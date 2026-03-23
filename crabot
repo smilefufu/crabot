@@ -1,0 +1,199 @@
+#!/bin/bash
+
+# Crabot CLI - 生产模式管理工具
+# 用法: ./crabot <command> [options]
+#
+#   onboard   初始化环境（安装依赖、配置 .env）
+#   start     生产模式启动（构建 + 运行）
+#   stop      优雅关闭所有服务
+#   check     检查前置工具状态
+#   help      显示帮助
+
+set -e
+
+# CRABOT_HOME: 项目根目录
+# 当前：脚本所在目录（repo 内运行）
+# 未来独立分发时：CRABOT_HOME="${CRABOT_HOME:-$HOME/.crabot}"
+CRABOT_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export CRABOT_HOME
+
+export DATA_DIR="${DATA_DIR:-$CRABOT_HOME/data}"
+export LITELLM_PORT="${LITELLM_PORT:-4000}"
+export LITELLM_DIR="${LITELLM_DIR:-$DATA_DIR/litellm}"
+export LITELLM_CONFIG="${LITELLM_CONFIG:-$LITELLM_DIR/config.yaml}"
+
+# 加载共享函数库
+source "$CRABOT_HOME/scripts/lib.sh"
+
+# ── check 命令 ────────────────────────────────────────────
+
+cmd_check() {
+  log_section "Crabot 环境检查"
+
+  local OS
+  OS="$(detect_os)"
+
+  check_one() {
+    local name="$1" status="$2" version="$3"
+    if [ "$status" = "ok" ]; then
+      printf "  ${GREEN}✓${NC} %-18s %s\n" "$name" "$version"
+    else
+      printf "  ${RED}✗${NC} %-18s %s\n" "$name" "$status"
+    fi
+  }
+
+  # 编译工具
+  if [ "$OS" = "macos" ]; then
+    if xcode-select -p &>/dev/null; then
+      check_one "编译工具" "ok" "Xcode CLT"
+    else
+      check_one "编译工具" "未安装"
+    fi
+  else
+    if command -v gcc &>/dev/null; then
+      check_one "编译工具" "ok" "gcc $(gcc --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)"
+    else
+      check_one "编译工具" "未安装"
+    fi
+  fi
+
+  # nvm
+  if [ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]; then
+    check_one "nvm" "ok" ""
+  else
+    check_one "nvm" "未安装"
+  fi
+
+  # Node.js
+  if command -v node &>/dev/null; then
+    local node_ver
+    node_ver="$(node -v 2>/dev/null)"
+    if version_ge "${node_ver#v}" "18.0.0"; then
+      check_one "Node.js" "ok" "$node_ver"
+    else
+      check_one "Node.js" "版本过低 (需要 >= 18)" "$node_ver"
+    fi
+  else
+    check_one "Node.js" "未安装"
+  fi
+
+  # Python
+  if command -v python3 &>/dev/null; then
+    local py_ver
+    py_ver="$(python3 -V 2>/dev/null | awk '{print $2}')"
+    if version_ge "$py_ver" "3.10.0"; then
+      check_one "Python" "ok" "$py_ver"
+    else
+      check_one "Python" "版本过低 (需要 >= 3.10)" "$py_ver"
+    fi
+  else
+    check_one "Python" "未安装"
+  fi
+
+  # uv
+  if command -v uv &>/dev/null; then
+    check_one "uv" "ok" "$(uv --version 2>/dev/null | awk '{print $2}')"
+  else
+    check_one "uv" "未安装"
+  fi
+
+  # LiteLLM
+  if command -v litellm &>/dev/null; then
+    local ll_ver
+    ll_ver="$(pip show litellm 2>/dev/null | grep Version | awk '{print $2}')"
+    check_one "LiteLLM" "ok" "$ll_ver"
+  else
+    check_one "LiteLLM" "未安装"
+  fi
+
+  echo ""
+
+  # 项目状态
+  log_section "项目状态"
+
+  if [ -f "$CRABOT_HOME/.env" ]; then
+    check_one ".env" "ok" ""
+  else
+    check_one ".env" "未配置"
+  fi
+
+  for mod in crabot-core crabot-admin crabot-agent crabot-channel-host; do
+    if [ -d "$CRABOT_HOME/$mod/node_modules" ]; then
+      check_one "$mod" "ok" "依赖已安装"
+    elif [ -d "$CRABOT_HOME/$mod" ]; then
+      check_one "$mod" "依赖未安装"
+    fi
+  done
+
+  if [ -d "$CRABOT_HOME/crabot-admin/web/node_modules" ]; then
+    check_one "crabot-admin/web" "ok" "依赖已安装"
+  elif [ -d "$CRABOT_HOME/crabot-admin/web" ]; then
+    check_one "crabot-admin/web" "依赖未安装"
+  fi
+
+  if [ -d "$CRABOT_HOME/crabot-memory/.venv" ]; then
+    check_one "crabot-memory" "ok" "venv 已创建"
+  elif [ -d "$CRABOT_HOME/crabot-memory" ]; then
+    check_one "crabot-memory" "venv 未创建"
+  fi
+
+  echo ""
+}
+
+# ── help 命令 ─────────────────────────────────────────────
+
+cmd_help() {
+  cat << 'EOF'
+Crabot CLI - AI 员工管理工具
+
+用法: ./crabot <command> [options]
+
+命令:
+  onboard   初始化环境（检测工具 → 安装依赖 → 配置 .env）
+  start     生产模式启动（构建所有模块 → 启动 Module Manager）
+  stop      优雅关闭所有 Crabot 服务
+  check     检查前置工具和项目状态
+  help      显示此帮助
+
+Onboard 选项:
+  --non-interactive   跳过所有交互确认（CI/自动化环境）
+  --skip-deps         跳过依赖安装（仅检测工具和配置 .env）
+
+示例:
+  ./crabot onboard                    # 交互式初始化
+  ./crabot onboard --non-interactive  # 无人值守初始化
+  ./crabot start                      # 生产模式启动
+  ./crabot stop                       # 关闭所有服务
+
+开发模式请使用 dev.sh：
+  ./dev.sh          # 启动开发环境（含 Vite HMR）
+  ./dev.sh stop     # 停止开发服务
+EOF
+}
+
+# ── 主入口 ────────────────────────────────────────────────
+
+case "${1:-help}" in
+  onboard)
+    shift
+    source "$CRABOT_HOME/scripts/onboard.sh" "$@"
+    ;;
+  start)
+    source "$CRABOT_HOME/scripts/start.sh"
+    ;;
+  stop)
+    source "$CRABOT_HOME/scripts/stop.sh"
+    ;;
+  check)
+    cmd_check
+    ;;
+  help|--help|-h)
+    cmd_help
+    ;;
+  *)
+    log_error "未知命令: $1"
+    echo ""
+    cmd_help
+    exit 1
+    ;;
+esac
