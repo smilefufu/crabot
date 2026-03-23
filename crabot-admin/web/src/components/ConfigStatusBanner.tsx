@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
+import { api } from '../services/api'
 
 interface ConfigStatus {
   configured: boolean
@@ -9,19 +10,15 @@ interface ConfigStatus {
 
 export const ConfigStatusBanner: React.FC = () => {
   const [status, setStatus] = useState<ConfigStatus | null>(null)
-  const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    fetch('/api/config/status')
-      .then(res => res.json())
-      .then(data => {
-        setStatus(data)
-        setLoading(false)
-      })
-      .catch(() => setLoading(false))
+    api.get<ConfigStatus>('/config/status')
+      .then(data => setStatus(data))
+      .catch(() => {})
   }, [])
 
-  if (loading || !status || status.configured) return null
+  if (!status || status.configured) return null
+  if (!Array.isArray(status.missing) || status.missing.length === 0) return null
 
   return (
     <div style={{
@@ -34,11 +31,9 @@ export const ConfigStatusBanner: React.FC = () => {
       <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '1.1rem', fontWeight: 600 }}>
         配置未完成
       </h3>
-      {status.missing.length > 0 && (
-        <ul style={{ margin: '0.5rem 0', paddingLeft: '1.5rem' }}>
-          {status.missing.map(msg => <li key={msg}>{msg}</li>)}
-        </ul>
-      )}
+      <ul style={{ margin: '0.5rem 0', paddingLeft: '1.5rem' }}>
+        {status.missing.map(msg => <li key={msg}>{msg}</li>)}
+      </ul>
       <Link to="/settings">
         <button style={{
           marginTop: '0.5rem',

@@ -7,6 +7,7 @@ import { Select } from '../../components/Common/Select'
 import { Loading } from '../../components/Common/Loading'
 import type { GlobalModelConfig, ModelProvider } from '../../types'
 import { useToast } from '../../contexts/ToastContext'
+import { api } from '../../services/api'
 
 interface ConfigStatus {
   configured: boolean
@@ -33,7 +34,7 @@ export const GlobalSettings: React.FC = () => {
       const [configData, providersData, statusData] = await Promise.all([
         providerService.getGlobalConfig(),
         providerService.listProviders(),
-        fetch('/api/config/status').then(r => r.json()),
+        api.get<ConfigStatus>('/config/status').catch(() => null),
       ])
       setConfig(configData)
       setProviders(providersData.items)
@@ -52,8 +53,7 @@ export const GlobalSettings: React.FC = () => {
       setSaving(true)
       await providerService.updateGlobalConfig(config)
       toast.success('保存成功')
-      // 重新加载状态
-      const statusData = await fetch('/api/config/status').then(r => r.json())
+      const statusData = await api.get<ConfigStatus>('/config/status').catch(() => null)
       setStatus(statusData)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '保存失败')
@@ -94,10 +94,10 @@ export const GlobalSettings: React.FC = () => {
             配置清单
           </h3>
           <ul style={{ margin: '0.5rem 0', paddingLeft: '1.5rem' }}>
-            {status.missing.map(msg => (
+            {(status.missing ?? []).map(msg => (
               <li key={msg} style={{ color: 'var(--error-color, #dc3545)' }}>❌ {msg}</li>
             ))}
-            {status.warnings.map(msg => (
+            {(status.warnings ?? []).map(msg => (
               <li key={msg} style={{ color: 'var(--warning-color, #ffc107)' }}>⚠️ {msg}</li>
             ))}
           </ul>
