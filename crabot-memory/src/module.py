@@ -66,6 +66,22 @@ class MemoryModule:
         # 注册路由
         self._register_routes()
 
+    def is_llm_configured(self) -> bool:
+        """检查 LLM 配置是否完整"""
+        return bool(
+            self.config.llm.api_key and
+            self.config.llm.base_url and
+            self.config.llm.model
+        )
+
+    def is_embedding_configured(self) -> bool:
+        """检查 Embedding 配置是否完整"""
+        return bool(
+            self.config.embedding.api_key and
+            self.config.embedding.base_url and
+            self.config.embedding.model
+        )
+
     def _register_routes(self):
         """注册 JSON-RPC 路由"""
         @self.app.post("/{method}")
@@ -96,6 +112,7 @@ class MemoryModule:
         handlers: Dict[str, Callable] = {
             "health": self._health,
             "shutdown": self._shutdown,
+            "get_status": self._get_status,
             "write_short_term": self._write_short_term,
             "search_short_term": self._search_short_term,
             "write_long_term": self._write_long_term,
@@ -124,8 +141,9 @@ class MemoryModule:
                 "short_term_count": short_count,
                 "long_term_count": long_count,
                 "total_tokens": (short_count * 100 + long_count * 500),
-                "embedding_model_status": "ready",
-                "llm_status": "ready",
+                "embedding_model_status": "ready" if self.is_embedding_configured() else "not_configured",
+                "llm_status": "ready" if self.is_llm_configured() else "not_configured",
+                "configured": self.is_llm_configured() and self.is_embedding_configured(),
             },
         }
 
@@ -135,20 +153,35 @@ class MemoryModule:
         asyncio.create_task(self._stop_server())
         return {}
 
+    async def _get_status(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """获取配置状态"""
+        return {
+            "configured": self.is_llm_configured() and self.is_embedding_configured(),
+            "llm_configured": self.is_llm_configured(),
+            "embedding_configured": self.is_embedding_configured(),
+            "version": self.config.version
+        }
+
     async def _write_short_term(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """写入短期记忆"""
+        if not self.is_llm_configured():
+            raise ValueError("Memory module not configured. Please configure LLM settings in Admin.")
         write_params = WriteShortTermParams(**params)
         memory = await self.short_term.write(write_params)
         return {"memory": memory.model_dump()}
 
     async def _search_short_term(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """检索短期记忆"""
+        if not self.is_embedding_configured():
+            raise ValueError("Memory module not configured. Please configure Embedding settings in Admin.")
         search_params = SearchShortTermParams(**params)
         results = await self.short_term.search(search_params)
         return {"results": [m.model_dump() for m in results]}
 
     async def _write_long_term(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """写入长期记忆"""
+        if not self.is_llm_configured():
+            raise ValueError("Memory module not configured. Please configure LLM settings in Admin.")
         write_params = WriteLongTermParams(**params)
         result = await self.long_term.write(write_params)
         return {
@@ -159,6 +192,8 @@ class MemoryModule:
 
     async def _search_long_term(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """检索长期记忆"""
+        if not self.is_embedding_configured():
+            raise ValueError("Memory module not configured. Please configure Embedding settings in Admin.")
         search_params = SearchLongTermParams(**params)
         results = await self.long_term.search(search_params)
         return {

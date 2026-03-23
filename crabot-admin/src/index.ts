@@ -662,6 +662,11 @@ export class AdminModule extends ModuleBase {
         return
       }
 
+      if (pathname === '/api/config/status' && req.method === 'GET') {
+        await this.handleGetConfigStatusApi(req, res)
+        return
+      }
+
       // Agent Implementation 路由
       if (pathname === '/api/agent-implementations' && req.method === 'GET') {
         await this.handleListImplementationsApi(req, res, url)
@@ -2786,6 +2791,69 @@ export class AdminModule extends ModuleBase {
     this.syncGlobalConfigToMemoryModules().catch((err: Error) => {
       console.warn('[Admin] syncGlobalConfigToMemoryModules failed:', err.message)
     })
+  }
+
+  private async handleGetConfigStatusApi(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const missing: string[] = []
+    const warnings: string[] = []
+
+    // 检查全局配置
+    const globalConfig = this.modelProviderManager.getGlobalConfig()
+    if (!globalConfig.default_llm_provider_id || !globalConfig.default_llm_model_id) {
+      missing.push('全局 LLM 模型未配置')
+    }
+    if (!globalConfig.default_embedding_provider_id || !globalConfig.default_embedding_model_id) {
+      missing.push('全局 Embedding 模型未配置')
+    }
+
+    // 检查 Provider 是否存在
+    if (globalConfig.default_llm_provider_id) {
+      const provider = this.modelProviderManager.getProvider(globalConfig.default_llm_provider_id)
+      if (!provider) {
+        warnings.push(`LLM Provider ${globalConfig.default_llm_provider_id} 不存在`)
+      }
+    }
+
+    if (globalConfig.default_embedding_provider_id) {
+      const provider = this.modelProviderManager.getProvider(globalConfig.default_embedding_provider_id)
+      if (!provider) {
+        warnings.push(`Embedding Provider ${globalConfig.default_embedding_provider_id} 不存在`)
+      }
+    }
+
+    // 检查 Memory 模块状态
+    try {
+      const memoryStatus = await this.checkMemoryStatus()
+      if (!memoryStatus.configured) {
+        warnings.push('Memory 模块未配置')
+      }
+    } catch (error) {
+      warnings.push('Memory 模块不可达')
+    }
+
+    const status = {
+      configured: missing.length === 0,
+      missing,
+      warnings,
+    }
+
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(status))
+  }
+
+  private async checkMemoryStatus(): Promise<{ configured: boolean }> {
+    try {
+      const memoryPort = await this.getMemoryPort()
+      const result = await this.rpcClient.call<{}, { configured: boolean }>(
+        memoryPort,
+        'get_status',
+        {},
+        'admin-web'
+      )
+      return result
+    } catch {
+      return { configured: false }
+    }
   }
 
   // ============================================================================

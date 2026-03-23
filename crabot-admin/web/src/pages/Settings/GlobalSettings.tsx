@@ -8,10 +8,17 @@ import { Loading } from '../../components/Common/Loading'
 import type { GlobalModelConfig, ModelProvider } from '../../types'
 import { useToast } from '../../contexts/ToastContext'
 
+interface ConfigStatus {
+  configured: boolean
+  missing: string[]
+  warnings: string[]
+}
+
 export const GlobalSettings: React.FC = () => {
   const toast = useToast()
   const [config, setConfig] = useState<GlobalModelConfig | null>(null)
   const [providers, setProviders] = useState<ModelProvider[]>([])
+  const [status, setStatus] = useState<ConfigStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -23,12 +30,14 @@ export const GlobalSettings: React.FC = () => {
   const loadData = async () => {
     try {
       setLoading(true)
-      const [configData, providersData] = await Promise.all([
+      const [configData, providersData, statusData] = await Promise.all([
         providerService.getGlobalConfig(),
         providerService.listProviders(),
+        fetch('/api/config/status').then(r => r.json()),
       ])
       setConfig(configData)
       setProviders(providersData.items)
+      setStatus(statusData)
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载失败')
     } finally {
@@ -43,6 +52,9 @@ export const GlobalSettings: React.FC = () => {
       setSaving(true)
       await providerService.updateGlobalConfig(config)
       toast.success('保存成功')
+      // 重新加载状态
+      const statusData = await fetch('/api/config/status').then(r => r.json())
+      setStatus(statusData)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '保存失败')
     } finally {
@@ -69,6 +81,28 @@ export const GlobalSettings: React.FC = () => {
       </div>
 
       {error && <div className="error-message">{error}</div>}
+
+      {status && !status.configured && (
+        <div style={{
+          backgroundColor: 'var(--warning-bg, #fff3cd)',
+          border: '1px solid var(--warning-border, #ffc107)',
+          borderRadius: '4px',
+          padding: '1rem',
+          marginBottom: '1.5rem',
+        }}>
+          <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '1.1rem', fontWeight: 600 }}>
+            配置清单
+          </h3>
+          <ul style={{ margin: '0.5rem 0', paddingLeft: '1.5rem' }}>
+            {status.missing.map(msg => (
+              <li key={msg} style={{ color: 'var(--error-color, #dc3545)' }}>❌ {msg}</li>
+            ))}
+            {status.warnings.map(msg => (
+              <li key={msg} style={{ color: 'var(--warning-color, #ffc107)' }}>⚠️ {msg}</li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <Card title="默认模型配置">
         <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>

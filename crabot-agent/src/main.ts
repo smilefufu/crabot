@@ -33,12 +33,12 @@ async function main(): Promise<void> {
     config.module_id = process.env.Crabot_MODULE_ID
   }
 
-  // 验证必需的模型配置
-  const mainModelConfig = config.agent_config?.model_config?.default
-  if (!mainModelConfig || !mainModelConfig.apikey) {
-    console.error('LLM API key is required. Check Admin global config.')
-    process.exit(1)
-  }
+  // 移除启动时的 API Key 验证，允许启动但处于未就绪状态
+  // const mainModelConfig = config.agent_config?.model_config?.default
+  // if (!mainModelConfig || !mainModelConfig.apikey) {
+  //   console.error('LLM API key is required. Check Admin global config.')
+  //   process.exit(1)
+  // }
 
   // 创建 UnifiedAgent 实例
   const agent = new UnifiedAgent(config)
@@ -61,6 +61,7 @@ async function main(): Promise<void> {
     console.log(`- Module ID: ${config.module_id}`)
     console.log(`- Port: ${config.port}`)
     console.log(`- Roles: ${config.agent_config?.roles.join(', ') || 'orchestration only'}`)
+    console.log(`- Configured: ${agent.isConfigured()}`)
   } catch (error) {
     console.error('Failed to start Unified Agent module:', error)
     process.exit(1)

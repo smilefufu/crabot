@@ -9,19 +9,19 @@ import yaml
 
 class LLMConfig(BaseModel):
     """LLM 配置"""
-    api_key: str
-    base_url: str
-    model: str
+    api_key: str = ""  # 允许空值，但标记为未配置
+    base_url: str = ""
+    model: str = ""
     temperature: float = 0.1
     max_retries: int = 3
 
 
 class EmbeddingConfig(BaseModel):
     """Embedding 配置"""
-    api_key: str
-    base_url: str
-    model: str
-    dimension: int
+    api_key: str = ""  # 允许空值，但标记为未配置
+    base_url: str = ""
+    model: str = ""
+    dimension: int = 1536  # 默认维度
 
 
 class StorageConfig(BaseModel):
@@ -98,18 +98,7 @@ def load_config(config_path: Optional[str] = None) -> MemoryConfig:
     if v := os.environ.get("CRABOT_MEMORY_DATA_DIR"):
         config.storage.data_dir = v
 
-    # 验证必填字段
-    if not config.llm.api_key:
-        raise ValueError("CRABOT_LLM_API_KEY is required")
-    if not config.llm.base_url:
-        raise ValueError("CRABOT_LLM_BASE_URL is required")
-    if not config.llm.model:
-        raise ValueError("CRABOT_LLM_MODEL is required")
-    if not config.embedding.api_key:
-        raise ValueError("CRABOT_EMBEDDING_API_KEY is required")
-    if not config.embedding.base_url:
-        raise ValueError("CRABOT_EMBEDDING_BASE_URL is required")
-    if not config.embedding.model:
-        raise ValueError("CRABOT_EMBEDDING_MODEL is required")
+    # 不验证必填字段，允许启动
+    # 配置完整性由 is_configured() 方法检查
 
     return config

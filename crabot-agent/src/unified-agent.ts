@@ -141,6 +141,14 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   /**
+   * 检查 Agent 是否已配置（LLM API key 是否存在）
+   */
+  isConfigured(): boolean {
+    const defaultModel = this.agentConfig?.model_config?.default
+    return !!(defaultModel && defaultModel.apikey && defaultModel.model_id)
+  }
+
+  /**
    * 初始化智能体层
    */
   private initializeAgentLayer(config: AgentLayerConfig): void {
@@ -321,6 +329,12 @@ ${skillsSection}
     const { message, friend } = payload
     const { session, sender, content } = message
 
+    // 0. 检查是否已配置
+    if (!this.isConfigured()) {
+      await this.sendConfigMissingReply(message)
+      return
+    }
+
     // 1. 更新 session 状态
     this.sessionManager.updateLastMessageTime(session.session_id)
 
@@ -439,6 +453,35 @@ ${skillsSection}
     } finally {
       // 11. 完成 request
       this.switchmapHandler.completeRequest(session.session_id, requestId)
+    }
+  }
+
+  /**
+   * 配置缺失时发送提示消息给用户
+   */
+  private async sendConfigMissingReply(message: ChannelMessage): Promise<void> {
+    try {
+      const channelPort = await this.getChannelPort(message.session.channel_id)
+      const reply: ChannelMessage = {
+        platform_message_id: `reply-${Date.now()}`,
+        session: message.session,
+        sender: { friend_id: 'system', platform_user_id: 'crabot', platform_display_name: 'Crabot' },
+        content: {
+          type: 'text',
+          text: 'Crabot 尚未配置 LLM 模型。请管理员在 Admin 界面完成配置后重试。',
+        },
+        features: { is_mention_crab: false },
+        platform_timestamp: new Date().toISOString(),
+      }
+
+      await this.rpcClient.call(
+        channelPort,
+        'send_message',
+        { message: reply },
+        this.config.moduleId,
+      )
+    } catch (error) {
+      console.error('Failed to send config missing reply:', error instanceof Error ? error.message : error)
     }
   }
 
@@ -761,6 +804,22 @@ ${skillsSection}
     })
 
     try {
+      // 检查是否已配置
+      if (!this.isConfigured()) {
+        await this.rpcClient.call(
+          await this.getAdminPort(),
+          'chat_callback',
+          {
+            request_id: callbackInfo.request_id,
+            reply_type: 'direct_reply',
+            content: 'Crabot 尚未配置 LLM 模型。请在全局设置中完成配置后重试。',
+          },
+          this.config.moduleId
+        )
+        this.traceStore.endTrace(trace.trace_id, 'failed', { summary: 'Agent not configured' })
+        return { decision_types: [] }
+      }
+
       // 检查是否有 Front Agent 能力
       if (!this.roles.has('front') || !this.frontHandler) {
         // 发送错误回复
