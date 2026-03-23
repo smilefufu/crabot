@@ -49,7 +49,7 @@ sed_inplace() {
 # 可移植实现（macOS BSD sort 不支持 -V）
 version_ge() {
   local IFS=.
-  local i ver1=($1) ver2=($2)
+  local i ver1=($(echo "$1" | tr -d '[:space:]')) ver2=($(echo "$2" | tr -d '[:space:]'))
   for ((i=0; i<${#ver2[@]}; i++)); do
     if ((10#${ver1[i]:-0} > 10#${ver2[i]:-0})); then
       return 0
@@ -189,7 +189,7 @@ start_litellm() {
   # 检查 LiteLLM 版本，若低于最低要求自动升级
   local litellm_min="1.82.0"
   local litellm_cur
-  litellm_cur=$(litellm --version 2>/dev/null | awk '{print $NF}')
+  litellm_cur=$(litellm --version 2>/dev/null | awk '{print $NF}' | tr -d '\r\n')
   if [ -n "$litellm_cur" ] && ! version_ge "$litellm_cur" "$litellm_min"; then
     log_warn "LiteLLM 版本过低 ($litellm_cur < $litellm_min)，升级中..."
     uv tool upgrade litellm -q || log_warn "LiteLLM 升级失败，继续使用当前版本"
