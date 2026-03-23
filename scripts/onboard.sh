@@ -138,6 +138,17 @@ install_uv() {
   fi
 }
 
+install_litellm() {
+  log_info "安装 LiteLLM..."
+  python3 -m pip install -i https://pypi.org/simple/ 'litellm[proxy]' -q >> "$ONBOARD_LOG" 2>&1 || {
+    log_error "LiteLLM 安装失败:"
+    tail -5 "$ONBOARD_LOG" | sed 's/^/    /'
+    log_error "手动安装: python3 -m pip install 'litellm[proxy]'"
+    exit 1
+  }
+  log_success "LiteLLM 已安装"
+}
+
 run_phase2_tools() {
   log_section "阶段 2/5：前置工具检查"
 
@@ -221,6 +232,20 @@ run_phase2_tools() {
       install_uv
     else
       log_error "需要 uv 来管理 Python 依赖。安装: https://docs.astral.sh/uv/"
+      exit 1
+    fi
+  fi
+
+  # LiteLLM
+  if command -v litellm &>/dev/null; then
+    log_success "LiteLLM 已就绪"
+  else
+    all_ok=false
+    if confirm "是否安装 LiteLLM (LLM 代理网关)？"; then
+      install_litellm
+    else
+      log_error "LiteLLM 是必须的 (Crabot 通过它连接所有 LLM 供应商)"
+      log_error "  手动安装: python3 -m pip install 'litellm[proxy]'"
       exit 1
     fi
   fi
