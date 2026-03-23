@@ -19,8 +19,7 @@
   "author": "Crabot Team",
   "license": "MIT",
   "dependencies": {
-    "jiti": "^2.6.1",
-    "openclaw": "^2026.3.13"
+    "jiti": "^2.6.1"
   },
   "devDependencies": {
     "@types/node": "^20.19.37",
