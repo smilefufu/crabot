@@ -117,8 +117,11 @@ install_node() {
   # shellcheck source=/dev/null
   [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
 
-  log_info "安装 Node.js（读取 .nvmrc）..."
-  (cd "$CRABOT_HOME" && nvm install) >> "$ONBOARD_LOG" 2>&1
+  log_info "安装 Node.js (读取 .nvmrc) ..."
+  local _saved_dir="$PWD"
+  cd "$CRABOT_HOME"
+  nvm install >> "$ONBOARD_LOG" 2>&1
+  cd "$_saved_dir"
   log_success "Node.js $(node -v) 已安装"
 }
 
@@ -310,11 +313,20 @@ run_phase4_deps() {
     return 0
   fi
 
-  # 确保 nvm 已加载（安装依赖需要正确的 Node 版本）
+  # 确保 nvm 已加载，并切换到 .nvmrc 指定的 Node 版本
   export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
   # shellcheck source=/dev/null
   [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-  (cd "$CRABOT_HOME" && nvm use 2>/dev/null) || true
+  # nvm install 会读 .nvmrc，版本已装则直接切换，未装则先安装
+  # 注意：不能用子 shell (cd ... && nvm use)，否则版本切换不传回父进程
+  local _saved_dir="$PWD"
+  cd "$CRABOT_HOME"
+  nvm install || {
+    log_error "无法切换到 .nvmrc 指定的 Node 版本"
+    exit 1
+  }
+  cd "$_saved_dir"
+  log_success "Node $(node -v) 已激活"
 
   log_info "并行安装 npm 依赖 (详细日志: $ONBOARD_LOG) ..."
 
