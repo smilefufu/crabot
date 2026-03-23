@@ -140,12 +140,14 @@ install_uv() {
 
 install_litellm() {
   log_info "安装 LiteLLM..."
-  python3 -m pip install -i https://pypi.org/simple/ 'litellm[proxy]' -q >> "$ONBOARD_LOG" 2>&1 || {
+  uv tool install 'litellm[proxy]' --index-url https://pypi.org/simple/ >> "$ONBOARD_LOG" 2>&1 || {
     log_error "LiteLLM 安装失败:"
     tail -5 "$ONBOARD_LOG" | sed 's/^/    /'
-    log_error "手动安装: python3 -m pip install 'litellm[proxy]'"
+    log_error "手动安装: uv tool install 'litellm[proxy]'"
     exit 1
   }
+  # 确保 uv tool bin 在 PATH 中
+  export PATH="$HOME/.local/bin:$PATH"
   log_success "LiteLLM 已安装"
 }
 
@@ -245,7 +247,7 @@ run_phase2_tools() {
       install_litellm
     else
       log_error "LiteLLM 是必须的 (Crabot 通过它连接所有 LLM 供应商)"
-      log_error "  手动安装: python3 -m pip install 'litellm[proxy]'"
+      log_error "  手动安装: uv tool install 'litellm[proxy]'"
       exit 1
     fi
   fi
@@ -478,7 +480,7 @@ run_phase5_verify() {
     log_success "LiteLLM"
   else
     log_warn "LiteLLM 未安装（LLM 功能将不可用）"
-    log_dim "  安装: pip install -i https://pypi.org/simple/ 'litellm[proxy]'"
+    log_dim "  安装: uv tool install 'litellm[proxy]'"
     all_ok=false
   fi
 

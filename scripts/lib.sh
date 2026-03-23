@@ -182,17 +182,17 @@ start_litellm() {
 
   if ! command -v litellm &>/dev/null; then
     log_warn "LiteLLM 未安装，跳过（LLM 功能不可用）"
-    log_dim "  安装: pip install -i https://pypi.org/simple/ 'litellm[proxy]'"
+    log_dim "  安装: uv tool install 'litellm[proxy]'"
     return 0
   fi
 
   # 检查 LiteLLM 版本，若低于最低要求自动升级
   local litellm_min="1.82.0"
   local litellm_cur
-  litellm_cur=$(python3 -m pip show litellm 2>/dev/null | grep Version | awk '{print $2}')
+  litellm_cur=$(litellm --version 2>/dev/null | awk '{print $NF}')
   if [ -n "$litellm_cur" ] && ! version_ge "$litellm_cur" "$litellm_min"; then
     log_warn "LiteLLM 版本过低 ($litellm_cur < $litellm_min)，升级中..."
-    python3 -m pip install -i https://pypi.org/simple/ -U 'litellm[proxy]' -q || log_warn "LiteLLM 升级失败，继续使用当前版本"
+    uv tool upgrade litellm -q || log_warn "LiteLLM 升级失败，继续使用当前版本"
   fi
 
   apply_litellm_patches

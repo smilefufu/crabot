@@ -100,7 +100,7 @@ cmd_check() {
   # LiteLLM
   if command -v litellm &>/dev/null; then
     local ll_ver
-    ll_ver="$(pip show litellm 2>/dev/null | grep Version | awk '{print $2}')"
+    ll_ver="$(litellm --version 2>/dev/null | awk '{print $NF}')"
     check_one "LiteLLM" "ok" "$ll_ver"
   else
     check_one "LiteLLM" "未安装"
