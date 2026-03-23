@@ -10,6 +10,18 @@ set -e
 load_env
 mkdir -p "$DATA_DIR/admin" "$DATA_DIR/agent" "$DATA_DIR/litellm" "$DATA_DIR/memory"
 
+# 0. 确保 nvm 已加载，切换到 .nvmrc 指定的 Node 版本
+export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+# shellcheck source=/dev/null
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+local_saved_dir="$PWD"
+cd "$CRABOT_HOME"
+nvm use || {
+  log_error "无法切换到 .nvmrc 指定的 Node 版本，请先运行 ./crabot onboard"
+  exit 1
+}
+cd "$local_saved_dir"
+
 # 1. LiteLLM
 log_section "启动 LiteLLM"
 start_litellm
@@ -25,7 +37,7 @@ build_frontend || exit 1
 
 # 4. Module Manager（前台 exec）
 log_section "启动 Crabot"
-log_info "Module Manager 启动中（port 19000）..."
-log_info "Admin Web 界面: http://localhost:3000"
+log_info "Module Manager 启动中 (port 19000) ..."
+log_info "Admin Web: http://localhost:3000"
 cd "$CRABOT_HOME/crabot-core"
 exec node dist/main.js

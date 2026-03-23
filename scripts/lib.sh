@@ -256,7 +256,9 @@ build_all_modules() {
       continue
     fi
     log_dim "  $mod"
-    (cd "$CRABOT_HOME/$mod" && npm run build 2>&1 | sed 's/^/    /') || {
+    local build_log
+    build_log="$(cd "$CRABOT_HOME/$mod" && npm run build 2>&1)" || {
+      echo "$build_log" | sed 's/^/    /'
       log_error "$mod 构建失败"
       fail=1
     }
@@ -278,7 +280,9 @@ build_all_modules() {
 
 build_frontend() {
   log_info "构建前端..."
-  (cd "$CRABOT_HOME/crabot-admin/web" && npm run build 2>&1 | sed 's/^/    /') || {
+  local build_log
+  build_log="$(cd "$CRABOT_HOME/crabot-admin/web" && npm run build 2>&1)" || {
+    echo "$build_log" | sed 's/^/    /'
     log_error "前端构建失败"
     return 1
   }
