@@ -25,29 +25,6 @@ import type {
 // 默认实现定义
 // ============================================================================
 
-const DEFAULT_FEISHU_IMPLEMENTATION: ChannelImplementation = {
-  id: 'feishu',
-  name: 'Feishu Channel',
-  type: 'builtin',
-  platform: 'feishu',
-  module_path: '../crabot-channel-feishu',
-  version: '0.1.0',
-  created_at: '2026-03-12T00:00:00.000Z',
-  updated_at: '2026-03-12T00:00:00.000Z',
-}
-
-const DEFAULT_FEISHU_INSTANCE: ChannelInstance = {
-  id: 'crabot-channel-feishu',
-  implementation_id: 'feishu',
-  name: 'Feishu Channel',
-  platform: 'feishu',
-  auto_start: false, // 需要配置凭证后手动启动
-  start_priority: 30,
-  module_registered: false,
-  created_at: '2026-03-12T00:00:00.000Z',
-  updated_at: '2026-03-12T00:00:00.000Z',
-}
-
 const DEFAULT_CHANNEL_HOST_IMPLEMENTATION: ChannelImplementation = {
   id: 'channel-host',
   name: 'OpenClaw Channel Host',
@@ -713,22 +690,10 @@ export class ChannelManager {
   }
 
   private async ensureDefaults(): Promise<void> {
-    if (!this.implementations.has('feishu')) {
-      this.implementations.set('feishu', DEFAULT_FEISHU_IMPLEMENTATION)
-      await this.saveImplementations()
-      console.log('[ChannelManager] Created default feishu implementation')
-    }
-
     if (!this.implementations.has('channel-host')) {
       this.implementations.set('channel-host', DEFAULT_CHANNEL_HOST_IMPLEMENTATION)
       await this.saveImplementations()
       console.log('[ChannelManager] Created default channel-host implementation')
-    }
-
-    if (!this.instances.has('crabot-channel-feishu')) {
-      this.instances.set('crabot-channel-feishu', DEFAULT_FEISHU_INSTANCE)
-      await this.saveInstances()
-      console.log('[ChannelManager] Created default feishu instance')
     }
   }
 }

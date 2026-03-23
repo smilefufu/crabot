@@ -1,12 +1,9 @@
 /**
  * Config Loader - 配置加载器
  *
- * 支持从 Admin 获取配置，失败则回退到本地 YAML 配置
+ * 从 Admin 获取配置。Admin 是唯一的配置来源，获取失败则报错。
  */
 
-import fs from 'node:fs'
-import path from 'node:path'
-import yaml from 'js-yaml'
 import type { RpcClient } from './module-base.js'
 import type {
   UnifiedAgentConfig,
@@ -40,27 +37,22 @@ interface GetAgentConfigResult {
 export class ConfigLoader {
   /**
    * 加载配置
-   * 优先从 Admin 获取，失败则回退到本地配置
+   * Admin 是唯一的配置来源，获取失败则报错
    */
   static async load(
-    configPath: string,
+    _configPath: string,
     rpcClient: RpcClient,
     adminEndpoint?: string
   ): Promise<UnifiedAgentConfig> {
     const moduleId = process.env.Crabot_MODULE_ID || 'crabot-agent'
 
-    // 如果配置了 Admin endpoint，尝试从 Admin 获取配置
-    if (adminEndpoint) {
-      const adminConfig = await this.loadFromAdmin(moduleId, rpcClient, adminEndpoint)
-      if (adminConfig) {
-        console.log(`[ConfigLoader] Loaded config from Admin for ${moduleId}`)
-        return adminConfig
-      }
+    if (!adminEndpoint) {
+      throw new Error('[ConfigLoader] Admin endpoint not configured. Agent cannot start without Admin.')
     }
 
-    // 回退到本地 YAML 配置
-    console.log(`[ConfigLoader] Loading config from local file: ${configPath}`)
-    return this.loadFromYaml(configPath)
+    const config = await this.loadFromAdmin(moduleId, rpcClient, adminEndpoint)
+    console.log(`[ConfigLoader] Loaded config from Admin for ${moduleId}`)
+    return config
   }
 
   /**
@@ -70,61 +62,23 @@ export class ConfigLoader {
     moduleId: string,
     rpcClient: RpcClient,
     adminEndpoint: string
-  ): Promise<UnifiedAgentConfig | null> {
-    try {
-      // 解析 Admin 端口
-      const adminPort = this.parsePortFromEndpoint(adminEndpoint)
-      if (!adminPort) {
-        console.warn(`[ConfigLoader] Invalid admin endpoint: ${adminEndpoint}`)
-        return null
-      }
-
-      // 调用 Admin 的 get_agent_config RPC 方法
-      const result = await rpcClient.call<
-        { instance_id: string },
-        GetAgentConfigResult
-      >(
-        adminPort,
-        'get_agent_config',
-        { instance_id: moduleId },
-        moduleId
-      )
-
-      // 将 Admin 配置转换为 UnifiedAgentConfig
-      return this.convertAdminConfigToLocal(result.config, moduleId)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      console.warn(`[ConfigLoader] Failed to load config from Admin: ${message}`)
-      return null
-    }
-  }
-
-  /**
-   * 从本地 YAML 文件加载配置
-   */
-  private static loadFromYaml(configPath: string): UnifiedAgentConfig {
-    if (!fs.existsSync(configPath)) {
-      throw new Error(`Config file not found: ${configPath}`)
+  ): Promise<UnifiedAgentConfig> {
+    const adminPort = this.parsePortFromEndpoint(adminEndpoint)
+    if (!adminPort) {
+      throw new Error(`[ConfigLoader] Invalid admin endpoint: ${adminEndpoint}`)
     }
 
-    const configContent = fs.readFileSync(configPath, 'utf-8')
+    const result = await rpcClient.call<
+      { instance_id: string },
+      GetAgentConfigResult
+    >(
+      adminPort,
+      'get_agent_config',
+      { instance_id: moduleId },
+      moduleId
+    )
 
-    // 替换环境变量
-    const expandedConfig = configContent.replace(/\$\{(\w+)\}/g, (_, varName) => {
-      return process.env[varName] || ''
-    })
-
-    const config = yaml.load(expandedConfig) as UnifiedAgentConfig
-
-    // 验证必需的配置
-    if (!config.module_id) {
-      config.module_id = process.env.Crabot_MODULE_ID || 'crabot-agent'
-    }
-    if (!config.port && process.env.Crabot_PORT) {
-      config.port = parseInt(process.env.Crabot_PORT, 10)
-    }
-
-    return config
+    return this.convertAdminConfigToLocal(result.config, moduleId)
   }
 
   /**

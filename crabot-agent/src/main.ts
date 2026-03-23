@@ -2,7 +2,6 @@
  * Unified Agent 模块入口
  */
 
-import path from 'node:path'
 import { UnifiedAgent } from './unified-agent.js'
 import { ConfigLoader, RpcClient } from './core/index.js'
 import type { UnifiedAgentConfig } from './types.js'
@@ -12,17 +11,15 @@ async function main(): Promise<void> {
   const mmEndpoint = process.env.CRABOT_MM_ENDPOINT || 'http://localhost:19000'
   const rpcClient = new RpcClient(parseInt(mmEndpoint.split(':').pop() || '19000', 10))
 
-  // 加载配置（优先 Admin，回退本地）
-  const configPath = process.env.CONFIG_PATH || path.join(process.cwd(), 'config.yaml')
+  // 从 Admin 加载配置（唯一来源）
   const adminEndpoint = process.env.CRABOT_ADMIN_ENDPOINT
 
   let config: UnifiedAgentConfig
   try {
-    config = await ConfigLoader.load(configPath, rpcClient, adminEndpoint)
+    config = await ConfigLoader.load('', rpcClient, adminEndpoint)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    console.error(`Failed to load config: ${message}`)
-    console.error('Please create config.yaml based on config.example.yaml')
+    console.error(`Failed to load config from Admin: ${message}`)
     process.exit(1)
   }
 
@@ -39,8 +36,7 @@ async function main(): Promise<void> {
   // 验证必需的模型配置
   const mainModelConfig = config.agent_config?.model_config?.default
   if (!mainModelConfig || !mainModelConfig.apikey) {
-    console.error('LLM API key is required')
-    console.error('Please configure model_config.default in config.yaml or via Admin')
+    console.error('LLM API key is required. Check Admin global config.')
     process.exit(1)
   }
 
@@ -65,7 +61,6 @@ async function main(): Promise<void> {
     console.log(`- Module ID: ${config.module_id}`)
     console.log(`- Port: ${config.port}`)
     console.log(`- Roles: ${config.agent_config?.roles.join(', ') || 'orchestration only'}`)
-    console.log(`- Config source: ${adminEndpoint ? 'Admin' : 'local'}`)
   } catch (error) {
     console.error('Failed to start Unified Agent module:', error)
     process.exit(1)

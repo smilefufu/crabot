@@ -94,17 +94,18 @@ const CORE_MODULES: Array<ModuleDefinition & Record<string, unknown>> = [
     entry: 'uv run python -m src.main',
     cwd: MEMORY_DIR,
     auto_start: fs.existsSync(path.join(MEMORY_DIR, 'src', 'main.py')),
-    start_priority: 5,  // 比 admin(10) 更早，因为 agent 可能依赖 memory
+    start_priority: 15,  // 在 admin(10) 之后启动，确保配置已就绪
     env: {
       CRABOT_MEMORY_DATA_DIR: path.join(DATA_DIR, 'memory'),
       CRABOT_MODULE_MANAGER_URL: 'http://localhost:19000',
-      CRABOT_LLM_BASE_URL: process.env.LITELLM_BASE_URL || 'http://localhost:4000',
-      CRABOT_LLM_API_KEY: process.env.LITELLM_MASTER_KEY || 'sk-litellm-test-key-12345',
-      CRABOT_LLM_MODEL: process.env.CRABOT_LLM_MODEL || 'provider-b5ed4aa1-stepfun-step-35-flash-free',
-      CRABOT_EMBEDDING_BASE_URL: process.env.LITELLM_BASE_URL || 'http://localhost:4000',
-      CRABOT_EMBEDDING_API_KEY: process.env.LITELLM_MASTER_KEY || 'sk-litellm-test-key-12345',
-      CRABOT_EMBEDDING_MODEL: process.env.CRABOT_EMBEDDING_MODEL || 'provider-16d7bea6-qwen3-embedding-06b',
-      CRABOT_EMBEDDING_DIMENSION: process.env.CRABOT_EMBEDDING_DIMENSION || '1024',
+      // LLM 配置由 Admin 通过 handleStartModuleAdmin 注入，不提供 fallback
+      CRABOT_LLM_BASE_URL: process.env.LITELLM_BASE_URL,
+      CRABOT_LLM_API_KEY: process.env.LITELLM_MASTER_KEY,
+      CRABOT_LLM_MODEL: process.env.CRABOT_LLM_MODEL,
+      CRABOT_EMBEDDING_BASE_URL: process.env.LITELLM_BASE_URL,
+      CRABOT_EMBEDDING_API_KEY: process.env.LITELLM_MASTER_KEY,
+      CRABOT_EMBEDDING_MODEL: process.env.CRABOT_EMBEDDING_MODEL,
+      CRABOT_EMBEDDING_DIMENSION: process.env.CRABOT_EMBEDDING_DIMENSION,
     } as Record<string, string>,
   },
 ]
