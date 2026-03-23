@@ -1,0 +1,196 @@
+import React from 'react'
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { AuthProvider, useAuth } from './contexts/AuthContext'
+import { ToastProvider } from './contexts/ToastContext'
+import { Login } from './pages/Login'
+import { Chat } from './pages/Chat'
+import { ProviderList } from './pages/Providers/ProviderList'
+import { ProviderCreate } from './pages/Providers/ProviderCreate'
+import { ProviderDetail } from './pages/Providers/ProviderDetail'
+import { ProviderEdit } from './pages/Providers/ProviderEdit'
+import { ModuleList } from './pages/Modules/ModuleList'
+import { ModuleDetail } from './pages/Modules/ModuleDetail'
+import { AgentConfig } from './pages/Agents/AgentConfig'
+import { ChannelConfig } from './pages/Channels/ChannelConfig'
+import { ChannelPty } from './pages/Channels/ChannelPty'
+import { GlobalSettings } from './pages/Settings/GlobalSettings'
+import { MemoryBrowser } from './pages/Memory/MemoryBrowser'
+import { FriendList } from './pages/Friends/FriendList'
+import { FriendDetail } from './pages/Friends/FriendDetail'
+import { PendingMessages } from './pages/Friends/PendingMessages'
+import { MCPServerList } from './pages/MCPServers/MCPServerList'
+import { SkillList } from './pages/Skills/SkillList'
+import { Traces } from './pages/Traces'
+import './App.css'
+
+const PrivateRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { isAuthenticated } = useAuth()
+  return isAuthenticated ? <>{children}</> : <Navigate to="/login" replace />
+}
+
+const AppRoutes: React.FC = () => {
+  return (
+    <Routes>
+      <Route path="/login" element={<Login />} />
+      <Route
+        path="/chat"
+        element={
+          <PrivateRoute>
+            <Chat />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/providers"
+        element={
+          <PrivateRoute>
+            <ProviderList />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/providers/new"
+        element={
+          <PrivateRoute>
+            <ProviderCreate />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/providers/:id"
+        element={
+          <PrivateRoute>
+            <ProviderDetail />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/providers/:id/edit"
+        element={
+          <PrivateRoute>
+            <ProviderEdit />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/modules"
+        element={
+          <PrivateRoute>
+            <ModuleList />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/modules/:id"
+        element={
+          <PrivateRoute>
+            <ModuleDetail />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/agents/config"
+        element={
+          <PrivateRoute>
+            <AgentConfig />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/channels/config"
+        element={
+          <PrivateRoute>
+            <ChannelConfig />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/channels/pty"
+        element={
+          <PrivateRoute>
+            <ChannelPty />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/settings"
+        element={
+          <PrivateRoute>
+            <GlobalSettings />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/memory"
+        element={
+          <PrivateRoute>
+            <MemoryBrowser />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/friends"
+        element={
+          <PrivateRoute>
+            <FriendList />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/friends/pending"
+        element={
+          <PrivateRoute>
+            <PendingMessages />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/friends/:id"
+        element={
+          <PrivateRoute>
+            <FriendDetail />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/mcp-servers"
+        element={
+          <PrivateRoute>
+            <MCPServerList />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/skills"
+        element={
+          <PrivateRoute>
+            <SkillList />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/traces"
+        element={
+          <PrivateRoute>
+            <Traces />
+          </PrivateRoute>
+        }
+      />
+      <Route path="/" element={<Navigate to="/chat" replace />} />
+    </Routes>
+  )
+}
+
+function App() {
+  return (
+    <BrowserRouter>
+      <AuthProvider>
+        <ToastProvider>
+          <AppRoutes />
+        </ToastProvider>
+      </AuthProvider>
+    </BrowserRouter>
+  )
+}
+
+export default App

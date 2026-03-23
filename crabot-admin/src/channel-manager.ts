@@ -1,0 +1,734 @@
+/**
+ * Channel 管理器
+ *
+ * 负责 Channel 实现（Implementation）、实例（Instance）和配置（Config）的管理
+ */
+
+import fs from 'fs/promises'
+import fsSync from 'fs'
+import path from 'path'
+import { generateTimestamp } from './core/base-protocol.js'
+import type { RpcClient } from './core/module-base.js'
+import type {
+  ChannelImplementation,
+  ChannelInstance,
+  ChannelConfig,
+  ScannedPlugin,
+  CreateChannelInstanceParams,
+  UpdateChannelInstanceParams,
+  UpdateChannelConfigParams,
+  ListChannelImplementationsParams,
+  ListChannelInstancesParams,
+} from './types.js'
+
+// ============================================================================
+// 默认实现定义
+// ============================================================================
+
+const DEFAULT_FEISHU_IMPLEMENTATION: ChannelImplementation = {
+  id: 'feishu',
+  name: 'Feishu Channel',
+  type: 'builtin',
+  platform: 'feishu',
+  module_path: '../crabot-channel-feishu',
+  version: '0.1.0',
+  created_at: '2026-03-12T00:00:00.000Z',
+  updated_at: '2026-03-12T00:00:00.000Z',
+}
+
+const DEFAULT_FEISHU_INSTANCE: ChannelInstance = {
+  id: 'crabot-channel-feishu',
+  implementation_id: 'feishu',
+  name: 'Feishu Channel',
+  platform: 'feishu',
+  auto_start: false, // 需要配置凭证后手动启动
+  start_priority: 30,
+  module_registered: false,
+  created_at: '2026-03-12T00:00:00.000Z',
+  updated_at: '2026-03-12T00:00:00.000Z',
+}
+
+const DEFAULT_CHANNEL_HOST_IMPLEMENTATION: ChannelImplementation = {
+  id: 'channel-host',
+  name: 'OpenClaw Channel Host',
+  type: 'builtin',
+  platform: '*', // 支持任意平台，具体由 state_dir 内的插件决定
+  module_path: '../crabot-channel-host',
+  version: '0.1.0',
+  created_at: '2026-03-16T00:00:00.000Z',
+  updated_at: '2026-03-16T00:00:00.000Z',
+}
+
+// ============================================================================
+// ChannelManager
+// ============================================================================
+
+export class ChannelManager {
+  private implementations: Map<string, ChannelImplementation> = new Map()
+  private instances: Map<string, ChannelInstance> = new Map()
+
+  private readonly dataDir: string
+  private readonly implementationsFilePath: string
+  private readonly instancesFilePath: string
+  private readonly configsDir: string
+  private readonly rpcClient: RpcClient
+
+  constructor(dataDir: string, rpcClient: RpcClient) {
+    this.dataDir = dataDir
+    this.implementationsFilePath = path.join(dataDir, 'channel-implementations.json')
+    this.instancesFilePath = path.join(dataDir, 'channel-instances.json')
+    this.configsDir = path.join(dataDir, 'channel-configs')
+    this.rpcClient = rpcClient
+  }
+
+  async initialize(): Promise<void> {
+    await fs.mkdir(this.dataDir, { recursive: true })
+    await fs.mkdir(this.configsDir, { recursive: true })
+    await this.loadData()
+    await this.ensureDefaults()
+  }
+
+  // ============================================================================
+  // Implementation CRUD
+  // ============================================================================
+
+  listImplementations(params?: ListChannelImplementationsParams): {
+    items: ChannelImplementation[]
+    pagination: { page: number; page_size: number; total_items: number; total_pages: number }
+  } {
+    let items = Array.from(this.implementations.values())
+
+    if (params?.type) {
+      items = items.filter((i) => i.type === params.type)
+    }
+    if (params?.platform) {
+      items = items.filter((i) => i.platform === params.platform)
+    }
+
+    const page = params?.page ?? 1
+    const pageSize = params?.page_size ?? 50
+    const totalItems = items.length
+    const totalPages = Math.ceil(totalItems / pageSize)
+    const start = (page - 1) * pageSize
+
+    return {
+      items: items.slice(start, start + pageSize),
+      pagination: { page, page_size: pageSize, total_items: totalItems, total_pages: totalPages },
+    }
+  }
+
+  getImplementation(id: string): ChannelImplementation | undefined {
+    return this.implementations.get(id)
+  }
+
+  async addImplementation(impl: ChannelImplementation): Promise<void> {
+    this.implementations.set(impl.id, impl)
+    await this.saveImplementations()
+  }
+
+  async removeImplementation(id: string): Promise<void> {
+    this.implementations.delete(id)
+    await this.saveImplementations()
+  }
+
+  // ============================================================================
+  // Instance CRUD
+  // ============================================================================
+
+  listInstances(params?: ListChannelInstancesParams): {
+    items: ChannelInstance[]
+    pagination: { page: number; page_size: number; total_items: number; total_pages: number }
+  } {
+    let items = Array.from(this.instances.values())
+
+    if (params?.platform) {
+      items = items.filter((i) => i.platform === params.platform)
+    }
+
+    const page = params?.page ?? 1
+    const pageSize = params?.page_size ?? 50
+    const totalItems = items.length
+    const totalPages = Math.ceil(totalItems / pageSize)
+    const start = (page - 1) * pageSize
+
+    return {
+      items: items.slice(start, start + pageSize),
+      pagination: { page, page_size: pageSize, total_items: totalItems, total_pages: totalPages },
+    }
+  }
+
+  getInstance(id: string): ChannelInstance | undefined {
+    return this.instances.get(id)
+  }
+
+  async createInstance(params: CreateChannelInstanceParams): Promise<ChannelInstance> {
+    const impl = this.implementations.get(params.implementation_id)
+    if (!impl) {
+      throw new Error(`Implementation not found: ${params.implementation_id}`)
+    }
+
+    // 名称唯一性校验
+    const duplicate = Array.from(this.instances.values()).find((i) => i.name === params.name)
+    if (duplicate) {
+      throw new Error(`Instance name already exists: ${params.name}`)
+    }
+
+    const now = generateTimestamp()
+    // channel-host 实例的 platform 由参数传入（因为 impl.platform = '*'），其他实现使用 impl.platform
+    const platform = params.platform ?? impl.platform
+    // 用 timestamp(base36) + 4位随机串 生成唯一的 URL 安全 ID
+    const instanceId = `ch-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+
+    // channel-host 实例：自动生成 state_dir（如果未提供）
+    let stateDir = params.state_dir
+    if (impl.id === 'channel-host' && !stateDir) {
+      stateDir = path.resolve(this.dataDir, 'channels', instanceId)
+      await this.initializeStateDir(stateDir)
+    }
+
+    const instance: ChannelInstance = {
+      id: instanceId,
+      implementation_id: params.implementation_id,
+      name: params.name,
+      platform,
+      ...(stateDir !== undefined && { state_dir: stateDir }),
+      auto_start: params.auto_start ?? false,
+      start_priority: 30,
+      module_registered: false,
+      created_at: now,
+      updated_at: now,
+    }
+
+    this.instances.set(instance.id, instance)
+    await this.saveInstances()
+
+    // channel-host 实现：注册到 Module Manager
+    if (impl.id === 'channel-host' && impl.module_path) {
+      try {
+        const resolvedModulePath = path.resolve(__dirname, '..', impl.module_path)
+        const entry = `node ${resolvedModulePath}/dist/main.js`
+        const env: Record<string, string> = {
+          CRABOT_MODULE_ID: instance.id,
+        }
+        if (instance.state_dir) {
+          env.OPENCLAW_STATE_DIR = instance.state_dir
+        }
+
+        await this.rpcClient.registerModuleDefinition(
+          {
+            module_id: instance.id,
+            module_type: 'channel',
+            entry,
+            cwd: resolvedModulePath,
+            env,
+            auto_start: instance.auto_start,
+            start_priority: instance.start_priority,
+          },
+          'admin'
+        )
+
+        const registered: ChannelInstance = { ...instance, module_registered: true }
+        this.instances.set(registered.id, registered)
+        await this.saveInstances()
+
+        console.log(`[ChannelManager] channel-host instance registered: ${instance.id}`)
+        return registered
+      } catch (error) {
+        console.error(`[ChannelManager] Failed to register channel-host module:`, error)
+        // 注册失败时回滚实例记录
+        this.instances.delete(instance.id)
+        await this.saveInstances()
+        throw error
+      }
+    }
+
+    return instance
+  }
+
+  /**
+   * 初始化 channel-host 的 state_dir 目录结构
+   * 创建 config.json（空配置）和 extensions/ 目录
+   */
+  private async initializeStateDir(stateDir: string): Promise<void> {
+    await fs.mkdir(stateDir, { recursive: true })
+    await fs.mkdir(path.join(stateDir, 'extensions'), { recursive: true })
+
+    const configPath = path.join(stateDir, 'config.json')
+    try {
+      await fs.access(configPath)
+    } catch {
+      await fs.writeFile(configPath, JSON.stringify({}, null, 2), 'utf-8')
+    }
+  }
+
+  async updateInstance(params: UpdateChannelInstanceParams): Promise<ChannelInstance> {
+    const existing = this.instances.get(params.instance_id)
+    if (!existing) {
+      throw new Error(`Instance not found: ${params.instance_id}`)
+    }
+
+    const updated: ChannelInstance = {
+      ...existing,
+      ...(params.name !== undefined && { name: params.name }),
+      ...(params.auto_start !== undefined && { auto_start: params.auto_start }),
+      updated_at: generateTimestamp(),
+    }
+
+    this.instances.set(params.instance_id, updated)
+    await this.saveInstances()
+
+    return updated
+  }
+
+  async deleteInstance(id: string): Promise<void> {
+    const instance = this.instances.get(id)
+    if (!instance) {
+      throw new Error(`Instance not found: ${id}`)
+    }
+
+    if (instance.module_registered) {
+      try {
+        await this.rpcClient.stopModule(id, 'admin')
+        await this.rpcClient.unregisterModuleDefinition(id, 'admin')
+      } catch (error) {
+        console.error(`[ChannelManager] Failed to unregister module:`, error)
+      }
+    }
+
+    this.instances.delete(id)
+    await this.saveInstances()
+    await this.deleteConfigFile(id)
+  }
+
+  // ============================================================================
+  // Config CRUD（通过 RPC 透传到 Channel 模块，见 protocol-channel §6.1）
+  // ============================================================================
+
+  async getConfig(instanceId: string): Promise<{ config: ChannelConfig; schema?: any }> {
+    const instance = this.instances.get(instanceId)
+    if (!instance) {
+      throw new Error(`Instance not found: ${instanceId}`)
+    }
+
+    // 解析模块地址
+    const modules = await this.rpcClient.resolve({ module_id: instanceId }, 'admin')
+    if (modules.length === 0) {
+      throw new Error(`Channel module not running: ${instanceId}`)
+    }
+
+    const result = await this.rpcClient.call<Record<string, never>, { config: ChannelConfig; schema?: any }>(
+      modules[0].port,
+      'get_config',
+      {},
+      'admin'
+    )
+    return result
+  }
+
+  async updateConfig(params: UpdateChannelConfigParams): Promise<{ config: ChannelConfig; requires_restart: boolean }> {
+    const instance = this.instances.get(params.instance_id)
+    if (!instance) {
+      throw new Error(`Instance not found: ${params.instance_id}`)
+    }
+
+    const modules = await this.rpcClient.resolve({ module_id: params.instance_id }, 'admin')
+    if (modules.length === 0) {
+      throw new Error(`Channel module not running: ${params.instance_id}`)
+    }
+
+    const result = await this.rpcClient.call<{ config: Partial<ChannelConfig> }, { config: ChannelConfig; requires_restart: boolean }>(
+      modules[0].port,
+      'update_config',
+      { config: params.config },
+      'admin'
+    )
+    return result
+  }
+
+  // ============================================================================
+  // 重新注册 & 自动启动
+  // ============================================================================
+
+  /**
+   * Admin 启动时重新注册所有 channel-host 实例到 MM
+   *
+   * MM 不持久化 registerModuleDefinition 的结果，重启后动态注册丢失。
+   * 此方法在 Admin onStart() 中调用，确保已有实例重新注册。
+   * 对 auto_start: true 的实例额外调用 startModule。
+   */
+  async reRegisterInstances(): Promise<void> {
+    const channelHostImpl = this.implementations.get('channel-host')
+    if (!channelHostImpl?.module_path) {
+      return
+    }
+
+    const instances = Array.from(this.instances.values())
+      .filter((i) => i.implementation_id === 'channel-host')
+
+    if (instances.length === 0) {
+      return
+    }
+
+    console.log(`[ChannelManager] Re-registering ${instances.length} channel-host instances to MM`)
+    const resolvedModulePath = path.resolve(__dirname, '..', channelHostImpl.module_path)
+
+    for (const instance of instances) {
+      try {
+        const entry = `node ${resolvedModulePath}/dist/main.js`
+        const env: Record<string, string> = {
+          CRABOT_MODULE_ID: instance.id,
+        }
+        if (instance.state_dir) {
+          env.OPENCLAW_STATE_DIR = instance.state_dir
+        }
+
+        await this.rpcClient.registerModuleDefinition(
+          {
+            module_id: instance.id,
+            module_type: 'channel',
+            entry,
+            cwd: resolvedModulePath,
+            env,
+            auto_start: instance.auto_start,
+            start_priority: instance.start_priority,
+          },
+          'admin'
+        )
+
+        // 注册成功，更新标志
+        if (!instance.module_registered) {
+          const updated: ChannelInstance = { ...instance, module_registered: true }
+          this.instances.set(updated.id, updated)
+        }
+
+        console.log(`[ChannelManager] Re-registered: ${instance.id}`)
+      } catch (error: any) {
+        // DUPLICATE_ID 表示 MM 没重启，模块已存在，忽略
+        if (error?.message?.includes('DUPLICATE_ID') || error?.code === 'DUPLICATE_ID') {
+          console.log(`[ChannelManager] Already registered (DUPLICATE_ID): ${instance.id}`)
+        } else {
+          console.error(`[ChannelManager] Failed to re-register ${instance.id}:`, error)
+        }
+      }
+    }
+
+    await this.saveInstances()
+
+    // 自动启动 auto_start 实例
+    const autoStartInstances = instances
+      .filter((i) => i.auto_start)
+      .sort((a, b) => a.start_priority - b.start_priority)
+
+    for (const instance of autoStartInstances) {
+      try {
+        await this.rpcClient.startModule(instance.id, 'admin')
+        console.log(`[ChannelManager] Auto-started: ${instance.id}`)
+      } catch (error: any) {
+        // 已在运行则忽略
+        if (error?.message?.includes('ALREADY_RUNNING')) {
+          console.log(`[ChannelManager] Already running: ${instance.id}`)
+        } else {
+          console.error(`[ChannelManager] Failed to auto-start ${instance.id}:`, error)
+        }
+      }
+    }
+  }
+
+  getAutoStartInstances(): ChannelInstance[] {
+    return Array.from(this.instances.values())
+      .filter((i) => i.auto_start)
+      .sort((a, b) => a.start_priority - b.start_priority)
+  }
+
+  // ============================================================================
+  // State Dir 扫描（检测已安装的 OpenClaw 插件）
+  // ============================================================================
+
+  /**
+   * 扫描 state_dir 中已安装的 OpenClaw 插件
+   *
+   * 两种检测策略：
+   * 1. openclaw.json（向导安装的标准格式）—— 解析 plugins.entries 和 channels
+   * 2. extensions/ 目录（手动安装 / npm install）—— 在 node_modules 中查找 openclaw.plugin.json
+   */
+  scanStateDir(stateDir: string): { plugins: ScannedPlugin[]; has_config: boolean } {
+    // 策略 1：解析 openclaw.json（@larksuite/openclaw-lark-tools install 写入）
+    const openclawJsonPath = path.join(stateDir, 'openclaw.json')
+    if (fsSync.existsSync(openclawJsonPath)) {
+      return this.scanFromOpenclawJson(openclawJsonPath)
+    }
+
+    // 策略 2：扫描 extensions/ 目录（手动安装场景）
+    const plugins: ScannedPlugin[] = []
+    const extensionsDir = path.join(stateDir, 'extensions')
+
+    if (fsSync.existsSync(extensionsDir)) {
+      const pluginDirs = fsSync.readdirSync(extensionsDir)
+      for (const pluginDir of pluginDirs) {
+        const base = path.join(extensionsDir, pluginDir)
+        if (!fsSync.statSync(base).isDirectory()) continue
+
+        const nodeModules = path.join(base, 'node_modules')
+        if (!fsSync.existsSync(nodeModules)) continue
+
+        const found = this.findOpenClawPlugins(nodeModules)
+        plugins.push(...found)
+      }
+    }
+
+    // 检查 config.json 是否存在且非空对象
+    let hasConfig = false
+    const configPath = path.join(stateDir, 'config.json')
+    if (fsSync.existsSync(configPath)) {
+      try {
+        const content = fsSync.readFileSync(configPath, 'utf-8')
+        const parsed = JSON.parse(content) as Record<string, unknown>
+        hasConfig = Object.keys(parsed).length > 0
+      } catch {
+        // 解析失败视为无配置
+      }
+    }
+
+    return { plugins, has_config: hasConfig }
+  }
+
+  /**
+   * 从 openclaw.json 解析已安装的插件
+   *
+   * openclaw.json 格式：
+   * {
+   *   "plugins": { "entries": { "feishu": { "enabled": false }, "openclaw-lark": { "enabled": true } }, "allow": ["openclaw-lark"] },
+   *   "channels": { "feishu": { "enabled": true, "appId": "...", ... } }
+   * }
+   */
+  private scanFromOpenclawJson(jsonPath: string): { plugins: ScannedPlugin[]; has_config: boolean } {
+    try {
+      const content = fsSync.readFileSync(jsonPath, 'utf-8')
+      const data = JSON.parse(content) as {
+        plugins?: { entries?: Record<string, { enabled?: boolean }>; allow?: string[] }
+        channels?: Record<string, { enabled?: boolean; [key: string]: unknown }>
+      }
+
+      const plugins: ScannedPlugin[] = []
+
+      // 从 plugins.entries 中提取已启用的插件
+      const entries = data.plugins?.entries ?? {}
+      const allowList = new Set(data.plugins?.allow ?? [])
+
+      for (const [name, info] of Object.entries(entries)) {
+        // 插件在 allow 列表中或明确 enabled
+        if (allowList.has(name) || info.enabled) {
+          const platform = this.inferPlatform(name)
+          plugins.push({ name, platform, entry_path: '' })
+        }
+      }
+
+      // 如果 plugins.entries 没有有效的启用插件，从 channels 推断
+      if (plugins.length === 0 && data.channels) {
+        for (const [channelName, channelInfo] of Object.entries(data.channels)) {
+          if (channelInfo.enabled !== false) {
+            const platform = this.inferPlatform(channelName)
+            plugins.push({ name: channelName, platform, entry_path: '' })
+          }
+        }
+      }
+
+      // channels 有内容即视为 has_config
+      const hasConfig = data.channels !== undefined && Object.keys(data.channels).length > 0
+
+      return { plugins, has_config: hasConfig }
+    } catch {
+      return { plugins: [], has_config: false }
+    }
+  }
+
+  /**
+   * 在 node_modules 中查找所有 OpenClaw 插件包
+   */
+  private findOpenClawPlugins(nodeModulesDir: string): ScannedPlugin[] {
+    const results: ScannedPlugin[] = []
+    const entries = fsSync.readdirSync(nodeModulesDir)
+
+    for (const entry of entries) {
+      const pkgBase = path.join(nodeModulesDir, entry)
+      if (!fsSync.statSync(pkgBase).isDirectory()) continue
+
+      if (entry.startsWith('@')) {
+        // @scope/pkg 格式
+        const scopedPkgs = fsSync.readdirSync(pkgBase)
+        for (const pkg of scopedPkgs) {
+          const pkgDir = path.join(pkgBase, pkg)
+          if (fsSync.existsSync(path.join(pkgDir, 'openclaw.plugin.json'))) {
+            const plugin = this.readPluginInfo(pkgDir, `${entry}/${pkg}`)
+            if (plugin) results.push(plugin)
+          }
+        }
+      } else {
+        if (fsSync.existsSync(path.join(pkgBase, 'openclaw.plugin.json'))) {
+          const plugin = this.readPluginInfo(pkgBase, entry)
+          if (plugin) results.push(plugin)
+        }
+      }
+    }
+
+    return results
+  }
+
+  /**
+   * 读取单个插件包的信息
+   */
+  private readPluginInfo(pkgDir: string, fallbackName: string): ScannedPlugin | null {
+    const pkgJsonPath = path.join(pkgDir, 'package.json')
+    let name = fallbackName
+
+    if (fsSync.existsSync(pkgJsonPath)) {
+      try {
+        const pkg = JSON.parse(fsSync.readFileSync(pkgJsonPath, 'utf-8')) as { name?: string }
+        if (pkg.name) name = pkg.name
+      } catch {
+        // 解析失败用 fallbackName
+      }
+    }
+
+    // 查找入口文件
+    const entryPaths = ['index.ts', 'src/index.ts', 'dist/index.js', 'index.js']
+    let entryPath: string | null = null
+    for (const ep of entryPaths) {
+      const candidate = path.join(pkgDir, ep)
+      if (fsSync.existsSync(candidate)) {
+        entryPath = candidate
+        break
+      }
+    }
+    if (!entryPath) return null
+
+    const platform = this.inferPlatform(name)
+
+    return { name, platform, entry_path: entryPath }
+  }
+
+  /**
+   * 从包名推断平台
+   */
+  private inferPlatform(packageName: string): string {
+    const platformMap: Record<string, string> = {
+      feishu: 'feishu',
+      lark: 'feishu',
+      dingtalk: 'dingtalk',
+      slack: 'slack',
+      wechat: 'wechat',
+      weixin: 'wechat',
+      wecom: 'wechat',
+      telegram: 'telegram',
+      discord: 'discord',
+    }
+
+    const lower = packageName.toLowerCase()
+    for (const [keyword, platform] of Object.entries(platformMap)) {
+      if (lower.includes(keyword)) return platform
+    }
+
+    // fallback：从包名清理前缀后提取平台名
+    // 例如 @openclaw/line → line，openclaw-matrix → matrix，@tencent-weixin/openclaw-weixin-cli → weixin（已在上面匹配）
+    let cleaned = packageName
+    // 去掉 @scope/ 前缀
+    cleaned = cleaned.replace(/^@[^/]+\//, '')
+    // 去掉 openclaw- 前缀
+    cleaned = cleaned.replace(/^openclaw-/, '')
+    // 去掉 -cli、-tools、-bot 等常见后缀
+    cleaned = cleaned.replace(/-(cli|tools|bot|plugin|sdk|adapter)$/, '')
+
+    if (cleaned && cleaned !== packageName.replace(/^@[^/]+\//, '')) {
+      return cleaned.toLowerCase()
+    }
+
+    return 'unknown'
+  }
+
+  // ============================================================================
+  // 数据持久化
+  // ============================================================================
+
+  private async loadData(): Promise<void> {
+    await this.loadImplementations()
+    await this.loadInstances()
+  }
+
+  private async loadImplementations(): Promise<void> {
+    try {
+      const data = await fs.readFile(this.implementationsFilePath, 'utf-8')
+      const items = JSON.parse(data) as ChannelImplementation[]
+      for (const item of items) {
+        this.implementations.set(item.id, item)
+      }
+      console.log(`[ChannelManager] Loaded ${this.implementations.size} implementations`)
+    } catch {
+      console.log('[ChannelManager] No existing implementations data')
+    }
+  }
+
+  private async loadInstances(): Promise<void> {
+    try {
+      const data = await fs.readFile(this.instancesFilePath, 'utf-8')
+      const items = JSON.parse(data) as ChannelInstance[]
+      for (const item of items) {
+        this.instances.set(item.id, item)
+      }
+      console.log(`[ChannelManager] Loaded ${this.instances.size} instances`)
+    } catch {
+      console.log('[ChannelManager] No existing instances data')
+    }
+  }
+
+  // ============================================================================
+  // 原子写入
+  // ============================================================================
+
+  /**
+   * 原子写入文件：先写临时文件，再 rename（避免进程被杀时文件损坏）
+   */
+  private async atomicWriteFile(filePath: string, content: string): Promise<void> {
+    const tempPath = `${filePath}.tmp`
+    await fs.writeFile(tempPath, content, 'utf-8')
+    await fs.rename(tempPath, filePath)
+  }
+
+  private async saveImplementations(): Promise<void> {
+    const items = Array.from(this.implementations.values())
+    await this.atomicWriteFile(this.implementationsFilePath, JSON.stringify(items, null, 2))
+  }
+
+  private async saveInstances(): Promise<void> {
+    const items = Array.from(this.instances.values())
+    await this.atomicWriteFile(this.instancesFilePath, JSON.stringify(items, null, 2))
+  }
+
+  private async deleteConfigFile(instanceId: string): Promise<void> {
+    const configPath = path.join(this.configsDir, `${instanceId}.json`)
+    try {
+      await fs.unlink(configPath)
+    } catch {
+      // 文件不存在，忽略
+    }
+  }
+
+  private async ensureDefaults(): Promise<void> {
+    if (!this.implementations.has('feishu')) {
+      this.implementations.set('feishu', DEFAULT_FEISHU_IMPLEMENTATION)
+      await this.saveImplementations()
+      console.log('[ChannelManager] Created default feishu implementation')
+    }
+
+    if (!this.implementations.has('channel-host')) {
+      this.implementations.set('channel-host', DEFAULT_CHANNEL_HOST_IMPLEMENTATION)
+      await this.saveImplementations()
+      console.log('[ChannelManager] Created default channel-host implementation')
+    }
+
+    if (!this.instances.has('crabot-channel-feishu')) {
+      this.instances.set('crabot-channel-feishu', DEFAULT_FEISHU_INSTANCE)
+      await this.saveInstances()
+      console.log('[ChannelManager] Created default feishu instance')
+    }
+  }
+}

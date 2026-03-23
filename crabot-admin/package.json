@@ -1,0 +1,50 @@
+{
+  "name": "crabot-admin",
+  "version": "1.0.0",
+  "description": "Crabot Admin Module - Management interface and data layer",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "build:web": "cd web && npm install && npm run build",
+    "build:all": "npm run build && npm run build:web",
+    "start": "node dist/main.js",
+    "dev": "ts-node src/main.ts",
+    "test": "vitest",
+    "test:coverage": "vitest --coverage"
+  },
+  "keywords": [
+    "crabot",
+    "admin",
+    "ai-agent"
+  ],
+  "author": "Crabot Team",
+  "license": "MIT",
+  "dependencies": {
+    "@types/adm-zip": "^0.5.8",
+    "adm-zip": "^0.5.16",
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^12.6.2",
+    "js-yaml": "^4.1.1",
+    "jsonwebtoken": "^9.0.0",
+    "node-pty": "^1.0.0",
+    "semver": "^7.7.4",
+    "uuid": "^9.0.0",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/js-yaml": "^4.0.9",
+    "@types/jsonwebtoken": "^9.0.0",
+    "@types/node": "^20.0.0",
+    "@types/semver": "^7.7.1",
+    "@types/uuid": "^9.0.0",
+    "@types/ws": "^8.18.1",
+    "@vitest/coverage-v8": "^1.0.0",
+    "ts-node": "^10.9.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.0.0",
+    "vitest": "^1.0.0"
+  }
+}

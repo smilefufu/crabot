@@ -1,0 +1,10 @@
+module_id: memory-default
+module_type: memory
+version: 0.1.0
+protocol_version: 0.1.0
+name: Memory Module
+description: 智能记忆服务，负责记忆的存取、压缩、索引和检索优化
+entry_point: src/main.py
+runtime: python
+python_version: ">=3.10"
+subscriptions: []

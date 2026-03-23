@@ -1,0 +1,1392 @@
+/**
+ * UnifiedAgent - 合并 Flow + Agent 的统一智能体模块
+ *
+ * 整合编排层（原 Flow）和智能体层（原 Agent）的能力
+ *
+ * @see crabot-docs/protocols/protocol-agent-v2.md
+ */
+
+import { ModuleBase, type ModuleConfig } from './core/module-base.js'
+import type { Event, ModuleId } from './core/base-protocol.js'
+import type {
+  UnifiedAgentConfig,
+  OrchestrationConfig,
+  AgentLayerConfig,
+  ChannelMessage,
+  MessageDecision,
+  ExecuteTaskResult,
+  ExecuteTaskParams,
+  DeliverHumanResponseResult,
+  MemoryPermissions,
+  TaskId,
+  FriendId,
+  Friend,
+  LLMRoleRequirement,
+  GetConfigResult,
+  UpdateConfigParams,
+  UpdateConfigResult,
+  LLMConnectionInfo,
+  TraceCallback,
+} from './types.js'
+import { SessionManager } from './orchestration/session-manager.js'
+import { SwitchMapHandler } from './orchestration/switchmap-handler.js'
+import { PermissionChecker } from './orchestration/permission-checker.js'
+import { WorkerSelector } from './orchestration/worker-selector.js'
+import { ContextAssembler } from './orchestration/context-assembler.js'
+import { DecisionDispatcher } from './orchestration/decision-dispatcher.js'
+import { MemoryWriter } from './orchestration/memory-writer.js'
+import { FrontHandler, type SdkEnvConfig } from './agent/front-handler.js'
+import { WorkerHandler } from './agent/worker-handler.js'
+import { MCPManager } from './agent/mcp-manager.js'
+import type { SdkMcpServerConfig } from './agent/sdk-runner.js'
+import { createCrabMessagingServer, type PathMapping } from './mcp/crab-messaging.js'
+import { TraceStore } from './core/trace-store.js'
+
+export class UnifiedAgent extends ModuleBase {
+  // 编排层组件
+  private sessionManager: SessionManager
+  private switchmapHandler: SwitchMapHandler
+  private permissionChecker: PermissionChecker
+  private workerSelector: WorkerSelector
+  private contextAssembler: ContextAssembler
+  private decisionDispatcher: DecisionDispatcher
+  private memoryWriter: MemoryWriter
+
+  // 智能体层组件（可选，取决于配置）
+  private frontHandler?: FrontHandler
+  private workerHandler?: WorkerHandler
+  private mcpManager?: MCPManager
+  private roles: Set<'front' | 'worker'> = new Set()
+  /** SDK 环境配置（Front/Worker 共用） */
+  private sdkEnvFront?: SdkEnvConfig
+  private sdkEnvWorker?: SdkEnvConfig
+  /** Worker sandbox 路径映射（每次 executeTask 时更新） */
+  private sandboxPathMappingsRef: { current: PathMapping[] } = { current: [] }
+
+  // 配置
+  private orchestrationConfig: OrchestrationConfig
+  private agentConfig?: AgentLayerConfig
+
+  // 端口缓存
+  private adminPort?: number
+  private memoryPort?: number
+  private channelPorts: Map<ModuleId, number> = new Map()
+
+  // Trace 存储
+  private traceStore: TraceStore = new TraceStore()
+
+  constructor(config: UnifiedAgentConfig) {
+    const moduleConfig: ModuleConfig = {
+      moduleId: config.module_id,
+      moduleType: config.module_type,
+      version: config.version,
+      protocolVersion: config.protocol_version,
+      port: config.port,
+      subscriptions: [
+        'channel.message_authorized',
+        'admin.task_status_changed',
+        'module_manager.module_stopped',
+        'admin.friend_updated',
+        'admin.friend_deleted',
+      ],
+    }
+
+    super(moduleConfig)
+
+    this.orchestrationConfig = config.orchestration
+    this.agentConfig = config.agent_config
+
+    // 初始化编排层组件
+    this.sessionManager = new SessionManager(this.orchestrationConfig.session_state_ttl)
+    this.switchmapHandler = new SwitchMapHandler(
+      this.sessionManager,
+      this.rpcClient,
+      config.module_id,
+      async () => await this.getAdminPort()
+    )
+    this.permissionChecker = new PermissionChecker(
+      this.rpcClient,
+      config.module_id,
+      async () => await this.getAdminPort()
+    )
+    this.workerSelector = new WorkerSelector(this.rpcClient, config.module_id)
+    this.contextAssembler = new ContextAssembler(
+      this.rpcClient,
+      config.module_id,
+      this.orchestrationConfig,
+      async () => await this.getAdminPort(),
+      async () => await this.getMemoryPort()
+    )
+    this.decisionDispatcher = new DecisionDispatcher(
+      this.rpcClient,
+      config.module_id,
+      this.workerSelector,
+      this.contextAssembler,
+      async () => await this.getAdminPort(),
+      async (channelId) => await this.getChannelPort(channelId)
+    )
+    this.memoryWriter = new MemoryWriter(
+      this.rpcClient,
+      config.module_id,
+      async () => await this.getMemoryPort()
+    )
+
+    // 初始化智能体层组件（如果有配置）
+    if (this.agentConfig) {
+      this.initializeAgentLayer(this.agentConfig)
+    }
+
+    // 注册 RPC 方法
+    this.registerMethods()
+  }
+
+  /**
+   * 初始化智能体层
+   */
+  private initializeAgentLayer(config: AgentLayerConfig): void {
+    // 设置角色
+    for (const role of config.roles) {
+      this.roles.add(role)
+    }
+
+    // 初始化 MCP Manager（如果有配置）
+    if (config.mcp_servers && config.mcp_servers.length > 0) {
+      this.mcpManager = new MCPManager({
+        getModuleId: () => this.config.moduleId,
+      })
+    }
+
+    // 构建 SDK 环境变量（通过 LiteLLM 代理）
+    const personalityPrompt = this.enhanceSystemPrompt(config.system_prompt, config.skills)
+
+    // MCP config factory: creates fresh McpServer instances per runSdk() call
+    // This avoids the "Already connected to a transport" Protocol reuse error
+    const externalMcpConfigs = this.buildExternalMcpConfigs(config.mcp_servers)
+    const createMcpConfigs = (): Record<string, SdkMcpServerConfig> => ({
+      'crab-messaging': createCrabMessagingServer({
+        rpcClient: this.rpcClient,
+        moduleId: this.config.moduleId,
+        getAdminPort: () => this.getAdminPort(),
+        resolveChannelPort: (channelId) => this.getChannelPort(channelId),
+      }, this.sandboxPathMappingsRef) as unknown as SdkMcpServerConfig,
+      ...externalMcpConfigs,
+    })
+
+    // 初始化 Front Handler（如果有 front 角色）
+    if (this.roles.has('front')) {
+      const frontModelConfig = config.model_config?.fast ?? config.model_config?.default
+      if (frontModelConfig) {
+        this.sdkEnvFront = this.buildSdkEnv(frontModelConfig)
+        this.frontHandler = new FrontHandler(this.sdkEnvFront, {
+          personalityPrompt: personalityPrompt || undefined,
+          maxIterations: config.max_iterations ?? 3,
+          timeout: this.orchestrationConfig.front_agent_timeout * 1000,
+        }, createMcpConfigs)
+      }
+    }
+
+    // 初始化 Worker Handler（如果有 worker 角色）
+    if (this.roles.has('worker')) {
+      const workerModelConfig = config.model_config?.smart ?? config.model_config?.default
+      if (workerModelConfig) {
+        this.sdkEnvWorker = this.buildSdkEnv(workerModelConfig)
+        // MCP 服务器配置转换为 SDK 格式（stdio 类型直传）
+        this.workerHandler = new WorkerHandler(this.sdkEnvWorker, {
+          personalityPrompt: personalityPrompt || undefined,
+          maxIterations: config.max_iterations ?? 20,
+        }, createMcpConfigs)
+      }
+    }
+  }
+
+  /**
+   * 从 LLMConnectionInfo 构建 SDK 环境配置
+   */
+  private buildSdkEnv(connInfo: LLMConnectionInfo): SdkEnvConfig {
+    return {
+      modelId: connInfo.model_id,
+      env: {
+        ANTHROPIC_BASE_URL: connInfo.endpoint,
+        ANTHROPIC_API_KEY: connInfo.apikey || 'dummy-key',
+      },
+    }
+  }
+
+  /**
+   * 将 MCPServerConfig[] 转换为 SDK 的 Record<string, SdkMcpServerConfig>
+   */
+  private buildExternalMcpConfigs(
+    configs?: Array<{ name: string; command: string; args?: string[]; env?: Record<string, string> }>
+  ): Record<string, SdkMcpServerConfig> {
+    if (!configs || configs.length === 0) return {}
+    const result: Record<string, SdkMcpServerConfig> = {}
+    for (const cfg of configs) {
+      result[cfg.name] = {
+        command: cfg.command,
+        args: cfg.args ?? [],
+        env: cfg.env,
+      } as unknown as SdkMcpServerConfig
+    }
+    return result
+  }
+
+  /**
+   * 增强 system_prompt，添加 Skills 信息
+   */
+  private enhanceSystemPrompt(
+    basePrompt: string,
+    skills?: Array<{ id: string; name: string; content: string }>
+  ): string {
+    if (!skills || skills.length === 0) {
+      return basePrompt
+    }
+
+    const skillsSection = skills
+      .map((skill) => `### ${skill.name}\n${skill.content}`)
+      .join('\n\n')
+
+    return `${basePrompt}
+
+## 可用技能
+
+${skillsSection}
+
+当用户请求与上述技能相关的任务时，请使用对应的技能来完成。`
+  }
+
+  /**
+   * 注册 RPC 方法
+   */
+  private registerMethods(): void {
+    // 编排接口
+    this.registerMethod('process_message', this.handleProcessMessage.bind(this))
+    this.registerMethod('create_task_from_schedule', this.handleCreateTaskFromSchedule.bind(this))
+
+    // Agent 接口
+    this.registerMethod('get_role', this.handleGetRole.bind(this))
+    this.registerMethod('get_status', this.handleGetStatus.bind(this))
+    this.registerMethod('get_llm_requirements', this.handleGetLLMRequirements.bind(this))
+
+    // 配置管理接口
+    this.registerMethod('get_config', this.handleGetConfig.bind(this))
+    this.registerMethod('update_config', this.handleUpdateConfig.bind(this))
+
+    if (this.roles.has('worker')) {
+      this.registerMethod('execute_task', this.handleExecuteTask.bind(this))
+      this.registerMethod('deliver_human_response', this.handleDeliverHumanResponse.bind(this))
+      this.registerMethod('cancel_task', this.handleCancelTask.bind(this))
+    }
+
+    // Trace 接口
+    this.registerMethod('get_traces', this.handleGetTraces.bind(this))
+    this.registerMethod('get_trace', this.handleGetTrace.bind(this))
+    this.registerMethod('clear_traces', this.handleClearTraces.bind(this))
+  }
+
+  // ============================================================================
+  // 事件处理
+  // ============================================================================
+
+  /**
+   * 处理接收到的事件
+   */
+  protected override async onEvent(event: Event): Promise<void> {
+    switch (event.type) {
+      case 'channel.message_authorized':
+        await this.handleMessageReceived(event.payload as { message: ChannelMessage; friend: Friend })
+        break
+
+      case 'admin.task_status_changed':
+        await this.handleTaskStatusChanged(event.payload as { task_id: string; new_status: string; final_reply?: string })
+        break
+
+      case 'module_manager.module_stopped':
+        await this.handleModuleStopped(event.payload as { module_id: ModuleId; reason: string })
+        break
+
+      case 'admin.friend_updated':
+      case 'admin.friend_deleted': {
+        // 清除 Friend 缓存
+        const friendPayload = event.payload as { friend_id: FriendId }
+        this.permissionChecker.clearFriendCache(friendPayload.friend_id)
+        break
+      }
+    }
+  }
+
+  /**
+   * 处理消息接收事件（来自 channel.message_authorized，消息已通过 Admin 鉴权）
+   */
+  private async handleMessageReceived(payload: { message: ChannelMessage; friend: Friend }): Promise<void> {
+    const { message, friend } = payload
+    const { session, sender, content } = message
+
+    // 1. 更新 session 状态
+    this.sessionManager.updateLastMessageTime(session.session_id)
+
+    // 2. switchMap 处理
+    const requestId = crypto.randomUUID()
+    await this.switchmapHandler.handleNewMessage(session.session_id, requestId)
+
+    // 3. 创建 Trace
+    const trace = this.traceStore.startTrace({
+      module_id: this.config.moduleId,
+      trigger: {
+        type: 'message',
+        summary: (content.text ?? '[非文本消息]').slice(0, 200),
+        source: session.channel_id,
+      },
+    })
+
+    try {
+      // 4. 如果没有配置 Front Agent 能力，需要调用外部 Agent
+      if (!this.roles.has('front') || !this.frontHandler) {
+        // TODO: 调用外部 Front Agent 模块
+        this.traceStore.endTrace(trace.trace_id, 'failed', { summary: 'No front agent configured' })
+        return
+      }
+
+      // 5. 派生记忆读写权限
+      const memPerms = this.deriveMemoryPermissions(friend, session.session_id)
+
+      // 6. 组装上下文（带 span 追踪耗时）
+      const ctxSpan = this.traceStore.startSpan(trace.trace_id, {
+        type: 'context_assembly',
+        details: {
+          context_type: 'front',
+          channel_id: session.channel_id,
+          session_id: session.session_id,
+        },
+      })
+      const context = await this.contextAssembler.assembleFrontContext(
+        {
+          channel_id: session.channel_id,
+          session_id: session.session_id,
+          sender_id: sender.platform_user_id,
+          message: content.text ?? '',
+          friend_id: sender.friend_id,
+        },
+        friend,
+        memPerms
+      )
+      this.traceStore.endSpan(trace.trace_id, ctxSpan.span_id, 'completed')
+
+      // 7. 构建 TraceCallback
+      const traceCallback = this.buildTraceCallback(trace.trace_id)
+
+      // 8. 调用 Front Agent（内部调用，无 RPC）
+      const result = await this.frontHandler.handleMessage({
+        messages: [message],
+        context,
+      }, traceCallback)
+
+      // 9. 分发决策
+      for (const decision of result.decisions) {
+        // 记录 decision span
+        const decisionSpan = this.traceStore.startSpan(trace.trace_id, {
+          type: 'decision',
+          details: {
+            decision_type: decision.type,
+            summary: decision.type === 'direct_reply'
+              ? (decision.reply.text ?? '').slice(0, 100)
+              : decision.type === 'create_task'
+              ? decision.task_title
+              : `task_id: ${decision.task_id}`,
+          },
+        })
+
+        await this.decisionDispatcher.dispatch(decision, {
+          channel_id: session.channel_id,
+          session_id: session.session_id,
+          message,
+          memoryPermissions: memPerms,
+        })
+
+        this.traceStore.endSpan(trace.trace_id, decisionSpan.span_id, 'completed')
+      }
+
+      // 10. 写入短期记忆（带 span 追踪耗时）
+      if (sender.friend_id && content.text) {
+        const agentReply = this.extractReplyText(result.decisions)
+        if (agentReply) {
+          const memSpan = this.traceStore.startSpan(trace.trace_id, {
+            type: 'memory_write',
+            details: {
+              friend_id: sender.friend_id,
+              channel_id: session.channel_id,
+            },
+          })
+          await this.memoryWriter.writeConversation({
+            friend_id: sender.friend_id,
+            channel_id: session.channel_id,
+            session_id: session.session_id,
+            sender_name: friend.display_name,
+            user_message: content.text,
+            agent_reply: agentReply,
+            visibility: memPerms.write_visibility,
+            scopes: memPerms.write_scopes,
+          })
+          this.traceStore.endSpan(trace.trace_id, memSpan.span_id, 'completed')
+        }
+      }
+
+      this.traceStore.endTrace(trace.trace_id, 'completed', {
+        summary: this.extractReplyText(result.decisions)?.slice(0, 200) ?? 'completed',
+      })
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      this.traceStore.endTrace(trace.trace_id, 'failed', { summary: msg, error: msg })
+    } finally {
+      // 11. 完成 request
+      this.switchmapHandler.completeRequest(session.session_id, requestId)
+    }
+  }
+
+  /**
+   * 从 Friend 权限派生记忆读写权限参数
+   *
+   * - master 权限：写入 private，读取不过滤（可见所有私有记忆）
+   * - normal 权限：写入 internal + session scope，读取限当前 session scope
+   */
+  private deriveMemoryPermissions(friend: Friend, sessionId: string): MemoryPermissions {
+    if (friend.permission === 'master') {
+      return {
+        write_visibility: 'private',
+        write_scopes: [],
+        read_min_visibility: 'private',
+        read_accessible_scopes: undefined,
+      }
+    }
+
+    return {
+      write_visibility: 'internal',
+      write_scopes: [sessionId],
+      read_min_visibility: 'internal',
+      read_accessible_scopes: [sessionId],
+    }
+  }
+
+  /**
+   * 从决策列表中提取 Agent 发出的第一条回复文本
+   */
+  private extractReplyText(decisions: MessageDecision[]): string | undefined {
+    for (const decision of decisions) {
+      if (decision.type === 'direct_reply' && decision.reply.text) {
+        return decision.reply.text
+      }
+      if (decision.type === 'create_task' && decision.immediate_reply.text) {
+        return decision.immediate_reply.text
+      }
+      if (decision.type === 'forward_to_worker' && decision.immediate_reply?.text) {
+        return decision.immediate_reply.text
+      }
+    }
+    return undefined
+  }
+
+  /**
+   * 处理任务状态变更事件
+   */
+  private async handleTaskStatusChanged(payload: {
+    task_id: string
+    new_status: string
+    final_reply?: string
+  }): Promise<void> {
+    const { task_id, new_status, final_reply } = payload
+
+    // 只处理完成或失败状态，且有最终回复
+    if ((new_status !== 'completed' && new_status !== 'failed') || !final_reply) {
+      return
+    }
+
+    try {
+      // 查询任务信息
+      const adminPort = await this.getAdminPort()
+      const taskInfo = await this.rpcClient.call<
+        { task_id: string },
+        {
+          task_id: string
+          title: string
+          status: string
+          source?: {
+            origin: string
+            source_module_id?: string
+            channel_id?: string
+            session_id?: string
+            friend_id?: string
+          }
+        }
+      >(adminPort, 'get_task', { task_id }, this.config.moduleId)
+
+      if (!taskInfo.source) {
+        return
+      }
+
+      const content =
+        new_status === 'completed'
+          ? final_reply
+          : '任务处理失败，请稍后重试'
+
+      // 根据来源类型路由回复
+      if (taskInfo.source.origin === 'admin_chat' && taskInfo.source.source_module_id) {
+        // Admin Chat 来源 - 通过 Admin 模块发送回调
+        await this.rpcClient.call(
+          adminPort,
+          'send_chat_message',
+          {
+            module_id: taskInfo.source.source_module_id,
+            content: { type: 'text', text: content },
+            metadata: {
+              task_id,
+              status: new_status,
+            },
+          },
+          this.config.moduleId
+        )
+      } else if (
+        taskInfo.source.origin === 'human' &&
+        taskInfo.source.channel_id &&
+        taskInfo.source.session_id
+      ) {
+        // Channel 来源 - 通过 Channel 模块发送消息
+        const channelPort = await this.getChannelPort(taskInfo.source.channel_id)
+        await this.rpcClient.call(
+          channelPort,
+          'send_message',
+          {
+            session_id: taskInfo.source.session_id,
+            content: { type: 'text', text: content },
+          },
+          this.config.moduleId
+        )
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(`[${this.config.moduleId}] Error handling task status changed:`, message)
+    }
+  }
+
+  /**
+   * 处理模块停止事件
+   */
+  private async handleModuleStopped(payload: { module_id: ModuleId; reason: string }): Promise<void> {
+    const { module_id, reason } = payload
+
+    // 清除端口缓存，下次调用时重新解析
+    this.channelPorts.delete(module_id)
+
+    // 正常关闭无需处理
+    if (reason === 'shutdown') {
+      return
+    }
+
+    console.warn(
+      `[${this.config.moduleId}] Module ${module_id} stopped unexpectedly: ${reason}`
+    )
+
+    try {
+      const adminPort = await this.getAdminPort()
+
+      // 查询该 Worker 上正在处理的任务
+      const tasksResult = await this.rpcClient.call<
+        {
+          assigned_worker: string
+          status: string[]
+        },
+        { tasks: Array<{ task_id: string; task_type: string; status: string }> }
+      >(
+        adminPort,
+        'query_tasks',
+        {
+          assigned_worker: module_id,
+          status: ['planning', 'executing', 'waiting_human'],
+        },
+        this.config.moduleId
+      )
+
+      if (!tasksResult.tasks || tasksResult.tasks.length === 0) {
+        return
+      }
+
+      console.log(
+        `[${this.config.moduleId}] Found ${tasksResult.tasks.length} affected tasks on crashed worker ${module_id}`
+      )
+
+      // 处理受影响的任务
+      for (const task of tasksResult.tasks) {
+        try {
+          // 标记任务失败
+          await this.rpcClient.call(
+            adminPort,
+            'update_task_status',
+            {
+              task_id: task.task_id,
+              status: 'failed',
+              reason: `Worker ${module_id} crashed (${reason})`,
+            },
+            this.config.moduleId
+          )
+
+          console.log(
+            `[${this.config.moduleId}] Task ${task.task_id} marked as failed due to worker crash`
+          )
+        } catch (taskError) {
+          const message =
+            taskError instanceof Error ? taskError.message : String(taskError)
+          console.error(
+            `[${this.config.moduleId}] Failed to update task ${task.task_id}:`,
+            message
+          )
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(`[${this.config.moduleId}] Error handling module stopped:`, message)
+    }
+  }
+
+  // ============================================================================
+  // RPC 方法处理器
+  // ============================================================================
+
+  private async handleProcessMessage(params: {
+    message: ChannelMessage
+    source_type?: 'channel' | 'admin_chat'
+    callback_info?: { source_module_id: string; request_id: string }
+  }): Promise<{ decision_types: string[]; task_ids?: string[] }> {
+    const { message, source_type, callback_info } = params
+
+    // Admin Chat 来源
+    if (source_type === 'admin_chat' && callback_info) {
+      return this.processAdminChatMessage(message, callback_info)
+    }
+
+    // Channel 来源 - 使用标准消息处理流程
+    if (source_type === 'channel' || !source_type) {
+      // 直接触发消息处理（跳过权限检查，因为来自内部调用）
+      const sessionId = message.session.session_id
+
+      // 更新 session 状态
+      this.sessionManager.updateLastMessageTime(sessionId)
+
+      // switchMap 处理
+      const requestId = crypto.randomUUID()
+      await this.switchmapHandler.handleNewMessage(sessionId, requestId)
+
+      try {
+        // 检查是否有 Front Agent 能力
+        if (!this.roles.has('front') || !this.frontHandler) {
+          return { decision_types: [] }
+        }
+
+        // 组装上下文（channel 内部调用无 permResult，默认使用 normal friend 权限）
+        const channelMemPerms: MemoryPermissions = {
+          write_visibility: 'internal',
+          write_scopes: [sessionId],
+          read_min_visibility: 'internal',
+          read_accessible_scopes: [sessionId],
+        }
+        const context = await this.contextAssembler.assembleFrontContext(
+          {
+            channel_id: message.session.channel_id,
+            session_id: sessionId,
+            sender_id: message.sender.platform_user_id,
+            message: message.content.text ?? '',
+            friend_id: message.sender.friend_id,
+          },
+          undefined,
+          channelMemPerms
+        )
+
+        // 调用 Front Agent
+        const result = await this.frontHandler.handleMessage({
+          messages: [message],
+          context,
+        })
+
+        // 分发决策
+        const taskIds: TaskId[] = []
+        const decisionTypes: string[] = []
+
+        for (const decision of result.decisions) {
+          decisionTypes.push(decision.type)
+          const dispatchResult = await this.decisionDispatcher.dispatch(decision, {
+            channel_id: message.session.channel_id,
+            session_id: sessionId,
+            message,
+            memoryPermissions: channelMemPerms,
+          })
+          if (dispatchResult.task_id) {
+            taskIds.push(dispatchResult.task_id)
+          }
+        }
+
+        return {
+          decision_types: decisionTypes,
+          task_ids: taskIds.length > 0 ? taskIds : undefined,
+        }
+      } finally {
+        this.switchmapHandler.completeRequest(sessionId, requestId)
+      }
+    }
+
+    return { decision_types: [] }
+  }
+
+  /**
+   * 处理 Admin Chat 消息
+   */
+  private async processAdminChatMessage(
+    message: ChannelMessage,
+    callbackInfo: { source_module_id: string; request_id: string }
+  ): Promise<{ decision_types: string[]; task_ids?: string[] }> {
+    // Admin Chat 使用固定 session ID
+    const sessionId = 'admin-chat'
+
+    // 更新 session 状态
+    this.sessionManager.updateLastMessageTime(sessionId)
+
+    // switchMap 处理
+    const requestId = crypto.randomUUID()
+    await this.switchmapHandler.handleNewMessage(sessionId, requestId)
+
+    // 创建 Trace
+    const trace = this.traceStore.startTrace({
+      module_id: this.config.moduleId,
+      trigger: {
+        type: 'message',
+        summary: (message.content.text ?? '[非文本消息]').slice(0, 200),
+        source: 'admin-web',
+      },
+    })
+
+    try {
+      // 检查是否有 Front Agent 能力
+      if (!this.roles.has('front') || !this.frontHandler) {
+        // 发送错误回复
+        await this.rpcClient.call(
+          await this.getAdminPort(),
+          'chat_callback',
+          {
+            request_id: callbackInfo.request_id,
+            reply_type: 'direct_reply',
+            content: '系统暂时不可用',
+          },
+          this.config.moduleId
+        )
+        this.traceStore.endTrace(trace.trace_id, 'failed', { summary: 'No front agent configured' })
+        return { decision_types: [] }
+      }
+
+      // Admin Chat 使用 master 级权限（私有，无 scope 过滤）
+      const masterMemPerms: MemoryPermissions = {
+        write_visibility: 'private',
+        write_scopes: [],
+        read_min_visibility: 'private',
+        read_accessible_scopes: undefined,
+      }
+
+      // 组装上下文（Admin Chat 专用，带 span 追踪耗时）
+      const ctxSpan = this.traceStore.startSpan(trace.trace_id, {
+        type: 'context_assembly',
+        details: {
+          context_type: 'front',
+          channel_id: 'admin-web',
+          session_id: sessionId,
+        },
+      })
+      const context = await this.contextAssembler.assembleFrontContext(
+        {
+          channel_id: 'admin-web',
+          session_id: sessionId,
+          sender_id: 'master',
+          message: message.content.text ?? '',
+          friend_id: message.sender.friend_id ?? 'master',
+        },
+        {
+          id: 'master',
+          display_name: 'Master',
+          permission: 'master',
+          channel_identities: [],
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        masterMemPerms
+      )
+      this.traceStore.endSpan(trace.trace_id, ctxSpan.span_id, 'completed')
+
+      // 构建 TraceCallback
+      const traceCallback = this.buildTraceCallback(trace.trace_id)
+
+      // 调用 Front Agent
+      const result = await this.frontHandler.handleMessage({
+        messages: [message],
+        context,
+      }, traceCallback)
+
+      // 分发决策（使用 Admin Chat 回调）
+      const taskIds: TaskId[] = []
+      const decisionTypes: string[] = []
+
+      for (const decision of result.decisions) {
+        decisionTypes.push(decision.type)
+
+        // 记录 decision span
+        const decisionSpan = this.traceStore.startSpan(trace.trace_id, {
+          type: 'decision',
+          details: {
+            decision_type: decision.type,
+            summary: decision.type === 'direct_reply'
+              ? (decision.reply.text ?? '').slice(0, 100)
+              : decision.type === 'create_task'
+              ? decision.task_title
+              : `task_id: ${decision.task_id}`,
+          },
+        })
+
+        const dispatchResult = await this.decisionDispatcher.dispatch(decision, {
+          channel_id: 'admin-web',
+          session_id: sessionId,
+          message,
+          memoryPermissions: masterMemPerms,
+          admin_chat_callback: callbackInfo,
+        })
+
+        this.traceStore.endSpan(trace.trace_id, decisionSpan.span_id, 'completed')
+
+        if (dispatchResult.task_id) {
+          taskIds.push(dispatchResult.task_id)
+        }
+      }
+
+      // 写入短期记忆（带 span 追踪耗时）
+      if (message.content.text) {
+        const agentReply = this.extractReplyText(result.decisions)
+        if (agentReply) {
+          const memSpan = this.traceStore.startSpan(trace.trace_id, {
+            type: 'memory_write',
+            details: {
+              friend_id: message.sender.friend_id ?? 'master',
+              channel_id: 'admin-web',
+            },
+          })
+          await this.memoryWriter.writeConversation({
+            friend_id: message.sender.friend_id ?? 'master',
+            channel_id: 'admin-web',
+            session_id: sessionId,
+            sender_name: 'Master',
+            user_message: message.content.text,
+            agent_reply: agentReply,
+            visibility: masterMemPerms.write_visibility,
+            scopes: masterMemPerms.write_scopes,
+          })
+          this.traceStore.endSpan(trace.trace_id, memSpan.span_id, 'completed')
+        }
+      }
+
+      this.traceStore.endTrace(trace.trace_id, 'completed', {
+        summary: this.extractReplyText(result.decisions)?.slice(0, 200) ?? 'completed',
+      })
+
+      return {
+        decision_types: decisionTypes,
+        task_ids: taskIds.length > 0 ? taskIds : undefined,
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      this.traceStore.endTrace(trace.trace_id, 'failed', { summary: msg, error: msg })
+      throw error
+    } finally {
+      this.switchmapHandler.completeRequest(sessionId, requestId)
+    }
+  }
+
+  private async handleCreateTaskFromSchedule(params: {
+    schedule_id: string
+    task_type: string
+    title: string
+    description: string
+    preferred_worker_specialization?: string
+  }): Promise<{ task_id: string; assigned_worker: ModuleId }> {
+    const { schedule_id, task_type, title, description, preferred_worker_specialization } = params
+
+    try {
+      // 选择 Worker
+      const workerId = await this.workerSelector.selectWorker({
+        task_type,
+        specialization_hint: preferred_worker_specialization,
+      })
+
+      // 创建任务
+      const adminPort = await this.getAdminPort()
+      const taskResult = await this.rpcClient.call<
+        {
+          title: string
+          description: string
+          task_type: string
+          assigned_worker: string
+          source: { origin: string; source_module_id: string }
+          refs?: { schedule_id: string }
+        },
+        { task_id: string }
+      >(
+        adminPort,
+        'create_task',
+        {
+          title,
+          description,
+          task_type,
+          assigned_worker: workerId,
+          source: {
+            origin: 'system',
+            source_module_id: this.config.moduleId,
+          },
+          refs: { schedule_id },
+        },
+        this.config.moduleId
+      )
+
+      console.log(
+        `[${this.config.moduleId}] Created task ${taskResult.task_id} from schedule ${schedule_id}, assigned to ${workerId}`
+      )
+
+      return { task_id: taskResult.task_id, assigned_worker: workerId }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(
+        `[${this.config.moduleId}] Failed to create task from schedule ${schedule_id}:`,
+        message
+      )
+      throw new Error(`Failed to create task from schedule: ${message}`)
+    }
+  }
+
+  private handleGetRole(): {
+    roles: string[]
+    specialization: string
+    supported_task_types: string[]
+    max_concurrent_tasks: number
+  } {
+    return {
+      roles: Array.from(this.roles),
+      specialization: this.agentConfig?.specialization ?? 'general',
+      supported_task_types: this.agentConfig?.supported_task_types ?? [],
+      max_concurrent_tasks: this.agentConfig?.max_concurrent_tasks ?? 5,
+    }
+  }
+
+  /**
+   * 返回模块需要的 LLM 配置需求
+   */
+  private handleGetLLMRequirements(): {
+    model_format: string
+    requirements: LLMRoleRequirement[]
+  } {
+    return {
+      model_format: 'anthropic',
+      requirements: [
+        {
+          key: 'default',
+          description: '默认执行模型，Front 和 Worker 默认使用',
+          required: true,
+          used_by: ['front', 'worker'],
+        },
+        {
+          key: 'fast',
+          description: '快速响应模型，用于 Front Agent 快速分诊（可选）',
+          required: false,
+          used_by: ['front'],
+        },
+        {
+          key: 'smart',
+          description: '深度推理模型，用于 Worker Agent 复杂任务（可选）',
+          required: false,
+          used_by: ['worker'],
+        },
+      ],
+    }
+  }
+
+  private async handleGetStatus(): Promise<{
+    roles: string[]
+    idle: boolean
+    processing_messages: number
+    active_sessions: number
+    current_task_count: number
+    available_capacity: number
+    specialization: string
+    supported_task_types: string[]
+  }> {
+    const maxCapacity = this.agentConfig?.max_concurrent_tasks ?? 5
+    const currentTaskCount = this.workerHandler?.getActiveTaskCount() ?? 0
+
+    return {
+      roles: Array.from(this.roles),
+      idle: this.sessionManager.getPendingSessionCount() === 0,
+      processing_messages: this.sessionManager.getPendingSessionCount(),
+      active_sessions: this.sessionManager.getActiveSessionCount(),
+      current_task_count: currentTaskCount,
+      available_capacity: Math.max(0, (this.agentConfig?.available_capacity ?? maxCapacity) - currentTaskCount),
+      specialization: this.agentConfig?.specialization ?? 'general',
+      supported_task_types: this.agentConfig?.supported_task_types ?? ['general'],
+    }
+  }
+
+  private async handleExecuteTask(params: ExecuteTaskParams & {
+    parent_trace_id?: string
+    parent_span_id?: string
+  }): Promise<ExecuteTaskResult> {
+    if (!this.workerHandler) {
+      throw new Error('Worker handler not configured')
+    }
+
+    const { parent_trace_id, parent_span_id, ...taskParams } = params
+
+    // 更新 sandbox 路径映射（crab-messaging send_message 需要路径转换）
+    this.sandboxPathMappingsRef.current = taskParams.context.sandbox_path_mappings ?? []
+
+    // 创建 Trace
+    const trace = this.traceStore.startTrace({
+      module_id: this.config.moduleId,
+      trigger: {
+        type: 'task',
+        summary: taskParams.task.task_title.slice(0, 200),
+        source: taskParams.context.task_origin?.channel_id,
+      },
+      parent_trace_id,
+      parent_span_id,
+    })
+
+    const traceCallback = this.buildTraceCallback(trace.trace_id)
+
+    try {
+      const result = await this.workerHandler.executeTask(taskParams, traceCallback)
+      this.traceStore.endTrace(trace.trace_id, result.outcome === 'completed' ? 'completed' : 'failed', {
+        summary: result.summary.slice(0, 200),
+        error: result.outcome === 'failed' ? result.summary : undefined,
+      })
+      return result
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      this.traceStore.endTrace(trace.trace_id, 'failed', { summary: msg, error: msg })
+      throw error
+    }
+  }
+
+  private handleDeliverHumanResponse(params: {
+    task_id: TaskId
+    messages: ChannelMessage[]
+  }): DeliverHumanResponseResult {
+    if (!this.workerHandler) {
+      throw new Error('Worker handler not configured')
+    }
+
+    this.workerHandler.deliverHumanResponse(params.task_id, params.messages)
+    return { received: true, task_status: 'executing' }
+  }
+
+  private handleCancelTask(params: { task_id: TaskId; reason: string }): { cancelled: true } {
+    if (!this.workerHandler) {
+      throw new Error('Worker handler not configured')
+    }
+
+    this.workerHandler.cancelTask(params.task_id, params.reason)
+    return { cancelled: true }
+  }
+
+  // ============================================================================
+  // 配置管理
+  // ============================================================================
+
+  /**
+   * 获取当前配置
+   */
+  private handleGetConfig(): GetConfigResult {
+    if (!this.agentConfig) {
+      throw new Error('Agent config not configured')
+    }
+
+    return {
+      config: this.agentConfig,
+    }
+  }
+
+  /**
+   * 热更新配置
+   */
+  private async handleUpdateConfig(params: UpdateConfigParams): Promise<UpdateConfigResult> {
+    if (!this.agentConfig) {
+      throw new Error('Agent config not configured')
+    }
+
+    const changedFields: string[] = []
+    let restartRequired = false
+
+    // 更新模型配置（需要热更新 LLM 客户端）
+    if (params.model_config) {
+      this.agentConfig.model_config = {
+        ...this.agentConfig.model_config,
+        ...params.model_config,
+      }
+      changedFields.push('model_config')
+
+      // 热更新 LLM 客户端
+      await this.updateLlmClients(params.model_config)
+    }
+
+    // 更新系统提示词（需要重启才能生效）
+    if (params.system_prompt !== undefined) {
+      this.agentConfig.system_prompt = params.system_prompt
+      changedFields.push('system_prompt')
+      restartRequired = true
+    }
+
+    // 更新 MCP Servers（需要重启才能生效）
+    if (params.mcp_servers !== undefined) {
+      this.agentConfig.mcp_servers = params.mcp_servers
+      changedFields.push('mcp_servers')
+      restartRequired = true
+    }
+
+    // 更新 Skills（需要重启才能生效）
+    if (params.skills !== undefined) {
+      this.agentConfig.skills = params.skills
+      changedFields.push('skills')
+      restartRequired = true
+    }
+
+    // 更新最大迭代次数
+    if (params.max_iterations !== undefined) {
+      this.agentConfig.max_iterations = params.max_iterations
+      changedFields.push('max_iterations')
+      // FrontHandler 和 WorkerHandler 的 max_iterations 在构造时设置
+      // 更新后需要重新创建 Handler 或重启
+      restartRequired = true
+    }
+
+    console.log(`[${this.config.moduleId}] Config updated: ${changedFields.join(', ')}`)
+    if (restartRequired) {
+      console.log(`[${this.config.moduleId}] Restart required for changes to take effect`)
+    }
+
+    return {
+      restart_required: restartRequired,
+      config: this.agentConfig,
+      changed_fields: changedFields,
+    }
+  }
+
+  /**
+   * 热更新 LLM 客户端
+   */
+  private async updateLlmClients(modelConfig: Record<string, LLMConnectionInfo>): Promise<void> {
+    const personalityPrompt = this.enhanceSystemPrompt(
+      this.agentConfig?.system_prompt ?? '',
+      this.agentConfig?.skills
+    )
+
+    // MCP config factory: creates fresh McpServer instances per runSdk() call
+    const externalMcpConfigs = this.buildExternalMcpConfigs(this.agentConfig?.mcp_servers)
+    const createMcpConfigs = (): Record<string, SdkMcpServerConfig> => ({
+      'crab-messaging': createCrabMessagingServer({
+        rpcClient: this.rpcClient,
+        moduleId: this.config.moduleId,
+        getAdminPort: () => this.getAdminPort(),
+        resolveChannelPort: (channelId) => this.getChannelPort(channelId),
+      }, this.sandboxPathMappingsRef) as unknown as SdkMcpServerConfig,
+      ...externalMcpConfigs,
+    })
+
+    // 更新 Front Agent
+    if (this.roles.has('front') && this.frontHandler) {
+      const frontConfig = modelConfig.fast ?? modelConfig.default
+      if (frontConfig) {
+        this.sdkEnvFront = this.buildSdkEnv(frontConfig)
+        this.frontHandler = new FrontHandler(this.sdkEnvFront, {
+          personalityPrompt: personalityPrompt || undefined,
+          maxIterations: this.agentConfig?.max_iterations ?? 3,
+          timeout: this.orchestrationConfig.front_agent_timeout * 1000,
+        }, createMcpConfigs)
+        console.log(`[${this.config.moduleId}] Front Agent SDK env updated`)
+      }
+    }
+
+    // 更新 Worker Agent
+    if (this.roles.has('worker') && this.workerHandler) {
+      const workerConfig = modelConfig.smart ?? modelConfig.default
+      if (workerConfig) {
+        this.sdkEnvWorker = this.buildSdkEnv(workerConfig)
+        this.workerHandler = new WorkerHandler(this.sdkEnvWorker, {
+          personalityPrompt: personalityPrompt || undefined,
+          maxIterations: this.agentConfig?.max_iterations ?? 20,
+        }, createMcpConfigs)
+        console.log(`[${this.config.moduleId}] Worker Agent SDK env updated`)
+      }
+    }
+  }
+
+  // ============================================================================
+  // Trace 辅助方法
+  // ============================================================================
+
+  /**
+   * 构建 TraceCallback，用于向 TraceStore 写入 Span
+   */
+  private buildTraceCallback(traceId: string): TraceCallback {
+    const store = this.traceStore
+    // 闭包追踪父 span ID，用于建立 llm_call / tool_call 的父子关系
+    let currentLoopSpanId: string | undefined
+    let currentLlmSpanId: string | undefined
+
+    return {
+      onLoopStart(loopLabel?: string, initData?: {
+        system_prompt?: string
+        model?: string
+        tools?: string[]
+        mcp_servers?: Array<{ name: string; status: string }>
+        skills?: string[]
+      }): string {
+        const span = store.startSpan(traceId, {
+          type: 'agent_loop',
+          details: {
+            loop_label: loopLabel,
+            ...(initData ?? {}),
+          },
+        })
+        currentLoopSpanId = span.span_id
+        return span.span_id
+      },
+
+      onLoopEnd(spanId: string, status: 'completed' | 'failed', iterationCount: number): void {
+        store.endSpan(traceId, spanId, status, { iteration_count: iterationCount } as Partial<import('./types.js').AgentLoopDetails>)
+        if (currentLoopSpanId === spanId) currentLoopSpanId = undefined
+      },
+
+      onLlmCallStart(iteration: number, inputSummary: string, attempt?: number): string {
+        const span = store.startSpan(traceId, {
+          type: 'llm_call',
+          parent_span_id: currentLoopSpanId,
+          details: { iteration, attempt, input_summary: inputSummary },
+        })
+        currentLlmSpanId = span.span_id
+        return span.span_id
+      },
+
+      onLlmCallEnd(spanId: string, result: { stopReason?: string; outputSummary?: string; toolCallsCount?: number }): void {
+        store.endSpan(traceId, spanId, 'completed', {
+          stop_reason: result.stopReason,
+          output_summary: result.outputSummary,
+          tool_calls_count: result.toolCallsCount,
+        } as Partial<import('./types.js').LlmCallDetails>)
+        if (currentLlmSpanId === spanId) currentLlmSpanId = undefined
+      },
+
+      onToolCallStart(toolName: string, inputSummary: string): string {
+        const span = store.startSpan(traceId, {
+          type: 'tool_call',
+          parent_span_id: currentLlmSpanId,
+          details: { tool_name: toolName, input_summary: inputSummary },
+        })
+        return span.span_id
+      },
+
+      onToolCallEnd(spanId: string, outputSummary: string, error?: string): void {
+        store.endSpan(traceId, spanId, error ? 'failed' : 'completed', {
+          output_summary: outputSummary,
+          error,
+        } as Partial<import('./types.js').ToolCallDetails>)
+      },
+    }
+  }
+
+  // ============================================================================
+  // Trace RPC 方法
+  // ============================================================================
+
+  private handleGetTraces(params: { limit?: number; offset?: number; status?: string }): { traces: import('./types.js').AgentTrace[]; total: number } {
+    return this.traceStore.getTraces(params.limit, params.offset, params.status)
+  }
+
+  private handleGetTrace(params: { trace_id: string }): { trace: import('./types.js').AgentTrace } {
+    const trace = this.traceStore.getTrace(params.trace_id)
+    if (!trace) {
+      throw new Error(`Trace not found: ${params.trace_id}`)
+    }
+    return { trace }
+  }
+
+  private handleClearTraces(params: { before?: string; trace_ids?: string[] }): { cleared_count: number } {
+    const count = this.traceStore.clearTraces(params.before, params.trace_ids)
+    return { cleared_count: count }
+  }
+
+  // ============================================================================
+  // 健康检查
+  // ============================================================================
+
+  protected override async getHealthDetails(): Promise<Record<string, unknown>> {
+    return {
+      roles: Array.from(this.roles),
+      idle: this.sessionManager.getPendingSessionCount() === 0,
+      processing_messages: this.sessionManager.getPendingSessionCount(),
+      active_sessions: this.sessionManager.getActiveSessionCount(),
+      current_task_count: this.workerHandler?.getActiveTaskCount() ?? 0,
+      sdk_status: (this.sdkEnvFront || this.sdkEnvWorker) ? 'ready' : 'not_configured',
+      mcp_servers_count: this.mcpManager?.count ?? 0,
+    }
+  }
+
+  // ============================================================================
+  // 端口解析
+  // ============================================================================
+
+  private async getAdminPort(): Promise<number> {
+    if (this.adminPort === undefined) {
+      const modules = await this.rpcClient.resolve({ module_type: 'admin' }, this.config.moduleId)
+      this.adminPort = modules[0]?.port ?? 3000
+    }
+    return this.adminPort
+  }
+
+  private async getMemoryPort(): Promise<number> {
+    if (this.memoryPort === undefined) {
+      const modules = await this.rpcClient.resolve({ module_type: 'memory' }, this.config.moduleId)
+      this.memoryPort = modules[0]?.port ?? 19002
+    }
+    return this.memoryPort
+  }
+
+  private async getChannelPort(channelId: ModuleId): Promise<number> {
+    let port = this.channelPorts.get(channelId)
+    if (port === undefined) {
+      const modules = await this.rpcClient.resolve({ module_id: channelId }, this.config.moduleId)
+      port = modules[0]?.port ?? 0
+      this.channelPorts.set(channelId, port)
+    }
+    return port
+  }
+
+  // ============================================================================
+  // 生命周期
+  // ============================================================================
+
+  protected override async onStart(): Promise<void> {
+    this.sessionManager.startCleanup()
+
+    // MCP Servers 现在由 SDK 管理连接，这里只做日志记录
+    if (this.agentConfig?.mcp_servers && this.agentConfig.mcp_servers.length > 0) {
+      console.log(
+        `[${this.config.moduleId}] ${this.agentConfig.mcp_servers.length} MCP server(s) configured, will be managed by SDK`
+      )
+    }
+  }
+
+  protected override async onStop(): Promise<void> {
+    this.sessionManager.stopCleanup()
+
+    // 停止 MCP Servers
+    if (this.mcpManager) {
+      await this.mcpManager.stopAll()
+    }
+  }
+}

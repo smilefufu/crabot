@@ -1,0 +1,101 @@
+"""
+Memory 模块配置
+"""
+from typing import Optional
+from pydantic import BaseModel, Field
+import os
+import yaml
+
+
+class LLMConfig(BaseModel):
+    """LLM 配置"""
+    api_key: str = ""
+    base_url: str = "https://api.openai.com/v1"
+    model: str = "gpt-4o-mini"
+    temperature: float = 0.1
+    max_retries: int = 3
+
+
+class EmbeddingConfig(BaseModel):
+    """Embedding 配置"""
+    api_key: str = ""
+    base_url: str = "https://api.openai.com/v1"
+    model: str = "text-embedding-3-small"
+    dimension: int = 1536
+
+
+class StorageConfig(BaseModel):
+    """存储配置"""
+    data_dir: str = "./data/memory"
+    lancedb_dir: str = "lancedb"
+    sqlite_file: str = "metadata.db"
+
+
+class CompressionConfig(BaseModel):
+    """压缩配置"""
+    compression_threshold: int = 100
+    compression_token_threshold: int = 50000
+    retention_window_days: int = 3
+    max_retention_days: int = 30
+    window_size: int = 20
+
+
+class RetrievalConfig(BaseModel):
+    """检索配置"""
+    semantic_top_k: int = 10
+    keyword_top_k: int = 10
+    enable_planning: bool = True
+
+
+class MemoryConfig(BaseModel):
+    """Memory 模块完整配置"""
+    module_id: str = "memory-default"
+    module_type: str = "memory"
+    version: str = "0.1.0"
+    protocol_version: str = "0.1.0"
+    port: int = 19002
+    module_manager_url: str = "http://localhost:19000"
+
+    llm: LLMConfig = Field(default_factory=LLMConfig)
+    embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
+    storage: StorageConfig = Field(default_factory=StorageConfig)
+    compression: CompressionConfig = Field(default_factory=CompressionConfig)
+    retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
+
+
+def load_config(config_path: Optional[str] = None) -> MemoryConfig:
+    """加载配置，优先级：环境变量 > 配置文件 > 默认值"""
+    config = MemoryConfig()
+
+    # 从 YAML 文件加载
+    if config_path and os.path.exists(config_path):
+        with open(config_path, "r") as f:
+            data = yaml.safe_load(f) or {}
+        config = MemoryConfig(**data)
+
+    # 环境变量覆盖关键配置
+    if v := os.environ.get("CRABOT_MEMORY_PORT"):
+        config.port = int(v)
+    # 兼容 Module Manager 注入的标准端口变量（优先级更高）
+    if v := os.environ.get("Crabot_PORT"):
+        config.port = int(v)
+    if v := os.environ.get("CRABOT_MODULE_MANAGER_URL"):
+        config.module_manager_url = v
+    if v := os.environ.get("CRABOT_LLM_API_KEY"):
+        config.llm.api_key = v
+    if v := os.environ.get("CRABOT_LLM_BASE_URL"):
+        config.llm.base_url = v
+    if v := os.environ.get("CRABOT_LLM_MODEL"):
+        config.llm.model = v
+    if v := os.environ.get("CRABOT_EMBEDDING_API_KEY"):
+        config.embedding.api_key = v
+    if v := os.environ.get("CRABOT_EMBEDDING_BASE_URL"):
+        config.embedding.base_url = v
+    if v := os.environ.get("CRABOT_EMBEDDING_MODEL"):
+        config.embedding.model = v
+    if v := os.environ.get("CRABOT_EMBEDDING_DIMENSION"):
+        config.embedding.dimension = int(v)
+    if v := os.environ.get("CRABOT_MEMORY_DATA_DIR"):
+        config.storage.data_dir = v
+
+    return config

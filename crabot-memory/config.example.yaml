@@ -1,0 +1,43 @@
+# Memory 模块配置示例
+
+module_id: memory-default
+module_type: memory
+version: 0.1.0
+protocol_version: 0.1.0
+port: 19002
+module_manager_url: http://localhost:19000
+
+# LLM 配置（用于压缩、去重、检索优化）
+llm:
+  api_key: ${CRABOT_LLM_API_KEY}
+  base_url: https://api.openai.com/v1
+  model: gpt-4o-mini
+  temperature: 0.1
+  max_retries: 3
+
+# Embedding 配置
+embedding:
+  api_key: ${CRABOT_EMBEDDING_API_KEY}
+  base_url: https://api.openai.com/v1
+  model: text-embedding-3-small
+  dimension: 1536
+
+# 存储配置
+storage:
+  data_dir: ./data/memory
+  lancedb_dir: lancedb
+  sqlite_file: metadata.db
+
+# 压缩配置
+compression:
+  compression_threshold: 100
+  compression_token_threshold: 50000
+  retention_window_days: 3
+  max_retention_days: 30
+  window_size: 20
+
+# 检索配置
+retrieval:
+  semantic_top_k: 10
+  keyword_top_k: 10
+  enable_planning: true

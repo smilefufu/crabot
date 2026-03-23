@@ -1,0 +1,29 @@
+{
+  "name": "crabot-channel-host",
+  "version": "0.1.0",
+  "description": "Crabot Channel Host - OpenClaw 插件兼容层（Shim）",
+  "main": "dist/main.js",
+  "bin": {
+    "openclaw": "./bin/openclaw.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/main.js"
+  },
+  "keywords": [
+    "crabot",
+    "channel",
+    "openclaw",
+    "shim"
+  ],
+  "author": "Crabot Team",
+  "license": "MIT",
+  "dependencies": {
+    "jiti": "^2.6.1",
+    "openclaw": "^2026.3.13"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.37",
+    "typescript": "^5.0.0"
+  }
+}
