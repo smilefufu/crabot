@@ -316,7 +316,7 @@ run_phase4_deps() {
   [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
   (cd "$CRABOT_HOME" && nvm use 2>/dev/null) || true
 
-  log_info "并行安装 npm 依赖（详细日志见 $ONBOARD_LOG）..."
+  log_info "并行安装 npm 依赖 (详细日志: $ONBOARD_LOG) ..."
 
   local pids=()
   local names=()
@@ -343,7 +343,11 @@ run_phase4_deps() {
     if wait "${pids[$i]}"; then
       log_success "${names[$i]}"
     else
-      log_error "${names[$i]} 安装失败（查看 $ONBOARD_LOG）"
+      log_error "${names[$i]} 安装失败:"
+      # 显示该模块日志最后 10 行，帮助用户快速定位
+      if [ -f "$ONBOARD_LOG.${names[$i]}" ]; then
+        tail -10 "$ONBOARD_LOG.${names[$i]}" | sed 's/^/    /'
+      fi
       fail=1
     fi
   done
@@ -358,15 +362,16 @@ run_phase4_deps() {
   done
 
   if [ "$fail" -eq 1 ]; then
-    log_error "部分依赖安装失败"
+    log_error "部分依赖安装失败 (完整日志: $ONBOARD_LOG)"
     exit 1
   fi
 
   # 串行安装：crabot-admin（原生模块编译，并行可能导致资源竞争）
   if [ -d "$CRABOT_HOME/crabot-admin" ]; then
-    log_info "安装 crabot-admin 依赖（含原生模块编译）..."
+    log_info "安装 crabot-admin 依赖 (含原生模块编译) ..."
     (cd "$CRABOT_HOME/crabot-admin" && npm install >> "$ONBOARD_LOG" 2>&1) || {
-      log_error "crabot-admin 安装失败（查看 $ONBOARD_LOG）"
+      log_error "crabot-admin 安装失败:"
+      tail -10 "$ONBOARD_LOG" | sed 's/^/    /'
       exit 1
     }
     log_success "crabot-admin"
@@ -376,7 +381,8 @@ run_phase4_deps() {
   if [ -d "$CRABOT_HOME/crabot-admin/web" ]; then
     log_info "安装前端依赖..."
     (cd "$CRABOT_HOME/crabot-admin/web" && npm install >> "$ONBOARD_LOG" 2>&1) || {
-      log_error "crabot-admin/web 安装失败（查看 $ONBOARD_LOG）"
+      log_error "crabot-admin/web 安装失败:"
+      tail -10 "$ONBOARD_LOG" | sed 's/^/    /'
       exit 1
     }
     log_success "crabot-admin/web"
