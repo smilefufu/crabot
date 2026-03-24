@@ -125,11 +125,15 @@ export class ChannelHost extends ModuleBase {
 
     for (const accountId of accountIds) {
       const account = plugin.resolveAccount(cfg, accountId)
+      console.log(`[ChannelHost] Starting account: ${accountId}`)
       plugin
         .startAccount({
           cfg,
           abortSignal: this.pluginAbortController.signal,
           account,
+        })
+        .then(() => {
+          console.log(`[ChannelHost] Account ${accountId} startAccount() resolved (plugin stopped or completed)`)
         })
         .catch((error: unknown) => {
           console.error(`[ChannelHost] Plugin startAccount error (${accountId}):`, error)
@@ -307,6 +311,8 @@ export class ChannelHost extends ModuleBase {
     const isGroupChat = ctx.ChatType === 'group'
     const displayName = ctx.SenderName ?? ctx.SenderUsername ?? platformUserId
 
+    console.log(`[ChannelHost] 📩 Message received: sender=${platformUserId} (${displayName}), session=${sessionId}, type=${isGroupChat ? 'group' : 'private'}, text=${(ctx.Body ?? '').slice(0, 50)}`)
+
     // 创建/更新 Session（不做 Friend 鉴权，鉴权由 Admin 负责）
     const { session } = isGroupChat
       ? this.sessionManager.upsertGroupSession({
@@ -350,6 +356,7 @@ export class ChannelHost extends ModuleBase {
     })
 
     await this.publishMessageReceivedEvent(channelMessage)
+    console.log(`[ChannelHost] 📤 Event published: channel.message_received, session.id=${session.id}`)
   }
 
   /**

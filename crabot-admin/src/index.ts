@@ -1874,6 +1874,8 @@ export class AdminModule extends ModuleBase {
     const { platform_user_id, platform_display_name } = message.sender
     const friend = this.resolveFriendByChannelIdentity(channelId, platform_user_id)
 
+    console.log(`[Admin] 📩 handleChannelMessage: channel=${channelId}, sender=${platform_user_id} (${platform_display_name}), friend=${friend ? friend.id : 'NOT_FOUND'}, sessionType=${message.session.type}`)
+
     if (friend) {
       // 已知 Friend：填充 friend_id，发出授权事件
       const authorizedMessage: ChannelMessageRef = {
@@ -1902,6 +1904,7 @@ export class AdminModule extends ModuleBase {
         await this.publishMessageAuthorizedEvent(channelId, message, guestFriend)
       }
       // 无 Master 在此 Channel → 静默丢弃
+      console.log(`[Admin] ⚠️ Group message from unknown sender dropped: no master on channel ${channelId}`)
       return
     }
 
@@ -1919,6 +1922,7 @@ export class AdminModule extends ModuleBase {
       console.log(`[Admin] Upserted pending message (${intent}) for unknown sender: ${platform_user_id} (${platform_display_name})`)
     }
     // 其他私聊陌生人消息静默丢弃
+    console.log(`[Admin] ⚠️ Private message from unknown sender dropped (not /pair or /apply): ${platform_user_id}, text="${(message.content.text ?? '').slice(0, 30)}"`)
   }
 
   /**
