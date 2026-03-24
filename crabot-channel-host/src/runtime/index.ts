@@ -19,7 +19,8 @@ import { runtimeStubs } from './stubs.js'
 
 export function createChannelRuntime(
   pendingDispatches: PendingDispatchMap,
-  onMessageReceived: (ctx: MsgContext, sessionId: string) => Promise<void>
+  onMessageReceived: (ctx: MsgContext, sessionId: string) => Promise<void>,
+  pluginConfig?: unknown
 ): unknown {
   const reply = createReplyRuntime(pendingDispatches, onMessageReceived)
 
@@ -45,6 +46,10 @@ export function createChannelRuntime(
       imessage: runtimeStubs.imessage,
       whatsapp: runtimeStubs.whatsapp,
       line: runtimeStubs.line,
+    },
+    // 插件配置加载（feishu 插件通过 LarkClient.runtime.config.loadConfig() 访问）
+    config: {
+      loadConfig: () => pluginConfig ?? {},
     },
     subagent: runtimeStubs.subagent,
   }

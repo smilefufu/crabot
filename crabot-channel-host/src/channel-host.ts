@@ -104,7 +104,8 @@ export class ChannelHost extends ModuleBase {
     // 对于 register(api) 格式的插件，runtime 会在 register 时注入到插件单例
     const runtime = createChannelRuntime(
       this.pendingDispatches,
-      this.onMessageReceived.bind(this)
+      this.onMessageReceived.bind(this),
+      this.hostConfig.plugin_config
     )
 
     const plugin = await loadPlugin(this.hostConfig.plugin_path, runtime)
