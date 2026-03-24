@@ -175,17 +175,163 @@ function createPluginRuntimeStore(errorMessage) {
 }
 
 // ---------------------------------------------------------------------------
-// Exports
+// emptyPluginConfigSchema  (from openclaw source — plugins/config-schema.ts)
+// Returns a schema that accepts undefined or empty objects only.
 // ---------------------------------------------------------------------------
-module.exports = {
+function emptyPluginConfigSchema() {
+  return {
+    safeParse(value) {
+      if (value === undefined) return { success: true, data: undefined }
+      if (!value || typeof value !== 'object' || Array.isArray(value))
+        return { success: false, error: { issues: [{ path: [], message: 'expected config object' }] } }
+      if (Object.keys(value).length > 0)
+        return { success: false, error: { issues: [{ path: [], message: 'config must be empty' }] } }
+      return { success: true, data: value }
+    },
+    jsonSchema: { type: 'object', additionalProperties: false, properties: {} },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Constants used by channel plugins at runtime
+// ---------------------------------------------------------------------------
+const SILENT_REPLY_TOKEN = '<<SILENT>>'
+const PAIRING_APPROVED_MESSAGE = 'Pairing approved! You can now send messages.'
+const DEFAULT_GROUP_HISTORY_LIMIT = 50
+
+// ---------------------------------------------------------------------------
+// Utility functions used by channel plugins
+// ---------------------------------------------------------------------------
+function readStringParam(params, key, _opts) {
+  if (!params || typeof params !== 'object') return undefined
+  const val = params[key]
+  return typeof val === 'string' ? val : undefined
+}
+
+function readNumberParam(params, key) {
+  if (!params || typeof params !== 'object') return undefined
+  const val = Number(params[key])
+  return Number.isFinite(val) ? val : undefined
+}
+
+function readBooleanParam(params, key) {
+  if (!params || typeof params !== 'object') return undefined
+  const val = params[key]
+  if (typeof val === 'boolean') return val
+  if (val === 'true') return true
+  if (val === 'false') return false
+  return undefined
+}
+
+function readReactionParams(params) {
+  return {
+    emoji: readStringParam(params, 'emoji'),
+    messageId: readStringParam(params, 'message_id') || readStringParam(params, 'messageId'),
+  }
+}
+
+function buildRandomTempFilePath(opts) {
+  const tmpDir = resolvePreferredOpenClawTmpDir()
+  const ext = (opts && opts.extension) || ''
+  const name = 'tmp-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8) + ext
+  return path.join(tmpDir, name)
+}
+
+function formatDocsLink(pathStr, _label) {
+  return 'https://docs.openclaw.com' + (pathStr || '')
+}
+
+function isNormalizedSenderAllowed(params) {
+  const { senderId, allowFrom } = params || {}
+  if (!allowFrom || !Array.isArray(allowFrom) || allowFrom.length === 0) return true
+  if (allowFrom.includes('*')) return true
+  return allowFrom.includes(senderId)
+}
+
+function addWildcardAllowFrom(allowFrom) {
+  if (!allowFrom || !Array.isArray(allowFrom)) return ['*']
+  if (allowFrom.includes('*')) return allowFrom
+  return ['*', ...allowFrom]
+}
+
+// ---------------------------------------------------------------------------
+// Message handling stubs (no-ops in shim context; Crabot handles these)
+// ---------------------------------------------------------------------------
+function clearHistoryEntriesIfEnabled() {}
+function recordPendingHistoryEntryIfEnabled() {}
+function logTypingFailure() {}
+function logInboundDrop() {}
+function logAckFailure() {}
+
+function resolveThreadSessionKeys(params) {
+  const chatId = params.chatId || params.threadId || 'unknown'
+  return { sessionKey: chatId, historyKey: chatId }
+}
+
+function buildPendingHistoryContextFromMap() {
+  return ''
+}
+
+function createReplyPrefixContext(params) {
+  return { cfg: params?.cfg, agentId: params?.agentId, prefix: '' }
+}
+
+// resolveSenderCommandAuthorization — alias for the WithRuntime variant
+// (plugin code calls this name; stubs had the WithRuntime suffix)
+async function resolveSenderCommandAuthorization(params) {
+  return resolveSenderCommandAuthorizationWithRuntime(params)
+}
+
+// ---------------------------------------------------------------------------
+// Exports — wrapped in Proxy to prevent crashes on unknown SDK exports.
+// Known functions return real implementations; unknown ones log a warning
+// and return undefined (for constants) or a no-op function (if called).
+// ---------------------------------------------------------------------------
+const _exports = {
   buildChannelConfigSchema,
+  emptyPluginConfigSchema,
   resolvePreferredOpenClawTmpDir,
   normalizeAccountId,
   DEFAULT_ACCOUNT_ID,
+  SILENT_REPLY_TOKEN,
+  PAIRING_APPROVED_MESSAGE,
+  DEFAULT_GROUP_HISTORY_LIMIT,
   stripMarkdown,
   withFileLock,
   createTypingCallbacks,
   resolveDirectDmAuthorizationOutcome,
+  resolveSenderCommandAuthorization,
   resolveSenderCommandAuthorizationWithRuntime,
   createPluginRuntimeStore,
+  readStringParam,
+  readNumberParam,
+  readBooleanParam,
+  readReactionParams,
+  buildRandomTempFilePath,
+  formatDocsLink,
+  isNormalizedSenderAllowed,
+  addWildcardAllowFrom,
+  clearHistoryEntriesIfEnabled,
+  recordPendingHistoryEntryIfEnabled,
+  logTypingFailure,
+  logInboundDrop,
+  logAckFailure,
+  resolveThreadSessionKeys,
+  buildPendingHistoryContextFromMap,
+  createReplyPrefixContext,
 }
+
+const _warned = new Set()
+module.exports = new Proxy(_exports, {
+  get(target, prop) {
+    if (prop in target) return target[prop]
+    if (typeof prop === 'symbol') return undefined
+    if (!_warned.has(prop)) {
+      _warned.add(prop)
+      console.warn('[openclaw-stub] unknown export accessed:', prop)
+    }
+    // Return a no-op function as safety net; callers that expect a constant
+    // will get a truthy value (the function itself), which is better than undefined.
+    return function _stubbed() { return undefined }
+  },
+})
