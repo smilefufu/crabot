@@ -98,7 +98,9 @@ export async function runSdk(options: SdkRunOptions): Promise<SdkRunResult> {
   // 清除可能干扰的 auth token
   // ~/.claude/settings.json 的 env.ANTHROPIC_AUTH_TOKEN 会让 CLI 优先连 Anthropic 官方 API
   // 而非我们指定的 ANTHROPIC_BASE_URL（LiteLLM），必须显式覆盖
-  cleanEnv.ANTHROPIC_AUTH_TOKEN = ''
+  // 注意：必须用 delete 而非赋空字符串。空字符串会让 Anthropic SDK 发 "Authorization: Bearer "
+  // (空 token)，LiteLLM 1.82+ 会拒绝认证。undefined 才能让 SDK 跳过 Authorization header。
+  delete cleanEnv.ANTHROPIC_AUTH_TOKEN
   const sdkOptions: SdkOptions = {
     systemPrompt,
     model,
