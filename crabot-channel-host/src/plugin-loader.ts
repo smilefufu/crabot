@@ -137,9 +137,28 @@ export async function loadPlugin(
     })
     mod = jitiLoad(pluginPath) as Record<string, unknown>
   } else {
-    // JavaScript 插件（CJS / ESM bundle）：直接 require
+    // JavaScript 插件（CJS / ESM bundle）
+    // 从外部目录（extensions/）加载的 JS 插件内部 require('openclaw/plugin-sdk') 时，
+    // Node.js 从插件目录向上查找 node_modules，找不到 openclaw 包。
+    // 临时 hook Module._resolveFilename，将 openclaw/* 重定向到 channel-host 的 node_modules。
+    const alias = getOpenClawAlias(path.dirname(pluginPath))
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    mod = require(pluginPath) as Record<string, unknown>
+    const NodeModule = require('node:module') as { _resolveFilename: (...args: unknown[]) => string }
+    const origResolve = NodeModule._resolveFilename
+
+    NodeModule._resolveFilename = function (request: unknown, ...rest: unknown[]) {
+      if (typeof request === 'string' && alias[request]) {
+        return alias[request]
+      }
+      return origResolve.call(this, request, ...rest)
+    }
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      mod = require(pluginPath) as Record<string, unknown>
+    } finally {
+      NodeModule._resolveFilename = origResolve
+    }
   }
 
   const rawPlugin = mod.default ?? mod.plugin ?? mod
