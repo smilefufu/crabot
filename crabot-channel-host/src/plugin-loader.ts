@@ -41,9 +41,13 @@ export interface LoadedPlugin {
  * jiti 默认无法找到 openclaw 的 peer dep。通过显式 alias 将每个子路径指向本模块
  * 已安装的 openclaw dist 文件，绕过 exports 字段解析问题。
  *
+ * 当 openclaw 包不可用时（部署环境），fallback 到 openclaw-stubs/ 的轻量 stub。
+ *
  * 例：
  *   openclaw/plugin-sdk/feishu → /path/to/node_modules/openclaw/dist/plugin-sdk/feishu.js
  */
+const OPENCLAW_STUB_DIR = path.join(__dirname, '..', 'openclaw-stubs')
+
 function buildOpenClawAlias(pluginDir?: string): Record<string, string> {
   let mainEntry: string
   try {
@@ -55,8 +59,13 @@ function buildOpenClawAlias(pluginDir?: string): Record<string, string> {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       mainEntry = require.resolve('openclaw', { paths: [pluginDir || __dirname] })
     } catch {
-      // openclaw not available — return empty alias, plugin may still work
-      return {}
+      // openclaw not available — use lightweight stubs
+      const stubPath = path.join(OPENCLAW_STUB_DIR, 'plugin-sdk.cjs')
+      return {
+        'openclaw/plugin-sdk': stubPath,
+        'openclaw/plugin-sdk/core': stubPath,
+        'openclaw/plugin-sdk/compat': stubPath,
+      }
     }
   }
   const pkgRoot = path.resolve(path.dirname(mainEntry), '..')  // .../openclaw/

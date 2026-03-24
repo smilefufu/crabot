@@ -225,6 +225,8 @@ function handlePluginsList() {
  * 将 openclaw 包的 exports 字段展开为 jiti alias map。
  * CommonJS 版本，从 plugin-loader.ts 提取。
  */
+const OPENCLAW_STUB_DIR = path.join(__dirname, '..', 'openclaw-stubs')
+
 function buildOpenClawAlias(pluginDir) {
   let mainEntry
   try {
@@ -234,8 +236,13 @@ function buildOpenClawAlias(pluginDir) {
     try {
       mainEntry = require.resolve('openclaw', { paths: [pluginDir || __dirname] })
     } catch {
-      // openclaw not available — return empty alias, plugin may still work
-      return {}
+      // openclaw not available — use lightweight stubs
+      const stubPath = path.join(OPENCLAW_STUB_DIR, 'plugin-sdk.cjs')
+      return {
+        'openclaw/plugin-sdk': stubPath,
+        'openclaw/plugin-sdk/core': stubPath,
+        'openclaw/plugin-sdk/compat': stubPath,
+      }
     }
   }
   const pkgRoot = path.resolve(path.dirname(mainEntry), '..')
