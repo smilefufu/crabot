@@ -120,46 +120,21 @@ export async function loadPlugin(
 ): Promise<LoadedPlugin> {
   let mod: Record<string, unknown>
 
-  const ext = path.extname(pluginPath).toLowerCase()
-  const isTs = ext === '.ts' || ext === '.mts' || ext === '.cts'
-
-  if (isTs) {
-    // TypeScript 插件（如 @openclaw/feishu）：用 jiti 在运行时转译加载
-    // OPENCLAW_ALIAS 确保无论插件在哪个目录，openclaw/plugin-sdk/* 都能正确解析
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { createJiti } = require('jiti') as {
-      createJiti: (root: string, opts?: Record<string, unknown>) => (id: string) => unknown
-    }
-    const jitiLoad = createJiti(pluginPath, {
-      interopDefault: true,
-      moduleCache: false,
-      alias: getOpenClawAlias(path.dirname(pluginPath)),
-    })
-    mod = jitiLoad(pluginPath) as Record<string, unknown>
-  } else {
-    // JavaScript 插件（CJS / ESM bundle）
-    // 从外部目录（extensions/）加载的 JS 插件内部 require('openclaw/plugin-sdk') 时，
-    // Node.js 从插件目录向上查找 node_modules，找不到 openclaw 包。
-    // 临时 hook Module._resolveFilename，将 openclaw/* 重定向到 channel-host 的 node_modules。
-    const alias = getOpenClawAlias(path.dirname(pluginPath))
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const NodeModule = require('node:module') as { _resolveFilename: (...args: unknown[]) => string }
-    const origResolve = NodeModule._resolveFilename
-
-    NodeModule._resolveFilename = function (request: unknown, ...rest: unknown[]) {
-      if (typeof request === 'string' && alias[request]) {
-        return alias[request]
-      }
-      return origResolve.call(this, request, ...rest)
-    }
-
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      mod = require(pluginPath) as Record<string, unknown>
-    } finally {
-      NodeModule._resolveFilename = origResolve
-    }
+  // 统一用 jiti 加载所有插件（TS / CJS / ESM）：
+  // - TS 插件需要运行时转译
+  // - 外部目录的 JS 插件需要 alias 解析 openclaw/plugin-sdk
+  // - 混合 CJS/ESM 的 JS 插件（如 extensions/openclaw-lark）用 require() 会报
+  //   "exports is not defined in ES module scope"，jiti 能正确处理
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { createJiti } = require('jiti') as {
+    createJiti: (root: string, opts?: Record<string, unknown>) => (id: string) => unknown
   }
+  const jitiLoad = createJiti(pluginPath, {
+    interopDefault: true,
+    moduleCache: false,
+    alias: getOpenClawAlias(path.dirname(pluginPath)),
+  })
+  mod = jitiLoad(pluginPath) as Record<string, unknown>
 
   const rawPlugin = mod.default ?? mod.plugin ?? mod
 
