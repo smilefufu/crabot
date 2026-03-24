@@ -234,11 +234,13 @@ function loadRegisterFormat(
     registerCli: () => {},
     registerTool: () => {},
     registerConfig: () => {},
+    registerCommand: () => {},
     registerApp: () => {},
     registerAgent: () => {},
     registerSubagent: () => {},
     setStatus: () => {},
     on: () => {},
+    config: {},
     logger: {
       debug: (msg: string) => console.debug('[Plugin]', msg),
       info: (msg: string) => console.log('[Plugin]', msg),
