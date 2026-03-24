@@ -238,6 +238,7 @@ function loadRegisterFormat(
     registerAgent: () => {},
     registerSubagent: () => {},
     setStatus: () => {},
+    on: () => {},
     logger: {
       debug: (msg: string) => console.debug('[Plugin]', msg),
       info: (msg: string) => console.log('[Plugin]', msg),
