@@ -131,18 +131,32 @@ function resolveDirectDmAuthorizationOutcome(params) {
 
 // ---------------------------------------------------------------------------
 // resolveSenderCommandAuthorizationWithRuntime
-// (In Crabot shim context, pairing stub returns ['*'] — all senders allowed)
+// In Crabot shim context, Admin handles authorization — plugin-level auth
+// must be a pass-through. The caller destructures { senderAllowedForCommands,
+// commandAuthorized } so we MUST return those fields (not just { authorized }).
 // ---------------------------------------------------------------------------
 async function resolveSenderCommandAuthorizationWithRuntime(params) {
-  // Delegate to runtime authorizers if available, otherwise allow
-  if (params.runtime?.shouldComputeCommandAuthorized) {
-    const shouldCompute = await params.runtime.shouldComputeCommandAuthorized(params)
-    if (!shouldCompute) return { authorized: true }
+  // Read the allow-from store (pairing list) if provided
+  const storeAllowFrom = params.readAllowFromStore
+    ? await params.readAllowFromStore().catch(() => [])
+    : []
+  const effectiveAllowFrom = [...(params.configuredAllowFrom || []), ...storeAllowFrom]
+
+  // Determine if sender is allowed: empty list = open, '*' = wildcard, or exact match
+  let senderAllowedForCommands = true
+  if (effectiveAllowFrom.length > 0 && params.isSenderAllowed) {
+    senderAllowedForCommands =
+      effectiveAllowFrom.includes('*') ||
+      params.isSenderAllowed(params.senderId, effectiveAllowFrom)
   }
-  if (params.runtime?.resolveCommandAuthorizedFromAuthorizers) {
-    return await params.runtime.resolveCommandAuthorizedFromAuthorizers(params)
+
+  return {
+    senderAllowedForCommands,
+    commandAuthorized: undefined,
+    effectiveAllowFrom,
+    effectiveGroupAllowFrom: params.configuredGroupAllowFrom || [],
+    shouldComputeAuth: false,
   }
-  return { authorized: true }
 }
 
 // ---------------------------------------------------------------------------
