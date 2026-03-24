@@ -192,7 +192,7 @@ export class ModelProviderManager {
       if (pid && mid) keys.add(`${pid}::${mid}`)
     }
 
-    // GlobalModelConfig
+    // GlobalModelConfig（全局默认是所有 Agent 的 fallback，必须加载）
     add(this.globalConfig.default_llm_provider_id, this.globalConfig.default_llm_model_id)
     add(this.globalConfig.default_embedding_provider_id, this.globalConfig.default_embedding_model_id)
 

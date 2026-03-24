@@ -95,8 +95,10 @@ export async function runSdk(options: SdkRunOptions): Promise<SdkRunResult> {
   const claudePath = findClaudeCodePath()
   log(`claudePath: ${claudePath ?? 'NOT FOUND'}`)
   const cleanEnv = { ...process.env, ...env } as Record<string, string | undefined>
-  // 清除可能干扰的 auth token（SDK 优先用 AUTH_TOKEN 连 Anthropic 官方 API）
-  delete cleanEnv.ANTHROPIC_AUTH_TOKEN
+  // 清除可能干扰的 auth token
+  // ~/.claude/settings.json 的 env.ANTHROPIC_AUTH_TOKEN 会让 CLI 优先连 Anthropic 官方 API
+  // 而非我们指定的 ANTHROPIC_BASE_URL（LiteLLM），必须显式覆盖
+  cleanEnv.ANTHROPIC_AUTH_TOKEN = ''
   const sdkOptions: SdkOptions = {
     systemPrompt,
     model,
