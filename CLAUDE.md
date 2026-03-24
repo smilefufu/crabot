@@ -105,6 +105,59 @@ Agent (Anthropic SDK) → LiteLLM (port 4000) → Provider (Ollama/OpenAI/etc)
 - **endpoint 包含 /v1**：Anthropic SDK 的 baseURL 不应含 /v1，否则请求变成 `/v1/v1/messages` → 404
 - **LiteLLM 模型名不匹配**：Agent 必须使用 LiteLLM 注册的模型名（如 `provider-bdbf737d-qwen35-cloud`），不是原始模型名（如 `qwen3.5:cloud`）
 
+## 模块配置架构（必须理解，反复踩坑的重灾区）
+
+### 核心原则（详见 protocol-admin.md §3.19）
+
+**Admin Web 是唯一的配置入口。配置存储引用（provider_id + model_id），不存快照（endpoint, apikey）。Admin 实时解析引用为连接信息。**
+
+### 配置层级
+
+```
+第一层：全局默认（Admin 全局设置页面）
+  → default_llm_provider_id + default_llm_model_id
+  → default_embedding_provider_id + default_embedding_model_id
+
+第二层：Agent 实例 slot 配置（Admin Agent 配置页面）
+  → models: { "default": { provider_id, model_id }, "smart": { ... }, "fast": { ... } }
+  → 每个 slot 存储 provider_id + model_id（引用）
+```
+
+### 解析逻辑（handleGetAgentConfig）
+
+```
+对于 Agent 声明的每个 model slot：
+  1. 如果 Agent 实例配置了此 slot → 用 buildConnectionInfo(provider_id, model_id) 实时解析
+  2. 如果没配 → 用全局默认的 provider_id + model_id 实时解析
+  3. 都没有 → 报错
+
+buildConnectionInfo 的职责：
+  provider_id + model_id → 查 Provider 列表 → 生成 LiteLLM 路由信息
+  → 返回 { endpoint: litellm_url, apikey: litellm_key, model_id: litellm_name, format: 'anthropic' }
+```
+
+### 数据流
+
+```
+用户在 Admin UI 配置
+  → 保存到磁盘（引用格式）
+  → requestSync()（LiteLLM 模型同步）
+  → pushConfigToAgentModules()（推送到运行中的 Agent）
+
+Agent 启动 / 收到 push
+  → RPC: get_agent_config
+    → handleGetAgentConfig() 读取存储的引用 + 实时解析为连接信息
+    → 返回给 Agent
+```
+
+### 已踩过的坑（严禁重犯）
+
+- **存快照不存引用**：model_config 存了 endpoint/apikey 快照 → Provider 改了配置不生效
+- **遍历空 model_config 的 keys**：首次创建时 `model_config: {}` → 解析后也是空 → "未配置"
+- **populateModelConfig 静默失败**：首次启动时全局 LLM 未配，catch 吞掉错误
+- **三级 fallback 回退到过期数据**：provider 解析失败时回退到旧快照，导致用旧配置运行
+- **从代码反推架构**：应以 protocol-admin.md §3.19 为准，不以现有代码实现为准
+
 ## 开发环境（必须了解）
 
 ### dev.sh（推荐的开发方式）

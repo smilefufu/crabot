@@ -194,10 +194,16 @@ export interface SkillConfig {
   description?: string
 }
 
+/** 模型 slot 引用（存储格式） */
+export interface ModelSlotRef {
+  provider_id: string
+  model_id: string
+}
+
 export interface AgentInstanceConfig {
   instance_id: string
   system_prompt: string
-  model_config: Record<string, ModelConnectionInfo>
+  model_config: Record<string, ModelSlotRef>
   mcp_server_ids?: string[]
   skill_ids?: string[]
   max_iterations?: number

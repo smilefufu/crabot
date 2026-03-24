@@ -1058,14 +1058,20 @@ export interface SkillConfig {
   description?: string
 }
 
+/** 模型 slot 引用（存储格式：只存 provider_id + model_id，运行时由 Admin 实时解析为连接信息） */
+export interface ModelSlotRef {
+  provider_id: string
+  model_id: string
+}
+
 /** Agent 实例配置（存储格式：引用注册表 ID） */
 export interface AgentInstanceConfig {
   /** 实例 ID */
   instance_id: string
   /** 系统提示词 */
   system_prompt: string
-  /** 模型配置（按角色键索引，值为 LLMConnectionInfo） */
-  model_config: Record<string, LLMConnectionInfo>
+  /** 模型配置（按角色键索引，值为 ModelSlotRef 引用） */
+  model_config: Record<string, ModelSlotRef>
   /** 关联的 MCP Server ID 列表（存储格式，引用全局 MCP 注册表） */
   mcp_server_ids?: string[]
   /** 关联的 Skill ID 列表（存储格式，引用全局 Skill 注册表） */
@@ -1078,6 +1084,11 @@ export interface AgentInstanceConfig {
   max_iterations?: number
   /** 工具是否只读（Front 默认 true） */
   tools_readonly?: boolean
+}
+
+/** Agent 实例配置的解析后格式（RPC 返回给 Agent，model_config 已从引用解析为连接信息） */
+export interface ResolvedAgentConfig extends Omit<AgentInstanceConfig, 'model_config'> {
+  model_config: Record<string, LLMConnectionInfo>
 }
 
 // Agent 实现管理 API 参数类型
@@ -1163,7 +1174,7 @@ export interface GetAgentConfigResult {
 export interface UpdateAgentConfigParams {
   instance_id: string
   system_prompt?: string
-  model_config?: Record<string, LLMConnectionInfo>
+  model_config?: Record<string, ModelSlotRef>
   mcp_server_ids?: string[]
   skill_ids?: string[]
   max_iterations?: number

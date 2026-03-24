@@ -11,7 +11,7 @@ import { Loading } from '../../components/Common/Loading'
 import type {
   ModelProvider,
   LLMRoleRequirement,
-  ModelConnectionInfo,
+  ModelSlotRef,
   MCPServerRegistryEntry,
   SkillRegistryEntry,
 } from '../../types'
@@ -19,7 +19,7 @@ import { useToast } from '../../contexts/ToastContext'
 
 interface AgentUnifiedConfig {
   system_prompt: string
-  model_roles: Record<string, ModelConnectionInfo>
+  model_roles: Record<string, ModelSlotRef>
   mcp_server_ids: string[]
   skill_ids: string[]
 }
@@ -80,10 +80,9 @@ export const AgentConfig: React.FC = () => {
   const handleSave = async () => {
     try {
       setSaving(true)
-      const existingConfig = await agentService.getConfig()
       await agentService.updateConfig({
-        system_prompt: config.system_prompt || existingConfig.system_prompt,
-        model_config: { ...existingConfig.model_config, ...config.model_roles },
+        system_prompt: config.system_prompt,
+        model_config: config.model_roles,
         mcp_server_ids: config.mcp_server_ids,
         skill_ids: config.skill_ids,
       })
@@ -107,10 +106,7 @@ export const AgentConfig: React.FC = () => {
             ...prev.model_roles,
             [roleKey]: {
               provider_id: providerId,
-              endpoint: provider.endpoint,
-              apikey: provider.api_key,
               model_id: firstModel.model_id,
-              format: provider.format,
             },
           },
         }))
@@ -149,9 +145,7 @@ export const AgentConfig: React.FC = () => {
   const getSelectedProvider = (roleKey: string): ModelProvider | undefined => {
     const roleConfig = config.model_roles[roleKey]
     if (!roleConfig) return undefined
-    if (roleConfig.provider_id) return providers.find((p) => p.id === roleConfig.provider_id)
-    if (roleConfig.endpoint) return providers.find((p) => p.endpoint === roleConfig.endpoint)
-    return undefined
+    return providers.find((p) => p.id === roleConfig.provider_id)
   }
 
   const configurableRoles = llmRequirements.filter((role) => role.key !== 'default')
@@ -212,7 +206,7 @@ export const AgentConfig: React.FC = () => {
                     { value: '', label: '使用默认模型' },
                     ...providers.filter((p) => p.models.some((m) => m.type === 'llm')).map((p) => ({ value: p.id, label: p.name })),
                   ]}
-                  value={config.model_roles[role.key]?.provider_id || (config.model_roles[role.key]?.endpoint ? providers.find((p) => p.endpoint === config.model_roles[role.key]?.endpoint)?.id || '' : '')}
+                  value={config.model_roles[role.key]?.provider_id || ''}
                   onChange={(e) => {
                     if (e.target.value) {
                       handleProviderChange(role.key, e.target.value)

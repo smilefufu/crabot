@@ -18,8 +18,8 @@ import type {
   UpdateAgentConfigParams,
   ListAgentImplementationsParams,
   ListAgentInstancesParams,
+  ModelSlotRef,
 } from './types.js'
-import type { ModelProviderManager } from './model-provider-manager.js'
 
 // ============================================================================
 // 默认实现定义
@@ -95,15 +95,13 @@ export class AgentManager {
   private readonly implementationsFilePath: string
   private readonly instancesFilePath: string
   private readonly configsDir: string
-  private modelProviderManager?: ModelProviderManager
   private onConfigChangedCallback: (() => void) | null = null
 
-  constructor(dataDir: string, modelProviderManager?: ModelProviderManager) {
+  constructor(dataDir: string) {
     this.dataDir = dataDir
     this.implementationsFilePath = path.join(dataDir, 'agent-implementations.json')
     this.instancesFilePath = path.join(dataDir, 'agent-instances.json')
     this.configsDir = path.join(dataDir, 'agent-configs')
-    this.modelProviderManager = modelProviderManager
   }
 
   async initialize(): Promise<void> {
@@ -411,10 +409,8 @@ export class AgentManager {
   getUsedModels(): Array<{ provider_id: string; model_id: string }> {
     const result: Array<{ provider_id: string; model_id: string }> = []
     for (const config of this.configs.values()) {
-      for (const info of Object.values(config.model_config ?? {})) {
-        if (info.provider_id && info.model_id) {
-          result.push({ provider_id: info.provider_id, model_id: info.model_id })
-        }
+      for (const ref of Object.values(config.model_config ?? {})) {
+        result.push({ provider_id: ref.provider_id, model_id: ref.model_id })
       }
     }
     return result
@@ -468,9 +464,36 @@ export class AgentManager {
       const files = await fs.readdir(this.configsDir)
       for (const file of files) {
         if (!file.endsWith('.json')) continue
-        const data = await fs.readFile(path.join(this.configsDir, file), 'utf-8')
-        const config = JSON.parse(data) as AgentInstanceConfig
-        this.configs.set(config.instance_id, config)
+        const filePath = path.join(this.configsDir, file)
+        const data = await fs.readFile(filePath, 'utf-8')
+        const config = JSON.parse(data) as AgentInstanceConfig & { model_config?: Record<string, Record<string, unknown>> }
+
+        // 自动迁移：快照格式 → 引用格式
+        if (config.model_config) {
+          let migrated = false
+          const migratedModelConfig: Record<string, ModelSlotRef> = {}
+          for (const [key, val] of Object.entries(config.model_config)) {
+            if (val && typeof val === 'object' && 'endpoint' in val) {
+              // 旧快照格式（有 endpoint 字段）
+              if (val.provider_id && typeof val.provider_id === 'string' && typeof val.model_id === 'string') {
+                // 有 provider_id：可提取引用
+                migratedModelConfig[key] = { provider_id: val.provider_id as string, model_id: val.model_id as string }
+              }
+              // 无 provider_id（如 "default" slot 只有 LiteLLM 生成的 model_id）：丢弃，fallback 到全局默认
+              migrated = true
+            } else if (val && typeof val === 'object' && 'provider_id' in val && 'model_id' in val && !('endpoint' in val)) {
+              // 已是引用格式
+              migratedModelConfig[key] = { provider_id: val.provider_id as string, model_id: val.model_id as string }
+            }
+          }
+          ;(config as { model_config: Record<string, ModelSlotRef> }).model_config = migratedModelConfig
+          if (migrated) {
+            await this.atomicWriteFile(filePath, JSON.stringify(config, null, 2))
+            console.log(`[AgentManager] Migrated config ${file} from snapshot to ref format`)
+          }
+        }
+
+        this.configs.set(config.instance_id, config as AgentInstanceConfig)
       }
       console.log(`[AgentManager] Loaded ${this.configs.size} configs`)
     } catch {
@@ -494,30 +517,8 @@ export class AgentManager {
     // 确保 crabot-agent 配置存在
     if (!this.configs.has('crabot-agent')) {
       const config = { ...DEFAULT_AGENT_CONFIG }
-      await this.populateModelConfig(config)
       this.configs.set('crabot-agent', config)
       await this.saveConfig('crabot-agent')
-    }
-  }
-
-  private async populateModelConfig(config: AgentInstanceConfig): Promise<void> {
-    if (!this.modelProviderManager) return
-
-    try {
-      // 获取全局默认 LLM 配置
-      const modelConfig = await this.modelProviderManager.resolveModelConfig({
-        module_id: config.instance_id,
-        role: 'llm',
-      })
-
-      // 填充到 model_config 的 'default' 角色
-      config.model_config = {
-        default: modelConfig,
-      }
-
-      console.log(`[AgentManager] Populated model config for ${config.instance_id}`)
-    } catch (error) {
-      console.warn(`[AgentManager] Failed to populate model config for ${config.instance_id}:`, error)
     }
   }
 

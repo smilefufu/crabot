@@ -67,6 +67,7 @@ import {
   type AgentImplementation,
   type AgentInstance,
   type AgentInstanceConfig,
+  type ResolvedAgentConfig,
   type CreateAgentInstanceParams,
   type UpdateAgentInstanceParams,
   type UpdateAgentConfigParams,
@@ -230,7 +231,7 @@ export class AdminModule extends ModuleBase {
       litellmBaseUrl,
       litellmMasterKey
     )
-    this.agentManager = new AgentManager(this.adminConfig.data_dir, this.modelProviderManager)
+    this.agentManager = new AgentManager(this.adminConfig.data_dir)
     this.channelManager = new ChannelManager(this.adminConfig.data_dir, this.rpcClient)
     this.moduleInstaller = new ModuleInstaller(this.adminConfig.data_dir, this.agentManager)
     this.mcpServerManager = new MCPServerManager(this.adminConfig.data_dir)
@@ -2965,21 +2966,36 @@ export class AdminModule extends ModuleBase {
   // ============================================================================
 
   private async handleGetAgentConfig(params: { instance_id: string }): Promise<{
-    config: AgentInstanceConfig
+    config: ResolvedAgentConfig
   }> {
     const config = this.agentManager.getConfig(params.instance_id)
     if (!config) {
       throw new Error(`Config not found for instance: ${params.instance_id}`)
     }
 
-    // 所有 model slot 统一从全局配置实时解析，Agent 不缓存连接信息
+    // 全局默认 LLM 配置（作为 fallback）
     const globalLLM = await this.modelProviderManager.resolveModelConfig({
       module_id: params.instance_id,
       role: 'llm',
     }) as LLMConnectionInfo
+
+    // 实时解析每个 slot 引用为连接信息
     const resolvedModelConfig: Record<string, LLMConnectionInfo> = {}
-    for (const key of Object.keys(config.model_config)) {
-      resolvedModelConfig[key] = globalLLM
+    for (const [key, ref] of Object.entries(config.model_config)) {
+      try {
+        resolvedModelConfig[key] = this.modelProviderManager.buildConnectionInfo(
+          ref.provider_id, ref.model_id
+        ) as LLMConnectionInfo
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error)
+        console.warn(`[Admin] Slot "${key}" ref (${ref.provider_id}/${ref.model_id}) resolve failed: ${msg}, using global default`)
+        resolvedModelConfig[key] = globalLLM
+      }
+    }
+
+    // 确保 'default' slot 存在（如果存储中没有，用全局默认填入）
+    if (!resolvedModelConfig['default']) {
+      resolvedModelConfig['default'] = globalLLM
     }
 
     return {
@@ -4427,12 +4443,18 @@ export class AdminModule extends ModuleBase {
     res: ServerResponse
   ): Promise<void> {
     try {
-      const config = await this.handleGetAgentConfig({ instance_id: 'crabot-agent' })
+      // 返回存储的引用格式（provider_id + model_id），前端需要原始引用来渲染下拉框
+      const config = this.agentManager.getConfig('crabot-agent')
+      if (!config) {
+        res.writeHead(404, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Config not found' }))
+        return
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify(config))
+      res.end(JSON.stringify({ config }))
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
-      res.writeHead(msg.includes('not found') ? 404 : 500, { 'Content-Type': 'application/json' })
+      res.writeHead(500, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: msg }))
     }
   }
@@ -4443,7 +4465,20 @@ export class AdminModule extends ModuleBase {
   ): Promise<void> {
     try {
       const body = await this.readJsonBody<Omit<UpdateAgentConfigParams, 'instance_id'>>(req)
-      const config = await this.agentManager.updateConfig({ ...body, instance_id: 'crabot-agent' })
+
+      // 防御性提取 model_config：只保留 provider_id + model_id
+      const sanitizedBody = { ...body, instance_id: 'crabot-agent' } as UpdateAgentConfigParams
+      if (body.model_config) {
+        const sanitized: Record<string, import('./types.js').ModelSlotRef> = {}
+        for (const [key, val] of Object.entries(body.model_config)) {
+          if (val && val.provider_id && val.model_id) {
+            sanitized[key] = { provider_id: val.provider_id, model_id: val.model_id }
+          }
+        }
+        sanitizedBody.model_config = sanitized
+      }
+
+      const config = await this.agentManager.updateConfig(sanitizedBody)
       this.publishAdminEvent('admin.agent_instance_config_updated', {
         instance_id: 'crabot-agent',
         config,
