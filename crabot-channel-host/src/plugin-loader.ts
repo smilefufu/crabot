@@ -44,9 +44,21 @@ export interface LoadedPlugin {
  * 例：
  *   openclaw/plugin-sdk/feishu → /path/to/node_modules/openclaw/dist/plugin-sdk/feishu.js
  */
-function buildOpenClawAlias(): Record<string, string> {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const mainEntry: string = require.resolve('openclaw')   // .../openclaw/dist/index.js
+function buildOpenClawAlias(pluginDir?: string): Record<string, string> {
+  let mainEntry: string
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    mainEntry = require.resolve('openclaw')
+  } catch {
+    // openclaw not in channel-host's node_modules, try plugin's own node_modules
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      mainEntry = require.resolve('openclaw', { paths: [pluginDir || __dirname] })
+    } catch {
+      // openclaw not available — return empty alias, plugin may still work
+      return {}
+    }
+  }
   const pkgRoot = path.resolve(path.dirname(mainEntry), '..')  // .../openclaw/
 
   const pkgJsonPath = path.join(pkgRoot, 'package.json')
@@ -80,8 +92,14 @@ function buildOpenClawAlias(): Record<string, string> {
   return alias
 }
 
-// 模块加载时构建一次，复用
-const OPENCLAW_ALIAS = buildOpenClawAlias()
+// 模块加载时构建一次，复用（pluginDir 在此时未知，运行时按需重建）
+let OPENCLAW_ALIAS: Record<string, string> | null = null
+function getOpenClawAlias(pluginDir?: string): Record<string, string> {
+  if (OPENCLAW_ALIAS === null) {
+    OPENCLAW_ALIAS = buildOpenClawAlias(pluginDir)
+  }
+  return OPENCLAW_ALIAS
+}
 
 // ============================================================================
 // 加载函数
@@ -106,7 +124,7 @@ export async function loadPlugin(
     const jitiLoad = createJiti(pluginPath, {
       interopDefault: true,
       moduleCache: false,
-      alias: OPENCLAW_ALIAS,
+      alias: getOpenClawAlias(path.dirname(pluginPath)),
     })
     mod = jitiLoad(pluginPath) as Record<string, unknown>
   } else {

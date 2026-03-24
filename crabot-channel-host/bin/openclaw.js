@@ -225,8 +225,19 @@ function handlePluginsList() {
  * 将 openclaw 包的 exports 字段展开为 jiti alias map。
  * CommonJS 版本，从 plugin-loader.ts 提取。
  */
-function buildOpenClawAlias() {
-  const mainEntry = require.resolve('openclaw')
+function buildOpenClawAlias(pluginDir) {
+  let mainEntry
+  try {
+    mainEntry = require.resolve('openclaw')
+  } catch {
+    // openclaw not in shim's node_modules, try plugin's own node_modules
+    try {
+      mainEntry = require.resolve('openclaw', { paths: [pluginDir || __dirname] })
+    } catch {
+      // openclaw not available — return empty alias, plugin may still work
+      return {}
+    }
+  }
   const pkgRoot = path.resolve(path.dirname(mainEntry), '..')
   const pkg = JSON.parse(fs.readFileSync(path.join(pkgRoot, 'package.json'), 'utf-8'))
   const alias = { openclaw: mainEntry }
@@ -277,7 +288,7 @@ function loadPluginGateway(pluginDir) {
     const jitiLoad = createJiti(entryPath, {
       interopDefault: true,
       moduleCache: false,
-      alias: buildOpenClawAlias(),
+      alias: buildOpenClawAlias(pluginDir),
     })
     mod = jitiLoad(entryPath)
   } else {
