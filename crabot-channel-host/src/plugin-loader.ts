@@ -120,21 +120,65 @@ export async function loadPlugin(
 ): Promise<LoadedPlugin> {
   let mod: Record<string, unknown>
 
-  // 统一用 jiti 加载所有插件（TS / CJS / ESM）：
-  // - TS 插件需要运行时转译
-  // - 外部目录的 JS 插件需要 alias 解析 openclaw/plugin-sdk
-  // - 混合 CJS/ESM 的 JS 插件（如 extensions/openclaw-lark）用 require() 会报
-  //   "exports is not defined in ES module scope"，jiti 能正确处理
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { createJiti } = require('jiti') as {
-    createJiti: (root: string, opts?: Record<string, unknown>) => (id: string) => unknown
+  const ext = path.extname(pluginPath).toLowerCase()
+  const isTs = ext === '.ts' || ext === '.mts' || ext === '.cts'
+
+  if (isTs) {
+    // TypeScript 插件（如 node_modules/@openclaw/feishu）：用 jiti 运行时转译
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { createJiti } = require('jiti') as {
+      createJiti: (root: string, opts?: Record<string, unknown>) => (id: string) => unknown
+    }
+    const jitiLoad = createJiti(pluginPath, {
+      interopDefault: true,
+      moduleCache: false,
+      alias: getOpenClawAlias(path.dirname(pluginPath)),
+    })
+    mod = jitiLoad(pluginPath) as Record<string, unknown>
+  } else {
+    // JavaScript 插件（shim CLI 安装到 extensions/ 的预编译包）
+    // 两个问题需要解决：
+    // 1. 插件 require("openclaw/plugin-sdk") 但 openclaw 不在其 node_modules 里
+    //    → 用 Module._resolveFilename hook 重定向到 stubs
+    // 2. 部分文件混用 CJS exports + ESM import.meta.url（TypeScript 编译产物）
+    //    → Node.js 检测到 import.meta 后切换 ESM 加载，但 exports 在 ESM 中未定义
+    //    → 用 Module._compile hook 把 import.meta.url 替换为 CJS 等价物
+    const alias = getOpenClawAlias(path.dirname(pluginPath))
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const NodeModule = require('node:module') as {
+      _resolveFilename: (...args: unknown[]) => string
+      prototype: { _compile: (content: string, filename: string) => unknown }
+    }
+    const origResolve = NodeModule._resolveFilename
+    const origCompile = NodeModule.prototype._compile
+
+    // Hook 1: openclaw/* → stubs
+    NodeModule._resolveFilename = function (request: unknown, ...rest: unknown[]) {
+      if (typeof request === 'string' && alias[request]) {
+        return alias[request]
+      }
+      return origResolve.call(this, request, ...rest)
+    }
+
+    // Hook 2: import.meta.url → CJS __filename 等价物
+    NodeModule.prototype._compile = function (content: string, filename: string) {
+      if (content.includes('import.meta.url')) {
+        content = content.replace(
+          /import\.meta\.url/g,
+          'require("node:url").pathToFileURL(__filename).href'
+        )
+      }
+      return origCompile.call(this, content, filename)
+    }
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      mod = require(pluginPath) as Record<string, unknown>
+    } finally {
+      NodeModule._resolveFilename = origResolve
+      NodeModule.prototype._compile = origCompile
+    }
   }
-  const jitiLoad = createJiti(pluginPath, {
-    interopDefault: true,
-    moduleCache: false,
-    alias: getOpenClawAlias(path.dirname(pluginPath)),
-  })
-  mod = jitiLoad(pluginPath) as Record<string, unknown>
 
   const rawPlugin = mod.default ?? mod.plugin ?? mod
 
