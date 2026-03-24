@@ -42,6 +42,13 @@ async def main():
             print(f"Failed to register to Module Manager: {e}")
             print("Module will continue running without registration")
 
+        # 从 Admin 拉取最新配置（统一配置模式：pull 初始化 + push 更新）
+        try:
+            await module.pull_config_from_admin()
+        except Exception as e:
+            print(f"Failed to pull config from Admin: {e}")
+            print("Continuing with env-injected config")
+
         # 保持运行
         if module.server_task:
             await module.server_task

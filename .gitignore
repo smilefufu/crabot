@@ -40,4 +40,4 @@ coverage/
 htmlcov/
 
 # Claude Code (local settings, not project config)
-.claude/settings.local.json
+.claude/

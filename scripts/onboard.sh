@@ -318,12 +318,8 @@ run_phase3_env() {
 
   chmod 600 "$CRABOT_HOME/.env"
 
-  # 创建 data/admin/.env
+  # 确保 data/admin 目录存在（模块配置需要）
   mkdir -p "$DATA_DIR/admin"
-  (umask 077 && cat > "$DATA_DIR/admin/.env" << EOF
-CRABOT_ADMIN_PASSWORD=$admin_password
-EOF
-)
 
   log_success ".env 配置完成"
 }

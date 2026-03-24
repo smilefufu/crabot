@@ -55,6 +55,7 @@ class MemoryConfig(BaseModel):
     protocol_version: str = "0.1.0"
     port: int = 19002
     module_manager_url: str = "http://localhost:19000"
+    admin_endpoint: str = ""  # Admin RPC 地址，供启动时 pull 配置
 
     llm: LLMConfig = Field(default_factory=LLMConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
@@ -81,6 +82,8 @@ def load_config(config_path: Optional[str] = None) -> MemoryConfig:
         config.port = int(v)
     if v := os.environ.get("CRABOT_MODULE_MANAGER_URL"):
         config.module_manager_url = v
+    if v := os.environ.get("CRABOT_ADMIN_ENDPOINT"):
+        config.admin_endpoint = v
     if v := os.environ.get("CRABOT_LLM_API_KEY"):
         config.llm.api_key = v
     if v := os.environ.get("CRABOT_LLM_BASE_URL"):

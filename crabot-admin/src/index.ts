@@ -304,6 +304,9 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('get_agent_config', this.handleGetAgentConfig.bind(this))
     this.registerMethod('update_agent_config', this.handleUpdateAgentConfig.bind(this))
 
+    // Memory 配置管理（供 Memory 模块启动时 pull 初始配置）
+    this.registerMethod('get_memory_config', this.handleGetMemoryConfig.bind(this))
+
     // Channel 实现管理
     this.registerMethod('list_channel_implementations', this.handleListChannelImplementations.bind(this))
     this.registerMethod('get_channel_implementation', this.handleGetChannelImplementation.bind(this))
@@ -454,12 +457,32 @@ export class AdminModule extends ModuleBase {
   }
 
   protected override async onEvent(event: Event): Promise<void> {
-    // 处理订阅的事件
+    // 统一配置分发模式：
+    // 1. 模块启动时先 pull 初始化（模块调用 Admin 的 get_xxx_config RPC）
+    // 2. 运行时配置变更由 Admin push（通过 update_config RPC）
+    // 3. module_started 事件的 push 作为补充保障（覆盖 pull 与 push 之间的时间窗口）
     switch (event.type) {
-      case 'module_manager.module_started':
+      case 'module_manager.module_started': {
+        const { module_id, module_type } = event.payload as { module_id: string; module_type: string }
+        if (module_type === 'memory') {
+          console.log(`[Admin] Memory module ${module_id} started, pushing config as safety net...`)
+          this.syncGlobalConfigToMemoryModules().catch((err: Error) => {
+            console.warn(`[Admin] Failed to push config to ${module_id}:`, err.message)
+          })
+        }
+        if (module_type === 'agent') {
+          console.log(`[Admin] Agent module ${module_id} started, pushing config as safety net...`)
+          // Agent 端口可能刚注册，给一点时间让 MM 更新端口映射
+          setTimeout(() => {
+            this.pushConfigToAgentModules().catch((err: Error) => {
+              console.warn(`[Admin] Failed to push config to ${module_id}:`, err.message)
+            })
+          }, 1000)
+        }
+        break
+      }
       case 'module_manager.module_stopped':
       case 'module_manager.module_error':
-        // 可以通过 WebSocket 推送给前端
         break
 
       case 'channel.message_received': {
@@ -2787,9 +2810,12 @@ export class AdminModule extends ModuleBase {
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ config }))
 
-    // 后台推送新配置到 Memory 模块（不阻塞响应）
+    // 后台推送新配置到所有模块（不阻塞响应）
     this.syncGlobalConfigToMemoryModules().catch((err: Error) => {
       console.warn('[Admin] syncGlobalConfigToMemoryModules failed:', err.message)
+    })
+    this.pushConfigToAgentModules().catch((err: Error) => {
+      console.warn('[Admin] pushConfigToAgentModules failed:', err.message)
     })
   }
 
@@ -3872,7 +3898,44 @@ export class AdminModule extends ModuleBase {
   }
 
   /**
-   * 全局配置保存后，推送新配置到所有 Memory 模块（热更新）
+   * 构建 Memory 模块的 RPC 配置参数（LLM + Embedding 连接信息）
+   * 供 get_memory_config（模块启动 pull）和 syncGlobalConfigToMemoryModules（push）共用
+   */
+  private buildMemoryRpcConfig(): { llm?: Record<string, string>; embedding?: Record<string, string | number> } {
+    const newEnv = this.buildGlobalModelEnv()
+    const rpcParams: { llm?: Record<string, string>; embedding?: Record<string, string | number> } = {}
+    if (newEnv.CRABOT_LLM_MODEL) {
+      rpcParams.llm = {
+        api_key: newEnv.CRABOT_LLM_API_KEY ?? '',
+        base_url: newEnv.CRABOT_LLM_BASE_URL ?? '',
+        model: newEnv.CRABOT_LLM_MODEL,
+      }
+    }
+    if (newEnv.CRABOT_EMBEDDING_MODEL) {
+      rpcParams.embedding = {
+        api_key: newEnv.CRABOT_EMBEDDING_API_KEY ?? '',
+        base_url: newEnv.CRABOT_EMBEDDING_BASE_URL ?? '',
+        model: newEnv.CRABOT_EMBEDDING_MODEL,
+      }
+      if (newEnv.CRABOT_EMBEDDING_DIMENSION) {
+        rpcParams.embedding.dimension = parseInt(newEnv.CRABOT_EMBEDDING_DIMENSION, 10)
+      }
+    }
+    return rpcParams
+  }
+
+  /**
+   * Memory 模块启动时调用此 RPC 拉取初始配置（pull 初始化）
+   * 统一配置模式：模块启动 pull + 运行时 Admin push
+   */
+  private async handleGetMemoryConfig(_params: { instance_id: string }): Promise<{
+    config: { llm?: Record<string, string>; embedding?: Record<string, string | number> }
+  }> {
+    return { config: this.buildMemoryRpcConfig() }
+  }
+
+  /**
+   * 全局配置保存后，推送新配置到所有 Memory 模块（push 热更新）
    * 同时更新 module-configs 文件和内存缓存
    */
   private async syncGlobalConfigToMemoryModules(): Promise<void> {
@@ -3908,25 +3971,8 @@ export class AdminModule extends ModuleBase {
     this.moduleEnvConfigCache.set(moduleId, mergedConfig)
     this.modelProviderManager.requestSync()
 
-    // 2. 构建 RPC 参数并推送到所有运行中的 Memory 模块
-    const rpcParams: { llm?: Record<string, string>; embedding?: Record<string, string | number> } = {}
-    if (newEnv.CRABOT_LLM_MODEL) {
-      rpcParams.llm = {
-        api_key: newEnv.CRABOT_LLM_API_KEY ?? '',
-        base_url: newEnv.CRABOT_LLM_BASE_URL ?? '',
-        model: newEnv.CRABOT_LLM_MODEL,
-      }
-    }
-    if (newEnv.CRABOT_EMBEDDING_MODEL) {
-      rpcParams.embedding = {
-        api_key: newEnv.CRABOT_EMBEDDING_API_KEY ?? '',
-        base_url: newEnv.CRABOT_EMBEDDING_BASE_URL ?? '',
-        model: newEnv.CRABOT_EMBEDDING_MODEL,
-      }
-      if (newEnv.CRABOT_EMBEDDING_DIMENSION) {
-        rpcParams.embedding.dimension = parseInt(newEnv.CRABOT_EMBEDDING_DIMENSION, 10)
-      }
-    }
+    // 2. 推送到所有运行中的 Memory 模块
+    const rpcParams = this.buildMemoryRpcConfig()
 
     if (Object.keys(rpcParams).length === 0) return
 
@@ -3945,6 +3991,33 @@ export class AdminModule extends ModuleBase {
       }
     } catch {
       // Memory 模块未运行，跳过 RPC 推送
+    }
+  }
+
+  /**
+   * 全局配置保存后或 Agent 启动时，推送 model_config 到 Agent 模块（热更新）
+   * system_prompt/mcp_servers/skills 变更需要重启，不在这里推送
+   */
+  private async pushConfigToAgentModules(): Promise<void> {
+    try {
+      const port = await this.ensureAgentPort()
+      if (!port) return
+
+      // 复用 handleGetAgentConfig 的配置解析逻辑
+      const { config } = await this.handleGetAgentConfig({ instance_id: 'crabot-agent' })
+
+      // 只推送可热更新的 model_config
+      const updateParams = {
+        model_config: config.model_config,
+      }
+
+      const result = await this.rpcClient.call<typeof updateParams, { restart_required: boolean; changed_fields: string[] }>(
+        port, 'update_config', updateParams, this.config.moduleId
+      )
+      console.log(`[Admin] Agent config pushed, changed: ${result.changed_fields?.join(', ') || 'none'}`)
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.warn(`[Admin] Failed to push config to Agent:`, msg)
     }
   }
 

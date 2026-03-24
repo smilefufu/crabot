@@ -387,6 +387,36 @@ class MemoryModule:
             resp.raise_for_status()
             logger.info("Registered to Module Manager")
 
+    async def pull_config_from_admin(self):
+        """启动时从 Admin 拉取初始配置（统一配置模式：pull 初始化 + push 更新）"""
+        if not self.config.admin_endpoint:
+            logger.warning("Admin endpoint not configured, skipping config pull")
+            return
+
+        import httpx
+        url = f"{self.config.admin_endpoint}/get_memory_config"
+        payload = {
+            "id": f"pull-{datetime.utcnow().timestamp()}",
+            "source": self.config.module_id,
+            "method": "get_memory_config",
+            "params": {"instance_id": self.config.module_id},
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        }
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(url, json=payload, timeout=10.0)
+                resp.raise_for_status()
+                data = resp.json()
+                config = data.get("data", {}).get("config", {})
+                if config:
+                    result = await self._update_config(config)
+                    logger.info("Pulled initial config from Admin: %s", result.get("updated", []))
+                else:
+                    logger.info("Admin returned empty config, using env defaults")
+        except Exception as e:
+            logger.warning("Failed to pull config from Admin: %s", e)
+            logger.info("Continuing with env-injected config")
+
     async def stop(self):
         """停止模块"""
         logger.info("Stopping Memory module")

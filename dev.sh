@@ -31,7 +31,7 @@ log_dim()   { echo -e "${DIM}$1${NC}"; }
 # ── 环境变量 ──────────────────────────────────────────────
 
 load_env() {
-  for f in "$DATA_DIR/admin/.env" "$SCRIPT_DIR/.env"; do
+  for f in "$SCRIPT_DIR/.env"; do
     if [ -f "$f" ]; then
       while IFS= read -r line; do
         line="${line%%#*}"

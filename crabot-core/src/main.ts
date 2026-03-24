@@ -13,10 +13,9 @@ const ADMIN_DIR = path.join(CRABOT_ROOT, 'crabot-admin')
 const AGENT_DIR = path.join(CRABOT_ROOT, 'crabot-agent')
 const DATA_DIR = process.env.DATA_DIR || path.join(CRABOT_ROOT, 'data')
 
-// 加载环境变量文件（按优先级加载）
+// 加载环境变量文件（统一从根目录 .env 读取）
 const envFiles = [
-  path.join(DATA_DIR, 'admin', '.env'),  // data/admin/.env
-  path.join(CRABOT_ROOT, '.env'),        // 项目根目录 .env
+  path.join(CRABOT_ROOT, '.env'),
 ]
 let envLoaded = false
 for (const envFile of envFiles) {
@@ -98,6 +97,8 @@ const CORE_MODULES: Array<ModuleDefinition & Record<string, unknown>> = [
     env: {
       CRABOT_MEMORY_DATA_DIR: path.join(DATA_DIR, 'memory'),
       CRABOT_MODULE_MANAGER_URL: 'http://localhost:19000',
+      // Admin endpoint，供 Memory 模块启动时 pull 初始配置
+      CRABOT_ADMIN_ENDPOINT: 'http://localhost:19001',
       // LLM/Embedding 配置由 Admin 通过 handleStartModuleAdmin 注入
       // 空字符串表示"未配置"，Memory 模块的 is_configured() 会检测到
       CRABOT_LLM_BASE_URL: process.env.LITELLM_BASE_URL || '',
