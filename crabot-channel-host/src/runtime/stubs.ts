@@ -119,6 +119,75 @@ export const runtimeStubs = {
   subagent: {
     run: (): Promise<never> =>
       Promise.reject(new Error('subagent not implemented in Phase 1')),
+    waitForRun: async (): Promise<null> => null,
+    getSessionMessages: async (): Promise<null> => null,
+    getSession: async (): Promise<null> => null,
+    deleteSession: async (): Promise<void> => {},
+  },
+
+  // ── system ─────────────────────────────────────────────────────────────────
+  // OpenClaw 插件调用 system.enqueueSystemEvent 等方法
+  system: {
+    enqueueSystemEvent: async (): Promise<void> => {},
+    requestHeartbeatNow: (): void => undefined,
+    runCommandWithTimeout: async (): Promise<null> => null,
+    formatNativeDependencyHint: (): string => '',
+  },
+
+  // ── events ─────────────────────────────────────────────────────────────────
+  events: {
+    onAgentEvent: (): (() => void) => () => {},
+    onSessionTranscriptUpdate: (): (() => void) => () => {},
+  },
+
+  // ── logging ────────────────────────────────────────────────────────────────
+  // 飞书插件在 typing.ts 中调用 getFeishuRuntime().logging.shouldLogVerbose()
+  logging: {
+    shouldLogVerbose: (): boolean => false,
+    getChildLogger: () => ({
+      info: (msg: string) => console.log('[Plugin]', msg),
+      warn: (msg: string) => console.warn('[Plugin]', msg),
+      error: (msg: string) => console.error('[Plugin]', msg),
+      debug: (msg: string) => console.debug('[Plugin]', msg),
+    }),
+  },
+
+  // ── state ──────────────────────────────────────────────────────────────────
+  state: {
+    resolveStateDir: (): string => '/tmp/openclaw',
+  },
+
+  // ── modelAuth ──────────────────────────────────────────────────────────────
+  modelAuth: {
+    getApiKeyForModel: async (): Promise<null> => null,
+    resolveApiKeyForProvider: async (): Promise<null> => null,
+  },
+
+  // ── tts ────────────────────────────────────────────────────────────────────
+  tts: {
+    textToSpeechTelephony: async (): Promise<null> => null,
+  },
+
+  // ── stt ────────────────────────────────────────────────────────────────────
+  stt: {
+    transcribeAudioFile: async (): Promise<null> => null,
+  },
+
+  // ── tools ──────────────────────────────────────────────────────────────────
+  tools: {
+    createMemoryGetTool: (): null => null,
+    createMemorySearchTool: (): null => null,
+    registerMemoryCli: (): void => undefined,
+  },
+
+  // ── media (top-level, for runtime.media.* access) ──────────────────────────
+  mediaRuntime: {
+    loadWebMedia: async (): Promise<null> => null,
+    detectMime: async (): Promise<string> => 'application/octet-stream',
+    mediaKindFromMime: (): string | null => null,
+    isVoiceCompatibleAudio: (): boolean => false,
+    getImageMetadata: async (): Promise<null> => null,
+    resizeToJpeg: async (): Promise<null> => null,
   },
 
   // ── 平台特定 stub（防止插件访问不存在的平台功能时崩溃） ──────────────────

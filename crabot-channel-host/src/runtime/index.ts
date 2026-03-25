@@ -51,6 +51,16 @@ export function createChannelRuntime(
     config: {
       loadConfig: () => pluginConfig ?? {},
     },
+    // OpenClaw PluginRuntime 接口的其他属性
+    system: runtimeStubs.system,
+    events: runtimeStubs.events,
+    logging: runtimeStubs.logging,
+    state: runtimeStubs.state,
+    modelAuth: runtimeStubs.modelAuth,
+    tts: runtimeStubs.tts,
+    stt: runtimeStubs.stt,
+    tools: runtimeStubs.tools,
+    media: runtimeStubs.mediaRuntime,
     subagent: runtimeStubs.subagent,
   }
 }
