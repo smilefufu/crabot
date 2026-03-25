@@ -52,10 +52,14 @@ export function createReplyRuntime(
      *   1. 从 ctx 提取 sessionId（ctx.SessionKey）
      *   2. 将 dispatcher.sendFinalReply 封装为 deliver fn 并存入 pendingDispatches
      *   3. 触发 onMessageReceived（发布 channel.message_received 事件）
-     *   4. 立即返回（不调用 LLM）
+     *   4. 等待 Agent 回复（通过 Promise）后返回
      *
      * Agent 回复后，ChannelHost.handleSendMessage 调用 deliver → dispatcher.sendFinalReply
      * → 实际发送到平台
+     *
+     * 重要：必须等待 Agent 回复后才返回，否则某些插件（如 @larksuite/openclaw-lark）
+     * 会在 dispatchReplyFromConfig 返回后立即设置 dispatchFullyComplete 标志，
+     * 导致 Agent 回复时 deliver 被跳过。
      */
     async dispatchReplyFromConfig(params: {
       ctx: Record<string, unknown>
@@ -75,21 +79,28 @@ export function createReplyRuntime(
 
       console.log(`[Shim] dispatchReplyFromConfig: sessionId=${sessionId}, dispatcher.sendFinalReply exists=${!!params.dispatcher.sendFinalReply}`)
 
-      // 封装 deliver fn：调用插件的 dispatcher.sendFinalReply
-      // 注意：不在这里调用 markComplete，因为 dispatcher 的生命周期由 withReplyDispatcher 管理
-      // 在 shim 中，我们故意不让 withReplyDispatcher 调用 markComplete，
-      // 这样 Agent 回复时 deliver 可以正常工作
+      // 创建一个 Promise，在 Agent 回复后 resolve
+      let resolveReply: () => void
+      const replyPromise = new Promise<void>((resolve) => {
+        resolveReply = resolve
+      })
+
+      // 封装 deliver fn：调用插件的 dispatcher.sendFinalReply，并在完成后 resolve
       const deliver: DeliverFn = async (payload, _info) => {
         console.log(`[Shim] deliver called: text="${(payload.text ?? '').slice(0, 50)}...", kind=${_info?.kind}`)
-        if (params.dispatcher.sendFinalReply) {
-          // 传递完整 payload（包含 text, mediaUrl, filename 等）
-          console.log('[Shim] deliver: calling dispatcher.sendFinalReply')
-          await params.dispatcher.sendFinalReply(payload)
-          console.log('[Shim] deliver: dispatcher.sendFinalReply returned')
-        } else {
-          console.error('[Shim] deliver: dispatcher.sendFinalReply is not available!')
+        try {
+          if (params.dispatcher.sendFinalReply) {
+            // 传递完整 payload（包含 text, mediaUrl, filename 等）
+            console.log('[Shim] deliver: calling dispatcher.sendFinalReply')
+            await params.dispatcher.sendFinalReply(payload)
+            console.log('[Shim] deliver: dispatcher.sendFinalReply returned')
+          } else {
+            console.error('[Shim] deliver: dispatcher.sendFinalReply is not available!')
+          }
+        } finally {
+          // Agent 回复完成，resolve Promise
+          resolveReply()
         }
-        // 不调用 markComplete，让消息可以正常发送
       }
 
       pendingDispatches.set(sessionId, { deliver })
@@ -111,7 +122,12 @@ export function createReplyRuntime(
         console.error('[ChannelHost] onMessageReceived error:', error)
       })
 
-      return { queuedFinal: 0, counts: { tool: 0, block: 0, final: 0 } }
+      // 等待 Agent 回复
+      console.log('[Shim] dispatchReplyFromConfig: waiting for Agent reply...')
+      await replyPromise
+      console.log('[Shim] dispatchReplyFromConfig: Agent reply completed')
+
+      return { queuedFinal: 1, counts: { tool: 0, block: 0, final: 1 } }
     },
 
     /**
