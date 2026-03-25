@@ -176,16 +176,21 @@ export class ChannelHost extends ModuleBase {
    * ★ 核心出站路径：发送消息（Agent 调用此方法）
    */
   private async handleSendMessage(params: SendMessageParams): Promise<SendMessageResult> {
+    console.log(`[ChannelHost] handleSendMessage: session_id=${params.session_id}`)
     const dispatch = this.pendingDispatches.get(params.session_id)
     if (!dispatch) {
+      console.error(`[ChannelHost] No pending dispatch for session: ${params.session_id}`)
       throw new Error(`No pending dispatch for session: ${params.session_id}`)
     }
 
     const replyPayload = messageContentToReplyPayload(params.content)
+    console.log(`[ChannelHost] handleSendMessage: replyPayload text length=${(replyPayload.text ?? '').length}`)
 
     // 使用 'final' 而不是 'block'，确保消息被正确发送
     // 飞书等插件对 block 消息有特殊处理（streaming fallback），可能不发送
+    console.log('[ChannelHost] handleSendMessage: calling dispatch.deliver')
     await dispatch.deliver(replyPayload, { kind: 'final' })
+    console.log('[ChannelHost] handleSendMessage: dispatch.deliver returned')
 
     // 消费完毕后删除
     this.pendingDispatches.delete(params.session_id)

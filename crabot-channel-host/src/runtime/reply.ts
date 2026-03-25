@@ -73,14 +73,21 @@ export function createReplyRuntime(
         (ctx.SenderId as string | undefined) ??
         randomUUID()
 
+      console.log(`[Shim] dispatchReplyFromConfig: sessionId=${sessionId}, dispatcher.sendFinalReply exists=${!!params.dispatcher.sendFinalReply}`)
+
       // 封装 deliver fn：调用插件的 dispatcher.sendFinalReply
       // 注意：不在这里调用 markComplete，因为 dispatcher 的生命周期由 withReplyDispatcher 管理
       // 在 shim 中，我们故意不让 withReplyDispatcher 调用 markComplete，
       // 这样 Agent 回复时 deliver 可以正常工作
       const deliver: DeliverFn = async (payload, _info) => {
+        console.log(`[Shim] deliver called: text="${(payload.text ?? '').slice(0, 50)}...", kind=${_info?.kind}`)
         if (params.dispatcher.sendFinalReply) {
           // 传递完整 payload（包含 text, mediaUrl, filename 等）
+          console.log('[Shim] deliver: calling dispatcher.sendFinalReply')
           await params.dispatcher.sendFinalReply(payload)
+          console.log('[Shim] deliver: dispatcher.sendFinalReply returned')
+        } else {
+          console.error('[Shim] deliver: dispatcher.sendFinalReply is not available!')
         }
         // 不调用 markComplete，让消息可以正常发送
       }
@@ -169,25 +176,34 @@ export function createReplyRuntime(
     } {
       const { deliver, onReplyStart, onIdle, onCleanup, onError } = params
       let isComplete = false
+      let callCount = 0
 
       return {
         dispatcher: {
           async sendFinalReply(payload: unknown) {
+            callCount++
+            console.log(`[Shim] sendFinalReply called (#${callCount}), isComplete=${isComplete}, payload text length=${String((payload as { text?: string }).text ?? '').length}`)
+
             // 防止重复调用
             if (isComplete) {
               console.log('[Shim] sendFinalReply: skipped (dispatcher already complete)')
               return
             }
             try {
+              console.log('[Shim] sendFinalReply: calling onReplyStart')
               await onReplyStart?.()
               const p = payload as { text?: string; mediaUrl?: string; mediaUrls?: string[] }
+              console.log(`[Shim] sendFinalReply: calling deliver with text="${(p.text ?? '').slice(0, 50)}..."`)
               // 传递完整的 payload 和 info
               await deliver(
                 { text: p.text, mediaUrl: p.mediaUrl, mediaUrls: p.mediaUrls },
                 { kind: 'final' }
               )
+              console.log('[Shim] sendFinalReply: deliver completed')
               await onIdle?.()
+              console.log('[Shim] sendFinalReply: onIdle completed')
             } catch (err) {
+              console.error('[Shim] sendFinalReply error:', err)
               await onError?.(err, { kind: 'final' })
             }
             // 注意：不在这里调用 onCleanup，让飞书的生命周期管理正常工作
@@ -205,6 +221,7 @@ export function createReplyRuntime(
           waitForIdle: async () => { await onIdle?.() },
           getQueuedCounts: () => ({ tool: 0, block: 0, final: 0 }),
           markComplete: () => {
+            console.log('[Shim] markComplete called')
             isComplete = true
             onCleanup?.()
           },
