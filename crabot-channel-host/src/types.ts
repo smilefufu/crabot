@@ -306,6 +306,7 @@ export interface MsgContext {
 export interface ReplyPayload {
   text?: string
   mediaUrl?: string
+  mediaUrls?: string[]
   replyToId?: string
   filename?: string
   mimeType?: string

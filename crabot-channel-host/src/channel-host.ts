@@ -183,7 +183,9 @@ export class ChannelHost extends ModuleBase {
 
     const replyPayload = messageContentToReplyPayload(params.content)
 
-    await dispatch.deliver(replyPayload, { kind: 'block' })
+    // 使用 'final' 而不是 'block'，确保消息被正确发送
+    // 飞书等插件对 block 消息有特殊处理（streaming fallback），可能不发送
+    await dispatch.deliver(replyPayload, { kind: 'final' })
 
     // 消费完毕后删除
     this.pendingDispatches.delete(params.session_id)

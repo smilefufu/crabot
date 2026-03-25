@@ -79,7 +79,8 @@ export function createReplyRuntime(
       // 这样 Agent 回复时 deliver 可以正常工作
       const deliver: DeliverFn = async (payload, _info) => {
         if (params.dispatcher.sendFinalReply) {
-          await params.dispatcher.sendFinalReply({ text: payload.text })
+          // 传递完整 payload（包含 text, mediaUrl, filename 等）
+          await params.dispatcher.sendFinalReply(payload)
         }
         // 不调用 markComplete，让消息可以正常发送
       }
@@ -167,22 +168,32 @@ export function createReplyRuntime(
       markDispatchIdle: () => void
     } {
       const { deliver, onReplyStart, onIdle, onCleanup, onError } = params
+      let isComplete = false
 
       return {
         dispatcher: {
           async sendFinalReply(payload: unknown) {
+            // 防止重复调用
+            if (isComplete) {
+              console.log('[Shim] sendFinalReply: skipped (dispatcher already complete)')
+              return
+            }
             try {
               await onReplyStart?.()
-              const p = payload as { text?: string; mediaUrl?: string }
-              await deliver({ text: p.text, mediaUrl: p.mediaUrl }, { kind: 'final' })
+              const p = payload as { text?: string; mediaUrl?: string; mediaUrls?: string[] }
+              // 传递完整的 payload 和 info
+              await deliver(
+                { text: p.text, mediaUrl: p.mediaUrl, mediaUrls: p.mediaUrls },
+                { kind: 'final' }
+              )
               await onIdle?.()
             } catch (err) {
               await onError?.(err, { kind: 'final' })
-            } finally {
-              onCleanup?.()
             }
+            // 注意：不在这里调用 onCleanup，让飞书的生命周期管理正常工作
           },
           async sendBlockReply(payload: unknown) {
+            if (isComplete) return
             try {
               const p = payload as { text?: string }
               await deliver({ text: p.text }, { kind: 'block' })
@@ -193,7 +204,10 @@ export function createReplyRuntime(
           sendToolResult: () => false,
           waitForIdle: async () => { await onIdle?.() },
           getQueuedCounts: () => ({ tool: 0, block: 0, final: 0 }),
-          markComplete: () => { onCleanup?.() },
+          markComplete: () => {
+            isComplete = true
+            onCleanup?.()
+          },
         },
         replyOptions: {},
         markDispatchIdle: () => { void onIdle?.() },
