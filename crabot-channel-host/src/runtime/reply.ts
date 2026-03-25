@@ -74,11 +74,14 @@ export function createReplyRuntime(
         randomUUID()
 
       // 封装 deliver fn：调用插件的 dispatcher.sendFinalReply
+      // 注意：不在这里调用 markComplete，因为 dispatcher 的生命周期由 withReplyDispatcher 管理
+      // 在 shim 中，我们故意不让 withReplyDispatcher 调用 markComplete，
+      // 这样 Agent 回复时 deliver 可以正常工作
       const deliver: DeliverFn = async (payload, _info) => {
         if (params.dispatcher.sendFinalReply) {
           await params.dispatcher.sendFinalReply({ text: payload.text })
         }
-        params.dispatcher.markComplete?.()
+        // 不调用 markComplete，让消息可以正常发送
       }
 
       pendingDispatches.set(sessionId, { deliver })
@@ -106,19 +109,31 @@ export function createReplyRuntime(
     /**
      * 高级插件的分发流程包装器
      *
-     * 在 OpenClaw 原版中，withReplyDispatcher 管理 dispatcher 的生命周期。
-     * 在 Shim 中：直接调用 run()（其中会调用我们的 dispatchReplyFromConfig），
-     * 然后调用 onSettled。
+     * 在 OpenClaw 原版中，withReplyDispatcher 管理 dispatcher 的生命周期：
+     * 1. 调用 run()
+     * 2. 调用 dispatcher.markComplete() 标记不再接收新消息
+     * 3. 等待 dispatcher.waitForIdle()（所有排队的消息发送完毕）
+     * 4. 调用 onSettled()
+     *
+     * 在 Shim 中：run() 会立即返回（dispatchReplyFromConfig 不等待 Agent 回复），
+     * 但我们需要延迟 markComplete 直到 Agent 真正回复。
+     * 这里先不做任何生命周期管理，让 Agent 回复时通过 deliver 完成发送。
      */
     async withReplyDispatcher(params: {
-      dispatcher: unknown
+      dispatcher: {
+        markComplete?: () => void
+        waitForIdle?: () => Promise<void>
+      }
       run: () => Promise<unknown>
       onSettled?: () => void
     }): Promise<unknown> {
       try {
         return await params.run()
       } finally {
-        params.onSettled?.()
+        // 注意：不调用 markComplete() 和 waitForIdle()
+        // 因为 Agent 的回复是异步的，dispatchReplyFromConfig 返回时消息还没处理完。
+        // onSettled 也不调用，因为消息还没 settled。
+        // 当 Agent 回复并调用 deliver 时，消息才算处理完成。
       }
     },
 
