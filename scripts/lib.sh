@@ -186,13 +186,14 @@ start_litellm() {
     return 0
   fi
 
-  # 检查 LiteLLM 版本，若低于最低要求自动升级
-  local litellm_min="1.82.0"
+  # 检查 LiteLLM 版本，必须严格为 1.82.6（高版本存在安全投毒问题）
+  local litellm_required="1.82.6"
   local litellm_cur
   litellm_cur=$(litellm --version 2>/dev/null | awk '{print $NF}' | tr -d '\r\n')
-  if [ -n "$litellm_cur" ] && ! version_ge "$litellm_cur" "$litellm_min"; then
-    log_warn "LiteLLM 版本过低 ($litellm_cur < $litellm_min)，升级中..."
-    uv tool upgrade litellm -q || log_warn "LiteLLM 升级失败，继续使用当前版本"
+  if [ -n "$litellm_cur" ] && [ "$litellm_cur" != "$litellm_required" ]; then
+    log_warn "LiteLLM 版本不正确 ($litellm_cur != $litellm_required)，重装为安全版本..."
+    uv tool uninstall litellm -q 2>/dev/null || true
+    uv tool install 'litellm[proxy]==1.82.6' -q || log_warn "LiteLLM 重装失败，继续使用当前版本"
   fi
 
   apply_litellm_patches

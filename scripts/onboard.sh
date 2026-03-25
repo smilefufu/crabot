@@ -139,8 +139,8 @@ install_uv() {
 }
 
 install_litellm() {
-  log_info "安装 LiteLLM..."
-  uv tool install 'litellm[proxy]' --index-url https://pypi.org/simple/ >> "$ONBOARD_LOG" 2>&1 || {
+  log_info "安装 LiteLLM 1.82.6（安全版本，避免高版本投毒问题）..."
+  uv tool install 'litellm[proxy]==1.82.6' --index-url https://pypi.org/simple/ >> "$ONBOARD_LOG" 2>&1 || {
     log_error "LiteLLM 安装失败:"
     tail -5 "$ONBOARD_LOG" | sed 's/^/    /'
     log_error "手动安装: uv tool install 'litellm[proxy]'"
