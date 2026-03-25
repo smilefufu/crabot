@@ -16,13 +16,16 @@ import type { PendingDispatchMap } from '../pending-dispatch.js'
 import { createReplyRuntime } from './reply.js'
 import { routingRuntime } from './routing.js'
 import { runtimeStubs } from './stubs.js'
+import { createMediaRuntime, createMediaRuntimeTopLevel } from './media.js'
 
 export function createChannelRuntime(
   pendingDispatches: PendingDispatchMap,
   onMessageReceived: (ctx: MsgContext, sessionId: string) => Promise<void>,
-  pluginConfig?: unknown
+  pluginConfig?: unknown,
+  dataDir?: string
 ): unknown {
   const reply = createReplyRuntime(pendingDispatches, onMessageReceived)
+  const effectiveDataDir = dataDir ?? '/tmp/crabot-media'
 
   return {
     channel: {
@@ -32,7 +35,7 @@ export function createChannelRuntime(
       session: runtimeStubs.session,
       pairing: runtimeStubs.pairing,
       debounce: runtimeStubs.debounce,
-      media: runtimeStubs.media,
+      media: createMediaRuntime(effectiveDataDir),
       activity: runtimeStubs.activity,
       mentions: runtimeStubs.mentions,
       reactions: runtimeStubs.reactions,
@@ -60,7 +63,7 @@ export function createChannelRuntime(
     tts: runtimeStubs.tts,
     stt: runtimeStubs.stt,
     tools: runtimeStubs.tools,
-    media: runtimeStubs.mediaRuntime,
+    media: createMediaRuntimeTopLevel(),
     subagent: runtimeStubs.subagent,
   }
 }

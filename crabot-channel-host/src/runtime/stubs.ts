@@ -74,10 +74,10 @@ export const runtimeStubs = {
   },
 
   // ── media ──────────────────────────────────────────────────────────────────
+  // 已在 media.ts 中实现：fetchRemoteMedia, saveMediaBuffer
+  // resolveMedia 仍为 stub（暂未需要）
   media: {
     resolveMedia: (): null => null,
-    fetchRemoteMedia: async (): Promise<null> => null,
-    saveMediaBuffer: async (): Promise<null> => null,
   },
 
   // ── activity ───────────────────────────────────────────────────────────────
@@ -181,11 +181,10 @@ export const runtimeStubs = {
   },
 
   // ── media (top-level, for runtime.media.* access) ──────────────────────────
+  // 已在 media.ts 中实现：detectMime, mediaKindFromMime, isVoiceCompatibleAudio
+  // loadWebMedia, getImageMetadata, resizeToJpeg 仍为 stub
   mediaRuntime: {
     loadWebMedia: async (): Promise<null> => null,
-    detectMime: async (): Promise<string> => 'application/octet-stream',
-    mediaKindFromMime: (): string | null => null,
-    isVoiceCompatibleAudio: (): boolean => false,
     getImageMetadata: async (): Promise<null> => null,
     resizeToJpeg: async (): Promise<null> => null,
   },

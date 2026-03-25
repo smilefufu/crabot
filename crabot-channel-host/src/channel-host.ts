@@ -105,7 +105,8 @@ export class ChannelHost extends ModuleBase {
     const runtime = createChannelRuntime(
       this.pendingDispatches,
       this.onMessageReceived.bind(this),
-      this.hostConfig.plugin_config
+      this.hostConfig.plugin_config,
+      this.hostConfig.data_dir
     )
 
     const plugin = await loadPlugin(this.hostConfig.plugin_path, runtime)
