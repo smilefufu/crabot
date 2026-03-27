@@ -101,11 +101,13 @@ export class FrontHandler {
   ): Promise<HandleMessageResult> {
     const { messages, context } = params
     const userMessage = this.buildUserMessage(messages, context)
+    const rawUserText = messages.map(m => m.content.text ?? '').join('\n').trim()
 
     try {
       const result = await runFrontLoop({
         systemPrompt: this.systemPrompt,
         userMessage,
+        rawUserText,
         llmClient: this.llmClient,
         toolExecutor: this.toolExecutor,
         traceCallback,

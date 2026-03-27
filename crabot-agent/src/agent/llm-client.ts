@@ -65,7 +65,7 @@ export class LLMClient {
         apiKey: config.apikey ?? this.client.apiKey,
       })
     }
-    if (config.model) this.model = config.model
-    if (config.maxTokens) this.maxTokens = config.maxTokens
+    if (config.model !== undefined) this.model = config.model
+    if (config.maxTokens !== undefined) this.maxTokens = config.maxTokens
   }
 }

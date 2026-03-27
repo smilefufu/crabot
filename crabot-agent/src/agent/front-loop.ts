@@ -23,11 +23,13 @@ const FRONT_MAX_ROUNDS = 5
 export async function runFrontLoop(params: {
   systemPrompt: string
   userMessage: string
+  /** Raw user text (for task title extraction on forced termination) */
+  rawUserText: string
   llmClient: LLMClient
   toolExecutor: ToolExecutor
   traceCallback?: TraceCallback
 }): Promise<FrontLoopResult> {
-  const { systemPrompt, userMessage, llmClient, toolExecutor, traceCallback } = params
+  const { systemPrompt, userMessage, rawUserText, llmClient, toolExecutor, traceCallback } = params
   const tools = getAllFrontTools()
   const messages: MessageParam[] = [{ role: 'user', content: userMessage }]
   const toolHistory: ToolHistoryEntry[] = []
@@ -125,8 +127,8 @@ export async function runFrontLoop(params: {
     }
 
     // Max rounds exceeded -> forced create_task with tool history
-    const taskTitle = extractTaskTitle(messages)
-    const taskDescription = extractTaskDescription(messages)
+    const taskTitle = rawUserText.length > 80 ? rawUserText.slice(0, 80) + '...' : (rawUserText || '用户请求')
+    const taskDescription = rawUserText || userMessage
 
     if (loopSpanId) traceCallback?.onLoopEnd(loopSpanId, 'completed', FRONT_MAX_ROUNDS)
 
@@ -170,9 +172,12 @@ function parseMakeDecision(input: Record<string, unknown>): MessageDecision {
       }
 
     case 'supplement_task':
+      if (!input.task_id) {
+        return { type: 'direct_reply', reply: { type: 'text', text: '无法确定目标任务，请指明您想调整哪个任务。' } }
+      }
       return {
         type: 'supplement_task',
-        task_id: (input.task_id as string) ?? '',
+        task_id: input.task_id as string,
         supplement_content: (input.supplement_content as string) ?? '',
         confidence: (input.confidence as 'high' | 'low') ?? 'low',
         immediate_reply: {
@@ -189,15 +194,4 @@ function parseMakeDecision(input: Record<string, unknown>): MessageDecision {
   }
 }
 
-function extractTaskTitle(messages: MessageParam[]): string {
-  const firstUser = messages.find(m => m.role === 'user')
-  if (!firstUser || typeof firstUser.content !== 'string') return '用户请求'
-  const text = firstUser.content.trim()
-  return text.length > 80 ? text.slice(0, 80) + '...' : text
-}
 
-function extractTaskDescription(messages: MessageParam[]): string {
-  const firstUser = messages.find(m => m.role === 'user')
-  if (!firstUser || typeof firstUser.content !== 'string') return ''
-  return firstUser.content
-}
