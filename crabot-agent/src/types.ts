@@ -287,6 +287,12 @@ export interface TaskOrigin {
 // Agent 决策类型
 // ============================================================================
 
+export interface ToolHistoryEntry {
+  tool_name: string
+  input_summary: string
+  output_summary: string
+}
+
 export interface DirectReplyDecision {
   type: 'direct_reply'
   reply: MessageContent
@@ -300,6 +306,8 @@ export interface CreateTaskDecision {
   priority?: string
   preferred_worker_specialization?: string
   immediate_reply: MessageContent
+  /** Front loop context, only set on forced termination (max rounds exceeded) */
+  front_context?: ToolHistoryEntry[]
 }
 
 export interface ForwardToWorkerDecision {
@@ -531,11 +539,26 @@ export interface SilentDecision {
   type: 'silent'
 }
 
+export interface SupplementTaskDecision {
+  type: 'supplement_task'
+  task_id: TaskId
+  supplement_content: string
+  confidence: 'high' | 'low'
+  immediate_reply: MessageContent
+}
+
+export interface FrontLoopResult {
+  decision: MessageDecision
+  /** Only set on forced termination (max rounds exceeded) */
+  toolHistory?: ToolHistoryEntry[]
+}
+
 export type MessageDecision =
   | DirectReplyDecision
   | CreateTaskDecision
   | ForwardToWorkerDecision
   | SilentDecision
+  | SupplementTaskDecision
 
 // ============================================================================
 // 配置热更新
