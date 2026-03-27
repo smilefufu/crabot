@@ -62,6 +62,10 @@ export interface SdkRunOptions {
   traceCallback?: TraceCallback
   /** Trace loop 标签（front / worker） */
   loopLabel?: string
+  /** Working directory for the SDK process */
+  cwd?: string
+  /** Callback for progress reporting */
+  progressCallback?: (summary: string) => Promise<void>
 }
 
 /** 导出 SDK 工具创建函数供 Worker 使用 */
@@ -89,6 +93,8 @@ export async function runSdk(options: SdkRunOptions): Promise<SdkRunResult> {
     abortController,
     traceCallback,
     loopLabel,
+    cwd,
+    progressCallback,
   } = options
 
   // 构建 SDK Options — 清理环境变量，确保不被 shell 残留值干扰
@@ -109,7 +115,7 @@ export async function runSdk(options: SdkRunOptions): Promise<SdkRunResult> {
     permissionMode: 'bypassPermissions',
     allowDangerouslySkipPermissions: true,
     persistSession: false,
-    settingSources: [],
+    settingSources: ['project'],
     // 不设置 tools，让 SDK 使用默认工具集（Bash, Read, Write, Glob, Grep 等）
     // LiteLLM 代理的非 Anthropic 模型不支持 thinking，必须禁用
     thinking: { type: 'disabled' },
@@ -119,6 +125,7 @@ export async function runSdk(options: SdkRunOptions): Promise<SdkRunResult> {
     ...(allowedTools && { allowedTools }),
     ...(outputFormat && { outputFormat }),
     ...(abortController && { abortController }),
+    ...(cwd && { cwd }),
     stderr: (data: string) => {
       if (data.trim()) log(`stderr: ${data.trim().slice(0, 500)}`)
     },
@@ -131,6 +138,7 @@ export async function runSdk(options: SdkRunOptions): Promise<SdkRunResult> {
 
   let loopSpanId: string | undefined
   let turnCount = 0
+  let lastProgressTime = Date.now()
 
   try {
     log(`Starting query: model=${model}, maxTurns=${maxTurns}, hasOutputFormat=${!!outputFormat}`)
@@ -212,6 +220,20 @@ export async function runSdk(options: SdkRunOptions): Promise<SdkRunResult> {
           }
 
           turnCount++
+
+          // Progress reporting
+          if (progressCallback && turnCount > 0) {
+            const shouldReport =
+              turnCount === 1 ||
+              turnCount % 3 === 0 ||
+              (Date.now() - lastProgressTime) > 30_000
+
+            if (shouldReport) {
+              const summary = turnText.slice(0, 200) || `执行中 (第 ${turnCount} 轮)`
+              try { await progressCallback(summary) } catch { /* ignore */ }
+              lastProgressTime = Date.now()
+            }
+          }
           break
         }
 
