@@ -11,6 +11,7 @@ import type {
   DirectReplyDecision,
   CreateTaskDecision,
   ForwardToWorkerDecision,
+  SupplementTaskDecision,
   ChannelMessage,
   MemoryPermissions,
 } from '../types.js'
@@ -66,6 +67,9 @@ export class DecisionDispatcher {
 
       case 'silent':
         return {}
+
+      case 'supplement_task':
+        return this.handleSupplementTask(decision, params, traceCtx)
 
       default:
         throw new Error(`Unknown decision type: ${(decision as { type: string }).type}`)
@@ -502,5 +506,124 @@ export class DecisionDispatcher {
     }
 
     return this.handleCreateTask(fallbackDecision, params, traceCtx)
+  }
+
+  /**
+   * 处理补充任务指示
+   */
+  private async handleSupplementTask(
+    decision: SupplementTaskDecision,
+    params: {
+      channel_id: ModuleId
+      session_id: string
+      admin_chat_callback?: { source_module_id: string; request_id: string }
+    },
+    traceCtx?: RpcTraceContext,
+  ): Promise<{ task_id?: string }> {
+    const adminPort = await this.getAdminPort()
+
+    if (decision.confidence === 'low') {
+      // Low confidence: ask user to confirm which task
+      const confirmText = await this.buildConfirmationMessage(adminPort)
+      if (params.admin_chat_callback) {
+        await this.rpcClient.call(adminPort, 'chat_callback', {
+          request_id: params.admin_chat_callback.request_id,
+          reply_type: 'direct_reply',
+          content: confirmText,
+        }, this.moduleId, traceCtx)
+      } else {
+        const channelPort = await this.getChannelPort(params.channel_id)
+        await this.rpcClient.call(channelPort, 'send_message', {
+          session_id: params.session_id,
+          content: { type: 'text', text: confirmText },
+        }, this.moduleId, traceCtx)
+      }
+      return {}
+    }
+
+    // High confidence: send immediate reply then inject into worker
+    if (decision.immediate_reply?.text) {
+      if (params.admin_chat_callback) {
+        await this.rpcClient.call(adminPort, 'chat_callback', {
+          request_id: params.admin_chat_callback.request_id,
+          reply_type: 'direct_reply',
+          content: decision.immediate_reply.text,
+        }, this.moduleId, traceCtx)
+      } else {
+        const channelPort = await this.getChannelPort(params.channel_id)
+        await this.rpcClient.call(channelPort, 'send_message', {
+          session_id: params.session_id,
+          content: { type: 'text', text: decision.immediate_reply.text },
+        }, this.moduleId, traceCtx)
+      }
+    }
+
+    // Find worker and deliver supplement
+    try {
+      const taskInfo = await this.rpcClient.call<
+        { task_id: string },
+        { task_id: string; status: string; assigned_worker?: string }
+      >(adminPort, 'get_task', { task_id: decision.task_id }, this.moduleId, traceCtx)
+
+      if (taskInfo.assigned_worker && ['executing', 'planning'].includes(taskInfo.status)) {
+        const workers = await this.rpcClient.resolve(
+          { module_id: taskInfo.assigned_worker }, this.moduleId,
+        )
+        if (workers.length > 0) {
+          await this.rpcClient.call(workers[0].port, 'deliver_human_response', {
+            task_id: decision.task_id,
+            messages: [{
+              platform_message_id: `supplement-${Date.now()}`,
+              session: {
+                channel_id: params.channel_id,
+                session_id: params.session_id,
+                type: 'private' as const,
+              },
+              sender: {
+                friend_id: 'system',
+                platform_user_id: 'system',
+                platform_display_name: 'System',
+              },
+              content: {
+                type: 'text' as const,
+                text: `用户补充指示：${decision.supplement_content}`,
+              },
+              features: { is_mention_crab: false },
+              platform_timestamp: new Date().toISOString(),
+            }],
+          }, this.moduleId, traceCtx)
+        }
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      console.error(`[DecisionDispatcher] Failed to deliver supplement to task ${decision.task_id}: ${msg}`)
+    }
+
+    return { task_id: decision.task_id }
+  }
+
+  /**
+   * 构建任务确认消息（低置信度时列出活跃任务供用户选择）
+   */
+  private async buildConfirmationMessage(adminPort: number): Promise<string> {
+    try {
+      const result = await this.rpcClient.call<
+        { status: string[] },
+        { tasks: Array<{ task_id: string; title: string; status: string }> }
+      >(adminPort, 'query_tasks', {
+        status: ['executing', 'planning', 'waiting_human'],
+      }, this.moduleId)
+
+      if (result.tasks.length <= 1) {
+        return '您是想调整当前正在执行的任务吗？请确认。'
+      }
+
+      const options = result.tasks
+        .map((t, i) => `${i + 1}. 「${t.title}」(${t.status})`)
+        .join('\n')
+      return `您想调整哪个任务？\n${options}`
+    } catch {
+      return '您是想调整当前正在执行的任务吗？请确认。'
+    }
   }
 }
