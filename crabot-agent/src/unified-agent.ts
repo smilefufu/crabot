@@ -225,7 +225,11 @@ export class UnifiedAgent extends ModuleBase {
         this.workerHandler = new WorkerHandler(workerSdkEnv, {
           personalityPrompt: personalityPrompt || undefined,
           maxIterations: config.max_iterations,
-        }, createMcpConfigs)
+        }, createMcpConfigs, {
+          rpcClient: this.rpcClient,
+          moduleId: this.config.moduleId,
+          resolveChannelPort: (channelId) => this.getChannelPort(channelId),
+        })
       }
     }
   }
@@ -1493,7 +1497,11 @@ ${skillsSection}
         this.workerHandler = new WorkerHandler(updatedWorkerSdkEnv, {
           personalityPrompt: personalityPrompt || undefined,
           maxIterations: this.agentConfig?.max_iterations,
-        }, createMcpConfigs)
+        }, createMcpConfigs, {
+          rpcClient: this.rpcClient,
+          moduleId: this.config.moduleId,
+          resolveChannelPort: (channelId) => this.getChannelPort(channelId),
+        })
         console.log(`[${this.config.moduleId}] Worker Agent SDK env updated`)
       }
     }
@@ -1615,8 +1623,7 @@ ${skillsSection}
   // ============================================================================
 
   private getActiveTasksList(): Array<{ task_id: string; status: string; started_at: string; title?: string }> {
-    if (!this.workerHandler) return []
-    return []  // Will be populated in Task 10 when WorkerHandler gets getActiveTasksForQuery()
+    return this.workerHandler?.getActiveTasksForQuery() ?? []
   }
 
   private async getAdminPort(): Promise<number> {

@@ -528,6 +528,7 @@ export interface WorkerTaskState {
   taskId: TaskId
   status: string
   startedAt: string
+  title?: string
   abortController: {
     signal: { aborted: boolean }
     abort: () => void

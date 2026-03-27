@@ -14,9 +14,12 @@ import type {
   WorkerAgentContext,
   WorkerTaskState,
   TaskId,
+  TaskOrigin,
   ChannelMessage,
   TraceCallback,
+  SkillConfig,
 } from '../types.js'
+import type { RpcClient } from '../core/module-base.js'
 
 import * as fs from 'fs'
 import * as path from 'path'
@@ -71,6 +74,25 @@ export interface WorkerHandlerConfig {
   maxIterations?: number
 }
 
+export interface ProgressDeps {
+  rpcClient: RpcClient
+  moduleId: string
+  resolveChannelPort: (channelId: string) => Promise<number>
+}
+
+/** Tools the Worker SDK is allowed to use */
+const WORKER_ALLOWED_TOOLS = [
+  'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep',
+  'Skill',
+  'mcp__crab-messaging__lookup_friend',
+  'mcp__crab-messaging__list_friends',
+  'mcp__crab-messaging__list_sessions',
+  'mcp__crab-messaging__open_private_session',
+  'mcp__crab-messaging__send_message',
+  'mcp__crab-messaging__get_history',
+  'mcp__crabot-worker__ask_human',
+]
+
 export class WorkerHandler {
   private sdkEnv: SdkEnvConfig
   private config: WorkerHandlerConfig
@@ -78,14 +100,17 @@ export class WorkerHandler {
   private activeTasks: Map<TaskId, WorkerTaskState> = new Map()
   /** Factory that creates fresh MCP server configs per runSdk() call (avoids Protocol reuse) */
   private mcpConfigFactory: (() => Record<string, SdkMcpServerConfig>) | undefined
+  private progressDeps?: ProgressDeps
 
   constructor(
     sdkEnv: SdkEnvConfig,
     config?: Partial<WorkerHandlerConfig>,
     mcpConfigFactory?: () => Record<string, SdkMcpServerConfig>,
+    progressDeps?: ProgressDeps,
   ) {
     this.sdkEnv = sdkEnv
     this.mcpConfigFactory = mcpConfigFactory
+    this.progressDeps = progressDeps
     this.config = {
       personalityPrompt: config?.personalityPrompt,
       maxIterations: config?.maxIterations,
@@ -106,12 +131,30 @@ export class WorkerHandler {
       taskId: task.task_id,
       status: 'executing',
       startedAt: new Date().toISOString(),
+      title: task.task_title,
       abortController,
       pendingHumanMessages: [],
     }
     this.activeTasks.set(task.task_id, taskState)
 
+    // Create isolated task directory
+    const taskDir = `/tmp/crabot-task-${task.task_id}`
+
     try {
+      await fs.promises.mkdir(taskDir, { recursive: true })
+
+      // Write Admin Skills to task directory
+      const skills = (params as { skills?: SkillConfig[] }).skills
+      if (skills && skills.length > 0) {
+        const skillsDir = path.join(taskDir, '.claude', 'skills')
+        await fs.promises.mkdir(skillsDir, { recursive: true })
+        for (const skill of skills) {
+          const skillDir = path.join(skillsDir, skill.id)
+          await fs.promises.mkdir(skillDir, { recursive: true })
+          await fs.promises.writeFile(path.join(skillDir, 'SKILL.md'), skill.content, 'utf-8')
+        }
+      }
+
       const taskMessage = this.buildTaskMessage(task, context)
 
       // ask_human 工具通过 SDK MCP 服务器提供
@@ -141,6 +184,19 @@ export class WorkerHandler {
         ...externalMcpConfigs,
       }
 
+      // Build allowedTools: static list + external MCP tool names
+      const externalMcpToolNames = Object.keys(externalMcpConfigs)
+        .filter((name) => name !== 'crabot-worker')
+        .map((name) => `mcp__${name}__*`)
+      const allowedTools = [...WORKER_ALLOWED_TOOLS, ...externalMcpToolNames]
+
+      // Build progress callback
+      const progressCallback = context.task_origin
+        ? async (summary: string) => {
+            await this.sendProgress(context.task_origin!, task.task_title, summary)
+          }
+        : undefined
+
       const sdkOpts: SdkRunOptions = {
         prompt: taskMessage,
         systemPrompt: this.buildSystemPrompt(context),
@@ -149,8 +205,9 @@ export class WorkerHandler {
         ...(this.config.maxIterations !== undefined && { maxTurns: this.config.maxIterations }),
         loopLabel: 'worker',
         mcpServers,
-        // 不设置 allowedTools，让 SDK 使用默认工具集 + MCP 工具
-        // Bash, Read, Write, Glob, Grep 等默认工具 + ask_human MCP 工具
+        allowedTools,
+        cwd: taskDir,
+        progressCallback,
         abortController,
         traceCallback,
       }
@@ -181,6 +238,7 @@ export class WorkerHandler {
       }
     } finally {
       this.activeTasks.delete(task.task_id)
+      await this.cleanupTaskDir(taskDir)
     }
   }
 
@@ -199,6 +257,15 @@ export class WorkerHandler {
   }
 
   getActiveTaskCount(): number { return this.activeTasks.size }
+
+  getActiveTasksForQuery(): Array<{ task_id: string; status: string; started_at: string; title?: string }> {
+    return Array.from(this.activeTasks.values()).map((t) => ({
+      task_id: t.taskId,
+      status: t.status,
+      started_at: t.startedAt,
+      title: t.title,
+    }))
+  }
 
   private buildSystemPrompt(context: WorkerAgentContext): string {
     const parts: string[] = [this.systemPrompt]
@@ -245,6 +312,18 @@ export class WorkerHandler {
     } else {
       parts.push('\n## 最近相关消息（暂无；如需历史消息，用 get_history 工具获取）')
     }
+
+    // Check for front_context (from forced Front termination)
+    const taskWithContext = task as { front_context?: Array<{ tool_name: string; input_summary: string; output_summary: string }> }
+    if (taskWithContext.front_context && Array.isArray(taskWithContext.front_context)) {
+      const frontContext = taskWithContext.front_context
+      parts.push('\n## Front Agent 已完成的工作')
+      parts.push('（以下是 Front 在分诊阶段已获取的信息，请直接使用，不要重复查询）')
+      for (const entry of frontContext) {
+        parts.push(`- ${entry.tool_name}: ${entry.output_summary}`)
+      }
+    }
+
     return parts.join('\n')
   }
 
@@ -271,6 +350,46 @@ export class WorkerHandler {
     // 没有输出，至少说明调用了哪些工具
     const toolNames = toolCalls.map((c) => c.name).join(', ')
     return `已执行工具: ${toolNames}（模型未生成总结文本）`
+  }
+
+  private async sendProgress(
+    taskOrigin: TaskOrigin,
+    taskTitle: string,
+    summary: string,
+  ): Promise<void> {
+    if (!this.progressDeps) return
+    try {
+      const channelPort = await this.progressDeps.resolveChannelPort(taskOrigin.channel_id)
+      await this.progressDeps.rpcClient.call(channelPort, 'send_message', {
+        session_id: taskOrigin.session_id,
+        content: { type: 'text', text: `[任务进度] ${taskTitle}\n${summary}` },
+      }, this.progressDeps.moduleId)
+    } catch { /* ignore progress send failures */ }
+  }
+
+  private async cleanupTaskDir(_taskDir: string): Promise<void> {
+    try {
+      const maxRetained = 5
+      const entries = await fs.promises.readdir('/tmp')
+      const dirs = entries.filter((d) => d.startsWith('crabot-task-')).map((d) => `/tmp/${d}`)
+      if (dirs.length > maxRetained) {
+        const withStats = await Promise.all(
+          dirs.map(async (d) => {
+            try {
+              const stat = await fs.promises.stat(d)
+              return { path: d, mtime: stat.mtimeMs }
+            } catch {
+              return null
+            }
+          })
+        )
+        const valid = withStats.filter((s): s is { path: string; mtime: number } => s !== null)
+        const sorted = valid.sort((a, b) => a.mtime - b.mtime)
+        for (const dir of sorted.slice(0, dirs.length - maxRetained)) {
+          await fs.promises.rm(dir.path, { recursive: true, force: true })
+        }
+      }
+    } catch { /* ignore cleanup errors */ }
   }
 
   private handleAskHuman(
