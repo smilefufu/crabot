@@ -18,7 +18,12 @@ import type {
   TraceCallback,
 } from '../types.js'
 
-const TASK_INSTRUCTIONS = `## 任务执行规则（内部指令）
+import * as fs from 'fs'
+import * as path from 'path'
+
+const WORKER_PROMPTS_FILE = path.join(process.cwd(), 'prompts-worker.md')
+
+const DEFAULT_TASK_INSTRUCTIONS = `## 任务执行规则（内部指令）
 
 你负责执行复杂任务：
 1. 深度分析任务需求
@@ -32,18 +37,38 @@ const TASK_INSTRUCTIONS = `## 任务执行规则（内部指令）
 - 按步骤执行，遇到问题及时调整
 - 如果无法完成，说明原因并给出建议
 
-### 通讯能力
-- 使用 get_history 查看更多聊天记录（预加载的消息可能不够）
-- 使用 send_message 在任意 Channel/Session 中发送消息
-- 使用 lookup_friend 查找联系人信息
-- 使用 list_sessions 查看 Channel 上的会话列表
-- 使用 open_private_session 打开与某人的私聊
+## 你已知道的上下文（无需工具获取）
+
+上下文中已预加载：
+- **最近相关消息**：当前会话最近消息（"## 最近相关消息"段落，条数见标题）
+- **短期记忆**：与该用户的近期对话摘要
+- **长期记忆**：通过语义搜索检索到的相关记忆
+
+**不要用工具重复获取这些已有的信息。**
+
+## 通讯工具
+
+- **get_history**：查询当前会话更早的历史（已预加载的消息之前的内容）
+- **send_message**：在任意 Channel/Session 中发送消息
+- **lookup_friend**：查找联系人信息
+- **list_sessions**：查看 Channel 上的会话列表
+- **open_private_session**：打开与某人的私聊
 
 完成任务后，直接输出最终结果。`
 
+function loadWorkerPrompts(): string {
+  try {
+    if (fs.existsSync(WORKER_PROMPTS_FILE)) {
+      return fs.readFileSync(WORKER_PROMPTS_FILE, 'utf-8')
+    }
+  } catch { /* ignore */ }
+  return DEFAULT_TASK_INSTRUCTIONS
+}
+
 export interface WorkerHandlerConfig {
   personalityPrompt?: string
-  maxIterations: number
+  /** 最大轮次，undefined 表示不限制 */
+  maxIterations?: number
 }
 
 export class WorkerHandler {
@@ -63,11 +88,12 @@ export class WorkerHandler {
     this.mcpConfigFactory = mcpConfigFactory
     this.config = {
       personalityPrompt: config?.personalityPrompt,
-      maxIterations: config?.maxIterations ?? 20,
+      maxIterations: config?.maxIterations,
     }
+    const taskInstructions = loadWorkerPrompts()
     this.systemPrompt = this.config.personalityPrompt
-      ? `${this.config.personalityPrompt}\n\n${TASK_INSTRUCTIONS}`
-      : TASK_INSTRUCTIONS
+      ? `${this.config.personalityPrompt}\n\n${taskInstructions}`
+      : taskInstructions
   }
 
   async executeTask(
@@ -120,7 +146,7 @@ export class WorkerHandler {
         systemPrompt: this.buildSystemPrompt(context),
         model: this.sdkEnv.modelId,
         env: this.sdkEnv.env,
-        maxTurns: this.config.maxIterations,
+        ...(this.config.maxIterations !== undefined && { maxTurns: this.config.maxIterations }),
         loopLabel: 'worker',
         mcpServers,
         // 不设置 allowedTools，让 SDK 使用默认工具集 + MCP 工具
@@ -131,11 +157,16 @@ export class WorkerHandler {
 
       const result = await runSdk(sdkOpts)
 
+      // SDK 结果可能为空（模型 thinking 消耗所有 token），从工具调用结果中提取
+      const resultText = result.text
+        || this.extractToolOutputSummary(result.toolCalls)
+        || (result.isError ? result.errors?.join('; ') ?? '执行失败' : '任务已完成，但模型未生成输出')
+
       return {
         task_id: task.task_id,
         outcome: result.isError ? 'failed' : 'completed',
-        summary: result.text || (result.isError ? result.errors?.join('; ') ?? '执行失败' : '任务已完成'),
-        final_reply: { type: 'text', text: result.text || '任务已完成' },
+        summary: resultText,
+        final_reply: { type: 'text', text: resultText },
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
@@ -207,12 +238,39 @@ export class WorkerHandler {
       for (const m of context.long_term_memories.slice(-5)) { parts.push(`- ${m.content}`) }
     }
     if (context.recent_messages && context.recent_messages.length > 0) {
-      parts.push('\n## 最近相关消息')
+      parts.push(`\n## 最近相关消息（已预加载，共 ${context.recent_messages.length} 条；更早的历史用 get_history 工具获取）`)
       for (const m of context.recent_messages.slice(-20)) {
         parts.push(`- ${m.sender.platform_display_name}: ${m.content.text ?? '[非文本消息]'}`)
       }
+    } else {
+      parts.push('\n## 最近相关消息（暂无；如需历史消息，用 get_history 工具获取）')
     }
     return parts.join('\n')
+  }
+
+  /**
+   * 从工具调用记录中提取最后有意义的输出
+   * 当 LLM 未生成文本时（thinking 消耗所有 token），从工具输出中兜底
+   */
+  private extractToolOutputSummary(toolCalls: Array<{ name: string; input: unknown; output: unknown }>): string | undefined {
+    if (toolCalls.length === 0) return undefined
+
+    // 从后往前找最后一个有输出的工具调用
+    for (let i = toolCalls.length - 1; i >= 0; i--) {
+      const call = toolCalls[i]
+      if (call.output) {
+        const text = typeof call.output === 'string'
+          ? call.output
+          : JSON.stringify(call.output)
+        if (text.length > 0 && text !== 'undefined') {
+          return `[${call.name}] ${text.slice(0, 2000)}`
+        }
+      }
+    }
+
+    // 没有输出，至少说明调用了哪些工具
+    const toolNames = toolCalls.map((c) => c.name).join(', ')
+    return `已执行工具: ${toolNames}（模型未生成总结文本）`
   }
 
   private handleAskHuman(

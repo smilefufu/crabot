@@ -264,8 +264,25 @@ export interface ChannelImplementation {
   module_path?: string
   installed_path?: string
   version: string
+  config_schema?: JsonSchema
   created_at: string
   updated_at: string
+}
+
+/** JSON Schema 子集（crabot-module.yaml config_schema） */
+export interface JsonSchema {
+  type: string
+  required?: string[]
+  properties?: Record<string, JsonSchemaProperty>
+}
+
+export interface JsonSchemaProperty {
+  type: string
+  title?: string
+  description?: string
+  format?: string // password, uri, email 等
+  default?: unknown
+  enum?: (string | number)[]
 }
 
 export interface ChannelInstance {
@@ -296,6 +313,7 @@ export interface CreateChannelInstanceParams {
   platform?: string
   state_dir?: string
   auto_start?: boolean
+  env?: Record<string, string>
 }
 
 export interface UpdateChannelInstanceParams {

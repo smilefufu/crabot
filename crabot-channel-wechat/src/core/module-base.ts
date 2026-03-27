@@ -20,7 +20,6 @@ import {
   createErrorResponse,
   GlobalErrorCode,
 } from './base-protocol.js'
-import type { TraceStore } from './trace-store.js'
 
 // ============================================================================
 // 类型定义
@@ -71,15 +70,6 @@ type CallbackHandler<P = unknown> = (payload: P) => Promise<void> | void
 // ============================================================================
 
 /**
- * Trace 上下文 - 传给 RpcClient.call() 以自动记录 rpc_call span
- */
-export interface RpcTraceContext {
-  traceStore: TraceStore
-  traceId: string
-  parentSpanId?: string
-}
-
-/**
  * RPC 客户端 - 用于模块间通信
  */
 export class RpcClient {
@@ -91,15 +81,12 @@ export class RpcClient {
 
   /**
    * 调用远程模块方法
-   *
-   * @param traceCtx 可选的 Trace 上下文，提供时自动记录 rpc_call span
    */
   async call<P, R>(
     targetPort: number,
     method: string,
     params: P,
-    source: ModuleId,
-    traceCtx?: RpcTraceContext
+    source: ModuleId
   ): Promise<R> {
     const request: Request<P> = {
       id: generateId(),
@@ -110,20 +97,6 @@ export class RpcClient {
     }
 
     const body = JSON.stringify(request)
-
-    // 开始 rpc_call span（如果提供了 trace 上下文）
-    const span = traceCtx
-      ? traceCtx.traceStore.startSpan(traceCtx.traceId, {
-          type: 'rpc_call',
-          parent_span_id: traceCtx.parentSpanId,
-          details: {
-            target_module: `port:${targetPort}`,
-            target_port: targetPort,
-            method,
-            request_summary: JSON.stringify(params).slice(0, 200),
-          },
-        })
-      : null
 
     return new Promise((resolve, reject) => {
       const req = http.request(
@@ -146,60 +119,18 @@ export class RpcClient {
             try {
               const response = JSON.parse(data) as Response<R>
               if (response.success) {
-                if (span && traceCtx) {
-                  traceCtx.traceStore.endSpan(traceCtx.traceId, span.span_id, 'completed', {
-                    target_module: `port:${targetPort}`,
-                    target_port: targetPort,
-                    method,
-                    request_summary: JSON.stringify(params).slice(0, 200),
-                    response_summary: JSON.stringify(response.data).slice(0, 200),
-                    status_code: res.statusCode,
-                  })
-                }
                 resolve(response.data as R)
               } else {
-                const errMsg = response.error?.message ?? 'Unknown error'
-                if (span && traceCtx) {
-                  traceCtx.traceStore.endSpan(traceCtx.traceId, span.span_id, 'failed', {
-                    target_module: `port:${targetPort}`,
-                    target_port: targetPort,
-                    method,
-                    request_summary: JSON.stringify(params).slice(0, 200),
-                    status_code: res.statusCode,
-                    error: errMsg,
-                  })
-                }
-                reject(new Error(errMsg))
+                reject(new Error(response.error?.message ?? 'Unknown error'))
               }
             } catch (e) {
-              const errMsg = `Failed to parse response: ${String(e)}`
-              if (span && traceCtx) {
-                traceCtx.traceStore.endSpan(traceCtx.traceId, span.span_id, 'failed', {
-                  target_module: `port:${targetPort}`,
-                  target_port: targetPort,
-                  method,
-                  request_summary: JSON.stringify(params).slice(0, 200),
-                  error: errMsg,
-                })
-              }
-              reject(new Error(errMsg))
+              reject(new Error(`Failed to parse response: ${String(e)}`))
             }
           })
         }
       )
 
-      req.on('error', (err) => {
-        if (span && traceCtx) {
-          traceCtx.traceStore.endSpan(traceCtx.traceId, span.span_id, 'failed', {
-            target_module: `port:${targetPort}`,
-            target_port: targetPort,
-            method,
-            request_summary: JSON.stringify(params).slice(0, 200),
-            error: err.message,
-          })
-        }
-        reject(err)
-      })
+      req.on('error', reject)
       req.write(body)
       req.end()
     })
@@ -468,6 +399,20 @@ export abstract class ModuleBase {
     // 默认空实现，子类可重写
   }
 
+  /**
+   * 子类重写：处理原始 HTTP 请求
+   * 在标准方法处理之前调用。
+   * 如果返回 true，表示请求已处理，不再走标准流程。
+   */
+  protected async onRawRequest(
+    _req: IncomingMessage,
+    _res: ServerResponse,
+    _method: string,
+    _body: string
+  ): Promise<boolean> {
+    return false
+  }
+
   // ============================================================================
   // 内部方法
   // ============================================================================
@@ -487,6 +432,10 @@ export abstract class ModuleBase {
 
     // 读取请求体
     const body = await this.readBody(req)
+
+    // 先给子类机会处理原始请求（如 Feishu Webhook）
+    const handled = await this.onRawRequest(req, res, method, body)
+    if (handled) return
 
     // 尝试解析为信封格式
     let request: Request | null = null

@@ -22,18 +22,154 @@ import type {
 } from './types.js'
 
 // ============================================================================
-// 默认实现定义
+// 内置模块声明（只声明路径，元数据从 crabot-module.yaml 动态加载）
 // ============================================================================
 
-const DEFAULT_CHANNEL_HOST_IMPLEMENTATION: ChannelImplementation = {
-  id: 'channel-host',
-  name: 'OpenClaw Channel Host',
-  type: 'builtin',
-  platform: '*', // 支持任意平台，具体由 state_dir 内的插件决定
-  module_path: '../crabot-channel-host',
-  version: '0.1.0',
-  created_at: '2026-03-16T00:00:00.000Z',
-  updated_at: '2026-03-16T00:00:00.000Z',
+/** 内置 Channel 模块的相对路径（相对于 crabot-admin 根目录） */
+const BUILTIN_MODULE_PATHS: readonly string[] = [
+  '../crabot-channel-host',
+  '../crabot-channel-wechat',
+]
+
+/**
+ * 从 crabot-module.yaml 加载模块元数据，构造 ChannelImplementation
+ */
+function loadBuiltinImplementation(modulePath: string): ChannelImplementation | null {
+  const resolvedPath = path.resolve(__dirname, '..', modulePath)
+  const yamlPath = path.join(resolvedPath, 'crabot-module.yaml')
+
+  if (!fsSync.existsSync(yamlPath)) {
+    console.warn(`[ChannelManager] crabot-module.yaml not found: ${yamlPath}`)
+    return null
+  }
+
+  try {
+    const content = fsSync.readFileSync(yamlPath, 'utf-8')
+    const parsed = parseSimpleYaml(content)
+
+    const now = generateTimestamp()
+    return {
+      id: parsed.module_id as string,
+      name: parsed.name as string,
+      type: 'builtin',
+      platform: inferPlatformFromModuleId(parsed.module_id as string),
+      module_path: modulePath,
+      version: (parsed.version as string) ?? '0.1.0',
+      config_schema: parsed.config_schema as Record<string, unknown> | undefined,
+      created_at: now,
+      updated_at: now,
+    }
+  } catch (error) {
+    console.error(`[ChannelManager] Failed to load crabot-module.yaml from ${yamlPath}:`, error)
+    return null
+  }
+}
+
+/**
+ * 从 module_id 推断平台（channel-wechat → wechat, channel-host → *）
+ */
+function inferPlatformFromModuleId(moduleId: string): string {
+  if (moduleId === 'channel-host') return '*'
+  const match = moduleId.match(/^channel-(.+)$/)
+  return match ? match[1] : 'unknown'
+}
+
+/**
+ * 简单 YAML 解析器（仅支持 crabot-module.yaml 所需的子集）
+ * 支持：标量值、嵌套对象、数组（- item 格式和 flow [a, b] 格式）、多行字符串
+ */
+function parseSimpleYaml(content: string): Record<string, unknown> {
+  const lines = content.split('\n')
+  const root: Record<string, unknown> = {}
+  const stack: { indent: number; obj: Record<string, unknown> }[] = [{ indent: -1, obj: root }]
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    // 跳过空行和注释
+    if (!line.trim() || line.trim().startsWith('#')) continue
+
+    const indent = line.length - line.trimStart().length
+    const trimmed = line.trim()
+
+    // 数组项
+    if (trimmed.startsWith('- ')) {
+      const parent = stack[stack.length - 1]
+      // 找到当前数组所属的 key（在父对象中最后一个值为数组的 key）
+      const parentObj = parent.obj
+      const lastKey = Object.keys(parentObj).pop()
+      if (lastKey && Array.isArray(parentObj[lastKey])) {
+        const val = trimmed.slice(2).trim()
+        ;(parentObj[lastKey] as unknown[]).push(parseYamlValue(val))
+      }
+      continue
+    }
+
+    const colonIdx = trimmed.indexOf(':')
+    if (colonIdx === -1) continue
+
+    const key = trimmed.slice(0, colonIdx).trim()
+    const rawValue = trimmed.slice(colonIdx + 1).trim()
+
+    // 回退到正确的父级
+    while (stack.length > 1 && stack[stack.length - 1].indent >= indent) {
+      stack.pop()
+    }
+    const current = stack[stack.length - 1].obj
+
+    if (rawValue === '' || rawValue === '|') {
+      // 可能是嵌套对象或多行字符串
+      // 看下一行的缩进来决定
+      const nextNonEmpty = lines.slice(i + 1).find((l) => l.trim() && !l.trim().startsWith('#'))
+      if (nextNonEmpty) {
+        const nextIndent = nextNonEmpty.length - nextNonEmpty.trimStart().length
+        if (nextIndent > indent && nextNonEmpty.trim().startsWith('- ')) {
+          // 数组
+          current[key] = []
+          stack.push({ indent, obj: current })
+        } else if (nextIndent > indent) {
+          // 嵌套对象
+          const child: Record<string, unknown> = {}
+          current[key] = child
+          stack.push({ indent, obj: child })
+        }
+      }
+    } else {
+      current[key] = parseYamlValue(rawValue)
+    }
+  }
+
+  return root
+}
+
+function parseYamlValue(raw: string): unknown {
+  // 去掉行内注释
+  const commentIdx = raw.indexOf(' #')
+  const val = commentIdx >= 0 ? raw.slice(0, commentIdx).trim() : raw
+
+  // 带引号的字符串
+  if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+    return val.slice(1, -1)
+  }
+  // Flow array: [a, b, c]
+  if (val.startsWith('[') && val.endsWith(']')) {
+    return val.slice(1, -1).split(',').map((s) => {
+      const item = s.trim()
+      if ((item.startsWith('"') && item.endsWith('"')) || (item.startsWith("'") && item.endsWith("'"))) {
+        return item.slice(1, -1)
+      }
+      return parseYamlScalar(item)
+    })
+  }
+  return parseYamlScalar(val)
+}
+
+function parseYamlScalar(val: string): unknown {
+  if (val === 'true') return true
+  if (val === 'false') return false
+  if (val === 'null' || val === '~') return null
+  const num = Number(val)
+  if (!isNaN(num) && val !== '') return num
+  return val
 }
 
 // ============================================================================
@@ -179,39 +315,23 @@ export class ChannelManager {
     this.instances.set(instance.id, instance)
     await this.saveInstances()
 
-    // channel-host 实现：注册到 Module Manager
-    if (impl.id === 'channel-host' && impl.module_path) {
+    // 保存初始环境变量配置
+    if (params.env && Object.keys(params.env).length > 0) {
+      await this.saveLocalConfig(instance.id, params.env)
+    }
+
+    // builtin 实现：注册到 Module Manager
+    if (impl.type === 'builtin' && impl.module_path) {
       try {
-        const resolvedModulePath = path.resolve(__dirname, '..', impl.module_path)
-        const entry = `node ${resolvedModulePath}/dist/main.js`
-        const env: Record<string, string> = {
-          CRABOT_MODULE_ID: instance.id,
-        }
-        if (instance.state_dir) {
-          env.OPENCLAW_STATE_DIR = instance.state_dir
-        }
-
-        await this.rpcClient.registerModuleDefinition(
-          {
-            module_id: instance.id,
-            module_type: 'channel',
-            entry,
-            cwd: resolvedModulePath,
-            env,
-            auto_start: instance.auto_start,
-            start_priority: instance.start_priority,
-          },
-          'admin'
-        )
-
+        await this.registerBuiltinModule(impl, instance)
         const registered: ChannelInstance = { ...instance, module_registered: true }
         this.instances.set(registered.id, registered)
         await this.saveInstances()
 
-        console.log(`[ChannelManager] channel-host instance registered: ${instance.id}`)
+        console.log(`[ChannelManager] ${impl.id} instance registered: ${instance.id}`)
         return registered
       } catch (error) {
-        console.error(`[ChannelManager] Failed to register channel-host module:`, error)
+        console.error(`[ChannelManager] Failed to register ${impl.id} module:`, error)
         // 注册失败时回滚实例记录
         this.instances.delete(instance.id)
         await this.saveInstances()
@@ -236,6 +356,80 @@ export class ChannelManager {
     } catch {
       await fs.writeFile(configPath, JSON.stringify({}, null, 2), 'utf-8')
     }
+  }
+
+  /**
+   * 注册 builtin 实现的模块到 Module Manager
+   */
+  private async registerBuiltinModule(impl: ChannelImplementation, instance: ChannelInstance): Promise<void> {
+    const resolvedModulePath = path.resolve(__dirname, '..', impl.module_path!)
+    const entry = `node ${resolvedModulePath}/dist/main.js`
+    const env = await this.buildModuleEnv(impl, instance)
+
+    await this.rpcClient.registerModuleDefinition(
+      {
+        module_id: instance.id,
+        module_type: 'channel',
+        entry,
+        cwd: resolvedModulePath,
+        env,
+        auto_start: instance.auto_start,
+        start_priority: instance.start_priority,
+      },
+      'admin'
+    )
+  }
+
+  /**
+   * 构建模块启动时的环境变量
+   *
+   * - channel-host: CRABOT_MODULE_ID + OPENCLAW_STATE_DIR
+   * - channel-wechat: CRABOT_MODULE_ID + channel-configs/<id>.json 中的 WECHAT_* 变量
+   */
+  private async buildModuleEnv(impl: ChannelImplementation, instance: ChannelInstance): Promise<Record<string, string>> {
+    const env: Record<string, string> = {
+      CRABOT_MODULE_ID: instance.id,
+    }
+
+    if (impl.id === 'channel-host' && instance.state_dir) {
+      env.OPENCLAW_STATE_DIR = instance.state_dir
+    }
+
+    // 从 channel-configs/<id>.json 加载额外环境变量
+    const localConfig = await this.loadLocalConfig(instance.id)
+    if (localConfig) {
+      for (const [key, value] of Object.entries(localConfig)) {
+        if (typeof value === 'string') {
+          env[key] = value
+        }
+      }
+    }
+
+    return env
+  }
+
+  /**
+   * 读取 channel-configs/<id>.json 中的本地配置（环境变量格式）
+   *
+   * 用于 channel-wechat 等需要在启动前配置环境变量的模块。
+   * 文件格式：{ "WECHAT_CONNECTOR_URL": "http://...", "WECHAT_API_KEY": "wct_..." }
+   */
+  async loadLocalConfig(instanceId: string): Promise<Record<string, string> | null> {
+    const configPath = path.join(this.configsDir, `${instanceId}.json`)
+    try {
+      const data = await fs.readFile(configPath, 'utf-8')
+      return JSON.parse(data) as Record<string, string>
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 保存本地配置（环境变量格式）到 channel-configs/<id>.json
+   */
+  async saveLocalConfig(instanceId: string, config: Record<string, string>): Promise<void> {
+    const configPath = path.join(this.configsDir, `${instanceId}.json`)
+    await this.atomicWriteFile(configPath, JSON.stringify(config, null, 2))
   }
 
   async updateInstance(params: UpdateChannelInstanceParams): Promise<ChannelInstance> {
@@ -323,54 +517,62 @@ export class ChannelManager {
   }
 
   // ============================================================================
+  // Health（通过 RPC 透传到 Channel 模块，见 protocol-channel §7.1）
+  // ============================================================================
+
+  async getHealth(instanceId: string): Promise<{ status: string; details: Record<string, unknown> }> {
+    const instance = this.instances.get(instanceId)
+    if (!instance) {
+      throw new Error(`Instance not found: ${instanceId}`)
+    }
+
+    const modules = await this.rpcClient.resolve({ module_id: instanceId }, 'admin')
+    if (modules.length === 0) {
+      throw new Error(`Channel module not running: ${instanceId}`)
+    }
+
+    const result = await this.rpcClient.call<Record<string, never>, { status: string; details: Record<string, unknown> }>(
+      modules[0].port,
+      'health',
+      {},
+      'admin'
+    )
+    return result
+  }
+
+  // ============================================================================
   // 重新注册 & 自动启动
   // ============================================================================
 
   /**
-   * Admin 启动时重新注册所有 channel-host 实例到 MM
+   * Admin 启动时重新注册所有 builtin 实现的实例到 MM
    *
    * MM 不持久化 registerModuleDefinition 的结果，重启后动态注册丢失。
    * 此方法在 Admin onStart() 中调用，确保已有实例重新注册。
    * 对 auto_start: true 的实例额外调用 startModule。
    */
   async reRegisterInstances(): Promise<void> {
-    const channelHostImpl = this.implementations.get('channel-host')
-    if (!channelHostImpl?.module_path) {
-      return
-    }
-
+    // 收集所有 builtin 实现的实例
+    const builtinImplIds = new Set(
+      Array.from(this.implementations.values())
+        .filter((i) => i.type === 'builtin' && i.module_path)
+        .map((i) => i.id)
+    )
     const instances = Array.from(this.instances.values())
-      .filter((i) => i.implementation_id === 'channel-host')
+      .filter((i) => builtinImplIds.has(i.implementation_id))
 
     if (instances.length === 0) {
       return
     }
 
-    console.log(`[ChannelManager] Re-registering ${instances.length} channel-host instances to MM`)
-    const resolvedModulePath = path.resolve(__dirname, '..', channelHostImpl.module_path)
+    console.log(`[ChannelManager] Re-registering ${instances.length} builtin channel instances to MM`)
 
     for (const instance of instances) {
-      try {
-        const entry = `node ${resolvedModulePath}/dist/main.js`
-        const env: Record<string, string> = {
-          CRABOT_MODULE_ID: instance.id,
-        }
-        if (instance.state_dir) {
-          env.OPENCLAW_STATE_DIR = instance.state_dir
-        }
+      const impl = this.implementations.get(instance.implementation_id)
+      if (!impl?.module_path) continue
 
-        await this.rpcClient.registerModuleDefinition(
-          {
-            module_id: instance.id,
-            module_type: 'channel',
-            entry,
-            cwd: resolvedModulePath,
-            env,
-            auto_start: instance.auto_start,
-            start_priority: instance.start_priority,
-          },
-          'admin'
-        )
+      try {
+        await this.registerBuiltinModule(impl, instance)
 
         // 注册成功，更新标志
         if (!instance.module_registered) {
@@ -378,7 +580,7 @@ export class ChannelManager {
           this.instances.set(updated.id, updated)
         }
 
-        console.log(`[ChannelManager] Re-registered: ${instance.id}`)
+        console.log(`[ChannelManager] Re-registered: ${instance.id} (${impl.id})`)
       } catch (error: any) {
         // DUPLICATE_ID 表示 MM 没重启，模块已存在，忽略
         if (error?.message?.includes('DUPLICATE_ID') || error?.code === 'DUPLICATE_ID') {
@@ -690,10 +892,25 @@ export class ChannelManager {
   }
 
   private async ensureDefaults(): Promise<void> {
-    if (!this.implementations.has('channel-host')) {
-      this.implementations.set('channel-host', DEFAULT_CHANNEL_HOST_IMPLEMENTATION)
+    let changed = false
+    for (const modulePath of BUILTIN_MODULE_PATHS) {
+      const impl = loadBuiltinImplementation(modulePath)
+      if (!impl) continue
+
+      const existing = this.implementations.get(impl.id)
+      if (!existing) {
+        this.implementations.set(impl.id, impl)
+        changed = true
+        console.log(`[ChannelManager] Registered builtin: ${impl.id}`)
+      } else if (!existing.config_schema && impl.config_schema) {
+        // 已有记录但缺少 config_schema（旧数据），补充
+        this.implementations.set(impl.id, { ...existing, config_schema: impl.config_schema })
+        changed = true
+        console.log(`[ChannelManager] Updated config_schema for: ${impl.id}`)
+      }
+    }
+    if (changed) {
       await this.saveImplementations()
-      console.log('[ChannelManager] Created default channel-host implementation')
     }
   }
 }

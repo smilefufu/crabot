@@ -35,6 +35,7 @@ import { WorkerSelector } from './orchestration/worker-selector.js'
 import { ContextAssembler } from './orchestration/context-assembler.js'
 import { DecisionDispatcher } from './orchestration/decision-dispatcher.js'
 import { MemoryWriter } from './orchestration/memory-writer.js'
+import { DebounceHandler, type DebounceConfig, type BufferedMessage } from './orchestration/debounce-handler.js'
 import { FrontHandler, type SdkEnvConfig } from './agent/front-handler.js'
 import { WorkerHandler } from './agent/worker-handler.js'
 import { MCPManager } from './agent/mcp-manager.js'
@@ -51,6 +52,7 @@ export class UnifiedAgent extends ModuleBase {
   private contextAssembler: ContextAssembler
   private decisionDispatcher: DecisionDispatcher
   private memoryWriter: MemoryWriter
+  private debounceHandler: DebounceHandler
 
   // 智能体层组件（可选，取决于配置）
   private frontHandler?: FrontHandler
@@ -131,6 +133,16 @@ export class UnifiedAgent extends ModuleBase {
       async () => await this.getMemoryPort()
     )
 
+    // 初始化群聊 Debounce（从 extra 读取配置，fallback 到协议默认值）
+    const debounceConfig: DebounceConfig = {
+      group_debounce_min_ms: (config.extra?.group_debounce_min_ms as number) ?? 5000,
+      group_debounce_max_ms: (config.extra?.group_debounce_max_ms as number) ?? 300000,
+    }
+    this.debounceHandler = new DebounceHandler(
+      debounceConfig,
+      (sessionId, messages) => this.processGroupBatch(sessionId, messages)
+    )
+
     // 初始化智能体层组件（如果有配置）
     if (this.agentConfig) {
       this.initializeAgentLayer(this.agentConfig)
@@ -187,8 +199,7 @@ export class UnifiedAgent extends ModuleBase {
         this.sdkEnvFront = this.buildSdkEnv(frontModelConfig)
         this.frontHandler = new FrontHandler(this.sdkEnvFront, {
           personalityPrompt: personalityPrompt || undefined,
-          maxIterations: config.max_iterations ?? 3,
-          timeout: this.orchestrationConfig.front_agent_timeout * 1000,
+          maxIterations: config.max_iterations ?? 10,
         }, createMcpConfigs)
       }
     }
@@ -201,7 +212,7 @@ export class UnifiedAgent extends ModuleBase {
         // MCP 服务器配置转换为 SDK 格式（stdio 类型直传）
         this.workerHandler = new WorkerHandler(this.sdkEnvWorker, {
           personalityPrompt: personalityPrompt || undefined,
-          maxIterations: config.max_iterations ?? 20,
+          maxIterations: config.max_iterations,
         }, createMcpConfigs)
       }
     }
@@ -324,10 +335,13 @@ ${skillsSection}
 
   /**
    * 处理消息接收事件（来自 channel.message_authorized，消息已通过 Admin 鉴权）
+   *
+   * 群聊非 @mention 消息走 Debounce 缓冲，其余直接处理。
+   * @see protocol-agent-v2.md §5.1 SwitchMap, §5.2 Debounce
    */
   private async handleMessageReceived(payload: { message: ChannelMessage; friend: Friend }): Promise<void> {
     const { message, friend } = payload
-    const { session, sender, content } = message
+    const { session } = message
 
     // 0. 检查是否已配置
     if (!this.isConfigured()) {
@@ -335,19 +349,41 @@ ${skillsSection}
       return
     }
 
+    // 群聊消息走 Debounce（@mention 消息也入队，但会重置窗口到最小值，快速触发）
+    if (session.type === 'group') {
+      this.debounceHandler.enqueue(session.session_id, message, friend)
+      return
+    }
+
+    // 私聊消息直接处理（带 SwitchMap）
+    await this.processDirectMessage(message, friend)
+  }
+
+  /**
+   * 私聊消息处理（SwitchMap：同 session 新消息取消旧请求）
+   */
+  private async processDirectMessage(message: ChannelMessage, friend: Friend): Promise<void> {
+    const { session, sender, content } = message
+
     // 1. 更新 session 状态
     this.sessionManager.updateLastMessageTime(session.session_id)
 
-    // 2. switchMap 处理
+    // 2. switchMap 处理：取消旧请求，合并被中断消息
     const requestId = crypto.randomUUID()
-    await this.switchmapHandler.handleNewMessage(session.session_id, requestId)
+    const mergedMessages = await this.switchmapHandler.handleNewMessage(
+      session.session_id,
+      requestId,
+      message
+    )
 
     // 3. 创建 Trace
     const trace = this.traceStore.startTrace({
       module_id: this.config.moduleId,
       trigger: {
         type: 'message',
-        summary: (content.text ?? '[非文本消息]').slice(0, 200),
+        summary: mergedMessages.length > 1
+          ? `[merged×${mergedMessages.length}] ${mergedMessages.map((m) => (m.content.text ?? '').slice(0, 50)).join(' | ').slice(0, 200)}`
+          : (content.text ?? '[非文本消息]').slice(0, 200),
         source: session.channel_id,
       },
     })
@@ -355,7 +391,6 @@ ${skillsSection}
     try {
       // 4. 如果没有配置 Front Agent 能力，需要调用外部 Agent
       if (!this.roles.has('front') || !this.frontHandler) {
-        // TODO: 调用外部 Front Agent 模块
         this.traceStore.endTrace(trace.trace_id, 'failed', { summary: 'No front agent configured' })
         return
       }
@@ -377,7 +412,8 @@ ${skillsSection}
           channel_id: session.channel_id,
           session_id: session.session_id,
           sender_id: sender.platform_user_id,
-          message: content.text ?? '',
+          // 合并所有消息的文本作为上下文（与 processGroupBatch 保持一致）
+          message: mergedMessages.map((m) => m.content.text ?? '').join('\n'),
           friend_id: sender.friend_id,
         },
         friend,
@@ -388,15 +424,23 @@ ${skillsSection}
       // 7. 构建 TraceCallback
       const traceCallback = this.buildTraceCallback(trace.trace_id)
 
-      // 8. 调用 Front Agent（内部调用，无 RPC）
+      // 8. 调用 Front Agent（传入合并后的消息列表）
       const result = await this.frontHandler.handleMessage({
-        messages: [message],
+        messages: mergedMessages,
         context,
       }, traceCallback)
 
-      // 9. 分发决策
+      // 9. Abort 检查：若已被更新消息取代，跳过 dispatch（防止并发双发 reply）
+      if (this.sessionManager.getPendingRequest(session.session_id) !== requestId) {
+        this.traceStore.endTrace(trace.trace_id, 'completed', {
+          summary: 'superseded by newer message',
+        })
+        return
+      }
+
+      // 10. 分发决策
+      const lastMessage = mergedMessages[mergedMessages.length - 1]
       for (const decision of result.decisions) {
-        // 记录 decision span
         const decisionSpan = this.traceStore.startSpan(trace.trace_id, {
           type: 'decision',
           details: {
@@ -405,22 +449,32 @@ ${skillsSection}
               ? (decision.reply.text ?? '').slice(0, 100)
               : decision.type === 'create_task'
               ? decision.task_title
-              : `task_id: ${decision.task_id}`,
+              : decision.type === 'forward_to_worker'
+              ? `task_id: ${decision.task_id}`
+              : 'silent',
           },
         })
 
-        await this.decisionDispatcher.dispatch(decision, {
-          channel_id: session.channel_id,
-          session_id: session.session_id,
-          message,
-          memoryPermissions: memPerms,
-        })
+        await this.decisionDispatcher.dispatch(
+          decision,
+          {
+            channel_id: session.channel_id,
+            session_id: session.session_id,
+            message: lastMessage,
+            memoryPermissions: memPerms,
+          },
+          {
+            traceStore: this.traceStore,
+            traceId: trace.trace_id,
+            parentSpanId: decisionSpan.span_id,
+          }
+        )
 
         this.traceStore.endSpan(trace.trace_id, decisionSpan.span_id, 'completed')
       }
 
-      // 10. 写入短期记忆（带 span 追踪耗时）
-      if (sender.friend_id && content.text) {
+      // 11. 写入短期记忆（合并所有消息文本）
+      if (sender.friend_id && mergedMessages.some((m) => m.content.text)) {
         const agentReply = this.extractReplyText(result.decisions)
         if (agentReply) {
           const memSpan = this.traceStore.startSpan(trace.trace_id, {
@@ -435,7 +489,7 @@ ${skillsSection}
             channel_id: session.channel_id,
             session_id: session.session_id,
             sender_name: friend.display_name,
-            user_message: content.text,
+            user_message: mergedMessages.map((m) => m.content.text ?? '').join('\n'),
             agent_reply: agentReply,
             visibility: memPerms.write_visibility,
             scopes: memPerms.write_scopes,
@@ -451,8 +505,132 @@ ${skillsSection}
       const msg = error instanceof Error ? error.message : String(error)
       this.traceStore.endTrace(trace.trace_id, 'failed', { summary: msg, error: msg })
     } finally {
-      // 11. 完成 request
       this.switchmapHandler.completeRequest(session.session_id, requestId)
+    }
+  }
+
+  /**
+   * 群聊批量消息处理（Debounce flush 回调）
+   *
+   * Debounce 窗口到期后调用，传入该窗口内积累的所有消息。
+   * Agent 判断是否需要回复：有回复 → 重置窗口；无关消息 → 退避窗口。
+   *
+   * @see protocol-agent-v2.md §5.2
+   */
+  private async processGroupBatch(sessionId: string, buffered: BufferedMessage[]): Promise<void> {
+    if (buffered.length === 0) return
+
+    // 使用最后一条消息的 friend 信息作为代表
+    const lastEntry = buffered[buffered.length - 1]
+    const messages = buffered.map((b) => b.message)
+    const session = messages[0].session
+
+    // 检查 Front Agent 能力
+    if (!this.roles.has('front') || !this.frontHandler) {
+      return
+    }
+
+    // 创建 Trace
+    const summary = messages
+      .map((m) => `${m.sender.platform_display_name}: ${(m.content.text ?? '').slice(0, 50)}`)
+      .join(' | ')
+      .slice(0, 200)
+    const trace = this.traceStore.startTrace({
+      module_id: this.config.moduleId,
+      trigger: {
+        type: 'message',
+        summary: `[group×${messages.length}] ${summary}`,
+        source: session.channel_id,
+      },
+    })
+
+    try {
+      const memPerms = this.deriveMemoryPermissions(lastEntry.friend, sessionId)
+
+      // 组装上下文
+      const ctxSpan = this.traceStore.startSpan(trace.trace_id, {
+        type: 'context_assembly',
+        details: {
+          context_type: 'front',
+          channel_id: session.channel_id,
+          session_id: sessionId,
+        },
+      })
+      const lastMsg = messages[messages.length - 1]
+      const context = await this.contextAssembler.assembleFrontContext(
+        {
+          channel_id: session.channel_id,
+          session_id: sessionId,
+          sender_id: lastMsg.sender.platform_user_id,
+          message: messages.map((m) => m.content.text ?? '').join('\n'),
+          friend_id: lastMsg.sender.friend_id,
+        },
+        lastEntry.friend,
+        memPerms
+      )
+      this.traceStore.endSpan(trace.trace_id, ctxSpan.span_id, 'completed')
+
+      const traceCallback = this.buildTraceCallback(trace.trace_id)
+
+      // 调用 Front Agent，传入整批消息
+      const result = await this.frontHandler.handleMessage({
+        messages,
+        context,
+      }, traceCallback)
+
+      // 判断是否产生了有意义的回复
+      const hasReply = result.decisions.some(
+        (d) => d.type === 'direct_reply' || d.type === 'create_task'
+      )
+
+      if (hasReply) {
+        // 分发决策
+        for (const decision of result.decisions) {
+          const decisionSpan = this.traceStore.startSpan(trace.trace_id, {
+            type: 'decision',
+            details: {
+              decision_type: decision.type,
+              summary: decision.type === 'direct_reply'
+                ? (decision.reply.text ?? '').slice(0, 100)
+                : decision.type === 'create_task'
+                ? decision.task_title
+                : decision.type === 'forward_to_worker'
+                ? `task_id: ${decision.task_id}`
+                : 'silent',
+            },
+          })
+
+          await this.decisionDispatcher.dispatch(
+            decision,
+            {
+              channel_id: session.channel_id,
+              session_id: sessionId,
+              message: lastMsg,
+              memoryPermissions: memPerms,
+            },
+            {
+              traceStore: this.traceStore,
+              traceId: trace.trace_id,
+              parentSpanId: decisionSpan.span_id,
+            }
+          )
+
+          this.traceStore.endSpan(trace.trace_id, decisionSpan.span_id, 'completed')
+        }
+      }
+      // else: silent discard — 不发送任何回复
+
+      // 报告结果，调整 debounce 窗口
+      this.debounceHandler.reportResult(sessionId, hasReply)
+
+      this.traceStore.endTrace(trace.trace_id, 'completed', {
+        summary: hasReply
+          ? (this.extractReplyText(result.decisions)?.slice(0, 200) ?? 'replied')
+          : 'silent discard',
+      })
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      this.traceStore.endTrace(trace.trace_id, 'failed', { summary: msg, error: msg })
     }
   }
 
@@ -714,7 +892,7 @@ ${skillsSection}
 
       // switchMap 处理
       const requestId = crypto.randomUUID()
-      await this.switchmapHandler.handleNewMessage(sessionId, requestId)
+      const mergedMessages = await this.switchmapHandler.handleNewMessage(sessionId, requestId, message)
 
       try {
         // 检查是否有 Front Agent 能力
@@ -734,7 +912,7 @@ ${skillsSection}
             channel_id: message.session.channel_id,
             session_id: sessionId,
             sender_id: message.sender.platform_user_id,
-            message: message.content.text ?? '',
+            message: mergedMessages.map((m) => m.content.text ?? '').join('\n'),
             friend_id: message.sender.friend_id,
           },
           undefined,
@@ -743,20 +921,26 @@ ${skillsSection}
 
         // 调用 Front Agent
         const result = await this.frontHandler.handleMessage({
-          messages: [message],
+          messages: mergedMessages,
           context,
         })
+
+        // 检查是否已被更新消息取代
+        if (this.sessionManager.getPendingRequest(sessionId) !== requestId) {
+          return { decision_types: [] }
+        }
 
         // 分发决策
         const taskIds: TaskId[] = []
         const decisionTypes: string[] = []
+        const lastMessage = mergedMessages[mergedMessages.length - 1]
 
         for (const decision of result.decisions) {
           decisionTypes.push(decision.type)
           const dispatchResult = await this.decisionDispatcher.dispatch(decision, {
             channel_id: message.session.channel_id,
             session_id: sessionId,
-            message,
+            message: lastMessage,
             memoryPermissions: channelMemPerms,
           })
           if (dispatchResult.task_id) {
@@ -791,14 +975,16 @@ ${skillsSection}
 
     // switchMap 处理
     const requestId = crypto.randomUUID()
-    await this.switchmapHandler.handleNewMessage(sessionId, requestId)
+    const mergedMessages = await this.switchmapHandler.handleNewMessage(sessionId, requestId, message)
 
     // 创建 Trace
     const trace = this.traceStore.startTrace({
       module_id: this.config.moduleId,
       trigger: {
         type: 'message',
-        summary: (message.content.text ?? '[非文本消息]').slice(0, 200),
+        summary: mergedMessages.length > 1
+          ? `[merged×${mergedMessages.length}] ${mergedMessages.map((m) => (m.content.text ?? '').slice(0, 50)).join(' | ').slice(0, 200)}`
+          : (message.content.text ?? '[非文本消息]').slice(0, 200),
         source: 'admin-web',
       },
     })
@@ -859,7 +1045,7 @@ ${skillsSection}
           channel_id: 'admin-web',
           session_id: sessionId,
           sender_id: 'master',
-          message: message.content.text ?? '',
+          message: mergedMessages.map((m) => m.content.text ?? '').join('\n'),
           friend_id: message.sender.friend_id ?? 'master',
         },
         {
@@ -879,13 +1065,20 @@ ${skillsSection}
 
       // 调用 Front Agent
       const result = await this.frontHandler.handleMessage({
-        messages: [message],
+        messages: mergedMessages,
         context,
       }, traceCallback)
+
+      // 检查是否已被更新消息取代
+      if (this.sessionManager.getPendingRequest(sessionId) !== requestId) {
+        this.traceStore.endTrace(trace.trace_id, 'completed', { summary: 'superseded by newer message' })
+        return { decision_types: [] }
+      }
 
       // 分发决策（使用 Admin Chat 回调）
       const taskIds: TaskId[] = []
       const decisionTypes: string[] = []
+      const lastMessage = mergedMessages[mergedMessages.length - 1]
 
       for (const decision of result.decisions) {
         decisionTypes.push(decision.type)
@@ -899,17 +1092,27 @@ ${skillsSection}
               ? (decision.reply.text ?? '').slice(0, 100)
               : decision.type === 'create_task'
               ? decision.task_title
-              : `task_id: ${decision.task_id}`,
+              : decision.type === 'forward_to_worker'
+              ? `task_id: ${decision.task_id}`
+              : 'silent',
           },
         })
 
-        const dispatchResult = await this.decisionDispatcher.dispatch(decision, {
-          channel_id: 'admin-web',
-          session_id: sessionId,
-          message,
-          memoryPermissions: masterMemPerms,
-          admin_chat_callback: callbackInfo,
-        })
+        const dispatchResult = await this.decisionDispatcher.dispatch(
+          decision,
+          {
+            channel_id: 'admin-web',
+            session_id: sessionId,
+            message: lastMessage,
+            memoryPermissions: masterMemPerms,
+            admin_chat_callback: callbackInfo,
+          },
+          {
+            traceStore: this.traceStore,
+            traceId: trace.trace_id,
+            parentSpanId: decisionSpan.span_id,
+          }
+        )
 
         this.traceStore.endSpan(trace.trace_id, decisionSpan.span_id, 'completed')
 
@@ -934,7 +1137,7 @@ ${skillsSection}
             channel_id: 'admin-web',
             session_id: sessionId,
             sender_name: 'Master',
-            user_message: message.content.text,
+            user_message: mergedMessages.map((m) => m.content.text ?? '').join('\n'),
             agent_reply: agentReply,
             visibility: masterMemPerms.write_visibility,
             scopes: masterMemPerms.write_scopes,
@@ -1263,8 +1466,7 @@ ${skillsSection}
         this.sdkEnvFront = this.buildSdkEnv(frontConfig)
         this.frontHandler = new FrontHandler(this.sdkEnvFront, {
           personalityPrompt: personalityPrompt || undefined,
-          maxIterations: this.agentConfig?.max_iterations ?? 3,
-          timeout: this.orchestrationConfig.front_agent_timeout * 1000,
+          maxIterations: this.agentConfig?.max_iterations ?? 10,
         }, createMcpConfigs)
         console.log(`[${this.config.moduleId}] Front Agent SDK env updated`)
       }
@@ -1277,7 +1479,7 @@ ${skillsSection}
         this.sdkEnvWorker = this.buildSdkEnv(workerConfig)
         this.workerHandler = new WorkerHandler(this.sdkEnvWorker, {
           personalityPrompt: personalityPrompt || undefined,
-          maxIterations: this.agentConfig?.max_iterations ?? 20,
+          maxIterations: this.agentConfig?.max_iterations,
         }, createMcpConfigs)
         console.log(`[${this.config.moduleId}] Worker Agent SDK env updated`)
       }
@@ -1442,6 +1644,7 @@ ${skillsSection}
 
   protected override async onStop(): Promise<void> {
     this.sessionManager.stopCleanup()
+    this.debounceHandler.stopAll()
 
     // 停止 MCP Servers
     if (this.mcpManager) {

@@ -19,11 +19,21 @@ import * as fs from 'fs'
 import * as path from 'path'
 
 const LOG_FILE = path.join(process.cwd(), '../data/front-handler-debug.log')
+const PROMPTS_FILE = path.join(process.cwd(), 'prompts.md')
 
 function logToFile(message: string) {
   const timestamp = new Date().toISOString()
   try { fs.appendFileSync(LOG_FILE, `[${timestamp}] ${message}\n`) } catch { /* ignore */ }
   console.log(message)
+}
+
+function loadPrompts(): string {
+  try {
+    if (fs.existsSync(PROMPTS_FILE)) {
+      return fs.readFileSync(PROMPTS_FILE, 'utf-8')
+    }
+  } catch { /* ignore */ }
+  return DEFAULT_ROUTING_INSTRUCTIONS
 }
 
 export interface SdkEnvConfig {
@@ -34,10 +44,9 @@ export interface SdkEnvConfig {
 export interface FrontHandlerConfig {
   personalityPrompt?: string
   maxIterations: number
-  timeout: number
 }
 
-const ROUTING_INSTRUCTIONS = `## 分诊规则（内部指令）
+const DEFAULT_ROUTING_INSTRUCTIONS = `## 分诊规则（内部指令）
 
 你负责快速处理用户消息。你有两种方式响应：
 
@@ -56,6 +65,10 @@ const ROUTING_INSTRUCTIONS = `## 分诊规则（内部指令）
 \`\`\`json
 {"decisions":[{"type":"create_task","task_title":"任务标题","task_description":"任务详细描述","task_type":"general","immediate_reply":{"type":"text","text":"好的，我来处理这个任务，请稍等..."}}]}
 \`\`\`
+
+### 任务进度查询
+- 用户问"任务进度"、"处理得怎么样了"、"之前那个任务"等 → 从上下文的活跃任务列表中查找并直接回复状态
+- 如果没有活跃任务 → 告知用户当前没有正在处理的任务
 
 ### 判断标准
 - 能在 1-2 步工具调用内完成 → 直接处理
@@ -89,11 +102,11 @@ export class FrontHandler {
     this.config = {
       personalityPrompt: config?.personalityPrompt,
       maxIterations: config?.maxIterations ?? 10,
-      timeout: config?.timeout ?? 30000,
     }
+    const routingInstructions = loadPrompts()
     this.systemPrompt = this.config.personalityPrompt
-      ? `${this.config.personalityPrompt}\n\n${ROUTING_INSTRUCTIONS}`
-      : ROUTING_INSTRUCTIONS
+      ? `${this.config.personalityPrompt}\n\n${routingInstructions}`
+      : routingInstructions
   }
 
   async handleMessage(
@@ -102,8 +115,6 @@ export class FrontHandler {
   ): Promise<HandleMessageResult> {
     const { messages, context } = params
     const userMessage = this.buildUserMessage(messages, context)
-    const timeoutController = new AbortController()
-    const timeoutId = setTimeout(() => timeoutController.abort(), this.config.timeout)
 
     try {
       for (let attempt = 0; attempt < 3; attempt++) {
@@ -114,13 +125,11 @@ export class FrontHandler {
           systemPrompt: this.systemPrompt,
           model: this.sdkEnv.modelId,
           env: this.sdkEnv.env,
-          // Front Handler: 3 轮足够处理简单工具调用（call→result→reply）
-          maxTurns: 3,
+          maxTurns: this.config.maxIterations,
           loopLabel: 'front',
           // 不设 allowedTools — 让 Front 有基础工具（Bash, Read 等）
           // 简单命令直接执行，复杂任务通过 JSON 决策派给 Worker
           ...(mcpServers && Object.keys(mcpServers).length > 0 && { mcpServers }),
-          abortController: timeoutController,
           traceCallback,
         }
 
@@ -142,8 +151,14 @@ export class FrontHandler {
           }
 
           // 3. 有文本但不是 JSON 决策 → 模型可能用了工具后直接给出了回答
-          //    将其包装为 direct_reply（排除包含 decisions JSON 的残破文本）
+          //    私聊：包装为 direct_reply；群聊无@：静默
           if (result.text.trim().length > 0 && !result.text.includes('"decisions"')) {
+            const isGroup = messages[0]?.session?.type === 'group'
+            const hasMention = messages.some((m) => m.features.is_mention_crab)
+            if (isGroup && !hasMention) {
+              logToFile(`[FrontHandler] 群聊无@提及，纯文本输出静默处理`)
+              return { decisions: [{ type: 'silent' }] }
+            }
             logToFile(`[FrontHandler] 模型返回纯文本（可能用了工具），包装为 direct_reply`)
             return {
               decisions: [{
@@ -154,9 +169,13 @@ export class FrontHandler {
           }
         }
 
-        // 4. error_max_turns 或工具调用失败 → 升级为 create_task
+        // 4. error_max_turns 或工具调用失败
         if (result.isError || (result.toolCalls.length > 0 && !result.text?.trim())) {
-          logToFile(`[FrontHandler] 工具调用失败或超限(isError=${result.isError}, toolCalls=${result.toolCalls.length})，升级为 create_task`)
+          logToFile(`[FrontHandler] 工具调用失败或超限(isError=${result.isError}, toolCalls=${result.toolCalls.length})`)
+          const isGroup = messages[0]?.session?.type === 'group'
+          if (isGroup) {
+            return { decisions: [{ type: 'silent' }] }
+          }
           return {
             decisions: [{
               type: 'create_task',
@@ -172,13 +191,19 @@ export class FrontHandler {
       }
 
       logToFile('[FrontHandler] 所有尝试均失败')
+      const isGroup = messages[0]?.session?.type === 'group'
+      if (isGroup) {
+        return { decisions: [{ type: 'silent' }] }
+      }
       return { decisions: [{ type: 'direct_reply', reply: { type: 'text', text: 'AI 服务暂时无法响应，请稍后再试' } }] }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
       logToFile(`[FrontHandler] 异常: ${msg}`)
+      const isGroup = messages[0]?.session?.type === 'group'
+      if (isGroup) {
+        return { decisions: [{ type: 'silent' }] }
+      }
       return { decisions: [{ type: 'direct_reply', reply: { type: 'text', text: `AI 服务异常：${msg}` } }] }
-    } finally {
-      clearTimeout(timeoutId)
     }
   }
 
@@ -187,6 +212,17 @@ export class FrontHandler {
     parts.push('## 上下文信息')
     parts.push(`- 用户: ${context.sender_friend.display_name}`)
     parts.push(`- 活跃任务数: ${context.active_tasks.length}`)
+
+    if (context.active_tasks.length > 0) {
+      parts.push('\n## 活跃任务列表')
+      for (const task of context.active_tasks) {
+        parts.push(`- [${task.status}] ${task.title} (ID: ${task.task_id}, 类型: ${task.task_type}, 优先级: ${task.priority})`)
+        if (task.plan_summary) {
+          parts.push(`  计划摘要: ${task.plan_summary}`)
+        }
+      }
+      parts.push('\n当用户询问任务进度时，请根据上述任务列表回答。')
+    }
 
     // 从消息中提取当前会话信息（crab-messaging 工具需要）
     if (messages.length > 0) {
@@ -206,18 +242,32 @@ export class FrontHandler {
     }
 
     if (context.recent_messages.length > 0) {
-      parts.push('\n## 最近消息')
+      parts.push(`\n## 最近消息（已预加载，共 ${context.recent_messages.length} 条；如需更早历史，用 get_history 工具获取）`)
       for (const msg of context.recent_messages.slice(-10)) {
         const sender = msg.sender.platform_display_name
         const fullText = msg.content.text ?? '[非文本消息]'
         const text = fullText.length > 300 ? fullText.slice(0, 300) + '...[内容截断]' : fullText
         parts.push(`- ${sender}: ${text}`)
       }
+    } else {
+      parts.push('\n## 最近消息（暂无历史记录，如需更早历史可用 get_history 工具）')
     }
 
-    parts.push('\n## 当前消息')
-    for (const msg of messages) {
-      parts.push(`- ${msg.sender.platform_display_name}: ${msg.content.text ?? '[非文本消息]'}`)
+    const isGroup = messages[0]?.session?.type === 'group'
+    const hasMention = messages.some((m) => m.features.is_mention_crab)
+
+    if (isGroup) {
+      parts.push(`\n## 当前群聊消息批次（共 ${messages.length} 条）`)
+      parts.push(`- 是否 @你: ${hasMention ? '是' : '否'}`)
+      for (const msg of messages) {
+        const mention = msg.features.is_mention_crab ? ' [@你]' : ''
+        parts.push(`- [${msg.sender.platform_display_name}]${mention}: ${msg.content.text ?? '[非文本消息]'}`)
+      }
+    } else {
+      parts.push('\n## 当前消息')
+      for (const msg of messages) {
+        parts.push(`- ${msg.sender.platform_display_name}: ${msg.content.text ?? '[非文本消息]'}`)
+      }
     }
 
     if (context.available_tools.length > 0) {
@@ -313,6 +363,8 @@ export class FrontHandler {
           task_id: d.task_id as string,
           immediate_reply: d.immediate_reply ? (d.immediate_reply as MessageContent) : undefined,
         }
+      case 'silent':
+        return { type: 'silent' }
       default:
         return { type: 'direct_reply', reply: { type: 'text', text: '未知的决策类型' } }
     }

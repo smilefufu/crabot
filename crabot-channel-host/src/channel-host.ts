@@ -192,8 +192,10 @@ export class ChannelHost extends ModuleBase {
     await dispatch.deliver(replyPayload, { kind: 'final' })
     console.log('[ChannelHost] handleSendMessage: dispatch.deliver returned')
 
-    // 消费完毕后删除
-    this.pendingDispatches.delete(params.session_id)
+    // 不删除 pendingDispatch — 同一 session 可能需要多次发送：
+    // 1. Front 即时回复（"收到，请稍等"）
+    // 2. Worker 异步完成后回复结果
+    // pendingDispatch 由 TTL 自动清理（5 分钟），或下一条入站消息覆盖
 
     const messageId = generateId()
     const sentAt = generateTimestamp()

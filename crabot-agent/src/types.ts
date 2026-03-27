@@ -79,6 +79,11 @@ export interface UnifiedAgentConfig {
   port: number
   orchestration: OrchestrationConfig
   agent_config?: AgentLayerConfig
+  /**
+   * 扩展配置（非协议固定字段，由具体 Agent 实现自定义）
+   * @see protocol-agent-v2.md §6 extra
+   */
+  extra?: Record<string, unknown>
 }
 
 // ============================================================================
@@ -522,10 +527,15 @@ export interface WorkerTaskState {
   pendingHumanMessages: ChannelMessage[]
 }
 
+export interface SilentDecision {
+  type: 'silent'
+}
+
 export type MessageDecision =
   | DirectReplyDecision
   | CreateTaskDecision
   | ForwardToWorkerDecision
+  | SilentDecision
 
 // ============================================================================
 // 配置热更新
@@ -575,6 +585,7 @@ export type AgentSpanType =
   | 'decision'
   | 'context_assembly'
   | 'memory_write'
+  | 'rpc_call'
 
 export interface AgentLoopDetails {
   loop_label?: string
@@ -626,6 +637,16 @@ export interface MemoryWriteDetails {
   channel_id: string
 }
 
+export interface RpcCallDetails {
+  target_module: string
+  target_port: number
+  method: string
+  request_summary: string
+  response_summary?: string
+  status_code?: number
+  error?: string
+}
+
 export type AgentSpanDetails =
   | AgentLoopDetails
   | LlmCallDetails
@@ -634,6 +655,7 @@ export type AgentSpanDetails =
   | DecisionDetails
   | ContextAssemblyDetails
   | MemoryWriteDetails
+  | RpcCallDetails
 
 export interface AgentSpan {
   span_id: string

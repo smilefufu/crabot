@@ -158,6 +158,20 @@ Agent 启动 / 收到 push
 - **三级 fallback 回退到过期数据**：provider 解析失败时回退到旧快照，导致用旧配置运行
 - **从代码反推架构**：应以 protocol-admin.md §3.19 为准，不以现有代码实现为准
 
+## Agent 调试（快速参考）
+
+遇到 Agent 相关问题时，先用调试脚本排查：
+
+```bash
+./scripts/debug-agent.sh health   # 确认各模块存活
+./scripts/debug-agent.sh traces   # 查看最近 trace
+./scripts/debug-agent.sh trace    # 查看最新 trace 详情（含 span 树）
+./scripts/debug-agent.sh tasks    # 查看 Admin 任务状态
+./scripts/debug-agent.sh logs     # 查看 SDK Runner 日志
+```
+
+完整调试手册：[docs/agent-debugging.md](docs/agent-debugging.md)
+
 ## 开发环境（必须了解）
 
 ### dev.sh（推荐的开发方式）

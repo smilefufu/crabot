@@ -90,3 +90,11 @@ agent_config:
 
   # Skills (可选)
   skills: []
+
+# 扩展配置（非协议固定字段，crabot-agent 专用）
+# @see protocol-agent-v2.md §5.2, §6
+extra:
+  # 群聊最小缓冲窗口（ms），Agent 回复或收到 @消息后重置到此值
+  group_debounce_min_ms: 5000
+  # 群聊最大缓冲窗口（ms），约 5 分钟
+  group_debounce_max_ms: 300000

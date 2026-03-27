@@ -51,6 +51,20 @@ export const channelService = {
     )
   },
 
+  // Local Config（启动前环境变量配置）
+  async getLocalConfig(id: string) {
+    return api.get<{ config: Record<string, string> }>(`/channel-instances/${id}/local-config`)
+  },
+
+  async saveLocalConfig(id: string, config: Record<string, string>) {
+    return api.post<{ config: Record<string, string> }>(`/channel-instances/${id}/local-config`, { config })
+  },
+
+  // Health（protocol-channel §7.1）
+  async getHealth(id: string) {
+    return api.get<{ status: string; details: Record<string, unknown> }>(`/channel-instances/${id}/health`)
+  },
+
   // Module Control
   async startInstance(id: string) {
     return api.post(`/channel-instances/${id}/start`)

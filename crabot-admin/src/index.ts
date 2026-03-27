@@ -245,9 +245,12 @@ export class AdminModule extends ModuleBase {
     this.modelProviderManager.setModuleEnvModelsProvider(
       () => this.getModuleEnvLiteLLMModels()
     )
-    this.agentManager.setOnConfigChanged(
-      () => this.modelProviderManager.requestSync()
-    )
+    this.agentManager.setOnConfigChanged(() => {
+      this.modelProviderManager.requestSync()
+      this.pushConfigToAgentModules().catch((err: Error) => {
+        console.warn('[Admin] pushConfigToAgentModules after agent config change failed:', err.message)
+      })
+    })
 
     // 注册 Admin 协议方法
       this.registerMethod('list_friends', this.handleListFriends.bind(this))
@@ -895,6 +898,34 @@ export class AdminModule extends ModuleBase {
       if (pathname.match(/^\/api\/channel-instances\/[^/]+\/config$/) && req.method === 'PATCH') {
         const id = decodeURIComponent(pathname.split('/')[3])
         await this.handleUpdateChannelInstanceConfigApi(req, res, id)
+        return
+      }
+
+      // Channel Instance :id/local-config 路由（启动前环境变量配置）
+      if (pathname.match(/^\/api\/channel-instances\/[^/]+\/local-config$/) && req.method === 'GET') {
+        const id = decodeURIComponent(pathname.split('/')[3])
+        await this.handleGetChannelLocalConfigApi(res, id)
+        return
+      }
+
+      if (pathname.match(/^\/api\/channel-instances\/[^/]+\/local-config$/) && (req.method === 'PUT' || req.method === 'POST')) {
+        const id = decodeURIComponent(pathname.split('/')[3])
+        await this.handlePutChannelLocalConfigApi(req, res, id)
+        return
+      }
+
+      // Channel Instance health（protocol-channel §7.1）
+      if (pathname.match(/^\/api\/channel-instances\/[^/]+\/health$/) && req.method === 'GET') {
+        const id = decodeURIComponent(pathname.split('/')[3])
+        try {
+          const health = await this.channelManager.getHealth(id)
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify(health))
+        } catch (err) {
+          const status = (err instanceof Error && err.message.includes('not running')) ? 503 : 500
+          res.writeHead(status, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'health check failed' }))
+        }
         return
       }
 
@@ -3690,6 +3721,36 @@ export class AdminModule extends ModuleBase {
         return
       }
       throw error
+    }
+  }
+
+  private async handleGetChannelLocalConfigApi(res: ServerResponse, id: string): Promise<void> {
+    const instance = this.channelManager.getInstance(id)
+    if (!instance) {
+      res.writeHead(404)
+      res.end(JSON.stringify({ error: 'Instance not found' }))
+      return
+    }
+    const config = await this.channelManager.loadLocalConfig(id)
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ config: config ?? {} }))
+  }
+
+  private async handlePutChannelLocalConfigApi(req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
+    const instance = this.channelManager.getInstance(id)
+    if (!instance) {
+      res.writeHead(404)
+      res.end(JSON.stringify({ error: 'Instance not found' }))
+      return
+    }
+    try {
+      const body = await this.readJsonBody<{ config: Record<string, string> }>(req)
+      await this.channelManager.saveLocalConfig(id, body.config)
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ config: body.config }))
+    } catch (error) {
+      res.writeHead(400)
+      res.end(JSON.stringify({ error: error instanceof Error ? error.message : 'Invalid request' }))
     }
   }
 

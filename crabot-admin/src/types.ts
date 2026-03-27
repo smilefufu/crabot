@@ -1380,6 +1380,8 @@ export interface ChannelImplementation {
   module_path?: string // builtin 类型使用
   installed_path?: string // installed 类型使用
   version: string
+  /** 配置 JSON Schema（来自 crabot-module.yaml config_schema），供 Admin UI 动态渲染表单 */
+  config_schema?: Record<string, unknown>
   created_at: string
   updated_at: string
 }
@@ -1440,6 +1442,8 @@ export interface CreateChannelInstanceParams {
   platform?: string
   state_dir?: string
   auto_start?: boolean
+  /** 模块启动环境变量（如 WECHAT_CONNECTOR_URL），保存到 channel-configs/<id>.json */
+  env?: Record<string, string>
 }
 
 /**

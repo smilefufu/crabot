@@ -1,7 +1,7 @@
 /**
  * Crab-Messaging MCP Server — Agent 统一通讯能力
  *
- * 提供 5 个工具：lookup_friend, list_sessions, open_private_session, send_message, get_history
+ * 提供 6 个工具：lookup_friend, list_friends, list_sessions, open_private_session, send_message, get_history
  * 对齐 protocol-crab-messaging.md
  *
  * @see crabot-docs/protocols/protocol-crab-messaging.md
@@ -193,7 +193,64 @@ export function createCrabMessagingServer(
       ),
 
       // ================================================================
-      // 2. list_sessions — 查看会话列表
+      // 2. list_friends — 列出好友列表
+      // ================================================================
+      tool(
+        'list_friends',
+        '列出所有好友，支持分页、搜索和权限过滤。',
+        {
+          page: z.number().optional().describe('页码，默认 1'),
+          page_size: z.number().optional().describe('每页条数，默认 20'),
+          search: z.string().optional().describe('按名称模糊搜索'),
+          permission: z.enum(['master', 'normal']).optional().describe('按权限过滤'),
+        },
+        async (args) => {
+          const adminPort = await getAdminPort()
+
+          const result = await rpcClient.call<
+            {
+              search?: string
+              permission?: 'master' | 'normal'
+              pagination?: { page: number; page_size: number }
+            },
+            {
+              items: Friend[]
+              pagination: { page: number; page_size: number; total_items: number; total_pages: number }
+            }
+          >(adminPort, 'list_friends', {
+            ...(args.search ? { search: args.search } : {}),
+            ...(args.permission ? { permission: args.permission } : {}),
+            pagination: {
+              page: args.page ?? 1,
+              page_size: args.page_size ?? 20,
+            },
+          }, moduleId)
+
+          const friends = result.items.map(f => ({
+            friend_id: f.id,
+            display_name: f.display_name,
+            permission: f.permission,
+            channels: f.channel_identities.map(ci => ({
+              channel_id: ci.channel_id,
+              platform_user_id: ci.platform_user_id,
+              platform_display_name: ci.platform_display_name ?? ci.platform_user_id,
+            })),
+          }))
+
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                friends,
+                pagination: result.pagination,
+              }),
+            }],
+          }
+        },
+      ),
+
+      // ================================================================
+      // 3. list_sessions — 查看会话列表
       // ================================================================
       tool(
         'list_sessions',
@@ -229,7 +286,7 @@ export function createCrabMessagingServer(
       ),
 
       // ================================================================
-      // 3. open_private_session — 打开/创建私聊
+      // 4. open_private_session — 打开/创建私聊
       // ================================================================
       tool(
         'open_private_session',
@@ -289,7 +346,7 @@ export function createCrabMessagingServer(
       ),
 
       // ================================================================
-      // 4. send_message — 发送消息
+      // 5. send_message — 发送消息
       // ================================================================
       tool(
         'send_message',
@@ -416,7 +473,7 @@ export function createCrabMessagingServer(
       ),
 
       // ================================================================
-      // 5. get_history — 查看聊天记录
+      // 6. get_history — 查看聊天记录
       // ================================================================
       tool(
         'get_history',

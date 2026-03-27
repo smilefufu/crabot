@@ -1,6 +1,6 @@
 # Crabot 项目进度
 
-> 最后更新：2026-03-23 — McpServer Protocol reuse bug 修复
+> 最后更新：2026-03-26 — SwitchMap 消息合并 + 群聊 Debounce + Front/Worker Handler 改进
 
 ---
 
@@ -17,7 +17,7 @@ Module Manager (port 19000)
 │   ├── 消息鉴权网关（channel.message_received → channel.message_authorized）
 │   └── PTY 会话管理 + Web 终端 (/ws/pty/*)
 ├── Agent (port 由 MM 分配)
-│   ├── Front Handler（快速分诊，3 次重试）
+│   ├── Front Handler（快速分诊，默认 10 轮，3 次重试）
 │   └── Worker Handler（深度执行）
 ├── Memory (Python, port 19002)
 │   └── 短期/长期记忆（LanceDB 向量检索）
@@ -60,6 +60,9 @@ Module Manager (port 19000)
 - [x] Agent 模块 Skills/MCP/聊天历史/crab-messaging 修复 — Skills UI 简化，消息预加载量优化（Front 10 条 / Worker 20 条），crab-messaging MCP Server 5 工具实现，对齐 protocol-crab-messaging.md，路径安全验证，TypeScript 编译零错误
 - [x] 全局配置热更新 + 模型配置统一管控 — Memory 模块 reconfigure() 热更新、update_config RPC，Admin 推送配置无需重启；Agent/Memory 配置根因修复（全局配置唯一真相来源，模块不缓存 LLM 连接信息），反转 merge 顺序确保全局优先
 - [x] McpServer Protocol reuse bug 修复 — Claude Agent SDK 在 Front Handler 重试或并发消息时抛出 "Already connected to a transport" 错误；根因是 `createCrabMessagingServer()` 在 `initializeAgentLayer()` 中只调用一次，所有 `runSdk()` 共享同一个 McpServer 实例，SDK 的 `Protocol.connect()` 不允许重复连接；修复方案：将传入的 `SdkMcpServerConfig` 对象改为工厂函数 `() => Record<string, SdkMcpServerConfig>`，每次 `runSdk()` 调用时创建新的 McpServer 实例；涉及文件：`unified-agent.ts`、`front-handler.ts`、`worker-handler.ts`，TypeScript 编译零错误
+- [x] SwitchMap 私聊消息合并 — 同 session 新消息到达时，被中断的消息 A 与新消息 B 合并为 `[A, B]` 一起传给 LLM（协议 §5.1）；`SwitchMapHandler` 新增 `pendingBatches` 追踪批次；`unified-agent.ts` 三处调用点（`processDirectMessage`/`handleProcessMessage`/`processAdminChatMessage`）均更新；dispatch 前增加 abort 检查防止并发双发 reply
+- [x] 群聊 Debounce 消息合并 + 群聊行为改进 — 群聊已通过 DebounceHandler 合并批次传给 Front Agent；新增 `SilentDecision` 类型；Front Agent 群聊默认静默，仅 @提及或明确提问时回复；提示词外部化到 `prompts.md`（根目录），修改后重启生效
+- [x] Front/Worker Handler 系统性修复 — 修复 `maxTurns` 硬编码为 3 的 bug（现在正确读取 `maxIterations` 配置）；Front 默认轮数 3→10；Worker 默认无限制轮数（不传 `maxTurns`）；提示词明确区分"已预注入的上下文"与"需工具查询的更多历史"；`prompts-worker.md` 外部化到根目录
 
 ---
 
@@ -69,9 +72,8 @@ Module Manager (port 19000)
 
 | 功能 | 说明 |
 |------|------|
+| 端到端集成测试 | 飞书/OpenClaw → Agent → 回复完整链路，验证群聊静默、私聊合并等新行为 |
 | 端到端集成测试 | 飞书/OpenClaw → Agent → 回复完整链路验证 |
-| SwitchMap 合并重处理 | 被中断消息合并后重新处理（当前只取消不合并） |
-| 群聊自适应 Debounce | GroupDebounceManager，退避算法 5s→25s→125s→300s（见 protocol-agent-v2.md §5.2） |
 
 ### 🟡 中优先级
 
