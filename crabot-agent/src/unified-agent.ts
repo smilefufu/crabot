@@ -37,6 +37,8 @@ import { DecisionDispatcher } from './orchestration/decision-dispatcher.js'
 import { MemoryWriter } from './orchestration/memory-writer.js'
 import { DebounceHandler, type DebounceConfig, type BufferedMessage } from './orchestration/debounce-handler.js'
 import { FrontHandler, type SdkEnvConfig } from './agent/front-handler.js'
+import type { LLMClientConfig } from './agent/llm-client.js'
+import type { ToolExecutorDeps } from './agent/tool-executor.js'
 import { WorkerHandler } from './agent/worker-handler.js'
 import { MCPManager } from './agent/mcp-manager.js'
 import type { SdkMcpServerConfig } from './agent/sdk-runner.js'
@@ -59,8 +61,7 @@ export class UnifiedAgent extends ModuleBase {
   private workerHandler?: WorkerHandler
   private mcpManager?: MCPManager
   private roles: Set<'front' | 'worker'> = new Set()
-  /** SDK 环境配置（Front/Worker 共用） */
-  private sdkEnvFront?: SdkEnvConfig
+  /** SDK 环境配置（Worker 专用） */
   private sdkEnvWorker?: SdkEnvConfig
   /** Worker sandbox 路径映射（每次 executeTask 时更新） */
   private sandboxPathMappingsRef: { current: PathMapping[] } = { current: [] }
@@ -196,11 +197,21 @@ export class UnifiedAgent extends ModuleBase {
     if (this.roles.has('front')) {
       const frontModelConfig = config.model_config?.fast ?? config.model_config?.default
       if (frontModelConfig) {
-        this.sdkEnvFront = this.buildSdkEnv(frontModelConfig)
-        this.frontHandler = new FrontHandler(this.sdkEnvFront, {
+        const llmConfig: LLMClientConfig = {
+          endpoint: frontModelConfig.endpoint,
+          apikey: frontModelConfig.apikey,
+          model: frontModelConfig.model_id,
+        }
+        const toolExecutorDeps: ToolExecutorDeps = {
+          rpcClient: this.rpcClient,
+          moduleId: this.config.moduleId,
+          getAdminPort: () => this.getAdminPort(),
+          resolveChannelPort: (channelId) => this.getChannelPort(channelId),
+          getActiveTasks: () => this.getActiveTasksList(),
+        }
+        this.frontHandler = new FrontHandler(llmConfig, toolExecutorDeps, {
           personalityPrompt: personalityPrompt || undefined,
-          maxIterations: config.max_iterations ?? 10,
-        }, createMcpConfigs)
+        })
       }
     }
 
@@ -209,8 +220,9 @@ export class UnifiedAgent extends ModuleBase {
       const workerModelConfig = config.model_config?.smart ?? config.model_config?.default
       if (workerModelConfig) {
         this.sdkEnvWorker = this.buildSdkEnv(workerModelConfig)
+        const workerSdkEnv = this.sdkEnvWorker
         // MCP 服务器配置转换为 SDK 格式（stdio 类型直传）
-        this.workerHandler = new WorkerHandler(this.sdkEnvWorker, {
+        this.workerHandler = new WorkerHandler(workerSdkEnv, {
           personalityPrompt: personalityPrompt || undefined,
           maxIterations: config.max_iterations,
         }, createMcpConfigs)
@@ -1463,12 +1475,12 @@ ${skillsSection}
     if (this.roles.has('front') && this.frontHandler) {
       const frontConfig = modelConfig.fast ?? modelConfig.default
       if (frontConfig) {
-        this.sdkEnvFront = this.buildSdkEnv(frontConfig)
-        this.frontHandler = new FrontHandler(this.sdkEnvFront, {
-          personalityPrompt: personalityPrompt || undefined,
-          maxIterations: this.agentConfig?.max_iterations ?? 10,
-        }, createMcpConfigs)
-        console.log(`[${this.config.moduleId}] Front Agent SDK env updated`)
+        this.frontHandler.updateLlmConfig({
+          endpoint: frontConfig.endpoint,
+          apikey: frontConfig.apikey,
+          model: frontConfig.model_id,
+        })
+        console.log(`[${this.config.moduleId}] Front Agent LLM config updated`)
       }
     }
 
@@ -1477,7 +1489,8 @@ ${skillsSection}
       const workerConfig = modelConfig.smart ?? modelConfig.default
       if (workerConfig) {
         this.sdkEnvWorker = this.buildSdkEnv(workerConfig)
-        this.workerHandler = new WorkerHandler(this.sdkEnvWorker, {
+        const updatedWorkerSdkEnv = this.sdkEnvWorker
+        this.workerHandler = new WorkerHandler(updatedWorkerSdkEnv, {
           personalityPrompt: personalityPrompt || undefined,
           maxIterations: this.agentConfig?.max_iterations,
         }, createMcpConfigs)
@@ -1592,7 +1605,7 @@ ${skillsSection}
       processing_messages: this.sessionManager.getPendingSessionCount(),
       active_sessions: this.sessionManager.getActiveSessionCount(),
       current_task_count: this.workerHandler?.getActiveTaskCount() ?? 0,
-      sdk_status: (this.sdkEnvFront || this.sdkEnvWorker) ? 'ready' : 'not_configured',
+      sdk_status: (this.frontHandler || this.sdkEnvWorker) ? 'ready' : 'not_configured',
       mcp_servers_count: this.mcpManager?.count ?? 0,
     }
   }
@@ -1600,6 +1613,11 @@ ${skillsSection}
   // ============================================================================
   // 端口解析
   // ============================================================================
+
+  private getActiveTasksList(): Array<{ task_id: string; status: string; started_at: string; title?: string }> {
+    if (!this.workerHandler) return []
+    return []  // Will be populated in Task 10 when WorkerHandler gets getActiveTasksForQuery()
+  }
 
   private async getAdminPort(): Promise<number> {
     if (this.adminPort === undefined) {
