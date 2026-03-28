@@ -457,34 +457,40 @@ ${skillsSection}
       // 10. 分发决策
       const lastMessage = mergedMessages[mergedMessages.length - 1]
       for (const decision of result.decisions) {
+        const decisionSummary = decision.type === 'direct_reply'
+          ? (decision.reply.text ?? '').slice(0, 100)
+          : decision.type === 'create_task'
+          ? decision.task_title
+          : decision.type === 'supplement_task'
+          ? `supplement → ${decision.task_id}: ${decision.supplement_content.slice(0, 60)}`
+          : decision.type === 'forward_to_worker'
+          ? `task_id: ${decision.task_id}`
+          : 'silent'
+
         const decisionSpan = this.traceStore.startSpan(trace.trace_id, {
           type: 'decision',
-          details: {
-            decision_type: decision.type,
-            summary: decision.type === 'direct_reply'
-              ? (decision.reply.text ?? '').slice(0, 100)
-              : decision.type === 'create_task'
-              ? decision.task_title
-              : decision.type === 'forward_to_worker'
-              ? `task_id: ${decision.task_id}`
-              : 'silent',
-          },
+          details: { decision_type: decision.type, summary: decisionSummary },
         })
 
-        await this.decisionDispatcher.dispatch(
-          decision,
-          {
-            channel_id: session.channel_id,
-            session_id: session.session_id,
-            message: lastMessage,
-            memoryPermissions: memPerms,
-          },
-          {
-            traceStore: this.traceStore,
-            traceId: trace.trace_id,
-            parentSpanId: decisionSpan.span_id,
-          }
-        )
+        // supplement_task: deliver directly to local Worker (bypass Admin lookup)
+        if (decision.type === 'supplement_task' && this.workerHandler) {
+          await this.handleLocalSupplement(decision, session, mergedMessages)
+        } else {
+          await this.decisionDispatcher.dispatch(
+            decision,
+            {
+              channel_id: session.channel_id,
+              session_id: session.session_id,
+              message: lastMessage,
+              memoryPermissions: memPerms,
+            },
+            {
+              traceStore: this.traceStore,
+              traceId: trace.trace_id,
+              parentSpanId: decisionSpan.span_id,
+            }
+          )
+        }
 
         this.traceStore.endSpan(trace.trace_id, decisionSpan.span_id, 'completed')
       }
@@ -700,6 +706,42 @@ ${skillsSection}
       write_scopes: [sessionId],
       read_min_visibility: 'internal',
       read_accessible_scopes: [sessionId],
+    }
+  }
+
+  /**
+   * Handle supplement_task locally — deliver directly to Worker without Admin roundtrip.
+   * In unified agent mode, the Worker is local, no need to look up worker_agent_id via Admin.
+   */
+  private async handleLocalSupplement(
+    decision: import('./types.js').SupplementTaskDecision,
+    session: { channel_id: string; session_id: string },
+    messages: ChannelMessage[],
+  ): Promise<void> {
+    // Send immediate reply to user
+    if (decision.immediate_reply?.text) {
+      try {
+        const channelPort = await this.getChannelPort(session.channel_id)
+        await this.rpcClient.call(channelPort, 'send_message', {
+          session_id: session.session_id,
+          content: { type: 'text', text: decision.immediate_reply.text },
+        }, this.config.moduleId)
+      } catch { /* ignore */ }
+    }
+
+    // Deliver supplement to local Worker
+    try {
+      this.workerHandler!.deliverHumanResponse(decision.task_id, [{
+        platform_message_id: `supplement-${Date.now()}`,
+        session: { channel_id: session.channel_id, session_id: session.session_id, type: 'private' as const },
+        sender: { friend_id: 'system', platform_user_id: 'system', platform_display_name: 'System' },
+        content: { type: 'text' as const, text: `用户补充指示：${decision.supplement_content}` },
+        features: { is_mention_crab: false },
+        platform_timestamp: new Date().toISOString(),
+      }])
+    } catch (error) {
+      console.error(`[${this.config.moduleId}] Failed to deliver supplement to task ${decision.task_id}:`,
+        error instanceof Error ? error.message : error)
     }
   }
 
