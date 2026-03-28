@@ -474,7 +474,7 @@ ${skillsSection}
 
         // supplement_task: deliver directly to local Worker (bypass Admin lookup)
         if (decision.type === 'supplement_task' && this.workerHandler) {
-          await this.handleLocalSupplement(decision, session, mergedMessages)
+          await this.handleLocalSupplement(decision, session, trace.trace_id, decisionSpan.span_id)
         } else {
           await this.decisionDispatcher.dispatch(
             decision,
@@ -716,9 +716,18 @@ ${skillsSection}
   private async handleLocalSupplement(
     decision: import('./types.js').SupplementTaskDecision,
     session: { channel_id: string; session_id: string },
-    messages: ChannelMessage[],
+    traceId: string,
+    parentSpanId: string,
   ): Promise<void> {
-    // Send immediate reply to user
+    // Step 1: Send immediate reply
+    const replySpan = this.traceStore.startSpan(traceId, {
+      type: 'tool_call' as const,
+      parent_span_id: parentSpanId,
+      details: {
+        tool_name: 'supplement_reply',
+        input_summary: `immediate_reply: "${(decision.immediate_reply?.text ?? '').slice(0, 100)}"`,
+      },
+    })
     if (decision.immediate_reply?.text) {
       try {
         const channelPort = await this.getChannelPort(session.channel_id)
@@ -726,10 +735,41 @@ ${skillsSection}
           session_id: session.session_id,
           content: { type: 'text', text: decision.immediate_reply.text },
         }, this.config.moduleId)
-      } catch { /* ignore */ }
+        this.traceStore.endSpan(traceId, replySpan.span_id, 'completed', {
+          output_summary: 'sent',
+        })
+      } catch (err) {
+        this.traceStore.endSpan(traceId, replySpan.span_id, 'failed', {
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    } else {
+      this.traceStore.endSpan(traceId, replySpan.span_id, 'completed', {
+        output_summary: 'skipped (no text)',
+      })
     }
 
-    // Deliver supplement to local Worker
+    // Step 2: Deliver to local Worker
+    const deliverSpan = this.traceStore.startSpan(traceId, {
+      type: 'tool_call' as const,
+      parent_span_id: parentSpanId,
+      details: {
+        tool_name: 'supplement_deliver',
+        input_summary: `task_id=${decision.task_id}, content="${decision.supplement_content.slice(0, 100)}"`,
+      },
+    })
+
+    // Check: is there a local Worker with this task?
+    const activeTasks = this.workerHandler!.getActiveTasksForQuery()
+    const matchingTask = activeTasks.find(t => t.task_id === decision.task_id)
+
+    if (!matchingTask) {
+      this.traceStore.endSpan(traceId, deliverSpan.span_id, 'failed', {
+        error: `task_id=${decision.task_id} not found in activeTasks. Active: [${activeTasks.map(t => t.task_id).join(', ')}]`,
+      })
+      return
+    }
+
     try {
       this.workerHandler!.deliverHumanResponse(decision.task_id, [{
         platform_message_id: `supplement-${Date.now()}`,
@@ -739,9 +779,14 @@ ${skillsSection}
         features: { is_mention_crab: false },
         platform_timestamp: new Date().toISOString(),
       }])
+      this.traceStore.endSpan(traceId, deliverSpan.span_id, 'completed', {
+        output_summary: `delivered to task ${decision.task_id} (status: ${matchingTask.status})`,
+      })
     } catch (error) {
-      console.error(`[${this.config.moduleId}] Failed to deliver supplement to task ${decision.task_id}:`,
-        error instanceof Error ? error.message : error)
+      const msg = error instanceof Error ? error.message : String(error)
+      this.traceStore.endSpan(traceId, deliverSpan.span_id, 'failed', {
+        error: msg,
+      })
     }
   }
 

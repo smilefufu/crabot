@@ -393,6 +393,7 @@ export class WorkerHandler {
 
           // Check for pending human messages — inject via streamInput
           if (taskState.pendingHumanMessages.length > 0) {
+            log(`[supplement] Found ${taskState.pendingHumanMessages.length} pending messages for task ${task.task_id}`)
             const pending = taskState.pendingHumanMessages.splice(0)
             const supplement = pending
               .map(m => m.content.text ?? '')
@@ -400,8 +401,9 @@ export class WorkerHandler {
               .join('\n')
 
             if (supplement) {
-              log(`Injecting human supplement: ${supplement.slice(0, 100)}`)
+              log(`[supplement] Injecting: ${supplement.slice(0, 200)}`)
               await this.injectHumanMessage(task.task_id, supplement)
+              log(`[supplement] Injection complete`)
             }
           }
 
@@ -456,7 +458,12 @@ export class WorkerHandler {
    */
   private async injectHumanMessage(taskId: TaskId, text: string): Promise<void> {
     const queryHandle = this.activeQueries.get(taskId)
-    if (!queryHandle) return
+    if (!queryHandle) {
+      log(`[supplement] injectHumanMessage: no queryHandle for task ${taskId}. activeQueries keys: [${Array.from(this.activeQueries.keys()).join(', ')}]`)
+      return
+    }
+
+    log(`[supplement] Calling streamInput for task ${taskId}`)
 
     async function* singleMessage(): AsyncIterable<SDKUserMessage> {
       yield {
@@ -469,14 +476,19 @@ export class WorkerHandler {
 
     try {
       await queryHandle.streamInput(singleMessage())
+      log(`[supplement] streamInput succeeded for task ${taskId}`)
     } catch (error) {
-      log(`Failed to inject human message: ${error instanceof Error ? error.message : error}`)
+      log(`[supplement] streamInput FAILED for task ${taskId}: ${error instanceof Error ? error.message : error}`)
     }
   }
 
   deliverHumanResponse(taskId: TaskId, messages: ChannelMessage[]): void {
     const taskState = this.activeTasks.get(taskId)
-    if (!taskState) { throw new Error(`Task not found: ${taskId}`) }
+    if (!taskState) {
+      log(`[supplement] deliverHumanResponse: task ${taskId} NOT FOUND. activeTasks keys: [${Array.from(this.activeTasks.keys()).join(', ')}]`)
+      throw new Error(`Task not found: ${taskId}`)
+    }
+    log(`[supplement] deliverHumanResponse: queued ${messages.length} messages for task ${taskId} (status: ${taskState.status}, pending: ${taskState.pendingHumanMessages.length})`)
     taskState.pendingHumanMessages.push(...messages)
   }
 
