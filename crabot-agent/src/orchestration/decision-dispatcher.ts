@@ -560,14 +560,15 @@ export class DecisionDispatcher {
 
     // Find worker and deliver supplement
     try {
-      const taskInfo = await this.rpcClient.call<
+      const taskResult = await this.rpcClient.call<
         { task_id: string },
-        { task_id: string; status: string; assigned_worker?: string }
+        { task: { id: string; status: string; worker_agent_id?: string } }
       >(adminPort, 'get_task', { task_id: decision.task_id }, this.moduleId, traceCtx)
+      const taskInfo = taskResult.task
 
-      if (taskInfo.assigned_worker && ['executing', 'planning'].includes(taskInfo.status)) {
+      if (taskInfo.worker_agent_id && ['executing', 'planning'].includes(taskInfo.status)) {
         const workers = await this.rpcClient.resolve(
-          { module_id: taskInfo.assigned_worker }, this.moduleId,
+          { module_id: taskInfo.worker_agent_id }, this.moduleId,
         )
         if (workers.length > 0) {
           await this.rpcClient.call(workers[0].port, 'deliver_human_response', {
