@@ -131,13 +131,18 @@ export class FrontHandler {
     if (context.active_tasks.length > 0) {
       parts.push('\n## 活跃任务列表')
       for (const task of context.active_tasks) {
-        parts.push(`- [${task.task_id}] "${task.title}" (status: ${task.status}, 类型: ${task.task_type}, 优先级: ${task.priority})`)
+        const sessionInfo = task.source_session_id ? `, 来源session: ${task.source_session_id}` : ''
+        parts.push(`- [${task.task_id}] "${task.title}" (status: ${task.status}${sessionInfo})`)
+        if (task.latest_progress) {
+          parts.push(`  最近进度: ${task.latest_progress}`)
+        }
         if (task.plan_summary) {
           parts.push(`  计划摘要: ${task.plan_summary}`)
         }
       }
       parts.push('\n当用户询问任务进度时，请根据上述任务列表回答。')
       parts.push('当用户消息可能是对某个任务的纠偏/补充时，使用 supplement_task 决策。')
+      parts.push('纠偏判断优先匹配来源 session 与当前 session 相同的任务。')
     }
 
     if (messages.length > 0) {

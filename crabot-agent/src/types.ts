@@ -227,6 +227,9 @@ export interface TaskSummary {
   task_type: string
   priority: string
   plan_summary?: string
+  source_channel_id?: ModuleId
+  source_session_id?: SessionId
+  latest_progress?: string
 }
 
 export interface ShortTermMemoryEntry {

@@ -270,17 +270,46 @@ export class ContextAssembler {
       const adminPort = await this.getAdminPort()
       const result = await this.rpcClient.call<
         { filter: { status: string[] } },
-        { items: TaskSummary[] }
+        {
+          items: Array<{
+            id: string
+            title: string
+            status: string
+            type: string
+            priority: string
+            plan?: { summary?: string }
+            source: { channel_id?: string; session_id?: string }
+            messages?: Array<{ content: string; timestamp: string }>
+          }>
+        }
       >(
         adminPort,
         'list_tasks',
         { filter: { status: ['pending', 'planning', 'executing', 'waiting_human'] } },
         this.moduleId
       )
-      return result.items
+      return result.items.map(t => ({
+        task_id: t.id,
+        title: t.title,
+        status: t.status,
+        task_type: t.type,
+        priority: t.priority,
+        plan_summary: t.plan?.summary,
+        source_channel_id: t.source.channel_id,
+        source_session_id: t.source.session_id,
+        latest_progress: this.extractLatestProgress(t.messages),
+      }))
     } catch {
       return []
     }
+  }
+
+  private extractLatestProgress(
+    messages?: Array<{ content: string; timestamp: string }>
+  ): string | undefined {
+    if (!messages || messages.length === 0) return undefined
+    const last = messages[messages.length - 1]
+    return last.content.length > 100 ? last.content.slice(0, 100) + '...' : last.content
   }
 
   // ==========================================================================
