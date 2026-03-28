@@ -304,6 +304,8 @@ export class WorkerHandler {
     let loopSpanId: string | undefined
     /** Accumulated tool call summaries waiting to be flushed */
     const pendingToolCalls: string[] = []
+    /** Last text sent to user (for final result dedup) */
+    let lastSentText = ''
 
     for await (const message of queryHandle) {
       const msg = message as SDKMessage & Record<string, unknown>
@@ -364,32 +366,30 @@ export class WorkerHandler {
 
           turnCount++
 
-          // ── Progress reporting based on content type ──
+          // ── Content-type based progress reporting ──
+          // Text = agent's "voice" → forward immediately
+          // Tool calls = agent's "actions" → accumulate, flush on text/overflow/timeout
           if (taskOrigin) {
-            const hasText = turnText.trim().length > 0
+            const trimmedText = turnText.trim()
+            const hasText = trimmedText.length > 0
             const hasTools = turnToolSummaries.length > 0
 
             if (hasText) {
-              // Text = agent "speaking" → flush pending tools first, then report text immediately
+              // Flush pending tool calls before text (show actions before speech)
               if (pendingToolCalls.length > 0) {
-                const toolBatch = pendingToolCalls.splice(0).join('\n').slice(0, 500)
-                await this.sendProgress(taskOrigin, task.task_title, toolBatch)
+                await this.sendToUser(taskOrigin, pendingToolCalls.splice(0).join('\n').slice(0, 500))
               }
-              await this.sendProgress(taskOrigin, task.task_title, turnText.trim().slice(0, 500))
+              // Forward agent text directly — no prefix, this IS the agent speaking
+              lastSentText = trimmedText
+              await this.sendToUser(taskOrigin, trimmedText.slice(0, 800))
             }
 
             if (hasTools) {
-              if (hasText) {
-                // Tools in same turn as text → report tools immediately too
-                await this.sendProgress(taskOrigin, task.task_title, turnToolSummaries.join('\n').slice(0, 500))
-              } else {
-                // Tools only (no text) → accumulate for batch reporting
-                pendingToolCalls.push(...turnToolSummaries)
-                // But if too many accumulated (>=5) or too long since last flush, flush now
-                if (pendingToolCalls.length >= 5) {
-                  const toolBatch = pendingToolCalls.splice(0).join('\n').slice(0, 500)
-                  await this.sendProgress(taskOrigin, task.task_title, toolBatch)
-                }
+              // Accumulate tool calls
+              pendingToolCalls.push(...turnToolSummaries)
+              // Flush if 5+ accumulated (avoid too much silence)
+              if (pendingToolCalls.length >= 5) {
+                await this.sendToUser(taskOrigin, pendingToolCalls.splice(0).join('\n').slice(0, 500))
               }
             }
           }
@@ -412,10 +412,9 @@ export class WorkerHandler {
         }
 
         case 'result': {
-          // Flush any remaining pending tool calls before result
+          // Flush remaining pending tool calls
           if (taskOrigin && pendingToolCalls.length > 0) {
-            const toolBatch = pendingToolCalls.splice(0).join('\n').slice(0, 500)
-            await this.sendProgress(taskOrigin, task.task_title, toolBatch)
+            await this.sendToUser(taskOrigin, pendingToolCalls.splice(0).join('\n').slice(0, 500))
           }
 
           const resultMsg = msg as Record<string, unknown>
@@ -444,11 +443,14 @@ export class WorkerHandler {
 
     const finalText = resultText || '任务已完成，但模型未生成输出'
 
+    // Dedup: if the final result was already sent as progress, don't repeat it
+    const alreadySent = lastSentText && finalText.startsWith(lastSentText.slice(0, 100))
+
     return {
       task_id: task.task_id,
       outcome: isError ? 'failed' : 'completed',
       summary: finalText,
-      final_reply: { type: 'text', text: finalText },
+      final_reply: alreadySent ? undefined : { type: 'text', text: finalText },
     }
   }
 
@@ -569,7 +571,7 @@ export class WorkerHandler {
     const args = input as Record<string, unknown> | undefined
     switch (toolName) {
       case 'Bash':
-        return `$ ${(args?.command as string ?? '').slice(0, 100)}`
+        return `> ${(args?.command as string ?? '').slice(0, 120)}`
       case 'Write':
         return `写入 ${args?.file_path ?? '文件'}`
       case 'Edit':
@@ -579,29 +581,31 @@ export class WorkerHandler {
       case 'Glob':
         return `搜索文件 ${args?.pattern ?? ''}`
       case 'Grep':
-        return `搜索内容 "${args?.pattern ?? ''}" in ${args?.path ?? '.'}`
+        return `搜索 "${(args?.pattern as string ?? '').slice(0, 30)}" in ${args?.path ?? '.'}`
       default:
         if (toolName.startsWith('mcp__crab-messaging__')) {
-          const method = toolName.replace('mcp__crab-messaging__', '')
-          return `通讯: ${method}`
+          return toolName.replace('mcp__crab-messaging__', '')
         }
-        return `调用 ${toolName}`
+        return toolName
     }
   }
 
-  private async sendProgress(
+  /**
+   * Send a message to the user during task execution.
+   * No prefix — text is forwarded as-is (agent's natural speech or tool summaries).
+   */
+  private async sendToUser(
     taskOrigin: TaskOrigin,
-    taskTitle: string,
-    summary: string,
+    text: string,
   ): Promise<void> {
     if (!this.deps) return
     try {
       const channelPort = await this.deps.resolveChannelPort(taskOrigin.channel_id)
       await this.deps.rpcClient.call(channelPort, 'send_message', {
         session_id: taskOrigin.session_id,
-        content: { type: 'text', text: `[任务进度] ${taskTitle}\n${summary}` },
+        content: { type: 'text', text },
       }, this.deps.moduleId)
-    } catch { /* ignore progress send failures */ }
+    } catch { /* ignore send failures */ }
   }
 
   private async cleanupTaskDir(): Promise<void> {
