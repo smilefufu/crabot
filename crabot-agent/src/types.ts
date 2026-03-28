@@ -262,6 +262,8 @@ export interface FrontAgentContext {
   short_term_memories: ShortTermMemoryEntry[]
   active_tasks: TaskSummary[]
   available_tools: ToolDeclaration[]
+  /** Crabot's display name on the current channel (e.g. group nickname) */
+  crab_display_name?: string
 }
 
 export interface WorkerAgentContext {
