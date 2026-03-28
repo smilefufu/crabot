@@ -304,6 +304,8 @@ export class WorkerHandler {
     let loopSpanId: string | undefined
     /** Accumulated tool call summaries waiting to be flushed */
     const pendingToolCalls: string[] = []
+    /** Set to true after interrupt() — next result is from interrupted turn, not final */
+    let interruptedForSupplement = false
 
     for await (const message of queryHandle) {
       const msg = message as SDKMessage & Record<string, unknown>
@@ -311,13 +313,15 @@ export class WorkerHandler {
       switch (msg.type) {
         case 'system': {
           if ((msg as Record<string, unknown>).subtype === 'init') {
-            log(`System init: model=${msg.model}, tools=${JSON.stringify(msg.tools)}`)
-            loopSpanId = traceCallback?.onLoopStart('worker', {
-              system_prompt: undefined,
-              model: msg.model as string,
-              tools: msg.tools as string[],
-              mcp_servers: msg.mcp_servers as Array<{ name: string; status: string }>,
-            })
+            log(`System init: model=${msg.model}`)
+            if (!loopSpanId) {
+              loopSpanId = traceCallback?.onLoopStart('worker', {
+                system_prompt: undefined,
+                model: msg.model as string,
+                tools: msg.tools as string[],
+                mcp_servers: msg.mcp_servers as Array<{ name: string; status: string }>,
+              })
+            }
           }
           break
         }
@@ -365,35 +369,28 @@ export class WorkerHandler {
           turnCount++
 
           // ── Content-type based progress reporting ──
-          // Text = agent's "voice" → forward immediately
-          // Tool calls = agent's "actions" → accumulate, flush on text/overflow/timeout
           if (taskOrigin) {
             const trimmedText = turnText.trim()
             const hasText = trimmedText.length > 0
             const hasTools = turnToolSummaries.length > 0
 
             if (hasText) {
-              // Flush pending tool calls before text (show actions before speech)
               if (pendingToolCalls.length > 0) {
                 await this.sendToUser(taskOrigin, pendingToolCalls.splice(0).join('\n').slice(0, 500))
               }
-              // Forward agent text directly — no prefix, this IS the agent speaking
               await this.sendToUser(taskOrigin, trimmedText.slice(0, 800))
             }
 
             if (hasTools) {
-              // Accumulate tool calls
               pendingToolCalls.push(...turnToolSummaries)
-              // Flush if 5+ accumulated (avoid too much silence)
               if (pendingToolCalls.length >= 5) {
                 await this.sendToUser(taskOrigin, pendingToolCalls.splice(0).join('\n').slice(0, 500))
               }
             }
           }
 
-          // Check for pending human messages — inject via streamInput
+          // ── Supplement injection: interrupt + streamInput ──
           if (taskState.pendingHumanMessages.length > 0) {
-            log(`[supplement] Found ${taskState.pendingHumanMessages.length} pending messages for task ${task.task_id}`)
             const pending = taskState.pendingHumanMessages.splice(0)
             const supplement = pending
               .map(m => m.content.text ?? '')
@@ -401,9 +398,18 @@ export class WorkerHandler {
               .join('\n')
 
             if (supplement) {
-              log(`[supplement] Injecting: ${supplement.slice(0, 200)}`)
+              log(`[supplement] Interrupting current work, then injecting: ${supplement.slice(0, 200)}`)
+              // 1. Interrupt current agent loop — stops tool execution
+              interruptedForSupplement = true
+              try {
+                await queryHandle.interrupt()
+                log(`[supplement] interrupt() succeeded`)
+              } catch (err) {
+                log(`[supplement] interrupt() failed: ${err instanceof Error ? err.message : err}`)
+              }
+              // 2. Queue the supplement as next turn — SDK will process it with full context
               await this.injectHumanMessage(task.task_id, supplement)
-              log(`[supplement] Injection complete`)
+              log(`[supplement] streamInput() done, waiting for SDK to process next turn`)
             }
           }
 
@@ -417,8 +423,18 @@ export class WorkerHandler {
           }
 
           const resultMsg = msg as Record<string, unknown>
-          log(`Result: subtype=${resultMsg.subtype}, isError=${resultMsg.is_error}`)
+          log(`Result: subtype=${resultMsg.subtype}, isError=${resultMsg.is_error}, interruptedForSupplement=${interruptedForSupplement}`)
 
+          if (interruptedForSupplement) {
+            // This result is from the interrupted turn — not the final result.
+            // The SDK will start a new turn to process the supplement.
+            // Reset flag and continue the for-await loop.
+            interruptedForSupplement = false
+            log(`[supplement] Interrupted turn completed, supplement turn starting...`)
+            break
+          }
+
+          // This is the actual final result
           if (resultMsg.subtype === 'success' || !resultMsg.is_error) {
             if (resultMsg.result && typeof resultMsg.result === 'string') {
               resultText = resultMsg.result
@@ -442,8 +458,6 @@ export class WorkerHandler {
 
     const finalText = resultText || '任务已完成，但模型未生成输出'
 
-    // Progress already streamed all text to user in real-time.
-    // final_reply only needed for errors (not sent via progress) or when no progress was sent.
     const hasProgressDeps = !!taskOrigin && !!this.deps
     return {
       task_id: task.task_id,
