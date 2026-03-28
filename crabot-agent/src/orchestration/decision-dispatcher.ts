@@ -140,32 +140,35 @@ export class DecisionDispatcher {
     },
     traceCtx?: RpcTraceContext
   ): Promise<{ task_id: string }> {
-    // 1. 发送即时回复
-    if (params.admin_chat_callback) {
-      const adminPort = await this.getAdminPort()
-      await this.rpcClient.call(
-        adminPort,
-        'chat_callback',
-        {
-          request_id: params.admin_chat_callback.request_id,
-          reply_type: 'task_created',
-          content: decision.immediate_reply.text ?? '',
-        },
-        this.moduleId,
-        traceCtx
-      )
-    } else {
-      const channelPort = await this.getChannelPort(params.channel_id)
-      await this.rpcClient.call(
-        channelPort,
-        'send_message',
-        {
-          session_id: params.session_id,
-          content: decision.immediate_reply,
-        },
-        this.moduleId,
-        traceCtx
-      )
+    // 1. 发送即时回复（如果有内容）
+    const replyText = decision.immediate_reply?.text
+    if (replyText) {
+      if (params.admin_chat_callback) {
+        const adminPort = await this.getAdminPort()
+        await this.rpcClient.call(
+          adminPort,
+          'chat_callback',
+          {
+            request_id: params.admin_chat_callback.request_id,
+            reply_type: 'task_created',
+            content: replyText,
+          },
+          this.moduleId,
+          traceCtx
+        )
+      } else {
+        const channelPort = await this.getChannelPort(params.channel_id)
+        await this.rpcClient.call(
+          channelPort,
+          'send_message',
+          {
+            session_id: params.session_id,
+            content: decision.immediate_reply,
+          },
+          this.moduleId,
+          traceCtx
+        )
+      }
     }
 
     // 2. 创建任务

@@ -138,7 +138,7 @@ export async function runFrontLoop(params: {
         task_title: taskTitle,
         task_description: taskDescription,
         task_type: 'general',
-        immediate_reply: { type: 'text', text: '问题比较复杂，我安排深度处理，请稍等...' },
+        immediate_reply: { type: 'text', text: '' },
         front_context: toolHistory.length > 0 ? toolHistory : undefined,
       },
       toolHistory: toolHistory.length > 0 ? toolHistory : undefined,
@@ -159,7 +159,8 @@ function parseMakeDecision(input: Record<string, unknown>): MessageDecision {
         reply: { type: 'text', text: (input.reply_text as string) ?? '' },
       }
 
-    case 'create_task':
+    case 'create_task': {
+      const replyText = input.immediate_reply_text as string | undefined
       return {
         type: 'create_task',
         task_title: (input.task_title as string) ?? '未命名任务',
@@ -167,9 +168,10 @@ function parseMakeDecision(input: Record<string, unknown>): MessageDecision {
         task_type: (input.task_type as string) ?? 'general',
         immediate_reply: {
           type: 'text',
-          text: (input.immediate_reply_text as string) ?? '好的，我来处理这个任务，请稍等...',
+          text: replyText ?? '',
         },
       }
+    }
 
     case 'supplement_task':
       if (!input.task_id) {
