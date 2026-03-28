@@ -594,12 +594,14 @@ export interface AgentLoopDetails {
 }
 
 export interface LlmCallDetails {
-  iteration: number
+  iteration?: number
   attempt?: number
-  input_summary: string
+  input_summary?: string
   output_summary?: string
   stop_reason?: string
   tool_calls_count?: number
+  full_input?: string
+  full_output?: string
 }
 
 export interface ToolCallDetails {
@@ -695,7 +697,7 @@ export interface TraceCallback {
   }): string
   onLoopEnd(spanId: string, status: 'completed' | 'failed', iterationCount: number): void
   onLlmCallStart(iteration: number, inputSummary: string, attempt?: number): string
-  onLlmCallEnd(spanId: string, result: { stopReason?: string; outputSummary?: string; toolCallsCount?: number }): void
+  onLlmCallEnd(spanId: string, result: { stopReason?: string; outputSummary?: string; toolCallsCount?: number; fullInput?: string; fullOutput?: string }): void
   onToolCallStart(toolName: string, inputSummary: string): string
   onToolCallEnd(spanId: string, outputSummary: string, error?: string): void
 }

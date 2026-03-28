@@ -59,6 +59,8 @@ export async function runFrontLoop(params: {
           stopReason: response.stopReason ?? undefined,
           outputSummary: textOutput.slice(0, 200) || undefined,
           toolCallsCount: toolUseCount > 0 ? toolUseCount : undefined,
+          fullInput: round === 0 ? userMessage : undefined,
+          fullOutput: textOutput || undefined,
         })
       }
 

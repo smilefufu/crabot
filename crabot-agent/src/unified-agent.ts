@@ -1647,11 +1647,13 @@ ${skillsSection}
         return span.span_id
       },
 
-      onLlmCallEnd(spanId: string, result: { stopReason?: string; outputSummary?: string; toolCallsCount?: number }): void {
+      onLlmCallEnd(spanId: string, result: { stopReason?: string; outputSummary?: string; toolCallsCount?: number; fullInput?: string; fullOutput?: string }): void {
         store.endSpan(traceId, spanId, 'completed', {
           stop_reason: result.stopReason,
           output_summary: result.outputSummary,
           tool_calls_count: result.toolCallsCount,
+          full_input: result.fullInput,
+          full_output: result.fullOutput,
         } as Partial<import('./types.js').LlmCallDetails>)
         if (currentLlmSpanId === spanId) currentLlmSpanId = undefined
       },
