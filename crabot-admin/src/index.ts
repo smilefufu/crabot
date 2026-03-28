@@ -1933,6 +1933,7 @@ export class AdminModule extends ModuleBase {
           updated_at: new Date().toISOString(),
         }
         await this.publishMessageAuthorizedEvent(channelId, message, guestFriend)
+        return
       }
       // 无 Master 在此 Channel → 静默丢弃
       console.log(`[Admin] ⚠️ Group message from unknown sender dropped: no master on channel ${channelId}`)
