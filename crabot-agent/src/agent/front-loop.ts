@@ -184,7 +184,7 @@ function parseMakeDecision(input: Record<string, unknown>): MessageDecision {
         confidence: (input.confidence as 'high' | 'low') ?? 'low',
         immediate_reply: {
           type: 'text',
-          text: (input.immediate_reply_text as string) ?? '好的，我已将您的补充发送给正在执行的任务。',
+          text: (input.immediate_reply_text as string) ?? '',
         },
       }
 
