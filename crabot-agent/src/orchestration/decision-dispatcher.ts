@@ -322,9 +322,10 @@ export class DecisionDispatcher {
           console.error(`[DecisionDispatcher] Failed to update task status: ${msg}`)
         })
 
-        // 回复用户
-        const replyText = result.final_reply?.text || result.summary || '任务已完成'
-        await this.sendReplyToUser(replyText, params)
+        // 回复用户（仅当 Worker 提供了 final_reply 时；进度流已发过的不重复）
+        if (result.final_reply?.text) {
+          await this.sendReplyToUser(result.final_reply.text, params)
+        }
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error)
         console.error(`[DecisionDispatcher] Background task ${task.id} failed: ${msg}`)

@@ -719,21 +719,23 @@ ${skillsSection}
     traceId: string,
     parentSpanId: string,
   ): Promise<void> {
-    // Step 1: Send immediate reply
+    // Step 1: Send immediate reply (auto-generate if LLM didn't provide one)
+    const replyText = decision.immediate_reply?.text
+      || `收到，正在调整：${decision.supplement_content.slice(0, 60)}`
     const replySpan = this.traceStore.startSpan(traceId, {
       type: 'tool_call' as const,
       parent_span_id: parentSpanId,
       details: {
         tool_name: 'supplement_reply',
-        input_summary: `immediate_reply: "${(decision.immediate_reply?.text ?? '').slice(0, 100)}"`,
+        input_summary: `reply: "${replyText.slice(0, 100)}"`,
       },
     })
-    if (decision.immediate_reply?.text) {
+    if (replyText) {
       try {
         const channelPort = await this.getChannelPort(session.channel_id)
         await this.rpcClient.call(channelPort, 'send_message', {
           session_id: session.session_id,
-          content: { type: 'text', text: decision.immediate_reply.text },
+          content: { type: 'text', text: replyText },
         }, this.config.moduleId)
         this.traceStore.endSpan(traceId, replySpan.span_id, 'completed', {
           output_summary: 'sent',
