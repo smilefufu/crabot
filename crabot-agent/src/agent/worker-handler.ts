@@ -301,10 +301,9 @@ export class WorkerHandler {
     let resultText = ''
     let isError = false
     let turnCount = 0
-    let lastProgressTime = Date.now()
     let loopSpanId: string | undefined
-    /** Accumulated tool call summaries since last progress report */
-    const pendingProgressItems: string[] = []
+    /** Accumulated tool call summaries waiting to be flushed */
+    const pendingToolCalls: string[] = []
 
     for await (const message of queryHandle) {
       const msg = message as SDKMessage & Record<string, unknown>
@@ -333,6 +332,7 @@ export class WorkerHandler {
           const llmSpanId = traceCallback?.onLlmCallStart(turnCount + 1, inputSummary)
           let turnText = ''
           let turnToolCount = 0
+          const turnToolSummaries: string[] = []
 
           if (betaMessage?.content) {
             for (const block of betaMessage.content) {
@@ -342,7 +342,7 @@ export class WorkerHandler {
               }
               if (block.type === 'tool_use' && block.name) {
                 turnToolCount++
-                pendingProgressItems.push(this.summarizeToolCall(block.name, block.input))
+                turnToolSummaries.push(this.summarizeToolCall(block.name, block.input))
                 const toolSpanId = traceCallback?.onToolCallStart(
                   block.name,
                   JSON.stringify(block.input ?? {}).slice(0, 200),
@@ -352,11 +352,6 @@ export class WorkerHandler {
                 }
               }
             }
-          }
-
-          // LLM text output is also useful progress (e.g. "我来分析一下...")
-          if (turnText.trim()) {
-            pendingProgressItems.push(turnText.trim().slice(0, 150))
           }
 
           if (llmSpanId) {
@@ -369,18 +364,34 @@ export class WorkerHandler {
 
           turnCount++
 
-          // Progress reporting: every 3 turns or every 30s
-          const elapsed = Date.now() - lastProgressTime
-          const shouldReport =
-            turnCount === 1 ||
-            turnCount % 3 === 0 ||
-            elapsed > 30_000
+          // ── Progress reporting based on content type ──
+          if (taskOrigin) {
+            const hasText = turnText.trim().length > 0
+            const hasTools = turnToolSummaries.length > 0
 
-          if (shouldReport && taskOrigin && pendingProgressItems.length > 0) {
-            // Drain accumulated items into one progress message
-            const summary = pendingProgressItems.splice(0).join('\n').slice(0, 500)
-            await this.sendProgress(taskOrigin, task.task_title, summary)
-            lastProgressTime = Date.now()
+            if (hasText) {
+              // Text = agent "speaking" → flush pending tools first, then report text immediately
+              if (pendingToolCalls.length > 0) {
+                const toolBatch = pendingToolCalls.splice(0).join('\n').slice(0, 500)
+                await this.sendProgress(taskOrigin, task.task_title, toolBatch)
+              }
+              await this.sendProgress(taskOrigin, task.task_title, turnText.trim().slice(0, 500))
+            }
+
+            if (hasTools) {
+              if (hasText) {
+                // Tools in same turn as text → report tools immediately too
+                await this.sendProgress(taskOrigin, task.task_title, turnToolSummaries.join('\n').slice(0, 500))
+              } else {
+                // Tools only (no text) → accumulate for batch reporting
+                pendingToolCalls.push(...turnToolSummaries)
+                // But if too many accumulated (>=5) or too long since last flush, flush now
+                if (pendingToolCalls.length >= 5) {
+                  const toolBatch = pendingToolCalls.splice(0).join('\n').slice(0, 500)
+                  await this.sendProgress(taskOrigin, task.task_title, toolBatch)
+                }
+              }
+            }
           }
 
           // Check for pending human messages — inject via streamInput
@@ -401,6 +412,12 @@ export class WorkerHandler {
         }
 
         case 'result': {
+          // Flush any remaining pending tool calls before result
+          if (taskOrigin && pendingToolCalls.length > 0) {
+            const toolBatch = pendingToolCalls.splice(0).join('\n').slice(0, 500)
+            await this.sendProgress(taskOrigin, task.task_title, toolBatch)
+          }
+
           const resultMsg = msg as Record<string, unknown>
           log(`Result: subtype=${resultMsg.subtype}, isError=${resultMsg.is_error}`)
 
