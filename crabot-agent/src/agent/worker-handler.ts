@@ -304,8 +304,6 @@ export class WorkerHandler {
     let loopSpanId: string | undefined
     /** Accumulated tool call summaries waiting to be flushed */
     const pendingToolCalls: string[] = []
-    /** Last text sent to user (for final result dedup) */
-    let lastSentText = ''
 
     for await (const message of queryHandle) {
       const msg = message as SDKMessage & Record<string, unknown>
@@ -380,7 +378,6 @@ export class WorkerHandler {
                 await this.sendToUser(taskOrigin, pendingToolCalls.splice(0).join('\n').slice(0, 500))
               }
               // Forward agent text directly — no prefix, this IS the agent speaking
-              lastSentText = trimmedText
               await this.sendToUser(taskOrigin, trimmedText.slice(0, 800))
             }
 
@@ -443,14 +440,14 @@ export class WorkerHandler {
 
     const finalText = resultText || '任务已完成，但模型未生成输出'
 
-    // Dedup: if the final result was already sent as progress, don't repeat it
-    const alreadySent = lastSentText && finalText.startsWith(lastSentText.slice(0, 100))
-
+    // Progress already streamed all text to user in real-time.
+    // final_reply only needed for errors (not sent via progress) or when no progress was sent.
+    const hasProgressDeps = !!taskOrigin && !!this.deps
     return {
       task_id: task.task_id,
       outcome: isError ? 'failed' : 'completed',
       summary: finalText,
-      final_reply: alreadySent ? undefined : { type: 'text', text: finalText },
+      final_reply: (isError || !hasProgressDeps) ? { type: 'text', text: finalText } : undefined,
     }
   }
 
