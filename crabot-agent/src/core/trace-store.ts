@@ -4,15 +4,22 @@
  * @see crabot-docs/protocols/protocol-agent-v2.md §8
  */
 
+import * as fs from 'fs'
+import * as path from 'path'
 import type { AgentTrace, AgentSpan, AgentSpanType, AgentSpanDetails } from '../types.js'
 
 export class TraceStore {
   private traces: Map<string, AgentTrace> = new Map()
   private order: string[] = []
   private maxSize: number
+  private persistDir: string | undefined
 
-  constructor(maxSize = 100) {
+  constructor(maxSize = 100, persistDir?: string) {
     this.maxSize = maxSize
+    this.persistDir = persistDir
+    if (persistDir) {
+      fs.mkdirSync(persistDir, { recursive: true })
+    }
   }
 
   startTrace(params: {
@@ -106,6 +113,8 @@ export class TraceStore {
     if (outcome) {
       trace.outcome = outcome
     }
+
+    this.persistTrace(trace)
   }
 
   getTraces(
@@ -166,5 +175,17 @@ export class TraceStore {
     this.traces.clear()
     this.order = []
     return count
+  }
+
+  private persistTrace(trace: AgentTrace): void {
+    if (!this.persistDir) return
+    try {
+      const date = trace.started_at.slice(0, 10) // YYYY-MM-DD
+      const filePath = path.join(this.persistDir, `traces-${date}.jsonl`)
+      const line = JSON.stringify(trace) + '\n'
+      fs.appendFileSync(filePath, line, 'utf-8')
+    } catch {
+      // persist failure must not affect main flow
+    }
   }
 }
