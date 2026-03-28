@@ -7,8 +7,8 @@
  * @see crabot-docs/protocols/protocol-crab-messaging.md
  */
 
-import { createSdkMcpServer, tool } from '../agent/sdk-runner.js'
-import type { SdkMcpServerConfig } from '../agent/sdk-runner.js'
+import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
+import type { McpServerConfig as SdkMcpServerConfig } from '@anthropic-ai/claude-agent-sdk'
 import { z } from 'zod/v4'
 import type { RpcClient } from '../core/module-base.js'
 import type { ModuleId, FriendId } from '../core/base-protocol.js'

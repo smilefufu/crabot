@@ -67,14 +67,6 @@ export interface FrontHandlerConfig {
   personalityPrompt?: string
 }
 
-/**
- * Kept for backward compatibility: worker-handler.ts imports this type.
- * Will be removed once worker-handler is updated in Task 10.
- */
-export interface SdkEnvConfig {
-  modelId: string
-  env: Record<string, string>
-}
 
 export class FrontHandler {
   private llmClient: LLMClient

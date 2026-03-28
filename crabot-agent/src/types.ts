@@ -453,40 +453,6 @@ export interface ToolHandler {
   (input: unknown): Promise<unknown> | unknown
 }
 
-export interface ToolCallRecord {
-  name: string
-  input: unknown
-  output: unknown
-}
-
-/** SDK 调用结果 */
-export interface SdkRunResult {
-  /** 最终文本输出 */
-  text: string
-  /** 结构化输出（如果有 outputFormat） */
-  structuredOutput?: unknown
-  /** 工具调用记录 */
-  toolCalls: ToolCallRecord[]
-  /** SDK init 事件快照 */
-  initEvent?: {
-    tools: string[]
-    mcp_servers: Array<{ name: string; status: string }>
-    model: string
-    skills: string[]
-  }
-  /** Token 用量 */
-  tokenUsage?: { input: number; output: number }
-  /** 总耗时（毫秒） */
-  durationMs?: number
-  /** 总花费（美元） */
-  totalCostUsd?: number
-  /** 轮次数 */
-  numTurns?: number
-  /** 是否出错 */
-  isError?: boolean
-  /** 错误信息 */
-  errors?: string[]
-}
 
 // ============================================================================
 // Handler 参数类型

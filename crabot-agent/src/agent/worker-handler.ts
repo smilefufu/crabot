@@ -1,12 +1,27 @@
 /**
- * Worker Handler - 任务执行处理器
+ * Worker Handler v2 - 任务执行处理器
  *
- * 使用 Claude Agent SDK + createSdkMcpServer 实现工具调用
+ * 直接使用 query() 的完整 session 能力：
+ * - async generator 输入 + 流式事件输出
+ * - streamInput() 注入纠偏消息
+ * - interrupt() 优雅中断
+ * - cwd 隔离、工具白名单、进度推送
+ *
+ * 不再依赖 sdk-runner.ts 中间层。
  */
 
-import { runSdk, createSdkMcpServer, tool } from './sdk-runner.js'
-import type { SdkRunOptions, SdkMcpServerConfig } from './sdk-runner.js'
-import type { SdkEnvConfig } from './front-handler.js'
+import {
+  query,
+  createSdkMcpServer,
+  tool,
+} from '@anthropic-ai/claude-agent-sdk'
+import type {
+  Options as SdkOptions,
+  SDKMessage,
+  SDKUserMessage,
+  McpServerConfig as SdkMcpServerConfig,
+  Query,
+} from '@anthropic-ai/claude-agent-sdk'
 import { z } from 'zod/v4'
 import type {
   ExecuteTaskParams,
@@ -23,8 +38,23 @@ import type { RpcClient } from '../core/module-base.js'
 
 import * as fs from 'fs'
 import * as path from 'path'
+import { execSync } from 'child_process'
 
 const WORKER_PROMPTS_FILE = path.join(process.cwd(), 'prompts-worker.md')
+const LOG_FILE = path.join(process.cwd(), '../data/worker-handler-debug.log')
+
+function log(msg: string) {
+  const ts = new Date().toISOString()
+  try { fs.appendFileSync(LOG_FILE, `[${ts}] ${msg}\n`) } catch { /* ignore */ }
+}
+
+function findClaudeCodePath(): string | undefined {
+  try {
+    return execSync('which claude', { encoding: 'utf-8' }).trim() || undefined
+  } catch {
+    return undefined
+  }
+}
 
 const DEFAULT_TASK_INSTRUCTIONS = `## 任务执行规则（内部指令）
 
@@ -43,7 +73,7 @@ const DEFAULT_TASK_INSTRUCTIONS = `## 任务执行规则（内部指令）
 ## 你已知道的上下文（无需工具获取）
 
 上下文中已预加载：
-- **最近相关消息**：当前会话最近消息（"## 最近相关消息"段落，条数见标题）
+- **最近相关消息**：当前会话最近消息
 - **短期记忆**：与该用户的近期对话摘要
 - **长期记忆**：通过语义搜索检索到的相关记忆
 
@@ -51,7 +81,7 @@ const DEFAULT_TASK_INSTRUCTIONS = `## 任务执行规则（内部指令）
 
 ## 通讯工具
 
-- **get_history**：查询当前会话更早的历史（已预加载的消息之前的内容）
+- **get_history**：查询当前会话更早的历史
 - **send_message**：在任意 Channel/Session 中发送消息
 - **lookup_friend**：查找联系人信息
 - **list_sessions**：查看 Channel 上的会话列表
@@ -70,14 +100,18 @@ function loadWorkerPrompts(): string {
 
 export interface WorkerHandlerConfig {
   personalityPrompt?: string
-  /** 最大轮次，undefined 表示不限制 */
   maxIterations?: number
 }
 
-export interface ProgressDeps {
+export interface WorkerDeps {
   rpcClient: RpcClient
   moduleId: string
   resolveChannelPort: (channelId: string) => Promise<number>
+}
+
+export interface SdkEnvConfig {
+  modelId: string
+  env: Record<string, string>
 }
 
 /** Tools the Worker SDK is allowed to use */
@@ -98,19 +132,20 @@ export class WorkerHandler {
   private config: WorkerHandlerConfig
   private systemPrompt: string
   private activeTasks: Map<TaskId, WorkerTaskState> = new Map()
-  /** Factory that creates fresh MCP server configs per runSdk() call (avoids Protocol reuse) */
+  /** Active query handles — for streamInput() injection */
+  private activeQueries: Map<TaskId, Query> = new Map()
   private mcpConfigFactory: (() => Record<string, SdkMcpServerConfig>) | undefined
-  private progressDeps?: ProgressDeps
+  private deps?: WorkerDeps
 
   constructor(
     sdkEnv: SdkEnvConfig,
     config?: Partial<WorkerHandlerConfig>,
     mcpConfigFactory?: () => Record<string, SdkMcpServerConfig>,
-    progressDeps?: ProgressDeps,
+    deps?: WorkerDeps,
   ) {
     this.sdkEnv = sdkEnv
     this.mcpConfigFactory = mcpConfigFactory
-    this.progressDeps = progressDeps
+    this.deps = deps
     this.config = {
       personalityPrompt: config?.personalityPrompt,
       maxIterations: config?.maxIterations,
@@ -126,24 +161,23 @@ export class WorkerHandler {
     traceCallback?: TraceCallback,
   ): Promise<ExecuteTaskResult> {
     const { task, context } = params
-    const abortController = new AbortController()
+    const taskDir = `/tmp/crabot-task-${task.task_id}`
+
     const taskState: WorkerTaskState = {
       taskId: task.task_id,
       status: 'executing',
       startedAt: new Date().toISOString(),
       title: task.task_title,
-      abortController,
+      abortController: new AbortController(),
       pendingHumanMessages: [],
     }
     this.activeTasks.set(task.task_id, taskState)
 
-    // Create isolated task directory
-    const taskDir = `/tmp/crabot-task-${task.task_id}`
-
     try {
+      // 1. Create isolated task directory
       await fs.promises.mkdir(taskDir, { recursive: true })
 
-      // Write Admin Skills to task directory
+      // 2. Write Admin Skills to task directory
       const skills = (params as { skills?: SkillConfig[] }).skills
       if (skills && skills.length > 0) {
         const skillsDir = path.join(taskDir, '.claude', 'skills')
@@ -155,9 +189,7 @@ export class WorkerHandler {
         }
       }
 
-      const taskMessage = this.buildTaskMessage(task, context)
-
-      // ask_human 工具通过 SDK MCP 服务器提供
+      // 3. Build MCP servers
       const askHumanServer = createSdkMcpServer({
         name: 'crabot-worker',
         version: '1.0.0',
@@ -170,64 +202,76 @@ export class WorkerHandler {
               options: z.array(z.string()).optional().describe('可选的选项列表'),
             },
             async (args) => {
-              const result = await this.handleAskHuman(task.task_id, { question: args.question }, taskState)
-              return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] }
+              taskState.status = 'waiting_for_human'
+              return {
+                content: [{
+                  type: 'text' as const,
+                  text: JSON.stringify({
+                    status: 'waiting',
+                    message: '已向人类发送问题，等待响应...',
+                    question: args.question,
+                  }),
+                }],
+              }
             },
           ),
         ],
       })
 
-      // Create fresh MCP server configs per executeTask call (avoids Protocol reuse)
       const externalMcpConfigs = this.mcpConfigFactory?.() ?? {}
       const mcpServers: Record<string, SdkMcpServerConfig> = {
         'crabot-worker': askHumanServer as unknown as SdkMcpServerConfig,
         ...externalMcpConfigs,
       }
 
-      // Build allowedTools: static list + external MCP tool names
+      // 4. Build allowedTools
       const externalMcpToolNames = Object.keys(externalMcpConfigs)
-        .filter((name) => name !== 'crabot-worker')
-        .map((name) => `mcp__${name}__*`)
+        .filter(name => name !== 'crabot-worker')
+        .map(name => `mcp__${name}__*`)
       const allowedTools = [...WORKER_ALLOWED_TOOLS, ...externalMcpToolNames]
 
-      // Build progress callback
-      const progressCallback = context.task_origin
-        ? async (summary: string) => {
-            await this.sendProgress(context.task_origin!, task.task_title, summary)
-          }
-        : undefined
+      // 5. Build SDK options
+      const claudePath = findClaudeCodePath()
+      const cleanEnv = { ...process.env, ...this.sdkEnv.env } as Record<string, string | undefined>
+      delete cleanEnv.ANTHROPIC_AUTH_TOKEN
 
-      const sdkOpts: SdkRunOptions = {
-        prompt: taskMessage,
+      const sdkOptions: SdkOptions = {
         systemPrompt: this.buildSystemPrompt(context),
         model: this.sdkEnv.modelId,
-        env: this.sdkEnv.env,
-        ...(this.config.maxIterations !== undefined && { maxTurns: this.config.maxIterations }),
-        loopLabel: 'worker',
-        mcpServers,
-        allowedTools,
+        env: cleanEnv,
         cwd: taskDir,
-        progressCallback,
-        abortController,
-        traceCallback,
+        settingSources: ['project'],
+        allowedTools,
+        mcpServers,
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+        persistSession: false,
+        thinking: { type: 'disabled' },
+        ...(this.config.maxIterations !== undefined && { maxTurns: this.config.maxIterations }),
+        ...(claudePath && { pathToClaudeCodeExecutable: claudePath }),
+        ...(taskState.abortController && { abortController: taskState.abortController as unknown as AbortController }),
+        stderr: (data: string) => {
+          if (data.trim()) log(`stderr: ${data.trim().slice(0, 500)}`)
+        },
       }
 
-      const result = await runSdk(sdkOpts)
+      // 6. Start query with task message
+      const taskMessage = this.buildTaskMessage(task, context)
+      log(`Starting worker query: model=${this.sdkEnv.modelId}, task=${task.task_title}`)
 
-      // SDK 结果可能为空（模型 thinking 消耗所有 token），从工具调用结果中提取
-      const resultText = result.text
-        || this.extractToolOutputSummary(result.toolCalls)
-        || (result.isError ? result.errors?.join('; ') ?? '执行失败' : '任务已完成，但模型未生成输出')
+      const queryHandle = query({ prompt: taskMessage, options: sdkOptions })
+      this.activeQueries.set(task.task_id, queryHandle)
 
-      return {
-        task_id: task.task_id,
-        outcome: result.isError ? 'failed' : 'completed',
-        summary: resultText,
-        final_reply: { type: 'text', text: resultText },
-      }
+      // 7. Process output stream — progress, trace, result extraction
+      const result = await this.processQueryStream(
+        queryHandle, task, context.task_origin, taskState, traceCallback,
+      )
+
+      return result
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
-      if (abortController.signal.aborted) {
+      log(`Worker error: ${errorMessage}`)
+      if (taskState.abortController.signal.aborted) {
         return { task_id: task.task_id, outcome: 'failed', summary: '任务被取消' }
       }
       return {
@@ -237,8 +281,171 @@ export class WorkerHandler {
         final_reply: { type: 'text', text: `抱歉，执行任务时出现错误: ${errorMessage}` },
       }
     } finally {
+      this.activeQueries.delete(task.task_id)
       this.activeTasks.delete(task.task_id)
-      await this.cleanupTaskDir(taskDir)
+      await this.cleanupTaskDir()
+    }
+  }
+
+  /**
+   * Process the query output stream — handle all SDK events.
+   * This replaces sdk-runner.ts's event loop.
+   */
+  private async processQueryStream(
+    queryHandle: Query,
+    task: ExecuteTaskParams['task'],
+    taskOrigin: TaskOrigin | undefined,
+    taskState: WorkerTaskState,
+    traceCallback?: TraceCallback,
+  ): Promise<ExecuteTaskResult> {
+    let resultText = ''
+    let isError = false
+    let turnCount = 0
+    let lastProgressTime = Date.now()
+    let loopSpanId: string | undefined
+
+    for await (const message of queryHandle) {
+      const msg = message as SDKMessage & Record<string, unknown>
+
+      switch (msg.type) {
+        case 'system': {
+          if ((msg as Record<string, unknown>).subtype === 'init') {
+            log(`System init: model=${msg.model}, tools=${JSON.stringify(msg.tools)}`)
+            loopSpanId = traceCallback?.onLoopStart('worker', {
+              system_prompt: undefined,
+              model: msg.model as string,
+              tools: msg.tools as string[],
+              mcp_servers: msg.mcp_servers as Array<{ name: string; status: string }>,
+            })
+          }
+          break
+        }
+
+        case 'assistant': {
+          const betaMessage = (msg as Record<string, unknown>).message as {
+            content?: Array<{ type: string; text?: string; name?: string; input?: unknown; id?: string }>
+            stop_reason?: string
+          }
+
+          const inputSummary = turnCount === 0 ? task.task_title.slice(0, 150) : `(turn ${turnCount + 1})`
+          const llmSpanId = traceCallback?.onLlmCallStart(turnCount + 1, inputSummary)
+          let turnText = ''
+          let toolUseCount = 0
+
+          if (betaMessage?.content) {
+            for (const block of betaMessage.content) {
+              if (block.type === 'text' && block.text) {
+                resultText = block.text  // Keep last text output as result
+                turnText += block.text
+              }
+              if (block.type === 'tool_use' && block.name) {
+                toolUseCount++
+                const toolSpanId = traceCallback?.onToolCallStart(
+                  block.name,
+                  JSON.stringify(block.input ?? {}).slice(0, 200),
+                )
+                if (toolSpanId) {
+                  traceCallback?.onToolCallEnd(toolSpanId, '(executed by SDK)')
+                }
+              }
+            }
+          }
+
+          if (llmSpanId) {
+            traceCallback?.onLlmCallEnd(llmSpanId, {
+              stopReason: betaMessage?.stop_reason,
+              outputSummary: turnText.slice(0, 200) || undefined,
+              toolCallsCount: toolUseCount > 0 ? toolUseCount : undefined,
+            })
+          }
+
+          turnCount++
+
+          // Progress reporting: every 3 turns or every 30s
+          const elapsed = Date.now() - lastProgressTime
+          const shouldReport =
+            turnCount === 1 ||
+            turnCount % 3 === 0 ||
+            elapsed > 30_000
+
+          if (shouldReport && taskOrigin) {
+            const summary = turnText.slice(0, 200) || `执行中 (第 ${turnCount} 轮)`
+            await this.sendProgress(taskOrigin, task.task_title, summary)
+            lastProgressTime = Date.now()
+          }
+
+          // Check for pending human messages — inject via streamInput
+          if (taskState.pendingHumanMessages.length > 0) {
+            const pending = taskState.pendingHumanMessages.splice(0)
+            const supplement = pending
+              .map(m => m.content.text ?? '')
+              .filter(t => t.length > 0)
+              .join('\n')
+
+            if (supplement) {
+              log(`Injecting human supplement: ${supplement.slice(0, 100)}`)
+              await this.injectHumanMessage(task.task_id, supplement)
+            }
+          }
+
+          break
+        }
+
+        case 'result': {
+          const resultMsg = msg as Record<string, unknown>
+          log(`Result: subtype=${resultMsg.subtype}, isError=${resultMsg.is_error}`)
+
+          if (resultMsg.subtype === 'success' || !resultMsg.is_error) {
+            if (resultMsg.result && typeof resultMsg.result === 'string') {
+              resultText = resultMsg.result
+            }
+            isError = !!resultMsg.is_error
+          } else {
+            isError = true
+            const errors = resultMsg.errors as string[] | undefined
+            if (errors?.length) {
+              resultText = errors.join('; ')
+            }
+          }
+          break
+        }
+      }
+    }
+
+    if (loopSpanId) {
+      traceCallback?.onLoopEnd(loopSpanId, isError ? 'failed' : 'completed', turnCount)
+    }
+
+    const finalText = resultText || '任务已完成，但模型未生成输出'
+
+    return {
+      task_id: task.task_id,
+      outcome: isError ? 'failed' : 'completed',
+      summary: finalText,
+      final_reply: { type: 'text', text: finalText },
+    }
+  }
+
+  /**
+   * Inject a human message into a running query via streamInput()
+   */
+  private async injectHumanMessage(taskId: TaskId, text: string): Promise<void> {
+    const queryHandle = this.activeQueries.get(taskId)
+    if (!queryHandle) return
+
+    async function* singleMessage(): AsyncIterable<SDKUserMessage> {
+      yield {
+        type: 'user',
+        session_id: '',
+        message: { role: 'user', content: [{ type: 'text', text: `用户补充指示：${text}` }] },
+        parent_tool_use_id: null,
+      }
+    }
+
+    try {
+      await queryHandle.streamInput(singleMessage())
+    } catch (error) {
+      log(`Failed to inject human message: ${error instanceof Error ? error.message : error}`)
     }
   }
 
@@ -254,12 +461,17 @@ export class WorkerHandler {
       taskState.abortController.abort()
       taskState.status = 'cancelled'
     }
+    // Also try to interrupt the query gracefully
+    const queryHandle = this.activeQueries.get(taskId)
+    if (queryHandle) {
+      queryHandle.interrupt().catch(() => { /* ignore */ })
+    }
   }
 
   getActiveTaskCount(): number { return this.activeTasks.size }
 
   getActiveTasksForQuery(): Array<{ task_id: string; status: string; started_at: string; title?: string }> {
-    return Array.from(this.activeTasks.values()).map((t) => ({
+    return Array.from(this.activeTasks.values()).map(t => ({
       task_id: t.taskId,
       status: t.status,
       started_at: t.startedAt,
@@ -305,21 +517,18 @@ export class WorkerHandler {
       for (const m of context.long_term_memories.slice(-5)) { parts.push(`- ${m.content}`) }
     }
     if (context.recent_messages && context.recent_messages.length > 0) {
-      parts.push(`\n## 最近相关消息（已预加载，共 ${context.recent_messages.length} 条；更早的历史用 get_history 工具获取）`)
+      parts.push(`\n## 最近相关消息（共 ${context.recent_messages.length} 条）`)
       for (const m of context.recent_messages.slice(-20)) {
         parts.push(`- ${m.sender.platform_display_name}: ${m.content.text ?? '[非文本消息]'}`)
       }
-    } else {
-      parts.push('\n## 最近相关消息（暂无；如需历史消息，用 get_history 工具获取）')
     }
 
-    // Check for front_context (from forced Front termination)
-    const taskWithContext = task as { front_context?: Array<{ tool_name: string; input_summary: string; output_summary: string }> }
+    // front_context from forced Front termination
+    const taskWithContext = task as { front_context?: Array<{ tool_name: string; output_summary: string }> }
     if (taskWithContext.front_context && Array.isArray(taskWithContext.front_context)) {
-      const frontContext = taskWithContext.front_context
       parts.push('\n## Front Agent 已完成的工作')
-      parts.push('（以下是 Front 在分诊阶段已获取的信息，请直接使用，不要重复查询）')
-      for (const entry of frontContext) {
+      parts.push('（以下信息已获取，请直接使用，不要重复查询）')
+      for (const entry of taskWithContext.front_context) {
         parts.push(`- ${entry.tool_name}: ${entry.output_summary}`)
       }
     }
@@ -327,61 +536,34 @@ export class WorkerHandler {
     return parts.join('\n')
   }
 
-  /**
-   * 从工具调用记录中提取最后有意义的输出
-   * 当 LLM 未生成文本时（thinking 消耗所有 token），从工具输出中兜底
-   */
-  private extractToolOutputSummary(toolCalls: Array<{ name: string; input: unknown; output: unknown }>): string | undefined {
-    if (toolCalls.length === 0) return undefined
-
-    // 从后往前找最后一个有输出的工具调用
-    for (let i = toolCalls.length - 1; i >= 0; i--) {
-      const call = toolCalls[i]
-      if (call.output) {
-        const text = typeof call.output === 'string'
-          ? call.output
-          : JSON.stringify(call.output)
-        if (text.length > 0 && text !== 'undefined') {
-          return `[${call.name}] ${text.slice(0, 2000)}`
-        }
-      }
-    }
-
-    // 没有输出，至少说明调用了哪些工具
-    const toolNames = toolCalls.map((c) => c.name).join(', ')
-    return `已执行工具: ${toolNames}（模型未生成总结文本）`
-  }
-
   private async sendProgress(
     taskOrigin: TaskOrigin,
     taskTitle: string,
     summary: string,
   ): Promise<void> {
-    if (!this.progressDeps) return
+    if (!this.deps) return
     try {
-      const channelPort = await this.progressDeps.resolveChannelPort(taskOrigin.channel_id)
-      await this.progressDeps.rpcClient.call(channelPort, 'send_message', {
+      const channelPort = await this.deps.resolveChannelPort(taskOrigin.channel_id)
+      await this.deps.rpcClient.call(channelPort, 'send_message', {
         session_id: taskOrigin.session_id,
         content: { type: 'text', text: `[任务进度] ${taskTitle}\n${summary}` },
-      }, this.progressDeps.moduleId)
+      }, this.deps.moduleId)
     } catch { /* ignore progress send failures */ }
   }
 
-  private async cleanupTaskDir(_taskDir: string): Promise<void> {
+  private async cleanupTaskDir(): Promise<void> {
     try {
       const maxRetained = 5
       const entries = await fs.promises.readdir('/tmp')
-      const dirs = entries.filter((d) => d.startsWith('crabot-task-')).map((d) => `/tmp/${d}`)
+      const dirs = entries.filter(d => d.startsWith('crabot-task-')).map(d => `/tmp/${d}`)
       if (dirs.length > maxRetained) {
         const withStats = await Promise.all(
-          dirs.map(async (d) => {
+          dirs.map(async d => {
             try {
               const stat = await fs.promises.stat(d)
               return { path: d, mtime: stat.mtimeMs }
-            } catch {
-              return null
-            }
-          })
+            } catch { return null }
+          }),
         )
         const valid = withStats.filter((s): s is { path: string; mtime: number } => s !== null)
         const sorted = valid.sort((a, b) => a.mtime - b.mtime)
@@ -390,18 +572,5 @@ export class WorkerHandler {
         }
       }
     } catch { /* ignore cleanup errors */ }
-  }
-
-  private handleAskHuman(
-    _taskId: TaskId,
-    input: { question: string },
-    taskState: WorkerTaskState,
-  ): Promise<unknown> {
-    taskState.status = 'waiting_for_human'
-    return Promise.resolve({
-      status: 'waiting',
-      message: '已向人类发送问题，等待响应...',
-      question: input.question,
-    })
   }
 }
