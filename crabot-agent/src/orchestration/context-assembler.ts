@@ -28,6 +28,7 @@ interface AssembleParams {
   sender_id: string
   message: string
   friend_id?: string
+  session_type?: 'private' | 'group'
 }
 
 export class ContextAssembler {
@@ -52,7 +53,8 @@ export class ContextAssembler {
       this.fetchRecentMessages(
         params.session_id,
         params.channel_id,
-        this.config.front_context_recent_messages_limit
+        this.config.front_context_recent_messages_limit,
+        params.session_type ?? 'private'
       ),
       this.fetchShortTermMemory(
         params.friend_id,
@@ -92,7 +94,8 @@ export class ContextAssembler {
         this.fetchRecentMessages(
           params.session_id,
           params.channel_id,
-          this.config.worker_recent_messages_limit
+          this.config.worker_recent_messages_limit,
+          params.session_type ?? 'private'
         ),
         this.fetchShortTermMemory(
           params.friend_id,
@@ -133,7 +136,8 @@ export class ContextAssembler {
   private async fetchRecentMessages(
     sessionId: SessionId,
     channelId: ModuleId,
-    limit: number
+    limit: number,
+    sessionType: 'private' | 'group' = 'private'
   ): Promise<ChannelMessage[]> {
     try {
       // admin-web 频道：从 Admin 的 get_chat_history RPC 获取（无 Channel 模块）
@@ -172,7 +176,7 @@ export class ContextAssembler {
         session: {
           session_id: sessionId,
           channel_id: channelId,
-          type: 'private' as const,
+          type: sessionType,
         },
         sender: {
           friend_id: msg.sender.friend_id,

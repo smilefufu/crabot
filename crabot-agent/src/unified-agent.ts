@@ -431,6 +431,7 @@ ${skillsSection}
           // 合并所有消息的文本作为上下文（与 processGroupBatch 保持一致）
           message: mergedMessages.map((m) => m.content.text ?? '').join('\n'),
           friend_id: sender.friend_id,
+          session_type: 'private',
         },
         friend,
         memPerms
@@ -586,6 +587,7 @@ ${skillsSection}
           sender_id: lastMsg.sender.platform_user_id,
           message: messages.map((m) => m.content.text ?? '').join('\n'),
           friend_id: lastMsg.sender.friend_id,
+          session_type: 'group',
         },
         lastEntry.friend,
         memPerms
@@ -1019,6 +1021,7 @@ ${skillsSection}
             sender_id: message.sender.platform_user_id,
             message: mergedMessages.map((m) => m.content.text ?? '').join('\n'),
             friend_id: message.sender.friend_id,
+            session_type: message.session.type,
           },
           undefined,
           channelMemPerms
@@ -1152,6 +1155,7 @@ ${skillsSection}
           sender_id: 'master',
           message: mergedMessages.map((m) => m.content.text ?? '').join('\n'),
           friend_id: message.sender.friend_id ?? 'master',
+          session_type: 'private',
         },
         {
           id: 'master',
