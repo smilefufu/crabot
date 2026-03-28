@@ -627,6 +627,11 @@ export interface ContextAssemblyDetails {
   context_type: 'front' | 'worker'
   channel_id?: string
   session_id?: string
+  message_batch?: Array<{
+    sender: string
+    text: string
+    is_mention_crab: boolean
+  }>
 }
 
 export interface MemoryWriteDetails {

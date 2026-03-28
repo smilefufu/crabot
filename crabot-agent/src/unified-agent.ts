@@ -6,6 +6,7 @@
  * @see crabot-docs/protocols/protocol-agent-v2.md
  */
 
+import * as path from 'path'
 import { ModuleBase, type ModuleConfig } from './core/module-base.js'
 import type { Event, ModuleId } from './core/base-protocol.js'
 import type {
@@ -76,7 +77,7 @@ export class UnifiedAgent extends ModuleBase {
   private channelPorts: Map<ModuleId, number> = new Map()
 
   // Trace 存储
-  private traceStore: TraceStore = new TraceStore()
+  private traceStore: TraceStore
 
   constructor(config: UnifiedAgentConfig) {
     const moduleConfig: ModuleConfig = {
@@ -95,6 +96,9 @@ export class UnifiedAgent extends ModuleBase {
     }
 
     super(moduleConfig)
+
+    const traceDir = path.join(process.env.DATA_DIR ?? './data', 'agent', 'traces')
+    this.traceStore = new TraceStore(100, traceDir)
 
     this.orchestrationConfig = config.orchestration
     this.agentConfig = config.agent_config
@@ -577,6 +581,11 @@ ${skillsSection}
           context_type: 'front',
           channel_id: session.channel_id,
           session_id: sessionId,
+          message_batch: messages.map(m => ({
+            sender: m.sender.platform_display_name,
+            text: (m.content.text ?? '').slice(0, 500),
+            is_mention_crab: m.features.is_mention_crab,
+          })),
         },
       })
       const lastMsg = messages[messages.length - 1]
