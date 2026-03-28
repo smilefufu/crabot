@@ -330,16 +330,16 @@ export class WorkerHandler {
           const inputSummary = turnCount === 0 ? task.task_title.slice(0, 150) : `(turn ${turnCount + 1})`
           const llmSpanId = traceCallback?.onLlmCallStart(turnCount + 1, inputSummary)
           let turnText = ''
-          let toolUseCount = 0
+          const turnToolCalls: string[] = []
 
           if (betaMessage?.content) {
             for (const block of betaMessage.content) {
               if (block.type === 'text' && block.text) {
-                resultText = block.text  // Keep last text output as result
+                resultText = block.text
                 turnText += block.text
               }
               if (block.type === 'tool_use' && block.name) {
-                toolUseCount++
+                turnToolCalls.push(this.summarizeToolCall(block.name, block.input))
                 const toolSpanId = traceCallback?.onToolCallStart(
                   block.name,
                   JSON.stringify(block.input ?? {}).slice(0, 200),
@@ -355,7 +355,7 @@ export class WorkerHandler {
             traceCallback?.onLlmCallEnd(llmSpanId, {
               stopReason: betaMessage?.stop_reason,
               outputSummary: turnText.slice(0, 200) || undefined,
-              toolCallsCount: toolUseCount > 0 ? toolUseCount : undefined,
+              toolCallsCount: turnToolCalls.length > 0 ? turnToolCalls.length : undefined,
             })
           }
 
@@ -369,7 +369,9 @@ export class WorkerHandler {
             elapsed > 30_000
 
           if (shouldReport && taskOrigin) {
-            const summary = turnText.slice(0, 200) || `执行中 (第 ${turnCount} 轮)`
+            // Build meaningful summary from text + tool calls
+            const summary = turnText.slice(0, 200)
+              || (turnToolCalls.length > 0 ? turnToolCalls.join('\n') : `执行中 (第 ${turnCount} 轮)`)
             await this.sendProgress(taskOrigin, task.task_title, summary)
             lastProgressTime = Date.now()
           }
@@ -534,6 +536,33 @@ export class WorkerHandler {
     }
 
     return parts.join('\n')
+  }
+
+  /**
+   * Extract a human-readable summary from a tool call
+   */
+  private summarizeToolCall(toolName: string, input: unknown): string {
+    const args = input as Record<string, unknown> | undefined
+    switch (toolName) {
+      case 'Bash':
+        return `$ ${(args?.command as string ?? '').slice(0, 100)}`
+      case 'Write':
+        return `写入 ${args?.file_path ?? '文件'}`
+      case 'Edit':
+        return `编辑 ${args?.file_path ?? '文件'}`
+      case 'Read':
+        return `读取 ${args?.file_path ?? '文件'}`
+      case 'Glob':
+        return `搜索文件 ${args?.pattern ?? ''}`
+      case 'Grep':
+        return `搜索内容 "${args?.pattern ?? ''}" in ${args?.path ?? '.'}`
+      default:
+        if (toolName.startsWith('mcp__crab-messaging__')) {
+          const method = toolName.replace('mcp__crab-messaging__', '')
+          return `通讯: ${method}`
+        }
+        return `调用 ${toolName}`
+    }
   }
 
   private async sendProgress(
