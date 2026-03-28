@@ -303,6 +303,8 @@ export class WorkerHandler {
     let turnCount = 0
     let lastProgressTime = Date.now()
     let loopSpanId: string | undefined
+    /** Accumulated tool call summaries since last progress report */
+    const pendingProgressItems: string[] = []
 
     for await (const message of queryHandle) {
       const msg = message as SDKMessage & Record<string, unknown>
@@ -330,7 +332,7 @@ export class WorkerHandler {
           const inputSummary = turnCount === 0 ? task.task_title.slice(0, 150) : `(turn ${turnCount + 1})`
           const llmSpanId = traceCallback?.onLlmCallStart(turnCount + 1, inputSummary)
           let turnText = ''
-          const turnToolCalls: string[] = []
+          let turnToolCount = 0
 
           if (betaMessage?.content) {
             for (const block of betaMessage.content) {
@@ -339,7 +341,8 @@ export class WorkerHandler {
                 turnText += block.text
               }
               if (block.type === 'tool_use' && block.name) {
-                turnToolCalls.push(this.summarizeToolCall(block.name, block.input))
+                turnToolCount++
+                pendingProgressItems.push(this.summarizeToolCall(block.name, block.input))
                 const toolSpanId = traceCallback?.onToolCallStart(
                   block.name,
                   JSON.stringify(block.input ?? {}).slice(0, 200),
@@ -351,11 +354,16 @@ export class WorkerHandler {
             }
           }
 
+          // LLM text output is also useful progress (e.g. "我来分析一下...")
+          if (turnText.trim()) {
+            pendingProgressItems.push(turnText.trim().slice(0, 150))
+          }
+
           if (llmSpanId) {
             traceCallback?.onLlmCallEnd(llmSpanId, {
               stopReason: betaMessage?.stop_reason,
               outputSummary: turnText.slice(0, 200) || undefined,
-              toolCallsCount: turnToolCalls.length > 0 ? turnToolCalls.length : undefined,
+              toolCallsCount: turnToolCount > 0 ? turnToolCount : undefined,
             })
           }
 
@@ -368,10 +376,9 @@ export class WorkerHandler {
             turnCount % 3 === 0 ||
             elapsed > 30_000
 
-          if (shouldReport && taskOrigin) {
-            // Build meaningful summary from text + tool calls
-            const summary = turnText.slice(0, 200)
-              || (turnToolCalls.length > 0 ? turnToolCalls.join('\n') : `执行中 (第 ${turnCount} 轮)`)
+          if (shouldReport && taskOrigin && pendingProgressItems.length > 0) {
+            // Drain accumulated items into one progress message
+            const summary = pendingProgressItems.splice(0).join('\n').slice(0, 500)
             await this.sendProgress(taskOrigin, task.task_title, summary)
             lastProgressTime = Date.now()
           }
