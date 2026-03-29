@@ -490,8 +490,8 @@ export class AdminModule extends ModuleBase {
         break
 
       case 'channel.message_received': {
-        const { channel_id, message } = event.payload as { channel_id: ModuleId; message: ChannelMessageRef }
-        await this.handleChannelMessage(channel_id, message)
+        const { channel_id, message, crab_display_name } = event.payload as { channel_id: ModuleId; message: ChannelMessageRef; crab_display_name?: string }
+        await this.handleChannelMessage(channel_id, message, crab_display_name)
         break
       }
       // 其他事件处理...
@@ -1901,7 +1901,7 @@ export class AdminModule extends ModuleBase {
   /**
    * 处理 channel.message_received 事件：鉴权，决定是否发出 channel.message_authorized
    */
-  private async handleChannelMessage(channelId: ModuleId, message: ChannelMessageRef): Promise<void> {
+  private async handleChannelMessage(channelId: ModuleId, message: ChannelMessageRef, crabDisplayName?: string): Promise<void> {
     const { platform_user_id, platform_display_name } = message.sender
     const friend = this.resolveFriendByChannelIdentity(channelId, platform_user_id)
 
@@ -1916,7 +1916,7 @@ export class AdminModule extends ModuleBase {
           friend_id: friend.id,
         },
       }
-      await this.publishMessageAuthorizedEvent(channelId, authorizedMessage, friend)
+      await this.publishMessageAuthorizedEvent(channelId, authorizedMessage, friend, crabDisplayName)
       return
     }
 
@@ -1932,7 +1932,7 @@ export class AdminModule extends ModuleBase {
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         }
-        await this.publishMessageAuthorizedEvent(channelId, message, guestFriend)
+        await this.publishMessageAuthorizedEvent(channelId, message, guestFriend, crabDisplayName)
         return
       }
       // 无 Master 在此 Channel → 静默丢弃
@@ -1984,13 +1984,19 @@ export class AdminModule extends ModuleBase {
   private async publishMessageAuthorizedEvent(
     channelId: ModuleId,
     message: ChannelMessageRef,
-    friend: Friend
+    friend: Friend,
+    crabDisplayName?: string
   ): Promise<void> {
     const event: Event = {
       id: generateId(),
       type: 'channel.message_authorized',
       source: this.config.moduleId,
-      payload: { channel_id: channelId, message, friend },
+      payload: {
+        channel_id: channelId,
+        message,
+        friend,
+        ...(crabDisplayName !== undefined ? { crab_display_name: crabDisplayName } : {}),
+      },
       timestamp: generateTimestamp(),
     }
     await this.rpcClient.publishEvent(event, this.config.moduleId)

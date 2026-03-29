@@ -75,6 +75,8 @@ export class UnifiedAgent extends ModuleBase {
   private adminPort?: number
   private memoryPort?: number
   private channelPorts: Map<ModuleId, number> = new Map()
+  /** Crabot 群昵称缓存: channel_id → display_name */
+  private crabDisplayNames: Map<ModuleId, string> = new Map()
 
   // Trace 存储
   private traceStore: TraceStore
@@ -332,7 +334,7 @@ ${skillsSection}
   protected override async onEvent(event: Event): Promise<void> {
     switch (event.type) {
       case 'channel.message_authorized':
-        await this.handleMessageReceived(event.payload as { message: ChannelMessage; friend: Friend })
+        await this.handleMessageReceived(event.payload as { message: ChannelMessage; friend: Friend; crab_display_name?: string })
         break
 
       case 'admin.task_status_changed':
@@ -359,9 +361,14 @@ ${skillsSection}
    * 群聊非 @mention 消息走 Debounce 缓冲，其余直接处理。
    * @see protocol-agent-v2.md §5.1 SwitchMap, §5.2 Debounce
    */
-  private async handleMessageReceived(payload: { message: ChannelMessage; friend: Friend }): Promise<void> {
-    const { message, friend } = payload
+  private async handleMessageReceived(payload: { message: ChannelMessage; friend: Friend; crab_display_name?: string }): Promise<void> {
+    const { message, friend, crab_display_name } = payload
     const { session } = message
+
+    // 缓存 Crabot 群昵称（来自 Channel 事件）
+    if (crab_display_name && session.channel_id) {
+      this.crabDisplayNames.set(session.channel_id, crab_display_name)
+    }
 
     // 0. 检查是否已配置
     if (!this.isConfigured()) {
@@ -597,6 +604,7 @@ ${skillsSection}
           message: messages.map((m) => m.content.text ?? '').join('\n'),
           friend_id: lastMsg.sender.friend_id,
           session_type: 'group',
+          crab_display_name: this.crabDisplayNames.get(session.channel_id),
         },
         lastEntry.friend,
         memPerms

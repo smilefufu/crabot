@@ -29,6 +29,7 @@ interface AssembleParams {
   message: string
   friend_id?: string
   session_type?: 'private' | 'group'
+  crab_display_name?: string
 }
 
 export class ContextAssembler {
@@ -77,6 +78,7 @@ export class ContextAssembler {
       recent_messages: recentMessages,
       short_term_memories: shortTermMemories,
       active_tasks: activeTasks,
+      crab_display_name: params.crab_display_name,
       available_tools: [],
     }
   }
