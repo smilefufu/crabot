@@ -516,27 +516,37 @@ ${skillsSection}
         this.traceStore.endSpan(trace.trace_id, decisionSpan.span_id, 'completed')
       }
 
-      // 11. 写入短期记忆（合并所有消息文本）
-      if (sender.friend_id && mergedMessages.some((m) => m.content.text)) {
-        const agentReply = this.extractReplyText(result.decisions)
-        if (agentReply) {
+      // 11. 写入短期记忆：分诊决策事件
+      if (sender.friend_id && result.decisions.length > 0) {
+        const messageBrief = mergedMessages
+          .map((m) => m.content.text ?? '')
+          .join(' ')
+          .slice(0, 80)
+
+        for (const decision of result.decisions) {
+          if (decision.type === 'silent') continue
+
           const memSpan = this.traceStore.startSpan(trace.trace_id, {
             type: 'memory_write',
             details: {
               friend_id: sender.friend_id,
               channel_id: session.channel_id,
+              decision_type: decision.type,
             },
           })
-          await this.memoryWriter.writeConversation({
+
+          await this.memoryWriter.writeTriageDecision({
+            friend_name: friend.display_name,
             friend_id: sender.friend_id,
             channel_id: session.channel_id,
             session_id: session.session_id,
-            sender_name: friend.display_name,
-            user_message: mergedMessages.map((m) => m.content.text ?? '').join('\n'),
-            agent_reply: agentReply,
+            message_brief: messageBrief,
+            decision: decision.type as 'direct_reply' | 'create_task' | 'forward_to_worker' | 'supplement_task',
+            task_id: 'task_id' in decision ? (decision as { task_id: string }).task_id : undefined,
             visibility: memPerms.write_visibility,
             scopes: memPerms.write_scopes,
           })
+
           this.traceStore.endSpan(trace.trace_id, memSpan.span_id, 'completed')
         }
       }
@@ -1263,27 +1273,37 @@ ${skillsSection}
         }
       }
 
-      // 写入短期记忆（带 span 追踪耗时）
-      if (message.content.text) {
-        const agentReply = this.extractReplyText(result.decisions)
-        if (agentReply) {
+      // 写入短期记忆：分诊决策事件
+      if (message.content.text && result.decisions.length > 0) {
+        const messageBrief = mergedMessages
+          .map((m) => m.content.text ?? '')
+          .join(' ')
+          .slice(0, 80)
+
+        for (const decision of result.decisions) {
+          if (decision.type === 'silent') continue
+
           const memSpan = this.traceStore.startSpan(trace.trace_id, {
             type: 'memory_write',
             details: {
               friend_id: message.sender.friend_id ?? 'master',
               channel_id: 'admin-web',
+              decision_type: decision.type,
             },
           })
-          await this.memoryWriter.writeConversation({
+
+          await this.memoryWriter.writeTriageDecision({
+            friend_name: 'Master',
             friend_id: message.sender.friend_id ?? 'master',
             channel_id: 'admin-web',
             session_id: sessionId,
-            sender_name: 'Master',
-            user_message: mergedMessages.map((m) => m.content.text ?? '').join('\n'),
-            agent_reply: agentReply,
+            message_brief: messageBrief,
+            decision: decision.type as 'direct_reply' | 'create_task' | 'forward_to_worker' | 'supplement_task',
+            task_id: 'task_id' in decision ? (decision as { task_id: string }).task_id : undefined,
             visibility: masterMemPerms.write_visibility,
             scopes: masterMemPerms.write_scopes,
           })
+
           this.traceStore.endSpan(trace.trace_id, memSpan.span_id, 'completed')
         }
       }
