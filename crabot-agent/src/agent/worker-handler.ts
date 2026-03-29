@@ -40,7 +40,6 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { execSync } from 'child_process'
 
-const WORKER_PROMPTS_FILE = path.join(process.cwd(), 'prompts-worker.md')
 const LOG_FILE = path.join(process.cwd(), '../data/worker-handler-debug.log')
 
 function log(msg: string) {
@@ -56,50 +55,8 @@ function findClaudeCodePath(): string | undefined {
   }
 }
 
-const DEFAULT_TASK_INSTRUCTIONS = `## 任务执行规则（内部指令）
-
-你负责执行复杂任务：
-1. 深度分析任务需求
-2. 使用可用工具完成任务
-3. 如果需要人类反馈，调用 ask_human 工具
-4. 完成后输出最终结果
-
-工作原则：
-- 仔细阅读任务描述，理解用户真实需求
-- 制定清晰的执行计划
-- 按步骤执行，遇到问题及时调整
-- 如果无法完成，说明原因并给出建议
-
-## 你已知道的上下文（无需工具获取）
-
-上下文中已预加载：
-- **最近相关消息**：当前会话最近消息
-- **短期记忆**：与该用户的近期对话摘要
-- **长期记忆**：通过语义搜索检索到的相关记忆
-
-**不要用工具重复获取这些已有的信息。**
-
-## 通讯工具
-
-- **get_history**：查询当前会话更早的历史
-- **send_message**：在任意 Channel/Session 中发送消息
-- **lookup_friend**：查找联系人信息
-- **list_sessions**：查看 Channel 上的会话列表
-- **open_private_session**：打开与某人的私聊
-
-完成任务后，直接输出最终结果。`
-
-function loadWorkerPrompts(): string {
-  try {
-    if (fs.existsSync(WORKER_PROMPTS_FILE)) {
-      return fs.readFileSync(WORKER_PROMPTS_FILE, 'utf-8')
-    }
-  } catch { /* ignore */ }
-  return DEFAULT_TASK_INSTRUCTIONS
-}
-
 export interface WorkerHandlerConfig {
-  personalityPrompt?: string
+  systemPrompt: string
   maxIterations?: number
 }
 
@@ -139,7 +96,7 @@ export class WorkerHandler {
 
   constructor(
     sdkEnv: SdkEnvConfig,
-    config?: Partial<WorkerHandlerConfig>,
+    config: WorkerHandlerConfig,
     mcpConfigFactory?: () => Record<string, SdkMcpServerConfig>,
     deps?: WorkerDeps,
   ) {
@@ -147,13 +104,10 @@ export class WorkerHandler {
     this.mcpConfigFactory = mcpConfigFactory
     this.deps = deps
     this.config = {
-      personalityPrompt: config?.personalityPrompt,
-      maxIterations: config?.maxIterations,
+      systemPrompt: config.systemPrompt,
+      maxIterations: config.maxIterations,
     }
-    const taskInstructions = loadWorkerPrompts()
-    this.systemPrompt = this.config.personalityPrompt
-      ? `${this.config.personalityPrompt}\n\n${taskInstructions}`
-      : taskInstructions
+    this.systemPrompt = config.systemPrompt
   }
 
   async executeTask(

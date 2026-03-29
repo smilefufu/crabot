@@ -15,64 +15,9 @@ import type {
   HandleMessageResult,
   TraceCallback,
 } from '../types.js'
-import * as fs from 'fs'
-import * as path from 'path'
-
-const PROMPTS_FILE = path.join(process.cwd(), 'prompts.md')
-
-const DEFAULT_SYSTEM_PROMPT = `你是 Crabot 的分诊员，负责快速分析消息并做出决策。
-
-## 决策输出
-
-你必须调用 make_decision 工具输出决策。四种类型：
-
-1. direct_reply — 直接回复（简单问答、问候、任务状态查询）
-2. create_task — 创建新任务（复杂操作、代码编写、数据分析）
-3. supplement_task — 补充/纠偏已有任务（用户对正在执行的任务有新指示）
-4. silent — 静默（群聊中与自己无关的消息）
-
-## 群聊规则（严格执行）
-
-在群聊中，你是旁听者，不是对话参与者。默认 silent。
-
-只有同时满足以下条件时才回复：
-1. 消息明确指向你（以下任一）：
-   - 消息标注了 [@你]
-   - 有人叫你的昵称
-   - 上下文中只有你一个可能的对话对象（群里只有发送者和你）
-2. 且消息内容确实需要你行动（提问、指令、求助）
-
-以下情况必须 silent：
-- 群成员之间互相讨论（即使话题是代码/技术/你擅长的领域）
-- 群成员之间一问一答（有明确的对话双方，你不是其中之一）
-- 系统通知、加群消息、分享链接等非对话内容
-- 不确定是否在叫你时，选择 silent
-
-## 纠偏判断指南
-
-当用户消息可能是对活跃任务的纠偏时：
-- 检查活跃任务列表，优先匹配同 session 发起的任务
-- 如果只有一个匹配任务且语义明确 -> confidence: high
-- 如果有多个匹配任务或语义模糊 -> confidence: low
-- 如果没有活跃任务或消息明显是新请求 -> create_task
-
-## 判断标准
-
-- 能在 1-2 步工具调用内完成 -> direct_reply
-- 需要多步骤或复杂推理 -> create_task
-- 不确定时 -> create_task（宁可派给 Worker）`
-
-function loadPrompts(): string {
-  try {
-    if (fs.existsSync(PROMPTS_FILE)) {
-      return fs.readFileSync(PROMPTS_FILE, 'utf-8')
-    }
-  } catch { /* ignore */ }
-  return DEFAULT_SYSTEM_PROMPT
-}
 
 export interface FrontHandlerConfig {
-  personalityPrompt?: string
+  systemPrompt: string
 }
 
 
@@ -84,15 +29,11 @@ export class FrontHandler {
   constructor(
     llmConfig: LLMClientConfig,
     toolExecutorDeps: ToolExecutorDeps,
-    config?: FrontHandlerConfig,
+    config: FrontHandlerConfig,
   ) {
     this.llmClient = new LLMClient(llmConfig)
     this.toolExecutor = new ToolExecutor(toolExecutorDeps)
-
-    const routingInstructions = loadPrompts()
-    this.systemPrompt = config?.personalityPrompt
-      ? `${config.personalityPrompt}\n\n${routingInstructions}`
-      : routingInstructions
+    this.systemPrompt = config.systemPrompt
   }
 
   async handleMessage(

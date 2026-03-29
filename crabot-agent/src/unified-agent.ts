@@ -45,6 +45,7 @@ import type { McpServerConfig as SdkMcpServerConfig } from '@anthropic-ai/claude
 import { MCPManager } from './agent/mcp-manager.js'
 import { createCrabMessagingServer, type PathMapping } from './mcp/crab-messaging.js'
 import { TraceStore } from './core/trace-store.js'
+import { PromptManager } from './prompt-manager.js'
 
 export class UnifiedAgent extends ModuleBase {
   // 编排层组件
@@ -80,6 +81,7 @@ export class UnifiedAgent extends ModuleBase {
 
   // Trace 存储
   private traceStore: TraceStore
+  private promptManager: PromptManager
 
   constructor(config: UnifiedAgentConfig) {
     const moduleConfig: ModuleConfig = {
@@ -101,6 +103,12 @@ export class UnifiedAgent extends ModuleBase {
 
     const traceDir = path.join(process.env.DATA_DIR ?? './data', 'agent', 'traces')
     this.traceStore = new TraceStore(100, traceDir)
+
+    const agentDataDir = process.env.DATA_DIR
+      ? path.join(process.env.DATA_DIR, 'agent')
+      : path.join('./data', 'agent')
+    this.promptManager = new PromptManager(agentDataDir)
+    this.promptManager.init()
 
     this.orchestrationConfig = config.orchestration
     this.agentConfig = config.agent_config
@@ -184,7 +192,7 @@ export class UnifiedAgent extends ModuleBase {
     }
 
     // 构建 SDK 环境变量（通过 LiteLLM 代理）
-    const personalityPrompt = this.enhanceSystemPrompt(config.system_prompt, config.skills)
+    const adminPersonality = this.enhanceSystemPrompt(config.system_prompt, config.skills)
 
     // MCP config factory: creates fresh McpServer instances per runSdk() call
     // This avoids the "Already connected to a transport" Protocol reuse error
@@ -216,7 +224,7 @@ export class UnifiedAgent extends ModuleBase {
           getActiveTasks: () => this.getActiveTasksList(),
         }
         this.frontHandler = new FrontHandler(llmConfig, toolExecutorDeps, {
-          personalityPrompt: personalityPrompt || undefined,
+          systemPrompt: this.promptManager.assembleFrontPrompt(adminPersonality || undefined),
         })
       }
     }
@@ -229,7 +237,7 @@ export class UnifiedAgent extends ModuleBase {
         const workerSdkEnv = this.sdkEnvWorker
         // MCP 服务器配置转换为 SDK 格式（stdio 类型直传）
         this.workerHandler = new WorkerHandler(workerSdkEnv, {
-          personalityPrompt: personalityPrompt || undefined,
+          systemPrompt: this.promptManager.assembleWorkerPrompt(adminPersonality || undefined),
           maxIterations: config.max_iterations,
         }, createMcpConfigs, {
           rpcClient: this.rpcClient,
@@ -1568,7 +1576,7 @@ ${skillsSection}
    * 热更新 LLM 客户端
    */
   private async updateLlmClients(modelConfig: Record<string, LLMConnectionInfo>): Promise<void> {
-    const personalityPrompt = this.enhanceSystemPrompt(
+    const adminPersonality = this.enhanceSystemPrompt(
       this.agentConfig?.system_prompt ?? '',
       this.agentConfig?.skills
     )
@@ -1605,7 +1613,7 @@ ${skillsSection}
         this.sdkEnvWorker = this.buildSdkEnv(workerConfig)
         const updatedWorkerSdkEnv = this.sdkEnvWorker
         this.workerHandler = new WorkerHandler(updatedWorkerSdkEnv, {
-          personalityPrompt: personalityPrompt || undefined,
+          systemPrompt: this.promptManager.assembleWorkerPrompt(adminPersonality || undefined),
           maxIterations: this.agentConfig?.max_iterations,
         }, createMcpConfigs, {
           rpcClient: this.rpcClient,
