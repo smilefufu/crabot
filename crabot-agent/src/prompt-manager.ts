@@ -50,7 +50,13 @@ const FRONT_RULES_TEMPLATE = `## 决策输出
 
 - 能在 1-2 步工具调用内完成 -> direct_reply
 - 需要多步骤或复杂推理 -> create_task
-- 不确定时 -> create_task（宁可派给 Worker）`
+- 不确定时 -> create_task（宁可派给 Worker）
+
+## create_task 字段指引
+
+- task_title：任务标题，简明扼要
+- task_description：一句话分类标注，描述任务方向。不要概括用户的完整需求——用户的原始消息会完整传递给 Worker
+- task_type：general / code / analysis / command`
 
 const WORKER_RULES_TEMPLATE = `## 工作目录
 

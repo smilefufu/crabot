@@ -24,7 +24,7 @@ export const MAKE_DECISION_TOOL: Tool = {
         description: '回复文本（type=direct_reply 时必填）',
       },
       task_title: { type: 'string', description: '任务标题（type=create_task 时必填）' },
-      task_description: { type: 'string', description: '任务详细描述（type=create_task 时必填）' },
+      task_description: { type: 'string', description: '一句话分类标注，描述任务方向（type=create_task 时必填）。不要概括用户需求，原始消息会完整传给 Worker。例如："分析挂靠功能需求并规划实现方案"' },
       task_type: {
         type: 'string',
         enum: ['general', 'code', 'analysis', 'command'],
