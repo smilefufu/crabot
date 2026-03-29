@@ -506,7 +506,28 @@ export class WorkerHandler {
     parts.push(`- 类型: ${task.task_type}`)
     parts.push(`- 优先级: ${task.priority}`)
     if (task.plan) { parts.push(`- 计划: ${task.plan}`) }
-    parts.push(`\n## 任务描述\n${task.task_description}`)
+
+    // trigger_messages: 用户的原始请求（核心内容）
+    if (context.trigger_messages && context.trigger_messages.length > 0) {
+      parts.push(`\n## 用户请求（共 ${context.trigger_messages.length} 条消息）`)
+      for (const msg of context.trigger_messages) {
+        const time = msg.platform_timestamp ? ` (${msg.platform_timestamp})` : ''
+        parts.push(`\n### ${msg.sender.platform_display_name}${time}`)
+        parts.push(msg.content.text ?? '[非文本消息]')
+      }
+      if (task.task_description) {
+        parts.push(`\n## 任务分类\n${task.task_description}`)
+      }
+    } else {
+      // 无 trigger_messages（如定时任务），回退到 task_description
+      parts.push(`\n## 任务描述\n${task.task_description}`)
+    }
+
+    if (context.sender_friend) {
+      parts.push(`\n## 发送者信息`)
+      parts.push(`- 名称: ${context.sender_friend.display_name}`)
+      parts.push(`- 权限: ${context.sender_friend.permission}`)
+    }
 
     if (context.task_origin) {
       parts.push('\n## 任务来源（crab-messaging 工具请使用这些 ID）')
