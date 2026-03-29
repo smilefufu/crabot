@@ -14,6 +14,7 @@ import type {
   SupplementTaskDecision,
   ChannelMessage,
   MemoryPermissions,
+  Friend,
 } from '../types.js'
 import { WorkerSelector } from './worker-selector.js'
 import { ContextAssembler } from './context-assembler.js'
@@ -46,7 +47,8 @@ export class DecisionDispatcher {
     params: {
       channel_id: ModuleId
       session_id: string
-      message: ChannelMessage
+      messages: ChannelMessage[]
+      senderFriend?: Friend
       memoryPermissions: MemoryPermissions
       admin_chat_callback?: {
         source_module_id: string
@@ -131,7 +133,8 @@ export class DecisionDispatcher {
     params: {
       channel_id: ModuleId
       session_id: string
-      message: ChannelMessage
+      messages: ChannelMessage[]
+      senderFriend?: Friend
       memoryPermissions: MemoryPermissions
       admin_chat_callback?: {
         source_module_id: string
@@ -206,7 +209,7 @@ export class DecisionDispatcher {
               source_module_id: params.channel_id,
               channel_id: params.channel_id,
               session_id: params.session_id,
-              friend_id: params.message.sender.friend_id,
+              friend_id: params.messages[params.messages.length - 1].sender.friend_id,
             },
       },
       this.moduleId,
@@ -222,12 +225,13 @@ export class DecisionDispatcher {
     })
 
     // 4. 组装 Worker 上下文
+    const lastMessage = params.messages[params.messages.length - 1]
     const workerContext = await this.contextAssembler.assembleWorkerContext({
       channel_id: params.channel_id,
       session_id: params.session_id,
-      sender_id: params.message.sender.platform_user_id,
-      message: params.message.content.text ?? '',
-      friend_id: params.message.sender.friend_id,
+      sender_id: lastMessage.sender.platform_user_id,
+      message: params.messages.map(m => m.content.text ?? '').join('\n'),
+      friend_id: lastMessage.sender.friend_id,
     }, params.memoryPermissions)
 
     // 5. 异步调用 Worker 执行任务（fire-and-forget，不阻塞 Front）
@@ -237,10 +241,16 @@ export class DecisionDispatcher {
       throw new Error(`Worker not found: ${workerId}`)
     }
 
+    const enrichedContext = {
+      ...workerContext,
+      trigger_messages: params.messages,
+      sender_friend: params.senderFriend,
+    }
+
     this.executeTaskInBackground(
       workers[0].port,
       task,
-      workerContext,
+      enrichedContext,
       params
     )
 
@@ -257,7 +267,7 @@ export class DecisionDispatcher {
     params: {
       channel_id: ModuleId
       session_id: string
-      message: ChannelMessage
+      messages: ChannelMessage[]
       admin_chat_callback?: {
         source_module_id: string
         request_id: string
@@ -398,7 +408,7 @@ export class DecisionDispatcher {
     params: {
       channel_id: ModuleId
       session_id: string
-      message: ChannelMessage
+      messages: ChannelMessage[]
       memoryPermissions: MemoryPermissions
       admin_chat_callback?: {
         source_module_id: string
@@ -473,7 +483,7 @@ export class DecisionDispatcher {
         'deliver_human_response',
         {
           task_id: decision.task_id,
-          messages: [params.message],
+          messages: params.messages,
         },
         this.moduleId,
         traceCtx
@@ -489,7 +499,7 @@ export class DecisionDispatcher {
         'update_task',
         {
           task_id: decision.task_id,
-          append_description: params.message.content.text,
+          append_description: params.messages.map(m => m.content.text ?? '').join('\n'),
         },
         this.moduleId,
         traceCtx
@@ -501,7 +511,7 @@ export class DecisionDispatcher {
     const fallbackDecision: CreateTaskDecision = {
       type: 'create_task',
       task_title: 'Follow-up request',
-      task_description: params.message.content.text ?? '',
+      task_description: params.messages.map(m => m.content.text ?? '').join('\n'),
       task_type: 'user_request',
       immediate_reply: {
         type: 'text',
