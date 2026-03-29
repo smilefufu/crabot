@@ -365,6 +365,18 @@ export interface TaskPlan {
   updated_at: string
 }
 
+/** 任务结果（Worker 完成/失败时写入） */
+export interface TaskResult {
+  /** 任务结局 */
+  outcome: 'completed' | 'failed'
+  /** 结果摘要（自然语言） */
+  summary: string
+  /** 最终回复内容 */
+  final_reply?: { text: string }
+  /** 完成/失败时间 */
+  finished_at: string
+}
+
 /** 任务消息 */
 export interface TaskMessage {
   /** 消息 ID */
@@ -399,6 +411,8 @@ export interface Task {
   worker_agent_id?: ModuleId
   /** 任务计划 */
   plan?: TaskPlan
+  /** 任务结果 */
+  result?: TaskResult
   /** 任务输入 */
   input?: Record<string, unknown>
   /** 任务输出 */
@@ -572,6 +586,7 @@ export interface UpdateTaskStatusParams {
   task_id: TaskId
   status: TaskStatus
   error?: string
+  result?: TaskResult
 }
 
 export interface UpdateTaskStatusResult {

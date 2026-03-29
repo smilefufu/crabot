@@ -2326,6 +2326,11 @@ export class AdminModule extends ModuleBase {
       task.error = params.error
     }
 
+    // 写入任务结果
+    if (params.result) {
+      task.result = params.result
+    }
+
     this.tasks.set(task.id, task)
 
     // 发布事件
