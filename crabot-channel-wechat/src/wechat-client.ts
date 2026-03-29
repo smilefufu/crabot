@@ -87,6 +87,20 @@ export class WechatClient {
   }
 
   /**
+   * 获取群成员列表
+   */
+  async getGroupMembers(chatroomName: string): Promise<{
+    members: Array<{ username: string; nickname: string; chatroom_nick?: string }>
+    memberCount: number
+  } | null> {
+    try {
+      return await this.get(`/api/v1/bot/groups/${encodeURIComponent(chatroomName)}/members`)
+    } catch {
+      return null
+    }
+  }
+
+  /**
    * 查询消息历史
    */
   async getMessages(talker: string, limit = 20): Promise<Array<Record<string, unknown>>> {

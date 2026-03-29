@@ -52,6 +52,10 @@ export class WechatChannel extends ModuleBase {
   // Webhook 服务器（仅 webhook 模式使用）
   private webhookServer: http.Server | null = null
 
+  /** Crabot 群昵称缓存: chatroomName → { nick, fetchedAt } */
+  private crabNickCache: Map<string, { nick: string; fetchedAt: number }> = new Map()
+  private static readonly NICK_CACHE_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
+
   constructor(config: WechatChannelInitConfig) {
     const moduleConfig: ModuleConfig = {
       moduleId: config.module_id,
@@ -237,13 +241,22 @@ export class WechatChannel extends ModuleBase {
 
     // 转换消息类型（MessageType 枚举：0=TEXT, 1=IMAGE, 18=QUOTE, ...）
     const msgType = event.message.type
-    const content = event.message.content as { text?: string; resource_url?: string }
+    const msgContent = event.message.content as { text?: string; at_string?: string; resource_url?: string }
     const hasText = msgType === 0 || msgType === 18 || msgType === 20  // TEXT, QUOTE, APP_MSG
 
     const contentType = msgType === 1 ? 'image' as const : 'text' as const
     const textContent = hasText
-      ? content.text ?? JSON.stringify(event.message.content)
+      ? msgContent.text ?? JSON.stringify(event.message.content)
       : `[${messageTypeName(msgType)}]`
+
+    // 检测 @Crabot
+    const atString = msgContent.at_string ?? ''
+    const isMentionCrab = isGroup && atString.split(',').some(wxid => wxid.trim() === event.puppet.wxid)
+
+    // 获取 Crabot 群昵称（仅群聊）
+    const crabDisplayName = isGroup
+      ? await this.getCrabGroupNick(platformSessionId, event.puppet.wxid)
+      : undefined
 
     // 构建 ChannelMessage
     const channelMessage: ChannelMessage = {
@@ -262,7 +275,7 @@ export class WechatChannel extends ModuleBase {
         text: textContent,
       },
       features: {
-        is_mention_crab: false,
+        is_mention_crab: isMentionCrab,
       },
       platform_timestamp: generateTimestamp(),
     }
@@ -283,12 +296,45 @@ export class WechatChannel extends ModuleBase {
       id: generateId(),
       type: 'channel.message_received',
       source: this.config.moduleId,
-      payload: { channel_id: this.config.moduleId, message: channelMessage },
+      payload: {
+        channel_id: this.config.moduleId,
+        message: channelMessage,
+        ...(crabDisplayName !== undefined ? { crab_display_name: crabDisplayName } : {}),
+      },
       timestamp: generateTimestamp(),
     }
 
     await this.rpcClient.publishEvent(crabotEvent, this.config.moduleId)
     console.log(`[WechatChannel] Published channel.message_received, session=${session.id}`)
+  }
+
+  // ============================================================================
+  // 群昵称缓存
+  // ============================================================================
+
+  /**
+   * 获取 Crabot 在群中的昵称（带 24h 缓存）
+   * 通过查询群成员列表，找到 puppet.wxid 对应的 chatroom_nick
+   */
+  private async getCrabGroupNick(chatroomName: string, puppetWxid: string): Promise<string | undefined> {
+    const cached = this.crabNickCache.get(chatroomName)
+    if (cached && Date.now() - cached.fetchedAt < WechatChannel.NICK_CACHE_TTL_MS) {
+      return cached.nick
+    }
+
+    try {
+      const result = await this.client.getGroupMembers(chatroomName)
+      if (!result?.members) return undefined
+
+      const self = result.members.find(m => m.username === puppetWxid)
+      const nick = self?.chatroom_nick || self?.nickname || undefined
+      if (nick) {
+        this.crabNickCache.set(chatroomName, { nick, fetchedAt: Date.now() })
+      }
+      return nick
+    } catch {
+      return undefined
+    }
   }
 
   // ============================================================================
@@ -407,8 +453,25 @@ export class WechatChannel extends ModuleBase {
       pageSize: params.limit ? undefined : pageSize,
     })
 
+    // 将内部 HistoryMessage 转换为 protocol-channel.md §3.3 协议格式
+    const protocolItems = items.map((m) => ({
+      platform_message_id: m.platform_message_id,
+      sender: {
+        platform_user_id: m.sender_platform_user_id ?? m.sender_name,
+        platform_display_name: m.sender_name,
+      },
+      content: {
+        type: m.content_type ?? 'text',
+        text: m.content,
+      },
+      features: {
+        is_mention_crab: false,
+      },
+      platform_timestamp: m.timestamp,
+    }))
+
     return {
-      items,
+      items: protocolItems,
       pagination: {
         page,
         page_size: params.limit ?? pageSize,
