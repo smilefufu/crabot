@@ -41,3 +41,5 @@ htmlcov/
 
 # Claude Code (local settings, not project config)
 .claude/
+
+docs/superpowers/

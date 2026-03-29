@@ -1,6 +1,6 @@
 # Crabot 项目进度
 
-> 最后更新：2026-03-26 — SwitchMap 消息合并 + 群聊 Debounce + Front/Worker Handler 改进
+> 最后更新：2026-03-29 — PromptManager 统一提示词管理 + 群聊决策优化 + Trace 持久化 + Channel Host 主动推送
 
 ---
 
@@ -63,17 +63,20 @@ Module Manager (port 19000)
 - [x] SwitchMap 私聊消息合并 — 同 session 新消息到达时，被中断的消息 A 与新消息 B 合并为 `[A, B]` 一起传给 LLM（协议 §5.1）；`SwitchMapHandler` 新增 `pendingBatches` 追踪批次；`unified-agent.ts` 三处调用点（`processDirectMessage`/`handleProcessMessage`/`processAdminChatMessage`）均更新；dispatch 前增加 abort 检查防止并发双发 reply
 - [x] 群聊 Debounce 消息合并 + 群聊行为改进 — 群聊已通过 DebounceHandler 合并批次传给 Front Agent；新增 `SilentDecision` 类型；Front Agent 群聊默认静默，仅 @提及或明确提问时回复；提示词外部化到 `prompts.md`（根目录），修改后重启生效
 - [x] Front/Worker Handler 系统性修复 — 修复 `maxTurns` 硬编码为 3 的 bug（现在正确读取 `maxIterations` 配置）；Front 默认轮数 3→10；Worker 默认无限制轮数（不传 `maxTurns`）；提示词明确区分"已预注入的上下文"与"需工具查询的更多历史"；`prompts-worker.md` 外部化到根目录
+- [x] supplement_task 纠偏机制 — Front Agent 识别用户对活跃任务的纠偏/补充消息，通过 interrupt() + streamInput() 直接注入运行中的 Worker，支持 confidence high/low 路由
+- [x] Worker 进度报告改进 — 基于实际工具调用的自然进度报告，避免 generic "执行中"；content-type 判断；进度与最终结果去重
+- [x] 群聊决策质量优化 — buildUserMessage 群聊 prompt 改进（参与者列表、Crabot 身份标识、sender role 标注、silent 引导）；system prompt 群聊规则强化（"你是旁听者"）；context-assembler session type 修复
+- [x] Agent Trace 可观测性增强 — full LLM input/output 记录到 trace span；群聊消息批次快照；Trace 磁盘持久化（daily JSONL）
+- [x] Admin guest authorization 修复 — 群聊 guest 鉴权路径缺失 return 导致消息重复处理
+- [x] Channel Host 主动推送 — 通过插件 outbound adapter 主动发送消息（不依赖入站消息的 pendingDispatch），支持跨渠道发送场景
+- [x] 微信 @Crabot 检测 — 通过 at_string 检测群聊 @提及，缓存群昵称
+- [x] crab_display_name 管线 — Admin → Agent 传递 Crabot 在 channel 上的显示名
+- [x] PromptManager 统一提示词管理 — 提示词分三层（personality / rules / additions），`data/agent/prompts/` 目录统一管理，Handler 不再自行加载提示词文件
+- [x] 端到端集成测试 — 飞书/OpenClaw → Agent → 回复完整链路，验证群聊静默、私聊合并等新行为
 
 ---
 
 ## 待实现
-
-### 🔴 高优先级
-
-| 功能 | 说明 |
-|------|------|
-| 端到端集成测试 | 飞书/OpenClaw → Agent → 回复完整链路，验证群聊静默、私聊合并等新行为 |
-| 端到端集成测试 | 飞书/OpenClaw → Agent → 回复完整链路验证 |
 
 ### 🟡 中优先级
 

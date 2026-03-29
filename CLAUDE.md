@@ -160,15 +160,18 @@ Agent 启动 / 收到 push
 
 ## Agent 调试（快速参考）
 
-遇到 Agent 相关问题时，先用调试脚本排查：
+遇到 Agent 相关问题时，先用调试脚本排查（Node.js 实现，支持短 ID 前缀匹配）：
 
 ```bash
-./scripts/debug-agent.sh health   # 确认各模块存活
-./scripts/debug-agent.sh traces   # 查看最近 trace
-./scripts/debug-agent.sh trace    # 查看最新 trace 详情（含 span 树）
-./scripts/debug-agent.sh tasks    # 查看 Admin 任务状态
-./scripts/debug-agent.sh logs     # 查看 SDK Runner 日志
+node scripts/debug-agent.mjs health   # 确认各模块存活
+node scripts/debug-agent.mjs traces   # 查看最近 trace
+node scripts/debug-agent.mjs trace    # 查看最新 trace 详情（含 span 树，支持短 ID）
+node scripts/debug-agent.mjs tasks    # 查看 Admin 任务状态
+node scripts/debug-agent.mjs logs     # 查看 SDK Runner 日志
+node scripts/debug-agent.mjs modules  # 查看 MM 注册的模块
 ```
+
+旧的 `./scripts/debug-agent.sh` 仍可用（转发到 .mjs）。
 
 完整调试手册：[docs/agent-debugging.md](docs/agent-debugging.md)
 
