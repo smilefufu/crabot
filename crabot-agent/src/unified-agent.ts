@@ -475,7 +475,6 @@ ${skillsSection}
       }
 
       // 10. 分发决策
-      const lastMessage = mergedMessages[mergedMessages.length - 1]
       for (const decision of result.decisions) {
         const decisionSummary = decision.type === 'direct_reply'
           ? (decision.reply.text ?? '').slice(0, 100)
@@ -501,7 +500,8 @@ ${skillsSection}
             {
               channel_id: session.channel_id,
               session_id: session.session_id,
-              message: lastMessage,
+              messages: mergedMessages,
+              senderFriend: friend,
               memoryPermissions: memPerms,
             },
             {
@@ -654,7 +654,8 @@ ${skillsSection}
             {
               channel_id: session.channel_id,
               session_id: sessionId,
-              message: lastMsg,
+              messages: messages,
+              senderFriend: lastEntry.friend,
               memoryPermissions: memPerms,
             },
             {
@@ -1066,14 +1067,13 @@ ${skillsSection}
         // 分发决策
         const taskIds: TaskId[] = []
         const decisionTypes: string[] = []
-        const lastMessage = mergedMessages[mergedMessages.length - 1]
 
         for (const decision of result.decisions) {
           decisionTypes.push(decision.type)
           const dispatchResult = await this.decisionDispatcher.dispatch(decision, {
             channel_id: message.session.channel_id,
             session_id: sessionId,
-            message: lastMessage,
+            messages: mergedMessages,
             memoryPermissions: channelMemPerms,
           })
           if (dispatchResult.task_id) {
@@ -1212,7 +1212,6 @@ ${skillsSection}
       // 分发决策（使用 Admin Chat 回调）
       const taskIds: TaskId[] = []
       const decisionTypes: string[] = []
-      const lastMessage = mergedMessages[mergedMessages.length - 1]
 
       for (const decision of result.decisions) {
         decisionTypes.push(decision.type)
@@ -1237,7 +1236,15 @@ ${skillsSection}
           {
             channel_id: 'admin-web',
             session_id: sessionId,
-            message: lastMessage,
+            messages: mergedMessages,
+            senderFriend: {
+              id: 'master',
+              display_name: 'Master',
+              permission: 'master' as const,
+              channel_identities: [],
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            },
             memoryPermissions: masterMemPerms,
             admin_chat_callback: callbackInfo,
           },
