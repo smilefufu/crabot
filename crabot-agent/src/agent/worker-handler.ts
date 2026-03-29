@@ -332,7 +332,7 @@ export class WorkerHandler {
               if (pendingToolCalls.length > 0) {
                 await this.sendToUser(taskOrigin, pendingToolCalls.splice(0).join('\n').slice(0, 500))
               }
-              await this.sendToUser(taskOrigin, trimmedText.slice(0, 800))
+              await this.sendToUser(taskOrigin, trimmedText)
             }
 
             if (hasTools) {
