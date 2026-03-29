@@ -18,6 +18,7 @@ import type {
 } from '../types.js'
 import { WorkerSelector } from './worker-selector.js'
 import { ContextAssembler } from './context-assembler.js'
+import { MemoryWriter } from './memory-writer.js'
 
 /** Admin create_task 返回的任务信息 */
 interface AdminTask {
@@ -35,6 +36,7 @@ export class DecisionDispatcher {
     private moduleId: string,
     private workerSelector: WorkerSelector,
     private contextAssembler: ContextAssembler,
+    private memoryWriter: MemoryWriter,
     private getAdminPort: () => number | Promise<number>,
     private getChannelPort: (channelId: ModuleId) => Promise<number>
   ) {}
@@ -268,6 +270,8 @@ export class DecisionDispatcher {
       channel_id: ModuleId
       session_id: string
       messages: ChannelMessage[]
+      senderFriend?: Friend
+      memoryPermissions: MemoryPermissions
       admin_chat_callback?: {
         source_module_id: string
         request_id: string
@@ -316,7 +320,7 @@ export class DecisionDispatcher {
           this.moduleId
         )
 
-        // 更新 Admin 任务状态：executing → completed/failed
+        // 更新 Admin 任务状态 + 持久化 result
         const finalStatus = result.outcome === 'completed' ? 'completed' : 'failed'
         await this.rpcClient.call(
           adminPort,
@@ -324,12 +328,34 @@ export class DecisionDispatcher {
           {
             task_id: task.id,
             status: finalStatus,
+            result: {
+              outcome: result.outcome,
+              summary: result.summary,
+              final_reply: result.final_reply,
+              finished_at: new Date().toISOString(),
+            },
             ...(finalStatus === 'failed' && { error: result.summary }),
           },
           this.moduleId
         ).catch((err: unknown) => {
           const msg = err instanceof Error ? err.message : String(err)
           console.error(`[DecisionDispatcher] Failed to update task status: ${msg}`)
+        })
+
+        // 写入短期记忆：Task 完成/失败事件
+        const friendName = params.senderFriend?.display_name ?? 'Unknown'
+        const friendId = params.messages[params.messages.length - 1]?.sender?.friend_id ?? ''
+        await this.memoryWriter.writeTaskFinished({
+          task_id: task.id,
+          task_title: task.title,
+          outcome: result.outcome,
+          summary: result.summary,
+          friend_name: friendName,
+          friend_id: friendId,
+          channel_id: params.channel_id,
+          session_id: params.session_id,
+          visibility: params.memoryPermissions.write_visibility,
+          scopes: params.memoryPermissions.write_scopes,
         })
 
         // 回复用户（仅当 Worker 提供了 final_reply 时；进度流已发过的不重复）
@@ -352,6 +378,22 @@ export class DecisionDispatcher {
 
         // 回复用户失败信息
         await this.sendReplyToUser('任务处理失败，请稍后重试', params).catch(() => {})
+
+        // 写入短期记忆：Task 失败事件
+        const failFriendName = params.senderFriend?.display_name ?? 'Unknown'
+        const failFriendId = params.messages[params.messages.length - 1]?.sender?.friend_id ?? ''
+        await this.memoryWriter.writeTaskFinished({
+          task_id: task.id,
+          task_title: task.title,
+          outcome: 'failed',
+          summary: msg,
+          friend_name: failFriendName,
+          friend_id: failFriendId,
+          channel_id: params.channel_id,
+          session_id: params.session_id,
+          visibility: params.memoryPermissions.write_visibility,
+          scopes: params.memoryPermissions.write_scopes,
+        }).catch(() => {}) // best effort
       }
     }
 

@@ -134,18 +134,19 @@ export class UnifiedAgent extends ModuleBase {
       async () => await this.getAdminPort(),
       async () => await this.getMemoryPort()
     )
+    this.memoryWriter = new MemoryWriter(
+      this.rpcClient,
+      config.module_id,
+      async () => await this.getMemoryPort()
+    )
     this.decisionDispatcher = new DecisionDispatcher(
       this.rpcClient,
       config.module_id,
       this.workerSelector,
       this.contextAssembler,
+      this.memoryWriter,
       async () => await this.getAdminPort(),
       async (channelId) => await this.getChannelPort(channelId)
-    )
-    this.memoryWriter = new MemoryWriter(
-      this.rpcClient,
-      config.module_id,
-      async () => await this.getMemoryPort()
     )
 
     // 初始化群聊 Debounce（从 extra 读取配置，fallback 到协议默认值）
