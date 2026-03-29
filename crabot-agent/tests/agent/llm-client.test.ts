@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { LlmClient } from '../../src/agent/llm-client.js'
-import type { ModelConnectionInfo } from '../../src/types.js'
+import { LLMClient } from '../../src/agent/llm-client.js'
+import type { LLMClientConfig } from '../../src/agent/llm-client.js'
 import Anthropic from '@anthropic-ai/sdk'
 
 // Mock Anthropic SDK
@@ -21,37 +21,24 @@ describe('LlmClient', () => {
   })
 
   describe('constructor', () => {
-    it('应该使用 anthropic format 初始化客户端', () => {
-      const config: ModelConnectionInfo = {
-        model_id: 'claude-3-5-sonnet-20241022',
-        provider: 'anthropic',
-        format: 'anthropic',
-        api_key: 'test-key'
+    it('应该初始化客户端', () => {
+      const config: LLMClientConfig = {
+        endpoint: 'http://localhost:4000',
+        apikey: 'test-key',
+        model: 'claude-3-5-sonnet-20241022',
       }
 
-      const client = new LlmClient(config)
+      const client = new LLMClient(config)
       expect(client).toBeDefined()
-    })
-
-    it('应该抛出错误如果 format 不是 anthropic', () => {
-      const config: ModelConnectionInfo = {
-        model_id: 'gpt-4',
-        provider: 'openai',
-        format: 'openai' as any,
-        api_key: 'test-key'
-      }
-
-      expect(() => new LlmClient(config)).toThrow('Only anthropic format is supported')
     })
   })
 
-  describe('chat', () => {
+  describe('callMessages', () => {
     it('应该成功调用 Anthropic API', async () => {
-      const config: ModelConnectionInfo = {
-        model_id: 'claude-3-5-sonnet-20241022',
-        provider: 'anthropic',
-        format: 'anthropic',
-        api_key: 'test-key'
+      const config: LLMClientConfig = {
+        endpoint: 'http://localhost:4000',
+        apikey: 'test-key',
+        model: 'claude-3-5-sonnet-20241022',
       }
 
       const mockResponse: Anthropic.Message = {
@@ -67,27 +54,27 @@ describe('LlmClient', () => {
 
       mockCreate.mockResolvedValue(mockResponse)
 
-      const client = new LlmClient(config)
-      const result = await client.chat({
+      const client = new LLMClient(config)
+      const result = await client.callMessages({
         system: 'You are helpful',
         messages: [{ role: 'user', content: 'Hi' }]
       })
 
-      expect(result).toEqual(mockResponse)
+      expect(result.content).toEqual(mockResponse.content)
+      expect(result.stopReason).toBe('end_turn')
       expect(mockCreate).toHaveBeenCalledWith({
         model: 'claude-3-5-sonnet-20241022',
         system: 'You are helpful',
         messages: [{ role: 'user', content: 'Hi' }],
-        max_tokens: 4096
+        max_tokens: 16384
       })
     })
 
     it('应该传递 tools 参数', async () => {
-      const config: ModelConnectionInfo = {
-        model_id: 'claude-3-5-sonnet-20241022',
-        provider: 'anthropic',
-        format: 'anthropic',
-        api_key: 'test-key'
+      const config: LLMClientConfig = {
+        endpoint: 'http://localhost:4000',
+        apikey: 'test-key',
+        model: 'claude-3-5-sonnet-20241022',
       }
 
       const mockResponse: Anthropic.Message = {
@@ -103,14 +90,14 @@ describe('LlmClient', () => {
 
       mockCreate.mockResolvedValue(mockResponse)
 
-      const client = new LlmClient(config)
+      const client = new LLMClient(config)
       const tools: Anthropic.Tool[] = [{
         name: 'test_tool',
         description: 'A test tool',
         input_schema: { type: 'object', properties: {} }
       }]
 
-      await client.chat({
+      await client.callMessages({
         system: 'You are helpful',
         messages: [{ role: 'user', content: 'Hi' }],
         tools
@@ -121,17 +108,16 @@ describe('LlmClient', () => {
         system: 'You are helpful',
         messages: [{ role: 'user', content: 'Hi' }],
         tools,
-        max_tokens: 4096
+        max_tokens: 16384
       })
     })
 
     it('应该使用自定义 maxTokens', async () => {
-      const config: ModelConnectionInfo = {
-        model_id: 'claude-3-5-sonnet-20241022',
-        provider: 'anthropic',
-        format: 'anthropic',
-        api_key: 'test-key',
-        max_tokens: 8192
+      const config: LLMClientConfig = {
+        endpoint: 'http://localhost:4000',
+        apikey: 'test-key',
+        model: 'claude-3-5-sonnet-20241022',
+        maxTokens: 8192
       }
 
       const mockResponse: Anthropic.Message = {
@@ -147,39 +133,37 @@ describe('LlmClient', () => {
 
       mockCreate.mockResolvedValue(mockResponse)
 
-      const client = new LlmClient(config)
-      await client.chat({
+      const client = new LLMClient(config)
+      await client.callMessages({
         system: 'You are helpful',
         messages: [{ role: 'user', content: 'Hi' }],
-        maxTokens: 2048
       })
 
       expect(mockCreate).toHaveBeenCalledWith({
         model: 'claude-3-5-sonnet-20241022',
         system: 'You are helpful',
         messages: [{ role: 'user', content: 'Hi' }],
-        max_tokens: 2048
+        max_tokens: 8192
       })
     })
 
-    it('应该捕获 API 错误并抛出带 AGENT_LLM_ERROR code 的错误', async () => {
-      const config: ModelConnectionInfo = {
-        model_id: 'claude-3-5-sonnet-20241022',
-        provider: 'anthropic',
-        format: 'anthropic',
-        api_key: 'test-key'
+    it('应该捕获 API 错误并抛出', async () => {
+      const config: LLMClientConfig = {
+        endpoint: 'http://localhost:4000',
+        apikey: 'test-key',
+        model: 'claude-3-5-sonnet-20241022',
       }
 
       mockCreate.mockRejectedValue(new Error('API rate limit exceeded'))
 
-      const client = new LlmClient(config)
+      const client = new LLMClient(config)
 
       await expect(
-        client.chat({
+        client.callMessages({
           system: 'You are helpful',
           messages: [{ role: 'user', content: 'Hi' }]
         })
-      ).rejects.toThrow('LLM API call failed: API rate limit exceeded')
+      ).rejects.toThrow('API rate limit exceeded')
     })
   })
 })
