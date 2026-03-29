@@ -183,12 +183,25 @@ export class SessionManager {
 
     try {
       const raw = fs.readFileSync(this.dataPath, 'utf-8')
-      const store: SessionStore = JSON.parse(raw) as SessionStore
+      const parsed = JSON.parse(raw) as SessionStore | Session[]
 
-      for (const [id, session] of Object.entries(store.sessions)) {
+      // 兼容旧格式：数组形式的 Session 列表
+      if (Array.isArray(parsed)) {
+        for (const session of parsed) {
+          this.sessions.set(session.id, session)
+          if (session.platform_session_id) {
+            this.platformIndex.set(session.platform_session_id, session.id)
+          }
+        }
+        // 迁移为新格式
+        this.saveToDisk()
+        return
+      }
+
+      for (const [id, session] of Object.entries(parsed.sessions ?? {})) {
         this.sessions.set(id, session)
       }
-      for (const [platformId, sessionId] of Object.entries(store.platformIndex)) {
+      for (const [platformId, sessionId] of Object.entries(parsed.platformIndex ?? {})) {
         this.platformIndex.set(platformId, sessionId)
       }
     } catch (error) {

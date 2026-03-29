@@ -12,9 +12,10 @@ import { generateId, generateTimestamp, type Event } from './core/base-protocol.
 import { PendingDispatchMap } from './pending-dispatch.js'
 import { SessionManager } from './session-manager.js'
 import { MessageStore } from './message-store.js'
-import { loadPlugin } from './plugin-loader.js'
+import { loadPlugin, type OutboundAdapter } from './plugin-loader.js'
 import { createChannelRuntime } from './runtime/index.js'
 import { msgContextToChannelMessage, messageContentToReplyPayload } from './msg-converter.js'
+import { extractPlatformTarget } from './proactive-send.js'
 import type {
   ModuleId,
   MsgContext,
@@ -33,7 +34,6 @@ import type {
   FindOrCreatePrivateSessionParams,
   FindOrCreatePrivateSessionResult,
   GetHistoryParams,
-  GetHistoryResult,
   SessionType,
 } from './types.js'
 
@@ -68,6 +68,8 @@ export class ChannelHost extends ModuleBase {
   private readonly hostConfig: ChannelHostConfig
   private pluginAbortController: AbortController | null = null
   private cleanupInterval: ReturnType<typeof setInterval> | null = null
+  private pluginOutbound: OutboundAdapter | null = null
+  private pluginCfg: unknown = null
 
   constructor(config: ChannelHostConfig) {
     const moduleConfig: ModuleConfig = {
@@ -111,11 +113,17 @@ export class ChannelHost extends ModuleBase {
 
     const plugin = await loadPlugin(this.hostConfig.plugin_path, runtime)
 
+    // 保存 outbound adapter 用于主动发送
+    this.pluginOutbound = plugin.outbound ?? null
+
     this.pluginAbortController = new AbortController()
 
     // 启动 OpenClaw 插件（长期运行，不 await）
     // 注入 Crabot 策略覆盖：群消息不需要 @bot（Crabot 由 Admin 层统一做准入控制）
     const cfg = injectCrabotPolicy(this.hostConfig.plugin_config)
+
+    // 保存 cfg 用于 outbound 调用
+    this.pluginCfg = cfg
 
     // 列出所有已注册账号，逐个解析并启动
     const accountIds = plugin.listAccountIds(cfg)
@@ -177,30 +185,22 @@ export class ChannelHost extends ModuleBase {
    */
   private async handleSendMessage(params: SendMessageParams): Promise<SendMessageResult> {
     console.log(`[ChannelHost] handleSendMessage: session_id=${params.session_id}`)
+
+    // 路径 1：被动回复（pendingDispatch 存在 = 有入站消息的回复通道）
     const dispatch = this.pendingDispatches.get(params.session_id)
-    if (!dispatch) {
-      console.error(`[ChannelHost] No pending dispatch for session: ${params.session_id}`)
-      throw new Error(`No pending dispatch for session: ${params.session_id}`)
+    if (dispatch) {
+      const replyPayload = messageContentToReplyPayload(params.content)
+      console.log(`[ChannelHost] handleSendMessage: using pending dispatch (passive reply), text length=${(replyPayload.text ?? '').length}`)
+      await dispatch.deliver(replyPayload, { kind: 'final' })
+    } else {
+      // 路径 2：主动发送（无入站消息，直接通过 outbound adapter 调用平台 API）
+      console.log(`[ChannelHost] handleSendMessage: no pending dispatch, trying proactive send`)
+      await this.proactiveSend(params)
     }
-
-    const replyPayload = messageContentToReplyPayload(params.content)
-    console.log(`[ChannelHost] handleSendMessage: replyPayload text length=${(replyPayload.text ?? '').length}`)
-
-    // 使用 'final' 而不是 'block'，确保消息被正确发送
-    // 飞书等插件对 block 消息有特殊处理（streaming fallback），可能不发送
-    console.log('[ChannelHost] handleSendMessage: calling dispatch.deliver')
-    await dispatch.deliver(replyPayload, { kind: 'final' })
-    console.log('[ChannelHost] handleSendMessage: dispatch.deliver returned')
-
-    // 不删除 pendingDispatch — 同一 session 可能需要多次发送：
-    // 1. Front 即时回复（"收到，请稍等"）
-    // 2. Worker 异步完成后回复结果
-    // pendingDispatch 由 TTL 自动清理（5 分钟），或下一条入站消息覆盖
 
     const messageId = generateId()
     const sentAt = generateTimestamp()
 
-    // 记录出站消息到历史
     this.messageStore.appendOutbound({
       sessionId: params.session_id,
       platformMessageId: messageId,
@@ -213,6 +213,46 @@ export class ChannelHost extends ModuleBase {
       platform_message_id: messageId,
       sent_at: sentAt,
     }
+  }
+
+  /**
+   * 主动发送消息：通过插件的 outbound adapter 直接调用平台 API。
+   * 当 pendingDispatch 不存在时（跨渠道发送、定时任务等场景）使用此路径。
+   */
+  private async proactiveSend(params: SendMessageParams): Promise<void> {
+    if (!this.pluginOutbound?.sendText) {
+      throw new Error(
+        `主动发送不可用：该渠道插件未提供 outbound adapter。Session: ${params.session_id}`
+      )
+    }
+
+    const session = this.sessionManager.findById(params.session_id)
+    if (!session) {
+      throw new Error(`Session not found: ${params.session_id}`)
+    }
+
+    const to = extractPlatformTarget(session.platform_session_id)
+    const text = params.content.text ?? ''
+    const mediaUrl = params.content.media_url
+
+    console.log(`[ChannelHost] proactiveSend: platform_session_id=${session.platform_session_id} -> to=${to}`)
+
+    if (mediaUrl && this.pluginOutbound.sendMedia) {
+      await this.pluginOutbound.sendMedia({
+        cfg: this.pluginCfg,
+        to,
+        text,
+        mediaUrl,
+      })
+    } else {
+      await this.pluginOutbound.sendText({
+        cfg: this.pluginCfg,
+        to,
+        text,
+      })
+    }
+
+    console.log(`[ChannelHost] proactiveSend: message sent successfully`)
   }
 
   /**
@@ -268,7 +308,7 @@ export class ChannelHost extends ModuleBase {
   /**
    * 查询历史消息（protocol-channel.md §3.3）
    */
-  private handleGetHistory(params: GetHistoryParams): GetHistoryResult {
+  private handleGetHistory(params: GetHistoryParams) {
     const session = this.sessionManager.findById(params.session_id)
     if (!session) {
       throw new Error('Session not found')
@@ -286,8 +326,25 @@ export class ChannelHost extends ModuleBase {
       pageSize: params.limit ? undefined : pageSize,
     })
 
+    // 将内部 HistoryMessage 转换为 protocol-channel.md §3.3 协议格式
+    const protocolItems = items.map((m) => ({
+      platform_message_id: m.platform_message_id,
+      sender: {
+        platform_user_id: m.sender_platform_user_id ?? m.sender_name,
+        platform_display_name: m.sender_name,
+      },
+      content: {
+        type: m.content_type ?? 'text',
+        text: m.content,
+      },
+      features: {
+        is_mention_crab: false,
+      },
+      platform_timestamp: m.timestamp,
+    }))
+
     return {
-      items,
+      items: protocolItems,
       pagination: {
         page,
         page_size: params.limit ?? pageSize,
@@ -596,6 +653,7 @@ export class ChannelHost extends ModuleBase {
       platform_connected: this.pluginAbortController !== null && !this.pluginAbortController.signal.aborted,
       active_sessions: this.sessionManager.listSessions().length,
       pending_dispatches: this.pendingDispatches.size,
+      proactive_send_available: this.pluginOutbound?.sendText != null,
     }
   }
 }

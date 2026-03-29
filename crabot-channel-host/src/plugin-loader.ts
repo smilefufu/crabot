@@ -28,6 +28,24 @@ export interface LoadedPlugin {
   listAccountIds(cfg: unknown): string[]
   /** 解析账号（从 cfg 中读取凭证信息） */
   resolveAccount(cfg: unknown, accountId?: string | null): unknown
+  /** 插件的出站适配器（可选，用于主动发送消息） */
+  outbound?: OutboundAdapter
+}
+
+/**
+ * Shim 层使用的 outbound 适配器精简接口。
+ * 对齐 OpenClaw ChannelOutboundAdapter 的 sendText/sendMedia 签名。
+ */
+export interface OutboundAdapter {
+  sendText?: (ctx: OutboundContext) => Promise<unknown>
+  sendMedia?: (ctx: OutboundContext & { mediaUrl: string }) => Promise<unknown>
+}
+
+export interface OutboundContext {
+  cfg: unknown
+  to: string
+  text: string
+  accountId?: string | null
 }
 
 // ============================================================================
@@ -205,6 +223,30 @@ export async function loadPlugin(
 }
 
 // ============================================================================
+// 提取 outbound adapter
+// ============================================================================
+
+/**
+ * 从插件的 outbound 对象中提取 sendText/sendMedia 函数。
+ *
+ * OpenClaw 插件通过 createRuntimeOutboundDelegates 生成的 outbound 对象，
+ * 其 sendText/sendMedia 已经是标准 async 函数（内部封装了 getRuntime → resolve → call 链）。
+ */
+function extractOutboundAdapter(
+  rawOutbound: Record<string, unknown> | undefined
+): OutboundAdapter | undefined {
+  if (!rawOutbound) return undefined
+  const sendText = typeof rawOutbound.sendText === 'function'
+    ? rawOutbound.sendText as OutboundAdapter['sendText']
+    : undefined
+  const sendMedia = typeof rawOutbound.sendMedia === 'function'
+    ? rawOutbound.sendMedia as OutboundAdapter['sendMedia']
+    : undefined
+  if (!sendText) return undefined
+  return { sendText, sendMedia }
+}
+
+// ============================================================================
 // 格式 1：OpenClawPluginDefinition { register(api) }
 // ============================================================================
 
@@ -279,6 +321,10 @@ function loadRegisterFormat(
     ? config.listAccountIds as (cfg: unknown) => string[]
     : null
 
+  // 捕获 outbound adapter（由 createRuntimeOutboundDelegates 生成的已解析函数）
+  const rawOutbound = innerPlugin.outbound as Record<string, unknown> | undefined
+  const outboundAdapter = extractOutboundAdapter(rawOutbound)
+
   return {
     startAccount({ cfg, abortSignal, account }) {
       // 为真实 OpenClaw 插件提供 ChannelGatewayContext
@@ -318,6 +364,8 @@ function loadRegisterFormat(
         accountId ?? null
       )
     },
+
+    outbound: outboundAdapter,
   }
 }
 
@@ -343,6 +391,10 @@ function loadSimpleFormat(
   const listAccountIdsFn = typeof config.listAccountIds === 'function'
     ? config.listAccountIds as (cfg: unknown) => string[]
     : null
+
+  // 捕获 outbound adapter
+  const rawOutbound = plugin.outbound as Record<string, unknown> | undefined
+  const outboundAdapter = extractOutboundAdapter(rawOutbound)
 
   return {
     startAccount({ cfg, abortSignal, account }) {
@@ -371,5 +423,7 @@ function loadSimpleFormat(
         accountId ?? null
       )
     },
+
+    outbound: outboundAdapter,
   }
 }
