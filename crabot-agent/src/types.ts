@@ -268,6 +268,10 @@ export interface FrontAgentContext {
 
 export interface WorkerAgentContext {
   task_origin?: TaskOrigin
+  /** Front 做决策时的完整输入消息（定时任务等场景不存在） */
+  trigger_messages?: ChannelMessage[]
+  /** 发送者信息（定时任务等场景不存在） */
+  sender_friend?: Friend
   recent_messages?: ChannelMessage[]
   short_term_memories: ShortTermMemoryEntry[]
   long_term_memories: LongTermL0Entry[]
