@@ -104,11 +104,31 @@ install_build_tools() {
 
 install_nvm() {
   log_info "安装 nvm v0.40.1..."
-  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh 2>/dev/null | bash >> "$ONBOARD_LOG" 2>&1
+  local install_script
+  install_script="$(mktemp)"
+  if ! curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh -o "$install_script" 2>>"$ONBOARD_LOG"; then
+    rm -f "$install_script"
+    log_error "下载 nvm 安装脚本失败（网络不通？）"
+    log_error "  手动安装: https://github.com/nvm-sh/nvm#installing-and-updating"
+    exit 1
+  fi
+  if ! bash "$install_script" >> "$ONBOARD_LOG" 2>&1; then
+    rm -f "$install_script"
+    log_error "nvm 安装脚本执行失败:"
+    tail -5 "$ONBOARD_LOG" | sed 's/^/    /'
+    log_error "  手动安装: https://github.com/nvm-sh/nvm#installing-and-updating"
+    exit 1
+  fi
+  rm -f "$install_script"
   export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
   # shellcheck source=/dev/null
-  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-  log_success "nvm 已安装"
+  if [ -s "$NVM_DIR/nvm.sh" ]; then
+    . "$NVM_DIR/nvm.sh"
+    log_success "nvm 已安装"
+  else
+    log_error "nvm 安装后未找到 nvm.sh，请检查日志: $ONBOARD_LOG"
+    exit 1
+  fi
 }
 
 install_node() {
@@ -188,8 +208,8 @@ run_phase2_tools() {
   # shellcheck source=/dev/null
   [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
 
-  check_tool_status node
-  local node_status=$?
+  local node_status=0
+  check_tool_status node || node_status=$?
   if [ "$node_status" -eq 0 ]; then
     log_success "Node.js $(node -v) 已就绪"
   else
@@ -206,8 +226,8 @@ run_phase2_tools() {
   fi
 
   # Python
-  check_tool_status python
-  local python_status=$?
+  local python_status=0
+  check_tool_status python || python_status=$?
   if [ "$python_status" -eq 0 ]; then
     log_success "Python $(python3 -V 2>/dev/null | awk '{print $2}') 已就绪"
   else
