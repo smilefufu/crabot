@@ -290,8 +290,6 @@ export class WorkerHandler {
     let loopSpanId: string | undefined
     /** Accumulated tool call summaries waiting to be flushed */
     const pendingToolCalls: string[] = []
-    /** Set to true after interrupt() — next result is from interrupted turn, not final */
-    let interruptedForSupplement = false
 
     for await (const message of queryHandle) {
       const msg = message as SDKMessage & Record<string, unknown>
@@ -360,7 +358,8 @@ export class WorkerHandler {
           turnCount++
 
           // ── Content-type based progress reporting ──
-          if (taskOrigin) {
+          // 有 pending supplement 时抑制进度消息（interrupt 已触发，这是被中断 turn 的残留输出）
+          if (taskOrigin && taskState.pendingHumanMessages.length === 0) {
             const trimmedText = turnText.trim()
             const hasText = trimmedText.length > 0
             const hasTools = turnToolSummaries.length > 0
@@ -378,9 +377,26 @@ export class WorkerHandler {
                 await this.sendToUser(taskOrigin, this.dedupeToolSummaries(pendingToolCalls.splice(0)).slice(0, 500))
               }
             }
+          } else if (taskState.pendingHumanMessages.length > 0) {
+            // 有 pending supplement，丢弃被中断 turn 的进度
+            pendingToolCalls.splice(0)
           }
 
-          // ── Supplement injection: interrupt + streamInput ──
+          break
+        }
+
+        case 'result': {
+          // Flush remaining pending tool calls (但有 pending supplement 时不发)
+          if (taskOrigin && pendingToolCalls.length > 0 && taskState.pendingHumanMessages.length === 0) {
+            await this.sendToUser(taskOrigin, this.dedupeToolSummaries(pendingToolCalls.splice(0)).slice(0, 500))
+          } else {
+            pendingToolCalls.splice(0)
+          }
+
+          const resultMsg = msg as Record<string, unknown>
+          log(`Result: subtype=${resultMsg.subtype}, isError=${resultMsg.is_error}`)
+
+          // ── Supplement injection: interrupt 已在 deliverHumanResponse 中触发，这里注入内容 ──
           if (taskState.pendingHumanMessages.length > 0) {
             const pending = taskState.pendingHumanMessages.splice(0)
             const supplement = pending
@@ -389,39 +405,11 @@ export class WorkerHandler {
               .join('\n')
 
             if (supplement) {
-              log(`[supplement] Interrupting current work, then injecting: ${supplement.slice(0, 200)}`)
-              // 1. Interrupt current agent loop — stops tool execution
-              interruptedForSupplement = true
-              try {
-                await queryHandle.interrupt()
-                log(`[supplement] interrupt() succeeded`)
-              } catch (err) {
-                log(`[supplement] interrupt() failed: ${err instanceof Error ? err.message : err}`)
-              }
-              // 2. Queue the supplement as next turn — SDK will process it with full context
+              log(`[supplement] Injecting after interrupt: ${supplement.slice(0, 200)}`)
               await this.injectHumanMessage(task.task_id, supplement)
               log(`[supplement] streamInput() done, waiting for SDK to process next turn`)
             }
-          }
-
-          break
-        }
-
-        case 'result': {
-          // Flush remaining pending tool calls
-          if (taskOrigin && pendingToolCalls.length > 0) {
-            await this.sendToUser(taskOrigin, this.dedupeToolSummaries(pendingToolCalls.splice(0)).slice(0, 500))
-          }
-
-          const resultMsg = msg as Record<string, unknown>
-          log(`Result: subtype=${resultMsg.subtype}, isError=${resultMsg.is_error}, interruptedForSupplement=${interruptedForSupplement}`)
-
-          if (interruptedForSupplement) {
-            // This result is from the interrupted turn — not the final result.
-            // The SDK will start a new turn to process the supplement.
-            // Reset flag and continue the for-await loop.
-            interruptedForSupplement = false
-            log(`[supplement] Interrupted turn completed, supplement turn starting...`)
+            // 这个 result 是被中断 turn 的结果，不是最终结果，继续 loop
             break
           }
 
@@ -495,6 +483,15 @@ export class WorkerHandler {
     }
     log(`[supplement] deliverHumanResponse: queued ${messages.length} messages for task ${taskId} (status: ${taskState.status}, pending: ${taskState.pendingHumanMessages.length})`)
     taskState.pendingHumanMessages.push(...messages)
+
+    // 立即 interrupt，不等 turn 结束
+    const queryHandle = this.activeQueries.get(taskId)
+    if (queryHandle) {
+      queryHandle.interrupt().catch((err) => {
+        log(`[supplement] immediate interrupt() failed: ${err instanceof Error ? err.message : err}`)
+      })
+      log(`[supplement] immediate interrupt() fired for task ${taskId}`)
+    }
   }
 
   cancelTask(taskId: TaskId, _reason: string): void {
@@ -571,13 +568,16 @@ export class WorkerHandler {
       parts.push(`- Channel ID: ${context.task_origin.channel_id}`)
       parts.push(`- Session ID: ${context.task_origin.session_id}`)
     }
-    if (context.short_term_memories.length > 0) {
-      parts.push('\n## 短期记忆')
-      for (const m of context.short_term_memories.slice(-5)) { parts.push(`- ${m.content}`) }
-    }
-    if (context.long_term_memories.length > 0) {
-      parts.push('\n## 长期记忆')
-      for (const m of context.long_term_memories.slice(-5)) { parts.push(`- ${m.content}`) }
+    if (context.short_term_memories.length > 0 || context.long_term_memories.length > 0) {
+      parts.push('\n## 记忆系统')
+      if (context.short_term_memories.length > 0) {
+        parts.push(`- 短期记忆: ${context.short_term_memories.length} 条（近期事件流水账，记录跨所有 channel/session 的事件摘要，如"用户要求修改某项目"、"任务 X 已完成"等。不是聊天记录）`)
+      }
+      if (context.long_term_memories.length > 0) {
+        parts.push(`- 长期记忆: ${context.long_term_memories.length} 条（反思提炼的认知知识，如用户偏好、实体信息、案例、行为模式等）`)
+      }
+      parts.push('- 聊天记录: 使用 crab-messaging 的 get_history 工具查看特定 channel/session 的原始消息')
+      parts.push('- 写入记忆: 使用 crab-memory 的 store_memory 工具保存重要信息到长期记忆')
     }
     if (context.recent_messages && context.recent_messages.length > 0) {
       parts.push(`\n## 最近相关消息（共 ${context.recent_messages.length} 条）`)

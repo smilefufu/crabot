@@ -163,7 +163,7 @@ export class ContextAssembler {
 
       const channelPort = modules[0].port
       const result = await this.rpcClient.call<
-        { session_id: SessionId; pagination: { page_size: number } },
+        { session_id: SessionId; limit: number },
         { items: Array<{
           platform_message_id: string
           sender: { friend_id: string; platform_user_id: string; platform_display_name: string }
@@ -174,7 +174,7 @@ export class ContextAssembler {
       >(
         channelPort,
         'get_history',
-        { session_id: sessionId, pagination: { page_size: limit } },
+        { session_id: sessionId, limit },
         this.moduleId
       )
       // 注入 session 上下文，转换为 ChannelMessage

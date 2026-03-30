@@ -125,14 +125,9 @@ export function buildUserMessage(messages: ChannelMessage[], context: FrontAgent
     parts.push(`- 当前 Session ID: ${session.session_id}`)
   }
 
-  // ── 短期记忆 ──
+  // ── 记忆系统提示 ──
   if (context.short_term_memories.length > 0) {
-    parts.push('\n## 短期记忆（近期对话片段）')
-    for (const memory of context.short_term_memories.slice(-3)) {
-      const content = memory.content.length > 200 ? memory.content.slice(0, 200) + '...' : memory.content
-      parts.push(content)
-      parts.push('---')
-    }
+    parts.push(`\n- 该用户有 ${context.short_term_memories.length} 条短期记忆（近期事件流水账，记录跨所有 channel/session 的事件摘要，如"用户要求修改某项目"、"任务 X 已完成"等）。短期记忆不是聊天记录。如需查看特定 session 的原始聊天消息，使用 get_history 工具。`)
   }
 
   // ── 最近消息 ──
