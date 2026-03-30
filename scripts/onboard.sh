@@ -147,8 +147,8 @@ install_node() {
 
 install_uv() {
   log_info "安装 uv..."
-  curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | sh >> "$ONBOARD_LOG" 2>&1
-  # 将 uv 加入当前 PATH
+  curl -LsSf https://astral.sh/uv/install.sh 2>>"$ONBOARD_LOG" | sh >> "$ONBOARD_LOG" 2>&1
+  # 将 uv 加入当前 PATH（安装器默认放这两个位置）
   export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
   if command -v uv &>/dev/null; then
     log_success "uv $(uv --version 2>/dev/null | awk '{print $2}') 已安装"
@@ -246,7 +246,8 @@ run_phase2_tools() {
     exit 1
   fi
 
-  # uv
+  # uv（安装器默认放 ~/.local/bin 或 ~/.cargo/bin，确保在 PATH 中）
+  export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
   if check_tool_status uv; then
     log_success "uv 已就绪"
   else
