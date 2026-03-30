@@ -315,6 +315,8 @@ run_phase3_env() {
     admin_password="$(openssl rand -base64 16 2>/dev/null | tr -d '=/+' | head -c 16)"
     log_warn "已自动生成管理员密码（请查看 .env 文件获取）"
   else
+    # 清空 stdin 残留输入，避免前面 confirm 的多余回车被吃掉
+    read -r -t 0.1 -n 10000 _ 2>/dev/null || true
     printf "${YELLOW}[crabot]${NC} 请设置管理员密码（直接回车使用随机密码）: "
     read -r admin_password
     if [ -z "$admin_password" ]; then
