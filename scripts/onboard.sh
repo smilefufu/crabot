@@ -123,7 +123,7 @@ install_nvm() {
   export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
   # shellcheck source=/dev/null
   if [ -s "$NVM_DIR/nvm.sh" ]; then
-    . "$NVM_DIR/nvm.sh"
+    set +e; . "$NVM_DIR/nvm.sh"; set -e
     log_success "nvm 已安装"
   else
     log_error "nvm 安装后未找到 nvm.sh，请检查日志: $ONBOARD_LOG"
@@ -135,7 +135,7 @@ install_node() {
   # 确保 nvm 已加载
   export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
   # shellcheck source=/dev/null
-  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+  set +e; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; set -e
 
   log_info "安装 Node.js (读取 .nvmrc) ..."
   local _saved_dir="$PWD"
@@ -206,7 +206,8 @@ run_phase2_tools() {
   # 确保 nvm 已加载
   export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
   # shellcheck source=/dev/null
-  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+  # nvm.sh 不兼容 set -e（已知问题 nvm#1985）
+  set +e; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; set -e
 
   local node_status=0
   check_tool_status node || node_status=$?
@@ -359,7 +360,7 @@ run_phase4_deps() {
   # 确保 nvm 已加载，并切换到 .nvmrc 指定的 Node 版本
   export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
   # shellcheck source=/dev/null
-  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+  set +e; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; set -e
   # nvm install 会读 .nvmrc，版本已装则直接切换，未装则先安装
   # 注意：不能用子 shell (cd ... && nvm use)，否则版本切换不传回父进程
   local _saved_dir="$PWD"
