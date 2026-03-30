@@ -36,7 +36,7 @@ import { WorkerSelector } from './orchestration/worker-selector.js'
 import { ContextAssembler } from './orchestration/context-assembler.js'
 import { DecisionDispatcher } from './orchestration/decision-dispatcher.js'
 import { MemoryWriter } from './orchestration/memory-writer.js'
-import { DebounceHandler, type DebounceConfig, type BufferedMessage } from './orchestration/debounce-handler.js'
+import { AttentionScheduler, type AttentionConfig, type BufferedMessage } from './orchestration/attention-scheduler.js'
 import { FrontHandler } from './agent/front-handler.js'
 import type { LLMClientConfig } from './agent/llm-client.js'
 import type { ToolExecutorDeps } from './agent/tool-executor.js'
@@ -56,7 +56,7 @@ export class UnifiedAgent extends ModuleBase {
   private contextAssembler: ContextAssembler
   private decisionDispatcher: DecisionDispatcher
   private memoryWriter: MemoryWriter
-  private debounceHandler: DebounceHandler
+  private attentionScheduler: AttentionScheduler
 
   // 智能体层组件（可选，取决于配置）
   private frontHandler?: FrontHandler
@@ -149,13 +149,13 @@ export class UnifiedAgent extends ModuleBase {
       async (channelId) => await this.getChannelPort(channelId)
     )
 
-    // 初始化群聊 Debounce（从 extra 读取配置，fallback 到协议默认值）
-    const debounceConfig: DebounceConfig = {
-      group_debounce_min_ms: (config.extra?.group_debounce_min_ms as number) ?? 5000,
-      group_debounce_max_ms: (config.extra?.group_debounce_max_ms as number) ?? 300000,
+    // 初始化群聊注意力调度（从 extra 读取配置，fallback 到协议默认值）
+    const attentionConfig: AttentionConfig = {
+      group_attention_min_ms: (config.extra?.group_attention_min_ms as number) ?? 5000,
+      group_attention_max_ms: (config.extra?.group_attention_max_ms as number) ?? 300000,
     }
-    this.debounceHandler = new DebounceHandler(
-      debounceConfig,
+    this.attentionScheduler = new AttentionScheduler(
+      attentionConfig,
       (sessionId, messages) => this.processGroupBatch(sessionId, messages)
     )
 
@@ -239,7 +239,6 @@ export class UnifiedAgent extends ModuleBase {
         // MCP 服务器配置转换为 SDK 格式（stdio 类型直传）
         this.workerHandler = new WorkerHandler(workerSdkEnv, {
           systemPrompt: this.promptManager.assembleWorkerPrompt(adminPersonality || undefined),
-          maxIterations: config.max_iterations,
         }, createMcpConfigs, {
           rpcClient: this.rpcClient,
           moduleId: this.config.moduleId,
@@ -367,8 +366,8 @@ ${skillsSection}
   /**
    * 处理消息接收事件（来自 channel.message_authorized，消息已通过 Admin 鉴权）
    *
-   * 群聊非 @mention 消息走 Debounce 缓冲，其余直接处理。
-   * @see protocol-agent-v2.md §5.1 SwitchMap, §5.2 Debounce
+   * 群聊消息走注意力调度，其余直接处理。
+   * @see protocol-agent-v2.md §5.1 SwitchMap, §5.2 Attention Scheduler
    */
   private async handleMessageReceived(payload: { message: ChannelMessage; friend: Friend; crab_display_name?: string }): Promise<void> {
     const { message, friend, crab_display_name } = payload
@@ -385,9 +384,9 @@ ${skillsSection}
       return
     }
 
-    // 群聊消息走 Debounce（@mention 消息也入队，但会重置窗口到最小值，快速触发）
+    // 群聊消息走注意力调度（@mention 消息立即触发巡检）
     if (session.type === 'group') {
-      this.debounceHandler.enqueue(session.session_id, message, friend)
+      this.attentionScheduler.enqueue(session.session_id, message, friend)
       return
     }
 
@@ -563,10 +562,10 @@ ${skillsSection}
   }
 
   /**
-   * 群聊批量消息处理（Debounce flush 回调）
+   * 群聊批量消息处理（注意力调度巡检回调）
    *
-   * Debounce 窗口到期后调用，传入该窗口内积累的所有消息。
-   * Agent 判断是否需要回复：有回复 → 重置窗口；无关消息 → 退避窗口。
+   * 巡检间隔到期后调用，传入该周期内积累的所有消息。
+   * Agent 判断是否需要回复：有回复 → 重置间隔；无关消息 → 退避间隔。
    *
    * @see protocol-agent-v2.md §5.2
    */
@@ -681,8 +680,8 @@ ${skillsSection}
       }
       // else: silent discard — 不发送任何回复
 
-      // 报告结果，调整 debounce 窗口
-      this.debounceHandler.reportResult(sessionId, hasReply)
+      // 报告结果，调整注意力巡检间隔
+      this.attentionScheduler.reportResult(sessionId, hasReply)
 
       this.traceStore.endTrace(trace.trace_id, 'completed', {
         summary: hasReply
@@ -1642,7 +1641,6 @@ ${skillsSection}
         const updatedWorkerSdkEnv = this.sdkEnvWorker
         this.workerHandler = new WorkerHandler(updatedWorkerSdkEnv, {
           systemPrompt: this.promptManager.assembleWorkerPrompt(adminPersonality || undefined),
-          maxIterations: this.agentConfig?.max_iterations,
         }, createMcpConfigs, {
           rpcClient: this.rpcClient,
           moduleId: this.config.moduleId,
@@ -1817,7 +1815,7 @@ ${skillsSection}
 
   protected override async onStop(): Promise<void> {
     this.sessionManager.stopCleanup()
-    this.debounceHandler.stopAll()
+    this.attentionScheduler.stopAll()
 
     // 停止 MCP Servers
     if (this.mcpManager) {

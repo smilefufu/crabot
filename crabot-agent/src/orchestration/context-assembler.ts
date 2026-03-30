@@ -120,6 +120,7 @@ export class ContextAssembler {
         channel_id: params.channel_id,
         session_id: params.session_id,
         friend_id: params.friend_id,
+        session_type: params.session_type,
       },
       recent_messages: recentMessages,
       short_term_memories: shortTermMemories,

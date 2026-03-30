@@ -290,6 +290,7 @@ export interface TaskOrigin {
   channel_id: ModuleId
   session_id: SessionId
   friend_id?: FriendId
+  session_type?: 'private' | 'group'
 }
 
 // ============================================================================

@@ -57,7 +57,6 @@ function findClaudeCodePath(): string | undefined {
 
 export interface WorkerHandlerConfig {
   systemPrompt: string
-  maxIterations?: number
 }
 
 export interface WorkerDeps {
@@ -70,6 +69,17 @@ export interface SdkEnvConfig {
   modelId: string
   env: Record<string, string>
 }
+
+/** Human-readable descriptions for tools (used in sanitized progress for non-master sessions) */
+const TOOL_DESCRIPTIONS: Record<string, string> = {
+  'mcp__crabot-worker__ask_human': '请求人类反馈',
+  'Skill': '使用技能',
+}
+
+/** Tool prefixes that are internal agent workflow — never reported as progress */
+const INTERNAL_TOOL_PREFIXES = [
+  'mcp__crab-messaging__',
+]
 
 /** Tools the Worker SDK is allowed to use */
 const WORKER_ALLOWED_TOOLS = [
@@ -86,7 +96,6 @@ const WORKER_ALLOWED_TOOLS = [
 
 export class WorkerHandler {
   private sdkEnv: SdkEnvConfig
-  private config: WorkerHandlerConfig
   private systemPrompt: string
   private activeTasks: Map<TaskId, WorkerTaskState> = new Map()
   /** Active query handles — for streamInput() injection */
@@ -103,10 +112,6 @@ export class WorkerHandler {
     this.sdkEnv = sdkEnv
     this.mcpConfigFactory = mcpConfigFactory
     this.deps = deps
-    this.config = {
-      systemPrompt: config.systemPrompt,
-      maxIterations: config.maxIterations,
-    }
     this.systemPrompt = config.systemPrompt
   }
 
@@ -201,7 +206,7 @@ export class WorkerHandler {
         allowDangerouslySkipPermissions: true,
         persistSession: false,
         thinking: { type: 'disabled' },
-        ...(this.config.maxIterations !== undefined && { maxTurns: this.config.maxIterations }),
+        // Worker 不设 maxTurns — 允许执行足够复杂的任务直到自然完成
         ...(claudePath && { pathToClaudeCodeExecutable: claudePath }),
         ...(taskState.abortController && { abortController: taskState.abortController as unknown as AbortController }),
         stderr: (data: string) => {
@@ -217,8 +222,12 @@ export class WorkerHandler {
       this.activeQueries.set(task.task_id, queryHandle)
 
       // 7. Process output stream — progress, trace, result extraction
+      const isMasterPrivate =
+        context.sender_friend?.permission === 'master'
+        && context.task_origin?.session_type === 'private'
+
       const result = await this.processQueryStream(
-        queryHandle, task, context.task_origin, taskState, traceCallback,
+        queryHandle, task, context.task_origin, taskState, traceCallback, isMasterPrivate,
       )
 
       return result
@@ -251,6 +260,7 @@ export class WorkerHandler {
     taskOrigin: TaskOrigin | undefined,
     taskState: WorkerTaskState,
     traceCallback?: TraceCallback,
+    isMasterPrivate: boolean = false,
   ): Promise<ExecuteTaskResult> {
     let resultText = ''
     let isError = false
@@ -300,7 +310,12 @@ export class WorkerHandler {
               }
               if (block.type === 'tool_use' && block.name) {
                 turnToolCount++
-                turnToolSummaries.push(this.summarizeToolCall(block.name, block.input))
+                const summary = isMasterPrivate
+                  ? this.summarizeToolCall(block.name, block.input)
+                  : this.summarizeToolCallSanitized(block.name, block.input)
+                if (summary !== null) {
+                  turnToolSummaries.push(summary)
+                }
                 const toolSpanId = traceCallback?.onToolCallStart(
                   block.name,
                   JSON.stringify(block.input ?? {}).slice(0, 200),
@@ -565,7 +580,8 @@ export class WorkerHandler {
   /**
    * Extract a human-readable summary from a tool call
    */
-  private summarizeToolCall(toolName: string, input: unknown): string {
+  private summarizeToolCall(toolName: string, input: unknown): string | null {
+    if (INTERNAL_TOOL_PREFIXES.some(p => toolName.startsWith(p))) return null
     const args = input as Record<string, unknown> | undefined
     switch (toolName) {
       case 'Bash':
@@ -581,11 +597,45 @@ export class WorkerHandler {
       case 'Grep':
         return `搜索 "${(args?.pattern as string ?? '').slice(0, 30)}" in ${args?.path ?? '.'}`
       default:
-        if (toolName.startsWith('mcp__crab-messaging__')) {
-          return toolName.replace('mcp__crab-messaging__', '')
-        }
         return toolName
     }
+  }
+
+  /**
+   * Sanitized tool summary for non-master sessions.
+   * Strips file paths to basename, sanitizes Bash commands, skips unknown tools.
+   * Returns null to indicate the tool should be omitted from progress.
+   */
+  private summarizeToolCallSanitized(toolName: string, input: unknown): string | null {
+    if (INTERNAL_TOOL_PREFIXES.some(p => toolName.startsWith(p))) return null
+    const args = input as Record<string, unknown> | undefined
+    switch (toolName) {
+      case 'Bash': {
+        const cmd = (args?.command as string ?? '')
+        const sanitized = cmd.replace(/(?:\/[\w.-]+)+/g, (match) => {
+          const segments = match.split('/')
+          return segments[segments.length - 1]
+        })
+        return `> ${sanitized.slice(0, 120)}`
+      }
+      case 'Write':
+        return `写入 ${this.basenameOf(args?.file_path)}`
+      case 'Edit':
+        return `编辑 ${this.basenameOf(args?.file_path)}`
+      case 'Read':
+        return `读取 ${this.basenameOf(args?.file_path)}`
+      case 'Glob':
+        return `搜索文件 ${args?.pattern ?? ''}`
+      case 'Grep':
+        return `搜索 "${(args?.pattern as string ?? '').slice(0, 30)}"`
+      default:
+        return TOOL_DESCRIPTIONS[toolName] ?? null
+    }
+  }
+
+  private basenameOf(filePath: unknown): string {
+    if (typeof filePath !== 'string') return '文件'
+    return path.basename(filePath)
   }
 
   /**
