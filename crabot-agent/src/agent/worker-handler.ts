@@ -345,7 +345,7 @@ export class WorkerHandler {
 
             if (hasText) {
               if (pendingToolCalls.length > 0) {
-                await this.sendToUser(taskOrigin, pendingToolCalls.splice(0).join('\n').slice(0, 500))
+                await this.sendToUser(taskOrigin, this.dedupeToolSummaries(pendingToolCalls.splice(0)).slice(0, 500))
               }
               await this.sendToUser(taskOrigin, trimmedText)
             }
@@ -353,7 +353,7 @@ export class WorkerHandler {
             if (hasTools) {
               pendingToolCalls.push(...turnToolSummaries)
               if (pendingToolCalls.length >= 5) {
-                await this.sendToUser(taskOrigin, pendingToolCalls.splice(0).join('\n').slice(0, 500))
+                await this.sendToUser(taskOrigin, this.dedupeToolSummaries(pendingToolCalls.splice(0)).slice(0, 500))
               }
             }
           }
@@ -388,7 +388,7 @@ export class WorkerHandler {
         case 'result': {
           // Flush remaining pending tool calls
           if (taskOrigin && pendingToolCalls.length > 0) {
-            await this.sendToUser(taskOrigin, pendingToolCalls.splice(0).join('\n').slice(0, 500))
+            await this.sendToUser(taskOrigin, this.dedupeToolSummaries(pendingToolCalls.splice(0)).slice(0, 500))
           }
 
           const resultMsg = msg as Record<string, unknown>
@@ -631,6 +631,28 @@ export class WorkerHandler {
       default:
         return TOOL_DESCRIPTIONS[toolName] ?? null
     }
+  }
+
+  /**
+   * Deduplicate consecutive identical tool summaries, appending ×N for runs > 1.
+   * e.g. ["编辑 A.tsx", "编辑 A.tsx", "编辑 B.tsx"] → "编辑 A.tsx ×2\n编辑 B.tsx"
+   */
+  private dedupeToolSummaries(summaries: string[]): string {
+    if (summaries.length === 0) return ''
+    const result: string[] = []
+    let current = summaries[0]
+    let count = 1
+    for (let i = 1; i < summaries.length; i++) {
+      if (summaries[i] === current) {
+        count++
+      } else {
+        result.push(count > 1 ? `${current} ×${count}` : current)
+        current = summaries[i]
+        count = 1
+      }
+    }
+    result.push(count > 1 ? `${current} ×${count}` : current)
+    return result.join('\n')
   }
 
   private basenameOf(filePath: unknown): string {
