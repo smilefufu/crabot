@@ -13,7 +13,8 @@ mkdir -p "$DATA_DIR/admin" "$DATA_DIR/agent" "$DATA_DIR/litellm" "$DATA_DIR/memo
 # 0. 确保 nvm 已加载，切换到 .nvmrc 指定的 Node 版本
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 # shellcheck source=/dev/null
-[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+# nvm.sh 不兼容 set -e（已知问题 nvm#1985）
+set +e; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; set -e
 local_saved_dir="$PWD"
 cd "$CRABOT_HOME"
 nvm use || {

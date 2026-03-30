@@ -106,10 +106,18 @@ load_env() {
 
 apply_litellm_patches() {
   local litellm_site
-  litellm_site=$(python3 -c "import litellm, os; print(os.path.dirname(litellm.__file__))" 2>/dev/null) || {
+  # 优先用 uv tool 的 venv 中的 python（litellm 通过 uv tool install 安装）
+  local uv_litellm_python="$HOME/.local/share/uv/tools/litellm/bin/python3"
+  if [ -x "$uv_litellm_python" ]; then
+    litellm_site=$("$uv_litellm_python" -c "import litellm, os; print(os.path.dirname(litellm.__file__))" 2>/dev/null)
+  fi
+  if [ -z "$litellm_site" ]; then
+    litellm_site=$(python3 -c "import litellm, os; print(os.path.dirname(litellm.__file__))" 2>/dev/null)
+  fi
+  if [ -z "$litellm_site" ]; then
     log_warn "无法定位 LiteLLM 安装路径，跳过补丁"
     return 0
-  }
+  fi
 
   local tf="$litellm_site/llms/anthropic/experimental_pass_through/adapters/transformation.py"
   local oa="$litellm_site/llms/openai/openai.py"
@@ -200,6 +208,20 @@ start_litellm() {
 
   log_info "启动 LiteLLM..."
   mkdir -p "$DATA_DIR/litellm"
+
+  # 首次启动时生成默认配置（后续由 Admin 动态覆盖）
+  if [ ! -f "$LITELLM_CONFIG" ]; then
+    cat > "$LITELLM_CONFIG" << 'CFGEOF'
+# LiteLLM Proxy 配置（初始空配置，由 crabot-admin 动态管理）
+model_list: []
+
+litellm_settings:
+  drop_params: true
+  set_verbose: false
+CFGEOF
+    log_info "已生成 LiteLLM 默认配置: $LITELLM_CONFIG"
+  fi
+
   if [ -z "$LITELLM_MASTER_KEY" ]; then
     export LITELLM_MASTER_KEY="sk-litellm-$(openssl rand -hex 16 2>/dev/null || echo default)"
   fi
