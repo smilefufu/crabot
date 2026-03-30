@@ -425,8 +425,12 @@ export class ModelProviderManager {
         if (response) {
           return
         }
-      } catch {
-        // 忽略错误，继续等待
+      } catch (err: unknown) {
+        // 401 = LiteLLM 在运行但需要 API key，视为启动成功
+        if (err instanceof Error && err.message.startsWith('HTTP 401')) {
+          return
+        }
+        // 其他错误（连接拒绝等），继续等待
       }
       await new Promise((resolve) => setTimeout(resolve, 1000))
     }
