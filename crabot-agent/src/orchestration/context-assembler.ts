@@ -129,6 +129,10 @@ export class ContextAssembler {
       admin_endpoint: adminEndpoint,
       memory_endpoint: memoryEndpoint,
       channel_endpoints: channelEndpoints,
+      memory_permissions: {
+        write_visibility: memoryPermissions.write_visibility,
+        write_scopes: memoryPermissions.write_scopes,
+      },
     }
   }
 

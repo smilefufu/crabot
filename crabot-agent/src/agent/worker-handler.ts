@@ -35,6 +35,8 @@ import type {
   SkillConfig,
 } from '../types.js'
 import type { RpcClient } from '../core/module-base.js'
+import { createCrabMemoryServer } from '../mcp/crab-memory.js'
+import type { MemoryTaskContext } from '../mcp/crab-memory.js'
 
 import * as fs from 'fs'
 import * as path from 'path'
@@ -63,6 +65,7 @@ export interface WorkerDeps {
   rpcClient: RpcClient
   moduleId: string
   resolveChannelPort: (channelId: string) => Promise<number>
+  getMemoryPort: () => Promise<number>
 }
 
 export interface SdkEnvConfig {
@@ -73,6 +76,7 @@ export interface SdkEnvConfig {
 /** Human-readable descriptions for tools (used in sanitized progress for non-master sessions) */
 const TOOL_DESCRIPTIONS: Record<string, string> = {
   'mcp__crabot-worker__ask_human': '请求人类反馈',
+  'mcp__crab-memory__store_memory': '写入长期记忆',
   'Skill': '使用技能',
 }
 
@@ -92,6 +96,7 @@ const WORKER_ALLOWED_TOOLS = [
   'mcp__crab-messaging__send_message',
   'mcp__crab-messaging__get_history',
   'mcp__crabot-worker__ask_human',
+  'mcp__crab-memory__store_memory',
 ]
 
 export class WorkerHandler {
@@ -177,9 +182,26 @@ export class WorkerHandler {
         ],
       })
 
+      // Build crab-memory MCP server (per-task, needs task context)
+      const memoryTaskCtx: MemoryTaskContext = {
+        taskId: task.task_id,
+        channelId: context.task_origin?.channel_id,
+        sessionId: context.task_origin?.session_id,
+        visibility: context.memory_permissions?.write_visibility ?? 'public',
+        scopes: context.memory_permissions?.write_scopes ?? [],
+      }
+      const crabMemoryServer = this.deps?.getMemoryPort
+        ? createCrabMemoryServer({
+            rpcClient: this.deps.rpcClient,
+            moduleId: this.deps.moduleId,
+            getMemoryPort: this.deps.getMemoryPort,
+          }, memoryTaskCtx)
+        : undefined
+
       const externalMcpConfigs = this.mcpConfigFactory?.() ?? {}
       const mcpServers: Record<string, SdkMcpServerConfig> = {
         'crabot-worker': askHumanServer as unknown as SdkMcpServerConfig,
+        ...(crabMemoryServer ? { 'crab-memory': crabMemoryServer } : {}),
         ...externalMcpConfigs,
       }
 

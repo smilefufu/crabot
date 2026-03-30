@@ -123,6 +123,31 @@ export class MemoryWriter {
     })
   }
 
+  /** 写入长期记忆，失败时静默 log 不抛出 */
+  async writeLongTerm(params: {
+    content: string
+    category: string
+    source?: { type: 'conversation' | 'reflection' | 'manual' | 'system'; task_id?: string; channel_id?: string; session_id?: string }
+    importance?: number
+    tags?: string[]
+    metadata?: Record<string, unknown>
+    visibility?: 'private' | 'internal' | 'public'
+    scopes?: string[]
+  }): Promise<void> {
+    try {
+      const memoryPort = await this.getMemoryPort()
+      await this.rpcClient.call(
+        memoryPort,
+        'write_long_term',
+        params,
+        this.moduleId
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(`[${this.moduleId}] Failed to write long-term memory:`, message)
+    }
+  }
+
   /** 底层写入方法，失败时静默 log 不抛出 */
   private async write(payload: {
     content: string

@@ -78,7 +78,24 @@ const WORKER_RULES_TEMPLATE = `## 工作目录
 
 - 完成任务后直接输出最终结果；结果会自动回复给用户，**不需要额外调用 send_message**
 - 如需在执行过程中向用户发送进度更新，可以使用 send_message
-- 如果有 Front Agent 已完成的工作（"## Front Agent 已完成的工作"段落），请直接使用那些信息`
+- 如果有 Front Agent 已完成的工作（"## Front Agent 已完成的工作"段落），请直接使用那些信息
+
+## 记忆存储
+
+当用户明确要求记住某些信息时，阅读理解后使用 store_memory 工具写入长期记忆。
+
+分类指南：
+- profile：身份属性
+- preference：偏好习惯
+- entity：项目/产品/组织知识
+- event：重要事件或决策
+- case：问题及其解决方案
+- pattern：发现的规律或流程
+
+注意：
+- 只在用户明确要求时使用，不要自作主张
+- content 应完整清晰，需要阅读文件或理解内容后再存储，不要只存用户原话
+- importance：日常偏好 3-5，重要决策 6-8，关键信息 9-10`
 
 const PERSONALITY_SEED = `# 人格设定
 

@@ -284,6 +284,11 @@ export interface WorkerAgentContext {
     host_path: string
     read_only: boolean
   }>
+  /** Memory write permissions for this task's context */
+  memory_permissions?: {
+    write_visibility: 'private' | 'internal' | 'public'
+    write_scopes: string[]
+  }
 }
 
 export interface TaskOrigin {
@@ -446,13 +451,6 @@ export interface ExecuteTaskResult {
   outcome: 'completed' | 'failed'
   summary: string
   final_reply?: MessageContent
-  memories_to_store?: WriteLongTermParams[]
-}
-
-export interface WriteLongTermParams {
-  content: string
-  category: string
-  metadata?: Record<string, unknown>
 }
 
 // ============================================================================

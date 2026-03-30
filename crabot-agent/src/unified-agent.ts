@@ -243,6 +243,7 @@ export class UnifiedAgent extends ModuleBase {
           rpcClient: this.rpcClient,
           moduleId: this.config.moduleId,
           resolveChannelPort: (channelId) => this.getChannelPort(channelId),
+          getMemoryPort: () => this.getMemoryPort(),
         })
       }
     }
@@ -1645,6 +1646,7 @@ ${skillsSection}
           rpcClient: this.rpcClient,
           moduleId: this.config.moduleId,
           resolveChannelPort: (channelId) => this.getChannelPort(channelId),
+          getMemoryPort: () => this.getMemoryPort(),
         })
         console.log(`[${this.config.moduleId}] Worker Agent SDK env updated`)
       }
