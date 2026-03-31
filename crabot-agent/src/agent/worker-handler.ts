@@ -107,7 +107,7 @@ const WORKER_ALLOWED_TOOLS = [
 export class WorkerHandler {
   private sdkEnv: SdkEnvConfig
   private systemPrompt: string
-  private longTermPreloadLimit: number
+  private longTermPreloadLimit = 20
   private activeTasks: Map<TaskId, WorkerTaskState> = new Map()
   /** Active query handles — for streamInput() injection */
   private activeQueries: Map<TaskId, Query> = new Map()
