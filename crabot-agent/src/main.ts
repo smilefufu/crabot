@@ -19,8 +19,9 @@ async function main(): Promise<void> {
     config = await ConfigLoader.load('', rpcClient, adminEndpoint)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    console.error(`Failed to load config from Admin: ${message}`)
-    process.exit(1)
+    console.warn(`Failed to load config from Admin: ${message}`)
+    console.warn('Starting in unconfigured mode, waiting for config push from Admin...')
+    config = ConfigLoader.createUnconfiguredConfig()
   }
 
   // Module Manager 会通过环境变量分配端口，覆盖配置文件中的端口

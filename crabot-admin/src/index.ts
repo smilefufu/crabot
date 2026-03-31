@@ -3020,11 +3020,16 @@ export class AdminModule extends ModuleBase {
       throw new Error(`Config not found for instance: ${params.instance_id}`)
     }
 
-    // 全局默认 LLM 配置（作为 fallback）
-    const globalLLM = await this.modelProviderManager.resolveModelConfig({
-      module_id: params.instance_id,
-      role: 'llm',
-    }) as LLMConnectionInfo
+    // 全局默认 LLM 配置（作为 fallback，未配置时为 null）
+    let globalLLM: LLMConnectionInfo | null = null
+    try {
+      globalLLM = await this.modelProviderManager.resolveModelConfig({
+        module_id: params.instance_id,
+        role: 'llm',
+      }) as LLMConnectionInfo
+    } catch {
+      // 首次安装时全局 LLM 未配置，允许返回空 model_config
+    }
 
     // 实时解析每个 slot 引用为连接信息
     const resolvedModelConfig: Record<string, LLMConnectionInfo> = {}
@@ -3035,13 +3040,17 @@ export class AdminModule extends ModuleBase {
         ) as LLMConnectionInfo
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error)
-        console.warn(`[Admin] Slot "${key}" ref (${ref.provider_id}/${ref.model_id}) resolve failed: ${msg}, using global default`)
-        resolvedModelConfig[key] = globalLLM
+        if (globalLLM) {
+          console.warn(`[Admin] Slot "${key}" ref (${ref.provider_id}/${ref.model_id}) resolve failed: ${msg}, using global default`)
+          resolvedModelConfig[key] = globalLLM
+        } else {
+          console.warn(`[Admin] Slot "${key}" ref (${ref.provider_id}/${ref.model_id}) resolve failed: ${msg}, no global default available`)
+        }
       }
     }
 
     // 确保 'default' slot 存在（如果存储中没有，用全局默认填入）
-    if (!resolvedModelConfig['default']) {
+    if (!resolvedModelConfig['default'] && globalLLM) {
       resolvedModelConfig['default'] = globalLLM
     }
 

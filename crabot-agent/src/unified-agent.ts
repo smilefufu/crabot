@@ -1632,20 +1632,43 @@ ${skillsSection}
     })
 
     // 更新 Front Agent
-    if (this.roles.has('front') && this.frontHandler) {
+    if (this.roles.has('front')) {
       const frontConfig = modelConfig.fast ?? modelConfig.default
       if (frontConfig) {
-        this.frontHandler.updateLlmConfig({
-          endpoint: frontConfig.endpoint,
-          apikey: frontConfig.apikey,
-          model: frontConfig.model_id,
-        })
-        console.log(`[${this.config.moduleId}] Front Agent LLM config updated`)
+        if (this.frontHandler) {
+          this.frontHandler.updateLlmConfig({
+            endpoint: frontConfig.endpoint,
+            apikey: frontConfig.apikey,
+            model: frontConfig.model_id,
+          })
+          console.log(`[${this.config.moduleId}] Front Agent LLM config updated`)
+        } else {
+          // 首次从未配置状态收到配置，创建 handler
+          const llmConfig: LLMClientConfig = {
+            endpoint: frontConfig.endpoint,
+            apikey: frontConfig.apikey,
+            model: frontConfig.model_id,
+          }
+          const toolExecutorDeps: ToolExecutorDeps = {
+            rpcClient: this.rpcClient,
+            moduleId: this.config.moduleId,
+            getAdminPort: () => this.getAdminPort(),
+            resolveChannelPort: (channelId) => this.getChannelPort(channelId),
+            getActiveTasks: () => this.getActiveTasksList(),
+            getMemoryPort: () => this.getMemoryPort(),
+            memoryWriteVisibility: () => this.currentMemPerms?.write_visibility ?? 'public',
+            memoryWriteScopes: () => this.currentMemPerms?.write_scopes ?? [],
+          }
+          this.frontHandler = new FrontHandler(llmConfig, toolExecutorDeps, {
+            systemPrompt: this.promptManager.assembleFrontPrompt(adminPersonality || undefined),
+          })
+          console.log(`[${this.config.moduleId}] Front Agent handler created from config push`)
+        }
       }
     }
 
     // 更新 Worker Agent
-    if (this.roles.has('worker') && this.workerHandler) {
+    if (this.roles.has('worker')) {
       const workerConfig = modelConfig.smart ?? modelConfig.default
       if (workerConfig) {
         this.sdkEnvWorker = this.buildSdkEnv(workerConfig)
@@ -1659,7 +1682,7 @@ ${skillsSection}
           resolveChannelPort: (channelId) => this.getChannelPort(channelId),
           getMemoryPort: () => this.getMemoryPort(),
         })
-        console.log(`[${this.config.moduleId}] Worker Agent SDK env updated`)
+        console.log(`[${this.config.moduleId}] Worker Agent SDK env ${this.workerHandler ? 'updated' : 'created from config push'}`)
       }
     }
   }
@@ -1772,6 +1795,7 @@ ${skillsSection}
       processing_messages: this.sessionManager.getPendingSessionCount(),
       active_sessions: this.sessionManager.getActiveSessionCount(),
       current_task_count: this.workerHandler?.getActiveTaskCount() ?? 0,
+      llm_status: this.isConfigured() ? 'ready' : 'not_configured',
       sdk_status: (this.frontHandler || this.sdkEnvWorker) ? 'ready' : 'not_configured',
       mcp_servers_count: this.mcpManager?.count ?? 0,
     }

@@ -127,6 +127,42 @@ export class ConfigLoader {
   }
 
   /**
+   * 创建未配置状态的默认配置
+   * 协议 §7.4: Agent 在 LLM 未配置时正常启动，等待 Admin 推送配置
+   */
+  static createUnconfiguredConfig(): UnifiedAgentConfig {
+    const moduleId = process.env.Crabot_MODULE_ID || 'crabot-agent'
+    return {
+      module_id: moduleId,
+      module_type: 'agent',
+      version: '0.2.0',
+      protocol_version: '0.2.0',
+      port: process.env.Crabot_PORT ? parseInt(process.env.Crabot_PORT, 10) : 19002,
+      orchestration: {
+        admin_config_path: process.env.DATA_DIR || './data',
+        front_context_recent_messages_limit: 20,
+        front_context_memory_limit: 5,
+        worker_recent_messages_limit: 20,
+        worker_short_term_memory_limit: 10,
+        worker_long_term_memory_limit: 5,
+        front_agent_timeout: 30,
+        session_state_ttl: 3600,
+        worker_config_refresh_interval: 60,
+        front_agent_queue_max_length: 100,
+        front_agent_queue_timeout: 300,
+      },
+      agent_config: {
+        instance_id: moduleId,
+        roles: ['front', 'worker'],
+        system_prompt: '',
+        model_config: {},
+        specialization: 'Unified agent with front and worker capabilities',
+        supported_task_types: ['general'],
+      },
+    }
+  }
+
+  /**
    * 从 endpoint URL 解析端口
    */
   private static parsePortFromEndpoint(endpoint: string): number | null {
