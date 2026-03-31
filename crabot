@@ -17,8 +17,13 @@ set -e
 CRABOT_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export CRABOT_HOME
 
-export DATA_DIR="${DATA_DIR:-$CRABOT_HOME/data}"
-export LITELLM_PORT="${LITELLM_PORT:-4000}"
+_offset="${CRABOT_PORT_OFFSET:-0}"
+if [ "$_offset" -gt 0 ]; then
+  export DATA_DIR="${DATA_DIR:-$CRABOT_HOME/data-$_offset}"
+else
+  export DATA_DIR="${DATA_DIR:-$CRABOT_HOME/data}"
+fi
+export LITELLM_PORT="${LITELLM_PORT:-$((4000 + _offset))}"
 export LITELLM_DIR="${LITELLM_DIR:-$DATA_DIR/litellm}"
 export LITELLM_CONFIG="${LITELLM_CONFIG:-$LITELLM_DIR/config.yaml}"
 

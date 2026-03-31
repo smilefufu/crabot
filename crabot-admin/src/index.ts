@@ -417,7 +417,7 @@ export class AdminModule extends ModuleBase {
     await this.chatManager.loadData()
 
     // 初始化 PTY 管理器（Web CLI 终端）
-    this.ptyManager = new PtyManager(this.jwtSecret, 19000, verifyJwt)
+    this.ptyManager = new PtyManager(this.jwtSecret, parseInt(process.env.CRABOT_MM_PORT || '19000', 10), verifyJwt)
 
     // 延迟解析 Agent 端口，等待 Agent 模块启动
     setTimeout(() => {

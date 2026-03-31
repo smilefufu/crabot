@@ -38,7 +38,10 @@ build_frontend || exit 1
 
 # 4. Module Manager（前台 exec）
 log_section "启动 Crabot"
-log_info "Module Manager 启动中 (port 19000) ..."
-log_info "Admin Web: http://localhost:3000"
+local _offset="${CRABOT_PORT_OFFSET:-0}"
+local _mm_port=$((19000 + _offset))
+local _web_port=$((3000 + _offset))
+log_info "Module Manager 启动中 (port $_mm_port) ..."
+log_info "Admin Web: http://localhost:$_web_port"
 cd "$CRABOT_HOME/crabot-core"
 exec node dist/main.js

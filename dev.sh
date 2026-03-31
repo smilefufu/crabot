@@ -10,8 +10,17 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-DATA_DIR="${DATA_DIR:-$SCRIPT_DIR/data}"
-LITELLM_PORT="${LITELLM_PORT:-4000}"
+PORT_OFFSET="${CRABOT_PORT_OFFSET:-0}"
+MM_PORT=$((19000 + PORT_OFFSET))
+ADMIN_RPC_PORT=$((19001 + PORT_OFFSET))
+ADMIN_WEB_PORT=$((3000 + PORT_OFFSET))
+
+if [ "$PORT_OFFSET" -gt 0 ]; then
+  DATA_DIR="${DATA_DIR:-$SCRIPT_DIR/data-$PORT_OFFSET}"
+else
+  DATA_DIR="${DATA_DIR:-$SCRIPT_DIR/data}"
+fi
+LITELLM_PORT="${LITELLM_PORT:-$((4000 + PORT_OFFSET))}"
 LITELLM_DIR="${LITELLM_DIR:-$DATA_DIR/litellm}"
 LITELLM_CONFIG="${LITELLM_CONFIG:-$LITELLM_DIR/config.yaml}"
 MEMORY_DIR="${MEMORY_DIR:-$SCRIPT_DIR/crabot-memory}"
@@ -238,7 +247,7 @@ stop_all() {
   log_info "停止开发服务..."
 
   # 优雅关闭 Module Manager（会级联关闭所有子模块，含 Vite）
-  curl --noproxy '*' -s -X POST http://localhost:19000/shutdown \
+  curl --noproxy '*' -s -X POST "http://localhost:$MM_PORT/shutdown" \
     -H "Content-Type: application/json" -d '{}' 2>/dev/null || true
 
   # 等待 MM 进程真正退出（最多 15 秒），确保 Admin saveData() 完成
@@ -266,7 +275,7 @@ stop_all() {
   fi
 
   # 兜底释放所有已知端口
-  for port in 19000 19001 3000 "$LITELLM_PORT"; do
+  for port in "$MM_PORT" "$ADMIN_RPC_PORT" "$ADMIN_WEB_PORT" "$LITELLM_PORT"; do
     local pid
     pid=$(lsof -ti :"$port" 2>/dev/null) || true
     if [ -n "$pid" ]; then

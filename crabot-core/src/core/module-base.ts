@@ -75,7 +75,7 @@ type CallbackHandler<P = unknown> = (payload: P) => Promise<void> | void
 export class RpcClient {
   private readonly moduleManagerPort: number
 
-  constructor(moduleManagerPort = 19000) {
+  constructor(moduleManagerPort = parseInt(process.env.CRABOT_MM_PORT || '19000', 10)) {
     this.moduleManagerPort = moduleManagerPort
   }
 
@@ -134,6 +134,13 @@ export class RpcClient {
       req.write(body)
       req.end()
     })
+  }
+
+  /**
+   * 调用 Module Manager 方法（使用构造时的 MM 端口）
+   */
+  async callModuleManager<P, R>(method: string, params: P, source: ModuleId): Promise<R> {
+    return this.call<P, R>(this.moduleManagerPort, method, params, source)
   }
 
   /**
@@ -263,7 +270,7 @@ export abstract class ModuleBase {
       subscriptions: this.config.subscriptions ?? [],
     }
 
-    await this.rpcClient.call(19000, 'register', params, this.config.moduleId)
+    await this.rpcClient.callModuleManager('register', params, this.config.moduleId)
     console.log(`[${this.config.moduleId}] Registered to Module Manager`)
   }
 

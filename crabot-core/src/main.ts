@@ -11,7 +11,11 @@ import fs from 'node:fs'
 const CRABOT_ROOT = path.resolve(process.cwd(), '..')
 const ADMIN_DIR = path.join(CRABOT_ROOT, 'crabot-admin')
 const AGENT_DIR = path.join(CRABOT_ROOT, 'crabot-agent')
-const DATA_DIR = process.env.DATA_DIR || path.join(CRABOT_ROOT, 'data')
+const DATA_DIR = process.env.DATA_DIR || path.join(CRABOT_ROOT,
+  parseInt(process.env.CRABOT_PORT_OFFSET || '0', 10) > 0
+    ? `data-${process.env.CRABOT_PORT_OFFSET}`
+    : 'data'
+)
 
 // 加载环境变量文件（统一从根目录 .env 读取）
 const envFiles = [
@@ -39,14 +43,27 @@ if (envLoaded) {
   console.log('[ModuleManager] Environment variables loaded')
 }
 
-const PORT = parseInt(process.env.PORT || '19000', 10)
-const PORT_RANGE_START = parseInt(process.env.PORT_RANGE_START || '19001', 10)
-const PORT_RANGE_END = parseInt(process.env.PORT_RANGE_END || '19999', 10)
+// 端口偏移：多实例部署时，每个实例设置不同的 CRABOT_PORT_OFFSET（如 0, 100, 200）
+const PORT_OFFSET = parseInt(process.env.CRABOT_PORT_OFFSET || '0', 10)
+
+const PORT = parseInt(process.env.PORT || String(19000 + PORT_OFFSET), 10)
+const PORT_RANGE_START = parseInt(process.env.PORT_RANGE_START || String(19002 + PORT_OFFSET), 10)
+const PORT_RANGE_END = parseInt(process.env.PORT_RANGE_END || String(19099 + PORT_OFFSET), 10)
 const HEALTH_CHECK_INTERVAL = parseInt(process.env.HEALTH_CHECK_INTERVAL || '30', 10)
+
+// 派生端口（基于偏移自动计算，也可通过各自环境变量显式覆盖）
+const ADMIN_RPC_PORT = process.env.CRABOT_ADMIN_PORT || String(19001 + PORT_OFFSET)
+const ADMIN_WEB_PORT = process.env.CRABOT_ADMIN_WEB_PORT || String(3000 + PORT_OFFSET)
+const MM_ENDPOINT = `http://localhost:${PORT}`
+const ADMIN_ENDPOINT = `http://localhost:${ADMIN_RPC_PORT}`
 
 const MEMORY_DIR = path.join(CRABOT_ROOT, 'crabot-memory')
 
 const isDev = process.env.CRABOT_DEV === 'true'
+
+if (PORT_OFFSET !== 0) {
+  console.log(`[ModuleManager] Port offset: ${PORT_OFFSET} (MM=${PORT}, Admin RPC=${ADMIN_RPC_PORT}, Admin Web=${ADMIN_WEB_PORT})`)
+}
 
 // 核心模块定义（Admin 和 Agent 是核心层模块，需要预定义）
 const CORE_MODULES: Array<ModuleDefinition & Record<string, unknown>> = [
@@ -60,8 +77,10 @@ const CORE_MODULES: Array<ModuleDefinition & Record<string, unknown>> = [
     auto_start: isDev || fs.existsSync(path.join(ADMIN_DIR, 'dist', 'main.js')),
     start_priority: 10,
     env: {
-      CRABOT_ADMIN_PORT: '19001',
-      CRABOT_ADMIN_WEB_PORT: '3000',
+      CRABOT_ADMIN_PORT: ADMIN_RPC_PORT,
+      CRABOT_ADMIN_WEB_PORT: ADMIN_WEB_PORT,
+      CRABOT_MM_ENDPOINT: MM_ENDPOINT,
+      CRABOT_MM_PORT: String(PORT),
       DATA_DIR: path.join(DATA_DIR, 'admin'),
     } as Record<string, string>,
   },
@@ -80,8 +99,9 @@ const CORE_MODULES: Array<ModuleDefinition & Record<string, unknown>> = [
       // 传递 New API token 给 Agent 使用
       NEW_API_TOKEN: process.env.CRABOT_NEW_API_ADMIN_TOKEN || '',
       // 传递 Admin endpoint，用于从 Admin 获取配置
-      CRABOT_ADMIN_ENDPOINT: 'http://localhost:19001',
-      CRABOT_MM_ENDPOINT: 'http://localhost:19000',
+      CRABOT_ADMIN_ENDPOINT: ADMIN_ENDPOINT,
+      CRABOT_MM_ENDPOINT: MM_ENDPOINT,
+      CRABOT_MM_PORT: String(PORT),
       CRABOT_MODULE_ID: 'crabot-agent',
     } as Record<string, string>,
   },
@@ -96,9 +116,10 @@ const CORE_MODULES: Array<ModuleDefinition & Record<string, unknown>> = [
     start_priority: 15,  // 在 admin(10) 之后启动，确保配置已就绪
     env: {
       CRABOT_MEMORY_DATA_DIR: path.join(DATA_DIR, 'memory'),
-      CRABOT_MODULE_MANAGER_URL: 'http://localhost:19000',
+      CRABOT_MODULE_MANAGER_URL: MM_ENDPOINT,
+      CRABOT_MM_PORT: String(PORT),
       // Admin endpoint，供 Memory 模块启动时 pull 初始配置
-      CRABOT_ADMIN_ENDPOINT: 'http://localhost:19001',
+      CRABOT_ADMIN_ENDPOINT: ADMIN_ENDPOINT,
       // LLM/Embedding 配置由 Admin 通过 handleStartModuleAdmin 注入
       // 空字符串表示"未配置"，Memory 模块的 is_configured() 会检测到
       CRABOT_LLM_BASE_URL: process.env.LITELLM_BASE_URL || '',

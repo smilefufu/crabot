@@ -268,7 +268,7 @@ export class AgentManager {
           cwd: startCmd.cwd,
           env: {
             ...startCmd.env,
-            CRABOT_MM_ENDPOINT: 'http://localhost:19000',
+            CRABOT_MM_ENDPOINT: process.env.CRABOT_MM_ENDPOINT || 'http://localhost:19000',
             CRABOT_AGENT_CONFIG_PATH: path.join(
               this.dataDir,
               'agent-configs',

@@ -318,7 +318,8 @@ stop_all_services() {
   log_info "停止 Crabot 服务..."
 
   # 优雅关闭 Module Manager（会级联关闭所有子模块）
-  curl --noproxy '*' -s -X POST http://localhost:19000/shutdown \
+  local mm_port=$((19000 + ${CRABOT_PORT_OFFSET:-0}))
+  curl --noproxy '*' -s -X POST "http://localhost:$mm_port/shutdown" \
     -H "Content-Type: application/json" -d '{}' 2>/dev/null || true
 
   # 等待 MM 进程真正退出（最多 15 秒），确保 Admin saveData() 完成
@@ -348,7 +349,9 @@ stop_all_services() {
   sleep 2
 
   # 兜底释放所有已知端口（先 SIGTERM，再 SIGKILL）
-  for port in 19000 19001 3000 "$LITELLM_PORT"; do
+  local offset="${CRABOT_PORT_OFFSET:-0}"
+  local ports=("$((19000 + offset))" "$((19001 + offset))" "$((3000 + offset))" "$LITELLM_PORT")
+  for port in "${ports[@]}"; do
     lsof -ti :"$port" 2>/dev/null | while read -r pid; do
       if [ -n "$pid" ]; then
         kill "$pid" 2>/dev/null || true
@@ -356,7 +359,7 @@ stop_all_services() {
     done
   done
   sleep 1
-  for port in 19000 19001 3000 "$LITELLM_PORT"; do
+  for port in "${ports[@]}"; do
     lsof -ti :"$port" 2>/dev/null | while read -r pid; do
       if [ -n "$pid" ]; then
         kill -9 "$pid" 2>/dev/null || true
