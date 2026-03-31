@@ -581,7 +581,7 @@ export class WorkerHandler {
     }
     if (context.recent_messages && context.recent_messages.length > 0) {
       parts.push(`\n## 最近相关消息（共 ${context.recent_messages.length} 条）`)
-      for (const m of context.recent_messages.slice(-20)) {
+      for (const m of context.recent_messages) {
         parts.push(`- ${m.sender.platform_display_name}: ${m.content.text ?? '[非文本消息]'}`)
       }
     }

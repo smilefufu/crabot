@@ -150,7 +150,10 @@ export function buildUserMessage(messages: ChannelMessage[], context: FrontAgent
       parts.push(`- [${msg.sender.platform_display_name}]${mention}: ${msg.content.text ?? '[非文本消息]'}`)
     }
 
-    if (!hasMention) {
+    if (hasMention) {
+      parts.push('\n## 群聊决策提示')
+      parts.push('本批次消息 @了你，你必须回复（direct_reply 或 create_task），禁止选择 silent。')
+    } else {
       parts.push('\n## 群聊决策提示')
       parts.push('本批次消息没有 @你。群成员之间的讨论（即使涉及技术/代码话题）不算向你提问。')
       parts.push('除非有人明确叫你名字或话题中没有其他对话对象且明显在向你求助，否则默认选择 silent。')

@@ -113,7 +113,7 @@ export class ConfigLoader {
         admin_config_path: process.env.DATA_DIR || './data',
         front_context_recent_messages_limit: 20,
         front_context_memory_limit: 5,
-        worker_recent_messages_limit: 50,
+        worker_recent_messages_limit: 20,
         worker_short_term_memory_limit: 10,
         worker_long_term_memory_limit: 5,
         front_agent_timeout: 30,
