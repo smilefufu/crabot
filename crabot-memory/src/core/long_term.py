@@ -36,22 +36,26 @@ class LongTermMemory:
         # 简化实现：暂不做去重，直接创建
         # TODO: 实现完整的去重/合并逻辑
 
-        # 生成 L0 和 L1
-        try:
-            summaries = await self.llm_client.generate_l0_l1(params.content)
-            abstract = summaries["abstract"]
-            overview = summaries["overview"]
-        except Exception as e:
-            logger.warning("Failed to generate L0/L1: %s", e)
-            abstract = params.content[:200]
-            overview = params.content[:2000]
+        import asyncio
 
-        # 提取关键词
-        try:
-            keywords = await self.llm_client.extract_keywords(params.content)
-        except Exception as e:
-            logger.warning("Failed to extract keywords: %s", e)
-            keywords = []
+        # 并行生成 L0/L1 和提取关键词（两个 LLM 调用互不依赖）
+        async def gen_summaries():
+            try:
+                return await self.llm_client.generate_l0_l1(params.content)
+            except Exception as e:
+                logger.warning("Failed to generate L0/L1: %s", e)
+                return {"abstract": params.content[:200], "overview": params.content[:2000]}
+
+        async def gen_keywords():
+            try:
+                return await self.llm_client.extract_keywords(params.content)
+            except Exception as e:
+                logger.warning("Failed to extract keywords: %s", e)
+                return []
+
+        summaries, keywords = await asyncio.gather(gen_summaries(), gen_keywords())
+        abstract = summaries["abstract"]
+        overview = summaries["overview"]
 
         # 创建条目
         entry = LongTermMemoryEntry(

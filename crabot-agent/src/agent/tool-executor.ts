@@ -197,33 +197,30 @@ export class ToolExecutor {
 
   private async storeMemory(input: Record<string, unknown>): Promise<ToolResult> {
     const memoryPort = await this.deps.getMemoryPort()
-    const result = await this.deps.rpcClient.call<
-      {
-        content: string
-        source: { type: string }
-        importance: number
-        tags?: string[]
-        visibility: string
-        scopes: string[]
-      },
-      {
-        action: string
-        memory: { id: string; abstract: string }
-      }
-    >(memoryPort, 'write_long_term', {
+    const rpcParams = {
       content: input.content as string,
       source: { type: 'conversation' },
       importance: (input.importance as number) ?? 5,
       ...(input.tags ? { tags: input.tags as string[] } : {}),
       visibility: this.deps.memoryWriteVisibility(),
       scopes: this.deps.memoryWriteScopes(),
-    }, this.deps.moduleId)
+    }
+
+    // Fire-and-forget: 不阻塞 Front loop，Memory 后台完成 L0/L1 生成和写入
+    this.deps.rpcClient.call(memoryPort, 'write_long_term', rpcParams, this.deps.moduleId)
+      .then(result => {
+        const r = result as { action: string; memory: { id: string } }
+        console.log(`[${this.deps.moduleId}] store_memory completed: ${r.action} ${r.memory.id}`)
+      })
+      .catch(err => {
+        console.error(`[${this.deps.moduleId}] store_memory failed:`, err instanceof Error ? err.message : err)
+      })
+
     return {
       output: JSON.stringify({
         success: true,
-        action: result.action,
-        memory_id: result.memory.id,
-        abstract: result.memory.abstract,
+        action: 'accepted',
+        message: 'Memory write accepted, processing in background.',
       }),
       isError: false,
     }
