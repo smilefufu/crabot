@@ -20,6 +20,9 @@ export interface ToolExecutorDeps {
     started_at: string
     title?: string
   }>
+  getMemoryPort: () => Promise<number>
+  memoryWriteVisibility: () => 'private' | 'internal' | 'public'
+  memoryWriteScopes: () => string[]
 }
 
 export interface ToolResult {
@@ -52,6 +55,9 @@ export class ToolExecutor {
         case 'get_history': return await this.getHistory(input)
         case 'query_tasks': return await this.queryTasks(input)
         case 'create_schedule': return await this.createSchedule(input)
+        case 'store_memory': return await this.storeMemory(input)
+        case 'search_memory': return await this.searchMemory(input)
+        case 'get_memory_detail': return await this.getMemoryDetail(input)
         default:
           return { output: JSON.stringify({ error: `Unknown tool: ${toolName}` }), isError: true }
       }
@@ -187,6 +193,124 @@ export class ToolExecutor {
       target_session_id: input.target_session_id,
     }, this.deps.moduleId)
     return { output: JSON.stringify(result), isError: false }
+  }
+
+  private async storeMemory(input: Record<string, unknown>): Promise<ToolResult> {
+    const memoryPort = await this.deps.getMemoryPort()
+    const result = await this.deps.rpcClient.call<
+      {
+        category: string
+        content: string
+        source: { type: string }
+        importance: number
+        tags?: string[]
+        visibility: string
+        scopes: string[]
+      },
+      {
+        action: string
+        memory: { id: string; abstract: string }
+      }
+    >(memoryPort, 'write_long_term', {
+      category: input.category as string,
+      content: input.content as string,
+      source: { type: 'conversation' },
+      importance: (input.importance as number) ?? 5,
+      ...(input.tags ? { tags: input.tags as string[] } : {}),
+      visibility: this.deps.memoryWriteVisibility(),
+      scopes: this.deps.memoryWriteScopes(),
+    }, this.deps.moduleId)
+    return {
+      output: JSON.stringify({
+        success: true,
+        action: result.action,
+        memory_id: result.memory.id,
+        abstract: result.memory.abstract,
+      }),
+      isError: false,
+    }
+  }
+
+  private async searchMemory(input: Record<string, unknown>): Promise<ToolResult> {
+    const memoryPort = await this.deps.getMemoryPort()
+    const limit = Math.min((input.limit as number) ?? 5, 20)
+    const visibility = this.deps.memoryWriteVisibility()
+
+    if (input.level === 'short_term') {
+      const result = await this.deps.rpcClient.call<
+        {
+          query: string
+          limit: number
+          min_visibility: string
+          accessible_scopes?: string[]
+        },
+        { results: Array<{ id: string; content: string; event_time: string; persons: string[]; topic?: string }> }
+      >(memoryPort, 'search_short_term', {
+        query: input.query as string,
+        limit,
+        min_visibility: visibility,
+        ...(this.deps.memoryWriteScopes().length > 0
+          ? { accessible_scopes: this.deps.memoryWriteScopes() }
+          : {}),
+      }, this.deps.moduleId)
+      return { output: JSON.stringify(result), isError: false }
+    }
+
+    // Default: long_term
+    const result = await this.deps.rpcClient.call<
+      {
+        query: string
+        detail: string
+        limit: number
+        filter?: { category?: string }
+        min_visibility: string
+        accessible_scopes?: string[]
+      },
+      { results: Array<{ memory: { id: string; abstract: string; importance: number; tags: string[]; category: string }; relevance: number }> }
+    >(memoryPort, 'search_long_term', {
+      query: input.query as string,
+      detail: 'L0',
+      limit,
+      ...(input.category ? { filter: { category: input.category as string } } : {}),
+      min_visibility: visibility,
+      ...(this.deps.memoryWriteScopes().length > 0
+        ? { accessible_scopes: this.deps.memoryWriteScopes() }
+        : {}),
+    }, this.deps.moduleId)
+    return { output: JSON.stringify(result), isError: false }
+  }
+
+  private async getMemoryDetail(input: Record<string, unknown>): Promise<ToolResult> {
+    const memoryPort = await this.deps.getMemoryPort()
+    const result = await this.deps.rpcClient.call<
+      { memory_id: string },
+      { memory: Record<string, unknown> }
+    >(memoryPort, 'get_memory', {
+      memory_id: input.memory_id as string,
+    }, this.deps.moduleId)
+
+    const mem = result.memory
+    const detail = (input.detail as string) ?? 'L1'
+
+    if (detail === 'L1') {
+      return {
+        output: JSON.stringify({
+          id: mem.id,
+          category: mem.category,
+          abstract: mem.abstract,
+          overview: mem.overview,
+          entities: mem.entities,
+          keywords: mem.keywords,
+          importance: mem.importance,
+          tags: mem.tags,
+          source: mem.source,
+        }),
+        isError: false,
+      }
+    }
+
+    // L2: return full object
+    return { output: JSON.stringify(mem), isError: false }
   }
 
   private formatFriend(f: Friend) {

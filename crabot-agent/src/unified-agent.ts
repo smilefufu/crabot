@@ -67,6 +67,8 @@ export class UnifiedAgent extends ModuleBase {
   private sdkEnvWorker?: SdkEnvConfig
   /** Worker sandbox 路径映射（每次 executeTask 时更新） */
   private sandboxPathMappingsRef: { current: PathMapping[] } = { current: [] }
+  /** 当前消息处理的记忆权限（Front tool 使用） */
+  private currentMemPerms?: MemoryPermissions
 
   // 配置
   private orchestrationConfig: OrchestrationConfig
@@ -223,6 +225,9 @@ export class UnifiedAgent extends ModuleBase {
           getAdminPort: () => this.getAdminPort(),
           resolveChannelPort: (channelId) => this.getChannelPort(channelId),
           getActiveTasks: () => this.getActiveTasksList(),
+          getMemoryPort: () => this.getMemoryPort(),
+          memoryWriteVisibility: () => this.currentMemPerms?.write_visibility ?? 'public',
+          memoryWriteScopes: () => this.currentMemPerms?.write_scopes ?? [],
         }
         this.frontHandler = new FrontHandler(llmConfig, toolExecutorDeps, {
           systemPrompt: this.promptManager.assembleFrontPrompt(adminPersonality || undefined),
@@ -462,6 +467,7 @@ ${skillsSection}
       const traceCallback = this.buildTraceCallback(trace.trace_id)
 
       // 8. 调用 Front Agent（传入合并后的消息列表）
+      this.currentMemPerms = memPerms
       const result = await this.frontHandler.handleMessage({
         messages: mergedMessages,
         context,
@@ -633,6 +639,7 @@ ${skillsSection}
       const traceCallback = this.buildTraceCallback(trace.trace_id)
 
       // 调用 Front Agent，传入整批消息
+      this.currentMemPerms = memPerms
       const result = await this.frontHandler.handleMessage({
         messages,
         context,
@@ -1065,6 +1072,7 @@ ${skillsSection}
         )
 
         // 调用 Front Agent
+        this.currentMemPerms = channelMemPerms
         const result = await this.frontHandler.handleMessage({
           messages: mergedMessages,
           context,
@@ -1209,6 +1217,7 @@ ${skillsSection}
       const traceCallback = this.buildTraceCallback(trace.trace_id)
 
       // 调用 Front Agent
+      this.currentMemPerms = masterMemPerms
       const result = await this.frontHandler.handleMessage({
         messages: mergedMessages,
         context,

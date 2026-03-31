@@ -175,6 +175,75 @@ export const GET_HISTORY_TOOL: Tool = {
   },
 }
 
+export const STORE_MEMORY_TOOL: Tool = {
+  name: 'store_memory',
+  description: '将信息写入长期记忆。当用户要求记住/记录某些信息时使用。',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      content: { type: 'string', description: '要记忆的完整内容，应包含足够上下文' },
+      category: {
+        type: 'string',
+        enum: ['profile', 'preference', 'entity', 'event', 'case', 'pattern'],
+        description: '分类：profile=人物画像, preference=偏好, entity=实体知识, event=关键事件, case=案例经验, pattern=规律模式',
+      },
+      importance: {
+        type: 'number',
+        description: '重要性（1-10），日常偏好 3-5，重要决策 6-8，关键信息 9-10',
+      },
+      tags: {
+        type: 'array',
+        items: { type: 'string' },
+        description: '分类标签',
+      },
+    },
+    required: ['content', 'category'],
+  },
+}
+
+export const SEARCH_MEMORY_TOOL: Tool = {
+  name: 'search_memory',
+  description: '搜索记忆，返回摘要列表（L0 级别）。可按语义查询、按分类过滤。',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      query: { type: 'string', description: '自然语言搜索查询' },
+      level: {
+        type: 'string',
+        enum: ['short_term', 'long_term'],
+        description: '搜索范围：short_term=近期事件流水账, long_term=认知知识库（默认 long_term）',
+      },
+      category: {
+        type: 'string',
+        enum: ['profile', 'preference', 'entity', 'event', 'case', 'pattern'],
+        description: '按分类过滤（仅 long_term 有效）',
+      },
+      limit: {
+        type: 'number',
+        description: '返回数量上限（1-20，默认 5）',
+      },
+    },
+    required: ['query'],
+  },
+}
+
+export const GET_MEMORY_DETAIL_TOOL: Tool = {
+  name: 'get_memory_detail',
+  description: '获取某条长期记忆的详细内容。先用 search_memory 找到记忆 ID，再用此工具查看详情。',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      memory_id: { type: 'string', description: '记忆 ID（如 mem-l042）' },
+      detail: {
+        type: 'string',
+        enum: ['L1', 'L2'],
+        description: '详细程度：L1=概览(~2k token), L2=完整内容（默认 L1）',
+      },
+    },
+    required: ['memory_id'],
+  },
+}
+
 /** All Front tools in order */
 export function getAllFrontTools(): Tool[] {
   return [
@@ -187,5 +256,8 @@ export function getAllFrontTools(): Tool[] {
     OPEN_PRIVATE_SESSION_TOOL,
     SEND_MESSAGE_TOOL,
     GET_HISTORY_TOOL,
+    STORE_MEMORY_TOOL,
+    SEARCH_MEMORY_TOOL,
+    GET_MEMORY_DETAIL_TOOL,
   ]
 }
