@@ -48,7 +48,7 @@ export function createCrabMemoryServer(
     tools: [
       tool(
         'store_memory',
-        '将信息写入长期记忆。当用户明确要求记住某些信息时使用。',
+        '将信息写入长期记忆。用户要求记住时必须使用；发现有价值的偏好、案例、模式等信息时也应主动使用。',
         {
           content: z.string().describe('要记住的完整信息，应包含足够上下文'),
           category: z.enum(['profile', 'preference', 'entity', 'event', 'case', 'pattern'])
@@ -104,6 +104,81 @@ export function createCrabMemoryServer(
                 }),
               }],
             }
+          }
+        },
+      ),
+      tool(
+        'search_memory',
+        '搜索记忆，返回摘要列表（L0 级别）。可按语义查询、按分类过滤。',
+        {
+          query: z.string().describe('自然语言搜索查询'),
+          level: z.enum(['short_term', 'long_term']).default('long_term')
+            .describe('搜索范围：short_term=近期事件流水账, long_term=认知知识库'),
+          category: z.enum(['profile', 'preference', 'entity', 'event', 'case', 'pattern']).optional()
+            .describe('按分类过滤（仅 long_term 有效）'),
+          limit: z.number().min(1).max(20).default(5)
+            .describe('返回数量上限'),
+        },
+        async (args) => {
+          try {
+            const memoryPort = await getMemoryPort()
+            if (args.level === 'short_term') {
+              const result = await rpcClient.call(
+                memoryPort, 'search_short_term',
+                {
+                  query: args.query, limit: args.limit,
+                  min_visibility: ctx.visibility,
+                  ...(ctx.scopes.length > 0 ? { accessible_scopes: ctx.scopes } : {}),
+                },
+                moduleId
+              ) as { results: Array<{ id: string; content: string; event_time: string; topic?: string }> }
+              return { content: [{ type: 'text' as const, text: JSON.stringify({ results: result.results }) }] }
+            }
+            const result = await rpcClient.call(
+              memoryPort, 'search_long_term',
+              {
+                query: args.query, detail: 'L0', limit: args.limit,
+                ...(args.category ? { filter: { category: args.category } } : {}),
+                min_visibility: ctx.visibility,
+                ...(ctx.scopes.length > 0 ? { accessible_scopes: ctx.scopes } : {}),
+              },
+              moduleId
+            ) as { results: Array<{ memory: { id: string; abstract: string; importance: number; tags: string[]; category: string }; relevance: number }> }
+            return {
+              content: [{ type: 'text' as const, text: JSON.stringify({
+                results: result.results.map(r => ({ ...r.memory, relevance: r.relevance })),
+              }) }],
+            }
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: message }) }] }
+          }
+        },
+      ),
+      tool(
+        'get_memory_detail',
+        '获取某条长期记忆的详细内容。先用 search_memory 找到记忆 ID，再用此工具查看详情。',
+        {
+          memory_id: z.string().describe('记忆 ID'),
+          detail: z.enum(['L1', 'L2']).default('L1')
+            .describe('详细程度：L1=概览(~2k token), L2=完整内容'),
+        },
+        async (args) => {
+          try {
+            const memoryPort = await getMemoryPort()
+            const result = await rpcClient.call(
+              memoryPort, 'get_memory',
+              { memory_id: args.memory_id },
+              moduleId
+            ) as { memory: Record<string, unknown> }
+            const mem = result.memory
+            const output = args.detail === 'L1'
+              ? { id: mem.id, category: mem.category, abstract: mem.abstract, overview: mem.overview, entities: mem.entities, keywords: mem.keywords, importance: mem.importance, tags: mem.tags, source: mem.source }
+              : mem
+            return { content: [{ type: 'text' as const, text: JSON.stringify(output) }] }
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: message }) }] }
           }
         },
       ),

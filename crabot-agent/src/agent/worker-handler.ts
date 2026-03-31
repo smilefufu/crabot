@@ -77,6 +77,8 @@ export interface SdkEnvConfig {
 const TOOL_DESCRIPTIONS: Record<string, string> = {
   'mcp__crabot-worker__ask_human': '请求人类反馈',
   'mcp__crab-memory__store_memory': '写入长期记忆',
+  'mcp__crab-memory__search_memory': '搜索记忆',
+  'mcp__crab-memory__get_memory_detail': '查看记忆详情',
   'Skill': '使用技能',
 }
 
@@ -97,6 +99,8 @@ const WORKER_ALLOWED_TOOLS = [
   'mcp__crab-messaging__get_history',
   'mcp__crabot-worker__ask_human',
   'mcp__crab-memory__store_memory',
+  'mcp__crab-memory__search_memory',
+  'mcp__crab-memory__get_memory_detail',
 ]
 
 export class WorkerHandler {
