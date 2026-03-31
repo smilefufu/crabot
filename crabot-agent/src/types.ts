@@ -240,10 +240,12 @@ export interface ShortTermMemoryEntry {
 }
 
 export interface LongTermL0Entry {
-  memory_id: string
-  content: string
-  timestamp: string
-  metadata?: Record<string, unknown>
+  id: string
+  abstract: string
+  importance: number
+  tags: string[]
+  category: string
+  created_at: string
 }
 
 export interface ResolvedModule {
