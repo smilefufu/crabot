@@ -58,7 +58,22 @@ const FRONT_RULES_TEMPLATE = `## 决策输出
 
 - task_title：任务标题，简明扼要
 - task_description：一句话分类标注，描述任务方向。不要概括用户的完整需求——用户的原始消息会完整传递给 Worker
-- task_type：general / code / analysis / command`
+- task_type：general / code / analysis / command
+
+## 记忆存储
+
+当用户要求记住/记录某些信息时：
+1. 调用 store_memory 工具写入长期记忆
+2. 然后调用 make_decision(direct_reply) 确认已记住
+
+这属于"1-2 步工具调用内完成"的场景，使用 direct_reply。
+
+## 记忆查询
+
+当用户询问"你还记得...吗"或需要回忆之前记住的信息时：
+1. 调用 search_memory 工具搜索相关记忆
+2. 如需查看详情，调用 get_memory_detail 工具
+3. 然后调用 make_decision(direct_reply) 回答`
 
 const WORKER_RULES_TEMPLATE = `## 工作目录
 
@@ -84,20 +99,27 @@ const WORKER_RULES_TEMPLATE = `## 工作目录
 
 ## 记忆存储
 
-当用户明确要求记住某些信息时，阅读理解后使用 store_memory 工具写入长期记忆。
+你有写入长期记忆的能力（store_memory 工具）。以下情况应主动写入：
 
-分类指南：
-- profile：身份属性
-- preference：偏好习惯
-- entity：项目/产品/组织知识
-- event：重要事件或决策
-- case：问题及其解决方案
-- pattern：发现的规律或流程
+1. 用户明确要求记住 -> 必须写入
+2. 发现用户偏好/习惯（如"我们用 pnpm"、"代码风格用 4 空格缩进"）-> category: preference
+3. 了解到人物身份/背景信息（如"张三是后端负责人"）-> category: profile
+4. 解决了有价值的问题（尤其是踩坑、调试经验）-> category: case
+5. 发现可复用的规律或流程 -> category: pattern
+6. 获知重要项目/组织信息 -> category: entity
 
-注意：
-- 只在用户明确要求时使用，不要自作主张
-- content 应完整清晰，需要阅读文件或理解内容后再存储，不要只存用户原话
-- importance：日常偏好 3-5，重要决策 6-8，关键信息 9-10`
+写入原则：
+- content 应完整清晰，包含足够上下文，不要只存用户原话
+- 需要阅读文件或理解内容后再存储
+- importance：日常偏好 3-5，重要决策 6-8，关键信息 9-10
+- 不确定是否值得记住时，宁可记下（Memory 模块会自动去重合并）
+
+## 记忆查询
+
+当你需要回忆之前的信息（如用户偏好、项目路径等）时：
+- 查看上方"长期记忆"段落中的 L0 摘要列表
+- 如需详情，调用 get_memory_detail 工具查看 L1 概览或 L2 全文
+- 如需搜索更多记忆，调用 search_memory 工具`
 
 const PERSONALITY_SEED = `# 人格设定
 
