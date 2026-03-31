@@ -205,12 +205,29 @@ node scripts/debug-agent.mjs modules  # 查看 MM 注册的模块
 
 ### 端口分配
 
-| 服务 | 端口 | 说明 |
-|------|------|------|
+| 服务 | 默认端口 | 说明 |
+|------|----------|------|
 | Module Manager | 19000 | 核心进程管理 |
 | Admin (RPC) | 19001 | 模块间通信 |
 | Admin (Web) | 3000 | REST API + 静态文件 |
-| Agent | 19005 | 由 Module Manager 分配 |
+| Agent | 19002+ | 由 Module Manager 动态分配 |
 | LiteLLM | 4000 | LLM 代理 |
 | Vite Dev | 5173 | 前端 HMR（仅开发） |
+
+### 多实例部署
+
+同一台机器可运行多个 Crabot 实例，通过 `CRABOT_PORT_OFFSET` 环境变量隔离端口和数据：
+
+```bash
+# 实例 A（默认，无需配置）
+./dev.sh
+
+# 实例 B（所有端口 +100，数据目录自动变为 data-100/）
+CRABOT_PORT_OFFSET=100 ./dev.sh
+
+# 实例 C（也可显式指定数据目录）
+CRABOT_PORT_OFFSET=200 DATA_DIR=/data/tenant-c ./dev.sh
+```
+
+端口映射规则：所有默认端口 + offset（如 offset=100 时，MM=19100, Admin RPC=19101, Admin Web=3100, LiteLLM=4100）。每个实例占用 100 个端口范围（19002-19099 → 19102-19199）。
 

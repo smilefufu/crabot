@@ -44,9 +44,10 @@ PORT=19000 npm start
 
 环境变量：
 - `PORT` - 监听端口（默认 19000）
-- `PORT_RANGE_MIN` - 模块端口范围最小值（默认 19001）
-- `PORT_RANGE_MAX` - 模块端口范围最大值（默认 19999）
+- `PORT_RANGE_START` - 模块端口范围最小值（默认 19002）
+- `PORT_RANGE_END` - 模块端口范围最大值（默认 19099）
 - `HEALTH_CHECK_INTERVAL` - 健康检查间隔秒数（默认 30）
+- `CRABOT_PORT_OFFSET` - 端口偏移量，用于多实例部署（默认 0）。设置后所有端口自动偏移，如 `CRABOT_PORT_OFFSET=100` 时 MM 监听 19100
 
 ## 文档
 

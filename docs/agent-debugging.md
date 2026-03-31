@@ -213,5 +213,7 @@ curl -s -X POST http://localhost:19001/get_tasks \
 | Module Manager | 19000 | 核心进程管理 |
 | Admin (RPC) | 19001 | 模块间通信 |
 | Admin (Web) | 3000 | REST API + 静态文件 |
-| Agent | 19005 | 由 MM 分配 |
+| Agent | 19002+ | 由 MM 动态分配 |
 | LiteLLM | 4000 | LLM 代理 |
+
+> **多实例部署**：设置 `CRABOT_PORT_OFFSET` 时所有端口自动偏移（如 offset=100 → MM=19100）。
