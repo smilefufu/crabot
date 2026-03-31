@@ -331,6 +331,9 @@ class MemoryModule:
                 self.config.embedding.model = emb["model"]
             if emb.get("dimension") is not None:
                 self.config.embedding.dimension = emb["dimension"]
+            # 维度可能变了，让 VectorStore 下次操作时重新校验
+            if emb.get("model") is not None or emb.get("dimension") is not None:
+                self.vector_store._tables_initialized = False
             updated.append("embedding")
 
         logger.info("Config hot-reloaded: %s", updated)

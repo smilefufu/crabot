@@ -29,7 +29,16 @@ class VectorStore:
         self.db = lancedb.connect(db_path)
         self.short_term_table = None
         self.long_term_table = None
+        self._tables_initialized = False
+
+    async def ensure_tables(self):
+        """确保表已初始化（需要在维度已知后调用）"""
+        if self._tables_initialized:
+            return
+        if self.embedding_client.dimension is None:
+            await self.embedding_client.probe_dimension()
         self._init_tables()
+        self._tables_initialized = True
 
     def _init_tables(self):
         """初始化表结构"""
@@ -52,10 +61,7 @@ class VectorStore:
             pa.field("vector", pa.list_(pa.float32(), self.embedding_client.dimension)),
         ])
 
-        if "short_term_memory" not in self.db.table_names():
-            self.short_term_table = self.db.create_table("short_term_memory", schema=short_schema)
-        else:
-            self.short_term_table = self.db.open_table("short_term_memory")
+        self.short_term_table = self._open_or_create("short_term_memory", short_schema)
 
         # 长期记忆表
         long_schema = pa.schema([
@@ -78,13 +84,47 @@ class VectorStore:
             pa.field("vector", pa.list_(pa.float32(), self.embedding_client.dimension)),
         ])
 
-        if "long_term_memory" not in self.db.table_names():
-            self.long_term_table = self.db.create_table("long_term_memory", schema=long_schema)
-        else:
-            self.long_term_table = self.db.open_table("long_term_memory")
+        self.long_term_table = self._open_or_create("long_term_memory", long_schema)
+
+    def _open_or_create(self, table_name: str, schema: pa.Schema):
+        """打开已有表或创建新表，维度不匹配时自动重建"""
+        if table_name not in self.db.table_names():
+            return self.db.create_table(table_name, schema=schema)
+
+        table = self.db.open_table(table_name)
+        existing_dim = self._get_vector_dim(table.schema)
+        expected_dim = self.embedding_client.dimension
+        if existing_dim is not None and existing_dim != expected_dim:
+            row_count = table.count_rows()
+            if row_count == 0:
+                logger.warning(
+                    "Table '%s' vector dimension mismatch (existing=%d, expected=%d), "
+                    "recreating empty table", table_name, existing_dim, expected_dim,
+                )
+                self.db.drop_table(table_name)
+                return self.db.create_table(table_name, schema=schema)
+            else:
+                logger.error(
+                    "Table '%s' vector dimension mismatch (existing=%d, expected=%d) "
+                    "with %d rows. Cannot auto-migrate. Please re-embed or reset the table.",
+                    table_name, existing_dim, expected_dim, row_count,
+                )
+        return table
+
+    @staticmethod
+    def _get_vector_dim(schema: pa.Schema) -> Optional[int]:
+        """从 schema 中提取 vector 字段的固定维度"""
+        idx = schema.get_field_index("vector")
+        if idx < 0:
+            return None
+        field_type = schema.field(idx).type
+        if isinstance(field_type, pa.FixedSizeListType):
+            return field_type.list_size
+        return None
 
     async def add_short_term(self, entry: ShortTermMemoryEntry):
         """添加短期记忆"""
+        await self.ensure_tables()
         import json
         vector = await self.embedding_client.embed_single(entry.content)
         data = {
@@ -120,6 +160,7 @@ class VectorStore:
         sort_by: str = "event_time",
     ) -> List[ShortTermMemoryEntry]:
         """检索短期记忆"""
+        await self.ensure_tables()
         import json
         from ..types import MemorySource
 
@@ -217,6 +258,7 @@ class VectorStore:
 
     async def add_long_term(self, entry: LongTermMemoryEntry):
         """添加长期记忆"""
+        await self.ensure_tables()
         import json
         vector = await self.embedding_client.embed_single(entry.content)
         data = {
@@ -251,6 +293,7 @@ class VectorStore:
         importance_min: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """检索长期记忆，返回原始行数据"""
+        await self.ensure_tables()
         if self.long_term_table.count_rows() == 0:
             return []
 
@@ -306,6 +349,7 @@ class VectorStore:
 
     async def get_by_id(self, memory_id: str) -> Optional[Dict[str, Any]]:
         """根据 ID 获取记忆（先查短期，再查长期）"""
+        await self.ensure_tables()
         if self.short_term_table.count_rows() > 0:
             results = (
                 self.short_term_table.search()
@@ -330,6 +374,7 @@ class VectorStore:
 
     async def delete_by_id(self, memory_id: str) -> bool:
         """根据 ID 删除记忆"""
+        await self.ensure_tables()
         if self.short_term_table.count_rows() > 0:
             results = (
                 self.short_term_table.search()
@@ -356,10 +401,14 @@ class VectorStore:
 
     def get_short_term_count(self) -> int:
         """获取短期记忆数量"""
+        if self.short_term_table is None:
+            return 0
         return self.short_term_table.count_rows()
 
     def get_long_term_count(self) -> int:
         """获取长期记忆数量"""
+        if self.long_term_table is None:
+            return 0
         return self.long_term_table.count_rows()
 
     def close(self):

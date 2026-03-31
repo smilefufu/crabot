@@ -21,7 +21,7 @@ class EmbeddingConfig(BaseModel):
     api_key: str = ""  # 允许空值，但标记为未配置
     base_url: str = ""
     model: str = ""
-    dimension: int = 1536  # 默认维度
+    dimension: Optional[int] = None  # 自动探测，不硬编码默认值
 
 
 class StorageConfig(BaseModel):

@@ -18,12 +18,13 @@ class EmbeddingClient:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         model: Optional[str] = None,
-        dimension: int = 1536,
+        dimension: Optional[int] = None,
     ):
         self._api_key = api_key
         self._base_url = base_url
         self._model = model or "text-embedding-3-small"
         self.dimension = dimension
+        self._dimension_probed = dimension is not None
         self._client: Optional[AsyncOpenAI] = None
 
     def reconfigure(
@@ -42,8 +43,13 @@ class EmbeddingClient:
             self._model = model
         if dimension is not None:
             self.dimension = dimension
+            self._dimension_probed = True
+        elif model is not None:
+            # 模型变了但没给维度，需要重新探测
+            self._dimension_probed = False
+            self.dimension = None
         self._client = None
-        logger.info("EmbeddingClient reconfigured: model=%s base_url=%s dim=%d", self._model, self._base_url, self.dimension)
+        logger.info("EmbeddingClient reconfigured: model=%s base_url=%s dim=%s", self._model, self._base_url, self.dimension)
 
     def _ensure_client(self) -> AsyncOpenAI:
         if self._client is None:
@@ -52,6 +58,19 @@ class EmbeddingClient:
                 base_url=self._base_url,
             )
         return self._client
+
+    async def probe_dimension(self) -> int:
+        """探测 embedding 模型的实际维度"""
+        client = self._ensure_client()
+        resp = await client.embeddings.create(
+            model=self._model,
+            input="dimension probe",
+        )
+        dim = len(resp.data[0].embedding)
+        self.dimension = dim
+        self._dimension_probed = True
+        logger.info("Probed embedding dimension: %d (model=%s)", dim, self._model)
+        return dim
 
     async def embed(self, texts: List[str]) -> List[List[float]]:
         """批量生成 embedding 向量"""
@@ -64,7 +83,12 @@ class EmbeddingClient:
                 model=self._model,
                 input=texts,
             )
-            return [item.embedding for item in resp.data]
+            vectors = [item.embedding for item in resp.data]
+            if not self._dimension_probed and vectors:
+                self.dimension = len(vectors[0])
+                self._dimension_probed = True
+                logger.info("Auto-detected embedding dimension: %d (model=%s)", self.dimension, self._model)
+            return vectors
         except Exception as e:
             logger.error("Embedding failed: %s", e)
             raise
