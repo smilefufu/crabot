@@ -42,7 +42,6 @@ export interface EntityRef {
 
 export interface LongTermMemoryEntry {
   id: string
-  category: string
   abstract: string
   overview: string
   content: string
@@ -70,7 +69,6 @@ export interface MemoryStats {
   }
   long_term: {
     entry_count: number
-    by_category: Record<string, number>
     total_tokens: number
     latest_entry_at: string | null
     earliest_entry_at: string | null
