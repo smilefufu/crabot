@@ -199,7 +199,6 @@ export class ToolExecutor {
     const memoryPort = await this.deps.getMemoryPort()
     const result = await this.deps.rpcClient.call<
       {
-        category: string
         content: string
         source: { type: string }
         importance: number
@@ -212,7 +211,6 @@ export class ToolExecutor {
         memory: { id: string; abstract: string }
       }
     >(memoryPort, 'write_long_term', {
-      category: input.category as string,
       content: input.content as string,
       source: { type: 'conversation' },
       importance: (input.importance as number) ?? 5,
@@ -262,7 +260,6 @@ export class ToolExecutor {
         query: string
         detail: string
         limit: number
-        filter?: { category?: string }
         min_visibility: string
         accessible_scopes?: string[]
       },
@@ -271,7 +268,6 @@ export class ToolExecutor {
       query: input.query as string,
       detail: 'L0',
       limit,
-      ...(input.category ? { filter: { category: input.category as string } } : {}),
       min_visibility: visibility,
       ...(this.deps.memoryWriteScopes().length > 0
         ? { accessible_scopes: this.deps.memoryWriteScopes() }

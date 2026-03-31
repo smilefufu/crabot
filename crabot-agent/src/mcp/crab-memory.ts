@@ -51,8 +51,6 @@ export function createCrabMemoryServer(
         '将信息写入长期记忆。用户要求记住时必须使用；发现有价值的偏好、案例、模式等信息时也应主动使用。',
         {
           content: z.string().describe('要记住的完整信息，应包含足够上下文'),
-          category: z.enum(['profile', 'preference', 'entity', 'event', 'case', 'pattern'])
-            .describe('分类：profile=身份属性, preference=偏好习惯, entity=项目/组织知识, event=重要事件, case=问题+方案, pattern=规律/流程'),
           importance: z.number().min(1).max(10).optional()
             .describe('重要性 1-10，日常偏好 3-5，重要决策 6-8，关键信息 9-10'),
           tags: z.array(z.string()).optional()
@@ -65,7 +63,6 @@ export function createCrabMemoryServer(
               memoryPort,
               'write_long_term',
               {
-                category: args.category,
                 content: args.content,
                 source: {
                   type: 'conversation' as const,
@@ -114,8 +111,6 @@ export function createCrabMemoryServer(
           query: z.string().describe('自然语言搜索查询'),
           level: z.enum(['short_term', 'long_term']).default('long_term')
             .describe('搜索范围：short_term=近期事件流水账, long_term=认知知识库'),
-          category: z.enum(['profile', 'preference', 'entity', 'event', 'case', 'pattern']).optional()
-            .describe('按分类过滤（仅 long_term 有效）'),
           limit: z.number().min(1).max(20).default(5)
             .describe('返回数量上限'),
         },
@@ -138,7 +133,6 @@ export function createCrabMemoryServer(
               memoryPort, 'search_long_term',
               {
                 query: args.query, detail: 'L0', limit: args.limit,
-                ...(args.category ? { filter: { category: args.category } } : {}),
                 min_visibility: ctx.visibility,
                 ...(ctx.scopes.length > 0 ? { accessible_scopes: ctx.scopes } : {}),
               },

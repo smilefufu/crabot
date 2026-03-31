@@ -244,7 +244,6 @@ export interface LongTermL0Entry {
   abstract: string
   importance: number
   tags: string[]
-  category: string
   created_at: string
 }
 

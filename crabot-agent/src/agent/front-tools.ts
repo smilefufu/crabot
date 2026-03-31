@@ -182,11 +182,6 @@ export const STORE_MEMORY_TOOL: Tool = {
     type: 'object' as const,
     properties: {
       content: { type: 'string', description: '要记忆的完整内容，应包含足够上下文' },
-      category: {
-        type: 'string',
-        enum: ['profile', 'preference', 'entity', 'event', 'case', 'pattern'],
-        description: '分类：profile=人物画像, preference=偏好, entity=实体知识, event=关键事件, case=案例经验, pattern=规律模式',
-      },
       importance: {
         type: 'number',
         description: '重要性（1-10），日常偏好 3-5，重要决策 6-8，关键信息 9-10',
@@ -197,7 +192,7 @@ export const STORE_MEMORY_TOOL: Tool = {
         description: '分类标签',
       },
     },
-    required: ['content', 'category'],
+    required: ['content'],
   },
 }
 
@@ -212,11 +207,6 @@ export const SEARCH_MEMORY_TOOL: Tool = {
         type: 'string',
         enum: ['short_term', 'long_term'],
         description: '搜索范围：short_term=近期事件流水账, long_term=认知知识库（默认 long_term）',
-      },
-      category: {
-        type: 'string',
-        enum: ['profile', 'preference', 'entity', 'event', 'case', 'pattern'],
-        description: '按分类过滤（仅 long_term 有效）',
       },
       limit: {
         type: 'number',

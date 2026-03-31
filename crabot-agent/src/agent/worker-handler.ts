@@ -594,7 +594,8 @@ export class WorkerHandler {
           parts.push(`\n### 长期记忆（共 ${count} 条）`)
         }
         for (const mem of context.long_term_memories) {
-          parts.push(`- [${mem.id}] [${mem.category}] ${mem.abstract} (importance: ${mem.importance})`)
+          const tagStr = mem.tags.length > 0 ? ` [${mem.tags.slice(0, 3).join(', ')}]` : ''
+          parts.push(`- [${mem.id}]${tagStr} ${mem.abstract} (importance: ${mem.importance})`)
         }
         if (isOverflow) {
           parts.push('\n如需查找更多记忆，使用 search_memory 工具。')
