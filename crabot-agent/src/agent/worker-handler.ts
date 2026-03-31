@@ -59,6 +59,7 @@ function findClaudeCodePath(): string | undefined {
 
 export interface WorkerHandlerConfig {
   systemPrompt: string
+  longTermPreloadLimit?: number
 }
 
 export interface WorkerDeps {
@@ -106,6 +107,7 @@ const WORKER_ALLOWED_TOOLS = [
 export class WorkerHandler {
   private sdkEnv: SdkEnvConfig
   private systemPrompt: string
+  private longTermPreloadLimit: number
   private activeTasks: Map<TaskId, WorkerTaskState> = new Map()
   /** Active query handles — for streamInput() injection */
   private activeQueries: Map<TaskId, Query> = new Map()
@@ -122,6 +124,7 @@ export class WorkerHandler {
     this.mcpConfigFactory = mcpConfigFactory
     this.deps = deps
     this.systemPrompt = config.systemPrompt
+    this.longTermPreloadLimit = config.longTermPreloadLimit ?? 20
   }
 
   async executeTask(
@@ -572,15 +575,34 @@ export class WorkerHandler {
       parts.push(`- Channel ID: ${context.task_origin.channel_id}`)
       parts.push(`- Session ID: ${context.task_origin.session_id}`)
     }
-    if (context.short_term_memories.length > 0 || context.long_term_memories.length > 0) {
+    const hasShortTerm = context.short_term_memories.length > 0
+    const hasLongTerm = context.long_term_memories.length > 0
+    if (hasShortTerm || hasLongTerm) {
       parts.push('\n## 记忆系统')
-      if (context.short_term_memories.length > 0) {
-        parts.push(`- 短期记忆: ${context.short_term_memories.length} 条（近期事件流水账，记录跨所有 channel/session 的事件摘要，如"用户要求修改某项目"、"任务 X 已完成"等。不是聊天记录）`)
+
+      if (hasShortTerm) {
+        parts.push(`\n### 短期记忆（${context.short_term_memories.length} 条）`)
+        parts.push('近期事件流水账，记录跨所有 channel/session 的事件摘要。不是聊天记录。')
       }
-      if (context.long_term_memories.length > 0) {
-        parts.push(`- 长期记忆: ${context.long_term_memories.length} 条（反思提炼的认知知识，如用户偏好、实体信息、案例、行为模式等）`)
+
+      if (hasLongTerm) {
+        const count = context.long_term_memories.length
+        const isOverflow = count >= this.longTermPreloadLimit
+        if (isOverflow) {
+          parts.push(`\n### 长期记忆（相关度最高的 ${count} 条，可能还有更多）`)
+        } else {
+          parts.push(`\n### 长期记忆（共 ${count} 条）`)
+        }
+        for (const mem of context.long_term_memories) {
+          parts.push(`- [${mem.id}] [${mem.category}] ${mem.abstract} (importance: ${mem.importance})`)
+        }
+        if (isOverflow) {
+          parts.push('\n如需查找更多记忆，使用 search_memory 工具。')
+        }
+        parts.push('如需查看某条记忆详情，使用 get_memory_detail 工具。')
       }
-      parts.push('- 聊天记录: 使用 crab-messaging 的 get_history 工具查看特定 channel/session 的原始消息')
+
+      parts.push('\n- 聊天记录: 使用 crab-messaging 的 get_history 工具查看特定 channel/session 的原始消息')
       parts.push('- 写入记忆: 使用 crab-memory 的 store_memory 工具保存重要信息到长期记忆')
     }
     if (context.recent_messages && context.recent_messages.length > 0) {

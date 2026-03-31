@@ -244,6 +244,7 @@ export class UnifiedAgent extends ModuleBase {
         // MCP 服务器配置转换为 SDK 格式（stdio 类型直传）
         this.workerHandler = new WorkerHandler(workerSdkEnv, {
           systemPrompt: this.promptManager.assembleWorkerPrompt(adminPersonality || undefined),
+          longTermPreloadLimit: this.orchestrationConfig.worker_long_term_memory_limit,
         }, createMcpConfigs, {
           rpcClient: this.rpcClient,
           moduleId: this.config.moduleId,
@@ -1651,6 +1652,7 @@ ${skillsSection}
         const updatedWorkerSdkEnv = this.sdkEnvWorker
         this.workerHandler = new WorkerHandler(updatedWorkerSdkEnv, {
           systemPrompt: this.promptManager.assembleWorkerPrompt(adminPersonality || undefined),
+          longTermPreloadLimit: this.orchestrationConfig.worker_long_term_memory_limit,
         }, createMcpConfigs, {
           rpcClient: this.rpcClient,
           moduleId: this.config.moduleId,
