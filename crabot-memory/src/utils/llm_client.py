@@ -136,14 +136,13 @@ class LLMClient:
         self,
         new_content: str,
         existing_content: str,
-        category: str,
     ) -> Dict[str, Any]:
         """判断新记忆与已有记忆的去重策略"""
         messages = [
             {
                 "role": "system",
                 "content": (
-                    "Compare the new memory with the existing memory in the same category.\n"
+                    "Compare the new memory with the existing memory.\n"
                     "Decide the action:\n"
                     '- "CREATE": completely different, create new\n'
                     '- "UPDATE": same topic but new info, update existing\n'

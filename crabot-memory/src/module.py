@@ -245,7 +245,6 @@ class MemoryModule:
             entities_data = json.loads(row["entities_json"]) if row["entities_json"] else []
             memory = LongTermMemoryEntry(
                 id=row["id"],
-                category=row["category"],
                 abstract=row["abstract"],
                 overview=row["overview"],
                 content=row["content"],

@@ -60,7 +60,6 @@ class VectorStore:
         # 长期记忆表
         long_schema = pa.schema([
             pa.field("id", pa.string()),
-            pa.field("category", pa.string()),
             pa.field("abstract", pa.string()),
             pa.field("overview", pa.string()),
             pa.field("content", pa.string()),
@@ -222,7 +221,6 @@ class VectorStore:
         vector = await self.embedding_client.embed_single(entry.content)
         data = {
             "id": entry.id,
-            "category": entry.category,
             "abstract": entry.abstract,
             "overview": entry.overview,
             "content": entry.content,
@@ -246,7 +244,6 @@ class VectorStore:
         self,
         query: str,
         limit: int = 10,
-        category: Optional[str] = None,
         min_visibility: Visibility = "public",
         entity_id: Optional[str] = None,
         entity_type: Optional[str] = None,
@@ -262,8 +259,6 @@ class VectorStore:
 
         # 添加可索引的过滤条件
         filters = []
-        if category:
-            filters.append(f"category = '{category}'")
         vis_order = {"private": 3, "internal": 2, "public": 1}
         min_level = vis_order.get(min_visibility, 1)
         if min_level >= 2:

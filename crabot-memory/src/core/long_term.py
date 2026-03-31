@@ -55,7 +55,6 @@ class LongTermMemory:
 
         # 创建条目
         entry = LongTermMemoryEntry(
-            category=params.category,
             abstract=abstract,
             overview=overview,
             content=params.content,
@@ -88,7 +87,6 @@ class LongTermMemory:
         rows = await self.vector_store.search_long_term(
             query=params.query,
             limit=params.limit,
-            category=f.category if f else None,
             min_visibility=params.min_visibility or "public",
             entity_id=f.entity_id if f else None,
             entity_type=f.entity_type if f else None,
@@ -105,7 +103,6 @@ class LongTermMemory:
                     abstract=row["abstract"],
                     importance=row["importance"],
                     tags=list(row["tags"] or []),
-                    category=row["category"],
                     visibility=row["visibility"],
                     created_at=row["created_at"],
                 )
@@ -118,7 +115,6 @@ class LongTermMemory:
                     abstract=row["abstract"],
                     importance=row["importance"],
                     tags=list(row["tags"] or []),
-                    category=row["category"],
                     visibility=row["visibility"],
                     created_at=row["created_at"],
                     overview=row["overview"],
@@ -134,7 +130,6 @@ class LongTermMemory:
                 metadata_data = json.loads(row["metadata_json"]) if row["metadata_json"] else None
                 memory = LongTermMemoryEntry(
                     id=row["id"],
-                    category=row["category"],
                     abstract=row["abstract"],
                     overview=row["overview"],
                     content=row["content"],
@@ -164,7 +159,6 @@ class LongTermMemory:
         # TODO: 实现更详细的统计
         return {
             "entry_count": count,
-            "by_category": {},
             "total_tokens": count * 500,  # 粗略估算
             "latest_entry_at": None,
             "earliest_entry_at": None,

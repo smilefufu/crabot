@@ -19,7 +19,6 @@ SessionId = str
 FriendId = str
 
 MemoryLevel = Literal["short_term", "long_term"]
-MemoryCategory = Literal["profile", "preference", "entity", "event", "case", "pattern"] | str
 EntityType = Literal["friend", "project", "topic", "event", "location", "organization"]
 SearchDetail = Literal["L0", "L1", "L2"]
 Visibility = Literal["private", "internal", "public"]
@@ -80,7 +79,6 @@ class ShortTermMemoryEntry(BaseModel):
 class LongTermMemoryEntry(BaseModel):
     """长期记忆条目（完整）"""
     id: MemoryId = Field(default_factory=lambda: f"mem-l-{uuid.uuid4().hex[:12]}")
-    category: MemoryCategory
     abstract: str  # L0
     overview: str  # L1
     content: str   # L2
@@ -107,7 +105,6 @@ class LongTermL0Entry(BaseModel):
     abstract: str
     importance: int
     tags: List[str]
-    category: MemoryCategory
     visibility: Visibility
     created_at: str
 
@@ -158,7 +155,6 @@ class WriteShortTermResult(BaseModel):
 
 class WriteLongTermParams(BaseModel):
     """写入长期记忆参数"""
-    category: MemoryCategory
     content: str
     source: MemorySource
     entities: Optional[List[EntityRef]] = None
@@ -208,7 +204,6 @@ class SearchShortTermResult(BaseModel):
 
 class SearchLongTermFilter(BaseModel):
     """长期记忆过滤条件"""
-    category: Optional[MemoryCategory] = None
     tags: Optional[List[str]] = None
     importance_min: Optional[int] = None
     entity_type: Optional[EntityType] = None
@@ -293,7 +288,6 @@ class ShortTermStats(BaseModel):
 class LongTermStats(BaseModel):
     """长期记忆统计"""
     entry_count: int
-    by_category: Dict[str, int]
     total_tokens: int
     latest_entry_at: Optional[str]
     earliest_entry_at: Optional[str]
