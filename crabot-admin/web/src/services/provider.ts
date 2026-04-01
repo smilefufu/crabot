@@ -5,6 +5,7 @@
 import { api } from './api'
 import type {
   ModelProvider,
+  ModelInfo,
   PresetVendor,
   GlobalModelConfig,
   PaginatedResponse,
@@ -60,5 +61,24 @@ export const providerService = {
   ): Promise<GlobalModelConfig> {
     const response = await api.patch<{ config: GlobalModelConfig }>('/model-config/global', config)
     return response.config
+  },
+
+  async testProvider(
+    id: string,
+    modelId?: string
+  ): Promise<{ success: boolean; latency_ms: number; error?: string }> {
+    return api.post(`/model-providers/${id}/test`, modelId ? { model_id: modelId } : {})
+  },
+
+  async refreshModels(
+    id: string
+  ): Promise<{ models: ModelInfo[]; added: string[]; removed: string[] }> {
+    return api.post(`/model-providers/${id}/refresh-models`, {})
+  },
+
+  async getReferences(
+    id: string
+  ): Promise<{ references: string[] }> {
+    return api.get(`/model-providers/${id}/references`)
   },
 }
