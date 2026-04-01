@@ -2858,7 +2858,7 @@ export class AdminModule extends ModuleBase {
   }
 
   private async handleTestProviderApi(req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
-    const body = await this.readJsonBody<{ model_id?: string }>(req).catch(() => ({}))
+    const body = await this.readJsonBody<{ model_id?: string }>(req).catch(() => ({} as { model_id?: string }))
     const result = await this.modelProviderManager.testProviderModel(id, body.model_id)
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(result))

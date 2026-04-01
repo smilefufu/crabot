@@ -4,10 +4,7 @@ import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { ToastProvider } from './contexts/ToastContext'
 import { Login } from './pages/Login'
 import { Chat } from './pages/Chat'
-import { ProviderList } from './pages/Providers/ProviderList'
-import { ProviderCreate } from './pages/Providers/ProviderCreate'
-import { ProviderDetail } from './pages/Providers/ProviderDetail'
-import { ProviderEdit } from './pages/Providers/ProviderEdit'
+import { ProviderManagement } from './pages/Providers/ProviderManagement'
 import { ModuleList } from './pages/Modules/ModuleList'
 import { ModuleDetail } from './pages/Modules/ModuleDetail'
 import { AgentConfig } from './pages/Agents/AgentConfig'
@@ -44,31 +41,7 @@ const AppRoutes: React.FC = () => {
         path="/providers"
         element={
           <PrivateRoute>
-            <ProviderList />
-          </PrivateRoute>
-        }
-      />
-      <Route
-        path="/providers/new"
-        element={
-          <PrivateRoute>
-            <ProviderCreate />
-          </PrivateRoute>
-        }
-      />
-      <Route
-        path="/providers/:id"
-        element={
-          <PrivateRoute>
-            <ProviderDetail />
-          </PrivateRoute>
-        }
-      />
-      <Route
-        path="/providers/:id/edit"
-        element={
-          <PrivateRoute>
-            <ProviderEdit />
+            <ProviderManagement />
           </PrivateRoute>
         }
       />
