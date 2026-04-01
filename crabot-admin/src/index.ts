@@ -251,6 +251,9 @@ export class AdminModule extends ModuleBase {
         console.warn('[Admin] pushConfigToAgentModules after agent config change failed:', err.message)
       })
     })
+    this.modelProviderManager.setAgentConfigRefsProvider(
+      (providerId) => this.agentManager.getReferencesForProvider(providerId)
+    )
 
     // 注册 Admin 协议方法
       this.registerMethod('list_friends', this.handleListFriends.bind(this))
@@ -648,6 +651,27 @@ export class AdminModule extends ModuleBase {
 
       if (pathname === '/api/model-providers' && req.method === 'POST') {
         await this.handleCreateProviderApi(req, res)
+        return
+      }
+
+      // POST /api/model-providers/:id/test
+      if (pathname.match(/^\/api\/model-providers\/[^/]+\/test$/) && req.method === 'POST') {
+        const id = pathname.split('/')[3]
+        await this.handleTestProviderApi(req, res, id)
+        return
+      }
+
+      // POST /api/model-providers/:id/refresh-models
+      if (pathname.match(/^\/api\/model-providers\/[^/]+\/refresh-models$/) && req.method === 'POST') {
+        const id = pathname.split('/')[3]
+        await this.handleRefreshModelsApi(req, res, id)
+        return
+      }
+
+      // GET /api/model-providers/:id/references
+      if (pathname.match(/^\/api\/model-providers\/[^/]+\/references$/) && req.method === 'GET') {
+        const id = pathname.split('/')[3]
+        await this.handleGetProviderReferencesApi(req, res, id)
         return
       }
 
@@ -2830,6 +2854,25 @@ export class AdminModule extends ModuleBase {
     this.publishAdminEvent('admin.model_provider_created', { provider: result.provider })
 
     res.writeHead(201, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(result))
+  }
+
+  private async handleTestProviderApi(req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
+    const body = await this.readJsonBody<{ model_id?: string }>(req).catch(() => ({}))
+    const result = await this.modelProviderManager.testProviderModel(id, body.model_id)
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(result))
+  }
+
+  private async handleRefreshModelsApi(_req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
+    const result = await this.modelProviderManager.refreshModels(id)
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(result))
+  }
+
+  private async handleGetProviderReferencesApi(_req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
+    const result = this.modelProviderManager.getProviderReferences(id)
+    res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(result))
   }
 

@@ -64,6 +64,7 @@ export class ModelProviderManager {
   private usedModelsProvider: (() => Array<{ provider_id: string; model_id: string }>) | null = null
   /** 提供所有模块 env 配置中引用的 LiteLLM 模型名（用于按需加载） */
   private moduleEnvModelsProvider: (() => string[]) | null = null
+  private agentConfigRefsProvider: ((providerId: string) => string[]) | null = null
   private lastLiteLLMYaml: string = ''
 
   private readonly dataDir: string
@@ -178,6 +179,10 @@ export class ModelProviderManager {
   /** 注入回调：提供各模块 env 配置中引用的 LiteLLM 模型名列表 */
   setModuleEnvModelsProvider(fn: () => string[]): void {
     this.moduleEnvModelsProvider = fn
+  }
+
+  setAgentConfigRefsProvider(fn: (providerId: string) => string[]): void {
+    this.agentConfigRefsProvider = fn
   }
 
   requestSync(): void {
@@ -494,6 +499,129 @@ export class ModelProviderManager {
 
       return { success: false, error: errorMessage }
     }
+  }
+
+  async testProviderModel(id: string, modelId?: string): Promise<{ success: boolean; latency_ms: number; error?: string }> {
+    const provider = this.providers.get(id)
+    if (!provider) {
+      throw new Error('Provider not found')
+    }
+
+    let model: ModelInfo | undefined
+    if (modelId) {
+      model = provider.models.find(m => m.model_id === modelId)
+      if (!model) {
+        throw new Error(`Model "${modelId}" not found in provider "${provider.name}"`)
+      }
+    } else {
+      model = provider.models[0]
+      if (!model) {
+        return { success: false, latency_ms: 0, error: 'No models configured' }
+      }
+    }
+
+    const startTime = Date.now()
+    try {
+      let result: ValidationResult
+      if (model.type === 'embedding') {
+        result = await this.detectEmbeddingDimension(
+          provider.endpoint, provider.api_key, model.model_id, provider.format
+        )
+        if (result.success && result.dimension) {
+          model.dimension = result.dimension
+        }
+      } else {
+        result = await this.testLLMConnection(
+          provider.endpoint, provider.api_key, model.model_id, provider.format
+        )
+      }
+      const latency_ms = Date.now() - startTime
+
+      if (result.success && !modelId) {
+        provider.status = 'active'
+        provider.last_validated_at = generateTimestamp()
+        provider.validation_error = undefined
+        await this.saveProviders()
+      }
+
+      return { success: result.success, latency_ms, error: result.error }
+    } catch (error) {
+      const latency_ms = Date.now() - startTime
+      const errorMessage = error instanceof Error ? error.message : String(error)
+
+      if (!modelId) {
+        provider.status = 'error'
+        provider.validation_error = errorMessage
+        await this.saveProviders()
+      }
+
+      return { success: false, latency_ms, error: errorMessage }
+    }
+  }
+
+  async refreshModels(id: string): Promise<{ models: ModelInfo[]; added: string[]; removed: string[] }> {
+    const provider = this.providers.get(id)
+    if (!provider) {
+      throw new Error('Provider not found')
+    }
+    if (provider.type !== 'preset' || !provider.preset_vendor) {
+      throw new Error('Only preset providers support model refresh')
+    }
+
+    const vendor = findPresetVendor(provider.preset_vendor)
+    if (!vendor) {
+      throw new Error(`Unknown vendor: ${provider.preset_vendor}`)
+    }
+
+    const freshModels = await this.fetchVendorModels(
+      { ...vendor, endpoint: provider.endpoint },
+      provider.api_key
+    )
+
+    const oldIds = new Set(provider.models.map(m => m.model_id))
+    const newIds = new Set(freshModels.map(m => m.model_id))
+
+    const added = freshModels.filter(m => !oldIds.has(m.model_id)).map(m => m.model_id)
+    const removed = provider.models.filter(m => !newIds.has(m.model_id)).map(m => m.model_id)
+
+    const mergedModels = freshModels.map(fresh => {
+      const existing = provider.models.find(m => m.model_id === fresh.model_id)
+      return existing ? { ...fresh, dimension: existing.dimension } : fresh
+    })
+
+    provider.models = mergedModels
+    provider.updated_at = generateTimestamp()
+    this.providers.set(id, provider)
+    await this.saveProviders()
+    await this.syncToLiteLLMConfig()
+
+    return { models: mergedModels, added, removed }
+  }
+
+  getProviderReferences(id: string): { references: string[] } {
+    const refs: string[] = []
+
+    if (this.globalConfig.default_llm_provider_id === id) {
+      refs.push('全局默认 LLM 模型')
+    }
+    if (this.globalConfig.default_embedding_provider_id === id) {
+      refs.push('全局默认 Embedding 模型')
+    }
+
+    for (const [moduleId, config] of this.moduleConfigs.entries()) {
+      if (config.llm_provider_id === id) {
+        refs.push(`模块 "${moduleId}" 的 LLM 配置`)
+      }
+      if (config.embedding_provider_id === id) {
+        refs.push(`模块 "${moduleId}" 的 Embedding 配置`)
+      }
+    }
+
+    if (this.agentConfigRefsProvider) {
+      refs.push(...this.agentConfigRefsProvider(id))
+    }
+
+    return { references: refs }
   }
 
   private async detectEmbeddingDimension(
