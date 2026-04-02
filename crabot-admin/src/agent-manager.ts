@@ -416,6 +416,20 @@ export class AgentManager {
     return result
   }
 
+  getReferencesForProvider(providerId: string): string[] {
+    const refs: string[] = []
+    for (const [instanceId, config] of this.configs.entries()) {
+      for (const [roleKey, ref] of Object.entries(config.model_config ?? {})) {
+        if (ref.provider_id === providerId) {
+          const instance = this.instances.get(instanceId)
+          const name = instance?.name || instanceId
+          refs.push(`Agent "${name}" 的 ${roleKey} 角色`)
+        }
+      }
+    }
+    return refs
+  }
+
   /** 获取所有自动启动的实例（按 start_priority 排序） */
   getAutoStartInstances(): AgentInstance[] {
     return Array.from(this.instances.values())

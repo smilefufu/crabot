@@ -920,3 +920,247 @@ code, pre, .mono {
   margin-bottom: 0.875rem;
   opacity: 0.5;
 }
+
+/* ============================================================================
+   Drawer 抽屉组件
+   ============================================================================ */
+
+.drawer-container {
+  overflow: hidden;
+  transition: width 0.25s ease;
+  flex-shrink: 0;
+  border-left: 1px solid var(--border-color, #2a2a2e);
+}
+
+.drawer-container:not(.drawer-open) {
+  border-left: none;
+}
+
+.drawer-panel {
+  height: 100%;
+  overflow-y: auto;
+  padding: 1.5rem;
+  position: relative;
+  background: var(--surface-elevated, #111114);
+}
+
+.drawer-close {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 1.5rem;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}
+
+.drawer-close:hover {
+  color: var(--text-primary);
+}
+
+.drawer-content {
+  padding-top: 0.5rem;
+}
+
+/* ============================================================================
+   ConfirmModal 确认对话框
+   ============================================================================ */
+
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal-content {
+  background: var(--surface-elevated, #1a1a1e);
+  border: 1px solid var(--border-color, #3a3a3e);
+  border-radius: 10px;
+  padding: 1.5rem;
+  max-width: 400px;
+  width: 90%;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+}
+
+.modal-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 0 0 0.75rem 0;
+}
+
+.modal-message {
+  color: var(--text-secondary);
+  margin: 0 0 1rem 0;
+  line-height: 1.5;
+}
+
+.modal-warning {
+  background: #4a3a1a;
+  border: 1px solid #6a5a2a;
+  border-radius: 6px;
+  padding: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.modal-warning-title {
+  font-size: 0.85rem;
+  color: #d9a84a;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+.modal-warning-items {
+  margin: 0;
+  padding-left: 1.25rem;
+  font-size: 0.8rem;
+  color: #bba050;
+  line-height: 1.6;
+}
+
+.modal-warning-note {
+  font-size: 0.8rem;
+  color: #998040;
+  margin-top: 0.5rem;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+
+/* ============================================================================
+   Provider Management 页面
+   ============================================================================ */
+
+.provider-management {
+  display: flex;
+  height: calc(100vh - 60px);
+  overflow: hidden;
+}
+
+.provider-list-area {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1.5rem;
+}
+
+.provider-search-bar {
+  display: flex;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+  align-items: center;
+}
+
+.provider-search-bar .form-group {
+  margin-bottom: 0;
+}
+
+.provider-search-bar .form-group:first-child {
+  flex: 1;
+}
+
+.provider-card {
+  background: var(--surface-elevated, #1a1a1e);
+  border: 1px solid var(--border-color, #2a2a2e);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.provider-card:hover {
+  border-color: var(--text-secondary);
+}
+
+.provider-card.selected {
+  border-color: var(--primary, #d97c4a);
+  border-width: 2px;
+}
+
+.provider-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.provider-card-name {
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.provider-card-meta {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  margin-top: 0.25rem;
+}
+
+.provider-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.provider-test-result {
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.provider-test-result.success {
+  color: #6fbf6f;
+}
+
+.provider-test-result.error {
+  color: #bf6f6f;
+}
+
+.provider-test-result.pending {
+  color: #d9a84a;
+}
+
+/* 抽屉内模型表格 */
+
+.model-table {
+  border: 1px solid var(--border-color, #2a2a2e);
+  border-radius: 6px;
+  overflow: hidden;
+  font-size: 0.85rem;
+}
+
+.model-table-header,
+.model-table-row {
+  display: flex;
+  padding: 0.5rem 0.75rem;
+  align-items: center;
+}
+
+.model-table-header {
+  background: var(--surface-elevated, #1a1a1e);
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-color, #2a2a2e);
+}
+
+.model-table-row {
+  border-bottom: 1px solid var(--surface-elevated, #1a1a1e);
+}
+
+.model-table-row:last-child {
+  border-bottom: none;
+}
+
+.model-table-col-id { flex: 2; }
+.model-table-col-type { flex: 1; }
+.model-table-col-test { width: 80px; text-align: right; }
