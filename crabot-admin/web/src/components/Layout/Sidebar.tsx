@@ -23,7 +23,7 @@ const navSections: NavSection[] = [
   {
     label: '模型与 Agent',
     items: [
-      { to: '/providers', label: '模型供应商', match: '/providers' },
+      { to: '/providers', label: '模型配置', match: '/providers' },
       { to: '/agents/config', label: 'Agent 配置', match: '/agents' },
       { to: '/mcp-servers', label: 'MCP Servers', match: '/mcp-servers' },
       { to: '/skills', label: 'Skills', match: '/skills' },
@@ -42,12 +42,6 @@ const navSections: NavSection[] = [
     items: [
       { to: '/friends', label: '熟人管理', match: '/friends' },
       { to: '/memory', label: '记忆管理', match: '/memory' },
-    ],
-  },
-  {
-    label: '管理',
-    items: [
-      { to: '/settings', label: '全局设置', match: '/settings' },
     ],
   },
 ]

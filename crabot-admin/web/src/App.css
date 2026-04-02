@@ -1062,7 +1062,11 @@ code, pre, .mono {
   align-items: center;
 }
 
-.provider-search-bar .input {
+.provider-search-bar .form-group {
+  margin-bottom: 0;
+}
+
+.provider-search-bar .form-group:first-child {
   flex: 1;
 }
 

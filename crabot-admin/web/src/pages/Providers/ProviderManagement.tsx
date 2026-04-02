@@ -148,7 +148,7 @@ export const ProviderManagement: React.FC = () => {
     <MainLayout>
       <div className="provider-management">
         <div className="provider-list-area">
-          <h1 style={{ fontSize: '1.75rem', fontWeight: 700, marginBottom: '1.25rem' }}>模型供应商</h1>
+          <h1 style={{ fontSize: '1.75rem', fontWeight: 700, marginBottom: '1.25rem' }}>模型配置</h1>
 
           <div style={{ marginBottom: '1.25rem' }}>
             <GlobalModelConfigCard providers={providers} />
