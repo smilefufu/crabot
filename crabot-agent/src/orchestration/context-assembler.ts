@@ -32,6 +32,21 @@ interface AssembleParams {
   crab_display_name?: string
 }
 
+interface FetchShortTermMemoryParams {
+  friendId?: string
+  limit?: number
+  minVisibility?: 'private' | 'internal' | 'public'
+  accessibleScopes?: string[]
+  sessionType?: 'private' | 'group'
+}
+
+interface FetchLongTermMemoryParams {
+  friendId?: string
+  query?: string
+  limit?: number
+  sessionType?: 'private' | 'group'
+}
+
 export class ContextAssembler {
   constructor(
     private rpcClient: RpcClient,
@@ -50,19 +65,21 @@ export class ContextAssembler {
     friend: Friend | undefined,
     memoryPermissions: MemoryPermissions
   ): Promise<FrontAgentContext> {
+    const sessionType = params.session_type ?? 'private'
     const [recentMessages, shortTermMemories, activeTasks] = await Promise.all([
       this.fetchRecentMessages(
         params.session_id,
         params.channel_id,
         this.config.front_context_recent_messages_limit,
-        params.session_type ?? 'private'
+        sessionType
       ),
-      this.fetchShortTermMemory(
-        params.friend_id,
-        this.config.front_context_memory_limit,
-        memoryPermissions.read_min_visibility,
-        memoryPermissions.read_accessible_scopes
-      ),
+      this.fetchShortTermMemory({
+        friendId: params.friend_id,
+        limit: this.config.front_context_memory_limit,
+        minVisibility: memoryPermissions.read_min_visibility,
+        accessibleScopes: memoryPermissions.read_accessible_scopes,
+        sessionType,
+      }),
       this.fetchActiveTasks(),
     ])
 
@@ -91,25 +108,28 @@ export class ContextAssembler {
     params: AssembleParams,
     memoryPermissions: MemoryPermissions
   ): Promise<WorkerAgentContext> {
+    const workerSessionType = params.session_type ?? 'private'
     const [recentMessages, shortTermMemories, longTermMemories, adminEndpoint, memoryEndpoint, channelEndpoints] =
       await Promise.all([
         this.fetchRecentMessages(
           params.session_id,
           params.channel_id,
           this.config.worker_recent_messages_limit,
-          params.session_type ?? 'private'
+          workerSessionType
         ),
-        this.fetchShortTermMemory(
-          params.friend_id,
-          this.config.worker_short_term_memory_limit,
-          memoryPermissions.read_min_visibility,
-          memoryPermissions.read_accessible_scopes
-        ),
-        this.fetchLongTermMemory(
-          params.friend_id,
-          params.message,
-          this.config.worker_long_term_memory_limit
-        ),
+        this.fetchShortTermMemory({
+          friendId: params.friend_id,
+          limit: this.config.worker_short_term_memory_limit,
+          minVisibility: memoryPermissions.read_min_visibility,
+          accessibleScopes: memoryPermissions.read_accessible_scopes,
+          sessionType: workerSessionType,
+        }),
+        this.fetchLongTermMemory({
+          friendId: params.friend_id,
+          query: params.message,
+          limit: this.config.worker_long_term_memory_limit,
+          sessionType: workerSessionType,
+        }),
         this.resolveModule('admin'),
         this.resolveModule('memory'),
         this.resolveModules('channel'),
@@ -205,16 +225,21 @@ export class ContextAssembler {
     }
   }
 
-  private async fetchShortTermMemory(
-    friendId?: string,
-    limit?: number,
-    minVisibility: 'private' | 'internal' | 'public' = 'public',
-    accessibleScopes?: string[]
-  ): Promise<ShortTermMemoryEntry[]> {
-    if (!friendId) return []
+  private async fetchShortTermMemory(params: FetchShortTermMemoryParams): Promise<ShortTermMemoryEntry[]> {
+    const { friendId, limit, minVisibility = 'public', accessibleScopes, sessionType = 'private' } = params
+
+    // 私聊需要 friendId 做个人记忆过滤；群聊靠 scope 隔离，不需要 friendId
+    if (sessionType === 'private' && !friendId) return []
 
     try {
       const memoryPort = await this.getMemoryPort()
+
+      // 群聊：不按 friend_id 过滤，仅靠 accessible_scopes 隔离
+      // 私聊：按 friend_id 过滤，只看到个人相关的记忆
+      const filter = sessionType === 'group'
+        ? undefined
+        : { refs: { friend_id: friendId! } }
+
       const result = await this.rpcClient.call<
         {
           filter?: { refs?: Record<string, string> }
@@ -228,7 +253,7 @@ export class ContextAssembler {
         memoryPort,
         'search_short_term',
         {
-          filter: { refs: { friend_id: friendId } },
+          ...(filter && { filter }),
           sort_by: 'event_time',
           limit: limit ?? this.config.worker_short_term_memory_limit,
           min_visibility: minVisibility,
@@ -242,15 +267,21 @@ export class ContextAssembler {
     }
   }
 
-  private async fetchLongTermMemory(
-    friendId?: string,
-    query?: string,
-    limit?: number
-  ): Promise<LongTermL0Entry[]> {
-    if (!friendId || !query) return []
+  private async fetchLongTermMemory(params: FetchLongTermMemoryParams): Promise<LongTermL0Entry[]> {
+    const { friendId, query, limit, sessionType = 'private' } = params
+
+    if (!query) return []
+    if (sessionType === 'private' && !friendId) return []
 
     try {
       const memoryPort = await this.getMemoryPort()
+
+      // 私聊：按 friend 关联的实体过滤
+      // 群聊：不按 entity_id 过滤，靠 scope 隔离
+      const filter = sessionType === 'group'
+        ? {}
+        : { entity_id: friendId }
+
       const result = await this.rpcClient.call<
         {
           query: string
@@ -266,7 +297,7 @@ export class ContextAssembler {
           query,
           detail: 'L0',
           limit: limit ?? this.config.worker_long_term_memory_limit,
-          filter: { entity_id: friendId },
+          filter,
         },
         this.moduleId
       )

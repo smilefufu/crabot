@@ -110,7 +110,7 @@ export const ConfigStatusBanner: React.FC = () => {
         ))}
       </ul>
       <Link
-        to="/settings"
+        to="/providers"
         style={styles.link}
         onMouseEnter={e => { e.currentTarget.style.opacity = '0.85' }}
         onMouseLeave={e => { e.currentTarget.style.opacity = '1' }}

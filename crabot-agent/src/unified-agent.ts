@@ -77,6 +77,8 @@ export class UnifiedAgent extends ModuleBase {
   // 端口缓存
   private adminPort?: number
   private memoryPort?: number
+  // Session memory_scopes 缓存（TTL 60s，session config 变更不频繁）
+  private sessionScopesCache: Map<string, { scopes: string[]; expiresAt: number }> = new Map()
   private channelPorts: Map<ModuleId, number> = new Map()
   /** Crabot 群昵称缓存: channel_id → display_name */
   private crabDisplayNames: Map<ModuleId, string> = new Map()
@@ -438,7 +440,7 @@ ${skillsSection}
       }
 
       // 5. 派生记忆读写权限
-      const memPerms = this.deriveMemoryPermissions(friend, session.session_id)
+      const memPerms = await this.deriveMemoryPermissions(friend, session.session_id)
 
       // 6. 组装上下文（带 span 追踪耗时）
       const ctxSpan = this.traceStore.startSpan(trace.trace_id, {
@@ -605,7 +607,8 @@ ${skillsSection}
     })
 
     try {
-      const memPerms = this.deriveMemoryPermissions(lastEntry.friend, sessionId)
+      // 群聊权限固定为 internal + session memory_scopes，不随发送者身份变化
+      const memPerms = await this.buildSessionMemoryPermissions(sessionId)
 
       // 组装上下文
       const ctxSpan = this.traceStore.startSpan(trace.trace_id, {
@@ -733,12 +736,15 @@ ${skillsSection}
   }
 
   /**
-   * 从 Friend 权限派生记忆读写权限参数
+   * 从 Friend 权限和 Session 配置派生记忆读写权限参数
    *
    * - master 权限：写入 private，读取不过滤（可见所有私有记忆）
-   * - normal 权限：写入 internal + session scope，读取限当前 session scope
+   * - normal 权限：写入 internal + session memory_scopes，读取限 session memory_scopes
+   *
+   * 优先从 Admin.get_session_config 读取 session.memory_scopes，
+   * fallback 到 [sessionId]（兼容未配置的场景）。
    */
-  private deriveMemoryPermissions(friend: Friend, sessionId: string): MemoryPermissions {
+  private async deriveMemoryPermissions(friend: Friend, sessionId: string): Promise<MemoryPermissions> {
     if (friend.permission === 'master') {
       return {
         write_visibility: 'private',
@@ -748,11 +754,46 @@ ${skillsSection}
       }
     }
 
+    return this.buildSessionMemoryPermissions(sessionId)
+  }
+
+  /**
+   * 从 Admin 获取 Session 的 memory_scopes（带 TTL 缓存），fallback 到 [sessionId]
+   */
+  private async getSessionMemoryScopes(sessionId: string): Promise<string[]> {
+    const cached = this.sessionScopesCache.get(sessionId)
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.scopes
+    }
+
+    let scopes: string[] = [sessionId]
+    try {
+      const adminPort = await this.getAdminPort()
+      const result = await this.rpcClient.call<
+        { session_id: string },
+        { config: { memory_scopes?: string[] } | null }
+      >(adminPort, 'get_session_config', { session_id: sessionId }, this.config.moduleId)
+      if (result.config?.memory_scopes && result.config.memory_scopes.length > 0) {
+        scopes = result.config.memory_scopes
+      }
+    } catch {
+      // Admin 不可达或 session 未配置，使用默认值
+    }
+
+    this.sessionScopesCache.set(sessionId, { scopes, expiresAt: Date.now() + 60_000 })
+    return scopes
+  }
+
+  /**
+   * 构建非 master 的 session 级 MemoryPermissions（群聊 / channel 内部调用共用）
+   */
+  private async buildSessionMemoryPermissions(sessionId: string): Promise<MemoryPermissions> {
+    const memoryScopes = await this.getSessionMemoryScopes(sessionId)
     return {
       write_visibility: 'internal',
-      write_scopes: [sessionId],
+      write_scopes: memoryScopes,
       read_min_visibility: 'internal',
-      read_accessible_scopes: [sessionId],
+      read_accessible_scopes: memoryScopes,
     }
   }
 
@@ -1052,13 +1093,8 @@ ${skillsSection}
           return { decision_types: [] }
         }
 
-        // 组装上下文（channel 内部调用无 permResult，默认使用 normal friend 权限）
-        const channelMemPerms: MemoryPermissions = {
-          write_visibility: 'internal',
-          write_scopes: [sessionId],
-          read_min_visibility: 'internal',
-          read_accessible_scopes: [sessionId],
-        }
+        // 组装上下文（channel 内部调用无 permResult，从 session 配置读取 memory_scopes）
+        const channelMemPerms = await this.buildSessionMemoryPermissions(sessionId)
         const context = await this.contextAssembler.assembleFrontContext(
           {
             channel_id: message.session.channel_id,

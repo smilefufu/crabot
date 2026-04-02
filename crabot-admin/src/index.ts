@@ -91,6 +91,7 @@ import {
   type UpsertPendingMessageParams,
   type UpsertPendingMessageResult,
   type ChannelMessageRef,
+  type SessionPermissionConfig,
 } from './types.js'
 import { ModelProviderManager } from './model-provider-manager.js'
 import { AgentManager } from './agent-manager.js'
@@ -177,6 +178,7 @@ export class AdminModule extends ModuleBase {
   private channelIdentityIndex: Map<string, FriendId> = new Map() // 快速查找
   private tasks: Map<TaskId, Task> = new Map()
   private schedules: Map<ScheduleId, Schedule> = new Map()
+  private sessionConfigs: Map<string, SessionPermissionConfig> = new Map()
 
   // 模型供应商管理器
   private modelProviderManager: ModelProviderManager
@@ -212,6 +214,7 @@ export class AdminModule extends ModuleBase {
   private friendsFilePath: string = ''
   private templatesFilePath: string = ''
   private pendingMessagesFilePath: string = ''
+  private sessionConfigsFilePath: string = ''
 
   constructor(
     moduleConfig: ModuleConfig,
@@ -343,6 +346,11 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('stop_module', this.handleStopModuleAdmin.bind(this))
     this.registerMethod('restart_module', this.handleRestartModuleAdmin.bind(this))
 
+    // Session 配置管理
+    this.registerMethod('get_session_config', this.handleGetSessionConfig.bind(this))
+    this.registerMethod('update_session_config', this.handleUpdateSessionConfig.bind(this))
+    this.registerMethod('delete_session_config', this.handleDeleteSessionConfig.bind(this))
+
     // Chat 管理
     this.registerMethod('chat_callback', this.handleChatCallback.bind(this))
     this.registerMethod('get_chat_history', this.handleGetChatHistory.bind(this))
@@ -373,6 +381,7 @@ export class AdminModule extends ModuleBase {
     this.friendsFilePath = path.join(this.adminConfig.data_dir, 'friends.json')
     this.templatesFilePath = path.join(this.adminConfig.data_dir, 'templates.json')
     this.pendingMessagesFilePath = path.join(this.adminConfig.data_dir, 'pending-messages.json')
+    this.sessionConfigsFilePath = path.join(this.adminConfig.data_dir, 'session-configs.json')
 
     // 加载数据
     await this.loadData()
@@ -1012,6 +1021,25 @@ export class AdminModule extends ModuleBase {
       if (pathname.startsWith('/api/channel-instances/') && req.method === 'DELETE') {
         const id = decodeURIComponent(pathname.split('/')[3])
         await this.handleDeleteChannelInstanceApi(req, res, id)
+        return
+      }
+
+      // Session 配置路由
+      if (pathname.match(/^\/api\/sessions\/[^/]+\/config$/) && req.method === 'GET') {
+        const sessionId = decodeURIComponent(pathname.split('/')[3])
+        await this.handleGetSessionConfigApi(res, sessionId)
+        return
+      }
+
+      if (pathname.match(/^\/api\/sessions\/[^/]+\/config$/) && req.method === 'PUT') {
+        const sessionId = decodeURIComponent(pathname.split('/')[3])
+        await this.handleUpdateSessionConfigApi(req, res, sessionId)
+        return
+      }
+
+      if (pathname.match(/^\/api\/sessions\/[^/]+\/config$/) && req.method === 'DELETE') {
+        const sessionId = decodeURIComponent(pathname.split('/')[3])
+        await this.handleDeleteSessionConfigApi(res, sessionId)
         return
       }
 
@@ -2085,6 +2113,17 @@ export class AdminModule extends ModuleBase {
     } catch {
       console.log('[Admin] No existing pending messages data')
     }
+
+    try {
+      const sessionConfigsData = await fs.readFile(this.sessionConfigsFilePath, 'utf-8')
+      const entries = JSON.parse(sessionConfigsData) as Array<{ session_id: string; config: SessionPermissionConfig }>
+      for (const entry of entries) {
+        this.sessionConfigs.set(entry.session_id, entry.config)
+      }
+      console.log(`[Admin] Loaded ${this.sessionConfigs.size} session configs`)
+    } catch {
+      console.log('[Admin] No existing session configs data')
+    }
   }
 
   /**
@@ -2105,6 +2144,11 @@ export class AdminModule extends ModuleBase {
 
     const pendingArray = Array.from(this.pendingMessages.values())
     await this.atomicWriteFile(this.pendingMessagesFilePath, JSON.stringify(pendingArray, null, 2))
+
+    const sessionConfigsArray = Array.from(this.sessionConfigs.entries()).map(
+      ([session_id, config]) => ({ session_id, config })
+    )
+    await this.atomicWriteFile(this.sessionConfigsFilePath, JSON.stringify(sessionConfigsArray, null, 2))
   }
 
   private async initSystemTemplates(): Promise<void> {
@@ -4275,6 +4319,54 @@ export class AdminModule extends ModuleBase {
     await new Promise(resolve => setTimeout(resolve, 2000))
     // 再启动
     return this.handleStartModuleAdmin({ module_id: params.module_id })
+  }
+
+  // ============================================================================
+  // Session 配置 RPC 方法
+  // ============================================================================
+
+  private async handleGetSessionConfig(params: { session_id: string }): Promise<{ config: SessionPermissionConfig | null }> {
+    const config = this.sessionConfigs.get(params.session_id) ?? null
+    return { config }
+  }
+
+  private async handleUpdateSessionConfig(params: { session_id: string; config: SessionPermissionConfig }): Promise<{ config: SessionPermissionConfig }> {
+    const config: SessionPermissionConfig = {
+      ...params.config,
+      updated_at: generateTimestamp(),
+    }
+    this.sessionConfigs.set(params.session_id, config)
+    await this.saveData()
+    return { config }
+  }
+
+  private async handleDeleteSessionConfig(params: { session_id: string }): Promise<{ deleted: boolean }> {
+    const existed = this.sessionConfigs.delete(params.session_id)
+    if (existed) {
+      await this.saveData()
+    }
+    return { deleted: existed }
+  }
+
+  // Session 配置 REST API
+
+  private async handleGetSessionConfigApi(res: ServerResponse, sessionId: string): Promise<void> {
+    const result = await this.handleGetSessionConfig({ session_id: sessionId })
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(result))
+  }
+
+  private async handleUpdateSessionConfigApi(req: IncomingMessage, res: ServerResponse, sessionId: string): Promise<void> {
+    const body = await this.readJsonBody<{ config: SessionPermissionConfig }>(req)
+    const result = await this.handleUpdateSessionConfig({ session_id: sessionId, config: body.config })
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(result))
+  }
+
+  private async handleDeleteSessionConfigApi(res: ServerResponse, sessionId: string): Promise<void> {
+    const result = await this.handleDeleteSessionConfig({ session_id: sessionId })
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(result))
   }
 
   // ============================================================================
