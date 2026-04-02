@@ -13,7 +13,7 @@ const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data')
 async function main(): Promise<void> {
   // Admin 模块配置
   // 注意：port 应该由 Module Manager 分配，这里使用环境变量
-  const port = parseInt(process.env.CRABOT_ADMIN_PORT ?? '19001', 10)
+  const port = parseInt(process.env.Crabot_PORT ?? process.env.CRABOT_ADMIN_PORT ?? '19001', 10)
   const webPort = parseInt(process.env.CRABOT_ADMIN_WEB_PORT ?? '3000', 10)
 
   const admin = new AdminModule(
