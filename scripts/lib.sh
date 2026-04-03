@@ -274,7 +274,7 @@ build_all_modules() {
   log_info "构建 TypeScript 模块..."
 
   local fail=0
-  for mod in crabot-core crabot-admin crabot-agent crabot-channel-host; do
+  for mod in crabot-core crabot-admin crabot-agent crabot-channel-host crabot-channel-wechat; do
     if [ ! -d "$CRABOT_HOME/$mod" ]; then
       continue
     fi
