@@ -8,17 +8,20 @@
 
 **计划文档**：`crabot-agent/docs/plans/2026-04-03-engine-v2.md`
 
-**Phase 1 进度**（最小可用引擎）：
-- [ ] Task 1: Engine Types
-- [ ] Task 2: LLM Adapter (Anthropic)
-- [ ] Task 3: Stream Processor
-- [ ] Task 4: Tool Framework
-- [ ] Task 5: Tool Orchestration
-- [ ] Task 6: Context Manager
-- [ ] Task 7: Core Query Loop
-- [ ] Task 8: MCP Server Migration
-- [ ] Task 9: Worker Handler Rewrite
-- [ ] Task 10: Remove SDK Dependency
+**Phase 1 进度**（最小可用引擎）— **已完成 2026-04-03**：
+- [x] Task 1: Engine Types (11 tests)
+- [x] Task 2: LLM Adapter (12 tests)
+- [x] Task 3: Stream Processor (13 tests)
+- [x] Task 4: Tool Framework (10 tests)
+- [x] Task 5: Tool Orchestration (5 tests)
+- [x] Task 6: Context Manager (11 tests)
+- [x] Task 7: Core Query Loop (10 tests)
+- [x] Task 8: MCP Server Migration
+- [x] Task 9: Worker Handler Rewrite (21 tests)
+- [x] Task 10: Remove SDK Dependency
+
+**总计：93 个测试通过，@anthropic-ai/claude-agent-sdk 已移除**
+**分支：feat/engine-v2**
 
 ---
 
