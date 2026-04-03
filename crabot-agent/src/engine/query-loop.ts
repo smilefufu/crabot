@@ -136,7 +136,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     const batches = partitionToolCalls(processed.toolUseBlocks, options.tools)
     const toolResults = await executeToolBatches(batches, options.tools, {
       abortSignal,
-    })
+    }, options.permissionConfig)
 
     // Fire onTurn callback
     if (options.onTurn) {

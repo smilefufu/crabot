@@ -63,6 +63,27 @@ export interface EngineToolResultMessage {
 
 export type EngineMessage = EngineUserMessage | EngineAssistantMessage | EngineToolResultMessage
 
+// --- Tool Permission ---
+
+export type ToolPermissionLevel = 'safe' | 'normal' | 'dangerous'
+
+export type PermissionMode =
+  | 'bypass'       // All tools allowed (for trusted contexts like admin chat)
+  | 'allowList'    // Only listed tools allowed
+  | 'denyList'     // All except listed tools allowed
+
+export interface ToolPermissionConfig {
+  readonly mode: PermissionMode
+  /** Tool names for allowList/denyList */
+  readonly toolNames?: ReadonlyArray<string>
+  /** Optional callback for dynamic permission decisions */
+  readonly checkPermission?: (toolName: string, input: Record<string, unknown>) => Promise<PermissionDecision>
+}
+
+export type PermissionDecision =
+  | { readonly allowed: true }
+  | { readonly allowed: false; readonly reason: string }
+
 // --- Tool Definition ---
 
 export interface ToolCallContext {
@@ -80,6 +101,7 @@ export interface ToolDefinition {
   readonly description: string
   readonly inputSchema: Record<string, unknown>
   readonly isReadOnly: boolean
+  readonly permissionLevel?: ToolPermissionLevel
   readonly call: (input: Record<string, unknown>, context: ToolCallContext) => Promise<ToolCallResult>
 }
 
@@ -112,6 +134,7 @@ export interface EngineOptions {
   readonly abortSignal?: AbortSignal
   readonly onTurn?: (event: EngineTurnEvent) => void
   readonly onTextDelta?: (text: string) => void
+  readonly permissionConfig?: ToolPermissionConfig
   readonly humanMessageQueue?: {
     readonly dequeue: () => Promise<string | ContentBlock[]>
   }

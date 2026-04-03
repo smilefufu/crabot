@@ -1,4 +1,4 @@
-import type { ToolDefinition, ToolUseBlock, ToolCallContext, ToolCallResult } from './types'
+import type { ToolDefinition, ToolUseBlock, ToolCallContext, ToolCallResult, ToolPermissionLevel } from './types'
 
 // --- Define Tool ---
 
@@ -7,6 +7,7 @@ export interface DefineToolParams {
   readonly description: string
   readonly inputSchema: Record<string, unknown>
   readonly isReadOnly?: boolean
+  readonly permissionLevel?: ToolPermissionLevel
   readonly call: (input: Record<string, unknown>, context: ToolCallContext) => Promise<ToolCallResult>
 }
 
@@ -16,6 +17,7 @@ export function defineTool(params: DefineToolParams): ToolDefinition {
     description: params.description,
     inputSchema: params.inputSchema,
     isReadOnly: params.isReadOnly ?? false,
+    ...(params.permissionLevel !== undefined ? { permissionLevel: params.permissionLevel } : {}),
     call: params.call,
   }
 }

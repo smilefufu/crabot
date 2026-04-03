@@ -10,6 +10,10 @@ export type {
   ToolDefinition,
   ToolCallContext,
   ToolCallResult,
+  ToolPermissionLevel,
+  PermissionMode,
+  ToolPermissionConfig,
+  PermissionDecision,
   EngineMessage,
   EngineUserMessage,
   EngineAssistantMessage,
@@ -32,6 +36,9 @@ export { defineTool, findTool, partitionToolCalls } from './tool-framework'
 
 // --- Tool Orchestration ---
 export { executeToolBatches } from './tool-orchestration'
+
+// --- Permission Checker ---
+export { checkToolPermission } from './permission-checker'
 
 // --- Stream Processor ---
 export { StreamProcessor } from './stream-processor'
