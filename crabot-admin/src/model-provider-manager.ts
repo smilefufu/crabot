@@ -783,7 +783,7 @@ export class ModelProviderManager {
 
   private async fetchVendorModels(vendor: PresetVendor, apiKey: string): Promise<ModelInfo[]> {
     if (!vendor.models_api) {
-      return []
+      return vendor.default_models ? [...vendor.default_models] : []
     }
 
     try {

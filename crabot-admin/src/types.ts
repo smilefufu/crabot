@@ -797,6 +797,8 @@ export interface PresetVendor {
   api_key_help_url?: string
   /** 是否允许用户自定义 endpoint（如自托管的 Ollama） */
   allows_custom_endpoint?: boolean
+  /** 不支持 /models API 的厂商，提供静态默认模型列表 */
+  default_models?: ModelInfo[]
 }
 
 /**
