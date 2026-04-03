@@ -1,0 +1,292 @@
+import { describe, it, expect, vi } from 'vitest'
+import { runEngine, type RunEngineParams } from '../../src/engine/query-loop'
+import { defineTool } from '../../src/engine/tool-framework'
+import type { LLMAdapter } from '../../src/engine/llm-adapter'
+import type { StreamChunk, ToolDefinition, EngineOptions } from '../../src/engine/types'
+
+// --- Test Helpers ---
+
+function mockAdapter(responses: ReadonlyArray<ReadonlyArray<StreamChunk>>): LLMAdapter {
+  let callIndex = 0
+  return {
+    async *stream() {
+      const chunks = responses[callIndex] ?? []
+      callIndex++
+      for (const chunk of chunks) {
+        yield chunk
+      }
+    },
+    updateConfig() {},
+  }
+}
+
+function textResponse(text: string): ReadonlyArray<StreamChunk> {
+  return [
+    { type: 'message_start', messageId: 'msg-1' },
+    { type: 'text_delta', text },
+    { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 5 } },
+  ]
+}
+
+function toolUseResponse(
+  toolId: string,
+  toolName: string,
+  input: Record<string, unknown>
+): ReadonlyArray<StreamChunk> {
+  return [
+    { type: 'message_start', messageId: 'msg-1' },
+    { type: 'tool_use_start', id: toolId, name: toolName },
+    { type: 'tool_use_delta', id: toolId, inputJson: JSON.stringify(input) },
+    { type: 'tool_use_end', id: toolId },
+    { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 20, outputTokens: 10 } },
+  ]
+}
+
+function baseOptions(overrides: Partial<EngineOptions> = {}): EngineOptions {
+  return {
+    systemPrompt: 'You are a test assistant.',
+    tools: [],
+    model: 'test-model',
+    maxTurns: 10,
+    ...overrides,
+  }
+}
+
+// --- Tests ---
+
+describe('runEngine', () => {
+  it('returns completed with text for a simple text response', async () => {
+    const adapter = mockAdapter([textResponse('Hello!')])
+    const result = await runEngine({
+      prompt: 'Hi',
+      adapter,
+      options: baseOptions(),
+    })
+
+    expect(result.outcome).toBe('completed')
+    expect(result.finalText).toBe('Hello!')
+    expect(result.totalTurns).toBe(1)
+    expect(result.usage.inputTokens).toBe(10)
+    expect(result.usage.outputTokens).toBe(5)
+  })
+
+  it('handles tool use then final text (2 turns)', async () => {
+    const readTool = defineTool({
+      name: 'Read',
+      description: 'Read a file',
+      inputSchema: { type: 'object', properties: { path: { type: 'string' } } },
+      isReadOnly: true,
+      call: async (input) => ({
+        output: `content of ${String(input.path)}`,
+        isError: false,
+      }),
+    })
+
+    const adapter = mockAdapter([
+      toolUseResponse('tu-1', 'Read', { path: '/tmp/test.txt' }),
+      textResponse('The file contains: content of /tmp/test.txt'),
+    ])
+
+    const result = await runEngine({
+      prompt: 'Read the file',
+      adapter,
+      options: baseOptions({ tools: [readTool] }),
+    })
+
+    expect(result.outcome).toBe('completed')
+    expect(result.finalText).toBe('The file contains: content of /tmp/test.txt')
+    expect(result.totalTurns).toBe(2)
+    expect(result.usage.inputTokens).toBe(30) // 20 + 10
+    expect(result.usage.outputTokens).toBe(15) // 10 + 5
+  })
+
+  it('returns max_turns when loop is exhausted', async () => {
+    const dummyTool = defineTool({
+      name: 'dummy',
+      description: 'Dummy tool',
+      inputSchema: {},
+      isReadOnly: false,
+      call: async () => ({ output: 'ok', isError: false }),
+    })
+
+    // Always returns tool_use, never end_turn
+    const adapter = mockAdapter([
+      toolUseResponse('tu-1', 'dummy', {}),
+      toolUseResponse('tu-2', 'dummy', {}),
+      toolUseResponse('tu-3', 'dummy', {}),
+    ])
+
+    const result = await runEngine({
+      prompt: 'Loop forever',
+      adapter,
+      options: baseOptions({ tools: [dummyTool], maxTurns: 3 }),
+    })
+
+    expect(result.outcome).toBe('max_turns')
+    expect(result.totalTurns).toBe(3)
+  })
+
+  it('calls onTurn callback with correct turn data', async () => {
+    const readTool = defineTool({
+      name: 'Read',
+      description: 'Read a file',
+      inputSchema: {},
+      isReadOnly: true,
+      call: async () => ({ output: 'file content', isError: false }),
+    })
+
+    const onTurn = vi.fn()
+
+    const adapter = mockAdapter([
+      toolUseResponse('tu-1', 'Read', { path: '/test' }),
+      textResponse('Done'),
+    ])
+
+    await runEngine({
+      prompt: 'Read it',
+      adapter,
+      options: baseOptions({ tools: [readTool], onTurn }),
+    })
+
+    // onTurn is called for tool-use turns (turn 1), not for the final text turn
+    expect(onTurn).toHaveBeenCalledTimes(1)
+    expect(onTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        turnNumber: 1,
+        stopReason: 'tool_use',
+        toolCalls: expect.arrayContaining([
+          expect.objectContaining({ id: 'tu-1', name: 'Read' }),
+        ]),
+      })
+    )
+  })
+
+  it('calls onTextDelta callback for streaming text', async () => {
+    const onTextDelta = vi.fn()
+
+    const adapter = mockAdapter([
+      [
+        { type: 'message_start', messageId: 'msg-1' } as StreamChunk,
+        { type: 'text_delta', text: 'Hel' } as StreamChunk,
+        { type: 'text_delta', text: 'lo!' } as StreamChunk,
+        { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 5, outputTokens: 3 } } as StreamChunk,
+      ],
+    ])
+
+    await runEngine({
+      prompt: 'Hi',
+      adapter,
+      options: baseOptions({ onTextDelta }),
+    })
+
+    expect(onTextDelta).toHaveBeenCalledTimes(2)
+    expect(onTextDelta).toHaveBeenCalledWith('Hel')
+    expect(onTextDelta).toHaveBeenCalledWith('lo!')
+  })
+
+  it('returns aborted when abort signal fires', async () => {
+    const controller = new AbortController()
+
+    const adapter: LLMAdapter = {
+      async *stream() {
+        yield { type: 'message_start', messageId: 'msg-1' } as StreamChunk
+        yield { type: 'text_delta', text: 'partial' } as StreamChunk
+        // Abort during streaming
+        controller.abort()
+        yield { type: 'text_delta', text: ' more' } as StreamChunk
+        yield { type: 'message_end', stopReason: 'end_turn' } as StreamChunk
+      },
+      updateConfig() {},
+    }
+
+    const result = await runEngine({
+      prompt: 'Hi',
+      adapter,
+      options: baseOptions({ abortSignal: controller.signal }),
+    })
+
+    expect(result.outcome).toBe('aborted')
+  })
+
+  it('returns aborted when signal is already aborted before stream starts', async () => {
+    const controller = new AbortController()
+    controller.abort()
+
+    const adapter = mockAdapter([textResponse('Hello')])
+
+    const result = await runEngine({
+      prompt: 'Hi',
+      adapter,
+      options: baseOptions({ abortSignal: controller.signal }),
+    })
+
+    expect(result.outcome).toBe('aborted')
+  })
+
+  it('returns failed when adapter throws an error', async () => {
+    const adapter: LLMAdapter = {
+      async *stream() {
+        throw new Error('Network timeout')
+      },
+      updateConfig() {},
+    }
+
+    const result = await runEngine({
+      prompt: 'Hi',
+      adapter,
+      options: baseOptions(),
+    })
+
+    expect(result.outcome).toBe('failed')
+    expect(result.error).toContain('Network timeout')
+  })
+
+  it('returns failed when adapter yields error chunk', async () => {
+    const adapter = mockAdapter([
+      [
+        { type: 'message_start', messageId: 'msg-1' } as StreamChunk,
+        { type: 'error', error: 'Rate limited' } as StreamChunk,
+      ],
+    ])
+
+    const result = await runEngine({
+      prompt: 'Hi',
+      adapter,
+      options: baseOptions(),
+    })
+
+    expect(result.outcome).toBe('failed')
+    expect(result.error).toContain('Rate limited')
+  })
+
+  it('defaults maxTurns to 10 when not specified', async () => {
+    const dummyTool = defineTool({
+      name: 'dummy',
+      description: 'Dummy',
+      inputSchema: {},
+      isReadOnly: false,
+      call: async () => ({ output: 'ok', isError: false }),
+    })
+
+    // Create 11 tool-use responses (one more than default max)
+    const responses = Array.from({ length: 11 }, (_, i) =>
+      toolUseResponse(`tu-${i}`, 'dummy', {})
+    )
+
+    const adapter = mockAdapter(responses)
+
+    const result = await runEngine({
+      prompt: 'Loop',
+      adapter,
+      options: {
+        systemPrompt: 'test',
+        tools: [dummyTool],
+        model: 'test-model',
+        // maxTurns intentionally omitted
+      },
+    })
+
+    expect(result.outcome).toBe('max_turns')
+    expect(result.totalTurns).toBe(10)
+  })
+})
