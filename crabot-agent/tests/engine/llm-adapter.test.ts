@@ -6,6 +6,7 @@ import {
   readSSELines,
   AnthropicAdapter,
   OpenAIAdapter,
+  createAdapter,
   type LLMAdapterConfig,
 } from '../../src/engine/llm-adapter'
 import {
@@ -549,5 +550,33 @@ describe('OpenAIAdapter', () => {
       adapter.updateConfig({ endpoint: 'http://localhost:5000' })
       expect(adapter).toBeDefined()
     })
+  })
+})
+
+describe('createAdapter', () => {
+  const baseConfig = {
+    endpoint: 'http://localhost:4000',
+    apikey: 'test-key',
+  }
+
+  it('should return AnthropicAdapter for format=anthropic', () => {
+    const adapter = createAdapter({ ...baseConfig, format: 'anthropic' })
+    expect(adapter).toBeInstanceOf(AnthropicAdapter)
+  })
+
+  it('should return OpenAIAdapter for format=openai', () => {
+    const adapter = createAdapter({ ...baseConfig, format: 'openai' })
+    expect(adapter).toBeInstanceOf(OpenAIAdapter)
+  })
+
+  it('should return OpenAIAdapter for format=gemini (via LiteLLM)', () => {
+    const adapter = createAdapter({ ...baseConfig, format: 'gemini' })
+    expect(adapter).toBeInstanceOf(OpenAIAdapter)
+  })
+
+  it('should throw for unsupported format', () => {
+    expect(() => {
+      createAdapter({ ...baseConfig, format: 'unknown' as 'anthropic' })
+    }).toThrow('Unsupported LLM format')
   })
 })

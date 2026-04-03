@@ -11,7 +11,7 @@
 
 import {
   runEngine,
-  AnthropicAdapter,
+  createAdapter,
   defineTool,
 } from '../engine/index.js'
 import type {
@@ -62,6 +62,7 @@ export interface WorkerDeps {
 
 export interface SdkEnvConfig {
   modelId: string
+  format: 'anthropic' | 'openai' | 'gemini'
   env: Record<string, string>
 }
 
@@ -310,10 +311,11 @@ export class WorkerHandler {
         tools.push(...mcpServerToToolDefinitions(server, serverName))
       }
 
-      // 4. Create AnthropicAdapter from sdkEnv
-      const adapter = new AnthropicAdapter({
+      // 4. Create LLM adapter from sdkEnv (format-based routing)
+      const adapter = createAdapter({
         endpoint: this.sdkEnv.env.ANTHROPIC_BASE_URL ?? this.sdkEnv.env.ANTHROPIC_API_BASE ?? '',
         apikey: this.sdkEnv.env.ANTHROPIC_API_KEY ?? '',
+        format: this.sdkEnv.format,
       })
 
       // 5. Build system prompt and task message

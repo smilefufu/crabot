@@ -235,6 +235,36 @@ export class AnthropicAdapter implements LLMAdapter {
   }
 }
 
+// --- Adapter Factory ---
+
+export type LLMFormat = 'anthropic' | 'openai' | 'gemini'
+
+export interface CreateAdapterConfig {
+  readonly endpoint: string
+  readonly apikey: string
+  readonly format: LLMFormat
+}
+
+/**
+ * Factory function that creates the correct LLM adapter based on the format field.
+ * Gemini uses OpenAI-compatible API via LiteLLM, so it maps to OpenAIAdapter.
+ */
+export function createAdapter(config: CreateAdapterConfig): LLMAdapter {
+  switch (config.format) {
+    case 'anthropic':
+      return new AnthropicAdapter({ endpoint: config.endpoint, apikey: config.apikey })
+    case 'openai':
+      return new OpenAIAdapter({ endpoint: config.endpoint, apikey: config.apikey })
+    case 'gemini':
+      // Gemini uses OpenAI-compatible API via LiteLLM
+      return new OpenAIAdapter({ endpoint: config.endpoint, apikey: config.apikey })
+    default: {
+      const exhaustiveCheck: never = config.format
+      throw new Error(`Unsupported LLM format: ${exhaustiveCheck}`)
+    }
+  }
+}
+
 // --- OpenAI Message Types ---
 
 interface OpenAITextContent {

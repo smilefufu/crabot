@@ -264,6 +264,7 @@ export class UnifiedAgent extends ModuleBase {
   private buildSdkEnv(connInfo: LLMConnectionInfo): SdkEnvConfig {
     return {
       modelId: connInfo.model_id,
+      format: connInfo.format,
       env: {
         ANTHROPIC_BASE_URL: connInfo.endpoint,
         ANTHROPIC_API_KEY: connInfo.apikey || 'dummy-key',
