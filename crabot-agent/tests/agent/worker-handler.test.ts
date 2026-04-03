@@ -21,6 +21,7 @@ const mockRunEngine = vi.mocked(runEngine)
 function makeHandler() {
   const sdkEnv = {
     modelId: 'test-model',
+    format: 'anthropic' as const,
     env: {
       ANTHROPIC_BASE_URL: 'http://localhost:4000',
       ANTHROPIC_API_KEY: 'test-key',
