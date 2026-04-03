@@ -64,7 +64,7 @@ async function executeSerialBatch(
 }
 
 export async function executeToolBatches(
-  batches: ToolBatch[],
+  batches: ReadonlyArray<ToolBatch>,
   tools: ReadonlyArray<ToolDefinition>,
   context?: ToolCallContext,
 ): Promise<ToolResultEntry[]> {

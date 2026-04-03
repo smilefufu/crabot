@@ -133,8 +133,8 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     }
 
     // Execute tools
-    const batches = [...partitionToolCalls(processed.toolUseBlocks, options.tools)]
-    const toolResults = await executeToolBatches(batches, [...options.tools], {
+    const batches = partitionToolCalls(processed.toolUseBlocks, options.tools)
+    const toolResults = await executeToolBatches(batches, options.tools, {
       abortSignal,
     })
 
