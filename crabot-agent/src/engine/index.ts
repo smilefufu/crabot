@@ -38,3 +38,7 @@ export { StreamProcessor } from './stream-processor'
 
 // --- Context Manager ---
 export { ContextManager } from './context-manager'
+
+// --- Sub-Agent ---
+export { forkEngine, createSubAgentTool } from './sub-agent'
+export type { ForkEngineParams, ForkEngineResult, SubAgentToolConfig } from './sub-agent'
