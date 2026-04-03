@@ -837,6 +837,7 @@ export interface ModelConnectionInfo {
  */
 export interface LLMConnectionInfo extends ModelConnectionInfo {
   max_tokens?: number
+  supports_vision?: boolean
 }
 
 /**

@@ -5,9 +5,11 @@
  * structured tool_use decisions via make_decision.
  */
 
+import type { ImageBlockParam, TextBlockParam } from '@anthropic-ai/sdk/resources/messages'
 import { LLMClient, type LLMClientConfig } from './llm-client.js'
 import { ToolExecutor, type ToolExecutorDeps } from './tool-executor.js'
 import { runFrontLoop } from './front-loop.js'
+import { resolveImageBlocks, formatMessageContent } from './media-resolver.js'
 import type {
   ChannelMessage,
   FrontAgentContext,
@@ -15,6 +17,8 @@ import type {
   HandleMessageResult,
   TraceCallback,
 } from '../types.js'
+
+export type UserMessageContent = string | Array<TextBlockParam | ImageBlockParam>
 
 export interface FrontHandlerConfig {
   systemPrompt: string
@@ -41,7 +45,8 @@ export class FrontHandler {
     traceCallback?: TraceCallback,
   ): Promise<HandleMessageResult> {
     const { messages, context } = params
-    const userMessage = buildUserMessage(messages, context)
+    const imageBlocks = await resolveImageBlocks(messages)
+    const userMessage = buildUserMessage(messages, context, imageBlocks)
     const rawUserText = messages.map(m => m.content.text ?? '').join('\n').trim()
 
     try {
@@ -78,7 +83,11 @@ export class FrontHandler {
  * 将当前消息、上下文（recent_messages / short_term_memories / active_tasks）
  * 组装为结构化的 prompt 文本。
  */
-export function buildUserMessage(messages: ChannelMessage[], context: FrontAgentContext): string {
+export function buildUserMessage(
+  messages: ChannelMessage[],
+  context: FrontAgentContext,
+  imageBlocks?: ImageBlockParam[],
+): UserMessageContent {
   const parts: string[] = []
   const isGroup = messages[0]?.session?.type === 'group'
   const hasMention = messages.some(m => m.features.is_mention_crab)
@@ -135,7 +144,7 @@ export function buildUserMessage(messages: ChannelMessage[], context: FrontAgent
     parts.push(`\n## 最近消息（共 ${context.recent_messages.length} 条）`)
     for (const msg of context.recent_messages) {
       const sender = msg.sender.platform_display_name
-      const fullText = msg.content.text ?? '[非文本消息]'
+      const fullText = formatMessageContent(msg)
       const text = fullText.length > 300 ? fullText.slice(0, 300) + '...[内容截断]' : fullText
       parts.push(`- ${sender}: ${text}`)
     }
@@ -147,7 +156,7 @@ export function buildUserMessage(messages: ChannelMessage[], context: FrontAgent
     parts.push(`- 是否 @你: ${hasMention ? '是' : '否'}`)
     for (const msg of messages) {
       const mention = msg.features.is_mention_crab ? ' [@你]' : ''
-      parts.push(`- [${msg.sender.platform_display_name}]${mention}: ${msg.content.text ?? '[非文本消息]'}`)
+      parts.push(`- [${msg.sender.platform_display_name}]${mention}: ${formatMessageContent(msg)}`)
     }
 
     if (hasMention) {
@@ -161,11 +170,23 @@ export function buildUserMessage(messages: ChannelMessage[], context: FrontAgent
   } else {
     parts.push('\n## 当前消息')
     for (const msg of messages) {
-      parts.push(`- ${msg.sender.platform_display_name}: ${msg.content.text ?? '[非文本消息]'}`)
+      parts.push(`- ${msg.sender.platform_display_name}: ${formatMessageContent(msg)}`)
     }
   }
 
   parts.push('\n## 指令')
   parts.push('请分析上述消息并调用 make_decision 工具输出决策。')
-  return parts.join('\n')
+
+  const textPrompt = parts.join('\n')
+
+  // 如果有图片内容，返回 ContentBlock[]（text + image blocks）
+  if (imageBlocks && imageBlocks.length > 0) {
+    return [
+      { type: 'text' as const, text: textPrompt },
+      ...imageBlocks,
+    ]
+  }
+
+  return textPrompt
 }
+

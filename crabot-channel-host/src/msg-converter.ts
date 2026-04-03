@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto'
 import type {
   MsgContext,
   MessageContent,
+  MessageType,
   ReplyPayload,
   ChannelMessage,
   Session,
@@ -31,6 +32,14 @@ export function msgContextToChannelMessage(
   const platformUserId = ctx.SenderId ?? 'unknown'
   const displayName = ctx.SenderName ?? ctx.SenderUsername ?? platformUserId
 
+  // 检测媒体内容（由 OpenClaw 插件 buildAgentMediaPayload 设置）
+  const mediaPath = ctx.MediaPath ?? ctx.MediaUrl
+  const mimeType = ctx.MediaType
+  const hasMedia = !!mediaPath
+  const contentType: MessageType = hasMedia
+    ? (mimeType?.startsWith('image/') ? 'image' : 'file')
+    : 'text'
+
   return {
     platform_message_id: ctx.MessageId ?? randomUUID(),
     session: {
@@ -43,10 +52,14 @@ export function msgContextToChannelMessage(
       platform_display_name: displayName,
     },
     content: {
-      type: 'text',
+      type: contentType,
       // RawBody 是未经格式化的原始内容（如 "/pair"），Body 是经插件处理后含前缀的内容
       // （如 "张三: /pair"）。Admin 鉴权网关需要原始内容做命令检测，优先取 RawBody。
       text: ctx.RawBody ?? ctx.Body ?? '',
+      ...(hasMedia && {
+        media_url: mediaPath,
+        mime_type: mimeType,
+      }),
     },
     features: {
       is_mention_crab: false,

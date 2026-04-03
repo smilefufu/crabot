@@ -37,6 +37,7 @@ import type {
 import type { RpcClient } from '../core/module-base.js'
 import { createCrabMemoryServer } from '../mcp/crab-memory.js'
 import type { MemoryTaskContext } from '../mcp/crab-memory.js'
+import { formatMessageContent } from './media-resolver.js'
 
 import * as fs from 'fs'
 import * as path from 'path'
@@ -554,7 +555,7 @@ export class WorkerHandler {
       for (const msg of context.trigger_messages) {
         const time = msg.platform_timestamp ? ` (${msg.platform_timestamp})` : ''
         parts.push(`\n### ${msg.sender.platform_display_name}${time}`)
-        parts.push(msg.content.text ?? '[非文本消息]')
+        parts.push(formatMessageContent(msg))
       }
       if (task.task_description) {
         parts.push(`\n## 任务分类\n${task.task_description}`)
@@ -609,7 +610,7 @@ export class WorkerHandler {
     if (context.recent_messages && context.recent_messages.length > 0) {
       parts.push(`\n## 最近相关消息（共 ${context.recent_messages.length} 条）`)
       for (const m of context.recent_messages) {
-        parts.push(`- ${m.sender.platform_display_name}: ${m.content.text ?? '[非文本消息]'}`)
+        parts.push(`- ${m.sender.platform_display_name}: ${formatMessageContent(m)}`)
       }
     }
 

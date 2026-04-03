@@ -42,6 +42,9 @@ export class MessageStore {
     senderPlatformUserId?: string
     text: string
     contentType?: MessageType
+    mediaUrl?: string
+    mimeType?: string
+    filename?: string
     timestamp?: string
   }): void {
     this.append(params.sessionId, {
@@ -50,6 +53,9 @@ export class MessageStore {
       sender_platform_user_id: params.senderPlatformUserId,
       content: params.text,
       content_type: params.contentType ?? 'text',
+      media_url: params.mediaUrl,
+      mime_type: params.mimeType,
+      filename: params.filename,
       timestamp: params.timestamp ?? new Date().toISOString(),
     })
   }

@@ -895,6 +895,7 @@ export class ModelProviderManager {
       ...base,
       // 透传模型的最大输出 token 数（在 Admin → 模型供应商 → 编辑模型 中配置）
       ...(model.max_tokens !== undefined && { max_tokens: model.max_tokens }),
+      ...(model.supports_vision && { supports_vision: true }),
     } as LLMConnectionInfo
   }
 

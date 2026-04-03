@@ -212,6 +212,12 @@ export interface HistoryMessage {
   sender_platform_user_id?: string
   content: string
   content_type: MessageType
+  /** 媒体 URL 或本地文件路径（image/file 消息） */
+  media_url?: string
+  /** 媒体 MIME 类型 */
+  mime_type?: string
+  /** 文件名 */
+  filename?: string
   timestamp: string
 }
 
@@ -297,6 +303,18 @@ export interface MsgContext {
   RawBody?: string
   ChatType?: string
   MessageId?: string
+  /** 媒体本地文件路径（由 OpenClaw 插件 buildAgentMediaPayload 设置） */
+  MediaPath?: string
+  /** 媒体 MIME 类型 */
+  MediaType?: string
+  /** 媒体 URL（通常与 MediaPath 相同） */
+  MediaUrl?: string
+  /** 多媒体本地文件路径列表 */
+  MediaPaths?: string[]
+  /** 多媒体 URL 列表 */
+  MediaUrls?: string[]
+  /** 多媒体 MIME 类型列表 */
+  MediaTypes?: string[]
 }
 
 /**

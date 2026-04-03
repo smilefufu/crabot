@@ -116,6 +116,13 @@ export function createReplyRuntime(
         Body: (ctx.Body ?? ctx.body) as string | undefined,
         RawBody: ctx.RawBody as string | undefined,
         ChatType: ctx.ChatType as string | undefined,
+        // 媒体字段（由 OpenClaw 插件 buildAgentMediaPayload spread 进 ctx）
+        MediaPath: ctx.MediaPath as string | undefined,
+        MediaType: ctx.MediaType as string | undefined,
+        MediaUrl: ctx.MediaUrl as string | undefined,
+        MediaPaths: ctx.MediaPaths as string[] | undefined,
+        MediaUrls: ctx.MediaUrls as string[] | undefined,
+        MediaTypes: ctx.MediaTypes as string[] | undefined,
       }
 
       onMessageReceived(msgCtx, sessionId).catch((error: unknown) => {

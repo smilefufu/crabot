@@ -260,7 +260,7 @@ export class ChannelHost extends ModuleBase {
    */
   private handleGetCapabilities(): ChannelCapabilities {
     return {
-      supported_message_types: ['text'],
+      supported_message_types: ['text', 'image', 'file'],
       supported_features: [],
       supports_history_query: true,
       supports_platform_user_query: false,
@@ -327,21 +327,28 @@ export class ChannelHost extends ModuleBase {
     })
 
     // 将内部 HistoryMessage 转换为 protocol-channel.md §3.3 协议格式
-    const protocolItems = items.map((m) => ({
-      platform_message_id: m.platform_message_id,
-      sender: {
-        platform_user_id: m.sender_platform_user_id ?? m.sender_name,
-        platform_display_name: m.sender_name,
-      },
-      content: {
+    const protocolItems = items.map((m) => {
+      const content: Record<string, unknown> = {
         type: m.content_type ?? 'text',
         text: m.content,
-      },
-      features: {
-        is_mention_crab: false,
-      },
-      platform_timestamp: m.timestamp,
-    }))
+      }
+      if (m.media_url) content.media_url = m.media_url
+      if (m.mime_type) content.mime_type = m.mime_type
+      if (m.filename) content.filename = m.filename
+
+      return {
+        platform_message_id: m.platform_message_id,
+        sender: {
+          platform_user_id: m.sender_platform_user_id ?? m.sender_name,
+          platform_display_name: m.sender_name,
+        },
+        content,
+        features: {
+          is_mention_crab: false,
+        },
+        platform_timestamp: m.timestamp,
+      }
+    })
 
     return {
       items: protocolItems,
@@ -418,8 +425,11 @@ export class ChannelHost extends ModuleBase {
       platformMessageId: channelMessage.platform_message_id,
       senderName: displayName,
       senderPlatformUserId: platformUserId,
-      text: channelMessage.content.text ?? '[非文本消息]',
+      text: channelMessage.content.text ?? '',
       contentType: channelMessage.content.type,
+      mediaUrl: channelMessage.content.media_url,
+      mimeType: channelMessage.content.mime_type,
+      filename: channelMessage.content.filename,
       timestamp: channelMessage.platform_timestamp,
     })
 

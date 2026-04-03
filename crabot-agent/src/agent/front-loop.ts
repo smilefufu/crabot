@@ -7,7 +7,7 @@
  * max rounds exceeded -> forced create_task with tool history
  */
 
-import type { MessageParam, ContentBlock, ToolResultBlockParam } from '@anthropic-ai/sdk/resources/messages'
+import type { MessageParam, ContentBlock, ToolResultBlockParam, TextBlockParam, ImageBlockParam } from '@anthropic-ai/sdk/resources/messages'
 import type { LLMClient } from './llm-client.js'
 import type { ToolExecutor } from './tool-executor.js'
 import type {
@@ -22,7 +22,7 @@ const FRONT_MAX_ROUNDS = 5
 
 export async function runFrontLoop(params: {
   systemPrompt: string
-  userMessage: string
+  userMessage: string | Array<TextBlockParam | ImageBlockParam>
   /** Raw user text (for task title extraction on forced termination) */
   rawUserText: string
   llmClient: LLMClient
@@ -42,7 +42,9 @@ export async function runFrontLoop(params: {
 
   try {
     for (let round = 0; round < FRONT_MAX_ROUNDS; round++) {
-      const inputSummary = round === 0 ? userMessage.slice(0, 150) : `(round ${round + 1})`
+      const inputSummary = round === 0
+        ? (typeof userMessage === 'string' ? userMessage.slice(0, 150) : '[multimodal message]')
+        : `(round ${round + 1})`
       const llmSpanId = traceCallback?.onLlmCallStart(round + 1, inputSummary)
 
       const response = await llmClient.callMessages({ system: systemPrompt, messages, tools })
@@ -59,7 +61,7 @@ export async function runFrontLoop(params: {
           stopReason: response.stopReason ?? undefined,
           outputSummary: textOutput.slice(0, 200) || undefined,
           toolCallsCount: toolUseCount > 0 ? toolUseCount : undefined,
-          fullInput: round === 0 ? userMessage : undefined,
+          fullInput: round === 0 ? (typeof userMessage === 'string' ? userMessage : '[multimodal message]') : undefined,
           fullOutput: textOutput || undefined,
         })
       }
@@ -147,7 +149,7 @@ export async function runFrontLoop(params: {
 
     // Max rounds exceeded -> forced create_task with tool history
     const taskTitle = rawUserText.length > 80 ? rawUserText.slice(0, 80) + '...' : (rawUserText || '用户请求')
-    const taskDescription = rawUserText || userMessage
+    const taskDescription = rawUserText || (typeof userMessage === 'string' ? userMessage : '[multimodal message]')
 
     if (loopSpanId) traceCallback?.onLoopEnd(loopSpanId, 'completed', FRONT_MAX_ROUNDS)
 

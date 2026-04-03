@@ -74,7 +74,7 @@ export const GlobalModelConfigCard: React.FC<GlobalModelConfigCardProps> = ({ pr
               label="模型"
               options={selectedLlmProvider.models
                 .filter(m => m.type === 'llm')
-                .map(m => ({ value: m.model_id, label: m.display_name }))}
+                .map(m => ({ value: m.model_id, label: m.display_name + (m.supports_vision ? ' [VLM]' : '') }))}
               value={config.default_llm_model_id || ''}
               onChange={e => setConfig({ ...config, default_llm_model_id: e.target.value || undefined })}
             />

@@ -20,6 +20,7 @@ export const ProviderDrawerDetail: React.FC<ProviderDrawerDetailProps> = ({
 }) => {
   const toast = useToast()
   const [refreshing, setRefreshing] = useState(false)
+  const [togglingVision, setTogglingVision] = useState<string | null>(null)
   const [modelTestResults, setModelTestResults] = useState<
     Record<string, { status: 'pending' | 'success' | 'error'; latency_ms?: number; error?: string }>
   >({})
@@ -65,6 +66,22 @@ export const ProviderDrawerDetail: React.FC<ProviderDrawerDetailProps> = ({
           error: err instanceof Error ? err.message : '测试失败',
         },
       }))
+    }
+  }
+
+  const handleToggleVision = async (modelId: string, currentValue: boolean) => {
+    try {
+      setTogglingVision(modelId)
+      const updatedModels = provider.models.map(m =>
+        m.model_id === modelId ? { ...m, supports_vision: !currentValue } : m
+      )
+      await providerService.updateProvider(provider.id, { models: updatedModels })
+      toast.success(`已${!currentValue ? '启用' : '关闭'} ${modelId} 的视觉能力标记`)
+      onRefresh()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '更新失败')
+    } finally {
+      setTogglingVision(null)
     }
   }
 
@@ -137,6 +154,20 @@ export const ProviderDrawerDetail: React.FC<ProviderDrawerDetailProps> = ({
                   <span className={`badge badge-${model.type === 'llm' ? 'success' : 'warning'}`}>
                     {model.type === 'llm' ? 'LLM' : 'Embedding'}
                   </span>
+                  {model.type === 'llm' && (
+                    <span
+                      className={`badge ${model.supports_vision ? 'badge-info' : 'badge-muted'}`}
+                      title={model.supports_vision ? '支持视觉/图片理解（点击关闭）' : '不支持视觉（点击启用）'}
+                      style={{
+                        marginLeft: '0.25rem',
+                        cursor: togglingVision === model.model_id ? 'wait' : 'pointer',
+                        opacity: model.supports_vision ? 1 : 0.4,
+                      }}
+                      onClick={() => !togglingVision && handleToggleVision(model.model_id, !!model.supports_vision)}
+                    >
+                      VLM
+                    </span>
+                  )}
                 </span>
                 <span className="model-table-col-test">
                   {testResult?.status === 'pending' ? (

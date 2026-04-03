@@ -417,6 +417,7 @@ export interface LLMConnectionInfo {
   model_id: string
   format: 'anthropic' | 'openai' | 'gemini'
   max_tokens?: number
+  supports_vision?: boolean
 }
 
 export interface MCPServerConfig {
