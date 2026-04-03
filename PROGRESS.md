@@ -25,7 +25,12 @@
 - [x] Task 12: Adapter Factory + format routing (4 tests)
 - [x] Task 13: Front Handler migration to engine adapter (llm-client.ts 已删除)
 
-**总计：128 个测试通过，@anthropic-ai/claude-agent-sdk 已移除，Front+Worker 均通过 engine adapter 支持 anthropic/openai/gemini 格式**
+**Phase 3 进度**（高级引擎能力）— **已完成 2026-04-04**：
+- [x] Task 14: LLM-based auto-compact (智能上下文压缩，LLM 失败自动回退文本摘要)
+- [x] Task 15: Sub-agent support (forkEngine + createSubAgentTool)
+- [x] Task 16: Tool permission system (bypass/allowList/denyList + dangerous 级别)
+
+**总计：200 个测试通过，@anthropic-ai/claude-agent-sdk 已移除，引擎支持多 LLM 格式 + 智能压缩 + 子 Agent + 工具权限**
 **分支：feat/engine-v2**
 
 ---
