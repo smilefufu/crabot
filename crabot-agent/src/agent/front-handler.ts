@@ -21,14 +21,14 @@ import type {
 export type UserMessageContent = string | Array<TextBlockParam | ImageBlockParam>
 
 export interface FrontHandlerConfig {
-  systemPrompt: string
+  getSystemPrompt: (isGroup: boolean) => string
 }
 
 
 export class FrontHandler {
   private llmClient: LLMClient
   private toolExecutor: ToolExecutor
-  private systemPrompt: string
+  private getSystemPrompt: (isGroup: boolean) => string
 
   constructor(
     llmConfig: LLMClientConfig,
@@ -37,7 +37,7 @@ export class FrontHandler {
   ) {
     this.llmClient = new LLMClient(llmConfig)
     this.toolExecutor = new ToolExecutor(toolExecutorDeps)
-    this.systemPrompt = config.systemPrompt
+    this.getSystemPrompt = config.getSystemPrompt
   }
 
   async handleMessage(
@@ -45,15 +45,20 @@ export class FrontHandler {
     traceCallback?: TraceCallback,
   ): Promise<HandleMessageResult> {
     const { messages, context } = params
+    const isGroup = messages[0]?.session?.type === 'group'
+    const hasMention = messages.some(m => m.features.is_mention_crab)
+    // silent 仅在群聊且未被 @ 时可用
+    const allowSilent = isGroup && !hasMention
     const imageBlocks = await resolveImageBlocks(messages)
     const userMessage = buildUserMessage(messages, context, imageBlocks)
     const rawUserText = messages.map(m => m.content.text ?? '').join('\n').trim()
 
     try {
       const result = await runFrontLoop({
-        systemPrompt: this.systemPrompt,
+        systemPrompt: this.getSystemPrompt(isGroup),
         userMessage,
         rawUserText,
+        allowSilent,
         llmClient: this.llmClient,
         toolExecutor: this.toolExecutor,
         traceCallback,

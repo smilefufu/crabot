@@ -231,8 +231,9 @@ export class UnifiedAgent extends ModuleBase {
           memoryWriteVisibility: () => this.currentMemPerms?.write_visibility ?? 'public',
           memoryWriteScopes: () => this.currentMemPerms?.write_scopes ?? [],
         }
+        const personality = adminPersonality || undefined
         this.frontHandler = new FrontHandler(llmConfig, toolExecutorDeps, {
-          systemPrompt: this.promptManager.assembleFrontPrompt(adminPersonality || undefined),
+          getSystemPrompt: (isGroup) => this.promptManager.assembleFrontPrompt(isGroup, personality),
         })
       }
     }
@@ -1695,8 +1696,9 @@ ${skillsSection}
             memoryWriteVisibility: () => this.currentMemPerms?.write_visibility ?? 'public',
             memoryWriteScopes: () => this.currentMemPerms?.write_scopes ?? [],
           }
+          const personality = adminPersonality || undefined
           this.frontHandler = new FrontHandler(llmConfig, toolExecutorDeps, {
-            systemPrompt: this.promptManager.assembleFrontPrompt(adminPersonality || undefined),
+            getSystemPrompt: (isGroup) => this.promptManager.assembleFrontPrompt(isGroup, personality),
           })
           console.log(`[${this.config.moduleId}] Front Agent handler created from config push`)
         }

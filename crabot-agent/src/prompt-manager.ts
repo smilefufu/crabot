@@ -12,35 +12,8 @@ import * as path from 'path'
  * 组装顺序: personality + rules + additions
  */
 
-const FRONT_RULES_TEMPLATE = `## 决策输出
-
-你必须调用 make_decision 工具输出决策。四种类型：
-
-1. direct_reply — 直接回复（简单问答、问候、任务状态查询）
-2. create_task — 创建新任务（复杂操作、代码编写、数据分析）
-3. supplement_task — 补充/纠偏已有任务（用户对正在执行的任务有新指示）
-4. silent — 静默（群聊中与自己无关的消息）
-
-## 群聊规则（严格执行）
-
-在群聊中，你是旁听者，不是对话参与者。默认 silent。
-
-只有同时满足以下条件时才回复：
-1. 消息明确指向你（以下任一）：
-   - 消息标注了 [@你]
-   - 有人叫你的昵称
-   - 上下文中只有你一个可能的对话对象（群里只有发送者和你）
-2. 且消息内容确实需要你行动（提问、指令、求助）
-
-**被 @你 时禁止 silent**：只要消息标注了 [@你]，你必须回复（direct_reply 或 create_task），绝不能选 silent。
-
-以下情况必须 silent：
-- 群成员之间互相讨论（即使话题是代码/技术/你擅长的领域）
-- 群成员之间一问一答（有明确的对话双方，你不是其中之一）
-- 系统通知、加群消息、分享链接等非对话内容
-- 不确定是否在叫你时，选择 silent
-
-## 纠偏判断指南
+// ── 私聊/群聊共用部分 ──
+const FRONT_RULES_SHARED = `## 纠偏判断指南
 
 当用户消息可能是对活跃任务的纠偏时：
 - 检查活跃任务列表，优先匹配同 session 发起的任务
@@ -76,6 +49,52 @@ tags 应涵盖关键维度，如人物、主题、类型（身份属性、偏好
 1. 调用 search_memory 工具搜索相关记忆
 2. 如需查看详情，调用 get_memory_detail 工具
 3. 然后调用 make_decision(direct_reply) 回答`
+
+// ── 私聊 Front Rules ──
+// 私聊中没有 silent 选项，从根本上杜绝误判
+const FRONT_RULES_PRIVATE = `## 决策输出
+
+你必须调用 make_decision 工具输出决策。三种类型：
+
+1. direct_reply — 直接回复（简单问答、问候、任务状态查询）
+2. create_task — 创建新任务（复杂操作、代码编写、数据分析）
+3. supplement_task — 补充/纠偏已有任务（用户对正在执行的任务有新指示）
+
+这是私聊场景，用户在直接和你对话，你必须回复。
+
+${FRONT_RULES_SHARED}`
+
+// ── 群聊 Front Rules ──
+// 群聊中增加 silent 选项和群聊专属规则
+const FRONT_RULES_GROUP = `## 决策输出
+
+你必须调用 make_decision 工具输出决策。四种类型：
+
+1. direct_reply — 直接回复（简单问答、问候、任务状态查询）
+2. create_task — 创建新任务（复杂操作、代码编写、数据分析）
+3. supplement_task — 补充/纠偏已有任务（用户对正在执行的任务有新指示）
+4. silent — 静默（与自己无关的消息）
+
+## 群聊规则（严格执行）
+
+在群聊中，你是旁听者，不是对话参与者。默认 silent。
+
+只有同时满足以下条件时才回复：
+1. 消息明确指向你（以下任一）：
+   - 消息标注了 [@你]
+   - 有人叫你的昵称
+   - 上下文中只有你一个可能的对话对象（群里只有发送者和你）
+2. 且消息内容确实需要你行动（提问、指令、求助）
+
+**被 @你 时禁止 silent**：只要消息标注了 [@你]，你必须回复（direct_reply 或 create_task），绝不能选 silent。
+
+以下情况必须 silent：
+- 群成员之间互相讨论（即使话题是代码/技术/你擅长的领域）
+- 群成员之间一问一答（有明确的对话双方，你不是其中之一）
+- 系统通知、加群消息、分享链接等非对话内容
+- 不确定是否在叫你时，选择 silent
+
+${FRONT_RULES_SHARED}`
 
 const WORKER_RULES_TEMPLATE = `## 工作目录
 
@@ -159,7 +178,8 @@ export class PromptManager {
     fs.mkdirSync(this.promptsDir, { recursive: true })
 
     // 代码管理：每次覆盖
-    this.writeFile('front-rules.md', RULES_HEADER + FRONT_RULES_TEMPLATE)
+    this.writeFile('front-rules-private.md', RULES_HEADER + FRONT_RULES_PRIVATE)
+    this.writeFile('front-rules-group.md', RULES_HEADER + FRONT_RULES_GROUP)
     this.writeFile('worker-rules.md', RULES_HEADER + WORKER_RULES_TEMPLATE)
 
     // 用户管理：仅首次创建
@@ -169,10 +189,11 @@ export class PromptManager {
   }
 
   /**
-   * 组装 Front Handler system prompt
+   * 组装 Front Handler system prompt（区分私聊/群聊）
+   * @param isGroup - 是否群聊场景
    * @param adminPersonality - Admin 配置中的 system_prompt（可选，优先级高于文件）
    */
-  assembleFrontPrompt(adminPersonality?: string): string {
+  assembleFrontPrompt(isGroup: boolean, adminPersonality?: string): string {
     const parts: string[] = []
 
     if (adminPersonality) {
@@ -183,7 +204,11 @@ export class PromptManager {
       parts.push(filePersonality)
     }
 
-    parts.push(this.readRulesFile('front-rules.md', FRONT_RULES_TEMPLATE))
+    if (isGroup) {
+      parts.push(this.readRulesFile('front-rules-group.md', FRONT_RULES_GROUP))
+    } else {
+      parts.push(this.readRulesFile('front-rules-private.md', FRONT_RULES_PRIVATE))
+    }
 
     const additions = this.readUserFile('front-additions.md')
     if (additions) {

@@ -8,17 +8,24 @@
 
 import type { Tool } from '@anthropic-ai/sdk/resources/messages'
 
-export const MAKE_DECISION_TOOL: Tool = {
-  name: 'make_decision',
-  description: '做出最终决策。分析完消息后必须调用此工具输出决策。',
-  input_schema: {
-    type: 'object' as const,
-    properties: {
-      type: {
-        type: 'string',
-        enum: ['direct_reply', 'create_task', 'supplement_task', 'silent'],
-        description: 'direct_reply=直接回复, create_task=创建新任务, supplement_task=补充/纠偏已有任务, silent=静默',
-      },
+export function makeDecisionTool(allowSilent: boolean): Tool {
+  const types = allowSilent
+    ? ['direct_reply', 'create_task', 'supplement_task', 'silent']
+    : ['direct_reply', 'create_task', 'supplement_task']
+  const desc = allowSilent
+    ? 'direct_reply=直接回复, create_task=创建新任务, supplement_task=补充/纠偏已有任务, silent=静默'
+    : 'direct_reply=直接回复, create_task=创建新任务, supplement_task=补充/纠偏已有任务'
+  return {
+    name: 'make_decision',
+    description: '做出最终决策。分析完消息后必须调用此工具输出决策。',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        type: {
+          type: 'string',
+          enum: types,
+          description: desc,
+        },
       reply_text: {
         type: 'string',
         description: '回复文本。direct_reply 时必填（作为回复内容）；create_task/supplement_task 时可选（作为即时回复，如"好的，正在处理"）',
@@ -46,6 +53,7 @@ export const MAKE_DECISION_TOOL: Tool = {
     },
     required: ['type'],
   },
+  }
 }
 
 export const QUERY_TASKS_TOOL: Tool = {
@@ -235,9 +243,9 @@ export const GET_MEMORY_DETAIL_TOOL: Tool = {
 }
 
 /** All Front tools in order */
-export function getAllFrontTools(): Tool[] {
+export function getAllFrontTools(allowSilent: boolean): Tool[] {
   return [
-    MAKE_DECISION_TOOL,
+    makeDecisionTool(allowSilent),
     QUERY_TASKS_TOOL,
     CREATE_SCHEDULE_TOOL,
     LOOKUP_FRIEND_TOOL,

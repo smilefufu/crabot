@@ -25,12 +25,14 @@ export async function runFrontLoop(params: {
   userMessage: string | Array<TextBlockParam | ImageBlockParam>
   /** Raw user text (for task title extraction on forced termination) */
   rawUserText: string
+  /** silent 仅在群聊且未被 @ 时可用 */
+  allowSilent: boolean
   llmClient: LLMClient
   toolExecutor: ToolExecutor
   traceCallback?: TraceCallback
 }): Promise<FrontLoopResult> {
-  const { systemPrompt, userMessage, rawUserText, llmClient, toolExecutor, traceCallback } = params
-  const tools = getAllFrontTools()
+  const { systemPrompt, userMessage, rawUserText, allowSilent, llmClient, toolExecutor, traceCallback } = params
+  const tools = getAllFrontTools(allowSilent)
   const messages: MessageParam[] = [{ role: 'user', content: userMessage }]
   const toolHistory: ToolHistoryEntry[] = []
 
@@ -76,7 +78,9 @@ export async function runFrontLoop(params: {
 
         const decision: MessageDecision = text
           ? { type: 'direct_reply', reply: { type: 'text', text } }
-          : { type: 'silent' }
+          : allowSilent
+            ? { type: 'silent' }
+            : { type: 'direct_reply', reply: { type: 'text', text: '你好，有什么我可以帮助你的吗？' } }
 
         if (loopSpanId) traceCallback?.onLoopEnd(loopSpanId, 'completed', round + 1)
         return { decision }
