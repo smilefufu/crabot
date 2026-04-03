@@ -1993,8 +1993,8 @@ export class AdminModule extends ModuleBase {
     }
 
     const body = (message.content.type === 'text' ? (message.content.text ?? '') : '').trim()
-    if (body === '/pair' || body === '/apply') {
-      const intent = body === '/pair' ? 'pair' : 'apply'
+    if (body === '/pair' || body === '/认主' || body === '/apply') {
+      const intent = (body === '/pair' || body === '/认主') ? 'pair' : 'apply'
       await this.handleUpsertPendingMessage({
         channel_id: channelId,
         platform_user_id,
@@ -2006,7 +2006,7 @@ export class AdminModule extends ModuleBase {
       console.log(`[Admin] Upserted pending message (${intent}) for unknown sender: ${platform_user_id} (${platform_display_name})`)
     }
     // 其他私聊陌生人消息静默丢弃
-    console.log(`[Admin] ⚠️ Private message from unknown sender dropped (not /pair or /apply): ${platform_user_id}, text="${(message.content.text ?? '').slice(0, 30)}"`)
+    console.log(`[Admin] ⚠️ Private message from unknown sender dropped (not /pair, /认主 or /apply): ${platform_user_id}, text="${(message.content.text ?? '').slice(0, 30)}"`)
   }
 
   /**
