@@ -12,6 +12,7 @@ import type {
   EngineToolResultMessage,
   ToolDefinition,
   StreamChunk,
+  ContentBlock,
 } from './types'
 
 // --- Interfaces ---
@@ -225,6 +226,359 @@ export class AnthropicAdapter implements LLMAdapter {
             inputTokens: finalMessage.usage.input_tokens,
             outputTokens: finalMessage.usage.output_tokens,
           },
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      yield { type: 'error', error: message }
+    }
+  }
+}
+
+// --- OpenAI Message Types ---
+
+interface OpenAITextContent {
+  readonly type: 'text'
+  readonly text: string
+}
+
+interface OpenAIImageUrlContent {
+  readonly type: 'image_url'
+  readonly image_url: { readonly url: string }
+}
+
+type OpenAIContentPart = OpenAITextContent | OpenAIImageUrlContent
+
+interface OpenAIToolCall {
+  readonly id: string
+  readonly type: 'function'
+  readonly function: {
+    readonly name: string
+    readonly arguments: string
+  }
+}
+
+interface OpenAIUserMessage {
+  readonly role: 'user'
+  readonly content: string | OpenAIContentPart[]
+}
+
+interface OpenAIAssistantMessage {
+  readonly role: 'assistant'
+  readonly content: string | null
+  readonly tool_calls?: OpenAIToolCall[]
+}
+
+interface OpenAIToolMessage {
+  readonly role: 'tool'
+  readonly tool_call_id: string
+  readonly content: string
+}
+
+interface OpenAISystemMessage {
+  readonly role: 'system'
+  readonly content: string
+}
+
+type OpenAIMessage = OpenAIUserMessage | OpenAIAssistantMessage | OpenAIToolMessage | OpenAISystemMessage
+
+interface OpenAITool {
+  readonly type: 'function'
+  readonly function: {
+    readonly name: string
+    readonly description: string
+    readonly parameters: Record<string, unknown>
+  }
+}
+
+// --- OpenAI Message Normalization ---
+
+export function normalizeMessagesForOpenAI(messages: ReadonlyArray<EngineMessage>): OpenAIMessage[] {
+  const result: OpenAIMessage[] = []
+
+  for (const msg of messages) {
+    if (isToolResultMessage(msg)) {
+      for (const tr of msg.toolResults) {
+        result.push({
+          role: 'tool',
+          tool_call_id: tr.tool_use_id,
+          content: tr.content,
+        })
+      }
+      continue
+    }
+
+    if (msg.role === 'assistant') {
+      const textParts = msg.content.filter((b) => b.type === 'text')
+      const toolUseParts = msg.content.filter((b) => b.type === 'tool_use')
+
+      const textContent = textParts.map((b) => (b as { text: string }).text).join('')
+
+      const toolCalls: OpenAIToolCall[] = toolUseParts.map((b) => {
+        const tu = b as { id: string; name: string; input: Record<string, unknown> }
+        return {
+          id: tu.id,
+          type: 'function' as const,
+          function: {
+            name: tu.name,
+            arguments: JSON.stringify(tu.input),
+          },
+        }
+      })
+
+      const assistantMsg: OpenAIAssistantMessage = {
+        role: 'assistant',
+        content: textContent || null,
+        ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+      }
+
+      result.push(assistantMsg)
+      continue
+    }
+
+    // User message (non-tool-result)
+    if (typeof msg.content === 'string') {
+      result.push({ role: 'user', content: msg.content })
+      continue
+    }
+
+    const contentParts: OpenAIContentPart[] = msg.content.map((block: ContentBlock): OpenAIContentPart => {
+      if (block.type === 'image') {
+        const mimeType = block.source.media_type
+        const data = block.source.data
+        const url = block.source.type === 'base64'
+          ? `data:${mimeType};base64,${data}`
+          : data
+        return {
+          type: 'image_url',
+          image_url: { url },
+        }
+      }
+      return { type: 'text', text: block.type === 'text' ? block.text : '' }
+    })
+
+    result.push({ role: 'user', content: contentParts })
+  }
+
+  return result
+}
+
+// --- OpenAI Tool Conversion ---
+
+export function toOpenAITool(tool: ToolDefinition): OpenAITool {
+  return {
+    type: 'function',
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.inputSchema,
+    },
+  }
+}
+
+// --- SSE Line Reader ---
+
+export async function* readSSELines(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+  const reader = body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (trimmed === '') continue
+        if (trimmed.startsWith('data: ')) {
+          const data = trimmed.slice(6)
+          yield data
+        }
+      }
+    }
+
+    // Process remaining buffer
+    if (buffer.trim() !== '') {
+      const trimmed = buffer.trim()
+      if (trimmed.startsWith('data: ')) {
+        yield trimmed.slice(6)
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
+}
+
+// --- OpenAI Adapter ---
+
+export class OpenAIAdapter implements LLMAdapter {
+  private config: LLMAdapterConfig
+
+  constructor(config: LLMAdapterConfig) {
+    this.config = config
+  }
+
+  updateConfig(config: Partial<LLMAdapterConfig>): void {
+    this.config = {
+      endpoint: config.endpoint ?? this.config.endpoint,
+      apikey: config.apikey ?? this.config.apikey,
+    }
+  }
+
+  async *stream(params: LLMStreamParams): AsyncGenerator<StreamChunk> {
+    const messages = normalizeMessagesForOpenAI(params.messages)
+    const tools = params.tools.map(toOpenAITool)
+
+    const body: Record<string, unknown> = {
+      model: params.model,
+      max_tokens: params.maxTokens ?? 4096,
+      messages: [
+        { role: 'system', content: params.systemPrompt },
+        ...messages,
+      ],
+      stream: true,
+      stream_options: { include_usage: true },
+    }
+
+    if (tools.length > 0) {
+      body.tools = tools
+    }
+
+    try {
+      const response = await fetch(`${this.config.endpoint}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.config.apikey}`,
+        },
+        body: JSON.stringify(body),
+        signal: params.signal,
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        yield { type: 'error', error: `OpenAI API error ${response.status}: ${errorText}` }
+        return
+      }
+
+      if (!response.body) {
+        yield { type: 'error', error: 'No response body received' }
+        return
+      }
+
+      let messageStarted = false
+      const activeToolCalls = new Map<number, string>() // index -> id
+
+      for await (const line of readSSELines(response.body)) {
+        if (line === '[DONE]') break
+
+        let data: Record<string, unknown>
+        try {
+          data = JSON.parse(line)
+        } catch {
+          continue
+        }
+
+        // Emit message_start on first chunk
+        if (!messageStarted) {
+          messageStarted = true
+          const id = (data as { id?: string }).id ?? 'msg_openai'
+          yield { type: 'message_start', messageId: id }
+        }
+
+        // Handle usage-only chunk (final chunk with stream_options.include_usage)
+        const usage = data.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined
+        const choices = data.choices as Array<{
+          delta?: {
+            content?: string | null
+            tool_calls?: Array<{
+              index: number
+              id?: string
+              function?: { name?: string; arguments?: string }
+            }>
+          }
+          finish_reason?: string | null
+        }> | undefined
+
+        if (choices && choices.length > 0) {
+          const choice = choices[0]
+          const delta = choice.delta
+
+          if (delta) {
+            // Text content
+            if (delta.content) {
+              yield { type: 'text_delta', text: delta.content }
+            }
+
+            // Tool calls
+            if (delta.tool_calls) {
+              for (const tc of delta.tool_calls) {
+                const idx = tc.index
+
+                // New tool call start
+                if (tc.id) {
+                  activeToolCalls.set(idx, tc.id)
+                  yield {
+                    type: 'tool_use_start',
+                    id: tc.id,
+                    name: tc.function?.name ?? '',
+                  }
+                }
+
+                // Tool call argument delta
+                if (tc.function?.arguments) {
+                  const id = activeToolCalls.get(idx) ?? ''
+                  yield {
+                    type: 'tool_use_delta',
+                    id,
+                    inputJson: tc.function.arguments,
+                  }
+                }
+              }
+            }
+          }
+
+          // Finish reason
+          if (choice.finish_reason === 'tool_calls') {
+            for (const [, id] of activeToolCalls) {
+              yield { type: 'tool_use_end', id }
+            }
+            activeToolCalls.clear()
+            yield {
+              type: 'message_end',
+              stopReason: 'tool_use',
+              ...(usage ? { usage: { inputTokens: usage.prompt_tokens ?? 0, outputTokens: usage.completion_tokens ?? 0 } } : {}),
+            }
+          } else if (choice.finish_reason === 'stop') {
+            yield {
+              type: 'message_end',
+              stopReason: 'end_turn',
+              ...(usage ? { usage: { inputTokens: usage.prompt_tokens ?? 0, outputTokens: usage.completion_tokens ?? 0 } } : {}),
+            }
+          } else if (choice.finish_reason === 'length') {
+            yield {
+              type: 'message_end',
+              stopReason: 'max_tokens',
+              ...(usage ? { usage: { inputTokens: usage.prompt_tokens ?? 0, outputTokens: usage.completion_tokens ?? 0 } } : {}),
+            }
+          }
+        }
+
+        // Usage-only chunk (no choices, just usage)
+        if (usage && (!choices || choices.length === 0)) {
+          yield {
+            type: 'message_end',
+            stopReason: null,
+            usage: {
+              inputTokens: usage.prompt_tokens ?? 0,
+              outputTokens: usage.completion_tokens ?? 0,
+            },
+          }
         }
       }
     } catch (error) {
