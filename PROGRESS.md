@@ -1,6 +1,24 @@
 # Crabot 项目进度
 
-> 最后更新：2026-03-29 — PromptManager 统一提示词管理 + 群聊决策优化 + Trace 持久化 + Channel Host 主动推送
+> 最后更新：2026-04-03 — Agent Engine V2 计划（替换 claude-agent-sdk，自研执行引擎）
+
+## 当前进行中：Agent Engine V2
+
+**目标**：替换 `@anthropic-ai/claude-agent-sdk` 依赖，自研执行引擎，支持多 LLM 格式
+
+**计划文档**：`crabot-agent/docs/plans/2026-04-03-engine-v2.md`
+
+**Phase 1 进度**（最小可用引擎）：
+- [ ] Task 1: Engine Types
+- [ ] Task 2: LLM Adapter (Anthropic)
+- [ ] Task 3: Stream Processor
+- [ ] Task 4: Tool Framework
+- [ ] Task 5: Tool Orchestration
+- [ ] Task 6: Context Manager
+- [ ] Task 7: Core Query Loop
+- [ ] Task 8: MCP Server Migration
+- [ ] Task 9: Worker Handler Rewrite
+- [ ] Task 10: Remove SDK Dependency
 
 ---
 
