@@ -6,11 +6,13 @@ import {
   type ContentBlock,
   createUserMessage,
 } from './types'
+import { callNonStreaming, type LLMAdapter } from './llm-adapter'
 
 export interface ContextManagerOptions {
   readonly maxContextTokens: number
   readonly compactThreshold?: number    // 0-1, default 0.8
   readonly keepRecentMessages?: number  // default 6
+  readonly compactSystemPrompt?: string
 }
 
 interface CumulativeUsage {
@@ -24,16 +26,26 @@ const CHARS_PER_TOKEN = 4
 const MESSAGE_OVERHEAD_TOKENS = 4
 const IMAGE_TOKENS = 1000
 
+const DEFAULT_COMPACT_SYSTEM_PROMPT = `You are summarizing a conversation for context preservation. Create a concise summary that captures:
+- Key decisions and outcomes
+- Important context that may be needed later
+- Tool calls made and their results (briefly)
+- Any unresolved questions or pending work
+
+Be concise. Output only the summary, no preamble.`
+
 export class ContextManager {
   private readonly maxContextTokens: number
   private readonly compactThreshold: number
   private readonly keepRecentMessages: number
+  private readonly compactSystemPrompt: string
   private cumulativeUsage: CumulativeUsage
 
   constructor(options: ContextManagerOptions) {
     this.maxContextTokens = options.maxContextTokens
     this.compactThreshold = options.compactThreshold ?? DEFAULT_COMPACT_THRESHOLD
     this.keepRecentMessages = options.keepRecentMessages ?? DEFAULT_KEEP_RECENT
+    this.compactSystemPrompt = options.compactSystemPrompt ?? DEFAULT_COMPACT_SYSTEM_PROMPT
     this.cumulativeUsage = { inputTokens: 0, outputTokens: 0 }
   }
 
@@ -86,6 +98,46 @@ export class ContextManager {
     return [summaryMessage, ...recentMessages]
   }
 
+  async compactWithLLM(
+    messages: ReadonlyArray<EngineMessage>,
+    adapter: LLMAdapter,
+    model: string,
+  ): Promise<ReadonlyArray<EngineMessage>> {
+    if (messages.length <= this.keepRecentMessages) {
+      return [...messages]
+    }
+
+    const splitIndex = messages.length - this.keepRecentMessages
+    const oldMessages = messages.slice(0, splitIndex)
+    const recentMessages = messages.slice(splitIndex)
+
+    try {
+      const summaryPrompt = this.buildSummaryPrompt(oldMessages)
+      const promptMessage = createUserMessage(summaryPrompt)
+
+      const response = await callNonStreaming(adapter, {
+        messages: [promptMessage],
+        systemPrompt: this.compactSystemPrompt,
+        tools: [],
+        model,
+      })
+
+      const summaryText = response.content
+        .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+        .map((b) => b.text)
+        .join('')
+
+      const summaryMessage = createUserMessage(
+        `[Earlier conversation summary]\n${summaryText}`
+      )
+
+      return [summaryMessage, ...recentMessages]
+    } catch {
+      // Fall back to text-based compaction
+      return this.compactMessages(messages)
+    }
+  }
+
   updateFromUsage(usage: { readonly inputTokens: number; readonly outputTokens: number }): void {
     this.cumulativeUsage = {
       inputTokens: this.cumulativeUsage.inputTokens + usage.inputTokens,
@@ -132,6 +184,41 @@ export class ContextManager {
 
     const conversationSummary = parts.join('\n')
     return `[Summary of earlier conversation]\n${conversationSummary}`
+  }
+
+  private buildSummaryPrompt(messages: ReadonlyArray<EngineMessage>): string {
+    const parts: string[] = []
+    const toolNames = new Set<string>()
+
+    for (const msg of messages) {
+      if (msg.role === 'assistant') {
+        const assistantMsg = msg as EngineAssistantMessage
+        for (const block of assistantMsg.content) {
+          if (block.type === 'tool_use') {
+            toolNames.add(block.name)
+          }
+        }
+      }
+
+      const role = msg.role === 'assistant' ? 'Assistant' : 'User'
+      const text = this.extractText(msg)
+      if (text) {
+        parts.push(`${role}: ${text}`)
+      }
+    }
+
+    const lines: string[] = [
+      'Summarize the following conversation:',
+      '',
+      ...parts,
+    ]
+
+    if (toolNames.size > 0) {
+      lines.push('')
+      lines.push(`Tools used: ${[...toolNames].join(', ')}`)
+    }
+
+    return lines.join('\n')
   }
 
   private extractText(msg: EngineMessage): string {
