@@ -20,7 +20,12 @@
 - [x] Task 9: Worker Handler Rewrite (21 tests)
 - [x] Task 10: Remove SDK Dependency
 
-**总计：93 个测试通过，@anthropic-ai/claude-agent-sdk 已移除**
+**Phase 2 进度**（多格式 LLM 支持）— **已完成 2026-04-04**：
+- [x] Task 11: OpenAI Adapter (15 tests, raw fetch + SSE streaming)
+- [x] Task 12: Adapter Factory + format routing (4 tests)
+- [x] Task 13: Front Handler migration to engine adapter (llm-client.ts 已删除)
+
+**总计：128 个测试通过，@anthropic-ai/claude-agent-sdk 已移除，Front+Worker 均通过 engine adapter 支持 anthropic/openai/gemini 格式**
 **分支：feat/engine-v2**
 
 ---
