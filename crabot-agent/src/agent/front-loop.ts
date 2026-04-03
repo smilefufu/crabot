@@ -76,14 +76,21 @@ export async function runFrontLoop(params: {
           .join('')
           .trim()
 
-        const decision: MessageDecision = text
-          ? { type: 'direct_reply', reply: { type: 'text', text } }
-          : allowSilent
-            ? { type: 'silent' }
-            : { type: 'direct_reply', reply: { type: 'text', text: '你好，有什么我可以帮助你的吗？' } }
+        if (text) {
+          const decision: MessageDecision = { type: 'direct_reply', reply: { type: 'text', text } }
+          if (loopSpanId) traceCallback?.onLoopEnd(loopSpanId, 'completed', round + 1)
+          return { decision }
+        }
 
-        if (loopSpanId) traceCallback?.onLoopEnd(loopSpanId, 'completed', round + 1)
-        return { decision }
+        if (allowSilent) {
+          if (loopSpanId) traceCallback?.onLoopEnd(loopSpanId, 'completed', round + 1)
+          return { decision: { type: 'silent' } }
+        }
+
+        // 私聊/被@场景下 LLM 没输出文本也没调 make_decision，注入提示让它重试
+        messages.push({ role: 'assistant', content: response.content as MessageParam['content'] })
+        messages.push({ role: 'user', content: '你必须调用 make_decision 工具输出决策，不能留空。请现在调用。' })
+        continue
       }
 
       // Case 2: tool_use
