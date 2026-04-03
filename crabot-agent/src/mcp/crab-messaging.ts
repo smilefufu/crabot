@@ -7,8 +7,7 @@
  * @see crabot-docs/protocols/protocol-crab-messaging.md
  */
 
-import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
-import type { McpServerConfig as SdkMcpServerConfig } from '@anthropic-ai/claude-agent-sdk'
+import { createMcpServer, type McpServer } from './mcp-helpers.js'
 import { z } from 'zod/v4'
 import type { RpcClient } from '../core/module-base.js'
 import type { ModuleId, FriendId } from '../core/base-protocol.js'
@@ -111,17 +110,15 @@ async function withRetry<T>(
 export function createCrabMessagingServer(
   deps: CrabMessagingDeps,
   sandboxPathMappingsRef?: { current: PathMapping[] },
-): SdkMcpServerConfig {
+): McpServer {
   const { rpcClient, moduleId, getAdminPort, resolveChannelPort } = deps
 
-  const server = createSdkMcpServer({
-    name: 'crab-messaging',
-    version: '1.0.0',
-    tools: [
-      // ================================================================
-      // 1. lookup_friend — 查找熟人
-      // ================================================================
-      tool(
+  const server = createMcpServer({ name: 'crab-messaging', version: '1.0.0' })
+
+  // ================================================================
+  // 1. lookup_friend — 查找熟人
+  // ================================================================
+  server.tool(
         'lookup_friend',
         '搜索熟人信息，包括该熟人在哪些 Channel 上有身份。可按名称模糊搜索或按 friend_id 精确查找。',
         {
@@ -195,7 +192,7 @@ export function createCrabMessagingServer(
       // ================================================================
       // 2. list_friends — 列出好友列表
       // ================================================================
-      tool(
+  server.tool(
         'list_friends',
         '列出所有好友，支持分页、搜索和权限过滤。',
         {
@@ -252,7 +249,7 @@ export function createCrabMessagingServer(
       // ================================================================
       // 3. list_sessions — 查看会话列表
       // ================================================================
-      tool(
+  server.tool(
         'list_sessions',
         '查看指定 Channel 上的会话列表。',
         {
@@ -288,7 +285,7 @@ export function createCrabMessagingServer(
       // ================================================================
       // 4. open_private_session — 打开/创建私聊
       // ================================================================
-      tool(
+  server.tool(
         'open_private_session',
         '在指定 Channel 上查找或创建与某个熟人的私聊 Session。',
         {
@@ -348,7 +345,7 @@ export function createCrabMessagingServer(
       // ================================================================
       // 5. send_message — 发送消息
       // ================================================================
-      tool(
+  server.tool(
         'send_message',
         '在指定 Channel 的指定 Session 中发送消息。支持文本、媒体 URL、本地文件路径。',
         {
@@ -475,7 +472,7 @@ export function createCrabMessagingServer(
       // ================================================================
       // 6. get_history — 查看聊天记录
       // ================================================================
-      tool(
+  server.tool(
         'get_history',
         '查看指定 Channel 上某个 Session 的历史消息。',
         {
@@ -570,9 +567,7 @@ export function createCrabMessagingServer(
             }
           }
         },
-      ),
-    ],
-  })
+  )
 
-  return server as unknown as SdkMcpServerConfig
+  return server
 }

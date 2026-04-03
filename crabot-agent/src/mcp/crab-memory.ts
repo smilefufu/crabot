@@ -8,8 +8,7 @@
  * @see crabot-docs/design-records/design-decisions.md §4.3 路径二
  */
 
-import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
-import type { McpServerConfig as SdkMcpServerConfig } from '@anthropic-ai/claude-agent-sdk'
+import { createMcpServer, type McpServer } from './mcp-helpers.js'
 import { z } from 'zod/v4'
 import type { RpcClient } from '../core/module-base.js'
 
@@ -39,14 +38,12 @@ export interface MemoryTaskContext {
 export function createCrabMemoryServer(
   deps: CrabMemoryDeps,
   ctx: MemoryTaskContext,
-): SdkMcpServerConfig {
+): McpServer {
   const { rpcClient, moduleId, getMemoryPort } = deps
 
-  const server = createSdkMcpServer({
-    name: 'crab-memory',
-    version: '1.0.0',
-    tools: [
-      tool(
+  const server = createMcpServer({ name: 'crab-memory', version: '1.0.0' })
+
+  server.tool(
         'store_memory',
         '将信息写入长期记忆。用户要求记住时必须使用；发现有价值的偏好、案例、模式等信息时也应主动使用。',
         {
@@ -104,7 +101,7 @@ export function createCrabMemoryServer(
           }
         },
       ),
-      tool(
+  server.tool(
         'search_memory',
         '搜索记忆，返回摘要列表（L0 级别）。可按语义查询、按分类过滤。',
         {
@@ -149,7 +146,7 @@ export function createCrabMemoryServer(
           }
         },
       ),
-      tool(
+  server.tool(
         'get_memory_detail',
         '获取某条长期记忆的详细内容。先用 search_memory 找到记忆 ID，再用此工具查看详情。',
         {
@@ -175,9 +172,7 @@ export function createCrabMemoryServer(
             return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: message }) }] }
           }
         },
-      ),
-    ],
-  })
+  )
 
-  return server as unknown as SdkMcpServerConfig
+  return server
 }

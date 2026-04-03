@@ -209,7 +209,7 @@ export class WorkerHandler {
       const externalMcpConfigs = this.mcpConfigFactory?.() ?? {}
       const mcpServers: Record<string, SdkMcpServerConfig> = {
         'crabot-worker': askHumanServer as unknown as SdkMcpServerConfig,
-        ...(crabMemoryServer ? { 'crab-memory': crabMemoryServer } : {}),
+        ...(crabMemoryServer ? { 'crab-memory': crabMemoryServer as unknown as SdkMcpServerConfig } : {}),
         ...externalMcpConfigs,
       }
 

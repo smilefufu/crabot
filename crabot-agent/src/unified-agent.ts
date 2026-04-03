@@ -41,7 +41,8 @@ import { FrontHandler } from './agent/front-handler.js'
 import type { LLMClientConfig } from './agent/llm-client.js'
 import type { ToolExecutorDeps } from './agent/tool-executor.js'
 import { WorkerHandler, type SdkEnvConfig } from './agent/worker-handler.js'
-import type { McpServerConfig as SdkMcpServerConfig } from '@anthropic-ai/claude-agent-sdk'
+import type { McpServerConfig as SdkMcpServerConfig } from '@anthropic-ai/claude-agent-sdk' // TODO(task-9): remove after worker-handler rewrite
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { MCPManager } from './agent/mcp-manager.js'
 import { createCrabMessagingServer, type PathMapping } from './mcp/crab-messaging.js'
 import { TraceStore } from './core/trace-store.js'
@@ -202,6 +203,7 @@ export class UnifiedAgent extends ModuleBase {
     // MCP config factory: creates fresh McpServer instances per runSdk() call
     // This avoids the "Already connected to a transport" Protocol reuse error
     const externalMcpConfigs = this.buildExternalMcpConfigs(config.mcp_servers)
+    // TODO(task-9): after worker-handler rewrite, change return type to Record<string, McpServer>
     const createMcpConfigs = (): Record<string, SdkMcpServerConfig> => ({
       'crab-messaging': createCrabMessagingServer({
         rpcClient: this.rpcClient,
@@ -1658,6 +1660,7 @@ ${skillsSection}
 
     // MCP config factory: creates fresh McpServer instances per runSdk() call
     const externalMcpConfigs = this.buildExternalMcpConfigs(this.agentConfig?.mcp_servers)
+    // TODO(task-9): after worker-handler rewrite, change return type to Record<string, McpServer>
     const createMcpConfigs = (): Record<string, SdkMcpServerConfig> => ({
       'crab-messaging': createCrabMessagingServer({
         rpcClient: this.rpcClient,
