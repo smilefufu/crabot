@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import { api } from '../services/api'
 
 interface ConfigStatus {
@@ -83,8 +83,38 @@ const styles = {
   } as React.CSSProperties,
 }
 
+const HIGHLIGHT_KEYFRAMES = `
+@keyframes config-highlight-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(232, 180, 74, 0); }
+  25%, 75% { box-shadow: 0 0 0 4px rgba(232, 180, 74, 0.4); }
+  50% { box-shadow: 0 0 0 6px rgba(232, 180, 74, 0.25); }
+}
+`
+
+function highlightElement(id: string) {
+  const el = document.getElementById(id)
+  if (!el) return
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  el.style.animation = 'config-highlight-pulse 1s ease-in-out 2'
+  el.style.borderRadius = '12px'
+  const cleanup = () => {
+    el.style.animation = ''
+    el.removeEventListener('animationend', cleanup)
+  }
+  el.addEventListener('animationend', cleanup)
+}
+
+/** Maps missing message keywords to DOM element IDs on the /providers page */
+function getTargetElementId(missing: string[]): string | null {
+  for (const msg of missing) {
+    if (msg.includes('LLM') || msg.includes('Embedding')) return 'global-model-config'
+  }
+  return null
+}
+
 export const ConfigStatusBanner: React.FC = () => {
   const [status, setStatus] = useState<ConfigStatus | null>(null)
+  const location = useLocation()
 
   useEffect(() => {
     api.get<ConfigStatus>('/config/status')
@@ -92,8 +122,28 @@ export const ConfigStatusBanner: React.FC = () => {
       .catch(() => {})
   }, [])
 
+  // Inject keyframes once
+  useEffect(() => {
+    const styleId = 'config-highlight-style'
+    if (document.getElementById(styleId)) return
+    const style = document.createElement('style')
+    style.id = styleId
+    style.textContent = HIGHLIGHT_KEYFRAMES
+    document.head.appendChild(style)
+  }, [])
+
   if (!status || status.configured) return null
   if (!Array.isArray(status.missing) || status.missing.length === 0) return null
+
+  const isOnProvidersPage = location.pathname === '/providers'
+  const targetId = isOnProvidersPage ? getTargetElementId(status.missing) : null
+
+  const handleHighlight = (e: React.MouseEvent) => {
+    if (targetId) {
+      e.preventDefault()
+      highlightElement(targetId)
+    }
+  }
 
   return (
     <div style={styles.banner}>
@@ -112,10 +162,11 @@ export const ConfigStatusBanner: React.FC = () => {
       <Link
         to="/providers"
         style={styles.link}
+        onClick={handleHighlight}
         onMouseEnter={e => { e.currentTarget.style.opacity = '0.85' }}
         onMouseLeave={e => { e.currentTarget.style.opacity = '1' }}
       >
-        前往配置
+        {targetId ? '定位到配置' : '前往配置'}
         <span style={{ fontSize: '0.75rem' }}>→</span>
       </Link>
     </div>
