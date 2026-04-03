@@ -2,30 +2,32 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { WorkerHandler } from '../../src/agent/worker-handler.js'
 import type {
   ExecuteTaskParams,
-  WorkerAgentContext
+  WorkerAgentContext,
+  EngineResult,
 } from '../../src/types.js'
 
-// Mock the claude-agent-sdk query function used internally by WorkerHandler
-vi.mock('@anthropic-ai/claude-agent-sdk', () => {
-  const mockQuery = vi.fn()
+// Mock the engine's runEngine function
+vi.mock('../../src/engine/index.js', async (importOriginal) => {
+  const actual = await importOriginal() as Record<string, unknown>
   return {
-    query: mockQuery,
-    createSdkMcpServer: vi.fn().mockReturnValue({}),
-    tool: vi.fn().mockImplementation((name: string, _desc: string, _schema: unknown, handler: Function) => ({
-      name,
-      handler,
-    })),
+    ...actual,
+    runEngine: vi.fn(),
   }
 })
 
-import { query } from '@anthropic-ai/claude-agent-sdk'
-const mockQuery = vi.mocked(query)
+import { runEngine } from '../../src/engine/index.js'
+const mockRunEngine = vi.mocked(runEngine)
 
-function makeHandler(options?: { maxIterations?: number }) {
-  const sdkEnv = { modelId: 'test-model', env: {} }
+function makeHandler() {
+  const sdkEnv = {
+    modelId: 'test-model',
+    env: {
+      ANTHROPIC_BASE_URL: 'http://localhost:4000',
+      ANTHROPIC_API_KEY: 'test-key',
+    },
+  }
   const config = {
     systemPrompt: 'You are a helpful worker.',
-    maxIterations: options?.maxIterations,
   }
   return new WorkerHandler(sdkEnv, config)
 }
@@ -52,18 +54,19 @@ function makeContext(): WorkerAgentContext {
   }
 }
 
-/** Create an async iterable that yields SDK messages */
-function makeQueryStream(messages: Array<Record<string, unknown>>) {
-  async function* gen() {
-    for (const msg of messages) {
-      yield msg
-    }
+function makeEngineResult(overrides?: Partial<{
+  outcome: string
+  finalText: string
+  totalTurns: number
+  error?: string
+}>): { outcome: 'completed' | 'failed' | 'max_turns' | 'aborted'; finalText: string; totalTurns: number; usage: { inputTokens: number; outputTokens: number }; error?: string } {
+  return {
+    outcome: (overrides?.outcome ?? 'completed') as 'completed' | 'failed' | 'max_turns' | 'aborted',
+    finalText: overrides?.finalText ?? 'Task completed successfully.',
+    totalTurns: overrides?.totalTurns ?? 1,
+    usage: { inputTokens: 100, outputTokens: 50 },
+    ...(overrides?.error ? { error: overrides.error } : {}),
   }
-  const iterable = gen()
-  // add streamInput and interrupt as expected by WorkerHandler
-  ;(iterable as any).streamInput = vi.fn().mockResolvedValue(undefined)
-  ;(iterable as any).interrupt = vi.fn().mockResolvedValue(undefined)
-  return iterable
 }
 
 describe('WorkerHandler', () => {
@@ -72,18 +75,10 @@ describe('WorkerHandler', () => {
   })
 
   describe('executeTask', () => {
-    it('应该成功执行任务', async () => {
-      mockQuery.mockReturnValue(makeQueryStream([
-        { type: 'system', subtype: 'init', model: 'test-model', tools: [], mcp_servers: [] },
-        {
-          type: 'assistant',
-          message: {
-            content: [{ type: 'text', text: 'Task completed successfully. The bug has been fixed.' }],
-            stop_reason: 'end_turn',
-          },
-        },
-        { type: 'result', subtype: 'success', result: 'Task completed successfully. The bug has been fixed.', is_error: false },
-      ]))
+    it('should successfully execute a task', async () => {
+      mockRunEngine.mockResolvedValue(makeEngineResult({
+        finalText: 'Task completed successfully. The bug has been fixed.',
+      }))
 
       const handler = makeHandler()
       const result = await handler.executeTask({ task: makeTask(), context: makeContext() })
@@ -93,15 +88,16 @@ describe('WorkerHandler', () => {
       expect(result.summary).toContain('Task completed successfully')
     })
 
-    it('应该处理执行失败', async () => {
-      mockQuery.mockReturnValue(makeQueryStream([
-        { type: 'system', subtype: 'init', model: 'test-model', tools: [], mcp_servers: [] },
-        { type: 'result', subtype: 'error', is_error: true, errors: ['API error'] },
-      ]))
+    it('should handle execution failure', async () => {
+      mockRunEngine.mockResolvedValue(makeEngineResult({
+        outcome: 'failed',
+        finalText: 'API error',
+        error: 'API error',
+      }))
 
       const handler = makeHandler()
       const result = await handler.executeTask({
-        task: makeTask({ task_id: 'task_1', task_title: 'Test task', task_description: 'Test', priority: 'low' }),
+        task: makeTask({ task_id: 'task_1' }),
         context: makeContext(),
       })
 
@@ -109,46 +105,59 @@ describe('WorkerHandler', () => {
       expect(result.outcome).toBe('failed')
     })
 
-    it('应该使用配置的 max_iterations', async () => {
-      mockQuery.mockReturnValue(makeQueryStream([
-        { type: 'system', subtype: 'init', model: 'test-model', tools: [], mcp_servers: [] },
-        { type: 'result', subtype: 'success', result: 'Done', is_error: false },
-      ]))
+    it('should call runEngine with correct parameters', async () => {
+      mockRunEngine.mockResolvedValue(makeEngineResult())
 
-      const handler = makeHandler({ maxIterations: 10 })
+      const handler = makeHandler()
       await handler.executeTask({ task: makeTask(), context: makeContext() })
 
-      expect(mockQuery).toHaveBeenCalled()
+      expect(mockRunEngine).toHaveBeenCalledTimes(1)
+      const callArgs = mockRunEngine.mock.calls[0][0]
+      expect(callArgs.prompt).toContain('Fix login bug')
+      expect(callArgs.options.model).toBe('test-model')
+      expect(callArgs.options.systemPrompt).toContain('You are a helpful worker.')
+    })
+
+    it('should handle aborted result', async () => {
+      mockRunEngine.mockResolvedValue(makeEngineResult({
+        outcome: 'aborted',
+        finalText: '',
+      }))
+
+      const handler = makeHandler()
+      const result = await handler.executeTask({ task: makeTask(), context: makeContext() })
+
+      expect(result.outcome).toBe('failed')
+      expect(result.summary).toContain('取消')
+    })
+
+    it('should handle engine exception', async () => {
+      mockRunEngine.mockRejectedValue(new Error('Connection failed'))
+
+      const handler = makeHandler()
+      const result = await handler.executeTask({ task: makeTask(), context: makeContext() })
+
+      expect(result.outcome).toBe('failed')
+      expect(result.summary).toContain('Connection failed')
     })
   })
 
   describe('deliverHumanResponse', () => {
-    it('应该抛出错误如果任务不存在', () => {
+    it('should throw error if task does not exist', () => {
       const handler = makeHandler()
       expect(() => handler.deliverHumanResponse('nonexistent_task', [])).toThrow('Task not found')
     })
 
-    it('应该投递消息到进行中的任务', async () => {
-      // Make the stream slow so the task is in progress when we deliver
-      let resolveStream: () => void
-      const streamDone = new Promise<void>(r => { resolveStream = r })
-
-      mockQuery.mockReturnValue((() => {
-        async function* gen() {
-          yield { type: 'system', subtype: 'init', model: 'test-model', tools: [], mcp_servers: [] }
-          await streamDone
-          yield { type: 'result', subtype: 'success', result: 'Done', is_error: false }
-        }
-        const it = gen()
-        ;(it as any).streamInput = vi.fn().mockResolvedValue(undefined)
-        ;(it as any).interrupt = vi.fn().mockResolvedValue(undefined)
-        return it
-      })())
+    it('should deliver messages to an in-progress task', async () => {
+      let resolveEngine: (value: ReturnType<typeof makeEngineResult>) => void
+      mockRunEngine.mockReturnValue(
+        new Promise(resolve => { resolveEngine = resolve }),
+      )
 
       const handler = makeHandler()
       const promise = handler.executeTask({ task: makeTask(), context: makeContext() })
 
-      // Wait briefly so the task is registered in activeTasks
+      // Wait briefly so the task is registered
       await new Promise(r => setTimeout(r, 20))
 
       expect(() => {
@@ -162,30 +171,21 @@ describe('WorkerHandler', () => {
         }])
       }).not.toThrow()
 
-      resolveStream!()
+      resolveEngine!(makeEngineResult())
       await promise
     })
   })
 
   describe('cancelTask', () => {
-    it('应该能够取消任务', () => {
-      const handler = makeHandler()
-      expect(typeof handler.cancelTask).toBe('function')
-      expect(() => handler.cancelTask('nonexistent_task', 'Test')).not.toThrow()
-    })
-
-    it('应该静默处理不存在的任务', () => {
+    it('should not throw for non-existent task', () => {
       const handler = makeHandler()
       expect(() => handler.cancelTask('nonexistent_task', 'Test')).not.toThrow()
     })
   })
 
   describe('getActiveTaskCount', () => {
-    it('任务完成后活跃任务数应为 0', async () => {
-      mockQuery.mockReturnValue(makeQueryStream([
-        { type: 'system', subtype: 'init', model: 'test-model', tools: [], mcp_servers: [] },
-        { type: 'result', subtype: 'success', result: 'Done', is_error: false },
-      ]))
+    it('should be 0 after task completes', async () => {
+      mockRunEngine.mockResolvedValue(makeEngineResult())
 
       const handler = makeHandler()
       await handler.executeTask({ task: makeTask(), context: makeContext() })

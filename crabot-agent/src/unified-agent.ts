@@ -41,7 +41,6 @@ import { FrontHandler } from './agent/front-handler.js'
 import type { LLMClientConfig } from './agent/llm-client.js'
 import type { ToolExecutorDeps } from './agent/tool-executor.js'
 import { WorkerHandler, type SdkEnvConfig } from './agent/worker-handler.js'
-import type { McpServerConfig as SdkMcpServerConfig } from '@anthropic-ai/claude-agent-sdk' // TODO(task-9): remove after worker-handler rewrite
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { MCPManager } from './agent/mcp-manager.js'
 import { createCrabMessagingServer, type PathMapping } from './mcp/crab-messaging.js'
@@ -203,14 +202,13 @@ export class UnifiedAgent extends ModuleBase {
     // MCP config factory: creates fresh McpServer instances per runSdk() call
     // This avoids the "Already connected to a transport" Protocol reuse error
     const externalMcpConfigs = this.buildExternalMcpConfigs(config.mcp_servers)
-    // TODO(task-9): after worker-handler rewrite, change return type to Record<string, McpServer>
-    const createMcpConfigs = (): Record<string, SdkMcpServerConfig> => ({
+    const createMcpConfigs = (): Record<string, McpServer> => ({
       'crab-messaging': createCrabMessagingServer({
         rpcClient: this.rpcClient,
         moduleId: this.config.moduleId,
         getAdminPort: () => this.getAdminPort(),
         resolveChannelPort: (channelId) => this.getChannelPort(channelId),
-      }, this.sandboxPathMappingsRef) as unknown as SdkMcpServerConfig,
+      }, this.sandboxPathMappingsRef),
       ...externalMcpConfigs,
     })
 
@@ -274,21 +272,16 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   /**
-   * 将 MCPServerConfig[] 转换为 SDK 的 Record<string, SdkMcpServerConfig>
+   * Build external MCP configs (stdio-based servers).
+   * TODO(task-10): migrate to MCPManager.startServers() for proper lifecycle management.
+   * Currently returns empty — external stdio MCP servers are not yet supported without claude-agent-sdk.
    */
   private buildExternalMcpConfigs(
-    configs?: Array<{ name: string; command: string; args?: string[]; env?: Record<string, string> }>
-  ): Record<string, SdkMcpServerConfig> {
-    if (!configs || configs.length === 0) return {}
-    const result: Record<string, SdkMcpServerConfig> = {}
-    for (const cfg of configs) {
-      result[cfg.name] = {
-        command: cfg.command,
-        args: cfg.args ?? [],
-        env: cfg.env,
-      } as unknown as SdkMcpServerConfig
-    }
-    return result
+    _configs?: Array<{ name: string; command: string; args?: string[]; env?: Record<string, string> }>
+  ): Record<string, McpServer> {
+    // External stdio MCP servers were previously handled by claude-agent-sdk.
+    // With the self-built engine, these need MCPManager integration (future task).
+    return {}
   }
 
   /**
@@ -1660,14 +1653,13 @@ ${skillsSection}
 
     // MCP config factory: creates fresh McpServer instances per runSdk() call
     const externalMcpConfigs = this.buildExternalMcpConfigs(this.agentConfig?.mcp_servers)
-    // TODO(task-9): after worker-handler rewrite, change return type to Record<string, McpServer>
-    const createMcpConfigs = (): Record<string, SdkMcpServerConfig> => ({
+    const createMcpConfigs = (): Record<string, McpServer> => ({
       'crab-messaging': createCrabMessagingServer({
         rpcClient: this.rpcClient,
         moduleId: this.config.moduleId,
         getAdminPort: () => this.getAdminPort(),
         resolveChannelPort: (channelId) => this.getChannelPort(channelId),
-      }, this.sandboxPathMappingsRef) as unknown as SdkMcpServerConfig,
+      }, this.sandboxPathMappingsRef),
       ...externalMcpConfigs,
     })
 

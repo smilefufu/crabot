@@ -1,27 +1,26 @@
 /**
- * Worker Handler v2 - 任务执行处理器
+ * Worker Handler v3 - 任务执行处理器（self-built engine）
  *
- * 直接使用 query() 的完整 session 能力：
- * - async generator 输入 + 流式事件输出
- * - streamInput() 注入纠偏消息
- * - interrupt() 优雅中断
- * - cwd 隔离、工具白名单、进度推送
- *
- * 不再依赖 sdk-runner.ts 中间层。
+ * 使用自建 engine 替代 claude-agent-sdk 的 query()：
+ * - runEngine() + AnthropicAdapter 驱动 LLM 循环
+ * - ToolDefinition[] 统一工具注册
+ * - humanMessageQueue 注入纠偏消息
+ * - AbortController 取消任务
+ * - MCP Server 工具自动转换为 ToolDefinition
  */
 
 import {
-  query,
-  createSdkMcpServer,
-  tool,
-} from '@anthropic-ai/claude-agent-sdk'
+  runEngine,
+  AnthropicAdapter,
+  defineTool,
+} from '../engine/index.js'
 import type {
-  Options as SdkOptions,
-  SDKMessage,
-  SDKUserMessage,
-  McpServerConfig as SdkMcpServerConfig,
-  Query,
-} from '@anthropic-ai/claude-agent-sdk'
+  ToolDefinition,
+  EngineTurnEvent,
+  EngineResult,
+  ContentBlock,
+} from '../engine/index.js'
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod/v4'
 import type {
   ExecuteTaskParams,
@@ -41,21 +40,12 @@ import { formatMessageContent } from './media-resolver.js'
 
 import * as fs from 'fs'
 import * as path from 'path'
-import { execSync } from 'child_process'
 
 const LOG_FILE = path.join(process.cwd(), '../data/worker-handler-debug.log')
 
 function log(msg: string) {
   const ts = new Date().toISOString()
   try { fs.appendFileSync(LOG_FILE, `[${ts}] ${msg}\n`) } catch { /* ignore */ }
-}
-
-function findClaudeCodePath(): string | undefined {
-  try {
-    return execSync('which claude', { encoding: 'utf-8' }).trim() || undefined
-  } catch {
-    return undefined
-  }
 }
 
 export interface WorkerHandlerConfig {
@@ -89,36 +79,135 @@ const INTERNAL_TOOL_PREFIXES = [
   'mcp__crab-messaging__',
 ]
 
-/** Tools the Worker SDK is allowed to use */
-const WORKER_ALLOWED_TOOLS = [
-  'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep',
-  'Skill',
-  'mcp__crab-messaging__lookup_friend',
-  'mcp__crab-messaging__list_friends',
-  'mcp__crab-messaging__list_sessions',
-  'mcp__crab-messaging__open_private_session',
-  'mcp__crab-messaging__send_message',
-  'mcp__crab-messaging__get_history',
-  'mcp__crabot-worker__ask_human',
-  'mcp__crab-memory__store_memory',
-  'mcp__crab-memory__search_memory',
-  'mcp__crab-memory__get_memory_detail',
-]
+// ============================================================================
+// MCP Server → ToolDefinition conversion
+// ============================================================================
+
+interface RegisteredMcpTool {
+  description?: string
+  inputSchema?: unknown
+  enabled?: boolean
+  handler: {
+    (args: Record<string, unknown>, extra: unknown): Promise<{ content: Array<{ type: string; text?: string }>; isError?: boolean }>
+  }
+}
+
+/**
+ * Convert a McpServer's registered tools into engine ToolDefinition[].
+ * Uses the internal _registeredTools map (McpServer from @modelcontextprotocol/sdk).
+ */
+function mcpServerToToolDefinitions(
+  server: McpServer,
+  serverName: string,
+): ToolDefinition[] {
+  // Access the internal _registeredTools map
+  const registeredTools = (server as unknown as { _registeredTools: Record<string, RegisteredMcpTool> })._registeredTools
+  if (!registeredTools) return []
+
+  const tools: ToolDefinition[] = []
+
+  for (const [toolName, registeredTool] of Object.entries(registeredTools)) {
+    if (registeredTool.enabled === false) continue
+
+    const prefixedName = `mcp__${serverName}__${toolName}`
+
+    // Convert zod schema to JSON schema for the engine
+    let inputSchema: Record<string, unknown> = { type: 'object', properties: {} }
+    if (registeredTool.inputSchema) {
+      try {
+        // Use zod's toJSONSchema if available, otherwise use a basic conversion
+        const zodSchema = registeredTool.inputSchema as { _def?: unknown }
+        if (typeof (z as unknown as { toJSONSchema?: unknown }).toJSONSchema === 'function') {
+          inputSchema = (z as unknown as { toJSONSchema: (s: unknown) => Record<string, unknown> }).toJSONSchema(zodSchema)
+        }
+      } catch {
+        // Fallback: empty object schema
+      }
+    }
+
+    const handler = registeredTool.handler
+    tools.push(defineTool({
+      name: prefixedName,
+      description: registeredTool.description ?? '',
+      inputSchema,
+      isReadOnly: false,
+      call: async (input) => {
+        try {
+          const result = await handler(input, {})
+          const textParts = (result.content ?? [])
+            .filter((block) => block.type === 'text' && block.text)
+            .map((block) => block.text as string)
+          return {
+            output: textParts.join('\n') || JSON.stringify(result.content),
+            isError: !!result.isError,
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          return { output: message, isError: true }
+        }
+      },
+    }))
+  }
+
+  return tools
+}
+
+// ============================================================================
+// Human Message Queue
+// ============================================================================
+
+/**
+ * A simple async queue that the engine polls via dequeue().
+ * deliverHumanResponse() pushes messages; the engine pulls them.
+ */
+class HumanMessageQueue {
+  private pending: Array<string | ContentBlock[]> = []
+  private waitResolve: ((value: string | ContentBlock[]) => void) | null = null
+
+  push(content: string | ContentBlock[]): void {
+    if (this.waitResolve) {
+      const resolve = this.waitResolve
+      this.waitResolve = null
+      resolve(content)
+    } else {
+      this.pending = [...this.pending, content]
+    }
+  }
+
+  async dequeue(): Promise<string | ContentBlock[]> {
+    if (this.pending.length > 0) {
+      const [first, ...rest] = this.pending
+      this.pending = rest
+      return first
+    }
+    return new Promise<string | ContentBlock[]>((resolve) => {
+      this.waitResolve = resolve
+    })
+  }
+
+  get hasPending(): boolean {
+    return this.pending.length > 0
+  }
+}
+
+// ============================================================================
+// WorkerHandler
+// ============================================================================
 
 export class WorkerHandler {
   private sdkEnv: SdkEnvConfig
   private systemPrompt: string
   private longTermPreloadLimit = 20
   private activeTasks: Map<TaskId, WorkerTaskState> = new Map()
-  /** Active query handles — for streamInput() injection */
-  private activeQueries: Map<TaskId, Query> = new Map()
-  private mcpConfigFactory: (() => Record<string, SdkMcpServerConfig>) | undefined
+  /** Human message queues for active tasks */
+  private humanQueues: Map<TaskId, HumanMessageQueue> = new Map()
+  private mcpConfigFactory: (() => Record<string, McpServer>) | undefined
   private deps?: WorkerDeps
 
   constructor(
     sdkEnv: SdkEnvConfig,
     config: WorkerHandlerConfig,
-    mcpConfigFactory?: () => Record<string, SdkMcpServerConfig>,
+    mcpConfigFactory?: () => Record<string, McpServer>,
     deps?: WorkerDeps,
   ) {
     this.sdkEnv = sdkEnv
@@ -145,6 +234,10 @@ export class WorkerHandler {
     }
     this.activeTasks.set(task.task_id, taskState)
 
+    // Create human message queue for this task
+    const humanQueue = new HumanMessageQueue()
+    this.humanQueues.set(task.task_id, humanQueue)
+
     try {
       // 1. Create isolated task directory
       await fs.promises.mkdir(taskDir, { recursive: true })
@@ -161,36 +254,40 @@ export class WorkerHandler {
         }
       }
 
-      // 3. Build MCP servers
-      const askHumanServer = createSdkMcpServer({
-        name: 'crabot-worker',
-        version: '1.0.0',
-        tools: [
-          tool(
-            'ask_human',
-            '请求人类反馈或确认',
-            {
-              question: z.string().describe('向人类提出的问题'),
-              options: z.array(z.string()).optional().describe('可选的选项列表'),
-            },
-            async (args) => {
-              taskState.status = 'waiting_for_human'
-              return {
-                content: [{
-                  type: 'text' as const,
-                  text: JSON.stringify({
-                    status: 'waiting',
-                    message: '已向人类发送问题，等待响应...',
-                    question: args.question,
-                  }),
-                }],
-              }
-            },
-          ),
-        ],
-      })
+      // 3. Build tools from MCP servers
+      const tools: ToolDefinition[] = []
 
-      // Build crab-memory MCP server (per-task, needs task context)
+      // 3a. ask_human built-in tool
+      tools.push(defineTool({
+        name: 'mcp__crabot-worker__ask_human',
+        description: '请求人类反馈或确认',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            question: { type: 'string', description: '向人类提出的问题' },
+            options: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '可选的选项列表',
+            },
+          },
+          required: ['question'],
+        },
+        isReadOnly: false,
+        call: async (input) => {
+          taskState.status = 'waiting_for_human'
+          return {
+            output: JSON.stringify({
+              status: 'waiting',
+              message: '已向人类发送问题，等待响应...',
+              question: (input as { question: string }).question,
+            }),
+            isError: false,
+          }
+        },
+      }))
+
+      // 3b. crab-memory MCP server tools
       const memoryTaskCtx: MemoryTaskContext = {
         taskId: task.task_id,
         channelId: context.task_origin?.channel_id,
@@ -198,69 +295,134 @@ export class WorkerHandler {
         visibility: context.memory_permissions?.write_visibility ?? 'public',
         scopes: context.memory_permissions?.write_scopes ?? [],
       }
-      const crabMemoryServer = this.deps?.getMemoryPort
-        ? createCrabMemoryServer({
-            rpcClient: this.deps.rpcClient,
-            moduleId: this.deps.moduleId,
-            getMemoryPort: this.deps.getMemoryPort,
-          }, memoryTaskCtx)
-        : undefined
-
-      const externalMcpConfigs = this.mcpConfigFactory?.() ?? {}
-      const mcpServers: Record<string, SdkMcpServerConfig> = {
-        'crabot-worker': askHumanServer as unknown as SdkMcpServerConfig,
-        ...(crabMemoryServer ? { 'crab-memory': crabMemoryServer as unknown as SdkMcpServerConfig } : {}),
-        ...externalMcpConfigs,
+      if (this.deps?.getMemoryPort) {
+        const crabMemoryServer = createCrabMemoryServer({
+          rpcClient: this.deps.rpcClient,
+          moduleId: this.deps.moduleId,
+          getMemoryPort: this.deps.getMemoryPort,
+        }, memoryTaskCtx)
+        tools.push(...mcpServerToToolDefinitions(crabMemoryServer, 'crab-memory'))
       }
 
-      // 4. Build allowedTools
-      const externalMcpToolNames = Object.keys(externalMcpConfigs)
-        .filter(name => name !== 'crabot-worker')
-        .map(name => `mcp__${name}__*`)
-      const allowedTools = [...WORKER_ALLOWED_TOOLS, ...externalMcpToolNames]
-
-      // 5. Build SDK options
-      const claudePath = findClaudeCodePath()
-      const cleanEnv = { ...process.env, ...this.sdkEnv.env } as Record<string, string | undefined>
-      delete cleanEnv.ANTHROPIC_AUTH_TOKEN
-
-      const sdkOptions: SdkOptions = {
-        systemPrompt: this.buildSystemPrompt(context),
-        model: this.sdkEnv.modelId,
-        env: cleanEnv,
-        cwd: taskDir,
-        settingSources: ['project'],
-        allowedTools,
-        mcpServers,
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
-        persistSession: false,
-        thinking: { type: 'disabled' },
-        // Worker 不设 maxTurns — 允许执行足够复杂的任务直到自然完成
-        ...(claudePath && { pathToClaudeCodeExecutable: claudePath }),
-        ...(taskState.abortController && { abortController: taskState.abortController as unknown as AbortController }),
-        stderr: (data: string) => {
-          if (data.trim()) log(`stderr: ${data.trim().slice(0, 500)}`)
-        },
+      // 3c. External MCP server tools (crab-messaging, etc.)
+      const externalMcpServers = this.mcpConfigFactory?.() ?? {}
+      for (const [serverName, server] of Object.entries(externalMcpServers)) {
+        tools.push(...mcpServerToToolDefinitions(server, serverName))
       }
 
-      // 6. Start query with task message
+      // 4. Create AnthropicAdapter from sdkEnv
+      const adapter = new AnthropicAdapter({
+        endpoint: this.sdkEnv.env.ANTHROPIC_BASE_URL ?? this.sdkEnv.env.ANTHROPIC_API_BASE ?? '',
+        apikey: this.sdkEnv.env.ANTHROPIC_API_KEY ?? '',
+      })
+
+      // 5. Build system prompt and task message
+      const systemPrompt = this.buildSystemPrompt(context)
       const taskMessage = this.buildTaskMessage(task, context)
-      log(`Starting worker query: model=${this.sdkEnv.modelId}, task=${task.task_title}`)
+      log(`Starting worker engine: model=${this.sdkEnv.modelId}, task=${task.task_title}, tools=${tools.length}`)
 
-      const queryHandle = query({ prompt: taskMessage, options: sdkOptions })
-      this.activeQueries.set(task.task_id, queryHandle)
-
-      // 7. Process output stream — progress, trace, result extraction
+      // 6. Set up trace and progress tracking
       const isMasterPrivate =
         context.sender_friend?.permission === 'master'
         && context.task_origin?.session_type === 'private'
 
-      const result = await this.processQueryStream(
-        queryHandle, task, context.task_origin, taskState, traceCallback, isMasterPrivate,
-      )
+      let loopSpanId: string | undefined
+      const pendingToolCalls: string[] = []
+      const taskOrigin = context.task_origin
 
-      return result
+      // Start loop span
+      loopSpanId = traceCallback?.onLoopStart('worker', {
+        system_prompt: undefined,
+        model: this.sdkEnv.modelId,
+        tools: tools.map(t => t.name),
+      })
+
+      // 7. Run engine
+      const engineResult = await runEngine({
+        prompt: taskMessage,
+        adapter,
+        options: {
+          systemPrompt,
+          tools,
+          model: this.sdkEnv.modelId,
+          abortSignal: taskState.abortController.signal as AbortSignal,
+          humanMessageQueue: humanQueue,
+          onTurn: (event: EngineTurnEvent) => {
+            // Trace: LLM call
+            const inputSummary = event.turnNumber === 1
+              ? task.task_title.slice(0, 150)
+              : `(turn ${event.turnNumber})`
+            const llmSpanId = traceCallback?.onLlmCallStart(event.turnNumber, inputSummary)
+
+            // Compute tool summaries
+            const turnToolSummaries: string[] = []
+            for (const tc of event.toolCalls) {
+              const summary = isMasterPrivate
+                ? this.summarizeToolCall(tc.name, tc.input)
+                : this.summarizeToolCallSanitized(tc.name, tc.input)
+              if (summary !== null) {
+                turnToolSummaries.push(summary)
+              }
+
+              // Trace: tool call
+              const toolSpanId = traceCallback?.onToolCallStart(
+                tc.name,
+                JSON.stringify(tc.input ?? {}).slice(0, 200),
+              )
+              if (toolSpanId) {
+                traceCallback?.onToolCallEnd(toolSpanId, '(executed by engine)')
+              }
+            }
+
+            if (llmSpanId) {
+              traceCallback?.onLlmCallEnd(llmSpanId, {
+                stopReason: event.stopReason ?? undefined,
+                outputSummary: event.assistantText.slice(0, 200) || undefined,
+                toolCallsCount: event.toolCalls.length > 0 ? event.toolCalls.length : undefined,
+              })
+            }
+
+            // Progress reporting (suppress when pending human messages exist)
+            if (taskOrigin && !humanQueue.hasPending) {
+              const trimmedText = event.assistantText.trim()
+              const hasText = trimmedText.length > 0
+              const hasTools = turnToolSummaries.length > 0
+
+              if (hasText) {
+                if (pendingToolCalls.length > 0) {
+                  this.sendToUser(taskOrigin, this.dedupeToolSummaries(pendingToolCalls.splice(0)).slice(0, 500))
+                }
+                this.sendToUser(taskOrigin, trimmedText)
+              }
+
+              if (hasTools) {
+                pendingToolCalls.push(...turnToolSummaries)
+                if (pendingToolCalls.length >= 5) {
+                  this.sendToUser(taskOrigin, this.dedupeToolSummaries(pendingToolCalls.splice(0)).slice(0, 500))
+                }
+              }
+            } else if (humanQueue.hasPending) {
+              // Discard interrupted turn's progress
+              pendingToolCalls.splice(0)
+            }
+          },
+        },
+      })
+
+      // Flush remaining pending tool calls
+      if (taskOrigin && pendingToolCalls.length > 0 && !humanQueue.hasPending) {
+        await this.sendToUser(taskOrigin, this.dedupeToolSummaries(pendingToolCalls.splice(0)).slice(0, 500))
+      }
+
+      // End loop span
+      const isError = engineResult.outcome === 'failed'
+      if (loopSpanId) {
+        traceCallback?.onLoopEnd(loopSpanId, isError ? 'failed' : 'completed', engineResult.totalTurns)
+      }
+
+      // 8. Map EngineResult → ExecuteTaskResult
+      return this.mapEngineResult(task.task_id, engineResult, !!taskOrigin && !!this.deps)
+
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
       log(`Worker error: ${errorMessage}`)
@@ -274,212 +436,32 @@ export class WorkerHandler {
         final_reply: { type: 'text', text: `抱歉，执行任务时出现错误: ${errorMessage}` },
       }
     } finally {
-      this.activeQueries.delete(task.task_id)
+      this.humanQueues.delete(task.task_id)
       this.activeTasks.delete(task.task_id)
       await this.cleanupTaskDir()
     }
   }
 
   /**
-   * Process the query output stream — handle all SDK events.
-   * This replaces sdk-runner.ts's event loop.
+   * Map EngineResult to ExecuteTaskResult
    */
-  private async processQueryStream(
-    queryHandle: Query,
-    task: ExecuteTaskParams['task'],
-    taskOrigin: TaskOrigin | undefined,
-    taskState: WorkerTaskState,
-    traceCallback?: TraceCallback,
-    isMasterPrivate: boolean = false,
-  ): Promise<ExecuteTaskResult> {
-    let resultText = ''
-    let isError = false
-    let turnCount = 0
-    let loopSpanId: string | undefined
-    /** Accumulated tool call summaries waiting to be flushed */
-    const pendingToolCalls: string[] = []
+  private mapEngineResult(
+    taskId: TaskId,
+    result: EngineResult,
+    hasProgressDeps: boolean,
+  ): ExecuteTaskResult {
+    const isError = result.outcome === 'failed' || result.outcome === 'aborted'
+    const finalText = result.finalText || '任务已完成，但模型未生成输出'
 
-    for await (const message of queryHandle) {
-      const msg = message as SDKMessage & Record<string, unknown>
-
-      switch (msg.type) {
-        case 'system': {
-          if ((msg as Record<string, unknown>).subtype === 'init') {
-            log(`System init: model=${msg.model}`)
-            if (!loopSpanId) {
-              loopSpanId = traceCallback?.onLoopStart('worker', {
-                system_prompt: undefined,
-                model: msg.model as string,
-                tools: msg.tools as string[],
-                mcp_servers: msg.mcp_servers as Array<{ name: string; status: string }>,
-              })
-            }
-          }
-          break
-        }
-
-        case 'assistant': {
-          const betaMessage = (msg as Record<string, unknown>).message as {
-            content?: Array<{ type: string; text?: string; name?: string; input?: unknown; id?: string }>
-            stop_reason?: string
-          }
-
-          const inputSummary = turnCount === 0 ? task.task_title.slice(0, 150) : `(turn ${turnCount + 1})`
-          const llmSpanId = traceCallback?.onLlmCallStart(turnCount + 1, inputSummary)
-          let turnText = ''
-          let turnToolCount = 0
-          const turnToolSummaries: string[] = []
-
-          if (betaMessage?.content) {
-            for (const block of betaMessage.content) {
-              if (block.type === 'text' && block.text) {
-                resultText = block.text
-                turnText += block.text
-              }
-              if (block.type === 'tool_use' && block.name) {
-                turnToolCount++
-                const summary = isMasterPrivate
-                  ? this.summarizeToolCall(block.name, block.input)
-                  : this.summarizeToolCallSanitized(block.name, block.input)
-                if (summary !== null) {
-                  turnToolSummaries.push(summary)
-                }
-                const toolSpanId = traceCallback?.onToolCallStart(
-                  block.name,
-                  JSON.stringify(block.input ?? {}).slice(0, 200),
-                )
-                if (toolSpanId) {
-                  traceCallback?.onToolCallEnd(toolSpanId, '(executed by SDK)')
-                }
-              }
-            }
-          }
-
-          if (llmSpanId) {
-            traceCallback?.onLlmCallEnd(llmSpanId, {
-              stopReason: betaMessage?.stop_reason,
-              outputSummary: turnText.slice(0, 200) || undefined,
-              toolCallsCount: turnToolCount > 0 ? turnToolCount : undefined,
-            })
-          }
-
-          turnCount++
-
-          // ── Content-type based progress reporting ──
-          // 有 pending supplement 时抑制进度消息（interrupt 已触发，这是被中断 turn 的残留输出）
-          if (taskOrigin && taskState.pendingHumanMessages.length === 0) {
-            const trimmedText = turnText.trim()
-            const hasText = trimmedText.length > 0
-            const hasTools = turnToolSummaries.length > 0
-
-            if (hasText) {
-              if (pendingToolCalls.length > 0) {
-                await this.sendToUser(taskOrigin, this.dedupeToolSummaries(pendingToolCalls.splice(0)).slice(0, 500))
-              }
-              await this.sendToUser(taskOrigin, trimmedText)
-            }
-
-            if (hasTools) {
-              pendingToolCalls.push(...turnToolSummaries)
-              if (pendingToolCalls.length >= 5) {
-                await this.sendToUser(taskOrigin, this.dedupeToolSummaries(pendingToolCalls.splice(0)).slice(0, 500))
-              }
-            }
-          } else if (taskState.pendingHumanMessages.length > 0) {
-            // 有 pending supplement，丢弃被中断 turn 的进度
-            pendingToolCalls.splice(0)
-          }
-
-          break
-        }
-
-        case 'result': {
-          // Flush remaining pending tool calls (但有 pending supplement 时不发)
-          if (taskOrigin && pendingToolCalls.length > 0 && taskState.pendingHumanMessages.length === 0) {
-            await this.sendToUser(taskOrigin, this.dedupeToolSummaries(pendingToolCalls.splice(0)).slice(0, 500))
-          } else {
-            pendingToolCalls.splice(0)
-          }
-
-          const resultMsg = msg as Record<string, unknown>
-          log(`Result: subtype=${resultMsg.subtype}, isError=${resultMsg.is_error}`)
-
-          // ── Supplement injection: interrupt 已在 deliverHumanResponse 中触发，这里注入内容 ──
-          if (taskState.pendingHumanMessages.length > 0) {
-            const pending = taskState.pendingHumanMessages.splice(0)
-            const supplement = pending
-              .map(m => m.content.text ?? '')
-              .filter(t => t.length > 0)
-              .join('\n')
-
-            if (supplement) {
-              log(`[supplement] Injecting after interrupt: ${supplement.slice(0, 200)}`)
-              await this.injectHumanMessage(task.task_id, supplement)
-              log(`[supplement] streamInput() done, waiting for SDK to process next turn`)
-            }
-            // 这个 result 是被中断 turn 的结果，不是最终结果，继续 loop
-            break
-          }
-
-          // This is the actual final result
-          if (resultMsg.subtype === 'success' || !resultMsg.is_error) {
-            if (resultMsg.result && typeof resultMsg.result === 'string') {
-              resultText = resultMsg.result
-            }
-            isError = !!resultMsg.is_error
-          } else {
-            isError = true
-            const errors = resultMsg.errors as string[] | undefined
-            if (errors?.length) {
-              resultText = errors.join('; ')
-            }
-          }
-          break
-        }
-      }
+    if (result.outcome === 'aborted') {
+      return { task_id: taskId, outcome: 'failed', summary: '任务被取消' }
     }
 
-    if (loopSpanId) {
-      traceCallback?.onLoopEnd(loopSpanId, isError ? 'failed' : 'completed', turnCount)
-    }
-
-    const finalText = resultText || '任务已完成，但模型未生成输出'
-
-    const hasProgressDeps = !!taskOrigin && !!this.deps
     return {
-      task_id: task.task_id,
+      task_id: taskId,
       outcome: isError ? 'failed' : 'completed',
       summary: finalText,
       final_reply: (isError || !hasProgressDeps) ? { type: 'text', text: finalText } : undefined,
-    }
-  }
-
-  /**
-   * Inject a human message into a running query via streamInput()
-   */
-  private async injectHumanMessage(taskId: TaskId, text: string): Promise<void> {
-    const queryHandle = this.activeQueries.get(taskId)
-    if (!queryHandle) {
-      log(`[supplement] injectHumanMessage: no queryHandle for task ${taskId}. activeQueries keys: [${Array.from(this.activeQueries.keys()).join(', ')}]`)
-      return
-    }
-
-    log(`[supplement] Calling streamInput for task ${taskId}`)
-
-    async function* singleMessage(): AsyncIterable<SDKUserMessage> {
-      yield {
-        type: 'user',
-        session_id: '',
-        message: { role: 'user', content: [{ type: 'text', text: `用户补充指示：${text}` }] },
-        parent_tool_use_id: null,
-      }
-    }
-
-    try {
-      await queryHandle.streamInput(singleMessage())
-      log(`[supplement] streamInput succeeded for task ${taskId}`)
-    } catch (error) {
-      log(`[supplement] streamInput FAILED for task ${taskId}: ${error instanceof Error ? error.message : error}`)
     }
   }
 
@@ -489,17 +471,26 @@ export class WorkerHandler {
       log(`[supplement] deliverHumanResponse: task ${taskId} NOT FOUND. activeTasks keys: [${Array.from(this.activeTasks.keys()).join(', ')}]`)
       throw new Error(`Task not found: ${taskId}`)
     }
-    log(`[supplement] deliverHumanResponse: queued ${messages.length} messages for task ${taskId} (status: ${taskState.status}, pending: ${taskState.pendingHumanMessages.length})`)
-    taskState.pendingHumanMessages.push(...messages)
 
-    // 立即 interrupt，不等 turn 结束
-    const queryHandle = this.activeQueries.get(taskId)
-    if (queryHandle) {
-      queryHandle.interrupt().catch((err) => {
-        log(`[supplement] immediate interrupt() failed: ${err instanceof Error ? err.message : err}`)
-      })
-      log(`[supplement] immediate interrupt() fired for task ${taskId}`)
+    log(`[supplement] deliverHumanResponse: queued ${messages.length} messages for task ${taskId} (status: ${taskState.status})`)
+
+    // Build supplement text from messages
+    const supplement = messages
+      .map(m => m.content.text ?? '')
+      .filter(t => t.length > 0)
+      .join('\n')
+
+    if (supplement) {
+      const humanQueue = this.humanQueues.get(taskId)
+      if (humanQueue) {
+        humanQueue.push(`用户补充指示：${supplement}`)
+        log(`[supplement] pushed to humanMessageQueue for task ${taskId}`)
+      }
     }
+
+    // Also store in pendingHumanMessages for backward compat with task state
+    taskState.pendingHumanMessages.push(...messages)
+    taskState.status = 'executing'
   }
 
   cancelTask(taskId: TaskId, _reason: string): void {
@@ -507,11 +498,6 @@ export class WorkerHandler {
     if (taskState) {
       taskState.abortController.abort()
       taskState.status = 'cancelled'
-    }
-    // Also try to interrupt the query gracefully
-    const queryHandle = this.activeQueries.get(taskId)
-    if (queryHandle) {
-      queryHandle.interrupt().catch(() => { /* ignore */ })
     }
   }
 
