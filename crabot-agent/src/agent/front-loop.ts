@@ -5,10 +5,23 @@
  * make_decision tool -> structured decision, return immediately
  * end_turn -> wrap as direct_reply
  * max rounds exceeded -> forced create_task with tool history
+ *
+ * Uses engine LLMAdapter via callNonStreaming instead of direct Anthropic SDK.
  */
 
-import type { MessageParam, ContentBlock, ToolResultBlockParam, TextBlockParam, ImageBlockParam } from '@anthropic-ai/sdk/resources/messages'
-import type { LLMClient } from './llm-client.js'
+import type { LLMAdapter } from '../engine/llm-adapter.js'
+import { callNonStreaming } from '../engine/llm-adapter.js'
+import type {
+  EngineMessage,
+  ContentBlock,
+  TextBlock,
+  ToolDefinition,
+} from '../engine/types.js'
+import {
+  createUserMessage,
+  createAssistantMessage,
+  createToolResultMessage,
+} from '../engine/types.js'
 import type { ToolExecutor } from './tool-executor.js'
 import type {
   MessageDecision,
@@ -20,25 +33,28 @@ import { getAllFrontTools } from './front-tools.js'
 
 const FRONT_MAX_ROUNDS = 5
 
-export async function runFrontLoop(params: {
-  systemPrompt: string
-  userMessage: string | Array<TextBlockParam | ImageBlockParam>
+export interface FrontLoopParams {
+  readonly systemPrompt: string
+  readonly userMessage: string | ContentBlock[]
   /** Raw user text (for task title extraction on forced termination) */
-  rawUserText: string
+  readonly rawUserText: string
   /** silent 仅在群聊且未被 @ 时可用 */
-  allowSilent: boolean
-  llmClient: LLMClient
-  toolExecutor: ToolExecutor
-  traceCallback?: TraceCallback
-}): Promise<FrontLoopResult> {
-  const { systemPrompt, userMessage, rawUserText, allowSilent, llmClient, toolExecutor, traceCallback } = params
-  const tools = getAllFrontTools(allowSilent)
-  const messages: MessageParam[] = [{ role: 'user', content: userMessage }]
+  readonly allowSilent: boolean
+  readonly adapter: LLMAdapter
+  readonly model: string
+  readonly toolExecutor: ToolExecutor
+  readonly traceCallback?: TraceCallback
+}
+
+export async function runFrontLoop(params: FrontLoopParams): Promise<FrontLoopResult> {
+  const { systemPrompt, userMessage, rawUserText, allowSilent, adapter, model, toolExecutor, traceCallback } = params
+  const tools: ToolDefinition[] = getAllFrontTools(allowSilent)
+  const messages: EngineMessage[] = [createUserMessage(userMessage)]
   const toolHistory: ToolHistoryEntry[] = []
 
   const loopSpanId = traceCallback?.onLoopStart('front', {
     system_prompt: systemPrompt,
-    model: undefined,
+    model,
     tools: tools.map(t => t.name),
   })
 
@@ -49,7 +65,12 @@ export async function runFrontLoop(params: {
         : `(round ${round + 1})`
       const llmSpanId = traceCallback?.onLlmCallStart(round + 1, inputSummary)
 
-      const response = await llmClient.callMessages({ system: systemPrompt, messages, tools })
+      const response = await callNonStreaming(adapter, {
+        systemPrompt,
+        messages,
+        tools,
+        model,
+      })
 
       // Trace: record LLM response
       let textOutput = ''
@@ -71,7 +92,7 @@ export async function runFrontLoop(params: {
       // Case 1: end_turn -> wrap text as direct_reply
       if (response.stopReason === 'end_turn') {
         const text = response.content
-          .filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')
+          .filter((b): b is TextBlock => b.type === 'text')
           .map(b => b.text)
           .join('')
           .trim()
@@ -88,16 +109,16 @@ export async function runFrontLoop(params: {
         }
 
         // 私聊/被@场景下 LLM 没输出文本也没调 make_decision，注入提示让它重试
-        messages.push({ role: 'assistant', content: response.content as MessageParam['content'] })
-        messages.push({ role: 'user', content: '你必须调用 make_decision 工具输出决策，不能留空。请现在调用。' })
+        messages.push(createAssistantMessage(response.content, 'end_turn', response.usage))
+        messages.push(createUserMessage('你必须调用 make_decision 工具输出决策，不能留空。请现在调用。'))
         continue
       }
 
       // Case 2: tool_use
       if (response.stopReason === 'tool_use') {
-        messages.push({ role: 'assistant', content: response.content as MessageParam['content'] })
+        messages.push(createAssistantMessage(response.content, 'tool_use', response.usage))
 
-        const toolResults: ToolResultBlockParam[] = []
+        const toolResultMessages: EngineMessage[] = []
 
         for (const block of response.content) {
           if (block.type !== 'tool_use') continue
@@ -112,12 +133,7 @@ export async function runFrontLoop(params: {
               const toolSpanId = traceCallback?.onToolCallStart('make_decision', JSON.stringify(rawInput).slice(0, 200))
               if (toolSpanId) traceCallback?.onToolCallEnd(toolSpanId, '', validationError)
 
-              toolResults.push({
-                type: 'tool_result',
-                tool_use_id: block.id,
-                content: validationError,
-                is_error: true,
-              })
+              toolResultMessages.push(createToolResultMessage(block.id, validationError, true))
               continue
             }
 
@@ -138,12 +154,7 @@ export async function runFrontLoop(params: {
             traceCallback?.onToolCallEnd(toolSpanId, result.output.slice(0, 200), result.isError ? result.output : undefined)
           }
 
-          toolResults.push({
-            type: 'tool_result',
-            tool_use_id: block.id,
-            content: result.output,
-            is_error: result.isError,
-          })
+          toolResultMessages.push(createToolResultMessage(block.id, result.output, result.isError))
 
           if (!result.isError) {
             toolHistory.push({
@@ -154,7 +165,23 @@ export async function runFrontLoop(params: {
           }
         }
 
-        messages.push({ role: 'user', content: toolResults })
+        // Merge all tool results into a single EngineToolResultMessage
+        if (toolResultMessages.length > 0) {
+          const allToolResults = toolResultMessages.flatMap(msg => {
+            if ('toolResults' in msg) {
+              return msg.toolResults
+            }
+            return []
+          })
+          if (allToolResults.length > 0) {
+            messages.push({
+              id: crypto.randomUUID(),
+              role: 'user',
+              toolResults: allToolResults as ReadonlyArray<{ readonly tool_use_id: string; readonly content: string; readonly is_error: boolean }>,
+              timestamp: Date.now(),
+            })
+          }
+        }
       }
     }
 
@@ -255,5 +282,3 @@ function parseMakeDecision(input: Record<string, unknown>): MessageDecision {
       return { type: 'silent' }
   }
 }
-
-

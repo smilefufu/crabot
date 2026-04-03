@@ -28,9 +28,9 @@ describe('WorkerHandler v2 (engine-based)', () => {
     expect(engineImports.length).toBeGreaterThanOrEqual(1)
   })
 
-  it('should import AnthropicAdapter', () => {
+  it('should import createAdapter', () => {
     const adapterImports = importBlocks.filter(block =>
-      block.includes('AnthropicAdapter'),
+      block.includes('createAdapter'),
     )
     expect(adapterImports.length).toBeGreaterThanOrEqual(1)
   })

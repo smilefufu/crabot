@@ -37,8 +37,8 @@ import { ContextAssembler } from './orchestration/context-assembler.js'
 import { DecisionDispatcher } from './orchestration/decision-dispatcher.js'
 import { MemoryWriter } from './orchestration/memory-writer.js'
 import { AttentionScheduler, type AttentionConfig, type BufferedMessage } from './orchestration/attention-scheduler.js'
-import { FrontHandler } from './agent/front-handler.js'
-import type { LLMClientConfig } from './agent/llm-client.js'
+import { FrontHandler, type FrontHandlerLlmConfig } from './agent/front-handler.js'
+import { createAdapter, type LLMAdapter } from './engine/llm-adapter.js'
 import type { ToolExecutorDeps } from './agent/tool-executor.js'
 import { WorkerHandler, type SdkEnvConfig } from './agent/worker-handler.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -216,9 +216,13 @@ export class UnifiedAgent extends ModuleBase {
     if (this.roles.has('front')) {
       const frontModelConfig = config.model_config?.fast ?? config.model_config?.default
       if (frontModelConfig) {
-        const llmConfig: LLMClientConfig = {
+        const adapter = createAdapter({
           endpoint: frontModelConfig.endpoint,
           apikey: frontModelConfig.apikey,
+          format: frontModelConfig.format as 'anthropic' | 'openai' | 'gemini',
+        })
+        const llmConfig: FrontHandlerLlmConfig = {
+          adapter,
           model: frontModelConfig.model_id,
         }
         const toolExecutorDeps: ToolExecutorDeps = {
@@ -1677,9 +1681,13 @@ ${skillsSection}
           console.log(`[${this.config.moduleId}] Front Agent LLM config updated`)
         } else {
           // 首次从未配置状态收到配置，创建 handler
-          const llmConfig: LLMClientConfig = {
+          const adapter = createAdapter({
             endpoint: frontConfig.endpoint,
             apikey: frontConfig.apikey,
+            format: frontConfig.format as 'anthropic' | 'openai' | 'gemini',
+          })
+          const llmConfig: FrontHandlerLlmConfig = {
+            adapter,
             model: frontConfig.model_id,
           }
           const toolExecutorDeps: ToolExecutorDeps = {

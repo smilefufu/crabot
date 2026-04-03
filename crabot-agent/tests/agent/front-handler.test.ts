@@ -7,11 +7,6 @@ vi.mock('../../src/agent/front-loop.js', () => ({
   runFrontLoop: vi.fn(),
 }))
 
-// Mock LLMClient constructor (FrontHandler creates one internally)
-vi.mock('../../src/agent/llm-client.js', () => ({
-  LLMClient: vi.fn().mockImplementation(() => ({})),
-}))
-
 // Mock ToolExecutor constructor
 vi.mock('../../src/agent/tool-executor.js', () => ({
   ToolExecutor: vi.fn().mockImplementation(() => ({})),
@@ -21,8 +16,16 @@ import { runFrontLoop } from '../../src/agent/front-loop.js'
 
 const mockRunFrontLoop = vi.mocked(runFrontLoop)
 
+function makeMockAdapter() {
+  return {
+    stream: vi.fn(),
+    updateConfig: vi.fn(),
+  }
+}
+
 function makeFrontHandler() {
-  const llmConfig = { endpoint: 'http://localhost:4000', apikey: 'test', model: 'test-model' }
+  const adapter = makeMockAdapter()
+  const llmConfig = { adapter, model: 'test-model' }
   const toolDeps = {
     rpcClient: {} as any,
     moduleId: 'test',
@@ -30,8 +33,8 @@ function makeFrontHandler() {
     resolveChannelPort: async () => 3003,
     getActiveTasks: () => [],
   }
-  const config = { systemPrompt: 'You are helpful' }
-  return new FrontHandler(llmConfig, toolDeps, config)
+  const config = { getSystemPrompt: () => 'You are helpful' }
+  return { handler: new FrontHandler(llmConfig, toolDeps, config), adapter }
 }
 
 function makeMessages(): ChannelMessage[] {
@@ -75,7 +78,7 @@ describe('FrontHandler', () => {
         decision: { type: 'direct_reply', reply: { type: 'text', text: 'Hello!' } },
       })
 
-      const handler = makeFrontHandler()
+      const { handler } = makeFrontHandler()
       const params: HandleMessageParams = { messages: makeMessages(), context: makeContext() }
       const result = await handler.handleMessage(params)
 
@@ -103,7 +106,7 @@ describe('FrontHandler', () => {
         platform_timestamp: '2024-01-01T00:00:00Z',
       }]
 
-      const handler = makeFrontHandler()
+      const { handler } = makeFrontHandler()
       const result = await handler.handleMessage({ messages, context: makeContext() })
 
       expect(result.decisions).toHaveLength(1)
@@ -118,28 +121,31 @@ describe('FrontHandler', () => {
         decision: { type: 'direct_reply', reply: { type: 'text', text: 'plain response' } },
       })
 
-      const handler = makeFrontHandler()
+      const { handler } = makeFrontHandler()
       const result = await handler.handleMessage({ messages: makeMessages(), context: makeContext() })
 
       expect(result.decisions).toHaveLength(1)
       expect(result.decisions[0].type).toBe('direct_reply')
     })
 
-    it('应该调用 runFrontLoop', async () => {
+    it('应该调用 runFrontLoop 并传递 adapter 和 model', async () => {
       mockRunFrontLoop.mockResolvedValue({
         decision: { type: 'direct_reply', reply: { type: 'text', text: 'OK' } },
       })
 
-      const handler = makeFrontHandler()
+      const { handler } = makeFrontHandler()
       await handler.handleMessage({ messages: makeMessages(), context: makeContext() })
 
       expect(mockRunFrontLoop).toHaveBeenCalled()
+      const callArgs = mockRunFrontLoop.mock.calls[0][0]
+      expect(callArgs).toHaveProperty('adapter')
+      expect(callArgs).toHaveProperty('model', 'test-model')
     })
 
     it('应该处理错误并返回错误消息（私聊）', async () => {
       mockRunFrontLoop.mockRejectedValue(new Error('API error'))
 
-      const handler = makeFrontHandler()
+      const { handler } = makeFrontHandler()
       const result = await handler.handleMessage({ messages: makeMessages(), context: makeContext() })
 
       expect(result.decisions).toHaveLength(1)
@@ -147,6 +153,37 @@ describe('FrontHandler', () => {
       if (result.decisions[0].type === 'direct_reply') {
         expect(result.decisions[0].reply.text).toContain('异常')
       }
+    })
+  })
+
+  describe('updateLlmConfig', () => {
+    it('应该更新 adapter 配置', () => {
+      const { handler, adapter } = makeFrontHandler()
+
+      handler.updateLlmConfig({ endpoint: 'http://new-url:4000', apikey: 'new-key' })
+
+      expect(adapter.updateConfig).toHaveBeenCalledWith({
+        endpoint: 'http://new-url:4000',
+        apikey: 'new-key',
+      })
+    })
+
+    it('应该只更新 model 不触发 adapter.updateConfig', () => {
+      const { handler, adapter } = makeFrontHandler()
+
+      handler.updateLlmConfig({ model: 'new-model' })
+
+      expect(adapter.updateConfig).not.toHaveBeenCalled()
+    })
+
+    it('应该同时更新 endpoint 和 model', () => {
+      const { handler, adapter } = makeFrontHandler()
+
+      handler.updateLlmConfig({ endpoint: 'http://new-url:4000', model: 'new-model' })
+
+      expect(adapter.updateConfig).toHaveBeenCalledWith({
+        endpoint: 'http://new-url:4000',
+      })
     })
   })
 })

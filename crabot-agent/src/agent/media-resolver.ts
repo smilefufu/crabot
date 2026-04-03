@@ -1,12 +1,12 @@
 /**
- * MediaResolver - 将 ChannelMessage 中的媒体内容解析为 Anthropic SDK ImageBlockParam
+ * MediaResolver - 将 ChannelMessage 中的媒体内容解析为 engine ImageBlock
  *
  * 处理本地文件路径（base64 编码）和远程 URL（下载后 base64 编码）。
  * 任何错误静默降级，不影响文本消息处理。
  */
 
 import { promises as fs } from 'fs'
-import type { ImageBlockParam } from '@anthropic-ai/sdk/resources/messages'
+import type { ImageBlock } from '../engine/types.js'
 import type { ChannelMessage } from '../types'
 
 const MAX_IMAGE_SIZE = 20 * 1024 * 1024 // 20MB
@@ -69,11 +69,11 @@ export function formatMessageContent(msg: ChannelMessage): string {
 }
 
 /**
- * 从 ChannelMessage 列表中解析图片为 Anthropic SDK ImageBlockParam
+ * 从 ChannelMessage 列表中解析图片为 engine ImageBlock
  */
 export async function resolveImageBlocks(
   messages: ChannelMessage[]
-): Promise<ImageBlockParam[]> {
+): Promise<ImageBlock[]> {
   // Fast path: skip all I/O if no image messages present
   const imageMessages = messages.filter(
     (msg) => msg.content.type === 'image' && msg.content.media_url
@@ -82,7 +82,7 @@ export async function resolveImageBlocks(
 
   // Resolve all images in parallel
   const results = await Promise.all(
-    imageMessages.map(async (msg): Promise<ImageBlockParam | null> => {
+    imageMessages.map(async (msg): Promise<ImageBlock | null> => {
       const url = msg.content.media_url!
       const isRemote = url.startsWith('http://') || url.startsWith('https://')
       const buffer = isRemote
@@ -103,5 +103,5 @@ export async function resolveImageBlocks(
     })
   )
 
-  return results.filter((block): block is ImageBlockParam => block !== null)
+  return results.filter((block): block is ImageBlock => block !== null)
 }

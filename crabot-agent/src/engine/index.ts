@@ -24,8 +24,8 @@ export type {
 export { createUserMessage, createAssistantMessage, createToolResultMessage } from './types'
 
 // --- LLM Adapter ---
-export type { LLMAdapter, LLMAdapterConfig, LLMStreamParams, LLMFormat, CreateAdapterConfig } from './llm-adapter'
-export { AnthropicAdapter, normalizeMessagesForAnthropic, OpenAIAdapter, normalizeMessagesForOpenAI, toOpenAITool, readSSELines, createAdapter } from './llm-adapter'
+export type { LLMAdapter, LLMAdapterConfig, LLMStreamParams, LLMFormat, CreateAdapterConfig, LLMCallResponse } from './llm-adapter'
+export { AnthropicAdapter, normalizeMessagesForAnthropic, OpenAIAdapter, normalizeMessagesForOpenAI, toOpenAITool, readSSELines, createAdapter, callNonStreaming } from './llm-adapter'
 
 // --- Tool Framework ---
 export { defineTool, findTool, partitionToolCalls } from './tool-framework'

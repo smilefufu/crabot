@@ -7,6 +7,7 @@ import type {
   ToolUseBlockParam,
   ToolResultBlockParam,
 } from '@anthropic-ai/sdk/resources/messages'
+import { StreamProcessor } from './stream-processor'
 import type {
   EngineMessage,
   EngineToolResultMessage,
@@ -34,6 +35,37 @@ export interface LLMAdapter {
 export interface LLMAdapterConfig {
   readonly endpoint: string
   readonly apikey: string
+}
+
+// --- Non-streaming convenience ---
+
+export interface LLMCallResponse {
+  readonly content: ContentBlock[]
+  readonly stopReason: string | null
+  readonly usage?: { readonly inputTokens: number; readonly outputTokens: number }
+}
+
+/** Collect a full streaming response into a single LLMCallResponse */
+export async function callNonStreaming(
+  adapter: LLMAdapter,
+  params: LLMStreamParams,
+): Promise<LLMCallResponse> {
+  const processor = new StreamProcessor()
+  for await (const chunk of adapter.stream(params)) {
+    if (chunk.type === 'error') {
+      throw new Error(chunk.error)
+    }
+    processor.process(chunk)
+  }
+  const result = processor.finalize()
+  return {
+    content: [
+      ...(result.text ? [{ type: 'text' as const, text: result.text }] : []),
+      ...result.toolUseBlocks,
+    ],
+    stopReason: result.stopReason,
+    usage: result.usage,
+  }
 }
 
 // --- Message Normalization ---
