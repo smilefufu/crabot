@@ -368,7 +368,11 @@ export class WechatChannel extends ModuleBase {
 
     console.log(`[WechatChannel] Sending message to ${wxid}: ${text.slice(0, 50)}...`)
 
-    if (params.content.type === 'image' && params.content.media_url) {
+    if ((params.content.type === 'image' || params.content.type === 'file') && params.content.file_path) {
+      // 本地文件：通过 connector 的 send-file 接口上传并发送
+      const fileType = params.content.type === 'image' ? 'image' as const : 'file' as const
+      await this.client.sendLocalFile(wxid, params.content.file_path, fileType)
+    } else if (params.content.type === 'image' && params.content.media_url) {
       await this.client.sendImage(wxid, params.content.media_url)
     } else if (params.content.type === 'file' && params.content.media_url) {
       await this.client.sendFile(wxid, params.content.media_url)
@@ -399,8 +403,8 @@ export class WechatChannel extends ModuleBase {
       supports_platform_user_query: false,
       max_message_length: null,
       max_file_size: null,
-      supports_file_path: false,
-      allowed_file_paths: [],
+      supports_file_path: true,
+      allowed_file_paths: ['/tmp/', '/private/tmp/'],
     }
   }
 

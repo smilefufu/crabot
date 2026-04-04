@@ -7,6 +7,8 @@
 
 import http from 'node:http'
 import https from 'node:https'
+import fs from 'node:fs'
+import path from 'node:path'
 import type { ApiResponse } from './types.js'
 
 export class WechatClient {
@@ -40,10 +42,44 @@ export class WechatClient {
   }
 
   /**
-   * 发送文件
+   * 发送文件（通过 URL）
    */
   async sendFile(wxid: string, url: string): Promise<{ taskId: string }> {
     return this.post('/api/v1/bot/send', { wxid, type: 'file', url })
+  }
+
+  /**
+   * 发送本地文件（通过 /api/v1/bot/send-file multipart 上传并发送）
+   */
+  async sendLocalFile(wxid: string, filePath: string, type: 'image' | 'file' = 'image'): Promise<{ taskId: string; url: string }> {
+    const fileBuffer = fs.readFileSync(filePath)
+    const filename = path.basename(filePath)
+    const boundary = `----CrabotBoundary${Date.now()}`
+
+    const parts: Buffer[] = []
+
+    // file field
+    parts.push(Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: application/octet-stream\r\n\r\n`
+    ))
+    parts.push(fileBuffer)
+    parts.push(Buffer.from('\r\n'))
+
+    // wxid field
+    parts.push(Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="wxid"\r\n\r\n${wxid}\r\n`
+    ))
+
+    // type field
+    parts.push(Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="type"\r\n\r\n${type}\r\n`
+    ))
+
+    parts.push(Buffer.from(`--${boundary}--\r\n`))
+
+    const body = Buffer.concat(parts)
+
+    return this.multipartPost('/api/v1/bot/send-file', body, boundary)
   }
 
   // ============================================================================
@@ -120,6 +156,49 @@ export class WechatClient {
 
   private async post<T>(path: string, body: unknown): Promise<T> {
     return this.request<T>('POST', path, body)
+  }
+
+  private multipartPost<T>(apiPath: string, body: Buffer, boundary: string): Promise<T> {
+    const url = new URL(apiPath, this.baseUrl)
+    const isHttps = url.protocol === 'https:'
+    const transport = isHttps ? https : http
+
+    return new Promise((resolve, reject) => {
+      const req = transport.request(
+        {
+          hostname: url.hostname,
+          port: url.port || (isHttps ? 443 : 80),
+          path: url.pathname + url.search,
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${this.apiKey}`,
+            'Content-Type': `multipart/form-data; boundary=${boundary}`,
+            'Content-Length': body.length,
+          },
+          timeout: 60000,
+        },
+        (res) => {
+          let data = ''
+          res.on('data', (chunk: string) => { data += chunk })
+          res.on('end', () => {
+            try {
+              const parsed = JSON.parse(data) as ApiResponse<T>
+              if (parsed.code !== 0) {
+                reject(new Error(parsed.message ?? `API error: code=${parsed.code}`))
+                return
+              }
+              resolve(parsed.data)
+            } catch (e) {
+              reject(new Error(`Failed to parse response: ${String(e)}`))
+            }
+          })
+        }
+      )
+      req.on('error', reject)
+      req.on('timeout', () => { req.destroy(); reject(new Error('Upload timeout')) })
+      req.write(body)
+      req.end()
+    })
   }
 
   private request<T>(method: string, path: string, body?: unknown): Promise<T> {
