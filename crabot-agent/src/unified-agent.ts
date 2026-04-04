@@ -493,8 +493,6 @@ ${skillsSection}
           ? decision.task_title
           : decision.type === 'supplement_task'
           ? `supplement → ${decision.task_id}: ${decision.supplement_content.slice(0, 60)}`
-          : decision.type === 'forward_to_worker'
-          ? `task_id: ${decision.task_id}`
           : 'silent'
 
         const decisionSpan = this.traceStore.startSpan(trace.trace_id, {
@@ -551,7 +549,7 @@ ${skillsSection}
             channel_id: session.channel_id,
             session_id: session.session_id,
             message_brief: messageBrief,
-            decision: decision.type as 'direct_reply' | 'create_task' | 'forward_to_worker' | 'supplement_task',
+            decision: decision.type as 'direct_reply' | 'create_task' | 'supplement_task',
             task_id: 'task_id' in decision ? (decision as { task_id: string }).task_id : undefined,
             visibility: memPerms.write_visibility,
             scopes: memPerms.write_scopes,
@@ -666,8 +664,8 @@ ${skillsSection}
                 ? (decision.reply.text ?? '').slice(0, 100)
                 : decision.type === 'create_task'
                 ? decision.task_title
-                : decision.type === 'forward_to_worker'
-                ? `task_id: ${decision.task_id}`
+                : decision.type === 'supplement_task'
+                ? `supplement → ${decision.task_id}: ${decision.supplement_content.slice(0, 60)}`
                 : 'silent',
             },
           })
@@ -855,9 +853,24 @@ ${skillsSection}
     const matchingTask = activeTasks.find(t => t.task_id === decision.task_id)
 
     if (!matchingTask) {
-      this.traceStore.endSpan(traceId, deliverSpan.span_id, 'failed', {
-        error: `task_id=${decision.task_id} not found in activeTasks. Active: [${activeTasks.map(t => t.task_id).join(', ')}]`,
+      // Task not found locally — fall back to remote delivery via Admin RPC
+      this.traceStore.endSpan(traceId, deliverSpan.span_id, 'completed', {
+        output_summary: `task not local, delegating to DecisionDispatcher`,
       })
+      await this.decisionDispatcher.dispatch(
+        decision,
+        {
+          channel_id: session.channel_id,
+          session_id: session.session_id,
+          messages: [],
+          memoryPermissions: { write_visibility: 'internal', write_scopes: [], read_min_visibility: 'internal' },
+        },
+        {
+          traceStore: this.traceStore,
+          traceId,
+          parentSpanId: parentSpanId,
+        }
+      )
       return
     }
 
@@ -892,7 +905,7 @@ ${skillsSection}
       if (decision.type === 'create_task' && decision.immediate_reply.text) {
         return decision.immediate_reply.text
       }
-      if (decision.type === 'forward_to_worker' && decision.immediate_reply?.text) {
+      if (decision.type === 'supplement_task' && decision.immediate_reply?.text) {
         return decision.immediate_reply.text
       }
     }
@@ -1283,8 +1296,8 @@ ${skillsSection}
               ? (decision.reply.text ?? '').slice(0, 100)
               : decision.type === 'create_task'
               ? decision.task_title
-              : decision.type === 'forward_to_worker'
-              ? `task_id: ${decision.task_id}`
+              : decision.type === 'supplement_task'
+              ? `supplement → ${decision.task_id}: ${decision.supplement_content.slice(0, 60)}`
               : 'silent',
           },
         })
@@ -1345,7 +1358,7 @@ ${skillsSection}
             channel_id: 'admin-web',
             session_id: sessionId,
             message_brief: messageBrief,
-            decision: decision.type as 'direct_reply' | 'create_task' | 'forward_to_worker' | 'supplement_task',
+            decision: decision.type as 'direct_reply' | 'create_task' | 'supplement_task',
             task_id: 'task_id' in decision ? (decision as { task_id: string }).task_id : undefined,
             visibility: masterMemPerms.write_visibility,
             scopes: masterMemPerms.write_scopes,

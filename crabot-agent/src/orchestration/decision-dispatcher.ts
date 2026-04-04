@@ -10,7 +10,6 @@ import type {
   MessageDecision,
   DirectReplyDecision,
   CreateTaskDecision,
-  ForwardToWorkerDecision,
   SupplementTaskDecision,
   ChannelMessage,
   MemoryPermissions,
@@ -65,9 +64,6 @@ export class DecisionDispatcher {
 
       case 'create_task':
         return this.handleCreateTask(decision, params, traceCtx)
-
-      case 'forward_to_worker':
-        return this.handleForwardToWorker(decision, params, traceCtx)
 
       case 'silent':
         return {}
@@ -443,129 +439,10 @@ export class DecisionDispatcher {
   }
 
   /**
-   * 处理转发到 Worker
-   */
-  private async handleForwardToWorker(
-    decision: ForwardToWorkerDecision,
-    params: {
-      channel_id: ModuleId
-      session_id: string
-      messages: ChannelMessage[]
-      memoryPermissions: MemoryPermissions
-      admin_chat_callback?: {
-        source_module_id: string
-        request_id: string
-      }
-    },
-    traceCtx?: RpcTraceContext
-  ): Promise<{ task_id: string }> {
-    // 1. 发送即时回复（如果有）
-    if (decision.immediate_reply) {
-      if (params.admin_chat_callback) {
-        const adminPort = await this.getAdminPort()
-        await this.rpcClient.call(
-          adminPort,
-          'chat_callback',
-          {
-            request_id: params.admin_chat_callback.request_id,
-            reply_type: 'task_created',
-            content: decision.immediate_reply.text ?? '',
-          },
-          this.moduleId,
-          traceCtx
-        )
-      } else {
-        const channelPort = await this.getChannelPort(params.channel_id)
-        await this.rpcClient.call(
-          channelPort,
-          'send_message',
-          {
-            session_id: params.session_id,
-            content: decision.immediate_reply,
-          },
-          this.moduleId,
-          traceCtx
-        )
-      }
-    }
-
-    // 2. 查询任务状态和分配的 Worker
-    const adminPort = await this.getAdminPort()
-    const taskInfo = await this.rpcClient.call<
-      { task_id: string },
-      {
-        status: string
-        assigned_worker?: string
-      }
-    >(
-      adminPort,
-      'get_task',
-      { task_id: decision.task_id },
-      this.moduleId,
-      traceCtx
-    )
-
-    // 3. 根据任务状态处理
-    if (['executing', 'planning', 'waiting_human'].includes(taskInfo.status)) {
-      // 投递消息给 Worker
-      if (!taskInfo.assigned_worker) {
-        throw new Error('Task has no assigned worker')
-      }
-
-      const workers = await this.rpcClient.resolve(
-        { module_id: taskInfo.assigned_worker },
-        this.moduleId
-      )
-      if (workers.length === 0) {
-        throw new Error(`Worker not found: ${taskInfo.assigned_worker}`)
-      }
-
-      await this.rpcClient.call(
-        workers[0].port,
-        'deliver_human_response',
-        {
-          task_id: decision.task_id,
-          messages: params.messages,
-        },
-        this.moduleId,
-        traceCtx
-      )
-
-      return { task_id: decision.task_id }
-    }
-
-    if (taskInfo.status === 'pending') {
-      // 任务尚未分配 Worker，追加补充信息到描述
-      await this.rpcClient.call(
-        adminPort,
-        'update_task',
-        {
-          task_id: decision.task_id,
-          append_description: params.messages.map(m => m.content.text ?? '').join('\n'),
-        },
-        this.moduleId,
-        traceCtx
-      )
-      return { task_id: decision.task_id }
-    }
-
-    // 任务已完成/取消/失败，回退到创建新任务
-    const fallbackDecision: CreateTaskDecision = {
-      type: 'create_task',
-      task_title: 'Follow-up request',
-      task_description: params.messages.map(m => m.content.text ?? '').join('\n'),
-      task_type: 'user_request',
-      immediate_reply: {
-        type: 'text',
-        text: 'Creating a new task for your follow-up request.',
-      },
-    }
-
-    return this.handleCreateTask(fallbackDecision, params, traceCtx)
-  }
-
-  /**
    * 处理补充任务指示
+   *
+   * 通过 Admin RPC 查找任务对应的 Worker，然后投递补充消息。
+   * 统一处理本地和远程 Worker 场景。
    */
   private async handleSupplementTask(
     decision: SupplementTaskDecision,
@@ -576,29 +453,9 @@ export class DecisionDispatcher {
     },
     traceCtx?: RpcTraceContext,
   ): Promise<{ task_id?: string }> {
-    const adminPort = await this.getAdminPort()
-
-    if (decision.confidence === 'low') {
-      // Low confidence: ask user to confirm which task
-      const confirmText = await this.buildConfirmationMessage(adminPort)
-      if (params.admin_chat_callback) {
-        await this.rpcClient.call(adminPort, 'chat_callback', {
-          request_id: params.admin_chat_callback.request_id,
-          reply_type: 'direct_reply',
-          content: confirmText,
-        }, this.moduleId, traceCtx)
-      } else {
-        const channelPort = await this.getChannelPort(params.channel_id)
-        await this.rpcClient.call(channelPort, 'send_message', {
-          session_id: params.session_id,
-          content: { type: 'text', text: confirmText },
-        }, this.moduleId, traceCtx)
-      }
-      return {}
-    }
-
-    // High confidence: send immediate reply then inject into worker
+    // Send immediate reply if provided
     if (decision.immediate_reply?.text) {
+      const adminPort = await this.getAdminPort()
       if (params.admin_chat_callback) {
         await this.rpcClient.call(adminPort, 'chat_callback', {
           request_id: params.admin_chat_callback.request_id,
@@ -614,8 +471,9 @@ export class DecisionDispatcher {
       }
     }
 
-    // Find worker and deliver supplement
+    // Find worker via Admin and deliver supplement
     try {
+      const adminPort = await this.getAdminPort()
       const taskResult = await this.rpcClient.call<
         { task_id: string },
         { task: { id: string; status: string; worker_agent_id?: string } }
@@ -657,30 +515,5 @@ export class DecisionDispatcher {
     }
 
     return { task_id: decision.task_id }
-  }
-
-  /**
-   * 构建任务确认消息（低置信度时列出活跃任务供用户选择）
-   */
-  private async buildConfirmationMessage(adminPort: number): Promise<string> {
-    try {
-      const result = await this.rpcClient.call<
-        { status: string[] },
-        { tasks: Array<{ task_id: string; title: string; status: string }> }
-      >(adminPort, 'query_tasks', {
-        status: ['executing', 'planning', 'waiting_human'],
-      }, this.moduleId)
-
-      if (result.tasks.length <= 1) {
-        return '您是想调整当前正在执行的任务吗？请确认。'
-      }
-
-      const options = result.tasks
-        .map((t, i) => `${i + 1}. 「${t.title}」(${t.status})`)
-        .join('\n')
-      return `您想调整哪个任务？\n${options}`
-    } catch {
-      return '您是想调整当前正在执行的任务吗？请确认。'
-    }
   }
 }

@@ -359,12 +359,6 @@ export interface CreateTaskDecision {
   front_context?: ToolHistoryEntry[]
 }
 
-export interface ForwardToWorkerDecision {
-  type: 'forward_to_worker'
-  task_id: TaskId
-  immediate_reply?: MessageContent
-}
-
 // ============================================================================
 // 协议接口参数
 // ============================================================================
@@ -379,7 +373,7 @@ export interface ProcessMessageParams {
 }
 
 export interface ProcessMessageResult {
-  decision_types: Array<'direct_reply' | 'create_task' | 'forward_to_worker'>
+  decision_types: Array<'direct_reply' | 'create_task' | 'supplement_task' | 'silent'>
   task_ids?: TaskId[]
 }
 
@@ -553,8 +547,7 @@ export interface SupplementTaskDecision {
   type: 'supplement_task'
   task_id: TaskId
   supplement_content: string
-  confidence: 'high' | 'low'
-  immediate_reply: MessageContent
+  immediate_reply?: MessageContent
 }
 
 export interface FrontLoopResult {
@@ -566,9 +559,8 @@ export interface FrontLoopResult {
 export type MessageDecision =
   | DirectReplyDecision
   | CreateTaskDecision
-  | ForwardToWorkerDecision
-  | SilentDecision
   | SupplementTaskDecision
+  | SilentDecision
 
 // ============================================================================
 // 配置热更新

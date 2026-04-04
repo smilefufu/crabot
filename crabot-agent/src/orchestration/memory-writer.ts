@@ -42,7 +42,7 @@ export interface WriteTriageDecisionParams extends MemoryWriteBase {
   session_id: string
   /** 用户消息的简要概述（≤80字，调用方截取，不需要 LLM） */
   message_brief: string
-  decision: 'direct_reply' | 'create_task' | 'forward_to_worker' | 'supplement_task'
+  decision: 'direct_reply' | 'create_task' | 'supplement_task'
   task_id?: string
 }
 
@@ -98,9 +98,6 @@ export class MemoryWriter {
         break
       case 'create_task':
         content = `${params.friend_name} 在 ${channelLabel} 发来请求（${params.message_brief}），创建任务 ${params.task_id ?? ''}`
-        break
-      case 'forward_to_worker':
-        content = `${params.friend_name} 的补充消息（${params.message_brief}）转发给任务 ${params.task_id ?? ''}`
         break
       case 'supplement_task':
         content = `${params.friend_name} 对任务 ${params.task_id ?? ''} 发来纠偏/补充（${params.message_brief}）`

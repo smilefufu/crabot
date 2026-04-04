@@ -268,11 +268,9 @@ function parseMakeDecision(input: Record<string, unknown>): MessageDecision {
         type: 'supplement_task',
         task_id: input.task_id as string,
         supplement_content: (input.supplement_content as string) ?? '',
-        confidence: (input.confidence as 'high' | 'low') ?? 'low',
-        immediate_reply: {
-          type: 'text',
-          text: replyText,
-        },
+        immediate_reply: replyText
+          ? { type: 'text' as const, text: replyText }
+          : undefined,
       }
 
     case 'silent':

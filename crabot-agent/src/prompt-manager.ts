@@ -17,8 +17,7 @@ const FRONT_RULES_SHARED = `## 纠偏判断指南
 
 当用户消息可能是对活跃任务的纠偏时：
 - 检查活跃任务列表，优先匹配同 session 发起的任务
-- 如果只有一个匹配任务且语义明确 -> confidence: high
-- 如果有多个匹配任务或语义模糊 -> confidence: low
+- 如果匹配到任务且语义明确 -> supplement_task（指定 task_id）
 - 如果没有活跃任务或消息明显是新请求 -> create_task
 
 ## 判断标准

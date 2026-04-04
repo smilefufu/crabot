@@ -50,11 +50,6 @@ export function makeDecisionTool(allowSilent: boolean): ToolDefinition {
         type: 'string',
         description: '提炼后的补充/纠偏内容（type=supplement_task 时必填）',
       },
-      confidence: {
-        type: 'string',
-        enum: ['high', 'low'],
-        description: 'high=确定是纠偏直接注入, low=不确定需用户确认',
-      },
     },
     required: ['type'],
   },
