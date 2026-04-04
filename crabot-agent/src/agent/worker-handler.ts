@@ -373,6 +373,7 @@ export class WorkerHandler {
           tools,
           model: this.sdkEnv.modelId,
           supportsVision: this.sdkEnv.supportsVision,
+          permissionConfig: { mode: 'bypass' },
           abortSignal: taskState.abortController.signal as AbortSignal,
           humanMessageQueue: humanQueue,
           onTurn: (event: EngineTurnEvent) => {

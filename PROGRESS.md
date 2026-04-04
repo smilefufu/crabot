@@ -57,8 +57,34 @@ Built-in tool config, Skill tool, E2E integration. **全部 311 tests pass**
 - [x] Task 40: Skill 工具修复 (skillsDir 传递)
 
 ### Engine V2 重构完成 ✅
-**总计**: 40 Tasks, 297 tests (agent 295 + mcp-tools 2)
-**分支**: `feat/engine-v2`
+**总计**: 40+ Tasks, 298 tests (agent 298 + mcp-tools 2)
+已合并到 main
+
+---
+
+## 后续规划：权限系统打通
+
+协议层完整定义，后端基础设施已有，但 Admin UI 和 Agent 工具权限未打通。
+
+### 第一期 ✅ — 让当前能跑通（master 自用）
+- [x] Worker 用 `bypass` 模式，所有工具可用
+- [x] engine permission-checker 基础设施（allowList/denyList/bypass/callback）
+- [x] deriveMemoryPermissions 已实现（master 无限制 / normal 按 session scope 过滤）
+- [x] `ToolPermissionConfig.checkPermission` 回调接口支持路径级细粒度控制
+
+### 第二期 — Admin UI 权限管理（让 master 能配置）
+- [ ] 权限模板管理页面（CRUD 自定义模板，系统预设: master_private/group_default/minimal/standard）
+- [ ] Friend 详情页增加权限模板选择器（permission_template_id）
+- [ ] Session 配置页面（查看/编辑 permissions、memory_scopes、workspace_path）
+- [ ] 内置工具管理页面（启用/禁用/权限级别覆盖，对应 BuiltinToolConfig）
+
+### 第三期 — Agent 侧权限打通（让配置真正生效）
+- [ ] 新增 `deriveToolPermissions(sessionPerms)` → `ToolPermissionConfig`
+- [ ] Session.permissions.desktop → 控制 computer-use 工具
+- [ ] Session.permissions.storage → 控制 Read/Write/Edit/Glob/Grep 路径
+- [ ] Session.permissions.network → 控制 fetch/Bash 网络访问
+- [ ] workspace_path → Worker task 沙箱根目录
+- [ ] Worker 从硬编码 `bypass` 改为 `deriveToolPermissions` 动态计算
 
 ---
 
