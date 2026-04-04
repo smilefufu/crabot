@@ -68,12 +68,6 @@ export function createReadTool(cwd: string): ToolDefinition {
       const limit = typeof input.limit === 'number' ? input.limit : DEFAULT_LIMIT
 
       try {
-        await fs.access(filePath)
-      } catch {
-        return { output: `File not found: ${filePath}`, isError: true }
-      }
-
-      try {
         const stat = await fs.stat(filePath)
         const fileSize = stat.size
 

@@ -11,7 +11,7 @@ import type {
 import {
   createUserMessage,
   createAssistantMessage,
-  createToolResultMessage,
+  createBatchToolResultMessage,
 } from './types'
 import { StreamProcessor } from './stream-processor'
 import { ContextManager } from './context-manager'
@@ -153,15 +153,8 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       options.onTurn(turnEvent)
     }
 
-    // Add tool results as individual messages
-    for (const result of toolResults) {
-      const toolResultMsg = createToolResultMessage(
-        result.tool_use_id,
-        result.content,
-        result.is_error
-      )
-      messages.push(toolResultMsg)
-    }
+    // Add tool results as a single batched message
+    messages.push(createBatchToolResultMessage(toolResults))
   }
 
   // Loop exhausted

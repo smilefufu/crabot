@@ -196,10 +196,6 @@ export class AnthropicAdapter implements LLMAdapter {
 
       let currentToolId: string | null = null
 
-      stream.on('message', () => {
-        // message event received
-      })
-
       for await (const event of stream) {
         switch (event.type) {
           case 'message_start':
@@ -237,28 +233,19 @@ export class AnthropicAdapter implements LLMAdapter {
             break
 
           case 'message_delta':
-            yield {
-              type: 'message_end',
-              stopReason: event.delta.stop_reason ?? null,
-              usage: event.usage
-                ? { inputTokens: 0, outputTokens: event.usage.output_tokens }
-                : undefined,
-            }
+            // Skip — use finalMessage() below for accurate usage
             break
         }
       }
 
-      // Get final message for accurate usage
       const finalMessage = await stream.finalMessage()
-      if (finalMessage.usage) {
-        yield {
-          type: 'message_end',
-          stopReason: finalMessage.stop_reason ?? null,
-          usage: {
-            inputTokens: finalMessage.usage.input_tokens,
-            outputTokens: finalMessage.usage.output_tokens,
-          },
-        }
+      yield {
+        type: 'message_end',
+        stopReason: finalMessage.stop_reason ?? null,
+        usage: {
+          inputTokens: finalMessage.usage.input_tokens,
+          outputTokens: finalMessage.usage.output_tokens,
+        },
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)

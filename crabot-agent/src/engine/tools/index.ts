@@ -12,32 +12,25 @@ export interface BuiltinToolsOptions {
   readonly skillsDir?: string
 }
 
-export function getAllBuiltinTools(cwd: string, options?: BuiltinToolsOptions): ReadonlyArray<ToolDefinition> {
+function buildBaseTools(cwd: string, bashTimeout?: number, skillsDir?: string): ToolDefinition[] {
   const tools: ToolDefinition[] = [
-    createBashTool(cwd),
+    createBashTool(cwd, bashTimeout),
     createReadTool(cwd),
     createWriteTool(cwd),
     createEditTool(cwd),
     createGlobTool(cwd),
     createGrepTool(cwd),
   ]
-
-  if (options?.skillsDir) {
-    tools.push(createSkillTool(options.skillsDir))
+  if (skillsDir) {
+    tools.push(createSkillTool(skillsDir))
   }
-
   return tools
 }
 
-/**
- * Get built-in tools filtered and configured by Admin-controlled BuiltinToolConfig.
- *
- * Logic:
- * 1. Get all base tools (with bash_timeout applied if configured)
- * 2. If enabled_tools set: keep only listed tools
- * 3. Else if disabled_tools set: remove listed tools
- * 4. Apply permission_overrides per tool
- */
+export function getAllBuiltinTools(cwd: string, options?: BuiltinToolsOptions): ReadonlyArray<ToolDefinition> {
+  return buildBaseTools(cwd, undefined, options?.skillsDir)
+}
+
 export function getConfiguredBuiltinTools(
   cwd: string,
   config?: BuiltinToolConfig,
@@ -47,19 +40,7 @@ export function getConfiguredBuiltinTools(
     return [...getAllBuiltinTools(cwd, options)]
   }
 
-  // Build base tools, passing bash_timeout if configured
-  const baseTools: ToolDefinition[] = [
-    createBashTool(cwd, config.bash_timeout),
-    createReadTool(cwd),
-    createWriteTool(cwd),
-    createEditTool(cwd),
-    createGlobTool(cwd),
-    createGrepTool(cwd),
-  ]
-
-  if (options?.skillsDir) {
-    baseTools.push(createSkillTool(options.skillsDir))
-  }
+  const baseTools = buildBaseTools(cwd, config.bash_timeout, options?.skillsDir)
 
   // Filter: enabled_tools takes precedence over disabled_tools
   let filtered: ToolDefinition[]

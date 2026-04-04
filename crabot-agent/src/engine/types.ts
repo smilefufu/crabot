@@ -186,3 +186,14 @@ export function createToolResultMessage(
     timestamp: Date.now(),
   }
 }
+
+export function createBatchToolResultMessage(
+  results: ReadonlyArray<{ tool_use_id: string; content: string; is_error: boolean }>
+): EngineToolResultMessage {
+  return {
+    id: randomUUID(),
+    role: 'user',
+    toolResults: results,
+    timestamp: Date.now(),
+  }
+}

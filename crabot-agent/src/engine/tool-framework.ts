@@ -59,7 +59,7 @@ export function partitionToolCalls(
 
   for (const block of blocks) {
     if (isReadOnlyBlock(block, tools)) {
-      currentReadOnlyBlocks = [...currentReadOnlyBlocks, block]
+      currentReadOnlyBlocks.push(block)
     } else {
       // Flush any accumulated read-only blocks as a parallel batch
       if (currentReadOnlyBlocks.length > 0) {

@@ -62,9 +62,11 @@ export interface WorkerDeps {
   getMemoryPort: () => Promise<number>
 }
 
+import type { LLMFormat } from '../engine/llm-adapter'
+
 export interface SdkEnvConfig {
   modelId: string
-  format: 'anthropic' | 'openai' | 'gemini'
+  format: LLMFormat
   env: Record<string, string>
 }
 

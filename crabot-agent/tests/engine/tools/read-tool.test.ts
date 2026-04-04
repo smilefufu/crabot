@@ -54,8 +54,7 @@ describe('createReadTool', () => {
     const filePath = path.join(tmpDir, 'does-not-exist.txt')
     const result = await tool.call({ file_path: filePath }, {})
     expect(result.isError).toBe(true)
-    expect(result.output).toContain('File not found')
-    expect(result.output).toContain(filePath)
+    expect(result.output).toContain('ENOENT')
   })
 
   it('detects binary files', async () => {
