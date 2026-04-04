@@ -203,16 +203,19 @@ export interface ChannelMessage {
     type: 'private' | 'group'
   }
   sender: {
-    /** Admin 鉴权后填充，channel.message_authorized 阶段一定存在 */
-    friend_id: FriendId
+    /** undefined if sender is not a registered friend */
+    friend_id?: FriendId
     platform_user_id: string
     platform_display_name: string
   }
   content: MessageContent
   features: {
-    mentions?: Array<{ friend_id: FriendId; platform_user_id: string }>
-    quote_message_id?: string
     is_mention_crab: boolean
+    mentions?: Array<{ user_id: string; display_name?: string }>
+    quote_message_id?: string
+    reply_to_message_id?: string
+    thread_id?: string
+    action_callback?: { action_id: string; payload: Record<string, unknown> }
   }
   platform_timestamp: string
 }
@@ -239,17 +242,33 @@ export interface TaskSummary {
   status: string
   task_type: string
   priority: string
+  assigned_worker?: string
   plan_summary?: string
-  source_channel_id?: ModuleId
-  source_session_id?: SessionId
   latest_progress?: string
+  source_channel_id?: string
+  source_session_id?: string
+  updated_at?: string
 }
 
 export interface ShortTermMemoryEntry {
-  memory_id: string
+  id: string
   content: string
-  timestamp: string
-  metadata?: Record<string, unknown>
+  keywords: string[]
+  event_time: string
+  persons: string[]
+  entities: string[]
+  topic?: string
+  source: {
+    channel_id?: string
+    session_id?: string
+    friend_id?: string
+    type: 'triage' | 'task' | 'manual'
+  }
+  refs?: Record<string, string>
+  compressed: boolean
+  visibility: 'private' | 'internal' | 'public'
+  scopes: string[]
+  created_at: string
 }
 
 export interface LongTermL0Entry {
@@ -257,6 +276,7 @@ export interface LongTermL0Entry {
   abstract: string
   importance: number
   tags: string[]
+  visibility: 'private' | 'internal' | 'public'
   created_at: string
 }
 
@@ -724,4 +744,3 @@ export interface TraceCallback {
   onToolCallStart(toolName: string, inputSummary: string): string
   onToolCallEnd(spanId: string, outputSummary: string, error?: string): void
 }
-
