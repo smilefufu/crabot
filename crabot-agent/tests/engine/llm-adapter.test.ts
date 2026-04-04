@@ -148,7 +148,7 @@ describe('normalizeMessagesForAnthropic', () => {
 
     expect(result).toHaveLength(1)
     expect(result[0].role).toBe('user')
-    const toolResult = (result[0] as { content: Array<Record<string, unknown>> }).content[0]
+    const toolResult = (result[0] as unknown as { content: Array<Record<string, unknown>> }).content[0]
     expect(toolResult.type).toBe('tool_result')
     expect(toolResult.tool_use_id).toBe('tu_1')
     expect(toolResult.is_error).toBe(false)
@@ -175,7 +175,7 @@ describe('normalizeMessagesForAnthropic', () => {
     } as EngineMessage
 
     const result = normalizeMessagesForAnthropic([msg])
-    const toolResult = (result[0] as { content: Array<Record<string, unknown>> }).content[0]
+    const toolResult = (result[0] as unknown as { content: Array<Record<string, unknown>> }).content[0]
     const content = toolResult.content as Array<Record<string, unknown>>
     // Empty string content should be omitted
     expect(content).toHaveLength(1)
@@ -187,7 +187,7 @@ describe('normalizeMessagesForAnthropic', () => {
     const result = normalizeMessagesForAnthropic([msg])
 
     expect(result[0].role).toBe('user')
-    const toolResult = (result[0] as { content: Array<Record<string, unknown>> }).content[0]
+    const toolResult = (result[0] as unknown as { content: Array<Record<string, unknown>> }).content[0]
     // No content array — just string content
     expect(toolResult.content).toBe('Just text')
   })
