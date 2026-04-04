@@ -39,8 +39,13 @@ Built-in tool config, Skill tool, E2E integration. **全部 311 tests pass**
 - [x] Task 28: Skill Execution Tool (5 tests)
 - [x] Task 29: End-to-End Integration Test (10 tests)
 
+### LSP 真实协议实现 ✅ (2026-04-04)
+- [x] Task 30: LSP Client (JSON-RPC over stdio, 14 tests)
+- [x] Task 31: LSP Server Manager (routing + file sync, 17 tests)
+- [x] Task 32: LSP MCP Server rewrite (9 operations, 25 tests)
+
 ### Engine V2 重构完成 ✅
-**总计**: 6 Phases, 29 Tasks, 311 tests, ~3000 LOC engine + tools
+**总计**: 6 Phases + LSP 补完, 32 Tasks, 360 tests
 **分支**: `feat/engine-v2` (ready for PR)
 
 ---
