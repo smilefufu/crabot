@@ -57,7 +57,7 @@ describe('McpConnector', () => {
 
     expect(connector.count).toBe(0)
     expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining('stdio transport requires "command"'),
+      expect.stringContaining('stdio needs command'),
     )
 
     consoleSpy.mockRestore()
@@ -72,7 +72,7 @@ describe('McpConnector', () => {
 
     expect(connector.count).toBe(0)
     expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining('streamable-http transport requires "url"'),
+      expect.stringContaining('streamable-http needs url'),
     )
 
     consoleSpy.mockRestore()
@@ -87,7 +87,7 @@ describe('McpConnector', () => {
 
     expect(connector.count).toBe(0)
     expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining('sse transport requires "url"'),
+      expect.stringContaining('sse needs url'),
     )
 
     consoleSpy.mockRestore()

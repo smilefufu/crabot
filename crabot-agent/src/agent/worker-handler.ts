@@ -324,7 +324,7 @@ export class WorkerHandler {
 
       // 3d. External MCP tools (from Admin-managed servers via McpConnector)
       if (this.mcpConnector) {
-        const externalTools = await this.mcpConnector.getAllTools()
+        const externalTools = this.mcpConnector.getAllTools()
         tools.push(...externalTools)
       }
 

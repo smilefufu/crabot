@@ -2,7 +2,7 @@
  * MCP Connector - Manages connections to external MCP servers (multi-transport)
  *
  * Supports stdio, streamable-http, and sse transports.
- * Converts remote MCP tools into engine ToolDefinition[] for use by WorkerHandler.
+ * Caches tool definitions at connect time to avoid per-task listTools() overhead.
  */
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -15,33 +15,36 @@ import type { MCPServerConfig } from '../types.js'
 
 export class McpConnector {
   private readonly clients: Map<string, Client> = new Map()
+  /** Cached tool definitions — populated at connect time, avoids per-task listTools() */
+  private cachedTools: ToolDefinition[] = []
 
-  /**
-   * Connect to all configured MCP servers.
-   * Errors on individual servers are logged but do not prevent other servers from connecting.
-   */
   async connectAll(configs: ReadonlyArray<MCPServerConfig>): Promise<void> {
+    // Deduplicate by name
+    const seen = new Set<string>()
+    const unique = configs.filter((c) => {
+      if (seen.has(c.name)) return false
+      seen.add(c.name)
+      return true
+    })
+
     const results = await Promise.allSettled(
-      configs.map((config) => this.connectOne(config))
+      unique.map((config) => this.connectOne(config))
     )
 
     for (let i = 0; i < results.length; i++) {
-      const result = results[i]
-      if (result.status === 'rejected') {
-        const reason = result.reason instanceof Error ? result.reason.message : String(result.reason)
-        console.error(`[McpConnector] Failed to connect MCP server "${configs[i].name}": ${reason}`)
+      if (results[i].status === 'rejected') {
+        const reason = (results[i] as PromiseRejectedResult).reason
+        const msg = reason instanceof Error ? reason.message : String(reason)
+        console.error(`[McpConnector] Failed to connect MCP server "${unique[i].name}": ${msg}`)
       }
     }
+
+    // Cache tools from all connected servers
+    await this.refreshToolCache()
   }
 
-  /**
-   * Connect to a single MCP server based on its transport type.
-   */
   private async connectOne(config: MCPServerConfig): Promise<void> {
-    if (this.clients.has(config.name)) {
-      console.warn(`[McpConnector] MCP server "${config.name}" already connected, skipping`)
-      return
-    }
+    if (this.clients.has(config.name)) return
 
     const transport = this.resolveTransport(config)
     const client = new Client(
@@ -49,75 +52,55 @@ export class McpConnector {
       { capabilities: {} },
     )
 
-    await client.connect(transport)
-    this.clients.set(config.name, client)
-
-    console.log(`[McpConnector] Connected to MCP server "${config.name}" (${transport.constructor.name})`)
+    try {
+      await client.connect(transport)
+      this.clients.set(config.name, client)
+      console.log(`[McpConnector] Connected to "${config.name}" (${config.transport ?? 'auto'})`)
+    } catch (error) {
+      // Clean up on partial failure
+      try { await client.close() } catch { /* ignore */ }
+      throw error
+    }
   }
 
-  /**
-   * Infer transport type and create the appropriate transport instance.
-   * - If config.transport is set, use it directly.
-   * - If config.command is set, default to stdio.
-   * - If config.url is set, default to streamable-http.
-   */
-  private resolveTransport(config: MCPServerConfig): InstanceType<typeof StdioClientTransport> | InstanceType<typeof SSEClientTransport> | InstanceType<typeof StreamableHTTPClientTransport> {
-    const transportType = config.transport
+  private resolveTransport(config: MCPServerConfig) {
+    const type = config.transport
       ?? (config.command ? 'stdio' : config.url ? 'streamable-http' : undefined)
 
-    if (!transportType) {
-      throw new Error(`MCP server "${config.name}": cannot determine transport type (no command or url provided)`)
+    if (!type) {
+      throw new Error(`"${config.name}": no transport (need command or url)`)
     }
 
-    switch (transportType) {
+    switch (type) {
       case 'stdio': {
-        if (!config.command) {
-          throw new Error(`MCP server "${config.name}": stdio transport requires "command"`)
-        }
+        if (!config.command) throw new Error(`"${config.name}": stdio needs command`)
         return new StdioClientTransport({
           command: config.command,
           args: config.args ?? [],
-          env: { ...process.env, ...config.env } as Record<string, string>,
+          env: config.env ? { ...process.env, ...config.env } as Record<string, string> : undefined,
         })
       }
       case 'streamable-http': {
-        if (!config.url) {
-          throw new Error(`MCP server "${config.name}": streamable-http transport requires "url"`)
-        }
+        if (!config.url) throw new Error(`"${config.name}": streamable-http needs url`)
         return new StreamableHTTPClientTransport(
           new URL(config.url),
-          { requestInit: { headers: config.headers } },
+          config.headers ? { requestInit: { headers: config.headers } } : undefined,
         )
       }
       case 'sse': {
-        if (!config.url) {
-          throw new Error(`MCP server "${config.name}": sse transport requires "url"`)
-        }
+        if (!config.url) throw new Error(`"${config.name}": sse needs url`)
         return new SSEClientTransport(
           new URL(config.url),
-          { requestInit: { headers: config.headers } },
+          config.headers ? { requestInit: { headers: config.headers } } : undefined,
         )
       }
       default:
-        throw new Error(`MCP server "${config.name}": unsupported transport type "${transportType}"`)
+        throw new Error(`"${config.name}": unsupported transport "${type}"`)
     }
   }
 
-  /** Get a connected client by server name */
-  getClient(name: string): Client | undefined {
-    return this.clients.get(name)
-  }
-
-  /** Number of connected servers */
-  get count(): number {
-    return this.clients.size
-  }
-
-  /**
-   * List all tools from all connected servers as ToolDefinition[].
-   * Tool names are prefixed with `mcp__<serverName>__<toolName>`.
-   */
-  async getAllTools(): Promise<ToolDefinition[]> {
+  /** Rebuild tool cache from all connected servers */
+  private async refreshToolCache(): Promise<void> {
     const tools: ToolDefinition[] = []
 
     for (const [serverName, client] of this.clients) {
@@ -139,38 +122,48 @@ export class McpConnector {
                   .filter(c => c.type === 'text' && c.text)
                   .map(c => c.text!)
                   .join('\n')
-                return {
-                  output: text || JSON.stringify(result.content),
-                  isError: !!result.isError,
-                }
+                return { output: text || JSON.stringify(result.content), isError: !!result.isError }
               } catch (error) {
-                const message = error instanceof Error ? error.message : String(error)
-                return { output: message, isError: true }
+                const msg = error instanceof Error ? error.message : String(error)
+                return { output: msg, isError: true }
               }
             },
           }))
         }
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        console.error(`[McpConnector] Failed to list tools from "${serverName}": ${message}`)
+        const msg = error instanceof Error ? error.message : String(error)
+        console.error(`[McpConnector] Failed to list tools from "${serverName}": ${msg}`)
       }
     }
 
-    return tools
+    this.cachedTools = tools
   }
 
-  /** Disconnect all connected MCP servers */
+  /** Get all tools (cached — no network calls) */
+  getAllTools(): ToolDefinition[] {
+    return this.cachedTools
+  }
+
+  getClient(name: string): Client | undefined {
+    return this.clients.get(name)
+  }
+
+  get count(): number {
+    return this.clients.size
+  }
+
   async disconnectAll(): Promise<void> {
     const entries = Array.from(this.clients.entries())
     this.clients.clear()
+    this.cachedTools = []
 
-    for (const [name, client] of entries) {
-      try {
-        await client.close()
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        console.error(`[McpConnector] Error disconnecting "${name}": ${message}`)
-      }
-    }
+    await Promise.allSettled(
+      entries.map(async ([name, client]) => {
+        try { await client.close() } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error)
+          console.error(`[McpConnector] Error disconnecting "${name}": ${msg}`)
+        }
+      })
+    )
   }
 }
