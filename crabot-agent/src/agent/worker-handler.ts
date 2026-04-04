@@ -13,6 +13,7 @@ import {
   runEngine,
   createAdapter,
   defineTool,
+  getAllBuiltinTools,
 } from '../engine/index.js'
 import type {
   ToolDefinition,
@@ -310,6 +311,9 @@ export class WorkerHandler {
       for (const [serverName, server] of Object.entries(externalMcpServers)) {
         tools.push(...mcpServerToToolDefinitions(server, serverName))
       }
+
+      // 3d. Built-in file/shell tools
+      tools.push(...getAllBuiltinTools(taskDir))
 
       // 4. Create LLM adapter from sdkEnv (format-based routing)
       const adapter = createAdapter({

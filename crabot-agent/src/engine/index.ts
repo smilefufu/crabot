@@ -49,3 +49,6 @@ export { ContextManager } from './context-manager'
 // --- Sub-Agent ---
 export { forkEngine, createSubAgentTool } from './sub-agent'
 export type { ForkEngineParams, ForkEngineResult, SubAgentToolConfig } from './sub-agent'
+
+// --- Built-in Tools ---
+export { getAllBuiltinTools } from './tools/index'
