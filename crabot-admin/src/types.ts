@@ -1051,12 +1051,18 @@ export interface MCPServerConfig {
   id: string
   /** 名称 */
   name: string
-  /** 启动命令 */
-  command: string
-  /** 命令参数 */
+  /** 传输类型 */
+  transport: 'stdio' | 'streamable-http' | 'sse'
+  /** 启动命令（stdio） */
+  command?: string
+  /** 命令参数（stdio） */
   args?: string[]
-  /** 环境变量 */
+  /** 环境变量（stdio） */
   env?: Record<string, string>
+  /** 服务端 URL（streamable-http / sse） */
+  url?: string
+  /** 请求头（streamable-http / sse） */
+  headers?: Record<string, string>
   /** 描述 */
   description?: string
 }

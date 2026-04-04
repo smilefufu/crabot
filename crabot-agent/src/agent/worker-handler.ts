@@ -329,7 +329,8 @@ export class WorkerHandler {
       }
 
       // 3e. Built-in file/shell tools (filtered by Admin config)
-      tools.push(...getConfiguredBuiltinTools(taskDir, this.builtinToolConfig))
+      const hasSkills = (params as { skills?: SkillConfig[] }).skills?.length
+      tools.push(...getConfiguredBuiltinTools(taskDir, this.builtinToolConfig, hasSkills ? { skillsDir: taskDir } : undefined))
 
       // 4. Create LLM adapter from sdkEnv (format-based routing)
       const adapter = createAdapter({
