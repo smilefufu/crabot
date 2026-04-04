@@ -186,7 +186,7 @@ export class ContextAssembler {
         { session_id: SessionId; limit: number },
         { items: Array<{
           platform_message_id: string
-          sender: { friend_id: string; platform_user_id: string; platform_display_name: string }
+          sender: { friend_id?: string; platform_user_id: string; platform_display_name: string }
           content: { type: string; text?: string; media_url?: string }
           features: { is_mention_crab: boolean }
           platform_timestamp: string
@@ -319,9 +319,11 @@ export class ContextAssembler {
             status: string
             type: string
             priority: string
+            assigned_worker?: string
             plan?: { summary?: string }
             source: { channel_id?: string; session_id?: string }
             messages?: Array<{ content: string; timestamp: string }>
+            updated_at?: string
           }>
         }
       >(
@@ -336,10 +338,12 @@ export class ContextAssembler {
         status: t.status,
         task_type: t.type,
         priority: t.priority,
+        assigned_worker: t.assigned_worker,
         plan_summary: t.plan?.summary,
+        latest_progress: this.extractLatestProgress(t.messages),
         source_channel_id: t.source.channel_id,
         source_session_id: t.source.session_id,
-        latest_progress: this.extractLatestProgress(t.messages),
+        updated_at: t.updated_at,
       }))
     } catch {
       return []

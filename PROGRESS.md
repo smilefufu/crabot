@@ -1,6 +1,58 @@
 # Crabot 项目进度
 
-> 最后更新：2026-03-29 — PromptManager 统一提示词管理 + 群聊决策优化 + Trace 持久化 + Channel Host 主动推送
+> 最后更新：2026-04-04 — Engine V2 Phase 4 开始（核心内置工具）
+
+## 当前进行中：Agent Engine V2
+
+**目标**：自研执行引擎，支持多 LLM 格式，内置工具，MCP 工具服务器  
+**计划文档**：`crabot-agent/docs/plans/2026-04-03-engine-v2.md`  
+**分支**：`feat/engine-v2`
+
+### Phase 1 — 引擎核心 ✅ (2026-04-03)
+10 个 engine 文件 ~1843 LOC, SDK 已移除, 93 tests
+
+### Phase 2 — 多 LLM 格式 ✅ (2026-04-04)
+OpenAI adapter, createAdapter factory, Front handler 迁移
+
+### Phase 3 — 高级能力 ✅ (2026-04-04)
+LLM auto-compact, sub-agent, permission system. 累计 200 tests
+
+### Phase 4 — 核心内置工具 ✅ (2026-04-04)
+Bash/Read/Write/Edit/Glob/Grep 6 个工具 + Worker 集成. 累计 203+49=252 tests
+- [x] Task 17: Bash Tool (7 tests)
+- [x] Task 18: Read Tool (8 tests)
+- [x] Task 19: Write Tool (7 tests)
+- [x] Task 20: Edit Tool (8 tests)
+- [x] Task 21: Glob Tool (8 tests)
+- [x] Task 22: Grep Tool (11 tests)
+- [x] Task 23: Built-in Tools Index + Worker Integration (7 tests)
+
+### Phase 5 — MCP 工具服务器 ✅ (2026-04-04)
+Computer Use (12 tests), LSP (7 tests), Git (10 tests). 累计 285 tests
+- [x] Task 24: Computer Use MCP (screenshot/mouse/keyboard)
+- [x] Task 25: LSP MCP (TypeScript diagnostics, hover/definition stubs)
+- [x] Task 26: Git MCP (status/diff/log/commit/branch/stash)
+
+### Phase 6 — Admin 工具注册集成 ✅ (2026-04-04)
+Built-in tool config, Skill tool, E2E integration. **全部 311 tests pass**
+- [x] Task 27: Admin Built-in Tool Configuration (11 tests)
+- [x] Task 28: Skill Execution Tool (5 tests)
+- [x] Task 29: End-to-End Integration Test (10 tests)
+
+### LSP 真实协议实现 ✅ (2026-04-04)
+- [x] Task 30: LSP Client (JSON-RPC over stdio, 14 tests)
+- [x] Task 31: LSP Server Manager (routing + file sync, 17 tests)
+- [x] Task 32: LSP MCP Server rewrite (9 operations, 25 tests)
+
+### 协议对齐 + 决策类型简化 ✅ (2026-04-04)
+- [x] Task 33: Protocol docs alignment (7 处协议修改)
+- [x] Task 34: Remove forward_to_worker → 4 种决策类型 (direct_reply, create_task, supplement_task, silent)
+- [x] Task 35: Type alignment (ShortTermMemory, LongTerm, TaskSummary, Features, friend_id)
+- [x] Task 36: Rename list_friends → list_contacts, add list_groups
+
+### Engine V2 重构完成 ✅
+**总计**: 36 Tasks, 364 tests, 协议 + 代码完全对齐
+**分支**: `feat/engine-v2` (ready for PR)
 
 ---
 

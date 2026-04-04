@@ -3,7 +3,7 @@
  */
 
 export { FrontHandler } from './front-handler.js'
+export type { FrontHandlerLlmConfig } from './front-handler.js'
 export { WorkerHandler } from './worker-handler.js'
-export type { LLMClientConfig } from './llm-client.js'
 export type { ToolExecutorDeps } from './tool-executor.js'
 export type { SdkEnvConfig, WorkerDeps } from './worker-handler.js'

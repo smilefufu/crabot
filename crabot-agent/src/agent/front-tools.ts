@@ -1,14 +1,19 @@
 /**
- * Front Tools - Anthropic-format tool definitions for Front Handler v2
+ * Front Tools - Engine ToolDefinition format for Front Handler v2
  *
  * Includes: make_decision, query_tasks, create_schedule,
- * and crab-messaging tools (lookup_friend, list_friends, list_sessions,
+ * and crab-messaging tools (lookup_friend, list_contacts, list_groups, list_sessions,
  * open_private_session, send_message, get_history)
+ *
+ * NOTE: These tools are NOT executed by the engine — the front-loop handles
+ * them manually. The `call` property is a no-op placeholder.
  */
 
-import type { Tool } from '@anthropic-ai/sdk/resources/messages'
+import type { ToolDefinition } from '../engine/types.js'
 
-export function makeDecisionTool(allowSilent: boolean): Tool {
+const NOOP_CALL = async () => ({ output: '', isError: false as const })
+
+export function makeDecisionTool(allowSilent: boolean): ToolDefinition {
   const types = allowSilent
     ? ['direct_reply', 'create_task', 'supplement_task', 'silent']
     : ['direct_reply', 'create_task', 'supplement_task']
@@ -18,7 +23,7 @@ export function makeDecisionTool(allowSilent: boolean): Tool {
   return {
     name: 'make_decision',
     description: '做出最终决策。分析完消息后必须调用此工具输出决策。',
-    input_schema: {
+    inputSchema: {
       type: 'object' as const,
       properties: {
         type: {
@@ -45,21 +50,18 @@ export function makeDecisionTool(allowSilent: boolean): Tool {
         type: 'string',
         description: '提炼后的补充/纠偏内容（type=supplement_task 时必填）',
       },
-      confidence: {
-        type: 'string',
-        enum: ['high', 'low'],
-        description: 'high=确定是纠偏直接注入, low=不确定需用户确认',
-      },
     },
     required: ['type'],
   },
+    isReadOnly: true,
+    call: NOOP_CALL,
   }
 }
 
-export const QUERY_TASKS_TOOL: Tool = {
+export const QUERY_TASKS_TOOL: ToolDefinition = {
   name: 'query_tasks',
   description: '查询当前活跃的任务列表和状态。用于回答用户关于任务进度的提问。',
-  input_schema: {
+  inputSchema: {
     type: 'object' as const,
     properties: {
       status: {
@@ -73,12 +75,14 @@ export const QUERY_TASKS_TOOL: Tool = {
     },
     required: [],
   },
+  isReadOnly: true,
+  call: NOOP_CALL,
 }
 
-export const CREATE_SCHEDULE_TOOL: Tool = {
+export const CREATE_SCHEDULE_TOOL: ToolDefinition = {
   name: 'create_schedule',
   description: '创建定时任务或提醒。支持一次性和周期性。',
-  input_schema: {
+  inputSchema: {
     type: 'object' as const,
     properties: {
       title: { type: 'string', description: '任务/提醒标题' },
@@ -95,12 +99,14 @@ export const CREATE_SCHEDULE_TOOL: Tool = {
     },
     required: ['title', 'action'],
   },
+  isReadOnly: false,
+  call: NOOP_CALL,
 }
 
-export const LOOKUP_FRIEND_TOOL: Tool = {
+export const LOOKUP_FRIEND_TOOL: ToolDefinition = {
   name: 'lookup_friend',
   description: '搜索熟人信息，包括该熟人在哪些 Channel 上有身份。可按名称模糊搜索或按 friend_id 精确查找。',
-  input_schema: {
+  inputSchema: {
     type: 'object' as const,
     properties: {
       name: { type: 'string', description: '按名称模糊搜索' },
@@ -108,27 +114,46 @@ export const LOOKUP_FRIEND_TOOL: Tool = {
     },
     required: [],
   },
+  isReadOnly: true,
+  call: NOOP_CALL,
 }
 
-export const LIST_FRIENDS_TOOL: Tool = {
-  name: 'list_friends',
-  description: '列出所有好友，支持分页、搜索和权限过滤。',
-  input_schema: {
+export const LIST_CONTACTS_TOOL: ToolDefinition = {
+  name: 'list_contacts',
+  description: '列出渠道的联系人列表（包含非熟人）',
+  inputSchema: {
     type: 'object' as const,
     properties: {
-      page: { type: 'number', description: '页码，默认 1' },
-      page_size: { type: 'number', description: '每页条数，默认 20' },
-      search: { type: 'string', description: '按名称模糊搜索' },
-      permission: { type: 'string', enum: ['master', 'normal'], description: '按权限过滤' },
+      channel_id: { type: 'string', description: '渠道 ID' },
+      search: { type: 'string', description: '联系人名称搜索关键词' },
+      limit: { type: 'number', description: '返回数量上限' },
     },
-    required: [],
+    required: ['channel_id'],
   },
+  isReadOnly: true,
+  call: NOOP_CALL,
 }
 
-export const LIST_SESSIONS_TOOL: Tool = {
+export const LIST_GROUPS_TOOL: ToolDefinition = {
+  name: 'list_groups',
+  description: '列出渠道的群聊列表',
+  inputSchema: {
+    type: 'object' as const,
+    properties: {
+      channel_id: { type: 'string', description: '渠道 ID' },
+      search: { type: 'string', description: '群名搜索关键词' },
+      limit: { type: 'number', description: '返回数量上限' },
+    },
+    required: ['channel_id'],
+  },
+  isReadOnly: true,
+  call: NOOP_CALL,
+}
+
+export const LIST_SESSIONS_TOOL: ToolDefinition = {
   name: 'list_sessions',
   description: '查看指定 Channel 上的会话列表。',
-  input_schema: {
+  inputSchema: {
     type: 'object' as const,
     properties: {
       channel_id: { type: 'string', description: 'Channel 模块实例 ID' },
@@ -136,12 +161,14 @@ export const LIST_SESSIONS_TOOL: Tool = {
     },
     required: ['channel_id'],
   },
+  isReadOnly: true,
+  call: NOOP_CALL,
 }
 
-export const OPEN_PRIVATE_SESSION_TOOL: Tool = {
+export const OPEN_PRIVATE_SESSION_TOOL: ToolDefinition = {
   name: 'open_private_session',
   description: '在指定 Channel 上查找或创建与某个熟人的私聊 Session。',
-  input_schema: {
+  inputSchema: {
     type: 'object' as const,
     properties: {
       channel_id: { type: 'string', description: 'Channel 模块实例 ID' },
@@ -149,12 +176,14 @@ export const OPEN_PRIVATE_SESSION_TOOL: Tool = {
     },
     required: ['channel_id', 'friend_id'],
   },
+  isReadOnly: false,
+  call: NOOP_CALL,
 }
 
-export const SEND_MESSAGE_TOOL: Tool = {
+export const SEND_MESSAGE_TOOL: ToolDefinition = {
   name: 'send_message',
   description: '在指定 Channel 的指定 Session 中发送消息。',
-  input_schema: {
+  inputSchema: {
     type: 'object' as const,
     properties: {
       channel_id: { type: 'string', description: 'Channel 模块实例 ID' },
@@ -164,12 +193,14 @@ export const SEND_MESSAGE_TOOL: Tool = {
     },
     required: ['channel_id', 'session_id', 'content'],
   },
+  isReadOnly: false,
+  call: NOOP_CALL,
 }
 
-export const GET_HISTORY_TOOL: Tool = {
+export const GET_HISTORY_TOOL: ToolDefinition = {
   name: 'get_history',
   description: '查看指定 Channel 上某个 Session 的历史消息。',
-  input_schema: {
+  inputSchema: {
     type: 'object' as const,
     properties: {
       channel_id: { type: 'string', description: 'Channel 模块实例 ID' },
@@ -181,12 +212,14 @@ export const GET_HISTORY_TOOL: Tool = {
     },
     required: ['channel_id', 'session_id'],
   },
+  isReadOnly: true,
+  call: NOOP_CALL,
 }
 
-export const STORE_MEMORY_TOOL: Tool = {
+export const STORE_MEMORY_TOOL: ToolDefinition = {
   name: 'store_memory',
   description: '将信息写入长期记忆。当用户要求记住/记录某些信息时使用。',
-  input_schema: {
+  inputSchema: {
     type: 'object' as const,
     properties: {
       content: { type: 'string', description: '要记忆的完整内容，应包含足够上下文' },
@@ -202,12 +235,14 @@ export const STORE_MEMORY_TOOL: Tool = {
     },
     required: ['content'],
   },
+  isReadOnly: false,
+  call: NOOP_CALL,
 }
 
-export const SEARCH_MEMORY_TOOL: Tool = {
+export const SEARCH_MEMORY_TOOL: ToolDefinition = {
   name: 'search_memory',
   description: '搜索记忆，返回摘要列表（L0 级别）。可按语义查询、按分类过滤。',
-  input_schema: {
+  inputSchema: {
     type: 'object' as const,
     properties: {
       query: { type: 'string', description: '自然语言搜索查询' },
@@ -223,12 +258,14 @@ export const SEARCH_MEMORY_TOOL: Tool = {
     },
     required: ['query'],
   },
+  isReadOnly: true,
+  call: NOOP_CALL,
 }
 
-export const GET_MEMORY_DETAIL_TOOL: Tool = {
+export const GET_MEMORY_DETAIL_TOOL: ToolDefinition = {
   name: 'get_memory_detail',
   description: '获取某条长期记忆的详细内容。先用 search_memory 找到记忆 ID，再用此工具查看详情。',
-  input_schema: {
+  inputSchema: {
     type: 'object' as const,
     properties: {
       memory_id: { type: 'string', description: '记忆 ID（如 mem-l042）' },
@@ -240,16 +277,19 @@ export const GET_MEMORY_DETAIL_TOOL: Tool = {
     },
     required: ['memory_id'],
   },
+  isReadOnly: true,
+  call: NOOP_CALL,
 }
 
 /** All Front tools in order */
-export function getAllFrontTools(allowSilent: boolean): Tool[] {
+export function getAllFrontTools(allowSilent: boolean): ToolDefinition[] {
   return [
     makeDecisionTool(allowSilent),
     QUERY_TASKS_TOOL,
     CREATE_SCHEDULE_TOOL,
     LOOKUP_FRIEND_TOOL,
-    LIST_FRIENDS_TOOL,
+    LIST_CONTACTS_TOOL,
+    LIST_GROUPS_TOOL,
     LIST_SESSIONS_TOOL,
     OPEN_PRIVATE_SESSION_TOOL,
     SEND_MESSAGE_TOOL,

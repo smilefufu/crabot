@@ -1,15 +1,16 @@
 /**
- * Front Handler v2 - Fast triage using direct Anthropic API
+ * Front Handler v2 - Fast triage using engine LLM adapter
  *
  * Replaces SDK-based implementation. Zero cold-start, ~10 controlled tools,
  * structured tool_use decisions via make_decision.
  */
 
-import type { ImageBlockParam, TextBlockParam } from '@anthropic-ai/sdk/resources/messages'
-import { LLMClient, type LLMClientConfig } from './llm-client.js'
+import type { LLMAdapter } from '../engine/llm-adapter.js'
+import type { ContentBlock } from '../engine/types.js'
 import { ToolExecutor, type ToolExecutorDeps } from './tool-executor.js'
 import { runFrontLoop } from './front-loop.js'
-import { resolveImageBlocks, formatMessageContent } from './media-resolver.js'
+import { resolveImageBlocks } from './media-resolver.js'
+import { formatMessageContent } from './media-resolver.js'
 import type {
   ChannelMessage,
   FrontAgentContext,
@@ -18,24 +19,31 @@ import type {
   TraceCallback,
 } from '../types.js'
 
-export type UserMessageContent = string | Array<TextBlockParam | ImageBlockParam>
+export type UserMessageContent = string | ContentBlock[]
 
 export interface FrontHandlerConfig {
   getSystemPrompt: (isGroup: boolean) => string
 }
 
+export interface FrontHandlerLlmConfig {
+  readonly adapter: LLMAdapter
+  readonly model: string
+}
+
 
 export class FrontHandler {
-  private llmClient: LLMClient
+  private adapter: LLMAdapter
+  private model: string
   private toolExecutor: ToolExecutor
   private getSystemPrompt: (isGroup: boolean) => string
 
   constructor(
-    llmConfig: LLMClientConfig,
+    llmConfig: FrontHandlerLlmConfig,
     toolExecutorDeps: ToolExecutorDeps,
     config: FrontHandlerConfig,
   ) {
-    this.llmClient = new LLMClient(llmConfig)
+    this.adapter = llmConfig.adapter
+    this.model = llmConfig.model
     this.toolExecutor = new ToolExecutor(toolExecutorDeps)
     this.getSystemPrompt = config.getSystemPrompt
   }
@@ -59,7 +67,8 @@ export class FrontHandler {
         userMessage,
         rawUserText,
         allowSilent,
-        llmClient: this.llmClient,
+        adapter: this.adapter,
+        model: this.model,
         toolExecutor: this.toolExecutor,
         traceCallback,
       })
@@ -77,8 +86,16 @@ export class FrontHandler {
     }
   }
 
-  updateLlmConfig(config: Partial<LLMClientConfig>): void {
-    this.llmClient.updateConfig(config)
+  updateLlmConfig(config: { endpoint?: string; apikey?: string; model?: string }): void {
+    if (config.endpoint !== undefined || config.apikey !== undefined) {
+      this.adapter.updateConfig({
+        ...(config.endpoint !== undefined ? { endpoint: config.endpoint } : {}),
+        ...(config.apikey !== undefined ? { apikey: config.apikey } : {}),
+      })
+    }
+    if (config.model !== undefined) {
+      this.model = config.model
+    }
   }
 }
 
@@ -91,7 +108,7 @@ export class FrontHandler {
 export function buildUserMessage(
   messages: ChannelMessage[],
   context: FrontAgentContext,
-  imageBlocks?: ImageBlockParam[],
+  imageBlocks?: Array<{ type: 'image'; source: { type: 'base64' | 'url'; media_type: string; data: string } }>,
 ): UserMessageContent {
   const parts: string[] = []
   const isGroup = messages[0]?.session?.type === 'group'
@@ -194,4 +211,3 @@ export function buildUserMessage(
 
   return textPrompt
 }
-

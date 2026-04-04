@@ -44,6 +44,17 @@ export interface OrchestrationConfig {
   front_agent_queue_timeout: number
 }
 
+export interface BuiltinToolConfig {
+  /** Which built-in tools are enabled (default: all enabled) */
+  enabled_tools?: string[]
+  /** Which built-in tools are disabled (alternative to enabled_tools) */
+  disabled_tools?: string[]
+  /** Permission level overrides per tool */
+  permission_overrides?: Record<string, 'safe' | 'normal' | 'dangerous'>
+  /** Bash-specific timeout in ms (default 120000) */
+  bash_timeout?: number
+}
+
 export interface AgentLayerConfig {
   /** 实例 ID */
   instance_id: string
@@ -69,6 +80,8 @@ export interface AgentLayerConfig {
   specialization?: string
   /** 支持的任务类型 */
   supported_task_types?: string[]
+  /** Built-in tool configuration (Admin-controlled) */
+  builtin_tool_config?: BuiltinToolConfig
 }
 
 export interface UnifiedAgentConfig {
@@ -190,16 +203,19 @@ export interface ChannelMessage {
     type: 'private' | 'group'
   }
   sender: {
-    /** Admin 鉴权后填充，channel.message_authorized 阶段一定存在 */
-    friend_id: FriendId
+    /** undefined if sender is not a registered friend */
+    friend_id?: FriendId
     platform_user_id: string
     platform_display_name: string
   }
   content: MessageContent
   features: {
-    mentions?: Array<{ friend_id: FriendId; platform_user_id: string }>
-    quote_message_id?: string
     is_mention_crab: boolean
+    mentions?: Array<{ user_id: string; display_name?: string }>
+    quote_message_id?: string
+    reply_to_message_id?: string
+    thread_id?: string
+    action_callback?: { action_id: string; payload: Record<string, unknown> }
   }
   platform_timestamp: string
 }
@@ -226,17 +242,33 @@ export interface TaskSummary {
   status: string
   task_type: string
   priority: string
+  assigned_worker?: string
   plan_summary?: string
-  source_channel_id?: ModuleId
-  source_session_id?: SessionId
   latest_progress?: string
+  source_channel_id?: string
+  source_session_id?: string
+  updated_at?: string
 }
 
 export interface ShortTermMemoryEntry {
-  memory_id: string
+  id: string
   content: string
-  timestamp: string
-  metadata?: Record<string, unknown>
+  keywords: string[]
+  event_time: string
+  persons: string[]
+  entities: string[]
+  topic?: string
+  source: {
+    channel_id?: string
+    session_id?: string
+    friend_id?: string
+    type: 'triage' | 'task' | 'manual'
+  }
+  refs?: Record<string, string>
+  compressed: boolean
+  visibility: 'private' | 'internal' | 'public'
+  scopes: string[]
+  created_at: string
 }
 
 export interface LongTermL0Entry {
@@ -244,6 +276,7 @@ export interface LongTermL0Entry {
   abstract: string
   importance: number
   tags: string[]
+  visibility: 'private' | 'internal' | 'public'
   created_at: string
 }
 
@@ -326,12 +359,6 @@ export interface CreateTaskDecision {
   front_context?: ToolHistoryEntry[]
 }
 
-export interface ForwardToWorkerDecision {
-  type: 'forward_to_worker'
-  task_id: TaskId
-  immediate_reply?: MessageContent
-}
-
 // ============================================================================
 // 协议接口参数
 // ============================================================================
@@ -346,7 +373,7 @@ export interface ProcessMessageParams {
 }
 
 export interface ProcessMessageResult {
-  decision_types: Array<'direct_reply' | 'create_task' | 'forward_to_worker'>
+  decision_types: Array<'direct_reply' | 'create_task' | 'supplement_task' | 'silent'>
   task_ids?: TaskId[]
 }
 
@@ -520,8 +547,7 @@ export interface SupplementTaskDecision {
   type: 'supplement_task'
   task_id: TaskId
   supplement_content: string
-  confidence: 'high' | 'low'
-  immediate_reply: MessageContent
+  immediate_reply?: MessageContent
 }
 
 export interface FrontLoopResult {
@@ -533,9 +559,8 @@ export interface FrontLoopResult {
 export type MessageDecision =
   | DirectReplyDecision
   | CreateTaskDecision
-  | ForwardToWorkerDecision
-  | SilentDecision
   | SupplementTaskDecision
+  | SilentDecision
 
 // ============================================================================
 // 配置热更新
@@ -711,4 +736,3 @@ export interface TraceCallback {
   onToolCallStart(toolName: string, inputSummary: string): string
   onToolCallEnd(spanId: string, outputSummary: string, error?: string): void
 }
-

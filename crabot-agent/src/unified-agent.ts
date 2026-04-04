@@ -37,11 +37,11 @@ import { ContextAssembler } from './orchestration/context-assembler.js'
 import { DecisionDispatcher } from './orchestration/decision-dispatcher.js'
 import { MemoryWriter } from './orchestration/memory-writer.js'
 import { AttentionScheduler, type AttentionConfig, type BufferedMessage } from './orchestration/attention-scheduler.js'
-import { FrontHandler } from './agent/front-handler.js'
-import type { LLMClientConfig } from './agent/llm-client.js'
+import { FrontHandler, type FrontHandlerLlmConfig } from './agent/front-handler.js'
+import { createAdapter, type LLMAdapter } from './engine/llm-adapter.js'
 import type { ToolExecutorDeps } from './agent/tool-executor.js'
 import { WorkerHandler, type SdkEnvConfig } from './agent/worker-handler.js'
-import type { McpServerConfig as SdkMcpServerConfig } from '@anthropic-ai/claude-agent-sdk'
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { MCPManager } from './agent/mcp-manager.js'
 import { createCrabMessagingServer, type PathMapping } from './mcp/crab-messaging.js'
 import { TraceStore } from './core/trace-store.js'
@@ -202,13 +202,13 @@ export class UnifiedAgent extends ModuleBase {
     // MCP config factory: creates fresh McpServer instances per runSdk() call
     // This avoids the "Already connected to a transport" Protocol reuse error
     const externalMcpConfigs = this.buildExternalMcpConfigs(config.mcp_servers)
-    const createMcpConfigs = (): Record<string, SdkMcpServerConfig> => ({
+    const createMcpConfigs = (): Record<string, McpServer> => ({
       'crab-messaging': createCrabMessagingServer({
         rpcClient: this.rpcClient,
         moduleId: this.config.moduleId,
         getAdminPort: () => this.getAdminPort(),
         resolveChannelPort: (channelId) => this.getChannelPort(channelId),
-      }, this.sandboxPathMappingsRef) as unknown as SdkMcpServerConfig,
+      }, this.sandboxPathMappingsRef),
       ...externalMcpConfigs,
     })
 
@@ -216,9 +216,13 @@ export class UnifiedAgent extends ModuleBase {
     if (this.roles.has('front')) {
       const frontModelConfig = config.model_config?.fast ?? config.model_config?.default
       if (frontModelConfig) {
-        const llmConfig: LLMClientConfig = {
+        const adapter = createAdapter({
           endpoint: frontModelConfig.endpoint,
           apikey: frontModelConfig.apikey,
+          format: frontModelConfig.format as 'anthropic' | 'openai' | 'gemini',
+        })
+        const llmConfig: FrontHandlerLlmConfig = {
+          adapter,
           model: frontModelConfig.model_id,
         }
         const toolExecutorDeps: ToolExecutorDeps = {
@@ -253,7 +257,7 @@ export class UnifiedAgent extends ModuleBase {
           moduleId: this.config.moduleId,
           resolveChannelPort: (channelId) => this.getChannelPort(channelId),
           getMemoryPort: () => this.getMemoryPort(),
-        })
+        }, config.builtin_tool_config)
       }
     }
   }
@@ -264,6 +268,7 @@ export class UnifiedAgent extends ModuleBase {
   private buildSdkEnv(connInfo: LLMConnectionInfo): SdkEnvConfig {
     return {
       modelId: connInfo.model_id,
+      format: connInfo.format,
       env: {
         ANTHROPIC_BASE_URL: connInfo.endpoint,
         ANTHROPIC_API_KEY: connInfo.apikey || 'dummy-key',
@@ -272,21 +277,16 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   /**
-   * 将 MCPServerConfig[] 转换为 SDK 的 Record<string, SdkMcpServerConfig>
+   * Build external MCP configs (stdio-based servers).
+   * TODO(task-10): migrate to MCPManager.startServers() for proper lifecycle management.
+   * Currently returns empty — external stdio MCP servers are not yet supported without claude-agent-sdk.
    */
   private buildExternalMcpConfigs(
-    configs?: Array<{ name: string; command: string; args?: string[]; env?: Record<string, string> }>
-  ): Record<string, SdkMcpServerConfig> {
-    if (!configs || configs.length === 0) return {}
-    const result: Record<string, SdkMcpServerConfig> = {}
-    for (const cfg of configs) {
-      result[cfg.name] = {
-        command: cfg.command,
-        args: cfg.args ?? [],
-        env: cfg.env,
-      } as unknown as SdkMcpServerConfig
-    }
-    return result
+    _configs?: Array<{ name: string; command: string; args?: string[]; env?: Record<string, string> }>
+  ): Record<string, McpServer> {
+    // External stdio MCP servers were previously handled by claude-agent-sdk.
+    // With the self-built engine, these need MCPManager integration (future task).
+    return {}
   }
 
   /**
@@ -493,8 +493,6 @@ ${skillsSection}
           ? decision.task_title
           : decision.type === 'supplement_task'
           ? `supplement → ${decision.task_id}: ${decision.supplement_content.slice(0, 60)}`
-          : decision.type === 'forward_to_worker'
-          ? `task_id: ${decision.task_id}`
           : 'silent'
 
         const decisionSpan = this.traceStore.startSpan(trace.trace_id, {
@@ -551,7 +549,7 @@ ${skillsSection}
             channel_id: session.channel_id,
             session_id: session.session_id,
             message_brief: messageBrief,
-            decision: decision.type as 'direct_reply' | 'create_task' | 'forward_to_worker' | 'supplement_task',
+            decision: decision.type as 'direct_reply' | 'create_task' | 'supplement_task',
             task_id: 'task_id' in decision ? (decision as { task_id: string }).task_id : undefined,
             visibility: memPerms.write_visibility,
             scopes: memPerms.write_scopes,
@@ -666,8 +664,8 @@ ${skillsSection}
                 ? (decision.reply.text ?? '').slice(0, 100)
                 : decision.type === 'create_task'
                 ? decision.task_title
-                : decision.type === 'forward_to_worker'
-                ? `task_id: ${decision.task_id}`
+                : decision.type === 'supplement_task'
+                ? `supplement → ${decision.task_id}: ${decision.supplement_content.slice(0, 60)}`
                 : 'silent',
             },
           })
@@ -855,9 +853,24 @@ ${skillsSection}
     const matchingTask = activeTasks.find(t => t.task_id === decision.task_id)
 
     if (!matchingTask) {
-      this.traceStore.endSpan(traceId, deliverSpan.span_id, 'failed', {
-        error: `task_id=${decision.task_id} not found in activeTasks. Active: [${activeTasks.map(t => t.task_id).join(', ')}]`,
+      // Task not found locally — fall back to remote delivery via Admin RPC
+      this.traceStore.endSpan(traceId, deliverSpan.span_id, 'completed', {
+        output_summary: `task not local, delegating to DecisionDispatcher`,
       })
+      await this.decisionDispatcher.dispatch(
+        decision,
+        {
+          channel_id: session.channel_id,
+          session_id: session.session_id,
+          messages: [],
+          memoryPermissions: { write_visibility: 'internal', write_scopes: [], read_min_visibility: 'internal' },
+        },
+        {
+          traceStore: this.traceStore,
+          traceId,
+          parentSpanId: parentSpanId,
+        }
+      )
       return
     }
 
@@ -892,7 +905,7 @@ ${skillsSection}
       if (decision.type === 'create_task' && decision.immediate_reply.text) {
         return decision.immediate_reply.text
       }
-      if (decision.type === 'forward_to_worker' && decision.immediate_reply?.text) {
+      if (decision.type === 'supplement_task' && decision.immediate_reply?.text) {
         return decision.immediate_reply.text
       }
     }
@@ -1283,8 +1296,8 @@ ${skillsSection}
               ? (decision.reply.text ?? '').slice(0, 100)
               : decision.type === 'create_task'
               ? decision.task_title
-              : decision.type === 'forward_to_worker'
-              ? `task_id: ${decision.task_id}`
+              : decision.type === 'supplement_task'
+              ? `supplement → ${decision.task_id}: ${decision.supplement_content.slice(0, 60)}`
               : 'silent',
           },
         })
@@ -1345,7 +1358,7 @@ ${skillsSection}
             channel_id: 'admin-web',
             session_id: sessionId,
             message_brief: messageBrief,
-            decision: decision.type as 'direct_reply' | 'create_task' | 'forward_to_worker' | 'supplement_task',
+            decision: decision.type as 'direct_reply' | 'create_task' | 'supplement_task',
             task_id: 'task_id' in decision ? (decision as { task_id: string }).task_id : undefined,
             visibility: masterMemPerms.write_visibility,
             scopes: masterMemPerms.write_scopes,
@@ -1658,13 +1671,13 @@ ${skillsSection}
 
     // MCP config factory: creates fresh McpServer instances per runSdk() call
     const externalMcpConfigs = this.buildExternalMcpConfigs(this.agentConfig?.mcp_servers)
-    const createMcpConfigs = (): Record<string, SdkMcpServerConfig> => ({
+    const createMcpConfigs = (): Record<string, McpServer> => ({
       'crab-messaging': createCrabMessagingServer({
         rpcClient: this.rpcClient,
         moduleId: this.config.moduleId,
         getAdminPort: () => this.getAdminPort(),
         resolveChannelPort: (channelId) => this.getChannelPort(channelId),
-      }, this.sandboxPathMappingsRef) as unknown as SdkMcpServerConfig,
+      }, this.sandboxPathMappingsRef),
       ...externalMcpConfigs,
     })
 
@@ -1681,9 +1694,13 @@ ${skillsSection}
           console.log(`[${this.config.moduleId}] Front Agent LLM config updated`)
         } else {
           // 首次从未配置状态收到配置，创建 handler
-          const llmConfig: LLMClientConfig = {
+          const adapter = createAdapter({
             endpoint: frontConfig.endpoint,
             apikey: frontConfig.apikey,
+            format: frontConfig.format as 'anthropic' | 'openai' | 'gemini',
+          })
+          const llmConfig: FrontHandlerLlmConfig = {
+            adapter,
             model: frontConfig.model_id,
           }
           const toolExecutorDeps: ToolExecutorDeps = {
@@ -1719,7 +1736,7 @@ ${skillsSection}
           moduleId: this.config.moduleId,
           resolveChannelPort: (channelId) => this.getChannelPort(channelId),
           getMemoryPort: () => this.getMemoryPort(),
-        })
+        }, this.agentConfig?.builtin_tool_config)
         console.log(`[${this.config.moduleId}] Worker Agent SDK env ${this.workerHandler ? 'updated' : 'created from config push'}`)
       }
     }
