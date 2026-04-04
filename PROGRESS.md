@@ -50,9 +50,15 @@ Built-in tool config, Skill tool, E2E integration. **全部 311 tests pass**
 - [x] Task 35: Type alignment (ShortTermMemory, LongTerm, TaskSummary, Features, friend_id)
 - [x] Task 36: Rename list_friends → list_contacts, add list_groups
 
+### MCP 基础设施重构 ✅ (2026-04-04)
+- [x] Task 37: crabot-mcp-tools 独立包 (Computer Use/LSP/Git stdio 入口)
+- [x] Task 38: Admin MCP 注册表扩展 (stdio/streamable-http/sse + 内置注册)
+- [x] Task 39: Agent McpConnector (多传输连接 + 工具转换)
+- [x] Task 40: Skill 工具修复 (skillsDir 传递)
+
 ### Engine V2 重构完成 ✅
-**总计**: 36 Tasks, 364 tests, 协议 + 代码完全对齐
-**分支**: `feat/engine-v2` (ready for PR)
+**总计**: 40 Tasks, 297 tests (agent 295 + mcp-tools 2)
+**分支**: `feat/engine-v2`
 
 ---
 
