@@ -74,12 +74,14 @@ export interface SdkEnvConfig {
 
 /** Human-readable descriptions for tools (used in sanitized progress for non-master sessions) */
 const TOOL_DESCRIPTIONS: Record<string, string> = {
-  'mcp__crabot-worker__ask_human': '请求人类反馈',
   'mcp__crab-memory__store_memory': '写入长期记忆',
   'mcp__crab-memory__search_memory': '搜索记忆',
   'mcp__crab-memory__get_memory_detail': '查看记忆详情',
   'Skill': '使用技能',
 }
+
+/** Bash commands that are internal utilities — not worth reporting as progress */
+const INTERNAL_BASH_RE = /^(ls|file|cat|head|tail|wc|echo|sleep|pwd|cd|which|type|test|stat|du|df|find|xargs|sort|uniq|tr|cut|awk|sed)\b/
 
 /** Tool prefixes that are internal agent workflow — never reported as progress */
 const INTERNAL_TOOL_PREFIXES = [
@@ -353,6 +355,7 @@ export class WorkerHandler {
       let loopSpanId: string | undefined
       const pendingToolCalls: string[] = []
       const taskOrigin = context.task_origin
+      let lastSentText = ''
 
       // Start loop span
       loopSpanId = traceCallback?.onLoopStart('worker', {
@@ -421,6 +424,7 @@ export class WorkerHandler {
                 if (pendingToolCalls.length > 0) {
                   this.sendToUser(taskOrigin, this.dedupeToolSummaries(pendingToolCalls.splice(0)).slice(0, 500))
                 }
+                lastSentText = trimmedText
                 this.sendToUser(taskOrigin, trimmedText)
               }
 
@@ -450,7 +454,7 @@ export class WorkerHandler {
       }
 
       // 8. Map EngineResult → ExecuteTaskResult
-      return this.mapEngineResult(task.task_id, engineResult, !!taskOrigin && !!this.deps)
+      return this.mapEngineResult(task.task_id, engineResult, !!taskOrigin && !!this.deps, lastSentText)
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
@@ -478,6 +482,7 @@ export class WorkerHandler {
     taskId: TaskId,
     result: EngineResult,
     hasProgressDeps: boolean,
+    lastSentText?: string,
   ): ExecuteTaskResult {
     const isError = result.outcome === 'failed' || result.outcome === 'aborted'
     const finalText = result.finalText || '任务已完成，但模型未生成输出'
@@ -486,11 +491,14 @@ export class WorkerHandler {
       return { task_id: taskId, outcome: 'failed', summary: '任务被取消' }
     }
 
+    // If final text was already sent as progress, skip final_reply to avoid duplication
+    const alreadySent = !!lastSentText && finalText.trim() === lastSentText.trim()
+
     return {
       task_id: taskId,
       outcome: isError ? 'failed' : 'completed',
       summary: finalText,
-      final_reply: (isError || !hasProgressDeps) ? { type: 'text', text: finalText } : undefined,
+      final_reply: alreadySent ? undefined : { type: 'text', text: finalText },
     }
   }
 
@@ -649,8 +657,11 @@ export class WorkerHandler {
     if (INTERNAL_TOOL_PREFIXES.some(p => toolName.startsWith(p))) return null
     const args = input as Record<string, unknown> | undefined
     switch (toolName) {
-      case 'Bash':
-        return `> ${(args?.command as string ?? '').slice(0, 120)}`
+      case 'Bash': {
+        const cmd = (args?.command as string ?? '').trim()
+        if (INTERNAL_BASH_RE.test(cmd)) return null
+        return `> ${cmd.slice(0, 120)}`
+      }
       case 'Write':
         return `写入 ${args?.file_path ?? '文件'}`
       case 'Edit':
@@ -661,6 +672,14 @@ export class WorkerHandler {
         return `搜索文件 ${args?.pattern ?? ''}`
       case 'Grep':
         return `搜索 "${(args?.pattern as string ?? '').slice(0, 30)}" in ${args?.path ?? '.'}`
+      case 'mcp__crabot-worker__ask_human': {
+        const question = (args?.question as string) ?? ''
+        return question || null
+      }
+      case 'mcp__computer-use__screenshot': return '正在截图...'
+      case 'mcp__computer-use__mouse_click': return '正在点击...'
+      case 'mcp__computer-use__keyboard_type': return '正在输入...'
+      case 'mcp__computer-use__keyboard_key': return '正在操作...'
       default:
         return toolName
     }
@@ -676,7 +695,8 @@ export class WorkerHandler {
     const args = input as Record<string, unknown> | undefined
     switch (toolName) {
       case 'Bash': {
-        const cmd = (args?.command as string ?? '')
+        const cmd = (args?.command as string ?? '').trim()
+        if (INTERNAL_BASH_RE.test(cmd)) return null
         const sanitized = cmd.replace(/(?:\/[\w.-]+)+/g, (match) => {
           const segments = match.split('/')
           return segments[segments.length - 1]
@@ -693,6 +713,14 @@ export class WorkerHandler {
         return `搜索文件 ${args?.pattern ?? ''}`
       case 'Grep':
         return `搜索 "${(args?.pattern as string ?? '').slice(0, 30)}"`
+      case 'mcp__crabot-worker__ask_human': {
+        const question = (args?.question as string) ?? ''
+        return question || null
+      }
+      case 'mcp__computer-use__screenshot': return '正在截图...'
+      case 'mcp__computer-use__mouse_click': return '正在点击...'
+      case 'mcp__computer-use__keyboard_type': return '正在输入...'
+      case 'mcp__computer-use__keyboard_key': return '正在操作...'
       default:
         return TOOL_DESCRIPTIONS[toolName] ?? null
     }
