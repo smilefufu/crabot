@@ -33,10 +33,15 @@ Computer Use (12 tests), LSP (7 tests), Git (10 tests). 累计 285 tests
 - [x] Task 25: LSP MCP (TypeScript diagnostics, hover/definition stubs)
 - [x] Task 26: Git MCP (status/diff/log/commit/branch/stash)
 
-### Phase 6 — Admin 工具注册集成
-- [ ] Task 27: Admin Built-in Tool Configuration
-- [ ] Task 28: Skill Execution Tool
-- [ ] Task 29: End-to-End Integration Test
+### Phase 6 — Admin 工具注册集成 ✅ (2026-04-04)
+Built-in tool config, Skill tool, E2E integration. **全部 311 tests pass**
+- [x] Task 27: Admin Built-in Tool Configuration (11 tests)
+- [x] Task 28: Skill Execution Tool (5 tests)
+- [x] Task 29: End-to-End Integration Test (10 tests)
+
+### Engine V2 重构完成 ✅
+**总计**: 6 Phases, 29 Tasks, 311 tests, ~3000 LOC engine + tools
+**分支**: `feat/engine-v2` (ready for PR)
 
 ---
 
