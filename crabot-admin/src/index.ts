@@ -3151,11 +3151,16 @@ export class AdminModule extends ModuleBase {
         ...config,
         model_config: resolvedModelConfig,
         // 将 ID 列表解析为完整对象，供 Agent 直接使用
-        // 只看 agent config 中的 ID 列表（Agent 配置页是唯一控制点），不检查 s.enabled
-        mcp_servers: (config.mcp_server_ids ?? [])
-          .map((id) => this.mcpServerManager.get(id))
-          .filter((s): s is NonNullable<typeof s> => s !== undefined)
-          .map((s) => this.mcpServerManager.toAgentConfig(s)),
+        // 1. Agent 实例配置的 mcp_server_ids（用户在 Agent 配置页关联的）
+        // 2. 所有 enabled 的内置 MCP server（自动可用，不需要手动关联）
+        mcp_servers: [
+          ...(config.mcp_server_ids ?? [])
+            .map((id) => this.mcpServerManager.get(id))
+            .filter((s): s is NonNullable<typeof s> => s !== undefined),
+          ...this.mcpServerManager.list()
+            .filter((s) => s.is_builtin && s.enabled)
+            .filter((s) => !(config.mcp_server_ids ?? []).includes(s.id)),
+        ].map((s) => this.mcpServerManager.toAgentConfig(s)),
         skills: (config.skill_ids ?? [])
           .map((id) => this.skillManager.get(id))
           .filter((s): s is NonNullable<typeof s> => s !== undefined)
