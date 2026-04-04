@@ -186,16 +186,22 @@ export class ToolExecutor {
 
   private async queryTasks(input: Record<string, unknown>): Promise<ToolResult> {
     const localTasks = this.deps.getActiveTasks()
-    const adminPort = await this.deps.getAdminPort()
-    const adminResult = await this.deps.rpcClient.call<
-      { status?: string[]; channel_id?: string },
-      { tasks: Array<{ task_id: string; title: string; status: string; task_type: string }> }
-    >(adminPort, 'query_tasks', {
-      status: input.status ? [input.status as string] : ['executing', 'waiting_human', 'planning'],
-      ...(input.channel_id ? { channel_id: input.channel_id as string } : {}),
-    }, this.deps.moduleId)
+    let adminTasks: Array<{ task_id: string; title: string; status: string; task_type: string }> = []
+    try {
+      const adminPort = await this.deps.getAdminPort()
+      const adminResult = await this.deps.rpcClient.call<
+        { status?: string[]; channel_id?: string },
+        { tasks: Array<{ task_id: string; title: string; status: string; task_type: string }> }
+      >(adminPort, 'query_tasks', {
+        status: input.status ? [input.status as string] : ['executing', 'waiting_human', 'planning'],
+        ...(input.channel_id ? { channel_id: input.channel_id as string } : {}),
+      }, this.deps.moduleId)
+      adminTasks = adminResult.tasks ?? []
+    } catch {
+      // Admin RPC unavailable — return local tasks only
+    }
     return {
-      output: JSON.stringify({ local_active: localTasks, admin_tasks: adminResult.tasks }),
+      output: JSON.stringify({ local_active: localTasks, admin_tasks: adminTasks }),
       isError: false,
     }
   }

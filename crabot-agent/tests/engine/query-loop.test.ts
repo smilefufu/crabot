@@ -259,7 +259,7 @@ describe('runEngine', () => {
     expect(result.error).toContain('Rate limited')
   })
 
-  it('defaults maxTurns to 10 when not specified', async () => {
+  it('defaults maxTurns to 200 when not specified', async () => {
     const dummyTool = defineTool({
       name: 'dummy',
       description: 'Dummy',
@@ -268,8 +268,8 @@ describe('runEngine', () => {
       call: async () => ({ output: 'ok', isError: false }),
     })
 
-    // Create 11 tool-use responses (one more than default max)
-    const responses = Array.from({ length: 11 }, (_, i) =>
+    // Create 201 tool-use responses (one more than default max)
+    const responses = Array.from({ length: 201 }, (_, i) =>
       toolUseResponse(`tu-${i}`, 'dummy', {})
     )
 
@@ -287,6 +287,6 @@ describe('runEngine', () => {
     })
 
     expect(result.outcome).toBe('max_turns')
-    expect(result.totalTurns).toBe(10)
+    expect(result.totalTurns).toBe(200)
   })
 })

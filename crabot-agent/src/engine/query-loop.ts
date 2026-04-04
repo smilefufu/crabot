@@ -27,7 +27,7 @@ export interface RunEngineParams {
   readonly options: EngineOptions
 }
 
-const DEFAULT_MAX_TURNS = 10
+const DEFAULT_MAX_TURNS = 200
 const DEFAULT_MAX_CONTEXT_TOKENS = 100_000
 
 // --- Core Loop ---
@@ -135,9 +135,11 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
 
     // Execute tools
     const batches = partitionToolCalls(processed.toolUseBlocks, options.tools)
+    const toolStartTime = Date.now()
     const toolResults = await executeToolBatches(batches, options.tools, {
       abortSignal,
     }, options.permissionConfig)
+    const toolExecutionMs = Date.now() - toolStartTime
 
     // Fire onTurn callback
     if (options.onTurn) {
@@ -152,6 +154,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
           isError: toolResults[i]?.is_error ?? false,
         })),
         stopReason,
+        toolExecutionMs,
       }
       options.onTurn(turnEvent)
     }
@@ -171,6 +174,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         const filename = `screenshot-${Date.now()}-${i}.png`
         const filePath = `/tmp/${filename}`
         fs.writeFileSync(filePath, Buffer.from(img.data, 'base64'))
+        console.log(`[engine] Image saved to file (model does not support vision): ${filePath}`)
         descriptions.push(`[Image saved to ${filePath}] Use Bash tool to analyze with OCR if needed.`)
       }
       return { ...r, content: descriptions.join('\n'), images: undefined }

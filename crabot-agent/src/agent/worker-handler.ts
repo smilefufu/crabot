@@ -385,6 +385,9 @@ export class WorkerHandler {
 
             // Compute tool summaries
             const turnToolSummaries: string[] = []
+            const perToolMs = event.toolCalls.length > 0
+              ? Math.round((event.toolExecutionMs ?? 0) / event.toolCalls.length)
+              : 0
             for (const tc of event.toolCalls) {
               const summary = isMasterPrivate
                 ? this.summarizeToolCall(tc.name, tc.input)
@@ -393,7 +396,7 @@ export class WorkerHandler {
                 turnToolSummaries.push(summary)
               }
 
-              // Trace: tool call
+              // Trace: tool call (spread total toolExecutionMs across tools)
               const toolSpanId = traceCallback?.onToolCallStart(
                 tc.name,
                 JSON.stringify(tc.input ?? {}).slice(0, 200),
@@ -401,7 +404,7 @@ export class WorkerHandler {
               if (toolSpanId) {
                 traceCallback?.onToolCallEnd(
                   toolSpanId,
-                  tc.output?.slice(0, 500) || '(no output)',
+                  `${tc.output?.slice(0, 500) || '(no output)'}${perToolMs > 0 ? ` [${perToolMs}ms]` : ''}`,
                   tc.isError ? tc.output : undefined,
                 )
               }
@@ -454,8 +457,20 @@ export class WorkerHandler {
         traceCallback?.onLoopEnd(loopSpanId, isError ? 'failed' : 'completed', engineResult.totalTurns)
       }
 
-      // 8. Map EngineResult → ExecuteTaskResult
-      return this.mapEngineResult(task.task_id, engineResult, !!taskOrigin && !!this.deps, lastSentText)
+      // 8. Summarize if finalText is empty or the default placeholder
+      let finalEngineResult = engineResult
+      if (!engineResult.finalText || engineResult.finalText === '任务已完成，但模型未生成输出') {
+        const summary = await this.summarizeTaskOutcome(
+          task.task_title,
+          engineResult.totalTurns,
+          engineResult.outcome,
+          engineResult.finalText,
+        )
+        finalEngineResult = { ...engineResult, finalText: summary }
+      }
+
+      // 9. Map EngineResult → ExecuteTaskResult
+      return this.mapEngineResult(task.task_id, finalEngineResult, !!taskOrigin && !!this.deps, lastSentText)
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
@@ -473,6 +488,44 @@ export class WorkerHandler {
       this.humanQueues.delete(task.task_id)
       this.activeTasks.delete(task.task_id)
       await this.cleanupTaskDir()
+    }
+  }
+
+  /**
+   * Call LLM to generate a human-readable summary when the engine finishes
+   * without producing a clear final text.
+   */
+  private async summarizeTaskOutcome(
+    taskTitle: string,
+    turnCount: number,
+    outcome: string,
+    lastText: string,
+  ): Promise<string> {
+    try {
+      const adapter = createAdapter({
+        endpoint: this.sdkEnv.env.ANTHROPIC_BASE_URL ?? '',
+        apikey: this.sdkEnv.env.ANTHROPIC_API_KEY ?? '',
+        format: this.sdkEnv.format,
+      })
+      const { callNonStreaming } = await import('../engine/llm-adapter.js')
+      const { createUserMessage } = await import('../engine/types.js')
+      const response = await callNonStreaming(adapter, {
+        messages: [createUserMessage(
+          `任务"${taskTitle}"已${outcome === 'completed' ? '完成' : '结束'}，共执行了${turnCount}轮操作。` +
+          (lastText ? `\n最后的输出是：${lastText.slice(0, 500)}` : '') +
+          `\n请用1-2句话向用户简要报告任务执行情况和结果。不要提及内部实现细节。`
+        )],
+        systemPrompt: '你是一个任务执行助手，需要向用户简要报告任务结果。语言简洁自然。',
+        tools: [],
+        model: this.sdkEnv.modelId,
+      })
+      const text = response.content
+        .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+        .map(b => b.text)
+        .join('')
+      return text || lastText || '任务已完成'
+    } catch {
+      return lastText || '任务已完成'
     }
   }
 

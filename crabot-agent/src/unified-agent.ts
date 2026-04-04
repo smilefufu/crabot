@@ -1526,6 +1526,17 @@ ${skillsSection}
 
     const traceCallback = this.buildTraceCallback(trace.trace_id)
 
+    // Add context_assembly span for worker context
+    const ctxSpan = this.traceStore.startSpan(trace.trace_id, {
+      type: 'context_assembly',
+      details: {
+        context_type: 'worker',
+        channel_id: taskParams.context.task_origin?.channel_id,
+        session_id: taskParams.context.task_origin?.session_id,
+      },
+    })
+    this.traceStore.endSpan(trace.trace_id, ctxSpan.span_id, 'completed')
+
     try {
       const result = await this.workerHandler.executeTask(taskParams, traceCallback)
       this.traceStore.endTrace(trace.trace_id, result.outcome === 'completed' ? 'completed' : 'failed', {

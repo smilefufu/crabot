@@ -125,6 +125,8 @@ export interface EngineTurnEvent {
   readonly assistantText: string
   readonly toolCalls: ReadonlyArray<{ readonly id: string; readonly name: string; readonly input: Record<string, unknown>; readonly output: string; readonly isError: boolean }>
   readonly stopReason: EngineAssistantMessage['stopReason']
+  /** Total wall-clock time spent executing tools this turn (ms) */
+  readonly toolExecutionMs?: number
 }
 
 export interface EngineOptions {
