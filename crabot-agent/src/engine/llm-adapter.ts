@@ -79,12 +79,32 @@ export function normalizeMessagesForAnthropic(messages: ReadonlyArray<EngineMess
     if (isToolResultMessage(msg)) {
       return {
         role: 'user',
-        content: msg.toolResults.map((tr) => ({
-          type: 'tool_result' as const,
-          tool_use_id: tr.tool_use_id,
-          content: tr.content,
-          is_error: tr.is_error,
-        })),
+        content: msg.toolResults.map((tr) => {
+          if (tr.images?.length) {
+            return {
+              type: 'tool_result' as const,
+              tool_use_id: tr.tool_use_id,
+              is_error: tr.is_error,
+              content: [
+                ...(tr.content ? [{ type: 'text' as const, text: tr.content }] : []),
+                ...tr.images.map((img) => ({
+                  type: 'image' as const,
+                  source: {
+                    type: 'base64' as const,
+                    media_type: img.media_type as 'image/png',
+                    data: img.data,
+                  },
+                })),
+              ],
+            }
+          }
+          return {
+            type: 'tool_result' as const,
+            tool_use_id: tr.tool_use_id,
+            content: tr.content,
+            is_error: tr.is_error,
+          }
+        }),
       }
     }
 

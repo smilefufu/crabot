@@ -131,6 +131,67 @@ describe('normalizeMessagesForAnthropic', () => {
     expect(result[3].content).toEqual([{ type: 'text', text: 'The answer is 4.' }])
   })
 
+  it('should normalize tool result with images for Anthropic', () => {
+    const msg: EngineMessage = {
+      id: 'test-id',
+      role: 'user',
+      toolResults: [{
+        tool_use_id: 'tu_1',
+        content: 'Screenshot captured',
+        images: [{ media_type: 'image/png', data: 'abc123' }],
+        is_error: false,
+      }],
+      timestamp: Date.now(),
+    } as EngineMessage
+
+    const result = normalizeMessagesForAnthropic([msg])
+
+    expect(result).toHaveLength(1)
+    expect(result[0].role).toBe('user')
+    const toolResult = (result[0] as { content: Array<Record<string, unknown>> }).content[0]
+    expect(toolResult.type).toBe('tool_result')
+    expect(toolResult.tool_use_id).toBe('tu_1')
+    expect(toolResult.is_error).toBe(false)
+    const content = toolResult.content as Array<Record<string, unknown>>
+    expect(content).toHaveLength(2)
+    expect(content[0]).toEqual({ type: 'text', text: 'Screenshot captured' })
+    expect(content[1]).toEqual({
+      type: 'image',
+      source: { type: 'base64', media_type: 'image/png', data: 'abc123' },
+    })
+  })
+
+  it('should normalize tool result with images but no text content', () => {
+    const msg: EngineMessage = {
+      id: 'test-id',
+      role: 'user',
+      toolResults: [{
+        tool_use_id: 'tu_1',
+        content: '',
+        images: [{ media_type: 'image/png', data: 'xyz789' }],
+        is_error: false,
+      }],
+      timestamp: Date.now(),
+    } as EngineMessage
+
+    const result = normalizeMessagesForAnthropic([msg])
+    const toolResult = (result[0] as { content: Array<Record<string, unknown>> }).content[0]
+    const content = toolResult.content as Array<Record<string, unknown>>
+    // Empty string content should be omitted
+    expect(content).toHaveLength(1)
+    expect(content[0].type).toBe('image')
+  })
+
+  it('should normalize tool result without images as plain text (unchanged)', () => {
+    const msg = createToolResultMessage('tu_1', 'Just text', false)
+    const result = normalizeMessagesForAnthropic([msg])
+
+    expect(result[0].role).toBe('user')
+    const toolResult = (result[0] as { content: Array<Record<string, unknown>> }).content[0]
+    // No content array — just string content
+    expect(toolResult.content).toBe('Just text')
+  })
+
   it('should handle tool result message with multiple results', () => {
     const msg: EngineMessage = {
       id: 'test-id',

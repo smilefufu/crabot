@@ -264,6 +264,7 @@ export class UnifiedAgent extends ModuleBase {
     return {
       modelId: connInfo.model_id,
       format: connInfo.format,
+      supportsVision: connInfo.supports_vision,
       env: {
         ANTHROPIC_BASE_URL: connInfo.endpoint,
         ANTHROPIC_API_KEY: connInfo.apikey || 'dummy-key',

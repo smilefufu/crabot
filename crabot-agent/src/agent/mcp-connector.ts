@@ -118,11 +118,21 @@ export class McpConnector {
                   name: mcpTool.name,
                   arguments: input,
                 })
-                const text = (result.content as Array<{ type: string; text?: string }>)
+                const contentArray = result.content as Array<{ type: string; text?: string; data?: string; mimeType?: string }>
+
+                const texts = contentArray
                   .filter(c => c.type === 'text' && c.text)
                   .map(c => c.text!)
-                  .join('\n')
-                return { output: text || JSON.stringify(result.content), isError: !!result.isError }
+
+                const images = contentArray
+                  .filter(c => c.type === 'image' && c.data)
+                  .map(c => ({ media_type: c.mimeType ?? 'image/png', data: c.data! }))
+
+                return {
+                  output: texts.join('\n') || (images.length > 0 ? '[Image captured]' : '(empty)'),
+                  images: images.length > 0 ? images : undefined,
+                  isError: !!result.isError,
+                }
               } catch (error) {
                 const msg = error instanceof Error ? error.message : String(error)
                 return { output: msg, isError: true }

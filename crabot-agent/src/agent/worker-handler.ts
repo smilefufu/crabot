@@ -68,6 +68,7 @@ import type { LLMFormat } from '../engine/llm-adapter'
 export interface SdkEnvConfig {
   modelId: string
   format: LLMFormat
+  supportsVision?: boolean
   env: Record<string, string>
 }
 
@@ -368,6 +369,7 @@ export class WorkerHandler {
           systemPrompt,
           tools,
           model: this.sdkEnv.modelId,
+          supportsVision: this.sdkEnv.supportsVision,
           abortSignal: taskState.abortController.signal as AbortSignal,
           humanMessageQueue: humanQueue,
           onTurn: (event: EngineTurnEvent) => {

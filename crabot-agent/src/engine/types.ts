@@ -56,6 +56,7 @@ export interface EngineToolResultMessage {
   readonly toolResults: ReadonlyArray<{
     readonly tool_use_id: string
     readonly content: string
+    readonly images?: ReadonlyArray<{ readonly media_type: string; readonly data: string }>
     readonly is_error: boolean
   }>
   readonly timestamp: number
@@ -93,6 +94,7 @@ export interface ToolCallContext {
 
 export interface ToolCallResult {
   readonly output: string
+  readonly images?: ReadonlyArray<{ readonly media_type: string; readonly data: string }>
   readonly isError: boolean
 }
 
@@ -135,6 +137,7 @@ export interface EngineOptions {
   readonly onTurn?: (event: EngineTurnEvent) => void
   readonly onTextDelta?: (text: string) => void
   readonly permissionConfig?: ToolPermissionConfig
+  readonly supportsVision?: boolean
   readonly humanMessageQueue?: {
     readonly dequeue: () => Promise<string | ContentBlock[]>
   }
@@ -177,18 +180,29 @@ export function createAssistantMessage(
 export function createToolResultMessage(
   toolUseId: string,
   content: string,
-  isError: boolean
+  isError: boolean,
+  images?: ReadonlyArray<{ readonly media_type: string; readonly data: string }>,
 ): EngineToolResultMessage {
   return {
     id: randomUUID(),
     role: 'user',
-    toolResults: [{ tool_use_id: toolUseId, content, is_error: isError }],
+    toolResults: [{
+      tool_use_id: toolUseId,
+      content,
+      ...(images !== undefined ? { images } : {}),
+      is_error: isError,
+    }],
     timestamp: Date.now(),
   }
 }
 
 export function createBatchToolResultMessage(
-  results: ReadonlyArray<{ tool_use_id: string; content: string; is_error: boolean }>
+  results: ReadonlyArray<{
+    tool_use_id: string
+    content: string
+    images?: ReadonlyArray<{ readonly media_type: string; readonly data: string }>
+    is_error: boolean
+  }>
 ): EngineToolResultMessage {
   return {
     id: randomUUID(),

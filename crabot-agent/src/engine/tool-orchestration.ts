@@ -5,6 +5,7 @@ import { checkToolPermission } from './permission-checker'
 export interface ToolResultEntry {
   readonly tool_use_id: string
   readonly content: string
+  readonly images?: ReadonlyArray<{ readonly media_type: string; readonly data: string }>
   readonly is_error: boolean
 }
 
@@ -28,7 +29,12 @@ async function executeSingleTool(
 
   try {
     const result = await tool.call(block.input, context)
-    return { tool_use_id: block.id, content: result.output, is_error: result.isError }
+    return {
+      tool_use_id: block.id,
+      content: result.output,
+      ...(result.images !== undefined ? { images: result.images } : {}),
+      is_error: result.isError,
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     return { tool_use_id: block.id, content: `Tool execution error: ${message}`, is_error: true }

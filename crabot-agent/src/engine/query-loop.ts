@@ -17,6 +17,7 @@ import { StreamProcessor } from './stream-processor'
 import { ContextManager } from './context-manager'
 import { partitionToolCalls } from './tool-framework'
 import { executeToolBatches } from './tool-orchestration'
+import * as fs from 'fs'
 
 // --- Public Interface ---
 
@@ -155,8 +156,28 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       options.onTurn(turnEvent)
     }
 
+    // Process images: VLM passes through, LLM saves to temp files
+    const processedResults = toolResults.map((r) => {
+      if (!r.images?.length) return r
+
+      if (options.supportsVision) {
+        return r // VLM: pass images through to message
+      }
+
+      // LLM: save images to temp files, replace with text description
+      const descriptions: string[] = [r.content]
+      for (let i = 0; i < r.images.length; i++) {
+        const img = r.images[i]
+        const filename = `screenshot-${Date.now()}-${i}.png`
+        const filePath = `/tmp/${filename}`
+        fs.writeFileSync(filePath, Buffer.from(img.data, 'base64'))
+        descriptions.push(`[Image saved to ${filePath}] Use Bash tool to analyze with OCR if needed.`)
+      }
+      return { ...r, content: descriptions.join('\n'), images: undefined }
+    })
+
     // Add tool results as a single batched message
-    messages.push(createBatchToolResultMessage(toolResults))
+    messages.push(createBatchToolResultMessage(processedResults))
   }
 
   // Loop exhausted
