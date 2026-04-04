@@ -2,7 +2,7 @@
  * Front Tools - Engine ToolDefinition format for Front Handler v2
  *
  * Includes: make_decision, query_tasks, create_schedule,
- * and crab-messaging tools (lookup_friend, list_friends, list_sessions,
+ * and crab-messaging tools (lookup_friend, list_contacts, list_groups, list_sessions,
  * open_private_session, send_message, get_history)
  *
  * NOTE: These tools are NOT executed by the engine — the front-loop handles
@@ -118,18 +118,33 @@ export const LOOKUP_FRIEND_TOOL: ToolDefinition = {
   call: NOOP_CALL,
 }
 
-export const LIST_FRIENDS_TOOL: ToolDefinition = {
-  name: 'list_friends',
-  description: '列出所有好友，支持分页、搜索和权限过滤。',
+export const LIST_CONTACTS_TOOL: ToolDefinition = {
+  name: 'list_contacts',
+  description: '列出渠道的联系人列表（包含非熟人）',
   inputSchema: {
     type: 'object' as const,
     properties: {
-      page: { type: 'number', description: '页码，默认 1' },
-      page_size: { type: 'number', description: '每页条数，默认 20' },
-      search: { type: 'string', description: '按名称模糊搜索' },
-      permission: { type: 'string', enum: ['master', 'normal'], description: '按权限过滤' },
+      channel_id: { type: 'string', description: '渠道 ID' },
+      search: { type: 'string', description: '联系人名称搜索关键词' },
+      limit: { type: 'number', description: '返回数量上限' },
     },
-    required: [],
+    required: ['channel_id'],
+  },
+  isReadOnly: true,
+  call: NOOP_CALL,
+}
+
+export const LIST_GROUPS_TOOL: ToolDefinition = {
+  name: 'list_groups',
+  description: '列出渠道的群聊列表',
+  inputSchema: {
+    type: 'object' as const,
+    properties: {
+      channel_id: { type: 'string', description: '渠道 ID' },
+      search: { type: 'string', description: '群名搜索关键词' },
+      limit: { type: 'number', description: '返回数量上限' },
+    },
+    required: ['channel_id'],
   },
   isReadOnly: true,
   call: NOOP_CALL,
@@ -273,7 +288,8 @@ export function getAllFrontTools(allowSilent: boolean): ToolDefinition[] {
     QUERY_TASKS_TOOL,
     CREATE_SCHEDULE_TOOL,
     LOOKUP_FRIEND_TOOL,
-    LIST_FRIENDS_TOOL,
+    LIST_CONTACTS_TOOL,
+    LIST_GROUPS_TOOL,
     LIST_SESSIONS_TOOL,
     OPEN_PRIVATE_SESSION_TOOL,
     SEND_MESSAGE_TOOL,

@@ -1,7 +1,7 @@
 /**
  * Crab-Messaging MCP Server — Agent 统一通讯能力
  *
- * 提供 6 个工具：lookup_friend, list_friends, list_sessions, open_private_session, send_message, get_history
+ * 提供 7 个工具：lookup_friend, list_contacts, list_groups, list_sessions, open_private_session, send_message, get_history
  * 对齐 protocol-crab-messaging.md
  *
  * @see crabot-docs/protocols/protocol-crab-messaging.md
@@ -190,59 +190,64 @@ export function createCrabMessagingServer(
       ),
 
       // ================================================================
-      // 2. list_friends — 列出好友列表
+      // 2. list_contacts — 列出渠道的联系人列表（包含非熟人）
       // ================================================================
   server.tool(
-        'list_friends',
-        '列出所有好友，支持分页、搜索和权限过滤。',
+        'list_contacts',
+        '列出渠道的联系人列表（包含非熟人）',
         {
-          page: z.number().optional().describe('页码，默认 1'),
-          page_size: z.number().optional().describe('每页条数，默认 20'),
-          search: z.string().optional().describe('按名称模糊搜索'),
-          permission: z.enum(['master', 'normal']).optional().describe('按权限过滤'),
+          channel_id: z.string().describe('渠道 ID'),
+          search: z.string().optional().describe('联系人名称搜索关键词'),
+          limit: z.number().optional().describe('返回数量上限，默认 50'),
+          offset: z.number().optional().describe('分页偏移'),
         },
         async (args) => {
           const adminPort = await getAdminPort()
 
-          const result = await rpcClient.call<
+          const result = await rpcClient.call(
+            adminPort,
+            'list_sessions',
             {
-              search?: string
-              permission?: 'master' | 'normal'
-              pagination?: { page: number; page_size: number }
+              channel_id: args.channel_id,
+              type: 'private',
+              search: args.search,
+              limit: args.limit ?? 50,
+              offset: args.offset ?? 0,
             },
+            moduleId,
+          )
+          return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] }
+        },
+      ),
+
+      // ================================================================
+      // 2b. list_groups — 列出渠道的群聊列表
+      // ================================================================
+  server.tool(
+        'list_groups',
+        '列出渠道的群聊列表',
+        {
+          channel_id: z.string().describe('渠道 ID'),
+          search: z.string().optional().describe('群名搜索关键词'),
+          limit: z.number().optional().describe('返回数量上限，默认 50'),
+          offset: z.number().optional().describe('分页偏移'),
+        },
+        async (args) => {
+          const adminPort = await getAdminPort()
+
+          const result = await rpcClient.call(
+            adminPort,
+            'list_sessions',
             {
-              items: Friend[]
-              pagination: { page: number; page_size: number; total_items: number; total_pages: number }
-            }
-          >(adminPort, 'list_friends', {
-            ...(args.search ? { search: args.search } : {}),
-            ...(args.permission ? { permission: args.permission } : {}),
-            pagination: {
-              page: args.page ?? 1,
-              page_size: args.page_size ?? 20,
+              channel_id: args.channel_id,
+              type: 'group',
+              search: args.search,
+              limit: args.limit ?? 50,
+              offset: args.offset ?? 0,
             },
-          }, moduleId)
-
-          const friends = result.items.map(f => ({
-            friend_id: f.id,
-            display_name: f.display_name,
-            permission: f.permission,
-            channels: f.channel_identities.map(ci => ({
-              channel_id: ci.channel_id,
-              platform_user_id: ci.platform_user_id,
-              platform_display_name: ci.platform_display_name ?? ci.platform_user_id,
-            })),
-          }))
-
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                friends,
-                pagination: result.pagination,
-              }),
-            }],
-          }
+            moduleId,
+          )
+          return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] }
         },
       ),
 

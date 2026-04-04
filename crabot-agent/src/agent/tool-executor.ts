@@ -48,7 +48,8 @@ export class ToolExecutor {
     try {
       switch (toolName) {
         case 'lookup_friend': return await this.lookupFriend(input)
-        case 'list_friends': return await this.listFriends(input)
+        case 'list_contacts': return await this.listContacts(input)
+        case 'list_groups': return await this.listGroups(input)
         case 'list_sessions': return await this.listSessions(input)
         case 'open_private_session': return await this.openPrivateSession(input)
         case 'send_message': return await this.sendMessage(input)
@@ -89,20 +90,38 @@ export class ToolExecutor {
     return { output: JSON.stringify({ error: '必须提供 name 或 friend_id' }), isError: true }
   }
 
-  private async listFriends(input: Record<string, unknown>): Promise<ToolResult> {
+  private async listContacts(input: Record<string, unknown>): Promise<ToolResult> {
     const adminPort = await this.deps.getAdminPort()
-    const result = await this.deps.rpcClient.call<
-      { search?: string; permission?: string; pagination?: { page: number; page_size: number } },
-      { items: Friend[]; pagination: { page: number; page_size: number; total_items: number; total_pages: number } }
-    >(adminPort, 'list_friends', {
-      ...(input.search ? { search: input.search as string } : {}),
-      ...(input.permission ? { permission: input.permission as string } : {}),
-      pagination: { page: (input.page as number) ?? 1, page_size: (input.page_size as number) ?? 20 },
-    }, this.deps.moduleId)
-    return {
-      output: JSON.stringify({ friends: result.items.map(f => this.formatFriend(f)), pagination: result.pagination }),
-      isError: false,
-    }
+    const result = await this.deps.rpcClient.call(
+      adminPort,
+      'list_sessions',
+      {
+        channel_id: input.channel_id as string,
+        type: 'private',
+        search: input.search as string | undefined,
+        limit: (input.limit as number) ?? 50,
+        offset: (input.offset as number) ?? 0,
+      },
+      this.deps.moduleId,
+    )
+    return { output: JSON.stringify(result), isError: false }
+  }
+
+  private async listGroups(input: Record<string, unknown>): Promise<ToolResult> {
+    const adminPort = await this.deps.getAdminPort()
+    const result = await this.deps.rpcClient.call(
+      adminPort,
+      'list_sessions',
+      {
+        channel_id: input.channel_id as string,
+        type: 'group',
+        search: input.search as string | undefined,
+        limit: (input.limit as number) ?? 50,
+        offset: (input.offset as number) ?? 0,
+      },
+      this.deps.moduleId,
+    )
+    return { output: JSON.stringify(result), isError: false }
   }
 
   private async listSessions(input: Record<string, unknown>): Promise<ToolResult> {
