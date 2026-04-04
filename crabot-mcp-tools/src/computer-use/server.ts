@@ -1,11 +1,11 @@
 /**
- * Computer Use MCP Server — macOS computer interaction
+ * Computer Use MCP Server -- macOS computer interaction
  *
  * Provides 4 tools: screenshot, mouse_click, keyboard_type, keyboard_key
  * Uses screencapture and AppleScript (osascript) for macOS.
  */
 
-import { createMcpServer, type McpServer } from './mcp-helpers.js'
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod/v4'
 import { execFile } from 'child_process'
 import { readFileSync, unlinkSync } from 'fs'
@@ -89,10 +89,12 @@ function buildKeyPressScript(key: string, modifiers?: string[]): string {
 // ============================================================================
 
 export function createComputerUseServer(): McpServer {
-  const server = createMcpServer({ name: 'computer-use', version: '1.0.0' })
+  const server = new McpServer(
+    { name: 'computer-use', version: '1.0.0' },
+  )
 
   // ================================================================
-  // 1. screenshot — capture screen as PNG
+  // 1. screenshot -- capture screen as PNG
   // ================================================================
   server.tool(
     'screenshot',
@@ -138,7 +140,7 @@ export function createComputerUseServer(): McpServer {
   )
 
   // ================================================================
-  // 2. mouse_click — click at coordinates
+  // 2. mouse_click -- click at coordinates
   // ================================================================
   server.tool(
     'mouse_click',
@@ -154,8 +156,6 @@ export function createComputerUseServer(): McpServer {
       const button = args.button ?? 'left'
       const isDouble = args.double_click ?? false
 
-      // Build AppleScript for mouse click
-      // Using System Events with Cocoa scripting
       const clickAction = button === 'right'
         ? (isDouble ? 'double right click' : 'right click')
         : (isDouble ? 'double click' : 'click')
@@ -168,7 +168,6 @@ tell application "System Events"
   do shell script "cliclick ${button === 'right' ? 'rc' : (isDouble ? 'dc' : 'c')}:${x},${y}"
 end tell
 `
-      // Fallback: pure AppleScript using CGEvent
       const fallbackScript = `
 use framework "CoreGraphics"
 set pointRef to current application's CGPointMake(${x}, ${y})
@@ -185,7 +184,6 @@ current application's CGEventPost(current application's kCGHIDEventTap, ${button
 `
 
       try {
-        // Try cliclick first, fall back to pure AppleScript
         try {
           await execFilePromise('osascript', ['-e', script])
         } catch {
@@ -208,7 +206,7 @@ current application's CGEventPost(current application's kCGHIDEventTap, ${button
   )
 
   // ================================================================
-  // 3. keyboard_type — type text
+  // 3. keyboard_type -- type text
   // ================================================================
   server.tool(
     'keyboard_type',
@@ -217,7 +215,6 @@ current application's CGEventPost(current application's kCGHIDEventTap, ${button
       text: z.string().describe('The text to type'),
     },
     async (args) => {
-      // Escape backslashes and double quotes for AppleScript string
       const escaped = args.text.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
       const script = `tell application "System Events" to keystroke "${escaped}"`
 
@@ -240,7 +237,7 @@ current application's CGEventPost(current application's kCGHIDEventTap, ${button
   )
 
   // ================================================================
-  // 4. keyboard_key — press a key with optional modifiers
+  // 4. keyboard_key -- press a key with optional modifiers
   // ================================================================
   server.tool(
     'keyboard_key',

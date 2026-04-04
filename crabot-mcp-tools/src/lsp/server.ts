@@ -1,23 +1,23 @@
 /**
- * LSP MCP Server — Code intelligence tools for Agent
+ * LSP MCP Server -- Code intelligence tools
  *
  * Uses real LSP protocol via LspServerManager for hover, definition, references,
  * symbols, implementation, and call hierarchy. Diagnostics still use tsc --noEmit
  * (reliable and proven).
  *
  * Tools (9):
- *   get_diagnostics    — tsc --noEmit (TypeScript only)
- *   get_hover          — textDocument/hover
- *   get_definition     — textDocument/definition
- *   find_references    — textDocument/references
- *   document_symbols   — textDocument/documentSymbol
- *   workspace_symbols  — workspace/symbol
- *   go_to_implementation — textDocument/implementation
- *   incoming_calls     — prepareCallHierarchy + callHierarchy/incomingCalls
- *   outgoing_calls     — prepareCallHierarchy + callHierarchy/outgoingCalls
+ *   get_diagnostics    -- tsc --noEmit (TypeScript only)
+ *   get_hover          -- textDocument/hover
+ *   get_definition     -- textDocument/definition
+ *   find_references    -- textDocument/references
+ *   document_symbols   -- textDocument/documentSymbol
+ *   workspace_symbols  -- workspace/symbol
+ *   go_to_implementation -- textDocument/implementation
+ *   incoming_calls     -- prepareCallHierarchy + callHierarchy/incomingCalls
+ *   outgoing_calls     -- prepareCallHierarchy + callHierarchy/outgoingCalls
  */
 
-import { createMcpServer, type McpServer } from './mcp-helpers.js'
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod/v4'
 import { execFile } from 'child_process'
 import * as fs from 'fs'
@@ -25,7 +25,7 @@ import * as path from 'path'
 import {
   LspServerManager,
   getDefaultServerConfigs,
-} from '../lsp/lsp-server-manager.js'
+} from './lsp-server-manager.js'
 
 // ============================================================================
 // Types
@@ -294,13 +294,15 @@ export function createLspServer(cwd: string): LspMcpServer {
     manager.registerServer(config)
   }
 
-  const server = createMcpServer({ name: 'lsp', version: '2.0.0' })
+  const server = new McpServer(
+    { name: 'lsp', version: '2.0.0' },
+  )
 
   // Sentinel file for workspace-level requests (needs a .ts file to route to TS server)
   const sentinelFile = path.join(cwd, '__lsp_sentinel__.ts')
 
   // ================================================================
-  // 1. get_diagnostics — TypeScript diagnostics via tsc --noEmit
+  // 1. get_diagnostics -- TypeScript diagnostics via tsc --noEmit
   // ================================================================
   server.tool(
     'get_diagnostics',
@@ -332,7 +334,7 @@ export function createLspServer(cwd: string): LspMcpServer {
   )
 
   // ================================================================
-  // 2. get_hover — LSP textDocument/hover
+  // 2. get_hover -- LSP textDocument/hover
   // ================================================================
   server.tool(
     'get_hover',
@@ -370,7 +372,7 @@ export function createLspServer(cwd: string): LspMcpServer {
   )
 
   // ================================================================
-  // 3. get_definition — LSP textDocument/definition
+  // 3. get_definition -- LSP textDocument/definition
   // ================================================================
   server.tool(
     'get_definition',
@@ -406,7 +408,7 @@ export function createLspServer(cwd: string): LspMcpServer {
   )
 
   // ================================================================
-  // 4. find_references — LSP textDocument/references
+  // 4. find_references -- LSP textDocument/references
   // ================================================================
   server.tool(
     'find_references',
@@ -447,7 +449,7 @@ export function createLspServer(cwd: string): LspMcpServer {
   )
 
   // ================================================================
-  // 5. document_symbols — LSP textDocument/documentSymbol
+  // 5. document_symbols -- LSP textDocument/documentSymbol
   // ================================================================
   server.tool(
     'document_symbols',
@@ -478,7 +480,7 @@ export function createLspServer(cwd: string): LspMcpServer {
   )
 
   // ================================================================
-  // 6. workspace_symbols — LSP workspace/symbol
+  // 6. workspace_symbols -- LSP workspace/symbol
   // ================================================================
   server.tool(
     'workspace_symbols',
@@ -519,7 +521,7 @@ export function createLspServer(cwd: string): LspMcpServer {
   )
 
   // ================================================================
-  // 7. go_to_implementation — LSP textDocument/implementation
+  // 7. go_to_implementation -- LSP textDocument/implementation
   // ================================================================
   server.tool(
     'go_to_implementation',
@@ -555,7 +557,7 @@ export function createLspServer(cwd: string): LspMcpServer {
   )
 
   // ================================================================
-  // 8. incoming_calls — prepareCallHierarchy + callHierarchy/incomingCalls
+  // 8. incoming_calls -- prepareCallHierarchy + callHierarchy/incomingCalls
   // ================================================================
   server.tool(
     'incoming_calls',
@@ -616,7 +618,7 @@ export function createLspServer(cwd: string): LspMcpServer {
   )
 
   // ================================================================
-  // 9. outgoing_calls — prepareCallHierarchy + callHierarchy/outgoingCalls
+  // 9. outgoing_calls -- prepareCallHierarchy + callHierarchy/outgoingCalls
   // ================================================================
   server.tool(
     'outgoing_calls',

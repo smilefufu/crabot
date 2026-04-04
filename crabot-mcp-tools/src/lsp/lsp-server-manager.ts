@@ -1,6 +1,6 @@
 import * as path from 'path'
 import { readFile } from 'fs/promises'
-import { LspClient } from './lsp-client'
+import { LspClient } from './lsp-client.js'
 
 export interface LspServerConfig {
   /** Server name (e.g., 'typescript-language-server') */
@@ -21,13 +21,13 @@ export interface LspServerConfig {
  * first access.
  */
 export class LspServerManager {
-  /** Registry of server configs: serverName → config */
+  /** Registry of server configs: serverName -> config */
   private readonly configs: Map<string, LspServerConfig> = new Map()
-  /** Running server instances: serverName → LspClient */
+  /** Running server instances: serverName -> LspClient */
   private readonly servers: Map<string, LspClient> = new Map()
-  /** Extension → serverName mapping */
+  /** Extension -> serverName mapping */
   private readonly extensionMap: Map<string, string> = new Map()
-  /** Tracking which files are open on which server: fileUri → serverName */
+  /** Tracking which files are open on which server: fileUri -> serverName */
   private readonly openFiles: Map<string, string> = new Map()
   /** Version counter per file URI for didChange notifications */
   private readonly fileVersions: Map<string, number> = new Map()
@@ -36,7 +36,7 @@ export class LspServerManager {
 
   /**
    * Register a language server config.
-   * Builds extensionMap from config.extensions → config.name.
+   * Builds extensionMap from config.extensions -> config.name.
    */
   registerServer(config: LspServerConfig): void {
     this.configs.set(config.name, config)
