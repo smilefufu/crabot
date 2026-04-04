@@ -121,7 +121,7 @@ export type StreamChunk =
 export interface EngineTurnEvent {
   readonly turnNumber: number
   readonly assistantText: string
-  readonly toolCalls: ReadonlyArray<{ readonly id: string; readonly name: string; readonly input: Record<string, unknown> }>
+  readonly toolCalls: ReadonlyArray<{ readonly id: string; readonly name: string; readonly input: Record<string, unknown>; readonly output: string; readonly isError: boolean }>
   readonly stopReason: EngineAssistantMessage['stopReason']
 }
 

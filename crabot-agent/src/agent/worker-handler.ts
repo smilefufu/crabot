@@ -393,7 +393,11 @@ export class WorkerHandler {
                 JSON.stringify(tc.input ?? {}).slice(0, 200),
               )
               if (toolSpanId) {
-                traceCallback?.onToolCallEnd(toolSpanId, '(executed by engine)')
+                traceCallback?.onToolCallEnd(
+                  toolSpanId,
+                  tc.output?.slice(0, 500) || '(no output)',
+                  tc.isError ? tc.output : undefined,
+                )
               }
             }
 

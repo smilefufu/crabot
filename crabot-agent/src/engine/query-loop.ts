@@ -143,10 +143,12 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       const turnEvent: EngineTurnEvent = {
         turnNumber: totalTurns,
         assistantText: processed.text,
-        toolCalls: processed.toolUseBlocks.map((b) => ({
+        toolCalls: processed.toolUseBlocks.map((b, i) => ({
           id: b.id,
           name: b.name,
           input: b.input,
+          output: toolResults[i]?.content ?? '',
+          isError: toolResults[i]?.is_error ?? false,
         })),
         stopReason,
       }
