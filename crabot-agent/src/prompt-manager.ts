@@ -192,7 +192,11 @@ export class PromptManager {
    * @param isGroup - 是否群聊场景
    * @param adminPersonality - Admin 配置中的 system_prompt（可选，优先级高于文件）
    */
-  assembleFrontPrompt(isGroup: boolean, adminPersonality?: string): string {
+  assembleFrontPrompt(
+    isGroup: boolean,
+    adminPersonality?: string,
+    workerCapabilities?: Array<{ name: string; description?: string }>,
+  ): string {
     const parts: string[] = []
 
     if (adminPersonality) {
@@ -207,6 +211,14 @@ export class PromptManager {
       parts.push(this.readRulesFile('front-rules-group.md', FRONT_RULES_GROUP))
     } else {
       parts.push(this.readRulesFile('front-rules-private.md', FRONT_RULES_PRIVATE))
+    }
+
+    // Inject worker capability awareness so Front can make informed triage decisions
+    if (workerCapabilities && workerCapabilities.length > 0) {
+      const capList = workerCapabilities
+        .map((c) => `- ${c.name}${c.description ? `: ${c.description}` : ''}`)
+        .join('\n')
+      parts.push(`## Worker 额外能力\n\n以下工具在 Worker 执行任务时可用。当用户请求涉及这些能力时，使用 create_task 将任务派给 Worker：\n${capList}`)
     }
 
     const additions = this.readUserFile('front-additions.md')

@@ -230,7 +230,9 @@ export class UnifiedAgent extends ModuleBase {
         }
         const personality = adminPersonality || undefined
         this.frontHandler = new FrontHandler(llmConfig, toolExecutorDeps, {
-          getSystemPrompt: (isGroup) => this.promptManager.assembleFrontPrompt(isGroup, personality),
+          getSystemPrompt: (isGroup) => this.promptManager.assembleFrontPrompt(
+            isGroup, personality, this.getWorkerCapabilities(),
+          ),
         })
       }
     }
@@ -1693,7 +1695,9 @@ ${skillsSection}
           }
           const personality = adminPersonality || undefined
           this.frontHandler = new FrontHandler(llmConfig, toolExecutorDeps, {
-            getSystemPrompt: (isGroup) => this.promptManager.assembleFrontPrompt(isGroup, personality),
+            getSystemPrompt: (isGroup) => this.promptManager.assembleFrontPrompt(
+              isGroup, personality, this.getWorkerCapabilities(),
+            ),
           })
           console.log(`[${this.config.moduleId}] Front Agent handler created from config push`)
         }
@@ -1837,6 +1841,17 @@ ${skillsSection}
   // ============================================================================
   // 端口解析
   // ============================================================================
+
+  /**
+   * Get external MCP tool names for Front prompt injection.
+   * Front doesn't call these tools — it uses this list to know what Worker can do.
+   */
+  private getWorkerCapabilities(): Array<{ name: string; description?: string }> {
+    return this.mcpConnector.getAllTools().map((t) => ({
+      name: t.name.replace(/^mcp__[^_]+__/, ''),
+      description: t.description || undefined,
+    }))
+  }
 
   private getActiveTasksList(): Array<{ task_id: string; status: string; started_at: string; title?: string }> {
     return this.workerHandler?.getActiveTasksForQuery() ?? []
