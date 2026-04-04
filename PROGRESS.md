@@ -1,37 +1,41 @@
 # Crabot 项目进度
 
-> 最后更新：2026-04-03 — Agent Engine V2 计划（替换 claude-agent-sdk，自研执行引擎）
+> 最后更新：2026-04-04 — Engine V2 Phase 4 开始（核心内置工具）
 
 ## 当前进行中：Agent Engine V2
 
-**目标**：替换 `@anthropic-ai/claude-agent-sdk` 依赖，自研执行引擎，支持多 LLM 格式
+**目标**：自研执行引擎，支持多 LLM 格式，内置工具，MCP 工具服务器  
+**计划文档**：`crabot-agent/docs/plans/2026-04-03-engine-v2.md`  
+**分支**：`feat/engine-v2`
 
-**计划文档**：`crabot-agent/docs/plans/2026-04-03-engine-v2.md`
+### Phase 1 — 引擎核心 ✅ (2026-04-03)
+10 个 engine 文件 ~1843 LOC, SDK 已移除, 93 tests
 
-**Phase 1 进度**（最小可用引擎）— **已完成 2026-04-03**：
-- [x] Task 1: Engine Types (11 tests)
-- [x] Task 2: LLM Adapter (12 tests)
-- [x] Task 3: Stream Processor (13 tests)
-- [x] Task 4: Tool Framework (10 tests)
-- [x] Task 5: Tool Orchestration (5 tests)
-- [x] Task 6: Context Manager (11 tests)
-- [x] Task 7: Core Query Loop (10 tests)
-- [x] Task 8: MCP Server Migration
-- [x] Task 9: Worker Handler Rewrite (21 tests)
-- [x] Task 10: Remove SDK Dependency
+### Phase 2 — 多 LLM 格式 ✅ (2026-04-04)
+OpenAI adapter, createAdapter factory, Front handler 迁移
 
-**Phase 2 进度**（多格式 LLM 支持）— **已完成 2026-04-04**：
-- [x] Task 11: OpenAI Adapter (15 tests, raw fetch + SSE streaming)
-- [x] Task 12: Adapter Factory + format routing (4 tests)
-- [x] Task 13: Front Handler migration to engine adapter (llm-client.ts 已删除)
+### Phase 3 — 高级能力 ✅ (2026-04-04)
+LLM auto-compact, sub-agent, permission system. 累计 200 tests
 
-**Phase 3 进度**（高级引擎能力）— **已完成 2026-04-04**：
-- [x] Task 14: LLM-based auto-compact (智能上下文压缩，LLM 失败自动回退文本摘要)
-- [x] Task 15: Sub-agent support (forkEngine + createSubAgentTool)
-- [x] Task 16: Tool permission system (bypass/allowList/denyList + dangerous 级别)
+### Phase 4 — 核心内置工具 (进行中)
+**关键**：SDK 移除后 Bash/Read/Write/Edit/Glob/Grep 无实现，Worker 无法工作
+- [ ] Task 17: Bash Tool
+- [ ] Task 18: Read Tool
+- [ ] Task 19: Write Tool
+- [ ] Task 20: Edit Tool
+- [ ] Task 21: Glob Tool
+- [ ] Task 22: Grep Tool
+- [ ] Task 23: Built-in Tools Index + Worker Integration
 
-**总计：200 个测试通过，@anthropic-ai/claude-agent-sdk 已移除，引擎支持多 LLM 格式 + 智能压缩 + 子 Agent + 工具权限**
-**分支：feat/engine-v2**
+### Phase 5 — MCP 工具服务器
+- [ ] Task 24: Computer Use MCP Server
+- [ ] Task 25: LSP MCP Server
+- [ ] Task 26: Git MCP Server
+
+### Phase 6 — Admin 工具注册集成
+- [ ] Task 27: Admin Built-in Tool Configuration
+- [ ] Task 28: Skill Execution Tool
+- [ ] Task 29: End-to-End Integration Test
 
 ---
 
