@@ -54,13 +54,14 @@ export class WechatClient {
   async sendLocalFile(wxid: string, filePath: string, type: 'image' | 'file' = 'image'): Promise<{ taskId: string; url: string }> {
     const fileBuffer = fs.readFileSync(filePath)
     const filename = path.basename(filePath)
+    const mimeType = inferMimeType(filename)
     const boundary = `----CrabotBoundary${Date.now()}`
 
     const parts: Buffer[] = []
 
     // file field
     parts.push(Buffer.from(
-      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: application/octet-stream\r\n\r\n`
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${mimeType}\r\n\r\n`
     ))
     parts.push(fileBuffer)
     parts.push(Buffer.from('\r\n'))
@@ -250,4 +251,28 @@ export class WechatClient {
       req.end()
     })
   }
+}
+
+const MIME_MAP: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+  '.mp4': 'video/mp4',
+  '.mov': 'video/quicktime',
+  '.avi': 'video/x-msvideo',
+  '.pdf': 'application/pdf',
+  '.doc': 'application/msword',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xls': 'application/vnd.ms-excel',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.zip': 'application/zip',
+  '.txt': 'text/plain',
+}
+
+function inferMimeType(filename: string): string {
+  const ext = path.extname(filename).toLowerCase()
+  return MIME_MAP[ext] ?? 'application/octet-stream'
 }
