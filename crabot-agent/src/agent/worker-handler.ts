@@ -39,6 +39,7 @@ import type { RpcClient } from '../core/module-base.js'
 import { createCrabMemoryServer } from '../mcp/crab-memory.js'
 import type { MemoryTaskContext } from '../mcp/crab-memory.js'
 import { formatMessageContent } from './media-resolver.js'
+import type { McpConnector } from './mcp-connector.js'
 
 import * as fs from 'fs'
 import * as path from 'path'
@@ -209,6 +210,7 @@ export class WorkerHandler {
   private mcpConfigFactory: (() => Record<string, McpServer>) | undefined
   private deps?: WorkerDeps
   private builtinToolConfig?: BuiltinToolConfig
+  private mcpConnector?: McpConnector
 
   constructor(
     sdkEnv: SdkEnvConfig,
@@ -216,6 +218,7 @@ export class WorkerHandler {
     mcpConfigFactory?: () => Record<string, McpServer>,
     deps?: WorkerDeps,
     builtinToolConfig?: BuiltinToolConfig,
+    mcpConnector?: McpConnector,
   ) {
     this.sdkEnv = sdkEnv
     this.mcpConfigFactory = mcpConfigFactory
@@ -223,6 +226,7 @@ export class WorkerHandler {
     this.systemPrompt = config.systemPrompt
     this.longTermPreloadLimit = config.longTermPreloadLimit ?? 20
     this.builtinToolConfig = builtinToolConfig
+    this.mcpConnector = mcpConnector
   }
 
   async executeTask(
@@ -318,8 +322,15 @@ export class WorkerHandler {
         tools.push(...mcpServerToToolDefinitions(server, serverName))
       }
 
-      // 3d. Built-in file/shell tools (filtered by Admin config)
-      tools.push(...getConfiguredBuiltinTools(taskDir, this.builtinToolConfig))
+      // 3d. External MCP tools (from Admin-managed servers via McpConnector)
+      if (this.mcpConnector) {
+        const externalTools = this.mcpConnector.getAllTools()
+        tools.push(...externalTools)
+      }
+
+      // 3e. Built-in file/shell tools (filtered by Admin config)
+      const hasSkills = (params as { skills?: SkillConfig[] }).skills?.length
+      tools.push(...getConfiguredBuiltinTools(taskDir, this.builtinToolConfig, hasSkills ? { skillsDir: taskDir } : undefined))
 
       // 4. Create LLM adapter from sdkEnv (format-based routing)
       const adapter = createAdapter({

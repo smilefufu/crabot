@@ -1,11 +1,11 @@
 /**
- * Git MCP Server — structured git CLI wrapper
+ * Git MCP Server -- structured git CLI wrapper
  *
  * Provides 6 tools: git_status, git_diff, git_log, git_commit, git_branch, git_stash
  * All tools use child_process.execFile for safe argument handling.
  */
 
-import { createMcpServer, type McpServer } from './mcp-helpers.js'
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod/v4'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
@@ -78,7 +78,9 @@ function parsePorcelainV1(output: string): StatusChange[] {
 // ============================================================================
 
 export function createGitServer(cwd: string): McpServer {
-  const server = createMcpServer({ name: 'git', version: '1.0.0' })
+  const server = new McpServer(
+    { name: 'git', version: '1.0.0' },
+  )
 
   // ================================================================
   // 1. git_status

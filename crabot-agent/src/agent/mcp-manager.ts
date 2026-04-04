@@ -85,6 +85,10 @@ export class MCPManager {
         }
       }
 
+      if (!config.command) {
+        throw new Error(`MCP server "${config.name}" requires a command for stdio transport`)
+      }
+
       const transport = new StdioClientTransport({
         command: config.command,
         args: config.args ?? [],

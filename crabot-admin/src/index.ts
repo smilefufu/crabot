@@ -413,6 +413,11 @@ export class AdminModule extends ModuleBase {
     // 初始化 MCP Server 管理器
     await this.mcpServerManager.initialize()
 
+    // 注册内置 MCP Server（幂等，仅首次启动时写入）
+    const mcpToolsPath = process.env.CRABOT_MCP_TOOLS_PATH
+      || path.resolve(this.adminConfig.data_dir, '../../crabot-mcp-tools')
+    await this.mcpServerManager.registerBuiltins(mcpToolsPath)
+
     // 初始化 Skill 管理器
     await this.skillManager.initialize()
 

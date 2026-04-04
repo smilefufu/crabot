@@ -42,7 +42,7 @@ import { createAdapter, type LLMAdapter } from './engine/llm-adapter.js'
 import type { ToolExecutorDeps } from './agent/tool-executor.js'
 import { WorkerHandler, type SdkEnvConfig } from './agent/worker-handler.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
-import { MCPManager } from './agent/mcp-manager.js'
+import { McpConnector } from './agent/mcp-connector.js'
 import { createCrabMessagingServer, type PathMapping } from './mcp/crab-messaging.js'
 import { TraceStore } from './core/trace-store.js'
 import { PromptManager } from './prompt-manager.js'
@@ -61,7 +61,7 @@ export class UnifiedAgent extends ModuleBase {
   // 智能体层组件（可选，取决于配置）
   private frontHandler?: FrontHandler
   private workerHandler?: WorkerHandler
-  private mcpManager?: MCPManager
+  private mcpConnector: McpConnector = new McpConnector()
   private roles: Set<'front' | 'worker'> = new Set()
   /** SDK 环境配置（Worker 专用） */
   private sdkEnvWorker?: SdkEnvConfig
@@ -189,19 +189,13 @@ export class UnifiedAgent extends ModuleBase {
       this.roles.add(role)
     }
 
-    // 初始化 MCP Manager（如果有配置）
-    if (config.mcp_servers && config.mcp_servers.length > 0) {
-      this.mcpManager = new MCPManager({
-        getModuleId: () => this.config.moduleId,
-      })
-    }
+    // MCP connections managed by mcpConnector in onStart()
 
     // 构建 SDK 环境变量（通过 LiteLLM 代理）
     const adminPersonality = this.enhanceSystemPrompt(config.system_prompt, config.skills)
 
-    // MCP config factory: creates fresh McpServer instances per runSdk() call
-    // This avoids the "Already connected to a transport" Protocol reuse error
-    const externalMcpConfigs = this.buildExternalMcpConfigs(config.mcp_servers)
+    // MCP config factory: creates fresh in-process McpServer instances per task
+    // External MCP servers are managed by this.mcpConnector (connected in onStart)
     const createMcpConfigs = (): Record<string, McpServer> => ({
       'crab-messaging': createCrabMessagingServer({
         rpcClient: this.rpcClient,
@@ -209,7 +203,6 @@ export class UnifiedAgent extends ModuleBase {
         getAdminPort: () => this.getAdminPort(),
         resolveChannelPort: (channelId) => this.getChannelPort(channelId),
       }, this.sandboxPathMappingsRef),
-      ...externalMcpConfigs,
     })
 
     // 初始化 Front Handler（如果有 front 角色）
@@ -257,7 +250,7 @@ export class UnifiedAgent extends ModuleBase {
           moduleId: this.config.moduleId,
           resolveChannelPort: (channelId) => this.getChannelPort(channelId),
           getMemoryPort: () => this.getMemoryPort(),
-        }, config.builtin_tool_config)
+        }, config.builtin_tool_config, this.mcpConnector)
       }
     }
   }
@@ -274,19 +267,6 @@ export class UnifiedAgent extends ModuleBase {
         ANTHROPIC_API_KEY: connInfo.apikey || 'dummy-key',
       },
     }
-  }
-
-  /**
-   * Build external MCP configs (stdio-based servers).
-   * TODO(task-10): migrate to MCPManager.startServers() for proper lifecycle management.
-   * Currently returns empty — external stdio MCP servers are not yet supported without claude-agent-sdk.
-   */
-  private buildExternalMcpConfigs(
-    _configs?: Array<{ name: string; command: string; args?: string[]; env?: Record<string, string> }>
-  ): Record<string, McpServer> {
-    // External stdio MCP servers were previously handled by claude-agent-sdk.
-    // With the self-built engine, these need MCPManager integration (future task).
-    return {}
   }
 
   /**
@@ -1669,8 +1649,7 @@ ${skillsSection}
       this.agentConfig?.skills
     )
 
-    // MCP config factory: creates fresh McpServer instances per runSdk() call
-    const externalMcpConfigs = this.buildExternalMcpConfigs(this.agentConfig?.mcp_servers)
+    // MCP config factory: creates fresh in-process McpServer instances per task
     const createMcpConfigs = (): Record<string, McpServer> => ({
       'crab-messaging': createCrabMessagingServer({
         rpcClient: this.rpcClient,
@@ -1678,7 +1657,6 @@ ${skillsSection}
         getAdminPort: () => this.getAdminPort(),
         resolveChannelPort: (channelId) => this.getChannelPort(channelId),
       }, this.sandboxPathMappingsRef),
-      ...externalMcpConfigs,
     })
 
     // 更新 Front Agent
@@ -1736,7 +1714,7 @@ ${skillsSection}
           moduleId: this.config.moduleId,
           resolveChannelPort: (channelId) => this.getChannelPort(channelId),
           getMemoryPort: () => this.getMemoryPort(),
-        }, this.agentConfig?.builtin_tool_config)
+        }, this.agentConfig?.builtin_tool_config, this.mcpConnector)
         console.log(`[${this.config.moduleId}] Worker Agent SDK env ${this.workerHandler ? 'updated' : 'created from config push'}`)
       }
     }
@@ -1852,7 +1830,7 @@ ${skillsSection}
       current_task_count: this.workerHandler?.getActiveTaskCount() ?? 0,
       llm_status: this.isConfigured() ? 'ready' : 'not_configured',
       sdk_status: (this.frontHandler || this.sdkEnvWorker) ? 'ready' : 'not_configured',
-      mcp_servers_count: this.mcpManager?.count ?? 0,
+      mcp_servers_count: this.mcpConnector.count,
     }
   }
 
@@ -1897,10 +1875,14 @@ ${skillsSection}
   protected override async onStart(): Promise<void> {
     this.sessionManager.startCleanup()
 
-    // MCP Servers 现在由 SDK 管理连接，这里只做日志记录
+    // Connect to external MCP servers (Admin-configured)
     if (this.agentConfig?.mcp_servers && this.agentConfig.mcp_servers.length > 0) {
       console.log(
-        `[${this.config.moduleId}] ${this.agentConfig.mcp_servers.length} MCP server(s) configured, will be managed by SDK`
+        `[${this.config.moduleId}] Connecting to ${this.agentConfig.mcp_servers.length} MCP server(s)...`
+      )
+      await this.mcpConnector.connectAll(this.agentConfig.mcp_servers)
+      console.log(
+        `[${this.config.moduleId}] ${this.mcpConnector.count} MCP server(s) connected`
       )
     }
   }
@@ -1909,9 +1891,7 @@ ${skillsSection}
     this.sessionManager.stopCleanup()
     this.attentionScheduler.stopAll()
 
-    // 停止 MCP Servers
-    if (this.mcpManager) {
-      await this.mcpManager.stopAll()
-    }
+    // Disconnect external MCP servers
+    await this.mcpConnector.disconnectAll()
   }
 }

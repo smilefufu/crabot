@@ -58,15 +58,6 @@ export class LspClient {
 
   /**
    * Start the language server process and complete the LSP initialization handshake.
-   *
-   * Flow:
-   * 1. Spawn process with stdio pipes
-   * 2. Create JSON-RPC MessageConnection from stdin/stdout
-   * 3. Send `initialize` request with client capabilities
-   * 4. Send `initialized` notification
-   * 5. Set state to 'running'
-   *
-   * On timeout or failure: stop process, set state to 'error', throw.
    */
   async start(): Promise<void> {
     if (this.state === 'running' || this.state === 'starting') {
@@ -78,7 +69,6 @@ export class LspClient {
     try {
       this.state = 'starting'
 
-      // 1. Spawn the language server process
       const childProcess = spawn(this.config.command, this.config.args, {
         stdio: ['pipe', 'pipe', 'pipe'],
         env: { ...process.env, ...this.config.env },
@@ -130,7 +120,7 @@ export class LspClient {
         // Swallowed intentionally; connection error handler covers this
       })
 
-      // 2. Create JSON-RPC connection
+      // Create JSON-RPC connection
       const reader = new StreamMessageReader(childProcess.stdout)
       const writer = new StreamMessageWriter(childProcess.stdin)
       const conn = createMessageConnection(reader, writer)
@@ -147,11 +137,10 @@ export class LspClient {
         }
       })
 
-      // 3. Start listening
       conn.listen()
       this.connection = conn
 
-      // 4. Send initialize request with timeout
+      // Send initialize request with timeout
       const initPromise = this.sendInitialize(conn)
       await withTimeout(
         initPromise,
@@ -159,7 +148,7 @@ export class LspClient {
         `Language server timed out after ${startupTimeout}ms during initialization`,
       )
 
-      // 5. Send initialized notification
+      // Send initialized notification
       conn.sendNotification('initialized', {})
 
       this.state = 'running'
@@ -280,7 +269,7 @@ export class LspClient {
     })
   }
 
-  private handleCrash(error: Error): void {
+  private handleCrash(_error: Error): void {
     const maxRestarts = this.config.maxRestarts ?? 3
 
     this.state = 'error'

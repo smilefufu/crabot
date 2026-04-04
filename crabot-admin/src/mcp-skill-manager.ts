@@ -56,9 +56,19 @@ export interface MCPServerRegistryEntry {
   id: string
   name: string
   description?: string
-  command: string
+
+  /** 传输类型 */
+  transport: 'stdio' | 'streamable-http' | 'sse'
+
+  /** stdio 配置（当 transport='stdio' 时使用） */
+  command?: string
   args?: string[]
   env?: Record<string, string>
+
+  /** HTTP/SSE 配置（当 transport='streamable-http' 或 'sse' 时使用） */
+  url?: string
+  headers?: Record<string, string>
+
   /** 是否为内置（不可删除） */
   is_builtin: boolean
   /** 是否为必要工具（默认提供给 Agent） */
@@ -126,6 +136,12 @@ export class MCPServerManager {
     try {
       const raw = await fs.readFile(this.filePath, 'utf-8')
       const entries: MCPServerRegistryEntry[] = JSON.parse(raw)
+      // Migrate: default missing transport to 'stdio' for backward compatibility
+      for (const entry of entries) {
+        if (!entry.transport) {
+          entry.transport = 'stdio'
+        }
+      }
       this.servers = new Map(entries.map((e) => [e.id, e]))
     } catch {
       this.servers = new Map()
@@ -156,9 +172,15 @@ export class MCPServerManager {
 
   async create(params: {
     name: string
-    command: string
+    transport?: 'stdio' | 'streamable-http' | 'sse'
+    // stdio
+    command?: string
     args?: string[]
     env?: Record<string, string>
+    // http/sse
+    url?: string
+    headers?: Record<string, string>
+    // meta
     description?: string
     install_method?: MCPServerRegistryEntry['install_method']
     source_market?: string
@@ -168,9 +190,12 @@ export class MCPServerManager {
     const entry: MCPServerRegistryEntry = {
       id: generateId(),
       name: params.name,
+      transport: params.transport ?? 'stdio',
       command: params.command,
       args: params.args,
       env: params.env,
+      url: params.url,
+      headers: params.headers,
       description: params.description,
       is_builtin: false,
       is_essential: false,
@@ -192,7 +217,7 @@ export class MCPServerManager {
     params: Partial<
       Pick<
         MCPServerRegistryEntry,
-        'name' | 'command' | 'args' | 'env' | 'description' | 'is_essential' | 'enabled'
+        'name' | 'transport' | 'command' | 'args' | 'env' | 'url' | 'headers' | 'description' | 'is_essential' | 'enabled'
       >
     >
   ): Promise<MCPServerRegistryEntry> {
@@ -244,6 +269,7 @@ export class MCPServerManager {
     const buildEntry = (name: string, c: Record<string, unknown>): MCPServerRegistryEntry => ({
       id: generateId(),
       name,
+      transport: 'stdio',
       command: c.command as string,
       args: Array.isArray(c.args) ? c.args.map(String) : undefined,
       env: typeof c.env === 'object' && c.env !== null
@@ -280,21 +306,89 @@ export class MCPServerManager {
     return newEntries
   }
 
+  /**
+   * 注册内置 MCP Server（幂等：已存在同名的不会重复注册）
+   * 在 Admin 初始化时调用，确保内置工具在首次启动时自动可用
+   */
+  async registerBuiltins(mcpToolsPath: string): Promise<void> {
+    const existingNames = new Set(this.list().map(s => s.name))
+
+    const builtins: Array<{
+      name: string
+      description: string
+      transport: 'stdio'
+      command: string
+      args: string[]
+    }> = [
+      {
+        name: 'computer-use',
+        description: 'Computer interaction: screenshot, mouse, keyboard (macOS)',
+        transport: 'stdio',
+        command: 'node',
+        args: [path.join(mcpToolsPath, 'dist/computer-use/main.js')],
+      },
+      {
+        name: 'lsp',
+        description: 'Code intelligence: diagnostics, hover, definition, references, symbols',
+        transport: 'stdio',
+        command: 'node',
+        args: [path.join(mcpToolsPath, 'dist/lsp/main.js')],
+      },
+      {
+        name: 'git',
+        description: 'Git operations: status, diff, log, commit, branch, stash',
+        transport: 'stdio',
+        command: 'node',
+        args: [path.join(mcpToolsPath, 'dist/git/main.js')],
+      },
+    ]
+
+    let changed = false
+    for (const builtin of builtins) {
+      if (existingNames.has(builtin.name)) continue
+      const now = generateTimestamp()
+      const entry: MCPServerRegistryEntry = {
+        id: generateId(),
+        ...builtin,
+        is_builtin: true,
+        is_essential: false,
+        can_disable: true,
+        enabled: true,
+        created_at: now,
+        updated_at: now,
+      }
+      this.servers.set(entry.id, entry)
+      changed = true
+    }
+
+    if (changed) {
+      await this.save()
+    }
+  }
+
   /** 将注册表条目转换为 Agent 所需的 MCPServerConfig 格式 */
   toAgentConfig(entry: MCPServerRegistryEntry): {
     id: string
     name: string
-    command: string
+    transport: 'stdio' | 'streamable-http' | 'sse'
+    // stdio
+    command?: string
     args?: string[]
     env?: Record<string, string>
+    // http/sse
+    url?: string
+    headers?: Record<string, string>
     description?: string
   } {
     return {
       id: entry.id,
       name: entry.name,
+      transport: entry.transport,
       command: entry.command,
       args: entry.args,
       env: entry.env,
+      url: entry.url,
+      headers: entry.headers,
       description: entry.description,
     }
   }
