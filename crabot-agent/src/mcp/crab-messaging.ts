@@ -391,22 +391,30 @@ export function createCrabMessagingServer(
               }
             } else if (args.file_path) {
               const mappings = sandboxPathMappingsRef?.current ?? []
-              if (mappings.length === 0) {
+              let hostPath: string
+
+              if (mappings.length > 0) {
+                // 有路径映射（远程 Worker）：沙盒路径 → 主机路径
+                try {
+                  hostPath = mapSandboxPathToHost(args.file_path, mappings)
+                } catch (pathErr) {
+                  return {
+                    content: [{ type: 'text' as const, text: JSON.stringify({ error: pathErr instanceof Error ? pathErr.message : String(pathErr) }) }],
+                  }
+                }
+              } else if (path.isAbsolute(args.file_path)) {
+                // 无路径映射（本地 unified agent）：绝对路径直接使用
+                hostPath = args.file_path
+              } else {
                 return {
-                  content: [{ type: 'text' as const, text: JSON.stringify({ error: '路径映射配置缺失，无法转换沙盒路径' }) }],
+                  content: [{ type: 'text' as const, text: JSON.stringify({ error: '相对路径需要路径映射配置，请使用绝对路径' }) }],
                 }
               }
-              try {
-                const hostPath = mapSandboxPathToHost(args.file_path, mappings)
-                messageContent = {
-                  type: args.content_type ?? 'file',
-                  file_path: hostPath,
-                  filename: args.filename ?? path.basename(args.file_path),
-                }
-              } catch (pathErr) {
-                return {
-                  content: [{ type: 'text' as const, text: JSON.stringify({ error: pathErr instanceof Error ? pathErr.message : String(pathErr) }) }],
-                }
+
+              messageContent = {
+                type: args.content_type ?? 'file',
+                file_path: hostPath,
+                filename: args.filename ?? path.basename(args.file_path),
               }
             } else {
               messageContent = {
