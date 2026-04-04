@@ -17,15 +17,15 @@ OpenAI adapter, createAdapter factory, Front handler 迁移
 ### Phase 3 — 高级能力 ✅ (2026-04-04)
 LLM auto-compact, sub-agent, permission system. 累计 200 tests
 
-### Phase 4 — 核心内置工具 (进行中)
-**关键**：SDK 移除后 Bash/Read/Write/Edit/Glob/Grep 无实现，Worker 无法工作
-- [ ] Task 17: Bash Tool
-- [ ] Task 18: Read Tool
-- [ ] Task 19: Write Tool
-- [ ] Task 20: Edit Tool
-- [ ] Task 21: Glob Tool
-- [ ] Task 22: Grep Tool
-- [ ] Task 23: Built-in Tools Index + Worker Integration
+### Phase 4 — 核心内置工具 ✅ (2026-04-04)
+Bash/Read/Write/Edit/Glob/Grep 6 个工具 + Worker 集成. 累计 203+49=252 tests
+- [x] Task 17: Bash Tool (7 tests)
+- [x] Task 18: Read Tool (8 tests)
+- [x] Task 19: Write Tool (7 tests)
+- [x] Task 20: Edit Tool (8 tests)
+- [x] Task 21: Glob Tool (8 tests)
+- [x] Task 22: Grep Tool (11 tests)
+- [x] Task 23: Built-in Tools Index + Worker Integration (7 tests)
 
 ### Phase 5 — MCP 工具服务器
 - [ ] Task 24: Computer Use MCP Server
