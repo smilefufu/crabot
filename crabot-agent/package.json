@@ -25,7 +25,9 @@
     "@modelcontextprotocol/sdk": "^1.27.1",
     "fast-glob": "^3.3.3",
     "js-yaml": "^4.1.1",
-    "jsonrepair": "^3.13.3"
+    "jsonrepair": "^3.13.3",
+    "vscode-jsonrpc": "^8.2.1",
+    "vscode-languageserver-protocol": "^3.17.5"
   },
   "devDependencies": {
     "@types/js-yaml": "^4.0.9",
