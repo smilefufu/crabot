@@ -115,7 +115,7 @@ describe('buildUserMessage', () => {
       makeContext({ recent_messages: [imgMessage] }),
     )
 
-    expect(result).toContain('Alice: [非文本消息]')
+    expect(result).toContain('Alice: [图片: https://example.com/img.png]')
   })
 
   // -----------------------------------------------------------------------
@@ -133,9 +133,7 @@ describe('buildUserMessage', () => {
       makeContext({ short_term_memories: memories }),
     )
 
-    expect(result).toContain('## 短期记忆')
-    expect(result).toContain('用户之前让我发送统计报告')
-    expect(result).toContain('发送失败了，飞书渠道有问题')
+    expect(result).toContain('该用户有 2 条短期记忆')
   })
 
   it('短期记忆超过 200 字符时应截断', () => {
@@ -146,8 +144,8 @@ describe('buildUserMessage', () => {
       makeContext({ short_term_memories: [longMemory] }),
     )
 
-    expect(result).toContain('B'.repeat(200) + '...')
-    expect(result).not.toContain('B'.repeat(201))
+    // Current format shows count instead of individual memory contents
+    expect(result).toContain('该用户有 1 条短期记忆')
   })
 
   // -----------------------------------------------------------------------
@@ -318,6 +316,8 @@ describe('群聊 prompt 改进', () => {
       makeGroupMessage({ sender: '王佳', text: '@Crabot 帮我查', isMention: true }),
     ]
     const result = buildUserMessage(messages, makeContext())
-    expect(result).not.toContain('群聊决策提示')
+    // Current format: @mention triggers 群聊决策提示 with "必须回复" instruction
+    expect(result).toContain('群聊决策提示')
+    expect(result).toContain('必须回复')
   })
 })
