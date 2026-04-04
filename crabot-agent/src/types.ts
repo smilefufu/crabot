@@ -449,9 +449,14 @@ export interface LLMConnectionInfo {
 
 export interface MCPServerConfig {
   name: string
-  command: string
+  transport?: 'stdio' | 'streamable-http' | 'sse'
+  // stdio fields
+  command?: string
   args?: string[]
   env?: Record<string, string>
+  // http/sse fields
+  url?: string
+  headers?: Record<string, string>
 }
 
 export interface SkillConfig {
