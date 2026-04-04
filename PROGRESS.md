@@ -27,10 +27,11 @@ Bash/Read/Write/Edit/Glob/Grep 6 个工具 + Worker 集成. 累计 203+49=252 te
 - [x] Task 22: Grep Tool (11 tests)
 - [x] Task 23: Built-in Tools Index + Worker Integration (7 tests)
 
-### Phase 5 — MCP 工具服务器
-- [ ] Task 24: Computer Use MCP Server
-- [ ] Task 25: LSP MCP Server
-- [ ] Task 26: Git MCP Server
+### Phase 5 — MCP 工具服务器 ✅ (2026-04-04)
+Computer Use (12 tests), LSP (7 tests), Git (10 tests). 累计 285 tests
+- [x] Task 24: Computer Use MCP (screenshot/mouse/keyboard)
+- [x] Task 25: LSP MCP (TypeScript diagnostics, hover/definition stubs)
+- [x] Task 26: Git MCP (status/diff/log/commit/branch/stash)
 
 ### Phase 6 — Admin 工具注册集成
 - [ ] Task 27: Admin Built-in Tool Configuration
