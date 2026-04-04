@@ -44,8 +44,14 @@ Built-in tool config, Skill tool, E2E integration. **全部 311 tests pass**
 - [x] Task 31: LSP Server Manager (routing + file sync, 17 tests)
 - [x] Task 32: LSP MCP Server rewrite (9 operations, 25 tests)
 
+### 协议对齐 + 决策类型简化 ✅ (2026-04-04)
+- [x] Task 33: Protocol docs alignment (7 处协议修改)
+- [x] Task 34: Remove forward_to_worker → 4 种决策类型 (direct_reply, create_task, supplement_task, silent)
+- [x] Task 35: Type alignment (ShortTermMemory, LongTerm, TaskSummary, Features, friend_id)
+- [x] Task 36: Rename list_friends → list_contacts, add list_groups
+
 ### Engine V2 重构完成 ✅
-**总计**: 6 Phases + LSP 补完, 32 Tasks, 360 tests
+**总计**: 36 Tasks, 364 tests, 协议 + 代码完全对齐
 **分支**: `feat/engine-v2` (ready for PR)
 
 ---
