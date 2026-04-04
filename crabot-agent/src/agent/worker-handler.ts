@@ -13,7 +13,7 @@ import {
   runEngine,
   createAdapter,
   defineTool,
-  getAllBuiltinTools,
+  getConfiguredBuiltinTools,
 } from '../engine/index.js'
 import type {
   ToolDefinition,
@@ -33,6 +33,7 @@ import type {
   ChannelMessage,
   TraceCallback,
   SkillConfig,
+  BuiltinToolConfig,
 } from '../types.js'
 import type { RpcClient } from '../core/module-base.js'
 import { createCrabMemoryServer } from '../mcp/crab-memory.js'
@@ -205,18 +206,21 @@ export class WorkerHandler {
   private humanQueues: Map<TaskId, HumanMessageQueue> = new Map()
   private mcpConfigFactory: (() => Record<string, McpServer>) | undefined
   private deps?: WorkerDeps
+  private builtinToolConfig?: BuiltinToolConfig
 
   constructor(
     sdkEnv: SdkEnvConfig,
     config: WorkerHandlerConfig,
     mcpConfigFactory?: () => Record<string, McpServer>,
     deps?: WorkerDeps,
+    builtinToolConfig?: BuiltinToolConfig,
   ) {
     this.sdkEnv = sdkEnv
     this.mcpConfigFactory = mcpConfigFactory
     this.deps = deps
     this.systemPrompt = config.systemPrompt
     this.longTermPreloadLimit = config.longTermPreloadLimit ?? 20
+    this.builtinToolConfig = builtinToolConfig
   }
 
   async executeTask(
@@ -312,8 +316,8 @@ export class WorkerHandler {
         tools.push(...mcpServerToToolDefinitions(server, serverName))
       }
 
-      // 3d. Built-in file/shell tools
-      tools.push(...getAllBuiltinTools(taskDir))
+      // 3d. Built-in file/shell tools (filtered by Admin config)
+      tools.push(...getConfiguredBuiltinTools(taskDir, this.builtinToolConfig))
 
       // 4. Create LLM adapter from sdkEnv (format-based routing)
       const adapter = createAdapter({

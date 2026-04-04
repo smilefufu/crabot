@@ -257,7 +257,7 @@ export class UnifiedAgent extends ModuleBase {
           moduleId: this.config.moduleId,
           resolveChannelPort: (channelId) => this.getChannelPort(channelId),
           getMemoryPort: () => this.getMemoryPort(),
-        })
+        }, config.builtin_tool_config)
       }
     }
   }
@@ -1723,7 +1723,7 @@ ${skillsSection}
           moduleId: this.config.moduleId,
           resolveChannelPort: (channelId) => this.getChannelPort(channelId),
           getMemoryPort: () => this.getMemoryPort(),
-        })
+        }, this.agentConfig?.builtin_tool_config)
         console.log(`[${this.config.moduleId}] Worker Agent SDK env ${this.workerHandler ? 'updated' : 'created from config push'}`)
       }
     }

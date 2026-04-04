@@ -44,6 +44,17 @@ export interface OrchestrationConfig {
   front_agent_queue_timeout: number
 }
 
+export interface BuiltinToolConfig {
+  /** Which built-in tools are enabled (default: all enabled) */
+  enabled_tools?: string[]
+  /** Which built-in tools are disabled (alternative to enabled_tools) */
+  disabled_tools?: string[]
+  /** Permission level overrides per tool */
+  permission_overrides?: Record<string, 'safe' | 'normal' | 'dangerous'>
+  /** Bash-specific timeout in ms (default 120000) */
+  bash_timeout?: number
+}
+
 export interface AgentLayerConfig {
   /** 实例 ID */
   instance_id: string
@@ -69,6 +80,8 @@ export interface AgentLayerConfig {
   specialization?: string
   /** 支持的任务类型 */
   supported_task_types?: string[]
+  /** Built-in tool configuration (Admin-controlled) */
+  builtin_tool_config?: BuiltinToolConfig
 }
 
 export interface UnifiedAgentConfig {

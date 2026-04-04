@@ -84,7 +84,8 @@ function execCommand(
   })
 }
 
-export function createBashTool(cwd: string): ToolDefinition {
+export function createBashTool(cwd: string, defaultTimeout?: number): ToolDefinition {
+  const effectiveDefault = defaultTimeout ?? DEFAULT_TIMEOUT_MS
   return defineTool({
     name: 'Bash',
     description: 'Executes a bash command in the working directory and returns its output.',
@@ -92,7 +93,7 @@ export function createBashTool(cwd: string): ToolDefinition {
       type: 'object',
       properties: {
         command: { type: 'string', description: 'The bash command to execute' },
-        timeout: { type: 'number', description: 'Timeout in milliseconds (default 120000)' },
+        timeout: { type: 'number', description: `Timeout in milliseconds (default ${effectiveDefault})` },
       },
       required: ['command'],
     },
@@ -100,7 +101,7 @@ export function createBashTool(cwd: string): ToolDefinition {
     permissionLevel: 'dangerous',
     call: async (input: Record<string, unknown>, context: ToolCallContext): Promise<ToolCallResult> => {
       const command = input.command as string
-      const timeoutMs = typeof input.timeout === 'number' ? input.timeout : DEFAULT_TIMEOUT_MS
+      const timeoutMs = typeof input.timeout === 'number' ? input.timeout : effectiveDefault
 
       return execCommand(command, cwd, timeoutMs, context.abortSignal)
     },
