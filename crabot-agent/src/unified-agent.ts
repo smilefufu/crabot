@@ -241,29 +241,29 @@ export class UnifiedAgent extends ModuleBase {
       }
     }
 
+    // 解析 digest 模型配置（回退链：digest → triage → worker 的配置）
+    const digestModelConfig = config.model_config?.digest ?? config.model_config?.triage ?? config.model_config?.worker
+    if (digestModelConfig) {
+      this.digestSdkEnv = this.buildSdkEnv(digestModelConfig)
+    }
+
     // 初始化 Worker Handler（如果有 worker 角色）
     if (this.roles.has('worker')) {
       const workerModelConfig = config.model_config?.worker
       if (workerModelConfig) {
         this.sdkEnvWorker = this.buildSdkEnv(workerModelConfig)
         const workerSdkEnv = this.sdkEnvWorker
-        // MCP 服务器配置转换为 SDK 格式（stdio 类型直传）
         this.workerHandler = new WorkerHandler(workerSdkEnv, {
           systemPrompt: this.promptManager.assembleWorkerPrompt(adminPersonality || undefined),
           longTermPreloadLimit: this.orchestrationConfig.worker_long_term_memory_limit,
+          progressDigest: config.progress_digest,
         }, createMcpConfigs, {
           rpcClient: this.rpcClient,
           moduleId: this.config.moduleId,
           resolveChannelPort: (channelId) => this.getChannelPort(channelId),
           getMemoryPort: () => this.getMemoryPort(),
-        }, config.builtin_tool_config, this.mcpConnector)
+        }, config.builtin_tool_config, this.mcpConnector, this.digestSdkEnv)
       }
-    }
-
-    // 解析 digest 模型配置（回退链：digest → triage → worker 的配置）
-    const digestModelConfig = config.model_config?.digest ?? config.model_config?.triage ?? config.model_config?.worker
-    if (digestModelConfig) {
-      this.digestSdkEnv = this.buildSdkEnv(digestModelConfig)
     }
   }
 
@@ -1726,6 +1726,12 @@ ${skillsSection}
       }
     }
 
+    // 更新 Digest 模型（在 Worker 之前，因为 WorkerHandler 构造需要 digestSdkEnv）
+    const digestConfig = modelConfig.digest ?? modelConfig.triage ?? modelConfig.worker
+    if (digestConfig) {
+      this.digestSdkEnv = this.buildSdkEnv(digestConfig)
+    }
+
     // 更新 Worker Agent
     if (this.roles.has('worker')) {
       const workerConfig = modelConfig.worker
@@ -1735,20 +1741,15 @@ ${skillsSection}
         this.workerHandler = new WorkerHandler(updatedWorkerSdkEnv, {
           systemPrompt: this.promptManager.assembleWorkerPrompt(adminPersonality || undefined),
           longTermPreloadLimit: this.orchestrationConfig.worker_long_term_memory_limit,
+          progressDigest: this.agentConfig?.progress_digest,
         }, createMcpConfigs, {
           rpcClient: this.rpcClient,
           moduleId: this.config.moduleId,
           resolveChannelPort: (channelId) => this.getChannelPort(channelId),
           getMemoryPort: () => this.getMemoryPort(),
-        }, this.agentConfig?.builtin_tool_config, this.mcpConnector)
+        }, this.agentConfig?.builtin_tool_config, this.mcpConnector, this.digestSdkEnv)
         console.log(`[${this.config.moduleId}] Worker Agent SDK env ${this.workerHandler ? 'updated' : 'created from config push'}`)
       }
-    }
-
-    // 更新 Digest 模型
-    const digestConfig = modelConfig.digest ?? modelConfig.triage ?? modelConfig.worker
-    if (digestConfig) {
-      this.digestSdkEnv = this.buildSdkEnv(digestConfig)
     }
   }
 
