@@ -35,24 +35,24 @@ const DEFAULT_IMPLEMENTATION: AgentImplementation = {
   model_format: 'anthropic',
   model_roles: [
     {
-      key: 'default',
-      description: '默认执行模型，用于大多数任务',
-      required: true,
-      recommended_capabilities: ['tool_use', 'long_context'],
-      used_by: ['front', 'worker'],
-    },
-    {
-      key: 'fast',
-      description: '快速响应模型，用于需要快速处理的简单任务',
+      key: 'triage',
+      description: '分诊模型，用于 Front Agent 消息意图判断和快速决策',
       required: false,
       recommended_capabilities: ['tool_use', 'fast'],
       used_by: ['front'],
     },
     {
-      key: 'smart',
-      description: '深度推理模型，用于需要深度思考的复杂任务',
+      key: 'worker',
+      description: '执行模型，用于 Worker Agent 执行实际任务',
       required: false,
-      recommended_capabilities: ['reasoning', 'long_context'],
+      recommended_capabilities: ['tool_use', 'long_context'],
+      used_by: ['worker'],
+    },
+    {
+      key: 'digest',
+      description: '摘要模型，用于生成进度汇报摘要（推荐小型快速模型）',
+      required: false,
+      recommended_capabilities: ['fast'],
       used_by: ['worker'],
     },
   ],
@@ -392,6 +392,7 @@ export class AgentManager {
       ...(params.skill_ids !== undefined && { skill_ids: params.skill_ids }),
       ...(params.max_iterations !== undefined && { max_iterations: params.max_iterations }),
       ...(params.tools_readonly !== undefined && { tools_readonly: params.tools_readonly }),
+      ...(params.progress_digest !== undefined && { progress_digest: params.progress_digest }),
     }
 
     this.configs.set(params.instance_id, updated)

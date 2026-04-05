@@ -3141,10 +3141,7 @@ export class AdminModule extends ModuleBase {
       }
     }
 
-    // 确保 'default' slot 存在（如果存储中没有，用全局默认填入）
-    if (!resolvedModelConfig['default'] && globalLLM) {
-      resolvedModelConfig['default'] = globalLLM
-    }
+    // 不再硬塞 default slot，每个 slot 未配置时 Agent 端自行回退到全局默认
 
     return {
       config: {

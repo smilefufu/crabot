@@ -148,7 +148,7 @@ export const AgentConfig: React.FC = () => {
     return providers.find((p) => p.id === roleConfig.provider_id)
   }
 
-  const configurableRoles = llmRequirements.filter((role) => role.key !== 'default')
+  const configurableRoles = llmRequirements
 
   if (loading) return <MainLayout><Loading /></MainLayout>
 
@@ -227,7 +227,7 @@ export const AgentConfig: React.FC = () => {
                   return (
                     <Select
                       label="选择模型"
-                      options={llmModels.map((m) => ({ value: m.model_id, label: m.display_name }))}
+                      options={llmModels.map((m) => ({ value: m.model_id, label: m.display_name + (m.supports_vision ? ' 👁 Vision' : '') }))}
                       value={config.model_roles[role.key]?.model_id || ''}
                       onChange={(e) => handleModelChange(role.key, e.target.value)}
                     />

@@ -1108,6 +1108,13 @@ export interface AgentInstanceConfig {
   max_iterations?: number
   /** 工具是否只读（Front 默认 true） */
   tools_readonly?: boolean
+  /** 进度摘要配置 */
+  progress_digest?: {
+    enabled?: boolean
+    interval_seconds?: number
+    group_interval_seconds?: number
+    mode?: 'llm' | 'extract'
+  }
 }
 
 /** Agent 实例配置的解析后格式（RPC 返回给 Agent，model_config 已从引用解析为连接信息） */
@@ -1203,6 +1210,7 @@ export interface UpdateAgentConfigParams {
   skill_ids?: string[]
   max_iterations?: number
   tools_readonly?: boolean
+  progress_digest?: AgentInstanceConfig['progress_digest']
 }
 
 export interface UpdateAgentConfigResult {

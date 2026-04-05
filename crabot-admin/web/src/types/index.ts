@@ -208,6 +208,12 @@ export interface AgentInstanceConfig {
   skill_ids?: string[]
   max_iterations?: number
   tools_readonly?: boolean
+  progress_digest?: {
+    enabled?: boolean
+    interval_seconds?: number
+    group_interval_seconds?: number
+    mode?: 'llm' | 'extract'
+  }
 }
 
 // ============================================================================
