@@ -323,6 +323,8 @@ export interface WorkerAgentContext {
     write_visibility: 'private' | 'internal' | 'public'
     write_scopes: string[]
   }
+  /** Front Agent 已发送给用户的即时回复（避免 Worker 重复确认） */
+  front_immediate_reply?: string
 }
 
 export interface TaskOrigin {

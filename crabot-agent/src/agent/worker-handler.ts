@@ -691,6 +691,13 @@ export class WorkerHandler {
       }
     }
 
+    // Front immediate reply — tell Worker what was already said to avoid repetition
+    if (context.front_immediate_reply) {
+      parts.push('\n## 已发送的即时回复')
+      parts.push(`你已经向用户发送了："${context.front_immediate_reply}"`)
+      parts.push('不要重复类似的确认或复述，直接开始执行任务。')
+    }
+
     // front_context from forced Front termination
     const taskWithContext = task as { front_context?: Array<{ tool_name: string; output_summary: string }> }
     if (taskWithContext.front_context && Array.isArray(taskWithContext.front_context)) {

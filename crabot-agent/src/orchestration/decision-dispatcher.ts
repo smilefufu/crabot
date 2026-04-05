@@ -243,6 +243,7 @@ export class DecisionDispatcher {
       ...workerContext,
       trigger_messages: params.messages,
       sender_friend: params.senderFriend,
+      front_immediate_reply: replyText,
     }
 
     this.executeTaskInBackground(
