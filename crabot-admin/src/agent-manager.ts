@@ -381,16 +381,12 @@ export class AgentManager {
     // 迁移旧 slot key: fast → triage, smart → worker, 删除 default
     const mc = config.model_config
     if (mc && (mc['fast'] || mc['smart'] || mc['default'])) {
-      const newMc = { ...mc }
-      if (mc['fast'] && !mc['triage']) {
-        newMc['triage'] = mc['fast']
+      const { fast, smart, default: _default, ...rest } = mc
+      const newMc = {
+        ...rest,
+        ...(fast && !mc['triage'] ? { triage: fast } : {}),
+        ...(smart && !mc['worker'] ? { worker: smart } : {}),
       }
-      delete newMc['fast']
-      if (mc['smart'] && !mc['worker']) {
-        newMc['worker'] = mc['smart']
-      }
-      delete newMc['smart']
-      delete newMc['default']
       const migrated = { ...config, model_config: newMc }
       this.configs.set(instanceId, migrated)
       this.saveConfig(instanceId).catch(() => {})

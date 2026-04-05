@@ -248,6 +248,7 @@ export class WorkerHandler {
     const humanQueue = new HumanMessageQueue()
     this.humanQueues.set(task.task_id, humanQueue)
 
+    let digest: ProgressDigest | undefined
     try {
       // 1. Create isolated task directory
       await fs.promises.mkdir(taskDir, { recursive: true })
@@ -358,7 +359,6 @@ export class WorkerHandler {
       })
 
       // 创建 ProgressDigest
-      let digest: ProgressDigest | undefined
       if (taskOrigin && this.deps) {
         const digestSettings = this.progressDigestSettings ?? {}
         const isEnabled = digestSettings.enabled !== false
@@ -368,7 +368,8 @@ export class WorkerHandler {
             ? (digestSettings.interval_seconds ?? 120) * 1000
             : (digestSettings.group_interval_seconds ?? digestSettings.interval_seconds ?? 180) * 1000
 
-          const digestAdapter = this.digestSdkEnv
+          const digestMode = digestSettings.mode ?? 'llm'
+          const digestAdapter = (digestMode !== 'extract' && this.digestSdkEnv)
             ? createAdapter({
                 endpoint: this.digestSdkEnv.env.ANTHROPIC_BASE_URL ?? '',
                 apikey: this.digestSdkEnv.env.ANTHROPIC_API_KEY ?? '',
@@ -378,7 +379,7 @@ export class WorkerHandler {
 
           const digestConfig: ProgressDigestConfig = {
             intervalMs,
-            mode: digestSettings.mode ?? 'llm',
+            mode: digestMode,
             isMasterPrivate,
           }
 
@@ -461,10 +462,8 @@ export class WorkerHandler {
         },
       })
 
-      // Dispose ProgressDigest: cancel timer, discard buffer (final_reply covers the rest)
-      if (digest) {
-        digest.dispose()
-      }
+      // Dispose ProgressDigest (also in finally block as safety net)
+      digest?.dispose()
 
       // End loop span
       const isError = engineResult.outcome === 'failed'
@@ -506,6 +505,7 @@ export class WorkerHandler {
         final_reply: { type: 'text', text: `抱歉，执行任务时出现错误: ${errorMessage}` },
       }
     } finally {
+      digest?.dispose()
       this.humanQueues.delete(task.task_id)
       this.activeTasks.delete(task.task_id)
       await this.cleanupTaskDir()
