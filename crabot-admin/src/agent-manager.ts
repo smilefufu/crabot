@@ -375,7 +375,29 @@ export class AgentManager {
   // ============================================================================
 
   getConfig(instanceId: string): AgentInstanceConfig | undefined {
-    return this.configs.get(instanceId)
+    const config = this.configs.get(instanceId)
+    if (!config) return undefined
+
+    // 迁移旧 slot key: fast → triage, smart → worker, 删除 default
+    const mc = config.model_config
+    if (mc && (mc['fast'] || mc['smart'] || mc['default'])) {
+      const newMc = { ...mc }
+      if (mc['fast'] && !mc['triage']) {
+        newMc['triage'] = mc['fast']
+      }
+      delete newMc['fast']
+      if (mc['smart'] && !mc['worker']) {
+        newMc['worker'] = mc['smart']
+      }
+      delete newMc['smart']
+      delete newMc['default']
+      const migrated = { ...config, model_config: newMc }
+      this.configs.set(instanceId, migrated)
+      this.saveConfig(instanceId).catch(() => {})
+      return migrated
+    }
+
+    return config
   }
 
   async updateConfig(params: UpdateAgentConfigParams): Promise<AgentInstanceConfig> {
