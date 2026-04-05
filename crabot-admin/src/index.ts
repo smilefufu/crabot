@@ -4202,9 +4202,10 @@ export class AdminModule extends ModuleBase {
       // 复用 handleGetAgentConfig 的配置解析逻辑
       const { config } = await this.handleGetAgentConfig({ instance_id: 'crabot-agent' })
 
-      // 只推送可热更新的 model_config
+      // 推送可热更新的字段
       const updateParams = {
         model_config: config.model_config,
+        extra: config.extra,
       }
 
       const result = await this.rpcClient.call<typeof updateParams, { restart_required: boolean; changed_fields: string[] }>(
@@ -4464,6 +4465,7 @@ export class AdminModule extends ModuleBase {
       const result = {
         model_format: defaultImpl.model_format,
         requirements: defaultImpl.model_roles,
+        extra_schema: defaultImpl.extra_schema ?? [],
       }
 
       res.writeHead(200, { 'Content-Type': 'application/json' })

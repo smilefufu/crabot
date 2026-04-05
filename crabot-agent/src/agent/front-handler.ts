@@ -185,9 +185,33 @@ export function buildUserMessage(
       parts.push('\n## 群聊决策提示')
       parts.push('本批次消息 @了你，你必须回复（direct_reply 或 create_task），禁止选择 silent。')
     } else {
+      // 检测对话延续性：recent_messages 中 bot 近期是否参与过对话
+      const crabName = context.crab_display_name
+      const botRecentlyActive = crabName
+        ? context.recent_messages.some(m => m.sender.platform_display_name === crabName)
+        : false
+
+      // 检测引用回复：当前消息是否引用了 bot 的消息
+      const quotedBotMessage = crabName
+        ? messages.some(m => {
+            const quoteId = m.features.quote_message_id ?? m.features.reply_to_message_id
+            if (!quoteId) return false
+            return context.recent_messages.some(
+              rm => rm.platform_message_id === quoteId && rm.sender.platform_display_name === crabName
+            )
+          })
+        : false
+
       parts.push('\n## 群聊决策提示')
-      parts.push('本批次消息没有 @你。群成员之间的讨论（即使涉及技术/代码话题）不算向你提问。')
-      parts.push('除非有人明确叫你名字或话题中没有其他对话对象且明显在向你求助，否则默认选择 silent。')
+      if (quotedBotMessage) {
+        parts.push('本批次消息引用了你之前的回复，你应该回复（direct_reply 或 create_task），禁止选择 silent。')
+      } else if (botRecentlyActive) {
+        parts.push('本批次消息没有 @你，但你近期在群中参与过对话。如果本条消息与你之前的回复相关（如追问、延续讨论），你应该回复（direct_reply）。')
+        parts.push('如果消息明显与你无关（群成员之间的独立讨论、转换了话题），则选择 silent。')
+      } else {
+        parts.push('本批次消息没有 @你。群成员之间的讨论（即使涉及技术/代码话题）不算向你提问。')
+        parts.push('除非有人明确叫你名字或话题中没有其他对话对象且明显在向你求助，否则默认选择 silent。')
+      }
     }
   } else {
     parts.push('\n## 当前消息')

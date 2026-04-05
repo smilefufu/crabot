@@ -37,7 +37,6 @@ import type {
   TraceCallback,
   SkillConfig,
   BuiltinToolConfig,
-  ProgressDigestSettings,
 } from '../types.js'
 import type { RpcClient } from '../core/module-base.js'
 import { createCrabMemoryServer } from '../mcp/crab-memory.js'
@@ -58,7 +57,7 @@ function log(msg: string) {
 export interface WorkerHandlerConfig {
   systemPrompt: string
   longTermPreloadLimit?: number
-  progressDigest?: ProgressDigestSettings
+  extra?: Record<string, unknown>
 }
 
 export interface WorkerDeps {
@@ -204,7 +203,7 @@ export class WorkerHandler {
   private deps?: WorkerDeps
   private builtinToolConfig?: BuiltinToolConfig
   private mcpConnector?: McpConnector
-  private progressDigestSettings?: ProgressDigestSettings
+  private extra: Record<string, unknown>
   private digestSdkEnv?: SdkEnvConfig
 
   constructor(
@@ -223,7 +222,7 @@ export class WorkerHandler {
     this.longTermPreloadLimit = config.longTermPreloadLimit ?? 20
     this.builtinToolConfig = builtinToolConfig
     this.mcpConnector = mcpConnector
-    this.progressDigestSettings = config.progressDigest
+    this.extra = config.extra ?? {}
     this.digestSdkEnv = digestSdkEnv
   }
 
@@ -358,17 +357,19 @@ export class WorkerHandler {
         tools: tools.map(t => t.name),
       })
 
-      // 创建 ProgressDigest
+      // 创建 ProgressDigest（从 extra key-value 读取配置）
       if (taskOrigin && this.deps) {
-        const digestSettings = this.progressDigestSettings ?? {}
-        const isEnabled = digestSettings.enabled !== false
+        const ex = this.extra
+        const isEnabled = ex.progress_digest_enabled !== false
 
         if (isEnabled) {
-          const intervalMs = isMasterPrivate
-            ? (digestSettings.interval_seconds ?? 120) * 1000
-            : (digestSettings.group_interval_seconds ?? digestSettings.interval_seconds ?? 180) * 1000
+          const intervalSec = isMasterPrivate
+            ? (typeof ex.progress_digest_interval_seconds === 'number' ? ex.progress_digest_interval_seconds : 120)
+            : (typeof ex.progress_digest_group_interval_seconds === 'number' ? ex.progress_digest_group_interval_seconds
+               : typeof ex.progress_digest_interval_seconds === 'number' ? ex.progress_digest_interval_seconds : 180)
+          const intervalMs = intervalSec * 1000
 
-          const digestMode = digestSettings.mode ?? 'llm'
+          const digestMode: 'llm' | 'extract' = ex.progress_digest_mode === 'extract' ? 'extract' : 'llm'
           const digestAdapter = (digestMode !== 'extract' && this.digestSdkEnv)
             ? createAdapter({
                 endpoint: this.digestSdkEnv.env.ANTHROPIC_BASE_URL ?? '',

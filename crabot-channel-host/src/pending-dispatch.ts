@@ -13,6 +13,8 @@ import type { DeliverFn } from './types.js'
 
 export interface PendingDispatch {
   deliver: DeliverFn
+  /** 释放 dispatch（不发送消息），用于 silent 等无回复场景 */
+  release?: () => void
   sessionId: string
   createdAt: number
 }
@@ -28,9 +30,10 @@ export class PendingDispatchMap {
   /**
    * 存储一个挂起请求
    */
-  set(sessionId: string, dispatch: { deliver: DeliverFn }): void {
+  set(sessionId: string, dispatch: { deliver: DeliverFn; release?: () => void }): void {
     this.map.set(sessionId, {
       deliver: dispatch.deliver,
+      release: dispatch.release,
       sessionId,
       createdAt: Date.now(),
     })

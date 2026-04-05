@@ -95,10 +95,21 @@ export interface LLMRoleRequirement {
   used_by?: Array<'front' | 'worker'>
 }
 
+/** 扩展配置项 Schema */
+export interface ExtraConfigSchema {
+  key: string
+  title: string
+  description?: string
+  type: 'string' | 'number' | 'boolean' | 'select'
+  default?: unknown
+  options?: Array<{ value: string; label: string }>
+}
+
 /** Agent LLM 需求响应 */
 export interface AgentLLMRequirementsResponse {
   model_format: ModelFormat
   requirements: LLMRoleRequirement[]
+  extra_schema: ExtraConfigSchema[]
 }
 
 export interface AgentImplementation {
@@ -208,12 +219,7 @@ export interface AgentInstanceConfig {
   skill_ids?: string[]
   max_iterations?: number
   tools_readonly?: boolean
-  progress_digest?: {
-    enabled?: boolean
-    interval_seconds?: number
-    group_interval_seconds?: number
-    mode?: 'llm' | 'extract'
-  }
+  extra?: Record<string, unknown>
 }
 
 // ============================================================================

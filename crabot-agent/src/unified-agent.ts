@@ -75,6 +75,7 @@ export class UnifiedAgent extends ModuleBase {
   // 配置
   private orchestrationConfig: OrchestrationConfig
   private agentConfig?: AgentLayerConfig
+  private extra: Record<string, unknown>
 
   // 端口缓存
   private adminPort?: number
@@ -118,6 +119,7 @@ export class UnifiedAgent extends ModuleBase {
 
     this.orchestrationConfig = config.orchestration
     this.agentConfig = config.agent_config
+    this.extra = config.extra ?? {}
 
     // 初始化编排层组件
     this.sessionManager = new SessionManager(this.orchestrationConfig.session_state_ttl)
@@ -256,7 +258,7 @@ export class UnifiedAgent extends ModuleBase {
         this.workerHandler = new WorkerHandler(workerSdkEnv, {
           systemPrompt: this.promptManager.assembleWorkerPrompt(adminPersonality || undefined),
           longTermPreloadLimit: this.orchestrationConfig.worker_long_term_memory_limit,
-          progressDigest: config.progress_digest,
+          extra: this.extra,
         }, createMcpConfigs, {
           rpcClient: this.rpcClient,
           moduleId: this.config.moduleId,
@@ -1643,6 +1645,12 @@ ${skillsSection}
       restartRequired = true
     }
 
+    // 更新扩展配置（热生效，下次使用对应功能时生效）
+    if (params.extra !== undefined) {
+      this.extra = { ...this.extra, ...params.extra }
+      changedFields.push('extra')
+    }
+
     // 更新最大迭代次数
     if (params.max_iterations !== undefined) {
       this.agentConfig.max_iterations = params.max_iterations
@@ -1741,7 +1749,7 @@ ${skillsSection}
         this.workerHandler = new WorkerHandler(updatedWorkerSdkEnv, {
           systemPrompt: this.promptManager.assembleWorkerPrompt(adminPersonality || undefined),
           longTermPreloadLimit: this.orchestrationConfig.worker_long_term_memory_limit,
-          progressDigest: this.agentConfig?.progress_digest,
+          extra: this.extra,
         }, createMcpConfigs, {
           rpcClient: this.rpcClient,
           moduleId: this.config.moduleId,

@@ -978,6 +978,22 @@ export interface ModelRoleDefinition {
   used_by?: Array<'front' | 'worker'>
 }
 
+/** 扩展配置项 Schema（供 Admin 渲染表单） */
+export interface ExtraConfigSchema {
+  /** 配置项 key */
+  key: string
+  /** Admin 界面显示的标签 */
+  title: string
+  /** 帮助文字 */
+  description?: string
+  /** 类型 */
+  type: 'string' | 'number' | 'boolean' | 'select'
+  /** 默认值 */
+  default?: unknown
+  /** type=select 时的选项列表 */
+  options?: Array<{ value: string; label: string }>
+}
+
 /** Agent 实现（已安装的包） */
 export interface AgentImplementation {
   /** 实现 ID */
@@ -996,6 +1012,8 @@ export interface AgentImplementation {
   model_format: ModelFormat
   /** 模型角色定义 */
   model_roles: ModelRoleDefinition[]
+  /** 扩展配置 Schema（声明支持的 extra 配置项，供 Admin 渲染表单） */
+  extra_schema?: ExtraConfigSchema[]
   /** 安装来源 */
   source?: {
     type: 'local' | 'git'
@@ -1108,13 +1126,8 @@ export interface AgentInstanceConfig {
   max_iterations?: number
   /** 工具是否只读（Front 默认 true） */
   tools_readonly?: boolean
-  /** 进度摘要配置 */
-  progress_digest?: {
-    enabled?: boolean
-    interval_seconds?: number
-    group_interval_seconds?: number
-    mode?: 'llm' | 'extract'
-  }
+  /** 扩展配置（非协议固定字段，由 Agent 实现自定义，见 protocol-agent-v2 §6） */
+  extra?: Record<string, unknown>
 }
 
 /** Agent 实例配置的解析后格式（RPC 返回给 Agent，model_config 已从引用解析为连接信息） */
@@ -1210,7 +1223,7 @@ export interface UpdateAgentConfigParams {
   skill_ids?: string[]
   max_iterations?: number
   tools_readonly?: boolean
-  progress_digest?: AgentInstanceConfig['progress_digest']
+  extra?: Record<string, unknown>
 }
 
 export interface UpdateAgentConfigResult {

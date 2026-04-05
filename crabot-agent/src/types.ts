@@ -55,17 +55,6 @@ export interface BuiltinToolConfig {
   bash_timeout?: number
 }
 
-export interface ProgressDigestSettings {
-  /** 是否启用（默认 true） */
-  enabled?: boolean
-  /** 私聊摘要间隔秒数（默认 120） */
-  interval_seconds?: number
-  /** 群聊摘要间隔秒数（默认 180） */
-  group_interval_seconds?: number
-  /** 摘要模式（默认 'llm'） */
-  mode?: 'llm' | 'extract'
-}
-
 export interface AgentLayerConfig {
   /** 实例 ID */
   instance_id: string
@@ -93,8 +82,6 @@ export interface AgentLayerConfig {
   supported_task_types?: string[]
   /** Built-in tool configuration (Admin-controlled) */
   builtin_tool_config?: BuiltinToolConfig
-  /** 进度摘要配置 */
-  progress_digest?: ProgressDigestSettings
 }
 
 export interface UnifiedAgentConfig {
@@ -597,6 +584,8 @@ export interface UpdateConfigParams {
   skills?: SkillConfig[]
   /** 更新的最大迭代次数 */
   max_iterations?: number
+  /** 更新的扩展配置 */
+  extra?: Record<string, unknown>
 }
 
 export interface UpdateConfigResult {

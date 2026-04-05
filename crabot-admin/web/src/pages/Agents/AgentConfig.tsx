@@ -14,6 +14,7 @@ import type {
   ModelSlotRef,
   MCPServerRegistryEntry,
   SkillRegistryEntry,
+  ExtraConfigSchema,
 } from '../../types'
 import { useToast } from '../../contexts/ToastContext'
 
@@ -22,12 +23,14 @@ interface AgentUnifiedConfig {
   model_roles: Record<string, ModelSlotRef>
   mcp_server_ids: string[]
   skill_ids: string[]
+  extra: Record<string, unknown>
 }
 
 export const AgentConfig: React.FC = () => {
   const toast = useToast()
   const [providers, setProviders] = useState<ModelProvider[]>([])
   const [llmRequirements, setLlmRequirements] = useState<LLMRoleRequirement[]>([])
+  const [extraSchema, setExtraSchema] = useState<ExtraConfigSchema[]>([])
   const [allMCPServers, setAllMCPServers] = useState<MCPServerRegistryEntry[]>([])
   const [allSkills, setAllSkills] = useState<SkillRegistryEntry[]>([])
   const [config, setConfig] = useState<AgentUnifiedConfig>({
@@ -35,6 +38,7 @@ export const AgentConfig: React.FC = () => {
     model_roles: {},
     mcp_server_ids: [],
     skill_ids: [],
+    extra: {},
   })
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -56,6 +60,7 @@ export const AgentConfig: React.FC = () => {
 
       setProviders(providersData.items)
       setLlmRequirements(requirements.requirements)
+      setExtraSchema(requirements.extra_schema || [])
       setAllMCPServers(mcpServers.filter(s => s.enabled))
       setAllSkills(skills.filter(s => s.enabled))
 
@@ -66,6 +71,7 @@ export const AgentConfig: React.FC = () => {
           model_roles: existingConfig.model_config || {},
           mcp_server_ids: existingConfig.mcp_server_ids || [],
           skill_ids: existingConfig.skill_ids || [],
+          extra: existingConfig.extra || {},
         })
       } catch {
         // Agent config not available yet, use defaults
@@ -85,6 +91,7 @@ export const AgentConfig: React.FC = () => {
         model_config: config.model_roles,
         mcp_server_ids: config.mcp_server_ids,
         skill_ids: config.skill_ids,
+        extra: Object.keys(config.extra).length > 0 ? config.extra : undefined,
       })
       toast.success('Agent 配置保存成功')
     } catch (err) {
@@ -298,6 +305,73 @@ export const AgentConfig: React.FC = () => {
           )}
         </Card>
       </div>
+
+      {/* 扩展配置 */}
+      {extraSchema.length > 0 && (
+        <div style={{ marginTop: '1.5rem' }}>
+          <Card title="扩展配置">
+            <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem', fontSize: '0.875rem' }}>
+              Agent 实现自定义的行为参数。未修改的项使用默认值。
+            </p>
+            {extraSchema.map((schema) => {
+              const currentValue = config.extra[schema.key]
+              const displayValue = currentValue ?? schema.default ?? ''
+              return (
+                <div key={schema.key} style={{ marginBottom: '1rem' }}>
+                  <label style={{ display: 'block', marginBottom: '0.25rem', fontWeight: 500, fontSize: '0.875rem' }}>
+                    {schema.title}
+                    {schema.default !== undefined && (
+                      <span style={{ color: 'var(--text-secondary)', fontWeight: 400, marginLeft: '0.5rem', fontSize: '0.75rem' }}>
+                        默认: {String(schema.default)}
+                      </span>
+                    )}
+                  </label>
+                  {schema.description && (
+                    <p style={{ color: 'var(--text-secondary)', fontSize: '0.75rem', marginBottom: '0.5rem' }}>{schema.description}</p>
+                  )}
+                  {schema.type === 'boolean' ? (
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={displayValue === true || displayValue === 'true'}
+                        onChange={(e) => setConfig((prev) => ({
+                          ...prev,
+                          extra: { ...prev.extra, [schema.key]: e.target.checked },
+                        }))}
+                      />
+                      <span style={{ fontSize: '0.875rem' }}>{displayValue ? '启用' : '禁用'}</span>
+                    </label>
+                  ) : schema.type === 'select' && schema.options ? (
+                    <Select
+                      label=""
+                      options={schema.options.map((o) => ({ value: o.value, label: o.label }))}
+                      value={String(displayValue)}
+                      onChange={(e) => setConfig((prev) => ({
+                        ...prev,
+                        extra: { ...prev.extra, [schema.key]: e.target.value },
+                      }))}
+                    />
+                  ) : (
+                    <input
+                      className="input"
+                      type={schema.type === 'number' ? 'number' : 'text'}
+                      value={String(displayValue)}
+                      onChange={(e) => {
+                        const raw = e.target.value
+                        const parsed = schema.type === 'number' ? (raw === '' ? '' : Number(raw)) : raw
+                        setConfig((prev) => ({
+                          ...prev,
+                          extra: { ...prev.extra, [schema.key]: parsed },
+                        }))
+                      }}
+                    />
+                  )}
+                </div>
+              )
+            })}
+          </Card>
+        </div>
+      )}
 
       <div style={{ marginTop: '1.5rem', display: 'flex', justifyContent: 'flex-end' }}>
         <Button variant="primary" onClick={handleSave} disabled={saving}>

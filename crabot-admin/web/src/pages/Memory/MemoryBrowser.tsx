@@ -165,12 +165,27 @@ export const MemoryBrowser: React.FC = () => {
     })
   }
 
-  const handleShowL2 = (id: string) => {
-    setLongTermDetailLevels(prev => {
-      const next = new Map(prev)
-      next.set(id, 'L2')
-      return next
-    })
+  const [l2Loading, setL2Loading] = useState<string | null>(null)
+
+  const handleShowL2 = async (id: string) => {
+    setL2Loading(id)
+    try {
+      const result = await memoryService.getMemory(id, selectedModuleId)
+      if (result.type === 'long') {
+        setLongTermEntries(prev =>
+          prev.map(e => e.id === id ? { ...e, content: result.memory.content } : e)
+        )
+        setLongTermDetailLevels(prev => {
+          const next = new Map(prev)
+          next.set(id, 'L2')
+          return next
+        })
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '加载全文失败')
+    } finally {
+      setL2Loading(null)
+    }
   }
 
   useEffect(() => {
@@ -338,6 +353,7 @@ export const MemoryBrowser: React.FC = () => {
                 detailLevels={longTermDetailLevels}
                 onToggleDetail={handleToggleLongTermDetail}
                 onShowL2={handleShowL2}
+                l2Loading={l2Loading}
                 onDelete={handleDelete}
                 deletingId={deletingId}
                 confirmDeleteId={confirmDeleteId}
@@ -468,13 +484,14 @@ interface LongTermListProps {
   detailLevels: Map<string, DetailLevel>
   onToggleDetail: (id: string) => void
   onShowL2: (id: string) => void
+  l2Loading: string | null
   onDelete: (id: string) => void
   deletingId: string | null
   confirmDeleteId: string | null
 }
 
 const LongTermList: React.FC<LongTermListProps> = ({
-  entries, detailLevels, onToggleDetail, onShowL2, onDelete, deletingId, confirmDeleteId
+  entries, detailLevels, onToggleDetail, onShowL2, l2Loading, onDelete, deletingId, confirmDeleteId
 }) => {
   if (entries.length === 0) {
     return <div style={{ color: 'var(--text-secondary)', textAlign: 'center', padding: '2rem' }}>暂无长期记忆</div>
@@ -549,6 +566,7 @@ const LongTermList: React.FC<LongTermListProps> = ({
                   {level === 'L1' && (
                     <button
                       onClick={e => { e.stopPropagation(); onShowL2(entry.id) }}
+                      disabled={l2Loading === entry.id}
                       style={{
                         marginLeft: 'auto',
                         padding: '0.15rem 0.6rem',
@@ -557,10 +575,11 @@ const LongTermList: React.FC<LongTermListProps> = ({
                         borderRadius: '4px',
                         color: '#8b5cf6',
                         fontSize: '0.75rem',
-                        cursor: 'pointer',
+                        cursor: l2Loading === entry.id ? 'wait' : 'pointer',
+                        opacity: l2Loading === entry.id ? 0.6 : 1,
                       }}
                     >
-                      展开全文 (L2)
+                      {l2Loading === entry.id ? '加载中...' : '展开全文 (L2)'}
                     </button>
                   )}
                 </div>

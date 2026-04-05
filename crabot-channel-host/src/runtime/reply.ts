@@ -103,7 +103,7 @@ export function createReplyRuntime(
         }
       }
 
-      pendingDispatches.set(sessionId, { deliver })
+      pendingDispatches.set(sessionId, { deliver, release: () => resolveReply() })
 
       // 将 ctx 适配为 MsgContext（取常用字段，其余 fallback 到空）
       const msgCtx: MsgContext = {
@@ -123,18 +123,31 @@ export function createReplyRuntime(
         MediaPaths: ctx.MediaPaths as string[] | undefined,
         MediaUrls: ctx.MediaUrls as string[] | undefined,
         MediaTypes: ctx.MediaTypes as string[] | undefined,
+        WasMentioned: ctx.WasMentioned as boolean | undefined,
       }
 
       onMessageReceived(msgCtx, sessionId).catch((error: unknown) => {
         console.error('[ChannelHost] onMessageReceived error:', error)
       })
 
-      // 等待 Agent 回复
+      // 等待 Agent 回复（带超时兜底，防止 silent 等场景下永久挂起）
+      const REPLY_TIMEOUT_MS = 60_000
       console.log('[Shim] dispatchReplyFromConfig: waiting for Agent reply...')
-      await replyPromise
-      console.log('[Shim] dispatchReplyFromConfig: Agent reply completed')
+      const timeoutPromise = new Promise<'timeout'>((resolve) =>
+        setTimeout(() => resolve('timeout'), REPLY_TIMEOUT_MS)
+      )
+      const result = await Promise.race([
+        replyPromise.then(() => 'replied' as const),
+        timeoutPromise,
+      ])
+      if (result === 'timeout') {
+        console.log(`[Shim] dispatchReplyFromConfig: timeout after ${REPLY_TIMEOUT_MS}ms, releasing (session=${sessionId})`)
+        pendingDispatches.delete(sessionId)
+      } else {
+        console.log('[Shim] dispatchReplyFromConfig: Agent reply completed')
+      }
 
-      return { queuedFinal: 1, counts: { tool: 0, block: 0, final: 1 } }
+      return { queuedFinal: result === 'replied' ? 1 : 0, counts: { tool: 0, block: 0, final: result === 'replied' ? 1 : 0 } }
     },
 
     /**

@@ -62,7 +62,7 @@ export function msgContextToChannelMessage(
       }),
     },
     features: {
-      is_mention_crab: false,
+      is_mention_crab: ctx.WasMentioned ?? false,
     },
     platform_timestamp: new Date().toISOString(),
   }

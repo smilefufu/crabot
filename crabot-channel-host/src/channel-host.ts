@@ -174,6 +174,7 @@ export class ChannelHost extends ModuleBase {
     this.registerMethod('get_history', this.handleGetHistory.bind(this))
     this.registerMethod('get_config', this.handleGetConfig.bind(this))
     this.registerMethod('update_config', this.handleUpdateConfig.bind(this))
+    this.registerMethod('complete_dispatch', this.handleCompleteDispatch.bind(this))
   }
 
   // ============================================================================
@@ -213,6 +214,20 @@ export class ChannelHost extends ModuleBase {
       platform_message_id: messageId,
       sent_at: sentAt,
     }
+  }
+
+  /**
+   * Agent 处理完消息但不需要回复时（如 silent 决策），释放 pending dispatch。
+   * 防止 shim 层的 replyPromise 永久挂起。
+   */
+  private handleCompleteDispatch(params: { session_id: string }): { ok: boolean } {
+    const dispatch = this.pendingDispatches.get(params.session_id)
+    if (dispatch?.release) {
+      console.log(`[ChannelHost] complete_dispatch: releasing session_id=${params.session_id}`)
+      dispatch.release()
+      this.pendingDispatches.delete(params.session_id)
+    }
+    return { ok: true }
   }
 
   /**
@@ -676,7 +691,9 @@ export class ChannelHost extends ModuleBase {
  * 将 Crabot 策略注入插件配置，覆盖 OpenClaw 插件的默认行为。
  *
  * - requireMention: false — 群消息不需要 @bot。
- *   OpenClaw 默认 true，但 Crabot 的准入控制由 Admin 层统一处理（§8.3/§8.4），
+ * - groupPolicy: 'open' — 接受所有群消息，不做白名单过滤。
+ *   OpenClaw 默认 requireMention=true、groupPolicy='allowlist'，
+ *   但 Crabot 的准入控制由 Admin 层统一处理（§8.3/§8.4），
  *   插件层不应再做二次过滤。
  */
 function injectCrabotPolicy(cfg: unknown): unknown {
@@ -691,6 +708,7 @@ function injectCrabotPolicy(cfg: unknown): unknown {
     injected[key] = {
       ...(channelCfg as Record<string, unknown>),
       requireMention: false,
+      groupPolicy: 'open',
     }
   }
 

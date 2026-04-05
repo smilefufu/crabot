@@ -315,6 +315,8 @@ export interface MsgContext {
   MediaUrls?: string[]
   /** 多媒体 MIME 类型列表 */
   MediaTypes?: string[]
+  /** 是否 @了 bot（由 OpenClaw 插件的 WasMentioned 字段传入） */
+  WasMentioned?: boolean
 }
 
 /**

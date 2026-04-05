@@ -66,6 +66,7 @@ export class DecisionDispatcher {
         return this.handleCreateTask(decision, params, traceCtx)
 
       case 'silent':
+        await this.releaseChannelDispatch(params.channel_id, params.session_id, traceCtx)
         return {}
 
       case 'supplement_task':
@@ -516,5 +517,28 @@ export class DecisionDispatcher {
     }
 
     return { task_id: decision.task_id }
+  }
+
+  /**
+   * 通知 Channel 释放 pending dispatch（silent 等无回复场景）。
+   * Admin Chat 不需要释放（没有 pending dispatch 机制）。
+   */
+  private async releaseChannelDispatch(
+    channelId: ModuleId,
+    sessionId: string,
+    traceCtx?: RpcTraceContext
+  ): Promise<void> {
+    try {
+      const channelPort = await this.getChannelPort(channelId)
+      await this.rpcClient.call(
+        channelPort,
+        'complete_dispatch',
+        { session_id: sessionId },
+        this.moduleId,
+        traceCtx
+      )
+    } catch {
+      // Channel 可能不支持 complete_dispatch（如 admin-web），静默忽略
+    }
   }
 }

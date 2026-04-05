@@ -26,12 +26,14 @@
     "fast-glob": "^3.3.3",
     "js-yaml": "^4.1.1",
     "jsonrepair": "^3.13.3",
+    "sharp": "^0.34.5",
     "vscode-jsonrpc": "^8.2.1",
     "vscode-languageserver-protocol": "^3.17.5"
   },
   "devDependencies": {
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^20.19.37",
+    "@types/sharp": "^0.31.1",
     "@vitest/coverage-v8": "^1.0.0",
     "ts-node": "^10.9.0",
     "typescript": "^5.0.0",

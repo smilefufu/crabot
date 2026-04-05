@@ -56,6 +56,54 @@ const DEFAULT_IMPLEMENTATION: AgentImplementation = {
       used_by: ['worker'],
     },
   ],
+  extra_schema: [
+    {
+      key: 'progress_digest_enabled',
+      title: '启用进度摘要',
+      description: 'Worker 执行任务时定时向用户发送进度汇报',
+      type: 'boolean',
+      default: true,
+    },
+    {
+      key: 'progress_digest_interval_seconds',
+      title: '私聊摘要间隔（秒）',
+      description: '私聊场景下的进度汇报间隔',
+      type: 'number',
+      default: 120,
+    },
+    {
+      key: 'progress_digest_group_interval_seconds',
+      title: '群聊摘要间隔（秒）',
+      description: '群聊场景下的进度汇报间隔',
+      type: 'number',
+      default: 180,
+    },
+    {
+      key: 'progress_digest_mode',
+      title: '摘要模式',
+      description: 'llm: 用 LLM 生成摘要；extract: 直接提取关键句',
+      type: 'select',
+      default: 'llm',
+      options: [
+        { value: 'llm', label: 'LLM 摘要' },
+        { value: 'extract', label: '提取关键句' },
+      ],
+    },
+    {
+      key: 'group_attention_min_ms',
+      title: '群聊最小巡检间隔（ms）',
+      description: 'Agent 刚回复后的最小巡检间隔',
+      type: 'number',
+      default: 5000,
+    },
+    {
+      key: 'group_attention_max_ms',
+      title: '群聊最大巡检间隔（ms）',
+      description: '群聊巡检间隔的上限',
+      type: 'number',
+      default: 300000,
+    },
+  ],
   version: '0.1.0',
   created_at: '2026-01-01T00:00:00.000Z',
   updated_at: '2026-01-01T00:00:00.000Z',
@@ -410,7 +458,7 @@ export class AgentManager {
       ...(params.skill_ids !== undefined && { skill_ids: params.skill_ids }),
       ...(params.max_iterations !== undefined && { max_iterations: params.max_iterations }),
       ...(params.tools_readonly !== undefined && { tools_readonly: params.tools_readonly }),
-      ...(params.progress_digest !== undefined && { progress_digest: params.progress_digest }),
+      ...(params.extra !== undefined && { extra: params.extra }),
     }
 
     this.configs.set(params.instance_id, updated)
@@ -535,9 +583,22 @@ export class AgentManager {
   }
 
   private async ensureDefaults(): Promise<void> {
-    // 确保默认实现存在
-    if (!this.implementations.has('default')) {
+    // 确保默认实现存在，且内置实现的 model_roles 始终与代码同步
+    const existingImpl = this.implementations.get('default')
+    if (!existingImpl) {
       this.implementations.set('default', DEFAULT_IMPLEMENTATION)
+      await this.saveImplementations()
+    } else if (existingImpl.type === 'builtin') {
+      // 内置实现的 model_roles/supported_roles/model_format 由代码定义，启动时强制同步
+      const updated = {
+        ...existingImpl,
+        model_roles: DEFAULT_IMPLEMENTATION.model_roles,
+        extra_schema: DEFAULT_IMPLEMENTATION.extra_schema,
+        supported_roles: DEFAULT_IMPLEMENTATION.supported_roles,
+        model_format: DEFAULT_IMPLEMENTATION.model_format,
+        updated_at: new Date().toISOString(),
+      }
+      this.implementations.set('default', updated)
       await this.saveImplementations()
     }
 
