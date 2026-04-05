@@ -54,5 +54,5 @@ export type { ForkEngineParams, ForkEngineResult, SubAgentToolConfig } from './s
 export { getAllBuiltinTools, getConfiguredBuiltinTools } from './tools/index'
 
 // --- Progress Digest ---
-export { ProgressDigest, DIGEST_SYSTEM_PROMPT } from './progress-digest'
-export type { ProgressDigestConfig, ProgressDigestDeps, DigestBuffer } from './progress-digest'
+export { ProgressDigest } from './progress-digest'
+export type { ProgressDigestConfig, ProgressDigestDeps } from './progress-digest'

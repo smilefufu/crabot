@@ -1,379 +1,348 @@
-import type { EngineTurnEvent, EngineMessage } from './types'
-import { createUserMessage } from './types'
 import type { LLMAdapter } from './llm-adapter'
-import { callNonStreaming } from './llm-adapter'
+import type { EngineTurnEvent } from './types'
 
 // --- Tool Classification ---
 
-/** Tools that get detailed summaries (name + brief description of what they did) */
+/** 高价值工具：列出具体操作 */
 const DETAILED_TOOLS = new Set([
   'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Skill',
 ])
 
-/** Regex matching internal/trivial Bash commands that should be ignored */
-const INTERNAL_BASH_RE = /^\s*(ls|cat|head|tail|echo|pwd|which|type|env|set|export|cd|mkdir|rm|cp|mv|chmod|chown|stat|file|wc|sort|uniq|diff|patch|touch|true|false|exit|sleep|date|uname|whoami|id|groups|hostname|printenv|test|:\s*$)/
+/** Bash 内部命令，完全忽略 */
+const INTERNAL_BASH_RE = /^(ls|file|cat|head|tail|wc|echo|sleep|pwd|cd|which|type|test|stat|du|df|find|xargs|sort|uniq|tr|cut|awk|sed)\b/
 
-/** Tool name prefixes/patterns that should only be counted (not detailed) */
-const SILENT_TOOL_CATEGORIES: ReadonlyArray<RegExp> = [
-  /^computer_use/,
-  /^computer-use/,
-  /^send_message/,
-  /^send-message/,
-  /^memory_/,
-  /^memory-/,
+/** 静默计数的工具前缀 → 分类名 */
+const SILENT_TOOL_CATEGORIES: ReadonlyArray<{ readonly prefix: string; readonly label: string }> = [
+  { prefix: 'mcp__computer-use__', label: '浏览器操作' },
+  { prefix: 'mcp__crab-messaging__', label: '消息操作' },
+  { prefix: 'mcp__crab-memory__', label: '记忆操作' },
 ]
 
-// --- Interfaces ---
+// --- Config & Deps ---
 
 export interface ProgressDigestConfig {
-  /** Flush interval in milliseconds (default: 3 minutes) */
-  readonly flushIntervalMs: number
-  /** Model ID to use for digest generation (lightweight model) */
-  readonly digestModel: string
-  /** Max tokens for digest response */
-  readonly maxTokens: number
-  /** If true, use extract mode (no LLM call, just extract first sentences) */
-  readonly extractMode: boolean
+  /** 摘要间隔毫秒（默认 120000） */
+  readonly intervalMs: number
+  /** 摘要模式 */
+  readonly mode: 'llm' | 'extract'
+  /** 是否为 master 私聊（决定是否脱敏） */
+  readonly isMasterPrivate: boolean
 }
 
 export interface ProgressDigestDeps {
-  readonly adapter: LLMAdapter
-  /** Chat history at start of task (for context) */
-  readonly chatHistory: ReadonlyArray<EngineMessage>
-  /** Callback to emit digest message to the caller */
-  readonly onDigest: (message: string) => void
+  /** 发送消息给用户 */
+  readonly sendToUser: (text: string) => Promise<void>
+  /** 获取近期对话记录 */
+  readonly getChatHistory: (limit: number) => Promise<string[]>
+  /** digest 模型的 LLM adapter（仅 llm 模式需要） */
+  readonly digestAdapter?: LLMAdapter
+  /** digest 模型 ID */
+  readonly digestModelId?: string
 }
 
-// --- Buffer ---
+// --- Buffer Types ---
 
-interface BufferedTurn {
-  readonly turnNumber: number
-  readonly assistantText: string
-  readonly toolCalls: ReadonlyArray<{
-    readonly name: string
-    readonly input: Record<string, unknown>
-    readonly output: string
-    readonly isError: boolean
-  }>
+interface ToolSummary {
+  readonly name: string
+  readonly detail: string
 }
 
-export type DigestBuffer = ReadonlyArray<BufferedTurn>
+interface DigestBuffer {
+  /** LLM 思考文本片段 */
+  readonly texts: readonly string[]
+  /** 详细工具操作 */
+  readonly detailedTools: readonly ToolSummary[]
+  /** 静默工具计数 */
+  readonly silentCounts: Readonly<Record<string, number>>
+  /** 已摄入的 turn 数 */
+  readonly turnCount: number
+}
 
-// --- System Prompt ---
+// --- Class ---
 
-export const DIGEST_SYSTEM_PROMPT = `You are a concise progress reporter for an AI agent task.
-Given a sequence of agent turns with tool calls and results, produce a brief 2-4 sentence summary of what was accomplished.
-Focus on concrete actions and findings, not process. Use past tense. Be specific about file names, commands run, and results found.
-Do NOT include next steps or recommendations. Do NOT say "the agent". Use "I" as subject.`
-
-// --- ProgressDigest Class ---
+const DIGEST_SYSTEM_PROMPT = `你是一个任务执行助手。根据以下执行记录，用1-2句话向用户汇报：你做了什么，现在正在做什么。
+严格基于提供的执行记录事实作答，不要推测、编造或虚构任何未发生的操作或结果。
+如果执行记录不足以判断某件事的结果，就说"正在进行"而不是编造一个结果。
+保持语言简洁自然，像同事汇报工作进度一样。不要使用 markdown 格式。`
 
 export class ProgressDigest {
   private readonly config: ProgressDigestConfig
   private readonly deps: ProgressDigestDeps
-  private buffer: DigestBuffer = []
-  private timer: NodeJS.Timeout | null = null
-  private flushing = false
+  private buffer: DigestBuffer
+  private timer: ReturnType<typeof setInterval> | null = null
+  private digestCount = 0
   private disposed = false
 
   constructor(config: ProgressDigestConfig, deps: ProgressDigestDeps) {
     this.config = config
     this.deps = deps
-    this.scheduleFlush()
+    this.buffer = createEmptyBuffer()
+    this.startTimer()
   }
 
-  /** Synchronously ingest a turn event into the buffer. Never blocks. */
+  /** 接收 turn 事件，纯同步写入缓冲区 */
   ingest(event: EngineTurnEvent): void {
     if (this.disposed) return
 
-    const buffered: BufferedTurn = {
-      turnNumber: event.turnNumber,
-      assistantText: event.assistantText,
-      toolCalls: event.toolCalls.map((tc) => ({
-        name: tc.name,
-        input: tc.input,
-        output: tc.output,
-        isError: tc.isError,
-      })),
+    // 收集思考文本
+    const trimmed = event.assistantText.trim()
+    if (trimmed.length > 0) {
+      this.buffer = { ...this.buffer, texts: [...this.buffer.texts, trimmed] }
     }
 
-    this.buffer = [...this.buffer, buffered]
+    // 分类工具调用
+    let { detailedTools, silentCounts } = this.buffer
+    for (const tc of event.toolCalls) {
+      const classification = classifyTool(tc.name, tc.input)
+      if (classification.type === 'detailed') {
+        const detail = summarizeDetailedTool(tc.name, tc.input, this.config.isMasterPrivate)
+        if (detail !== null) {
+          detailedTools = [...detailedTools, { name: tc.name, detail }]
+        }
+      } else if (classification.type === 'silent') {
+        silentCounts = { ...silentCounts, [classification.category]: (silentCounts[classification.category] ?? 0) + 1 }
+      }
+    }
+    this.buffer = { ...this.buffer, detailedTools, silentCounts, turnCount: this.buffer.turnCount + 1 }
 
-    // Immediate flush on ask_human or errors
-    const hasAskHuman = event.toolCalls.some((tc) => tc.name === 'ask_human')
-    const hasErrors = event.toolCalls.some((tc) => tc.isError)
-
-    if (hasAskHuman || hasErrors) {
-      void this.doFlush()
+    // 即时告警检测
+    for (const tc of event.toolCalls) {
+      if (tc.name === 'mcp__crabot-worker__ask_human' || tc.isError) {
+        this.flushNow()
+        return
+      }
     }
   }
 
-  /** Force an immediate flush (fire-and-forget). */
+  /** 立即触发 flush（用于即时告警），异步不阻塞 */
   flushNow(): void {
-    void this.doFlush()
+    if (this.disposed) return
+    this.doFlush().catch(() => {})
   }
 
-  /** Cancel the timer and discard the buffer. Call when engine ends. */
+  /** Engine 结束时调用：取消定时器，丢弃缓冲区 */
   dispose(): void {
     this.disposed = true
     if (this.timer !== null) {
-      clearTimeout(this.timer)
+      clearInterval(this.timer)
       this.timer = null
     }
-    this.buffer = []
+    this.buffer = createEmptyBuffer()
   }
 
-  private scheduleFlush(): void {
-    if (this.disposed) return
-    this.timer = setTimeout(() => {
-      void this.doFlush()
-    }, this.config.flushIntervalMs)
+  // --- Private Methods ---
+
+  private startTimer(): void {
+    this.timer = setInterval(() => {
+      this.doFlush().catch(() => {})
+    }, this.config.intervalMs)
   }
 
   private async doFlush(): Promise<void> {
-    if (this.flushing || this.disposed) return
-    if (this.buffer.length === 0) {
-      if (!this.disposed) this.scheduleFlush()
-      return
-    }
+    if (isBufferEmpty(this.buffer)) return
 
-    this.flushing = true
     const snapshot = this.buffer
-    this.buffer = []
-
-    // Cancel current timer; reschedule after flush
-    if (this.timer !== null) {
-      clearTimeout(this.timer)
-      this.timer = null
-    }
+    this.buffer = createEmptyBuffer()
 
     try {
-      let digest: string
+      const message = this.config.mode === 'llm'
+        ? await this.generateLlmDigest(snapshot)
+        : generateExtractDigest(snapshot)
 
-      if (this.config.extractMode) {
-        digest = this.generateExtractDigest(snapshot)
-      } else {
-        digest = await this.generateLlmDigest(snapshot)
+      if (message.length > 0) {
+        await this.deps.sendToUser(message)
+        this.digestCount++
       }
-
-      if (digest.trim().length > 0) {
-        this.deps.onDigest(digest)
-      }
-    } catch (error) {
-      // Fallback to extract mode on LLM failure
+    } catch {
+      // LLM 失败时回退到 extract 模式
       try {
-        const fallback = this.generateExtractDigest(snapshot)
-        if (fallback.trim().length > 0) {
-          this.deps.onDigest(fallback)
+        const fallback = generateExtractDigest(snapshot)
+        if (fallback.length > 0) {
+          await this.deps.sendToUser(fallback)
+          this.digestCount++
         }
       } catch {
-        // Silently discard if even fallback fails
-      }
-    } finally {
-      this.flushing = false
-      if (!this.disposed) {
-        this.scheduleFlush()
+        // Fire-and-forget: swallow errors silently
       }
     }
   }
 
-  private async generateLlmDigest(turns: DigestBuffer): Promise<string> {
-    const executionRecord = this.formatTurnsAsRecord(turns)
-    const historyContext = this.deps.chatHistory
-      .slice(-4) // Last 4 messages for context
-      .map((m) => {
-        if (m.role === 'user' && 'content' in m) {
-          const content = typeof m.content === 'string' ? m.content : '[media]'
-          return `User: ${content}`
-        }
-        return ''
-      })
-      .filter(Boolean)
-      .join('\n')
+  private async generateLlmDigest(snapshot: DigestBuffer): Promise<string> {
+    const { digestAdapter, digestModelId } = this.deps
+    if (!digestAdapter || !digestModelId) {
+      return generateExtractDigest(snapshot)
+    }
 
-    const userContent = [
-      historyContext ? `Recent conversation:\n${historyContext}\n` : '',
-      `Execution record:\n${executionRecord}`,
-      '\nPlease summarize what was accomplished in these turns.',
-    ]
-      .filter(Boolean)
-      .join('\n')
+    // Fetch chat history for context
+    const historyLimit = this.digestCount + 10
+    let chatHistory: string[] = []
+    try {
+      chatHistory = await this.deps.getChatHistory(historyLimit)
+    } catch {
+      // Continue without history
+    }
 
-    const response = await callNonStreaming(this.deps.adapter, {
-      messages: [createUserMessage(userContent)],
+    const toolSection = formatToolSection(snapshot)
+
+    const userMessage = [
+      chatHistory.length > 0 ? `## 近期对话记录\n${chatHistory.join('\n')}` : '',
+      '## 本轮执行记录',
+      snapshot.texts.length > 0 ? `### 思考文本\n${snapshot.texts.join('\n---\n')}` : '',
+      toolSection.length > 0 ? `### 操作记录\n${toolSection}` : '',
+    ].filter(s => s.length > 0).join('\n\n')
+
+    const { callNonStreaming } = await import('./llm-adapter.js')
+    const { createUserMessage } = await import('./types.js')
+
+    const response = await callNonStreaming(digestAdapter, {
+      messages: [createUserMessage(userMessage)],
       systemPrompt: DIGEST_SYSTEM_PROMPT,
       tools: [],
-      model: this.config.digestModel,
-      maxTokens: this.config.maxTokens,
+      model: digestModelId,
     })
 
-    const textBlock = response.content.find((b) => b.type === 'text')
-    return textBlock && textBlock.type === 'text' ? textBlock.text.trim() : ''
-  }
+    const llmText = response.content
+      .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+      .map(b => b.text)
+      .join('')
 
-  private generateExtractDigest(turns: DigestBuffer): string {
-    const sentences: string[] = []
-
-    for (const turn of turns) {
-      if (turn.assistantText.trim().length > 0) {
-        const firstSentence = extractFirstSentence(turn.assistantText)
-        if (firstSentence) {
-          sentences.push(firstSentence)
-        }
-      }
+    // Append tool details below LLM summary
+    if (toolSection.length > 0) {
+      return `${llmText}\n\n操作：\n${toolSection}`
     }
-
-    return this.dedupeDetails(sentences).join(' ')
-  }
-
-  private formatTurnsAsRecord(turns: DigestBuffer): string {
-    const sections: string[] = []
-
-    for (const turn of turns) {
-      const parts: string[] = [`Turn ${turn.turnNumber}:`]
-
-      if (turn.assistantText.trim().length > 0) {
-        parts.push(`  Thought: ${turn.assistantText.slice(0, 200)}`)
-      }
-
-      const toolSection = this.formatToolSection(turn.toolCalls)
-      if (toolSection) {
-        parts.push(toolSection)
-      }
-
-      sections.push(parts.join('\n'))
-    }
-
-    return sections.join('\n\n')
-  }
-
-  private formatToolSection(
-    toolCalls: ReadonlyArray<{ name: string; input: Record<string, unknown>; output: string; isError: boolean }>,
-  ): string {
-    if (toolCalls.length === 0) return ''
-
-    const detailed: string[] = []
-    const silentCounts = new Map<string, number>()
-
-    for (const tc of toolCalls) {
-      const classification = this.classifyTool(tc.name, tc.input)
-
-      if (classification === 'ignore') continue
-
-      if (classification === 'silent') {
-        const count = silentCounts.get(tc.name) ?? 0
-        silentCounts.set(tc.name, count + 1)
-        continue
-      }
-
-      // detailed
-      const summary = this.summarizeDetailedTool(tc)
-      if (summary) {
-        detailed.push(`    - ${summary}`)
-      }
-    }
-
-    const lines: string[] = []
-
-    if (detailed.length > 0) {
-      lines.push('  Tools:')
-      lines.push(...detailed)
-    }
-
-    if (silentCounts.size > 0) {
-      const counts = Array.from(silentCounts.entries())
-        .map(([name, count]) => `${name}×${count}`)
-        .join(', ')
-      lines.push(`  Also: ${counts}`)
-    }
-
-    return lines.join('\n')
-  }
-
-  private dedupeDetails(items: string[]): string[] {
-    const seen = new Set<string>()
-    return items.filter((item) => {
-      const normalized = item.toLowerCase().trim()
-      if (seen.has(normalized)) return false
-      seen.add(normalized)
-      return true
-    })
-  }
-
-  private classifyTool(
-    name: string,
-    input: Record<string, unknown>,
-  ): 'detailed' | 'silent' | 'ignore' {
-    // Check silent categories first
-    if (SILENT_TOOL_CATEGORIES.some((re) => re.test(name))) {
-      return 'silent'
-    }
-
-    if (DETAILED_TOOLS.has(name)) {
-      // Special case: ignore trivial Bash commands
-      if (name === 'Bash') {
-        const cmd = String(input['command'] ?? input['cmd'] ?? '')
-        if (INTERNAL_BASH_RE.test(cmd)) {
-          return 'ignore'
-        }
-      }
-      return 'detailed'
-    }
-
-    // Unknown tools: treat as silent
-    return 'silent'
-  }
-
-  private summarizeDetailedTool(tc: {
-    name: string
-    input: Record<string, unknown>
-    output: string
-    isError: boolean
-  }): string {
-    const prefix = tc.isError ? '[ERROR] ' : ''
-
-    switch (tc.name) {
-      case 'Bash': {
-        const cmd = String(tc.input['command'] ?? tc.input['cmd'] ?? '').slice(0, 80)
-        const outputSnippet = tc.output.slice(0, 100).replace(/\n/g, ' ')
-        return `${prefix}Bash: \`${cmd}\` → ${outputSnippet}`
-      }
-      case 'Read': {
-        const path = String(tc.input['file_path'] ?? tc.input['path'] ?? '')
-        return `${prefix}Read: ${path}`
-      }
-      case 'Write': {
-        const path = String(tc.input['file_path'] ?? tc.input['path'] ?? '')
-        return `${prefix}Write: ${path}`
-      }
-      case 'Edit': {
-        const path = String(tc.input['file_path'] ?? tc.input['path'] ?? '')
-        return `${prefix}Edit: ${path}`
-      }
-      case 'Glob': {
-        const pattern = String(tc.input['pattern'] ?? '')
-        return `${prefix}Glob: ${pattern}`
-      }
-      case 'Grep': {
-        const pattern = String(tc.input['pattern'] ?? '')
-        return `${prefix}Grep: ${pattern}`
-      }
-      case 'Skill': {
-        const skill = String(tc.input['skill'] ?? tc.input['name'] ?? '')
-        return `${prefix}Skill: ${skill}`
-      }
-      default: {
-        const summary = JSON.stringify(tc.input).slice(0, 60)
-        return `${prefix}${tc.name}: ${summary}`
-      }
-    }
+    return llmText
   }
 }
 
-// --- Helpers ---
+// --- Pure Functions ---
 
-function extractFirstSentence(text: string): string {
-  const trimmed = text.trim()
-  const match = trimmed.match(/^[^.!?]+[.!?]/)
-  return match ? match[0].trim() : trimmed.split('\n')[0].trim()
+function createEmptyBuffer(): DigestBuffer {
+  return { texts: [], detailedTools: [], silentCounts: {}, turnCount: 0 }
+}
+
+function isBufferEmpty(buffer: DigestBuffer): boolean {
+  return buffer.texts.length === 0
+    && buffer.detailedTools.length === 0
+    && Object.keys(buffer.silentCounts).length === 0
+}
+
+function classifyTool(
+  toolName: string,
+  input: Record<string, unknown>,
+): { type: 'detailed'; detail: string } | { type: 'silent'; category: string } | { type: 'ignore' } {
+  // Check silent categories first
+  for (const cat of SILENT_TOOL_CATEGORIES) {
+    if (toolName.startsWith(cat.prefix)) {
+      return { type: 'silent', category: cat.label }
+    }
+  }
+
+  // Check detailed tools
+  if (DETAILED_TOOLS.has(toolName)) {
+    // Special case: ignore trivial Bash commands
+    if (toolName === 'Bash') {
+      const cmd = ((input.command as string) ?? '').trim()
+      if (INTERNAL_BASH_RE.test(cmd)) return { type: 'ignore' }
+    }
+    return { type: 'detailed', detail: toolName }
+  }
+
+  // Unknown tools → silent with tool name as category
+  return { type: 'silent', category: toolName }
+}
+
+function summarizeDetailedTool(
+  toolName: string,
+  input: Record<string, unknown>,
+  isMasterPrivate: boolean,
+): string | null {
+  switch (toolName) {
+    case 'Bash': {
+      const cmd = ((input.command as string) ?? '').trim()
+      if (INTERNAL_BASH_RE.test(cmd)) return null
+      if (isMasterPrivate) return `> ${cmd.slice(0, 120)}`
+      // 脱敏：绝对路径替换为 basename
+      const sanitized = cmd.replace(/(?:\/[\w.-]+)+/g, (match) => {
+        const segments = match.split('/')
+        return segments[segments.length - 1]
+      })
+      return `> ${sanitized.slice(0, 120)}`
+    }
+    case 'Read':
+      return `读取 ${isMasterPrivate ? (input.file_path ?? '文件') : basenameOf(input.file_path)}`
+    case 'Write':
+      return `写入 ${isMasterPrivate ? (input.file_path ?? '文件') : basenameOf(input.file_path)}`
+    case 'Edit':
+      return `编辑 ${isMasterPrivate ? (input.file_path ?? '文件') : basenameOf(input.file_path)}`
+    case 'Glob':
+      return `搜索文件 ${input.pattern ?? ''}`
+    case 'Grep':
+      return `搜索 "${((input.pattern as string) ?? '').slice(0, 30)}"`
+    case 'Skill':
+      return '使用技能'
+    default:
+      return toolName
+  }
+}
+
+function basenameOf(filePath: unknown): string {
+  if (typeof filePath !== 'string') return '文件'
+  const segments = filePath.split('/')
+  return segments[segments.length - 1] || '文件'
+}
+
+function generateExtractDigest(snapshot: DigestBuffer): string {
+  const parts: string[] = []
+
+  // 取每段文本的第一句话
+  if (snapshot.texts.length > 0) {
+    const firstSentences = snapshot.texts
+      .map(t => {
+        const match = t.match(/^[^。！？\n.!?]+[。！？.!?]?/)
+        return match ? match[0] : t.slice(0, 80)
+      })
+      .join('；')
+    parts.push(firstSentences.slice(0, 150))
+  }
+
+  const toolSection = formatToolSection(snapshot)
+  if (toolSection.length > 0) {
+    parts.push(`\n操作：\n${toolSection}`)
+  }
+
+  return parts.join('\n')
+}
+
+function formatToolSection(snapshot: DigestBuffer): string {
+  const lines: string[] = []
+
+  // Detailed tools: dedupe consecutive identical entries
+  if (snapshot.detailedTools.length > 0) {
+    lines.push(...dedupeDetails(snapshot.detailedTools))
+  }
+
+  // Silent counts
+  for (const [category, count] of Object.entries(snapshot.silentCounts)) {
+    lines.push(`- ${category} ×${count}`)
+  }
+
+  return lines.join('\n')
+}
+
+function dedupeDetails(tools: readonly ToolSummary[]): string[] {
+  if (tools.length === 0) return []
+  const result: string[] = []
+  let current = tools[0].detail
+  let count = 1
+  for (let i = 1; i < tools.length; i++) {
+    if (tools[i].detail === current) {
+      count++
+    } else {
+      result.push(count > 1 ? `- ${current} ×${count}` : `- ${current}`)
+      current = tools[i].detail
+      count = 1
+    }
+  }
+  result.push(count > 1 ? `- ${current} ×${count}` : `- ${current}`)
+  return result
 }
