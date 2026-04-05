@@ -36,7 +36,10 @@ log_section "构建"
 build_all_modules || exit 1
 build_frontend || exit 1
 
-# 4. Module Manager（前台 exec）
+# 4. macOS 权限预检（computer-use MCP 需要屏幕录制 + 辅助功能权限）
+precheck_macos_permissions
+
+# 5. Module Manager（前台 exec）
 log_section "启动 Crabot"
 _offset="${CRABOT_PORT_OFFSET:-0}"
 _mm_port=$((19000 + _offset))

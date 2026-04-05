@@ -302,7 +302,30 @@ start() {
   # 3. 构建（Admin 跳过，用 tsx --watch 直接跑源码）
   build_all
 
-  # 4. Module Manager（前台 exec，会自动拉起 Memory + Admin + Agent + Vite）
+  # 4. macOS 权限预检（computer-use MCP 需要屏幕录制 + 辅助功能权限）
+  if [ "$(uname -s)" = "Darwin" ]; then
+    local mcp_config="$DATA_DIR/admin/mcp-servers.json"
+    if [ -f "$mcp_config" ] && node -e "
+      const cfg = require('$mcp_config');
+      process.exit(cfg.find(s => s.name === 'computer-use' && s.enabled) ? 0 : 1);
+    " 2>/dev/null; then
+      log_info "检查 computer-use 权限..."
+      local tmp_ss="/tmp/.crabot-permission-check.png"
+      if node -e "try{require('child_process').execFileSync('screencapture',['-x','-t','png','$tmp_ss'],{timeout:5000});process.exit(0)}catch{process.exit(1)}" 2>/dev/null; then
+        log_info "  屏幕录制 ✓"
+      else
+        log_warn "  屏幕录制权限未授予 node — 请在系统弹窗中允许"
+      fi
+      rm -f "$tmp_ss"
+      if node -e "try{require('child_process').execFileSync('osascript',['-e','tell application \"System Events\" to return name of first process'],{timeout:5000});process.exit(0)}catch{process.exit(1)}" 2>/dev/null; then
+        log_info "  辅助功能 ✓"
+      else
+        log_warn "  辅助功能权限未授予 node — 请在系统弹窗中允许"
+      fi
+    fi
+  fi
+
+  # 5. Module Manager（前台 exec，会自动拉起 Memory + Admin + Agent + Vite）
   log_info "启动 Module Manager..."
   cd "$SCRIPT_DIR/crabot-core"
   exec node dist/main.js

@@ -22,6 +22,7 @@ export const ProviderDrawerEdit: React.FC<ProviderDrawerEditProps> = ({
   const [endpoint, setEndpoint] = useState(provider.endpoint)
   const [apiKey, setApiKey] = useState(provider.api_key)
   const [saving, setSaving] = useState(false)
+  const [showApiKey, setShowApiKey] = useState(false)
 
   const llmModels = provider.models.filter(m => m.type === 'llm').map(m => m.model_id)
   const embeddingModels = provider.models.filter(m => m.type === 'embedding').map(m => m.model_id)
@@ -88,7 +89,38 @@ export const ProviderDrawerEdit: React.FC<ProviderDrawerEditProps> = ({
 
         <Input label="端点" value={endpoint} onChange={e => setEndpoint(e.target.value)} required />
 
-        <Input type="password" label="API Key" value={apiKey} onChange={e => setApiKey(e.target.value)} required />
+        <div className="form-group">
+          <label className="form-label">API Key</label>
+          <div style={{ position: 'relative' }}>
+            <input
+              className="input"
+              type={showApiKey ? 'text' : 'password'}
+              value={apiKey}
+              onChange={e => setApiKey(e.target.value)}
+              required
+              style={{ paddingRight: '2.5rem' }}
+            />
+            <button
+              type="button"
+              onClick={() => setShowApiKey(prev => !prev)}
+              style={{
+                position: 'absolute',
+                right: '0.5rem',
+                top: '50%',
+                transform: 'translateY(-50%)',
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                padding: '0.25rem',
+                color: 'var(--text-secondary)',
+                fontSize: '0.85rem',
+              }}
+              title={showApiKey ? '隐藏' : '显示'}
+            >
+              {showApiKey ? '隐藏' : '显示'}
+            </button>
+          </div>
+        </div>
 
         {provider.type === 'manual' && (
           <>

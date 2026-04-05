@@ -312,6 +312,70 @@ build_frontend() {
   log_info "前端构建完成"
 }
 
+# ── macOS 权限预检 ──────────────────────────────────────
+
+# computer-use MCP 需要 macOS 的「屏幕录制」和「辅助功能」权限。
+# 权限绑定到 node 二进制，必须通过 node 触发弹窗。
+# 此函数在启动时预检，避免运行时首次调用工具才弹窗。
+precheck_macos_permissions() {
+  [ "$(detect_os)" = "macos" ] || return 0
+
+  # 检查 computer-use 是否启用
+  local mcp_config="$DATA_DIR/admin/mcp-servers.json"
+  if [ ! -f "$mcp_config" ]; then
+    return 0
+  fi
+  if ! node -e "
+    const cfg = require('$mcp_config');
+    const cu = cfg.find(s => s.name === 'computer-use' && s.enabled);
+    process.exit(cu ? 0 : 1);
+  " 2>/dev/null; then
+    return 0
+  fi
+
+  log_info "检查 computer-use 权限..."
+
+  local tmp_screenshot="/tmp/.crabot-permission-check.png"
+  local need_grant=false
+
+  # 1. 屏幕录制权限：通过 node 调用 screencapture
+  if ! node -e "
+    const { execFileSync } = require('child_process');
+    try {
+      execFileSync('screencapture', ['-x', '-t', 'png', '$tmp_screenshot'], { timeout: 5000 });
+      process.exit(0);
+    } catch { process.exit(1); }
+  " 2>/dev/null; then
+    need_grant=true
+    log_warn "屏幕录制权限未授予 node ($(which node))"
+    log_warn "  请在弹出的系统对话框中允许，或前往："
+    log_warn "  系统设置 → 隐私与安全性 → 屏幕录制 → 允许 node"
+  else
+    log_success "屏幕录制权限已就绪"
+  fi
+  rm -f "$tmp_screenshot"
+
+  # 2. 辅助功能权限：通过 node 调用 osascript
+  if ! node -e "
+    const { execFileSync } = require('child_process');
+    try {
+      execFileSync('osascript', ['-e', 'tell application \"System Events\" to return name of first process'], { timeout: 5000 });
+      process.exit(0);
+    } catch { process.exit(1); }
+  " 2>/dev/null; then
+    need_grant=true
+    log_warn "辅助功能权限未授予 node ($(which node))"
+    log_warn "  请在弹出的系统对话框中允许，或前往："
+    log_warn "  系统设置 → 隐私与安全性 → 辅助功能 → 允许 node"
+  else
+    log_success "辅助功能权限已就绪"
+  fi
+
+  if [ "$need_grant" = true ]; then
+    log_warn "授予权限后可能需要重启终端或重新运行 ./crabot start"
+  fi
+}
+
 # ── 进程管理 ──────────────────────────────────────────────
 
 stop_all_services() {

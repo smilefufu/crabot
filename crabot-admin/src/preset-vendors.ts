@@ -47,6 +47,17 @@ const DASHSCOPE_MODELS: ModelInfo[] = [
   { model_id: 'text-embedding-v1', display_name: 'Text Embedding v1', type: 'embedding' },
 ]
 
+/**
+ * 百炼 Coding Plan 静态模型列表
+ * 百炼 Coding Plan 提供 Anthropic 兼容接口，不支持 GET /models
+ */
+const DASHSCOPE_CODING_MODELS: ModelInfo[] = [
+  { model_id: 'qwen3.5-plus', display_name: 'Qwen3.5 Plus', type: 'llm', supports_vision: true, context_window: 131072 },
+  { model_id: 'kimi-k2.5', display_name: 'Kimi K2.5', type: 'llm', supports_vision: true, context_window: 131072 },
+  { model_id: 'glm-5', display_name: 'GLM-5', type: 'llm', supports_vision: false, context_window: 131072 },
+  { model_id: 'MiniMax-M2.5', display_name: 'MiniMax M2.5', type: 'llm', supports_vision: false, context_window: 131072 },
+]
+
 export const PRESET_VENDORS: readonly PresetVendor[] = [
   {
     id: 'ollama',
@@ -84,6 +95,15 @@ export const PRESET_VENDORS: readonly PresetVendor[] = [
     docs_url: 'https://help.aliyun.com/zh/model-studio/',
     api_key_help_url: 'https://bailian.console.aliyun.com/?apiKey=1',
     default_models: DASHSCOPE_MODELS,
+  },
+  {
+    id: 'dashscope-coding',
+    name: '百炼 Coding Plan',
+    format: 'anthropic',
+    endpoint: 'https://coding.dashscope.aliyuncs.com/apps/anthropic',
+    docs_url: 'https://help.aliyun.com/zh/model-studio/',
+    api_key_help_url: 'https://bailian.console.aliyun.com/?apiKey=1',
+    default_models: DASHSCOPE_CODING_MODELS,
   },
   {
     id: 'zhipu',
