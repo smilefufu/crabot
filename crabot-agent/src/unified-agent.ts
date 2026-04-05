@@ -65,6 +65,8 @@ export class UnifiedAgent extends ModuleBase {
   private roles: Set<'front' | 'worker'> = new Set()
   /** SDK 环境配置（Worker 专用） */
   private sdkEnvWorker?: SdkEnvConfig
+  /** SDK 环境配置（Digest 摘要模型） */
+  private digestSdkEnv?: SdkEnvConfig
   /** Worker sandbox 路径映射（每次 executeTask 时更新） */
   private sandboxPathMappingsRef: { current: PathMapping[] } = { current: [] }
   /** 当前消息处理的记忆权限（Front tool 使用） */
@@ -176,8 +178,10 @@ export class UnifiedAgent extends ModuleBase {
    * 检查 Agent 是否已配置（LLM API key 是否存在）
    */
   isConfigured(): boolean {
-    const defaultModel = this.agentConfig?.model_config?.default
-    return !!(defaultModel && defaultModel.apikey && defaultModel.model_id)
+    const mc = this.agentConfig?.model_config
+    if (!mc) return false
+    // 任意一个 slot 有配置即认为已配置
+    return Object.values(mc).some(m => m && m.apikey && m.model_id)
   }
 
   /**
@@ -207,7 +211,7 @@ export class UnifiedAgent extends ModuleBase {
 
     // 初始化 Front Handler（如果有 front 角色）
     if (this.roles.has('front')) {
-      const frontModelConfig = config.model_config?.fast ?? config.model_config?.default
+      const frontModelConfig = config.model_config?.triage
       if (frontModelConfig) {
         const adapter = createAdapter({
           endpoint: frontModelConfig.endpoint,
@@ -239,7 +243,7 @@ export class UnifiedAgent extends ModuleBase {
 
     // 初始化 Worker Handler（如果有 worker 角色）
     if (this.roles.has('worker')) {
-      const workerModelConfig = config.model_config?.smart ?? config.model_config?.default
+      const workerModelConfig = config.model_config?.worker
       if (workerModelConfig) {
         this.sdkEnvWorker = this.buildSdkEnv(workerModelConfig)
         const workerSdkEnv = this.sdkEnvWorker
@@ -254,6 +258,12 @@ export class UnifiedAgent extends ModuleBase {
           getMemoryPort: () => this.getMemoryPort(),
         }, config.builtin_tool_config, this.mcpConnector)
       }
+    }
+
+    // 解析 digest 模型配置（回退链：digest → triage → worker 的配置）
+    const digestModelConfig = config.model_config?.digest ?? config.model_config?.triage ?? config.model_config?.worker
+    if (digestModelConfig) {
+      this.digestSdkEnv = this.buildSdkEnv(digestModelConfig)
     }
   }
 
@@ -1453,20 +1463,20 @@ ${skillsSection}
       model_format: 'anthropic',
       requirements: [
         {
-          key: 'default',
-          description: '默认执行模型，Front 和 Worker 默认使用',
-          required: true,
-          used_by: ['front', 'worker'],
-        },
-        {
-          key: 'fast',
-          description: '快速响应模型，用于 Front Agent 快速分诊（可选）',
+          key: 'triage',
+          description: '分诊模型，用于 Front Agent 消息意图判断和快速决策（可选）',
           required: false,
           used_by: ['front'],
         },
         {
-          key: 'smart',
-          description: '深度推理模型，用于 Worker Agent 复杂任务（可选）',
+          key: 'worker',
+          description: '执行模型，用于 Worker Agent 执行实际任务（可选）',
+          required: false,
+          used_by: ['worker'],
+        },
+        {
+          key: 'digest',
+          description: '摘要模型，用于生成进度汇报摘要（可选，推荐小型快速模型）',
           required: false,
           used_by: ['worker'],
         },
@@ -1675,7 +1685,7 @@ ${skillsSection}
 
     // 更新 Front Agent
     if (this.roles.has('front')) {
-      const frontConfig = modelConfig.fast ?? modelConfig.default
+      const frontConfig = modelConfig.triage
       if (frontConfig) {
         if (this.frontHandler) {
           this.frontHandler.updateLlmConfig({
@@ -1718,7 +1728,7 @@ ${skillsSection}
 
     // 更新 Worker Agent
     if (this.roles.has('worker')) {
-      const workerConfig = modelConfig.smart ?? modelConfig.default
+      const workerConfig = modelConfig.worker
       if (workerConfig) {
         this.sdkEnvWorker = this.buildSdkEnv(workerConfig)
         const updatedWorkerSdkEnv = this.sdkEnvWorker
@@ -1733,6 +1743,12 @@ ${skillsSection}
         }, this.agentConfig?.builtin_tool_config, this.mcpConnector)
         console.log(`[${this.config.moduleId}] Worker Agent SDK env ${this.workerHandler ? 'updated' : 'created from config push'}`)
       }
+    }
+
+    // 更新 Digest 模型
+    const digestConfig = modelConfig.digest ?? modelConfig.triage ?? modelConfig.worker
+    if (digestConfig) {
+      this.digestSdkEnv = this.buildSdkEnv(digestConfig)
     }
   }
 
