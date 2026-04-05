@@ -14,12 +14,15 @@ import {
   createAdapter,
   defineTool,
   getConfiguredBuiltinTools,
+  ProgressDigest,
 } from '../engine/index.js'
 import type {
   ToolDefinition,
   EngineTurnEvent,
   EngineResult,
   ContentBlock,
+  ProgressDigestConfig,
+  ProgressDigestDeps,
 } from '../engine/index.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod/v4'
@@ -34,6 +37,7 @@ import type {
   TraceCallback,
   SkillConfig,
   BuiltinToolConfig,
+  ProgressDigestSettings,
 } from '../types.js'
 import type { RpcClient } from '../core/module-base.js'
 import { createCrabMemoryServer } from '../mcp/crab-memory.js'
@@ -54,6 +58,7 @@ function log(msg: string) {
 export interface WorkerHandlerConfig {
   systemPrompt: string
   longTermPreloadLimit?: number
+  progressDigest?: ProgressDigestSettings
 }
 
 export interface WorkerDeps {
@@ -72,21 +77,6 @@ export interface SdkEnvConfig {
   env: Record<string, string>
 }
 
-/** Human-readable descriptions for tools (used in sanitized progress for non-master sessions) */
-const TOOL_DESCRIPTIONS: Record<string, string> = {
-  'mcp__crab-memory__store_memory': '写入长期记忆',
-  'mcp__crab-memory__search_memory': '搜索记忆',
-  'mcp__crab-memory__get_memory_detail': '查看记忆详情',
-  'Skill': '使用技能',
-}
-
-/** Bash commands that are internal utilities — not worth reporting as progress */
-const INTERNAL_BASH_RE = /^(ls|file|cat|head|tail|wc|echo|sleep|pwd|cd|which|type|test|stat|du|df|find|xargs|sort|uniq|tr|cut|awk|sed)\b/
-
-/** Tool prefixes that are internal agent workflow — never reported as progress */
-const INTERNAL_TOOL_PREFIXES = [
-  'mcp__crab-messaging__',
-]
 
 // ============================================================================
 // MCP Server → ToolDefinition conversion
@@ -214,6 +204,8 @@ export class WorkerHandler {
   private deps?: WorkerDeps
   private builtinToolConfig?: BuiltinToolConfig
   private mcpConnector?: McpConnector
+  private progressDigestSettings?: ProgressDigestSettings
+  private digestSdkEnv?: SdkEnvConfig
 
   constructor(
     sdkEnv: SdkEnvConfig,
@@ -222,6 +214,7 @@ export class WorkerHandler {
     deps?: WorkerDeps,
     builtinToolConfig?: BuiltinToolConfig,
     mcpConnector?: McpConnector,
+    digestSdkEnv?: SdkEnvConfig,
   ) {
     this.sdkEnv = sdkEnv
     this.mcpConfigFactory = mcpConfigFactory
@@ -230,6 +223,8 @@ export class WorkerHandler {
     this.longTermPreloadLimit = config.longTermPreloadLimit ?? 20
     this.builtinToolConfig = builtinToolConfig
     this.mcpConnector = mcpConnector
+    this.progressDigestSettings = config.progressDigest
+    this.digestSdkEnv = digestSdkEnv
   }
 
   async executeTask(
@@ -353,9 +348,7 @@ export class WorkerHandler {
         && context.task_origin?.session_type === 'private'
 
       let loopSpanId: string | undefined
-      const pendingToolCalls: string[] = []
       const taskOrigin = context.task_origin
-      let lastSentText = ''
 
       // Start loop span
       loopSpanId = traceCallback?.onLoopStart('worker', {
@@ -363,6 +356,57 @@ export class WorkerHandler {
         model: this.sdkEnv.modelId,
         tools: tools.map(t => t.name),
       })
+
+      // 创建 ProgressDigest
+      let digest: ProgressDigest | undefined
+      if (taskOrigin && this.deps) {
+        const digestSettings = this.progressDigestSettings ?? {}
+        const isEnabled = digestSettings.enabled !== false
+
+        if (isEnabled) {
+          const intervalMs = isMasterPrivate
+            ? (digestSettings.interval_seconds ?? 120) * 1000
+            : (digestSettings.group_interval_seconds ?? digestSettings.interval_seconds ?? 180) * 1000
+
+          const digestAdapter = this.digestSdkEnv
+            ? createAdapter({
+                endpoint: this.digestSdkEnv.env.ANTHROPIC_BASE_URL ?? '',
+                apikey: this.digestSdkEnv.env.ANTHROPIC_API_KEY ?? '',
+                format: this.digestSdkEnv.format,
+              })
+            : undefined
+
+          const digestConfig: ProgressDigestConfig = {
+            intervalMs,
+            mode: digestSettings.mode ?? 'llm',
+            isMasterPrivate,
+          }
+
+          const deps = this.deps
+          const digestDeps: ProgressDigestDeps = {
+            sendToUser: (text: string) => this.sendToUser(taskOrigin, text),
+            getChatHistory: async (limit: number) => {
+              try {
+                const channelPort = await deps.resolveChannelPort(taskOrigin.channel_id)
+                const result = await deps.rpcClient.call<
+                  { session_id: string; limit: number },
+                  { items: Array<{ sender_name: string; content: string }> }
+                >(channelPort, 'get_history', {
+                  session_id: taskOrigin.session_id,
+                  limit,
+                }, deps.moduleId)
+                return (result.items ?? []).map(m => `${m.sender_name}: ${m.content}`)
+              } catch {
+                return []
+              }
+            },
+            digestAdapter,
+            digestModelId: this.digestSdkEnv?.modelId,
+          }
+
+          digest = new ProgressDigest(digestConfig, digestDeps)
+        }
+      }
 
       // 7. Run engine
       const engineResult = await runEngine({
@@ -383,20 +427,11 @@ export class WorkerHandler {
               : `(turn ${event.turnNumber})`
             const llmSpanId = traceCallback?.onLlmCallStart(event.turnNumber, inputSummary)
 
-            // Compute tool summaries
-            const turnToolSummaries: string[] = []
+            // Trace: tool calls
             const perToolMs = event.toolCalls.length > 0
               ? Math.round((event.toolExecutionMs ?? 0) / event.toolCalls.length)
               : 0
             for (const tc of event.toolCalls) {
-              const summary = isMasterPrivate
-                ? this.summarizeToolCall(tc.name, tc.input)
-                : this.summarizeToolCallSanitized(tc.name, tc.input)
-              if (summary !== null) {
-                turnToolSummaries.push(summary)
-              }
-
-              // Trace: tool call (spread total toolExecutionMs across tools)
               const toolSpanId = traceCallback?.onToolCallStart(
                 tc.name,
                 JSON.stringify(tc.input ?? {}).slice(0, 200),
@@ -418,37 +453,17 @@ export class WorkerHandler {
               })
             }
 
-            // Progress reporting (suppress when pending human messages exist)
-            if (taskOrigin && !humanQueue.hasPending) {
-              const trimmedText = event.assistantText.trim()
-              const hasText = trimmedText.length > 0
-              const hasTools = turnToolSummaries.length > 0
-
-              if (hasText) {
-                if (pendingToolCalls.length > 0) {
-                  this.sendToUser(taskOrigin, this.dedupeToolSummaries(pendingToolCalls.splice(0)).slice(0, 500))
-                }
-                lastSentText = trimmedText
-                this.sendToUser(taskOrigin, trimmedText)
-              }
-
-              if (hasTools) {
-                pendingToolCalls.push(...turnToolSummaries)
-                if (pendingToolCalls.length >= 5) {
-                  this.sendToUser(taskOrigin, this.dedupeToolSummaries(pendingToolCalls.splice(0)).slice(0, 500))
-                }
-              }
-            } else if (humanQueue.hasPending) {
-              // Discard interrupted turn's progress
-              pendingToolCalls.splice(0)
+            // Progress: delegate to ProgressDigest
+            if (digest && !humanQueue.hasPending) {
+              digest.ingest(event)
             }
           },
         },
       })
 
-      // Flush remaining pending tool calls
-      if (taskOrigin && pendingToolCalls.length > 0 && !humanQueue.hasPending) {
-        await this.sendToUser(taskOrigin, this.dedupeToolSummaries(pendingToolCalls.splice(0)).slice(0, 500))
+      // Dispose ProgressDigest: cancel timer, discard buffer (final_reply covers the rest)
+      if (digest) {
+        digest.dispose()
       }
 
       // End loop span
@@ -456,10 +471,16 @@ export class WorkerHandler {
       if (loopSpanId) {
         traceCallback?.onLoopEnd(loopSpanId, isError ? 'failed' : 'completed', engineResult.totalTurns)
       }
+      if (engineResult.error) {
+        log(`Engine error (outcome=${engineResult.outcome}, turns=${engineResult.totalTurns}): ${engineResult.error}`)
+      }
 
       // 8. Summarize if finalText is empty or the default placeholder
+      // For failed outcomes, use the engine error as the summary instead of generating an optimistic one
       let finalEngineResult = engineResult
-      if (!engineResult.finalText || engineResult.finalText === '任务已完成，但模型未生成输出') {
+      if (isError && engineResult.error) {
+        finalEngineResult = { ...engineResult, finalText: `执行失败 (${engineResult.totalTurns}轮后): ${engineResult.error}` }
+      } else if (!engineResult.finalText || engineResult.finalText === '任务已完成，但模型未生成输出') {
         const summary = await this.summarizeTaskOutcome(
           task.task_title,
           engineResult.totalTurns,
@@ -470,7 +491,7 @@ export class WorkerHandler {
       }
 
       // 9. Map EngineResult → ExecuteTaskResult
-      return this.mapEngineResult(task.task_id, finalEngineResult, !!taskOrigin && !!this.deps, lastSentText)
+      return this.mapEngineResult(task.task_id, finalEngineResult)
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
@@ -535,8 +556,6 @@ export class WorkerHandler {
   private mapEngineResult(
     taskId: TaskId,
     result: EngineResult,
-    hasProgressDeps: boolean,
-    lastSentText?: string,
   ): ExecuteTaskResult {
     const isError = result.outcome === 'failed' || result.outcome === 'aborted'
     const finalText = result.finalText || '任务已完成，但模型未生成输出'
@@ -545,14 +564,11 @@ export class WorkerHandler {
       return { task_id: taskId, outcome: 'failed', summary: '任务被取消' }
     }
 
-    // If final text was already sent as progress, skip final_reply to avoid duplication
-    const alreadySent = !!lastSentText && finalText.trim() === lastSentText.trim()
-
     return {
       task_id: taskId,
       outcome: isError ? 'failed' : 'completed',
       summary: finalText,
-      final_reply: alreadySent ? undefined : { type: 'text', text: finalText },
+      final_reply: { type: 'text', text: finalText },
     }
   }
 
@@ -712,111 +728,7 @@ export class WorkerHandler {
   }
 
   /**
-   * Extract a human-readable summary from a tool call
-   */
-  private summarizeToolCall(toolName: string, input: unknown): string | null {
-    if (INTERNAL_TOOL_PREFIXES.some(p => toolName.startsWith(p))) return null
-    const args = input as Record<string, unknown> | undefined
-    switch (toolName) {
-      case 'Bash': {
-        const cmd = (args?.command as string ?? '').trim()
-        if (INTERNAL_BASH_RE.test(cmd)) return null
-        return `> ${cmd.slice(0, 120)}`
-      }
-      case 'Write':
-        return `写入 ${args?.file_path ?? '文件'}`
-      case 'Edit':
-        return `编辑 ${args?.file_path ?? '文件'}`
-      case 'Read':
-        return `读取 ${args?.file_path ?? '文件'}`
-      case 'Glob':
-        return `搜索文件 ${args?.pattern ?? ''}`
-      case 'Grep':
-        return `搜索 "${(args?.pattern as string ?? '').slice(0, 30)}" in ${args?.path ?? '.'}`
-      case 'mcp__crabot-worker__ask_human': {
-        const question = (args?.question as string) ?? ''
-        return question || null
-      }
-      case 'mcp__computer-use__screenshot': return '正在截图...'
-      case 'mcp__computer-use__mouse_click': return '正在点击...'
-      case 'mcp__computer-use__keyboard_type': return '正在输入...'
-      case 'mcp__computer-use__keyboard_key': return '正在操作...'
-      default:
-        return toolName
-    }
-  }
-
-  /**
-   * Sanitized tool summary for non-master sessions.
-   * Strips file paths to basename, sanitizes Bash commands, skips unknown tools.
-   * Returns null to indicate the tool should be omitted from progress.
-   */
-  private summarizeToolCallSanitized(toolName: string, input: unknown): string | null {
-    if (INTERNAL_TOOL_PREFIXES.some(p => toolName.startsWith(p))) return null
-    const args = input as Record<string, unknown> | undefined
-    switch (toolName) {
-      case 'Bash': {
-        const cmd = (args?.command as string ?? '').trim()
-        if (INTERNAL_BASH_RE.test(cmd)) return null
-        const sanitized = cmd.replace(/(?:\/[\w.-]+)+/g, (match) => {
-          const segments = match.split('/')
-          return segments[segments.length - 1]
-        })
-        return `> ${sanitized.slice(0, 120)}`
-      }
-      case 'Write':
-        return `写入 ${this.basenameOf(args?.file_path)}`
-      case 'Edit':
-        return `编辑 ${this.basenameOf(args?.file_path)}`
-      case 'Read':
-        return `读取 ${this.basenameOf(args?.file_path)}`
-      case 'Glob':
-        return `搜索文件 ${args?.pattern ?? ''}`
-      case 'Grep':
-        return `搜索 "${(args?.pattern as string ?? '').slice(0, 30)}"`
-      case 'mcp__crabot-worker__ask_human': {
-        const question = (args?.question as string) ?? ''
-        return question || null
-      }
-      case 'mcp__computer-use__screenshot': return '正在截图...'
-      case 'mcp__computer-use__mouse_click': return '正在点击...'
-      case 'mcp__computer-use__keyboard_type': return '正在输入...'
-      case 'mcp__computer-use__keyboard_key': return '正在操作...'
-      default:
-        return TOOL_DESCRIPTIONS[toolName] ?? null
-    }
-  }
-
-  /**
-   * Deduplicate consecutive identical tool summaries, appending ×N for runs > 1.
-   * e.g. ["编辑 A.tsx", "编辑 A.tsx", "编辑 B.tsx"] → "编辑 A.tsx ×2\n编辑 B.tsx"
-   */
-  private dedupeToolSummaries(summaries: string[]): string {
-    if (summaries.length === 0) return ''
-    const result: string[] = []
-    let current = summaries[0]
-    let count = 1
-    for (let i = 1; i < summaries.length; i++) {
-      if (summaries[i] === current) {
-        count++
-      } else {
-        result.push(count > 1 ? `${current} ×${count}` : current)
-        current = summaries[i]
-        count = 1
-      }
-    }
-    result.push(count > 1 ? `${current} ×${count}` : current)
-    return result.join('\n')
-  }
-
-  private basenameOf(filePath: unknown): string {
-    if (typeof filePath !== 'string') return '文件'
-    return path.basename(filePath)
-  }
-
-  /**
    * Send a message to the user during task execution.
-   * No prefix — text is forwarded as-is (agent's natural speech or tool summaries).
    */
   private async sendToUser(
     taskOrigin: TaskOrigin,
