@@ -23,6 +23,28 @@ const EMPTY_FORM: FormData = {
   trigger_phrases: '',
 }
 
+function parseSkillMdFrontmatter(content: string): { name?: string; version?: string; description?: string; trigger_phrases?: string[] } {
+  const match = content.match(/^---\n([\s\S]*?)\n---/)
+  if (!match) return {}
+  const meta: Record<string, string | string[]> = {}
+  for (const line of match[1].split('\n')) {
+    const idx = line.indexOf(':')
+    if (idx < 0) continue
+    const key = line.slice(0, idx).trim()
+    const val = line.slice(idx + 1).trim()
+    if (key === 'trigger_phrases') {
+      try {
+        meta[key] = JSON.parse(val)
+      } catch {
+        meta[key] = val.split(',').map(s => s.trim()).filter(Boolean)
+      }
+    } else {
+      meta[key] = val
+    }
+  }
+  return meta as { name?: string; version?: string; description?: string; trigger_phrases?: string[] }
+}
+
 type CreateTab = 'git' | 'local' | 'upload'
 
 export const SkillList: React.FC = () => {
@@ -80,9 +102,47 @@ export const SkillList: React.FC = () => {
       content: s.content,
       trigger_phrases: (s.trigger_phrases ?? []).join(', '),
     })
-    setCreateTab('local')
     setShowForm(true)
     setPreviewId(null)
+  }
+
+  const handleContentChange = (content: string) => {
+    const parsed = parseSkillMdFrontmatter(content)
+    setForm(prev => ({
+      ...prev,
+      content,
+      ...(parsed.name ? { name: parsed.name } : {}),
+      ...(parsed.version ? { version: parsed.version } : {}),
+      ...(parsed.description ? { description: parsed.description } : {}),
+      ...(parsed.trigger_phrases ? { trigger_phrases: parsed.trigger_phrases.join(', ') } : {}),
+    }))
+  }
+
+  const handleSave = async () => {
+    if (!editingId) return
+    if (!form.name.trim()) { toast.error('名称不能为空'); return }
+    setSaving(true)
+    try {
+      const triggerPhrases = form.trigger_phrases
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean)
+      await skillService.update(editingId, {
+        name: form.name.trim(),
+        description: form.description.trim(),
+        version: form.version.trim(),
+        content: form.content,
+        trigger_phrases: triggerPhrases,
+      })
+      toast.success('保存成功')
+      setShowForm(false)
+      setEditingId(null)
+      await load()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '保存失败')
+    } finally {
+      setSaving(false)
+    }
   }
 
   const handleScanGit = async () => {
@@ -204,13 +264,48 @@ export const SkillList: React.FC = () => {
             {editingId ? '编辑 Skill' : '添加 Skill'}
           </h3>
 
-          {!editingId && (
+          {editingId ? (
+            <div style={{ display: 'grid', gap: '0.75rem' }}>
+              <div>
+                <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem', color: 'var(--text-secondary)' }}>名称</label>
+                <input className="input" value={form.name} onChange={e => setForm(prev => ({ ...prev, name: e.target.value }))} />
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+                <div>
+                  <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem', color: 'var(--text-secondary)' }}>版本</label>
+                  <input className="input" value={form.version} onChange={e => setForm(prev => ({ ...prev, version: e.target.value }))} />
+                </div>
+                <div>
+                  <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem', color: 'var(--text-secondary)' }}>触发词（逗号分隔）</label>
+                  <input className="input" value={form.trigger_phrases} onChange={e => setForm(prev => ({ ...prev, trigger_phrases: e.target.value }))} placeholder="例: 代码审查, review" />
+                </div>
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem', color: 'var(--text-secondary)' }}>描述</label>
+                <input className="input" value={form.description} onChange={e => setForm(prev => ({ ...prev, description: e.target.value }))} />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem', color: 'var(--text-secondary)' }}>内容（Markdown）</label>
+                <textarea
+                  className="input"
+                  value={form.content}
+                  onChange={e => handleContentChange(e.target.value)}
+                  rows={12}
+                  style={{ fontFamily: 'monospace', fontSize: '0.85rem', resize: 'vertical' }}
+                />
+              </div>
+              <div style={{ display: 'flex', gap: '0.75rem' }}>
+                <Button variant="primary" onClick={handleSave} disabled={saving}>{saving ? '保存中...' : '保存'}</Button>
+                <Button variant="secondary" onClick={() => { setShowForm(false); setEditingId(null) }}>取消</Button>
+              </div>
+            </div>
+          ) : (
+            <>
             <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', marginBottom: '1rem', flexWrap: 'wrap' }}>
               <button style={tabStyle(createTab === 'git')} onClick={() => setCreateTab('git')}>从 Git 仓库</button>
               <button style={tabStyle(createTab === 'local')} onClick={() => setCreateTab('local')}>本地路径</button>
               <button style={tabStyle(createTab === 'upload')} onClick={() => setCreateTab('upload')}>上传文件</button>
             </div>
-          )}
 
           {createTab === 'git' && (
             <div style={{ display: 'grid', gap: '0.75rem' }}>
@@ -318,6 +413,8 @@ export const SkillList: React.FC = () => {
                 <Button variant="secondary" onClick={() => setShowForm(false)}>取消</Button>
               </div>
             </div>
+          )}
+          </>
           )}
         </Card>
         </div>
