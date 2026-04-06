@@ -46,6 +46,7 @@ import { McpConnector } from './agent/mcp-connector.js'
 import { createCrabMessagingServer, type PathMapping } from './mcp/crab-messaging.js'
 import { TraceStore } from './core/trace-store.js'
 import { PromptManager } from './prompt-manager.js'
+import { SUBAGENT_DEFINITIONS, type SubAgentDefinition } from './agent/subagent-prompts.js'
 
 export class UnifiedAgent extends ModuleBase {
   // 编排层组件
@@ -264,7 +265,8 @@ export class UnifiedAgent extends ModuleBase {
           moduleId: this.config.moduleId,
           resolveChannelPort: (channelId) => this.getChannelPort(channelId),
           getMemoryPort: () => this.getMemoryPort(),
-        }, config.builtin_tool_config, this.mcpConnector, this.digestSdkEnv)
+        }, config.builtin_tool_config, this.mcpConnector, this.digestSdkEnv,
+          this.buildSubAgentConfigs(config.model_config))
       }
     }
   }
@@ -282,6 +284,17 @@ export class UnifiedAgent extends ModuleBase {
         ANTHROPIC_API_KEY: connInfo.apikey || 'dummy-key',
       },
     }
+  }
+
+  private buildSubAgentConfigs(
+    modelConfig: Record<string, LLMConnectionInfo>
+  ): ReadonlyArray<{ readonly definition: SubAgentDefinition; readonly sdkEnv: SdkEnvConfig }> {
+    return SUBAGENT_DEFINITIONS
+      .filter((def) => modelConfig[def.slotKey] !== undefined)
+      .map((def) => ({
+        definition: def,
+        sdkEnv: this.buildSdkEnv(modelConfig[def.slotKey]),
+      }))
   }
 
   /**
@@ -1778,7 +1791,8 @@ ${skillsSection}
           moduleId: this.config.moduleId,
           resolveChannelPort: (channelId) => this.getChannelPort(channelId),
           getMemoryPort: () => this.getMemoryPort(),
-        }, this.agentConfig?.builtin_tool_config, this.mcpConnector, this.digestSdkEnv)
+        }, this.agentConfig?.builtin_tool_config, this.mcpConnector, this.digestSdkEnv,
+          this.buildSubAgentConfigs(modelConfig))
         console.log(`[${this.config.moduleId}] Worker Agent SDK env ${this.workerHandler ? 'updated' : 'created from config push'}`)
       }
     }
