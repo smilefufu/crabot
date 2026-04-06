@@ -248,10 +248,26 @@ CFGEOF
 # ── Scrapling ─────────────────────────────────────────────
 
 check_scrapling() {
+  local scrapling_required="0.4.4"
   if ! command -v scrapling &>/dev/null; then
-    log_warn "Scrapling 未安装（Browser Use 功能需要）"
-    log_dim "  安装: pip install -i https://pypi.org/simple/ 'scrapling[ai]'"
-    return 1
+    log_info "安装 Scrapling（Browser Use 功能需要）..."
+    uv tool install "scrapling[ai]" -q 2>/dev/null \
+      || pip install -i https://pypi.org/simple/ "scrapling[ai]" -q \
+      || {
+        log_warn "Scrapling 安装失败，Browser Use 功能不可用"
+        return 1
+      }
+    log_info "Scrapling 已安装"
+  fi
+
+  # 检查版本
+  local cur
+  cur=$(pip show scrapling 2>/dev/null | grep Version | awk '{print $2}')
+  if [ -n "$cur" ] && [ "$cur" != "$scrapling_required" ]; then
+    log_warn "Scrapling 版本不匹配 ($cur != $scrapling_required)，重装中..."
+    uv tool install "scrapling[ai]==$scrapling_required" -q 2>/dev/null \
+      || pip install -i https://pypi.org/simple/ "scrapling[ai]==$scrapling_required" -q \
+      || log_warn "Scrapling 重装失败，继续使用当前版本"
   fi
   return 0
 }

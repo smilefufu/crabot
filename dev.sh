@@ -222,10 +222,22 @@ start_litellm() {
 # ── Scrapling ─────────────────────────────────────────────
 
 check_scrapling() {
+  local scrapling_min="0.4.4"
   if ! command -v scrapling &>/dev/null; then
-    log_warn "Scrapling 未安装（Browser Use 功能需要）"
-    log_dim "  安装: pip install -i https://pypi.org/simple/ 'scrapling[ai]'"
-    return 1
+    log_info "安装 Scrapling（Browser Use 功能需要）..."
+    pip install -i https://pypi.org/simple/ "scrapling[ai]" -q || {
+      log_warn "Scrapling 安装失败，Browser Use 功能不可用"
+      return 1
+    }
+    log_info "Scrapling 已安装"
+  fi
+
+  # 检查版本
+  local cur
+  cur=$(pip show scrapling 2>/dev/null | grep Version | awk '{print $2}')
+  if [ -n "$cur" ] && [ "$(printf '%s\n' "$scrapling_min" "$cur" | sort -V | head -1)" != "$scrapling_min" ]; then
+    log_warn "Scrapling 版本过低 ($cur < $scrapling_min)，升级中..."
+    pip install -i https://pypi.org/simple/ -U "scrapling[ai]" -q || log_warn "Scrapling 升级失败，继续使用当前版本"
   fi
   return 0
 }
