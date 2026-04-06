@@ -261,6 +261,9 @@ export class WorkerHandler {
           const skillDir = path.join(skillsDir, skill.id)
           await fs.promises.mkdir(skillDir, { recursive: true })
           await fs.promises.writeFile(path.join(skillDir, 'SKILL.md'), skill.content, 'utf-8')
+          if (skill.skill_dir) {
+            await fs.promises.writeFile(path.join(skillDir, '.skill_dir'), skill.skill_dir, 'utf-8')
+          }
         }
       }
 

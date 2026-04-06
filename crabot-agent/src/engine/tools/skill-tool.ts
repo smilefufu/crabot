@@ -61,7 +61,15 @@ export function createSkillTool(baseDir: string): ToolDefinition {
 
       const content = await readSkillContent(skillsDir, skillInput)
       if (content !== null) {
-        return { output: content, isError: false }
+        const skillDir = join(skillsDir, skillInput)
+        let baseDir = skillDir
+        try {
+          const markerContent = await readFile(join(skillDir, '.skill_dir'), 'utf-8')
+          baseDir = markerContent.trim()
+        } catch {
+          // No marker file, use local directory
+        }
+        return { output: `Base directory for this skill: ${baseDir}\n\n${content}`, isError: false }
       }
 
       const availableHint = ids.length > 0

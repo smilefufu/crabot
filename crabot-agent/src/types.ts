@@ -465,6 +465,7 @@ export interface SkillConfig {
   id: string
   name: string
   content: string
+  skill_dir?: string
 }
 
 export interface AgentRole {
