@@ -256,8 +256,13 @@ export class UnifiedAgent extends ModuleBase {
       if (workerModelConfig) {
         this.sdkEnvWorker = this.buildSdkEnv(workerModelConfig)
         const workerSdkEnv = this.sdkEnvWorker
+        const subAgentConfigs = this.buildSubAgentConfigs(config.model_config)
+        const subAgentHints = subAgentConfigs.map(({ definition }) => ({
+          toolName: definition.toolName,
+          workerHint: definition.workerHint,
+        }))
         this.workerHandler = new WorkerHandler(workerSdkEnv, {
-          systemPrompt: this.promptManager.assembleWorkerPrompt(adminPersonality || undefined),
+          systemPrompt: this.promptManager.assembleWorkerPrompt(adminPersonality || undefined, subAgentHints),
           longTermPreloadLimit: this.orchestrationConfig.worker_long_term_memory_limit,
           extra: this.extra,
         }, createMcpConfigs, {
@@ -266,7 +271,7 @@ export class UnifiedAgent extends ModuleBase {
           resolveChannelPort: (channelId) => this.getChannelPort(channelId),
           getMemoryPort: () => this.getMemoryPort(),
         }, config.builtin_tool_config, this.mcpConnector, this.digestSdkEnv,
-          this.buildSubAgentConfigs(config.model_config))
+          subAgentConfigs)
       }
     }
   }
@@ -1782,8 +1787,13 @@ ${skillsSection}
       if (workerConfig) {
         this.sdkEnvWorker = this.buildSdkEnv(workerConfig)
         const updatedWorkerSdkEnv = this.sdkEnvWorker
+        const subAgentConfigs = this.buildSubAgentConfigs(modelConfig)
+        const subAgentHints = subAgentConfigs.map(({ definition }) => ({
+          toolName: definition.toolName,
+          workerHint: definition.workerHint,
+        }))
         this.workerHandler = new WorkerHandler(updatedWorkerSdkEnv, {
-          systemPrompt: this.promptManager.assembleWorkerPrompt(adminPersonality || undefined),
+          systemPrompt: this.promptManager.assembleWorkerPrompt(adminPersonality || undefined, subAgentHints),
           longTermPreloadLimit: this.orchestrationConfig.worker_long_term_memory_limit,
           extra: this.extra,
         }, createMcpConfigs, {
@@ -1792,7 +1802,7 @@ ${skillsSection}
           resolveChannelPort: (channelId) => this.getChannelPort(channelId),
           getMemoryPort: () => this.getMemoryPort(),
         }, this.agentConfig?.builtin_tool_config, this.mcpConnector, this.digestSdkEnv,
-          this.buildSubAgentConfigs(modelConfig))
+          subAgentConfigs)
         console.log(`[${this.config.moduleId}] Worker Agent SDK env ${this.workerHandler ? 'updated' : 'created from config push'}`)
       }
     }

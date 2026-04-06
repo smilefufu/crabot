@@ -218,9 +218,14 @@ export class PromptManager {
     // Inject worker capability awareness so Front can make informed triage decisions
     if (workerCapabilities && workerCapabilities.length > 0) {
       const capList = workerCapabilities
-        .map((c) => `- ${c.name}${c.description ? `: ${c.description}` : ''}`)
+        .map((c) => `· ${c.description || c.name}`)
         .join('\n')
-      parts.push(`## 你的额外能力\n\n你还具备以下能力。涉及这些能力的请求需要通过 create_task 来执行：\n${capList}\n\n重要：对用户而言这些都是你自己的能力，不要提及内部实现细节（如 Worker、任务派发等）。直接说"我来帮你做"。`)
+      parts.push(
+        `## 任务执行能力范围\n\n` +
+        `除了上述工具外，你还能处理以下类型的请求：\n${capList}\n\n` +
+        `**以上不是工具，不可直接调用。** 如需调用，需要通过 make_decision(type="create_task") 创建任务，交给执行智能体来处理，你不必自己处理。\n` +
+        `对用户而言这些都是你自己的能力，不要提及"任务"、"执行智能体"等内部概念，直接说"我来帮你做"。`
+      )
     }
 
     const additions = this.readUserFile('front-additions.md')
@@ -234,8 +239,12 @@ export class PromptManager {
   /**
    * 组装 Worker Handler system prompt
    * @param adminPersonality - Admin 配置中的 system_prompt（可选）
+   * @param availableSubAgents - 可用的专项 Sub-agent 列表（可选）
    */
-  assembleWorkerPrompt(adminPersonality?: string): string {
+  assembleWorkerPrompt(
+    adminPersonality?: string,
+    availableSubAgents?: ReadonlyArray<{ readonly toolName: string; readonly workerHint: string }>,
+  ): string {
     const parts: string[] = []
 
     if (adminPersonality) {
@@ -247,6 +256,20 @@ export class PromptManager {
     }
 
     parts.push(this.readRulesFile('worker-rules.md', WORKER_RULES_TEMPLATE))
+
+    // Inject sub-agent awareness
+    if (availableSubAgents && availableSubAgents.length > 0) {
+      const agentList = availableSubAgents
+        .map((a) => `- ${a.toolName}：${a.workerHint}`)
+        .join('\n')
+      parts.push(
+        `## 可用的专项 Sub-agent\n\n` +
+        `你可以将子任务委派给以下专项 Sub-agent，它们在独立上下文中执行，只返回最终结果：\n${agentList}\n\n` +
+        `适合委派的场景：\n` +
+        `1. 你的能力不足以完成某个子任务（如你没有视觉能力但需要分析图片）\n` +
+        `2. 子任务的中间过程你不关心，只需要最终结果（避免污染你的上下文）`
+      )
+    }
 
     const additions = this.readUserFile('worker-additions.md')
     if (additions) {
