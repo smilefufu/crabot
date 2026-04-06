@@ -321,6 +321,7 @@ export class MCPServerManager {
       transport: 'stdio'
       command: string
       args: string[]
+      enabled?: boolean
     }> = [
       {
         name: 'computer-use',
@@ -343,6 +344,14 @@ export class MCPServerManager {
         command: 'node',
         args: [path.join(mcpToolsPath, 'dist/git/main.js')],
       },
+      {
+        name: 'scrapling',
+        description: 'Browser Use: web scraping and browser automation via Scrapling',
+        transport: 'stdio',
+        command: 'scrapling',
+        args: ['mcp'],
+        enabled: false,
+      },
     ]
 
     let changed = false
@@ -355,7 +364,7 @@ export class MCPServerManager {
         is_builtin: true,
         is_essential: false,
         can_disable: true,
-        enabled: true,
+        enabled: builtin.enabled ?? true,
         created_at: now,
         updated_at: now,
       }
