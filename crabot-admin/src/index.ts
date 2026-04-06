@@ -421,6 +421,10 @@ export class AdminModule extends ModuleBase {
     // 初始化 Skill 管理器
     await this.skillManager.initialize()
 
+    // 注册内置 Skill（幂等，仅首次启动时写入）
+    const builtinSkillsPath = path.join(__dirname, '..', 'builtins', 'skills')
+    await this.skillManager.registerBuiltins(builtinSkillsPath)
+
     // 初始化必要工具配置管理器
     await this.essentialToolsManager.initialize()
 

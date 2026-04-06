@@ -507,6 +507,62 @@ export class SkillManager {
     await this.save()
   }
 
+  /**
+   * 注册内置 Skill（幂等：已存在同名的不会重复注册）
+   * 在 Admin 初始化时调用，扫描 builtinsDir 下的子目录，每个子目录应包含 SKILL.md
+   */
+  async registerBuiltins(builtinsDir: string): Promise<void> {
+    let dirEntries: import('fs').Dirent[]
+    try {
+      dirEntries = await fs.readdir(builtinsDir, { withFileTypes: true })
+    } catch {
+      // builtinsDir 不存在时静默跳过
+      return
+    }
+
+    const existingNames = new Set(this.list().map(s => s.name))
+    let changed = false
+
+    for (const dirent of dirEntries) {
+      if (!dirent.isDirectory()) continue
+      const skillDir = path.join(builtinsDir, dirent.name)
+      const skillMdPath = path.join(skillDir, 'SKILL.md')
+
+      let content: string
+      try {
+        content = await fs.readFile(skillMdPath, 'utf-8')
+      } catch {
+        continue // 没有 SKILL.md 的子目录跳过
+      }
+
+      const parsed = parseSkillMd(content)
+      if (!parsed.name || existingNames.has(parsed.name)) continue
+
+      const now = generateTimestamp()
+      const entry: SkillRegistryEntry = {
+        id: generateId(),
+        name: parsed.name,
+        description: parsed.description,
+        version: parsed.version,
+        content,
+        skill_dir: skillDir,
+        is_builtin: true,
+        is_essential: false,
+        can_disable: true,
+        enabled: true,
+        created_at: now,
+        updated_at: now,
+      }
+      this.skills.set(entry.id, entry)
+      existingNames.add(parsed.name)
+      changed = true
+    }
+
+    if (changed) {
+      await this.save()
+    }
+  }
+
   /** 将注册表条目转换为 Agent 所需的 SkillConfig 格式 */
   toAgentConfig(entry: SkillRegistryEntry): {
     id: string
