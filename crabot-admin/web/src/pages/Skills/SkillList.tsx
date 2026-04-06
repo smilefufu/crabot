@@ -23,25 +23,7 @@ const EMPTY_FORM: FormData = {
   trigger_phrases: '',
 }
 
-type CreateTab = 'paste' | 'git' | 'local' | 'upload'
-
-function parseSkillMdFrontmatter(content: string): Partial<FormData> {
-  const match = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n/)
-  if (!match) return {}
-  const meta: Record<string, string> = {}
-  for (const line of match[1].split('\n')) {
-    const colonIdx = line.indexOf(':')
-    if (colonIdx === -1) continue
-    const k = line.slice(0, colonIdx).trim()
-    const v = line.slice(colonIdx + 1).trim()
-    if (k) meta[k] = v
-  }
-  return {
-    name: meta['name'] ?? '',
-    description: meta['description'] ?? '',
-    version: meta['version'] ?? '1.0.0',
-  }
-}
+type CreateTab = 'git' | 'local' | 'upload'
 
 export const SkillList: React.FC = () => {
   const toast = useToast()
@@ -52,7 +34,7 @@ export const SkillList: React.FC = () => {
   const [form, setForm] = useState<FormData>(EMPTY_FORM)
   const [saving, setSaving] = useState(false)
   const [previewId, setPreviewId] = useState<string | null>(null)
-  const [createTab, setCreateTab] = useState<CreateTab>('paste')
+  const [createTab, setCreateTab] = useState<CreateTab>('git')
   // Git import state
   const [gitUrl, setGitUrl] = useState('')
   const [gitScanning, setGitScanning] = useState(false)
@@ -80,7 +62,7 @@ export const SkillList: React.FC = () => {
   const openCreate = () => {
     setEditingId(null)
     setForm(EMPTY_FORM)
-    setCreateTab('paste')
+    setCreateTab('git')
     setGitUrl('')
     setGitSkills(null)
     setGitSelected(new Set())
@@ -98,53 +80,9 @@ export const SkillList: React.FC = () => {
       content: s.content,
       trigger_phrases: (s.trigger_phrases ?? []).join(', '),
     })
-    setCreateTab('paste')
+    setCreateTab('local')
     setShowForm(true)
     setPreviewId(null)
-  }
-
-  const handleSave = async () => {
-    if (!form.name.trim() || !form.content.trim()) {
-      toast.error('名称和内容不能为空')
-      return
-    }
-    setSaving(true)
-    try {
-      const trigger_phrases = form.trigger_phrases.trim()
-        ? form.trigger_phrases.split(',').map(s => s.trim()).filter(Boolean)
-        : undefined
-      const payload = {
-        name: form.name.trim(),
-        description: form.description.trim(),
-        version: form.version.trim() || '1.0.0',
-        content: form.content,
-        trigger_phrases,
-      }
-      if (editingId) {
-        await skillService.update(editingId, payload)
-        toast.success('已更新')
-      } else {
-        await skillService.create(payload)
-        toast.success('已创建')
-      }
-      setShowForm(false)
-      await load()
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '保存失败')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  const handleContentChange = (content: string) => {
-    const parsed = parseSkillMdFrontmatter(content)
-    setForm(f => ({
-      ...f,
-      content,
-      name: parsed.name || f.name,
-      description: parsed.description || f.description,
-      version: parsed.version || f.version,
-    }))
   }
 
   const handleScanGit = async () => {
@@ -268,48 +206,9 @@ export const SkillList: React.FC = () => {
 
           {!editingId && (
             <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', marginBottom: '1rem', flexWrap: 'wrap' }}>
-              <button style={tabStyle(createTab === 'paste')} onClick={() => setCreateTab('paste')}>粘贴内容</button>
               <button style={tabStyle(createTab === 'git')} onClick={() => setCreateTab('git')}>从 Git 仓库</button>
               <button style={tabStyle(createTab === 'local')} onClick={() => setCreateTab('local')}>本地路径</button>
               <button style={tabStyle(createTab === 'upload')} onClick={() => setCreateTab('upload')}>上传文件</button>
-            </div>
-          )}
-
-          {createTab === 'paste' && (
-            <div style={{ display: 'grid', gap: '0.75rem' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
-                <div>
-                  <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem', color: 'var(--text-secondary)' }}>名称 *</label>
-                  <input className="input" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. 代码审查" />
-                </div>
-                <div>
-                  <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem', color: 'var(--text-secondary)' }}>版本</label>
-                  <input className="input" value={form.version} onChange={e => setForm(f => ({ ...f, version: e.target.value }))} placeholder="1.0.0" />
-                </div>
-              </div>
-              <div>
-                <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem', color: 'var(--text-secondary)' }}>描述</label>
-                <input className="input" value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))} placeholder="简短描述此 Skill 的用途" />
-              </div>
-              <div>
-                <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem', color: 'var(--text-secondary)' }}>触发短语（逗号分隔）</label>
-                <input className="input" value={form.trigger_phrases} onChange={e => setForm(f => ({ ...f, trigger_phrases: e.target.value }))} placeholder="e.g. 代码审查, review code" />
-              </div>
-              <div>
-                <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem', color: 'var(--text-secondary)' }}>内容（SKILL.md 格式，粘贴后自动解析 frontmatter）*</label>
-                <textarea
-                  className="input"
-                  value={form.content}
-                  onChange={e => handleContentChange(e.target.value)}
-                  rows={10}
-                  style={{ fontFamily: 'monospace', resize: 'vertical' }}
-                  placeholder={'---\nname: 我的 Skill\ndescription: 描述\nversion: 1.0.0\n---\n\n# Skill 内容...'}
-                />
-              </div>
-              <div style={{ display: 'flex', gap: '0.75rem' }}>
-                <Button variant="primary" onClick={handleSave} disabled={saving}>{saving ? '保存中...' : '保存'}</Button>
-                <Button variant="secondary" onClick={() => setShowForm(false)}>取消</Button>
-              </div>
             </div>
           )}
 
