@@ -3201,9 +3201,44 @@ export class AdminModule extends ModuleBase {
       // 首次安装时全局 LLM 未配置，允许返回空 model_config
     }
 
-    // 实时解析每个 slot 引用为连接信息
+    // 获取实现定义的 model_roles（含 fallback 元数据）
+    const impl = this.agentManager.getImplementation('default')
+    const modelRoles = impl?.model_roles ?? []
+
+    // 实时解析每个 slot 引用为连接信息，按 model_roles 遍历
     const resolvedModelConfig: Record<string, LLMConnectionInfo> = {}
+    const processedKeys = new Set<string>()
+
+    for (const role of modelRoles) {
+      processedKeys.add(role.key)
+      const ref = config.model_config[role.key]
+      const fallback = role.fallback ?? 'global_default'
+
+      if (ref) {
+        // 用户显式配置了此 slot
+        try {
+          resolvedModelConfig[role.key] = this.modelProviderManager.buildConnectionInfo(
+            ref.provider_id, ref.model_id
+          ) as LLMConnectionInfo
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error)
+          if (fallback === 'global_default' && globalLLM) {
+            console.warn(`[Admin] Slot "${role.key}" ref resolve failed: ${msg}, using global default`)
+            resolvedModelConfig[role.key] = globalLLM
+          } else {
+            console.warn(`[Admin] Slot "${role.key}" ref resolve failed: ${msg}, slot unavailable`)
+          }
+        }
+      } else if (fallback === 'global_default' && globalLLM) {
+        // 未配置 + fallback 到全局默认
+        resolvedModelConfig[role.key] = globalLLM
+      }
+      // fallback === 'none' 且未配置 → 不加入 resolvedModelConfig
+    }
+
+    // 处理用户配置了但不在 model_roles 中的 slot（向前兼容）
     for (const [key, ref] of Object.entries(config.model_config)) {
+      if (processedKeys.has(key)) continue
       try {
         resolvedModelConfig[key] = this.modelProviderManager.buildConnectionInfo(
           ref.provider_id, ref.model_id
@@ -3211,15 +3246,13 @@ export class AdminModule extends ModuleBase {
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error)
         if (globalLLM) {
-          console.warn(`[Admin] Slot "${key}" ref (${ref.provider_id}/${ref.model_id}) resolve failed: ${msg}, using global default`)
+          console.warn(`[Admin] Unknown slot "${key}" resolve failed: ${msg}, using global default`)
           resolvedModelConfig[key] = globalLLM
         } else {
-          console.warn(`[Admin] Slot "${key}" ref (${ref.provider_id}/${ref.model_id}) resolve failed: ${msg}, no global default available`)
+          console.warn(`[Admin] Unknown slot "${key}" resolve failed: ${msg}, no global default available`)
         }
       }
     }
-
-    // 不再硬塞 default slot，每个 slot 未配置时 Agent 端自行回退到全局默认
 
     // 解析 MCP servers: 用户关联的 + 内置启用的
     const enabledMcpServers = [
