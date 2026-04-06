@@ -519,7 +519,7 @@ ${skillsSection}
         this.traceStore.endSpan(trace.trace_id, decisionSpan.span_id, 'completed')
       }
 
-      // 11. 写入短期记忆：分诊决策事件
+      // 11. 写入短期记忆：分诊决策事件（fire-and-forget，不阻塞 completeRequest）
       if (sender.friend_id && result.decisions.length > 0) {
         const messageBrief = mergedMessages
           .map((m) => m.content.text ?? '')
@@ -538,7 +538,7 @@ ${skillsSection}
             },
           })
 
-          await this.memoryWriter.writeTriageDecision({
+          this.memoryWriter.writeTriageDecision({
             friend_name: friend.display_name,
             friend_id: sender.friend_id,
             channel_id: session.channel_id,
@@ -548,9 +548,11 @@ ${skillsSection}
             task_id: 'task_id' in decision ? (decision as { task_id: string }).task_id : undefined,
             visibility: memPerms.write_visibility,
             scopes: memPerms.write_scopes,
+          }).then(() => {
+            this.traceStore.endSpan(trace.trace_id, memSpan.span_id, 'completed')
+          }).catch(() => {
+            this.traceStore.endSpan(trace.trace_id, memSpan.span_id, 'failed')
           })
-
-          this.traceStore.endSpan(trace.trace_id, memSpan.span_id, 'completed')
         }
       }
 
@@ -645,7 +647,7 @@ ${skillsSection}
 
       // 判断是否产生了有意义的回复
       const hasReply = result.decisions.some(
-        (d) => d.type === 'direct_reply' || d.type === 'create_task'
+        (d) => d.type === 'direct_reply' || d.type === 'create_task' || d.type === 'supplement_task'
       )
 
       if (hasReply) {
@@ -1328,7 +1330,7 @@ ${skillsSection}
         }
       }
 
-      // 写入短期记忆：分诊决策事件
+      // 写入短期记忆：分诊决策事件（fire-and-forget，不阻塞主流程）
       if (message.content.text && result.decisions.length > 0) {
         const messageBrief = mergedMessages
           .map((m) => m.content.text ?? '')
@@ -1347,7 +1349,7 @@ ${skillsSection}
             },
           })
 
-          await this.memoryWriter.writeTriageDecision({
+          this.memoryWriter.writeTriageDecision({
             friend_name: 'Master',
             friend_id: message.sender.friend_id ?? 'master',
             channel_id: 'admin-web',
@@ -1357,9 +1359,11 @@ ${skillsSection}
             task_id: 'task_id' in decision ? (decision as { task_id: string }).task_id : undefined,
             visibility: masterMemPerms.write_visibility,
             scopes: masterMemPerms.write_scopes,
+          }).then(() => {
+            this.traceStore.endSpan(trace.trace_id, memSpan.span_id, 'completed')
+          }).catch(() => {
+            this.traceStore.endSpan(trace.trace_id, memSpan.span_id, 'failed')
           })
-
-          this.traceStore.endSpan(trace.trace_id, memSpan.span_id, 'completed')
         }
       }
 
@@ -1469,18 +1473,37 @@ ${skillsSection}
           description: '分诊模型，用于 Front Agent 消息意图判断和快速决策（可选）',
           required: false,
           used_by: ['front'],
+          fallback: 'global_default',
         },
         {
           key: 'worker',
           description: '执行模型，用于 Worker Agent 执行实际任务（可选）',
           required: false,
           used_by: ['worker'],
+          fallback: 'global_default',
         },
         {
           key: 'digest',
           description: '摘要模型，用于生成进度汇报摘要（可选，推荐小型快速模型）',
           required: false,
           used_by: ['worker'],
+          fallback: 'global_default',
+        },
+        {
+          key: 'vision_expert',
+          description: '视觉专家 Sub-agent，用于截图分析、UI 识别、浏览器页面理解（可选）',
+          required: false,
+          used_by: ['worker'],
+          recommended_capabilities: ['vision'],
+          fallback: 'none',
+        },
+        {
+          key: 'coding_expert',
+          description: '编码专家 Sub-agent，用于代码编写、代码分析、bug 修复（可选）',
+          required: false,
+          used_by: ['worker'],
+          recommended_capabilities: ['coding', 'tool_use'],
+          fallback: 'none',
         },
       ],
     }

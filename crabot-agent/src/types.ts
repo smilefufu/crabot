@@ -431,13 +431,17 @@ export interface FriendDeletedEvent {
  */
 export interface LLMRoleRequirement {
   /** 配置 key */
-  key: 'triage' | 'worker' | 'digest'
+  key: string
   /** 描述说明 */
   description: string
   /** 是否必须 */
   required: boolean
   /** 使用该模型的角色 */
   used_by: Array<'front' | 'worker'>
+  /** 推荐能力 */
+  recommended_capabilities?: string[]
+  /** 未配置时的回退行为，默认 'global_default' */
+  fallback?: 'global_default' | 'none'
 }
 
 export interface LLMConnectionInfo {
