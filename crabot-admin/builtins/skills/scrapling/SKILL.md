@@ -384,3 +384,54 @@ This skill encapsulates almost all the published documentation in Markdown, so d
 - Add delays (`download_delay`) for large crawls.
 - Don't bypass paywalls or authentication without permission.
 - Never scrape personal/sensitive data.
+
+---
+
+## Crabot 集成指南
+
+Scrapling 在 Crabot 中作为内置 MCP 工具提供，通过 `mcp__scrapling__*` 工具调用。以下是 Crabot 环境下的使用决策指南。
+
+### 环境信息
+
+- 环境变量 `BROWSER_CDP_URL` 可能包含 Crabot 管理的持久 Chrome 实例的 CDP 地址
+- 该 Chrome 实例由用户在 Admin 中配置，支持独立 profile 或复用用户 profile
+
+### 模式选择决策
+
+根据任务需求选择 `open_session` 的参数组合：
+
+**场景 1：需要复用登录态（如访问已登录的网站）**
+```
+open_session(session_type="dynamic", cdp_url=<BROWSER_CDP_URL>)
+```
+- 连接 Crabot 管理的持久 Chrome，复用其 cookies/localStorage
+- 无 stealth 功能，适合访问已信任的网站
+
+**场景 2：需要完整反检测（如绕过 Cloudflare）**
+```
+open_session(session_type="stealthy", hide_canvas=true, block_webrtc=true)
+```
+- Scrapling 自行启动 patchright 浏览器，完整 stealth
+- 不复用登录态，每次是全新浏览器实例
+
+**场景 3：需要反检测 + 部分登录态**
+```
+open_session(session_type="stealthy", cdp_url=<BROWSER_CDP_URL>)
+```
+- 连接持久 Chrome，context 级 stealth（UA 伪装、header 注入）生效
+- 但 Chrome flags 级 stealth（canvas 噪声、WebRTC 屏蔽）不生效
+- 折中方案，适合中等防护级别的网站
+
+**场景 4：简单网页抓取（无需浏览器）**
+```
+get(url=...)
+```
+- HTTP 直接请求，最快最轻量
+- 无 JS 渲染，不适合动态页面
+
+### 决策原则
+
+1. **优先用最轻量的方式**：能用 `get` 就不用 `fetch`，能用 `fetch` 就不用 `stealthy_fetch`
+2. **需要登录态时用 CDP**：传 `cdp_url` 参数连接持久 Chrome
+3. **遇到反爬时升级**：从 dynamic → stealthy，从不传 cdp_url（完整 stealth）
+4. **用完关 session**：调用 `close_session` 释放资源，除非后续任务还需要
