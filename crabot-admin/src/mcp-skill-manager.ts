@@ -608,7 +608,7 @@ export class SkillManager {
       content,
       source_package: resolved,
     })
-    const updated: SkillRegistryEntry = { ...entry, skill_dir: resolved, updated_at: entry.updated_at }
+    const updated: SkillRegistryEntry = { ...entry, skill_dir: resolved, updated_at: generateTimestamp() }
     this.skills.set(entry.id, updated)
     await this.save()
     return updated
