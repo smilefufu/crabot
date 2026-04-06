@@ -250,7 +250,7 @@ CFGEOF
 check_scrapling() {
   if ! command -v scrapling &>/dev/null; then
     log_warn "Scrapling 未安装（Browser Use 功能需要）"
-    log_dim "  安装: pip install 'scrapling[ai]'"
+    log_dim "  安装: pip install -i https://pypi.org/simple/ 'scrapling[ai]'"
     return 1
   fi
   return 0
