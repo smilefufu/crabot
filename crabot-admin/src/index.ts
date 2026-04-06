@@ -3231,9 +3231,17 @@ export class AdminModule extends ModuleBase {
         .filter((s) => !(config.mcp_server_ids ?? []).includes(s.id)),
     ]
 
-    // 如果 scrapling MCP server 已启用，注入 browser CDP URL
-    const scraplingEnabled = enabledMcpServers.some((s) => s.name === 'scrapling')
-    const browserCdpUrl = scraplingEnabled ? this.browserManager.cdpUrl : undefined
+    // 将 MCP server 配置转换为 Agent 格式，并为 scrapling 注入 CDP URL 环境变量
+    const mcpServerConfigs = enabledMcpServers.map((s) => {
+      const agentConfig = this.mcpServerManager.toAgentConfig(s)
+      if (s.name === 'scrapling') {
+        return {
+          ...agentConfig,
+          env: { ...agentConfig.env, BROWSER_CDP_URL: this.browserManager.cdpUrl },
+        }
+      }
+      return agentConfig
+    })
 
     return {
       config: {
@@ -3242,12 +3250,11 @@ export class AdminModule extends ModuleBase {
         // 将 ID 列表解析为完整对象，供 Agent 直接使用
         // 1. Agent 实例配置的 mcp_server_ids（用户在 Agent 配置页关联的）
         // 2. 所有 enabled 的内置 MCP server（自动可用，不需要手动关联）
-        mcp_servers: enabledMcpServers.map((s) => this.mcpServerManager.toAgentConfig(s)),
+        mcp_servers: mcpServerConfigs,
         skills: (config.skill_ids ?? [])
           .map((id) => this.skillManager.get(id))
           .filter((s): s is NonNullable<typeof s> => s !== undefined)
           .map((s) => this.skillManager.toAgentConfig(s)),
-        browser_cdp_url: browserCdpUrl,
       },
     }
   }

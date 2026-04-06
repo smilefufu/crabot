@@ -251,7 +251,7 @@ export class BrowserManager {
       if (process.platform === 'darwin') {
         execSync('pkill -f "Google Chrome"', { encoding: 'utf-8' })
       } else {
-        execSync('pkill -f chrome', { encoding: 'utf-8' })
+        execSync('pkill -f "google-chrome|chromium-browser|chromium"', { encoding: 'utf-8' })
       }
     } catch {
       // pkill returns non-zero if no processes matched — that's fine
@@ -265,7 +265,7 @@ export class BrowserManager {
         if (process.platform === 'darwin') {
           execSync('pgrep -f "Google Chrome"', { encoding: 'utf-8' })
         } else {
-          execSync('pgrep -f chrome', { encoding: 'utf-8' })
+          execSync('pgrep -f "google-chrome|chromium-browser|chromium"', { encoding: 'utf-8' })
         }
         // Still running, wait
         await sleep(500)
