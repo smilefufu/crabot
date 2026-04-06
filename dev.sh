@@ -219,6 +219,17 @@ start_litellm() {
   log_warn "LiteLLM 启动超时，继续..."
 }
 
+# ── Scrapling ─────────────────────────────────────────────
+
+check_scrapling() {
+  if ! command -v scrapling &>/dev/null; then
+    log_warn "Scrapling 未安装（Browser Use 功能需要）"
+    log_dim "  安装: pip install 'scrapling[ai]'"
+    return 1
+  fi
+  return 0
+}
+
 # ── Memory 依赖同步 ──────────────────────────────────────
 
 sync_memory_deps() {
@@ -274,6 +285,12 @@ stop_all() {
     rm -f "$DATA_DIR/litellm/litellm.pid"
   fi
 
+  # 清理 Crabot 管理的 Chrome 实例
+  if [ -f "$DATA_DIR/browser/chrome.pid" ]; then
+    kill "$(cat "$DATA_DIR/browser/chrome.pid")" 2>/dev/null || true
+    rm -f "$DATA_DIR/browser/chrome.pid"
+  fi
+
   # 兜底释放所有已知端口
   for port in "$MM_PORT" "$ADMIN_RPC_PORT" "$ADMIN_WEB_PORT" "$LITELLM_PORT"; do
     local pid
@@ -295,6 +312,8 @@ start() {
 
   # 1. LiteLLM（冷启动，Memory priority=5 比 Admin priority=10 先启动，需要 LiteLLM 就绪）
   start_litellm
+
+  check_scrapling || true  # 非阻塞，仅提示
 
   # 2. 准备 Memory 依赖
   sync_memory_deps

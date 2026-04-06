@@ -245,6 +245,17 @@ CFGEOF
   log_warn "LiteLLM 启动超时，继续..."
 }
 
+# ── Scrapling ─────────────────────────────────────────────
+
+check_scrapling() {
+  if ! command -v scrapling &>/dev/null; then
+    log_warn "Scrapling 未安装（Browser Use 功能需要）"
+    log_dim "  安装: pip install 'scrapling[ai]'"
+    return 1
+  fi
+  return 0
+}
+
 # ── Memory 依赖 ──────────────────────────────────────────
 
 sync_memory_deps() {
@@ -407,6 +418,12 @@ stop_all_services() {
   if [ -f "$DATA_DIR/litellm/litellm.pid" ]; then
     kill "$(cat "$DATA_DIR/litellm/litellm.pid")" 2>/dev/null || true
     rm -f "$DATA_DIR/litellm/litellm.pid"
+  fi
+
+  # 清理 Crabot 管理的 Chrome 实例
+  if [ -f "$DATA_DIR/browser/chrome.pid" ]; then
+    kill "$(cat "$DATA_DIR/browser/chrome.pid")" 2>/dev/null || true
+    rm -f "$DATA_DIR/browser/chrome.pid"
   fi
 
   # 等待 SIGTERM 生效
