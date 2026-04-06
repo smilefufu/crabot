@@ -43,6 +43,8 @@ import { createCrabMemoryServer } from '../mcp/crab-memory.js'
 import type { MemoryTaskContext } from '../mcp/crab-memory.js'
 import { formatMessageContent } from './media-resolver.js'
 import type { McpConnector } from './mcp-connector.js'
+import { createSubAgentTool } from '../engine/sub-agent.js'
+import type { SubAgentDefinition } from './subagent-prompts.js'
 
 import * as fs from 'fs'
 import * as path from 'path'
@@ -205,6 +207,7 @@ export class WorkerHandler {
   private mcpConnector?: McpConnector
   private extra: Record<string, unknown>
   private digestSdkEnv?: SdkEnvConfig
+  private readonly subAgentConfigs: ReadonlyArray<{ readonly definition: SubAgentDefinition; readonly sdkEnv: SdkEnvConfig }>
 
   constructor(
     sdkEnv: SdkEnvConfig,
@@ -214,6 +217,7 @@ export class WorkerHandler {
     builtinToolConfig?: BuiltinToolConfig,
     mcpConnector?: McpConnector,
     digestSdkEnv?: SdkEnvConfig,
+    subAgentConfigs?: ReadonlyArray<{ readonly definition: SubAgentDefinition; readonly sdkEnv: SdkEnvConfig }>,
   ) {
     this.sdkEnv = sdkEnv
     this.mcpConfigFactory = mcpConfigFactory
@@ -224,6 +228,7 @@ export class WorkerHandler {
     this.mcpConnector = mcpConnector
     this.extra = config.extra ?? {}
     this.digestSdkEnv = digestSdkEnv
+    this.subAgentConfigs = subAgentConfigs ?? []
   }
 
   async executeTask(
@@ -332,6 +337,39 @@ export class WorkerHandler {
       // 3e. Built-in file/shell tools (filtered by Admin config)
       const hasSkills = (params as { skills?: SkillConfig[] }).skills?.length
       tools.push(...getConfiguredBuiltinTools(taskDir, this.builtinToolConfig, hasSkills ? { skillsDir: taskDir } : undefined))
+
+      // 3f. Sub-agent delegation tools
+      for (const { definition, sdkEnv: subSdkEnv } of this.subAgentConfigs) {
+        const subAdapter = createAdapter({
+          endpoint: subSdkEnv.env.ANTHROPIC_BASE_URL ?? subSdkEnv.env.ANTHROPIC_API_BASE ?? '',
+          apikey: subSdkEnv.env.ANTHROPIC_API_KEY ?? '',
+          format: subSdkEnv.format,
+        })
+        // Sub-agent inherits Worker's tools except delegation tools (prevent recursion)
+        const subTools = tools.filter((t) => !t.name.startsWith('delegate_to_'))
+        tools.push(createSubAgentTool({
+          name: definition.toolName,
+          description: definition.toolDescription,
+          adapter: subAdapter,
+          model: subSdkEnv.modelId,
+          systemPrompt: definition.systemPrompt,
+          subTools,
+          maxTurns: definition.maxTurns,
+          onSubAgentTurn: traceCallback ? (event) => {
+            const spanId = traceCallback.onLlmCallStart(
+              event.turnNumber,
+              `[${definition.slotKey}] turn ${event.turnNumber}`,
+            )
+            if (spanId) {
+              traceCallback.onLlmCallEnd(spanId, {
+                stopReason: event.stopReason ?? undefined,
+                outputSummary: event.assistantText.slice(0, 200) || undefined,
+                toolCallsCount: event.toolCalls.length > 0 ? event.toolCalls.length : undefined,
+              })
+            }
+          } : undefined,
+        }))
+      }
 
       // 4. Create LLM adapter from sdkEnv (format-based routing)
       const adapter = createAdapter({
