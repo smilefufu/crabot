@@ -40,6 +40,7 @@ const DEFAULT_IMPLEMENTATION: AgentImplementation = {
       required: false,
       recommended_capabilities: ['tool_use', 'fast'],
       used_by: ['front'],
+      fallback: 'global_default',
     },
     {
       key: 'worker',
@@ -47,6 +48,7 @@ const DEFAULT_IMPLEMENTATION: AgentImplementation = {
       required: false,
       recommended_capabilities: ['tool_use', 'long_context'],
       used_by: ['worker'],
+      fallback: 'global_default',
     },
     {
       key: 'digest',
@@ -54,6 +56,23 @@ const DEFAULT_IMPLEMENTATION: AgentImplementation = {
       required: false,
       recommended_capabilities: ['fast'],
       used_by: ['worker'],
+      fallback: 'global_default',
+    },
+    {
+      key: 'vision_expert',
+      description: '视觉专家 Sub-agent，用于截图分析、UI 识别、浏览器页面理解',
+      required: false,
+      recommended_capabilities: ['vision'],
+      used_by: ['worker'],
+      fallback: 'none',
+    },
+    {
+      key: 'coding_expert',
+      description: '编码专家 Sub-agent，用于代码编写、代码分析、bug 修复',
+      required: false,
+      recommended_capabilities: ['coding', 'tool_use'],
+      used_by: ['worker'],
+      fallback: 'none',
     },
   ],
   extra_schema: [
