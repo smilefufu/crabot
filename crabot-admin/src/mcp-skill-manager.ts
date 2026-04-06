@@ -94,6 +94,8 @@ export interface SkillRegistryEntry {
   version: string
   /** SKILL.md 格式的提示词内容 */
   content: string
+  /** skill 所在目录的绝对路径（目录型 skill） */
+  skill_dir?: string
   /** 触发短语（用于 LLM 匹配） */
   trigger_phrases?: string[]
   is_builtin: boolean
@@ -478,7 +480,7 @@ export class SkillManager {
     params: Partial<
       Pick<
         SkillRegistryEntry,
-        'name' | 'description' | 'content' | 'version' | 'trigger_phrases' | 'is_essential' | 'enabled'
+        'name' | 'description' | 'content' | 'version' | 'trigger_phrases' | 'skill_dir' | 'is_essential' | 'enabled'
       >
     >
   ): Promise<SkillRegistryEntry> {
@@ -511,12 +513,14 @@ export class SkillManager {
     name: string
     content: string
     description?: string
+    skill_dir?: string
   } {
     return {
       id: entry.id,
       name: entry.name,
       content: entry.content,
       description: entry.description,
+      ...(entry.skill_dir ? { skill_dir: entry.skill_dir } : {}),
     }
   }
 
@@ -597,13 +601,17 @@ export class SkillManager {
     }
     const parsed = parseSkillMd(content)
     if (!parsed.name) throw new Error('SKILL.md 缺少 name 字段')
-    return this.create({
+    const entry = await this.create({
       name: parsed.name,
       description: parsed.description,
       version: parsed.version,
       content,
       source_package: resolved,
     })
+    const updated: SkillRegistryEntry = { ...entry, skill_dir: resolved, updated_at: entry.updated_at }
+    this.skills.set(entry.id, updated)
+    await this.save()
+    return updated
   }
 
   /**
