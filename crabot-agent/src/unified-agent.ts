@@ -28,6 +28,7 @@ import type {
   UpdateConfigResult,
   LLMConnectionInfo,
   TraceCallback,
+  BuiltinToolConfig,
 } from './types.js'
 import { SessionManager } from './orchestration/session-manager.js'
 import { SwitchMapHandler } from './orchestration/switchmap-handler.js'
@@ -255,23 +256,9 @@ export class UnifiedAgent extends ModuleBase {
       const workerModelConfig = config.model_config?.worker
       if (workerModelConfig) {
         this.sdkEnvWorker = this.buildSdkEnv(workerModelConfig)
-        const workerSdkEnv = this.sdkEnvWorker
-        const subAgentConfigs = this.buildSubAgentConfigs(config.model_config)
-        const subAgentHints = subAgentConfigs.map(({ definition }) => ({
-          toolName: definition.toolName,
-          workerHint: definition.workerHint,
-        }))
-        this.workerHandler = new WorkerHandler(workerSdkEnv, {
-          systemPrompt: this.promptManager.assembleWorkerPrompt(adminPersonality || undefined, subAgentHints),
-          longTermPreloadLimit: this.orchestrationConfig.worker_long_term_memory_limit,
-          extra: this.extra,
-        }, createMcpConfigs, {
-          rpcClient: this.rpcClient,
-          moduleId: this.config.moduleId,
-          resolveChannelPort: (channelId) => this.getChannelPort(channelId),
-          getMemoryPort: () => this.getMemoryPort(),
-        }, config.builtin_tool_config, this.mcpConnector, this.digestSdkEnv,
-          subAgentConfigs)
+        this.workerHandler = this.createWorkerHandler(
+          this.sdkEnvWorker, config.model_config, adminPersonality,
+          createMcpConfigs, config.builtin_tool_config)
       }
     }
   }
@@ -300,6 +287,31 @@ export class UnifiedAgent extends ModuleBase {
         definition: def,
         sdkEnv: this.buildSdkEnv(modelConfig[def.slotKey]),
       }))
+  }
+
+  private createWorkerHandler(
+    workerSdkEnv: SdkEnvConfig,
+    modelConfig: Record<string, LLMConnectionInfo>,
+    adminPersonality: string | undefined,
+    createMcpConfigs: () => Record<string, McpServer>,
+    builtinToolConfig?: BuiltinToolConfig,
+  ): WorkerHandler {
+    const subAgentConfigs = this.buildSubAgentConfigs(modelConfig)
+    const subAgentHints = subAgentConfigs.map(({ definition }) => ({
+      toolName: definition.toolName,
+      workerHint: definition.workerHint,
+    }))
+    return new WorkerHandler(workerSdkEnv, {
+      systemPrompt: this.promptManager.assembleWorkerPrompt(adminPersonality || undefined, subAgentHints),
+      longTermPreloadLimit: this.orchestrationConfig.worker_long_term_memory_limit,
+      extra: this.extra,
+    }, createMcpConfigs, {
+      rpcClient: this.rpcClient,
+      moduleId: this.config.moduleId,
+      resolveChannelPort: (channelId) => this.getChannelPort(channelId),
+      getMemoryPort: () => this.getMemoryPort(),
+    }, builtinToolConfig, this.mcpConnector, this.digestSdkEnv,
+      subAgentConfigs)
   }
 
   /**
@@ -1507,22 +1519,14 @@ ${skillsSection}
           used_by: ['worker'],
           fallback: 'global_default',
         },
-        {
-          key: 'vision_expert',
-          description: '视觉专家 Sub-agent，用于截图分析、UI 识别、浏览器页面理解（可选）',
-          required: false,
-          used_by: ['worker'],
-          recommended_capabilities: ['vision'],
-          fallback: 'none',
-        },
-        {
-          key: 'coding_expert',
-          description: '编码专家 Sub-agent，用于代码编写、代码分析、bug 修复（可选）',
-          required: false,
-          used_by: ['worker'],
-          recommended_capabilities: ['coding', 'tool_use'],
-          fallback: 'none',
-        },
+        ...SUBAGENT_DEFINITIONS.map((def) => ({
+          key: def.slotKey,
+          description: def.slotDescription,
+          required: false as const,
+          used_by: ['worker'] as Array<'front' | 'worker'>,
+          recommended_capabilities: [...def.recommendedCapabilities],
+          fallback: 'none' as const,
+        })),
       ],
     }
   }
@@ -1786,23 +1790,9 @@ ${skillsSection}
       const workerConfig = modelConfig.worker
       if (workerConfig) {
         this.sdkEnvWorker = this.buildSdkEnv(workerConfig)
-        const updatedWorkerSdkEnv = this.sdkEnvWorker
-        const subAgentConfigs = this.buildSubAgentConfigs(modelConfig)
-        const subAgentHints = subAgentConfigs.map(({ definition }) => ({
-          toolName: definition.toolName,
-          workerHint: definition.workerHint,
-        }))
-        this.workerHandler = new WorkerHandler(updatedWorkerSdkEnv, {
-          systemPrompt: this.promptManager.assembleWorkerPrompt(adminPersonality || undefined, subAgentHints),
-          longTermPreloadLimit: this.orchestrationConfig.worker_long_term_memory_limit,
-          extra: this.extra,
-        }, createMcpConfigs, {
-          rpcClient: this.rpcClient,
-          moduleId: this.config.moduleId,
-          resolveChannelPort: (channelId) => this.getChannelPort(channelId),
-          getMemoryPort: () => this.getMemoryPort(),
-        }, this.agentConfig?.builtin_tool_config, this.mcpConnector, this.digestSdkEnv,
-          subAgentConfigs)
+        this.workerHandler = this.createWorkerHandler(
+          this.sdkEnvWorker, modelConfig, adminPersonality,
+          createMcpConfigs, this.agentConfig?.builtin_tool_config)
         console.log(`[${this.config.moduleId}] Worker Agent SDK env ${this.workerHandler ? 'updated' : 'created from config push'}`)
       }
     }

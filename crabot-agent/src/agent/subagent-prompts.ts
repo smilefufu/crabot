@@ -8,6 +8,10 @@
 export interface SubAgentDefinition {
   /** Model slot key (must match a key in model_config) */
   readonly slotKey: string
+  /** Human-readable slot description (used in LLM requirements and Admin UI) */
+  readonly slotDescription: string
+  /** Recommended model capabilities for this slot */
+  readonly recommendedCapabilities: readonly string[]
   /** Tool name exposed to Worker (prefixed with delegate_to_) */
   readonly toolName: string
   /** Tool description for Worker's LLM */
@@ -23,6 +27,8 @@ export interface SubAgentDefinition {
 export const SUBAGENT_DEFINITIONS: readonly SubAgentDefinition[] = [
   {
     slotKey: 'vision_expert',
+    slotDescription: '视觉专家 Sub-agent，用于截图分析、UI 识别、浏览器页面理解（可选）',
+    recommendedCapabilities: ['vision'],
     toolName: 'delegate_to_vision_expert',
     toolDescription: '将视觉分析任务委派给视觉专家 Sub-agent。Sub-agent 在独立上下文中运行，擅长截图分析、UI 识别、浏览器页面理解。只返回最终分析结果。',
     systemPrompt: [
@@ -40,6 +46,8 @@ export const SUBAGENT_DEFINITIONS: readonly SubAgentDefinition[] = [
   },
   {
     slotKey: 'coding_expert',
+    slotDescription: '编码专家 Sub-agent，用于代码编写、代码分析、bug 修复（可选）',
+    recommendedCapabilities: ['coding', 'tool_use'],
     toolName: 'delegate_to_coding_expert',
     toolDescription: '将编码任务委派给编码专家 Sub-agent。Sub-agent 在独立上下文中运行，擅长代码编写、代码分析、bug 修复。只返回最终结果。',
     systemPrompt: [

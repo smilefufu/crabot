@@ -339,21 +339,20 @@ export class WorkerHandler {
       tools.push(...getConfiguredBuiltinTools(taskDir, this.builtinToolConfig, hasSkills ? { skillsDir: taskDir } : undefined))
 
       // 3f. Sub-agent delegation tools
+      const baseTools = [...tools]
       for (const { definition, sdkEnv: subSdkEnv } of this.subAgentConfigs) {
         const subAdapter = createAdapter({
           endpoint: subSdkEnv.env.ANTHROPIC_BASE_URL ?? subSdkEnv.env.ANTHROPIC_API_BASE ?? '',
           apikey: subSdkEnv.env.ANTHROPIC_API_KEY ?? '',
           format: subSdkEnv.format,
         })
-        // Sub-agent inherits Worker's tools except delegation tools (prevent recursion)
-        const subTools = tools.filter((t) => !t.name.startsWith('delegate_to_'))
         tools.push(createSubAgentTool({
           name: definition.toolName,
           description: definition.toolDescription,
           adapter: subAdapter,
           model: subSdkEnv.modelId,
           systemPrompt: definition.systemPrompt,
-          subTools,
+          subTools: baseTools,
           maxTurns: definition.maxTurns,
           onSubAgentTurn: traceCallback ? (event) => {
             const spanId = traceCallback.onLlmCallStart(
