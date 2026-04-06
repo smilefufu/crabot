@@ -1133,6 +1133,8 @@ export interface AgentInstanceConfig {
 /** Agent 实例配置的解析后格式（RPC 返回给 Agent，model_config 已从引用解析为连接信息） */
 export interface ResolvedAgentConfig extends Omit<AgentInstanceConfig, 'model_config'> {
   model_config: Record<string, LLMConnectionInfo>
+  /** CDP URL for browser automation (set when scrapling MCP server is enabled) */
+  browser_cdp_url?: string
 }
 
 // Agent 实现管理 API 参数类型

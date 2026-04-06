@@ -9,6 +9,7 @@ import type { Socket } from 'node:net'
 import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { BrowserManager } from './browser-manager.js'
 import { ModuleBase, type ModuleConfig } from './core/module-base.js'
 import {
   type Event,
@@ -207,6 +208,9 @@ export class AdminModule extends ModuleBase {
   // 必要工具配置管理器
   private essentialToolsManager!: EssentialToolsManager
 
+  // Browser 管理器（CDP 浏览器自动化）
+  private browserManager!: BrowserManager
+
   // 模块 env 配置缓存（用于 LiteLLM 按需加载）
   private moduleEnvConfigCache: Map<string, Record<string, string>> = new Map()
 
@@ -240,6 +244,10 @@ export class AdminModule extends ModuleBase {
     this.mcpServerManager = new MCPServerManager(this.adminConfig.data_dir)
     this.skillManager = new SkillManager(this.adminConfig.data_dir)
     this.essentialToolsManager = new EssentialToolsManager(this.adminConfig.data_dir)
+    this.browserManager = new BrowserManager(
+      this.adminConfig.data_dir,
+      parseInt(process.env.CRABOT_PORT_OFFSET || '0', 10)
+    )
 
     // 注入回调，实现跨模块解耦通信
     this.modelProviderManager.setUsedModelsProvider(
@@ -428,6 +436,9 @@ export class AdminModule extends ModuleBase {
     // 初始化必要工具配置管理器
     await this.essentialToolsManager.initialize()
 
+    // 初始化 Browser 管理器
+    await this.browserManager.loadConfig()
+
     // 初始化 Chat 管理器
     this.chatManager = new ChatManager(
       this.adminConfig.data_dir,
@@ -456,6 +467,9 @@ export class AdminModule extends ModuleBase {
   protected override async onStop(): Promise<void> {
     // 保存数据
     await this.saveData()
+
+    // 停止 Browser 管理器
+    await this.browserManager.stop()
 
     // 关闭 Chat 管理器
     if (this.chatManager) {
@@ -904,6 +918,66 @@ export class AdminModule extends ModuleBase {
         const config = await this.essentialToolsManager.update(params)
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(config))
+        return
+      }
+
+      // Browser 管理路由
+      if (pathname === '/api/browser/config' && req.method === 'GET') {
+        const browserConfig = await this.browserManager.loadConfig()
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({
+          profile_mode: browserConfig.profile_mode,
+          cdp_port: browserConfig.cdp_port,
+          is_running: this.browserManager.isAlive(),
+        }))
+        return
+      }
+
+      if (pathname === '/api/browser/config' && req.method === 'PATCH') {
+        const body = await this.readJsonBody<{ profile_mode?: string }>(req)
+        if (body.profile_mode !== undefined && body.profile_mode !== 'isolated' && body.profile_mode !== 'user') {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'profile_mode must be "isolated" or "user"' }))
+          return
+        }
+        const currentConfig = await this.browserManager.loadConfig()
+        const updatedConfig = {
+          ...currentConfig,
+          ...(body.profile_mode !== undefined ? { profile_mode: body.profile_mode as 'isolated' | 'user' } : {}),
+        }
+        await this.browserManager.saveConfig(updatedConfig)
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({
+          profile_mode: updatedConfig.profile_mode,
+          cdp_port: updatedConfig.cdp_port,
+          is_running: this.browserManager.isAlive(),
+        }))
+        return
+      }
+
+      if (pathname === '/api/browser/start' && req.method === 'POST') {
+        try {
+          const cdpUrl = await this.browserManager.ensureRunning()
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ cdp_url: cdpUrl }))
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: message }))
+        }
+        return
+      }
+
+      if (pathname === '/api/browser/stop' && req.method === 'POST') {
+        try {
+          await this.browserManager.stop()
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: true }))
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: message }))
+        }
         return
       }
 
@@ -3147,6 +3221,20 @@ export class AdminModule extends ModuleBase {
 
     // 不再硬塞 default slot，每个 slot 未配置时 Agent 端自行回退到全局默认
 
+    // 解析 MCP servers: 用户关联的 + 内置启用的
+    const enabledMcpServers = [
+      ...(config.mcp_server_ids ?? [])
+        .map((id) => this.mcpServerManager.get(id))
+        .filter((s): s is NonNullable<typeof s> => s !== undefined),
+      ...this.mcpServerManager.list()
+        .filter((s) => s.is_builtin && s.enabled)
+        .filter((s) => !(config.mcp_server_ids ?? []).includes(s.id)),
+    ]
+
+    // 如果 scrapling MCP server 已启用，注入 browser CDP URL
+    const scraplingEnabled = enabledMcpServers.some((s) => s.name === 'scrapling')
+    const browserCdpUrl = scraplingEnabled ? this.browserManager.cdpUrl : undefined
+
     return {
       config: {
         ...config,
@@ -3154,18 +3242,12 @@ export class AdminModule extends ModuleBase {
         // 将 ID 列表解析为完整对象，供 Agent 直接使用
         // 1. Agent 实例配置的 mcp_server_ids（用户在 Agent 配置页关联的）
         // 2. 所有 enabled 的内置 MCP server（自动可用，不需要手动关联）
-        mcp_servers: [
-          ...(config.mcp_server_ids ?? [])
-            .map((id) => this.mcpServerManager.get(id))
-            .filter((s): s is NonNullable<typeof s> => s !== undefined),
-          ...this.mcpServerManager.list()
-            .filter((s) => s.is_builtin && s.enabled)
-            .filter((s) => !(config.mcp_server_ids ?? []).includes(s.id)),
-        ].map((s) => this.mcpServerManager.toAgentConfig(s)),
+        mcp_servers: enabledMcpServers.map((s) => this.mcpServerManager.toAgentConfig(s)),
         skills: (config.skill_ids ?? [])
           .map((id) => this.skillManager.get(id))
           .filter((s): s is NonNullable<typeof s> => s !== undefined)
           .map((s) => this.skillManager.toAgentConfig(s)),
+        browser_cdp_url: browserCdpUrl,
       },
     }
   }
