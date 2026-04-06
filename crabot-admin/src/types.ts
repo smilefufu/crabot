@@ -976,6 +976,8 @@ export interface ModelRoleDefinition {
   recommended_capabilities?: string[]
   /** 被哪些 Agent 角色使用 */
   used_by?: Array<'front' | 'worker'>
+  /** 未配置时的回退行为，默认 'global_default' */
+  fallback?: 'global_default' | 'none'
 }
 
 /** 扩展配置项 Schema（供 Admin 渲染表单） */
