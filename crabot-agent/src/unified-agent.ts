@@ -305,13 +305,19 @@ export class UnifiedAgent extends ModuleBase {
       systemPrompt: this.promptManager.assembleWorkerPrompt(adminPersonality || undefined, subAgentHints),
       longTermPreloadLimit: this.orchestrationConfig.worker_long_term_memory_limit,
       extra: this.extra,
-    }, createMcpConfigs, {
-      rpcClient: this.rpcClient,
-      moduleId: this.config.moduleId,
-      resolveChannelPort: (channelId) => this.getChannelPort(channelId),
-      getMemoryPort: () => this.getMemoryPort(),
-    }, builtinToolConfig, this.mcpConnector, this.digestSdkEnv,
-      subAgentConfigs)
+    }, {
+      mcpConfigFactory: createMcpConfigs,
+      deps: {
+        rpcClient: this.rpcClient,
+        moduleId: this.config.moduleId,
+        resolveChannelPort: (channelId) => this.getChannelPort(channelId),
+        getMemoryPort: () => this.getMemoryPort(),
+      },
+      builtinToolConfig,
+      mcpConnector: this.mcpConnector,
+      digestSdkEnv: this.digestSdkEnv,
+      subAgentConfigs,
+    })
   }
 
   /**

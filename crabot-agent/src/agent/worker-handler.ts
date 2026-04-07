@@ -194,6 +194,15 @@ class HumanMessageQueue {
 // WorkerHandler
 // ============================================================================
 
+export interface WorkerHandlerOptions {
+  mcpConfigFactory?: () => Record<string, McpServer>
+  deps?: WorkerDeps
+  builtinToolConfig?: BuiltinToolConfig
+  mcpConnector?: McpConnector
+  digestSdkEnv?: SdkEnvConfig
+  subAgentConfigs?: ReadonlyArray<{ readonly definition: SubAgentDefinition; readonly sdkEnv: SdkEnvConfig }>
+}
+
 export class WorkerHandler {
   private sdkEnv: SdkEnvConfig
   private systemPrompt: string
@@ -212,23 +221,18 @@ export class WorkerHandler {
   constructor(
     sdkEnv: SdkEnvConfig,
     config: WorkerHandlerConfig,
-    mcpConfigFactory?: () => Record<string, McpServer>,
-    deps?: WorkerDeps,
-    builtinToolConfig?: BuiltinToolConfig,
-    mcpConnector?: McpConnector,
-    digestSdkEnv?: SdkEnvConfig,
-    subAgentConfigs?: ReadonlyArray<{ readonly definition: SubAgentDefinition; readonly sdkEnv: SdkEnvConfig }>,
+    options?: WorkerHandlerOptions,
   ) {
     this.sdkEnv = sdkEnv
-    this.mcpConfigFactory = mcpConfigFactory
-    this.deps = deps
+    this.mcpConfigFactory = options?.mcpConfigFactory
+    this.deps = options?.deps
     this.systemPrompt = config.systemPrompt
     this.longTermPreloadLimit = config.longTermPreloadLimit ?? 20
-    this.builtinToolConfig = builtinToolConfig
-    this.mcpConnector = mcpConnector
+    this.builtinToolConfig = options?.builtinToolConfig
+    this.mcpConnector = options?.mcpConnector
     this.extra = config.extra ?? {}
-    this.digestSdkEnv = digestSdkEnv
-    this.subAgentConfigs = subAgentConfigs ?? []
+    this.digestSdkEnv = options?.digestSdkEnv
+    this.subAgentConfigs = options?.subAgentConfigs ?? []
   }
 
   async executeTask(
@@ -342,7 +346,7 @@ export class WorkerHandler {
       const baseTools = [...tools]
       for (const { definition, sdkEnv: subSdkEnv } of this.subAgentConfigs) {
         const subAdapter = createAdapter({
-          endpoint: subSdkEnv.env.ANTHROPIC_BASE_URL ?? subSdkEnv.env.ANTHROPIC_API_BASE ?? '',
+          endpoint: subSdkEnv.env.ANTHROPIC_BASE_URL ?? '',
           apikey: subSdkEnv.env.ANTHROPIC_API_KEY ?? '',
           format: subSdkEnv.format,
         })
@@ -372,7 +376,7 @@ export class WorkerHandler {
 
       // 4. Create LLM adapter from sdkEnv (format-based routing)
       const adapter = createAdapter({
-        endpoint: this.sdkEnv.env.ANTHROPIC_BASE_URL ?? this.sdkEnv.env.ANTHROPIC_API_BASE ?? '',
+        endpoint: this.sdkEnv.env.ANTHROPIC_BASE_URL ?? '',
         apikey: this.sdkEnv.env.ANTHROPIC_API_KEY ?? '',
         format: this.sdkEnv.format,
       })
