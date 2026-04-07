@@ -346,8 +346,8 @@ export class WorkerHandler {
       const baseTools = [...tools]
       for (const { definition, sdkEnv: subSdkEnv } of this.subAgentConfigs) {
         const subAdapter = createAdapter({
-          endpoint: subSdkEnv.env.ANTHROPIC_BASE_URL ?? '',
-          apikey: subSdkEnv.env.ANTHROPIC_API_KEY ?? '',
+          endpoint: subSdkEnv.env.LLM_BASE_URL ?? '',
+          apikey: subSdkEnv.env.LLM_API_KEY ?? '',
           format: subSdkEnv.format,
         })
         tools.push(createSubAgentTool({
@@ -376,8 +376,8 @@ export class WorkerHandler {
 
       // 4. Create LLM adapter from sdkEnv (format-based routing)
       const adapter = createAdapter({
-        endpoint: this.sdkEnv.env.ANTHROPIC_BASE_URL ?? '',
-        apikey: this.sdkEnv.env.ANTHROPIC_API_KEY ?? '',
+        endpoint: this.sdkEnv.env.LLM_BASE_URL ?? '',
+        apikey: this.sdkEnv.env.LLM_API_KEY ?? '',
         format: this.sdkEnv.format,
       })
 
@@ -416,8 +416,8 @@ export class WorkerHandler {
           const digestMode: 'llm' | 'extract' = ex.progress_digest_mode === 'extract' ? 'extract' : 'llm'
           const digestAdapter = (digestMode !== 'extract' && this.digestSdkEnv)
             ? createAdapter({
-                endpoint: this.digestSdkEnv.env.ANTHROPIC_BASE_URL ?? '',
-                apikey: this.digestSdkEnv.env.ANTHROPIC_API_KEY ?? '',
+                endpoint: this.digestSdkEnv.env.LLM_BASE_URL ?? '',
+                apikey: this.digestSdkEnv.env.LLM_API_KEY ?? '',
                 format: this.digestSdkEnv.format,
               })
             : undefined
@@ -569,8 +569,8 @@ export class WorkerHandler {
   ): Promise<string> {
     try {
       const adapter = createAdapter({
-        endpoint: this.sdkEnv.env.ANTHROPIC_BASE_URL ?? '',
-        apikey: this.sdkEnv.env.ANTHROPIC_API_KEY ?? '',
+        endpoint: this.sdkEnv.env.LLM_BASE_URL ?? '',
+        apikey: this.sdkEnv.env.LLM_API_KEY ?? '',
         format: this.sdkEnv.format,
       })
       const { callNonStreaming } = await import('../engine/llm-adapter.js')
