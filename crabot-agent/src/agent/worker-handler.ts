@@ -201,6 +201,7 @@ export interface WorkerHandlerOptions {
   mcpConnector?: McpConnector
   digestSdkEnv?: SdkEnvConfig
   subAgentConfigs?: ReadonlyArray<{ readonly definition: SubAgentDefinition; readonly sdkEnv: SdkEnvConfig }>
+  skills?: ReadonlyArray<SkillConfig>
 }
 
 export class WorkerHandler {
@@ -217,6 +218,7 @@ export class WorkerHandler {
   private extra: Record<string, unknown>
   private digestSdkEnv?: SdkEnvConfig
   private readonly subAgentConfigs: ReadonlyArray<{ readonly definition: SubAgentDefinition; readonly sdkEnv: SdkEnvConfig }>
+  private readonly skills: ReadonlyArray<SkillConfig>
 
   constructor(
     sdkEnv: SdkEnvConfig,
@@ -233,6 +235,7 @@ export class WorkerHandler {
     this.extra = config.extra ?? {}
     this.digestSdkEnv = options?.digestSdkEnv
     this.subAgentConfigs = options?.subAgentConfigs ?? []
+    this.skills = options?.skills ?? []
   }
 
   async executeTask(
@@ -261,9 +264,9 @@ export class WorkerHandler {
       // 1. Create isolated task directory
       await fs.promises.mkdir(taskDir, { recursive: true })
 
-      // 2. Write Admin Skills to task directory
-      const skills = (params as { skills?: SkillConfig[] }).skills
-      if (skills && skills.length > 0) {
+      // 2. Write Admin Skills to task directory (from instance config, not RPC params)
+      const skills = this.skills
+      if (skills.length > 0) {
         const skillsDir = path.join(taskDir, '.claude', 'skills')
         await fs.promises.mkdir(skillsDir, { recursive: true })
         for (const skill of skills) {
@@ -339,8 +342,7 @@ export class WorkerHandler {
       }
 
       // 3e. Built-in file/shell tools (filtered by Admin config)
-      const hasSkills = (params as { skills?: SkillConfig[] }).skills?.length
-      tools.push(...getConfiguredBuiltinTools(taskDir, this.builtinToolConfig, hasSkills ? { skillsDir: taskDir } : undefined))
+      tools.push(...getConfiguredBuiltinTools(taskDir, this.builtinToolConfig, skills.length > 0 ? { skillsDir: taskDir } : undefined))
 
       // 3f. Sub-agent delegation tools
       const baseTools = [...tools]

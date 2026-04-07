@@ -157,227 +157,260 @@ export const AgentConfig: React.FC = () => {
 
   const configurableRoles = llmRequirements
 
+  const llmProviders = providers.filter((p) => p.models.some((m) => m.type === 'llm'))
+
   if (loading) return <MainLayout><Loading /></MainLayout>
 
   return (
     <MainLayout>
-      <div style={{ marginBottom: '2rem' }}>
-        <h1 style={{ fontSize: '2rem', fontWeight: 700 }}>Agent 配置</h1>
-        <p style={{ color: 'var(--text-secondary)', marginTop: '0.5rem' }}>
-          配置 AI 助手的模型、工具和系统行为
-        </p>
-      </div>
-
-      {error && <div className="error-message">{error}</div>}
-
-      <Card title="AI 性格提示词">
-        <p style={{ color: 'var(--text-secondary)', marginBottom: '1rem', fontSize: '0.875rem' }}>
-          定义 AI 助手的角色、语气和领域专长（可选，留空则不设定特定性格）。<br />
-          <span style={{ fontSize: '0.8rem', color: 'var(--text-tertiary, #9ca3af)' }}>
-            注：Front/Worker 内部的工作流程指令已内置，无需在此配置。
-          </span>
-        </p>
-        <textarea
-          className="textarea"
-          value={config.system_prompt}
-          onChange={(e) => setConfig((prev) => ({ ...prev, system_prompt: e.target.value }))}
-          rows={6}
-          placeholder="例如：你是一个专业友善的客服助手，帮助用户解决售后问题。回答时请保持简洁、耐心..."
-        />
-      </Card>
-
-      <div style={{ marginTop: '1.5rem' }}>
-        <Card title="模型角色">
-          <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem', fontSize: '0.875rem' }}>
-            为不同场景配置专用模型。默认模型使用全局设置，无需配置。
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.25rem' }}>
+        <div>
+          <h1 style={{ fontSize: '1.5rem', fontWeight: 700, letterSpacing: '-0.01em' }}>Agent 配置</h1>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem', marginTop: '0.25rem' }}>
+            模型、工具与系统行为
           </p>
-          {configurableRoles.length === 0 ? (
-            <p style={{ color: 'var(--text-secondary)' }}>暂无可配置的模型角色</p>
-          ) : (
-            configurableRoles.map((role) => (
-              <div key={role.key} style={{ marginBottom: '1.5rem', padding: '1rem', background: 'var(--bg-tertiary)', borderRadius: '8px' }}>
-                <div style={{ marginBottom: '0.5rem' }}>
-                  <strong style={{ fontSize: '1rem' }}>{role.key}</strong>
-                  {role.required && <span style={{ color: 'var(--error)', marginLeft: '0.25rem' }}>*</span>}
-                  {!role.required && <span style={{ color: 'var(--text-secondary)', marginLeft: '0.5rem', fontSize: '0.75rem' }}>(可选)</span>}
-                </div>
-                <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', marginBottom: '0.75rem' }}>{role.description}</p>
-                {role.recommended_capabilities && role.recommended_capabilities.length > 0 && (
-                  <p style={{ color: 'var(--primary)', fontSize: '0.75rem', marginBottom: '0.75rem' }}>
-                    推荐能力: {role.recommended_capabilities.join(', ')}
-                  </p>
-                )}
-                <Select
-                  label="选择模型供应商"
-                  options={[
-                    { value: '', label: '使用默认模型' },
-                    ...providers.filter((p) => p.models.some((m) => m.type === 'llm')).map((p) => ({ value: p.id, label: p.name })),
-                  ]}
-                  value={config.model_roles[role.key]?.provider_id || ''}
-                  onChange={(e) => {
-                    if (e.target.value) {
-                      handleProviderChange(role.key, e.target.value)
-                    } else {
-                      setConfig((prev) => {
-                        const newRoles = { ...prev.model_roles }
-                        delete newRoles[role.key]
-                        return { ...prev, model_roles: newRoles }
-                      })
-                    }
-                  }}
-                />
-                {(() => {
-                  const selectedProvider = getSelectedProvider(role.key)
-                  if (!selectedProvider) return null
-                  const llmModels = selectedProvider.models.filter((m) => m.type === 'llm')
-                  if (llmModels.length === 0) return null
-                  return (
-                    <Select
-                      label="选择模型"
-                      options={llmModels.map((m) => ({ value: m.model_id, label: m.display_name + (m.supports_vision ? ' 👁 Vision' : '') }))}
-                      value={config.model_roles[role.key]?.model_id || ''}
-                      onChange={(e) => handleModelChange(role.key, e.target.value)}
-                    />
-                  )
-                })()}
-              </div>
-            ))
-          )}
-        </Card>
-      </div>
-
-      {/* MCP Server 关联 */}
-      <div style={{ marginTop: '1.5rem' }}>
-        <Card title="MCP Servers（工具）">
-          <p style={{ color: 'var(--text-secondary)', marginBottom: '1rem', fontSize: '0.875rem' }}>
-            选择要提供给 Agent 的 MCP Server。内置必要工具已自动启用，无需配置。
-          </p>
-          {allMCPServers.length === 0 ? (
-            <p style={{ color: 'var(--text-secondary)' }}>暂无可用的 MCP Server，请先在"MCP Servers"页面添加</p>
-          ) : (
-            <div style={{ display: 'grid', gap: '0.5rem' }}>
-              {allMCPServers.map(s => (
-                <label key={s.id} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', cursor: s.can_disable ? 'pointer' : 'default', padding: '0.5rem', borderRadius: '6px', background: config.mcp_server_ids.includes(s.id) ? 'rgba(59,130,246,0.08)' : 'transparent' }}>
-                  <input
-                    type="checkbox"
-                    checked={config.mcp_server_ids.includes(s.id)}
-                    onChange={() => toggleMCPServer(s.id)}
-                    disabled={!s.can_disable && s.is_essential}
-                  />
-                  <div style={{ flex: 1 }}>
-                    <span style={{ fontWeight: 500 }}>{s.name}</span>
-                    {s.is_builtin && <span style={{ marginLeft: '0.5rem', fontSize: '0.75rem', color: '#8b5cf6' }}>[内置]</span>}
-                    {s.description && <span style={{ marginLeft: '0.5rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{s.description}</span>}
-                  </div>
-                </label>
-              ))}
-            </div>
-          )}
-        </Card>
-      </div>
-
-      {/* Skill 关联 */}
-      <div style={{ marginTop: '1.5rem' }}>
-        <Card title="Skills（技能）">
-          <p style={{ color: 'var(--text-secondary)', marginBottom: '1rem', fontSize: '0.875rem' }}>
-            选择要注入 Agent 系统提示词的 Skill。
-          </p>
-          {allSkills.length === 0 ? (
-            <p style={{ color: 'var(--text-secondary)' }}>暂无可用的 Skill，请先在"Skills"页面添加</p>
-          ) : (
-            <div style={{ display: 'grid', gap: '0.5rem' }}>
-              {allSkills.map(s => (
-                <label key={s.id} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', cursor: 'pointer', padding: '0.5rem', borderRadius: '6px', background: config.skill_ids.includes(s.id) ? 'rgba(59,130,246,0.08)' : 'transparent' }}>
-                  <input
-                    type="checkbox"
-                    checked={config.skill_ids.includes(s.id)}
-                    onChange={() => toggleSkill(s.id)}
-                  />
-                  <div style={{ flex: 1 }}>
-                    <span style={{ fontWeight: 500 }}>{s.name}</span>
-                    <span style={{ marginLeft: '0.5rem', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>v{s.version}</span>
-                    {s.is_builtin && <span style={{ marginLeft: '0.5rem', fontSize: '0.75rem', color: '#8b5cf6' }}>[内置]</span>}
-                    {s.description && <span style={{ marginLeft: '0.5rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{s.description}</span>}
-                  </div>
-                </label>
-              ))}
-            </div>
-          )}
-        </Card>
-      </div>
-
-      {/* 扩展配置 */}
-      {extraSchema.length > 0 && (
-        <div style={{ marginTop: '1.5rem' }}>
-          <Card title="扩展配置">
-            <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem', fontSize: '0.875rem' }}>
-              Agent 实现自定义的行为参数。未修改的项使用默认值。
-            </p>
-            {extraSchema.map((schema) => {
-              const currentValue = config.extra[schema.key]
-              const displayValue = currentValue ?? schema.default ?? ''
-              return (
-                <div key={schema.key} style={{ marginBottom: '1rem' }}>
-                  <label style={{ display: 'block', marginBottom: '0.25rem', fontWeight: 500, fontSize: '0.875rem' }}>
-                    {schema.title}
-                    {schema.default !== undefined && (
-                      <span style={{ color: 'var(--text-secondary)', fontWeight: 400, marginLeft: '0.5rem', fontSize: '0.75rem' }}>
-                        默认: {String(schema.default)}
-                      </span>
-                    )}
-                  </label>
-                  {schema.description && (
-                    <p style={{ color: 'var(--text-secondary)', fontSize: '0.75rem', marginBottom: '0.5rem' }}>{schema.description}</p>
-                  )}
-                  {schema.type === 'boolean' ? (
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-                      <input
-                        type="checkbox"
-                        checked={displayValue === true || displayValue === 'true'}
-                        onChange={(e) => setConfig((prev) => ({
-                          ...prev,
-                          extra: { ...prev.extra, [schema.key]: e.target.checked },
-                        }))}
-                      />
-                      <span style={{ fontSize: '0.875rem' }}>{displayValue ? '启用' : '禁用'}</span>
-                    </label>
-                  ) : schema.type === 'select' && schema.options ? (
-                    <Select
-                      label=""
-                      options={schema.options.map((o) => ({ value: o.value, label: o.label }))}
-                      value={String(displayValue)}
-                      onChange={(e) => setConfig((prev) => ({
-                        ...prev,
-                        extra: { ...prev.extra, [schema.key]: e.target.value },
-                      }))}
-                    />
-                  ) : (
-                    <input
-                      className="input"
-                      type={schema.type === 'number' ? 'number' : 'text'}
-                      value={String(displayValue)}
-                      onChange={(e) => {
-                        const raw = e.target.value
-                        const parsed = schema.type === 'number' ? (raw === '' ? '' : Number(raw)) : raw
-                        setConfig((prev) => ({
-                          ...prev,
-                          extra: { ...prev.extra, [schema.key]: parsed },
-                        }))
-                      }}
-                    />
-                  )}
-                </div>
-              )
-            })}
-          </Card>
         </div>
-      )}
-
-      <div style={{ marginTop: '1.5rem', display: 'flex', justifyContent: 'flex-end' }}>
         <Button variant="primary" onClick={handleSave} disabled={saving}>
           {saving ? '保存中...' : '保存配置'}
         </Button>
       </div>
+
+      {error && <div className="error-message">{error}</div>}
+
+      {/* System Prompt */}
+      <Card>
+        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: '0.625rem' }}>
+          <h3 style={{ fontSize: '0.9375rem', fontWeight: 600 }}>AI 性格提示词</h3>
+          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>工作流程指令已内置</span>
+        </div>
+        <textarea
+          className="textarea"
+          value={config.system_prompt}
+          onChange={(e) => setConfig((prev) => ({ ...prev, system_prompt: e.target.value }))}
+          rows={4}
+          style={{ minHeight: '80px' }}
+          placeholder="例如：你是一个专业友善的客服助手，帮助用户解决售后问题。回答时请保持简洁、耐心..."
+        />
+      </Card>
+
+      {/* Model Roles */}
+      <div style={{ marginTop: '1rem' }}>
+        <Card>
+          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
+            <h3 style={{ fontSize: '0.9375rem', fontWeight: 600 }}>模型角色</h3>
+            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>未配置则使用全局默认</span>
+          </div>
+          {configurableRoles.length === 0 ? (
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>暂无可配置的模型角色</p>
+          ) : (
+            <div style={{ display: 'grid', gap: '0.625rem' }}>
+              {configurableRoles.map((role) => {
+                const selectedProvider = getSelectedProvider(role.key)
+                const llmModels = selectedProvider?.models.filter((m) => m.type === 'llm') || []
+                return (
+                  <div key={role.key} style={{
+                    padding: '0.75rem',
+                    background: 'var(--bg-secondary)',
+                    borderRadius: '8px',
+                    border: '1px solid var(--border)',
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.375rem' }}>
+                      <span style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-primary)' }}>{role.key}</span>
+                      {role.required && <span style={{ color: 'var(--error)', fontSize: '0.75rem' }}>*</span>}
+                      {!role.required && <span style={{ fontSize: '0.6875rem', color: 'var(--text-muted)', background: 'var(--surface-hover)', padding: '0.0625rem 0.375rem', borderRadius: '3px' }}>可选</span>}
+                      {role.recommended_capabilities && role.recommended_capabilities.length > 0 && (
+                        <span style={{ fontSize: '0.6875rem', color: 'var(--primary)', background: 'var(--primary-subtle)', padding: '0.0625rem 0.375rem', borderRadius: '3px' }}>
+                          {role.recommended_capabilities.join(' / ')}
+                        </span>
+                      )}
+                    </div>
+                    {role.description && (
+                      <p style={{ color: 'var(--text-secondary)', fontSize: '0.75rem', marginBottom: '0.5rem', lineHeight: 1.4 }}>{role.description}</p>
+                    )}
+                    <div style={{ display: 'grid', gridTemplateColumns: llmModels.length > 0 ? '1fr 1fr' : '1fr', gap: '0.5rem' }}>
+                      <div className="form-group" style={{ marginBottom: 0 }}>
+                        <select
+                          className="select"
+                          value={config.model_roles[role.key]?.provider_id || ''}
+                          onChange={(e) => {
+                            if (e.target.value) {
+                              handleProviderChange(role.key, e.target.value)
+                            } else {
+                              setConfig((prev) => {
+                                const newRoles = { ...prev.model_roles }
+                                delete newRoles[role.key]
+                                return { ...prev, model_roles: newRoles }
+                              })
+                            }
+                          }}
+                        >
+                          <option value="">默认</option>
+                          {llmProviders.map((p) => (
+                            <option key={p.id} value={p.id}>{p.name}</option>
+                          ))}
+                        </select>
+                      </div>
+                      {llmModels.length > 0 && (
+                        <div className="form-group" style={{ marginBottom: 0 }}>
+                          <select
+                            className="select"
+                            value={config.model_roles[role.key]?.model_id || ''}
+                            onChange={(e) => handleModelChange(role.key, e.target.value)}
+                          >
+                            {llmModels.map((m) => (
+                              <option key={m.model_id} value={m.model_id}>
+                                {m.display_name}{m.supports_vision ? ' (Vision)' : ''}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </Card>
+      </div>
+
+      {/* MCP Servers + Skills — side by side */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '1rem' }}>
+        <Card>
+          <h3 style={{ fontSize: '0.9375rem', fontWeight: 600, marginBottom: '0.5rem' }}>MCP Servers</h3>
+          {allMCPServers.length === 0 ? (
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>暂无可用的 MCP Server</p>
+          ) : (
+            <div style={{ display: 'grid', gap: '0.125rem' }}>
+              {allMCPServers.map(s => {
+                const checked = config.mcp_server_ids.includes(s.id)
+                return (
+                  <label key={s.id} style={{
+                    display: 'flex', alignItems: 'center', gap: '0.5rem',
+                    cursor: s.can_disable ? 'pointer' : 'default',
+                    padding: '0.375rem 0.5rem', borderRadius: '5px',
+                    background: checked ? 'var(--primary-subtle)' : 'transparent',
+                    transition: 'background 0.15s',
+                  }}>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleMCPServer(s.id)}
+                      disabled={!s.can_disable && s.is_essential}
+                    />
+                    <span style={{ fontSize: '0.8125rem', fontWeight: 500 }}>{s.name}</span>
+                    {s.is_builtin && <span style={{ fontSize: '0.6875rem', color: '#8b5cf6', opacity: 0.8 }}>[内置]</span>}
+                    {s.description && <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.description}</span>}
+                  </label>
+                )
+              })}
+            </div>
+          )}
+        </Card>
+
+        <Card>
+          <h3 style={{ fontSize: '0.9375rem', fontWeight: 600, marginBottom: '0.5rem' }}>Skills</h3>
+          {allSkills.length === 0 ? (
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>暂无可用的 Skill</p>
+          ) : (
+            <div style={{ display: 'grid', gap: '0.125rem' }}>
+              {allSkills.map(s => {
+                const checked = config.skill_ids.includes(s.id)
+                return (
+                  <label key={s.id} style={{
+                    display: 'flex', alignItems: 'center', gap: '0.5rem',
+                    cursor: 'pointer',
+                    padding: '0.375rem 0.5rem', borderRadius: '5px',
+                    background: checked ? 'var(--primary-subtle)' : 'transparent',
+                    transition: 'background 0.15s',
+                  }}>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleSkill(s.id)}
+                    />
+                    <span style={{ fontSize: '0.8125rem', fontWeight: 500 }}>{s.name}</span>
+                    <span style={{ fontSize: '0.6875rem', color: 'var(--text-muted)' }}>v{s.version}</span>
+                    {s.is_builtin && <span style={{ fontSize: '0.6875rem', color: '#8b5cf6', opacity: 0.8 }}>[内置]</span>}
+                  </label>
+                )
+              })}
+            </div>
+          )}
+        </Card>
+      </div>
+
+      {/* Extra Config */}
+      {extraSchema.length > 0 && (
+        <div style={{ marginTop: '1rem' }}>
+          <Card>
+            <h3 style={{ fontSize: '0.9375rem', fontWeight: 600, marginBottom: '0.625rem' }}>扩展配置</h3>
+            <div style={{ display: 'grid', gap: '0.75rem' }}>
+              {extraSchema.map((schema) => {
+                const currentValue = config.extra[schema.key]
+                const displayValue = currentValue ?? schema.default ?? ''
+                return (
+                  <div key={schema.key}>
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.5rem', marginBottom: '0.25rem' }}>
+                      <label style={{ fontWeight: 500, fontSize: '0.8125rem' }}>{schema.title}</label>
+                      {schema.default !== undefined && (
+                        <span style={{ color: 'var(--text-muted)', fontSize: '0.6875rem' }}>
+                          默认: {String(schema.default)}
+                        </span>
+                      )}
+                    </div>
+                    {schema.description && (
+                      <p style={{ color: 'var(--text-secondary)', fontSize: '0.6875rem', marginBottom: '0.375rem' }}>{schema.description}</p>
+                    )}
+                    {schema.type === 'boolean' ? (
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={displayValue === true || displayValue === 'true'}
+                          onChange={(e) => setConfig((prev) => ({
+                            ...prev,
+                            extra: { ...prev.extra, [schema.key]: e.target.checked },
+                          }))}
+                        />
+                        <span style={{ fontSize: '0.8125rem' }}>{displayValue ? '启用' : '禁用'}</span>
+                      </label>
+                    ) : schema.type === 'select' && schema.options ? (
+                      <div className="form-group" style={{ marginBottom: 0 }}>
+                        <select
+                          className="select"
+                          value={String(displayValue)}
+                          onChange={(e) => setConfig((prev) => ({
+                            ...prev,
+                            extra: { ...prev.extra, [schema.key]: e.target.value },
+                          }))}
+                        >
+                          {schema.options.map((o) => (
+                            <option key={o.value} value={o.value}>{o.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                    ) : (
+                      <input
+                        className="input"
+                        type={schema.type === 'number' ? 'number' : 'text'}
+                        value={String(displayValue)}
+                        onChange={(e) => {
+                          const raw = e.target.value
+                          const parsed = schema.type === 'number' ? (raw === '' ? '' : Number(raw)) : raw
+                          setConfig((prev) => ({
+                            ...prev,
+                            extra: { ...prev.extra, [schema.key]: parsed },
+                          }))
+                        }}
+                      />
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          </Card>
+        </div>
+      )}
     </MainLayout>
   )
 }

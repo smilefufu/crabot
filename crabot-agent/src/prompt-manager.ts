@@ -142,7 +142,13 @@ const WORKER_RULES_TEMPLATE = `## 工作目录
 当你需要回忆之前的信息（如用户偏好、项目路径等）时：
 - 查看上方"长期记忆"段落中的 L0 摘要列表
 - 如需详情，调用 get_memory_detail 工具查看 L1 概览或 L2 全文
-- 如需搜索更多记忆，调用 search_memory 工具`
+- 如需搜索更多记忆，调用 search_memory 工具
+
+## 技能（Skill）
+
+如果系统提示中列出了"可用技能"，这些是为特定任务类型提供的专业指引。
+在执行相关任务前，先调用 Skill 工具（输入技能名称）加载完整指引，然后按指引操作。
+使用 Skill("list") 查看所有可用技能。`
 
 const PERSONALITY_SEED = `# 人格设定
 

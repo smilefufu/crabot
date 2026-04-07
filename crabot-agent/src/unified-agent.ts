@@ -29,6 +29,7 @@ import type {
   LLMConnectionInfo,
   TraceCallback,
   BuiltinToolConfig,
+  SkillConfig,
 } from './types.js'
 import { SessionManager } from './orchestration/session-manager.js'
 import { SwitchMapHandler } from './orchestration/switchmap-handler.js'
@@ -199,8 +200,12 @@ export class UnifiedAgent extends ModuleBase {
 
     // MCP connections managed by mcpConnector in onStart()
 
-    // 构建 SDK 环境变量（通过 LiteLLM 代理）
-    const adminPersonality = this.enhanceSystemPrompt(config.system_prompt, config.skills)
+    // Front: 纯 system_prompt（不含 skills）
+    // Worker: system_prompt + skill 摘要列表（完整内容通过 Skill tool 按需加载）
+    const basePersonality = config.system_prompt || undefined
+    const workerPersonality = basePersonality
+      ? basePersonality + this.buildSkillListing(config.skills)
+      : this.buildSkillListing(config.skills) || undefined
 
     // MCP config factory: creates fresh in-process McpServer instances per task
     // External MCP servers are managed by this.mcpConnector (connected in onStart)
@@ -236,10 +241,9 @@ export class UnifiedAgent extends ModuleBase {
           memoryWriteVisibility: () => this.currentMemPerms?.write_visibility ?? 'public',
           memoryWriteScopes: () => this.currentMemPerms?.write_scopes ?? [],
         }
-        const personality = adminPersonality || undefined
         this.frontHandler = new FrontHandler(llmConfig, toolExecutorDeps, {
           getSystemPrompt: (isGroup) => this.promptManager.assembleFrontPrompt(
-            isGroup, personality, this.getWorkerCapabilities(),
+            isGroup, basePersonality, this.getWorkerCapabilities(),
           ),
         })
       }
@@ -257,8 +261,8 @@ export class UnifiedAgent extends ModuleBase {
       if (workerModelConfig) {
         this.sdkEnvWorker = this.buildSdkEnv(workerModelConfig)
         this.workerHandler = this.createWorkerHandler(
-          this.sdkEnvWorker, config.model_config, adminPersonality,
-          createMcpConfigs, config.builtin_tool_config)
+          this.sdkEnvWorker, config.model_config, workerPersonality,
+          createMcpConfigs, config.builtin_tool_config, config.skills)
       }
     }
   }
@@ -292,9 +296,10 @@ export class UnifiedAgent extends ModuleBase {
   private createWorkerHandler(
     workerSdkEnv: SdkEnvConfig,
     modelConfig: Record<string, LLMConnectionInfo>,
-    adminPersonality: string | undefined,
+    workerPersonality: string | undefined,
     createMcpConfigs: () => Record<string, McpServer>,
     builtinToolConfig?: BuiltinToolConfig,
+    skills?: ReadonlyArray<SkillConfig>,
   ): WorkerHandler {
     const subAgentConfigs = this.buildSubAgentConfigs(modelConfig)
     const subAgentHints = subAgentConfigs.map(({ definition }) => ({
@@ -302,7 +307,7 @@ export class UnifiedAgent extends ModuleBase {
       workerHint: definition.workerHint,
     }))
     return new WorkerHandler(workerSdkEnv, {
-      systemPrompt: this.promptManager.assembleWorkerPrompt(adminPersonality || undefined, subAgentHints),
+      systemPrompt: this.promptManager.assembleWorkerPrompt(workerPersonality || undefined, subAgentHints),
       longTermPreloadLimit: this.orchestrationConfig.worker_long_term_memory_limit,
       extra: this.extra,
     }, {
@@ -317,31 +322,29 @@ export class UnifiedAgent extends ModuleBase {
       mcpConnector: this.mcpConnector,
       digestSdkEnv: this.digestSdkEnv,
       subAgentConfigs,
+      skills: skills ?? [],
     })
   }
 
   /**
-   * 增强 system_prompt，添加 Skills 信息
+   * 构建 skill 摘要列表（渐进式披露：只放 name + description，完整内容通过 Skill tool 按需加载）
    */
-  private enhanceSystemPrompt(
-    basePrompt: string,
-    skills?: Array<{ id: string; name: string; content: string }>
+  private buildSkillListing(
+    skills?: ReadonlyArray<{ id: string; name: string; description?: string }>
   ): string {
-    if (!skills || skills.length === 0) {
-      return basePrompt
-    }
+    if (!skills || skills.length === 0) return ''
 
-    const skillsSection = skills
-      .map((skill) => `### ${skill.name}\n${skill.content}`)
-      .join('\n\n')
+    const MAX_DESC = 250
+    const listing = skills
+      .map((s) => {
+        const desc = s.description
+          ? (s.description.length > MAX_DESC ? s.description.slice(0, MAX_DESC - 1) + '…' : s.description)
+          : ''
+        return `- ${s.name}${desc ? `: ${desc}` : ''}`
+      })
+      .join('\n')
 
-    return `${basePrompt}
-
-## 可用技能
-
-${skillsSection}
-
-当用户请求与上述技能相关的任务时，请使用对应的技能来完成。`
+    return `\n\n## 可用技能\n\n以下技能可通过 Skill 工具加载完整指引：\n${listing}\n\n执行相关任务前，先调用 Skill 工具加载对应技能，再按指引操作。`
   }
 
   /**
@@ -1727,10 +1730,10 @@ ${skillsSection}
    * 热更新 LLM 客户端
    */
   private async updateLlmClients(modelConfig: Record<string, LLMConnectionInfo>): Promise<void> {
-    const adminPersonality = this.enhanceSystemPrompt(
-      this.agentConfig?.system_prompt ?? '',
-      this.agentConfig?.skills
-    )
+    const basePersonality = this.agentConfig?.system_prompt || undefined
+    const workerPersonality = basePersonality
+      ? basePersonality + this.buildSkillListing(this.agentConfig?.skills)
+      : this.buildSkillListing(this.agentConfig?.skills) || undefined
 
     // MCP config factory: creates fresh in-process McpServer instances per task
     const createMcpConfigs = (): Record<string, McpServer> => ({
@@ -1774,10 +1777,9 @@ ${skillsSection}
             memoryWriteVisibility: () => this.currentMemPerms?.write_visibility ?? 'public',
             memoryWriteScopes: () => this.currentMemPerms?.write_scopes ?? [],
           }
-          const personality = adminPersonality || undefined
           this.frontHandler = new FrontHandler(llmConfig, toolExecutorDeps, {
             getSystemPrompt: (isGroup) => this.promptManager.assembleFrontPrompt(
-              isGroup, personality, this.getWorkerCapabilities(),
+              isGroup, basePersonality, this.getWorkerCapabilities(),
             ),
           })
           console.log(`[${this.config.moduleId}] Front Agent handler created from config push`)
@@ -1797,8 +1799,8 @@ ${skillsSection}
       if (workerConfig) {
         this.sdkEnvWorker = this.buildSdkEnv(workerConfig)
         this.workerHandler = this.createWorkerHandler(
-          this.sdkEnvWorker, modelConfig, adminPersonality,
-          createMcpConfigs, this.agentConfig?.builtin_tool_config)
+          this.sdkEnvWorker, modelConfig, workerPersonality,
+          createMcpConfigs, this.agentConfig?.builtin_tool_config, this.agentConfig?.skills)
         console.log(`[${this.config.moduleId}] Worker Agent SDK env ${this.workerHandler ? 'updated' : 'created from config push'}`)
       }
     }

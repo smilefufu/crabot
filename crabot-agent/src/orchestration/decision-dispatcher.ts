@@ -340,10 +340,10 @@ export class DecisionDispatcher {
           console.error(`[DecisionDispatcher] Failed to update task status: ${msg}`)
         })
 
-        // 写入短期记忆：Task 完成/失败事件
+        // 写入短期记忆：Task 完成/失败事件（fire-and-forget）
         const friendName = params.senderFriend?.display_name ?? 'Unknown'
         const friendId = params.messages[params.messages.length - 1]?.sender?.friend_id ?? ''
-        await this.memoryWriter.writeTaskFinished({
+        this.memoryWriter.writeTaskFinished({
           task_id: task.id,
           task_title: task.title,
           outcome: result.outcome,
@@ -354,7 +354,7 @@ export class DecisionDispatcher {
           session_id: params.session_id,
           visibility: params.memoryPermissions.write_visibility,
           scopes: params.memoryPermissions.write_scopes,
-        })
+        }).catch(() => {})
 
         // 回复用户（仅当 Worker 提供了 final_reply 时；进度流已发过的不重复）
         if (result.final_reply?.text) {
@@ -377,10 +377,10 @@ export class DecisionDispatcher {
         // 回复用户失败信息
         await this.sendReplyToUser('任务处理失败，请稍后重试', params).catch(() => {})
 
-        // 写入短期记忆：Task 失败事件
+        // 写入短期记忆：Task 失败事件（fire-and-forget）
         const failFriendName = params.senderFriend?.display_name ?? 'Unknown'
         const failFriendId = params.messages[params.messages.length - 1]?.sender?.friend_id ?? ''
-        await this.memoryWriter.writeTaskFinished({
+        this.memoryWriter.writeTaskFinished({
           task_id: task.id,
           task_title: task.title,
           outcome: 'failed',
@@ -391,7 +391,7 @@ export class DecisionDispatcher {
           session_id: params.session_id,
           visibility: params.memoryPermissions.write_visibility,
           scopes: params.memoryPermissions.write_scopes,
-        }).catch(() => {}) // best effort
+        }).catch(() => {})
       }
     }
 

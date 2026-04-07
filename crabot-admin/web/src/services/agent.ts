@@ -7,19 +7,9 @@ import type {
   AgentInstance,
   AgentInstanceConfig,
   AgentImplementation,
+  AgentLLMRequirementsResponse,
   PaginatedResponse,
 } from '../types'
-
-interface AgentLLMRequirementsResponse {
-  model_format: string
-  requirements: Array<{
-    key: string
-    description: string
-    required: boolean
-    recommended_capabilities?: string[]
-    used_by?: Array<'front' | 'worker'>
-  }>
-}
 
 export const agentService = {
   async listInstances(): Promise<PaginatedResponse<AgentInstance>> {
