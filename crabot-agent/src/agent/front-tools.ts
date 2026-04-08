@@ -216,6 +216,22 @@ export const GET_HISTORY_TOOL: ToolDefinition = {
   call: NOOP_CALL,
 }
 
+export const GET_MESSAGE_TOOL: ToolDefinition = {
+  name: 'get_message',
+  description: '按消息 ID 查询单条消息详情。当历史消息中某条消息的内容不完整时（如只显示占位符），可用此工具查看完整内容。',
+  inputSchema: {
+    type: 'object' as const,
+    properties: {
+      channel_id: { type: 'string', description: 'Channel 模块实例 ID' },
+      session_id: { type: 'string', description: 'Session ID' },
+      platform_message_id: { type: 'string', description: '要查询的消息 ID' },
+    },
+    required: ['channel_id', 'session_id', 'platform_message_id'],
+  },
+  isReadOnly: true,
+  call: NOOP_CALL,
+}
+
 export const STORE_MEMORY_TOOL: ToolDefinition = {
   name: 'store_memory',
   description: '将信息写入长期记忆。当用户要求记住/记录某些信息时使用。',
@@ -294,6 +310,7 @@ export function getAllFrontTools(allowSilent: boolean): ToolDefinition[] {
     OPEN_PRIVATE_SESSION_TOOL,
     SEND_MESSAGE_TOOL,
     GET_HISTORY_TOOL,
+    GET_MESSAGE_TOOL,
     STORE_MEMORY_TOOL,
     SEARCH_MEMORY_TOOL,
     GET_MEMORY_DETAIL_TOOL,

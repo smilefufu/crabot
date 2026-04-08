@@ -1,7 +1,7 @@
 /**
  * Crab-Messaging MCP Server — Agent 统一通讯能力
  *
- * 提供 7 个工具：lookup_friend, list_contacts, list_groups, list_sessions, open_private_session, send_message, get_history
+ * 提供 8 个工具：lookup_friend, list_contacts, list_groups, list_sessions, open_private_session, send_message, get_history, get_message
  * 对齐 protocol-crab-messaging.md
  *
  * @see crabot-docs/protocols/protocol-crab-messaging.md
@@ -577,6 +577,46 @@ export function createCrabMessagingServer(
             const msg = err instanceof Error ? err.message : String(err)
             return {
               content: [{ type: 'text' as const, text: JSON.stringify({ error: `查询历史失败: ${msg}` }) }],
+            }
+          }
+        },
+  )
+
+      // ================================================================
+      // 7. get_message — 按 ID 查询单条消息
+      // ================================================================
+  server.tool(
+        'get_message',
+        '按消息 ID 查询单条消息详情。当消息内容不完整时可用此工具查看完整内容。',
+        {
+          channel_id: z.string().describe('Channel 模块实例 ID'),
+          session_id: z.string().describe('Session ID'),
+          platform_message_id: z.string().describe('要查询的消息 ID'),
+        },
+        async (args) => {
+          try {
+            const channelPort = await resolveChannelPort(args.channel_id)
+            if (!channelPort) {
+              return {
+                content: [{ type: 'text' as const, text: JSON.stringify({ error: `Channel ${args.channel_id} 不可用` }) }],
+              }
+            }
+
+            const result = await rpcClient.call<
+              { session_id: string; platform_message_id: string },
+              Record<string, unknown>
+            >(channelPort, 'get_message', {
+              session_id: args.session_id,
+              platform_message_id: args.platform_message_id,
+            }, moduleId)
+
+            return {
+              content: [{ type: 'text' as const, text: JSON.stringify(result) }],
+            }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err)
+            return {
+              content: [{ type: 'text' as const, text: JSON.stringify({ error: `查询消息失败: ${msg}` }) }],
             }
           }
         },

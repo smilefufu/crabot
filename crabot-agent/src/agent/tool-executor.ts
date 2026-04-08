@@ -54,6 +54,7 @@ export class ToolExecutor {
         case 'open_private_session': return await this.openPrivateSession(input)
         case 'send_message': return await this.sendMessage(input)
         case 'get_history': return await this.getHistory(input)
+        case 'get_message': return await this.getMessage(input)
         case 'query_tasks': return await this.queryTasks(input)
         case 'create_schedule': return await this.createSchedule(input)
         case 'store_memory': return await this.storeMemory(input)
@@ -182,6 +183,18 @@ export class ToolExecutor {
       limit: (input.limit as number) ?? 20,
     }, this.deps.moduleId)
     return { output: JSON.stringify({ messages: result.items ?? [] }), isError: false }
+  }
+
+  private async getMessage(input: Record<string, unknown>): Promise<ToolResult> {
+    const channelPort = await this.deps.resolveChannelPort(input.channel_id as string)
+    const result = await this.deps.rpcClient.call<
+      { session_id: string; platform_message_id: string },
+      Record<string, unknown>
+    >(channelPort, 'get_message', {
+      session_id: input.session_id as string,
+      platform_message_id: input.platform_message_id as string,
+    }, this.deps.moduleId)
+    return { output: JSON.stringify(result), isError: false }
   }
 
   private async queryTasks(input: Record<string, unknown>): Promise<ToolResult> {
