@@ -188,6 +188,11 @@ export interface TimeRange {
   after?: string
 }
 
+export interface GetMessageParams {
+  session_id: SessionId
+  platform_message_id: string
+}
+
 export interface GetHistoryParams {
   session_id: SessionId
   time_range?: TimeRange

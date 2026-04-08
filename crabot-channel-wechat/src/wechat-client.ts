@@ -138,13 +138,34 @@ export class WechatClient {
   }
 
   /**
-   * 查询消息历史
+   * 查询消息历史（代理 wechat-connector GET /api/v1/bot/messages）
    */
-  async getMessages(talker: string, limit = 20): Promise<Array<Record<string, unknown>>> {
+  async getMessages(params: {
+    talker: string
+    limit?: number
+    before?: string
+    after?: string
+  }): Promise<Array<Record<string, unknown>>> {
+    const qs = new URLSearchParams()
+    qs.set('talker', params.talker)
+    if (params.limit) qs.set('limit', String(params.limit))
+    if (params.before) qs.set('before', params.before)
+    if (params.after) qs.set('after', params.after)
     const result = await this.get<Array<Record<string, unknown>>>(
-      `/api/v1/bot/messages?talker=${encodeURIComponent(talker)}&limit=${limit}`
+      `/api/v1/bot/messages?${qs.toString()}`
     )
     return result ?? []
+  }
+
+  /**
+   * 按 ID 查询单条消息（代理 wechat-connector GET /api/v1/bot/messages/:id）
+   */
+  async getMessageById(id: string): Promise<Record<string, unknown> | null> {
+    try {
+      return await this.get(`/api/v1/bot/messages/${encodeURIComponent(id)}`)
+    } catch {
+      return null
+    }
   }
 
   // ============================================================================

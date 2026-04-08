@@ -13,8 +13,8 @@ import crypto from 'node:crypto'
 import { ModuleBase, type ModuleConfig } from './core/module-base.js'
 import { generateId, generateTimestamp, type Event } from './core/base-protocol.js'
 import { WechatClient } from './wechat-client.js'
+import { formatWechatContent } from './format-wechat-content.js'
 import { SessionManager } from './session-manager.js'
-import { MessageStore } from './message-store.js'
 import type {
   WechatRawEvent,
   WebhookEnvelope,
@@ -27,6 +27,7 @@ import type {
   GetSessionParams,
   FindOrCreatePrivateSessionParams,
   GetHistoryParams,
+  GetMessageParams,
   SessionType,
 } from './types.js'
 
@@ -43,9 +44,7 @@ export interface WechatChannelInitConfig {
 export class WechatChannel extends ModuleBase {
   private readonly client: WechatClient
   private readonly sessionManager: SessionManager
-  private readonly messageStore: MessageStore
   private readonly wechatConfig: WechatChannelConfig
-  private readonly dataDir: string
 
   // Socket.IO 连接（动态 import，仅 socketio 模式使用）
   private socket: { disconnect(): void; on(event: string, handler: (...args: unknown[]) => void): void } | null = null
@@ -71,10 +70,8 @@ export class WechatChannel extends ModuleBase {
     // 规范化 connector_url：去掉尾部 /puppet-events（如用户从前端复制了完整连接地址）
     const cleanUrl = config.wechat.connector_url.replace(/\/puppet-events\/?$/, '').replace(/\/+$/, '')
     this.wechatConfig = { ...config.wechat, connector_url: cleanUrl }
-    this.dataDir = config.data_dir
     this.client = new WechatClient(cleanUrl, config.wechat.api_key)
     this.sessionManager = new SessionManager(config.module_id, config.data_dir)
-    this.messageStore = new MessageStore(config.data_dir)
 
     this.registerMethods()
   }
@@ -239,18 +236,13 @@ export class WechatChannel extends ModuleBase {
       sender_name: event.sender.name,
     })
 
-    // 转换消息类型（MessageType 枚举：0=TEXT, 1=IMAGE, 18=QUOTE, ...）
+    // 格式化消息内容（所有消息类型统一通过 formatWechatContent 处理）
     const msgType = event.message.type
-    const msgContent = event.message.content as { text?: string; at_string?: string; resource_url?: string }
-    const hasText = msgType === 0 || msgType === 18 || msgType === 20  // TEXT, QUOTE, APP_MSG
-
-    const contentType = msgType === 1 ? 'image' as const : 'text' as const
-    const textContent = hasText
-      ? msgContent.text ?? JSON.stringify(event.message.content)
-      : `[${messageTypeName(msgType)}]`
+    const rawContent = event.message.content as Record<string, unknown>
+    const { content: formattedContent, features: extraFeatures } = formatWechatContent(msgType, rawContent)
 
     // 检测 @Crabot
-    const atString = msgContent.at_string ?? ''
+    const atString = (rawContent.at_string as string | undefined) ?? ''
     const isMentionCrab = isGroup && atString.split(',').some(wxid => wxid.trim() === event.puppet.wxid)
 
     // 获取 Crabot 群昵称（仅群聊）
@@ -270,26 +262,13 @@ export class WechatChannel extends ModuleBase {
         platform_user_id: event.sender.wxid,
         platform_display_name: event.sender.name,
       },
-      content: {
-        type: contentType,
-        text: textContent,
-      },
+      content: formattedContent,
       features: {
         is_mention_crab: isMentionCrab,
+        ...extraFeatures,
       },
       platform_timestamp: generateTimestamp(),
     }
-
-    // 记录入站消息
-    this.messageStore.appendInbound({
-      sessionId: session.id,
-      platformMessageId: event.message.id,
-      senderName: event.sender.name,
-      senderPlatformUserId: event.sender.wxid,
-      text: textContent,
-      contentType,
-      timestamp: channelMessage.platform_timestamp,
-    })
 
     // 发布 channel.message_received 事件
     const crabotEvent: Event = {
@@ -348,6 +327,7 @@ export class WechatChannel extends ModuleBase {
     this.registerMethod('get_session', this.handleGetSession.bind(this))
     this.registerMethod('find_or_create_private_session', this.handleFindOrCreatePrivateSession.bind(this))
     this.registerMethod('get_history', this.handleGetHistory.bind(this))
+    this.registerMethod('get_message', this.handleGetMessage.bind(this))
   }
 
   // ============================================================================
@@ -382,15 +362,6 @@ export class WechatChannel extends ModuleBase {
 
     const messageId = generateId()
     const sentAt = generateTimestamp()
-
-    // 记录出站消息
-    this.messageStore.appendOutbound({
-      sessionId: params.session_id,
-      platformMessageId: messageId,
-      text: text || '[非文本消息]',
-      contentType: params.content.type,
-      timestamp: sentAt,
-    })
 
     return { platform_message_id: messageId, sent_at: sentAt }
   }
@@ -442,46 +413,90 @@ export class WechatChannel extends ModuleBase {
     })
   }
 
-  private handleGetHistory(params: GetHistoryParams) {
+  private async handleGetHistory(params: GetHistoryParams) {
     const session = this.sessionManager.findById(params.session_id)
     if (!session) throw new Error('Session not found')
 
-    const page = params.pagination?.page ?? 1
-    const pageSize = params.pagination?.page_size ?? 20
+    const talker = session.platform_session_id
+    const limit = params.limit ?? params.pagination?.page_size ?? 20
 
-    const { items, total } = this.messageStore.query({
-      sessionId: params.session_id,
-      keyword: params.keyword,
-      limit: params.limit,
-      page: params.limit ? undefined : page,
-      pageSize: params.limit ? undefined : pageSize,
+    // 代理到 wechat-connector API
+    const messages = await this.client.getMessages({
+      talker,
+      limit,
+      before: params.time_range?.before,
+      after: params.time_range?.after,
     })
 
-    // 将内部 HistoryMessage 转换为 protocol-channel.md §3.3 协议格式
-    const protocolItems = items.map((m) => ({
-      platform_message_id: m.platform_message_id,
-      sender: {
-        platform_user_id: m.sender_platform_user_id ?? m.sender_name,
-        platform_display_name: m.sender_name,
-      },
-      content: {
-        type: m.content_type ?? 'text',
-        text: m.content,
-      },
-      features: {
-        is_mention_crab: false,
-      },
-      platform_timestamp: m.timestamp,
-    }))
+    // 关键词过滤（connector API 不支持 keyword，本地过滤）
+    let filtered = messages
+    if (params.keyword) {
+      const kw = params.keyword.toLowerCase()
+      filtered = messages.filter((m) => {
+        const content = m.content as Record<string, unknown> | undefined
+        const text = (content?.text as string) ?? ''
+        return text.toLowerCase().includes(kw)
+      })
+    }
+
+    // 转换为协议格式，复用 formatWechatContent
+    const protocolItems = filtered.map((m) => {
+      const content = m.content as Record<string, unknown>
+      const fieldType = (m.fieldType as number) ?? (content.type as number) ?? 0
+      const isSend = (m.fieldIsSend as number) === 1
+      const { content: msgContent, features } = formatWechatContent(fieldType, content)
+
+      return {
+        platform_message_id: m.id as string,
+        sender: {
+          platform_user_id: isSend ? '_self' : (content.group_sender as string ?? talker),
+          platform_display_name: isSend ? 'bot' : (content.group_sender as string ?? talker),
+        },
+        content: msgContent,
+        features: {
+          is_mention_crab: false,
+          ...features,
+        },
+        platform_timestamp: connectorTimeToISO(m.fieldCreateTime as string),
+      }
+    })
 
     return {
       items: protocolItems,
       pagination: {
-        page,
-        page_size: params.limit ?? pageSize,
-        total_items: total,
-        total_pages: Math.ceil(total / (params.limit ?? pageSize)),
+        page: 1,
+        page_size: limit,
+        total_items: protocolItems.length,
+        total_pages: 1,
       },
+    }
+  }
+
+  private async handleGetMessage(params: GetMessageParams) {
+    const session = this.sessionManager.findById(params.session_id)
+    if (!session) throw new Error('Session not found')
+
+    const msg = await this.client.getMessageById(params.platform_message_id)
+    if (!msg) throw new Error('Message not found')
+
+    const content = msg.content as Record<string, unknown>
+    const fieldType = (msg.fieldType as number) ?? (content.type as number) ?? 0
+    const isSend = (msg.fieldIsSend as number) === 1
+    const talker = session.platform_session_id
+    const { content: msgContent, features } = formatWechatContent(fieldType, content)
+
+    return {
+      platform_message_id: msg.id as string,
+      sender: {
+        platform_user_id: isSend ? '_self' : (content.group_sender as string ?? talker),
+        platform_display_name: isSend ? 'bot' : (content.group_sender as string ?? talker),
+      },
+      content: msgContent,
+      features: {
+        is_mention_crab: false,
+        ...features,
+      },
+      platform_timestamp: connectorTimeToISO(msg.fieldCreateTime as string),
     }
   }
 
@@ -506,28 +521,9 @@ export class WechatChannel extends ModuleBase {
 // 工具函数
 // ============================================================================
 
-// 对齐 wechat-connector 的 MessageType 枚举（content.type，非微信原始 field_type）
-function messageTypeName(type: number): string {
-  const names: Record<number, string> = {
-    0: '文本',
-    1: '图片',
-    2: '语音',
-    3: '名片',
-    4: '转账',
-    5: '红包',
-    6: '系统通知',
-    9: '文件',
-    10: '视频',
-    11: '链接',
-    15: '小程序',
-    17: '拍一拍',
-    18: '引用',
-    20: '应用消息',
-    34: '语音',
-    43: '视频',
-    47: '表情',
-    10000: '系统消息',
-    10002: '撤回',
-  }
-  return names[type] ?? `未知类型(${type})`
+/** wechat-connector 毫秒时间戳字符串 → ISO 8601 */
+function connectorTimeToISO(ts: string): string {
+  const ms = parseInt(ts, 10)
+  return isNaN(ms) ? new Date().toISOString() : new Date(ms).toISOString()
 }
+
