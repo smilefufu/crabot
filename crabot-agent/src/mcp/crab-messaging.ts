@@ -604,14 +604,47 @@ export function createCrabMessagingServer(
 
             const result = await rpcClient.call<
               { session_id: string; platform_message_id: string },
-              Record<string, unknown>
+              {
+                platform_message_id: string
+                sender: { platform_user_id: string; platform_display_name: string }
+                content: { type: string; text?: string; media_url?: string }
+                features: Record<string, unknown>
+                platform_timestamp: string
+              }
             >(channelPort, 'get_message', {
               session_id: args.session_id,
               platform_message_id: args.platform_message_id,
             }, moduleId)
 
+            // friend-id enrichment（与 get_history 保持一致）
+            let senderFriendId: string | undefined
+            const puid = result.sender?.platform_user_id
+            if (puid) {
+              try {
+                const adminPort = await getAdminPort()
+                const resolveResult = await rpcClient.call<
+                  { channel_id: string; platform_user_id: string },
+                  { friend: Friend | null }
+                >(adminPort, 'resolve_friend', {
+                  channel_id: args.channel_id,
+                  platform_user_id: puid,
+                }, moduleId)
+                senderFriendId = resolveResult.friend?.id
+              } catch {
+                // ignore mapping failure
+              }
+            }
+
             return {
-              content: [{ type: 'text' as const, text: JSON.stringify(result) }],
+              content: [{ type: 'text' as const, text: JSON.stringify({
+                platform_message_id: result.platform_message_id,
+                sender_name: result.sender?.platform_display_name,
+                sender_friend_id: senderFriendId,
+                content: result.content?.text ?? '',
+                content_type: result.content?.type ?? 'text',
+                timestamp: result.platform_timestamp,
+                quote_message_id: result.features?.quote_message_id,
+              }) }],
             }
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err)
