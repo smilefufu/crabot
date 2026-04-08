@@ -418,17 +418,17 @@ export class WechatChannel extends ModuleBase {
     if (!session) throw new Error('Session not found')
 
     const talker = session.platform_session_id
-    const limit = params.limit ?? params.pagination?.page_size ?? 20
+    const requestedLimit = params.limit ?? params.pagination?.page_size ?? 20
+    // connector 不支持 keyword 过滤，本地过滤会缩减结果集，多取一些以补偿
+    const fetchLimit = params.keyword ? requestedLimit * 5 : requestedLimit
 
-    // 代理到 wechat-connector API
     const messages = await this.client.getMessages({
       talker,
-      limit,
+      limit: fetchLimit,
       before: params.time_range?.before,
       after: params.time_range?.after,
     })
 
-    // 关键词过滤（connector API 不支持 keyword，本地过滤）
     let filtered = messages
     if (params.keyword) {
       const kw = params.keyword.toLowerCase()
@@ -439,33 +439,16 @@ export class WechatChannel extends ModuleBase {
       })
     }
 
-    // 转换为协议格式，复用 formatWechatContent
-    const protocolItems = filtered.map((m) => {
-      const content = m.content as Record<string, unknown>
-      const fieldType = (m.fieldType as number) ?? (content.type as number) ?? 0
-      const isSend = (m.fieldIsSend as number) === 1
-      const { content: msgContent, features } = formatWechatContent(fieldType, content)
-
-      return {
-        platform_message_id: m.id as string,
-        sender: {
-          platform_user_id: isSend ? '_self' : (content.group_sender as string ?? talker),
-          platform_display_name: isSend ? 'bot' : (content.group_sender as string ?? talker),
-        },
-        content: msgContent,
-        features: {
-          is_mention_crab: false,
-          ...features,
-        },
-        platform_timestamp: connectorTimeToISO(m.fieldCreateTime as string),
-      }
-    })
+    // connector 不支持 page offset，只能取最近 N 条后截取
+    const protocolItems = filtered
+      .slice(-requestedLimit)
+      .map((m) => connectorMsgToProtocolItem(m, talker))
 
     return {
       items: protocolItems,
       pagination: {
         page: 1,
-        page_size: limit,
+        page_size: requestedLimit,
         total_items: protocolItems.length,
         total_pages: 1,
       },
@@ -479,25 +462,7 @@ export class WechatChannel extends ModuleBase {
     const msg = await this.client.getMessageById(params.platform_message_id)
     if (!msg) throw new Error('Message not found')
 
-    const content = msg.content as Record<string, unknown>
-    const fieldType = (msg.fieldType as number) ?? (content.type as number) ?? 0
-    const isSend = (msg.fieldIsSend as number) === 1
-    const talker = session.platform_session_id
-    const { content: msgContent, features } = formatWechatContent(fieldType, content)
-
-    return {
-      platform_message_id: msg.id as string,
-      sender: {
-        platform_user_id: isSend ? '_self' : (content.group_sender as string ?? talker),
-        platform_display_name: isSend ? 'bot' : (content.group_sender as string ?? talker),
-      },
-      content: msgContent,
-      features: {
-        is_mention_crab: false,
-        ...features,
-      },
-      platform_timestamp: connectorTimeToISO(msg.fieldCreateTime as string),
-    }
+    return connectorMsgToProtocolItem(msg, session.platform_session_id)
   }
 
   // ============================================================================
@@ -520,6 +485,28 @@ export class WechatChannel extends ModuleBase {
 // ============================================================================
 // 工具函数
 // ============================================================================
+
+/** wechat-connector 消息 → Crabot 协议 HistoryMessage 格式 */
+function connectorMsgToProtocolItem(m: Record<string, unknown>, talker: string) {
+  const content = m.content as Record<string, unknown>
+  const fieldType = (m.fieldType as number) ?? (content.type as number) ?? 0
+  const isSend = (m.fieldIsSend as number) === 1
+  const { content: msgContent, features } = formatWechatContent(fieldType, content)
+
+  return {
+    platform_message_id: m.id as string,
+    sender: {
+      platform_user_id: isSend ? '_self' : (content.group_sender as string ?? talker),
+      platform_display_name: isSend ? 'bot' : (content.group_sender as string ?? talker),
+    },
+    content: msgContent,
+    features: {
+      is_mention_crab: false,
+      ...features,
+    },
+    platform_timestamp: connectorTimeToISO(m.fieldCreateTime as string),
+  }
+}
 
 /** wechat-connector 毫秒时间戳字符串 → ISO 8601 */
 function connectorTimeToISO(ts: string): string {
