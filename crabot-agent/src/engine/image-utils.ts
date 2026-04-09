@@ -1,4 +1,3 @@
-import sharp from 'sharp'
 import type { EngineMessage, EngineToolResultMessage } from './types'
 
 // --- Configuration ---
@@ -12,6 +11,30 @@ const COMPRESS_MAX_WIDTH = 1024
 /** JPEG quality for compressed screenshots (0-100) */
 const COMPRESS_QUALITY = 70
 
+// --- Sharp lazy loading (optional native dependency) ---
+
+type SharpFn = (input: Buffer) => {
+  resize: (opts: { width: number; withoutEnlargement: boolean }) => {
+    jpeg: (opts: { quality: number }) => {
+      toBuffer: () => Promise<Buffer>
+    }
+  }
+}
+
+let sharpFn: SharpFn | null | undefined
+
+async function getSharp(): Promise<SharpFn | null> {
+  if (sharpFn !== undefined) return sharpFn
+  try {
+    const mod = await import('sharp')
+    sharpFn = mod.default as unknown as SharpFn
+    return sharpFn
+  } catch {
+    sharpFn = null
+    return null
+  }
+}
+
 // --- Image Compression ---
 
 interface ImageData {
@@ -21,10 +44,13 @@ interface ImageData {
 
 /**
  * Compress a base64 image: resize to max width + re-encode as JPEG.
- * Returns a new ImageData with reduced size.
+ * Returns a new ImageData with reduced size, or the original if sharp is unavailable.
  */
 export async function compressImage(image: ImageData): Promise<ImageData> {
   try {
+    const sharp = await getSharp()
+    if (!sharp) return image
+
     const inputBuffer = Buffer.from(image.data, 'base64')
     const outputBuffer = await sharp(inputBuffer)
       .resize({ width: COMPRESS_MAX_WIDTH, withoutEnlargement: true })
@@ -36,7 +62,6 @@ export async function compressImage(image: ImageData): Promise<ImageData> {
       data: outputBuffer.toString('base64'),
     }
   } catch {
-    // If compression fails, return original
     return image
   }
 }
