@@ -6,7 +6,6 @@ import { skillService } from '../../services/skill'
 import { MainLayout } from '../../components/Layout/MainLayout'
 import { Card } from '../../components/Common/Card'
 import { Button } from '../../components/Common/Button'
-import { Select } from '../../components/Common/Select'
 import { Loading } from '../../components/Common/Loading'
 import type {
   ModelProvider,
