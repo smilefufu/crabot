@@ -7,7 +7,7 @@
 // Model Provider 类型
 // ============================================================================
 
-export type ApiFormat = 'openai' | 'anthropic' | 'gemini'
+export type ApiFormat = 'openai' | 'anthropic' | 'gemini' | 'openai-responses'
 export type ModelType = 'llm' | 'embedding'
 export type ProviderStatus = 'active' | 'inactive' | 'error'
 export type ProviderConfigType = 'manual' | 'preset'
@@ -31,12 +31,12 @@ export interface ModelProvider {
   endpoint: string
   api_key: string
   preset_vendor?: string
+  auth_type?: 'apikey' | 'oauth'
+  oauth_info?: { email?: string; expires_at?: number; account_id?: string }
   models: ModelInfo[]
   status: ProviderStatus
   last_validated_at?: string
   validation_error?: string
-  new_api_channel_id?: number
-  new_api_token?: string
   created_at: string
   updated_at: string
 }
@@ -51,6 +51,8 @@ export interface PresetVendor {
   api_key_help_url?: string
   /** 是否允许用户自定义 endpoint（如自托管的 Ollama） */
   allows_custom_endpoint?: boolean
+  /** 认证方式 */
+  auth_type?: 'apikey' | 'oauth'
 }
 
 export interface GlobalModelConfig {
@@ -338,6 +340,56 @@ export interface UpdateChannelConfigParams {
   instance_id: string
   config: Partial<ChannelConfig>
 }
+
+// ============================================================================
+// Permission System
+// ============================================================================
+
+export type ToolCategory = 'memory' | 'messaging' | 'task' | 'mcp_skill' | 'file_io' | 'browser' | 'shell' | 'remote_exec'
+
+export interface ToolAccessConfig {
+  memory: boolean
+  messaging: boolean
+  task: boolean
+  mcp_skill: boolean
+  file_io: boolean
+  browser: boolean
+  shell: boolean
+  remote_exec: boolean
+}
+
+export interface StoragePermission {
+  workspace_path: string
+  access: 'read' | 'readwrite'
+}
+
+export interface PermissionTemplate {
+  id: string
+  name: string
+  description?: string
+  is_system: boolean
+  tool_access: ToolAccessConfig
+  storage: StoragePermission | null
+  memory_scopes: string[]
+  created_at: string
+  updated_at: string
+}
+
+/** Tool category labels for display */
+export const TOOL_CATEGORY_LABELS: Record<ToolCategory, string> = {
+  memory: '记忆读写',
+  messaging: '消息操作',
+  task: '任务管理',
+  mcp_skill: 'MCP 技能',
+  file_io: '文件操作',
+  browser: '浏览器',
+  shell: '本地命令',
+  remote_exec: '远程执行',
+}
+
+export const TOOL_CATEGORIES: readonly ToolCategory[] = [
+  'memory', 'messaging', 'task', 'mcp_skill', 'file_io', 'browser', 'shell', 'remote_exec',
+] as const
 
 // ============================================================================
 // Friend（熟人）管理类型

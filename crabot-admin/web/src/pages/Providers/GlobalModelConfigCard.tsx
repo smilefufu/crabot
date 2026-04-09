@@ -37,7 +37,8 @@ export const GlobalModelConfigCard: React.FC<GlobalModelConfigCardProps> = ({ pr
   if (!loaded) return null
 
   const llmProviders = providers.filter(p => p.models.some(m => m.type === 'llm'))
-  const embeddingProviders = providers.filter(p => p.models.some(m => m.type === 'embedding'))
+  // Anthropic 没有 embedding API，过滤掉
+  const embeddingProviders = providers.filter(p => p.format !== 'anthropic' && p.models.some(m => m.type === 'embedding'))
   const selectedLlmProvider = providers.find(p => p.id === config.default_llm_provider_id)
   const selectedEmbeddingProvider = providers.find(p => p.id === config.default_embedding_provider_id)
 
@@ -55,7 +56,7 @@ export const GlobalModelConfigCard: React.FC<GlobalModelConfigCardProps> = ({ pr
             label="默认 LLM"
             options={[
               { value: '', label: '未设置' },
-              ...llmProviders.map(p => ({ value: p.id, label: p.name })),
+              ...llmProviders.map(p => ({ value: p.id, label: `${p.name} [${p.format}]` })),
             ]}
             value={config.default_llm_provider_id || ''}
             onChange={e => {
@@ -85,7 +86,7 @@ export const GlobalModelConfigCard: React.FC<GlobalModelConfigCardProps> = ({ pr
             label="默认 Embedding"
             options={[
               { value: '', label: '未设置' },
-              ...embeddingProviders.map(p => ({ value: p.id, label: p.name })),
+              ...embeddingProviders.map(p => ({ value: p.id, label: `${p.name} [${p.format}]` })),
             ]}
             value={config.default_embedding_provider_id || ''}
             onChange={e => {

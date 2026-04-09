@@ -158,19 +158,6 @@ install_uv() {
   fi
 }
 
-install_litellm() {
-  log_info "安装 LiteLLM 1.82.6（安全版本，避免高版本投毒问题）..."
-  uv tool install 'litellm[proxy]==1.82.6' --index-url https://pypi.org/simple/ >> "$ONBOARD_LOG" 2>&1 || {
-    log_error "LiteLLM 安装失败:"
-    tail -5 "$ONBOARD_LOG" | sed 's/^/    /'
-    log_error "手动安装: uv tool install 'litellm[proxy]'"
-    exit 1
-  }
-  # 确保 uv tool bin 在 PATH 中
-  export PATH="$HOME/.local/bin:$PATH"
-  log_success "LiteLLM 已安装"
-}
-
 run_phase2_tools() {
   log_section "阶段 2/5：前置工具检查"
 
@@ -260,20 +247,6 @@ run_phase2_tools() {
     fi
   fi
 
-  # LiteLLM
-  if command -v litellm &>/dev/null; then
-    log_success "LiteLLM 已就绪"
-  else
-    all_ok=false
-    if confirm "是否安装 LiteLLM (LLM 代理网关)？"; then
-      install_litellm
-    else
-      log_error "LiteLLM 是必须的 (Crabot 通过它连接所有 LLM 供应商)"
-      log_error "  手动安装: uv tool install 'litellm[proxy]'"
-      exit 1
-    fi
-  fi
-
   if [ "$all_ok" = true ]; then
     log_info "所有前置工具已就绪"
   fi
@@ -304,8 +277,6 @@ run_phase3_env() {
   # 自动生成密钥
   local jwt_secret
   jwt_secret="$(openssl rand -hex 32 2>/dev/null || head -c 64 /dev/urandom | xxd -p | tr -d '\n' | head -c 64)"
-  local litellm_key
-  litellm_key="sk-litellm-$(openssl rand -hex 16 2>/dev/null || head -c 32 /dev/urandom | xxd -p | tr -d '\n' | head -c 32)"
   local encryption_key
   encryption_key="$(openssl rand -hex 32 2>/dev/null || head -c 64 /dev/urandom | xxd -p | tr -d '\n' | head -c 64)"
 
@@ -330,13 +301,11 @@ run_phase3_env() {
   tmp_env="$(mktemp)"
   awk -v "v1=$admin_password" \
       -v "v2=$jwt_secret" \
-      -v "v3=$litellm_key" \
-      -v "v4=$encryption_key" \
+      -v "v3=$encryption_key" \
       'BEGIN{FS=OFS="="}
        /^CRABOT_ADMIN_PASSWORD=/{$2=v1}
        /^CRABOT_JWT_SECRET=/{$2=v2}
-       /^LITELLM_MASTER_KEY=/{$2=v3}
-       /^ADMIN_ENCRYPTION_KEY=/{$2=v4}
+       /^ADMIN_ENCRYPTION_KEY=/{$2=v3}
        {print}' "$CRABOT_HOME/.env" > "$tmp_env"
   mv "$tmp_env" "$CRABOT_HOME/.env"
 
@@ -495,14 +464,6 @@ run_phase5_verify() {
     all_ok=false
   fi
 
-  # 检查 LiteLLM
-  if command -v litellm &>/dev/null; then
-    log_success "LiteLLM"
-  else
-    log_warn "LiteLLM 未安装（LLM 功能将不可用）"
-    log_dim "  安装: uv tool install 'litellm[proxy]'"
-    all_ok=false
-  fi
 
   echo ""
   if [ "$all_ok" = true ]; then

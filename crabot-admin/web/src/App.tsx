@@ -16,7 +16,9 @@ import { FriendList } from './pages/Friends/FriendList'
 import { FriendDetail } from './pages/Friends/FriendDetail'
 import { PendingMessages } from './pages/Friends/PendingMessages'
 import { MCPServerList } from './pages/MCPServers/MCPServerList'
+import { PermissionTemplateList } from './pages/Permissions/PermissionTemplateList'
 import { SkillList } from './pages/Skills/SkillList'
+import { SessionList } from './pages/Sessions/SessionList'
 import { Traces } from './pages/Traces'
 import './App.css'
 
@@ -126,6 +128,14 @@ const AppRoutes: React.FC = () => {
         }
       />
       <Route
+        path="/permission-templates"
+        element={
+          <PrivateRoute>
+            <PermissionTemplateList />
+          </PrivateRoute>
+        }
+      />
+      <Route
         path="/mcp-servers"
         element={
           <PrivateRoute>
@@ -146,6 +156,14 @@ const AppRoutes: React.FC = () => {
         element={
           <PrivateRoute>
             <Traces />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/sessions"
+        element={
+          <PrivateRoute>
+            <SessionList />
           </PrivateRoute>
         }
       />

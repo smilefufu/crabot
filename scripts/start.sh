@@ -8,7 +8,7 @@ set -e
 # 不设置 CRABOT_DEV（与 dev.sh 的关键区别）
 
 load_env
-mkdir -p "$DATA_DIR/admin" "$DATA_DIR/agent" "$DATA_DIR/litellm" "$DATA_DIR/memory"
+mkdir -p "$DATA_DIR/admin" "$DATA_DIR/agent" "$DATA_DIR/memory"
 
 # 0. 确保 nvm 已加载，切换到 .nvmrc 指定的 Node 版本
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
@@ -23,23 +23,19 @@ nvm use || {
 }
 cd "$local_saved_dir"
 
-# 1. LiteLLM
-log_section "启动 LiteLLM"
-start_litellm
-
-# 2. Memory 依赖
+# 1. Memory 依赖
 log_section "同步依赖"
 sync_memory_deps
 
-# 3. 构建所有模块
+# 2. 构建所有模块
 log_section "构建"
 build_all_modules || exit 1
 build_frontend || exit 1
 
-# 4. macOS 权限预检（computer-use MCP 需要屏幕录制 + 辅助功能权限）
+# 3. macOS 权限预检（computer-use MCP 需要屏幕录制 + 辅助功能权限）
 precheck_macos_permissions
 
-# 5. Module Manager（前台 exec）
+# 4. Module Manager（前台 exec）
 log_section "启动 Crabot"
 _offset="${CRABOT_PORT_OFFSET:-0}"
 _mm_port=$((19000 + _offset))

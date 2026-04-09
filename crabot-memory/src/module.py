@@ -57,6 +57,7 @@ class MemoryModule:
             api_key=self.config.llm.api_key,
             base_url=self.config.llm.base_url,
             model=self.config.llm.model,
+            format=self.config.llm.format,
         )
 
         # 初始化核心模块
@@ -306,6 +307,7 @@ class MemoryModule:
                 api_key=llm.get("api_key"),
                 base_url=llm.get("base_url"),
                 model=llm.get("model"),
+                format=llm.get("format"),
             )
             if llm.get("api_key") is not None:
                 self.config.llm.api_key = llm["api_key"]
@@ -313,6 +315,8 @@ class MemoryModule:
                 self.config.llm.base_url = llm["base_url"]
             if llm.get("model") is not None:
                 self.config.llm.model = llm["model"]
+            if llm.get("format") is not None:
+                self.config.llm.format = llm["format"]
             updated.append("llm")
 
         if "embedding" in params and isinstance(params["embedding"], dict):

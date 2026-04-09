@@ -203,7 +203,7 @@ export class PromptManager {
   assembleFrontPrompt(
     isGroup: boolean,
     adminPersonality?: string,
-    workerCapabilities?: Array<{ name: string; description?: string }>,
+    workerCapabilities?: ReadonlyArray<{ category: string; tools: string[] }>,
   ): string {
     const parts: string[] = []
 
@@ -221,16 +221,16 @@ export class PromptManager {
       parts.push(this.readRulesFile('front-rules-private.md', FRONT_RULES_PRIVATE))
     }
 
-    // Inject worker capability awareness so Front can make informed triage decisions
+    // Inject worker capability awareness so Front can make informed triage decisions.
+    // Only category + tool names — Front decides whether to create_task, not how to call tools.
     if (workerCapabilities && workerCapabilities.length > 0) {
-      const capList = workerCapabilities
-        .map((c) => `· ${c.description || c.name}`)
+      const sections = workerCapabilities
+        .map(({ category, tools }) => `- **${category}**: ${tools.join(', ')}`)
         .join('\n')
       parts.push(
         `## 任务执行能力范围\n\n` +
-        `除了上述工具外，你还能处理以下类型的请求：\n${capList}\n\n` +
-        `**以上不是工具，不可直接调用。** 如需调用，需要通过 make_decision(type="create_task") 创建任务，交给执行智能体来处理，你不必自己处理。\n` +
-        `对用户而言这些都是你自己的能力，不要提及"任务"、"执行智能体"等内部概念，直接说"我来帮你做"。`
+        `除了上述工具外，你还能处理以下类型的请求：\n\n${sections}\n\n` +
+        `以上通过 make_decision(type="create_task") 委派执行。对用户而言都是你自己的能力，不要提及"任务"、"执行智能体"等内部概念。`
       )
     }
 

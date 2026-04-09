@@ -1,6 +1,6 @@
 # Crabot 项目进度
 
-> 最后更新：2026-04-04 — Engine V2 Phase 4 开始（核心内置工具）
+> 最后更新：2026-04-07 — 去 LiteLLM 化 + ChatGPT 订阅 OAuth 接入（规划完成）
 
 ## 当前进行中：Agent Engine V2
 
@@ -59,6 +59,27 @@ Built-in tool config, Skill tool, E2E integration. **全部 311 tests pass**
 ### Engine V2 重构完成 ✅
 **总计**: 40+ Tasks, 298 tests (agent 298 + mcp-tools 2)
 已合并到 main
+
+---
+
+## 当前规划：去 LiteLLM 化 + ChatGPT 订阅 OAuth 接入
+
+**目标**：移除 LiteLLM 中间层，Agent V2 引擎直连 LLM Provider，新增 ChatGPT 订阅 OAuth 接入  
+**计划文档**：`crabot-agent/docs/plans/2026-04-07-remove-litellm-and-codex-oauth.md`  
+**分支**：待开启
+
+### Phase 1 — 去 LiteLLM 化
+- [ ] buildConnectionInfo 返回 Provider 原生连接信息（endpoint/apikey）而非 LiteLLM 路由
+- [ ] Agent V2 引擎支持多格式（Anthropic/OpenAI/others），无需 LiteLLM 代理
+- [ ] Memory 模块获得多格式支持（LLM adapter 解耦）
+- [ ] 移除 LiteLLM 部署依赖（dev.sh 不启动 LiteLLM）
+- [ ] 系统架构图更新（LiteLLM 层移除）
+
+### Phase 2 — ChatGPT 订阅 OAuth
+- [ ] 新增 openai-responses 适配器（OAuth token 调用 OpenAI Realtime API）
+- [ ] Admin OAuth PKCE 登录流（Authorization Code Flow with PKCE）
+- [ ] token 管理（存储、刷新、过期处理）
+- [ ] Provider 接入流程优化（从 API Key 改为 OAuth）
 
 ---
 

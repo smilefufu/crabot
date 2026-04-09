@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Crabot 共享函数库
-# 由 crabot 主入口 source，提供日志、环境检测、LiteLLM、构建等公共函数
+# 由 crabot 主入口 source，提供日志、环境检测、构建等公共函数
 # 本文件为纯函数库，不产生副作用
 
 # ── 颜色 ──────────────────────────────────────────────────
@@ -100,149 +100,6 @@ load_env() {
   export CRABOT_ADMIN_PASSWORD="${CRABOT_ADMIN_PASSWORD:-admin123}"
   export CRABOT_JWT_SECRET="${CRABOT_JWT_SECRET:-$(openssl rand -hex 32 2>/dev/null || echo dev-secret)}"
   export DATA_DIR="$DATA_DIR"
-}
-
-# ── LiteLLM ──────────────────────────────────────────────
-
-apply_litellm_patches() {
-  local litellm_site
-  # 优先用 uv tool 的 venv 中的 python（litellm 通过 uv tool install 安装）
-  local uv_litellm_python="$HOME/.local/share/uv/tools/litellm/bin/python3"
-  if [ -x "$uv_litellm_python" ]; then
-    litellm_site=$("$uv_litellm_python" -c "import litellm, os; print(os.path.dirname(litellm.__file__))" 2>/dev/null)
-  fi
-  if [ -z "$litellm_site" ]; then
-    litellm_site=$(python3 -c "import litellm, os; print(os.path.dirname(litellm.__file__))" 2>/dev/null)
-  fi
-  if [ -z "$litellm_site" ]; then
-    log_warn "无法定位 LiteLLM 安装路径，跳过补丁"
-    return 0
-  fi
-
-  local tf="$litellm_site/llms/anthropic/experimental_pass_through/adapters/transformation.py"
-  local oa="$litellm_site/llms/openai/openai.py"
-
-  # 补丁 1：移除 thinking_blocks 字段（Anthropic 专有，非 Anthropic provider 不识别）
-  if [ -f "$tf" ] && ! grep -q 'thinking_blocks 是 Anthropic 专有字段' "$tf" 2>/dev/null; then
-    python3 - "$tf" << 'PYEOF'
-import sys, re
-path = sys.argv[1]
-with open(path) as f:
-    content = f.read()
-patched = re.sub(
-    r'\n(\s+)if len\(thinking_blocks\) > 0:\n\1    assistant_message\["thinking_blocks"\] = thinking_blocks\n',
-    '\n\\1# thinking_blocks 是 Anthropic 专有字段，不发给非 Anthropic provider\n\\1# （OpenAI/OpenRouter 等不认识此字段，会返回 400）\n',
-    content
-)
-if patched == content:
-    print("WARN: patch1 pattern not found, skipping", file=sys.stderr)
-    sys.exit(0)
-with open(path, 'w') as f:
-    f.write(patched)
-print("patch1 applied")
-PYEOF
-    log_info "LiteLLM 补丁 1/2 已应用（thinking_blocks 过滤）"
-  fi
-
-  # 补丁 2：为缺少 content 的 assistant 消息补充 content: None
-  if [ -f "$oa" ] && ! grep -q '确保 assistant 消息始终包含 content 字段' "$oa" 2>/dev/null; then
-    python3 - "$oa" << 'PYEOF'
-import sys, re
-path = sys.argv[1]
-with open(path) as f:
-    content = f.read()
-insertion = (
-    '        # 确保 assistant 消息始终包含 content 字段\n'
-    '        # 部分 provider（如 StepFun）要求 content 显式存在，OpenAI SDK 序列化会过滤 None\n'
-    '        _messages = data.get("messages")\n'
-    '        if isinstance(_messages, list):\n'
-    '            for _m in _messages:\n'
-    '                if isinstance(_m, dict) and _m.get("role") == "assistant" and "content" not in _m:\n'
-    '                    _m["content"] = None\n'
-)
-patched = re.sub(
-    r'(\n        start_time = time\.time\(\)\n)',
-    '\n' + insertion + r'\1',
-    content,
-    count=1
-)
-if patched == content:
-    print("WARN: patch2 pattern not found, skipping", file=sys.stderr)
-    sys.exit(0)
-with open(path, 'w') as f:
-    f.write(patched)
-print("patch2 applied")
-PYEOF
-    log_info "LiteLLM 补丁 2/2 已应用（assistant content 字段）"
-  fi
-}
-
-check_litellm() {
-  curl --noproxy '*' -s -o /dev/null -w '%{http_code}' \
-    "http://localhost:$LITELLM_PORT/health" 2>/dev/null | grep -qE '200|401'
-}
-
-start_litellm() {
-  if check_litellm; then
-    log_info "LiteLLM 已在运行 (port $LITELLM_PORT)"
-    return 0
-  fi
-
-  if ! command -v litellm &>/dev/null; then
-    log_warn "LiteLLM 未安装，跳过（LLM 功能不可用）"
-    log_dim "  安装: uv tool install 'litellm[proxy]'"
-    return 0
-  fi
-
-  # 检查 LiteLLM 版本，必须严格为 1.82.6（高版本存在安全投毒问题）
-  local litellm_required="1.82.6"
-  local litellm_cur
-  litellm_cur=$(litellm --version 2>/dev/null | awk '{print $NF}' | tr -d '\r\n')
-  if [ -n "$litellm_cur" ] && [ "$litellm_cur" != "$litellm_required" ]; then
-    log_warn "LiteLLM 版本不正确 ($litellm_cur != $litellm_required)，重装为安全版本..."
-    uv tool uninstall litellm -q 2>/dev/null || true
-    uv tool install 'litellm[proxy]==1.82.6' -q || log_warn "LiteLLM 重装失败，继续使用当前版本"
-  fi
-
-  apply_litellm_patches
-
-  log_info "启动 LiteLLM..."
-  mkdir -p "$DATA_DIR/litellm"
-
-  # 首次启动时生成默认配置（后续由 Admin 动态覆盖）
-  if [ ! -f "$LITELLM_CONFIG" ]; then
-    cat > "$LITELLM_CONFIG" << 'CFGEOF'
-# LiteLLM Proxy 配置（初始空配置，由 crabot-admin 动态管理）
-model_list: []
-
-litellm_settings:
-  drop_params: true
-  set_verbose: false
-CFGEOF
-    log_info "已生成 LiteLLM 默认配置: $LITELLM_CONFIG"
-  fi
-
-  if [ -z "$LITELLM_MASTER_KEY" ]; then
-    export LITELLM_MASTER_KEY="sk-litellm-$(openssl rand -hex 16 2>/dev/null || echo default)"
-  fi
-
-  (
-    unset all_proxy ALL_PROXY http_proxy HTTP_PROXY https_proxy HTTPS_PROXY
-    export no_proxy="*"
-    export LITELLM_USE_CHAT_COMPLETIONS_URL_FOR_ANTHROPIC_MESSAGES=true
-    litellm --config "$LITELLM_CONFIG" --port "$LITELLM_PORT" &
-    echo $! > "$DATA_DIR/litellm/litellm.pid"
-  )
-
-  for _ in $(seq 1 20); do
-    if check_litellm; then
-      log_info "LiteLLM 就绪"
-      return 0
-    fi
-    sleep 1
-  done
-
-  log_warn "LiteLLM 启动超时，继续..."
 }
 
 # ── Scrapling ─────────────────────────────────────────────
@@ -429,13 +286,6 @@ stop_all_services() {
   pkill -f "node.*crabot-admin/dist/main.js" 2>/dev/null || true
   pkill -f "node.*crabot-agent/dist/main.js" 2>/dev/null || true
 
-  # 杀掉 LiteLLM
-  pkill -f "litellm.*--config.*$LITELLM_CONFIG" 2>/dev/null || true
-  if [ -f "$DATA_DIR/litellm/litellm.pid" ]; then
-    kill "$(cat "$DATA_DIR/litellm/litellm.pid")" 2>/dev/null || true
-    rm -f "$DATA_DIR/litellm/litellm.pid"
-  fi
-
   # 清理 Crabot 管理的 Chrome 实例
   if [ -f "$DATA_DIR/browser/chrome.pid" ]; then
     kill "$(cat "$DATA_DIR/browser/chrome.pid")" 2>/dev/null || true
@@ -447,7 +297,7 @@ stop_all_services() {
 
   # 兜底释放所有已知端口（先 SIGTERM，再 SIGKILL）
   local offset="${CRABOT_PORT_OFFSET:-0}"
-  local ports=("$((19000 + offset))" "$((19001 + offset))" "$((3000 + offset))" "$LITELLM_PORT")
+  local ports=("$((19000 + offset))" "$((19001 + offset))" "$((3000 + offset))")
   for port in "${ports[@]}"; do
     lsof -ti :"$port" 2>/dev/null | while read -r pid; do
       if [ -n "$pid" ]; then

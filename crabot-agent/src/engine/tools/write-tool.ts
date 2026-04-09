@@ -6,6 +6,7 @@ import type { ToolDefinition } from '../types'
 export function createWriteTool(cwd: string): ToolDefinition {
   return defineTool({
     name: 'Write',
+    category: 'file_io',
     description: 'Writes content to a file. Creates parent directories if they do not exist. Overwrites the file if it already exists.',
     inputSchema: {
       type: 'object',

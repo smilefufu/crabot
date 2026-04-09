@@ -60,6 +60,7 @@ export function makeDecisionTool(allowSilent: boolean): ToolDefinition {
 
 export const QUERY_TASKS_TOOL: ToolDefinition = {
   name: 'query_tasks',
+  category: 'task' as const,
   description: '查询当前活跃的任务列表和状态。用于回答用户关于任务进度的提问。',
   inputSchema: {
     type: 'object' as const,
@@ -81,6 +82,7 @@ export const QUERY_TASKS_TOOL: ToolDefinition = {
 
 export const CREATE_SCHEDULE_TOOL: ToolDefinition = {
   name: 'create_schedule',
+  category: 'task' as const,
   description: '创建定时任务或提醒。支持一次性和周期性。',
   inputSchema: {
     type: 'object' as const,
@@ -105,6 +107,7 @@ export const CREATE_SCHEDULE_TOOL: ToolDefinition = {
 
 export const LOOKUP_FRIEND_TOOL: ToolDefinition = {
   name: 'lookup_friend',
+  category: 'messaging' as const,
   description: '搜索熟人信息，包括该熟人在哪些 Channel 上有身份。可按名称模糊搜索或按 friend_id 精确查找。',
   inputSchema: {
     type: 'object' as const,
@@ -120,6 +123,7 @@ export const LOOKUP_FRIEND_TOOL: ToolDefinition = {
 
 export const LIST_CONTACTS_TOOL: ToolDefinition = {
   name: 'list_contacts',
+  category: 'messaging' as const,
   description: '列出渠道的联系人列表（包含非熟人）',
   inputSchema: {
     type: 'object' as const,
@@ -136,6 +140,7 @@ export const LIST_CONTACTS_TOOL: ToolDefinition = {
 
 export const LIST_GROUPS_TOOL: ToolDefinition = {
   name: 'list_groups',
+  category: 'messaging' as const,
   description: '列出渠道的群聊列表',
   inputSchema: {
     type: 'object' as const,
@@ -152,6 +157,7 @@ export const LIST_GROUPS_TOOL: ToolDefinition = {
 
 export const LIST_SESSIONS_TOOL: ToolDefinition = {
   name: 'list_sessions',
+  category: 'messaging' as const,
   description: '查看指定 Channel 上的会话列表。',
   inputSchema: {
     type: 'object' as const,
@@ -167,6 +173,7 @@ export const LIST_SESSIONS_TOOL: ToolDefinition = {
 
 export const OPEN_PRIVATE_SESSION_TOOL: ToolDefinition = {
   name: 'open_private_session',
+  category: 'messaging' as const,
   description: '在指定 Channel 上查找或创建与某个熟人的私聊 Session。',
   inputSchema: {
     type: 'object' as const,
@@ -182,6 +189,7 @@ export const OPEN_PRIVATE_SESSION_TOOL: ToolDefinition = {
 
 export const SEND_MESSAGE_TOOL: ToolDefinition = {
   name: 'send_message',
+  category: 'messaging' as const,
   description: '在指定 Channel 的指定 Session 中发送消息。',
   inputSchema: {
     type: 'object' as const,
@@ -199,6 +207,7 @@ export const SEND_MESSAGE_TOOL: ToolDefinition = {
 
 export const GET_HISTORY_TOOL: ToolDefinition = {
   name: 'get_history',
+  category: 'messaging' as const,
   description: '查看指定 Channel 上某个 Session 的历史消息。',
   inputSchema: {
     type: 'object' as const,
@@ -218,6 +227,7 @@ export const GET_HISTORY_TOOL: ToolDefinition = {
 
 export const GET_MESSAGE_TOOL: ToolDefinition = {
   name: 'get_message',
+  category: 'messaging' as const,
   description: '按消息 ID 查询单条消息详情。当历史消息中某条消息的内容不完整时（如只显示占位符），可用此工具查看完整内容。',
   inputSchema: {
     type: 'object' as const,
@@ -234,6 +244,7 @@ export const GET_MESSAGE_TOOL: ToolDefinition = {
 
 export const STORE_MEMORY_TOOL: ToolDefinition = {
   name: 'store_memory',
+  category: 'memory' as const,
   description: '将信息写入长期记忆。当用户要求记住/记录某些信息时使用。',
   inputSchema: {
     type: 'object' as const,
@@ -257,6 +268,7 @@ export const STORE_MEMORY_TOOL: ToolDefinition = {
 
 export const SEARCH_MEMORY_TOOL: ToolDefinition = {
   name: 'search_memory',
+  category: 'memory' as const,
   description: '搜索记忆，返回摘要列表（L0 级别）。可按语义查询、按分类过滤。',
   inputSchema: {
     type: 'object' as const,
@@ -280,6 +292,7 @@ export const SEARCH_MEMORY_TOOL: ToolDefinition = {
 
 export const GET_MEMORY_DETAIL_TOOL: ToolDefinition = {
   name: 'get_memory_detail',
+  category: 'memory' as const,
   description: '获取某条长期记忆的详细内容。先用 search_memory 找到记忆 ID，再用此工具查看详情。',
   inputSchema: {
     type: 'object' as const,

@@ -579,7 +579,7 @@ export class AgentManager {
                 // 有 provider_id：可提取引用
                 migratedModelConfig[key] = { provider_id: val.provider_id as string, model_id: val.model_id as string }
               }
-              // 无 provider_id（如 "default" slot 只有 LiteLLM 生成的 model_id）：丢弃，fallback 到全局默认
+              // 无 provider_id（旧格式遗留数据）：丢弃，fallback 到全局默认
               migrated = true
             } else if (val && typeof val === 'object' && 'provider_id' in val && 'model_id' in val && !('endpoint' in val)) {
               // 已是引用格式

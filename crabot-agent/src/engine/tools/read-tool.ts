@@ -35,6 +35,7 @@ function containsNullBytes(buffer: Buffer): boolean {
 export function createReadTool(cwd: string): ToolDefinition {
   return defineTool({
     name: 'Read',
+    category: 'file_io',
     description:
       'Reads a file from the filesystem. Returns content with line numbers. ' +
       'Supports offset (0-based start line) and limit (max lines to read, default 2000).',

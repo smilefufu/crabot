@@ -103,10 +103,31 @@ export const ProviderDrawerDetail: React.FC<ProviderDrawerDetailProps> = ({
           <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>端点</div>
           <div style={{ fontSize: '0.85rem', wordBreak: 'break-all' }}>{provider.endpoint}</div>
         </div>
-        <div>
-          <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>API Key</div>
-          <div>{maskApiKey(provider.api_key)}</div>
-        </div>
+        {provider.auth_type === 'oauth' ? (
+          <div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>OAuth 登录</div>
+            {provider.oauth_info?.email ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <span>{provider.oauth_info.email}</span>
+                {provider.oauth_info.expires_at && (
+                  <span style={{
+                    fontSize: '0.75rem',
+                    color: Date.now() > provider.oauth_info.expires_at ? 'var(--error)' : 'var(--success)',
+                  }}>
+                    {Date.now() > provider.oauth_info.expires_at ? '已过期' : '有效'}
+                  </span>
+                )}
+              </div>
+            ) : (
+              <div style={{ color: 'var(--text-secondary)' }}>未登录</div>
+            )}
+          </div>
+        ) : (
+          <div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>API Key</div>
+            <div>{maskApiKey(provider.api_key)}</div>
+          </div>
+        )}
         <div>
           <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>状态</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>

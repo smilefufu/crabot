@@ -181,6 +181,7 @@ function formatCount(
 export function createGrepTool(cwd: string): ToolDefinition {
   return defineTool({
     name: 'Grep',
+    category: 'file_io',
     description: 'Search for regex patterns in files recursively. Supports glob filtering, context lines, and multiple output modes.',
     inputSchema: {
       type: 'object',

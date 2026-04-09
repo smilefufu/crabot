@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { providerService } from '../../services/provider'
 import { Button } from '../../components/Common/Button'
 import { Input } from '../../components/Common/Input'
@@ -24,6 +24,15 @@ export const ProviderDrawerCreate: React.FC<ProviderDrawerCreateProps> = ({
   const [selectedVendor, setSelectedVendor] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [customEndpoint, setCustomEndpoint] = useState('')
+  const [oauthStatus, setOauthStatus] = useState<'idle' | 'pending' | 'success' | 'failed'>('idle')
+  const [oauthEmail, setOauthEmail] = useState('')
+  const pollRef = useRef<{ interval?: ReturnType<typeof setInterval>; timeout?: ReturnType<typeof setTimeout> }>({})
+
+  // 组件卸载时清理轮询
+  useEffect(() => () => {
+    if (pollRef.current.interval) clearInterval(pollRef.current.interval)
+    if (pollRef.current.timeout) clearTimeout(pollRef.current.timeout)
+  }, [])
 
   // manual mode
   const [name, setName] = useState('')
@@ -37,9 +46,58 @@ export const ProviderDrawerCreate: React.FC<ProviderDrawerCreateProps> = ({
     providerService.listPresetVendors().then(r => setVendors(r.items)).catch(() => {})
   }, [])
 
+  const currentVendor = vendors.find(v => v.id === selectedVendor)
+  const isOAuthVendor = currentVendor?.auth_type === 'oauth'
+
+  const clearPoll = () => {
+    if (pollRef.current.interval) clearInterval(pollRef.current.interval)
+    if (pollRef.current.timeout) clearTimeout(pollRef.current.timeout)
+    pollRef.current = {}
+  }
+
+  const handleOAuthLogin = async () => {
+    try {
+      const { auth_url } = await providerService.startOAuthLogin()
+      window.open(auth_url, '_blank', 'width=600,height=700')
+      setOauthStatus('pending')
+      clearPoll()
+
+      pollRef.current.interval = setInterval(async () => {
+        try {
+          const status = await providerService.getOAuthStatus()
+          if (status.status === 'success') {
+            clearPoll()
+            setOauthStatus('success')
+            setOauthEmail(status.email ?? '')
+
+            setSaving(true)
+            const result = await providerService.importFromVendor(selectedVendor, 'oauth-pending')
+            toast.success('ChatGPT 登录成功')
+            const providerId = (result as { id?: string; provider?: { id: string } }).provider?.id ?? (result as { id?: string }).id ?? ''
+            onCreated(providerId)
+            setSaving(false)
+          } else if (status.status === 'failed') {
+            clearPoll()
+            setOauthStatus('failed')
+            toast.error(status.error ?? 'OAuth 登录失败')
+          }
+        } catch {
+          // 继续轮询
+        }
+      }, 2000)
+
+      pollRef.current.timeout = setTimeout(clearPoll, 5 * 60 * 1000)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'OAuth 启动失败')
+    }
+  }
+
   const handlePresetSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!selectedVendor || !apiKey) return
+    if (!selectedVendor) return
+    if (isOAuthVendor) return // OAuth 通过按钮处理
+
+    if (!apiKey) return
 
     const vendor = vendors.find(v => v.id === selectedVendor)
     const ep = vendor?.allows_custom_endpoint ? customEndpoint.trim() || undefined : undefined
@@ -48,7 +106,6 @@ export const ProviderDrawerCreate: React.FC<ProviderDrawerCreateProps> = ({
       setSaving(true)
       const result = await providerService.importFromVendor(selectedVendor, apiKey, ep)
       toast.success('导入成功')
-      // importFromVendor returns ModelProvider directly
       onCreated((result as any).id || (result as any).provider?.id)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '导入失败')
@@ -168,18 +225,48 @@ export const ProviderDrawerCreate: React.FC<ProviderDrawerCreateProps> = ({
             />
           )}
 
-          <Input
-            type="password"
-            label="API Key"
-            placeholder="输入 API Key"
-            value={apiKey}
-            onChange={e => setApiKey(e.target.value)}
-          />
+          {isOAuthVendor ? (
+            <>
+              {oauthStatus === 'idle' && (
+                <Button type="button" variant="primary" onClick={handleOAuthLogin}
+                  disabled={saving || !selectedVendor}
+                  style={{ width: '100%', marginTop: '0.5rem' }}>
+                  登录 ChatGPT
+                </Button>
+              )}
+              {oauthStatus === 'pending' && (
+                <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', textAlign: 'center', padding: '1rem 0' }}>
+                  等待浏览器中完成登录...
+                </p>
+              )}
+              {oauthStatus === 'success' && (
+                <p style={{ color: 'var(--success)', fontSize: '0.85rem', textAlign: 'center', padding: '1rem 0' }}>
+                  已登录: {oauthEmail}
+                </p>
+              )}
+              {oauthStatus === 'failed' && (
+                <Button type="button" variant="primary" onClick={handleOAuthLogin}
+                  style={{ width: '100%', marginTop: '0.5rem' }}>
+                  重新登录
+                </Button>
+              )}
+            </>
+          ) : (
+            <>
+              <Input
+                type="password"
+                label="API Key"
+                placeholder="输入 API Key"
+                value={apiKey}
+                onChange={e => setApiKey(e.target.value)}
+              />
 
-          <Button type="submit" variant="primary" disabled={saving || !selectedVendor || !apiKey}
-            style={{ width: '100%', marginTop: '0.5rem' }}>
-            {saving ? '导入中...' : '导入'}
-          </Button>
+              <Button type="submit" variant="primary" disabled={saving || !selectedVendor || !apiKey}
+                style={{ width: '100%', marginTop: '0.5rem' }}>
+                {saving ? '导入中...' : '导入'}
+              </Button>
+            </>
+          )}
         </form>
       ) : (
         <form onSubmit={handleManualSubmit}>

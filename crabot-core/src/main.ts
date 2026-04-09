@@ -120,15 +120,8 @@ const CORE_MODULES: Array<ModuleDefinition & Record<string, unknown>> = [
       CRABOT_MM_PORT: String(PORT),
       // Admin endpoint，供 Memory 模块启动时 pull 初始配置
       CRABOT_ADMIN_ENDPOINT: ADMIN_ENDPOINT,
-      // LLM/Embedding 配置由 Admin 通过 handleStartModuleAdmin 注入
+      // LLM/Embedding 配置由 Admin 在 Memory 启动后通过 RPC push 注入
       // 空字符串表示"未配置"，Memory 模块的 is_configured() 会检测到
-      CRABOT_LLM_BASE_URL: process.env.LITELLM_BASE_URL || '',
-      CRABOT_LLM_API_KEY: process.env.LITELLM_MASTER_KEY || '',
-      CRABOT_LLM_MODEL: process.env.CRABOT_LLM_MODEL || '',
-      CRABOT_EMBEDDING_BASE_URL: process.env.LITELLM_BASE_URL || '',
-      CRABOT_EMBEDDING_API_KEY: process.env.LITELLM_MASTER_KEY || '',
-      CRABOT_EMBEDDING_MODEL: process.env.CRABOT_EMBEDDING_MODEL || '',
-      CRABOT_EMBEDDING_DIMENSION: process.env.CRABOT_EMBEDDING_DIMENSION || '',
     } as Record<string, string>,
   },
 ]

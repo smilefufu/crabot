@@ -281,20 +281,69 @@ export function createMediaRuntime(dataDir: string) {
       return fetchRemoteMedia(params)
     },
 
+    // OpenClaw 插件用位置参数调用: saveMediaBuffer(buffer, contentType, direction, maxBytes, fileName)
+    // 同时兼容对象参数形式: saveMediaBuffer({ buffer, contentType, direction, maxBytes, fileName })
     saveMediaBuffer: async (
-      params: SaveMediaBufferParams
+      bufferOrParams: Buffer | SaveMediaBufferParams,
+      contentType?: string,
+      direction?: 'inbound' | 'outbound',
+      maxBytes?: number,
+      fileName?: string,
     ): Promise<SaveMediaBufferResult> => {
-      return saveMediaBuffer(params, dataDir)
+      if (Buffer.isBuffer(bufferOrParams)) {
+        return saveMediaBuffer(
+          {
+            buffer: bufferOrParams,
+            contentType: contentType ?? 'application/octet-stream',
+            direction: direction ?? 'inbound',
+            maxBytes,
+            fileName,
+          },
+          dataDir,
+        )
+      }
+      return saveMediaBuffer(bufferOrParams, dataDir)
     },
   }
 }
 
 export function createMediaRuntimeTopLevel() {
   return {
-    loadWebMedia: async () => null,
+    // OpenClaw 插件通过此方法加载要发送的媒体（本地路径或远程 URL）
+    loadWebMedia: async (
+      url: string,
+      opts?: { maxBytes?: number; optimizeImages?: boolean; localRoots?: readonly string[] },
+    ): Promise<{ buffer: Buffer; fileName?: string } | null> => {
+      if (!url) return null
+      const maxBytes = opts?.maxBytes ?? 50 * 1024 * 1024
 
-    detectMime: async (buffer: Buffer): Promise<string> => {
-      return detectMime(buffer)
+      // 本地文件路径
+      if (!url.startsWith('http://') && !url.startsWith('https://') && !url.startsWith('data:')) {
+        try {
+          const buffer = await fs.readFile(url)
+          if (buffer.length > maxBytes) return null
+          return { buffer, fileName: path.basename(url) }
+        } catch (err) {
+          console.error(`[Media] loadWebMedia failed for local path ${url}:`, err)
+          return null
+        }
+      }
+
+      // 远程 URL：复用 fetchRemoteMedia
+      try {
+        const result = await fetchRemoteMedia({ url, maxBytes })
+        return { buffer: result.buffer, fileName: path.basename(new URL(url).pathname) || undefined }
+      } catch (err) {
+        console.error(`[Media] loadWebMedia failed for URL ${url}:`, err)
+        return null
+      }
+    },
+
+    // OpenClaw 插件用对象参数调用: detectMime({ buffer })
+    // 同时兼容直接传 Buffer: detectMime(buffer)
+    detectMime: async (bufferOrObj: Buffer | { buffer: Buffer }): Promise<string> => {
+      const buf = Buffer.isBuffer(bufferOrObj) ? bufferOrObj : bufferOrObj.buffer
+      return detectMime(buf)
     },
 
     mediaKindFromMime: (mime: string): string | null => {

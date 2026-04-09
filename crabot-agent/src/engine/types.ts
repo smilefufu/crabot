@@ -68,6 +68,8 @@ export type EngineMessage = EngineUserMessage | EngineAssistantMessage | EngineT
 
 export type ToolPermissionLevel = 'safe' | 'normal' | 'dangerous'
 
+export type ToolCategory = 'memory' | 'messaging' | 'task' | 'mcp_skill' | 'file_io' | 'browser' | 'shell' | 'remote_exec'
+
 export type PermissionMode =
   | 'bypass'       // All tools allowed (for trusted contexts like admin chat)
   | 'allowList'    // Only listed tools allowed
@@ -104,6 +106,7 @@ export interface ToolDefinition {
   readonly inputSchema: Record<string, unknown>
   readonly isReadOnly: boolean
   readonly permissionLevel?: ToolPermissionLevel
+  readonly category?: ToolCategory
   readonly call: (input: Record<string, unknown>, context: ToolCallContext) => Promise<ToolCallResult>
 }
 

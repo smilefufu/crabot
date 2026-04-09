@@ -41,6 +41,50 @@ export interface Friend {
 }
 
 // ============================================================================
+// 权限配置类型
+// ============================================================================
+
+/** 工具类别 */
+export type ToolCategory = 'memory' | 'messaging' | 'task' | 'mcp_skill' | 'file_io' | 'browser' | 'shell' | 'remote_exec'
+
+/** 工具访问配置（按类别控制） */
+export interface ToolAccessConfig {
+  memory: boolean
+  messaging: boolean
+  task: boolean
+  mcp_skill: boolean
+  file_io: boolean
+  browser: boolean
+  shell: boolean
+  remote_exec: boolean
+}
+
+/** 存储权限 */
+export interface StoragePermission {
+  workspace_path: string
+  access: 'read' | 'readwrite'
+}
+
+/** 所有工具类别的键列表（用于遍历和验证） */
+export const TOOL_CATEGORIES: readonly ToolCategory[] = [
+  'memory', 'messaging', 'task', 'mcp_skill', 'file_io', 'browser', 'shell', 'remote_exec',
+] as const
+
+/** 创建一个所有类别都为指定值的 ToolAccessConfig */
+export function createToolAccessConfig(defaultValue: boolean): ToolAccessConfig {
+  return {
+    memory: defaultValue,
+    messaging: defaultValue,
+    task: defaultValue,
+    mcp_skill: defaultValue,
+    file_io: defaultValue,
+    browser: defaultValue,
+    shell: defaultValue,
+    remote_exec: defaultValue,
+  }
+}
+
+// ============================================================================
 // PermissionTemplate（权限模板）
 // ============================================================================
 
@@ -48,20 +92,10 @@ export interface PermissionTemplate {
   id: string
   name: string
   description?: string
-  /** 是否为系统预设模板 */
   is_system: boolean
-  /** 创建者（master 的 FriendId，系统模板为 null） */
   created_by?: FriendId
-  desktop: boolean
-  network: {
-    mode: 'allow_all' | 'whitelist' | 'blacklist'
-    rules: string[]
-  }
-  storage: Array<{
-    path: string
-    access: 'read' | 'readwrite'
-  }>
-  /** 该模板下可访问的 Memory scopes */
+  tool_access: ToolAccessConfig
+  storage: StoragePermission | null
   memory_scopes: string[]
   created_at: string
   updated_at: string
@@ -72,24 +106,18 @@ export interface PermissionTemplate {
 // ============================================================================
 
 export interface SessionPermissionConfig {
-  /** 桌面操作权限 */
-  desktop: boolean
-  /** 网络访问权限 */
-  network: {
-    mode: 'allow_all' | 'whitelist' | 'blacklist'
-    rules: string[]
-  }
-  /** 存储访问权限 */
-  storage: Array<{
-    path: string
-    access: 'read' | 'readwrite'
-  }>
-  /** Memory 访问作用域 */
-  memory_scopes: string[]
-  /** 使用的权限模板 ID */
+  tool_access?: Partial<ToolAccessConfig>
+  storage?: StoragePermission | null
+  memory_scopes?: string[]
   template_id?: string
-  /** 最后更新时间 */
   updated_at: string
+}
+
+/** 合并后的权限（模板 + Session 覆盖） */
+export interface ResolvedPermissions {
+  tool_access: ToolAccessConfig
+  storage: StoragePermission | null
+  memory_scopes: string[]
 }
 
 // ============================================================================
@@ -256,6 +284,54 @@ export interface LoginRequest {
 export interface LoginResponse {
   token: string
   expires_at: string
+}
+
+// PermissionTemplate 管理
+export interface ListPermissionTemplatesParams extends PaginationParams {
+  system_only?: boolean
+}
+
+export type ListPermissionTemplatesResult = PaginatedResult<PermissionTemplate>
+
+export interface GetPermissionTemplateParams {
+  template_id: string
+}
+
+export interface GetPermissionTemplateResult {
+  template: PermissionTemplate
+}
+
+export interface CreatePermissionTemplateParams {
+  name: string
+  description?: string
+  tool_access: ToolAccessConfig
+  storage?: StoragePermission | null
+  memory_scopes?: string[]
+}
+
+export interface CreatePermissionTemplateResult {
+  template: PermissionTemplate
+}
+
+export interface UpdatePermissionTemplateParams {
+  template_id: string
+  name?: string
+  description?: string
+  tool_access?: ToolAccessConfig
+  storage?: StoragePermission | null
+  memory_scopes?: string[]
+}
+
+export interface UpdatePermissionTemplateResult {
+  template: PermissionTemplate
+}
+
+export interface DeletePermissionTemplateParams {
+  template_id: string
+}
+
+export interface DeletePermissionTemplateResult {
+  deleted: true
 }
 
 // ============================================================================
@@ -730,7 +806,7 @@ export interface TriggerNowResult {
 // ============================================================================
 
 /** API 格式 */
-export type ApiFormat = 'openai' | 'anthropic' | 'gemini'
+export type ApiFormat = 'openai' | 'anthropic' | 'gemini' | 'openai-responses'
 
 /** 模型类型 */
 export type ModelType = 'llm' | 'embedding'
@@ -772,14 +848,14 @@ export interface ModelProvider {
   api_key: string
   /** 预置厂商标识 */
   preset_vendor?: string
+  /** 认证方式：apikey（默认）或 oauth */
+  auth_type?: 'apikey' | 'oauth'
+  /** OAuth 凭证（仅 auth_type=oauth 时存在） */
+  oauth_credential?: OAuthCredential
   models: ModelInfo[]
   status: ProviderStatus
   last_validated_at?: string
   validation_error?: string
-  /** LiteLLM 中的模型名 */
-  litellm_model_name?: string
-  /** LiteLLM 生成的访问密钥 */
-  litellm_key?: string
   created_at: string
   updated_at: string
 }
@@ -799,6 +875,19 @@ export interface PresetVendor {
   allows_custom_endpoint?: boolean
   /** 不支持 /models API 的厂商，提供静态默认模型列表 */
   default_models?: ModelInfo[]
+  /** 认证方式：apikey（默认）或 oauth */
+  auth_type?: 'apikey' | 'oauth'
+}
+
+/**
+ * OAuth 凭证信息
+ */
+export interface OAuthCredential {
+  access_token: string
+  refresh_token: string
+  expires_at: number  // Unix timestamp (ms)
+  account_id?: string
+  email?: string
 }
 
 /**
@@ -830,7 +919,7 @@ export interface ModelConnectionInfo {
   apikey: string
   model_id: string
   format: ApiFormat
-  /** 供应商 ID（用于 LiteLLM 路由解析） */
+  /** 供应商 ID */
   provider_id?: string
 }
 
@@ -868,6 +957,7 @@ export interface CreateModelProviderParams {
   endpoint: string
   api_key: string
   preset_vendor?: string
+  auth_type?: 'apikey' | 'oauth'
   models: ModelInfo[]
 }
 
@@ -1355,61 +1445,6 @@ export interface GetChatHistoryResult {
     features: { is_mention_crab: false }
     platform_timestamp: string
   }>
-}
-
-// ============================================================================
-// LiteLLM 类型定义
-// ============================================================================
-
-/**
- * LiteLLM 模型配置
- */
-export interface LiteLLMModelConfig {
-  model_name: string
-  litellm_params: {
-    model: string
-    api_key: string
-    api_base?: string
-  }
-}
-
-/**
- * LiteLLM 客户端配置
- */
-export interface LiteLLMClientConfig {
-  baseUrl: string
-  masterKey: string
-}
-
-/**
- * LiteLLM 密钥生成参数
- */
-export interface LiteLLMGenerateKeyParams {
-  models: string[]
-  key_alias?: string
-  max_budget?: number
-}
-
-/**
- * LiteLLM 密钥信息
- */
-export interface LiteLLMKeyInfo {
-  key: string
-  key_alias?: string
-  models: string[]
-  max_budget?: number
-}
-
-/**
- * LiteLLM 模型信息
- */
-export interface LiteLLMModelInfo {
-  model_name: string
-  litellm_params: {
-    model: string
-    api_key?: string
-    api_base?: string
-  }
 }
 
 // ============================================================================

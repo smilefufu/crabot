@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Crabot Dev - 开发模式启动脚本
-# 用法: ./dev.sh          构建 + 启动 LiteLLM + Module Manager（前台，含 Vite）
+# 用法: ./dev.sh          构建 + 启动 Module Manager（前台，含 Vite）
 #       ./dev.sh stop      停止所有开发服务
 #       ./dev.sh build     仅构建，不启动
 
@@ -20,9 +20,6 @@ if [ "$PORT_OFFSET" -gt 0 ]; then
 else
   DATA_DIR="${DATA_DIR:-$SCRIPT_DIR/data}"
 fi
-LITELLM_PORT="${LITELLM_PORT:-$((4000 + PORT_OFFSET))}"
-LITELLM_DIR="${LITELLM_DIR:-$DATA_DIR/litellm}"
-LITELLM_CONFIG="${LITELLM_CONFIG:-$LITELLM_DIR/config.yaml}"
 MEMORY_DIR="${MEMORY_DIR:-$SCRIPT_DIR/crabot-memory}"
 
 # 颜色
@@ -97,128 +94,6 @@ build_all() {
   log_info "构建完成"
 }
 
-# ── LiteLLM 补丁 ──────────────────────────────────────────
-
-apply_litellm_patches() {
-  local litellm_site
-  litellm_site=$(python3 -c "import litellm, os; print(os.path.dirname(litellm.__file__))" 2>/dev/null) || {
-    log_warn "无法定位 LiteLLM 安装路径，跳过补丁"
-    return 0
-  }
-
-  local tf="$litellm_site/llms/anthropic/experimental_pass_through/adapters/transformation.py"
-  local oa="$litellm_site/llms/openai/openai.py"
-
-  # 补丁 1：移除 thinking_blocks 字段（Anthropic 专有，非 Anthropic provider 不识别）
-  if [ -f "$tf" ] && ! grep -q 'thinking_blocks 是 Anthropic 专有字段' "$tf" 2>/dev/null; then
-    python3 - "$tf" << 'PYEOF'
-import sys, re
-path = sys.argv[1]
-with open(path) as f:
-    content = f.read()
-patched = re.sub(
-    r'\n(\s+)if len\(thinking_blocks\) > 0:\n\1    assistant_message\["thinking_blocks"\] = thinking_blocks\n',
-    '\n\\1# thinking_blocks 是 Anthropic 专有字段，不发给非 Anthropic provider\n\\1# （OpenAI/OpenRouter 等不认识此字段，会返回 400）\n',
-    content
-)
-if patched == content:
-    print("WARN: patch1 pattern not found, skipping", file=sys.stderr)
-    sys.exit(0)
-with open(path, 'w') as f:
-    f.write(patched)
-print("patch1 applied")
-PYEOF
-    log_info "LiteLLM 补丁 1/2 已应用（thinking_blocks 过滤）"
-  fi
-
-  # 补丁 2：为缺少 content 的 assistant 消息补充 content: None
-  if [ -f "$oa" ] && ! grep -q '确保 assistant 消息始终包含 content 字段' "$oa" 2>/dev/null; then
-    python3 - "$oa" << 'PYEOF'
-import sys, re
-path = sys.argv[1]
-with open(path) as f:
-    content = f.read()
-insertion = (
-    '        # 确保 assistant 消息始终包含 content 字段\n'
-    '        # 部分 provider（如 StepFun）要求 content 显式存在，OpenAI SDK 序列化会过滤 None\n'
-    '        _messages = data.get("messages")\n'
-    '        if isinstance(_messages, list):\n'
-    '            for _m in _messages:\n'
-    '                if isinstance(_m, dict) and _m.get("role") == "assistant" and "content" not in _m:\n'
-    '                    _m["content"] = None\n'
-)
-patched = re.sub(
-    r'(\n        start_time = time\.time\(\)\n)',
-    '\n' + insertion + r'\1',
-    content,
-    count=1
-)
-if patched == content:
-    print("WARN: patch2 pattern not found, skipping", file=sys.stderr)
-    sys.exit(0)
-with open(path, 'w') as f:
-    f.write(patched)
-print("patch2 applied")
-PYEOF
-    log_info "LiteLLM 补丁 2/2 已应用（assistant content 字段）"
-  fi
-}
-
-# ── LiteLLM ───────────────────────────────────────────────
-
-check_litellm() {
-  curl --noproxy '*' -s -o /dev/null -w '%{http_code}' \
-    "http://localhost:$LITELLM_PORT/health" 2>/dev/null | grep -qE '200|401'
-}
-
-start_litellm() {
-  if check_litellm; then
-    log_info "LiteLLM 已在运行 (port $LITELLM_PORT)"
-    return 0
-  fi
-
-  if ! command -v litellm &>/dev/null; then
-    log_warn "LiteLLM 未安装，跳过（LLM 功能不可用）"
-    log_dim "  安装: pip install -i https://pypi.org/simple/ 'litellm[proxy]'"
-    return 0
-  fi
-
-  # 检查 LiteLLM 版本，若低于最低要求自动升级
-  LITELLM_MIN="1.82.0"
-  LITELLM_CUR=$(pip show litellm 2>/dev/null | grep Version | awk '{print $2}')
-  if [ -n "$LITELLM_CUR" ] && [ "$(printf '%s\n' "$LITELLM_MIN" "$LITELLM_CUR" | sort -V | head -1)" != "$LITELLM_MIN" ]; then
-    log_warn "LiteLLM 版本过低 ($LITELLM_CUR < $LITELLM_MIN)，升级中..."
-    pip install -i https://pypi.org/simple/ -U 'litellm[proxy]' -q || log_warn "LiteLLM 升级失败，继续使用当前版本"
-  fi
-
-  # 应用 bug 修复补丁（升级后需重新应用）
-  apply_litellm_patches
-
-  log_info "启动 LiteLLM..."
-  if [ -z "$LITELLM_MASTER_KEY" ]; then
-    export LITELLM_MASTER_KEY="sk-litellm-$(openssl rand -hex 16 2>/dev/null || echo default)"
-  fi
-
-  # LiteLLM 不走代理
-  (
-    unset all_proxy ALL_PROXY http_proxy HTTP_PROXY https_proxy HTTPS_PROXY
-    export no_proxy="*"
-    export LITELLM_USE_CHAT_COMPLETIONS_URL_FOR_ANTHROPIC_MESSAGES=true
-    litellm --config "$LITELLM_CONFIG" --port "$LITELLM_PORT" &
-    echo $! > "$DATA_DIR/litellm/litellm.pid"
-  )
-
-  for _ in $(seq 1 20); do
-    if check_litellm; then
-      log_info "LiteLLM 就绪"
-      return 0
-    fi
-    sleep 1
-  done
-
-  log_warn "LiteLLM 启动超时，继续..."
-}
-
 # ── Scrapling ─────────────────────────────────────────────
 
 check_scrapling() {
@@ -290,13 +165,6 @@ stop_all() {
   pkill -f "crabot-agent/dist/main.js" 2>/dev/null || true
   pkill -f "vite.*crabot-admin/web" 2>/dev/null || true
 
-  # 杀掉 LiteLLM
-  pkill -f "litellm.*--config.*$LITELLM_CONFIG" 2>/dev/null || true
-  if [ -f "$DATA_DIR/litellm/litellm.pid" ]; then
-    kill "$(cat "$DATA_DIR/litellm/litellm.pid")" 2>/dev/null || true
-    rm -f "$DATA_DIR/litellm/litellm.pid"
-  fi
-
   # 清理 Crabot 管理的 Chrome 实例
   if [ -f "$DATA_DIR/browser/chrome.pid" ]; then
     kill "$(cat "$DATA_DIR/browser/chrome.pid")" 2>/dev/null || true
@@ -304,7 +172,7 @@ stop_all() {
   fi
 
   # 兜底释放所有已知端口
-  for port in "$MM_PORT" "$ADMIN_RPC_PORT" "$ADMIN_WEB_PORT" "$LITELLM_PORT"; do
+  for port in "$MM_PORT" "$ADMIN_RPC_PORT" "$ADMIN_WEB_PORT"; do
     local pid
     pid=$(lsof -ti :"$port" 2>/dev/null) || true
     if [ -n "$pid" ]; then
@@ -320,20 +188,17 @@ stop_all() {
 start() {
   export CRABOT_DEV=true
   load_env
-  mkdir -p "$DATA_DIR/admin" "$DATA_DIR/agent" "$DATA_DIR/litellm" "$DATA_DIR/memory"
-
-  # 1. LiteLLM（冷启动，Memory priority=5 比 Admin priority=10 先启动，需要 LiteLLM 就绪）
-  start_litellm
+  mkdir -p "$DATA_DIR/admin" "$DATA_DIR/agent" "$DATA_DIR/memory"
 
   check_scrapling || true  # 非阻塞，仅提示
 
-  # 2. 准备 Memory 依赖
+  # 1. 准备 Memory 依赖
   sync_memory_deps
 
-  # 3. 构建（Admin 跳过，用 tsx --watch 直接跑源码）
+  # 2. 构建（Admin 跳过，用 tsx --watch 直接跑源码）
   build_all
 
-  # 4. macOS 权限预检（computer-use MCP 需要屏幕录制 + 辅助功能权限）
+  # 3. macOS 权限预检（computer-use MCP 需要屏幕录制 + 辅助功能权限）
   if [ "$(uname -s)" = "Darwin" ]; then
     local mcp_config="$DATA_DIR/admin/mcp-servers.json"
     if [ -f "$mcp_config" ] && node -e "
@@ -356,7 +221,7 @@ start() {
     fi
   fi
 
-  # 5. Module Manager（前台 exec，会自动拉起 Memory + Admin + Agent + Vite）
+  # 4. Module Manager（前台 exec，会自动拉起 Memory + Admin + Agent + Vite）
   log_info "启动 Module Manager..."
   cd "$SCRIPT_DIR/crabot-core"
   exec node dist/main.js

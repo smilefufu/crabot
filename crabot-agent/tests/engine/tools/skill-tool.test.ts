@@ -44,7 +44,9 @@ describe('createSkillTool', () => {
     const result = await tool.call({ skill: 'code-review' }, {})
 
     expect(result.isError).toBe(false)
-    expect(result.output).toBe('# Code Review\nReview the code carefully.')
+    // skill-tool 会在内容前添加 base directory 信息
+    expect(result.output).toContain('Base directory for this skill:')
+    expect(result.output).toContain('# Code Review\nReview the code carefully.')
   })
 
   it('lists available skills', async () => {

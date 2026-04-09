@@ -19,6 +19,10 @@ import type {
   ExecuteTaskParams,
   DeliverHumanResponseResult,
   MemoryPermissions,
+  ResolvedPermissions,
+  ToolAccessConfig,
+  StoragePermission,
+  SessionPermissionConfig,
   TaskId,
   FriendId,
   Friend,
@@ -40,15 +44,35 @@ import { DecisionDispatcher } from './orchestration/decision-dispatcher.js'
 import { MemoryWriter } from './orchestration/memory-writer.js'
 import { AttentionScheduler, type AttentionConfig, type BufferedMessage } from './orchestration/attention-scheduler.js'
 import { FrontHandler, type FrontHandlerLlmConfig } from './agent/front-handler.js'
-import { createAdapter, type LLMAdapter } from './engine/llm-adapter.js'
+import { createAdapter, type LLMAdapter, type LLMFormat } from './engine/llm-adapter.js'
 import type { ToolExecutorDeps } from './agent/tool-executor.js'
 import { WorkerHandler, type SdkEnvConfig } from './agent/worker-handler.js'
+import type { ToolPermissionConfig, ToolDefinition as EngineToolDefinition } from './engine/types.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { McpConnector } from './agent/mcp-connector.js'
 import { createCrabMessagingServer, type PathMapping } from './mcp/crab-messaging.js'
 import { TraceStore } from './core/trace-store.js'
 import { PromptManager } from './prompt-manager.js'
 import { SUBAGENT_DEFINITIONS, type SubAgentDefinition } from './agent/subagent-prompts.js'
+
+/**
+ * Map ToolAccessConfig to engine's ToolPermissionConfig denyList.
+ */
+function toToolPermissionConfig(
+  toolAccess: ToolAccessConfig,
+  tools: ReadonlyArray<EngineToolDefinition>,
+): ToolPermissionConfig {
+  const deniedTools = tools
+    .filter(t => {
+      const category = t.category ?? 'mcp_skill'
+      return !toolAccess[category]
+    })
+    .map(t => t.name)
+
+  return deniedTools.length === 0
+    ? { mode: 'bypass' as const }
+    : { mode: 'denyList' as const, toolNames: deniedTools }
+}
 
 export class UnifiedAgent extends ModuleBase {
   // 编排层组件
@@ -74,6 +98,8 @@ export class UnifiedAgent extends ModuleBase {
   private sandboxPathMappingsRef: { current: PathMapping[] } = { current: [] }
   /** 当前消息处理的记忆权限（Front tool 使用） */
   private currentMemPerms?: MemoryPermissions
+  /** 当前 session 的解析后权限（模板 + Session 覆盖） */
+  private currentResolvedPerms?: ResolvedPermissions | null
 
   // 配置
   private orchestrationConfig: OrchestrationConfig
@@ -225,7 +251,7 @@ export class UnifiedAgent extends ModuleBase {
         const adapter = createAdapter({
           endpoint: frontModelConfig.endpoint,
           apikey: frontModelConfig.apikey,
-          format: frontModelConfig.format as 'anthropic' | 'openai' | 'gemini',
+          format: frontModelConfig.format as LLMFormat,
         })
         const llmConfig: FrontHandlerLlmConfig = {
           adapter,
@@ -243,7 +269,7 @@ export class UnifiedAgent extends ModuleBase {
         }
         this.frontHandler = new FrontHandler(llmConfig, toolExecutorDeps, {
           getSystemPrompt: (isGroup) => this.promptManager.assembleFrontPrompt(
-            isGroup, basePersonality, this.getWorkerCapabilities(),
+            isGroup, basePersonality, this.getWorkerCapabilitySummary(),
           ),
         })
       }
@@ -474,8 +500,10 @@ export class UnifiedAgent extends ModuleBase {
         return
       }
 
-      // 5. 派生记忆读写权限
-      const memPerms = await this.deriveMemoryPermissions(friend, session.session_id)
+      // 5. 解析权限（模板 + Session 覆盖）
+      const resolvedPerms = await this.resolveSessionPermissions(friend, session.session_id)
+      this.currentResolvedPerms = resolvedPerms
+      const memPerms = await this.deriveMemoryPermissions(friend, session.session_id, resolvedPerms)
 
       // 6. 组装上下文（带 span 追踪耗时）
       const ctxSpan = this.traceStore.startSpan(trace.trace_id, {
@@ -642,8 +670,17 @@ export class UnifiedAgent extends ModuleBase {
     })
 
     try {
-      // 群聊权限固定为 internal + session memory_scopes，不随发送者身份变化
-      const memPerms = await this.buildSessionMemoryPermissions(sessionId)
+      // 群聊权限：group_default 模板 + Session 覆盖
+      const resolvedPerms = await this.resolveGroupPermissions(sessionId)
+      this.currentResolvedPerms = resolvedPerms
+      const memPerms = resolvedPerms
+        ? {
+            write_visibility: 'internal' as const,
+            write_scopes: resolvedPerms.memory_scopes,
+            read_min_visibility: 'internal' as const,
+            read_accessible_scopes: resolvedPerms.memory_scopes,
+          }
+        : await this.buildSessionMemoryPermissions(sessionId)
 
       // 组装上下文
       const ctxSpan = this.traceStore.startSpan(trace.trace_id, {
@@ -779,7 +816,7 @@ export class UnifiedAgent extends ModuleBase {
    * 优先从 Admin.get_session_config 读取 session.memory_scopes，
    * fallback 到 [sessionId]（兼容未配置的场景）。
    */
-  private async deriveMemoryPermissions(friend: Friend, sessionId: string): Promise<MemoryPermissions> {
+  private async deriveMemoryPermissions(friend: Friend, sessionId: string, resolvedPerms?: ResolvedPermissions | null): Promise<MemoryPermissions> {
     if (friend.permission === 'master') {
       return {
         write_visibility: 'private',
@@ -789,7 +826,86 @@ export class UnifiedAgent extends ModuleBase {
       }
     }
 
-    return this.buildSessionMemoryPermissions(sessionId)
+    // Use resolved permissions if available, otherwise fall back to RPC
+    const memoryScopes = resolvedPerms?.memory_scopes ?? await this.getSessionMemoryScopes(sessionId)
+    return {
+      write_visibility: 'internal',
+      write_scopes: memoryScopes,
+      read_min_visibility: 'internal',
+      read_accessible_scopes: memoryScopes,
+    }
+  }
+
+  /**
+   * 从 Admin 获取合并后的 session 权限（模板 + Session 覆盖）
+   */
+  private async resolveSessionPermissions(
+    friend: Friend,
+    sessionId: string,
+  ): Promise<ResolvedPermissions | null> {
+    const templateId = friend.permission === 'master'
+      ? 'master_private'
+      : friend.permission_template_id
+
+    if (!templateId) return null
+    return this.resolvePermissionsForTemplate(templateId, sessionId)
+  }
+
+  /**
+   * 群聊权限解析：使用 group_default 模板 + Session 覆盖
+   */
+  private async resolveGroupPermissions(sessionId: string): Promise<ResolvedPermissions | null> {
+    return this.resolvePermissionsForTemplate('group_default', sessionId)
+  }
+
+  /**
+   * 从 Admin 获取模板 + Session 配置并增量合并。两个 RPC 并行调用。
+   */
+  private async resolvePermissionsForTemplate(templateId: string, sessionId: string): Promise<ResolvedPermissions | null> {
+    try {
+      const adminPort = await this.getAdminPort()
+
+      const [templateResult, sessionResult] = await Promise.all([
+        this.rpcClient.call<
+          { template_id: string },
+          { template: { tool_access: ToolAccessConfig; storage: StoragePermission | null; memory_scopes: string[] } }
+        >(adminPort, 'get_permission_template', { template_id: templateId }, this.config.moduleId),
+        this.rpcClient.call<
+          { session_id: string },
+          { config: SessionPermissionConfig | null }
+        >(adminPort, 'get_session_config', { session_id: sessionId }, this.config.moduleId),
+      ])
+
+      const template = templateResult.template
+      const sessionConfig = sessionResult.config
+
+      const toolAccess = sessionConfig?.tool_access
+        ? { ...template.tool_access, ...sessionConfig.tool_access }
+        : { ...template.tool_access }
+
+      const storage = sessionConfig?.storage !== undefined
+        ? sessionConfig.storage
+        : template.storage
+
+      const memoryScopes = sessionConfig?.memory_scopes !== undefined
+        ? sessionConfig.memory_scopes
+        : template.memory_scopes
+
+      return { tool_access: toolAccess, storage, memory_scopes: memoryScopes }
+    } catch (err) {
+      console.warn(`[Agent] Failed to resolve permissions for template ${templateId}:`, err)
+      return null
+    }
+  }
+
+  /**
+   * Get current session's tool permission config for worker use
+   */
+  getToolPermissionConfig(tools: ReadonlyArray<EngineToolDefinition>): ToolPermissionConfig {
+    if (!this.currentResolvedPerms) {
+      return { mode: 'bypass' }
+    }
+    return toToolPermissionConfig(this.currentResolvedPerms.tool_access, tools)
   }
 
   /**
@@ -1761,7 +1877,7 @@ export class UnifiedAgent extends ModuleBase {
           const adapter = createAdapter({
             endpoint: frontConfig.endpoint,
             apikey: frontConfig.apikey,
-            format: frontConfig.format as 'anthropic' | 'openai' | 'gemini',
+            format: frontConfig.format as LLMFormat,
           })
           const llmConfig: FrontHandlerLlmConfig = {
             adapter,
@@ -1779,7 +1895,7 @@ export class UnifiedAgent extends ModuleBase {
           }
           this.frontHandler = new FrontHandler(llmConfig, toolExecutorDeps, {
             getSystemPrompt: (isGroup) => this.promptManager.assembleFrontPrompt(
-              isGroup, basePersonality, this.getWorkerCapabilities(),
+              isGroup, basePersonality, this.getWorkerCapabilitySummary(),
             ),
           })
           console.log(`[${this.config.moduleId}] Front Agent handler created from config push`)
@@ -1928,11 +2044,24 @@ export class UnifiedAgent extends ModuleBase {
    * Get external MCP tool names for Front prompt injection.
    * Front doesn't call these tools — it uses this list to know what Worker can do.
    */
-  private getWorkerCapabilities(): Array<{ name: string; description?: string }> {
-    return this.mcpConnector.getAllTools().map((t) => ({
-      name: t.name.replace(/^mcp__[^_]+__/, ''),
-      description: t.description || undefined,
-    }))
+  /**
+   * Build a concise capability summary for Front prompt injection.
+   * Front only needs category-level awareness to route create_task decisions,
+   * not per-tool parameter docs.
+   * Returns one entry per MCP server (category) with tool names listed.
+   */
+  private getWorkerCapabilitySummary(): Array<{ category: string; tools: string[] }> {
+    const grouped = new Map<string, string[]>()
+    for (const t of this.mcpConnector.getAllTools()) {
+      // Delimiter is __ (double underscore); server names may contain single underscores
+      const m = t.name.match(/^mcp__(.+?)__(.+)$/)
+      const category = m ? m[1] : 'other'
+      const toolName = m ? m[2] : t.name
+      const list = grouped.get(category) ?? []
+      list.push(toolName)
+      grouped.set(category, list)
+    }
+    return Array.from(grouped.entries()).map(([category, tools]) => ({ category, tools }))
   }
 
   private getActiveTasksList(): Array<{ task_id: string; status: string; started_at: string; title?: string }> {

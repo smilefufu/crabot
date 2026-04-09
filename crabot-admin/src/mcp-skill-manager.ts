@@ -356,7 +356,20 @@ export class MCPServerManager {
 
     let changed = false
     for (const builtin of builtins) {
-      if (existingNames.has(builtin.name)) continue
+      if (existingNames.has(builtin.name)) {
+        // 已注册：更新路径（项目目录可能变更）
+        for (const [id, existing] of this.servers) {
+          if (existing.name === builtin.name && existing.is_builtin) {
+            const argsChanged = JSON.stringify(existing.args) !== JSON.stringify(builtin.args)
+            if (argsChanged) {
+              this.servers.set(id, { ...existing, args: builtin.args, updated_at: generateTimestamp() })
+              changed = true
+            }
+            break
+          }
+        }
+        continue
+      }
       const now = generateTimestamp()
       const entry: MCPServerRegistryEntry = {
         id: generateId(),
@@ -545,7 +558,21 @@ export class SkillManager {
       }
 
       const parsed = parseSkillMd(content)
-      if (!parsed.name || existingNames.has(parsed.name)) continue
+      if (!parsed.name) continue
+
+      if (existingNames.has(parsed.name)) {
+        // 已注册：更新路径和内容（项目目录可能变更）
+        for (const [id, existing] of this.skills) {
+          if (existing.name === parsed.name && existing.is_builtin) {
+            if (existing.skill_dir !== skillDir || existing.content !== content) {
+              this.skills.set(id, { ...existing, skill_dir: skillDir, content, updated_at: generateTimestamp() })
+              changed = true
+            }
+            break
+          }
+        }
+        continue
+      }
 
       const now = generateTimestamp()
       const entry: SkillRegistryEntry = {

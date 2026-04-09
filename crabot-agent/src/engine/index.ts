@@ -11,6 +11,7 @@ export type {
   ToolCallContext,
   ToolCallResult,
   ToolPermissionLevel,
+  ToolCategory,
   PermissionMode,
   ToolPermissionConfig,
   PermissionDecision,

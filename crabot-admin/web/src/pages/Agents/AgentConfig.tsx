@@ -246,7 +246,7 @@ export const AgentConfig: React.FC = () => {
                         >
                           <option value="">默认</option>
                           {llmProviders.map((p) => (
-                            <option key={p.id} value={p.id}>{p.name}</option>
+                            <option key={p.id} value={p.id}>{p.name} [{p.format}]</option>
                           ))}
                         </select>
                       </div>

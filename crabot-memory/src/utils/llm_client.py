@@ -1,12 +1,9 @@
 """
-LLM 客户端 - 精简版，提取自 SimpleMem
-使用 OpenAI 兼容 API
+LLM 客户端 - 多格式支持（OpenAI / Anthropic）
 """
 import json
 import logging
 from typing import List, Dict, Any, Optional
-
-from openai import AsyncOpenAI
 
 from .._config_ref import get_llm_config
 
@@ -14,24 +11,27 @@ logger = logging.getLogger(__name__)
 
 
 class LLMClient:
-    """异步 LLM 客户端"""
+    """异步 LLM 客户端，支持 OpenAI 和 Anthropic 格式"""
 
     def __init__(
         self,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         model: Optional[str] = None,
+        format: Optional[str] = None,
     ):
         self._api_key = api_key
         self._base_url = base_url
         self._model = model
-        self._client: Optional[AsyncOpenAI] = None
+        self._format = format or "openai"
+        self._client: Any = None
 
     def reconfigure(
         self,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         model: Optional[str] = None,
+        format: Optional[str] = None,
     ) -> None:
         """热更新配置，下次调用时自动重建客户端"""
         if api_key is not None:
@@ -40,15 +40,26 @@ class LLMClient:
             self._base_url = base_url
         if model is not None:
             self._model = model
+        if format is not None:
+            self._format = format
         self._client = None
-        logger.info("LLMClient reconfigured: model=%s base_url=%s", self._model, self._base_url)
+        logger.info("LLMClient reconfigured: format=%s model=%s base_url=%s", self._format, self._model, self._base_url)
 
-    def _ensure_client(self) -> AsyncOpenAI:
+    def _ensure_client(self) -> Any:
         if self._client is None:
-            self._client = AsyncOpenAI(
-                api_key=self._api_key,
-                base_url=self._base_url,
-            )
+            if self._format == "anthropic":
+                from anthropic import AsyncAnthropic
+                self._client = AsyncAnthropic(
+                    api_key=self._api_key,
+                    base_url=self._base_url if self._base_url else None,
+                )
+            else:
+                # openai, gemini 等都走 OpenAI 兼容 API
+                from openai import AsyncOpenAI
+                self._client = AsyncOpenAI(
+                    api_key=self._api_key,
+                    base_url=self._base_url,
+                )
         return self._client
 
     @property
@@ -62,8 +73,35 @@ class LLMClient:
         response_format: Optional[Dict[str, str]] = None,
         max_retries: int = 3,
     ) -> str:
-        """聊天补全，带重试"""
+        """聊天补全，带重试。自动根据 format 选择 API"""
         client = self._ensure_client()
+
+        last_err: Optional[Exception] = None
+        for attempt in range(max_retries):
+            try:
+                if self._format == "anthropic":
+                    content = await self._call_anthropic(client, messages, temperature, needs_json=response_format is not None)
+                else:
+                    content = await self._call_openai(client, messages, temperature, response_format)
+                return content
+            except Exception as e:
+                last_err = e
+                logger.warning("LLM call attempt %d/%d failed: %s", attempt + 1, max_retries, e)
+
+        raise RuntimeError(f"LLM call failed after {max_retries} attempts: {last_err}")
+
+    @property
+    def _json_response_format(self) -> Optional[Dict[str, str]]:
+        """Anthropic 不支持 response_format 参数"""
+        return {"type": "json_object"} if self._format != "anthropic" else None
+
+    async def _call_openai(
+        self,
+        client: Any,
+        messages: List[Dict[str, str]],
+        temperature: float,
+        response_format: Optional[Dict[str, str]],
+    ) -> str:
         kwargs: Dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -72,17 +110,40 @@ class LLMClient:
         if response_format:
             kwargs["response_format"] = response_format
 
-        last_err: Optional[Exception] = None
-        for attempt in range(max_retries):
-            try:
-                resp = await client.chat.completions.create(**kwargs)
-                content = resp.choices[0].message.content or ""
-                return content
-            except Exception as e:
-                last_err = e
-                logger.warning("LLM call attempt %d/%d failed: %s", attempt + 1, max_retries, e)
+        resp = await client.chat.completions.create(**kwargs)
+        return resp.choices[0].message.content or ""
 
-        raise RuntimeError(f"LLM call failed after {max_retries} attempts: {last_err}")
+    async def _call_anthropic(
+        self,
+        client: Any,
+        messages: List[Dict[str, str]],
+        temperature: float,
+        needs_json: bool = False,
+    ) -> str:
+        # 从 messages 中分离 system prompt 和 user messages
+        system_prompt = ""
+        user_messages = []
+        for msg in messages:
+            if msg["role"] == "system":
+                system_prompt = msg["content"]
+            else:
+                user_messages.append(msg)
+
+        # Anthropic 不支持 response_format，通过 prompt 指令确保 JSON 输出
+        if needs_json and "JSON" not in system_prompt:
+            system_prompt += "\n\nIMPORTANT: You must respond with valid JSON only, no other text."
+
+        kwargs: Dict[str, Any] = {
+            "model": self.model,
+            "messages": user_messages,
+            "temperature": temperature,
+            "max_tokens": 4096,
+        }
+        if system_prompt:
+            kwargs["system"] = system_prompt
+
+        resp = await client.messages.create(**kwargs)
+        return resp.content[0].text if resp.content else ""
 
     async def extract_keywords(self, text: str) -> List[str]:
         """从文本中提取关键词"""
@@ -96,7 +157,7 @@ class LLMClient:
         resp = await self.chat_completion(
             messages,
             temperature=0.0,
-            response_format={"type": "json_object"},
+            response_format=self._json_response_format,
         )
         data = extract_json(resp)
         if isinstance(data, dict):
@@ -137,13 +198,12 @@ class LLMClient:
         resp = await self.chat_completion(
             messages,
             temperature=0.1,
-            response_format={"type": "json_object"},
+            response_format=self._json_response_format,
         )
         data = extract_json(resp)
         if isinstance(data, dict):
             abstract = data.get("abstract", content[:256])
             overview = data.get("overview", content[:4000])
-            # 硬截断兜底，防止 LLM 超长
             return {
                 "abstract": abstract[:256],
                 "overview": overview[:4000],
@@ -177,7 +237,7 @@ class LLMClient:
         resp = await self.chat_completion(
             messages,
             temperature=0.0,
-            response_format={"type": "json_object"},
+            response_format=self._json_response_format,
         )
         data = extract_json(resp)
         if isinstance(data, dict) and "action" in data:

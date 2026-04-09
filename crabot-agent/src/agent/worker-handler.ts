@@ -465,6 +465,7 @@ export class WorkerHandler {
           tools,
           model: this.sdkEnv.modelId,
           supportsVision: this.sdkEnv.supportsVision,
+          // TODO: Wire resolved permissions from unified-agent (currently bypass)
           permissionConfig: { mode: 'bypass' },
           abortSignal: taskState.abortController.signal as AbortSignal,
           humanMessageQueue: humanQueue,

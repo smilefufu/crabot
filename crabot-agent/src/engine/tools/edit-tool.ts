@@ -18,6 +18,7 @@ function findOccurrenceLines(content: string, search: string): ReadonlyArray<num
 export function createEditTool(cwd: string): ToolDefinition {
   return defineTool({
     name: 'Edit',
+    category: 'file_io',
     description: 'Performs exact string replacements in a file.',
     inputSchema: {
       type: 'object',

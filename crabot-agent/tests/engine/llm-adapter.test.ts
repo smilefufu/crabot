@@ -630,7 +630,7 @@ describe('createAdapter', () => {
     expect(adapter).toBeInstanceOf(OpenAIAdapter)
   })
 
-  it('should return OpenAIAdapter for format=gemini (via LiteLLM)', () => {
+  it('should return OpenAIAdapter for format=gemini (OpenAI-compatible)', () => {
     const adapter = createAdapter({ ...baseConfig, format: 'gemini' })
     expect(adapter).toBeInstanceOf(OpenAIAdapter)
   })

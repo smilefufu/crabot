@@ -88,6 +88,7 @@ export function createBashTool(cwd: string, defaultTimeout?: number): ToolDefini
   const effectiveDefault = defaultTimeout ?? DEFAULT_TIMEOUT_MS
   return defineTool({
     name: 'Bash',
+    category: 'shell',
     description: 'Executes a bash command in the working directory and returns its output.',
     inputSchema: {
       type: 'object',

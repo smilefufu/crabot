@@ -51,6 +51,19 @@ const DASHSCOPE_MODELS: ModelInfo[] = [
  * 百炼 Coding Plan 静态模型列表
  * 百炼 Coding Plan 提供 Anthropic 兼容接口，不支持 GET /models
  */
+/**
+ * ChatGPT 订阅模型列表
+ * 通过 OAuth 认证后可用的模型（ChatGPT Plus/Pro/Enterprise）
+ */
+const CHATGPT_SUBSCRIPTION_MODELS: ModelInfo[] = [
+  { model_id: 'gpt-4o', display_name: 'GPT-4o', type: 'llm', supports_vision: true, context_window: 128000 },
+  { model_id: 'gpt-4o-mini', display_name: 'GPT-4o Mini', type: 'llm', supports_vision: true, context_window: 128000 },
+  { model_id: 'o3', display_name: 'o3', type: 'llm', supports_vision: false, context_window: 200000 },
+  { model_id: 'o3-mini', display_name: 'o3 Mini', type: 'llm', supports_vision: false, context_window: 200000 },
+  { model_id: 'o4-mini', display_name: 'o4 Mini', type: 'llm', supports_vision: true, context_window: 200000 },
+  { model_id: 'codex-mini', display_name: 'Codex Mini', type: 'llm', supports_vision: false, context_window: 200000 },
+]
+
 const DASHSCOPE_CODING_MODELS: ModelInfo[] = [
   { model_id: 'qwen3.5-plus', display_name: 'Qwen3.5 Plus', type: 'llm', supports_vision: true, context_window: 131072 },
   { model_id: 'kimi-k2.5', display_name: 'Kimi K2.5', type: 'llm', supports_vision: true, context_window: 131072 },
@@ -59,6 +72,15 @@ const DASHSCOPE_CODING_MODELS: ModelInfo[] = [
 ]
 
 export const PRESET_VENDORS: readonly PresetVendor[] = [
+  {
+    id: 'chatgpt-subscription',
+    name: 'ChatGPT 订阅',
+    format: 'openai-responses',
+    endpoint: 'https://chatgpt.com/backend-api/codex',
+    docs_url: 'https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan',
+    default_models: CHATGPT_SUBSCRIPTION_MODELS,
+    auth_type: 'oauth',
+  },
   {
     id: 'ollama',
     name: 'Ollama',

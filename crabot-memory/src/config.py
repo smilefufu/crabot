@@ -12,6 +12,7 @@ class LLMConfig(BaseModel):
     api_key: str = ""  # 允许空值，但标记为未配置
     base_url: str = ""
     model: str = ""
+    format: str = "openai"  # 'openai' | 'anthropic'
     temperature: float = 0.1
     max_retries: int = 3
 
@@ -90,6 +91,8 @@ def load_config(config_path: Optional[str] = None) -> MemoryConfig:
         config.llm.base_url = v
     if v := os.environ.get("CRABOT_LLM_MODEL"):
         config.llm.model = v
+    if v := os.environ.get("CRABOT_LLM_FORMAT"):
+        config.llm.format = v
     if v := os.environ.get("CRABOT_EMBEDDING_API_KEY"):
         config.embedding.api_key = v
     if v := os.environ.get("CRABOT_EMBEDDING_BASE_URL"):

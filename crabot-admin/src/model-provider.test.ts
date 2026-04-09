@@ -245,8 +245,8 @@ describe('ModelProviderManager', () => {
       expect(connectionInfo.endpoint).toBe('http://localhost:11434/v1')
       expect(connectionInfo.apikey).toBe('test-key')
       expect(connectionInfo.model_id).toBe('test-llm')
-      // Agent 使用 Anthropic SDK，LiteLLM 提供格式转换
-      expect(connectionInfo.format).toBe('anthropic')
+      // 直连 Provider，返回 provider 的原始格式
+      expect(connectionInfo.format).toBe('openai')
     })
 
     it('should resolve model config from module config', async () => {

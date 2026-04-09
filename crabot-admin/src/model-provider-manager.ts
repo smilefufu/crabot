@@ -2,14 +2,11 @@
  * 模型供应商管理器
  *
  * 负责模型供应商的配置、验证、存储和分发
- * 通过修改 LiteLLM config.yaml 来管理模型，保存后重启 LiteLLM
+ * Agent/Memory 直连 Provider，不经过中间代理
  */
 
 import fs from 'fs/promises'
 import path from 'path'
-import http from 'http'
-import https from 'https'
-import { spawn } from 'child_process'
 import { generateId, generateTimestamp } from './core/base-protocol.js'
 import type {
   ModelProvider,
@@ -25,69 +22,29 @@ import type {
   ImportFromVendorParams,
   ImportFromVendorResult,
   ResolveModelConfigParams,
+  OAuthCredential,
   ApiFormat,
   ModelType,
 } from './types.js'
 import { findPresetVendor } from './preset-vendors.js'
 
-/**
- * LiteLLM config.yaml 模型配置
- */
-interface LiteLLMModelConfig {
-  model_name: string
-  litellm_params: {
-    model: string
-    api_base?: string
-    api_key: string
-  }
-}
-
-/**
- * LiteLLM config.yaml 结构
- */
-interface LiteLLMConfig {
-  model_list: LiteLLMModelConfig[]
-  litellm_settings: {
-    drop_params: boolean
-    set_verbose: boolean
-  }
-  general_settings: {
-    master_key: string
-  }
-}
-
 export class ModelProviderManager {
   private providers: Map<string, ModelProvider> = new Map()
   private globalConfig: GlobalModelConfig = {}
   private moduleConfigs: Map<string, ModuleModelConfig> = new Map()
-  private litellmRestartPending: boolean = false
-  private usedModelsProvider: (() => Array<{ provider_id: string; model_id: string }>) | null = null
-  /** 提供所有模块 env 配置中引用的 LiteLLM 模型名（用于按需加载） */
-  private moduleEnvModelsProvider: (() => string[]) | null = null
   private agentConfigRefsProvider: ((providerId: string) => string[]) | null = null
-  private lastLiteLLMYaml: string = ''
 
   private readonly dataDir: string
   private readonly providersFilePath: string
   private readonly globalConfigFilePath: string
   private readonly moduleConfigsDir: string
-  private readonly litellmConfigPath: string
-  private readonly litellmBaseUrl: string
-  private readonly litellmMasterKey: string
+  private refreshInFlight: Map<string, Promise<import('./oauth/openai-codex-oauth.js').OAuthLoginResult>> = new Map()
 
-  constructor(
-    dataDir: string,
-    litellmConfigPath: string,
-    litellmBaseUrl: string = 'http://localhost:4000',
-    litellmMasterKey: string = 'sk-litellm-test-key-12345'
-  ) {
+  constructor(dataDir: string) {
     this.dataDir = dataDir
     this.providersFilePath = path.join(dataDir, 'model_providers.json')
     this.globalConfigFilePath = path.join(dataDir, 'global_model_config.json')
     this.moduleConfigsDir = path.join(dataDir, 'module_model_configs')
-    this.litellmConfigPath = litellmConfigPath
-    this.litellmBaseUrl = litellmBaseUrl
-    this.litellmMasterKey = litellmMasterKey
   }
 
   async initialize(): Promise<void> {
@@ -110,6 +67,7 @@ export class ModelProviderManager {
       endpoint: params.endpoint,
       api_key: params.api_key,
       preset_vendor: params.preset_vendor,
+      ...(params.auth_type && { auth_type: params.auth_type }),
       models: params.models,
       status: 'active',
       created_at: now,
@@ -118,7 +76,6 @@ export class ModelProviderManager {
 
     this.providers.set(provider.id, provider)
     await this.saveProviders()
-    await this.syncToLiteLLMConfig()
 
     console.log(`[ModelProviderManager] Created provider ${provider.id} (${provider.name})`)
     return provider
@@ -149,7 +106,6 @@ export class ModelProviderManager {
 
     this.providers.set(id, provider)
     await this.saveProviders()
-    await this.syncToLiteLLMConfig()
 
     console.log(`[ModelProviderManager] Updated provider ${id}`)
     return provider
@@ -163,283 +119,52 @@ export class ModelProviderManager {
 
     this.providers.delete(id)
     await this.saveProviders()
-    await this.syncToLiteLLMConfig()
 
     console.log(`[ModelProviderManager] Deleted provider ${id}`)
   }
 
   // ============================================================================
-  // On-demand sync API
+  // Provider references
   // ============================================================================
-
-  setUsedModelsProvider(fn: () => Array<{ provider_id: string; model_id: string }>): void {
-    this.usedModelsProvider = fn
-  }
-
-  /** 注入回调：提供各模块 env 配置中引用的 LiteLLM 模型名列表 */
-  setModuleEnvModelsProvider(fn: () => string[]): void {
-    this.moduleEnvModelsProvider = fn
-  }
 
   setAgentConfigRefsProvider(fn: (providerId: string) => string[]): void {
     this.agentConfigRefsProvider = fn
   }
 
-  requestSync(): void {
-    this.syncToLiteLLMConfig().catch((err) => {
-      console.error('[ModelProviderManager] Background sync failed:', err)
-    })
-  }
-
-  private computeNeededModelKeys(): Set<string> {
-    const keys = new Set<string>()
-    const add = (pid?: string, mid?: string) => {
-      if (pid && mid) keys.add(`${pid}::${mid}`)
-    }
-
-    // GlobalModelConfig（全局默认是所有 Agent 的 fallback，必须加载）
-    add(this.globalConfig.default_llm_provider_id, this.globalConfig.default_llm_model_id)
-    add(this.globalConfig.default_embedding_provider_id, this.globalConfig.default_embedding_model_id)
-
-    // ModuleModelConfig
-    for (const mc of this.moduleConfigs.values()) {
-      add(mc.llm_provider_id, mc.llm_model_id)
-      add(mc.embedding_provider_id, mc.embedding_model_id)
-    }
-
-    // AgentInstanceConfig（通过注入的回调获取）
-    if (this.usedModelsProvider) {
-      for (const { provider_id, model_id } of this.usedModelsProvider()) {
-        add(provider_id, model_id)
-      }
-    }
-
-    // 模块 env 配置中的 LiteLLM 模型名（如 Memory 模块的 CRABOT_LLM_MODEL）
-    // 需要反向解析为 provider_id::model_id
-    if (this.moduleEnvModelsProvider) {
-      for (const litellmName of this.moduleEnvModelsProvider()) {
-        for (const [provId, provider] of this.providers) {
-          for (const model of provider.models) {
-            if (this.generateLiteLLMModelName(provId, model.model_id) === litellmName) {
-              add(provId, model.model_id)
-            }
-          }
-        }
-      }
-    }
-
-    return keys
-  }
-
   // ============================================================================
-  // LiteLLM Config Sync
+  // OAuth Credential Management
   // ============================================================================
 
-  /**
-   * 同步 providers 到 LiteLLM config.yaml
-   */
-  private async syncToLiteLLMConfig(): Promise<void> {
-    const modelList: LiteLLMModelConfig[] = []
+  async setOAuthCredential(providerId: string, credential: OAuthCredential): Promise<void> {
+    const provider = this.providers.get(providerId)
+    if (!provider) throw new Error(`Provider not found: ${providerId}`)
 
-    // 计算需要的模型集合
-    const neededKeys = this.computeNeededModelKeys()
-
-    for (const provider of this.providers.values()) {
-      // 只同步 active 状态的 provider
-      if (provider.status !== 'active') continue
-
-      // 为每个模型创建配置
-      for (const model of provider.models) {
-        const key = `${provider.id}::${model.model_id}`
-        if (!neededKeys.has(key)) continue  // 只处理被引用的模型
-
-        const modelName = this.generateLiteLLMModelName(provider.id, model.model_id)
-        const litellmModelId = this.buildLiteLLMModelId(provider, model.model_id)
-
-        // 对于 Ollama，api_base 不应该包含 /v1
-        let apiBase = provider.endpoint
-        if (provider.preset_vendor === 'ollama' && apiBase.endsWith('/v1')) {
-          apiBase = apiBase.slice(0, -3) // 移除末尾的 /v1
-        }
-
-        modelList.push({
-          model_name: modelName,
-          litellm_params: {
-            model: litellmModelId,
-            api_base: apiBase,
-            api_key: provider.api_key,
-          },
-        })
-      }
+    const updated = {
+      ...provider,
+      auth_type: 'oauth' as const,
+      oauth_credential: credential,
+      updated_at: generateTimestamp(),
     }
-
-    const config: LiteLLMConfig = {
-      model_list: modelList,
-      litellm_settings: {
-        drop_params: true,
-        set_verbose: false,
-      },
-      general_settings: {
-        master_key: `os.environ/LITELLM_MASTER_KEY`,
-      },
-    }
-
-    // no-op 优化：YAML 未变则跳过写文件和重启
-    const yamlContent = this.toYaml(config)
-    if (yamlContent === this.lastLiteLLMYaml) {
-      console.log(`[ModelProviderManager] LiteLLM config unchanged, skipping restart`)
-      return
-    }
-    this.lastLiteLLMYaml = yamlContent
-
-    // 写入 config.yaml
-    await fs.writeFile(this.litellmConfigPath, yamlContent, 'utf-8')
-
-    console.log(`[ModelProviderManager] Synced ${modelList.length} needed models to LiteLLM config`)
-
-    // 后台重启 LiteLLM，不阻塞调用方
-    this.scheduleRestartLiteLLM()
+    this.providers.set(providerId, updated)
+    await this.saveProviders()
   }
 
-  /**
-   * 调度后台重启（防止并发重复重启）
-   */
-  private scheduleRestartLiteLLM(): void {
-    if (this.litellmRestartPending) {
-      console.log('[ModelProviderManager] LiteLLM restart already pending, skipping')
-      return
+  async clearOAuthCredential(providerId: string): Promise<void> {
+    const provider = this.providers.get(providerId)
+    if (!provider) throw new Error(`Provider not found: ${providerId}`)
+
+    const updated = {
+      ...provider,
+      oauth_credential: undefined,
+      api_key: '',
+      updated_at: generateTimestamp(),
     }
-    this.litellmRestartPending = true
-    // 异步执行，不 await，不阻塞调用链
-    this.restartLiteLLM()
-      .catch((err) => {
-        console.error('[ModelProviderManager] LiteLLM restart failed:', err)
-      })
-      .finally(() => {
-        this.litellmRestartPending = false
-      })
+    this.providers.set(providerId, updated)
+    await this.saveProviders()
   }
 
-  private generateLiteLLMModelName(providerId: string, modelId: string): string {
-    // 格式: provider-{id前8位}-{model_id}
-    // 例如: provider-bdbf737d-qwen3.5:cloud
-    const shortId = providerId.slice(0, 8)
-    // 清理 model_id 中的特殊字符
-    const cleanModelId = modelId.replace(/[:/]/g, '-').replace(/[^a-zA-Z0-9-_]/g, '')
-    return `provider-${shortId}-${cleanModelId}`
-  }
-
-  private buildLiteLLMModelId(provider: ModelProvider, modelId: string): string {
-    // LiteLLM 格式:
-    // - Ollama: ollama/{model_id}
-    // - 其他: {format}/{model_id}
-    if (provider.preset_vendor === 'ollama') {
-      return `ollama/${modelId}`
-    }
-    return `${provider.format}/${modelId}`
-  }
-
-  /**
-   * 简单的 YAML 序列化（不依赖第三方库）
-   */
-  private toYaml(config: LiteLLMConfig): string {
-    const lines: string[] = ['# LiteLLM Proxy 配置', '# 由 crabot-admin 自动生成', '']
-
-    // model_list
-    lines.push('model_list:')
-    for (const model of config.model_list) {
-      lines.push(`  - model_name: "${model.model_name}"`)
-      lines.push('    litellm_params:')
-      lines.push(`      model: "${model.litellm_params.model}"`)
-      if (model.litellm_params.api_base) {
-        lines.push(`      api_base: "${model.litellm_params.api_base}"`)
-      }
-      lines.push(`      api_key: "${model.litellm_params.api_key}"`)
-    }
-
-    // litellm_settings
-    lines.push('')
-    lines.push('litellm_settings:')
-    lines.push('  drop_params: true')
-    lines.push('  set_verbose: false')
-
-    // 不配置 general_settings.master_key
-    // LiteLLM 无数据库时，设置 master_key 会导致所有 API 调用报 "No connected db" 错误
-    // LiteLLM 仅在本地运行，作为内部代理不需要认证
-
-    return lines.join('\n')
-  }
-
-  /**
-   * 重启 LiteLLM
-   */
-  private async restartLiteLLM(): Promise<void> {
-    console.log('[ModelProviderManager] Restarting LiteLLM...')
-
-    // 查找并杀死现有 LiteLLM 进程
-    try {
-      await new Promise<void>((resolve) => {
-        const killProcess = spawn('pkill', ['-f', 'litellm'])
-        killProcess.on('close', () => {
-          setTimeout(resolve, 1000) // 等待进程完全退出
-        })
-      })
-    } catch {
-      // 忽略错误
-    }
-
-    // 启动新的 LiteLLM 进程
-    const configDir = path.dirname(this.litellmConfigPath)
-
-    // 使用 spawn 在后台启动
-    const litellmProcess = spawn('litellm', ['--config', this.litellmConfigPath, '--port', '4000'], {
-      cwd: configDir,
-      detached: true,
-      stdio: 'ignore',
-      env: {
-        ...process.env,
-        // 清除代理设置，避免 LiteLLM 通过不可用的代理访问外部 API
-        all_proxy: '',
-        ALL_PROXY: '',
-        http_proxy: '',
-        HTTP_PROXY: '',
-        https_proxy: '',
-        HTTPS_PROXY: '',
-        no_proxy: '',
-        NO_PROXY: '',
-      },
-    })
-
-    litellmProcess.unref()
-
-    // 等待 LiteLLM 启动
-    await this.waitForLiteLLM()
-
-    console.log('[ModelProviderManager] LiteLLM restarted')
-  }
-
-  /**
-   * 等待 LiteLLM 启动
-   */
-  private async waitForLiteLLM(maxAttempts: number = 120): Promise<void> {
-    for (let i = 0; i < maxAttempts; i++) {
-      try {
-        const response = await this.httpRequest(`${this.litellmBaseUrl}/health`, {
-          method: 'GET',
-        })
-        if (response) {
-          return
-        }
-      } catch (err: unknown) {
-        // 401 = LiteLLM 在运行但需要 API key，视为启动成功
-        if (err instanceof Error && err.message.startsWith('HTTP 401')) {
-          return
-        }
-        // 其他错误（连接拒绝等），继续等待
-      }
-      await new Promise((resolve) => setTimeout(resolve, 1000))
-    }
-    throw new Error('LiteLLM failed to start within timeout')
+  getOAuthCredential(providerId: string): OAuthCredential | undefined {
+    return this.providers.get(providerId)?.oauth_credential
   }
 
   // ============================================================================
@@ -520,6 +245,17 @@ export class ModelProviderManager {
       }
     }
 
+    // OAuth provider：检查 credential 是否存在且未过期
+    if (provider.auth_type === 'oauth') {
+      if (!provider.oauth_credential) {
+        return { success: false, latency_ms: 0, error: 'OAuth 未登录，请先完成 ChatGPT 登录' }
+      }
+      if (Date.now() > provider.oauth_credential.expires_at) {
+        return { success: false, latency_ms: 0, error: 'OAuth token 已过期，请重新登录' }
+      }
+      return { success: true, latency_ms: 0 }
+    }
+
     const startTime = Date.now()
     try {
       let result: ValidationResult
@@ -593,7 +329,6 @@ export class ModelProviderManager {
     provider.updated_at = generateTimestamp()
     this.providers.set(id, provider)
     await this.saveProviders()
-    await this.syncToLiteLLMConfig()
 
     return { models: mergedModels, added, removed }
   }
@@ -740,6 +475,9 @@ export class ModelProviderManager {
           return { success: true }
         }
         return { success: false, error: 'Invalid response format' }
+      } else if (format === 'openai-responses') {
+        // OAuth providers: 跳过 LLM 连接测试（需要有效 OAuth token）
+        return { success: true }
       }
 
       return { success: false, error: `Unsupported format: ${format}` }
@@ -775,6 +513,7 @@ export class ModelProviderManager {
       endpoint,
       api_key: params.api_key,
       preset_vendor: vendor.id,
+      auth_type: vendor.auth_type,
       models,
     })
 
@@ -862,7 +601,7 @@ export class ModelProviderManager {
     return this.buildConnectionInfo(providerId, modelId)
   }
 
-  buildConnectionInfo(providerId: string, modelId: string): LLMConnectionInfo | EmbeddingConnectionInfo {
+  async buildConnectionInfo(providerId: string, modelId: string): Promise<LLMConnectionInfo | EmbeddingConnectionInfo> {
     const provider = this.providers.get(providerId)
     if (!provider) {
       throw new Error(`Provider not found: ${providerId}`)
@@ -873,18 +612,47 @@ export class ModelProviderManager {
       throw new Error(`Model not found: ${modelId} in provider ${providerId}`)
     }
 
-    // 使用 LiteLLM endpoint
-    // Anthropic SDK 会在 baseURL 后追加 /v1/messages，所以不应包含 /v1
-    const endpoint = this.litellmBaseUrl
-    const apiKey = this.litellmMasterKey
-    const litellmModelName = this.generateLiteLLMModelName(providerId, modelId)
+    // OAuth provider：使用 access_token，过期时自动刷新
+    let apikey = provider.api_key
+    if (provider.auth_type === 'oauth' && provider.oauth_credential) {
+      if (Date.now() > provider.oauth_credential.expires_at - 60_000) {
+        // Token 即将过期（<1分钟），去重刷新
+        try {
+          let refreshPromise = this.refreshInFlight.get(providerId)
+          if (!refreshPromise) {
+            refreshPromise = (async () => {
+              const { refreshOAuthToken } = await import('./oauth/openai-codex-oauth.js')
+              return refreshOAuthToken(provider.oauth_credential!.refresh_token)
+            })()
+            this.refreshInFlight.set(providerId, refreshPromise)
+            refreshPromise.finally(() => this.refreshInFlight.delete(providerId))
+          }
+          const refreshed = await refreshPromise
+          await this.setOAuthCredential(providerId, {
+            access_token: refreshed.access_token,
+            refresh_token: refreshed.refresh_token,
+            expires_at: refreshed.expires_at,
+            account_id: refreshed.account_id,
+            email: refreshed.email,
+          })
+          apikey = refreshed.access_token
+        } catch (err) {
+          console.error(`[ModelProviderManager] OAuth token refresh failed for ${providerId}:`, err)
+          apikey = provider.oauth_credential.access_token
+        }
+      } else {
+        apikey = provider.oauth_credential.access_token
+      }
+    }
 
+    // 直连 Provider：返回 provider 原始连接信息
+    // endpoint 存储不含 /v1 的 base URL，各 adapter 自行拼接路径
     const base = {
-      endpoint,
-      apikey: apiKey,
-      model_id: litellmModelName,
-      // Agent 使用 Anthropic SDK，LiteLLM 提供格式转换
-      format: 'anthropic' as const,
+      endpoint: provider.endpoint,
+      apikey,
+      model_id: model.model_id,
+      format: provider.format,
+      provider_id: providerId,
     }
 
     if (model.dimension !== undefined) {
@@ -893,7 +661,6 @@ export class ModelProviderManager {
 
     return {
       ...base,
-      // 透传模型的最大输出 token 数（在 Admin → 模型供应商 → 编辑模型 中配置）
       ...(model.max_tokens !== undefined && { max_tokens: model.max_tokens }),
       ...(model.supports_vision && { supports_vision: true }),
     } as LLMConnectionInfo
@@ -910,7 +677,6 @@ export class ModelProviderManager {
   async updateGlobalConfig(config: Partial<GlobalModelConfig>): Promise<GlobalModelConfig> {
     this.globalConfig = { ...this.globalConfig, ...config }
     await this.saveGlobalConfig()
-    this.requestSync()
     return this.globalConfig
   }
 
@@ -934,7 +700,6 @@ export class ModelProviderManager {
     const updated = { ...existing, ...config }
     this.moduleConfigs.set(moduleId, updated)
     await this.saveModuleConfig(moduleId)
-    this.requestSync()
     return updated
   }
 
@@ -994,13 +759,6 @@ export class ModelProviderManager {
     } catch {
       console.log('[ModelProviderManager] No existing module configs')
     }
-
-    // 加载已有 LiteLLM YAML 用于 no-op 比对
-    try {
-      this.lastLiteLLMYaml = await fs.readFile(this.litellmConfigPath, 'utf-8')
-    } catch {
-      this.lastLiteLLMYaml = ''
-    }
   }
 
   // ============================================================================
@@ -1037,7 +795,7 @@ export class ModelProviderManager {
   // HTTP Helper
   // ============================================================================
 
-  private httpRequest(
+  private async httpRequest(
     url: string,
     options: {
       method: string
@@ -1045,38 +803,18 @@ export class ModelProviderManager {
       body?: string
     }
   ): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const urlObj = new URL(url)
-      const client = urlObj.protocol === 'https:' ? https : http
-
-      const req = client.request(
-        url,
-        {
-          method: options.method,
-          headers: options.headers,
-        },
-        (res: http.IncomingMessage) => {
-          let data = ''
-          res.on('data', (chunk: Buffer) => {
-            data += chunk.toString()
-          })
-          res.on('end', () => {
-            if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-              resolve(data)
-            } else {
-              reject(new Error(`HTTP ${res.statusCode}: ${data}`))
-            }
-          })
-        }
-      )
-
-      req.on('error', reject)
-
-      if (options.body) {
-        req.write(options.body)
-      }
-
-      req.end()
+    const response = await fetch(url, {
+      method: options.method,
+      headers: options.headers,
+      body: options.body,
     })
+
+    const data = await response.text()
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${data}`)
+    }
+
+    return data
   }
 }

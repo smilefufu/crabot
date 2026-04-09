@@ -6,7 +6,8 @@ import { Button } from '../../components/Common/Button'
 import { Loading } from '../../components/Common/Loading'
 import { useToast } from '../../contexts/ToastContext'
 import { friendService } from '../../services/friend'
-import type { Friend, FriendPermission } from '../../types'
+import { permissionTemplateService } from '../../services/permission-template'
+import type { Friend, FriendPermission, PermissionTemplate } from '../../types'
 
 export const FriendList: React.FC = () => {
   const toast = useToast()
@@ -22,6 +23,8 @@ export const FriendList: React.FC = () => {
   const [createName, setCreateName] = useState('')
   const [createPerm, setCreatePerm] = useState<FriendPermission>('normal')
   const [creating, setCreating] = useState(false)
+  const [templates, setTemplates] = useState<PermissionTemplate[]>([])
+  const [createTemplateId, setCreateTemplateId] = useState<string>('standard')
 
   // 删除确认
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
@@ -55,6 +58,12 @@ export const FriendList: React.FC = () => {
     loadPendingCount()
   }, [loadFriends, loadPendingCount])
 
+  useEffect(() => {
+    permissionTemplateService.list().then(result => {
+      setTemplates(result.items)
+    }).catch(() => {})
+  }, [])
+
   const handleCreate = async () => {
     if (!createName.trim()) return
     setCreating(true)
@@ -62,11 +71,13 @@ export const FriendList: React.FC = () => {
       await friendService.createFriend({
         display_name: createName.trim(),
         permission: createPerm,
+        ...(createPerm === 'normal' ? { permission_template_id: createTemplateId } : {}),
       })
       toast.success('熟人创建成功')
       setShowCreate(false)
       setCreateName('')
       setCreatePerm('normal')
+      setCreateTemplateId('standard')
       await loadFriends()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '创建失败')
@@ -284,6 +295,32 @@ export const FriendList: React.FC = () => {
                 <option value="master">Master</option>
               </select>
             </div>
+
+            {createPerm === 'normal' && (
+              <div style={{ marginBottom: '1.5rem' }}>
+                <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.25rem' }}>
+                  权限模板
+                </label>
+                <select
+                  value={createTemplateId}
+                  onChange={(e) => setCreateTemplateId(e.target.value)}
+                  style={{
+                    width: '100%',
+                    padding: '0.5rem 0.75rem',
+                    borderRadius: '6px',
+                    border: '1px solid var(--border)',
+                    background: 'var(--bg-secondary)',
+                    color: 'var(--text-primary)',
+                    fontSize: '0.875rem',
+                    boxSizing: 'border-box',
+                  }}
+                >
+                  {templates.filter(t => t.id !== 'master_private').map(t => (
+                    <option key={t.id} value={t.id}>{t.name}{t.is_system ? ' (系统)' : ''}</option>
+                  ))}
+                </select>
+              </div>
+            )}
 
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem' }}>
               <Button variant="secondary" onClick={() => setShowCreate(false)}>取消</Button>

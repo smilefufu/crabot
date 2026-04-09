@@ -129,6 +129,30 @@ export interface MemoryPermissions {
   read_accessible_scopes?: string[]
 }
 
+export type ToolCategory = 'memory' | 'messaging' | 'task' | 'mcp_skill' | 'file_io' | 'browser' | 'shell' | 'remote_exec'
+
+export interface ToolAccessConfig {
+  memory: boolean
+  messaging: boolean
+  task: boolean
+  mcp_skill: boolean
+  file_io: boolean
+  browser: boolean
+  shell: boolean
+  remote_exec: boolean
+}
+
+export interface StoragePermission {
+  workspace_path: string
+  access: 'read' | 'readwrite'
+}
+
+export interface ResolvedPermissions {
+  tool_access: ToolAccessConfig
+  storage: StoragePermission | null
+  memory_scopes: string[]
+}
+
 export interface PermissionResult {
   /** 是否允许处理 */
   allowed: boolean
@@ -155,16 +179,9 @@ export interface Friend {
 }
 
 export interface SessionPermissionConfig {
-  desktop: boolean
-  network: {
-    mode: 'allow_all' | 'whitelist' | 'blacklist'
-    rules: string[]
-  }
-  storage: Array<{
-    path: string
-    access: 'read' | 'readwrite'
-  }>
-  memory_scopes: string[]
+  tool_access?: Partial<ToolAccessConfig>
+  storage?: StoragePermission | null
+  memory_scopes?: string[]
   template_id?: string
   updated_at: string
 }

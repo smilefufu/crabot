@@ -81,4 +81,33 @@ export const providerService = {
   ): Promise<{ references: string[] }> {
     return api.get(`/model-providers/${id}/references`)
   },
+
+  // OAuth
+  async startOAuthLogin(): Promise<{ auth_url: string }> {
+    return api.post('/oauth/chatgpt/login', {})
+  },
+
+  async getOAuthStatus(): Promise<{
+    status: 'idle' | 'pending' | 'success' | 'failed'
+    email?: string
+    account_id?: string
+    expires_at?: number
+    error?: string
+  }> {
+    return api.get('/oauth/chatgpt/status')
+  },
+
+  async logoutOAuth(providerId: string): Promise<{ success: boolean }> {
+    return api.post(`/oauth/chatgpt/${providerId}/logout`, {})
+  },
+
+  async getOAuthTokenInfo(providerId: string): Promise<{
+    logged_in: boolean
+    email?: string
+    account_id?: string
+    expires_at?: number
+    is_expired?: boolean
+  }> {
+    return api.get(`/oauth/chatgpt/${providerId}/token-info`)
+  },
 }

@@ -10,6 +10,7 @@ import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { BrowserManager } from './browser-manager.js'
+import { PermissionTemplateManager } from './permission-template-manager.js'
 import { ModuleBase, type ModuleConfig } from './core/module-base.js'
 import {
   type Event,
@@ -57,6 +58,7 @@ import {
   type TaskPriority,
   type ScheduleTrigger,
   type AdminEventPayloads,
+  type ModelProvider,
   type CreateModelProviderParams,
   type UpdateModelProviderParams,
   type ImportFromVendorParams,
@@ -93,6 +95,8 @@ import {
   type UpsertPendingMessageResult,
   type ChannelMessageRef,
   type SessionPermissionConfig,
+  type CreatePermissionTemplateParams,
+  type UpdatePermissionTemplateParams,
 } from './types.js'
 import { ModelProviderManager } from './model-provider-manager.js'
 import { AgentManager } from './agent-manager.js'
@@ -174,7 +178,7 @@ export class AdminModule extends ModuleBase {
 
   // 数据存储
   private friends: Map<FriendId, Friend> = new Map()
-  private permissionTemplates: Map<string, PermissionTemplate> = new Map()
+  private permissionTemplateManager = new PermissionTemplateManager()
   private pendingMessages: Map<string, PendingMessage> = new Map()
   private channelIdentityIndex: Map<string, FriendId> = new Map() // 快速查找
   private tasks: Map<TaskId, Task> = new Map()
@@ -211,7 +215,7 @@ export class AdminModule extends ModuleBase {
   // Browser 管理器（CDP 浏览器自动化）
   private browserManager!: BrowserManager
 
-  // 模块 env 配置缓存（用于 LiteLLM 按需加载）
+  // 模块 env 配置缓存
   private moduleEnvConfigCache: Map<string, Record<string, string>> = new Map()
 
   // 数据文件路径
@@ -227,16 +231,8 @@ export class AdminModule extends ModuleBase {
     super(moduleConfig)
     this.adminConfig = { ...DEFAULT_ADMIN_CONFIG, ...adminConfig }
 
-    // LiteLLM 配置
-    const litellmBaseUrl = process.env.LITELLM_BASE_URL || 'http://localhost:4000'
-    const litellmMasterKey = process.env.LITELLM_MASTER_KEY || 'sk-litellm-test-key-12345'
-    const litellmConfigPath = process.env.LITELLM_CONFIG_PATH || path.join(this.adminConfig.data_dir, '../litellm/config.yaml')
-
     this.modelProviderManager = new ModelProviderManager(
-      this.adminConfig.data_dir,
-      litellmConfigPath,
-      litellmBaseUrl,
-      litellmMasterKey
+      this.adminConfig.data_dir
     )
     this.agentManager = new AgentManager(this.adminConfig.data_dir)
     this.channelManager = new ChannelManager(this.adminConfig.data_dir, this.rpcClient)
@@ -250,14 +246,7 @@ export class AdminModule extends ModuleBase {
     )
 
     // 注入回调，实现跨模块解耦通信
-    this.modelProviderManager.setUsedModelsProvider(
-      () => this.agentManager.getUsedModels()
-    )
-    this.modelProviderManager.setModuleEnvModelsProvider(
-      () => this.getModuleEnvLiteLLMModels()
-    )
     this.agentManager.setOnConfigChanged(() => {
-      this.modelProviderManager.requestSync()
       this.pushConfigToAgentModules().catch((err: Error) => {
         console.warn('[Admin] pushConfigToAgentModules after agent config change failed:', err.message)
       })
@@ -354,6 +343,13 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('stop_module', this.handleStopModuleAdmin.bind(this))
     this.registerMethod('restart_module', this.handleRestartModuleAdmin.bind(this))
 
+    // Permission Template 管理
+    this.registerMethod('list_permission_templates', this.handleListPermissionTemplates.bind(this))
+    this.registerMethod('get_permission_template', this.handleGetPermissionTemplate.bind(this))
+    this.registerMethod('create_permission_template', this.handleCreatePermissionTemplate.bind(this))
+    this.registerMethod('update_permission_template', this.handleUpdatePermissionTemplate.bind(this))
+    this.registerMethod('delete_permission_template', this.handleDeletePermissionTemplate.bind(this))
+
     // Session 配置管理
     this.registerMethod('get_session_config', this.handleGetSessionConfig.bind(this))
     this.registerMethod('update_session_config', this.handleUpdateSessionConfig.bind(this))
@@ -397,17 +393,14 @@ export class AdminModule extends ModuleBase {
     // 初始化系统权限模板
     await this.initSystemTemplates()
 
-    // 加载模块 env 配置缓存（供 LiteLLM 按需加载使用）
+    // 加载模块 env 配置缓存
     await this.loadModuleEnvConfigCache()
 
-    // 初始化模型供应商管理器（会自动同步到 LiteLLM）
+    // 初始化模型供应商管理器
     await this.modelProviderManager.initialize()
 
     // 初始化 Agent 管理器
     await this.agentManager.initialize()
-
-    // agentManager 初始化完成后，触发一次同步以纳入 agent configs 和模块 env 中的模型
-    this.modelProviderManager.requestSync()
 
     // 初始化 Channel 管理器
     await this.channelManager.initialize()
@@ -747,6 +740,29 @@ export class AdminModule extends ModuleBase {
 
       if (pathname === '/api/config/status' && req.method === 'GET') {
         await this.handleGetConfigStatusApi(req, res)
+        return
+      }
+
+      // OAuth 路由
+      if (pathname === '/api/oauth/chatgpt/login' && req.method === 'POST') {
+        await this.handleOAuthChatGPTLogin(req, res)
+        return
+      }
+
+      if (pathname === '/api/oauth/chatgpt/status' && req.method === 'GET') {
+        await this.handleOAuthChatGPTStatus(req, res)
+        return
+      }
+
+      if (pathname.match(/^\/api\/oauth\/chatgpt\/[^/]+\/logout$/) && req.method === 'POST') {
+        const providerId = pathname.split('/')[4]
+        await this.handleOAuthChatGPTLogout(req, res, providerId)
+        return
+      }
+
+      if (pathname.match(/^\/api\/oauth\/chatgpt\/[^/]+\/token-info$/) && req.method === 'GET') {
+        const providerId = pathname.split('/')[4]
+        await this.handleOAuthChatGPTTokenInfo(req, res, providerId)
         return
       }
 
@@ -1104,6 +1120,84 @@ export class AdminModule extends ModuleBase {
       if (pathname.startsWith('/api/channel-instances/') && req.method === 'DELETE') {
         const id = decodeURIComponent(pathname.split('/')[3])
         await this.handleDeleteChannelInstanceApi(req, res, id)
+        return
+      }
+
+      // Permission Template 路由
+      if (pathname === '/api/permission-templates' && req.method === 'GET') {
+        const systemOnly = url.searchParams.get('system_only') === 'true'
+        const page = parseInt(url.searchParams.get('page') ?? '1', 10)
+        const pageSize = parseInt(url.searchParams.get('page_size') ?? '50', 10)
+        const result = await this.handleListPermissionTemplates({ system_only: systemOnly, page, page_size: pageSize })
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(result))
+        return
+      }
+
+      if (pathname === '/api/permission-templates' && req.method === 'POST') {
+        const body = await this.readJsonBody<CreatePermissionTemplateParams>(req)
+        const result = await this.handleCreatePermissionTemplate(body)
+        res.writeHead(201, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(result))
+        return
+      }
+
+      if (pathname.match(/^\/api\/permission-templates\/[^/]+$/) && req.method === 'GET') {
+        const id = decodeURIComponent(pathname.split('/')[3])
+        const result = await this.handleGetPermissionTemplate({ template_id: id })
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(result))
+        return
+      }
+
+      if (pathname.match(/^\/api\/permission-templates\/[^/]+$/) && req.method === 'PATCH') {
+        const id = decodeURIComponent(pathname.split('/')[3])
+        const body = await this.readJsonBody<Omit<UpdatePermissionTemplateParams, 'template_id'>>(req)
+        const result = await this.handleUpdatePermissionTemplate({ template_id: id, ...body })
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(result))
+        return
+      }
+
+      if (pathname.match(/^\/api\/permission-templates\/[^/]+$/) && req.method === 'DELETE') {
+        const id = decodeURIComponent(pathname.split('/')[3])
+        try {
+          const result = await this.handleDeletePermissionTemplate({ template_id: id })
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify(result))
+        } catch (err: any) {
+          const status = err.code === 'ADMIN_TEMPLATE_IN_USE' || err.code === 'ADMIN_CANNOT_DELETE_SYSTEM_TEMPLATE' ? 409 : 404
+          res.writeHead(status, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: err.message, code: err.code }))
+        }
+        return
+      }
+
+      // Channel Sessions 代理路由
+      if (pathname.match(/^\/api\/channels\/[^/]+\/sessions$/) && req.method === 'GET') {
+        const channelId = decodeURIComponent(pathname.split('/')[3])
+        const type = url.searchParams.get('type') ?? undefined
+        try {
+          const modules = await this.rpcClient.resolve(
+            { module_id: channelId },
+            this.config.moduleId
+          )
+          if (modules.length === 0) {
+            res.writeHead(404, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'Channel module not found' }))
+            return
+          }
+          const channelPort = modules[0].port
+          const result = await this.rpcClient.call<
+            { type?: string },
+            { items: Array<{ id: string; channel_id: string; type: string; platform_session_id: string; title: string; participants: Array<{ friend_id?: string; platform_user_id: string; role: string }> }>; pagination: { total_items: number } }
+          >(channelPort, 'get_sessions', { type }, this.config.moduleId)
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify(result))
+        } catch (err) {
+          res.writeHead(502, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'Failed to fetch sessions from channel' }))
+        }
         return
       }
 
@@ -2172,10 +2266,8 @@ export class AdminModule extends ModuleBase {
     try {
       const templatesData = await fs.readFile(this.templatesFilePath, 'utf-8')
       const templatesArray = JSON.parse(templatesData) as PermissionTemplate[]
-      for (const template of templatesArray) {
-        this.permissionTemplates.set(template.id, template)
-      }
-      console.log(`[Admin] Loaded ${this.permissionTemplates.size} permission templates`)
+      this.permissionTemplateManager.loadFromArray(templatesArray)
+      console.log(`[Admin] Loaded ${this.permissionTemplateManager.size} permission templates`)
     } catch {
       console.log('[Admin] No existing templates data')
     }
@@ -2222,7 +2314,7 @@ export class AdminModule extends ModuleBase {
     const friendsArray = Array.from(this.friends.values())
     await this.atomicWriteFile(this.friendsFilePath, JSON.stringify(friendsArray, null, 2))
 
-    const templatesArray = Array.from(this.permissionTemplates.values())
+    const templatesArray = this.permissionTemplateManager.toArray()
     await this.atomicWriteFile(this.templatesFilePath, JSON.stringify(templatesArray, null, 2))
 
     const pendingArray = Array.from(this.pendingMessages.values())
@@ -2235,65 +2327,7 @@ export class AdminModule extends ModuleBase {
   }
 
   private async initSystemTemplates(): Promise<void> {
-    const now = generateTimestamp()
-
-    const systemTemplates: PermissionTemplate[] = [
-      {
-        id: 'master_private',
-        name: 'Master 私聊',
-        description: 'Master 用户私聊的权限配置',
-        is_system: true,
-        desktop: true,
-        network: { mode: 'allow_all', rules: [] },
-        storage: [{ path: '/', access: 'readwrite' }],
-        memory_scopes: [],
-        created_at: now,
-        updated_at: now,
-      },
-      {
-        id: 'group_default',
-        name: '群聊默认',
-        description: '群聊的默认权限配置',
-        is_system: true,
-        desktop: false,
-        network: { mode: 'whitelist', rules: [] },
-        storage: [{ path: '/shared', access: 'read' }],
-        memory_scopes: [],
-        created_at: now,
-        updated_at: now,
-      },
-      {
-        id: 'minimal',
-        name: '最低权限',
-        description: '最低权限配置',
-        is_system: true,
-        desktop: false,
-        network: { mode: 'blacklist', rules: ['*'] },
-        storage: [],
-        memory_scopes: [],
-        created_at: now,
-        updated_at: now,
-      },
-      {
-        id: 'standard',
-        name: '普通权限',
-        description: '普通用户的权限配置',
-        is_system: true,
-        desktop: false,
-        network: { mode: 'whitelist', rules: [] },
-        storage: [{ path: '/home', access: 'read' }],
-        memory_scopes: [],
-        created_at: now,
-        updated_at: now,
-      },
-    ]
-
-    for (const template of systemTemplates) {
-      if (!this.permissionTemplates.has(template.id)) {
-        this.permissionTemplates.set(template.id, template)
-      }
-    }
-
+    this.permissionTemplateManager.initSystemTemplates()
     await this.saveData()
   }
 
@@ -2920,11 +2954,26 @@ export class AdminModule extends ModuleBase {
   // Model Provider REST API
   // ============================================================================
 
+  /** 序列化 provider 给前端：剥离敏感的 oauth_credential，派生安全的 oauth_info */
+  private sanitizeProviderForApi(provider: ModelProvider): Record<string, unknown> {
+    const { oauth_credential, ...rest } = provider
+    return {
+      ...rest,
+      ...(oauth_credential ? {
+        oauth_info: {
+          email: oauth_credential.email,
+          expires_at: oauth_credential.expires_at,
+          account_id: oauth_credential.account_id,
+        },
+      } : {}),
+    }
+  }
+
   private async handleListProvidersApi(_req: IncomingMessage, res: ServerResponse): Promise<void> {
     const providers = this.modelProviderManager.listProviders()
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({
-      items: providers,
+      items: providers.map(p => this.sanitizeProviderForApi(p)),
       pagination: {
         page: 1,
         page_size: 100,
@@ -2952,7 +3001,7 @@ export class AdminModule extends ModuleBase {
       return
     }
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify(provider))
+    res.end(JSON.stringify(this.sanitizeProviderForApi(provider)))
   }
 
   private async handleUpdateProviderApi(req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
@@ -2977,6 +3026,18 @@ export class AdminModule extends ModuleBase {
   private async handleImportFromVendorApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await this.readJsonBody<ImportFromVendorParams>(req)
     const result = await this.modelProviderManager.importFromVendor(body)
+
+    // OAuth vendor：自动关联最近一次 OAuth 登录的 credential
+    if (result.provider.auth_type === 'oauth' && this.lastOAuthResult) {
+      await this.modelProviderManager.setOAuthCredential(result.provider.id, {
+        access_token: this.lastOAuthResult.access_token,
+        refresh_token: this.lastOAuthResult.refresh_token,
+        expires_at: this.lastOAuthResult.expires_at,
+        account_id: this.lastOAuthResult.account_id,
+        email: this.lastOAuthResult.email,
+      })
+      this.lastOAuthResult = null
+    }
 
     this.publishAdminEvent('admin.model_provider_created', { provider: result.provider })
 
@@ -3036,6 +3097,105 @@ export class AdminModule extends ModuleBase {
       console.warn('[Admin] pushConfigToAgentModules failed:', err.message)
     })
   }
+
+  // ============================================================================
+  // OAuth API Handlers
+  // ============================================================================
+
+  private oauthLoginPromise: Promise<import('./oauth/openai-codex-oauth.js').OAuthLoginResult> | null = null
+  private lastOAuthResult: import('./oauth/openai-codex-oauth.js').OAuthLoginResult | null = null
+
+  private async handleOAuthChatGPTLogin(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const { waitForOAuthCallback, getOAuthAuthUrl } = await import('./oauth/openai-codex-oauth.js')
+
+    this.lastOAuthResult = null
+    this.oauthLoginPromise = waitForOAuthCallback()
+
+    const authUrl = getOAuthAuthUrl()
+    if (!authUrl) {
+      res.writeHead(500, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Failed to generate auth URL' }))
+      return
+    }
+
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ auth_url: authUrl }))
+
+    // 后台等待回调完成，保存结果
+    this.oauthLoginPromise
+      .then((result) => { this.lastOAuthResult = result })
+      .catch(() => { /* 状态通过 /status 查询 */ })
+  }
+
+  private async handleOAuthChatGPTStatus(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const { isOAuthPending } = await import('./oauth/openai-codex-oauth.js')
+
+    if (!this.oauthLoginPromise) {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ status: 'idle' }))
+      return
+    }
+
+    if (isOAuthPending()) {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ status: 'pending' }))
+      return
+    }
+
+    // Flow 已完成
+    try {
+      const result = await this.oauthLoginPromise
+      this.oauthLoginPromise = null
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({
+        status: 'success',
+        email: result.email,
+        account_id: result.account_id,
+        expires_at: result.expires_at,
+      }))
+    } catch (err) {
+      this.oauthLoginPromise = null
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({
+        status: 'failed',
+        error: err instanceof Error ? err.message : String(err),
+      }))
+    }
+  }
+
+  private async handleOAuthChatGPTLogout(_req: IncomingMessage, res: ServerResponse, providerId: string): Promise<void> {
+    try {
+      await this.modelProviderManager.clearOAuthCredential(providerId)
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ success: true }))
+    } catch (err) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }))
+    }
+  }
+
+  private async handleOAuthChatGPTTokenInfo(_req: IncomingMessage, res: ServerResponse, providerId: string): Promise<void> {
+    const credential = this.modelProviderManager.getOAuthCredential(providerId)
+    if (!credential) {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ logged_in: false }))
+      return
+    }
+
+    const isExpired = Date.now() > credential.expires_at
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({
+      logged_in: true,
+      email: credential.email,
+      account_id: credential.account_id,
+      expires_at: credential.expires_at,
+      is_expired: isExpired,
+    }))
+  }
+
+  // ============================================================================
+  // Config Status
+  // ============================================================================
 
   private async handleGetConfigStatusApi(_req: IncomingMessage, res: ServerResponse): Promise<void> {
     const missing: string[] = []
@@ -3217,7 +3377,7 @@ export class AdminModule extends ModuleBase {
       if (ref) {
         // 用户显式配置了此 slot
         try {
-          resolvedModelConfig[role.key] = this.modelProviderManager.buildConnectionInfo(
+          resolvedModelConfig[role.key] = await this.modelProviderManager.buildConnectionInfo(
             ref.provider_id, ref.model_id
           ) as LLMConnectionInfo
         } catch (error) {
@@ -3240,7 +3400,7 @@ export class AdminModule extends ModuleBase {
     for (const [key, ref] of Object.entries(config.model_config)) {
       if (processedKeys.has(key)) continue
       try {
-        resolvedModelConfig[key] = this.modelProviderManager.buildConnectionInfo(
+        resolvedModelConfig[key] = await this.modelProviderManager.buildConnectionInfo(
           ref.provider_id, ref.model_id
         ) as LLMConnectionInfo
       } catch (error) {
@@ -4168,8 +4328,6 @@ export class AdminModule extends ModuleBase {
     await fs.writeFile(filePath, JSON.stringify(data, null, 2))
     // 同步内存缓存
     this.moduleEnvConfigCache.set(params.module_id, params.config)
-    // 模块配置变更后触发 LiteLLM 同步（确保新配置引用的模型被加载）
-    this.modelProviderManager.requestSync()
     return { updated: true }
   }
 
@@ -4181,19 +4339,20 @@ export class AdminModule extends ModuleBase {
    * 将全局模型配置构建为 env 变量（作为模块启动时的默认值）
    * 模块自身的显式配置可覆盖这些默认值
    */
-  private buildGlobalModelEnv(): Record<string, string> {
+  private async buildGlobalModelEnv(): Promise<Record<string, string>> {
     const env: Record<string, string> = {}
     const globalConfig = this.modelProviderManager.getGlobalConfig()
 
     try {
       if (globalConfig.default_llm_provider_id && globalConfig.default_llm_model_id) {
-        const info = this.modelProviderManager.buildConnectionInfo(
+        const info = await this.modelProviderManager.buildConnectionInfo(
           globalConfig.default_llm_provider_id,
           globalConfig.default_llm_model_id
         ) as LLMConnectionInfo
         env.CRABOT_LLM_BASE_URL = info.endpoint
         env.CRABOT_LLM_MODEL = info.model_id
         env.CRABOT_LLM_API_KEY = info.apikey
+        env.CRABOT_LLM_FORMAT = info.format
       }
     } catch {
       console.warn('[Admin] buildGlobalModelEnv: failed to resolve global LLM config')
@@ -4201,7 +4360,7 @@ export class AdminModule extends ModuleBase {
 
     try {
       if (globalConfig.default_embedding_provider_id && globalConfig.default_embedding_model_id) {
-        const info = this.modelProviderManager.buildConnectionInfo(
+        const info = await this.modelProviderManager.buildConnectionInfo(
           globalConfig.default_embedding_provider_id,
           globalConfig.default_embedding_model_id
         ) as EmbeddingConnectionInfo
@@ -4223,14 +4382,15 @@ export class AdminModule extends ModuleBase {
    * 构建 Memory 模块的 RPC 配置参数（LLM + Embedding 连接信息）
    * 供 get_memory_config（模块启动 pull）和 syncGlobalConfigToMemoryModules（push）共用
    */
-  private buildMemoryRpcConfig(): { llm?: Record<string, string>; embedding?: Record<string, string | number> } {
-    const newEnv = this.buildGlobalModelEnv()
+  private async buildMemoryRpcConfig(): Promise<{ llm?: Record<string, string>; embedding?: Record<string, string | number> }> {
+    const newEnv = await this.buildGlobalModelEnv()
     const rpcParams: { llm?: Record<string, string>; embedding?: Record<string, string | number> } = {}
     if (newEnv.CRABOT_LLM_MODEL) {
       rpcParams.llm = {
         api_key: newEnv.CRABOT_LLM_API_KEY ?? '',
         base_url: newEnv.CRABOT_LLM_BASE_URL ?? '',
         model: newEnv.CRABOT_LLM_MODEL,
+        format: newEnv.CRABOT_LLM_FORMAT ?? 'openai',
       }
     }
     if (newEnv.CRABOT_EMBEDDING_MODEL) {
@@ -4253,7 +4413,7 @@ export class AdminModule extends ModuleBase {
   private async handleGetMemoryConfig(_params: { instance_id: string }): Promise<{
     config: { llm?: Record<string, string>; embedding?: Record<string, string | number> }
   }> {
-    return { config: this.buildMemoryRpcConfig() }
+    return { config: await this.buildMemoryRpcConfig() }
   }
 
   /**
@@ -4261,7 +4421,7 @@ export class AdminModule extends ModuleBase {
    * 同时更新 module-configs 文件和内存缓存
    */
   private async syncGlobalConfigToMemoryModules(): Promise<void> {
-    const newEnv = this.buildGlobalModelEnv()
+    const newEnv = await this.buildGlobalModelEnv()
     if (Object.keys(newEnv).length === 0) return
 
     // 1. 更新 memory-default.json（只更新已有 key 或新增模型相关 key）
@@ -4291,10 +4451,9 @@ export class AdminModule extends ModuleBase {
       updated_at: generateTimestamp(),
     }, null, 2))
     this.moduleEnvConfigCache.set(moduleId, mergedConfig)
-    this.modelProviderManager.requestSync()
 
     // 2. 推送到所有运行中的 Memory 模块
-    const rpcParams = this.buildMemoryRpcConfig()
+    const rpcParams = await this.buildMemoryRpcConfig()
 
     if (Object.keys(rpcParams).length === 0) return
 
@@ -4396,7 +4555,7 @@ export class AdminModule extends ModuleBase {
 
     // 2. 全局模型配置始终优先（Admin 是唯一真相来源），
     //    模块文件只保留非模型的自定义配置（如 CRABOT_MEMORY_DATA_DIR 等）
-    const globalEnv = this.buildGlobalModelEnv()
+    const globalEnv = await this.buildGlobalModelEnv()
     const mergedConfig = { ...config, ...globalEnv }
 
     // 3. 调用 MM 的 start_module，注入配置为 env
@@ -4453,6 +4612,51 @@ export class AdminModule extends ModuleBase {
     await new Promise(resolve => setTimeout(resolve, 2000))
     // 再启动
     return this.handleStartModuleAdmin({ module_id: params.module_id })
+  }
+
+  // ============================================================================
+  // PermissionTemplate RPC 方法
+  // ============================================================================
+
+  private async handleListPermissionTemplates(params: { system_only?: boolean; page?: number; page_size?: number }): Promise<{ items: PermissionTemplate[]; total: number }> {
+    const all = this.permissionTemplateManager.list(params.system_only)
+    const page = params.page ?? 1
+    const pageSize = params.page_size ?? 50
+    const start = (page - 1) * pageSize
+    return { items: all.slice(start, start + pageSize), total: all.length }
+  }
+
+  private async handleGetPermissionTemplate(params: { template_id: string }): Promise<{ template: PermissionTemplate }> {
+    const template = this.permissionTemplateManager.get(params.template_id)
+    if (!template) {
+      throw Object.assign(new Error('Template not found'), { code: 'NOT_FOUND' })
+    }
+    return { template }
+  }
+
+  private async handleCreatePermissionTemplate(params: CreatePermissionTemplateParams): Promise<{ template: PermissionTemplate }> {
+    const template = this.permissionTemplateManager.create(params)
+    await this.saveData()
+    return { template }
+  }
+
+  private async handleUpdatePermissionTemplate(params: UpdatePermissionTemplateParams): Promise<{ template: PermissionTemplate }> {
+    const { template_id, ...rest } = params
+    const template = this.permissionTemplateManager.update(template_id, rest)
+    await this.saveData()
+    return { template }
+  }
+
+  private async handleDeletePermissionTemplate(params: { template_id: string }): Promise<{ deleted: true }> {
+    const isInUse = (templateId: string) => {
+      for (const friend of this.friends.values()) {
+        if (friend.permission_template_id === templateId) return true
+      }
+      return false
+    }
+    this.permissionTemplateManager.delete(params.template_id, isInUse)
+    await this.saveData()
+    return { deleted: true }
   }
 
   // ============================================================================
@@ -4637,23 +4841,7 @@ export class AdminModule extends ModuleBase {
     }
   }
 
-  /** 从模块 env 配置缓存中收集所有被引用的 LiteLLM 模型名 */
-  private getModuleEnvLiteLLMModels(): string[] {
-    const names: string[] = []
-    for (const config of this.moduleEnvConfigCache.values()) {
-      if (config.CRABOT_LLM_MODEL) names.push(config.CRABOT_LLM_MODEL)
-      if (config.CRABOT_EMBEDDING_MODEL) names.push(config.CRABOT_EMBEDDING_MODEL)
-    }
-    return names
-  }
-
   private agentPort = 0
-
-  private getAgentPort(): number {
-    // 返回缓存的 Agent 端口
-    // 端口在启动时通过 Module Manager 解析
-    return this.agentPort
-  }
 
   /**
    * 确保 Agent 端口已解析，如果缓存为空则重新解析

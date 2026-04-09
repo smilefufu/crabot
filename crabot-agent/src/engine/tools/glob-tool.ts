@@ -8,6 +8,7 @@ const MAX_RESULTS = 200
 export function createGlobTool(cwd: string): ToolDefinition {
   return defineTool({
     name: 'glob',
+    category: 'file_io',
     description: 'Fast file pattern matching. Returns matching file paths sorted alphabetically.',
     inputSchema: {
       type: 'object',

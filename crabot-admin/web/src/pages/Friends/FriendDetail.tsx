@@ -6,7 +6,8 @@ import { Button } from '../../components/Common/Button'
 import { Loading } from '../../components/Common/Loading'
 import { useToast } from '../../contexts/ToastContext'
 import { friendService } from '../../services/friend'
-import type { Friend, FriendPermission, ChannelIdentity } from '../../types'
+import { permissionTemplateService } from '../../services/permission-template'
+import type { Friend, FriendPermission, ChannelIdentity, PermissionTemplate } from '../../types'
 
 export const FriendDetail: React.FC = () => {
   const { id } = useParams<{ id: string }>()
@@ -19,7 +20,9 @@ export const FriendDetail: React.FC = () => {
   // 编辑状态
   const [editName, setEditName] = useState('')
   const [editPerm, setEditPerm] = useState<FriendPermission>('normal')
+  const [editTemplateId, setEditTemplateId] = useState<string>('')
   const [saving, setSaving] = useState(false)
+  const [templates, setTemplates] = useState<PermissionTemplate[]>([])
 
   // 绑定身份表单
   const [showBind, setShowBind] = useState(false)
@@ -39,6 +42,7 @@ export const FriendDetail: React.FC = () => {
       setFriend(result.friend)
       setEditName(result.friend.display_name)
       setEditPerm(result.friend.permission)
+      setEditTemplateId(result.friend.permission_template_id ?? '')
     } catch (err) {
       toast.error('加载熟人信息失败')
       navigate('/friends')
@@ -51,6 +55,12 @@ export const FriendDetail: React.FC = () => {
     loadFriend()
   }, [loadFriend])
 
+  useEffect(() => {
+    permissionTemplateService.list().then(result => {
+      setTemplates(result.items)
+    }).catch(() => {})
+  }, [])
+
   const handleSave = async () => {
     if (!friend || !editName.trim()) return
     setSaving(true)
@@ -58,6 +68,7 @@ export const FriendDetail: React.FC = () => {
       const result = await friendService.updateFriend(friend.id, {
         display_name: editName.trim(),
         permission: editPerm,
+        ...(editPerm === 'normal' && editTemplateId ? { permission_template_id: editTemplateId } : {}),
       })
       setFriend(result.friend)
       toast.success('保存成功')
@@ -114,7 +125,7 @@ export const FriendDetail: React.FC = () => {
     return <MainLayout><div>熟人不存在</div></MainLayout>
   }
 
-  const hasChanges = editName !== friend.display_name || editPerm !== friend.permission
+  const hasChanges = editName !== friend.display_name || editPerm !== friend.permission || editTemplateId !== (friend.permission_template_id ?? '')
 
   return (
     <MainLayout>
@@ -176,6 +187,32 @@ export const FriendDetail: React.FC = () => {
                 <option value="master">Master</option>
               </select>
             </div>
+            {editPerm === 'normal' && (
+              <div>
+                <label style={{ display: 'block', fontSize: '0.875rem', fontWeight: 500, marginBottom: '0.25rem' }}>
+                  权限模板
+                </label>
+                <select
+                  value={editTemplateId}
+                  onChange={(e) => setEditTemplateId(e.target.value)}
+                  style={{
+                    width: '100%',
+                    padding: '0.5rem 0.75rem',
+                    borderRadius: '6px',
+                    border: '1px solid var(--border)',
+                    background: 'var(--bg-secondary)',
+                    color: 'var(--text-primary)',
+                    fontSize: '0.875rem',
+                    boxSizing: 'border-box',
+                  }}
+                >
+                  <option value="">未选择</option>
+                  {templates.filter(t => t.id !== 'master_private').map(t => (
+                    <option key={t.id} value={t.id}>{t.name}{t.is_system ? ' (系统)' : ''}</option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div style={{ display: 'flex', gap: '1rem', fontSize: '0.75rem', color: 'var(--text-tertiary)' }}>
               <span>创建于 {new Date(friend.created_at).toLocaleString()}</span>
               <span>更新于 {new Date(friend.updated_at).toLocaleString()}</span>

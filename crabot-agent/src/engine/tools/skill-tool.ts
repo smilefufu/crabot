@@ -31,6 +31,7 @@ export function createSkillTool(baseDir: string): ToolDefinition {
 
   return defineTool({
     name: 'Skill',
+    category: 'mcp_skill',
     description: 'Load a skill (prompt template) to guide your work. Use "list" to see available skills.',
     inputSchema: {
       type: 'object',

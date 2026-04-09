@@ -47,19 +47,14 @@ export function createReplyRuntime(
     /**
      * 高级插件的分发入口（feishu、telegram、whatsapp 等）
      *
-     * 在 OpenClaw 原版中，此函数调用 LLM 并通过 dispatcher 发送回复。
-     * 在 Shim 中：
+     * Fire-and-forget 模式：
      *   1. 从 ctx 提取 sessionId（ctx.SessionKey）
      *   2. 将 dispatcher.sendFinalReply 封装为 deliver fn 并存入 pendingDispatches
      *   3. 触发 onMessageReceived（发布 channel.message_received 事件）
-     *   4. 等待 Agent 回复（通过 Promise）后返回
+     *   4. 立即返回，不等待 Agent 回复
      *
-     * Agent 回复后，ChannelHost.handleSendMessage 调用 deliver → dispatcher.sendFinalReply
-     * → 实际发送到平台
-     *
-     * 重要：必须等待 Agent 回复后才返回，否则某些插件（如 @larksuite/openclaw-lark）
-     * 会在 dispatchReplyFromConfig 返回后立即设置 dispatchFullyComplete 标志，
-     * 导致 Agent 回复时 deliver 被跳过。
+     * Agent 回复走 handleSendMessage → 群聊用 proactiveSend，私聊用 dispatch.deliver()。
+     * dispatch 由 TTL（5 分钟）自动清理。
      */
     async dispatchReplyFromConfig(params: {
       ctx: Record<string, unknown>
@@ -79,31 +74,22 @@ export function createReplyRuntime(
 
       console.log(`[Shim] dispatchReplyFromConfig: sessionId=${sessionId}, dispatcher.sendFinalReply exists=${!!params.dispatcher.sendFinalReply}`)
 
-      // 创建一个 Promise，在 Agent 回复后 resolve
-      let resolveReply: () => void
-      const replyPromise = new Promise<void>((resolve) => {
-        resolveReply = resolve
-      })
-
-      // 封装 deliver fn：调用插件的 dispatcher.sendFinalReply，并在完成后 resolve
       const deliver: DeliverFn = async (payload, _info) => {
-        console.log(`[Shim] deliver called: text="${(payload.text ?? '').slice(0, 50)}...", kind=${_info?.kind}`)
+        console.log(`[Shim] deliver called: session=${sessionId}, kind=${_info?.kind}`)
+        if (!params.dispatcher.sendFinalReply) {
+          console.error('[Shim] deliver: dispatcher.sendFinalReply is not available!')
+          return
+        }
         try {
-          if (params.dispatcher.sendFinalReply) {
-            // 传递完整 payload（包含 text, mediaUrl, filename 等）
-            console.log('[Shim] deliver: calling dispatcher.sendFinalReply')
-            await params.dispatcher.sendFinalReply(payload)
-            console.log('[Shim] deliver: dispatcher.sendFinalReply returned')
-          } else {
-            console.error('[Shim] deliver: dispatcher.sendFinalReply is not available!')
-          }
-        } finally {
-          // Agent 回复完成，resolve Promise
-          resolveReply()
+          await params.dispatcher.sendFinalReply(payload)
+        } catch (err) {
+          console.error(`[Shim] deliver failed: session=${sessionId}`, err)
         }
       }
 
-      pendingDispatches.set(sessionId, { deliver, release: () => resolveReply() })
+      pendingDispatches.set(sessionId, { deliver })
+
+      console.log(`[Shim] dispatchReplyFromConfig: WasMentioned=${ctx.WasMentioned}, ChatType=${ctx.ChatType}, From=${ctx.From}`)
 
       // 将 ctx 适配为 MsgContext（取常用字段，其余 fallback 到空）
       const msgCtx: MsgContext = {
@@ -130,24 +116,12 @@ export function createReplyRuntime(
         console.error('[ChannelHost] onMessageReceived error:', error)
       })
 
-      // 等待 Agent 回复（带超时兜底，防止 silent 等场景下永久挂起）
-      const REPLY_TIMEOUT_MS = 60_000
-      console.log('[Shim] dispatchReplyFromConfig: waiting for Agent reply...')
-      const timeoutPromise = new Promise<'timeout'>((resolve) =>
-        setTimeout(() => resolve('timeout'), REPLY_TIMEOUT_MS)
-      )
-      const result = await Promise.race([
-        replyPromise.then(() => 'replied' as const),
-        timeoutPromise,
-      ])
-      if (result === 'timeout') {
-        console.log(`[Shim] dispatchReplyFromConfig: timeout after ${REPLY_TIMEOUT_MS}ms, releasing (session=${sessionId})`)
-        pendingDispatches.delete(sessionId)
-      } else {
-        console.log('[Shim] dispatchReplyFromConfig: Agent reply completed')
-      }
+      // Fire-and-forget：不等待 Agent 回复，立即释放飞书插件的 per-chat 队列。
+      // Agent 回复时：dispatch 还在 → deliver()（私聊）或 proactiveSend（群聊）
+      // Agent 静默时：complete_dispatch 清理 dispatch，或 TTL 兜底
+      console.log(`[Shim] dispatchReplyFromConfig: fire-and-forget, session=${sessionId}`)
 
-      return { queuedFinal: result === 'replied' ? 1 : 0, counts: { tool: 0, block: 0, final: result === 'replied' ? 1 : 0 } }
+      return { queuedFinal: 0, counts: { tool: 0, block: 0, final: 0 } }
     },
 
     /**

@@ -109,6 +109,7 @@ export class McpConnector {
         for (const mcpTool of mcpTools) {
           tools.push(defineTool({
             name: `mcp__${serverName}__${mcpTool.name}`,
+            category: 'mcp_skill',
             description: mcpTool.description ?? '',
             inputSchema: mcpTool.inputSchema as Record<string, unknown>,
             isReadOnly: false,

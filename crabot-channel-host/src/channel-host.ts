@@ -187,9 +187,16 @@ export class ChannelHost extends ModuleBase {
   private async handleSendMessage(params: SendMessageParams): Promise<SendMessageResult> {
     console.log(`[ChannelHost] handleSendMessage: session_id=${params.session_id}`)
 
-    // 路径 1：被动回复（pendingDispatch 存在 = 有入站消息的回复通道）
     const dispatch = this.pendingDispatches.get(params.session_id)
-    if (dispatch) {
+
+    // 群聊：跳过 pendingDispatch（避免飞书插件的强制引用回复），改走 proactiveSend
+    const session = this.sessionManager.findById(params.session_id)
+    if (dispatch && session?.type === 'group') {
+      console.log(`[ChannelHost] handleSendMessage: group session, using proactive send`)
+      this.pendingDispatches.delete(params.session_id)
+      await this.proactiveSend(params)
+    } else if (dispatch) {
+      // 私聊：被动回复（保留原有行为）
       const replyPayload = messageContentToReplyPayload(params.content)
       console.log(`[ChannelHost] handleSendMessage: using pending dispatch (passive reply), text length=${(replyPayload.text ?? '').length}`)
       await dispatch.deliver(replyPayload, { kind: 'final' })
@@ -217,14 +224,11 @@ export class ChannelHost extends ModuleBase {
   }
 
   /**
-   * Agent 处理完消息但不需要回复时（如 silent 决策），释放 pending dispatch。
-   * 防止 shim 层的 replyPromise 永久挂起。
+   * Agent 处理完消息但不需要回复时（如 silent 决策），清理 pending dispatch。
    */
   private handleCompleteDispatch(params: { session_id: string }): { ok: boolean } {
-    const dispatch = this.pendingDispatches.get(params.session_id)
-    if (dispatch?.release) {
-      console.log(`[ChannelHost] complete_dispatch: releasing session_id=${params.session_id}`)
-      dispatch.release()
+    if (this.pendingDispatches.get(params.session_id)) {
+      console.log(`[ChannelHost] complete_dispatch: cleaning up session_id=${params.session_id}`)
       this.pendingDispatches.delete(params.session_id)
     }
     return { ok: true }
@@ -248,7 +252,7 @@ export class ChannelHost extends ModuleBase {
 
     const to = extractPlatformTarget(session.platform_session_id)
     const text = params.content.text ?? ''
-    const mediaUrl = params.content.media_url
+    const mediaUrl = params.content.media_url ?? params.content.file_path
 
     console.log(`[ChannelHost] proactiveSend: platform_session_id=${session.platform_session_id} -> to=${to}`)
 
@@ -401,7 +405,7 @@ export class ChannelHost extends ModuleBase {
     const isGroupChat = ctx.ChatType === 'group'
     const displayName = ctx.SenderName ?? ctx.SenderUsername ?? platformUserId
 
-    console.log(`[ChannelHost] 📩 Message received: sender=${platformUserId} (${displayName}), session=${sessionId}, type=${isGroupChat ? 'group' : 'private'}, text=${(ctx.Body ?? '').slice(0, 50)}`)
+    console.log(`[ChannelHost] 📩 Message received: sender=${platformUserId} (${displayName}), session=${sessionId}, type=${isGroupChat ? 'group' : 'private'}, WasMentioned=${ctx.WasMentioned}, text=${(ctx.Body ?? '').slice(0, 50)}`)
 
     // 创建/更新 Session（不做 Friend 鉴权，鉴权由 Admin 负责）
     const { session } = isGroupChat
