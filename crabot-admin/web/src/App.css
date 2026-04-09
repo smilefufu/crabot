@@ -1164,3 +1164,628 @@ code, pre, .mono {
 .model-table-col-id { flex: 2; }
 .model-table-col-type { flex: 1; }
 .model-table-col-test { width: 80px; text-align: right; }
+
+/* ============================================================================
+   Session Management — Observatory Design
+   Tacit knowledge principle: ambient visual cues > explicit text
+   ============================================================================ */
+
+.session-page {
+  padding: 0;
+}
+
+/* Page header */
+.session-page-header {
+  margin-bottom: 1.75rem;
+}
+
+.session-page-title {
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--text-primary);
+  margin-bottom: 0.25rem;
+}
+
+.session-page-subtitle {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.session-stats {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.session-stats-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--primary-dim);
+}
+
+/* Filter bar */
+.session-filter-bar {
+  display: flex;
+  gap: 0.875rem;
+  margin-bottom: 1rem;
+  align-items: flex-end;
+  flex-wrap: nowrap;
+}
+
+.session-filter-bar .form-group {
+  margin-bottom: 0;
+}
+
+.session-filter-channel {
+  width: 280px;
+  flex-shrink: 0;
+}
+
+.session-filter-type {
+  width: 130px;
+  flex-shrink: 0;
+}
+
+.session-filter-search {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Permission legend */
+.session-legend {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.5rem 0.875rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 1.5rem;
+  font-size: 0.7rem;
+  overflow-x: auto;
+  flex-wrap: wrap;
+}
+
+.session-legend-label {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.session-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.session-legend-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.session-legend-sep {
+  width: 1px;
+  height: 12px;
+  background: var(--border-highlight);
+  margin: 0 0.25rem;
+}
+
+.session-legend-cat {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  white-space: nowrap;
+}
+
+/* Session groups */
+.session-group {
+  margin-bottom: 2rem;
+}
+
+.session-group-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.875rem;
+}
+
+.session-group-icon {
+  font-size: 0.875rem;
+  color: var(--primary-dim);
+  opacity: 0.6;
+}
+
+.session-group-title {
+  font-family: var(--font-display);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.session-group-count {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+}
+
+.session-group-line {
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(to right, var(--border), transparent);
+}
+
+/* Session grid */
+.session-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 0.75rem;
+}
+
+/* Session card */
+.session-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem 1.25rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+.session-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: transparent;
+  transition: background 0.25s ease;
+}
+
+.session-card:hover {
+  border-color: var(--border-highlight);
+  background: var(--surface-hover);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+}
+
+.session-card:hover::before {
+  background: linear-gradient(to right, var(--primary-dim), transparent);
+}
+
+.session-card--active {
+  border-color: var(--primary-dim);
+  background: var(--primary-subtle);
+}
+
+.session-card--active::before {
+  background: var(--primary);
+}
+
+.session-card--customized {
+  border-left: 2px solid var(--primary-dim);
+}
+
+/* Card header */
+.session-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 0.75rem;
+}
+
+.session-card-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.session-type-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.session-type-indicator--private {
+  background: #4a8ed9;
+  box-shadow: 0 0 6px rgba(74, 142, 217, 0.3);
+}
+
+.session-type-indicator--group {
+  background: #7cb87c;
+  box-shadow: 0 0 6px rgba(124, 184, 124, 0.3);
+}
+
+.session-type-indicator--lg {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+}
+
+.session-card-title {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-customized-badge {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  color: var(--primary-light);
+  background: var(--primary-glow);
+  border: 1px solid rgba(217, 124, 74, 0.2);
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Card body: dots + avatars */
+.session-card-body {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.625rem;
+}
+
+.session-perm-dots {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+/* Participant avatars */
+.session-avatars {
+  display: flex;
+  align-items: center;
+}
+
+.session-avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.6rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.85);
+  border: 2px solid var(--surface);
+  margin-left: -6px;
+  flex-shrink: 0;
+}
+
+.session-avatar:first-child {
+  margin-left: 0;
+}
+
+.session-avatar--sm {
+  width: 20px;
+  height: 20px;
+  font-size: 0.55rem;
+  border-width: 1.5px;
+  margin-left: 0;
+}
+
+.session-avatar-overflow {
+  background: var(--surface-raised);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.55rem;
+  border-color: var(--surface);
+}
+
+/* Card footer */
+.session-card-footer {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.session-card-meta {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.session-template-tag,
+.session-scope-tag {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
+/* Empty state */
+.session-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 4rem 2rem;
+  background: var(--surface);
+  border: 1px dashed var(--border-highlight);
+  border-radius: 12px;
+}
+
+.session-empty-icon {
+  margin-bottom: 1rem;
+  opacity: 0.4;
+}
+
+.session-empty-text {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  margin-bottom: 0.25rem;
+}
+
+.session-empty-hint {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+/* ============================================================================
+   Session Modal — Permission Editor
+   ============================================================================ */
+
+.session-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  animation: session-modal-fade-in 0.15s ease-out;
+}
+
+@keyframes session-modal-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.session-modal {
+  background: var(--surface);
+  border: 1px solid var(--border-highlight);
+  border-radius: 14px;
+  padding: 1.75rem;
+  width: 520px;
+  max-width: 90vw;
+  max-height: 85vh;
+  overflow-y: auto;
+  position: relative;
+  box-shadow:
+    0 0 0 1px rgba(217, 124, 74, 0.06),
+    0 24px 64px rgba(0, 0, 0, 0.5),
+    0 0 80px rgba(217, 124, 74, 0.04);
+  animation: session-modal-slide-in 0.2s ease-out;
+}
+
+@keyframes session-modal-slide-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.session-modal-close {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 1.5rem;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+  transition: color 0.15s;
+}
+
+.session-modal-close:hover {
+  color: var(--text-primary);
+}
+
+.session-modal-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.session-modal-title {
+  font-family: var(--font-display);
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.session-modal-subtitle {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+/* Participants list in modal */
+.session-modal-participants {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  margin-bottom: 1rem;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.session-modal-participant {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0;
+}
+
+.session-modal-participant-id {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-modal-participant-role {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+}
+
+.session-modal-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 1rem 0 1.25rem;
+}
+
+.session-modal-section {
+  margin-bottom: 1.5rem;
+}
+
+/* Tri-state toggle grid */
+.session-tri-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.375rem;
+  margin-top: 0.5rem;
+}
+
+.session-tri-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4375rem 0.625rem;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-family: var(--font-body);
+}
+
+.session-tri-toggle:hover {
+  border-color: var(--border-highlight);
+  background: var(--surface-hover);
+}
+
+.session-tri-toggle-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition: all 0.2s ease;
+}
+
+.session-tri-toggle--inherit .session-tri-toggle-indicator {
+  background: var(--text-muted);
+}
+
+.session-tri-toggle--on {
+  border-color: rgba(92, 184, 122, 0.3);
+}
+
+.session-tri-toggle--on .session-tri-toggle-indicator {
+  background: var(--success);
+  box-shadow: 0 0 6px rgba(92, 184, 122, 0.5);
+}
+
+.session-tri-toggle--off {
+  border-color: rgba(224, 96, 96, 0.2);
+}
+
+.session-tri-toggle--off .session-tri-toggle-indicator {
+  background: var(--error);
+  box-shadow: 0 0 6px rgba(224, 96, 96, 0.4);
+}
+
+.session-tri-toggle-label {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.session-tri-toggle--on .session-tri-toggle-label {
+  color: var(--success);
+}
+
+.session-tri-toggle--off .session-tri-toggle-label {
+  color: var(--error);
+}
+
+/* Modal actions */
+.session-modal-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+/* ============================================================================
+   Session Card entrance animation
+   ============================================================================ */
+
+@keyframes session-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.session-grid > .session-card {
+  animation: session-card-in 0.25s ease-out backwards;
+}
+
+.session-grid > .session-card:nth-child(1) { animation-delay: 0s; }
+.session-grid > .session-card:nth-child(2) { animation-delay: 0.04s; }
+.session-grid > .session-card:nth-child(3) { animation-delay: 0.08s; }
+.session-grid > .session-card:nth-child(4) { animation-delay: 0.12s; }
+.session-grid > .session-card:nth-child(5) { animation-delay: 0.16s; }
+.session-grid > .session-card:nth-child(6) { animation-delay: 0.2s; }
+.session-grid > .session-card:nth-child(n+7) { animation-delay: 0.24s; }
