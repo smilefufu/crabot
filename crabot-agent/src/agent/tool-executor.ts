@@ -7,7 +7,7 @@
  */
 
 import type { RpcClient } from '../core/module-base.js'
-import type { FriendId, ModuleId } from '../core/base-protocol.js'
+import type { Friend } from '../types.js'
 
 export interface ToolExecutorDeps {
   rpcClient: RpcClient
@@ -28,17 +28,6 @@ export interface ToolExecutorDeps {
 export interface ToolResult {
   output: string
   isError: boolean
-}
-
-interface Friend {
-  id: FriendId
-  display_name: string
-  permission: 'master' | 'normal'
-  channel_identities: Array<{
-    channel_id: ModuleId
-    platform_user_id: string
-    platform_display_name?: string
-  }>
 }
 
 export class ToolExecutor {

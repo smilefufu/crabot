@@ -10,7 +10,7 @@
 import { createMcpServer, type McpServer } from './mcp-helpers.js'
 import { z } from 'zod/v4'
 import type { RpcClient } from '../core/module-base.js'
-import type { ModuleId, FriendId } from '../core/base-protocol.js'
+import type { Friend } from '../types.js'
 import * as path from 'path'
 
 // ============================================================================
@@ -35,20 +35,6 @@ export interface PathMapping {
 }
 
 // ============================================================================
-// Admin RPC 返回的 Friend 类型
-// ============================================================================
-
-interface Friend {
-  id: FriendId
-  display_name: string
-  permission: 'master' | 'normal'
-  channel_identities: Array<{
-    channel_id: ModuleId
-    platform_user_id: string
-    platform_display_name?: string
-  }>
-}
-
 // ============================================================================
 // 路径转换
 // ============================================================================

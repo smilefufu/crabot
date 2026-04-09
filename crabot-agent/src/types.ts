@@ -148,6 +148,7 @@ export interface Friend {
   channel_identities: Array<{
     channel_id: ModuleId
     platform_user_id: string
+    platform_display_name: string
   }>
   created_at: string
   updated_at: string
@@ -448,7 +449,7 @@ export interface LLMConnectionInfo {
   endpoint: string
   apikey: string
   model_id: string
-  format: 'anthropic' | 'openai' | 'gemini'
+  format: 'anthropic' | 'openai' | 'gemini' | 'openai-responses'
   max_tokens?: number
   supports_vision?: boolean
 }
@@ -478,7 +479,7 @@ export interface AgentRole {
   supported_task_types?: string[]
   max_concurrent_tasks?: number
   models: Record<string, LLMConnectionInfo>
-  model_format: 'anthropic' | 'openai' | 'gemini'
+  model_format: 'anthropic' | 'openai' | 'gemini' | 'openai-responses'
   tools?: ToolDeclaration[]
   skills?: SkillConfig[]
 }
