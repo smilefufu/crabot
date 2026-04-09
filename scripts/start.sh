@@ -23,8 +23,9 @@ nvm use || {
 }
 cd "$local_saved_dir"
 
-# 1. Memory 依赖
+# 1. 同步依赖
 log_section "同步依赖"
+sync_node_deps || exit 1
 sync_memory_deps
 
 # 2. 构建所有模块

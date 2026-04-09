@@ -129,6 +129,32 @@ check_scrapling() {
   return 0
 }
 
+# ── Node.js 依赖 ────────────────────────────────────────
+
+sync_node_deps() {
+  log_info "同步 Node.js 依赖..."
+
+  for mod in crabot-core crabot-admin crabot-agent crabot-channel-host crabot-channel-wechat; do
+    if [ ! -d "$CRABOT_HOME/$mod" ]; then
+      continue
+    fi
+    log_dim "  $mod"
+    (cd "$CRABOT_HOME/$mod" && npm install 2>&1 | tail -1) || {
+      log_error "$mod 依赖安装失败"
+      return 1
+    }
+  done
+
+  # crabot-admin/web 前端依赖
+  if [ -d "$CRABOT_HOME/crabot-admin/web" ]; then
+    log_dim "  crabot-admin/web"
+    (cd "$CRABOT_HOME/crabot-admin/web" && npm install 2>&1 | tail -1) || {
+      log_error "crabot-admin/web 依赖安装失败"
+      return 1
+    }
+  fi
+}
+
 # ── Memory 依赖 ──────────────────────────────────────────
 
 sync_memory_deps() {
