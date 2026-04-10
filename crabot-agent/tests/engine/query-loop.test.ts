@@ -259,6 +259,39 @@ describe('runEngine', () => {
     expect(result.error).toContain('Rate limited')
   })
 
+  it('accepts ContentBlock[] as prompt', async () => {
+    const capturedMessages: unknown[] = []
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        capturedMessages.push(params.messages)
+        for (const chunk of textResponse('ok')) {
+          yield chunk
+        }
+      },
+      updateConfig() {},
+    }
+
+    await runEngine({
+      prompt: [
+        { type: 'text' as const, text: 'Analyze this image' },
+        { type: 'image' as const, source: { type: 'base64' as const, media_type: 'image/png', data: 'abc123' } },
+      ],
+      adapter,
+      options: {
+        systemPrompt: 'You are helpful.',
+        tools: [],
+        model: 'test-model',
+      },
+    })
+
+    const messages = capturedMessages[0] as Array<{ content: unknown }>
+    const firstContent = messages[0].content
+    expect(Array.isArray(firstContent)).toBe(true)
+    expect(firstContent).toHaveLength(2)
+    expect((firstContent as any)[0].type).toBe('text')
+    expect((firstContent as any)[1].type).toBe('image')
+  })
+
   it('defaults maxTurns to 200 when not specified', async () => {
     const dummyTool = defineTool({
       name: 'dummy',

@@ -22,7 +22,7 @@ import * as fs from 'fs'
 // --- Public Interface ---
 
 export interface RunEngineParams {
-  readonly prompt: string
+  readonly prompt: string | import('./types').ContentBlock[]
   readonly adapter: LLMAdapter
   readonly options: EngineOptions
 }
