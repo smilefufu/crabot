@@ -40,12 +40,18 @@ export interface LLMCallResponse {
 
 // --- Non-streaming convenience ---
 
+export const DEFAULT_LLM_TIMEOUT_MS = 120_000
+
 export async function callNonStreaming(
   adapter: LLMAdapter,
   params: LLMStreamParams,
 ): Promise<LLMCallResponse> {
+  const effectiveParams = params.signal ? params : {
+    ...params,
+    signal: AbortSignal.timeout(DEFAULT_LLM_TIMEOUT_MS),
+  }
   const processor = new StreamProcessor()
-  for await (const chunk of adapter.stream(params)) {
+  for await (const chunk of adapter.stream(effectiveParams)) {
     if (chunk.type === 'error') {
       throw new Error(chunk.error)
     }

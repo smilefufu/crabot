@@ -58,12 +58,14 @@ export async function runFrontLoop(params: FrontLoopParams): Promise<FrontLoopRe
     tools: tools.map(t => t.name),
   })
 
+  let llmSpanId: string | undefined
+
   try {
     for (let round = 0; round < FRONT_MAX_ROUNDS; round++) {
       const inputSummary = round === 0
         ? (typeof userMessage === 'string' ? userMessage.slice(0, 150) : '[multimodal message]')
         : `(round ${round + 1})`
-      const llmSpanId = traceCallback?.onLlmCallStart(round + 1, inputSummary)
+      llmSpanId = traceCallback?.onLlmCallStart(round + 1, inputSummary)
 
       const response = await callNonStreaming(adapter, {
         systemPrompt,
@@ -87,6 +89,7 @@ export async function runFrontLoop(params: FrontLoopParams): Promise<FrontLoopRe
           fullInput: round === 0 ? (typeof userMessage === 'string' ? userMessage : '[multimodal message]') : undefined,
           fullOutput: textOutput || undefined,
         })
+        llmSpanId = undefined
       }
 
       // Case 1: end_turn -> wrap text as direct_reply
@@ -203,6 +206,7 @@ export async function runFrontLoop(params: FrontLoopParams): Promise<FrontLoopRe
       toolHistory: toolHistory.length > 0 ? toolHistory : undefined,
     }
   } catch (error) {
+    if (llmSpanId) traceCallback?.onLlmCallEnd(llmSpanId, { error: String(error).slice(0, 200) })
     if (loopSpanId) traceCallback?.onLoopEnd(loopSpanId, 'failed', 0)
     throw error
   }

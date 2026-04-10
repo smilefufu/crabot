@@ -2015,10 +2015,10 @@ export class UnifiedAgent extends ModuleBase {
         return span.span_id
       },
 
-      onLlmCallEnd(spanId: string, result: { stopReason?: string; outputSummary?: string; toolCallsCount?: number; fullInput?: string; fullOutput?: string }): void {
-        store.endSpan(traceId, spanId, 'completed', {
+      onLlmCallEnd(spanId: string, result: { stopReason?: string; outputSummary?: string; toolCallsCount?: number; fullInput?: string; fullOutput?: string; error?: string }): void {
+        store.endSpan(traceId, spanId, result.error ? 'failed' : 'completed', {
           stop_reason: result.stopReason,
-          output_summary: result.outputSummary,
+          output_summary: result.error ?? result.outputSummary,
           tool_calls_count: result.toolCallsCount,
           full_input: result.fullInput,
           full_output: result.fullOutput,

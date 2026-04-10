@@ -764,7 +764,7 @@ export interface TraceCallback {
   }): string
   onLoopEnd(spanId: string, status: 'completed' | 'failed', iterationCount: number): void
   onLlmCallStart(iteration: number, inputSummary: string, attempt?: number): string
-  onLlmCallEnd(spanId: string, result: { stopReason?: string; outputSummary?: string; toolCallsCount?: number; fullInput?: string; fullOutput?: string }): void
+  onLlmCallEnd(spanId: string, result: { stopReason?: string; outputSummary?: string; toolCallsCount?: number; fullInput?: string; fullOutput?: string; error?: string }): void
   onToolCallStart(toolName: string, inputSummary: string): string
   onToolCallEnd(spanId: string, outputSummary: string, error?: string): void
 }
