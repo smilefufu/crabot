@@ -1,12 +1,13 @@
 import type { LLMAdapter } from './llm-adapter'
-import type { ToolDefinition, EngineTurnEvent, EngineResult } from './types'
+import type { ToolDefinition, EngineTurnEvent, EngineResult, ContentBlock } from './types'
 import { runEngine } from './query-loop'
+import { resolveImageFromPaths } from '../agent/media-resolver'
 
 // --- Fork Engine ---
 
 export interface ForkEngineParams {
-  /** Task description for the sub-agent */
-  readonly prompt: string
+  /** Task description for the sub-agent (string or content blocks with images) */
+  readonly prompt: string | ReadonlyArray<ContentBlock>
   /** LLM adapter (can be same or different from parent) */
   readonly adapter: LLMAdapter
   /** Model to use (can be lighter model for cost savings) */
@@ -23,6 +24,8 @@ export interface ForkEngineParams {
   readonly abortSignal?: AbortSignal
   /** Callback for sub-agent turns */
   readonly onTurn?: (event: EngineTurnEvent) => void
+  /** Whether the sub-agent's model supports vision (image inputs) */
+  readonly supportsVision?: boolean
 }
 
 export interface ForkEngineResult {
@@ -39,12 +42,22 @@ export interface ForkEngineResult {
 const DEFAULT_SUB_AGENT_MAX_TURNS = 20
 
 export async function forkEngine(params: ForkEngineParams): Promise<ForkEngineResult> {
-  const fullPrompt = params.parentContext
-    ? `## Parent Context\n${params.parentContext}\n\n## Your Task\n${params.prompt}`
-    : params.prompt
+  let prompt: string | ReadonlyArray<ContentBlock>
+  if (params.parentContext) {
+    if (typeof params.prompt === 'string') {
+      prompt = `## Parent Context\n${params.parentContext}\n\n## Your Task\n${params.prompt}`
+    } else {
+      prompt = [
+        { type: 'text' as const, text: `## Parent Context\n${params.parentContext}\n\n## Your Task\n` },
+        ...params.prompt,
+      ]
+    }
+  } else {
+    prompt = params.prompt
+  }
 
   const result = await runEngine({
-    prompt: fullPrompt,
+    prompt: typeof prompt === 'string' ? prompt : [...prompt],
     adapter: params.adapter,
     options: {
       systemPrompt: params.systemPrompt,
@@ -53,6 +66,7 @@ export async function forkEngine(params: ForkEngineParams): Promise<ForkEngineRe
       maxTurns: params.maxTurns ?? DEFAULT_SUB_AGENT_MAX_TURNS,
       abortSignal: params.abortSignal,
       onTurn: params.onTurn,
+      supportsVision: params.supportsVision,
     },
   })
 
@@ -77,25 +91,47 @@ export interface SubAgentToolConfig {
   readonly subTools: ReadonlyArray<ToolDefinition>
   readonly maxTurns?: number
   readonly onSubAgentTurn?: (event: EngineTurnEvent) => void
+  readonly supportsVision?: boolean
 }
 
 export function createSubAgentTool(config: SubAgentToolConfig): ToolDefinition {
+  const properties: Record<string, unknown> = {
+    task: { type: 'string', description: 'Task description for the sub-agent' },
+    context: { type: 'string', description: 'Optional parent context to share with the sub-agent' },
+  }
+  if (config.supportsVision) {
+    properties.image_paths = {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Local file paths of images to pass to the sub-agent for visual analysis',
+    }
+  }
+
   return {
     name: config.name,
     description: config.description,
     isReadOnly: true,
     inputSchema: {
       type: 'object',
-      properties: {
-        task: { type: 'string', description: 'Task description for the sub-agent' },
-        context: { type: 'string', description: 'Optional parent context to share with the sub-agent' },
-      },
+      properties,
       required: ['task'],
     },
     call: async (input, callContext) => {
       try {
+        let prompt: string | ReadonlyArray<ContentBlock> = String(input.task)
+        const imagePaths = input.image_paths as string[] | undefined
+        if (config.supportsVision && imagePaths?.length) {
+          const imageBlocks = await resolveImageFromPaths(imagePaths)
+          if (imageBlocks.length > 0) {
+            prompt = [
+              { type: 'text' as const, text: String(input.task) },
+              ...imageBlocks,
+            ]
+          }
+        }
+
         const result = await forkEngine({
-          prompt: String(input.task),
+          prompt,
           adapter: config.adapter,
           model: config.model,
           systemPrompt: config.systemPrompt,
@@ -104,6 +140,7 @@ export function createSubAgentTool(config: SubAgentToolConfig): ToolDefinition {
           parentContext: input.context !== undefined ? String(input.context) : undefined,
           abortSignal: callContext.abortSignal,
           onTurn: config.onSubAgentTurn,
+          supportsVision: config.supportsVision,
         })
 
         return {

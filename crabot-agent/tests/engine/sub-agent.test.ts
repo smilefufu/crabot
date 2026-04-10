@@ -138,6 +138,38 @@ describe('forkEngine', () => {
 
     expect(result.outcome).toBe('aborted')
   })
+
+  it('passes supportsVision to engine options', async () => {
+    // Mock runEngine to capture params
+    const { runEngine } = await import('../../src/engine/query-loop')
+    const runEngineSpy = vi.spyOn(
+      await import('../../src/engine/query-loop'),
+      'runEngine'
+    )
+    runEngineSpy.mockResolvedValueOnce({
+      outcome: 'completed',
+      finalText: 'done',
+      totalTurns: 1,
+      usage: { inputTokens: 10, outputTokens: 5 },
+    })
+
+    const adapter = mockAdapter([])
+
+    await forkEngine({
+      prompt: 'Analyze image',
+      adapter,
+      model: 'test-model',
+      systemPrompt: 'Vision expert.',
+      tools: [],
+      supportsVision: true,
+    })
+
+    expect(runEngineSpy).toHaveBeenCalledOnce()
+    const calledParams = runEngineSpy.mock.calls[0][0]
+    expect(calledParams.options.supportsVision).toBe(true)
+
+    runEngineSpy.mockRestore()
+  })
 })
 
 describe('createSubAgentTool', () => {
@@ -184,5 +216,35 @@ describe('createSubAgentTool', () => {
 
     expect(result.isError).toBe(false)
     expect(result.output).toContain('Research complete: found 3 results')
+  })
+
+  it('input schema includes image_paths parameter', () => {
+    const tool = createSubAgentTool({
+      name: 'vision_expert',
+      description: 'Vision agent',
+      adapter: mockAdapter([]),
+      model: 'test-model',
+      systemPrompt: 'You are a vision expert.',
+      subTools: [],
+      supportsVision: true,
+    })
+
+    const props = (tool.inputSchema as any).properties
+    expect(props).toHaveProperty('image_paths')
+    expect(props.image_paths.type).toBe('array')
+  })
+
+  it('input schema omits image_paths when supportsVision is false', () => {
+    const tool = createSubAgentTool({
+      name: 'coding_expert',
+      description: 'Coding agent',
+      adapter: mockAdapter([]),
+      model: 'test-model',
+      systemPrompt: 'You are a coder.',
+      subTools: [],
+    })
+
+    const props = (tool.inputSchema as any).properties
+    expect(props).not.toHaveProperty('image_paths')
   })
 })
