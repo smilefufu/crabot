@@ -44,9 +44,7 @@ async function main(): Promise<void> {
   }
 
   const dataDir = process.env.DATA_DIR ?? path.join(process.cwd(), 'data')
-  if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true })
-  }
+  fs.mkdirSync(dataDir, { recursive: true })
 
   const channel = new TelegramChannel({
     module_id: moduleId,
@@ -63,15 +61,12 @@ async function main(): Promise<void> {
     },
   })
 
-  process.on('SIGINT', () => {
-    console.log('\nReceived SIGINT, shutting down...')
+  const shutdown = (signal: string) => () => {
+    console.log(`\nReceived ${signal}, shutting down...`)
     channel.stop().then(() => process.exit(0)).catch(() => process.exit(1))
-  })
-
-  process.on('SIGTERM', () => {
-    console.log('\nReceived SIGTERM, shutting down...')
-    channel.stop().then(() => process.exit(0)).catch(() => process.exit(1))
-  })
+  }
+  process.on('SIGINT', shutdown('SIGINT'))
+  process.on('SIGTERM', shutdown('SIGTERM'))
 
   try {
     await channel.start()

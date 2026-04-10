@@ -8,7 +8,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { generateId, generateTimestamp } from './core/base-protocol.js'
-import type { ModuleId, Session, SessionType, SessionParticipant, SessionPermissions } from './types.js'
+import type { ModuleId, Session, SessionType, SessionPermissions } from './types.js'
 
 const DEFAULT_PERMISSIONS: SessionPermissions = {
   desktop: false,
@@ -40,7 +40,8 @@ export class SessionManager {
     if (existing) {
       const updated = this.ensureParticipant(existing, params.sender_user_id)
       if (updated) this.save()
-      return { session: existing, created: false }
+      const current = this.sessions.get(existing.id) ?? existing
+      return { session: current, created: false }
     }
 
     const session: Session = {
@@ -87,12 +88,15 @@ export class SessionManager {
     const exists = session.participants.some((p) => p.platform_user_id === userId)
     if (exists) return false
 
-    const updatedParticipants: SessionParticipant[] = [
-      ...session.participants,
-      { platform_user_id: userId, role: 'member' },
-    ]
-    session.participants = updatedParticipants
-    session.updated_at = generateTimestamp()
+    const updated: Session = {
+      ...session,
+      participants: [
+        ...session.participants,
+        { platform_user_id: userId, role: 'member' },
+      ],
+      updated_at: generateTimestamp(),
+    }
+    this.sessions.set(updated.id, updated)
     return true
   }
 
@@ -116,8 +120,7 @@ export class SessionManager {
 
   private save(): void {
     try {
-      const dir = path.dirname(this.filePath)
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+      fs.mkdirSync(path.dirname(this.filePath), { recursive: true })
       const data = Array.from(this.sessions.values())
       fs.writeFileSync(this.filePath, JSON.stringify(data, null, 2), 'utf-8')
     } catch (error) {

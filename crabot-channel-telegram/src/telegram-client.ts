@@ -5,7 +5,7 @@
  * https://core.telegram.org/bots/api
  */
 
-import fs from 'node:fs'
+import fs from 'node:fs/promises'
 import path from 'node:path'
 import type {
   TgUser,
@@ -22,7 +22,7 @@ export class TelegramClient {
   private readonly baseUrl: string
   private readonly fileBaseUrl: string
 
-  constructor(private readonly token: string) {
+  constructor(token: string) {
     this.baseUrl = `https://api.telegram.org/bot${token}`
     this.fileBaseUrl = `https://api.telegram.org/file/bot${token}`
   }
@@ -38,7 +38,6 @@ export class TelegramClient {
   async getUpdates(offset?: number, timeout = 30): Promise<TgUpdate[]> {
     const params: Record<string, unknown> = { timeout }
     if (offset !== undefined) params.offset = offset
-    // allowed_updates 过滤：只接收 message 和 edited_message
     params.allowed_updates = ['message', 'edited_message']
     return this.callApi<TgUpdate[]>('getUpdates', params)
   }
@@ -126,9 +125,6 @@ export class TelegramClient {
     return this.callApi<TgFile>('getFile', { file_id: fileId })
   }
 
-  /**
-   * 下载文件内容。先调用 getFile 获取 file_path，再从 Telegram 文件服务器下载。
-   */
   async downloadFile(filePath: string): Promise<Buffer> {
     const url = `${this.fileBaseUrl}/${filePath}`
     const response = await fetch(url)
@@ -142,7 +138,7 @@ export class TelegramClient {
   }
 
   /**
-   * 便捷方法：通过 file_id 下载文件并保存到本地目录。
+   * 通过 file_id 下载文件并保存到本地目录。
    * 返回保存后的本地文件路径。
    */
   async downloadFileToLocal(
@@ -159,15 +155,13 @@ export class TelegramClient {
     const localFilename = `${fileInfo.file_unique_id}${ext}`
     const localPath = path.join(mediaDir, localFilename)
 
-    if (!fs.existsSync(mediaDir)) {
-      fs.mkdirSync(mediaDir, { recursive: true })
-    }
-    fs.writeFileSync(localPath, buffer)
+    await fs.mkdir(mediaDir, { recursive: true })
+    await fs.writeFile(localPath, buffer)
 
     return { localPath, filePath: fileInfo.file_path }
   }
 
-  // ── 内部：JSON API 调用 ──────────────────────────────────────────────────
+  // ── 内部 ──────────────────────────────────────────────────────────────────
 
   private async callApi<T>(method: string, params?: Record<string, unknown>): Promise<T> {
     const url = `${this.baseUrl}/${method}`
@@ -178,17 +172,8 @@ export class TelegramClient {
     })
 
     const data = (await response.json()) as TgApiResponse<T>
-    if (!data.ok || data.result === undefined) {
-      throw new TelegramApiError(
-        data.error_code ?? response.status,
-        data.description ?? 'Unknown Telegram API error'
-      )
-    }
-
-    return data.result
+    return this.unwrapResponse(data, response.status)
   }
-
-  // ── 内部：Multipart 上传（发送本地文件用） ──────────────────────────────
 
   private async callApiMultipart<T>(
     method: string,
@@ -196,10 +181,10 @@ export class TelegramClient {
     files: Record<string, Buffer>,
     filename?: string
   ): Promise<T> {
-    const boundary = `----CrabotBoundary${Date.now()}`
+    const now = Date.now()
+    const boundary = `----CrabotBoundary${now}`
     const parts: Buffer[] = []
 
-    // 文本字段
     for (const [key, value] of Object.entries(fields)) {
       if (value === undefined || value === null) continue
       parts.push(Buffer.from(
@@ -207,9 +192,8 @@ export class TelegramClient {
       ))
     }
 
-    // 文件字段
     for (const [key, buffer] of Object.entries(files)) {
-      const fn = filename ?? `upload_${Date.now()}`
+      const fn = filename ?? `upload_${now}`
       parts.push(Buffer.from(
         `--${boundary}\r\nContent-Disposition: form-data; name="${key}"; filename="${fn}"\r\nContent-Type: application/octet-stream\r\n\r\n`
       ))
@@ -228,13 +212,16 @@ export class TelegramClient {
     })
 
     const data = (await response.json()) as TgApiResponse<T>
+    return this.unwrapResponse(data, response.status)
+  }
+
+  private unwrapResponse<T>(data: TgApiResponse<T>, httpStatus: number): T {
     if (!data.ok || data.result === undefined) {
       throw new TelegramApiError(
-        data.error_code ?? response.status,
+        data.error_code ?? httpStatus,
         data.description ?? 'Unknown Telegram API error'
       )
     }
-
     return data.result
   }
 }

@@ -54,6 +54,13 @@ export interface TgDocument {
   file_size?: number
 }
 
+export interface TgMediaFile {
+  file_id: string
+  file_unique_id: string
+  duration: number
+  mime_type?: string
+}
+
 export interface TgMessage {
   message_id: number
   from?: TgUser
@@ -65,10 +72,10 @@ export interface TgMessage {
   caption_entities?: TgMessageEntity[]
   photo?: TgPhotoSize[]
   document?: TgDocument
-  voice?: { file_id: string; file_unique_id: string; duration: number; mime_type?: string }
-  video?: { file_id: string; file_unique_id: string; duration: number; mime_type?: string }
+  voice?: TgMediaFile
+  video?: TgMediaFile
   sticker?: { file_id: string; file_unique_id: string; emoji?: string }
-  audio?: { file_id: string; file_unique_id: string; duration: number; mime_type?: string }
+  audio?: TgMediaFile
   location?: { latitude: number; longitude: number }
   new_chat_members?: TgUser[]
   left_chat_member?: TgUser

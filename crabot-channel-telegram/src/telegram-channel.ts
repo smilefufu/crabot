@@ -8,7 +8,7 @@
  * 对齐：protocol-channel.md 所有端点
  */
 
-import fs from 'node:fs'
+import fs from 'node:fs/promises'
 import path from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { ModuleBase, type ModuleConfig } from './core/module-base.js'
@@ -23,6 +23,7 @@ import type {
   ChannelMessage,
   ChannelCapabilities,
   MessageContent,
+  StoredMessage,
   SendMessageParams,
   SendMessageResult,
   GetSessionsParams,
@@ -34,6 +35,9 @@ import type {
   TelegramChannelConfig,
   TelegramCacheConfig,
 } from './types.js'
+
+const MAX_MESSAGE_LENGTH = 4096
+const MAX_FILE_SIZE = 50 * 1024 * 1024 // 50 MB
 
 // ============================================================================
 // 配置
@@ -61,10 +65,10 @@ export class TelegramChannel extends ModuleBase {
   private readonly telegramConfig: TelegramChannelConfig
   private readonly dataDir: string
 
-  /** Bot 自身信息（启动时通过 getMe 获取） */
   private botUser: TgUser | null = null
+  /** Cached lowercase @username for mention detection */
+  private botMentionLower: string | null = null
 
-  /** Long polling 状态 */
   private pollingActive = false
   private pollingOffset: number | undefined = undefined
 
@@ -94,22 +98,19 @@ export class TelegramChannel extends ModuleBase {
   // ============================================================================
 
   protected override async onStart(): Promise<void> {
-    // 获取 Bot 信息
     this.botUser = await this.client.getMe()
+    this.botMentionLower = this.botUser.username
+      ? `@${this.botUser.username}`.toLowerCase()
+      : null
+
     console.log(
       `[TelegramChannel] Bot: @${this.botUser.username} (${this.botUser.first_name}, id=${this.botUser.id})`
     )
 
-    // 确保 media 目录存在
-    const mediaDir = path.join(this.dataDir, 'media')
-    if (!fs.existsSync(mediaDir)) {
-      fs.mkdirSync(mediaDir, { recursive: true })
-    }
+    await fs.mkdir(path.join(this.dataDir, 'media'), { recursive: true })
 
-    // 启动消息存储清理
     this.messageStore.startCleanup()
 
-    // 启动消息接收
     if (this.telegramConfig.mode === 'polling') {
       await this.startPolling()
     } else if (this.telegramConfig.mode === 'webhook') {
@@ -135,13 +136,11 @@ export class TelegramChannel extends ModuleBase {
   // ============================================================================
 
   private async startPolling(): Promise<void> {
-    // 先清除可能残留的 webhook
     await this.client.deleteWebhook()
 
     this.pollingActive = true
     console.log('[TelegramChannel] Starting long polling...')
 
-    // 启动轮询循环（不 await，后台运行）
     this.pollLoop().catch((error) => {
       console.error('[TelegramChannel] Poll loop crashed:', error)
     })
@@ -154,7 +153,6 @@ export class TelegramChannel extends ModuleBase {
       try {
         const updates = await this.client.getUpdates(this.pollingOffset, 30)
 
-        // 重置退避
         backoffMs = 1000
 
         for (const update of updates) {
@@ -172,7 +170,6 @@ export class TelegramChannel extends ModuleBase {
           console.error('[TelegramChannel] Polling error:', error)
         }
 
-        // 指数退避
         await new Promise((resolve) => setTimeout(resolve, backoffMs))
         backoffMs = Math.min(backoffMs * 2, 30_000)
       }
@@ -193,10 +190,6 @@ export class TelegramChannel extends ModuleBase {
     console.log(`[TelegramChannel] Webhook set to: ${webhook_url}`)
   }
 
-  /**
-   * 处理原始 HTTP 请求（ModuleBase 的 hook）。
-   * 拦截 /telegram/webhook 路径，处理 Telegram 推送。
-   */
   protected override async onRawRequest(
     req: IncomingMessage,
     res: ServerResponse,
@@ -205,7 +198,6 @@ export class TelegramChannel extends ModuleBase {
   ): Promise<boolean> {
     if (method !== 'telegram/webhook') return false
 
-    // 验证 secret token
     if (this.telegramConfig.webhook_secret) {
       const headerSecret = req.headers['x-telegram-bot-api-secret-token']
       if (headerSecret !== this.telegramConfig.webhook_secret) {
@@ -220,7 +212,6 @@ export class TelegramChannel extends ModuleBase {
       res.writeHead(200)
       res.end('OK')
 
-      // 异步处理
       this.handleUpdate(update).catch((error) => {
         console.error('[TelegramChannel] Error handling webhook update:', error)
       })
@@ -244,9 +235,8 @@ export class TelegramChannel extends ModuleBase {
     const chatId = String(message.chat.id)
     const isGroup = message.chat.type === 'group' || message.chat.type === 'supergroup'
     const senderId = String(message.from.id)
-    const senderName = [message.from.first_name, message.from.last_name]
-      .filter(Boolean)
-      .join(' ')
+    const senderName = message.from.first_name +
+      (message.from.last_name ? ` ${message.from.last_name}` : '')
 
     const chatTitle = isGroup
       ? (message.chat.title ?? `Group ${chatId}`)
@@ -257,7 +247,6 @@ export class TelegramChannel extends ModuleBase {
       `chat=${chatTitle}, type=${isGroup ? 'group' : 'private'}`
     )
 
-    // 创建/更新 Session
     const { session } = this.sessionManager.upsert({
       platform_session_id: chatId,
       type: isGroup ? 'group' : 'private',
@@ -266,13 +255,9 @@ export class TelegramChannel extends ModuleBase {
       sender_name: senderName,
     })
 
-    // 转换消息内容
     const content = await this.convertMessageContent(message)
-
-    // 检测 @bot
     const isMentionCrab = this.detectBotMention(message)
 
-    // 构建 ChannelMessage
     const channelMessage: ChannelMessage = {
       platform_message_id: String(message.message_id),
       session: {
@@ -291,7 +276,6 @@ export class TelegramChannel extends ModuleBase {
       platform_timestamp: new Date(message.date * 1000).toISOString(),
     }
 
-    // 记录入站消息
     this.messageStore.appendInbound({
       sessionId: session.id,
       platformMessageId: String(message.message_id),
@@ -305,7 +289,6 @@ export class TelegramChannel extends ModuleBase {
       timestamp: channelMessage.platform_timestamp,
     })
 
-    // 发布事件
     const event: Event = {
       id: generateId(),
       type: 'channel.message_received',
@@ -322,13 +305,9 @@ export class TelegramChannel extends ModuleBase {
   // 消息内容转换
   // ============================================================================
 
-  /**
-   * TgMessage → Crabot MessageContent
-   */
   private async convertMessageContent(msg: TgMessage): Promise<MessageContent> {
     const mediaDir = path.join(this.dataDir, 'media')
 
-    // photo: 取最大尺寸
     if (msg.photo && msg.photo.length > 0) {
       const largest = msg.photo[msg.photo.length - 1]
       try {
@@ -348,7 +327,6 @@ export class TelegramChannel extends ModuleBase {
       }
     }
 
-    // document
     if (msg.document) {
       try {
         const { localPath } = await this.client.downloadFileToLocal(
@@ -369,7 +347,6 @@ export class TelegramChannel extends ModuleBase {
       }
     }
 
-    // 其他类型降级为 text
     if (msg.voice) return { type: 'text', text: '[语音消息]' }
     if (msg.video) return { type: 'text', text: msg.caption ?? '[视频消息]' }
     if (msg.sticker) return { type: 'text', text: msg.sticker.emoji ?? '[贴纸]' }
@@ -381,24 +358,19 @@ export class TelegramChannel extends ModuleBase {
       }
     }
 
-    // text
     return { type: 'text', text: msg.text ?? '' }
   }
 
-  /**
-   * 检测消息中是否 @了 bot
-   */
   private detectBotMention(msg: TgMessage): boolean {
-    if (!this.botUser?.username) return false
+    if (!this.botMentionLower) return false
 
-    const botUsername = `@${this.botUser.username}`
     const entities = msg.entities ?? msg.caption_entities ?? []
     const text = msg.text ?? msg.caption ?? ''
 
     for (const entity of entities) {
       if (entity.type === 'mention') {
         const mentionText = text.slice(entity.offset, entity.offset + entity.length)
-        if (mentionText.toLowerCase() === botUsername.toLowerCase()) {
+        if (mentionText.toLowerCase() === this.botMentionLower) {
           return true
         }
       }
@@ -441,49 +413,11 @@ export class TelegramChannel extends ModuleBase {
 
     console.log(`[TelegramChannel] Sending message to chat ${chatId}: ${text.slice(0, 50)}...`)
 
-    let sentMsg: { message_id: number }
-
-    if (params.content.type === 'image') {
-      const source = params.content.file_path ?? params.content.media_url
-      if (source && fs.existsSync(source)) {
-        const buffer = fs.readFileSync(source)
-        sentMsg = await this.client.sendPhoto(chatId, buffer, {
-          ...sendOpts,
-          caption: text || undefined,
-        })
-      } else if (source) {
-        sentMsg = await this.client.sendPhoto(chatId, source, {
-          ...sendOpts,
-          caption: text || undefined,
-        })
-      } else {
-        sentMsg = await this.client.sendMessage(chatId, text, sendOpts)
-      }
-    } else if (params.content.type === 'file') {
-      const source = params.content.file_path ?? params.content.media_url
-      if (source && fs.existsSync(source)) {
-        const buffer = fs.readFileSync(source)
-        sentMsg = await this.client.sendDocument(chatId, buffer, {
-          ...sendOpts,
-          caption: text || undefined,
-          filename: params.content.filename,
-        })
-      } else if (source) {
-        sentMsg = await this.client.sendDocument(chatId, source, {
-          ...sendOpts,
-          caption: text || undefined,
-        })
-      } else {
-        sentMsg = await this.client.sendMessage(chatId, text, sendOpts)
-      }
-    } else {
-      sentMsg = await this.client.sendMessage(chatId, text, sendOpts)
-    }
+    const sentMsg = await this.sendByContentType(params, chatId, text, sendOpts)
 
     const messageId = String(sentMsg.message_id)
     const sentAt = generateTimestamp()
 
-    // 记录出站消息
     this.messageStore.appendOutbound({
       sessionId: params.session_id,
       platformMessageId: messageId,
@@ -495,14 +429,48 @@ export class TelegramChannel extends ModuleBase {
     return { platform_message_id: messageId, sent_at: sentAt }
   }
 
+  /**
+   * 按 content.type 选择发送方式。image/file 走 sendMedia，text 走 sendMessage。
+   */
+  private async sendByContentType(
+    params: SendMessageParams,
+    chatId: string,
+    text: string,
+    sendOpts?: { reply_to_message_id: number }
+  ): Promise<{ message_id: number }> {
+    const { type, file_path, media_url, filename } = params.content
+    const source = file_path ?? media_url
+
+    if ((type === 'image' || type === 'file') && source) {
+      const sendFn = type === 'image'
+        ? this.client.sendPhoto.bind(this.client)
+        : this.client.sendDocument.bind(this.client)
+
+      let media: string | Buffer = source
+      try {
+        media = await fs.readFile(source)
+      } catch {
+        // Not a local file — pass as URL string
+      }
+
+      return sendFn(chatId, media, {
+        ...sendOpts,
+        caption: text || undefined,
+        ...(type === 'file' && filename ? { filename } : {}),
+      })
+    }
+
+    return this.client.sendMessage(chatId, text, sendOpts)
+  }
+
   private handleGetCapabilities(): ChannelCapabilities {
     return {
       supported_message_types: ['text', 'image', 'file'],
       supported_features: [],
       supports_history_query: true,
       supports_platform_user_query: true,
-      max_message_length: 4096,
-      max_file_size: 52428800, // 50MB
+      max_message_length: MAX_MESSAGE_LENGTH,
+      max_file_size: MAX_FILE_SIZE,
       supports_file_path: true,
       allowed_file_paths: [path.join(this.dataDir, 'media')],
     }
@@ -557,28 +525,8 @@ export class TelegramChannel extends ModuleBase {
       pageSize: pageSize,
     })
 
-    // 转为协议格式
-    const protocolItems = items.map((m) => ({
-      platform_message_id: m.platform_message_id,
-      sender: {
-        platform_user_id: m.sender_platform_user_id,
-        platform_display_name: m.sender_name,
-      },
-      content: {
-        type: m.content_type,
-        text: m.text,
-        media_url: m.media_url,
-        mime_type: m.mime_type,
-        filename: m.filename,
-      },
-      features: {
-        is_mention_crab: false,
-      },
-      platform_timestamp: m.timestamp,
-    }))
-
     return {
-      items: protocolItems,
+      items: items.map(storedMessageToProtocol),
       pagination: {
         page: page ?? 1,
         page_size: pageSize,
@@ -595,24 +543,7 @@ export class TelegramChannel extends ModuleBase {
     const msg = this.messageStore.findByMessageId(params.session_id, params.platform_message_id)
     if (!msg) throw new Error('Message not found')
 
-    return {
-      platform_message_id: msg.platform_message_id,
-      sender: {
-        platform_user_id: msg.sender_platform_user_id,
-        platform_display_name: msg.sender_name,
-      },
-      content: {
-        type: msg.content_type,
-        text: msg.text,
-        media_url: msg.media_url,
-        mime_type: msg.mime_type,
-        filename: msg.filename,
-      },
-      features: {
-        is_mention_crab: false,
-      },
-      platform_timestamp: msg.timestamp,
-    }
+    return storedMessageToProtocol(msg)
   }
 
   private async handleGetPlatformUserInfo(params: { platform_user_id: string }) {
@@ -621,7 +552,6 @@ export class TelegramChannel extends ModuleBase {
       throw new Error(`Invalid platform_user_id: ${params.platform_user_id}`)
     }
 
-    // Telegram 没有直接查用户信息的 API，但 getChat 对私聊 chat_id 有效
     const chat = await this.client.getChat(userId)
     return {
       platform_user_id: params.platform_user_id,
@@ -647,5 +577,30 @@ export class TelegramChannel extends ModuleBase {
       active_sessions: this.sessionManager.listSessions().length,
       polling_active: this.pollingActive,
     }
+  }
+}
+
+// ============================================================================
+// 工具函数
+// ============================================================================
+
+function storedMessageToProtocol(m: StoredMessage) {
+  return {
+    platform_message_id: m.platform_message_id,
+    sender: {
+      platform_user_id: m.sender_platform_user_id,
+      platform_display_name: m.sender_name,
+    },
+    content: {
+      type: m.content_type,
+      text: m.text,
+      media_url: m.media_url,
+      mime_type: m.mime_type,
+      filename: m.filename,
+    },
+    features: {
+      is_mention_crab: false,
+    },
+    platform_timestamp: m.timestamp,
   }
 }
