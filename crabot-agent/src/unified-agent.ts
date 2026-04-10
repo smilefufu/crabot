@@ -312,11 +312,57 @@ export class UnifiedAgent extends ModuleBase {
     modelConfig: Record<string, LLMConnectionInfo>
   ): ReadonlyArray<{ readonly definition: SubAgentDefinition; readonly sdkEnv: SdkEnvConfig }> {
     return SUBAGENT_DEFINITIONS
-      .filter((def) => modelConfig[def.slotKey] !== undefined)
-      .map((def) => ({
-        definition: def,
-        sdkEnv: this.buildSdkEnv(modelConfig[def.slotKey]),
-      }))
+      .map((def) => {
+        const connInfo = this.resolveSubAgentSlot(def, modelConfig)
+        if (!connInfo) return null
+        return {
+          definition: def,
+          sdkEnv: this.buildSdkEnv(connInfo),
+        }
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null)
+  }
+
+  /**
+   * 解析 sub-agent 的 model slot，支持 vision 降级。
+   *
+   * 优先级：
+   *  1. 显式配置的 slot（且能力匹配）
+   *  2. 对于需要 vision 的 slot，降级到任意已配且 supports_vision=true 的模型
+   *  3. 都没有 → 返回 undefined（跳过该 sub-agent）
+   */
+  private resolveSubAgentSlot(
+    def: SubAgentDefinition,
+    modelConfig: Record<string, LLMConnectionInfo>
+  ): LLMConnectionInfo | undefined {
+    const needsVision = def.recommendedCapabilities.includes('vision')
+    const explicit = modelConfig[def.slotKey]
+
+    // 显式配置且能力匹配
+    if (explicit) {
+      if (!needsVision || explicit.supports_vision) {
+        return explicit
+      }
+      console.log(`[SubAgent] Slot '${def.slotKey}' model lacks vision capability, trying fallback`)
+    }
+
+    // 需要 vision 能力：从其他 slot 中找一个 VLM
+    if (needsVision) {
+      for (const [key, connInfo] of Object.entries(modelConfig)) {
+        if (key !== def.slotKey && connInfo.supports_vision) {
+          console.log(`[SubAgent] Slot '${def.slotKey}' falling back to '${key}' model (${connInfo.model_id})`)
+          return connInfo
+        }
+      }
+      console.log(`[SubAgent] No VLM available for slot '${def.slotKey}', skipping`)
+      return undefined
+    }
+
+    // 非 vision slot，未配置则跳过
+    if (!explicit) {
+      console.log(`[SubAgent] Slot '${def.slotKey}' not configured, skipping ${def.toolName}`)
+    }
+    return explicit
   }
 
   private createWorkerHandler(
