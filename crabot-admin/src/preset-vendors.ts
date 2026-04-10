@@ -64,6 +64,20 @@ const CHATGPT_SUBSCRIPTION_MODELS: ModelInfo[] = [
   { model_id: 'codex-mini', display_name: 'Codex Mini', type: 'llm', supports_vision: false, context_window: 200000 },
 ]
 
+/**
+ * 智谱国际版（Z.AI）静态模型列表
+ * Z.AI 提供 Anthropic 兼容接口，不支持 GET /models
+ * 参考: https://docs.z.ai/scenario-example/develop-tools/claude
+ */
+const ZAI_MODELS: ModelInfo[] = [
+  { model_id: 'glm-5.1', display_name: 'GLM-5.1', type: 'llm', supports_vision: false },
+  { model_id: 'glm-5', display_name: 'GLM-5', type: 'llm', supports_vision: false },
+  { model_id: 'glm-5-turbo', display_name: 'GLM-5 Turbo', type: 'llm', supports_vision: false },
+  { model_id: 'glm-5v-turbo', display_name: 'GLM-5V Turbo', type: 'llm', supports_vision: true },
+  { model_id: 'glm-4.7', display_name: 'GLM-4.7', type: 'llm', supports_vision: false },
+  { model_id: 'glm-4.7-flash', display_name: 'GLM-4.7 Flash', type: 'llm', supports_vision: false },
+]
+
 const DASHSCOPE_CODING_MODELS: ModelInfo[] = [
   { model_id: 'qwen3.5-plus', display_name: 'Qwen3.5 Plus', type: 'llm', supports_vision: true, context_window: 131072 },
   { model_id: 'kimi-k2.5', display_name: 'Kimi K2.5', type: 'llm', supports_vision: true, context_window: 131072 },
@@ -135,6 +149,15 @@ export const PRESET_VENDORS: readonly PresetVendor[] = [
     models_api: '/models',
     docs_url: 'https://open.bigmodel.cn/dev/howuse/introduction',
     api_key_help_url: 'https://open.bigmodel.cn/usercenter/apikeys',
+  },
+  {
+    id: 'zhipu-international',
+    name: '智谱国际版 (Z.AI)',
+    format: 'anthropic',
+    endpoint: 'https://api.z.ai/api/anthropic',
+    docs_url: 'https://docs.z.ai/scenario-example/develop-tools/claude',
+    api_key_help_url: 'https://z.ai/model-api',
+    default_models: ZAI_MODELS,
   },
   {
     id: 'openrouter',
