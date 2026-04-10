@@ -41,7 +41,7 @@ import type {
 import type { RpcClient } from '../core/module-base.js'
 import { createCrabMemoryServer } from '../mcp/crab-memory.js'
 import type { MemoryTaskContext } from '../mcp/crab-memory.js'
-import { formatMessageContent } from './media-resolver.js'
+import { formatMessageContent, resolveImageBlocks } from './media-resolver.js'
 import type { McpConnector } from './mcp-connector.js'
 import { createSubAgentTool } from '../engine/sub-agent.js'
 import type { SubAgentDefinition } from './subagent-prompts.js'
@@ -360,6 +360,7 @@ export class WorkerHandler {
           systemPrompt: definition.systemPrompt,
           subTools: baseTools,
           maxTurns: definition.maxTurns,
+          supportsVision: subSdkEnv.supportsVision,
           onSubAgentTurn: traceCallback ? (event) => {
             const spanId = traceCallback.onLlmCallStart(
               event.turnNumber,
@@ -385,7 +386,7 @@ export class WorkerHandler {
 
       // 5. Build system prompt and task message
       const systemPrompt = this.buildSystemPrompt(context)
-      const taskMessage = this.buildTaskMessage(task, context)
+      const taskMessage = await this.buildTaskMessage(task, context)
       log(`Starting worker engine: model=${this.sdkEnv.modelId}, task=${task.task_title}, tools=${tools.length}`)
 
       // 6. Set up trace and progress tracking
@@ -682,7 +683,7 @@ export class WorkerHandler {
     return parts.join('\n')
   }
 
-  private buildTaskMessage(task: ExecuteTaskParams['task'], context: WorkerAgentContext): string {
+  private async buildTaskMessage(task: ExecuteTaskParams['task'], context: WorkerAgentContext): Promise<string | ContentBlock[]> {
     const parts: string[] = []
     parts.push('## 任务信息')
     parts.push(`- 标题: ${task.task_title}`)
@@ -772,7 +773,20 @@ export class WorkerHandler {
       }
     }
 
-    return parts.join('\n')
+    const textContent = parts.join('\n')
+
+    // VLM Worker: resolve images from trigger messages into ContentBlock[]
+    if (this.sdkEnv.supportsVision && context.trigger_messages?.length) {
+      const imageBlocks = await resolveImageBlocks(context.trigger_messages)
+      if (imageBlocks.length > 0) {
+        return [
+          { type: 'text' as const, text: textContent },
+          ...imageBlocks,
+        ]
+      }
+    }
+
+    return textContent
   }
 
   /**
