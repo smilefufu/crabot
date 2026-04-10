@@ -100,4 +100,47 @@ describe('createReadTool', () => {
     expect(result.isError).toBe(false)
     expect(result.output).toContain('[...truncated')
   })
+
+  it('returns image data for image files', async () => {
+    const filePath = path.join(tmpDir, 'photo.png')
+    // 1x1 red PNG
+    const pngData = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==',
+      'base64'
+    )
+    await fs.writeFile(filePath, pngData)
+
+    const result = await tool.call({ file_path: filePath }, {})
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('[Image:')
+    expect(result.images).toBeDefined()
+    expect(result.images!.length).toBe(1)
+    // compressImage may convert to image/jpeg if sharp is available
+    expect(['image/png', 'image/jpeg']).toContain(result.images![0].media_type)
+    expect(result.images![0].data).toBeTruthy()
+  })
+
+  it('returns image data for jpg files', async () => {
+    const filePath = path.join(tmpDir, 'photo.jpg')
+    await fs.writeFile(filePath, Buffer.alloc(100, 0xFF))
+
+    const result = await tool.call({ file_path: filePath }, {})
+    expect(result.isError).toBe(false)
+    expect(result.images).toBeDefined()
+    expect(result.images![0].media_type).toBe('image/jpeg')
+  })
+
+  it('still rejects non-image binary files', async () => {
+    const filePath = path.join(tmpDir, 'data.bin')
+    const buf = Buffer.alloc(100)
+    buf[50] = 0x00
+    buf.fill(0x41, 0, 50)
+    buf.fill(0x42, 51)
+    await fs.writeFile(filePath, buf)
+
+    const result = await tool.call({ file_path: filePath }, {})
+    expect(result.isError).toBe(true)
+    expect(result.output).toContain('Binary file')
+    expect(result.images).toBeUndefined()
+  })
 })

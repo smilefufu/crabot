@@ -2,8 +2,16 @@ import * as fs from 'fs/promises'
 import * as path from 'path'
 import { defineTool } from '../tool-framework'
 import type { ToolDefinition } from '../types'
+import { compressImage } from '../image-utils'
 
 const MAX_FILE_SIZE = 500 * 1024
+const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp'])
+const MAX_IMAGE_SIZE = 20 * 1024 * 1024 // 20MB
+
+function isImageFile(filePath: string): boolean {
+  const ext = filePath.split('.').pop()?.toLowerCase() ?? ''
+  return IMAGE_EXTENSIONS.has(ext)
+}
 const DEFAULT_LIMIT = 2000
 const BINARY_CHECK_SIZE = 8192
 
@@ -74,6 +82,33 @@ export function createReadTool(cwd: string): ToolDefinition {
 
         if (fileSize === 0) {
           return { output: '', isError: false }
+        }
+
+        // Image file detection — return as ImageBlock before text processing
+        if (isImageFile(filePath)) {
+          if (fileSize > MAX_IMAGE_SIZE) {
+            return {
+              output: `[Image too large: ${filePath}, ${fileSize} bytes]`,
+              isError: false,
+            }
+          }
+          const imageBuffer = await fs.readFile(filePath)
+          const ext = filePath.split('.').pop()?.toLowerCase() ?? 'png'
+          const mediaTypeMap: Record<string, string> = {
+            jpg: 'image/jpeg', jpeg: 'image/jpeg',
+            png: 'image/png', gif: 'image/gif', webp: 'image/webp',
+          }
+          const rawMediaType = mediaTypeMap[ext] ?? 'image/png'
+          const rawImageData = {
+            media_type: rawMediaType,
+            data: imageBuffer.toString('base64'),
+          }
+          const compressed = await compressImage(rawImageData)
+          return {
+            output: `[Image: ${filePath}, ${fileSize} bytes]`,
+            isError: false,
+            images: [compressed],
+          }
         }
 
         const truncated = fileSize > MAX_FILE_SIZE
