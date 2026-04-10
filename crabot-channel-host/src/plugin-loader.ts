@@ -65,67 +65,76 @@ export interface OutboundContext {
  *   openclaw/plugin-sdk/feishu → /path/to/node_modules/openclaw/dist/plugin-sdk/feishu.js
  */
 const OPENCLAW_STUB_DIR = path.join(__dirname, '..', 'openclaw-stubs')
+const OPENCLAW_STUB_PATH = path.join(OPENCLAW_STUB_DIR, 'plugin-sdk.cjs')
 
-function buildOpenClawAlias(pluginDir?: string): Record<string, string> {
-  let mainEntry: string
+/**
+ * openclaw 包是否可用。
+ * - true：openclaw 已安装，alias 从 package.json exports 精确映射
+ * - false：openclaw 不可用（Shim 部署），所有 openclaw/* 导入前缀匹配到 stub
+ */
+let openclawAvailable: boolean | null = null
+let openclawAlias: Record<string, string> | null = null
+
+function resolveOpenClawState(pluginDir?: string): void {
+  if (openclawAvailable !== null) return
+
+  let mainEntry: string | undefined
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     mainEntry = require.resolve('openclaw')
   } catch {
-    // openclaw not in channel-host's node_modules, try plugin's own node_modules
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       mainEntry = require.resolve('openclaw', { paths: [pluginDir || __dirname] })
     } catch {
-      // openclaw not available — use lightweight stubs
-      const stubPath = path.join(OPENCLAW_STUB_DIR, 'plugin-sdk.cjs')
-      return {
-        'openclaw/plugin-sdk': stubPath,
-        'openclaw/plugin-sdk/core': stubPath,
-        'openclaw/plugin-sdk/compat': stubPath,
-      }
+      // openclaw not available — will use prefix-based stub resolution
+      openclawAvailable = false
+      openclawAlias = {}
+      return
     }
   }
-  const pkgRoot = path.resolve(path.dirname(mainEntry), '..')  // .../openclaw/
 
+  // openclaw available — build exact alias from package.json exports
+  openclawAvailable = true
+  const pkgRoot = path.resolve(path.dirname(mainEntry), '..')
   const pkgJsonPath = path.join(pkgRoot, 'package.json')
   const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8')) as {
     exports?: Record<string, unknown>
   }
 
   const alias: Record<string, string> = {
-    openclaw: mainEntry,  // 主入口
+    openclaw: mainEntry,
   }
 
   for (const [key, val] of Object.entries(pkg.exports ?? {})) {
-    if (key === '.') continue  // 已通过 mainEntry 处理
-
-    // 取 default 导出（优先），或直接字符串值
+    if (key === '.') continue
     let target: unknown = val
     if (target && typeof target === 'object') {
       target = (target as Record<string, unknown>).default
     }
     if (typeof target !== 'string') continue
-
-    // key 形如 './plugin-sdk/feishu'，去掉开头的 './'
-    const moduleName = 'openclaw' + key.slice(1)                    // openclaw/plugin-sdk/feishu
-    const resolvedPath = path.join(pkgRoot, target)                 // .../dist/plugin-sdk/feishu.js
-
+    const moduleName = 'openclaw' + key.slice(1)
+    const resolvedPath = path.join(pkgRoot, target)
     if (fs.existsSync(resolvedPath)) {
       alias[moduleName] = resolvedPath
     }
   }
-
-  return alias
+  openclawAlias = alias
 }
 
-// 模块加载时构建一次，复用（pluginDir 在此时未知，运行时按需重建）
-let OPENCLAW_ALIAS: Record<string, string> | null = null
-function getOpenClawAlias(pluginDir?: string): Record<string, string> {
-  if (OPENCLAW_ALIAS === null) {
-    OPENCLAW_ALIAS = buildOpenClawAlias(pluginDir)
+/**
+ * 解析 openclaw 模块请求。
+ * - openclaw 可用时：精确 alias 查找
+ * - openclaw 不可用时：所有 openclaw/* 前缀匹配到 stub
+ */
+function resolveOpenClawModule(request: string): string | undefined {
+  if (openclawAlias && openclawAlias[request]) {
+    return openclawAlias[request]
   }
-  return OPENCLAW_ALIAS
+  if (!openclawAvailable && request.startsWith('openclaw/')) {
+    return OPENCLAW_STUB_PATH
+  }
+  return undefined
 }
 
 // ============================================================================
@@ -141,61 +150,62 @@ export async function loadPlugin(
   const ext = path.extname(pluginPath).toLowerCase()
   const isTs = ext === '.ts' || ext === '.mts' || ext === '.cts'
 
-  if (isTs) {
-    // TypeScript 插件（如 node_modules/@openclaw/feishu）：用 jiti 运行时转译
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { createJiti } = require('jiti') as {
-      createJiti: (root: string, opts?: Record<string, unknown>) => (id: string) => unknown
-    }
-    const jitiLoad = createJiti(pluginPath, {
-      interopDefault: true,
-      moduleCache: false,
-      alias: getOpenClawAlias(path.dirname(pluginPath)),
-    })
-    mod = jitiLoad(pluginPath) as Record<string, unknown>
-  } else {
-    // JavaScript 插件（shim CLI 安装到 extensions/ 的预编译包）
-    // 两个问题需要解决：
-    // 1. 插件 require("openclaw/plugin-sdk") 但 openclaw 不在其 node_modules 里
-    //    → 用 Module._resolveFilename hook 重定向到 stubs
-    // 2. 部分文件混用 CJS exports + ESM import.meta.url（TypeScript 编译产物）
-    //    → Node.js 检测到 import.meta 后切换 ESM 加载，但 exports 在 ESM 中未定义
-    //    → 用 Module._compile hook 把 import.meta.url 替换为 CJS 等价物
-    const alias = getOpenClawAlias(path.dirname(pluginPath))
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const NodeModule = require('node:module') as {
-      _resolveFilename: (...args: unknown[]) => string
-      prototype: { _compile: (content: string, filename: string) => unknown }
-    }
-    const origResolve = NodeModule._resolveFilename
-    const origCompile = NodeModule.prototype._compile
+  // 确保 openclaw 解析状态已初始化
+  resolveOpenClawState(path.dirname(pluginPath))
 
-    // Hook 1: openclaw/* → stubs
-    NodeModule._resolveFilename = function (request: unknown, ...rest: unknown[]) {
-      if (typeof request === 'string' && alias[request]) {
-        return alias[request]
-      }
-      return origResolve.call(this, request, ...rest)
+  // 安装 Module._resolveFilename hook：拦截所有 openclaw/* 导入
+  // TS 和 JS 插件都需要（jiti 内部也走 require.resolve，alias 只支持精确匹配）
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const NodeModule = require('node:module') as {
+    _resolveFilename: (...args: unknown[]) => string
+    prototype: { _compile: (content: string, filename: string) => unknown }
+  }
+  const origResolve = NodeModule._resolveFilename
+  NodeModule._resolveFilename = function (request: unknown, ...rest: unknown[]) {
+    if (typeof request === 'string') {
+      const resolved = resolveOpenClawModule(request)
+      if (resolved) return resolved
     }
+    return origResolve.call(this, request, ...rest)
+  }
 
-    // Hook 2: import.meta.url → CJS __filename 等价物
-    NodeModule.prototype._compile = function (content: string, filename: string) {
-      if (content.includes('import.meta.url')) {
-        content = content.replace(
-          /import\.meta\.url/g,
-          'require("node:url").pathToFileURL(__filename).href'
-        )
-      }
-      return origCompile.call(this, content, filename)
-    }
-
-    try {
+  try {
+    if (isTs) {
+      // TypeScript 插件（如 node_modules/@openclaw/feishu）：用 jiti 运行时转译
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      mod = require(pluginPath) as Record<string, unknown>
-    } finally {
-      NodeModule._resolveFilename = origResolve
-      NodeModule.prototype._compile = origCompile
+      const { createJiti } = require('jiti') as {
+        createJiti: (root: string, opts?: Record<string, unknown>) => (id: string) => unknown
+      }
+      const jitiLoad = createJiti(pluginPath, {
+        interopDefault: true,
+        moduleCache: false,
+      })
+      mod = jitiLoad(pluginPath) as Record<string, unknown>
+    } else {
+      // JavaScript 插件（shim CLI 安装到 extensions/ 的预编译包）
+      // 额外问题：部分文件混用 CJS exports + ESM import.meta.url（TypeScript 编译产物）
+      //   → Node.js 检测到 import.meta 后切换 ESM 加载，但 exports 在 ESM 中未定义
+      //   → 用 Module._compile hook 把 import.meta.url 替换为 CJS 等价物
+      const origCompile = NodeModule.prototype._compile
+      NodeModule.prototype._compile = function (content: string, filename: string) {
+        if (content.includes('import.meta.url')) {
+          content = content.replace(
+            /import\.meta\.url/g,
+            'require("node:url").pathToFileURL(__filename).href'
+          )
+        }
+        return origCompile.call(this, content, filename)
+      }
+
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        mod = require(pluginPath) as Record<string, unknown>
+      } finally {
+        NodeModule.prototype._compile = origCompile
+      }
     }
+  } finally {
+    NodeModule._resolveFilename = origResolve
   }
 
   const rawPlugin = mod.default ?? mod.plugin ?? mod

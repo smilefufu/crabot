@@ -19,6 +19,7 @@
   "author": "Crabot Team",
   "license": "MIT",
   "dependencies": {
+    "@openclaw/feishu": "^2026.3.13",
     "jiti": "^2.6.1"
   },
   "devDependencies": {

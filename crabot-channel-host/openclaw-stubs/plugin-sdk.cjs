@@ -283,6 +283,63 @@ async function resolveSenderCommandAuthorization(params) {
 }
 
 // ---------------------------------------------------------------------------
+// Dedupe stubs — feishu plugin creates these at module top-level
+// ---------------------------------------------------------------------------
+// OpenClaw dedup semantics (derived from usage in feishu/dedup.ts):
+//
+// createDedupeCache:
+//   check(key):  return TRUE = duplicate (already seen & recorded), FALSE = new (now recorded)
+//   peek(key):   return TRUE = seen before, FALSE = not seen (read-only, no side effect)
+//   Used as: return !cache.check(key)  → true = new message, false = duplicate
+//
+// createPersistentDedupe:
+//   checkAndRecord(key, opts): return TRUE = new (successfully recorded), FALSE = duplicate
+//   Used as: if (!(await persistent.checkAndRecord(...))) → duplicate
+//   NOTE: opposite convention from cache.check()!
+//
+function createDedupeCache(_opts) {
+  const seen = new Map()
+  return {
+    has(key) { return seen.has(key) },
+    // check: true = duplicate, false = new (records on first call)
+    check(key) {
+      if (!key) return false
+      if (seen.has(key)) return true
+      seen.set(key, Date.now())
+      return false
+    },
+    peek(key) { return seen.has(key) },
+    checkAndRecord(key) {
+      if (!key) return false
+      if (seen.has(key)) return true
+      seen.set(key, Date.now())
+      return false
+    },
+    record(key) { seen.set(key, Date.now()) },
+    delete(key) { seen.delete(key) },
+    clear() { seen.clear() },
+  }
+}
+
+function createPersistentDedupe(_opts) {
+  const seen = new Map()
+  return {
+    // checkAndRecord: true = new (recorded), false = duplicate — opposite of cache.check()!
+    checkAndRecord(key) {
+      if (!key) return true
+      if (seen.has(key)) return false
+      seen.set(key, Date.now())
+      return true
+    },
+    async warmup(_namespace, _onError) { /* no-op in shim */ },
+  }
+}
+
+function readJsonFileWithFallback(_filePath, fallback) {
+  return fallback
+}
+
+// ---------------------------------------------------------------------------
 // Exports — wrapped in Proxy to prevent crashes on unknown SDK exports.
 // Known functions return real implementations; unknown ones log a warning
 // and return undefined (for constants) or a no-op function (if called).
@@ -290,6 +347,9 @@ async function resolveSenderCommandAuthorization(params) {
 const _exports = {
   buildChannelConfigSchema,
   emptyPluginConfigSchema,
+  createDedupeCache,
+  createPersistentDedupe,
+  readJsonFileWithFallback,
   resolvePreferredOpenClawTmpDir,
   normalizeAccountId,
   DEFAULT_ACCOUNT_ID,
@@ -322,16 +382,21 @@ const _exports = {
 }
 
 const _warned = new Set()
-module.exports = new Proxy(_exports, {
+const _proxy = new Proxy(_exports, {
   get(target, prop) {
     if (prop in target) return target[prop]
     if (typeof prop === 'symbol') return undefined
+    // jiti interopDefault accesses .default — return the proxy itself so named exports survive
+    if (prop === 'default') return _proxy
+    if (prop === '__esModule') return true
     if (!_warned.has(prop)) {
       _warned.add(prop)
       console.warn('[openclaw-stub] unknown export accessed:', prop)
     }
-    // Return a no-op function as safety net; callers that expect a constant
-    // will get a truthy value (the function itself), which is better than undefined.
-    return function _stubbed() { return undefined }
+    // Return a no-op function that returns an empty object as safety net.
+    // Callers may destructure the result (e.g. createDefaultChannelRuntimeState),
+    // so {} is safer than undefined. Also serves as a truthy value for constant checks.
+    return function _stubbed() { return {} }
   },
 })
+module.exports = _proxy
