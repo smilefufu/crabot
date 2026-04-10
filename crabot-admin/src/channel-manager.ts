@@ -29,6 +29,7 @@ import type {
 const BUILTIN_MODULE_PATHS: readonly string[] = [
   '../crabot-channel-host',
   '../crabot-channel-wechat',
+  '../crabot-channel-telegram',
 ]
 
 /**
