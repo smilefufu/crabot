@@ -50,22 +50,30 @@ async function fetchRemoteImage(url: string): Promise<Buffer | null> {
   }
 }
 
-/**
- * 将消息内容格式化为可读文本。
- * 优先返回文本内容，非文本消息（图片、文件等）返回占位描述。
- */
-export function formatMessageContent(msg: ChannelMessage): string {
-  const text = msg.content.text
-  if (text) return text
-
+function formatMediaRef(msg: ChannelMessage): string {
+  if (!msg.content.media_url) return ''
   switch (msg.content.type) {
     case 'image':
-      return `[图片${msg.content.media_url ? ': ' + msg.content.media_url : ''}]`
+      return `[图片: ${msg.content.media_url}]`
     case 'file':
-      return `[文件: ${msg.content.filename ?? msg.content.media_url ?? '未知'}]`
+      return `[文件: ${msg.content.filename ?? msg.content.media_url}]`
     default:
-      return '[非文本消息]'
+      return ''
   }
+}
+
+/**
+ * 将消息内容格式化为可读文本。
+ * 同时保留文本内容和媒体引用（图片、文件等），两者都有时用换行拼接。
+ */
+export function formatMessageContent(msg: ChannelMessage): string {
+  const text = msg.content.text ?? ''
+  const mediaRef = formatMediaRef(msg)
+
+  if (text && mediaRef) return `${text}\n${mediaRef}`
+  if (text) return text
+  if (mediaRef) return mediaRef
+  return '[非文本消息]'
 }
 
 /**
@@ -103,5 +111,31 @@ export async function resolveImageBlocks(
     })
   )
 
+  return results.filter((block): block is ImageBlock => block !== null)
+}
+
+/**
+ * 从文件路径列表解析图片为 engine ImageBlock。
+ * 供 Worker buildTaskMessage 和 Sub-agent image_paths 参数复用。
+ */
+export async function resolveImageFromPaths(
+  paths: ReadonlyArray<string>
+): Promise<ImageBlock[]> {
+  const results = await Promise.all(
+    paths.map(async (filePath): Promise<ImageBlock | null> => {
+      const buffer = await readLocalFile(filePath)
+      if (!buffer) return null
+
+      const mediaType = inferMediaType(undefined, filePath)
+      return {
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: mediaType,
+          data: buffer.toString('base64'),
+        },
+      }
+    })
+  )
   return results.filter((block): block is ImageBlock => block !== null)
 }
