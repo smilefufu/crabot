@@ -3,6 +3,7 @@ import * as path from 'path'
 import { defineTool } from '../tool-framework'
 import type { ToolDefinition } from '../types'
 import { compressImage } from '../image-utils'
+import { inferMediaType } from '../../agent/media-resolver'
 
 const MAX_FILE_SIZE = 500 * 1024
 const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp'])
@@ -93,14 +94,8 @@ export function createReadTool(cwd: string): ToolDefinition {
             }
           }
           const imageBuffer = await fs.readFile(filePath)
-          const ext = filePath.split('.').pop()?.toLowerCase() ?? 'png'
-          const mediaTypeMap: Record<string, string> = {
-            jpg: 'image/jpeg', jpeg: 'image/jpeg',
-            png: 'image/png', gif: 'image/gif', webp: 'image/webp',
-          }
-          const rawMediaType = mediaTypeMap[ext] ?? 'image/png'
           const rawImageData = {
-            media_type: rawMediaType,
+            media_type: inferMediaType(undefined, filePath),
             data: imageBuffer.toString('base64'),
           }
           const compressed = await compressImage(rawImageData)

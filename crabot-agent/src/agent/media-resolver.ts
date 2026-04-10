@@ -13,7 +13,7 @@ const MAX_IMAGE_SIZE = 20 * 1024 * 1024 // 20MB
 const SUPPORTED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])
 type ImageMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'
 
-function inferMediaType(mimeType?: string, filePath?: string): ImageMediaType {
+export function inferMediaType(mimeType?: string, filePath?: string): ImageMediaType {
   if (mimeType && SUPPORTED_MIME_TYPES.has(mimeType)) {
     return mimeType as ImageMediaType
   }
