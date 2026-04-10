@@ -371,6 +371,37 @@ function buildAgentMediaPayload(mediaList) {
 }
 
 // ---------------------------------------------------------------------------
+// Group policy stubs — Crabot sets groupPolicy='open' via injectCrabotPolicy(),
+// these stubs faithfully pass it through so the plugin respects it.
+// ---------------------------------------------------------------------------
+
+// Reads cfg.groupPolicy; defaults to 'allowlist'.
+function resolveDefaultGroupPolicy(cfg) {
+  if (!cfg || typeof cfg !== 'object') return 'allowlist'
+  return cfg.groupPolicy || 'allowlist'
+}
+
+// Provider-level groupPolicy takes precedence over the default.
+function resolveOpenProviderRuntimeGroupPolicy(params) {
+  if (params.providerConfigPresent && params.groupPolicy) {
+    return { groupPolicy: params.groupPolicy, providerMissingFallbackApplied: false }
+  }
+  return { groupPolicy: params.defaultGroupPolicy || 'allowlist', providerMissingFallbackApplied: !params.providerConfigPresent }
+}
+
+// No-op — Crabot doesn't need this warning.
+function warnMissingProviderGroupPolicyFallbackOnce() {}
+
+// 'open' → allowed, 'disabled' → denied, 'allowlist' → delegate to isSenderAllowed()
+function evaluateSenderGroupAccessForPolicy(params) {
+  if (params.groupPolicy === 'open') return { allowed: true }
+  if (params.groupPolicy === 'disabled') return { allowed: false }
+  if (params.groupAllowFrom && params.groupAllowFrom.includes(params.senderId)) return { allowed: true }
+  if (typeof params.isSenderAllowed === 'function') return params.isSenderAllowed()
+  return { allowed: false }
+}
+
+// ---------------------------------------------------------------------------
 // Exports — wrapped in Proxy to prevent crashes on unknown SDK exports.
 // Known functions return real implementations; unknown ones log a warning
 // and return undefined (for constants) or a no-op function (if called).
@@ -412,6 +443,10 @@ const _exports = {
   createReplyPrefixContext,
   buildAgentMediaPayload,
   createScopedPairingAccess,
+  resolveDefaultGroupPolicy,
+  resolveOpenProviderRuntimeGroupPolicy,
+  warnMissingProviderGroupPolicyFallbackOnce,
+  evaluateSenderGroupAccessForPolicy,
 }
 
 const _warned = new Set()
