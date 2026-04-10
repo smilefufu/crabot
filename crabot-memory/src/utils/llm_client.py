@@ -143,7 +143,10 @@ class LLMClient:
             kwargs["system"] = system_prompt
 
         resp = await client.messages.create(**kwargs)
-        return resp.content[0].text if resp.content else ""
+        for block in resp.content:
+            if block.type == "text":
+                return block.text
+        return ""
 
     async def extract_keywords(self, text: str) -> List[str]:
         """从文本中提取关键词"""
