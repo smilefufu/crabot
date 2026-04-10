@@ -340,6 +340,37 @@ function readJsonFileWithFallback(_filePath, fallback) {
 }
 
 // ---------------------------------------------------------------------------
+// createScopedPairingAccess — shim always allows all senders (pairing disabled)
+// ---------------------------------------------------------------------------
+function createScopedPairingAccess() {
+  return {
+    readAllowFromStore: async () => ['*'],
+    writeAllowToStore: async () => {},
+    clearStore: async () => {},
+  }
+}
+
+// ---------------------------------------------------------------------------
+// buildAgentMediaPayload — converts media list to MsgContext media fields
+// ---------------------------------------------------------------------------
+function buildAgentMediaPayload(mediaList) {
+  if (!mediaList || mediaList.length === 0) return {}
+  const first = mediaList[0]
+  const result = {
+    MediaPath: first.path,
+    MediaType: first.contentType,
+    MediaUrl: first.path,
+  }
+  if (mediaList.length > 1) {
+    const paths = mediaList.map(function (m) { return m.path })
+    result.MediaPaths = paths
+    result.MediaTypes = mediaList.map(function (m) { return m.contentType })
+    result.MediaUrls = paths
+  }
+  return result
+}
+
+// ---------------------------------------------------------------------------
 // Exports — wrapped in Proxy to prevent crashes on unknown SDK exports.
 // Known functions return real implementations; unknown ones log a warning
 // and return undefined (for constants) or a no-op function (if called).
@@ -379,6 +410,8 @@ const _exports = {
   resolveThreadSessionKeys,
   buildPendingHistoryContextFromMap,
   createReplyPrefixContext,
+  buildAgentMediaPayload,
+  createScopedPairingAccess,
 }
 
 const _warned = new Set()
