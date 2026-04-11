@@ -4562,11 +4562,13 @@ export class AdminModule extends ModuleBase {
     try {
       const result = await this.rpcClient.callModuleManager<
         Record<string, never>,
-        { modules: Array<{ module_id: string; port: number; status: string }> }
+        { modules: Array<{ module_id: string; module_type: string; port: number; status: string }> }
       >('list_modules', {}, this.config.moduleId)
 
+      // 只推送给支持 update_proxy_config 的 Node.js 模块（跳过 Python memory、devtool 等）
+      const PROXY_SUPPORTED_TYPES = new Set(['agent', 'channel'])
       const pushPromises = result.modules
-        .filter(m => m.module_id !== this.config.moduleId && m.status === 'running' && m.port > 0)
+        .filter(m => m.module_id !== this.config.moduleId && m.status === 'running' && m.port > 0 && PROXY_SUPPORTED_TYPES.has(m.module_type))
         .map(m =>
           this.rpcClient.call(m.port, 'update_proxy_config', params, this.config.moduleId)
             .catch((err: Error) => {
