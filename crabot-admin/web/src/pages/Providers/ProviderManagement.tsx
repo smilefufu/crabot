@@ -229,6 +229,7 @@ export const ProviderManagement: React.FC = () => {
         <Drawer open={drawerMode !== 'closed'} onClose={handleDrawerClose}>
           {drawerMode === 'detail' && selectedProvider && (
             <ProviderDrawerDetail
+              key={selectedProvider.id}
               provider={selectedProvider}
               onEdit={() => setDrawerMode('edit')}
               onDelete={() => handleDeleteRequest(selectedProvider)}

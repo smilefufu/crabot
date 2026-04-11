@@ -86,6 +86,7 @@ export class UnifiedAgent extends ModuleBase {
 
   // 智能体层组件（可选，取决于配置）
   private frontHandler?: FrontHandler
+  private frontHandlerFormat?: LLMFormat
   private workerHandler?: WorkerHandler
   private mcpConnector: McpConnector = new McpConnector()
   private roles: Set<'front' | 'worker'> = new Set()
@@ -256,21 +257,12 @@ export class UnifiedAgent extends ModuleBase {
           adapter,
           model: frontModelConfig.model_id,
         }
-        const toolExecutorDeps: ToolExecutorDeps = {
-          rpcClient: this.rpcClient,
-          moduleId: this.config.moduleId,
-          getAdminPort: () => this.getAdminPort(),
-          resolveChannelPort: (channelId) => this.getChannelPort(channelId),
-          getActiveTasks: () => this.getActiveTasksList(),
-          getMemoryPort: () => this.getMemoryPort(),
-          memoryWriteVisibility: () => this.currentMemPerms?.write_visibility ?? 'public',
-          memoryWriteScopes: () => this.currentMemPerms?.write_scopes ?? [],
-        }
-        this.frontHandler = new FrontHandler(llmConfig, toolExecutorDeps, {
+        this.frontHandler = new FrontHandler(llmConfig, this.buildToolExecutorDeps(), {
           getSystemPrompt: (isGroup) => this.promptManager.assembleFrontPrompt(
             isGroup, basePersonality, this.getWorkerCapabilitySummary(),
           ),
         })
+        this.frontHandlerFormat = frontModelConfig.format as LLMFormat
       }
     }
 
@@ -289,6 +281,19 @@ export class UnifiedAgent extends ModuleBase {
           this.sdkEnvWorker, config.model_config, workerPersonality,
           createMcpConfigs, config.builtin_tool_config, config.skills)
       }
+    }
+  }
+
+  private buildToolExecutorDeps(): ToolExecutorDeps {
+    return {
+      rpcClient: this.rpcClient,
+      moduleId: this.config.moduleId,
+      getAdminPort: () => this.getAdminPort(),
+      resolveChannelPort: (channelId) => this.getChannelPort(channelId),
+      getActiveTasks: () => this.getActiveTasksList(),
+      getMemoryPort: () => this.getMemoryPort(),
+      memoryWriteVisibility: () => this.currentMemPerms?.write_visibility ?? 'public',
+      memoryWriteScopes: () => this.currentMemPerms?.write_scopes ?? [],
     }
   }
 
@@ -1910,7 +1915,8 @@ export class UnifiedAgent extends ModuleBase {
     if (this.roles.has('front')) {
       const frontConfig = modelConfig.triage
       if (frontConfig) {
-        if (this.frontHandler) {
+        const formatChanged = this.frontHandlerFormat !== frontConfig.format
+        if (this.frontHandler && !formatChanged) {
           this.frontHandler.updateLlmConfig({
             endpoint: frontConfig.endpoint,
             apikey: frontConfig.apikey,
@@ -1918,7 +1924,6 @@ export class UnifiedAgent extends ModuleBase {
           })
           console.log(`[${this.config.moduleId}] Front Agent LLM config updated`)
         } else {
-          // 首次从未配置状态收到配置，创建 handler
           const adapter = createAdapter({
             endpoint: frontConfig.endpoint,
             apikey: frontConfig.apikey,
@@ -1928,22 +1933,13 @@ export class UnifiedAgent extends ModuleBase {
             adapter,
             model: frontConfig.model_id,
           }
-          const toolExecutorDeps: ToolExecutorDeps = {
-            rpcClient: this.rpcClient,
-            moduleId: this.config.moduleId,
-            getAdminPort: () => this.getAdminPort(),
-            resolveChannelPort: (channelId) => this.getChannelPort(channelId),
-            getActiveTasks: () => this.getActiveTasksList(),
-            getMemoryPort: () => this.getMemoryPort(),
-            memoryWriteVisibility: () => this.currentMemPerms?.write_visibility ?? 'public',
-            memoryWriteScopes: () => this.currentMemPerms?.write_scopes ?? [],
-          }
-          this.frontHandler = new FrontHandler(llmConfig, toolExecutorDeps, {
+          this.frontHandler = new FrontHandler(llmConfig, this.buildToolExecutorDeps(), {
             getSystemPrompt: (isGroup) => this.promptManager.assembleFrontPrompt(
               isGroup, basePersonality, this.getWorkerCapabilitySummary(),
             ),
           })
-          console.log(`[${this.config.moduleId}] Front Agent handler created from config push`)
+          this.frontHandlerFormat = frontConfig.format as LLMFormat
+          console.log(`[${this.config.moduleId}] Front Agent handler created (format: ${frontConfig.format})`)
         }
       }
     }

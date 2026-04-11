@@ -440,7 +440,7 @@ export class ModelProviderManager {
         }
         return { success: false, error: 'Invalid response format' }
       } else if (format === 'anthropic') {
-        const response = await this.httpRequest(`${endpoint}/messages`, {
+        const response = await this.httpRequest(`${endpoint}/v1/messages`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
