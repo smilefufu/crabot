@@ -10,7 +10,7 @@
 
 import { createMcpServer, type McpServer } from './mcp-helpers.js'
 import { z } from 'zod/v4'
-import type { RpcClient } from '../core/module-base.js'
+import type { RpcClient } from 'crabot-shared'
 
 // ============================================================================
 // 依赖注入接口

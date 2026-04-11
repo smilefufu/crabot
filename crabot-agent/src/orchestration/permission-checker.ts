@@ -5,8 +5,7 @@
  * 群聊决策树：@bot? → Master在群? → 是Master? → 拒绝
  */
 
-import type { ModuleId, FriendId } from '../core/base-protocol.js'
-import type { RpcClient } from '../core/module-base.js'
+import type { ModuleId, FriendId, RpcClient } from 'crabot-shared'
 import type { PermissionResult, Friend } from '../types.js'
 
 interface CheckParams {

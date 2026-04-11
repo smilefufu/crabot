@@ -4,8 +4,7 @@
  * 根据 Front Agent 的决策类型执行相应操作
  */
 
-import type { ModuleId } from '../core/base-protocol.js'
-import type { RpcClient, RpcTraceContext } from '../core/module-base.js'
+import type { ModuleId, RpcClient, RpcTraceContext } from 'crabot-shared'
 import type {
   MessageDecision,
   DirectReplyDecision,

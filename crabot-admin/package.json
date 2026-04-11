@@ -21,6 +21,7 @@
   "author": "Crabot Team",
   "license": "MIT",
   "dependencies": {
+    "crabot-shared": "file:../crabot-shared",
     "@types/adm-zip": "^0.5.8",
     "adm-zip": "^0.5.16",
     "bcryptjs": "^2.4.3",

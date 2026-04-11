@@ -7,8 +7,7 @@
  * @see protocol-agent-v2.md 3.2.3 WorkerAgentContext
  */
 
-import type { ModuleId, SessionId } from '../core/base-protocol.js'
-import type { RpcClient } from '../core/module-base.js'
+import type { ModuleId, SessionId, RpcClient } from 'crabot-shared'
 import type {
   OrchestrationConfig,
   FrontAgentContext,

@@ -7,8 +7,7 @@
  */
 
 import * as path from 'path'
-import { ModuleBase, type ModuleConfig } from './core/module-base.js'
-import type { Event, ModuleId } from './core/base-protocol.js'
+import { ModuleBase, type ModuleConfig, type Event, type ModuleId, type TraceStoreInterface } from 'crabot-shared'
 import type {
   UnifiedAgentConfig,
   OrchestrationConfig,
@@ -622,7 +621,7 @@ export class UnifiedAgent extends ModuleBase {
               memoryPermissions: memPerms,
             },
             {
-              traceStore: this.traceStore,
+              traceStore: this.traceStore as TraceStoreInterface,
               traceId: trace.trace_id,
               parentSpanId: decisionSpan.span_id,
             }
@@ -799,7 +798,7 @@ export class UnifiedAgent extends ModuleBase {
               memoryPermissions: memPerms,
             },
             {
-              traceStore: this.traceStore,
+              traceStore: this.traceStore as TraceStoreInterface,
               traceId: trace.trace_id,
               parentSpanId: decisionSpan.span_id,
             }
@@ -1064,7 +1063,7 @@ export class UnifiedAgent extends ModuleBase {
           memoryPermissions: { write_visibility: 'internal', write_scopes: [], read_min_visibility: 'internal' },
         },
         {
-          traceStore: this.traceStore,
+          traceStore: this.traceStore as TraceStoreInterface,
           traceId,
           parentSpanId: parentSpanId,
         }
@@ -1518,7 +1517,7 @@ export class UnifiedAgent extends ModuleBase {
             admin_chat_callback: callbackInfo,
           },
           {
-            traceStore: this.traceStore,
+            traceStore: this.traceStore as TraceStoreInterface,
             traceId: trace.trace_id,
             parentSpanId: decisionSpan.span_id,
           }

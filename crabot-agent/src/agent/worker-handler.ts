@@ -38,7 +38,7 @@ import type {
   SkillConfig,
   BuiltinToolConfig,
 } from '../types.js'
-import type { RpcClient } from '../core/module-base.js'
+import type { RpcClient } from 'crabot-shared'
 import { createCrabMemoryServer } from '../mcp/crab-memory.js'
 import type { MemoryTaskContext } from '../mcp/crab-memory.js'
 import { formatMessageContent, resolveImageBlocks } from './media-resolver.js'

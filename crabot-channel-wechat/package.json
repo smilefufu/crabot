@@ -15,6 +15,7 @@
   "author": "Crabot Team",
   "license": "MIT",
   "dependencies": {
+    "crabot-shared": "file:../crabot-shared",
     "socket.io-client": "^4.8.0"
   },
   "devDependencies": {

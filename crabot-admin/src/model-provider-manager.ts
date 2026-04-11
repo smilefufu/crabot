@@ -7,7 +7,7 @@
 
 import fs from 'fs/promises'
 import path from 'path'
-import { generateId, generateTimestamp } from './core/base-protocol.js'
+import { generateId, generateTimestamp } from 'crabot-shared'
 import type {
   ModelProvider,
   ModelInfo,

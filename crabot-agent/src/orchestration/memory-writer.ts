@@ -7,7 +7,7 @@
  * @see crabot-docs/design-records/design-decisions.md §5.3
  */
 
-import type { RpcClient } from '../core/module-base.js'
+import type { RpcClient } from 'crabot-shared'
 
 interface MemoryWriteBase {
   visibility: 'private' | 'internal' | 'public'

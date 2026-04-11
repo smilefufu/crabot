@@ -2,7 +2,7 @@
  * Session Manager - 会话状态管理
  */
 
-import type { SessionId } from '../core/base-protocol.js'
+import type { SessionId } from 'crabot-shared'
 import type { SessionState } from '../types.js'
 
 export class SessionManager {

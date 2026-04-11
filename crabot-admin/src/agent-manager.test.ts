@@ -6,7 +6,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import fs from 'fs/promises'
 import path from 'path'
 import { AgentManager } from './agent-manager.js'
-import type { RpcClient } from './core/module-base.js'
+import type { RpcClient } from 'crabot-shared'
 import type { RuntimeManager } from './runtime-manager.js'
 import type {
   CreateAgentInstanceParams,

@@ -7,7 +7,7 @@
  * - crabot protocol-channel.md §3 的 Channel 接口
  */
 
-import type { ModuleId, SessionId } from './core/base-protocol.js'
+import type { ModuleId, SessionId } from 'crabot-shared'
 
 export type { ModuleId, SessionId }
 

@@ -7,7 +7,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import http from 'node:http'
 import fs from 'node:fs/promises'
 import ModuleManager from './index.js'
-import type { Response } from './core/base-protocol.js'
+import type { Response } from 'crabot-shared'
 
 const TEST_PORT = 19950
 const MODULE_PORT_START = 19951

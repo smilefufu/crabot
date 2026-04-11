@@ -4,7 +4,7 @@
  * 从 Admin 获取配置。Admin 是唯一的配置来源，获取失败则报错。
  */
 
-import type { RpcClient } from './module-base.js'
+import type { RpcClient } from 'crabot-shared'
 import type {
   UnifiedAgentConfig,
   AgentLayerConfig,

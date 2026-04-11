@@ -7,8 +7,7 @@
 import fs from 'fs/promises'
 import fsSync from 'fs'
 import path from 'path'
-import { generateTimestamp } from './core/base-protocol.js'
-import type { RpcClient } from './core/module-base.js'
+import { generateTimestamp, type RpcClient } from 'crabot-shared'
 import type {
   ChannelImplementation,
   ChannelInstance,

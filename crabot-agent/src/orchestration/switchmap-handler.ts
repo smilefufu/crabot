@@ -9,8 +9,7 @@
  * @see protocol-agent-v2.md §5.1
  */
 
-import type { SessionId } from '../core/base-protocol.js'
-import type { RpcClient } from '../core/module-base.js'
+import type { SessionId, RpcClient } from 'crabot-shared'
 import type { ChannelMessage } from '../types.js'
 import type { SessionManager } from './session-manager.js'
 

@@ -13,7 +13,7 @@ import {
   type ResolvedModule,
   type Event,
   createEvent,
-} from './core/base-protocol.js'
+} from 'crabot-shared'
 
 // ============================================================================
 // 端口分配

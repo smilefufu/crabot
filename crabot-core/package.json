@@ -19,6 +19,7 @@
   "author": "Crabot Team",
   "license": "MIT",
   "dependencies": {
+    "crabot-shared": "file:../crabot-shared",
     "uuid": "^9.0.0"
   },
   "devDependencies": {

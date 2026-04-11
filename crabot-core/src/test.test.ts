@@ -7,7 +7,7 @@ import http from 'node:http'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import ModuleManager from './index.js'
-import type { Request } from './core/base-protocol.js'
+import type { Request } from 'crabot-shared'
 import type { ModuleManagerConfig, ModuleDefinition as ModuleDef } from './types.js'
 
 const TEST_PORT = 19900

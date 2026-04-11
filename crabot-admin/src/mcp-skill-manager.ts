@@ -7,7 +7,7 @@
 import fs from 'fs/promises'
 import path from 'path'
 import AdmZip from 'adm-zip'
-import { generateId, generateTimestamp } from './core/base-protocol.js'
+import { generateId, generateTimestamp } from 'crabot-shared'
 
 // ============================================================================
 // SKILL.md frontmatter 解析

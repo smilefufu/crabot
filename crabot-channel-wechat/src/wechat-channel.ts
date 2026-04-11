@@ -10,8 +10,7 @@
 
 import http from 'node:http'
 import crypto from 'node:crypto'
-import { ModuleBase, type ModuleConfig } from './core/module-base.js'
-import { generateId, generateTimestamp, type Event } from './core/base-protocol.js'
+import { ModuleBase, type ModuleConfig, generateId, generateTimestamp, type Event } from 'crabot-shared'
 import { WechatClient } from './wechat-client.js'
 import { formatWechatContent } from './format-wechat-content.js'
 import { SessionManager } from './session-manager.js'

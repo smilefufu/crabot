@@ -3,7 +3,8 @@
  */
 
 import { UnifiedAgent } from './unified-agent.js'
-import { ConfigLoader, RpcClient } from './core/index.js'
+import { RpcClient } from 'crabot-shared'
+import { ConfigLoader } from './core/config-loader.js'
 import type { UnifiedAgentConfig } from './types.js'
 
 async function main(): Promise<void> {

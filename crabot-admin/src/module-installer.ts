@@ -7,7 +7,7 @@
 import fs from 'fs/promises'
 import path from 'path'
 import { spawn } from 'child_process'
-import { generateTimestamp } from './core/base-protocol.js'
+import { generateTimestamp } from 'crabot-shared'
 import { RuntimeManager } from './runtime-manager.js'
 import { ModuleValidator } from './module-validator.js'
 import { AgentManager } from './agent-manager.js'

@@ -25,7 +25,7 @@ import {
   createSuccessResponse,
   createErrorResponse,
   GlobalErrorCode,
-} from './core/base-protocol.js'
+} from 'crabot-shared'
 import {
   type ModuleManagerConfig,
   type ModuleRuntime,

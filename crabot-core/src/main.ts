@@ -3,7 +3,7 @@
  */
 
 import ModuleManager from './index.js'
-import type { ModuleDefinition } from './core/base-protocol.js'
+import type { ModuleDefinition } from 'crabot-shared'
 import path from 'node:path'
 import fs from 'node:fs'
 

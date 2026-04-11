@@ -6,8 +6,7 @@
 
 import fs from 'fs/promises'
 import path from 'path'
-import { generateTimestamp } from './core/base-protocol.js'
-import type { RpcClient } from './core/module-base.js'
+import { generateTimestamp, type RpcClient } from 'crabot-shared'
 import type { RuntimeManager } from './runtime-manager.js'
 import type {
   AgentImplementation,

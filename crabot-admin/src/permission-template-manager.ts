@@ -12,7 +12,7 @@ import type {
   SessionPermissionConfig,
 } from './types.js'
 import { createToolAccessConfig } from './types.js'
-import { generateId, generateTimestamp } from './core/base-protocol.js'
+import { generateId, generateTimestamp } from 'crabot-shared'
 
 export class PermissionTemplateManager {
   private templates: Map<string, PermissionTemplate> = new Map()

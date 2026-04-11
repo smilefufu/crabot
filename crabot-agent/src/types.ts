@@ -13,7 +13,7 @@ import type {
   SessionId,
   TaskId,
   ScheduleId,
-} from './core/base-protocol.js'
+} from 'crabot-shared'
 
 // ============================================================================
 // 配置

@@ -7,8 +7,7 @@
 
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { ModuleBase, type ModuleConfig } from './core/module-base.js'
-import { generateId, generateTimestamp, type Event } from './core/base-protocol.js'
+import { ModuleBase, type ModuleConfig, generateId, generateTimestamp, type Event } from 'crabot-shared'
 import { PendingDispatchMap } from './pending-dispatch.js'
 import { SessionManager } from './session-manager.js'
 import { MessageStore } from './message-store.js'

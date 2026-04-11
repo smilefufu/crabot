@@ -4,8 +4,7 @@
  * 基于 available_capacity 的贪心算法
  */
 
-import type { ModuleId } from '../core/base-protocol.js'
-import type { RpcClient } from '../core/module-base.js'
+import type { ModuleId, RpcClient } from 'crabot-shared'
 import type { WorkerRoutingInfo } from '../types.js'
 
 export class WorkerSelector {

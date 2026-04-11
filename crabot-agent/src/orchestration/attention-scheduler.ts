@@ -12,7 +12,7 @@
  * @see protocol-agent-v2.md §5.2
  */
 
-import type { SessionId } from '../core/base-protocol.js'
+import type { SessionId } from 'crabot-shared'
 import type { ChannelMessage, Friend } from '../types.js'
 
 export interface AttentionConfig {

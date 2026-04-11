@@ -9,7 +9,7 @@
  * - protocol-channel.md §4 发出的事件
  */
 
-import type { ModuleId, FriendId, SessionId } from './core/base-protocol.js'
+import type { ModuleId, FriendId, SessionId } from 'crabot-shared'
 
 // ============================================================================
 // 复用 base-protocol 中的类型

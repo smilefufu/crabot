@@ -7,7 +7,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
-import { generateId, generateTimestamp } from './core/base-protocol.js'
+import { generateId, generateTimestamp } from 'crabot-shared'
 import type { ModuleId, Session, SessionType, SessionPermissions } from './types.js'
 
 const DEFAULT_PERMISSIONS: SessionPermissions = {

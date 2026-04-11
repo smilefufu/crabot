@@ -6,7 +6,7 @@
  * create_schedule -> Admin RPC
  */
 
-import type { RpcClient } from '../core/module-base.js'
+import type { RpcClient } from 'crabot-shared'
 import type { Friend } from '../types.js'
 
 export interface ToolExecutorDeps {

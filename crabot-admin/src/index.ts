@@ -11,8 +11,9 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { BrowserManager } from './browser-manager.js'
 import { PermissionTemplateManager } from './permission-template-manager.js'
-import { ModuleBase, type ModuleConfig } from './core/module-base.js'
 import {
+  ModuleBase,
+  type ModuleConfig,
   type Event,
   type ModuleId,
   type FriendId,
@@ -20,7 +21,7 @@ import {
   type ScheduleId,
   generateId,
   generateTimestamp,
-} from './core/base-protocol.js'
+} from 'crabot-shared'
 import {
   type Friend,
   type PermissionTemplate,

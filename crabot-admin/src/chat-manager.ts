@@ -7,8 +7,7 @@ import path from 'node:path'
 import { IncomingMessage } from 'node:http'
 import { Socket } from 'node:net'
 import { WebSocket, WebSocketServer } from 'ws'
-import { generateId, generateTimestamp } from './core/base-protocol.js'
-import type { RpcClient } from './core/module-base.js'
+import { generateId, generateTimestamp, type RpcClient } from 'crabot-shared'
 import type {
   ChatMessage,
   ChatClientMessage,

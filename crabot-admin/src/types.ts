@@ -4,7 +4,7 @@
  * @see crabot-docs/protocols/protocol-admin.md
  */
 
-import type { ModuleId, FriendId, PaginatedResult, PaginationParams, TaskId, ScheduleId, SessionId } from './core/base-protocol.js'
+import type { ModuleId, FriendId, PaginatedResult, PaginationParams, TaskId, ScheduleId, SessionId } from 'crabot-shared'
 
 // ============================================================================
 // Channel 身份
