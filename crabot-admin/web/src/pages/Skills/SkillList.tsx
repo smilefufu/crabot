@@ -398,11 +398,11 @@ export const SkillList: React.FC = () => {
           {createTab === 'upload' && (
             <div style={{ display: 'grid', gap: '0.75rem' }}>
               <div>
-                <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem', color: 'var(--text-secondary)' }}>上传 .zip 或 .skills 文件</label>
+                <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem', color: 'var(--text-secondary)' }}>上传 .zip 或 .skill 文件</label>
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept=".zip,.skills"
+                  accept=".zip,.skill"
                   onChange={handleFileUpload}
                   disabled={saving}
                   style={{ display: 'block', padding: '0.5rem 0' }}
