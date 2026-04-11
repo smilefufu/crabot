@@ -43,6 +43,10 @@ npm run build
 npm start
 ```
 
+## 依赖
+
+- `crabot-shared` — 模块基类、RPC 客户端、代理管理
+
 ## 文件结构
 
 ```
@@ -52,6 +56,5 @@ src/
 ├── wechat-client.ts     ← REST API 客户端（发消息、查联系人等）
 ├── session-manager.ts   ← Session 管理（微信会话 → Crabot Session 映射）
 ├── message-store.ts     ← 消息历史存储（JSONL 格式）
-├── types.ts             ← 类型定义（WechatRawEvent + Crabot Channel 协议）
-└── core/                ← 模块基类（复制自 channel-host）
+└── types.ts             ← 类型定义（WechatRawEvent + Crabot Channel 协议）
 ```

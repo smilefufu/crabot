@@ -50,6 +50,10 @@ npm run build
 npm start
 ```
 
+## 依赖
+
+- `crabot-shared` — 模块基类、RPC 客户端、代理管理
+
 ## 文件结构
 
 ```
@@ -59,6 +63,5 @@ src/
 ├── telegram-client.ts   ← Telegram Bot API HTTP 封装（fetch）
 ├── session-manager.ts   ← Session 管理（chat_id → Crabot Session 映射）
 ├── message-store.ts     ← 消息历史存储（JSONL + 定期清理）
-├── types.ts             ← 类型定义（Telegram API + Crabot Channel 协议）
-└── core/                ← 模块基类（复制自 channel-wechat）
+└── types.ts             ← 类型定义（Telegram API + Crabot Channel 协议）
 ```
