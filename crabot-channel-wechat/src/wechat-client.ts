@@ -10,6 +10,7 @@ import https from 'node:https'
 import fs from 'node:fs'
 import path from 'node:path'
 import type { ApiResponse } from './types.js'
+import { proxyManager } from 'crabot-shared'
 
 export class WechatClient {
   private readonly baseUrl: string
@@ -198,6 +199,7 @@ export class WechatClient {
             'Content-Length': body.length,
           },
           timeout: 60000,
+          agent: isHttps ? proxyManager.getHttpsAgent() : undefined,
         },
         (res) => {
           let data = ''
@@ -243,6 +245,7 @@ export class WechatClient {
             ...(bodyStr ? { 'Content-Length': Buffer.byteLength(bodyStr) } : {}),
           },
           timeout: 15000,
+          agent: isHttps ? proxyManager.getHttpsAgent() : undefined,
         },
         (res) => {
           let data = ''
