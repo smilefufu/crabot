@@ -1,3 +1,39 @@
 // crabot-shared/src/index.ts
-// 各模块的统一导出将在后续 task 添加
-export {}
+export {
+  // Types
+  type ModuleId,
+  type FriendId,
+  type SessionId,
+  type TaskId,
+  type MemoryId,
+  type ScheduleId,
+  type ModuleStatus,
+  type HealthStatus,
+  type Request,
+  type Response,
+  type AcceptedResponse,
+  type CallbackPayload,
+  type ErrorDetail,
+  type Event,
+  type SubscribeParams,
+  type PublishEventParams,
+  type ResolveParams,
+  type ResolvedModule,
+  type ResolveResult,
+  type HealthResult,
+  type ModuleDefinition,
+  type ModuleInfo,
+  type RegisterParams,
+  type PaginationParams,
+  type PaginatedResult,
+  type ProxyConfig,
+  // Constants
+  GlobalErrorCode,
+  // Functions
+  generateId,
+  generateTimestamp,
+  createSuccessResponse,
+  createErrorResponse,
+  createAcceptedResponse,
+  createEvent,
+} from './base-protocol.js'
