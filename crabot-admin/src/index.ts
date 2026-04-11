@@ -21,6 +21,8 @@ import {
   type ScheduleId,
   generateId,
   generateTimestamp,
+  proxyManager,
+  type ProxyConfig,
 } from 'crabot-shared'
 import {
   type Friend,
@@ -400,6 +402,11 @@ export class AdminModule extends ModuleBase {
     // 初始化模型供应商管理器
     await this.modelProviderManager.initialize()
 
+    // 加载并应用存储的代理配置
+    const proxyConfig = this.modelProviderManager.getProxyConfig()
+    proxyManager.updateConfig(proxyConfig)
+    console.log(`[Admin] Proxy config loaded: mode=${proxyConfig.mode}`)
+
     // 初始化 Agent 管理器
     await this.agentManager.initialize()
 
@@ -512,6 +519,10 @@ export class AdminModule extends ModuleBase {
             })
           }, 1000)
         }
+        // 所有模块启动时都推送代理配置
+        this.pushProxyConfigToAllModules().catch((err: Error) => {
+          console.warn(`[Admin] Failed to push proxy config to ${module_id}:`, err.message)
+        })
         break
       }
       case 'module_manager.module_stopped':
@@ -736,6 +747,16 @@ export class AdminModule extends ModuleBase {
 
       if (pathname === '/api/model-config/global' && req.method === 'PATCH') {
         await this.handleUpdateGlobalConfigApi(req, res)
+        return
+      }
+
+      if (pathname === '/api/proxy-config' && req.method === 'GET') {
+        await this.handleGetProxyConfigApi(req, res)
+        return
+      }
+
+      if (pathname === '/api/proxy-config' && req.method === 'PATCH') {
+        await this.handleUpdateProxyConfigApi(req, res)
         return
       }
 
@@ -3099,6 +3120,33 @@ export class AdminModule extends ModuleBase {
     })
   }
 
+  private async handleGetProxyConfigApi(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const config = this.modelProviderManager.getProxyConfig()
+    const systemProxyUrl = process.env.HTTPS_PROXY
+      || process.env.HTTP_PROXY
+      || process.env.https_proxy
+      || process.env.http_proxy
+      || null
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ config, system_proxy_url: systemProxyUrl }))
+  }
+
+  private async handleUpdateProxyConfigApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const { mode, custom_url } = await this.readJsonBody<ProxyConfig>(req)
+    const proxyConfig: ProxyConfig = { mode, custom_url }
+
+    await this.modelProviderManager.updateProxyConfig(proxyConfig)
+    proxyManager.updateConfig(proxyConfig)
+
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ config: proxyConfig }))
+
+    // 后台推送到所有模块
+    this.pushProxyConfigToAllModules(proxyConfig).catch((err: Error) => {
+      console.warn('[Admin] pushProxyConfigToAllModules failed:', err.message)
+    })
+  }
+
   // ============================================================================
   // OAuth API Handlers
   // ============================================================================
@@ -4501,6 +4549,29 @@ export class AdminModule extends ModuleBase {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       console.warn(`[Admin] Failed to push config to Agent:`, msg)
+    }
+  }
+
+  /**
+   * 推送代理配置到所有运行中的模块
+   */
+  private async pushProxyConfigToAllModules(proxyConfig?: ProxyConfig): Promise<void> {
+    const config = proxyConfig ?? this.modelProviderManager.getProxyConfig()
+    const params = { proxy: config }
+
+    try {
+      const modules = await this.rpcClient.resolve({}, this.config.moduleId)
+      const pushPromises = modules
+        .filter(m => m.module_id !== this.config.moduleId)
+        .map(m =>
+          this.rpcClient.call(m.port, 'update_proxy_config', params, this.config.moduleId)
+            .catch((err: Error) => {
+              console.warn(`[Admin] Failed to push proxy config to ${m.module_id}:`, err.message)
+            })
+        )
+      await Promise.allSettled(pushPromises)
+    } catch (err) {
+      console.warn('[Admin] Failed to resolve modules for proxy push:', err)
     }
   }
 

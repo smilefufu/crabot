@@ -25,6 +25,7 @@ import type {
   OAuthCredential,
   ApiFormat,
   ModelType,
+  ProxyConfig,
 } from './types.js'
 import { findPresetVendor } from './preset-vendors.js'
 
@@ -674,6 +675,21 @@ export class ModelProviderManager {
     return { ...this.globalConfig }
   }
 
+  /**
+   * 获取代理配置
+   */
+  getProxyConfig(): ProxyConfig {
+    return this.globalConfig.proxy ?? { mode: 'system' }
+  }
+
+  /**
+   * 更新代理配置
+   */
+  async updateProxyConfig(proxy: ProxyConfig): Promise<void> {
+    this.globalConfig = { ...this.globalConfig, proxy }
+    await this.saveGlobalConfig()
+  }
+
   async updateGlobalConfig(config: Partial<GlobalModelConfig>): Promise<GlobalModelConfig> {
     this.globalConfig = { ...this.globalConfig, ...config }
     await this.saveGlobalConfig()
@@ -739,6 +755,7 @@ export class ModelProviderManager {
         default_llm_model_id: raw.default_llm_model_id,
         default_embedding_provider_id: raw.default_embedding_provider_id,
         default_embedding_model_id: raw.default_embedding_model_id,
+        proxy: raw.proxy,
       }
       console.log('[ModelProviderManager] Loaded global config')
     } catch {

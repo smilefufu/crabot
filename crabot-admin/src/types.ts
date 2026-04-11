@@ -4,7 +4,9 @@
  * @see crabot-docs/protocols/protocol-admin.md
  */
 
-import type { ModuleId, FriendId, PaginatedResult, PaginationParams, TaskId, ScheduleId, SessionId } from 'crabot-shared'
+import type { ModuleId, FriendId, PaginatedResult, PaginationParams, TaskId, ScheduleId, SessionId, ProxyConfig } from 'crabot-shared'
+
+export type { ProxyConfig }
 
 // ============================================================================
 // Channel 身份
@@ -898,6 +900,7 @@ export interface GlobalModelConfig {
   default_llm_model_id?: string
   default_embedding_provider_id?: string
   default_embedding_model_id?: string
+  proxy?: ProxyConfig
 }
 
 /**
