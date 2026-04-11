@@ -47,4 +47,4 @@ export {
   type TraceStoreInterface,
 } from './module-base.js'
 
-export { proxyManager } from './proxy-manager.js'
+export { ProxyManager, proxyManager } from './proxy-manager.js'
