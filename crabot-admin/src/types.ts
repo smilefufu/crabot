@@ -1073,6 +1073,21 @@ export interface ModelRoleDefinition {
   fallback?: 'global_default' | 'none'
 }
 
+/** visible_when 条件：单字段条件 */
+interface SingleVisibleWhenCondition {
+  readonly key: string
+  readonly equals: string | number | boolean
+}
+
+/** visible_when 条件：多字段 OR 条件 */
+interface AnyOfVisibleWhenCondition {
+  readonly any_of: readonly string[]
+  readonly equals: string | number | boolean
+}
+
+/** ExtraConfigSchema 的条件显示条件 */
+export type VisibleWhenCondition = SingleVisibleWhenCondition | AnyOfVisibleWhenCondition
+
 /** 扩展配置项 Schema（供 Admin 渲染表单） */
 export interface ExtraConfigSchema {
   /** 配置项 key */
@@ -1087,6 +1102,8 @@ export interface ExtraConfigSchema {
   default?: unknown
   /** type=select 时的选项列表 */
   options?: Array<{ value: string; label: string }>
+  /** 条件显示：满足条件时才渲染 */
+  visible_when?: VisibleWhenCondition
 }
 
 /** Agent 实现（已安装的包） */

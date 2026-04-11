@@ -76,25 +76,55 @@ const DEFAULT_IMPLEMENTATION: AgentImplementation = {
   ],
   extra_schema: [
     {
-      key: 'progress_digest_enabled',
-      title: '启用进度摘要',
-      description: 'Worker 执行任务时定时向用户发送进度汇报',
-      type: 'boolean',
-      default: true,
+      key: 'progress_report_master_private',
+      title: 'Master 私聊汇报',
+      description: 'Master 私聊场景下的进度汇报行为',
+      type: 'select',
+      default: 'digest',
+      options: [
+        { value: 'silent', label: '静默' },
+        { value: 'text_forward', label: '文本转发' },
+        { value: 'digest', label: '定期摘要' },
+      ],
+    },
+    {
+      key: 'progress_report_other_private',
+      title: '其他私聊汇报',
+      description: '非 Master 的普通好友私聊场景下的进度汇报行为',
+      type: 'select',
+      default: 'digest',
+      options: [
+        { value: 'silent', label: '静默' },
+        { value: 'text_forward', label: '文本转发' },
+        { value: 'digest', label: '定期摘要' },
+      ],
+    },
+    {
+      key: 'progress_report_group',
+      title: '群聊汇报',
+      description: '群聊场景下的进度汇报行为',
+      type: 'select',
+      default: 'digest',
+      options: [
+        { value: 'silent', label: '静默' },
+        { value: 'text_forward', label: '文本转发' },
+        { value: 'digest', label: '定期摘要' },
+      ],
     },
     {
       key: 'progress_digest_interval_seconds',
-      title: '私聊摘要间隔（秒）',
-      description: '私聊场景下的进度汇报间隔',
+      title: '摘要间隔（秒）',
+      description: '定期摘要模式下的汇报间隔',
       type: 'number',
       default: 120,
-    },
-    {
-      key: 'progress_digest_group_interval_seconds',
-      title: '群聊摘要间隔（秒）',
-      description: '群聊场景下的进度汇报间隔',
-      type: 'number',
-      default: 180,
+      visible_when: {
+        any_of: [
+          'progress_report_master_private',
+          'progress_report_other_private',
+          'progress_report_group',
+        ],
+        equals: 'digest',
+      },
     },
     {
       key: 'progress_digest_mode',
@@ -106,6 +136,14 @@ const DEFAULT_IMPLEMENTATION: AgentImplementation = {
         { value: 'llm', label: 'LLM 摘要' },
         { value: 'extract', label: '提取关键句' },
       ],
+      visible_when: {
+        any_of: [
+          'progress_report_master_private',
+          'progress_report_other_private',
+          'progress_report_group',
+        ],
+        equals: 'digest',
+      },
     },
     {
       key: 'group_attention_min_ms',

@@ -49,6 +49,22 @@ import type { SubAgentDefinition } from './subagent-prompts.js'
 import * as fs from 'fs'
 import * as path from 'path'
 
+type ProgressReportMode = 'silent' | 'text_forward' | 'digest'
+
+function getReportMode(
+  sessionType: 'private' | 'group' | undefined,
+  isMasterPrivate: boolean,
+  extra: Record<string, unknown>,
+): ProgressReportMode {
+  const raw = sessionType === 'group'
+    ? extra.progress_report_group
+    : isMasterPrivate
+      ? extra.progress_report_master_private
+      : extra.progress_report_other_private
+  if (raw === 'silent' || raw === 'text_forward' || raw === 'digest') return raw
+  return 'digest'
+}
+
 const LOG_FILE = path.join(process.cwd(), '../data/worker-handler-debug.log')
 
 function log(msg: string) {
@@ -404,18 +420,20 @@ export class WorkerHandler {
         tools: tools.map(t => t.name),
       })
 
-      // 创建 ProgressDigest（从 extra key-value 读取配置）
+      // 创建进度汇报（根据会话场景分支）
+      let textForwardMode = false
       if (taskOrigin && this.deps) {
-        const ex = this.extra
-        const isEnabled = ex.progress_digest_enabled !== false
+        const reportMode = getReportMode(
+          taskOrigin.session_type,
+          isMasterPrivate,
+          this.extra,
+        )
 
-        if (isEnabled) {
-          const intervalSec = isMasterPrivate
-            ? (typeof ex.progress_digest_interval_seconds === 'number' ? ex.progress_digest_interval_seconds : 120)
-            : (typeof ex.progress_digest_group_interval_seconds === 'number' ? ex.progress_digest_group_interval_seconds
-               : typeof ex.progress_digest_interval_seconds === 'number' ? ex.progress_digest_interval_seconds : 180)
-          const intervalMs = intervalSec * 1000
-
+        if (reportMode === 'digest') {
+          const ex = this.extra
+          const intervalSec = typeof ex.progress_digest_interval_seconds === 'number'
+            ? ex.progress_digest_interval_seconds
+            : 120
           const digestMode: 'llm' | 'extract' = ex.progress_digest_mode === 'extract' ? 'extract' : 'llm'
           const digestAdapter = (digestMode !== 'extract' && this.digestSdkEnv)
             ? createAdapter({
@@ -426,7 +444,7 @@ export class WorkerHandler {
             : undefined
 
           const digestConfig: ProgressDigestConfig = {
-            intervalMs,
+            intervalMs: intervalSec * 1000,
             mode: digestMode,
             isMasterPrivate,
           }
@@ -454,7 +472,10 @@ export class WorkerHandler {
           }
 
           digest = new ProgressDigest(digestConfig, digestDeps)
+        } else if (reportMode === 'text_forward') {
+          textForwardMode = true
         }
+        // reportMode === 'silent' → no digest, no text forward
       }
 
       // 7. Run engine
@@ -503,9 +524,16 @@ export class WorkerHandler {
               })
             }
 
-            // Progress: delegate to ProgressDigest
-            if (digest && !humanQueue.hasPending) {
-              digest.ingest(event)
+            // Progress: delegate based on report mode
+            if (!humanQueue.hasPending) {
+              if (digest) {
+                digest.ingest(event)
+              } else if (textForwardMode && taskOrigin) {
+                const text = event.assistantText.trim()
+                if (text.length > 0) {
+                  this.sendToUser(taskOrigin, text).catch(() => {})
+                }
+              }
             }
           },
         },

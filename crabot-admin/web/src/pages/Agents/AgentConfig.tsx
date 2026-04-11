@@ -14,7 +14,19 @@ import type {
   MCPServerRegistryEntry,
   SkillRegistryEntry,
   ExtraConfigSchema,
+  VisibleWhenCondition,
 } from '../../types'
+
+function evaluateVisibleWhen(
+  condition: VisibleWhenCondition | undefined,
+  extra: Record<string, unknown>,
+): boolean {
+  if (!condition) return true
+  if ('any_of' in condition) {
+    return condition.any_of.some((k) => extra[k] === condition.equals)
+  }
+  return extra[condition.key] === condition.equals
+}
 import { useToast } from '../../contexts/ToastContext'
 
 interface AgentUnifiedConfig {
@@ -348,6 +360,18 @@ export const AgentConfig: React.FC = () => {
               {extraSchema.map((schema) => {
                 const currentValue = config.extra[schema.key]
                 const displayValue = currentValue ?? schema.default ?? ''
+
+                // Evaluate visible_when — apply defaults for fields not yet touched
+                const extraWithDefaults: Record<string, unknown> = { ...config.extra }
+                for (const s of extraSchema) {
+                  if (extraWithDefaults[s.key] === undefined && s.default !== undefined) {
+                    extraWithDefaults[s.key] = s.default
+                  }
+                }
+                if (!evaluateVisibleWhen(schema.visible_when, extraWithDefaults)) {
+                  return null
+                }
+
                 return (
                   <div key={schema.key}>
                     <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.5rem', marginBottom: '0.25rem' }}>

@@ -97,6 +97,11 @@ export interface LLMRoleRequirement {
   used_by?: Array<'front' | 'worker'>
 }
 
+/** visible_when 条件 */
+export type VisibleWhenCondition =
+  | { key: string; equals: string | number | boolean }
+  | { any_of: string[]; equals: string | number | boolean }
+
 /** 扩展配置项 Schema */
 export interface ExtraConfigSchema {
   key: string
@@ -105,6 +110,7 @@ export interface ExtraConfigSchema {
   type: 'string' | 'number' | 'boolean' | 'select'
   default?: unknown
   options?: Array<{ value: string; label: string }>
+  visible_when?: VisibleWhenCondition
 }
 
 /** Agent LLM 需求响应 */
