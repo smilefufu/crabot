@@ -278,7 +278,7 @@ export class TelegramChannel extends ModuleBase {
       platform_timestamp: new Date(message.date * 1000).toISOString(),
     }
 
-    this.messageStore.appendInbound({
+    await this.messageStore.appendInbound({
       sessionId: session.id,
       platformMessageId: String(message.message_id),
       senderPlatformUserId: senderId,
@@ -425,7 +425,7 @@ export class TelegramChannel extends ModuleBase {
     const messageId = String(sentMsg.message_id)
     const sentAt = generateTimestamp()
 
-    this.messageStore.appendOutbound({
+    await this.messageStore.appendOutbound({
       sessionId: params.session_id,
       platformMessageId: messageId,
       text: text || '[非文本消息]',
@@ -517,14 +517,14 @@ export class TelegramChannel extends ModuleBase {
     })
   }
 
-  private handleGetHistory(params: GetHistoryParams) {
+  private async handleGetHistory(params: GetHistoryParams) {
     const session = this.sessionManager.findById(params.session_id)
     if (!session) throw new Error('Session not found')
 
     const pageSize = params.limit ?? params.pagination?.page_size ?? 20
     const page = params.limit ? undefined : (params.pagination?.page ?? 1)
 
-    const { items, total } = this.messageStore.query({
+    const { items, total } = await this.messageStore.query({
       sessionId: params.session_id,
       keyword: params.keyword,
       timeRange: params.time_range,
@@ -543,11 +543,11 @@ export class TelegramChannel extends ModuleBase {
     }
   }
 
-  private handleGetMessage(params: GetMessageParams) {
+  private async handleGetMessage(params: GetMessageParams) {
     const session = this.sessionManager.findById(params.session_id)
     if (!session) throw new Error('Session not found')
 
-    const msg = this.messageStore.findByMessageId(params.session_id, params.platform_message_id)
+    const msg = await this.messageStore.findByMessageId(params.session_id, params.platform_message_id)
     if (!msg) throw new Error('Message not found')
 
     return storedMessageToProtocol(msg)

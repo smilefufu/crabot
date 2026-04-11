@@ -62,7 +62,6 @@ export const ProxyConfigCard: React.FC = () => {
   return (
     <Card title="网络代理">
       <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-        {/* Radio: system */}
         <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', cursor: 'pointer' }}>
           <input
             type="radio"
@@ -95,7 +94,6 @@ export const ProxyConfigCard: React.FC = () => {
           </div>
         )}
 
-        {/* Radio: custom */}
         <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', cursor: 'pointer' }}>
           <input
             type="radio"
@@ -132,7 +130,6 @@ export const ProxyConfigCard: React.FC = () => {
           </div>
         )}
 
-        {/* Radio: none */}
         <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', cursor: 'pointer' }}>
           <input
             type="radio"
@@ -150,7 +147,6 @@ export const ProxyConfigCard: React.FC = () => {
           </div>
         </label>
 
-        {/* Save button */}
         <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '0.5rem' }}>
           <Button onClick={handleSave} disabled={saving}>
             {saving ? '保存中...' : '保存'}

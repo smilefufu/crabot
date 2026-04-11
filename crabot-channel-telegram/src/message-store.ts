@@ -7,7 +7,8 @@
  * 存储路径：DATA_DIR/messages/<session-id>.jsonl
  */
 
-import fs from 'node:fs'
+import fs from 'node:fs/promises'
+import fsSync from 'node:fs'
 import path from 'node:path'
 import type { StoredMessage, MessageType, TelegramCacheConfig } from './types.js'
 
@@ -25,8 +26,8 @@ export class MessageStore {
 
   constructor(dataDir: string, cacheConfig?: Partial<TelegramCacheConfig>) {
     this.messagesDir = path.join(dataDir, 'messages')
+    fsSync.mkdirSync(this.messagesDir, { recursive: true })
     this.cacheConfig = { ...DEFAULT_CACHE_CONFIG, ...cacheConfig }
-    fs.mkdirSync(this.messagesDir, { recursive: true })
   }
 
   startCleanup(): void {
@@ -41,7 +42,7 @@ export class MessageStore {
     }
   }
 
-  appendInbound(params: {
+  async appendInbound(params: {
     sessionId: string
     platformMessageId: string
     senderPlatformUserId: string
@@ -52,7 +53,7 @@ export class MessageStore {
     mimeType?: string
     filename?: string
     timestamp: string
-  }): void {
+  }): Promise<void> {
     const record: StoredMessage = {
       platform_message_id: params.platformMessageId,
       direction: 'inbound',
@@ -65,16 +66,16 @@ export class MessageStore {
       filename: params.filename,
       timestamp: params.timestamp,
     }
-    this.appendRecord(params.sessionId, record)
+    await this.appendRecord(params.sessionId, record)
   }
 
-  appendOutbound(params: {
+  async appendOutbound(params: {
     sessionId: string
     platformMessageId: string
     text: string
     contentType: MessageType
     timestamp: string
-  }): void {
+  }): Promise<void> {
     const record: StoredMessage = {
       platform_message_id: params.platformMessageId,
       direction: 'outbound',
@@ -84,17 +85,17 @@ export class MessageStore {
       text: params.text,
       timestamp: params.timestamp,
     }
-    this.appendRecord(params.sessionId, record)
+    await this.appendRecord(params.sessionId, record)
   }
 
-  query(params: {
+  async query(params: {
     sessionId: string
     keyword?: string
     timeRange?: { before?: string; after?: string }
     page?: number
     pageSize?: number
-  }): { items: StoredMessage[]; total: number } {
-    const records = this.readRecords(params.sessionId)
+  }): Promise<{ items: StoredMessage[]; total: number }> {
+    const records = await this.readRecords(params.sessionId)
 
     const afterMs = params.timeRange?.after ? new Date(params.timeRange.after).getTime() : null
     const beforeMs = params.timeRange?.before ? new Date(params.timeRange.before).getTime() : null
@@ -117,8 +118,8 @@ export class MessageStore {
     return { items: filtered, total }
   }
 
-  findByMessageId(sessionId: string, platformMessageId: string): StoredMessage | undefined {
-    const records = this.readRecords(sessionId)
+  async findByMessageId(sessionId: string, platformMessageId: string): Promise<StoredMessage | undefined> {
+    const records = await this.readRecords(sessionId)
     return records.find((r) => r.platform_message_id === platformMessageId)
   }
 
@@ -128,20 +129,20 @@ export class MessageStore {
     return path.join(this.messagesDir, `${sessionId}.jsonl`)
   }
 
-  private appendRecord(sessionId: string, record: StoredMessage): void {
+  private async appendRecord(sessionId: string, record: StoredMessage): Promise<void> {
     const filePath = this.sessionFilePath(sessionId)
     const line = JSON.stringify(record) + '\n'
-    fs.appendFileSync(filePath, line, 'utf-8')
+    await fs.appendFile(filePath, line, 'utf-8')
   }
 
-  private readRecords(sessionId: string): StoredMessage[] {
+  private async readRecords(sessionId: string): Promise<StoredMessage[]> {
     return this.readRecordsFromPath(this.sessionFilePath(sessionId))
   }
 
-  private readRecordsFromPath(filePath: string): StoredMessage[] {
+  private async readRecordsFromPath(filePath: string): Promise<StoredMessage[]> {
     let content: string
     try {
-      content = fs.readFileSync(filePath, 'utf-8').trim()
+      content = (await fs.readFile(filePath, 'utf-8')).trim()
     } catch {
       return []
     }
@@ -160,9 +161,15 @@ export class MessageStore {
   }
 
   private cleanup(): void {
+    this.cleanupAsync().catch((err) => {
+      console.error('[MessageStore] Cleanup error:', err)
+    })
+  }
+
+  private async cleanupAsync(): Promise<void> {
     let files: string[]
     try {
-      files = fs.readdirSync(this.messagesDir).filter((f) => f.endsWith('.jsonl'))
+      files = (await fs.readdir(this.messagesDir)).filter((f) => f.endsWith('.jsonl'))
     } catch {
       return
     }
@@ -171,7 +178,7 @@ export class MessageStore {
 
     for (const file of files) {
       const filePath = path.join(this.messagesDir, file)
-      const records = this.readRecordsFromPath(filePath)
+      const records = await this.readRecordsFromPath(filePath)
 
       let kept = records.filter((r) => new Date(r.timestamp).getTime() >= cutoffTime)
 
@@ -180,10 +187,10 @@ export class MessageStore {
       }
 
       if (kept.length === 0) {
-        fs.unlinkSync(filePath)
+        await fs.unlink(filePath)
       } else if (kept.length < records.length) {
         const content = kept.map((r) => JSON.stringify(r)).join('\n') + '\n'
-        fs.writeFileSync(filePath, content, 'utf-8')
+        await fs.writeFile(filePath, content, 'utf-8')
       }
     }
   }

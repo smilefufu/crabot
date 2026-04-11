@@ -22,6 +22,7 @@ import {
   generateId,
   generateTimestamp,
   proxyManager,
+  ProxyManager,
   type ProxyConfig,
 } from 'crabot-shared'
 import {
@@ -519,8 +520,8 @@ export class AdminModule extends ModuleBase {
             })
           }, 1000)
         }
-        // 所有模块启动时都推送代理配置
-        this.pushProxyConfigToAllModules().catch((err: Error) => {
+        // 新启动的模块推送代理配置
+        this.pushProxyConfigToModule(module_id).catch((err: Error) => {
           console.warn(`[Admin] Failed to push proxy config to ${module_id}:`, err.message)
         })
         break
@@ -3122,11 +3123,7 @@ export class AdminModule extends ModuleBase {
 
   private async handleGetProxyConfigApi(_req: IncomingMessage, res: ServerResponse): Promise<void> {
     const config = this.modelProviderManager.getProxyConfig()
-    const systemProxyUrl = process.env.HTTPS_PROXY
-      || process.env.HTTP_PROXY
-      || process.env.https_proxy
-      || process.env.http_proxy
-      || null
+    const systemProxyUrl = ProxyManager.resolveSystemProxyUrl()
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ config, system_proxy_url: systemProxyUrl }))
   }
@@ -4565,7 +4562,6 @@ export class AdminModule extends ModuleBase {
         { modules: Array<{ module_id: string; module_type: string; port: number; status: string }> }
       >('list_modules', {}, this.config.moduleId)
 
-      // 只推送给支持 update_proxy_config 的 Node.js 模块（跳过 Python memory、devtool 等）
       const PROXY_SUPPORTED_TYPES = new Set(['agent', 'channel'])
       const pushPromises = result.modules
         .filter(m => m.module_id !== this.config.moduleId && m.status === 'running' && m.port > 0 && PROXY_SUPPORTED_TYPES.has(m.module_type))
@@ -4578,6 +4574,24 @@ export class AdminModule extends ModuleBase {
       await Promise.allSettled(pushPromises)
     } catch (err) {
       console.warn('[Admin] Failed to resolve modules for proxy push:', err)
+    }
+  }
+
+  /**
+   * 推送代理配置到指定模块（模块启动时的安全网）
+   */
+  private async pushProxyConfigToModule(moduleId: string): Promise<void> {
+    const PROXY_SUPPORTED_TYPES = new Set(['agent', 'channel'])
+    try {
+      const modules = await this.rpcClient.resolve({ module_id: moduleId }, this.config.moduleId)
+      const target = modules[0]
+      if (!target || !PROXY_SUPPORTED_TYPES.has(target.module_type) || target.status !== 'running') return
+
+      const config = this.modelProviderManager.getProxyConfig()
+      await this.rpcClient.call(target.port, 'update_proxy_config', { proxy: config }, this.config.moduleId)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.warn(`[Admin] Failed to push proxy config to ${moduleId}:`, msg)
     }
   }
 
