@@ -37,3 +37,14 @@ export {
   createAcceptedResponse,
   createEvent,
 } from './base-protocol.js'
+
+export {
+  ModuleBase,
+  RpcClient,
+  type ModuleConfig,
+  type ModuleMetadata,
+  type RpcTraceContext,
+  type TraceStoreInterface,
+} from './module-base.js'
+
+export { proxyManager } from './proxy-manager.js'
