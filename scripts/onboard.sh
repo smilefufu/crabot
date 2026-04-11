@@ -350,7 +350,7 @@ run_phase4_deps() {
   local names=()
 
   # 并行安装：crabot-core, crabot-agent, crabot-channel-host, crabot-memory
-  for mod in crabot-shared crabot-core crabot-agent crabot-channel-host; do
+  for mod in crabot-shared crabot-core crabot-agent crabot-channel-host crabot-channel-telegram; do
     if [ -d "$CRABOT_HOME/$mod" ]; then
       (cd "$CRABOT_HOME/$mod" && npm install >> "$ONBOARD_LOG.$mod" 2>&1) &
       pids+=($!)

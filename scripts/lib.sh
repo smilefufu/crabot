@@ -134,7 +134,7 @@ check_scrapling() {
 sync_node_deps() {
   log_info "同步 Node.js 依赖..."
 
-  for mod in crabot-shared crabot-core crabot-admin crabot-agent crabot-channel-host crabot-channel-wechat; do
+  for mod in crabot-shared crabot-core crabot-admin crabot-agent crabot-channel-host crabot-channel-wechat crabot-channel-telegram; do
     if [ ! -d "$CRABOT_HOME/$mod" ]; then
       continue
     fi
@@ -196,7 +196,7 @@ build_all_modules() {
   fi
 
   local fail=0
-  for mod in crabot-core crabot-admin crabot-agent crabot-channel-host crabot-channel-wechat; do
+  for mod in crabot-core crabot-admin crabot-agent crabot-channel-host crabot-channel-wechat crabot-channel-telegram; do
     if [ ! -d "$CRABOT_HOME/$mod" ]; then
       continue
     fi

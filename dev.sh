@@ -73,7 +73,7 @@ build_all() {
   fi
 
   local fail=0
-  for mod in crabot-core crabot-admin crabot-agent crabot-channel-host crabot-channel-wechat; do
+  for mod in crabot-core crabot-admin crabot-agent crabot-channel-host crabot-channel-wechat crabot-channel-telegram; do
     if [ ! -d "$SCRIPT_DIR/$mod" ]; then
       continue
     fi
