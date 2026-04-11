@@ -6,6 +6,7 @@ import { Loading } from '../../components/Common/Loading'
 import { useToast } from '../../contexts/ToastContext'
 import { api } from '../../services/api'
 import { browserService } from '../../services/browser'
+import { ProxyConfigCard } from './ProxyConfigCard'
 
 interface ConfigStatus {
   configured: boolean
@@ -251,6 +252,10 @@ export const GlobalSettings: React.FC = () => {
             </p>
           )}
         </Card>
+      </div>
+
+      <div style={{ marginTop: '1.5rem' }}>
+        <ProxyConfigCard />
       </div>
     </MainLayout>
   )
