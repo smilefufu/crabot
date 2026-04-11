@@ -63,6 +63,15 @@ load_env() {
 build_all() {
   log_info "构建 TypeScript 模块..."
 
+  # crabot-shared 必须先编译
+  if [ -d "$SCRIPT_DIR/crabot-shared" ]; then
+    log_dim "  crabot-shared"
+    (cd "$SCRIPT_DIR/crabot-shared" && npm run build 2>&1 | sed 's/^/    /') || {
+      log_error "crabot-shared 构建失败"
+      exit 1
+    }
+  fi
+
   local fail=0
   for mod in crabot-core crabot-admin crabot-agent crabot-channel-host crabot-channel-wechat; do
     if [ ! -d "$SCRIPT_DIR/$mod" ]; then

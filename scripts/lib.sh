@@ -134,7 +134,7 @@ check_scrapling() {
 sync_node_deps() {
   log_info "同步 Node.js 依赖..."
 
-  for mod in crabot-core crabot-admin crabot-agent crabot-channel-host crabot-channel-wechat; do
+  for mod in crabot-shared crabot-core crabot-admin crabot-agent crabot-channel-host crabot-channel-wechat; do
     if [ ! -d "$CRABOT_HOME/$mod" ]; then
       continue
     fi
@@ -183,6 +183,17 @@ sync_memory_deps() {
 
 build_all_modules() {
   log_info "构建 TypeScript 模块..."
+
+  # crabot-shared 必须先编译（其他模块依赖它）
+  if [ -d "$CRABOT_HOME/crabot-shared" ]; then
+    log_dim "  crabot-shared"
+    local build_log
+    build_log="$(cd "$CRABOT_HOME/crabot-shared" && npm run build 2>&1)" || {
+      echo "$build_log" | sed 's/^/    /'
+      log_error "crabot-shared 构建失败"
+      return 1
+    }
+  fi
 
   local fail=0
   for mod in crabot-core crabot-admin crabot-agent crabot-channel-host crabot-channel-wechat; do
