@@ -361,17 +361,22 @@ export class TelegramChannel extends ModuleBase {
   }
 
   private detectBotMention(msg: TgMessage): boolean {
-    if (!this.botMentionLower) return false
+    if (!this.botUser) return false
 
     const entities = msg.entities ?? msg.caption_entities ?? []
     const text = msg.text ?? msg.caption ?? ''
 
     for (const entity of entities) {
-      if (entity.type === 'mention') {
+      // @username 形式的 mention
+      if (entity.type === 'mention' && this.botMentionLower) {
         const mentionText = text.slice(entity.offset, entity.offset + entity.length)
         if (mentionText.toLowerCase() === this.botMentionLower) {
           return true
         }
+      }
+      // 通过菜单选择的 text_mention（entity 带 user 对象，按 bot id 匹配）
+      if (entity.type === 'text_mention' && entity.user?.id === this.botUser.id) {
+        return true
       }
     }
 

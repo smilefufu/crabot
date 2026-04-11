@@ -36,6 +36,8 @@ export interface TgMessageEntity {
   type: string
   offset: number
   length: number
+  /** For text_mention: the mentioned user */
+  user?: TgUser
 }
 
 export interface TgPhotoSize {
