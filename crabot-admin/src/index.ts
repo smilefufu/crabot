@@ -4629,7 +4629,15 @@ export class AdminModule extends ModuleBase {
     module_id: string
   }): Promise<{ status: 'accepted'; tracking_id: string }> {
     // 1. 读取用户配置
-    const { config } = await this.handleGetModuleConfig({ module_id: params.module_id })
+    //    Channel 模块的配置存在 channel-configs/ 目录，其他模块在 module-configs/
+    const channelInstance = this.channelManager.getInstance(params.module_id)
+    let config: Record<string, string>
+    if (channelInstance) {
+      config = await this.channelManager.loadLocalConfig(params.module_id) ?? {}
+    } else {
+      const result = await this.handleGetModuleConfig({ module_id: params.module_id })
+      config = result.config
+    }
 
     // 2. 全局模型配置始终优先（Admin 是唯一真相来源），
     //    模块文件只保留非模型的自定义配置（如 CRABOT_MEMORY_DATA_DIR 等）
