@@ -11,6 +11,7 @@ import type {
   ToolUseBlockParam,
   ToolResultBlockParam,
 } from '@anthropic-ai/sdk/resources/messages'
+import { proxyManager } from 'crabot-shared'
 import type { LLMAdapter, LLMAdapterConfig, LLMStreamParams } from './llm-adapter-types.js'
 import { isToolResultMessage } from './llm-adapter-types.js'
 import type { EngineMessage, ToolDefinition, StreamChunk } from './types.js'
@@ -110,6 +111,7 @@ export class AnthropicAdapter implements LLMAdapter {
     return new Anthropic({
       baseURL: config.endpoint,
       apiKey: config.apikey,
+      httpAgent: proxyManager.getHttpsAgent(),
     })
   }
 
