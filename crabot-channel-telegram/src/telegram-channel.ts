@@ -231,6 +231,9 @@ export class TelegramChannel extends ModuleBase {
     if (!message) return
     if (!message.from) return
 
+    // 跳过服务消息（入群、退群等），它们没有用户内容
+    if (message.new_chat_members || message.left_chat_member) return
+
     const chatId = String(message.chat.id)
     const isGroup = message.chat.type === 'group' || message.chat.type === 'supergroup'
     const senderId = String(message.from.id)
