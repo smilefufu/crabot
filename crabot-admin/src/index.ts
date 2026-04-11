@@ -4560,9 +4560,13 @@ export class AdminModule extends ModuleBase {
     const params = { proxy: config }
 
     try {
-      const modules = await this.rpcClient.resolve({}, this.config.moduleId)
-      const pushPromises = modules
-        .filter(m => m.module_id !== this.config.moduleId)
+      const result = await this.rpcClient.callModuleManager<
+        Record<string, never>,
+        { modules: Array<{ module_id: string; port: number; status: string }> }
+      >('list_modules', {}, this.config.moduleId)
+
+      const pushPromises = result.modules
+        .filter(m => m.module_id !== this.config.moduleId && m.status === 'running' && m.port > 0)
         .map(m =>
           this.rpcClient.call(m.port, 'update_proxy_config', params, this.config.moduleId)
             .catch((err: Error) => {
