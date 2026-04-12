@@ -290,6 +290,26 @@ class VectorStore:
         }
         await _run_sync(lambda: self.long_term_table.add([data]))
 
+    async def search_similar_long_term(
+        self,
+        vector: List[float],
+        visibility: str,
+        limit: int = 3,
+    ) -> List[Dict[str, Any]]:
+        """按向量相似度搜索同 visibility 的长期记忆，返回含 _distance 的行"""
+        await self.ensure_tables()
+        where = f"visibility = '{visibility}'"
+
+        def _do_search():
+            return (
+                self.long_term_table.search(vector)
+                .where(where, prefilter=True)
+                .limit(limit)
+                .to_list()
+            )
+
+        return await _run_sync(_do_search)
+
     async def search_long_term(
         self,
         query: str,

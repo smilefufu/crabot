@@ -22,6 +22,11 @@ embedding:
   model: qwen3-embedding:0.6b
   dimension: 1024
 
+# 去重配置
+dedup:
+  similarity_threshold: 0.85
+  max_candidates: 3
+
 # 存储配置
 storage:
   data_dir: ./data/memory

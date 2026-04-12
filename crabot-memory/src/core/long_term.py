@@ -28,17 +28,18 @@ class LongTermMemory:
         vector_store: VectorStore,
         llm_client: LLMClient,
         sqlite_store=None,
+        dedup_config=None,
     ):
         self.vector_store = vector_store
         self.llm_client = llm_client
         self.sqlite_store = sqlite_store
+        self.dedup_config = dedup_config
 
     async def write(self, params: WriteLongTermParams) -> Dict[str, Any]:
         """写入长期记忆，含去重逻辑"""
-        # 简化实现：暂不做去重，直接创建
-        # TODO: 实现完整的去重/合并逻辑
-
         import asyncio
+        import json
+        from ..types import MemorySource, UpdateMemoryParams
 
         # 阶段一：并行生成 L0/L1 摘要和关键词（互不依赖）
         async def gen_summaries():
@@ -66,7 +67,66 @@ class LongTermMemory:
             logger.error("Failed to generate embedding: %s", e)
             raise
 
-        # 创建条目
+        # 阶段三：去重检查
+        visibility = params.visibility or "public"
+        dedup_action = await self._check_dedup(
+            vector=vector,
+            visibility=visibility,
+            new_content=params.content,
+            new_tags=params.tags or [],
+        )
+
+        if dedup_action is not None:
+            action_type = dedup_action["action"]
+            existing_row = dedup_action["row"]
+            existing_id = existing_row["id"]
+
+            if action_type == "SKIP":
+                # 重建已有条目并返回
+                existing_entry = self._row_to_entry(existing_row)
+                logger.info("Long-term memory dedup SKIP: %s", existing_id)
+                return {
+                    "action": "skipped",
+                    "memory": existing_entry,
+                    "merged_from": None,
+                }
+
+            if action_type == "UPDATE":
+                update_params = UpdateMemoryParams(
+                    memory_id=existing_id,
+                    content=params.content,
+                    importance=params.importance,
+                    tags=params.tags,
+                    revision_reason=f"dedup update: {dedup_action.get('reason', '')}",
+                )
+                result = await self.update(update_params)
+                logger.info("Long-term memory dedup UPDATE: %s", existing_id)
+                return {
+                    "action": "updated",
+                    "memory": result["memory"],
+                    "merged_from": None,
+                }
+
+            if action_type == "MERGE":
+                merged_content = await self.llm_client.merge_contents(
+                    params.content, existing_row["content"]
+                )
+                update_params = UpdateMemoryParams(
+                    memory_id=existing_id,
+                    content=merged_content,
+                    importance=params.importance,
+                    tags=params.tags,
+                    revision_reason=f"dedup merge: {dedup_action.get('reason', '')}",
+                )
+                result = await self.update(update_params)
+                logger.info("Long-term memory dedup MERGE: %s", existing_id)
+                return {
+                    "action": "merged",
+                    "memory": result["memory"],
+                    "merged_from": [existing_id],
+                }
+
+        # CREATE（无候选或 LLM 判断 CREATE）
         entry = LongTermMemoryEntry(
             abstract=abstract,
             overview=overview,
@@ -79,7 +139,7 @@ class LongTermMemory:
             metadata=params.metadata,
             read_count=0,
             version=1,
-            visibility=params.visibility or "public",
+            visibility=visibility,
             scopes=params.scopes or [],
         )
 
@@ -92,6 +152,96 @@ class LongTermMemory:
             "memory": entry,
             "merged_from": None,
         }
+
+    async def _check_dedup(
+        self,
+        vector: List[float],
+        visibility: str,
+        new_content: str,
+        new_tags: List[str],
+    ) -> Optional[Dict[str, Any]]:
+        """检查去重候选，返回 None 表示无候选（应 CREATE）"""
+        if self.dedup_config is None:
+            return None
+
+        threshold = self.dedup_config.similarity_threshold
+        max_candidates = self.dedup_config.max_candidates
+
+        try:
+            candidates = await self.vector_store.search_similar_long_term(
+                vector=vector,
+                visibility=visibility,
+                limit=max_candidates,
+            )
+        except Exception as e:
+            logger.warning("Dedup search failed, falling back to CREATE: %s", e)
+            return None
+
+        if not candidates:
+            return None
+
+        # 按相似度过滤（LanceDB _distance 是 L2 距离，越小越相似）
+        for row in candidates:
+            distance = row.get("_distance", float("inf"))
+            similarity = 1.0 / (1.0 + distance)
+            if similarity < threshold:
+                continue
+
+            # 可选：tags 重叠检查（有共同 tag 才去重）
+            row_tags = list(row.get("tags") or [])
+            if new_tags and row_tags:
+                overlap = set(new_tags) & set(row_tags)
+                if not overlap:
+                    continue
+
+            # 调用 LLM 判断去重策略
+            try:
+                judgment = await self.llm_client.judge_dedup(
+                    new_content=new_content,
+                    existing_content=row["content"],
+                )
+            except Exception as e:
+                logger.warning("Dedup judge failed: %s", e)
+                continue
+
+            action = judgment.get("action", "CREATE").upper()
+            if action in ("SKIP", "UPDATE", "MERGE"):
+                return {
+                    "action": action,
+                    "row": row,
+                    "reason": judgment.get("reason", ""),
+                }
+
+        return None
+
+    @staticmethod
+    def _row_to_entry(row: Dict[str, Any]) -> LongTermMemoryEntry:
+        """从 LanceDB 行数据重建 LongTermMemoryEntry"""
+        import json
+        from ..types import MemorySource, EntityRef
+
+        entities_data = json.loads(row["entities_json"]) if row.get("entities_json") else []
+        source_data = json.loads(row["source_json"])
+        metadata_data = json.loads(row["metadata_json"]) if row.get("metadata_json") else None
+
+        return LongTermMemoryEntry(
+            id=row["id"],
+            abstract=row["abstract"],
+            overview=row["overview"],
+            content=row["content"],
+            entities=[EntityRef(**e) for e in entities_data],
+            importance=row["importance"],
+            keywords=list(row.get("keywords") or []),
+            tags=list(row.get("tags") or []),
+            source=MemorySource(**source_data),
+            metadata=metadata_data,
+            read_count=row["read_count"],
+            version=row["version"],
+            visibility=row["visibility"],
+            scopes=list(row.get("scopes") or []),
+            created_at=row.get("created_at"),
+            updated_at=row.get("updated_at"),
+        )
 
     async def search(self, params: SearchLongTermParams) -> List[SearchLongTermResultItem]:
         """检索长期记忆"""

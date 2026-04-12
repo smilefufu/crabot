@@ -32,6 +32,12 @@ class StorageConfig(BaseModel):
     sqlite_file: str = "metadata.db"
 
 
+class DedupConfig(BaseModel):
+    """去重配置"""
+    similarity_threshold: float = 0.85
+    max_candidates: int = 3
+
+
 class CompressionConfig(BaseModel):
     """压缩配置"""
     compression_threshold: int = 100
@@ -61,6 +67,7 @@ class MemoryConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
+    dedup: DedupConfig = Field(default_factory=DedupConfig)
     compression: CompressionConfig = Field(default_factory=CompressionConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
 

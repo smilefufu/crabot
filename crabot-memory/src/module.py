@@ -62,7 +62,7 @@ class MemoryModule:
 
         # 初始化核心模块
         self.short_term = ShortTermMemory(self.vector_store, self.llm_client)
-        self.long_term = LongTermMemory(self.vector_store, self.llm_client, self.sqlite_store)
+        self.long_term = LongTermMemory(self.vector_store, self.llm_client, self.sqlite_store, self.config.dedup)
 
         # 注册路由
         self._register_routes()

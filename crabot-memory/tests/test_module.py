@@ -193,5 +193,20 @@ async def test_update_memory(memory_module):
     assert get_result["revisions"][0]["reason"] == "用户纠正了语言偏好"
 
 
+@pytest.mark.asyncio
+async def test_dedup_skip_duplicate(memory_module):
+    """测试去重：完全重复的内容应该 SKIP"""
+    params = WriteLongTermParams(
+        content="张三是前端开发工程师，擅长 React 和 TypeScript",
+        source=MemorySource(type="reflection"),
+        tags=["role"],
+    )
+    r1 = await memory_module._write_long_term(params.model_dump())
+    assert r1["action"] == "created"
+
+    r2 = await memory_module._write_long_term(params.model_dump())
+    assert r2["action"] in ("skipped", "updated", "merged")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
