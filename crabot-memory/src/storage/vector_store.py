@@ -188,8 +188,8 @@ class VectorStore:
                 pass
 
         if accessible_scopes:
-            # 简化：仅检查 scopes 非空且有交集
-            pass  # LanceDB 的 array 过滤较复杂，暂时跳过
+            scope_conditions = [f"array_has(scopes, '{s}')" for s in accessible_scopes]
+            filters.append(f"({' OR '.join(scope_conditions)})")
 
         where_clause = " AND ".join(filters) if filters else None
 
@@ -299,6 +299,7 @@ class VectorStore:
         entity_type: Optional[str] = None,
         tags: Optional[List[str]] = None,
         importance_min: Optional[int] = None,
+        accessible_scopes: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """检索长期记忆，返回原始行数据"""
         await self.ensure_tables()
@@ -316,6 +317,10 @@ class VectorStore:
 
         if importance_min is not None:
             filters.append(f"importance >= {importance_min}")
+
+        if accessible_scopes:
+            scope_conditions = [f"array_has(scopes, '{s}')" for s in accessible_scopes]
+            filters.append(f"({' OR '.join(scope_conditions)})")
 
         where_clause = " AND ".join(filters) if filters else None
 

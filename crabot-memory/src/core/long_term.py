@@ -103,6 +103,7 @@ class LongTermMemory:
             entity_type=f.entity_type if f else None,
             tags=f.tags if f else None,
             importance_min=f.importance_min if f else None,
+            accessible_scopes=params.accessible_scopes,
         )
 
         results = []

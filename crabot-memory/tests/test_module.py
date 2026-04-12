@@ -133,5 +133,34 @@ async def test_get_stats(memory_module):
     assert "entry_count" in result["long_term"]
 
 
+@pytest.mark.asyncio
+async def test_scopes_filtering(memory_module):
+    """测试 scopes 权限过滤"""
+    await memory_module._write_short_term(WriteShortTermParams(
+        content="scope-a 的私有信息",
+        source=MemorySource(type="conversation"),
+        visibility="internal",
+        scopes=["scope-a"],
+    ).model_dump())
+
+    await memory_module._write_short_term(WriteShortTermParams(
+        content="scope-b 的私有信息",
+        source=MemorySource(type="conversation"),
+        visibility="internal",
+        scopes=["scope-b"],
+    ).model_dump())
+
+    result = await memory_module._search_short_term(SearchShortTermParams(
+        query="私有信息",
+        min_visibility="internal",
+        accessible_scopes=["scope-a"],
+        limit=10,
+    ).model_dump())
+
+    contents = [r["content"] for r in result["results"]]
+    assert any("scope-a" in c for c in contents)
+    assert not any("scope-b" in c for c in contents)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
