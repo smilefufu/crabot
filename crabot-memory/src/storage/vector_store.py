@@ -191,6 +191,13 @@ class VectorStore:
             scope_conditions = [f"array_has(scopes, '{s}')" for s in accessible_scopes]
             filters.append(f"({' OR '.join(scope_conditions)})")
 
+        # 时间范围过滤
+        if time_range:
+            if time_range.get("start"):
+                filters.append(f"event_time >= '{time_range['start']}'")
+            if time_range.get("end"):
+                filters.append(f"event_time <= '{time_range['end']}'")
+
         where_clause = " AND ".join(filters) if filters else None
 
         if query:

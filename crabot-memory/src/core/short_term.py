@@ -70,6 +70,7 @@ class ShortTermMemory:
             min_visibility=params.min_visibility or "public",
             accessible_scopes=params.accessible_scopes,
             filter_refs=f.refs if f else None,
+            time_range=params.time_range.model_dump() if params.time_range else None,
             filter_persons=f.persons if f else None,
             filter_entities=f.entities if f else None,
             filter_topic=f.topic if f else None,

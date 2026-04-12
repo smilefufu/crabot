@@ -125,6 +125,8 @@ class MemoryModule:
             "update_reflection_watermark": self._update_reflection_watermark,
             "update_config": self._update_config,
             "update_memory": self._update_memory,
+            "batch_write_short_term": self._batch_write_short_term,
+            "batch_write_long_term": self._batch_write_long_term,
         }
 
         handler = handlers.get(method)
@@ -307,6 +309,44 @@ class MemoryModule:
         update_params = UpdateReflectionWatermarkParams(**params)
         self.sqlite_store.update_reflection_watermark(update_params.last_reflected_at)
         return {"last_reflected_at": update_params.last_reflected_at}
+
+    async def _batch_write_short_term(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """批量写入短期记忆"""
+        from .types import BatchWriteShortTermParams
+        batch_params = BatchWriteShortTermParams(**params)
+        memories = []
+        failures = []
+        for i, entry_params in enumerate(batch_params.entries):
+            try:
+                result = await self._write_short_term(entry_params.model_dump())
+                memories.append(result["memory"])
+            except Exception as e:
+                failures.append({"index": i, "error": {"code": "MEMORY_WRITE_FAILED", "message": str(e)}})
+        return {
+            "memories": memories,
+            "success_count": len(memories),
+            "failure_count": len(failures),
+            "failures": failures if failures else None,
+        }
+
+    async def _batch_write_long_term(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """批量写入长期记忆"""
+        from .types import BatchWriteLongTermParams
+        batch_params = BatchWriteLongTermParams(**params)
+        results = []
+        failures = []
+        for i, entry_params in enumerate(batch_params.entries):
+            try:
+                result = await self._write_long_term(entry_params.model_dump())
+                results.append(result)
+            except Exception as e:
+                failures.append({"index": i, "error": {"code": "MEMORY_WRITE_FAILED", "message": str(e)}})
+        return {
+            "results": results,
+            "success_count": len(results),
+            "failure_count": len(failures),
+            "failures": failures if failures else None,
+        }
 
     async def _update_config(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """热更新 LLM / Embedding 配置（由 Admin 推送）"""

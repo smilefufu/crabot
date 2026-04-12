@@ -208,5 +208,57 @@ async def test_dedup_skip_duplicate(memory_module):
     assert r2["action"] in ("skipped", "updated", "merged")
 
 
+@pytest.mark.asyncio
+async def test_time_range_filter(memory_module):
+    """测试时间范围过滤"""
+    await memory_module._write_short_term(WriteShortTermParams(
+        content="早期事件",
+        source=MemorySource(type="conversation"),
+        event_time="2026-01-01T00:00:00Z",
+    ).model_dump())
+    await memory_module._write_short_term(WriteShortTermParams(
+        content="近期事件",
+        source=MemorySource(type="conversation"),
+        event_time="2026-04-01T00:00:00Z",
+    ).model_dump())
+
+    result = await memory_module._search_short_term(SearchShortTermParams(
+        limit=10,
+        time_range={"start": "2026-03-01T00:00:00Z"},
+    ).model_dump())
+
+    contents = [r["content"] for r in result["results"]]
+    assert any("近期" in c for c in contents)
+    assert not any("早期" in c for c in contents)
+
+
+@pytest.mark.asyncio
+async def test_batch_write_short_term(memory_module):
+    """测试批量写入短期记忆"""
+    result = await memory_module._batch_write_short_term({
+        "entries": [
+            {"content": "批量事件1", "source": {"type": "conversation"}},
+            {"content": "批量事件2", "source": {"type": "conversation"}},
+            {"content": "批量事件3", "source": {"type": "conversation"}},
+        ]
+    })
+    assert result["success_count"] == 3
+    assert result["failure_count"] == 0
+    assert len(result["memories"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_batch_write_long_term(memory_module):
+    """测试批量写入长期记忆"""
+    result = await memory_module._batch_write_long_term({
+        "entries": [
+            {"content": "张三喜欢 Python", "source": {"type": "reflection"}, "tags": ["pref"]},
+            {"content": "李四擅长 Go 语言", "source": {"type": "reflection"}, "tags": ["skill"]},
+        ]
+    })
+    assert result["success_count"] == 2
+    assert result["failure_count"] == 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
