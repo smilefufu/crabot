@@ -162,5 +162,36 @@ async def test_scopes_filtering(memory_module):
     assert not any("scope-b" in c for c in contents)
 
 
+@pytest.mark.asyncio
+async def test_update_memory(memory_module):
+    """测试更新长期记忆"""
+    write_result = await memory_module._write_long_term(WriteLongTermParams(
+        content="张三偏好 Python",
+        source=MemorySource(type="reflection"),
+        importance=5,
+        tags=["preference"],
+    ).model_dump())
+    memory_id = write_result["memory"]["id"]
+
+    from src.types import UpdateMemoryParams
+    update_result = await memory_module._update_memory(UpdateMemoryParams(
+        memory_id=memory_id,
+        content="张三偏好 TypeScript，不再使用 Python",
+        importance=8,
+        revision_reason="用户纠正了语言偏好",
+    ).model_dump())
+
+    assert update_result["memory"]["content"] == "张三偏好 TypeScript，不再使用 Python"
+    assert update_result["memory"]["importance"] == 8
+    assert update_result["version"] == 2
+
+    get_result = await memory_module._get_memory({
+        "memory_id": memory_id,
+        "include_revisions": True,
+    })
+    assert len(get_result["revisions"]) == 1
+    assert get_result["revisions"][0]["reason"] == "用户纠正了语言偏好"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

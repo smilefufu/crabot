@@ -392,6 +392,17 @@ class VectorStore:
 
         return None
 
+    async def update_long_term(self, memory_id: str, entry: LongTermMemoryEntry, vector: Optional[List[float]] = None):
+        """更新长期记忆：删除旧行，插入新行（LanceDB 不支持原地 update）"""
+        await self.ensure_tables()
+        if vector is None:
+            # 保留旧 vector
+            old = await self.get_by_id(memory_id)
+            if old and old["type"] == "long":
+                vector = old["row"].get("vector")
+        await _run_sync(lambda: self.long_term_table.delete(f"id = '{memory_id}'"))
+        await self.add_long_term(entry, vector=vector)
+
     async def delete_by_id(self, memory_id: str) -> bool:
         """根据 ID 删除记忆"""
         await self.ensure_tables()

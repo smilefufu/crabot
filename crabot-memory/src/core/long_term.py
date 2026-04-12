@@ -27,9 +27,11 @@ class LongTermMemory:
         self,
         vector_store: VectorStore,
         llm_client: LLMClient,
+        sqlite_store=None,
     ):
         self.vector_store = vector_store
         self.llm_client = llm_client
+        self.sqlite_store = sqlite_store
 
     async def write(self, params: WriteLongTermParams) -> Dict[str, Any]:
         """写入长期记忆，含去重逻辑"""
@@ -164,6 +166,72 @@ class LongTermMemory:
             results.append(SearchLongTermResultItem(memory=memory, relevance=relevance))
 
         return results
+
+    async def update(self, params) -> Dict[str, Any]:
+        """更新长期记忆"""
+        import json
+        from ..types import EntityRef, MemorySource
+
+        # 1. 查旧条目
+        result = await self.vector_store.get_by_id(params.memory_id)
+        if result is None:
+            raise ValueError(f"Memory not found: {params.memory_id}")
+        if result["type"] != "long":
+            raise ValueError(f"Not a long-term memory: {params.memory_id}")
+
+        row = result["row"]
+        old_content = row["content"]
+        old_version = row["version"]
+
+        # 2. 保存修正历史
+        if self.sqlite_store:
+            self.sqlite_store.add_revision(params.memory_id, old_version, old_content, params.revision_reason)
+
+        # 3. 构建更新后的字段
+        new_content = params.content if params.content is not None else old_content
+        new_entities = params.entities if params.entities is not None else [EntityRef(**e) for e in json.loads(row["entities_json"])]
+        new_importance = params.importance if params.importance is not None else row["importance"]
+        new_tags = params.tags if params.tags is not None else list(row["tags"] or [])
+
+        # 4. 如果 content 变了，重新生成 L0/L1 + embedding
+        vector = None
+        if params.content is not None and params.content != old_content:
+            summaries = await self.llm_client.generate_l0_l1(new_content)
+            abstract = summaries["abstract"]
+            overview = summaries["overview"]
+            vector = await self.vector_store.embedding_client.embed_single(abstract)
+        else:
+            abstract = row["abstract"]
+            overview = row["overview"]
+
+        source_data = json.loads(row["source_json"])
+        metadata_data = json.loads(row["metadata_json"]) if row["metadata_json"] else None
+
+        entry = LongTermMemoryEntry(
+            id=params.memory_id,
+            abstract=abstract,
+            overview=overview,
+            content=new_content,
+            entities=new_entities,
+            importance=new_importance,
+            keywords=list(row["keywords"] or []),
+            tags=new_tags,
+            source=MemorySource(**source_data),
+            metadata=metadata_data,
+            read_count=row["read_count"],
+            version=old_version + 1,
+            visibility=row["visibility"],
+            scopes=list(row["scopes"] or []),
+            created_at=row["created_at"],
+        )
+
+        await self.vector_store.update_long_term(params.memory_id, entry, vector=vector)
+        logger.info("Long-term memory updated: %s v%d", entry.id, entry.version)
+
+        return {
+            "memory": entry,
+            "version": entry.version,
+        }
 
     async def get_stats(self) -> dict:
         """获取长期记忆统计"""

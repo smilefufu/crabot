@@ -62,7 +62,7 @@ class MemoryModule:
 
         # 初始化核心模块
         self.short_term = ShortTermMemory(self.vector_store, self.llm_client)
-        self.long_term = LongTermMemory(self.vector_store, self.llm_client)
+        self.long_term = LongTermMemory(self.vector_store, self.llm_client, self.sqlite_store)
 
         # 注册路由
         self._register_routes()
@@ -124,6 +124,7 @@ class MemoryModule:
             "get_reflection_watermark": self._get_reflection_watermark,
             "update_reflection_watermark": self._update_reflection_watermark,
             "update_config": self._update_config,
+            "update_memory": self._update_memory,
         }
 
         handler = handlers.get(method)
@@ -238,7 +239,7 @@ class MemoryModule:
             )
             revisions = None
             if get_params.include_revisions:
-                revisions = self.sqlite_store.get_revisions(get_params.memory_id)
+                revisions = [r.model_dump() for r in self.sqlite_store.get_revisions(get_params.memory_id)]
             return {"memory": memory.model_dump(), "type": "short", "revisions": revisions}
         else:
             row = result["row"]
@@ -264,7 +265,7 @@ class MemoryModule:
             )
             revisions = None
             if get_params.include_revisions:
-                revisions = self.sqlite_store.get_revisions(get_params.memory_id)
+                revisions = [r.model_dump() for r in self.sqlite_store.get_revisions(get_params.memory_id)]
             return {"memory": memory.model_dump(), "type": "long", "revisions": revisions}
 
     async def _delete_memory(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -276,6 +277,16 @@ class MemoryModule:
         if not deleted:
             raise ValueError(f"Memory not found: {delete_params.memory_id}")
         return {"deleted": True}
+
+    async def _update_memory(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """更新长期记忆"""
+        from .types import UpdateMemoryParams
+        update_params = UpdateMemoryParams(**params)
+        result = await self.long_term.update(update_params)
+        return {
+            "memory": result["memory"].model_dump(),
+            "version": result["version"],
+        }
 
     async def _get_stats(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """获取统计信息"""
