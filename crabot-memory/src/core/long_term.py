@@ -38,7 +38,7 @@ class LongTermMemory:
 
         import asyncio
 
-        # 并行生成 L0/L1 和提取关键词（两个 LLM 调用互不依赖）
+        # 阶段一：并行生成 L0/L1 摘要和关键词（互不依赖）
         async def gen_summaries():
             try:
                 return await self.llm_client.generate_l0_l1(params.content)
@@ -57,6 +57,13 @@ class LongTermMemory:
         abstract = summaries["abstract"]
         overview = summaries["overview"]
 
+        # 阶段二：用 L0 abstract 计算 embedding（需等 L0 生成完毕）
+        try:
+            vector = await self.vector_store.embedding_client.embed_single(abstract)
+        except Exception as e:
+            logger.error("Failed to generate embedding: %s", e)
+            raise
+
         # 创建条目
         entry = LongTermMemoryEntry(
             abstract=abstract,
@@ -74,8 +81,8 @@ class LongTermMemory:
             scopes=params.scopes or [],
         )
 
-        # 存储
-        await self.vector_store.add_long_term(entry)
+        # 存储（传入预计算的 vector，跳过重复 embedding）
+        await self.vector_store.add_long_term(entry, vector=vector)
         logger.info("Long-term memory written: %s", entry.id)
 
         return {

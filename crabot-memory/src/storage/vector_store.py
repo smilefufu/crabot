@@ -2,6 +2,7 @@
 向量存储 - 基于 LanceDB
 提取并简化自 SimpleMem vector_store.py
 """
+import asyncio
 import logging
 from typing import List, Optional, Dict, Any
 from pathlib import Path
@@ -13,6 +14,11 @@ from ..types import ShortTermMemoryEntry, LongTermMemoryEntry, Visibility
 from ..utils.embedding import EmbeddingClient
 
 logger = logging.getLogger(__name__)
+
+
+def _run_sync(fn):
+    """将同步函数包装到 executor 中运行，避免阻塞事件循环"""
+    return asyncio.get_running_loop().run_in_executor(None, fn)
 
 
 class VectorStore:
@@ -122,11 +128,12 @@ class VectorStore:
             return field_type.list_size
         return None
 
-    async def add_short_term(self, entry: ShortTermMemoryEntry):
-        """添加短期记忆"""
+    async def add_short_term(self, entry: ShortTermMemoryEntry, vector: Optional[List[float]] = None):
+        """添加短期记忆。可传入预计算的 vector 跳过 embedding 调用"""
         await self.ensure_tables()
         import json
-        vector = await self.embedding_client.embed_single(entry.content)
+        if vector is None:
+            vector = await self.embedding_client.embed_single(entry.content)
         data = {
             "id": entry.id,
             "content": entry.content,
@@ -144,7 +151,7 @@ class VectorStore:
             "created_at": entry.created_at,
             "vector": vector,
         }
-        self.short_term_table.add([data])
+        await _run_sync(lambda: self.short_term_table.add([data]))
 
     async def search_short_term(
         self,
@@ -163,9 +170,6 @@ class VectorStore:
         await self.ensure_tables()
         import json
         from ..types import MemorySource
-
-        if self.short_term_table.count_rows() == 0:
-            return []
 
         # 构建权限过滤条件
         filters = []
@@ -191,16 +195,19 @@ class VectorStore:
 
         if query:
             vector = await self.embedding_client.embed_single(query)
-            results = self.short_term_table.search(vector).limit(limit * 2)  # 多取一些用于后过滤
-            if where_clause:
-                results = results.where(where_clause, prefilter=True)
-            rows = results.to_list()
+            def _do_search():
+                r = self.short_term_table.search(vector).limit(limit * 2)
+                if where_clause:
+                    r = r.where(where_clause, prefilter=True)
+                return r.to_list()
+            rows = await _run_sync(_do_search)
         else:
-            # 无查询，按时间排序返回
-            query_builder = self.short_term_table.search()
-            if where_clause:
-                query_builder = query_builder.where(where_clause, prefilter=True)
-            rows = query_builder.limit(limit * 2).to_list()
+            def _do_scan():
+                r = self.short_term_table.search()
+                if where_clause:
+                    r = r.where(where_clause, prefilter=True)
+                return r.limit(limit * 2).to_list()
+            rows = await _run_sync(_do_scan)
 
         entries = []
         for row in rows:
@@ -256,11 +263,12 @@ class VectorStore:
 
         return entries[:limit]
 
-    async def add_long_term(self, entry: LongTermMemoryEntry):
-        """添加长期记忆"""
+    async def add_long_term(self, entry: LongTermMemoryEntry, vector: Optional[List[float]] = None):
+        """添加长期记忆。可传入预计算的 vector 跳过 embedding 调用"""
         await self.ensure_tables()
         import json
-        vector = await self.embedding_client.embed_single(entry.content)
+        if vector is None:
+            vector = await self.embedding_client.embed_single(entry.abstract)
         data = {
             "id": entry.id,
             "abstract": entry.abstract,
@@ -280,7 +288,7 @@ class VectorStore:
             "updated_at": entry.updated_at,
             "vector": vector,
         }
-        self.long_term_table.add([data])
+        await _run_sync(lambda: self.long_term_table.add([data]))
 
     async def search_long_term(
         self,
@@ -294,13 +302,10 @@ class VectorStore:
     ) -> List[Dict[str, Any]]:
         """检索长期记忆，返回原始行数据"""
         await self.ensure_tables()
-        if self.long_term_table.count_rows() == 0:
-            return []
 
         vector = await self.embedding_client.embed_single(query)
-        results = self.long_term_table.search(vector).limit(limit * 2)  # 多取用于后过滤
 
-        # 添加可索引的过滤条件
+        # 构建可前置到 LanceDB WHERE 的过滤条件
         filters = []
         vis_order = {"private": 3, "internal": 2, "public": 1}
         min_level = vis_order.get(min_visibility, 1)
@@ -309,19 +314,24 @@ class VectorStore:
         elif min_level >= 1:
             filters.append("visibility IN ('private', 'internal', 'public')")
 
-        if filters:
-            where_clause = " AND ".join(filters)
-            results = results.where(where_clause, prefilter=True)
+        if importance_min is not None:
+            filters.append(f"importance >= {importance_min}")
 
-        rows = results.to_list()
+        where_clause = " AND ".join(filters) if filters else None
 
-        # 后过滤：importance 和 entity_id（需要解析 JSON）
-        if importance_min is not None or entity_id is not None or entity_type is not None or tags is not None:
+        def _do_search():
+            r = self.long_term_table.search(vector).limit(limit * 2)
+            if where_clause:
+                r = r.where(where_clause, prefilter=True)
+            return r.to_list()
+
+        rows = await _run_sync(_do_search)
+
+        # 后过滤：entity_id/entity_type/tags（需要解析 JSON，无法前置）
+        if entity_id is not None or entity_type is not None or tags is not None:
             import json
             filtered_rows = []
             for row in rows:
-                if importance_min is not None and row.get("importance", 0) < importance_min:
-                    continue
                 if tags:
                     row_tags = list(row.get("tags") or [])
                     if not any(t in row_tags for t in tags):
@@ -350,32 +360,38 @@ class VectorStore:
     async def get_by_id(self, memory_id: str) -> Optional[Dict[str, Any]]:
         """根据 ID 获取记忆（先查短期，再查长期）"""
         await self.ensure_tables()
-        if self.short_term_table.count_rows() > 0:
-            results = (
+
+        def _find_short():
+            return (
                 self.short_term_table.search()
                 .where(f"id = '{memory_id}'", prefilter=True)
                 .limit(1)
                 .to_list()
             )
-            if results:
-                return {"type": "short", "row": results[0]}
 
-        if self.long_term_table.count_rows() > 0:
-            results = (
+        results = await _run_sync(_find_short)
+        if results:
+            return {"type": "short", "row": results[0]}
+
+        def _find_long():
+            return (
                 self.long_term_table.search()
                 .where(f"id = '{memory_id}'", prefilter=True)
                 .limit(1)
                 .to_list()
             )
-            if results:
-                return {"type": "long", "row": results[0]}
+
+        results = await _run_sync(_find_long)
+        if results:
+            return {"type": "long", "row": results[0]}
 
         return None
 
     async def delete_by_id(self, memory_id: str) -> bool:
         """根据 ID 删除记忆"""
         await self.ensure_tables()
-        if self.short_term_table.count_rows() > 0:
+
+        def _try_delete_short():
             results = (
                 self.short_term_table.search()
                 .where(f"id = '{memory_id}'", prefilter=True)
@@ -385,8 +401,12 @@ class VectorStore:
             if results:
                 self.short_term_table.delete(f"id = '{memory_id}'")
                 return True
+            return False
 
-        if self.long_term_table.count_rows() > 0:
+        if await _run_sync(_try_delete_short):
+            return True
+
+        def _try_delete_long():
             results = (
                 self.long_term_table.search()
                 .where(f"id = '{memory_id}'", prefilter=True)
@@ -396,6 +416,10 @@ class VectorStore:
             if results:
                 self.long_term_table.delete(f"id = '{memory_id}'")
                 return True
+            return False
+
+        if await _run_sync(_try_delete_long):
+            return True
 
         return False
 

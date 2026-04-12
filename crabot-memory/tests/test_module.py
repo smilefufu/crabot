@@ -80,7 +80,6 @@ async def test_search_short_term(memory_module):
 async def test_write_long_term(memory_module):
     """测试写入长期记忆"""
     params = WriteLongTermParams(
-        category="preference",
         content="用户张三偏好使用 TypeScript 进行开发，认为类型安全很重要。",
         source=MemorySource(type="reflection"),
         importance=7,
@@ -91,7 +90,7 @@ async def test_write_long_term(memory_module):
 
     assert result["action"] == "created"
     assert result["memory"]["id"].startswith("mem-l-")
-    assert result["memory"]["category"] == "preference"
+    assert result["memory"]["importance"] == 7
 
 
 @pytest.mark.asyncio
