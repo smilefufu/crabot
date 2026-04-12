@@ -466,6 +466,39 @@ class VectorStore:
 
         return False
 
+    async def query_old_short_term(
+        self,
+        before_time: str,
+        visibility: str,
+        compressed: bool = False,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """查询指定时间之前的短期记忆原始行"""
+        await self.ensure_tables()
+        where = f"event_time < '{before_time}' AND visibility = '{visibility}' AND compressed = {str(compressed).lower()}"
+        def _do_query():
+            return (
+                self.short_term_table.search()
+                .where(where, prefilter=True)
+                .limit(limit)
+                .to_list()
+            )
+        return await _run_sync(_do_query)
+
+    async def delete_by_ids(self, table_name: str, ids: List[str]):
+        """批量删除指定 ID 的行"""
+        await self.ensure_tables()
+        table = self.short_term_table if table_name == "short" else self.long_term_table
+        id_list = ", ".join(f"'{id}'" for id in ids)
+        where = f"id IN ({id_list})"
+        await _run_sync(lambda: table.delete(where))
+
+    async def rotate_short_term(self, before_time: str):
+        """删除指定时间之前的所有短期记忆"""
+        await self.ensure_tables()
+        where = f"event_time < '{before_time}'"
+        await _run_sync(lambda: self.short_term_table.delete(where))
+
     def get_short_term_count(self) -> int:
         """获取短期记忆数量"""
         if self.short_term_table is None:

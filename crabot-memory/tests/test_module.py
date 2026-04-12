@@ -260,5 +260,29 @@ async def test_batch_write_long_term(memory_module):
     assert result["failure_count"] == 0
 
 
+@pytest.mark.asyncio
+async def test_short_term_compression(memory_module):
+    """测试短期记忆压缩"""
+    memory_module.config.compression.compression_threshold = 3
+    memory_module.config.compression.retention_window_days = 0
+    memory_module.config.compression.window_size = 5
+
+    count_before = memory_module.vector_store.get_short_term_count()
+
+    for i in range(5):
+        await memory_module._write_short_term(WriteShortTermParams(
+            content=f"事件 {i}: 用户请求操作 {i}",
+            source=MemorySource(type="conversation"),
+            event_time=f"2026-01-0{i+1}T00:00:00Z",
+        ).model_dump())
+
+    result = await memory_module.short_term.compress(memory_module.config.compression)
+    assert result["compressed_count"] > 0
+
+    count_after = memory_module.vector_store.get_short_term_count()
+    # 压缩后总数应该比压缩前 + 5 条原始写入更少（压缩减少了条目数）
+    assert count_after < count_before + 5
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

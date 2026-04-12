@@ -247,6 +247,38 @@ class LLMClient:
             return data
         return {"action": "CREATE", "reason": "parse_failed"}
 
+    async def compress_short_term(self, entries: List[Dict[str, str]]) -> List[str]:
+        """将多条短期记忆压缩为更少的紧凑事实单元"""
+        entries_text = "\n".join(
+            f"[{e.get('event_time', '?')}] {e['content']}"
+            for e in entries
+        )
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a memory compression engine. Given a list of timestamped events, "
+                    "compress them into fewer fact statements. Rules:\n"
+                    "1. Resolve pronouns to actual names\n"
+                    "2. Convert relative times to absolute times\n"
+                    "3. Merge related events into single factual statements\n"
+                    "4. Preserve all unique information, remove redundancy\n"
+                    "5. Each output fact should be a single clear sentence\n"
+                    "Return a JSON array of strings."
+                ),
+            },
+            {"role": "user", "content": entries_text},
+        ]
+        resp = await self.chat_completion(
+            messages, temperature=0.1, response_format=self._json_response_format,
+        )
+        data = extract_json(resp)
+        if isinstance(data, list):
+            return [str(item) for item in data]
+        if isinstance(data, dict) and "facts" in data:
+            return [str(item) for item in data["facts"]]
+        return [entries_text]
+
     async def merge_contents(self, content_a: str, content_b: str) -> str:
         """合并两段记忆内容"""
         messages = [

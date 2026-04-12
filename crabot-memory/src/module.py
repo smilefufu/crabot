@@ -64,6 +64,8 @@ class MemoryModule:
         self.short_term = ShortTermMemory(self.vector_store, self.llm_client)
         self.long_term = LongTermMemory(self.vector_store, self.llm_client, self.sqlite_store, self.config.dedup)
 
+        self._compression_running = False
+
         # 注册路由
         self._register_routes()
 
@@ -172,7 +174,26 @@ class MemoryModule:
             raise ValueError("Memory module not configured. Please configure LLM settings in Admin.")
         write_params = WriteShortTermParams(**params)
         memory = await self.short_term.write(write_params)
+
+        # 异步触发压缩检查
+        count = self.vector_store.get_short_term_count()
+        if count > self.config.compression.compression_threshold and not self._compression_running:
+            asyncio.create_task(self._run_compression())
+
         return {"memory": memory.model_dump()}
+
+    async def _run_compression(self):
+        """后台执行压缩 + rotate"""
+        if self._compression_running:
+            return
+        self._compression_running = True
+        try:
+            await self.short_term.compress(self.config.compression)
+            await self.short_term.rotate(self.config.compression)
+        except Exception as e:
+            logger.error("Compression failed: %s", e, exc_info=True)
+        finally:
+            self._compression_running = False
 
     async def _search_short_term(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """检索短期记忆"""

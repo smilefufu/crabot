@@ -2,7 +2,7 @@
 短期记忆核心逻辑
 """
 import logging
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 from ..types import (
@@ -77,6 +77,63 @@ class ShortTermMemory:
             sort_by=params.sort_by,
         )
         return results
+
+    async def compress(self, config) -> Dict[str, Any]:
+        """执行短期记忆压缩"""
+        from datetime import datetime, timedelta
+
+        cutoff = (datetime.utcnow() - timedelta(days=config.retention_window_days)).isoformat() + "Z"
+        window_size = config.window_size
+        compressed_count = 0
+
+        for vis in ["private", "internal", "public"]:
+            old_entries = await self.vector_store.query_old_short_term(
+                before_time=cutoff, visibility=vis, compressed=False, limit=500,
+            )
+            if not old_entries:
+                continue
+
+            for i in range(0, len(old_entries), window_size):
+                batch = old_entries[i:i + window_size]
+                batch_data = [
+                    {"content": r["content"], "event_time": r["event_time"],
+                     "persons": list(r.get("persons") or []),
+                     "entities": list(r.get("entities") or []),
+                     "topic": r.get("topic", "")}
+                    for r in batch
+                ]
+
+                compressed_facts = await self.llm_client.compress_short_term(batch_data)
+
+                all_scopes: set = set()
+                for r in batch:
+                    all_scopes.update(r.get("scopes") or [])
+
+                old_ids = [r["id"] for r in batch]
+                await self.vector_store.delete_by_ids("short", old_ids)
+
+                for fact in compressed_facts:
+                    from ..types import ShortTermMemoryEntry, MemorySource
+                    entry = ShortTermMemoryEntry(
+                        content=fact,
+                        event_time=batch[0]["event_time"],
+                        source=MemorySource(type="system"),
+                        compressed=True,
+                        visibility=vis,
+                        scopes=list(all_scopes),
+                    )
+                    await self.vector_store.add_short_term(entry)
+                    compressed_count += 1
+
+        return {"compressed_count": compressed_count}
+
+    async def rotate(self, config) -> Dict[str, Any]:
+        """删除超过最大保留天数的短期记忆"""
+        from datetime import datetime, timedelta
+
+        cutoff = (datetime.utcnow() - timedelta(days=config.max_retention_days)).isoformat() + "Z"
+        await self.vector_store.rotate_short_term(cutoff)
+        return {"rotated_before": cutoff}
 
     async def get_stats(self) -> dict:
         """获取短期记忆统计"""
