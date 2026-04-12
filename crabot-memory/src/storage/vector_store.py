@@ -499,6 +499,39 @@ class VectorStore:
         where = f"event_time < '{before_time}'"
         await _run_sync(lambda: self.short_term_table.delete(where))
 
+    async def get_all_short_term_rows(self) -> List[Dict[str, Any]]:
+        """导出所有短期记忆行（不含 vector）"""
+        await self.ensure_tables()
+        def _do():
+            return self.short_term_table.search().limit(100000).to_list()
+        rows = await _run_sync(_do)
+        for r in rows:
+            r.pop("vector", None)
+            r.pop("_distance", None)
+        return rows
+
+    async def get_all_long_term_rows(self) -> List[Dict[str, Any]]:
+        """导出所有长期记忆行（不含 vector）"""
+        await self.ensure_tables()
+        def _do():
+            return self.long_term_table.search().limit(100000).to_list()
+        rows = await _run_sync(_do)
+        for r in rows:
+            r.pop("vector", None)
+            r.pop("_distance", None)
+        return rows
+
+    async def clear_all(self):
+        """清空所有数据（用于 replace 模式导入）"""
+        await self.ensure_tables()
+        def _do():
+            for name in ["short_term_memory", "long_term_memory"]:
+                if name in self.db.table_names():
+                    self.db.drop_table(name)
+        await _run_sync(_do)
+        self._tables_initialized = False
+        await self.ensure_tables()
+
     def get_short_term_count(self) -> int:
         """获取短期记忆数量"""
         if self.short_term_table is None:

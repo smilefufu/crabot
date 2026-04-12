@@ -346,6 +346,26 @@ class BatchWriteLongTermResult(BaseModel):
 
 
 # ============================================================================
+# 导入/导出
+# ============================================================================
+
+class ExportMemoriesResult(BaseModel):
+    """导出结果"""
+    version: str = "1.0"
+    exported_at: str
+    short_term: List[Dict[str, Any]]
+    long_term: List[Dict[str, Any]]
+    watermark: Optional[str]
+    revisions: List[Dict[str, Any]]
+
+
+class ImportMemoriesParams(BaseModel):
+    """导入参数"""
+    mode: Literal["replace", "merge"]
+    data: Dict[str, Any]
+
+
+# ============================================================================
 # 健康检查
 # ============================================================================
 

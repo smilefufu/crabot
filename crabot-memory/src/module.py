@@ -129,6 +129,8 @@ class MemoryModule:
             "update_memory": self._update_memory,
             "batch_write_short_term": self._batch_write_short_term,
             "batch_write_long_term": self._batch_write_long_term,
+            "export_memories": self._export_memories,
+            "import_memories": self._import_memories,
         }
 
         handler = handlers.get(method)
@@ -367,6 +369,116 @@ class MemoryModule:
             "success_count": len(results),
             "failure_count": len(failures),
             "failures": failures if failures else None,
+        }
+
+    async def _export_memories(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """导出全量记忆"""
+        short_rows = await self.vector_store.get_all_short_term_rows()
+        long_rows = await self.vector_store.get_all_long_term_rows()
+        watermark = self.sqlite_store.get_reflection_watermark()
+
+        revisions = []
+        for row in long_rows:
+            mem_revisions = self.sqlite_store.get_revisions(row["id"])
+            for rev in mem_revisions:
+                revisions.append({
+                    "memory_id": row["id"],
+                    **rev.model_dump(),
+                })
+
+        return {
+            "version": "1.0",
+            "exported_at": datetime.utcnow().isoformat() + "Z",
+            "short_term": short_rows,
+            "long_term": long_rows,
+            "watermark": watermark,
+            "revisions": revisions,
+        }
+
+    async def _import_memories(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """导入记忆"""
+        from .types import ImportMemoriesParams, ShortTermMemoryEntry, LongTermMemoryEntry, MemorySource, EntityRef
+        import json
+
+        import_params = ImportMemoriesParams(**params)
+        data = import_params.data
+
+        if data.get("version") != "1.0":
+            raise ValueError(f"Unsupported export version: {data.get('version')}")
+
+        if import_params.mode == "replace":
+            await self.vector_store.clear_all()
+            self.sqlite_store.conn.execute("DELETE FROM memory_revisions")
+            self.sqlite_store.conn.execute("DELETE FROM reflection_watermark")
+            self.sqlite_store.conn.commit()
+
+        short_count = 0
+        for row in data.get("short_term", []):
+            if import_params.mode == "merge":
+                existing = await self.vector_store.get_by_id(row["id"])
+                if existing:
+                    continue
+            source_data = json.loads(row["source_json"]) if isinstance(row.get("source_json"), str) else row.get("source_json", {})
+            entry = ShortTermMemoryEntry(
+                id=row["id"], content=row["content"],
+                keywords=list(row.get("keywords") or []),
+                event_time=row["event_time"],
+                persons=list(row.get("persons") or []),
+                entities=list(row.get("entities") or []),
+                topic=row.get("topic") or None,
+                source=MemorySource(**source_data) if source_data else MemorySource(type="system"),
+                refs=json.loads(row["refs_json"]) if isinstance(row.get("refs_json"), str) and row["refs_json"] else None,
+                compressed=row.get("compressed", False),
+                visibility=row.get("visibility", "public"),
+                scopes=list(row.get("scopes") or []),
+                created_at=row.get("created_at", ""),
+            )
+            await self.vector_store.add_short_term(entry)
+            short_count += 1
+
+        long_count = 0
+        for row in data.get("long_term", []):
+            if import_params.mode == "merge":
+                existing = await self.vector_store.get_by_id(row["id"])
+                if existing:
+                    continue
+            source_data = json.loads(row["source_json"]) if isinstance(row.get("source_json"), str) else row.get("source_json", {})
+            entities_data = json.loads(row["entities_json"]) if isinstance(row.get("entities_json"), str) else row.get("entities_json", [])
+            metadata_data = json.loads(row["metadata_json"]) if isinstance(row.get("metadata_json"), str) and row["metadata_json"] else None
+            entry = LongTermMemoryEntry(
+                id=row["id"], abstract=row["abstract"], overview=row["overview"],
+                content=row["content"],
+                entities=[EntityRef(**e) for e in entities_data],
+                importance=row.get("importance", 5),
+                keywords=list(row.get("keywords") or []),
+                tags=list(row.get("tags") or []),
+                source=MemorySource(**source_data) if source_data else MemorySource(type="system"),
+                metadata=metadata_data,
+                read_count=row.get("read_count", 0),
+                version=row.get("version", 1),
+                visibility=row.get("visibility", "public"),
+                scopes=list(row.get("scopes") or []),
+                created_at=row.get("created_at", ""),
+                updated_at=row.get("updated_at", ""),
+            )
+            await self.vector_store.add_long_term(entry)  # re-embeds on L0 abstract
+            long_count += 1
+
+        if data.get("watermark"):
+            self.sqlite_store.update_reflection_watermark(data["watermark"])
+
+        for rev in data.get("revisions", []):
+            try:
+                self.sqlite_store.add_revision(
+                    rev["memory_id"], rev["version"], rev["previous_content"], rev["reason"],
+                )
+            except Exception:
+                pass
+
+        return {
+            "short_term_count": short_count,
+            "long_term_count": long_count,
+            "watermark_restored": data.get("watermark") is not None,
         }
 
     async def _update_config(self, params: Dict[str, Any]) -> Dict[str, Any]:

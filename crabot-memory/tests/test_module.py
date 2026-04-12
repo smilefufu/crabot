@@ -284,5 +284,31 @@ async def test_short_term_compression(memory_module):
     assert count_after < count_before + 5
 
 
+@pytest.mark.asyncio
+async def test_export_import_roundtrip(memory_module):
+    """测试导出后导入还原"""
+    await memory_module._write_short_term(WriteShortTermParams(
+        content="导出测试短期记忆",
+        source=MemorySource(type="conversation"),
+    ).model_dump())
+    await memory_module._write_long_term(WriteLongTermParams(
+        content="导出测试长期记忆",
+        source=MemorySource(type="reflection"),
+        tags=["export-test"],
+    ).model_dump())
+
+    export_result = await memory_module._export_memories({})
+    assert export_result["version"] == "1.0"
+    assert len(export_result["short_term"]) >= 1
+    assert len(export_result["long_term"]) >= 1
+
+    import_result = await memory_module._import_memories({
+        "mode": "replace",
+        "data": export_result,
+    })
+    assert import_result["short_term_count"] >= 1
+    assert import_result["long_term_count"] >= 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
