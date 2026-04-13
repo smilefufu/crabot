@@ -184,6 +184,14 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     // Add tool results as a single batched message
     messages.push(createBatchToolResultMessage(processedResults))
 
+    // Inject any pending human supplement messages
+    if (options.humanMessageQueue) {
+      const supplements = options.humanMessageQueue.drainPending()
+      for (const content of supplements) {
+        messages.push(createUserMessage(content))
+      }
+    }
+
     // Prune old images — keep only the most recent N screenshots
     if (options.supportsVision) {
       pruneOldImages(messages)

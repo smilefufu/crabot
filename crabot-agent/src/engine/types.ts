@@ -144,7 +144,8 @@ export interface EngineOptions {
   readonly permissionConfig?: ToolPermissionConfig
   readonly supportsVision?: boolean
   readonly humanMessageQueue?: {
-    readonly dequeue: () => Promise<string | ContentBlock[]>
+    readonly drainPending: () => Array<string | ContentBlock[]>
+    readonly hasPending: boolean
   }
 }
 

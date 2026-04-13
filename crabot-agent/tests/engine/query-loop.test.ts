@@ -3,6 +3,7 @@ import { runEngine, type RunEngineParams } from '../../src/engine/query-loop'
 import { defineTool } from '../../src/engine/tool-framework'
 import type { LLMAdapter } from '../../src/engine/llm-adapter'
 import type { StreamChunk, ToolDefinition, EngineOptions } from '../../src/engine/types'
+import { HumanMessageQueue } from '../../src/engine/human-message-queue'
 
 // --- Test Helpers ---
 
@@ -321,5 +322,128 @@ describe('runEngine', () => {
 
     expect(result.outcome).toBe('max_turns')
     expect(result.totalTurns).toBe(200)
+  })
+})
+
+describe('runEngine humanMessageQueue integration', () => {
+  it('injects supplement messages between turns', async () => {
+    const capturedMessages: unknown[][] = []
+    let callIndex = 0
+
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        capturedMessages.push([...params.messages])
+        if (callIndex === 0) {
+          for (const chunk of toolUseResponse('tu-1', 'dummy', {})) yield chunk
+        } else {
+          for (const chunk of textResponse('Adjusted!')) yield chunk
+        }
+        callIndex++
+      },
+      updateConfig() {},
+    }
+
+    const queue = new HumanMessageQueue()
+
+    const toolWithSupplement = defineTool({
+      name: 'dummy',
+      description: 'Dummy tool',
+      inputSchema: {},
+      isReadOnly: true,
+      call: async () => {
+        queue.push('用户补充指示：改变方向')
+        return { output: 'ok', isError: false }
+      },
+    })
+
+    const result = await runEngine({
+      prompt: 'Start task',
+      adapter,
+      options: baseOptions({
+        tools: [toolWithSupplement],
+        humanMessageQueue: queue,
+      }),
+    })
+
+    expect(result.outcome).toBe('completed')
+    expect(result.finalText).toBe('Adjusted!')
+
+    // Second LLM call should have the supplement message
+    const secondCallMessages = capturedMessages[1]
+    const allContent = secondCallMessages.map((m: any) =>
+      typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+    ).join(' ')
+    expect(allContent).toContain('用户补充指示：改变方向')
+  })
+
+  it('drains multiple pending supplements in one batch', async () => {
+    const capturedMessages: unknown[][] = []
+    let callIndex = 0
+
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        capturedMessages.push([...params.messages])
+        if (callIndex === 0) {
+          for (const chunk of toolUseResponse('tu-1', 'dummy', {})) yield chunk
+        } else {
+          for (const chunk of textResponse('Done')) yield chunk
+        }
+        callIndex++
+      },
+      updateConfig() {},
+    }
+
+    const queue = new HumanMessageQueue()
+
+    const dummyTool = defineTool({
+      name: 'dummy',
+      description: 'Dummy',
+      inputSchema: {},
+      isReadOnly: true,
+      call: async () => {
+        queue.push('supplement 1')
+        queue.push('supplement 2')
+        return { output: 'ok', isError: false }
+      },
+    })
+
+    await runEngine({
+      prompt: 'Go',
+      adapter,
+      options: baseOptions({
+        tools: [dummyTool],
+        humanMessageQueue: queue,
+      }),
+    })
+
+    const secondCallMessages = capturedMessages[1]
+    const msgContents = secondCallMessages.map((m: any) =>
+      typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+    ).join(' ')
+    expect(msgContents).toContain('supplement 1')
+    expect(msgContents).toContain('supplement 2')
+  })
+
+  it('does nothing when humanMessageQueue is undefined', async () => {
+    const adapter = mockAdapter([
+      toolUseResponse('tu-1', 'dummy', {}),
+      textResponse('Done'),
+    ])
+
+    const dummyTool = defineTool({
+      name: 'dummy',
+      description: 'Dummy',
+      inputSchema: {},
+      isReadOnly: true,
+      call: async () => ({ output: 'ok', isError: false }),
+    })
+
+    const result = await runEngine({
+      prompt: 'Go',
+      adapter,
+      options: baseOptions({ tools: [dummyTool] }),
+    })
+
+    expect(result.outcome).toBe('completed')
   })
 })
