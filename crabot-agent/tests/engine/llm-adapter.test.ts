@@ -509,6 +509,41 @@ describe('normalizeMessagesForOpenAI', () => {
     expect(result[2]).toEqual({ role: 'tool', tool_call_id: 'tc_calc', content: '4' })
     expect(result[3]).toEqual({ role: 'assistant', content: 'The answer is 4.' })
   })
+
+  describe('consecutive user message merging', () => {
+    it('merges consecutive user messages into one', () => {
+      const messages: EngineMessage[] = [
+        createUserMessage('First'),
+        createUserMessage('Second'),
+      ]
+
+      const normalized = normalizeMessagesForOpenAI(messages)
+      expect(normalized).toHaveLength(1)
+      expect(normalized[0].role).toBe('user')
+      const content = normalized[0].content as unknown[]
+      expect(content).toHaveLength(2)
+      expect((content[0] as any).text).toBe('First')
+      expect((content[1] as any).text).toBe('Second')
+    })
+
+    it('does not merge user message after tool message', () => {
+      const messages: EngineMessage[] = [
+        createUserMessage('Hello'),
+        createAssistantMessage(
+          [{ type: 'tool_use', id: 'tc-1', name: 'dummy', input: {} }],
+          'tool_use',
+        ),
+        createToolResultMessage('tc-1', 'ok', false),
+        createUserMessage('Supplement'),
+      ]
+
+      const normalized = normalizeMessagesForOpenAI(messages)
+      // tool result becomes role:tool, so user message after it is separate — no merge
+      expect(normalized).toHaveLength(4)
+      expect(normalized[2].role).toBe('tool')
+      expect(normalized[3].role).toBe('user')
+    })
+  })
 })
 
 describe('toOpenAITool', () => {

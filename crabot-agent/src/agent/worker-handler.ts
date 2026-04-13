@@ -663,7 +663,12 @@ export class WorkerHandler {
     if (supplement) {
       const humanQueue = this.humanQueues.get(taskId)
       if (humanQueue) {
-        humanQueue.push(`用户补充指示：${supplement}`)
+        humanQueue.push(
+          `[实时纠偏 - 来自用户]\n` +
+          `用户在任务执行期间发来了补充指示：\n\n` +
+          `"${supplement}"\n\n` +
+          `请结合当前任务进展，调整你的执行方向。`,
+        )
         log(`[supplement] pushed to humanMessageQueue for task ${taskId}`)
       }
     }
