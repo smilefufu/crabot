@@ -45,6 +45,7 @@ import { formatMessageContent, resolveImageBlocks } from './media-resolver.js'
 import type { McpConnector } from './mcp-connector.js'
 import { createSubAgentTool } from '../engine/sub-agent.js'
 import type { SubAgentDefinition } from './subagent-prompts.js'
+import { HumanMessageQueue } from '../engine/human-message-queue.js'
 
 import * as fs from 'fs'
 import * as path from 'path'
@@ -166,44 +167,6 @@ function mcpServerToToolDefinitions(
   }
 
   return tools
-}
-
-// ============================================================================
-// Human Message Queue
-// ============================================================================
-
-/**
- * A simple async queue that the engine polls via dequeue().
- * deliverHumanResponse() pushes messages; the engine pulls them.
- */
-class HumanMessageQueue {
-  private pending: Array<string | ContentBlock[]> = []
-  private waitResolve: ((value: string | ContentBlock[]) => void) | null = null
-
-  push(content: string | ContentBlock[]): void {
-    if (this.waitResolve) {
-      const resolve = this.waitResolve
-      this.waitResolve = null
-      resolve(content)
-    } else {
-      this.pending = [...this.pending, content]
-    }
-  }
-
-  async dequeue(): Promise<string | ContentBlock[]> {
-    if (this.pending.length > 0) {
-      const [first, ...rest] = this.pending
-      this.pending = rest
-      return first
-    }
-    return new Promise<string | ContentBlock[]>((resolve) => {
-      this.waitResolve = resolve
-    })
-  }
-
-  get hasPending(): boolean {
-    return this.pending.length > 0
-  }
 }
 
 // ============================================================================
