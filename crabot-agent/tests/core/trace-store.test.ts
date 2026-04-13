@@ -279,7 +279,7 @@ describe('TraceStore getSpansAtDepth', () => {
       details: { tool_name: 'search', input_summary: 'q' },
     })
 
-    const result = store.getSpansAtDepth(trace.trace_id, { span_depth: 1 })
+    const result = store.getSpansAtDepth(trace.trace_id, {})
     expect(result.spans).toHaveLength(1)
     expect(result.spans[0].span_id).toBe(loopSpan.span_id)
     expect(result.spans[0].children_count).toBe(1)

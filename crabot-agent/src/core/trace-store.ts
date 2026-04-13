@@ -78,24 +78,9 @@ export class TraceStore {
           if (!line.trim()) { offset += lineBytes; continue }
           try {
             const trace = JSON.parse(line) as AgentTrace
-            const entry: TraceIndexEntry = {
-              trace_id: trace.trace_id,
-              related_task_id: trace.related_task_id,
-              parent_trace_id: trace.parent_trace_id,
-              trigger_type: trace.trigger.type,
-              trigger_summary: trace.trigger.summary,
-              started_at: trace.started_at,
-              ended_at: trace.ended_at,
-              status: trace.status,
-              outcome_summary: trace.outcome?.summary,
-              span_count: trace.spans?.length ?? 0,
-              file,
-              file_offset: offset,
-            }
-            this.traceIndex.push(entry)
+            this.traceIndex.push(this.traceToIndexEntry(trace, file, offset))
             if (trace.related_task_id) {
-              const existing = this.taskIndex.get(trace.related_task_id) ?? []
-              this.taskIndex.set(trace.related_task_id, [...existing, trace.trace_id])
+              this.addToTaskIndex(trace.related_task_id, trace.trace_id)
             }
           } catch { /* skip malformed lines */ }
           offset += lineBytes
@@ -274,10 +259,7 @@ export class TraceStore {
     if (updates.related_task_id !== undefined) {
       trace.related_task_id = updates.related_task_id
       if (updates.related_task_id) {
-        const existing = this.taskIndex.get(updates.related_task_id) ?? []
-        if (!existing.includes(traceId)) {
-          this.taskIndex.set(updates.related_task_id, [...existing, traceId])
-        }
+        this.addToTaskIndex(updates.related_task_id, traceId)
       }
     }
   }
@@ -319,8 +301,8 @@ export class TraceStore {
       const filePath = path.join(this.persistDir, indexEntry.file)
       const fd = fs.openSync(filePath, 'r')
       try {
-        const bufSize = 1024 * 1024 // 1MB max per trace line
-        const buf = Buffer.alloc(bufSize)
+        const bufSize = 64 * 1024 // 64KB initial read (most traces are <50KB)
+        const buf = Buffer.allocUnsafe(bufSize)
         const bytesRead = fs.readSync(fd, buf, 0, bufSize, indexEntry.file_offset)
         const content = buf.toString('utf-8', 0, bytesRead)
         const lineEnd = content.indexOf('\n')
@@ -336,19 +318,24 @@ export class TraceStore {
 
   getSpansAtDepth(
     traceId: string,
-    params: { span_depth?: number; parent_span_id?: string }
+    params: { parent_span_id?: string }
   ): { spans: SpanWithMeta[]; span_total: number } {
     const trace = this.traces.get(traceId)
     if (!trace) return { spans: [], span_total: 0 }
 
     const allSpans = trace.spans
 
-    let targetSpans: AgentSpan[]
-    if (params.parent_span_id) {
-      targetSpans = allSpans.filter(s => s.parent_span_id === params.parent_span_id)
-    } else {
-      targetSpans = allSpans.filter(s => !s.parent_span_id)
+    // Build children count map in O(n) instead of O(n²)
+    const childrenCount = new Map<string, number>()
+    for (const s of allSpans) {
+      if (s.parent_span_id) {
+        childrenCount.set(s.parent_span_id, (childrenCount.get(s.parent_span_id) ?? 0) + 1)
+      }
     }
+
+    const targetSpans = params.parent_span_id
+      ? allSpans.filter(s => s.parent_span_id === params.parent_span_id)
+      : allSpans.filter(s => !s.parent_span_id)
 
     const result: SpanWithMeta[] = targetSpans.map(span => ({
       span_id: span.span_id,
@@ -360,7 +347,7 @@ export class TraceStore {
       duration_ms: span.duration_ms,
       status: span.status,
       details: span.details,
-      children_count: allSpans.filter(s => s.parent_span_id === span.span_id).length,
+      children_count: childrenCount.get(span.span_id) ?? 0,
     }))
 
     return { spans: result, span_total: result.length }
@@ -457,12 +444,35 @@ export class TraceStore {
     return removed
   }
 
+  private addToTaskIndex(taskId: string, traceId: string): void {
+    const existing = this.taskIndex.get(taskId) ?? []
+    if (!existing.includes(traceId)) {
+      this.taskIndex.set(taskId, [...existing, traceId])
+    }
+  }
+
+  private traceToIndexEntry(trace: AgentTrace, file: string, fileOffset: number): TraceIndexEntry {
+    return {
+      trace_id: trace.trace_id,
+      related_task_id: trace.related_task_id,
+      parent_trace_id: trace.parent_trace_id,
+      trigger_type: trace.trigger.type,
+      trigger_summary: trace.trigger.summary,
+      started_at: trace.started_at,
+      ended_at: trace.ended_at,
+      status: trace.status,
+      outcome_summary: trace.outcome?.summary,
+      span_count: trace.spans?.length ?? 0,
+      file,
+      file_offset: fileOffset,
+    }
+  }
+
   private rebuildTaskIndex(): void {
     this.taskIndex.clear()
     for (const entry of this.traceIndex) {
       if (entry.related_task_id) {
-        const existing = this.taskIndex.get(entry.related_task_id) ?? []
-        this.taskIndex.set(entry.related_task_id, [...existing, entry.trace_id])
+        this.addToTaskIndex(entry.related_task_id, entry.trace_id)
       }
     }
   }
@@ -480,24 +490,9 @@ export class TraceStore {
 
       fs.appendFileSync(filePath, line, 'utf-8')
 
-      const entry: TraceIndexEntry = {
-        trace_id: trace.trace_id,
-        related_task_id: trace.related_task_id,
-        parent_trace_id: trace.parent_trace_id,
-        trigger_type: trace.trigger.type,
-        trigger_summary: trace.trigger.summary,
-        started_at: trace.started_at,
-        ended_at: trace.ended_at,
-        status: trace.status,
-        outcome_summary: trace.outcome?.summary,
-        span_count: trace.spans.length,
-        file,
-        file_offset: fileOffset,
-      }
-      this.traceIndex.push(entry)
+      this.traceIndex.push(this.traceToIndexEntry(trace, file, fileOffset))
       if (trace.related_task_id) {
-        const existing = this.taskIndex.get(trace.related_task_id) ?? []
-        this.taskIndex.set(trace.related_task_id, [...existing, trace.trace_id])
+        this.addToTaskIndex(trace.related_task_id, trace.trace_id)
       }
     } catch {
       // persist failure must not affect main flow

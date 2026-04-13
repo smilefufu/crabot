@@ -341,6 +341,12 @@ export class WorkerHandler {
 
       // 3f. Sub-agent delegation tools
       const baseTools = [...tools]
+      const subAgentTraceConfig = traceContext ? {
+        traceStore: traceContext.traceStore,
+        parentTraceId: traceContext.traceId,
+        relatedTaskId: traceContext.relatedTaskId,
+      } : undefined
+
       for (const { definition, sdkEnv: subSdkEnv } of this.subAgentConfigs) {
         tools.push(createSubAgentTool({
           name: definition.toolName,
@@ -352,12 +358,7 @@ export class WorkerHandler {
           maxTurns: definition.maxTurns,
           supportsVision: subSdkEnv.supportsVision,
           parentHumanQueue: humanQueue,
-          traceConfig: traceContext ? {
-            traceStore: traceContext.traceStore,
-            parentTraceId: traceContext.traceId,
-            parentSpanId: undefined,
-            relatedTaskId: traceContext.relatedTaskId,
-          } : undefined,
+          traceConfig: subAgentTraceConfig,
         }))
       }
 
@@ -373,12 +374,7 @@ export class WorkerHandler {
         maxTurns: 30,
         supportsVision: this.sdkEnv.supportsVision,
         parentHumanQueue: humanQueue,
-        traceConfig: traceContext ? {
-          traceStore: traceContext.traceStore,
-          parentTraceId: traceContext.traceId,
-          parentSpanId: undefined,
-          relatedTaskId: traceContext.relatedTaskId,
-        } : undefined,
+        traceConfig: subAgentTraceConfig,
       }))
 
       // 5. Build system prompt and task message
