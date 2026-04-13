@@ -8,6 +8,19 @@ import * as fs from 'fs'
 import * as path from 'path'
 import type { AgentTrace, AgentSpan, AgentSpanType, AgentSpanDetails } from '../types.js'
 
+export interface SpanWithMeta {
+  span_id: string
+  parent_span_id?: string
+  trace_id: string
+  type: AgentSpanType
+  started_at: string
+  ended_at?: string
+  duration_ms?: number
+  status: 'running' | 'completed' | 'failed'
+  details: AgentSpanDetails
+  children_count: number
+}
+
 export interface TraceIndexEntry {
   trace_id: string
   related_task_id?: string
@@ -281,6 +294,67 @@ export class TraceStore {
 
   getTrace(traceId: string): AgentTrace | undefined {
     return this.traces.get(traceId)
+  }
+
+  async getFullTrace(traceId: string): Promise<AgentTrace | undefined> {
+    // 1. 先查 ring buffer
+    const cached = this.traces.get(traceId)
+    if (cached) return cached
+
+    // 2. 从索引找到文件位置
+    const indexEntry = this.traceIndex.find(e => e.trace_id === traceId)
+    if (!indexEntry || !this.persistDir || !indexEntry.file) return undefined
+
+    // 3. 从 JSONL 按需读取
+    try {
+      const filePath = path.join(this.persistDir, indexEntry.file)
+      const fd = fs.openSync(filePath, 'r')
+      try {
+        const bufSize = 1024 * 1024 // 1MB max per trace line
+        const buf = Buffer.alloc(bufSize)
+        const bytesRead = fs.readSync(fd, buf, 0, bufSize, indexEntry.file_offset)
+        const content = buf.toString('utf-8', 0, bytesRead)
+        const lineEnd = content.indexOf('\n')
+        const line = lineEnd >= 0 ? content.slice(0, lineEnd) : content
+        return JSON.parse(line) as AgentTrace
+      } finally {
+        fs.closeSync(fd)
+      }
+    } catch {
+      return undefined
+    }
+  }
+
+  getSpansAtDepth(
+    traceId: string,
+    params: { span_depth?: number; parent_span_id?: string }
+  ): { spans: SpanWithMeta[]; span_total: number } {
+    const trace = this.traces.get(traceId)
+    if (!trace) return { spans: [], span_total: 0 }
+
+    const allSpans = trace.spans
+
+    let targetSpans: AgentSpan[]
+    if (params.parent_span_id) {
+      targetSpans = allSpans.filter(s => s.parent_span_id === params.parent_span_id)
+    } else {
+      targetSpans = allSpans.filter(s => !s.parent_span_id)
+    }
+
+    const result: SpanWithMeta[] = targetSpans.map(span => ({
+      span_id: span.span_id,
+      parent_span_id: span.parent_span_id,
+      trace_id: span.trace_id,
+      type: span.type,
+      started_at: span.started_at,
+      ended_at: span.ended_at,
+      duration_ms: span.duration_ms,
+      status: span.status,
+      details: span.details,
+      children_count: allSpans.filter(s => s.parent_span_id === span.span_id).length,
+    }))
+
+    return { spans: result, span_total: result.length }
   }
 
   clearTraces(before?: string, traceIds?: string[]): number {

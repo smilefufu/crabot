@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import { TraceStore } from '../../src/core/trace-store'
+import { TraceStore, SpanWithMeta } from '../../src/core/trace-store'
 
 describe('TraceStore', () => {
   describe('startTrace with related_task_id', () => {
@@ -146,5 +146,90 @@ describe('TraceStore index', () => {
     const result = store.searchTraces({ keyword: '运行' })
     expect(result.traces).toHaveLength(1)
     expect(result.traces[0].status).toBe('running')
+  })
+})
+
+describe('TraceStore getFullTrace', () => {
+  it('loads trace from ring buffer if available', async () => {
+    const store = new TraceStore(10)
+    const trace = store.startTrace({
+      module_id: 'agent-1',
+      trigger: { type: 'message', summary: 'test' },
+    })
+    store.startSpan(trace.trace_id, { type: 'llm_call', details: { iteration: 1, input_summary: 'hi' } })
+    store.endTrace(trace.trace_id, 'completed', { summary: 'done' })
+
+    const full = await store.getFullTrace(trace.trace_id)
+    expect(full).toBeDefined()
+    expect(full!.spans).toHaveLength(1)
+  })
+
+  it('loads trace from JSONL when evicted from ring buffer', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-full-'))
+    try {
+      const store = new TraceStore(2, dir)
+
+      const t1 = store.startTrace({ module_id: 'a', trigger: { type: 'message', summary: 't1' } })
+      store.startSpan(t1.trace_id, { type: 'llm_call', details: { iteration: 1, input_summary: 'x' } })
+      store.endTrace(t1.trace_id, 'completed', { summary: 'r1' })
+
+      // Create 2 more traces to evict t1
+      const t2 = store.startTrace({ module_id: 'a', trigger: { type: 'message', summary: 't2' } })
+      store.endTrace(t2.trace_id, 'completed')
+      const t3 = store.startTrace({ module_id: 'a', trigger: { type: 'message', summary: 't3' } })
+      store.endTrace(t3.trace_id, 'completed')
+
+      // t1 should be evicted from ring buffer
+      expect(store.getTrace(t1.trace_id)).toBeUndefined()
+
+      const full = await store.getFullTrace(t1.trace_id)
+      expect(full).toBeDefined()
+      expect(full!.trace_id).toBe(t1.trace_id)
+      expect(full!.spans).toHaveLength(1)
+    } finally {
+      fs.rmSync(dir, { recursive: true })
+    }
+  })
+})
+
+describe('TraceStore getSpansAtDepth', () => {
+  it('returns top-level spans with children_count', () => {
+    const store = new TraceStore(10)
+    const trace = store.startTrace({ module_id: 'a', trigger: { type: 'task', summary: 'test' } })
+
+    const loopSpan = store.startSpan(trace.trace_id, { type: 'agent_loop', details: { loop_label: 'worker' } })
+    const llmSpan = store.startSpan(trace.trace_id, {
+      type: 'llm_call',
+      parent_span_id: loopSpan.span_id,
+      details: { iteration: 1, input_summary: 'x' },
+    })
+    store.startSpan(trace.trace_id, {
+      type: 'tool_call',
+      parent_span_id: llmSpan.span_id,
+      details: { tool_name: 'search', input_summary: 'q' },
+    })
+
+    const result = store.getSpansAtDepth(trace.trace_id, { span_depth: 1 })
+    expect(result.spans).toHaveLength(1)
+    expect(result.spans[0].span_id).toBe(loopSpan.span_id)
+    expect(result.spans[0].children_count).toBe(1)
+    expect(result.span_total).toBe(1)
+  })
+
+  it('returns children of specific parent span', () => {
+    const store = new TraceStore(10)
+    const trace = store.startTrace({ module_id: 'a', trigger: { type: 'task', summary: 'test' } })
+
+    const loopSpan = store.startSpan(trace.trace_id, { type: 'agent_loop', details: { loop_label: 'w' } })
+    const llm1 = store.startSpan(trace.trace_id, {
+      type: 'llm_call', parent_span_id: loopSpan.span_id, details: { iteration: 1, input_summary: 'a' },
+    })
+    const llm2 = store.startSpan(trace.trace_id, {
+      type: 'llm_call', parent_span_id: loopSpan.span_id, details: { iteration: 2, input_summary: 'b' },
+    })
+
+    const result = store.getSpansAtDepth(trace.trace_id, { parent_span_id: loopSpan.span_id })
+    expect(result.spans).toHaveLength(2)
+    expect(result.spans.map(s => s.span_id)).toEqual([llm1.span_id, llm2.span_id])
   })
 })
