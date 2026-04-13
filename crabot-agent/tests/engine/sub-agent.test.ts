@@ -3,6 +3,7 @@ import { forkEngine, createSubAgentTool } from '../../src/engine/sub-agent'
 import type { LLMAdapter } from '../../src/engine/llm-adapter'
 import type { StreamChunk, ToolDefinition } from '../../src/engine/types'
 import { defineTool } from '../../src/engine/tool-framework'
+import { HumanMessageQueue } from '../../src/engine/human-message-queue'
 
 // --- Test Helpers (same pattern as query-loop tests) ---
 
@@ -246,5 +247,113 @@ describe('createSubAgentTool', () => {
 
     const props = (tool.inputSchema as any).properties
     expect(props).not.toHaveProperty('image_paths')
+  })
+})
+
+describe('createSubAgentTool with parentHumanQueue', () => {
+  it('creates child queue and propagates supplements to sub-agent', async () => {
+    const capturedMessages: unknown[][] = []
+    let subAgentCallIndex = 0
+
+    const subAdapter: LLMAdapter = {
+      async *stream(params) {
+        capturedMessages.push([...params.messages])
+        if (subAgentCallIndex === 0) {
+          for (const chunk of toolUseResponse('tu-1', 'sub_dummy', {})) yield chunk
+        } else {
+          for (const chunk of textResponse('Adjusted by sub-agent')) yield chunk
+        }
+        subAgentCallIndex++
+      },
+      updateConfig() {},
+    }
+
+    const subDummy = defineTool({
+      name: 'sub_dummy',
+      description: 'Sub dummy',
+      inputSchema: {},
+      isReadOnly: true,
+      call: async () => ({ output: 'ok', isError: false }),
+    })
+
+    const parentQueue = new HumanMessageQueue()
+
+    const origCall = subDummy.call
+    const toolWithSupplement = defineTool({
+      ...subDummy,
+      call: async (input, ctx) => {
+        parentQueue.push('用户补充：换个方向')
+        return origCall(input, ctx)
+      },
+    })
+
+    const tool = createSubAgentTool({
+      name: 'test_delegate',
+      description: 'Test delegate',
+      adapter: subAdapter,
+      model: 'test-model',
+      systemPrompt: 'You are a test sub-agent.',
+      subTools: [toolWithSupplement],
+      parentHumanQueue: parentQueue,
+    })
+
+    const result = await tool.call({ task: 'Do something' }, {})
+
+    expect(result.isError).toBe(false)
+    const parsed = JSON.parse(result.output)
+    expect(parsed.output).toBe('Adjusted by sub-agent')
+
+    expect(capturedMessages.length).toBe(2)
+    const secondCallMsgs = capturedMessages[1]
+    const allContent = secondCallMsgs.map((m: any) =>
+      typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+    ).join(' ')
+    expect(allContent).toContain('用户补充：换个方向')
+  })
+
+  it('removes child queue after sub-agent completes', async () => {
+    const adapter = mockAdapter([textResponse('Done')])
+    const parentQueue = new HumanMessageQueue()
+
+    const tool = createSubAgentTool({
+      name: 'test_delegate',
+      description: 'Test',
+      adapter,
+      model: 'test-model',
+      systemPrompt: 'Test.',
+      subTools: [],
+      parentHumanQueue: parentQueue,
+    })
+
+    await tool.call({ task: 'Quick task' }, {})
+
+    parentQueue.push('after completion')
+    expect(parentQueue.drainPending()).toEqual(['after completion'])
+  })
+
+  it('removes child queue even if sub-agent fails', async () => {
+    const failAdapter: LLMAdapter = {
+      async *stream() {
+        throw new Error('LLM crashed')
+      },
+      updateConfig() {},
+    }
+    const parentQueue = new HumanMessageQueue()
+
+    const tool = createSubAgentTool({
+      name: 'test_delegate',
+      description: 'Test',
+      adapter: failAdapter,
+      model: 'test-model',
+      systemPrompt: 'Test.',
+      subTools: [],
+      parentHumanQueue: parentQueue,
+    })
+
+    const result = await tool.call({ task: 'Fail task' }, {})
+    expect(result.isError).toBe(true)
+
+    parentQueue.push('after failure')
+    expect(parentQueue.drainPending()).toEqual(['after failure'])
   })
 })

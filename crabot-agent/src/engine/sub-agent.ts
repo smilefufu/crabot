@@ -2,6 +2,7 @@ import type { LLMAdapter } from './llm-adapter'
 import type { ToolDefinition, EngineTurnEvent, EngineResult, ContentBlock } from './types'
 import { runEngine } from './query-loop'
 import { resolveImageFromPaths } from '../agent/media-resolver'
+import { HumanMessageQueue } from './human-message-queue'
 
 // --- Fork Engine ---
 
@@ -26,6 +27,7 @@ export interface ForkEngineParams {
   readonly onTurn?: (event: EngineTurnEvent) => void
   /** Whether the sub-agent's model supports vision (image inputs) */
   readonly supportsVision?: boolean
+  readonly humanMessageQueue?: { readonly drainPending: () => Array<string | ContentBlock[]>; readonly hasPending: boolean }
 }
 
 export interface ForkEngineResult {
@@ -67,6 +69,7 @@ export async function forkEngine(params: ForkEngineParams): Promise<ForkEngineRe
       abortSignal: params.abortSignal,
       onTurn: params.onTurn,
       supportsVision: params.supportsVision,
+      humanMessageQueue: params.humanMessageQueue,
     },
   })
 
@@ -92,6 +95,7 @@ export interface SubAgentToolConfig {
   readonly maxTurns?: number
   readonly onSubAgentTurn?: (event: EngineTurnEvent) => void
   readonly supportsVision?: boolean
+  readonly parentHumanQueue?: HumanMessageQueue
 }
 
 export function createSubAgentTool(config: SubAgentToolConfig): ToolDefinition {
@@ -117,6 +121,22 @@ export function createSubAgentTool(config: SubAgentToolConfig): ToolDefinition {
       required: ['task'],
     },
     call: async (input, callContext) => {
+      let childQueue: HumanMessageQueue | undefined
+      if (config.parentHumanQueue) {
+        childQueue = config.parentHumanQueue.createChild((content) => {
+          const text = typeof content === 'string' ? content : '[多媒体纠偏消息]'
+          return [
+            '[实时纠偏 - 来自用户]\n',
+            '用户在你执行任务期间发来了补充指示：\n\n',
+            `"${text}"\n\n`,
+            '请判断：\n',
+            '- 如果此指示与你当前的工作直接相关，立即调整你的行为\n',
+            '- 如果此指示与你当前的工作无关（可能是针对整体任务的），忽略它继续工作\n',
+            '- 如果此指示表明你的整个子任务已不再需要，停止工作并返回当前已有的结果',
+          ].join('')
+        })
+      }
+
       try {
         let prompt: string | ReadonlyArray<ContentBlock> = String(input.task)
         const imagePaths = input.image_paths as string[] | undefined
@@ -141,6 +161,7 @@ export function createSubAgentTool(config: SubAgentToolConfig): ToolDefinition {
           abortSignal: callContext.abortSignal,
           onTurn: config.onSubAgentTurn,
           supportsVision: config.supportsVision,
+          humanMessageQueue: childQueue,
         })
 
         return {
@@ -156,6 +177,10 @@ export function createSubAgentTool(config: SubAgentToolConfig): ToolDefinition {
         return {
           output: `Sub-agent error: ${message}`,
           isError: true,
+        }
+      } finally {
+        if (childQueue && config.parentHumanQueue) {
+          config.parentHumanQueue.removeChild(childQueue)
         }
       }
     },
