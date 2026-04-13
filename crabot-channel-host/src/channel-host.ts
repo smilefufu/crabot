@@ -15,6 +15,7 @@ import { loadPlugin, type OutboundAdapter } from './plugin-loader.js'
 import { createChannelRuntime } from './runtime/index.js'
 import { msgContextToChannelMessage, messageContentToReplyPayload } from './msg-converter.js'
 import { extractPlatformTarget } from './proactive-send.js'
+import { splitTextByTableLimit } from './card-table-guard.js'
 import type {
   ModuleId,
   MsgContext,
@@ -195,10 +196,13 @@ export class ChannelHost extends ModuleBase {
       this.pendingDispatches.delete(params.session_id)
       await this.proactiveSend(params)
     } else if (dispatch) {
-      // 私聊：被动回复（保留原有行为）
+      // 私聊：被动回复
       const replyPayload = messageContentToReplyPayload(params.content)
-      console.log(`[ChannelHost] handleSendMessage: using pending dispatch (passive reply), text length=${(replyPayload.text ?? '').length}`)
-      await dispatch.deliver(replyPayload, { kind: 'final' })
+      const textChunks = splitTextByTableLimit(replyPayload.text ?? '')
+      console.log(`[ChannelHost] handleSendMessage: using pending dispatch (passive reply), text length=${(replyPayload.text ?? '').length}, chunks=${textChunks.length}`)
+      for (const chunk of textChunks) {
+        await dispatch.deliver({ ...replyPayload, text: chunk }, { kind: 'final' })
+      }
     } else {
       // 路径 2：主动发送（无入站消息，直接通过 outbound adapter 调用平台 API）
       console.log(`[ChannelHost] handleSendMessage: no pending dispatch, trying proactive send`)
@@ -263,11 +267,14 @@ export class ChannelHost extends ModuleBase {
         mediaUrl,
       })
     } else {
-      await this.pluginOutbound.sendText({
-        cfg: this.pluginCfg,
-        to,
-        text,
-      })
+      const chunks = splitTextByTableLimit(text)
+      for (const chunk of chunks) {
+        await this.pluginOutbound.sendText({
+          cfg: this.pluginCfg,
+          to,
+          text: chunk,
+        })
+      }
     }
 
     console.log(`[ChannelHost] proactiveSend: message sent successfully`)
