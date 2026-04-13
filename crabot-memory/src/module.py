@@ -2,6 +2,7 @@
 Memory 模块主类
 实现 JSON-RPC 接口和生命周期管理
 """
+import json
 import logging
 import asyncio
 from typing import Dict, Any, Optional, Callable
@@ -235,9 +236,6 @@ class MemoryModule:
 
     async def _get_memory(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """获取记忆详情"""
-        import json
-        from .types import GetMemoryParams, MemorySource, EntityRef
-
         get_params = GetMemoryParams(**params)
         result = await self.vector_store.get_by_id(get_params.memory_id)
         if result is None:
@@ -295,8 +293,6 @@ class MemoryModule:
 
     async def _delete_memory(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """删除记忆"""
-        from .types import DeleteMemoryParams
-
         delete_params = DeleteMemoryParams(**params)
         deleted = await self.vector_store.delete_by_id(delete_params.memory_id)
         if not deleted:
@@ -305,7 +301,6 @@ class MemoryModule:
 
     async def _update_memory(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """更新长期记忆"""
-        from .types import UpdateMemoryParams
         update_params = UpdateMemoryParams(**params)
         result = await self.long_term.update(update_params)
         return {
@@ -335,7 +330,6 @@ class MemoryModule:
 
     async def _batch_write_short_term(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """批量写入短期记忆"""
-        from .types import BatchWriteShortTermParams
         batch_params = BatchWriteShortTermParams(**params)
         memories = []
         failures = []
@@ -354,7 +348,6 @@ class MemoryModule:
 
     async def _batch_write_long_term(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """批量写入长期记忆"""
-        from .types import BatchWriteLongTermParams
         batch_params = BatchWriteLongTermParams(**params)
         results = []
         failures = []
@@ -397,9 +390,6 @@ class MemoryModule:
 
     async def _import_memories(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """导入记忆"""
-        from .types import ImportMemoriesParams, ShortTermMemoryEntry, LongTermMemoryEntry, MemorySource, EntityRef
-        import json
-
         import_params = ImportMemoriesParams(**params)
         data = import_params.data
 

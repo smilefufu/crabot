@@ -3,6 +3,7 @@
 提取并简化自 SimpleMem vector_store.py
 """
 import asyncio
+import json
 import logging
 from typing import List, Optional, Dict, Any
 from pathlib import Path
@@ -10,7 +11,7 @@ from pathlib import Path
 import lancedb
 import pyarrow as pa
 
-from ..types import ShortTermMemoryEntry, LongTermMemoryEntry, Visibility
+from ..types import ShortTermMemoryEntry, LongTermMemoryEntry, MemorySource, Visibility
 from ..utils.embedding import EmbeddingClient
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,25 @@ logger = logging.getLogger(__name__)
 def _run_sync(fn):
     """将同步函数包装到 executor 中运行，避免阻塞事件循环"""
     return asyncio.get_running_loop().run_in_executor(None, fn)
+
+
+def _build_visibility_filter(min_visibility: Visibility) -> Optional[str]:
+    """构建 visibility WHERE 子句"""
+    vis_order = {"private": 3, "internal": 2, "public": 1}
+    min_level = vis_order.get(min_visibility, 1)
+    if min_level >= 2:
+        return "visibility IN ('private', 'internal')"
+    elif min_level >= 1:
+        return "visibility IN ('private', 'internal', 'public')"
+    return None
+
+
+def _build_scopes_filter(accessible_scopes: Optional[List[str]]) -> Optional[str]:
+    """构建 scopes WHERE 子句"""
+    if not accessible_scopes:
+        return None
+    scope_conditions = [f"array_has(scopes, '{s}')" for s in accessible_scopes]
+    return f"({' OR '.join(scope_conditions)})"
 
 
 class VectorStore:
@@ -131,7 +151,6 @@ class VectorStore:
     async def add_short_term(self, entry: ShortTermMemoryEntry, vector: Optional[List[float]] = None):
         """添加短期记忆。可传入预计算的 vector 跳过 embedding 调用"""
         await self.ensure_tables()
-        import json
         if vector is None:
             vector = await self.embedding_client.embed_single(entry.content)
         data = {
@@ -168,28 +187,14 @@ class VectorStore:
     ) -> List[ShortTermMemoryEntry]:
         """检索短期记忆"""
         await self.ensure_tables()
-        import json
-        from ..types import MemorySource
 
-        # 构建权限过滤条件
         filters = []
-        vis_order = {"private": 3, "internal": 2, "public": 1}
-        min_level = vis_order.get(min_visibility, 1)
-        if min_level >= 2:
-            filters.append("visibility IN ('private', 'internal')")
-        elif min_level >= 1:
-            filters.append("visibility IN ('private', 'internal', 'public')")
-
-        # 添加 refs 过滤（通过 JSON 字段匹配）
-        if filter_refs:
-            for key, value in filter_refs.items():
-                # LanceDB 不支持直接 JSON 查询，需要全表扫描后过滤
-                # 暂时标记需要后处理
-                pass
-
-        if accessible_scopes:
-            scope_conditions = [f"array_has(scopes, '{s}')" for s in accessible_scopes]
-            filters.append(f"({' OR '.join(scope_conditions)})")
+        vis_filter = _build_visibility_filter(min_visibility)
+        if vis_filter:
+            filters.append(vis_filter)
+        scopes_filter = _build_scopes_filter(accessible_scopes)
+        if scopes_filter:
+            filters.append(scopes_filter)
 
         # 时间范围过滤
         if time_range:
@@ -273,7 +278,6 @@ class VectorStore:
     async def add_long_term(self, entry: LongTermMemoryEntry, vector: Optional[List[float]] = None):
         """添加长期记忆。可传入预计算的 vector 跳过 embedding 调用"""
         await self.ensure_tables()
-        import json
         if vector is None:
             vector = await self.embedding_client.embed_single(entry.abstract)
         data = {
@@ -333,21 +337,15 @@ class VectorStore:
 
         vector = await self.embedding_client.embed_single(query)
 
-        # 构建可前置到 LanceDB WHERE 的过滤条件
         filters = []
-        vis_order = {"private": 3, "internal": 2, "public": 1}
-        min_level = vis_order.get(min_visibility, 1)
-        if min_level >= 2:
-            filters.append("visibility IN ('private', 'internal')")
-        elif min_level >= 1:
-            filters.append("visibility IN ('private', 'internal', 'public')")
-
+        vis_filter = _build_visibility_filter(min_visibility)
+        if vis_filter:
+            filters.append(vis_filter)
         if importance_min is not None:
             filters.append(f"importance >= {importance_min}")
-
-        if accessible_scopes:
-            scope_conditions = [f"array_has(scopes, '{s}')" for s in accessible_scopes]
-            filters.append(f"({' OR '.join(scope_conditions)})")
+        scopes_filter = _build_scopes_filter(accessible_scopes)
+        if scopes_filter:
+            filters.append(scopes_filter)
 
         where_clause = " AND ".join(filters) if filters else None
 
@@ -361,7 +359,6 @@ class VectorStore:
 
         # 后过滤：entity_id/entity_type/tags（需要解析 JSON，无法前置）
         if entity_id is not None or entity_type is not None or tags is not None:
-            import json
             filtered_rows = []
             for row in rows:
                 if tags:
@@ -485,13 +482,12 @@ class VectorStore:
             )
         return await _run_sync(_do_query)
 
-    async def delete_by_ids(self, table_name: str, ids: List[str]):
-        """批量删除指定 ID 的行"""
+    async def delete_short_term_by_ids(self, ids: List[str]):
+        """批量删除指定 ID 的短期记忆"""
         await self.ensure_tables()
-        table = self.short_term_table if table_name == "short" else self.long_term_table
         id_list = ", ".join(f"'{id}'" for id in ids)
         where = f"id IN ({id_list})"
-        await _run_sync(lambda: table.delete(where))
+        await _run_sync(lambda: self.short_term_table.delete(where))
 
     async def rotate_short_term(self, before_time: str):
         """删除指定时间之前的所有短期记忆"""

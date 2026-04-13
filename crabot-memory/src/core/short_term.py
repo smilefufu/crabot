@@ -6,6 +6,7 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 from ..types import (
+    MemorySource,
     ShortTermMemoryEntry,
     WriteShortTermParams,
     SearchShortTermParams,
@@ -110,10 +111,9 @@ class ShortTermMemory:
                     all_scopes.update(r.get("scopes") or [])
 
                 old_ids = [r["id"] for r in batch]
-                await self.vector_store.delete_by_ids("short", old_ids)
+                await self.vector_store.delete_short_term_by_ids(old_ids)
 
                 for fact in compressed_facts:
-                    from ..types import ShortTermMemoryEntry, MemorySource
                     entry = ShortTermMemoryEntry(
                         content=fact,
                         event_time=batch[0]["event_time"],

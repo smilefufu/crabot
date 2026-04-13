@@ -1,18 +1,22 @@
 """
 长期记忆核心逻辑（简化版）
 """
+import asyncio
+import json
 import logging
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 from ..types import (
+    EntityRef,
     LongTermMemoryEntry,
     LongTermL0Entry,
     LongTermL1Entry,
+    MemorySource,
+    UpdateMemoryParams,
     WriteLongTermParams,
     SearchLongTermParams,
     SearchLongTermResultItem,
-    EntityRef,
 )
 from ..storage.vector_store import VectorStore
 from ..utils.llm_client import LLMClient
@@ -37,10 +41,6 @@ class LongTermMemory:
 
     async def write(self, params: WriteLongTermParams) -> Dict[str, Any]:
         """写入长期记忆，含去重逻辑"""
-        import asyncio
-        import json
-        from ..types import MemorySource, UpdateMemoryParams
-
         # 阶段一：并行生成 L0/L1 摘要和关键词（互不依赖）
         async def gen_summaries():
             try:
@@ -217,9 +217,6 @@ class LongTermMemory:
     @staticmethod
     def _row_to_entry(row: Dict[str, Any]) -> LongTermMemoryEntry:
         """从 LanceDB 行数据重建 LongTermMemoryEntry"""
-        import json
-        from ..types import MemorySource, EntityRef
-
         entities_data = json.loads(row["entities_json"]) if row.get("entities_json") else []
         source_data = json.loads(row["source_json"])
         metadata_data = json.loads(row["metadata_json"]) if row.get("metadata_json") else None
@@ -245,7 +242,6 @@ class LongTermMemory:
 
     async def search(self, params: SearchLongTermParams) -> List[SearchLongTermResultItem]:
         """检索长期记忆"""
-        import json
         f = params.filter
         rows = await self.vector_store.search_long_term(
             query=params.query,
@@ -271,7 +267,6 @@ class LongTermMemory:
                     created_at=row["created_at"],
                 )
             elif params.detail == "L1":
-                from ..types import MemorySource
                 source_data = json.loads(row["source_json"])
                 entities_data = json.loads(row["entities_json"])
                 memory = LongTermL1Entry(
@@ -288,28 +283,7 @@ class LongTermMemory:
                     scopes=list(row["scopes"] or []),
                 )
             else:  # L2
-                from ..types import MemorySource
-                source_data = json.loads(row["source_json"])
-                entities_data = json.loads(row["entities_json"])
-                metadata_data = json.loads(row["metadata_json"]) if row["metadata_json"] else None
-                memory = LongTermMemoryEntry(
-                    id=row["id"],
-                    abstract=row["abstract"],
-                    overview=row["overview"],
-                    content=row["content"],
-                    entities=[EntityRef(**e) for e in entities_data],
-                    importance=row["importance"],
-                    keywords=list(row["keywords"] or []),
-                    tags=list(row["tags"] or []),
-                    source=MemorySource(**source_data),
-                    metadata=metadata_data,
-                    read_count=row["read_count"],
-                    version=row["version"],
-                    visibility=row["visibility"],
-                    scopes=list(row["scopes"] or []),
-                    created_at=row["created_at"],
-                    updated_at=row["updated_at"],
-                )
+                memory = self._row_to_entry(row)
 
             # 计算相关性（简化：使用距离的倒数）
             relevance = 0.9  # 简化实现
@@ -319,9 +293,6 @@ class LongTermMemory:
 
     async def update(self, params) -> Dict[str, Any]:
         """更新长期记忆"""
-        import json
-        from ..types import EntityRef, MemorySource
-
         # 1. 查旧条目
         result = await self.vector_store.get_by_id(params.memory_id)
         if result is None:
