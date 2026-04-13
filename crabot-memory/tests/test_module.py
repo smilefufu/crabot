@@ -267,8 +267,6 @@ async def test_short_term_compression(memory_module):
     memory_module.config.compression.retention_window_days = 0
     memory_module.config.compression.window_size = 5
 
-    count_before = memory_module.vector_store.get_short_term_count()
-
     for i in range(5):
         await memory_module._write_short_term(WriteShortTermParams(
             content=f"事件 {i}: 用户请求操作 {i}",
@@ -276,12 +274,14 @@ async def test_short_term_compression(memory_module):
             event_time=f"2026-01-0{i+1}T00:00:00Z",
         ).model_dump())
 
+    count_before_compress = memory_module.vector_store.get_short_term_count()
+
     result = await memory_module.short_term.compress(memory_module.config.compression)
     assert result["compressed_count"] > 0
 
     count_after = memory_module.vector_store.get_short_term_count()
-    # 压缩后总数应该比压缩前 + 5 条原始写入更少（压缩减少了条目数）
-    assert count_after < count_before + 5
+    # 压缩将多条合并为更少条目，总数应减少
+    assert count_after < count_before_compress
 
 
 @pytest.mark.asyncio
