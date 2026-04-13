@@ -192,6 +192,76 @@ describe('TraceStore getFullTrace', () => {
   })
 })
 
+describe('TraceStore getTraceTree', () => {
+  it('groups traces by role (fronts/worker/subagents)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-tree-'))
+    try {
+      const traces = [
+        { trace_id: 'front-1', module_id: 'a', related_task_id: 'task-1', started_at: '2026-04-13T10:00:00Z', status: 'completed', trigger: { type: 'message', summary: 'create task' }, spans: [] },
+        { trace_id: 'worker-1', module_id: 'a', related_task_id: 'task-1', started_at: '2026-04-13T10:01:00Z', status: 'completed', trigger: { type: 'task', summary: 'do work' }, spans: [] },
+        { trace_id: 'sub-1', module_id: 'a', related_task_id: 'task-1', parent_trace_id: 'worker-1', started_at: '2026-04-13T10:02:00Z', status: 'completed', trigger: { type: 'sub_agent_call', summary: 'delegate' }, spans: [] },
+        { trace_id: 'front-2', module_id: 'a', related_task_id: 'task-1', started_at: '2026-04-13T10:03:00Z', status: 'completed', trigger: { type: 'message', summary: 'supplement' }, spans: [] },
+      ]
+      fs.writeFileSync(path.join(dir, 'traces-2026-04-13.jsonl'), traces.map(t => JSON.stringify(t)).join('\n') + '\n')
+
+      const store = new TraceStore(10, dir)
+      const tree = store.getTraceTree('task-1')
+
+      expect(tree.task_id).toBe('task-1')
+      expect(tree.tree.fronts).toHaveLength(2)
+      expect(tree.tree.worker?.trace_id).toBe('worker-1')
+      expect(tree.tree.subagents).toHaveLength(1)
+    } finally {
+      fs.rmSync(dir, { recursive: true })
+    }
+  })
+
+  it('returns empty tree for unknown task_id', () => {
+    const store = new TraceStore(10)
+    const tree = store.getTraceTree('nonexistent')
+    expect(tree.tree.fronts).toHaveLength(0)
+    expect(tree.tree.worker).toBeNull()
+    expect(tree.tree.subagents).toHaveLength(0)
+  })
+})
+
+describe('TraceStore cleanupOldFiles', () => {
+  it('removes JSONL files older than retention days', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-cleanup-'))
+    try {
+      fs.writeFileSync(path.join(dir, 'traces-2026-03-01.jsonl'), JSON.stringify({ trace_id: 'old', module_id: 'a', started_at: '2026-03-01T00:00:00Z', status: 'completed', trigger: { type: 'message', summary: 'old' }, spans: [] }) + '\n')
+      fs.writeFileSync(path.join(dir, 'traces-2026-04-13.jsonl'), JSON.stringify({ trace_id: 'new', module_id: 'a', started_at: '2026-04-13T00:00:00Z', status: 'completed', trigger: { type: 'message', summary: 'new' }, spans: [] }) + '\n')
+
+      const store = new TraceStore(10, dir)
+      // Both should be in index
+      expect(store.searchTraces({}).total).toBe(2)
+
+      const removed = store.cleanupOldFiles(30)
+      expect(removed).toBe(1)
+      expect(fs.existsSync(path.join(dir, 'traces-2026-03-01.jsonl'))).toBe(false)
+      expect(fs.existsSync(path.join(dir, 'traces-2026-04-13.jsonl'))).toBe(true)
+
+      // Index should be updated
+      expect(store.searchTraces({}).total).toBe(1)
+    } finally {
+      fs.rmSync(dir, { recursive: true })
+    }
+  })
+
+  it('returns 0 when no files are expired', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-cleanup-'))
+    try {
+      fs.writeFileSync(path.join(dir, 'traces-2026-04-13.jsonl'), JSON.stringify({ trace_id: 'new', module_id: 'a', started_at: '2026-04-13T00:00:00Z', status: 'completed', trigger: { type: 'message', summary: 'new' }, spans: [] }) + '\n')
+
+      const store = new TraceStore(10, dir)
+      const removed = store.cleanupOldFiles(30)
+      expect(removed).toBe(0)
+    } finally {
+      fs.rmSync(dir, { recursive: true })
+    }
+  })
+})
+
 describe('TraceStore getSpansAtDepth', () => {
   it('returns top-level spans with children_count', () => {
     const store = new TraceStore(10)

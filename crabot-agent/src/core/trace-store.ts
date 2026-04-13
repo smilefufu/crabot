@@ -21,6 +21,15 @@ export interface SpanWithMeta {
   children_count: number
 }
 
+export interface TraceTree {
+  task_id: string
+  tree: {
+    fronts: TraceIndexEntry[]
+    worker: TraceIndexEntry | null
+    subagents: TraceIndexEntry[]
+  }
+}
+
 export interface TraceIndexEntry {
   trace_id: string
   related_task_id?: string
@@ -392,6 +401,70 @@ export class TraceStore {
     this.traces.clear()
     this.order = []
     return count
+  }
+
+  getTraceTree(taskId: string): TraceTree {
+    const { traces } = this.searchTraces({ task_id: taskId, limit: 100 })
+
+    const fronts: TraceIndexEntry[] = []
+    let worker: TraceIndexEntry | null = null
+    const subagents: TraceIndexEntry[] = []
+
+    for (const t of traces) {
+      switch (t.trigger_type) {
+        case 'message':
+          fronts.push(t)
+          break
+        case 'task':
+          worker = t
+          break
+        case 'sub_agent_call':
+          subagents.push(t)
+          break
+        default:
+          fronts.push(t)
+      }
+    }
+
+    return { task_id: taskId, tree: { fronts, worker, subagents } }
+  }
+
+  cleanupOldFiles(retentionDays: number): number {
+    if (!this.persistDir) return 0
+
+    const cutoff = new Date()
+    cutoff.setDate(cutoff.getDate() - retentionDays)
+    const cutoffStr = cutoff.toISOString().slice(0, 10)
+
+    let removed = 0
+    try {
+      const files = fs.readdirSync(this.persistDir)
+        .filter(f => f.startsWith('traces-') && f.endsWith('.jsonl'))
+
+      for (const file of files) {
+        const dateStr = file.slice('traces-'.length, 'traces-'.length + 10)
+        if (dateStr < cutoffStr) {
+          fs.unlinkSync(path.join(this.persistDir, file))
+          this.traceIndex = this.traceIndex.filter(e => e.file !== file)
+          removed++
+        }
+      }
+      if (removed > 0) {
+        this.rebuildTaskIndex()
+      }
+    } catch { /* best effort */ }
+
+    return removed
+  }
+
+  private rebuildTaskIndex(): void {
+    this.taskIndex.clear()
+    for (const entry of this.traceIndex) {
+      if (entry.related_task_id) {
+        const existing = this.taskIndex.get(entry.related_task_id) ?? []
+        this.taskIndex.set(entry.related_task_id, [...existing, entry.trace_id])
+      }
+    }
   }
 
   private persistTrace(trace: AgentTrace): void {
