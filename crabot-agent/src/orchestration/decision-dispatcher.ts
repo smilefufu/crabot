@@ -1,7 +1,9 @@
 /**
  * Decision Dispatcher - 决策分发器
  *
- * 根据 Front Agent 的决策类型执行相应操作
+ * 根据 Front Agent 的决策类型执行相应操作。
+ * Worker 在同一模块内，直接调用本地方法，不走 RPC。
+ * 跨模块通信（Admin、Channel）通过 RPC。
  */
 
 import type { ModuleId, RpcClient, RpcTraceContext } from 'crabot-shared'
@@ -14,7 +16,7 @@ import type {
   MemoryPermissions,
   Friend,
 } from '../types.js'
-import { WorkerSelector } from './worker-selector.js'
+import type { WorkerHandler } from '../agent/worker-handler.js'
 import { ContextAssembler } from './context-assembler.js'
 import { MemoryWriter } from './memory-writer.js'
 
@@ -29,15 +31,23 @@ interface AdminTask {
 }
 
 export class DecisionDispatcher {
+  private workerHandler: WorkerHandler | null = null
+
   constructor(
     private rpcClient: RpcClient,
     private moduleId: string,
-    private workerSelector: WorkerSelector,
     private contextAssembler: ContextAssembler,
     private memoryWriter: MemoryWriter,
     private getAdminPort: () => number | Promise<number>,
     private getChannelPort: (channelId: ModuleId) => Promise<number>
   ) {}
+
+  /**
+   * 设置本地 Worker Handler 引用（UnifiedAgent 在初始化 Worker 后调用）
+   */
+  setWorkerHandler(handler: WorkerHandler): void {
+    this.workerHandler = handler
+  }
 
   /**
    * 分发决策
@@ -141,6 +151,10 @@ export class DecisionDispatcher {
     },
     traceCtx?: RpcTraceContext
   ): Promise<{ task_id: string }> {
+    if (!this.workerHandler) {
+      throw new Error('Worker handler not configured')
+    }
+
     // 1. 发送即时回复（如果有内容）
     const replyText = decision.immediate_reply?.text
     if (replyText) {
@@ -172,7 +186,7 @@ export class DecisionDispatcher {
       }
     }
 
-    // 2. 创建任务
+    // 2. 在 Admin 创建任务记录（跨模块 RPC）
     const adminPort = await this.getAdminPort()
     const taskResult = await this.rpcClient.call<
       {
@@ -216,13 +230,7 @@ export class DecisionDispatcher {
 
     const task = taskResult.task
 
-    // 3. 选择 Worker
-    const workerId = await this.workerSelector.selectWorker({
-      task_type: decision.task_type,
-      specialization_hint: decision.preferred_worker_specialization,
-    })
-
-    // 4. 组装 Worker 上下文
+    // 3. 组装 Worker 上下文
     const lastMessage = params.messages[params.messages.length - 1]
     const workerContext = await this.contextAssembler.assembleWorkerContext({
       channel_id: params.channel_id,
@@ -232,13 +240,6 @@ export class DecisionDispatcher {
       friend_id: lastMessage.sender.friend_id,
     }, params.memoryPermissions)
 
-    // 5. 异步调用 Worker 执行任务（fire-and-forget，不阻塞 Front）
-    //    Worker 完成后更新 Admin 任务状态 + 回复用户
-    const workers = await this.rpcClient.resolve({ module_id: workerId }, this.moduleId)
-    if (workers.length === 0) {
-      throw new Error(`Worker not found: ${workerId}`)
-    }
-
     const enrichedContext = {
       ...workerContext,
       trigger_messages: params.messages,
@@ -246,21 +247,16 @@ export class DecisionDispatcher {
       front_immediate_reply: replyText,
     }
 
-    this.executeTaskInBackground(
-      workers[0].port,
-      task,
-      enrichedContext,
-      params
-    )
+    // 4. 直接调用本地 Worker 执行（fire-and-forget，不阻塞 Front）
+    this.executeTaskInBackground(task, enrichedContext, params)
 
     return { task_id: task.id }
   }
 
   /**
-   * 后台执行任务：调用 Worker → 更新 Admin 任务状态 → 回复用户
+   * 后台执行任务：本地 Worker 执行 → 更新 Admin 任务状态 → 回复用户
    */
   private executeTaskInBackground(
-    workerPort: number,
     task: AdminTask,
     workerContext: import('../types.js').WorkerAgentContext,
     params: {
@@ -278,7 +274,7 @@ export class DecisionDispatcher {
     const run = async () => {
       const adminPort = await this.getAdminPort()
 
-      // 推进任务状态：pending → planning → executing（遵循 Admin 状态机）
+      // 推进任务状态：pending → planning → executing（Admin 跨模块 RPC）
       try {
         await this.rpcClient.call(
           adminPort, 'update_task_status',
@@ -296,13 +292,8 @@ export class DecisionDispatcher {
       }
 
       try {
-        // 调用 Worker 执行
-        const result = await this.rpcClient.call<
-          import('../types.js').ExecuteTaskParams,
-          import('../types.js').ExecuteTaskResult
-        >(
-          workerPort,
-          'execute_task',
+        // 直接调用本地 Worker
+        const result = await this.workerHandler!.executeTask(
           {
             task: {
               task_id: task.id,
@@ -314,10 +305,9 @@ export class DecisionDispatcher {
             },
             context: workerContext,
           },
-          this.moduleId
         )
 
-        // 更新 Admin 任务状态 + 持久化 result
+        // 更新 Admin 任务状态（跨模块 RPC）
         const finalStatus = result.outcome === 'completed' ? 'completed' : 'failed'
         await this.rpcClient.call(
           adminPort,
@@ -339,7 +329,7 @@ export class DecisionDispatcher {
           console.error(`[DecisionDispatcher] Failed to update task status: ${msg}`)
         })
 
-        // 写入短期记忆：Task 完成/失败事件（fire-and-forget）
+        // 写入短期记忆（fire-and-forget）
         const friendName = params.senderFriend?.display_name ?? 'Unknown'
         const friendId = params.messages[params.messages.length - 1]?.sender?.friend_id ?? ''
         this.memoryWriter.writeTaskFinished({
@@ -355,7 +345,7 @@ export class DecisionDispatcher {
           scopes: params.memoryPermissions.write_scopes,
         }).catch(() => {})
 
-        // 回复用户（仅当 Worker 提供了 final_reply 时；进度流已发过的不重复）
+        // 回复用户（仅当 Worker 提供了 final_reply 时）
         if (result.final_reply?.text) {
           await this.sendReplyToUser(result.final_reply.text, params)
         }
@@ -363,7 +353,7 @@ export class DecisionDispatcher {
         const msg = error instanceof Error ? error.message : String(error)
         console.error(`[DecisionDispatcher] Background task ${task.id} failed: ${msg}`)
 
-        // 更新任务为失败：executing → failed
+        // 更新任务为失败
         try {
           await this.rpcClient.call(
             adminPort,
@@ -373,10 +363,8 @@ export class DecisionDispatcher {
           )
         } catch { /* best effort */ }
 
-        // 回复用户失败信息
         await this.sendReplyToUser('任务处理失败，请稍后重试', params).catch(() => {})
 
-        // 写入短期记忆：Task 失败事件（fire-and-forget）
         const failFriendName = params.senderFriend?.display_name ?? 'Unknown'
         const failFriendId = params.messages[params.messages.length - 1]?.sender?.friend_id ?? ''
         this.memoryWriter.writeTaskFinished({
@@ -400,7 +388,7 @@ export class DecisionDispatcher {
   }
 
   /**
-   * 向用户发送回复（Channel 或 Admin Chat）
+   * 向用户发送回复（Channel 或 Admin Chat，跨模块 RPC）
    */
   private async sendReplyToUser(
     text: string,
@@ -440,10 +428,7 @@ export class DecisionDispatcher {
   }
 
   /**
-   * 处理补充任务指示
-   *
-   * 通过 Admin RPC 查找任务对应的 Worker，然后投递补充消息。
-   * 统一处理本地和远程 Worker 场景。
+   * 处理补充/纠偏任务：直接调用本地 Worker 投递
    */
   private async handleSupplementTask(
     decision: SupplementTaskDecision,
@@ -454,65 +439,47 @@ export class DecisionDispatcher {
     },
     traceCtx?: RpcTraceContext,
   ): Promise<{ task_id?: string }> {
-    // Send immediate reply if provided
-    if (decision.immediate_reply?.text) {
-      const adminPort = await this.getAdminPort()
-      if (params.admin_chat_callback) {
-        await this.rpcClient.call(adminPort, 'chat_callback', {
-          request_id: params.admin_chat_callback.request_id,
-          reply_type: 'direct_reply',
-          content: decision.immediate_reply.text,
-        }, this.moduleId, traceCtx)
-      } else {
-        const channelPort = await this.getChannelPort(params.channel_id)
-        await this.rpcClient.call(channelPort, 'send_message', {
-          session_id: params.session_id,
-          content: { type: 'text', text: decision.immediate_reply.text },
-        }, this.moduleId, traceCtx)
-      }
+    if (!this.workerHandler) {
+      throw new Error('Worker handler not configured')
     }
 
-    // Find worker via Admin and deliver supplement
-    try {
-      const adminPort = await this.getAdminPort()
-      const taskResult = await this.rpcClient.call<
-        { task_id: string },
-        { task: { id: string; status: string; worker_agent_id?: string } }
-      >(adminPort, 'get_task', { task_id: decision.task_id }, this.moduleId, traceCtx)
-      const taskInfo = taskResult.task
+    // Step 1: 验证任务存在（本地 O(1) 查询）
+    const taskExists = this.workerHandler.hasActiveTask(decision.task_id)
 
-      if (taskInfo.worker_agent_id && ['executing', 'planning'].includes(taskInfo.status)) {
-        const workers = await this.rpcClient.resolve(
-          { module_id: taskInfo.worker_agent_id }, this.moduleId,
-        )
-        if (workers.length > 0) {
-          await this.rpcClient.call(workers[0].port, 'deliver_human_response', {
-            task_id: decision.task_id,
-            messages: [{
-              platform_message_id: `supplement-${Date.now()}`,
-              session: {
-                channel_id: params.channel_id,
-                session_id: params.session_id,
-                type: 'private' as const,
-              },
-              sender: {
-                friend_id: 'system',
-                platform_user_id: 'system',
-                platform_display_name: 'System',
-              },
-              content: {
-                type: 'text' as const,
-                text: `用户补充指示：${decision.supplement_content}`,
-              },
-              features: { is_mention_crab: false },
-              platform_timestamp: new Date().toISOString(),
-            }],
-          }, this.moduleId, traceCtx)
-        }
-      }
+    // Step 2: 发送即时回复
+    if (decision.immediate_reply?.text) {
+      await this.sendReplyToUser(decision.immediate_reply.text, params)
+    }
+
+    // Step 3: 投递纠偏消息（本地直接调用）
+    if (!taskExists) {
+      console.error(`[DecisionDispatcher] Supplement target task ${decision.task_id} not found locally`)
+      return { task_id: decision.task_id }
+    }
+
+    try {
+      this.workerHandler.deliverHumanResponse(decision.task_id, [{
+        platform_message_id: `supplement-${Date.now()}`,
+        session: {
+          channel_id: params.channel_id,
+          session_id: params.session_id,
+          type: 'private' as const,
+        },
+        sender: {
+          friend_id: 'system',
+          platform_user_id: 'system',
+          platform_display_name: 'System',
+        },
+        content: {
+          type: 'text' as const,
+          text: `用户补充指示：${decision.supplement_content}`,
+        },
+        features: { is_mention_crab: false },
+        platform_timestamp: new Date().toISOString(),
+      }])
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
-      console.error(`[DecisionDispatcher] Failed to deliver supplement to task ${decision.task_id}: ${msg}`)
+      console.error(`[DecisionDispatcher] Failed to deliver supplement: ${msg}`)
     }
 
     return { task_id: decision.task_id }

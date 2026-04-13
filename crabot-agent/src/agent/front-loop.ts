@@ -40,6 +40,8 @@ export interface FrontLoopParams {
   readonly rawUserText: string
   /** silent 仅在群聊且未被 @ 时可用 */
   readonly allowSilent: boolean
+  /** 当前活跃任务 ID 列表，为空时不暴露 supplement_task 选项 */
+  readonly activeTaskIds: readonly string[]
   readonly adapter: LLMAdapter
   readonly model: string
   readonly toolExecutor: ToolExecutor
@@ -47,8 +49,9 @@ export interface FrontLoopParams {
 }
 
 export async function runFrontLoop(params: FrontLoopParams): Promise<FrontLoopResult> {
-  const { systemPrompt, userMessage, rawUserText, allowSilent, adapter, model, toolExecutor, traceCallback } = params
-  const tools: ToolDefinition[] = getAllFrontTools(allowSilent)
+  const { systemPrompt, userMessage, rawUserText, allowSilent, activeTaskIds, adapter, model, toolExecutor, traceCallback } = params
+  const hasActiveTasks = activeTaskIds.length > 0
+  const tools: ToolDefinition[] = getAllFrontTools(allowSilent, hasActiveTasks)
   const messages: EngineMessage[] = [createUserMessage(userMessage)]
   const toolHistory: ToolHistoryEntry[] = []
 
@@ -129,7 +132,7 @@ export async function runFrontLoop(params: FrontLoopParams): Promise<FrontLoopRe
           // make_decision -> validate first, return structured decision or error
           if (block.name === 'make_decision') {
             const rawInput = block.input as Record<string, unknown>
-            const validationError = validateMakeDecision(rawInput)
+            const validationError = validateMakeDecision(rawInput, activeTaskIds)
 
             if (validationError) {
               // 校验失败：作为 tool error 返回给 LLM，让它重试
@@ -222,7 +225,7 @@ function getReplyText(input: Record<string, unknown>): string {
 /**
  * 校验 make_decision 输入，返回错误提示（null 表示通过）
  */
-function validateMakeDecision(input: Record<string, unknown>): string | null {
+function validateMakeDecision(input: Record<string, unknown>, activeTaskIds: readonly string[]): string | null {
   const type = input.type as string
   if (!type) return '缺少必填参数 type'
 
@@ -235,6 +238,8 @@ function validateMakeDecision(input: Record<string, unknown>): string | null {
       break
     case 'supplement_task':
       if (!input.task_id) return 'type=supplement_task 时 task_id 为必填参数，请指明目标任务'
+      if (activeTaskIds.length === 0) return '当前没有活跃任务，无法纠偏。如果是新请求请使用 create_task，如果是简单回复请使用 direct_reply'
+      if (!activeTaskIds.includes(input.task_id as string)) return `task_id "${input.task_id}" 不在活跃任务列表中，可选任务: ${activeTaskIds.join(', ')}。请重新选择`
       break
     case 'silent':
       break

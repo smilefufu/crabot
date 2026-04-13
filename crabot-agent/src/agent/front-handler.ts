@@ -67,6 +67,7 @@ export class FrontHandler {
         userMessage,
         rawUserText,
         allowSilent,
+        activeTaskIds: context.active_tasks.map(t => t.task_id),
         adapter: this.adapter,
         model: this.model,
         toolExecutor: this.toolExecutor,

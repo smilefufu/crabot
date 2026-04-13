@@ -13,13 +13,20 @@ import type { ToolDefinition } from '../engine/types.js'
 
 const NOOP_CALL = async () => ({ output: '', isError: false as const })
 
-export function makeDecisionTool(allowSilent: boolean): ToolDefinition {
-  const types = allowSilent
-    ? ['direct_reply', 'create_task', 'supplement_task', 'silent']
-    : ['direct_reply', 'create_task', 'supplement_task']
-  const desc = allowSilent
-    ? 'direct_reply=直接回复, create_task=创建新任务, supplement_task=补充/纠偏已有任务, silent=静默'
-    : 'direct_reply=直接回复, create_task=创建新任务, supplement_task=补充/纠偏已有任务'
+export function makeDecisionTool(allowSilent: boolean, hasActiveTasks: boolean): ToolDefinition {
+  const types = [
+    'direct_reply',
+    'create_task',
+    ...(hasActiveTasks ? ['supplement_task'] : []),
+    ...(allowSilent ? ['silent'] : []),
+  ]
+  const descParts = [
+    'direct_reply=直接回复',
+    'create_task=创建新任务',
+    ...(hasActiveTasks ? ['supplement_task=补充/纠偏已有任务'] : []),
+    ...(allowSilent ? ['silent=静默'] : []),
+  ]
+  const desc = descParts.join(', ')
   return {
     name: 'make_decision',
     description: '做出最终决策。分析完消息后必须调用此工具输出决策。',
@@ -311,9 +318,9 @@ export const GET_MEMORY_DETAIL_TOOL: ToolDefinition = {
 }
 
 /** All Front tools in order */
-export function getAllFrontTools(allowSilent: boolean): ToolDefinition[] {
+export function getAllFrontTools(allowSilent: boolean, hasActiveTasks: boolean): ToolDefinition[] {
   return [
-    makeDecisionTool(allowSilent),
+    makeDecisionTool(allowSilent, hasActiveTasks),
     QUERY_TASKS_TOOL,
     CREATE_SCHEDULE_TOOL,
     LOOKUP_FRIEND_TOOL,

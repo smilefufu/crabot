@@ -687,6 +687,10 @@ export class WorkerHandler {
 
   getActiveTaskCount(): number { return this.activeTasks.size }
 
+  hasActiveTask(taskId: TaskId): boolean {
+    return this.activeTasks.has(taskId)
+  }
+
   getActiveTasksForQuery(): Array<{ task_id: string; status: string; started_at: string; title?: string }> {
     return Array.from(this.activeTasks.values()).map(t => ({
       task_id: t.taskId,

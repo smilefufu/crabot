@@ -179,7 +179,6 @@ export class UnifiedAgent extends ModuleBase {
     this.decisionDispatcher = new DecisionDispatcher(
       this.rpcClient,
       config.module_id,
-      this.workerSelector,
       this.contextAssembler,
       this.memoryWriter,
       async () => await this.getAdminPort(),
@@ -280,6 +279,7 @@ export class UnifiedAgent extends ModuleBase {
         this.workerHandler = this.createWorkerHandler(
           this.sdkEnvWorker, config.model_config, workerPersonality,
           createMcpConfigs, config.builtin_tool_config, config.skills)
+        this.decisionDispatcher.setWorkerHandler(this.workerHandler)
       }
     }
   }
@@ -612,9 +612,32 @@ export class UnifiedAgent extends ModuleBase {
           details: { decision_type: decision.type, summary: decisionSummary },
         })
 
-        // supplement_task: deliver directly to local Worker (bypass Admin lookup)
         if (decision.type === 'supplement_task' && this.workerHandler) {
-          await this.handleLocalSupplement(decision, session, trace.trace_id, decisionSpan.span_id)
+          const delivered = await this.handleLocalSupplement(decision, session, trace.trace_id, decisionSpan.span_id)
+          if (!delivered) {
+            // 目标任务不存在 → 改写为 create_task，确保用户请求被真正执行
+            await this.decisionDispatcher.dispatch(
+              {
+                type: 'create_task',
+                task_title: decision.supplement_content.slice(0, 60) || '用户追加请求',
+                task_description: decision.supplement_content,
+                task_type: 'general',
+                immediate_reply: decision.immediate_reply ?? { type: 'text', text: '' },
+              },
+              {
+                channel_id: session.channel_id,
+                session_id: session.session_id,
+                messages: mergedMessages,
+                senderFriend: friend,
+                memoryPermissions: memPerms,
+              },
+              {
+                traceStore: this.traceStore as TraceStoreInterface,
+                traceId: trace.trace_id,
+                parentSpanId: decisionSpan.span_id,
+              }
+            )
+          }
         } else {
           await this.decisionDispatcher.dispatch(
             decision,
@@ -999,16 +1022,32 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   /**
-   * Handle supplement_task locally — deliver directly to Worker without Admin roundtrip.
-   * In unified agent mode, the Worker is local, no need to look up worker_agent_id via Admin.
+   * 本地投递纠偏消息给 Worker。
+   * 返回 true 表示成功投递，false 表示任务不存在（调用方应回退为 create_task）。
    */
   private async handleLocalSupplement(
     decision: import('./types.js').SupplementTaskDecision,
     session: { channel_id: string; session_id: string },
     traceId: string,
     parentSpanId: string,
-  ): Promise<void> {
-    // Step 1: Send immediate reply (auto-generate if LLM didn't provide one)
+  ): Promise<boolean> {
+    // Step 1: Verify task exists BEFORE doing anything
+    if (!this.workerHandler!.hasActiveTask(decision.task_id)) {
+      const span = this.traceStore.startSpan(traceId, {
+        type: 'tool_call' as const,
+        parent_span_id: parentSpanId,
+        details: {
+          tool_name: 'supplement_fallback',
+          input_summary: `task ${decision.task_id} not found, will fallback to create_task`,
+        },
+      })
+      this.traceStore.endSpan(traceId, span.span_id, 'completed', {
+        output_summary: 'task not found, fallback to create_task',
+      })
+      return false
+    }
+
+    // Step 2: Task verified — send immediate reply
     const replyText = decision.immediate_reply?.text
       || `收到，正在调整：${decision.supplement_content.slice(0, 60)}`
     const replySpan = this.traceStore.startSpan(traceId, {
@@ -1040,7 +1079,7 @@ export class UnifiedAgent extends ModuleBase {
       })
     }
 
-    // Step 2: Deliver to local Worker
+    // Step 3: Deliver supplement to local Worker
     const deliverSpan = this.traceStore.startSpan(traceId, {
       type: 'tool_call' as const,
       parent_span_id: parentSpanId,
@@ -1049,33 +1088,6 @@ export class UnifiedAgent extends ModuleBase {
         input_summary: `task_id=${decision.task_id}, content="${decision.supplement_content.slice(0, 100)}"`,
       },
     })
-
-    // Check: is there a local Worker with this task?
-    const activeTasks = this.workerHandler!.getActiveTasksForQuery()
-    const matchingTask = activeTasks.find(t => t.task_id === decision.task_id)
-
-    if (!matchingTask) {
-      // Task not found locally — fall back to remote delivery via Admin RPC
-      this.traceStore.endSpan(traceId, deliverSpan.span_id, 'completed', {
-        output_summary: `task not local, delegating to DecisionDispatcher`,
-      })
-      await this.decisionDispatcher.dispatch(
-        decision,
-        {
-          channel_id: session.channel_id,
-          session_id: session.session_id,
-          messages: [],
-          memoryPermissions: { write_visibility: 'internal', write_scopes: [], read_min_visibility: 'internal' },
-        },
-        {
-          traceStore: this.traceStore as TraceStoreInterface,
-          traceId,
-          parentSpanId: parentSpanId,
-        }
-      )
-      return
-    }
-
     try {
       this.workerHandler!.deliverHumanResponse(decision.task_id, [{
         platform_message_id: `supplement-${Date.now()}`,
@@ -1086,7 +1098,7 @@ export class UnifiedAgent extends ModuleBase {
         platform_timestamp: new Date().toISOString(),
       }])
       this.traceStore.endSpan(traceId, deliverSpan.span_id, 'completed', {
-        output_summary: `delivered to task ${decision.task_id} (status: ${matchingTask.status})`,
+        output_summary: `delivered to task ${decision.task_id}`,
       })
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
@@ -1094,6 +1106,8 @@ export class UnifiedAgent extends ModuleBase {
         error: msg,
       })
     }
+
+    return true
   }
 
   /**
@@ -1958,6 +1972,7 @@ export class UnifiedAgent extends ModuleBase {
         this.workerHandler = this.createWorkerHandler(
           this.sdkEnvWorker, modelConfig, workerPersonality,
           createMcpConfigs, this.agentConfig?.builtin_tool_config, this.agentConfig?.skills)
+        this.decisionDispatcher.setWorkerHandler(this.workerHandler)
         console.log(`[${this.config.moduleId}] Worker Agent SDK env ${this.workerHandler ? 'updated' : 'created from config push'}`)
       }
     }
