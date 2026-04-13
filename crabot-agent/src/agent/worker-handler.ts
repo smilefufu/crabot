@@ -340,6 +340,7 @@ export class WorkerHandler {
           subTools: baseTools,
           maxTurns: definition.maxTurns,
           supportsVision: subSdkEnv.supportsVision,
+          parentHumanQueue: humanQueue,
           onSubAgentTurn: traceCallback ? (event) => {
             const spanId = traceCallback.onLlmCallStart(
               event.turnNumber,
