@@ -96,6 +96,34 @@ export interface SdkEnvConfig {
   env: Record<string, string>
 }
 
+function adapterFromSdkEnv(sdkEnv: SdkEnvConfig) {
+  return createAdapter({
+    endpoint: sdkEnv.env.LLM_BASE_URL ?? '',
+    apikey: sdkEnv.env.LLM_API_KEY ?? '',
+    format: sdkEnv.format,
+  })
+}
+
+function makeSubAgentTraceCallback(
+  label: string,
+  traceCallback: TraceCallback | undefined,
+): ((event: EngineTurnEvent) => void) | undefined {
+  if (!traceCallback) return undefined
+  return (event) => {
+    const spanId = traceCallback.onLlmCallStart(
+      event.turnNumber,
+      `[${label}] turn ${event.turnNumber}`,
+    )
+    if (spanId) {
+      traceCallback.onLlmCallEnd(spanId, {
+        stopReason: event.stopReason ?? undefined,
+        outputSummary: event.assistantText.slice(0, 200) || undefined,
+        toolCallsCount: event.toolCalls.length > 0 ? event.toolCalls.length : undefined,
+      })
+    }
+  }
+}
+
 
 // ============================================================================
 // MCP Server → ToolDefinition conversion
@@ -327,74 +355,34 @@ export class WorkerHandler {
       // 3f. Sub-agent delegation tools
       const baseTools = [...tools]
       for (const { definition, sdkEnv: subSdkEnv } of this.subAgentConfigs) {
-        const subAdapter = createAdapter({
-          endpoint: subSdkEnv.env.LLM_BASE_URL ?? '',
-          apikey: subSdkEnv.env.LLM_API_KEY ?? '',
-          format: subSdkEnv.format,
-        })
         tools.push(createSubAgentTool({
           name: definition.toolName,
           description: definition.toolDescription,
-          adapter: subAdapter,
+          adapter: adapterFromSdkEnv(subSdkEnv),
           model: subSdkEnv.modelId,
           systemPrompt: definition.systemPrompt,
           subTools: baseTools,
           maxTurns: definition.maxTurns,
           supportsVision: subSdkEnv.supportsVision,
           parentHumanQueue: humanQueue,
-          onSubAgentTurn: traceCallback ? (event) => {
-            const spanId = traceCallback.onLlmCallStart(
-              event.turnNumber,
-              `[${definition.slotKey}] turn ${event.turnNumber}`,
-            )
-            if (spanId) {
-              traceCallback.onLlmCallEnd(spanId, {
-                stopReason: event.stopReason ?? undefined,
-                outputSummary: event.assistantText.slice(0, 200) || undefined,
-                toolCallsCount: event.toolCalls.length > 0 ? event.toolCalls.length : undefined,
-              })
-            }
-          } : undefined,
+          onSubAgentTurn: makeSubAgentTraceCallback(definition.slotKey, traceCallback),
         }))
       }
 
       // 3g. Generic delegate_task tool (uses Worker's own model)
-      const delegateAdapter = createAdapter({
-        endpoint: this.sdkEnv.env.LLM_BASE_URL ?? '',
-        apikey: this.sdkEnv.env.LLM_API_KEY ?? '',
-        format: this.sdkEnv.format,
-      })
+      const adapter = adapterFromSdkEnv(this.sdkEnv)
       tools.push(createSubAgentTool({
         name: 'delegate_task',
         description: '将子任务委派给一个独立的执行者。执行者在独立上下文中运行，使用与你相同的模型和工具，只返回最终结果。适合：(1) 子任务的中间过程会污染你的上下文 (2) 子任务可以独立完成，不需要你的持续关注',
-        adapter: delegateAdapter,
+        adapter,
         model: this.sdkEnv.modelId,
         systemPrompt: DELEGATE_TASK_SYSTEM_PROMPT,
         subTools: baseTools,
         maxTurns: 30,
         supportsVision: this.sdkEnv.supportsVision,
         parentHumanQueue: humanQueue,
-        onSubAgentTurn: traceCallback ? (event) => {
-          const spanId = traceCallback.onLlmCallStart(
-            event.turnNumber,
-            `[delegate_task] turn ${event.turnNumber}`,
-          )
-          if (spanId) {
-            traceCallback.onLlmCallEnd(spanId, {
-              stopReason: event.stopReason ?? undefined,
-              outputSummary: event.assistantText.slice(0, 200) || undefined,
-              toolCallsCount: event.toolCalls.length > 0 ? event.toolCalls.length : undefined,
-            })
-          }
-        } : undefined,
+        onSubAgentTurn: makeSubAgentTraceCallback('delegate_task', traceCallback),
       }))
-
-      // 4. Create LLM adapter from sdkEnv (format-based routing)
-      const adapter = createAdapter({
-        endpoint: this.sdkEnv.env.LLM_BASE_URL ?? '',
-        apikey: this.sdkEnv.env.LLM_API_KEY ?? '',
-        format: this.sdkEnv.format,
-      })
 
       // 5. Build system prompt and task message
       const systemPrompt = this.buildSystemPrompt(context)
@@ -432,11 +420,7 @@ export class WorkerHandler {
             : 120
           const digestMode: 'llm' | 'extract' = ex.progress_digest_mode === 'extract' ? 'extract' : 'llm'
           const digestAdapter = (digestMode !== 'extract' && this.digestSdkEnv)
-            ? createAdapter({
-                endpoint: this.digestSdkEnv.env.LLM_BASE_URL ?? '',
-                apikey: this.digestSdkEnv.env.LLM_API_KEY ?? '',
-                format: this.digestSdkEnv.format,
-              })
+            ? adapterFromSdkEnv(this.digestSdkEnv)
             : undefined
 
           const digestConfig: ProgressDigestConfig = {
@@ -596,11 +580,7 @@ export class WorkerHandler {
     lastText: string,
   ): Promise<string> {
     try {
-      const adapter = createAdapter({
-        endpoint: this.sdkEnv.env.LLM_BASE_URL ?? '',
-        apikey: this.sdkEnv.env.LLM_API_KEY ?? '',
-        format: this.sdkEnv.format,
-      })
+      const adapter = adapterFromSdkEnv(this.sdkEnv)
       const { callNonStreaming } = await import('../engine/llm-adapter.js')
       const { createUserMessage } = await import('../engine/types.js')
       const response = await callNonStreaming(adapter, {

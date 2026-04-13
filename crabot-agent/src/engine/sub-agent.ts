@@ -2,6 +2,7 @@ import type { LLMAdapter } from './llm-adapter'
 import type { ToolDefinition, EngineTurnEvent, EngineResult, ContentBlock } from './types'
 import { runEngine } from './query-loop'
 import { resolveImageFromPaths } from '../agent/media-resolver'
+import { formatSupplementForSubAgent } from '../agent/subagent-prompts'
 import { HumanMessageQueue } from './human-message-queue'
 
 // --- Fork Engine ---
@@ -125,15 +126,7 @@ export function createSubAgentTool(config: SubAgentToolConfig): ToolDefinition {
       if (config.parentHumanQueue) {
         childQueue = config.parentHumanQueue.createChild((content) => {
           const text = typeof content === 'string' ? content : '[多媒体纠偏消息]'
-          return [
-            '[实时纠偏 - 来自用户]\n',
-            '用户在你执行任务期间发来了补充指示：\n\n',
-            `"${text}"\n\n`,
-            '请判断：\n',
-            '- 如果此指示与你当前的工作直接相关，立即调整你的行为\n',
-            '- 如果此指示与你当前的工作无关（可能是针对整体任务的），忽略它继续工作\n',
-            '- 如果此指示表明你的整个子任务已不再需要，停止工作并返回当前已有的结果',
-          ].join('')
+          return formatSupplementForSubAgent(text)
         })
       }
 

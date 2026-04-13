@@ -65,6 +65,18 @@ export const SUBAGENT_DEFINITIONS: readonly SubAgentDefinition[] = [
   },
 ] as const
 
+export function formatSupplementForSubAgent(text: string): string {
+  return [
+    '[实时纠偏 - 来自用户]\n',
+    '用户在你执行任务期间发来了补充指示：\n\n',
+    `"${text}"\n\n`,
+    '请判断：\n',
+    '- 如果此指示与你当前的工作直接相关，立即调整你的行为\n',
+    '- 如果此指示与你当前的工作无关（可能是针对整体任务的），忽略它继续工作\n',
+    '- 如果此指示表明你的整个子任务已不再需要，停止工作并返回当前已有的结果',
+  ].join('')
+}
+
 export const DELEGATE_TASK_SYSTEM_PROMPT = [
   '你是一个任务执行助手。你的职责是完成委派给你的子任务并返回清晰的结果。',
   '',

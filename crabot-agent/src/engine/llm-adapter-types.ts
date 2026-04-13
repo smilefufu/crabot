@@ -89,6 +89,29 @@ export function buildImageUrl(source: { type: 'base64' | 'url'; media_type: stri
     : source.data
 }
 
+/**
+ * Merge consecutive same-role messages by concatenating their content arrays.
+ * Required by Anthropic API (alternating user/assistant) and defensive for OpenAI.
+ */
+export function mergeConsecutiveUserMessages<T extends { role: string; content: unknown }>(
+  messages: T[],
+  toArray: (content: unknown) => unknown[],
+): T[] {
+  const merged: T[] = []
+  for (const msg of messages) {
+    const prev = merged.length > 0 ? merged[merged.length - 1] : undefined
+    if (prev && prev.role === 'user' && msg.role === 'user') {
+      merged[merged.length - 1] = {
+        ...prev,
+        content: [...toArray(prev.content), ...toArray(msg.content)],
+      }
+    } else {
+      merged.push(msg)
+    }
+  }
+  return merged
+}
+
 // --- SSE Reader ---
 
 export async function* readSSEEvents(body: ReadableStream<Uint8Array>): AsyncGenerator<{ event: string; data: string }> {
