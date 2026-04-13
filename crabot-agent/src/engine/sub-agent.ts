@@ -1,5 +1,7 @@
 import type { LLMAdapter } from './llm-adapter'
 import type { ToolDefinition, EngineTurnEvent, EngineResult, ContentBlock } from './types'
+import type { AgentTrace } from '../types'
+import type { TraceStore } from '../core/trace-store'
 import { runEngine } from './query-loop'
 import { resolveImageFromPaths } from '../agent/media-resolver'
 import { formatSupplementForSubAgent } from '../agent/subagent-prompts'
@@ -40,6 +42,8 @@ export interface ForkEngineResult {
   readonly usage: { readonly inputTokens: number; readonly outputTokens: number }
   /** Number of turns used */
   readonly totalTurns: number
+  /** Error message (when outcome is 'failed') */
+  readonly error?: string
 }
 
 const DEFAULT_SUB_AGENT_MAX_TURNS = 20
@@ -79,7 +83,17 @@ export async function forkEngine(params: ForkEngineParams): Promise<ForkEngineRe
     outcome: result.outcome,
     usage: result.usage,
     totalTurns: result.totalTurns,
+    error: result.error,
   }
+}
+
+// --- Sub-Agent Trace Config ---
+
+export interface SubAgentTraceConfig {
+  readonly traceStore: TraceStore
+  readonly parentTraceId: string
+  readonly parentSpanId?: string
+  readonly relatedTaskId?: string
 }
 
 // --- Sub-Agent Tool ---
@@ -94,9 +108,9 @@ export interface SubAgentToolConfig {
   /** Tools available to the sub-agent */
   readonly subTools: ReadonlyArray<ToolDefinition>
   readonly maxTurns?: number
-  readonly onSubAgentTurn?: (event: EngineTurnEvent) => void
   readonly supportsVision?: boolean
   readonly parentHumanQueue?: HumanMessageQueue
+  readonly traceConfig?: SubAgentTraceConfig
 }
 
 export function createSubAgentTool(config: SubAgentToolConfig): ToolDefinition {
@@ -130,6 +144,59 @@ export function createSubAgentTool(config: SubAgentToolConfig): ToolDefinition {
         })
       }
 
+      // Create sub-agent independent trace
+      const tc = config.traceConfig
+      let subTrace: AgentTrace | undefined
+      let subTraceCallback: ((event: EngineTurnEvent) => void) | undefined
+
+      if (tc) {
+        subTrace = tc.traceStore.startTrace({
+          module_id: 'sub-agent',
+          trigger: {
+            type: 'sub_agent_call',
+            summary: String(input.task).slice(0, 200),
+          },
+          parent_trace_id: tc.parentTraceId,
+          parent_span_id: tc.parentSpanId,
+          related_task_id: tc.relatedTaskId,
+        })
+
+        // Build trace callback that writes spans to the sub-agent's own trace
+        subTraceCallback = (event: EngineTurnEvent) => {
+          const llmSpan = tc.traceStore.startSpan(subTrace!.trace_id, {
+            type: 'llm_call',
+            details: {
+              iteration: event.turnNumber,
+              input_summary: `turn ${event.turnNumber}`,
+            },
+          })
+
+          // Record tool_call spans as children of the llm_call span
+          for (const toolCall of event.toolCalls) {
+            const toolSpan = tc.traceStore.startSpan(subTrace!.trace_id, {
+              type: 'tool_call',
+              parent_span_id: llmSpan.span_id,
+              details: {
+                tool_name: toolCall.name,
+                input_summary: JSON.stringify(toolCall.input ?? {}).slice(0, 200),
+              },
+            })
+            tc.traceStore.endSpan(subTrace!.trace_id, toolSpan.span_id,
+              toolCall.isError ? 'failed' : 'completed',
+              {
+                output_summary: String(toolCall.output).slice(0, 500),
+                error: toolCall.isError ? String(toolCall.output) : undefined,
+              })
+          }
+
+          tc.traceStore.endSpan(subTrace!.trace_id, llmSpan.span_id, 'completed', {
+            stop_reason: event.stopReason ?? undefined,
+            output_summary: event.assistantText.slice(0, 200) || undefined,
+            tool_calls_count: event.toolCalls.length > 0 ? event.toolCalls.length : undefined,
+          })
+        }
+      }
+
       try {
         let prompt: string | ReadonlyArray<ContentBlock> = String(input.task)
         const imagePaths = input.image_paths as string[] | undefined
@@ -152,21 +219,33 @@ export function createSubAgentTool(config: SubAgentToolConfig): ToolDefinition {
           maxTurns: config.maxTurns,
           parentContext: input.context !== undefined ? String(input.context) : undefined,
           abortSignal: callContext.abortSignal,
-          onTurn: config.onSubAgentTurn,
+          onTurn: subTraceCallback,
           supportsVision: config.supportsVision,
           humanMessageQueue: childQueue,
         })
+
+        if (subTrace && tc) {
+          const traceSummary = result.output.slice(0, 200) || result.error?.slice(0, 200) || ''
+          tc.traceStore.endTrace(subTrace.trace_id, result.outcome === 'failed' ? 'failed' : 'completed', {
+            summary: traceSummary,
+            error: result.outcome === 'failed' ? (result.error?.slice(0, 200) || result.output.slice(0, 200)) : undefined,
+          })
+        }
 
         return {
           output: JSON.stringify({
             output: result.output,
             outcome: result.outcome,
             totalTurns: result.totalTurns,
+            child_trace_id: subTrace?.trace_id,
           }),
           isError: result.outcome === 'failed',
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
+        if (subTrace && tc) {
+          tc.traceStore.endTrace(subTrace.trace_id, 'failed', { summary: message, error: message })
+        }
         return {
           output: `Sub-agent error: ${message}`,
           isError: true,

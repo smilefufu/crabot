@@ -1782,8 +1782,14 @@ export class UnifiedAgent extends ModuleBase {
     })
     this.traceStore.endSpan(trace.trace_id, ctxSpan.span_id, 'completed')
 
+    const traceContext: import('./agent/worker-handler').WorkerTraceContext = {
+      traceStore: this.traceStore,
+      traceId: trace.trace_id,
+      relatedTaskId: related_task_id,
+    }
+
     try {
-      const result = await this.workerHandler.executeTask(taskParams, traceCallback)
+      const result = await this.workerHandler.executeTask(taskParams, traceCallback, traceContext)
       this.traceStore.endTrace(trace.trace_id, result.outcome === 'completed' ? 'completed' : 'failed', {
         summary: result.summary.slice(0, 200),
         error: result.outcome === 'failed' ? result.summary : undefined,
