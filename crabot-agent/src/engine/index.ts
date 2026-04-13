@@ -57,3 +57,7 @@ export { getAllBuiltinTools, getConfiguredBuiltinTools } from './tools/index'
 // --- Progress Digest ---
 export { ProgressDigest } from './progress-digest'
 export type { ProgressDigestConfig, ProgressDigestDeps } from './progress-digest'
+
+// --- Human Message Queue ---
+export { HumanMessageQueue } from './human-message-queue'
+export type { QueueContent, QueueTransform } from './human-message-queue'
