@@ -27,11 +27,13 @@ export class TraceStore {
     trigger: AgentTrace['trigger']
     parent_trace_id?: string
     parent_span_id?: string
+    related_task_id?: string
   }): AgentTrace {
     const trace: AgentTrace = {
       trace_id: crypto.randomUUID(),
       parent_trace_id: params.parent_trace_id,
       parent_span_id: params.parent_span_id,
+      related_task_id: params.related_task_id,
       module_id: params.module_id,
       started_at: new Date().toISOString(),
       status: 'running',
@@ -115,6 +117,14 @@ export class TraceStore {
     }
 
     this.persistTrace(trace)
+  }
+
+  updateTrace(traceId: string, updates: { related_task_id?: string }): void {
+    const trace = this.traces.get(traceId)
+    if (!trace) return
+    if (updates.related_task_id !== undefined) {
+      trace.related_task_id = updates.related_task_id
+    }
   }
 
   getTraces(
