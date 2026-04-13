@@ -15,10 +15,17 @@ import type {
   ChannelMessage,
   MemoryPermissions,
   Friend,
+  ExecuteTaskParams,
+  ExecuteTaskResult,
 } from '../types.js'
 import type { WorkerHandler } from '../agent/worker-handler.js'
 import { ContextAssembler } from './context-assembler.js'
 import { MemoryWriter } from './memory-writer.js'
+
+/** Extended TraceStore interface with updateTrace support (not in base TraceStoreInterface) */
+interface TraceStoreWithUpdate {
+  updateTrace?(traceId: string, updates: { related_task_id?: string }): void
+}
 
 /** Admin create_task 返回的任务信息 */
 interface AdminTask {
@@ -39,7 +46,8 @@ export class DecisionDispatcher {
     private contextAssembler: ContextAssembler,
     private memoryWriter: MemoryWriter,
     private getAdminPort: () => number | Promise<number>,
-    private getChannelPort: (channelId: ModuleId) => Promise<number>
+    private getChannelPort: (channelId: ModuleId) => Promise<number>,
+    private executeTaskFn?: (params: ExecuteTaskParams & { related_task_id?: string }) => Promise<ExecuteTaskResult>,
   ) {}
 
   /**
@@ -230,6 +238,12 @@ export class DecisionDispatcher {
 
     const task = taskResult.task
 
+    // Back-fill Front trace's related_task_id
+    if (traceCtx?.traceStore && traceCtx.traceId) {
+      const store = traceCtx.traceStore as TraceStoreWithUpdate
+      store.updateTrace?.(traceCtx.traceId, { related_task_id: task.id })
+    }
+
     // 3. 组装 Worker 上下文
     const lastMessage = params.messages[params.messages.length - 1]
     const workerContext = await this.contextAssembler.assembleWorkerContext({
@@ -248,7 +262,7 @@ export class DecisionDispatcher {
     }
 
     // 4. 直接调用本地 Worker 执行（fire-and-forget，不阻塞 Front）
-    this.executeTaskInBackground(task, enrichedContext, params)
+    this.executeTaskInBackground(task, enrichedContext, params, task.id)
 
     return { task_id: task.id }
   }
@@ -269,7 +283,8 @@ export class DecisionDispatcher {
         source_module_id: string
         request_id: string
       }
-    }
+    },
+    relatedTaskId: string,
   ): void {
     const run = async () => {
       const adminPort = await this.getAdminPort()
@@ -292,20 +307,22 @@ export class DecisionDispatcher {
       }
 
       try {
-        // 直接调用本地 Worker
-        const result = await this.workerHandler!.executeTask(
-          {
-            task: {
-              task_id: task.id,
-              task_title: task.title,
-              task_description: task.description ?? '',
-              task_type: task.type,
-              priority: task.priority,
-              plan: task.plan,
-            },
-            context: workerContext,
+        // 直接调用本地 Worker（或通过回调函数）
+        const taskPayload: ExecuteTaskParams = {
+          task: {
+            task_id: task.id,
+            task_title: task.title,
+            task_description: task.description ?? '',
+            task_type: task.type,
+            priority: task.priority,
+            plan: task.plan,
           },
-        )
+          context: workerContext,
+        }
+
+        const result = this.executeTaskFn
+          ? await this.executeTaskFn({ ...taskPayload, related_task_id: relatedTaskId })
+          : await this.workerHandler!.executeTask(taskPayload)
 
         // 更新 Admin 任务状态（跨模块 RPC）
         const finalStatus = result.outcome === 'completed' ? 'completed' : 'failed'
@@ -441,6 +458,12 @@ export class DecisionDispatcher {
   ): Promise<{ task_id?: string }> {
     if (!this.workerHandler) {
       throw new Error('Worker handler not configured')
+    }
+
+    // Back-fill Front trace's related_task_id
+    if (traceCtx?.traceStore && traceCtx.traceId) {
+      const store = traceCtx.traceStore as TraceStoreWithUpdate
+      store.updateTrace?.(traceCtx.traceId, { related_task_id: decision.task_id })
     }
 
     // Step 1: 验证任务存在（本地 O(1) 查询）

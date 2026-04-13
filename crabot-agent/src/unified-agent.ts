@@ -178,7 +178,8 @@ export class UnifiedAgent extends ModuleBase {
       this.contextAssembler,
       this.memoryWriter,
       async () => await this.getAdminPort(),
-      async (channelId) => await this.getChannelPort(channelId)
+      async (channelId) => await this.getChannelPort(channelId),
+      (params) => this.handleExecuteTask(params),
     )
 
     // 初始化群聊注意力调度（从 extra 读取配置，fallback 到协议默认值）
@@ -1744,12 +1745,13 @@ export class UnifiedAgent extends ModuleBase {
   private async handleExecuteTask(params: ExecuteTaskParams & {
     parent_trace_id?: string
     parent_span_id?: string
+    related_task_id?: string
   }): Promise<ExecuteTaskResult> {
     if (!this.workerHandler) {
       throw new Error('Worker handler not configured')
     }
 
-    const { parent_trace_id, parent_span_id, ...taskParams } = params
+    const { parent_trace_id, parent_span_id, related_task_id, ...taskParams } = params
 
     // 更新 sandbox 路径映射（crab-messaging send_message 需要路径转换）
     this.sandboxPathMappingsRef.current = taskParams.context.sandbox_path_mappings ?? []
@@ -1764,6 +1766,7 @@ export class UnifiedAgent extends ModuleBase {
       },
       parent_trace_id,
       parent_span_id,
+      related_task_id,
     })
 
     const traceCallback = this.buildTraceCallback(trace.trace_id)
