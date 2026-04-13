@@ -8,18 +8,145 @@ import * as fs from 'fs'
 import * as path from 'path'
 import type { AgentTrace, AgentSpan, AgentSpanType, AgentSpanDetails } from '../types.js'
 
+export interface TraceIndexEntry {
+  trace_id: string
+  related_task_id?: string
+  parent_trace_id?: string
+  trigger_type: string
+  trigger_summary: string
+  started_at: string
+  ended_at?: string
+  status: 'running' | 'completed' | 'failed'
+  outcome_summary?: string
+  span_count: number
+  file: string
+  file_offset: number
+}
+
 export class TraceStore {
   private traces: Map<string, AgentTrace> = new Map()
   private order: string[] = []
   private maxSize: number
   private persistDir: string | undefined
+  private traceIndex: TraceIndexEntry[] = []
+  private taskIndex: Map<string, string[]> = new Map()
 
   constructor(maxSize = 100, persistDir?: string) {
     this.maxSize = maxSize
     this.persistDir = persistDir
     if (persistDir) {
       fs.mkdirSync(persistDir, { recursive: true })
+      this.rebuildIndex()
     }
+  }
+
+  private rebuildIndex(): void {
+    if (!this.persistDir) return
+    try {
+      const files = fs.readdirSync(this.persistDir)
+        .filter(f => f.startsWith('traces-') && f.endsWith('.jsonl'))
+        .sort()
+
+      for (const file of files) {
+        const filePath = path.join(this.persistDir, file)
+        const content = fs.readFileSync(filePath, 'utf-8')
+        let offset = 0
+        for (const line of content.split('\n')) {
+          const lineBytes = Buffer.byteLength(line + '\n', 'utf-8')
+          if (!line.trim()) { offset += lineBytes; continue }
+          try {
+            const trace = JSON.parse(line) as AgentTrace
+            const entry: TraceIndexEntry = {
+              trace_id: trace.trace_id,
+              related_task_id: trace.related_task_id,
+              parent_trace_id: trace.parent_trace_id,
+              trigger_type: trace.trigger.type,
+              trigger_summary: trace.trigger.summary,
+              started_at: trace.started_at,
+              ended_at: trace.ended_at,
+              status: trace.status,
+              outcome_summary: trace.outcome?.summary,
+              span_count: trace.spans?.length ?? 0,
+              file,
+              file_offset: offset,
+            }
+            this.traceIndex.push(entry)
+            if (trace.related_task_id) {
+              const existing = this.taskIndex.get(trace.related_task_id) ?? []
+              this.taskIndex.set(trace.related_task_id, [...existing, trace.trace_id])
+            }
+          } catch { /* skip malformed lines */ }
+          offset += lineBytes
+        }
+      }
+    } catch { /* persist dir read failure */ }
+  }
+
+  searchTraces(params: {
+    task_id?: string
+    time_range?: { start: string; end: string }
+    keyword?: string
+    status?: string
+    limit?: number
+    offset?: number
+  }): { traces: TraceIndexEntry[]; total: number } {
+    let results = [...this.traceIndex]
+
+    // Merge running traces from ring buffer not yet persisted
+    for (const trace of this.traces.values()) {
+      if (trace.status === 'running' && !results.some(e => e.trace_id === trace.trace_id)) {
+        results.push({
+          trace_id: trace.trace_id,
+          related_task_id: trace.related_task_id,
+          parent_trace_id: trace.parent_trace_id,
+          trigger_type: trace.trigger.type,
+          trigger_summary: trace.trigger.summary,
+          started_at: trace.started_at,
+          ended_at: trace.ended_at,
+          status: trace.status,
+          outcome_summary: trace.outcome?.summary,
+          span_count: trace.spans.length,
+          file: '',
+          file_offset: 0,
+        })
+      }
+    }
+
+    if (params.task_id) {
+      const traceIds = new Set(this.taskIndex.get(params.task_id) ?? [])
+      for (const trace of this.traces.values()) {
+        if (trace.related_task_id === params.task_id) traceIds.add(trace.trace_id)
+      }
+      results = results.filter(e => traceIds.has(e.trace_id))
+    }
+
+    if (params.time_range) {
+      const start = new Date(params.time_range.start).getTime()
+      const end = new Date(params.time_range.end).getTime()
+      results = results.filter(e => {
+        const t = new Date(e.started_at).getTime()
+        return t >= start && t < end
+      })
+    }
+
+    if (params.keyword) {
+      const kw = params.keyword.toLowerCase()
+      results = results.filter(e =>
+        e.trigger_summary.toLowerCase().includes(kw) ||
+        (e.outcome_summary?.toLowerCase().includes(kw) ?? false)
+      )
+    }
+
+    if (params.status) {
+      results = results.filter(e => e.status === params.status)
+    }
+
+    results.sort((a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime())
+
+    const total = results.length
+    const limit = Math.min(params.limit ?? 20, 100)
+    const off = params.offset ?? 0
+    return { traces: results.slice(off, off + limit), total }
   }
 
   startTrace(params: {
@@ -124,6 +251,12 @@ export class TraceStore {
     if (!trace) return
     if (updates.related_task_id !== undefined) {
       trace.related_task_id = updates.related_task_id
+      if (updates.related_task_id) {
+        const existing = this.taskIndex.get(updates.related_task_id) ?? []
+        if (!existing.includes(traceId)) {
+          this.taskIndex.set(updates.related_task_id, [...existing, traceId])
+        }
+      }
     }
   }
 
@@ -190,10 +323,35 @@ export class TraceStore {
   private persistTrace(trace: AgentTrace): void {
     if (!this.persistDir) return
     try {
-      const date = trace.started_at.slice(0, 10) // YYYY-MM-DD
-      const filePath = path.join(this.persistDir, `traces-${date}.jsonl`)
+      const date = trace.started_at.slice(0, 10)
+      const file = `traces-${date}.jsonl`
+      const filePath = path.join(this.persistDir, file)
       const line = JSON.stringify(trace) + '\n'
+
+      let fileOffset = 0
+      try { fileOffset = fs.statSync(filePath).size } catch { /* new file */ }
+
       fs.appendFileSync(filePath, line, 'utf-8')
+
+      const entry: TraceIndexEntry = {
+        trace_id: trace.trace_id,
+        related_task_id: trace.related_task_id,
+        parent_trace_id: trace.parent_trace_id,
+        trigger_type: trace.trigger.type,
+        trigger_summary: trace.trigger.summary,
+        started_at: trace.started_at,
+        ended_at: trace.ended_at,
+        status: trace.status,
+        outcome_summary: trace.outcome?.summary,
+        span_count: trace.spans.length,
+        file,
+        file_offset: fileOffset,
+      }
+      this.traceIndex.push(entry)
+      if (trace.related_task_id) {
+        const existing = this.taskIndex.get(trace.related_task_id) ?? []
+        this.taskIndex.set(trace.related_task_id, [...existing, trace.trace_id])
+      }
     } catch {
       // persist failure must not affect main flow
     }
