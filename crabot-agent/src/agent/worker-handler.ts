@@ -45,6 +45,7 @@ import { formatMessageContent, resolveImageBlocks } from './media-resolver.js'
 import type { McpConnector } from './mcp-connector.js'
 import { createSubAgentTool } from '../engine/sub-agent.js'
 import type { SubAgentDefinition } from './subagent-prompts.js'
+import { DELEGATE_TASK_SYSTEM_PROMPT } from './subagent-prompts.js'
 import { HumanMessageQueue } from '../engine/human-message-queue.js'
 
 import * as fs from 'fs'
@@ -356,6 +357,37 @@ export class WorkerHandler {
           } : undefined,
         }))
       }
+
+      // 3g. Generic delegate_task tool (uses Worker's own model)
+      const delegateAdapter = createAdapter({
+        endpoint: this.sdkEnv.env.LLM_BASE_URL ?? '',
+        apikey: this.sdkEnv.env.LLM_API_KEY ?? '',
+        format: this.sdkEnv.format,
+      })
+      tools.push(createSubAgentTool({
+        name: 'delegate_task',
+        description: '将子任务委派给一个独立的执行者。执行者在独立上下文中运行，使用与你相同的模型和工具，只返回最终结果。适合：(1) 子任务的中间过程会污染你的上下文 (2) 子任务可以独立完成，不需要你的持续关注',
+        adapter: delegateAdapter,
+        model: this.sdkEnv.modelId,
+        systemPrompt: DELEGATE_TASK_SYSTEM_PROMPT,
+        subTools: baseTools,
+        maxTurns: 30,
+        supportsVision: this.sdkEnv.supportsVision,
+        parentHumanQueue: humanQueue,
+        onSubAgentTurn: traceCallback ? (event) => {
+          const spanId = traceCallback.onLlmCallStart(
+            event.turnNumber,
+            `[delegate_task] turn ${event.turnNumber}`,
+          )
+          if (spanId) {
+            traceCallback.onLlmCallEnd(spanId, {
+              stopReason: event.stopReason ?? undefined,
+              outputSummary: event.assistantText.slice(0, 200) || undefined,
+              toolCallsCount: event.toolCalls.length > 0 ? event.toolCalls.length : undefined,
+            })
+          }
+        } : undefined,
+      }))
 
       // 4. Create LLM adapter from sdkEnv (format-based routing)
       const adapter = createAdapter({
