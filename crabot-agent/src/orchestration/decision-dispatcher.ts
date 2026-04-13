@@ -47,7 +47,7 @@ export class DecisionDispatcher {
     private memoryWriter: MemoryWriter,
     private getAdminPort: () => number | Promise<number>,
     private getChannelPort: (channelId: ModuleId) => Promise<number>,
-    private executeTaskFn?: (params: ExecuteTaskParams & { related_task_id?: string }) => Promise<ExecuteTaskResult>,
+    private executeTaskFn?: (params: ExecuteTaskParams & { related_task_id?: string }) => Promise<ExecuteTaskResult & { trace_id?: string }>,
   ) {}
 
   /**
@@ -320,7 +320,7 @@ export class DecisionDispatcher {
           context: workerContext,
         }
 
-        const result = this.executeTaskFn
+        const result: ExecuteTaskResult & { trace_id?: string } = this.executeTaskFn
           ? await this.executeTaskFn({ ...taskPayload, related_task_id: relatedTaskId })
           : await this.workerHandler!.executeTask(taskPayload)
 
@@ -360,6 +360,7 @@ export class DecisionDispatcher {
           session_id: params.session_id,
           visibility: params.memoryPermissions.write_visibility,
           scopes: params.memoryPermissions.write_scopes,
+          trace_id: result.trace_id,
         }).catch(() => {})
 
         // 回复用户（仅当 Worker 提供了 final_reply 时）

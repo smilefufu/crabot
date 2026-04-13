@@ -1747,7 +1747,7 @@ export class UnifiedAgent extends ModuleBase {
     parent_trace_id?: string
     parent_span_id?: string
     related_task_id?: string
-  }): Promise<ExecuteTaskResult> {
+  }): Promise<ExecuteTaskResult & { trace_id?: string }> {
     if (!this.workerHandler) {
       throw new Error('Worker handler not configured')
     }
@@ -1795,7 +1795,7 @@ export class UnifiedAgent extends ModuleBase {
         summary: result.summary.slice(0, 200),
         error: result.outcome === 'failed' ? result.summary : undefined,
       })
-      return result
+      return { ...result, trace_id: trace.trace_id }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
       this.traceStore.endTrace(trace.trace_id, 'failed', { summary: msg, error: msg })
