@@ -2,7 +2,7 @@
  * Front Loop - Mini agent loop for Front Handler v2
  *
  * <=5 rounds: call LLM -> if tool_use, execute -> loop
- * make_decision tool -> structured decision, return immediately
+ * Decision tools (reply, create_task, supplement_task, stay_silent) -> return immediately
  * end_turn -> wrap as direct_reply
  * max rounds exceeded -> forced create_task with tool history
  *
@@ -29,7 +29,7 @@ import type {
   FrontLoopResult,
   TraceCallback,
 } from '../types.js'
-import { getAllFrontTools } from './front-tools.js'
+import { getAllFrontTools, DECISION_TOOL_NAMES, type DecisionToolName } from './front-tools.js'
 
 const FRONT_MAX_ROUNDS = 5
 
@@ -40,7 +40,7 @@ export interface FrontLoopParams {
   readonly rawUserText: string
   /** silent 仅在群聊且未被 @ 时可用 */
   readonly allowSilent: boolean
-  /** 当前活跃任务 ID 列表，为空时不暴露 supplement_task 选项 */
+  /** 当前活跃任务 ID 列表，为空时不暴露 supplement_task 工具 */
   readonly activeTaskIds: readonly string[]
   readonly adapter: LLMAdapter
   readonly model: string
@@ -50,8 +50,7 @@ export interface FrontLoopParams {
 
 export async function runFrontLoop(params: FrontLoopParams): Promise<FrontLoopResult> {
   const { systemPrompt, userMessage, rawUserText, allowSilent, activeTaskIds, adapter, model, toolExecutor, traceCallback } = params
-  const hasActiveTasks = activeTaskIds.length > 0
-  const tools: ToolDefinition[] = getAllFrontTools(allowSilent, hasActiveTasks)
+  const tools: ToolDefinition[] = getAllFrontTools(allowSilent, activeTaskIds)
   const messages: EngineMessage[] = [createUserMessage(userMessage)]
   const toolHistory: ToolHistoryEntry[] = []
 
@@ -114,9 +113,9 @@ export async function runFrontLoop(params: FrontLoopParams): Promise<FrontLoopRe
           return { decision: { type: 'silent' } }
         }
 
-        // 私聊/被@场景下 LLM 没输出文本也没调 make_decision，注入提示让它重试
+        // 私聊/被@场景下 LLM 没输出文本也没调决策工具，注入提示让它重试
         messages.push(createAssistantMessage(response.content, 'end_turn', response.usage))
-        messages.push(createUserMessage('你必须调用 make_decision 工具输出决策，不能留空。请现在调用。'))
+        messages.push(createUserMessage('你必须调用一个决策工具（reply / create_task）输出决策，不能留空。请现在调用。'))
         continue
       }
 
@@ -129,23 +128,12 @@ export async function runFrontLoop(params: FrontLoopParams): Promise<FrontLoopRe
         for (const block of response.content) {
           if (block.type !== 'tool_use') continue
 
-          // make_decision -> validate first, return structured decision or error
-          if (block.name === 'make_decision') {
+          // Decision tools -> parse and return immediately
+          if (DECISION_TOOL_NAMES.has(block.name)) {
             const rawInput = block.input as Record<string, unknown>
-            const validationError = validateMakeDecision(rawInput, activeTaskIds)
+            const decision = parseDecisionTool(block.name as DecisionToolName, rawInput)
 
-            if (validationError) {
-              // 校验失败：作为 tool error 返回给 LLM，让它重试
-              const toolSpanId = traceCallback?.onToolCallStart('make_decision', JSON.stringify(rawInput).slice(0, 200))
-              if (toolSpanId) traceCallback?.onToolCallEnd(toolSpanId, '', validationError)
-
-              toolResultMessages.push(createToolResultMessage(block.id, validationError, true))
-              continue
-            }
-
-            const decision = parseMakeDecision(rawInput)
-
-            const toolSpanId = traceCallback?.onToolCallStart('make_decision', JSON.stringify(rawInput).slice(0, 200))
+            const toolSpanId = traceCallback?.onToolCallStart(block.name, JSON.stringify(rawInput).slice(0, 200))
             if (toolSpanId) traceCallback?.onToolCallEnd(toolSpanId, `decision: ${decision.type}`)
 
             if (loopSpanId) traceCallback?.onLoopEnd(loopSpanId, 'completed', round + 1)
@@ -215,49 +203,15 @@ export async function runFrontLoop(params: FrontLoopParams): Promise<FrontLoopRe
   }
 }
 
-/** 统一读取回复文本，兼容旧的 immediate_reply_text */
-function getReplyText(input: Record<string, unknown>): string {
-  return (input.reply_text as string)
-    ?? (input.immediate_reply_text as string)
-    ?? ''
-}
-
 /**
- * 校验 make_decision 输入，返回错误提示（null 表示通过）
+ * 将决策工具调用解析为 MessageDecision
  */
-function validateMakeDecision(input: Record<string, unknown>, activeTaskIds: readonly string[]): string | null {
-  const type = input.type as string
-  if (!type) return '缺少必填参数 type'
-
-  switch (type) {
-    case 'direct_reply':
-      if (!getReplyText(input)) return 'type=direct_reply 时 reply_text 为必填参数，请提供回复文本'
-      break
-    case 'create_task':
-      if (!input.task_title) return 'type=create_task 时 task_title 为必填参数'
-      break
-    case 'supplement_task':
-      if (!input.task_id) return 'type=supplement_task 时 task_id 为必填参数，请指明目标任务'
-      if (activeTaskIds.length === 0) return '当前没有活跃任务，无法纠偏。如果是新请求请使用 create_task，如果是简单回复请使用 direct_reply'
-      if (!activeTaskIds.includes(input.task_id as string)) return `task_id "${input.task_id}" 不在活跃任务列表中，可选任务: ${activeTaskIds.join(', ')}。请重新选择`
-      break
-    case 'silent':
-      break
-    default:
-      return `未知的决策类型: ${type}，可选值: direct_reply, create_task, supplement_task, silent`
-  }
-  return null
-}
-
-function parseMakeDecision(input: Record<string, unknown>): MessageDecision {
-  const type = input.type as string
-  const replyText = getReplyText(input)
-
-  switch (type) {
-    case 'direct_reply':
+function parseDecisionTool(toolName: DecisionToolName, input: Record<string, unknown>): MessageDecision {
+  switch (toolName) {
+    case 'reply':
       return {
         type: 'direct_reply',
-        reply: { type: 'text', text: replyText },
+        reply: { type: 'text', text: (input.text as string) ?? '' },
       }
 
     case 'create_task':
@@ -268,24 +222,27 @@ function parseMakeDecision(input: Record<string, unknown>): MessageDecision {
         task_type: (input.task_type as string) ?? 'general',
         immediate_reply: {
           type: 'text',
-          text: replyText,
+          text: (input.ack_text as string) ?? '',
         },
       }
 
     case 'supplement_task':
       return {
         type: 'supplement_task',
-        task_id: input.task_id as string,
-        supplement_content: (input.supplement_content as string) ?? '',
-        immediate_reply: replyText
-          ? { type: 'text' as const, text: replyText }
-          : undefined,
+        task_id: (input.task_id as string) ?? '',
+        supplement_content: (input.content as string) ?? '',
+        immediate_reply: {
+          type: 'text',
+          text: (input.ack_text as string) ?? '',
+        },
       }
 
-    case 'silent':
+    case 'stay_silent':
       return { type: 'silent' }
 
-    default:
-      return { type: 'silent' }
+    default: {
+      const _exhaustive: never = toolName
+      throw new Error(`Unknown decision tool: ${_exhaustive}`)
+    }
   }
 }

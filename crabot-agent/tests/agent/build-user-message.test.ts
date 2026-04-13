@@ -239,7 +239,7 @@ describe('buildUserMessage', () => {
     const result = buildUserMessage([makeMessage()], makeContext())
 
     expect(result).toContain('## 指令')
-    expect(result).toContain('make_decision')
+    expect(result).toContain('决策工具')
   })
 })
 
@@ -308,7 +308,7 @@ describe('群聊 prompt 改进', () => {
     ]
     const result = buildUserMessage(messages, makeContext())
     expect(result).toContain('群聊决策提示')
-    expect(result).toContain('默认选择 silent')
+    expect(result).toContain('默认选择 stay_silent')
   })
 
   it('有 @mention 的群聊不应有 silent 引导', () => {

@@ -1,9 +1,11 @@
 /**
  * Front Tools - Engine ToolDefinition format for Front Handler v2
  *
- * Includes: make_decision, query_tasks, create_schedule,
- * and crab-messaging tools (lookup_friend, list_contacts, list_groups, list_sessions,
- * open_private_session, send_message, get_history)
+ * Decision tools: reply, create_task, supplement_task, stay_silent
+ * Info tools: query_tasks, create_schedule
+ * Messaging tools: lookup_friend, list_contacts, list_groups, list_sessions,
+ *   open_private_session, send_message, get_history, get_message
+ * Memory tools: store_memory, search_memory, get_memory_detail
  *
  * NOTE: These tools are NOT executed by the engine — the front-loop handles
  * them manually. The `call` property is a no-op placeholder.
@@ -13,56 +15,96 @@ import type { ToolDefinition } from '../engine/types.js'
 
 const NOOP_CALL = async () => ({ output: '', isError: false as const })
 
-export function makeDecisionTool(allowSilent: boolean, hasActiveTasks: boolean): ToolDefinition {
-  const types = [
-    'direct_reply',
-    'create_task',
-    ...(hasActiveTasks ? ['supplement_task'] : []),
-    ...(allowSilent ? ['silent'] : []),
-  ]
-  const descParts = [
-    'direct_reply=直接回复',
-    'create_task=创建新任务',
-    ...(hasActiveTasks ? ['supplement_task=补充/纠偏已有任务'] : []),
-    ...(allowSilent ? ['silent=静默'] : []),
-  ]
-  const desc = descParts.join(', ')
-  return {
-    name: 'make_decision',
-    description: '做出最终决策。分析完消息后必须调用此工具输出决策。',
-    inputSchema: {
-      type: 'object' as const,
-      properties: {
-        type: {
-          type: 'string',
-          enum: types,
-          description: desc,
-        },
-      reply_text: {
+/** 决策工具名称，单一来源 */
+const DECISION_NAMES = ['reply', 'create_task', 'supplement_task', 'stay_silent'] as const
+export type DecisionToolName = typeof DECISION_NAMES[number]
+export const DECISION_TOOL_NAMES: ReadonlySet<string> = new Set(DECISION_NAMES)
+
+export const REPLY_TOOL: ToolDefinition = {
+  name: 'reply',
+  description: '直接回复用户。调用后对话结束，不会有后续动作。适用于简单问答、问候、信息查询。',
+  inputSchema: {
+    type: 'object' as const,
+    properties: {
+      text: {
         type: 'string',
-        description: '回复文本。direct_reply 时必填（作为回复内容）；create_task/supplement_task 时可选（作为即时回复，如"好的，正在处理"）',
+        description: '发给用户的最终完整回答。这是最终内容，不要写"让我查一下"等暗示后续动作的话。',
       },
-      task_title: { type: 'string', description: '任务标题（type=create_task 时必填）' },
-      task_description: { type: 'string', description: '一句话分类标注，描述任务方向（type=create_task 时必填）。不要概括用户需求，原始消息会完整传给 Worker。例如："分析挂靠功能需求并规划实现方案"' },
+    },
+    required: ['text'],
+  },
+  isReadOnly: true,
+  call: NOOP_CALL,
+}
+
+export const CREATE_TASK_TOOL: ToolDefinition = {
+  name: 'create_task',
+  description: '创建异步任务。适用于需要多步操作、外部访问、代码编写、深度分析等复杂请求。',
+  inputSchema: {
+    type: 'object' as const,
+    properties: {
+      task_title: {
+        type: 'string',
+        description: '任务标题，简明扼要',
+      },
+      task_description: {
+        type: 'string',
+        description: '一句话分类标注，描述任务方向。不要概括用户需求，原始消息会完整传给执行环节。例如："分析挂靠功能需求并规划实现方案"',
+      },
       task_type: {
         type: 'string',
         enum: ['general', 'code', 'analysis', 'command'],
         description: '任务类型，默认 general',
       },
-      task_id: {
+      ack_text: {
         type: 'string',
-        description: '目标任务 ID（type=supplement_task 时必填）',
-      },
-      supplement_content: {
-        type: 'string',
-        description: '提炼后的补充/纠偏内容（type=supplement_task 时必填）',
+        description: '立即发给用户的确认文本。必须简短自然，让用户知道你已收到并开始处理，如"好的，我来对比一下这几个产品"、"收到，正在分析代码"。',
       },
     },
-    required: ['type'],
+    required: ['task_title', 'task_description', 'ack_text'],
   },
+  isReadOnly: true,
+  call: NOOP_CALL,
+}
+
+export function supplementTaskTool(activeTaskIds: readonly string[]): ToolDefinition {
+  return {
+    name: 'supplement_task',
+    description: '补充或纠偏一个正在执行的任务。仅当用户消息明确针对某个活跃任务时使用。',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        task_id: {
+          type: 'string',
+          enum: [...activeTaskIds],
+          description: '目标任务 ID，必须是活跃任务列表中的一个',
+        },
+        content: {
+          type: 'string',
+          description: '提炼后的补充/纠偏内容',
+        },
+        ack_text: {
+          type: 'string',
+          description: '立即发给用户的确认文本，如"好的，我调整一下方向"',
+        },
+      },
+      required: ['task_id', 'content', 'ack_text'],
+    },
     isReadOnly: true,
     call: NOOP_CALL,
   }
+}
+
+export const STAY_SILENT_TOOL: ToolDefinition = {
+  name: 'stay_silent',
+  description: '静默不回复。仅群聊中使用，当消息与自己无关时选择。',
+  inputSchema: {
+    type: 'object' as const,
+    properties: {},
+    required: [],
+  },
+  isReadOnly: true,
+  call: NOOP_CALL,
 }
 
 export const QUERY_TASKS_TOOL: ToolDefinition = {
@@ -318,9 +360,14 @@ export const GET_MEMORY_DETAIL_TOOL: ToolDefinition = {
 }
 
 /** All Front tools in order */
-export function getAllFrontTools(allowSilent: boolean, hasActiveTasks: boolean): ToolDefinition[] {
+export function getAllFrontTools(allowSilent: boolean, activeTaskIds: readonly string[]): ToolDefinition[] {
   return [
-    makeDecisionTool(allowSilent, hasActiveTasks),
+    // Decision tools
+    REPLY_TOOL,
+    CREATE_TASK_TOOL,
+    ...(activeTaskIds.length > 0 ? [supplementTaskTool(activeTaskIds)] : []),
+    ...(allowSilent ? [STAY_SILENT_TOOL] : []),
+    // Info tools
     QUERY_TASKS_TOOL,
     CREATE_SCHEDULE_TOOL,
     LOOKUP_FRIEND_TOOL,

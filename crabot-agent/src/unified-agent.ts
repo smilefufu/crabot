@@ -140,11 +140,7 @@ export class UnifiedAgent extends ModuleBase {
     const traceDir = path.join(process.env.DATA_DIR ?? './data', 'agent', 'traces')
     this.traceStore = new TraceStore(100, traceDir)
 
-    const agentDataDir = process.env.DATA_DIR
-      ? path.join(process.env.DATA_DIR, 'agent')
-      : path.join('./data', 'agent')
-    this.promptManager = new PromptManager(agentDataDir)
-    this.promptManager.init()
+    this.promptManager = new PromptManager()
 
     this.orchestrationConfig = config.orchestration
     this.agentConfig = config.agent_config

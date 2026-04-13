@@ -2,7 +2,7 @@
  * Front Handler v2 - Fast triage using engine LLM adapter
  *
  * Replaces SDK-based implementation. Zero cold-start, ~10 controlled tools,
- * structured tool_use decisions via make_decision.
+ * structured tool_use decisions via reply/create_task/supplement_task/stay_silent.
  */
 
 import type { LLMAdapter } from '../engine/llm-adapter.js'
@@ -184,7 +184,7 @@ export function buildUserMessage(
 
     if (hasMention) {
       parts.push('\n## 群聊决策提示')
-      parts.push('本批次消息 @了你，你必须回复（direct_reply 或 create_task），禁止选择 silent。')
+      parts.push('本批次消息 @了你，你必须回复（reply 或 create_task），禁止选择 stay_silent。')
     } else {
       // 检测对话延续性：recent_messages 中 bot 近期是否参与过对话
       const crabName = context.crab_display_name
@@ -205,13 +205,13 @@ export function buildUserMessage(
 
       parts.push('\n## 群聊决策提示')
       if (quotedBotMessage) {
-        parts.push('本批次消息引用了你之前的回复，你应该回复（direct_reply 或 create_task），禁止选择 silent。')
+        parts.push('本批次消息引用了你之前的回复，你应该回复（reply 或 create_task），禁止选择 stay_silent。')
       } else if (botRecentlyActive) {
-        parts.push('本批次消息没有 @你，但你近期在群中参与过对话。如果本条消息与你之前的回复相关（如追问、延续讨论），你应该回复（direct_reply）。')
-        parts.push('如果消息明显与你无关（群成员之间的独立讨论、转换了话题），则选择 silent。')
+        parts.push('本批次消息没有 @你，但你近期在群中参与过对话。如果本条消息与你之前的回复相关（如追问、延续讨论），你应该回复（reply）。')
+        parts.push('如果消息明显与你无关（群成员之间的独立讨论、转换了话题），则选择 stay_silent。')
       } else {
         parts.push('本批次消息没有 @你。群成员之间的讨论（即使涉及技术/代码话题）不算向你提问。')
-        parts.push('除非有人明确叫你名字或话题中没有其他对话对象且明显在向你求助，否则默认选择 silent。')
+        parts.push('除非有人明确叫你名字或话题中没有其他对话对象且明显在向你求助，否则默认选择 stay_silent。')
       }
     }
   } else {
@@ -222,7 +222,7 @@ export function buildUserMessage(
   }
 
   parts.push('\n## 指令')
-  parts.push('请分析上述消息并调用 make_decision 工具输出决策。')
+  parts.push('请分析上述消息并调用决策工具（reply / create_task / supplement_task / stay_silent）。')
 
   const textPrompt = parts.join('\n')
 

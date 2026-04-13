@@ -39,9 +39,9 @@ describe('callNonStreaming', () => {
   it('should collect tool_use blocks', async () => {
     const adapter = makeMockAdapter([
       { type: 'message_start', messageId: 'msg_1' },
-      { type: 'tool_use_start', id: 'tu_1', name: 'make_decision' },
-      { type: 'tool_use_delta', id: 'tu_1', inputJson: '{"type":' },
-      { type: 'tool_use_delta', id: 'tu_1', inputJson: '"direct_reply","reply_text":"Hi"}' },
+      { type: 'tool_use_start', id: 'tu_1', name: 'reply' },
+      { type: 'tool_use_delta', id: 'tu_1', inputJson: '{"text":' },
+      { type: 'tool_use_delta', id: 'tu_1', inputJson: '"Hi"}' },
       { type: 'tool_use_end', id: 'tu_1' },
       { type: 'message_end', stopReason: 'tool_use' },
     ])
@@ -52,8 +52,8 @@ describe('callNonStreaming', () => {
     expect(result.content).toHaveLength(1)
     expect(result.content[0].type).toBe('tool_use')
     if (result.content[0].type === 'tool_use') {
-      expect(result.content[0].name).toBe('make_decision')
-      expect(result.content[0].input).toEqual({ type: 'direct_reply', reply_text: 'Hi' })
+      expect(result.content[0].name).toBe('reply')
+      expect(result.content[0].input).toEqual({ text: 'Hi' })
     }
   })
 

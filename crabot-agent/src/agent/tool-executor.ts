@@ -50,7 +50,7 @@ export class ToolExecutor {
         case 'search_memory': return await this.searchMemory(input)
         case 'get_memory_detail': return await this.getMemoryDetail(input)
         default:
-          return { output: JSON.stringify({ error: `"${toolName}" 不是可用工具。如果你想使用此能力，请调用 make_decision(type="create_task") 创建任务。` }), isError: true }
+          return { output: JSON.stringify({ error: `"${toolName}" 不是可用工具。如果你想使用此能力，请调用 create_task 工具创建任务。` }), isError: true }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
