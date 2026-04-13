@@ -212,6 +212,60 @@ describe('normalizeMessagesForAnthropic', () => {
       { type: 'tool_result', tool_use_id: 'tu_2', content: 'result2', is_error: true },
     ])
   })
+
+  describe('consecutive user message merging', () => {
+    it('merges consecutive user messages into one', () => {
+      const messages: EngineMessage[] = [
+        createUserMessage('Hello'),
+        createAssistantMessage(
+          [{ type: 'tool_use', id: 'tu-1', name: 'dummy', input: {} }],
+          'tool_use',
+        ),
+        createToolResultMessage('tu-1', 'ok', false),
+        createUserMessage('Supplement: change direction'),
+      ]
+
+      const normalized = normalizeMessagesForAnthropic(messages)
+
+      expect(normalized).toHaveLength(3)
+      expect(normalized[0].role).toBe('user')
+      expect(normalized[1].role).toBe('assistant')
+      expect(normalized[2].role).toBe('user')
+
+      const lastMsg = normalized[2]
+      const content = lastMsg.content as unknown[]
+      expect(content.length).toBeGreaterThanOrEqual(2)
+      expect((content[0] as any).type).toBe('tool_result')
+      const textBlocks = content.filter((b: any) => b.type === 'text')
+      expect(textBlocks.length).toBeGreaterThanOrEqual(1)
+      expect((textBlocks[textBlocks.length - 1] as any).text).toContain('Supplement: change direction')
+    })
+
+    it('does not merge non-consecutive user messages', () => {
+      const messages: EngineMessage[] = [
+        createUserMessage('Hello'),
+        createAssistantMessage([{ type: 'text', text: 'Hi' }], 'end_turn'),
+        createUserMessage('Goodbye'),
+      ]
+
+      const normalized = normalizeMessagesForAnthropic(messages)
+      expect(normalized).toHaveLength(3)
+    })
+
+    it('merges multiple consecutive user messages', () => {
+      const messages: EngineMessage[] = [
+        createUserMessage('First'),
+        createUserMessage('Second'),
+        createUserMessage('Third'),
+      ]
+
+      const normalized = normalizeMessagesForAnthropic(messages)
+      expect(normalized).toHaveLength(1)
+      expect(normalized[0].role).toBe('user')
+      const content = normalized[0].content as unknown[]
+      expect(content).toHaveLength(3)
+    })
+  })
 })
 
 describe('AnthropicAdapter', () => {

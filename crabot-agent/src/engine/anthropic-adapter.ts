@@ -19,7 +19,7 @@ import type { EngineMessage, ToolDefinition, StreamChunk } from './types.js'
 // --- Anthropic Message Normalization ---
 
 export function normalizeMessagesForAnthropic(messages: ReadonlyArray<EngineMessage>): MessageParam[] {
-  return messages.map((msg): MessageParam => {
+  const raw = messages.map((msg): MessageParam => {
     if (isToolResultMessage(msg)) {
       return {
         role: 'user',
@@ -94,6 +94,27 @@ export function normalizeMessagesForAnthropic(messages: ReadonlyArray<EngineMess
 
     return { role: 'user', content }
   })
+
+  // Merge consecutive user messages (required by Anthropic API)
+  const merged: MessageParam[] = []
+  for (const msg of raw) {
+    const prev = merged.length > 0 ? merged[merged.length - 1] : undefined
+    if (prev && prev.role === 'user' && msg.role === 'user') {
+      const prevContent = Array.isArray(prev.content)
+        ? prev.content
+        : [{ type: 'text' as const, text: prev.content }]
+      const curContent = Array.isArray(msg.content)
+        ? msg.content
+        : [{ type: 'text' as const, text: msg.content }]
+      merged[merged.length - 1] = {
+        role: 'user',
+        content: [...prevContent, ...curContent],
+      }
+    } else {
+      merged.push(msg)
+    }
+  }
+  return merged
 }
 
 // --- Anthropic Adapter ---

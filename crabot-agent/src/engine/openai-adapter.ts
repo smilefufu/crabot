@@ -105,7 +105,23 @@ export function normalizeMessagesForOpenAI(messages: ReadonlyArray<EngineMessage
     result.push({ role: 'user', content: contentParts })
   }
 
-  return result
+  // Merge consecutive user messages (defensive — shouldn't happen with tool results, but supplements can cause it)
+  const merged: OpenAIMessage[] = []
+  for (const msg of result) {
+    const prev = merged.length > 0 ? merged[merged.length - 1] : undefined
+    if (prev && prev.role === 'user' && msg.role === 'user') {
+      const prevContent = Array.isArray(prev.content)
+        ? prev.content
+        : [{ type: 'text' as const, text: prev.content } as OpenAITextContent]
+      const curContent = Array.isArray(msg.content)
+        ? msg.content
+        : [{ type: 'text' as const, text: msg.content } as OpenAITextContent]
+      merged[merged.length - 1] = { role: 'user', content: [...prevContent, ...curContent] }
+    } else {
+      merged.push(msg)
+    }
+  }
+  return merged
 }
 
 // --- OpenAI Tool Conversion ---
