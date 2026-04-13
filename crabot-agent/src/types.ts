@@ -671,6 +671,8 @@ export interface ToolCallDetails {
   input_summary: string
   output_summary?: string
   error?: string
+  /** 指向 sub-agent 的独立 trace（delegate_task 等场景） */
+  child_trace_id?: string
 }
 
 export interface SubAgentCallDetails {
@@ -737,6 +739,8 @@ export interface AgentTrace {
   trace_id: string
   parent_trace_id?: string
   parent_span_id?: string
+  /** 关联的任务 ID（Front/Worker/Sub-agent 通过此字段关联） */
+  related_task_id?: string
   module_id: string
   started_at: string
   ended_at?: string
