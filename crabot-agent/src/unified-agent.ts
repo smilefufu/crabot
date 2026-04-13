@@ -2175,19 +2175,23 @@ export class UnifiedAgent extends ModuleBase {
     }
 
     // Startup cleanup of expired JSONL trace files
-    const retentionDays = parseInt(process.env.TRACE_RETENTION_DAYS ?? '30', 10)
-    const removed = this.traceStore.cleanupOldFiles(retentionDays)
-    if (removed > 0) {
-      console.log(`[${this.config.moduleId}] Cleaned up ${removed} expired trace file(s) (retention: ${retentionDays}d)`)
-    }
+    const retentionDays = parseInt(process.env.TRACE_RETENTION_DAYS ?? '30', 10) || 30
+    try {
+      const removed = this.traceStore.cleanupOldFiles(retentionDays)
+      if (removed > 0) {
+        console.log(`[${this.config.moduleId}] Cleaned up ${removed} expired trace file(s) (retention: ${retentionDays}d)`)
+      }
+    } catch { /* best effort */ }
 
     // Daily cleanup interval
     const ONE_DAY_MS = 24 * 60 * 60 * 1000
     this.traceCleanupInterval = setInterval(() => {
-      const count = this.traceStore.cleanupOldFiles(retentionDays)
-      if (count > 0) {
-        console.log(`[${this.config.moduleId}] Daily cleanup: removed ${count} expired trace file(s)`)
-      }
+      try {
+        const count = this.traceStore.cleanupOldFiles(retentionDays)
+        if (count > 0) {
+          console.log(`[${this.config.moduleId}] Daily cleanup: removed ${count} expired trace file(s)`)
+        }
+      } catch { /* best effort */ }
     }, ONE_DAY_MS)
   }
 
