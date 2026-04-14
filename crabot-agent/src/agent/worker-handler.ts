@@ -197,6 +197,7 @@ export interface WorkerHandlerOptions {
   digestSdkEnv?: SdkEnvConfig
   subAgentConfigs?: ReadonlyArray<{ readonly definition: SubAgentDefinition; readonly sdkEnv: SdkEnvConfig }>
   skills?: ReadonlyArray<SkillConfig>
+  lspManager?: import('../lsp/lsp-manager').LSPManager
 }
 
 export class WorkerHandler {

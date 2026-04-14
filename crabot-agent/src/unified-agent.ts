@@ -53,6 +53,7 @@ import { createCrabMessagingServer, type PathMapping } from './mcp/crab-messagin
 import { TraceStore } from './core/trace-store.js'
 import { PromptManager } from './prompt-manager.js'
 import { SUBAGENT_DEFINITIONS, type SubAgentDefinition } from './agent/subagent-prompts.js'
+import { createLSPManager, type LSPManager } from './lsp/lsp-manager.js'
 import type { SupplementTaskDecision } from './types.js'
 
 const BARRIER_TIMEOUT_MS = 8_000
@@ -120,6 +121,7 @@ export class UnifiedAgent extends ModuleBase {
 
   // Trace 存储
   private traceStore: TraceStore
+  private lspManager: LSPManager
   private traceCleanupInterval?: ReturnType<typeof setInterval>
   private promptManager: PromptManager
 
@@ -143,6 +145,7 @@ export class UnifiedAgent extends ModuleBase {
 
     const traceDir = path.join(process.env.DATA_DIR ?? './data', 'agent', 'traces')
     this.traceStore = new TraceStore(100, traceDir)
+    this.lspManager = createLSPManager()
 
     this.promptManager = new PromptManager()
 
@@ -277,6 +280,10 @@ export class UnifiedAgent extends ModuleBase {
       const workerModelConfig = config.model_config?.worker
       if (workerModelConfig) {
         this.sdkEnvWorker = this.buildSdkEnv(workerModelConfig)
+
+        // 启动 LSP Manager（coding_expert sub-agent 使用）
+        void this.lspManager.start(process.cwd())
+
         this.workerHandler = this.createWorkerHandler(
           this.sdkEnvWorker, config.model_config, workerPersonality,
           createMcpConfigs, config.builtin_tool_config, config.skills)
@@ -400,6 +407,7 @@ export class UnifiedAgent extends ModuleBase {
       digestSdkEnv: this.digestSdkEnv,
       subAgentConfigs,
       skills: skills ?? [],
+      lspManager: this.lspManager,
     })
   }
 
@@ -2273,5 +2281,8 @@ export class UnifiedAgent extends ModuleBase {
 
     // Disconnect external MCP servers
     await this.mcpConnector.disconnectAll()
+
+    // Stop LSP servers
+    await this.lspManager.stop()
   }
 }
