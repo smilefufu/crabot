@@ -117,6 +117,7 @@ export class UnifiedAgent extends ModuleBase {
 
   // Trace 存储
   private traceStore: TraceStore
+  private traceCleanupInterval?: ReturnType<typeof setInterval>
   private promptManager: PromptManager
 
   constructor(config: UnifiedAgentConfig) {
@@ -178,7 +179,8 @@ export class UnifiedAgent extends ModuleBase {
       this.contextAssembler,
       this.memoryWriter,
       async () => await this.getAdminPort(),
-      async (channelId) => await this.getChannelPort(channelId)
+      async (channelId) => await this.getChannelPort(channelId),
+      (params) => this.handleExecuteTask(params),
     )
 
     // 初始化群聊注意力调度（从 extra 读取配置，fallback 到协议默认值）
@@ -1744,12 +1746,13 @@ export class UnifiedAgent extends ModuleBase {
   private async handleExecuteTask(params: ExecuteTaskParams & {
     parent_trace_id?: string
     parent_span_id?: string
-  }): Promise<ExecuteTaskResult> {
+    related_task_id?: string
+  }): Promise<ExecuteTaskResult & { trace_id?: string }> {
     if (!this.workerHandler) {
       throw new Error('Worker handler not configured')
     }
 
-    const { parent_trace_id, parent_span_id, ...taskParams } = params
+    const { parent_trace_id, parent_span_id, related_task_id, ...taskParams } = params
 
     // 更新 sandbox 路径映射（crab-messaging send_message 需要路径转换）
     this.sandboxPathMappingsRef.current = taskParams.context.sandbox_path_mappings ?? []
@@ -1764,6 +1767,7 @@ export class UnifiedAgent extends ModuleBase {
       },
       parent_trace_id,
       parent_span_id,
+      related_task_id,
     })
 
     const traceCallback = this.buildTraceCallback(trace.trace_id)
@@ -1779,13 +1783,19 @@ export class UnifiedAgent extends ModuleBase {
     })
     this.traceStore.endSpan(trace.trace_id, ctxSpan.span_id, 'completed')
 
+    const traceContext: import('./agent/worker-handler').WorkerTraceContext = {
+      traceStore: this.traceStore,
+      traceId: trace.trace_id,
+      relatedTaskId: related_task_id,
+    }
+
     try {
-      const result = await this.workerHandler.executeTask(taskParams, traceCallback)
+      const result = await this.workerHandler.executeTask(taskParams, traceCallback, traceContext)
       this.traceStore.endTrace(trace.trace_id, result.outcome === 'completed' ? 'completed' : 'failed', {
         summary: result.summary.slice(0, 200),
         error: result.outcome === 'failed' ? result.summary : undefined,
       })
-      return result
+      return { ...result, trace_id: trace.trace_id }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
       this.traceStore.endTrace(trace.trace_id, 'failed', { summary: msg, error: msg })
@@ -2163,11 +2173,36 @@ export class UnifiedAgent extends ModuleBase {
         `[${this.config.moduleId}] ${this.mcpConnector.count} MCP server(s) connected`
       )
     }
+
+    // Startup cleanup of expired JSONL trace files
+    const retentionDays = parseInt(process.env.TRACE_RETENTION_DAYS ?? '30', 10) || 30
+    try {
+      const removed = this.traceStore.cleanupOldFiles(retentionDays)
+      if (removed > 0) {
+        console.log(`[${this.config.moduleId}] Cleaned up ${removed} expired trace file(s) (retention: ${retentionDays}d)`)
+      }
+    } catch { /* best effort */ }
+
+    // Daily cleanup interval
+    const ONE_DAY_MS = 24 * 60 * 60 * 1000
+    this.traceCleanupInterval = setInterval(() => {
+      try {
+        const count = this.traceStore.cleanupOldFiles(retentionDays)
+        if (count > 0) {
+          console.log(`[${this.config.moduleId}] Daily cleanup: removed ${count} expired trace file(s)`)
+        }
+      } catch { /* best effort */ }
+    }, ONE_DAY_MS)
   }
 
   protected override async onStop(): Promise<void> {
     this.sessionManager.stopCleanup()
     this.attentionScheduler.stopAll()
+
+    if (this.traceCleanupInterval) {
+      clearInterval(this.traceCleanupInterval)
+      this.traceCleanupInterval = undefined
+    }
 
     // Disconnect external MCP servers
     await this.mcpConnector.disconnectAll()

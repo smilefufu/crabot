@@ -89,6 +89,12 @@ export interface WorkerDeps {
 
 import type { LLMFormat } from '../engine/llm-adapter'
 
+export interface WorkerTraceContext {
+  traceStore: import('../core/trace-store').TraceStore
+  traceId: string
+  relatedTaskId?: string
+}
+
 export interface SdkEnvConfig {
   modelId: string
   format: LLMFormat
@@ -102,26 +108,6 @@ function adapterFromSdkEnv(sdkEnv: SdkEnvConfig) {
     apikey: sdkEnv.env.LLM_API_KEY ?? '',
     format: sdkEnv.format,
   })
-}
-
-function makeSubAgentTraceCallback(
-  label: string,
-  traceCallback: TraceCallback | undefined,
-): ((event: EngineTurnEvent) => void) | undefined {
-  if (!traceCallback) return undefined
-  return (event) => {
-    const spanId = traceCallback.onLlmCallStart(
-      event.turnNumber,
-      `[${label}] turn ${event.turnNumber}`,
-    )
-    if (spanId) {
-      traceCallback.onLlmCallEnd(spanId, {
-        stopReason: event.stopReason ?? undefined,
-        outputSummary: event.assistantText.slice(0, 200) || undefined,
-        toolCallsCount: event.toolCalls.length > 0 ? event.toolCalls.length : undefined,
-      })
-    }
-  }
 }
 
 
@@ -249,6 +235,7 @@ export class WorkerHandler {
   async executeTask(
     params: ExecuteTaskParams,
     traceCallback?: TraceCallback,
+    traceContext?: WorkerTraceContext,
   ): Promise<ExecuteTaskResult> {
     const { task, context } = params
     const taskDir = `/tmp/crabot-task-${task.task_id}`
@@ -354,6 +341,12 @@ export class WorkerHandler {
 
       // 3f. Sub-agent delegation tools
       const baseTools = [...tools]
+      const subAgentTraceConfig = traceContext ? {
+        traceStore: traceContext.traceStore,
+        parentTraceId: traceContext.traceId,
+        relatedTaskId: traceContext.relatedTaskId,
+      } : undefined
+
       for (const { definition, sdkEnv: subSdkEnv } of this.subAgentConfigs) {
         tools.push(createSubAgentTool({
           name: definition.toolName,
@@ -365,7 +358,7 @@ export class WorkerHandler {
           maxTurns: definition.maxTurns,
           supportsVision: subSdkEnv.supportsVision,
           parentHumanQueue: humanQueue,
-          onSubAgentTurn: makeSubAgentTraceCallback(definition.slotKey, traceCallback),
+          traceConfig: subAgentTraceConfig,
         }))
       }
 
@@ -381,8 +374,14 @@ export class WorkerHandler {
         maxTurns: 30,
         supportsVision: this.sdkEnv.supportsVision,
         parentHumanQueue: humanQueue,
-        onSubAgentTurn: makeSubAgentTraceCallback('delegate_task', traceCallback),
+        traceConfig: subAgentTraceConfig,
       }))
+
+      // 3h. Trace search tool
+      if (traceContext) {
+        const { createSearchTracesTool } = await import('./trace-search-tool.js')
+        tools.push(createSearchTracesTool(traceContext.traceStore))
+      }
 
       // 5. Build system prompt and task message
       const systemPrompt = this.buildSystemPrompt(context)

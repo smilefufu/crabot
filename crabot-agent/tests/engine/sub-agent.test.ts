@@ -4,6 +4,7 @@ import type { LLMAdapter } from '../../src/engine/llm-adapter'
 import type { StreamChunk, ToolDefinition } from '../../src/engine/types'
 import { defineTool } from '../../src/engine/tool-framework'
 import { HumanMessageQueue } from '../../src/engine/human-message-queue'
+import { TraceStore } from '../../src/core/trace-store'
 
 // --- Test Helpers (same pattern as query-loop tests) ---
 
@@ -355,5 +356,136 @@ describe('createSubAgentTool with parentHumanQueue', () => {
 
     parentQueue.push('after failure')
     expect(parentQueue.drainPending()).toEqual(['after failure'])
+  })
+})
+
+describe('createSubAgentTool with trace', () => {
+  it('creates independent trace for sub-agent execution', async () => {
+    const store = new TraceStore(10)
+    const parentTrace = store.startTrace({
+      module_id: 'agent-1',
+      trigger: { type: 'task', summary: 'parent task' },
+      related_task_id: 'task-999',
+    })
+    const parentSpan = store.startSpan(parentTrace.trace_id, {
+      type: 'tool_call',
+      details: { tool_name: 'delegate_task', input_summary: 'do something' },
+    })
+
+    const subDummy = defineTool({
+      name: 'sub_dummy',
+      description: 'Dummy',
+      inputSchema: {},
+      isReadOnly: true,
+      call: async () => ({ output: 'ok', isError: false }),
+    })
+
+    // Use tool_use + text response so onTurn fires (onTurn only fires on tool_use turns)
+    const adapter = mockAdapter([
+      toolUseResponse('tu-1', 'sub_dummy', {}),
+      textResponse('Sub result'),
+    ])
+    const tool = createSubAgentTool({
+      name: 'delegate_task',
+      description: 'delegate',
+      adapter,
+      model: 'test',
+      systemPrompt: 'You are a sub-agent.',
+      subTools: [subDummy],
+      traceConfig: {
+        traceStore: store,
+        parentTraceId: parentTrace.trace_id,
+        parentSpanId: parentSpan.span_id,
+        relatedTaskId: 'task-999',
+      },
+    })
+
+    const result = await tool.call!({ task: 'do something' }, { abortSignal: new AbortController().signal })
+    expect(result.isError).toBe(false)
+
+    // Verify sub-agent created independent trace
+    const allTraces = store.getTraces(10, 0)
+    expect(allTraces.traces).toHaveLength(2)  // parent + sub-agent
+
+    const subTrace = allTraces.traces.find(t => t.trigger.type === 'sub_agent_call')
+    expect(subTrace).toBeDefined()
+    expect(subTrace!.parent_trace_id).toBe(parentTrace.trace_id)
+    expect(subTrace!.parent_span_id).toBe(parentSpan.span_id)
+    expect(subTrace!.related_task_id).toBe('task-999')
+    expect(subTrace!.status).toBe('completed')
+    // onTurn fires once for the tool_use turn, creating llm_call + tool_call spans
+    expect(subTrace!.spans.length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('marks trace as failed when sub-agent errors', async () => {
+    const store = new TraceStore(10)
+    const parentTrace = store.startTrace({
+      module_id: 'agent-1',
+      trigger: { type: 'task', summary: 'parent task' },
+    })
+    const parentSpan = store.startSpan(parentTrace.trace_id, {
+      type: 'tool_call',
+      details: { tool_name: 'delegate_task', input_summary: 'fail' },
+    })
+
+    const failAdapter: LLMAdapter = {
+      async *stream() { throw new Error('LLM crashed') },
+      updateConfig() {},
+    }
+
+    const tool = createSubAgentTool({
+      name: 'delegate_task',
+      description: 'delegate',
+      adapter: failAdapter,
+      model: 'test',
+      systemPrompt: 'You are a sub-agent.',
+      subTools: [],
+      traceConfig: {
+        traceStore: store,
+        parentTraceId: parentTrace.trace_id,
+        parentSpanId: parentSpan.span_id,
+      },
+    })
+
+    const result = await tool.call!({ task: 'fail' }, { abortSignal: new AbortController().signal })
+    expect(result.isError).toBe(true)
+
+    const allTraces = store.getTraces(10, 0)
+    const subTrace = allTraces.traces.find(t => t.trigger.type === 'sub_agent_call')
+    expect(subTrace).toBeDefined()
+    expect(subTrace!.status).toBe('failed')
+    expect(subTrace!.outcome?.error).toContain('LLM crashed')
+  })
+
+  it('includes child_trace_id in output JSON', async () => {
+    const store = new TraceStore(10)
+    const parentTrace = store.startTrace({
+      module_id: 'agent-1',
+      trigger: { type: 'task', summary: 'parent task' },
+    })
+    const parentSpan = store.startSpan(parentTrace.trace_id, {
+      type: 'tool_call',
+      details: { tool_name: 'delegate_task', input_summary: 'test' },
+    })
+
+    const adapter = mockAdapter([textResponse('Done')])
+    const tool = createSubAgentTool({
+      name: 'delegate_task',
+      description: 'delegate',
+      adapter,
+      model: 'test',
+      systemPrompt: 'Sub.',
+      subTools: [],
+      traceConfig: {
+        traceStore: store,
+        parentTraceId: parentTrace.trace_id,
+        parentSpanId: parentSpan.span_id,
+      },
+    })
+
+    const result = await tool.call!({ task: 'test' }, { abortSignal: new AbortController().signal })
+    const parsed = JSON.parse(result.output)
+    expect(parsed.child_trace_id).toBeDefined()
+    expect(typeof parsed.child_trace_id).toBe('string')
   })
 })

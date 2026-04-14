@@ -22,6 +22,7 @@ export interface WriteTaskCreatedParams extends MemoryWriteBase {
   channel_id: string
   session_id: string
   worker_id?: string
+  trace_id?: string
 }
 
 export interface WriteTaskFinishedParams extends MemoryWriteBase {
@@ -33,6 +34,7 @@ export interface WriteTaskFinishedParams extends MemoryWriteBase {
   friend_id: string
   channel_id: string
   session_id: string
+  trace_id?: string
 }
 
 export interface WriteTriageDecisionParams extends MemoryWriteBase {
@@ -61,7 +63,7 @@ export class MemoryWriter {
     await this.write({
       content,
       source: { type: 'conversation' as const, channel_id: params.channel_id, session_id: params.session_id },
-      refs: { task_id: params.task_id, friend_id: params.friend_id, session_id: params.session_id, channel_id: params.channel_id },
+      refs: { task_id: params.task_id, friend_id: params.friend_id, session_id: params.session_id, channel_id: params.channel_id, ...(params.trace_id ? { trace_id: params.trace_id } : {}) },
       persons: [params.friend_name],
       entities: [params.task_id],
       topic: params.task_title,
@@ -78,7 +80,7 @@ export class MemoryWriter {
     await this.write({
       content,
       source: { type: 'conversation' as const, channel_id: params.channel_id, session_id: params.session_id },
-      refs: { task_id: params.task_id, friend_id: params.friend_id, session_id: params.session_id, channel_id: params.channel_id },
+      refs: { task_id: params.task_id, friend_id: params.friend_id, session_id: params.session_id, channel_id: params.channel_id, ...(params.trace_id ? { trace_id: params.trace_id } : {}) },
       persons: [params.friend_name],
       entities: [params.task_id],
       topic: params.task_title,
