@@ -1,4 +1,4 @@
-import type { HookInput, HookResult, InternalHandler, InternalHandlerContext, FormattedDiagnostic } from './types'
+import type { InternalHandler, FormattedDiagnostic } from './types'
 import { execSync } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
