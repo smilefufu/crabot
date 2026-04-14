@@ -53,7 +53,6 @@ describe('executeCommandHook', () => {
       event: 'PostToolUse', type: 'command',
       command: '__internal:lsp-diagnostics',
     }
-    // Without lspManager, should return continue with no diagnostics
     const result = await executeCommandHook(hook, baseInput, { workingDirectory: '/tmp' })
     expect(result.action).toBe('continue')
   })

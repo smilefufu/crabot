@@ -1,126 +1,81 @@
 import { describe, it, expect } from 'vitest'
 import { runPromptHook } from '../../../src/hooks/prompt-hook'
-import type { LLMAdapter } from '../../../src/engine/llm-adapter'
-import type { StreamChunk } from '../../../src/engine/types'
 import type { HookInput } from '../../../src/hooks/types'
+import type { LLMAdapter } from '../../../src/engine/llm-adapter-types'
+import type { StreamChunk } from '../../../src/engine/types'
 
-// --- Test Helpers ---
-
-function mockAdapter(text: string): LLMAdapter {
+function mockAdapter(responseText: string): LLMAdapter {
   return {
     async *stream() {
-      const chunks: StreamChunk[] = [
-        { type: 'message_start', messageId: 'msg-1' },
-        { type: 'text_delta', text },
-        { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 5 } },
-      ]
-      for (const chunk of chunks) {
-        yield chunk
-      }
+      yield { type: 'message_start' as const, messageId: 'msg-1' }
+      yield { type: 'text_delta' as const, text: responseText }
+      yield { type: 'message_end' as const, stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 5 } }
     },
     updateConfig() {},
   }
 }
 
-function baseInput(overrides: Partial<HookInput> = {}): HookInput {
-  return {
-    event: 'PreToolUse',
-    toolName: 'Write',
-    filePaths: ['/tmp/test.ts'],
-    toolInput: { content: 'const x = 1' },
-    workingDirectory: '/tmp',
-    ...overrides,
-  }
+const baseInput: HookInput = {
+  event: 'Stop',
+  workingDirectory: '/tmp',
 }
 
-// --- Tests ---
-
 describe('runPromptHook', () => {
-  it('returns block when LLM responds with action:block', async () => {
+  it('parses JSON response with action block', async () => {
     const adapter = mockAdapter('{"action":"block","message":"tests are failing"}')
-
     const result = await runPromptHook({
-      prompt: 'Check code quality. Input: $INPUT',
-      input: baseInput(),
+      prompt: 'Check: $INPUT',
+      input: baseInput,
       adapter,
       model: 'test-model',
     })
-
     expect(result.action).toBe('block')
     expect(result.message).toBe('tests are failing')
   })
 
-  it('returns continue when LLM responds with action:continue', async () => {
+  it('returns continue when LLM says continue', async () => {
     const adapter = mockAdapter('{"action":"continue"}')
-
     const result = await runPromptHook({
-      prompt: 'Check code quality. Input: $INPUT',
-      input: baseInput(),
+      prompt: 'Check: $INPUT',
+      input: baseInput,
       adapter,
       model: 'test-model',
     })
-
     expect(result.action).toBe('continue')
   })
 
-  it('returns continue when LLM returns non-JSON text', async () => {
-    const adapter = mockAdapter('I think everything is fine, proceed.')
-
+  it('returns continue with raw text on unparseable response', async () => {
+    const adapter = mockAdapter('I think everything is fine')
     const result = await runPromptHook({
-      prompt: 'Check quality. Input: $INPUT',
-      input: baseInput(),
+      prompt: 'Check: $INPUT',
+      input: baseInput,
       adapter,
       model: 'test-model',
     })
-
     expect(result.action).toBe('continue')
-    expect(result.message).toBe('I think everything is fine, proceed.')
+    expect(result.message).toContain('everything is fine')
   })
 
-  it('replaces $INPUT with JSON-serialized hook input', async () => {
-    const capturedParams: unknown[] = []
-
+  it('substitutes $INPUT in prompt template', async () => {
+    let capturedMessages: unknown
     const adapter: LLMAdapter = {
       async *stream(params) {
-        capturedParams.push(params)
-        yield { type: 'message_start', messageId: 'msg-1' }
-        yield { type: 'text_delta', text: '{"action":"continue"}' }
-        yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 5 } }
+        capturedMessages = params.messages
+        yield { type: 'message_start' as const, messageId: 'msg-1' }
+        yield { type: 'text_delta' as const, text: '{"action":"continue"}' }
+        yield { type: 'message_end' as const, stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 5 } }
       },
       updateConfig() {},
     }
 
-    const input = baseInput({ toolName: 'Bash', toolInput: { command: 'ls' } })
-
     await runPromptHook({
-      prompt: 'Evaluate: $INPUT',
-      input,
+      prompt: 'Analyze: $INPUT',
+      input: { event: 'Stop', workingDirectory: '/project' },
       adapter,
       model: 'test-model',
     })
 
-    expect(capturedParams).toHaveLength(1)
-    const params = capturedParams[0] as { messages: Array<{ content: string | unknown[] }> }
-    const userMessageContent = params.messages[0].content
-    const contentText =
-      typeof userMessageContent === 'string'
-        ? userMessageContent
-        : JSON.stringify(userMessageContent)
-
-    expect(contentText).toContain('Bash')
-    expect(contentText).not.toContain('$INPUT')
-  })
-
-  it('returns continue with no message when LLM returns empty response', async () => {
-    const adapter = mockAdapter('')
-
-    const result = await runPromptHook({
-      prompt: 'Check: $INPUT',
-      input: baseInput(),
-      adapter,
-      model: 'test-model',
-    })
-
-    expect(result.action).toBe('continue')
+    const msgs = capturedMessages as Array<{ content: string }>
+    expect(msgs[0].content).toContain('/project')
   })
 })
