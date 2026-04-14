@@ -1,0 +1,6 @@
+export type { HookEvent, HookDefinition, HookInput, HookResult, HookExecutorContext, FormattedDiagnostic, LspManagerLike } from './types'
+export { HookRegistry } from './hook-registry'
+export { executeHooks } from './hook-executor'
+export { executeCommandHook } from './command-hook'
+export { runPromptHook } from './prompt-hook'
+export { createCodingExpertHookRegistry } from './defaults'
