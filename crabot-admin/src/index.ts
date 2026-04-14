@@ -1358,6 +1358,17 @@ export class AdminModule extends ModuleBase {
         return
       }
 
+      if (pathname === '/api/agent/traces/search' && req.method === 'GET') {
+        await this.handleSearchAgentTracesApi(req, res, url)
+        return
+      }
+
+      const traceTreeMatch = pathname.match(/^\/api\/agent\/trace-tree\/([^/]+)$/)
+      if (traceTreeMatch && req.method === 'GET') {
+        await this.handleGetAgentTraceTreeApi(req, res, traceTreeMatch[1])
+        return
+      }
+
       const agentTraceDetailMatch = pathname.match(/^\/api\/agent\/traces\/([^/]+)$/)
       if (agentTraceDetailMatch && req.method === 'GET') {
         await this.handleGetAgentTraceApi(req, res, agentTraceDetailMatch[1])
@@ -5073,6 +5084,69 @@ export class AdminModule extends ModuleBase {
         { before?: string; trace_ids?: string[] },
         { cleared_count: number }
       >(port, 'clear_traces', params, this.config.moduleId)
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(result))
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      res.writeHead(500, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: msg }))
+    }
+  }
+
+  private async handleSearchAgentTracesApi(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    url: URL
+  ): Promise<void> {
+    try {
+      const port = await this.ensureAgentPort()
+      if (!port) {
+        res.writeHead(503, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Agent not available' }))
+        return
+      }
+      const params: Record<string, unknown> = {}
+      const taskId = url.searchParams.get('task_id')
+      if (taskId) params.task_id = taskId
+      const keyword = url.searchParams.get('keyword')
+      if (keyword) params.keyword = keyword
+      const status = url.searchParams.get('status')
+      if (status) params.status = status
+      const start = url.searchParams.get('start')
+      const end = url.searchParams.get('end')
+      if (start && end) params.time_range = { start, end }
+      params.limit = parseInt(url.searchParams.get('limit') ?? '20')
+      params.offset = parseInt(url.searchParams.get('offset') ?? '0')
+
+      const result = await this.rpcClient.call<
+        Record<string, unknown>,
+        { traces: unknown[]; total: number }
+      >(port, 'search_traces', params, this.config.moduleId)
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(result))
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      res.writeHead(500, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: msg }))
+    }
+  }
+
+  private async handleGetAgentTraceTreeApi(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    taskId: string
+  ): Promise<void> {
+    try {
+      const port = await this.ensureAgentPort()
+      if (!port) {
+        res.writeHead(503, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Agent not available' }))
+        return
+      }
+      const result = await this.rpcClient.call<
+        { task_id: string },
+        unknown
+      >(port, 'get_trace_tree', { task_id: taskId }, this.config.moduleId)
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(result))
     } catch (error) {
