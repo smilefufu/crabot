@@ -7,6 +7,8 @@ export class HumanMessageQueue {
   private pending: QueueContent[] = []
   private waitResolve: ((value: QueueContent) => void) | null = null
   private children: Set<{ queue: HumanMessageQueue; transform?: QueueTransform }> = new Set()
+  private barrierResolve: (() => void) | null = null
+  private barrierTimer: ReturnType<typeof setTimeout> | null = null
 
   push(content: QueueContent): void {
     if (this.waitResolve) {
@@ -20,6 +22,7 @@ export class HumanMessageQueue {
       const transformed = child.transform ? child.transform(content) : content
       child.queue.push(transformed)
     }
+    this.clearBarrier()
   }
 
   async dequeue(): Promise<QueueContent> {
@@ -58,5 +61,46 @@ export class HumanMessageQueue {
       }
     }
     this.children = next
+  }
+
+  setBarrier(timeoutMs: number): void {
+    this.clearBarrier()
+    this.barrierTimer = setTimeout(() => {
+      this.clearBarrier()
+    }, timeoutMs)
+  }
+
+  clearBarrier(): void {
+    if (this.barrierTimer !== null) {
+      clearTimeout(this.barrierTimer)
+      this.barrierTimer = null
+    }
+    if (this.barrierResolve !== null) {
+      const resolve = this.barrierResolve
+      this.barrierResolve = null
+      resolve()
+    }
+  }
+
+  get hasBarrier(): boolean {
+    return this.barrierTimer !== null || this.barrierResolve !== null
+  }
+
+  async waitBarrier(signal?: AbortSignal): Promise<void> {
+    if (!this.hasBarrier) {
+      return
+    }
+    if (this.barrierResolve !== null) {
+      return
+    }
+    return new Promise<void>((resolve) => {
+      this.barrierResolve = resolve
+      if (signal) {
+        const onAbort = (): void => {
+          this.clearBarrier()
+        }
+        signal.addEventListener('abort', onAbort, { once: true })
+      }
+    })
   }
 }

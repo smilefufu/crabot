@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { HumanMessageQueue } from '../../src/engine/human-message-queue'
 
 describe('HumanMessageQueue', () => {
@@ -100,6 +100,95 @@ describe('HumanMessageQueue', () => {
       const blocks = [{ type: 'text' as const, text: 'hello' }]
       parent.push(blocks)
       expect(child.drainPending()).toEqual(['[多媒体纠偏消息]'])
+    })
+  })
+
+  describe('barrier', () => {
+    it('hasBarrier is false by default', () => {
+      const queue = new HumanMessageQueue()
+      expect(queue.hasBarrier).toBe(false)
+    })
+
+    it('setBarrier makes hasBarrier true', () => {
+      const queue = new HumanMessageQueue()
+      queue.setBarrier(5000)
+      expect(queue.hasBarrier).toBe(true)
+    })
+
+    it('clearBarrier makes hasBarrier false', () => {
+      const queue = new HumanMessageQueue()
+      queue.setBarrier(5000)
+      queue.clearBarrier()
+      expect(queue.hasBarrier).toBe(false)
+    })
+
+    it('waitBarrier resolves immediately when no barrier', async () => {
+      const queue = new HumanMessageQueue()
+      await queue.waitBarrier()  // should not hang
+    })
+
+    it('waitBarrier blocks until clearBarrier is called', async () => {
+      const queue = new HumanMessageQueue()
+      queue.setBarrier(5000)
+      let resolved = false
+      const promise = queue.waitBarrier().then(() => { resolved = true })
+      // Should not resolve synchronously
+      await Promise.resolve()
+      expect(resolved).toBe(false)
+      queue.clearBarrier()
+      await promise
+      expect(resolved).toBe(true)
+    })
+
+    it('push auto-clears barrier', async () => {
+      const queue = new HumanMessageQueue()
+      queue.setBarrier(5000)
+      let resolved = false
+      const promise = queue.waitBarrier().then(() => { resolved = true })
+      await Promise.resolve()
+      expect(resolved).toBe(false)
+      queue.push('supplement msg')
+      await promise
+      expect(resolved).toBe(true)
+      expect(queue.hasBarrier).toBe(false)
+      expect(queue.hasPending).toBe(true)
+    })
+
+    it('barrier auto-clears on timeout', async () => {
+      vi.useFakeTimers()
+      const queue = new HumanMessageQueue()
+      queue.setBarrier(100)
+      let resolved = false
+      const promise = queue.waitBarrier().then(() => { resolved = true })
+      expect(resolved).toBe(false)
+      vi.advanceTimersByTime(100)
+      await promise
+      expect(resolved).toBe(true)
+      expect(queue.hasBarrier).toBe(false)
+      vi.useRealTimers()
+    })
+
+    it('setBarrier clears previous barrier before setting new one', () => {
+      const queue = new HumanMessageQueue()
+      queue.setBarrier(5000)
+      queue.setBarrier(3000)
+      expect(queue.hasBarrier).toBe(true)
+      queue.clearBarrier()
+      expect(queue.hasBarrier).toBe(false)
+    })
+
+    it('waitBarrier responds to AbortSignal', async () => {
+      const queue = new HumanMessageQueue()
+      queue.setBarrier(5000)
+      const controller = new AbortController()
+      let resolved = false
+      const promise = queue.waitBarrier(controller.signal).then(() => { resolved = true })
+      await Promise.resolve()
+      expect(resolved).toBe(false)
+      controller.abort()
+      await promise
+      expect(resolved).toBe(true)
+      expect(queue.hasBarrier).toBe(false)
     })
   })
 })
