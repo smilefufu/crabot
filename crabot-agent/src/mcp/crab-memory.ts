@@ -29,6 +29,8 @@ export interface MemoryTaskContext {
   sessionId?: string
   visibility: 'private' | 'internal' | 'public'
   scopes: string[]
+  /** 记忆来源类型，默认 'conversation' */
+  sourceType?: 'conversation' | 'reflection' | 'system'
 }
 
 // ============================================================================
@@ -52,6 +54,10 @@ export function createCrabMemoryServer(
             .describe('重要性 1-10，日常偏好 3-5，重要决策 6-8，关键信息 9-10'),
           tags: z.array(z.string()).optional()
             .describe('分类标签'),
+          abstract: z.string().optional()
+            .describe('L0 摘要（可选）。面向召回场景写，包含关键场景词和结论'),
+          overview: z.string().optional()
+            .describe('L1 概览（可选）。结构化经验描述：场景、问题、方案、适用范围'),
         },
         async (args) => {
           try {
@@ -61,8 +67,10 @@ export function createCrabMemoryServer(
               'write_long_term',
               {
                 content: args.content,
+                ...(args.abstract && { abstract: args.abstract }),
+                ...(args.overview && { overview: args.overview }),
                 source: {
-                  type: 'conversation' as const,
+                  type: ctx.sourceType ?? 'conversation',
                   task_id: ctx.taskId,
                   channel_id: ctx.channelId,
                   session_id: ctx.sessionId,

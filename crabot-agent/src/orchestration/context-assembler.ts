@@ -155,6 +155,30 @@ export class ContextAssembler {
     }
   }
 
+  /**
+   * 组装调度任务上下文 — 不依赖 channel/session/friend
+   */
+  async assembleScheduledTaskContext(): Promise<WorkerAgentContext> {
+    const [adminEndpoint, memoryEndpoint, channelEndpoints] = await Promise.all([
+      this.resolveModule('admin'),
+      this.resolveModule('memory'),
+      this.resolveModules('channel'),
+    ])
+
+    return {
+      short_term_memories: [],
+      long_term_memories: [],
+      available_tools: [],
+      admin_endpoint: adminEndpoint,
+      memory_endpoint: memoryEndpoint,
+      channel_endpoints: channelEndpoints,
+      memory_permissions: {
+        write_visibility: 'internal',
+        write_scopes: [],
+      },
+    }
+  }
+
   // ==========================================================================
   // 数据获取
   // ==========================================================================

@@ -1710,6 +1710,20 @@ export class UnifiedAgent extends ModuleBase {
         `[${this.config.moduleId}] Created task ${taskResult.task_id} from schedule ${schedule_id}, assigned to ${workerId}`
       )
 
+      // 组装调度任务上下文并启动 Worker 执行
+      const workerContext = await this.contextAssembler.assembleScheduledTaskContext()
+
+      this.decisionDispatcher.executeScheduledTaskInBackground(
+        {
+          id: taskResult.task_id,
+          title,
+          description,
+          type: task_type,
+          priority: 'normal',
+        },
+        workerContext,
+      )
+
       return { task_id: taskResult.task_id, assigned_worker: workerId }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)

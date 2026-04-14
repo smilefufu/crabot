@@ -406,6 +406,121 @@ export class DecisionDispatcher {
   }
 
   /**
+   * 后台执行调度任务：无来源 channel，不发即时回复，仅更新 Admin 任务状态 + 写系统级短期记忆
+   */
+  executeScheduledTaskInBackground(
+    task: AdminTask,
+    workerContext: import('../types.js').WorkerAgentContext,
+  ): void {
+    const run = async () => {
+      const adminPort = await this.getAdminPort()
+
+      // 推进任务状态：pending → planning → executing
+      try {
+        await this.rpcClient.call(
+          adminPort, 'update_task_status',
+          { task_id: task.id, status: 'planning' },
+          this.moduleId
+        )
+        await this.rpcClient.call(
+          adminPort, 'update_task_status',
+          { task_id: task.id, status: 'executing' },
+          this.moduleId
+        )
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error(`[DecisionDispatcher] Failed to transition scheduled task ${task.id} to executing: ${msg}`)
+      }
+
+      try {
+        const taskPayload: ExecuteTaskParams = {
+          task: {
+            task_id: task.id,
+            task_title: task.title,
+            task_description: task.description ?? '',
+            task_type: task.type,
+            priority: task.priority,
+            plan: task.plan,
+          },
+          context: workerContext,
+        }
+
+        const result: ExecuteTaskResult & { trace_id?: string } = this.executeTaskFn
+          ? await this.executeTaskFn({ ...taskPayload, related_task_id: task.id })
+          : await this.workerHandler!.executeTask(taskPayload)
+
+        // 更新 Admin 任务状态
+        const finalStatus = result.outcome === 'completed' ? 'completed' : 'failed'
+        await this.rpcClient.call(
+          adminPort,
+          'update_task_status',
+          {
+            task_id: task.id,
+            status: finalStatus,
+            result: {
+              outcome: result.outcome,
+              summary: result.summary,
+              final_reply: result.final_reply,
+              finished_at: new Date().toISOString(),
+            },
+            ...(finalStatus === 'failed' && { error: result.summary }),
+          },
+          this.moduleId
+        ).catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err)
+          console.error(`[DecisionDispatcher] Failed to update scheduled task status: ${msg}`)
+        })
+
+        // 写入短期记忆（系统级参数）
+        this.memoryWriter.writeTaskFinished({
+          task_id: task.id,
+          task_title: task.title,
+          outcome: result.outcome,
+          summary: result.summary,
+          friend_name: 'system',
+          friend_id: '',
+          channel_id: '',
+          session_id: '',
+          visibility: 'internal',
+          scopes: [],
+          trace_id: result.trace_id,
+        }).catch(() => {})
+
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error)
+        console.error(`[DecisionDispatcher] Background scheduled task ${task.id} failed: ${msg}`)
+
+        // 更新任务为失败
+        try {
+          await this.rpcClient.call(
+            adminPort,
+            'update_task_status',
+            { task_id: task.id, status: 'failed', error: msg },
+            this.moduleId
+          )
+        } catch { /* best effort */ }
+
+        this.memoryWriter.writeTaskFinished({
+          task_id: task.id,
+          task_title: task.title,
+          outcome: 'failed',
+          summary: msg,
+          friend_name: 'system',
+          friend_id: '',
+          channel_id: '',
+          session_id: '',
+          visibility: 'internal',
+          scopes: [],
+        }).catch(() => {})
+      }
+    }
+
+    run().catch((err) => {
+      console.error(`[DecisionDispatcher] Unexpected error in scheduled task: ${err}`)
+    })
+  }
+
+  /**
    * 向用户发送回复（Channel 或 Admin Chat，跨模块 RPC）
    */
   private async sendReplyToUser(
