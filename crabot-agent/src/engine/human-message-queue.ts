@@ -94,12 +94,17 @@ export class HumanMessageQueue {
       return
     }
     return new Promise<void>((resolve) => {
-      this.barrierResolve = resolve
       if (signal) {
         const onAbort = (): void => {
           this.clearBarrier()
         }
         signal.addEventListener('abort', onAbort, { once: true })
+        this.barrierResolve = () => {
+          signal.removeEventListener('abort', onAbort)
+          resolve()
+        }
+      } else {
+        this.barrierResolve = resolve
       }
     })
   }

@@ -156,16 +156,19 @@ describe('HumanMessageQueue', () => {
 
     it('barrier auto-clears on timeout', async () => {
       vi.useFakeTimers()
-      const queue = new HumanMessageQueue()
-      queue.setBarrier(100)
-      let resolved = false
-      const promise = queue.waitBarrier().then(() => { resolved = true })
-      expect(resolved).toBe(false)
-      vi.advanceTimersByTime(100)
-      await promise
-      expect(resolved).toBe(true)
-      expect(queue.hasBarrier).toBe(false)
-      vi.useRealTimers()
+      try {
+        const queue = new HumanMessageQueue()
+        queue.setBarrier(100)
+        let resolved = false
+        const promise = queue.waitBarrier().then(() => { resolved = true })
+        expect(resolved).toBe(false)
+        vi.advanceTimersByTime(100)
+        await promise
+        expect(resolved).toBe(true)
+        expect(queue.hasBarrier).toBe(false)
+      } finally {
+        vi.useRealTimers()
+      }
     })
 
     it('setBarrier clears previous barrier before setting new one', () => {
