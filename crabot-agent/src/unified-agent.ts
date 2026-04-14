@@ -772,7 +772,22 @@ export class UnifiedAgent extends ModuleBase {
       },
     })
 
+    let barrierTaskIds: string[] = []
+
     try {
+      // 群聊 barrier：仅在有 @bot 消息时设置（非 @bot 群聊消息不暂停 worker）
+      const hasMention = messages.some(m => m.features.is_mention_crab)
+      if (hasMention && this.workerHandler) {
+        const BARRIER_TIMEOUT_MS = 8000
+        barrierTaskIds = this.workerHandler.getActiveTasksByOrigin(
+          session.channel_id,
+          sessionId,
+        )
+        for (const taskId of barrierTaskIds) {
+          this.workerHandler.setBarrierForTask(taskId, BARRIER_TIMEOUT_MS)
+        }
+      }
+
       // 群聊权限：group_default 模板 + Session 覆盖
       const resolvedPerms = await this.resolveGroupPermissions(sessionId)
       this.currentResolvedPerms = resolvedPerms
@@ -867,6 +882,20 @@ export class UnifiedAgent extends ModuleBase {
       }
       // else: silent discard — 不发送任何回复
 
+      // 清除未被 supplement 命中的 barrier
+      if (barrierTaskIds.length > 0) {
+        const supplementedTaskIds = new Set(
+          result.decisions
+            .filter((d): d is import('./types.js').SupplementTaskDecision => d.type === 'supplement_task')
+            .map(d => d.task_id)
+        )
+        for (const taskId of barrierTaskIds) {
+          if (!supplementedTaskIds.has(taskId)) {
+            this.workerHandler?.clearBarrierForTask(taskId)
+          }
+        }
+      }
+
       // 报告结果，调整注意力巡检间隔
       this.attentionScheduler.reportResult(sessionId, hasReply)
 
@@ -876,6 +905,10 @@ export class UnifiedAgent extends ModuleBase {
           : 'silent discard',
       })
     } catch (error) {
+      // 异常时清除所有 barrier
+      for (const taskId of barrierTaskIds) {
+        this.workerHandler?.clearBarrierForTask(taskId)
+      }
       const msg = error instanceof Error ? error.message : String(error)
       this.traceStore.endTrace(trace.trace_id, 'failed', { summary: msg, error: msg })
     }
