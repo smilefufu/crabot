@@ -21,11 +21,12 @@
   "author": "Crabot Team",
   "license": "MIT",
   "dependencies": {
-    "crabot-shared": "file:../crabot-shared",
     "@types/adm-zip": "^0.5.8",
     "adm-zip": "^0.5.16",
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^12.6.2",
+    "crabot-shared": "file:../crabot-shared",
+    "croner": "^10.0.1",
     "js-yaml": "^4.1.1",
     "jsonwebtoken": "^9.0.0",
     "node-pty": "^1.0.0",
