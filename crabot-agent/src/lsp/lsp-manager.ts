@@ -3,7 +3,10 @@ import type { Language } from './configs'
 import { LSP_CONFIGS, detectLanguage } from './configs'
 import { createLSPClient, type LSPClient } from './lsp-client'
 import { DiagnosticStore } from './diagnostic-store'
-import { execSync } from 'child_process'
+import { exec as execCb } from 'child_process'
+import { promisify } from 'util'
+
+const execAsync = promisify(execCb)
 
 export interface LSPManager extends LspManagerLike {
   start(rootUri: string, languages?: Language[]): Promise<void>
@@ -18,12 +21,17 @@ export function createLSPManager(): LSPManager {
   const diagnosticStore = new DiagnosticStore()
   let rootUri: string | undefined
   const startingLanguages = new Set<Language>()
+  const installedCache = new Map<string, boolean>()
 
-  function isServerInstalled(command: string): boolean {
+  async function isServerInstalled(command: string): Promise<boolean> {
+    const cached = installedCache.get(command)
+    if (cached !== undefined) return cached
     try {
-      execSync(`which ${command}`, { stdio: 'pipe' })
+      await execAsync(`which ${command}`)
+      installedCache.set(command, true)
       return true
     } catch {
+      installedCache.set(command, false)
       return false
     }
   }
@@ -34,7 +42,7 @@ export function createLSPManager(): LSPManager {
     if (startingLanguages.has(language)) return undefined
 
     const config = LSP_CONFIGS[language]
-    if (!isServerInstalled(config.command)) return undefined
+    if (!(await isServerInstalled(config.command))) return undefined
 
     startingLanguages.add(language)
     try {
@@ -84,7 +92,7 @@ export function createLSPManager(): LSPManager {
       if (!client) return []
 
       const diagnostics = await client.waitForDiagnostics(filePath)
-      diagnosticStore.update(filePath, [...diagnostics])
+      diagnosticStore.update(filePath, diagnostics)
       return diagnosticStore.get(filePath)
     },
 

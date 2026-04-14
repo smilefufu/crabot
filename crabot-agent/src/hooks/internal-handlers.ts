@@ -1,4 +1,5 @@
 import type { InternalHandler, FormattedDiagnostic } from './types'
+import { extractFilePaths } from '../engine/tool-orchestration'
 import { exec } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
@@ -20,7 +21,7 @@ registerInternalHandler('lsp-diagnostics', async (input, context) => {
     return { action: 'continue' }
   }
 
-  const filePath = extractFilePath(input.toolInput)
+  const filePath = input.toolInput ? extractFilePaths(input.toolInput)[0] : undefined
   if (!filePath) {
     return { action: 'continue' }
   }
@@ -72,12 +73,6 @@ registerInternalHandler('compile-check', async (_input, context) => {
 })
 
 // --- Helpers ---
-
-function extractFilePath(toolInput?: Record<string, unknown>): string | undefined {
-  if (!toolInput) return undefined
-  const fp = toolInput.file_path ?? toolInput.filePath ?? toolInput.path
-  return typeof fp === 'string' ? fp : undefined
-}
 
 function formatDiagnosticsMessage(diagnostics: ReadonlyArray<FormattedDiagnostic>): string {
   const lines = diagnostics.map((d) =>

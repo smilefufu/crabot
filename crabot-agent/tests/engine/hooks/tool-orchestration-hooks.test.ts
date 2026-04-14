@@ -23,7 +23,7 @@ describe('tool-orchestration with hooks', () => {
     })
 
     const batches = [{ parallel: false, blocks: [{ id: '1', name: 'Write', input: { file_path: '/tmp/x.ts' } }] }]
-    const results = await executeToolBatches(batches, tools, {}, undefined, registry, { workingDirectory: '/tmp' })
+    const results = await executeToolBatches(batches, tools, {}, undefined, { registry, context: { workingDirectory: '/tmp' } })
 
     expect(results[0].is_error).toBe(true)
     expect(results[0].content).toContain('blocked')
@@ -37,7 +37,7 @@ describe('tool-orchestration with hooks', () => {
     })
 
     const batches = [{ parallel: false, blocks: [{ id: '1', name: 'Write', input: { file_path: '/tmp/x.ts' } }] }]
-    const results = await executeToolBatches(batches, tools, {}, undefined, registry, { workingDirectory: '/tmp' })
+    const results = await executeToolBatches(batches, tools, {}, undefined, { registry, context: { workingDirectory: '/tmp' } })
 
     expect(results[0].is_error).toBe(false)
     expect(results[0].content).toContain('wrote:')

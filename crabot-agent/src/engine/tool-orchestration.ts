@@ -12,9 +12,14 @@ export interface ToolResultEntry {
   readonly is_error: boolean
 }
 
+export interface HookConfig {
+  readonly registry: HookRegistry
+  readonly context: HookExecutorContext
+}
+
 const MAX_CONCURRENT = 10
 
-function extractFilePaths(input: Record<string, unknown>): string[] {
+export function extractFilePaths(input: Record<string, unknown>): string[] {
   const paths: string[] = []
   const fp = input.file_path ?? input.filePath ?? input.path
   if (typeof fp === 'string') paths.push(fp)
@@ -26,8 +31,7 @@ async function executeSingleTool(
   tools: ReadonlyArray<ToolDefinition>,
   context: ToolCallContext,
   permissionConfig?: ToolPermissionConfig,
-  hookRegistry?: HookRegistry,
-  hookContext?: HookExecutorContext,
+  hooks?: HookConfig,
 ): Promise<ToolResultEntry> {
   const tool = findTool(tools, block.name)
   if (tool === undefined) {
@@ -41,18 +45,18 @@ async function executeSingleTool(
 
   // --- PreToolUse hook ---
   let effectiveInput = block.input
-  if (hookRegistry && hookContext) {
+  if (hooks) {
     const filePaths = extractFilePaths(block.input)
     const preInput = {
       event: 'PreToolUse' as const,
       toolName: block.name,
       toolInput: block.input,
-      workingDirectory: hookContext.workingDirectory,
+      workingDirectory: hooks.context.workingDirectory,
       filePaths,
     }
-    const matching = hookRegistry.getMatching('PreToolUse', preInput)
+    const matching = hooks.registry.getMatching('PreToolUse', preInput)
     if (matching.length > 0) {
-      const preResult = await executeHooks(matching, preInput, hookContext)
+      const preResult = await executeHooks(matching, preInput, hooks.context)
       if (preResult.action === 'block') {
         return { tool_use_id: block.id, content: preResult.message ?? 'Blocked by hook', is_error: true }
       }
@@ -67,19 +71,19 @@ async function executeSingleTool(
 
     // --- PostToolUse hook ---
     let finalContent = result.output
-    if (hookRegistry && hookContext) {
+    if (hooks) {
       const filePaths = extractFilePaths(effectiveInput)
       const postInput = {
         event: 'PostToolUse' as const,
         toolName: block.name,
         toolInput: effectiveInput,
         toolOutput: result.output,
-        workingDirectory: hookContext.workingDirectory,
+        workingDirectory: hooks.context.workingDirectory,
         filePaths,
       }
-      const matching = hookRegistry.getMatching('PostToolUse', postInput)
+      const matching = hooks.registry.getMatching('PostToolUse', postInput)
       if (matching.length > 0) {
-        const postResult = await executeHooks(matching, postInput, hookContext)
+        const postResult = await executeHooks(matching, postInput, hooks.context)
         if (postResult.message) {
           const suffix = postResult.action === 'block'
             ? `\n\n${postResult.message}\n\n请修复以上问题后继续。`
@@ -106,8 +110,7 @@ async function executeParallelBatch(
   tools: ReadonlyArray<ToolDefinition>,
   context: ToolCallContext,
   permissionConfig?: ToolPermissionConfig,
-  hookRegistry?: HookRegistry,
-  hookContext?: HookExecutorContext,
+  hooks?: HookConfig,
 ): Promise<ReadonlyArray<ToolResultEntry>> {
   const blocks = batch.blocks
   const results: ToolResultEntry[] = new Array(blocks.length)
@@ -116,7 +119,7 @@ async function executeParallelBatch(
   for (let i = 0; i < blocks.length; i += MAX_CONCURRENT) {
     const chunk = blocks.slice(i, i + MAX_CONCURRENT)
     const chunkResults = await Promise.all(
-      chunk.map((block) => executeSingleTool(block, tools, context, permissionConfig, hookRegistry, hookContext))
+      chunk.map((block) => executeSingleTool(block, tools, context, permissionConfig, hooks))
     )
     for (let j = 0; j < chunkResults.length; j++) {
       results[i + j] = chunkResults[j]
@@ -131,12 +134,11 @@ async function executeSerialBatch(
   tools: ReadonlyArray<ToolDefinition>,
   context: ToolCallContext,
   permissionConfig?: ToolPermissionConfig,
-  hookRegistry?: HookRegistry,
-  hookContext?: HookExecutorContext,
+  hooks?: HookConfig,
 ): Promise<ReadonlyArray<ToolResultEntry>> {
   const results: ToolResultEntry[] = []
   for (const block of batch.blocks) {
-    const result = await executeSingleTool(block, tools, context, permissionConfig, hookRegistry, hookContext)
+    const result = await executeSingleTool(block, tools, context, permissionConfig, hooks)
     results.push(result)
   }
   return results
@@ -147,16 +149,15 @@ export async function executeToolBatches(
   tools: ReadonlyArray<ToolDefinition>,
   context?: ToolCallContext,
   permissionConfig?: ToolPermissionConfig,
-  hookRegistry?: HookRegistry,
-  hookContext?: HookExecutorContext,
+  hooks?: HookConfig,
 ): Promise<ToolResultEntry[]> {
   const resolvedContext: ToolCallContext = context ?? {}
   const allResults: ToolResultEntry[] = []
 
   for (const batch of batches) {
     const batchResults = batch.parallel
-      ? await executeParallelBatch(batch, tools, resolvedContext, permissionConfig, hookRegistry, hookContext)
-      : await executeSerialBatch(batch, tools, resolvedContext, permissionConfig, hookRegistry, hookContext)
+      ? await executeParallelBatch(batch, tools, resolvedContext, permissionConfig, hooks)
+      : await executeSerialBatch(batch, tools, resolvedContext, permissionConfig, hooks)
 
     for (const result of batchResults) {
       allResults.push(result)

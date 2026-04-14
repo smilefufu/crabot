@@ -15,9 +15,9 @@ import {
 import { StreamProcessor } from './stream-processor'
 import { ContextManager } from './context-manager'
 import { partitionToolCalls } from './tool-framework'
-import { executeToolBatches } from './tool-orchestration'
+import { executeToolBatches, type HookConfig } from './tool-orchestration'
 import { compressToolResultImages, pruneOldImages } from './image-utils'
-import type { HookInput, HookExecutorContext } from '../hooks/types'
+import type { HookInput } from '../hooks/types'
 import { executeHooks } from '../hooks/hook-executor'
 import * as fs from 'fs'
 
@@ -47,6 +47,12 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
 
   let totalTurns = 0
   let finalText = ''
+
+  const workingDirectory = process.cwd()
+  const hooks: HookConfig | undefined = options.hookRegistry ? {
+    registry: options.hookRegistry,
+    context: { workingDirectory, adapter, model: options.model, lspManager: options.lspManager },
+  } : undefined
 
   for (let turn = 0; turn < maxTurns; turn++) {
     // Check abort before starting a turn
@@ -133,21 +139,14 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     // If no tool use, we're done
     if (stopReason !== 'tool_use') {
       // --- Stop hook ---
-      if (options.hookRegistry) {
-        const hookRegistry = options.hookRegistry
-        const stopInput: HookInput = { event: 'Stop', workingDirectory: process.cwd() }
-        const matching = hookRegistry.getMatching('Stop', stopInput)
+      if (hooks) {
+        const stopInput: HookInput = { event: 'Stop', workingDirectory }
+        const matching = hooks.registry.getMatching('Stop', stopInput)
         if (matching.length > 0) {
-          const stopContext: HookExecutorContext = {
-            workingDirectory: process.cwd(),
-            adapter,
-            model: options.model,
-            lspManager: options.lspManager,
-          }
-          const stopResult = await executeHooks(matching, stopInput, stopContext)
+          const stopResult = await executeHooks(matching, stopInput, hooks.context)
           if (stopResult.action === 'block' && stopResult.message) {
             messages.push(createUserMessage(stopResult.message))
-            continue  // 继续循环，让 LLM 看到 hook 消息
+            continue
           }
         }
       }
@@ -203,16 +202,9 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     // Execute tools
     const batches = partitionToolCalls(processed.toolUseBlocks, options.tools)
     const toolStartTime = Date.now()
-    const hookRegistry = options.hookRegistry
-    const hookContext: HookExecutorContext | undefined = hookRegistry ? {
-      workingDirectory: process.cwd(),
-      adapter,
-      model: options.model,
-      lspManager: options.lspManager,
-    } : undefined
     const toolResults = await executeToolBatches(batches, options.tools, {
       abortSignal,
-    }, options.permissionConfig, hookRegistry, hookContext)
+    }, options.permissionConfig, hooks)
     const toolExecutionMs = Date.now() - toolStartTime
 
     // Fire onTurn callback

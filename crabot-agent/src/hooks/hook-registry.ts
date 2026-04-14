@@ -1,15 +1,20 @@
 import type { HookDefinition, HookEvent, HookInput } from './types'
 
+interface CompiledHook {
+  readonly definition: HookDefinition
+  readonly matcherRegex?: RegExp
+}
+
 export class HookRegistry {
-  private readonly hooks: HookDefinition[] = []
+  private readonly hooks: CompiledHook[] = []
 
   register(hook: HookDefinition): void {
-    this.hooks.push(hook)
+    this.hooks.push(compile(hook))
   }
 
   registerAll(hooks: ReadonlyArray<HookDefinition>): void {
     for (const hook of hooks) {
-      this.hooks.push(hook)
+      this.hooks.push(compile(hook))
     }
   }
 
@@ -18,21 +23,30 @@ export class HookRegistry {
   }
 
   getMatching(event: HookEvent, input: HookInput): ReadonlyArray<HookDefinition> {
-    return this.hooks.filter((hook) => {
-      if (hook.event !== event) return false
-      if (event === 'Stop') return true
+    return this.hooks
+      .filter((compiled) => {
+        const hook = compiled.definition
+        if (hook.event !== event) return false
+        if (event === 'Stop') return true
 
-      if (hook.matcher !== undefined && input.toolName !== undefined) {
-        const regex = new RegExp(`^(?:${hook.matcher})$`)
-        if (!regex.test(input.toolName)) return false
-      }
+        if (compiled.matcherRegex && input.toolName !== undefined) {
+          if (!compiled.matcherRegex.test(input.toolName)) return false
+        }
 
-      if (hook.if !== undefined && input.filePaths !== undefined) {
-        if (!matchIfCondition(hook.if, input.filePaths)) return false
-      }
+        if (hook.if !== undefined && input.filePaths !== undefined) {
+          if (!matchIfCondition(hook.if, input.filePaths)) return false
+        }
 
-      return true
-    })
+        return true
+      })
+      .map((compiled) => compiled.definition)
+  }
+}
+
+function compile(hook: HookDefinition): CompiledHook {
+  return {
+    definition: hook,
+    matcherRegex: hook.matcher !== undefined ? new RegExp(`^(?:${hook.matcher})$`) : undefined,
   }
 }
 
