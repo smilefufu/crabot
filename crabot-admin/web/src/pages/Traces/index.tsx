@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react'
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { MainLayout } from '../../components/Layout/MainLayout'
 import { Button } from '../../components/Common/Button'
 import { Loading } from '../../components/Common/Loading'
@@ -54,15 +54,23 @@ function statusColor(status: string): string {
   return '#f59e0b' // running
 }
 
+const triggerTypeLabel: Record<string, string> = {
+  message: 'front',
+  task: 'worker',
+  sub_agent_call: 'sub-agent',
+  schedule: 'schedule',
+}
+
 // ============================================================================
 // SpanDetailPanel — 展开的详情面板
 // ============================================================================
 
 interface SpanDetailPanelProps {
   span: AgentSpan
+  onNavigateTrace?: (traceId: string) => void
 }
 
-const SpanDetailPanel: React.FC<SpanDetailPanelProps> = ({ span }) => {
+const SpanDetailPanel: React.FC<SpanDetailPanelProps> = ({ span, onNavigateTrace }) => {
   const d = span.details as Record<string, unknown>
 
   const rows: { label: string; value: string | React.ReactNode; monospace?: boolean }[] = []
@@ -121,6 +129,19 @@ const SpanDetailPanel: React.FC<SpanDetailPanelProps> = ({ span }) => {
     if (d.error) {
       rows.push({ label: 'Error', value: String(d.error), monospace: true })
     }
+    if (d.child_trace_id) {
+      rows.push({
+        label: 'Sub Trace',
+        value: (
+          <span
+            style={{ color: '#3b82f6', cursor: 'pointer', textDecoration: 'underline' }}
+            onClick={() => onNavigateTrace?.(String(d.child_trace_id))}
+          >
+            {String(d.child_trace_id).slice(0, 8)}... →
+          </span>
+        ),
+      })
+    }
   }
 
   // decision 详情
@@ -134,7 +155,17 @@ const SpanDetailPanel: React.FC<SpanDetailPanelProps> = ({ span }) => {
     if (d.target_module_id) rows.push({ label: 'Target', value: String(d.target_module_id) })
     if (d.method) rows.push({ label: 'Method', value: String(d.method) })
     if (d.task_id) rows.push({ label: 'Task ID', value: String(d.task_id) })
-    if (d.child_trace_id) rows.push({ label: 'Child Trace', value: String(d.child_trace_id).slice(0, 8) + '...' })
+    if (d.child_trace_id) rows.push({
+      label: 'Child Trace',
+      value: (
+        <span
+          style={{ color: '#3b82f6', cursor: 'pointer', textDecoration: 'underline' }}
+          onClick={() => onNavigateTrace?.(String(d.child_trace_id))}
+        >
+          {String(d.child_trace_id).slice(0, 8)}... →
+        </span>
+      ),
+    })
   }
 
   // context_assembly 详情
@@ -229,9 +260,10 @@ interface SpanTreeProps {
   depth?: number
   expandedDetails: Set<string>
   toggleDetail: (spanId: string) => void
+  onNavigateTrace?: (traceId: string) => void
 }
 
-const SpanTree: React.FC<SpanTreeProps> = ({ spans, parentSpanId, depth = 0, expandedDetails, toggleDetail }) => {
+const SpanTree: React.FC<SpanTreeProps> = ({ spans, parentSpanId, depth = 0, expandedDetails, toggleDetail, onNavigateTrace }) => {
   const children = spans.filter((s) => s.parent_span_id === parentSpanId)
   if (children.length === 0) return null
 
@@ -245,6 +277,7 @@ const SpanTree: React.FC<SpanTreeProps> = ({ spans, parentSpanId, depth = 0, exp
           depth={depth}
           expandedDetails={expandedDetails}
           toggleDetail={toggleDetail}
+          onNavigateTrace={onNavigateTrace}
         />
       ))}
     </>
@@ -257,9 +290,10 @@ interface SpanRowProps {
   depth: number
   expandedDetails: Set<string>
   toggleDetail: (spanId: string) => void
+  onNavigateTrace?: (traceId: string) => void
 }
 
-const SpanRow: React.FC<SpanRowProps> = ({ span, spans, depth, expandedDetails, toggleDetail }) => {
+const SpanRow: React.FC<SpanRowProps> = ({ span, spans, depth, expandedDetails, toggleDetail, onNavigateTrace }) => {
   const [expanded, setExpanded] = useState(depth < 2)
   const hasChildren = spans.some((s) => s.parent_span_id === span.span_id)
   const showDetail = expandedDetails.has(span.span_id)
@@ -383,7 +417,7 @@ const SpanRow: React.FC<SpanRowProps> = ({ span, spans, depth, expandedDetails, 
       </div>
 
       {/* 展开的详情面板 */}
-      {showDetail && <SpanDetailPanel span={span} />}
+      {showDetail && <SpanDetailPanel span={span} onNavigateTrace={onNavigateTrace} />}
 
       {/* 子节点 */}
       {expanded && hasChildren && (
@@ -393,6 +427,7 @@ const SpanRow: React.FC<SpanRowProps> = ({ span, spans, depth, expandedDetails, 
           depth={depth + 1}
           expandedDetails={expandedDetails}
           toggleDetail={toggleDetail}
+          onNavigateTrace={onNavigateTrace}
         />
       )}
     </>
@@ -407,9 +442,10 @@ interface TraceDetailProps {
   trace: AgentTrace
   expandedDetails: Set<string>
   toggleDetail: (spanId: string) => void
+  onNavigateTrace?: (traceId: string) => void
 }
 
-const TraceDetail: React.FC<TraceDetailProps> = ({ trace, expandedDetails, toggleDetail }) => {
+const TraceDetail: React.FC<TraceDetailProps> = ({ trace, expandedDetails, toggleDetail, onNavigateTrace }) => {
   return (
     <div style={{ height: '100%', overflow: 'auto' }}>
       {/* 标题区 */}
@@ -417,6 +453,11 @@ const TraceDetail: React.FC<TraceDetailProps> = ({ trace, expandedDetails, toggl
         {trace.parent_trace_id && (
           <div style={{ fontSize: 12, color: '#9ca3af', marginBottom: 6 }}>
             来自 {trace.module_id} / {trace.parent_trace_id.slice(0, 8)}
+          </div>
+        )}
+        {trace.related_task_id && (
+          <div style={{ fontSize: 12, color: '#6366f1', marginBottom: 6 }}>
+            任务: {trace.related_task_id.slice(0, 8)}...
           </div>
         )}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -459,9 +500,160 @@ const TraceDetail: React.FC<TraceDetailProps> = ({ trace, expandedDetails, toggl
             depth={0}
             expandedDetails={expandedDetails}
             toggleDetail={toggleDetail}
+            onNavigateTrace={onNavigateTrace}
           />
         )}
       </div>
+    </div>
+  )
+}
+
+// ============================================================================
+// TraceListItem — 单条 Trace 列表项
+// ============================================================================
+
+interface TraceListItemProps {
+  trace: AgentTrace
+  isSelected: boolean
+  onClick: () => void
+  indent?: boolean
+}
+
+const TraceListItem: React.FC<TraceListItemProps> = ({ trace, isSelected, onClick, indent }) => (
+  <div
+    onClick={onClick}
+    style={{
+      padding: '10px 12px',
+      paddingLeft: indent ? 28 : 12,
+      borderBottom: '1px solid var(--border)',
+      cursor: 'pointer',
+      background: isSelected ? 'var(--bg-highlight, rgba(59,130,246,0.08))' : undefined,
+      transition: 'background 0.1s',
+    }}
+  >
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+      <span
+        style={{
+          width: 8, height: 8, borderRadius: '50%',
+          background: statusColor(trace.status),
+          flexShrink: 0,
+        }}
+      />
+      <span style={{ fontSize: 11, color: '#9ca3af' }}>
+        {triggerTypeLabel[trace.trigger.type] ?? trace.trigger.type}
+      </span>
+      <span style={{ flex: 1 }} />
+      <span style={{ fontSize: 11, color: '#9ca3af' }}>
+        {formatDuration(trace.duration_ms)}
+      </span>
+    </div>
+    <div style={{
+      fontSize: 12, color: 'var(--text-primary)',
+      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+    }}>
+      {trace.trigger.summary}
+    </div>
+    <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>
+      {formatTime(trace.started_at)}
+      {trace.trigger.source && ` · ${trace.trigger.source}`}
+    </div>
+  </div>
+)
+
+// ============================================================================
+// TraceGroupItem — 按 task 聚合的 Trace 组
+// ============================================================================
+
+interface TraceGroup {
+  taskId: string | null
+  traces: AgentTrace[]
+  latestTime: string
+  hasRunning: boolean
+}
+
+interface TraceGroupItemProps {
+  group: TraceGroup
+  selectedTraceId: string | null
+  onSelectTrace: (trace: AgentTrace) => void
+}
+
+const TraceGroupItem: React.FC<TraceGroupItemProps> = ({ group, selectedTraceId, onSelectTrace }) => {
+  const [expanded, setExpanded] = useState(false)
+
+  if (group.taskId === null) {
+    const trace = group.traces[0]
+    return (
+      <TraceListItem
+        trace={trace}
+        isSelected={selectedTraceId === trace.trace_id}
+        onClick={() => onSelectTrace(trace)}
+      />
+    )
+  }
+
+  const roleOrder: Record<string, number> = { message: 0, task: 1, sub_agent_call: 2, schedule: 3 }
+  const sorted = [...group.traces].sort((a, b) =>
+    (roleOrder[a.trigger.type] ?? 9) - (roleOrder[b.trigger.type] ?? 9)
+  )
+  const primary = sorted.find(t => t.trigger.type === 'task') ?? sorted[0]
+  const fronts = sorted.filter(t => t.trigger.type === 'message')
+  const subagents = sorted.filter(t => t.trigger.type === 'sub_agent_call')
+
+  return (
+    <div style={{ borderBottom: '1px solid var(--border)' }}>
+      <div
+        onClick={() => setExpanded(!expanded)}
+        style={{
+          padding: '10px 12px',
+          cursor: 'pointer',
+          background: group.traces.some(t => t.trace_id === selectedTraceId)
+            ? 'var(--bg-highlight, rgba(59,130,246,0.08))' : undefined,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+          <span style={{ fontSize: 11, color: '#9ca3af' }}>
+            {expanded ? '▼' : '▶'}
+          </span>
+          <span
+            style={{
+              width: 8, height: 8, borderRadius: '50%',
+              background: group.hasRunning ? '#f59e0b' : sorted.some(t => t.status === 'failed') ? '#ef4444' : '#10b981',
+              flexShrink: 0,
+            }}
+          />
+          <span style={{ fontSize: 11, color: '#6366f1', fontWeight: 500 }}>
+            task
+          </span>
+          <span style={{ flex: 1 }} />
+          <span style={{ fontSize: 11, color: '#9ca3af' }}>
+            {fronts.length}F{subagents.length > 0 ? ` ${subagents.length}S` : ''}
+          </span>
+          <span style={{ fontSize: 11, color: '#9ca3af', marginLeft: 4 }}>
+            {formatDuration(primary.duration_ms)}
+          </span>
+        </div>
+        <div style={{
+          fontSize: 12, color: 'var(--text-primary)',
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>
+          {primary.trigger.summary}
+        </div>
+        <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>
+          {formatTime(primary.started_at)}
+          {' · '}
+          {group.taskId.slice(0, 8)}
+        </div>
+      </div>
+
+      {expanded && sorted.map(trace => (
+        <TraceListItem
+          key={trace.trace_id}
+          trace={trace}
+          isSelected={selectedTraceId === trace.trace_id}
+          onClick={() => onSelectTrace(trace)}
+          indent
+        />
+      ))}
     </div>
   )
 }
@@ -485,6 +677,9 @@ export const Traces: React.FC = () => {
   const [selectedTrace, setSelectedTrace] = useState<AgentTrace | null>(null)
   // 展开的详情 span
   const [expandedDetails, setExpandedDetails] = useState<Set<string>>(new Set())
+
+  type ViewMode = 'flat' | 'grouped'
+  const [viewMode, setViewMode] = useState<ViewMode>('grouped')
 
   const loadTraces = useCallback(async () => {
     setLoading(true)
@@ -532,6 +727,62 @@ export const Traces: React.FC = () => {
     setSelectedTrace(trace)
     setExpandedDetails(new Set()) // 切换 trace 时清空展开状态
   }
+
+  const handleNavigateTrace = useCallback(async (traceId: string) => {
+    const existing = traces.find(t => t.trace_id === traceId)
+    if (existing) {
+      handleSelectTrace(existing)
+      return
+    }
+    try {
+      const result = await traceService.getTrace(traceId)
+      setSelectedTraceId(result.trace.trace_id)
+      setSelectedTrace(result.trace)
+      setExpandedDetails(new Set())
+    } catch {
+      toast.error('无法加载关联 Trace')
+    }
+  }, [traces, toast])
+
+  const traceGroups = useMemo((): TraceGroup[] => {
+    if (viewMode === 'flat') return []
+
+    const grouped = new Map<string, AgentTrace[]>()
+    const ungrouped: AgentTrace[] = []
+
+    for (const trace of traces) {
+      if (trace.related_task_id) {
+        const existing = grouped.get(trace.related_task_id) ?? []
+        grouped.set(trace.related_task_id, [...existing, trace])
+      } else {
+        ungrouped.push(trace)
+      }
+    }
+
+    const groups: TraceGroup[] = []
+
+    for (const [taskId, taskTraces] of grouped) {
+      groups.push({
+        taskId,
+        traces: taskTraces,
+        latestTime: taskTraces.reduce((latest, t) =>
+          t.started_at > latest ? t.started_at : latest, ''),
+        hasRunning: taskTraces.some(t => t.status === 'running'),
+      })
+    }
+
+    for (const trace of ungrouped) {
+      groups.push({
+        taskId: null,
+        traces: [trace],
+        latestTime: trace.started_at,
+        hasRunning: trace.status === 'running',
+      })
+    }
+
+    groups.sort((a, b) => new Date(b.latestTime).getTime() - new Date(a.latestTime).getTime())
+    return groups
+  }, [traces, viewMode])
 
   const toggleDetail = useCallback((spanId: string) => {
     setExpandedDetails(prev => {
@@ -602,54 +853,41 @@ export const Traces: React.FC = () => {
               </div>
             ) : (
               <>
-                <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', fontSize: 12, color: '#9ca3af' }}>
-                  共 {total} 条（显示最近 {traces.length} 条）
-                </div>
-                {traces.map((trace) => (
-                  <div
-                    key={trace.trace_id}
-                    onClick={() => handleSelectTrace(trace)}
-                    style={{
-                      padding: '10px 12px',
-                      borderBottom: '1px solid var(--border)',
-                      cursor: 'pointer',
-                      background: selectedTraceId === trace.trace_id ? 'var(--bg-highlight, rgba(59,130,246,0.08))' : undefined,
-                      transition: 'background 0.1s',
-                    }}
+                <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', display: 'flex', gap: 8, fontSize: 12 }}>
+                  <span style={{ color: '#9ca3af' }}>共 {total} 条</span>
+                  <span style={{ flex: 1 }} />
+                  <span
+                    style={{ cursor: 'pointer', color: viewMode === 'grouped' ? '#3b82f6' : '#9ca3af' }}
+                    onClick={() => setViewMode('grouped')}
                   >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                      <span
-                        style={{
-                          width: 8,
-                          height: 8,
-                          borderRadius: '50%',
-                          background: statusColor(trace.status),
-                          flexShrink: 0,
-                        }}
-                      />
-                      <span style={{ fontSize: 11, color: '#9ca3af' }}>
-                        {trace.trigger.type}
-                      </span>
-                      <span style={{ flex: 1 }} />
-                      <span style={{ fontSize: 11, color: '#9ca3af' }}>
-                        {formatDuration(trace.duration_ms)}
-                      </span>
-                    </div>
-                    <div style={{
-                      fontSize: 12,
-                      color: 'var(--text-primary)',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}>
-                      {trace.trigger.summary}
-                    </div>
-                    <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>
-                      {formatTime(trace.started_at)}
-                      {trace.trigger.source && ` · ${trace.trigger.source}`}
-                    </div>
-                  </div>
-                ))}
+                    聚合
+                  </span>
+                  <span
+                    style={{ cursor: 'pointer', color: viewMode === 'flat' ? '#3b82f6' : '#9ca3af' }}
+                    onClick={() => setViewMode('flat')}
+                  >
+                    平铺
+                  </span>
+                </div>
+                {viewMode === 'flat' ? (
+                  traces.map(trace => (
+                    <TraceListItem
+                      key={trace.trace_id}
+                      trace={trace}
+                      isSelected={selectedTraceId === trace.trace_id}
+                      onClick={() => handleSelectTrace(trace)}
+                    />
+                  ))
+                ) : (
+                  traceGroups.map((group, i) => (
+                    <TraceGroupItem
+                      key={group.taskId ?? `ungrouped-${i}`}
+                      group={group}
+                      selectedTraceId={selectedTraceId}
+                      onSelectTrace={handleSelectTrace}
+                    />
+                  ))
+                )}
               </>
             )}
           </div>
@@ -661,6 +899,7 @@ export const Traces: React.FC = () => {
                 trace={selectedTrace}
                 expandedDetails={expandedDetails}
                 toggleDetail={toggleDetail}
+                onNavigateTrace={handleNavigateTrace}
               />
             ) : (
               <div style={{ padding: 24, color: '#9ca3af', fontSize: 13, textAlign: 'center' }}>
