@@ -31,7 +31,6 @@ export function createLSPManager(): LSPManager {
       installedCache.set(command, true)
       return true
     } catch {
-      installedCache.set(command, false)
       return false
     }
   }

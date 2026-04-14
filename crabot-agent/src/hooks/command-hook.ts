@@ -55,8 +55,10 @@ export async function executeCommandHook(
     child.stdout.on('data', (data: Buffer) => { stdout += data.toString() })
     child.stderr.on('data', (data: Buffer) => { stderr += data.toString() })
 
-    // Write input JSON to stdin (ignore EPIPE if process exits before read)
-    child.stdin.on('error', () => {})
+    // Ignore EPIPE when process exits before consuming stdin
+    child.stdin.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code !== 'EPIPE') throw err
+    })
     child.stdin.write(inputJson)
     child.stdin.end()
 

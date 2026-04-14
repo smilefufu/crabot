@@ -9,21 +9,18 @@ export function createCodingExpertHookRegistry(): HookRegistry {
 
 function getCodingExpertHooks(): ReadonlyArray<HookDefinition> {
   return [
-    // 1. LSP diagnostics — type/syntax errors after file edits
     {
       event: 'PostToolUse',
       matcher: 'Write|Edit',
       type: 'command',
       command: '__internal:lsp-diagnostics',
     },
-    // 2. Compile check — verify build before sub-agent finishes
     {
       event: 'Stop',
       type: 'command',
       command: '__internal:compile-check',
       timeout: 60,
     },
-    // 3. Test evaluation — LLM judges if tests need running
     {
       event: 'Stop',
       type: 'prompt',

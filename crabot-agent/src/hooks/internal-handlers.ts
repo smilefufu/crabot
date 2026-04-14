@@ -2,6 +2,7 @@ import type { InternalHandler, FormattedDiagnostic } from './types'
 import { extractFilePaths } from '../engine/tool-orchestration'
 import { exec } from 'child_process'
 import * as fs from 'fs'
+import * as fsp from 'fs/promises'
 import * as path from 'path'
 
 const handlers = new Map<string, InternalHandler>()
@@ -27,7 +28,7 @@ registerInternalHandler('lsp-diagnostics', async (input, context) => {
   }
 
   try {
-    const content = fs.readFileSync(filePath, 'utf-8')
+    const content = await fsp.readFile(filePath, 'utf-8')
     context.lspManager.notifyFileChanged(filePath, content)
     const diagnostics = await context.lspManager.getDiagnostics(filePath)
 
