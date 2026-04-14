@@ -451,6 +451,8 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('get_traces', this.handleGetTraces.bind(this))
     this.registerMethod('get_trace', this.handleGetTrace.bind(this))
     this.registerMethod('clear_traces', this.handleClearTraces.bind(this))
+    this.registerMethod('search_traces', this.handleSearchTraces.bind(this))
+    this.registerMethod('get_trace_tree', this.handleGetTraceTree.bind(this))
   }
 
   // ============================================================================
@@ -2118,8 +2120,8 @@ export class UnifiedAgent extends ModuleBase {
     return this.traceStore.getTraces(params.limit, params.offset, params.status)
   }
 
-  private handleGetTrace(params: { trace_id: string }): { trace: import('./types.js').AgentTrace } {
-    const trace = this.traceStore.getTrace(params.trace_id)
+  private async handleGetTrace(params: { trace_id: string }): Promise<{ trace: import('./types.js').AgentTrace }> {
+    const trace = await this.traceStore.getFullTrace(params.trace_id)
     if (!trace) {
       throw new Error(`Trace not found: ${params.trace_id}`)
     }
@@ -2129,6 +2131,21 @@ export class UnifiedAgent extends ModuleBase {
   private handleClearTraces(params: { before?: string; trace_ids?: string[] }): { cleared_count: number } {
     const count = this.traceStore.clearTraces(params.before, params.trace_ids)
     return { cleared_count: count }
+  }
+
+  private handleSearchTraces(params: {
+    task_id?: string
+    time_range?: { start: string; end: string }
+    keyword?: string
+    status?: string
+    limit?: number
+    offset?: number
+  }): { traces: import('./core/trace-store.js').TraceIndexEntry[]; total: number } {
+    return this.traceStore.searchTraces(params)
+  }
+
+  private handleGetTraceTree(params: { task_id: string }): import('./core/trace-store.js').TraceTree {
+    return this.traceStore.getTraceTree(params.task_id)
   }
 
   // ============================================================================
