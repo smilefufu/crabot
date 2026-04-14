@@ -377,6 +377,12 @@ export class WorkerHandler {
         traceConfig: subAgentTraceConfig,
       }))
 
+      // 3h. Trace search tool
+      if (traceContext) {
+        const { createSearchTracesTool } = await import('./trace-search-tool.js')
+        tools.push(createSearchTracesTool(traceContext.traceStore))
+      }
+
       // 5. Build system prompt and task message
       const systemPrompt = this.buildSystemPrompt(context)
       const taskMessage = await this.buildTaskMessage(task, context)
