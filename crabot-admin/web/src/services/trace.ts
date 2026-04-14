@@ -8,7 +8,7 @@ export interface AgentSpan {
   span_id: string
   parent_span_id?: string
   trace_id: string
-  type: 'agent_loop' | 'llm_call' | 'tool_call' | 'sub_agent_call' | 'decision' | 'context_assembly' | 'memory_write'
+  type: 'agent_loop' | 'llm_call' | 'tool_call' | 'sub_agent_call' | 'decision' | 'context_assembly' | 'memory_write' | 'rpc_call'
   started_at: string
   ended_at?: string
   duration_ms?: number
@@ -20,6 +20,7 @@ export interface AgentTrace {
   trace_id: string
   parent_trace_id?: string
   parent_span_id?: string
+  related_task_id?: string
   module_id: string
   started_at: string
   ended_at?: string
@@ -42,6 +43,33 @@ export interface GetTracesResult {
   total: number
 }
 
+export interface TraceIndexEntry {
+  trace_id: string
+  related_task_id?: string
+  parent_trace_id?: string
+  trigger_type: string
+  trigger_summary: string
+  started_at: string
+  ended_at?: string
+  status: 'running' | 'completed' | 'failed'
+  outcome_summary?: string
+  span_count: number
+}
+
+export interface TraceTree {
+  task_id: string
+  tree: {
+    fronts: TraceIndexEntry[]
+    worker: TraceIndexEntry | null
+    subagents: TraceIndexEntry[]
+  }
+}
+
+export interface SearchTracesResult {
+  traces: TraceIndexEntry[]
+  total: number
+}
+
 export const traceService = {
   async getTraces(params?: {
     limit?: number
@@ -58,6 +86,31 @@ export const traceService = {
 
   async getTrace(traceId: string): Promise<{ trace: AgentTrace }> {
     return api.get(`/agent/traces/${traceId}`)
+  },
+
+  async searchTraces(params?: {
+    task_id?: string
+    keyword?: string
+    status?: string
+    start?: string
+    end?: string
+    limit?: number
+    offset?: number
+  }): Promise<SearchTracesResult> {
+    const qs = new URLSearchParams()
+    if (params?.task_id) qs.set('task_id', params.task_id)
+    if (params?.keyword) qs.set('keyword', params.keyword)
+    if (params?.status) qs.set('status', params.status)
+    if (params?.start) qs.set('start', params.start)
+    if (params?.end) qs.set('end', params.end)
+    if (params?.limit) qs.set('limit', String(params.limit))
+    if (params?.offset) qs.set('offset', String(params.offset))
+    const query = qs.toString() ? `?${qs.toString()}` : ''
+    return api.get<SearchTracesResult>(`/agent/traces/search${query}`)
+  },
+
+  async getTraceTree(taskId: string): Promise<TraceTree> {
+    return api.get<TraceTree>(`/agent/trace-tree/${taskId}`)
   },
 
   async clearTraces(_params?: {
