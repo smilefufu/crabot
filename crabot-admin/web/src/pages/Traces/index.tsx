@@ -61,6 +61,19 @@ const triggerTypeLabel: Record<string, string> = {
   schedule: 'schedule',
 }
 
+type ViewMode = 'flat' | 'grouped'
+
+function TraceLink({ traceId, onNavigate }: { traceId: string; onNavigate?: (id: string) => void }) {
+  return (
+    <span
+      style={{ color: '#3b82f6', cursor: 'pointer', textDecoration: 'underline' }}
+      onClick={() => onNavigate?.(traceId)}
+    >
+      {traceId.slice(0, 8)}... →
+    </span>
+  )
+}
+
 // ============================================================================
 // SpanDetailPanel — 展开的详情面板
 // ============================================================================
@@ -132,14 +145,7 @@ const SpanDetailPanel: React.FC<SpanDetailPanelProps> = ({ span, onNavigateTrace
     if (d.child_trace_id) {
       rows.push({
         label: 'Sub Trace',
-        value: (
-          <span
-            style={{ color: '#3b82f6', cursor: 'pointer', textDecoration: 'underline' }}
-            onClick={() => onNavigateTrace?.(String(d.child_trace_id))}
-          >
-            {String(d.child_trace_id).slice(0, 8)}... →
-          </span>
-        ),
+        value: <TraceLink traceId={String(d.child_trace_id)} onNavigate={onNavigateTrace} />,
       })
     }
   }
@@ -157,14 +163,7 @@ const SpanDetailPanel: React.FC<SpanDetailPanelProps> = ({ span, onNavigateTrace
     if (d.task_id) rows.push({ label: 'Task ID', value: String(d.task_id) })
     if (d.child_trace_id) rows.push({
       label: 'Child Trace',
-      value: (
-        <span
-          style={{ color: '#3b82f6', cursor: 'pointer', textDecoration: 'underline' }}
-          onClick={() => onNavigateTrace?.(String(d.child_trace_id))}
-        >
-          {String(d.child_trace_id).slice(0, 8)}... →
-        </span>
-      ),
+      value: <TraceLink traceId={String(d.child_trace_id)} onNavigate={onNavigateTrace} />,
     })
   }
 
@@ -678,7 +677,6 @@ export const Traces: React.FC = () => {
   // 展开的详情 span
   const [expandedDetails, setExpandedDetails] = useState<Set<string>>(new Set())
 
-  type ViewMode = 'flat' | 'grouped'
   const [viewMode, setViewMode] = useState<ViewMode>('grouped')
 
   const loadTraces = useCallback(async () => {
@@ -728,8 +726,11 @@ export const Traces: React.FC = () => {
     setExpandedDetails(new Set()) // 切换 trace 时清空展开状态
   }
 
+  const tracesRef = useRef(traces)
+  useEffect(() => { tracesRef.current = traces }, [traces])
+
   const handleNavigateTrace = useCallback(async (traceId: string) => {
-    const existing = traces.find(t => t.trace_id === traceId)
+    const existing = tracesRef.current.find(t => t.trace_id === traceId)
     if (existing) {
       handleSelectTrace(existing)
       return
@@ -742,7 +743,7 @@ export const Traces: React.FC = () => {
     } catch {
       toast.error('无法加载关联 Trace')
     }
-  }, [traces, toast])
+  }, [toast])
 
   const traceGroups = useMemo((): TraceGroup[] => {
     if (viewMode === 'flat') return []
@@ -752,8 +753,8 @@ export const Traces: React.FC = () => {
 
     for (const trace of traces) {
       if (trace.related_task_id) {
-        const existing = grouped.get(trace.related_task_id) ?? []
-        grouped.set(trace.related_task_id, [...existing, trace])
+        const arr = grouped.get(trace.related_task_id)
+        if (arr) { arr.push(trace) } else { grouped.set(trace.related_task_id, [trace]) }
       } else {
         ungrouped.push(trace)
       }

@@ -5017,8 +5017,8 @@ export class AdminModule extends ModuleBase {
         res.end(JSON.stringify({ error: 'Agent not available' }))
         return
       }
-      const limit = parseInt(url.searchParams.get('limit') ?? '20')
-      const offset = parseInt(url.searchParams.get('offset') ?? '0')
+      const limit = parseInt(url.searchParams.get('limit') ?? '20', 10)
+      const offset = parseInt(url.searchParams.get('offset') ?? '0', 10)
       const status = url.searchParams.get('status') ?? undefined
       const result = await this.rpcClient.call<
         { limit?: number; offset?: number; status?: string },
@@ -5115,8 +5115,8 @@ export class AdminModule extends ModuleBase {
       const start = url.searchParams.get('start')
       const end = url.searchParams.get('end')
       if (start && end) params.time_range = { start, end }
-      params.limit = parseInt(url.searchParams.get('limit') ?? '20')
-      params.offset = parseInt(url.searchParams.get('offset') ?? '0')
+      params.limit = parseInt(url.searchParams.get('limit') ?? '20', 10)
+      params.offset = parseInt(url.searchParams.get('offset') ?? '0', 10)
 
       const result = await this.rpcClient.call<
         Record<string, unknown>,
