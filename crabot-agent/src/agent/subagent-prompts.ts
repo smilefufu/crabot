@@ -22,6 +22,8 @@ export interface SubAgentDefinition {
   readonly workerHint: string
   /** Max turns for the sub-agent engine loop */
   readonly maxTurns: number
+  /** Hook preset name. If set, hooks will be registered when creating the sub-agent. */
+  readonly hooks?: string
 }
 
 export const SUBAGENT_DEFINITIONS: readonly SubAgentDefinition[] = [
@@ -62,6 +64,7 @@ export const SUBAGENT_DEFINITIONS: readonly SubAgentDefinition[] = [
     ].join('\n'),
     workerHint: '编码专家，擅长代码编写、代码分析、bug 修复',
     maxTurns: 30,
+    hooks: 'coding_expert',
   },
 ] as const
 

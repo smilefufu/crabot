@@ -31,6 +31,7 @@ export interface ForkEngineParams {
   /** Whether the sub-agent's model supports vision (image inputs) */
   readonly supportsVision?: boolean
   readonly humanMessageQueue?: HumanMessageQueueLike
+  readonly hookRegistry?: import('../hooks/hook-registry').HookRegistry
 }
 
 export interface ForkEngineResult {
@@ -75,6 +76,7 @@ export async function forkEngine(params: ForkEngineParams): Promise<ForkEngineRe
       onTurn: params.onTurn,
       supportsVision: params.supportsVision,
       humanMessageQueue: params.humanMessageQueue,
+      hookRegistry: params.hookRegistry,
     },
   })
 
@@ -111,6 +113,7 @@ export interface SubAgentToolConfig {
   readonly supportsVision?: boolean
   readonly parentHumanQueue?: HumanMessageQueue
   readonly traceConfig?: SubAgentTraceConfig
+  readonly hookRegistry?: import('../hooks/hook-registry').HookRegistry
 }
 
 export function createSubAgentTool(config: SubAgentToolConfig): ToolDefinition {
@@ -222,6 +225,7 @@ export function createSubAgentTool(config: SubAgentToolConfig): ToolDefinition {
           onTurn: subTraceCallback,
           supportsVision: config.supportsVision,
           humanMessageQueue: childQueue,
+          hookRegistry: config.hookRegistry,
         })
 
         if (subTrace && tc) {

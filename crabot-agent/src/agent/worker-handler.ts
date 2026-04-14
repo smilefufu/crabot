@@ -47,6 +47,7 @@ import { createSubAgentTool } from '../engine/sub-agent.js'
 import type { SubAgentDefinition } from './subagent-prompts.js'
 import { DELEGATE_TASK_SYSTEM_PROMPT } from './subagent-prompts.js'
 import { HumanMessageQueue } from '../engine/human-message-queue.js'
+import { createCodingExpertHookRegistry } from '../hooks/defaults.js'
 
 import * as fs from 'fs'
 import * as path from 'path'
@@ -349,6 +350,10 @@ export class WorkerHandler {
       } : undefined
 
       for (const { definition, sdkEnv: subSdkEnv } of this.subAgentConfigs) {
+        const hookRegistry = definition.hooks === 'coding_expert'
+          ? createCodingExpertHookRegistry()
+          : undefined
+
         tools.push(createSubAgentTool({
           name: definition.toolName,
           description: definition.toolDescription,
@@ -360,6 +365,7 @@ export class WorkerHandler {
           supportsVision: subSdkEnv.supportsVision,
           parentHumanQueue: humanQueue,
           traceConfig: subAgentTraceConfig,
+          hookRegistry,
         }))
       }
 
