@@ -247,6 +247,7 @@ export class WorkerHandler {
       title: task.task_title,
       abortController: new AbortController(),
       pendingHumanMessages: [],
+      taskOrigin: context.task_origin,
     }
     this.activeTasks.set(task.task_id, taskState)
 
@@ -669,6 +670,31 @@ export class WorkerHandler {
 
   hasActiveTask(taskId: TaskId): boolean {
     return this.activeTasks.has(taskId)
+  }
+
+  setBarrierForTask(taskId: TaskId, timeoutMs: number): boolean {
+    const queue = this.humanQueues.get(taskId)
+    if (!queue) return false
+    queue.setBarrier(timeoutMs)
+    return true
+  }
+
+  clearBarrierForTask(taskId: TaskId): void {
+    const queue = this.humanQueues.get(taskId)
+    queue?.clearBarrier()
+  }
+
+  getActiveTasksByOrigin(channelId: string, sessionId: string): TaskId[] {
+    const result: TaskId[] = []
+    for (const [taskId, state] of this.activeTasks) {
+      if (
+        state.taskOrigin?.channel_id === channelId &&
+        state.taskOrigin?.session_id === sessionId
+      ) {
+        result.push(taskId)
+      }
+    }
+    return result
   }
 
   getActiveTasksForQuery(): Array<{ task_id: string; status: string; started_at: string; title?: string }> {

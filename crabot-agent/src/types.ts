@@ -567,6 +567,7 @@ export interface WorkerTaskState {
     abort: () => void
   }
   pendingHumanMessages: ChannelMessage[]
+  taskOrigin?: TaskOrigin
 }
 
 export interface SilentDecision {
