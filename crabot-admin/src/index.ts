@@ -2976,9 +2976,6 @@ export class AdminModule extends ModuleBase {
         // TODO: 使用 cron 库计算下次执行时间
         return undefined
       }
-      case 'threshold': {
-        return undefined
-      }
       default:
         return undefined
     }

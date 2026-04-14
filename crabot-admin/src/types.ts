@@ -518,7 +518,7 @@ export interface Task {
 // ============================================================================
 
 /** 调度触发器类型 */
-export type ScheduleTriggerType = 'cron' | 'interval' | 'once' | 'threshold'
+export type ScheduleTriggerType = 'cron' | 'interval' | 'once'
 
 /** 调度触发器 - Cron 表达式 */
 export interface CronTrigger {
@@ -543,17 +543,8 @@ export interface OnceTrigger {
   execute_at: string
 }
 
-/** 调度触发器 - 阈值触发 */
-export interface ThresholdTrigger {
-  type: 'threshold'
-  /** 触发条件描述 */
-  condition: string
-  /** 检查间隔秒数 */
-  check_interval_seconds: number
-}
-
 /** 调度触发器联合类型 */
-export type ScheduleTrigger = CronTrigger | IntervalTrigger | OnceTrigger | ThresholdTrigger
+export type ScheduleTrigger = CronTrigger | IntervalTrigger | OnceTrigger
 
 /** 调度任务模板 */
 export interface ScheduleTaskTemplate {
