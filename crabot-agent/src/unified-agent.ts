@@ -541,6 +541,8 @@ export class UnifiedAgent extends ModuleBase {
       },
     })
 
+    let barrierTaskIds: string[] = []
+
     try {
       // 4. 如果没有配置 Front Agent 能力，需要调用外部 Agent
       if (!this.roles.has('front') || !this.frontHandler) {
@@ -579,6 +581,18 @@ export class UnifiedAgent extends ModuleBase {
 
       // 7. 构建 TraceCallback
       const traceCallback = this.buildTraceCallback(trace.trace_id)
+
+      // 7.5 设置 barrier（可能的纠偏消息等待）
+      const BARRIER_TIMEOUT_MS = 8000
+      barrierTaskIds = this.workerHandler
+        ? this.workerHandler.getActiveTasksByOrigin(
+            session.channel_id,
+            session.session_id,
+          )
+        : []
+      for (const taskId of barrierTaskIds) {
+        this.workerHandler!.setBarrierForTask(taskId, BARRIER_TIMEOUT_MS)
+      }
 
       // 8. 调用 Front Agent（传入合并后的消息列表）
       this.currentMemPerms = memPerms
@@ -657,6 +671,20 @@ export class UnifiedAgent extends ModuleBase {
         this.traceStore.endSpan(trace.trace_id, decisionSpan.span_id, 'completed')
       }
 
+      // 10.5 清除未被 supplement 命中的 barrier
+      if (barrierTaskIds.length > 0) {
+        const supplementedTaskIds = new Set(
+          result.decisions
+            .filter((d): d is import('./types.js').SupplementTaskDecision => d.type === 'supplement_task')
+            .map(d => d.task_id)
+        )
+        for (const taskId of barrierTaskIds) {
+          if (!supplementedTaskIds.has(taskId)) {
+            this.workerHandler?.clearBarrierForTask(taskId)
+          }
+        }
+      }
+
       // 11. 写入短期记忆：分诊决策事件（fire-and-forget，不阻塞 completeRequest）
       if (sender.friend_id && result.decisions.length > 0) {
         const messageBrief = mergedMessages
@@ -698,6 +726,10 @@ export class UnifiedAgent extends ModuleBase {
         summary: this.extractReplyText(result.decisions)?.slice(0, 200) ?? 'completed',
       })
     } catch (error) {
+      // 异常时清除所有 barrier
+      for (const taskId of barrierTaskIds) {
+        this.workerHandler?.clearBarrierForTask(taskId)
+      }
       const msg = error instanceof Error ? error.message : String(error)
       this.traceStore.endTrace(trace.trace_id, 'failed', { summary: msg, error: msg })
     } finally {
