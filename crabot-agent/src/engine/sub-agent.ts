@@ -30,7 +30,13 @@ export interface ForkEngineParams {
   readonly onTurn?: (event: EngineTurnEvent) => void
   /** Whether the sub-agent's model supports vision (image inputs) */
   readonly supportsVision?: boolean
-  readonly humanMessageQueue?: { readonly drainPending: () => Array<string | ContentBlock[]>; readonly hasPending: boolean }
+  readonly humanMessageQueue?: {
+    readonly drainPending: () => Array<string | ContentBlock[]>
+    readonly hasPending: boolean
+    readonly hasBarrier: boolean
+    readonly waitBarrier: (signal?: AbortSignal) => Promise<void>
+    readonly clearBarrier: () => void
+  }
 }
 
 export interface ForkEngineResult {

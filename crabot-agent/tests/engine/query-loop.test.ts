@@ -447,3 +447,150 @@ describe('runEngine humanMessageQueue integration', () => {
     expect(result.outcome).toBe('completed')
   })
 })
+
+describe('runEngine barrier integration', () => {
+  it('waits for barrier before executing tools, cancels tools when supplement arrives', async () => {
+    const capturedMessages: unknown[][] = []
+    let callIndex = 0
+
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        capturedMessages.push([...params.messages])
+        if (callIndex === 0) {
+          for (const chunk of toolUseResponse('tu-1', 'send_message', { text: 'hello' })) yield chunk
+        } else {
+          for (const chunk of textResponse('Understood, adjusting.')) yield chunk
+        }
+        callIndex++
+      },
+      updateConfig() {},
+    }
+
+    const queue = new HumanMessageQueue()
+    queue.setBarrier(5000)
+
+    // After 10ms, push a supplement to clear the barrier
+    setTimeout(() => {
+      queue.push('不要发送消息，改为总结')
+    }, 10)
+
+    const toolCallLog: string[] = []
+    const sendTool = defineTool({
+      name: 'send_message',
+      description: 'Send a message',
+      inputSchema: { type: 'object', properties: { text: { type: 'string' } } },
+      isReadOnly: false,
+      call: async (input) => {
+        toolCallLog.push(String(input.text))
+        return { output: 'sent', isError: false }
+      },
+    })
+
+    const result = await runEngine({
+      prompt: 'Send hello',
+      adapter,
+      options: baseOptions({
+        tools: [sendTool],
+        humanMessageQueue: queue,
+      }),
+    })
+
+    expect(result.outcome).toBe('completed')
+    // Tool was NOT called — barrier intercepted before execution
+    expect(toolCallLog).toHaveLength(0)
+
+    // Second LLM call should contain cancellation notice and supplement
+    const secondCallMessages = capturedMessages[1]
+    const allContent = secondCallMessages.map((m: any) => {
+      if (typeof m.content === 'string') return m.content
+      if (m.toolResults) return m.toolResults.map((r: any) => r.content).join(' ')
+      return JSON.stringify(m.content)
+    }).join(' ')
+    expect(allContent).toContain('操作已取消')
+    expect(allContent).toContain('不要发送消息，改为总结')
+  })
+
+  it('proceeds normally when barrier is cleared without supplement', async () => {
+    const adapter = mockAdapter([
+      toolUseResponse('tu-1', 'send_message', { text: 'hello' }),
+      textResponse('Done'),
+    ])
+
+    const queue = new HumanMessageQueue()
+    queue.setBarrier(5000)
+
+    // Clear barrier after 10ms without pushing a supplement
+    setTimeout(() => {
+      queue.clearBarrier()
+    }, 10)
+
+    const toolCallLog: string[] = []
+    const sendTool = defineTool({
+      name: 'send_message',
+      description: 'Send a message',
+      inputSchema: { type: 'object', properties: { text: { type: 'string' } } },
+      isReadOnly: false,
+      call: async (input) => {
+        toolCallLog.push(String(input.text))
+        return { output: 'sent', isError: false }
+      },
+    })
+
+    const result = await runEngine({
+      prompt: 'Send hello',
+      adapter,
+      options: baseOptions({
+        tools: [sendTool],
+        humanMessageQueue: queue,
+      }),
+    })
+
+    expect(result.outcome).toBe('completed')
+    // Tool WAS called — barrier cleared without supplement
+    expect(toolCallLog).toHaveLength(1)
+  })
+
+  it('proceeds normally when barrier times out', async () => {
+    vi.useFakeTimers()
+
+    const adapter = mockAdapter([
+      toolUseResponse('tu-1', 'send_message', { text: 'hello' }),
+      textResponse('Done'),
+    ])
+
+    const queue = new HumanMessageQueue()
+    queue.setBarrier(100)
+
+    const toolCallLog: string[] = []
+    const sendTool = defineTool({
+      name: 'send_message',
+      description: 'Send a message',
+      inputSchema: { type: 'object', properties: { text: { type: 'string' } } },
+      isReadOnly: false,
+      call: async (input) => {
+        toolCallLog.push(String(input.text))
+        return { output: 'sent', isError: false }
+      },
+    })
+
+    const enginePromise = runEngine({
+      prompt: 'Send hello',
+      adapter,
+      options: baseOptions({
+        tools: [sendTool],
+        humanMessageQueue: queue,
+      }),
+    })
+
+    // Advance timers to trigger the barrier timeout
+    await vi.advanceTimersByTimeAsync(100)
+
+    const result = await enginePromise
+
+    expect(result.outcome).toBe('completed')
+    // Tool WAS called — barrier timed out
+    expect(toolCallLog).toHaveLength(1)
+
+    vi.useRealTimers()
+  })
+})

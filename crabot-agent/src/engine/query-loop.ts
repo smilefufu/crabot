@@ -133,6 +133,52 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       return buildResult('completed', finalText, totalTurns, contextManager)
     }
 
+    // ── Barrier check: wait for potential supplement before executing tools ──
+    if (options.humanMessageQueue?.hasBarrier) {
+      await options.humanMessageQueue.waitBarrier(abortSignal)
+
+      // Check abort after waiting
+      if (abortSignal?.aborted) {
+        return buildResult('aborted', finalText, totalTurns, contextManager)
+      }
+
+      // If supplement arrived during wait, cancel tools and inject
+      if (options.humanMessageQueue.hasPending) {
+        const cancelledResults = processed.toolUseBlocks.map(block => ({
+          tool_use_id: block.id,
+          content: '[操作已取消：收到用户实时纠偏，请根据新指示重新决策]',
+          is_error: false,
+        }))
+        messages.push(createBatchToolResultMessage(cancelledResults))
+
+        const supplements = options.humanMessageQueue.drainPending()
+        for (const content of supplements) {
+          messages.push(createUserMessage(content))
+        }
+
+        // Fire onTurn with cancelled tools for trace recording
+        if (options.onTurn) {
+          const turnEvent: EngineTurnEvent = {
+            turnNumber: totalTurns,
+            assistantText: processed.text,
+            toolCalls: processed.toolUseBlocks.map(b => ({
+              id: b.id,
+              name: b.name,
+              input: b.input,
+              output: '[cancelled by supplement]',
+              isError: false,
+            })),
+            stopReason,
+            toolExecutionMs: 0,
+          }
+          options.onTurn(turnEvent)
+        }
+
+        continue  // Skip tool execution, go to next LLM turn
+      }
+      // else: barrier cleared without supplement → proceed normally
+    }
+
     // Execute tools
     const batches = partitionToolCalls(processed.toolUseBlocks, options.tools)
     const toolStartTime = Date.now()

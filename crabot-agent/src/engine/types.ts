@@ -146,6 +146,9 @@ export interface EngineOptions {
   readonly humanMessageQueue?: {
     readonly drainPending: () => Array<string | ContentBlock[]>
     readonly hasPending: boolean
+    readonly hasBarrier: boolean
+    readonly waitBarrier: (signal?: AbortSignal) => Promise<void>
+    readonly clearBarrier: () => void
   }
 }
 
