@@ -481,6 +481,14 @@ export interface MCPServerConfig {
   // http/sse fields
   url?: string
   headers?: Record<string, string>
+  /**
+   * Per-tool default parameters injected before each call.
+   * Key = tool name (without mcp__server__ prefix), value = defaults to merge.
+   * Only fills in missing keys — never overwrites explicit LLM input.
+   *
+   * Example: { "fetch": { "real_chrome": true }, "stealthy_fetch": { "real_chrome": true } }
+   */
+  tool_defaults?: Record<string, Record<string, unknown>>
 }
 
 export interface SkillConfig {

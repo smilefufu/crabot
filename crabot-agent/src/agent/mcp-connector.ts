@@ -17,6 +17,8 @@ export class McpConnector {
   private readonly clients: Map<string, Client> = new Map()
   /** Cached tool definitions — populated at connect time, avoids per-task listTools() */
   private cachedTools: ToolDefinition[] = []
+  /** Per-server per-tool default params — built from MCPServerConfig.tool_defaults */
+  private readonly toolDefaultsMap: Map<string, Record<string, Record<string, unknown>>> = new Map()
 
   async connectAll(configs: ReadonlyArray<MCPServerConfig>): Promise<void> {
     // Deduplicate by name
@@ -26,6 +28,13 @@ export class McpConnector {
       seen.add(c.name)
       return true
     })
+
+    // Store tool_defaults for connected servers
+    for (const config of unique) {
+      if (config.tool_defaults) {
+        this.toolDefaultsMap.set(config.name, config.tool_defaults)
+      }
+    }
 
     const results = await Promise.allSettled(
       unique.map((config) => this.connectOne(config))
@@ -107,6 +116,7 @@ export class McpConnector {
       try {
         const { tools: mcpTools } = await client.listTools()
         for (const mcpTool of mcpTools) {
+          const toolDefaults = this.toolDefaultsMap.get(serverName)?.[mcpTool.name]
           tools.push(defineTool({
             name: `mcp__${serverName}__${mcpTool.name}`,
             category: 'mcp_skill',
@@ -115,9 +125,13 @@ export class McpConnector {
             isReadOnly: false,
             call: async (input) => {
               try {
+                // Merge tool_defaults (fill missing keys only, never overwrite LLM input)
+                const merged = toolDefaults
+                  ? { ...toolDefaults, ...input }
+                  : input
                 const result = await client.callTool({
                   name: mcpTool.name,
-                  arguments: input,
+                  arguments: merged,
                 })
                 const contentArray = result.content as Array<{ type: string; text?: string; data?: string; mimeType?: string }>
 
