@@ -1,5 +1,5 @@
 import type { LLMAdapter } from './llm-adapter'
-import type { ToolDefinition, EngineTurnEvent, EngineResult, ContentBlock } from './types'
+import type { ToolDefinition, EngineTurnEvent, EngineResult, ContentBlock, HumanMessageQueueLike } from './types'
 import type { AgentTrace } from '../types'
 import type { TraceStore } from '../core/trace-store'
 import { runEngine } from './query-loop'
@@ -30,13 +30,7 @@ export interface ForkEngineParams {
   readonly onTurn?: (event: EngineTurnEvent) => void
   /** Whether the sub-agent's model supports vision (image inputs) */
   readonly supportsVision?: boolean
-  readonly humanMessageQueue?: {
-    readonly drainPending: () => Array<string | ContentBlock[]>
-    readonly hasPending: boolean
-    readonly hasBarrier: boolean
-    readonly waitBarrier: (signal?: AbortSignal) => Promise<void>
-    readonly clearBarrier: () => void
-  }
+  readonly humanMessageQueue?: HumanMessageQueueLike
 }
 
 export interface ForkEngineResult {

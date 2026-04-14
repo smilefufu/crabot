@@ -563,6 +563,7 @@ export class WorkerHandler {
       }
     } finally {
       digest?.dispose()
+      this.humanQueues.get(task.task_id)?.clearBarrier()
       this.humanQueues.delete(task.task_id)
       this.activeTasks.delete(task.task_id)
       await this.cleanupTaskDir()

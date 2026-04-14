@@ -53,6 +53,9 @@ import { createCrabMessagingServer, type PathMapping } from './mcp/crab-messagin
 import { TraceStore } from './core/trace-store.js'
 import { PromptManager } from './prompt-manager.js'
 import { SUBAGENT_DEFINITIONS, type SubAgentDefinition } from './agent/subagent-prompts.js'
+import type { SupplementTaskDecision } from './types.js'
+
+const BARRIER_TIMEOUT_MS = 8_000
 
 /**
  * Map ToolAccessConfig to engine's ToolPermissionConfig denyList.
@@ -582,17 +585,7 @@ export class UnifiedAgent extends ModuleBase {
       // 7. 构建 TraceCallback
       const traceCallback = this.buildTraceCallback(trace.trace_id)
 
-      // 7.5 设置 barrier（可能的纠偏消息等待）
-      const BARRIER_TIMEOUT_MS = 8000
-      barrierTaskIds = this.workerHandler
-        ? this.workerHandler.getActiveTasksByOrigin(
-            session.channel_id,
-            session.session_id,
-          )
-        : []
-      for (const taskId of barrierTaskIds) {
-        this.workerHandler!.setBarrierForTask(taskId, BARRIER_TIMEOUT_MS)
-      }
+      barrierTaskIds = this.setupBarriers(session.channel_id, session.session_id)
 
       // 8. 调用 Front Agent（传入合并后的消息列表）
       this.currentMemPerms = memPerms
@@ -671,19 +664,7 @@ export class UnifiedAgent extends ModuleBase {
         this.traceStore.endSpan(trace.trace_id, decisionSpan.span_id, 'completed')
       }
 
-      // 10.5 清除未被 supplement 命中的 barrier
-      if (barrierTaskIds.length > 0) {
-        const supplementedTaskIds = new Set(
-          result.decisions
-            .filter((d): d is import('./types.js').SupplementTaskDecision => d.type === 'supplement_task')
-            .map(d => d.task_id)
-        )
-        for (const taskId of barrierTaskIds) {
-          if (!supplementedTaskIds.has(taskId)) {
-            this.workerHandler?.clearBarrierForTask(taskId)
-          }
-        }
-      }
+      this.releaseBarriers(barrierTaskIds, result.decisions)
 
       // 11. 写入短期记忆：分诊决策事件（fire-and-forget，不阻塞 completeRequest）
       if (sender.friend_id && result.decisions.length > 0) {
@@ -726,10 +707,7 @@ export class UnifiedAgent extends ModuleBase {
         summary: this.extractReplyText(result.decisions)?.slice(0, 200) ?? 'completed',
       })
     } catch (error) {
-      // 异常时清除所有 barrier
-      for (const taskId of barrierTaskIds) {
-        this.workerHandler?.clearBarrierForTask(taskId)
-      }
+      this.clearAllBarriers(barrierTaskIds)
       const msg = error instanceof Error ? error.message : String(error)
       this.traceStore.endTrace(trace.trace_id, 'failed', { summary: msg, error: msg })
     } finally {
@@ -777,15 +755,8 @@ export class UnifiedAgent extends ModuleBase {
     try {
       // 群聊 barrier：仅在有 @bot 消息时设置（非 @bot 群聊消息不暂停 worker）
       const hasMention = messages.some(m => m.features.is_mention_crab)
-      if (hasMention && this.workerHandler) {
-        const BARRIER_TIMEOUT_MS = 8000
-        barrierTaskIds = this.workerHandler.getActiveTasksByOrigin(
-          session.channel_id,
-          sessionId,
-        )
-        for (const taskId of barrierTaskIds) {
-          this.workerHandler.setBarrierForTask(taskId, BARRIER_TIMEOUT_MS)
-        }
+      if (hasMention) {
+        barrierTaskIds = this.setupBarriers(session.channel_id, sessionId)
       }
 
       // 群聊权限：group_default 模板 + Session 覆盖
@@ -882,19 +853,7 @@ export class UnifiedAgent extends ModuleBase {
       }
       // else: silent discard — 不发送任何回复
 
-      // 清除未被 supplement 命中的 barrier
-      if (barrierTaskIds.length > 0) {
-        const supplementedTaskIds = new Set(
-          result.decisions
-            .filter((d): d is import('./types.js').SupplementTaskDecision => d.type === 'supplement_task')
-            .map(d => d.task_id)
-        )
-        for (const taskId of barrierTaskIds) {
-          if (!supplementedTaskIds.has(taskId)) {
-            this.workerHandler?.clearBarrierForTask(taskId)
-          }
-        }
-      }
+      this.releaseBarriers(barrierTaskIds, result.decisions)
 
       // 报告结果，调整注意力巡检间隔
       this.attentionScheduler.reportResult(sessionId, hasReply)
@@ -905,10 +864,7 @@ export class UnifiedAgent extends ModuleBase {
           : 'silent discard',
       })
     } catch (error) {
-      // 异常时清除所有 barrier
-      for (const taskId of barrierTaskIds) {
-        this.workerHandler?.clearBarrierForTask(taskId)
-      }
+      this.clearAllBarriers(barrierTaskIds)
       const msg = error instanceof Error ? error.message : String(error)
       this.traceStore.endTrace(trace.trace_id, 'failed', { summary: msg, error: msg })
     }
@@ -1189,6 +1145,35 @@ export class UnifiedAgent extends ModuleBase {
       }
     }
     return undefined
+  }
+
+  private setupBarriers(channelId: string, sessionId: string): string[] {
+    if (!this.workerHandler) return []
+    const taskIds = this.workerHandler.getActiveTasksByOrigin(channelId, sessionId)
+    for (const taskId of taskIds) {
+      this.workerHandler.setBarrierForTask(taskId, BARRIER_TIMEOUT_MS)
+    }
+    return taskIds
+  }
+
+  private releaseBarriers(barrierTaskIds: string[], decisions: MessageDecision[]): void {
+    if (barrierTaskIds.length === 0) return
+    const supplementedTaskIds = new Set(
+      decisions
+        .filter((d): d is SupplementTaskDecision => d.type === 'supplement_task')
+        .map(d => d.task_id)
+    )
+    for (const taskId of barrierTaskIds) {
+      if (!supplementedTaskIds.has(taskId)) {
+        this.workerHandler?.clearBarrierForTask(taskId)
+      }
+    }
+  }
+
+  private clearAllBarriers(barrierTaskIds: string[]): void {
+    for (const taskId of barrierTaskIds) {
+      this.workerHandler?.clearBarrierForTask(taskId)
+    }
   }
 
   /**

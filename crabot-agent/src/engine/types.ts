@@ -143,13 +143,15 @@ export interface EngineOptions {
   readonly onTextDelta?: (text: string) => void
   readonly permissionConfig?: ToolPermissionConfig
   readonly supportsVision?: boolean
-  readonly humanMessageQueue?: {
-    readonly drainPending: () => Array<string | ContentBlock[]>
-    readonly hasPending: boolean
-    readonly hasBarrier: boolean
-    readonly waitBarrier: (signal?: AbortSignal) => Promise<void>
-    readonly clearBarrier: () => void
-  }
+  readonly humanMessageQueue?: HumanMessageQueueLike
+}
+
+export interface HumanMessageQueueLike {
+  readonly drainPending: () => Array<string | ContentBlock[]>
+  readonly hasPending: boolean
+  readonly hasBarrier: boolean
+  readonly waitBarrier: (signal?: AbortSignal) => Promise<void>
+  readonly clearBarrier: () => void
 }
 
 export interface EngineResult {
