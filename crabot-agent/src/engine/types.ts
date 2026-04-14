@@ -144,6 +144,7 @@ export interface EngineOptions {
   readonly permissionConfig?: ToolPermissionConfig
   readonly supportsVision?: boolean
   readonly humanMessageQueue?: HumanMessageQueueLike
+  readonly hookRegistry?: import('../hooks/hook-registry').HookRegistry
 }
 
 export interface HumanMessageQueueLike {

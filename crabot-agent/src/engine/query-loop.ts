@@ -17,6 +17,8 @@ import { ContextManager } from './context-manager'
 import { partitionToolCalls } from './tool-framework'
 import { executeToolBatches } from './tool-orchestration'
 import { compressToolResultImages, pruneOldImages } from './image-utils'
+import type { HookInput, HookExecutorContext } from '../hooks/types'
+import { executeHooks } from '../hooks/hook-executor'
 import * as fs from 'fs'
 
 // --- Public Interface ---
@@ -130,6 +132,24 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
 
     // If no tool use, we're done
     if (stopReason !== 'tool_use') {
+      // --- Stop hook ---
+      if (options.hookRegistry) {
+        const hookRegistry = options.hookRegistry
+        const stopInput: HookInput = { event: 'Stop', workingDirectory: process.cwd() }
+        const matching = hookRegistry.getMatching('Stop', stopInput)
+        if (matching.length > 0) {
+          const stopContext: HookExecutorContext = {
+            workingDirectory: process.cwd(),
+            adapter,
+            model: options.model,
+          }
+          const stopResult = await executeHooks(matching, stopInput, stopContext)
+          if (stopResult.action === 'block' && stopResult.message) {
+            messages.push(createUserMessage(stopResult.message))
+            continue  // 继续循环，让 LLM 看到 hook 消息
+          }
+        }
+      }
       return buildResult('completed', finalText, totalTurns, contextManager)
     }
 
@@ -182,9 +202,15 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     // Execute tools
     const batches = partitionToolCalls(processed.toolUseBlocks, options.tools)
     const toolStartTime = Date.now()
+    const hookRegistry = options.hookRegistry
+    const hookContext: HookExecutorContext | undefined = hookRegistry ? {
+      workingDirectory: process.cwd(),
+      adapter,
+      model: options.model,
+    } : undefined
     const toolResults = await executeToolBatches(batches, options.tools, {
       abortSignal,
-    }, options.permissionConfig)
+    }, options.permissionConfig, hookRegistry, hookContext)
     const toolExecutionMs = Date.now() - toolStartTime
 
     // Fire onTurn callback

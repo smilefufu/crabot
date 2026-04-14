@@ -16,6 +16,7 @@ export interface HookInput {
   readonly toolName?: string
   readonly filePaths?: ReadonlyArray<string>
   readonly toolInput?: Record<string, unknown>
+  readonly toolOutput?: string
   readonly workingDirectory?: string
 }
 
