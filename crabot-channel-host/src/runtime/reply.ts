@@ -102,6 +102,7 @@ export function createReplyRuntime(
         Body: (ctx.Body ?? ctx.body) as string | undefined,
         RawBody: ctx.RawBody as string | undefined,
         ChatType: ctx.ChatType as string | undefined,
+        MessageId: ctx.MessageSid as string | undefined,
         // 媒体字段（由 OpenClaw 插件 buildAgentMediaPayload spread 进 ctx）
         MediaPath: ctx.MediaPath as string | undefined,
         MediaType: ctx.MediaType as string | undefined,
@@ -110,6 +111,8 @@ export function createReplyRuntime(
         MediaUrls: ctx.MediaUrls as string[] | undefined,
         MediaTypes: ctx.MediaTypes as string[] | undefined,
         WasMentioned: ctx.WasMentioned as boolean | undefined,
+        ReplyToId: ctx.ReplyToId as string | undefined,
+        ReplyToBody: ctx.ReplyToBody as string | undefined,
       }
 
       onMessageReceived(msgCtx, sessionId).catch((error: unknown) => {
@@ -245,7 +248,7 @@ export function createReplyRuntime(
     resolveHumanDelayConfig: () => null,
     resolveEffectiveMessagesConfig: () => ({}),
     finalizeInboundContext: (ctx: unknown) => ctx,
-    formatAgentEnvelope: () => '',
+    formatAgentEnvelope: (params: { body?: string }) => params?.body ?? '',
     formatInboundEnvelope: () => '',
     resolveEnvelopeFormatOptions: () => ({}),
     dispatchReplyFromConfig_raw: undefined,  // 内部占位，不对外暴露

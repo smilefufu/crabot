@@ -40,6 +40,13 @@ export function msgContextToChannelMessage(
     ? (mimeType?.startsWith('image/') ? 'image' : 'file')
     : 'text'
 
+  // 构建消息文本：如果是回复消息，在前面加 markdown 引用块
+  const rawText = ctx.RawBody ?? ctx.Body ?? ''
+  const replyToBody = ctx.ReplyToBody?.trim()
+  const text = replyToBody
+    ? `> **Quoted message:**\n> ${replyToBody.replace(/\n/g, '\n> ')}\n\n${rawText}`
+    : rawText
+
   return {
     platform_message_id: ctx.MessageId ?? randomUUID(),
     session: {
@@ -53,9 +60,7 @@ export function msgContextToChannelMessage(
     },
     content: {
       type: contentType,
-      // RawBody 是未经格式化的原始内容（如 "/pair"），Body 是经插件处理后含前缀的内容
-      // （如 "张三: /pair"）。Admin 鉴权网关需要原始内容做命令检测，优先取 RawBody。
-      text: ctx.RawBody ?? ctx.Body ?? '',
+      text,
       ...(hasMedia && {
         media_url: mediaPath,
         mime_type: mimeType,
@@ -63,6 +68,7 @@ export function msgContextToChannelMessage(
     },
     features: {
       is_mention_crab: ctx.WasMentioned ?? false,
+      ...(ctx.ReplyToId && { reply_to_message_id: ctx.ReplyToId }),
     },
     platform_timestamp: new Date().toISOString(),
   }

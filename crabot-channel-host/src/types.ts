@@ -317,6 +317,10 @@ export interface MsgContext {
   MediaTypes?: string[]
   /** 是否 @了 bot（由 OpenClaw 插件的 WasMentioned 字段传入） */
   WasMentioned?: boolean
+  /** 被回复消息的 ID（由 OpenClaw 插件的 ReplyToId 字段传入） */
+  ReplyToId?: string
+  /** 被回复消息的文本内容（由 OpenClaw 插件的 ReplyToBody 字段传入） */
+  ReplyToBody?: string
 }
 
 /**
