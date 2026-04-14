@@ -29,6 +29,7 @@ function spanTypeLabel(type: AgentSpan['type']): string {
     decision: 'decision',
     context_assembly: 'ctx',
     memory_write: 'mem-w',
+    rpc_call: 'rpc',
   }
   return map[type] ?? type
 }
@@ -42,6 +43,7 @@ function spanTypeBg(type: AgentSpan['type']): string {
     decision: '#10b981',
     context_assembly: '#0ea5e9',
     memory_write: '#14b8a6',
+    rpc_call: '#6366f1',
   }
   return map[type] ?? '#6b7280'
 }
@@ -146,6 +148,23 @@ const SpanDetailPanel: React.FC<SpanDetailPanelProps> = ({ span }) => {
   if (span.type === 'memory_write') {
     if (d.friend_id) rows.push({ label: 'Friend', value: String(d.friend_id) })
     if (d.channel_id) rows.push({ label: 'Channel', value: String(d.channel_id) })
+  }
+
+  // rpc_call 详情
+  if (span.type === 'rpc_call') {
+    if (d.target_module) rows.push({ label: 'Target', value: String(d.target_module) })
+    if (d.method) rows.push({ label: 'Method', value: String(d.method) })
+    if (d.target_port) rows.push({ label: 'Port', value: String(d.target_port) })
+    if (d.request_summary) {
+      rows.push({ label: 'Request', value: String(d.request_summary), monospace: true })
+    }
+    if (d.response_summary) {
+      rows.push({ label: 'Response', value: String(d.response_summary), monospace: true })
+    }
+    if (d.status_code) rows.push({ label: 'Status Code', value: String(d.status_code) })
+    if (d.error) {
+      rows.push({ label: 'Error', value: String(d.error), monospace: true })
+    }
   }
 
   // 通用时间信息
@@ -271,6 +290,9 @@ const SpanRow: React.FC<SpanRowProps> = ({ span, spans, depth, expandedDetails, 
     }
     if (span.type === 'memory_write') {
       return `→ ${details.channel_id ?? ''}`
+    }
+    if (span.type === 'rpc_call') {
+      return `${details.target_module ?? ''}::${details.method ?? ''}`
     }
     return ''
   }
