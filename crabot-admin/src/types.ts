@@ -1376,7 +1376,7 @@ export interface AdminEventPayloads {
   'admin.schedule_created': { schedule: Schedule }
   'admin.schedule_updated': { schedule: Schedule }
   'admin.schedule_deleted': { schedule_id: ScheduleId }
-  'admin.schedule_triggered': { schedule: Schedule; task: Task }
+  'admin.schedule_triggered': { schedule: Schedule; task_id: string }
   'admin.model_provider_created': { provider: ModelProvider }
   'admin.model_provider_updated': { provider: ModelProvider }
   'admin.model_provider_deleted': { provider_id: string }

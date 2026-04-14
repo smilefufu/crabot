@@ -110,6 +110,8 @@ import { ChatManager } from './chat-manager.js'
 import { PtyManager } from './pty-manager.js'
 import { MCPServerManager, SkillManager, EssentialToolsManager } from './mcp-skill-manager.js'
 import { PRESET_VENDORS } from './preset-vendors.js'
+import { Cron } from 'croner'
+import { ScheduleEngine } from './schedule-engine.js'
 
 // ============================================================================
 // JWT 工具函数
@@ -219,6 +221,9 @@ export class AdminModule extends ModuleBase {
   // Browser 管理器（CDP 浏览器自动化）
   private browserManager!: BrowserManager
 
+  // 调度引擎
+  private scheduleEngine: ScheduleEngine
+
   // 模块 env 配置缓存
   private moduleEnvConfigCache: Map<string, Record<string, string>> = new Map()
 
@@ -248,6 +253,9 @@ export class AdminModule extends ModuleBase {
       this.adminConfig.data_dir,
       parseInt(process.env.CRABOT_PORT_OFFSET || '0', 10)
     )
+    this.scheduleEngine = new ScheduleEngine({
+      onTrigger: (schedule) => this.handleScheduleTrigger(schedule),
+    })
 
     // 注入回调，实现跨模块解耦通信
     this.agentManager.setOnConfigChanged(() => {
@@ -460,6 +468,11 @@ export class AdminModule extends ModuleBase {
       })
     }, 2000)
 
+    // 启动调度引擎
+    const allSchedules = Array.from(this.schedules.values())
+    this.scheduleEngine.startAll(allSchedules)
+    console.log(`[Admin] ScheduleEngine started with ${allSchedules.filter(s => s.enabled).length} active schedules`)
+
     // 启动 Web 服务器
     await this.startWebServer()
 
@@ -467,6 +480,9 @@ export class AdminModule extends ModuleBase {
   }
 
   protected override async onStop(): Promise<void> {
+    // 停止调度引擎
+    this.scheduleEngine.stop()
+
     // 保存数据
     await this.saveData()
 
@@ -2774,6 +2790,7 @@ export class AdminModule extends ModuleBase {
     }
 
     this.schedules.set(schedule.id, schedule)
+    this.scheduleEngine.add(schedule)
 
     // 发布事件
     this.publishAdminEvent('admin.schedule_created', { schedule })
@@ -2833,34 +2850,43 @@ export class AdminModule extends ModuleBase {
   }
 
   private async handleUpdateSchedule(params: UpdateScheduleParams): Promise<{ schedule: Schedule }> {
-    const schedule = this.schedules.get(params.schedule_id)
-    if (!schedule) {
+    const existing = this.schedules.get(params.schedule_id)
+    if (!existing) {
       throw new Error(AdminErrorCode.SCHEDULE_NOT_FOUND)
     }
 
-    if (params.name !== undefined) {
-      schedule.name = params.name
-    }
-    if (params.description !== undefined) {
-      schedule.description = params.description
-    }
-    if (params.enabled !== undefined) {
-      schedule.enabled = params.enabled
-    }
     if (params.trigger !== undefined) {
       if (params.trigger.type === 'cron' && !this.isValidCronExpression(params.trigger.expression)) {
         throw new Error(AdminErrorCode.INVALID_CRON_EXPRESSION)
       }
-      schedule.trigger = params.trigger
-    }
-    if (params.task_template !== undefined) {
-      schedule.task_template = params.task_template
     }
 
-    schedule.updated_at = generateTimestamp()
-    schedule.next_trigger_at = this.calculateNextTriggerTime(schedule.trigger)
+    const merged: Schedule = {
+      ...existing,
+      ...(params.name !== undefined ? { name: params.name } : {}),
+      ...(params.description !== undefined ? { description: params.description } : {}),
+      ...(params.enabled !== undefined ? { enabled: params.enabled } : {}),
+      ...(params.trigger !== undefined ? { trigger: params.trigger } : {}),
+      ...(params.task_template !== undefined ? { task_template: params.task_template } : {}),
+      updated_at: generateTimestamp(),
+    }
+    const schedule: Schedule = {
+      ...merged,
+      next_trigger_at: this.calculateNextTriggerTime(merged.trigger),
+    }
 
     this.schedules.set(schedule.id, schedule)
+
+    // 同步调度引擎
+    if (params.enabled !== undefined && params.enabled !== existing.enabled) {
+      if (params.enabled) {
+        this.scheduleEngine.enable(schedule.id, schedule)
+      } else {
+        this.scheduleEngine.disable(schedule.id)
+      }
+    } else {
+      this.scheduleEngine.update(schedule.id, schedule)
+    }
 
     // 发布事件
     this.publishAdminEvent('admin.schedule_updated', { schedule })
@@ -2874,6 +2900,7 @@ export class AdminModule extends ModuleBase {
       throw new Error(AdminErrorCode.SCHEDULE_NOT_FOUND)
     }
 
+    this.scheduleEngine.remove(params.schedule_id)
     this.schedules.delete(params.schedule_id)
 
     // 发布事件
@@ -2882,54 +2909,98 @@ export class AdminModule extends ModuleBase {
     return { deleted: true }
   }
 
-  private async handleTriggerNow(params: TriggerNowParams): Promise<{ task: Task; schedule: Schedule }> {
+  private async handleTriggerNow(params: TriggerNowParams): Promise<{ task_id: string; schedule: Schedule }> {
     const schedule = this.schedules.get(params.schedule_id)
     if (!schedule) {
       throw new Error(AdminErrorCode.SCHEDULE_NOT_FOUND)
     }
 
-    // 创建任务
-    const now = generateTimestamp()
-    const task: Task = {
-      id: generateId(),
-      type: schedule.task_template.type,
-      status: 'pending',
-      priority: schedule.task_template.priority,
-      title: schedule.task_template.title,
-      description: schedule.task_template.description,
-      source: {
-        trigger_type: 'scheduled',
-      },
-      worker_agent_id: undefined,
-      plan: undefined,
-      input: schedule.task_template.input,
-      output: undefined,
-      error: undefined,
-      messages: [],
-      tags: schedule.task_template.tags,
-      created_at: now,
-      updated_at: now,
-      started_at: undefined,
-      completed_at: undefined,
-      expires_at: undefined,
+    // 走统一触发链路（RPC → Agent create_task_from_schedule）
+    const result = await this.handleScheduleTrigger(schedule)
+    if (!result) {
+      throw new Error('Schedule trigger failed: Agent not available or RPC error')
     }
 
-    this.tasks.set(task.id, task)
+    // 从 Map 中取最新状态（handleScheduleTrigger 已更新）
+    const updatedSchedule = this.schedules.get(params.schedule_id) ?? schedule
 
-    // 更新调度状态
-    schedule.last_triggered_at = now
-    schedule.last_task_id = task.id
-    schedule.execution_count++
-    schedule.next_trigger_at = this.calculateNextTriggerTime(schedule.trigger)
-    schedule.updated_at = now
+    return { task_id: result.task_id, schedule: updatedSchedule }
+  }
 
-    this.schedules.set(schedule.id, schedule)
+  // ============================================================================
+  // Schedule 触发回调
+  // ============================================================================
+
+  /**
+   * ScheduleEngine 到点时调用的回调
+   * 替换模板变量 → RPC 调 Agent create_task_from_schedule → 更新 Schedule 状态
+   */
+  private async handleScheduleTrigger(schedule: Schedule): Promise<{ task_id: string } | void> {
+    const now = new Date()
+
+    // 替换模板变量
+    const replaceVars = (text: string): string =>
+      text
+        .replace(/\{\{date\}\}/g, now.toISOString().slice(0, 10))
+        .replace(/\{\{time\}\}/g, now.toTimeString().slice(0, 8))
+        .replace(/\{\{datetime\}\}/g, now.toISOString())
+        .replace(/\{\{schedule_name\}\}/g, schedule.name)
+
+    const title = replaceVars(schedule.task_template.title)
+    const description = replaceVars(schedule.task_template.description ?? '')
+
+    // 找到 Agent 模块并 RPC 调用
+    let result: { task_id: string; assigned_worker: string }
+    try {
+      const port = await this.ensureAgentPort()
+      if (!port) {
+        console.error(`[Admin] No agent module found, skipping schedule trigger for ${schedule.id} (${schedule.name})`)
+        return
+      }
+
+      result = await this.rpcClient.call<
+        { schedule_id: string; task_type: string; title: string; description: string },
+        { task_id: string; assigned_worker: string }
+      >(
+        port,
+        'create_task_from_schedule',
+        {
+          schedule_id: schedule.id,
+          task_type: schedule.task_template.type,
+          title,
+          description,
+        },
+        this.config.moduleId
+      )
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      console.error(`[Admin] Schedule trigger RPC failed for ${schedule.id} (${schedule.name}): ${msg}`)
+      return
+    }
+
+    // 更新 Schedule 状态（不可变模式）
+    const nowIso = generateTimestamp()
+    const updated: Schedule = {
+      ...schedule,
+      last_triggered_at: nowIso,
+      execution_count: schedule.execution_count + 1,
+      next_trigger_at: this.calculateNextTriggerTime(schedule.trigger),
+      last_task_id: result.task_id,
+      updated_at: nowIso,
+    }
+    this.schedules.set(schedule.id, updated)
+
+    // Once 类型触发后自动 disable
+    if (schedule.trigger.type === 'once') {
+      const disabled: Schedule = { ...updated, enabled: false }
+      this.schedules.set(schedule.id, disabled)
+      this.scheduleEngine.disable(schedule.id)
+    }
 
     // 发布事件
-    this.publishAdminEvent('admin.task_created', { task })
-    this.publishAdminEvent('admin.schedule_triggered', { schedule, task })
+    this.publishAdminEvent('admin.schedule_triggered', { schedule: updated, task_id: result.task_id })
 
-    return { task, schedule }
+    return { task_id: result.task_id }
   }
 
   // ============================================================================
@@ -2972,9 +3043,10 @@ export class AdminModule extends ModuleBase {
         return trigger.execute_at
       }
       case 'cron': {
-        // 简化实现：返回 undefined，实际需要 cron 解析库
-        // TODO: 使用 cron 库计算下次执行时间
-        return undefined
+        const cron = new Cron(trigger.expression, { timezone: trigger.timezone })
+        const next = cron.nextRun()
+        cron.stop()
+        return next?.toISOString()
       }
       default:
         return undefined
