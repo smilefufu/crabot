@@ -1,5 +1,5 @@
 import type { InternalHandler, FormattedDiagnostic } from './types'
-import { execSync } from 'child_process'
+import { exec } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 
@@ -56,18 +56,19 @@ registerInternalHandler('compile-check', async (_input, context) => {
     return { action: 'continue' }
   }
 
-  try {
-    execSync(detected.command, { cwd, timeout: 55_000, stdio: 'pipe' })
-    return { action: 'continue' }
-  } catch (error: unknown) {
-    const stderr = error instanceof Error && 'stderr' in error
-      ? String((error as { stderr: unknown }).stderr)
-      : String(error)
-    return {
-      action: 'block',
-      message: `Compile check failed (${detected.type}):\n${stderr.slice(0, 2000)}`,
-    }
-  }
+  return new Promise((resolve) => {
+    const child = exec(detected.command, { cwd, timeout: 55_000 }, (error, _stdout, stderr) => {
+      if (error) {
+        resolve({
+          action: 'block',
+          message: `Compile check failed (${detected.type}):\n${(stderr || error.message).slice(0, 2000)}`,
+        })
+      } else {
+        resolve({ action: 'continue' })
+      }
+    })
+    child.stdin?.end()
+  })
 })
 
 // --- Helpers ---

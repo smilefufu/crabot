@@ -215,6 +215,7 @@ export class WorkerHandler {
   private digestSdkEnv?: SdkEnvConfig
   private readonly subAgentConfigs: ReadonlyArray<{ readonly definition: SubAgentDefinition; readonly sdkEnv: SdkEnvConfig }>
   private readonly skills: ReadonlyArray<SkillConfig>
+  private readonly lspManager?: import('../lsp/lsp-manager').LSPManager
 
   constructor(
     sdkEnv: SdkEnvConfig,
@@ -232,6 +233,7 @@ export class WorkerHandler {
     this.digestSdkEnv = options?.digestSdkEnv
     this.subAgentConfigs = options?.subAgentConfigs ?? []
     this.skills = options?.skills ?? []
+    this.lspManager = options?.lspManager
   }
 
   async executeTask(
@@ -367,6 +369,7 @@ export class WorkerHandler {
           parentHumanQueue: humanQueue,
           traceConfig: subAgentTraceConfig,
           hookRegistry,
+          lspManager: hookRegistry ? this.lspManager : undefined,
         }))
       }
 

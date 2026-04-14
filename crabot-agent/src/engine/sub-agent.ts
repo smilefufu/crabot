@@ -32,6 +32,7 @@ export interface ForkEngineParams {
   readonly supportsVision?: boolean
   readonly humanMessageQueue?: HumanMessageQueueLike
   readonly hookRegistry?: import('../hooks/hook-registry').HookRegistry
+  readonly lspManager?: import('../hooks/types').LspManagerLike
 }
 
 export interface ForkEngineResult {
@@ -77,6 +78,7 @@ export async function forkEngine(params: ForkEngineParams): Promise<ForkEngineRe
       supportsVision: params.supportsVision,
       humanMessageQueue: params.humanMessageQueue,
       hookRegistry: params.hookRegistry,
+      lspManager: params.lspManager,
     },
   })
 
@@ -114,6 +116,7 @@ export interface SubAgentToolConfig {
   readonly parentHumanQueue?: HumanMessageQueue
   readonly traceConfig?: SubAgentTraceConfig
   readonly hookRegistry?: import('../hooks/hook-registry').HookRegistry
+  readonly lspManager?: import('../hooks/types').LspManagerLike
 }
 
 export function createSubAgentTool(config: SubAgentToolConfig): ToolDefinition {
@@ -226,6 +229,7 @@ export function createSubAgentTool(config: SubAgentToolConfig): ToolDefinition {
           supportsVision: config.supportsVision,
           humanMessageQueue: childQueue,
           hookRegistry: config.hookRegistry,
+          lspManager: config.lspManager,
         })
 
         if (subTrace && tc) {

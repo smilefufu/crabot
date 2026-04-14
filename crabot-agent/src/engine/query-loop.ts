@@ -142,6 +142,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
             workingDirectory: process.cwd(),
             adapter,
             model: options.model,
+            lspManager: options.lspManager,
           }
           const stopResult = await executeHooks(matching, stopInput, stopContext)
           if (stopResult.action === 'block' && stopResult.message) {
@@ -207,6 +208,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       workingDirectory: process.cwd(),
       adapter,
       model: options.model,
+      lspManager: options.lspManager,
     } : undefined
     const toolResults = await executeToolBatches(batches, options.tools, {
       abortSignal,

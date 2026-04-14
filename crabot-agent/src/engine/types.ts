@@ -145,6 +145,7 @@ export interface EngineOptions {
   readonly supportsVision?: boolean
   readonly humanMessageQueue?: HumanMessageQueueLike
   readonly hookRegistry?: import('../hooks/hook-registry').HookRegistry
+  readonly lspManager?: import('../hooks/types').LspManagerLike
 }
 
 export interface HumanMessageQueueLike {
