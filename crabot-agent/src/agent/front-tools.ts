@@ -51,11 +51,6 @@ export const CREATE_TASK_TOOL: ToolDefinition = {
         type: 'string',
         description: '一句话分类标注，描述任务方向。不要概括用户需求，原始消息会完整传给执行环节。例如："分析挂靠功能需求并规划实现方案"',
       },
-      task_type: {
-        type: 'string',
-        enum: ['general', 'code', 'analysis', 'command'],
-        description: '任务类型，默认 general',
-      },
       ack_text: {
         type: 'string',
         description: '立即发给用户的确认文本。必须简短自然，让用户知道你已收到并开始处理，如"好的，我来对比一下这几个产品"、"收到，正在分析代码"。',
@@ -132,21 +127,21 @@ export const QUERY_TASKS_TOOL: ToolDefinition = {
 export const CREATE_SCHEDULE_TOOL: ToolDefinition = {
   name: 'create_schedule',
   category: 'task' as const,
-  description: '创建定时任务或提醒。支持一次性和周期性。',
+  description: '创建定时任务或提醒。支持一次性（trigger_at）和周期性（cron）。创建后由系统在到达指定时间时自动执行，无需额外操作。',
   inputSchema: {
     type: 'object' as const,
     properties: {
       title: { type: 'string', description: '任务/提醒标题' },
       description: { type: 'string', description: '详细描述' },
-      trigger_at: { type: 'string', description: '触发时间（ISO 8601），一次性提醒用此字段' },
-      cron: { type: 'string', description: 'Cron 表达式，周期性任务用此字段' },
+      trigger_at: { type: 'string', description: '触发时间，必须是完整的 ISO 8601 格式含时区，如 "2026-04-15T16:45:00+08:00"。一次性提醒用此字段' },
+      cron: { type: 'string', description: 'Cron 表达式（分 时 日 月 周），如 "0 9 * * *"。周期性任务用此字段' },
       action: {
         type: 'string',
         enum: ['send_reminder', 'create_task'],
-        description: 'send_reminder=发送提醒消息, create_task=触发时创建 Worker 任务',
+        description: 'send_reminder=到时间后发送提醒消息给用户, create_task=到时间后创建后台任务执行',
       },
-      target_channel_id: { type: 'string', description: '提醒发送到的 channel' },
-      target_session_id: { type: 'string', description: '提醒发送到的 session' },
+      target_channel_id: { type: 'string', description: '提醒发送到的 channel（send_reminder 时必填，使用当前 Channel ID）' },
+      target_session_id: { type: 'string', description: '提醒发送到的 session（send_reminder 时必填，使用当前 Session ID）' },
     },
     required: ['title', 'action'],
   },

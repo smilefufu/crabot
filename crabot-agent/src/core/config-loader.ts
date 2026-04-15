@@ -99,7 +99,6 @@ export class ConfigLoader {
       skills: adminConfig.skills,
       tools_readonly: adminConfig.tools_readonly,
       specialization: 'Unified agent with front and worker capabilities',
-      supported_task_types: ['general'],
     }
 
     // 构造 UnifiedAgentConfig
@@ -157,7 +156,6 @@ export class ConfigLoader {
         system_prompt: '',
         model_config: {},
         specialization: 'Unified agent with front and worker capabilities',
-        supported_task_types: ['general'],
       },
     }
   }

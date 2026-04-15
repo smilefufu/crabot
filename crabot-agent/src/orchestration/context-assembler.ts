@@ -359,7 +359,6 @@ export class ContextAssembler {
         task_id: t.id,
         title: t.title,
         status: t.status,
-        task_type: t.type,
         priority: t.priority,
         assigned_worker: t.assigned_worker,
         plan_summary: t.plan?.summary,

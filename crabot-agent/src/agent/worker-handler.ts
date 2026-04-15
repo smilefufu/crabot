@@ -319,7 +319,7 @@ export class WorkerHandler {
         sessionId: context.task_origin?.session_id,
         visibility: context.memory_permissions?.write_visibility ?? 'public',
         scopes: context.memory_permissions?.write_scopes ?? [],
-        sourceType: task.task_type === 'daily_reflection' ? 'reflection' : context.task_origin ? 'conversation' : 'system',
+        sourceType: context.task_origin ? 'conversation' : 'system',
       }
       if (this.deps?.getMemoryPort) {
         const crabMemoryServer = createCrabMemoryServer({
@@ -737,7 +737,6 @@ export class WorkerHandler {
     const parts: string[] = []
     parts.push('## 任务信息')
     parts.push(`- 标题: ${task.task_title}`)
-    parts.push(`- 类型: ${task.task_type}`)
     parts.push(`- 优先级: ${task.priority}`)
     if (task.plan) { parts.push(`- 计划: ${task.plan}`) }
 

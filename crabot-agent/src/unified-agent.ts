@@ -636,7 +636,6 @@ export class UnifiedAgent extends ModuleBase {
                 type: 'create_task',
                 task_title: decision.supplement_content.slice(0, 60) || '用户追加请求',
                 task_description: decision.supplement_content,
-                task_type: 'general',
                 immediate_reply: decision.immediate_reply ?? { type: 'text', text: '' },
               },
               {
@@ -1295,7 +1294,7 @@ export class UnifiedAgent extends ModuleBase {
           assigned_worker: string
           status: string[]
         },
-        { tasks: Array<{ task_id: string; task_type: string; status: string }> }
+        { tasks: Array<{ task_id: string; status: string }> }
       >(
         adminPort,
         'query_tasks',
@@ -1663,17 +1662,15 @@ export class UnifiedAgent extends ModuleBase {
 
   private async handleCreateTaskFromSchedule(params: {
     schedule_id: string
-    task_type: string
     title: string
     description: string
     preferred_worker_specialization?: string
   }): Promise<{ task_id: string; assigned_worker: ModuleId }> {
-    const { schedule_id, task_type, title, description, preferred_worker_specialization } = params
+    const { schedule_id, title, description, preferred_worker_specialization } = params
 
     try {
       // 选择 Worker
       const workerId = await this.workerSelector.selectWorker({
-        task_type,
         specialization_hint: preferred_worker_specialization,
       })
 
@@ -1683,7 +1680,6 @@ export class UnifiedAgent extends ModuleBase {
         {
           title: string
           description: string
-          task_type: string
           assigned_worker: string
           source: { origin: string; source_module_id: string }
           refs?: { schedule_id: string }
@@ -1695,7 +1691,6 @@ export class UnifiedAgent extends ModuleBase {
         {
           title,
           description,
-          task_type,
           assigned_worker: workerId,
           source: {
             origin: 'system',
@@ -1718,7 +1713,6 @@ export class UnifiedAgent extends ModuleBase {
           id: taskResult.task_id,
           title,
           description,
-          type: task_type,
           priority: 'normal',
         },
         workerContext,
@@ -1738,13 +1732,11 @@ export class UnifiedAgent extends ModuleBase {
   private handleGetRole(): {
     roles: string[]
     specialization: string
-    supported_task_types: string[]
     max_concurrent_tasks: number
   } {
     return {
       roles: Array.from(this.roles),
       specialization: this.agentConfig?.specialization ?? 'general',
-      supported_task_types: this.agentConfig?.supported_task_types ?? [],
       max_concurrent_tasks: this.agentConfig?.max_concurrent_tasks ?? 5,
     }
   }
@@ -1800,7 +1792,6 @@ export class UnifiedAgent extends ModuleBase {
     current_task_count: number
     available_capacity: number
     specialization: string
-    supported_task_types: string[]
   }> {
     const maxCapacity = this.agentConfig?.max_concurrent_tasks ?? 5
     const currentTaskCount = this.workerHandler?.getActiveTaskCount() ?? 0
@@ -1813,7 +1804,6 @@ export class UnifiedAgent extends ModuleBase {
       current_task_count: currentTaskCount,
       available_capacity: Math.max(0, (this.agentConfig?.available_capacity ?? maxCapacity) - currentTaskCount),
       specialization: this.agentConfig?.specialization ?? 'general',
-      supported_task_types: this.agentConfig?.supported_task_types ?? ['general'],
     }
   }
 

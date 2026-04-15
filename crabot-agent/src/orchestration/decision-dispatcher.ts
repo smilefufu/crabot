@@ -32,7 +32,6 @@ interface AdminTask {
   id: string
   title: string
   description?: string
-  type: string
   priority: string
   plan?: string
 }
@@ -200,7 +199,6 @@ export class DecisionDispatcher {
       {
         title: string
         description: string
-        type: string
         priority?: string
         source: {
           origin: string
@@ -217,7 +215,6 @@ export class DecisionDispatcher {
       {
         title: decision.task_title,
         description: decision.task_description,
-        type: decision.task_type,
         priority: decision.priority,
         source: params.admin_chat_callback
           ? {
@@ -313,7 +310,6 @@ export class DecisionDispatcher {
             task_id: task.id,
             task_title: task.title,
             task_description: task.description ?? '',
-            task_type: task.type,
             priority: task.priority,
             plan: task.plan,
           },
@@ -438,7 +434,6 @@ export class DecisionDispatcher {
             task_id: task.id,
             task_title: task.title,
             task_description: task.description ?? '',
-            task_type: task.type,
             priority: task.priority,
             plan: task.plan,
           },

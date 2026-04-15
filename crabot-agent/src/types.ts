@@ -78,8 +78,6 @@ export interface AgentLayerConfig {
   tools_readonly?: boolean
   /** 专长描述 */
   specialization?: string
-  /** 支持的任务类型 */
-  supported_task_types?: string[]
   /** Built-in tool configuration (Admin-controlled) */
   builtin_tool_config?: BuiltinToolConfig
 }
@@ -193,7 +191,6 @@ export interface SessionPermissionConfig {
 export interface WorkerRoutingInfo {
   worker_id: ModuleId
   specialization: string
-  supported_task_types: string[]
   available_capacity: number
 }
 
@@ -258,7 +255,6 @@ export interface TaskSummary {
   task_id: TaskId
   title: string
   status: string
-  task_type: string
   priority: string
   assigned_worker?: string
   plan_summary?: string
@@ -371,7 +367,6 @@ export interface CreateTaskDecision {
   type: 'create_task'
   task_title: string
   task_description: string
-  task_type: string
   priority?: string
   preferred_worker_specialization?: string
   immediate_reply: MessageContent
@@ -399,7 +394,6 @@ export interface ProcessMessageResult {
 
 export interface CreateTaskFromScheduleParams {
   schedule_id: ScheduleId
-  task_type: string
   title: string
   description: string
   preferred_worker_specialization?: string
@@ -501,7 +495,6 @@ export interface SkillConfig {
 export interface AgentRole {
   roles: Array<'front' | 'worker'>
   specialization: string
-  supported_task_types?: string[]
   max_concurrent_tasks?: number
   models: Record<string, LLMConnectionInfo>
   model_format: 'anthropic' | 'openai' | 'gemini' | 'openai-responses'
@@ -543,7 +536,6 @@ export interface ExecuteTaskParams {
     task_id: TaskId
     task_title: string
     task_description: string
-    task_type: string
     priority: string
     plan?: string
   }

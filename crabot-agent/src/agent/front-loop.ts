@@ -190,7 +190,6 @@ export async function runFrontLoop(params: FrontLoopParams): Promise<FrontLoopRe
         type: 'create_task',
         task_title: taskTitle,
         task_description: taskDescription,
-        task_type: 'general',
         immediate_reply: { type: 'text', text: '' },
         front_context: toolHistory.length > 0 ? toolHistory : undefined,
       },
@@ -219,7 +218,6 @@ function parseDecisionTool(toolName: DecisionToolName, input: Record<string, unk
         type: 'create_task',
         task_title: (input.task_title as string) ?? '未命名任务',
         task_description: (input.task_description as string) ?? '',
-        task_type: (input.task_type as string) ?? 'general',
         immediate_reply: {
           type: 'text',
           text: (input.ack_text as string) ?? '',
