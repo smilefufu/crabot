@@ -375,13 +375,6 @@ export type TaskStatus =
   | 'failed'
   | 'cancelled'
 
-/** 任务类型 */
-export type TaskType =
-  | 'single'
-  | 'conversation'
-  | 'background'
-  | 'scheduled'
-
 /** 任务优先级 */
 export type TaskPriority = 'low' | 'normal' | 'high' | 'urgent'
 
@@ -473,8 +466,6 @@ export interface TaskMessage {
 export interface Task {
   /** 任务 ID */
   id: TaskId
-  /** 任务类型 */
-  type: TaskType
   /** 任务状态 */
   status: TaskStatus
   /** 优先级 */
@@ -548,8 +539,6 @@ export type ScheduleTrigger = CronTrigger | IntervalTrigger | OnceTrigger
 
 /** 调度任务模板 */
 export interface ScheduleTaskTemplate {
-  /** 任务类型 */
-  type: TaskType
   /** 任务标题模板 */
   title: string
   /** 任务描述模板 */
@@ -584,6 +573,8 @@ export interface Schedule {
   execution_count: number
   /** 最后创建的任务 ID */
   last_task_id?: TaskId
+  /** 是否为系统内置（不可删除） */
+  is_builtin?: boolean
   /** 创建时间 */
   created_at: string
   /** 更新时间 */
@@ -596,7 +587,6 @@ export interface Schedule {
 
 // 创建任务
 export interface CreateTaskParams {
-  type: TaskType
   priority?: TaskPriority
   title: string
   description?: string
@@ -622,7 +612,6 @@ export interface GetTaskResult {
 // 任务列表过滤条件
 export interface TaskFilter {
   status?: TaskStatus | TaskStatus[]
-  type?: TaskType | TaskType[]
   priority?: TaskPriority | TaskPriority[]
   worker_agent_id?: ModuleId
   source_channel_id?: ModuleId
@@ -717,7 +706,6 @@ export interface CancelTaskResult {
 export interface TaskStats {
   total: number
   by_status: Record<TaskStatus, number>
-  by_type: Record<TaskType, number>
   by_priority: Record<TaskPriority, number>
 }
 
@@ -1145,8 +1133,6 @@ export interface AgentInstance {
   name: string
   /** 专长描述 */
   specialization: string
-  /** 支持的任务类型（Worker 角色） */
-  supported_task_types?: TaskType[]
   /** 最大并发任务数 */
   max_concurrent_tasks?: number
   /** 是否自动启动 */
@@ -1276,7 +1262,6 @@ export interface CreateAgentInstanceParams {
   implementation_id: string
   name: string
   specialization: string
-  supported_task_types?: TaskType[]
   max_concurrent_tasks?: number
   auto_start?: boolean
   start_priority?: number
@@ -1290,7 +1275,6 @@ export interface UpdateAgentInstanceParams {
   instance_id: string
   name?: string
   specialization?: string
-  supported_task_types?: TaskType[]
   max_concurrent_tasks?: number
   auto_start?: boolean
   start_priority?: number

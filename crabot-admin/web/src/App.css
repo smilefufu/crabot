@@ -1789,3 +1789,371 @@ code, pre, .mono {
 .session-grid > .session-card:nth-child(5) { animation-delay: 0.16s; }
 .session-grid > .session-card:nth-child(6) { animation-delay: 0.2s; }
 .session-grid > .session-card:nth-child(n+7) { animation-delay: 0.24s; }
+
+/* ===================================================
+   Schedule Management
+   =================================================== */
+
+.sched-filter-bar {
+  display: flex;
+  gap: 0.75rem;
+  margin-bottom: 1.25rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.sched-filter-bar .select {
+  min-width: 120px;
+}
+
+/* ---- Form Panel ---- */
+
+.sched-form-panel {
+  background: var(--surface);
+  border: 1px solid var(--border-highlight);
+  border-radius: 10px;
+  margin-bottom: 1.5rem;
+  overflow: hidden;
+  animation: sched-slide-in 0.2s ease-out;
+}
+
+@keyframes sched-slide-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.sched-form-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-raised);
+}
+
+.sched-form-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1.4rem;
+  cursor: pointer;
+  padding: 0.25rem;
+  line-height: 1;
+  transition: color 0.15s;
+}
+
+.sched-form-close:hover {
+  color: var(--text-primary);
+}
+
+.sched-form-body {
+  padding: 1.25rem;
+}
+
+.sched-form-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  padding: 1rem 1.25rem;
+  border-top: 1px solid var(--border);
+  background: var(--surface-raised);
+}
+
+.sched-form-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+}
+
+/* ---- Trigger Tabs ---- */
+
+.sched-trigger-tabs {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.sched-trigger-tab {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.85rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-family: var(--font-body);
+  transition: all 0.15s;
+}
+
+.sched-trigger-tab:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.sched-trigger-tab.active {
+  border-color: var(--primary);
+  background: var(--primary-glow);
+  color: var(--primary-light);
+}
+
+.sched-trigger-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* ---- Toggle Switch ---- */
+
+.sched-toggle {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+  cursor: pointer;
+}
+
+.sched-toggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.sched-toggle-track {
+  position: absolute;
+  inset: 0;
+  background: var(--border-strong);
+  border-radius: 10px;
+  transition: background 0.2s;
+}
+
+.sched-toggle-track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: all 0.2s;
+}
+
+.sched-toggle input:checked + .sched-toggle-track {
+  background: var(--success);
+}
+
+.sched-toggle input:checked + .sched-toggle-track::after {
+  left: 18px;
+  background: #fff;
+}
+
+/* ---- Empty State ---- */
+
+.sched-empty {
+  text-align: center;
+  padding: 4rem 2rem;
+  color: var(--text-secondary);
+  background: var(--surface);
+  border: 1px dashed var(--border-highlight);
+  border-radius: 10px;
+}
+
+.sched-empty-icon {
+  font-size: 2.5rem;
+  margin-bottom: 0.5rem;
+  opacity: 0.5;
+  filter: grayscale(0.6);
+}
+
+/* ---- Schedule Cards ---- */
+
+.sched-grid {
+  display: grid;
+  gap: 0.625rem;
+}
+
+.sched-card {
+  display: flex;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  animation: sched-card-in 0.25s ease-out backwards;
+}
+
+@keyframes sched-card-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.sched-grid > .sched-card:nth-child(1) { animation-delay: 0s; }
+.sched-grid > .sched-card:nth-child(2) { animation-delay: 0.03s; }
+.sched-grid > .sched-card:nth-child(3) { animation-delay: 0.06s; }
+.sched-grid > .sched-card:nth-child(4) { animation-delay: 0.09s; }
+.sched-grid > .sched-card:nth-child(5) { animation-delay: 0.12s; }
+.sched-grid > .sched-card:nth-child(n+6) { animation-delay: 0.15s; }
+
+.sched-card:hover {
+  border-color: var(--border-highlight);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
+}
+
+.sched-card.disabled {
+  opacity: 0.55;
+}
+
+.sched-card.disabled:hover {
+  opacity: 0.7;
+}
+
+.sched-card-accent {
+  width: 3px;
+  flex-shrink: 0;
+  transition: background 0.2s;
+}
+
+.sched-card-body {
+  flex: 1;
+  padding: 0.875rem 1rem;
+  min-width: 0;
+}
+
+.sched-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.sched-card-name {
+  font-weight: 600;
+  font-size: 0.95rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sched-card-desc {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  margin-top: 0.25rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sched-card-trigger {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  margin-top: 0.5rem;
+  padding: 0.35rem 0.5rem;
+  background: var(--bg-secondary);
+  border-radius: 4px;
+  display: inline-block;
+}
+
+.sched-card-stats {
+  display: flex;
+  gap: 1.5rem;
+  margin-top: 0.625rem;
+  flex-wrap: wrap;
+}
+
+.sched-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.sched-stat-label {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-family: var(--font-mono);
+}
+
+.sched-stat-value {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.sched-card-tags {
+  display: flex;
+  gap: 0.35rem;
+  margin-top: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.sched-tag {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.5rem;
+  background: var(--primary-subtle);
+  color: var(--primary);
+  border-radius: 3px;
+  font-family: var(--font-mono);
+}
+
+/* ---- Badges ---- */
+
+.sched-badge {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 4px;
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* ---- Action Buttons ---- */
+
+.sched-card-actions {
+  display: flex;
+  gap: 0.25rem;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.sched-card:hover .sched-card-actions {
+  opacity: 1;
+}
+
+.sched-action-btn {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.85rem;
+  transition: all 0.12s;
+}
+
+.sched-action-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.sched-action-btn.trigger:hover {
+  background: var(--primary-glow);
+  color: var(--primary);
+}
+
+.sched-action-btn.danger:hover {
+  background: var(--error-glow);
+  color: var(--error);
+}
+
+.sched-action-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}

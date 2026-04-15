@@ -78,7 +78,6 @@ export interface ModelConnectionInfo {
 export type AgentEngine = 'claude-agent-sdk' | 'pydantic-ai' | 'custom'
 export type AgentImplementationType = 'config_only' | 'full_code'
 export type ModelFormat = 'openai' | 'anthropic' | 'gemini'
-export type TaskType = 'single' | 'conversation' | 'background' | 'scheduled'
 
 export interface ModelRoleDefinition {
   key: string
@@ -146,7 +145,6 @@ export interface AgentInstance {
   implementation_id: string
   name: string
   specialization: string
-  supported_task_types?: TaskType[]
   max_concurrent_tasks?: number
   auto_start: boolean
   start_priority: number
@@ -444,4 +442,54 @@ export interface ScannedPlugin {
 export interface ScanResult {
   plugins: ScannedPlugin[]
   has_config: boolean
+}
+
+// ============================================================================
+// Schedule 类型
+// ============================================================================
+
+export type ScheduleTriggerType = 'cron' | 'interval' | 'once'
+
+export interface CronTrigger {
+  type: 'cron'
+  expression: string
+  timezone?: string
+}
+
+export interface IntervalTrigger {
+  type: 'interval'
+  seconds: number
+}
+
+export interface OnceTrigger {
+  type: 'once'
+  execute_at: string
+}
+
+export type ScheduleTrigger = CronTrigger | IntervalTrigger | OnceTrigger
+
+export type TaskPriority = 'low' | 'normal' | 'high' | 'urgent'
+
+export interface ScheduleTaskTemplate {
+  title: string
+  description?: string
+  priority: TaskPriority
+  input?: Record<string, unknown>
+  tags: string[]
+}
+
+export interface Schedule {
+  id: string
+  name: string
+  description?: string
+  enabled: boolean
+  is_builtin?: boolean
+  trigger: ScheduleTrigger
+  task_template: ScheduleTaskTemplate
+  last_triggered_at?: string
+  next_trigger_at?: string
+  execution_count: number
+  last_task_id?: string
+  created_at: string
+  updated_at: string
 }

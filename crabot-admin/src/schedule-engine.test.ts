@@ -9,7 +9,6 @@ function makeSchedule(overrides: Partial<Schedule> = {}): Schedule {
     enabled: true,
     trigger: { type: 'interval', seconds: 10 },
     task_template: {
-      type: 'background',
       title: 'Test Task',
       priority: 'normal',
       tags: [],

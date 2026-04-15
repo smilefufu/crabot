@@ -61,6 +61,7 @@ import {
   type TaskMessage,
   type TaskPriority,
   type ScheduleTrigger,
+  type ScheduleTriggerType,
   type AdminEventPayloads,
   type ModelProvider,
   type CreateModelProviderParams,
@@ -232,6 +233,7 @@ export class AdminModule extends ModuleBase {
   private templatesFilePath: string = ''
   private pendingMessagesFilePath: string = ''
   private sessionConfigsFilePath: string = ''
+  private schedulesFilePath: string = ''
 
   constructor(
     moduleConfig: ModuleConfig,
@@ -398,6 +400,7 @@ export class AdminModule extends ModuleBase {
     this.templatesFilePath = path.join(this.adminConfig.data_dir, 'templates.json')
     this.pendingMessagesFilePath = path.join(this.adminConfig.data_dir, 'pending-messages.json')
     this.sessionConfigsFilePath = path.join(this.adminConfig.data_dir, 'session-configs.json')
+    this.schedulesFilePath = path.join(this.adminConfig.data_dir, 'schedules.json')
 
     // 加载数据
     await this.loadData()
@@ -467,6 +470,8 @@ export class AdminModule extends ModuleBase {
         console.warn('[Admin] Failed to resolve Agent port after retries:', error)
       })
     }, 2000)
+
+    await this.ensureBuiltinSchedules()
 
     // 启动调度引擎
     const allSchedules = Array.from(this.schedules.values())
@@ -1451,6 +1456,41 @@ export class AdminModule extends ModuleBase {
         return
       }
 
+      // Schedule 管理路由
+      if (pathname === '/api/schedules' && req.method === 'GET') {
+        await this.handleListSchedulesApi(req, res, url)
+        return
+      }
+
+      if (pathname === '/api/schedules' && req.method === 'POST') {
+        await this.handleCreateScheduleApi(req, res)
+        return
+      }
+
+      if (pathname.match(/^\/api\/schedules\/[^/]+\/trigger$/) && req.method === 'POST') {
+        const id = decodeURIComponent(pathname.split('/')[3])
+        await this.handleTriggerNowApi(req, res, id)
+        return
+      }
+
+      if (pathname.match(/^\/api\/schedules\/[^/]+$/) && req.method === 'GET') {
+        const id = decodeURIComponent(pathname.split('/')[3])
+        await this.handleGetScheduleApi(req, res, id)
+        return
+      }
+
+      if (pathname.match(/^\/api\/schedules\/[^/]+$/) && req.method === 'PATCH') {
+        const id = decodeURIComponent(pathname.split('/')[3])
+        await this.handleUpdateScheduleApi(req, res, id)
+        return
+      }
+
+      if (pathname.match(/^\/api\/schedules\/[^/]+$/) && req.method === 'DELETE') {
+        const id = decodeURIComponent(pathname.split('/')[3])
+        await this.handleDeleteScheduleApi(req, res, id)
+        return
+      }
+
       // 静态文件服务（Web UI）
       // dev 模式下前端由 Vite 提供，不 serve 静态文件（可能过期）
       if (!pathname.startsWith('/api/')) {
@@ -2349,6 +2389,17 @@ export class AdminModule extends ModuleBase {
     } catch {
       console.log('[Admin] No existing session configs data')
     }
+
+    try {
+      const schedulesData = await fs.readFile(this.schedulesFilePath, 'utf-8')
+      const schedulesArray = JSON.parse(schedulesData) as Schedule[]
+      for (const schedule of schedulesArray) {
+        this.schedules.set(schedule.id, schedule)
+      }
+      console.log(`[Admin] Loaded ${this.schedules.size} schedules`)
+    } catch {
+      console.log('[Admin] No existing schedules data')
+    }
   }
 
   /**
@@ -2374,6 +2425,9 @@ export class AdminModule extends ModuleBase {
       ([session_id, config]) => ({ session_id, config })
     )
     await this.atomicWriteFile(this.sessionConfigsFilePath, JSON.stringify(sessionConfigsArray, null, 2))
+
+    const schedulesArray = Array.from(this.schedules.values())
+    await this.atomicWriteFile(this.schedulesFilePath, JSON.stringify(schedulesArray, null, 2))
   }
 
   private async initSystemTemplates(): Promise<void> {
@@ -2389,7 +2443,6 @@ export class AdminModule extends ModuleBase {
     const now = generateTimestamp()
     const task: Task = {
       id: generateId(),
-      type: params.type,
       status: 'pending',
       priority: params.priority ?? 'normal',
       title: params.title,
@@ -2435,10 +2488,6 @@ export class AdminModule extends ModuleBase {
       if (filter.status) {
         const statuses = Array.isArray(filter.status) ? filter.status : [filter.status]
         tasks = tasks.filter((t) => statuses.includes(t.status))
-      }
-      if (filter.type) {
-        const types = Array.isArray(filter.type) ? filter.type : [filter.type]
-        tasks = tasks.filter((t) => types.includes(t.type))
       }
       if (filter.priority) {
         const priorities = Array.isArray(filter.priority) ? filter.priority : [filter.priority]
@@ -2690,12 +2739,6 @@ export class AdminModule extends ModuleBase {
         failed: 0,
         cancelled: 0,
       },
-      by_type: {
-        single: 0,
-        conversation: 0,
-        background: 0,
-        scheduled: 0,
-      },
       by_priority: {
         low: 0,
         normal: 0,
@@ -2706,7 +2749,6 @@ export class AdminModule extends ModuleBase {
 
     for (const task of tasks) {
       stats.by_status[task.status]++
-      stats.by_type[task.type]++
       stats.by_priority[task.priority]++
     }
 
@@ -2773,6 +2815,14 @@ export class AdminModule extends ModuleBase {
       }
     }
 
+    // 验证 once 触发时间
+    if (params.trigger.type === 'once') {
+      const ts = new Date(params.trigger.execute_at).getTime()
+      if (Number.isNaN(ts)) {
+        throw new Error(`Invalid execute_at: "${params.trigger.execute_at}" is not a valid ISO 8601 date`)
+      }
+    }
+
     const now = generateTimestamp()
     const schedule: Schedule = {
       id: generateId(),
@@ -2791,6 +2841,7 @@ export class AdminModule extends ModuleBase {
 
     this.schedules.set(schedule.id, schedule)
     this.scheduleEngine.add(schedule)
+    await this.saveData()
 
     // 发布事件
     this.publishAdminEvent('admin.schedule_created', { schedule })
@@ -2888,6 +2939,8 @@ export class AdminModule extends ModuleBase {
       this.scheduleEngine.update(schedule.id, schedule)
     }
 
+    await this.saveData()
+
     // 发布事件
     this.publishAdminEvent('admin.schedule_updated', { schedule })
 
@@ -2895,13 +2948,18 @@ export class AdminModule extends ModuleBase {
   }
 
   private async handleDeleteSchedule(params: DeleteScheduleParams): Promise<{ deleted: true }> {
-    const exists = this.schedules.has(params.schedule_id)
-    if (!exists) {
+    const schedule = this.schedules.get(params.schedule_id)
+    if (!schedule) {
       throw new Error(AdminErrorCode.SCHEDULE_NOT_FOUND)
+    }
+
+    if (schedule.is_builtin) {
+      throw new Error('Cannot delete builtin schedule. Use update to disable it instead.')
     }
 
     this.scheduleEngine.remove(params.schedule_id)
     this.schedules.delete(params.schedule_id)
+    await this.saveData()
 
     // 发布事件
     this.publishAdminEvent('admin.schedule_deleted', { schedule_id: params.schedule_id })
@@ -2959,14 +3017,13 @@ export class AdminModule extends ModuleBase {
       }
 
       result = await this.rpcClient.call<
-        { schedule_id: string; task_type: string; title: string; description: string },
+        { schedule_id: string; title: string; description: string },
         { task_id: string; assigned_worker: string }
       >(
         port,
         'create_task_from_schedule',
         {
           schedule_id: schedule.id,
-          task_type: schedule.task_template.type,
           title,
           description,
         },
@@ -2996,6 +3053,9 @@ export class AdminModule extends ModuleBase {
       this.schedules.set(schedule.id, disabled)
       this.scheduleEngine.disable(schedule.id)
     }
+
+    // 持久化状态变更（fire-and-forget，不阻塞触发链路）
+    this.saveData().catch(() => {})
 
     // 发布事件
     this.publishAdminEvent('admin.schedule_triggered', { schedule: updated, task_id: result.task_id })
@@ -3050,6 +3110,147 @@ export class AdminModule extends ModuleBase {
       }
       default:
         return undefined
+    }
+  }
+
+  /** 确保内置 Schedule 存在。首次启动时创建，后续启动跳过。 */
+  private async ensureBuiltinSchedules(): Promise<void> {
+    const BUILTIN_SCHEDULE_NAME = '每日反思'
+    const exists = Array.from(this.schedules.values()).some(s => s.is_builtin && s.name === BUILTIN_SCHEDULE_NAME)
+    if (exists) return
+
+    const now = generateTimestamp()
+    const schedule: Schedule = {
+      id: generateId(),
+      name: BUILTIN_SCHEDULE_NAME,
+      description: '每天凌晨 2 点自动执行反思，分析前一天任务执行情况，提炼经验写入长期记忆。',
+      enabled: true,
+      is_builtin: true,
+      trigger: {
+        type: 'cron',
+        expression: '0 2 * * *',
+        timezone: 'Asia/Shanghai',
+      },
+      task_template: {
+        title: '每日反思 — {{date}}',
+        description: '执行每日反思。标准流程：1）获取今日任务概览；2）筛选值得深入分析的任务（失败的、轮数异常多的、人类情绪明显的）；3）查 trace 和对话历史深入分析选中任务；4）提炼经验写入长期记忆（L0 面向召回场景写，L1 结构化描述，L2 完整分析）；5）重大发现向 master 汇报。',
+        priority: 'low',
+        tags: ['daily_reflection', 'builtin'],
+      },
+      execution_count: 0,
+      next_trigger_at: this.calculateNextTriggerTime({ type: 'cron', expression: '0 2 * * *', timezone: 'Asia/Shanghai' }),
+      created_at: now,
+      updated_at: now,
+    }
+
+    this.schedules.set(schedule.id, schedule)
+    await this.saveData()
+    console.log(`[Admin] Created builtin schedule: ${BUILTIN_SCHEDULE_NAME}`)
+  }
+
+  // ============================================================================
+  // Schedule REST API
+  // ============================================================================
+
+  private async handleListSchedulesApi(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    url: URL
+  ): Promise<void> {
+    const params: ListSchedulesParams = {
+      page: parseInt(url.searchParams.get('page') ?? '1', 10),
+      page_size: parseInt(url.searchParams.get('page_size') ?? '50', 10),
+      filter: {},
+    }
+    const enabled = url.searchParams.get('enabled')
+    if (enabled !== null) params.filter!.enabled = enabled === 'true'
+    const triggerType = url.searchParams.get('trigger_type')
+    if (triggerType) params.filter!.trigger_type = triggerType as ScheduleTriggerType
+    const search = url.searchParams.get('search')
+    if (search) params.filter!.search = search
+
+    const result = await this.handleListSchedules(params)
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(result))
+  }
+
+  private async handleCreateScheduleApi(
+    req: IncomingMessage,
+    res: ServerResponse
+  ): Promise<void> {
+    try {
+      const params = await this.readJsonBody<CreateScheduleParams>(req)
+      const result = await this.handleCreateSchedule(params)
+      res.writeHead(201, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(result))
+    } catch (err) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'create failed' }))
+    }
+  }
+
+  private async handleGetScheduleApi(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    id: string
+  ): Promise<void> {
+    try {
+      const result = await this.handleGetSchedule({ schedule_id: id })
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(result))
+    } catch (err) {
+      const status = err instanceof Error && err.message.includes('NOT_FOUND') ? 404 : 400
+      res.writeHead(status, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'get failed' }))
+    }
+  }
+
+  private async handleUpdateScheduleApi(
+    req: IncomingMessage,
+    res: ServerResponse,
+    id: string
+  ): Promise<void> {
+    try {
+      const body = await this.readJsonBody<Omit<UpdateScheduleParams, 'schedule_id'>>(req)
+      const result = await this.handleUpdateSchedule({ ...body, schedule_id: id })
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(result))
+    } catch (err) {
+      const status = err instanceof Error && err.message.includes('NOT_FOUND') ? 404 : 400
+      res.writeHead(status, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'update failed' }))
+    }
+  }
+
+  private async handleDeleteScheduleApi(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    id: string
+  ): Promise<void> {
+    try {
+      await this.handleDeleteSchedule({ schedule_id: id })
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ deleted: true }))
+    } catch (err) {
+      const status = err instanceof Error && err.message.includes('NOT_FOUND') ? 404 : 400
+      res.writeHead(status, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'delete failed' }))
+    }
+  }
+
+  private async handleTriggerNowApi(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    id: string
+  ): Promise<void> {
+    try {
+      const result = await this.handleTriggerNow({ schedule_id: id })
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(result))
+    } catch (err) {
+      const status = err instanceof Error && err.message.includes('NOT_FOUND') ? 404 : 500
+      res.writeHead(status, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'trigger failed' }))
     }
   }
 

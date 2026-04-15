@@ -20,6 +20,7 @@ import { PermissionTemplateList } from './pages/Permissions/PermissionTemplateLi
 import { SkillList } from './pages/Skills/SkillList'
 import { SessionList } from './pages/Sessions/SessionList'
 import { Traces } from './pages/Traces'
+import { ScheduleList } from './pages/Schedules/ScheduleList'
 import './App.css'
 
 const PrivateRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -164,6 +165,14 @@ const AppRoutes: React.FC = () => {
         element={
           <PrivateRoute>
             <SessionList />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/schedules"
+        element={
+          <PrivateRoute>
+            <ScheduleList />
           </PrivateRoute>
         }
       />

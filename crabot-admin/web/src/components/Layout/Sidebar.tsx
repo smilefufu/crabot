@@ -34,7 +34,7 @@ const navSections: NavSection[] = [
     items: [
       { to: '/modules', label: '模块管理', match: '/modules' },
       { to: '/channels/config', label: 'Channel 配置', match: '/channels' },
-
+      { to: '/schedules', label: '计划任务', match: '/schedules' },
     ],
   },
   {

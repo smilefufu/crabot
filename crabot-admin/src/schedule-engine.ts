@@ -85,7 +85,12 @@ export class ScheduleEngine {
         break
       }
       case 'once': {
-        const delay = Math.max(0, new Date(trigger.execute_at).getTime() - Date.now())
+        const executeTime = new Date(trigger.execute_at).getTime()
+        if (Number.isNaN(executeTime)) {
+          console.error(`[ScheduleEngine] Invalid execute_at for schedule ${schedule.id}: "${trigger.execute_at}", skipping`)
+          break
+        }
+        const delay = Math.max(0, executeTime - Date.now())
         const id = setTimeout(() => {
           this.fireTrigger(schedule)
         }, delay)
