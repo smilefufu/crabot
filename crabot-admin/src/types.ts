@@ -579,6 +579,8 @@ export interface Schedule {
   created_at: string
   /** 更新时间 */
   updated_at: string
+  /** 反思水位 — 上次成功覆盖到的时间点（ISO 8601），完成时推进 */
+  watermark?: string
 }
 
 // ============================================================================

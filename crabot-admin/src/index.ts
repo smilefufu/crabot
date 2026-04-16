@@ -3014,6 +3014,7 @@ export class AdminModule extends ModuleBase {
         .replace(/\{\{time\}\}/g, now.toTimeString().slice(0, 8))
         .replace(/\{\{datetime\}\}/g, now.toISOString())
         .replace(/\{\{schedule_name\}\}/g, schedule.name)
+        .replace(/\{\{watermark\}\}/g, schedule.watermark ?? schedule.created_at)
 
     const title = replaceVars(schedule.task_template.title)
     const description = replaceVars(schedule.task_template.description ?? '')
