@@ -1,0 +1,69 @@
+# Crabot Unified Agent Module
+# 合并 Flow + Agent 的统一智能体模块
+
+module_id: crabot-agent
+name: Crabot Unified Agent
+version: 0.2.0
+module_type: agent
+description: Unified Agent with orchestration and intelligence capabilities
+protocol_version: "0.2.0"
+
+# 运行时配置
+runtime:
+  type: nodejs
+  version: ">=20.0.0"
+
+# 启动配置
+entry: dist/main.js
+install: npm install
+build: npm run build
+
+# 事件订阅 (原 Flow 的订阅)
+subscriptions:
+  - channel.message_received
+  - admin.task_status_changed
+  - module_manager.module_stopped
+  - admin.friend_updated
+  - admin.friend_deleted
+
+# Agent 特性 (支持多角色)
+agent:
+  engine: unified
+  supported_roles: [front, worker, both]
+  model_format: anthropic
+  model_roles:
+    - key: default
+      description: 默认执行模型，Front 和 Worker 默认使用
+      required: true
+      used_by: [front, worker]
+      recommended_capabilities: [tool_use, long_context]
+    - key: fast
+      description: 快速响应模型，用于 Front Agent 快速分诊（可选）
+      required: false
+      used_by: [front]
+      recommended_capabilities: [tool_use, fast]
+    - key: smart
+      description: 深度推理模型，用于 Worker Agent 复杂任务（可选）
+      required: false
+      used_by: [worker]
+      recommended_capabilities: [reasoning, long_context]
+
+# 编排特性 (原 Flow)
+orchestration:
+  features:
+    - message_routing
+    - permission_checking
+    - context_assembly
+    - switchmap_merging
+    - worker_selection
+    - decision_dispatching
+
+# 元数据
+author: Crabot Team
+license: MIT
+keywords:
+  - crabot
+  - agent
+  - orchestration
+  - ai
+  - claude

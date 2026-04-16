@@ -1,0 +1,115 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+          - os: macos-14
+            platform: darwin
+            arch: arm64
+          - os: windows-latest
+            platform: windows
+            arch: x64
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: |
+          npm install
+          cd crabot-shared && npm install && cd ..
+          cd crabot-admin && npm install && cd ..
+          cd crabot-core && npm install && cd ..
+          cd crabot-agent && npm install && cd ..
+
+      - name: Build
+        run: |
+          cd crabot-shared && npm run build && cd ..
+          cd crabot-admin && npm run build && npm run build:web && cd ..
+          cd crabot-core && npm run build && cd ..
+          cd crabot-agent && npm run build && cd ..
+          npm run build:cli
+
+      - name: Package (Unix)
+        if: matrix.platform != 'windows'
+        run: |
+          VERSION=${GITHUB_REF_NAME}
+          DIRNAME="crabot-${VERSION}-${{ matrix.platform }}-${{ matrix.arch }}"
+          mkdir -p "/tmp/${DIRNAME}"
+
+          # 复制运行时文件
+          cp cli.mjs crabot.cmd package.json install.sh install.ps1 "/tmp/${DIRNAME}/"
+          cp -r dist scripts node_modules "/tmp/${DIRNAME}/"
+
+          # 复制各模块（排除顶层 src、test、.git）
+          for mod in crabot-shared crabot-admin crabot-core crabot-agent \
+                     crabot-channel-host crabot-channel-telegram crabot-channel-wechat \
+                     crabot-memory crabot-mcp-tools; do
+            if [ -d "$mod" ]; then
+              rsync -a --exclude='/src/' --exclude='/test*/' --exclude='.git/' \
+                    --exclude='node_modules/.cache/' --exclude='.venv/' \
+                    --exclude='.env' "$mod/" "/tmp/${DIRNAME}/$mod/"
+            fi
+          done
+
+          # 打包
+          cd /tmp
+          tar -czf "${DIRNAME}.tar.gz" "${DIRNAME}"
+          shasum -a 256 "${DIRNAME}.tar.gz" > "${DIRNAME}.tar.gz.sha256"
+
+          # 移回 workspace
+          mv "${DIRNAME}.tar.gz" "${DIRNAME}.tar.gz.sha256" "$GITHUB_WORKSPACE/"
+
+      - name: Package (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $Version = $env:GITHUB_REF_NAME
+          $DirName = "crabot-${Version}-windows-x64"
+          $TempDir = "$env:TEMP\$DirName"
+          New-Item -ItemType Directory -Force -Path $TempDir
+
+          Copy-Item cli.mjs, crabot.cmd, package.json, install.sh, install.ps1 $TempDir
+          Copy-Item -Recurse dist, scripts, node_modules $TempDir
+
+          $modules = @('crabot-shared','crabot-admin','crabot-core','crabot-agent',
+                       'crabot-channel-host','crabot-channel-telegram','crabot-channel-wechat',
+                       'crabot-memory','crabot-mcp-tools')
+          foreach ($mod in $modules) {
+            if (Test-Path $mod) {
+              $dest = Join-Path $TempDir $mod
+              Copy-Item -Recurse $mod $dest
+              # 清理不需要的目录
+              Remove-Item -Recurse -Force "$dest\src" -ErrorAction SilentlyContinue
+              Remove-Item -Recurse -Force "$dest\test*" -ErrorAction SilentlyContinue
+              Remove-Item -Recurse -Force "$dest\.venv" -ErrorAction SilentlyContinue
+            }
+          }
+
+          Compress-Archive -Path $TempDir -DestinationPath "$DirName.zip"
+          (Get-FileHash "$DirName.zip" -Algorithm SHA256).Hash | Out-File "$DirName.zip.sha256"
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            crabot-*.tar.gz
+            crabot-*.tar.gz.sha256
+            crabot-*.zip
+            crabot-*.zip.sha256

@@ -1,0 +1,118 @@
+# Crabot Unified Agent 运行时配置
+# 合并了 Flow 编排配置和 Agent 智能体配置
+
+# 模块基础配置
+module_id: crabot-agent
+module_type: agent
+version: 0.2.0
+protocol_version: 0.2.0
+port: 19300
+
+# 编排层配置
+orchestration:
+  # Admin 共享存储路径（用于直接访问 Friend 数据）
+  admin_config_path: ../crabot-admin/data/admin.db
+
+  # Session 状态 TTL (秒)
+  session_state_ttl: 300
+
+  # Front Agent 超时 (秒)
+  front_agent_timeout: 30
+
+  # Front 上下文 - 最近消息数量限制
+  front_context_recent_messages_limit: 20
+
+  # Front 上下文 - 短期记忆数量限制
+  front_context_memory_limit: 10
+
+  # Worker - 最近消息数量限制
+  worker_recent_messages_limit: 50
+
+  # Worker - 短期记忆数量限制
+  worker_short_term_memory_limit: 20
+
+  # Worker - 长期记忆数量限制
+  worker_long_term_memory_limit: 30
+
+  # Front Agent 队列最大长度
+  front_agent_queue_max_length: 100
+
+  # Front Agent 队列超时 (秒)
+  front_agent_queue_timeout: 60
+
+  # Worker 配置刷新间隔 (秒)
+  worker_config_refresh_interval: 60
+
+# 智能体层配置（混合模式：Front + Worker）
+agent_config:
+  # 实例 ID
+  instance_id: main-agent
+
+  # 支持的角色: front, worker, 或两者
+  roles:
+    - front
+    - worker
+
+  # 系统提示词（统一提示词，Front 和 Worker 共用）
+  system_prompt: |
+    你是 Crabot，一个 AI 员工助手。
+
+    你的职责：
+    - 理解用户意图并做出合适的决策
+    - 执行复杂任务并提供高质量的结果
+    - 与用户保持友好、专业的交流
+
+    决策原则：
+    - 简单问题直接回复
+    - 复杂任务创建 Task 并分配给 Worker
+    - 需要深度处理的任务转发给专门的 Worker
+
+  # 模型配置（支持多个 LLM，按 model_roles 声明配置）
+  # default: 默认执行模型（必需）- Front 和 Worker 默认使用
+  # fast: 快速响应模型（可选）- 如果配置则 Front 优先使用
+  # smart: 深度推理模型（可选）- 如果配置则 Worker 优先使用
+  model_config:
+    default:
+      endpoint: http://localhost:4000
+      apikey: ${LITELLM_MASTER_KEY}
+      model_id: qwen3.5:cloud
+      format: anthropic
+      max_tokens: 4096
+    # fast:  # 可选，配置后 Front Agent 使用
+    #   endpoint: https://api.anthropic.com
+    #   apikey: ${ANTHROPIC_API_KEY}
+    #   model_id: claude-haiku-3-5-20241022
+    #   format: anthropic
+    #   max_tokens: 4096
+    # smart:  # 可选，配置后 Worker Agent 使用
+    #   endpoint: https://api.anthropic.com
+    #   apikey: ${ANTHROPIC_API_KEY}
+    #   model_id: claude-opus-4-20250514
+    #   format: anthropic
+    #   max_tokens: 8192
+
+  # 最大迭代次数
+  max_iterations: 20
+
+  # 最大并发任务数（Worker 角色）
+  max_concurrent_tasks: 5
+
+  # 可用容量（Worker 角色）
+  available_capacity: 5
+
+  # 专长描述（Worker 角色）
+  specialization: general
+
+  # 支持的任务类型（Worker 角色）
+  supported_task_types:
+    - general_qa
+    - code_generation
+    - data_analysis
+    - text_processing
+    - task_planning
+
+  # MCP 服务器配置（可选）
+  mcp_servers: []
+
+  # Skills 配置（可选）
+  skills: []

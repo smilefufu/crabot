@@ -1,0 +1,32 @@
+module_id: channel-host
+name: OpenClaw Channel Host
+version: 0.1.0
+module_type: channel
+description: OpenClaw 插件兼容层，加载 OpenClaw 生态的 IM 插件运行
+
+protocol_version: "0.1.0"
+
+runtime:
+  type: nodejs
+  version: ">=20.0.0"
+
+install: npm install
+build: npm run build
+entry: dist/main.js
+
+config_schema:
+  type: object
+  required:
+    - OPENCLAW_STATE_DIR
+  properties:
+    OPENCLAW_STATE_DIR:
+      type: string
+      title: 插件目录（state_dir）
+      description: OpenClaw 插件安装目录，包含 openclaw.json 和 extensions/
+
+author: Crabot Team
+license: MIT
+keywords:
+  - openclaw
+  - channel
+  - shim

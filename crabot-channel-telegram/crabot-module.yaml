@@ -1,0 +1,48 @@
+module_id: channel-telegram
+name: Telegram Bot
+version: 0.1.0
+module_type: channel
+description: Telegram Channel 模块，通过 Bot API 接入 Telegram
+
+protocol_version: "0.1.0"
+
+runtime:
+  type: nodejs
+  version: ">=20.0.0"
+
+install: npm install
+build: npm run build
+entry: dist/main.js
+
+config_schema:
+  type: object
+  required:
+    - TELEGRAM_BOT_TOKEN
+  properties:
+    TELEGRAM_BOT_TOKEN:
+      type: string
+      title: Bot Token
+      description: 从 @BotFather 获取的 Bot Token
+      format: password
+    TELEGRAM_MODE:
+      type: string
+      title: 消息接收模式
+      enum: ["polling", "webhook"]
+      default: "polling"
+    TELEGRAM_WEBHOOK_URL:
+      type: string
+      title: Webhook URL
+      description: webhook 模式下的公网回调地址（如 https://example.com/telegram/webhook）
+      format: uri
+    TELEGRAM_WEBHOOK_SECRET:
+      type: string
+      title: Webhook Secret
+      description: webhook 模式下的签名验证密钥（可选，推荐设置）
+      format: password
+
+author: Crabot Team
+license: MIT
+keywords:
+  - telegram
+  - channel
+  - messaging

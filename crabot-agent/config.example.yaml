@@ -1,0 +1,100 @@
+# Crabot Unified Agent 配置示例
+# 合并了 Flow 编排配置和 Agent 智能体配置
+
+# 模块基础配置
+module_id: crabot-agent
+module_type: agent
+
+# 编排层配置 (原 Flow 配置)
+orchestration:
+  # 会话状态 TTL (秒)
+  session_state_ttl: 300
+  # Front Agent 超时 (秒)
+  front_agent_timeout: 30
+  # Front 上下文 - 最近消息数量限制
+  front_context_recent_messages_limit: 20
+  # Front 上下文 - 短期记忆数量限制
+  front_context_memory_limit: 10
+  # Worker - 最近消息数量限制
+  worker_recent_messages_limit: 50
+  # Worker - 短期记忆数量限制
+  worker_short_term_memory_limit: 30
+  # Worker - 长期记忆数量限制
+  worker_long_term_memory_limit: 10
+  # Front Agent 队列最大长度
+  front_agent_queue_max_length: 10
+  # Front Agent 队列超时 (秒)
+  front_agent_queue_timeout: 60
+  # Worker 配置刷新间隔 (秒)
+  worker_config_refresh_interval: 30
+
+# 智能体层配置 (原 Agent 配置)
+agent_config:
+  # 实例 ID
+  instance_id: unified-agent
+  # 支持的角色: front, worker, 或两者
+  roles: [front, worker]
+
+  # Front Agent 配置
+  front:
+    system_prompt: |
+      You are Crabot's front agent. Your job is to:
+      1. Quickly understand user intent
+      2. Answer simple questions directly
+      3. Route complex requests to appropriate workers
+
+      Always respond with a decision in the following format:
+      <decision>{"type":"direct_reply","reply":{"type":"text","text":"Your response"}}</decision>
+    max_iterations: 3
+    tools_readonly: true
+
+  # Worker Agent 配置
+  worker:
+    system_prompt: |
+      You are Crabot's worker agent. Your job is to:
+      1. Execute complex tasks thoroughly
+      2. Use available tools effectively
+      3. Report progress and results clearly
+    max_iterations: 50
+    specialization: general
+    supported_task_types:
+      - user_request
+      - system_maintenance
+
+  # 模型配置 (按 model_roles 声明配置)
+  # default: 默认执行模型（必需）
+  # fast: 快速任务模型（可选）
+  # thinking: 深度推理模型（可选）
+  model_config:
+    default:
+      endpoint: "https://api.anthropic.com/v1/messages"
+      model_id: "claude-sonnet-4"
+      format: "anthropic"
+      apikey: "YOUR_API_KEY_HERE"
+      max_tokens: 4096
+    fast:
+      endpoint: "https://api.anthropic.com/v1/messages"
+      model_id: "claude-haiku-3.5"
+      format: "anthropic"
+      apikey: "YOUR_API_KEY_HERE"
+      max_tokens: 4096
+    thinking:
+      endpoint: "https://api.anthropic.com/v1/messages"
+      model_id: "claude-sonnet-4"
+      format: "anthropic"
+      apikey: "YOUR_API_KEY_HERE"
+      max_tokens: 8192
+
+  # MCP Servers (可选)
+  mcp_servers: []
+
+  # Skills (可选)
+  skills: []
+
+# 扩展配置（非协议固定字段，crabot-agent 专用）
+# @see protocol-agent-v2.md §5.2, §6
+extra:
+  # 群聊最小巡检间隔（ms），Agent 回复后重置到此值
+  group_attention_min_ms: 5000
+  # 群聊最大巡检间隔（ms），约 5 分钟
+  group_attention_max_ms: 300000

@@ -1,0 +1,46 @@
+# Runtime data
+data/
+
+# Environment (contains secrets)
+.env
+.env.local
+
+# crabot-docs is a separate repo, cloned here for dev convenience
+crabot-docs/
+
+# Node.js
+node_modules/
+dist/
+*.log
+npm-debug.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test
+coverage/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Claude Code (local settings, not project config)
+.claude/
+
+docs/superpowers/
+.superpowers/

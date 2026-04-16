@@ -1,0 +1,236 @@
+#!/bin/bash
+set -e
+
+# Crabot 安装脚本
+# 用法:
+#   远程安装: curl -fsSL <url>/install.sh | bash
+#   源码安装: ./install.sh --from-source
+
+CRABOT_VERSION="${CRABOT_VERSION:-latest}"
+INSTALL_DIR="${CRABOT_INSTALL_DIR:-$HOME/.crabot}"
+REQUIRED_NODE_VERSION="22.14.0"
+FROM_SOURCE=false
+
+# 解析参数
+for arg in "$@"; do
+  case "$arg" in
+    --from-source) FROM_SOURCE=true ;;
+    --version=*) CRABOT_VERSION="${arg#*=}" ;;
+    --install-dir=*) INSTALL_DIR="${arg#*=}" ;;
+  esac
+done
+
+# --- 颜色 ---
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+info()    { echo -e "${GREEN}[crabot]${NC} $1"; }
+warn()    { echo -e "${YELLOW}[crabot]${NC} $1"; }
+error()   { echo -e "${RED}[crabot]${NC} $1"; }
+section() { echo -e "\n${BOLD}${CYAN}── $1 ──${NC}\n"; }
+
+# --- OS 检测 ---
+detect_platform() {
+  local os arch
+  case "$(uname -s)" in
+    Darwin) os="darwin" ;;
+    Linux)  os="linux" ;;
+    MINGW*|MSYS*|CYGWIN*) os="windows" ;;
+    *) error "Unsupported OS: $(uname -s)"; exit 1 ;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64) arch="x64" ;;
+    arm64|aarch64) arch="arm64" ;;
+    *) error "Unsupported architecture: $(uname -m)"; exit 1 ;;
+  esac
+  echo "${os}-${arch}"
+}
+
+# --- Node.js 检查/安装 ---
+ensure_node() {
+  if command -v node &>/dev/null; then
+    local current
+    current=$(node -v | tr -d 'v')
+    if version_ge "$current" "$REQUIRED_NODE_VERSION"; then
+      info "Node.js $current found (>= $REQUIRED_NODE_VERSION)"
+      return
+    fi
+    warn "Node.js $current found, but >= $REQUIRED_NODE_VERSION required"
+  fi
+
+  section "Installing Node.js"
+  if command -v nvm &>/dev/null; then
+    nvm install 22
+    nvm use 22
+  elif command -v brew &>/dev/null; then
+    brew install node@22
+  else
+    # 使用 NodeSource 安装脚本
+    curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+    sudo apt-get install -y nodejs
+  fi
+  info "Node.js $(node -v) installed"
+}
+
+# --- uv 检查/安装 ---
+ensure_uv() {
+  if command -v uv &>/dev/null; then
+    info "uv $(uv --version) found"
+    return
+  fi
+  section "Installing uv"
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  export PATH="$HOME/.local/bin:$PATH"
+  info "uv $(uv --version) installed"
+}
+
+# --- 版本比较 ---
+version_ge() {
+  local IFS=.
+  local i ver1=($1) ver2=($2)
+  for ((i=0; i<${#ver2[@]}; i++)); do
+    if ((10#${ver1[i]:-0} > 10#${ver2[i]:-0})); then return 0; fi
+    if ((10#${ver1[i]:-0} < 10#${ver2[i]:-0})); then return 1; fi
+  done
+  return 0
+}
+
+# --- 主流程 ---
+main() {
+  section "Crabot Installer"
+  local platform
+  platform=$(detect_platform)
+  info "Platform: $platform"
+
+  ensure_node
+  ensure_uv
+
+  if [ "$FROM_SOURCE" = true ]; then
+    section "Source Install"
+    info "Installing npm dependencies..."
+    npm install
+    info "Building all modules..."
+    npm run build 2>/dev/null || {
+      # 尝试各模块单独构建
+      for dir in crabot-shared crabot-admin crabot-core crabot-agent; do
+        (cd "$dir" && npm install && npm run build)
+      done
+      npm run build:cli
+    }
+    info "Setting up Python environment..."
+    (cd crabot-memory && uv sync)
+    info "Source install complete."
+  else
+    section "Release Install"
+    # 获取版本
+    local version="$CRABOT_VERSION"
+    if [ "$version" = "latest" ]; then
+      version=$(curl -sL "https://github.com/smilefufu/crabot/releases.atom" \
+        | grep -o '<title>[^<]*</title>' | sed -n '2s/<[^>]*>//gp' | tr -d '[:space:]')
+      if [ -z "$version" ]; then
+        error "Failed to fetch latest version from GitHub. Set CRABOT_VERSION manually."
+        exit 1
+      fi
+      info "Latest version: $version"
+    fi
+
+    # 下载
+    local filename="crabot-${version}-${platform}.tar.gz"
+    local url="https://github.com/smilefufu/crabot/releases/download/${version}/${filename}"
+    info "Downloading $filename..."
+    mkdir -p "$INSTALL_DIR"
+    curl -fsSL "$url" -o "/tmp/$filename"
+
+    # Checksum 校验
+    local checksum_url="${url}.sha256"
+    if curl -fsSL "$checksum_url" -o "/tmp/${filename}.sha256" 2>/dev/null; then
+      info "Verifying checksum..."
+      (cd /tmp && sha256sum -c "${filename}.sha256") || {
+        error "Checksum verification failed!"
+        exit 1
+      }
+    fi
+
+    # 解压
+    info "Extracting to $INSTALL_DIR..."
+    tar -xzf "/tmp/$filename" -C "$INSTALL_DIR" --strip-components=1
+    rm -f "/tmp/$filename" "/tmp/${filename}.sha256"
+
+    # Python 依赖
+    info "Setting up Python environment..."
+    (cd "$INSTALL_DIR/crabot-memory" && uv sync)
+  fi
+
+  # PATH 设置
+  section "Setting up PATH"
+  local bin_dir="$HOME/.local/bin"
+  mkdir -p "$bin_dir"
+
+  local crabot_path
+  if [ "$FROM_SOURCE" = true ]; then
+    crabot_path="$(pwd)/cli.mjs"
+  else
+    crabot_path="$INSTALL_DIR/cli.mjs"
+  fi
+  ln -sf "$crabot_path" "$bin_dir/crabot"
+  chmod +x "$crabot_path"
+
+  # 检查 PATH
+  if ! echo "$PATH" | grep -q "$bin_dir"; then
+    local shell_rc
+    case "$SHELL" in
+      */zsh)  shell_rc="$HOME/.zshrc" ;;
+      */bash) shell_rc="$HOME/.bashrc" ;;
+      *)      shell_rc="$HOME/.profile" ;;
+    esac
+    echo "export PATH=\"$bin_dir:\$PATH\"" >> "$shell_rc"
+    warn "Added $bin_dir to PATH in $shell_rc. Restart your shell or run:"
+    echo "  export PATH=\"$bin_dir:\$PATH\""
+  fi
+
+  # 设置管理密码
+  section "Admin Password"
+  local data_dir
+  if [ "$FROM_SOURCE" = true ]; then
+    data_dir="$(pwd)/data"
+  else
+    data_dir="$INSTALL_DIR/data"
+  fi
+  mkdir -p "$data_dir/admin"
+
+  local admin_env="$data_dir/admin/.env"
+  if [ ! -f "$admin_env" ] || ! grep -q CRABOT_ADMIN_PASSWORD "$admin_env" 2>/dev/null; then
+    local password="" confirm=""
+    while true; do
+      printf "%s" "Set admin password: " >/dev/tty
+      read -rs password </dev/tty
+      echo >/dev/tty
+      if [ ${#password} -lt 4 ]; then
+        warn "Password must be at least 4 characters."
+        continue
+      fi
+      printf "%s" "Confirm password: " >/dev/tty
+      read -rs confirm </dev/tty
+      echo >/dev/tty
+      if [ "$password" != "$confirm" ]; then
+        warn "Passwords do not match. Try again."
+        continue
+      fi
+      break
+    done
+    echo "CRABOT_ADMIN_PASSWORD=$password" >> "$admin_env"
+    info "Password saved."
+  else
+    info "Admin password already configured."
+  fi
+
+  section "Done!"
+  info "Run 'crabot start' to start Crabot."
+  info "Run 'crabot --help' for all commands."
+}
+
+main "$@"

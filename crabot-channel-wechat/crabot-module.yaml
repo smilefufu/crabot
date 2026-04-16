@@ -1,0 +1,55 @@
+module_id: channel-wechat
+name: WeChat (via wechat-connector)
+version: 0.1.0
+module_type: channel
+description: 微信 Channel 模块，通过 wechat-connector 的 Bot API 接入微信
+
+protocol_version: "0.1.0"
+
+runtime:
+  type: nodejs
+  version: ">=20.0.0"
+
+install: npm install
+build: npm run build
+entry: dist/main.js
+
+config_schema:
+  type: object
+  required:
+    - WECHAT_CONNECTOR_URL
+    - WECHAT_API_KEY
+  properties:
+    WECHAT_CONNECTOR_URL:
+      type: string
+      title: wechat-connector 地址
+      description: 服务器地址（如 http://host:8080），从 Puppet 详情页复制
+      format: uri
+      default: "http://localhost:3001"
+    WECHAT_API_KEY:
+      type: string
+      title: Bot API Key
+      description: wechat-connector 分配的 Bot API Key（wct_ 前缀）
+      format: password
+    WECHAT_MODE:
+      type: string
+      title: 推送模式
+      description: 消息接收方式
+      enum: ["socketio", "webhook"]
+      default: "socketio"
+    WECHAT_WEBHOOK_SECRET:
+      type: string
+      title: Webhook 签名密钥
+      description: webhook 模式下的签名验证密钥
+      format: password
+    WECHAT_WEBHOOK_PORT:
+      type: number
+      title: Webhook 监听端口
+      description: webhook 模式下的 HTTP 监听端口
+
+author: Crabot Team
+license: MIT
+keywords:
+  - wechat
+  - channel
+  - messaging

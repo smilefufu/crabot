@@ -1,0 +1,44 @@
+{
+  "name": "crabot-agent",
+  "version": "0.2.0",
+  "description": "Crabot Unified Agent Module - Orchestration + Intelligence",
+  "main": "dist/main.js",
+  "types": "dist/main.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "dev": "ts-node src/main.ts",
+    "test": "vitest",
+    "test:coverage": "vitest --coverage"
+  },
+  "keywords": [
+    "crabot",
+    "agent",
+    "orchestration",
+    "ai",
+    "claude"
+  ],
+  "author": "Crabot Team",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "crabot-shared": "file:../crabot-shared",
+    "@anthropic-ai/sdk": "^0.30.1",
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "fast-glob": "^3.3.3",
+    "js-yaml": "^4.1.1",
+    "jsonrepair": "^3.13.3",
+    "vscode-jsonrpc": "^8.2.1",
+    "vscode-languageserver-protocol": "^3.17.5"
+  },
+  "optionalDependencies": {
+    "sharp": "^0.34.5"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^20.19.37",
+    "@vitest/coverage-v8": "^1.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.0.0",
+    "vitest": "^1.0.0"
+  }
+}
