@@ -30,7 +30,7 @@ export interface RunEngineParams {
 }
 
 const DEFAULT_MAX_TURNS = 200
-const DEFAULT_MAX_CONTEXT_TOKENS = 100_000
+const DEFAULT_MAX_CONTEXT_TOKENS = 200_000
 
 // --- Core Loop ---
 
