@@ -2628,6 +2628,23 @@ export class AdminModule extends ModuleBase {
 
     this.tasks.set(task.id, task)
 
+    // 任务完成时推进关联 Schedule 的 watermark
+    if (params.status === 'completed') {
+      const scheduleId = (task.input as Record<string, unknown> | undefined)?.schedule_id
+      if (typeof scheduleId === 'string') {
+        const schedule = this.schedules.get(scheduleId)
+        if (schedule) {
+          const updated: Schedule = {
+            ...schedule,
+            watermark: task.completed_at ?? task.updated_at,
+            updated_at: task.updated_at,
+          }
+          this.schedules.set(scheduleId, updated)
+          this.saveData().catch(() => {})
+        }
+      }
+    }
+
     // 发布事件
     this.publishAdminEvent('admin.task_status_changed', {
       task_id: task.id,
