@@ -34,6 +34,7 @@ interface AdminTask {
   description?: string
   priority: string
   plan?: string
+  task_type?: string
 }
 
 export class DecisionDispatcher {
@@ -312,6 +313,7 @@ export class DecisionDispatcher {
             task_description: task.description ?? '',
             priority: task.priority,
             plan: task.plan,
+            task_type: task.task_type,
           },
           context: workerContext,
         }
@@ -436,6 +438,7 @@ export class DecisionDispatcher {
             task_description: task.description ?? '',
             priority: task.priority,
             plan: task.plan,
+            task_type: task.task_type,
           },
           context: workerContext,
         }

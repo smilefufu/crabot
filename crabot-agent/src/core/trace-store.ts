@@ -36,6 +36,7 @@ export interface TraceIndexEntry {
   parent_trace_id?: string
   trigger_type: string
   trigger_summary: string
+  trigger_task_type?: string
   started_at: string
   ended_at?: string
   status: 'running' | 'completed' | 'failed'
@@ -458,6 +459,7 @@ export class TraceStore {
       parent_trace_id: trace.parent_trace_id,
       trigger_type: trace.trigger.type,
       trigger_summary: trace.trigger.summary,
+      trigger_task_type: trace.trigger.task_type,
       started_at: trace.started_at,
       ended_at: trace.ended_at,
       status: trace.status,

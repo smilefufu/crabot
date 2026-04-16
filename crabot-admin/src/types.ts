@@ -539,6 +539,8 @@ export type ScheduleTrigger = CronTrigger | IntervalTrigger | OnceTrigger
 
 /** 调度任务模板 */
 export interface ScheduleTaskTemplate {
+  /** 任务类型，如 'daily_reflection'（用于 trace 过滤） */
+  type?: string
   /** 任务标题模板 */
   title: string
   /** 任务描述模板 */

@@ -3046,13 +3046,14 @@ export class AdminModule extends ModuleBase {
       }
 
       result = await this.rpcClient.call<
-        { schedule_id: string; title: string; description: string },
+        { schedule_id: string; task_type?: string; title: string; description: string },
         { task_id: string; assigned_worker: string }
       >(
         port,
         'create_task_from_schedule',
         {
           schedule_id: schedule.id,
+          task_type: schedule.task_template.type,
           title,
           description,
         },

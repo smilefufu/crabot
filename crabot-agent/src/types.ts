@@ -488,6 +488,7 @@ export interface MCPServerConfig {
 export interface SkillConfig {
   id: string
   name: string
+  description: string
   content: string
   skill_dir?: string
 }
@@ -538,6 +539,7 @@ export interface ExecuteTaskParams {
     task_description: string
     priority: string
     plan?: string
+    task_type?: string
   }
   context: WorkerAgentContext
 }
@@ -751,6 +753,8 @@ export interface AgentTrace {
     type: 'message' | 'task' | 'schedule' | 'sub_agent_call'
     summary: string
     source?: string
+    /** 调度任务类型，如 'daily_reflection'（仅调度任务有） */
+    task_type?: string
   }
   spans: AgentSpan[]
   outcome?: {

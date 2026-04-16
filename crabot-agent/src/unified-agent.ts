@@ -1665,11 +1665,12 @@ export class UnifiedAgent extends ModuleBase {
 
   private async handleCreateTaskFromSchedule(params: {
     schedule_id: string
+    task_type?: string
     title: string
     description: string
     preferred_worker_specialization?: string
   }): Promise<{ task_id: string; assigned_worker: ModuleId }> {
-    const { schedule_id, title, description, preferred_worker_specialization } = params
+    const { schedule_id, task_type, title, description, preferred_worker_specialization } = params
 
     try {
       // 选择 Worker
@@ -1719,6 +1720,7 @@ export class UnifiedAgent extends ModuleBase {
           title,
           description,
           priority: 'normal',
+          task_type,
         },
         workerContext,
       )
@@ -1833,6 +1835,7 @@ export class UnifiedAgent extends ModuleBase {
         type: 'task',
         summary: taskParams.task.task_title.slice(0, 200),
         source: taskParams.context.task_origin?.channel_id,
+        task_type: taskParams.task.task_type,
       },
       parent_trace_id,
       parent_span_id,
