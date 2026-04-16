@@ -412,24 +412,27 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   /**
-   * 构建 skill 摘要列表（渐进式披露：只放 name + description，完整内容通过 Skill tool 按需加载）
+   * 构建 skill catalog（渐进式披露 Tier 1：name + description，完整内容通过 Skill tool 按需加载）
+   * 输出格式遵循 Agent Skills 开源标准的 <available_skills> XML 格式。
    */
   private buildSkillListing(
     skills?: ReadonlyArray<{ id: string; name: string; description?: string }>
   ): string {
     if (!skills || skills.length === 0) return ''
 
-    const MAX_DESC = 250
-    const listing = skills
+    const skillEntries = skills
       .map((s) => {
-        const desc = s.description
-          ? (s.description.length > MAX_DESC ? s.description.slice(0, MAX_DESC - 1) + '…' : s.description)
-          : ''
-        return `- ${s.name}${desc ? `: ${desc}` : ''}`
+        const desc = s.description || s.name
+        return `<skill>\n<name>${s.name}</name>\n<description>${desc}</description>\n</skill>`
       })
       .join('\n')
 
-    return `\n\n## 可用技能\n\n以下技能可通过 Skill 工具加载完整指引：\n${listing}\n\n执行相关任务前，先调用 Skill 工具加载对应技能，再按指引操作。`
+    return (
+      '\n\n以下技能为特定任务提供专业指引。当任务匹配某个技能的描述时，' +
+      '必须先调用 Skill 工具（输入技能名称）加载完整指引，然后按指引操作。' +
+      '这是强制要求——先加载技能，再执行任务。\n\n' +
+      `<available_skills>\n${skillEntries}\n</available_skills>`
+    )
   }
 
   /**
@@ -1682,9 +1685,9 @@ export class UnifiedAgent extends ModuleBase {
           description: string
           assigned_worker: string
           source: { origin: string; source_module_id: string }
-          refs?: { schedule_id: string }
+          input?: Record<string, unknown>
         },
-        { task_id: string }
+        { task: { id: string } }
       >(
         adminPort,
         'create_task',
@@ -1696,13 +1699,15 @@ export class UnifiedAgent extends ModuleBase {
             origin: 'system',
             source_module_id: this.config.moduleId,
           },
-          refs: { schedule_id },
+          input: { schedule_id },
         },
         this.config.moduleId
       )
 
+      const taskId = taskResult.task.id
+
       console.log(
-        `[${this.config.moduleId}] Created task ${taskResult.task_id} from schedule ${schedule_id}, assigned to ${workerId}`
+        `[${this.config.moduleId}] Created task ${taskId} from schedule ${schedule_id}, assigned to ${workerId}`
       )
 
       // 组装调度任务上下文并启动 Worker 执行
@@ -1710,7 +1715,7 @@ export class UnifiedAgent extends ModuleBase {
 
       this.decisionDispatcher.executeScheduledTaskInBackground(
         {
-          id: taskResult.task_id,
+          id: taskId,
           title,
           description,
           priority: 'normal',
@@ -1718,7 +1723,7 @@ export class UnifiedAgent extends ModuleBase {
         workerContext,
       )
 
-      return { task_id: taskResult.task_id, assigned_worker: workerId }
+      return { task_id: taskId, assigned_worker: workerId }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       console.error(
