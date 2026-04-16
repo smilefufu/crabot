@@ -2630,7 +2630,7 @@ export class AdminModule extends ModuleBase {
 
     // 任务完成时推进关联 Schedule 的 watermark
     if (params.status === 'completed') {
-      const scheduleId = (task.input as Record<string, unknown> | undefined)?.schedule_id
+      const scheduleId = task.input?.schedule_id
       if (typeof scheduleId === 'string') {
         const schedule = this.schedules.get(scheduleId)
         if (schedule) {

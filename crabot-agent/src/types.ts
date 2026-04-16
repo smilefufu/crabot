@@ -488,7 +488,7 @@ export interface MCPServerConfig {
 export interface SkillConfig {
   id: string
   name: string
-  description: string
+  description?: string
   content: string
   skill_dir?: string
 }
