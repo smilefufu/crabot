@@ -3162,8 +3162,9 @@ export class AdminModule extends ModuleBase {
         timezone: 'Asia/Shanghai',
       },
       task_template: {
+        type: 'daily_reflection',
         title: '每日反思 — {{date}}',
-        description: '执行每日反思。标准流程：1）获取今日任务概览；2）筛选值得深入分析的任务（失败的、轮数异常多的、人类情绪明显的）；3）查 trace 和对话历史深入分析选中任务；4）提炼经验写入长期记忆（L0 面向召回场景写，L1 结构化描述，L2 完整分析）；5）重大发现向 master 汇报。',
+        description: '执行每日反思。反思时间范围：{{watermark}} 到 {{datetime}}。标准流程：1）获取此时间范围内的任务概览；2）筛选值得深入分析的任务（排除 daily_reflection 类型，优先关注失败、轮数异常、人类情绪明显的）；3）对每个选中任务委派 sub-agent 深入分析（trace span + 对话历史），返回分析结果和经验建议；4）综合所有 sub-agent 结果，跨任务去重，统一写入长期记忆；5）重大发现向 master 汇报。',
         priority: 'low',
         tags: ['daily_reflection', 'builtin'],
       },
