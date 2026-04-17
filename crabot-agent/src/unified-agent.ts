@@ -229,12 +229,8 @@ export class UnifiedAgent extends ModuleBase {
 
     // MCP connections managed by mcpConnector in onStart()
 
-    // Front: 纯 system_prompt（不含 skills）
-    // Worker: system_prompt + skill 摘要列表（完整内容通过 Skill tool 按需加载）
-    const basePersonality = config.system_prompt || undefined
-    const workerPersonality = basePersonality
-      ? basePersonality + this.buildSkillListing(config.skills)
-      : this.buildSkillListing(config.skills) || undefined
+    const { basePersonality, workerPersonality, frontSkillListing } =
+      this.buildPromptParts(config.system_prompt, config.skills)
 
     // MCP config factory: creates fresh in-process McpServer instances per task
     // External MCP servers are managed by this.mcpConnector (connected in onStart)
@@ -261,9 +257,9 @@ export class UnifiedAgent extends ModuleBase {
           model: frontModelConfig.model_id,
         }
         this.frontHandler = new FrontHandler(llmConfig, this.buildToolExecutorDeps(), {
-          getSystemPrompt: (isGroup) => this.promptManager.assembleFrontPrompt(
-            isGroup, basePersonality, this.getWorkerCapabilitySummary(),
-          ),
+          getSystemPrompt: (isGroup) => this.promptManager.assembleFrontPrompt({
+            isGroup, adminPersonality: basePersonality, workerCapabilities: this.getWorkerCapabilitySummary(), skillListing: frontSkillListing,
+          }),
         })
         this.frontHandlerFormat = frontModelConfig.format as LLMFormat
       }
@@ -412,27 +408,51 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   /**
-   * 构建 skill catalog（渐进式披露 Tier 1：name + description，完整内容通过 Skill tool 按需加载）
+   * 构建 skill catalog XML（渐进式披露 Tier 1：name + description）
    * 输出格式遵循 Agent Skills 开源标准的 <available_skills> XML 格式。
    */
-  private buildSkillListing(
-    skills?: ReadonlyArray<{ id: string; name: string; description?: string }>
+  private static buildSkillXml(
+    skills: ReadonlyArray<{ id: string; name: string; description?: string }>
   ): string {
-    if (!skills || skills.length === 0) return ''
-
-    const skillEntries = skills
+    return skills
       .map((s) => {
         const desc = s.description || s.name
         return `<skill>\n<name>${s.name}</name>\n<description>${desc}</description>\n</skill>`
       })
       .join('\n')
+  }
 
-    return (
+  private static buildSkillListing(
+    skills: ReadonlyArray<{ id: string; name: string; description?: string }> | undefined,
+    intro: string
+  ): string {
+    if (!skills || skills.length === 0) return ''
+    return `${intro}\n\n<available_skills>\n${UnifiedAgent.buildSkillXml(skills)}\n</available_skills>`
+  }
+
+  private buildPromptParts(
+    systemPrompt?: string,
+    skills?: ReadonlyArray<{ id: string; name: string; description?: string }>
+  ): { basePersonality?: string; workerPersonality?: string; frontSkillListing?: string } {
+    const basePersonality = systemPrompt || undefined
+
+    const workerIntro =
       '\n\n以下技能为特定任务提供专业指引。当任务匹配某个技能的描述时，' +
       '必须先调用 Skill 工具（输入技能名称）加载完整指引，然后按指引操作。' +
-      '这是强制要求——先加载技能，再执行任务。\n\n' +
-      `<available_skills>\n${skillEntries}\n</available_skills>`
-    )
+      '这是强制要求——先加载技能，再执行任务。'
+    const workerSuffix = UnifiedAgent.buildSkillListing(skills, workerIntro)
+    const workerPersonality = basePersonality
+      ? basePersonality + workerSuffix
+      : workerSuffix || undefined
+
+    const frontIntro =
+      '## 技能（Skill）\n\n' +
+      '以下技能为特定任务提供专业能力。当用户的请求匹配某个技能的描述时，' +
+      '**必须使用 create_task**，不能用 reply 直接回答。\n' +
+      '即使问题看起来简单（如"502是什么原因"），只要它属于某个技能的职责范围，就必须 create_task。'
+    const frontSkillListing = UnifiedAgent.buildSkillListing(skills, frontIntro) || undefined
+
+    return { basePersonality, workerPersonality, frontSkillListing }
   }
 
   /**
@@ -1988,10 +2008,8 @@ export class UnifiedAgent extends ModuleBase {
    * 热更新 LLM 客户端
    */
   private async updateLlmClients(modelConfig: Record<string, LLMConnectionInfo>): Promise<void> {
-    const basePersonality = this.agentConfig?.system_prompt || undefined
-    const workerPersonality = basePersonality
-      ? basePersonality + this.buildSkillListing(this.agentConfig?.skills)
-      : this.buildSkillListing(this.agentConfig?.skills) || undefined
+    const { basePersonality, workerPersonality, frontSkillListing } =
+      this.buildPromptParts(this.agentConfig?.system_prompt, this.agentConfig?.skills)
 
     // MCP config factory: creates fresh in-process McpServer instances per task
     const createMcpConfigs = (): Record<string, McpServer> => ({
@@ -2026,9 +2044,9 @@ export class UnifiedAgent extends ModuleBase {
             model: frontConfig.model_id,
           }
           this.frontHandler = new FrontHandler(llmConfig, this.buildToolExecutorDeps(), {
-            getSystemPrompt: (isGroup) => this.promptManager.assembleFrontPrompt(
-              isGroup, basePersonality, this.getWorkerCapabilitySummary(),
-            ),
+            getSystemPrompt: (isGroup) => this.promptManager.assembleFrontPrompt({
+              isGroup, adminPersonality: basePersonality, workerCapabilities: this.getWorkerCapabilitySummary(), skillListing: frontSkillListing,
+            }),
           })
           this.frontHandlerFormat = frontConfig.format as LLMFormat
           console.log(`[${this.config.moduleId}] Front Agent handler created (format: ${frontConfig.format})`)

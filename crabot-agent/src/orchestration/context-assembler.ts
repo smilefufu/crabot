@@ -31,7 +31,7 @@ interface AssembleParams {
   crab_display_name?: string
 }
 
-interface FetchShortTermMemoryParams {
+interface MemoryFetchParams {
   friendId?: string
   limit?: number
   minVisibility?: 'private' | 'internal' | 'public'
@@ -39,11 +39,10 @@ interface FetchShortTermMemoryParams {
   sessionType?: 'private' | 'group'
 }
 
-interface FetchLongTermMemoryParams {
-  friendId?: string
+type FetchShortTermMemoryParams = MemoryFetchParams
+
+interface FetchLongTermMemoryParams extends MemoryFetchParams {
   query?: string
-  limit?: number
-  sessionType?: 'private' | 'group'
 }
 
 export class ContextAssembler {
@@ -127,6 +126,8 @@ export class ContextAssembler {
           friendId: params.friend_id,
           query: params.message,
           limit: this.config.worker_long_term_memory_limit,
+          minVisibility: memoryPermissions.read_min_visibility,
+          accessibleScopes: memoryPermissions.read_accessible_scopes,
           sessionType: workerSessionType,
         }),
         this.resolveModule('admin'),
@@ -291,7 +292,7 @@ export class ContextAssembler {
   }
 
   private async fetchLongTermMemory(params: FetchLongTermMemoryParams): Promise<LongTermL0Entry[]> {
-    const { friendId, query, limit, sessionType = 'private' } = params
+    const { friendId, query, limit, minVisibility = 'public', accessibleScopes, sessionType = 'private' } = params
 
     if (!query) return []
     if (sessionType === 'private' && !friendId) return []
@@ -311,6 +312,8 @@ export class ContextAssembler {
           detail: string
           limit?: number
           filter?: { entity_id?: string }
+          min_visibility?: string
+          accessible_scopes?: string[]
         },
         { results: Array<{ memory: LongTermL0Entry; relevance: number }> }
       >(
@@ -321,6 +324,8 @@ export class ContextAssembler {
           detail: 'L0',
           limit: limit ?? this.config.worker_long_term_memory_limit,
           filter,
+          min_visibility: minVisibility,
+          ...(accessibleScopes !== undefined && { accessible_scopes: accessibleScopes }),
         },
         this.moduleId
       )

@@ -33,8 +33,8 @@ export class HookRegistry {
           if (!compiled.matcherRegex.test(input.toolName)) return false
         }
 
-        if (hook.if !== undefined && input.filePaths !== undefined) {
-          if (!matchIfCondition(hook.if, input.filePaths)) return false
+        if (hook.if !== undefined) {
+          if (!matchIfCondition(hook.if, input)) return false
         }
 
         return true
@@ -50,12 +50,33 @@ function compile(hook: HookDefinition): CompiledHook {
   }
 }
 
-function matchIfCondition(condition: string, filePaths: ReadonlyArray<string>): boolean {
-  const match = condition.match(/\(([^)]+)\)/)
+/**
+ * 匹配 if 条件。支持两种格式：
+ * - "ToolName(*.ext)"  — 文件扩展名匹配（如 "Edit(*.ts)"）
+ * - "Bash(command *)"  — Bash 命令前缀匹配（如 "Bash(crabot *)"）
+ */
+function matchIfCondition(condition: string, input: HookInput): boolean {
+  const match = condition.match(/^(\w+)\(([^)]+)\)$/)
   if (!match) return true
-  const pattern = match[1]
+  const [, toolName, pattern] = match
+
+  // 文件扩展名匹配：Edit(*.ts), Write(*.js) 等
   const extMatch = pattern.match(/^\*(\.\w+)$/)
-  if (!extMatch) return true
-  const extension = extMatch[1]
-  return filePaths.some((fp) => fp.endsWith(extension))
+  if (extMatch) {
+    const extension = extMatch[1]
+    return (input.filePaths ?? []).some((fp) => fp.endsWith(extension))
+  }
+
+  // Bash 命令前缀匹配：Bash(crabot *) 等
+  if (toolName === 'Bash' && input.toolInput) {
+    const command = typeof input.toolInput.command === 'string'
+      ? input.toolInput.command.trim()
+      : ''
+    // "crabot *" → 匹配以 "crabot" 开头的命令
+    const prefix = pattern.replace(/\s*\*$/, '')
+    return command.startsWith(prefix)
+  }
+
+  // 未识别的 pattern 格式，不匹配（安全默认）
+  return false
 }

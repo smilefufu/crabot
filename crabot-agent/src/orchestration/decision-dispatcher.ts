@@ -244,12 +244,14 @@ export class DecisionDispatcher {
 
     // 3. 组装 Worker 上下文
     const lastMessage = params.messages[params.messages.length - 1]
+    const sessionType = params.messages[0]?.session?.type ?? 'private'
     const workerContext = await this.contextAssembler.assembleWorkerContext({
       channel_id: params.channel_id,
       session_id: params.session_id,
       sender_id: lastMessage.sender.platform_user_id,
       message: params.messages.map(m => m.content.text ?? '').join('\n'),
       friend_id: lastMessage.sender.friend_id,
+      session_type: sessionType,
     }, params.memoryPermissions)
 
     const enrichedContext = {

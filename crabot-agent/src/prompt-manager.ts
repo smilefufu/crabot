@@ -10,8 +10,9 @@
 // ── 私聊/群聊共用部分 ──
 const FRONT_RULES_SHARED = `## 决策判断标准
 
-- 能在 1-2 步工具调用内完成 → reply
+- 能在 1-2 步工具调用内完成，且不涉及任何 skill → reply
 - 需要多步操作、外部访问、代码编写、深度分析 → create_task
+- 任务匹配某个 skill 的描述 → 必须 create_task（skill 只能在任务中执行）
 - 不确定时 → create_task
 
 ## 常见误判（必须避免）
@@ -37,20 +38,13 @@ const FRONT_RULES_SHARED = `## 决策判断标准
 
 ## 记忆存储
 
-当用户要求记住/记录某些信息时：
-1. 调用 store_memory 工具写入长期记忆（提供 content 和 tags）
-2. 然后调用 reply 确认已记住
-
+当用户要求记住/记录某些信息时，写入长期记忆并用 reply 确认已记住。
 tags 应涵盖关键维度，如人物、主题、类型（身份属性、偏好习惯、项目知识、重要事件等）。
-
 这属于"1-2 步工具调用内完成"的场景，使用 reply。
 
 ## 记忆查询
 
-当用户询问"你还记得...吗"或需要回忆之前记住的信息时：
-1. 调用 search_memory 工具搜索相关记忆
-2. 如需查看详情，调用 get_memory_detail 工具
-3. 然后调用 reply 回答`
+当用户询问"你还记得...吗"或需要回忆之前记住的信息时，搜索记忆并用 reply 回答。`
 
 // ── 共享工具描述 ──
 const TOOL_DESC_COMMON = `- **reply(text)** — 直接回复。text 是发给用户的最终完整回答，调用后对话结束。
@@ -137,9 +131,9 @@ const WORKER_RULES = `## 工作目录
 
 ## 记忆存储
 
-你有写入长期记忆的能力（store_memory 工具）。以下情况应主动写入：
+你有写入长期记忆的能力。以下情况应主动写入：
 
-1. 用户明确要求记住 -> 必须写入
+1. 用户明确要求记住 → 必须写入
 2. 发现用户偏好/习惯（如"我们用 pnpm"、"代码风格用 4 空格缩进"）
 3. 了解到人物身份/背景信息（如"张三是后端负责人"）
 4. 解决了有价值的问题（尤其是踩坑、调试经验）
@@ -157,26 +151,28 @@ const WORKER_RULES = `## 工作目录
 
 当你需要回忆之前的信息（如用户偏好、项目路径等）时：
 - 查看上方"长期记忆"段落中的 L0 摘要列表
-- 如需详情，调用 get_memory_detail 工具查看 L1 概览或 L2 全文
-- 如需搜索更多记忆，调用 search_memory 工具
+- 如需详情，查看记忆的 L1 概览或 L2 全文
+- 如需搜索更多记忆，使用记忆搜索工具
 
 ## 技能（Skill）
 
-如果系统提示中列出了"可用技能"，这些是为特定任务类型提供的专业指引。
-在执行相关任务前，先调用 Skill 工具（输入技能名称）加载完整指引，然后按指引操作。
-使用 Skill("list") 查看所有可用技能。`
+上下文中的 <available_skills> 列出了可用技能（name + description）。
+当任务匹配某个技能的描述时，**必须**在开始工作前调用 Skill 工具加载完整指引。
+这是强制要求——先加载技能，再执行任务。不要跳过这一步。
+
+调用方式：Skill("技能名称")，返回的 <skill_content> 包含完整指引和可用资源列表。`
 
 export class PromptManager {
   /**
    * 组装 Front Handler system prompt（区分私聊/群聊）
-   * @param isGroup - 是否群聊场景
-   * @param adminPersonality - Admin 配置中的 system_prompt（可选，优先级最高）
    */
-  assembleFrontPrompt(
-    isGroup: boolean,
-    adminPersonality?: string,
-    workerCapabilities?: ReadonlyArray<{ category: string; tools: string[] }>,
-  ): string {
+  assembleFrontPrompt(opts: {
+    isGroup: boolean
+    adminPersonality?: string
+    workerCapabilities?: ReadonlyArray<{ category: string; tools: string[] }>
+    skillListing?: string
+  }): string {
+    const { isGroup, adminPersonality, workerCapabilities, skillListing } = opts
     const parts: string[] = []
 
     if (adminPersonality) {
@@ -195,6 +191,11 @@ export class PromptManager {
         `除了上述工具外，你还能处理以下类型的请求：\n\n${sections}\n\n` +
         `以上通过 create_task 工具委派执行。对用户而言都是你自己的能力，不要提及"任务"、"执行智能体"等内部概念。`
       )
+    }
+
+    // Inject skill listing so Front can route skill-matching tasks to Worker.
+    if (skillListing) {
+      parts.push(skillListing)
     }
 
     return parts.join('\n\n')

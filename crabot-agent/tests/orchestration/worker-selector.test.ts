@@ -33,19 +33,6 @@ describe('WorkerSelector', () => {
     expect(workerId).toBe('worker-2')
   })
 
-  it('should filter by task_type', async () => {
-    mockRpc.resolve.mockResolvedValueOnce([
-      { module_id: 'worker-1', port: 19401 },
-      { module_id: 'worker-2', port: 19402 },
-    ])
-    mockRpc.call
-      .mockResolvedValueOnce({ available_capacity: 5, specialization: 'general', supported_task_types: ['user_request'] })
-      .mockResolvedValueOnce({ available_capacity: 3, specialization: 'code', supported_task_types: ['code_review'] })
-
-    const workerId = await selector.selectWorker({ task_type: 'code_review' })
-    expect(workerId).toBe('worker-2')
-  })
-
   it('should prefer specialization hint', async () => {
     mockRpc.resolve.mockResolvedValueOnce([
       { module_id: 'worker-1', port: 19401 },

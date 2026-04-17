@@ -146,8 +146,8 @@ describe('ContextAssembler', () => {
     ]
     const shortMem = [{ memory_id: 'mem1', content: 'fact', timestamp: '2026-01-01T00:00:00Z' }]
     // Raw admin API format (id, type — before mapping by fetchActiveTasks)
-    const rawActiveTasks = [{ id: 't1', title: 'test', status: 'pending', type: 'user_request', priority: 'normal', source: {} }]
-    const mappedActiveTasks = [{ task_id: 't1', title: 'test', status: 'pending', task_type: 'user_request', priority: 'normal', plan_summary: undefined, source_channel_id: undefined, source_session_id: undefined, latest_progress: undefined }]
+    const rawActiveTasks = [{ id: 't1', title: 'test', status: 'pending', priority: 'normal', source: {} }]
+    const mappedActiveTasks = [{ task_id: 't1', title: 'test', status: 'pending', priority: 'normal', plan_summary: undefined, source_channel_id: undefined, source_session_id: undefined, latest_progress: undefined }]
 
     // Call order: get_chat_history, search_short_term, list_tasks
     mockRpc.call

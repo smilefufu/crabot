@@ -1,6 +1,6 @@
 ---
 name: crabot-cli
-description: "使用 Crabot CLI 管理系统配置：模型 Provider、Agent 实例、MCP Server、Channel、技能、定时任务、好友、权限模板等"
+description: "Use when master asks to view or change system configuration, switch models, manage MCP servers, channels, schedules, or friends in a private chat session"
 version: "1.0.0"
 metadata:
   openclaw:
@@ -12,9 +12,9 @@ metadata:
 
 # Crabot CLI 管理技能
 
-## 使用条件
+## Overview
 
-此技能仅在 **master 私聊** 场景可用。在其他场景下 CLI 命令会被系统拦截。
+通过 `crabot` CLI 命令管理 Crabot 系统配置。
 
 ## 使用方式
 

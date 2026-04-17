@@ -1,7 +1,7 @@
 /**
  * Crab-Messaging MCP Server — Agent 统一通讯能力
  *
- * 提供 8 个工具：lookup_friend, list_contacts, list_groups, list_sessions, open_private_session, send_message, get_history, get_message
+ * 提供 8 个工具：lookup_friend, list_contacts, list_groups, list_sessions, send_private_message, send_message, get_history, get_message
  * 对齐 protocol-crab-messaging.md
  *
  * @see crabot-docs/protocols/protocol-crab-messaging.md
@@ -274,60 +274,86 @@ export function createCrabMessagingServer(
       ),
 
       // ================================================================
-      // 4. open_private_session — 打开/创建私聊
+      // 4. send_private_message — 给熟人发私聊消息
       // ================================================================
   server.tool(
-        'open_private_session',
-        '在指定 Channel 上查找或创建与某个熟人的私聊 Session。',
+        'send_private_message',
+        '给熟人发私聊消息。当你不关心使用哪个 Channel 或不知道该用哪个 Channel 时使用此工具。系统自动查找可用 Channel 并创建/复用私聊 Session。如果你已知 channel_id 和 session_id，请直接使用 send_message。',
         {
-          channel_id: z.string().describe('Channel 模块实例 ID'),
           friend_id: z.string().describe('目标熟人 ID'),
+          content: z.string().describe('消息内容（文本）'),
         },
         async (args) => {
           try {
-            // 1. 查询 friend 的 channel_identities
+            // 1. 查询 friend 信息
             const adminPort = await getAdminPort()
             const friendResult = await rpcClient.call<
               { friend_id: string },
               { friend: Friend }
             >(adminPort, 'get_friend', { friend_id: args.friend_id }, moduleId)
 
-            const identity = friendResult.friend.channel_identities.find(
-              ci => ci.channel_id === args.channel_id,
-            )
-            if (!identity) {
+            const identities = friendResult.friend.channel_identities
+            if (identities.length === 0) {
               return {
-                content: [{
-                  type: 'text' as const,
-                  text: JSON.stringify({
-                    error: `熟人 ${friendResult.friend.display_name} 在 Channel ${args.channel_id} 上没有身份`,
-                    available_channels: friendResult.friend.channel_identities.map(ci => ci.channel_id),
-                  }),
-                }],
+                content: [{ type: 'text' as const, text: JSON.stringify({ error: `熟人 ${friendResult.friend.display_name} 没有关联任何 Channel` }) }],
               }
             }
 
-            // 2. 调用 Channel 的 find_or_create_private_session
-            const channelPort = await resolveChannelPort(args.channel_id)
-            if (!channelPort) {
-              return {
-                content: [{ type: 'text' as const, text: JSON.stringify({ error: `Channel ${args.channel_id} 不可用` }) }],
+            // 2. 逐个尝试 channel，找到第一个可用的
+            let lastError = ''
+            for (const identity of identities) {
+              let channelPort: number
+              try {
+                channelPort = await resolveChannelPort(identity.channel_id)
+              } catch {
+                lastError = `Channel ${identity.channel_id} 不可用`
+                continue
+              }
+              if (!channelPort) {
+                lastError = `Channel ${identity.channel_id} 不可用`
+                continue
+              }
+
+              try {
+                // 3. 查找或创建私聊 session
+                const sessionResult = await rpcClient.call<
+                  { platform_user_id: string },
+                  { session_id: string; created: boolean }
+                >(channelPort, 'find_or_create_private_session', {
+                  platform_user_id: identity.platform_user_id,
+                }, moduleId)
+
+                // 4. 发送消息
+                const sendResult = await withRetry(async () => {
+                  return rpcClient.call<
+                    { session_id: string; content: { type: string; text: string } },
+                    { platform_message_id: string; sent_at: string }
+                  >(channelPort, 'send_message', {
+                    session_id: sessionResult.session_id,
+                    content: { type: 'text', text: args.content },
+                  }, moduleId)
+                })
+
+                return {
+                  content: [{ type: 'text' as const, text: JSON.stringify({
+                    ...sendResult,
+                    channel_id: identity.channel_id,
+                    session_id: sessionResult.session_id,
+                  }) }],
+                }
+              } catch (err) {
+                lastError = err instanceof Error ? err.message : String(err)
+                continue
               }
             }
-            const result = await rpcClient.call<
-              { platform_user_id: string },
-              { session_id: string; created: boolean }
-            >(channelPort, 'find_or_create_private_session', {
-              platform_user_id: identity.platform_user_id,
-            }, moduleId)
 
             return {
-              content: [{ type: 'text' as const, text: JSON.stringify(result) }],
+              content: [{ type: 'text' as const, text: JSON.stringify({ error: `所有 Channel 均不可用: ${lastError}` }) }],
             }
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err)
             return {
-              content: [{ type: 'text' as const, text: JSON.stringify({ error: msg }) }],
+              content: [{ type: 'text' as const, text: JSON.stringify({ error: `发送失败: ${msg}` }) }],
             }
           }
         },

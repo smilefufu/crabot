@@ -271,7 +271,7 @@ export class WorkerHandler {
         const skillsDir = path.join(taskDir, '.claude', 'skills')
         await fs.promises.mkdir(skillsDir, { recursive: true })
         for (const skill of skills) {
-          const skillDir = path.join(skillsDir, skill.id)
+          const skillDir = path.join(skillsDir, skill.name)
           await fs.promises.mkdir(skillDir, { recursive: true })
           await fs.promises.writeFile(path.join(skillDir, 'SKILL.md'), skill.content, 'utf-8')
           if (skill.skill_dir) {
@@ -811,13 +811,10 @@ export class WorkerHandler {
           parts.push(`- [${mem.id}]${tagStr} ${mem.abstract} (importance: ${mem.importance})`)
         }
         if (isOverflow) {
-          parts.push('\n如需查找更多记忆，使用 search_memory 工具。')
+          parts.push('\n以上为相关度最高的记忆，可通过记忆搜索工具查找更多。')
         }
-        parts.push('如需查看某条记忆详情，使用 get_memory_detail 工具。')
+        parts.push('如需查看某条记忆详情，可查看其 L1 概览或 L2 全文。')
       }
-
-      parts.push('\n- 聊天记录: 使用 crab-messaging 的 get_history 工具查看特定 channel/session 的原始消息')
-      parts.push('- 写入记忆: 使用 crab-memory 的 store_memory 工具保存重要信息到长期记忆')
     }
     if (context.recent_messages && context.recent_messages.length > 0) {
       parts.push(`\n## 最近相关消息（共 ${context.recent_messages.length} 条）`)
