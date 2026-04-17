@@ -7,20 +7,21 @@
 
 import crypto from 'crypto'
 import http from 'http'
+import { oauthErrorHtml, oauthSuccessHtml } from './oauth-page.js'
 
 // --- OAuth 配置 ---
 
-const OAUTH_CALLBACK_BASE_PORT = 1455
-const portOffset = parseInt(process.env.CRABOT_PORT_OFFSET || '0', 10)
-const callbackPort = OAUTH_CALLBACK_BASE_PORT + portOffset
+const CALLBACK_PORT = 1455
+const ORIGINATOR = 'openclaw'
 
 const OAUTH_CONFIG = {
   authorizationEndpoint: 'https://auth.openai.com/oauth/authorize',
   tokenEndpoint: 'https://auth.openai.com/oauth/token',
   clientId: 'app_EMoamEEZ73f0CkXaXp7hrann',
-  redirectUri: `http://127.0.0.1:${callbackPort}/auth/callback`,
-  callbackPort,
+  redirectUri: `http://localhost:${CALLBACK_PORT}/auth/callback`,
+  callbackPort: CALLBACK_PORT,
   scope: 'openid profile email offline_access',
+  originator: ORIGINATOR,
 }
 
 // --- PKCE ---
@@ -41,13 +42,9 @@ function generateState(): string {
 
 export interface CodexJwtPayload {
   exp?: number
-  iss?: string
-  sub?: string
   'https://api.openai.com/profile'?: { email?: string }
   'https://api.openai.com/auth'?: {
-    chatgpt_account_user_id?: string
-    chatgpt_user_id?: string
-    user_id?: string
+    chatgpt_account_id?: string
   }
 }
 
@@ -75,14 +72,9 @@ export function extractTokenInfo(accessToken: string): {
   const profile = payload['https://api.openai.com/profile']
   const auth = payload['https://api.openai.com/auth']
 
-  const accountId = auth?.chatgpt_account_user_id
-    ?? auth?.chatgpt_user_id
-    ?? auth?.user_id
-    ?? (payload.iss && payload.sub ? `${payload.iss}|${payload.sub}` : undefined)
-
   return {
     email: profile?.email,
-    accountId,
+    accountId: auth?.chatgpt_account_id,
     expiresAt: payload.exp ? payload.exp * 1000 : Date.now() + 3600_000,
   }
 }
@@ -124,44 +116,64 @@ export function waitForOAuthCallback(): Promise<OAuthLoginResult> {
       pendingFlow.reject(new Error('Superseded by new login attempt'))
     }
 
+    const sendHtml = (res: http.ServerResponse, statusCode: number, body: string): void => {
+      res.writeHead(statusCode, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Connection': 'close',
+      })
+      res.end(body)
+    }
+
     const server = http.createServer(async (req, res) => {
-      const url = new URL(req.url ?? '/', `http://127.0.0.1:${OAUTH_CONFIG.callbackPort}`)
-
-      if (url.pathname !== '/auth/callback') {
-        res.writeHead(404)
-        res.end('Not found')
-        return
-      }
-
-      const code = url.searchParams.get('code')
-      const returnedState = url.searchParams.get('state')
-      const error = url.searchParams.get('error')
-
-      if (error) {
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-        res.end('<html><body><h2>登录失败</h2><p>请关闭此窗口</p></body></html>')
-        cleanup()
-        reject(new Error(`OAuth error: ${error}`))
-        return
-      }
-
-      if (!code || returnedState !== state) {
-        res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' })
-        res.end('<html><body><h2>无效的回调</h2><p>请关闭此窗口并重试</p></body></html>')
-        return
-      }
-
       try {
-        const tokenResult = await exchangeCodeForToken(code, codeVerifier)
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-        res.end('<html><body><h2>登录成功！</h2><p>请关闭此窗口返回 Crabot</p></body></html>')
-        cleanup()
-        resolve(tokenResult)
-      } catch (err) {
-        res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' })
-        res.end('<html><body><h2>Token 换取失败</h2><p>请关闭此窗口并重试</p></body></html>')
-        cleanup()
-        reject(err instanceof Error ? err : new Error(String(err)))
+        const url = new URL(req.url ?? '/', `http://127.0.0.1:${OAUTH_CONFIG.callbackPort}`)
+
+        if (url.pathname === '/__selfcheck') {
+          const nonce = url.searchParams.get('nonce') ?? ''
+          res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Connection': 'close' })
+          res.end(nonce)
+          return
+        }
+
+        if (url.pathname !== '/auth/callback') {
+          sendHtml(res, 404, oauthErrorHtml('Callback route not found.'))
+          return
+        }
+
+        const oauthError = url.searchParams.get('error')
+        if (oauthError) {
+          const errorDesc = url.searchParams.get('error_description') ?? oauthError
+          sendHtml(res, 400, oauthErrorHtml(errorDesc))
+          cleanup()
+          reject(new Error(`OAuth error: ${oauthError}`))
+          return
+        }
+
+        const code = url.searchParams.get('code')
+        const returnedState = url.searchParams.get('state')
+
+        if (returnedState !== state) {
+          sendHtml(res, 400, oauthErrorHtml('State mismatch.'))
+          return
+        }
+
+        if (!code) {
+          sendHtml(res, 400, oauthErrorHtml('Missing authorization code.'))
+          return
+        }
+
+        try {
+          const tokenResult = await exchangeCodeForToken(code, codeVerifier)
+          sendHtml(res, 200, oauthSuccessHtml('OpenAI authentication completed. You can close this window.'))
+          cleanup()
+          resolve(tokenResult)
+        } catch (err) {
+          sendHtml(res, 500, oauthErrorHtml(err instanceof Error ? err.message : String(err)))
+          cleanup()
+          reject(err instanceof Error ? err : new Error(String(err)))
+        }
+      } catch {
+        sendHtml(res, 500, oauthErrorHtml('Internal error while processing OAuth callback.'))
       }
     })
 
@@ -183,9 +195,15 @@ export function waitForOAuthCallback(): Promise<OAuthLoginResult> {
       // Server ready
     })
 
-    server.on('error', (err) => {
+    server.on('error', (err: NodeJS.ErrnoException) => {
       cleanup()
-      reject(new Error(`Failed to start callback server: ${err.message}`))
+      if (err.code === 'EADDRINUSE') {
+        const e = new Error(`Port ${OAUTH_CONFIG.callbackPort} is already in use`) as Error & { code: string }
+        e.code = 'PORT_IN_USE'
+        reject(e)
+      } else {
+        reject(new Error(`Failed to start callback server: ${err.message}`))
+      }
     })
 
     pendingFlow = {
@@ -213,9 +231,12 @@ export function getOAuthAuthUrl(): string | null {
     client_id: OAUTH_CONFIG.clientId,
     redirect_uri: OAUTH_CONFIG.redirectUri,
     scope: OAUTH_CONFIG.scope,
-    state: pendingFlow.state,
     code_challenge: codeChallenge,
     code_challenge_method: 'S256',
+    state: pendingFlow.state,
+    id_token_add_organizations: 'true',
+    codex_cli_simplified_flow: 'true',
+    originator: OAUTH_CONFIG.originator,
   })
 
   return `${OAUTH_CONFIG.authorizationEndpoint}?${params.toString()}`
@@ -226,10 +247,10 @@ export function getOAuthAuthUrl(): string | null {
 async function exchangeCodeForToken(code: string, codeVerifier: string): Promise<OAuthLoginResult> {
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
-    code,
     client_id: OAUTH_CONFIG.clientId,
-    redirect_uri: OAUTH_CONFIG.redirectUri,
+    code,
     code_verifier: codeVerifier,
+    redirect_uri: OAUTH_CONFIG.redirectUri,
   })
 
   const response = await fetch(OAUTH_CONFIG.tokenEndpoint, {
@@ -303,6 +324,45 @@ export async function refreshOAuthToken(refreshToken: string): Promise<OAuthLogi
  */
 export function isOAuthPending(): boolean {
   return pendingFlow !== null
+}
+
+/**
+ * 使用 node:http 原生请求（绕过 undici globalDispatcher 代理）验证回调 server 是否属于本实例。
+ * 向 127.0.0.1:1455/__selfcheck?nonce=<随机值> 发送 GET，校验响应体是否原样返回该 nonce。
+ */
+export function selfCheckCallbackServer(): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false
+    const done = (value: boolean): void => {
+      if (settled) return
+      settled = true
+      resolve(value)
+    }
+    const nonce = crypto.randomBytes(16).toString('hex')
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port: OAUTH_CONFIG.callbackPort,
+        path: `/__selfcheck?nonce=${nonce}`,
+        method: 'GET',
+        timeout: 2000,
+      },
+      (res) => {
+        const chunks: Buffer[] = []
+        res.on('data', (chunk) => chunks.push(chunk))
+        res.on('end', () => {
+          const body = Buffer.concat(chunks).toString('utf-8')
+          done(res.statusCode === 200 && body === nonce)
+        })
+      },
+    )
+    req.on('error', () => done(false))
+    req.on('timeout', () => {
+      req.destroy()
+      done(false)
+    })
+    req.end()
+  })
 }
 
 /**

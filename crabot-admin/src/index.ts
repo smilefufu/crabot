@@ -3464,13 +3464,48 @@ export class AdminModule extends ModuleBase {
   private lastOAuthResult: import('./oauth/openai-codex-oauth.js').OAuthLoginResult | null = null
 
   private async handleOAuthChatGPTLogin(_req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const { waitForOAuthCallback, getOAuthAuthUrl } = await import('./oauth/openai-codex-oauth.js')
+    const oauthMod = await import('./oauth/openai-codex-oauth.js')
 
     this.lastOAuthResult = null
-    this.oauthLoginPromise = waitForOAuthCallback()
 
-    const authUrl = getOAuthAuthUrl()
+    // 启动 callback server（异步等待回调）
+    const flowPromise = oauthMod.waitForOAuthCallback()
+    this.oauthLoginPromise = flowPromise
+
+    // 在等待回调的同时，先用一个 race 拿到 listen 阶段的错误（PORT_IN_USE 等）
+    // listen 失败时 promise 立即 reject；listen 成功时 promise 不会立刻 settle
+    // 因此用 setImmediate 让 listen 事件循环先跑一轮
+    await new Promise((r) => setImmediate(r))
+
+    // 探测：如果 flowPromise 已经因 PORT_IN_USE 失败，捕获并返回 409
+    let listenError: unknown = null
+    flowPromise.catch((err) => { listenError = err })
+    await new Promise((r) => setImmediate(r))
+
+    const listenErrorCode = (listenError as { code?: string } | null)?.code
+    if (listenErrorCode === 'PORT_IN_USE') {
+      this.oauthLoginPromise = null
+      res.writeHead(409, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({
+        error: '端口 1455 被占用，可能是另一个 Crabot 实例正在进行 ChatGPT 登录。请先在那个实例完成或取消登录后重试。',
+      }))
+      return
+    }
+
+    // 自验证：确认 server 能响应
+    const ok = await oauthMod.selfCheckCallbackServer()
+    if (!ok) {
+      oauthMod.cancelOAuthFlow()
+      this.oauthLoginPromise = null
+      res.writeHead(503, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'OAuth callback server 自验证失败，无法继续登录' }))
+      return
+    }
+
+    const authUrl = oauthMod.getOAuthAuthUrl()
     if (!authUrl) {
+      oauthMod.cancelOAuthFlow()
+      this.oauthLoginPromise = null
       res.writeHead(500, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'Failed to generate auth URL' }))
       return
@@ -3480,7 +3515,7 @@ export class AdminModule extends ModuleBase {
     res.end(JSON.stringify({ auth_url: authUrl }))
 
     // 后台等待回调完成，保存结果
-    this.oauthLoginPromise
+    flowPromise
       .then((result) => { this.lastOAuthResult = result })
       .catch(() => { /* 状态通过 /status 查询 */ })
   }
