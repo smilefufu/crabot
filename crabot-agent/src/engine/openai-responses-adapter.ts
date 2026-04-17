@@ -10,15 +10,28 @@ import type { EngineMessage, ToolDefinition, StreamChunk, ContentBlock } from '.
 
 // --- Responses API Message Normalization ---
 
+/**
+ * Split a tool_use block id that may be encoded as `call_id|fc_id` (Codex format)
+ * or plain `call_id` (other backends).
+ */
+function splitEncodedToolId(id: string): { callId: string; itemId?: string } {
+  if (!id.includes('|')) {
+    return { callId: id }
+  }
+  const [callId, itemId] = id.split('|', 2)
+  return itemId ? { callId, itemId } : { callId }
+}
+
 export function normalizeMessagesForResponses(messages: ReadonlyArray<EngineMessage>): Record<string, unknown>[] {
   const result: Record<string, unknown>[] = []
 
   for (const msg of messages) {
     if (isToolResultMessage(msg)) {
       for (const tr of msg.toolResults) {
+        const { callId } = splitEncodedToolId(tr.tool_use_id)
         result.push({
           type: 'function_call_output',
-          call_id: tr.tool_use_id,
+          call_id: callId,
           output: tr.is_error ? `Error: ${tr.content}` : tr.content,
         })
       }
@@ -26,22 +39,39 @@ export function normalizeMessagesForResponses(messages: ReadonlyArray<EngineMess
     }
 
     if (msg.role === 'assistant') {
-      const textContent = extractText(msg.content)
-      const toolUseParts = msg.content.filter((b) => b.type === 'tool_use')
-
-      if (textContent) {
-        result.push({ type: 'message', role: 'assistant', content: textContent })
+      // Iterate blocks in order to preserve reasoning → text → tool_use sequence
+      // required by the Responses API for proper replay of encrypted reasoning context.
+      let pendingText = ''
+      const flushText = () => {
+        if (pendingText) {
+          result.push({ type: 'message', role: 'assistant', content: pendingText })
+          pendingText = ''
+        }
       }
 
-      for (const b of toolUseParts) {
-        const tu = b as { id: string; name: string; input: Record<string, unknown> }
-        result.push({
-          type: 'function_call',
-          call_id: tu.id,
-          name: tu.name,
-          arguments: JSON.stringify(tu.input),
-        })
+      for (const block of msg.content) {
+        if (block.type === 'text') {
+          pendingText += block.text
+          continue
+        }
+        if (block.type === 'raw_reasoning') {
+          flushText()
+          result.push(block.data as Record<string, unknown>)
+          continue
+        }
+        if (block.type === 'tool_use') {
+          flushText()
+          const { callId, itemId } = splitEncodedToolId(block.id)
+          result.push({
+            type: 'function_call',
+            ...(itemId ? { id: itemId } : {}),
+            call_id: callId,
+            name: block.name,
+            arguments: JSON.stringify(block.input),
+          })
+        }
       }
+      flushText()
       continue
     }
 
@@ -100,6 +130,11 @@ export class OpenAIResponsesAdapter implements LLMAdapter {
     this.config = {
       endpoint: config.endpoint ?? this.config.endpoint,
       apikey: config.apikey ?? this.config.apikey,
+      ...(config.accountId !== undefined
+        ? { accountId: config.accountId }
+        : this.config.accountId !== undefined
+        ? { accountId: this.config.accountId }
+        : {}),
     }
   }
 
@@ -107,28 +142,45 @@ export class OpenAIResponsesAdapter implements LLMAdapter {
     const input = normalizeMessagesForResponses(params.messages)
     const tools = params.tools.map(toResponsesTool)
 
+    // ChatGPT Codex 后端：endpoint 形如 https://chatgpt.com/backend-api/codex
+    // 路径追加 /responses（对齐 codex-rs ResponsesApiRequest）
+    // OpenAI 官方：endpoint 形如 https://api.openai.com/v1，同样追加 /responses
+    const isCodexBackend = this.config.endpoint.includes('chatgpt.com/backend-api')
+
     const body: Record<string, unknown> = {
       model: params.model,
       instructions: params.systemPrompt,
       input,
+      tools,
+      tool_choice: 'auto',
+      parallel_tool_calls: false,
+      store: false,
       stream: true,
     }
 
-    if (params.maxTokens) {
+    // Codex 特有字段：reasoning 控制和 include（传递加密的 reasoning 上下文）
+    if (isCodexBackend) {
+      body.reasoning = { effort: 'medium', summary: 'auto' }
+      body.include = ['reasoning.encrypted_content']
+    }
+
+    // max_output_tokens 对 Codex 无效，仅 OpenAI 官方 Responses API 支持
+    if (!isCodexBackend && params.maxTokens) {
       body.max_output_tokens = params.maxTokens
     }
 
-    if (tools.length > 0) {
-      body.tools = tools
-    }
-
     try {
-      const response = await fetch(`${this.config.endpoint}/v1/responses`, {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.config.apikey}`,
+      }
+      if (isCodexBackend && this.config.accountId) {
+        headers['ChatGPT-Account-Id'] = this.config.accountId
+      }
+
+      const response = await fetch(`${this.config.endpoint}/responses`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.config.apikey}`,
-        },
+        headers,
         body: JSON.stringify(body),
         signal: params.signal,
       })
@@ -145,7 +197,9 @@ export class OpenAIResponsesAdapter implements LLMAdapter {
       }
 
       let messageStarted = false
-      const activeFunctionCalls = new Map<string, { callId: string; name: string }>()
+      // Maps streamed item.id (fc_xxx) to the encoded block id ("call_xxx|fc_xxx") that
+      // we use internally so replay emits both id and call_id to the Responses API.
+      const activeFunctionCalls = new Map<string, { encodedId: string; name: string }>()
 
       for await (const { event, data } of readSSEEvents(response.body)) {
         let parsed: Record<string, unknown>
@@ -173,8 +227,9 @@ export class OpenAIResponsesAdapter implements LLMAdapter {
           case 'response.output_item.added': {
             const item = parsed.item as { type?: string; id?: string; call_id?: string; name?: string }
             if (item?.type === 'function_call' && item.id && item.call_id) {
-              activeFunctionCalls.set(item.id, { callId: item.call_id, name: item.name ?? '' })
-              yield { type: 'tool_use_start', id: item.call_id, name: item.name ?? '' }
+              const encodedId = `${item.call_id}|${item.id}`
+              activeFunctionCalls.set(item.id, { encodedId, name: item.name ?? '' })
+              yield { type: 'tool_use_start', id: encodedId, name: item.name ?? '' }
             }
             break
           }
@@ -184,7 +239,7 @@ export class OpenAIResponsesAdapter implements LLMAdapter {
             const delta = parsed.delta as string
             const fc = activeFunctionCalls.get(itemId)
             if (fc && delta) {
-              yield { type: 'tool_use_delta', id: fc.callId, inputJson: delta }
+              yield { type: 'tool_use_delta', id: fc.encodedId, inputJson: delta }
             }
             break
           }
@@ -193,7 +248,17 @@ export class OpenAIResponsesAdapter implements LLMAdapter {
             const itemId = parsed.item_id as string
             const fc = activeFunctionCalls.get(itemId)
             if (fc) {
-              yield { type: 'tool_use_end', id: fc.callId }
+              yield { type: 'tool_use_end', id: fc.encodedId }
+            }
+            break
+          }
+
+          case 'response.output_item.done': {
+            // Capture reasoning items so we can replay them (with encrypted_content)
+            // in subsequent turns. Required by Codex backend when include=['reasoning.encrypted_content'].
+            const item = parsed.item as Record<string, unknown> | undefined
+            if (item && typeof item.type === 'string' && (item.type === 'reasoning' || item.type.startsWith('reasoning.'))) {
+              yield { type: 'raw_reasoning', data: { ...item } }
             }
             break
           }
@@ -204,7 +269,11 @@ export class OpenAIResponsesAdapter implements LLMAdapter {
               usage?: { input_tokens?: number; output_tokens?: number }
             } | undefined
 
-            const hasToolCalls = resp?.output?.some(item => item.type === 'function_call') ?? false
+            // Trust the stream: if a function_call item was emitted, the stop reason is tool_use.
+            // This guards against edge cases where response.completed.output omits the function_call type.
+            const hasToolCallsInOutput = resp?.output?.some(item => item.type === 'function_call') ?? false
+            const hasToolCallsInStream = activeFunctionCalls.size > 0
+            const hasToolCalls = hasToolCallsInOutput || hasToolCallsInStream
             const usage = resp?.usage
 
             yield {

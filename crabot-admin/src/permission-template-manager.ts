@@ -66,9 +66,9 @@ export class PermissionTemplateManager {
       {
         id: 'group_default',
         name: '群聊默认',
-        description: '群聊的默认权限配置',
+        description: '群聊的默认权限配置（除 desktop/computer-use 外全部开放）',
         is_system: true,
-        tool_access: { ...createToolAccessConfig(false), memory: true, messaging: true },
+        tool_access: { ...createToolAccessConfig(true), desktop: false },
         storage: null,
         memory_scopes: [],
         created_at: now,
@@ -98,24 +98,9 @@ export class PermissionTemplateManager {
       },
     ]
 
+    // 系统模板始终以代码定义为准（is_system 模板不允许用户编辑，磁盘持久化只是缓存）
     for (const template of systemTemplates) {
-      const existing = this.templates.get(template.id)
-      const shouldReplace =
-        !existing ||
-        !existing.tool_access ||
-        typeof existing.tool_access.desktop !== 'boolean'
-      if (shouldReplace) {
-        this.templates.set(template.id, template)
-        continue
-      }
-      // 非 master_private 的系统模板：强制关闭 desktop
-      if (existing.id !== 'master_private' && existing.tool_access.desktop === true) {
-        this.templates.set(existing.id, {
-          ...existing,
-          tool_access: { ...existing.tool_access, desktop: false },
-          updated_at: now,
-        })
-      }
+      this.templates.set(template.id, template)
     }
   }
 

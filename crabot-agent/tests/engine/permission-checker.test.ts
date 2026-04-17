@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { checkToolPermission } from '../../src/engine/permission-checker'
+import { checkToolPermission, filterToolsByPermission } from '../../src/engine/permission-checker'
 import { defineTool } from '../../src/engine/tool-framework'
 import { executeToolBatches } from '../../src/engine/tool-orchestration'
 import type { ToolDefinition, ToolPermissionConfig, PermissionDecision } from '../../src/engine/types'
@@ -101,6 +101,17 @@ describe('checkToolPermission', () => {
     const tool = makeTool('nuke', 'dangerous')
     const config: ToolPermissionConfig = { mode: 'bypass' }
     const result = await checkToolPermission('nuke', {}, tool, config)
+    expect(result).toEqual({ allowed: true })
+  })
+
+  it('dangerous tool with denyList (not listed) → allowed', async () => {
+    // denyList 已是用户明确声明，dangerous 的默认保护在此模式下不叠加
+    const tool = makeTool('bash', 'dangerous')
+    const config: ToolPermissionConfig = {
+      mode: 'denyList',
+      toolNames: ['write_file'],
+    }
+    const result = await checkToolPermission('bash', {}, tool, config)
     expect(result).toEqual({ allowed: true })
   })
 
@@ -216,5 +227,44 @@ describe('executeToolBatches with permission config (integration)', () => {
     expect(results).toHaveLength(1)
     expect(results[0].is_error).toBe(false)
     expect(results[0].content).toBe('write_file_ok')
+  })
+})
+
+describe('filterToolsByPermission', () => {
+  const read = makeTool('read_file')
+  const write = makeTool('write_file')
+  const bash = makeTool('bash')
+
+  it('undefined config → returns all tools', () => {
+    expect(filterToolsByPermission([read, write], undefined).map(t => t.name)).toEqual(['read_file', 'write_file'])
+  })
+
+  it('bypass mode → returns all tools', () => {
+    const result = filterToolsByPermission([read, write], { mode: 'bypass' })
+    expect(result.map(t => t.name)).toEqual(['read_file', 'write_file'])
+  })
+
+  it('denyList → drops listed tools', () => {
+    const result = filterToolsByPermission(
+      [read, write, bash],
+      { mode: 'denyList', toolNames: ['write_file', 'bash'] },
+    )
+    expect(result.map(t => t.name)).toEqual(['read_file'])
+  })
+
+  it('allowList → keeps only listed tools', () => {
+    const result = filterToolsByPermission(
+      [read, write, bash],
+      { mode: 'allowList', toolNames: ['read_file'] },
+    )
+    expect(result.map(t => t.name)).toEqual(['read_file'])
+  })
+
+  it('checkPermission callback → skips static filtering, returns all', () => {
+    const result = filterToolsByPermission(
+      [read, write],
+      { mode: 'denyList', toolNames: ['write_file'], checkPermission: async () => ({ allowed: true }) },
+    )
+    expect(result.map(t => t.name)).toEqual(['read_file', 'write_file'])
   })
 })

@@ -15,6 +15,7 @@ import {
   defineTool,
   getConfiguredBuiltinTools,
   ProgressDigest,
+  filterToolsByPermission,
 } from '../engine/index.js'
 import type {
   ToolDefinition,
@@ -115,6 +116,7 @@ function adapterFromSdkEnv(sdkEnv: SdkEnvConfig) {
     endpoint: sdkEnv.env.LLM_BASE_URL ?? '',
     apikey: sdkEnv.env.LLM_API_KEY ?? '',
     format: sdkEnv.format,
+    ...(sdkEnv.env.LLM_ACCOUNT_ID ? { accountId: sdkEnv.env.LLM_ACCOUNT_ID } : {}),
   })
 }
 
@@ -353,9 +355,11 @@ export class WorkerHandler {
       tools.push(...getConfiguredBuiltinTools(taskDir, this.builtinToolConfig, skills.length > 0 ? { skillsDir: taskDir } : undefined))
 
       // 3f. Sub-agent delegation tools
-      const baseTools = [...tools]
-      // 计算 sub-agent 的 permissionConfig（基于 baseTools 中需要拒绝的工具）
-      const subAgentPermissionConfig = this.deps?.getPermissionConfig?.(baseTools)
+      // 预过滤：被 deny 的工具不注入给 LLM（sub-agent 和 Worker 自己都拿过滤后的列表）
+      const baseToolsRaw = [...tools]
+      const permissionConfig: ToolPermissionConfig =
+        this.deps?.getPermissionConfig?.(baseToolsRaw) ?? { mode: 'bypass' }
+      const baseTools = filterToolsByPermission(baseToolsRaw, permissionConfig)
       const subAgentTraceConfig = traceContext ? {
         traceStore: traceContext.traceStore,
         parentTraceId: traceContext.traceId,
@@ -380,7 +384,7 @@ export class WorkerHandler {
           traceConfig: subAgentTraceConfig,
           hookRegistry,
           lspManager: hookRegistry ? this.lspManager : undefined,
-          permissionConfig: subAgentPermissionConfig,
+          permissionConfig,
         }))
       }
 
@@ -397,7 +401,7 @@ export class WorkerHandler {
         supportsVision: this.sdkEnv.supportsVision,
         parentHumanQueue: humanQueue,
         traceConfig: subAgentTraceConfig,
-        permissionConfig: subAgentPermissionConfig,
+        permissionConfig,
       }))
 
       // 3h. Trace search tool
@@ -419,11 +423,14 @@ export class WorkerHandler {
       let loopSpanId: string | undefined
       const taskOrigin = context.task_origin
 
+      // 预过滤：无权限工具不注入 LLM（仅过滤一次，loop span 和 runEngine 复用同一列表）
+      const finalTools = filterToolsByPermission(tools, permissionConfig)
+
       // Start loop span
       loopSpanId = traceCallback?.onLoopStart('worker', {
         system_prompt: undefined,
         model: this.sdkEnv.modelId,
-        tools: tools.map(t => t.name),
+        tools: finalTools.map(t => t.name),
       })
 
       // 创建进度汇报（根据会话场景分支）
@@ -500,14 +507,12 @@ export class WorkerHandler {
       }
 
       // 7. Run engine
-      const permissionConfig: ToolPermissionConfig =
-        this.deps?.getPermissionConfig?.(tools) ?? { mode: 'bypass' }
       const engineResult = await runEngine({
         prompt: taskMessage,
         adapter,
         options: {
           systemPrompt,
-          tools,
+          tools: finalTools,
           model: this.sdkEnv.modelId,
           supportsVision: this.sdkEnv.supportsVision,
           permissionConfig,

@@ -52,16 +52,20 @@ const DASHSCOPE_MODELS: ModelInfo[] = [
  * 百炼 Coding Plan 提供 Anthropic 兼容接口，不支持 GET /models
  */
 /**
- * ChatGPT 订阅模型列表
+ * ChatGPT 订阅模型列表（Codex 后端）
+ *
  * 通过 OAuth 认证后可用的模型（ChatGPT Plus/Pro/Enterprise）
+ * 请求走 Responses API：https://chatgpt.com/backend-api/codex/responses
+ * 参考：openai/codex 源码及 openclaw 的 openai-codex-provider 实现
  */
 const CHATGPT_SUBSCRIPTION_MODELS: ModelInfo[] = [
-  { model_id: 'gpt-4o', display_name: 'GPT-4o', type: 'llm', supports_vision: true, context_window: 128000 },
-  { model_id: 'gpt-4o-mini', display_name: 'GPT-4o Mini', type: 'llm', supports_vision: true, context_window: 128000 },
-  { model_id: 'o3', display_name: 'o3', type: 'llm', supports_vision: false, context_window: 200000 },
-  { model_id: 'o3-mini', display_name: 'o3 Mini', type: 'llm', supports_vision: false, context_window: 200000 },
-  { model_id: 'o4-mini', display_name: 'o4 Mini', type: 'llm', supports_vision: true, context_window: 200000 },
-  { model_id: 'codex-mini', display_name: 'Codex Mini', type: 'llm', supports_vision: false, context_window: 200000 },
+  { model_id: 'gpt-5.4', display_name: 'GPT-5.4', type: 'llm', supports_vision: true, context_window: 272000 },
+  { model_id: 'gpt-5.4-codex', display_name: 'GPT-5.4 Codex (alias)', type: 'llm', supports_vision: true, context_window: 272000 },
+  { model_id: 'gpt-5.4-pro', display_name: 'GPT-5.4 Pro', type: 'llm', supports_vision: true, context_window: 272000 },
+  { model_id: 'gpt-5.4-mini', display_name: 'GPT-5.4 Mini', type: 'llm', supports_vision: true, context_window: 272000 },
+  { model_id: 'gpt-5.3-codex', display_name: 'GPT-5.3 Codex', type: 'llm', supports_vision: true, context_window: 272000 },
+  { model_id: 'gpt-5.3-codex-spark', display_name: 'GPT-5.3 Codex Spark', type: 'llm', supports_vision: false, context_window: 128000 },
+  { model_id: 'gpt-5.2-codex', display_name: 'GPT-5.2 Codex', type: 'llm', supports_vision: true, context_window: 272000 },
 ]
 
 /**
@@ -91,6 +95,7 @@ export const PRESET_VENDORS: readonly PresetVendor[] = [
     name: 'ChatGPT 订阅',
     format: 'openai-responses',
     endpoint: 'https://chatgpt.com/backend-api/codex',
+    models_api: '/models',
     docs_url: 'https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan',
     default_models: CHATGPT_SUBSCRIPTION_MODELS,
     auth_type: 'oauth',

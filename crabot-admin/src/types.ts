@@ -919,6 +919,8 @@ export interface ModelConnectionInfo {
   format: ApiFormat
   /** 供应商 ID */
   provider_id?: string
+  /** ChatGPT OAuth 账号 ID（仅 openai-responses + ChatGPT 订阅） */
+  account_id?: string
 }
 
 /**

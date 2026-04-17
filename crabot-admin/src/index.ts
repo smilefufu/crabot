@@ -3372,6 +3372,15 @@ export class AdminModule extends ModuleBase {
         email: this.lastOAuthResult.email,
       })
       this.lastOAuthResult = null
+
+      // OAuth 凭证已 attach，用 access_token 拉取真实模型列表
+      try {
+        const refreshed = await this.modelProviderManager.refreshModels(result.provider.id)
+        result.models = refreshed.models
+        result.provider.models = refreshed.models
+      } catch (err) {
+        console.warn(`[Admin] OAuth provider 模型列表刷新失败（继续使用默认列表）:`, err)
+      }
     }
 
     this.publishAdminEvent('admin.model_provider_created', { provider: result.provider })

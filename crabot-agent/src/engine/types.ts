@@ -30,7 +30,17 @@ export interface ToolResultBlock {
   readonly is_error: boolean
 }
 
-export type ContentBlock = TextBlock | ImageBlock | ToolUseBlock | ToolResultBlock
+/**
+ * Raw reasoning block for OpenAI Responses API (Codex backend).
+ * Stores the full reasoning item JSON so it can be replayed back in subsequent turns.
+ * Other adapters ignore this block type.
+ */
+export interface RawReasoningBlock {
+  readonly type: 'raw_reasoning'
+  readonly data: Record<string, unknown>
+}
+
+export type ContentBlock = TextBlock | ImageBlock | ToolUseBlock | ToolResultBlock | RawReasoningBlock
 
 // --- Messages ---
 
@@ -126,6 +136,7 @@ export type StreamChunk =
   | { readonly type: 'tool_use_start'; readonly id: string; readonly name: string }
   | { readonly type: 'tool_use_delta'; readonly id: string; readonly inputJson: string }
   | { readonly type: 'tool_use_end'; readonly id: string }
+  | { readonly type: 'raw_reasoning'; readonly data: Record<string, unknown> }
   | { readonly type: 'message_start'; readonly messageId: string }
   | { readonly type: 'message_end'; readonly stopReason: string | null; readonly usage?: { readonly inputTokens: number; readonly outputTokens: number } }
   | { readonly type: 'error'; readonly error: string }

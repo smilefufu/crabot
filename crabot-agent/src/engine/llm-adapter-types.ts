@@ -30,6 +30,7 @@ export interface LLMAdapter {
 export interface LLMAdapterConfig {
   readonly endpoint: string
   readonly apikey: string
+  readonly accountId?: string
 }
 
 export interface LLMCallResponse {
@@ -60,6 +61,8 @@ export async function callNonStreaming(
   const result = processor.finalize()
   return {
     content: [
+      // Reasoning items come first so they precede text/tool_use when replayed to Codex
+      ...result.reasoningBlocks,
       ...(result.text ? [{ type: 'text' as const, text: result.text }] : []),
       ...result.toolUseBlocks,
     ],

@@ -1,9 +1,10 @@
 import { jsonrepair } from 'jsonrepair'
-import type { StreamChunk, ToolUseBlock } from './types'
+import type { StreamChunk, ToolUseBlock, RawReasoningBlock } from './types'
 
 export interface ProcessedResponse {
   readonly text: string
   readonly toolUseBlocks: ReadonlyArray<ToolUseBlock>
+  readonly reasoningBlocks: ReadonlyArray<RawReasoningBlock>
   readonly stopReason: string | null
   readonly usage?: { readonly inputTokens: number; readonly outputTokens: number }
 }
@@ -17,6 +18,7 @@ interface ToolUseBuffer {
 export class StreamProcessor {
   private textParts: string[] = []
   private toolUseBlocks: ToolUseBlock[] = []
+  private reasoningBlocks: RawReasoningBlock[] = []
   private activeToolBuffers: Map<string, ToolUseBuffer> = new Map()
   private stopReason: string | null = null
   private usage: { inputTokens: number; outputTokens: number } | undefined = undefined
@@ -58,6 +60,10 @@ export class StreamProcessor {
         break
       }
 
+      case 'raw_reasoning':
+        this.reasoningBlocks.push({ type: 'raw_reasoning', data: chunk.data })
+        break
+
       case 'message_end':
         this.stopReason = chunk.stopReason
         if (chunk.usage) {
@@ -76,6 +82,7 @@ export class StreamProcessor {
     return {
       text: this.textParts.join(''),
       toolUseBlocks: [...this.toolUseBlocks],
+      reasoningBlocks: [...this.reasoningBlocks],
       stopReason: this.stopReason,
       ...(this.usage !== undefined ? { usage: { ...this.usage } } : {}),
     }
@@ -84,6 +91,7 @@ export class StreamProcessor {
   reset(): void {
     this.textParts = []
     this.toolUseBlocks = []
+    this.reasoningBlocks = []
     this.activeToolBuffers = new Map()
     this.stopReason = null
     this.usage = undefined

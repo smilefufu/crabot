@@ -1,6 +1,26 @@
 import type { ToolDefinition, ToolPermissionConfig, PermissionDecision } from './types'
 
 /**
+ * Pre-filter tools before injecting them to the LLM.
+ * Tools in the deny list (or outside an allow list) are dropped so the LLM
+ * never sees them. Unused when checkPermission callback is set (dynamic decisions
+ * can't be evaluated statically) or when mode is bypass.
+ */
+export function filterToolsByPermission<T extends ToolDefinition>(
+  tools: ReadonlyArray<T>,
+  config?: ToolPermissionConfig,
+): T[] {
+  if (!config || config.mode === 'bypass' || config.checkPermission) {
+    return [...tools]
+  }
+  const names = new Set(config.toolNames ?? [])
+  if (config.mode === 'allowList') {
+    return tools.filter(t => names.has(t.name))
+  }
+  return tools.filter(t => !names.has(t.name))
+}
+
+/**
  * Check whether a tool call is permitted under the given permission config.
  *
  * Logic:
@@ -50,19 +70,12 @@ export async function checkToolPermission(
     }
   }
 
-  // denyList
+  // denyList: 用户已明确声明禁用清单，视为已接管权限决策；
+  // dangerous 的默认保护只在"无 config"场景生效，此处不再叠加。
   if (isInList) {
     return {
       allowed: false,
       reason: `Tool '${toolName}' is in the deny list`,
-    }
-  }
-
-  // Not in deny list, but check if dangerous
-  if (tool.permissionLevel === 'dangerous') {
-    return {
-      allowed: false,
-      reason: `Tool '${toolName}' is marked as dangerous and requires explicit permission`,
     }
   }
 

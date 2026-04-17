@@ -310,9 +310,14 @@ export class ModelProviderManager {
       throw new Error(`Unknown vendor: ${provider.preset_vendor}`)
     }
 
+    // OAuth provider 使用当前 access_token；apikey provider 使用配置的 api_key
+    const authToken = provider.auth_type === 'oauth'
+      ? provider.oauth_credential?.access_token ?? ''
+      : provider.api_key
+
     const freshModels = await this.fetchVendorModels(
       { ...vendor, endpoint: provider.endpoint },
-      provider.api_key
+      authToken
     )
 
     const oldIds = new Set(provider.models.map(m => m.model_id))
@@ -526,6 +531,11 @@ export class ModelProviderManager {
       return vendor.default_models ? [...vendor.default_models] : []
     }
 
+    // 无凭证时用静态列表兜底（OAuth provider 首次导入前没有 token）
+    if (!apiKey) {
+      return vendor.default_models ? [...vendor.default_models] : []
+    }
+
     try {
       const response = await this.httpRequest(`${vendor.endpoint}${vendor.models_api}`, {
         method: 'GET',
@@ -537,31 +547,47 @@ export class ModelProviderManager {
       const data = JSON.parse(response)
       const models: ModelInfo[] = []
 
-      // OpenAI 格式的模型列表
-      if (data.data && Array.isArray(data.data)) {
-        for (const item of data.data) {
-          const modelId = item.id || item.model
-          if (!modelId) continue
+      // OpenAI 格式：{data: [{id, ...}]}
+      // Codex 格式：{models: [{slug, display_name, ...}]}
+      const rawList: unknown[] = Array.isArray(data.data)
+        ? data.data
+        : Array.isArray(data.models)
+        ? data.models
+        : []
 
-          // 判断模型类型
-          const isEmbedding = modelId.includes('embedding') || modelId.includes('embed')
-          const type: ModelType = isEmbedding ? 'embedding' : 'llm'
+      for (const raw of rawList) {
+        const item = raw as Record<string, unknown>
+        const modelId = (item.id as string) || (item.model as string) || (item.slug as string)
+        if (!modelId) continue
 
-          models.push({
-            model_id: modelId,
-            display_name: item.name || modelId,
-            type,
-            supports_vision: item.capabilities?.vision || false,
-            // OpenRouter 用 context_length，OpenAI 用 context_window
-            context_window: item.context_window ?? item.context_length,
-          })
-        }
+        const isEmbedding = modelId.includes('embedding') || modelId.includes('embed')
+        const type: ModelType = isEmbedding ? 'embedding' : 'llm'
+
+        const capabilities = item.capabilities as { vision?: boolean } | undefined
+        const modalities = item.input as string[] | undefined
+        const supportsVision = capabilities?.vision === true
+          || (Array.isArray(modalities) && modalities.includes('image'))
+
+        models.push({
+          model_id: modelId,
+          display_name: (item.display_name as string) || (item.name as string) || modelId,
+          type,
+          supports_vision: supportsVision,
+          context_window: (item.context_window as number | undefined)
+            ?? (item.context_length as number | undefined)
+            ?? (item.context_tokens as number | undefined),
+        })
+      }
+
+      // 拉不到任何模型时，退回默认列表，避免清空导致用户无法选择
+      if (models.length === 0 && vendor.default_models) {
+        return [...vendor.default_models]
       }
 
       return models
     } catch (error) {
       console.error(`Failed to fetch models from ${vendor.name}:`, error)
-      return []
+      return vendor.default_models ? [...vendor.default_models] : []
     }
   }
 
@@ -654,6 +680,9 @@ export class ModelProviderManager {
       model_id: model.model_id,
       format: provider.format,
       provider_id: providerId,
+      ...(provider.oauth_credential?.account_id
+        ? { account_id: provider.oauth_credential.account_id }
+        : {}),
     }
 
     if (model.dimension !== undefined) {

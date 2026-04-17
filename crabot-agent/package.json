@@ -21,9 +21,9 @@
   "author": "Crabot Team",
   "license": "Apache-2.0",
   "dependencies": {
-    "crabot-shared": "file:../crabot-shared",
     "@anthropic-ai/sdk": "^0.30.1",
     "@modelcontextprotocol/sdk": "^1.27.1",
+    "crabot-shared": "file:../crabot-shared",
     "fast-glob": "^3.3.3",
     "js-yaml": "^4.1.1",
     "jsonrepair": "^3.13.3",
@@ -39,6 +39,7 @@
     "@vitest/coverage-v8": "^1.0.0",
     "ts-node": "^10.9.0",
     "typescript": "^5.0.0",
+    "undici": "^8.1.0",
     "vitest": "^1.0.0"
   }
 }

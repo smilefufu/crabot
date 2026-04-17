@@ -39,7 +39,7 @@ export { defineTool, findTool, partitionToolCalls } from './tool-framework'
 export { executeToolBatches } from './tool-orchestration'
 
 // --- Permission Checker ---
-export { checkToolPermission } from './permission-checker'
+export { checkToolPermission, filterToolsByPermission } from './permission-checker'
 
 // --- Stream Processor ---
 export { StreamProcessor } from './stream-processor'

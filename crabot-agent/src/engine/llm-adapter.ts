@@ -44,6 +44,7 @@ export interface CreateAdapterConfig {
   readonly endpoint: string
   readonly apikey: string
   readonly format: LLMFormat
+  readonly accountId?: string
 }
 
 export function createAdapter(config: CreateAdapterConfig): LLMAdapter {
@@ -55,7 +56,11 @@ export function createAdapter(config: CreateAdapterConfig): LLMAdapter {
     case 'gemini':
       return new OpenAIAdapter({ endpoint: config.endpoint, apikey: config.apikey })
     case 'openai-responses':
-      return new OpenAIResponsesAdapter({ endpoint: config.endpoint, apikey: config.apikey })
+      return new OpenAIResponsesAdapter({
+        endpoint: config.endpoint,
+        apikey: config.apikey,
+        ...(config.accountId ? { accountId: config.accountId } : {}),
+      })
     default: {
       const exhaustiveCheck: never = config.format
       throw new Error(`Unsupported LLM format: ${exhaustiveCheck}`)

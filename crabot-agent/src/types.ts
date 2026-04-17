@@ -474,6 +474,8 @@ export interface LLMConnectionInfo {
   format: 'anthropic' | 'openai' | 'gemini' | 'openai-responses'
   max_tokens?: number
   supports_vision?: boolean
+  /** ChatGPT OAuth 账号 ID（仅 openai-responses + ChatGPT 订阅需要） */
+  account_id?: string
 }
 
 export interface MCPServerConfig {

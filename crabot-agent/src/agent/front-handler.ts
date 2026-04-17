@@ -87,11 +87,12 @@ export class FrontHandler {
     }
   }
 
-  updateLlmConfig(config: { endpoint?: string; apikey?: string; model?: string }): void {
-    if (config.endpoint !== undefined || config.apikey !== undefined) {
+  updateLlmConfig(config: { endpoint?: string; apikey?: string; accountId?: string; model?: string }): void {
+    if (config.endpoint !== undefined || config.apikey !== undefined || config.accountId !== undefined) {
       this.adapter.updateConfig({
         ...(config.endpoint !== undefined ? { endpoint: config.endpoint } : {}),
         ...(config.apikey !== undefined ? { apikey: config.apikey } : {}),
+        ...(config.accountId !== undefined ? { accountId: config.accountId } : {}),
       })
     }
     if (config.model !== undefined) {

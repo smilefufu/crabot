@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import {
   normalizeMessagesForAnthropic,
   normalizeMessagesForOpenAI,
@@ -6,9 +6,11 @@ import {
   readSSELines,
   AnthropicAdapter,
   OpenAIAdapter,
+  OpenAIResponsesAdapter,
   createAdapter,
   type LLMAdapterConfig,
 } from '../../src/engine/llm-adapter'
+import type { StreamChunk } from '../../src/engine/types'
 import {
   createUserMessage,
   createAssistantMessage,
@@ -700,6 +702,96 @@ describe('OpenAIAdapter', () => {
       adapter.updateConfig({ endpoint: 'http://localhost:5000' })
       expect(adapter).toBeDefined()
     })
+  })
+})
+
+describe('OpenAIResponsesAdapter.stream', () => {
+  const originalFetch = global.fetch
+  afterEach(() => {
+    global.fetch = originalFetch
+  })
+
+  function makeSSEResponse(events: Array<{ event: string; data: Record<string, unknown> }>): Response {
+    const encoder = new TextEncoder()
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const { event, data } of events) {
+          controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`))
+        }
+        controller.close()
+      },
+    })
+    return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+  }
+
+  async function collectChunks(adapter: OpenAIResponsesAdapter): Promise<StreamChunk[]> {
+    const chunks: StreamChunk[] = []
+    for await (const c of adapter.stream({
+      messages: [],
+      systemPrompt: '',
+      tools: [],
+      model: 'gpt-5.4',
+    })) {
+      chunks.push(c)
+    }
+    return chunks
+  }
+
+  it('treats stream as tool_use when function_call was streamed even if response.completed.output omits it', async () => {
+    const events = [
+      { event: 'response.created', data: { response: { id: 'resp_1' } } },
+      {
+        event: 'response.output_item.added',
+        data: { item: { type: 'function_call', id: 'fc_abc', call_id: 'call_xyz', name: 'reply' } },
+      },
+      {
+        event: 'response.function_call_arguments.delta',
+        data: { item_id: 'fc_abc', delta: '{"text":"hi"}' },
+      },
+      { event: 'response.function_call_arguments.done', data: { item_id: 'fc_abc' } },
+      // Simulate the quirk: response.completed.output has NO function_call entry
+      {
+        event: 'response.completed',
+        data: {
+          response: {
+            output: [{ type: 'message' }],
+            usage: { input_tokens: 10, output_tokens: 5 },
+          },
+        },
+      },
+    ]
+    global.fetch = vi.fn().mockResolvedValue(makeSSEResponse(events)) as unknown as typeof fetch
+
+    const adapter = new OpenAIResponsesAdapter({ endpoint: 'https://api.openai.com/v1', apikey: 'k' })
+    const chunks = await collectChunks(adapter)
+
+    const messageEnd = chunks.find((c): c is Extract<StreamChunk, { type: 'message_end' }> => c.type === 'message_end')
+    expect(messageEnd).toBeDefined()
+    expect(messageEnd!.stopReason).toBe('tool_use')
+  })
+
+  it('reports end_turn when no function_call was streamed', async () => {
+    const events = [
+      { event: 'response.created', data: { response: { id: 'resp_2' } } },
+      { event: 'response.output_text.delta', data: { delta: 'Hello' } },
+      {
+        event: 'response.completed',
+        data: {
+          response: {
+            output: [{ type: 'message' }],
+            usage: { input_tokens: 4, output_tokens: 2 },
+          },
+        },
+      },
+    ]
+    global.fetch = vi.fn().mockResolvedValue(makeSSEResponse(events)) as unknown as typeof fetch
+
+    const adapter = new OpenAIResponsesAdapter({ endpoint: 'https://api.openai.com/v1', apikey: 'k' })
+    const chunks = await collectChunks(adapter)
+
+    const messageEnd = chunks.find((c): c is Extract<StreamChunk, { type: 'message_end' }> => c.type === 'message_end')
+    expect(messageEnd).toBeDefined()
+    expect(messageEnd!.stopReason).toBe('end_turn')
   })
 })
 

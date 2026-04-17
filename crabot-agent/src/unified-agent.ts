@@ -59,6 +59,21 @@ import type { SupplementTaskDecision } from './types.js'
 const BARRIER_TIMEOUT_MS = 8_000
 
 /**
+ * fail-closed 兜底：权限解析失败时用最小权限（仅 messaging），避免未绑定模板或 Admin 不可用时放开全部工具。
+ */
+const FAIL_CLOSED_TOOL_ACCESS: ToolAccessConfig = {
+  memory: false,
+  messaging: true,
+  task: false,
+  mcp_skill: false,
+  file_io: false,
+  browser: false,
+  shell: false,
+  remote_exec: false,
+  desktop: false,
+}
+
+/**
  * Map ToolAccessConfig to engine's ToolPermissionConfig denyList.
  */
 function toToolPermissionConfig(
@@ -251,6 +266,7 @@ export class UnifiedAgent extends ModuleBase {
           endpoint: frontModelConfig.endpoint,
           apikey: frontModelConfig.apikey,
           format: frontModelConfig.format as LLMFormat,
+          ...(frontModelConfig.account_id ? { accountId: frontModelConfig.account_id } : {}),
         })
         const llmConfig: FrontHandlerLlmConfig = {
           adapter,
@@ -312,6 +328,7 @@ export class UnifiedAgent extends ModuleBase {
       env: {
         LLM_BASE_URL: connInfo.endpoint,
         LLM_API_KEY: connInfo.apikey || 'dummy-key',
+        ...(connInfo.account_id ? { LLM_ACCOUNT_ID: connInfo.account_id } : {}),
       },
     }
   }
@@ -1027,10 +1044,9 @@ export class UnifiedAgent extends ModuleBase {
    * Get current session's tool permission config for worker use
    */
   getToolPermissionConfig(tools: ReadonlyArray<EngineToolDefinition>): ToolPermissionConfig {
-    if (!this.currentResolvedPerms) {
-      return { mode: 'bypass' }
-    }
-    return toToolPermissionConfig(this.currentResolvedPerms.tool_access, tools)
+    // fail-closed：权限解析失败时按最小权限兜底，不放开全部工具
+    const toolAccess = this.currentResolvedPerms?.tool_access ?? FAIL_CLOSED_TOOL_ACCESS
+    return toToolPermissionConfig(toolAccess, tools)
   }
 
   /**
@@ -2032,6 +2048,7 @@ export class UnifiedAgent extends ModuleBase {
             endpoint: frontConfig.endpoint,
             apikey: frontConfig.apikey,
             model: frontConfig.model_id,
+            ...(frontConfig.account_id ? { accountId: frontConfig.account_id } : {}),
           })
           console.log(`[${this.config.moduleId}] Front Agent LLM config updated`)
         } else {
@@ -2039,6 +2056,7 @@ export class UnifiedAgent extends ModuleBase {
             endpoint: frontConfig.endpoint,
             apikey: frontConfig.apikey,
             format: frontConfig.format as LLMFormat,
+            ...(frontConfig.account_id ? { accountId: frontConfig.account_id } : {}),
           })
           const llmConfig: FrontHandlerLlmConfig = {
             adapter,

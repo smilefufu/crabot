@@ -114,7 +114,10 @@ export async function runFrontLoop(params: FrontLoopParams): Promise<FrontLoopRe
         }
 
         // 私聊/被@场景下 LLM 没输出文本也没调决策工具，注入提示让它重试
-        messages.push(createAssistantMessage(response.content, 'end_turn', response.usage))
+        // Strip tool_use blocks so orphan function_calls don't poison the next request
+        // (Codex/Responses API rejects function_call without matching function_call_output)
+        const safeContent = response.content.filter(b => b.type !== 'tool_use')
+        messages.push(createAssistantMessage(safeContent, 'end_turn', response.usage))
         messages.push(createUserMessage('你必须调用一个决策工具（reply / create_task）输出决策，不能留空。请现在调用。'))
         continue
       }
