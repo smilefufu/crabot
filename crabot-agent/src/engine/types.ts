@@ -68,7 +68,16 @@ export type EngineMessage = EngineUserMessage | EngineAssistantMessage | EngineT
 
 export type ToolPermissionLevel = 'safe' | 'normal' | 'dangerous'
 
-export type ToolCategory = 'memory' | 'messaging' | 'task' | 'mcp_skill' | 'file_io' | 'browser' | 'shell' | 'remote_exec'
+export type ToolCategory =
+  | 'memory'
+  | 'messaging'
+  | 'task'
+  | 'mcp_skill'
+  | 'file_io'
+  | 'browser'
+  | 'shell'
+  | 'remote_exec'
+  | 'desktop'
 
 export type PermissionMode =
   | 'bypass'       // All tools allowed (for trusted contexts like admin chat)

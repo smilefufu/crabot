@@ -47,7 +47,16 @@ export interface Friend {
 // ============================================================================
 
 /** 工具类别 */
-export type ToolCategory = 'memory' | 'messaging' | 'task' | 'mcp_skill' | 'file_io' | 'browser' | 'shell' | 'remote_exec'
+export type ToolCategory =
+  | 'memory'
+  | 'messaging'
+  | 'task'
+  | 'mcp_skill'
+  | 'file_io'
+  | 'browser'
+  | 'shell'
+  | 'remote_exec'
+  | 'desktop'
 
 /** 工具访问配置（按类别控制） */
 export interface ToolAccessConfig {
@@ -59,6 +68,8 @@ export interface ToolAccessConfig {
   browser: boolean
   shell: boolean
   remote_exec: boolean
+  /** 桌面控制：键盘、鼠标、截屏等 OS 级操作（computer-use 类工具）。仅 master_private 模板可开启 */
+  desktop: boolean
 }
 
 /** 存储权限 */
@@ -69,7 +80,7 @@ export interface StoragePermission {
 
 /** 所有工具类别的键列表（用于遍历和验证） */
 export const TOOL_CATEGORIES: readonly ToolCategory[] = [
-  'memory', 'messaging', 'task', 'mcp_skill', 'file_io', 'browser', 'shell', 'remote_exec',
+  'memory', 'messaging', 'task', 'mcp_skill', 'file_io', 'browser', 'shell', 'remote_exec', 'desktop',
 ] as const
 
 /** 创建一个所有类别都为指定值的 ToolAccessConfig */
@@ -83,6 +94,7 @@ export function createToolAccessConfig(defaultValue: boolean): ToolAccessConfig 
     browser: defaultValue,
     shell: defaultValue,
     remote_exec: defaultValue,
+    desktop: defaultValue,
   }
 }
 

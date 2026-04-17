@@ -23,6 +23,7 @@ import type {
   ContentBlock,
   ProgressDigestConfig,
   ProgressDigestDeps,
+  ToolPermissionConfig,
 } from '../engine/index.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod/v4'
@@ -87,6 +88,11 @@ export interface WorkerDeps {
   moduleId: string
   resolveChannelPort: (channelId: string) => Promise<number>
   getMemoryPort: () => Promise<number>
+  /**
+   * 返回当前 session 的 permissionConfig（基于 session 模板 + 覆盖）。
+   * 未配置时返回 { mode: 'bypass' }（向后兼容）。
+   */
+  getPermissionConfig?: (tools: ReadonlyArray<ToolDefinition>) => ToolPermissionConfig
 }
 
 import type { LLMFormat } from '../engine/llm-adapter'
@@ -348,6 +354,8 @@ export class WorkerHandler {
 
       // 3f. Sub-agent delegation tools
       const baseTools = [...tools]
+      // 计算 sub-agent 的 permissionConfig（基于 baseTools 中需要拒绝的工具）
+      const subAgentPermissionConfig = this.deps?.getPermissionConfig?.(baseTools)
       const subAgentTraceConfig = traceContext ? {
         traceStore: traceContext.traceStore,
         parentTraceId: traceContext.traceId,
@@ -372,6 +380,7 @@ export class WorkerHandler {
           traceConfig: subAgentTraceConfig,
           hookRegistry,
           lspManager: hookRegistry ? this.lspManager : undefined,
+          permissionConfig: subAgentPermissionConfig,
         }))
       }
 
@@ -388,6 +397,7 @@ export class WorkerHandler {
         supportsVision: this.sdkEnv.supportsVision,
         parentHumanQueue: humanQueue,
         traceConfig: subAgentTraceConfig,
+        permissionConfig: subAgentPermissionConfig,
       }))
 
       // 3h. Trace search tool
@@ -490,6 +500,8 @@ export class WorkerHandler {
       }
 
       // 7. Run engine
+      const permissionConfig: ToolPermissionConfig =
+        this.deps?.getPermissionConfig?.(tools) ?? { mode: 'bypass' }
       const engineResult = await runEngine({
         prompt: taskMessage,
         adapter,
@@ -498,8 +510,7 @@ export class WorkerHandler {
           tools,
           model: this.sdkEnv.modelId,
           supportsVision: this.sdkEnv.supportsVision,
-          // TODO: Wire resolved permissions from unified-agent (currently bypass)
-          permissionConfig: { mode: 'bypass' },
+          permissionConfig,
           abortSignal: taskState.abortController.signal as AbortSignal,
           humanMessageQueue: humanQueue,
           hookRegistry: workerHookRegistry,

@@ -397,6 +397,7 @@ export class UnifiedAgent extends ModuleBase {
         moduleId: this.config.moduleId,
         resolveChannelPort: (channelId) => this.getChannelPort(channelId),
         getMemoryPort: () => this.getMemoryPort(),
+        getPermissionConfig: (tools) => this.getToolPermissionConfig(tools),
       },
       builtinToolConfig,
       mcpConnector: this.mcpConnector,

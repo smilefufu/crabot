@@ -20,8 +20,25 @@ export class PermissionTemplateManager {
   loadFromArray(data: PermissionTemplate[]): void {
     this.templates.clear()
     for (const t of data) {
-      this.templates.set(t.id, t)
+      this.templates.set(t.id, this.normalize(t))
     }
+  }
+
+  /** 迁移旧数据：补齐缺失的 desktop 字段（默认 false，master_private 除外在 initSystemTemplates 时回填） */
+  private normalize(t: PermissionTemplate): PermissionTemplate {
+    if (!t.tool_access) return t
+    if (typeof t.tool_access.desktop === 'boolean') return t
+    return {
+      ...t,
+      tool_access: { ...t.tool_access, desktop: false },
+    }
+  }
+
+  /** 非 master_private 模板的 desktop 必须为 false */
+  private enforceDesktopPolicy(templateId: string | null, toolAccess: ToolAccessConfig): ToolAccessConfig {
+    if (templateId === 'master_private') return toolAccess
+    if (toolAccess.desktop !== true) return toolAccess
+    return { ...toolAccess, desktop: false }
   }
 
   toArray(): PermissionTemplate[] {
@@ -83,9 +100,21 @@ export class PermissionTemplateManager {
 
     for (const template of systemTemplates) {
       const existing = this.templates.get(template.id)
-      // 覆盖：不存在 或 旧格式（缺少 tool_access）
-      if (!existing || !existing.tool_access) {
+      const shouldReplace =
+        !existing ||
+        !existing.tool_access ||
+        typeof existing.tool_access.desktop !== 'boolean'
+      if (shouldReplace) {
         this.templates.set(template.id, template)
+        continue
+      }
+      // 非 master_private 的系统模板：强制关闭 desktop
+      if (existing.id !== 'master_private' && existing.tool_access.desktop === true) {
+        this.templates.set(existing.id, {
+          ...existing,
+          tool_access: { ...existing.tool_access, desktop: false },
+          updated_at: now,
+        })
       }
     }
   }
@@ -101,12 +130,13 @@ export class PermissionTemplateManager {
 
   create(params: CreatePermissionTemplateParams): PermissionTemplate {
     const now = generateTimestamp()
+    const id = generateId()
     const template: PermissionTemplate = {
-      id: generateId(),
+      id,
       name: params.name,
       description: params.description,
       is_system: false,
-      tool_access: params.tool_access,
+      tool_access: this.enforceDesktopPolicy(id, params.tool_access),
       storage: params.storage ?? null,
       memory_scopes: params.memory_scopes ?? [],
       created_at: now,
@@ -128,7 +158,7 @@ export class PermissionTemplateManager {
       ...existing,
       ...(params.name !== undefined ? { name: params.name } : {}),
       ...(params.description !== undefined ? { description: params.description } : {}),
-      ...(params.tool_access !== undefined ? { tool_access: params.tool_access } : {}),
+      ...(params.tool_access !== undefined ? { tool_access: this.enforceDesktopPolicy(existing.id, params.tool_access) } : {}),
       ...(params.storage !== undefined ? { storage: params.storage } : {}),
       ...(params.memory_scopes !== undefined ? { memory_scopes: params.memory_scopes } : {}),
       updated_at: generateTimestamp(),

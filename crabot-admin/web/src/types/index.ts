@@ -349,7 +349,16 @@ export interface UpdateChannelConfigParams {
 // Permission System
 // ============================================================================
 
-export type ToolCategory = 'memory' | 'messaging' | 'task' | 'mcp_skill' | 'file_io' | 'browser' | 'shell' | 'remote_exec'
+export type ToolCategory =
+  | 'memory'
+  | 'messaging'
+  | 'task'
+  | 'mcp_skill'
+  | 'file_io'
+  | 'browser'
+  | 'shell'
+  | 'remote_exec'
+  | 'desktop'
 
 export interface ToolAccessConfig {
   memory: boolean
@@ -360,6 +369,8 @@ export interface ToolAccessConfig {
   browser: boolean
   shell: boolean
   remote_exec: boolean
+  /** 桌面控制（computer-use）：仅 master_private 模板可开启 */
+  desktop: boolean
 }
 
 export interface StoragePermission {
@@ -389,10 +400,11 @@ export const TOOL_CATEGORY_LABELS: Record<ToolCategory, string> = {
   browser: '浏览器',
   shell: '本地命令',
   remote_exec: '远程执行',
+  desktop: '桌面控制（仅 Master 私聊）',
 }
 
 export const TOOL_CATEGORIES: readonly ToolCategory[] = [
-  'memory', 'messaging', 'task', 'mcp_skill', 'file_io', 'browser', 'shell', 'remote_exec',
+  'memory', 'messaging', 'task', 'mcp_skill', 'file_io', 'browser', 'shell', 'remote_exec', 'desktop',
 ] as const
 
 // ============================================================================

@@ -10,8 +10,17 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { defineTool } from '../engine/tool-framework.js'
-import type { ToolDefinition } from '../engine/types.js'
+import type { ToolDefinition, ToolCategory } from '../engine/types.js'
 import type { MCPServerConfig } from '../types.js'
+
+/**
+ * 根据 MCP server 名称决定工具类别。
+ * computer-use（键盘/鼠标/截屏）归属 desktop（高权限，仅 master_private 可用）；
+ * 其他 MCP server 归属 mcp_skill。
+ */
+function mcpCategoryFor(serverName: string): ToolCategory {
+  return serverName === 'computer-use' ? 'desktop' : 'mcp_skill'
+}
 
 export class McpConnector {
   private readonly clients: Map<string, Client> = new Map()
@@ -119,7 +128,7 @@ export class McpConnector {
           const toolDefaults = this.toolDefaultsMap.get(serverName)?.[mcpTool.name]
           tools.push(defineTool({
             name: `mcp__${serverName}__${mcpTool.name}`,
-            category: 'mcp_skill',
+            category: mcpCategoryFor(serverName),
             description: mcpTool.description ?? '',
             inputSchema: mcpTool.inputSchema as Record<string, unknown>,
             isReadOnly: false,

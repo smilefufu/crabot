@@ -1,5 +1,5 @@
 import type { LLMAdapter } from './llm-adapter'
-import type { ToolDefinition, EngineTurnEvent, EngineResult, ContentBlock, HumanMessageQueueLike } from './types'
+import type { ToolDefinition, EngineTurnEvent, EngineResult, ContentBlock, HumanMessageQueueLike, ToolPermissionConfig } from './types'
 import type { AgentTrace } from '../types'
 import type { TraceStore } from '../core/trace-store'
 import { runEngine } from './query-loop'
@@ -33,6 +33,8 @@ export interface ForkEngineParams {
   readonly humanMessageQueue?: HumanMessageQueueLike
   readonly hookRegistry?: import('../hooks/hook-registry').HookRegistry
   readonly lspManager?: import('../hooks/types').LspManagerLike
+  /** 继承自父（Worker）的 permissionConfig；sub-agent 使用的工具子集仍需遵循相同权限策略 */
+  readonly permissionConfig?: ToolPermissionConfig
 }
 
 export interface ForkEngineResult {
@@ -79,6 +81,7 @@ export async function forkEngine(params: ForkEngineParams): Promise<ForkEngineRe
       humanMessageQueue: params.humanMessageQueue,
       hookRegistry: params.hookRegistry,
       lspManager: params.lspManager,
+      permissionConfig: params.permissionConfig,
     },
   })
 
@@ -117,6 +120,8 @@ export interface SubAgentToolConfig {
   readonly traceConfig?: SubAgentTraceConfig
   readonly hookRegistry?: import('../hooks/hook-registry').HookRegistry
   readonly lspManager?: import('../hooks/types').LspManagerLike
+  /** 从父 Worker 继承的 permissionConfig；sub-agent 的工具执行也需遵守同一 session 的权限策略 */
+  readonly permissionConfig?: ToolPermissionConfig
 }
 
 export function createSubAgentTool(config: SubAgentToolConfig): ToolDefinition {
@@ -230,6 +235,7 @@ export function createSubAgentTool(config: SubAgentToolConfig): ToolDefinition {
           humanMessageQueue: childQueue,
           hookRegistry: config.hookRegistry,
           lspManager: config.lspManager,
+          permissionConfig: config.permissionConfig,
         })
 
         if (subTrace && tc) {

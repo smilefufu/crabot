@@ -127,7 +127,16 @@ export interface MemoryPermissions {
   read_accessible_scopes?: string[]
 }
 
-export type ToolCategory = 'memory' | 'messaging' | 'task' | 'mcp_skill' | 'file_io' | 'browser' | 'shell' | 'remote_exec'
+export type ToolCategory =
+  | 'memory'
+  | 'messaging'
+  | 'task'
+  | 'mcp_skill'
+  | 'file_io'
+  | 'browser'
+  | 'shell'
+  | 'remote_exec'
+  | 'desktop'
 
 export interface ToolAccessConfig {
   memory: boolean
@@ -138,6 +147,8 @@ export interface ToolAccessConfig {
   browser: boolean
   shell: boolean
   remote_exec: boolean
+  /** 桌面控制：键盘、鼠标、截屏等 OS 级操作（computer-use 类 MCP 工具）。仅 master_private 模板可开启 */
+  desktop: boolean
 }
 
 export interface StoragePermission {

@@ -20,6 +20,7 @@ const DEFAULT_TOOL_ACCESS: ToolAccessConfig = {
   browser: false,
   shell: false,
   remote_exec: false,
+  desktop: false,
 }
 
 interface FormState {
@@ -185,30 +186,41 @@ export const PermissionTemplateForm: React.FC<PermissionTemplateFormProps> = ({
           gap: '0.5rem',
           marginTop: '0.25rem',
         }}>
-          {TOOL_CATEGORIES.map(cat => (
-            <label
-              key={cat}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '0.5rem',
-                padding: '0.5rem 0.75rem',
-                borderRadius: '6px',
-                background: 'var(--bg-secondary)',
-                cursor: isSystem ? 'default' : 'pointer',
-                fontSize: '0.875rem',
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={form.tool_access[cat]}
-                onChange={() => toggleToolAccess(cat)}
-                disabled={isSystem}
-                style={{ accentColor: 'var(--primary)' }}
-              />
-              {TOOL_CATEGORY_LABELS[cat]}
-            </label>
-          ))}
+          {TOOL_CATEGORIES.map(cat => {
+            // desktop 仅 master_private 模板可启用，其他模板（系统或自定义）一律禁用
+            const isDesktop = cat === 'desktop'
+            const isMasterPrivate = template?.id === 'master_private'
+            const disabled = isSystem || (isDesktop && !isMasterPrivate)
+            const title = isDesktop && !isMasterPrivate
+              ? '桌面控制（computer-use）仅 Master 私聊可开启'
+              : undefined
+            return (
+              <label
+                key={cat}
+                title={title}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.5rem',
+                  padding: '0.5rem 0.75rem',
+                  borderRadius: '6px',
+                  background: 'var(--bg-secondary)',
+                  cursor: disabled ? 'not-allowed' : 'pointer',
+                  fontSize: '0.875rem',
+                  opacity: disabled && !isSystem ? 0.6 : 1,
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={form.tool_access[cat]}
+                  onChange={() => toggleToolAccess(cat)}
+                  disabled={disabled}
+                  style={{ accentColor: 'var(--primary)' }}
+                />
+                {TOOL_CATEGORY_LABELS[cat]}
+              </label>
+            )
+          })}
         </div>
       </div>
 
