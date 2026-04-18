@@ -44,3 +44,6 @@ htmlcov/
 
 docs/superpowers/
 .superpowers/
+
+# Git worktrees
+.worktrees/
