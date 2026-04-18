@@ -12,9 +12,10 @@ import type {
   ToolResultBlockParam,
 } from '@anthropic-ai/sdk/resources/messages'
 import { proxyManager } from 'crabot-shared'
-import type { LLMAdapter, LLMAdapterConfig, LLMStreamParams } from './llm-adapter-types.js'
+import type { LLMAdapter, LLMAdapterConfig, LLMStreamParams, LLMCallResponse } from './llm-adapter-types.js'
+import { streamWithRetry, withRetry } from './retry-utils.js'
 import { isToolResultMessage, mergeConsecutiveUserMessages } from './llm-adapter-types.js'
-import type { EngineMessage, ToolDefinition, StreamChunk } from './types.js'
+import type { EngineMessage, ToolDefinition, StreamChunk, ContentBlock } from './types.js'
 
 // --- Anthropic Message Normalization ---
 
@@ -116,6 +117,8 @@ export class AnthropicAdapter implements LLMAdapter {
       baseURL: config.endpoint,
       apiKey: config.apikey,
       httpAgent: proxyManager.getHttpsAgent(),
+      // Retries are handled by streamWithRetry() at the adapter layer.
+      maxRetries: 0,
     })
   }
 
@@ -145,78 +148,123 @@ export class AnthropicAdapter implements LLMAdapter {
   }
 
   async *stream(params: LLMStreamParams): AsyncGenerator<StreamChunk> {
+    yield* streamWithRetry(
+      'anthropic-adapter',
+      () => this.streamOnce(params),
+      { abortSignal: params.signal },
+    )
+  }
+
+  async complete(params: LLMStreamParams): Promise<LLMCallResponse> {
     const messages = normalizeMessagesForAnthropic(params.messages)
     const tools = params.tools.map(AnthropicAdapter.toAnthropicTool)
 
-    try {
-      const stream = this.client.messages.stream({
-        model: params.model,
-        max_tokens: params.maxTokens ?? 4096,
-        system: params.systemPrompt,
-        messages,
-        ...(tools.length > 0 ? { tools } : {}),
-      })
+    const response = await withRetry(
+      'anthropic-adapter',
+      () =>
+        this.client.messages.create({
+          model: params.model,
+          max_tokens: params.maxTokens ?? 4096,
+          system: params.systemPrompt,
+          messages,
+          ...(tools.length > 0 ? { tools } : {}),
+        }, { signal: params.signal }),
+      { abortSignal: params.signal },
+    )
 
-      if (params.signal) {
-        const onAbort = () => stream.abort()
-        params.signal.addEventListener('abort', onAbort, { once: true })
+    const content: ContentBlock[] = []
+    for (const block of response.content) {
+      if (block.type === 'text') {
+        content.push({ type: 'text', text: block.text })
+      } else if (block.type === 'tool_use') {
+        content.push({
+          type: 'tool_use',
+          id: block.id,
+          name: block.name,
+          input: (block.input ?? {}) as Record<string, unknown>,
+        })
       }
+      // thinking / other block types: ignored (Anthropic doesn't require replay)
+    }
 
-      let currentToolId: string | null = null
+    return {
+      content,
+      stopReason: response.stop_reason ?? null,
+      usage: {
+        inputTokens: response.usage.input_tokens,
+        outputTokens: response.usage.output_tokens,
+      },
+    }
+  }
 
-      for await (const event of stream) {
-        switch (event.type) {
-          case 'message_start':
-            yield { type: 'message_start', messageId: event.message.id }
-            break
+  private async *streamOnce(params: LLMStreamParams): AsyncGenerator<StreamChunk> {
+    const messages = normalizeMessagesForAnthropic(params.messages)
+    const tools = params.tools.map(AnthropicAdapter.toAnthropicTool)
 
-          case 'content_block_start':
-            if (event.content_block.type === 'tool_use') {
-              currentToolId = event.content_block.id
-              yield {
-                type: 'tool_use_start',
-                id: event.content_block.id,
-                name: event.content_block.name,
-              }
+    const stream = this.client.messages.stream({
+      model: params.model,
+      max_tokens: params.maxTokens ?? 4096,
+      system: params.systemPrompt,
+      messages,
+      ...(tools.length > 0 ? { tools } : {}),
+    })
+
+    if (params.signal) {
+      const onAbort = () => stream.abort()
+      params.signal.addEventListener('abort', onAbort, { once: true })
+    }
+
+    let currentToolId: string | null = null
+
+    for await (const event of stream) {
+      switch (event.type) {
+        case 'message_start':
+          yield { type: 'message_start', messageId: event.message.id }
+          break
+
+        case 'content_block_start':
+          if (event.content_block.type === 'tool_use') {
+            currentToolId = event.content_block.id
+            yield {
+              type: 'tool_use_start',
+              id: event.content_block.id,
+              name: event.content_block.name,
             }
-            break
+          }
+          break
 
-          case 'content_block_delta':
-            if (event.delta.type === 'text_delta') {
-              yield { type: 'text_delta', text: event.delta.text }
-            } else if (event.delta.type === 'input_json_delta') {
-              yield {
-                type: 'tool_use_delta',
-                id: currentToolId ?? '',
-                inputJson: event.delta.partial_json,
-              }
+        case 'content_block_delta':
+          if (event.delta.type === 'text_delta') {
+            yield { type: 'text_delta', text: event.delta.text }
+          } else if (event.delta.type === 'input_json_delta') {
+            yield {
+              type: 'tool_use_delta',
+              id: currentToolId ?? '',
+              inputJson: event.delta.partial_json,
             }
-            break
+          }
+          break
 
-          case 'content_block_stop':
-            if (currentToolId !== null) {
-              yield { type: 'tool_use_end', id: currentToolId }
-              currentToolId = null
-            }
-            break
+        case 'content_block_stop':
+          if (currentToolId !== null) {
+            yield { type: 'tool_use_end', id: currentToolId }
+            currentToolId = null
+          }
+          break
 
-          case 'message_delta':
-            break
-        }
+        case 'message_delta':
+          break
       }
+    }
 
-      const finalMessage = await stream.finalMessage()
-      yield {
-        type: 'message_end',
-        stopReason: finalMessage.stop_reason ?? null,
-        usage: {
-          inputTokens: finalMessage.usage.input_tokens,
-          outputTokens: finalMessage.usage.output_tokens,
-        },
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      yield { type: 'error', error: message }
+    const finalMessage = await stream.finalMessage()
+    yield {
+      type: 'message_end',
+      stopReason: finalMessage.stop_reason ?? null,
+      usage: {
+        inputTokens: finalMessage.usage.input_tokens,
+        outputTokens: finalMessage.usage.output_tokens,
+      },
     }
   }
 }

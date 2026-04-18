@@ -24,6 +24,14 @@ export interface LLMStreamParams {
 
 export interface LLMAdapter {
   stream(params: LLMStreamParams): AsyncGenerator<StreamChunk>
+  /**
+   * Optional non-streaming completion. Preferred over `stream()` when available —
+   * avoids SSE parsing and makes mid-response network failures naturally retryable.
+   * Adapters that can't express their full response via a single non-streaming call
+   * (e.g. Codex with encrypted reasoning) may omit this; callers will fall back to
+   * consuming `stream()`.
+   */
+  complete?(params: LLMStreamParams): Promise<LLMCallResponse>
   updateConfig(config: Partial<LLMAdapterConfig>): void
 }
 
@@ -47,12 +55,27 @@ export async function callNonStreaming(
   adapter: LLMAdapter,
   params: LLMStreamParams,
 ): Promise<LLMCallResponse> {
-  const effectiveParams = params.signal ? params : {
+  const effectiveParams = params.signal != null ? params : {
     ...params,
     signal: AbortSignal.timeout(DEFAULT_LLM_TIMEOUT_MS),
   }
+
+  // Prefer native non-streaming endpoint when the adapter provides one.
+  // This avoids SSE parsing and makes mid-response network failures naturally
+  // retryable (vs. streaming, which can only retry before the first chunk).
+  if (adapter.complete) {
+    return adapter.complete(effectiveParams)
+  }
+
+  // Fallback: consume stream and aggregate. Still used by adapters that can't
+  // express their full response via a single non-streaming call (e.g. Codex
+  // with encrypted reasoning), and as an escape hatch if we ever need to
+  // re-enable the streaming path.
   const processor = new StreamProcessor()
   for await (const chunk of adapter.stream(effectiveParams)) {
+    if (effectiveParams.signal?.aborted) {
+      throw new DOMException('Aborted', 'AbortError')
+    }
     if (chunk.type === 'error') {
       throw new Error(chunk.error)
     }

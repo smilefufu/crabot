@@ -373,7 +373,7 @@ describe('Engine E2E', () => {
       // on the second call. The for-await loop checks abortSignal after each chunk.
       let callIndex = 0
       const customAdapter: LLMAdapter = {
-        async *stream(params: LLMStreamParams): AsyncGenerator<StreamChunk> {
+        async *stream(_params: LLMStreamParams): AsyncGenerator<StreamChunk> {
           callIndex++
 
           yield { type: 'message_start', messageId: `msg_${callIndex}` }
@@ -480,13 +480,12 @@ describe('Engine E2E', () => {
   })
 
   // -----------------------------------------------------------------------
-  // 8. onTurn and onTextDelta callbacks
+  // 8. onTurn callback
   // -----------------------------------------------------------------------
   describe('callbacks', () => {
-    it('should fire onTurn and onTextDelta during execution', async () => {
+    it('should fire onTurn during execution', async () => {
       const tools = getAllBuiltinTools(tempDir)
       const turnEvents: number[] = []
-      const textDeltas: string[] = []
 
       const adapter = createScriptedAdapter([
         {
@@ -505,9 +504,6 @@ describe('Engine E2E', () => {
           onTurn: (event) => {
             turnEvents.push(event.turnNumber)
           },
-          onTextDelta: (text) => {
-            textDeltas.push(text)
-          },
         }),
       })
 
@@ -516,10 +512,6 @@ describe('Engine E2E', () => {
 
       // onTurn fires only for turns with tool calls (before executing them)
       expect(turnEvents).toContain(1)
-
-      // onTextDelta fires for each text chunk
-      expect(textDeltas).toContain('Step one.')
-      expect(textDeltas).toContain('Done.')
     })
   })
 

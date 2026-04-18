@@ -98,7 +98,7 @@ export class StreamProcessor {
   }
 }
 
-function parseToolInput(raw: string): Record<string, unknown> {
+export function parseToolInput(raw: string): Record<string, unknown> {
   if (raw.trim() === '') {
     return {}
   }

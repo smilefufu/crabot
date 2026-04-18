@@ -282,9 +282,9 @@ async function cmdTasks(statusFilter) {
 
 function cmdLogs(lines = 50) {
   const home = process.env.CRABOT_HOME ?? PROJECT_ROOT
-  const logFile = resolve(home, 'data/agent/sdk-runner-debug.log')
+  const logFile = resolve(home, 'data/worker-handler-debug.log')
 
-  console.log(`${c.bold(c.cyan(`── SDK Runner Log (最近 ${lines} 行) ──`))}`)
+  console.log(`${c.bold(c.cyan(`── Worker Handler Log (最近 ${lines} 行) ──`))}`)
   console.log(`${c.dim(`  ${logFile}`)}\n`)
 
   if (!existsSync(logFile)) {
@@ -359,7 +359,7 @@ ${c.bold('Crabot Agent 调试脚本')}
     ${c.cyan('trace')}   [trace_id]          显示单个 Trace 详情（支持短 ID 前缀）
     ${c.cyan('tasks')}   [status]            列出 Admin 任务
     ${c.cyan('health')}                      检查各模块健康状态
-    ${c.cyan('logs')}    [lines]             查看 SDK Runner 日志（默认 50 行）
+    ${c.cyan('logs')}    [lines]             查看 Worker Handler 日志（默认 50 行）
     ${c.cyan('modules')}                     列出 MM 注册的模块
     ${c.cyan('watch')}                       实时监控模式
 

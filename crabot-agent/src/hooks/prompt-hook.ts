@@ -1,5 +1,5 @@
-import { StreamProcessor } from '../engine/stream-processor.js'
 import { createUserMessage } from '../engine/types.js'
+import { callNonStreaming, extractText } from '../engine/llm-adapter-types.js'
 import type { LLMAdapter } from '../engine/llm-adapter-types.js'
 import type { HookInput, HookResult } from './types.js'
 
@@ -24,24 +24,15 @@ export async function runPromptHook(params: RunPromptHookParams): Promise<HookRe
 
   const messages = [createUserMessage(resolvedPrompt)]
 
-  const processor = new StreamProcessor()
-
-  for await (const chunk of adapter.stream({
+  const response = await callNonStreaming(adapter, {
     messages,
     systemPrompt: SYSTEM_PROMPT,
     tools: [],
     model,
-    maxTokens,
-  })) {
-    if (chunk.type === 'error') {
-      throw new Error(`LLM error during prompt hook: ${chunk.error}`)
-    }
-    processor.process(chunk)
-  }
+    ...(maxTokens !== undefined ? { maxTokens } : {}),
+  })
 
-  const { text } = processor.finalize()
-
-  return parseHookResult(text)
+  return parseHookResult(extractText(response.content))
 }
 
 function parseHookResult(text: string): HookResult {

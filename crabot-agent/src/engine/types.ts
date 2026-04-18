@@ -160,7 +160,6 @@ export interface EngineOptions {
   readonly maxTokens?: number
   readonly abortSignal?: AbortSignal
   readonly onTurn?: (event: EngineTurnEvent) => void
-  readonly onTextDelta?: (text: string) => void
   readonly permissionConfig?: ToolPermissionConfig
   readonly supportsVision?: boolean
   readonly humanMessageQueue?: HumanMessageQueueLike

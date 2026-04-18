@@ -2,9 +2,11 @@
  * OpenAI Chat Completions LLM Adapter
  */
 
-import type { LLMAdapter, LLMAdapterConfig, LLMStreamParams } from './llm-adapter-types.js'
+import type { LLMAdapter, LLMAdapterConfig, LLMStreamParams, LLMCallResponse } from './llm-adapter-types.js'
 import { isToolResultMessage, extractText, buildImageUrl, readSSELines, mergeConsecutiveUserMessages } from './llm-adapter-types.js'
 import type { EngineMessage, ToolDefinition, StreamChunk, ContentBlock } from './types.js'
+import { HttpResponseError, streamWithRetry, withRetry } from './retry-utils.js'
+import { parseToolInput } from './stream-processor.js'
 
 // --- OpenAI Message Types ---
 
@@ -119,6 +121,22 @@ export function toOpenAITool(tool: ToolDefinition): OpenAITool {
   }
 }
 
+type OpenAIFinishReason = 'stop' | 'tool_calls' | 'length' | 'content_filter' | 'function_call'
+type EngineStopReason = 'end_turn' | 'tool_use' | 'max_tokens' | 'stop_sequence' | null
+
+function mapOpenAIFinishReason(raw: string | null | undefined): EngineStopReason {
+  switch (raw as OpenAIFinishReason | null | undefined) {
+    case 'stop':
+      return 'end_turn'
+    case 'tool_calls':
+      return 'tool_use'
+    case 'length':
+      return 'max_tokens'
+    default:
+      return null
+  }
+}
+
 // --- OpenAI Adapter ---
 
 export class OpenAIAdapter implements LLMAdapter {
@@ -136,6 +154,91 @@ export class OpenAIAdapter implements LLMAdapter {
   }
 
   async *stream(params: LLMStreamParams): AsyncGenerator<StreamChunk> {
+    yield* streamWithRetry(
+      'openai-adapter',
+      () => this.streamOnce(params),
+      { abortSignal: params.signal },
+    )
+  }
+
+  async complete(params: LLMStreamParams): Promise<LLMCallResponse> {
+    const messages = normalizeMessagesForOpenAI(params.messages)
+    const tools = params.tools.map(toOpenAITool)
+
+    const body: Record<string, unknown> = {
+      model: params.model,
+      max_tokens: params.maxTokens ?? 4096,
+      messages: [{ role: 'system', content: params.systemPrompt }, ...messages],
+      stream: false,
+    }
+    if (tools.length > 0) {
+      body.tools = tools
+    }
+
+    const data = await withRetry(
+      'openai-adapter',
+      async () => {
+        const response = await fetch(`${this.config.endpoint}/v1/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${this.config.apikey}`,
+          },
+          body: JSON.stringify(body),
+          signal: params.signal,
+        })
+
+        if (!response.ok) {
+          const errorText = await response.text()
+          throw new HttpResponseError(response.status, errorText, 'openai-adapter')
+        }
+        return response.json() as Promise<{
+          choices?: Array<{
+            message?: {
+              content?: string | null
+              tool_calls?: Array<{
+                id: string
+                function?: { name?: string; arguments?: string }
+              }>
+            }
+            finish_reason?: string | null
+          }>
+          usage?: { prompt_tokens?: number; completion_tokens?: number }
+        }>
+      },
+      { abortSignal: params.signal },
+    )
+
+    const choice = data.choices?.[0]
+    const msg = choice?.message
+    const content: ContentBlock[] = []
+
+    if (msg?.content) {
+      content.push({ type: 'text', text: msg.content })
+    }
+    if (msg?.tool_calls) {
+      for (const tc of msg.tool_calls) {
+        content.push({
+          type: 'tool_use',
+          id: tc.id,
+          name: tc.function?.name ?? '',
+          input: parseToolInput(tc.function?.arguments ?? ''),
+        })
+      }
+    }
+
+    const stopReason = mapOpenAIFinishReason(choice?.finish_reason ?? null)
+    const usage = data.usage
+    return {
+      content,
+      stopReason,
+      ...(usage
+        ? { usage: { inputTokens: usage.prompt_tokens ?? 0, outputTokens: usage.completion_tokens ?? 0 } }
+        : {}),
+    }
+  }
+
+  private async *streamOnce(params: LLMStreamParams): AsyncGenerator<StreamChunk> {
     const messages = normalizeMessagesForOpenAI(params.messages)
     const tools = params.tools.map(toOpenAITool)
 
@@ -151,117 +254,101 @@ export class OpenAIAdapter implements LLMAdapter {
       body.tools = tools
     }
 
-    try {
-      const response = await fetch(`${this.config.endpoint}/v1/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.config.apikey}`,
-        },
-        body: JSON.stringify(body),
-        signal: params.signal,
-      })
+    const response = await fetch(`${this.config.endpoint}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.config.apikey}`,
+      },
+      body: JSON.stringify(body),
+      signal: params.signal,
+    })
 
-      if (!response.ok) {
-        const errorText = await response.text()
-        yield { type: 'error', error: `OpenAI API error ${response.status}: ${errorText}` }
-        return
+    if (!response.ok) {
+      const errorText = await response.text()
+      throw new HttpResponseError(response.status, errorText, 'openai-adapter')
+    }
+
+    if (!response.body) {
+      throw new Error('openai-adapter: no response body received')
+    }
+
+    let messageStarted = false
+    const activeToolCalls = new Map<number, string>()
+
+    for await (const line of readSSELines(response.body)) {
+      if (line === '[DONE]') break
+
+      let data: Record<string, unknown>
+      try {
+        data = JSON.parse(line)
+      } catch {
+        continue
       }
 
-      if (!response.body) {
-        yield { type: 'error', error: 'No response body received' }
-        return
+      if (!messageStarted) {
+        messageStarted = true
+        yield { type: 'message_start', messageId: (data as { id?: string }).id ?? 'msg_openai' }
       }
 
-      let messageStarted = false
-      const activeToolCalls = new Map<number, string>()
-
-      for await (const line of readSSELines(response.body)) {
-        if (line === '[DONE]') break
-
-        let data: Record<string, unknown>
-        try {
-          data = JSON.parse(line)
-        } catch {
-          continue
+      const usage = data.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined
+      const choices = data.choices as Array<{
+        delta?: {
+          content?: string | null
+          tool_calls?: Array<{
+            index: number
+            id?: string
+            function?: { name?: string; arguments?: string }
+          }>
         }
+        finish_reason?: string | null
+      }> | undefined
 
-        if (!messageStarted) {
-          messageStarted = true
-          yield { type: 'message_start', messageId: (data as { id?: string }).id ?? 'msg_openai' }
-        }
+      if (choices && choices.length > 0) {
+        const choice = choices[0]
+        const delta = choice.delta
 
-        const usage = data.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined
-        const choices = data.choices as Array<{
-          delta?: {
-            content?: string | null
-            tool_calls?: Array<{
-              index: number
-              id?: string
-              function?: { name?: string; arguments?: string }
-            }>
+        if (delta) {
+          if (delta.content) {
+            yield { type: 'text_delta', text: delta.content }
           }
-          finish_reason?: string | null
-        }> | undefined
 
-        if (choices && choices.length > 0) {
-          const choice = choices[0]
-          const delta = choice.delta
-
-          if (delta) {
-            if (delta.content) {
-              yield { type: 'text_delta', text: delta.content }
-            }
-
-            if (delta.tool_calls) {
-              for (const tc of delta.tool_calls) {
-                if (tc.id) {
-                  activeToolCalls.set(tc.index, tc.id)
-                  yield { type: 'tool_use_start', id: tc.id, name: tc.function?.name ?? '' }
-                }
-                if (tc.function?.arguments) {
-                  yield { type: 'tool_use_delta', id: activeToolCalls.get(tc.index) ?? '', inputJson: tc.function.arguments }
-                }
+          if (delta.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              if (tc.id) {
+                activeToolCalls.set(tc.index, tc.id)
+                yield { type: 'tool_use_start', id: tc.id, name: tc.function?.name ?? '' }
+              }
+              if (tc.function?.arguments) {
+                yield { type: 'tool_use_delta', id: activeToolCalls.get(tc.index) ?? '', inputJson: tc.function.arguments }
               }
             }
           }
+        }
 
+        const stopReason = mapOpenAIFinishReason(choice.finish_reason)
+        if (stopReason !== null) {
           if (choice.finish_reason === 'tool_calls') {
             for (const [, id] of activeToolCalls) {
               yield { type: 'tool_use_end', id }
             }
             activeToolCalls.clear()
-            yield {
-              type: 'message_end',
-              stopReason: 'tool_use',
-              ...(usage ? { usage: { inputTokens: usage.prompt_tokens ?? 0, outputTokens: usage.completion_tokens ?? 0 } } : {}),
-            }
-          } else if (choice.finish_reason === 'stop') {
-            yield {
-              type: 'message_end',
-              stopReason: 'end_turn',
-              ...(usage ? { usage: { inputTokens: usage.prompt_tokens ?? 0, outputTokens: usage.completion_tokens ?? 0 } } : {}),
-            }
-          } else if (choice.finish_reason === 'length') {
-            yield {
-              type: 'message_end',
-              stopReason: 'max_tokens',
-              ...(usage ? { usage: { inputTokens: usage.prompt_tokens ?? 0, outputTokens: usage.completion_tokens ?? 0 } } : {}),
-            }
           }
-        }
-
-        if (usage && (!choices || choices.length === 0)) {
           yield {
             type: 'message_end',
-            stopReason: null,
-            usage: { inputTokens: usage.prompt_tokens ?? 0, outputTokens: usage.completion_tokens ?? 0 },
+            stopReason,
+            ...(usage ? { usage: { inputTokens: usage.prompt_tokens ?? 0, outputTokens: usage.completion_tokens ?? 0 } } : {}),
           }
         }
       }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      yield { type: 'error', error: message }
+
+      if (usage && (!choices || choices.length === 0)) {
+        yield {
+          type: 'message_end',
+          stopReason: null,
+          usage: { inputTokens: usage.prompt_tokens ?? 0, outputTokens: usage.completion_tokens ?? 0 },
+        }
+      }
     }
   }
 }

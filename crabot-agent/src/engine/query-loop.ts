@@ -1,10 +1,12 @@
 import type { LLMAdapter } from './llm-adapter'
+import { callNonStreaming } from './llm-adapter'
 import type {
+  ContentBlock,
   EngineMessage,
   EngineOptions,
   EngineResult,
   EngineTurnEvent,
-  TextBlock,
+  RawReasoningBlock,
   ToolUseBlock,
 } from './types'
 import {
@@ -12,11 +14,11 @@ import {
   createAssistantMessage,
   createBatchToolResultMessage,
 } from './types'
-import { StreamProcessor } from './stream-processor'
 import { ContextManager } from './context-manager'
 import { partitionToolCalls } from './tool-framework'
 import { executeToolBatches, type HookConfig } from './tool-orchestration'
 import { compressToolResultImages, pruneOldImages } from './image-utils'
+import { formatError } from './error-utils'
 import type { HookInput } from '../hooks/types'
 import { executeHooks } from '../hooks/hook-executor'
 import * as fs from 'fs'
@@ -40,7 +42,6 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
   const abortSignal = options.abortSignal
 
   const messages: EngineMessage[] = [createUserMessage(prompt)]
-  const processor = new StreamProcessor()
   const contextManager = new ContextManager({
     maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
   })
@@ -69,14 +70,11 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       }
     }
 
-    processor.reset()
-
-    // Stream from LLM
-    let abortedDuringStream = false
-    let streamError: string | undefined
-
+    // Call LLM (non-streaming by default; streaming infra preserved for rollback
+    // via adapters that opt out of `complete()`).
+    let response: import('./llm-adapter').LLMCallResponse
     try {
-      const stream = adapter.stream({
+      response = await callNonStreaming(adapter, {
         messages,
         systemPrompt: options.systemPrompt,
         tools: [...options.tools],
@@ -84,54 +82,27 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         maxTokens: options.maxTokens,
         signal: abortSignal,
       })
-
-      for await (const chunk of stream) {
-        // Check abort during streaming
-        if (abortSignal?.aborted) {
-          abortedDuringStream = true
-          break
-        }
-
-        // Handle error chunks
-        if (chunk.type === 'error') {
-          streamError = chunk.error
-          break
-        }
-
-        processor.process(chunk)
-
-        // Forward text deltas to callback
-        if (chunk.type === 'text_delta' && options.onTextDelta) {
-          options.onTextDelta(chunk.text)
-        }
-      }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      return buildResult('failed', finalText, totalTurns, contextManager, message)
+      if (abortSignal?.aborted) {
+        return buildResult('aborted', finalText, totalTurns, contextManager)
+      }
+      console.error('[query-loop] LLM call threw:', error)
+      return buildResult('failed', finalText, totalTurns, contextManager, formatError(error))
     }
 
-    if (abortedDuringStream) {
-      return buildResult('aborted', finalText, totalTurns, contextManager)
-    }
-
-    if (streamError !== undefined) {
-      return buildResult('failed', finalText, totalTurns, contextManager, streamError)
-    }
-
-    // Finalize the processed stream
-    const processed = processor.finalize()
+    const processed = partitionResponseContent(response.content)
     totalTurns++
 
     // Update usage tracking
-    if (processed.usage) {
-      contextManager.updateFromUsage(processed.usage)
+    if (response.usage) {
+      contextManager.updateFromUsage(response.usage)
     }
 
-    // Build assistant message content blocks
-    const contentBlocks = buildAssistantContent(processed.text, processed.toolUseBlocks)
-    const stopReason = normalizeStopReason(processed.stopReason)
+    // Build assistant message content blocks (preserves reasoning ordering: reasoning → text → tool_use)
+    const contentBlocks = buildAssistantContent(processed.reasoningBlocks, processed.text, processed.toolUseBlocks)
+    const stopReason = normalizeStopReason(response.stopReason)
 
-    const assistantMessage = createAssistantMessage(contentBlocks, stopReason, processed.usage)
+    const assistantMessage = createAssistantMessage(contentBlocks, stopReason, response.usage)
     messages.push(assistantMessage)
 
     finalText = processed.text
@@ -288,10 +259,16 @@ function buildResult(
 }
 
 function buildAssistantContent(
+  reasoningBlocks: ReadonlyArray<RawReasoningBlock>,
   text: string,
   toolUseBlocks: ReadonlyArray<ToolUseBlock>
-): Array<TextBlock | ToolUseBlock> {
-  const blocks: Array<TextBlock | ToolUseBlock> = []
+): ContentBlock[] {
+  const blocks: ContentBlock[] = []
+
+  // Reasoning must precede text/tool_use so Codex replay keeps encrypted_content intact
+  for (const block of reasoningBlocks) {
+    blocks.push(block)
+  }
 
   if (text.length > 0) {
     blocks.push({ type: 'text', text })
@@ -302,6 +279,22 @@ function buildAssistantContent(
   }
 
   return blocks
+}
+
+function partitionResponseContent(content: ReadonlyArray<ContentBlock>): {
+  readonly text: string
+  readonly toolUseBlocks: ReadonlyArray<ToolUseBlock>
+  readonly reasoningBlocks: ReadonlyArray<RawReasoningBlock>
+} {
+  const textParts: string[] = []
+  const toolUseBlocks: ToolUseBlock[] = []
+  const reasoningBlocks: RawReasoningBlock[] = []
+  for (const block of content) {
+    if (block.type === 'text') textParts.push(block.text)
+    else if (block.type === 'tool_use') toolUseBlocks.push(block)
+    else if (block.type === 'raw_reasoning') reasoningBlocks.push(block)
+  }
+  return { text: textParts.join(''), toolUseBlocks, reasoningBlocks }
 }
 
 function normalizeStopReason(

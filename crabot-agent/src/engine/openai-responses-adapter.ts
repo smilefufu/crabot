@@ -7,6 +7,7 @@
 import type { LLMAdapter, LLMAdapterConfig, LLMStreamParams } from './llm-adapter-types.js'
 import { isToolResultMessage, extractText, buildImageUrl, readSSEEvents } from './llm-adapter-types.js'
 import type { EngineMessage, ToolDefinition, StreamChunk, ContentBlock } from './types.js'
+import { HttpResponseError, streamWithRetry } from './retry-utils.js'
 
 // --- Responses API Message Normalization ---
 
@@ -139,6 +140,14 @@ export class OpenAIResponsesAdapter implements LLMAdapter {
   }
 
   async *stream(params: LLMStreamParams): AsyncGenerator<StreamChunk> {
+    yield* streamWithRetry(
+      'openai-responses-adapter',
+      () => this.streamOnce(params),
+      { abortSignal: params.signal },
+    )
+  }
+
+  private async *streamOnce(params: LLMStreamParams): AsyncGenerator<StreamChunk> {
     const input = normalizeMessagesForResponses(params.messages)
     const tools = params.tools.map(toResponsesTool)
 
@@ -169,128 +178,121 @@ export class OpenAIResponsesAdapter implements LLMAdapter {
       body.max_output_tokens = params.maxTokens
     }
 
-    try {
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.config.apikey}`,
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${this.config.apikey}`,
+    }
+    if (isCodexBackend && this.config.accountId) {
+      headers['ChatGPT-Account-Id'] = this.config.accountId
+    }
+
+    const response = await fetch(`${this.config.endpoint}/responses`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: params.signal,
+    })
+
+    if (!response.ok) {
+      const errorText = await response.text()
+      throw new HttpResponseError(response.status, errorText, 'openai-responses-adapter')
+    }
+
+    if (!response.body) {
+      throw new Error('openai-responses-adapter: no response body received')
+    }
+
+    let messageStarted = false
+    // Maps streamed item.id (fc_xxx) to the encoded block id ("call_xxx|fc_xxx") that
+    // we use internally so replay emits both id and call_id to the Responses API.
+    const activeFunctionCalls = new Map<string, { encodedId: string; name: string }>()
+
+    for await (const { event, data } of readSSEEvents(response.body)) {
+      let parsed: Record<string, unknown>
+      try {
+        parsed = JSON.parse(data)
+      } catch {
+        continue
       }
-      if (isCodexBackend && this.config.accountId) {
-        headers['ChatGPT-Account-Id'] = this.config.accountId
+
+      if (!messageStarted) {
+        messageStarted = true
+        const resp = parsed.response as { id?: string } | undefined
+        yield { type: 'message_start', messageId: resp?.id ?? 'resp_unknown' }
       }
 
-      const response = await fetch(`${this.config.endpoint}/responses`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-        signal: params.signal,
-      })
-
-      if (!response.ok) {
-        const errorText = await response.text()
-        yield { type: 'error', error: `Responses API error ${response.status}: ${errorText}` }
-        return
-      }
-
-      if (!response.body) {
-        yield { type: 'error', error: 'No response body received' }
-        return
-      }
-
-      let messageStarted = false
-      // Maps streamed item.id (fc_xxx) to the encoded block id ("call_xxx|fc_xxx") that
-      // we use internally so replay emits both id and call_id to the Responses API.
-      const activeFunctionCalls = new Map<string, { encodedId: string; name: string }>()
-
-      for await (const { event, data } of readSSEEvents(response.body)) {
-        let parsed: Record<string, unknown>
-        try {
-          parsed = JSON.parse(data)
-        } catch {
-          continue
+      switch (event) {
+        case 'response.output_text.delta': {
+          const delta = parsed.delta as string
+          if (delta) {
+            yield { type: 'text_delta', text: delta }
+          }
+          break
         }
 
-        if (!messageStarted) {
-          messageStarted = true
-          const resp = parsed.response as { id?: string } | undefined
-          yield { type: 'message_start', messageId: resp?.id ?? 'resp_unknown' }
+        case 'response.output_item.added': {
+          const item = parsed.item as { type?: string; id?: string; call_id?: string; name?: string }
+          if (item?.type === 'function_call' && item.id && item.call_id) {
+            const encodedId = `${item.call_id}|${item.id}`
+            activeFunctionCalls.set(item.id, { encodedId, name: item.name ?? '' })
+            yield { type: 'tool_use_start', id: encodedId, name: item.name ?? '' }
+          }
+          break
         }
 
-        switch (event) {
-          case 'response.output_text.delta': {
-            const delta = parsed.delta as string
-            if (delta) {
-              yield { type: 'text_delta', text: delta }
-            }
-            break
+        case 'response.function_call_arguments.delta': {
+          const itemId = parsed.item_id as string
+          const delta = parsed.delta as string
+          const fc = activeFunctionCalls.get(itemId)
+          if (fc && delta) {
+            yield { type: 'tool_use_delta', id: fc.encodedId, inputJson: delta }
           }
-
-          case 'response.output_item.added': {
-            const item = parsed.item as { type?: string; id?: string; call_id?: string; name?: string }
-            if (item?.type === 'function_call' && item.id && item.call_id) {
-              const encodedId = `${item.call_id}|${item.id}`
-              activeFunctionCalls.set(item.id, { encodedId, name: item.name ?? '' })
-              yield { type: 'tool_use_start', id: encodedId, name: item.name ?? '' }
-            }
-            break
-          }
-
-          case 'response.function_call_arguments.delta': {
-            const itemId = parsed.item_id as string
-            const delta = parsed.delta as string
-            const fc = activeFunctionCalls.get(itemId)
-            if (fc && delta) {
-              yield { type: 'tool_use_delta', id: fc.encodedId, inputJson: delta }
-            }
-            break
-          }
-
-          case 'response.function_call_arguments.done': {
-            const itemId = parsed.item_id as string
-            const fc = activeFunctionCalls.get(itemId)
-            if (fc) {
-              yield { type: 'tool_use_end', id: fc.encodedId }
-            }
-            break
-          }
-
-          case 'response.output_item.done': {
-            // Capture reasoning items so we can replay them (with encrypted_content)
-            // in subsequent turns. Required by Codex backend when include=['reasoning.encrypted_content'].
-            const item = parsed.item as Record<string, unknown> | undefined
-            if (item && typeof item.type === 'string' && (item.type === 'reasoning' || item.type.startsWith('reasoning.'))) {
-              yield { type: 'raw_reasoning', data: { ...item } }
-            }
-            break
-          }
-
-          case 'response.completed': {
-            const resp = parsed.response as {
-              output?: Array<{ type?: string }>
-              usage?: { input_tokens?: number; output_tokens?: number }
-            } | undefined
-
-            // Trust the stream: if a function_call item was emitted, the stop reason is tool_use.
-            // This guards against edge cases where response.completed.output omits the function_call type.
-            const hasToolCallsInOutput = resp?.output?.some(item => item.type === 'function_call') ?? false
-            const hasToolCallsInStream = activeFunctionCalls.size > 0
-            const hasToolCalls = hasToolCallsInOutput || hasToolCallsInStream
-            const usage = resp?.usage
-
-            yield {
-              type: 'message_end',
-              stopReason: hasToolCalls ? 'tool_use' : 'end_turn',
-              ...(usage ? { usage: { inputTokens: usage.input_tokens ?? 0, outputTokens: usage.output_tokens ?? 0 } } : {}),
-            }
-            break
-          }
-
-          default:
-            break
+          break
         }
+
+        case 'response.function_call_arguments.done': {
+          const itemId = parsed.item_id as string
+          const fc = activeFunctionCalls.get(itemId)
+          if (fc) {
+            yield { type: 'tool_use_end', id: fc.encodedId }
+          }
+          break
+        }
+
+        case 'response.output_item.done': {
+          // Capture reasoning items so we can replay them (with encrypted_content)
+          // in subsequent turns. Required by Codex backend when include=['reasoning.encrypted_content'].
+          const item = parsed.item as Record<string, unknown> | undefined
+          if (item && typeof item.type === 'string' && (item.type === 'reasoning' || item.type.startsWith('reasoning.'))) {
+            yield { type: 'raw_reasoning', data: { ...item } }
+          }
+          break
+        }
+
+        case 'response.completed': {
+          const resp = parsed.response as {
+            output?: Array<{ type?: string }>
+            usage?: { input_tokens?: number; output_tokens?: number }
+          } | undefined
+
+          // Trust the stream: if a function_call item was emitted, the stop reason is tool_use.
+          // This guards against edge cases where response.completed.output omits the function_call type.
+          const hasToolCallsInOutput = resp?.output?.some(item => item.type === 'function_call') ?? false
+          const hasToolCallsInStream = activeFunctionCalls.size > 0
+          const hasToolCalls = hasToolCallsInOutput || hasToolCallsInStream
+          const usage = resp?.usage
+
+          yield {
+            type: 'message_end',
+            stopReason: hasToolCalls ? 'tool_use' : 'end_turn',
+            ...(usage ? { usage: { inputTokens: usage.input_tokens ?? 0, outputTokens: usage.output_tokens ?? 0 } } : {}),
+          }
+          break
+        }
+
+        default:
+          break
       }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      yield { type: 'error', error: message }
     }
   }
 }

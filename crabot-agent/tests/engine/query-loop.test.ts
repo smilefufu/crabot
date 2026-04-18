@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from 'vitest'
-import { runEngine, type RunEngineParams } from '../../src/engine/query-loop'
+import { runEngine } from '../../src/engine/query-loop'
 import { defineTool } from '../../src/engine/tool-framework'
 import type { LLMAdapter } from '../../src/engine/llm-adapter'
-import type { StreamChunk, ToolDefinition, EngineOptions } from '../../src/engine/types'
+import type { StreamChunk, EngineOptions } from '../../src/engine/types'
 import { HumanMessageQueue } from '../../src/engine/human-message-queue'
 
 // --- Test Helpers ---
@@ -160,29 +160,6 @@ describe('runEngine', () => {
         ]),
       })
     )
-  })
-
-  it('calls onTextDelta callback for streaming text', async () => {
-    const onTextDelta = vi.fn()
-
-    const adapter = mockAdapter([
-      [
-        { type: 'message_start', messageId: 'msg-1' } as StreamChunk,
-        { type: 'text_delta', text: 'Hel' } as StreamChunk,
-        { type: 'text_delta', text: 'lo!' } as StreamChunk,
-        { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 5, outputTokens: 3 } } as StreamChunk,
-      ],
-    ])
-
-    await runEngine({
-      prompt: 'Hi',
-      adapter,
-      options: baseOptions({ onTextDelta }),
-    })
-
-    expect(onTextDelta).toHaveBeenCalledTimes(2)
-    expect(onTextDelta).toHaveBeenCalledWith('Hel')
-    expect(onTextDelta).toHaveBeenCalledWith('lo!')
   })
 
   it('returns aborted when abort signal fires', async () => {
