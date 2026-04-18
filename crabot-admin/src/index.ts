@@ -228,12 +228,15 @@ export class AdminModule extends ModuleBase {
   // 模块 env 配置缓存
   private moduleEnvConfigCache: Map<string, Record<string, string>> = new Map()
 
-  // 数据文件路径
-  private friendsFilePath: string = ''
-  private templatesFilePath: string = ''
-  private pendingMessagesFilePath: string = ''
-  private sessionConfigsFilePath: string = ''
-  private schedulesFilePath: string = ''
+  // 数据文件路径（在 constructor 里就初始化好，避免 SIGINT 早于 onStart 时 saveData 写到错误位置）
+  private readonly friendsFilePath: string
+  private readonly templatesFilePath: string
+  private readonly pendingMessagesFilePath: string
+  private readonly sessionConfigsFilePath: string
+  private readonly schedulesFilePath: string
+
+  // 数据加载完成前 saveData 必须拒绝，否则会用空内存覆盖磁盘真实数据
+  private dataLoaded = false
 
   constructor(
     moduleConfig: ModuleConfig,
@@ -241,6 +244,13 @@ export class AdminModule extends ModuleBase {
   ) {
     super(moduleConfig)
     this.adminConfig = { ...DEFAULT_ADMIN_CONFIG, ...adminConfig }
+
+    // 数据文件路径：constructor 里就算好，生命周期内不可变
+    this.friendsFilePath = path.join(this.adminConfig.data_dir, 'friends.json')
+    this.templatesFilePath = path.join(this.adminConfig.data_dir, 'templates.json')
+    this.pendingMessagesFilePath = path.join(this.adminConfig.data_dir, 'pending-messages.json')
+    this.sessionConfigsFilePath = path.join(this.adminConfig.data_dir, 'session-configs.json')
+    this.schedulesFilePath = path.join(this.adminConfig.data_dir, 'schedules.json')
 
     this.modelProviderManager = new ModelProviderManager(
       this.adminConfig.data_dir
@@ -406,15 +416,9 @@ export class AdminModule extends ModuleBase {
     await fs.writeFile(tokenPath, internalToken, { mode: 0o600 })
     console.log(`[Admin] Internal token written to ${tokenPath}`)
 
-    // 设置数据文件路径
-    this.friendsFilePath = path.join(this.adminConfig.data_dir, 'friends.json')
-    this.templatesFilePath = path.join(this.adminConfig.data_dir, 'templates.json')
-    this.pendingMessagesFilePath = path.join(this.adminConfig.data_dir, 'pending-messages.json')
-    this.sessionConfigsFilePath = path.join(this.adminConfig.data_dir, 'session-configs.json')
-    this.schedulesFilePath = path.join(this.adminConfig.data_dir, 'schedules.json')
-
-    // 加载数据
+    // 加载数据（filePath 已在 constructor 初始化）
     await this.loadData()
+    this.dataLoaded = true
 
     // 初始化系统权限模板
     await this.initSystemTemplates()
@@ -2417,12 +2421,21 @@ export class AdminModule extends ModuleBase {
    * 原子写入文件：先写临时文件，再 rename（避免进程被杀时文件损坏）
    */
   private async atomicWriteFile(filePath: string, content: string): Promise<void> {
+    if (!filePath) {
+      throw new Error('atomicWriteFile: filePath must be a non-empty string')
+    }
     const tempPath = `${filePath}.tmp`
     await fs.writeFile(tempPath, content, 'utf-8')
     await fs.rename(tempPath, filePath)
   }
 
   private async saveData(): Promise<void> {
+    // 关键防御：数据未加载完成时 saveData 会把空 Map 序列化覆盖磁盘真实数据
+    // 典型触发场景：SIGINT 在 onStart 早期（loadData 之前）到达 → onStop → saveData
+    if (!this.dataLoaded) {
+      console.warn('[Admin] saveData skipped: data not loaded yet')
+      return
+    }
     const friendsArray = Array.from(this.friends.values())
     await this.atomicWriteFile(this.friendsFilePath, JSON.stringify(friendsArray, null, 2))
 
