@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { skillService, type GitSkillItem } from '../../services/skill'
+import { skillService, type GitSkillItem, isDuplicateSkillError, type DuplicateSkillErrorBody } from '../../services/skill'
 import { agentService } from '../../services/agent'
 import { MainLayout } from '../../components/Layout/MainLayout'
 import { Card } from '../../components/Common/Card'
@@ -58,6 +58,38 @@ function mergeUnique(base: string[], additions: string[]): string[] {
     }
   }
   return merged
+}
+
+/**
+ * 弹出确认对话框询问用户是否覆盖同名 Skill
+ */
+function confirmOverwrite(body: DuplicateSkillErrorBody): boolean {
+  const { existing, incoming } = body
+  if (existing.is_builtin) {
+    // 内置 skill 不可覆盖（后端会再次拒绝），这里直接告知用户
+    alert(`"${existing.name}" 是内置 Skill，不可通过导入覆盖。`)
+    return false
+  }
+  return confirm(
+    `已存在同名 Skill "${existing.name}" (当前 v${existing.version})。\n\n` +
+    `是否用上传的 v${incoming.version} 覆盖？\n` +
+    `点击"确定"覆盖更新，点击"取消"放弃本次上传。`
+  )
+}
+
+/**
+ * 执行导入，若遇到同名冲突则询问用户；用户拒绝则返回 null。
+ */
+async function importWithOverwritePrompt<T>(
+  runImport: (overwrite?: boolean) => Promise<T>
+): Promise<T | null> {
+  try {
+    return await runImport(false)
+  } catch (err) {
+    if (!isDuplicateSkillError(err)) throw err
+    if (!confirmOverwrite(err.body)) return null
+    return runImport(true)
+  }
 }
 
 export const SkillList: React.FC = () => {
@@ -183,10 +215,14 @@ export const SkillList: React.FC = () => {
     if (gitSelected.size === 0) { toast.error('请选择要安装的 Skill'); return }
     setGitInstalling(true)
     const installedIds: string[] = []
+    let skippedCount = 0
     for (const url of gitSelected) {
       try {
-        const installed = await skillService.installFromGit(url, gitUrl.trim())
-        installedIds.push(installed.id)
+        const result = await importWithOverwritePrompt(overwrite =>
+          skillService.installFromGit(url, gitUrl.trim(), overwrite)
+        )
+        if (result) installedIds.push(result.id)
+        else skippedCount++
       } catch (err) {
         toast.error(`安装失败: ${err instanceof Error ? err.message : url}`)
       }
@@ -197,6 +233,8 @@ export const SkillList: React.FC = () => {
       setShowForm(false)
       await load()
       setPendingSkillIds(prev => mergeUnique(prev, installedIds))
+    } else if (skippedCount > 0) {
+      toast.success(`已取消 ${skippedCount} 个同名 Skill 的覆盖`)
     }
   }
 
@@ -204,7 +242,13 @@ export const SkillList: React.FC = () => {
     if (!localPath.trim()) { toast.error('请输入本地目录路径'); return }
     setSaving(true)
     try {
-      const imported = await skillService.importFromLocal(localPath.trim())
+      const imported = await importWithOverwritePrompt(overwrite =>
+        skillService.importFromLocal(localPath.trim(), overwrite)
+      )
+      if (!imported) {
+        toast.success('已取消，未做任何变更')
+        return
+      }
       toast.success('导入成功')
       setShowForm(false)
       await load()
@@ -231,7 +275,13 @@ export const SkillList: React.FC = () => {
         reader.onerror = () => reject(new Error('文件读取失败'))
         reader.readAsDataURL(file)
       })
-      const imported = await skillService.importFromUpload(base64, file.name)
+      const imported = await importWithOverwritePrompt(overwrite =>
+        skillService.importFromUpload(base64, file.name, overwrite)
+      )
+      if (!imported) {
+        toast.success('已取消，未做任何变更')
+        return
+      }
       toast.success('上传导入成功')
       setShowForm(false)
       await load()

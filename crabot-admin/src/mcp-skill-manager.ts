@@ -87,6 +87,21 @@ export interface MCPServerRegistryEntry {
   updated_at: string
 }
 
+/**
+ * 导入时检测到同名 Skill 抛出此错误
+ * 调用方可捕获后询问用户是否覆盖，重试时传 overwrite=true
+ */
+export class DuplicateSkillError extends Error {
+  readonly code = 'DUPLICATE_SKILL'
+  constructor(
+    readonly existing: SkillRegistryEntry,
+    readonly incoming: { name: string; description: string; version: string }
+  ) {
+    super(`Skill "${existing.name}" 已存在（当前 v${existing.version}，上传 v${incoming.version}）`)
+    this.name = 'DuplicateSkillError'
+  }
+}
+
 export interface SkillRegistryEntry {
   id: string
   name: string
@@ -466,6 +481,64 @@ export class SkillManager {
     return this.skills.get(id)
   }
 
+  /**
+   * 按 name 查找 Skill。用于导入前的重名检测
+   */
+  findByName(name: string): SkillRegistryEntry | undefined {
+    for (const entry of this.skills.values()) {
+      if (entry.name === name) return entry
+    }
+    return undefined
+  }
+
+  /**
+   * 导入时处理同名 Skill：
+   * - 目标是内置 Skill → 拒绝（内置由 registerBuiltins 独立管理）
+   * - overwrite=true → 更新现有条目并返回
+   * - 否则 → 抛出 DuplicateSkillError，由调用方询问用户
+   */
+  private async handleDuplicateOnImport(
+    existing: SkillRegistryEntry,
+    incoming: {
+      name: string
+      description: string
+      version: string
+      content: string
+      source_package?: string
+      skill_dir?: string
+    },
+    overwrite?: boolean
+  ): Promise<SkillRegistryEntry> {
+    if (existing.is_builtin) {
+      throw new Error(`Skill "${existing.name}" 是内置的，不可通过导入覆盖`)
+    }
+    if (!overwrite) {
+      throw new DuplicateSkillError(existing, {
+        name: incoming.name,
+        description: incoming.description,
+        version: incoming.version,
+      })
+    }
+    const updated = await this.update(existing.id, {
+      name: incoming.name,
+      description: incoming.description,
+      version: incoming.version,
+      content: incoming.content,
+    })
+    if (incoming.skill_dir !== undefined || incoming.source_package !== undefined) {
+      const patched: SkillRegistryEntry = {
+        ...updated,
+        ...(incoming.skill_dir !== undefined ? { skill_dir: incoming.skill_dir } : {}),
+        ...(incoming.source_package !== undefined ? { source_package: incoming.source_package } : {}),
+        updated_at: generateTimestamp(),
+      }
+      this.skills.set(updated.id, patched)
+      await this.save()
+      return patched
+    }
+    return updated
+  }
+
   async create(params: {
     name: string
     description: string
@@ -643,7 +716,7 @@ export class SkillManager {
    * 从 GitHub 安装指定 skill（通过 skill_md_url 获取内容）
    * 仅允许 raw.githubusercontent.com 的 HTTPS URL，防止 SSRF
    */
-  async importFromGit(skillMdUrl: string, sourceGitUrl?: string): Promise<SkillRegistryEntry> {
+  async importFromGit(skillMdUrl: string, sourceGitUrl?: string, overwrite?: boolean): Promise<SkillRegistryEntry> {
     // 严格限制只允许 GitHub raw 内容 URL，防止 SSRF
     let parsedUrl: URL
     try {
@@ -664,6 +737,16 @@ export class SkillManager {
     const content = await response.text()
     const parsed = parseSkillMd(content)
     if (!parsed.name) throw new Error('SKILL.md 缺少 name 字段')
+    const existing = this.findByName(parsed.name)
+    if (existing) {
+      return this.handleDuplicateOnImport(existing, {
+        name: parsed.name,
+        description: parsed.description,
+        version: parsed.version,
+        content,
+        source_package: sourceGitUrl,
+      }, overwrite)
+    }
     return this.create({
       name: parsed.name,
       description: parsed.description,
@@ -677,7 +760,7 @@ export class SkillManager {
    * 从本地目录路径导入（读取 <dirPath>/SKILL.md）
    * 禁止访问系统敏感目录，防止路径穿越
    */
-  async importFromLocalPath(dirPath: string): Promise<SkillRegistryEntry> {
+  async importFromLocalPath(dirPath: string, overwrite?: boolean): Promise<SkillRegistryEntry> {
     const resolved = path.resolve(dirPath)
     // 禁止访问敏感系统路径
     const FORBIDDEN_PREFIXES = ['/etc', '/proc', '/sys', '/dev', '/var/run', '/root', '/boot']
@@ -693,6 +776,17 @@ export class SkillManager {
     }
     const parsed = parseSkillMd(content)
     if (!parsed.name) throw new Error('SKILL.md 缺少 name 字段')
+    const existing = this.findByName(parsed.name)
+    if (existing) {
+      return this.handleDuplicateOnImport(existing, {
+        name: parsed.name,
+        description: parsed.description,
+        version: parsed.version,
+        content,
+        source_package: resolved,
+        skill_dir: resolved,
+      }, overwrite)
+    }
     const entry = await this.create({
       name: parsed.name,
       description: parsed.description,
@@ -709,7 +803,7 @@ export class SkillManager {
   /**
    * 从 zip/skills 文件的 base64 内容导入
    */
-  async importFromZip(base64Content: string, filename: string): Promise<SkillRegistryEntry> {
+  async importFromZip(base64Content: string, filename: string, overwrite?: boolean): Promise<SkillRegistryEntry> {
     const buffer = Buffer.from(base64Content, 'base64')
     const zip = new AdmZip(buffer)
     const entries = zip.getEntries()
@@ -723,6 +817,16 @@ export class SkillManager {
     const content = skillMdEntry.getData().toString('utf-8')
     const parsed = parseSkillMd(content)
     if (!parsed.name) throw new Error('SKILL.md 缺少 name 字段')
+    const existing = this.findByName(parsed.name)
+    if (existing) {
+      return this.handleDuplicateOnImport(existing, {
+        name: parsed.name,
+        description: parsed.description,
+        version: parsed.version,
+        content,
+        source_package: filename,
+      }, overwrite)
+    }
     return this.create({
       name: parsed.name,
       description: parsed.description,

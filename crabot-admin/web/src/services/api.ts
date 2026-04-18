@@ -38,8 +38,14 @@ class ApiClient {
     }
 
     if (!response.ok) {
-      const error: ApiError = await response.json()
-      throw new Error(error.error || 'Request failed')
+      const body: ApiError = await response.json().catch(() => ({ error: 'Request failed' }))
+      const err = new Error(body.error || 'Request failed') as Error & {
+        status?: number
+        body?: ApiError & Record<string, unknown>
+      }
+      err.status = response.status
+      err.body = body as ApiError & Record<string, unknown>
+      throw err
     }
 
     if (response.status === 204 || response.headers.get('content-length') === '0') {

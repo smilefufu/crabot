@@ -109,7 +109,7 @@ import { ChannelManager } from './channel-manager.js'
 import { ModuleInstaller } from './module-installer.js'
 import { ChatManager } from './chat-manager.js'
 import { PtyManager } from './pty-manager.js'
-import { MCPServerManager, SkillManager, EssentialToolsManager } from './mcp-skill-manager.js'
+import { MCPServerManager, SkillManager, EssentialToolsManager, DuplicateSkillError } from './mcp-skill-manager.js'
 import { PRESET_VENDORS } from './preset-vendors.js'
 import { Cron } from 'croner'
 import { ScheduleEngine } from './schedule-engine.js'
@@ -4055,16 +4055,38 @@ export class AdminModule extends ModuleBase {
     }
   }
 
+  /**
+   * 将 DuplicateSkillError 转为 409 响应。前端可据此弹确认框并重试（携带 overwrite:true）。
+   */
+  private writeDuplicateSkillResponse(res: ServerResponse, err: DuplicateSkillError): void {
+    res.writeHead(409, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({
+      error: err.message,
+      code: err.code,
+      existing: {
+        id: err.existing.id,
+        name: err.existing.name,
+        version: err.existing.version,
+        is_builtin: err.existing.is_builtin,
+      },
+      incoming: err.incoming,
+    }))
+  }
+
   private async handleInstallSkillGitApi(
     req: IncomingMessage,
     res: ServerResponse
   ): Promise<void> {
     try {
-      const body = await this.readJsonBody<{ skill_md_url: string; source_git_url?: string }>(req)
-      const skill = await this.skillManager.importFromGit(body.skill_md_url, body.source_git_url)
+      const body = await this.readJsonBody<{ skill_md_url: string; source_git_url?: string; overwrite?: boolean }>(req)
+      const skill = await this.skillManager.importFromGit(body.skill_md_url, body.source_git_url, body.overwrite)
       res.writeHead(201, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(skill))
     } catch (err) {
+      if (err instanceof DuplicateSkillError) {
+        this.writeDuplicateSkillResponse(res, err)
+        return
+      }
       res.writeHead(400, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'install failed' }))
     }
@@ -4075,11 +4097,15 @@ export class AdminModule extends ModuleBase {
     res: ServerResponse
   ): Promise<void> {
     try {
-      const body = await this.readJsonBody<{ dir_path: string }>(req)
-      const skill = await this.skillManager.importFromLocalPath(body.dir_path)
+      const body = await this.readJsonBody<{ dir_path: string; overwrite?: boolean }>(req)
+      const skill = await this.skillManager.importFromLocalPath(body.dir_path, body.overwrite)
       res.writeHead(201, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(skill))
     } catch (err) {
+      if (err instanceof DuplicateSkillError) {
+        this.writeDuplicateSkillResponse(res, err)
+        return
+      }
       res.writeHead(400, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'import failed' }))
     }
@@ -4091,11 +4117,15 @@ export class AdminModule extends ModuleBase {
   ): Promise<void> {
     try {
       // base64 编码后约为原始大小的 1.37 倍，允许最大 50MB zip 文件
-      const body = await this.readJsonBody<{ base64_content: string; filename: string }>(req, 70 * 1024 * 1024)
-      const skill = await this.skillManager.importFromZip(body.base64_content, body.filename)
+      const body = await this.readJsonBody<{ base64_content: string; filename: string; overwrite?: boolean }>(req, 70 * 1024 * 1024)
+      const skill = await this.skillManager.importFromZip(body.base64_content, body.filename, body.overwrite)
       res.writeHead(201, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(skill))
     } catch (err) {
+      if (err instanceof DuplicateSkillError) {
+        this.writeDuplicateSkillResponse(res, err)
+        return
+      }
       res.writeHead(400, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'import failed' }))
     }
