@@ -31,6 +31,9 @@ export interface MemoryTaskContext {
   scopes: string[]
   /** 记忆来源类型，默认 'conversation' */
   sourceType?: 'conversation' | 'reflection' | 'system'
+  /** 场景推断所需：群聊 sessionType='group'；私聊 'private' 需 friendId */
+  sessionType?: 'private' | 'group'
+  senderFriendId?: string
 }
 
 // ============================================================================
@@ -154,6 +157,72 @@ export function createCrabMemoryServer(
           }
         },
       ),
+  server.tool(
+    'set_scene_anchor',
+    '把一条稳定的场景规则/身份信息写入当前场景画像（而非普通长期记忆）。用户明确要求"请把这条记下来作为规则"时优先使用。',
+    {
+      topic: z.string().describe('画像分节主题，如"群职责"、"发言规范"、"联系方式"'),
+      body: z.string().describe('分节正文。保持简洁、稳定、可直接读的陈述'),
+      visibility: z.enum(['private', 'public']).optional()
+        .describe('默认 private；仅 friend 场景允许 public（表示可被对方参与的其他场景共享）'),
+    },
+    async (args) => {
+      try {
+        let scene:
+          | { type: 'group_session'; channel_id: string; session_id: string }
+          | { type: 'friend'; friend_id: string }
+          | null = null
+        if (ctx.sessionType === 'group' && ctx.channelId && ctx.sessionId) {
+          scene = { type: 'group_session', channel_id: ctx.channelId, session_id: ctx.sessionId }
+        } else if (ctx.sessionType === 'private' && ctx.senderFriendId) {
+          scene = { type: 'friend', friend_id: ctx.senderFriendId }
+        }
+        if (!scene) {
+          return {
+            content: [{ type: 'text' as const, text: JSON.stringify({
+              success: false,
+              error: '无法推断场景（缺少 friend_id 或 session_id）',
+            }) }],
+          }
+        }
+
+        const visibility = (scene.type === 'friend' && args.visibility === 'public')
+          ? 'public' : 'private'
+
+        const memoryPort = await getMemoryPort()
+        const result = await rpcClient.call<
+          {
+            scene: typeof scene
+            section: { topic: string; body: string; visibility: 'private' | 'public' }
+            merge: 'replace_topic'
+            label?: string
+          },
+          { profile: unknown }
+        >(
+          memoryPort,
+          'patch_scene_profile',
+          { scene, section: { topic: args.topic, body: args.body, visibility }, merge: 'replace_topic' },
+          moduleId,
+        )
+
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({
+            success: true,
+            profile: result.profile,
+          }) }],
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        console.error(`[${moduleId}] set_scene_anchor failed:`, message)
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({
+            success: false,
+            error: message,
+          }) }],
+        }
+      }
+    },
+  )
   server.tool(
         'get_memory_detail',
         '获取某条长期记忆的详细内容。先用 search_memory 找到记忆 ID，再用此工具查看详情。',

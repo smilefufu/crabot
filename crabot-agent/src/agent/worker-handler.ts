@@ -329,6 +329,8 @@ export class WorkerHandler {
         visibility: context.memory_permissions?.write_visibility ?? 'public',
         scopes: context.memory_permissions?.write_scopes ?? [],
         sourceType: context.task_origin ? 'conversation' : 'system',
+        sessionType: context.task_origin?.session_type,
+        senderFriendId: context.sender_friend?.id,
       }
       if (this.deps?.getMemoryPort) {
         const crabMemoryServer = createCrabMemoryServer({
