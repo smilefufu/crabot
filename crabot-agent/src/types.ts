@@ -321,6 +321,8 @@ export interface FrontAgentContext {
   short_term_memories: ShortTermMemoryEntry[]
   active_tasks: TaskSummary[]
   available_tools: ToolDeclaration[]
+  /** 组合后的场景画像（好友 + 群会话叠加），由 Memory 模块返回 */
+  scene_profile?: ComposedSceneProfile
   /** Crabot's display name on the current channel (e.g. group nickname) */
   crab_display_name?: string
 }
@@ -348,6 +350,8 @@ export interface WorkerAgentContext {
     write_visibility: 'private' | 'internal' | 'public'
     write_scopes: string[]
   }
+  /** 组合后的场景画像（好友 + 群会话叠加），由 Memory 模块返回 */
+  scene_profile?: ComposedSceneProfile
   /** Front Agent 已发送给用户的即时回复（避免 Worker 重复确认） */
   front_immediate_reply?: string
 }
@@ -789,4 +793,38 @@ export interface TraceCallback {
   onLlmCallEnd(spanId: string, result: { stopReason?: string; outputSummary?: string; toolCallsCount?: number; fullInput?: string; fullOutput?: string; error?: string }): void
   onToolCallStart(toolName: string, inputSummary: string): string
   onToolCallEnd(spanId: string, outputSummary: string, error?: string): void
+}
+
+// ============================================================================
+// 场景画像（SceneProfile）— 对齐 protocol-memory.md v0.2.0
+// ============================================================================
+
+export type SceneIdentity =
+  | { type: 'friend'; friend_id: string }
+  | { type: 'group_session'; channel_id: string; session_id: string }
+  | { type: 'global' }
+
+export interface SceneProfileSection {
+  topic: string
+  body: string
+  visibility: 'private' | 'public'
+}
+
+export interface SceneProfile {
+  scene: SceneIdentity
+  label: string
+  sections: SceneProfileSection[]
+  source_memory_ids?: string[]
+  created_at: string
+  updated_at: string
+  last_declared_at?: string
+}
+
+export interface ComposedSceneProfile {
+  primary_label: string
+  sections: SceneProfileSection[]
+  source: {
+    primary_scene: SceneIdentity
+    overlaid_friend_id?: string
+  }
 }
