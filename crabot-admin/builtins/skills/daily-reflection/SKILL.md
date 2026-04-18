@@ -1,7 +1,7 @@
 ---
 name: daily-reflection
-description: "Use when the task contains the word '反思' — guides structured daily reflection on task execution quality"
-version: "1.1.0"
+description: "在任务描述包含'反思'时使用 — 引导结构化的每日任务质量反思"
+version: "1.2.0"
 ---
 
 # 每日反思技能
@@ -118,3 +118,18 @@ mcp__crab-memory__store_memory({
 3. `mcp__crab-messaging__send_message(...)` 发送简要汇报
 
 如果无重大发现或找不到 master 会话，跳过汇报。
+
+### 第七步：场景画像反思
+
+**目标**：把近期反复出现的"场景核心稳定知识"从长期记忆/trace 中归纳到场景画像（`SceneProfile`），清理画像中已被推翻的旧条目，并对违反黑名单的新长期记忆做回收。
+
+1. **列出活跃场景**：从最近 24h short-term 事件中抽取出现过的 `friend_id` 与 `{channel_id, session_id}` 对。
+2. **逐场景归纳**：
+   - `mcp__crab-memory__get_scene_profile({ scene })` 取现状
+   - 扫描该场景相关的 long-term 条目与 trace
+   - 识别"核心稳定知识"：反复出现但未被画像覆盖的规则 / 用户反复纠正的偏好 / 与画像已有 section 矛盾的新证据
+   - 有新归纳 → `mcp__crab-memory__patch_scene_profile({ scene, section, merge: "replace_topic" })`，并在 `source_memory_ids` 记录来源
+3. **清理过期**：画像中某 section 被新证据推翻 → `patch_scene_profile` 替换 / 删除；section 过期且无替代 → 在 `label` 备注或整条 `delete_scene_profile`。
+4. **黑名单合规检查**：扫描近 24h 新增 long-term 条目，命中黑名单（一次性快照、时效新闻、细碎 tip、已解决 bug 细节、中间猜测、偶尔一次表述）的 → `delete_memory` 回收。
+
+**不新增反思频次**：第七步与前六步同一 run 内执行。
