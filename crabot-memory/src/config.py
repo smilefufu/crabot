@@ -59,7 +59,7 @@ class MemoryConfig(BaseModel):
     module_id: str = "memory-default"
     module_type: str = "memory"
     version: str = "0.1.0"
-    protocol_version: str = "0.1.0"
+    protocol_version: str = "0.2.0"
     port: int = 19002
     module_manager_url: str = "http://localhost:19000"
     admin_endpoint: str = ""  # Admin RPC 地址，供启动时 pull 配置
