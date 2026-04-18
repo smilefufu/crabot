@@ -997,7 +997,11 @@ export class UnifiedAgent extends ModuleBase {
    * 群聊权限解析：使用 group_default 模板 + Session 覆盖
    */
   private async resolveGroupPermissions(sessionId: string): Promise<ResolvedPermissions | null> {
-    return this.resolvePermissionsForTemplate('group_default', sessionId)
+    const resolved = await this.resolvePermissionsForTemplate('group_default', sessionId)
+    if (!resolved) return null
+    // 群聊：memory_scopes 为空时 fallback 到 [sessionId]，避免写入跨群可见
+    const memoryScopes = resolved.memory_scopes.length > 0 ? resolved.memory_scopes : [sessionId]
+    return { ...resolved, memory_scopes: memoryScopes }
   }
 
   /**
