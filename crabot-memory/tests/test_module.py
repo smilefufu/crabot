@@ -3,6 +3,8 @@ Memory 模块基础测试
 """
 import pytest
 import asyncio
+import shutil
+import tempfile
 from datetime import datetime
 
 from src.types import (
@@ -17,20 +19,19 @@ from src.module import MemoryModule
 
 @pytest.fixture
 async def memory_module():
-    """创建测试用的 Memory 模块"""
-    # 加载配置文件（包含 ollama 配置）
+    """创建测试用的 Memory 模块（每个测试独立 tmp 目录）"""
     config = load_config("config.yaml")
-    config.port = 19999  # 测试端口
-    # 使用临时目录进行测试
-    config.storage.data_dir = "/tmp/crabot-memory-test"
+    config.port = 19999
+    tmp_dir = tempfile.mkdtemp(prefix="crabot-memory-test-")
+    config.storage.data_dir = tmp_dir
 
     module = MemoryModule(config)
-    # 不启动 HTTP 服务器，直接测试内部方法
     yield module
 
-    # 清理
     module.vector_store.close()
     module.sqlite_store.close()
+    module.scene_profile_store.close()
+    shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 @pytest.mark.asyncio
