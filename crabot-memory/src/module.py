@@ -660,6 +660,7 @@ class MemoryModule:
         logger.info("Stopping Memory module")
         self.vector_store.close()
         self.sqlite_store.close()
+        self.scene_profile_store.close()
         if self.server:
             self.server.should_exit = True
         if self.server_task:
