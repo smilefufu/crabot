@@ -18,7 +18,8 @@ from ..types import (
 class SceneProfileStore:
     def __init__(self, db_path: str):
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(db_path)
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self._init_db()
 
@@ -188,23 +189,24 @@ class SceneProfileStore:
         return "scene_type = 'global'", ()
 
     def _row_to_profile(self, row) -> SceneProfile:
-        scene_type, friend_id, channel_id, session_id, label, sections_json, src_json, c_at, u_at, l_at = row
+        scene_type = row["scene_type"]
         if scene_type == "friend":
-            scene: SceneIdentity = SceneIdentityFriend(friend_id=friend_id)
+            scene: SceneIdentity = SceneIdentityFriend(friend_id=row["friend_id"])
         elif scene_type == "group_session":
-            scene = SceneIdentityGroup(channel_id=channel_id, session_id=session_id)
+            scene = SceneIdentityGroup(channel_id=row["channel_id"], session_id=row["session_id"])
         else:
             scene = SceneIdentityGlobal()
-        sections = [SceneProfileSection(**s) for s in json.loads(sections_json)]
+        sections = [SceneProfileSection(**s) for s in json.loads(row["sections_json"])]
+        src_json = row["source_memory_ids_json"]
         source_ids = json.loads(src_json) if src_json else None
         return SceneProfile(
             scene=scene,
-            label=label,
+            label=row["label"],
             sections=sections,
             source_memory_ids=source_ids,
-            created_at=c_at,
-            updated_at=u_at,
-            last_declared_at=l_at,
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            last_declared_at=row["last_declared_at"],
         )
 
     def _default_label(self, scene: SceneIdentity) -> str:
