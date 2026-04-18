@@ -2,7 +2,7 @@
 Memory 模块数据类型定义
 对齐 protocol-memory.md 和 base-protocol.md
 """
-from typing import Optional, List, Dict, Any, Literal
+from typing import Optional, List, Dict, Any, Literal, Union
 from pydantic import BaseModel, Field
 from datetime import datetime
 import uuid
@@ -373,3 +373,42 @@ class HealthResult(BaseModel):
     """健康检查结果"""
     status: Literal["healthy", "degraded", "unhealthy"]
     details: Optional[Dict[str, Any]] = None
+
+
+# ============================================================================
+# 场景画像（SceneProfile）— protocol-memory.md v0.2.0
+# ============================================================================
+
+
+class SceneIdentityFriend(BaseModel):
+    type: Literal["friend"] = "friend"
+    friend_id: str
+
+
+class SceneIdentityGroup(BaseModel):
+    type: Literal["group_session"] = "group_session"
+    channel_id: str
+    session_id: str
+
+
+class SceneIdentityGlobal(BaseModel):
+    type: Literal["global"] = "global"
+
+
+SceneIdentity = Union[SceneIdentityFriend, SceneIdentityGroup, SceneIdentityGlobal]
+
+
+class SceneProfileSection(BaseModel):
+    topic: str
+    body: str
+    visibility: Literal["private", "public"] = "private"
+
+
+class SceneProfile(BaseModel):
+    scene: SceneIdentity
+    label: str
+    sections: List[SceneProfileSection] = Field(default_factory=list)
+    source_memory_ids: Optional[List[MemoryId]] = None
+    created_at: str
+    updated_at: str
+    last_declared_at: Optional[str] = None
