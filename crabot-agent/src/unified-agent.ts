@@ -1961,16 +1961,17 @@ export class UnifiedAgent extends ModuleBase {
     const changedFields: string[] = []
     let restartRequired = false
 
-    // 更新模型配置（需要热更新 LLM 客户端）
+    // 先收集所有状态变更，最后统一触发 handler 重建，避免多次重建
+    const modelConfigChanged = params.model_config !== undefined
+    const skillsChanged = params.skills !== undefined
+
+    // 更新模型配置
     if (params.model_config) {
       this.agentConfig.model_config = {
         ...this.agentConfig.model_config,
         ...params.model_config,
       }
       changedFields.push('model_config')
-
-      // 热更新 LLM 客户端
-      await this.updateLlmClients(params.model_config)
     }
 
     // 更新系统提示词（需要重启才能生效）
@@ -1987,11 +1988,16 @@ export class UnifiedAgent extends ModuleBase {
       restartRequired = true
     }
 
-    // 更新 Skills（需要重启才能生效）
+    // 更新 Skills（热更新：重建 Front/Worker handler 以刷新 system prompt 与 skill 列表）
     if (params.skills !== undefined) {
       this.agentConfig.skills = params.skills
       changedFields.push('skills')
-      restartRequired = true
+    }
+
+    // 根据变更字段，按需触发 handler 重建
+    if (modelConfigChanged || skillsChanged) {
+      const mergedModelConfig = this.agentConfig.model_config ?? {}
+      await this.updateLlmClients(mergedModelConfig, { forceFrontRebuild: skillsChanged })
     }
 
     // 更新扩展配置（热生效，下次使用对应功能时生效）
@@ -2023,8 +2029,13 @@ export class UnifiedAgent extends ModuleBase {
 
   /**
    * 热更新 LLM 客户端
+   * @param modelConfig 新的模型配置
+   * @param options.forceFrontRebuild 强制重建 Front handler（skills 等 prompt 依赖字段变更时用）
    */
-  private async updateLlmClients(modelConfig: Record<string, LLMConnectionInfo>): Promise<void> {
+  private async updateLlmClients(
+    modelConfig: Record<string, LLMConnectionInfo>,
+    options: { forceFrontRebuild?: boolean } = {},
+  ): Promise<void> {
     const { basePersonality, workerPersonality, frontSkillListing } =
       this.buildPromptParts(this.agentConfig?.system_prompt, this.agentConfig?.skills)
 
@@ -2043,7 +2054,7 @@ export class UnifiedAgent extends ModuleBase {
       const frontConfig = modelConfig.triage
       if (frontConfig) {
         const formatChanged = this.frontHandlerFormat !== frontConfig.format
-        if (this.frontHandler && !formatChanged) {
+        if (this.frontHandler && !formatChanged && !options.forceFrontRebuild) {
           this.frontHandler.updateLlmConfig({
             endpoint: frontConfig.endpoint,
             apikey: frontConfig.apikey,

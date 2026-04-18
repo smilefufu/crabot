@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { skillService, type GitSkillItem } from '../../services/skill'
+import { agentService } from '../../services/agent'
 import { MainLayout } from '../../components/Layout/MainLayout'
 import { Card } from '../../components/Common/Card'
 import { Button } from '../../components/Common/Button'
@@ -47,6 +48,18 @@ function parseSkillMdFrontmatter(content: string): { name?: string; version?: st
 
 type CreateTab = 'git' | 'local' | 'upload'
 
+function mergeUnique(base: string[], additions: string[]): string[] {
+  const seen = new Set(base)
+  const merged = [...base]
+  for (const id of additions) {
+    if (!seen.has(id)) {
+      seen.add(id)
+      merged.push(id)
+    }
+  }
+  return merged
+}
+
 export const SkillList: React.FC = () => {
   const toast = useToast()
   const [skills, setSkills] = useState<SkillRegistryEntry[]>([])
@@ -67,6 +80,9 @@ export const SkillList: React.FC = () => {
   const [localPath, setLocalPath] = useState('')
   // Upload state
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // Pending skills to offer adding to agent config
+  const [pendingSkillIds, setPendingSkillIds] = useState<string[]>([])
+  const [addingToAgent, setAddingToAgent] = useState(false)
 
   useEffect(() => { load() }, [])
 
@@ -166,20 +182,21 @@ export const SkillList: React.FC = () => {
   const handleInstallGit = async () => {
     if (gitSelected.size === 0) { toast.error('请选择要安装的 Skill'); return }
     setGitInstalling(true)
-    let successCount = 0
+    const installedIds: string[] = []
     for (const url of gitSelected) {
       try {
-        await skillService.installFromGit(url, gitUrl.trim())
-        successCount++
+        const installed = await skillService.installFromGit(url, gitUrl.trim())
+        installedIds.push(installed.id)
       } catch (err) {
         toast.error(`安装失败: ${err instanceof Error ? err.message : url}`)
       }
     }
     setGitInstalling(false)
-    if (successCount > 0) {
-      toast.success(`成功安装 ${successCount} 个 Skill`)
+    if (installedIds.length > 0) {
+      toast.success(`成功安装 ${installedIds.length} 个 Skill`)
       setShowForm(false)
       await load()
+      setPendingSkillIds(prev => mergeUnique(prev, installedIds))
     }
   }
 
@@ -187,10 +204,11 @@ export const SkillList: React.FC = () => {
     if (!localPath.trim()) { toast.error('请输入本地目录路径'); return }
     setSaving(true)
     try {
-      await skillService.importFromLocal(localPath.trim())
+      const imported = await skillService.importFromLocal(localPath.trim())
       toast.success('导入成功')
       setShowForm(false)
       await load()
+      setPendingSkillIds(prev => mergeUnique(prev, [imported.id]))
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '导入失败')
     } finally {
@@ -213,15 +231,37 @@ export const SkillList: React.FC = () => {
         reader.onerror = () => reject(new Error('文件读取失败'))
         reader.readAsDataURL(file)
       })
-      await skillService.importFromUpload(base64, file.name)
+      const imported = await skillService.importFromUpload(base64, file.name)
       toast.success('上传导入成功')
       setShowForm(false)
       await load()
+      setPendingSkillIds(prev => mergeUnique(prev, [imported.id]))
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '上传失败')
     } finally {
       setSaving(false)
       if (fileInputRef.current) fileInputRef.current.value = ''
+    }
+  }
+
+  const handleEnableInAgent = async () => {
+    if (pendingSkillIds.length === 0) return
+    setAddingToAgent(true)
+    try {
+      const agentConfig = await agentService.getConfig()
+      const existing = agentConfig.skill_ids ?? []
+      const merged = mergeUnique(existing, pendingSkillIds)
+      if (merged.length === existing.length) {
+        toast.success('这些 Skill 已在 Agent 配置中')
+      } else {
+        await agentService.updateConfig({ skill_ids: merged })
+        toast.success('已添加到 Agent 配置')
+      }
+      setPendingSkillIds([])
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '添加失败')
+    } finally {
+      setAddingToAgent(false)
     }
   }
 
@@ -419,6 +459,42 @@ export const SkillList: React.FC = () => {
         </Card>
         </div>
       )}
+
+      {pendingSkillIds.length > 0 && (() => {
+        const pendingNames = pendingSkillIds
+          .map(id => skills.find(s => s.id === id)?.name)
+          .filter((n): n is string => !!n)
+        return (
+          <div
+            className="card"
+            style={{
+              marginBottom: '1rem',
+              borderLeft: '3px solid var(--primary)',
+              background: 'rgba(59,130,246,0.06)',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+              <div style={{ flex: 1, minWidth: '240px' }}>
+                <div style={{ fontWeight: 600, marginBottom: '0.25rem' }}>
+                  把新添加的 Skill 启用到 Agent 配置？
+                </div>
+                <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                  {pendingNames.length > 0 ? pendingNames.join('、') : `${pendingSkillIds.length} 个 Skill`}
+                  {' '}未启用，Agent 不会识别它们。点"启用"一键加入 Agent 配置。
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: '0.5rem', flexShrink: 0 }}>
+                <Button variant="primary" onClick={handleEnableInAgent} disabled={addingToAgent}>
+                  {addingToAgent ? '添加中...' : '启用'}
+                </Button>
+                <Button variant="secondary" onClick={() => setPendingSkillIds([])} disabled={addingToAgent}>
+                  忽略
+                </Button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
 
       {skills.length === 0 ? (
         <Card>

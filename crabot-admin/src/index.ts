@@ -4878,8 +4878,9 @@ export class AdminModule extends ModuleBase {
   }
 
   /**
-   * 全局配置保存后或 Agent 启动时，推送 model_config 到 Agent 模块（热更新）
-   * system_prompt/mcp_servers/skills 变更需要重启，不在这里推送
+   * 全局配置保存后或 Agent 启动时，推送可热更新字段到 Agent 模块
+   * 支持热更新：model_config、skills、extra
+   * 仍需重启：system_prompt、mcp_servers
    */
   private async pushConfigToAgentModules(): Promise<void> {
     try {
@@ -4892,6 +4893,7 @@ export class AdminModule extends ModuleBase {
       // 推送可热更新的字段
       const updateParams = {
         model_config: config.model_config,
+        skills: config.skills,
         extra: config.extra,
       }
 
