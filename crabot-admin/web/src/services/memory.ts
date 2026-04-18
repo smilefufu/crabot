@@ -123,3 +123,90 @@ export const memoryService = {
     return api.delete<{ deleted: boolean }>(`/memory/${id}${q}`)
   },
 }
+
+// ============================================================================
+// 场景画像（SceneProfile）— 对齐 protocol-memory.md v0.2.0
+// ============================================================================
+
+export type SceneIdentity =
+  | { type: 'friend'; friend_id: string }
+  | { type: 'group_session'; channel_id: string; session_id: string }
+  | { type: 'global' }
+
+export interface SceneProfileSection {
+  topic: string
+  body: string
+  visibility: 'private' | 'public'
+}
+
+export interface SceneProfile {
+  scene: SceneIdentity
+  label: string
+  sections: SceneProfileSection[]
+  source_memory_ids?: string[] | null
+  created_at: string
+  updated_at: string
+  last_declared_at?: string | null
+}
+
+export function sceneToKey(scene: SceneIdentity): string {
+  if (scene.type === 'global') return 'global'
+  if (scene.type === 'friend') return `friend:${scene.friend_id}`
+  return `group:${scene.channel_id}:${scene.session_id}`
+}
+
+export const sceneProfileService = {
+  async list(params: {
+    sceneType?: 'friend' | 'group_session' | 'global'
+    limit?: number
+    offset?: number
+    moduleId?: string
+  } = {}): Promise<{ profiles: SceneProfile[] }> {
+    const q = buildQuery({
+      scene_type: params.sceneType,
+      limit: params.limit,
+      offset: params.offset,
+      module_id: params.moduleId,
+    })
+    return api.get<{ profiles: SceneProfile[] }>(`/scene-profiles${q}`)
+  },
+
+  async get(
+    key: string,
+    params: { onlyPublic?: boolean; moduleId?: string } = {},
+  ): Promise<{ profile: SceneProfile | null }> {
+    const q = buildQuery({
+      only_public: params.onlyPublic ? 'true' : undefined,
+      module_id: params.moduleId,
+    })
+    return api.get<{ profile: SceneProfile | null }>(
+      `/scene-profiles/${encodeURIComponent(key)}${q}`,
+    )
+  },
+
+  async patch(
+    key: string,
+    body: {
+      label?: string
+      sections?: SceneProfileSection[]
+      source_memory_ids?: string[]
+    },
+    moduleId?: string,
+  ): Promise<{ profile: SceneProfile }> {
+    const q = buildQuery({ module_id: moduleId })
+    return api.patch<{ profile: SceneProfile }>(
+      `/scene-profiles/${encodeURIComponent(key)}${q}`,
+      body,
+    )
+  },
+
+  async delete(
+    key: string,
+    moduleId?: string,
+  ): Promise<{ deleted: boolean }> {
+    const q = buildQuery({ module_id: moduleId })
+    return api.delete<{ deleted: boolean }>(
+      `/scene-profiles/${encodeURIComponent(key)}${q}`,
+    )
+  },
+}
