@@ -58,6 +58,7 @@ export const SceneProfileDetail: React.FC = () => {
       setServiceError('')
     } catch (err) {
       const msg = 'Memory 服务未运行，请确认 Memory 模块已启动'
+      setProfile(null)
       setServiceError(msg)
       toast.error(err instanceof Error ? err.message : msg)
     }
@@ -114,7 +115,7 @@ export const SceneProfileDetail: React.FC = () => {
   }, [key, toast, navigate])
 
   // Loading state
-  if (profile === undefined && !serviceError) {
+  if (profile === undefined) {
     return (
       <MainLayout>
         <Loading />
