@@ -1,6 +1,6 @@
 ---
 name: crabot-cli
-description: "Use when master asks to view or change system configuration, switch models, manage MCP servers, channels, schedules, or friends in a private chat session"
+description: "在 master 通过私聊要求查看或变更系统配置、切换模型、管理 MCP 服务器、频道、日程或好友时使用"
 version: "1.0.0"
 metadata:
   openclaw:
