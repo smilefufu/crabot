@@ -774,6 +774,15 @@ export class WorkerHandler {
 
   private async buildTaskMessage(task: ExecuteTaskParams['task'], context: WorkerAgentContext): Promise<string | ContentBlock[]> {
     const parts: string[] = []
+    if (context.scene_profile && context.scene_profile.sections.length > 0) {
+      const sp = context.scene_profile
+      parts.push(`## 场景画像（${sp.primary_label}）`)
+      parts.push('以下是本场景的稳定规则/身份，需在本轮任务中遵守。')
+      for (const s of sp.sections) {
+        parts.push(`\n### ${s.topic}\n${s.body}`)
+      }
+      parts.push('')  // 空行分隔
+    }
     parts.push('## 任务信息')
     parts.push(`- 标题: ${task.task_title}`)
     parts.push(`- 优先级: ${task.priority}`)
