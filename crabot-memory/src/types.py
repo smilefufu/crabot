@@ -381,17 +381,20 @@ class HealthResult(BaseModel):
 
 
 class SceneIdentityFriend(BaseModel):
+    """场景身份：好友"""
     type: Literal["friend"] = "friend"
     friend_id: str
 
 
 class SceneIdentityGroup(BaseModel):
+    """场景身份：群会话"""
     type: Literal["group_session"] = "group_session"
     channel_id: str
     session_id: str
 
 
 class SceneIdentityGlobal(BaseModel):
+    """场景身份：全局（Agent 基础 persona）"""
     type: Literal["global"] = "global"
 
 
@@ -399,16 +402,18 @@ SceneIdentity = Union[SceneIdentityFriend, SceneIdentityGroup, SceneIdentityGlob
 
 
 class SceneProfileSection(BaseModel):
+    """场景画像分节"""
     topic: str
     body: str
     visibility: Literal["private", "public"] = "private"
 
 
 class SceneProfile(BaseModel):
+    """场景画像（按场景身份聚合的稳定规则与信息）"""
     scene: SceneIdentity
     label: str
     sections: List[SceneProfileSection] = Field(default_factory=list)
     source_memory_ids: Optional[List[MemoryId]] = None
-    created_at: str
-    updated_at: str
+    created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
     last_declared_at: Optional[str] = None
