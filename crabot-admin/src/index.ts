@@ -171,6 +171,40 @@ function verifyJwt(token: string, secret: string): JwtPayload | null {
 }
 
 // ============================================================================
+// Scene Profile 工具函数
+// ============================================================================
+
+interface SceneIdentity {
+  type: 'friend' | 'group_session' | 'global'
+  friend_id?: string
+  channel_id?: string
+  session_id?: string
+}
+
+function parseSceneKey(key: string): SceneIdentity {
+  const decoded = decodeURIComponent(key)
+  if (decoded === 'global') return { type: 'global' }
+  if (decoded.startsWith('friend:')) {
+    const friendId = decoded.slice('friend:'.length)
+    if (!friendId) throw new Error(`Invalid friend scene key: ${decoded}`)
+    return { type: 'friend', friend_id: friendId }
+  }
+  if (decoded.startsWith('group:')) {
+    const rest = decoded.slice('group:'.length)
+    const idx = rest.indexOf(':')
+    if (idx <= 0 || idx === rest.length - 1) {
+      throw new Error(`Invalid group scene key: ${decoded}`)
+    }
+    return {
+      type: 'group_session',
+      channel_id: rest.slice(0, idx),
+      session_id: rest.slice(idx + 1),
+    }
+  }
+  throw new Error(`Unknown scene key: ${decoded}`)
+}
+
+// ============================================================================
 // Admin 模块
 // ============================================================================
 
@@ -1468,6 +1502,30 @@ export class AdminModule extends ModuleBase {
       if (req.method === 'DELETE' && pathname.match(/^\/api\/memory\/[^/]+$/)) {
         const memoryId = pathname.split('/')[3]
         await this.handleDeleteMemoryApi(req, res, url, memoryId)
+        return
+      }
+
+      // Scene Profile 管理 API
+      if (req.method === 'GET' && pathname === '/api/scene-profiles') {
+        await this.handleListSceneProfilesApi(req, res, url)
+        return
+      }
+
+      if (req.method === 'GET' && pathname.match(/^\/api\/scene-profiles\/.+$/)) {
+        const key = pathname.slice('/api/scene-profiles/'.length)
+        await this.handleGetSceneProfileApi(req, res, url, key)
+        return
+      }
+
+      if (req.method === 'PATCH' && pathname.match(/^\/api\/scene-profiles\/.+$/)) {
+        const key = pathname.slice('/api/scene-profiles/'.length)
+        await this.handlePatchSceneProfileApi(req, res, url, key)
+        return
+      }
+
+      if (req.method === 'DELETE' && pathname.match(/^\/api\/scene-profiles\/.+$/)) {
+        const key = pathname.slice('/api/scene-profiles/'.length)
+        await this.handleDeleteSceneProfileApi(req, res, url, key)
         return
       }
 
@@ -5658,6 +5716,85 @@ export class AdminModule extends ModuleBase {
     const port = await this.getMemoryPort(moduleId)
     const result = await this.rpcClient.call<{ memory_id: string }, unknown>(
       port, 'delete_memory', { memory_id: memoryId }, this.config.moduleId
+    )
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(result))
+  }
+
+  private async handleListSceneProfilesApi(_req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+    const moduleId = url.searchParams.get('module_id') ?? undefined
+    const sceneType = url.searchParams.get('scene_type') ?? undefined
+    const limit = parseInt(url.searchParams.get('limit') ?? '100', 10)
+    const offset = parseInt(url.searchParams.get('offset') ?? '0', 10)
+    const port = await this.getMemoryPort(moduleId)
+    const params: { scene_type?: string; limit: number; offset: number } = { limit, offset }
+    if (sceneType) params.scene_type = sceneType
+    const result = await this.rpcClient.call<typeof params, unknown>(
+      port, 'list_scene_profiles', params, this.config.moduleId
+    )
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(result))
+  }
+
+  private async handleGetSceneProfileApi(_req: IncomingMessage, res: ServerResponse, url: URL, key: string): Promise<void> {
+    const moduleId = url.searchParams.get('module_id') ?? undefined
+    const onlyPublic = url.searchParams.get('only_public') === 'true'
+    const scene = parseSceneKey(key)
+    const port = await this.getMemoryPort(moduleId)
+    const result = await this.rpcClient.call<{ scene: SceneIdentity; only_public?: boolean }, unknown>(
+      port, 'get_scene_profile', { scene, only_public: onlyPublic }, this.config.moduleId
+    )
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(result))
+  }
+
+  private async handlePatchSceneProfileApi(req: IncomingMessage, res: ServerResponse, url: URL, key: string): Promise<void> {
+    const moduleId = url.searchParams.get('module_id') ?? undefined
+    const scene = parseSceneKey(key)
+    const body = await this.readJsonBody<{
+      label?: string
+      sections?: Array<{ topic: string; body: string; visibility?: 'private' | 'public' }>
+      source_memory_ids?: string[]
+    }>(req)
+
+    const port = await this.getMemoryPort(moduleId)
+
+    // 先取现有画像
+    const getResult = await this.rpcClient.call<
+      { scene: SceneIdentity },
+      { profile: { scene: SceneIdentity; label: string; sections: Array<{ topic: string; body: string; visibility: 'private' | 'public' }>; created_at: string; updated_at: string; last_declared_at?: string | null; source_memory_ids?: string[] | null } | null }
+    >(port, 'get_scene_profile', { scene }, this.config.moduleId)
+
+    const now = new Date().toISOString()
+    const existing = getResult.profile
+
+    const mergedLabel = body.label ?? existing?.label ?? (scene.type === 'global' ? 'global' : (scene.type === 'friend' ? `friend:${scene.friend_id}` : `group:${scene.channel_id}:${scene.session_id}`))
+    const mergedSections = body.sections ?? existing?.sections ?? []
+    const mergedSourceIds = body.source_memory_ids ?? existing?.source_memory_ids ?? undefined
+
+    const upsertParams = {
+      scene,
+      label: mergedLabel,
+      sections: mergedSections.map(s => ({ topic: s.topic, body: s.body, visibility: s.visibility ?? 'private' as const })),
+      source_memory_ids: mergedSourceIds,
+      created_at: existing?.created_at ?? now,
+      updated_at: now,
+      last_declared_at: existing?.last_declared_at ?? null,
+    }
+
+    const result = await this.rpcClient.call<typeof upsertParams, unknown>(
+      port, 'upsert_scene_profile', upsertParams, this.config.moduleId
+    )
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(result))
+  }
+
+  private async handleDeleteSceneProfileApi(_req: IncomingMessage, res: ServerResponse, url: URL, key: string): Promise<void> {
+    const moduleId = url.searchParams.get('module_id') ?? undefined
+    const scene = parseSceneKey(key)
+    const port = await this.getMemoryPort(moduleId)
+    const result = await this.rpcClient.call<{ scene: SceneIdentity }, unknown>(
+      port, 'delete_scene_profile', { scene }, this.config.moduleId
     )
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(result))
