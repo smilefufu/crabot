@@ -13,6 +13,7 @@ import { ChannelPty } from './pages/Channels/ChannelPty'
 import { GlobalSettings } from './pages/Settings/GlobalSettings'
 import { MemoryBrowser } from './pages/Memory/MemoryBrowser'
 import { SceneProfileList } from './pages/Memory/SceneProfileList'
+import { SceneProfileDetail } from './pages/Memory/SceneProfileDetail'
 import { FriendList } from './pages/Friends/FriendList'
 import { FriendDetail } from './pages/Friends/FriendDetail'
 import { PendingMessages } from './pages/Friends/PendingMessages'
@@ -110,6 +111,14 @@ const AppRoutes: React.FC = () => {
         element={
           <PrivateRoute>
             <SceneProfileList />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/memory/scenes/:key"
+        element={
+          <PrivateRoute>
+            <SceneProfileDetail />
           </PrivateRoute>
         }
       />
