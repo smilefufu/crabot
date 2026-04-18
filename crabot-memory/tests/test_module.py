@@ -310,5 +310,81 @@ async def test_export_import_roundtrip(memory_module):
     assert import_result["long_term_count"] >= 1
 
 
+@pytest.mark.asyncio
+async def test_upsert_and_get_scene_profile(memory_module):
+    params = {
+        "scene": {"type": "group_session", "channel_id": "c1", "session_id": "s1"},
+        "label": "开发组群",
+        "sections": [{"topic": "群职责", "body": "x", "visibility": "private"}],
+        "created_at": "2026-04-17T00:00:00Z",
+        "updated_at": "2026-04-17T00:00:00Z",
+    }
+    await memory_module._upsert_scene_profile(params)
+    got = await memory_module._get_scene_profile(
+        {"scene": {"type": "group_session", "channel_id": "c1", "session_id": "s1"}})
+    assert got["profile"]["label"] == "开发组群"
+
+
+@pytest.mark.asyncio
+async def test_get_scene_profile_none(memory_module):
+    got = await memory_module._get_scene_profile(
+        {"scene": {"type": "group_session", "channel_id": "x", "session_id": "y"}})
+    assert got["profile"] is None
+
+
+@pytest.mark.asyncio
+async def test_patch_scene_profile_replace_topic(memory_module):
+    scene = {"type": "group_session", "channel_id": "c2", "session_id": "s2"}
+    await memory_module._upsert_scene_profile({
+        "scene": scene, "label": "x",
+        "sections": [{"topic": "规则", "body": "v1", "visibility": "private"}],
+        "created_at": "2026-04-17T00:00:00Z", "updated_at": "2026-04-17T00:00:00Z",
+    })
+    out = await memory_module._patch_scene_profile({
+        "scene": scene,
+        "section": {"topic": "规则", "body": "v2", "visibility": "private"},
+        "merge": "replace_topic",
+    })
+    assert len(out["profile"]["sections"]) == 1
+    assert out["profile"]["sections"][0]["body"] == "v2"
+
+
+@pytest.mark.asyncio
+async def test_list_scene_profiles(memory_module):
+    await memory_module._upsert_scene_profile({
+        "scene": {"type": "friend", "friend_id": "f1"}, "label": "张三",
+        "sections": [], "created_at": "2026-04-17T00:00:00Z", "updated_at": "2026-04-17T00:00:00Z",
+    })
+    got = await memory_module._list_scene_profiles({"scene_type": "friend"})
+    assert len(got["profiles"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_scene_profile(memory_module):
+    scene = {"type": "friend", "friend_id": "f2"}
+    await memory_module._upsert_scene_profile({
+        "scene": scene, "label": "x", "sections": [],
+        "created_at": "2026-04-17T00:00:00Z", "updated_at": "2026-04-17T00:00:00Z",
+    })
+    out = await memory_module._delete_scene_profile({"scene": scene})
+    assert out["deleted"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_scene_profile_only_public(memory_module):
+    scene = {"type": "friend", "friend_id": "f3"}
+    await memory_module._upsert_scene_profile({
+        "scene": scene, "label": "x",
+        "sections": [
+            {"topic": "职务", "body": "p", "visibility": "public"},
+            {"topic": "私密", "body": "s", "visibility": "private"},
+        ],
+        "created_at": "2026-04-17T00:00:00Z", "updated_at": "2026-04-17T00:00:00Z",
+    })
+    got = await memory_module._get_scene_profile({"scene": scene, "only_public": True})
+    assert len(got["profile"]["sections"]) == 1
+    assert got["profile"]["sections"][0]["topic"] == "职务"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

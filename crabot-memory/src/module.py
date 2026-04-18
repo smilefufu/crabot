@@ -16,6 +16,7 @@ from .config import MemoryConfig
 from .types import *
 from .storage.vector_store import VectorStore
 from .storage.sqlite_store import SQLiteStore
+from .storage.scene_profile_store import SceneProfileStore
 from .core.short_term import ShortTermMemory
 from .core.long_term import LongTermMemory
 from .utils.llm_client import LLMClient
@@ -51,6 +52,10 @@ class MemoryModule:
         )
 
         self.sqlite_store = SQLiteStore(
+            db_path=str(data_dir / self.config.storage.sqlite_file),
+        )
+
+        self.scene_profile_store = SceneProfileStore(
             db_path=str(data_dir / self.config.storage.sqlite_file),
         )
 
@@ -132,6 +137,11 @@ class MemoryModule:
             "batch_write_long_term": self._batch_write_long_term,
             "export_memories": self._export_memories,
             "import_memories": self._import_memories,
+            "upsert_scene_profile": self._upsert_scene_profile,
+            "patch_scene_profile": self._patch_scene_profile,
+            "get_scene_profile": self._get_scene_profile,
+            "list_scene_profiles": self._list_scene_profiles,
+            "delete_scene_profile": self._delete_scene_profile,
         }
 
         handler = handlers.get(method)
@@ -522,6 +532,54 @@ class MemoryModule:
                 "embedding": {"model": self.config.embedding.model, "base_url": self.config.embedding.base_url, "dimension": self.config.embedding.dimension},
             },
         }
+
+    async def _upsert_scene_profile(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """写入或更新场景画像"""
+        profile = SceneProfile(**params)
+        out = self.scene_profile_store.upsert(profile)
+        return {"profile": out.model_dump()}
+
+    async def _patch_scene_profile(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """局部更新场景画像"""
+        scene = self._parse_scene(params["scene"])
+        section = SceneProfileSection(**params["section"])
+        merge = params.get("merge", "replace_topic")
+        label = params.get("label")
+        out = self.scene_profile_store.patch(scene, label=label, section=section, merge=merge)
+        return {"profile": out.model_dump()}
+
+    async def _get_scene_profile(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """获取场景画像"""
+        scene = self._parse_scene(params["scene"])
+        only_public = bool(params.get("only_public", False))
+        out = self.scene_profile_store.get(scene, only_public=only_public)
+        return {"profile": out.model_dump() if out else None}
+
+    async def _list_scene_profiles(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """列出场景画像"""
+        out = self.scene_profile_store.list(
+            scene_type=params.get("scene_type"),
+            limit=int(params.get("limit", 100)),
+            offset=int(params.get("offset", 0)),
+        )
+        return {"profiles": [p.model_dump() for p in out]}
+
+    async def _delete_scene_profile(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """删除场景画像"""
+        scene = self._parse_scene(params["scene"])
+        deleted = self.scene_profile_store.delete(scene)
+        return {"deleted": deleted}
+
+    def _parse_scene(self, raw: Dict[str, Any]) -> SceneIdentity:
+        """将 dict 转为 SceneIdentity 联合类型"""
+        t = raw.get("type")
+        if t == "friend":
+            return SceneIdentityFriend(friend_id=raw["friend_id"])
+        if t == "group_session":
+            return SceneIdentityGroup(channel_id=raw["channel_id"], session_id=raw["session_id"])
+        if t == "global":
+            return SceneIdentityGlobal()
+        raise ValueError(f"Unknown scene type: {t}")
 
     async def start(self):
         """启动模块"""
