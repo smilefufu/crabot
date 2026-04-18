@@ -19,7 +19,11 @@ import type {
   ResolvedModule,
   Friend,
   MemoryPermissions,
+  ComposedSceneProfile,
+  SceneProfile,
+  SceneIdentity,
 } from '../types.js'
+import { composeSceneProfile } from './scene-profile-resolver.js'
 
 interface AssembleParams {
   channel_id: ModuleId
@@ -64,7 +68,7 @@ export class ContextAssembler {
     memoryPermissions: MemoryPermissions
   ): Promise<FrontAgentContext> {
     const sessionType = params.session_type ?? 'private'
-    const [recentMessages, shortTermMemories, activeTasks] = await Promise.all([
+    const [recentMessages, shortTermMemories, activeTasks, sceneProfile] = await Promise.all([
       this.fetchRecentMessages(
         params.session_id,
         params.channel_id,
@@ -79,6 +83,7 @@ export class ContextAssembler {
         sessionType,
       }),
       this.fetchActiveTasks(),
+      this.resolveSceneProfile(params.channel_id, params.session_id, sessionType, params.friend_id),
     ])
 
     return {
@@ -95,6 +100,7 @@ export class ContextAssembler {
       active_tasks: activeTasks,
       crab_display_name: params.crab_display_name,
       available_tools: [],
+      ...(sceneProfile ? { scene_profile: sceneProfile } : {}),
     }
   }
 
@@ -107,33 +113,46 @@ export class ContextAssembler {
     memoryPermissions: MemoryPermissions
   ): Promise<WorkerAgentContext> {
     const workerSessionType = params.session_type ?? 'private'
-    const [recentMessages, shortTermMemories, longTermMemories, adminEndpoint, memoryEndpoint, channelEndpoints] =
-      await Promise.all([
-        this.fetchRecentMessages(
-          params.session_id,
-          params.channel_id,
-          this.config.worker_recent_messages_limit,
-          workerSessionType
-        ),
-        this.fetchShortTermMemory({
-          friendId: params.friend_id,
-          limit: this.config.worker_short_term_memory_limit,
-          minVisibility: memoryPermissions.read_min_visibility,
-          accessibleScopes: memoryPermissions.read_accessible_scopes,
-          sessionType: workerSessionType,
-        }),
-        this.fetchLongTermMemory({
-          friendId: params.friend_id,
-          query: params.message,
-          limit: this.config.worker_long_term_memory_limit,
-          minVisibility: memoryPermissions.read_min_visibility,
-          accessibleScopes: memoryPermissions.read_accessible_scopes,
-          sessionType: workerSessionType,
-        }),
-        this.resolveModule('admin'),
-        this.resolveModule('memory'),
-        this.resolveModules('channel'),
-      ])
+    const [
+      recentMessages,
+      shortTermMemories,
+      longTermMemories,
+      adminEndpoint,
+      memoryEndpoint,
+      channelEndpoints,
+      sceneProfile,
+    ] = await Promise.all([
+      this.fetchRecentMessages(
+        params.session_id,
+        params.channel_id,
+        this.config.worker_recent_messages_limit,
+        workerSessionType
+      ),
+      this.fetchShortTermMemory({
+        friendId: params.friend_id,
+        limit: this.config.worker_short_term_memory_limit,
+        minVisibility: memoryPermissions.read_min_visibility,
+        accessibleScopes: memoryPermissions.read_accessible_scopes,
+        sessionType: workerSessionType,
+      }),
+      this.fetchLongTermMemory({
+        friendId: params.friend_id,
+        query: params.message,
+        limit: this.config.worker_long_term_memory_limit,
+        minVisibility: memoryPermissions.read_min_visibility,
+        accessibleScopes: memoryPermissions.read_accessible_scopes,
+        sessionType: workerSessionType,
+      }),
+      this.resolveModule('admin'),
+      this.resolveModule('memory'),
+      this.resolveModules('channel'),
+      this.resolveSceneProfile(
+        params.channel_id,
+        params.session_id,
+        workerSessionType,
+        params.friend_id,
+      ),
+    ])
 
     return {
       task_origin: {
@@ -153,6 +172,7 @@ export class ContextAssembler {
         write_visibility: memoryPermissions.write_visibility,
         write_scopes: memoryPermissions.write_scopes,
       },
+      ...(sceneProfile ? { scene_profile: sceneProfile } : {}),
     }
   }
 
@@ -383,6 +403,65 @@ export class ContextAssembler {
     if (!messages || messages.length === 0) return undefined
     const last = messages[messages.length - 1]
     return last.content.length > 100 ? last.content.slice(0, 100) + '...' : last.content
+  }
+
+  // ==========================================================================
+  // 场景画像
+  // ==========================================================================
+
+  /**
+   * 解析当前会话的 ComposedSceneProfile。
+   * - 失败一律返回 null（不阻塞上下文组装）
+   * - METHOD_NOT_FOUND 容忍（对接 Memory v0.1.0 旧版本）
+   */
+  private async resolveSceneProfile(
+    channelId: ModuleId,
+    sessionId: SessionId,
+    sessionType: 'private' | 'group',
+    friendId: string | undefined,
+  ): Promise<ComposedSceneProfile | null> {
+    try {
+      const memoryPort = await this.getMemoryPort()
+
+      let primaryScene: SceneIdentity | null = null
+      if (sessionType === 'group') {
+        primaryScene = { type: 'group_session', channel_id: channelId, session_id: sessionId }
+      } else if (friendId) {
+        primaryScene = { type: 'friend', friend_id: friendId }
+      }
+
+      const fetchScene = async (
+        scene: SceneIdentity,
+        onlyPublic = false,
+      ): Promise<SceneProfile | null> => {
+        try {
+          const resp = await this.rpcClient.call<
+            { scene: SceneIdentity; only_public?: boolean },
+            { profile: SceneProfile | null }
+          >(memoryPort, 'get_scene_profile', { scene, only_public: onlyPublic }, this.moduleId)
+          return resp?.profile ?? null
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          if (msg.includes('Method not found') || msg.includes('METHOD_NOT_FOUND')) {
+            return null
+          }
+          throw err
+        }
+      }
+
+      const [primary, friendOverlay, globalProfile] = await Promise.all([
+        primaryScene ? fetchScene(primaryScene) : Promise.resolve(null),
+        sessionType === 'group' && friendId
+          ? fetchScene({ type: 'friend', friend_id: friendId }, true)
+          : Promise.resolve(null),
+        fetchScene({ type: 'global' }),
+      ])
+
+      return composeSceneProfile({ primary, friendOverlay, global: globalProfile })
+    } catch (err) {
+      console.warn(`[${this.moduleId}] resolveSceneProfile failed:`, err)
+      return null
+    }
   }
 
   // ==========================================================================

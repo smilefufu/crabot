@@ -113,7 +113,12 @@ describe('ContextAssembler', () => {
 
   it('should skip memory fetch if no friend_id', async () => {
     // Use admin-web so fetchRecentMessages uses rpcClient.call (get_chat_history)
-    mockRpc.call.mockResolvedValueOnce({ messages: [] })
+    // scene_profile 的 get_scene_profile 调用即便无 mock 也会被内部 try/catch 吞掉，不影响断言
+    mockRpc.call.mockImplementation((_port, method) => {
+      if (method === 'get_chat_history') return Promise.resolve({ messages: [] })
+      if (method === 'get_scene_profile') return Promise.resolve({ profile: null })
+      return Promise.reject(new Error(`unexpected call: ${method}`))
+    })
     mockRpc.resolve
       .mockResolvedValueOnce([{ module_id: 'admin', port: 19100 }])
       .mockResolvedValueOnce([{ module_id: 'memory', port: 19200 }])
@@ -128,8 +133,10 @@ describe('ContextAssembler', () => {
 
     expect(ctx.short_term_memories).toEqual([])
     expect(ctx.long_term_memories).toEqual([])
-    // 只调用了 get_chat_history，没有调用 query_memory（因为没有 friend_id）
-    expect(mockRpc.call).toHaveBeenCalledTimes(1)
+    // 没有调用 search_short_term / search_long_term（因为没有 friend_id）
+    const calledMethods = mockRpc.call.mock.calls.map((c) => c[1])
+    expect(calledMethods).not.toContain('search_short_term')
+    expect(calledMethods).not.toContain('search_long_term')
   })
 
   it('should assemble front context with sender friend', async () => {
