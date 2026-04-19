@@ -11,12 +11,16 @@ export const Input: React.FC<InputProps> = ({
   error,
   help,
   className = '',
+  id,
   ...props
 }) => {
+  const generatedId = React.useId()
+  const inputId = id ?? generatedId
+
   return (
     <div className="form-group">
-      {label && <label className="form-label">{label}</label>}
-      <input className={`input ${className}`} {...props} />
+      {label && <label className="form-label" htmlFor={inputId}>{label}</label>}
+      <input id={inputId} className={`input ${className}`} {...props} />
       {help && <span className="form-help">{help}</span>}
       {error && <span className="form-help" style={{ color: 'var(--error)' }}>{error}</span>}
     </div>
