@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '../../components/Common/Button'
 import { Card } from '../../components/Common/Card'
 import { Drawer } from '../../components/Common/Drawer'
@@ -8,12 +8,16 @@ import { MainLayout } from '../../components/Layout/MainLayout'
 import { useToast } from '../../contexts/ToastContext'
 import { dialogObjectsService } from '../../services/dialog-objects'
 import { friendService } from '../../services/friend'
+import { permissionTemplateService } from '../../services/permission-template'
 import type {
   DialogObjectApplication,
+  ChannelIdentity,
   DialogObjectFriend,
   DialogObjectGroupEntry,
   DialogObjectPrivatePoolEntry,
   Friend,
+  FriendPermission,
+  PermissionTemplate,
 } from '../../types'
 
 type DialogDomain = 'friends' | 'privatePool' | 'groups'
@@ -58,6 +62,7 @@ export const DialogObjectsPage: React.FC = () => {
   const [groups, setGroups] = useState<DialogObjectGroupEntry[]>([])
   const [applications, setApplications] = useState<DialogObjectApplication[]>([])
   const [friendOptions, setFriendOptions] = useState<Friend[]>([])
+  const [permissionTemplates, setPermissionTemplates] = useState<PermissionTemplate[]>([])
 
   const [selectedIds, setSelectedIds] = useState<Record<DialogDomain, string | null>>({
     friends: null,
@@ -76,9 +81,24 @@ export const DialogObjectsPage: React.FC = () => {
   const [assignFriendId, setAssignFriendId] = useState('')
   const [actionLoading, setActionLoading] = useState(false)
 
-  const refreshAll = useCallback(async () => {
+  const [editName, setEditName] = useState('')
+  const [editPerm, setEditPerm] = useState<FriendPermission>('normal')
+  const [editTemplateId, setEditTemplateId] = useState('')
+  const [savingFriend, setSavingFriend] = useState(false)
+  const [showBindDrawer, setShowBindDrawer] = useState(false)
+  const [bindChannelId, setBindChannelId] = useState('')
+  const [bindPlatformUserId, setBindPlatformUserId] = useState('')
+  const [bindDisplayName, setBindDisplayName] = useState('')
+  const [bindingIdentity, setBindingIdentity] = useState(false)
+  const [confirmUnlinkKey, setConfirmUnlinkKey] = useState<string | null>(null)
+  const [unlinkingIdentity, setUnlinkingIdentity] = useState(false)
+  const initialLoadDone = useRef(false)
+
+  const loadDialogObjects = useCallback(async (showLoading = false) => {
     try {
-      setLoading(true)
+      if (showLoading) {
+        setLoading(true)
+      }
       const results = await Promise.allSettled([
         dialogObjectsService.listFriends(),
         dialogObjectsService.listPrivatePool(),
@@ -119,13 +139,28 @@ export const DialogObjectsPage: React.FC = () => {
         notifyError(`部分数据加载失败：${failures.join('、')}`)
       }
     } finally {
-      setLoading(false)
+      if (showLoading) {
+        setLoading(false)
+      }
     }
   }, [notifyError])
 
   useEffect(() => {
-    refreshAll()
-  }, [refreshAll, refreshKey])
+    if (!initialLoadDone.current) {
+      initialLoadDone.current = true
+      void loadDialogObjects(true)
+      return
+    }
+    void loadDialogObjects(false)
+  }, [loadDialogObjects, refreshKey])
+
+  useEffect(() => {
+    permissionTemplateService.list({ page_size: 100 })
+      .then((result) => {
+        setPermissionTemplates(result.items)
+      })
+      .catch(() => {})
+  }, [])
 
   const itemsByDomain = useMemo(() => ({
     friends,
@@ -188,6 +223,19 @@ export const DialogObjectsPage: React.FC = () => {
     () => friends.filter((friend) => friend.permission === 'master'),
     [friends]
   )
+
+  useEffect(() => {
+    if (domain !== 'friends' || !selectedItem) return
+    const friend = selectedItem as DialogObjectFriend
+    setEditName(friend.display_name)
+    setEditPerm(friend.permission)
+    setEditTemplateId(friend.permission_template_id ?? '')
+    setShowBindDrawer(false)
+    setBindChannelId('')
+    setBindPlatformUserId('')
+    setBindDisplayName('')
+    setConfirmUnlinkKey(null)
+  }, [domain, selectedItem])
 
   const openAssignModal = async (target: QueueTarget, kind: QueueTargetKind) => {
     setAssignTarget(target)
@@ -301,6 +349,72 @@ export const DialogObjectsPage: React.FC = () => {
     }
   }
 
+  const triggerRefresh = () => {
+    setRefreshKey((value) => value + 1)
+  }
+
+  const handleSaveFriend = async () => {
+    if (domain !== 'friends' || !selectedItem || !editName.trim()) return
+    const friend = selectedItem as DialogObjectFriend
+    try {
+      setSavingFriend(true)
+      await friendService.updateFriend(friend.id, {
+        display_name: editName.trim(),
+        permission: editPerm,
+        ...(editPerm === 'normal' && editTemplateId ? { permission_template_id: editTemplateId } : {}),
+      })
+      success('保存成功')
+      triggerRefresh()
+    } catch (caughtError) {
+      const message = caughtError instanceof Error ? caughtError.message : '保存失败'
+      notifyError(message)
+    } finally {
+      setSavingFriend(false)
+    }
+  }
+
+  const handleBindIdentity = async () => {
+    if (domain !== 'friends' || !selectedItem || !bindChannelId.trim() || !bindPlatformUserId.trim()) return
+    const friend = selectedItem as DialogObjectFriend
+    try {
+      setBindingIdentity(true)
+      const identity: ChannelIdentity = {
+        channel_id: bindChannelId.trim(),
+        platform_user_id: bindPlatformUserId.trim(),
+        platform_display_name: bindDisplayName.trim() || bindPlatformUserId.trim(),
+      }
+      await friendService.linkIdentity(friend.id, identity)
+      success('身份绑定成功')
+      setShowBindDrawer(false)
+      setBindChannelId('')
+      setBindPlatformUserId('')
+      setBindDisplayName('')
+      triggerRefresh()
+    } catch (caughtError) {
+      const message = caughtError instanceof Error ? caughtError.message : '绑定失败'
+      notifyError(message)
+    } finally {
+      setBindingIdentity(false)
+    }
+  }
+
+  const handleUnlinkIdentity = async (identity: ChannelIdentity) => {
+    if (domain !== 'friends' || !selectedItem) return
+    const friend = selectedItem as DialogObjectFriend
+    try {
+      setUnlinkingIdentity(true)
+      await friendService.unlinkIdentity(friend.id, identity.channel_id, identity.platform_user_id)
+      success('身份已解绑')
+      setConfirmUnlinkKey(null)
+      triggerRefresh()
+    } catch (caughtError) {
+      const message = caughtError instanceof Error ? caughtError.message : '解绑失败'
+      notifyError(message)
+    } finally {
+      setUnlinkingIdentity(false)
+    }
+  }
+
   const renderList = () => {
     if (filteredItems.length === 0) {
       return (
@@ -325,6 +439,7 @@ export const DialogObjectsPage: React.FC = () => {
             <button
               key={item.id}
               type="button"
+              aria-label={title}
               onClick={() => setSelectedIds((prev) => ({ ...prev, [domain]: item.id }))}
               style={{
                 width: '100%',
@@ -357,22 +472,117 @@ export const DialogObjectsPage: React.FC = () => {
 
     if (domain === 'friends') {
       const friend = selectedItem as DialogObjectFriend
+      const isLockedMaster = friend.permission === 'master'
+      const hasChanges = editName !== friend.display_name
+        || editPerm !== friend.permission
+        || editTemplateId !== (friend.permission_template_id ?? '')
       return (
         <Card title="好友详情">
-          <div style={{ display: 'grid', gap: '0.75rem' }}>
-            <div><strong>{friend.display_name}</strong></div>
-            <div>权限等级：{friend.permission}</div>
-            <div>状态：{friend.status === 'active' ? '活跃' : '无渠道'}</div>
-            <div>权限模板：{friend.permission_template_id ?? '未设置'}</div>
+          <div style={{ display: 'grid', gap: '1rem' }}>
+            <div style={{ display: 'grid', gap: '0.75rem' }}>
+              <Input
+                label="显示名称"
+                aria-label="显示名称"
+                value={editName}
+                onChange={(event) => setEditName(event.target.value)}
+              />
+              <label style={{ display: 'grid', gap: '0.35rem' }}>
+                <span style={{ fontSize: '0.875rem', fontWeight: 500 }}>权限</span>
+                <select
+                  aria-label="权限"
+                  value={editPerm}
+                  onChange={(event) => setEditPerm(event.target.value as FriendPermission)}
+                  disabled={isLockedMaster}
+                  className="select"
+                >
+                  <option value="normal">Normal</option>
+                  <option value="master">Master</option>
+                </select>
+              </label>
+              {editPerm === 'normal' && (
+                <label style={{ display: 'grid', gap: '0.35rem' }}>
+                  <span style={{ fontSize: '0.875rem', fontWeight: 500 }}>权限模板</span>
+                  <select
+                    aria-label="权限模板"
+                    value={editTemplateId}
+                    onChange={(event) => setEditTemplateId(event.target.value)}
+                    className="select"
+                  >
+                    <option value="">未选择</option>
+                    {permissionTemplates
+                      .filter((template) => template.id !== 'master_private')
+                      .map((template) => (
+                        <option key={template.id} value={template.id}>
+                          {template.name}{template.is_system ? ' (系统)' : ''}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+              )}
+              <div style={{ display: 'flex', gap: '1rem', fontSize: '0.75rem', color: 'var(--text-tertiary)' }}>
+                <span>状态：{friend.status === 'active' ? '活跃' : '无渠道'}</span>
+                <span>权限等级：{friend.permission}</span>
+              </div>
+              <Button
+                variant="primary"
+                onClick={handleSaveFriend}
+                disabled={savingFriend || !editName.trim() || !hasChanges}
+              >
+                {savingFriend ? '保存中...' : '保存修改'}
+              </Button>
+            </div>
             <div>
-              渠道身份：
-              <ul style={{ margin: '0.5rem 0 0 1.25rem' }}>
-                {friend.identities.map((identity) => (
-                  <li key={`${identity.channel_id}:${identity.platform_user_id}`}>
-                    {identity.platform_display_name} · {identity.channel_id}
-                  </li>
-                ))}
-              </ul>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                <strong>Channel 身份</strong>
+                <Button variant="secondary" onClick={() => setShowBindDrawer(true)}>绑定新身份</Button>
+              </div>
+              {friend.identities.length === 0 ? (
+                <div style={{ color: 'var(--text-secondary)' }}>暂无绑定的 Channel 身份</div>
+              ) : (
+                <div style={{ display: 'grid', gap: '0.75rem' }}>
+                  {friend.identities.map((identity) => {
+                    const key = `${identity.channel_id}:${identity.platform_user_id}`
+                    return (
+                      <div
+                        key={key}
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          padding: '0.75rem',
+                          borderRadius: '10px',
+                          background: 'var(--bg-secondary)',
+                        }}
+                      >
+                        <div>
+                          <div style={{ fontWeight: 600 }}>{identity.platform_display_name}</div>
+                          <div style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>
+                            {identity.channel_id} / {identity.platform_user_id}
+                          </div>
+                        </div>
+                        {confirmUnlinkKey === key ? (
+                          <div style={{ display: 'flex', gap: '0.5rem' }}>
+                            <Button
+                              variant="danger"
+                              onClick={() => handleUnlinkIdentity(identity)}
+                              disabled={unlinkingIdentity}
+                            >
+                              确认解绑
+                            </Button>
+                            <Button variant="secondary" onClick={() => setConfirmUnlinkKey(null)}>
+                              取消
+                            </Button>
+                          </div>
+                        ) : (
+                          <Button variant="danger" onClick={() => setConfirmUnlinkKey(key)}>
+                            解绑
+                          </Button>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
             </div>
             <div style={{ color: 'var(--text-secondary)' }}>
               统一私聊权限、私聊场景和记忆工作台将在这里继续扩展。
@@ -597,6 +807,44 @@ export const DialogObjectsPage: React.FC = () => {
           </div>
         </div>
       </Drawer>
+
+      {showBindDrawer && domain === 'friends' && selectedItem && (
+        <Drawer open onClose={() => setShowBindDrawer(false)} width={420}>
+          <div style={{ display: 'grid', gap: '1rem' }}>
+            <h2 style={{ margin: 0 }}>绑定 Channel 身份</h2>
+            <Input
+              label="Channel ID"
+              aria-label="Channel ID"
+              value={bindChannelId}
+              onChange={(event) => setBindChannelId(event.target.value)}
+            />
+            <Input
+              label="平台用户 ID"
+              aria-label="平台用户 ID"
+              value={bindPlatformUserId}
+              onChange={(event) => setBindPlatformUserId(event.target.value)}
+            />
+            <Input
+              label="平台显示名称（可选）"
+              aria-label="平台显示名称（可选）"
+              value={bindDisplayName}
+              onChange={(event) => setBindDisplayName(event.target.value)}
+            />
+            <div style={{ display: 'flex', gap: '0.75rem' }}>
+              <Button
+                variant="primary"
+                onClick={handleBindIdentity}
+                disabled={bindingIdentity || !bindChannelId.trim() || !bindPlatformUserId.trim()}
+              >
+                {bindingIdentity ? '绑定中...' : '绑定'}
+              </Button>
+              <Button variant="secondary" onClick={() => setShowBindDrawer(false)} disabled={bindingIdentity}>
+                取消
+              </Button>
+            </div>
+          </div>
+        </Drawer>
+      )}
 
       {createTarget && (
         <Drawer open onClose={() => {

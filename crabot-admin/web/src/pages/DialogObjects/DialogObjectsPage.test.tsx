@@ -14,6 +14,10 @@ const createApplicationFriend = vi.fn()
 const linkApplicationMaster = vi.fn()
 const rejectApplication = vi.fn()
 const listLegacyFriends = vi.fn()
+const updateFriend = vi.fn()
+const linkIdentity = vi.fn()
+const unlinkIdentity = vi.fn()
+const listPermissionTemplates = vi.fn()
 const toastMock = {
   success: vi.fn(),
   error: vi.fn(),
@@ -46,6 +50,15 @@ vi.mock('../../services/dialog-objects', () => ({
 vi.mock('../../services/friend', () => ({
   friendService: {
     listFriends: (...args: unknown[]) => listLegacyFriends(...args),
+    updateFriend: (...args: unknown[]) => updateFriend(...args),
+    linkIdentity: (...args: unknown[]) => linkIdentity(...args),
+    unlinkIdentity: (...args: unknown[]) => unlinkIdentity(...args),
+  },
+}))
+
+vi.mock('../../services/permission-template', () => ({
+  permissionTemplateService: {
+    list: (...args: unknown[]) => listPermissionTemplates(...args),
   },
 }))
 
@@ -163,6 +176,64 @@ describe('DialogObjectsPage', () => {
         page_size: 20,
         total_items: 1,
         total_pages: 1,
+      },
+    })
+    listPermissionTemplates.mockResolvedValue({
+      items: [
+        {
+          id: 'standard',
+          name: 'Standard',
+          is_system: false,
+          tool_access: {},
+          storage: null,
+          memory_scopes: [],
+          created_at: '2026-04-19T00:00:00.000Z',
+          updated_at: '2026-04-19T00:00:00.000Z',
+        },
+        {
+          id: 'custom-template',
+          name: 'Custom Template',
+          is_system: false,
+          tool_access: {},
+          storage: null,
+          memory_scopes: [],
+          created_at: '2026-04-19T00:00:00.000Z',
+          updated_at: '2026-04-19T00:00:00.000Z',
+        },
+        {
+          id: 'master_private',
+          name: 'Master Private',
+          is_system: true,
+          tool_access: {},
+          storage: null,
+          memory_scopes: [],
+          created_at: '2026-04-19T00:00:00.000Z',
+          updated_at: '2026-04-19T00:00:00.000Z',
+        },
+      ],
+      pagination: {
+        page: 1,
+        page_size: 20,
+        total_items: 3,
+        total_pages: 1,
+      },
+    })
+    updateFriend.mockResolvedValue({
+      friend: {
+        id: 'friend-1',
+        display_name: 'Alice Renamed',
+      },
+    })
+    linkIdentity.mockResolvedValue({
+      friend: {
+        id: 'friend-1',
+        display_name: 'Alice',
+      },
+    })
+    unlinkIdentity.mockResolvedValue({
+      friend: {
+        id: 'friend-1',
+        display_name: 'Alice',
       },
     })
     createFriendFromPrivatePool.mockResolvedValue({
@@ -379,5 +450,68 @@ describe('DialogObjectsPage', () => {
     expect(await screen.findByRole('heading', { name: '对话对象管理' })).toBeInTheDocument()
     expect((await screen.findAllByText('Alice')).length).toBeGreaterThan(0)
     expect(toastMock.error).toHaveBeenCalled()
+  })
+
+  it('edits a normal friend from the dialog objects workbench and refreshes the list', async () => {
+    render(<DialogObjectsPage />)
+
+    expect(await screen.findByRole('heading', { name: '好友详情' })).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('显示名称'), { target: { value: 'Alice Renamed' } })
+    fireEvent.change(screen.getByLabelText('权限模板'), { target: { value: 'custom-template' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
+
+    await waitFor(() => {
+      expect(updateFriend).toHaveBeenCalledWith('friend-1', {
+        display_name: 'Alice Renamed',
+        permission: 'normal',
+        permission_template_id: 'custom-template',
+      })
+    })
+    expect(toastMock.success).toHaveBeenCalledWith('保存成功')
+    await waitFor(() => {
+      expect(listFriends.mock.calls.length).toBeGreaterThan(1)
+    })
+  })
+
+  it('binds and unlinks channel identities in the dialog objects workbench', async () => {
+    render(<DialogObjectsPage />)
+
+    expect(await screen.findByRole('heading', { name: '好友详情' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '绑定新身份' }))
+    fireEvent.change(screen.getByLabelText('Channel ID'), { target: { value: 'wechat-alt' } })
+    fireEvent.change(screen.getByLabelText('平台用户 ID'), { target: { value: 'alice-alt' } })
+    fireEvent.change(screen.getByLabelText('平台显示名称（可选）'), { target: { value: 'Alice Alt' } })
+    fireEvent.click(screen.getByRole('button', { name: '绑定' }))
+
+    await waitFor(() => {
+      expect(linkIdentity).toHaveBeenCalledWith('friend-1', {
+        channel_id: 'wechat-alt',
+        platform_user_id: 'alice-alt',
+        platform_display_name: 'Alice Alt',
+      })
+    })
+    expect(toastMock.success).toHaveBeenCalledWith('身份绑定成功')
+
+    fireEvent.click(screen.getByRole('button', { name: '解绑' }))
+    fireEvent.click(screen.getByRole('button', { name: '确认解绑' }))
+
+    await waitFor(() => {
+      expect(unlinkIdentity).toHaveBeenCalledWith('friend-1', 'wechat-main', 'alice-wx')
+    })
+    expect(toastMock.success).toHaveBeenCalledWith('身份已解绑')
+    await waitFor(() => {
+      expect(listFriends.mock.calls.length).toBeGreaterThan(2)
+    })
+  })
+
+  it('keeps master friends permission locked in the dialog objects workbench', async () => {
+    render(<DialogObjectsPage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Master Boss' }))
+
+    expect(screen.getByLabelText('权限')).toBeDisabled()
+    expect(screen.queryByLabelText('权限模板')).not.toBeInTheDocument()
   })
 })
