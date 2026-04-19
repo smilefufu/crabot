@@ -10,6 +10,12 @@ import { dialogObjectsService } from '../../services/dialog-objects'
 import { friendService } from '../../services/friend'
 import { permissionTemplateService } from '../../services/permission-template'
 import { sessionService } from '../../services/session'
+import { ApplicationQueueModal } from './components/ApplicationQueueModal'
+import { DialogDomain, DomainNav } from './components/DomainNav'
+import { FriendWorkbench } from './components/FriendWorkbench'
+import { GroupWorkbench } from './components/GroupWorkbench'
+import { ObjectList } from './components/ObjectList'
+import { PrivatePoolWorkbench } from './components/PrivatePoolWorkbench'
 import type {
   DialogObjectApplication,
   ChannelIdentity,
@@ -25,48 +31,14 @@ import type {
 } from '../../types'
 import { TOOL_CATEGORIES, TOOL_CATEGORY_LABELS } from '../../types'
 
-type DialogDomain = 'friends' | 'privatePool' | 'groups'
 type QueueTarget = { id: string; channel_id: string; title: string }
 type QueueTargetKind = 'privatePool' | 'application'
-
-const domainOptions: Array<{ key: DialogDomain; label: string }> = [
-  { key: 'friends', label: '好友' },
-  { key: 'privatePool', label: '私聊池' },
-  { key: 'groups', label: '群聊' },
-]
 
 const panelStyle: React.CSSProperties = {
   display: 'grid',
   gridTemplateColumns: '200px minmax(260px, 340px) minmax(320px, 1fr)',
   gap: '1rem',
   alignItems: 'start',
-}
-
-const sidebarButtonStyle = (active: boolean): React.CSSProperties => ({
-  width: '100%',
-  textAlign: 'left',
-  padding: '0.75rem 0.875rem',
-  borderRadius: '10px',
-  border: active ? '1px solid var(--primary)' : '1px solid var(--border)',
-  background: active ? 'rgba(59, 130, 246, 0.08)' : 'var(--bg-primary)',
-  color: 'var(--text-primary)',
-  cursor: 'pointer',
-  fontSize: '0.95rem',
-  fontWeight: active ? 600 : 500,
-})
-
-const workbenchLinkStyle: React.CSSProperties = {
-  display: 'inline-flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  padding: '0.625rem 0.875rem',
-  borderRadius: '10px',
-  border: '1px solid var(--border)',
-  background: 'var(--bg-secondary)',
-  color: 'var(--text-primary)',
-  textDecoration: 'none',
-  fontSize: '0.875rem',
-  fontWeight: 500,
 }
 
 type TriState = 'inherit' | 'on' | 'off'
@@ -80,29 +52,6 @@ const triStateLabel = (state: TriState): string => {
     default:
       return '继承'
   }
-}
-
-const buildSceneProfileHref = (sceneKey: string): string => `/memory/scenes/${encodeURIComponent(sceneKey)}`
-
-const buildMemoryBrowserHref = (params: {
-  friendId?: string
-  accessibleScopes?: string[]
-  contextLabel?: string
-}): string => {
-  const search = new URLSearchParams()
-  if (params.friendId) {
-    search.set('friend_id', params.friendId)
-  }
-  params.accessibleScopes?.forEach((scope) => {
-    if (scope.trim()) {
-      search.append('accessible_scope', scope.trim())
-    }
-  })
-  if (params.contextLabel) {
-    search.set('context_label', params.contextLabel)
-  }
-  const query = search.toString()
-  return query ? `/memory?${query}` : '/memory'
 }
 
 const GroupTriStateToggle: React.FC<{
@@ -300,12 +249,6 @@ export const DialogObjectsPage: React.FC = () => {
   }, [applications, selectedApplicationId])
 
   const selectedItem = filteredItems.find((item) => item.id === selectedIds[domain]) ?? filteredItems[0] ?? null
-  const selectedApplication = applications.find((item) => item.id === selectedApplicationId) ?? applications[0] ?? null
-
-  const groupedApplications = useMemo(() => ({
-    pair: applications.filter((item) => item.intent === 'pair'),
-    apply: applications.filter((item) => item.intent === 'apply'),
-  }), [applications])
 
   const masterFriends = useMemo(
     () => friends.filter((friend) => friend.permission === 'master'),
@@ -407,11 +350,10 @@ export const DialogObjectsPage: React.FC = () => {
     }
   }
 
-  const handleLinkApplicationMaster = async () => {
-    if (!selectedApplication) return
+  const handleLinkApplicationMaster = async (application: DialogObjectApplication) => {
     try {
       setActionLoading(true)
-      const result = await dialogObjectsService.linkApplicationMaster(selectedApplication.id)
+      const result = await dialogObjectsService.linkApplicationMaster(application.id)
       success(result.created ? '已新建 Master' : '已并入现有 Master')
       setRefreshKey((value) => value + 1)
     } catch (caughtError) {
@@ -422,11 +364,10 @@ export const DialogObjectsPage: React.FC = () => {
     }
   }
 
-  const handleRejectApplication = async () => {
-    if (!selectedApplication) return
+  const handleRejectApplication = async (application: DialogObjectApplication) => {
     try {
       setActionLoading(true)
-      await dialogObjectsService.rejectApplication(selectedApplication.id)
+      await dialogObjectsService.rejectApplication(application.id)
       success('已拒绝申请')
       setRefreshKey((value) => value + 1)
     } catch (caughtError) {
@@ -604,283 +545,6 @@ export const DialogObjectsPage: React.FC = () => {
     }
   }
 
-  const renderList = () => {
-    if (filteredItems.length === 0) {
-      return (
-        <Card>
-          <div style={{ color: 'var(--text-secondary)' }}>
-            当前对象域暂无数据
-          </div>
-        </Card>
-      )
-    }
-
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-        {filteredItems.map((item) => {
-          const active = item.id === selectedItem?.id
-          const title = 'display_name' in item ? item.display_name : item.title
-          const subtitle = 'display_name' in item
-            ? `${item.identities.length} 个渠道身份`
-            : `${item.channel_id} · ${item.type}`
-
-          return (
-            <button
-              key={item.id}
-              type="button"
-              aria-label={title}
-              onClick={() => setSelectedIds((prev) => ({ ...prev, [domain]: item.id }))}
-              style={{
-                width: '100%',
-                textAlign: 'left',
-                padding: '0.875rem 1rem',
-                borderRadius: '12px',
-                border: active ? '1px solid var(--primary)' : '1px solid var(--border)',
-                background: active ? 'rgba(59, 130, 246, 0.06)' : 'var(--bg-primary)',
-                color: 'var(--text-primary)',
-                cursor: 'pointer',
-              }}
-            >
-              <div style={{ fontWeight: 600, marginBottom: '0.25rem' }}>{title}</div>
-              <div style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>{subtitle}</div>
-            </button>
-          )
-        })}
-      </div>
-    )
-  }
-
-  const renderDetail = () => {
-    if (!selectedItem) {
-      return (
-        <Card title="详情">
-          <div style={{ color: 'var(--text-secondary)' }}>请选择一个对象</div>
-        </Card>
-      )
-    }
-
-    if (domain === 'friends') {
-      const friend = selectedItem as DialogObjectFriend
-      const friendSceneHref = buildSceneProfileHref(`friend:${friend.id}`)
-      const friendMemoryHref = buildMemoryBrowserHref({
-        friendId: friend.id,
-        contextLabel: friend.display_name,
-      })
-      const isLockedMaster = friend.permission === 'master'
-      const hasChanges = editName !== friend.display_name
-        || editPerm !== friend.permission
-        || editTemplateId !== (friend.permission_template_id ?? '')
-      return (
-        <Card title="好友详情">
-          <div style={{ display: 'grid', gap: '1rem' }}>
-            <div style={{ display: 'grid', gap: '0.75rem' }}>
-              <Input
-                label="显示名称"
-                aria-label="显示名称"
-                value={editName}
-                onChange={(event) => setEditName(event.target.value)}
-              />
-              <label style={{ display: 'grid', gap: '0.35rem' }}>
-                <span style={{ fontSize: '0.875rem', fontWeight: 500 }}>权限</span>
-                <select
-                  aria-label="权限"
-                  value={editPerm}
-                  onChange={(event) => setEditPerm(event.target.value as FriendPermission)}
-                  disabled={isLockedMaster}
-                  className="select"
-                >
-                  <option value="normal">Normal</option>
-                  <option value="master">Master</option>
-                </select>
-              </label>
-              {editPerm === 'normal' && (
-                <label style={{ display: 'grid', gap: '0.35rem' }}>
-                  <span style={{ fontSize: '0.875rem', fontWeight: 500 }}>权限模板</span>
-                  <select
-                    aria-label="权限模板"
-                    value={editTemplateId}
-                    onChange={(event) => setEditTemplateId(event.target.value)}
-                    className="select"
-                  >
-                    <option value="">未选择</option>
-                    {permissionTemplates
-                      .filter((template) => template.id !== 'master_private')
-                      .map((template) => (
-                        <option key={template.id} value={template.id}>
-                          {template.name}{template.is_system ? ' (系统)' : ''}
-                        </option>
-                      ))}
-                  </select>
-                </label>
-              )}
-              <div style={{ display: 'flex', gap: '1rem', fontSize: '0.75rem', color: 'var(--text-tertiary)' }}>
-                <span>状态：{friend.status === 'active' ? '活跃' : '无渠道'}</span>
-                <span>权限等级：{friend.permission}</span>
-              </div>
-              <Button
-                variant="primary"
-                onClick={handleSaveFriend}
-                disabled={savingFriend || !editName.trim() || !hasChanges}
-              >
-                {savingFriend ? '保存中...' : '保存修改'}
-              </Button>
-            </div>
-            <div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-                <strong>Channel 身份</strong>
-                <Button variant="secondary" onClick={() => setShowBindDrawer(true)}>绑定新身份</Button>
-              </div>
-              {friend.identities.length === 0 ? (
-                <div style={{ color: 'var(--text-secondary)' }}>暂无绑定的 Channel 身份</div>
-              ) : (
-                <div style={{ display: 'grid', gap: '0.75rem' }}>
-                  {friend.identities.map((identity) => {
-                    const key = `${identity.channel_id}:${identity.platform_user_id}`
-                    return (
-                      <div
-                        key={key}
-                        style={{
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          alignItems: 'center',
-                          padding: '0.75rem',
-                          borderRadius: '10px',
-                          background: 'var(--bg-secondary)',
-                        }}
-                      >
-                        <div>
-                          <div style={{ fontWeight: 600 }}>{identity.platform_display_name}</div>
-                          <div style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>
-                            {identity.channel_id} / {identity.platform_user_id}
-                          </div>
-                        </div>
-                        {confirmUnlinkKey === key ? (
-                          <div style={{ display: 'flex', gap: '0.5rem' }}>
-                            <Button
-                              variant="danger"
-                              onClick={() => handleUnlinkIdentity(identity)}
-                              disabled={unlinkingIdentity}
-                            >
-                              确认解绑
-                            </Button>
-                            <Button variant="secondary" onClick={() => setConfirmUnlinkKey(null)}>
-                              取消
-                            </Button>
-                          </div>
-                        ) : (
-                          <Button variant="danger" onClick={() => setConfirmUnlinkKey(key)}>
-                            解绑
-                          </Button>
-                        )}
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-            </div>
-            <div style={{ display: 'grid', gap: '0.75rem' }}>
-              <strong>私聊场景与记忆</strong>
-              <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
-                <a
-                  href={friendSceneHref}
-                  aria-label="打开私聊场景画像"
-                  style={workbenchLinkStyle}
-                >
-                  打开私聊场景画像
-                </a>
-                <a
-                  href={friendMemoryHref}
-                  aria-label="查看私聊记忆"
-                  style={workbenchLinkStyle}
-                >
-                  查看私聊记忆
-                </a>
-              </div>
-              <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
-                好友统一承接该人的私聊场景画像和私聊记忆范围。
-              </div>
-            </div>
-            <div style={{ color: 'var(--text-secondary)' }}>
-              权限在此编辑，场景与记忆通过独立工作台继续深入查看。
-            </div>
-          </div>
-        </Card>
-      )
-    }
-
-    if (domain === 'privatePool') {
-      const entry = selectedItem as DialogObjectPrivatePoolEntry
-      return (
-        <Card title="私聊池详情">
-          <div style={{ display: 'grid', gap: '0.75rem' }}>
-            <div><strong>{entry.title}</strong></div>
-            <div>来源渠道：{entry.channel_id}</div>
-            <div>Session ID：{entry.id}</div>
-            <div>参与者：{entry.participants.map((participant) => participant.platform_user_id).join(', ')}</div>
-            <div>关联申请：{entry.matching_pending_application_ids.length}</div>
-            <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
-              <Button variant="secondary" onClick={() => openAssignModal(entry, 'privatePool')}>
-                归到已有好友
-              </Button>
-              <Button
-                variant="primary"
-                onClick={() => openCreateModal(entry, 'privatePool')}
-              >
-                从私聊新建好友
-              </Button>
-            </div>
-          </div>
-        </Card>
-      )
-    }
-
-    const group = selectedItem as DialogObjectGroupEntry
-    const groupSceneHref = buildSceneProfileHref(`group:${group.channel_id}:${group.id}`)
-    const groupMemoryHref = buildMemoryBrowserHref({
-      accessibleScopes: [group.id],
-      contextLabel: group.title,
-    })
-    return (
-      <Card title="群聊详情">
-        <div style={{ display: 'grid', gap: '0.75rem' }}>
-          <div><strong>{group.title}</strong></div>
-          <div>来源渠道：{group.channel_id}</div>
-          <div>群成员数量：{group.participant_count}</div>
-          <div>master_in_group：{group.master_in_group ? '是' : '否'}</div>
-          <div>会话配置：{group.has_session_config ? '已配置' : '未配置'}</div>
-          <Button variant="secondary" onClick={() => void openGroupPermissionEditor(group)}>
-            编辑群权限
-          </Button>
-          <div style={{ display: 'grid', gap: '0.75rem' }}>
-            <strong>群场景与记忆</strong>
-            <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
-              <a
-                href={groupSceneHref}
-                aria-label="打开群聊场景画像"
-                style={workbenchLinkStyle}
-              >
-                打开群聊场景画像
-              </a>
-              <a
-                href={groupMemoryHref}
-                aria-label="查看群聊记忆"
-                style={workbenchLinkStyle}
-              >
-                查看群聊记忆
-              </a>
-            </div>
-            <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
-              当前群聊记忆入口默认按 session scope 过滤，和 `master_in_group` 可处理规则保持一致。
-            </div>
-          </div>
-          <div style={{ color: 'var(--text-secondary)' }}>
-            当前列表已和运行时 `master_in_group` 规则保持一致。
-          </div>
-        </div>
-      </Card>
-    )
-  }
-
   if (loading) {
     return (
       <MainLayout>
@@ -915,143 +579,87 @@ export const DialogObjectsPage: React.FC = () => {
               />
             </div>
             <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', marginBottom: '0.5rem' }}>
-              当前对象域：{domainOptions.find((option) => option.key === domain)?.label}
+              当前对象域：{domain === 'friends' ? '好友' : domain === 'privatePool' ? '私聊池' : '群聊'}
             </div>
           </div>
         </Card>
 
         <div style={panelStyle}>
-          <Card title="对象域">
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-              {domainOptions.map((option) => (
-                <button
-                  key={option.key}
-                  type="button"
-                  onClick={() => setDomain(option.key)}
-                  style={sidebarButtonStyle(option.key === domain)}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-          </Card>
+          <DomainNav activeDomain={domain} onChange={setDomain} />
 
-          <Card title="对象列表">
-            {renderList()}
-          </Card>
+          <ObjectList
+            domain={domain}
+            items={filteredItems}
+            selectedId={selectedItem?.id ?? null}
+            onSelect={(id) => setSelectedIds((prev) => ({ ...prev, [domain]: id }))}
+          />
 
-          {renderDetail()}
+          {domain === 'friends' ? (
+            <FriendWorkbench
+              friend={(selectedItem as DialogObjectFriend | null)}
+              editName={editName}
+              editPerm={editPerm}
+              editTemplateId={editTemplateId}
+              permissionTemplates={permissionTemplates}
+              savingFriend={savingFriend}
+              confirmUnlinkKey={confirmUnlinkKey}
+              unlinkingIdentity={unlinkingIdentity}
+              onEditNameChange={setEditName}
+              onEditPermChange={setEditPerm}
+              onEditTemplateChange={setEditTemplateId}
+              onSave={handleSaveFriend}
+              onOpenBindDrawer={() => setShowBindDrawer(true)}
+              onRequestUnlink={setConfirmUnlinkKey}
+              onCancelUnlink={() => setConfirmUnlinkKey(null)}
+              onConfirmUnlink={handleUnlinkIdentity}
+            />
+          ) : domain === 'privatePool' ? (
+            <PrivatePoolWorkbench
+              entry={(selectedItem as DialogObjectPrivatePoolEntry | null)}
+              onAssignToFriend={() => {
+                if (selectedItem) {
+                  void openAssignModal(selectedItem as DialogObjectPrivatePoolEntry, 'privatePool')
+                }
+              }}
+              onCreateFriend={() => {
+                if (selectedItem) {
+                  openCreateModal(selectedItem as DialogObjectPrivatePoolEntry, 'privatePool')
+                }
+              }}
+            />
+          ) : (
+            <GroupWorkbench
+              group={(selectedItem as DialogObjectGroupEntry | null)}
+              onEditPermission={() => {
+                if (selectedItem) {
+                  void openGroupPermissionEditor(selectedItem as DialogObjectGroupEntry)
+                }
+              }}
+            />
+          )}
         </div>
       </div>
 
       <Drawer open={applicationQueueOpen} onClose={() => setApplicationQueueOpen(false)} width={520}>
-        <div style={{ display: 'grid', gap: '1rem' }}>
-          <div>
-            <h2 style={{ margin: 0 }}>申请队列</h2>
-            <p style={{ color: 'var(--text-secondary)', marginTop: '0.5rem' }}>
-              这里集中查看 `/认主` 和 `/apply` 事件，并直接按当前对话对象模型完成归属处理。
-            </p>
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: '180px 1fr', gap: '1rem' }}>
-            <div style={{ display: 'grid', gap: '0.75rem' }}>
-              {([
-                ['认主申请', groupedApplications.pair],
-                ['普通申请', groupedApplications.apply],
-              ] as const).map(([title, items]) => (
-                <Card key={title} title={title}>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                    {items.length === 0 ? (
-                      <div style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>暂无</div>
-                    ) : (
-                      items.map((item) => (
-                        <button
-                          key={item.id}
-                          type="button"
-                          onClick={() => setSelectedApplicationId(item.id)}
-                          style={{
-                            width: '100%',
-                            textAlign: 'left',
-                            border: item.id === selectedApplication?.id ? '1px solid var(--primary)' : '1px solid var(--border)',
-                            background: item.id === selectedApplication?.id ? 'rgba(59, 130, 246, 0.06)' : 'var(--bg-primary)',
-                            borderRadius: '10px',
-                            padding: '0.625rem 0.75rem',
-                            cursor: 'pointer',
-                          }}
-                        >
-                          <div style={{ fontWeight: 600 }}>{item.platform_display_name}</div>
-                          <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{item.channel_id}</div>
-                        </button>
-                      ))
-                    )}
-                  </div>
-                </Card>
-              ))}
-            </div>
-
-            <Card title="申请详情">
-              {selectedApplication ? (
-                <div style={{ display: 'grid', gap: '0.75rem' }}>
-                  <div><strong>{selectedApplication.platform_display_name}</strong></div>
-                  <div>类型：{selectedApplication.intent === 'pair' ? '认主申请' : '普通申请'}</div>
-                  <div>来源渠道：{selectedApplication.channel_id}</div>
-                  <div>来源私聊：{selectedApplication.source_session_id}</div>
-                  <div>内容预览：{selectedApplication.content_preview}</div>
-                  {selectedApplication.intent === 'pair' ? (
-                    <div style={{ display: 'grid', gap: '0.75rem' }}>
-                      <div style={{ color: 'var(--text-secondary)' }}>
-                        {masterFriends.length > 0
-                          ? `当前已有 ${masterFriends.length} 个 Master，可直接并入现有 Master。`
-                          : '当前没有 Master，可直接创建新的 Master。'}
-                      </div>
-                      <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
-                        <Button variant="primary" onClick={handleLinkApplicationMaster} disabled={actionLoading}>
-                          {masterFriends.length > 0 ? '并入现有 Master' : '新建 Master'}
-                        </Button>
-                        <Button variant="secondary" onClick={handleRejectApplication} disabled={actionLoading}>
-                          拒绝申请
-                        </Button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div style={{ display: 'grid', gap: '0.75rem' }}>
-                      <div style={{ color: 'var(--text-secondary)' }}>
-                        普通申请可以归到已有好友，或按当前申请直接新建好友。
-                      </div>
-                      <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
-                        <Button
-                          variant="secondary"
-                          onClick={() => openAssignModal({
-                            id: selectedApplication.id,
-                            channel_id: selectedApplication.channel_id,
-                            title: selectedApplication.platform_display_name,
-                          }, 'application')}
-                        >
-                          归到已有好友
-                        </Button>
-                        <Button
-                          variant="primary"
-                          onClick={() => openCreateModal({
-                            id: selectedApplication.id,
-                            channel_id: selectedApplication.channel_id,
-                            title: selectedApplication.platform_display_name,
-                          }, 'application', selectedApplication.platform_display_name)}
-                        >
-                          新建好友
-                        </Button>
-                        <Button variant="secondary" onClick={handleRejectApplication} disabled={actionLoading}>
-                          拒绝申请
-                        </Button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div style={{ color: 'var(--text-secondary)' }}>暂无申请</div>
-              )}
-            </Card>
-          </div>
-        </div>
+        <ApplicationQueueModal
+          applications={applications}
+          selectedApplicationId={selectedApplicationId}
+          masterFriendCount={masterFriends.length}
+          actionLoading={actionLoading}
+          onSelectApplication={setSelectedApplicationId}
+          onAssignExistingFriend={(application) => openAssignModal({
+            id: application.id,
+            channel_id: application.channel_id,
+            title: application.platform_display_name,
+          }, 'application')}
+          onCreateFriend={(application) => openCreateModal({
+            id: application.id,
+            channel_id: application.channel_id,
+            title: application.platform_display_name,
+          }, 'application', application.platform_display_name)}
+          onLinkMaster={(application) => void handleLinkApplicationMaster(application)}
+          onReject={(application) => void handleRejectApplication(application)}
+        />
       </Drawer>
 
       {showBindDrawer && domain === 'friends' && selectedItem && (
