@@ -41,8 +41,7 @@ const navSections: NavSection[] = [
   {
     label: '社交与数据',
     items: [
-      { to: '/friends', label: '熟人管理', match: '/friends' },
-      { to: '/sessions', label: '会话管理', match: '/sessions' },
+      { to: '/dialog-objects', label: '对话对象', match: '/dialog-objects' },
       { to: '/permission-templates', label: '权限模板', match: '/permission-templates' },
       { to: '/memory', label: '记忆管理', match: '/memory' },
     ],

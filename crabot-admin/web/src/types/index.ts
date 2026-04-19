@@ -442,6 +442,63 @@ export interface PendingMessage {
 }
 
 // ============================================================================
+// Dialog Objects
+// ============================================================================
+
+export type DialogObjectFriendStatus = 'active' | 'no_channel'
+
+export interface DialogObjectFriend {
+  id: string
+  display_name: string
+  permission: FriendPermission
+  permission_template_id?: string
+  identities: ChannelIdentity[]
+  status: DialogObjectFriendStatus
+  created_at: string
+  updated_at: string
+}
+
+export interface DialogObjectApplication {
+  id: string
+  intent: 'pair' | 'apply'
+  channel_id: string
+  platform_user_id: string
+  platform_display_name: string
+  content_preview: string
+  source_session_id: string
+  received_at: string
+  expires_at: string
+}
+
+export interface DialogObjectChannelSessionParticipant {
+  friend_id?: string
+  platform_user_id: string
+  role: 'owner' | 'admin' | 'member'
+}
+
+export interface DialogObjectChannelSession {
+  id: string
+  channel_id: string
+  type: 'private' | 'group'
+  platform_session_id: string
+  title: string
+  participants: DialogObjectChannelSessionParticipant[]
+  created_at: string
+  updated_at: string
+}
+
+export interface DialogObjectPrivatePoolEntry extends DialogObjectChannelSession {
+  has_session_config: boolean
+  matching_pending_application_ids: string[]
+}
+
+export interface DialogObjectGroupEntry extends DialogObjectChannelSession {
+  participant_count: number
+  has_session_config: boolean
+  master_in_group: boolean
+}
+
+// ============================================================================
 // Channel 扫描类型
 // ==============================================================================
 

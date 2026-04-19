@@ -14,13 +14,10 @@ import { GlobalSettings } from './pages/Settings/GlobalSettings'
 import { MemoryBrowser } from './pages/Memory/MemoryBrowser'
 import { SceneProfileList } from './pages/Memory/SceneProfileList'
 import { SceneProfileDetail } from './pages/Memory/SceneProfileDetail'
-import { FriendList } from './pages/Friends/FriendList'
-import { FriendDetail } from './pages/Friends/FriendDetail'
-import { PendingMessages } from './pages/Friends/PendingMessages'
+import { DialogObjectsPage } from './pages/DialogObjects'
 import { MCPServerList } from './pages/MCPServers/MCPServerList'
 import { PermissionTemplateList } from './pages/Permissions/PermissionTemplateList'
 import { SkillList } from './pages/Skills/SkillList'
-import { SessionList } from './pages/Sessions/SessionList'
 import { Traces } from './pages/Traces'
 import { ScheduleList } from './pages/Schedules/ScheduleList'
 import './App.css'
@@ -123,29 +120,16 @@ const AppRoutes: React.FC = () => {
         }
       />
       <Route
-        path="/friends"
+        path="/dialog-objects"
         element={
           <PrivateRoute>
-            <FriendList />
+            <DialogObjectsPage />
           </PrivateRoute>
         }
       />
-      <Route
-        path="/friends/pending"
-        element={
-          <PrivateRoute>
-            <PendingMessages />
-          </PrivateRoute>
-        }
-      />
-      <Route
-        path="/friends/:id"
-        element={
-          <PrivateRoute>
-            <FriendDetail />
-          </PrivateRoute>
-        }
-      />
+      <Route path="/friends" element={<Navigate to="/dialog-objects" replace />} />
+      <Route path="/friends/pending" element={<Navigate to="/dialog-objects" replace />} />
+      <Route path="/friends/:id" element={<Navigate to="/dialog-objects" replace />} />
       <Route
         path="/permission-templates"
         element={
@@ -178,14 +162,7 @@ const AppRoutes: React.FC = () => {
           </PrivateRoute>
         }
       />
-      <Route
-        path="/sessions"
-        element={
-          <PrivateRoute>
-            <SessionList />
-          </PrivateRoute>
-        }
-      />
+      <Route path="/sessions" element={<Navigate to="/dialog-objects" replace />} />
       <Route
         path="/schedules"
         element={
