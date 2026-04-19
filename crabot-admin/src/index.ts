@@ -102,6 +102,7 @@ import {
   type SessionPermissionConfig,
   type CreatePermissionTemplateParams,
   type UpdatePermissionTemplateParams,
+  type DialogObjectChannelSession,
 } from './types.js'
 import { ModelProviderManager } from './model-provider-manager.js'
 import { AgentManager } from './agent-manager.js'
@@ -113,6 +114,12 @@ import { MCPServerManager, SkillManager, EssentialToolsManager, DuplicateSkillEr
 import { PRESET_VENDORS } from './preset-vendors.js'
 import { Cron } from 'croner'
 import { ScheduleEngine } from './schedule-engine.js'
+import {
+  projectApplicationDialogObjects,
+  projectFriendDialogObjects,
+  projectGroupDialogObjects,
+  projectPrivatePoolDialogObjects,
+} from './dialog-objects.js'
 
 // ============================================================================
 // JWT 工具函数
@@ -748,6 +755,26 @@ export class AdminModule extends ModuleBase {
 
       if (pathname === '/api/pending-messages' && req.method === 'POST') {
         await this.handleUpsertPendingMessageApi(req, res)
+        return
+      }
+
+      if (pathname === '/api/dialog-objects/friends' && req.method === 'GET') {
+        await this.handleListDialogObjectFriendsApi(res)
+        return
+      }
+
+      if (pathname === '/api/dialog-objects/private-pool' && req.method === 'GET') {
+        await this.handleListDialogObjectPrivatePoolApi(res)
+        return
+      }
+
+      if (pathname === '/api/dialog-objects/groups' && req.method === 'GET') {
+        await this.handleListDialogObjectGroupsApi(res)
+        return
+      }
+
+      if (pathname === '/api/dialog-objects/applications' && req.method === 'GET') {
+        await this.handleListDialogObjectApplicationsApi(res)
         return
       }
 
@@ -1915,6 +1942,95 @@ export class AdminModule extends ModuleBase {
       }
       throw error
     }
+  }
+
+  private async handleListDialogObjectFriendsApi(res: ServerResponse): Promise<void> {
+    const items = projectFriendDialogObjects(this.friends.values())
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ items }))
+  }
+
+  private async handleListDialogObjectApplicationsApi(res: ServerResponse): Promise<void> {
+    const items = projectApplicationDialogObjects(this.pendingMessages.values())
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ items }))
+  }
+
+  private async handleListDialogObjectPrivatePoolApi(res: ServerResponse): Promise<void> {
+    const sessions = await this.fetchChannelSessionsForDialogObjects('private')
+    const items = projectPrivatePoolDialogObjects({
+      friends: this.friends.values(),
+      pendingMessages: this.pendingMessages.values(),
+      sessions,
+      sessionConfigs: this.sessionConfigs,
+    })
+
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ items }))
+  }
+
+  private async handleListDialogObjectGroupsApi(res: ServerResponse): Promise<void> {
+    const sessions = await this.fetchChannelSessionsForDialogObjects('group')
+    const items = projectGroupDialogObjects({
+      friends: this.friends.values(),
+      sessions,
+      sessionConfigs: this.sessionConfigs,
+    })
+
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ items }))
+  }
+
+  private async fetchChannelSessionsForDialogObjects(
+    type: DialogObjectChannelSession['type']
+  ): Promise<DialogObjectChannelSession[]> {
+    const channelInstances = this.channelManager.listInstances({
+      page: 1,
+      page_size: Number.MAX_SAFE_INTEGER,
+    }).items
+    const sessions: DialogObjectChannelSession[] = []
+
+    for (const instance of channelInstances) {
+      const modules = await this.rpcClient.resolve(
+        { module_id: instance.id },
+        this.config.moduleId
+      )
+
+      if (modules.length === 0) {
+        continue
+      }
+
+      const channelPort = modules[0].port
+      const pageSize = 100
+      let page = 1
+      let totalPages = 1
+
+      do {
+        const result = await this.rpcClient.call<
+          { type: DialogObjectChannelSession['type']; pagination: { page: number; page_size: number } },
+          {
+            items: DialogObjectChannelSession[]
+            pagination: {
+              page: number
+              page_size: number
+              total_items: number
+              total_pages: number
+            }
+          }
+        >(
+          channelPort,
+          'get_sessions',
+          { type, pagination: { page, page_size: pageSize } },
+          this.config.moduleId
+        )
+
+        sessions.push(...result.items)
+        totalPages = result.pagination.total_pages || Math.max(1, Math.ceil(result.pagination.total_items / result.pagination.page_size))
+        page += 1
+      } while (page <= totalPages)
+    }
+
+    return sessions
   }
 
   private async handleUpsertPendingMessageApi(req: IncomingMessage, res: ServerResponse): Promise<void> {

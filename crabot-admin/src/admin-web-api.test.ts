@@ -141,6 +141,52 @@ describe('Admin Web API', () => {
     })
   })
 
+  describe('GET /api/dialog-objects/*', () => {
+    it('should return basic shapes for the dialog object read APIs', async () => {
+      const token = await loginAndGetToken()
+
+      const [friends, privatePool, groups, applications] = await Promise.all([
+        makeWebRequest<{ items: unknown[] }>(
+          TEST_WEB_PORT,
+          '/api/dialog-objects/friends',
+          'GET',
+          null,
+          token
+        ),
+        makeWebRequest<{ items: unknown[] }>(
+          TEST_WEB_PORT,
+          '/api/dialog-objects/private-pool',
+          'GET',
+          null,
+          token
+        ),
+        makeWebRequest<{ items: unknown[] }>(
+          TEST_WEB_PORT,
+          '/api/dialog-objects/groups',
+          'GET',
+          null,
+          token
+        ),
+        makeWebRequest<{ items: unknown[] }>(
+          TEST_WEB_PORT,
+          '/api/dialog-objects/applications',
+          'GET',
+          null,
+          token
+        ),
+      ])
+
+      expect(friends.statusCode).toBe(200)
+      expect(privatePool.statusCode).toBe(200)
+      expect(groups.statusCode).toBe(200)
+      expect(applications.statusCode).toBe(200)
+      expect(friends.body.items).toBeInstanceOf(Array)
+      expect(privatePool.body.items).toBeInstanceOf(Array)
+      expect(groups.body.items).toBeInstanceOf(Array)
+      expect(applications.body.items).toBeInstanceOf(Array)
+    })
+  })
+
   describe('CORS', () => {
     it('should handle CORS preflight requests', async () => {
       const response = await makeOptionsRequest(
