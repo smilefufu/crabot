@@ -793,6 +793,30 @@ export class AdminModule extends ModuleBase {
         return
       }
 
+      if (pathname.match(/^\/api\/dialog-objects\/applications\/[^/]+\/assign-friend$/) && req.method === 'POST') {
+        const applicationId = decodeURIComponent(pathname.split('/')[4])
+        await this.handleAssignDialogObjectApplicationFriendApi(req, res, applicationId)
+        return
+      }
+
+      if (pathname.match(/^\/api\/dialog-objects\/applications\/[^/]+\/create-friend$/) && req.method === 'POST') {
+        const applicationId = decodeURIComponent(pathname.split('/')[4])
+        await this.handleCreateDialogObjectApplicationFriendApi(req, res, applicationId)
+        return
+      }
+
+      if (pathname.match(/^\/api\/dialog-objects\/applications\/[^/]+\/link-master$/) && req.method === 'POST') {
+        const applicationId = decodeURIComponent(pathname.split('/')[4])
+        await this.handleLinkDialogObjectApplicationMasterApi(req, res, applicationId)
+        return
+      }
+
+      if (pathname.match(/^\/api\/dialog-objects\/applications\/[^/]+$/) && req.method === 'DELETE') {
+        const applicationId = decodeURIComponent(pathname.split('/')[4])
+        await this.handleRejectDialogObjectApplicationApi(req, res, applicationId)
+        return
+      }
+
       // Model Provider 路由
       if (pathname === '/api/model-providers' && req.method === 'GET') {
         await this.handleListProvidersApi(req, res)
@@ -1971,6 +1995,78 @@ export class AdminModule extends ModuleBase {
     res.end(JSON.stringify({ items }))
   }
 
+  private async handleAssignDialogObjectApplicationFriendApi(
+    req: IncomingMessage,
+    res: ServerResponse,
+    applicationId: string
+  ): Promise<void> {
+    const body = await this.readJsonBody<{ friend_id: FriendId }>(req)
+
+    try {
+      const result = await this.handleAssignDialogObjectApplicationFriend({
+        pending_message_id: applicationId,
+        friend_id: body.friend_id,
+      })
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(result))
+    } catch (error) {
+      this.writeDialogObjectApplicationActionError(res, error)
+    }
+  }
+
+  private async handleCreateDialogObjectApplicationFriendApi(
+    req: IncomingMessage,
+    res: ServerResponse,
+    applicationId: string
+  ): Promise<void> {
+    const body = await this.readJsonBody<{
+      display_name: string
+      permission_template_id?: string
+    }>(req)
+
+    try {
+      const result = await this.handleCreateDialogObjectApplicationFriend({
+        pending_message_id: applicationId,
+        display_name: body.display_name,
+        permission_template_id: body.permission_template_id,
+      })
+      res.writeHead(201, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(result))
+    } catch (error) {
+      this.writeDialogObjectApplicationActionError(res, error)
+    }
+  }
+
+  private async handleLinkDialogObjectApplicationMasterApi(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    applicationId: string
+  ): Promise<void> {
+    try {
+      const result = await this.handleLinkDialogObjectApplicationMaster({
+        pending_message_id: applicationId,
+      })
+      res.writeHead(result.created ? 201 : 200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ friend: result.friend }))
+    } catch (error) {
+      this.writeDialogObjectApplicationActionError(res, error)
+    }
+  }
+
+  private async handleRejectDialogObjectApplicationApi(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    applicationId: string
+  ): Promise<void> {
+    try {
+      const result = await this.handleRejectDialogObjectApplication({ pending_message_id: applicationId })
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(result))
+    } catch (error) {
+      this.writeDialogObjectApplicationActionError(res, error)
+    }
+  }
+
   private async handleListDialogObjectPrivatePoolApi(res: ServerResponse): Promise<void> {
     const sessions = await this.fetchChannelSessionsForDialogObjects('private')
     const items = projectPrivatePoolDialogObjects({
@@ -2169,6 +2265,87 @@ export class AdminModule extends ModuleBase {
     return result
   }
 
+  private async handleAssignDialogObjectApplicationFriend(params: {
+    pending_message_id: string
+    friend_id: FriendId
+  }): Promise<{ friend: Friend }> {
+    const message = this.getPendingMessageOrThrow(params.pending_message_id)
+    if (message.intent !== 'apply') {
+      throw new Error('Application intent mismatch')
+    }
+
+    const channelIdentity = await this.resolveApplicationChannelIdentity(message)
+    const result = await this.handleLinkChannelIdentity({
+      friend_id: params.friend_id,
+      channel_identity: channelIdentity,
+    })
+    await this.removePendingMessagesForChannelIdentity(channelIdentity)
+    return result
+  }
+
+  private async handleCreateDialogObjectApplicationFriend(params: {
+    pending_message_id: string
+    display_name: string
+    permission_template_id?: string
+  }): Promise<{ friend: Friend }> {
+    const message = this.getPendingMessageOrThrow(params.pending_message_id)
+    if (message.intent !== 'apply') {
+      throw new Error('Application intent mismatch')
+    }
+
+    const channelIdentity = await this.resolveApplicationChannelIdentity(message)
+    const result = this.handleCreateFriend({
+      display_name: params.display_name,
+      permission: 'normal',
+      permission_template_id: params.permission_template_id,
+      channel_identities: [channelIdentity],
+    })
+    await this.removePendingMessagesForChannelIdentity(channelIdentity)
+    await this.saveData()
+    return result
+  }
+
+  private async handleLinkDialogObjectApplicationMaster(params: {
+    pending_message_id: string
+  }): Promise<{ friend: Friend; created: boolean }> {
+    const message = this.getPendingMessageOrThrow(params.pending_message_id)
+    if (message.intent !== 'pair') {
+      throw new Error('Application intent mismatch')
+    }
+
+    const channelIdentity = await this.resolveApplicationChannelIdentity(message)
+    const existingMaster = Array.from(this.friends.values()).find((friend) => friend.permission === 'master')
+
+    const result = existingMaster
+      ? await this.handleLinkChannelIdentity({
+          friend_id: existingMaster.id,
+          channel_identity: channelIdentity,
+        })
+      : this.handleCreateFriend({
+          display_name: message.platform_display_name,
+          permission: 'master',
+          channel_identities: [channelIdentity],
+        })
+
+    await this.removePendingMessagesForChannelIdentity(channelIdentity)
+
+    return { friend: result.friend, created: !existingMaster }
+  }
+
+  private async handleRejectDialogObjectApplication(params: {
+    pending_message_id: string
+  }): Promise<{ deleted: true }> {
+    const exists = this.pendingMessages.has(params.pending_message_id)
+    if (!exists) {
+      throw new Error('Pending message not found')
+    }
+
+    this.pendingMessages.delete(params.pending_message_id)
+    await this.saveData()
+
+    return { deleted: true }
+  }
+
   private async resolveChannelSession(channelId: ModuleId, sessionId: string): Promise<{
     id: string
     channel_id: ModuleId
@@ -2212,6 +2389,10 @@ export class AdminModule extends ModuleBase {
     }
 
     return extractChannelIdentityFromPrivateSession(session)
+  }
+
+  private async resolveApplicationChannelIdentity(message: PendingMessage): Promise<ChannelIdentity> {
+    return this.resolveChannelIdentityFromPrivateSession(message.channel_id, message.raw_message.session.session_id)
   }
 
   private async handleUpsertPendingMessageApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -2542,6 +2723,51 @@ export class AdminModule extends ModuleBase {
     await this.saveData()
 
     return { deleted: true }
+  }
+
+  private getPendingMessageOrThrow(pendingMessageId: string): PendingMessage {
+    const message = this.pendingMessages.get(pendingMessageId)
+    if (!message) {
+      throw new Error('Pending message not found')
+    }
+    return message
+  }
+
+  private writeDialogObjectApplicationActionError(res: ServerResponse, error: unknown): void {
+    if (error instanceof Error) {
+      if (error.message === 'Pending message not found') {
+        res.writeHead(404, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: error.message }))
+        return
+      }
+      if (error.message === 'Friend not found') {
+        res.writeHead(404, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: error.message }))
+        return
+      }
+      if (error.message === 'Channel module not found' || error.message === 'Session not found') {
+        res.writeHead(404, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: error.message }))
+        return
+      }
+      if (error.message === 'Channel identity already in use') {
+        res.writeHead(409, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: AdminErrorCode.CHANNEL_IDENTITY_IN_USE, message: error.message }))
+        return
+      }
+      if (
+        error.message === 'Session channel mismatch' ||
+        error.message === 'Session is not private' ||
+        error.message === 'Private session has no participants' ||
+        error.message === 'Private session identity is ambiguous' ||
+        error.message === 'Application intent mismatch'
+      ) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: error.message }))
+        return
+      }
+    }
+    throw error
   }
 
   private async handleUpsertPendingMessage(params: UpsertPendingMessageParams): Promise<UpsertPendingMessageResult> {
