@@ -2274,7 +2274,7 @@ export class AdminModule extends ModuleBase {
       throw new Error('Application intent mismatch')
     }
 
-    const channelIdentity = await this.resolveApplicationChannelIdentity(message)
+    const channelIdentity = this.getChannelIdentityFromPendingMessage(message)
     const result = await this.handleLinkChannelIdentity({
       friend_id: params.friend_id,
       channel_identity: channelIdentity,
@@ -2293,7 +2293,7 @@ export class AdminModule extends ModuleBase {
       throw new Error('Application intent mismatch')
     }
 
-    const channelIdentity = await this.resolveApplicationChannelIdentity(message)
+    const channelIdentity = this.getChannelIdentityFromPendingMessage(message)
     const result = this.handleCreateFriend({
       display_name: params.display_name,
       permission: 'normal',
@@ -2313,7 +2313,7 @@ export class AdminModule extends ModuleBase {
       throw new Error('Application intent mismatch')
     }
 
-    const channelIdentity = await this.resolveApplicationChannelIdentity(message)
+    const channelIdentity = this.getChannelIdentityFromPendingMessage(message)
     const existingMaster = Array.from(this.friends.values()).find((friend) => friend.permission === 'master')
 
     const result = existingMaster
@@ -2392,7 +2392,15 @@ export class AdminModule extends ModuleBase {
   }
 
   private async resolveApplicationChannelIdentity(message: PendingMessage): Promise<ChannelIdentity> {
-    return this.resolveChannelIdentityFromPrivateSession(message.channel_id, message.raw_message.session.session_id)
+    return this.getChannelIdentityFromPendingMessage(message)
+  }
+
+  private getChannelIdentityFromPendingMessage(message: Pick<PendingMessage, 'channel_id' | 'platform_user_id' | 'platform_display_name'>): ChannelIdentity {
+    return {
+      channel_id: message.channel_id,
+      platform_user_id: message.platform_user_id,
+      platform_display_name: message.platform_display_name,
+    }
   }
 
   private async handleUpsertPendingMessageApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -2751,6 +2759,11 @@ export class AdminModule extends ModuleBase {
         return
       }
       if (error.message === 'Channel identity already in use') {
+        res.writeHead(409, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: AdminErrorCode.CHANNEL_IDENTITY_IN_USE, message: error.message }))
+        return
+      }
+      if (error.message.startsWith('Channel identity already in use:')) {
         res.writeHead(409, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: AdminErrorCode.CHANNEL_IDENTITY_IN_USE, message: error.message }))
         return

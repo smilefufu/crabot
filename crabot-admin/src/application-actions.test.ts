@@ -194,6 +194,44 @@ describe('Dialog object application actions', () => {
     expect(Array.from(adminAny.pendingMessages.values())).toEqual([])
   })
 
+  it('returns 409 when an apply application create-friend action reuses an existing channel identity', async () => {
+    const adminAny = admin as any
+    adminAny.handleCreateFriend({
+      display_name: 'Existing Identity',
+      permission: 'normal',
+      channel_identities: [
+        {
+          channel_id: 'wechat-main',
+          platform_user_id: 'apply-user',
+          platform_display_name: 'Existing Apply User',
+        },
+      ],
+    })
+
+    const application = await seedApplication(adminAny, {
+      id: 'application-apply-conflict',
+      channel_id: 'wechat-main',
+      platform_user_id: 'apply-user',
+      platform_display_name: 'Apply User',
+      intent: 'apply',
+      source_session_id: 'source-session-apply-conflict',
+    })
+
+    const response = await makeWebRequest<{ error: string; message: string }>(
+      TEST_WEB_PORT,
+      `/api/dialog-objects/applications/${application.id}/create-friend`,
+      'POST',
+      {
+        display_name: 'Conflicting Friend',
+      },
+      token
+    )
+
+    expect(response.statusCode).toBe(409)
+    expect(response.body.error).toBe('ADMIN_CHANNEL_IDENTITY_IN_USE')
+    expect(response.body.message).toContain('Channel identity already in use:')
+  })
+
   it('links a pair application to an existing master friend', async () => {
     const adminAny = admin as any
     const { friend: master } = adminAny.handleCreateFriend({
@@ -261,6 +299,81 @@ describe('Dialog object application actions', () => {
       },
     ])
     expect(Array.from(adminAny.pendingMessages.values())).toEqual([])
+  })
+
+  it('assigns an apply application without re-resolving the source session', async () => {
+    const adminAny = admin as any
+    const { friend } = adminAny.handleCreateFriend({
+      display_name: 'Existing Friend',
+      permission: 'normal',
+    }) as { friend: Friend }
+
+    const application = await seedApplication(adminAny, {
+      id: 'application-apply-no-rpc',
+      channel_id: 'wechat-main',
+      platform_user_id: 'no-rpc-apply-user',
+      platform_display_name: 'No RPC Apply User',
+      intent: 'apply',
+      source_session_id: 'missing-source-session-apply',
+    })
+
+    adminAny.rpcClient.resolve.mockRejectedValue(new Error('RPC should not be called'))
+    adminAny.rpcClient.call.mockRejectedValue(new Error('RPC should not be called'))
+
+    const response = await makeWebRequest<{ friend: Friend }>(
+      TEST_WEB_PORT,
+      `/api/dialog-objects/applications/${application.id}/assign-friend`,
+      'POST',
+      { friend_id: friend.id },
+      token
+    )
+
+    expect(response.statusCode).toBe(200)
+    expect(response.body.friend.channel_identities).toEqual([
+      {
+        channel_id: 'wechat-main',
+        platform_user_id: 'no-rpc-apply-user',
+        platform_display_name: 'No RPC Apply User',
+      },
+    ])
+  })
+
+  it('links a pair application without re-resolving the source session', async () => {
+    const adminAny = admin as any
+    const { friend: master } = adminAny.handleCreateFriend({
+      display_name: 'Existing Master',
+      permission: 'master',
+    }) as { friend: Friend }
+
+    const application = await seedApplication(adminAny, {
+      id: 'application-pair-no-rpc',
+      channel_id: 'wechat-main',
+      platform_user_id: 'no-rpc-pair-user',
+      platform_display_name: 'No RPC Pair User',
+      intent: 'pair',
+      source_session_id: 'missing-source-session-pair',
+    })
+
+    adminAny.rpcClient.resolve.mockRejectedValue(new Error('RPC should not be called'))
+    adminAny.rpcClient.call.mockRejectedValue(new Error('RPC should not be called'))
+
+    const response = await makeWebRequest<{ friend: Friend }>(
+      TEST_WEB_PORT,
+      `/api/dialog-objects/applications/${application.id}/link-master`,
+      'POST',
+      null,
+      token
+    )
+
+    expect(response.statusCode).toBe(200)
+    expect(response.body.friend.id).toBe(master.id)
+    expect(response.body.friend.channel_identities).toEqual([
+      {
+        channel_id: 'wechat-main',
+        platform_user_id: 'no-rpc-pair-user',
+        platform_display_name: 'No RPC Pair User',
+      },
+    ])
   })
 
   it('rejects an application and removes it from the queue', async () => {
