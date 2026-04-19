@@ -9,8 +9,8 @@ import AdminModule from './index.js'
 import type { ModelProvider, AgentImplementation, AgentInstance } from './types.js'
 
 // 测试配置
-const TEST_PROTOCOL_PORT = 19805
-const TEST_WEB_PORT = 13005
+const TEST_PROTOCOL_PORT = 19806
+const TEST_WEB_PORT = 13006
 const TEST_DATA_DIR = './test-data/admin-provider-test'
 
 // 全局存储 JWT token
@@ -217,14 +217,14 @@ describe('AdminModule - Model Provider & Agent', () => {
         {
           implementation_id: 'default',
           name: 'Test Instance',
-          role: 'worker',
+          specialization: 'Worker tasks',
           auto_start: false,
         },
         true
       )
 
       expect(response.instance.name).toBe('Test Instance')
-      expect(response.instance.role).toBe('worker')
+      expect(response.instance.specialization).toBe('Worker tasks')
       instanceId = response.instance.id
     })
 

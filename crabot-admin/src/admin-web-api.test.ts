@@ -9,8 +9,8 @@ import AdminModule from './index.js'
 import type { Friend, LoginResponse } from './types.js'
 import { AdminErrorCode } from './types.js'
 
-const TEST_PROTOCOL_PORT = 19805
-const TEST_WEB_PORT = 13005
+const TEST_PROTOCOL_PORT = 19807
+const TEST_WEB_PORT = 13007
 const TEST_DATA_DIR = './test-data/admin-web-api-test'
 
 describe('Admin Web API', () => {
