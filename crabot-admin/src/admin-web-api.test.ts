@@ -191,6 +191,83 @@ describe('Admin Web API', () => {
     })
   })
 
+  describe('GET /api/memory/*', () => {
+    it('forwards friend and scope filters to short-term memory search', async () => {
+      const token = await loginAndGetToken()
+
+      vi.spyOn(admin['rpcClient'], 'resolve').mockResolvedValue([
+        {
+          module_id: 'memory-test',
+          module_type: 'memory',
+          version: '0.1.0',
+          port: 19001,
+        },
+      ] as any)
+
+      const callSpy = vi.spyOn(admin['rpcClient'], 'call').mockResolvedValue({ results: [] } as any)
+
+      const response = await makeWebRequest<{ results: unknown[] }>(
+        TEST_WEB_PORT,
+        '/api/memory/short-term?q=hello&limit=5&friend_id=friend-1&accessible_scope=session-a&accessible_scope=session-b',
+        'GET',
+        null,
+        token
+      )
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body.results).toEqual([])
+      expect(callSpy).toHaveBeenCalledWith(
+        19001,
+        'search_short_term',
+        {
+          query: 'hello',
+          limit: 5,
+          filter: { refs: { friend_id: 'friend-1' } },
+          accessible_scopes: ['session-a', 'session-b'],
+        },
+        'admin-web-test'
+      )
+    })
+
+    it('forwards friend and packed scope filters to long-term memory search', async () => {
+      const token = await loginAndGetToken()
+
+      vi.spyOn(admin['rpcClient'], 'resolve').mockResolvedValue([
+        {
+          module_id: 'memory-test',
+          module_type: 'memory',
+          version: '0.1.0',
+          port: 19001,
+        },
+      ] as any)
+
+      const callSpy = vi.spyOn(admin['rpcClient'], 'call').mockResolvedValue({ results: [] } as any)
+
+      const response = await makeWebRequest<{ results: unknown[] }>(
+        TEST_WEB_PORT,
+        '/api/memory/long-term?q=project&limit=7&friend_id=friend-2&accessible_scopes=session-x,session-y',
+        'GET',
+        null,
+        token
+      )
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body.results).toEqual([])
+      expect(callSpy).toHaveBeenCalledWith(
+        19001,
+        'search_long_term',
+        {
+          query: 'project',
+          limit: 7,
+          detail: 'L1',
+          filter: { entity_id: 'friend-2' },
+          accessible_scopes: ['session-x', 'session-y'],
+        },
+        'admin-web-test'
+      )
+    })
+  })
+
   describe('POST /api/dialog-objects/private-pool/:sessionId/*', () => {
     it('assigns an unassigned private session to an existing friend and clears matching applications', async () => {
       const token = await loginAndGetToken()

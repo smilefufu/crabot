@@ -6239,9 +6239,24 @@ export class AdminModule extends ModuleBase {
     const moduleId = url.searchParams.get('module_id') ?? undefined
     const q = url.searchParams.get('q') ?? undefined
     const limit = parseInt(url.searchParams.get('limit') ?? '20', 10)
+    const friendId = url.searchParams.get('friend_id') ?? undefined
+    const accessibleScopes = this.parseAccessibleScopes(url)
     const port = await this.getMemoryPort(moduleId)
-    const result = await this.rpcClient.call<{ query?: string; limit: number }, unknown>(
-      port, 'search_short_term', { query: q, limit }, this.config.moduleId
+    const result = await this.rpcClient.call<{
+      query?: string
+      limit: number
+      filter?: { refs?: Record<string, string> }
+      accessible_scopes?: string[]
+    }, unknown>(
+      port,
+      'search_short_term',
+      {
+        query: q,
+        limit,
+        ...(friendId ? { filter: { refs: { friend_id: friendId } } } : {}),
+        ...(accessibleScopes ? { accessible_scopes: accessibleScopes } : {}),
+      },
+      this.config.moduleId
     )
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(result))
@@ -6251,9 +6266,26 @@ export class AdminModule extends ModuleBase {
     const moduleId = url.searchParams.get('module_id') ?? undefined
     const q = url.searchParams.get('q') ?? 'memory'
     const limit = parseInt(url.searchParams.get('limit') ?? '20', 10)
+    const friendId = url.searchParams.get('friend_id') ?? undefined
+    const accessibleScopes = this.parseAccessibleScopes(url)
     const port = await this.getMemoryPort(moduleId)
-    const result = await this.rpcClient.call<{ query: string; limit: number; detail: string }, unknown>(
-      port, 'search_long_term', { query: q, limit, detail: 'L1' }, this.config.moduleId
+    const result = await this.rpcClient.call<{
+      query: string
+      limit: number
+      detail: string
+      filter?: { entity_id?: string }
+      accessible_scopes?: string[]
+    }, unknown>(
+      port,
+      'search_long_term',
+      {
+        query: q,
+        limit,
+        detail: 'L1',
+        ...(friendId ? { filter: { entity_id: friendId } } : {}),
+        ...(accessibleScopes ? { accessible_scopes: accessibleScopes } : {}),
+      },
+      this.config.moduleId
     )
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(result))
@@ -6267,6 +6299,27 @@ export class AdminModule extends ModuleBase {
     )
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(result))
+  }
+
+  private parseAccessibleScopes(url: URL): string[] | undefined {
+    const repeated = url.searchParams
+      .getAll('accessible_scope')
+      .map((scope) => scope.trim())
+      .filter(Boolean)
+    if (repeated.length > 0) {
+      return repeated
+    }
+
+    const packed = url.searchParams.get('accessible_scopes')
+    if (!packed) {
+      return undefined
+    }
+
+    const scopes = packed
+      .split(',')
+      .map((scope) => scope.trim())
+      .filter(Boolean)
+    return scopes.length > 0 ? scopes : undefined
   }
 
   private async handleDeleteMemoryApi(_req: IncomingMessage, res: ServerResponse, url: URL, memoryId: string): Promise<void> {
