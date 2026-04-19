@@ -79,10 +79,23 @@ type MemoryEntry =
   | { type: 'short'; memory: ShortTermMemoryEntry }
   | { type: 'long'; memory: LongTermMemoryEntry }
 
-function buildQuery(params: Record<string, string | number | undefined>): string {
-  const entries = Object.entries(params).filter(([, v]) => v !== undefined && v !== '')
-  if (entries.length === 0) return ''
-  return '?' + entries.map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`).join('&')
+function buildQuery(params: Record<string, string | number | string[] | undefined>): string {
+  const search = new URLSearchParams()
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === '') {
+      return
+    }
+    if (Array.isArray(value)) {
+      value
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .forEach((item) => search.append(key, item))
+      return
+    }
+    search.set(key, String(value))
+  })
+  const query = search.toString()
+  return query ? `?${query}` : ''
 }
 
 export const memoryService = {
@@ -99,8 +112,16 @@ export const memoryService = {
     q?: string
     limit?: number
     moduleId?: string
+    friendId?: string
+    accessibleScopes?: string[]
   }): Promise<{ results: ShortTermMemoryEntry[] }> {
-    const q = buildQuery({ q: params.q, limit: params.limit, module_id: params.moduleId })
+    const q = buildQuery({
+      q: params.q,
+      limit: params.limit,
+      module_id: params.moduleId,
+      friend_id: params.friendId,
+      accessible_scope: params.accessibleScopes,
+    })
     return api.get<{ results: ShortTermMemoryEntry[] }>(`/memory/short-term${q}`)
   },
 
@@ -108,8 +129,16 @@ export const memoryService = {
     q?: string
     limit?: number
     moduleId?: string
+    friendId?: string
+    accessibleScopes?: string[]
   }): Promise<{ results: Array<{ memory: LongTermMemoryEntry; relevance: number }> }> {
-    const q = buildQuery({ q: params.q, limit: params.limit, module_id: params.moduleId })
+    const q = buildQuery({
+      q: params.q,
+      limit: params.limit,
+      module_id: params.moduleId,
+      friend_id: params.friendId,
+      accessible_scope: params.accessibleScopes,
+    })
     return api.get<{ results: Array<{ memory: LongTermMemoryEntry; relevance: number }> }>(`/memory/long-term${q}`)
   },
 
@@ -150,6 +179,39 @@ export interface SceneProfile {
 }
 
 export function sceneToKey(scene: SceneIdentity): string {
+  if (scene.type === 'global') return 'global'
+  if (scene.type === 'friend') return `friend:${scene.friend_id}`
+  return `group:${scene.channel_id}:${scene.session_id}`
+}
+
+export function parseSceneKey(key: string): SceneIdentity {
+  const decoded = decodeURIComponent(key)
+  if (decoded === 'global') {
+    return { type: 'global' }
+  }
+  if (decoded.startsWith('friend:')) {
+    const friendId = decoded.slice('friend:'.length)
+    if (!friendId) {
+      throw new Error(`Invalid friend scene key: ${decoded}`)
+    }
+    return { type: 'friend', friend_id: friendId }
+  }
+  if (decoded.startsWith('group:')) {
+    const rest = decoded.slice('group:'.length)
+    const idx = rest.indexOf(':')
+    if (idx <= 0 || idx === rest.length - 1) {
+      throw new Error(`Invalid group scene key: ${decoded}`)
+    }
+    return {
+      type: 'group_session',
+      channel_id: rest.slice(0, idx),
+      session_id: rest.slice(idx + 1),
+    }
+  }
+  throw new Error(`Unknown scene key: ${decoded}`)
+}
+
+export function defaultSceneProfileLabel(scene: SceneIdentity): string {
   if (scene.type === 'global') return 'global'
   if (scene.type === 'friend') return `friend:${scene.friend_id}`
   return `group:${scene.channel_id}:${scene.session_id}`

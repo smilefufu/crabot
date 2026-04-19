@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useMemo } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { MainLayout } from '../../components/Layout/MainLayout'
 import { Card } from '../../components/Common/Card'
 import { Button } from '../../components/Common/Button'
@@ -19,6 +20,8 @@ type DetailLevel = 'L0' | 'L1' | 'L2'
 
 export const MemoryBrowser: React.FC = () => {
   const toast = useToast()
+  const location = useLocation()
+  const navigate = useNavigate()
 
   const [modules, setModules] = useState<MemoryModule[]>([])
   const [selectedModuleId, setSelectedModuleId] = useState<string | undefined>(undefined)
@@ -34,6 +37,28 @@ export const MemoryBrowser: React.FC = () => {
   const [serviceError, setServiceError] = useState('')
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+
+  const contextFilters = useMemo(() => {
+    const search = new URLSearchParams(location.search)
+    const repeatedScopes = search
+      .getAll('accessible_scope')
+      .map((scope) => scope.trim())
+      .filter(Boolean)
+    const packedScopes = search.get('accessible_scopes')
+      ?.split(',')
+      .map((scope) => scope.trim())
+      .filter(Boolean) ?? []
+
+    return {
+      friendId: search.get('friend_id')?.trim() || undefined,
+      accessibleScopes: repeatedScopes.length > 0 ? repeatedScopes : packedScopes,
+      contextLabel: search.get('context_label')?.trim() || '',
+    }
+  }, [location.search])
+
+  const hasContextFilter = Boolean(
+    contextFilters.friendId || contextFilters.accessibleScopes.length > 0,
+  )
 
   const loadModules = useCallback(async () => {
     try {
@@ -64,6 +89,8 @@ export const MemoryBrowser: React.FC = () => {
         q: q || undefined,
         limit: 50,
         moduleId: selectedModuleId,
+        friendId: contextFilters.friendId,
+        accessibleScopes: contextFilters.accessibleScopes,
       })
       setShortTermEntries(result.results)
     } catch (err) {
@@ -71,7 +98,7 @@ export const MemoryBrowser: React.FC = () => {
     } finally {
       setListLoading(false)
     }
-  }, [selectedModuleId, toast])
+  }, [contextFilters.accessibleScopes, contextFilters.friendId, selectedModuleId, toast])
 
   const loadLongTerm = useCallback(async (q?: string) => {
     setListLoading(true)
@@ -80,6 +107,8 @@ export const MemoryBrowser: React.FC = () => {
         q: q || 'memory',
         limit: 50,
         moduleId: selectedModuleId,
+        friendId: contextFilters.friendId,
+        accessibleScopes: contextFilters.accessibleScopes,
       })
       setLongTermEntries(result.results.map(r => r.memory))
     } catch (err) {
@@ -87,7 +116,7 @@ export const MemoryBrowser: React.FC = () => {
     } finally {
       setListLoading(false)
     }
-  }, [selectedModuleId, toast])
+  }, [contextFilters.accessibleScopes, contextFilters.friendId, selectedModuleId, toast])
 
   useEffect(() => {
     const init = async () => {
@@ -96,7 +125,7 @@ export const MemoryBrowser: React.FC = () => {
       setLoading(false)
     }
     init()
-  }, [])
+  }, [loadModules])
 
   useEffect(() => {
     if (!serviceError && modules.length > 0) {
@@ -107,7 +136,12 @@ export const MemoryBrowser: React.FC = () => {
         loadLongTerm()
       }
     }
-  }, [selectedModuleId, modules, serviceError])
+  }, [loadLongTerm, loadShortTerm, loadStats, modules, serviceError, tab])
+
+  useEffect(() => {
+    setExpandedId(null)
+    setLongTermDetailLevels(new Map())
+  }, [contextFilters.accessibleScopes, contextFilters.friendId])
 
   const handleTabChange = (newTab: TabType) => {
     setTab(newTab)
@@ -222,7 +256,10 @@ export const MemoryBrowser: React.FC = () => {
     <MainLayout>
       <div style={{ marginBottom: '2rem' }}>
         <h1 style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.5rem' }}>记忆管理</h1>
-        <p style={{ color: 'var(--text-secondary)' }}>查看和管理 Memory 模块中的短期与长期记忆</p>
+        <p style={{ color: 'var(--text-secondary)' }}>
+          查看和管理 Memory 模块中的短期与长期记忆
+          {hasContextFilter ? '，当前列表已按对话对象上下文过滤。' : ''}
+        </p>
       </div>
 
       {serviceError && (
@@ -236,6 +273,34 @@ export const MemoryBrowser: React.FC = () => {
 
       {!serviceError && (
         <>
+          {hasContextFilter && (
+            <Card>
+              <div style={{ display: 'grid', gap: '0.5rem' }}>
+                <div style={{ fontWeight: 600 }}>
+                  当前上下文：{contextFilters.contextLabel || '已应用上下文过滤'}
+                </div>
+                {contextFilters.friendId && (
+                  <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
+                    好友 ID：{contextFilters.friendId}
+                  </div>
+                )}
+                {contextFilters.accessibleScopes.length > 0 && (
+                  <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
+                    可访问范围：{contextFilters.accessibleScopes.join(', ')}
+                  </div>
+                )}
+                <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>
+                  说明：列表查询已按上下文过滤，顶部统计仍显示当前 Memory 模块的总体数据。
+                </div>
+                <div>
+                  <Button variant="secondary" onClick={() => navigate('/memory')}>
+                    清除上下文过滤
+                  </Button>
+                </div>
+              </div>
+            </Card>
+          )}
+
           {modules.length > 1 && (
             <div style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '1rem' }}>
               <span style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>选择 Memory 模块：</span>

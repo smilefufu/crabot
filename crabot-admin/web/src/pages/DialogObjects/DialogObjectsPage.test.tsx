@@ -570,6 +570,20 @@ describe('DialogObjectsPage', () => {
     expect(screen.queryByLabelText('权限模板')).not.toBeInTheDocument()
   })
 
+  it('exposes friend scene and memory entry points from the friend workbench', async () => {
+    render(<DialogObjectsPage />)
+
+    const friendDetail = (await screen.findByRole('heading', { name: '好友详情' })).closest('.card')
+    expect(friendDetail).not.toBeNull()
+    const scopedFriendDetail = within(friendDetail as HTMLElement)
+
+    const sceneLink = scopedFriendDetail.getByRole('link', { name: '打开私聊场景画像' })
+    expect(sceneLink).toHaveAttribute('href', '/memory/scenes/friend%3Afriend-1')
+
+    const memoryLink = scopedFriendDetail.getByRole('link', { name: '查看私聊记忆' })
+    expect(memoryLink).toHaveAttribute('href', '/memory?friend_id=friend-1&context_label=Alice')
+  })
+
   it('shows group session status and opens an editable permission drawer without template id', async () => {
     render(<DialogObjectsPage />)
 
@@ -592,6 +606,23 @@ describe('DialogObjectsPage', () => {
     expect(screen.getByLabelText('记忆范围覆盖')).toHaveValue('group-scope-a, group-scope-b')
     expect(screen.getByRole('button', { name: '保存配置' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '重置为继承' })).toBeInTheDocument()
+  })
+
+  it('exposes group scene and memory entry points from the group workbench', async () => {
+    render(<DialogObjectsPage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '群聊' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Master Group' }))
+
+    const groupDetail = screen.getByRole('heading', { name: '群聊详情' }).closest('.card')
+    expect(groupDetail).not.toBeNull()
+    const scopedGroupDetail = within(groupDetail as HTMLElement)
+
+    const sceneLink = scopedGroupDetail.getByRole('link', { name: '打开群聊场景画像' })
+    expect(sceneLink).toHaveAttribute('href', '/memory/scenes/group%3Awechat-main%3Agroup-1')
+
+    const memoryLink = scopedGroupDetail.getByRole('link', { name: '查看群聊记忆' })
+    expect(memoryLink).toHaveAttribute('href', '/memory?accessible_scope=group-1&context_label=Master+Group')
   })
 
   it('saves meaningful group permission overrides and resets them by deleting config', async () => {

@@ -55,6 +55,20 @@ const sidebarButtonStyle = (active: boolean): React.CSSProperties => ({
   fontWeight: active ? 600 : 500,
 })
 
+const workbenchLinkStyle: React.CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  padding: '0.625rem 0.875rem',
+  borderRadius: '10px',
+  border: '1px solid var(--border)',
+  background: 'var(--bg-secondary)',
+  color: 'var(--text-primary)',
+  textDecoration: 'none',
+  fontSize: '0.875rem',
+  fontWeight: 500,
+}
+
 type TriState = 'inherit' | 'on' | 'off'
 
 const triStateLabel = (state: TriState): string => {
@@ -66,6 +80,29 @@ const triStateLabel = (state: TriState): string => {
     default:
       return '继承'
   }
+}
+
+const buildSceneProfileHref = (sceneKey: string): string => `/memory/scenes/${encodeURIComponent(sceneKey)}`
+
+const buildMemoryBrowserHref = (params: {
+  friendId?: string
+  accessibleScopes?: string[]
+  contextLabel?: string
+}): string => {
+  const search = new URLSearchParams()
+  if (params.friendId) {
+    search.set('friend_id', params.friendId)
+  }
+  params.accessibleScopes?.forEach((scope) => {
+    if (scope.trim()) {
+      search.append('accessible_scope', scope.trim())
+    }
+  })
+  if (params.contextLabel) {
+    search.set('context_label', params.contextLabel)
+  }
+  const query = search.toString()
+  return query ? `/memory?${query}` : '/memory'
 }
 
 const GroupTriStateToggle: React.FC<{
@@ -624,6 +661,11 @@ export const DialogObjectsPage: React.FC = () => {
 
     if (domain === 'friends') {
       const friend = selectedItem as DialogObjectFriend
+      const friendSceneHref = buildSceneProfileHref(`friend:${friend.id}`)
+      const friendMemoryHref = buildMemoryBrowserHref({
+        friendId: friend.id,
+        contextLabel: friend.display_name,
+      })
       const isLockedMaster = friend.permission === 'master'
       const hasChanges = editName !== friend.display_name
         || editPerm !== friend.permission
@@ -736,8 +778,30 @@ export const DialogObjectsPage: React.FC = () => {
                 </div>
               )}
             </div>
+            <div style={{ display: 'grid', gap: '0.75rem' }}>
+              <strong>私聊场景与记忆</strong>
+              <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+                <a
+                  href={friendSceneHref}
+                  aria-label="打开私聊场景画像"
+                  style={workbenchLinkStyle}
+                >
+                  打开私聊场景画像
+                </a>
+                <a
+                  href={friendMemoryHref}
+                  aria-label="查看私聊记忆"
+                  style={workbenchLinkStyle}
+                >
+                  查看私聊记忆
+                </a>
+              </div>
+              <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
+                好友统一承接该人的私聊场景画像和私聊记忆范围。
+              </div>
+            </div>
             <div style={{ color: 'var(--text-secondary)' }}>
-              统一私聊权限、私聊场景和记忆工作台将在这里继续扩展。
+              权限在此编辑，场景与记忆通过独立工作台继续深入查看。
             </div>
           </div>
         </Card>
@@ -771,6 +835,11 @@ export const DialogObjectsPage: React.FC = () => {
     }
 
     const group = selectedItem as DialogObjectGroupEntry
+    const groupSceneHref = buildSceneProfileHref(`group:${group.channel_id}:${group.id}`)
+    const groupMemoryHref = buildMemoryBrowserHref({
+      accessibleScopes: [group.id],
+      contextLabel: group.title,
+    })
     return (
       <Card title="群聊详情">
         <div style={{ display: 'grid', gap: '0.75rem' }}>
@@ -782,8 +851,30 @@ export const DialogObjectsPage: React.FC = () => {
           <Button variant="secondary" onClick={() => void openGroupPermissionEditor(group)}>
             编辑群权限
           </Button>
+          <div style={{ display: 'grid', gap: '0.75rem' }}>
+            <strong>群场景与记忆</strong>
+            <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+              <a
+                href={groupSceneHref}
+                aria-label="打开群聊场景画像"
+                style={workbenchLinkStyle}
+              >
+                打开群聊场景画像
+              </a>
+              <a
+                href={groupMemoryHref}
+                aria-label="查看群聊记忆"
+                style={workbenchLinkStyle}
+              >
+                查看群聊记忆
+              </a>
+            </div>
+            <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
+              当前群聊记忆入口默认按 session scope 过滤，和 `master_in_group` 可处理规则保持一致。
+            </div>
+          </div>
           <div style={{ color: 'var(--text-secondary)' }}>
-            群权限、群场景和记忆工作台将在这里继续展开；当前列表已和运行时 `master_in_group` 规则保持一致。
+            当前列表已和运行时 `master_in_group` 规则保持一致。
           </div>
         </div>
       </Card>
@@ -858,7 +949,7 @@ export const DialogObjectsPage: React.FC = () => {
           <div>
             <h2 style={{ margin: 0 }}>申请队列</h2>
             <p style={{ color: 'var(--text-secondary)', marginTop: '0.5rem' }}>
-              这里先集中查看 `/认主` 和 `/apply` 事件，动作流将在后续和新模型完全对齐。
+              这里集中查看 `/认主` 和 `/apply` 事件，并直接按当前对话对象模型完成归属处理。
             </p>
           </div>
 

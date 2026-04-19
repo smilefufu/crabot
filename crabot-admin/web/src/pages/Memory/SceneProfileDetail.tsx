@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import { MainLayout } from '../../components/Layout/MainLayout'
 import { Card } from '../../components/Common/Card'
 import { Button } from '../../components/Common/Button'
@@ -7,6 +7,8 @@ import { Loading } from '../../components/Common/Loading'
 import { ConfirmModal } from '../../components/Common/ConfirmModal'
 import { useToast } from '../../contexts/ToastContext'
 import {
+  defaultSceneProfileLabel,
+  parseSceneKey,
   sceneProfileService,
   type SceneProfile,
   type SceneProfileSection,
@@ -37,9 +39,12 @@ const inputStyle: React.CSSProperties = {
 export const SceneProfileDetail: React.FC = () => {
   const { key = '' } = useParams<{ key: string }>()
   const navigate = useNavigate()
+  const location = useLocation()
   const toast = useToast()
+  const contextLabel = new URLSearchParams(location.search).get('context_label')?.trim() || ''
 
   const [profile, setProfile] = useState<SceneProfile | null | undefined>(undefined)
+  const [profileExists, setProfileExists] = useState(false)
   const [serviceError, setServiceError] = useState('')
   const [label, setLabel] = useState('')
   const [sections, setSections] = useState<SceneProfileSection[]>([])
@@ -47,22 +52,48 @@ export const SceneProfileDetail: React.FC = () => {
   const [deleting, setDeleting] = useState(false)
   const [confirmOpen, setConfirmOpen] = useState(false)
 
+  const buildDraftProfile = useCallback((): SceneProfile => {
+    const scene = parseSceneKey(key)
+    const now = new Date().toISOString()
+    return {
+      scene,
+      label: contextLabel || defaultSceneProfileLabel(scene),
+      sections: [],
+      source_memory_ids: [],
+      created_at: now,
+      updated_at: now,
+      last_declared_at: null,
+    }
+  }, [contextLabel, key])
+
   const load = useCallback(async () => {
+    let draft: SceneProfile
+    try {
+      draft = buildDraftProfile()
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '场景 key 无效'
+      setProfile(null)
+      setProfileExists(false)
+      setServiceError(msg)
+      return
+    }
+
     try {
       const result = await sceneProfileService.get(key)
-      setProfile(result.profile)
-      if (result.profile) {
-        setLabel(result.profile.label)
-        setSections(result.profile.sections)
-      }
+      const nextProfile = result.profile ?? draft
+      setProfile(nextProfile)
+      setProfileExists(result.profile != null)
+      setLabel(nextProfile.label)
+      setSections(nextProfile.sections)
       setServiceError('')
     } catch (err) {
       const msg = 'Memory 服务未运行，请确认 Memory 模块已启动'
       setProfile(null)
+      setProfileExists(false)
       setServiceError(msg)
       toast.error(err instanceof Error ? err.message : msg)
     }
-  }, [key, toast])
+  }, [buildDraftProfile, key, toast])
 
   useEffect(() => {
     load()
@@ -93,16 +124,24 @@ export const SceneProfileDetail: React.FC = () => {
   const handleSave = useCallback(async () => {
     setSaving(true)
     try {
-      await sceneProfileService.patch(key, { label, sections })
-      toast.success('已保存')
+      const result = await sceneProfileService.patch(key, { label, sections })
+      setProfile(result.profile)
+      setProfileExists(true)
+      setLabel(result.profile.label)
+      setSections(result.profile.sections)
+      toast.success(profileExists ? '已保存' : '场景画像已创建')
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '保存失败')
     } finally {
       setSaving(false)
     }
-  }, [key, label, sections, toast])
+  }, [key, label, profileExists, sections, toast])
 
   const handleDelete = useCallback(async () => {
+    if (!profileExists) {
+      setConfirmOpen(false)
+      return
+    }
     setDeleting(true)
     try {
       await sceneProfileService.delete(key)
@@ -112,7 +151,7 @@ export const SceneProfileDetail: React.FC = () => {
       toast.error(err instanceof Error ? err.message : '删除失败')
       setDeleting(false)
     }
-  }, [key, toast, navigate])
+  }, [key, navigate, profileExists, toast])
 
   // Loading state
   if (profile === undefined) {
@@ -140,26 +179,18 @@ export const SceneProfileDetail: React.FC = () => {
     )
   }
 
-  // Profile not found
   if (profile === null) {
     return (
       <MainLayout>
-        <div style={{ marginBottom: '2rem' }}>
-          <h1 style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.5rem' }}>场景画像详情</h1>
-        </div>
         <Card>
-          <div style={{ textAlign: 'center', padding: '2rem' }}>
-            <div style={{ color: 'var(--text-secondary)', marginBottom: '1rem' }}>场景画像不存在</div>
-            <Button variant="secondary" onClick={() => navigate('/memory/scenes')}>
-              返回列表
-            </Button>
-          </div>
+          <div style={{ color: 'var(--text-secondary)' }}>无法解析当前场景画像。</div>
         </Card>
       </MainLayout>
     )
   }
 
-  const sceneType = profile.scene.type
+  const activeProfile: SceneProfile = profile
+  const sceneType = activeProfile.scene.type
   const badgeStyle = SCENE_TYPE_COLORS[sceneType] ?? { bg: 'rgba(0,0,0,0.1)', color: 'var(--text-secondary)' }
   const isFriend = sceneType === 'friend'
 
@@ -167,7 +198,7 @@ export const SceneProfileDetail: React.FC = () => {
     <MainLayout>
       <div style={{ marginBottom: '2rem' }}>
         <h1 style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.5rem' }}>场景画像详情</h1>
-        <p style={{ color: 'var(--text-secondary)' }}>{profile.label || key}</p>
+        <p style={{ color: 'var(--text-secondary)' }}>{activeProfile.label || key}</p>
       </div>
 
       {/* 顶部信息区（只读） */}
@@ -191,25 +222,39 @@ export const SceneProfileDetail: React.FC = () => {
         <div style={{ marginBottom: '0.75rem' }}>
           <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>原始 scene：</span>
           <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginLeft: '0.5rem', fontFamily: 'monospace' }}>
-            {JSON.stringify(profile.scene)}
+            {JSON.stringify(activeProfile.scene)}
           </span>
         </div>
 
         <div style={{ display: 'flex', gap: '1.5rem', fontSize: '0.85rem', color: 'var(--text-secondary)', flexWrap: 'wrap', marginBottom: '0.5rem' }}>
-          <span>创建时间：{new Date(profile.created_at).toLocaleString('zh-CN')}</span>
-          <span>更新时间：{new Date(profile.updated_at).toLocaleString('zh-CN')}</span>
-          {profile.last_declared_at && (
-            <span>最近声明：{new Date(profile.last_declared_at).toLocaleString('zh-CN')}</span>
+          {profileExists ? (
+            <>
+              <span>创建时间：{new Date(activeProfile.created_at).toLocaleString('zh-CN')}</span>
+              <span>更新时间：{new Date(activeProfile.updated_at).toLocaleString('zh-CN')}</span>
+              {activeProfile.last_declared_at && (
+                <span>最近声明：{new Date(activeProfile.last_declared_at).toLocaleString('zh-CN')}</span>
+              )}
+            </>
+          ) : (
+            <span>状态：尚未创建，保存后会创建这份场景画像。</span>
           )}
         </div>
 
         <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
           来源记忆 ID：
-          {profile.source_memory_ids && profile.source_memory_ids.length > 0
-            ? profile.source_memory_ids.join('、')
-            : '—'}
+          {profileExists && activeProfile.source_memory_ids && activeProfile.source_memory_ids.length > 0
+            ? activeProfile.source_memory_ids.join('、')
+            : profileExists ? '—' : '尚未创建'}
         </div>
       </Card>
+
+      {!profileExists && (
+        <Card>
+          <div style={{ color: 'var(--text-secondary)' }}>
+            当前 scene key 还没有现成画像。你现在编辑的是一份草稿，保存后会直接创建该对象的场景画像。
+          </div>
+        </Card>
+      )}
 
       {/* label 编辑 */}
       <div style={{ marginTop: '1.5rem', marginBottom: '1.5rem' }}>
@@ -303,11 +348,17 @@ export const SceneProfileDetail: React.FC = () => {
       {/* 操作按钮区 */}
       <div style={{ display: 'flex', gap: '1rem', justifyContent: 'space-between', alignItems: 'center' }}>
         <Button variant="primary" onClick={handleSave} disabled={saving}>
-          {saving ? '保存中...' : '保存'}
+          {saving ? (profileExists ? '保存中...' : '创建中...') : (profileExists ? '保存' : '创建画像')}
         </Button>
-        <Button variant="danger" onClick={() => setConfirmOpen(true)}>
-          删除整份画像
-        </Button>
+        {profileExists ? (
+          <Button variant="danger" onClick={() => setConfirmOpen(true)}>
+            删除整份画像
+          </Button>
+        ) : (
+          <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+            尚未创建的画像无需删除。
+          </div>
+        )}
       </div>
 
       <ConfirmModal
