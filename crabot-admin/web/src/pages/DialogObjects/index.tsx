@@ -9,6 +9,7 @@ import { useToast } from '../../contexts/ToastContext'
 import { dialogObjectsService } from '../../services/dialog-objects'
 import { friendService } from '../../services/friend'
 import { permissionTemplateService } from '../../services/permission-template'
+import { sessionService } from '../../services/session'
 import type {
   DialogObjectApplication,
   ChannelIdentity,
@@ -18,7 +19,11 @@ import type {
   Friend,
   FriendPermission,
   PermissionTemplate,
+  StoragePermission,
+  ToolAccessConfig,
+  ToolCategory,
 } from '../../types'
+import { TOOL_CATEGORIES, TOOL_CATEGORY_LABELS } from '../../types'
 
 type DialogDomain = 'friends' | 'privatePool' | 'groups'
 type QueueTarget = { id: string; channel_id: string; title: string }
@@ -49,6 +54,43 @@ const sidebarButtonStyle = (active: boolean): React.CSSProperties => ({
   fontSize: '0.95rem',
   fontWeight: active ? 600 : 500,
 })
+
+type TriState = 'inherit' | 'on' | 'off'
+
+const triStateLabel = (state: TriState): string => {
+  switch (state) {
+    case 'on':
+      return '开启'
+    case 'off':
+      return '关闭'
+    default:
+      return '继承'
+  }
+}
+
+const GroupTriStateToggle: React.FC<{
+  label: string
+  category: ToolCategory
+  value: TriState
+  onChange: (cat: string, val: TriState) => void
+}> = ({ label, category, value, onChange }) => {
+  const cycle = () => {
+    const next: TriState = value === 'inherit' ? 'on' : value === 'on' ? 'off' : 'inherit'
+    onChange(category, next)
+  }
+
+  return (
+    <button
+      type="button"
+      className={`session-tri-toggle session-tri-toggle--${value}`}
+      onClick={cycle}
+      title={`${label}: ${triStateLabel(value)} (点击切换)`}
+    >
+      <span className="session-tri-toggle-indicator" />
+      <span className="session-tri-toggle-label">{label}: {triStateLabel(value)}</span>
+    </button>
+  )
+}
 
 export const DialogObjectsPage: React.FC = () => {
   const { success, error: notifyError } = useToast()
@@ -92,6 +134,15 @@ export const DialogObjectsPage: React.FC = () => {
   const [bindingIdentity, setBindingIdentity] = useState(false)
   const [confirmUnlinkKey, setConfirmUnlinkKey] = useState<string | null>(null)
   const [unlinkingIdentity, setUnlinkingIdentity] = useState(false)
+  const [editingGroup, setEditingGroup] = useState<DialogObjectGroupEntry | null>(null)
+  const [groupConfigLoading, setGroupConfigLoading] = useState(false)
+  const [groupSaving, setGroupSaving] = useState(false)
+  const [groupHasExistingConfig, setGroupHasExistingConfig] = useState(false)
+  const [groupToolOverrides, setGroupToolOverrides] = useState<Record<string, boolean>>({})
+  const [groupStorageEnabled, setGroupStorageEnabled] = useState(false)
+  const [groupStoragePath, setGroupStoragePath] = useState('')
+  const [groupStorageAccess, setGroupStorageAccess] = useState<'read' | 'readwrite'>('read')
+  const [groupMemoryScopes, setGroupMemoryScopes] = useState('')
   const initialLoadDone = useRef(false)
 
   const loadDialogObjects = useCallback(async (showLoading = false) => {
@@ -415,6 +466,107 @@ export const DialogObjectsPage: React.FC = () => {
     }
   }
 
+  const resetGroupConfigForm = useCallback(() => {
+    setGroupToolOverrides({})
+    setGroupStorageEnabled(false)
+    setGroupStoragePath('')
+    setGroupStorageAccess('read')
+    setGroupMemoryScopes('')
+    setGroupHasExistingConfig(false)
+  }, [])
+
+  const openGroupPermissionEditor = useCallback(async (group: DialogObjectGroupEntry) => {
+    setEditingGroup(group)
+    resetGroupConfigForm()
+    setGroupConfigLoading(true)
+
+    try {
+      const result = await sessionService.getConfig(group.id)
+      const config = result.config
+      setGroupHasExistingConfig(config != null)
+      if (config) {
+        setGroupToolOverrides(config.tool_access ? { ...config.tool_access } : {})
+        setGroupStorageEnabled(config.storage != null)
+        setGroupStoragePath(config.storage?.workspace_path ?? '')
+        setGroupStorageAccess(config.storage?.access ?? 'read')
+        setGroupMemoryScopes(config.memory_scopes?.join(', ') ?? '')
+      }
+    } catch (caughtError) {
+      const message = caughtError instanceof Error ? caughtError.message : '加载群聊权限失败'
+      notifyError(message)
+    } finally {
+      setGroupConfigLoading(false)
+    }
+  }, [notifyError, resetGroupConfigForm])
+
+  const closeGroupPermissionEditor = useCallback(() => {
+    setEditingGroup(null)
+  }, [])
+
+  const getGroupTriState = (cat: string): TriState => {
+    if (!(cat in groupToolOverrides)) return 'inherit'
+    return groupToolOverrides[cat] ? 'on' : 'off'
+  }
+
+  const setGroupTriState = (cat: string, value: TriState) => {
+    setGroupToolOverrides((prev) => {
+      const { [cat]: _, ...rest } = prev
+      return value === 'inherit' ? rest : { ...rest, [cat]: value === 'on' }
+    })
+  }
+
+  const handleSaveGroupConfig = async () => {
+    if (!editingGroup) return
+
+    try {
+      setGroupSaving(true)
+      const storage: StoragePermission | null = groupStorageEnabled
+        ? {
+            workspace_path: groupStoragePath.trim(),
+            access: groupStorageAccess,
+          }
+        : null
+
+      const memoryScopes = groupMemoryScopes
+        .split(',')
+        .map((scope) => scope.trim())
+        .filter(Boolean)
+
+      const config = {
+        tool_access: Object.keys(groupToolOverrides).length > 0
+          ? groupToolOverrides as Partial<ToolAccessConfig>
+          : undefined,
+        storage,
+        memory_scopes: memoryScopes.length > 0 ? memoryScopes : undefined,
+      }
+
+      await sessionService.updateConfig(editingGroup.id, config)
+      setGroupHasExistingConfig(true)
+      success('群聊权限配置已保存')
+    } catch (caughtError) {
+      const message = caughtError instanceof Error ? caughtError.message : '保存失败'
+      notifyError(message)
+    } finally {
+      setGroupSaving(false)
+    }
+  }
+
+  const handleResetGroupConfig = async () => {
+    if (!editingGroup) return
+
+    try {
+      setGroupSaving(true)
+      await sessionService.deleteConfig(editingGroup.id)
+      resetGroupConfigForm()
+      success('已重置为继承模板')
+    } catch (caughtError) {
+      const message = caughtError instanceof Error ? caughtError.message : '重置失败'
+      notifyError(message)
+    } finally {
+      setGroupSaving(false)
+    }
+  }
+
   const renderList = () => {
     if (filteredItems.length === 0) {
       return (
@@ -627,6 +779,9 @@ export const DialogObjectsPage: React.FC = () => {
           <div>群成员数量：{group.participant_count}</div>
           <div>master_in_group：{group.master_in_group ? '是' : '否'}</div>
           <div>会话配置：{group.has_session_config ? '已配置' : '未配置'}</div>
+          <Button variant="secondary" onClick={() => void openGroupPermissionEditor(group)}>
+            编辑群权限
+          </Button>
           <div style={{ color: 'var(--text-secondary)' }}>
             群权限、群场景和记忆工作台将在这里继续展开；当前列表已和运行时 `master_in_group` 规则保持一致。
           </div>
@@ -907,6 +1062,100 @@ export const DialogObjectsPage: React.FC = () => {
                 取消
               </Button>
             </div>
+          </div>
+        </Drawer>
+      )}
+
+      {editingGroup && (
+        <Drawer open onClose={closeGroupPermissionEditor} width={540}>
+          <div style={{ display: 'grid', gap: '1rem' }}>
+            <div>
+              <h2 style={{ margin: 0 }}>群聊权限编辑</h2>
+              <p style={{ color: 'var(--text-secondary)', marginTop: '0.5rem' }}>
+                只编辑群聊自己的会话覆盖，不包含 `template_id`。
+              </p>
+            </div>
+
+            {groupConfigLoading ? (
+              <Loading />
+            ) : (
+              <>
+                <div style={{ display: 'grid', gap: '0.75rem' }}>
+                  <div style={{ fontWeight: 600 }}>工具访问覆盖</div>
+                  <div className="session-tri-grid">
+                    {TOOL_CATEGORIES.map((category) => (
+                      <GroupTriStateToggle
+                        key={category}
+                        label={TOOL_CATEGORY_LABELS[category]}
+                        category={category}
+                        value={getGroupTriState(category)}
+                        onChange={setGroupTriState}
+                      />
+                    ))}
+                  </div>
+                </div>
+
+                <div style={{ display: 'grid', gap: '0.75rem' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <input
+                      type="checkbox"
+                      checked={groupStorageEnabled}
+                      onChange={(event) => setGroupStorageEnabled(event.target.checked)}
+                    />
+                    覆盖存储权限
+                  </label>
+                  {groupStorageEnabled && (
+                    <div style={{ display: 'grid', gap: '0.75rem' }}>
+                      <Input
+                        label="存储路径"
+                        aria-label="存储路径"
+                        value={groupStoragePath}
+                        onChange={(event) => setGroupStoragePath(event.target.value)}
+                      />
+                      <label style={{ display: 'grid', gap: '0.35rem' }}>
+                        <span style={{ fontSize: '0.875rem', fontWeight: 500 }}>存储权限</span>
+                        <select
+                          aria-label="存储权限"
+                          value={groupStorageAccess}
+                          onChange={(event) => setGroupStorageAccess(event.target.value as 'read' | 'readwrite')}
+                          className="select"
+                        >
+                          <option value="read">只读</option>
+                          <option value="readwrite">读写</option>
+                        </select>
+                      </label>
+                    </div>
+                  )}
+                </div>
+
+                <Input
+                  label="记忆范围覆盖"
+                  aria-label="记忆范围覆盖"
+                  value={groupMemoryScopes}
+                  onChange={(event) => setGroupMemoryScopes(event.target.value)}
+                  help="逗号分隔，如：group-a, group-b"
+                />
+
+                <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+                  <Button
+                    variant="primary"
+                    onClick={() => void handleSaveGroupConfig()}
+                    disabled={groupSaving}
+                  >
+                    {groupSaving ? '保存中...' : '保存配置'}
+                  </Button>
+                  {groupHasExistingConfig && (
+                    <Button
+                      variant="secondary"
+                      onClick={() => void handleResetGroupConfig()}
+                      disabled={groupSaving}
+                    >
+                      重置为继承
+                    </Button>
+                  )}
+                </div>
+              </>
+            )}
           </div>
         </Drawer>
       )}

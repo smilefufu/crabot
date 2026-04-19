@@ -1,5 +1,5 @@
 import React from 'react'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DialogObjectsPage } from './index'
 
@@ -18,6 +18,9 @@ const updateFriend = vi.fn()
 const linkIdentity = vi.fn()
 const unlinkIdentity = vi.fn()
 const listPermissionTemplates = vi.fn()
+const getSessionConfig = vi.fn()
+const updateSessionConfig = vi.fn()
+const deleteSessionConfig = vi.fn()
 const toastMock = {
   success: vi.fn(),
   error: vi.fn(),
@@ -59,6 +62,14 @@ vi.mock('../../services/friend', () => ({
 vi.mock('../../services/permission-template', () => ({
   permissionTemplateService: {
     list: (...args: unknown[]) => listPermissionTemplates(...args),
+  },
+}))
+
+vi.mock('../../services/session', () => ({
+  sessionService: {
+    getConfig: (...args: unknown[]) => getSessionConfig(...args),
+    updateConfig: (...args: unknown[]) => updateSessionConfig(...args),
+    deleteConfig: (...args: unknown[]) => deleteSessionConfig(...args),
   },
 }))
 
@@ -217,6 +228,33 @@ describe('DialogObjectsPage', () => {
         total_items: 3,
         total_pages: 1,
       },
+    })
+    getSessionConfig.mockResolvedValue({
+      config: {
+        tool_access: {
+          memory: true,
+          messaging: false,
+        },
+        storage: {
+          workspace_path: '/srv/dialog/group-1',
+          access: 'readwrite',
+        },
+        memory_scopes: ['group-scope-a', 'group-scope-b'],
+        updated_at: '2026-04-19T00:00:00.000Z',
+      },
+    })
+    updateSessionConfig.mockResolvedValue({
+      config: {
+        tool_access: {
+          memory: true,
+        },
+        storage: null,
+        memory_scopes: ['group-scope-a'],
+        updated_at: '2026-04-19T00:00:00.000Z',
+      },
+    })
+    deleteSessionConfig.mockResolvedValue({
+      deleted: true,
     })
     updateFriend.mockResolvedValue({
       friend: {
@@ -530,5 +568,73 @@ describe('DialogObjectsPage', () => {
 
     expect(screen.getByLabelText('权限')).toBeDisabled()
     expect(screen.queryByLabelText('权限模板')).not.toBeInTheDocument()
+  })
+
+  it('shows group session status and opens an editable permission drawer without template id', async () => {
+    render(<DialogObjectsPage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '群聊' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Master Group' }))
+
+    const groupDetail = screen.getByRole('heading', { name: '群聊详情' }).closest('.card')
+    expect(groupDetail).not.toBeNull()
+    const scopedGroupDetail = within(groupDetail as HTMLElement)
+    expect(scopedGroupDetail.getByText('来源渠道：wechat-main')).toBeInTheDocument()
+    expect(scopedGroupDetail.getByText('群成员数量：2')).toBeInTheDocument()
+    expect(scopedGroupDetail.getByText('master_in_group：是')).toBeInTheDocument()
+    expect(scopedGroupDetail.getByText('会话配置：已配置')).toBeInTheDocument()
+    expect(scopedGroupDetail.getByRole('button', { name: '编辑群权限' })).toBeInTheDocument()
+
+    fireEvent.click(scopedGroupDetail.getByRole('button', { name: '编辑群权限' }))
+
+    expect(await screen.findByRole('heading', { name: '群聊权限编辑' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('权限模板')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('记忆范围覆盖')).toHaveValue('group-scope-a, group-scope-b')
+    expect(screen.getByRole('button', { name: '保存配置' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重置为继承' })).toBeInTheDocument()
+  })
+
+  it('saves meaningful group permission overrides and resets them by deleting config', async () => {
+    render(<DialogObjectsPage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '群聊' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Master Group' }))
+    fireEvent.click(screen.getByRole('button', { name: '编辑群权限' }))
+
+    expect(await screen.findByRole('heading', { name: '群聊权限编辑' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '消息操作: 关闭' }))
+    fireEvent.click(screen.getByRole('button', { name: '消息操作: 继承' }))
+
+    const storageToggle = screen.getByLabelText('覆盖存储权限')
+    expect(storageToggle).toBeChecked()
+    const storagePath = screen.getByLabelText('存储路径')
+    expect(screen.getByRole('button', { name: '消息操作: 开启' })).toBeInTheDocument()
+    fireEvent.change(storagePath, { target: { value: '/data/dialog/group-1' } })
+    fireEvent.change(screen.getByLabelText('存储权限'), { target: { value: 'read' } })
+    fireEvent.change(screen.getByLabelText('记忆范围覆盖'), { target: { value: 'group-a, group-b' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存配置' }))
+
+    await waitFor(() => {
+      expect(updateSessionConfig).toHaveBeenCalledWith('group-1', {
+        tool_access: expect.objectContaining({
+          memory: true,
+          messaging: true,
+        }),
+        storage: {
+          workspace_path: '/data/dialog/group-1',
+          access: 'read',
+        },
+        memory_scopes: ['group-a', 'group-b'],
+      })
+    })
+    expect(toastMock.success).toHaveBeenCalledWith('群聊权限配置已保存')
+
+    fireEvent.click(screen.getByRole('button', { name: '重置为继承' }))
+
+    await waitFor(() => {
+      expect(deleteSessionConfig).toHaveBeenCalledWith('group-1')
+    })
+    expect(toastMock.success).toHaveBeenCalledWith('已重置为继承模板')
   })
 })
