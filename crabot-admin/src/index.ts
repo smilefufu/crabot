@@ -2016,7 +2016,12 @@ export class AdminModule extends ModuleBase {
           res.end(JSON.stringify({ error: AdminErrorCode.CHANNEL_IDENTITY_IN_USE, message: error.message }))
           return
         }
-        if (error.message === 'Session channel mismatch' || error.message === 'Session is not private' || error.message === 'Private session has no participants') {
+        if (
+          error.message === 'Session channel mismatch' ||
+          error.message === 'Session is not private' ||
+          error.message === 'Private session has no participants' ||
+          error.message === 'Private session identity is ambiguous'
+        ) {
           res.writeHead(400, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ error: error.message }))
           return
@@ -2058,7 +2063,12 @@ export class AdminModule extends ModuleBase {
           res.end(JSON.stringify({ error: AdminErrorCode.CHANNEL_IDENTITY_IN_USE, message: error.message }))
           return
         }
-        if (error.message === 'Session channel mismatch' || error.message === 'Session is not private' || error.message === 'Private session has no participants') {
+        if (
+          error.message === 'Session channel mismatch' ||
+          error.message === 'Session is not private' ||
+          error.message === 'Private session has no participants' ||
+          error.message === 'Private session identity is ambiguous'
+        ) {
           res.writeHead(400, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ error: error.message }))
           return

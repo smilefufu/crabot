@@ -157,10 +157,22 @@ export function extractChannelIdentityFromPrivateSession(
     throw new Error('Session is not private')
   }
 
-  const participant = session.participants.find((item) => item.platform_user_id)
-  if (!participant) {
+  const participants = Array.from(
+    new Map(
+      session.participants
+        .filter((item) => item.platform_user_id)
+        .map((item) => [item.platform_user_id, item])
+    ).values()
+  )
+
+  if (participants.length === 0) {
     throw new Error('Private session has no participants')
   }
+  if (participants.length > 1) {
+    throw new Error('Private session identity is ambiguous')
+  }
+
+  const participant = participants[0]
 
   return {
     channel_id: session.channel_id,

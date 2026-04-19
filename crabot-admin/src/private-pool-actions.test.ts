@@ -234,6 +234,33 @@ describe('Private Pool Actions And Group Gating', () => {
     expect(Array.from(adminAny.pendingMessages.keys())).toEqual([])
   })
 
+  it('rejects private-pool actions when a private session has multiple participants', async () => {
+    sessionById.set('private-session-ambiguous', makeSession({
+      id: 'private-session-ambiguous',
+      channel_id: 'wechat-main',
+      type: 'private',
+      title: 'Ambiguous User',
+      participants: [
+        { platform_user_id: 'user-a', role: 'member' },
+        { platform_user_id: 'user-b', role: 'member' },
+      ],
+    }))
+
+    const response = await makeWebRequest<{ error: string }>(
+      TEST_WEB_PORT,
+      `/api/dialog-objects/private-pool/private-session-ambiguous/create-friend`,
+      'POST',
+      {
+        channel_id: 'wechat-main',
+        display_name: 'Should Fail',
+      },
+      token
+    )
+
+    expect(response.statusCode).toBe(400)
+    expect(response.body.error).toBe('Private session identity is ambiguous')
+  })
+
   it('authorizes a group message when the concrete group session contains a master', async () => {
     const adminAny = admin as any
     const { friend: master } = adminAny.handleCreateFriend({
