@@ -23,6 +23,29 @@ interface GroupProjectionInput {
   sessionConfigs: ReadonlyMap<string, SessionPermissionConfig> | Iterable<[string, SessionPermissionConfig]>
 }
 
+export interface DialogObjectSessionPage {
+  items: DialogObjectChannelSession[]
+  pagination?: {
+    page?: number
+    page_size?: number
+    total_items?: number
+    total_pages?: number
+  }
+}
+
+interface CollectDialogObjectSessionsInput<TChannel> {
+  channels: Iterable<TChannel>
+  type: DialogObjectChannelSession['type']
+  pageSize?: number
+  fetchPage: (
+    channel: TChannel,
+    page: number,
+    pageSize: number,
+    type: DialogObjectChannelSession['type']
+  ) => Promise<DialogObjectSessionPage>
+  onError?: (channel: TChannel, error: unknown) => void | Promise<void>
+}
+
 function toSessionConfigIdSet(
   sessionConfigs: ReadonlyMap<string, SessionPermissionConfig> | Iterable<[string, SessionPermissionConfig]>
 ): Set<string> {
@@ -46,6 +69,10 @@ function buildAssignedIdentitySet(friends: Iterable<Friend>): Set<string> {
   return assignedIdentities
 }
 
+function buildFriendIdSet(friends: Iterable<Friend>): Set<string> {
+  return new Set(Array.from(friends, (friend) => friend.id))
+}
+
 function buildMasterIdentitySet(friends: Iterable<Friend>): Set<string> {
   const masterIdentities = new Set<string>()
   for (const friend of friends) {
@@ -55,6 +82,14 @@ function buildMasterIdentitySet(friends: Iterable<Friend>): Set<string> {
     }
   }
   return masterIdentities
+}
+
+function buildMasterFriendIdSet(friends: Iterable<Friend>): Set<string> {
+  return new Set(
+    Array.from(friends)
+      .filter((friend) => friend.permission === 'master')
+      .map((friend) => friend.id)
+  )
 }
 
 function buildPendingMessageIndex(
@@ -70,6 +105,72 @@ function buildPendingMessageIndex(
     index.set(key, ids)
   }
   return index
+}
+
+function isAssignedParticipant(
+  session: DialogObjectChannelSession,
+  participant: DialogObjectChannelSession['participants'][number],
+  assignedFriendIds: Set<string>,
+  assignedIdentities: Set<string>
+): boolean {
+  return (
+    (participant.friend_id !== undefined && assignedFriendIds.has(participant.friend_id)) ||
+    assignedIdentities.has(`${session.channel_id}:${participant.platform_user_id}`)
+  )
+}
+
+function isMasterParticipant(
+  session: DialogObjectChannelSession,
+  participant: DialogObjectChannelSession['participants'][number],
+  masterFriendIds: Set<string>,
+  masterIdentities: Set<string>
+): boolean {
+  return (
+    (participant.friend_id !== undefined && masterFriendIds.has(participant.friend_id)) ||
+    masterIdentities.has(`${session.channel_id}:${participant.platform_user_id}`)
+  )
+}
+
+function normalizeTotalPages(
+  sessionPage: DialogObjectSessionPage,
+  pageSize: number,
+  currentPage: number
+): number {
+  const pagination = sessionPage.pagination
+  if (pagination?.total_pages && pagination.total_pages > 0) {
+    return Math.max(currentPage, pagination.total_pages)
+  }
+  if (pagination?.total_items !== undefined) {
+    const effectivePageSize =
+      pagination.page_size && pagination.page_size > 0 ? pagination.page_size : pageSize
+    return Math.max(currentPage, Math.ceil(pagination.total_items / effectivePageSize), 1)
+  }
+  return currentPage
+}
+
+export async function collectDialogObjectChannelSessions<TChannel>(
+  input: CollectDialogObjectSessionsInput<TChannel>
+): Promise<DialogObjectChannelSession[]> {
+  const sessions: DialogObjectChannelSession[] = []
+  const pageSize = input.pageSize ?? 100
+
+  for (const channel of input.channels) {
+    try {
+      let page = 1
+      let totalPages = 1
+
+      do {
+        const result = await input.fetchPage(channel, page, pageSize, input.type)
+        sessions.push(...result.items)
+        totalPages = normalizeTotalPages(result, pageSize, page)
+        page += 1
+      } while (page <= totalPages)
+    } catch (error) {
+      await input.onError?.(channel, error)
+    }
+  }
+
+  return sessions
 }
 
 export function projectFriendDialogObjects(friends: Iterable<Friend>): DialogObjectFriend[] {
@@ -105,7 +206,9 @@ export function projectApplicationDialogObjects(
 }
 
 export function projectPrivatePoolDialogObjects(input: PrivatePoolProjectionInput): DialogObjectPrivatePoolEntry[] {
-  const assignedIdentities = buildAssignedIdentitySet(input.friends)
+  const friends = Array.from(input.friends)
+  const assignedFriendIds = buildFriendIdSet(friends)
+  const assignedIdentities = buildAssignedIdentitySet(friends)
   const pendingMessageIndex = buildPendingMessageIndex(input.pendingMessages, input.now ?? new Date())
   const sessionConfigIds = toSessionConfigIdSet(input.sessionConfigs)
 
@@ -113,7 +216,7 @@ export function projectPrivatePoolDialogObjects(input: PrivatePoolProjectionInpu
     .filter((session) => session.type === 'private')
     .filter((session) =>
       !session.participants.some((participant) =>
-        assignedIdentities.has(`${session.channel_id}:${participant.platform_user_id}`)
+        isAssignedParticipant(session, participant, assignedFriendIds, assignedIdentities)
       )
     )
     .map((session) => ({
@@ -130,14 +233,16 @@ export function projectPrivatePoolDialogObjects(input: PrivatePoolProjectionInpu
 }
 
 export function projectGroupDialogObjects(input: GroupProjectionInput): DialogObjectGroupEntry[] {
-  const masterIdentities = buildMasterIdentitySet(input.friends)
+  const friends = Array.from(input.friends)
+  const masterFriendIds = buildMasterFriendIdSet(friends)
+  const masterIdentities = buildMasterIdentitySet(friends)
   const sessionConfigIds = toSessionConfigIdSet(input.sessionConfigs)
 
   return Array.from(input.sessions)
     .filter((session) => session.type === 'group')
     .map((session) => {
       const master_in_group = session.participants.some((participant) =>
-        masterIdentities.has(`${session.channel_id}:${participant.platform_user_id}`)
+        isMasterParticipant(session, participant, masterFriendIds, masterIdentities)
       )
 
       return {

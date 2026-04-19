@@ -115,6 +115,7 @@ import { PRESET_VENDORS } from './preset-vendors.js'
 import { Cron } from 'croner'
 import { ScheduleEngine } from './schedule-engine.js'
 import {
+  collectDialogObjectChannelSessions,
   projectApplicationDialogObjects,
   projectFriendDialogObjects,
   projectGroupDialogObjects,
@@ -1988,25 +1989,22 @@ export class AdminModule extends ModuleBase {
       page: 1,
       page_size: Number.MAX_SAFE_INTEGER,
     }).items
-    const sessions: DialogObjectChannelSession[] = []
 
-    for (const instance of channelInstances) {
-      const modules = await this.rpcClient.resolve(
-        { module_id: instance.id },
-        this.config.moduleId
-      )
+    return collectDialogObjectChannelSessions({
+      channels: channelInstances,
+      type,
+      fetchPage: async (instance, page, pageSize, sessionType) => {
+        const modules = await this.rpcClient.resolve(
+          { module_id: instance.id },
+          this.config.moduleId
+        )
 
-      if (modules.length === 0) {
-        continue
-      }
+        if (modules.length === 0) {
+          throw new Error(`Channel instance not resolvable: ${instance.id}`)
+        }
 
-      const channelPort = modules[0].port
-      const pageSize = 100
-      let page = 1
-      let totalPages = 1
-
-      do {
-        const result = await this.rpcClient.call<
+        const channelPort = modules[0].port
+        return this.rpcClient.call<
           { type: DialogObjectChannelSession['type']; pagination: { page: number; page_size: number } },
           {
             items: DialogObjectChannelSession[]
@@ -2020,17 +2018,15 @@ export class AdminModule extends ModuleBase {
         >(
           channelPort,
           'get_sessions',
-          { type, pagination: { page, page_size: pageSize } },
+          { type: sessionType, pagination: { page, page_size: pageSize } },
           this.config.moduleId
         )
-
-        sessions.push(...result.items)
-        totalPages = result.pagination.total_pages || Math.max(1, Math.ceil(result.pagination.total_items / result.pagination.page_size))
-        page += 1
-      } while (page <= totalPages)
-    }
-
-    return sessions
+      },
+      onError: (instance, error) => {
+        const message = error instanceof Error ? error.message : String(error)
+        console.warn(`[Admin] Dialog object session fetch skipped for ${instance.id}: ${message}`)
+      },
+    })
   }
 
   private async handleUpsertPendingMessageApi(req: IncomingMessage, res: ServerResponse): Promise<void> {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  collectDialogObjectChannelSessions,
   projectApplicationDialogObjects,
   projectFriendDialogObjects,
   projectGroupDialogObjects,
@@ -325,5 +326,119 @@ describe('dialog object projections', () => {
         has_session_config: true,
       }),
     ])
+  })
+
+  it('matches participants by friend_id when identity fields are stale or absent', () => {
+    const master = makeFriend({
+      id: 'friend-master',
+      permission: 'master',
+      channel_identities: [],
+    })
+    const normal = makeFriend({
+      id: 'friend-normal',
+      channel_identities: [],
+    })
+
+    const privatePool = projectPrivatePoolDialogObjects({
+      friends: [normal],
+      pendingMessages: [],
+      sessions: [
+        makeSession({
+          id: 'session-assigned-by-friend-id',
+          type: 'private',
+          participants: [
+            {
+              friend_id: 'friend-normal',
+              platform_user_id: 'mismatched-user',
+              role: 'member',
+            },
+          ],
+        }),
+      ],
+      sessionConfigs: new Map(),
+    })
+
+    const groups = projectGroupDialogObjects({
+      friends: [master],
+      sessions: [
+        makeSession({
+          id: 'group-master-by-friend-id',
+          type: 'group',
+          participants: [
+            {
+              friend_id: 'friend-master',
+              platform_user_id: 'mismatched-master',
+              role: 'owner',
+            },
+          ],
+        }),
+      ],
+      sessionConfigs: new Map(),
+    })
+
+    expect(privatePool).toEqual([])
+    expect(groups).toEqual([
+      expect.objectContaining({
+        id: 'group-master-by-friend-id',
+        master_in_group: true,
+      }),
+    ])
+  })
+
+  it('collects paginated sessions across multiple pages', async () => {
+    const pages = new Map<string, DialogObjectChannelSession[][]>([
+      ['chan-a', [
+        [makeSession({ id: 'session-a1' }), makeSession({ id: 'session-a2' })],
+        [makeSession({ id: 'session-a3' })],
+      ]],
+    ])
+
+    const sessions = await collectDialogObjectChannelSessions({
+      channels: ['chan-a'],
+      type: 'private',
+      pageSize: 2,
+      fetchPage: async (channel, page) => ({
+        items: pages.get(channel)?.[page - 1] ?? [],
+        pagination: {
+          page,
+          page_size: 2,
+          total_items: 3,
+        },
+      }),
+    })
+
+    expect(sessions.map((session) => session.id)).toEqual(['session-a1', 'session-a2', 'session-a3'])
+  })
+
+  it('isolates channel fetch failures instead of aborting the whole collection', async () => {
+    const handledErrors: Array<{ channel: string; message: string }> = []
+
+    const sessions = await collectDialogObjectChannelSessions({
+      channels: ['chan-ok', 'chan-fail'],
+      type: 'group',
+      fetchPage: async (channel) => {
+        if (channel === 'chan-fail') {
+          throw new Error('rpc exploded')
+        }
+
+        return {
+          items: [makeSession({ id: 'group-ok', type: 'group', channel_id: channel })],
+          pagination: {
+            page: 1,
+            page_size: 100,
+            total_pages: 1,
+          },
+        }
+      },
+      onError: (channel, error) => {
+        handledErrors.push({
+          channel,
+          message: error instanceof Error ? error.message : String(error),
+        })
+      },
+    })
+
+    expect(sessions.map((session) => session.id)).toEqual(['group-ok'])
+    expect(handledErrors).toEqual([{ channel: 'chan-fail', message: 'rpc exploded' }])
   })
 })
