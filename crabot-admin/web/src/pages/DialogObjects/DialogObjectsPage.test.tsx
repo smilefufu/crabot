@@ -308,6 +308,52 @@ describe('DialogObjectsPage', () => {
     })
   })
 
+  it('creates a master from a pair application when no master exists yet', async () => {
+    listFriends.mockResolvedValueOnce({
+      items: [
+        {
+          id: 'friend-1',
+          display_name: 'Alice',
+          permission: 'normal',
+          permission_template_id: 'standard',
+          identities: [
+            {
+              channel_id: 'wechat-main',
+              platform_user_id: 'alice-wx',
+              platform_display_name: 'Alice WX',
+            },
+          ],
+          status: 'active',
+          created_at: '2026-04-19T00:00:00.000Z',
+          updated_at: '2026-04-19T00:00:00.000Z',
+        },
+      ],
+    })
+    linkApplicationMaster.mockResolvedValueOnce({
+      friend: {
+        id: 'friend-master-new',
+        display_name: 'Master User',
+      },
+      created: true,
+    })
+
+    render(<DialogObjectsPage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '申请队列 2' }))
+    expect((await screen.findAllByText('Master User')).length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('button', { name: /Master User/ }))
+
+    fireEvent.click(screen.getByRole('button', { name: '新建 Master' }))
+
+    await waitFor(() => {
+      expect(linkApplicationMaster).toHaveBeenCalledWith('app-2')
+    })
+    expect(toastMock.success).toHaveBeenCalledWith('已新建 Master')
+    await waitFor(() => {
+      expect(listApplications.mock.calls.length).toBeGreaterThan(1)
+    })
+  })
+
   it('rejects an application from the queue', async () => {
     render(<DialogObjectsPage />)
 
