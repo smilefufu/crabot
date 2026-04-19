@@ -116,10 +116,12 @@ import { Cron } from 'croner'
 import { ScheduleEngine } from './schedule-engine.js'
 import {
   collectDialogObjectChannelSessions,
+  extractChannelIdentityFromPrivateSession,
   projectApplicationDialogObjects,
   projectFriendDialogObjects,
   projectGroupDialogObjects,
   projectPrivatePoolDialogObjects,
+  sessionHasMasterParticipant,
 } from './dialog-objects.js'
 
 // ============================================================================
@@ -766,6 +768,18 @@ export class AdminModule extends ModuleBase {
 
       if (pathname === '/api/dialog-objects/private-pool' && req.method === 'GET') {
         await this.handleListDialogObjectPrivatePoolApi(res)
+        return
+      }
+
+      if (pathname.match(/^\/api\/dialog-objects\/private-pool\/[^/]+\/assign-friend$/) && req.method === 'POST') {
+        const sessionId = decodeURIComponent(pathname.split('/')[4])
+        await this.handleAssignPrivatePoolFriendApi(req, res, sessionId)
+        return
+      }
+
+      if (pathname.match(/^\/api\/dialog-objects\/private-pool\/[^/]+\/create-friend$/) && req.method === 'POST') {
+        const sessionId = decodeURIComponent(pathname.split('/')[4])
+        await this.handleCreatePrivatePoolFriendApi(req, res, sessionId)
         return
       }
 
@@ -1970,6 +1984,90 @@ export class AdminModule extends ModuleBase {
     res.end(JSON.stringify({ items }))
   }
 
+  private async handleAssignPrivatePoolFriendApi(
+    req: IncomingMessage,
+    res: ServerResponse,
+    sessionId: string
+  ): Promise<void> {
+    const body = await this.readJsonBody<{ channel_id: ModuleId; friend_id: FriendId }>(req)
+
+    try {
+      const result = await this.handleAssignPrivatePoolFriend({
+        session_id: sessionId,
+        channel_id: body.channel_id,
+        friend_id: body.friend_id,
+      })
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(result))
+    } catch (error) {
+      if (error instanceof Error) {
+        if (error.message === 'Friend not found') {
+          res.writeHead(404, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: error.message }))
+          return
+        }
+        if (error.message === 'Channel module not found' || error.message === 'Session not found') {
+          res.writeHead(404, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: error.message }))
+          return
+        }
+        if (error.message === 'Channel identity already in use') {
+          res.writeHead(409, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: AdminErrorCode.CHANNEL_IDENTITY_IN_USE, message: error.message }))
+          return
+        }
+        if (error.message === 'Session channel mismatch' || error.message === 'Session is not private' || error.message === 'Private session has no participants') {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: error.message }))
+          return
+        }
+      }
+      throw error
+    }
+  }
+
+  private async handleCreatePrivatePoolFriendApi(
+    req: IncomingMessage,
+    res: ServerResponse,
+    sessionId: string
+  ): Promise<void> {
+    const body = await this.readJsonBody<{
+      channel_id: ModuleId
+      display_name: string
+      permission_template_id?: string
+    }>(req)
+
+    try {
+      const result = await this.handleCreatePrivatePoolFriend({
+        session_id: sessionId,
+        channel_id: body.channel_id,
+        display_name: body.display_name,
+        permission_template_id: body.permission_template_id,
+      })
+      res.writeHead(201, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(result))
+    } catch (error) {
+      if (error instanceof Error) {
+        if (error.message === 'Channel module not found' || error.message === 'Session not found') {
+          res.writeHead(404, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: error.message }))
+          return
+        }
+        if (error.message.startsWith('Channel identity already in use')) {
+          res.writeHead(409, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: AdminErrorCode.CHANNEL_IDENTITY_IN_USE, message: error.message }))
+          return
+        }
+        if (error.message === 'Session channel mismatch' || error.message === 'Session is not private' || error.message === 'Private session has no participants') {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: error.message }))
+          return
+        }
+      }
+      throw error
+    }
+  }
+
   private async handleListDialogObjectGroupsApi(res: ServerResponse): Promise<void> {
     const sessions = await this.fetchChannelSessionsForDialogObjects('group')
     const items = projectGroupDialogObjects({
@@ -2027,6 +2125,83 @@ export class AdminModule extends ModuleBase {
         console.warn(`[Admin] Dialog object session fetch skipped for ${instance.id}: ${message}`)
       },
     })
+  }
+
+  private async handleAssignPrivatePoolFriend(params: {
+    session_id: string
+    channel_id: ModuleId
+    friend_id: FriendId
+  }): Promise<{ friend: Friend }> {
+    const channelIdentity = await this.resolveChannelIdentityFromPrivateSession(params.channel_id, params.session_id)
+    const result = await this.handleLinkChannelIdentity({
+      friend_id: params.friend_id,
+      channel_identity: channelIdentity,
+    })
+    await this.removePendingMessagesForChannelIdentity(channelIdentity)
+    return result
+  }
+
+  private async handleCreatePrivatePoolFriend(params: {
+    session_id: string
+    channel_id: ModuleId
+    display_name: string
+    permission_template_id?: string
+  }): Promise<{ friend: Friend }> {
+    const channelIdentity = await this.resolveChannelIdentityFromPrivateSession(params.channel_id, params.session_id)
+    const result = this.handleCreateFriend({
+      display_name: params.display_name,
+      permission: 'normal',
+      permission_template_id: params.permission_template_id,
+      channel_identities: [channelIdentity],
+    })
+    await this.removePendingMessagesForChannelIdentity(channelIdentity)
+    await this.saveData()
+    return result
+  }
+
+  private async resolveChannelSession(channelId: ModuleId, sessionId: string): Promise<{
+    id: string
+    channel_id: ModuleId
+    type: 'private' | 'group'
+    title: string
+    participants: Array<{ friend_id?: FriendId; platform_user_id: string; role: 'owner' | 'admin' | 'member' }>
+  }> {
+    const modules = await this.rpcClient.resolve(
+      { module_id: channelId },
+      this.config.moduleId
+    )
+    if (modules.length === 0) {
+      throw new Error('Channel module not found')
+    }
+
+    const result = await this.rpcClient.call<
+      { session_id: string },
+      {
+        session: {
+          id: string
+          channel_id: ModuleId
+          type: 'private' | 'group'
+          title: string
+          participants: Array<{ friend_id?: FriendId; platform_user_id: string; role: 'owner' | 'admin' | 'member' }>
+        }
+      }
+    >(
+      modules[0].port,
+      'get_session',
+      { session_id: sessionId },
+      this.config.moduleId
+    )
+
+    return result.session
+  }
+
+  private async resolveChannelIdentityFromPrivateSession(channelId: ModuleId, sessionId: string): Promise<ChannelIdentity> {
+    const session = await this.resolveChannelSession(channelId, sessionId)
+    if (session.channel_id !== channelId) {
+      throw new Error('Session channel mismatch')
+    }
+
+    return extractChannelIdentityFromPrivateSession(session)
   }
 
   private async handleUpsertPendingMessageApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -2192,6 +2367,8 @@ export class AdminModule extends ModuleBase {
       if (existingFriendId !== params.friend_id) {
         throw new Error('Channel identity already in use')
       }
+
+      return { friend: existing }
     }
 
     const friend: Friend = {
@@ -2411,6 +2588,14 @@ export class AdminModule extends ModuleBase {
 
     console.log(`[Admin] 📩 handleChannelMessage: channel=${channelId}, sender=${platform_user_id} (${platform_display_name}), friend=${friend ? friend.id : 'NOT_FOUND'}, sessionType=${message.session.type}`)
 
+    if (message.session.type !== 'private') {
+      const masterInGroup = await this.checkMasterInSession(channelId, message.session.session_id)
+      if (!masterInGroup) {
+        console.log(`[Admin] ⚠️ Group message dropped: no master in session ${message.session.session_id} on channel ${channelId}`)
+        return
+      }
+    }
+
     if (friend) {
       // 已知 Friend：填充 friend_id，发出授权事件
       const authorizedMessage: ChannelMessageRef = {
@@ -2426,21 +2611,15 @@ export class AdminModule extends ModuleBase {
 
     // 未知发信人
     if (message.session.type !== 'private') {
-      // 群聊：检查此 Channel 上是否有 Master（群本身是准入门槛，§8.3/8.4）
-      if (this.hasMasterOnChannel(channelId)) {
-        const guestFriend: Friend = {
-          id: `guest:${channelId}:${platform_user_id}` as FriendId,
-          display_name: platform_display_name || platform_user_id,
-          permission: 'normal',
-          channel_identities: [{ channel_id: channelId, platform_user_id, platform_display_name: platform_display_name || platform_user_id }],
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        }
-        await this.publishMessageAuthorizedEvent(channelId, message, guestFriend, crabDisplayName)
-        return
+      const guestFriend: Friend = {
+        id: `guest:${channelId}:${platform_user_id}` as FriendId,
+        display_name: platform_display_name || platform_user_id,
+        permission: 'normal',
+        channel_identities: [{ channel_id: channelId, platform_user_id, platform_display_name: platform_display_name || platform_user_id }],
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
       }
-      // 无 Master 在此 Channel → 静默丢弃
-      console.log(`[Admin] ⚠️ Group message from unknown sender dropped: no master on channel ${channelId}`)
+      await this.publishMessageAuthorizedEvent(channelId, message, guestFriend, crabDisplayName)
       return
     }
 
@@ -2471,15 +2650,18 @@ export class AdminModule extends ModuleBase {
     return this.friends.get(friendId) ?? null
   }
 
-  /**
-   * 检查给定 Channel 上是否注册了 Master（§8.4 群聊准入依据）
-   */
-  private hasMasterOnChannel(channelId: ModuleId): boolean {
-    for (const friend of this.friends.values()) {
-      if (friend.permission !== 'master') continue
-      if (friend.channel_identities.some(ci => ci.channel_id === channelId)) return true
+  private async checkMasterInSession(channelId: ModuleId, sessionId: string): Promise<boolean> {
+    try {
+      const session = await this.resolveChannelSession(channelId, sessionId)
+      if (session.type === 'private') {
+        return true
+      }
+      return sessionHasMasterParticipant(session, this.friends.values())
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.warn(`[Admin] Failed to resolve session-level master gate for ${channelId}/${sessionId}: ${message}`)
+      return false
     }
-    return false
   }
 
   /**
@@ -2512,6 +2694,21 @@ export class AdminModule extends ModuleBase {
 
   private getChannelIdentityKey(identity: ChannelIdentity): string {
     return `${identity.channel_id}:${identity.platform_user_id}`
+  }
+
+  private async removePendingMessagesForChannelIdentity(identity: ChannelIdentity): Promise<void> {
+    let removed = false
+
+    for (const [messageId, message] of this.pendingMessages.entries()) {
+      if (message.channel_id === identity.channel_id && message.platform_user_id === identity.platform_user_id) {
+        this.pendingMessages.delete(messageId)
+        removed = true
+      }
+    }
+
+    if (removed) {
+      await this.saveData()
+    }
   }
 
   private async loadData(): Promise<void> {

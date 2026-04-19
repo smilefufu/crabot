@@ -1,4 +1,5 @@
 import type {
+  ChannelIdentity,
   DialogObjectApplication,
   DialogObjectChannelSession,
   DialogObjectFriend,
@@ -131,6 +132,43 @@ function isMasterParticipant(
   )
 }
 
+export function sessionHasMasterParticipant(
+  session: Pick<DialogObjectChannelSession, 'channel_id' | 'participants'>,
+  friends: Iterable<Friend>
+): boolean {
+  const friendList = Array.from(friends)
+  const masterFriendIds = buildMasterFriendIdSet(friendList)
+  const masterIdentities = buildMasterIdentitySet(friendList)
+
+  return session.participants.some((participant) =>
+    isMasterParticipant(
+      session as DialogObjectChannelSession,
+      participant,
+      masterFriendIds,
+      masterIdentities
+    )
+  )
+}
+
+export function extractChannelIdentityFromPrivateSession(
+  session: Pick<DialogObjectChannelSession, 'channel_id' | 'type' | 'title' | 'participants'>
+): ChannelIdentity {
+  if (session.type !== 'private') {
+    throw new Error('Session is not private')
+  }
+
+  const participant = session.participants.find((item) => item.platform_user_id)
+  if (!participant) {
+    throw new Error('Private session has no participants')
+  }
+
+  return {
+    channel_id: session.channel_id,
+    platform_user_id: participant.platform_user_id,
+    platform_display_name: session.title || participant.platform_user_id,
+  }
+}
+
 function normalizeTotalPages(
   sessionPage: DialogObjectSessionPage,
   pageSize: number,
@@ -234,22 +272,16 @@ export function projectPrivatePoolDialogObjects(input: PrivatePoolProjectionInpu
 
 export function projectGroupDialogObjects(input: GroupProjectionInput): DialogObjectGroupEntry[] {
   const friends = Array.from(input.friends)
-  const masterFriendIds = buildMasterFriendIdSet(friends)
-  const masterIdentities = buildMasterIdentitySet(friends)
   const sessionConfigIds = toSessionConfigIdSet(input.sessionConfigs)
 
   return Array.from(input.sessions)
     .filter((session) => session.type === 'group')
     .map((session) => {
-      const master_in_group = session.participants.some((participant) =>
-        isMasterParticipant(session, participant, masterFriendIds, masterIdentities)
-      )
-
       return {
         ...session,
         participant_count: session.participants.length,
         has_session_config: sessionConfigIds.has(session.id),
-        master_in_group,
+        master_in_group: sessionHasMasterParticipant(session, friends),
       }
     })
     .filter((session) => session.master_in_group)
