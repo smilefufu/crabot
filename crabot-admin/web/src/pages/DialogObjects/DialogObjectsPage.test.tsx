@@ -9,6 +9,10 @@ const listGroups = vi.fn()
 const listApplications = vi.fn()
 const createFriendFromPrivatePool = vi.fn()
 const assignPrivatePoolToFriend = vi.fn()
+const assignApplicationFriend = vi.fn()
+const createApplicationFriend = vi.fn()
+const linkApplicationMaster = vi.fn()
+const rejectApplication = vi.fn()
 const listLegacyFriends = vi.fn()
 const toastMock = {
   success: vi.fn(),
@@ -32,6 +36,10 @@ vi.mock('../../services/dialog-objects', () => ({
     listApplications: (...args: unknown[]) => listApplications(...args),
     createFriendFromPrivatePool: (...args: unknown[]) => createFriendFromPrivatePool(...args),
     assignPrivatePoolToFriend: (...args: unknown[]) => assignPrivatePoolToFriend(...args),
+    assignApplicationFriend: (...args: unknown[]) => assignApplicationFriend(...args),
+    createApplicationFriend: (...args: unknown[]) => createApplicationFriend(...args),
+    linkApplicationMaster: (...args: unknown[]) => linkApplicationMaster(...args),
+    rejectApplication: (...args: unknown[]) => rejectApplication(...args),
   },
 }))
 
@@ -58,6 +66,16 @@ describe('DialogObjectsPage', () => {
               platform_display_name: 'Alice WX',
             },
           ],
+          status: 'active',
+          created_at: '2026-04-19T00:00:00.000Z',
+          updated_at: '2026-04-19T00:00:00.000Z',
+        },
+        {
+          id: 'friend-master',
+          display_name: 'Master Boss',
+          permission: 'master',
+          permission_template_id: 'master',
+          identities: [],
           status: 'active',
           created_at: '2026-04-19T00:00:00.000Z',
           updated_at: '2026-04-19T00:00:00.000Z',
@@ -115,6 +133,17 @@ describe('DialogObjectsPage', () => {
           received_at: '2026-04-19T00:00:00.000Z',
           expires_at: '2026-04-20T00:00:00.000Z',
         },
+        {
+          id: 'app-2',
+          intent: 'pair',
+          channel_id: 'wechat-main',
+          platform_user_id: 'master-user',
+          platform_display_name: 'Master User',
+          content_preview: '/pair',
+          source_session_id: 'private-2',
+          received_at: '2026-04-19T00:00:00.000Z',
+          expires_at: '2026-04-20T00:00:00.000Z',
+        },
       ],
     })
     listLegacyFriends.mockResolvedValue({
@@ -148,6 +177,28 @@ describe('DialogObjectsPage', () => {
         display_name: 'Alice',
       },
     })
+    assignApplicationFriend.mockResolvedValue({
+      friend: {
+        id: 'friend-1',
+        display_name: 'Alice',
+      },
+    })
+    createApplicationFriend.mockResolvedValue({
+      friend: {
+        id: 'friend-new',
+        display_name: 'Master User',
+      },
+    })
+    linkApplicationMaster.mockResolvedValue({
+      friend: {
+        id: 'friend-1',
+        display_name: 'Alice',
+      },
+      created: false,
+    })
+    rejectApplication.mockResolvedValue({
+      deleted: true,
+    })
   })
 
   it('renders domain navigation and the application queue badge from service data', async () => {
@@ -159,7 +210,7 @@ describe('DialogObjectsPage', () => {
     expect(screen.getByRole('button', { name: '群聊' })).toBeInTheDocument()
 
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /申请队列 1/ })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /申请队列 2/ })).toBeInTheDocument()
     })
     expect((await screen.findAllByText('Alice')).length).toBeGreaterThan(0)
   })
@@ -193,6 +244,84 @@ describe('DialogObjectsPage', () => {
         display_name: 'Pool User',
         permission_template_id: undefined,
       })
+    })
+  })
+
+  it('assigns an apply application to an existing friend and refreshes the queue', async () => {
+    render(<DialogObjectsPage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '申请队列 2' }))
+    expect((await screen.findAllByText('Pool User')).length).toBeGreaterThan(0)
+
+    fireEvent.click(screen.getByRole('button', { name: '归到已有好友' }))
+    expect(await screen.findByLabelText('选择好友')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '确认归属' }))
+
+    await waitFor(() => {
+      expect(assignApplicationFriend).toHaveBeenCalledWith('app-1', {
+        friend_id: 'friend-1',
+      })
+    })
+    expect(toastMock.success).toHaveBeenCalledWith('已归属到已有好友')
+    await waitFor(() => {
+      expect(listApplications.mock.calls.length).toBeGreaterThan(1)
+    })
+  })
+
+  it('creates a friend from an apply application through the new route', async () => {
+    render(<DialogObjectsPage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '申请队列 2' }))
+    expect((await screen.findAllByText('Pool User')).length).toBeGreaterThan(0)
+
+    fireEvent.click(screen.getByRole('button', { name: '新建好友' }))
+    const nameInput = await screen.findByLabelText('好友名称')
+    fireEvent.change(nameInput, { target: { value: 'Created Friend' } })
+    fireEvent.click(screen.getByRole('button', { name: '确认新建' }))
+
+    await waitFor(() => {
+      expect(createApplicationFriend).toHaveBeenCalledWith('app-1', {
+        display_name: 'Created Friend',
+      })
+    })
+    expect(toastMock.success).toHaveBeenCalledWith('已新建好友')
+    await waitFor(() => {
+      expect(listApplications.mock.calls.length).toBeGreaterThan(1)
+    })
+  })
+
+  it('links a pair application to the existing master friend when one exists', async () => {
+    render(<DialogObjectsPage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '申请队列 2' }))
+    expect((await screen.findAllByText('Master User')).length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('button', { name: /Master User/ }))
+
+    fireEvent.click(screen.getByRole('button', { name: '并入现有 Master' }))
+
+    await waitFor(() => {
+      expect(linkApplicationMaster).toHaveBeenCalledWith('app-2')
+    })
+    expect(toastMock.success).toHaveBeenCalledWith('已并入现有 Master')
+    await waitFor(() => {
+      expect(listApplications.mock.calls.length).toBeGreaterThan(1)
+    })
+  })
+
+  it('rejects an application from the queue', async () => {
+    render(<DialogObjectsPage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: '申请队列 2' }))
+    expect((await screen.findAllByText('Pool User')).length).toBeGreaterThan(0)
+
+    fireEvent.click(screen.getByRole('button', { name: '拒绝申请' }))
+
+    await waitFor(() => {
+      expect(rejectApplication).toHaveBeenCalledWith('app-1')
+    })
+    expect(toastMock.success).toHaveBeenCalledWith('已拒绝申请')
+    await waitFor(() => {
+      expect(listApplications.mock.calls.length).toBeGreaterThan(1)
     })
   })
 

@@ -24,6 +24,40 @@ export const dialogObjectsService = {
     return api.get<{ items: DialogObjectApplication[] }>('/dialog-objects/applications')
   },
 
+  async assignApplicationFriend(
+    applicationId: string,
+    data: { friend_id: string }
+  ): Promise<{ friend: Friend }> {
+    return api.post<{ friend: Friend }>(
+      `/dialog-objects/applications/${encodeURIComponent(applicationId)}/assign-friend`,
+      data
+    )
+  },
+
+  async createApplicationFriend(
+    applicationId: string,
+    data: { display_name: string; permission_template_id?: string }
+  ): Promise<{ friend: Friend }> {
+    return api.post<{ friend: Friend }>(
+      `/dialog-objects/applications/${encodeURIComponent(applicationId)}/create-friend`,
+      data
+    )
+  },
+
+  async linkApplicationMaster(
+    applicationId: string
+  ): Promise<{ friend: Friend; created: boolean }> {
+    return api.post<{ friend: Friend; created: boolean }>(
+      `/dialog-objects/applications/${encodeURIComponent(applicationId)}/link-master`
+    )
+  },
+
+  async rejectApplication(applicationId: string): Promise<{ deleted: true }> {
+    return api.delete<{ deleted: true }>(
+      `/dialog-objects/applications/${encodeURIComponent(applicationId)}`
+    )
+  },
+
   async assignPrivatePoolToFriend(
     sessionId: string,
     data: { channel_id: string; friend_id: string }

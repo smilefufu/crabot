@@ -17,6 +17,8 @@ import type {
 } from '../../types'
 
 type DialogDomain = 'friends' | 'privatePool' | 'groups'
+type QueueTarget = { id: string; channel_id: string; title: string }
+type QueueTargetKind = 'privatePool' | 'application'
 
 const domainOptions: Array<{ key: DialogDomain; label: string }> = [
   { key: 'friends', label: '好友' },
@@ -66,9 +68,11 @@ export const DialogObjectsPage: React.FC = () => {
   const [applicationQueueOpen, setApplicationQueueOpen] = useState(false)
   const [selectedApplicationId, setSelectedApplicationId] = useState<string | null>(null)
 
-  const [createTarget, setCreateTarget] = useState<DialogObjectPrivatePoolEntry | null>(null)
+  const [createTarget, setCreateTarget] = useState<QueueTarget | null>(null)
+  const [createTargetKind, setCreateTargetKind] = useState<QueueTargetKind>('privatePool')
   const [createName, setCreateName] = useState('')
-  const [assignTarget, setAssignTarget] = useState<DialogObjectPrivatePoolEntry | null>(null)
+  const [assignTarget, setAssignTarget] = useState<QueueTarget | null>(null)
+  const [assignTargetKind, setAssignTargetKind] = useState<QueueTargetKind>('privatePool')
   const [assignFriendId, setAssignFriendId] = useState('')
   const [actionLoading, setActionLoading] = useState(false)
 
@@ -180,8 +184,14 @@ export const DialogObjectsPage: React.FC = () => {
     apply: applications.filter((item) => item.intent === 'apply'),
   }), [applications])
 
-  const openAssignModal = async (entry: DialogObjectPrivatePoolEntry) => {
-    setAssignTarget(entry)
+  const masterFriends = useMemo(
+    () => friends.filter((friend) => friend.permission === 'master'),
+    [friends]
+  )
+
+  const openAssignModal = async (target: QueueTarget, kind: QueueTargetKind) => {
+    setAssignTarget(target)
+    setAssignTargetKind(kind)
     setAssignFriendId('')
     try {
       const result = await friendService.listFriends({ page: 1, page_size: 200 })
@@ -195,19 +205,34 @@ export const DialogObjectsPage: React.FC = () => {
     }
   }
 
+  const openCreateModal = (target: QueueTarget, kind: QueueTargetKind, defaultName?: string) => {
+    setCreateTarget(target)
+    setCreateTargetKind(kind)
+    setCreateName(defaultName ?? target.title)
+  }
+
   const handleCreateFriend = async () => {
     if (!createTarget || !createName.trim()) return
     try {
       setActionLoading(true)
-      await dialogObjectsService.createFriendFromPrivatePool(createTarget.id, {
-        channel_id: createTarget.channel_id,
-        display_name: createName.trim(),
-      })
-      success('已从私聊池新建好友')
+      if (createTargetKind === 'application') {
+        await dialogObjectsService.createApplicationFriend(createTarget.id, {
+          display_name: createName.trim(),
+        })
+        success('已新建好友')
+      } else {
+        await dialogObjectsService.createFriendFromPrivatePool(createTarget.id, {
+          channel_id: createTarget.channel_id,
+          display_name: createName.trim(),
+        })
+        success('已从私聊池新建好友')
+      }
       setCreateTarget(null)
       setCreateName('')
       setRefreshKey((value) => value + 1)
-      setDomain('friends')
+      if (createTargetKind === 'privatePool') {
+        setDomain('friends')
+      }
     } catch (caughtError) {
       const message = caughtError instanceof Error ? caughtError.message : '新建好友失败'
       notifyError(message)
@@ -220,17 +245,56 @@ export const DialogObjectsPage: React.FC = () => {
     if (!assignTarget || !assignFriendId) return
     try {
       setActionLoading(true)
-      await dialogObjectsService.assignPrivatePoolToFriend(assignTarget.id, {
-        channel_id: assignTarget.channel_id,
-        friend_id: assignFriendId,
-      })
-      success('已归属到已有好友')
+      if (assignTargetKind === 'application') {
+        await dialogObjectsService.assignApplicationFriend(assignTarget.id, {
+          friend_id: assignFriendId,
+        })
+        success('已归属到已有好友')
+      } else {
+        await dialogObjectsService.assignPrivatePoolToFriend(assignTarget.id, {
+          channel_id: assignTarget.channel_id,
+          friend_id: assignFriendId,
+        })
+        success('已归属到已有好友')
+      }
       setAssignTarget(null)
       setAssignFriendId('')
       setRefreshKey((value) => value + 1)
-      setDomain('friends')
+      if (assignTargetKind === 'privatePool') {
+        setDomain('friends')
+      }
     } catch (caughtError) {
       const message = caughtError instanceof Error ? caughtError.message : '归属好友失败'
+      notifyError(message)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  const handleLinkApplicationMaster = async () => {
+    if (!selectedApplication) return
+    try {
+      setActionLoading(true)
+      const result = await dialogObjectsService.linkApplicationMaster(selectedApplication.id)
+      success(result.created ? '已新建 Master' : '已并入现有 Master')
+      setRefreshKey((value) => value + 1)
+    } catch (caughtError) {
+      const message = caughtError instanceof Error ? caughtError.message : '处理认主申请失败'
+      notifyError(message)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  const handleRejectApplication = async () => {
+    if (!selectedApplication) return
+    try {
+      setActionLoading(true)
+      await dialogObjectsService.rejectApplication(selectedApplication.id)
+      success('已拒绝申请')
+      setRefreshKey((value) => value + 1)
+    } catch (caughtError) {
+      const message = caughtError instanceof Error ? caughtError.message : '拒绝申请失败'
       notifyError(message)
     } finally {
       setActionLoading(false)
@@ -329,15 +393,12 @@ export const DialogObjectsPage: React.FC = () => {
             <div>参与者：{entry.participants.map((participant) => participant.platform_user_id).join(', ')}</div>
             <div>关联申请：{entry.matching_pending_application_ids.length}</div>
             <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
-              <Button variant="secondary" onClick={() => openAssignModal(entry)}>
+              <Button variant="secondary" onClick={() => openAssignModal(entry, 'privatePool')}>
                 归到已有好友
               </Button>
               <Button
                 variant="primary"
-                onClick={() => {
-                  setCreateTarget(entry)
-                  setCreateName(entry.title)
-                }}
+                onClick={() => openCreateModal(entry, 'privatePool')}
               >
                 从私聊新建好友
               </Button>
@@ -480,9 +541,54 @@ export const DialogObjectsPage: React.FC = () => {
                   <div>来源渠道：{selectedApplication.channel_id}</div>
                   <div>来源私聊：{selectedApplication.source_session_id}</div>
                   <div>内容预览：{selectedApplication.content_preview}</div>
-                  <div style={{ color: 'var(--text-secondary)' }}>
-                    审批动作将在后续接入新的“归到已有好友 / 新建好友 / 并入现有 master”流程。
-                  </div>
+                  {selectedApplication.intent === 'pair' ? (
+                    <div style={{ display: 'grid', gap: '0.75rem' }}>
+                      <div style={{ color: 'var(--text-secondary)' }}>
+                        {masterFriends.length > 0
+                          ? `当前已有 ${masterFriends.length} 个 Master，可直接并入现有 Master。`
+                          : '当前没有 Master，可直接创建新的 Master。'}
+                      </div>
+                      <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+                        <Button variant="primary" onClick={handleLinkApplicationMaster} disabled={actionLoading}>
+                          {masterFriends.length > 0 ? '并入现有 Master' : '新建 Master'}
+                        </Button>
+                        <Button variant="secondary" onClick={handleRejectApplication} disabled={actionLoading}>
+                          拒绝申请
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'grid', gap: '0.75rem' }}>
+                      <div style={{ color: 'var(--text-secondary)' }}>
+                        普通申请可以归到已有好友，或按当前申请直接新建好友。
+                      </div>
+                      <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+                        <Button
+                          variant="secondary"
+                          onClick={() => openAssignModal({
+                            id: selectedApplication.id,
+                            channel_id: selectedApplication.channel_id,
+                            title: selectedApplication.platform_display_name,
+                          }, 'application')}
+                        >
+                          归到已有好友
+                        </Button>
+                        <Button
+                          variant="primary"
+                          onClick={() => openCreateModal({
+                            id: selectedApplication.id,
+                            channel_id: selectedApplication.channel_id,
+                            title: selectedApplication.platform_display_name,
+                          }, 'application', selectedApplication.platform_display_name)}
+                        >
+                          新建好友
+                        </Button>
+                        <Button variant="secondary" onClick={handleRejectApplication} disabled={actionLoading}>
+                          拒绝申请
+                        </Button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div style={{ color: 'var(--text-secondary)' }}>暂无申请</div>
@@ -493,9 +599,12 @@ export const DialogObjectsPage: React.FC = () => {
       </Drawer>
 
       {createTarget && (
-        <Drawer open onClose={() => setCreateTarget(null)} width={420}>
+        <Drawer open onClose={() => {
+          setCreateTarget(null)
+          setCreateTargetKind('privatePool')
+        }} width={420}>
           <div style={{ display: 'grid', gap: '1rem' }}>
-            <h2 style={{ margin: 0 }}>从私聊新建好友</h2>
+            <h2 style={{ margin: 0 }}>{createTargetKind === 'application' ? '从申请新建好友' : '从私聊新建好友'}</h2>
             <Input
               label="好友名称"
               aria-label="好友名称"
@@ -506,7 +615,10 @@ export const DialogObjectsPage: React.FC = () => {
               <Button variant="primary" onClick={handleCreateFriend} disabled={actionLoading || !createName.trim()}>
                 确认新建
               </Button>
-              <Button variant="secondary" onClick={() => setCreateTarget(null)} disabled={actionLoading}>
+              <Button variant="secondary" onClick={() => {
+                setCreateTarget(null)
+                setCreateTargetKind('privatePool')
+              }} disabled={actionLoading}>
                 取消
               </Button>
             </div>
@@ -515,9 +627,12 @@ export const DialogObjectsPage: React.FC = () => {
       )}
 
       {assignTarget && (
-        <Drawer open onClose={() => setAssignTarget(null)} width={420}>
+        <Drawer open onClose={() => {
+          setAssignTarget(null)
+          setAssignTargetKind('privatePool')
+        }} width={420}>
           <div style={{ display: 'grid', gap: '1rem' }}>
-            <h2 style={{ margin: 0 }}>归到已有好友</h2>
+            <h2 style={{ margin: 0 }}>{assignTargetKind === 'application' ? '申请归到已有好友' : '归到已有好友'}</h2>
             <label style={{ display: 'grid', gap: '0.5rem' }}>
               <span>选择好友</span>
               <select
@@ -537,7 +652,10 @@ export const DialogObjectsPage: React.FC = () => {
               <Button variant="primary" onClick={handleAssignFriend} disabled={actionLoading || !assignFriendId}>
                 确认归属
               </Button>
-              <Button variant="secondary" onClick={() => setAssignTarget(null)} disabled={actionLoading}>
+              <Button variant="secondary" onClick={() => {
+                setAssignTarget(null)
+                setAssignTargetKind('privatePool')
+              }} disabled={actionLoading}>
                 取消
               </Button>
             </div>
