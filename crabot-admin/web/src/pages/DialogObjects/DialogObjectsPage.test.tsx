@@ -474,6 +474,23 @@ describe('DialogObjectsPage', () => {
     })
   })
 
+  it('clears a normal friend permission template from the dialog objects workbench', async () => {
+    render(<DialogObjectsPage />)
+
+    expect(await screen.findByRole('heading', { name: '好友详情' })).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('权限模板'), { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
+
+    await waitFor(() => {
+      expect(updateFriend).toHaveBeenCalledWith('friend-1', {
+        display_name: 'Alice',
+        permission: 'normal',
+        permission_template_id: '',
+      })
+    })
+  })
+
   it('binds and unlinks channel identities in the dialog objects workbench', async () => {
     render(<DialogObjectsPage />)
 

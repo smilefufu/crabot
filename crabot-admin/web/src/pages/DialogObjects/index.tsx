@@ -361,7 +361,7 @@ export const DialogObjectsPage: React.FC = () => {
       await friendService.updateFriend(friend.id, {
         display_name: editName.trim(),
         permission: editPerm,
-        ...(editPerm === 'normal' && editTemplateId ? { permission_template_id: editTemplateId } : {}),
+        ...(editPerm === 'normal' ? { permission_template_id: editTemplateId } : {}),
       })
       success('保存成功')
       triggerRefresh()
