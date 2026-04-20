@@ -471,6 +471,19 @@ async def test_upsert_scene_profile_preserves_created_at_on_update(memory_module
 
 
 @pytest.mark.asyncio
+async def test_upsert_scene_profile_rejects_blank_content(memory_module):
+    with pytest.raises(ValueError, match="content"):
+        await memory_module._upsert_scene_profile({
+            "scene": {"type": "friend", "friend_id": "f-blank"},
+            "label": "blank",
+            "abstract": "摘要",
+            "overview": "概览",
+            "content": "   ",
+            "updated_at": "2026-04-18T00:00:00Z",
+        })
+
+
+@pytest.mark.asyncio
 async def test_delete_scene_profile(memory_module):
     scene = {"type": "friend", "friend_id": "f2"}
     await memory_module._upsert_scene_profile({
@@ -482,7 +495,7 @@ async def test_delete_scene_profile(memory_module):
 
 
 @pytest.mark.asyncio
-async def test_get_scene_profile_only_public_is_compat_noop(memory_module, caplog):
+async def test_get_scene_profile_only_public_raises(memory_module):
     scene = {"type": "friend", "friend_id": "f3"}
     await memory_module._upsert_scene_profile({
         "scene": scene, "label": "x",
@@ -490,10 +503,8 @@ async def test_get_scene_profile_only_public_is_compat_noop(memory_module, caplo
         "content": "职务: p\n私密: s",
         "created_at": "2026-04-17T00:00:00Z", "updated_at": "2026-04-17T00:00:00Z",
     })
-    with caplog.at_level("WARNING"):
-        got = await memory_module._get_scene_profile({"scene": scene, "only_public": True})
-    assert got["profile"]["content"] == "职务: p\n私密: s"
-    assert "ignored for compatibility" in caplog.text
+    with pytest.raises(ValueError, match="only_public"):
+        await memory_module._get_scene_profile({"scene": scene, "only_public": True})
 
 
 if __name__ == "__main__":

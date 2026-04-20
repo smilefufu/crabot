@@ -538,10 +538,13 @@ class MemoryModule:
         content = payload.get("content")
         if content is None:
             raise ValueError("Scene profile content is required")
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("Scene profile content cannot be empty")
+        payload["content"] = content.strip()
         if not payload.get("abstract") or not payload.get("overview"):
             if not self.is_llm_configured():
                 raise ValueError("Memory module not configured. Please configure LLM settings in Admin.")
-            summaries = await self.llm_client.generate_l0_l1(content)
+            summaries = await self.llm_client.generate_l0_l1(payload["content"])
             payload.setdefault("abstract", summaries["abstract"])
             payload.setdefault("overview", summaries["overview"])
             if not payload.get("abstract"):

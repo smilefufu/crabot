@@ -55,14 +55,10 @@ def test_upsert_update(store):
     assert got.created_at == "2026-04-17T00:00:00Z"
 
 
-def test_get_only_public_is_compat_noop(store, caplog):
+def test_get_only_public_raises_for_removed_filter_mode(store):
     store.upsert(_sample_group())
-    with caplog.at_level("WARNING"):
-        got = store.get(_sample_group().scene, only_public=True)
-    assert got.abstract == "开发组群摘要"
-    assert got.overview == "开发组群概览"
-    assert got.content == "x"
-    assert "ignored for compatibility" in caplog.text
+    with pytest.raises(ValueError, match="only_public"):
+        store.get(_sample_group().scene, only_public=True)
 
 
 def test_list(store):
@@ -176,3 +172,32 @@ def test_old_schema_db_writes_scene_profile_without_rebuild(tmp_path):
     ).fetchone()
     assert row["sections_json"] == "[]"
     store.close()
+
+
+def test_update_preserves_source_memory_ids_when_omitted(store):
+    first = SceneProfile(
+        scene=SceneIdentityFriend(friend_id="friend-1"),
+        label="Alice",
+        abstract="摘要一",
+        overview="概览一",
+        content="正文一",
+        source_memory_ids=["mem-1"],
+        created_at="2026-04-17T00:00:00Z",
+        updated_at="2026-04-17T00:00:00Z",
+    )
+    store.upsert(first)
+
+    updated = SceneProfile(
+        scene=SceneIdentityFriend(friend_id="friend-1"),
+        label="Alice 2",
+        abstract="摘要二",
+        overview="概览二",
+        content="正文二",
+        created_at="2026-04-18T00:00:00Z",
+        updated_at="2026-04-18T00:00:00Z",
+    )
+    store.upsert(updated)
+
+    got = store.get(updated.scene)
+    assert got is not None
+    assert got.source_memory_ids == ["mem-1"]

@@ -6408,10 +6408,9 @@ export class AdminModule extends ModuleBase {
       body.overview,
       existing?.overview ?? '',
     )
-    const nextContent = normalizeSceneProfileTextField(
-      body.content,
-      existing?.content ?? '',
-    )
+    const nextContent = body.content === undefined
+      ? (existing?.content ?? '')
+      : body.content.trim()
 
     if (!nextContent) {
       res.writeHead(400, { 'Content-Type': 'application/json' })

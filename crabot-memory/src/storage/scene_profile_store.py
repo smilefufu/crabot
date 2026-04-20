@@ -1,6 +1,5 @@
 """SceneProfile 存储层 — 基于 SQLite，独立于 SQLiteStore 的连接."""
 import json
-import logging
 import sqlite3
 from pathlib import Path
 from typing import List, Literal, Optional
@@ -12,9 +11,6 @@ from ..types import (
     SceneIdentityGroup,
     SceneIdentityGlobal,
 )
-
-logger = logging.getLogger(__name__)
-
 
 class SceneProfileStore:
     def __init__(self, db_path: str):
@@ -69,12 +65,11 @@ class SceneProfileStore:
         return self._insert(profile)
 
     def get(self, scene: SceneIdentity, only_public: bool = False) -> Optional[SceneProfile]:
+        if only_public:
+            raise ValueError("Scene profile only_public filtering is no longer supported")
         row = self._select_one(scene)
         if not row:
             return None
-        if only_public:
-            # Compatibility shim: scene profiles no longer carry section-level visibility.
-            logger.warning("Scene profile only_public flag is ignored for compatibility")
         return self._row_to_profile(row)
 
     def list(
@@ -141,6 +136,9 @@ class SceneProfileStore:
         existing_row = self._select_one(profile.scene)
         existing = self._row_to_profile(existing_row) if existing_row else None
         created_at = existing.created_at if existing else profile.created_at
+        next_source_ids = profile.source_memory_ids
+        if next_source_ids is None and existing:
+            next_source_ids = existing.source_memory_ids
         self.conn.execute(
             f"""UPDATE scene_profiles SET label = ?, abstract = ?, overview = ?, content = ?,
                 sections_json = ?, source_memory_ids_json = ?, updated_at = ?, last_declared_at = ?
@@ -151,7 +149,7 @@ class SceneProfileStore:
                 profile.overview,
                 profile.content,
                 "[]",
-                json.dumps(profile.source_memory_ids) if profile.source_memory_ids else None,
+                json.dumps(next_source_ids) if next_source_ids else None,
                 profile.updated_at,
                 profile.last_declared_at,
             ] + list(params),
@@ -163,7 +161,7 @@ class SceneProfileStore:
             abstract=profile.abstract,
             overview=profile.overview,
             content=profile.content,
-            source_memory_ids=profile.source_memory_ids,
+            source_memory_ids=next_source_ids,
             created_at=created_at,
             updated_at=profile.updated_at,
             last_declared_at=profile.last_declared_at,
