@@ -412,7 +412,9 @@ class SceneProfile(BaseModel):
     """场景画像（按场景身份聚合的稳定规则与信息）"""
     scene: SceneIdentity
     label: str
-    sections: List[SceneProfileSection] = Field(default_factory=list)
+    abstract: str
+    overview: str
+    content: str
     source_memory_ids: Optional[List[MemoryId]] = None
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
     updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")

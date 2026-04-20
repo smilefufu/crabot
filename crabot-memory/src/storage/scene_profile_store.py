@@ -7,7 +7,6 @@ from typing import List, Literal, Optional
 
 from ..types import (
     SceneProfile,
-    SceneProfileSection,
     SceneIdentity,
     SceneIdentityFriend,
     SceneIdentityGroup,
@@ -31,7 +30,10 @@ class SceneProfileStore:
           channel_id             TEXT,
           session_id             TEXT,
           label                  TEXT NOT NULL,
-          sections_json          TEXT NOT NULL,
+          abstract               TEXT,
+          overview               TEXT,
+          content                TEXT,
+          sections_json          TEXT,
           source_memory_ids_json TEXT,
           created_at             TEXT NOT NULL,
           updated_at             TEXT NOT NULL,
@@ -44,7 +46,17 @@ class SceneProfileStore:
         CREATE UNIQUE INDEX IF NOT EXISTS ux_global ON scene_profiles(scene_type)
           WHERE scene_type = 'global';
         """)
+        self._migrate_schema()
         self.conn.commit()
+
+    def _migrate_schema(self) -> None:
+        columns = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(scene_profiles)").fetchall()
+        }
+        for column in ("abstract", "overview", "content", "sections_json"):
+            if column not in columns:
+                self.conn.execute(f"ALTER TABLE scene_profiles ADD COLUMN {column} TEXT")
 
     # ---------- public API ----------
 
@@ -58,46 +70,16 @@ class SceneProfileStore:
         self,
         scene: SceneIdentity,
         label: Optional[str],
-        section: SceneProfileSection,
+        section,
         merge: Literal["replace_topic", "append"],
     ) -> SceneProfile:
-        current = self.get(scene)
-        if current is None:
-            new_profile = SceneProfile(
-                scene=scene,
-                label=label or self._default_label(scene),
-                sections=[section],
-                created_at=_now_iso(),
-                updated_at=_now_iso(),
-                last_declared_at=_now_iso(),
-            )
-            return self._insert(new_profile)
-
-        sections = list(current.sections)
-        if merge == "replace_topic":
-            sections = [s for s in sections if s.topic != section.topic]
-            sections.append(section)
-        else:
-            sections.append(section)
-
-        return self._update(SceneProfile(
-            scene=scene,
-            label=label or current.label,
-            sections=sections,
-            source_memory_ids=current.source_memory_ids,
-            created_at=current.created_at,
-            updated_at=_now_iso(),
-            last_declared_at=_now_iso(),
-        ))
+        raise NotImplementedError("patch_scene_profile is deprecated; use upsert_scene_profile")
 
     def get(self, scene: SceneIdentity, only_public: bool = False) -> Optional[SceneProfile]:
         row = self._select_one(scene)
         if not row:
             return None
-        profile = self._row_to_profile(row)
-        if only_public:
-            profile.sections = [s for s in profile.sections if s.visibility == "public"]
-        return profile
+        return self._row_to_profile(row)
 
     def list(
         self,
@@ -105,8 +87,10 @@ class SceneProfileStore:
         limit: int = 100,
         offset: int = 0,
     ) -> List[SceneProfile]:
-        sql = "SELECT scene_type, friend_id, channel_id, session_id, label, sections_json, " \
-              "source_memory_ids_json, created_at, updated_at, last_declared_at FROM scene_profiles"
+        sql = (
+            "SELECT scene_type, friend_id, channel_id, session_id, label, abstract, overview, content, "
+            "sections_json, source_memory_ids_json, created_at, updated_at, last_declared_at FROM scene_profiles"
+        )
         params: list = []
         if scene_type:
             sql += " WHERE scene_type = ?"
@@ -134,15 +118,19 @@ class SceneProfileStore:
         self.conn.execute(
             """INSERT INTO scene_profiles
                (scene_type, friend_id, channel_id, session_id, label,
-                sections_json, source_memory_ids_json, created_at, updated_at, last_declared_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                abstract, overview, content, sections_json, source_memory_ids_json,
+                created_at, updated_at, last_declared_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 scene.type,
                 getattr(scene, "friend_id", None),
                 getattr(scene, "channel_id", None),
                 getattr(scene, "session_id", None),
                 profile.label,
-                json.dumps([s.model_dump() for s in profile.sections], ensure_ascii=False),
+                profile.abstract,
+                profile.overview,
+                profile.content,
+                None,
                 json.dumps(profile.source_memory_ids) if profile.source_memory_ids else None,
                 profile.created_at,
                 profile.updated_at,
@@ -155,11 +143,15 @@ class SceneProfileStore:
     def _update(self, profile: SceneProfile) -> SceneProfile:
         where, params = self._where_for_scene(profile.scene)
         self.conn.execute(
-            f"""UPDATE scene_profiles SET label = ?, sections_json = ?, source_memory_ids_json = ?,
-                updated_at = ?, last_declared_at = ? WHERE {where}""",
+            f"""UPDATE scene_profiles SET label = ?, abstract = ?, overview = ?, content = ?,
+                sections_json = ?, source_memory_ids_json = ?, updated_at = ?, last_declared_at = ?
+                WHERE {where}""",
             [
                 profile.label,
-                json.dumps([s.model_dump() for s in profile.sections], ensure_ascii=False),
+                profile.abstract,
+                profile.overview,
+                profile.content,
+                None,
                 json.dumps(profile.source_memory_ids) if profile.source_memory_ids else None,
                 profile.updated_at,
                 profile.last_declared_at,
@@ -171,7 +163,7 @@ class SceneProfileStore:
     def _select_one(self, scene: SceneIdentity):
         where, params = self._where_for_scene(scene)
         row = self.conn.execute(
-            f"SELECT scene_type, friend_id, channel_id, session_id, label, sections_json, "
+            f"SELECT scene_type, friend_id, channel_id, session_id, label, abstract, overview, content, sections_json, "
             f"source_memory_ids_json, created_at, updated_at, last_declared_at "
             f"FROM scene_profiles WHERE {where} LIMIT 1",
             params,
@@ -196,13 +188,19 @@ class SceneProfileStore:
             scene = SceneIdentityGroup(channel_id=row["channel_id"], session_id=row["session_id"])
         else:
             scene = SceneIdentityGlobal()
-        sections = [SceneProfileSection(**s) for s in json.loads(row["sections_json"])]
+
+        legacy_sections = json.loads(row["sections_json"]) if row["sections_json"] else []
+        content = row["content"] or _legacy_sections_to_content(legacy_sections)
+        abstract = row["abstract"] or content[:256]
+        overview = row["overview"] or content[:4000]
         src_json = row["source_memory_ids_json"]
         source_ids = json.loads(src_json) if src_json else None
         return SceneProfile(
             scene=scene,
             label=row["label"],
-            sections=sections,
+            abstract=abstract,
+            overview=overview,
+            content=content,
             source_memory_ids=source_ids,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
@@ -219,3 +217,17 @@ class SceneProfileStore:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _legacy_sections_to_content(sections: list[dict]) -> str:
+    lines = []
+    for section in sections:
+        topic = str(section.get("topic", "")).strip()
+        body = str(section.get("body", "")).strip()
+        if topic and body:
+            lines.append(f"{topic}: {body}")
+        elif topic:
+            lines.append(topic)
+        elif body:
+            lines.append(body)
+    return "\n".join(lines)

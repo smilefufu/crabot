@@ -6,6 +6,7 @@ import asyncio
 import shutil
 import tempfile
 from datetime import datetime
+from unittest.mock import AsyncMock
 
 from src.types import (
     WriteShortTermParams,
@@ -26,6 +27,65 @@ async def memory_module():
     config.storage.data_dir = tmp_dir
 
     module = MemoryModule(config)
+    module.embedding_client.dimension = 8
+    module.embedding_client._dimension_probed = True
+
+    async def _embed_single(text: str):
+        return [0.0] * 8
+
+    async def _extract_keywords(text: str):
+        return ["kw1", "kw2"] if text else []
+
+    async def _generate_l0_l1(content: str):
+        return {
+            "abstract": content[:256],
+            "overview": content[:4000],
+        }
+
+    async def _judge_dedup(new_content: str, existing_content: str):
+        action = "SKIP" if new_content == existing_content else "CREATE"
+        return {"action": action, "reason": "same content" if action == "SKIP" else ""}
+
+    async def _merge_contents(content_a: str, content_b: str):
+        return content_a
+
+    async def _compress_short_term(batch_data):
+        return [f"压缩: {batch_data[0]['content']}"] if batch_data else []
+
+    async def _noop_run_compression():
+        return None
+
+    async def _delete_short_term_by_ids(ids):
+        if not ids:
+            return
+
+        def _delete():
+            table = module.vector_store.db.open_table("short_term_memory")
+            where = "id IN (" + ", ".join(f"'{entry_id}'" for entry_id in ids) + ")"
+            table.delete(where)
+            module.vector_store.short_term_table = table
+
+        await asyncio.get_running_loop().run_in_executor(None, _delete)
+
+    async def _rotate_short_term(before_time):
+        def _delete():
+            table = module.vector_store.db.open_table("short_term_memory")
+            where = f"event_time < '{before_time}'"
+            table.delete(where)
+            module.vector_store.short_term_table = table
+
+        await asyncio.get_running_loop().run_in_executor(None, _delete)
+
+    module.vector_store.embedding_client.embed_single = _embed_single
+    module.llm_client.extract_keywords = _extract_keywords
+    module.llm_client.generate_l0_l1 = _generate_l0_l1
+    module.llm_client.judge_dedup = _judge_dedup
+    module.llm_client.merge_contents = _merge_contents
+    module.llm_client.compress_short_term = _compress_short_term
+    module._run_compression = _noop_run_compression
+    module.vector_store.delete_short_term_by_ids = _delete_short_term_by_ids
+    module.vector_store.rotate_short_term = _rotate_short_term
+
     yield module
 
     module.vector_store.close()
@@ -316,7 +376,7 @@ async def test_upsert_and_get_scene_profile(memory_module):
     params = {
         "scene": {"type": "group_session", "channel_id": "c1", "session_id": "s1"},
         "label": "开发组群",
-        "sections": [{"topic": "群职责", "body": "x", "visibility": "private"}],
+        "content": "群职责: x",
         "created_at": "2026-04-17T00:00:00Z",
         "updated_at": "2026-04-17T00:00:00Z",
     }
@@ -324,6 +384,9 @@ async def test_upsert_and_get_scene_profile(memory_module):
     got = await memory_module._get_scene_profile(
         {"scene": {"type": "group_session", "channel_id": "c1", "session_id": "s1"}})
     assert got["profile"]["label"] == "开发组群"
+    assert got["profile"]["content"] == "群职责: x"
+    assert "abstract" in got["profile"]
+    assert "overview" in got["profile"]
 
 
 @pytest.mark.asyncio
@@ -334,37 +397,50 @@ async def test_get_scene_profile_none(memory_module):
 
 
 @pytest.mark.asyncio
-async def test_patch_scene_profile_replace_topic(memory_module):
-    scene = {"type": "group_session", "channel_id": "c2", "session_id": "s2"}
-    await memory_module._upsert_scene_profile({
-        "scene": scene, "label": "x",
-        "sections": [{"topic": "规则", "body": "v1", "visibility": "private"}],
-        "created_at": "2026-04-17T00:00:00Z", "updated_at": "2026-04-17T00:00:00Z",
+async def test_upsert_scene_profile_generates_l0_l1_when_missing(memory_module, monkeypatch):
+    monkeypatch.setattr(
+        memory_module.llm_client,
+        "generate_l0_l1",
+        AsyncMock(return_value={"abstract": "自动摘要", "overview": "自动概览"}),
+    )
+    result = await memory_module._upsert_scene_profile({
+        "scene": {"type": "global"},
+        "label": "global",
+        "content": "只有正文",
     })
-    out = await memory_module._patch_scene_profile({
-        "scene": scene,
-        "section": {"topic": "规则", "body": "v2", "visibility": "private"},
-        "merge": "replace_topic",
-    })
-    assert len(out["profile"]["sections"]) == 1
-    assert out["profile"]["sections"][0]["body"] == "v2"
+    assert result["profile"]["abstract"] == "自动摘要"
+    assert result["profile"]["overview"] == "自动概览"
+    assert result["profile"]["content"] == "只有正文"
+    memory_module.llm_client.generate_l0_l1.assert_awaited_once_with("只有正文")
+
+
+@pytest.mark.asyncio
+async def test_patch_scene_profile_rejects_legacy_section_payload(memory_module):
+    with pytest.raises(NotImplementedError):
+        await memory_module._patch_scene_profile({
+            "scene": {"type": "group_session", "channel_id": "c2", "session_id": "s2"},
+            "section": {"topic": "规则", "body": "v2", "visibility": "private"},
+            "merge": "replace_topic",
+        })
 
 
 @pytest.mark.asyncio
 async def test_list_scene_profiles(memory_module):
     await memory_module._upsert_scene_profile({
         "scene": {"type": "friend", "friend_id": "f1"}, "label": "张三",
-        "sections": [], "created_at": "2026-04-17T00:00:00Z", "updated_at": "2026-04-17T00:00:00Z",
+        "abstract": "张三摘要", "overview": "张三概览", "content": "张三内容",
+        "created_at": "2026-04-17T00:00:00Z", "updated_at": "2026-04-17T00:00:00Z",
     })
     got = await memory_module._list_scene_profiles({"scene_type": "friend"})
     assert len(got["profiles"]) == 1
+    assert got["profiles"][0]["content"] == "张三内容"
 
 
 @pytest.mark.asyncio
 async def test_delete_scene_profile(memory_module):
     scene = {"type": "friend", "friend_id": "f2"}
     await memory_module._upsert_scene_profile({
-        "scene": scene, "label": "x", "sections": [],
+        "scene": scene, "label": "x", "abstract": "x 摘要", "overview": "x 概览", "content": "x",
         "created_at": "2026-04-17T00:00:00Z", "updated_at": "2026-04-17T00:00:00Z",
     })
     out = await memory_module._delete_scene_profile({"scene": scene})
@@ -376,15 +452,12 @@ async def test_get_scene_profile_only_public(memory_module):
     scene = {"type": "friend", "friend_id": "f3"}
     await memory_module._upsert_scene_profile({
         "scene": scene, "label": "x",
-        "sections": [
-            {"topic": "职务", "body": "p", "visibility": "public"},
-            {"topic": "私密", "body": "s", "visibility": "private"},
-        ],
+        "abstract": "x 摘要", "overview": "x 概览",
+        "content": "职务: p\n私密: s",
         "created_at": "2026-04-17T00:00:00Z", "updated_at": "2026-04-17T00:00:00Z",
     })
     got = await memory_module._get_scene_profile({"scene": scene, "only_public": True})
-    assert len(got["profile"]["sections"]) == 1
-    assert got["profile"]["sections"][0]["topic"] == "职务"
+    assert got["profile"]["content"] == "职务: p\n私密: s"
 
 
 if __name__ == "__main__":

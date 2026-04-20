@@ -1,12 +1,12 @@
 import os
 import tempfile
+import json
 
 import pytest
 
 from src.storage.scene_profile_store import SceneProfileStore
 from src.types import (
     SceneProfile,
-    SceneProfileSection,
     SceneIdentityFriend,
     SceneIdentityGroup,
     SceneIdentityGlobal,
@@ -27,7 +27,9 @@ def _sample_group():
     return SceneProfile(
         scene=SceneIdentityGroup(channel_id="feishu", session_id="s1"),
         label="开发组群",
-        sections=[SceneProfileSection(topic="群职责", body="x", visibility="private")],
+        abstract="开发组群摘要",
+        overview="开发组群概览",
+        content="x",
         created_at="2026-04-17T00:00:00Z",
         updated_at="2026-04-17T00:00:00Z",
     )
@@ -52,39 +54,40 @@ def test_upsert_update(store):
 
 def test_patch_replace_topic(store):
     store.upsert(_sample_group())
-    new_section = SceneProfileSection(topic="群职责", body="新版", visibility="private")
-    result = store.patch(_sample_group().scene, label=None, section=new_section, merge="replace_topic")
-    assert len(result.sections) == 1
-    assert result.sections[0].body == "新版"
+    result = store.get(_sample_group().scene)
+    assert result.abstract == "开发组群摘要"
+    assert result.overview == "开发组群概览"
+    assert result.content == "x"
 
 
 def test_patch_append(store):
     store.upsert(_sample_group())
-    new_section = SceneProfileSection(topic="群职责", body="并存", visibility="private")
-    result = store.patch(_sample_group().scene, label=None, section=new_section, merge="append")
-    assert len(result.sections) == 2
+    result = store.list(scene_type="group_session")
+    assert len(result) == 1
+    assert result[0].content == "x"
 
 
 def test_get_friend_only_public(store):
     friend_profile = SceneProfile(
         scene=SceneIdentityFriend(friend_id="f1"),
         label="张三",
-        sections=[
-            SceneProfileSection(topic="职务", body="产品", visibility="public"),
-            SceneProfileSection(topic="私密", body="x", visibility="private"),
-        ],
+        abstract="张三摘要",
+        overview="张三概览",
+        content="职务: 产品\n私密: x",
         created_at="2026-04-17T00:00:00Z",
         updated_at="2026-04-17T00:00:00Z",
     )
     store.upsert(friend_profile)
     got = store.get(friend_profile.scene, only_public=True)
-    assert len(got.sections) == 1 and got.sections[0].topic == "职务"
+    assert got.content == friend_profile.content
+    assert got.abstract == "张三摘要"
 
 
 def test_list(store):
     store.upsert(_sample_group())
     out = store.list(scene_type="group_session")
     assert len(out) == 1
+    assert out[0].abstract == "开发组群摘要"
 
 
 def test_delete(store):
@@ -98,15 +101,51 @@ def test_unique_constraint_global(store):
     g1 = SceneProfile(
         scene=SceneIdentityGlobal(),
         label="A",
+        abstract="A 摘要",
+        overview="A 概览",
+        content="A",
         created_at="2026-04-17T00:00:00Z",
         updated_at="2026-04-17T00:00:00Z",
     )
     g2 = SceneProfile(
         scene=SceneIdentityGlobal(),
         label="B",
+        abstract="B 摘要",
+        overview="B 概览",
+        content="B",
         created_at="2026-04-17T00:00:00Z",
         updated_at="2026-04-17T00:00:00Z",
     )
     store.upsert(g1)
     store.upsert(g2)
     assert len(store.list()) == 1 and store.list()[0].label == "B"
+
+
+def test_legacy_sections_json_is_converted_to_content(store):
+    store.conn.execute(
+        """
+        INSERT INTO scene_profiles
+        (scene_type, friend_id, channel_id, session_id, label, sections_json,
+         source_memory_ids_json, created_at, updated_at, last_declared_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "group_session",
+            None,
+            "feishu",
+            "legacy-1",
+            "旧群画像",
+            json.dumps([
+                {"topic": "群职责", "body": "Crabot 开发", "visibility": "private"},
+                {"topic": "群规则", "body": "保持简洁", "visibility": "public"},
+            ], ensure_ascii=False),
+            None,
+            "2026-04-17T00:00:00Z",
+            "2026-04-17T00:00:00Z",
+            None,
+        ),
+    )
+    store.conn.commit()
+
+    got = store.get(SceneIdentityGroup(channel_id="feishu", session_id="legacy-1"))
+    assert got.content == "群职责: Crabot 开发\n群规则: 保持简洁"

@@ -535,18 +535,27 @@ class MemoryModule:
 
     async def _upsert_scene_profile(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """写入或更新场景画像"""
-        profile = SceneProfile(**params)
+        payload = dict(params)
+        content = payload.get("content")
+        if content is None:
+            raise ValueError("Scene profile content is required")
+        if not payload.get("abstract") or not payload.get("overview"):
+            summaries = await self.llm_client.generate_l0_l1(content)
+            payload.setdefault("abstract", summaries["abstract"])
+            payload.setdefault("overview", summaries["overview"])
+            if not payload.get("abstract"):
+                payload["abstract"] = summaries["abstract"]
+            if not payload.get("overview"):
+                payload["overview"] = summaries["overview"]
+        profile = SceneProfile(**payload)
         out = self.scene_profile_store.upsert(profile)
         return {"profile": out.model_dump()}
 
     async def _patch_scene_profile(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """局部更新场景画像"""
-        scene = self._parse_scene(params["scene"])
-        section = SceneProfileSection(**params["section"])
-        merge = params.get("merge", "replace_topic")
-        label = params.get("label")
-        out = self.scene_profile_store.patch(scene, label=label, section=section, merge=merge)
-        return {"profile": out.model_dump()}
+        raise NotImplementedError(
+            "patch_scene_profile is deprecated; use upsert_scene_profile with abstract/overview/content"
+        )
 
     async def _get_scene_profile(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """获取场景画像"""
