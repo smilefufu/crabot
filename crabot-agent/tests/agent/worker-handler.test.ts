@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { WorkerHandler } from '../../src/agent/worker-handler.js'
+import { resolveSceneAnchorLabel } from '../../src/mcp/crab-memory.js'
 import type {
   ExecuteTaskParams,
   WorkerAgentContext,
@@ -141,6 +142,60 @@ describe('WorkerHandler', () => {
       expect(result.outcome).toBe('failed')
       expect(result.summary).toContain('Connection failed')
     })
+
+    it('injects current scene content verbatim into the worker prompt', async () => {
+      mockRunEngine.mockResolvedValue(makeEngineResult())
+
+      const handler = makeHandler()
+      await handler.executeTask({
+        task: makeTask(),
+        context: {
+          ...makeContext(),
+          scene_profile: {
+            label: '项目群',
+            abstract: '群画像',
+            overview: '技术支持',
+            content: '第一条规则\n\n第二条规则\n### 原文标题保留',
+            source: {
+              scene: { type: 'group_session', channel_id: 'channel_1', session_id: 'session-1' },
+            },
+          },
+        },
+      })
+
+      expect(mockRunEngine).toHaveBeenCalledTimes(1)
+      const callArgs = mockRunEngine.mock.calls[0][0]
+      expect(callArgs.prompt).toContain('## 场景画像（项目群）')
+      expect(callArgs.prompt).toContain('以下内容是当前场景必须加载并遵守的上下文：')
+      expect(callArgs.prompt).toContain('第一条规则\n\n第二条规则\n### 原文标题保留')
+      expect(callArgs.prompt).not.toContain('### 群职责')
+    })
+
+    it('keeps the scene profile block when content is empty', async () => {
+      mockRunEngine.mockResolvedValue(makeEngineResult())
+
+      const handler = makeHandler()
+      await handler.executeTask({
+        task: makeTask(),
+        context: {
+          ...makeContext(),
+          scene_profile: {
+            label: '空画像',
+            abstract: '空摘要',
+            overview: '空概览',
+            content: '',
+            source: {
+              scene: { type: 'group_session', channel_id: 'channel_1', session_id: 'session-1' },
+            },
+          },
+        },
+      })
+
+      expect(mockRunEngine).toHaveBeenCalledTimes(1)
+      const callArgs = mockRunEngine.mock.calls[0][0]
+      expect(callArgs.prompt).toContain('## 场景画像（空画像）')
+      expect(callArgs.prompt).toContain('以下内容是当前场景必须加载并遵守的上下文：')
+    })
   })
 
   describe('deliverHumanResponse', () => {
@@ -192,6 +247,50 @@ describe('WorkerHandler', () => {
       await handler.executeTask({ task: makeTask(), context: makeContext() })
 
       expect(handler.getActiveTaskCount()).toBe(0)
+    })
+  })
+
+  describe('resolveSceneAnchorLabel', () => {
+    it('preserves an existing scene label when a profile already exists', async () => {
+      const rpcClient = {
+        call: vi.fn().mockResolvedValue({
+          profile: {
+            label: 'Crabot 开发群',
+          },
+        }),
+      }
+
+      const label = await resolveSceneAnchorLabel({
+        rpcClient: rpcClient as any,
+        memoryPort: 3002,
+        moduleId: 'agent-test',
+        scene: { type: 'group_session', channel_id: 'wechat', session_id: 'group-1' },
+      })
+
+      expect(label).toBe('Crabot 开发群')
+      expect(rpcClient.call).toHaveBeenCalledWith(
+        3002,
+        'get_scene_profile',
+        { scene: { type: 'group_session', channel_id: 'wechat', session_id: 'group-1' } },
+        'agent-test',
+      )
+    })
+
+    it('falls back to the default label when no profile exists yet', async () => {
+      const rpcClient = {
+        call: vi.fn().mockResolvedValue({
+          profile: null,
+        }),
+      }
+
+      const label = await resolveSceneAnchorLabel({
+        rpcClient: rpcClient as any,
+        memoryPort: 3002,
+        moduleId: 'agent-test',
+        scene: { type: 'friend', friend_id: 'friend-1' },
+      })
+
+      expect(label).toBe('friend:friend-1')
     })
   })
 })

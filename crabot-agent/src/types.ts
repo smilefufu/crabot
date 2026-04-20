@@ -321,8 +321,8 @@ export interface FrontAgentContext {
   short_term_memories: ShortTermMemoryEntry[]
   active_tasks: TaskSummary[]
   available_tools: ToolDeclaration[]
-  /** 组合后的场景画像（好友 + 群会话叠加），由 Memory 模块返回 */
-  scene_profile?: ComposedSceneProfile
+  /** 当前场景画像，由 Memory 模块直接返回并映射为运行时格式 */
+  scene_profile?: RuntimeSceneProfile
   /** Crabot's display name on the current channel (e.g. group nickname) */
   crab_display_name?: string
 }
@@ -350,8 +350,8 @@ export interface WorkerAgentContext {
     write_visibility: 'private' | 'internal' | 'public'
     write_scopes: string[]
   }
-  /** 组合后的场景画像（好友 + 群会话叠加），由 Memory 模块返回 */
-  scene_profile?: ComposedSceneProfile
+  /** 当前场景画像，由 Memory 模块直接返回并映射为运行时格式 */
+  scene_profile?: RuntimeSceneProfile
   /** Front Agent 已发送给用户的即时回复（避免 Worker 重复确认） */
   front_immediate_reply?: string
 }
@@ -804,27 +804,24 @@ export type SceneIdentity =
   | { type: 'group_session'; channel_id: string; session_id: string }
   | { type: 'global' }
 
-export interface SceneProfileSection {
-  topic: string
-  body: string
-  visibility: 'private' | 'public'
-}
-
 export interface SceneProfile {
   scene: SceneIdentity
   label: string
-  sections: SceneProfileSection[]
+  abstract: string
+  overview: string
+  content: string
   source_memory_ids?: string[]
   created_at: string
   updated_at: string
-  last_declared_at?: string
+  last_declared_at?: string | null
 }
 
-export interface ComposedSceneProfile {
-  primary_label: string
-  sections: SceneProfileSection[]
+export interface RuntimeSceneProfile {
+  label: string
+  abstract: string
+  overview: string
+  content: string
   source: {
-    primary_scene: SceneIdentity
-    overlaid_friend_id?: string
+    scene: SceneIdentity
   }
 }

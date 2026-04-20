@@ -36,6 +36,33 @@ export interface MemoryTaskContext {
   senderFriendId?: string
 }
 
+function defaultSceneProfileLabel(
+  scene: { type: 'group_session'; channel_id: string; session_id: string } | { type: 'friend'; friend_id: string },
+): string {
+  if (scene.type === 'friend') return `friend:${scene.friend_id}`
+  return `group:${scene.channel_id}:${scene.session_id}`
+}
+
+export async function resolveSceneAnchorLabel(params: {
+  rpcClient: RpcClient
+  memoryPort: number
+  moduleId: string
+  scene: { type: 'group_session'; channel_id: string; session_id: string } | { type: 'friend'; friend_id: string }
+}): Promise<string> {
+  const result = await params.rpcClient.call<
+    { scene: typeof params.scene },
+    { profile: { label?: string | null } | null }
+  >(
+    params.memoryPort,
+    'get_scene_profile',
+    { scene: params.scene },
+    params.moduleId,
+  )
+
+  const existingLabel = result?.profile?.label?.trim()
+  return existingLabel || defaultSceneProfileLabel(params.scene)
+}
+
 // ============================================================================
 // MCP Server 创建
 // ============================================================================
@@ -159,12 +186,9 @@ export function createCrabMemoryServer(
       ),
   server.tool(
     'set_scene_anchor',
-    '把一条稳定的场景规则/身份信息写入当前场景画像（而非普通长期记忆）。用户明确要求"请把这条记下来作为规则"时优先使用。',
+    '把当前场景必须遵守的一段上下文写入场景画像。',
     {
-      topic: z.string().describe('画像分节主题，如"群职责"、"发言规范"、"联系方式"'),
-      body: z.string().describe('分节正文。保持简洁、稳定、可直接读的陈述'),
-      visibility: z.enum(['private', 'public']).optional()
-        .describe('默认 private；仅 friend 场景允许 public（表示可被对方参与的其他场景共享）'),
+      content: z.string().describe('完整场景正文'),
     },
     async (args) => {
       try {
@@ -185,23 +209,35 @@ export function createCrabMemoryServer(
             }) }],
           }
         }
-
-        const visibility = (scene.type === 'friend' && args.visibility === 'public')
-          ? 'public' : 'private'
-
+        const now = new Date().toISOString()
         const memoryPort = await getMemoryPort()
+        const label = await resolveSceneAnchorLabel({
+          rpcClient,
+          memoryPort,
+          moduleId,
+          scene,
+        })
         const result = await rpcClient.call<
           {
             scene: typeof scene
-            section: { topic: string; body: string; visibility: 'private' | 'public' }
-            merge: 'replace_topic'
-            label?: string
+            label: string
+            content: string
+            created_at: string
+            updated_at: string
+            last_declared_at: string
           },
           { profile: unknown }
         >(
           memoryPort,
-          'patch_scene_profile',
-          { scene, section: { topic: args.topic, body: args.body, visibility }, merge: 'replace_topic' },
+          'upsert_scene_profile',
+          {
+            scene,
+            label,
+            content: args.content,
+            created_at: now,
+            updated_at: now,
+            last_declared_at: now,
+          },
           moduleId,
         )
 

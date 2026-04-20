@@ -189,4 +189,115 @@ describe('ContextAssembler', () => {
     expect(ctx.active_tasks).toEqual(mappedActiveTasks)
     expect(ctx.available_tools).toEqual([])
   })
+
+  it('loads only the current group scene profile for worker context', async () => {
+    const groupProfile = {
+      scene: { type: 'group_session', channel_id: 'admin-web', session_id: 'session-1' },
+      label: '开发群',
+      abstract: '群画像',
+      overview: '只处理当前群上下文',
+      content: '这里是当前群必须遵守的规则。',
+      created_at: '2026-04-20T00:00:00Z',
+      updated_at: '2026-04-20T00:00:00Z',
+    }
+
+    mockRpc.call.mockImplementation((_port, method, args) => {
+      if (method === 'get_chat_history') return Promise.resolve({ messages: [] })
+      if (method === 'search_short_term') return Promise.resolve({ results: [] })
+      if (method === 'search_long_term') return Promise.resolve({ results: [] })
+      if (method === 'get_scene_profile') {
+        expect(args).toEqual({
+          scene: { type: 'group_session', channel_id: 'admin-web', session_id: 'session-1' },
+        })
+        return Promise.resolve({ profile: groupProfile })
+      }
+      throw new Error(`unexpected call: ${String(method)}`)
+    })
+
+    mockRpc.resolve
+      .mockResolvedValueOnce([{ module_id: 'admin', port: 19100 }])
+      .mockResolvedValueOnce([{ module_id: 'memory', port: 19200 }])
+      .mockResolvedValueOnce([])
+
+    const ctx = await assembler.assembleWorkerContext({
+      channel_id: 'admin-web',
+      session_id: 'session-1',
+      sender_id: 'user-1',
+      message: 'hello',
+      friend_id: 'friend-1',
+      session_type: 'group',
+    }, defaultMemoryPermissions)
+
+    expect(ctx.scene_profile).toEqual({
+      label: '开发群',
+      abstract: '群画像',
+      overview: '只处理当前群上下文',
+      content: '这里是当前群必须遵守的规则。',
+      source: {
+        scene: { type: 'group_session', channel_id: 'admin-web', session_id: 'session-1' },
+      },
+    })
+
+    const getSceneCalls = mockRpc.call.mock.calls.filter(([, method]) => method === 'get_scene_profile')
+    expect(getSceneCalls).toHaveLength(1)
+  })
+
+  it('loads only the current private scene profile for front context', async () => {
+    const friend = {
+      id: 'friend-1',
+      display_name: 'Test User',
+      permission: 'master' as const,
+      channel_identities: [],
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+    }
+    const friendProfile = {
+      scene: { type: 'friend', friend_id: 'friend-1' },
+      label: 'Test User',
+      abstract: '私聊画像',
+      overview: '仅当前私聊可见',
+      content: '这里是当前私聊必须遵守的上下文。',
+      created_at: '2026-04-20T00:00:00Z',
+      updated_at: '2026-04-20T00:00:00Z',
+    }
+
+    mockRpc.call.mockImplementation((_port, method, args) => {
+      if (method === 'get_chat_history') return Promise.resolve({ messages: [] })
+      if (method === 'search_short_term') return Promise.resolve({ results: [] })
+      if (method === 'list_tasks') return Promise.resolve({ items: [] })
+      if (method === 'get_scene_profile') {
+        expect(args).toEqual({
+          scene: { type: 'friend', friend_id: 'friend-1' },
+        })
+        return Promise.resolve({ profile: friendProfile })
+      }
+      throw new Error(`unexpected call: ${String(method)}`)
+    })
+
+    const ctx = await assembler.assembleFrontContext(
+      {
+        channel_id: 'admin-web',
+        session_id: 'session-1',
+        sender_id: 'user-1',
+        message: 'hello',
+        friend_id: 'friend-1',
+        session_type: 'private',
+      },
+      friend,
+      defaultMemoryPermissions,
+    )
+
+    expect(ctx.scene_profile).toEqual({
+      label: 'Test User',
+      abstract: '私聊画像',
+      overview: '仅当前私聊可见',
+      content: '这里是当前私聊必须遵守的上下文。',
+      source: {
+        scene: { type: 'friend', friend_id: 'friend-1' },
+      },
+    })
+
+    const getSceneCalls = mockRpc.call.mock.calls.filter(([, method]) => method === 'get_scene_profile')
+    expect(getSceneCalls).toHaveLength(1)
+  })
 })

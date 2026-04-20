@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { FrontHandler } from '../../src/agent/front-handler.js'
+import { FrontHandler, buildUserMessage } from '../../src/agent/front-handler.js'
 import type { HandleMessageParams, FrontAgentContext, ChannelMessage } from '../../src/types.js'
 
 // Mock runFrontLoop so we control decision output without a real LLM
@@ -153,6 +153,80 @@ describe('FrontHandler', () => {
       if (result.decisions[0].type === 'direct_reply') {
         expect(result.decisions[0].reply.text).toContain('异常')
       }
+    })
+
+    it('injects scene profile content verbatim into the front prompt', async () => {
+      mockRunFrontLoop.mockResolvedValue({
+        decision: { type: 'direct_reply', reply: { type: 'text', text: 'OK' } },
+      })
+
+      const { handler } = makeFrontHandler()
+      const context: FrontAgentContext = {
+        ...makeContext(),
+        scene_profile: {
+          label: '项目群',
+          abstract: '群画像',
+          overview: '技术支持',
+          content: '第一行规则\n\n- 第二行原文\n### 不应被重写',
+          source: {
+            scene: { type: 'group_session', channel_id: 'ch_1', session_id: 'session-1' },
+          },
+        },
+      }
+
+      await handler.handleMessage({
+        messages: [{
+          ...makeMessages()[0],
+          session: { session_id: 'session-1', channel_id: 'ch_1', type: 'group' },
+        }],
+        context,
+      })
+
+      const callArgs = mockRunFrontLoop.mock.calls[0][0]
+      expect(callArgs.userMessage).toContain('## 场景画像（项目群）')
+      expect(callArgs.userMessage).toContain('以下内容是当前场景必须加载并遵守的上下文：')
+      expect(callArgs.userMessage).toContain('第一行规则\n\n- 第二行原文\n### 不应被重写')
+      expect(callArgs.userMessage).not.toContain('### 群职责')
+    })
+  })
+
+  describe('buildUserMessage', () => {
+    it('renders scene profile content without composing sections', () => {
+      const message = buildUserMessage(makeMessages(), {
+        ...makeContext(),
+        scene_profile: {
+          label: '项目群',
+          abstract: '群画像',
+          overview: '技术支持',
+          content: '进入本群后先做技术支持与问题排查。',
+          source: {
+            scene: { type: 'group_session', channel_id: 'ch_1', session_id: 'session-1' },
+          },
+        },
+      })
+
+      expect(typeof message).toBe('string')
+      expect(message).toContain('进入本群后先做技术支持与问题排查。')
+      expect(message).not.toContain('### ')
+    })
+
+    it('renders the scene profile block even when content is empty', () => {
+      const message = buildUserMessage(makeMessages(), {
+        ...makeContext(),
+        scene_profile: {
+          label: '空画像',
+          abstract: '空摘要',
+          overview: '空概览',
+          content: '',
+          source: {
+            scene: { type: 'group_session', channel_id: 'ch_1', session_id: 'session-1' },
+          },
+        },
+      })
+
+      expect(typeof message).toBe('string')
+      expect(message).toContain('## 场景画像（空画像）')
+      expect(message).toContain('以下内容是当前场景必须加载并遵守的上下文：')
     })
   })
 

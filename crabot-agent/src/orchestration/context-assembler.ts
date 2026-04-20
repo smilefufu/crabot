@@ -19,11 +19,11 @@ import type {
   ResolvedModule,
   Friend,
   MemoryPermissions,
-  ComposedSceneProfile,
+  RuntimeSceneProfile,
   SceneProfile,
   SceneIdentity,
 } from '../types.js'
-import { composeSceneProfile } from './scene-profile-resolver.js'
+import { buildRuntimeSceneProfile } from './scene-profile-resolver.js'
 
 interface AssembleParams {
   channel_id: ModuleId
@@ -410,7 +410,7 @@ export class ContextAssembler {
   // ==========================================================================
 
   /**
-   * 解析当前会话的 ComposedSceneProfile。
+   * 解析当前会话的 RuntimeSceneProfile。
    * - 失败一律返回 null（不阻塞上下文组装）
    * - METHOD_NOT_FOUND 容忍（对接 Memory v0.1.0 旧版本）
    */
@@ -419,46 +419,29 @@ export class ContextAssembler {
     sessionId: SessionId,
     sessionType: 'private' | 'group',
     friendId: string | undefined,
-  ): Promise<ComposedSceneProfile | null> {
+  ): Promise<RuntimeSceneProfile | null> {
     try {
       const memoryPort = await this.getMemoryPort()
 
-      let primaryScene: SceneIdentity | null = null
+      let scene: SceneIdentity | null = null
       if (sessionType === 'group') {
-        primaryScene = { type: 'group_session', channel_id: channelId, session_id: sessionId }
+        scene = { type: 'group_session', channel_id: channelId, session_id: sessionId }
       } else if (friendId) {
-        primaryScene = { type: 'friend', friend_id: friendId }
+        scene = { type: 'friend', friend_id: friendId }
       }
+      if (!scene) return null
 
-      const fetchScene = async (
-        scene: SceneIdentity,
-        onlyPublic = false,
-      ): Promise<SceneProfile | null> => {
-        try {
-          const resp = await this.rpcClient.call<
-            { scene: SceneIdentity; only_public?: boolean },
-            { profile: SceneProfile | null }
-          >(memoryPort, 'get_scene_profile', { scene, only_public: onlyPublic }, this.moduleId)
-          return resp?.profile ?? null
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err)
-          if (msg.includes('Method not found') || msg.includes('METHOD_NOT_FOUND')) {
-            return null
-          }
-          throw err
-        }
-      }
+      const resp = await this.rpcClient.call<
+        { scene: SceneIdentity },
+        { profile: SceneProfile | null }
+      >(memoryPort, 'get_scene_profile', { scene }, this.moduleId)
 
-      const [primary, friendOverlay, globalProfile] = await Promise.all([
-        primaryScene ? fetchScene(primaryScene) : Promise.resolve(null),
-        sessionType === 'group' && friendId
-          ? fetchScene({ type: 'friend', friend_id: friendId }, true)
-          : Promise.resolve(null),
-        fetchScene({ type: 'global' }),
-      ])
-
-      return composeSceneProfile({ primary, friendOverlay, global: globalProfile })
+      return buildRuntimeSceneProfile(resp?.profile ?? null)
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('Method not found') || msg.includes('METHOD_NOT_FOUND')) {
+        return null
+      }
       console.warn(`[${this.moduleId}] resolveSceneProfile failed:`, err)
       return null
     }

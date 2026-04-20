@@ -116,13 +116,11 @@ export function buildUserMessage(
   const isGroup = messages[0]?.session?.type === 'group'
   const hasMention = messages.some(m => m.features.is_mention_crab)
 
-  if (context.scene_profile && context.scene_profile.sections.length > 0) {
-    const sp = context.scene_profile
-    parts.push(`## 场景画像（${sp.primary_label}）`)
-    parts.push('以下是本场景的稳定规则/身份，需在回复决策中遵守。')
-    for (const s of sp.sections) {
-      parts.push(`\n### ${s.topic}\n${s.body}`)
-    }
+  if (context.scene_profile) {
+    parts.push(`## 场景画像（${context.scene_profile.label}）`)
+    parts.push('以下内容是当前场景必须加载并遵守的上下文：')
+    parts.push('')
+    parts.push(context.scene_profile.content)
     parts.push('')
   }
 
