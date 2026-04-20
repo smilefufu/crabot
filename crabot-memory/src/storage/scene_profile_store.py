@@ -138,6 +138,9 @@ class SceneProfileStore:
 
     def _update(self, profile: SceneProfile) -> SceneProfile:
         where, params = self._where_for_scene(profile.scene)
+        existing_row = self._select_one(profile.scene)
+        existing = self._row_to_profile(existing_row) if existing_row else None
+        created_at = existing.created_at if existing else profile.created_at
         self.conn.execute(
             f"""UPDATE scene_profiles SET label = ?, abstract = ?, overview = ?, content = ?,
                 sections_json = ?, source_memory_ids_json = ?, updated_at = ?, last_declared_at = ?
@@ -154,7 +157,17 @@ class SceneProfileStore:
             ] + list(params),
         )
         self.conn.commit()
-        return profile
+        return SceneProfile(
+            scene=profile.scene,
+            label=profile.label,
+            abstract=profile.abstract,
+            overview=profile.overview,
+            content=profile.content,
+            source_memory_ids=profile.source_memory_ids,
+            created_at=created_at,
+            updated_at=profile.updated_at,
+            last_declared_at=profile.last_declared_at,
+        )
 
     def _select_one(self, scene: SceneIdentity):
         where, params = self._where_for_scene(scene)

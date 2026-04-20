@@ -47,10 +47,12 @@ def test_upsert_update(store):
     store.upsert(_sample_group())
     updated = _sample_group()
     updated.label = "新名字"
+    updated.created_at = "2026-04-19T00:00:00Z"
     updated.updated_at = "2026-04-18T00:00:00Z"
     store.upsert(updated)
     got = store.get(updated.scene)
     assert got.label == "新名字"
+    assert got.created_at == "2026-04-17T00:00:00Z"
 
 
 def test_get_only_public_is_compat_noop(store, caplog):

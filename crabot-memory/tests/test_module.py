@@ -415,6 +415,20 @@ async def test_upsert_scene_profile_generates_l0_l1_when_missing(memory_module, 
 
 
 @pytest.mark.asyncio
+async def test_upsert_scene_profile_requires_llm_config_for_generated_summaries(memory_module):
+    memory_module.config.llm.api_key = ""
+    memory_module.config.llm.base_url = ""
+    memory_module.config.llm.model = ""
+
+    with pytest.raises(ValueError, match="Memory module not configured"):
+        await memory_module._upsert_scene_profile({
+            "scene": {"type": "global"},
+            "label": "global",
+            "content": "只有正文",
+        })
+
+
+@pytest.mark.asyncio
 async def test_dispatch_rejects_patch_scene_profile(memory_module):
     with pytest.raises(ValueError, match="Method not found"):
         await memory_module._dispatch("patch_scene_profile", {})
@@ -430,6 +444,30 @@ async def test_list_scene_profiles(memory_module):
     got = await memory_module._list_scene_profiles({"scene_type": "friend"})
     assert len(got["profiles"]) == 1
     assert got["profiles"][0]["content"] == "张三内容"
+
+
+@pytest.mark.asyncio
+async def test_upsert_scene_profile_preserves_created_at_on_update(memory_module):
+    scene = {"type": "friend", "friend_id": "f4"}
+    first = await memory_module._upsert_scene_profile({
+        "scene": scene,
+        "label": "x",
+        "abstract": "x 摘要",
+        "overview": "x 概览",
+        "content": "内容一",
+        "created_at": "2026-04-17T00:00:00Z",
+        "updated_at": "2026-04-17T00:00:00Z",
+    })
+    second = await memory_module._upsert_scene_profile({
+        "scene": scene,
+        "label": "x2",
+        "abstract": "x2 摘要",
+        "overview": "x2 概览",
+        "content": "内容二",
+        "updated_at": "2026-04-18T00:00:00Z",
+    })
+    assert first["profile"]["created_at"] == "2026-04-17T00:00:00Z"
+    assert second["profile"]["created_at"] == "2026-04-17T00:00:00Z"
 
 
 @pytest.mark.asyncio
