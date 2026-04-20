@@ -214,6 +214,12 @@ function parseSceneKey(key: string): SceneIdentity {
   throw new Error(`Unknown scene key: ${decoded}`)
 }
 
+function defaultSceneProfileLabel(scene: SceneIdentity): string {
+  if (scene.type === 'global') return 'global'
+  if (scene.type === 'friend') return `friend:${scene.friend_id}`
+  return `group:${scene.channel_id}:${scene.session_id}`
+}
+
 // ============================================================================
 // Admin 模块
 // ============================================================================
@@ -6364,7 +6370,9 @@ export class AdminModule extends ModuleBase {
     const scene = parseSceneKey(key)
     const body = await this.readJsonBody<{
       label?: string
-      sections?: Array<{ topic: string; body: string; visibility?: 'private' | 'public' }>
+      abstract?: string
+      overview?: string
+      content?: string
       source_memory_ids?: string[]
     }>(req)
 
@@ -6373,21 +6381,19 @@ export class AdminModule extends ModuleBase {
     // 先取现有画像
     const getResult = await this.rpcClient.call<
       { scene: SceneIdentity },
-      { profile: { scene: SceneIdentity; label: string; sections: Array<{ topic: string; body: string; visibility: 'private' | 'public' }>; created_at: string; updated_at: string; last_declared_at?: string | null; source_memory_ids?: string[] | null } | null }
+      { profile: { scene: SceneIdentity; label: string; abstract: string; overview: string; content: string; created_at: string; updated_at: string; last_declared_at?: string | null; source_memory_ids?: string[] | null } | null }
     >(port, 'get_scene_profile', { scene }, this.config.moduleId)
 
     const now = new Date().toISOString()
     const existing = getResult.profile
 
-    const mergedLabel = body.label ?? existing?.label ?? (scene.type === 'global' ? 'global' : (scene.type === 'friend' ? `friend:${scene.friend_id}` : `group:${scene.channel_id}:${scene.session_id}`))
-    const mergedSections = body.sections ?? existing?.sections ?? []
-    const mergedSourceIds = body.source_memory_ids ?? existing?.source_memory_ids ?? undefined
-
     const upsertParams = {
       scene,
-      label: mergedLabel,
-      sections: mergedSections.map(s => ({ topic: s.topic, body: s.body, visibility: s.visibility ?? 'private' as const })),
-      source_memory_ids: mergedSourceIds,
+      label: body.label ?? existing?.label ?? defaultSceneProfileLabel(scene),
+      abstract: body.abstract ?? existing?.abstract ?? '',
+      overview: body.overview ?? existing?.overview ?? '',
+      content: body.content ?? existing?.content ?? '',
+      source_memory_ids: body.source_memory_ids ?? existing?.source_memory_ids ?? undefined,
       created_at: existing?.created_at ?? now,
       updated_at: now,
       last_declared_at: existing?.last_declared_at ?? null,

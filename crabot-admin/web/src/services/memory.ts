@@ -162,16 +162,12 @@ export type SceneIdentity =
   | { type: 'group_session'; channel_id: string; session_id: string }
   | { type: 'global' }
 
-export interface SceneProfileSection {
-  topic: string
-  body: string
-  visibility: 'private' | 'public'
-}
-
 export interface SceneProfile {
   scene: SceneIdentity
   label: string
-  sections: SceneProfileSection[]
+  abstract: string
+  overview: string
+  content: string
   source_memory_ids?: string[] | null
   created_at: string
   updated_at: string
@@ -250,7 +246,9 @@ export const sceneProfileService = {
     key: string,
     body: {
       label?: string
-      sections?: SceneProfileSection[]
+      abstract?: string
+      overview?: string
+      content?: string
       source_memory_ids?: string[]
     },
     moduleId?: string,

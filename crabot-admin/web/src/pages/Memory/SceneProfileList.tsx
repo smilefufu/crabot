@@ -138,9 +138,19 @@ export const SceneProfileList: React.FC = () => {
                             {profile.label || key}
                           </span>
                         </div>
+                        <div
+                          style={{
+                            color: 'var(--text-secondary)',
+                            fontSize: '0.9rem',
+                            marginBottom: '0.5rem',
+                            whiteSpace: 'pre-wrap',
+                            lineHeight: 1.5,
+                          }}
+                        >
+                          {profile.abstract || '暂无摘要'}
+                        </div>
                         <div style={{ display: 'flex', gap: '1.5rem', fontSize: '0.8rem', color: 'var(--text-secondary)', flexWrap: 'wrap' }}>
                           <span>更新：{updatedAt}</span>
-                          <span>Section 数：{profile.sections.length}</span>
                           <span>最近声明：{lastDeclared}</span>
                         </div>
                       </div>
