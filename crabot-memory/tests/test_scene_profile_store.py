@@ -1,6 +1,7 @@
 import os
 import tempfile
 import json
+import sqlite3
 
 import pytest
 
@@ -52,35 +53,14 @@ def test_upsert_update(store):
     assert got.label == "新名字"
 
 
-def test_patch_replace_topic(store):
+def test_get_only_public_is_compat_noop(store, caplog):
     store.upsert(_sample_group())
-    result = store.get(_sample_group().scene)
-    assert result.abstract == "开发组群摘要"
-    assert result.overview == "开发组群概览"
-    assert result.content == "x"
-
-
-def test_patch_append(store):
-    store.upsert(_sample_group())
-    result = store.list(scene_type="group_session")
-    assert len(result) == 1
-    assert result[0].content == "x"
-
-
-def test_get_friend_only_public(store):
-    friend_profile = SceneProfile(
-        scene=SceneIdentityFriend(friend_id="f1"),
-        label="张三",
-        abstract="张三摘要",
-        overview="张三概览",
-        content="职务: 产品\n私密: x",
-        created_at="2026-04-17T00:00:00Z",
-        updated_at="2026-04-17T00:00:00Z",
-    )
-    store.upsert(friend_profile)
-    got = store.get(friend_profile.scene, only_public=True)
-    assert got.content == friend_profile.content
-    assert got.abstract == "张三摘要"
+    with caplog.at_level("WARNING"):
+        got = store.get(_sample_group().scene, only_public=True)
+    assert got.abstract == "开发组群摘要"
+    assert got.overview == "开发组群概览"
+    assert got.content == "x"
+    assert "ignored for compatibility" in caplog.text
 
 
 def test_list(store):
@@ -149,3 +129,48 @@ def test_legacy_sections_json_is_converted_to_content(store):
 
     got = store.get(SceneIdentityGroup(channel_id="feishu", session_id="legacy-1"))
     assert got.content == "群职责: Crabot 开发\n群规则: 保持简洁"
+
+
+def test_old_schema_db_writes_scene_profile_without_rebuild(tmp_path):
+    db_path = tmp_path / "old_schema.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE scene_profiles (
+          scene_type             TEXT NOT NULL,
+          friend_id              TEXT,
+          channel_id             TEXT,
+          session_id             TEXT,
+          label                  TEXT NOT NULL,
+          sections_json          TEXT NOT NULL,
+          source_memory_ids_json TEXT,
+          created_at             TEXT NOT NULL,
+          updated_at             TEXT NOT NULL,
+          last_declared_at       TEXT
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    store = SceneProfileStore(str(db_path))
+    profile = SceneProfile(
+        scene=SceneIdentityGroup(channel_id="feishu", session_id="write-1"),
+        label="写入测试",
+        abstract="写入摘要",
+        overview="写入概览",
+        content="正文内容",
+        created_at="2026-04-17T00:00:00Z",
+        updated_at="2026-04-17T00:00:00Z",
+    )
+    store.upsert(profile)
+
+    got = store.get(profile.scene)
+    assert got is not None
+    assert got.content == "正文内容"
+    row = store.conn.execute(
+        "SELECT sections_json FROM scene_profiles WHERE channel_id = ? AND session_id = ?",
+        ("feishu", "write-1"),
+    ).fetchone()
+    assert row["sections_json"] == "[]"
+    store.close()

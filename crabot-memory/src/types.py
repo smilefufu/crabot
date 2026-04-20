@@ -401,13 +401,6 @@ class SceneIdentityGlobal(BaseModel):
 SceneIdentity = Union[SceneIdentityFriend, SceneIdentityGroup, SceneIdentityGlobal]
 
 
-class SceneProfileSection(BaseModel):
-    """场景画像分节"""
-    topic: str
-    body: str
-    visibility: Literal["private", "public"] = "private"
-
-
 class SceneProfile(BaseModel):
     """场景画像（按场景身份聚合的稳定规则与信息）"""
     scene: SceneIdentity

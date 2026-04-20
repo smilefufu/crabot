@@ -1,7 +1,7 @@
-"""SceneProfile 存储层 — 基于 SQLite，独立于 SQLiteStore 的连接。"""
+"""SceneProfile 存储层 — 基于 SQLite，独立于 SQLiteStore 的连接."""
 import json
+import logging
 import sqlite3
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Literal, Optional
 
@@ -12,6 +12,8 @@ from ..types import (
     SceneIdentityGroup,
     SceneIdentityGlobal,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class SceneProfileStore:
@@ -66,19 +68,13 @@ class SceneProfileStore:
             return self._update(profile)
         return self._insert(profile)
 
-    def patch(
-        self,
-        scene: SceneIdentity,
-        label: Optional[str],
-        section,
-        merge: Literal["replace_topic", "append"],
-    ) -> SceneProfile:
-        raise NotImplementedError("patch_scene_profile is deprecated; use upsert_scene_profile")
-
     def get(self, scene: SceneIdentity, only_public: bool = False) -> Optional[SceneProfile]:
         row = self._select_one(scene)
         if not row:
             return None
+        if only_public:
+            # Compatibility shim: scene profiles no longer carry section-level visibility.
+            logger.warning("Scene profile only_public flag is ignored for compatibility")
         return self._row_to_profile(row)
 
     def list(
@@ -130,7 +126,7 @@ class SceneProfileStore:
                 profile.abstract,
                 profile.overview,
                 profile.content,
-                None,
+                "[]",
                 json.dumps(profile.source_memory_ids) if profile.source_memory_ids else None,
                 profile.created_at,
                 profile.updated_at,
@@ -151,7 +147,7 @@ class SceneProfileStore:
                 profile.abstract,
                 profile.overview,
                 profile.content,
-                None,
+                "[]",
                 json.dumps(profile.source_memory_ids) if profile.source_memory_ids else None,
                 profile.updated_at,
                 profile.last_declared_at,
@@ -206,18 +202,6 @@ class SceneProfileStore:
             updated_at=row["updated_at"],
             last_declared_at=row["last_declared_at"],
         )
-
-    def _default_label(self, scene: SceneIdentity) -> str:
-        if scene.type == "friend":
-            return f"friend:{scene.friend_id}"
-        if scene.type == "group_session":
-            return f"group:{scene.channel_id}:{scene.session_id}"
-        return "global"
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
 
 def _legacy_sections_to_content(sections: list[dict]) -> str:
     lines = []

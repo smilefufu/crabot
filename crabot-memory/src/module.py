@@ -138,7 +138,6 @@ class MemoryModule:
             "export_memories": self._export_memories,
             "import_memories": self._import_memories,
             "upsert_scene_profile": self._upsert_scene_profile,
-            "patch_scene_profile": self._patch_scene_profile,
             "get_scene_profile": self._get_scene_profile,
             "list_scene_profiles": self._list_scene_profiles,
             "delete_scene_profile": self._delete_scene_profile,
@@ -550,12 +549,6 @@ class MemoryModule:
         profile = SceneProfile(**payload)
         out = self.scene_profile_store.upsert(profile)
         return {"profile": out.model_dump()}
-
-    async def _patch_scene_profile(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """局部更新场景画像"""
-        raise NotImplementedError(
-            "patch_scene_profile is deprecated; use upsert_scene_profile with abstract/overview/content"
-        )
 
     async def _get_scene_profile(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """获取场景画像"""

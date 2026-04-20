@@ -415,13 +415,9 @@ async def test_upsert_scene_profile_generates_l0_l1_when_missing(memory_module, 
 
 
 @pytest.mark.asyncio
-async def test_patch_scene_profile_rejects_legacy_section_payload(memory_module):
-    with pytest.raises(NotImplementedError):
-        await memory_module._patch_scene_profile({
-            "scene": {"type": "group_session", "channel_id": "c2", "session_id": "s2"},
-            "section": {"topic": "规则", "body": "v2", "visibility": "private"},
-            "merge": "replace_topic",
-        })
+async def test_dispatch_rejects_patch_scene_profile(memory_module):
+    with pytest.raises(ValueError, match="Method not found"):
+        await memory_module._dispatch("patch_scene_profile", {})
 
 
 @pytest.mark.asyncio
@@ -448,7 +444,7 @@ async def test_delete_scene_profile(memory_module):
 
 
 @pytest.mark.asyncio
-async def test_get_scene_profile_only_public(memory_module):
+async def test_get_scene_profile_only_public_is_compat_noop(memory_module, caplog):
     scene = {"type": "friend", "friend_id": "f3"}
     await memory_module._upsert_scene_profile({
         "scene": scene, "label": "x",
@@ -456,8 +452,10 @@ async def test_get_scene_profile_only_public(memory_module):
         "content": "职务: p\n私密: s",
         "created_at": "2026-04-17T00:00:00Z", "updated_at": "2026-04-17T00:00:00Z",
     })
-    got = await memory_module._get_scene_profile({"scene": scene, "only_public": True})
+    with caplog.at_level("WARNING"):
+        got = await memory_module._get_scene_profile({"scene": scene, "only_public": True})
     assert got["profile"]["content"] == "职务: p\n私密: s"
+    assert "ignored for compatibility" in caplog.text
 
 
 if __name__ == "__main__":
