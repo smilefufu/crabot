@@ -231,10 +231,9 @@ export const sceneProfileService = {
 
   async get(
     key: string,
-    params: { onlyPublic?: boolean; moduleId?: string } = {},
+    params: { moduleId?: string } = {},
   ): Promise<{ profile: SceneProfile | null }> {
     const q = buildQuery({
-      only_public: params.onlyPublic ? 'true' : undefined,
       module_id: params.moduleId,
     })
     return api.get<{ profile: SceneProfile | null }>(

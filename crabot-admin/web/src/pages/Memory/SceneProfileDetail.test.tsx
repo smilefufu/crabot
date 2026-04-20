@@ -130,4 +130,21 @@ describe('SceneProfileDetail', () => {
     expect(screen.queryByText(/Sections（/u)).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '新增分节' })).not.toBeInTheDocument()
   })
+
+  it('blocks save when l2 content is blank', async () => {
+    getSceneProfile.mockResolvedValue({ profile: null })
+
+    renderSceneProfileDetail('/memory/scenes/group%3Awechat-main%3Agroup-2?context_label=空白测试群')
+
+    expect(await screen.findByText('空白测试群')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '创建画像' }))
+    fireEvent.change(screen.getByLabelText('摘要（L0）'), { target: { value: '  临时摘要  ' } })
+    fireEvent.change(screen.getByLabelText('概览（L1）'), { target: { value: '  临时概览  ' } })
+    fireEvent.change(screen.getByLabelText('正文（L2）'), { target: { value: '   ' } })
+    fireEvent.click(screen.getByRole('button', { name: '创建画像' }))
+
+    expect(patchSceneProfile).not.toHaveBeenCalled()
+    expect(toastMock.error).toHaveBeenCalledWith('正文（L2）不能为空')
+  })
 })

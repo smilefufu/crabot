@@ -80,6 +80,7 @@ export const SceneProfileDetail: React.FC = () => {
   const [serviceError, setServiceError] = useState('')
   const [mode, setMode] = useState<DetailMode>('view')
   const [draft, setDraft] = useState<SceneProfileDraft>(EMPTY_DRAFT)
+  const [validationError, setValidationError] = useState('')
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [confirmOpen, setConfirmOpen] = useState(false)
@@ -118,6 +119,7 @@ export const SceneProfileDetail: React.FC = () => {
       setProfile(nextProfile)
       setProfileExists(result.profile != null)
       setDraft(toDraft(nextProfile))
+      setValidationError('')
       setMode('view')
       setServiceError('')
     } catch (err) {
@@ -137,6 +139,7 @@ export const SceneProfileDetail: React.FC = () => {
     if (profile) {
       setDraft(toDraft(profile))
     }
+    setValidationError('')
     setMode('edit')
   }, [profile])
 
@@ -144,23 +147,41 @@ export const SceneProfileDetail: React.FC = () => {
     if (profile) {
       setDraft(toDraft(profile))
     }
+    setValidationError('')
     setMode('view')
   }, [profile])
 
   const updateDraft = useCallback(
     (field: keyof SceneProfileDraft, value: string) => {
+      setValidationError('')
       setDraft((prev) => ({ ...prev, [field]: value }))
     },
     [],
   )
 
   const handleSave = useCallback(async () => {
+    const normalizedDraft: SceneProfileDraft = {
+      label: draft.label.trim(),
+      abstract: draft.abstract.trim(),
+      overview: draft.overview.trim(),
+      content: draft.content.trim(),
+    }
+
+    if (!normalizedDraft.content) {
+      const message = '正文（L2）不能为空'
+      setValidationError(message)
+      toast.error(message)
+      return
+    }
+
+    setValidationError('')
     setSaving(true)
     try {
-      const result = await sceneProfileService.patch(key, draft)
+      const result = await sceneProfileService.patch(key, normalizedDraft)
       setProfile(result.profile)
       setProfileExists(true)
       setDraft(toDraft(result.profile))
+      setValidationError('')
       setMode('view')
       toast.success(profileExists ? '已保存' : '场景画像已创建')
     } catch (err) {
@@ -378,6 +399,12 @@ export const SceneProfileDetail: React.FC = () => {
               你正在编辑会影响 Agent 进入该场景时读取的 L0/L1/L2 文档。
             </div>
           </Card>
+
+          {validationError && (
+            <Card>
+              <div style={{ color: 'var(--danger)' }}>{validationError}</div>
+            </Card>
+          )}
 
           <div style={{ marginTop: '1.5rem', marginBottom: '1.5rem' }}>
             <label htmlFor="scene-profile-label" style={{ display: 'block', fontWeight: 500, marginBottom: '0.5rem', fontSize: '0.9rem' }}>

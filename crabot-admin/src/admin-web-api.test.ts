@@ -268,6 +268,106 @@ describe('Admin Web API', () => {
     })
   })
 
+  describe('PATCH /api/scene-profiles/:key', () => {
+    it('trims document fields and preserves existing abstract when blank values are submitted', async () => {
+      const token = await loginAndGetToken()
+
+      vi.spyOn(admin['rpcClient'], 'resolve').mockResolvedValue([
+        {
+          module_id: 'memory-test',
+          module_type: 'memory',
+          version: '0.1.0',
+          port: 19001,
+        },
+      ] as any)
+
+      const callSpy = vi.spyOn(admin['rpcClient'], 'call').mockImplementation(async (_port, method, params) => {
+        if (method === 'get_scene_profile') {
+          expect(params).toEqual({ scene: { type: 'friend', friend_id: 'friend-1' } })
+          return {
+            profile: {
+              scene: { type: 'friend', friend_id: 'friend-1' },
+              label: 'Alice',
+              abstract: '现有摘要',
+              overview: '现有概览',
+              content: '现有正文',
+              source_memory_ids: ['mem-1'],
+              created_at: '2026-04-19T00:00:00.000Z',
+              updated_at: '2026-04-20T00:00:00.000Z',
+              last_declared_at: null,
+            },
+          } as any
+        }
+        if (method === 'upsert_scene_profile') {
+          expect(params).toMatchObject({
+            scene: { type: 'friend', friend_id: 'friend-1' },
+            label: 'Alice 2',
+            abstract: '现有摘要',
+            overview: '新概览',
+            content: '新正文',
+            source_memory_ids: ['mem-1'],
+          })
+          return { profile: params } as any
+        }
+        throw new Error(`Unexpected RPC method: ${String(method)}`)
+      })
+
+      const response = await makeWebRequest<{ profile: unknown }>(
+        TEST_WEB_PORT,
+        '/api/scene-profiles/friend%3Afriend-1',
+        'PATCH',
+        {
+          label: '  Alice 2  ',
+          abstract: '   ',
+          overview: '  新概览  ',
+          content: '  新正文  ',
+        },
+        token
+      )
+
+      expect(response.statusCode).toBe(200)
+      expect(callSpy).toHaveBeenCalledTimes(2)
+    })
+
+    it('rejects a patch when the resulting content is empty', async () => {
+      const token = await loginAndGetToken()
+
+      vi.spyOn(admin['rpcClient'], 'resolve').mockResolvedValue([
+        {
+          module_id: 'memory-test',
+          module_type: 'memory',
+          version: '0.1.0',
+          port: 19001,
+        },
+      ] as any)
+
+      const callSpy = vi.spyOn(admin['rpcClient'], 'call').mockImplementation(async (_port, method, params) => {
+        if (method === 'get_scene_profile') {
+          expect(params).toEqual({ scene: { type: 'global' } })
+          return { profile: null } as any
+        }
+        throw new Error(`Unexpected RPC method: ${String(method)}`)
+      })
+
+      const response = await makeWebRequest<{ error: string }>(
+        TEST_WEB_PORT,
+        '/api/scene-profiles/global',
+        'PATCH',
+        {
+          label: 'global',
+          abstract: '   ',
+          overview: '   ',
+          content: '   ',
+        },
+        token
+      )
+
+      expect(response.statusCode).toBe(400)
+      expect(response.body.error).toBe('Scene profile content cannot be empty')
+      expect(callSpy).toHaveBeenCalledTimes(1)
+    })
+  })
+
   describe('POST /api/dialog-objects/private-pool/:sessionId/*', () => {
     it('assigns an unassigned private session to an existing friend and clears matching applications', async () => {
       const token = await loginAndGetToken()

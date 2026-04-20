@@ -220,6 +220,17 @@ function defaultSceneProfileLabel(scene: SceneIdentity): string {
   return `group:${scene.channel_id}:${scene.session_id}`
 }
 
+function normalizeSceneProfileTextField(
+  value: string | undefined,
+  fallback: string,
+): string {
+  if (value === undefined) {
+    return fallback
+  }
+  const trimmed = value.trim()
+  return trimmed || fallback
+}
+
 // ============================================================================
 // Admin 模块
 // ============================================================================
@@ -6355,11 +6366,10 @@ export class AdminModule extends ModuleBase {
 
   private async handleGetSceneProfileApi(_req: IncomingMessage, res: ServerResponse, url: URL, key: string): Promise<void> {
     const moduleId = url.searchParams.get('module_id') ?? undefined
-    const onlyPublic = url.searchParams.get('only_public') === 'true'
     const scene = parseSceneKey(key)
     const port = await this.getMemoryPort(moduleId)
-    const result = await this.rpcClient.call<{ scene: SceneIdentity; only_public?: boolean }, unknown>(
-      port, 'get_scene_profile', { scene, only_public: onlyPublic }, this.config.moduleId
+    const result = await this.rpcClient.call<{ scene: SceneIdentity }, unknown>(
+      port, 'get_scene_profile', { scene }, this.config.moduleId
     )
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(result))
@@ -6386,13 +6396,35 @@ export class AdminModule extends ModuleBase {
 
     const now = new Date().toISOString()
     const existing = getResult.profile
+    const nextLabel = normalizeSceneProfileTextField(
+      body.label,
+      existing?.label ?? defaultSceneProfileLabel(scene),
+    )
+    const nextAbstract = normalizeSceneProfileTextField(
+      body.abstract,
+      existing?.abstract ?? '',
+    )
+    const nextOverview = normalizeSceneProfileTextField(
+      body.overview,
+      existing?.overview ?? '',
+    )
+    const nextContent = normalizeSceneProfileTextField(
+      body.content,
+      existing?.content ?? '',
+    )
+
+    if (!nextContent) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Scene profile content cannot be empty' }))
+      return
+    }
 
     const upsertParams = {
       scene,
-      label: body.label ?? existing?.label ?? defaultSceneProfileLabel(scene),
-      abstract: body.abstract ?? existing?.abstract ?? '',
-      overview: body.overview ?? existing?.overview ?? '',
-      content: body.content ?? existing?.content ?? '',
+      label: nextLabel,
+      abstract: nextAbstract,
+      overview: nextOverview,
+      content: nextContent,
       source_memory_ids: body.source_memory_ids ?? existing?.source_memory_ids ?? undefined,
       created_at: existing?.created_at ?? now,
       updated_at: now,
