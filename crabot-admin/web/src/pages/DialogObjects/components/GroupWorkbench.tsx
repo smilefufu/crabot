@@ -66,7 +66,6 @@ export const GroupWorkbench: React.FC<GroupWorkbenchProps> = ({
         <div>来源渠道：{group.channel_id}</div>
         <div>群成员数量：{group.participant_count}</div>
         <div>master_in_group：{group.master_in_group ? '是' : '否'}</div>
-        <div>会话配置：{group.has_session_config ? '已配置' : '未配置'}</div>
         <Button variant="secondary" onClick={onEditPermission}>
           编辑群权限
         </Button>

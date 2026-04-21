@@ -41,40 +41,90 @@ const panelStyle: React.CSSProperties = {
   alignItems: 'start',
 }
 
-type TriState = 'inherit' | 'on' | 'off'
+const DEFAULT_STORAGE_PATH = '/workspace'
 
-const triStateLabel = (state: TriState): string => {
-  switch (state) {
-    case 'on':
-      return '开启'
-    case 'off':
-      return '关闭'
-    default:
-      return '继承'
+function buildToolAccess(defaultValue: boolean): ToolAccessConfig {
+  return {
+    memory: defaultValue,
+    messaging: defaultValue,
+    task: defaultValue,
+    mcp_skill: defaultValue,
+    file_io: defaultValue,
+    browser: defaultValue,
+    shell: defaultValue,
+    remote_exec: defaultValue,
+    desktop: defaultValue,
   }
 }
 
-const GroupTriStateToggle: React.FC<{
+function getStorageSummary(storage: StoragePermission | null): string {
+  if (!storage) return '未开启'
+  return `${storage.workspace_path} · ${storage.access === 'read' ? '只读' : '读写'}`
+}
+
+function getMemoryScopeSummary(sessionId: string, scopes: string[]): string {
+  if (scopes.length === 1 && scopes[0] === sessionId) return '当前会话'
+  return scopes.join(', ')
+}
+
+function parseMemoryScopes(value: string): string[] {
+  return value
+    .split(/[\n,]/)
+    .map((scope) => scope.trim())
+    .filter(Boolean)
+}
+
+function resolveGroupPermissions(
+  sessionId: string,
+  template: PermissionTemplate,
+  config: {
+    tool_access?: Partial<ToolAccessConfig>
+    storage?: StoragePermission | null
+    memory_scopes?: string[]
+  } | null
+): {
+  tool_access: ToolAccessConfig
+  storage: StoragePermission | null
+  memory_scopes: string[]
+} {
+  const tool_access = {
+    ...template.tool_access,
+    ...(config?.tool_access ?? {}),
+  }
+  const storage = config?.storage !== undefined ? config.storage : template.storage
+  const memory_scopes = config?.memory_scopes !== undefined
+    ? config.memory_scopes
+    : template.memory_scopes
+
+  return {
+    tool_access,
+    storage,
+    memory_scopes: memory_scopes.length > 0 ? memory_scopes : [sessionId],
+  }
+}
+
+const PermissionSwitchRow: React.FC<{
   label: string
   category: ToolCategory
-  value: TriState
-  onChange: (cat: string, val: TriState) => void
-}> = ({ label, category, value, onChange }) => {
-  const cycle = () => {
-    const next: TriState = value === 'inherit' ? 'on' : value === 'on' ? 'off' : 'inherit'
-    onChange(category, next)
-  }
-
+  checked: boolean
+  onChange: (cat: ToolCategory, checked: boolean) => void
+}> = ({ label, category, checked, onChange }) => {
   return (
-    <button
-      type="button"
-      className={`session-tri-toggle session-tri-toggle--${value}`}
-      onClick={cycle}
-      title={`${label}: ${triStateLabel(value)} (点击切换)`}
-    >
-      <span className="session-tri-toggle-indicator" />
-      <span className="session-tri-toggle-label">{label}: {triStateLabel(value)}</span>
-    </button>
+    <label className="session-permission-switch-row">
+      <span className="session-permission-switch-value">
+        <span>{label}</span>
+        <span>{checked ? '开启' : '关闭'}</span>
+      </span>
+      <span className="toggle-switch">
+        <input
+          aria-label={label}
+          type="checkbox"
+          checked={checked}
+          onChange={(event) => onChange(category, event.target.checked)}
+        />
+        <span className="toggle-track" />
+      </span>
+    </label>
   )
 }
 
@@ -123,12 +173,12 @@ export const DialogObjectsPage: React.FC = () => {
   const [editingGroup, setEditingGroup] = useState<DialogObjectGroupEntry | null>(null)
   const [groupConfigLoading, setGroupConfigLoading] = useState(false)
   const [groupSaving, setGroupSaving] = useState(false)
-  const [groupHasExistingConfig, setGroupHasExistingConfig] = useState(false)
-  const [groupToolOverrides, setGroupToolOverrides] = useState<Record<string, boolean>>({})
+  const [groupToolAccess, setGroupToolAccess] = useState<ToolAccessConfig>(() => buildToolAccess(false))
   const [groupStorageEnabled, setGroupStorageEnabled] = useState(false)
   const [groupStoragePath, setGroupStoragePath] = useState('')
   const [groupStorageAccess, setGroupStorageAccess] = useState<'read' | 'readwrite'>('read')
-  const [groupMemoryScopes, setGroupMemoryScopes] = useState('')
+  const [groupMemoryMode, setGroupMemoryMode] = useState<'session' | 'custom'>('session')
+  const [groupMemoryScopesInput, setGroupMemoryScopesInput] = useState('')
   const initialLoadDone = useRef(false)
 
   const loadDialogObjects = useCallback(async (showLoading = false) => {
@@ -445,12 +495,12 @@ export const DialogObjectsPage: React.FC = () => {
   }
 
   const resetGroupConfigForm = useCallback(() => {
-    setGroupToolOverrides({})
+    setGroupToolAccess(buildToolAccess(false))
     setGroupStorageEnabled(false)
     setGroupStoragePath('')
     setGroupStorageAccess('read')
-    setGroupMemoryScopes('')
-    setGroupHasExistingConfig(false)
+    setGroupMemoryMode('session')
+    setGroupMemoryScopesInput('')
   }, [])
 
   const openGroupPermissionEditor = useCallback(async (group: DialogObjectGroupEntry) => {
@@ -459,15 +509,25 @@ export const DialogObjectsPage: React.FC = () => {
     setGroupConfigLoading(true)
 
     try {
-      const result = await sessionService.getConfig(group.id)
-      const config = result.config
-      setGroupHasExistingConfig(config != null)
-      if (config) {
-        setGroupToolOverrides(config.tool_access ? { ...config.tool_access } : {})
-        setGroupStorageEnabled(config.storage != null)
-        setGroupStoragePath(config.storage?.workspace_path ?? '')
-        setGroupStorageAccess(config.storage?.access ?? 'read')
-        setGroupMemoryScopes(config.memory_scopes?.join(', ') ?? '')
+      const cachedGroupDefault = permissionTemplates.find((template) => template.id === 'group_default')
+      const [configResult, templateResult] = await Promise.all([
+        sessionService.getConfig(group.id),
+        cachedGroupDefault
+          ? Promise.resolve({ template: cachedGroupDefault })
+          : permissionTemplateService.get('group_default'),
+      ])
+      const resolved = resolveGroupPermissions(group.id, templateResult.template, configResult.config)
+
+      setGroupToolAccess(resolved.tool_access)
+      setGroupStorageEnabled(resolved.storage !== null)
+      setGroupStoragePath(resolved.storage?.workspace_path ?? DEFAULT_STORAGE_PATH)
+      setGroupStorageAccess(resolved.storage?.access ?? 'read')
+      if (resolved.memory_scopes.length === 1 && resolved.memory_scopes[0] === group.id) {
+        setGroupMemoryMode('session')
+        setGroupMemoryScopesInput('')
+      } else {
+        setGroupMemoryMode('custom')
+        setGroupMemoryScopesInput(resolved.memory_scopes.join(', '))
       }
     } catch (caughtError) {
       const message = caughtError instanceof Error ? caughtError.message : '加载群聊权限失败'
@@ -475,70 +535,49 @@ export const DialogObjectsPage: React.FC = () => {
     } finally {
       setGroupConfigLoading(false)
     }
-  }, [notifyError, resetGroupConfigForm])
+  }, [notifyError, permissionTemplates, resetGroupConfigForm])
 
   const closeGroupPermissionEditor = useCallback(() => {
     setEditingGroup(null)
   }, [])
-
-  const getGroupTriState = (cat: string): TriState => {
-    if (!(cat in groupToolOverrides)) return 'inherit'
-    return groupToolOverrides[cat] ? 'on' : 'off'
-  }
-
-  const setGroupTriState = (cat: string, value: TriState) => {
-    setGroupToolOverrides((prev) => {
-      const { [cat]: _, ...rest } = prev
-      return value === 'inherit' ? rest : { ...rest, [cat]: value === 'on' }
-    })
-  }
 
   const handleSaveGroupConfig = async () => {
     if (!editingGroup) return
 
     try {
       setGroupSaving(true)
+      const trimmedStoragePath = groupStoragePath.trim()
+      if (groupStorageEnabled && !trimmedStoragePath) {
+        notifyError('存储路径不能为空')
+        return
+      }
+
+      const memoryScopes = groupMemoryMode === 'session'
+        ? [editingGroup.id]
+        : parseMemoryScopes(groupMemoryScopesInput)
+      if (memoryScopes.length === 0) {
+        notifyError('请至少填写一个记忆范围')
+        return
+      }
+
       const storage: StoragePermission | null = groupStorageEnabled
         ? {
-            workspace_path: groupStoragePath.trim(),
+            workspace_path: trimmedStoragePath,
             access: groupStorageAccess,
           }
         : null
 
-      const memoryScopes = groupMemoryScopes
-        .split(',')
-        .map((scope) => scope.trim())
-        .filter(Boolean)
-
       const config = {
-        tool_access: Object.keys(groupToolOverrides).length > 0
-          ? groupToolOverrides as Partial<ToolAccessConfig>
-          : undefined,
+        tool_access: groupToolAccess,
         storage,
-        memory_scopes: memoryScopes.length > 0 ? memoryScopes : undefined,
+        memory_scopes: memoryScopes,
       }
 
       await sessionService.updateConfig(editingGroup.id, config)
-      setGroupHasExistingConfig(true)
       success('群聊权限配置已保存')
+      triggerRefresh()
     } catch (caughtError) {
       const message = caughtError instanceof Error ? caughtError.message : '保存失败'
-      notifyError(message)
-    } finally {
-      setGroupSaving(false)
-    }
-  }
-
-  const handleResetGroupConfig = async () => {
-    if (!editingGroup) return
-
-    try {
-      setGroupSaving(true)
-      await sessionService.deleteConfig(editingGroup.id)
-      resetGroupConfigForm()
-      success('已重置为继承模板')
-    } catch (caughtError) {
-      const message = caughtError instanceof Error ? caughtError.message : '重置失败'
       notifyError(message)
     } finally {
       setGroupSaving(false)
@@ -771,7 +810,7 @@ export const DialogObjectsPage: React.FC = () => {
             <div>
               <h2 style={{ margin: 0 }}>群聊权限编辑</h2>
               <p style={{ color: 'var(--text-secondary)', marginTop: '0.5rem' }}>
-                只编辑群聊自己的会话覆盖，不包含 `template_id`。
+                直接编辑当前生效权限。
               </p>
             </div>
 
@@ -780,41 +819,65 @@ export const DialogObjectsPage: React.FC = () => {
             ) : (
               <>
                 <div style={{ display: 'grid', gap: '0.75rem' }}>
-                  <div style={{ fontWeight: 600 }}>工具访问覆盖</div>
-                  <div className="session-tri-grid">
+                  <div style={{ fontWeight: 600 }}>工具权限</div>
+                  <div className="session-permission-switch-list">
                     {TOOL_CATEGORIES.map((category) => (
-                      <GroupTriStateToggle
+                      <PermissionSwitchRow
                         key={category}
                         label={TOOL_CATEGORY_LABELS[category]}
                         category={category}
-                        value={getGroupTriState(category)}
-                        onChange={setGroupTriState}
+                        checked={groupToolAccess[category]}
+                        onChange={(cat, checked) => {
+                          setGroupToolAccess((prev) => ({ ...prev, [cat]: checked }))
+                        }}
                       />
                     ))}
                   </div>
                 </div>
 
                 <div style={{ display: 'grid', gap: '0.75rem' }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <input
-                      type="checkbox"
-                      checked={groupStorageEnabled}
-                      onChange={(event) => setGroupStorageEnabled(event.target.checked)}
-                    />
-                    覆盖存储权限
+                  <div style={{ fontWeight: 600 }}>存储权限</div>
+                  <label className="session-permission-switch-row">
+                    <span className="session-permission-switch-value">
+                      <span>启用存储</span>
+                      <span>
+                        {groupStorageEnabled
+                          ? getStorageSummary({
+                              workspace_path: groupStoragePath.trim() || DEFAULT_STORAGE_PATH,
+                              access: groupStorageAccess,
+                            })
+                          : '未开启'}
+                      </span>
+                    </span>
+                    <span className="toggle-switch">
+                      <input
+                        aria-label="启用存储"
+                        type="checkbox"
+                        checked={groupStorageEnabled}
+                        onChange={(event) => {
+                          const checked = event.target.checked
+                          setGroupStorageEnabled(checked)
+                          if (checked && !groupStoragePath.trim()) {
+                            setGroupStoragePath(DEFAULT_STORAGE_PATH)
+                          }
+                        }}
+                      />
+                      <span className="toggle-track" />
+                    </span>
                   </label>
                   {groupStorageEnabled && (
-                    <div style={{ display: 'grid', gap: '0.75rem' }}>
+                    <div className="session-detail-grid">
                       <Input
-                        label="存储路径"
-                        aria-label="存储路径"
+                        label="工作区路径"
+                        aria-label="工作区路径"
                         value={groupStoragePath}
                         onChange={(event) => setGroupStoragePath(event.target.value)}
+                        help="输入当前群聊可访问的工作区路径。"
                       />
                       <label style={{ display: 'grid', gap: '0.35rem' }}>
-                        <span style={{ fontSize: '0.875rem', fontWeight: 500 }}>存储权限</span>
+                        <span style={{ fontSize: '0.875rem', fontWeight: 500 }}>访问级别</span>
                         <select
-                          aria-label="存储权限"
+                          aria-label="访问级别"
                           value={groupStorageAccess}
                           onChange={(event) => setGroupStorageAccess(event.target.value as 'read' | 'readwrite')}
                           className="select"
@@ -827,13 +890,56 @@ export const DialogObjectsPage: React.FC = () => {
                   )}
                 </div>
 
-                <Input
-                  label="记忆范围覆盖"
-                  aria-label="记忆范围覆盖"
-                  value={groupMemoryScopes}
-                  onChange={(event) => setGroupMemoryScopes(event.target.value)}
-                  help="逗号分隔，如：group-a, group-b"
-                />
+                <div style={{ display: 'grid', gap: '0.75rem' }}>
+                  <div style={{ fontWeight: 600 }}>记忆范围</div>
+                  <div className="session-segmented-control" role="radiogroup" aria-label="记忆范围模式">
+                    <label className={`session-segmented-option ${groupMemoryMode === 'session' ? 'session-segmented-option--active' : ''}`}>
+                      <input
+                        aria-label="当前会话"
+                        type="radio"
+                        name="group-memory-mode"
+                        checked={groupMemoryMode === 'session'}
+                        onChange={() => setGroupMemoryMode('session')}
+                      />
+                      <span>当前会话</span>
+                    </label>
+                    <label className={`session-segmented-option ${groupMemoryMode === 'custom' ? 'session-segmented-option--active' : ''}`}>
+                      <input
+                        aria-label="自定义范围"
+                        type="radio"
+                        name="group-memory-mode"
+                        checked={groupMemoryMode === 'custom'}
+                        onChange={() => setGroupMemoryMode('custom')}
+                      />
+                      <span>自定义范围</span>
+                    </label>
+                  </div>
+
+                  {groupMemoryMode === 'custom' && (
+                    <label style={{ display: 'grid', gap: '0.35rem' }}>
+                      <span style={{ fontSize: '0.875rem', fontWeight: 500 }}>范围标识</span>
+                      <textarea
+                        aria-label="范围标识"
+                        className="textarea"
+                        value={groupMemoryScopesInput}
+                        onChange={(event) => setGroupMemoryScopesInput(event.target.value)}
+                        placeholder="例如：group-a, group-b"
+                      />
+                      <span className="form-help">多个范围可用逗号或换行分隔。</span>
+                    </label>
+                  )}
+
+                  <div className="session-inline-summary">
+                    当前生效：
+                    {' '}
+                    {getMemoryScopeSummary(
+                      editingGroup.id,
+                      groupMemoryMode === 'session'
+                        ? [editingGroup.id]
+                        : parseMemoryScopes(groupMemoryScopesInput)
+                    )}
+                  </div>
+                </div>
 
                 <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
                   <Button
@@ -843,15 +949,6 @@ export const DialogObjectsPage: React.FC = () => {
                   >
                     {groupSaving ? '保存中...' : '保存配置'}
                   </Button>
-                  {groupHasExistingConfig && (
-                    <Button
-                      variant="secondary"
-                      onClick={() => void handleResetGroupConfig()}
-                      disabled={groupSaving}
-                    >
-                      重置为继承
-                    </Button>
-                  )}
                 </div>
               </>
             )}
