@@ -99,7 +99,11 @@ import {
   type UpsertPendingMessageParams,
   type UpsertPendingMessageResult,
   type ChannelMessageRef,
+  type FriendPermissionConfig,
+  type GetFriendPermissionResult,
+  type ResolvedPermissions,
   type SessionPermissionConfig,
+  type UpdateFriendPermissionBody,
   type CreatePermissionTemplateParams,
   type UpdatePermissionTemplateParams,
   type DialogObjectChannelSession,
@@ -252,6 +256,7 @@ export class AdminModule extends ModuleBase {
   private tasks: Map<TaskId, Task> = new Map()
   private schedules: Map<ScheduleId, Schedule> = new Map()
   private sessionConfigs: Map<string, SessionPermissionConfig> = new Map()
+  private friendPermissionConfigs: Map<FriendId, FriendPermissionConfig> = new Map()
 
   // 模型供应商管理器
   private modelProviderManager: ModelProviderManager
@@ -294,6 +299,7 @@ export class AdminModule extends ModuleBase {
   private readonly templatesFilePath: string
   private readonly pendingMessagesFilePath: string
   private readonly sessionConfigsFilePath: string
+  private readonly friendPermissionConfigsFilePath: string
   private readonly schedulesFilePath: string
 
   // 数据加载完成前 saveData 必须拒绝，否则会用空内存覆盖磁盘真实数据
@@ -311,6 +317,7 @@ export class AdminModule extends ModuleBase {
     this.templatesFilePath = path.join(this.adminConfig.data_dir, 'templates.json')
     this.pendingMessagesFilePath = path.join(this.adminConfig.data_dir, 'pending-messages.json')
     this.sessionConfigsFilePath = path.join(this.adminConfig.data_dir, 'session-configs.json')
+    this.friendPermissionConfigsFilePath = path.join(this.adminConfig.data_dir, 'friend-permission-configs.json')
     this.schedulesFilePath = path.join(this.adminConfig.data_dir, 'schedules.json')
 
     this.modelProviderManager = new ModelProviderManager(
@@ -436,6 +443,9 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('delete_permission_template', this.handleDeletePermissionTemplate.bind(this))
 
     // Session 配置管理
+    this.registerMethod('get_friend_permissions', async (params: { friend_id: FriendId }) =>
+      await this.handleGetFriendPermission(params.friend_id)
+    )
     this.registerMethod('get_session_config', this.handleGetSessionConfig.bind(this))
     this.registerMethod('update_session_config', this.handleUpdateSessionConfig.bind(this))
     this.registerMethod('delete_session_config', this.handleDeleteSessionConfig.bind(this))
@@ -1396,6 +1406,18 @@ export class AdminModule extends ModuleBase {
         return
       }
 
+      if (pathname.match(/^\/api\/friends\/[^/]+\/permissions$/) && req.method === 'GET') {
+        const friendId = decodeURIComponent(pathname.split('/')[3]) as FriendId
+        await this.handleGetFriendPermissionApi(res, friendId)
+        return
+      }
+
+      if (pathname.match(/^\/api\/friends\/[^/]+\/permissions$/) && req.method === 'PUT') {
+        const friendId = decodeURIComponent(pathname.split('/')[3]) as FriendId
+        await this.handleUpdateFriendPermissionApi(req, res, friendId)
+        return
+      }
+
       // Chat 路由
       if (pathname === '/api/chat/messages' && req.method === 'GET') {
         await this.handleGetChatMessagesApi(req, res, url)
@@ -2226,7 +2248,11 @@ export class AdminModule extends ModuleBase {
 
         const channelPort = modules[0].port
         return this.rpcClient.call<
-          { type: DialogObjectChannelSession['type']; pagination: { page: number; page_size: number } },
+          {
+            type: DialogObjectChannelSession['type']
+            pagination: { page: number; page_size: number }
+            hydrate_participant_user_ids?: string[]
+          },
           {
             items: DialogObjectChannelSession[]
             pagination: {
@@ -2239,7 +2265,15 @@ export class AdminModule extends ModuleBase {
         >(
           channelPort,
           'get_sessions',
-          { type: sessionType, pagination: { page, page_size: pageSize } },
+          {
+            type: sessionType,
+            pagination: { page, page_size: pageSize },
+            ...(instance.platform === 'telegram' && sessionType === 'group'
+              ? {
+                  hydrate_participant_user_ids: this.getMasterPlatformUserIdsForChannel(instance.id),
+                }
+              : {}),
+          },
           this.config.moduleId
         )
       },
@@ -2248,6 +2282,16 @@ export class AdminModule extends ModuleBase {
         console.warn(`[Admin] Dialog object session fetch skipped for ${instance.id}: ${message}`)
       },
     })
+  }
+
+  private getMasterPlatformUserIdsForChannel(channelId: ModuleId): string[] {
+    return Array.from(this.friends.values())
+      .filter((friend) => friend.permission === 'master')
+      .flatMap((friend) =>
+        friend.channel_identities
+          .filter((identity) => identity.channel_id === channelId)
+          .map((identity) => identity.platform_user_id)
+      )
   }
 
   private async handleAssignPrivatePoolFriend(params: {
@@ -2363,7 +2407,11 @@ export class AdminModule extends ModuleBase {
     return { deleted: true }
   }
 
-  private async resolveChannelSession(channelId: ModuleId, sessionId: string): Promise<{
+  private async resolveChannelSession(
+    channelId: ModuleId,
+    sessionId: string,
+    hydrateParticipantUserIds?: string[]
+  ): Promise<{
     id: string
     channel_id: ModuleId
     type: 'private' | 'group'
@@ -2379,7 +2427,7 @@ export class AdminModule extends ModuleBase {
     }
 
     const result = await this.rpcClient.call<
-      { session_id: string },
+      { session_id: string; hydrate_participant_user_ids?: string[] },
       {
         session: {
           id: string
@@ -2392,7 +2440,12 @@ export class AdminModule extends ModuleBase {
     >(
       modules[0].port,
       'get_session',
-      { session_id: sessionId },
+      {
+        session_id: sessionId,
+        ...(hydrateParticipantUserIds && hydrateParticipantUserIds.length > 0
+          ? { hydrate_participant_user_ids: hydrateParticipantUserIds }
+          : {}),
+      },
       this.config.moduleId
     )
 
@@ -2496,11 +2549,14 @@ export class AdminModule extends ModuleBase {
     }
 
     const now = generateTimestamp()
+    const permissionTemplateId = params.permission === 'normal'
+      ? (params.permission_template_id ?? 'standard')
+      : undefined
     const friend: Friend = {
       id: generateId(),
       display_name: params.display_name,
       permission: params.permission,
-      permission_template_id: params.permission_template_id,
+      permission_template_id: permissionTemplateId,
       channel_identities: params.channel_identities ?? [],
       created_at: now,
       updated_at: now,
@@ -2532,11 +2588,20 @@ export class AdminModule extends ModuleBase {
       }
     }
 
+    const nextPermission = params.permission ?? existing.permission
+    const nextPermissionTemplateId = nextPermission === 'master'
+      ? undefined
+      : (
+          params.permission_template_id !== undefined
+            ? params.permission_template_id
+            : (existing.permission_template_id ?? 'standard')
+        )
+
     const friend: Friend = {
       ...existing,
       ...(params.display_name !== undefined ? { display_name: params.display_name } : {}),
-      ...(params.permission !== undefined ? { permission: params.permission } : {}),
-      ...(params.permission_template_id !== undefined ? { permission_template_id: params.permission_template_id } : {}),
+      permission: nextPermission,
+      permission_template_id: nextPermissionTemplateId,
       updated_at: generateTimestamp(),
     }
 
@@ -2563,6 +2628,7 @@ export class AdminModule extends ModuleBase {
     }
 
     this.friends.delete(params.friend_id)
+    this.friendPermissionConfigs.delete(params.friend_id)
     await this.saveData()
 
     return { deleted: true }
@@ -2918,7 +2984,11 @@ export class AdminModule extends ModuleBase {
 
   private async checkMasterInSession(channelId: ModuleId, sessionId: string): Promise<boolean> {
     try {
-      const session = await this.resolveChannelSession(channelId, sessionId)
+      const session = await this.resolveChannelSession(
+        channelId,
+        sessionId,
+        this.getMasterPlatformUserIdsForChannel(channelId)
+      )
       if (session.type === 'private') {
         return true
       }
@@ -3039,6 +3109,24 @@ export class AdminModule extends ModuleBase {
     }
 
     try {
+      const friendPermissionConfigsData = await fs.readFile(this.friendPermissionConfigsFilePath, 'utf-8')
+      const entries = JSON.parse(friendPermissionConfigsData) as Array<{ friend_id: FriendId; config: FriendPermissionConfig }>
+      for (const entry of entries) {
+        const friend = this.friends.get(entry.friend_id)
+        if (!friend) {
+          continue
+        }
+        this.friendPermissionConfigs.set(
+          entry.friend_id,
+          this.normalizeFriendPermissionConfig(friend, entry.config)
+        )
+      }
+      console.log(`[Admin] Loaded ${this.friendPermissionConfigs.size} friend permission configs`)
+    } catch {
+      console.log('[Admin] No existing friend permission configs data')
+    }
+
+    try {
       const schedulesData = await fs.readFile(this.schedulesFilePath, 'utf-8')
       const schedulesArray = JSON.parse(schedulesData) as Schedule[]
       for (const schedule of schedulesArray) {
@@ -3082,6 +3170,11 @@ export class AdminModule extends ModuleBase {
       ([session_id, config]) => ({ session_id, config })
     )
     await this.atomicWriteFile(this.sessionConfigsFilePath, JSON.stringify(sessionConfigsArray, null, 2))
+
+    const friendPermissionConfigsArray = Array.from(this.friendPermissionConfigs.entries()).map(
+      ([friend_id, config]) => ({ friend_id, config })
+    )
+    await this.atomicWriteFile(this.friendPermissionConfigsFilePath, JSON.stringify(friendPermissionConfigsArray, null, 2))
 
     const schedulesArray = Array.from(this.schedules.values())
     await this.atomicWriteFile(this.schedulesFilePath, JSON.stringify(schedulesArray, null, 2))
@@ -5793,6 +5886,97 @@ export class AdminModule extends ModuleBase {
     return { deleted: true }
   }
 
+  private normalizeFriendPermissionConfig(friend: Friend, config: FriendPermissionConfig): FriendPermissionConfig {
+    if (friend.permission === 'master') {
+      return {
+        tool_access: { ...config.tool_access },
+        storage: config.storage ? { ...config.storage } : null,
+        memory_scopes: [...config.memory_scopes],
+        updated_at: config.updated_at,
+      }
+    }
+
+    return {
+      tool_access: { ...config.tool_access, desktop: false },
+      storage: config.storage ? { ...config.storage } : null,
+      memory_scopes: [...config.memory_scopes],
+      updated_at: config.updated_at,
+    }
+  }
+
+  private resolveFriendTemplateId(friend: Friend): string | null {
+    if (friend.permission === 'master') {
+      return 'master_private'
+    }
+    return friend.permission_template_id ?? 'standard'
+  }
+
+  private buildResolvedFriendPermissions(friend: Friend): ResolvedPermissions | null {
+    if (friend.permission === 'master') {
+      return this.permissionTemplateManager.resolvePermissions('master_private', null)
+    }
+
+    const explicitConfig = this.friendPermissionConfigs.get(friend.id) ?? null
+    if (explicitConfig) {
+      const normalizedConfig = this.normalizeFriendPermissionConfig(friend, explicitConfig)
+      return {
+        tool_access: { ...normalizedConfig.tool_access },
+        storage: normalizedConfig.storage ? { ...normalizedConfig.storage } : null,
+        memory_scopes: [...normalizedConfig.memory_scopes],
+      }
+    }
+
+    const templateId = this.resolveFriendTemplateId(friend)
+    if (!templateId) {
+      return null
+    }
+    try {
+      return this.permissionTemplateManager.resolvePermissions(templateId, null)
+    } catch (error) {
+      if (error instanceof Error && 'code' in error && error.code === 'NOT_FOUND') {
+        return null
+      }
+      throw error
+    }
+  }
+
+  private async handleGetFriendPermission(friendId: FriendId): Promise<GetFriendPermissionResult> {
+    const friend = this.friends.get(friendId)
+    if (!friend) {
+      throw new Error('Friend not found')
+    }
+
+    const config = this.friendPermissionConfigs.get(friendId)
+      ? this.normalizeFriendPermissionConfig(friend, this.friendPermissionConfigs.get(friendId)!)
+      : null
+    const resolved = this.buildResolvedFriendPermissions(friend)
+    return { config, resolved }
+  }
+
+  private async handleUpdateFriendPermission(
+    friendId: FriendId,
+    config: UpdateFriendPermissionBody['config'],
+  ): Promise<{ config: FriendPermissionConfig }> {
+    const friend = this.friends.get(friendId)
+    if (!friend) {
+      throw new Error('Friend not found')
+    }
+    if (friend.permission === 'master') {
+      throw new Error('Cannot update master friend permissions')
+    }
+
+    const nextConfig = this.normalizeFriendPermissionConfig(friend, {
+      tool_access: { ...config.tool_access, desktop: false },
+      storage: config.storage ? { ...config.storage } : null,
+      memory_scopes: [...config.memory_scopes],
+      updated_at: generateTimestamp(),
+    })
+
+    this.friendPermissionConfigs.set(friendId, nextConfig)
+    await this.saveData()
+    return { config: nextConfig }
+  }
+
   // ============================================================================
   // Session 配置 RPC 方法
   // ============================================================================
@@ -5839,6 +6023,46 @@ export class AdminModule extends ModuleBase {
     const result = await this.handleDeleteSessionConfig({ session_id: sessionId })
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(result))
+  }
+
+  private async handleGetFriendPermissionApi(res: ServerResponse, friendId: FriendId): Promise<void> {
+    try {
+      const result = await this.handleGetFriendPermission(friendId)
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ config: result.config, resolved: result.resolved }))
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Friend not found') {
+        res.writeHead(404, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Friend not found' }))
+        return
+      }
+      throw error
+    }
+  }
+
+  private async handleUpdateFriendPermissionApi(
+    req: IncomingMessage,
+    res: ServerResponse,
+    friendId: FriendId,
+  ): Promise<void> {
+    const body = await this.readJsonBody<UpdateFriendPermissionBody>(req)
+    try {
+      const result = await this.handleUpdateFriendPermission(friendId, body.config)
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ config: result.config }))
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Cannot update master friend permissions') {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Cannot update master friend permissions' }))
+        return
+      }
+      if (error instanceof Error && error.message === 'Friend not found') {
+        res.writeHead(404, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Friend not found' }))
+        return
+      }
+      throw error
+    }
   }
 
   // ============================================================================

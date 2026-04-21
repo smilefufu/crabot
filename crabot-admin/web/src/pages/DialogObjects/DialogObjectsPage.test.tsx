@@ -15,6 +15,8 @@ const linkApplicationMaster = vi.fn()
 const rejectApplication = vi.fn()
 const listLegacyFriends = vi.fn()
 const updateFriend = vi.fn()
+const getFriendPermissions = vi.fn()
+const updateFriendPermissions = vi.fn()
 const linkIdentity = vi.fn()
 const unlinkIdentity = vi.fn()
 const listPermissionTemplates = vi.fn()
@@ -54,6 +56,8 @@ vi.mock('../../services/friend', () => ({
   friendService: {
     listFriends: (...args: unknown[]) => listLegacyFriends(...args),
     updateFriend: (...args: unknown[]) => updateFriend(...args),
+    getPermissions: (...args: unknown[]) => getFriendPermissions(...args),
+    updatePermissions: (...args: unknown[]) => updateFriendPermissions(...args),
     linkIdentity: (...args: unknown[]) => linkIdentity(...args),
     unlinkIdentity: (...args: unknown[]) => unlinkIdentity(...args),
   },
@@ -301,6 +305,48 @@ describe('DialogObjectsPage', () => {
         display_name: 'Alice Renamed',
       },
     })
+    getFriendPermissions.mockResolvedValue({
+      config: null,
+      resolved: {
+        tool_access: {
+          memory: true,
+          messaging: true,
+          task: false,
+          mcp_skill: false,
+          file_io: true,
+          browser: false,
+          shell: false,
+          remote_exec: false,
+          desktop: false,
+        },
+        storage: {
+          workspace_path: '/workspace/friends/alice',
+          access: 'read',
+        },
+        memory_scopes: ['friend:friend-1'],
+      },
+    })
+    updateFriendPermissions.mockResolvedValue({
+      config: {
+        tool_access: {
+          memory: true,
+          messaging: false,
+          task: false,
+          mcp_skill: false,
+          file_io: true,
+          browser: false,
+          shell: false,
+          remote_exec: false,
+          desktop: false,
+        },
+        storage: {
+          workspace_path: '/data/friend-1',
+          access: 'read',
+        },
+        memory_scopes: ['friend:friend-1', 'friend:shared'],
+        updated_at: '2026-04-21T00:00:00.000Z',
+      },
+    })
     linkIdentity.mockResolvedValue({
       friend: {
         id: 'friend-1',
@@ -361,6 +407,89 @@ describe('DialogObjectsPage', () => {
       expect(screen.getByRole('button', { name: /申请队列 2/ })).toBeInTheDocument()
     })
     expect((await screen.findAllByText('Alice')).length).toBeGreaterThan(0)
+  })
+
+  it('opens friend result-first permissions instead of a template selector', async () => {
+    render(<DialogObjectsPage />)
+
+    expect(await screen.findByRole('heading', { name: '好友详情' })).toBeInTheDocument()
+
+    await waitFor(() => {
+      expect(getFriendPermissions).toHaveBeenCalledWith('friend-1')
+    })
+
+    expect(screen.queryByLabelText('权限模板')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('记忆读写')).toBeChecked()
+    expect(screen.queryByLabelText('桌面控制（仅 Master 私聊）')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('启用存储')).toBeChecked()
+    expect(screen.getByLabelText('范围标识')).toHaveValue('friend:friend-1')
+  })
+
+  it('saves explicit friend permissions from the workbench', async () => {
+    render(<DialogObjectsPage />)
+
+    expect(await screen.findByRole('heading', { name: '好友详情' })).toBeInTheDocument()
+    await waitFor(() => {
+      expect(getFriendPermissions).toHaveBeenCalledWith('friend-1')
+    })
+
+    fireEvent.click(screen.getByLabelText('消息操作'))
+    fireEvent.change(screen.getByLabelText('工作区路径'), { target: { value: '/data/friend-1' } })
+    fireEvent.click(screen.getByLabelText('自定义范围'))
+    fireEvent.change(screen.getByLabelText('范围标识'), {
+      target: { value: 'friend:friend-1, friend:shared' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '保存权限' }))
+
+    await waitFor(() => {
+      expect(updateFriendPermissions).toHaveBeenCalledWith('friend-1', {
+        tool_access: expect.objectContaining({
+          messaging: false,
+        }),
+        storage: {
+          workspace_path: '/data/friend-1',
+          access: 'read',
+        },
+        memory_scopes: ['friend:friend-1', 'friend:shared'],
+      })
+    })
+  })
+
+  it('keeps friend permissions read-only when loading the resolved payload fails', async () => {
+    getFriendPermissions.mockRejectedValueOnce(new Error('friend permissions down'))
+
+    render(<DialogObjectsPage />)
+
+    expect(await screen.findByRole('heading', { name: '好友详情' })).toBeInTheDocument()
+
+    await waitFor(() => {
+      expect(getFriendPermissions).toHaveBeenCalledWith('friend-1')
+    })
+
+    expect(await screen.findByText('好友权限暂时不可编辑，请先刷新或修复加载错误。')).toBeInTheDocument()
+    expect(screen.queryByLabelText('记忆读写')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '保存权限' })).not.toBeInTheDocument()
+    expect(toastMock.error).toHaveBeenCalledWith('friend permissions down')
+  })
+
+  it('keeps friend permissions read-only when no resolved payload is returned', async () => {
+    getFriendPermissions.mockResolvedValueOnce({
+      config: null,
+      resolved: null,
+    })
+
+    render(<DialogObjectsPage />)
+
+    expect(await screen.findByRole('heading', { name: '好友详情' })).toBeInTheDocument()
+
+    await waitFor(() => {
+      expect(getFriendPermissions).toHaveBeenCalledWith('friend-1')
+    })
+
+    expect(await screen.findByText('好友权限暂时不可编辑，请先刷新或修复加载错误。')).toBeInTheDocument()
+    expect(screen.queryByLabelText('记忆读写')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '保存权限' })).not.toBeInTheDocument()
+    expect(toastMock.error).toHaveBeenCalledWith('好友权限未返回可编辑配置')
   })
 
   it('switches domains and renders fetched items for each domain', async () => {
@@ -529,43 +658,42 @@ describe('DialogObjectsPage', () => {
     expect(toastMock.error).toHaveBeenCalled()
   })
 
-  it('edits a normal friend from the dialog objects workbench and refreshes the list', async () => {
+  it('edits friend metadata from the dialog objects workbench and refreshes the list', async () => {
     render(<DialogObjectsPage />)
 
     expect(await screen.findByRole('heading', { name: '好友详情' })).toBeInTheDocument()
 
     fireEvent.change(screen.getByLabelText('显示名称'), { target: { value: 'Alice Renamed' } })
-    fireEvent.change(screen.getByLabelText('权限模板'), { target: { value: 'custom-template' } })
-    fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
+    fireEvent.click(screen.getByRole('button', { name: '保存基础信息' }))
 
     await waitFor(() => {
       expect(updateFriend).toHaveBeenCalledWith('friend-1', {
         display_name: 'Alice Renamed',
         permission: 'normal',
-        permission_template_id: 'custom-template',
       })
     })
-    expect(toastMock.success).toHaveBeenCalledWith('保存成功')
+    expect(updateFriendPermissions).not.toHaveBeenCalled()
+    expect(toastMock.success).toHaveBeenCalledWith('好友基础信息已保存')
     await waitFor(() => {
       expect(listFriends.mock.calls.length).toBeGreaterThan(1)
     })
   })
 
-  it('clears a normal friend permission template from the dialog objects workbench', async () => {
+  it('updates friend permission level without touching the explicit permission API', async () => {
     render(<DialogObjectsPage />)
 
     expect(await screen.findByRole('heading', { name: '好友详情' })).toBeInTheDocument()
 
-    fireEvent.change(screen.getByLabelText('权限模板'), { target: { value: '' } })
-    fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
+    fireEvent.change(screen.getByLabelText('权限'), { target: { value: 'master' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存基础信息' }))
 
     await waitFor(() => {
       expect(updateFriend).toHaveBeenCalledWith('friend-1', {
         display_name: 'Alice',
-        permission: 'normal',
-        permission_template_id: '',
+        permission: 'master',
       })
     })
+    expect(updateFriendPermissions).not.toHaveBeenCalled()
   })
 
   it('binds and unlinks channel identities in the dialog objects workbench', async () => {

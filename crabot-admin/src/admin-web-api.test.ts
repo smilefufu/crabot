@@ -6,7 +6,7 @@ import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest
 import http from 'node:http'
 import fs from 'node:fs/promises'
 import AdminModule from './index.js'
-import type { ChannelMessageRef, DialogObjectApplication, Friend, LoginResponse } from './types.js'
+import type { ChannelMessageRef, DialogObjectApplication, Friend, FriendPermissionConfig, LoginResponse } from './types.js'
 import { AdminErrorCode } from './types.js'
 
 const TEST_PROTOCOL_PORT = 19807
@@ -188,6 +188,96 @@ describe('Admin Web API', () => {
       expect(privatePool.body.items).toBeInstanceOf(Array)
       expect(groups.body.items).toBeInstanceOf(Array)
       expect(applications.body.items).toBeInstanceOf(Array)
+    })
+
+    it('should pass telegram master identities when listing groups', async () => {
+      const token = await loginAndGetToken()
+
+      admin['friends'].set('friend-master', {
+        id: 'friend-master',
+        display_name: 'FuFu',
+        permission: 'master',
+        permission_template_id: undefined,
+        channel_identities: [
+          {
+            channel_id: 'telegram-001',
+            platform_user_id: '7692507087',
+            platform_display_name: 'FuFu',
+          },
+        ],
+        created_at: '2026-04-19T00:00:00.000Z',
+        updated_at: '2026-04-19T00:00:00.000Z',
+      })
+
+      vi.spyOn(admin['channelManager'], 'listInstances').mockReturnValue({
+        items: [
+          {
+            id: 'telegram-001',
+            implementation_id: 'channel-telegram',
+            name: 'telegram-001',
+            platform: 'telegram',
+            auto_start: true,
+            start_priority: 30,
+            module_registered: true,
+            created_at: '2026-04-19T00:00:00.000Z',
+            updated_at: '2026-04-19T00:00:00.000Z',
+          },
+        ],
+        pagination: { page: 1, page_size: 1, total_items: 1, total_pages: 1 },
+      } as any)
+
+      vi.spyOn(admin['rpcClient'], 'resolve').mockResolvedValue([
+        {
+          module_id: 'telegram-001',
+          module_type: 'channel',
+          version: '0.1.0',
+          port: 19009,
+        },
+      ] as any)
+
+      vi.spyOn(admin['rpcClient'], 'call').mockImplementation(async (_port, method, params) => {
+        if (method === 'get_sessions') {
+          expect(params).toEqual({
+            type: 'group',
+            pagination: { page: 1, page_size: 100 },
+            hydrate_participant_user_ids: ['7692507087'],
+          })
+          return {
+            items: [
+              {
+                id: 'group-session-1',
+                channel_id: 'telegram-001',
+                type: 'group',
+                platform_session_id: '-4655543630',
+                title: '全栈工程师哈哈 & Mr.Wu',
+                participants: [
+                  { platform_user_id: '7692507087', role: 'member' },
+                ],
+                created_at: '2026-04-19T00:00:00.000Z',
+                updated_at: '2026-04-19T00:00:00.000Z',
+              },
+            ],
+            pagination: {
+              page: 1,
+              page_size: 100,
+              total_items: 1,
+              total_pages: 1,
+            },
+          } as any
+        }
+        throw new Error(`Unexpected RPC method: ${String(method)}`)
+      })
+
+      const response = await makeWebRequest<{ items: unknown[] }>(
+        TEST_WEB_PORT,
+        '/api/dialog-objects/groups',
+        'GET',
+        null,
+        token
+      )
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body.items).toHaveLength(1)
     })
   })
 
@@ -570,6 +660,458 @@ describe('Admin Web API', () => {
       expect(response.statusCode).toBe(204)
     })
   })
+
+  describe('friend permission API master behavior', () => {
+    it('should resolve master permissions from master_private even if an explicit friend config exists', async () => {
+      const token = await loginAndGetToken()
+      const friendId = 'master-read-test'
+      admin['friends'].set(friendId, {
+        id: friendId,
+        display_name: 'Master Read Test',
+        permission: 'master',
+        channel_identities: [],
+        created_at: '2026-04-21T00:00:00.000Z',
+        updated_at: '2026-04-21T00:00:00.000Z',
+      })
+
+      const explicitConfig: FriendPermissionConfig = {
+        tool_access: {
+          memory: false,
+          messaging: false,
+          task: false,
+          mcp_skill: false,
+          file_io: false,
+          browser: false,
+          shell: false,
+          remote_exec: false,
+          desktop: false,
+        },
+        storage: null,
+        memory_scopes: ['should-not-apply'],
+        updated_at: '2026-04-21T00:00:00.000Z',
+      }
+      admin['friendPermissionConfigs'].set(friendId, explicitConfig)
+
+      const response = await makeWebRequest<{
+        config: FriendPermissionConfig | null
+        resolved: {
+          tool_access: FriendPermissionConfig['tool_access']
+          storage: FriendPermissionConfig['storage']
+          memory_scopes: string[]
+        } | null
+      }>(
+        TEST_WEB_PORT,
+        `/api/friends/${friendId}/permissions`,
+        'GET',
+        null,
+        token
+      )
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body.config).toEqual(explicitConfig)
+      expect(response.body.resolved).toEqual({
+        tool_access: {
+          memory: true,
+          messaging: true,
+          task: true,
+          mcp_skill: true,
+          file_io: true,
+          browser: true,
+          shell: true,
+          remote_exec: true,
+          desktop: true,
+        },
+        storage: { workspace_path: '/', access: 'readwrite' },
+        memory_scopes: [],
+      })
+    })
+
+    it('should resolve an untouched normal friend from the standard template', async () => {
+      const token = await loginAndGetToken()
+      const friendId = 'normal-standard-read-test'
+      admin['friends'].set(friendId, {
+        id: friendId,
+        display_name: 'Normal Standard Read Test',
+        permission: 'normal',
+        permission_template_id: 'standard',
+        channel_identities: [],
+        created_at: '2026-04-21T00:00:00.000Z',
+        updated_at: '2026-04-21T00:00:00.000Z',
+      })
+
+      const response = await getFriendPermissions(token, friendId)
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body.config).toBeNull()
+      expect(response.body.resolved).toEqual({
+        tool_access: {
+          memory: true,
+          messaging: true,
+          task: true,
+          mcp_skill: false,
+          file_io: false,
+          browser: false,
+          shell: false,
+          remote_exec: false,
+          desktop: false,
+        },
+        storage: null,
+        memory_scopes: [],
+      })
+    })
+
+    it('should resolve an untouched normal friend without a template id from the standard template', async () => {
+      const token = await loginAndGetToken()
+      const friendId = 'normal-implicit-standard-read-test'
+      admin['friends'].set(friendId, {
+        id: friendId,
+        display_name: 'Normal Implicit Standard Read Test',
+        permission: 'normal',
+        channel_identities: [],
+        created_at: '2026-04-21T00:00:00.000Z',
+        updated_at: '2026-04-21T00:00:00.000Z',
+      })
+
+      const response = await getFriendPermissions(token, friendId)
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body.config).toBeNull()
+      expect(response.body.resolved).toEqual({
+        tool_access: {
+          memory: true,
+          messaging: true,
+          task: true,
+          mcp_skill: false,
+          file_io: false,
+          browser: false,
+          shell: false,
+          remote_exec: false,
+          desktop: false,
+        },
+        storage: null,
+        memory_scopes: [],
+      })
+    })
+
+    it('should return 404 for an unknown friend when reading permissions', async () => {
+      const token = await loginAndGetToken()
+
+      const response = await getFriendPermissions(token, 'missing-friend-read-test')
+
+      expect(response.statusCode).toBe(404)
+      expect(response.body.error).toBe('Friend not found')
+    })
+
+    it('should return 404 for an unknown friend when updating permissions', async () => {
+      const token = await loginAndGetToken()
+
+      const response = await putFriendPermissions(token, 'missing-friend-update-test', {
+        tool_access: {
+          memory: true,
+          messaging: true,
+          task: true,
+          mcp_skill: false,
+          file_io: false,
+          browser: false,
+          shell: false,
+          remote_exec: false,
+          desktop: false,
+        },
+        storage: null,
+        memory_scopes: [],
+      })
+
+      expect(response.statusCode).toBe(404)
+      expect(response.body.error).toBe('Friend not found')
+    })
+
+    it('should read the master friend with empty memory scopes and master storage defaults', async () => {
+      const token = await loginAndGetToken()
+      const friendId = 'master-default-read-test'
+      admin['friends'].set(friendId, {
+        id: friendId,
+        display_name: 'Master Default Read Test',
+        permission: 'master',
+        channel_identities: [],
+        created_at: '2026-04-21T00:00:00.000Z',
+        updated_at: '2026-04-21T00:00:00.000Z',
+      })
+
+      const response = await getFriendPermissions(token, friendId)
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body.config).toBeNull()
+      expect(response.body.resolved).toEqual({
+        tool_access: {
+          memory: true,
+          messaging: true,
+          task: true,
+          mcp_skill: true,
+          file_io: true,
+          browser: true,
+          shell: true,
+          remote_exec: true,
+          desktop: true,
+        },
+        storage: { workspace_path: '/', access: 'readwrite' },
+        memory_scopes: [],
+      })
+    })
+
+    it('should reject updating master friend permissions', async () => {
+      const token = await loginAndGetToken()
+      const friendId = 'master-update-test'
+      admin['friends'].set(friendId, {
+        id: friendId,
+        display_name: 'Master Update Test',
+        permission: 'master',
+        channel_identities: [],
+        created_at: '2026-04-21T00:00:00.000Z',
+        updated_at: '2026-04-21T00:00:00.000Z',
+      })
+
+      const response = await makeWebRequest<{ error: string }>(
+        TEST_WEB_PORT,
+        `/api/friends/${friendId}/permissions`,
+        'PUT',
+        {
+          config: {
+            tool_access: {
+              memory: false,
+              messaging: true,
+              task: false,
+              mcp_skill: false,
+              file_io: false,
+              browser: false,
+              shell: false,
+              remote_exec: false,
+              desktop: false,
+            },
+            storage: null,
+            memory_scopes: ['should-not-save'],
+          },
+        },
+        token
+      )
+
+      expect(response.statusCode).toBe(400)
+      expect(response.body.error).toBe('Cannot update master friend permissions')
+      expect(admin['friendPermissionConfigs'].has(friendId)).toBe(false)
+    })
+  })
+
+  describe('friend permission API non-master behavior', () => {
+    it('should normalize a preexisting stale explicit non-master config on read', async () => {
+      const token = await loginAndGetToken()
+      const friendId = 'normal-stale-config-read-test'
+      admin['friends'].set(friendId, {
+        id: friendId,
+        display_name: 'Normal Stale Config Read Test',
+        permission: 'normal',
+        permission_template_id: 'standard',
+        channel_identities: [],
+        created_at: '2026-04-21T00:00:00.000Z',
+        updated_at: '2026-04-21T00:00:00.000Z',
+      })
+      admin['friendPermissionConfigs'].set(friendId, {
+        tool_access: {
+          memory: true,
+          messaging: true,
+          task: true,
+          mcp_skill: false,
+          file_io: false,
+          browser: false,
+          shell: false,
+          remote_exec: false,
+          desktop: true,
+        },
+        storage: null,
+        memory_scopes: ['scope-stale'],
+        updated_at: '2026-04-21T00:00:00.000Z',
+      })
+
+      const response = await makeWebRequest<{
+        config: FriendPermissionConfig | null
+        resolved: {
+          tool_access: FriendPermissionConfig['tool_access']
+          storage: FriendPermissionConfig['storage']
+          memory_scopes: string[]
+        } | null
+      }>(
+        TEST_WEB_PORT,
+        `/api/friends/${friendId}/permissions`,
+        'GET',
+        null,
+        token
+      )
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body.config?.tool_access.desktop).toBe(false)
+      expect(response.body.resolved?.tool_access.desktop).toBe(false)
+    })
+
+    it('should clamp desktop to false when saving explicit non-master friend permissions', async () => {
+      const token = await loginAndGetToken()
+      const friendId = 'normal-desktop-clamp-test'
+      admin['friends'].set(friendId, {
+        id: friendId,
+        display_name: 'Normal Desktop Clamp Test',
+        permission: 'normal',
+        permission_template_id: 'standard',
+        channel_identities: [],
+        created_at: '2026-04-21T00:00:00.000Z',
+        updated_at: '2026-04-21T00:00:00.000Z',
+      })
+
+      const response = await makeWebRequest<{ config: FriendPermissionConfig }>(
+        TEST_WEB_PORT,
+        `/api/friends/${friendId}/permissions`,
+        'PUT',
+        {
+          config: {
+            tool_access: {
+              memory: true,
+              messaging: true,
+              task: true,
+              mcp_skill: false,
+              file_io: false,
+              browser: false,
+              shell: false,
+              remote_exec: false,
+              desktop: true,
+            },
+            storage: null,
+            memory_scopes: ['scope-a'],
+          },
+        },
+        token
+      )
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body.config.tool_access.desktop).toBe(false)
+      expect(admin['friendPermissionConfigs'].get(friendId)?.tool_access.desktop).toBe(false)
+    })
+
+    it('should save explicit non-master permissions and return matching config and resolved data', async () => {
+      const token = await loginAndGetToken()
+      const friendId = 'normal-explicit-save-test'
+      admin['friends'].set(friendId, {
+        id: friendId,
+        display_name: 'Normal Explicit Save Test',
+        permission: 'normal',
+        permission_template_id: 'standard',
+        channel_identities: [],
+        created_at: '2026-04-21T00:00:00.000Z',
+        updated_at: '2026-04-21T00:00:00.000Z',
+      })
+
+      const requestedConfig = {
+        tool_access: {
+          memory: true,
+          messaging: false,
+          task: true,
+          mcp_skill: false,
+          file_io: true,
+          browser: false,
+          shell: false,
+          remote_exec: false,
+          desktop: false,
+        },
+        storage: { workspace_path: '/workspace/projects', access: 'readwrite' as const },
+        memory_scopes: ['scope-a', 'scope-b'],
+      }
+
+      const saveResponse = await putFriendPermissions(token, friendId, requestedConfig)
+
+      expect(saveResponse.statusCode).toBe(200)
+      expect(saveResponse.body.config).toMatchObject(requestedConfig)
+      expect(saveResponse.body.config.updated_at).toBeDefined()
+
+      const readResponse = await getFriendPermissions(token, friendId)
+
+      expect(readResponse.statusCode).toBe(200)
+      expect(readResponse.body.config).toMatchObject(requestedConfig)
+      expect(readResponse.body.config?.updated_at).toBe(saveResponse.body.config.updated_at)
+      expect(readResponse.body.resolved).toEqual({
+        ...requestedConfig,
+      })
+    })
+
+    it('should return resolved null when a non-master friend template is missing', async () => {
+      const token = await loginAndGetToken()
+      const friendId = 'normal-missing-template-test'
+      admin['friends'].set(friendId, {
+        id: friendId,
+        display_name: 'Normal Missing Template Test',
+        permission: 'normal',
+        permission_template_id: 'missing-template',
+        channel_identities: [],
+        created_at: '2026-04-21T00:00:00.000Z',
+        updated_at: '2026-04-21T00:00:00.000Z',
+      })
+
+      const response = await makeWebRequest<{
+        config: FriendPermissionConfig | null
+        resolved: {
+          tool_access: FriendPermissionConfig['tool_access']
+          storage: FriendPermissionConfig['storage']
+          memory_scopes: string[]
+        } | null
+      }>(
+        TEST_WEB_PORT,
+        `/api/friends/${friendId}/permissions`,
+        'GET',
+        null,
+        token
+      )
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body.config).toBeNull()
+      expect(response.body.resolved).toBeNull()
+    })
+
+    it('should delete a friend permission config when the friend is deleted', async () => {
+      const token = await loginAndGetToken()
+      const friendId = 'normal-delete-config-test'
+      admin['friends'].set(friendId, {
+        id: friendId,
+        display_name: 'Normal Delete Config Test',
+        permission: 'normal',
+        permission_template_id: 'standard',
+        channel_identities: [],
+        created_at: '2026-04-21T00:00:00.000Z',
+        updated_at: '2026-04-21T00:00:00.000Z',
+      })
+      admin['friendPermissionConfigs'].set(friendId, {
+        tool_access: {
+          memory: true,
+          messaging: true,
+          task: true,
+          mcp_skill: false,
+          file_io: false,
+          browser: false,
+          shell: false,
+          remote_exec: false,
+          desktop: false,
+        },
+        storage: null,
+        memory_scopes: ['scope-delete'],
+        updated_at: '2026-04-21T00:00:00.000Z',
+      })
+
+      const response = await makeWebRequest<{ deleted: true }>(
+        TEST_WEB_PORT,
+        `/api/friends/${friendId}`,
+        'DELETE',
+        null,
+        token
+      )
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body.deleted).toBe(true)
+      expect(admin['friendPermissionConfigs'].has(friendId)).toBe(false)
+    })
+  })
 })
 
 // Helper functions
@@ -656,6 +1198,37 @@ async function loginAndGetToken(): Promise<string> {
   expect(response.statusCode).toBe(200)
   expect(response.body.token).toBeDefined()
   return response.body.token
+}
+
+function getFriendPermissions(token: string, friendId: string) {
+  return makeWebRequest<{
+    config: FriendPermissionConfig | null
+    resolved: {
+      tool_access: FriendPermissionConfig['tool_access']
+      storage: FriendPermissionConfig['storage']
+      memory_scopes: string[]
+    } | null
+  }>(
+    TEST_WEB_PORT,
+    `/api/friends/${friendId}/permissions`,
+    'GET',
+    null,
+    token
+  )
+}
+
+function putFriendPermissions(
+  token: string,
+  friendId: string,
+  config: Omit<FriendPermissionConfig, 'updated_at'>
+) {
+  return makeWebRequest<{ config: FriendPermissionConfig }>(
+    TEST_WEB_PORT,
+    `/api/friends/${friendId}/permissions`,
+    'PUT',
+    { config },
+    token
+  )
 }
 
 function makePrivateMessageRef(params: {

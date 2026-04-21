@@ -2,12 +2,16 @@ import React from 'react'
 import { Button } from '../../../components/Common/Button'
 import { Card } from '../../../components/Common/Card'
 import { Input } from '../../../components/Common/Input'
+import { Loading } from '../../../components/Common/Loading'
+import { parseMemoryScopes, summarizeFriendMemoryScopes, summarizeFriendStorage } from '../friend-permission-utils'
 import type {
   ChannelIdentity,
   DialogObjectFriend,
   FriendPermission,
-  PermissionTemplate,
+  ToolAccessConfig,
+  ToolCategory,
 } from '../../../types'
+import { TOOL_CATEGORIES, TOOL_CATEGORY_LABELS } from '../../../types'
 
 const workbenchLinkStyle: React.CSSProperties = {
   display: 'inline-flex',
@@ -50,34 +54,89 @@ interface FriendWorkbenchProps {
   friend: DialogObjectFriend | null
   editName: string
   editPerm: FriendPermission
-  editTemplateId: string
-  permissionTemplates: PermissionTemplate[]
-  savingFriend: boolean
+  savingMetadata: boolean
+  friendPermissionLoading: boolean
+  friendPermissionState: 'idle' | 'loading' | 'ready' | 'unavailable'
+  friendPermissionUnavailableMessage: string | null
+  savingPermissions: boolean
+  friendToolAccess: ToolAccessConfig
+  friendStorageEnabled: boolean
+  friendStoragePath: string
+  friendStorageAccess: 'read' | 'readwrite'
+  friendMemoryMode: 'empty' | 'custom'
+  friendMemoryScopesInput: string
   confirmUnlinkKey: string | null
   unlinkingIdentity: boolean
   onEditNameChange: (value: string) => void
   onEditPermChange: (value: FriendPermission) => void
-  onEditTemplateChange: (value: string) => void
-  onSave: () => void
+  onSaveMetadata: () => void
+  onFriendToolAccessChange: (category: ToolCategory, checked: boolean) => void
+  onFriendStorageEnabledChange: (enabled: boolean) => void
+  onFriendStoragePathChange: (value: string) => void
+  onFriendStorageAccessChange: (value: 'read' | 'readwrite') => void
+  onFriendMemoryModeChange: (value: 'empty' | 'custom') => void
+  onFriendMemoryScopesInputChange: (value: string) => void
+  onSavePermissions: () => void
   onOpenBindDrawer: () => void
   onRequestUnlink: (key: string) => void
   onCancelUnlink: () => void
   onConfirmUnlink: (identity: ChannelIdentity) => void
 }
 
+const DEFAULT_STORAGE_PATH = '/workspace'
+
+const PermissionSwitchRow: React.FC<{
+  label: string
+  category: ToolCategory
+  checked: boolean
+  onChange: (cat: ToolCategory, checked: boolean) => void
+}> = ({ label, category, checked, onChange }) => {
+  return (
+    <label className="session-permission-switch-row">
+      <span className="session-permission-switch-value">
+        <span>{label}</span>
+        <span>{checked ? '开启' : '关闭'}</span>
+      </span>
+      <span className="toggle-switch">
+        <input
+          aria-label={label}
+          type="checkbox"
+          checked={checked}
+          onChange={(event) => onChange(category, event.target.checked)}
+        />
+        <span className="toggle-track" />
+      </span>
+    </label>
+  )
+}
+
 export const FriendWorkbench: React.FC<FriendWorkbenchProps> = ({
   friend,
   editName,
   editPerm,
-  editTemplateId,
-  permissionTemplates,
-  savingFriend,
+  savingMetadata,
+  friendPermissionLoading,
+  friendPermissionState,
+  friendPermissionUnavailableMessage,
+  savingPermissions,
+  friendToolAccess,
+  friendStorageEnabled,
+  friendStoragePath,
+  friendStorageAccess,
+  friendMemoryMode,
+  friendMemoryScopesInput,
   confirmUnlinkKey,
   unlinkingIdentity,
   onEditNameChange,
   onEditPermChange,
-  onEditTemplateChange,
-  onSave,
+  onSaveMetadata,
+  onFriendToolAccessChange,
+  onFriendStorageEnabledChange,
+  onFriendStoragePathChange,
+  onFriendStorageAccessChange,
+  onFriendMemoryModeChange,
+  onFriendMemoryScopesInputChange,
+  onSavePermissions,
   onOpenBindDrawer,
   onRequestUnlink,
   onCancelUnlink,
@@ -97,9 +156,11 @@ export const FriendWorkbench: React.FC<FriendWorkbenchProps> = ({
     contextLabel: friend.display_name,
   })
   const isLockedMaster = friend.permission === 'master'
+  const canEditPermissions = friendPermissionState === 'ready'
   const hasChanges = editName !== friend.display_name
     || editPerm !== friend.permission
-    || editTemplateId !== (friend.permission_template_id ?? '')
+  const parsedMemoryScopes = parseMemoryScopes(friendMemoryScopesInput)
+  const memorySummary = summarizeFriendMemoryScopes(friend.id, friendMemoryMode === 'empty' ? [] : parsedMemoryScopes)
 
   return (
     <Card title="好友详情">
@@ -124,37 +185,160 @@ export const FriendWorkbench: React.FC<FriendWorkbenchProps> = ({
               <option value="master">Master</option>
             </select>
           </label>
-          {editPerm === 'normal' && (
-            <label style={{ display: 'grid', gap: '0.35rem' }}>
-              <span style={{ fontSize: '0.875rem', fontWeight: 500 }}>权限模板</span>
-              <select
-                aria-label="权限模板"
-                value={editTemplateId}
-                onChange={(event) => onEditTemplateChange(event.target.value)}
-                className="select"
-              >
-                <option value="">未选择</option>
-                {permissionTemplates
-                  .filter((template) => template.id !== 'master_private')
-                  .map((template) => (
-                    <option key={template.id} value={template.id}>
-                      {template.name}{template.is_system ? ' (系统)' : ''}
-                    </option>
-                  ))}
-              </select>
-            </label>
-          )}
           <div style={{ display: 'flex', gap: '1rem', fontSize: '0.75rem', color: 'var(--text-tertiary)' }}>
             <span>状态：{friend.status === 'active' ? '活跃' : '无渠道'}</span>
             <span>权限等级：{friend.permission}</span>
           </div>
           <Button
             variant="primary"
-            onClick={onSave}
-            disabled={savingFriend || !editName.trim() || !hasChanges}
+            onClick={onSaveMetadata}
+            disabled={savingMetadata || !editName.trim() || !hasChanges}
           >
-            {savingFriend ? '保存中...' : '保存修改'}
+            {savingMetadata ? '保存中...' : '保存基础信息'}
           </Button>
+        </div>
+
+        <div className="dialog-object-permission-panel">
+          <div style={{ display: 'grid', gap: '0.35rem' }}>
+            <strong>好友权限</strong>
+            <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
+              直接编辑当前生效权限，保存后写入该好友的显式私聊权限配置。
+            </div>
+          </div>
+
+          {isLockedMaster ? (
+            <div className="dialog-object-permission-readonly">
+              Master 好友权限保持锁定，不在这里编辑。
+            </div>
+          ) : friendPermissionLoading || friendPermissionState === 'loading' ? (
+            <Loading />
+          ) : !canEditPermissions ? (
+            <div className="dialog-object-permission-readonly">
+              {friendPermissionUnavailableMessage ?? '好友权限暂时不可编辑，请先刷新或修复加载错误。'}
+            </div>
+          ) : (
+            <div style={{ display: 'grid', gap: '1rem' }}>
+              <div className="session-modal-section">
+                <div style={{ fontWeight: 600 }}>工具权限</div>
+                <div className="session-permission-switch-list">
+                  {TOOL_CATEGORIES.filter((category) => category !== 'desktop').map((category) => (
+                    <PermissionSwitchRow
+                      key={category}
+                      label={TOOL_CATEGORY_LABELS[category]}
+                      category={category}
+                      checked={friendToolAccess[category]}
+                      onChange={onFriendToolAccessChange}
+                    />
+                  ))}
+                </div>
+              </div>
+
+              <div className="session-modal-section">
+                <div style={{ fontWeight: 600 }}>存储权限</div>
+                <label className="session-permission-switch-row">
+                  <span className="session-permission-switch-value">
+                    <span>启用存储</span>
+                    <span>
+                      {friendStorageEnabled
+                        ? summarizeFriendStorage({
+                            workspace_path: friendStoragePath.trim() || DEFAULT_STORAGE_PATH,
+                            access: friendStorageAccess,
+                          })
+                        : '未开启'}
+                    </span>
+                  </span>
+                  <span className="toggle-switch">
+                    <input
+                      aria-label="启用存储"
+                      type="checkbox"
+                      checked={friendStorageEnabled}
+                      onChange={(event) => onFriendStorageEnabledChange(event.target.checked)}
+                    />
+                    <span className="toggle-track" />
+                  </span>
+                </label>
+                {friendStorageEnabled && (
+                  <div className="session-detail-grid">
+                    <Input
+                      label="工作区路径"
+                      aria-label="工作区路径"
+                      value={friendStoragePath}
+                      onChange={(event) => onFriendStoragePathChange(event.target.value)}
+                      help="输入当前好友私聊可访问的工作区路径。"
+                    />
+                    <label style={{ display: 'grid', gap: '0.35rem' }}>
+                      <span style={{ fontSize: '0.875rem', fontWeight: 500 }}>访问级别</span>
+                      <select
+                        aria-label="访问级别"
+                        value={friendStorageAccess}
+                        onChange={(event) => onFriendStorageAccessChange(event.target.value as 'read' | 'readwrite')}
+                        className="select"
+                      >
+                        <option value="read">只读</option>
+                        <option value="readwrite">读写</option>
+                      </select>
+                    </label>
+                  </div>
+                )}
+              </div>
+
+              <div className="session-modal-section">
+                <div style={{ fontWeight: 600 }}>记忆范围</div>
+                <div className="session-segmented-control" role="radiogroup" aria-label="记忆范围模式">
+                  <label className={`session-segmented-option ${friendMemoryMode === 'empty' ? 'session-segmented-option--active' : ''}`}>
+                    <input
+                      aria-label="空范围"
+                      type="radio"
+                      name="friend-memory-mode"
+                      checked={friendMemoryMode === 'empty'}
+                      onChange={() => onFriendMemoryModeChange('empty')}
+                    />
+                    <span>空范围</span>
+                  </label>
+                  <label className={`session-segmented-option ${friendMemoryMode === 'custom' ? 'session-segmented-option--active' : ''}`}>
+                    <input
+                      aria-label="自定义范围"
+                      type="radio"
+                      name="friend-memory-mode"
+                      checked={friendMemoryMode === 'custom'}
+                      onChange={() => onFriendMemoryModeChange('custom')}
+                    />
+                    <span>自定义范围</span>
+                  </label>
+                </div>
+
+                {friendMemoryMode === 'custom' && (
+                  <label style={{ display: 'grid', gap: '0.35rem' }}>
+                    <span style={{ fontSize: '0.875rem', fontWeight: 500 }}>范围标识</span>
+                    <textarea
+                      aria-label="范围标识"
+                      className="textarea"
+                      value={friendMemoryScopesInput}
+                      onChange={(event) => onFriendMemoryScopesInputChange(event.target.value)}
+                      placeholder="例如：friend:friend-1, friend:shared"
+                    />
+                    <span className="form-help">多个范围可用逗号或换行分隔。</span>
+                  </label>
+                )}
+
+                <div className="session-inline-summary">
+                  当前生效：
+                  {' '}
+                  {memorySummary}
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+                <Button
+                  variant="primary"
+                  onClick={onSavePermissions}
+                  disabled={savingPermissions || friendPermissionLoading}
+                >
+                  {savingPermissions ? '保存中...' : '保存权限'}
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
 
         <div>

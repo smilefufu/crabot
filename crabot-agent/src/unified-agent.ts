@@ -22,6 +22,7 @@ import type {
   ToolAccessConfig,
   StoragePermission,
   SessionPermissionConfig,
+  FriendPermissionConfig,
   TaskId,
   FriendId,
   Friend,
@@ -51,6 +52,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { McpConnector } from './agent/mcp-connector.js'
 import { createCrabMessagingServer, type PathMapping } from './mcp/crab-messaging.js'
 import { TraceStore } from './core/trace-store.js'
+import { getAgentTraceDir } from './core/data-paths.js'
 import { PromptManager } from './prompt-manager.js'
 import { SUBAGENT_DEFINITIONS, type SubAgentDefinition } from './agent/subagent-prompts.js'
 import { createLSPManager, type LSPManager } from './lsp/lsp-manager.js'
@@ -158,8 +160,7 @@ export class UnifiedAgent extends ModuleBase {
 
     super(moduleConfig)
 
-    const traceDir = path.join(process.env.DATA_DIR ?? './data', 'agent', 'traces')
-    this.traceStore = new TraceStore(100, traceDir)
+    this.traceStore = new TraceStore(100, getAgentTraceDir())
     this.lspManager = createLSPManager()
 
     this.promptManager = new PromptManager()
@@ -985,12 +986,36 @@ export class UnifiedAgent extends ModuleBase {
     friend: Friend,
     sessionId: string,
   ): Promise<ResolvedPermissions | null> {
+    const friendPermissions = await this.fetchFriendPermissions(friend)
+    if (friendPermissions === null) {
+      return null
+    }
+    if (friendPermissions.config) {
+      return friendPermissions.resolved
+    }
+
     const templateId = friend.permission === 'master'
       ? 'master_private'
-      : friend.permission_template_id
+      : (friend.permission_template_id ?? 'standard')
 
     if (!templateId) return null
     return this.resolvePermissionsForTemplate(templateId, sessionId)
+  }
+
+  private async fetchFriendPermissions(friend: Friend): Promise<{
+    config: FriendPermissionConfig | null
+    resolved: ResolvedPermissions | null
+  } | null> {
+    try {
+      const adminPort = await this.getAdminPort()
+      return await this.rpcClient.call<
+        { friend_id: string },
+        { config: FriendPermissionConfig | null; resolved: ResolvedPermissions | null }
+      >(adminPort, 'get_friend_permissions', { friend_id: friend.id }, this.config.moduleId)
+    } catch (err) {
+      console.warn(`[Agent] Failed to resolve friend permissions for ${friend.id}:`, err)
+      return null
+    }
   }
 
   /**

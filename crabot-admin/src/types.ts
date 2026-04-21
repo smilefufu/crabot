@@ -127,11 +127,27 @@ export interface SessionPermissionConfig {
   updated_at: string
 }
 
+export interface FriendPermissionConfig {
+  tool_access: ToolAccessConfig
+  storage: StoragePermission | null
+  memory_scopes: string[]
+  updated_at: string
+}
+
 /** 合并后的权限（模板 + Session 覆盖） */
 export interface ResolvedPermissions {
   tool_access: ToolAccessConfig
   storage: StoragePermission | null
   memory_scopes: string[]
+}
+
+export interface GetFriendPermissionResult {
+  config: FriendPermissionConfig | null
+  resolved: ResolvedPermissions | null
+}
+
+export interface UpdateFriendPermissionBody {
+  config: Omit<FriendPermissionConfig, 'updated_at'>
 }
 
 // ============================================================================

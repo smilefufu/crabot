@@ -1695,6 +1695,23 @@ code, pre, .mono {
   margin-bottom: 1.5rem;
 }
 
+.dialog-object-permission-panel {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.dialog-object-permission-readonly {
+  padding: 0.875rem 1rem;
+  border: 1px dashed var(--border-highlight);
+  border-radius: 10px;
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+}
+
 .session-permission-switch-list {
   display: grid;
   grid-template-columns: 1fr;

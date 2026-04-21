@@ -8,7 +8,29 @@ import type {
   PaginatedResponse,
   ChannelIdentity,
   FriendPermission,
+  StoragePermission,
+  ToolAccessConfig,
 } from '../types'
+
+export interface FriendPermissionConfig {
+  tool_access: ToolAccessConfig
+  storage: StoragePermission | null
+  memory_scopes: string[]
+  updated_at: string
+}
+
+export interface FriendPermissionResolved {
+  tool_access: ToolAccessConfig
+  storage: StoragePermission | null
+  memory_scopes: string[]
+}
+
+export interface FriendPermissionResponse {
+  config: FriendPermissionConfig | null
+  resolved: FriendPermissionResolved | null
+}
+
+export type FriendPermissionUpdateConfig = Omit<FriendPermissionConfig, 'updated_at'>
 
 export const friendService = {
   async listFriends(params?: {
@@ -42,6 +64,20 @@ export const friendService = {
   async unlinkIdentity(friendId: string, channelId: string, platformUserId: string): Promise<{ friend: Friend }> {
     return api.delete<{ friend: Friend }>(
       `/friends/${friendId}/identities/${encodeURIComponent(channelId)}/${encodeURIComponent(platformUserId)}`
+    )
+  },
+
+  async getPermissions(friendId: string): Promise<FriendPermissionResponse> {
+    return api.get<FriendPermissionResponse>(`/friends/${encodeURIComponent(friendId)}/permissions`)
+  },
+
+  async updatePermissions(
+    friendId: string,
+    config: FriendPermissionUpdateConfig
+  ): Promise<{ config: FriendPermissionConfig }> {
+    return api.put<{ config: FriendPermissionConfig }>(
+      `/friends/${encodeURIComponent(friendId)}/permissions`,
+      { config }
     )
   },
 }

@@ -157,15 +157,39 @@ describe('DialogObjects components', () => {
         friend={friend}
         editName="Alice"
         editPerm="normal"
-        editTemplateId="standard"
-        permissionTemplates={[]}
-        savingFriend={false}
+        savingMetadata={false}
+        friendPermissionLoading={false}
+        friendPermissionState="ready"
+        friendPermissionUnavailableMessage={null}
+        savingPermissions={false}
+        friendToolAccess={{
+          memory: true,
+          messaging: true,
+          task: false,
+          mcp_skill: false,
+          file_io: true,
+          browser: false,
+          shell: false,
+          remote_exec: false,
+          desktop: false,
+        }}
+        friendStorageEnabled
+        friendStoragePath="/workspace/friends/alice"
+        friendStorageAccess="read"
+        friendMemoryMode="custom"
+        friendMemoryScopesInput="friend:friend-1"
         confirmUnlinkKey={null}
         unlinkingIdentity={false}
         onEditNameChange={() => {}}
         onEditPermChange={() => {}}
-        onEditTemplateChange={() => {}}
-        onSave={() => {}}
+        onSaveMetadata={() => {}}
+        onFriendToolAccessChange={() => {}}
+        onFriendStorageEnabledChange={() => {}}
+        onFriendStoragePathChange={() => {}}
+        onFriendStorageAccessChange={() => {}}
+        onFriendMemoryModeChange={() => {}}
+        onFriendMemoryScopesInputChange={() => {}}
+        onSavePermissions={() => {}}
         onOpenBindDrawer={() => {}}
         onRequestUnlink={() => {}}
         onCancelUnlink={() => {}}
@@ -173,6 +197,9 @@ describe('DialogObjects components', () => {
       />
     )
     expect(screen.getByRole('link', { name: '打开私聊场景画像' })).toHaveAttribute('href', '/memory/scenes/friend%3Afriend-1')
+    expect(screen.getByLabelText('记忆读写')).toBeInTheDocument()
+    expect(screen.queryByLabelText('桌面控制（仅 Master 私聊）')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('权限模板')).not.toBeInTheDocument()
 
     rerender(
       <PrivatePoolWorkbench

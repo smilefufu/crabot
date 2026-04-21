@@ -195,6 +195,13 @@ export interface SessionPermissionConfig {
   updated_at: string
 }
 
+export interface FriendPermissionConfig {
+  tool_access: ToolAccessConfig
+  storage: StoragePermission | null
+  memory_scopes: string[]
+  updated_at: string
+}
+
 // ============================================================================
 // Worker 选择
 // ============================================================================

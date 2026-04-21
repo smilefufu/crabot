@@ -14,6 +14,12 @@ import { ApplicationQueueModal } from './components/ApplicationQueueModal'
 import { DialogDomain, DomainNav } from './components/DomainNav'
 import { FriendWorkbench } from './components/FriendWorkbench'
 import { GroupWorkbench } from './components/GroupWorkbench'
+import {
+  buildExplicitFriendPermissionConfig,
+  parseMemoryScopes,
+  summarizeFriendMemoryScopes,
+  summarizeFriendStorage,
+} from './friend-permission-utils'
 import { ObjectList } from './components/ObjectList'
 import { PrivatePoolWorkbench } from './components/PrivatePoolWorkbench'
 import type {
@@ -33,6 +39,7 @@ import { TOOL_CATEGORIES, TOOL_CATEGORY_LABELS } from '../../types'
 
 type QueueTarget = { id: string; channel_id: string; title: string }
 type QueueTargetKind = 'privatePool' | 'application'
+type FriendPermissionState = 'idle' | 'loading' | 'ready' | 'unavailable'
 
 const panelStyle: React.CSSProperties = {
   display: 'grid',
@@ -55,23 +62,6 @@ function buildToolAccess(defaultValue: boolean): ToolAccessConfig {
     remote_exec: defaultValue,
     desktop: defaultValue,
   }
-}
-
-function getStorageSummary(storage: StoragePermission | null): string {
-  if (!storage) return '未开启'
-  return `${storage.workspace_path} · ${storage.access === 'read' ? '只读' : '读写'}`
-}
-
-function getMemoryScopeSummary(sessionId: string, scopes: string[]): string {
-  if (scopes.length === 1 && scopes[0] === sessionId) return '当前会话'
-  return scopes.join(', ')
-}
-
-function parseMemoryScopes(value: string): string[] {
-  return value
-    .split(/[\n,]/)
-    .map((scope) => scope.trim())
-    .filter(Boolean)
 }
 
 function resolveGroupPermissions(
@@ -161,8 +151,17 @@ export const DialogObjectsPage: React.FC = () => {
 
   const [editName, setEditName] = useState('')
   const [editPerm, setEditPerm] = useState<FriendPermission>('normal')
-  const [editTemplateId, setEditTemplateId] = useState('')
-  const [savingFriend, setSavingFriend] = useState(false)
+  const [savingFriendMetadata, setSavingFriendMetadata] = useState(false)
+  const [friendPermissionLoading, setFriendPermissionLoading] = useState(false)
+  const [friendPermissionState, setFriendPermissionState] = useState<FriendPermissionState>('idle')
+  const [friendPermissionUnavailableMessage, setFriendPermissionUnavailableMessage] = useState<string | null>(null)
+  const [savingFriendPermissions, setSavingFriendPermissions] = useState(false)
+  const [friendToolAccess, setFriendToolAccess] = useState<ToolAccessConfig>(() => buildToolAccess(false))
+  const [friendStorageEnabled, setFriendStorageEnabled] = useState(false)
+  const [friendStoragePath, setFriendStoragePath] = useState('')
+  const [friendStorageAccess, setFriendStorageAccess] = useState<'read' | 'readwrite'>('read')
+  const [friendMemoryMode, setFriendMemoryMode] = useState<'empty' | 'custom'>('empty')
+  const [friendMemoryScopesInput, setFriendMemoryScopesInput] = useState('')
   const [showBindDrawer, setShowBindDrawer] = useState(false)
   const [bindChannelId, setBindChannelId] = useState('')
   const [bindPlatformUserId, setBindPlatformUserId] = useState('')
@@ -180,6 +179,17 @@ export const DialogObjectsPage: React.FC = () => {
   const [groupMemoryMode, setGroupMemoryMode] = useState<'session' | 'custom'>('session')
   const [groupMemoryScopesInput, setGroupMemoryScopesInput] = useState('')
   const initialLoadDone = useRef(false)
+
+  const resetFriendPermissionForm = useCallback(() => {
+    setFriendPermissionState('idle')
+    setFriendPermissionUnavailableMessage(null)
+    setFriendToolAccess(buildToolAccess(false))
+    setFriendStorageEnabled(false)
+    setFriendStoragePath('')
+    setFriendStorageAccess('read')
+    setFriendMemoryMode('empty')
+    setFriendMemoryScopesInput('')
+  }, [])
 
   const loadDialogObjects = useCallback(async (showLoading = false) => {
     try {
@@ -310,13 +320,62 @@ export const DialogObjectsPage: React.FC = () => {
     const friend = selectedItem as DialogObjectFriend
     setEditName(friend.display_name)
     setEditPerm(friend.permission)
-    setEditTemplateId(friend.permission_template_id ?? '')
     setShowBindDrawer(false)
     setBindChannelId('')
     setBindPlatformUserId('')
     setBindDisplayName('')
     setConfirmUnlinkKey(null)
-  }, [domain, selectedItem])
+    resetFriendPermissionForm()
+  }, [domain, selectedItem, resetFriendPermissionForm])
+
+  useEffect(() => {
+    if (domain !== 'friends' || !selectedItem) return undefined
+    const friend = selectedItem as DialogObjectFriend
+    if (friend.permission === 'master') {
+      resetFriendPermissionForm()
+      return undefined
+    }
+
+    let active = true
+    setFriendPermissionState('loading')
+    setFriendPermissionUnavailableMessage(null)
+    setFriendPermissionLoading(true)
+
+    void friendService.getPermissions(friend.id)
+      .then((result) => {
+        if (!active) return
+        if (!result.resolved) {
+          setFriendPermissionState('unavailable')
+          setFriendPermissionUnavailableMessage('好友权限暂时不可编辑，请先刷新或修复加载错误。')
+          notifyError('好友权限未返回可编辑配置')
+          return
+        }
+        const resolved = result.resolved
+        setFriendToolAccess(resolved.tool_access)
+        setFriendStorageEnabled(resolved.storage !== null)
+        setFriendStoragePath(resolved.storage?.workspace_path ?? DEFAULT_STORAGE_PATH)
+        setFriendStorageAccess(resolved.storage?.access ?? 'read')
+        setFriendMemoryMode(resolved.memory_scopes.length === 0 ? 'empty' : 'custom')
+        setFriendMemoryScopesInput(resolved.memory_scopes.join(', '))
+        setFriendPermissionState('ready')
+      })
+      .catch((caughtError) => {
+        if (!active) return
+        const message = caughtError instanceof Error ? caughtError.message : '加载好友权限失败'
+        setFriendPermissionState('unavailable')
+        setFriendPermissionUnavailableMessage('好友权限暂时不可编辑，请先刷新或修复加载错误。')
+        notifyError(message)
+      })
+      .finally(() => {
+        if (active) {
+          setFriendPermissionLoading(false)
+        }
+      })
+
+    return () => {
+      active = false
+    }
+  }, [domain, selectedItem, notifyError, resetFriendPermissionForm])
 
   const openAssignModal = async (target: QueueTarget, kind: QueueTargetKind) => {
     setAssignTarget(target)
@@ -432,23 +491,63 @@ export const DialogObjectsPage: React.FC = () => {
     setRefreshKey((value) => value + 1)
   }
 
-  const handleSaveFriend = async () => {
+  const handleSaveFriendMetadata = async () => {
     if (domain !== 'friends' || !selectedItem || !editName.trim()) return
     const friend = selectedItem as DialogObjectFriend
     try {
-      setSavingFriend(true)
+      setSavingFriendMetadata(true)
       await friendService.updateFriend(friend.id, {
         display_name: editName.trim(),
         permission: editPerm,
-        ...(editPerm === 'normal' ? { permission_template_id: editTemplateId } : {}),
       })
-      success('保存成功')
+      success('好友基础信息已保存')
       triggerRefresh()
     } catch (caughtError) {
       const message = caughtError instanceof Error ? caughtError.message : '保存失败'
       notifyError(message)
     } finally {
-      setSavingFriend(false)
+      setSavingFriendMetadata(false)
+    }
+  }
+
+  const handleSaveFriendPermissions = async () => {
+    if (domain !== 'friends' || !selectedItem) return
+    const friend = selectedItem as DialogObjectFriend
+    if (friend.permission === 'master' || friendPermissionState !== 'ready') return
+
+    try {
+      setSavingFriendPermissions(true)
+      const trimmedStoragePath = friendStoragePath.trim()
+      if (friendStorageEnabled && !trimmedStoragePath) {
+        notifyError('存储路径不能为空')
+        return
+      }
+
+      const memoryScopes = friendMemoryMode === 'empty'
+        ? []
+        : parseMemoryScopes(friendMemoryScopesInput)
+      if (friendMemoryMode === 'custom' && memoryScopes.length === 0) {
+        notifyError('请至少填写一个记忆范围，或切换到空范围')
+        return
+      }
+
+      await friendService.updatePermissions(friend.id, buildExplicitFriendPermissionConfig({
+        tool_access: friendToolAccess,
+        storage: friendStorageEnabled
+          ? {
+              workspace_path: trimmedStoragePath,
+              access: friendStorageAccess,
+            }
+          : null,
+        memory_scopes: memoryScopes,
+      }))
+      success('好友权限已保存')
+      triggerRefresh()
+    } catch (caughtError) {
+      const message = caughtError instanceof Error ? caughtError.message : '保存失败'
+      notifyError(message)
+    } finally {
+      setSavingFriendPermissions(false)
     }
   }
 
@@ -638,15 +737,36 @@ export const DialogObjectsPage: React.FC = () => {
               friend={(selectedItem as DialogObjectFriend | null)}
               editName={editName}
               editPerm={editPerm}
-              editTemplateId={editTemplateId}
-              permissionTemplates={permissionTemplates}
-              savingFriend={savingFriend}
+              savingMetadata={savingFriendMetadata}
+              friendPermissionLoading={friendPermissionLoading}
+              friendPermissionState={friendPermissionState}
+              friendPermissionUnavailableMessage={friendPermissionUnavailableMessage}
+              savingPermissions={savingFriendPermissions}
+              friendToolAccess={friendToolAccess}
+              friendStorageEnabled={friendStorageEnabled}
+              friendStoragePath={friendStoragePath}
+              friendStorageAccess={friendStorageAccess}
+              friendMemoryMode={friendMemoryMode}
+              friendMemoryScopesInput={friendMemoryScopesInput}
               confirmUnlinkKey={confirmUnlinkKey}
               unlinkingIdentity={unlinkingIdentity}
               onEditNameChange={setEditName}
               onEditPermChange={setEditPerm}
-              onEditTemplateChange={setEditTemplateId}
-              onSave={handleSaveFriend}
+              onSaveMetadata={handleSaveFriendMetadata}
+              onFriendToolAccessChange={(category, checked) => {
+                setFriendToolAccess((prev) => ({ ...prev, [category]: checked }))
+              }}
+              onFriendStorageEnabledChange={(enabled) => {
+                setFriendStorageEnabled(enabled)
+                if (enabled && !friendStoragePath.trim()) {
+                  setFriendStoragePath(DEFAULT_STORAGE_PATH)
+                }
+              }}
+              onFriendStoragePathChange={setFriendStoragePath}
+              onFriendStorageAccessChange={setFriendStorageAccess}
+              onFriendMemoryModeChange={setFriendMemoryMode}
+              onFriendMemoryScopesInputChange={setFriendMemoryScopesInput}
+              onSavePermissions={handleSaveFriendPermissions}
               onOpenBindDrawer={() => setShowBindDrawer(true)}
               onRequestUnlink={setConfirmUnlinkKey}
               onCancelUnlink={() => setConfirmUnlinkKey(null)}
@@ -838,11 +958,11 @@ export const DialogObjectsPage: React.FC = () => {
                 <div style={{ display: 'grid', gap: '0.75rem' }}>
                   <div style={{ fontWeight: 600 }}>存储权限</div>
                   <label className="session-permission-switch-row">
-                    <span className="session-permission-switch-value">
-                      <span>启用存储</span>
-                      <span>
-                        {groupStorageEnabled
-                          ? getStorageSummary({
+                      <span className="session-permission-switch-value">
+                        <span>启用存储</span>
+                        <span>
+                          {groupStorageEnabled
+                          ? summarizeFriendStorage({
                               workspace_path: groupStoragePath.trim() || DEFAULT_STORAGE_PATH,
                               access: groupStorageAccess,
                             })
@@ -932,7 +1052,7 @@ export const DialogObjectsPage: React.FC = () => {
                   <div className="session-inline-summary">
                     当前生效：
                     {' '}
-                    {getMemoryScopeSummary(
+                    {summarizeFriendMemoryScopes(
                       editingGroup.id,
                       groupMemoryMode === 'session'
                         ? [editingGroup.id]
