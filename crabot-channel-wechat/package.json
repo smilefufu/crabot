@@ -5,13 +5,12 @@
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/main.js"
+    "start": "node dist/main.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
-  "keywords": [
-    "crabot",
-    "channel",
-    "wechat"
-  ],
+  "keywords": ["crabot", "channel", "wechat"],
   "author": "Crabot Team",
   "license": "Apache-2.0",
   "dependencies": {
@@ -20,6 +19,8 @@
   },
   "devDependencies": {
     "@types/node": "^20.19.37",
-    "typescript": "^5.0.0"
+    "@vitest/coverage-v8": "^1.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^1.0.0"
   }
 }
