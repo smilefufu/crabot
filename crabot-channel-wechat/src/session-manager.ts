@@ -47,28 +47,12 @@ export class SessionManager {
       return { session: existing, created: false }
     }
 
-    const session: Session = {
-      id: generateId(),
-      channel_id: this.channelId,
+    const session = this.createAndStoreSession({
       type: params.type,
       platform_session_id: params.platform_session_id,
       title: params.title,
-      participants: [
-        {
-          platform_user_id: params.sender_wxid,
-          role: 'member',
-        },
-      ],
-      permissions: DEFAULT_PERMISSIONS,
-      memory_scopes: [params.platform_session_id],
-      workspace_path: '',
-      created_at: generateTimestamp(),
-      updated_at: generateTimestamp(),
-    }
-
-    this.sessions.set(session.id, session)
-    this.platformToId.set(params.platform_session_id, session.id)
-    this.save()
+      participants: [{ platform_user_id: params.sender_wxid, role: 'member' }],
+    })
 
     return { session, created: true }
   }
@@ -97,25 +81,40 @@ export class SessionManager {
       return { session: updated, created: false }
     }
 
+    const session = this.createAndStoreSession({
+      type: 'group',
+      platform_session_id: params.platform_session_id,
+      title: params.title,
+      participants: params.participants,
+    })
+
+    return { session, created: true }
+  }
+
+  private createAndStoreSession(params: {
+    type: SessionType
+    platform_session_id: string
+    title: string
+    participants: SessionParticipant[]
+  }): Session {
+    const now = generateTimestamp()
     const session: Session = {
       id: generateId(),
       channel_id: this.channelId,
-      type: 'group',
+      type: params.type,
       platform_session_id: params.platform_session_id,
       title: params.title,
       participants: params.participants,
       permissions: DEFAULT_PERMISSIONS,
       memory_scopes: [params.platform_session_id],
       workspace_path: '',
-      created_at: generateTimestamp(),
-      updated_at: generateTimestamp(),
+      created_at: now,
+      updated_at: now,
     }
-
     this.sessions.set(session.id, session)
     this.platformToId.set(params.platform_session_id, session.id)
     this.save()
-
-    return { session, created: true }
+    return session
   }
 
   findById(sessionId: string): Session | undefined {
