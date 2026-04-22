@@ -61,6 +61,7 @@ describe('SessionManager.upsertGroupSessionFromSnapshot', () => {
 
     expect(second.created).toBe(false)
     expect(second.session.id).toBe(first.session.id)
+    expect(second.session.created_at).toBe(first.session.created_at)
     expect(second.session.title).toBe('工作群（新）')
     expect(second.session.participants).toHaveLength(3)
     expect(second.session.participants.map((p) => p.platform_user_id)).toEqual([
