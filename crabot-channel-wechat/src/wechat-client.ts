@@ -125,7 +125,10 @@ export class WechatClient {
   }
 
   /**
-   * 列出群组
+   * 列出群组（分页）。
+   *
+   * 与 getContact/getGroup/getGroupMembers 不同，本方法不 catch 错误：
+   * 分页循环应在网络失败时整体退出而不是跳过某一页，交由调用方决定。
    */
   async listGroups(params: {
     keyword?: string
