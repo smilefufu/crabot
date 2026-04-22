@@ -4227,17 +4227,17 @@ export class AdminModule extends ModuleBase {
 
     this.lastOAuthResult = null
 
-    // 解析回调使用的主机名：优先前端显式传入的 redirect_host（当前浏览器 URL 的 hostname），
-    // 其次从 Host 头解析，最后回退到 'localhost'
-    let redirectHost: string | undefined
+    let explicitHost: string | undefined
     try {
       const body = await this.readJsonBody<{ redirect_host?: string }>(req)
-      redirectHost = body?.redirect_host?.trim() || undefined
-    } catch { /* 空 body 或非 JSON：视为未提供 */ }
-
-    if (!redirectHost && req.headers.host) {
-      redirectHost = req.headers.host.split(':')[0] || undefined
+      explicitHost = body?.redirect_host
+    } catch (err) {
+      if (!(err instanceof SyntaxError) && !(err instanceof Error && err.message === 'Invalid JSON')) {
+        throw err
+      }
     }
+
+    const redirectHost = oauthMod.resolveRedirectHost(explicitHost, req.headers.host)
 
     // 启动 callback server（异步等待回调）
     const flowPromise = oauthMod.waitForOAuthCallback({ redirectHost })

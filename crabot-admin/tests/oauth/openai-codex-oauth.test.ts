@@ -6,6 +6,7 @@ import {
   cancelOAuthFlow,
   extractTokenInfo,
   selfCheckCallbackServer,
+  resolveRedirectHost,
 } from '../../src/oauth/openai-codex-oauth.js'
 
 describe('openai-codex-oauth', () => {
@@ -53,6 +54,24 @@ describe('openai-codex-oauth', () => {
       const authUrl = getOAuthAuthUrl()
       const url = new URL(authUrl!)
       expect(url.searchParams.get('redirect_uri')).toContain(':1455/')
+    })
+  })
+
+  describe('resolveRedirectHost', () => {
+    it('显式 host 优先，即使 Host 头存在', () => {
+      expect(resolveRedirectHost('192.168.1.10', 'crabot.local:3000')).toBe('192.168.1.10')
+    })
+
+    it('显式 host 为空串时从 Host 头解析 hostname', () => {
+      expect(resolveRedirectHost('', '192.168.1.10:3000')).toBe('192.168.1.10')
+    })
+
+    it('两者都缺失时回退到 localhost', () => {
+      expect(resolveRedirectHost(undefined, undefined)).toBe('localhost')
+    })
+
+    it('Host 头格式异常时回退到 localhost', () => {
+      expect(resolveRedirectHost(undefined, 'not valid')).toBe('localhost')
     })
   })
 

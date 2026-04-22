@@ -7,6 +7,7 @@
 
 import crypto from 'crypto'
 import http from 'http'
+import net from 'net'
 import { oauthErrorHtml, oauthSuccessHtml } from './oauth-page.js'
 
 // --- OAuth 配置 ---
@@ -30,6 +31,37 @@ function buildRedirectUri(host: string): string {
 
 function isLoopbackHost(host: string): boolean {
   return host === 'localhost' || host === '127.0.0.1' || host === '::1'
+}
+
+/**
+ * 解析 callback server 应绑定的地址。
+ * Loopback 主机只绑定到本机；IP 字面量绑定到该具体 IP（避免把端口暴露到其他网卡）；
+ * DNS 名称无法在同步上下文解析，退回到 0.0.0.0。
+ */
+function resolveBindAddress(host: string): string {
+  if (isLoopbackHost(host)) return '127.0.0.1'
+  if (net.isIP(host)) return host
+  return '0.0.0.0'
+}
+
+/**
+ * 从可选的显式值和 HTTP Host 头中解析回调使用的主机名。
+ * 用于 Admin 模块决定 OAuth redirect_uri 的域名——让 OpenAI 回调到浏览器实际访问的地址。
+ */
+export function resolveRedirectHost(
+  explicit: string | undefined,
+  hostHeader: string | undefined,
+): string {
+  const trimmed = explicit?.trim()
+  if (trimmed) return trimmed
+  if (hostHeader) {
+    try {
+      return new URL(`http://${hostHeader}`).hostname || DEFAULT_REDIRECT_HOST
+    } catch {
+      // Host 头异常时退回默认
+    }
+  }
+  return DEFAULT_REDIRECT_HOST
 }
 
 // --- PKCE ---
@@ -124,8 +156,7 @@ export function waitForOAuthCallback(
   return new Promise((resolve, reject) => {
     const redirectHost = options.redirectHost?.trim() || DEFAULT_REDIRECT_HOST
     const redirectUri = buildRedirectUri(redirectHost)
-    // 非 loopback 主机需要绑定到 0.0.0.0 以接收远端回调；loopback 保持 127.0.0.1 更安全
-    const bindAddress = isLoopbackHost(redirectHost) ? '127.0.0.1' : '0.0.0.0'
+    const bindAddress = resolveBindAddress(redirectHost)
 
     const state = generateState()
     const codeVerifier = generateCodeVerifier()
