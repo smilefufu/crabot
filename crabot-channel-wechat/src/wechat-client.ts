@@ -125,6 +125,53 @@ export class WechatClient {
   }
 
   /**
+   * 列出群组
+   */
+  async listGroups(params: {
+    keyword?: string
+    page?: number
+    pageSize?: number
+  } = {}): Promise<{
+    items: Array<{ chatroomName: string; name: string }>
+    pagination: {
+      page: number
+      pageSize: number
+      total: number
+      totalPages: number
+    }
+  }> {
+    const qs = new URLSearchParams()
+    if (params.keyword) qs.set('keyword', params.keyword)
+    if (params.page) qs.set('page', String(params.page))
+    if (params.pageSize) qs.set('pageSize', String(params.pageSize))
+
+    const suffix = qs.toString() ? `?${qs.toString()}` : ''
+    const raw = await this.get<{
+      items: Array<Record<string, unknown>>
+      total?: number
+      page?: number
+      pageSize?: number
+    }>(`/api/v1/bot/groups${suffix}`)
+
+    const items = (raw.items ?? []).map((item) => {
+      const chatroomName = String(item.fieldChatroomName ?? '')
+      const nick = item.fieldChatroomNick
+      const name = typeof nick === 'string' && nick.length > 0 ? nick : chatroomName
+      return { chatroomName, name }
+    })
+
+    const page = Number(raw.page ?? params.page ?? 1)
+    const pageSize = Number(raw.pageSize ?? params.pageSize ?? items.length ?? 0)
+    const total = Number(raw.total ?? items.length)
+    const totalPages = pageSize > 0 ? Math.max(1, Math.ceil(total / pageSize)) : 1
+
+    return {
+      items,
+      pagination: { page, pageSize, total, totalPages },
+    }
+  }
+
+  /**
    * 获取群成员列表
    */
   async getGroupMembers(chatroomName: string): Promise<{
