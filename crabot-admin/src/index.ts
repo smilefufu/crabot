@@ -4222,13 +4222,25 @@ export class AdminModule extends ModuleBase {
   private oauthLoginPromise: Promise<import('./oauth/openai-codex-oauth.js').OAuthLoginResult> | null = null
   private lastOAuthResult: import('./oauth/openai-codex-oauth.js').OAuthLoginResult | null = null
 
-  private async handleOAuthChatGPTLogin(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+  private async handleOAuthChatGPTLogin(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const oauthMod = await import('./oauth/openai-codex-oauth.js')
 
     this.lastOAuthResult = null
 
+    // 解析回调使用的主机名：优先前端显式传入的 redirect_host（当前浏览器 URL 的 hostname），
+    // 其次从 Host 头解析，最后回退到 'localhost'
+    let redirectHost: string | undefined
+    try {
+      const body = await this.readJsonBody<{ redirect_host?: string }>(req)
+      redirectHost = body?.redirect_host?.trim() || undefined
+    } catch { /* 空 body 或非 JSON：视为未提供 */ }
+
+    if (!redirectHost && req.headers.host) {
+      redirectHost = req.headers.host.split(':')[0] || undefined
+    }
+
     // 启动 callback server（异步等待回调）
-    const flowPromise = oauthMod.waitForOAuthCallback()
+    const flowPromise = oauthMod.waitForOAuthCallback({ redirectHost })
     this.oauthLoginPromise = flowPromise
 
     // 在等待回调的同时，先用一个 race 拿到 listen 阶段的错误（PORT_IN_USE 等）

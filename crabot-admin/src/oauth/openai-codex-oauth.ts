@@ -13,15 +13,23 @@ import { oauthErrorHtml, oauthSuccessHtml } from './oauth-page.js'
 
 const CALLBACK_PORT = 1455
 const ORIGINATOR = 'openclaw'
+const DEFAULT_REDIRECT_HOST = 'localhost'
 
 const OAUTH_CONFIG = {
   authorizationEndpoint: 'https://auth.openai.com/oauth/authorize',
   tokenEndpoint: 'https://auth.openai.com/oauth/token',
   clientId: 'app_EMoamEEZ73f0CkXaXp7hrann',
-  redirectUri: `http://localhost:${CALLBACK_PORT}/auth/callback`,
   callbackPort: CALLBACK_PORT,
   scope: 'openid profile email offline_access',
   originator: ORIGINATOR,
+}
+
+function buildRedirectUri(host: string): string {
+  return `http://${host}:${CALLBACK_PORT}/auth/callback`
+}
+
+function isLoopbackHost(host: string): boolean {
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1'
 }
 
 // --- PKCE ---
@@ -92,6 +100,7 @@ export interface OAuthLoginResult {
 interface PendingOAuthFlow {
   state: string
   codeVerifier: string
+  redirectUri: string
   resolve: (result: OAuthLoginResult) => void
   reject: (error: Error) => void
   server: http.Server
@@ -100,12 +109,24 @@ interface PendingOAuthFlow {
 
 let pendingFlow: PendingOAuthFlow | null = null
 
+export interface WaitForOAuthCallbackOptions {
+  /** 回调 URL 使用的主机名。默认 'localhost'；从局域网/远程访问时应传入访问 UI 的域名。 */
+  redirectHost?: string
+}
+
 /**
  * 启动回调服务器，等待 OAuth 回调
  * 返回 Promise，登录成功时 resolve
  */
-export function waitForOAuthCallback(): Promise<OAuthLoginResult> {
+export function waitForOAuthCallback(
+  options: WaitForOAuthCallbackOptions = {},
+): Promise<OAuthLoginResult> {
   return new Promise((resolve, reject) => {
+    const redirectHost = options.redirectHost?.trim() || DEFAULT_REDIRECT_HOST
+    const redirectUri = buildRedirectUri(redirectHost)
+    // 非 loopback 主机需要绑定到 0.0.0.0 以接收远端回调；loopback 保持 127.0.0.1 更安全
+    const bindAddress = isLoopbackHost(redirectHost) ? '127.0.0.1' : '0.0.0.0'
+
     const state = generateState()
     const codeVerifier = generateCodeVerifier()
 
@@ -163,7 +184,7 @@ export function waitForOAuthCallback(): Promise<OAuthLoginResult> {
         }
 
         try {
-          const tokenResult = await exchangeCodeForToken(code, codeVerifier)
+          const tokenResult = await exchangeCodeForToken(code, codeVerifier, redirectUri)
           sendHtml(res, 200, oauthSuccessHtml('OpenAI authentication completed. You can close this window.'))
           cleanup()
           resolve(tokenResult)
@@ -191,7 +212,7 @@ export function waitForOAuthCallback(): Promise<OAuthLoginResult> {
       reject(new Error('OAuth login timed out (5 minutes)'))
     }, 5 * 60 * 1000)
 
-    server.listen(OAUTH_CONFIG.callbackPort, '127.0.0.1', () => {
+    server.listen(OAUTH_CONFIG.callbackPort, bindAddress, () => {
       // Server ready
     })
 
@@ -209,6 +230,7 @@ export function waitForOAuthCallback(): Promise<OAuthLoginResult> {
     pendingFlow = {
       state,
       codeVerifier,
+      redirectUri,
       resolve,
       reject,
       server,
@@ -229,7 +251,7 @@ export function getOAuthAuthUrl(): string | null {
   const params = new URLSearchParams({
     response_type: 'code',
     client_id: OAUTH_CONFIG.clientId,
-    redirect_uri: OAUTH_CONFIG.redirectUri,
+    redirect_uri: pendingFlow.redirectUri,
     scope: OAUTH_CONFIG.scope,
     code_challenge: codeChallenge,
     code_challenge_method: 'S256',
@@ -244,13 +266,17 @@ export function getOAuthAuthUrl(): string | null {
 
 // --- Token 换取 ---
 
-async function exchangeCodeForToken(code: string, codeVerifier: string): Promise<OAuthLoginResult> {
+async function exchangeCodeForToken(
+  code: string,
+  codeVerifier: string,
+  redirectUri: string,
+): Promise<OAuthLoginResult> {
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
     client_id: OAUTH_CONFIG.clientId,
     code,
     code_verifier: codeVerifier,
-    redirect_uri: OAUTH_CONFIG.redirectUri,
+    redirect_uri: redirectUri,
   })
 
   const response = await fetch(OAUTH_CONFIG.tokenEndpoint, {

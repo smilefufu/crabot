@@ -84,7 +84,9 @@ export const providerService = {
 
   // OAuth
   async startOAuthLogin(): Promise<{ auth_url: string }> {
-    return api.post('/oauth/chatgpt/login', {})
+    return api.post('/oauth/chatgpt/login', {
+      redirect_host: window.location.hostname,
+    })
   },
 
   async getOAuthStatus(): Promise<{

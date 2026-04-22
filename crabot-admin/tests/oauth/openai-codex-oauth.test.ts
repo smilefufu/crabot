@@ -56,6 +56,32 @@ describe('openai-codex-oauth', () => {
     })
   })
 
+  describe('waitForOAuthCallback redirectHost', () => {
+    it('传入 redirectHost 时 redirect_uri 使用该主机名', async () => {
+      const pending = waitForOAuthCallback({ redirectHost: '192.168.1.10' }).catch(() => undefined)
+      try {
+        const authUrl = getOAuthAuthUrl()!
+        const url = new URL(authUrl)
+        expect(url.searchParams.get('redirect_uri')).toBe('http://192.168.1.10:1455/auth/callback')
+      } finally {
+        cancelOAuthFlow()
+        await pending
+      }
+    })
+
+    it('redirectHost 为空字符串时回退到默认 localhost', async () => {
+      const pending = waitForOAuthCallback({ redirectHost: '   ' }).catch(() => undefined)
+      try {
+        const authUrl = getOAuthAuthUrl()!
+        const url = new URL(authUrl)
+        expect(url.searchParams.get('redirect_uri')).toBe('http://localhost:1455/auth/callback')
+      } finally {
+        cancelOAuthFlow()
+        await pending
+      }
+    })
+  })
+
   describe('extractTokenInfo', () => {
     const encode = (payload: object): string => {
       const header = Buffer.from('{"alg":"none"}').toString('base64url')
