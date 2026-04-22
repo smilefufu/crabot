@@ -938,6 +938,7 @@ code, pre, .mono {
   height: 100%;
   display: flex;
   justify-content: flex-end;
+  overflow: hidden;
 }
 
 .drawer-container:not(.drawer-open) {
