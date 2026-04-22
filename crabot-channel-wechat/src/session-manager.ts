@@ -73,6 +73,51 @@ export class SessionManager {
     return { session, created: true }
   }
 
+  /**
+   * 根据上游拉到的完整群成员快照幂等创建/更新 group session。
+   * 与 upsert() 的区别：upsert 是"收到一条消息，只知道单个 sender"，
+   * 本方法写入全量参与者列表，用于启动 bootstrap。
+   */
+  upsertGroupSessionFromSnapshot(params: {
+    platform_session_id: string
+    title: string
+    participants: SessionParticipant[]
+  }): { session: Session; created: boolean } {
+    const existing = this.findByPlatformId(params.platform_session_id)
+
+    if (existing) {
+      const updated: Session = {
+        ...existing,
+        title: params.title,
+        participants: params.participants,
+        updated_at: generateTimestamp(),
+      }
+      this.sessions.set(updated.id, updated)
+      this.save()
+      return { session: updated, created: false }
+    }
+
+    const session: Session = {
+      id: generateId(),
+      channel_id: this.channelId,
+      type: 'group',
+      platform_session_id: params.platform_session_id,
+      title: params.title,
+      participants: params.participants,
+      permissions: DEFAULT_PERMISSIONS,
+      memory_scopes: [params.platform_session_id],
+      workspace_path: '',
+      created_at: generateTimestamp(),
+      updated_at: generateTimestamp(),
+    }
+
+    this.sessions.set(session.id, session)
+    this.platformToId.set(params.platform_session_id, session.id)
+    this.save()
+
+    return { session, created: true }
+  }
+
   findById(sessionId: string): Session | undefined {
     return this.sessions.get(sessionId)
   }
