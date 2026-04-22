@@ -748,7 +748,7 @@ describe('DialogObjectsPage', () => {
     expect(sceneLink).toHaveAttribute('href', '/memory/scenes/friend%3Afriend-1')
 
     const memoryLink = scopedFriendDetail.getByRole('link', { name: '查看私聊记忆' })
-    expect(memoryLink).toHaveAttribute('href', '/memory?friend_id=friend-1&context_label=Alice')
+    expect(memoryLink).toHaveAttribute('href', '/memory/entries?friend_id=friend-1&context_label=Alice')
   })
 
   it('shows group session status and opens an editable permission drawer without template id', async () => {
@@ -794,7 +794,7 @@ describe('DialogObjectsPage', () => {
     expect(sceneLink).toHaveAttribute('href', '/memory/scenes/group%3Awechat-main%3Agroup-1')
 
     const memoryLink = scopedGroupDetail.getByRole('link', { name: '查看群聊记忆' })
-    expect(memoryLink).toHaveAttribute('href', '/memory?accessible_scope=group-1&context_label=Master+Group')
+    expect(memoryLink).toHaveAttribute('href', '/memory/entries?accessible_scope=group-1&context_label=Master+Group')
   })
 
   it('saves explicit effective group permissions', async () => {

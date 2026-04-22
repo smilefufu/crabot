@@ -59,9 +59,9 @@ class SceneProfileStore:
     # ---------- public API ----------
 
     def upsert(self, profile: SceneProfile) -> SceneProfile:
-        existing = self.get(profile.scene)
-        if existing:
-            return self._update(profile)
+        existing_row = self._select_one(profile.scene)
+        if existing_row:
+            return self._update(profile, existing_row)
         return self._insert(profile)
 
     def get(self, scene: SceneIdentity, only_public: bool = False) -> Optional[SceneProfile]:
@@ -90,6 +90,13 @@ class SceneProfileStore:
         params.extend([limit, offset])
         rows = self.conn.execute(sql, params).fetchall()
         return [self._row_to_profile(r) for r in rows]
+
+    def list_by_memory_id(self, memory_id: str) -> List[SceneProfile]:
+        rows = self.conn.execute(
+            "SELECT scene_type, friend_id, channel_id, session_id, label, abstract, overview, content, sections_json, source_memory_ids_json, created_at, updated_at, last_declared_at FROM scene_profiles WHERE source_memory_ids_json LIKE ? ORDER BY updated_at DESC",
+            (f'%\"{memory_id}\"%',),
+        ).fetchall()
+        return [self._row_to_profile(row) for row in rows]
 
     def delete(self, scene: SceneIdentity) -> bool:
         where, params = self._where_for_scene(scene)
@@ -131,13 +138,12 @@ class SceneProfileStore:
         self.conn.commit()
         return profile
 
-    def _update(self, profile: SceneProfile) -> SceneProfile:
+    def _update(self, profile: SceneProfile, existing_row) -> SceneProfile:
         where, params = self._where_for_scene(profile.scene)
-        existing_row = self._select_one(profile.scene)
-        existing = self._row_to_profile(existing_row) if existing_row else None
-        created_at = existing.created_at if existing else profile.created_at
+        existing = self._row_to_profile(existing_row)
+        created_at = existing.created_at
         next_source_ids = profile.source_memory_ids
-        if next_source_ids is None and existing:
+        if next_source_ids is None:
             next_source_ids = existing.source_memory_ids
         self.conn.execute(
             f"""UPDATE scene_profiles SET label = ?, abstract = ?, overview = ?, content = ?,

@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react'
+import React, { useEffect, useId } from 'react'
 import { Button } from './Button'
 
 interface ConfirmModalWarning {
@@ -30,6 +30,8 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
   confirmVariant = 'primary',
   loading = false,
 }) => {
+  const titleId = useId()
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onCancel()
@@ -44,8 +46,14 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
 
   return (
     <div className="modal-overlay" onClick={onCancel}>
-      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-        <h3 className="modal-title">{title}</h3>
+      <div
+        className="modal-content"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 id={titleId} className="modal-title">{title}</h3>
         <p className="modal-message">{message}</p>
         {warning && (
           <div className="modal-warning">

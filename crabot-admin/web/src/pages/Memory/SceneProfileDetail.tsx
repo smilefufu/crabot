@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react'
-import { useLocation, useNavigate, useParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { MainLayout } from '../../components/Layout/MainLayout'
 import { Card } from '../../components/Common/Card'
 import { Button } from '../../components/Common/Button'
@@ -8,10 +8,13 @@ import { ConfirmModal } from '../../components/Common/ConfirmModal'
 import { useToast } from '../../contexts/ToastContext'
 import {
   defaultSceneProfileLabel,
+  memoryService,
   parseSceneKey,
   sceneProfileService,
+  type LongTermMemoryEntry,
   type SceneProfile,
 } from '../../services/memory'
+import { buildMemoryEntriesHref } from './memoryContextQuery'
 
 const SCENE_TYPE_LABELS: Record<string, string> = {
   friend: '好友',
@@ -84,6 +87,7 @@ export const SceneProfileDetail: React.FC = () => {
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [confirmOpen, setConfirmOpen] = useState(false)
+  const [sourceMemories, setSourceMemories] = useState<LongTermMemoryEntry[]>([])
 
   const buildDraftProfile = useCallback((): SceneProfile => {
     const scene = parseSceneKey(key)
@@ -167,6 +171,13 @@ export const SceneProfileDetail: React.FC = () => {
       content: draft.content.trim(),
     }
 
+    if (!normalizedDraft.abstract) {
+      const message = '摘要（L0）不能为空'
+      setValidationError(message)
+      toast.error(message)
+      return
+    }
+
     if (!normalizedDraft.content) {
       const message = '正文（L2）不能为空'
       setValidationError(message)
@@ -190,6 +201,42 @@ export const SceneProfileDetail: React.FC = () => {
       setSaving(false)
     }
   }, [draft, key, profileExists, toast])
+
+  useEffect(() => {
+    let cancelled = false
+    const sourceMemoryIds = profile?.source_memory_ids ?? []
+
+    const loadSourceMemories = async () => {
+      if (!profileExists || sourceMemoryIds.length === 0) {
+        setSourceMemories([])
+        return
+      }
+
+      try {
+        const uniqueIds = [...new Set(sourceMemoryIds)]
+        const items = await Promise.all(
+          uniqueIds.map(async (id) => {
+            const result = await memoryService.getMemory(id)
+            return result.type === 'long' ? result.memory : null
+          }),
+        )
+
+        if (!cancelled) {
+          setSourceMemories(items.filter((item): item is LongTermMemoryEntry => item !== null))
+        }
+      } catch (err) {
+        if (!cancelled) {
+          toast.error(err instanceof Error ? err.message : '加载来源记忆失败')
+          setSourceMemories([])
+        }
+      }
+    }
+
+    loadSourceMemories()
+    return () => {
+      cancelled = true
+    }
+  }, [profile?.source_memory_ids, profileExists, toast])
 
   const handleDelete = useCallback(async () => {
     if (!profileExists) {
@@ -323,6 +370,25 @@ export const SceneProfileDetail: React.FC = () => {
           {profileExists && activeProfile.source_memory_ids && activeProfile.source_memory_ids.length > 0
             ? activeProfile.source_memory_ids.join('、')
             : profileExists ? '—' : '尚未创建'}
+        </div>
+
+        <div style={{ marginTop: '1rem' }}>
+          <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '0.5rem' }}>来源长期记忆</div>
+          {sourceMemories.length === 0 ? (
+            <div style={{ color: 'var(--text-secondary)' }}>暂无来源记忆</div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+              {sourceMemories.map((memory) => (
+                <Link
+                  key={memory.id}
+                  to={buildMemoryEntriesHref({ tab: 'long', mode: 'search', memoryId: memory.id })}
+                  style={{ color: 'var(--primary)' }}
+                >
+                  {memory.abstract}
+                </Link>
+              ))}
+            </div>
+          )}
         </div>
       </Card>
 

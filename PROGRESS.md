@@ -1,6 +1,6 @@
 # Crabot 项目进度
 
-> 最后更新：2026-04-07 — 去 LiteLLM 化 + ChatGPT 订阅 OAuth 接入（规划完成）
+> 最后更新：2026-04-22 — 记忆管理界面重构收尾 + 路由精简
 
 ## 当前进行中：Agent Engine V2
 
@@ -163,7 +163,7 @@ Module Manager (port 19000)
 - [x] Agent Loop 可观测性 — 通用 Trace 规范（protocol-agent-v2.md §8），Ring Buffer TraceStore，前后端可视化 Trace/Span 树
 - [x] Front Handler 工具调用改进 — 保留默认工具集，maxTurns 1→3，结果路由（JSON 决策/纯文本/工具失败自动升级），简单任务直接执行、复杂任务创建 task 派 Worker
 - [x] Agent 模块 Skills/MCP/聊天历史/crab-messaging 修复 — Skills UI 简化，消息预加载量优化（Front 10 条 / Worker 20 条），crab-messaging MCP Server 5 工具实现，对齐 protocol-crab-messaging.md，路径安全验证，TypeScript 编译零错误
-- [x] 全局配置热更新 + 模型配置统一管控 — Memory 模块 reconfigure() 热更新、update_config RPC，Admin 推送配置无需重启；Agent/Memory 配置根因修复（全局配置唯一真相来源，模块不缓存 LLM 连接信息），反转 merge 顺序确保全局优先
+- [x] 记忆管理界面重构 — `/memory/entries` 条目页模式拆分（browse/search/context）、长期记忆 browse API、SceneProfile 详情强化（L0/L2 校验 + 来源记忆链接）、SceneProfile 治理视图、记忆→画像反向链接、`/memory` 路由精简为直接跳转条目页；前端/后端定向测试与浏览器自测已通过
 - [x] McpServer Protocol reuse bug 修复 — Claude Agent SDK 在 Front Handler 重试或并发消息时抛出 "Already connected to a transport" 错误；根因是 `createCrabMessagingServer()` 在 `initializeAgentLayer()` 中只调用一次，所有 `runSdk()` 共享同一个 McpServer 实例，SDK 的 `Protocol.connect()` 不允许重复连接；修复方案：将传入的 `SdkMcpServerConfig` 对象改为工厂函数 `() => Record<string, SdkMcpServerConfig>`，每次 `runSdk()` 调用时创建新的 McpServer 实例；涉及文件：`unified-agent.ts`、`front-handler.ts`、`worker-handler.ts`，TypeScript 编译零错误
 - [x] SwitchMap 私聊消息合并 — 同 session 新消息到达时，被中断的消息 A 与新消息 B 合并为 `[A, B]` 一起传给 LLM（协议 §5.1）；`SwitchMapHandler` 新增 `pendingBatches` 追踪批次；`unified-agent.ts` 三处调用点（`processDirectMessage`/`handleProcessMessage`/`processAdminChatMessage`）均更新；dispatch 前增加 abort 检查防止并发双发 reply
 - [x] 群聊 Debounce 消息合并 + 群聊行为改进 — 群聊已通过 DebounceHandler 合并批次传给 Front Agent；新增 `SilentDecision` 类型；Front Agent 群聊默认静默，仅 @提及或明确提问时回复；提示词外部化到 `prompts.md`（根目录），修改后重启生效
@@ -191,6 +191,7 @@ Module Manager (port 19000)
 | 短期记忆压缩 | 保留窗口 + 语义无损压缩 |
 | 长期记忆去重/合并 | CREATE/UPDATE/MERGE/SKIP 决策 |
 | 混合检索 | 语义 + BM25 + 元数据多路召回 |
+| MemoryBrowser 测试 OOM | `crabot-admin/web/src/pages/Memory/MemoryBrowser.test.tsx` 在当前 Vitest 环境下触发 worker out of memory，需后续拆分或瘦身测试 |
 | Permission Template CRUD | 权限模板管理 |
 
 ### 🟢 低优先级

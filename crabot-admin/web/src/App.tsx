@@ -11,7 +11,7 @@ import { AgentConfig } from './pages/Agents/AgentConfig'
 import { ChannelConfig } from './pages/Channels/ChannelConfig'
 import { ChannelPty } from './pages/Channels/ChannelPty'
 import { GlobalSettings } from './pages/Settings/GlobalSettings'
-import { MemoryBrowser } from './pages/Memory/MemoryBrowser'
+import { MemoryEntriesPage } from './pages/Memory/MemoryEntriesPage'
 import { SceneProfileList } from './pages/Memory/SceneProfileList'
 import { SceneProfileDetail } from './pages/Memory/SceneProfileDetail'
 import { DialogObjectsPage } from './pages/DialogObjects'
@@ -95,11 +95,12 @@ const AppRoutes: React.FC = () => {
           </PrivateRoute>
         }
       />
+      <Route path="/memory" element={<Navigate to="/memory/entries" replace />} />
       <Route
-        path="/memory"
+        path="/memory/entries"
         element={
           <PrivateRoute>
-            <MemoryBrowser />
+            <MemoryEntriesPage />
           </PrivateRoute>
         }
       />

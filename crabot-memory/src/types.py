@@ -232,6 +232,20 @@ class SearchLongTermResult(BaseModel):
     results: List[SearchLongTermResultItem]
 
 
+class BrowseLongTermParams(BaseModel):
+    """浏览长期记忆参数"""
+    detail: SearchDetail
+    limit: int = 10
+    filter: Optional[SearchLongTermFilter] = None
+    min_visibility: Optional[Visibility] = "public"
+    accessible_scopes: Optional[List[str]] = None
+
+
+class BrowseLongTermResult(BaseModel):
+    """浏览长期记忆结果"""
+    results: List[SearchLongTermResultItem]
+
+
 class GetMemoryParams(BaseModel):
     """获取记忆详情参数"""
     memory_id: MemoryId

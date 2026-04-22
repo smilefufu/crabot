@@ -4,6 +4,23 @@
 
 import { api } from './api'
 
+export type SceneIdentity =
+  | { type: 'friend'; friend_id: string }
+  | { type: 'group_session'; channel_id: string; session_id: string }
+  | { type: 'global' }
+
+export interface SceneProfile {
+  scene: SceneIdentity
+  label: string
+  abstract: string
+  overview: string
+  content: string
+  source_memory_ids?: string[] | null
+  created_at: string
+  updated_at: string
+  last_declared_at?: string | null
+}
+
 export interface MemoryModule {
   module_id: string
   port: number
@@ -44,19 +61,19 @@ export interface LongTermMemoryEntry {
   id: string
   abstract: string
   overview: string
-  content: string
+  content?: string
   entities: EntityRef[]
   importance: number
   keywords: string[]
   tags: string[]
   source: MemorySourceInfo
   metadata?: Record<string, unknown>
-  read_count: number
-  version: number
+  read_count?: number
+  version?: number
   visibility: 'private' | 'internal' | 'public'
   scopes: string[]
   created_at: string
-  updated_at: string
+  updated_at?: string
 }
 
 export interface MemoryStats {
@@ -125,6 +142,21 @@ export const memoryService = {
     return api.get<{ results: ShortTermMemoryEntry[] }>(`/memory/short-term${q}`)
   },
 
+  async browseLongTerm(params: {
+    limit?: number
+    moduleId?: string
+    friendId?: string
+    accessibleScopes?: string[]
+  }): Promise<{ results: LongTermMemoryEntry[] }> {
+    const q = buildQuery({
+      limit: params.limit,
+      module_id: params.moduleId,
+      friend_id: params.friendId,
+      accessible_scope: params.accessibleScopes,
+    })
+    return api.get<{ results: LongTermMemoryEntry[] }>(`/memory/long-term/browse${q}`)
+  },
+
   async searchLongTerm(params: {
     q?: string
     limit?: number
@@ -151,27 +183,11 @@ export const memoryService = {
     const q = buildQuery({ module_id: moduleId })
     return api.delete<{ deleted: boolean }>(`/memory/${id}${q}`)
   },
-}
 
-// ============================================================================
-// 场景画像（SceneProfile）— 对齐 protocol-memory.md v0.2.0
-// ============================================================================
-
-export type SceneIdentity =
-  | { type: 'friend'; friend_id: string }
-  | { type: 'group_session'; channel_id: string; session_id: string }
-  | { type: 'global' }
-
-export interface SceneProfile {
-  scene: SceneIdentity
-  label: string
-  abstract: string
-  overview: string
-  content: string
-  source_memory_ids?: string[] | null
-  created_at: string
-  updated_at: string
-  last_declared_at?: string | null
+  async getRelatedSceneProfiles(memoryId: string, moduleId?: string): Promise<{ profiles: SceneProfile[] }> {
+    const q = buildQuery({ module_id: moduleId })
+    return api.get<{ profiles: SceneProfile[] }>(`/memory/${encodeURIComponent(memoryId)}/scene-profiles${q}`)
+  },
 }
 
 export function sceneToKey(scene: SceneIdentity): string {

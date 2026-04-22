@@ -33,11 +33,16 @@ def _build_visibility_filter(min_visibility: Visibility) -> Optional[str]:
     return None
 
 
+def _quote_string(value: str) -> str:
+    """转义 LanceDB WHERE 子句中的字符串字面量"""
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
 def _build_scopes_filter(accessible_scopes: Optional[List[str]]) -> Optional[str]:
     """构建 scopes WHERE 子句"""
     if not accessible_scopes:
         return None
-    scope_conditions = [f"array_has(scopes, '{s}')" for s in accessible_scopes]
+    scope_conditions = [f"array_has(scopes, '{_quote_string(s)}')" for s in accessible_scopes]
     return f"({' OR '.join(scope_conditions)})"
 
 
@@ -385,6 +390,64 @@ class VectorStore:
             rows = filtered_rows
 
         return rows[:limit]
+
+    async def browse_long_term(
+        self,
+        limit: int = 10,
+        min_visibility: Visibility = "public",
+        entity_id: Optional[str] = None,
+        entity_type: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        importance_min: Optional[int] = None,
+        accessible_scopes: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """按时间倒序浏览长期记忆，返回原始行数据"""
+        await self.ensure_tables()
+
+        filters = []
+        vis_filter = _build_visibility_filter(min_visibility)
+        if vis_filter:
+            filters.append(vis_filter)
+        if importance_min is not None:
+            filters.append(f"importance >= {importance_min}")
+        scopes_filter = _build_scopes_filter(accessible_scopes)
+        if scopes_filter:
+            filters.append(scopes_filter)
+
+        where_clause = " AND ".join(filters) if filters else None
+
+        def _matches_row(row: Dict[str, Any]) -> bool:
+            if tags:
+                row_tags = list(row.get("tags") or [])
+                if not any(tag in row_tags for tag in tags):
+                    return False
+            if entity_id is not None or entity_type is not None:
+                entities_json = row.get("entities_json", "[]")
+                try:
+                    entities = json.loads(entities_json)
+                except Exception:
+                    entities = []
+                for entity in entities:
+                    entity_id_match = entity_id is not None and entity.get("id") == entity_id
+                    entity_type_match = entity_type is not None and entity.get("type") == entity_type
+                    if entity_id_match or entity_type_match:
+                        return True
+                return False
+            return True
+
+        def _sort_key(row: Dict[str, Any]) -> str:
+            return row.get("updated_at") or row.get("created_at") or ""
+
+        def _do_scan() -> List[Dict[str, Any]]:
+            reader = self.long_term_table.search()
+            if where_clause:
+                reader = reader.where(where_clause, prefilter=True)
+            rows = reader.to_list()
+            filtered_rows = [row for row in rows if _matches_row(row)]
+            filtered_rows.sort(key=_sort_key, reverse=True)
+            return filtered_rows[:limit]
+
+        return await _run_sync(_do_scan)
 
     async def get_by_id(self, memory_id: str) -> Optional[Dict[str, Any]]:
         """根据 ID 获取记忆（先查短期，再查长期）"""

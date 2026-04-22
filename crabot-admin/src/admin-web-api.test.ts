@@ -356,6 +356,116 @@ describe('Admin Web API', () => {
         'admin-web-test'
       )
     })
+
+    it('browses recent long-term memory without a search query', async () => {
+      const token = await loginAndGetToken()
+
+      vi.spyOn(admin['rpcClient'], 'resolve').mockResolvedValue([
+        {
+          module_id: 'memory-test',
+          module_type: 'memory',
+          version: '0.1.0',
+          port: 19001,
+        },
+      ] as any)
+
+      const callSpy = vi.spyOn(admin['rpcClient'], 'call').mockResolvedValue({
+        results: [
+          {
+            memory: {
+              id: 'mem-l-1',
+              abstract: 'recent memory',
+              overview: 'overview',
+              entities: [],
+              importance: 5,
+              keywords: [],
+              tags: [],
+              source: { type: 'manual' },
+              visibility: 'public',
+              scopes: [],
+              created_at: '2026-04-20T00:00:00Z',
+            },
+            relevance: 0.9,
+          },
+        ],
+      } as any)
+
+      const response = await makeWebRequest<{ results: Array<{ id: string; abstract: string }> }>(
+        TEST_WEB_PORT,
+        '/api/memory/long-term/browse?limit=10&friend_id=friend-2&accessible_scope=session-x',
+        'GET',
+        null,
+        token
+      )
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body.results).toEqual([
+        expect.objectContaining({ id: 'mem-l-1', abstract: 'recent memory' }),
+      ])
+      expect(callSpy).toHaveBeenCalledWith(
+        19001,
+        'browse_long_term',
+        {
+          limit: 10,
+          detail: 'L1',
+          filter: { entity_id: 'friend-2' },
+          accessible_scopes: ['session-x'],
+        },
+        'admin-web-test'
+      )
+    })
+
+    it('returns scene profiles that reference a long-term memory id', async () => {
+      const token = await loginAndGetToken()
+
+      vi.spyOn(admin['rpcClient'], 'resolve').mockResolvedValue([
+        {
+          module_id: 'memory-test',
+          module_type: 'memory',
+          version: '0.1.0',
+          port: 19001,
+        },
+      ] as any)
+
+      const callSpy = vi.spyOn(admin['rpcClient'], 'call').mockResolvedValue({
+        profiles: [
+          {
+            label: 'Alice',
+            scene: { type: 'friend', friend_id: 'friend-1' },
+            abstract: '工作搭子',
+            overview: '稳定规则',
+            content: '完整说明',
+            created_at: '2026-04-19T00:00:00.000Z',
+            updated_at: '2026-04-20T00:00:00.000Z',
+          },
+        ],
+      } as any)
+
+      const response = await makeWebRequest<{ profiles: Array<{ label: string; scene: { type: string; friend_id: string } }> }>(
+        TEST_WEB_PORT,
+        '/api/memory/mem-1/scene-profiles',
+        'GET',
+        null,
+        token,
+      )
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body).toEqual({
+        profiles: [
+          expect.objectContaining({
+            label: 'Alice',
+            scene: { type: 'friend', friend_id: 'friend-1' },
+          }),
+        ],
+      })
+
+      expect(callSpy).toHaveBeenCalledWith(
+        19001,
+        'list_scene_profiles_by_memory',
+        { memory_id: 'mem-1' },
+        'admin-web-test',
+      )
+    })
   })
 
   describe('PATCH /api/scene-profiles/:key', () => {

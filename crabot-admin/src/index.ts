@@ -1593,8 +1593,19 @@ export class AdminModule extends ModuleBase {
         return
       }
 
+      if (req.method === 'GET' && pathname === '/api/memory/long-term/browse') {
+        await this.handleBrowseLongTermApi(req, res, url)
+        return
+      }
+
       if (req.method === 'GET' && pathname === '/api/memory/long-term') {
         await this.handleSearchLongTermApi(req, res, url)
+        return
+      }
+
+      if (req.method === 'GET' && pathname.match(/^\/api\/memory\/[^/]+\/scene-profiles$/)) {
+        const memoryId = pathname.split('/')[3]
+        await this.handleListSceneProfilesByMemoryApi(req, res, url, memoryId)
         return
       }
 
@@ -6505,7 +6516,12 @@ export class AdminModule extends ModuleBase {
 
   private async handleSearchLongTermApi(_req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
     const moduleId = url.searchParams.get('module_id') ?? undefined
-    const q = url.searchParams.get('q') ?? 'memory'
+    const q = url.searchParams.get('q')?.trim()
+    if (!q) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'q is required for long-term search' }))
+      return
+    }
     const limit = parseInt(url.searchParams.get('limit') ?? '20', 10)
     const friendId = url.searchParams.get('friend_id') ?? undefined
     const accessibleScopes = this.parseAccessibleScopes(url)
@@ -6532,6 +6548,34 @@ export class AdminModule extends ModuleBase {
     res.end(JSON.stringify(result))
   }
 
+  private async handleBrowseLongTermApi(_req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+    const moduleId = url.searchParams.get('module_id') ?? undefined
+    const limit = parseInt(url.searchParams.get('limit') ?? '20', 10)
+    const friendId = url.searchParams.get('friend_id') ?? undefined
+    const accessibleScopes = this.parseAccessibleScopes(url)
+    const port = await this.getMemoryPort(moduleId)
+    const result = await this.rpcClient.call<{
+      limit: number
+      detail: string
+      filter?: { entity_id?: string }
+      accessible_scopes?: string[]
+    }, { results: Array<{ memory: unknown; relevance: number }> }>(
+      port,
+      'browse_long_term',
+      {
+        limit,
+        detail: 'L1',
+        ...(friendId ? { filter: { entity_id: friendId } } : {}),
+        ...(accessibleScopes ? { accessible_scopes: accessibleScopes } : {}),
+      },
+      this.config.moduleId
+    )
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({
+      results: result.results.map((item) => item.memory),
+    }))
+  }
+
   private async handleGetMemoryApi(_req: IncomingMessage, res: ServerResponse, url: URL, memoryId: string): Promise<void> {
     const moduleId = url.searchParams.get('module_id') ?? undefined
     const port = await this.getMemoryPort(moduleId)
@@ -6542,25 +6586,40 @@ export class AdminModule extends ModuleBase {
     res.end(JSON.stringify(result))
   }
 
+  private async handleListSceneProfilesByMemoryApi(_req: IncomingMessage, res: ServerResponse, url: URL, memoryId: string): Promise<void> {
+    const moduleId = url.searchParams.get('module_id') ?? undefined
+    const port = await this.getMemoryPort(moduleId)
+    const result = await this.rpcClient.call<{ memory_id: string }, unknown>(
+      port,
+      'list_scene_profiles_by_memory',
+      { memory_id: memoryId },
+      this.config.moduleId,
+    )
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(result))
+  }
+
   private parseAccessibleScopes(url: URL): string[] | undefined {
-    const repeated = url.searchParams
-      .getAll('accessible_scope')
+    const candidates = [
+      ...url.searchParams.getAll('accessible_scope'),
+      ...(url.searchParams.get('accessible_scopes')?.split(',') ?? []),
+    ]
+
+    const scopes = candidates
       .map((scope) => scope.trim())
       .filter(Boolean)
-    if (repeated.length > 0) {
-      return repeated
-    }
 
-    const packed = url.searchParams.get('accessible_scopes')
-    if (!packed) {
+    if (scopes.length === 0) {
       return undefined
     }
 
-    const scopes = packed
-      .split(',')
-      .map((scope) => scope.trim())
-      .filter(Boolean)
-    return scopes.length > 0 ? scopes : undefined
+    const validScopePattern = /^[A-Za-z0-9:_./-]+$/
+    const invalidScope = scopes.find((scope) => !validScopePattern.test(scope))
+    if (invalidScope) {
+      throw new Error(`Invalid accessible_scope: ${invalidScope}`)
+    }
+
+    return scopes
   }
 
   private async handleDeleteMemoryApi(_req: IncomingMessage, res: ServerResponse, url: URL, memoryId: string): Promise<void> {

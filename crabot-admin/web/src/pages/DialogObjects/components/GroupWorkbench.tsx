@@ -1,6 +1,7 @@
 import React from 'react'
 import { Button } from '../../../components/Common/Button'
 import { Card } from '../../../components/Common/Card'
+import { buildMemoryEntriesHref } from '../../Memory/memoryContextQuery'
 import type { DialogObjectGroupEntry } from '../../../types'
 
 const workbenchLinkStyle: React.CSSProperties = {
@@ -18,23 +19,6 @@ const workbenchLinkStyle: React.CSSProperties = {
 }
 
 const buildSceneProfileHref = (sceneKey: string): string => `/memory/scenes/${encodeURIComponent(sceneKey)}`
-
-const buildMemoryBrowserHref = (params: {
-  accessibleScopes?: string[]
-  contextLabel?: string
-}): string => {
-  const search = new URLSearchParams()
-  params.accessibleScopes?.forEach((scope) => {
-    if (scope.trim()) {
-      search.append('accessible_scope', scope.trim())
-    }
-  })
-  if (params.contextLabel) {
-    search.set('context_label', params.contextLabel)
-  }
-  const query = search.toString()
-  return query ? `/memory?${query}` : '/memory'
-}
 
 interface GroupWorkbenchProps {
   group: DialogObjectGroupEntry | null
@@ -54,7 +38,7 @@ export const GroupWorkbench: React.FC<GroupWorkbenchProps> = ({
   }
 
   const groupSceneHref = buildSceneProfileHref(`group:${group.channel_id}:${group.id}`)
-  const groupMemoryHref = buildMemoryBrowserHref({
+  const groupMemoryHref = buildMemoryEntriesHref({
     accessibleScopes: [group.id],
     contextLabel: group.title,
   })

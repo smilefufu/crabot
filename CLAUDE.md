@@ -2,9 +2,9 @@
 
 ## crabot-docs 目录下有设计文档和协议文档。Crabot 项目是一个文档驱动的项目
 
-## PROGRESS.md 是当前的项目开发进度
-
 ## SimpleMem 和OpenViking 是两个值得参考的开源项目
+
+## PROGRESS.md 记录了项目进度，包括一些待办事项等。做好对该文件的维护，及时清理或压缩不再需要的已完成事项，以确保文件不会过长
 
 ## 文档驱动开发规范（必须遵守）
 
@@ -20,17 +20,7 @@
 
 ### 常见错误模式（已踩过的坑）
 
-以下是 Flow 模块实现中出现过的文档-代码不一致问题，必须避免：
-
-- **字段名简化**：协议定义 `short_term_memories`，代码写成 `short_term_memory`；协议定义 `task_title`，代码写成 `title`
-- **结构扁平化**：协议定义 `ChannelMessage.content` 是 `MessageContent` 对象（含 type/text/media_url），代码简化为 `string`
-- **结构合并**：协议定义 `admin_endpoint`、`memory_endpoint`、`channel_endpoints` 是独立的 `ResolvedModule` 字段，代码合并为 `module_endpoints: { admin: string, channels: Record<string, string> }`
-- **类型丢失**：协议定义了 `MessageDecision` 联合类型（DirectReplyDecision/CreateTaskDecision/ForwardToWorkerDecision），代码用内联对象类型 `{ type: string; content?: string; ... }` 替代
-- **嵌套结构忽略**：协议定义 `ChannelMessage.sender` 是嵌套对象（含 friend_id/platform_user_id），代码扁平化为 `sender_id`
-
 ### 根因分析
-
-这些问题的根因是：实现时凭记忆写代码，没有逐字段对照协议文档。尤其在类型定义（types.ts）阶段，如果类型就偏了，后续所有使用这些类型的代码都会跟着偏。
 
 ### 检查清单
 
@@ -230,4 +220,3 @@ CRABOT_PORT_OFFSET=200 DATA_DIR=/data/tenant-c ./dev.sh
 ```
 
 端口映射规则：所有默认端口 + offset（如 offset=100 时，MM=19100, Admin RPC=19101, Admin Web=3100, LiteLLM=4100）。每个实例占用 100 个端口范围（19002-19099 → 19102-19199）。
-

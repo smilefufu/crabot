@@ -1,32 +1,66 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react'
-import { useLocation, useNavigate } from 'react-router-dom'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { MainLayout } from '../../components/Layout/MainLayout'
 import { Card } from '../../components/Common/Card'
 import { Button } from '../../components/Common/Button'
 import { Loading } from '../../components/Common/Loading'
+import { ConfirmModal } from '../../components/Common/ConfirmModal'
 import { useToast } from '../../contexts/ToastContext'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   memoryService,
+  sceneToKey,
   type MemoryModule,
   type MemoryStats,
+  type SceneProfile,
   type ShortTermMemoryEntry,
   type LongTermMemoryEntry,
 } from '../../services/memory'
+import type { MemoryContextQuery } from './memoryContextQuery'
 
 type TabType = 'short' | 'long'
 type DetailLevel = 'L0' | 'L1' | 'L2'
+type TaskMode = 'browse' | 'search' | 'context'
 
-export const MemoryBrowser: React.FC = () => {
+interface MemoryBrowserProps {
+  initialTab?: TabType
+  initialMode?: TaskMode
+  initialContext?: MemoryContextQuery
+}
+
+const MODE_LABELS: Record<TaskMode, string> = {
+  browse: '浏览最近',
+  search: '语义搜索',
+  context: '按上下文查看',
+}
+
+export const MemoryBrowser: React.FC<MemoryBrowserProps> = ({
+  initialTab = 'short',
+  initialMode = 'browse',
+  initialContext,
+}) => {
   const toast = useToast()
-  const location = useLocation()
   const navigate = useNavigate()
+
+  const contextFilters = useMemo(
+    () => ({
+      friendId: initialContext?.friendId,
+      accessibleScopes: initialContext?.accessibleScopes ?? [],
+      contextLabel: initialContext?.contextLabel?.trim() ?? '',
+      memoryId: initialContext?.memoryId,
+    }),
+    [initialContext],
+  )
+  const hasContextFilter = Boolean(
+    contextFilters.friendId || contextFilters.accessibleScopes.length > 0,
+  )
 
   const [modules, setModules] = useState<MemoryModule[]>([])
   const [selectedModuleId, setSelectedModuleId] = useState<string | undefined>(undefined)
   const [stats, setStats] = useState<MemoryStats | null>(null)
-  const [tab, setTab] = useState<TabType>('short')
+  const [tab, setTab] = useState<TabType>(initialTab)
+  const [mode, setMode] = useState<TaskMode>(initialMode)
   const [query, setQuery] = useState('')
   const [shortTermEntries, setShortTermEntries] = useState<ShortTermMemoryEntry[]>([])
   const [longTermEntries, setLongTermEntries] = useState<LongTermMemoryEntry[]>([])
@@ -37,41 +71,28 @@ export const MemoryBrowser: React.FC = () => {
   const [serviceError, setServiceError] = useState('')
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  const [l2Loading, setL2Loading] = useState<string | null>(null)
+  const [relatedSceneProfiles, setRelatedSceneProfiles] = useState<Record<string, SceneProfile[]>>({})
 
-  const contextFilters = useMemo(() => {
-    const search = new URLSearchParams(location.search)
-    const repeatedScopes = search
-      .getAll('accessible_scope')
-      .map((scope) => scope.trim())
-      .filter(Boolean)
-    const packedScopes = search.get('accessible_scopes')
-      ?.split(',')
-      .map((scope) => scope.trim())
-      .filter(Boolean) ?? []
+  useEffect(() => {
+    setTab(initialTab)
+  }, [initialTab])
 
-    return {
-      friendId: search.get('friend_id')?.trim() || undefined,
-      accessibleScopes: repeatedScopes.length > 0 ? repeatedScopes : packedScopes,
-      contextLabel: search.get('context_label')?.trim() || '',
-    }
-  }, [location.search])
-
-  const hasContextFilter = Boolean(
-    contextFilters.friendId || contextFilters.accessibleScopes.length > 0,
-  )
+  useEffect(() => {
+    setMode(initialMode)
+    setQuery('')
+  }, [initialMode])
 
   const loadModules = useCallback(async () => {
     try {
       const result = await memoryService.listModules()
       setModules(result.items)
-      if (result.items.length > 0 && !selectedModuleId) {
-        setSelectedModuleId(result.items[0].module_id)
-      }
+      setSelectedModuleId((current) => current ?? result.items[0]?.module_id)
       setServiceError('')
-    } catch (err) {
+    } catch {
       setServiceError('Memory 服务未运行，请确认 Memory 模块已启动')
     }
-  }, [selectedModuleId])
+  }, [])
 
   const loadStats = useCallback(async () => {
     try {
@@ -82,11 +103,11 @@ export const MemoryBrowser: React.FC = () => {
     }
   }, [selectedModuleId])
 
-  const loadShortTerm = useCallback(async (q?: string) => {
+  const loadShortTerm = useCallback(async (queryInput?: string) => {
     setListLoading(true)
     try {
       const result = await memoryService.searchShortTerm({
-        q: q || undefined,
+        q: queryInput?.trim() || undefined,
         limit: 50,
         moduleId: selectedModuleId,
         friendId: contextFilters.friendId,
@@ -100,23 +121,45 @@ export const MemoryBrowser: React.FC = () => {
     }
   }, [contextFilters.accessibleScopes, contextFilters.friendId, selectedModuleId, toast])
 
-  const loadLongTerm = useCallback(async (q?: string) => {
+  const loadLongTerm = useCallback(async (input: { query?: string; mode: TaskMode }) => {
     setListLoading(true)
     try {
+      if (input.mode !== 'search') {
+        const result = await memoryService.browseLongTerm({
+          limit: 50,
+          moduleId: selectedModuleId,
+          friendId: contextFilters.friendId,
+          accessibleScopes: contextFilters.accessibleScopes,
+        })
+        setLongTermEntries(result.results)
+        return
+      }
+
       const result = await memoryService.searchLongTerm({
-        q: q || 'memory',
+        q: input.query?.trim() || undefined,
         limit: 50,
         moduleId: selectedModuleId,
         friendId: contextFilters.friendId,
         accessibleScopes: contextFilters.accessibleScopes,
       })
-      setLongTermEntries(result.results.map(r => r.memory))
+      setLongTermEntries(result.results.map((entry) => entry.memory))
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '加载长期记忆失败')
     } finally {
       setListLoading(false)
     }
   }, [contextFilters.accessibleScopes, contextFilters.friendId, selectedModuleId, toast])
+
+  const loadCurrentEntries = useCallback(async (queryInput?: string) => {
+    if (tab === 'short') {
+      await loadShortTerm(mode === 'search' ? queryInput : undefined)
+      return
+    }
+    await loadLongTerm({
+      query: mode === 'search' ? queryInput : undefined,
+      mode,
+    })
+  }, [loadLongTerm, loadShortTerm, mode, tab])
 
   useEffect(() => {
     const init = async () => {
@@ -128,99 +171,77 @@ export const MemoryBrowser: React.FC = () => {
   }, [loadModules])
 
   useEffect(() => {
-    if (!serviceError && modules.length > 0) {
-      loadStats()
-      if (tab === 'short') {
-        loadShortTerm()
-      } else {
-        loadLongTerm()
-      }
+    if (serviceError || modules.length === 0) {
+      return
     }
-  }, [loadLongTerm, loadShortTerm, loadStats, modules, serviceError, tab])
+
+    loadStats()
+
+    if (mode === 'search') {
+      if (tab === 'short') {
+        setShortTermEntries([])
+      } else {
+        setLongTermEntries([])
+      }
+      return
+    }
+
+    loadCurrentEntries()
+  }, [loadCurrentEntries, loadStats, mode, modules.length, serviceError, tab, contextFilters.friendId, contextFilters.accessibleScopes])
 
   useEffect(() => {
     setExpandedId(null)
     setLongTermDetailLevels(new Map())
-  }, [contextFilters.accessibleScopes, contextFilters.friendId])
+  }, [tab, mode, contextFilters.friendId, contextFilters.accessibleScopes])
 
-  const handleTabChange = (newTab: TabType) => {
-    setTab(newTab)
-    setQuery('')
-    setExpandedId(null)
-    setLongTermDetailLevels(new Map())
-    if (newTab === 'short') {
-      loadShortTerm()
-    } else {
-      loadLongTerm()
-    }
-  }
-
-  const handleSearch = () => {
-    if (tab === 'short') {
-      loadShortTerm(query)
-    } else {
-      loadLongTerm(query || 'memory')
-    }
-  }
-
-  const handleDelete = async (id: string) => {
-    if (confirmDeleteId !== id) {
-      setConfirmDeleteId(id)
-      toast.info('再次点击删除按钮以确认删除')
+  useEffect(() => {
+    if (!contextFilters.memoryId || tab !== 'long' || mode !== 'search') {
       return
     }
-    setConfirmDeleteId(null)
-    setDeletingId(id)
-    try {
-      await memoryService.deleteMemory(id, selectedModuleId)
-      toast.success('记忆已删除')
-      if (tab === 'short') {
-        setShortTermEntries(prev => prev.filter(e => e.id !== id))
-      } else {
-        setLongTermEntries(prev => prev.filter(e => e.id !== id))
-      }
-      loadStats()
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '删除失败')
-    } finally {
-      setDeletingId(null)
+    setQuery(contextFilters.memoryId)
+    loadCurrentEntries(contextFilters.memoryId)
+  }, [contextFilters.memoryId, loadCurrentEntries, mode, tab])
+
+  useEffect(() => {
+    if (tab !== 'long' || longTermEntries.length === 0) {
+      setRelatedSceneProfiles({})
+      return
     }
-  }
 
-  const handleToggleLongTermDetail = (id: string) => {
-    setLongTermDetailLevels(prev => {
-      const next = new Map(prev)
-      if (next.has(id)) {
-        next.delete(id)
-      } else {
-        next.set(id, 'L1')
-      }
-      return next
-    })
-  }
+    let cancelled = false
+    const entryIds = longTermEntries.map((entry) => entry.id)
+    const missingIds = entryIds.filter((id) => relatedSceneProfiles[id] === undefined)
 
-  const [l2Loading, setL2Loading] = useState<string | null>(null)
+    if (missingIds.length === 0) {
+      return
+    }
 
-  const handleShowL2 = async (id: string) => {
-    setL2Loading(id)
-    try {
-      const result = await memoryService.getMemory(id, selectedModuleId)
-      if (result.type === 'long') {
-        setLongTermEntries(prev =>
-          prev.map(e => e.id === id ? { ...e, content: result.memory.content } : e)
+    const loadRelatedSceneProfiles = async () => {
+      try {
+        const pairs = await Promise.all(
+          missingIds.map(async (id) => {
+            const result = await memoryService.getRelatedSceneProfiles(id, selectedModuleId)
+            return [id, result.profiles] as const
+          }),
         )
-        setLongTermDetailLevels(prev => {
-          const next = new Map(prev)
-          next.set(id, 'L2')
-          return next
-        })
+        if (!cancelled) {
+          setRelatedSceneProfiles((prev) => ({
+            ...prev,
+            ...Object.fromEntries(pairs),
+          }))
+        }
+      } catch (err) {
+        if (!cancelled) {
+          toast.error(err instanceof Error ? err.message : '加载关联场景画像失败')
+        }
       }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '加载全文失败')
-    } finally {
-      setL2Loading(null)
     }
-  }
+
+    loadRelatedSceneProfiles()
+    return () => {
+      cancelled = true
+    }
+  }, [longTermEntries, relatedSceneProfiles, selectedModuleId, tab, toast])
 
   useEffect(() => {
     const style = document.createElement('style')
@@ -250,15 +271,110 @@ export const MemoryBrowser: React.FC = () => {
     return () => { document.head.removeChild(style) }
   }, [])
 
-  if (loading) return <MainLayout><Loading /></MainLayout>
+  const handleTabChange = (nextTab: TabType) => {
+    setTab(nextTab)
+    setQuery('')
+  }
+
+  const handleModeChange = (nextMode: TaskMode) => {
+    setMode(nextMode)
+    setQuery('')
+  }
+
+  const handleSearch = () => {
+    if (mode !== 'search') {
+      loadCurrentEntries()
+      return
+    }
+    loadCurrentEntries(query)
+  }
+
+  const handleClear = () => {
+    setQuery('')
+    if (mode === 'search') {
+      if (tab === 'short') {
+        setShortTermEntries([])
+      } else {
+        setLongTermEntries([])
+      }
+      return
+    }
+    loadCurrentEntries()
+  }
+
+  const handleRequestDelete = (id: string) => {
+    setConfirmDeleteId(id)
+  }
+
+  const handleDeleteConfirmed = async (id: string) => {
+    setDeletingId(id)
+    try {
+      await memoryService.deleteMemory(id, selectedModuleId)
+      toast.success('记忆已删除')
+      setConfirmDeleteId(null)
+      if (tab === 'short') {
+        setShortTermEntries((prev) => prev.filter((entry) => entry.id !== id))
+      } else {
+        setLongTermEntries((prev) => prev.filter((entry) => entry.id !== id))
+      }
+      loadStats()
+      setRelatedSceneProfiles((prev) => {
+        const next = { ...prev }
+        delete next[id]
+        return next
+      })
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '删除失败')
+    } finally {
+      setDeletingId(null)
+    }
+  }
+
+  const handleToggleLongTermDetail = (id: string) => {
+    setLongTermDetailLevels((prev) => {
+      const next = new Map(prev)
+      if (next.has(id)) {
+        next.delete(id)
+      } else {
+        next.set(id, 'L1')
+      }
+      return next
+    })
+  }
+
+  const handleShowL2 = async (id: string) => {
+    setL2Loading(id)
+    try {
+      const result = await memoryService.getMemory(id, selectedModuleId)
+      if (result.type === 'long') {
+        setLongTermEntries((prev) => prev.map((entry) => (
+          entry.id === id ? { ...entry, ...result.memory } : entry
+        )))
+        setLongTermDetailLevels((prev) => {
+          const next = new Map(prev)
+          next.set(id, 'L2')
+          return next
+        })
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '加载全文失败')
+    } finally {
+      setL2Loading(null)
+    }
+  }
+
+  if (loading) {
+    return <MainLayout><Loading /></MainLayout>
+  }
+
+  const currentResultCount = tab === 'short' ? shortTermEntries.length : longTermEntries.length
 
   return (
     <MainLayout>
       <div style={{ marginBottom: '2rem' }}>
-        <h1 style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.5rem' }}>记忆管理</h1>
+        <h1 style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.5rem' }}>记忆条目</h1>
         <p style={{ color: 'var(--text-secondary)' }}>
-          查看和管理 Memory 模块中的短期与长期记忆
-          {hasContextFilter ? '，当前列表已按对话对象上下文过滤。' : ''}
+          按浏览、搜索或上下文模式查看 Memory 模块中的短期与长期记忆。
         </p>
       </div>
 
@@ -273,40 +389,12 @@ export const MemoryBrowser: React.FC = () => {
 
       {!serviceError && (
         <>
-          {hasContextFilter && (
-            <Card>
-              <div style={{ display: 'grid', gap: '0.5rem' }}>
-                <div style={{ fontWeight: 600 }}>
-                  当前上下文：{contextFilters.contextLabel || '已应用上下文过滤'}
-                </div>
-                {contextFilters.friendId && (
-                  <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
-                    好友 ID：{contextFilters.friendId}
-                  </div>
-                )}
-                {contextFilters.accessibleScopes.length > 0 && (
-                  <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
-                    可访问范围：{contextFilters.accessibleScopes.join(', ')}
-                  </div>
-                )}
-                <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>
-                  说明：列表查询已按上下文过滤，顶部统计仍显示当前 Memory 模块的总体数据。
-                </div>
-                <div>
-                  <Button variant="secondary" onClick={() => navigate('/memory')}>
-                    清除上下文过滤
-                  </Button>
-                </div>
-              </div>
-            </Card>
-          )}
-
           {modules.length > 1 && (
             <div style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '1rem' }}>
               <span style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>选择 Memory 模块：</span>
               <select
                 value={selectedModuleId ?? ''}
-                onChange={e => setSelectedModuleId(e.target.value)}
+                onChange={(event) => setSelectedModuleId(event.target.value)}
                 style={{
                   padding: '0.4rem 0.8rem',
                   background: 'var(--bg-secondary)',
@@ -315,46 +403,70 @@ export const MemoryBrowser: React.FC = () => {
                   color: 'var(--text-primary)',
                 }}
               >
-                {modules.map(m => (
-                  <option key={m.module_id} value={m.module_id}>{m.module_id}</option>
+                {modules.map((module) => (
+                  <option key={module.module_id} value={module.module_id}>{module.module_id}</option>
                 ))}
               </select>
             </div>
           )}
 
           {stats && (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1.5rem' }}>
-              <Card>
-                <div style={{ textAlign: 'center' }}>
-                  <div style={{ fontSize: '2.5rem', fontWeight: 700, color: 'var(--primary)' }}>
-                    {stats.short_term.entry_count}
-                  </div>
-                  <div style={{ color: 'var(--text-secondary)', marginTop: '0.25rem' }}>短期记忆</div>
-                  {stats.short_term.latest_entry_at && (
-                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', marginTop: '0.25rem' }}>
-                      最新：{new Date(stats.short_term.latest_entry_at).toLocaleString('zh-CN')}
+            <>
+              <div style={{ fontWeight: 600, marginBottom: '0.75rem' }}>全局统计</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+                <Card>
+                  <div style={{ textAlign: 'center' }}>
+                    <div style={{ fontSize: '2.5rem', fontWeight: 700, color: 'var(--primary)' }}>
+                      {stats.short_term.entry_count}
                     </div>
-                  )}
-                </div>
-              </Card>
-              <Card>
-                <div style={{ textAlign: 'center' }}>
-                  <div style={{ fontSize: '2.5rem', fontWeight: 700, color: '#8b5cf6' }}>
-                    {stats.long_term.entry_count}
+                    <div style={{ color: 'var(--text-secondary)', marginTop: '0.25rem' }}>短期记忆</div>
+                    {stats.short_term.latest_entry_at && (
+                      <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', marginTop: '0.25rem' }}>
+                        最新：{new Date(stats.short_term.latest_entry_at).toLocaleString('zh-CN')}
+                      </div>
+                    )}
                   </div>
-                  <div style={{ color: 'var(--text-secondary)', marginTop: '0.25rem' }}>长期记忆</div>
-                  {stats.long_term.latest_entry_at && (
-                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', marginTop: '0.25rem' }}>
-                      最新：{new Date(stats.long_term.latest_entry_at).toLocaleString('zh-CN')}
+                </Card>
+                <Card>
+                  <div style={{ textAlign: 'center' }}>
+                    <div style={{ fontSize: '2.5rem', fontWeight: 700, color: '#8b5cf6' }}>
+                      {stats.long_term.entry_count}
                     </div>
-                  )}
-                </div>
-              </Card>
-            </div>
+                    <div style={{ color: 'var(--text-secondary)', marginTop: '0.25rem' }}>长期记忆</div>
+                    {stats.long_term.latest_entry_at && (
+                      <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', marginTop: '0.25rem' }}>
+                        最新：{new Date(stats.long_term.latest_entry_at).toLocaleString('zh-CN')}
+                      </div>
+                    )}
+                  </div>
+                </Card>
+              </div>
+            </>
           )}
 
           <Card>
-            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.5rem' }}>
+            <div style={{ display: 'grid', gap: '0.75rem' }}>
+              <div style={{ fontWeight: 600 }}>当前视图</div>
+              <div>模式：{MODE_LABELS[mode]}</div>
+              <div>结果数：{currentResultCount}</div>
+              <div>类型：{tab === 'short' ? '短期记忆' : '长期记忆'}</div>
+              {contextFilters.contextLabel && <div>上下文：{contextFilters.contextLabel}</div>}
+              {contextFilters.friendId && <div>friend_id：{contextFilters.friendId}</div>}
+              {contextFilters.accessibleScopes.length > 0 && (
+                <div>scopes：{contextFilters.accessibleScopes.join('、')}</div>
+              )}
+              {hasContextFilter && (
+                <div>
+                  <Button variant="secondary" onClick={() => navigate('/memory/entries')}>
+                    清除上下文过滤
+                  </Button>
+                </div>
+              )}
+            </div>
+          </Card>
+
+          <Card>
+            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
               <Button
                 variant={tab === 'short' ? 'primary' : 'secondary'}
                 onClick={() => handleTabChange('short')}
@@ -369,35 +481,49 @@ export const MemoryBrowser: React.FC = () => {
               </Button>
             </div>
 
-            <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '1.5rem' }}>
-              <input
-                type="text"
-                placeholder={tab === 'short' ? '搜索短期记忆内容...' : '搜索长期记忆...'}
-                value={query}
-                onChange={e => setQuery(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handleSearch()}
-                style={{
-                  flex: 1,
-                  padding: '0.5rem 1rem',
-                  background: 'var(--bg-secondary)',
-                  border: '1px solid var(--border)',
-                  borderRadius: '6px',
-                  color: 'var(--text-primary)',
-                  fontSize: '0.9rem',
-                }}
-              />
-              <Button onClick={handleSearch}>搜索</Button>
+            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
               <Button
-                variant="secondary"
-                onClick={() => {
-                  setQuery('')
-                  if (tab === 'short') loadShortTerm()
-                  else loadLongTerm()
-                }}
+                variant={mode === 'browse' ? 'primary' : 'secondary'}
+                onClick={() => handleModeChange('browse')}
               >
-                清除
+                浏览最近
+              </Button>
+              <Button
+                variant={mode === 'search' ? 'primary' : 'secondary'}
+                onClick={() => handleModeChange('search')}
+              >
+                语义搜索
+              </Button>
+              <Button
+                variant={mode === 'context' ? 'primary' : 'secondary'}
+                onClick={() => handleModeChange('context')}
+              >
+                按上下文查看
               </Button>
             </div>
+
+            {mode === 'search' && (
+              <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '1.5rem' }}>
+                <input
+                  type="text"
+                  placeholder={tab === 'short' ? '搜索短期记忆内容...' : '搜索长期记忆...'}
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  onKeyDown={(event) => event.key === 'Enter' && handleSearch()}
+                  style={{
+                    flex: 1,
+                    padding: '0.5rem 1rem',
+                    background: 'var(--bg-secondary)',
+                    border: '1px solid var(--border)',
+                    borderRadius: '6px',
+                    color: 'var(--text-primary)',
+                    fontSize: '0.9rem',
+                  }}
+                />
+                <Button onClick={handleSearch}>搜索</Button>
+                <Button variant="secondary" onClick={handleClear}>清除</Button>
+              </div>
+            )}
 
             {listLoading && <Loading />}
 
@@ -405,10 +531,9 @@ export const MemoryBrowser: React.FC = () => {
               <ShortTermList
                 entries={shortTermEntries}
                 expandedId={expandedId}
-                onToggleExpand={id => setExpandedId(prev => prev === id ? null : id)}
-                onDelete={handleDelete}
+                onToggleExpand={(id) => setExpandedId((prev) => prev === id ? null : id)}
+                onDelete={handleRequestDelete}
                 deletingId={deletingId}
-                confirmDeleteId={confirmDeleteId}
               />
             )}
 
@@ -419,14 +544,25 @@ export const MemoryBrowser: React.FC = () => {
                 onToggleDetail={handleToggleLongTermDetail}
                 onShowL2={handleShowL2}
                 l2Loading={l2Loading}
-                onDelete={handleDelete}
+                onDelete={handleRequestDelete}
                 deletingId={deletingId}
-                confirmDeleteId={confirmDeleteId}
+                relatedSceneProfiles={relatedSceneProfiles}
               />
             )}
           </Card>
         </>
       )}
+
+      <ConfirmModal
+        open={Boolean(confirmDeleteId)}
+        title="删除记忆条目"
+        message="此操作不可撤销。该记忆条目将被永久删除。"
+        confirmText="删除"
+        confirmVariant="danger"
+        loading={deletingId !== null}
+        onConfirm={() => confirmDeleteId && handleDeleteConfirmed(confirmDeleteId)}
+        onCancel={() => setConfirmDeleteId(null)}
+      />
     </MainLayout>
   )
 }
@@ -437,11 +573,10 @@ interface ShortTermListProps {
   onToggleExpand: (id: string) => void
   onDelete: (id: string) => void
   deletingId: string | null
-  confirmDeleteId: string | null
 }
 
 const ShortTermList: React.FC<ShortTermListProps> = ({
-  entries, expandedId, onToggleExpand, onDelete, deletingId, confirmDeleteId
+  entries, expandedId, onToggleExpand, onDelete, deletingId,
 }) => {
   if (entries.length === 0) {
     return <div style={{ color: 'var(--text-secondary)', textAlign: 'center', padding: '2rem' }}>暂无短期记忆</div>
@@ -449,7 +584,7 @@ const ShortTermList: React.FC<ShortTermListProps> = ({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-      {entries.map(entry => (
+      {entries.map((entry) => (
         <div key={entry.id} style={{
           border: '1px solid var(--border)',
           borderRadius: '8px',
@@ -489,11 +624,11 @@ const ShortTermList: React.FC<ShortTermListProps> = ({
             </div>
             <Button
               variant="danger"
-              onClick={e => { e.stopPropagation(); onDelete(entry.id) }}
+              onClick={(event) => { event.stopPropagation(); onDelete(entry.id) }}
               disabled={deletingId === entry.id}
               style={{ flexShrink: 0, padding: '0.25rem 0.75rem', fontSize: '0.8rem' }}
             >
-              {confirmDeleteId === entry.id ? '确认删除' : deletingId === entry.id ? '删除中...' : '删除'}
+              {deletingId === entry.id ? '删除中...' : '删除'}
             </Button>
           </div>
 
@@ -507,8 +642,8 @@ const ShortTermList: React.FC<ShortTermListProps> = ({
               {entry.keywords.length > 0 && (
                 <div style={{ marginBottom: '0.5rem' }}>
                   <span style={{ color: 'var(--text-secondary)' }}>关键词：</span>
-                  {entry.keywords.map(k => (
-                    <span key={k} style={{
+                  {entry.keywords.map((keyword) => (
+                    <span key={keyword} style={{
                       display: 'inline-block',
                       margin: '0 0.25rem',
                       padding: '0.1rem 0.4rem',
@@ -516,7 +651,7 @@ const ShortTermList: React.FC<ShortTermListProps> = ({
                       borderRadius: '4px',
                       fontSize: '0.8rem',
                       color: 'var(--primary)',
-                    }}>{k}</span>
+                    }}>{keyword}</span>
                   ))}
                 </div>
               )}
@@ -552,11 +687,11 @@ interface LongTermListProps {
   l2Loading: string | null
   onDelete: (id: string) => void
   deletingId: string | null
-  confirmDeleteId: string | null
+  relatedSceneProfiles: Record<string, SceneProfile[]>
 }
 
 const LongTermList: React.FC<LongTermListProps> = ({
-  entries, detailLevels, onToggleDetail, onShowL2, l2Loading, onDelete, deletingId, confirmDeleteId
+  entries, detailLevels, onToggleDetail, onShowL2, l2Loading, onDelete, deletingId, relatedSceneProfiles,
 }) => {
   if (entries.length === 0) {
     return <div style={{ color: 'var(--text-secondary)', textAlign: 'center', padding: '2rem' }}>暂无长期记忆</div>
@@ -564,7 +699,7 @@ const LongTermList: React.FC<LongTermListProps> = ({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-      {entries.map(entry => {
+      {entries.map((entry) => {
         const level = detailLevels.get(entry.id) ?? 'L0'
         const isExpanded = level !== 'L0'
 
@@ -574,7 +709,6 @@ const LongTermList: React.FC<LongTermListProps> = ({
             borderRadius: '8px',
             overflow: 'hidden',
           }}>
-            {/* L0: always visible */}
             <div
               style={{
                 display: 'flex',
@@ -588,14 +722,14 @@ const LongTermList: React.FC<LongTermListProps> = ({
             >
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.375rem', marginBottom: '0.375rem', flexWrap: 'wrap' }}>
-                  {entry.tags.map(t => (
-                    <span key={t} style={{
+                  {entry.tags.map((tag) => (
+                    <span key={tag} style={{
                       padding: '0.1rem 0.4rem',
                       background: 'rgba(139, 92, 246, 0.1)',
                       borderRadius: '4px',
                       color: '#8b5cf6',
                       fontSize: '0.75rem',
-                    }}>{t}</span>
+                    }}>{tag}</span>
                   ))}
                   <span style={{ marginLeft: 'auto', fontSize: '0.8rem', color: 'var(--text-secondary)', flexShrink: 0 }}>
                     ⭐ {entry.importance}
@@ -610,15 +744,14 @@ const LongTermList: React.FC<LongTermListProps> = ({
               </div>
               <Button
                 variant="danger"
-                onClick={e => { e.stopPropagation(); onDelete(entry.id) }}
+                onClick={(event) => { event.stopPropagation(); onDelete(entry.id) }}
                 disabled={deletingId === entry.id}
                 style={{ flexShrink: 0, padding: '0.25rem 0.75rem', fontSize: '0.8rem' }}
               >
-                {confirmDeleteId === entry.id ? '确认删除' : deletingId === entry.id ? '删除中...' : '删除'}
+                {deletingId === entry.id ? '删除中...' : '删除'}
               </Button>
             </div>
 
-            {/* L1: overview section */}
             {isExpanded && (
               <div style={{
                 borderTop: '1px solid var(--border)',
@@ -630,7 +763,7 @@ const LongTermList: React.FC<LongTermListProps> = ({
                   <span style={{ color: '#4ade80', fontSize: '0.75rem', fontWeight: 600 }}>L1 概览</span>
                   {level === 'L1' && (
                     <button
-                      onClick={e => { e.stopPropagation(); onShowL2(entry.id) }}
+                      onClick={(event) => { event.stopPropagation(); onShowL2(entry.id) }}
                       disabled={l2Loading === entry.id}
                       style={{
                         marginLeft: 'auto',
@@ -654,10 +787,10 @@ const LongTermList: React.FC<LongTermListProps> = ({
                 {entry.keywords.length > 0 && (
                   <div style={{ marginBottom: '0.5rem', fontSize: '0.8rem' }}>
                     <span style={{ color: 'var(--text-secondary)' }}>关键词：</span>
-                    {entry.keywords.map((k, i) => (
-                      <span key={k}>
-                        <span style={{ color: '#60a5fa' }}>{k}</span>
-                        {i < entry.keywords.length - 1 && <span style={{ color: 'var(--text-secondary)' }}> · </span>}
+                    {entry.keywords.map((keyword, index) => (
+                      <span key={keyword}>
+                        <span style={{ color: '#60a5fa' }}>{keyword}</span>
+                        {index < entry.keywords.length - 1 && <span style={{ color: 'var(--text-secondary)' }}> · </span>}
                       </span>
                     ))}
                   </div>
@@ -665,18 +798,39 @@ const LongTermList: React.FC<LongTermListProps> = ({
                 {entry.entities.length > 0 && (
                   <div style={{ marginBottom: '0.5rem', fontSize: '0.8rem' }}>
                     <span style={{ color: 'var(--text-secondary)' }}>实体：</span>
-                    {entry.entities.map(e => `${e.name}(${e.type})`).join('、')}
+                    {entry.entities.map((entity) => `${entity.name}(${entity.type})`).join('、')}
                   </div>
                 )}
+                {relatedSceneProfiles[entry.id]?.length ? (
+                  <div style={{ marginTop: '0.5rem', fontSize: '0.8rem' }}>
+                    <span style={{ color: 'var(--text-secondary)' }}>被引用于：</span>
+                    {relatedSceneProfiles[entry.id].map((profile, index) => {
+                      const sceneKey = sceneToKey(profile.scene)
+                      return (
+                        <React.Fragment key={sceneKey}>
+                          {index > 0 && <span style={{ color: 'var(--text-secondary)' }}> · </span>}
+                          <a
+                            href={`/memory/scenes/${encodeURIComponent(sceneKey)}`}
+                            onClick={(event) => event.stopPropagation()}
+                            style={{ color: 'var(--primary)' }}
+                          >
+                            {profile.label || sceneKey}
+                          </a>
+                        </React.Fragment>
+                      )
+                    })}
+                  </div>
+                ) : null}
                 <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>
-                  v{entry.version} · {entry.source.type}
+                  {entry.version !== undefined && `v${entry.version} · `}
+                  {entry.source.type}
                   {entry.source.channel_id && ` · ${entry.source.channel_id}`}
-                  · {new Date(entry.updated_at).toLocaleString('zh-CN')}
+                  {' · '}
+                  {new Date(entry.updated_at ?? entry.created_at).toLocaleString('zh-CN')}
                 </div>
               </div>
             )}
 
-            {/* L2: full content */}
             {level === 'L2' && (
               <div style={{
                 borderTop: '1px solid var(--border)',

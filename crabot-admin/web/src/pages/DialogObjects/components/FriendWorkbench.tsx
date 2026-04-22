@@ -4,6 +4,7 @@ import { Card } from '../../../components/Common/Card'
 import { Input } from '../../../components/Common/Input'
 import { Loading } from '../../../components/Common/Loading'
 import { parseMemoryScopes, summarizeFriendMemoryScopes, summarizeFriendStorage } from '../friend-permission-utils'
+import { buildMemoryEntriesHref } from '../../Memory/memoryContextQuery'
 import type {
   ChannelIdentity,
   DialogObjectFriend,
@@ -28,27 +29,6 @@ const workbenchLinkStyle: React.CSSProperties = {
 }
 
 const buildSceneProfileHref = (sceneKey: string): string => `/memory/scenes/${encodeURIComponent(sceneKey)}`
-
-const buildMemoryBrowserHref = (params: {
-  friendId?: string
-  accessibleScopes?: string[]
-  contextLabel?: string
-}): string => {
-  const search = new URLSearchParams()
-  if (params.friendId) {
-    search.set('friend_id', params.friendId)
-  }
-  params.accessibleScopes?.forEach((scope) => {
-    if (scope.trim()) {
-      search.append('accessible_scope', scope.trim())
-    }
-  })
-  if (params.contextLabel) {
-    search.set('context_label', params.contextLabel)
-  }
-  const query = search.toString()
-  return query ? `/memory?${query}` : '/memory'
-}
 
 interface FriendWorkbenchProps {
   friend: DialogObjectFriend | null
@@ -151,7 +131,7 @@ export const FriendWorkbench: React.FC<FriendWorkbenchProps> = ({
   }
 
   const friendSceneHref = buildSceneProfileHref(`friend:${friend.id}`)
-  const friendMemoryHref = buildMemoryBrowserHref({
+  const friendMemoryHref = buildMemoryEntriesHref({
     friendId: friend.id,
     contextLabel: friend.display_name,
   })

@@ -126,6 +126,7 @@ class MemoryModule:
             "search_short_term": self._search_short_term,
             "write_long_term": self._write_long_term,
             "search_long_term": self._search_long_term,
+            "browse_long_term": self._browse_long_term,
             "get_memory": self._get_memory,
             "delete_memory": self._delete_memory,
             "get_stats": self._get_stats,
@@ -140,6 +141,7 @@ class MemoryModule:
             "upsert_scene_profile": self._upsert_scene_profile,
             "get_scene_profile": self._get_scene_profile,
             "list_scene_profiles": self._list_scene_profiles,
+            "list_scene_profiles_by_memory": self._list_scene_profiles_by_memory,
             "delete_scene_profile": self._delete_scene_profile,
         }
 
@@ -240,6 +242,20 @@ class MemoryModule:
                     "relevance": r.relevance,
                 }
                 for r in results
+            ]
+        }
+
+    async def _browse_long_term(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """浏览近期长期记忆"""
+        browse_params = BrowseLongTermParams(**params)
+        result = await self.long_term.browse_recent(browse_params)
+        return {
+            "results": [
+                {
+                    "memory": item.memory.model_dump(),
+                    "relevance": item.relevance,
+                }
+                for item in result.results
             ]
         }
 
@@ -570,6 +586,12 @@ class MemoryModule:
             offset=int(params.get("offset", 0)),
         )
         return {"profiles": [p.model_dump() for p in out]}
+
+    async def _list_scene_profiles_by_memory(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """列出引用指定长期记忆的场景画像"""
+        memory_id = str(params["memory_id"]).strip()
+        profiles = self.scene_profile_store.list_by_memory_id(memory_id)
+        return {"profiles": [p.model_dump() for p in profiles]}
 
     async def _delete_scene_profile(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """删除场景画像"""

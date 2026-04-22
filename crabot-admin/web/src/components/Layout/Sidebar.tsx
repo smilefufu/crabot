@@ -43,7 +43,8 @@ const navSections: NavSection[] = [
     items: [
       { to: '/dialog-objects', label: '对话对象', match: '/dialog-objects' },
       { to: '/permission-templates', label: '权限模板', match: '/permission-templates' },
-      { to: '/memory', label: '记忆管理', match: '/memory' },
+      { to: '/memory', label: '记忆', match: '/memory' },
+      { to: '/memory/scenes', label: '场景画像', match: '/memory/scenes' },
     ],
   },
 ]
@@ -51,7 +52,12 @@ const navSections: NavSection[] = [
 export const Sidebar: React.FC = () => {
   const location = useLocation()
 
-  const isActive = (match: string) => location.pathname.startsWith(match)
+  const activeItem = navSections
+    .flatMap((section) => section.items)
+    .filter((item) => location.pathname.startsWith(item.match))
+    .sort((left, right) => right.match.length - left.match.length)[0]
+
+  const isActive = (item: NavItem) => activeItem?.to === item.to
 
   return (
     <aside className="sidebar">
@@ -68,7 +74,7 @@ export const Sidebar: React.FC = () => {
               <Link
                 key={item.to}
                 to={item.to}
-                className={`sidebar-nav-item ${isActive(item.match) ? 'active' : ''}`}
+                className={`sidebar-nav-item ${isActive(item) ? 'active' : ''}`}
               >
                 <span className="sidebar-nav-dot" />
                 {item.label}

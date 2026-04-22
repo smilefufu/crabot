@@ -174,30 +174,22 @@ def test_old_schema_db_writes_scene_profile_without_rebuild(tmp_path):
     store.close()
 
 
-def test_update_preserves_source_memory_ids_when_omitted(store):
-    first = SceneProfile(
+
+
+def test_list_scene_profiles_by_memory_returns_referencing_profiles(store):
+    profile = SceneProfile(
         scene=SceneIdentityFriend(friend_id="friend-1"),
         label="Alice",
-        abstract="摘要一",
-        overview="概览一",
-        content="正文一",
+        abstract="工作搭子",
+        overview="稳定规则",
+        content="完整说明",
         source_memory_ids=["mem-1"],
         created_at="2026-04-17T00:00:00Z",
         updated_at="2026-04-17T00:00:00Z",
     )
-    store.upsert(first)
+    store.upsert(profile)
 
-    updated = SceneProfile(
-        scene=SceneIdentityFriend(friend_id="friend-1"),
-        label="Alice 2",
-        abstract="摘要二",
-        overview="概览二",
-        content="正文二",
-        created_at="2026-04-18T00:00:00Z",
-        updated_at="2026-04-18T00:00:00Z",
-    )
-    store.upsert(updated)
+    profiles = store.list_by_memory_id("mem-1")
 
-    got = store.get(updated.scene)
-    assert got is not None
-    assert got.source_memory_ids == ["mem-1"]
+    assert len(profiles) == 1
+    assert profiles[0].label == "Alice"

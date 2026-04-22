@@ -7,6 +7,7 @@ import { SceneProfileDetail } from './SceneProfileDetail'
 const getSceneProfile = vi.fn()
 const patchSceneProfile = vi.fn()
 const deleteSceneProfile = vi.fn()
+const getMemory = vi.fn()
 const toastMock = {
   success: vi.fn(),
   error: vi.fn(),
@@ -25,6 +26,10 @@ vi.mock('../../services/memory', async () => {
   const actual = await vi.importActual<typeof import('../../services/memory')>('../../services/memory')
   return {
     ...actual,
+    memoryService: {
+      ...actual.memoryService,
+      getMemory: (...args: unknown[]) => getMemory(...args),
+    },
     sceneProfileService: {
       list: vi.fn(),
       get: (...args: unknown[]) => getSceneProfile(...args),
@@ -47,6 +52,26 @@ function renderSceneProfileDetail(initialEntry: string) {
 describe('SceneProfileDetail', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    getMemory.mockResolvedValue({
+      type: 'long',
+      memory: {
+        id: 'mem-1',
+        abstract: '偏好 TypeScript',
+        overview: '偏好概览',
+        content: '完整内容',
+        entities: [],
+        importance: 7,
+        keywords: [],
+        tags: ['preference'],
+        source: { type: 'manual' },
+        read_count: 0,
+        version: 1,
+        visibility: 'internal',
+        scopes: [],
+        created_at: '2026-04-19T00:00:00.000Z',
+        updated_at: '2026-04-20T00:00:00.000Z',
+      },
+    })
   })
 
   it('shows l0 l1 l2 document fields in view mode and saves edits without section ui', async () => {
@@ -131,6 +156,22 @@ describe('SceneProfileDetail', () => {
     expect(screen.queryByRole('button', { name: '新增分节' })).not.toBeInTheDocument()
   })
 
+  it('blocks save when l0 abstract is blank', async () => {
+    getSceneProfile.mockResolvedValue({ profile: null })
+
+    renderSceneProfileDetail('/memory/scenes/group%3Awechat-main%3Agroup-2?context_label=空白测试群')
+
+    expect(await screen.findByText('空白测试群')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '创建画像' }))
+    fireEvent.change(screen.getByLabelText('摘要（L0）'), { target: { value: '   ' } })
+    fireEvent.change(screen.getByLabelText('正文（L2）'), { target: { value: '有效正文' } })
+    fireEvent.click(screen.getByRole('button', { name: '创建画像' }))
+
+    expect(patchSceneProfile).not.toHaveBeenCalled()
+    expect(toastMock.error).toHaveBeenCalledWith('摘要（L0）不能为空')
+  })
+
   it('blocks save when l2 content is blank', async () => {
     getSceneProfile.mockResolvedValue({ profile: null })
 
@@ -146,5 +187,27 @@ describe('SceneProfileDetail', () => {
 
     expect(patchSceneProfile).not.toHaveBeenCalled()
     expect(toastMock.error).toHaveBeenCalledWith('正文（L2）不能为空')
+  })
+
+  it('renders source memories as links when source ids exist', async () => {
+    getSceneProfile.mockResolvedValue({
+      profile: {
+        scene: { type: 'friend', friend_id: 'friend-1' },
+        label: 'Alice',
+        abstract: '工作搭子',
+        overview: '稳定规则',
+        content: '完整说明',
+        source_memory_ids: ['mem-1'],
+        created_at: '2026-04-19T00:00:00.000Z',
+        updated_at: '2026-04-20T00:00:00.000Z',
+      },
+    })
+
+    renderSceneProfileDetail('/memory/scenes/friend%3Afriend-1')
+
+    expect(await screen.findByRole('link', { name: '偏好 TypeScript' })).toHaveAttribute(
+      'href',
+      '/memory/entries?tab=long&mode=search&memory_id=mem-1',
+    )
   })
 })

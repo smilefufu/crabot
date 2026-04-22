@@ -13,6 +13,7 @@ from src.types import (
     MemorySource,
     SearchShortTermParams,
     WriteLongTermParams,
+    EntityRef,
 )
 from src.config import MemoryConfig, load_config
 from src.module import MemoryModule
@@ -492,6 +493,78 @@ async def test_delete_scene_profile(memory_module):
     })
     out = await memory_module._delete_scene_profile({"scene": scene})
     assert out["deleted"] is True
+
+
+@pytest.mark.asyncio
+async def test_browse_long_term_returns_recent_entries(memory_module):
+    await memory_module._write_long_term(WriteLongTermParams(
+        content="prefers TypeScript",
+        source=MemorySource(type="manual", original_time="2026-04-19T00:00:00Z"),
+    ).model_dump())
+    await memory_module._write_long_term(WriteLongTermParams(
+        content="prefers result-first UI",
+        source=MemorySource(type="manual", original_time="2026-04-20T00:00:00Z"),
+    ).model_dump())
+
+    result = await memory_module._dispatch("browse_long_term", {
+        "limit": 10,
+        "detail": "L1",
+    })
+
+    assert [item["memory"]["abstract"] for item in result["results"]] == [
+        "prefers result-first UI",
+        "prefers TypeScript",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_browse_long_term_filters_scopes_safely(memory_module):
+    await memory_module._write_long_term(WriteLongTermParams(
+        content="scope-a recent memory",
+        source=MemorySource(type="manual", original_time="2026-04-21T00:00:00Z"),
+        visibility="internal",
+        scopes=["scope-a"],
+    ).model_dump())
+    await memory_module._write_long_term(WriteLongTermParams(
+        content="scope-b recent memory",
+        source=MemorySource(type="manual", original_time="2026-04-22T00:00:00Z"),
+        visibility="internal",
+        scopes=["scope-b"],
+    ).model_dump())
+
+    result = await memory_module._dispatch("browse_long_term", {
+        "limit": 10,
+        "detail": "L1",
+        "min_visibility": "internal",
+        "accessible_scopes": ["scope-a"],
+    })
+
+    assert [item["memory"]["abstract"] for item in result["results"]] == [
+        "scope-a recent memory",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_browse_long_term_applies_entity_filter_after_sorting(memory_module):
+    await memory_module._write_long_term(WriteLongTermParams(
+        content="other recent memory",
+        source=MemorySource(type="manual", original_time="2026-04-22T00:00:00Z"),
+    ).model_dump())
+    await memory_module._write_long_term(WriteLongTermParams(
+        content="friend target older memory",
+        source=MemorySource(type="manual", original_time="2026-04-20T00:00:00Z"),
+        entities=[EntityRef(type="friend", id="friend-1", name="Alice")],
+    ).model_dump())
+
+    result = await memory_module._dispatch("browse_long_term", {
+        "limit": 10,
+        "detail": "L1",
+        "filter": {"entity_id": "friend-1"},
+    })
+
+    assert [item["memory"]["abstract"] for item in result["results"]] == [
+        "friend target older memory",
+    ]
 
 
 @pytest.mark.asyncio
