@@ -287,6 +287,72 @@ export class WechatChannel extends ModuleBase {
   }
 
   // ============================================================================
+  // 群聊 bootstrap（启动时从上游重建 group sessions）
+  // ============================================================================
+
+  private static readonly BOOTSTRAP_PAGE_SIZE = 50
+
+  private async bootstrapGroupSessions(): Promise<void> {
+    console.log('[WechatChannel] Group bootstrap: start')
+
+    let fetched = 0
+    let written = 0
+    let skipped = 0
+
+    try {
+      let page = 1
+      const pageSize = WechatChannel.BOOTSTRAP_PAGE_SIZE
+
+      while (true) {
+        const { items, pagination } = await this.client.listGroups({ page, pageSize })
+        fetched += items.length
+
+        for (const group of items) {
+          try {
+            const memberResp = await this.client.getGroupMembers(group.chatroomName)
+            if (!memberResp?.members) {
+              console.warn(
+                `[WechatChannel] Skip group ${group.chatroomName}: members fetch returned null`
+              )
+              skipped += 1
+              continue
+            }
+
+            const participants = memberResp.members.map((m) => ({
+              platform_user_id: m.username,
+              role: 'member' as const,
+            }))
+
+            this.sessionManager.upsertGroupSessionFromSnapshot({
+              platform_session_id: group.chatroomName,
+              title: group.name,
+              participants,
+            })
+            written += 1
+          } catch (err) {
+            console.warn(
+              `[WechatChannel] Skip group ${group.chatroomName}: members fetch failed:`,
+              err
+            )
+            skipped += 1
+          }
+        }
+
+        const totalPages = pagination?.totalPages ?? 1
+        if (page >= totalPages || items.length === 0) break
+        page += 1
+      }
+    } catch (err) {
+      console.warn('[WechatChannel] Group bootstrap aborted:', err)
+      return
+    }
+
+    console.log(
+      `[WechatChannel] Group bootstrap done: fetched=${fetched}, written=${written}, skipped=${skipped}`
+    )
+  }
+
+  // ============================================================================
   // 群昵称缓存
   // ============================================================================
 
