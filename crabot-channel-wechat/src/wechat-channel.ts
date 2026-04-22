@@ -89,6 +89,9 @@ export class WechatChannel extends ModuleBase {
       throw error
     }
 
+    // 启动时从上游重建 group sessions（失败不阻塞启动）
+    await this.bootstrapGroupSessions()
+
     // 启动消息接收
     if (this.wechatConfig.mode === 'socketio') {
       await this.startSocketIO()
