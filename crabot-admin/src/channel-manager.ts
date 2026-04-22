@@ -385,8 +385,10 @@ export class ChannelManager {
    * - channel-wechat: CRABOT_MODULE_ID + channel-configs/<id>.json 中的 WECHAT_* 变量
    */
   private async buildModuleEnv(impl: ChannelImplementation, instance: ChannelInstance): Promise<Record<string, string>> {
+    const instanceDataDir = path.join(this.dataDir, 'channels', instance.id)
     const env: Record<string, string> = {
       CRABOT_MODULE_ID: instance.id,
+      DATA_DIR: instanceDataDir,
     }
 
     if (impl.id === 'channel-host' && instance.state_dir) {
