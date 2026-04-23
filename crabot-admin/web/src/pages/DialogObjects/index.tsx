@@ -252,6 +252,20 @@ export const DialogObjectsPage: React.FC = () => {
   }, [loadDialogObjects, refreshKey])
 
   useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void loadDialogObjects(false)
+      }
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    window.addEventListener('focus', onVisibilityChange)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      window.removeEventListener('focus', onVisibilityChange)
+    }
+  }, [loadDialogObjects])
+
+  useEffect(() => {
     permissionTemplateService.list({ page_size: 100 })
       .then((result) => {
         setPermissionTemplates(result.items)
@@ -701,9 +715,14 @@ export const DialogObjectsPage: React.FC = () => {
               用统一模型查看好友、未归属私聊和可处理群聊。
             </p>
           </div>
-          <Button variant="secondary" onClick={() => setApplicationQueueOpen(true)}>
-            申请队列 {applications.length}
-          </Button>
+          <div style={{ display: 'flex', gap: '0.5rem' }}>
+            <Button variant="secondary" onClick={triggerRefresh}>
+              刷新
+            </Button>
+            <Button variant="secondary" onClick={() => setApplicationQueueOpen(true)}>
+              申请队列 {applications.length}
+            </Button>
+          </div>
         </div>
 
         <Card>

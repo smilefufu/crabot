@@ -73,6 +73,38 @@ describe('SessionManager.upsertGroupSessionFromSnapshot', () => {
     expect(manager.listSessions('group')).toHaveLength(1)
   })
 
+  it('upgrades title via upsert when incoming event carries a friendly name', () => {
+    const manager = new SessionManager('vongcloud-wechat', dataDir)
+
+    const { session: created } = manager.upsert({
+      platform_session_id: '12345@chatroom',
+      type: 'group',
+      title: '12345@chatroom',
+      sender_wxid: 'wxid_a',
+      sender_name: 'Alice',
+    })
+    expect(created.title).toBe('12345@chatroom')
+
+    const { session: upgraded } = manager.upsert({
+      platform_session_id: '12345@chatroom',
+      type: 'group',
+      title: '工作群',
+      sender_wxid: 'wxid_b',
+      sender_name: 'Bob',
+    })
+    expect(upgraded.id).toBe(created.id)
+    expect(upgraded.title).toBe('工作群')
+
+    const { session: preserved } = manager.upsert({
+      platform_session_id: '12345@chatroom',
+      type: 'group',
+      title: '12345@chatroom',
+      sender_wxid: 'wxid_c',
+      sender_name: 'Carol',
+    })
+    expect(preserved.title).toBe('工作群')
+  })
+
   it('persists group sessions across SessionManager restarts', () => {
     const m1 = new SessionManager('vongcloud-wechat', dataDir)
     m1.upsertGroupSessionFromSnapshot({

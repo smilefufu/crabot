@@ -16,6 +16,13 @@ const DEFAULT_PERMISSIONS: SessionPermissions = {
   storage: [],
 }
 
+function isBetterTitle(incoming: string, current: string, platformSessionId: string): boolean {
+  const next = incoming?.trim()
+  if (!next || next === current) return false
+  if (next === platformSessionId) return false
+  return current === platformSessionId || current.trim().length === 0
+}
+
 export class SessionManager {
   private sessions: Map<string, Session> = new Map()
   private platformToId: Map<string, string> = new Map()
@@ -41,9 +48,13 @@ export class SessionManager {
     const existing = this.findByPlatformId(params.platform_session_id)
 
     if (existing) {
-      // 更新参与者
-      const updated = this.ensureParticipant(existing, params.sender_wxid, params.sender_name)
-      if (updated) this.save()
+      let mutated = this.ensureParticipant(existing, params.sender_wxid)
+      if (isBetterTitle(params.title, existing.title, params.platform_session_id)) {
+        existing.title = params.title
+        existing.updated_at = generateTimestamp()
+        mutated = true
+      }
+      if (mutated) this.save()
       return { session: existing, created: false }
     }
 
@@ -131,7 +142,7 @@ export class SessionManager {
     return type ? all.filter((s) => s.type === type) : all
   }
 
-  private ensureParticipant(session: Session, wxid: string, name: string): boolean {
+  private ensureParticipant(session: Session, wxid: string): boolean {
     const exists = session.participants.some((p) => p.platform_user_id === wxid)
     if (exists) return false
 
