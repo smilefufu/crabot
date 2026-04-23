@@ -179,14 +179,19 @@ main() {
   ln -sf "$crabot_path" "$bin_dir/crabot"
   chmod +x "$crabot_path"
 
-  # 检查 PATH
-  if ! echo "$PATH" | grep -q "$bin_dir"; then
-    local shell_rc
-    case "$SHELL" in
-      */zsh)  shell_rc="$HOME/.zshrc" ;;
-      */bash) shell_rc="$HOME/.bashrc" ;;
-      *)      shell_rc="$HOME/.profile" ;;
-    esac
+  # 持久化 PATH 到 shell profile
+  # 注意：不能用 `echo "$PATH" | grep` 判断，因为 ensure_uv 可能已经把 $bin_dir
+  # 临时 export 到本进程 PATH 里，导致误判"已在 PATH"而不写 rc。
+  # 必须直接检查 shell profile 文件内容。
+  local shell_rc
+  case "$SHELL" in
+    */zsh)  shell_rc="$HOME/.zshrc" ;;
+    */bash) shell_rc="$HOME/.bashrc" ;;
+    *)      shell_rc="$HOME/.profile" ;;
+  esac
+  if [ -f "$shell_rc" ] && grep -q "$bin_dir" "$shell_rc"; then
+    info "PATH already configured in $shell_rc"
+  else
     echo "export PATH=\"$bin_dir:\$PATH\"" >> "$shell_rc"
     warn "Added $bin_dir to PATH in $shell_rc. Restart your shell or run:"
     echo "  export PATH=\"$bin_dir:\$PATH\""

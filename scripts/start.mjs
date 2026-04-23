@@ -9,6 +9,7 @@ import { createInterface } from 'node:readline'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
+import { homedir } from 'node:os'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
@@ -40,6 +41,16 @@ loadEnvFile(resolve(ROOT, '.env'))
 
 if (!process.env.CRABOT_JWT_SECRET) {
   process.env.CRABOT_JWT_SECRET = randomBytes(32).toString('hex')
+}
+
+// PATH 兜底：onboard/install 有些场景未持久化 ~/.local/bin 到 shell profile，
+// 导致 Node spawn 子进程时找不到 uv。若该目录存在且未在 PATH 中，prepend 进去。
+const LOCAL_BIN = resolve(homedir(), '.local/bin')
+if (existsSync(LOCAL_BIN)) {
+  const currentPath = (process.env.PATH || '').split(':').filter(Boolean)
+  if (!currentPath.includes(LOCAL_BIN)) {
+    process.env.PATH = [LOCAL_BIN, ...currentPath].join(':')
+  }
 }
 
 // ── 数据目录 ──

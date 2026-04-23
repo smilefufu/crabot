@@ -148,14 +148,34 @@ install_node() {
 install_uv() {
   log_info "安装 uv..."
   curl -LsSf https://astral.sh/uv/install.sh 2>>"$ONBOARD_LOG" | sh >> "$ONBOARD_LOG" 2>&1
-  # 将 uv 加入当前 PATH（安装器默认放这两个位置）
-  export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+  # 将 uv 加入当前 PATH（官方安装器默认放 ~/.local/bin）
+  export PATH="$HOME/.local/bin:$PATH"
   if command -v uv &>/dev/null; then
     log_success "uv $(uv --version 2>/dev/null | awk '{print $2}') 已安装"
+    persist_path_to_profile "$HOME/.local/bin"
   else
     log_error "uv 安装失败，请手动安装: https://docs.astral.sh/uv/"
     exit 1
   fi
+}
+
+# 把指定 bin 目录追加到 $SHELL_PROFILE 的 PATH 导出中（幂等）
+# 注意：不能根据当前进程的 PATH 判断，因为 install_uv 已经临时 export 进来，
+# 会造成"已在 PATH"的假象。必须直接 grep shell profile 文件。
+persist_path_to_profile() {
+  local bin_dir="$1"
+  if [ -z "$SHELL_PROFILE" ]; then
+    return 0
+  fi
+  # 不存在则创建空文件（首次装机常见）
+  [ -f "$SHELL_PROFILE" ] || touch "$SHELL_PROFILE"
+  if grep -q "$bin_dir" "$SHELL_PROFILE"; then
+    return 0
+  fi
+  echo "export PATH=\"$bin_dir:\$PATH\"" >> "$SHELL_PROFILE"
+  log_warn "已将 $bin_dir 添加到 $SHELL_PROFILE"
+  log_warn "请重新打开 shell，或在当前 shell 执行："
+  log_dim "  export PATH=\"$bin_dir:\$PATH\""
 }
 
 run_phase2_tools() {
@@ -233,10 +253,14 @@ run_phase2_tools() {
     exit 1
   fi
 
-  # uv（安装器默认放 ~/.local/bin 或 ~/.cargo/bin，确保在 PATH 中）
-  export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+  # uv（官方安装器默认放 ~/.local/bin，确保在 PATH 中）
+  export PATH="$HOME/.local/bin:$PATH"
   if check_tool_status uv; then
     log_success "uv 已就绪"
+    # 若 uv 位于 ~/.local/bin 但 shell profile 未持久化，补写一下（兼容旧机器）
+    if [ -x "$HOME/.local/bin/uv" ]; then
+      persist_path_to_profile "$HOME/.local/bin"
+    fi
   else
     all_ok=false
     if confirm "是否安装 uv（Python 包管理器）？"; then
