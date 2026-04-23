@@ -10,6 +10,15 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# PATH 兜底（见 scripts/lib.sh 同名逻辑）：脚本是非交互 shell，不会 source
+# ~/.bashrc，若用户 onboard 后在当前 shell 直接跑 dev.sh，uv 会找不到。
+if [ -d "$HOME/.local/bin" ]; then
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*) : ;;
+    *) export PATH="$HOME/.local/bin:$PATH" ;;
+  esac
+fi
+
 PORT_OFFSET="${CRABOT_PORT_OFFSET:-0}"
 MM_PORT=$((19000 + PORT_OFFSET))
 ADMIN_RPC_PORT=$((19001 + PORT_OFFSET))

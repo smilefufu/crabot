@@ -39,12 +39,11 @@
 
 ## 快速开始
 
-### 环境要求
+两种路径，**选一种即可**。脚本会自动处理依赖（Node.js、uv），无需手动准备。
 
-- Node.js >= 22
-- Python >= 3.11 + [uv](https://docs.astral.sh/uv/)
+### 路径 A：二进制安装（只想用）
 
-### 从 Release 安装
+从 GitHub Release 下载预构建包到 `~/.crabot/`，并在 `~/.local/bin/` 创建全局 `crabot` 命令。
 
 ```bash
 # macOS / Linux
@@ -54,36 +53,54 @@ curl -fsSL https://raw.githubusercontent.com/smilefufu/crabot/main/install.sh | 
 powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/smilefufu/crabot/main/install.ps1 | iex"
 ```
 
-安装脚本会自动检查并安装前置依赖（Node.js、uv），下载最新 Release 包，并提示设置管理员密码。
+安装完成后（若提示 PATH 有变更，重开一个终端即可）：
 
-### 从源码安装
+```bash
+crabot start       # 启动（首次会提示设置管理员密码）
+crabot stop        # 停止
+crabot check       # 环境检查
+crabot password    # 修改管理员密码
+```
+
+### 路径 B：源码运行（改代码 / 贡献）
+
+从源码 clone 后用 `onboard` 初始化，之后所有命令都用 `./crabot`（**不会创建全局命令**）。
 
 ```bash
 git clone https://github.com/smilefufu/crabot.git
 cd crabot
-./install.sh --from-source
+./crabot onboard     # 检测工具 → 装 nvm/uv → 生成 .env → 装依赖 → 验证
+./crabot start       # 构建并启动
+./crabot stop
+./crabot check
 ```
 
-### 运行
+开发模式（前端 Vite HMR，热更新）：
 
 ```bash
-# 启动（首次启动会提示设置管理员密码）
-crabot start
-
-# 打开 Admin UI
-open http://localhost:3000
-
-# 检查状态
-crabot check
-
-# 停止
-crabot stop
+./dev.sh             # 启动（http://localhost:5173 是 Vite dev server）
+./dev.sh stop        # 停止
+./dev.sh build       # 仅构建
 ```
 
-### 修改密码
+- 前端代码修改：浏览器自动刷新
+- 后端代码修改：需重启 `./dev.sh stop && ./dev.sh`
+
+### 首次启动后
+
+打开 Admin UI 完成配置：
+
+1. 访问 http://localhost:3000（密码见 `.env` 或安装时设置的）
+2. 添加模型供应商（OpenAI / Anthropic / Ollama / ChatGPT OAuth 等）
+3. 配置智能体实例（选择模型 slot、MCP 工具、权限模板）
+4. 连接消息渠道（Telegram / 微信）
+
+### 多实例部署
+
+同一台机器可运行多个 Crabot 实例，通过 `CRABOT_PORT_OFFSET` 隔离端口和数据目录：
 
 ```bash
-crabot password
+CRABOT_PORT_OFFSET=100 ./crabot start   # 所有端口 +100，数据目录变为 data-100/
 ```
 
 ## CLI
@@ -104,32 +121,17 @@ crabot permission list        # 查看权限模板
 crabot provider list --json
 ```
 
-完整命令列表请执行 `crabot --help`。
+> 源码路径（B）下把 `crabot` 替换为 `./crabot`。完整命令列表：`crabot --help`。
 
-## 开发
+## 常见问题
 
-```bash
-./dev.sh          # 构建 + 启动 Module Manager + Vite HMR（端口 5173）
-./dev.sh stop     # 停止所有服务
-./dev.sh build    # 仅构建
-```
+**提示 `uv 未安装`、或找不到 `crabot` 命令？**
 
-- 前端代码修改：浏览器自动刷新（Vite HMR，`http://localhost:5173`）
-- 后端代码修改：需重启 `./dev.sh stop && ./dev.sh`
-
-### 多实例
-
-同一台机器可运行多个 Crabot 实例，通过端口偏移隔离：
+安装脚本把 `~/.local/bin` 写进了 shell profile（`~/.bashrc` / `~/.zshrc`）。新开的终端自动生效；`./crabot <cmd>` 已内置 PATH 兜底不受影响。只有在**当前终端直接调用 `uv` 或全局 `crabot`** 时需要先执行：
 
 ```bash
-CRABOT_PORT_OFFSET=100 ./dev.sh    # 所有端口 +100，数据目录自动变为 data-100/
+export PATH="$HOME/.local/bin:$PATH"
 ```
-
-## 配置
-
-1. 启动系统 `crabot start`
-2. 打开 Admin UI `http://localhost:3000`
-3. 添加模型供应商、配置智能体、连接渠道
 
 ## 许可
 

@@ -173,9 +173,9 @@ persist_path_to_profile() {
     return 0
   fi
   echo "export PATH=\"$bin_dir:\$PATH\"" >> "$SHELL_PROFILE"
-  log_warn "已将 $bin_dir 添加到 $SHELL_PROFILE"
-  log_warn "请重新打开 shell，或在当前 shell 执行："
-  log_dim "  export PATH=\"$bin_dir:\$PATH\""
+  log_info "已将 $bin_dir 写入 $SHELL_PROFILE"
+  log_dim "  后续 ./crabot 命令可直接使用；若要在当前 shell 直接调用 uv，请执行："
+  log_dim "    export PATH=\"$bin_dir:\$PATH\""
 }
 
 run_phase2_tools() {

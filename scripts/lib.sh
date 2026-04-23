@@ -2,7 +2,20 @@
 
 # Crabot 共享函数库
 # 由 crabot 主入口 source，提供日志、环境检测、构建等公共函数
-# 本文件为纯函数库，不产生副作用
+
+# ── PATH 兜底 ────────────────────────────────────────────
+#
+# onboard/install 会把 ~/.local/bin 写进 shell profile（~/.bashrc 等），
+# 但脚本是非交互 shell，不会 source profile。用户若在 onboard 后的**同一个
+# 终端**直接跑 `./crabot start`，当前 shell 的 PATH 还是旧的，子进程也一样，
+# 于是 spawn uv/crabot 就 ENOENT。
+# 这里直接 prepend，保证所有 `./crabot <cmd>` 路径幂等地能找到 ~/.local/bin。
+if [ -d "$HOME/.local/bin" ]; then
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*) : ;;
+    *) export PATH="$HOME/.local/bin:$PATH" ;;
+  esac
+fi
 
 # ── 颜色 ──────────────────────────────────────────────────
 
