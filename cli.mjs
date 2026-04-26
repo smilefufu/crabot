@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // cli.mjs — Crabot CLI 入口
-// 纯 JS，不依赖任何 npm 包，跨平台（macOS/Linux/Windows）
+// 纯 JS，不依赖任何第三方包，跨平台（macOS/Linux/Windows）
 
 import { existsSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
@@ -27,7 +27,7 @@ if (command === 'password') {
 } else {
   const cliEntry = resolve(__dirname, 'dist/cli/main.js')
   if (!existsSync(cliEntry)) {
-    console.error('CLI not built. Run "crabot start" first or build with "npm run build:cli".')
+    console.error('CLI not built. Run "crabot start" first or build with "pnpm run build:cli".')
     process.exit(1)
   }
   const { run } = await import(cliEntry)

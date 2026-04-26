@@ -36,6 +36,20 @@ function Ensure-Uv {
     Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression
 }
 
+# --- pnpm（仅源码安装路径需要） ---
+function Ensure-Pnpm {
+    $corepackCmd = Get-Command corepack -ErrorAction SilentlyContinue
+    if (-not $corepackCmd) {
+        Write-Err "corepack not found (Node 16.13+ required). Reinstall Node.js."
+        exit 1
+    }
+    Write-Info "Activating pnpm via corepack..."
+    corepack enable
+    corepack prepare --activate
+    $pnpmVer = (pnpm --version)
+    Write-Info "pnpm $pnpmVer ready"
+}
+
 # --- Main ---
 Write-Host "`n== Crabot Installer ==`n" -ForegroundColor Cyan
 
@@ -43,9 +57,26 @@ Ensure-Node
 Ensure-Uv
 
 if ($FromSource) {
+    Ensure-Pnpm
     Write-Info "Source install..."
-    npm install
-    npm run build
+    pnpm install
+    # shared 必须先编译
+    Push-Location crabot-shared
+    pnpm install; pnpm run build
+    Pop-Location
+    foreach ($mod in @('crabot-core','crabot-admin','crabot-agent','crabot-channel-host','crabot-channel-wechat','crabot-channel-telegram','crabot-mcp-tools')) {
+        if (Test-Path $mod) {
+            Push-Location $mod
+            pnpm install; pnpm run build
+            Pop-Location
+        }
+    }
+    if (Test-Path 'crabot-admin/web') {
+        Push-Location 'crabot-admin/web'
+        pnpm install; pnpm run build
+        Pop-Location
+    }
+    pnpm run build:cli
     Set-Location crabot-memory
     uv sync
     Set-Location ..

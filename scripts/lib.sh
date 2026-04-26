@@ -155,7 +155,7 @@ sync_node_deps() {
       continue
     fi
     log_dim "  $mod"
-    (cd "$CRABOT_HOME/$mod" && npm install 2>&1 | tail -1) || {
+    (cd "$CRABOT_HOME/$mod" && pnpm install 2>&1 | tail -1) || {
       log_error "$mod 依赖安装失败"
       return 1
     }
@@ -164,7 +164,7 @@ sync_node_deps() {
   # crabot-admin/web 前端依赖
   if [ -d "$CRABOT_HOME/crabot-admin/web" ]; then
     log_dim "  crabot-admin/web"
-    (cd "$CRABOT_HOME/crabot-admin/web" && npm install 2>&1 | tail -1) || {
+    (cd "$CRABOT_HOME/crabot-admin/web" && pnpm install 2>&1 | tail -1) || {
       log_error "crabot-admin/web 依赖安装失败"
       return 1
     }
@@ -204,7 +204,7 @@ build_all_modules() {
   if [ -d "$CRABOT_HOME/crabot-shared" ]; then
     log_dim "  crabot-shared"
     local build_log
-    build_log="$(cd "$CRABOT_HOME/crabot-shared" && npm run build 2>&1)" || {
+    build_log="$(cd "$CRABOT_HOME/crabot-shared" && pnpm run build 2>&1)" || {
       echo "$build_log" | sed 's/^/    /'
       log_error "crabot-shared 构建失败"
       return 1
@@ -218,7 +218,7 @@ build_all_modules() {
     fi
     log_dim "  $mod"
     local build_log
-    build_log="$(cd "$CRABOT_HOME/$mod" && npm run build 2>&1)" || {
+    build_log="$(cd "$CRABOT_HOME/$mod" && pnpm run build 2>&1)" || {
       echo "$build_log" | sed 's/^/    /'
       log_error "$mod 构建失败"
       fail=1
@@ -242,7 +242,7 @@ build_all_modules() {
 build_frontend() {
   log_info "构建前端..."
   local build_log
-  build_log="$(cd "$CRABOT_HOME/crabot-admin/web" && npm run build 2>&1)" || {
+  build_log="$(cd "$CRABOT_HOME/crabot-admin/web" && pnpm run build 2>&1)" || {
     echo "$build_log" | sed 's/^/    /'
     log_error "前端构建失败"
     return 1

@@ -75,7 +75,7 @@ build_all() {
   # crabot-shared 必须先编译
   if [ -d "$SCRIPT_DIR/crabot-shared" ]; then
     log_dim "  crabot-shared"
-    (cd "$SCRIPT_DIR/crabot-shared" && npm run build 2>&1 | sed 's/^/    /') || {
+    (cd "$SCRIPT_DIR/crabot-shared" && pnpm run build 2>&1 | sed 's/^/    /') || {
       log_error "crabot-shared 构建失败"
       exit 1
     }
@@ -92,7 +92,7 @@ build_all() {
       continue
     fi
     log_dim "  $mod"
-    (cd "$SCRIPT_DIR/$mod" && npm run build 2>&1 | sed 's/^/    /') || {
+    (cd "$SCRIPT_DIR/$mod" && pnpm run build 2>&1 | sed 's/^/    /') || {
       log_error "$mod 构建失败"
       fail=1
     }

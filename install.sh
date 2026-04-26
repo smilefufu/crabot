@@ -88,6 +88,19 @@ ensure_uv() {
   info "uv $(uv --version) installed"
 }
 
+# --- pnpm（仅源码安装路径需要，release 包内含 dist/） ---
+ensure_pnpm() {
+  if ! command -v corepack &>/dev/null; then
+    error "corepack not found (Node 16.13+ required). Reinstall Node.js."
+    exit 1
+  fi
+  section "Activating pnpm via corepack"
+  corepack enable
+  # 读取根 package.json 的 packageManager 字段并激活
+  corepack prepare --activate
+  info "pnpm $(pnpm --version) ready"
+}
+
 # --- 版本比较 ---
 version_ge() {
   local IFS=.
@@ -110,18 +123,23 @@ main() {
   ensure_uv
 
   if [ "$FROM_SOURCE" = true ]; then
+    ensure_pnpm
     section "Source Install"
-    info "Installing npm dependencies..."
-    npm install
+    info "Installing pnpm dependencies (root)..."
+    pnpm install
     info "Building all modules..."
     # shared 必须先编译（其他模块依赖它）
-    (cd crabot-shared && npm install && npm run build)
+    (cd crabot-shared && pnpm install && pnpm run build)
     for dir in crabot-core crabot-admin crabot-agent crabot-channel-host crabot-channel-wechat crabot-channel-telegram crabot-mcp-tools; do
       if [ -d "$dir" ]; then
-        (cd "$dir" && npm install && npm run build)
+        (cd "$dir" && pnpm install && pnpm run build)
       fi
     done
-    npm run build:cli
+    # 前端依赖与构建（之前漏装）
+    if [ -d "crabot-admin/web" ]; then
+      (cd crabot-admin/web && pnpm install && pnpm run build)
+    fi
+    pnpm run build:cli
     info "Setting up Python environment..."
     (cd crabot-memory && uv sync)
     info "Source install complete."

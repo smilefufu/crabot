@@ -28,7 +28,8 @@
     "js-yaml": "^4.1.1",
     "jsonrepair": "^3.13.3",
     "vscode-jsonrpc": "^8.2.1",
-    "vscode-languageserver-protocol": "^3.17.5"
+    "vscode-languageserver-protocol": "^3.17.5",
+    "zod": "^3.25.28"
   },
   "optionalDependencies": {
     "sharp": "^0.34.5"

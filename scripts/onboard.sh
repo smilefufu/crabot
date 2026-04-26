@@ -159,6 +159,31 @@ install_uv() {
   fi
 }
 
+# 通过 corepack 激活根 package.json 中 packageManager 字段指定的 pnpm 版本
+install_pnpm() {
+  if ! command -v corepack &>/dev/null; then
+    log_error "corepack 未找到（需要 Node 16.13+）。请检查 Node 安装。"
+    exit 1
+  fi
+  log_info "激活 pnpm（corepack）..."
+  # corepack enable 默认作用于全局 npm 前缀，nvm 装的 Node 不需要 sudo
+  corepack enable >> "$ONBOARD_LOG" 2>&1 || {
+    log_error "corepack enable 失败，详见 $ONBOARD_LOG"
+    exit 1
+  }
+  # 在 crabot 根目录读取 packageManager 字段并激活
+  (cd "$CRABOT_HOME" && corepack prepare --activate >> "$ONBOARD_LOG" 2>&1) || {
+    log_error "corepack prepare 失败，详见 $ONBOARD_LOG"
+    exit 1
+  }
+  if command -v pnpm &>/dev/null; then
+    log_success "pnpm $(pnpm --version) 已就绪"
+  else
+    log_error "pnpm 激活后仍未找到，详见 $ONBOARD_LOG"
+    exit 1
+  fi
+}
+
 # 把指定 bin 目录追加到 $SHELL_PROFILE 的 PATH 导出中（幂等）
 # 注意：不能根据当前进程的 PATH 判断，因为 install_uv 已经临时 export 进来，
 # 会造成"已在 PATH"的假象。必须直接 grep shell profile 文件。
@@ -271,6 +296,13 @@ run_phase2_tools() {
     fi
   fi
 
+  # pnpm（通过 corepack 激活，版本由 package.json 的 packageManager 字段锁定）
+  if command -v pnpm &>/dev/null; then
+    log_success "pnpm $(pnpm --version) 已就绪"
+  else
+    install_pnpm
+  fi
+
   if [ "$all_ok" = true ]; then
     log_info "所有前置工具已就绪"
   fi
@@ -368,7 +400,7 @@ run_phase4_deps() {
   cd "$_saved_dir"
   log_success "Node $(node -v) 已激活"
 
-  log_info "并行安装 npm 依赖 (详细日志: $ONBOARD_LOG) ..."
+  log_info "并行安装 pnpm 依赖 (详细日志: $ONBOARD_LOG) ..."
 
   local pids=()
   local names=()
@@ -376,7 +408,7 @@ run_phase4_deps() {
   # 并行安装：crabot-core, crabot-agent, crabot-channel-host, crabot-memory
   for mod in crabot-shared crabot-core crabot-agent crabot-channel-host crabot-channel-telegram; do
     if [ -d "$CRABOT_HOME/$mod" ]; then
-      (cd "$CRABOT_HOME/$mod" && npm install >> "$ONBOARD_LOG.$mod" 2>&1) &
+      (cd "$CRABOT_HOME/$mod" && pnpm install >> "$ONBOARD_LOG.$mod" 2>&1) &
       pids+=($!)
       names+=("$mod")
     fi
@@ -421,7 +453,7 @@ run_phase4_deps() {
   # 串行安装：crabot-admin（原生模块编译，并行可能导致资源竞争）
   if [ -d "$CRABOT_HOME/crabot-admin" ]; then
     log_info "安装 crabot-admin 依赖 (含原生模块编译) ..."
-    (cd "$CRABOT_HOME/crabot-admin" && npm install >> "$ONBOARD_LOG" 2>&1) || {
+    (cd "$CRABOT_HOME/crabot-admin" && pnpm install >> "$ONBOARD_LOG" 2>&1) || {
       log_error "crabot-admin 安装失败:"
       tail -10 "$ONBOARD_LOG" | sed 's/^/    /'
       exit 1
@@ -432,7 +464,7 @@ run_phase4_deps() {
   # 串行：crabot-admin/web
   if [ -d "$CRABOT_HOME/crabot-admin/web" ]; then
     log_info "安装前端依赖..."
-    (cd "$CRABOT_HOME/crabot-admin/web" && npm install >> "$ONBOARD_LOG" 2>&1) || {
+    (cd "$CRABOT_HOME/crabot-admin/web" && pnpm install >> "$ONBOARD_LOG" 2>&1) || {
       log_error "crabot-admin/web 安装失败:"
       tail -10 "$ONBOARD_LOG" | sed 's/^/    /'
       exit 1
