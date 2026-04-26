@@ -3946,18 +3946,19 @@ export class AdminModule extends ModuleBase {
       },
     ]
 
+    const memoryCurateSeed = SEEDS.find(s => s.name === '记忆整理')
     let migrated = false
-    for (const sched of this.schedules.values()) {
-      if (sched.is_builtin && sched.name === '周期轻反思') {
-        const seed = SEEDS.find(s => s.name === '记忆整理')
-        if (seed) {
-          sched.name = seed.name
-          sched.description = seed.description
-          sched.trigger = seed.trigger
-          sched.task_template = seed.task_template
-          sched.updated_at = generateTimestamp()
-          migrated = true
-        }
+    for (const [id, sched] of this.schedules) {
+      if (sched.is_builtin && sched.name === '周期轻反思' && memoryCurateSeed) {
+        this.schedules.set(id, {
+          ...sched,
+          name: memoryCurateSeed.name,
+          description: memoryCurateSeed.description,
+          trigger: memoryCurateSeed.trigger,
+          task_template: memoryCurateSeed.task_template,
+          updated_at: generateTimestamp(),
+        })
+        migrated = true
       }
     }
 

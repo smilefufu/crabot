@@ -8,6 +8,7 @@ import type { LLMAdapter, LLMAdapterConfig, LLMStreamParams } from './llm-adapte
 import { isToolResultMessage, extractText, buildImageUrl, readSSEEvents } from './llm-adapter-types.js'
 import type { EngineMessage, ToolDefinition, StreamChunk, ContentBlock } from './types.js'
 import { HttpResponseError, streamWithRetry } from './retry-utils.js'
+import { isMaterialChunk } from './stream-processor.js'
 
 // --- Responses API Message Normalization ---
 
@@ -143,10 +144,7 @@ export class OpenAIResponsesAdapter implements LLMAdapter {
     yield* streamWithRetry(
       'openai-responses-adapter',
       () => this.streamOnce(params),
-      {
-        abortSignal: params.signal,
-        isMaterial: (c) => c.type !== 'message_start',
-      },
+      { abortSignal: params.signal, isMaterial: isMaterialChunk },
     )
   }
 

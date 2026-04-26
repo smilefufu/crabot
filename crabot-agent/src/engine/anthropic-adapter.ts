@@ -15,6 +15,7 @@ import { proxyManager } from 'crabot-shared'
 import type { LLMAdapter, LLMAdapterConfig, LLMStreamParams, LLMCallResponse } from './llm-adapter-types.js'
 import { streamWithRetry, withRetry } from './retry-utils.js'
 import { isToolResultMessage, mergeConsecutiveUserMessages } from './llm-adapter-types.js'
+import { isMaterialChunk } from './stream-processor.js'
 import type { EngineMessage, ToolDefinition, StreamChunk, ContentBlock } from './types.js'
 
 // --- Anthropic Message Normalization ---
@@ -151,12 +152,7 @@ export class AnthropicAdapter implements LLMAdapter {
     yield* streamWithRetry(
       'anthropic-adapter',
       () => this.streamOnce(params),
-      {
-        abortSignal: params.signal,
-        // message_start 仅携带 messageId，StreamProcessor 对其 noop。允许在
-        // 此类元事件后重试，挽救上游过早关闭 socket 的常见网络抽风。
-        isMaterial: (c) => c.type !== 'message_start',
-      },
+      { abortSignal: params.signal, isMaterial: isMaterialChunk },
     )
   }
 

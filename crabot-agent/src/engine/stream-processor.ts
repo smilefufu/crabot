@@ -1,6 +1,15 @@
 import { jsonrepair } from 'jsonrepair'
 import type { StreamChunk, ToolUseBlock, RawReasoningBlock } from './types'
 
+/**
+ * 判断 chunk 是否对消费者可见。message_start 仅携带 messageId，
+ * `StreamProcessor.process` 对其 noop —— 仅在它后面断流时允许 streamWithRetry 重试。
+ * 此谓词与 process() 中 noop 分支的判定保持单点同步。
+ */
+export function isMaterialChunk(chunk: StreamChunk): boolean {
+  return chunk.type !== 'message_start'
+}
+
 export interface ProcessedResponse {
   readonly text: string
   readonly toolUseBlocks: ReadonlyArray<ToolUseBlock>

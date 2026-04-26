@@ -6,7 +6,7 @@ import type { LLMAdapter, LLMAdapterConfig, LLMStreamParams, LLMCallResponse } f
 import { isToolResultMessage, extractText, buildImageUrl, readSSELines, mergeConsecutiveUserMessages } from './llm-adapter-types.js'
 import type { EngineMessage, ToolDefinition, StreamChunk, ContentBlock } from './types.js'
 import { HttpResponseError, streamWithRetry, withRetry } from './retry-utils.js'
-import { parseToolInput } from './stream-processor.js'
+import { isMaterialChunk, parseToolInput } from './stream-processor.js'
 
 // --- OpenAI Message Types ---
 
@@ -157,10 +157,7 @@ export class OpenAIAdapter implements LLMAdapter {
     yield* streamWithRetry(
       'openai-adapter',
       () => this.streamOnce(params),
-      {
-        abortSignal: params.signal,
-        isMaterial: (c) => c.type !== 'message_start',
-      },
+      { abortSignal: params.signal, isMaterial: isMaterialChunk },
     )
   }
 
