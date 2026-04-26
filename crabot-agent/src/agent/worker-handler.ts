@@ -27,6 +27,7 @@ import type {
   ToolPermissionConfig,
 } from '../engine/index.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import type { MemoryWriter } from '../orchestration/memory-writer.js'
 import { z } from 'zod/v4'
 import type {
   ExecuteTaskParams,
@@ -207,6 +208,7 @@ export interface WorkerHandlerOptions {
   subAgentConfigs?: ReadonlyArray<{ readonly definition: SubAgentDefinition; readonly sdkEnv: SdkEnvConfig }>
   skills?: ReadonlyArray<SkillConfig>
   lspManager?: import('../lsp/lsp-manager').LSPManager
+  memoryWriter?: MemoryWriter
 }
 
 export class WorkerHandler {
@@ -225,6 +227,8 @@ export class WorkerHandler {
   private readonly subAgentConfigs: ReadonlyArray<{ readonly definition: SubAgentDefinition; readonly sdkEnv: SdkEnvConfig }>
   private readonly skills: ReadonlyArray<SkillConfig>
   private readonly lspManager?: import('../lsp/lsp-manager').LSPManager
+  private memoryWriter?: MemoryWriter
+  private confirmedSnapshotBlock: string = ''
 
   constructor(
     sdkEnv: SdkEnvConfig,
@@ -243,6 +247,26 @@ export class WorkerHandler {
     this.subAgentConfigs = options?.subAgentConfigs ?? []
     this.skills = options?.skills ?? []
     this.lspManager = options?.lspManager
+    this.memoryWriter = options?.memoryWriter
+  }
+
+  async loadConfirmedSnapshot(): Promise<void> {
+    if (!this.memoryWriter) return
+    try {
+      const snap = await this.memoryWriter.fetchConfirmedSnapshot()
+      if (!snap) return
+      const lines: string[] = [`## 你已知的长期事实 / 经验 / 概念（snapshot ${snap.snapshot_id}）`, '']
+      for (const type of ['fact', 'lesson', 'concept'] as const) {
+        const items = snap.by_type[type]
+        if (items.length === 0) continue
+        lines.push(`### ${type}`)
+        for (const it of items) lines.push(`- (${it.id}) ${it.brief}`)
+        lines.push('')
+      }
+      this.confirmedSnapshotBlock = lines.join('\n').trim()
+    } catch (error) {
+      console.error('[WorkerHandler] Failed to load confirmed snapshot:', error)
+    }
   }
 
   async executeTask(
@@ -769,6 +793,9 @@ export class WorkerHandler {
         parts.push(`- ${m.sandbox_path} -> ${m.host_path} (${m.read_only ? '只读' : '读写'})`)
       }
     }
+    if (this.confirmedSnapshotBlock) {
+      parts.push('\n' + this.confirmedSnapshotBlock)
+    }
     return parts.join('\n')
   }
 
@@ -832,13 +859,15 @@ export class WorkerHandler {
           parts.push(`\n### 长期记忆（共 ${count} 条）`)
         }
         for (const mem of context.long_term_memories) {
-          const tagStr = mem.tags.length > 0 ? ` [${mem.tags.slice(0, 3).join(', ')}]` : ''
-          parts.push(`- [${mem.id}]${tagStr} ${mem.abstract} (importance: ${mem.importance})`)
+          // TODO(memory-v2): 重新接入 importance 信号（v2 brief 不返回 importance_factors，需要 include='full' 才能拿到）
+          const tags = mem.tags ?? []
+          const tagStr = tags.length > 0 ? ` [${tags.slice(0, 3).join(', ')}]` : ''
+          parts.push(`- [${mem.id}]${tagStr} ${mem.brief}`)
         }
         if (isOverflow) {
           parts.push('\n以上为相关度最高的记忆，可通过记忆搜索工具查找更多。')
         }
-        parts.push('如需查看某条记忆详情，可查看其 L1 概览或 L2 全文。')
+        parts.push('如需查看某条记忆详情，可使用记忆查询工具获取 frontmatter 与正文。')
       }
     }
     if (context.recent_messages && context.recent_messages.length > 0) {

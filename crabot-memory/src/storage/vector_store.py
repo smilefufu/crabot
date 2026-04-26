@@ -1,6 +1,9 @@
 """
 向量存储 - 基于 LanceDB
-提取并简化自 SimpleMem vector_store.py
+
+注：长期记忆 v1 的 LanceDB 表（``long_term_memory``）已在 Memory v2 Phase 4
+移除。长期记忆现在通过 ``src/long_term_v2/`` 的文件存储 + SQLite 索引管理。
+本模块只保留短期记忆（``short_term_memory``）的向量存取。
 """
 import asyncio
 import json
@@ -11,7 +14,7 @@ from pathlib import Path
 import lancedb
 import pyarrow as pa
 
-from ..types import ShortTermMemoryEntry, LongTermMemoryEntry, MemorySource, Visibility
+from ..types import ShortTermMemoryEntry, MemorySource, Visibility
 from ..utils.embedding import EmbeddingClient
 
 logger = logging.getLogger(__name__)
@@ -47,7 +50,7 @@ def _build_scopes_filter(accessible_scopes: Optional[List[str]]) -> Optional[str
 
 
 class VectorStore:
-    """向量存储，支持短期和长期记忆"""
+    """向量存储（仅短期记忆）"""
 
     def __init__(
         self,
@@ -59,7 +62,6 @@ class VectorStore:
         Path(db_path).mkdir(parents=True, exist_ok=True)
         self.db = lancedb.connect(db_path)
         self.short_term_table = None
-        self.long_term_table = None
         self._tables_initialized = False
 
     async def ensure_tables(self):
@@ -93,29 +95,6 @@ class VectorStore:
         ])
 
         self.short_term_table = self._open_or_create("short_term_memory", short_schema)
-
-        # 长期记忆表
-        long_schema = pa.schema([
-            pa.field("id", pa.string()),
-            pa.field("abstract", pa.string()),
-            pa.field("overview", pa.string()),
-            pa.field("content", pa.string()),
-            pa.field("entities_json", pa.string()),
-            pa.field("importance", pa.int32()),
-            pa.field("keywords", pa.list_(pa.string())),
-            pa.field("tags", pa.list_(pa.string())),
-            pa.field("source_json", pa.string()),
-            pa.field("metadata_json", pa.string()),
-            pa.field("read_count", pa.int32()),
-            pa.field("version", pa.int32()),
-            pa.field("visibility", pa.string()),
-            pa.field("scopes", pa.list_(pa.string())),
-            pa.field("created_at", pa.string()),
-            pa.field("updated_at", pa.string()),
-            pa.field("vector", pa.list_(pa.float32(), self.embedding_client.dimension)),
-        ])
-
-        self.long_term_table = self._open_or_create("long_term_memory", long_schema)
 
     def _open_or_create(self, table_name: str, schema: pa.Schema):
         """打开已有表或创建新表，维度不匹配时自动重建"""
@@ -280,177 +259,8 @@ class VectorStore:
 
         return entries[:limit]
 
-    async def add_long_term(self, entry: LongTermMemoryEntry, vector: Optional[List[float]] = None):
-        """添加长期记忆。可传入预计算的 vector 跳过 embedding 调用"""
-        await self.ensure_tables()
-        if vector is None:
-            vector = await self.embedding_client.embed_single(entry.abstract)
-        data = {
-            "id": entry.id,
-            "abstract": entry.abstract,
-            "overview": entry.overview,
-            "content": entry.content,
-            "entities_json": json.dumps([e.model_dump() for e in entry.entities]),
-            "importance": entry.importance,
-            "keywords": entry.keywords,
-            "tags": entry.tags,
-            "source_json": entry.source.model_dump_json(),
-            "metadata_json": json.dumps(entry.metadata or {}),
-            "read_count": entry.read_count,
-            "version": entry.version,
-            "visibility": entry.visibility,
-            "scopes": entry.scopes,
-            "created_at": entry.created_at,
-            "updated_at": entry.updated_at,
-            "vector": vector,
-        }
-        await _run_sync(lambda: self.long_term_table.add([data]))
-
-    async def search_similar_long_term(
-        self,
-        vector: List[float],
-        visibility: str,
-        limit: int = 3,
-    ) -> List[Dict[str, Any]]:
-        """按向量相似度搜索同 visibility 的长期记忆，返回含 _distance 的行"""
-        await self.ensure_tables()
-        where = f"visibility = '{visibility}'"
-
-        def _do_search():
-            return (
-                self.long_term_table.search(vector)
-                .where(where, prefilter=True)
-                .limit(limit)
-                .to_list()
-            )
-
-        return await _run_sync(_do_search)
-
-    async def search_long_term(
-        self,
-        query: str,
-        limit: int = 10,
-        min_visibility: Visibility = "public",
-        entity_id: Optional[str] = None,
-        entity_type: Optional[str] = None,
-        tags: Optional[List[str]] = None,
-        importance_min: Optional[int] = None,
-        accessible_scopes: Optional[List[str]] = None,
-    ) -> List[Dict[str, Any]]:
-        """检索长期记忆，返回原始行数据"""
-        await self.ensure_tables()
-
-        vector = await self.embedding_client.embed_single(query)
-
-        filters = []
-        vis_filter = _build_visibility_filter(min_visibility)
-        if vis_filter:
-            filters.append(vis_filter)
-        if importance_min is not None:
-            filters.append(f"importance >= {importance_min}")
-        scopes_filter = _build_scopes_filter(accessible_scopes)
-        if scopes_filter:
-            filters.append(scopes_filter)
-
-        where_clause = " AND ".join(filters) if filters else None
-
-        def _do_search():
-            r = self.long_term_table.search(vector).limit(limit * 2)
-            if where_clause:
-                r = r.where(where_clause, prefilter=True)
-            return r.to_list()
-
-        rows = await _run_sync(_do_search)
-
-        # 后过滤：entity_id/entity_type/tags（需要解析 JSON，无法前置）
-        if entity_id is not None or entity_type is not None or tags is not None:
-            filtered_rows = []
-            for row in rows:
-                if tags:
-                    row_tags = list(row.get("tags") or [])
-                    if not any(t in row_tags for t in tags):
-                        continue
-                if entity_id is not None or entity_type is not None:
-                    entities_json = row.get("entities_json", "[]")
-                    try:
-                        entities = json.loads(entities_json)
-                    except Exception:
-                        entities = []
-                    match = False
-                    for e in entities:
-                        if entity_id and e.get("id") == entity_id:
-                            match = True
-                            break
-                        if entity_type and e.get("type") == entity_type:
-                            match = True
-                            break
-                    if not match and (entity_id or entity_type):
-                        continue
-                filtered_rows.append(row)
-            rows = filtered_rows
-
-        return rows[:limit]
-
-    async def browse_long_term(
-        self,
-        limit: int = 10,
-        min_visibility: Visibility = "public",
-        entity_id: Optional[str] = None,
-        entity_type: Optional[str] = None,
-        tags: Optional[List[str]] = None,
-        importance_min: Optional[int] = None,
-        accessible_scopes: Optional[List[str]] = None,
-    ) -> List[Dict[str, Any]]:
-        """按时间倒序浏览长期记忆，返回原始行数据"""
-        await self.ensure_tables()
-
-        filters = []
-        vis_filter = _build_visibility_filter(min_visibility)
-        if vis_filter:
-            filters.append(vis_filter)
-        if importance_min is not None:
-            filters.append(f"importance >= {importance_min}")
-        scopes_filter = _build_scopes_filter(accessible_scopes)
-        if scopes_filter:
-            filters.append(scopes_filter)
-
-        where_clause = " AND ".join(filters) if filters else None
-
-        def _matches_row(row: Dict[str, Any]) -> bool:
-            if tags:
-                row_tags = list(row.get("tags") or [])
-                if not any(tag in row_tags for tag in tags):
-                    return False
-            if entity_id is not None or entity_type is not None:
-                entities_json = row.get("entities_json", "[]")
-                try:
-                    entities = json.loads(entities_json)
-                except Exception:
-                    entities = []
-                for entity in entities:
-                    entity_id_match = entity_id is not None and entity.get("id") == entity_id
-                    entity_type_match = entity_type is not None and entity.get("type") == entity_type
-                    if entity_id_match or entity_type_match:
-                        return True
-                return False
-            return True
-
-        def _sort_key(row: Dict[str, Any]) -> str:
-            return row.get("updated_at") or row.get("created_at") or ""
-
-        def _do_scan() -> List[Dict[str, Any]]:
-            reader = self.long_term_table.search()
-            if where_clause:
-                reader = reader.where(where_clause, prefilter=True)
-            rows = reader.to_list()
-            filtered_rows = [row for row in rows if _matches_row(row)]
-            filtered_rows.sort(key=_sort_key, reverse=True)
-            return filtered_rows[:limit]
-
-        return await _run_sync(_do_scan)
-
     async def get_by_id(self, memory_id: str) -> Optional[Dict[str, Any]]:
-        """根据 ID 获取记忆（先查短期，再查长期）"""
+        """根据 ID 获取短期记忆行"""
         await self.ensure_tables()
 
         def _find_short():
@@ -465,33 +275,10 @@ class VectorStore:
         if results:
             return {"type": "short", "row": results[0]}
 
-        def _find_long():
-            return (
-                self.long_term_table.search()
-                .where(f"id = '{memory_id}'", prefilter=True)
-                .limit(1)
-                .to_list()
-            )
-
-        results = await _run_sync(_find_long)
-        if results:
-            return {"type": "long", "row": results[0]}
-
         return None
 
-    async def update_long_term(self, memory_id: str, entry: LongTermMemoryEntry, vector: Optional[List[float]] = None):
-        """更新长期记忆：删除旧行，插入新行（LanceDB 不支持原地 update）"""
-        await self.ensure_tables()
-        if vector is None:
-            # 保留旧 vector
-            old = await self.get_by_id(memory_id)
-            if old and old["type"] == "long":
-                vector = old["row"].get("vector")
-        await _run_sync(lambda: self.long_term_table.delete(f"id = '{memory_id}'"))
-        await self.add_long_term(entry, vector=vector)
-
     async def delete_by_id(self, memory_id: str) -> bool:
-        """根据 ID 删除记忆"""
+        """根据 ID 删除短期记忆"""
         await self.ensure_tables()
 
         def _try_delete_short():
@@ -506,25 +293,7 @@ class VectorStore:
                 return True
             return False
 
-        if await _run_sync(_try_delete_short):
-            return True
-
-        def _try_delete_long():
-            results = (
-                self.long_term_table.search()
-                .where(f"id = '{memory_id}'", prefilter=True)
-                .limit(1)
-                .to_list()
-            )
-            if results:
-                self.long_term_table.delete(f"id = '{memory_id}'")
-                return True
-            return False
-
-        if await _run_sync(_try_delete_long):
-            return True
-
-        return False
+        return await _run_sync(_try_delete_short)
 
     async def query_old_short_term(
         self,
@@ -569,24 +338,12 @@ class VectorStore:
             r.pop("_distance", None)
         return rows
 
-    async def get_all_long_term_rows(self) -> List[Dict[str, Any]]:
-        """导出所有长期记忆行（不含 vector）"""
-        await self.ensure_tables()
-        def _do():
-            return self.long_term_table.search().limit(100000).to_list()
-        rows = await _run_sync(_do)
-        for r in rows:
-            r.pop("vector", None)
-            r.pop("_distance", None)
-        return rows
-
     async def clear_all(self):
         """清空所有数据（用于 replace 模式导入）"""
         await self.ensure_tables()
         def _do():
-            for name in ["short_term_memory", "long_term_memory"]:
-                if name in self.db.table_names():
-                    self.db.drop_table(name)
+            if "short_term_memory" in self.db.table_names():
+                self.db.drop_table("short_term_memory")
         await _run_sync(_do)
         self._tables_initialized = False
         await self.ensure_tables()
@@ -596,12 +353,6 @@ class VectorStore:
         if self.short_term_table is None:
             return 0
         return self.short_term_table.count_rows()
-
-    def get_long_term_count(self) -> int:
-        """获取长期记忆数量"""
-        if self.long_term_table is None:
-            return 0
-        return self.long_term_table.count_rows()
 
     def close(self):
         """关闭连接"""

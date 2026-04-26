@@ -58,6 +58,8 @@ export interface ModuleRuntime extends ModuleDefinition {
   install_source?: string
   /** 安装时间 */
   installed_at?: string
+  /** 启动检测发现 schema 不匹配时的详情，仅当 status === 'schema_mismatch' 时设置 */
+  schema_mismatch?: { code_version: string; data_version: string | null }
 }
 
 // ============================================================================

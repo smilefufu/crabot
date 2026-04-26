@@ -1,6 +1,29 @@
 # Crabot 项目进度
 
-> 最后更新：2026-04-22 — 记忆管理界面重构收尾 + 路由精简
+> 最后更新：2026-04-25 — Phase A 自学习反馈信号闭环 + N7 版本历史 + N1-N10 测试覆盖第二轮
+
+## 最新里程碑（2026-04-25 — Phase A 自学习反馈信号闭环）
+
+修复长期记忆 v2 Observation 观察期 pass/fail 信号链路。设计核心：Front Handler 在 reply / create_task / supplement_task 工具上携带 `user_attitude` 字段（4 档 strong_pass/pass/fail/strong_fail）；代码层根据工具语义自动锚定 task_id（reply/create_task→prev finished task 同 channel/sender 30 分钟内；supplement_task→payload task_id）；调 memory.report_task_feedback 累加 observation_pass_count / observation_fail_count；maintenance.observation_check 按净值判定 pass/fail/extend。spec：`crabot-docs/superpowers/specs/2026-04-25-self-learning-feedback-signal-design.md`，plan：`crabot-docs/superpowers/plans/2026-04-25-self-learning-feedback-signal.md`。
+
+- **memory 侧 5 个 task**：lesson_task_usage 表 + observation_pass_count/fail_count 列；SqliteIndex 三个新方法（record/find/bump）；search_long_term 接 task_id 写表；report_task_feedback RPC + 三处分发表同步注册；maintenance.observation_check 按净值（pass-fail）判定。同步修了 stale_check_count >= 3 分支对 lesson/concept 写非法 maturity="stable" 的 pre-existing bug（按 type 分支：fact→stale / lesson→retired / concept→observation_stale tag）。
+- **agent 侧 6 个 task**：types.ts 加 UserAttitude / UserAttitudeNegOnly 类型；front-tools.ts 给 3 个决策工具加 schema 字段；front-loop parseDecisionTool 解析 + 验证 enum；MemoryWriter.reportTaskFeedback fire-and-forget RPC；DecisionDispatcher dispatch 加 reportFeedbackIfPresent + findPrevFinishedTaskId 锚定钩子，删除旧 24h 时间窗 fail 路径；prompt-manager FRONT_RULES_SHARED 加 4 档判定引导（情绪用于判别不用于升级，fail 例子用"算了，就这样吧"避免"嗯，好吧"中性误判）。
+- **协议文档**：protocol-agent-v2.md §5.4 加 user_attitude 字段表（含锚定对象映射 + 跳过条件）。同步发现 protocol-admin.md §3.22 误把 Front 决策工具列在 admin 协议里（架构分层错误），已拆分到 protocol-agent-v2.md §5.4 新增"Front Agent 决策工具实现"专节。
+- **闭环真正收尾（Task 14）**：plan 当时把"Worker 召回时传 task_id"标了 Out of Scope，实际上不补这一环 lesson_task_usage 表永远不会被写入、整个反馈链路空跑。补 5 处：AssembleParams 加 task_id / FetchLongTermMemoryParams 加 taskId / assembleWorkerContext 透传 / fetchLongTermMemory 加守卫式 spread / decision-dispatcher.ts 创建 task 后传 task.id / mcp/crab-memory.ts MCP search_long_term 调 ctx.taskId。Front 端 tool-executor.ts 不动（Front 没 task_id）。
+- **稳定 RPC ordering（I-1 fix）**：`find_lessons_used_in_task` SELECT 加 `ORDER BY lesson_id ASC`，避免 RPC report_task_feedback 返回值依赖 SQLite 隐式行序。
+- **测试**：agent 477/477 pass + memory 233/233 pass（含 e2e dispatcher → memory RPC 链路 + 新增 context-assembler task_id 透传 2 测试），tsc 0 errors。
+- **已知 follow-up**（不阻塞）：vote count 在 rollback/pass 后是否 reset（spec 未明示）；evolution mode 自动判定（spec §6.2 follow-up）；spec 文本说"maturity stable"应改为按 type 列举合法字面量；test fixture 重复（多个测试构造相同 store/idx/rpc 可提取）。
+
+## 同期解决的前置 in-progress（2026-04-25）
+
+- **N7 版本历史端到端**（spec §9.2）：数据/RPC/分发表/静态锁四层串通——store 旁路 `<id>.versions/v<n>.md`、`get_entry_version` RPC、move/purge 跟随 versions 目录迁移与清理；`tests/long_term_v2/test_rpc_spec_alignment.py` 静态扫 `module.py` 源码 `self._lt_v2_rpc.<name>` 引用集与 `LongTermV2Rpc` 公开方法集做差分，把"加了 RPC 忘了在分发表登记"这类盲区永久关掉。
+- **N1-N10 测试覆盖第二轮**：spec §6/§7/§9/§10 细节口子 N1–N10 全部 ✅。修改既有 5 测试（test_maintenance/evolution/chain_of_note/rpc/rpc_update_phase3）+ 新增 6 测试文件（rule_promotion_e2e / pe_concurrent_write / pe_gated_recall_e2e / pe_gated_write_e2e / trash_cleanup_timezone / version_history_e2e）。同步 evolution.py spec §6.4 ≥3 case 晋升门槛硬约束。
+- **Front prompt 防 XML mimicry**：原 worker capabilities 注入展开具体 tool 名（screenshot / mouse_click / git_status 等），某些模型（MiniMax-M2.5）看到后直接吐 `<invoke name="X">…</invoke>` 形式 XML 文本污染 reply。改为只列 category 名 + 加"工具调用硬性规则"段明示 Front 唯一可调用工具是 4 个决策工具。
+
+## 上一里程碑（2026-04-24）
+
+- **Memory v2 Phase 5 Admin UI 完成**：Admin Web 长期记忆管理页重做——一级 Tab（全部记忆/观察期）+ 类型/状态 Chips + 搜索 keyword/semantic + 批量操作 + 手动维护下拉 + 观察期面板替代 Proposals 审核（全自动路径）+ 详情 6 段 + 版本历史只读对比；MemoryEntriesPage 彻底清理；路由迁到 `/memory/long-term|short-term|scenes`。spec：`crabot-docs/superpowers/specs/2026-04-24-long-term-memory-admin-ui-design.md`，plan：`crabot-docs/superpowers/plans/2026-04-24-memory-v2-phase5-admin-ui.md`。24 task 全部完成，admin web 132 tests pass，tsc 无错。
+- **Memory v2 全部 4 期落地**（2026-04-23）：Phase 1（数据模型 / 文件存储 / SQLite 索引 / v1→v2 迁移）+ Phase 2（6 步 hybrid 召回 + Eval harness）+ Phase 3（PE-Gated Write / Observation / Case→Rule / Frozen Snapshot / Evolution Mode）+ Phase 4（Admin UI 重做 + v1 路径清理 + 协议对齐）。Phase 4 共 22 task，1051 tests pass，验收记录见 `/tmp/memory-v2-acceptance.md`。
 
 ## 当前进行中：Agent Engine V2
 

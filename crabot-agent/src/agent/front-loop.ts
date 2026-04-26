@@ -205,18 +205,33 @@ export async function runFrontLoop(params: FrontLoopParams): Promise<FrontLoopRe
   }
 }
 
+const VALID_ATTITUDES_FULL = new Set(['strong_pass', 'pass', 'fail', 'strong_fail'])
+const VALID_ATTITUDES_NEG_ONLY = new Set(['fail', 'strong_fail'])
+
+function parseUserAttitude(
+  raw: unknown,
+  allowed: ReadonlySet<string>,
+): 'strong_pass' | 'pass' | 'fail' | 'strong_fail' | undefined {
+  if (typeof raw !== 'string') return undefined
+  return allowed.has(raw) ? (raw as 'strong_pass' | 'pass' | 'fail' | 'strong_fail') : undefined
+}
+
 /**
  * 将决策工具调用解析为 MessageDecision
  */
 function parseDecisionTool(toolName: DecisionToolName, input: Record<string, unknown>): MessageDecision {
   switch (toolName) {
-    case 'reply':
+    case 'reply': {
+      const attitude = parseUserAttitude(input.user_attitude, VALID_ATTITUDES_FULL)
       return {
         type: 'direct_reply',
         reply: { type: 'text', text: (input.text as string) ?? '' },
+        ...(attitude ? { user_attitude: attitude } : {}),
       }
+    }
 
-    case 'create_task':
+    case 'create_task': {
+      const attitude = parseUserAttitude(input.user_attitude, VALID_ATTITUDES_FULL)
       return {
         type: 'create_task',
         task_title: (input.task_title as string) ?? '未命名任务',
@@ -225,9 +240,12 @@ function parseDecisionTool(toolName: DecisionToolName, input: Record<string, unk
           type: 'text',
           text: (input.ack_text as string) ?? '',
         },
+        ...(attitude ? { user_attitude: attitude } : {}),
       }
+    }
 
-    case 'supplement_task':
+    case 'supplement_task': {
+      const attitude = parseUserAttitude(input.user_attitude, VALID_ATTITUDES_NEG_ONLY)
       return {
         type: 'supplement_task',
         task_id: (input.task_id as string) ?? '',
@@ -236,7 +254,9 @@ function parseDecisionTool(toolName: DecisionToolName, input: Record<string, unk
           type: 'text',
           text: (input.ack_text as string) ?? '',
         },
+        ...(attitude ? { user_attitude: attitude as 'fail' | 'strong_fail' } : {}),
       }
+    }
 
     case 'stay_silent':
       return { type: 'silent' }
@@ -247,3 +267,6 @@ function parseDecisionTool(toolName: DecisionToolName, input: Record<string, unk
     }
   }
 }
+
+// Test-only export to avoid touching the public surface area.
+export const __test_only__parseDecisionTool = parseDecisionTool

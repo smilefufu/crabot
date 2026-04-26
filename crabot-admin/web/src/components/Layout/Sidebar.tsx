@@ -43,7 +43,8 @@ const navSections: NavSection[] = [
     items: [
       { to: '/dialog-objects', label: '对话对象', match: '/dialog-objects' },
       { to: '/permission-templates', label: '权限模板', match: '/permission-templates' },
-      { to: '/memory', label: '记忆', match: '/memory' },
+      { to: '/memory/long-term', label: '长期记忆', match: '/memory/long-term' },
+      { to: '/memory/short-term', label: '短期记忆', match: '/memory/short-term' },
       { to: '/memory/scenes', label: '场景画像', match: '/memory/scenes' },
     ],
   },

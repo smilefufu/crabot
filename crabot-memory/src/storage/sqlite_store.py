@@ -1,15 +1,16 @@
 """
 SQLite 元数据存储
-存储反思水位、统计信息、修正历史等
+存储反思水位、统计信息等。
+
+注：长期记忆 v1 的修正历史（``memory_revisions`` 表）已在 Memory v2 Phase 4
+移除。长期记忆现由 ``src/long_term_v2/`` 管理。
 """
 import sqlite3
 import json
 import logging
-from typing import Optional, List, Dict, Any
+from typing import Optional, Any
 from datetime import datetime
 from pathlib import Path
-
-from ..types import MemoryRevision
 
 logger = logging.getLogger(__name__)
 
@@ -33,18 +34,6 @@ class SQLiteStore:
             CREATE TABLE IF NOT EXISTS reflection_watermark (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 last_reflected_at TEXT
-            )
-        """)
-
-        # 修正历史表
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS memory_revisions (
-                memory_id TEXT NOT NULL,
-                version INTEGER NOT NULL,
-                previous_content TEXT NOT NULL,
-                reason TEXT NOT NULL,
-                revised_at TEXT NOT NULL,
-                PRIMARY KEY (memory_id, version)
             )
         """)
 
@@ -73,34 +62,6 @@ class SQLiteStore:
             ON CONFLICT(id) DO UPDATE SET last_reflected_at = ?
         """, (timestamp, timestamp))
         self.conn.commit()
-
-    def add_revision(self, memory_id: str, version: int, previous_content: str, reason: str):
-        """添加修正历史"""
-        revised_at = datetime.utcnow().isoformat() + "Z"
-        self.conn.execute("""
-            INSERT INTO memory_revisions (memory_id, version, previous_content, reason, revised_at)
-            VALUES (?, ?, ?, ?, ?)
-        """, (memory_id, version, previous_content, reason, revised_at))
-        self.conn.commit()
-
-    def get_revisions(self, memory_id: str) -> List[MemoryRevision]:
-        """获取修正历史"""
-        cursor = self.conn.execute("""
-            SELECT version, previous_content, reason, revised_at
-            FROM memory_revisions
-            WHERE memory_id = ?
-            ORDER BY version DESC
-        """, (memory_id,))
-        rows = cursor.fetchall()
-        return [
-            MemoryRevision(
-                version=row["version"],
-                previous_content=row["previous_content"],
-                reason=row["reason"],
-                revised_at=row["revised_at"],
-            )
-            for row in rows
-        ]
 
     def set_stat(self, key: str, value: Any):
         """设置统计信息"""

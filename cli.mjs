@@ -11,7 +11,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const args = process.argv.slice(2)
 const command = args[0] ?? 'help'
 
-const bootstrapCommands = new Set(['start', 'stop', 'check', 'help'])
+const bootstrapCommands = new Set(['start', 'stop', 'check', 'help', 'upgrade'])
 
 if (command === 'password') {
   await import(resolve(__dirname, 'scripts/password.mjs'))

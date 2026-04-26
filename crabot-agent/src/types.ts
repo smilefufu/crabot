@@ -303,13 +303,19 @@ export interface ShortTermMemoryEntry {
   created_at: string
 }
 
-export interface LongTermL0Entry {
+/**
+ * 长期记忆引用 — Memory v2 `search_long_term` 默认 brief 形态
+ *
+ * @see protocol-memory.md `search_long_term` 响应（include='brief'）
+ * @see protocol-memory.md frontmatter（include='full' 时附带）
+ */
+export interface LongTermMemoryRef {
   id: string
-  abstract: string
-  importance: number
-  tags: string[]
-  visibility: 'private' | 'internal' | 'public'
-  created_at: string
+  type: 'fact' | 'lesson' | 'concept'
+  status: 'inbox' | 'confirmed' | 'trash'
+  brief: string
+  /** optional tags from frontmatter (only present if include='full' was used) */
+  tags?: string[]
 }
 
 export interface ResolvedModule {
@@ -342,7 +348,7 @@ export interface WorkerAgentContext {
   sender_friend?: Friend
   recent_messages?: ChannelMessage[]
   short_term_memories: ShortTermMemoryEntry[]
-  long_term_memories: LongTermL0Entry[]
+  long_term_memories: LongTermMemoryRef[]
   available_tools: ToolDeclaration[]
   admin_endpoint: ResolvedModule
   memory_endpoint: ResolvedModule
@@ -380,9 +386,24 @@ export interface ToolHistoryEntry {
   output_summary: string
 }
 
+/**
+ * 用户对 task 的态度（Phase A 2026-04-25）
+ *
+ * Front Handler 在 reply / create_task / supplement_task 三个工具上可附带本字段。
+ * 锚定对象由调用的工具自动决定（spec §6）：
+ * - reply / create_task：prev finished task（同 channel/sender，30 分钟内）
+ * - supplement_task：当前 payload 里的 task_id
+ *
+ * Spec: 2026-04-25-self-learning-feedback-signal-design.md
+ */
+export type UserAttitude = 'strong_pass' | 'pass' | 'fail' | 'strong_fail'
+export type UserAttitudeNegOnly = 'fail' | 'strong_fail'
+
 export interface DirectReplyDecision {
   type: 'direct_reply'
   reply: MessageContent
+  /** 用户对 prev finished task 的态度（可选，求准策略下 Front 不确定时不填） */
+  user_attitude?: UserAttitude
 }
 
 export interface CreateTaskDecision {
@@ -394,6 +415,8 @@ export interface CreateTaskDecision {
   immediate_reply: MessageContent
   /** Front loop context, only set on forced termination (max rounds exceeded) */
   front_context?: ToolHistoryEntry[]
+  /** 用户对 prev finished task 的态度（可选；不是对正在创建的新 task 的评价） */
+  user_attitude?: UserAttitude
 }
 
 // ============================================================================
@@ -605,6 +628,8 @@ export interface SupplementTaskDecision {
   task_id: TaskId
   supplement_content: string
   immediate_reply?: MessageContent
+  /** 用户对当前 supplement 的 task 的否定程度（仅 fail/strong_fail；补充而非纠偏时不填） */
+  user_attitude?: UserAttitudeNegOnly
 }
 
 export interface FrontLoopResult {

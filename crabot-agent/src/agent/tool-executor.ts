@@ -30,6 +30,31 @@ export interface ToolResult {
   isError: boolean
 }
 
+/** brief 必须 ≤80 字符且非空，从 content 首行截取 */
+function deriveBriefFromContent(content: string): string {
+  const firstLine = content.split(/\r?\n/, 1)[0]?.trim() ?? ''
+  const trimmed = firstLine || content.trim()
+  return trimmed.slice(0, 80) || 'untitled'
+}
+
+/** 1-10 importance → 4 维 importance_factors（0-1 区间） */
+function importanceToFactors(importance: number | undefined): {
+  proximity: number
+  surprisal: number
+  entity_priority: number
+  unambiguity: number
+} {
+  const raw = typeof importance === 'number' ? importance : 5
+  const clamped = Math.min(10, Math.max(1, raw))
+  const normalized = clamped / 10
+  return {
+    proximity: 0.5,
+    surprisal: normalized,
+    entity_priority: 0.5,
+    unambiguity: 0.5,
+  }
+}
+
 export class ToolExecutor {
   constructor(private deps: ToolExecutorDeps) {}
 
@@ -274,20 +299,25 @@ export class ToolExecutor {
 
   private async storeMemory(input: Record<string, unknown>): Promise<ToolResult> {
     const memoryPort = await this.deps.getMemoryPort()
+    const content = input.content as string
+    const brief = (input.brief as string | undefined)?.trim() || deriveBriefFromContent(content)
+    const type = (input.type as 'fact' | 'lesson' | 'concept' | undefined) ?? 'fact'
     const rpcParams = {
-      content: input.content as string,
-      source: { type: 'conversation' },
-      importance: (input.importance as number) ?? 5,
-      ...(input.tags ? { tags: input.tags as string[] } : {}),
-      visibility: this.deps.memoryWriteVisibility(),
-      scopes: this.deps.memoryWriteScopes(),
+      type,
+      brief,
+      content,
+      author: 'agent',
+      source_ref: { type: 'conversation' as const },
+      entities: [] as Array<{ type: string; id: string; name: string }>,
+      tags: (input.tags as string[] | undefined) ?? [],
+      importance_factors: importanceToFactors(input.importance as number | undefined),
     }
 
-    // Fire-and-forget: 不阻塞 Front loop，Memory 后台完成 L0/L1 生成和写入
-    this.deps.rpcClient.call(memoryPort, 'write_long_term', rpcParams, this.deps.moduleId)
+    // Fire-and-forget: 不阻塞 Front loop，Memory 后台完成索引/嵌入
+    this.deps.rpcClient.call(memoryPort, 'quick_capture', rpcParams, this.deps.moduleId)
       .then(result => {
-        const r = result as { action: string; memory: { id: string } }
-        console.log(`[${this.deps.moduleId}] store_memory completed: ${r.action} ${r.memory.id}`)
+        const r = result as { id?: string; status?: string }
+        console.log(`[${this.deps.moduleId}] store_memory completed: ${r.status ?? 'ok'} ${r.id ?? ''}`)
       })
       .catch(err => {
         console.error(`[${this.deps.moduleId}] store_memory failed:`, err instanceof Error ? err.message : err)
@@ -328,20 +358,20 @@ export class ToolExecutor {
       return { output: JSON.stringify(result), isError: false }
     }
 
-    // Default: long_term
+    // Default: long_term (Memory v2 contract)
     const result = await this.deps.rpcClient.call<
       {
         query: string
-        detail: string
-        limit: number
+        k: number
+        include: 'brief' | 'full'
         min_visibility: string
         accessible_scopes?: string[]
       },
-      { results: Array<{ memory: { id: string; abstract: string; importance: number; tags: string[]; category: string }; relevance: number }> }
+      { results: Array<{ id: string; type: string; status: string; brief: string; tags?: string[] }> }
     >(memoryPort, 'search_long_term', {
       query: input.query as string,
-      detail: 'L0',
-      limit,
+      k: limit,
+      include: 'brief',
       min_visibility: visibility,
       ...(this.deps.memoryWriteScopes().length > 0
         ? { accessible_scopes: this.deps.memoryWriteScopes() }
@@ -352,35 +382,16 @@ export class ToolExecutor {
 
   private async getMemoryDetail(input: Record<string, unknown>): Promise<ToolResult> {
     const memoryPort = await this.deps.getMemoryPort()
+    const include = (input.include as 'brief' | 'full' | undefined) ?? 'full'
     const result = await this.deps.rpcClient.call<
-      { memory_id: string },
-      { memory: Record<string, unknown> }
+      { id: string; include: 'brief' | 'full' },
+      { id: string; type: string; status: string; brief: string; body?: string; frontmatter?: Record<string, unknown> }
     >(memoryPort, 'get_memory', {
-      memory_id: input.memory_id as string,
+      id: input.memory_id as string,
+      include,
     }, this.deps.moduleId)
 
-    const mem = result.memory
-    const detail = (input.detail as string) ?? 'L1'
-
-    if (detail === 'L1') {
-      return {
-        output: JSON.stringify({
-          id: mem.id,
-          category: mem.category,
-          abstract: mem.abstract,
-          overview: mem.overview,
-          entities: mem.entities,
-          keywords: mem.keywords,
-          importance: mem.importance,
-          tags: mem.tags,
-          source: mem.source,
-        }),
-        isError: false,
-      }
-    }
-
-    // L2: return full object
-    return { output: JSON.stringify(mem), isError: false }
+    return { output: JSON.stringify(result), isError: false }
   }
 
   private formatFriend(f: Friend) {

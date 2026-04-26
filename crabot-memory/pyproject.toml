@@ -13,6 +13,8 @@ dependencies = [
     "anthropic>=0.30.0",
     "pydantic>=2.6.0",
     "pyyaml>=6.0",
+    "rank-bm25>=0.2.2",
+    "aiosqlite>=0.19",
 ]
 
 [project.optional-dependencies]
@@ -40,3 +42,4 @@ packages = ["src"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]

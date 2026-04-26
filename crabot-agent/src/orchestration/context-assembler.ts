@@ -14,7 +14,7 @@ import type {
   WorkerAgentContext,
   ChannelMessage,
   ShortTermMemoryEntry,
-  LongTermL0Entry,
+  LongTermMemoryRef,
   TaskSummary,
   ResolvedModule,
   Friend,
@@ -33,6 +33,8 @@ interface AssembleParams {
   friend_id?: string
   session_type?: 'private' | 'group'
   crab_display_name?: string
+  /** Worker scope 的 task_id，传给 search_long_term 用于写入 lesson_task_usage */
+  task_id?: string
 }
 
 interface MemoryFetchParams {
@@ -47,6 +49,8 @@ type FetchShortTermMemoryParams = MemoryFetchParams
 
 interface FetchLongTermMemoryParams extends MemoryFetchParams {
   query?: string
+  /** 调用方传入的 task_id，会作为 task_id 参数传给 search_long_term */
+  taskId?: string
 }
 
 export class ContextAssembler {
@@ -142,6 +146,7 @@ export class ContextAssembler {
         minVisibility: memoryPermissions.read_min_visibility,
         accessibleScopes: memoryPermissions.read_accessible_scopes,
         sessionType: workerSessionType,
+        taskId: params.task_id,
       }),
       this.resolveModule('admin'),
       this.resolveModule('memory'),
@@ -311,8 +316,8 @@ export class ContextAssembler {
     }
   }
 
-  private async fetchLongTermMemory(params: FetchLongTermMemoryParams): Promise<LongTermL0Entry[]> {
-    const { friendId, query, limit, minVisibility = 'public', accessibleScopes, sessionType = 'private' } = params
+  private async fetchLongTermMemory(params: FetchLongTermMemoryParams): Promise<LongTermMemoryRef[]> {
+    const { friendId, query, limit, minVisibility = 'public', accessibleScopes, sessionType = 'private', taskId } = params
 
     if (!query) return []
     if (sessionType === 'private' && !friendId) return []
@@ -322,34 +327,36 @@ export class ContextAssembler {
 
       // 私聊：按 friend 关联的实体过滤
       // 群聊：不按 entity_id 过滤，靠 scope 隔离
-      const filter = sessionType === 'group'
-        ? {}
+      const filters = sessionType === 'group'
+        ? undefined
         : { entity_id: friendId }
 
       const result = await this.rpcClient.call<
         {
           query: string
-          detail: string
-          limit?: number
-          filter?: { entity_id?: string }
+          include: 'brief' | 'full'
+          k?: number
+          filters?: { entity_id?: string }
           min_visibility?: string
           accessible_scopes?: string[]
+          task_id?: string
         },
-        { results: Array<{ memory: LongTermL0Entry; relevance: number }> }
+        { results: LongTermMemoryRef[] }
       >(
         memoryPort,
         'search_long_term',
         {
           query,
-          detail: 'L0',
-          limit: limit ?? this.config.worker_long_term_memory_limit,
-          filter,
+          include: 'brief',
+          k: limit ?? this.config.worker_long_term_memory_limit,
+          ...(filters && { filters }),
           min_visibility: minVisibility,
           ...(accessibleScopes !== undefined && { accessible_scopes: accessibleScopes }),
+          ...(taskId ? { task_id: taskId } : {}),
         },
         this.moduleId
       )
-      return result.results.map((r) => r.memory)
+      return result.results
     } catch {
       return []
     }

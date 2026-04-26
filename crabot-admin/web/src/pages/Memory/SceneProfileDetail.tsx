@@ -8,12 +8,11 @@ import { ConfirmModal } from '../../components/Common/ConfirmModal'
 import { useToast } from '../../contexts/ToastContext'
 import {
   defaultSceneProfileLabel,
-  memoryService,
   parseSceneKey,
   sceneProfileService,
-  type LongTermMemoryEntry,
   type SceneProfile,
 } from '../../services/memory'
+import { memoryV2Service, type MemoryEntryV2 } from '../../services/memoryV2'
 import { buildMemoryEntriesHref } from './memoryContextQuery'
 
 const SCENE_TYPE_LABELS: Record<string, string> = {
@@ -87,7 +86,7 @@ export const SceneProfileDetail: React.FC = () => {
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [confirmOpen, setConfirmOpen] = useState(false)
-  const [sourceMemories, setSourceMemories] = useState<LongTermMemoryEntry[]>([])
+  const [sourceMemories, setSourceMemories] = useState<MemoryEntryV2[]>([])
 
   const buildDraftProfile = useCallback((): SceneProfile => {
     const scene = parseSceneKey(key)
@@ -216,13 +215,16 @@ export const SceneProfileDetail: React.FC = () => {
         const uniqueIds = [...new Set(sourceMemoryIds)]
         const items = await Promise.all(
           uniqueIds.map(async (id) => {
-            const result = await memoryService.getMemory(id)
-            return result.type === 'long' ? result.memory : null
+            try {
+              return await memoryV2Service.getEntry(id)
+            } catch {
+              return null
+            }
           }),
         )
 
         if (!cancelled) {
-          setSourceMemories(items.filter((item): item is LongTermMemoryEntry => item !== null))
+          setSourceMemories(items.filter((item): item is MemoryEntryV2 => item !== null))
         }
       } catch (err) {
         if (!cancelled) {
@@ -384,7 +386,7 @@ export const SceneProfileDetail: React.FC = () => {
                   to={buildMemoryEntriesHref({ tab: 'long', mode: 'search', memoryId: memory.id })}
                   style={{ color: 'var(--primary)' }}
                 >
-                  {memory.abstract}
+                  {memory.brief}
                 </Link>
               ))}
             </div>

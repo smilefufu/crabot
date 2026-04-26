@@ -12,8 +12,6 @@ from src.types import (
     WriteShortTermParams,
     MemorySource,
     SearchShortTermParams,
-    WriteLongTermParams,
-    EntityRef,
 )
 from src.config import MemoryConfig, load_config
 from src.module import MemoryModule
@@ -140,19 +138,27 @@ async def test_search_short_term(memory_module):
 
 @pytest.mark.asyncio
 async def test_write_long_term(memory_module):
-    """测试写入长期记忆"""
-    params = WriteLongTermParams(
-        content="用户张三偏好使用 TypeScript 进行开发，认为类型安全很重要。",
-        source=MemorySource(type="reflection"),
-        importance=7,
-        tags=["preference", "technology"],
-    )
+    """测试写入长期记忆 (v2 RPC)"""
+    # Long-term v2 lives entirely in _lt_v2_rpc; route via dispatch to mirror
+    # the JSON-RPC contract callers actually use.
+    result = await memory_module._dispatch("write_long_term", {
+        "type": "fact",
+        "brief": "张三偏好 TypeScript",
+        "content": "用户张三偏好使用 TypeScript 进行开发，认为类型安全很重要。",
+        "author": "user",
+        "source_ref": {"type": "reflection"},
+        "source_trust": 5,
+        "content_confidence": 5,
+        "importance_factors": {
+            "proximity": 0.5, "surprisal": 0.5,
+            "entity_priority": 0.5, "unambiguity": 0.5,
+        },
+        "event_time": "2026-04-23T10:00:00Z",
+        "tags": ["#preference", "#technology"],
+    })
 
-    result = await memory_module._write_long_term(params.model_dump())
-
-    assert result["action"] == "created"
-    assert result["memory"]["id"].startswith("mem-l-")
-    assert result["memory"]["importance"] == 7
+    assert result["status"] == "ok"
+    assert result["id"].startswith("mem-l-")
 
 
 @pytest.mark.asyncio
@@ -225,52 +231,6 @@ async def test_scopes_filtering(memory_module):
 
 
 @pytest.mark.asyncio
-async def test_update_memory(memory_module):
-    """测试更新长期记忆"""
-    write_result = await memory_module._write_long_term(WriteLongTermParams(
-        content="张三偏好 Python",
-        source=MemorySource(type="reflection"),
-        importance=5,
-        tags=["preference"],
-    ).model_dump())
-    memory_id = write_result["memory"]["id"]
-
-    from src.types import UpdateMemoryParams
-    update_result = await memory_module._update_memory(UpdateMemoryParams(
-        memory_id=memory_id,
-        content="张三偏好 TypeScript，不再使用 Python",
-        importance=8,
-        revision_reason="用户纠正了语言偏好",
-    ).model_dump())
-
-    assert update_result["memory"]["content"] == "张三偏好 TypeScript，不再使用 Python"
-    assert update_result["memory"]["importance"] == 8
-    assert update_result["version"] == 2
-
-    get_result = await memory_module._get_memory({
-        "memory_id": memory_id,
-        "include_revisions": True,
-    })
-    assert len(get_result["revisions"]) == 1
-    assert get_result["revisions"][0]["reason"] == "用户纠正了语言偏好"
-
-
-@pytest.mark.asyncio
-async def test_dedup_skip_duplicate(memory_module):
-    """测试去重：完全重复的内容应该 SKIP"""
-    params = WriteLongTermParams(
-        content="张三是前端开发工程师，擅长 React 和 TypeScript",
-        source=MemorySource(type="reflection"),
-        tags=["role"],
-    )
-    r1 = await memory_module._write_long_term(params.model_dump())
-    assert r1["action"] == "created"
-
-    r2 = await memory_module._write_long_term(params.model_dump())
-    assert r2["action"] in ("skipped", "updated", "merged")
-
-
-@pytest.mark.asyncio
 async def test_time_range_filter(memory_module):
     """测试时间范围过滤"""
     await memory_module._write_short_term(WriteShortTermParams(
@@ -310,19 +270,6 @@ async def test_batch_write_short_term(memory_module):
 
 
 @pytest.mark.asyncio
-async def test_batch_write_long_term(memory_module):
-    """测试批量写入长期记忆"""
-    result = await memory_module._batch_write_long_term({
-        "entries": [
-            {"content": "张三喜欢 Python", "source": {"type": "reflection"}, "tags": ["pref"]},
-            {"content": "李四擅长 Go 语言", "source": {"type": "reflection"}, "tags": ["skill"]},
-        ]
-    })
-    assert result["success_count"] == 2
-    assert result["failure_count"] == 0
-
-
-@pytest.mark.asyncio
 async def test_short_term_compression(memory_module):
     """测试短期记忆压缩"""
     memory_module.config.compression.compression_threshold = 3
@@ -348,28 +295,24 @@ async def test_short_term_compression(memory_module):
 
 @pytest.mark.asyncio
 async def test_export_import_roundtrip(memory_module):
-    """测试导出后导入还原"""
+    """测试导出后导入还原 (short_term only; long-term v2 backed up via filesystem)"""
     await memory_module._write_short_term(WriteShortTermParams(
         content="导出测试短期记忆",
         source=MemorySource(type="conversation"),
     ).model_dump())
-    await memory_module._write_long_term(WriteLongTermParams(
-        content="导出测试长期记忆",
-        source=MemorySource(type="reflection"),
-        tags=["export-test"],
-    ).model_dump())
 
     export_result = await memory_module._export_memories({})
-    assert export_result["version"] == "1.0"
+    assert export_result["version"] == "1.1"
     assert len(export_result["short_term"]) >= 1
-    assert len(export_result["long_term"]) >= 1
+    assert "long_term" not in export_result
+    assert "revisions" not in export_result
 
     import_result = await memory_module._import_memories({
         "mode": "replace",
         "data": export_result,
     })
     assert import_result["short_term_count"] >= 1
-    assert import_result["long_term_count"] >= 1
+    assert "long_term_count" not in import_result
 
 
 @pytest.mark.asyncio
@@ -493,78 +436,6 @@ async def test_delete_scene_profile(memory_module):
     })
     out = await memory_module._delete_scene_profile({"scene": scene})
     assert out["deleted"] is True
-
-
-@pytest.mark.asyncio
-async def test_browse_long_term_returns_recent_entries(memory_module):
-    await memory_module._write_long_term(WriteLongTermParams(
-        content="prefers TypeScript",
-        source=MemorySource(type="manual", original_time="2026-04-19T00:00:00Z"),
-    ).model_dump())
-    await memory_module._write_long_term(WriteLongTermParams(
-        content="prefers result-first UI",
-        source=MemorySource(type="manual", original_time="2026-04-20T00:00:00Z"),
-    ).model_dump())
-
-    result = await memory_module._dispatch("browse_long_term", {
-        "limit": 10,
-        "detail": "L1",
-    })
-
-    assert [item["memory"]["abstract"] for item in result["results"]] == [
-        "prefers result-first UI",
-        "prefers TypeScript",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_browse_long_term_filters_scopes_safely(memory_module):
-    await memory_module._write_long_term(WriteLongTermParams(
-        content="scope-a recent memory",
-        source=MemorySource(type="manual", original_time="2026-04-21T00:00:00Z"),
-        visibility="internal",
-        scopes=["scope-a"],
-    ).model_dump())
-    await memory_module._write_long_term(WriteLongTermParams(
-        content="scope-b recent memory",
-        source=MemorySource(type="manual", original_time="2026-04-22T00:00:00Z"),
-        visibility="internal",
-        scopes=["scope-b"],
-    ).model_dump())
-
-    result = await memory_module._dispatch("browse_long_term", {
-        "limit": 10,
-        "detail": "L1",
-        "min_visibility": "internal",
-        "accessible_scopes": ["scope-a"],
-    })
-
-    assert [item["memory"]["abstract"] for item in result["results"]] == [
-        "scope-a recent memory",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_browse_long_term_applies_entity_filter_after_sorting(memory_module):
-    await memory_module._write_long_term(WriteLongTermParams(
-        content="other recent memory",
-        source=MemorySource(type="manual", original_time="2026-04-22T00:00:00Z"),
-    ).model_dump())
-    await memory_module._write_long_term(WriteLongTermParams(
-        content="friend target older memory",
-        source=MemorySource(type="manual", original_time="2026-04-20T00:00:00Z"),
-        entities=[EntityRef(type="friend", id="friend-1", name="Alice")],
-    ).model_dump())
-
-    result = await memory_module._dispatch("browse_long_term", {
-        "limit": 10,
-        "detail": "L1",
-        "filter": {"entity_id": "friend-1"},
-    })
-
-    assert [item["memory"]["abstract"] for item in result["results"]] == [
-        "friend target older memory",
-    ]
 
 
 @pytest.mark.asyncio

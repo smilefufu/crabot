@@ -90,7 +90,7 @@ function mockGroupSessionLookup(admin: AdminModule, participants: Array<{
 
   vi.spyOn(admin['rpcClient'], 'call').mockImplementation(async (_port, method, params) => {
     if (method === 'get_session') {
-      expect(params).toEqual({ session_id: 'group-session-1' })
+      expect(params).toMatchObject({ session_id: 'group-session-1' })
       return {
         session: {
           id: 'group-session-1',

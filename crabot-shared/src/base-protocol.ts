@@ -32,7 +32,7 @@ export type ScheduleId = string
 // 模块状态
 // ============================================================================
 
-export type ModuleStatus = 'starting' | 'running' | 'stopping' | 'stopped' | 'error'
+export type ModuleStatus = 'starting' | 'running' | 'stopping' | 'stopped' | 'error' | 'schema_mismatch'
 
 export type HealthStatus = 'healthy' | 'degraded' | 'unhealthy'
 
@@ -235,6 +235,8 @@ export interface ModuleDefinition {
   start_priority: number
   /** 跳过健康检查和注册（用于不实现 Crabot 协议的工具进程，如 Vite） */
   skip_health_check?: boolean
+  /** 模块数据目录绝对路径，传入则在 spawn 前做 schema 检测 */
+  data_dir?: string
 }
 
 /**

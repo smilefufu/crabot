@@ -62,13 +62,14 @@ describe('ContextAssembler', () => {
       },
     ]
     const shortMem = [{ memory_id: 'mem1', content: 'fact', timestamp: '2026-01-01T00:00:00Z' }]
-    const longMem = [{ memory_id: 'mem2', content: 'old fact', timestamp: '2025-01-01T00:00:00Z' }]
+    const longMem = [{ id: 'mem2', type: 'fact', status: 'confirmed', brief: 'old fact' }]
 
     // Call order: get_chat_history, search_short_term, search_long_term
+    // v2 search_long_term returns { results: LongTermMemoryRef[] } directly (no { memory, relevance } wrapper)
     mockRpc.call
       .mockResolvedValueOnce({ messages })
       .mockResolvedValueOnce({ results: shortMem })
-      .mockResolvedValueOnce({ results: longMem.map(m => ({ memory: m, relevance: 1.0 })) })
+      .mockResolvedValueOnce({ results: longMem })
 
     // Resolve order: admin (module_type), memory (module_type), channel (module_type)
     mockRpc.resolve

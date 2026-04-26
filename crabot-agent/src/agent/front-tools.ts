@@ -15,6 +15,24 @@ import type { ToolDefinition } from '../engine/types.js'
 
 const NOOP_CALL = async () => ({ output: '', isError: false as const })
 
+/** Phase A (2026-04-25): user_attitude 字段 — reply / create_task 用 4 档完整版 */
+const USER_ATTITUDE_FIELD_FULL = {
+  type: 'string' as const,
+  enum: ['strong_pass', 'pass', 'fail', 'strong_fail'] as const,
+  description:
+    '【可选】用户对【前一个已完成 task】的态度。指的是用户对那个 task 的反馈，' +
+    '不是对你这次回复的自评。判断不出来就不填。',
+}
+
+/** Phase A (2026-04-25): user_attitude 字段 — supplement_task 仅负反馈版 */
+const USER_ATTITUDE_FIELD_NEG_ONLY = {
+  type: 'string' as const,
+  enum: ['fail', 'strong_fail'] as const,
+  description:
+    '【可选】用户对【正在 supplement 的这个 current task】的否定程度。' +
+    '用户在 supplement 时若是补充信息（不是纠偏）就不填字段。',
+}
+
 /** 决策工具名称，单一来源 */
 const DECISION_NAMES = ['reply', 'create_task', 'supplement_task', 'stay_silent'] as const
 export type DecisionToolName = typeof DECISION_NAMES[number]
@@ -30,6 +48,7 @@ export const REPLY_TOOL: ToolDefinition = {
         type: 'string',
         description: '发给用户的最终完整回答。这是最终内容，不要写"让我查一下"等暗示后续动作的话。',
       },
+      user_attitude: USER_ATTITUDE_FIELD_FULL,
     },
     required: ['text'],
   },
@@ -54,6 +73,13 @@ export const CREATE_TASK_TOOL: ToolDefinition = {
       ack_text: {
         type: 'string',
         description: '立即发给用户的确认文本。必须简短自然，让用户知道你已收到并开始处理，如"好的，我来对比一下这几个产品"、"收到，正在分析代码"。',
+      },
+      user_attitude: {
+        ...USER_ATTITUDE_FIELD_FULL,
+        description:
+          '【可选】用户对【前一个已完成 task】的态度。' +
+          '注意：不是对你正在创建的新 task 的评价（你无法预知一个还没开始的 task 的成败）。' +
+          '判断不出来就不填。',
       },
     },
     required: ['task_title', 'task_description', 'ack_text'],
@@ -82,6 +108,7 @@ export function supplementTaskTool(activeTaskIds: readonly string[]): ToolDefini
           type: 'string',
           description: '立即发给用户的确认文本，如"好的，我调整一下方向"',
         },
+        user_attitude: USER_ATTITUDE_FIELD_NEG_ONLY,
       },
       required: ['task_id', 'content', 'ack_text'],
     },
@@ -289,14 +316,20 @@ export const GET_MESSAGE_TOOL: ToolDefinition = {
 export const STORE_MEMORY_TOOL: ToolDefinition = {
   name: 'store_memory',
   category: 'memory' as const,
-  description: '将信息写入长期记忆。当用户要求记住/记录某些信息时使用。',
+  description: '将信息写入长期记忆 inbox。当用户要求记住/记录某些信息时使用。',
   inputSchema: {
     type: 'object' as const,
     properties: {
-      content: { type: 'string', description: '要记忆的完整内容，应包含足够上下文' },
+      content: { type: 'string', description: '要记忆的完整内容，应包含足够上下文（成为 body）' },
+      brief: { type: 'string', description: '召回标题（≤80 字符）。不传则自动从 content 首行截取' },
+      type: {
+        type: 'string',
+        enum: ['fact', 'lesson', 'concept'],
+        description: '记忆类型：fact=客观事实, lesson=经验教训, concept=概念定义（默认 fact）',
+      },
       importance: {
         type: 'number',
-        description: '重要性（1-10），日常偏好 3-5，重要决策 6-8，关键信息 9-10',
+        description: '重要性（1-10），日常偏好 3-5，重要决策 6-8，关键信息 9-10（用于推断 importance_factors）',
       },
       tags: {
         type: 'array',
@@ -313,7 +346,7 @@ export const STORE_MEMORY_TOOL: ToolDefinition = {
 export const SEARCH_MEMORY_TOOL: ToolDefinition = {
   name: 'search_memory',
   category: 'memory' as const,
-  description: '搜索记忆，返回摘要列表（L0 级别）。可按语义查询、按分类过滤。',
+  description: '搜索记忆，返回 brief 列表。可按语义查询。',
   inputSchema: {
     type: 'object' as const,
     properties: {
@@ -341,11 +374,11 @@ export const GET_MEMORY_DETAIL_TOOL: ToolDefinition = {
   inputSchema: {
     type: 'object' as const,
     properties: {
-      memory_id: { type: 'string', description: '记忆 ID（如 mem-l042）' },
-      detail: {
+      memory_id: { type: 'string', description: '记忆 ID' },
+      include: {
         type: 'string',
-        enum: ['L1', 'L2'],
-        description: '详细程度：L1=概览(~2k token), L2=完整内容（默认 L1）',
+        enum: ['brief', 'full'],
+        description: '详细程度：brief=仅返回标识与 brief, full=附带 body 与 frontmatter（默认 full）',
       },
     },
     required: ['memory_id'],

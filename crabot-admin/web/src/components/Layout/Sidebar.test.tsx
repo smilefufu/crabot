@@ -12,6 +12,7 @@ describe('Sidebar', () => {
     )
 
     expect(screen.getByRole('link', { name: '场景画像' })).toHaveClass('active')
-    expect(screen.getByRole('link', { name: '记忆' })).not.toHaveClass('active')
+    expect(screen.getByRole('link', { name: '长期记忆' })).not.toHaveClass('active')
+    expect(screen.getByRole('link', { name: '短期记忆' })).not.toHaveClass('active')
   })
 })

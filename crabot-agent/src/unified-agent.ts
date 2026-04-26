@@ -404,7 +404,7 @@ export class UnifiedAgent extends ModuleBase {
       toolName: definition.toolName,
       workerHint: definition.workerHint,
     }))
-    return new WorkerHandler(workerSdkEnv, {
+    const handler = new WorkerHandler(workerSdkEnv, {
       systemPrompt: this.promptManager.assembleWorkerPrompt(workerPersonality || undefined, subAgentHints),
       longTermPreloadLimit: this.orchestrationConfig.worker_long_term_memory_limit,
       extra: this.extra,
@@ -423,7 +423,10 @@ export class UnifiedAgent extends ModuleBase {
       subAgentConfigs,
       skills: skills ?? [],
       lspManager: this.lspManager,
+      memoryWriter: this.memoryWriter,
     })
+    void handler.loadConfirmedSnapshot()
+    return handler
   }
 
   /**

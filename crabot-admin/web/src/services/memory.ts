@@ -51,31 +51,6 @@ export interface ShortTermMemoryEntry {
   created_at: string
 }
 
-export interface EntityRef {
-  type: string
-  id: string
-  name: string
-}
-
-export interface LongTermMemoryEntry {
-  id: string
-  abstract: string
-  overview: string
-  content?: string
-  entities: EntityRef[]
-  importance: number
-  keywords: string[]
-  tags: string[]
-  source: MemorySourceInfo
-  metadata?: Record<string, unknown>
-  read_count?: number
-  version?: number
-  visibility: 'private' | 'internal' | 'public'
-  scopes: string[]
-  created_at: string
-  updated_at?: string
-}
-
 export interface MemoryStats {
   short_term: {
     entry_count: number
@@ -92,9 +67,10 @@ export interface MemoryStats {
   }
 }
 
-type MemoryEntry =
-  | { type: 'short'; memory: ShortTermMemoryEntry }
-  | { type: 'long'; memory: LongTermMemoryEntry }
+interface ShortMemoryEntry {
+  type: 'short'
+  memory: ShortTermMemoryEntry
+}
 
 function buildQuery(params: Record<string, string | number | string[] | undefined>): string {
   const search = new URLSearchParams()
@@ -142,41 +118,9 @@ export const memoryService = {
     return api.get<{ results: ShortTermMemoryEntry[] }>(`/memory/short-term${q}`)
   },
 
-  async browseLongTerm(params: {
-    limit?: number
-    moduleId?: string
-    friendId?: string
-    accessibleScopes?: string[]
-  }): Promise<{ results: LongTermMemoryEntry[] }> {
-    const q = buildQuery({
-      limit: params.limit,
-      module_id: params.moduleId,
-      friend_id: params.friendId,
-      accessible_scope: params.accessibleScopes,
-    })
-    return api.get<{ results: LongTermMemoryEntry[] }>(`/memory/long-term/browse${q}`)
-  },
-
-  async searchLongTerm(params: {
-    q?: string
-    limit?: number
-    moduleId?: string
-    friendId?: string
-    accessibleScopes?: string[]
-  }): Promise<{ results: Array<{ memory: LongTermMemoryEntry; relevance: number }> }> {
-    const q = buildQuery({
-      q: params.q,
-      limit: params.limit,
-      module_id: params.moduleId,
-      friend_id: params.friendId,
-      accessible_scope: params.accessibleScopes,
-    })
-    return api.get<{ results: Array<{ memory: LongTermMemoryEntry; relevance: number }> }>(`/memory/long-term${q}`)
-  },
-
-  async getMemory(id: string, moduleId?: string): Promise<MemoryEntry> {
+  async getMemory(id: string, moduleId?: string): Promise<ShortMemoryEntry> {
     const q = buildQuery({ module_id: moduleId })
-    return api.get<MemoryEntry>(`/memory/${id}${q}`)
+    return api.get<ShortMemoryEntry>(`/memory/${id}${q}`)
   },
 
   async deleteMemory(id: string, moduleId?: string): Promise<{ deleted: boolean }> {

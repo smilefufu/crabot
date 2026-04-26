@@ -7,7 +7,7 @@ import { SceneProfileDetail } from './SceneProfileDetail'
 const getSceneProfile = vi.fn()
 const patchSceneProfile = vi.fn()
 const deleteSceneProfile = vi.fn()
-const getMemory = vi.fn()
+const getEntryV2 = vi.fn()
 const toastMock = {
   success: vi.fn(),
   error: vi.fn(),
@@ -26,15 +26,22 @@ vi.mock('../../services/memory', async () => {
   const actual = await vi.importActual<typeof import('../../services/memory')>('../../services/memory')
   return {
     ...actual,
-    memoryService: {
-      ...actual.memoryService,
-      getMemory: (...args: unknown[]) => getMemory(...args),
-    },
     sceneProfileService: {
       list: vi.fn(),
       get: (...args: unknown[]) => getSceneProfile(...args),
       patch: (...args: unknown[]) => patchSceneProfile(...args),
       delete: (...args: unknown[]) => deleteSceneProfile(...args),
+    },
+  }
+})
+
+vi.mock('../../services/memoryV2', async () => {
+  const actual = await vi.importActual<typeof import('../../services/memoryV2')>('../../services/memoryV2')
+  return {
+    ...actual,
+    memoryV2Service: {
+      ...actual.memoryV2Service,
+      getEntry: (...args: unknown[]) => getEntryV2(...args),
     },
   }
 })
@@ -52,25 +59,12 @@ function renderSceneProfileDetail(initialEntry: string) {
 describe('SceneProfileDetail', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    getMemory.mockResolvedValue({
-      type: 'long',
-      memory: {
-        id: 'mem-1',
-        abstract: '偏好 TypeScript',
-        overview: '偏好概览',
-        content: '完整内容',
-        entities: [],
-        importance: 7,
-        keywords: [],
-        tags: ['preference'],
-        source: { type: 'manual' },
-        read_count: 0,
-        version: 1,
-        visibility: 'internal',
-        scopes: [],
-        created_at: '2026-04-19T00:00:00.000Z',
-        updated_at: '2026-04-20T00:00:00.000Z',
-      },
+    getEntryV2.mockResolvedValue({
+      id: 'mem-1',
+      type: 'fact',
+      status: 'confirmed',
+      brief: '偏好 TypeScript',
+      body: '完整内容',
     })
   })
 
@@ -207,7 +201,7 @@ describe('SceneProfileDetail', () => {
 
     expect(await screen.findByRole('link', { name: '偏好 TypeScript' })).toHaveAttribute(
       'href',
-      '/memory/entries?tab=long&mode=search&memory_id=mem-1',
+      '/memory/short-term?tab=long&mode=search&memory_id=mem-1',
     )
   })
 })

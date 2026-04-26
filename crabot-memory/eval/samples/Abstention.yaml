@@ -1,0 +1,257 @@
+- id: ab-001
+  category: Abstention
+  setup_memories:
+    - {type: fact, brief: 张三 wxid, content: 张三微信 wxid_zhangsan,
+       entities: [{type: friend, id: z3, name: 张三}], tags: [], event_time: "2026-04-01T10:00:00Z"}
+  query: 王五的微信是多少
+  ground_truth: 不知道
+  acceptable_answers: [我没有这个信息, 没有记录, 我不清楚, abstain]
+
+- id: ab-002
+  category: Abstention
+  setup_memories: []
+  query: 项目 X 截止哪天
+  ground_truth: 不知道
+  acceptable_answers: [我没有项目 X 的信息, 没有记录]
+
+- id: ab-003
+  category: Abstention
+  setup_memories:
+    - {type: fact, brief: 张三北京, content: 张三在北京,
+       entities: [{type: friend, id: z3, name: 张三}], tags: [], event_time: "2026-04-01T10:00:00Z"}
+  query: 张三的住址具体在哪条街
+  ground_truth: 不知道
+  acceptable_answers: [只知道在北京, 没有具体地址]
+
+- id: ab-004
+  category: Abstention
+  setup_memories:
+    - {type: fact, brief: 周会时间, content: 周会周二 3 点,
+       entities: [], tags: [], event_time: "2026-04-01T10:00:00Z"}
+  query: 月会什么时候开
+  ground_truth: 不知道
+  acceptable_answers: [没有月会的记录, 我没有这条信息]
+
+- id: ab-005
+  category: Abstention
+  setup_memories: []
+  query: master 用什么 IDE
+  ground_truth: 不知道
+  acceptable_answers: [没有相关记录]
+
+- id: ab-006
+  category: Abstention
+  setup_memories:
+    - {type: fact, brief: 李四电话, content: 李四的电话是 13800000000,
+       entities: [{type: friend, id: l4, name: 李四}], tags: [], event_time: "2026-04-15T10:00:00Z"}
+  query: 李四的微信号是什么
+  ground_truth: 不知道
+  acceptable_answers: [没有李四微信的记录, 只知道电话]
+
+- id: ab-007
+  category: Abstention
+  setup_memories: []
+  query: 赵丽的生日是哪天
+  ground_truth: 不知道
+  acceptable_answers: [没有相关记录, 我不知道]
+
+- id: ab-008
+  category: Abstention
+  setup_memories:
+    - {type: fact, brief: 公司地址, content: 公司地址在上海市徐汇区漕河泾,
+       entities: [], tags: [], event_time: "2026-04-15T10:00:00Z"}
+  query: 公司楼层和门牌号是多少
+  ground_truth: 不知道
+  acceptable_answers: [没有详细门牌信息, 只知道大概地址]
+
+- id: ab-009
+  category: Abstention
+  setup_memories: []
+  query: 陈伟最近联系了哪些客户
+  ground_truth: 不知道
+  acceptable_answers: [没有相关记录, 无法回答]
+
+- id: ab-010
+  category: Abstention
+  setup_memories:
+    - {type: fact, brief: 项目 A 截止, content: 项目 A 截止 2026-06-30,
+       entities: [], tags: [], event_time: "2026-04-10T10:00:00Z"}
+  query: 项目 A 的预算是多少
+  ground_truth: 不知道
+  acceptable_answers: [没有项目A预算的记录, 只知道截止日期]
+
+- id: ab-011
+  category: Abstention
+  setup_memories: []
+  query: 周杰上周出差去了哪里
+  ground_truth: 不知道
+  acceptable_answers: [没有相关记录, 不清楚]
+
+- id: ab-012
+  category: Abstention
+  setup_memories:
+    - {type: fact, brief: 吴佳职位, content: 吴佳的职位是产品经理,
+       entities: [{type: friend, id: wj, name: 吴佳}], tags: [], event_time: "2026-01-15T10:00:00Z"}
+  query: 吴佳的手机号是什么
+  ground_truth: 不知道
+  acceptable_answers: [没有吴佳联系方式记录, 只知道职位]
+
+- id: ab-013
+  category: Abstention
+  setup_memories: []
+  query: 上周五公司开了什么会
+  ground_truth: 不知道
+  acceptable_answers: [没有记录, 无法确认]
+
+- id: ab-014
+  category: Abstention
+  setup_memories:
+    - {type: fact, brief: 钱晓彤电话, content: 钱晓彤的手机是 13911112222,
+       entities: [{type: friend, id: qxt, name: 钱晓彤}], tags: [], event_time: "2026-02-20T10:00:00Z"}
+  query: 钱晓彤的邮箱是什么
+  ground_truth: 不知道
+  acceptable_answers: [没有钱晓彤邮箱记录, 只知道手机号]
+
+- id: ab-015
+  category: Abstention
+  setup_memories: []
+  query: 林海的工号是多少
+  ground_truth: 不知道
+  acceptable_answers: [没有相关记录, 不清楚]
+
+- id: ab-016
+  category: Abstention
+  setup_memories:
+    - {type: fact, brief: 测试服务器 IP, content: 测试服务器 IP 是 192.168.1.100,
+       entities: [], tags: [], event_time: "2026-04-05T10:00:00Z"}
+  query: 生产服务器的 IP 地址是什么
+  ground_truth: 不知道
+  acceptable_answers: [只知道测试服务器IP, 没有生产服务器信息]
+
+- id: ab-017
+  category: Abstention
+  setup_memories: []
+  query: 马超最喜欢的编程语言是什么
+  ground_truth: 不知道
+  acceptable_answers: [没有相关记录, 无法回答]
+
+- id: ab-018
+  category: Abstention
+  setup_memories:
+    - {type: fact, brief: 项目 C 预算, content: 项目 C 的预算是 50 万元,
+       entities: [], tags: [], event_time: "2026-03-01T10:00:00Z"}
+  query: 项目 C 的甲方是谁
+  ground_truth: 不知道
+  acceptable_answers: [没有甲方相关记录, 只知道预算]
+
+- id: ab-019
+  category: Abstention
+  setup_memories: []
+  query: 冯宇昨天做了什么工作
+  ground_truth: 不知道
+  acceptable_answers: [没有相关记录, 无法回答]
+
+- id: ab-020
+  category: Abstention
+  setup_memories:
+    - {type: fact, brief: 沈娜职称, content: 沈娜的职称是高级工程师,
+       entities: [{type: friend, id: sn, name: 沈娜}], tags: [], event_time: "2026-02-01T10:00:00Z"}
+  query: 沈娜上个月的绩效评级是什么
+  ground_truth: 不知道
+  acceptable_answers: [没有绩效记录, 只知道职称]
+
+- id: ab-021
+  category: Abstention
+  setup_memories: []
+  query: 韩梅的家庭住址在哪里
+  ground_truth: 不知道
+  acceptable_answers: [没有相关记录, 不清楚]
+
+- id: ab-022
+  category: Abstention
+  setup_memories:
+    - {type: fact, brief: 周会在 5 号会议室, content: 周会在 5 号会议室开,
+       entities: [], tags: [], event_time: "2026-04-01T10:00:00Z"}
+  query: 5 号会议室的预订联系人是谁
+  ground_truth: 不知道
+  acceptable_answers: [没有相关记录, 只知道周会在那里开]
+
+- id: ab-023
+  category: Abstention
+  setup_memories: []
+  query: 杨帆的工资是多少
+  ground_truth: 不知道
+  acceptable_answers: [没有相关记录, 这类信息不在记录中]
+
+- id: ab-024
+  category: Abstention
+  setup_memories:
+    - {type: fact, brief: 王小明在技术部, content: 王小明在技术部,
+       entities: [{type: friend, id: wxm, name: 王小明}], tags: [], event_time: "2026-03-01T10:00:00Z"}
+  query: 王小明的工号是什么
+  ground_truth: 不知道
+  acceptable_answers: [没有王小明工号记录, 只知道他在技术部]
+
+- id: ab-025
+  category: Abstention
+  setup_memories: []
+  query: 昨天的日报里有哪些内容
+  ground_truth: 不知道
+  acceptable_answers: [没有日报记录, 无法回答]
+
+- id: ab-026
+  category: Abstention
+  setup_memories:
+    - {type: fact, brief: 徐磊负责前端, content: 徐磊负责前端模块,
+       entities: [{type: friend, id: xl, name: 徐磊}], tags: [], event_time: "2026-02-15T10:00:00Z"}
+  query: 徐磊的个人 GitHub 账号是什么
+  ground_truth: 不知道
+  acceptable_answers: [没有相关记录, 只知道他负责前端]
+
+- id: ab-027
+  category: Abstention
+  setup_memories: []
+  query: 上周五和哪位客户吃了饭
+  ground_truth: 不知道
+  acceptable_answers: [没有相关记录, 无法回答]
+
+- id: ab-028
+  category: Abstention
+  setup_memories:
+    - {type: fact, brief: 项目 D 预算 80 万, content: 项目 D 预算 80 万,
+       entities: [], tags: [], event_time: "2026-03-01T10:00:00Z"}
+  query: 项目 D 的代码仓库地址是什么
+  ground_truth: 不知道
+  acceptable_answers: [没有代码仓库记录, 只知道预算]
+
+- id: ab-029
+  category: Abstention
+  setup_memories: []
+  query: 郑阳的个人年度目标是什么
+  ground_truth: 不知道
+  acceptable_answers: [没有相关记录, 无法回答]
+
+- id: ab-030
+  category: Abstention
+  setup_memories:
+    - {type: fact, brief: 孙芳负责招聘, content: 孙芳负责技术岗招聘,
+       entities: [{type: friend, id: sf, name: 孙芳}], tags: [], event_time: "2026-02-01T10:00:00Z"}
+  query: 本季度已经招聘了几个人
+  ground_truth: 不知道
+  acceptable_answers: [没有已招聘人数记录, 只知道她负责招聘]
+
+- id: ab-031
+  category: Abstention
+  setup_memories: []
+  query: 昨天服务器出现了什么故障
+  ground_truth: 不知道
+  acceptable_answers: [没有故障记录, 无法回答]
+
+- id: ab-032
+  category: Abstention
+  setup_memories:
+    - {type: fact, brief: 赵丽是技术总监, content: 赵丽是技术总监,
+       entities: [{type: friend, id: zl, name: 赵丽}], tags: [], event_time: "2026-04-01T10:00:00Z"}
+  query: 赵丽上个季度的绩效奖金是多少
+  ground_truth: 不知道
+  acceptable_answers: [没有绩效奖金记录, 只知道她的职位]

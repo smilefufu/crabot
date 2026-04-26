@@ -58,14 +58,13 @@ const DASHSCOPE_MODELS: ModelInfo[] = [
  * 请求走 Responses API：https://chatgpt.com/backend-api/codex/responses
  * 参考：openai/codex 源码及 openclaw 的 openai-codex-provider 实现
  */
+// 仅包含 supported_in_api=true 的模型；spark 这类 client-only 模型不能走 Responses API
 const CHATGPT_SUBSCRIPTION_MODELS: ModelInfo[] = [
   { model_id: 'gpt-5.4', display_name: 'GPT-5.4', type: 'llm', supports_vision: true, context_window: 272000 },
-  { model_id: 'gpt-5.4-codex', display_name: 'GPT-5.4 Codex (alias)', type: 'llm', supports_vision: true, context_window: 272000 },
-  { model_id: 'gpt-5.4-pro', display_name: 'GPT-5.4 Pro', type: 'llm', supports_vision: true, context_window: 272000 },
+  { model_id: 'gpt-5.5', display_name: 'GPT-5.5', type: 'llm', supports_vision: true, context_window: 272000 },
   { model_id: 'gpt-5.4-mini', display_name: 'GPT-5.4 Mini', type: 'llm', supports_vision: true, context_window: 272000 },
   { model_id: 'gpt-5.3-codex', display_name: 'GPT-5.3 Codex', type: 'llm', supports_vision: true, context_window: 272000 },
-  { model_id: 'gpt-5.3-codex-spark', display_name: 'GPT-5.3 Codex Spark', type: 'llm', supports_vision: false, context_window: 128000 },
-  { model_id: 'gpt-5.2-codex', display_name: 'GPT-5.2 Codex', type: 'llm', supports_vision: true, context_window: 272000 },
+  { model_id: 'gpt-5.2', display_name: 'GPT-5.2', type: 'llm', supports_vision: true, context_window: 272000 },
 ]
 
 /**

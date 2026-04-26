@@ -40,7 +40,46 @@ const FRONT_RULES_SHARED = `## 决策判断标准
 
 - 用户要求"记住 X" → \`store_memory\`（普通条目），tags 覆盖关键维度，reply 确认
 - 用户要求"以后本场景遵守 X" / 声明身份规则 → 这类属 Worker 职责，用 create_task 交给 Worker（Worker 会用 \`set_scene_anchor\` 写入当前场景全文）
-- 用户询问"你还记得 Y 吗" → 先看上下文已加载的 **场景画像 / 短期记忆 / 长期记忆**，命中则直接 reply；未命中再搜索`
+- 用户询问"你还记得 Y 吗" → 先看上下文已加载的 **场景画像 / 短期记忆 / 长期记忆**，命中则直接 reply；未命中再搜索
+
+## user_attitude 字段（决策与反馈是两件正交的事）
+
+reply / create_task / supplement_task 工具上有一个可选字段 \`user_attitude\`，
+用于把"用户对之前任务的态度"反馈给长期记忆系统。这与你选哪个决策工具是**两件独立的事**：
+
+- 决策回答："这条消息我怎么处理？" → 选工具
+- 反馈回答："这条消息顺便表达了对之前任务的什么态度？" → 填或不填字段
+
+一条消息可以是：
+- 只是决策不带反馈："再帮我做 Y" → create_task，不填
+- 只是反馈不带新决策："谢谢" → reply，填 pass
+- 决策+反馈复合："好的，接下来做 X" → create_task，填 pass
+                "上次那个不对，重新做一下" → create_task，填 fail
+
+### 4 档判定标准（情绪用于判别，不用于升级）
+
+绝大多数明确反馈使用 \`pass\` 或 \`fail\`。情绪线索的作用是让你判断更准
+（例如识破"算了，就这样吧"这种放弃式接受其实是 fail），而不是强行升级到 strong_。
+
+- **pass**：明确肯定。"好的/收到/嗯嗯/谢谢"；"好的，接下来做 X"；用户立刻进入新话题且无保留
+- **fail**：明确否定或情绪线索识破的隐性否定：
+  - "不对/错了/重做/不是这个"
+  - "算了，就这样吧"、"唉，那就这样"——明显放弃式接受，原本期望未被满足
+  - 用户从详细对话退化为单字应答（明显失望）
+  - 用户反复追问同一细节 ≥3 次（隐含质疑）
+- **strong_pass / strong_fail**：仅在两个条件【同时满足】才用：
+  1. 用户情绪明显激烈（叹号、连续称赞 / 明显愤怒不耐烦）
+  2. 你十分确信判断方向正确
+  典型例子：strong_pass="太棒了！！" "完美！正是我要的！"；strong_fail="这完全不对！！" "我说过多少次了！"
+
+### 绝不填的情形
+
+- 你只是"感觉"用户不开心，但说不出具体证据
+- 用户明显切到全新话题、跟之前任务无关
+- 你不确定上一个 task 是哪个
+- supplement_task 场景下，你判断这是补充（不是纠偏）
+
+宁可不填，不要乱填。错误反馈污染长期记忆。`
 
 // ── 共享工具描述 ──
 const TOOL_DESC_COMMON = `- **reply(text)** — 直接回复。text 是发给用户的最终完整回答，调用后对话结束。
@@ -183,14 +222,23 @@ export class PromptManager {
     parts.push(isGroup ? FRONT_RULES_GROUP : FRONT_RULES_PRIVATE)
 
     // Inject worker capability awareness so Front can make informed triage decisions.
+    //
+    // 注意：此处**只列 category 名**，严禁展开具体 tool 名（如 screenshot / mouse_click / git_status）。
+    // 某些模型（如 MiniMax-M2.5）看到具体 tool 名会被诱导直接吐 `<invoke name="X">…</invoke>` 形式的原生
+    // XML 工具调用文本，而 front 层根本没注册这些工具，这段 XML 最终会被原样塞进 reply 文本发给用户，
+    // 并污染会话历史导致后续继续模仿。保持 category 级别的抽象即可满足 triage 判断需求。
     if (workerCapabilities && workerCapabilities.length > 0) {
-      const sections = workerCapabilities
-        .map(({ category, tools }) => `- **${category}**: ${tools.join(', ')}`)
-        .join('\n')
+      const categories = workerCapabilities.map(({ category }) => `- ${category}`).join('\n')
       parts.push(
         `## 任务执行能力范围\n\n` +
-        `除了上述工具外，你还能处理以下类型的请求：\n\n${sections}\n\n` +
-        `以上通过 create_task 工具委派执行。对用户而言都是你自己的能力，不要提及"任务"、"执行智能体"等内部概念。`
+        `除了你的决策工具外，Worker（异步任务执行方）还能处理以下类别的请求：\n\n${categories}\n\n` +
+        `这些类别的请求必须通过 create_task 工具委派给 Worker。对用户而言都是你自己的能力，不要提及"任务"、"执行智能体"等内部概念。\n\n` +
+        `## 工具调用硬性规则（禁止违反）\n\n` +
+        `1. 你唯一能调用的工具是你的决策工具：reply / create_task / supplement_task / stay_silent。\n` +
+        `   除此之外的任何名字（如 computer、screenshot、git、bash 等）都**不是**你可以直接调用的工具。\n` +
+        `2. 严禁在 reply 的 text 参数中输出 \`<invoke name="...">\`、\`<parameter name="...">\`、\`<tool_call>\` 或任何\n` +
+        `   形似"工具调用"的 XML/JSON 片段——这类文本会被原样发给用户，既不会触发工具执行，也会污染会话历史。\n` +
+        `3. 如果用户请求匹配上述能力类别，必须使用 create_task 委派，禁止在 reply 文本里"演示"或"模拟"工具调用。`
       )
     }
 

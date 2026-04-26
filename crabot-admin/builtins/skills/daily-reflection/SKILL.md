@@ -69,14 +69,16 @@ delegate_task({
    - 反面模式：哪些做法应该避免
    - 最佳路径：如果重来，最优执行路径是什么
 
-4. 返回结构化分析结果（不要调用 store_memory，由 main worker 统一处理）：
+4. 返回结构化分析结果（不要调用 quick_capture，由 main worker 统一处理）：
    - summary: 一句话总结
-   - experiences: 数组，每条包含 { abstract, overview, content, importance, tags }
-     - abstract（L0）：面向召回写，包含关键场景词和结论
-     - overview（L1）：结构化描述 — 场景、问题、方案、反面模式、适用范围
-     - content（L2）：完整分析 — 背景、执行过程、踩坑细节、解决过程、总结
-     - importance: 7=一般经验, 8=重要发现, 9=影响架构的经验
+   - experiences: 数组，每条包含 { brief, body, importance_factors, tags, scenario, outcome }
+     - brief：一行（≤80 字）面向召回的结论，包含关键场景词
+     - body：完整分析的 markdown — 背景、执行过程、踩坑细节、解决过程、总结
+     - importance_factors: { proximity: 0-1, surprisal: 0-1, entity_priority: 0-1, unambiguity: 0-1 }
+       - 一般经验全 0.5；重要发现 surprisal=0.7+；影响架构的经验 surprisal=0.9
      - tags: ['task_experience', ...场景标签]
+     - scenario: lesson 触发场景描述
+     - outcome: success | failure
    - 如无有价值的经验，返回空 experiences 数组"
 })
 ```
@@ -88,19 +90,22 @@ delegate_task({
 收集所有 sub-agent 返回的 experiences，综合去重：
 
 1. 合并跨任务的重复经验（不同任务得出同一结论的，合并为一条更完整的）
-2. 对去重后的每条经验，调用一次 `mcp__crab-memory__store_memory`：
+2. 对去重后的每条经验，调用一次 `mcp__crab-memory__quick_capture`（写入 inbox/lesson，由后续 quick-reflection / 用户审核晋升 confirmed）：
 
 ```
-mcp__crab-memory__store_memory({
-  abstract: "<L0 — 面向召回的摘要>",
-  overview: "<L1 — 结构化描述>",
-  content: "<L2 — 完整分析>",
-  importance: <7-9>,
-  tags: ["task_experience", "...场景标签"]
+mcp__crab-memory__quick_capture({
+  type: "lesson",
+  brief: "<一行（≤80 字）面向召回的结论>",
+  content: "<完整 markdown 分析>",
+  source_ref: { type: "reflection", task_id: "<task_id>" },
+  entities: [],
+  tags: ["task_experience", "...场景标签"],
+  importance_factors: { proximity: 0.6, surprisal: 0.7, entity_priority: 0.5, unambiguity: 0.6 },
+  lesson_meta: { scenario: "<场景描述>", outcome: "success" },
 })
 ```
 
-**L0 写法示例**：
+**brief 写法示例**：
 - 好：`"macOS 终端输入中文时键盘模拟不可行，必须使用剪贴板(pbcopy+Cmd+V)"`
 - 差：`"在飞书操作时遇到了中文输入问题并解决了"`
 
@@ -110,7 +115,7 @@ mcp__crab-memory__store_memory({
 - 反思时间范围
 - 分析的任务数量
 - 提炼的经验数量
-- 每条经验的 L0 摘要
+- 每条经验的 brief
 
 如果本次反思有 importance >= 8 的发现：
 1. `mcp__crab-messaging__lookup_friend({ name: "master" })` 获取 master 信息
@@ -125,11 +130,75 @@ mcp__crab-memory__store_memory({
 
 1. **列出活跃场景**：从最近 24h short-term 事件中抽取出现过的 `friend_id` 与 `{channel_id, session_id}` 对。
 2. **逐场景归纳**：
-   - `mcp__crab-memory__get_scene_profile({ scene })` 取现状
+   - `mcp__crab-memory__get_scene_profile({ scene })` 取现状（含 label / content / abstract / overview）
    - 扫描该场景相关的 long-term 条目与 trace
-   - 识别"核心稳定知识"：反复出现但未被画像覆盖的规则 / 用户反复纠正的偏好 / 与画像已有 section 矛盾的新证据
-   - 有新归纳 → `mcp__crab-memory__patch_scene_profile({ scene, section, merge: "replace_topic" })`，并在 `source_memory_ids` 记录来源
-3. **清理过期**：画像中某 section 被新证据推翻 → `patch_scene_profile` 替换 / 删除；section 过期且无替代 → 在 `label` 备注或整条 `delete_scene_profile`。
-4. **黑名单合规检查**：扫描近 24h 新增 long-term 条目，命中黑名单（一次性快照、时效新闻、细碎 tip、已解决 bug 细节、中间猜测、偶尔一次表述）的 → `delete_memory` 回收。
+   - 识别"核心稳定知识"：反复出现但未被画像覆盖的规则 / 用户反复纠正的偏好 / 与画像已有内容矛盾的新证据
+   - LLM 综合现状 + 新证据生成新版 content（保留仍成立的旧规则；用新证据替换被推翻的旧规则；追加新归纳；保持 markdown 章节结构）
+   - `mcp__crab-memory__upsert_scene_profile({ scene, label, content: <新版正文>, source_memory_ids: [...] })` 覆盖；abstract / overview 不传时后端自动用 LLM 重新生成
+3. **清理无效**：整条画像被新证据完全推翻且无替代 → `mcp__crab-memory__delete_scene_profile({ scene })`。
+4. **黑名单合规检查**：扫描近 24h 新增 long-term 条目，命中黑名单（一次性快照、时效新闻、细碎 tip、已解决 bug 细节、中间猜测、偶尔一次表述）的 → `mcp__crab-memory__delete_memory` 回收。
 
 **不新增反思频次**：第七步与前六步同一 run 内执行。
+
+### 第八步：PE-Gated 冲突检查
+
+对今日新写入的 confirmed/inbox fact，每条做：
+
+1. `mcp__crab-memory__search_long_term({ query: <brief>, filters: { type: "fact" }, k: 3 })`
+2. LLM 比对：与 top-3 是否冲突 / 修正 / 完全一致
+3. 完全一致 → `update_long_term({ id: <旧条 id>, patch: { content_confidence_increment: 1 } })`
+4. 冲突 → `update_long_term({ id: <旧条 id>, patch: { invalidated_by: <新条 id> } })`
+5. 完全新颖 → 不动
+
+### 第九步：Case → Rule 涌现
+
+对今日新增的 case 类 lesson，按 scenario 聚类，**自动晋升进观察期**（spec §6.4 / v2-ui §12.1：无人工 confirm 步骤）：
+
+1. `mcp__crab-memory__search_long_term({ query: <scenario>, filters: { type: "lesson" }, k: 10 })` 拉同 scenario 候选
+2. 筛选 outcome 一致的 case（`maturity == "case"` 且 `lesson_meta.outcome` 一致）
+3. **凑不齐 3 条同类**：跳过本 scenario，留待下次反思继续累积
+4. **凑齐 ≥3 条**：LLM 抽象 rule 文本（包含 scenario / 适用条件 / 推荐做法 / 反例），调 `promote_to_rule` 直接晋升：
+
+```
+mcp__crab-memory__promote_to_rule({
+  source_cases: [<id1>, <id2>, <id3>, ...],   // ≥3 条来源 case（spec §6.4 门槛）
+  brief: <一行召回标题，含场景关键词，≤80 字符>,
+  content: <完整 markdown：scenario / 适用条件 / 推荐做法 / 反例>,
+  scenario: "<场景描述>",
+  source_trust: 4,
+  content_confidence: 4,
+  window_days: 7
+})
+```
+
+返回 `{ id, status: "ok" }`。该 rule 直接进入 `confirmed/lesson/`（maturity=rule），并开始 7 天观察期：
+
+- 期间用户对引用此 rule 的任务表态（pass/fail）会累加到 `observation_pass_count` / `observation_fail_count`
+- 凌晨 04:00 的 `memory-maintenance` schedule 跑 `observation_check`：净值 > 0 → 观察期通过；< 0 → 回滚到 inbox；= 0 → 延期再观察一轮
+- Admin UI 「长期记忆 → 观察期」 tab 可事后人工标记通过 / 延长 / 删除
+
+> 不再走 inbox + 任何 proposal tag 的旧人工审核链路（v2-ui §12.1 已删除人工审核 RPC）。
+
+### 第十步：触发机械维护
+
+`mcp__crab-memory__run_maintenance({ scope: "all" })`
+
+> 这一步是兜底；正常路径下凌晨 04:00 的 memory-maintenance schedule 已经独立跑一次。
+> Daily reflection 在 03:00 跑完，这里再跑一次保证当晚反思的状态变化在隔日凌晨之前结算。
+
+### 第十一步：Evolution Mode 自评
+
+读取近期信号：
+- `mcp__crab-memory__get_stats()` → 近期 hit rate / use count 比例
+- 用户撤销 / supplement_task 频率（trace 统计）
+
+判断标准：
+
+| 信号 | 推荐 mode |
+|---|---|
+| 错误率 < 5%、use rate 上升 | innovate |
+| 错误率 5%~15%、稳定 | balanced（默认） |
+| 错误率 15%~25% 或大量 case 待整理 | harden |
+| 错误率 > 25% 或用户大量 reject | repair-only |
+
+`mcp__crab-memory__set_evolution_mode({ mode, reason })`

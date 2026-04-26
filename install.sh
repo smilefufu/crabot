@@ -114,13 +114,14 @@ main() {
     info "Installing npm dependencies..."
     npm install
     info "Building all modules..."
-    npm run build 2>/dev/null || {
-      # 尝试各模块单独构建
-      for dir in crabot-shared crabot-admin crabot-core crabot-agent; do
+    # shared 必须先编译（其他模块依赖它）
+    (cd crabot-shared && npm install && npm run build)
+    for dir in crabot-core crabot-admin crabot-agent crabot-channel-host crabot-channel-wechat crabot-channel-telegram crabot-mcp-tools; do
+      if [ -d "$dir" ]; then
         (cd "$dir" && npm install && npm run build)
-      done
-      npm run build:cli
-    }
+      fi
+    done
+    npm run build:cli
     info "Setting up Python environment..."
     (cd crabot-memory && uv sync)
     info "Source install complete."
@@ -158,6 +159,8 @@ main() {
     # 解压
     info "Extracting to $INSTALL_DIR..."
     tar -xzf "/tmp/$filename" -C "$INSTALL_DIR" --strip-components=1
+    # 写 VERSION 文件供 crabot upgrade 检测当前版本
+    echo "$version" > "$INSTALL_DIR/VERSION"
     rm -f "/tmp/$filename" "/tmp/${filename}.sha256"
 
     # Python 依赖

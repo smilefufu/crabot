@@ -112,6 +112,7 @@ const CORE_MODULES: Array<ModuleDefinition & Record<string, unknown>> = [
     protocol_version: '0.1.0',
     entry: 'uv run python -m src.main',
     cwd: MEMORY_DIR,
+    data_dir: path.join(DATA_DIR, 'memory'),
     auto_start: fs.existsSync(path.join(MEMORY_DIR, 'src', 'main.py')),
     start_priority: 15,  // 在 admin(10) 之后启动，确保配置已就绪
     env: {

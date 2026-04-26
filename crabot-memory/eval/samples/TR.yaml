@@ -1,0 +1,278 @@
+- id: tr-001
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 上周开了周会, content: 上周二开了周会，讨论了 X,
+       entities: [], tags: [], event_time: "2026-04-15T15:00:00Z"}
+  query: 上周开会讨论了什么
+  ground_truth: X
+  acceptable_answers: [讨论了 X]
+
+- id: tr-002
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 三天前发邮件, content: 三天前给张三发了项目邮件,
+       entities: [{type: friend, id: z3, name: 张三}], tags: [], event_time: "2026-04-20T10:00:00Z"}
+  query: 三天前发了什么邮件
+  ground_truth: 项目邮件给张三
+  acceptable_answers: [给张三的项目邮件]
+
+- id: tr-003
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 昨天体检, content: 昨天去医院体检了,
+       entities: [], tags: [], event_time: "2026-04-22T08:00:00Z"}
+  query: 昨天去哪了
+  ground_truth: 医院体检
+  acceptable_answers: [医院, 体检]
+
+- id: tr-004
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 项目启动, content: 项目 A 是 2026-01-15 启动,
+       entities: [], tags: [], event_time: "2026-01-15T10:00:00Z"}
+  query: 项目 A 几月启动的
+  ground_truth: 2026 年 1 月
+  acceptable_answers: [1 月, January, 2026-01]
+
+- id: tr-005
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 上月去广州, content: 上月去广州出差,
+       entities: [], tags: [], event_time: "2026-03-10T10:00:00Z"}
+  query: 上月去过哪里
+  ground_truth: 广州
+  acceptable_answers: [广州出差]
+
+- id: tr-006
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 今天开产品会, content: 今天上午 10 点开了产品评审会,
+       entities: [], tags: [], event_time: "2026-04-23T10:00:00Z"}
+  query: 今天开了什么会
+  ground_truth: 产品评审会
+  acceptable_answers: [产品评审会, 今天产品评审]
+
+- id: tr-007
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 前天拜访客户, content: 前天去腾讯拜访了客户张经理,
+       entities: [{type: organization, id: zm, name: 张经理}], tags: [], event_time: "2026-04-21T14:00:00Z"}
+  query: 前天去哪里拜访了谁
+  ground_truth: 腾讯 / 张经理
+  acceptable_answers: [腾讯的张经理, 去腾讯拜访张经理]
+
+- id: tr-008
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 一周前提交代码, content: 一周前提交了支付模块代码审查,
+       entities: [], tags: [], event_time: "2026-04-16T10:00:00Z"}
+  query: 一周前提交了什么代码
+  ground_truth: 支付模块代码审查
+  acceptable_answers: [支付模块, 支付模块代码]
+
+- id: tr-009
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 半个月前签合同, content: 半个月前与阿里巴巴签了合作协议,
+       entities: [], tags: [], event_time: "2026-04-08T10:00:00Z"}
+  query: 半个月前签了什么合同
+  ground_truth: 与阿里巴巴的合作协议
+  acceptable_answers: [阿里巴巴合作协议, 合作协议]
+
+- id: tr-010
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 大前天参加培训, content: 大前天参加了 Python 机器学习培训,
+       entities: [], tags: [], event_time: "2026-04-20T09:00:00Z"}
+  query: 大前天参加了什么培训
+  ground_truth: Python 机器学习培训
+  acceptable_answers: [Python机器学习, 机器学习培训]
+
+- id: tr-011
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 上周三上线功能, content: 上周三把用户登录模块上线了,
+       entities: [], tags: [], event_time: "2026-04-15T20:00:00Z"}
+  query: 上周上线了什么功能
+  ground_truth: 用户登录模块
+  acceptable_answers: [登录模块, 用户登录]
+
+- id: tr-012
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 两周前招聘面试, content: 两周前面试了 3 位后端候选人,
+       entities: [], tags: [], event_time: "2026-04-09T14:00:00Z"}
+  query: 两周前面试了几个人
+  ground_truth: 3 位
+  acceptable_answers: [3位, 3人, 三位]
+
+- id: tr-013
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 本周一做了 code review, content: 本周一和赵丽做了前端代码 code review,
+       entities: [{type: friend, id: zl, name: 赵丽}], tags: [], event_time: "2026-04-20T15:00:00Z"}
+  query: 本周一和谁做了 code review
+  ground_truth: 赵丽
+  acceptable_answers: [赵丽, 和赵丽]
+
+- id: tr-014
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 上个月底发了奖金, content: 上个月底发了季度奖金,
+       entities: [], tags: [], event_time: "2026-03-31T10:00:00Z"}
+  query: 上个月底发了什么
+  ground_truth: 季度奖金
+  acceptable_answers: [季度奖金, 奖金]
+
+- id: tr-015
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 三个月前换了 Mac, content: 三个月前公司给配了新 MacBook Pro,
+       entities: [], tags: [], event_time: "2026-01-23T10:00:00Z"}
+  query: 三个月前公司配了什么设备
+  ground_truth: MacBook Pro
+  acceptable_answers: [MacBook Pro, 新MacBook]
+
+- id: tr-016
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 上周五发布会, content: 上周五参加了产品发布会,
+       entities: [], tags: [], event_time: "2026-04-17T14:00:00Z"}
+  query: 上周五参加了什么活动
+  ground_truth: 产品发布会
+  acceptable_answers: [产品发布会, 发布会]
+
+- id: tr-017
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 今天下午与客户电话, content: 今天下午 3 点和李总通了电话,
+       entities: [{type: organization, id: lt, name: 李总}], tags: [], event_time: "2026-04-23T15:00:00Z"}
+  query: 今天和谁通了电话
+  ground_truth: 李总
+  acceptable_answers: [李总, 和李总打电话]
+
+- id: tr-018
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 昨天提交测试报告, content: 昨天提交了第二阶段测试报告,
+       entities: [], tags: [], event_time: "2026-04-22T17:00:00Z"}
+  query: 昨天提交了什么文档
+  ground_truth: 第二阶段测试报告
+  acceptable_answers: [测试报告, 第二阶段测试报告]
+
+- id: tr-019
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 两天前修了 bug, content: 两天前修复了支付超时 bug,
+       entities: [], tags: [], event_time: "2026-04-21T11:00:00Z"}
+  query: 两天前修复了什么 bug
+  ground_truth: 支付超时 bug
+  acceptable_answers: [支付超时, 支付超时bug]
+
+- id: tr-020
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 上月初来了新同事, content: 上月初林海加入了后端团队,
+       entities: [{type: friend, id: lh, name: 林海}], tags: [], event_time: "2026-03-03T09:00:00Z"}
+  query: 上月初谁加入了后端团队
+  ground_truth: 林海
+  acceptable_answers: [林海, 林海加入]
+
+- id: tr-021
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 昨天晚上紧急上线, content: 昨天晚上 11 点紧急上线了数据迁移脚本,
+       entities: [], tags: [], event_time: "2026-04-22T23:00:00Z"}
+  query: 昨晚上线了什么
+  ground_truth: 数据迁移脚本
+  acceptable_answers: [数据迁移脚本, 迁移脚本]
+
+- id: tr-022
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 上周二下午培训, content: 上周二下午开了安全意识培训,
+       entities: [], tags: [], event_time: "2026-04-14T14:00:00Z"}
+  query: 上周二下午开了什么培训
+  ground_truth: 安全意识培训
+  acceptable_answers: [安全意识培训, 安全培训]
+
+- id: tr-023
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 本月初立项, content: 本月初 4 月 2 日项目 J 正式立项,
+       entities: [], tags: [], event_time: "2026-04-02T10:00:00Z"}
+  query: 本月初立项的项目是哪个
+  ground_truth: 项目 J
+  acceptable_answers: [项目J, J项目]
+
+- id: tr-024
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 四天前出差北京, content: 四天前出差去北京参加行业峰会,
+       entities: [], tags: [], event_time: "2026-04-19T08:00:00Z"}
+  query: 四天前去哪里出差了
+  ground_truth: 北京
+  acceptable_answers: [北京, 出差北京]
+
+- id: tr-025
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 上周四更新了接口文档, content: 上周四更新了支付接口 API 文档,
+       entities: [], tags: [], event_time: "2026-04-16T16:00:00Z"}
+  query: 上周四更新了什么文档
+  ground_truth: 支付接口 API 文档
+  acceptable_answers: [支付接口文档, API文档]
+
+- id: tr-026
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 昨天收到 offer, content: 昨天收到了候选人王飞的录用接受确认,
+       entities: [{type: friend, id: wf, name: 王飞}], tags: [], event_time: "2026-04-22T14:00:00Z"}
+  query: 昨天收到了谁的 offer 确认
+  ground_truth: 王飞
+  acceptable_answers: [王飞, 候选人王飞]
+
+- id: tr-027
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 上周末团建, content: 上周末公司团建去了南京,
+       entities: [], tags: [], event_time: "2026-04-19T09:00:00Z"}
+  query: 上周末公司团建去了哪里
+  ground_truth: 南京
+  acceptable_answers: [南京, 去南京团建]
+
+- id: tr-028
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 今早收到需求变更, content: 今早收到了产品的需求变更通知,
+       entities: [], tags: [], event_time: "2026-04-23T09:30:00Z"}
+  query: 今早收到了什么通知
+  ground_truth: 产品的需求变更通知
+  acceptable_answers: [需求变更, 产品需求变更]
+
+- id: tr-029
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 本季度初定了 OKR, content: 本季度初 4 月 1 日确认了团队 OKR,
+       entities: [], tags: [], event_time: "2026-04-01T10:00:00Z"}
+  query: 本季度初做了什么
+  ground_truth: 确认了团队 OKR
+  acceptable_answers: [确认OKR, 团队OKR]
+
+- id: tr-030
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 上周一代码冻结, content: 上周一宣布了版本代码冻结,
+       entities: [], tags: [], event_time: "2026-04-13T10:00:00Z"}
+  query: 上周一宣布了什么
+  ground_truth: 版本代码冻结
+  acceptable_answers: [代码冻结, 版本冻结]
+
+- id: tr-031
+  category: TR
+  setup_memories:
+    - {type: fact, brief: 前天下午系统发布, content: 前天下午 4 点 v2.3 版本成功发布,
+       entities: [], tags: [], event_time: "2026-04-21T16:00:00Z"}
+  query: 前天发布了哪个版本
+  ground_truth: v2.3
+  acceptable_answers: [v2.3, 2.3版本]

@@ -64,15 +64,15 @@ crabot password    # 修改管理员密码
 
 ### 路径 B：源码运行（改代码 / 贡献）
 
-从源码 clone 后用 `onboard` 初始化，之后所有命令都用 `./crabot`（**不会创建全局命令**）。
+从源码 clone 后用 `onboard` 初始化，之后所有命令都用项目根目录下的 `crabot`（**不会创建全局命令**）。
 
 ```bash
 git clone https://github.com/smilefufu/crabot.git
 cd crabot
-./crabot onboard     # 检测工具 → 装 nvm/uv → 生成 .env → 装依赖 → 验证
-./crabot start       # 构建并启动
-./crabot stop
-./crabot check
+crabot onboard     # 检测工具 → 装 nvm/uv → 生成 .env → 装依赖 → 验证
+crabot start       # 构建并启动
+crabot stop
+crabot check
 ```
 
 开发模式（前端 Vite HMR，热更新）：
@@ -100,7 +100,7 @@ cd crabot
 同一台机器可运行多个 Crabot 实例，通过 `CRABOT_PORT_OFFSET` 隔离端口和数据目录：
 
 ```bash
-CRABOT_PORT_OFFSET=100 ./crabot start   # 所有端口 +100，数据目录变为 data-100/
+CRABOT_PORT_OFFSET=100 crabot start   # 所有端口 +100，数据目录变为 data-100/
 ```
 
 ## CLI
@@ -121,13 +121,32 @@ crabot permission list        # 查看权限模板
 crabot provider list --json
 ```
 
-> 源码路径（B）下把 `crabot` 替换为 `./crabot`。完整命令列表：`crabot --help`。
+> 源码路径（B）下的 `crabot` 是项目根目录的脚本（不在 PATH），建议 `cd` 进项目后使用。完整命令列表：`crabot --help`。
+
+## 升级
+
+```bash
+crabot stop
+
+# Release 模式
+crabot upgrade           # 检测最新 tag → 下载替换 → 数据迁移
+
+# 源码模式
+git pull                 # 拿新代码
+crabot upgrade           # 重装依赖 → 构建 → 数据迁移
+
+crabot start
+```
+
+> **注意：** 升级前会自动备份 `data/`（release 模式备份整个安装目录）。
+> 升级失败时 backup 完整保留，按 stderr 指引手工恢复后再次执行 `crabot upgrade`。
+> 模块如果数据 schema 与代码不匹配，Module Manager 会拒绝启动该模块并提示。
 
 ## 常见问题
 
 **提示 `uv 未安装`、或找不到 `crabot` 命令？**
 
-安装脚本把 `~/.local/bin` 写进了 shell profile（`~/.bashrc` / `~/.zshrc`）。新开的终端自动生效；`./crabot <cmd>` 已内置 PATH 兜底不受影响。只有在**当前终端直接调用 `uv` 或全局 `crabot`** 时需要先执行：
+安装脚本把 `~/.local/bin` 写进了 shell profile（`~/.bashrc` / `~/.zshrc`）。新开的终端自动生效；源码模式下的根目录 `crabot` 脚本已内置 PATH 兜底不受影响。只有在**当前终端直接调用 `uv` 或全局 `crabot`** 时需要先执行：
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"

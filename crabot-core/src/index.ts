@@ -658,6 +658,36 @@ export class ModuleManager {
       throw new Error(`Module already running: ${moduleId}`)
     }
 
+    // schema 检测（仅当模块声明了 data_dir）
+    if (runtime.data_dir) {
+      const { checkSchema } = await import('./schema-check.js')
+      const result = checkSchema({ moduleDir: runtime.cwd ?? '.', dataDir: runtime.data_dir })
+      if (result.kind === 'block') {
+        runtime.status = 'schema_mismatch'
+        runtime.schema_mismatch = {
+          code_version: result.codeVersion,
+          data_version: result.dataVersion,
+        }
+        console.error('')
+        console.error(`[ModuleManager] FATAL: ${moduleId} schema mismatch`)
+        console.error(`  Code expects: ${result.codeVersion}`)
+        console.error(`  Data version: ${result.dataVersion ?? '(none — data exists but unversioned)'}`)
+        console.error('')
+        console.error('  This module will not start. To upgrade:')
+        console.error('    crabot stop')
+        console.error('    crabot upgrade')
+        console.error('    crabot start')
+        console.error('')
+        return
+      }
+      if (result.kind === 'allow_first_install') {
+        const { mkdirSync, writeFileSync } = await import('node:fs')
+        mkdirSync(runtime.data_dir, { recursive: true })
+        writeFileSync(`${runtime.data_dir}/SCHEMA_VERSION`, `${result.writeVersion}\n`)
+        console.log(`[ModuleManager] ${moduleId}: wrote initial SCHEMA_VERSION = ${result.writeVersion}`)
+      }
+    }
+
     runtime.status = 'starting'
 
     // 替换 entry 中的 {PORT} 模板
@@ -968,9 +998,27 @@ export class ModuleManager {
     lines.push('')
 
     for (const m of modules) {
-      const icon = m.status === 'running' ? '\u2705' : m.status === 'error' ? '\u274c' : '\u2b55'
+      const icon =
+        m.status === 'running' ? '\u2705'
+        : m.status === 'error' ? '\u274c'
+        : m.status === 'schema_mismatch' ? '\ud83d\udd27'
+        : '\u2b55'
       const portInfo = m.status === 'running' ? `:${m.port}` : ''
       lines.push(`  ${icon} ${m.module_id} (${m.module_type}) ${m.status}${portInfo}`)
+    }
+
+    const blocked = modules.filter((m) => m.status === 'schema_mismatch')
+    if (blocked.length > 0) {
+      lines.push('')
+      lines.push('  Modules blocked by schema mismatch (run "crabot upgrade"):')
+      for (const m of blocked) {
+        const sm = m.schema_mismatch
+        if (sm) {
+          lines.push(`    - ${m.module_id}: code=${sm.code_version}, data=${sm.data_version ?? 'none'}`)
+        } else {
+          lines.push(`    - ${m.module_id}`)
+        }
+      }
     }
 
     lines.push('')

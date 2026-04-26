@@ -1,0 +1,340 @@
+- id: ku-001
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 张三老微信, content: 张三的微信原为 wxid_old,
+       entities: [{type: friend, id: z3, name: 张三}], tags: [], event_time: "2026-01-01T10:00:00Z"}
+    - {type: fact, brief: 张三新微信, content: 张三换号了，新微信 wxid_new,
+       entities: [{type: friend, id: z3, name: 张三}], tags: [], event_time: "2026-04-01T10:00:00Z"}
+  query: 张三现在的微信号是什么
+  ground_truth: wxid_new
+  acceptable_answers: [wxid_new, 张三新号 wxid_new]
+
+- id: ku-002
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 项目 A 旧截止, content: 项目 A 原计划 2026-06-30,
+       entities: [], tags: [], event_time: "2026-04-10T10:00:00Z"}
+    - {type: fact, brief: 项目 A 延期, content: 项目 A 改到 2026-07-31 截止,
+       entities: [], tags: [], event_time: "2026-04-20T10:00:00Z"}
+  query: 项目 A 现在什么时候截止
+  ground_truth: "2026-07-31"
+  acceptable_answers: ["2026-07-31", 7月31日]
+
+- id: ku-003
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 公司旧地址, content: 公司原在徐汇,
+       entities: [], tags: [], event_time: "2026-01-01T10:00:00Z"}
+    - {type: fact, brief: 公司新地址, content: 公司搬到浦东了,
+       entities: [], tags: [], event_time: "2026-04-15T10:00:00Z"}
+  query: 公司现在在哪
+  ground_truth: 浦东
+  acceptable_answers: [浦东, 上海浦东]
+
+- id: ku-004
+  category: KU
+  setup_memories:
+    - {type: fact, brief: master 旧偏好, content: master 偏好 launcher.sh,
+       entities: [], tags: [], event_time: "2026-03-01T10:00:00Z"}
+    - {type: fact, brief: master 新偏好, content: master 改用 dev.sh 启动,
+       entities: [], tags: [], event_time: "2026-04-15T10:00:00Z"}
+  query: master 现在用哪个脚本启动
+  ground_truth: dev.sh
+  acceptable_answers: [./dev.sh, dev.sh]
+
+- id: ku-005
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 周会旧时间, content: 周会原在周二,
+       entities: [], tags: [], event_time: "2026-03-01T10:00:00Z"}
+    - {type: fact, brief: 周会新时间, content: 周会改到周三,
+       entities: [], tags: [], event_time: "2026-04-15T10:00:00Z"}
+  query: 周会现在哪天开
+  ground_truth: 周三
+  acceptable_answers: [星期三, Wednesday]
+
+- id: ku-006
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 李四旧电话, content: 李四之前的电话是 13800000000,
+       entities: [{type: friend, id: l4, name: 李四}], tags: [], event_time: "2026-01-15T10:00:00Z"}
+    - {type: fact, brief: 李四新电话, content: 李四换了新手机号 13911111111,
+       entities: [{type: friend, id: l4, name: 李四}], tags: [], event_time: "2026-04-10T10:00:00Z"}
+  query: 李四现在的手机号是什么
+  ground_truth: "13911111111"
+  acceptable_answers: ["13911111111"]
+
+- id: ku-007
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 项目 B 旧负责人, content: 项目 B 原来由张三负责,
+       entities: [{type: friend, id: z3, name: 张三}], tags: [], event_time: "2026-02-01T10:00:00Z"}
+    - {type: fact, brief: 项目 B 新负责人, content: 项目 B 现在由王小明接手负责,
+       entities: [{type: friend, id: wxm, name: 王小明}], tags: [], event_time: "2026-04-05T10:00:00Z"}
+  query: 项目 B 现在谁负责
+  ground_truth: 王小明
+  acceptable_answers: [王小明, 王小明负责]
+
+- id: ku-008
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 前端旧框架, content: 前端原来用 Vue 2,
+       entities: [], tags: [], event_time: "2026-01-10T10:00:00Z"}
+    - {type: fact, brief: 前端新框架, content: 前端升级到 Vue 3,
+       entities: [], tags: [], event_time: "2026-03-20T10:00:00Z"}
+  query: 前端现在用什么版本的 Vue
+  ground_truth: Vue 3
+  acceptable_answers: [Vue 3, Vue3]
+
+- id: ku-009
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 赵丽旧职位, content: 赵丽原来是高级工程师,
+       entities: [{type: friend, id: zl, name: 赵丽}], tags: [], event_time: "2026-01-01T10:00:00Z"}
+    - {type: fact, brief: 赵丽晋升, content: 赵丽升职为技术总监,
+       entities: [{type: friend, id: zl, name: 赵丽}], tags: [], event_time: "2026-04-01T10:00:00Z"}
+  query: 赵丽现在的职位是什么
+  ground_truth: 技术总监
+  acceptable_answers: [技术总监, CTO级别]
+
+- id: ku-010
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 数据库旧端口, content: 数据库原来用 3306 端口,
+       entities: [], tags: [], event_time: "2026-02-01T10:00:00Z"}
+    - {type: fact, brief: 数据库新端口, content: 数据库迁移后改用 5432 端口,
+       entities: [], tags: [], event_time: "2026-04-08T10:00:00Z"}
+  query: 数据库现在用哪个端口
+  ground_truth: "5432"
+  acceptable_answers: ["5432", 5432]
+
+- id: ku-011
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 陈伟旧邮箱, content: 陈伟原来邮箱 chenwei@old.com,
+       entities: [{type: friend, id: cw, name: 陈伟}], tags: [], event_time: "2026-01-20T10:00:00Z"}
+    - {type: fact, brief: 陈伟新邮箱, content: 陈伟更换了邮箱 chenwei@company.com,
+       entities: [{type: friend, id: cw, name: 陈伟}], tags: [], event_time: "2026-03-15T10:00:00Z"}
+  query: 陈伟现在的邮箱是什么
+  ground_truth: chenwei@company.com
+  acceptable_answers: [chenwei@company.com]
+
+- id: ku-012
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 项目 C 旧预算, content: 项目 C 原计划预算 30 万,
+       entities: [], tags: [], event_time: "2026-02-15T10:00:00Z"}
+    - {type: fact, brief: 项目 C 新预算, content: 项目 C 预算调整为 50 万,
+       entities: [], tags: [], event_time: "2026-04-12T10:00:00Z"}
+  query: 项目 C 现在预算是多少
+  ground_truth: 50 万
+  acceptable_answers: [50万, 500000]
+
+- id: ku-013
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 周杰旧微信, content: 周杰原来微信号是 wxid_old_zhoujie,
+       entities: [{type: friend, id: zj, name: 周杰}], tags: [], event_time: "2026-01-05T10:00:00Z"}
+    - {type: fact, brief: 周杰新微信, content: 周杰换了微信号 wxid_zhoujie123,
+       entities: [{type: friend, id: zj, name: 周杰}], tags: [], event_time: "2026-03-10T10:00:00Z"}
+  query: 周杰现在的微信号
+  ground_truth: wxid_zhoujie123
+  acceptable_answers: [wxid_zhoujie123]
+
+- id: ku-014
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 办公室旧 WiFi 密码, content: 办公室 WiFi 原来密码是 Office@2025,
+       entities: [], tags: [], event_time: "2025-12-01T10:00:00Z"}
+    - {type: fact, brief: 办公室新 WiFi 密码, content: 办公室 WiFi 密码更新为 Office@2026,
+       entities: [], tags: [], event_time: "2026-01-20T10:00:00Z"}
+  query: 办公室 WiFi 现在密码是什么
+  ground_truth: Office@2026
+  acceptable_answers: [Office@2026]
+
+- id: ku-015
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 日站会旧时间, content: 日站会原来每天早上 9:00,
+       entities: [], tags: [], event_time: "2026-02-01T10:00:00Z"}
+    - {type: fact, brief: 日站会新时间, content: 日站会改为每天早上 9:30,
+       entities: [], tags: [], event_time: "2026-04-10T10:00:00Z"}
+  query: 日站会现在几点开
+  ground_truth: 9:30
+  acceptable_answers: [9:30, 早上9点30, 09:30]
+
+- id: ku-016
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 吴佳旧职位, content: 吴佳原来是产品专员,
+       entities: [{type: friend, id: wj, name: 吴佳}], tags: [], event_time: "2026-01-01T10:00:00Z"}
+    - {type: fact, brief: 吴佳新职位, content: 吴佳升任产品经理,
+       entities: [{type: friend, id: wj, name: 吴佳}], tags: [], event_time: "2026-03-01T10:00:00Z"}
+  query: 吴佳现在什么职位
+  ground_truth: 产品经理
+  acceptable_answers: [产品经理, PM]
+
+- id: ku-017
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 测试环境旧域名, content: 测试环境旧域名是 staging.old.internal,
+       entities: [], tags: [], event_time: "2026-01-15T10:00:00Z"}
+    - {type: fact, brief: 测试环境新域名, content: 测试环境域名改为 test.crabot.internal,
+       entities: [], tags: [], event_time: "2026-04-02T10:00:00Z"}
+  query: 测试环境现在的域名是什么
+  ground_truth: test.crabot.internal
+  acceptable_answers: [test.crabot.internal]
+
+- id: ku-018
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 钱晓彤旧部门, content: 钱晓彤原来在行政部,
+       entities: [{type: friend, id: qxt, name: 钱晓彤}], tags: [], event_time: "2026-01-01T10:00:00Z"}
+    - {type: fact, brief: 钱晓彤转岗, content: 钱晓彤转岗到人力资源部,
+       entities: [{type: friend, id: qxt, name: 钱晓彤}], tags: [], event_time: "2026-03-10T10:00:00Z"}
+  query: 钱晓彤现在在哪个部门
+  ground_truth: 人力资源部
+  acceptable_answers: [人力资源部, HR部门]
+
+- id: ku-019
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 项目 E 旧截止, content: 项目 E 原定 2026-08-31 截止,
+       entities: [], tags: [], event_time: "2026-03-05T10:00:00Z"}
+    - {type: fact, brief: 项目 E 提前, content: 项目 E 提前到 2026-07-31 完成,
+       entities: [], tags: [], event_time: "2026-04-20T10:00:00Z"}
+  query: 项目 E 现在什么时候截止
+  ground_truth: "2026-07-31"
+  acceptable_answers: ["2026-07-31", 7月31日]
+
+- id: ku-020
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 林海旧工号, content: 林海原工号是 EMP-2030,
+       entities: [{type: friend, id: lh, name: 林海}], tags: [], event_time: "2026-01-05T10:00:00Z"}
+    - {type: fact, brief: 林海新工号, content: 林海重新分配工号为 EMP-2031,
+       entities: [{type: friend, id: lh, name: 林海}], tags: [], event_time: "2026-03-01T10:00:00Z"}
+  query: 林海现在的工号是什么
+  ground_truth: EMP-2031
+  acceptable_answers: [EMP-2031]
+
+- id: ku-021
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 服务器旧 IP, content: 测试服务器原来 IP 是 192.168.1.50,
+       entities: [], tags: [], event_time: "2026-02-01T10:00:00Z"}
+    - {type: fact, brief: 服务器新 IP, content: 测试服务器迁移后 IP 变为 192.168.1.100,
+       entities: [], tags: [], event_time: "2026-04-05T10:00:00Z"}
+  query: 测试服务器现在的 IP 地址是什么
+  ground_truth: 192.168.1.100
+  acceptable_answers: [192.168.1.100]
+
+- id: ku-022
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 马超旧微信, content: 马超原来微信号 wxid_old_machao,
+       entities: [{type: friend, id: mc, name: 马超}], tags: [], event_time: "2026-01-18T10:00:00Z"}
+    - {type: fact, brief: 马超新微信, content: 马超换了新微信号 wxid_machao007,
+       entities: [{type: friend, id: mc, name: 马超}], tags: [], event_time: "2026-03-18T10:00:00Z"}
+  query: 马超现在的微信号
+  ground_truth: wxid_machao007
+  acceptable_answers: [wxid_machao007]
+
+- id: ku-023
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 图片 bucket 旧名, content: 图片资源原存在 old-assets bucket,
+       entities: [], tags: [], event_time: "2026-01-10T10:00:00Z"}
+    - {type: fact, brief: 图片 bucket 新名, content: 图片资源迁移到 crabot-assets bucket,
+       entities: [], tags: [], event_time: "2026-04-08T10:00:00Z"}
+  query: 图片资源现在存在哪个 bucket
+  ground_truth: crabot-assets
+  acceptable_answers: [crabot-assets]
+
+- id: ku-024
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 杨帆旧公司, content: 杨帆之前在腾讯工作,
+       entities: [{type: friend, id: yf2, name: 杨帆}], tags: [], event_time: "2025-12-01T10:00:00Z"}
+    - {type: fact, brief: 杨帆新公司, content: 杨帆跳槽到字节跳动了,
+       entities: [{type: friend, id: yf2, name: 杨帆}], tags: [], event_time: "2026-01-25T10:00:00Z"}
+  query: 杨帆现在在哪家公司
+  ground_truth: 字节跳动
+  acceptable_answers: [字节跳动, ByteDance]
+
+- id: ku-025
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 孙芳旧电话, content: 孙芳原来电话是 13988887777,
+       entities: [{type: friend, id: sf, name: 孙芳}], tags: [], event_time: "2026-01-01T10:00:00Z"}
+    - {type: fact, brief: 孙芳新电话, content: 孙芳换了新电话 13666665555,
+       entities: [{type: friend, id: sf, name: 孙芳}], tags: [], event_time: "2026-04-18T10:00:00Z"}
+  query: 孙芳现在的手机号是什么
+  ground_truth: "13666665555"
+  acceptable_answers: ["13666665555"]
+
+- id: ku-026
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 郑阳旧城市, content: 郑阳原来在上海工作,
+       entities: [{type: friend, id: zy2, name: 郑阳}], tags: [], event_time: "2026-01-01T10:00:00Z"}
+    - {type: fact, brief: 郑阳新城市, content: 郑阳调到杭州驻场了,
+       entities: [{type: friend, id: zy2, name: 郑阳}], tags: [], event_time: "2026-03-01T10:00:00Z"}
+  query: 郑阳现在在哪个城市工作
+  ground_truth: 杭州
+  acceptable_answers: [杭州, 在杭州]
+
+- id: ku-027
+  category: KU
+  setup_memories:
+    - {type: fact, brief: API key 旧前缀, content: API key 原来前缀是 sk-staging,
+       entities: [], tags: [], event_time: "2026-02-01T10:00:00Z"}
+    - {type: fact, brief: API key 新前缀, content: API key 前缀更新为 sk-prod,
+       entities: [], tags: [], event_time: "2026-04-01T10:00:00Z"}
+  query: 现在 API key 的前缀是什么
+  ground_truth: sk-prod
+  acceptable_answers: [sk-prod]
+
+- id: ku-028
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 沈娜旧职称, content: 沈娜原来职称是中级工程师,
+       entities: [{type: friend, id: sn, name: 沈娜}], tags: [], event_time: "2026-01-01T10:00:00Z"}
+    - {type: fact, brief: 沈娜晋升, content: 沈娜晋升为高级工程师,
+       entities: [{type: friend, id: sn, name: 沈娜}], tags: [], event_time: "2026-03-15T10:00:00Z"}
+  query: 沈娜现在的职称是什么
+  ground_truth: 高级工程师
+  acceptable_answers: [高级工程师, Senior Engineer]
+
+- id: ku-029
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 项目 F 旧合同金额, content: 项目 F 原合同 150 万,
+       entities: [], tags: [], event_time: "2026-03-01T10:00:00Z"}
+    - {type: fact, brief: 项目 F 新合同金额, content: 项目 F 合同追加变为 200 万,
+       entities: [], tags: [], event_time: "2026-03-20T10:00:00Z"}
+  query: 项目 F 现在合同金额是多少
+  ground_truth: 200 万
+  acceptable_answers: [200万, 200万元]
+
+- id: ku-030
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 徐磊旧 wxid, content: 徐磊原来微信号 wxid_old_xulei,
+       entities: [{type: friend, id: xl, name: 徐磊}], tags: [], event_time: "2026-01-01T10:00:00Z"}
+    - {type: fact, brief: 徐磊新 wxid, content: 徐磊更换了新微信 wxid_xulei888,
+       entities: [{type: friend, id: xl, name: 徐磊}], tags: [], event_time: "2026-03-25T10:00:00Z"}
+  query: 徐磊现在的微信号是什么
+  ground_truth: wxid_xulei888
+  acceptable_answers: [wxid_xulei888]
+
+- id: ku-031
+  category: KU
+  setup_memories:
+    - {type: fact, brief: 冯宇旧城市, content: 冯宇以前在北京工作,
+       entities: [{type: friend, id: fy, name: 冯宇}], tags: [], event_time: "2025-10-01T10:00:00Z"}
+    - {type: fact, brief: 冯宇新城市, content: 冯宇搬到深圳了,
+       entities: [{type: friend, id: fy, name: 冯宇}], tags: [], event_time: "2026-04-01T10:00:00Z"}
+  query: 冯宇现在在哪个城市
+  ground_truth: 深圳
+  acceptable_answers: [深圳, 在深圳]

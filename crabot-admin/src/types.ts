@@ -1705,27 +1705,6 @@ export interface EntityRef {
   name: string
 }
 
-/** 长期记忆条目 */
-export interface LongTermMemoryEntry {
-  id: string
-  category: string
-  abstract: string
-  overview: string
-  content: string
-  entities: EntityRef[]
-  importance: number
-  keywords: string[]
-  tags: string[]
-  source: MemorySourceInfo
-  metadata?: Record<string, unknown>
-  read_count: number
-  version: number
-  visibility: 'private' | 'internal' | 'public'
-  scopes: string[]
-  created_at: string
-  updated_at: string
-}
-
 /** Memory 统计 */
 export interface MemoryStats {
   short_term: {

@@ -29,6 +29,71 @@ import type {
 } from './types.js'
 import { findPresetVendor } from './preset-vendors.js'
 
+/**
+ * Codex `/models` 响应里只有 `visibility === 'list'` 的 SKU 会出现在 UI；
+ * `hide` 用于内部模型（如 codex-auto-review），不应暴露给用户。
+ */
+function parseCodexModels(raw: unknown[]): ModelInfo[] {
+  const models: ModelInfo[] = []
+  for (const entry of raw) {
+    const item = entry as Record<string, unknown>
+    const slug = typeof item.slug === 'string' ? item.slug : ''
+    if (!slug) continue
+    if (item.visibility !== 'list') continue
+    if (item.supported_in_api === false) continue
+
+    const modalities = Array.isArray(item.input_modalities) ? (item.input_modalities as unknown[]) : []
+    const supportsVision = modalities.includes('image')
+
+    models.push({
+      model_id: slug,
+      display_name: (typeof item.display_name === 'string' && item.display_name) || slug,
+      type: 'llm',
+      supports_vision: supportsVision,
+      context_window: typeof item.context_window === 'number' ? item.context_window : undefined,
+    })
+  }
+  return models
+}
+
+/**
+ * OpenAI 兼容 `/models` 响应解析：{data: [{id, ...}]}
+ */
+function parseOpenAIModels(raw: unknown[]): ModelInfo[] {
+  const models: ModelInfo[] = []
+  for (const entry of raw) {
+    const item = entry as Record<string, unknown>
+    const modelId =
+      (typeof item.id === 'string' && item.id) ||
+      (typeof item.model === 'string' && item.model) ||
+      (typeof item.slug === 'string' && item.slug) ||
+      ''
+    if (!modelId) continue
+
+    const isEmbedding = modelId.includes('embedding') || modelId.includes('embed')
+    const type: ModelType = isEmbedding ? 'embedding' : 'llm'
+
+    const capabilities = item.capabilities as { vision?: boolean } | undefined
+    const modalities = Array.isArray(item.input) ? (item.input as unknown[]) : []
+    const supportsVision = capabilities?.vision === true || modalities.includes('image')
+
+    models.push({
+      model_id: modelId,
+      display_name:
+        (typeof item.display_name === 'string' && item.display_name) ||
+        (typeof item.name === 'string' && item.name) ||
+        modelId,
+      type,
+      supports_vision: supportsVision,
+      context_window:
+        (typeof item.context_window === 'number' ? item.context_window : undefined) ??
+        (typeof item.context_length === 'number' ? item.context_length : undefined) ??
+        (typeof item.context_tokens === 'number' ? item.context_tokens : undefined),
+    })
+  }
+  return models
+}
+
 export class ModelProviderManager {
   private providers: Map<string, ModelProvider> = new Map()
   private globalConfig: GlobalModelConfig = {}
@@ -537,7 +602,8 @@ export class ModelProviderManager {
     }
 
     try {
-      const response = await this.httpRequest(`${vendor.endpoint}${vendor.models_api}`, {
+      const url = await this.buildVendorModelsUrl(vendor)
+      const response = await this.httpRequest(url, {
         method: 'GET',
         headers: {
           Authorization: `Bearer ${apiKey}`,
@@ -545,39 +611,12 @@ export class ModelProviderManager {
       })
 
       const data = JSON.parse(response)
-      const models: ModelInfo[] = []
 
-      // OpenAI 格式：{data: [{id, ...}]}
-      // Codex 格式：{models: [{slug, display_name, ...}]}
-      const rawList: unknown[] = Array.isArray(data.data)
-        ? data.data
-        : Array.isArray(data.models)
-        ? data.models
-        : []
-
-      for (const raw of rawList) {
-        const item = raw as Record<string, unknown>
-        const modelId = (item.id as string) || (item.model as string) || (item.slug as string)
-        if (!modelId) continue
-
-        const isEmbedding = modelId.includes('embedding') || modelId.includes('embed')
-        const type: ModelType = isEmbedding ? 'embedding' : 'llm'
-
-        const capabilities = item.capabilities as { vision?: boolean } | undefined
-        const modalities = item.input as string[] | undefined
-        const supportsVision = capabilities?.vision === true
-          || (Array.isArray(modalities) && modalities.includes('image'))
-
-        models.push({
-          model_id: modelId,
-          display_name: (item.display_name as string) || (item.name as string) || modelId,
-          type,
-          supports_vision: supportsVision,
-          context_window: (item.context_window as number | undefined)
-            ?? (item.context_length as number | undefined)
-            ?? (item.context_tokens as number | undefined),
-        })
-      }
+      // Codex 订阅后端：{models: [{slug, visibility, input_modalities, ...}]}
+      // OpenAI 标准：{data: [{id, ...}]}
+      const models = vendor.format === 'openai-responses' && Array.isArray(data.models)
+        ? parseCodexModels(data.models as unknown[])
+        : parseOpenAIModels(Array.isArray(data.data) ? (data.data as unknown[]) : [])
 
       // 拉不到任何模型时，退回默认列表，避免清空导致用户无法选择
       if (models.length === 0 && vendor.default_models) {
@@ -589,6 +628,21 @@ export class ModelProviderManager {
       console.error(`Failed to fetch models from ${vendor.name}:`, error)
       return vendor.default_models ? [...vendor.default_models] : []
     }
+  }
+
+  /**
+   * 为需要 `/models` 的厂商构造带 query 的 URL。
+   * 目前仅 Codex 订阅需要 `client_version` 参数，其它厂商走原样 endpoint。
+   */
+  private async buildVendorModelsUrl(vendor: PresetVendor): Promise<string> {
+    const base = `${vendor.endpoint}${vendor.models_api}`
+    if (vendor.format !== 'openai-responses') {
+      return base
+    }
+    const { resolveCodexClientVersion } = await import('./oauth/codex-client-version.js')
+    const clientVersion = await resolveCodexClientVersion()
+    const separator = base.includes('?') ? '&' : '?'
+    return `${base}${separator}client_version=${encodeURIComponent(clientVersion)}`
   }
 
   // ============================================================================

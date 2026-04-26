@@ -1,0 +1,358 @@
+- id: mr-001
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 张三 wxid, content: 张三微信 wxid_zhangsan,
+       entities: [{type: friend, id: z3, name: 张三}], tags: [], event_time: "2026-04-01T10:00:00Z"}
+    - {type: fact, brief: 张三参与项目 A, content: 张三是项目 A 的负责人,
+       entities: [{type: friend, id: z3, name: 张三}], tags: [], event_time: "2026-04-05T10:00:00Z"}
+    - {type: fact, brief: 项目 A 截止, content: 项目 A 截止 2026-06-30,
+       entities: [], tags: [], event_time: "2026-04-10T10:00:00Z"}
+  query: 项目 A 的负责人微信是什么
+  ground_truth: wxid_zhangsan
+  acceptable_answers: [wxid_zhangsan]
+
+- id: mr-002
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 李四参与项目 B, content: 李四负责项目 B,
+       entities: [{type: friend, id: l4, name: 李四}], tags: [], event_time: "2026-04-05T10:00:00Z"}
+    - {type: fact, brief: 项目 B 截止, content: 项目 B 截止 2026-07-15,
+       entities: [], tags: [], event_time: "2026-04-10T10:00:00Z"}
+  query: 李四负责的项目什么时候截止
+  ground_truth: "2026-07-15"
+  acceptable_answers: ["2026-07-15", 7月15日]
+
+- id: mr-003
+  category: MR
+  setup_memories:
+    - {type: fact, brief: macOS 偏好命令, content: master 在 macOS 上偏好 dev.sh,
+       entities: [], tags: ["#scope:macos"], event_time: "2026-03-01T10:00:00Z"}
+    - {type: fact, brief: master 用 mac, content: master 现在主力机是 macOS,
+       entities: [], tags: [], event_time: "2026-03-01T10:00:00Z"}
+  query: master 在自己的主力机上偏好用什么命令启动
+  ground_truth: dev.sh
+  acceptable_answers: [./dev.sh, dev.sh]
+
+- id: mr-004
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 张三北京, content: 张三在北京,
+       entities: [{type: friend, id: z3, name: 张三}], tags: [], event_time: "2026-04-01T10:00:00Z"}
+    - {type: fact, brief: 张三爱辣, content: 张三喜欢吃川菜,
+       entities: [{type: friend, id: z3, name: 张三}], tags: [], event_time: "2026-04-02T10:00:00Z"}
+  query: 张三在哪个城市，他爱吃什么
+  ground_truth: 北京 / 川菜
+  acceptable_answers: [张三在北京并喜欢川菜, 北京、川菜]
+
+- id: mr-005
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 周会时间, content: 周会每周二下午 3 点,
+       entities: [], tags: [], event_time: "2026-04-01T10:00:00Z"}
+    - {type: fact, brief: 周会地点, content: 周会在 5 号会议室,
+       entities: [], tags: [], event_time: "2026-04-01T10:00:00Z"}
+  query: 周会在哪开几点开
+  ground_truth: 5 号会议室 周二下午 3 点
+  acceptable_answers: [周二 15:00 5 号会议室]
+
+- id: mr-006
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 王小明部门, content: 王小明在技术部,
+       entities: [{type: friend, id: wxm, name: 王小明}], tags: [], event_time: "2026-03-01T10:00:00Z"}
+    - {type: fact, brief: 技术部负责人, content: 技术部负责人是赵丽,
+       entities: [{type: friend, id: zl, name: 赵丽}], tags: [], event_time: "2026-03-01T10:00:00Z"}
+  query: 王小明的直属领导是谁
+  ground_truth: 赵丽
+  acceptable_answers: [赵丽, 技术部的赵丽]
+
+- id: mr-007
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 陈伟负责项目 C, content: 陈伟是项目 C 负责人,
+       entities: [{type: friend, id: cw, name: 陈伟}], tags: [], event_time: "2026-03-15T10:00:00Z"}
+    - {type: fact, brief: 陈伟邮箱, content: 陈伟的工作邮箱是 chenwei@company.com,
+       entities: [{type: friend, id: cw, name: 陈伟}], tags: [], event_time: "2026-02-01T10:00:00Z"}
+  query: 项目 C 负责人的邮箱
+  ground_truth: chenwei@company.com
+  acceptable_answers: [chenwei@company.com]
+
+- id: mr-008
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 周杰住上海, content: 周杰住在上海,
+       entities: [{type: friend, id: zj, name: 周杰}], tags: [], event_time: "2026-02-10T10:00:00Z"}
+    - {type: fact, brief: 周杰喜欢跑步, content: 周杰业余爱好是跑步,
+       entities: [{type: friend, id: zj, name: 周杰}], tags: [], event_time: "2026-02-10T10:00:00Z"}
+    - {type: fact, brief: 周杰电话, content: 周杰手机号 13600001111,
+       entities: [{type: friend, id: zj, name: 周杰}], tags: [], event_time: "2026-02-10T10:00:00Z"}
+  query: 周杰住在哪，他的联系方式是什么
+  ground_truth: 上海 / 13600001111
+  acceptable_answers: [上海，电话 13600001111, 上海 13600001111]
+
+- id: mr-009
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 吴佳参与项目 D, content: 吴佳是项目 D 的产品负责人,
+       entities: [{type: friend, id: wj, name: 吴佳}], tags: [], event_time: "2026-03-20T10:00:00Z"}
+    - {type: fact, brief: 项目 D 预算, content: 项目 D 预算 80 万,
+       entities: [], tags: [], event_time: "2026-03-01T10:00:00Z"}
+  query: 吴佳负责的项目预算是多少
+  ground_truth: 80 万
+  acceptable_answers: [80万, 800000]
+
+- id: mr-010
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 钱晓彤是 HR, content: 钱晓彤在人力资源部负责招聘,
+       entities: [{type: friend, id: qxt, name: 钱晓彤}], tags: [], event_time: "2026-01-10T10:00:00Z"}
+    - {type: fact, brief: 钱晓彤邮箱, content: 钱晓彤邮箱是 qianxt@company.com,
+       entities: [{type: friend, id: qxt, name: 钱晓彤}], tags: [], event_time: "2026-01-10T10:00:00Z"}
+  query: 负责招聘的同事邮箱是什么
+  ground_truth: qianxt@company.com
+  acceptable_answers: [qianxt@company.com]
+
+- id: mr-011
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 林海项目, content: 林海负责项目 E,
+       entities: [{type: friend, id: lh, name: 林海}], tags: [], event_time: "2026-03-05T10:00:00Z"}
+    - {type: fact, brief: 项目 E 截止, content: 项目 E 截止日期是 2026-08-31,
+       entities: [], tags: [], event_time: "2026-03-05T10:00:00Z"}
+    - {type: fact, brief: 林海手机, content: 林海手机号是 13700009999,
+       entities: [{type: friend, id: lh, name: 林海}], tags: [], event_time: "2026-01-20T10:00:00Z"}
+  query: 项目 E 负责人的手机号和截止日期
+  ground_truth: 13700009999 / 2026-08-31
+  acceptable_answers: [13700009999 截止8月31日, 手机13700009999 2026-08-31]
+
+- id: mr-012
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 前端框架 React, content: 前端采用 React 框架,
+       entities: [], tags: [], event_time: "2026-02-15T10:00:00Z"}
+    - {type: fact, brief: 前端负责人徐磊, content: 前端模块负责人是徐磊,
+       entities: [{type: friend, id: xl, name: 徐磊}], tags: [], event_time: "2026-02-15T10:00:00Z"}
+  query: 前端负责人是谁，用什么框架
+  ground_truth: 徐磊 / React
+  acceptable_answers: [徐磊负责React前端, 徐磊 React]
+
+- id: mr-013
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 孙芳 HR, content: 孙芳是 HR 主管,
+       entities: [{type: friend, id: sf, name: 孙芳}], tags: [], event_time: "2026-01-15T10:00:00Z"}
+    - {type: fact, brief: 孙芳电话, content: 孙芳电话 13988887777,
+       entities: [{type: friend, id: sf, name: 孙芳}], tags: [], event_time: "2026-01-15T10:00:00Z"}
+  query: HR 主管的电话号码
+  ground_truth: "13988887777"
+  acceptable_answers: ["13988887777"]
+
+- id: mr-014
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 马超会议时间, content: 马超每周四上午 10 点有技术评审会,
+       entities: [{type: friend, id: mc, name: 马超}], tags: [], event_time: "2026-04-10T10:00:00Z"}
+    - {type: fact, brief: 技术评审地点, content: 技术评审会在 3 号会议室,
+       entities: [], tags: [], event_time: "2026-04-10T10:00:00Z"}
+  query: 马超的技术评审会在哪个会议室几点开
+  ground_truth: 3 号会议室 周四上午 10 点
+  acceptable_answers: [3号会议室 周四10点, 周四10:00 3号会议室]
+
+- id: mr-015
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 冯宇学历, content: 冯宇毕业于清华大学计算机系,
+       entities: [{type: friend, id: fy, name: 冯宇}], tags: [], event_time: "2026-01-05T10:00:00Z"}
+    - {type: fact, brief: 冯宇工龄, content: 冯宇工作了 5 年,
+       entities: [{type: friend, id: fy, name: 冯宇}], tags: [], event_time: "2026-01-05T10:00:00Z"}
+  query: 冯宇是哪里毕业的，工作几年了
+  ground_truth: 清华大学计算机系 / 5 年
+  acceptable_answers: [清华计算机 5年, 清华大学 工作5年]
+
+- id: mr-016
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 郑阳在杭州, content: 郑阳驻场杭州办公室,
+       entities: [{type: friend, id: zy2, name: 郑阳}], tags: [], event_time: "2026-03-01T10:00:00Z"}
+    - {type: fact, brief: 杭州办公室地址, content: 杭州办公室在西湖区文三路 300 号,
+       entities: [], tags: [], event_time: "2026-03-01T10:00:00Z"}
+  query: 郑阳在哪里上班，具体地址是什么
+  ground_truth: 杭州西湖区文三路 300 号
+  acceptable_answers: [杭州文三路300号, 西湖区文三路300号]
+
+- id: mr-017
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 项目 F 客户, content: 项目 F 的甲方是腾讯,
+       entities: [], tags: [], event_time: "2026-03-20T10:00:00Z"}
+    - {type: fact, brief: 项目 F 合同金额, content: 项目 F 合同金额是 200 万,
+       entities: [], tags: [], event_time: "2026-03-20T10:00:00Z"}
+    - {type: fact, brief: 项目 F 负责人, content: 项目 F 负责人是沈娜,
+       entities: [{type: friend, id: sn, name: 沈娜}], tags: [], event_time: "2026-03-20T10:00:00Z"}
+  query: 腾讯那个项目的合同金额是多少，谁负责
+  ground_truth: 200 万 / 沈娜
+  acceptable_answers: [200万 沈娜负责, 沈娜 200万]
+
+- id: mr-018
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 韩梅爱好, content: 韩梅喜欢摄影,
+       entities: [{type: friend, id: hm, name: 韩梅}], tags: [], event_time: "2026-02-08T10:00:00Z"}
+    - {type: fact, brief: 韩梅城市, content: 韩梅住在成都,
+       entities: [{type: friend, id: hm, name: 韩梅}], tags: [], event_time: "2026-02-08T10:00:00Z"}
+  query: 韩梅住在哪，有什么爱好
+  ground_truth: 成都 / 摄影
+  acceptable_answers: [成都 喜欢摄影, 成都 摄影]
+
+- id: mr-019
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 杨帆技术栈, content: 杨帆擅长 Go 语言后端开发,
+       entities: [{type: friend, id: yf2, name: 杨帆}], tags: [], event_time: "2026-04-05T10:00:00Z"}
+    - {type: fact, brief: 杨帆公司, content: 杨帆在字节跳动工作,
+       entities: [{type: friend, id: yf2, name: 杨帆}], tags: [], event_time: "2026-01-25T10:00:00Z"}
+  query: 杨帆在哪家公司，他擅长什么技术
+  ground_truth: 字节跳动 / Go 语言后端
+  acceptable_answers: [字节跳动 Go后端, 字节 Go语言]
+
+- id: mr-020
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 项目 G 技术栈, content: 项目 G 用 Python + FastAPI,
+       entities: [], tags: [], event_time: "2026-04-12T10:00:00Z"}
+    - {type: fact, brief: 项目 G 负责人, content: 项目 G 后端负责人是王小明,
+       entities: [{type: friend, id: wxm, name: 王小明}], tags: [], event_time: "2026-04-12T10:00:00Z"}
+    - {type: fact, brief: 王小明邮箱, content: 王小明邮箱是 wangxm@company.com,
+       entities: [{type: friend, id: wxm, name: 王小明}], tags: [], event_time: "2026-03-20T10:00:00Z"}
+  query: 项目 G 后端负责人的邮箱，该项目用什么技术栈
+  ground_truth: wangxm@company.com / Python + FastAPI
+  acceptable_answers: [wangxm@company.com Python FastAPI]
+
+- id: mr-021
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 测试环境域名, content: 测试环境访问 test.crabot.internal,
+       entities: [], tags: [], event_time: "2026-04-02T10:00:00Z"}
+    - {type: fact, brief: 测试环境负责人, content: 测试环境由赵丽维护,
+       entities: [{type: friend, id: zl, name: 赵丽}], tags: [], event_time: "2026-04-02T10:00:00Z"}
+  query: 测试环境域名是什么，谁在维护
+  ground_truth: test.crabot.internal / 赵丽
+  acceptable_answers: [test.crabot.internal 赵丽维护]
+
+- id: mr-022
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 午餐团购负责人, content: 午餐团购由徐磊组织,
+       entities: [{type: friend, id: xl, name: 徐磊}], tags: [], event_time: "2026-04-15T10:00:00Z"}
+    - {type: fact, brief: 徐磊微信, content: 徐磊微信 wxid_xulei888,
+       entities: [{type: friend, id: xl, name: 徐磊}], tags: [], event_time: "2026-03-25T10:00:00Z"}
+  query: 午餐团购联系谁，他的微信是什么
+  ground_truth: 徐磊 / wxid_xulei888
+  acceptable_answers: [找徐磊 wxid_xulei888, 徐磊 wxid_xulei888]
+
+- id: mr-023
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 项目 H 团队, content: 项目 H 团队有 6 人,
+       entities: [], tags: [], event_time: "2026-04-18T10:00:00Z"}
+    - {type: fact, brief: 项目 H 进度, content: 项目 H 已完成 40%,
+       entities: [], tags: [], event_time: "2026-04-18T10:00:00Z"}
+    - {type: fact, brief: 项目 H 截止, content: 项目 H 截止 2026-09-30,
+       entities: [], tags: [], event_time: "2026-04-18T10:00:00Z"}
+  query: 项目 H 有多少人，进度多少，截止日期是什么
+  ground_truth: 6 人 / 40% / 2026-09-30
+  acceptable_answers: [6人 40% 9月30日, 6人 40%完成 2026-09-30]
+
+- id: mr-024
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 马超擅长 Java, content: 马超擅长 Java 微服务开发,
+       entities: [{type: friend, id: mc, name: 马超}], tags: [], event_time: "2026-03-18T10:00:00Z"}
+    - {type: fact, brief: 马超部门, content: 马超在后端架构组,
+       entities: [{type: friend, id: mc, name: 马超}], tags: [], event_time: "2026-03-18T10:00:00Z"}
+  query: 马超在哪个组，擅长什么技术
+  ground_truth: 后端架构组 / Java 微服务
+  acceptable_answers: [后端架构组 Java微服务, Java微服务 后端架构组]
+
+- id: mr-025
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 冯宇城市, content: 冯宇在深圳工作,
+       entities: [{type: friend, id: fy, name: 冯宇}], tags: [], event_time: "2026-04-01T10:00:00Z"}
+    - {type: fact, brief: 冯宇偏好语言, content: 冯宇偏好用 Python,
+       entities: [{type: friend, id: fy, name: 冯宇}], tags: [], event_time: "2026-04-01T10:00:00Z"}
+    - {type: fact, brief: 冯宇邮箱, content: 冯宇邮箱 fengyu@tech.com,
+       entities: [{type: friend, id: fy, name: 冯宇}], tags: [], event_time: "2026-03-05T10:00:00Z"}
+  query: 冯宇在哪个城市，常用什么语言，邮箱是多少
+  ground_truth: 深圳 / Python / fengyu@tech.com
+  acceptable_answers: [深圳 Python fengyu@tech.com]
+
+- id: mr-026
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 季度总结会时间, content: 季度总结会在每季度最后一周的周五下午 2 点,
+       entities: [], tags: [], event_time: "2026-04-20T10:00:00Z"}
+    - {type: fact, brief: 季度总结会地点, content: 季度总结会在大会议室 A,
+       entities: [], tags: [], event_time: "2026-04-20T10:00:00Z"}
+  query: 季度总结会在哪，什么时间
+  ground_truth: 大会议室 A / 季末周五下午 2 点
+  acceptable_answers: [大会议室A 周五14:00, 大会议室A 季末周五2点]
+
+- id: mr-027
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 沈娜带项目 F, content: 沈娜负责项目 F,
+       entities: [{type: friend, id: sn, name: 沈娜}], tags: [], event_time: "2026-03-20T10:00:00Z"}
+    - {type: fact, brief: 沈娜工号, content: 沈娜工号是 EMP-1088,
+       entities: [{type: friend, id: sn, name: 沈娜}], tags: [], event_time: "2026-01-10T10:00:00Z"}
+  query: 项目 F 负责人的工号
+  ground_truth: EMP-1088
+  acceptable_answers: [EMP-1088]
+
+- id: mr-028
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 韩梅擅长前端, content: 韩梅擅长 Vue.js 前端开发,
+       entities: [{type: friend, id: hm, name: 韩梅}], tags: [], event_time: "2026-04-10T10:00:00Z"}
+    - {type: fact, brief: 韩梅参与项目, content: 韩梅目前参与项目 I,
+       entities: [{type: friend, id: hm, name: 韩梅}], tags: [], event_time: "2026-04-10T10:00:00Z"}
+    - {type: fact, brief: 项目 I 使用 Vue, content: 项目 I 前端框架是 Vue.js,
+       entities: [], tags: [], event_time: "2026-04-10T10:00:00Z"}
+  query: 韩梅参与的项目叫什么，该项目前端用什么框架
+  ground_truth: 项目 I / Vue.js
+  acceptable_answers: [项目I Vue.js, 项目I Vue]
+
+- id: mr-029
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 孙芳负责招聘, content: 孙芳负责技术岗招聘,
+       entities: [{type: friend, id: sf, name: 孙芳}], tags: [], event_time: "2026-02-01T10:00:00Z"}
+    - {type: fact, brief: 技术岗 HC 数量, content: 本季度技术岗 HC 有 5 个,
+       entities: [], tags: [], event_time: "2026-04-01T10:00:00Z"}
+  query: 孙芳负责招聘哪类岗位，本季度有几个 HC
+  ground_truth: 技术岗 / 5 个
+  acceptable_answers: [技术岗 5个HC, 技术岗 5个]
+
+- id: mr-030
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 郑阳工龄, content: 郑阳在公司工作了 3 年,
+       entities: [{type: friend, id: zy2, name: 郑阳}], tags: [], event_time: "2026-01-01T10:00:00Z"}
+    - {type: fact, brief: 郑阳职称, content: 郑阳职称是中级工程师,
+       entities: [{type: friend, id: zy2, name: 郑阳}], tags: [], event_time: "2026-01-01T10:00:00Z"}
+  query: 郑阳工作几年了，职称是什么
+  ground_truth: 3 年 / 中级工程师
+  acceptable_answers: [3年 中级工程师, 工作3年 中级工程师]
+
+- id: mr-031
+  category: MR
+  setup_memories:
+    - {type: fact, brief: 周杰部门, content: 周杰在前端团队,
+       entities: [{type: friend, id: zj, name: 周杰}], tags: [], event_time: "2026-03-01T10:00:00Z"}
+    - {type: fact, brief: 前端团队规模, content: 前端团队共 8 人,
+       entities: [], tags: [], event_time: "2026-03-01T10:00:00Z"}
+    - {type: fact, brief: 周杰 wxid, content: 周杰微信号 wxid_zhoujie123,
+       entities: [{type: friend, id: zj, name: 周杰}], tags: [], event_time: "2026-03-10T10:00:00Z"}
+  query: 周杰在哪个团队，团队多大，他微信是多少
+  ground_truth: 前端团队 / 8 人 / wxid_zhoujie123
+  acceptable_answers: [前端团队8人 wxid_zhoujie123, 前端8人 wxid_zhoujie123]

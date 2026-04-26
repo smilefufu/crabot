@@ -60,6 +60,9 @@ export function buildMemoryEntriesHref(input: BuildMemoryEntriesHrefInput): stri
     params.set('memory_id', input.memoryId)
   }
 
+  const prefix = input.mode === 'search' || input.mode === 'context'
+    ? '/memory/short-term'
+    : '/memory/long-term'
   const query = params.toString()
-  return query ? `/memory/entries?${query}` : '/memory/entries'
+  return query ? `${prefix}?${query}` : prefix
 }

@@ -5,6 +5,7 @@ Memory 模块主类
 import json
 import logging
 import asyncio
+import os
 from typing import Dict, Any, Optional, Callable
 from pathlib import Path
 
@@ -18,9 +19,11 @@ from .storage.vector_store import VectorStore
 from .storage.sqlite_store import SQLiteStore
 from .storage.scene_profile_store import SceneProfileStore
 from .core.short_term import ShortTermMemory
-from .core.long_term import LongTermMemory
 from .utils.llm_client import LLMClient
 from .utils.embedding import EmbeddingClient
+from .long_term_v2.store import MemoryStore as LongTermV2Store
+from .long_term_v2.sqlite_index import SqliteIndex as LongTermV2Index
+from .long_term_v2.rpc import LongTermV2Rpc
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -68,9 +71,31 @@ class MemoryModule:
 
         # 初始化核心模块
         self.short_term = ShortTermMemory(self.vector_store, self.llm_client)
-        self.long_term = LongTermMemory(self.vector_store, self.llm_client, self.sqlite_store, self.config.dedup)
 
         self._compression_running = False
+
+        # Long-term v2 is the only long-term backend (v1 routing removed).
+        from .long_term_v2.reranker import FallbackReranker, HttpReranker
+        data_root = str(data_dir / "long_term")
+        self._lt_v2_store = LongTermV2Store(data_root)
+        self._lt_v2_index = LongTermV2Index(str(data_dir / "long_term_v2.db"))
+
+        rerank_url = os.environ.get("RERANK_BASE_URL")
+        rerank_key = os.environ.get("RERANK_API_KEY")
+        rerank_model = os.environ.get("RERANK_MODEL", "bge-reranker-v2-m3")
+        if rerank_url and rerank_key:
+            reranker = HttpReranker(base_url=rerank_url, api_key=rerank_key, model=rerank_model)
+        else:
+            reranker = FallbackReranker()
+
+        self._lt_v2_rpc = LongTermV2Rpc(
+            store=self._lt_v2_store,
+            index=self._lt_v2_index,
+            embedder=self.embedding_client,
+            llm=self.llm_client,
+            reranker=reranker,
+        )
+        logger.info("Long-term memory v2 enabled (data root: %s)", data_root)
 
         # 注册路由
         self._register_routes()
@@ -124,18 +149,16 @@ class MemoryModule:
             "get_status": self._get_status,
             "write_short_term": self._write_short_term,
             "search_short_term": self._search_short_term,
-            "write_long_term": self._write_long_term,
-            "search_long_term": self._search_long_term,
-            "browse_long_term": self._browse_long_term,
-            "get_memory": self._get_memory,
-            "delete_memory": self._delete_memory,
+            "write_long_term": self._lt_v2_rpc.write_long_term,
+            "search_long_term": self._lt_v2_rpc.search_long_term,
+            "get_memory": self._lt_v2_rpc.get_memory,
+            "delete_memory": self._lt_v2_rpc.delete_memory,
+            "update_memory": self._lt_v2_rpc.update_long_term,
             "get_stats": self._get_stats,
             "get_reflection_watermark": self._get_reflection_watermark,
             "update_reflection_watermark": self._update_reflection_watermark,
             "update_config": self._update_config,
-            "update_memory": self._update_memory,
             "batch_write_short_term": self._batch_write_short_term,
-            "batch_write_long_term": self._batch_write_long_term,
             "export_memories": self._export_memories,
             "import_memories": self._import_memories,
             "upsert_scene_profile": self._upsert_scene_profile,
@@ -143,6 +166,28 @@ class MemoryModule:
             "list_scene_profiles": self._list_scene_profiles,
             "list_scene_profiles_by_memory": self._list_scene_profiles_by_memory,
             "delete_scene_profile": self._delete_scene_profile,
+            "grep_memory": self._lt_v2_rpc.grep_memory,
+            "list_recent": self._lt_v2_rpc.list_recent,
+            "find_by_entity": self._lt_v2_rpc.find_by_entity,
+            "find_by_tag": self._lt_v2_rpc.find_by_tag,
+            "get_cases_about": self._lt_v2_rpc.get_cases_about,
+            "quick_capture": self._lt_v2_rpc.quick_capture,
+            "update_long_term": self._lt_v2_rpc.update_long_term,
+            "run_maintenance": self._lt_v2_rpc.run_maintenance,
+            "trigger_consolidation": self._lt_v2_rpc.trigger_consolidation,
+            "get_evolution_mode": self._lt_v2_rpc.get_evolution_mode,
+            "set_evolution_mode": self._lt_v2_rpc.set_evolution_mode,
+            "promote_to_rule": self._lt_v2_rpc.promote_to_rule,
+            "get_observation_pending": self._lt_v2_rpc.get_observation_pending,
+            "mark_observation_pass": self._lt_v2_rpc.mark_observation_pass,
+            "extend_observation_window": self._lt_v2_rpc.extend_observation_window,
+            "get_confirmed_snapshot": self._lt_v2_rpc.get_confirmed_snapshot,
+            "bump_lesson_use": self._lt_v2_rpc.bump_lesson_use,
+            "list_entries": self._lt_v2_rpc.list_entries,
+            "keyword_search": self._lt_v2_rpc.keyword_search,
+            "restore_memory": self._lt_v2_rpc.restore_memory,
+            "get_entry_version": self._lt_v2_rpc.get_entry_version,
+            "report_task_feedback": self._lt_v2_rpc.report_task_feedback,
         }
 
         handler = handlers.get(method)
@@ -154,7 +199,7 @@ class MemoryModule:
     async def _health(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """健康检查"""
         short_count = self.vector_store.get_short_term_count()
-        long_count = self.vector_store.get_long_term_count()
+        long_count = self._lt_v2_index.count_entries()
         return {
             "status": "healthy",
             "details": {
@@ -217,126 +262,16 @@ class MemoryModule:
         results = await self.short_term.search(search_params)
         return {"results": [m.model_dump() for m in results]}
 
-    async def _write_long_term(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """写入长期记忆"""
-        if not self.is_llm_configured():
-            raise ValueError("Memory module not configured. Please configure LLM settings in Admin.")
-        write_params = WriteLongTermParams(**params)
-        result = await self.long_term.write(write_params)
-        return {
-            "action": result["action"],
-            "memory": result["memory"].model_dump(),
-            "merged_from": result.get("merged_from"),
-        }
-
-    async def _search_long_term(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """检索长期记忆"""
-        if not self.is_embedding_configured():
-            raise ValueError("Memory module not configured. Please configure Embedding settings in Admin.")
-        search_params = SearchLongTermParams(**params)
-        results = await self.long_term.search(search_params)
-        return {
-            "results": [
-                {
-                    "memory": r.memory.model_dump(),
-                    "relevance": r.relevance,
-                }
-                for r in results
-            ]
-        }
-
-    async def _browse_long_term(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """浏览近期长期记忆"""
-        browse_params = BrowseLongTermParams(**params)
-        result = await self.long_term.browse_recent(browse_params)
-        return {
-            "results": [
-                {
-                    "memory": item.memory.model_dump(),
-                    "relevance": item.relevance,
-                }
-                for item in result.results
-            ]
-        }
-
-    async def _get_memory(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """获取记忆详情"""
-        get_params = GetMemoryParams(**params)
-        result = await self.vector_store.get_by_id(get_params.memory_id)
-        if result is None:
-            raise ValueError(f"Memory not found: {get_params.memory_id}")
-
-        if result["type"] == "short":
-            row = result["row"]
-            source_data = json.loads(row["source_json"])
-            refs_data = json.loads(row["refs_json"]) if row["refs_json"] else None
-            memory = ShortTermMemoryEntry(
-                id=row["id"],
-                content=row["content"],
-                keywords=list(row["keywords"] or []),
-                event_time=row["event_time"],
-                persons=list(row["persons"] or []),
-                entities=list(row["entities"] or []),
-                topic=row["topic"] or None,
-                source=MemorySource(**source_data),
-                refs=refs_data,
-                compressed=row["compressed"],
-                visibility=row["visibility"],
-                scopes=list(row["scopes"] or []),
-                created_at=row["created_at"],
-            )
-            revisions = None
-            if get_params.include_revisions:
-                revisions = [r.model_dump() for r in self.sqlite_store.get_revisions(get_params.memory_id)]
-            return {"memory": memory.model_dump(), "type": "short", "revisions": revisions}
-        else:
-            row = result["row"]
-            source_data = json.loads(row["source_json"])
-            entities_data = json.loads(row["entities_json"]) if row["entities_json"] else []
-            memory = LongTermMemoryEntry(
-                id=row["id"],
-                abstract=row["abstract"],
-                overview=row["overview"],
-                content=row["content"],
-                entities=[EntityRef(**e) for e in entities_data],
-                importance=row["importance"],
-                keywords=list(row["keywords"] or []),
-                tags=list(row["tags"] or []),
-                source=MemorySource(**source_data),
-                metadata=json.loads(row["metadata_json"]) if row["metadata_json"] else None,
-                read_count=row["read_count"],
-                version=row["version"],
-                visibility=row["visibility"],
-                scopes=list(row["scopes"] or []),
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
-            )
-            revisions = None
-            if get_params.include_revisions:
-                revisions = [r.model_dump() for r in self.sqlite_store.get_revisions(get_params.memory_id)]
-            return {"memory": memory.model_dump(), "type": "long", "revisions": revisions}
-
-    async def _delete_memory(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """删除记忆"""
-        delete_params = DeleteMemoryParams(**params)
-        deleted = await self.vector_store.delete_by_id(delete_params.memory_id)
-        if not deleted:
-            raise ValueError(f"Memory not found: {delete_params.memory_id}")
-        return {"deleted": True}
-
-    async def _update_memory(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """更新长期记忆"""
-        update_params = UpdateMemoryParams(**params)
-        result = await self.long_term.update(update_params)
-        return {
-            "memory": result["memory"].model_dump(),
-            "version": result["version"],
-        }
-
     async def _get_stats(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """获取统计信息"""
         short_stats = await self.short_term.get_stats()
-        long_stats = await self.long_term.get_stats()
+        long_count = self._lt_v2_index.count_entries()
+        long_stats = {
+            "entry_count": long_count,
+            "total_tokens": long_count * 500,
+            "latest_entry_at": None,
+            "earliest_entry_at": None,
+        }
         return {
             "short_term": short_stats,
             "long_term": long_stats,
@@ -371,59 +306,33 @@ class MemoryModule:
             "failures": failures if failures else None,
         }
 
-    async def _batch_write_long_term(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """批量写入长期记忆"""
-        batch_params = BatchWriteLongTermParams(**params)
-        results = []
-        failures = []
-        for i, entry_params in enumerate(batch_params.entries):
-            try:
-                result = await self._write_long_term(entry_params.model_dump())
-                results.append(result)
-            except Exception as e:
-                failures.append({"index": i, "error": {"code": "MEMORY_WRITE_FAILED", "message": str(e)}})
-        return {
-            "results": results,
-            "success_count": len(results),
-            "failure_count": len(failures),
-            "failures": failures if failures else None,
-        }
-
     async def _export_memories(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """导出全量记忆"""
+        """导出全量记忆。
+
+        长期记忆现在由 long_term_v2 文件存储管理（``<DATA_DIR>/long_term/``），
+        请用文件系统级备份/同步该目录；这里只负责短期记忆 + 反思水位。
+        """
         short_rows = await self.vector_store.get_all_short_term_rows()
-        long_rows = await self.vector_store.get_all_long_term_rows()
         watermark = self.sqlite_store.get_reflection_watermark()
 
-        revisions = []
-        for row in long_rows:
-            mem_revisions = self.sqlite_store.get_revisions(row["id"])
-            for rev in mem_revisions:
-                revisions.append({
-                    "memory_id": row["id"],
-                    **rev.model_dump(),
-                })
-
         return {
-            "version": "1.0",
+            "version": "1.1",
             "exported_at": datetime.utcnow().isoformat() + "Z",
             "short_term": short_rows,
-            "long_term": long_rows,
             "watermark": watermark,
-            "revisions": revisions,
         }
 
     async def _import_memories(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """导入记忆"""
+        """导入记忆（仅短期 + 反思水位；长期 v2 走文件系统级别的备份恢复）"""
         import_params = ImportMemoriesParams(**params)
         data = import_params.data
 
-        if data.get("version") != "1.0":
-            raise ValueError(f"Unsupported export version: {data.get('version')}")
+        version = data.get("version")
+        if version not in ("1.0", "1.1"):
+            raise ValueError(f"Unsupported export version: {version}")
 
         if import_params.mode == "replace":
             await self.vector_store.clear_all()
-            self.sqlite_store.conn.execute("DELETE FROM memory_revisions")
             self.sqlite_store.conn.execute("DELETE FROM reflection_watermark")
             self.sqlite_store.conn.commit()
 
@@ -451,48 +360,11 @@ class MemoryModule:
             await self.vector_store.add_short_term(entry)
             short_count += 1
 
-        long_count = 0
-        for row in data.get("long_term", []):
-            if import_params.mode == "merge":
-                existing = await self.vector_store.get_by_id(row["id"])
-                if existing:
-                    continue
-            source_data = json.loads(row["source_json"]) if isinstance(row.get("source_json"), str) else row.get("source_json", {})
-            entities_data = json.loads(row["entities_json"]) if isinstance(row.get("entities_json"), str) else row.get("entities_json", [])
-            metadata_data = json.loads(row["metadata_json"]) if isinstance(row.get("metadata_json"), str) and row["metadata_json"] else None
-            entry = LongTermMemoryEntry(
-                id=row["id"], abstract=row["abstract"], overview=row["overview"],
-                content=row["content"],
-                entities=[EntityRef(**e) for e in entities_data],
-                importance=row.get("importance", 5),
-                keywords=list(row.get("keywords") or []),
-                tags=list(row.get("tags") or []),
-                source=MemorySource(**source_data) if source_data else MemorySource(type="system"),
-                metadata=metadata_data,
-                read_count=row.get("read_count", 0),
-                version=row.get("version", 1),
-                visibility=row.get("visibility", "public"),
-                scopes=list(row.get("scopes") or []),
-                created_at=row.get("created_at", ""),
-                updated_at=row.get("updated_at", ""),
-            )
-            await self.vector_store.add_long_term(entry)  # re-embeds on L0 abstract
-            long_count += 1
-
         if data.get("watermark"):
             self.sqlite_store.update_reflection_watermark(data["watermark"])
 
-        for rev in data.get("revisions", []):
-            try:
-                self.sqlite_store.add_revision(
-                    rev["memory_id"], rev["version"], rev["previous_content"], rev["reason"],
-                )
-            except Exception:
-                pass
-
         return {
             "short_term_count": short_count,
-            "long_term_count": long_count,
             "watermark_restored": data.get("watermark") is not None,
         }
 

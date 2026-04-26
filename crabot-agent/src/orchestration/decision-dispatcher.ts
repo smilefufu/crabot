@@ -75,6 +75,10 @@ export class DecisionDispatcher {
     },
     traceCtx?: RpcTraceContext
   ): Promise<{ task_id?: string }> {
+    // Phase A (2026-04-25): 决策与反馈正交 — 先 fire-and-forget 反馈，
+    // 再分发决策。spec §9.1
+    this.reportFeedbackIfPresent(decision, params).catch(() => undefined)
+
     switch (decision.type) {
       case 'direct_reply':
         return this.handleDirectReply(decision, params, traceCtx)
@@ -252,6 +256,7 @@ export class DecisionDispatcher {
       message: params.messages.map(m => m.content.text ?? '').join('\n'),
       friend_id: lastMessage.sender.friend_id,
       session_type: sessionType,
+      task_id: task.id,
     }, params.memoryPermissions)
 
     const enrichedContext = {
@@ -363,6 +368,25 @@ export class DecisionDispatcher {
           trace_id: result.trace_id,
         }).catch(() => {})
 
+        // 任务完成时同时尝试抽 case（fire-and-forget；失败静默）
+        {
+          const briefSrc = `${task.title} → ${result.summary}`.slice(0, 80)
+          this.memoryWriter.quickCapture({
+            type: 'lesson',
+            brief: briefSrc,
+            content: `任务 ${task.id}（${task.title}）${result.outcome === 'completed' ? '完成' : '失败'}：${result.summary}`,
+            source_ref: { type: 'conversation', task_id: task.id, channel_id: params.channel_id, session_id: params.session_id },
+            entities: [],
+            tags: [`task_outcome:${result.outcome}`],
+            importance_factors: {
+              proximity: 0.6,
+              surprisal: result.outcome === 'failed' ? 0.8 : 0.4,
+              entity_priority: 0.5,
+              unambiguity: 0.6,
+            },
+          }).catch(() => undefined)
+        }
+
         // 回复用户（仅当 Worker 提供了 final_reply 时）
         if (result.final_reply?.text) {
           await this.sendReplyToUser(result.final_reply.text, params)
@@ -397,6 +421,25 @@ export class DecisionDispatcher {
           visibility: params.memoryPermissions.write_visibility,
           scopes: params.memoryPermissions.write_scopes,
         }).catch(() => {})
+
+        // 任务完成时同时尝试抽 case（fire-and-forget；失败静默）
+        {
+          const briefSrc = `${task.title} → ${msg}`.slice(0, 80)
+          this.memoryWriter.quickCapture({
+            type: 'lesson',
+            brief: briefSrc,
+            content: `任务 ${task.id}（${task.title}）失败：${msg}`,
+            source_ref: { type: 'conversation', task_id: task.id, channel_id: params.channel_id, session_id: params.session_id },
+            entities: [],
+            tags: [`task_outcome:failed`],
+            importance_factors: {
+              proximity: 0.6,
+              surprisal: 0.8,
+              entity_priority: 0.5,
+              unambiguity: 0.6,
+            },
+          }).catch(() => undefined)
+        }
       }
     }
 
@@ -430,6 +473,42 @@ export class DecisionDispatcher {
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
         console.error(`[DecisionDispatcher] Failed to transition scheduled task ${task.id} to executing: ${msg}`)
+      }
+
+      // memory_maintenance 直接走 RPC，不经 Worker
+      if (task.task_type === 'memory_maintenance') {
+        try {
+          await this.memoryWriter.runMaintenance('all')
+          await this.rpcClient.call(
+            adminPort,
+            'update_task_status',
+            {
+              task_id: task.id,
+              status: 'completed',
+              result: {
+                outcome: 'completed',
+                summary: '记忆维护完成（observation_check / stale_aging / trash_cleanup）',
+                finished_at: new Date().toISOString(),
+              },
+            },
+            this.moduleId,
+          )
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error)
+          console.error(`[DecisionDispatcher] memory_maintenance task ${task.id} failed: ${msg}`)
+          await this.rpcClient.call(
+            adminPort,
+            'update_task_status',
+            {
+              task_id: task.id,
+              status: 'failed',
+              result: { outcome: 'failed', summary: msg, finished_at: new Date().toISOString() },
+              error: msg,
+            },
+            this.moduleId,
+          ).catch(() => undefined)
+        }
+        return
       }
 
       try {
@@ -486,6 +565,25 @@ export class DecisionDispatcher {
           trace_id: result.trace_id,
         }).catch(() => {})
 
+        // 任务完成时同时尝试抽 case（fire-and-forget；失败静默）
+        {
+          const briefSrc = `${task.title} → ${result.summary}`.slice(0, 80)
+          this.memoryWriter.quickCapture({
+            type: 'lesson',
+            brief: briefSrc,
+            content: `任务 ${task.id}（${task.title}）${result.outcome === 'completed' ? '完成' : '失败'}：${result.summary}`,
+            source_ref: { type: 'conversation', task_id: task.id, channel_id: '', session_id: '' },
+            entities: [],
+            tags: [`task_outcome:${result.outcome}`],
+            importance_factors: {
+              proximity: 0.6,
+              surprisal: result.outcome === 'failed' ? 0.8 : 0.4,
+              entity_priority: 0.5,
+              unambiguity: 0.6,
+            },
+          }).catch(() => undefined)
+        }
+
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error)
         console.error(`[DecisionDispatcher] Background scheduled task ${task.id} failed: ${msg}`)
@@ -512,6 +610,25 @@ export class DecisionDispatcher {
           visibility: 'internal',
           scopes: [],
         }).catch(() => {})
+
+        // 任务完成时同时尝试抽 case（fire-and-forget；失败静默）
+        {
+          const briefSrc = `${task.title} → ${msg}`.slice(0, 80)
+          this.memoryWriter.quickCapture({
+            type: 'lesson',
+            brief: briefSrc,
+            content: `任务 ${task.id}（${task.title}）失败：${msg}`,
+            source_ref: { type: 'conversation', task_id: task.id, channel_id: '', session_id: '' },
+            entities: [],
+            tags: [`task_outcome:failed`],
+            importance_factors: {
+              proximity: 0.6,
+              surprisal: 0.8,
+              entity_priority: 0.5,
+              unambiguity: 0.6,
+            },
+          }).catch(() => undefined)
+        }
       }
     }
 
@@ -622,6 +739,95 @@ export class DecisionDispatcher {
     }
 
     return { task_id: decision.task_id }
+  }
+
+  /**
+   * Phase A (2026-04-25): 把 user_attitude 转为 memory RPC 调用。
+   *
+   * - silent / 没有 user_attitude → 跳过
+   * - reply / create_task：锚定到 prev finished task（同 channel/sender，30 分钟内）
+   * - supplement_task：锚定到 payload 里的 task_id
+   * - 找不到合法锚定 → 静默丢弃
+   *
+   * Spec: 2026-04-25-self-learning-feedback-signal-design.md §6 §9.1
+   */
+  private async reportFeedbackIfPresent(
+    decision: MessageDecision,
+    params: {
+      channel_id: ModuleId
+      session_id: string
+      senderFriend?: Friend
+    },
+  ): Promise<void> {
+    if (decision.type === 'silent') return
+    const attitude = (decision as { user_attitude?: 'strong_pass' | 'pass' | 'fail' | 'strong_fail' }).user_attitude
+    if (!attitude) return
+
+    let taskId: string | undefined
+    if (decision.type === 'supplement_task') {
+      taskId = decision.task_id
+    } else {
+      taskId = await this.findPrevFinishedTaskId({
+        channelId: params.channel_id,
+        senderFriendId: params.senderFriend?.id,
+        finishedWithinMs: 30 * 60 * 1000,
+      })
+    }
+    if (!taskId) return  // 锚定失败 → 静默丢弃
+
+    await this.memoryWriter.reportTaskFeedback(taskId, attitude)
+  }
+
+  /**
+   * 查找同 channel + 同 sender + 状态 finished + finished_at 距今 ≤ window 的最近一条 task。
+   *
+   * 实现策略：调 admin.list_tasks 拉 completed/failed 任务，agent 侧 filter + 排序取最近一条。
+   *
+   * Spec: 2026-04-25-self-learning-feedback-signal-design.md §6.1
+   */
+  private async findPrevFinishedTaskId(opts: {
+    channelId: ModuleId
+    senderFriendId: string | undefined
+    finishedWithinMs: number
+  }): Promise<string | undefined> {
+    if (!opts.senderFriendId) return undefined
+
+    let items: Array<{
+      id: string
+      status: string
+      finished_at?: string
+      source?: { channel_id?: string; friend_id?: string }
+    }> = []
+    try {
+      const adminPort = await this.getAdminPort()
+      const result = await this.rpcClient.call<
+        { filter: { status: string[] } },
+        { items: typeof items }
+      >(
+        adminPort,
+        'list_tasks',
+        { filter: { status: ['completed', 'failed'] } },
+        this.moduleId,
+      )
+      items = result.items ?? []
+    } catch {
+      return undefined
+    }
+
+    const now = Date.now()
+    const cutoff = now - opts.finishedWithinMs
+    const candidates = items
+      .filter(t => t.source?.channel_id === opts.channelId)
+      .filter(t => t.source?.friend_id === opts.senderFriendId)
+      .filter(t => t.status === 'completed' || t.status === 'failed')
+      .filter(t => {
+        if (!t.finished_at) return false
+        const ts = Date.parse(t.finished_at)
+        return Number.isFinite(ts) && ts >= cutoff
+      })
+      .sort((a, b) => Date.parse(b.finished_at!) - Date.parse(a.finished_at!))
+
+    return candidates[0]?.id
   }
 
   /**

@@ -1,0 +1,286 @@
+- id: ie-001
+  category: IE
+  setup_memories:
+    - type: fact
+      brief: 张三微信
+      content: 张三的微信号是 wxid_zhangsan
+      entities:
+        - {type: friend, id: z3, name: 张三}
+      tags: []
+      event_time: "2026-04-01T10:00:00Z"
+  query: 张三的微信号是多少
+  ground_truth: wxid_zhangsan
+  acceptable_answers:
+    - wxid_zhangsan
+    - 张三的微信是 wxid_zhangsan
+
+- id: ie-002
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 项目 A 截止, content: 项目 A 的截止日期是 2026-06-30,
+       entities: [], tags: [], event_time: "2026-04-10T10:00:00Z"}
+  query: 项目 A 的截止日期
+  ground_truth: "2026-06-30"
+  acceptable_answers: ["2026-06-30", 6月30日]
+
+- id: ie-003
+  category: IE
+  setup_memories:
+    - {type: fact, brief: master 启动偏好,
+       content: master 偏好用 dev.sh 启动 Crabot,
+       entities: [], tags: [], event_time: "2026-03-15T10:00:00Z"}
+  query: master 用什么命令启动 Crabot
+  ground_truth: dev.sh
+  acceptable_answers: [./dev.sh, dev.sh]
+
+- id: ie-004
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 李四电话, content: 李四的电话是 13800000000,
+       entities: [{type: friend, id: l4, name: 李四}], tags: [], event_time: "2026-04-15T10:00:00Z"}
+  query: 李四的电话号码
+  ground_truth: "13800000000"
+  acceptable_answers: ["13800000000"]
+
+- id: ie-005
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 公司地址, content: 公司地址在上海市徐汇区漕河泾,
+       entities: [], tags: [], event_time: "2026-04-15T10:00:00Z"}
+  query: 公司在哪
+  ground_truth: 上海市徐汇区漕河泾
+  acceptable_answers: [上海徐汇, 上海漕河泾]
+
+- id: ie-006
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 周会时间, content: 周会每周二下午 3 点,
+       entities: [], tags: [], event_time: "2026-04-15T10:00:00Z"}
+  query: 周会什么时候开
+  ground_truth: 周二下午 3 点
+  acceptable_answers: [星期二下午三点, 周二 15:00]
+
+- id: ie-007
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 王小明邮箱, content: 王小明的工作邮箱是 wangxm@company.com,
+       entities: [{type: friend, id: wxm, name: 王小明}], tags: [], event_time: "2026-03-20T10:00:00Z"}
+  query: 王小明的邮箱地址
+  ground_truth: wangxm@company.com
+  acceptable_answers: [wangxm@company.com, 王小明邮箱 wangxm@company.com]
+
+- id: ie-008
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 赵丽生日, content: 赵丽的生日是 1995-08-18,
+       entities: [{type: friend, id: zl, name: 赵丽}], tags: [], event_time: "2026-01-10T10:00:00Z"}
+  query: 赵丽的生日是哪天
+  ground_truth: "1995-08-18"
+  acceptable_answers: ["1995-08-18", 8月18日]
+
+- id: ie-009
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 项目 B 负责人, content: 项目 B 的负责人是陈伟,
+       entities: [{type: friend, id: cw, name: 陈伟}], tags: [], event_time: "2026-02-01T10:00:00Z"}
+  query: 谁负责项目 B
+  ground_truth: 陈伟
+  acceptable_answers: [陈伟, 陈伟负责]
+
+- id: ie-010
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 服务器 IP, content: 测试服务器 IP 是 192.168.1.100,
+       entities: [], tags: [], event_time: "2026-04-05T10:00:00Z"}
+  query: 测试服务器的 IP 地址
+  ground_truth: 192.168.1.100
+  acceptable_answers: [192.168.1.100]
+
+- id: ie-011
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 周杰 wxid, content: 周杰的微信号是 wxid_zhoujie123,
+       entities: [{type: friend, id: zj, name: 周杰}], tags: [], event_time: "2026-03-10T10:00:00Z"}
+  query: 周杰微信号
+  ground_truth: wxid_zhoujie123
+  acceptable_answers: [wxid_zhoujie123]
+
+- id: ie-012
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 数据库端口, content: 生产数据库端口是 5432,
+       entities: [], tags: [], event_time: "2026-04-01T10:00:00Z"}
+  query: 生产数据库用哪个端口
+  ground_truth: "5432"
+  acceptable_answers: ["5432", 5432]
+
+- id: ie-013
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 吴佳职位, content: 吴佳的职位是产品经理,
+       entities: [{type: friend, id: wj, name: 吴佳}], tags: [], event_time: "2026-01-15T10:00:00Z"}
+  query: 吴佳是做什么的
+  ground_truth: 产品经理
+  acceptable_answers: [产品经理, PM]
+
+- id: ie-014
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 钱晓彤电话, content: 钱晓彤的手机是 13911112222,
+       entities: [{type: friend, id: qxt, name: 钱晓彤}], tags: [], event_time: "2026-02-20T10:00:00Z"}
+  query: 钱晓彤的手机号
+  ground_truth: "13911112222"
+  acceptable_answers: ["13911112222"]
+
+- id: ie-015
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 项目 C 预算, content: 项目 C 的预算是 50 万元,
+       entities: [], tags: [], event_time: "2026-03-01T10:00:00Z"}
+  query: 项目 C 预算多少
+  ground_truth: 50 万元
+  acceptable_answers: [50万, 500000元]
+
+- id: ie-016
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 林海工号, content: 林海的工号是 EMP-2031,
+       entities: [{type: friend, id: lh, name: 林海}], tags: [], event_time: "2026-01-05T10:00:00Z"}
+  query: 林海的工号是什么
+  ground_truth: EMP-2031
+  acceptable_answers: [EMP-2031]
+
+- id: ie-017
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 会议室预订规则, content: 5 号会议室最多容纳 20 人,
+       entities: [], tags: [], event_time: "2026-04-10T10:00:00Z"}
+  query: 5 号会议室最多坐几个人
+  ground_truth: 20 人
+  acceptable_answers: [20人, 最多20]
+
+- id: ie-018
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 徐磊微信, content: 徐磊的微信号是 wxid_xulei888,
+       entities: [{type: friend, id: xl, name: 徐磊}], tags: [], event_time: "2026-03-25T10:00:00Z"}
+  query: 徐磊的微信
+  ground_truth: wxid_xulei888
+  acceptable_answers: [wxid_xulei888]
+
+- id: ie-019
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 办公室 WiFi 密码, content: 办公室 WiFi 密码是 Office@2026,
+       entities: [], tags: [], event_time: "2026-01-20T10:00:00Z"}
+  query: 办公室 WiFi 密码是什么
+  ground_truth: Office@2026
+  acceptable_answers: [Office@2026]
+
+- id: ie-020
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 孙芳部门, content: 孙芳在人力资源部,
+       entities: [{type: friend, id: sf, name: 孙芳}], tags: [], event_time: "2026-02-10T10:00:00Z"}
+  query: 孙芳在哪个部门
+  ground_truth: 人力资源部
+  acceptable_answers: [人力资源部, HR部门]
+
+- id: ie-021
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 冯宇邮箱, content: 冯宇的邮箱是 fengyu@tech.com,
+       entities: [{type: friend, id: fy, name: 冯宇}], tags: [], event_time: "2026-03-05T10:00:00Z"}
+  query: 冯宇的邮箱
+  ground_truth: fengyu@tech.com
+  acceptable_answers: [fengyu@tech.com]
+
+- id: ie-022
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 项目 D 开始时间, content: 项目 D 于 2026-03-01 正式启动,
+       entities: [], tags: [], event_time: "2026-03-01T10:00:00Z"}
+  query: 项目 D 什么时候开始的
+  ground_truth: "2026-03-01"
+  acceptable_answers: ["2026-03-01", 3月1日]
+
+- id: ie-023
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 郑阳生日, content: 郑阳生日是 1990-12-05,
+       entities: [{type: friend, id: zy2, name: 郑阳}], tags: [], event_time: "2026-01-08T10:00:00Z"}
+  query: 郑阳的生日
+  ground_truth: "1990-12-05"
+  acceptable_answers: ["1990-12-05", 12月5日]
+
+- id: ie-024
+  category: IE
+  setup_memories:
+    - {type: fact, brief: API 密钥前缀, content: 正式环境 API key 前缀是 sk-prod,
+       entities: [], tags: [], event_time: "2026-04-01T10:00:00Z"}
+  query: 正式环境 API key 前缀
+  ground_truth: sk-prod
+  acceptable_answers: [sk-prod]
+
+- id: ie-025
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 韩梅身高, content: 韩梅身高 168cm,
+       entities: [{type: friend, id: hm, name: 韩梅}], tags: [], event_time: "2026-02-14T10:00:00Z"}
+  query: 韩梅多高
+  ground_truth: 168cm
+  acceptable_answers: [168cm, 168 厘米]
+
+- id: ie-026
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 前端框架选型, content: 项目前端框架选用 React + TypeScript,
+       entities: [], tags: [], event_time: "2026-03-10T10:00:00Z"}
+  query: 项目前端用的什么框架
+  ground_truth: React + TypeScript
+  acceptable_answers: [React TypeScript, React+TS]
+
+- id: ie-027
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 杨帆公司, content: 杨帆在字节跳动工作,
+       entities: [{type: friend, id: yf2, name: 杨帆}], tags: [], event_time: "2026-01-25T10:00:00Z"}
+  query: 杨帆在哪家公司
+  ground_truth: 字节跳动
+  acceptable_answers: [字节跳动, ByteDance]
+
+- id: ie-028
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 云存储 bucket 名, content: 图片资源 bucket 名为 crabot-assets,
+       entities: [], tags: [], event_time: "2026-04-08T10:00:00Z"}
+  query: 图片资源存在哪个 bucket
+  ground_truth: crabot-assets
+  acceptable_answers: [crabot-assets]
+
+- id: ie-029
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 沈娜职位, content: 沈娜的职位是高级工程师,
+       entities: [{type: friend, id: sn, name: 沈娜}], tags: [], event_time: "2026-02-01T10:00:00Z"}
+  query: 沈娜的职位
+  ground_truth: 高级工程师
+  acceptable_answers: [高级工程师, Senior Engineer]
+
+- id: ie-030
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 测试环境域名, content: 测试环境域名是 test.crabot.internal,
+       entities: [], tags: [], event_time: "2026-04-02T10:00:00Z"}
+  query: 测试环境域名是什么
+  ground_truth: test.crabot.internal
+  acceptable_answers: [test.crabot.internal]
+
+- id: ie-031
+  category: IE
+  setup_memories:
+    - {type: fact, brief: 马超微信, content: 马超微信号是 wxid_machao007,
+       entities: [{type: friend, id: mc, name: 马超}], tags: [], event_time: "2026-03-18T10:00:00Z"}
+  query: 马超的微信号
+  ground_truth: wxid_machao007
+  acceptable_answers: [wxid_machao007]

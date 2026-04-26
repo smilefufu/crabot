@@ -127,6 +127,7 @@ import {
   projectPrivatePoolDialogObjects,
   sessionHasMasterParticipant,
 } from './dialog-objects.js'
+import { createMemoryV2RestRouter } from './memory-v2-rest.js'
 
 // ============================================================================
 // JWT 工具函数
@@ -291,6 +292,9 @@ export class AdminModule extends ModuleBase {
   // 调度引擎
   private scheduleEngine: ScheduleEngine
 
+  // Memory v2 REST router
+  private memoryV2Router!: ReturnType<typeof createMemoryV2RestRouter>
+
   // 模块 env 配置缓存
   private moduleEnvConfigCache: Map<string, Record<string, string>> = new Map()
 
@@ -335,6 +339,12 @@ export class AdminModule extends ModuleBase {
     )
     this.scheduleEngine = new ScheduleEngine({
       onTrigger: (schedule) => this.handleScheduleTrigger(schedule),
+    })
+
+    this.memoryV2Router = createMemoryV2RestRouter({
+      rpcClient: this.rpcClient,
+      moduleId: this.config.moduleId,
+      getMemoryPort: (mid) => this.getMemoryPort(mid),
     })
 
     // 注入回调，实现跨模块解耦通信
@@ -1577,6 +1587,18 @@ export class AdminModule extends ModuleBase {
         return
       }
 
+      // Memory v2 REST API
+      if (pathname.startsWith('/api/memory/v2/')) {
+        const bodyText = req.method && ['POST', 'PATCH', 'PUT'].includes(req.method)
+          ? JSON.stringify(await this.readJsonBody<unknown>(req).catch(() => ({})))
+          : undefined
+        const r = await this.memoryV2Router.dispatch(req.method ?? 'GET', req.url ?? '', bodyText)
+        res.writeHead(r.status, { 'Content-Type': 'application/json' })
+        if (r.status !== 204) res.end(JSON.stringify(r.body))
+        else res.end()
+        return
+      }
+
       // Memory 管理 API
       if (req.method === 'GET' && pathname === '/api/memory/modules') {
         await this.handleGetMemoryModulesApi(req, res)
@@ -1590,16 +1612,6 @@ export class AdminModule extends ModuleBase {
 
       if (req.method === 'GET' && pathname === '/api/memory/short-term') {
         await this.handleSearchShortTermApi(req, res, url)
-        return
-      }
-
-      if (req.method === 'GET' && pathname === '/api/memory/long-term/browse') {
-        await this.handleBrowseLongTermApi(req, res, url)
-        return
-      }
-
-      if (req.method === 'GET' && pathname === '/api/memory/long-term') {
-        await this.handleSearchLongTermApi(req, res, url)
         return
       }
 
@@ -3893,40 +3905,69 @@ export class AdminModule extends ModuleBase {
     }
   }
 
-  /** 确保内置 Schedule 存在。首次启动时创建，后续启动跳过。 */
+  /** 确保内置 Schedule 存在。首次启动时创建，后续启动跳过已存在的。 */
   private async ensureBuiltinSchedules(): Promise<void> {
-    const BUILTIN_SCHEDULE_NAME = '每日反思'
-    const exists = Array.from(this.schedules.values()).some(s => s.is_builtin && s.name === BUILTIN_SCHEDULE_NAME)
-    if (exists) return
+    const SEEDS: Array<Pick<Schedule, 'name' | 'description' | 'trigger' | 'task_template'>> = [
+      {
+        name: '每日反思',
+        description: '每天凌晨 2 点自动执行反思，分析前一天任务执行情况，提炼经验写入长期记忆。',
+        trigger: { type: 'cron', expression: '0 2 * * *', timezone: 'Asia/Shanghai' },
+        task_template: {
+          type: 'daily_reflection',
+          title: '每日反思 — {{date}}',
+          description: '执行每日反思。反思时间范围：{{watermark}} 到 {{datetime}}。标准流程：1）获取此时间范围内的任务概览；2）筛选值得深入分析的任务（排除 daily_reflection 类型，优先关注失败、轮数异常、人类情绪明显的）；3）对每个选中任务委派 sub-agent 深入分析（trace span + 对话历史），返回分析结果和经验建议；4）综合所有 sub-agent 结果，跨任务去重，统一写入长期记忆；5）重大发现向 master 汇报。',
+          priority: 'low',
+          tags: ['daily_reflection', 'builtin'],
+        },
+      },
+      {
+        name: '周期轻反思',
+        description: '每小时扫一次 inbox，做去重和多因子打分，高分高置信晋升 confirmed。',
+        trigger: { type: 'interval', seconds: 3600 },
+        task_template: {
+          type: 'quick_reflection',
+          title: '周期轻反思 — {{datetime}}',
+          description: '执行 quick-reflection skill：扫近期 inbox → 去重 → 多因子打分 → 晋升 / 留待 daily。',
+          priority: 'low',
+          tags: ['quick_reflection', 'builtin'],
+        },
+      },
+      {
+        name: '记忆维护',
+        description: '每天凌晨 4 点跑 memory.run_maintenance(scope=all)，做观察期到期检查 / stale 老化 / trash 清理。',
+        trigger: { type: 'cron', expression: '0 4 * * *', timezone: 'Asia/Shanghai' },
+        task_template: {
+          type: 'memory_maintenance',
+          title: '记忆维护 — {{date}}',
+          description: '调用 memory 模块 run_maintenance({scope: "all"}) RPC。',
+          priority: 'low',
+          tags: ['memory_maintenance', 'builtin'],
+        },
+      },
+    ]
 
-    const now = generateTimestamp()
-    const schedule: Schedule = {
-      id: generateId(),
-      name: BUILTIN_SCHEDULE_NAME,
-      description: '每天凌晨 2 点自动执行反思，分析前一天任务执行情况，提炼经验写入长期记忆。',
-      enabled: true,
-      is_builtin: true,
-      trigger: {
-        type: 'cron',
-        expression: '0 2 * * *',
-        timezone: 'Asia/Shanghai',
-      },
-      task_template: {
-        type: 'daily_reflection',
-        title: '每日反思 — {{date}}',
-        description: '执行每日反思。反思时间范围：{{watermark}} 到 {{datetime}}。标准流程：1）获取此时间范围内的任务概览；2）筛选值得深入分析的任务（排除 daily_reflection 类型，优先关注失败、轮数异常、人类情绪明显的）；3）对每个选中任务委派 sub-agent 深入分析（trace span + 对话历史），返回分析结果和经验建议；4）综合所有 sub-agent 结果，跨任务去重，统一写入长期记忆；5）重大发现向 master 汇报。',
-        priority: 'low',
-        tags: ['daily_reflection', 'builtin'],
-      },
-      execution_count: 0,
-      next_trigger_at: this.calculateNextTriggerTime({ type: 'cron', expression: '0 2 * * *', timezone: 'Asia/Shanghai' }),
-      created_at: now,
-      updated_at: now,
+    const existing = new Set(
+      Array.from(this.schedules.values()).filter(s => s.is_builtin).map(s => s.name),
+    )
+
+    for (const seed of SEEDS) {
+      if (existing.has(seed.name)) continue
+      const now = generateTimestamp()
+      const id = generateId()
+      const schedule: Schedule = {
+        id,
+        ...seed,
+        enabled: true,
+        is_builtin: true,
+        execution_count: 0,
+        next_trigger_at: this.calculateNextTriggerTime(seed.trigger),
+        created_at: now,
+        updated_at: now,
+      }
+      this.schedules.set(id, schedule)
     }
-
-    this.schedules.set(schedule.id, schedule)
     await this.saveData()
-    console.log(`[Admin] Created builtin schedule: ${BUILTIN_SCHEDULE_NAME}`)
+    console.log('[Admin] Builtin schedules ensured: daily-reflection / quick-reflection / memory-maintenance')
   }
 
   // ============================================================================
@@ -6524,68 +6565,6 @@ export class AdminModule extends ModuleBase {
     )
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(result))
-  }
-
-  private async handleSearchLongTermApi(_req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
-    const moduleId = url.searchParams.get('module_id') ?? undefined
-    const q = url.searchParams.get('q')?.trim()
-    if (!q) {
-      res.writeHead(400, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: 'q is required for long-term search' }))
-      return
-    }
-    const limit = parseInt(url.searchParams.get('limit') ?? '20', 10)
-    const friendId = url.searchParams.get('friend_id') ?? undefined
-    const accessibleScopes = this.parseAccessibleScopes(url)
-    const port = await this.getMemoryPort(moduleId)
-    const result = await this.rpcClient.call<{
-      query: string
-      limit: number
-      detail: string
-      filter?: { entity_id?: string }
-      accessible_scopes?: string[]
-    }, unknown>(
-      port,
-      'search_long_term',
-      {
-        query: q,
-        limit,
-        detail: 'L1',
-        ...(friendId ? { filter: { entity_id: friendId } } : {}),
-        ...(accessibleScopes ? { accessible_scopes: accessibleScopes } : {}),
-      },
-      this.config.moduleId
-    )
-    res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify(result))
-  }
-
-  private async handleBrowseLongTermApi(_req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
-    const moduleId = url.searchParams.get('module_id') ?? undefined
-    const limit = parseInt(url.searchParams.get('limit') ?? '20', 10)
-    const friendId = url.searchParams.get('friend_id') ?? undefined
-    const accessibleScopes = this.parseAccessibleScopes(url)
-    const port = await this.getMemoryPort(moduleId)
-    const result = await this.rpcClient.call<{
-      limit: number
-      detail: string
-      filter?: { entity_id?: string }
-      accessible_scopes?: string[]
-    }, { results: Array<{ memory: unknown; relevance: number }> }>(
-      port,
-      'browse_long_term',
-      {
-        limit,
-        detail: 'L1',
-        ...(friendId ? { filter: { entity_id: friendId } } : {}),
-        ...(accessibleScopes ? { accessible_scopes: accessibleScopes } : {}),
-      },
-      this.config.moduleId
-    )
-    res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({
-      results: result.results.map((item) => item.memory),
-    }))
   }
 
   private async handleGetMemoryApi(_req: IncomingMessage, res: ServerResponse, url: URL, memoryId: string): Promise<void> {

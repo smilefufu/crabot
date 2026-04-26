@@ -18,10 +18,6 @@
 2. **写代码时**：类型名、字段名、方法签名必须与协议文档一字不差。不得自行简化、重命名或合并字段
 3. **写代码后**：对照协议文档逐项检查，确保没有偏差
 
-### 常见错误模式（已踩过的坑）
-
-### 根因分析
-
 ### 检查清单
 
 每次实现新模块或修改现有模块时：
@@ -46,17 +42,12 @@
 
 1. **使用环境变量**：路径通过环境变量传递
    ```yaml
-   database_url: "sqlite:///${DATA_DIR}/litellm/litellm.db"
+   data_path: "${DATA_DIR}/agent/state.json"
    ```
 
 2. **使用相对路径**：相对于项目根目录或工作目录
    ```yaml
-   database_url: "sqlite:///./data/litellm/litellm.db"
-   ```
-
-3. **使用 os.environ**：在配置中引用环境变量
-   ```yaml
-   database_url: os.environ/DATABASE_URL
+   data_path: "./data/agent/state.json"
    ```
 
 ### 检查清单
@@ -66,34 +57,51 @@
 - [ ] 路径通过环境变量或相对路径配置
 - [ ] 配置在开发和生产环境都能正常工作
 
-## LiteLLM 集成架构（必须理解）
+## LLM Provider 连接架构（必须理解）
 
 ### 核心原则
 
-**Agent 永远不直连 Provider，必须通过 LiteLLM 代理。** LiteLLM 负责 API 格式转换（openai ↔ anthropic ↔ gemini）。
+**Agent 直连 Provider 原生 API，不经过任何代理。** 由 Agent 内部的多格式适配器层（`crabot-agent/src/engine/llm-adapter.ts`）根据 `format` 路由到对应 SDK。
+
+> 历史备注：2026-04 之前曾有 LiteLLM 代理层（port 4000）做格式转换，现已完全移除。如果在旧文档或 memory 里看到 LiteLLM、port 4000、`LITELLM_BASE_URL/MASTER_KEY`、`provider-<hash>-<model>` 这类命名，一律视为过时信息，以本文件和代码为准。
 
 ### 数据流
 
 ```
-Agent (Anthropic SDK) → LiteLLM (port 4000) → Provider (Ollama/OpenAI/etc)
-     format: anthropic      格式转换           format: openai
+Agent (engine/llm-adapter.ts)
+  ├── format=anthropic          → AnthropicAdapter      → Anthropic SDK
+  ├── format=openai             → OpenAIAdapter         → OpenAI SDK
+  ├── format=gemini             → OpenAIAdapter         → Gemini 的 OpenAI 兼容端点
+  └── format=openai-responses   → OpenAIResponsesAdapter → ChatGPT Responses API（OAuth）
 ```
 
-### 关键实现
+适配器工厂位置：`crabot-agent/src/engine/llm-adapter.ts` 的 `createAdapter({endpoint, apikey, format, accountId?})`。
 
-- `ModelProviderManager.buildConnectionInfo(providerId, modelId)` 是唯一的连接信息解析入口
-  - 将 Provider 原始信息（endpoint, apikey, format）转换为 LiteLLM 路由信息
-  - 输出 `endpoint: http://localhost:4000`（不含 /v1，Anthropic SDK 自动追加 /v1/messages）
-  - 输出 `format: 'anthropic'`
-  - 输出 `model_id: 'provider-{id前缀}-{清理后的模型名}'`（LiteLLM 注册的模型名）
+### 连接信息解析入口
 
-- `handleGetAgentConfig` 在返回配置给 Agent 前，通过 `buildConnectionInfo` 解析每个 model role
+`ModelProviderManager.buildConnectionInfo(providerId, modelId)`（`crabot-admin/src/**` 内）是唯一的连接信息解析入口，返回 Provider 原生连接信息：
+
+```typescript
+{
+  endpoint: provider.endpoint,    // 直接是 Provider 原生端点（如 https://api.openai.com）
+  apikey: provider.api_key,       // 原生 API key；OAuth 场景返回已刷新的 access_token
+  model_id: model.model_id,       // 原生模型名（如 gpt-4o、claude-sonnet-4-6）
+  format: provider.format,        // 'anthropic' | 'openai' | 'gemini' | 'openai-responses'
+  provider_id,
+  max_tokens?, supports_vision?,
+  account_id?                     // OAuth 专用
+}
+```
+
+**OAuth token 自动刷新**：`buildConnectionInfo` 内部检测 token 过期并自动刷新，对调用方透明。
+
+`handleGetAgentConfig` 在把配置返回给 Agent 前，对每个 model role 调 `buildConnectionInfo` 实时解析。
 
 ### 常见错误模式（已踩过的坑）
 
-- **直传 Provider 原始信息给 Agent**：前端选择 Provider 后直接存 `endpoint/apikey/format`，Agent 收到 `format: 'openai'` 崩溃
-- **endpoint 包含 /v1**：Anthropic SDK 的 baseURL 不应含 /v1，否则请求变成 `/v1/v1/messages` → 404
-- **LiteLLM 模型名不匹配**：Agent 必须使用 LiteLLM 注册的模型名（如 `provider-bdbf737d-qwen35-cloud`），不是原始模型名（如 `qwen3.5:cloud`）
+- **endpoint 不匹配 format**：endpoint 指向 OpenAI 但 format='anthropic' → 适配器发错 schema 请求
+- **把废弃字段塞回配置**：旧代码里可能残留 `litellm_url`、`provider-<hash>-<name>` 这类字段，新代码严禁引入
+- **OAuth 配置绕过 buildConnectionInfo**：会拿到过期 token，必须走解析入口以触发刷新
 
 ## 模块配置架构（必须理解，反复踩坑的重灾区）
 
@@ -117,13 +125,11 @@ Agent (Anthropic SDK) → LiteLLM (port 4000) → Provider (Ollama/OpenAI/etc)
 
 ```
 对于 Agent 声明的每个 model slot：
-  1. 如果 Agent 实例配置了此 slot → 用 buildConnectionInfo(provider_id, model_id) 实时解析
+  1. 如果 Agent 实例配置了此 slot → buildConnectionInfo(provider_id, model_id) 实时解析
   2. 如果没配 → 用全局默认的 provider_id + model_id 实时解析
   3. 都没有 → 报错
 
-buildConnectionInfo 的职责：
-  provider_id + model_id → 查 Provider 列表 → 生成 LiteLLM 路由信息
-  → 返回 { endpoint: litellm_url, apikey: litellm_key, model_id: litellm_name, format: 'anthropic' }
+返回给 Agent 的 model_config[role] 是 Provider 原生连接信息，Agent 侧直接喂给 createAdapter()
 ```
 
 ### 数据流
@@ -131,13 +137,12 @@ buildConnectionInfo 的职责：
 ```
 用户在 Admin UI 配置
   → 保存到磁盘（引用格式）
-  → requestSync()（LiteLLM 模型同步）
   → pushConfigToAgentModules()（推送到运行中的 Agent）
 
 Agent 启动 / 收到 push
   → RPC: get_agent_config
-    → handleGetAgentConfig() 读取存储的引用 + 实时解析为连接信息
-    → 返回给 Agent
+    → handleGetAgentConfig() 读取存储的引用 + 实时解析为 Provider 原生连接信息
+    → 返回给 Agent → createAdapter({endpoint, apikey, format, accountId?})
 ```
 
 ### 已踩过的坑（严禁重犯）
@@ -157,7 +162,7 @@ node scripts/debug-agent.mjs health   # 确认各模块存活
 node scripts/debug-agent.mjs traces   # 查看最近 trace
 node scripts/debug-agent.mjs trace    # 查看最新 trace 详情（含 span 树，支持短 ID）
 node scripts/debug-agent.mjs tasks    # 查看 Admin 任务状态
-node scripts/debug-agent.mjs logs     # 查看 SDK Runner 日志
+node scripts/debug-agent.mjs logs     # 查看 Worker Handler 日志
 node scripts/debug-agent.mjs modules  # 查看 MM 注册的模块
 ```
 
@@ -179,6 +184,7 @@ node scripts/debug-agent.mjs modules  # 查看 MM 注册的模块
 - 前端改代码 → 浏览器自动刷新（Vite HMR）
 - 后端改代码 → 需要 `./dev.sh stop && ./dev.sh`（重新构建）
 - **launcher.sh 不适合开发**：没有构建步骤，代码改了不生效
+- `dev.sh` 只启动 Module Manager，由 MM 拉起 Admin / Agent / Memory 子进程；**不再启动任何 LLM 代理进程**
 
 ### 前端构建须知
 
@@ -186,23 +192,6 @@ node scripts/debug-agent.mjs modules  # 查看 MM 注册的模块
 - Admin 后端（port 3000）serve 的是构建后的静态文件，不是源码
 - Vite 开发服务器（port 5173）代理 `/api` 和 `/ws` 到后端 port 3000
 - **改了前端代码不生效？** 检查是通过 port 5173（Vite）还是 port 3000（静态文件）访问的
-
-### 环境变量
-
-- `data/admin/.env` 含 `CRABOT_ADMIN_PASSWORD`
-- `.env` 含 `LITELLM_BASE_URL`、`LITELLM_MASTER_KEY`、`LITELLM_CONFIG_PATH` 等
-- LiteLLM 默认: port 4000, master key 通过 `LITELLM_MASTER_KEY` 环境变量配置
-
-### 端口分配
-
-| 服务 | 默认端口 | 说明 |
-|------|----------|------|
-| Module Manager | 19000 | 核心进程管理 |
-| Admin (RPC) | 19001 | 模块间通信 |
-| Admin (Web) | 3000 | REST API + 静态文件 |
-| Agent | 19002+ | 由 Module Manager 动态分配 |
-| LiteLLM | 4000 | LLM 代理 |
-| Vite Dev | 5173 | 前端 HMR（仅开发） |
 
 ### 多实例部署
 
@@ -219,4 +208,4 @@ CRABOT_PORT_OFFSET=100 ./dev.sh
 CRABOT_PORT_OFFSET=200 DATA_DIR=/data/tenant-c ./dev.sh
 ```
 
-端口映射规则：所有默认端口 + offset（如 offset=100 时，MM=19100, Admin RPC=19101, Admin Web=3100, LiteLLM=4100）。每个实例占用 100 个端口范围（19002-19099 → 19102-19199）。
+端口映射规则：所有默认端口 + offset（如 offset=100 时，MM=19100, Admin RPC=19101, Admin Web=3100）。每个实例占用 100 个端口范围（19002-19099 → 19102-19199）。
