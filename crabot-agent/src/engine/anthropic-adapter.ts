@@ -151,7 +151,12 @@ export class AnthropicAdapter implements LLMAdapter {
     yield* streamWithRetry(
       'anthropic-adapter',
       () => this.streamOnce(params),
-      { abortSignal: params.signal },
+      {
+        abortSignal: params.signal,
+        // message_start 仅携带 messageId，StreamProcessor 对其 noop。允许在
+        // 此类元事件后重试，挽救上游过早关闭 socket 的常见网络抽风。
+        isMaterial: (c) => c.type !== 'message_start',
+      },
     )
   }
 

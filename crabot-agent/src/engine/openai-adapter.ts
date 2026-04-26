@@ -157,7 +157,10 @@ export class OpenAIAdapter implements LLMAdapter {
     yield* streamWithRetry(
       'openai-adapter',
       () => this.streamOnce(params),
-      { abortSignal: params.signal },
+      {
+        abortSignal: params.signal,
+        isMaterial: (c) => c.type !== 'message_start',
+      },
     )
   }
 

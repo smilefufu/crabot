@@ -94,7 +94,17 @@ export interface RetryOptions {
   readonly abortSignal?: AbortSignal
 }
 
-export type StreamRetryOptions = RetryOptions
+export interface StreamRetryOptions<T = unknown> extends RetryOptions {
+  /**
+   * 判断已 yield 的 chunk 是否对消费者可见。返回 true 后，再次失败将不再重试
+   * （避免重复 chunk 送给消费者）。默认：所有 chunk 都视为可见 —— 等同旧行为。
+   *
+   * 用途：流式 LLM 响应可能先吐元事件（如 `message_start`，仅含 messageId，对
+   * 下游 StreamProcessor 是 noop），再吐实质性内容。识别这类元事件后，即便
+   * 已 yield 也允许在断流时重试。
+   */
+  readonly isMaterial?: (chunk: T) => boolean
+}
 
 /**
  * Wraps a promise-returning factory with retry semantics. Retries on known
@@ -136,22 +146,25 @@ export async function withRetry<T>(
 export async function* streamWithRetry<T>(
   label: string,
   makeStream: () => AsyncGenerator<T>,
-  options: RetryOptions = {},
+  options: StreamRetryOptions<T> = {},
 ): AsyncGenerator<T> {
   const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES
   const delayMs = options.delayMs ?? DEFAULT_RETRY_DELAY_MS
   const abortSignal = options.abortSignal
+  const isMaterial = options.isMaterial ?? (() => true)
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    let yielded = false
+    let materialYielded = false
     try {
       for await (const chunk of makeStream()) {
-        yielded = true
+        if (!materialYielded && isMaterial(chunk)) {
+          materialYielded = true
+        }
         yield chunk
       }
       return
     } catch (err) {
-      if (yielded) throw err
+      if (materialYielded) throw err
       if (abortSignal?.aborted) throw err
       if (!isRetryableError(err)) throw err
       if (attempt >= maxRetries) throw err
