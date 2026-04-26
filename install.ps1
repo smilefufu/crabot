@@ -46,7 +46,7 @@ function Ensure-Pnpm {
     Write-Info "Activating pnpm via corepack..."
     corepack enable
     corepack prepare --activate
-    $pnpmVer = (pnpm --version)
+    $pnpmVer = (corepack pnpm --version)
     Write-Info "pnpm $pnpmVer ready"
 }
 
@@ -59,24 +59,24 @@ Ensure-Uv
 if ($FromSource) {
     Ensure-Pnpm
     Write-Info "Source install..."
-    pnpm install
+    corepack pnpm install
     # shared 必须先编译
     Push-Location crabot-shared
-    pnpm install; pnpm run build
+    corepack pnpm install; corepack pnpm run build
     Pop-Location
     foreach ($mod in @('crabot-core','crabot-admin','crabot-agent','crabot-channel-host','crabot-channel-wechat','crabot-channel-telegram','crabot-mcp-tools')) {
         if (Test-Path $mod) {
             Push-Location $mod
-            pnpm install; pnpm run build
+            corepack pnpm install; corepack pnpm run build
             Pop-Location
         }
     }
     if (Test-Path 'crabot-admin/web') {
         Push-Location 'crabot-admin/web'
-        pnpm install; pnpm run build
+        corepack pnpm install; corepack pnpm run build
         Pop-Location
     }
-    pnpm run build:cli
+    corepack pnpm run build:cli
     Set-Location crabot-memory
     uv sync
     Set-Location ..

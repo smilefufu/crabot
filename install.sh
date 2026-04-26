@@ -98,7 +98,7 @@ ensure_pnpm() {
   corepack enable
   # 读取根 package.json 的 packageManager 字段并激活
   corepack prepare --activate
-  info "pnpm $(pnpm --version) ready"
+  info "pnpm $(corepack pnpm --version) ready"
 }
 
 # --- 版本比较 ---
@@ -126,20 +126,20 @@ main() {
     ensure_pnpm
     section "Source Install"
     info "Installing pnpm dependencies (root)..."
-    pnpm install
+    corepack pnpm install
     info "Building all modules..."
     # shared 必须先编译（其他模块依赖它）
-    (cd crabot-shared && pnpm install && pnpm run build)
+    (cd crabot-shared && corepack pnpm install && corepack pnpm run build)
     for dir in crabot-core crabot-admin crabot-agent crabot-channel-host crabot-channel-wechat crabot-channel-telegram crabot-mcp-tools; do
       if [ -d "$dir" ]; then
-        (cd "$dir" && pnpm install && pnpm run build)
+        (cd "$dir" && corepack pnpm install && corepack pnpm run build)
       fi
     done
     # 前端依赖与构建（之前漏装）
     if [ -d "crabot-admin/web" ]; then
-      (cd crabot-admin/web && pnpm install && pnpm run build)
+      (cd crabot-admin/web && corepack pnpm install && corepack pnpm run build)
     fi
-    pnpm run build:cli
+    corepack pnpm run build:cli
     info "Setting up Python environment..."
     (cd crabot-memory && uv sync)
     info "Source install complete."

@@ -97,8 +97,8 @@ needs_sync() {
 }
 
 sync_node_deps() {
-  if ! command -v pnpm &>/dev/null && ! command -v corepack &>/dev/null; then
-    log_warn "pnpm/corepack 未找到，跳过依赖同步"
+  if ! command -v corepack &>/dev/null; then
+    log_warn "corepack 未找到（需要 Node 16.13+），跳过依赖同步"
     log_dim "  首次安装请运行: ./install.sh --from-source"
     return 0
   fi
@@ -119,7 +119,7 @@ sync_node_deps() {
   local pids=()
   for mod in "${pending[@]}"; do
     log_dim "  $mod"
-    (cd "$SCRIPT_DIR/$mod" && pnpm install --prefer-offline >/tmp/.crabot-dev-sync-"${mod//\//-}".log 2>&1) &
+    (cd "$SCRIPT_DIR/$mod" && corepack pnpm install --prefer-offline >/tmp/.crabot-dev-sync-"${mod//\//-}".log 2>&1) &
     pids+=($!)
   done
 
@@ -143,7 +143,7 @@ build_all() {
   # crabot-shared 必须先编译
   if [ -d "$SCRIPT_DIR/crabot-shared" ]; then
     log_dim "  crabot-shared"
-    (cd "$SCRIPT_DIR/crabot-shared" && pnpm run build 2>&1 | sed 's/^/    /') || {
+    (cd "$SCRIPT_DIR/crabot-shared" && corepack pnpm run build 2>&1 | sed 's/^/    /') || {
       log_error "crabot-shared 构建失败"
       exit 1
     }
@@ -160,7 +160,7 @@ build_all() {
       continue
     fi
     log_dim "  $mod"
-    (cd "$SCRIPT_DIR/$mod" && pnpm run build 2>&1 | sed 's/^/    /') || {
+    (cd "$SCRIPT_DIR/$mod" && corepack pnpm run build 2>&1 | sed 's/^/    /') || {
       log_error "$mod 构建失败"
       fail=1
     }

@@ -26,10 +26,12 @@ function runCmd(cmd, args, cwd, logger) {
   })
 }
 
+// 所有 pnpm 调用走 corepack，避免被用户机器上抢占 PATH 的全局 pnpm 干扰
+// （否则可能用错 major 版本，把 lockfile v9.0 降级成 v5.4）
 async function installAndBuild(moduleDir, logger) {
   // --prefer-offline：lock 未变时跳过网络 verify，毫秒级返回
-  await runCmd('pnpm', ['install', '--prefer-offline'], moduleDir, logger)
-  await runCmd('pnpm', ['run', 'build'], moduleDir, logger)
+  await runCmd('corepack', ['pnpm', 'install', '--prefer-offline'], moduleDir, logger)
+  await runCmd('corepack', ['pnpm', 'run', 'build'], moduleDir, logger)
 }
 
 async function ensurePnpm(crabotHome, logger) {
@@ -41,7 +43,7 @@ async function ensurePnpm(crabotHome, logger) {
 export async function runSourceUpgrade(crabotHome, logger) {
   await ensurePnpm(crabotHome, logger)
 
-  await runCmd('pnpm', ['install', '--prefer-offline'], crabotHome, logger)
+  await runCmd('corepack', ['pnpm', 'install', '--prefer-offline'], crabotHome, logger)
 
   const sharedDir = join(crabotHome, SHARED_MODULE)
   if (existsSync(sharedDir)) {
@@ -60,7 +62,7 @@ export async function runSourceUpgrade(crabotHome, logger) {
     await installAndBuild(webDir, logger)
   }
 
-  await runCmd('pnpm', ['run', 'build:cli'], crabotHome, logger)
+  await runCmd('corepack', ['pnpm', 'run', 'build:cli'], crabotHome, logger)
 
   const memoryDir = join(crabotHome, PY_MODULE)
   if (existsSync(memoryDir)) {
