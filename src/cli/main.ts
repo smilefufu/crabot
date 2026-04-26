@@ -12,6 +12,7 @@ import { registerChannelCommands } from './commands/channel.js'
 import { registerFriendCommands } from './commands/friend.js'
 import { registerConfigCommands } from './commands/config.js'
 import { registerPermissionCommands } from './commands/permission.js'
+import { registerAgentSetModelCommand } from './commands/composites/agent-set-model.js'
 
 export interface CliContext {
   readonly client: AdminClient
@@ -61,6 +62,7 @@ export function run(argv: string[]): void {
 
   registerProviderCommands(program)
   registerAgentCommands(program)
+  registerAgentSetModelCommand(program)
   registerMcpCommands(program)
   registerSkillCommands(program)
   registerScheduleCommands(program)
