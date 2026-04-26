@@ -15,6 +15,7 @@ import { ModuleBase, type ModuleConfig, generateId, generateTimestamp, type Even
 import { TelegramClient, TelegramApiError } from './telegram-client.js'
 import { SessionManager } from './session-manager.js'
 import { MessageStore } from './message-store.js'
+import { splitText } from './text-splitter.js'
 import type {
   TgUpdate,
   TgMessage,
@@ -36,6 +37,7 @@ import type {
 } from './types.js'
 
 const MAX_MESSAGE_LENGTH = 4096
+const MAX_CAPTION_LENGTH = 1024
 const MAX_FILE_SIZE = 50 * 1024 * 1024 // 50 MB
 
 // ============================================================================
@@ -416,58 +418,95 @@ export class TelegramChannel extends ModuleBase {
     const replyTo = params.features?.reply_to_message_id
       ? parseInt(params.features.reply_to_message_id, 10)
       : undefined
-    const sendOpts = replyTo ? { reply_to_message_id: replyTo } : undefined
 
-    console.log(`[TelegramChannel] Sending message to chat ${chatId}: ${text.slice(0, 50)}...`)
+    console.log(
+      `[TelegramChannel] Sending message to chat ${chatId} (${text.length} chars): ${text.slice(0, 50)}...`
+    )
 
-    const sentMsg = await this.sendByContentType(params, chatId, text, sendOpts)
-
-    const messageId = String(sentMsg.message_id)
+    const sentIds = await this.dispatchSend(params, chatId, text, replyTo)
+    const firstId = String(sentIds[0])
     const sentAt = generateTimestamp()
 
     await this.messageStore.appendOutbound({
       sessionId: params.session_id,
-      platformMessageId: messageId,
+      platformMessageId: firstId,
       text: text || '[非文本消息]',
       contentType: params.content.type,
       timestamp: sentAt,
     })
 
-    return { platform_message_id: messageId, sent_at: sentAt }
+    return { platform_message_id: firstId, sent_at: sentAt }
   }
 
   /**
-   * 按 content.type 选择发送方式。image/file 走 sendMedia，text 走 sendMessage。
+   * 按 content.type 选择发送方式，超长文本/caption 自动按 Telegram 限制切分多条。
+   * 第一条消息绑定 reply_to_message_id，后续接力发送不带 reply_to。
+   * 返回所有发出的 message_id（顺序）。
    */
-  private async sendByContentType(
+  private async dispatchSend(
     params: SendMessageParams,
     chatId: string,
     text: string,
-    sendOpts?: { reply_to_message_id: number }
-  ): Promise<{ message_id: number }> {
+    replyTo: number | undefined
+  ): Promise<number[]> {
     const { type, file_path, media_url, filename } = params.content
     const source = file_path ?? media_url
+    const hasMedia = (type === 'image' || type === 'file') && !!source
 
-    if ((type === 'image' || type === 'file') && source) {
+    if (hasMedia) {
+      const media = await loadMediaSource(source!)
       const sendFn = type === 'image'
         ? this.client.sendPhoto.bind(this.client)
         : this.client.sendDocument.bind(this.client)
+      const fileOpts = type === 'file' && filename ? { filename } : {}
 
-      let media: string | Buffer = source
-      try {
-        media = await fs.readFile(source)
-      } catch {
-        // Not a local file — pass as URL string
-      }
+      // 把文本按 caption 上限切分：第一段塞进 caption，后续段独立发 text。
+      // 每段 <= MAX_CAPTION_LENGTH < MAX_MESSAGE_LENGTH，单条 sendMessage 安全。
+      const chunks = splitText(text, MAX_CAPTION_LENGTH)
+      const caption = chunks.length > 0 ? chunks[0] : undefined
 
-      return sendFn(chatId, media, {
-        ...sendOpts,
-        caption: text || undefined,
-        ...(type === 'file' && filename ? { filename } : {}),
+      const firstMsg = await sendFn(chatId, media, {
+        ...(replyTo ? { reply_to_message_id: replyTo } : {}),
+        caption,
+        ...fileOpts,
       })
+      const ids = [firstMsg.message_id]
+
+      for (let i = 1; i < chunks.length; i++) {
+        const sent = await this.client.sendMessage(chatId, chunks[i])
+        ids.push(sent.message_id)
+      }
+      return ids
     }
 
-    return this.client.sendMessage(chatId, text, sendOpts)
+    return this.sendTextChunks(chatId, text, replyTo)
+  }
+
+  /**
+   * 按 MAX_MESSAGE_LENGTH 智能切分文本并依次发送。第一条带 reply_to，后续不带。
+   */
+  private async sendTextChunks(
+    chatId: string,
+    text: string,
+    replyTo: number | undefined
+  ): Promise<number[]> {
+    const chunks = splitText(text, MAX_MESSAGE_LENGTH)
+    if (chunks.length === 0) {
+      const sent = await this.client.sendMessage(
+        chatId,
+        text,
+        replyTo ? { reply_to_message_id: replyTo } : undefined
+      )
+      return [sent.message_id]
+    }
+
+    const ids: number[] = []
+    for (let i = 0; i < chunks.length; i++) {
+      const opts = i === 0 && replyTo ? { reply_to_message_id: replyTo } : undefined
+      const sent = await this.client.sendMessage(chatId, chunks[i], opts)
+      ids.push(sent.message_id)
+    }
+    return ids
   }
 
   private handleGetCapabilities(): ChannelCapabilities {
@@ -590,6 +629,14 @@ export class TelegramChannel extends ModuleBase {
 // ============================================================================
 // 工具函数
 // ============================================================================
+
+async function loadMediaSource(source: string): Promise<string | Buffer> {
+  try {
+    return await fs.readFile(source)
+  } catch {
+    return source
+  }
+}
 
 function storedMessageToProtocol(m: StoredMessage) {
   return {
