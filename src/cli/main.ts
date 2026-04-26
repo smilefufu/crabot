@@ -13,6 +13,9 @@ import { registerFriendCommands } from './commands/friend.js'
 import { registerConfigCommands } from './commands/config.js'
 import { registerPermissionCommands } from './commands/permission.js'
 import { registerAgentSetModelCommand } from './commands/composites/agent-set-model.js'
+import { registerConfigSwitchDefaultCommand } from './commands/composites/config-switch-default.js'
+import { registerMcpToggleCommand } from './commands/composites/mcp-toggle.js'
+import { registerScheduleToggleCommands } from './commands/composites/schedule-toggle.js'
 
 export interface CliContext {
   readonly client: AdminClient
@@ -70,6 +73,9 @@ export function run(argv: string[]): void {
   registerFriendCommands(program)
   registerConfigCommands(program)
   registerPermissionCommands(program)
+  registerConfigSwitchDefaultCommand(program)
+  registerMcpToggleCommand(program)
+  registerScheduleToggleCommands(program)
 
   program.parseAsync(argv).catch((err: unknown) => {
     const cli =
