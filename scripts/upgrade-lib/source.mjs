@@ -27,12 +27,21 @@ function runCmd(cmd, args, cwd, logger) {
 }
 
 async function installAndBuild(moduleDir, logger) {
-  await runCmd('npm', ['install'], moduleDir, logger)
-  await runCmd('npm', ['run', 'build'], moduleDir, logger)
+  // --prefer-offline：lock 未变时跳过网络 verify，毫秒级返回
+  await runCmd('pnpm', ['install', '--prefer-offline'], moduleDir, logger)
+  await runCmd('pnpm', ['run', 'build'], moduleDir, logger)
+}
+
+async function ensurePnpm(crabotHome, logger) {
+  // 通过 corepack 激活根 package.json packageManager 字段指定的 pnpm 版本
+  await runCmd('corepack', ['enable'], crabotHome, logger)
+  await runCmd('corepack', ['prepare', '--activate'], crabotHome, logger)
 }
 
 export async function runSourceUpgrade(crabotHome, logger) {
-  await runCmd('npm', ['install'], crabotHome, logger)
+  await ensurePnpm(crabotHome, logger)
+
+  await runCmd('pnpm', ['install', '--prefer-offline'], crabotHome, logger)
 
   const sharedDir = join(crabotHome, SHARED_MODULE)
   if (existsSync(sharedDir)) {
@@ -45,7 +54,13 @@ export async function runSourceUpgrade(crabotHome, logger) {
     await installAndBuild(dir, logger)
   }
 
-  await runCmd('npm', ['run', 'build:cli'], crabotHome, logger)
+  // 前端
+  const webDir = join(crabotHome, 'crabot-admin', 'web')
+  if (existsSync(webDir)) {
+    await installAndBuild(webDir, logger)
+  }
+
+  await runCmd('pnpm', ['run', 'build:cli'], crabotHome, logger)
 
   const memoryDir = join(crabotHome, PY_MODULE)
   if (existsSync(memoryDir)) {

@@ -10,8 +10,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# PATH 兜底（见 scripts/lib.sh 同名逻辑）：脚本是非交互 shell，不会 source
-# ~/.bashrc，若用户 onboard 后在当前 shell 直接跑 dev.sh，uv 会找不到。
+# PATH 兜底：脚本是非交互 shell，不会 source ~/.bashrc，若用户安装后在当前
+# shell 直接跑 dev.sh，uv / 全局 crabot 会找不到。
 if [ -d "$HOME/.local/bin" ]; then
   case ":$PATH:" in
     *":$HOME/.local/bin:"*) : ;;
@@ -65,6 +65,74 @@ load_env() {
   export CRABOT_ADMIN_PASSWORD="${CRABOT_ADMIN_PASSWORD:-admin123}"
   export CRABOT_JWT_SECRET="${CRABOT_JWT_SECRET:-$(openssl rand -hex 32 2>/dev/null || echo dev-secret)}"
   export DATA_DIR="$DATA_DIR"
+}
+
+# ── Node 依赖同步 ─────────────────────────────────────────
+#
+# 策略：每个模块比较 pnpm-lock.yaml 与 node_modules/.modules.yaml 的 mtime，
+# 仅当 lock 更新（git pull 拉到新版本）或 node_modules 缺失时才跑 pnpm install。
+# 常态下整体 < 100ms（仅做 mtime 比较）；有变更时仅对受影响模块并行同步。
+
+NODE_MODULES_DIRS=(
+  crabot-shared
+  crabot-core
+  crabot-admin
+  crabot-admin/web
+  crabot-agent
+  crabot-channel-host
+  crabot-channel-wechat
+  crabot-channel-telegram
+  crabot-mcp-tools
+)
+
+needs_sync() {
+  local mod="$1"
+  local lock="$SCRIPT_DIR/$mod/pnpm-lock.yaml"
+  local mark="$SCRIPT_DIR/$mod/node_modules/.modules.yaml"
+  [ ! -f "$lock" ] && return 1                              # 无 lock 不在管控范围
+  [ ! -d "$SCRIPT_DIR/$mod/node_modules" ] && return 0      # 首次或被清空
+  [ ! -f "$mark" ] && return 0                              # 之前可能是 npm 装的
+  [ "$lock" -nt "$mark" ] && return 0                       # lock 新于上次安装
+  return 1
+}
+
+sync_node_deps() {
+  if ! command -v pnpm &>/dev/null && ! command -v corepack &>/dev/null; then
+    log_warn "pnpm/corepack 未找到，跳过依赖同步"
+    log_dim "  首次安装请运行: ./install.sh --from-source"
+    return 0
+  fi
+
+  local pending=()
+  for mod in "${NODE_MODULES_DIRS[@]}"; do
+    [ -d "$SCRIPT_DIR/$mod" ] || continue
+    if needs_sync "$mod"; then
+      pending+=("$mod")
+    fi
+  done
+
+  if [ "${#pending[@]}" -eq 0 ]; then
+    return 0
+  fi
+
+  log_info "同步 Node 依赖（${#pending[@]} 个模块需要更新）..."
+  local pids=()
+  for mod in "${pending[@]}"; do
+    log_dim "  $mod"
+    (cd "$SCRIPT_DIR/$mod" && pnpm install --prefer-offline >/tmp/.crabot-dev-sync-"${mod//\//-}".log 2>&1) &
+    pids+=($!)
+  done
+
+  local fail=0
+  for i in "${!pids[@]}"; do
+    if ! wait "${pids[$i]}"; then
+      log_error "${pending[$i]} 同步失败:"
+      tail -10 "/tmp/.crabot-dev-sync-${pending[$i]//\//-}.log" | sed 's/^/    /'
+      fail=1
+    fi
+  done
+  rm -f /tmp/.crabot-dev-sync-*.log
+  [ "$fail" -eq 1 ] && exit 1
 }
 
 # ── 构建 ──────────────────────────────────────────────────
@@ -210,10 +278,13 @@ start() {
 
   check_scrapling || true  # 非阻塞，仅提示
 
-  # 1. 准备 Memory 依赖
+  # 1. 同步 Node 依赖（lock 没变时秒过）
+  sync_node_deps
+
+  # 2. 准备 Memory 依赖
   sync_memory_deps
 
-  # 2. 构建（Admin 跳过，用 tsx --watch 直接跑源码）
+  # 3. 构建（Admin 跳过，用 tsx --watch 直接跑源码）
   build_all
 
   # 3. macOS 权限预检（computer-use MCP 需要屏幕录制 + 辅助功能权限）

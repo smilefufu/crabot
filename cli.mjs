@@ -21,7 +21,6 @@ if (command === 'password') {
     await import(scriptPath)
   } else {
     console.error(`Bootstrap command "${command}" not yet available in cli.mjs.`)
-    console.error('Use the legacy ./crabot bash script for now.')
     process.exit(1)
   }
 } else {

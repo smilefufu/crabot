@@ -11,12 +11,12 @@
   },
   "license": "Apache-2.0",
   "dependencies": {
-    "https-proxy-agent": "^7.0.0"
+    "https-proxy-agent": "^7.0.0",
+    "undici": "^7.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
-    "typescript": "~5.8.0",
-    "undici": "^7.0.0"
+    "typescript": "~5.8.0"
   }
 }

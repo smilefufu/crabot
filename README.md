@@ -39,7 +39,7 @@
 
 ## 快速开始
 
-两种路径，**选一种即可**。脚本会自动处理依赖（Node.js、uv，源码模式还包括 pnpm — 通过 corepack 自动激活），无需手动准备。
+两种路径，**选一种即可**。脚本会自动处理依赖（Node.js、uv；源码模式还包括 pnpm — 通过 corepack 自动激活），无需手动准备。
 
 ### 路径 A：二进制安装（只想用）
 
@@ -64,15 +64,24 @@ crabot password    # 修改管理员密码
 
 ### 路径 B：源码运行（改代码 / 贡献）
 
-从源码 clone 后用 `onboard` 初始化，之后所有命令都用项目根目录下的 `crabot`（**不会创建全局命令**）。
+从源码 clone 后用 `install.sh --from-source` 一键完成环境准备：装工具（Node/uv/pnpm）、装依赖、编译、生成 `.env`、把 `crabot` 命令软链到 `~/.local/bin/`。完成后即可在任意目录用全局 `crabot` 命令。
 
 ```bash
 git clone https://github.com/smilefufu/crabot.git
 cd crabot
-crabot onboard     # 检测工具 → 装 nvm/uv → 生成 .env → 装依赖 → 验证
-crabot start       # 构建并启动
+./install.sh --from-source
+crabot start       # 启动（dist/ 已就绪，无需重新构建）
 crabot stop
 crabot check
+```
+
+代码有更新（`git pull`）后，重装依赖 + 重编译：
+
+```bash
+crabot stop
+git pull
+crabot upgrade     # 增量同步依赖 + 重编译 + 数据迁移
+crabot start
 ```
 
 开发模式（前端 Vite HMR，热更新）：
@@ -83,6 +92,8 @@ crabot check
 ./dev.sh build       # 仅构建
 ```
 
+- 首次跑 `./dev.sh` 前必须先 `./install.sh --from-source`
+- `git pull` 拉到新依赖后 `./dev.sh` 会**自动同步**变更模块（基于 lock mtime），无需手动 install
 - 前端代码修改：浏览器自动刷新
 - 后端代码修改：需重启 `./dev.sh stop && ./dev.sh`
 

@@ -218,45 +218,79 @@ main() {
     echo "  export PATH=\"$bin_dir:\$PATH\""
   fi
 
-  # 设置管理密码
-  section "Admin Password"
-  local data_dir
+  # 生成 .env（含密码、ADMIN_ENCRYPTION_KEY、CRABOT_JWT_SECRET）
+  section "Environment Configuration"
+  local crabot_root
   if [ "$FROM_SOURCE" = true ]; then
-    data_dir="$(pwd)/data"
+    crabot_root="$(pwd)"
   else
-    data_dir="$INSTALL_DIR/data"
+    crabot_root="$INSTALL_DIR"
   fi
-  mkdir -p "$data_dir/admin"
-
-  local admin_env="$data_dir/admin/.env"
-  if [ ! -f "$admin_env" ] || ! grep -q CRABOT_ADMIN_PASSWORD "$admin_env" 2>/dev/null; then
-    local password="" confirm=""
-    while true; do
-      printf "%s" "Set admin password: " >/dev/tty
-      read -rs password </dev/tty
-      echo >/dev/tty
-      if [ ${#password} -lt 4 ]; then
-        warn "Password must be at least 4 characters."
-        continue
-      fi
-      printf "%s" "Confirm password: " >/dev/tty
-      read -rs confirm </dev/tty
-      echo >/dev/tty
-      if [ "$password" != "$confirm" ]; then
-        warn "Passwords do not match. Try again."
-        continue
-      fi
-      break
-    done
-    echo "CRABOT_ADMIN_PASSWORD=$password" >> "$admin_env"
-    info "Password saved."
-  else
-    info "Admin password already configured."
-  fi
+  setup_env_file "$crabot_root"
 
   section "Done!"
   info "Run 'crabot start' to start Crabot."
   info "Run 'crabot --help' for all commands."
+}
+
+# --- .env 生成（密码 + 加密密钥 + JWT secret）---
+setup_env_file() {
+  local root="$1"
+  local env_file="$root/.env"
+  local example="$root/.env.example"
+
+  if [ -f "$env_file" ] && grep -q CRABOT_ADMIN_PASSWORD "$env_file" 2>/dev/null; then
+    info ".env already configured at $env_file"
+    return 0
+  fi
+
+  if [ ! -f "$example" ]; then
+    error ".env.example not found at $example"
+    exit 1
+  fi
+
+  # 自动生成密钥
+  local jwt_secret encryption_key
+  jwt_secret="$(openssl rand -hex 32 2>/dev/null || head -c 64 /dev/urandom | xxd -p | tr -d '\n' | head -c 64)"
+  encryption_key="$(openssl rand -hex 32 2>/dev/null || head -c 64 /dev/urandom | xxd -p | tr -d '\n' | head -c 64)"
+
+  # 获取管理员密码
+  local password="" confirm=""
+  while true; do
+    printf "%s" "Set admin password: " >/dev/tty
+    read -rs password </dev/tty
+    echo >/dev/tty
+    if [ ${#password} -lt 4 ]; then
+      warn "Password must be at least 4 characters."
+      continue
+    fi
+    printf "%s" "Confirm password: " >/dev/tty
+    read -rs confirm </dev/tty
+    echo >/dev/tty
+    if [ "$password" != "$confirm" ]; then
+      warn "Passwords do not match. Try again."
+      continue
+    fi
+    break
+  done
+
+  # 用 awk 替换占位符（不依赖 sed/python，避免特殊字符注入）
+  cp "$example" "$env_file"
+  local tmp
+  tmp="$(mktemp)"
+  awk -v "v1=$password" \
+      -v "v2=$jwt_secret" \
+      -v "v3=$encryption_key" \
+      'BEGIN{FS=OFS="="}
+       /^CRABOT_ADMIN_PASSWORD=/{$2=v1}
+       /^CRABOT_JWT_SECRET=/{$2=v2}
+       /^ADMIN_ENCRYPTION_KEY=/{$2=v3}
+       {print}' "$env_file" > "$tmp"
+  mv "$tmp" "$env_file"
+  chmod 600 "$env_file"
+
+  mkdir -p "$root/data/admin"
+  info ".env saved to $env_file"
 }
 
 main "$@"

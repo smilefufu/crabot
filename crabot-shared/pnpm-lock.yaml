@@ -11,6 +11,9 @@ importers:
       https-proxy-agent:
         specifier: ^7.0.0
         version: 7.0.6
+      undici:
+        specifier: ^7.0.0
+        version: 7.25.0
     devDependencies:
       '@types/node':
         specifier: ^22.0.0
@@ -21,9 +24,6 @@ importers:
       typescript:
         specifier: ~5.8.0
         version: 5.8.3
-      undici:
-        specifier: ^7.0.0
-        version: 7.25.0
 
 packages:
 
