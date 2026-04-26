@@ -1,7 +1,7 @@
 ---
 name: daily-reflection
-description: "在任务描述包含'反思'时使用 — 引导结构化的每日任务质量反思"
-version: "1.2.0"
+description: "深度反思（每日 1 次）：读 trace、委派 sub-agent 分析失败任务、提炼经验写入长期记忆。仅当任务标题以'每日反思'开头或 trigger=daily_reflection 时使用。机械的 inbox 去重打分用 memory-curate，不要用本 skill。"
+version: "1.3.0"
 ---
 
 # 每日反思技能
@@ -90,7 +90,7 @@ delegate_task({
 收集所有 sub-agent 返回的 experiences，综合去重：
 
 1. 合并跨任务的重复经验（不同任务得出同一结论的，合并为一条更完整的）
-2. 对去重后的每条经验，调用一次 `mcp__crab-memory__quick_capture`（写入 inbox/lesson，由后续 quick-reflection / 用户审核晋升 confirmed）：
+2. 对去重后的每条经验，调用一次 `mcp__crab-memory__quick_capture`（写入 inbox/lesson，由后续 memory-curate / 用户审核晋升 confirmed）：
 
 ```
 mcp__crab-memory__quick_capture({

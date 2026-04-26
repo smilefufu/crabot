@@ -3,7 +3,7 @@
  *
  * 验证 ensureBuiltinSchedules 在首次启动时正确创建三个内置调度：
  *   - 每日反思 (cron)
- *   - 周期轻反思 (interval)
+ *   - 记忆整理 (interval)
  *   - 记忆维护 (cron)
  */
 
@@ -69,16 +69,16 @@ describe('AdminModule - ensureBuiltinSchedules', () => {
     expect(dailyReflection!.task_template.type).toBe('daily_reflection')
   })
 
-  it('should seed 周期轻反思 (interval, 3600s)', async () => {
+  it('should seed 记忆整理 (interval, 3600s)', async () => {
     const result = await (admin as unknown as { handleListSchedules: (params: { page: number; page_size: number; filter: Record<string, unknown> }) => Promise<{ items: Schedule[] }> }).handleListSchedules({ page: 1, page_size: 50, filter: {} })
-    const quickReflection = result.items.find(s => s.name === '周期轻反思')
-    expect(quickReflection, '周期轻反思 should exist').toBeDefined()
-    expect(quickReflection!.is_builtin).toBe(true)
-    expect(quickReflection!.trigger.type).toBe('interval')
-    if (quickReflection!.trigger.type === 'interval') {
-      expect(quickReflection!.trigger.seconds).toBe(3600)
+    const memoryCurate = result.items.find(s => s.name === '记忆整理')
+    expect(memoryCurate, '记忆整理 should exist').toBeDefined()
+    expect(memoryCurate!.is_builtin).toBe(true)
+    expect(memoryCurate!.trigger.type).toBe('interval')
+    if (memoryCurate!.trigger.type === 'interval') {
+      expect(memoryCurate!.trigger.seconds).toBe(3600)
     }
-    expect(quickReflection!.task_template.type).toBe('quick_reflection')
+    expect(memoryCurate!.task_template.type).toBe('memory_curate')
   })
 
   it('should seed 记忆维护 (cron, 0 4 * * *)', async () => {

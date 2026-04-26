@@ -1,17 +1,17 @@
 ---
-name: quick-reflection
-description: "在任务描述包含'轻反思'或 trigger=quick_reflection 时使用 — 扫近期 inbox，多因子打分，高分高置信晋升 confirmed"
-version: "1.0.0"
+name: memory-curate
+description: "记忆整理：扫 inbox 候选，去重 + 多因子打分，高分高置信晋升 confirmed。仅当任务标题以'记忆整理'开头或 trigger=memory_curate 时使用，与 daily-reflection 互斥（daily-reflection 用于深度反思，会读 trace 并委派 sub-agent）。"
+version: "2.0.0"
 ---
 
-# 周期轻反思 Skill
+# 记忆整理 Skill
 
 ## Overview
 
 每小时（默认）跑一次：扫近期 inbox 中的 fact/lesson 候选，做去重 + 多因子打分。
 高分 + 高置信 → `update_long_term` 升级到 confirmed；
 低分 / 模糊 → 留给 daily-reflection 深加工。
-**不调贵 LLM**：仅做去重 hash 比对、IDF / entity_priority / 高 proximity 阈值过滤。
+**这是机械整理，不是反思**：仅做去重 hash 比对、IDF / entity_priority / 高 proximity 阈值过滤，不调贵 LLM、不读 trace、不委派 sub-agent。
 
 ## 流程
 

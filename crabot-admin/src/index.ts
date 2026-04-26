@@ -3921,15 +3921,15 @@ export class AdminModule extends ModuleBase {
         },
       },
       {
-        name: '周期轻反思',
+        name: '记忆整理',
         description: '每小时扫一次 inbox，做去重和多因子打分，高分高置信晋升 confirmed。',
         trigger: { type: 'interval', seconds: 3600 },
         task_template: {
-          type: 'quick_reflection',
-          title: '周期轻反思 — {{datetime}}',
-          description: '执行 quick-reflection skill：扫近期 inbox → 去重 → 多因子打分 → 晋升 / 留待 daily。',
+          type: 'memory_curate',
+          title: '记忆整理 — {{datetime}}',
+          description: '第一步必须调用 Skill("memory-curate")，禁止加载其他 reflection skill。流程：扫近期 inbox → 去重 → 多因子打分 → 晋升 confirmed / 丢弃 / 留待 daily-reflection。',
           priority: 'low',
-          tags: ['quick_reflection', 'builtin'],
+          tags: ['memory_curate', 'builtin'],
         },
       },
       {
@@ -3945,6 +3945,21 @@ export class AdminModule extends ModuleBase {
         },
       },
     ]
+
+    let migrated = false
+    for (const sched of this.schedules.values()) {
+      if (sched.is_builtin && sched.name === '周期轻反思') {
+        const seed = SEEDS.find(s => s.name === '记忆整理')
+        if (seed) {
+          sched.name = seed.name
+          sched.description = seed.description
+          sched.trigger = seed.trigger
+          sched.task_template = seed.task_template
+          sched.updated_at = generateTimestamp()
+          migrated = true
+        }
+      }
+    }
 
     const existing = new Set(
       Array.from(this.schedules.values()).filter(s => s.is_builtin).map(s => s.name),
@@ -3967,7 +3982,10 @@ export class AdminModule extends ModuleBase {
       this.schedules.set(id, schedule)
     }
     await this.saveData()
-    console.log('[Admin] Builtin schedules ensured: daily-reflection / quick-reflection / memory-maintenance')
+    if (migrated) {
+      console.log('[Admin] Migrated builtin schedule: 周期轻反思 → 记忆整理 (quick_reflection → memory_curate)')
+    }
+    console.log('[Admin] Builtin schedules ensured: daily-reflection / memory-curate / memory-maintenance')
   }
 
   // ============================================================================

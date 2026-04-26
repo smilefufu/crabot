@@ -317,7 +317,7 @@ export function createCrabMemoryServer(
   // 反思级原生 RPC 工具组
   // ============================================================================
   // 这一组工具直接透传到 Memory 后端 RPC，工具名与 RPC 一一对应，
-  // 供 daily-reflection / quick-reflection 等内置 SKILL 在反思流程中精细操作。
+  // 供 daily-reflection / memory-curate 等内置 SKILL 在反思 / 整理流程中精细操作。
   // 与上面 4 个 Worker 简化工具的区别：参数完整、字段精细可控、不做隐式推断。
   // 详见 protocol-memory.md。
 
