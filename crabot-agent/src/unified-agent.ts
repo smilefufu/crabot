@@ -1995,6 +1995,7 @@ export class UnifiedAgent extends ModuleBase {
     // 先收集所有状态变更，最后统一触发 handler 重建，避免多次重建
     const modelConfigChanged = params.model_config !== undefined
     const skillsChanged = params.skills !== undefined
+    const systemPromptChanged = params.system_prompt !== undefined
 
     // 更新模型配置
     if (params.model_config) {
@@ -2027,9 +2028,15 @@ export class UnifiedAgent extends ModuleBase {
     }
 
     // 根据变更字段，按需触发 handler 重建
-    if (modelConfigChanged || skillsChanged) {
+    if (modelConfigChanged || skillsChanged || systemPromptChanged) {
       const mergedModelConfig = this.agentConfig.model_config ?? {}
-      await this.updateLlmClients(mergedModelConfig, { forceFrontRebuild: skillsChanged })
+      // skills / system_prompt 变更时 Front 必须重建（Front prompt closure 在构造时绑定 personality + skill listing）；
+      // Worker 已通过 updateSkills / updateSystemPrompt 热更新，无需重建（重建会让 in-flight task 的 RPC 路由
+      // 找不到原 activeTasks 条目）。仅 model_config 变化才重建 Worker。
+      await this.updateLlmClients(mergedModelConfig, {
+        forceFrontRebuild: skillsChanged || systemPromptChanged,
+        skipWorkerRebuild: !modelConfigChanged,
+      })
     }
 
     // 更新扩展配置（热生效，下次使用对应功能时生效）
@@ -2062,11 +2069,13 @@ export class UnifiedAgent extends ModuleBase {
   /**
    * 热更新 LLM 客户端
    * @param modelConfig 新的模型配置
-   * @param options.forceFrontRebuild 强制重建 Front handler（skills 等 prompt 依赖字段变更时用）
+   * @param options.forceFrontRebuild 强制重建 Front handler（skills / system_prompt 等 prompt 依赖字段变更时用）
+   * @param options.skipWorkerRebuild 跳过 Worker handler 重建（skills / system_prompt 走 worker 自己的热更新方法
+   *   updateSkills / updateSystemPrompt，重建会鬼存 in-flight task 的 activeTasks）
    */
   private async updateLlmClients(
     modelConfig: Record<string, LLMConnectionInfo>,
-    options: { forceFrontRebuild?: boolean } = {},
+    options: { forceFrontRebuild?: boolean; skipWorkerRebuild?: boolean } = {},
   ): Promise<void> {
     const { basePersonality, workerPersonality, frontSkillListing } =
       this.buildPromptParts(this.agentConfig?.system_prompt, this.agentConfig?.skills)
@@ -2122,8 +2131,8 @@ export class UnifiedAgent extends ModuleBase {
       this.digestSdkEnv = this.buildSdkEnv(digestConfig)
     }
 
-    // 更新 Worker Agent
-    if (this.roles.has('worker')) {
+    // 更新 Worker Agent — 仅 model_config 真正变化时重建（skills / system_prompt 走热更新方法）
+    if (this.roles.has('worker') && !options.skipWorkerRebuild) {
       const workerConfig = modelConfig.worker
       if (workerConfig) {
         this.sdkEnvWorker = this.buildSdkEnv(workerConfig)

@@ -76,4 +76,57 @@ describe('UnifiedAgent.handleUpdateConfig — hot reload', () => {
         .handleUpdateConfig({ mcp_servers: [{ name: 'A', transport: 'stdio', command: 'echo' }] }),
     ).rejects.toThrow('connect fail')
   })
+
+  it('system_prompt 变更触发 updateLlmClients（Front 重建路径）', async () => {
+    // 此 test 锁定 review feedback I-2 修复：system_prompt 变更必须经过 updateLlmClients
+    // 让 Front 重建（Front prompt closure 嵌入了 personality）
+    const updateSkills = vi.fn()
+    const updateSystemPrompt = vi.fn()
+    const agent = buildAgent({ workerHandler: { updateSkills, updateSystemPrompt } })
+    // Spy on updateLlmClients to verify it's invoked with correct options
+    const updateLlmClients = vi.fn().mockResolvedValue(undefined)
+    ;(agent as { updateLlmClients: typeof updateLlmClients }).updateLlmClients = updateLlmClients
+
+    await (agent as { handleUpdateConfig: (p: unknown) => Promise<unknown> })
+      .handleUpdateConfig({ system_prompt: 'new personality' })
+
+    expect(updateLlmClients).toHaveBeenCalledTimes(1)
+    const callArg = updateLlmClients.mock.calls[0][1] as { forceFrontRebuild: boolean; skipWorkerRebuild: boolean }
+    expect(callArg.forceFrontRebuild).toBe(true)
+    expect(callArg.skipWorkerRebuild).toBe(true) // worker 已通过 updateSystemPrompt 热更新，不该重建
+  })
+
+  it('skills 变更走 Front 重建但跳过 Worker 重建（防鬼存）', async () => {
+    // 此 test 锁定 review feedback I-1 修复：skills 变更不重建 Worker handler
+    // （否则 in-flight task 的 activeTasks 会被新 worker handler 丢失）
+    const updateSkills = vi.fn()
+    const updateSystemPrompt = vi.fn()
+    const agent = buildAgent({ workerHandler: { updateSkills, updateSystemPrompt } })
+    const updateLlmClients = vi.fn().mockResolvedValue(undefined)
+    ;(agent as { updateLlmClients: typeof updateLlmClients }).updateLlmClients = updateLlmClients
+
+    await (agent as { handleUpdateConfig: (p: unknown) => Promise<unknown> })
+      .handleUpdateConfig({ skills: [{ id: 's1', name: 'foo', description: 'bar', content: '' }] })
+
+    expect(updateLlmClients).toHaveBeenCalledTimes(1)
+    const callArg = updateLlmClients.mock.calls[0][1] as { forceFrontRebuild: boolean; skipWorkerRebuild: boolean }
+    expect(callArg.forceFrontRebuild).toBe(true)
+    expect(callArg.skipWorkerRebuild).toBe(true)
+  })
+
+  it('model_config 变更时不跳过 Worker 重建', async () => {
+    // model_config 真正变化时才需要重建 Worker（SDK env 改变）
+    const updateSkills = vi.fn()
+    const updateSystemPrompt = vi.fn()
+    const agent = buildAgent({ workerHandler: { updateSkills, updateSystemPrompt } })
+    const updateLlmClients = vi.fn().mockResolvedValue(undefined)
+    ;(agent as { updateLlmClients: typeof updateLlmClients }).updateLlmClients = updateLlmClients
+
+    await (agent as { handleUpdateConfig: (p: unknown) => Promise<unknown> })
+      .handleUpdateConfig({ model_config: { worker: { endpoint: 'https://x', apikey: 'k', model_id: 'm', format: 'anthropic', provider_id: 'p' } } })
+
+    expect(updateLlmClients).toHaveBeenCalledTimes(1)
+    const callArg = updateLlmClients.mock.calls[0][1] as { forceFrontRebuild: boolean; skipWorkerRebuild: boolean }
+    expect(callArg.skipWorkerRebuild).toBe(false) // model_config 变更必须重建 Worker
+  })
 })
