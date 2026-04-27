@@ -186,6 +186,34 @@ export class McpConnector {
     return this.clients.size
   }
 
+  /**
+   * 原子替换 MCP 连接：先 disconnectAll 旧的 → connectAll 新的。
+   * 如果整个 connectAll 抛错（罕见，因为 connectAll 用 Promise.allSettled 内部不抛），
+   * 回滚到 disconnectAll 之前的状态。
+   *
+   * 注意：clients 和 toolDefaultsMap 字段声明为 readonly，不能重新赋值。
+   * 回滚时通过 Map.clear() + 逐项 set 恢复。cachedTools 字段无 readonly，可重赋值。
+   */
+  async reconnect(newConfigs: ReadonlyArray<MCPServerConfig>): Promise<void> {
+    // Snapshot 旧状态
+    const oldClients = new Map(this.clients)
+    const oldCachedTools = [...this.cachedTools]
+    const oldDefaults = new Map(this.toolDefaultsMap)
+
+    try {
+      await this.disconnectAll()
+      await this.connectAll(newConfigs)
+    } catch (error) {
+      // 回滚：Map 通过 clear+set 恢复，array 直接重赋值
+      this.clients.clear()
+      for (const [k, v] of oldClients) this.clients.set(k, v)
+      this.cachedTools = oldCachedTools
+      this.toolDefaultsMap.clear()
+      for (const [k, v] of oldDefaults) this.toolDefaultsMap.set(k, v)
+      throw error
+    }
+  }
+
   async disconnectAll(): Promise<void> {
     const entries = Array.from(this.clients.entries())
     this.clients.clear()
