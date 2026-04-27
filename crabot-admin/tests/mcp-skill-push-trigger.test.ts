@@ -68,7 +68,7 @@ describe('MCP REST handler triggers pushConfigToAgentModules', () => {
     const res = makeRes()
 
     await (
-      admin as {
+      admin as unknown as {
         handleCreateMCPServerApi: (
           req: IncomingMessage,
           res: ServerResponse
@@ -87,7 +87,7 @@ describe('MCP REST handler triggers pushConfigToAgentModules', () => {
     const res = makeRes()
 
     await (
-      admin as {
+      admin as unknown as {
         handleUpdateMCPServerApi: (
           req: IncomingMessage,
           res: ServerResponse,
@@ -106,7 +106,7 @@ describe('MCP REST handler triggers pushConfigToAgentModules', () => {
     const res = makeRes()
 
     await (
-      admin as {
+      admin as unknown as {
         handleDeleteMCPServerApi: (
           req: IncomingMessage,
           res: ServerResponse,
@@ -125,7 +125,7 @@ describe('MCP REST handler triggers pushConfigToAgentModules', () => {
     const res = makeRes()
 
     await (
-      admin as {
+      admin as unknown as {
         handleImportMCPServersFromJsonApi: (
           req: IncomingMessage,
           res: ServerResponse
