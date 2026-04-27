@@ -4638,15 +4638,9 @@ export class AdminModule extends ModuleBase {
       }
     }
 
-    // 解析 MCP servers: 用户关联的 + 内置启用的
-    const enabledMcpServers = [
-      ...(config.mcp_server_ids ?? [])
-        .map((id) => this.mcpServerManager.get(id))
-        .filter((s): s is NonNullable<typeof s> => s !== undefined),
-      ...this.mcpServerManager.list()
-        .filter((s) => s.is_builtin && s.enabled)
-        .filter((s) => !(config.mcp_server_ids ?? []).includes(s.id)),
-    ]
+    // 所有 enabled MCP server 都对所有 agent 实例可见——
+    // 不再区分 builtin / user-installed，不再读 config.mcp_server_ids（已 @deprecated）
+    const enabledMcpServers = this.mcpServerManager.list().filter((s) => s.enabled)
 
     // 将 MCP server 配置转换为 Agent 格式，并为 scrapling 注入 CDP URL 环境变量
     const mcpServerConfigs = enabledMcpServers.map((s) => {
@@ -4664,13 +4658,12 @@ export class AdminModule extends ModuleBase {
       config: {
         ...config,
         model_config: resolvedModelConfig,
-        // 将 ID 列表解析为完整对象，供 Agent 直接使用
-        // 1. Agent 实例配置的 mcp_server_ids（用户在 Agent 配置页关联的）
-        // 2. 所有 enabled 的内置 MCP server（自动可用，不需要手动关联）
+        // 所有 enabled MCP server 自动对所有 agent 可见，
+        // 不再读 config.mcp_server_ids（已 @deprecated）
         mcp_servers: mcpServerConfigs,
-        skills: (config.skill_ids ?? [])
-          .map((id) => this.skillManager.get(id))
-          .filter((s): s is NonNullable<typeof s> => s !== undefined)
+        // 所有 enabled skill 都对所有 agent 可见，不再读 config.skill_ids（已 @deprecated）
+        skills: this.skillManager.list()
+          .filter((s) => s.enabled)
           .map((s) => this.skillManager.toAgentConfig(s)),
       },
     }
