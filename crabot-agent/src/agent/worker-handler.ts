@@ -52,6 +52,7 @@ import { DELEGATE_TASK_SYSTEM_PROMPT } from './subagent-prompts.js'
 import { HumanMessageQueue } from '../engine/human-message-queue.js'
 import { createCodingExpertHookRegistry, createCliBlockHook } from '../hooks/defaults.js'
 import { HookRegistry } from '../hooks/hook-registry.js'
+import { PromptManager } from '../prompt-manager.js'
 
 import * as fs from 'fs'
 import * as path from 'path'
@@ -80,6 +81,10 @@ function log(msg: string) {
 }
 
 export interface WorkerHandlerConfig {
+  /**
+   * Admin personality（system_prompt）。仅承载 personality，不再包含 skill listing。
+   * skillListing 通过 `updateSkills` 维护，由 worker-handler 内 buildSkillListingSnapshot 即时拼装。
+   */
   systemPrompt: string
   longTermPreloadLimit?: number
   extra?: Record<string, unknown>
@@ -209,6 +214,16 @@ export interface WorkerHandlerOptions {
   skills?: ReadonlyArray<SkillConfig>
   lspManager?: import('../lsp/lsp-manager').LSPManager
   memoryWriter?: MemoryWriter
+  /**
+   * Prompt 装配器。Worker 在每轮 LLM 调用前用它把 personality + skill listing + sub-agent
+   * 重新拼成 system prompt，以便 updateSkills / updateSystemPrompt 即时生效。
+   */
+  promptManager?: PromptManager
+  /**
+   * Sub-agent hint 列表，用于注入到 worker prompt 末尾的"可用专项 Sub-agent"段落。
+   * 来自 createWorkerHandler 解析 SUBAGENT_DEFINITIONS 后的实际可用列表。
+   */
+  subAgentHints?: ReadonlyArray<{ readonly toolName: string; readonly workerHint: string }>
 }
 
 export class WorkerHandler {
@@ -229,6 +244,8 @@ export class WorkerHandler {
   private readonly lspManager?: import('../lsp/lsp-manager').LSPManager
   private memoryWriter?: MemoryWriter
   private confirmedSnapshotBlock: string = ''
+  private readonly promptManager?: PromptManager
+  private readonly subAgentHints: ReadonlyArray<{ readonly toolName: string; readonly workerHint: string }>
 
   constructor(
     sdkEnv: SdkEnvConfig,
@@ -248,6 +265,8 @@ export class WorkerHandler {
     this.skills = options?.skills ?? []
     this.lspManager = options?.lspManager
     this.memoryWriter = options?.memoryWriter
+    this.promptManager = options?.promptManager
+    this.subAgentHints = options?.subAgentHints ?? []
   }
 
   async loadConfirmedSnapshot(): Promise<void> {
@@ -827,8 +846,32 @@ export class WorkerHandler {
     }))
   }
 
+  /**
+   * 从 this.skills 实时拼装 worker skill listing 段落。
+   * updateSkills 改 this.skills 后，下一轮 buildSystemPrompt 自动反映新列表。
+   */
+  private buildSkillListingSnapshot(): string | undefined {
+    if (!this.skills || this.skills.length === 0) return undefined
+    const intro =
+      '\n\n以下技能为特定任务提供专业指引。当任务匹配某个技能的描述时，' +
+      '必须先调用 Skill 工具（输入技能名称）加载完整指引，然后按指引操作。' +
+      '这是强制要求——先加载技能，再执行任务。'
+    const body = this.skills.map((s) => {
+      const desc = s.description || s.name
+      return `<skill>\n<name>${s.name}</name>\n<description>${desc}</description>\n</skill>`
+    }).join('\n')
+    return `${intro}\n\n<available_skills>\n${body}\n</available_skills>`
+  }
+
   private buildSystemPrompt(context: WorkerAgentContext): string {
-    const parts: string[] = [this.systemPrompt]
+    const baseAssembled = this.promptManager
+      ? this.promptManager.assembleWorkerPrompt({
+        adminPersonality: this.systemPrompt || undefined,
+        skillListing: this.buildSkillListingSnapshot(),
+        availableSubAgents: this.subAgentHints,
+      })
+      : this.systemPrompt
+    const parts: string[] = [baseAssembled]
     if (context.available_tools.length > 0) {
       parts.push('\n## 可用工具')
       for (const t of context.available_tools) { parts.push(`- ${t.name}: ${t.description}`) }

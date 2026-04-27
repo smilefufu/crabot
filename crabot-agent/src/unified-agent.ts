@@ -403,8 +403,11 @@ export class UnifiedAgent extends ModuleBase {
       toolName: definition.toolName,
       workerHint: definition.workerHint,
     }))
+    // workerPersonality 仅承载 admin personality（system_prompt）；skill listing 走独立通道，
+    // 由 WorkerHandler 内部 buildSkillListingSnapshot 实时从 this.skills 拼装，
+    // 保证 updateSkills 后下一轮 LLM 调用即时生效。
     const handler = new WorkerHandler(workerSdkEnv, {
-      systemPrompt: this.promptManager.assembleWorkerPrompt(workerPersonality || undefined, subAgentHints),
+      systemPrompt: workerPersonality ?? '',
       longTermPreloadLimit: this.orchestrationConfig.worker_long_term_memory_limit,
       extra: this.extra,
     }, {
@@ -423,6 +426,8 @@ export class UnifiedAgent extends ModuleBase {
       skills: skills ?? [],
       lspManager: this.lspManager,
       memoryWriter: this.memoryWriter,
+      promptManager: this.promptManager,
+      subAgentHints,
     })
     void handler.loadConfirmedSnapshot()
     return handler
@@ -454,17 +459,21 @@ export class UnifiedAgent extends ModuleBase {
   private buildPromptParts(
     systemPrompt?: string,
     skills?: ReadonlyArray<{ id: string; name: string; description?: string }>
-  ): { basePersonality?: string; workerPersonality?: string; frontSkillListing?: string } {
+  ): {
+    basePersonality?: string
+    workerPersonality?: string
+    workerSkillListing?: string
+    frontSkillListing?: string
+  } {
     const basePersonality = systemPrompt || undefined
 
     const workerIntro =
       '\n\n以下技能为特定任务提供专业指引。当任务匹配某个技能的描述时，' +
       '必须先调用 Skill 工具（输入技能名称）加载完整指引，然后按指引操作。' +
       '这是强制要求——先加载技能，再执行任务。'
-    const workerSuffix = UnifiedAgent.buildSkillListing(skills, workerIntro)
+    const workerSkillListing = UnifiedAgent.buildSkillListing(skills, workerIntro) || undefined
+    // workerPersonality 不再夹带 skill listing — skillListing 走独立通道
     const workerPersonality = basePersonality
-      ? basePersonality + workerSuffix
-      : workerSuffix || undefined
 
     const frontIntro =
       '## 技能（Skill）\n\n' +
@@ -473,7 +482,7 @@ export class UnifiedAgent extends ModuleBase {
       '即使问题看起来简单（如"502是什么原因"），只要它属于某个技能的职责范围，就必须 create_task。'
     const frontSkillListing = UnifiedAgent.buildSkillListing(skills, frontIntro) || undefined
 
-    return { basePersonality, workerPersonality, frontSkillListing }
+    return { basePersonality, workerPersonality, workerSkillListing, frontSkillListing }
   }
 
   /**

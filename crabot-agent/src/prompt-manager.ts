@@ -354,17 +354,24 @@ export class PromptManager {
 
   /**
    * 组装 Worker Handler system prompt
-   * @param adminPersonality - Admin 配置中的 system_prompt（可选）
-   * @param availableSubAgents - 可用的专项 Sub-agent 列表（可选）
+   *
+   * 装配顺序：adminPersonality → skillListing → WORKER_RULES → sub-agent listing。
+   * skillListing 走独立通道，不再夹带在 adminPersonality 里。
    */
-  assembleWorkerPrompt(
-    adminPersonality?: string,
-    availableSubAgents?: ReadonlyArray<{ readonly toolName: string; readonly workerHint: string }>,
-  ): string {
+  assembleWorkerPrompt(opts: {
+    adminPersonality?: string
+    skillListing?: string
+    availableSubAgents?: ReadonlyArray<{ readonly toolName: string; readonly workerHint: string }>
+  } = {}): string {
+    const { adminPersonality, skillListing, availableSubAgents } = opts
     const parts: string[] = []
 
     if (adminPersonality) {
       parts.push(adminPersonality)
+    }
+
+    if (skillListing) {
+      parts.push(skillListing)
     }
 
     parts.push(WORKER_RULES)

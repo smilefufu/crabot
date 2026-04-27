@@ -226,13 +226,45 @@ describe('PromptManager 注入', () => {
     expect(out).toContain('可用技能')
     expect(out).toContain('foo: bar')
   })
+})
 
-  it('sub-agent 注入到 Worker prompt', () => {
-    const out = pm.assembleWorkerPrompt(undefined, [
-      { toolName: 'visual_analyzer', workerHint: '分析图片' },
-    ])
+describe('PromptManager.assembleWorkerPrompt — opts 签名', () => {
+  it('opts.skillListing 注入到 system prompt', () => {
+    const out = pm.assembleWorkerPrompt({
+      adminPersonality: 'You are X.',
+      skillListing: '<available_skills>\n<skill><name>foo</name><description>bar</description></skill>\n</available_skills>',
+    })
+    expect(out).toContain('You are X.')
+    expect(out).toContain('<available_skills>')
+    expect(out).toContain('<name>foo</name>')
+  })
+
+  it('opts.skillListing 不传则不含具体 skill 条目', () => {
+    // WORKER_RULES 的"Skill 加载"段落会提到 <available_skills> 占位符；
+    // 真正的注入会在其后跟一个 <skill> 子条目。这里断言"没有具体的 skill 条目被注入"。
+    const out = pm.assembleWorkerPrompt({
+      adminPersonality: 'You are X.',
+    })
+    expect(out).not.toContain('<skill>')
+  })
+
+  it('opts.adminPersonality 不再夹带 skill listing（独立通道）', () => {
+    const out = pm.assembleWorkerPrompt({
+      adminPersonality: 'pure personality, no skills here',
+      skillListing: '<available_skills>\n<skill><name>x</name><description>y</description></skill>\n</available_skills>',
+    })
+    const personalityIdx = out.indexOf('pure personality')
+    const skillIdx = out.indexOf('<available_skills>')
+    expect(personalityIdx).toBeGreaterThanOrEqual(0)
+    expect(skillIdx).toBeGreaterThanOrEqual(0)
+    expect(personalityIdx).not.toBe(skillIdx)
+  })
+
+  it('opts.availableSubAgents 仍正常注入', () => {
+    const out = pm.assembleWorkerPrompt({
+      availableSubAgents: [{ toolName: 'visual_analyzer', workerHint: '分析图片' }],
+    })
     expect(out).toContain('专项 Sub-agent')
     expect(out).toContain('visual_analyzer')
-    expect(out).toContain('分析图片')
   })
 })
