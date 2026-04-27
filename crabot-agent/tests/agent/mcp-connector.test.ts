@@ -59,6 +59,26 @@ describe('McpConnector.reconnect', () => {
     expect(connector.getAllTools().some(t => t.name === 'mcp__B__echo')).toBe(false)
     expect(connector.getAllTools().some(t => t.name === 'mcp__C__echo')).toBe(true)
   })
+
+  it('reconnect 失败时回滚到旧状态（软原子）', async () => {
+    await connector.connectAll([cfgA, cfgB])
+    expect(connector.count).toBe(2)
+    const oldToolNames = connector.getAllTools().map(t => t.name).sort()
+
+    // Spy on connectAll to throw on the next call (simulating refreshToolCache or
+    // dedup step blowing up — the only practical path into the catch block).
+    const spy = vi.spyOn(connector, 'connectAll').mockRejectedValueOnce(new Error('boom'))
+
+    await expect(connector.reconnect([cfgC])).rejects.toThrow('boom')
+
+    // 字段引用已恢复（注意软原子：底层 transport 已断开，但 Map 内容是旧的）
+    expect(connector.count).toBe(2)
+    expect(connector.getAllTools().map(t => t.name).sort()).toEqual(oldToolNames)
+    expect(connector.getClient('A')).toBeDefined()
+    expect(connector.getClient('B')).toBeDefined()
+
+    spy.mockRestore()
+  })
 })
 
 // 恢复 commit 8d2ac0a 之前已有的 smoke / error-logging 测试。
