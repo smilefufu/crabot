@@ -34,12 +34,12 @@ function getDataDir(): string {
 }
 
 function readGlobalOpts(program: Command) {
-  return program.opts<{ endpoint?: string; token?: string; human?: boolean; json?: boolean }>()
+  return program.opts<{ adminEndpoint?: string; token?: string; human?: boolean; json?: boolean }>()
 }
 
 export function createContext(program: Command): CliContext {
   const opts = readGlobalOpts(program)
-  const auth = resolveAuth({ endpoint: opts.endpoint, token: opts.token })
+  const auth = resolveAuth({ endpoint: opts.adminEndpoint, token: opts.token })
   return {
     client: new AdminClient(auth),
     mode: opts.human ? 'human' : 'ai',
@@ -50,7 +50,7 @@ export function createContext(program: Command): CliContext {
 // Backward-compat for commands not yet migrated to createContext
 export function createClient(program: Command): { client: AdminClient; json: boolean } {
   const opts = readGlobalOpts(program)
-  const auth = resolveAuth({ endpoint: opts.endpoint, token: opts.token })
+  const auth = resolveAuth({ endpoint: opts.adminEndpoint, token: opts.token })
   return { client: new AdminClient(auth), json: !opts.human }
 }
 
@@ -61,7 +61,7 @@ export function run(argv: string[]): void {
     .name('crabot')
     .description('Crabot CLI — AI-first admin client')
     .version('1.0.0')
-    .option('-e, --endpoint <url>', 'Admin endpoint URL (overrides CRABOT_ENDPOINT)')
+    .option('-e, --admin-endpoint <url>', 'Admin endpoint URL (overrides CRABOT_ENDPOINT)')
     .option('-t, --token <token>', 'Auth token (overrides CRABOT_TOKEN)')
     .option('--human', 'Human-readable output (table + colored errors)')
     .option('--json', 'JSON output (default; alias for AI mode)')

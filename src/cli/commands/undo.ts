@@ -128,12 +128,16 @@ async function executeReverse(ctx: CliContext, entry: UndoEntry): Promise<unknow
 }
 
 async function performUndo(ctx: CliContext, entry: UndoEntry): Promise<unknown> {
+  const log = new UndoLog(ctx.dataDir)
   let result: unknown
   try {
     result = await executeReverse(ctx, entry)
   } catch (e) {
+    // Stale undo: target likely changed/deleted by another action. Remove the entry
+    // to prevent the same failure from recurring on subsequent `crabot undo` calls.
+    await log.removeById(entry.id).catch(() => {})
     if (e instanceof CliError) {
-      throw new CliError('UNDO_STALE', `Cannot undo: reverse command failed (${e.code})`, {
+      throw new CliError('UNDO_STALE', `Cannot undo: reverse command failed (${e.code}). Entry removed from log.`, {
         undo_id: entry.id,
         reverse_command: entry.reverse.command,
         original_error: e.message,
@@ -141,7 +145,6 @@ async function performUndo(ctx: CliContext, entry: UndoEntry): Promise<unknown> 
     }
     throw e
   }
-  const log = new UndoLog(ctx.dataDir)
   await log.removeById(entry.id)
   return {
     ok: true,

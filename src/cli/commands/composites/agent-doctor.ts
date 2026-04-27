@@ -80,7 +80,7 @@ export function registerAgentDoctorCommand(parent: Command): void {
         const a = await resolveRef(ctx.client, 'agent', ref)
         agents = [a]
       } else {
-        agents = await ctx.client.get<Array<{ id: string; name: string }>>('/api/agent-instances')
+        agents = await ctx.client.getList<{ id: string; name: string }>('/api/agent-instances')
       }
 
       const reports: DoctorReport[] = []

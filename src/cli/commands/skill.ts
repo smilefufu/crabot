@@ -110,9 +110,7 @@ export function registerSkillCommands(parent: Command): void {
         command_text: cmdText,
         execute: () => ctx.client.delete(`/api/skills/${id}`),
         collectPreview: async () => {
-          const agents = await ctx.client.get<
-            Array<{ id: string; name: string; skill_ids?: string[] }>
-          >('/api/agent-instances')
+          const agents = await ctx.client.getList<{ id: string; name: string; skill_ids?: string[] }>('/api/agent-instances')
           const refs = agents
             .filter((a) => (a.skill_ids ?? []).includes(id))
             .map((a) => ({ id: a.id, name: a.name }))

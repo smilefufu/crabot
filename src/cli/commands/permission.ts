@@ -154,9 +154,7 @@ export function registerPermissionCommands(parent: Command): void {
         command_text: cmdText,
         execute: () => ctx.client.delete(`/api/permission-templates/${id}`),
         collectPreview: async () => {
-          const friends = await ctx.client.get<
-            Array<{ id: string; name: string; permission_template_id?: string }>
-          >('/api/friends')
+          const friends = await ctx.client.getList<{ id: string; name: string; permission_template_id?: string }>('/api/friends')
           const refs = friends
             .filter((f) => f.permission_template_id === id)
             .map((f) => ({ id: f.id, name: f.name }))

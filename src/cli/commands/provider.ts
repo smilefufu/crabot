@@ -116,9 +116,7 @@ export function registerProviderCommands(parent: Command): void {
         command_text: cmdText,
         execute: () => ctx.client.delete(`/api/model-providers/${id}`),
         collectPreview: async () => {
-          const agents = await ctx.client.get<Array<{ id: string; name: string; models?: unknown }>>(
-            '/api/agent-instances',
-          )
+          const agents = await ctx.client.getList<{ id: string; name: string; models?: unknown }>('/api/agent-instances')
           const referencing = agents
             .filter((a) => JSON.stringify(a.models ?? {}).includes(id))
             .map((a) => ({ id: a.id, name: a.name }))

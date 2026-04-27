@@ -125,9 +125,7 @@ export function registerMcpCommands(parent: Command): void {
         command_text: cmdText,
         execute: () => ctx.client.delete(`/api/mcp-servers/${id}`),
         collectPreview: async () => {
-          const agents = await ctx.client.get<
-            Array<{ id: string; name: string; mcp_ids?: string[] }>
-          >('/api/agent-instances')
+          const agents = await ctx.client.getList<{ id: string; name: string; mcp_ids?: string[] }>('/api/agent-instances')
           const refs = agents
             .filter((a) => (a.mcp_ids ?? []).includes(id))
             .map((a) => ({ id: a.id, name: a.name }))

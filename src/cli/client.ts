@@ -72,4 +72,15 @@ export class AdminClient {
       headers: this.buildHeaders(),
     })
   }
+
+  // Helper for list endpoints — Admin returns either bare arrays or {items: [...]}.
+  // Always returns a plain array.
+  async getList<T>(path: string): Promise<T[]> {
+    const raw = await this.get<unknown>(path)
+    if (Array.isArray(raw)) return raw as T[]
+    if (raw && typeof raw === 'object' && Array.isArray((raw as { items?: unknown }).items)) {
+      return (raw as { items: T[] }).items
+    }
+    return []
+  }
 }
