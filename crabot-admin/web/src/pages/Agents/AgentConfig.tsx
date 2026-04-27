@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { agentService } from '../../services/agent'
 import { providerService } from '../../services/provider'
@@ -43,6 +43,8 @@ export const AgentConfig: React.FC = () => {
   const [extraSchema, setExtraSchema] = useState<ExtraConfigSchema[]>([])
   const [allMCPServers, setAllMCPServers] = useState<MCPServerRegistryEntry[]>([])
   const [allSkills, setAllSkills] = useState<SkillRegistryEntry[]>([])
+  const enabledMCPServers = useMemo(() => allMCPServers.filter(s => s.enabled), [allMCPServers])
+  const enabledSkills = useMemo(() => allSkills.filter(s => s.enabled), [allSkills])
   const [config, setConfig] = useState<AgentUnifiedConfig>({
     system_prompt: '',
     model_roles: {},
@@ -267,11 +269,11 @@ export const AgentConfig: React.FC = () => {
             <h3 style={{ fontSize: '0.9375rem', fontWeight: 600, marginBottom: '0.5rem' }}>
               已启用的 MCP Servers
             </h3>
-            {allMCPServers.filter(s => s.enabled).length === 0 ? (
+            {enabledMCPServers.length === 0 ? (
               <p style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>暂无启用的 MCP Server</p>
             ) : (
               <div>
-                {allMCPServers.filter(s => s.enabled).map((s) => (
+                {enabledMCPServers.map((s) => (
                   <div
                     key={s.id}
                     style={{
@@ -307,11 +309,11 @@ export const AgentConfig: React.FC = () => {
             <h3 style={{ fontSize: '0.9375rem', fontWeight: 600, marginBottom: '0.5rem' }}>
               已启用的 Skills
             </h3>
-            {allSkills.filter(s => s.enabled).length === 0 ? (
+            {enabledSkills.length === 0 ? (
               <p style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>暂无启用的 Skill</p>
             ) : (
               <div>
-                {allSkills.filter(s => s.enabled).map((s) => (
+                {enabledSkills.map((s) => (
                   <div
                     key={s.id}
                     style={{

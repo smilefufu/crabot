@@ -33,6 +33,21 @@ function makeReq(body: unknown): IncomingMessage {
   } as unknown as IncomingMessage
 }
 
+/** 调 admin 上的 handler 方法（绕过类型检查）+ 等 fire-and-forget microtask 完成。 */
+async function invoke<A extends unknown[]>(
+  admin: unknown,
+  method: string,
+  ...args: A
+): Promise<void> {
+  await (admin as Record<string, (...a: A) => Promise<void>>)[method](...args)
+  await new Promise((resolve) => setImmediate(resolve))
+}
+
+/** 断言 push 触发了恰好一次。 */
+function expectPushed(admin: { pushConfigToAgentModules: ReturnType<typeof vi.fn> }): void {
+  expect(admin.pushConfigToAgentModules).toHaveBeenCalledTimes(1)
+}
+
 function buildAdmin(deps: {
   mcpManagerStubs?: Record<string, ReturnType<typeof vi.fn>>
   skillManagerStubs?: Record<string, ReturnType<typeof vi.fn>>
@@ -64,153 +79,57 @@ function buildAdmin(deps: {
 describe('MCP REST handler triggers pushConfigToAgentModules', () => {
   it('handleCreateMCPServerApi 触发 push', async () => {
     const admin = buildAdmin()
-    const req = makeReq({ name: 'X', transport: 'stdio', command: 'echo' })
-    const res = makeRes()
-
-    await (
-      admin as unknown as {
-        handleCreateMCPServerApi: (
-          req: IncomingMessage,
-          res: ServerResponse
-        ) => Promise<void>
-      }
-    ).handleCreateMCPServerApi(req, res)
-
-    // push 调用是 fire-and-forget，需要等待 microtask
-    await new Promise((resolve) => setImmediate(resolve))
-    expect(admin.pushConfigToAgentModules).toHaveBeenCalledTimes(1)
+    await invoke(admin, 'handleCreateMCPServerApi', makeReq({ name: 'X', transport: 'stdio', command: 'echo' }), makeRes())
+    expectPushed(admin)
   })
 
   it('handleUpdateMCPServerApi 触发 push', async () => {
     const admin = buildAdmin()
-    const req = makeReq({ enabled: false })
-    const res = makeRes()
-
-    await (
-      admin as unknown as {
-        handleUpdateMCPServerApi: (
-          req: IncomingMessage,
-          res: ServerResponse,
-          id: string
-        ) => Promise<void>
-      }
-    ).handleUpdateMCPServerApi(req, res, 'mcp-id')
-
-    await new Promise((resolve) => setImmediate(resolve))
-    expect(admin.pushConfigToAgentModules).toHaveBeenCalledTimes(1)
+    await invoke(admin, 'handleUpdateMCPServerApi', makeReq({ enabled: false }), makeRes(), 'mcp-id')
+    expectPushed(admin)
   })
 
   it('handleDeleteMCPServerApi 触发 push', async () => {
     const admin = buildAdmin()
-    const req = makeReq({})
-    const res = makeRes()
-
-    await (
-      admin as unknown as {
-        handleDeleteMCPServerApi: (
-          req: IncomingMessage,
-          res: ServerResponse,
-          id: string
-        ) => Promise<void>
-      }
-    ).handleDeleteMCPServerApi(req, res, 'mcp-id')
-
-    await new Promise((resolve) => setImmediate(resolve))
-    expect(admin.pushConfigToAgentModules).toHaveBeenCalledTimes(1)
+    await invoke(admin, 'handleDeleteMCPServerApi', makeReq({}), makeRes(), 'mcp-id')
+    expectPushed(admin)
   })
 
   it('handleImportMCPServersFromJsonApi 触发 push', async () => {
     const admin = buildAdmin()
-    const req = makeReq({ json: '{"mcpServers":{}}' })
-    const res = makeRes()
-
-    await (
-      admin as unknown as {
-        handleImportMCPServersFromJsonApi: (
-          req: IncomingMessage,
-          res: ServerResponse
-        ) => Promise<void>
-      }
-    ).handleImportMCPServersFromJsonApi(req, res)
-
-    await new Promise((resolve) => setImmediate(resolve))
-    expect(admin.pushConfigToAgentModules).toHaveBeenCalledTimes(1)
+    await invoke(admin, 'handleImportMCPServersFromJsonApi', makeReq({ json: '{"mcpServers":{}}' }), makeRes())
+    expectPushed(admin)
   })
 })
 
 describe('Skill REST handler triggers pushConfigToAgentModules', () => {
   it('handleCreateSkillApi 触发 push', async () => {
     const admin = buildAdmin()
-    const req = makeReq({ name: 'foo', content: 'body' })
-    const res = makeRes()
-
-    await (
-      admin as unknown as {
-        handleCreateSkillApi: (req: IncomingMessage, res: ServerResponse) => Promise<void>
-      }
-    ).handleCreateSkillApi(req, res)
-
-    await new Promise((resolve) => setImmediate(resolve))
-    expect(admin.pushConfigToAgentModules).toHaveBeenCalledTimes(1)
+    await invoke(admin, 'handleCreateSkillApi', makeReq({ name: 'foo', content: 'body' }), makeRes())
+    expectPushed(admin)
   })
 
   it('handleUpdateSkillApi 触发 push', async () => {
     const admin = buildAdmin()
-    const req = makeReq({ enabled: false })
-    const res = makeRes()
-
-    await (
-      admin as unknown as {
-        handleUpdateSkillApi: (req: IncomingMessage, res: ServerResponse, id: string) => Promise<void>
-      }
-    ).handleUpdateSkillApi(req, res, 'skill-id')
-
-    await new Promise((resolve) => setImmediate(resolve))
-    expect(admin.pushConfigToAgentModules).toHaveBeenCalledTimes(1)
+    await invoke(admin, 'handleUpdateSkillApi', makeReq({ enabled: false }), makeRes(), 'skill-id')
+    expectPushed(admin)
   })
 
   it('handleDeleteSkillApi 触发 push', async () => {
     const admin = buildAdmin()
-    const req = makeReq({})
-    const res = makeRes()
-
-    await (
-      admin as unknown as {
-        handleDeleteSkillApi: (req: IncomingMessage, res: ServerResponse, id: string) => Promise<void>
-      }
-    ).handleDeleteSkillApi(req, res, 'skill-id')
-
-    await new Promise((resolve) => setImmediate(resolve))
-    expect(admin.pushConfigToAgentModules).toHaveBeenCalledTimes(1)
+    await invoke(admin, 'handleDeleteSkillApi', makeReq({}), makeRes(), 'skill-id')
+    expectPushed(admin)
   })
 
   it('handleImportSkillLocalApi 触发 push', async () => {
     const admin = buildAdmin()
-    const req = makeReq({ dir_path: '/tmp/skill-foo' })
-    const res = makeRes()
-
-    await (
-      admin as unknown as {
-        handleImportSkillLocalApi: (req: IncomingMessage, res: ServerResponse) => Promise<void>
-      }
-    ).handleImportSkillLocalApi(req, res)
-
-    await new Promise((resolve) => setImmediate(resolve))
-    expect(admin.pushConfigToAgentModules).toHaveBeenCalledTimes(1)
+    await invoke(admin, 'handleImportSkillLocalApi', makeReq({ dir_path: '/tmp/skill-foo' }), makeRes())
+    expectPushed(admin)
   })
 
   it('handleImportSkillUploadApi 触发 push', async () => {
     const admin = buildAdmin()
-    const req = makeReq({ base64_content: '', filename: 'foo.zip' })
-    const res = makeRes()
-
-    await (
-      admin as unknown as {
-        handleImportSkillUploadApi: (req: IncomingMessage, res: ServerResponse) => Promise<void>
-      }
-    ).handleImportSkillUploadApi(req, res)
-
-    await new Promise((resolve) => setImmediate(resolve))
-    expect(admin.pushConfigToAgentModules).toHaveBeenCalledTimes(1)
+    await invoke(admin, 'handleImportSkillUploadApi', makeReq({ base64_content: '', filename: 'foo.zip' }), makeRes())
+    expectPushed(admin)
   })
 })
