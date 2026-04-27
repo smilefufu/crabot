@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import { Link } from 'react-router-dom'
 import { agentService } from '../../services/agent'
 import { providerService } from '../../services/provider'
 import { mcpService } from '../../services/mcp'
@@ -32,8 +33,6 @@ import { useToast } from '../../contexts/ToastContext'
 interface AgentUnifiedConfig {
   system_prompt: string
   model_roles: Record<string, ModelSlotRef>
-  mcp_server_ids: string[]
-  skill_ids: string[]
   extra: Record<string, unknown>
 }
 
@@ -47,8 +46,6 @@ export const AgentConfig: React.FC = () => {
   const [config, setConfig] = useState<AgentUnifiedConfig>({
     system_prompt: '',
     model_roles: {},
-    mcp_server_ids: [],
-    skill_ids: [],
     extra: {},
   })
   const [loading, setLoading] = useState(true)
@@ -72,16 +69,14 @@ export const AgentConfig: React.FC = () => {
       setProviders(providersData.items)
       setLlmRequirements(requirements.requirements)
       setExtraSchema(requirements.extra_schema || [])
-      setAllMCPServers(mcpServers.filter(s => s.enabled))
-      setAllSkills(skills.filter(s => s.enabled))
+      setAllMCPServers(mcpServers)
+      setAllSkills(skills)
 
       try {
         const existingConfig = await agentService.getConfig()
         setConfig({
           system_prompt: existingConfig.system_prompt || '',
           model_roles: existingConfig.model_config || {},
-          mcp_server_ids: existingConfig.mcp_server_ids || [],
-          skill_ids: existingConfig.skill_ids || [],
           extra: existingConfig.extra || {},
         })
       } catch {
@@ -100,8 +95,6 @@ export const AgentConfig: React.FC = () => {
       await agentService.updateConfig({
         system_prompt: config.system_prompt,
         model_config: config.model_roles,
-        mcp_server_ids: config.mcp_server_ids,
-        skill_ids: config.skill_ids,
         extra: Object.keys(config.extra).length > 0 ? config.extra : undefined,
       })
       toast.success('Agent 配置保存成功')
@@ -139,24 +132,6 @@ export const AgentConfig: React.FC = () => {
         ...prev.model_roles,
         [roleKey]: { ...prev.model_roles[roleKey], model_id: modelId },
       },
-    }))
-  }
-
-  const toggleMCPServer = (id: string) => {
-    setConfig(prev => ({
-      ...prev,
-      mcp_server_ids: prev.mcp_server_ids.includes(id)
-        ? prev.mcp_server_ids.filter(x => x !== id)
-        : [...prev.mcp_server_ids, id],
-    }))
-  }
-
-  const toggleSkill = (id: string) => {
-    setConfig(prev => ({
-      ...prev,
-      skill_ids: prev.skill_ids.includes(id)
-        ? prev.skill_ids.filter(x => x !== id)
-        : [...prev.skill_ids, id],
     }))
   }
 
@@ -285,69 +260,81 @@ export const AgentConfig: React.FC = () => {
         </Card>
       </div>
 
-      {/* MCP Servers + Skills — side by side */}
+      {/* MCP Servers + Skills — read-only summary + link to mgmt */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '1rem' }}>
         <Card>
-          <h3 style={{ fontSize: '0.9375rem', fontWeight: 600, marginBottom: '0.5rem' }}>MCP Servers</h3>
-          {allMCPServers.length === 0 ? (
-            <p style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>暂无可用的 MCP Server</p>
-          ) : (
-            <div style={{ display: 'grid', gap: '0.125rem' }}>
-              {allMCPServers.map(s => {
-                const checked = config.mcp_server_ids.includes(s.id)
-                return (
-                  <label key={s.id} style={{
-                    display: 'flex', alignItems: 'center', gap: '0.5rem',
-                    cursor: s.can_disable ? 'pointer' : 'default',
-                    padding: '0.375rem 0.5rem', borderRadius: '5px',
-                    background: checked ? 'var(--primary-subtle)' : 'transparent',
-                    transition: 'background 0.15s',
-                  }}>
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => toggleMCPServer(s.id)}
-                      disabled={!s.can_disable && s.is_essential}
-                    />
-                    <span style={{ fontSize: '0.8125rem', fontWeight: 500 }}>{s.name}</span>
-                    {s.is_builtin && <span style={{ fontSize: '0.6875rem', color: '#8b5cf6', opacity: 0.8 }}>[内置]</span>}
-                    {s.description && <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.description}</span>}
-                  </label>
-                )
-              })}
+          <div style={{ flex: 1 }}>
+            <h3 style={{ fontSize: '0.9375rem', fontWeight: 600, marginBottom: '0.5rem' }}>
+              已启用的 MCP Servers
+            </h3>
+            {allMCPServers.filter(s => s.enabled).length === 0 ? (
+              <p style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>暂无启用的 MCP Server</p>
+            ) : (
+              <div>
+                {allMCPServers.filter(s => s.enabled).map((s) => (
+                  <div
+                    key={s.id}
+                    style={{
+                      padding: '0.5rem 0.75rem',
+                      marginBottom: '0.25rem',
+                      borderRadius: '0.375rem',
+                      background: 'var(--bg-tertiary)',
+                    }}
+                  >
+                    <strong style={{ fontSize: '0.875rem' }}>{s.name}</strong>
+                    {s.is_builtin && (
+                      <span style={{ marginLeft: '0.5rem', fontSize: '0.75rem', color: 'var(--accent)' }}>
+                        [内置]
+                      </span>
+                    )}
+                    <span style={{ marginLeft: '0.5rem', color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>
+                      {s.description}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ marginTop: '0.75rem' }}>
+              <Link to="/mcp-servers" style={{ color: 'var(--accent)', fontSize: '0.8125rem', textDecoration: 'none' }}>
+                → 前往 MCP 管理
+              </Link>
             </div>
-          )}
+          </div>
         </Card>
 
         <Card>
-          <h3 style={{ fontSize: '0.9375rem', fontWeight: 600, marginBottom: '0.5rem' }}>Skills</h3>
-          {allSkills.length === 0 ? (
-            <p style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>暂无可用的 Skill</p>
-          ) : (
-            <div style={{ display: 'grid', gap: '0.125rem' }}>
-              {allSkills.map(s => {
-                const checked = config.skill_ids.includes(s.id)
-                return (
-                  <label key={s.id} style={{
-                    display: 'flex', alignItems: 'center', gap: '0.5rem',
-                    cursor: 'pointer',
-                    padding: '0.375rem 0.5rem', borderRadius: '5px',
-                    background: checked ? 'var(--primary-subtle)' : 'transparent',
-                    transition: 'background 0.15s',
-                  }}>
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => toggleSkill(s.id)}
-                    />
-                    <span style={{ fontSize: '0.8125rem', fontWeight: 500 }}>{s.name}</span>
-                    <span style={{ fontSize: '0.6875rem', color: 'var(--text-muted)' }}>v{s.version}</span>
-                    {s.is_builtin && <span style={{ fontSize: '0.6875rem', color: '#8b5cf6', opacity: 0.8 }}>[内置]</span>}
-                  </label>
-                )
-              })}
+          <div style={{ flex: 1 }}>
+            <h3 style={{ fontSize: '0.9375rem', fontWeight: 600, marginBottom: '0.5rem' }}>
+              已启用的 Skills
+            </h3>
+            {allSkills.filter(s => s.enabled).length === 0 ? (
+              <p style={{ color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>暂无启用的 Skill</p>
+            ) : (
+              <div>
+                {allSkills.filter(s => s.enabled).map((s) => (
+                  <div
+                    key={s.id}
+                    style={{
+                      padding: '0.5rem 0.75rem',
+                      marginBottom: '0.25rem',
+                      borderRadius: '0.375rem',
+                      background: 'var(--bg-tertiary)',
+                    }}
+                  >
+                    <strong style={{ fontSize: '0.875rem' }}>{s.name}</strong>
+                    <span style={{ marginLeft: '0.5rem', color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>
+                      {s.description}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ marginTop: '0.75rem' }}>
+              <Link to="/skills" style={{ color: 'var(--accent)', fontSize: '0.8125rem', textDecoration: 'none' }}>
+                → 前往 Skills 管理
+              </Link>
             </div>
-          )}
+          </div>
         </Card>
       </div>
 
