@@ -167,6 +167,14 @@ describe('Worker prompt — 新增规则', () => {
     expect(worker).toContain('信息不足以决策')
     expect(worker).toContain('最多一个')
   })
+
+  it('隐藏内部 ID（报告输出规范）', () => {
+    expect(worker).toContain('隐藏内部 ID')
+    expect(worker).toContain('message_id')
+    expect(worker).toContain('task_id')
+    expect(worker).toContain('对用户是噪音')
+    expect(worker).toContain('不论 master、其他人或群聊')
+  })
 })
 
 describe('Front prompt — 删除项不应再出现', () => {
