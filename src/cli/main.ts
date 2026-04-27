@@ -13,6 +13,7 @@ import { registerFriendCommands } from './commands/friend.js'
 import { registerConfigCommands } from './commands/config.js'
 import { registerPermissionCommands } from './commands/permission.js'
 import { registerAgentSetModelCommand } from './commands/composites/agent-set-model.js'
+import { registerAgentDoctorCommand } from './commands/composites/agent-doctor.js'
 import { registerConfigSwitchDefaultCommand } from './commands/composites/config-switch-default.js'
 import { registerMcpToggleCommand } from './commands/composites/mcp-toggle.js'
 import { registerScheduleToggleCommands } from './commands/composites/schedule-toggle.js'
@@ -66,6 +67,7 @@ export function run(argv: string[]): void {
   registerProviderCommands(program)
   registerAgentCommands(program)
   registerAgentSetModelCommand(program)
+  registerAgentDoctorCommand(program)
   registerMcpCommands(program)
   registerSkillCommands(program)
   registerScheduleCommands(program)
