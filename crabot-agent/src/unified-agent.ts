@@ -2006,22 +2006,23 @@ export class UnifiedAgent extends ModuleBase {
       changedFields.push('model_config')
     }
 
-    // 更新系统提示词（需要重启才能生效）
+    // 更新系统提示词（热更新：worker 在下一轮 LLM 调用时通过 callback 看到新 prompt）
     if (params.system_prompt !== undefined) {
+      this.workerHandler?.updateSystemPrompt(params.system_prompt)
       this.agentConfig.system_prompt = params.system_prompt
       changedFields.push('system_prompt')
-      restartRequired = true
     }
 
-    // 更新 MCP Servers（需要重启才能生效）
+    // 更新 MCP Servers（热更新：mcpConnector.reconnect 原子接管；失败抛出由 admin 感知）
     if (params.mcp_servers !== undefined) {
+      await this.mcpConnector.reconnect(params.mcp_servers)
       this.agentConfig.mcp_servers = params.mcp_servers
       changedFields.push('mcp_servers')
-      restartRequired = true
     }
 
-    // 更新 Skills（热更新：重建 Front/Worker handler 以刷新 system prompt 与 skill 列表）
+    // 更新 Skills（热更新：worker 在下一轮 LLM 调用时通过 callback 看到新 skill 列表）
     if (params.skills !== undefined) {
+      this.workerHandler?.updateSkills(params.skills)
       this.agentConfig.skills = params.skills
       changedFields.push('skills')
     }
