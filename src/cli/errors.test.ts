@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { CliError, exitCodeFor, fromHttpError } from '../../src/cli/errors.js'
+import { CliError, exitCodeFor, fromHttpError } from './errors.js'
 
 describe('CliError', () => {
   it('携带 code/message/details/exitCode', () => {
