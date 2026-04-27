@@ -280,9 +280,14 @@ export class WorkerHandler {
 
   /**
    * 热加载：更新 base system prompt（admin personality）。下次 LLM 调用时生效。
+   *
+   * `undefined` 表示"不变"，保留当前值；caller 想清空 personality 应明确传 `''`。
+   * 这与 handleUpdateConfig 的 `!== undefined` 守卫语义一致：
+   * undefined 是 "字段未改动"，空字符串是 "明确设为空"。
    */
   updateSystemPrompt(newPrompt: string | undefined): void {
-    this.systemPrompt = newPrompt ?? ''
+    if (newPrompt === undefined) return
+    this.systemPrompt = newPrompt
   }
 
   async executeTask(
