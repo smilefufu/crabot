@@ -48,3 +48,5 @@ export {
 } from './module-base.js'
 
 export { ProxyManager, proxyManager } from './proxy-manager.js'
+
+export { CLI_WRITE_SUBCOMMANDS, CLI_MUST_CONFIRM_SUBCOMMANDS } from './cli-write-commands.js'
