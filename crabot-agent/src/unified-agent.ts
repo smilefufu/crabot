@@ -6,7 +6,6 @@
  * @see crabot-docs/protocols/protocol-agent-v2.md
  */
 
-import * as path from 'path'
 import { ModuleBase, type ModuleConfig, type Event, type ModuleId, type TraceStoreInterface } from 'crabot-shared'
 import type {
   UnifiedAgentConfig,
@@ -44,7 +43,7 @@ import { DecisionDispatcher } from './orchestration/decision-dispatcher.js'
 import { MemoryWriter } from './orchestration/memory-writer.js'
 import { AttentionScheduler, type AttentionConfig, type BufferedMessage } from './orchestration/attention-scheduler.js'
 import { FrontHandler, type FrontHandlerLlmConfig } from './agent/front-handler.js'
-import { createAdapter, type LLMAdapter, type LLMFormat } from './engine/llm-adapter.js'
+import { createAdapter, type LLMFormat } from './engine/llm-adapter.js'
 import type { ToolExecutorDeps } from './agent/tool-executor.js'
 import { WorkerHandler, type SdkEnvConfig } from './agent/worker-handler.js'
 import type { ToolPermissionConfig, ToolDefinition as EngineToolDefinition } from './engine/types.js'
