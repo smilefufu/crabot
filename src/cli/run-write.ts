@@ -1,6 +1,8 @@
 import { CliError } from './errors.js'
 import { mustConfirm, generateToken, verifyToken, expiresAt } from './confirm-rules.js'
 import { UndoLog, type UndoEntryInput } from './undo-log.js'
+import type { OutputMode } from './output.js'
+import { promptYesNo } from './human-confirm.js'
 
 export interface PreviewInfo {
   readonly side_effects: ReadonlyArray<unknown>
@@ -18,6 +20,7 @@ export interface RunWriteParams {
   readonly collectPreview?: () => Promise<PreviewInfo>
   readonly dataDir: string
   readonly actor?: string
+  readonly mode?: OutputMode
 }
 
 export interface OkResponse {
@@ -65,13 +68,25 @@ export async function runWrite(p: RunWriteParams): Promise<RunWriteResult> {
       )
     }
     const preview = await p.collectPreview()
-    const token = generateToken(p.subcommand, p.args)
-    return {
-      confirmation_required: true,
-      confirmation_token: token,
-      expires_at: expiresAt(),
-      preview: { action: actionOf(p.subcommand), ...preview },
-      command_to_confirm: buildConfirmCommand(p.command_text, token),
+
+    if (p.mode === 'human') {
+      const previewPayload = { action: actionOf(p.subcommand), ...preview }
+      process.stderr.write(`\nPreview:\n${JSON.stringify(previewPayload, null, 2)}\n\n`)
+      const ok = await promptYesNo(`Execute: ${p.subcommand}?`)
+      if (!ok) {
+        process.stderr.write('Cancelled.\n')
+        process.exit(0)
+      }
+      // Human confirmed interactively — fall through to execute()
+    } else {
+      const token = generateToken(p.subcommand, p.args)
+      return {
+        confirmation_required: true,
+        confirmation_token: token,
+        expires_at: expiresAt(),
+        preview: { action: actionOf(p.subcommand), ...preview },
+        command_to_confirm: buildConfirmCommand(p.command_text, token),
+      }
     }
   }
 

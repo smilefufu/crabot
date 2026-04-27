@@ -36,6 +36,7 @@ export function registerMcpToggleCommand(parent: Command): void {
         }),
         dataDir: ctx.dataDir,
         actor: process.env['CRABOT_ACTOR'] ?? 'human',
+        mode: ctx.mode,
       })
       renderResult(result, { mode: ctx.mode })
     })

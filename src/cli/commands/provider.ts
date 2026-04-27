@@ -72,6 +72,7 @@ export function registerProviderCommands(parent: Command): void {
           },
           dataDir: ctx.dataDir,
           actor: process.env['CRABOT_ACTOR'] ?? 'human',
+          mode: ctx.mode,
         })
         renderResult(maskSensitive(result), { mode: ctx.mode })
       },
@@ -131,6 +132,7 @@ export function registerProviderCommands(parent: Command): void {
         },
         dataDir: ctx.dataDir,
         actor: process.env['CRABOT_ACTOR'] ?? 'human',
+        mode: ctx.mode,
       })
       // name is resolved above — suppress the unused warning by referencing it
       void name

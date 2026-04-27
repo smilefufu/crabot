@@ -5,6 +5,11 @@ import { join } from 'node:path'
 import { runWrite } from './run-write.js'
 import { UndoLog } from './undo-log.js'
 
+// Mock human-confirm module for human mode tests
+vi.mock('./human-confirm.js', () => ({
+  promptYesNo: vi.fn(),
+}))
+
 let tmpDir: string
 beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), 'crabot-rw-')) })
 afterEach(() => { rmSync(tmpDir, { recursive: true, force: true }) })
@@ -128,5 +133,54 @@ describe('runWrite', () => {
     if (!('command_to_confirm' in result)) throw new Error('expected confirmation')
     // 不应该出现两个 --confirm
     expect(result.command_to_confirm.match(/--confirm/g)?.length).toBe(1)
+  })
+
+  it('human 模式 + 用户输入 YES → 直接执行，不返回 confirmation_required', async () => {
+    const { promptYesNo } = await import('./human-confirm.js')
+    vi.mocked(promptYesNo).mockResolvedValue(true)
+
+    const exec = vi.fn(async () => ({ deleted: true }))
+    const collectPreview = vi.fn(async () => ({ side_effects: [{ type: 'data_loss' }] }))
+
+    const result = await runWrite({
+      subcommand: 'provider delete',
+      args: { '_positional': 'gpt' },
+      command_text: 'provider delete gpt',
+      execute: exec,
+      collectPreview,
+      dataDir: tmpDir,
+      mode: 'human',
+    })
+
+    expect(exec).toHaveBeenCalledOnce()
+    expect(collectPreview).toHaveBeenCalledOnce()
+    expect(promptYesNo).toHaveBeenCalledOnce()
+    if (!('ok' in result)) throw new Error('expected ok response')
+    expect(result.ok).toBe(true)
+  })
+
+  it('human 模式 + 用户输入 NO → process.exit(0)', async () => {
+    const { promptYesNo } = await import('./human-confirm.js')
+    vi.mocked(promptYesNo).mockResolvedValue(false)
+
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('process.exit called')
+    }) as never)
+
+    const exec = vi.fn()
+
+    await expect(runWrite({
+      subcommand: 'provider delete',
+      args: { '_positional': 'gpt' },
+      command_text: 'provider delete gpt',
+      execute: exec,
+      collectPreview: async () => ({ side_effects: [] }),
+      dataDir: tmpDir,
+      mode: 'human',
+    })).rejects.toThrow('process.exit called')
+
+    expect(exec).not.toHaveBeenCalled()
+    expect(exitSpy).toHaveBeenCalledWith(0)
+    exitSpy.mockRestore()
   })
 })

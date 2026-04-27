@@ -51,6 +51,7 @@ export function registerConfigCommands(parent: Command): void {
         snapshot: before,
         dataDir: ctx.dataDir,
         actor: process.env['CRABOT_ACTOR'] ?? 'human',
+        mode: ctx.mode,
       })
       renderResult(maskSensitive(result), { mode: ctx.mode })
     })
@@ -94,6 +95,7 @@ export function registerConfigCommands(parent: Command): void {
         snapshot: before,
         dataDir: ctx.dataDir,
         actor: process.env['CRABOT_ACTOR'] ?? 'human',
+        mode: ctx.mode,
       })
       renderResult(maskSensitive(result), { mode: ctx.mode })
     })

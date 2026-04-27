@@ -63,6 +63,7 @@ export function registerMcpCommands(parent: Command): void {
         },
         dataDir: ctx.dataDir,
         actor: process.env['CRABOT_ACTOR'] ?? 'human',
+        mode: ctx.mode,
       })
       renderResult(maskSensitive(result), { mode: ctx.mode })
     })
@@ -101,6 +102,7 @@ export function registerMcpCommands(parent: Command): void {
         },
         dataDir: ctx.dataDir,
         actor: process.env['CRABOT_ACTOR'] ?? 'human',
+        mode: ctx.mode,
       })
       renderResult(maskSensitive(result), { mode: ctx.mode })
     })
@@ -136,6 +138,7 @@ export function registerMcpCommands(parent: Command): void {
         },
         dataDir: ctx.dataDir,
         actor: process.env['CRABOT_ACTOR'] ?? 'human',
+        mode: ctx.mode,
       })
       void name
       renderResult(result, { mode: ctx.mode })

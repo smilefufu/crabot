@@ -42,6 +42,7 @@ export function registerConfigSwitchDefaultCommand(parent: Command): void {
         snapshot: before,
         dataDir: ctx.dataDir,
         actor: process.env['CRABOT_ACTOR'] ?? 'human',
+        mode: ctx.mode,
       })
       renderResult(result, { mode: ctx.mode })
     })

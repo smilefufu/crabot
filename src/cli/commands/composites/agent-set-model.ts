@@ -48,6 +48,7 @@ export function registerAgentSetModelCommand(parent: Command): void {
         snapshot: { models: { [opts.slot]: oldSlot ?? null } },
         dataDir: ctx.dataDir,
         actor: process.env['CRABOT_ACTOR'] ?? 'human',
+        mode: ctx.mode,
       })
 
       renderResult(result, { mode: ctx.mode })
