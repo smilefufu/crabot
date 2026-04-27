@@ -117,7 +117,10 @@ describe('WorkerHandler', () => {
       const callArgs = mockRunEngine.mock.calls[0][0]
       expect(callArgs.prompt).toContain('Fix login bug')
       expect(callArgs.options.model).toBe('test-model')
-      expect(callArgs.options.systemPrompt).toContain('You are a helpful worker.')
+      // systemPrompt 现在是 lambda（HR Task 3：每轮 resolve 以支持热加载）
+      expect(typeof callArgs.options.systemPrompt).toBe('function')
+      const resolvedPrompt = (callArgs.options.systemPrompt as () => string)()
+      expect(resolvedPrompt).toContain('You are a helpful worker.')
     })
 
     it('should handle aborted result', async () => {

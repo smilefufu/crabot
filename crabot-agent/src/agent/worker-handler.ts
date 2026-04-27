@@ -225,7 +225,7 @@ export class WorkerHandler {
   private extra: Record<string, unknown>
   private digestSdkEnv?: SdkEnvConfig
   private readonly subAgentConfigs: ReadonlyArray<{ readonly definition: SubAgentDefinition; readonly sdkEnv: SdkEnvConfig }>
-  private readonly skills: ReadonlyArray<SkillConfig>
+  private skills: ReadonlyArray<SkillConfig>
   private readonly lspManager?: import('../lsp/lsp-manager').LSPManager
   private memoryWriter?: MemoryWriter
   private confirmedSnapshotBlock: string = ''
@@ -267,6 +267,43 @@ export class WorkerHandler {
     } catch (error) {
       console.error('[WorkerHandler] Failed to load confirmed snapshot:', error)
     }
+  }
+
+  /**
+   * 热加载：更新 skills 列表。下次 LLM 调用时通过 systemPrompt callback 让 LLM 感知。
+   * 注意：已经在执行的 task 不会重写 /tmp/crabot-task-<id>/.claude/skills/ 目录。
+   * Skill 详情加载靠 LLM 主动调 Skill 工具，工具内部从 this.skills 读最新列表。
+   */
+  updateSkills(newSkills: ReadonlyArray<SkillConfig>): void {
+    this.skills = newSkills
+  }
+
+  /**
+   * 热加载：更新 base system prompt（admin personality）。下次 LLM 调用时生效。
+   */
+  updateSystemPrompt(newPrompt: string | undefined): void {
+    this.systemPrompt = newPrompt ?? ''
+  }
+
+  /**
+   * 构建 skill catalog 文本片段（XML 格式 + 强制使用 Skill 工具的引导语）。
+   *
+   * 该 helper 当前未直接被 buildSystemPrompt 使用（system prompt 仍由 unified-agent
+   * 的 promptManager.assembleWorkerPrompt 预先组装）。HR Task 5 会让 worker-handler
+   * 自行负责 skill listing 拼装，届时此 helper 会替代 unified-agent 内的
+   * buildSkillXml + buildSkillListing。
+   */
+  private buildSkillListingSnapshot(): string | undefined {
+    if (!this.skills || this.skills.length === 0) return undefined
+    const intro =
+      '\n\n以下技能为特定任务提供专业指引。当任务匹配某个技能的描述时，' +
+      '必须先调用 Skill 工具（输入技能名称）加载完整指引，然后按指引操作。' +
+      '这是强制要求——先加载技能，再执行任务。'
+    const body = this.skills.map((s) => {
+      const desc = s.description || s.name
+      return `<skill>\n<name>${s.name}</name>\n<description>${desc}</description>\n</skill>`
+    }).join('\n')
+    return `${intro}\n\n<available_skills>\n${body}\n</available_skills>`
   }
 
   async executeTask(
@@ -312,134 +349,154 @@ export class WorkerHandler {
         }
       }
 
-      // 3. Build tools from MCP servers
-      const tools: ToolDefinition[] = []
-
-      // 3a. ask_human built-in tool
-      tools.push(defineTool({
-        name: 'mcp__crabot-worker__ask_human',
-        description: '请求人类反馈或确认',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            question: { type: 'string', description: '向人类提出的问题' },
-            options: {
-              type: 'array',
-              items: { type: 'string' },
-              description: '可选的选项列表',
-            },
-          },
-          required: ['question'],
-        },
-        isReadOnly: false,
-        call: async (input) => {
-          taskState.status = 'waiting_for_human'
-          return {
-            output: JSON.stringify({
-              status: 'waiting',
-              message: '已向人类发送问题，等待响应...',
-              question: (input as { question: string }).question,
-            }),
-            isError: false,
-          }
-        },
-      }))
-
-      // 3b. crab-memory MCP server tools
-      const memoryTaskCtx: MemoryTaskContext = {
-        taskId: task.task_id,
-        channelId: context.task_origin?.channel_id,
-        sessionId: context.task_origin?.session_id,
-        visibility: context.memory_permissions?.write_visibility ?? 'public',
-        scopes: context.memory_permissions?.write_scopes ?? [],
-        sourceType: context.task_origin ? 'conversation' : 'system',
-        sessionType: context.task_origin?.session_type,
-        senderFriendId: context.sender_friend?.id,
-      }
-      if (this.deps?.getMemoryPort) {
-        const crabMemoryServer = createCrabMemoryServer({
-          rpcClient: this.deps.rpcClient,
-          moduleId: this.deps.moduleId,
-          getMemoryPort: this.deps.getMemoryPort,
-        }, memoryTaskCtx)
-        tools.push(...mcpServerToToolDefinitions(crabMemoryServer, 'crab-memory'))
-      }
-
-      // 3c. External MCP server tools (crab-messaging, etc.)
-      const externalMcpServers = this.mcpConfigFactory?.() ?? {}
-      for (const [serverName, server] of Object.entries(externalMcpServers)) {
-        tools.push(...mcpServerToToolDefinitions(server, serverName))
-      }
-
-      // 3d. External MCP tools (from Admin-managed servers via McpConnector)
-      if (this.mcpConnector) {
-        const externalTools = this.mcpConnector.getAllTools()
-        tools.push(...externalTools)
-      }
-
-      // 3e. Built-in file/shell tools (filtered by Admin config)
-      tools.push(...getConfiguredBuiltinTools(taskDir, this.builtinToolConfig, skills.length > 0 ? { skillsDir: taskDir } : undefined))
-
-      // 3f. Sub-agent delegation tools
-      // 预过滤：被 deny 的工具不注入给 LLM（sub-agent 和 Worker 自己都拿过滤后的列表）
-      const baseToolsRaw = [...tools]
-      const permissionConfig: ToolPermissionConfig =
-        this.deps?.getPermissionConfig?.(baseToolsRaw) ?? { mode: 'bypass' }
-      const baseTools = filterToolsByPermission(baseToolsRaw, permissionConfig)
+      // 3. Build tools — adapter / sub-agent trace config 等无依赖项先行构造
+      const adapter = adapterFromSdkEnv(this.sdkEnv)
       const subAgentTraceConfig = traceContext ? {
         traceStore: traceContext.traceStore,
         parentTraceId: traceContext.traceId,
         relatedTaskId: traceContext.relatedTaskId,
       } : undefined
 
-      for (const { definition, sdkEnv: subSdkEnv } of this.subAgentConfigs) {
-        const hookRegistry = definition.hooks === 'coding_expert'
-          ? createCodingExpertHookRegistry()
-          : undefined
+      // Trace search tool (异步 import，提前加载，lambda 内只用同步引用)
+      const traceSearchTool = traceContext
+        ? (await import('./trace-search-tool.js')).createSearchTracesTool(traceContext.traceStore)
+        : undefined
 
+      // 工具列表构造改为 callback 形式：每轮 LLM 调用前由 query-loop 重新 resolve，
+      // 让 admin push config（updateSkills / updateSystemPrompt）能在同一 task 内热生效。
+      // 注意：lambda 内捕获 taskState / taskDir / context / humanQueue 等闭包变量，
+      // 行为与原一次性构造等价。
+      const buildToolsDynamic = (): ReadonlyArray<ToolDefinition> => {
+        const tools: ToolDefinition[] = []
+
+        // 3a. ask_human built-in tool
+        tools.push(defineTool({
+          name: 'mcp__crabot-worker__ask_human',
+          description: '请求人类反馈或确认',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              question: { type: 'string', description: '向人类提出的问题' },
+              options: {
+                type: 'array',
+                items: { type: 'string' },
+                description: '可选的选项列表',
+              },
+            },
+            required: ['question'],
+          },
+          isReadOnly: false,
+          call: async (input) => {
+            taskState.status = 'waiting_for_human'
+            return {
+              output: JSON.stringify({
+                status: 'waiting',
+                message: '已向人类发送问题，等待响应...',
+                question: (input as { question: string }).question,
+              }),
+              isError: false,
+            }
+          },
+        }))
+
+        // 3b. crab-memory MCP server tools
+        const memoryTaskCtx: MemoryTaskContext = {
+          taskId: task.task_id,
+          channelId: context.task_origin?.channel_id,
+          sessionId: context.task_origin?.session_id,
+          visibility: context.memory_permissions?.write_visibility ?? 'public',
+          scopes: context.memory_permissions?.write_scopes ?? [],
+          sourceType: context.task_origin ? 'conversation' : 'system',
+          sessionType: context.task_origin?.session_type,
+          senderFriendId: context.sender_friend?.id,
+        }
+        if (this.deps?.getMemoryPort) {
+          const crabMemoryServer = createCrabMemoryServer({
+            rpcClient: this.deps.rpcClient,
+            moduleId: this.deps.moduleId,
+            getMemoryPort: this.deps.getMemoryPort,
+          }, memoryTaskCtx)
+          tools.push(...mcpServerToToolDefinitions(crabMemoryServer, 'crab-memory'))
+        }
+
+        // 3c. External MCP server tools (crab-messaging, etc.)
+        const externalMcpServers = this.mcpConfigFactory?.() ?? {}
+        for (const [serverName, server] of Object.entries(externalMcpServers)) {
+          tools.push(...mcpServerToToolDefinitions(server, serverName))
+        }
+
+        // 3d. External MCP tools (from Admin-managed servers via McpConnector)
+        if (this.mcpConnector) {
+          const externalTools = this.mcpConnector.getAllTools()
+          tools.push(...externalTools)
+        }
+
+        // 3e. Built-in file/shell tools (filtered by Admin config)
+        const skillsSnapshot = this.skills
+        tools.push(...getConfiguredBuiltinTools(
+          taskDir,
+          this.builtinToolConfig,
+          skillsSnapshot.length > 0 ? { skillsDir: taskDir } : undefined,
+        ))
+
+        // 3f. Sub-agent delegation tools
+        // 预过滤：被 deny 的工具不注入给 LLM（sub-agent 和 Worker 自己都拿过滤后的列表）
+        const baseToolsRaw = [...tools]
+        const localPermissionConfig: ToolPermissionConfig =
+          this.deps?.getPermissionConfig?.(baseToolsRaw) ?? { mode: 'bypass' }
+        const baseTools = filterToolsByPermission(baseToolsRaw, localPermissionConfig)
+
+        for (const { definition, sdkEnv: subSdkEnv } of this.subAgentConfigs) {
+          const hookRegistry = definition.hooks === 'coding_expert'
+            ? createCodingExpertHookRegistry()
+            : undefined
+
+          tools.push(createSubAgentTool({
+            name: definition.toolName,
+            description: definition.toolDescription,
+            adapter: adapterFromSdkEnv(subSdkEnv),
+            model: subSdkEnv.modelId,
+            systemPrompt: definition.systemPrompt,
+            subTools: baseTools,
+            maxTurns: definition.maxTurns,
+            supportsVision: subSdkEnv.supportsVision,
+            parentHumanQueue: humanQueue,
+            traceConfig: subAgentTraceConfig,
+            hookRegistry,
+            lspManager: hookRegistry ? this.lspManager : undefined,
+            permissionConfig: localPermissionConfig,
+          }))
+        }
+
+        // 3g. Generic delegate_task tool (uses Worker's own model)
         tools.push(createSubAgentTool({
-          name: definition.toolName,
-          description: definition.toolDescription,
-          adapter: adapterFromSdkEnv(subSdkEnv),
-          model: subSdkEnv.modelId,
-          systemPrompt: definition.systemPrompt,
+          name: 'delegate_task',
+          description: '将子任务委派给一个独立的执行者。执行者在独立上下文中运行，使用与你相同的模型和工具，只返回最终结果。适合：(1) 子任务的中间过程会污染你的上下文 (2) 子任务可以独立完成，不需要你的持续关注',
+          adapter,
+          model: this.sdkEnv.modelId,
+          systemPrompt: DELEGATE_TASK_SYSTEM_PROMPT,
           subTools: baseTools,
-          maxTurns: definition.maxTurns,
-          supportsVision: subSdkEnv.supportsVision,
+          maxTurns: 30,
+          supportsVision: this.sdkEnv.supportsVision,
           parentHumanQueue: humanQueue,
           traceConfig: subAgentTraceConfig,
-          hookRegistry,
-          lspManager: hookRegistry ? this.lspManager : undefined,
-          permissionConfig,
+          permissionConfig: localPermissionConfig,
         }))
+
+        // 3h. Trace search tool
+        if (traceSearchTool) {
+          tools.push(traceSearchTool)
+        }
+
+        // 最终过滤：无权限工具不注入 LLM
+        return filterToolsByPermission(tools, localPermissionConfig)
       }
 
-      // 3g. Generic delegate_task tool (uses Worker's own model)
-      const adapter = adapterFromSdkEnv(this.sdkEnv)
-      tools.push(createSubAgentTool({
-        name: 'delegate_task',
-        description: '将子任务委派给一个独立的执行者。执行者在独立上下文中运行，使用与你相同的模型和工具，只返回最终结果。适合：(1) 子任务的中间过程会污染你的上下文 (2) 子任务可以独立完成，不需要你的持续关注',
-        adapter,
-        model: this.sdkEnv.modelId,
-        systemPrompt: DELEGATE_TASK_SYSTEM_PROMPT,
-        subTools: baseTools,
-        maxTurns: 30,
-        supportsVision: this.sdkEnv.supportsVision,
-        parentHumanQueue: humanQueue,
-        traceConfig: subAgentTraceConfig,
-        permissionConfig,
-      }))
+      // System prompt 也改为 callback：admin push config 触发 updateSystemPrompt 后下一轮生效。
+      const buildSystemPromptDynamic = (): string => this.buildSystemPrompt(context)
 
-      // 3h. Trace search tool
-      if (traceContext) {
-        const { createSearchTracesTool } = await import('./trace-search-tool.js')
-        tools.push(createSearchTracesTool(traceContext.traceStore))
-      }
-
-      // 5. Build system prompt and task message
-      const systemPrompt = this.buildSystemPrompt(context)
+      // 5. Build task message（一次性，task 启动后用户请求/记忆等不变）
       const taskMessage = await this.buildTaskMessage(task, context)
-      log(`Starting worker engine: model=${this.sdkEnv.modelId}, task=${task.task_title}, tools=${tools.length}`)
 
       // 6. Set up trace and progress tracking
       const isMasterPrivate =
@@ -449,14 +506,19 @@ export class WorkerHandler {
       let loopSpanId: string | undefined
       const taskOrigin = context.task_origin
 
-      // 预过滤：无权限工具不注入 LLM（仅过滤一次，loop span 和 runEngine 复用同一列表）
-      const finalTools = filterToolsByPermission(tools, permissionConfig)
+      // 初始 snapshot：用于 trace 记录 + 给 runEngine 的 permissionConfig option（兜底）。
+      // runEngine 内部会在每轮调用 buildToolsDynamic 重新拿最新工具列表。
+      const initialTools = buildToolsDynamic()
+      const initialPermissionConfig: ToolPermissionConfig =
+        this.deps?.getPermissionConfig?.(initialTools) ?? { mode: 'bypass' }
+
+      log(`Starting worker engine: model=${this.sdkEnv.modelId}, task=${task.task_title}, tools=${initialTools.length}`)
 
       // Start loop span
       loopSpanId = traceCallback?.onLoopStart('worker', {
         system_prompt: undefined,
         model: this.sdkEnv.modelId,
-        tools: finalTools.map(t => t.name),
+        tools: initialTools.map(t => t.name),
       })
 
       // 创建进度汇报（根据会话场景分支）
@@ -532,16 +594,16 @@ export class WorkerHandler {
         }
       }
 
-      // 7. Run engine
+      // 7. Run engine — systemPrompt 和 tools 传 lambda，每轮 LLM 调用前 query-loop 重新 resolve
       const engineResult = await runEngine({
         prompt: taskMessage,
         adapter,
         options: {
-          systemPrompt,
-          tools: finalTools,
+          systemPrompt: buildSystemPromptDynamic,
+          tools: buildToolsDynamic,
           model: this.sdkEnv.modelId,
           supportsVision: this.sdkEnv.supportsVision,
-          permissionConfig,
+          permissionConfig: initialPermissionConfig,
           abortSignal: taskState.abortController.signal as AbortSignal,
           humanMessageQueue: humanQueue,
           hookRegistry: workerHookRegistry,
