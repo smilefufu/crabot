@@ -285,27 +285,6 @@ export class WorkerHandler {
     this.systemPrompt = newPrompt ?? ''
   }
 
-  /**
-   * 构建 skill catalog 文本片段（XML 格式 + 强制使用 Skill 工具的引导语）。
-   *
-   * 该 helper 当前未直接被 buildSystemPrompt 使用（system prompt 仍由 unified-agent
-   * 的 promptManager.assembleWorkerPrompt 预先组装）。HR Task 5 会让 worker-handler
-   * 自行负责 skill listing 拼装，届时此 helper 会替代 unified-agent 内的
-   * buildSkillXml + buildSkillListing。
-   */
-  private buildSkillListingSnapshot(): string | undefined {
-    if (!this.skills || this.skills.length === 0) return undefined
-    const intro =
-      '\n\n以下技能为特定任务提供专业指引。当任务匹配某个技能的描述时，' +
-      '必须先调用 Skill 工具（输入技能名称）加载完整指引，然后按指引操作。' +
-      '这是强制要求——先加载技能，再执行任务。'
-    const body = this.skills.map((s) => {
-      const desc = s.description || s.name
-      return `<skill>\n<name>${s.name}</name>\n<description>${desc}</description>\n</skill>`
-    }).join('\n')
-    return `${intro}\n\n<available_skills>\n${body}\n</available_skills>`
-  }
-
   async executeTask(
     params: ExecuteTaskParams,
     traceCallback?: TraceCallback,

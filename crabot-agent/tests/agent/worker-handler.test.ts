@@ -4,7 +4,6 @@ import { resolveSceneAnchorLabel } from '../../src/mcp/crab-memory.js'
 import type {
   ExecuteTaskParams,
   WorkerAgentContext,
-  EngineResult,
 } from '../../src/types.js'
 
 // Mock the engine's runEngine function
