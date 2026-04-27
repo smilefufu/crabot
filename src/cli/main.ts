@@ -17,6 +17,7 @@ import { registerAgentDoctorCommand } from './commands/composites/agent-doctor.j
 import { registerConfigSwitchDefaultCommand } from './commands/composites/config-switch-default.js'
 import { registerMcpToggleCommand } from './commands/composites/mcp-toggle.js'
 import { registerScheduleToggleCommands } from './commands/composites/schedule-toggle.js'
+import { registerUndoCommands } from './commands/undo.js'
 
 export interface CliContext {
   readonly client: AdminClient
@@ -78,6 +79,7 @@ export function run(argv: string[]): void {
   registerConfigSwitchDefaultCommand(program)
   registerMcpToggleCommand(program)
   registerScheduleToggleCommands(program)
+  registerUndoCommands(program)
 
   program.parseAsync(argv).catch((err: unknown) => {
     const cli =
