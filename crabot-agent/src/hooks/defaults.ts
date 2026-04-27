@@ -7,15 +7,18 @@ export function createCodingExpertHookRegistry(): HookRegistry {
   return registry
 }
 
-export function createCliBlockHook(): HookDefinition {
+export function createCliPermissionHook(): HookDefinition {
   return {
     event: 'PreToolUse',
     matcher: 'Bash',
     if: 'Bash(crabot *)',
     type: 'command',
-    command: '__internal:block-cli',
+    command: '__internal:block-cli-write',
   }
 }
+
+// Backward-compat alias for existing references in worker-handler
+export const createCliBlockHook = createCliPermissionHook
 
 function getCodingExpertHooks(): ReadonlyArray<HookDefinition> {
   return [
