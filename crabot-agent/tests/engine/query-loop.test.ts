@@ -574,8 +574,8 @@ describe('runEngine barrier integration', () => {
 
 // --- HR Task 1: Resolvable callback for tools / systemPrompt ---
 
-import type { LLMCallResponse } from '../../src/engine/llm-adapter.js'
-import type { ToolDefinition } from '../../src/engine/types.js'
+import type { LLMCallResponse } from '../../src/engine/llm-adapter'
+import type { ToolDefinition } from '../../src/engine/types'
 
 function makeAdapter(responses: LLMCallResponse[]): LLMAdapter {
   let i = 0
@@ -594,7 +594,7 @@ function endResponse(text = 'done'): LLMCallResponse {
   return {
     content: [{ type: 'text', text }],
     stopReason: 'end_turn',
-    usage: { input_tokens: 10, output_tokens: 5 },
+    usage: { inputTokens: 10, outputTokens: 5 },
   }
 }
 
@@ -626,16 +626,13 @@ describe('runEngine — Resolvable callback', () => {
 
   it('tools 传 callback（每轮 resolve）', async () => {
     const adapter = makeAdapter([endResponse()])
-    const cb = vi.fn(() => [dummyTool])
-    await runEngine({
-      prompt: 'hi',
-      adapter,
-      options: {
-        systemPrompt: () => 'sys-dynamic',
-        tools: cb,
-        model: 'test',
-      },
-    })
+    const cb = vi.fn<[], readonly ToolDefinition[]>(() => [dummyTool])
+    const options: EngineOptions = {
+      systemPrompt: () => 'sys-dynamic',
+      tools: cb,
+      model: 'test',
+    }
+    await runEngine({ prompt: 'hi', adapter, options })
     expect(cb).toHaveBeenCalled()
     const call = (adapter.complete as ReturnType<typeof vi.fn>).mock.calls[0][0]
     expect(call.tools).toEqual([dummyTool])
@@ -650,20 +647,17 @@ describe('runEngine — Resolvable callback', () => {
       {
         content: [{ type: 'tool_use', id: 't1', name: 'tool1', input: {} }],
         stopReason: 'tool_use',
-        usage: { input_tokens: 10, output_tokens: 5 },
+        usage: { inputTokens: 10, outputTokens: 5 },
       },
       endResponse(),
     ])
-    const cb = vi.fn(() => returnTool2 ? [tool2] : [tool1])
+    const cb = vi.fn<[], readonly ToolDefinition[]>(() => returnTool2 ? [tool2] : [tool1])
     const switching = (async () => {
       await new Promise(r => setTimeout(r, 10))
       returnTool2 = true
     })()
-    await runEngine({
-      prompt: 'hi',
-      adapter,
-      options: { systemPrompt: 'sys', tools: cb, model: 'test' },
-    })
+    const options: EngineOptions = { systemPrompt: 'sys', tools: cb, model: 'test' }
+    await runEngine({ prompt: 'hi', adapter, options })
     await switching
     expect(cb.mock.calls.length).toBeGreaterThanOrEqual(2)
   })
