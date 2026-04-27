@@ -2484,10 +2484,6 @@ export class AdminModule extends ModuleBase {
     return extractChannelIdentityFromPrivateSession(session)
   }
 
-  private async resolveApplicationChannelIdentity(message: PendingMessage): Promise<ChannelIdentity> {
-    return this.getChannelIdentityFromPendingMessage(message)
-  }
-
   private getChannelIdentityFromPendingMessage(message: Pick<PendingMessage, 'channel_id' | 'platform_user_id' | 'platform_display_name'>): ChannelIdentity {
     return {
       channel_id: message.channel_id,
