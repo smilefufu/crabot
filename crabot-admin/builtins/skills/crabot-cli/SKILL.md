@@ -2,12 +2,6 @@
 name: crabot-cli
 description: '管理 Crabot 系统自身的资源（Provider/Agent/MCP/Channel/Skill/Schedule/Friend/Permission）。Use when master 让你查看/列出/切换/启停/增删/诊断/撤销这些资源——例如"当前用什么模型"、"切到 GPT-5"、"列出所有 agent"、"启用 weather mcp"、"重启 telegram channel"、"暂停那个定时任务"、"删掉这个 provider"、"撤销刚才的改动"、"channel 是不是失联了"、"测一下这个 provider 通不通"。read 类命令在所有场景可用（敏感字段自动 mask），write 类（add/update/set/delete/restart/start/stop/toggle/trigger/pause/resume）仅 master 私聊场景执行，其他场景会被 hook 拦截。'
 version: "2.1.0"
-metadata:
-  openclaw:
-    emoji: "⚙️"
-    requires:
-      bins:
-        - node
 ---
 
 # Crabot CLI 管理技能
