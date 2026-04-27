@@ -23,7 +23,15 @@ function execCommand(
     const child = execFile(
       '/bin/sh',
       ['-c', command],
-      { cwd, timeout: timeoutMs, signal, maxBuffer: 10 * 1024 * 1024 },
+      {
+        cwd,
+        timeout: timeoutMs,
+        signal,
+        maxBuffer: 10 * 1024 * 1024,
+        // 显式透传父进程 env，确保 CRABOT_TOKEN / DATA_DIR 等环境变量进入子 shell。
+        // execFile 默认 inherit 但显式传更稳定。
+        env: process.env,
+      },
       (error, stdout, stderr) => {
         const stderrTrimmed = stderr.trim()
         const stdoutTrimmed = stdout ?? ''

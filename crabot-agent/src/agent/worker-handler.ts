@@ -586,7 +586,10 @@ export class WorkerHandler {
       }
 
       // 6c. 注入 CLI 环境变量（CRABOT_TOKEN）
-      if (isMasterPrivate && !process.env.CRABOT_TOKEN) {
+      // 总是注入（不论 isMasterPrivate）—— token 只是让子进程能调 CLI；
+      // 真正的权限边界在 CLI 层 (block-cli-write hook 限制 write 命令到 master_private)。
+      // 不注入会让群聊/非 master 任务的 read 类 CLI（如 'crabot mcp list'）也跑不起来。
+      if (!process.env.CRABOT_TOKEN) {
         const dataDir = process.env.DATA_DIR ?? './data'
         const tokenPath = path.join(dataDir, 'admin', 'internal-token')
         try {
