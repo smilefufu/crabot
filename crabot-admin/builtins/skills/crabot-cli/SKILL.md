@@ -1,7 +1,7 @@
 ---
 name: crabot-cli
-description: "在 master 通过私聊要求查看或变更系统配置、切换模型、管理 MCP 服务器、频道、日程或好友时使用"
-version: "1.0.0"
+description: "通过 crabot CLI 管理 Crabot 系统配置（模型 Provider、Agent、MCP、Channel、技能、定时任务、好友等）。read 命令所有场景可用，write 命令仅 master 私聊"
+version: "2.0.0"
 metadata:
   openclaw:
     emoji: "⚙️"
@@ -14,54 +14,105 @@ metadata:
 
 ## Overview
 
-通过 `crabot` CLI 命令管理 Crabot 系统配置。
+通过 `crabot` CLI 管理 Crabot 系统。CLI 默认输出 JSON，专为 LLM 友好设计。
 
-## 使用方式
+## 调用方式
 
-通过 Bash tool 执行 `crabot <command> --json`，解析 JSON 输出。环境变量 `CRABOT_ENDPOINT` 和 `CRABOT_TOKEN` 由运行时自动注入，无需手动设置。
+通过 Bash tool 执行 `crabot <command>`（默认 JSON 输出，无需加 `--json`）。环境变量 `CRABOT_ENDPOINT` 和 `CRABOT_TOKEN` 由运行时自动注入。
 
-## 常用操作模式
+## 关键协议
 
-### 查看系统状态
+### read 命令（所有场景可用）
 
-```bash
-crabot provider list --json    # 查看可用的模型 Provider
-crabot agent list --json       # 查看 Agent 实例
-crabot channel list --json     # 查看 Channel 实例
-crabot mcp list --json         # 查看 MCP 服务
+`list` / `show` / `config`（无 `--set`） / `doctor` 等只读命令在所有场景下都能用。**敏感字段（apikey、password、secret、token 等）永远 mask 成 `sk-x****-xxxx` 形式**——任何场景下 LLM 都拿不到原文。
+
+### write 命令（仅 master 私聊）
+
+非 master 私聊场景下，所有 write 命令会被 hook 拦截，返回权限错误。
+
+写命令分两类响应路径：
+
+#### A. 默认情况：直接执行 + 返回 undo
+
+绝大多数写命令（add / update / set / restart / toggle / pause / resume 等）：
+
+```json
+{
+  "ok": true,
+  "action": "add",
+  "result": { "id": "...", ... },
+  "undo": {
+    "id": "undo-...",
+    "command": "crabot undo undo-...",
+    "description": "delete provider openai (a3c1f9e2)",
+    "expires_at": "2026-04-28T18:20:01Z"
+  }
+}
 ```
 
-### 切换模型
+→ 操作完成。把 `undo.command` 简单告知 master（"已 X，如需撤销执行 Y"），**不需要** master 二次确认。
 
-```bash
-# 1. 查看可用 Provider 和模型
-crabot provider list --json
+#### B. 必 confirm 类：返回 confirmation_required
 
-# 2. 查看某个 Provider 的可用模型
-crabot provider show <provider_id> --json
+仅删除类（provider/mcp/skill/schedule/friend/permission delete）和 `schedule trigger` 7 类命令：
 
-# 3. 更新全局默认模型
-crabot config set default_llm_provider_id=<pid> default_llm_model_id=<mid>
+```json
+{
+  "confirmation_required": true,
+  "confirmation_token": "...",
+  "expires_at": "2026-04-26T18:35:16Z",
+  "preview": {
+    "action": "delete",
+    "side_effects": [...],
+    "rollback_difficulty": "需重新粘贴 apikey 原文"
+  },
+  "command_to_confirm": "crabot ... --confirm <token>"
+}
 ```
 
-### 管理 MCP 服务
+→ **必须停下**，把 `preview.side_effects` 和 `preview.rollback_difficulty` 翻译成自然语言告诉 master，明确询问是否继续。得到肯定答复后用 `command_to_confirm` 字段中的命令重新执行。**任何情况下都不要绕过这个流程。**
+
+## 重要约束
+
+- **不应主动 `crabot undo`**——除非 master 明确说"撤销刚才那个"。undo 是 master 的工具，不是 agent 自我修正的工具。
+- **绝不尝试 `--reveal`**——查看 apikey 原文需走 Admin Web UI，agent 不应该有此能力。
+- **错误响应是结构化 JSON**（在 stderr）：`{"error": {"code": "X", "message": "...", "details": {...}}}`。根据 `code` 决定下一步：
+  - `NOT_FOUND` → 重新 list 一遍
+  - `AMBIGUOUS_REFERENCE` → 看 `details.candidates`，向 master 确认指哪个
+  - `CONFIRMATION_INVALID` → token 错或过期，重新发不带 --confirm 的命令拿新 preview
+  - `UNDO_STALE` / `UNDO_EXPIRED` / `UNDO_EMPTY` → 告知 master 不能 undo
+  - `PERMISSION_DENIED` → 当前场景没有该权限，告知 master 在 master 私聊重试
+
+## 引用方式
+
+所有需要 ID 参数的命令（`<ref>`）支持三种引用：
+
+1. 完整 UUID：`a3c1f9e2-1111-...`
+2. **name**：`openai`（推荐——LLM 友好）
+3. **短前缀**（≥4 字符）：`a3c1`
+
+## 常用操作
 
 ```bash
-crabot mcp list --json                                    # 列出
-crabot mcp add --name myserver --command uvx --args my-mcp  # 添加
-crabot mcp delete <id>                                    # 删除
+# 状态查看（所有场景可用）
+crabot provider list
+crabot agent list
+crabot agent doctor                    # 综合诊断（连接性 + 模型配置）
+
+# 切换模型（一条命令完成）
+crabot agent set-model code-helper --slot fast --provider openai --model gpt-5
+crabot config switch-default --provider openai --model gpt-4o
+
+# 启用/禁用
+crabot mcp toggle weather --on
+crabot schedule pause daily-report
+crabot schedule resume daily-report
+
+# 撤销最近一次写操作（master 主动调用，agent 一般不调）
+crabot undo
+crabot undo list                       # 查看可撤销清单
 ```
 
-### 管理定时任务
+## 详细命令参考
 
-```bash
-crabot schedule list --json
-crabot schedule add --title "日报提醒" --cron "0 9 * * *" --action send_reminder
-crabot schedule trigger <id>    # 立即触发
-```
-
-## 注意事项
-
-- 始终使用 `--json` 参数以获得结构化输出
-- ID 参数支持短前缀匹配（如 `bdbf` 匹配 `bdbf737d-...`）
-- 详细命令参考见 `references/command-ref.md`
+见 `references/command-ref.md`（由 `scripts/gen-skill-ref.mjs` 自动生成自 `crabot --schema`，与 CLI 实现保持同步）。

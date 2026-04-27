@@ -4,13 +4,17 @@
   "type": "module",
   "packageManager": "pnpm@9.15.9",
   "scripts": {
-    "build:cli": "tsc -p tsconfig.cli.json"
+    "build:cli": "tsc -p tsconfig.cli.json",
+    "build": "pnpm run build:cli && node scripts/gen-skill-ref.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "commander": "^13.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "vitest": "^1.0.0"
   }
 }

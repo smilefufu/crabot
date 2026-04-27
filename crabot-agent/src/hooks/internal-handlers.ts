@@ -4,6 +4,8 @@ import { exec } from 'child_process'
 import * as fs from 'fs'
 import * as fsp from 'fs/promises'
 import * as path from 'path'
+import { CLI_WRITE_SUBCOMMANDS } from 'crabot-shared'
+import { parseCrabotInvocation } from './crabot-cmd-parser.js'
 
 const handlers = new Map<string, InternalHandler>()
 
@@ -73,13 +75,26 @@ registerInternalHandler('compile-check', async (_input, context) => {
   })
 })
 
-// --- Built-in: block-cli ---
-// 无条件阻止 crabot CLI 管理命令
-registerInternalHandler('block-cli', async (_input, _context) => {
-  return {
-    action: 'block',
-    message: 'CLI 管理命令仅在 master 私聊场景可用。',
+// --- Built-in: block-cli-write ---
+// 解析 Bash 命令中的 crabot 调用，拦截 write 类子命令和 --reveal
+registerInternalHandler('block-cli-write', async (input, _context) => {
+  const cmdStr = String(input.toolInput?.['command'] ?? '')
+  const parsed = parseCrabotInvocation(cmdStr)
+  if (!parsed) return { action: 'continue' }
+  if (parsed.hasReveal) {
+    return { action: 'block', message: '`--reveal` 仅在 master 私聊场景可用。' }
   }
+  if (CLI_WRITE_SUBCOMMANDS.has(parsed.subcommand)) {
+    return { action: 'block', message: `命令 \`crabot ${parsed.subcommand}\` 仅在 master 私聊场景可用。` }
+  }
+  return { action: 'continue' }
+})
+
+// --- Built-in: block-cli (legacy alias) ---
+registerInternalHandler('block-cli', async (input, context) => {
+  const fwd = getInternalHandler('block-cli-write')
+  if (!fwd) return { action: 'block', message: 'CLI 管理命令仅在 master 私聊场景可用。' }
+  return fwd(input, context)
 })
 
 // --- Helpers ---

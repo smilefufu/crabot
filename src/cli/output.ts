@@ -1,8 +1,17 @@
+import { CliError } from './errors.js'
+
+export type OutputMode = 'ai' | 'human'
+
 export interface Column {
   readonly key: string
   readonly header: string
   readonly width?: number
   readonly transform?: (value: unknown) => string
+}
+
+export interface RenderOptions {
+  readonly mode: OutputMode
+  readonly columns?: Column[]
 }
 
 export function shortId(id: string): string {
@@ -20,7 +29,7 @@ function getCellValue(row: Record<string, unknown>, col: Column): string {
   return String(value)
 }
 
-export function printTable(
+function printTableImpl(
   data: ReadonlyArray<Record<string, unknown>>,
   columns: Column[]
 ): void {
@@ -58,8 +67,55 @@ export function printTable(
   }
 }
 
-export function printJson(data: unknown): void {
+function printJsonImpl(data: unknown): void {
   process.stdout.write(JSON.stringify(data, null, 2) + '\n')
+}
+
+// New AI-first API
+
+export function renderResult(data: unknown, opts: RenderOptions): void {
+  if (opts.mode === 'human' && opts.columns) {
+    if (
+      Array.isArray(data) &&
+      data.length > 0 &&
+      typeof data[0] === 'object'
+    ) {
+      printTableImpl(data as ReadonlyArray<Record<string, unknown>>, opts.columns)
+      return
+    }
+    if (typeof data === 'object' && data !== null && !Array.isArray(data)) {
+      printTableImpl([data as Record<string, unknown>], opts.columns)
+      return
+    }
+  }
+  printJsonImpl(data)
+}
+
+export function renderError(err: CliError, opts: RenderOptions): void {
+  if (opts.mode === 'ai') {
+    process.stderr.write(JSON.stringify(err.toJson(), null, 2) + '\n')
+    return
+  }
+  process.stderr.write(`Error [${err.code}]: ${err.message}\n`)
+  if (err.details && Array.isArray(err.details['candidates'])) {
+    process.stderr.write('Candidates:\n')
+    for (const c of err.details['candidates'] as Array<{ id: string; name: string }>) {
+      process.stderr.write(`  - ${shortId(c.id)} (${c.name})\n`)
+    }
+  }
+}
+
+// Legacy API (backward compatible) — used by current commands until they migrate
+
+export function printJson(data: unknown): void {
+  printJsonImpl(data)
+}
+
+export function printTable(
+  data: ReadonlyArray<Record<string, unknown>>,
+  columns: Column[]
+): void {
+  printTableImpl(data, columns)
 }
 
 export function printResult(
@@ -68,7 +124,7 @@ export function printResult(
   columns?: Column[]
 ): void {
   if (json) {
-    printJson(data)
+    printJsonImpl(data)
     return
   }
 
@@ -78,7 +134,7 @@ export function printResult(
     data.length > 0 &&
     typeof data[0] === 'object'
   ) {
-    printTable(data as ReadonlyArray<Record<string, unknown>>, columns)
+    printTableImpl(data as ReadonlyArray<Record<string, unknown>>, columns)
     return
   }
 
@@ -88,9 +144,9 @@ export function printResult(
     data !== null &&
     !Array.isArray(data)
   ) {
-    printTable([data as Record<string, unknown>], columns)
+    printTableImpl([data as Record<string, unknown>], columns)
     return
   }
 
-  printJson(data)
+  printJsonImpl(data)
 }

@@ -1,7 +1,10 @@
 import { Command } from 'commander'
-import { readFileSync } from 'node:fs'
-import { createClient } from '../main.js'
-import { printResult, shortId, type Column } from '../output.js'
+import { createContext } from '../main.js'
+import { renderResult, type Column, shortId } from '../output.js'
+import { resolveRef } from '../resolve.js'
+import { maskSensitive } from '../mask.js'
+import { runWrite } from '../run-write.js'
+import { buildDeleteParams, readJsonFile } from './_utils.js'
 
 const COLUMNS: Column[] = [
   { key: 'id', header: 'ID', transform: (v) => shortId(String(v ?? '')) },
@@ -11,26 +14,25 @@ const COLUMNS: Column[] = [
 ]
 
 export function registerMcpCommands(parent: Command): void {
-  const mcp = parent
-    .command('mcp')
-    .description('Manage MCP servers')
+  const mcp = parent.command('mcp').description('Manage MCP servers')
 
   mcp
     .command('list')
     .description('List all MCP servers')
     .action(async () => {
-      const { client, json } = createClient(parent)
-      const data = await client.get<unknown>('/api/mcp-servers')
-      printResult(data, json, COLUMNS)
+      const ctx = createContext(parent)
+      const data = await ctx.client.get<unknown>('/api/mcp-servers')
+      renderResult(maskSensitive(data), { mode: ctx.mode, columns: COLUMNS })
     })
 
   mcp
-    .command('show <id>')
+    .command('show <ref>')
     .description('Show an MCP server')
-    .action(async (id: string) => {
-      const { client, json } = createClient(parent)
-      const data = await client.get<unknown>(`/api/mcp-servers/${id}`)
-      printResult(data, json, COLUMNS)
+    .action(async (ref: string) => {
+      const ctx = createContext(parent)
+      const { id } = await resolveRef(ctx.client, 'mcp', ref)
+      const data = await ctx.client.get<unknown>(`/api/mcp-servers/${id}`)
+      renderResult(maskSensitive(data), { mode: ctx.mode, columns: COLUMNS })
     })
 
   mcp
@@ -40,45 +42,90 @@ export function registerMcpCommands(parent: Command): void {
     .requiredOption('--command <cmd>', 'Command to run')
     .option('--args <args>', 'Comma-separated arguments')
     .action(async (opts: { name: string; command: string; args?: string }) => {
-      const { client, json } = createClient(parent)
-
+      const ctx = createContext(parent)
       const body = {
         name: opts.name,
         transport: 'stdio',
         command: opts.command,
         args: opts.args ? opts.args.split(',') : [],
       }
-
-      const data = await client.post<unknown>('/api/mcp-servers', body)
-      printResult(data, json, COLUMNS)
+      const result = await runWrite({
+        subcommand: 'mcp add',
+        args: { '--name': opts.name, '--command': opts.command },
+        command_text: `mcp add --name ${opts.name} --command ${opts.command}${opts.args ? ` --args ${opts.args}` : ''}`,
+        execute: () => ctx.client.post('/api/mcp-servers', body),
+        reverseFromResult: (r) => {
+          const newId = (r as { id?: string })?.id ?? '<unknown>'
+          return {
+            command: `mcp delete ${newId}`,
+            preview_description: `delete MCP server ${opts.name} (${newId})`,
+          }
+        },
+        dataDir: ctx.dataDir,
+        actor: ctx.actor,
+        mode: ctx.mode,
+      })
+      renderResult(maskSensitive(result), { mode: ctx.mode })
     })
 
   mcp
     .command('import <file>')
     .description('Import MCP servers from a JSON file')
     .action(async (file: string) => {
-      const { client, json } = createClient(parent)
+      const ctx = createContext(parent)
 
-      let fileContent: unknown
-      try {
-        const raw = readFileSync(file, 'utf-8')
-        fileContent = JSON.parse(raw)
-      } catch (error) {
-        throw new Error(`Failed to read or parse file ${file}: ${error instanceof Error ? error.message : String(error)}`)
-      }
+      const fileContent = readJsonFile(file)
 
-      const data = await client.post<unknown>('/api/mcp-servers/import-json', fileContent)
-      printResult(data, json)
+      const result = await runWrite({
+        subcommand: 'mcp import',
+        args: { _positional: file },
+        command_text: `mcp import ${file}`,
+        execute: () => ctx.client.post('/api/mcp-servers/import-json', fileContent),
+        reverseFromResult: (r) => {
+          const created = r as Array<{ id?: string }> | { id?: string }
+          const ids = Array.isArray(created)
+            ? created.map((item) => item.id ?? '').filter(Boolean)
+            : [(created as { id?: string }).id ?? ''].filter(Boolean)
+          const idList = ids.join(',')
+          return {
+            command: `mcp undo-import ${idList}`,
+            preview_description: `delete ${ids.length} MCP server${ids.length !== 1 ? 's' : ''} imported from ${file}`,
+          }
+        },
+        dataDir: ctx.dataDir,
+        actor: ctx.actor,
+        mode: ctx.mode,
+      })
+      renderResult(maskSensitive(result), { mode: ctx.mode })
     })
 
   mcp
-    .command('delete <id>')
+    .command('delete <ref>')
     .description('Delete an MCP server')
-    .action(async (id: string) => {
-      const { client, json } = createClient(parent)
-      await client.delete<unknown>(`/api/mcp-servers/${id}`)
-      if (!json) {
-        console.log(`MCP server ${shortId(id)} deleted.`)
-      }
+    .option('--confirm <token>', 'Confirmation token from preview response')
+    .action(async (ref: string, opts: { confirm?: string }) => {
+      const ctx = createContext(parent)
+      const { id } = await resolveRef(ctx.client, 'mcp', ref)
+      const { args, command_text: cmdText } = buildDeleteParams('mcp delete', ref, opts.confirm)
+      const result = await runWrite({
+        subcommand: 'mcp delete',
+        args,
+        command_text: cmdText,
+        execute: () => ctx.client.delete(`/api/mcp-servers/${id}`),
+        collectPreview: async () => {
+          const agents = await ctx.client.getList<{ id: string; name: string; mcp_ids?: string[] }>('/api/agent-instances')
+          const refs = agents
+            .filter((a) => (a.mcp_ids ?? []).includes(id))
+            .map((a) => ({ id: a.id, name: a.name }))
+          return {
+            side_effects: refs.length > 0 ? [{ type: 'agent_unset', agents: refs }] : [],
+            rollback_difficulty: 'mcp 配置可能复杂，重建容易出错',
+          }
+        },
+        dataDir: ctx.dataDir,
+        actor: ctx.actor,
+        mode: ctx.mode,
+      })
+      renderResult(result, { mode: ctx.mode })
     })
 }

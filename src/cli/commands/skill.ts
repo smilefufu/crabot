@@ -1,6 +1,10 @@
 import { Command } from 'commander'
-import { createClient } from '../main.js'
-import { printResult, shortId, type Column } from '../output.js'
+import { createContext } from '../main.js'
+import { renderResult, type Column, shortId } from '../output.js'
+import { resolveRef } from '../resolve.js'
+import { maskSensitive } from '../mask.js'
+import { runWrite } from '../run-write.js'
+import { buildDeleteParams } from './_utils.js'
 
 const COLUMNS: Column[] = [
   { key: 'id', header: 'ID', transform: (v) => shortId(String(v ?? '')) },
@@ -11,26 +15,25 @@ const COLUMNS: Column[] = [
 ]
 
 export function registerSkillCommands(parent: Command): void {
-  const skill = parent
-    .command('skill')
-    .description('Manage skills')
+  const skill = parent.command('skill').description('Manage skills')
 
   skill
     .command('list')
     .description('List all skills')
     .action(async () => {
-      const { client, json } = createClient(parent)
-      const data = await client.get<unknown>('/api/skills')
-      printResult(data, json, COLUMNS)
+      const ctx = createContext(parent)
+      const data = await ctx.client.get<unknown>('/api/skills')
+      renderResult(maskSensitive(data), { mode: ctx.mode, columns: COLUMNS })
     })
 
   skill
-    .command('show <id>')
+    .command('show <ref>')
     .description('Show a skill')
-    .action(async (id: string) => {
-      const { client, json } = createClient(parent)
-      const data = await client.get<unknown>(`/api/skills/${id}`)
-      printResult(data, json, COLUMNS)
+    .action(async (ref: string) => {
+      const ctx = createContext(parent)
+      const { id } = await resolveRef(ctx.client, 'skill', ref)
+      const data = await ctx.client.get<unknown>(`/api/skills/${id}`)
+      renderResult(maskSensitive(data), { mode: ctx.mode, columns: COLUMNS })
     })
 
   const add = skill
@@ -39,36 +42,85 @@ export function registerSkillCommands(parent: Command): void {
     .option('--git <url>', 'Git repository URL')
     .option('--path <dir>', 'Local directory path')
     .action(async (opts: { git?: string; path?: string }) => {
-      const { client, json } = createClient(parent)
+      const ctx = createContext(parent)
 
       if (opts.git) {
-        const scanResult = await client.post<{ install_id?: string; [key: string]: unknown }>(
-          '/api/skills/import-git/scan',
-          { url: opts.git }
-        )
-        const data = await client.post<unknown>(
-          '/api/skills/import-git/install',
-          scanResult
-        )
-        printResult(data, json, COLUMNS)
-      } else if (opts.path) {
-        const data = await client.post<unknown>('/api/skills/import-local', {
-          path: opts.path,
+        const gitUrl = opts.git
+        const result = await runWrite({
+          subcommand: 'skill add',
+          args: { '--git': gitUrl },
+          command_text: `skill add --git ${gitUrl}`,
+          execute: async () => {
+            const scanResult = await ctx.client.post<{ install_id?: string; [key: string]: unknown }>(
+              '/api/skills/import-git/scan',
+              { url: gitUrl },
+            )
+            return ctx.client.post<unknown>('/api/skills/import-git/install', scanResult)
+          },
+          reverseFromResult: (r) => {
+            const newId = (r as { id?: string })?.id ?? '<unknown>'
+            return {
+              command: `skill delete ${newId}`,
+              preview_description: `delete skill imported from git ${gitUrl} (${newId})`,
+            }
+          },
+          dataDir: ctx.dataDir,
+          actor: ctx.actor,
+          mode: ctx.mode,
         })
-        printResult(data, json, COLUMNS)
+        renderResult(maskSensitive(result), { mode: ctx.mode })
+      } else if (opts.path) {
+        const localPath = opts.path
+        const result = await runWrite({
+          subcommand: 'skill add',
+          args: { '--path': localPath },
+          command_text: `skill add --path ${localPath}`,
+          execute: () => ctx.client.post<unknown>('/api/skills/import-local', { path: localPath }),
+          reverseFromResult: (r) => {
+            const newId = (r as { id?: string })?.id ?? '<unknown>'
+            return {
+              command: `skill delete ${newId}`,
+              preview_description: `delete skill imported from path ${localPath} (${newId})`,
+            }
+          },
+          dataDir: ctx.dataDir,
+          actor: ctx.actor,
+          mode: ctx.mode,
+        })
+        renderResult(maskSensitive(result), { mode: ctx.mode })
       } else {
         add.error('Either --git or --path is required')
       }
     })
 
   skill
-    .command('delete <id>')
+    .command('delete <ref>')
     .description('Delete a skill')
-    .action(async (id: string) => {
-      const { client, json } = createClient(parent)
-      await client.delete<unknown>(`/api/skills/${id}`)
-      if (!json) {
-        console.log(`Skill ${shortId(id)} deleted.`)
-      }
+    .option('--confirm <token>', 'Confirmation token from preview response')
+    .action(async (ref: string, opts: { confirm?: string }) => {
+      const ctx = createContext(parent)
+      const { id } = await resolveRef(ctx.client, 'skill', ref)
+      const { args, command_text: cmdText } = buildDeleteParams('skill delete', ref, opts.confirm)
+      const result = await runWrite({
+        subcommand: 'skill delete',
+        args,
+        command_text: cmdText,
+        execute: () => ctx.client.delete(`/api/skills/${id}`),
+        collectPreview: async () => {
+          const agents = await ctx.client.getList<{ id: string; name: string; skill_ids?: string[] }>('/api/agent-instances')
+          const refs = agents
+            .filter((a) => (a.skill_ids ?? []).includes(id))
+            .map((a) => ({ id: a.id, name: a.name }))
+          return {
+            side_effects: refs.length > 0 ? [{ type: 'agent_unset', agents: refs }] : [],
+            rollback_difficulty: '本地 path 导入的 skill 丢了 path 难找回；git 导入的需要重新拉',
+          }
+        },
+        dataDir: ctx.dataDir,
+        actor: ctx.actor,
+        mode: ctx.mode,
+      })
+      renderResult(result, { mode: ctx.mode })
     })
 }
+
