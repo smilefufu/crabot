@@ -461,18 +461,13 @@ export class UnifiedAgent extends ModuleBase {
     skills?: ReadonlyArray<{ id: string; name: string; description?: string }>
   ): {
     basePersonality?: string
+    /** 与 basePersonality 内容相同，仅命名上对应"传给 WorkerHandler 的 personality 字段"。 */
     workerPersonality?: string
-    workerSkillListing?: string
     frontSkillListing?: string
   } {
     const basePersonality = systemPrompt || undefined
-
-    const workerIntro =
-      '\n\n以下技能为特定任务提供专业指引。当任务匹配某个技能的描述时，' +
-      '必须先调用 Skill 工具（输入技能名称）加载完整指引，然后按指引操作。' +
-      '这是强制要求——先加载技能，再执行任务。'
-    const workerSkillListing = UnifiedAgent.buildSkillListing(skills, workerIntro) || undefined
-    // workerPersonality 不再夹带 skill listing — skillListing 走独立通道
+    // workerPersonality 仅承载 admin personality；skill listing 走独立通道，
+    // 由 WorkerHandler 内部 buildSkillListingSnapshot 实时从 this.skills 拼装。
     const workerPersonality = basePersonality
 
     const frontIntro =
@@ -482,7 +477,7 @@ export class UnifiedAgent extends ModuleBase {
       '即使问题看起来简单（如"502是什么原因"），只要它属于某个技能的职责范围，就必须 create_task。'
     const frontSkillListing = UnifiedAgent.buildSkillListing(skills, frontIntro) || undefined
 
-    return { basePersonality, workerPersonality, workerSkillListing, frontSkillListing }
+    return { basePersonality, workerPersonality, frontSkillListing }
   }
 
   /**
