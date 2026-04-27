@@ -3,7 +3,14 @@ import { createContext, type CliContext } from '../main.js'
 import { renderResult, type Column } from '../output.js'
 import { CliError } from '../errors.js'
 import { UndoLog, type UndoEntry } from '../undo-log.js'
-import { resolveRef } from '../resolve.js'
+import { resolveRef, ENDPOINT, type Domain } from '../resolve.js'
+
+const SNAPSHOT_RESTORE_PATH: Record<'agent' | 'channel' | 'friend' | 'permission', (id: string) => string> = {
+  agent: (id) => `/api/agent-instances/${id}/config`,
+  channel: (id) => `/api/channel-instances/${id}/config`,
+  friend: (id) => `/api/friends/${id}`,
+  permission: (id) => `/api/permission-templates/${id}`,
+}
 
 const LIST_COLUMNS: Column[] = [
   { key: 'id', header: 'ID' },
@@ -24,21 +31,13 @@ async function executeReverse(ctx: CliContext, entry: UndoEntry): Promise<unknow
   }
 
   const restoreMatch = cmd.match(
-    /^(agent|channel|friend|permission)\s+(config|update)\s+(\S+)\s+--restore-snapshot$/,
+    /^(agent|channel|friend|permission)\s+(?:config|update)\s+(\S+)\s+--restore-snapshot$/,
   )
   if (restoreMatch) {
-    const domain = restoreMatch[1]!
-    const ref = restoreMatch[3]!
-    type ResolvableDomain = 'agent' | 'channel' | 'friend' | 'permission'
-    const endpointMap: Record<ResolvableDomain, { domain: ResolvableDomain; pathFn: (id: string) => string }> = {
-      agent: { domain: 'agent', pathFn: (id) => `/api/agent-instances/${id}/config` },
-      channel: { domain: 'channel', pathFn: (id) => `/api/channel-instances/${id}/config` },
-      friend: { domain: 'friend', pathFn: (id) => `/api/friends/${id}` },
-      permission: { domain: 'permission', pathFn: (id) => `/api/permission-templates/${id}` },
-    }
-    const m = endpointMap[domain as ResolvableDomain]!
-    const { id } = await resolveRef(ctx.client, m.domain, ref)
-    return ctx.client.patch(m.pathFn(id), entry.snapshot ?? {})
+    const domain = restoreMatch[1] as keyof typeof SNAPSHOT_RESTORE_PATH
+    const ref = restoreMatch[2]!
+    const { id } = await resolveRef(ctx.client, domain, ref)
+    return ctx.client.patch(SNAPSHOT_RESTORE_PATH[domain](id), entry.snapshot ?? {})
   }
 
   // mcp undo-import
@@ -58,22 +57,10 @@ async function executeReverse(ctx: CliContext, entry: UndoEntry): Promise<unknow
     throw new CliError('UNDO_STALE', `Cannot parse reverse command: ${cmd}`, { command: cmd })
   }
 
-  // delete <id> patterns
   if (action === 'delete' && rest[0]) {
-    const id = rest[0]
-    const deleteEndpoint: Record<string, string> = {
-      provider: `/api/model-providers/${id}`,
-      mcp: `/api/mcp-servers/${id}`,
-      skill: `/api/skills/${id}`,
-      schedule: `/api/schedules/${id}`,
-      friend: `/api/friends/${id}`,
-      permission: `/api/permission-templates/${id}`,
-    }
-    const ep = deleteEndpoint[domain]
-    if (!ep) {
-      throw new CliError('UNDO_STALE', `Unknown delete domain: ${domain}`, { command: cmd })
-    }
-    return ctx.client.delete(ep)
+    const base = ENDPOINT[domain as Domain]
+    if (!base) throw new CliError('UNDO_STALE', `Unknown delete domain: ${domain}`, { command: cmd })
+    return ctx.client.delete(`${base}/${rest[0]}`)
   }
 
   // mcp toggle

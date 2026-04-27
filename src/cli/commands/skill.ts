@@ -4,6 +4,7 @@ import { renderResult, type Column, shortId } from '../output.js'
 import { resolveRef } from '../resolve.js'
 import { maskSensitive } from '../mask.js'
 import { runWrite } from '../run-write.js'
+import { buildDeleteParams } from './_utils.js'
 
 const COLUMNS: Column[] = [
   { key: 'id', header: 'ID', transform: (v) => shortId(String(v ?? '')) },
@@ -64,7 +65,7 @@ export function registerSkillCommands(parent: Command): void {
             }
           },
           dataDir: ctx.dataDir,
-          actor: process.env['CRABOT_ACTOR'] ?? 'human',
+          actor: ctx.actor,
           mode: ctx.mode,
         })
         renderResult(maskSensitive(result), { mode: ctx.mode })
@@ -83,7 +84,7 @@ export function registerSkillCommands(parent: Command): void {
             }
           },
           dataDir: ctx.dataDir,
-          actor: process.env['CRABOT_ACTOR'] ?? 'human',
+          actor: ctx.actor,
           mode: ctx.mode,
         })
         renderResult(maskSensitive(result), { mode: ctx.mode })
@@ -98,12 +99,8 @@ export function registerSkillCommands(parent: Command): void {
     .option('--confirm <token>', 'Confirmation token from preview response')
     .action(async (ref: string, opts: { confirm?: string }) => {
       const ctx = createContext(parent)
-      const { id, name } = await resolveRef(ctx.client, 'skill', ref)
-      const args: Record<string, unknown> = { _positional: ref }
-      if (opts.confirm) args['--confirm'] = opts.confirm
-      const cmdText = opts.confirm
-        ? `skill delete ${ref} --confirm ${opts.confirm}`
-        : `skill delete ${ref}`
+      const { id } = await resolveRef(ctx.client, 'skill', ref)
+      const { args, command_text: cmdText } = buildDeleteParams('skill delete', ref, opts.confirm)
       const result = await runWrite({
         subcommand: 'skill delete',
         args,
@@ -120,10 +117,9 @@ export function registerSkillCommands(parent: Command): void {
           }
         },
         dataDir: ctx.dataDir,
-        actor: process.env['CRABOT_ACTOR'] ?? 'human',
+        actor: ctx.actor,
         mode: ctx.mode,
       })
-      void name
       renderResult(result, { mode: ctx.mode })
     })
 }

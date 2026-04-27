@@ -24,6 +24,7 @@ export interface CliContext {
   readonly client: AdminClient
   readonly mode: OutputMode
   readonly dataDir: string
+  readonly actor: string
 }
 
 function getDataDir(): string {
@@ -44,6 +45,7 @@ export function createContext(program: Command): CliContext {
     client: new AdminClient(auth),
     mode: opts.human ? 'human' : 'ai',
     dataDir: getDataDir(),
+    actor: process.env['CRABOT_ACTOR'] ?? 'human',
   }
 }
 
@@ -52,6 +54,14 @@ export function createClient(program: Command): { client: AdminClient; json: boo
   const opts = readGlobalOpts(program)
   const auth = resolveAuth({ endpoint: opts.adminEndpoint, token: opts.token })
   return { client: new AdminClient(auth), json: !opts.human }
+}
+
+export function requireSubCommand(parent: Command, name: string): Command {
+  const sub = parent.commands.find(c => c.name() === name)
+  if (!sub) {
+    throw new Error(`Internal error: '${name}' command must be registered before composite extensions`)
+  }
+  return sub
 }
 
 export function run(argv: string[]): void {

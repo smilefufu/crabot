@@ -4,6 +4,7 @@ import { renderResult, type Column, shortId } from '../output.js'
 import { resolveRef } from '../resolve.js'
 import { maskSensitive } from '../mask.js'
 import { runWrite } from '../run-write.js'
+import { buildDeleteParams } from './_utils.js'
 
 const COLUMNS: Column[] = [
   { key: 'id', header: 'ID', transform: (v) => shortId(String(v ?? '')) },
@@ -71,7 +72,7 @@ export function registerProviderCommands(parent: Command): void {
             }
           },
           dataDir: ctx.dataDir,
-          actor: process.env['CRABOT_ACTOR'] ?? 'human',
+          actor: ctx.actor,
           mode: ctx.mode,
         })
         renderResult(maskSensitive(result), { mode: ctx.mode })
@@ -104,12 +105,8 @@ export function registerProviderCommands(parent: Command): void {
     .option('--confirm <token>', 'Confirmation token from preview response')
     .action(async (ref: string, opts: { confirm?: string }) => {
       const ctx = createContext(parent)
-      const { id, name } = await resolveRef(ctx.client, 'provider', ref)
-      const args: Record<string, unknown> = { _positional: ref }
-      if (opts.confirm) args['--confirm'] = opts.confirm
-      const cmdText = opts.confirm
-        ? `provider delete ${ref} --confirm ${opts.confirm}`
-        : `provider delete ${ref}`
+      const { id } = await resolveRef(ctx.client, 'provider', ref)
+      const { args, command_text: cmdText } = buildDeleteParams('provider delete', ref, opts.confirm)
       const result = await runWrite({
         subcommand: 'provider delete',
         args,
@@ -129,11 +126,9 @@ export function registerProviderCommands(parent: Command): void {
           }
         },
         dataDir: ctx.dataDir,
-        actor: process.env['CRABOT_ACTOR'] ?? 'human',
+        actor: ctx.actor,
         mode: ctx.mode,
       })
-      // name is resolved above — suppress the unused warning by referencing it
-      void name
       renderResult(result, { mode: ctx.mode })
     })
 }

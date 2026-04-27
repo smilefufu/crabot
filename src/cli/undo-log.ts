@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 
@@ -37,7 +37,7 @@ export class UndoLog {
 
   constructor(dataDir: string, opts: UndoLogOptions = {}) {
     const cliDir = join(dataDir, 'cli')
-    if (!existsSync(cliDir)) mkdirSync(cliDir, { recursive: true })
+    mkdirSync(cliDir, { recursive: true })
     this.logPath = join(cliDir, 'undo-log.jsonl')
     this.now = opts.now ?? Date.now
     this.maxEntries = opts.maxEntries ?? DEFAULT_MAX_ENTRIES
@@ -64,11 +64,17 @@ export class UndoLog {
   }
 
   async list(): Promise<ReadonlyArray<UndoEntry>> {
-    if (!existsSync(this.logPath)) return []
-    const lines = readFileSync(this.logPath, 'utf-8').split('\n').filter(Boolean)
+    let raw: string
+    try {
+      raw = readFileSync(this.logPath, 'utf-8')
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return []
+      throw e
+    }
     const now = this.now()
     const valid: UndoEntry[] = []
-    for (const line of lines) {
+    for (const line of raw.split('\n')) {
+      if (!line) continue
       try {
         const e = JSON.parse(line) as UndoEntry
         if (Date.parse(e.expires_at) > now) valid.push(e)

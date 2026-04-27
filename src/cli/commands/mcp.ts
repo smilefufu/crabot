@@ -1,10 +1,10 @@
 import { Command } from 'commander'
-import { readFileSync } from 'node:fs'
 import { createContext } from '../main.js'
 import { renderResult, type Column, shortId } from '../output.js'
 import { resolveRef } from '../resolve.js'
 import { maskSensitive } from '../mask.js'
 import { runWrite } from '../run-write.js'
+import { buildDeleteParams, readJsonFile } from './_utils.js'
 
 const COLUMNS: Column[] = [
   { key: 'id', header: 'ID', transform: (v) => shortId(String(v ?? '')) },
@@ -62,7 +62,7 @@ export function registerMcpCommands(parent: Command): void {
           }
         },
         dataDir: ctx.dataDir,
-        actor: process.env['CRABOT_ACTOR'] ?? 'human',
+        actor: ctx.actor,
         mode: ctx.mode,
       })
       renderResult(maskSensitive(result), { mode: ctx.mode })
@@ -74,15 +74,7 @@ export function registerMcpCommands(parent: Command): void {
     .action(async (file: string) => {
       const ctx = createContext(parent)
 
-      let fileContent: unknown
-      try {
-        const raw = readFileSync(file, 'utf-8')
-        fileContent = JSON.parse(raw)
-      } catch (error) {
-        throw new Error(
-          `Failed to read or parse file ${file}: ${error instanceof Error ? error.message : String(error)}`,
-        )
-      }
+      const fileContent = readJsonFile(file)
 
       const result = await runWrite({
         subcommand: 'mcp import',
@@ -101,7 +93,7 @@ export function registerMcpCommands(parent: Command): void {
           }
         },
         dataDir: ctx.dataDir,
-        actor: process.env['CRABOT_ACTOR'] ?? 'human',
+        actor: ctx.actor,
         mode: ctx.mode,
       })
       renderResult(maskSensitive(result), { mode: ctx.mode })
@@ -113,12 +105,8 @@ export function registerMcpCommands(parent: Command): void {
     .option('--confirm <token>', 'Confirmation token from preview response')
     .action(async (ref: string, opts: { confirm?: string }) => {
       const ctx = createContext(parent)
-      const { id, name } = await resolveRef(ctx.client, 'mcp', ref)
-      const args: Record<string, unknown> = { _positional: ref }
-      if (opts.confirm) args['--confirm'] = opts.confirm
-      const cmdText = opts.confirm
-        ? `mcp delete ${ref} --confirm ${opts.confirm}`
-        : `mcp delete ${ref}`
+      const { id } = await resolveRef(ctx.client, 'mcp', ref)
+      const { args, command_text: cmdText } = buildDeleteParams('mcp delete', ref, opts.confirm)
       const result = await runWrite({
         subcommand: 'mcp delete',
         args,
@@ -135,10 +123,9 @@ export function registerMcpCommands(parent: Command): void {
           }
         },
         dataDir: ctx.dataDir,
-        actor: process.env['CRABOT_ACTOR'] ?? 'human',
+        actor: ctx.actor,
         mode: ctx.mode,
       })
-      void name
       renderResult(result, { mode: ctx.mode })
     })
 }

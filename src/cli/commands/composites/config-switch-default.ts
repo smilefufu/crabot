@@ -1,12 +1,11 @@
 import { Command } from 'commander'
-import { createContext } from '../../main.js'
+import { createContext, requireSubCommand } from '../../main.js'
 import { renderResult } from '../../output.js'
 import { resolveRef } from '../../resolve.js'
 import { runWrite } from '../../run-write.js'
 
 export function registerConfigSwitchDefaultCommand(parent: Command): void {
-  const configCmd = parent.commands.find(c => c.name() === 'config')
-  if (!configCmd) throw new Error('config command must be registered first')
+  const configCmd = requireSubCommand(parent, 'config')
 
   configCmd
     .command('switch-default')
@@ -41,7 +40,7 @@ export function registerConfigSwitchDefaultCommand(parent: Command): void {
         },
         snapshot: before,
         dataDir: ctx.dataDir,
-        actor: process.env['CRABOT_ACTOR'] ?? 'human',
+        actor: ctx.actor,
         mode: ctx.mode,
       })
       renderResult(result, { mode: ctx.mode })

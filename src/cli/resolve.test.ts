@@ -3,7 +3,7 @@ import { resolveRef } from './resolve.js'
 import { CliError } from './errors.js'
 
 function makeClient(items: Array<{ id: string; name: string }>) {
-  return { get: vi.fn(async () => items) } as any
+  return { getList: vi.fn(async () => items) } as any
 }
 
 describe('resolveRef', () => {

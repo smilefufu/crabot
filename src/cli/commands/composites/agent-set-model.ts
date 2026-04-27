@@ -1,5 +1,5 @@
 import { Command } from 'commander'
-import { createContext } from '../../main.js'
+import { createContext, requireSubCommand } from '../../main.js'
 import { renderResult } from '../../output.js'
 import { resolveRef } from '../../resolve.js'
 import { runWrite } from '../../run-write.js'
@@ -9,10 +9,7 @@ interface AgentConfig {
 }
 
 export function registerAgentSetModelCommand(parent: Command): void {
-  const agentCmd = parent.commands.find(c => c.name() === 'agent')
-  if (!agentCmd) {
-    throw new Error('agent command must be registered before agent set-model composite')
-  }
+  const agentCmd = requireSubCommand(parent, 'agent')
 
   agentCmd
     .command('set-model <ref>')
@@ -47,7 +44,7 @@ export function registerAgentSetModelCommand(parent: Command): void {
         }),
         snapshot: { models: { [opts.slot]: oldSlot ?? null } },
         dataDir: ctx.dataDir,
-        actor: process.env['CRABOT_ACTOR'] ?? 'human',
+        actor: ctx.actor,
         mode: ctx.mode,
       })
 

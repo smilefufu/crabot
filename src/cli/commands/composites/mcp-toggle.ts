@@ -1,13 +1,12 @@
 import { Command } from 'commander'
-import { createContext } from '../../main.js'
+import { createContext, requireSubCommand } from '../../main.js'
 import { renderResult } from '../../output.js'
 import { resolveRef } from '../../resolve.js'
 import { runWrite } from '../../run-write.js'
 import { CliError } from '../../errors.js'
 
 export function registerMcpToggleCommand(parent: Command): void {
-  const mcpCmd = parent.commands.find(c => c.name() === 'mcp')
-  if (!mcpCmd) throw new Error('mcp command must be registered first')
+  const mcpCmd = requireSubCommand(parent, 'mcp')
 
   mcpCmd
     .command('toggle <ref>')
@@ -35,7 +34,7 @@ export function registerMcpToggleCommand(parent: Command): void {
           preview_description: `${targetEnabled ? 'disable' : 'enable'} mcp ${name}`,
         }),
         dataDir: ctx.dataDir,
-        actor: process.env['CRABOT_ACTOR'] ?? 'human',
+        actor: ctx.actor,
         mode: ctx.mode,
       })
       renderResult(result, { mode: ctx.mode })

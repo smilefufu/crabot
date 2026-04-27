@@ -4,6 +4,7 @@ import { renderResult, type Column, shortId } from '../output.js'
 import { resolveRef } from '../resolve.js'
 import { maskSensitive } from '../mask.js'
 import { runWrite } from '../run-write.js'
+import { buildDeleteParams } from './_utils.js'
 
 const COLUMNS: Column[] = [
   { key: 'id', header: 'ID', transform: (v) => shortId(String(v ?? '')) },
@@ -61,7 +62,7 @@ export function registerFriendCommands(parent: Command): void {
           }
         },
         dataDir: ctx.dataDir,
-        actor: process.env['CRABOT_ACTOR'] ?? 'human',
+        actor: ctx.actor,
         mode: ctx.mode,
       })
       renderResult(maskSensitive(result), { mode: ctx.mode })
@@ -103,7 +104,7 @@ export function registerFriendCommands(parent: Command): void {
         },
         snapshot: before,
         dataDir: ctx.dataDir,
-        actor: process.env['CRABOT_ACTOR'] ?? 'human',
+        actor: ctx.actor,
         mode: ctx.mode,
       })
       renderResult(maskSensitive(result), { mode: ctx.mode })
@@ -116,12 +117,7 @@ export function registerFriendCommands(parent: Command): void {
     .action(async (ref: string, opts: { confirm?: string }) => {
       const ctx = createContext(parent)
       const { id } = await resolveRef(ctx.client, 'friend', ref)
-
-      const args: Record<string, unknown> = { _positional: ref }
-      if (opts.confirm) args['--confirm'] = opts.confirm
-      const cmdText = opts.confirm
-        ? `friend delete ${ref} --confirm ${opts.confirm}`
-        : `friend delete ${ref}`
+      const { args, command_text: cmdText } = buildDeleteParams('friend delete', ref, opts.confirm)
 
       const result = await runWrite({
         subcommand: 'friend delete',
@@ -139,7 +135,7 @@ export function registerFriendCommands(parent: Command): void {
           }
         },
         dataDir: ctx.dataDir,
-        actor: process.env['CRABOT_ACTOR'] ?? 'human',
+        actor: ctx.actor,
         mode: ctx.mode,
       })
       renderResult(result, { mode: ctx.mode })

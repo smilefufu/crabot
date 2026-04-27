@@ -1,5 +1,5 @@
 import { Command } from 'commander'
-import { createContext } from '../../main.js'
+import { createContext, requireSubCommand } from '../../main.js'
 import { renderResult } from '../../output.js'
 import { resolveRef } from '../../resolve.js'
 import { runWrite } from '../../run-write.js'
@@ -21,7 +21,7 @@ function makeToggleAction(parent: Command, action: 'pause' | 'resume') {
         preview_description: `${reverseAction} schedule ${name}`,
       }),
       dataDir: ctx.dataDir,
-      actor: process.env['CRABOT_ACTOR'] ?? 'human',
+      actor: ctx.actor,
       mode: ctx.mode,
     })
     renderResult(result, { mode: ctx.mode })
@@ -29,8 +29,7 @@ function makeToggleAction(parent: Command, action: 'pause' | 'resume') {
 }
 
 export function registerScheduleToggleCommands(parent: Command): void {
-  const scheduleCmd = parent.commands.find(c => c.name() === 'schedule')
-  if (!scheduleCmd) throw new Error('schedule command must be registered first')
+  const scheduleCmd = requireSubCommand(parent, 'schedule')
 
   scheduleCmd
     .command('pause <ref>')

@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+
 export function setNestedValue(
   obj: Record<string, unknown>,
   path: string,
@@ -36,4 +38,28 @@ export function parseKeyValuePairs(pairs: string[]): Record<string, unknown> {
   }
 
   return result
+}
+
+export function readJsonFile(path: string): unknown {
+  try {
+    return JSON.parse(readFileSync(path, 'utf-8'))
+  } catch (e) {
+    throw new Error(`Failed to read or parse file ${path}: ${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
+// Build the args + command_text for a delete command of the given subcommand+ref,
+// optionally with a confirmation token (used by 6 delete handlers).
+export function buildDeleteParams(
+  subcommand: string,
+  ref: string,
+  confirm: string | undefined,
+): { args: Record<string, unknown>; command_text: string } {
+  const args: Record<string, unknown> = { _positional: ref }
+  let command_text = `${subcommand} ${ref}`
+  if (confirm) {
+    args['--confirm'] = confirm
+    command_text = `${subcommand} ${ref} --confirm ${confirm}`
+  }
+  return { args, command_text }
 }

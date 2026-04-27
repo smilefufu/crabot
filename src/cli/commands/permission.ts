@@ -1,10 +1,10 @@
 import { Command } from 'commander'
-import { readFileSync } from 'node:fs'
 import { createContext } from '../main.js'
 import { renderResult, type Column, shortId } from '../output.js'
 import { resolveRef } from '../resolve.js'
 import { maskSensitive } from '../mask.js'
 import { runWrite } from '../run-write.js'
+import { buildDeleteParams, readJsonFile } from './_utils.js'
 
 const COLUMNS: Column[] = [
   { key: 'id', header: 'ID', transform: (v) => shortId(String(v ?? '')) },
@@ -42,16 +42,7 @@ export function registerPermissionCommands(parent: Command): void {
     .action(async (opts: { name: string; file: string }) => {
       const ctx = createContext(parent)
 
-      let templateData: unknown
-      try {
-        const raw = readFileSync(opts.file, 'utf-8')
-        templateData = JSON.parse(raw)
-      } catch (error) {
-        throw new Error(
-          `Failed to read or parse file ${opts.file}: ${error instanceof Error ? error.message : String(error)}`,
-        )
-      }
-
+      const templateData = readJsonFile(opts.file)
       const body = {
         name: opts.name,
         ...(typeof templateData === 'object' && templateData !== null ? templateData : {}),
@@ -70,7 +61,7 @@ export function registerPermissionCommands(parent: Command): void {
           }
         },
         dataDir: ctx.dataDir,
-        actor: process.env['CRABOT_ACTOR'] ?? 'human',
+        actor: ctx.actor,
         mode: ctx.mode,
       })
       renderResult(maskSensitive(result), { mode: ctx.mode })
@@ -91,15 +82,7 @@ export function registerPermissionCommands(parent: Command): void {
         if (opts.name) body['name'] = opts.name
 
         if (opts.file) {
-          let templateData: unknown
-          try {
-            const raw = readFileSync(opts.file, 'utf-8')
-            templateData = JSON.parse(raw)
-          } catch (error) {
-            throw new Error(
-              `Failed to read or parse file ${opts.file}: ${error instanceof Error ? error.message : String(error)}`,
-            )
-          }
+          const templateData = readJsonFile(opts.file)
           if (typeof templateData === 'object' && templateData !== null) {
             Object.assign(body, templateData)
           }
@@ -127,7 +110,7 @@ export function registerPermissionCommands(parent: Command): void {
           },
           snapshot: before,
           dataDir: ctx.dataDir,
-          actor: process.env['CRABOT_ACTOR'] ?? 'human',
+          actor: ctx.actor,
           mode: ctx.mode,
         })
         renderResult(maskSensitive(result), { mode: ctx.mode })
@@ -141,12 +124,7 @@ export function registerPermissionCommands(parent: Command): void {
     .action(async (ref: string, opts: { confirm?: string }) => {
       const ctx = createContext(parent)
       const { id } = await resolveRef(ctx.client, 'permission', ref)
-
-      const args: Record<string, unknown> = { _positional: ref }
-      if (opts.confirm) args['--confirm'] = opts.confirm
-      const cmdText = opts.confirm
-        ? `permission delete ${ref} --confirm ${opts.confirm}`
-        : `permission delete ${ref}`
+      const { args, command_text: cmdText } = buildDeleteParams('permission delete', ref, opts.confirm)
 
       const result = await runWrite({
         subcommand: 'permission delete',
@@ -165,7 +143,7 @@ export function registerPermissionCommands(parent: Command): void {
           }
         },
         dataDir: ctx.dataDir,
-        actor: process.env['CRABOT_ACTOR'] ?? 'human',
+        actor: ctx.actor,
         mode: ctx.mode,
       })
       renderResult(result, { mode: ctx.mode })

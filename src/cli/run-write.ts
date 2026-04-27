@@ -77,7 +77,6 @@ export async function runWrite(p: RunWriteParams): Promise<RunWriteResult> {
         process.stderr.write('Cancelled.\n')
         process.exit(0)
       }
-      // Human confirmed interactively — fall through to execute()
     } else {
       const token = generateToken(p.subcommand, p.args)
       return {

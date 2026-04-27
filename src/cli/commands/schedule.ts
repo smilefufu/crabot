@@ -4,6 +4,7 @@ import { renderResult, type Column, shortId } from '../output.js'
 import { resolveRef } from '../resolve.js'
 import { maskSensitive } from '../mask.js'
 import { runWrite } from '../run-write.js'
+import { buildDeleteParams } from './_utils.js'
 
 const COLUMNS: Column[] = [
   { key: 'id', header: 'ID', transform: (v) => shortId(String(v ?? '')) },
@@ -93,7 +94,7 @@ export function registerScheduleCommands(parent: Command): void {
             }
           },
           dataDir: ctx.dataDir,
-          actor: process.env['CRABOT_ACTOR'] ?? 'human',
+          actor: ctx.actor,
           mode: ctx.mode,
         })
         renderResult(maskSensitive(result), { mode: ctx.mode })
@@ -106,12 +107,8 @@ export function registerScheduleCommands(parent: Command): void {
     .option('--confirm <token>', 'Confirmation token from preview response')
     .action(async (ref: string, opts: { confirm?: string }) => {
       const ctx = createContext(parent)
-      const { id, name } = await resolveRef(ctx.client, 'schedule', ref)
-      const args: Record<string, unknown> = { _positional: ref }
-      if (opts.confirm) args['--confirm'] = opts.confirm
-      const cmdText = opts.confirm
-        ? `schedule trigger ${ref} --confirm ${opts.confirm}`
-        : `schedule trigger ${ref}`
+      const { id } = await resolveRef(ctx.client, 'schedule', ref)
+      const { args, command_text: cmdText } = buildDeleteParams('schedule trigger', ref, opts.confirm)
       const result = await runWrite({
         subcommand: 'schedule trigger',
         args,
@@ -128,10 +125,9 @@ export function registerScheduleCommands(parent: Command): void {
           rollback_difficulty: '触发产生的副作用无法撤销',
         }),
         dataDir: ctx.dataDir,
-        actor: process.env['CRABOT_ACTOR'] ?? 'human',
+        actor: ctx.actor,
         mode: ctx.mode,
       })
-      void name
       renderResult(result, { mode: ctx.mode })
     })
 
@@ -141,7 +137,7 @@ export function registerScheduleCommands(parent: Command): void {
     .option('--confirm <token>', 'Confirmation token from preview response')
     .action(async (ref: string, opts: { confirm?: string }) => {
       const ctx = createContext(parent)
-      const { id, name } = await resolveRef(ctx.client, 'schedule', ref)
+      const { id } = await resolveRef(ctx.client, 'schedule', ref)
       const args: Record<string, unknown> = { _positional: ref }
       if (opts.confirm) args['--confirm'] = opts.confirm
       const cmdText = opts.confirm
@@ -162,10 +158,9 @@ export function registerScheduleCommands(parent: Command): void {
           rollback_difficulty: 'cron + action 配置丢失，需要重新添加',
         }),
         dataDir: ctx.dataDir,
-        actor: process.env['CRABOT_ACTOR'] ?? 'human',
+        actor: ctx.actor,
         mode: ctx.mode,
       })
-      void name
       renderResult(result, { mode: ctx.mode })
     })
 }
