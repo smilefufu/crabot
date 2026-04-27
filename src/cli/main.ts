@@ -3,6 +3,7 @@ import { resolveAuth } from './auth.js'
 import { AdminClient } from './client.js'
 import { CliError } from './errors.js'
 import { renderError, type OutputMode } from './output.js'
+import { buildSchema } from './schema.js'
 import { registerProviderCommands } from './commands/provider.js'
 import { registerAgentCommands } from './commands/agent.js'
 import { registerMcpCommands } from './commands/mcp.js'
@@ -64,6 +65,7 @@ export function run(argv: string[]): void {
     .option('-t, --token <token>', 'Auth token (overrides CRABOT_TOKEN)')
     .option('--human', 'Human-readable output (table + colored errors)')
     .option('--json', 'JSON output (default; alias for AI mode)')
+    .option('--schema', 'Print machine-readable command schema and exit')
 
   registerProviderCommands(program)
   registerAgentCommands(program)
@@ -80,6 +82,11 @@ export function run(argv: string[]): void {
   registerMcpToggleCommand(program)
   registerScheduleToggleCommands(program)
   registerUndoCommands(program)
+
+  if (argv.includes('--schema')) {
+    process.stdout.write(JSON.stringify(buildSchema(program, '1.0.0'), null, 2) + '\n')
+    process.exit(0)
+  }
 
   program.parseAsync(argv).catch((err: unknown) => {
     const cli =
