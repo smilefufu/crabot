@@ -4696,6 +4696,10 @@ export class AdminModule extends ModuleBase {
     try {
       const params = await this.readJsonBody<Parameters<MCPServerManager['create']>[0]>(req)
       const server = await this.mcpServerManager.create(params)
+      // 触发 push 让 agent 实例感知 mcp_servers 变更（hot-reload 链路）
+      this.pushConfigToAgentModules().catch((err: Error) => {
+        console.warn('[Admin] pushConfigToAgentModules after mcp create failed:', err.message)
+      })
       res.writeHead(201, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(server))
     } catch (err) {
@@ -4727,6 +4731,10 @@ export class AdminModule extends ModuleBase {
     try {
       const params = await this.readJsonBody<Parameters<MCPServerManager['update']>[1]>(req)
       const server = await this.mcpServerManager.update(id, params)
+      // 触发 push 让 agent 实例感知 mcp_servers 变更（hot-reload 链路）
+      this.pushConfigToAgentModules().catch((err: Error) => {
+        console.warn('[Admin] pushConfigToAgentModules after mcp update failed:', err.message)
+      })
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(server))
     } catch (err) {
@@ -4743,6 +4751,10 @@ export class AdminModule extends ModuleBase {
   ): Promise<void> {
     try {
       await this.mcpServerManager.delete(id)
+      // 触发 push 让 agent 实例感知 mcp_servers 变更（hot-reload 链路）
+      this.pushConfigToAgentModules().catch((err: Error) => {
+        console.warn('[Admin] pushConfigToAgentModules after mcp delete failed:', err.message)
+      })
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ deleted: true }))
     } catch (err) {
@@ -4839,6 +4851,11 @@ export class AdminModule extends ModuleBase {
     try {
       const body = await this.readJsonBody<{ json: string }>(req)
       const entries = await this.mcpServerManager.importFromJson(body.json)
+      // 触发 push 让 agent 实例感知 mcp_servers 变更（hot-reload 链路）
+      // 一次性 push，即使导入了多个 MCP 也只 push 一次
+      this.pushConfigToAgentModules().catch((err: Error) => {
+        console.warn('[Admin] pushConfigToAgentModules after mcp import failed:', err.message)
+      })
       res.writeHead(201, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ entries, count: entries.length }))
     } catch (err) {
