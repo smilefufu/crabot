@@ -175,6 +175,13 @@ describe('Worker prompt — 新增规则', () => {
     expect(worker).toContain('对用户是噪音')
     expect(worker).toContain('不论 master、其他人或群聊')
   })
+
+  it('不要绕过用户的硬约束（specification gaming）', () => {
+    expect(worker).toContain('specification gaming')
+    expect(worker).toContain('designer intent')
+    expect(worker).toContain('硬约束')
+    expect(worker).toContain('一、接任段的三条路径')
+  })
 })
 
 describe('Front prompt — 删除项不应再出现', () => {
