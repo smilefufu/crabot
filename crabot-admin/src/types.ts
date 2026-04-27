@@ -1310,9 +1310,9 @@ export interface AgentInstanceConfig {
   system_prompt: string
   /** 模型配置（按角色键索引，值为 ModelSlotRef 引用） */
   model_config: Record<string, ModelSlotRef>
-  /** 关联的 MCP Server ID 列表（存储格式，引用全局 MCP 注册表） */
+  /** @deprecated as of 2026-04-27. MCP enable/disable 已移到 MCPServerRegistryEntry.enabled 全局字段。运行时忽略此字段；前端不再写入此字段。保留兼容期不破坏老数据。 */
   mcp_server_ids?: string[]
-  /** 关联的 Skill ID 列表（存储格式，引用全局 Skill 注册表） */
+  /** @deprecated as of 2026-04-27. Skill enable/disable 已移到 SkillRegistryEntry.enabled 全局字段。运行时忽略此字段；前端不再写入此字段。保留兼容期不破坏老数据。 */
   skill_ids?: string[]
   /** 解析后的 MCP Server 完整配置（发给 Agent 时填充，不存储） */
   mcp_servers?: MCPServerConfig[]
@@ -1413,7 +1413,9 @@ export interface UpdateAgentConfigParams {
   instance_id: string
   system_prompt?: string
   model_config?: Record<string, ModelSlotRef>
+  /** @deprecated as of 2026-04-27. MCP enable/disable 已移到 MCPServerRegistryEntry.enabled 全局字段。运行时忽略此字段；前端不再写入此字段。保留兼容期不破坏老数据。 */
   mcp_server_ids?: string[]
+  /** @deprecated as of 2026-04-27. Skill enable/disable 已移到 SkillRegistryEntry.enabled 全局字段。运行时忽略此字段；前端不再写入此字段。保留兼容期不破坏老数据。 */
   skill_ids?: string[]
   max_iterations?: number
   tools_readonly?: boolean
