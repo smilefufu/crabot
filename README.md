@@ -134,6 +134,30 @@ crabot provider list --json
 
 > 源码路径（B）下的 `crabot` 是项目根目录的脚本（不在 PATH），建议 `cd` 进项目后使用。完整命令列表：`crabot --help`。
 
+### 人类直接使用 CLI
+
+`crabot` 默认输出 JSON（对 LLM 友好）。如果你是人类直接在终端使用，建议加 alias：
+
+```bash
+# bash / zsh
+alias crabot='crabot --human'
+
+# fish
+alias crabot 'crabot --human'
+```
+
+加上 alias 后：
+- 列表和详情输出表格而非 JSON
+- 错误信息按可读文本输出
+- 删除类操作交互式 `Type YES to confirm`，而非返回确认 token
+
+无 alias 时也可以在单条命令上加 `--human`：
+
+```bash
+crabot provider list --human
+crabot provider delete my-provider --human
+```
+
 ## 升级
 
 ```bash
