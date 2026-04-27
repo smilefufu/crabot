@@ -1,106 +1,71 @@
 # Crabot CLI 命令参考
 
-## Model Provider
+> 此文件由 `scripts/gen-skill-ref.mjs` 自动生成（基于 `crabot --schema` 输出）。请勿手动编辑。
 
-| 命令 | 说明 |
-|------|------|
-| `crabot provider list` | 列出所有 Provider |
-| `crabot provider show <id>` | 查看 Provider 详情（含模型列表） |
-| `crabot provider add --name <n> --type <t> --endpoint <url> --apikey <key>` | 创建 Provider |
-| `crabot provider test <id>` | 测试 Provider 连接 |
-| `crabot provider refresh <id>` | 刷新模型列表 |
-| `crabot provider delete <id>` | 删除 Provider |
+生成时间：2026-04-27T00:09:22.120Z  CLI 版本：1.0.0
 
-> 安全提示：`--apikey` 会出现在 shell history 中，可用 `--apikey-stdin` 从 stdin 读取。
+## 命令清单
 
-## Agent 实例
-
-| 命令 | 说明 |
-|------|------|
-| `crabot agent list` | 列出 Agent 实例 |
-| `crabot agent show <id>` | 查看实例详情 |
-| `crabot agent config <id>` | 查看实例配置 |
-| `crabot agent config <id> --set k=v [k=v...]` | 更新配置（支持点号路径） |
-| `crabot agent restart <id>` | 重启 Agent |
-
-`--set` 点号路径示例：`--set models.default.provider_id=xxx models.default.model_id=yyy`
-
-## MCP Server
-
-| 命令 | 说明 |
-|------|------|
-| `crabot mcp list` | 列出 MCP 服务 |
-| `crabot mcp show <id>` | 查看详情 |
-| `crabot mcp add --name <n> --command <cmd> --args <a1,a2>` | 创建 MCP 服务 |
-| `crabot mcp import <file>` | 从 JSON 文件批量导入 |
-| `crabot mcp delete <id>` | 删除 MCP 服务 |
-
-## Skill
-
-| 命令 | 说明 |
-|------|------|
-| `crabot skill list` | 列出技能 |
-| `crabot skill show <id>` | 查看详情 |
-| `crabot skill add --git <url>` | 从 Git 仓库导入技能 |
-| `crabot skill add --path <dir>` | 从本地目录导入技能 |
-| `crabot skill delete <id>` | 删除技能 |
-
-## Schedule
-
-| 命令 | 说明 |
-|------|------|
-| `crabot schedule list` | 列出定时任务 |
-| `crabot schedule show <id>` | 查看详情 |
-| `crabot schedule add --title <t> --cron "expr" --action <a>` | 创建 cron 任务 |
-| `crabot schedule add --title <t> --trigger-at "ISO时间" --action <a>` | 创建一次性任务 |
-| `crabot schedule trigger <id>` | 立即触发 |
-| `crabot schedule delete <id>` | 删除定时任务 |
-
-## Channel 实例
-
-| 命令 | 说明 |
-|------|------|
-| `crabot channel list` | 列出 Channel 实例 |
-| `crabot channel show <id>` | 查看详情 |
-| `crabot channel config <id>` | 查看 Channel 配置 |
-| `crabot channel config <id> --set k=v` | 更新配置 |
-| `crabot channel start <id>` | 启动 Channel |
-| `crabot channel stop <id>` | 停止 Channel |
-| `crabot channel restart <id>` | 重启 Channel |
-
-## Friend
-
-| 命令 | 说明 |
-|------|------|
-| `crabot friend list [--search <keyword>]` | 列出/搜索好友 |
-| `crabot friend show <id>` | 查看好友详情 |
-| `crabot friend add --name <n> --permission <template_id>` | 添加好友 |
-| `crabot friend update <id> --name <n> --permission <template_id>` | 更新好友 |
-| `crabot friend delete <id>` | 删除好友 |
-
-## 全局配置
-
-| 命令 | 说明 |
-|------|------|
-| `crabot config show` | 查看全局模型配置 + 代理配置 |
-| `crabot config set k=v [k=v...]` | 更新全局模型配置 |
-| `crabot config proxy show` | 查看代理（proxy）配置 |
-| `crabot config proxy set k=v [k=v...]` | 更新代理配置 |
-
-## 权限模板
-
-| 命令 | 说明 |
-|------|------|
-| `crabot permission list` | 列出权限模板 |
-| `crabot permission show <id>` | 查看模板详情 |
-| `crabot permission add --name <n> --file <template.json>` | 创建权限模板 |
-| `crabot permission update <id> --name <n> --file <template.json>` | 更新权限模板 |
-| `crabot permission delete <id>` | 删除权限模板 |
+| 命令 | 说明 | 权限 | 需 confirm |
+|---|---|---|---|
+| `crabot provider list` | List all providers | read | ❌ |
+| `crabot provider show` | Show a provider | read | ❌ |
+| `crabot provider add` | Add a provider | write | ❌ |
+| `crabot provider test` | Test a provider connection | write | ❌ |
+| `crabot provider refresh` | Refresh provider models | write | ❌ |
+| `crabot provider delete` | Delete a provider | write | ✅ |
+| `crabot agent list` | List all agent instances | read | ❌ |
+| `crabot agent show` | Show an agent instance | read | ❌ |
+| `crabot agent config` | Get or set agent instance config | write | ❌ |
+| `crabot agent restart` | Restart an agent instance | write | ❌ |
+| `crabot agent set-model` | Set the model for a specific slot in an agent (composite command) | write | ❌ |
+| `crabot agent doctor` | Diagnose agent model slot configuration and provider connectivity (composite, read-only) | read | ❌ |
+| `crabot mcp list` | List all MCP servers | read | ❌ |
+| `crabot mcp show` | Show an MCP server | read | ❌ |
+| `crabot mcp add` | Add an MCP server | write | ❌ |
+| `crabot mcp import` | Import MCP servers from a JSON file | write | ❌ |
+| `crabot mcp delete` | Delete an MCP server | write | ✅ |
+| `crabot mcp toggle` | Enable or disable an MCP server (composite) | write | ❌ |
+| `crabot skill list` | List all skills | read | ❌ |
+| `crabot skill show` | Show a skill | read | ❌ |
+| `crabot skill add` | Add a skill from git or local path | write | ❌ |
+| `crabot skill delete` | Delete a skill | write | ✅ |
+| `crabot schedule list` | List all schedules | read | ❌ |
+| `crabot schedule show` | Show a schedule | read | ❌ |
+| `crabot schedule add` | Add a schedule | write | ❌ |
+| `crabot schedule trigger` | Manually trigger a schedule | write | ✅ |
+| `crabot schedule delete` | Delete a schedule | write | ✅ |
+| `crabot schedule pause` | Pause a schedule (composite) | write | ❌ |
+| `crabot schedule resume` | Resume a schedule (composite) | write | ❌ |
+| `crabot channel list` | List all channel instances | read | ❌ |
+| `crabot channel show` | Show a channel instance | read | ❌ |
+| `crabot channel config` | Get or set channel instance config | write | ❌ |
+| `crabot channel start` | Start a channel instance | write | ❌ |
+| `crabot channel stop` | Stop a channel instance | write | ❌ |
+| `crabot channel restart` | Restart a channel instance | write | ❌ |
+| `crabot friend list` | List all friends | read | ❌ |
+| `crabot friend show` | Show a friend | read | ❌ |
+| `crabot friend add` | Add a friend | write | ❌ |
+| `crabot friend update` | Update a friend | write | ❌ |
+| `crabot friend delete` | Delete a friend | write | ✅ |
+| `crabot config show` | Show global model config and proxy config | read | ❌ |
+| `crabot config set` | Set global model config values (key=value) | write | ❌ |
+| `crabot config proxy show` | Show proxy config | read | ❌ |
+| `crabot config proxy set` | Set a proxy config value (key=value) | write | ❌ |
+| `crabot config switch-default` | Switch the global default LLM provider+model (composite) | write | ❌ |
+| `crabot permission list` | List all permission templates | read | ❌ |
+| `crabot permission show` | Show a permission template | read | ❌ |
+| `crabot permission add` | Add a permission template | write | ❌ |
+| `crabot permission update` | Update a permission template | write | ❌ |
+| `crabot permission delete` | Delete a permission template | write | ✅ |
+| `crabot undo list` | List undoable operations (newest first) | read | ❌ |
 
 ## 通用选项
 
 | 选项 | 说明 |
-|------|------|
-| `--json` | 输出 JSON 格式（Agent 必用） |
-| `-e, --endpoint <url>` | 指定 Admin 端点（覆盖 CRABOT_ENDPOINT） |
-| `-t, --token <token>` | 指定认证 Token（覆盖 CRABOT_TOKEN） |
+|---|---|
+| `--human` | 人类可读输出（表格 + 彩色错误） |
+| `--json` | JSON 输出（默认；AI 模式 alias） |
+| `-e, --endpoint <url>` | 指定 Admin 地址（覆盖 CRABOT_ENDPOINT） |
+| `-t, --token <token>` | 指定认证 token（覆盖 CRABOT_TOKEN） |
+| `--schema` | 输出机器可读的命令 schema 并退出 |
