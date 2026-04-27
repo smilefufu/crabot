@@ -4784,6 +4784,10 @@ export class AdminModule extends ModuleBase {
     try {
       const params = await this.readJsonBody<Parameters<SkillManager['create']>[0]>(req)
       const skill = await this.skillManager.create(params)
+      // 触发 push 让 agent 实例感知 skills 变更（hot-reload 链路）
+      this.pushConfigToAgentModules().catch((err: Error) => {
+        console.warn('[Admin] pushConfigToAgentModules after skill create failed:', err.message)
+      })
       res.writeHead(201, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(skill))
     } catch (err) {
@@ -4815,6 +4819,10 @@ export class AdminModule extends ModuleBase {
     try {
       const params = await this.readJsonBody<Parameters<SkillManager['update']>[1]>(req)
       const skill = await this.skillManager.update(id, params)
+      // 触发 push 让 agent 实例感知 skills 变更（hot-reload 链路）
+      this.pushConfigToAgentModules().catch((err: Error) => {
+        console.warn('[Admin] pushConfigToAgentModules after skill update failed:', err.message)
+      })
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(skill))
     } catch (err) {
@@ -4831,6 +4839,10 @@ export class AdminModule extends ModuleBase {
   ): Promise<void> {
     try {
       await this.skillManager.delete(id)
+      // 触发 push 让 agent 实例感知 skills 变更（hot-reload 链路）
+      this.pushConfigToAgentModules().catch((err: Error) => {
+        console.warn('[Admin] pushConfigToAgentModules after skill delete failed:', err.message)
+      })
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ deleted: true }))
     } catch (err) {
@@ -4927,6 +4939,10 @@ export class AdminModule extends ModuleBase {
     try {
       const body = await this.readJsonBody<{ dir_path: string; overwrite?: boolean }>(req)
       const skill = await this.skillManager.importFromLocalPath(body.dir_path, body.overwrite)
+      // 触发 push 让 agent 实例感知 skills 变更（hot-reload 链路）
+      this.pushConfigToAgentModules().catch((err: Error) => {
+        console.warn('[Admin] pushConfigToAgentModules after skill import-local failed:', err.message)
+      })
       res.writeHead(201, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(skill))
     } catch (err) {
@@ -4947,6 +4963,10 @@ export class AdminModule extends ModuleBase {
       // base64 编码后约为原始大小的 1.37 倍，允许最大 50MB zip 文件
       const body = await this.readJsonBody<{ base64_content: string; filename: string; overwrite?: boolean }>(req, 70 * 1024 * 1024)
       const skill = await this.skillManager.importFromZip(body.base64_content, body.filename, body.overwrite)
+      // 触发 push 让 agent 实例感知 skills 变更（hot-reload 链路）
+      this.pushConfigToAgentModules().catch((err: Error) => {
+        console.warn('[Admin] pushConfigToAgentModules after skill import-upload failed:', err.message)
+      })
       res.writeHead(201, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(skill))
     } catch (err) {

@@ -49,8 +49,8 @@ function buildAdmin(deps: {
     create: vi.fn().mockResolvedValue({ id: 'new-skill-id', name: 'foo' }),
     update: vi.fn().mockResolvedValue({ id: 'skill-id', name: 'foo' }),
     delete: vi.fn().mockResolvedValue(undefined),
-    importLocal: vi.fn().mockResolvedValue([]),
-    importUpload: vi.fn().mockResolvedValue([]),
+    importFromLocalPath: vi.fn().mockResolvedValue({ id: 'imported-skill-id', name: 'foo' }),
+    importFromZip: vi.fn().mockResolvedValue({ id: 'zipped-skill-id', name: 'foo' }),
     ...deps.skillManagerStubs,
   }
   admin.config = { moduleId: 'test-admin' }
@@ -132,6 +132,83 @@ describe('MCP REST handler triggers pushConfigToAgentModules', () => {
         ) => Promise<void>
       }
     ).handleImportMCPServersFromJsonApi(req, res)
+
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(admin.pushConfigToAgentModules).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('Skill REST handler triggers pushConfigToAgentModules', () => {
+  it('handleCreateSkillApi 触发 push', async () => {
+    const admin = buildAdmin()
+    const req = makeReq({ name: 'foo', content: 'body' })
+    const res = makeRes()
+
+    await (
+      admin as unknown as {
+        handleCreateSkillApi: (req: IncomingMessage, res: ServerResponse) => Promise<void>
+      }
+    ).handleCreateSkillApi(req, res)
+
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(admin.pushConfigToAgentModules).toHaveBeenCalledTimes(1)
+  })
+
+  it('handleUpdateSkillApi 触发 push', async () => {
+    const admin = buildAdmin()
+    const req = makeReq({ enabled: false })
+    const res = makeRes()
+
+    await (
+      admin as unknown as {
+        handleUpdateSkillApi: (req: IncomingMessage, res: ServerResponse, id: string) => Promise<void>
+      }
+    ).handleUpdateSkillApi(req, res, 'skill-id')
+
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(admin.pushConfigToAgentModules).toHaveBeenCalledTimes(1)
+  })
+
+  it('handleDeleteSkillApi 触发 push', async () => {
+    const admin = buildAdmin()
+    const req = makeReq({})
+    const res = makeRes()
+
+    await (
+      admin as unknown as {
+        handleDeleteSkillApi: (req: IncomingMessage, res: ServerResponse, id: string) => Promise<void>
+      }
+    ).handleDeleteSkillApi(req, res, 'skill-id')
+
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(admin.pushConfigToAgentModules).toHaveBeenCalledTimes(1)
+  })
+
+  it('handleImportSkillLocalApi 触发 push', async () => {
+    const admin = buildAdmin()
+    const req = makeReq({ dir_path: '/tmp/skill-foo' })
+    const res = makeRes()
+
+    await (
+      admin as unknown as {
+        handleImportSkillLocalApi: (req: IncomingMessage, res: ServerResponse) => Promise<void>
+      }
+    ).handleImportSkillLocalApi(req, res)
+
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(admin.pushConfigToAgentModules).toHaveBeenCalledTimes(1)
+  })
+
+  it('handleImportSkillUploadApi 触发 push', async () => {
+    const admin = buildAdmin()
+    const req = makeReq({ base64_content: '', filename: 'foo.zip' })
+    const res = makeRes()
+
+    await (
+      admin as unknown as {
+        handleImportSkillUploadApi: (req: IncomingMessage, res: ServerResponse) => Promise<void>
+      }
+    ).handleImportSkillUploadApi(req, res)
 
     await new Promise((resolve) => setImmediate(resolve))
     expect(admin.pushConfigToAgentModules).toHaveBeenCalledTimes(1)
