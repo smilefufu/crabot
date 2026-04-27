@@ -571,3 +571,100 @@ describe('runEngine barrier integration', () => {
     vi.useRealTimers()
   })
 })
+
+// --- HR Task 1: Resolvable callback for tools / systemPrompt ---
+
+import type { LLMCallResponse } from '../../src/engine/llm-adapter.js'
+import type { ToolDefinition } from '../../src/engine/types.js'
+
+function makeAdapter(responses: LLMCallResponse[]): LLMAdapter {
+  let i = 0
+  return {
+    complete: vi.fn().mockImplementation(async () => {
+      const r = responses[Math.min(i, responses.length - 1)]
+      i++
+      return r
+    }),
+    completeStreaming: vi.fn(),
+    updateConfig: vi.fn(),
+  } as unknown as LLMAdapter
+}
+
+function endResponse(text = 'done'): LLMCallResponse {
+  return {
+    content: [{ type: 'text', text }],
+    stopReason: 'end_turn',
+    usage: { input_tokens: 10, output_tokens: 5 },
+  }
+}
+
+const dummyTool: ToolDefinition = {
+  name: 'dummy_tool',
+  description: 'd',
+  inputSchema: { type: 'object' as const, properties: {} },
+  isReadOnly: true,
+  call: async () => ({ output: '', isError: false as const }),
+}
+
+describe('runEngine — Resolvable callback', () => {
+  it('tools 传静态数组（向后兼容）', async () => {
+    const adapter = makeAdapter([endResponse()])
+    const result = await runEngine({
+      prompt: 'hi',
+      adapter,
+      options: {
+        systemPrompt: 'sys',
+        tools: [dummyTool],
+        model: 'test',
+      },
+    })
+    expect(result.outcome).toBe('completed')
+    expect(adapter.complete).toHaveBeenCalledTimes(1)
+    const call = (adapter.complete as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    expect(call.tools).toEqual([dummyTool])
+  })
+
+  it('tools 传 callback（每轮 resolve）', async () => {
+    const adapter = makeAdapter([endResponse()])
+    const cb = vi.fn(() => [dummyTool])
+    await runEngine({
+      prompt: 'hi',
+      adapter,
+      options: {
+        systemPrompt: () => 'sys-dynamic',
+        tools: cb,
+        model: 'test',
+      },
+    })
+    expect(cb).toHaveBeenCalled()
+    const call = (adapter.complete as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    expect(call.tools).toEqual([dummyTool])
+    expect(call.systemPrompt).toBe('sys-dynamic')
+  })
+
+  it('tools callback 在每轮被独立 resolve', async () => {
+    const tool1 = { ...dummyTool, name: 'tool1' }
+    const tool2 = { ...dummyTool, name: 'tool2' }
+    let returnTool2 = false
+    const adapter = makeAdapter([
+      {
+        content: [{ type: 'tool_use', id: 't1', name: 'tool1', input: {} }],
+        stopReason: 'tool_use',
+        usage: { input_tokens: 10, output_tokens: 5 },
+      },
+      endResponse(),
+    ])
+    const cb = vi.fn(() => returnTool2 ? [tool2] : [tool1])
+    const switching = (async () => {
+      await new Promise(r => setTimeout(r, 10))
+      returnTool2 = true
+    })()
+    await runEngine({
+      prompt: 'hi',
+      adapter,
+      options: { systemPrompt: 'sys', tools: cb, model: 'test' },
+    })
+    await switching
+    expect(cb.mock.calls.length).toBeGreaterThanOrEqual(2)
+  })
+})

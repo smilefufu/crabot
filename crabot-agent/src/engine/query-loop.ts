@@ -73,11 +73,17 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     // Call LLM (non-streaming by default; streaming infra preserved for rollback
     // via adapters that opt out of `complete()`).
     let response: import('./llm-adapter').LLMCallResponse
+    const currentSystemPrompt = typeof options.systemPrompt === 'function'
+      ? (options.systemPrompt as () => string)()
+      : options.systemPrompt
+    const currentTools = typeof options.tools === 'function'
+      ? (options.tools as () => ReadonlyArray<import('./types').ToolDefinition>)()
+      : options.tools
     try {
       response = await callNonStreaming(adapter, {
         messages,
-        systemPrompt: options.systemPrompt,
-        tools: [...options.tools],
+        systemPrompt: currentSystemPrompt,
+        tools: [...currentTools],
         model: options.model,
         maxTokens: options.maxTokens,
         signal: abortSignal,
@@ -171,9 +177,9 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     }
 
     // Execute tools
-    const batches = partitionToolCalls(processed.toolUseBlocks, options.tools)
+    const batches = partitionToolCalls(processed.toolUseBlocks, currentTools)
     const toolStartTime = Date.now()
-    const toolResults = await executeToolBatches(batches, options.tools, {
+    const toolResults = await executeToolBatches(batches, currentTools, {
       abortSignal,
     }, options.permissionConfig, hooks)
     const toolExecutionMs = Date.now() - toolStartTime

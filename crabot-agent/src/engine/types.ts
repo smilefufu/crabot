@@ -152,9 +152,12 @@ export interface EngineTurnEvent {
   readonly toolExecutionMs?: number
 }
 
+/** 既可传静态值也可传 callback（每轮 resolve） */
+export type Resolvable<T> = T | (() => T)
+
 export interface EngineOptions {
-  readonly systemPrompt: string
-  readonly tools: ReadonlyArray<ToolDefinition>
+  readonly systemPrompt: Resolvable<string>
+  readonly tools: Resolvable<ReadonlyArray<ToolDefinition>>
   readonly model: string
   readonly maxTurns?: number
   readonly maxTokens?: number
