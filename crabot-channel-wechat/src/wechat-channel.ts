@@ -423,7 +423,7 @@ export class WechatChannel extends ModuleBase {
     } else if (params.content.type === 'image' && params.content.media_url) {
       await this.client.sendImage(wxid, params.content.media_url)
     } else if (params.content.type === 'file' && params.content.media_url) {
-      await this.client.sendFile(wxid, params.content.media_url)
+      await this.client.sendFile(wxid, params.content.media_url, params.content.filename)
     } else {
       await this.client.sendText(wxid, text)
     }

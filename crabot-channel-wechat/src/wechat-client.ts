@@ -57,9 +57,14 @@ export class WechatClient {
 
   /**
    * 发送文件（通过 URL）
+   *
+   * filename 用于覆盖微信端展示的文件名；图床上传后的 URL 通常是 uuid 命名，
+   * 省略时 connector 会从 URL 末尾推断，导致用户看到 uuid 而不是原始文件名。
    */
-  async sendFile(wxid: string, url: string): Promise<{ taskId: string }> {
-    return this.post('/api/v1/bot/send', { wxid, type: 'file', url })
+  async sendFile(wxid: string, url: string, filename?: string): Promise<{ taskId: string }> {
+    const body: Record<string, unknown> = { wxid, type: 'file', url }
+    if (filename) body.filename = filename
+    return this.post('/api/v1/bot/send', body)
   }
 
   /**
