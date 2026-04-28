@@ -1,8 +1,19 @@
 # Crabot 项目进度
 
-> 最后更新：2026-04-25 — Phase A 自学习反馈信号闭环 + N7 版本历史 + N1-N10 测试覆盖第二轮
+> 最后更新：2026-04-28 — Agent 配置层简化（per-instance MCP/Skill ID → 全局启用）
 
-## 最新里程碑（2026-04-25 — Phase A 自学习反馈信号闭环）
+## 最新里程碑（2026-04-28 — Simplify Agent MCP/Skill Config）
+
+砍掉 Agent 实例配置里的 `mcp_server_ids` / `skill_ids` 维度——这一层从来没被 Admin Web UI 暴露过（AgentConfig.tsx 是 unified 单页，没 instance/role 选择入口），数据模型表达 per-instance 灵活性但 UI 没对应入口暴露，是虚假能力。改成全局启用层：MCP/Skill 在各自管理页 enable/disable，所有 agent 实例共用。spec：`crabot-docs/superpowers/specs/2026-04-27-simplify-agent-mcp-skill-config-design.md`，plan：`crabot-docs/superpowers/plans/2026-04-27-simplify-agent-mcp-skill-config.md`。
+
+- **types.ts**：`AgentInstanceConfig.mcp_server_ids/skill_ids` + `UpdateAgentConfigParams.mcp_server_ids/skill_ids` 标 `@deprecated`，软迁移保留兼容期，运行时忽略。
+- **handleGetAgentConfig**：返回的 `mcp_servers` / `skills` 改为 `manager.list().filter(s => s.enabled)`（单一真相），不再做"用户绑定 + 内置"两路合并。
+- **9 个 mcp/skill REST handler 加 push trigger**：`triggerPushAfter(reason)` 私有 helper + fire-and-forget，每次 mcp/skill 注册/更新/启用/禁用/删除/导入后通过 `pushConfigToAgentModules` 推到运行中的 Agent。新增 4 mcp + 5 skill push trigger 单元测试。
+- **AgentConfig.tsx**：移除 MCP/Skill 勾选 section，改为 read-only 列表 + react-router Link 跳转到 `/mcp-servers` 和 `/skills` 管理页；`mcp_server_ids` / `skill_ids` 从 `AgentUnifiedConfig` interface 移除。新增 5 个组件渲染测试。
+- **Skills 管理页补 toggle UI**：之前只有 MCP 管理页有启用/禁用按钮，Skills 没有；加 `handleToggle` + `StatusBadge` 启用/禁用 pill + toggle button（仿 MCPServerList pattern）。复用现成 `<StatusBadge status="active|inactive">` 替换内联 rgba。
+- **测试**：admin 全套 + admin-web 145/145 + tsc 0 errors，e2e 手动验证通过。
+
+## 上一里程碑（2026-04-25 — Phase A 自学习反馈信号闭环）
 
 修复长期记忆 v2 Observation 观察期 pass/fail 信号链路。设计核心：Front Handler 在 reply / create_task / supplement_task 工具上携带 `user_attitude` 字段（4 档 strong_pass/pass/fail/strong_fail）；代码层根据工具语义自动锚定 task_id（reply/create_task→prev finished task 同 channel/sender 30 分钟内；supplement_task→payload task_id）；调 memory.report_task_feedback 累加 observation_pass_count / observation_fail_count；maintenance.observation_check 按净值判定 pass/fail/extend。spec：`crabot-docs/superpowers/specs/2026-04-25-self-learning-feedback-signal-design.md`，plan：`crabot-docs/superpowers/plans/2026-04-25-self-learning-feedback-signal.md`。
 
@@ -85,24 +96,9 @@ Built-in tool config, Skill tool, E2E integration. **全部 311 tests pass**
 
 ---
 
-## 当前规划：去 LiteLLM 化 + ChatGPT 订阅 OAuth 接入
+## 已完成：去 LiteLLM 化 + ChatGPT 订阅 OAuth ✅ (~2026-04)
 
-**目标**：移除 LiteLLM 中间层，Agent V2 引擎直连 LLM Provider，新增 ChatGPT 订阅 OAuth 接入  
-**计划文档**：`crabot-agent/docs/plans/2026-04-07-remove-litellm-and-codex-oauth.md`  
-**分支**：待开启
-
-### Phase 1 — 去 LiteLLM 化
-- [ ] buildConnectionInfo 返回 Provider 原生连接信息（endpoint/apikey）而非 LiteLLM 路由
-- [ ] Agent V2 引擎支持多格式（Anthropic/OpenAI/others），无需 LiteLLM 代理
-- [ ] Memory 模块获得多格式支持（LLM adapter 解耦）
-- [ ] 移除 LiteLLM 部署依赖（dev.sh 不启动 LiteLLM）
-- [ ] 系统架构图更新（LiteLLM 层移除）
-
-### Phase 2 — ChatGPT 订阅 OAuth
-- [ ] 新增 openai-responses 适配器（OAuth token 调用 OpenAI Realtime API）
-- [ ] Admin OAuth PKCE 登录流（Authorization Code Flow with PKCE）
-- [ ] token 管理（存储、刷新、过期处理）
-- [ ] Provider 接入流程优化（从 API Key 改为 OAuth）
+Agent V2 引擎直连 Provider 原生 API，LiteLLM 中间层完全移除（包括 dev.sh）。`createAdapter` 工厂按 `format` 路由到 Anthropic / OpenAI / Gemini / openai-responses。ChatGPT OAuth PKCE 落地，`buildConnectionInfo` 内部检测 token 过期并自动刷新。详见 [memory: project_remove_litellm.md](crabot-docs/memory)。
 
 ---
 
@@ -138,7 +134,7 @@ Built-in tool config, Skill tool, E2E integration. **全部 311 tests pass**
 Module Manager (port 19000)
 ├── Admin (RPC 19001, Web 3000)
 │   ├── Friend / Permission 管理
-│   ├── LLM Provider 管理（→ LiteLLM 同步）
+│   ├── LLM Provider 管理（buildConnectionInfo 解析为 Provider 原生连接信息）
 │   ├── MCP Server + Skill 注册表管理（全局管理 + Agent 配置引用）
 │   ├── Agent 配置管理（含 MCP Server/Skill 关联）
 │   ├── Web 管理界面 + Master Chat (WebSocket)
@@ -149,11 +145,9 @@ Module Manager (port 19000)
 │   └── Worker Handler（深度执行）
 ├── Memory (Python, port 19002)
 │   └── 短期/长期记忆（LanceDB 向量检索）
-├── LiteLLM Proxy (port 4000)
-│   └── API 格式转换（Anthropic ↔ OpenAI）
 └── Channel(s)
-    ├── 飞书 Channel（crabot-channel-feishu/）
-    └── OpenClaw Host Shim（crabot-channel-host/）
+    ├── 微信 / Telegram 原生模块
+    └── OpenClaw Host Shim（crabot-channel-host/，跑 OpenClaw 生态插件）
 ```
 
 ## 端口分配
@@ -166,7 +160,6 @@ Module Manager (port 19000)
 | Memory | 19002 |
 | OpenClaw Host | 19003 |
 | Agent | 19005+ |
-| LiteLLM | 4000 |
 | Vite Dev | 5173 |
 
 ---
@@ -175,13 +168,11 @@ Module Manager (port 19000)
 
 - [x] Module Manager — 生命周期、端口分配、事件总线
 - [x] Admin 模块 — Friend 管理、Task/Schedule、LLM Provider、Agent 配置、Master Chat、PTY 终端
-- [x] Agent 模块 — 编排层 + Front/Worker Handler，LiteLLM 接入
+- [x] Agent 模块 — 编排层 + Front/Worker Handler，多格式 LLM 适配器（Anthropic/OpenAI/Gemini/openai-responses）
 - [x] Memory 模块 — 短期记忆读写、向量检索、管理界面
-- [x] LiteLLM 集成 — Provider CRUD 自动同步，Anthropic format 统一
 - [x] Channel 飞书 — 完整 protocol-channel.md 实现
 - [x] Channel OpenClaw Shim — 插件兼容层，jiti 加载 TS 插件
 - [x] 消息鉴权网关重构 — Channel 只发布原始消息，Admin 做 Friend 解析和鉴权，Agent 订阅 channel.message_authorized
-- [x] dev.sh 修复 — LiteLLM 进程清理、LITELLM_USE_CHAT_COMPLETIONS_URL_FOR_ANTHROPIC_MESSAGES 环境变量
 - [x] MCP Server + Skill 系统 Phase 1 — 全局注册表（protocol-admin.md §3.16/3.17 扩充），Admin 后端 Manager（MCPServerManager/SkillManager/EssentialToolsManager），Admin 前端 CRUD 页面，Agent 配置 ID 引用解析
 - [x] Agent Loop 可观测性 — 通用 Trace 规范（protocol-agent-v2.md §8），Ring Buffer TraceStore，前后端可视化 Trace/Span 树
 - [x] Front Handler 工具调用改进 — 保留默认工具集，maxTurns 1→3，结果路由（JSON 决策/纯文本/工具失败自动升级），简单任务直接执行、复杂任务创建 task 派 Worker
@@ -231,7 +222,7 @@ Module Manager (port 19000)
 
 ```bash
 ./dev.sh          # 构建 TS + 启动所有服务 + Vite HMR (5173)
-./dev.sh stop     # 停止所有进程（含 LiteLLM）
+./dev.sh stop     # 停止所有进程
 ./dev.sh build    # 只构建不启动
 ./dev.sh vite     # 只启动 Vite
 ```
