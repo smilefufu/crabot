@@ -3,7 +3,7 @@
 # Crabot Dev - 开发模式启动脚本
 # 用法: ./dev.sh          构建 + 启动 Module Manager（前台，含 Vite）
 #       ./dev.sh stop      停止所有开发服务
-#       ./dev.sh build     仅构建，不启动
+#       ./dev.sh build     仅构建（含 Admin Web 前端 dist/web/），不启动
 
 set -e
 
@@ -177,6 +177,17 @@ build_all() {
     log_info "已修复 node-pty spawn-helper 权限"
   fi
 
+  # Admin Web 前端（输出到 crabot-admin/dist/web/，由 port 3000 静态服务）
+  # 注意：dev 模式下访问 5173 走 Vite HMR，无需依赖此构建产物；
+  # 但访问 port 3000 或非 dev 启动时必须有此产物，否则前端永远是旧的。
+  if [ -d "$SCRIPT_DIR/crabot-admin/web" ]; then
+    log_dim "  crabot-admin/web"
+    (cd "$SCRIPT_DIR/crabot-admin/web" && corepack pnpm run build 2>&1 | sed 's/^/    /') || {
+      log_error "crabot-admin/web 构建失败"
+      exit 1
+    }
+  fi
+
   log_info "构建完成"
 }
 
@@ -325,9 +336,9 @@ case "${1:-start}" in
   *)
     echo "用法: $0 [start|stop|build]"
     echo ""
-    echo "  start  启动开发环境（默认）"
+    echo "  start  启动开发环境（默认；Vite HMR 在 5173）"
     echo "  stop   停止所有开发服务"
-    echo "  build  仅构建 TypeScript"
+    echo "  build  仅构建（TypeScript 模块 + Admin Web 前端 dist/web/）"
     exit 1
     ;;
 esac
