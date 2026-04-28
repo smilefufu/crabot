@@ -1,5 +1,6 @@
 import React from 'react'
 import { Link, useLocation } from 'react-router-dom'
+import { useDialogApplications } from '../../contexts/DialogApplicationsContext'
 
 interface NavItem {
   to: string
@@ -52,6 +53,7 @@ const navSections: NavSection[] = [
 
 export const Sidebar: React.FC = () => {
   const location = useLocation()
+  const { count: pendingApplicationCount } = useDialogApplications()
 
   const activeItem = navSections
     .flatMap((section) => section.items)
@@ -59,6 +61,13 @@ export const Sidebar: React.FC = () => {
     .sort((left, right) => right.match.length - left.match.length)[0]
 
   const isActive = (item: NavItem) => activeItem?.to === item.to
+
+  const badgeForItem = (item: NavItem): number | null => {
+    if (item.match === '/dialog-objects' && pendingApplicationCount > 0) {
+      return pendingApplicationCount
+    }
+    return null
+  }
 
   return (
     <aside className="sidebar">
@@ -71,16 +80,27 @@ export const Sidebar: React.FC = () => {
         {navSections.map((section, idx) => (
           <div key={idx} className="sidebar-section">
             <div className="sidebar-section-label">{section.label}</div>
-            {section.items.map((item) => (
-              <Link
-                key={item.to}
-                to={item.to}
-                className={`sidebar-nav-item ${isActive(item) ? 'active' : ''}`}
-              >
-                <span className="sidebar-nav-dot" />
-                {item.label}
-              </Link>
-            ))}
+            {section.items.map((item) => {
+              const badge = badgeForItem(item)
+              return (
+                <Link
+                  key={item.to}
+                  to={item.to}
+                  className={`sidebar-nav-item ${isActive(item) ? 'active' : ''}${badge ? ' has-badge' : ''}`}
+                >
+                  <span className="sidebar-nav-dot" />
+                  <span className="sidebar-nav-label">{item.label}</span>
+                  {badge !== null && (
+                    <span
+                      className="sidebar-nav-badge"
+                      aria-label={`${badge} 条待处理申请`}
+                    >
+                      {badge > 99 ? '99+' : badge}
+                    </span>
+                  )}
+                </Link>
+              )
+            })}
           </div>
         ))}
       </nav>

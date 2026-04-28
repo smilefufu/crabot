@@ -1,5 +1,4 @@
 import React from 'react'
-import { Card } from '../../../components/Common/Card'
 
 export type DialogDomain = 'friends' | 'privatePool' | 'groups'
 
@@ -9,37 +8,32 @@ const domainOptions: Array<{ key: DialogDomain; label: string }> = [
   { key: 'groups', label: '群聊' },
 ]
 
-const sidebarButtonStyle = (active: boolean): React.CSSProperties => ({
-  width: '100%',
-  textAlign: 'left',
-  padding: '0.75rem 0.875rem',
-  borderRadius: '10px',
-  border: active ? '1px solid var(--primary)' : '1px solid var(--border)',
-  background: active ? 'rgba(59, 130, 246, 0.08)' : 'var(--bg-primary)',
-  color: 'var(--text-primary)',
-  cursor: 'pointer',
-  fontSize: '0.95rem',
-  fontWeight: active ? 600 : 500,
-})
-
 interface DomainNavProps {
   activeDomain: DialogDomain
   onChange: (domain: DialogDomain) => void
+  counts?: Partial<Record<DialogDomain, number>>
 }
 
-export const DomainNav: React.FC<DomainNavProps> = ({ activeDomain, onChange }) => (
-  <Card title="对象域">
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-      {domainOptions.map((option) => (
+export const DomainNav: React.FC<DomainNavProps> = ({ activeDomain, onChange, counts }) => (
+  <div className="dlg-domain-switch" role="tablist" aria-label="对象域">
+    {domainOptions.map((option) => {
+      const active = option.key === activeDomain
+      const count = counts?.[option.key]
+      return (
         <button
           key={option.key}
           type="button"
+          role="tab"
+          aria-selected={active}
           onClick={() => onChange(option.key)}
-          style={sidebarButtonStyle(option.key === activeDomain)}
+          className={`dlg-domain-switch__btn${active ? ' is-active' : ''}`}
         >
           {option.label}
+          {typeof count === 'number' && (
+            <span className="dlg-domain-switch__count">{count}</span>
+          )}
         </button>
-      ))}
-    </div>
-  </Card>
+      )
+    })}
+  </div>
 )

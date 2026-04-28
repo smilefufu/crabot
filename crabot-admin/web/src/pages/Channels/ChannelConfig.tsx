@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { channelService } from '../../services/channel'
 import { MainLayout } from '../../components/Layout/MainLayout'
 import { Button } from '../../components/Common/Button'
@@ -12,6 +12,34 @@ import type {
   JsonSchemaProperty,
 } from '../../types'
 import { useToast } from '../../contexts/ToastContext'
+
+const CHANNEL_ONBOARDING_STORAGE_KEY = 'crabot:channel-onboarding-dismissed:v1'
+
+const ChannelOnboardingCallout: React.FC<{ visible: boolean; onDismiss: () => void }> = ({
+  visible,
+  onDismiss,
+}) => {
+  if (!visible) return null
+  return (
+    <aside className="channel-onboarding" role="note">
+      <span className="channel-onboarding__eyebrow">下一步</span>
+      <h3 className="channel-onboarding__title">完成主人认证 (<code>/认主</code>)</h3>
+      <p className="channel-onboarding__text">
+        新接入的渠道启动后，需要在该平台的<strong>私聊</strong>或<strong>群聊</strong>中向 Crabot 发送 <code>/认主</code>。
+        认证通过后你才会被识别为 Master，写命令、记忆与工具权限等才能正常使用。
+      </p>
+      <p className="channel-onboarding__text">
+        待审批的认主请求会出现在 <Link to="/dialog-objects">对话对象 → 申请队列</Link> 中。
+      </p>
+      <div className="channel-onboarding__actions">
+        <Link to="/dialog-objects" className="channel-onboarding__cta">前往申请队列</Link>
+        <button type="button" className="channel-onboarding__dismiss" onClick={onDismiss}>
+          我已了解
+        </button>
+      </div>
+    </aside>
+  )
+}
 
 // ============================================================================
 // Schema 驱动的表单渲染
@@ -165,6 +193,17 @@ export const ChannelConfig: React.FC = () => {
 
   // 创建表单
   const [showCreateForm, setShowCreateForm] = useState(false)
+  const [onboardingDismissed, setOnboardingDismissed] = useState(() => {
+    if (typeof window === 'undefined') return true
+    return window.localStorage.getItem(CHANNEL_ONBOARDING_STORAGE_KEY) === '1'
+  })
+
+  const dismissOnboarding = () => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(CHANNEL_ONBOARDING_STORAGE_KEY, '1')
+    }
+    setOnboardingDismissed(true)
+  }
   const [createImplId, setCreateImplId] = useState('')
   const [createName, setCreateName] = useState('')
   const [createPlatform, setCreatePlatform] = useState('')
@@ -415,11 +454,16 @@ export const ChannelConfig: React.FC = () => {
         ...(Object.keys(envToSave).length > 0 && { env: envToSave }),
         auto_start: false,
       })
-      toast.success('Channel 实例已创建')
+      toast.success('Channel 实例已创建。启动后请在该平台向 Crabot 发送 /认主 完成主人认证')
       setShowCreateForm(false)
       setCreateName('')
       setCreatePlatform('')
       setCreateEnv({})
+      // 创建成功重新展示引导：用户可能已忘记或上次操作的是别的实例
+      if (typeof window !== 'undefined') {
+        window.localStorage.removeItem(CHANNEL_ONBOARDING_STORAGE_KEY)
+      }
+      setOnboardingDismissed(false)
       loadInstances()
     } catch (err) {
       toast.error(`创建失败: ${err instanceof Error ? err.message : '未知错误'}`)
@@ -460,6 +504,11 @@ export const ChannelConfig: React.FC = () => {
         </div>
 
         {error && <div className="error-message">{error}</div>}
+
+        <ChannelOnboardingCallout
+          visible={!onboardingDismissed && instances.length > 0}
+          onDismiss={dismissOnboarding}
+        />
 
         {/* Create Form */}
         {showCreateForm && (
@@ -524,6 +573,9 @@ export const ChannelConfig: React.FC = () => {
               <p style={{ color: 'var(--text-secondary)', fontSize: '0.9375rem', fontWeight: 500 }}>暂无 Channel 实例</p>
               <p style={{ color: 'var(--text-muted)', fontSize: '0.8125rem', marginTop: '0.375rem' }}>
                 通过安装向导或手动创建来添加第一个渠道
+              </p>
+              <p style={{ color: 'var(--text-muted)', fontSize: '0.75rem', marginTop: '0.875rem', maxWidth: '420px', lineHeight: 1.55 }}>
+                创建并启动渠道后，记得在该平台向 Crabot 发送 <code>/认主</code> 完成主人认证——这是写命令、记忆与工具权限生效的前提。
               </p>
             </div>
           ) : (

@@ -2,6 +2,7 @@ import React from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { ToastProvider } from './contexts/ToastContext'
+import { DialogApplicationsProvider } from './contexts/DialogApplicationsContext'
 import { Login } from './pages/Login'
 import { Chat } from './pages/Chat'
 import { ProviderManagement } from './pages/Providers/ProviderManagement'
@@ -191,7 +192,9 @@ function App() {
     <BrowserRouter>
       <AuthProvider>
         <ToastProvider>
-          <AppRoutes />
+          <DialogApplicationsProvider>
+            <AppRoutes />
+          </DialogApplicationsProvider>
         </ToastProvider>
       </AuthProvider>
     </BrowserRouter>

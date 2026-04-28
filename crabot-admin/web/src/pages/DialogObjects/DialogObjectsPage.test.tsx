@@ -399,12 +399,12 @@ describe('DialogObjectsPage', () => {
     render(<DialogObjectsPage />)
 
     expect(await screen.findByRole('heading', { name: '对话对象管理' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '好友' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '私聊池' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '群聊' })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: /好友/ })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: /私聊池/ })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: /群聊/ })).toBeInTheDocument()
 
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /申请队列 2/ })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /^申请队列，2 条待处理$/ })).toBeInTheDocument()
     })
     expect((await screen.findAllByText('Alice')).length).toBeGreaterThan(0)
   })
@@ -497,17 +497,17 @@ describe('DialogObjectsPage', () => {
 
     expect((await screen.findAllByText('Alice')).length).toBeGreaterThan(0)
 
-    fireEvent.click(screen.getByRole('button', { name: '私聊池' }))
+    fireEvent.click(screen.getByRole('tab', { name: /私聊池/ }))
     expect((await screen.findAllByText('Pool User')).length).toBeGreaterThan(0)
 
-    fireEvent.click(screen.getByRole('button', { name: '群聊' }))
+    fireEvent.click(screen.getByRole('tab', { name: /群聊/ }))
     expect((await screen.findAllByText('Master Group')).length).toBeGreaterThan(0)
   })
 
   it('calls the create-friend private-pool action through the service layer', async () => {
     render(<DialogObjectsPage />)
 
-    fireEvent.click(await screen.findByRole('button', { name: '私聊池' }))
+    fireEvent.click(await screen.findByRole('tab', { name: /私聊池/ }))
     expect((await screen.findAllByText('Pool User')).length).toBeGreaterThan(0)
 
     fireEvent.click(screen.getByRole('button', { name: '从私聊新建好友' }))
@@ -527,7 +527,7 @@ describe('DialogObjectsPage', () => {
   it('assigns an apply application to an existing friend and refreshes the queue', async () => {
     render(<DialogObjectsPage />)
 
-    fireEvent.click(await screen.findByRole('button', { name: '申请队列 2' }))
+    fireEvent.click(await screen.findByRole('button', { name: /^申请队列，2 条待处理$/ }))
     expect((await screen.findAllByText('Pool User')).length).toBeGreaterThan(0)
 
     fireEvent.click(screen.getByRole('button', { name: '归到已有好友' }))
@@ -548,7 +548,7 @@ describe('DialogObjectsPage', () => {
   it('creates a friend from an apply application through the new route', async () => {
     render(<DialogObjectsPage />)
 
-    fireEvent.click(await screen.findByRole('button', { name: '申请队列 2' }))
+    fireEvent.click(await screen.findByRole('button', { name: /^申请队列，2 条待处理$/ }))
     expect((await screen.findAllByText('Pool User')).length).toBeGreaterThan(0)
 
     fireEvent.click(screen.getByRole('button', { name: '新建好友' }))
@@ -570,7 +570,7 @@ describe('DialogObjectsPage', () => {
   it('links a pair application to the existing master friend when one exists', async () => {
     render(<DialogObjectsPage />)
 
-    fireEvent.click(await screen.findByRole('button', { name: '申请队列 2' }))
+    fireEvent.click(await screen.findByRole('button', { name: /^申请队列，2 条待处理$/ }))
     expect((await screen.findAllByText('Master User')).length).toBeGreaterThan(0)
     fireEvent.click(screen.getByRole('button', { name: /Master User/ }))
 
@@ -616,7 +616,7 @@ describe('DialogObjectsPage', () => {
 
     render(<DialogObjectsPage />)
 
-    fireEvent.click(await screen.findByRole('button', { name: '申请队列 2' }))
+    fireEvent.click(await screen.findByRole('button', { name: /^申请队列，2 条待处理$/ }))
     expect((await screen.findAllByText('Master User')).length).toBeGreaterThan(0)
     fireEvent.click(screen.getByRole('button', { name: /Master User/ }))
 
@@ -634,7 +634,7 @@ describe('DialogObjectsPage', () => {
   it('rejects an application from the queue', async () => {
     render(<DialogObjectsPage />)
 
-    fireEvent.click(await screen.findByRole('button', { name: '申请队列 2' }))
+    fireEvent.click(await screen.findByRole('button', { name: /^申请队列，2 条待处理$/ }))
     expect((await screen.findAllByText('Pool User')).length).toBeGreaterThan(0)
 
     fireEvent.click(screen.getByRole('button', { name: '拒绝申请' }))
@@ -754,7 +754,7 @@ describe('DialogObjectsPage', () => {
   it('shows group session status and opens an editable permission drawer without template id', async () => {
     render(<DialogObjectsPage />)
 
-    fireEvent.click(await screen.findByRole('button', { name: '群聊' }))
+    fireEvent.click(await screen.findByRole('tab', { name: /群聊/ }))
     fireEvent.click(await screen.findByRole('button', { name: 'Master Group' }))
 
     const groupDetail = screen.getByRole('heading', { name: '群聊详情' }).closest('.card')
@@ -783,7 +783,7 @@ describe('DialogObjectsPage', () => {
   it('exposes group scene and memory entry points from the group workbench', async () => {
     render(<DialogObjectsPage />)
 
-    fireEvent.click(await screen.findByRole('button', { name: '群聊' }))
+    fireEvent.click(await screen.findByRole('tab', { name: /群聊/ }))
     fireEvent.click(await screen.findByRole('button', { name: 'Master Group' }))
 
     const groupDetail = screen.getByRole('heading', { name: '群聊详情' }).closest('.card')
@@ -800,7 +800,7 @@ describe('DialogObjectsPage', () => {
   it('saves explicit effective group permissions', async () => {
     render(<DialogObjectsPage />)
 
-    fireEvent.click(await screen.findByRole('button', { name: '群聊' }))
+    fireEvent.click(await screen.findByRole('tab', { name: /群聊/ }))
     fireEvent.click(await screen.findByRole('button', { name: 'Master Group' }))
     fireEvent.click(screen.getByRole('button', { name: '编辑群权限' }))
 

@@ -64,7 +64,7 @@ describe('DialogObjects components', () => {
     const onChange = vi.fn()
     render(<DomainNav activeDomain="friends" onChange={onChange} />)
 
-    fireEvent.click(screen.getByRole('button', { name: '私聊池' }))
+    fireEvent.click(screen.getByRole('tab', { name: /私聊池/ }))
 
     expect(onChange).toHaveBeenCalledWith('privatePool')
   })
@@ -220,6 +220,8 @@ describe('DialogObjects components', () => {
 
     rerender(
       <ApplicationQueueModal
+        open
+        onClose={() => {}}
         applications={[application]}
         selectedApplicationId="app-1"
         masterFriendCount={0}
@@ -231,6 +233,8 @@ describe('DialogObjects components', () => {
         onReject={() => {}}
       />
     )
-    expect(screen.getByText('普通申请')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 2, name: '申请队列' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 3, name: '普通申请' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '新建好友' })).toBeInTheDocument()
   })
 })

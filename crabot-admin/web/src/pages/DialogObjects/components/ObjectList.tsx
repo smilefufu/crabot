@@ -1,5 +1,4 @@
 import React from 'react'
-import { Card } from '../../../components/Common/Card'
 import type {
   DialogObjectFriend,
   DialogObjectGroupEntry,
@@ -16,55 +15,60 @@ interface ObjectListProps {
   onSelect: (id: string) => void
 }
 
-export const ObjectList: React.FC<ObjectListProps> = ({
-  domain,
-  items,
-  selectedId,
-  onSelect,
-}) => {
-  if (items.length === 0) {
-    return (
-      <Card title="对象列表">
-        <div style={{ color: 'var(--text-secondary)' }}>
-          当前对象域暂无数据
-        </div>
-      </Card>
-    )
+const TITLE_BY_DOMAIN: Record<DialogDomain, string> = {
+  friends: '好友',
+  privatePool: '私聊池',
+  groups: '群聊',
+}
+
+function describe(item: DialogObjectListItem): { title: string; subtitle: string; tag?: string } {
+  if ('display_name' in item) {
+    const friend = item as DialogObjectFriend
+    return {
+      title: friend.display_name,
+      subtitle: `${friend.identities.length} 个渠道身份`,
+      tag: friend.permission === 'master' ? 'Master' : undefined,
+    }
   }
+  return {
+    title: 'title' in item ? item.title : '',
+    subtitle: 'channel_id' in item ? `${item.channel_id} · ${item.type}` : '',
+  }
+}
 
+export const ObjectList: React.FC<ObjectListProps> = ({ domain, items, selectedId, onSelect }) => {
   return (
-    <Card title="对象列表">
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-        {items.map((item) => {
-          const active = item.id === selectedId
-          const title = 'display_name' in item ? item.display_name : item.title
-          const subtitle = 'display_name' in item
-            ? `${item.identities.length} 个渠道身份`
-            : `${item.channel_id} · ${item.type}`
-
-          return (
-            <button
-              key={`${domain}:${item.id}`}
-              type="button"
-              aria-label={title}
-              onClick={() => onSelect(item.id)}
-              style={{
-                width: '100%',
-                textAlign: 'left',
-                padding: '0.875rem 1rem',
-                borderRadius: '12px',
-                border: active ? '1px solid var(--primary)' : '1px solid var(--border)',
-                background: active ? 'rgba(59, 130, 246, 0.06)' : 'var(--bg-primary)',
-                color: 'var(--text-primary)',
-                cursor: 'pointer',
-              }}
-            >
-              <div style={{ fontWeight: 600, marginBottom: '0.25rem' }}>{title}</div>
-              <div style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>{subtitle}</div>
-            </button>
-          )
-        })}
+    <div className="dlg-list">
+      <div className="dlg-list__header">
+        <span className="dlg-list__title">{TITLE_BY_DOMAIN[domain]}</span>
+        <span className="dlg-list__count">{items.length}</span>
       </div>
-    </Card>
+      {items.length === 0 ? (
+        <div className="dlg-list__empty">当前对象域暂无数据</div>
+      ) : (
+        <ul className="dlg-list__items">
+          {items.map((item) => {
+            const active = item.id === selectedId
+            const { title, subtitle, tag } = describe(item)
+            return (
+              <li key={`${domain}:${item.id}`}>
+                <button
+                  type="button"
+                  aria-label={title}
+                  onClick={() => onSelect(item.id)}
+                  className={`dlg-list__item${active ? ' is-active' : ''}`}
+                >
+                  <span className="dlg-list__item-title">
+                    {title}
+                    {tag && <span className="dlg-intent-badge dlg-intent-badge--pair">{tag}</span>}
+                  </span>
+                  <span className="dlg-list__item-subtitle">{subtitle}</span>
+                </button>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </div>
   )
 }

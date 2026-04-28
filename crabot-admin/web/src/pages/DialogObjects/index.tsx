@@ -1,11 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '../../components/Common/Button'
-import { Card } from '../../components/Common/Card'
 import { Drawer } from '../../components/Common/Drawer'
 import { Input } from '../../components/Common/Input'
 import { Loading } from '../../components/Common/Loading'
 import { MainLayout } from '../../components/Layout/MainLayout'
 import { useToast } from '../../contexts/ToastContext'
+import { useDialogApplications } from '../../contexts/DialogApplicationsContext'
 import { dialogObjectsService } from '../../services/dialog-objects'
 import { friendService } from '../../services/friend'
 import { permissionTemplateService } from '../../services/permission-template'
@@ -40,13 +40,6 @@ import { TOOL_CATEGORIES, TOOL_CATEGORY_LABELS } from '../../types'
 type QueueTarget = { id: string; channel_id: string; title: string }
 type QueueTargetKind = 'privatePool' | 'application'
 type FriendPermissionState = 'idle' | 'loading' | 'ready' | 'unavailable'
-
-const panelStyle: React.CSSProperties = {
-  display: 'grid',
-  gridTemplateColumns: '200px minmax(260px, 340px) minmax(320px, 1fr)',
-  gap: '1rem',
-  alignItems: 'start',
-}
 
 const DEFAULT_STORAGE_PATH = '/workspace'
 
@@ -120,6 +113,7 @@ const PermissionSwitchRow: React.FC<{
 
 export const DialogObjectsPage: React.FC = () => {
   const { success, error: notifyError } = useToast()
+  const { refresh: refreshApplicationCount } = useDialogApplications()
   const [loading, setLoading] = useState(true)
   const [refreshKey, setRefreshKey] = useState(0)
   const [search, setSearch] = useState('')
@@ -227,6 +221,7 @@ export const DialogObjectsPage: React.FC = () => {
 
       if (results[3].status === 'fulfilled') {
         setApplications(results[3].value.items)
+        refreshApplicationCount().catch(() => {})
       } else {
         setApplications([])
         failures.push('申请队列')
@@ -240,7 +235,7 @@ export const DialogObjectsPage: React.FC = () => {
         setLoading(false)
       }
     }
-  }, [notifyError])
+  }, [notifyError, refreshApplicationCount])
 
   useEffect(() => {
     if (!initialLoadDone.current) {
@@ -707,43 +702,55 @@ export const DialogObjectsPage: React.FC = () => {
 
   return (
     <MainLayout>
-      <div style={{ display: 'grid', gap: '1rem' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
+      <div className="dlg-page">
+        <header className="dlg-page__header">
           <div>
-            <h1 style={{ fontSize: '1.6rem', fontWeight: 700, marginBottom: '0.25rem' }}>对话对象管理</h1>
-            <p style={{ color: 'var(--text-secondary)', margin: 0 }}>
-              用统一模型查看好友、未归属私聊和可处理群聊。
+            <span className="dlg-page__eyebrow">Dialog Objects</span>
+            <h1 className="dlg-page__title">对话对象管理</h1>
+            <p className="dlg-page__subtitle">
+              用统一模型查看好友、未归属私聊与可处理群聊；事件归属与权限调整在此一站完成。
             </p>
           </div>
-          <div style={{ display: 'flex', gap: '0.5rem' }}>
-            <Button variant="secondary" onClick={triggerRefresh}>
-              刷新
-            </Button>
-            <Button variant="secondary" onClick={() => setApplicationQueueOpen(true)}>
-              申请队列 {applications.length}
-            </Button>
+          <div className="dlg-page__actions">
+            <Button variant="secondary" onClick={triggerRefresh}>刷新</Button>
+            <button
+              type="button"
+              className={`dlg-page__queue-btn${applications.length > 0 ? ' has-pending' : ''}`}
+              onClick={() => setApplicationQueueOpen(true)}
+              aria-label={
+                applications.length > 0
+                  ? `申请队列，${applications.length} 条待处理`
+                  : '申请队列，暂无待处理'
+              }
+            >
+              <span>申请队列</span>
+              <span className="dlg-page__queue-count" aria-hidden="true">
+                {applications.length}
+              </span>
+            </button>
           </div>
+        </header>
+
+        <div className="dlg-toolbar">
+          <Input
+            placeholder="按名字、渠道或参与者搜索"
+            aria-label="搜索"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+          <DomainNav
+            activeDomain={domain}
+            onChange={setDomain}
+            counts={{
+              friends: friends.length,
+              privatePool: privatePool.length,
+              groups: groups.length,
+            }}
+          />
+          <span className="dlg-toolbar__meta">{filteredItems.length} / {itemsByDomain[domain].length}</span>
         </div>
 
-        <Card>
-          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-end', flexWrap: 'wrap' }}>
-            <div style={{ minWidth: '280px' }}>
-              <Input
-                label="搜索"
-                placeholder="按名字、渠道或参与者搜索"
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-              />
-            </div>
-            <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', marginBottom: '0.5rem' }}>
-              当前对象域：{domain === 'friends' ? '好友' : domain === 'privatePool' ? '私聊池' : '群聊'}
-            </div>
-          </div>
-        </Card>
-
-        <div style={panelStyle}>
-          <DomainNav activeDomain={domain} onChange={setDomain} />
-
+        <div className="dlg-body">
           <ObjectList
             domain={domain}
             items={filteredItems}
@@ -818,27 +825,27 @@ export const DialogObjectsPage: React.FC = () => {
         </div>
       </div>
 
-      <Drawer open={applicationQueueOpen} onClose={() => setApplicationQueueOpen(false)} width={520}>
-        <ApplicationQueueModal
-          applications={applications}
-          selectedApplicationId={selectedApplicationId}
-          masterFriendCount={masterFriends.length}
-          actionLoading={actionLoading}
-          onSelectApplication={setSelectedApplicationId}
-          onAssignExistingFriend={(application) => openAssignModal({
-            id: application.id,
-            channel_id: application.channel_id,
-            title: application.platform_display_name,
-          }, 'application')}
-          onCreateFriend={(application) => openCreateModal({
-            id: application.id,
-            channel_id: application.channel_id,
-            title: application.platform_display_name,
-          }, 'application', application.platform_display_name)}
-          onLinkMaster={(application) => void handleLinkApplicationMaster(application)}
-          onReject={(application) => void handleRejectApplication(application)}
-        />
-      </Drawer>
+      <ApplicationQueueModal
+        open={applicationQueueOpen}
+        onClose={() => setApplicationQueueOpen(false)}
+        applications={applications}
+        selectedApplicationId={selectedApplicationId}
+        masterFriendCount={masterFriends.length}
+        actionLoading={actionLoading}
+        onSelectApplication={setSelectedApplicationId}
+        onAssignExistingFriend={(application) => openAssignModal({
+          id: application.id,
+          channel_id: application.channel_id,
+          title: application.platform_display_name,
+        }, 'application')}
+        onCreateFriend={(application) => openCreateModal({
+          id: application.id,
+          channel_id: application.channel_id,
+          title: application.platform_display_name,
+        }, 'application', application.platform_display_name)}
+        onLinkMaster={(application) => void handleLinkApplicationMaster(application)}
+        onReject={(application) => void handleRejectApplication(application)}
+      />
 
       {showBindDrawer && domain === 'friends' && selectedItem && (
         <Drawer open onClose={() => setShowBindDrawer(false)} width={420}>
