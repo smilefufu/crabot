@@ -39,7 +39,9 @@ export class TelegramClient {
     const params: Record<string, unknown> = { timeout }
     if (offset !== undefined) params.offset = offset
     params.allowed_updates = ['message', 'edited_message']
-    return this.callApi<TgUpdate[]>('getUpdates', params)
+    // long polling 自身就是循环操作，pollLoop 失败后会自然进入下一轮；
+    // 客户端层再加重试只会放大单次失败的等待时间和日志噪音。
+    return this.callApi<TgUpdate[]>('getUpdates', params, { retry: false })
   }
 
   // ── 消息发送 ──────────────────────────────────────────────────────────────
@@ -163,14 +165,18 @@ export class TelegramClient {
 
   // ── 内部 ──────────────────────────────────────────────────────────────────
 
-  private async callApi<T>(method: string, params?: Record<string, unknown>): Promise<T> {
+  private async callApi<T>(
+    method: string,
+    params?: Record<string, unknown>,
+    options?: { retry?: boolean },
+  ): Promise<T> {
     const url = `${this.baseUrl}/${method}`
     const body = params ? JSON.stringify(params) : undefined
     return this.fetchWithRetry<T>(method, () => fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body,
-    }))
+    }), options?.retry !== false)
   }
 
   private async callApiMultipart<T>(
@@ -223,12 +229,15 @@ export class TelegramClient {
    *   - 业务级 ok=false 但 HTTP 200 的（除非 error_code=429）
    *
    * 退避：指数递增，base=300ms（300 / 600 / 1200ms），最多 3 次尝试。
+   *
+   * `enabled=false` 时退化为单次请求（用于 long polling 等本身具循环语义的调用）。
    */
   private async fetchWithRetry<T>(
     method: string,
     doFetch: () => Promise<Response>,
+    enabled = true,
   ): Promise<T> {
-    const MAX_ATTEMPTS = 3
+    const MAX_ATTEMPTS = enabled ? 3 : 1
     const BASE_DELAY_MS = 300
 
     let lastError: unknown
