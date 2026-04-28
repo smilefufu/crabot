@@ -138,4 +138,36 @@ describe('AdminModule - ensureBuiltinSchedules', () => {
     expect(curatesAfter).toHaveLength(1)
     expect(curatesAfter[0].id).toBe(original!.id)
   })
+
+  it('should resync stale builtin task_template to current SEED on startup', async () => {
+    // Simulates an upgrade where a deployed instance has an older
+    // task_template.description (e.g. before we added the "第一步必须调用 Skill"
+    // header). ensureBuiltinSchedules must overwrite the stale task_template
+    // while preserving user-mutable fields (enabled / trigger / description /
+    // execution_count / id).
+    const schedulesMap = (admin as unknown as { schedules: Map<string, Schedule> }).schedules
+    const dailyReflection = Array.from(schedulesMap.values()).find(
+      s => s.is_builtin && s.name === '每日反思'
+    )
+    expect(dailyReflection, 'pre-existing 每日反思 seed must exist').toBeDefined()
+
+    const staleDescription = '执行每日反思（旧版文案，缺少 Skill 调用指令）。'
+    const originalId = dailyReflection!.id
+    const originalCreatedAt = dailyReflection!.created_at
+
+    schedulesMap.set(originalId, {
+      ...dailyReflection!,
+      task_template: { ...dailyReflection!.task_template, description: staleDescription },
+      execution_count: 42,
+    })
+
+    await (admin as unknown as { ensureBuiltinSchedules: () => Promise<void> }).ensureBuiltinSchedules()
+
+    const refreshed = schedulesMap.get(originalId)
+    expect(refreshed, 'schedule should still exist with same id').toBeDefined()
+    expect(refreshed!.task_template.description).not.toBe(staleDescription)
+    expect(refreshed!.task_template.description).toMatch(/第一步必须调用 Skill\("daily-reflection"\)/)
+    expect(refreshed!.created_at).toBe(originalCreatedAt) // user-facing fields preserved
+    expect(refreshed!.execution_count).toBe(42) // runtime stats preserved
+  })
 })

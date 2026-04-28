@@ -3909,7 +3909,7 @@ export class AdminModule extends ModuleBase {
         task_template: {
           type: 'daily_reflection',
           title: '每日反思 — {{date}}',
-          description: '执行每日反思。反思时间范围：{{watermark}} 到 {{datetime}}。标准流程：1）获取此时间范围内的任务概览；2）筛选值得深入分析的任务（排除 daily_reflection 类型，优先关注失败、轮数异常、人类情绪明显的）；3）对每个选中任务委派 sub-agent 深入分析（trace span + 对话历史），返回分析结果和经验建议；4）综合所有 sub-agent 结果，跨任务去重，统一写入长期记忆；5）重大发现向 master 汇报。',
+          description: '第一步必须调用 Skill("daily-reflection")，禁止加载其他 reflection skill。反思时间范围：{{watermark}} 到 {{datetime}}。标准流程：1）获取此时间范围内的任务概览；2）筛选值得深入分析的任务（排除 daily_reflection 类型，优先关注失败、轮数异常、人类情绪明显的）；3）对每个选中任务委派 sub-agent 深入分析（trace span + 对话历史），返回分析结果和经验建议；4）综合所有 sub-agent 结果，跨任务去重，统一写入长期记忆；5）重大发现向 master 汇报。',
           priority: 'low',
           tags: ['daily_reflection', 'builtin'],
         },
@@ -3972,12 +3972,28 @@ export class AdminModule extends ModuleBase {
       console.warn(`[Admin] Collapsed ${drop.length} duplicate builtin schedule(s) named "${name}", kept ${keep.id}`)
     }
 
-    const existing = new Set(
-      Array.from(this.schedules.values()).filter(s => s.is_builtin).map(s => s.name),
-    )
+    const existingByName = new Map<string, Schedule>()
+    for (const sched of this.schedules.values()) {
+      if (sched.is_builtin) existingByName.set(sched.name, sched)
+    }
+
+    // 已存在的 builtin：把核心执行体（task_template）对齐当前 SEED，
+    // 保留用户可改字段（enabled / trigger / description / 运行统计）。
+    // 这样开发者升级 SEED 中 task_template 文案时，存量实例也会同步生效。
+    for (const seed of SEEDS) {
+      const current = existingByName.get(seed.name)
+      if (!current) continue
+      if (JSON.stringify(current.task_template) === JSON.stringify(seed.task_template)) continue
+      this.schedules.set(current.id, {
+        ...current,
+        task_template: seed.task_template,
+        updated_at: generateTimestamp(),
+      })
+      console.log(`[Admin] Resynced builtin schedule task_template for "${seed.name}"`)
+    }
 
     for (const seed of SEEDS) {
-      if (existing.has(seed.name)) continue
+      if (existingByName.has(seed.name)) continue
       const now = generateTimestamp()
       const id = generateId()
       const schedule: Schedule = {

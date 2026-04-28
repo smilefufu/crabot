@@ -634,11 +634,24 @@ export class SkillManager {
       if (!parsed.name) continue
 
       if (existingNames.has(parsed.name)) {
-        // 已注册：更新路径和内容（项目目录可能变更）
+        // 已注册：用 SKILL.md 当前内容 + frontmatter 同步条目
+        // （项目目录、文件内容、frontmatter 里的 description / version 都可能变更）
         for (const [id, existing] of this.skills) {
           if (existing.name === parsed.name && existing.is_builtin) {
-            if (existing.skill_dir !== skillDir || existing.content !== content) {
-              this.skills.set(id, { ...existing, skill_dir: skillDir, content, updated_at: generateTimestamp() })
+            if (
+              existing.skill_dir !== skillDir ||
+              existing.content !== content ||
+              existing.description !== parsed.description ||
+              existing.version !== parsed.version
+            ) {
+              this.skills.set(id, {
+                ...existing,
+                skill_dir: skillDir,
+                content,
+                description: parsed.description,
+                version: parsed.version,
+                updated_at: generateTimestamp(),
+              })
               changed = true
             }
             break

@@ -1,7 +1,7 @@
 ---
 name: daily-reflection
-description: "深度反思（每日 1 次）：读 trace、委派 sub-agent 分析失败任务、提炼经验写入长期记忆。仅当任务标题以'每日反思'开头或 trigger=daily_reflection 时使用。机械的 inbox 去重打分用 memory-curate，不要用本 skill。"
-version: "1.3.0"
+description: "深度反思（每日 1 次）：读 trace、委派 sub-agent 分析失败任务、提炼经验写入长期记忆。仅当任务标题以'每日反思'开头或 trigger=daily_reflection 时使用，与 memory-curate 互斥（memory-curate 用于机械的 inbox 去重打分，不读 trace、不委派 sub-agent）。"
+version: "1.4.0"
 ---
 
 # 每日反思技能
