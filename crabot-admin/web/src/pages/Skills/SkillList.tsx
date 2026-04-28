@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { skillService, type GitSkillItem, isDuplicateSkillError, type DuplicateSkillErrorBody } from '../../services/skill'
-import { agentService } from '../../services/agent'
 import { MainLayout } from '../../components/Layout/MainLayout'
 import { Card } from '../../components/Common/Card'
 import { Button } from '../../components/Common/Button'
@@ -47,18 +46,6 @@ function parseSkillMdFrontmatter(content: string): { name?: string; version?: st
 }
 
 type CreateTab = 'git' | 'local' | 'upload'
-
-function mergeUnique(base: string[], additions: string[]): string[] {
-  const seen = new Set(base)
-  const merged = [...base]
-  for (const id of additions) {
-    if (!seen.has(id)) {
-      seen.add(id)
-      merged.push(id)
-    }
-  }
-  return merged
-}
 
 /**
  * 弹出确认对话框询问用户是否覆盖同名 Skill
@@ -112,9 +99,6 @@ export const SkillList: React.FC = () => {
   const [localPath, setLocalPath] = useState('')
   // Upload state
   const fileInputRef = useRef<HTMLInputElement>(null)
-  // Pending skills to offer adding to agent config
-  const [pendingSkillIds, setPendingSkillIds] = useState<string[]>([])
-  const [addingToAgent, setAddingToAgent] = useState(false)
 
   useEffect(() => { load() }, [])
 
@@ -232,7 +216,6 @@ export const SkillList: React.FC = () => {
       toast.success(`成功安装 ${installedIds.length} 个 Skill`)
       setShowForm(false)
       await load()
-      setPendingSkillIds(prev => mergeUnique(prev, installedIds))
     } else if (skippedCount > 0) {
       toast.success(`已取消 ${skippedCount} 个同名 Skill 的覆盖`)
     }
@@ -252,7 +235,6 @@ export const SkillList: React.FC = () => {
       toast.success('导入成功')
       setShowForm(false)
       await load()
-      setPendingSkillIds(prev => mergeUnique(prev, [imported.id]))
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '导入失败')
     } finally {
@@ -285,7 +267,6 @@ export const SkillList: React.FC = () => {
       toast.success('上传导入成功')
       setShowForm(false)
       await load()
-      setPendingSkillIds(prev => mergeUnique(prev, [imported.id]))
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '上传失败')
     } finally {
@@ -294,24 +275,16 @@ export const SkillList: React.FC = () => {
     }
   }
 
-  const handleEnableInAgent = async () => {
-    if (pendingSkillIds.length === 0) return
-    setAddingToAgent(true)
+  const handleToggle = async (s: SkillRegistryEntry) => {
+    if (!s.can_disable && s.enabled) {
+      toast.error('此 Skill 不允许禁用')
+      return
+    }
     try {
-      const agentConfig = await agentService.getConfig()
-      const existing = agentConfig.skill_ids ?? []
-      const merged = mergeUnique(existing, pendingSkillIds)
-      if (merged.length === existing.length) {
-        toast.success('这些 Skill 已在 Agent 配置中')
-      } else {
-        await agentService.updateConfig({ skill_ids: merged })
-        toast.success('已添加到 Agent 配置')
-      }
-      setPendingSkillIds([])
+      await skillService.update(s.id, { enabled: !s.enabled })
+      await load()
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : '添加失败')
-    } finally {
-      setAddingToAgent(false)
+      toast.error(err instanceof Error ? err.message : '操作失败')
     }
   }
 
@@ -510,42 +483,6 @@ export const SkillList: React.FC = () => {
         </div>
       )}
 
-      {pendingSkillIds.length > 0 && (() => {
-        const pendingNames = pendingSkillIds
-          .map(id => skills.find(s => s.id === id)?.name)
-          .filter((n): n is string => !!n)
-        return (
-          <div
-            className="card"
-            style={{
-              marginBottom: '1rem',
-              borderLeft: '3px solid var(--primary)',
-              background: 'rgba(59,130,246,0.06)',
-            }}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
-              <div style={{ flex: 1, minWidth: '240px' }}>
-                <div style={{ fontWeight: 600, marginBottom: '0.25rem' }}>
-                  把新添加的 Skill 启用到 Agent 配置？
-                </div>
-                <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                  {pendingNames.length > 0 ? pendingNames.join('、') : `${pendingSkillIds.length} 个 Skill`}
-                  {' '}未启用，Agent 不会识别它们。点"启用"一键加入 Agent 配置。
-                </div>
-              </div>
-              <div style={{ display: 'flex', gap: '0.5rem', flexShrink: 0 }}>
-                <Button variant="primary" onClick={handleEnableInAgent} disabled={addingToAgent}>
-                  {addingToAgent ? '添加中...' : '启用'}
-                </Button>
-                <Button variant="secondary" onClick={() => setPendingSkillIds([])} disabled={addingToAgent}>
-                  忽略
-                </Button>
-              </div>
-            </div>
-          </div>
-        )
-      })()}
-
       {skills.length === 0 ? (
         <Card>
           <p style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>
@@ -567,6 +504,13 @@ export const SkillList: React.FC = () => {
                     {s.is_essential && (
                       <span style={{ fontSize: '0.75rem', padding: '0.1rem 0.5rem', background: 'rgba(59,130,246,0.15)', color: '#3b82f6', borderRadius: '4px' }}>必要</span>
                     )}
+                    <span style={{
+                      fontSize: '0.75rem', padding: '0.1rem 0.5rem', borderRadius: '4px',
+                      background: s.enabled ? 'rgba(34,197,94,0.15)' : 'rgba(107,114,128,0.15)',
+                      color: s.enabled ? '#22c55e' : '#6b7280',
+                    }}>
+                      {s.enabled ? '已启用' : '已禁用'}
+                    </span>
                   </div>
                   {s.description && (
                     <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '0.25rem' }}>{s.description}</div>
@@ -595,6 +539,11 @@ export const SkillList: React.FC = () => {
                   >
                     {previewId === s.id ? '收起' : '预览'}
                   </Button>
+                  {s.can_disable && (
+                    <Button variant="secondary" onClick={() => handleToggle(s)} style={{ fontSize: '0.8rem', padding: '0.3rem 0.75rem' }}>
+                      {s.enabled ? '禁用' : '启用'}
+                    </Button>
+                  )}
                   {!s.is_builtin && (
                     <>
                       <Button variant="secondary" onClick={() => openEdit(s)} style={{ fontSize: '0.8rem', padding: '0.3rem 0.75rem' }}>编辑</Button>
