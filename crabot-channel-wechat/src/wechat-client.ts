@@ -275,7 +275,29 @@ export class WechatClient {
     })
   }
 
-  private request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const MAX_ATTEMPTS = 3
+    const BASE_DELAY_MS = 200
+
+    let lastError: unknown
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        return await this.executeRequest<T>(method, path, body)
+      } catch (err: unknown) {
+        lastError = err
+        if (!isTransient(err) || attempt >= MAX_ATTEMPTS) throw err
+        const delay = BASE_DELAY_MS * 2 ** (attempt - 1)
+        const msg = err instanceof Error ? err.message : String(err)
+        console.warn(
+          `[WechatClient] ${method} ${path} attempt ${attempt}/${MAX_ATTEMPTS} transient error: ${msg}, retrying in ${delay}ms`
+        )
+        await sleep(delay)
+      }
+    }
+    throw lastError ?? new Error(`[WechatClient] ${method} ${path} exhausted retries`)
+  }
+
+  private executeRequest<T>(method: string, path: string, body?: unknown): Promise<T> {
     const url = new URL(path, this.baseUrl)
     const isHttps = url.protocol === 'https:'
     const transport = isHttps ? https : http
@@ -301,6 +323,11 @@ export class WechatClient {
           let data = ''
           res.on('data', (chunk: string) => { data += chunk })
           res.on('end', () => {
+            // HTTP 5xx：服务端临时故障，标记为 transient
+            if (res.statusCode !== undefined && res.statusCode >= 500) {
+              reject(new TransientError(`HTTP ${res.statusCode}: ${data.slice(0, 200)}`))
+              return
+            }
             try {
               const parsed = JSON.parse(data) as ApiResponse<T>
               if (parsed.code !== 0) {
@@ -309,22 +336,36 @@ export class WechatClient {
               }
               resolve(parsed.data)
             } catch (e) {
-              reject(new Error(`Failed to parse response: ${String(e)}`))
+              // 非 JSON body 通常意味着上游网关错误页 → transient
+              reject(new TransientError(`Failed to parse response: ${String(e)}`))
             }
           })
         }
       )
 
-      req.on('error', reject)
+      req.on('error', (err) => reject(new TransientError(err.message)))
       req.on('timeout', () => {
         req.destroy()
-        reject(new Error(`Request timeout: ${method} ${path}`))
+        reject(new TransientError(`Request timeout: ${method} ${path}`))
       })
 
       if (bodyStr) req.write(bodyStr)
       req.end()
     })
   }
+}
+
+/** 标记为可重试的瞬态错误（网络层、5xx、timeout）。业务错误不应使用。 */
+class TransientError extends Error {
+  readonly transient = true as const
+}
+
+function isTransient(err: unknown): boolean {
+  return err instanceof TransientError
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 const MIME_MAP: Record<string, string> = {

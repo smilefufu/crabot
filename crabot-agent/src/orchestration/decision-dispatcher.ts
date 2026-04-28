@@ -168,33 +168,42 @@ export class DecisionDispatcher {
     }
 
     // 1. 发送即时回复（如果有内容）
+    //
+    // ack 失败不能阻塞 task 创建：channel 网络抖动（如 Telegram fetch failed）会让
+    // RPC 抛错；如果让它向上抛，整个 create_task 流程被切断 → 用户的请求被丢弃。
+    // ack 只是"已收到"的确认提示，丢失它远没有丢失 task 严重。失败时只 log。
     const replyText = decision.immediate_reply?.text
     if (replyText) {
-      if (params.admin_chat_callback) {
-        const adminPort = await this.getAdminPort()
-        await this.rpcClient.call(
-          adminPort,
-          'chat_callback',
-          {
-            request_id: params.admin_chat_callback.request_id,
-            reply_type: 'task_created',
-            content: replyText,
-          },
-          this.moduleId,
-          traceCtx
-        )
-      } else {
-        const channelPort = await this.getChannelPort(params.channel_id)
-        await this.rpcClient.call(
-          channelPort,
-          'send_message',
-          {
-            session_id: params.session_id,
-            content: decision.immediate_reply,
-          },
-          this.moduleId,
-          traceCtx
-        )
+      try {
+        if (params.admin_chat_callback) {
+          const adminPort = await this.getAdminPort()
+          await this.rpcClient.call(
+            adminPort,
+            'chat_callback',
+            {
+              request_id: params.admin_chat_callback.request_id,
+              reply_type: 'task_created',
+              content: replyText,
+            },
+            this.moduleId,
+            traceCtx
+          )
+        } else {
+          const channelPort = await this.getChannelPort(params.channel_id)
+          await this.rpcClient.call(
+            channelPort,
+            'send_message',
+            {
+              session_id: params.session_id,
+              content: decision.immediate_reply,
+            },
+            this.moduleId,
+            traceCtx
+          )
+        }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error(`[DecisionDispatcher] create_task ack send failed (non-blocking): ${msg}`)
       }
     }
 
@@ -702,9 +711,14 @@ export class DecisionDispatcher {
     // Step 1: 验证任务存在（本地 O(1) 查询）
     const taskExists = this.workerHandler.hasActiveTask(decision.task_id)
 
-    // Step 2: 发送即时回复
+    // Step 2: 发送即时回复（ack 失败不阻塞 supplement 投递，理由同 handleCreateTask）
     if (decision.immediate_reply?.text) {
-      await this.sendReplyToUser(decision.immediate_reply.text, params)
+      try {
+        await this.sendReplyToUser(decision.immediate_reply.text, params)
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error(`[DecisionDispatcher] supplement_task ack send failed (non-blocking): ${msg}`)
+      }
     }
 
     // Step 3: 投递纠偏消息（本地直接调用）

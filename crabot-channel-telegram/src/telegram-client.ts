@@ -165,14 +165,12 @@ export class TelegramClient {
 
   private async callApi<T>(method: string, params?: Record<string, unknown>): Promise<T> {
     const url = `${this.baseUrl}/${method}`
-    const response = await fetch(url, {
+    const body = params ? JSON.stringify(params) : undefined
+    return this.fetchWithRetry<T>(method, () => fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: params ? JSON.stringify(params) : undefined,
-    })
-
-    const data = (await response.json()) as TgApiResponse<T>
-    return this.unwrapResponse(data, response.status)
+      body,
+    }))
   }
 
   private async callApiMultipart<T>(
@@ -205,14 +203,73 @@ export class TelegramClient {
     const body = Buffer.concat(parts)
 
     const url = `${this.baseUrl}/${method}`
-    const response = await fetch(url, {
+    return this.fetchWithRetry<T>(method, () => fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
       body,
-    })
+    }))
+  }
 
-    const data = (await response.json()) as TgApiResponse<T>
-    return this.unwrapResponse(data, response.status)
+  /**
+   * 调用 Telegram API，带瞬态错误重试。
+   *
+   * 会重试的：
+   *   - fetch 抛错（DNS/connection reset/socket hang up 等网络层错误）
+   *   - HTTP 5xx（Telegram 后端临时故障）
+   *   - HTTP 429 / `retry_after`（rate limit；遵循返回的 retry_after 秒数）
+   *
+   * 不会重试的：
+   *   - 4xx 用户错误（chat not found、bot blocked、bad request 等永久错误）
+   *   - 业务级 ok=false 但 HTTP 200 的（除非 error_code=429）
+   *
+   * 退避：指数递增，base=300ms（300 / 600 / 1200ms），最多 3 次尝试。
+   */
+  private async fetchWithRetry<T>(
+    method: string,
+    doFetch: () => Promise<Response>,
+  ): Promise<T> {
+    const MAX_ATTEMPTS = 3
+    const BASE_DELAY_MS = 300
+
+    let lastError: unknown
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        const response = await doFetch()
+        const data = (await response.json()) as TgApiResponse<T>
+        const status = response.status
+        const errorCode = data.error_code ?? status
+
+        const retryable =
+          status >= 500 || status === 429 || errorCode === 429
+        if (!data.ok && retryable && attempt < MAX_ATTEMPTS) {
+          const retryAfter = typeof data.parameters?.retry_after === 'number'
+            ? data.parameters.retry_after * 1000
+            : BASE_DELAY_MS * 2 ** (attempt - 1)
+          console.warn(
+            `[TelegramClient] ${method} retryable status=${status} code=${errorCode} attempt ${attempt}/${MAX_ATTEMPTS}, retrying in ${retryAfter}ms`
+          )
+          await sleep(retryAfter)
+          continue
+        }
+
+        return this.unwrapResponse(data, status)
+      } catch (err: unknown) {
+        // fetch 抛错 = 网络层错误（DNS、connection refused、socket reset、TLS 等），瞬态可重试
+        lastError = err
+        if (attempt < MAX_ATTEMPTS) {
+          const delay = BASE_DELAY_MS * 2 ** (attempt - 1)
+          const msg = err instanceof Error ? err.message : String(err)
+          console.warn(
+            `[TelegramClient] ${method} network error attempt ${attempt}/${MAX_ATTEMPTS}: ${msg}, retrying in ${delay}ms`
+          )
+          await sleep(delay)
+          continue
+        }
+        throw err
+      }
+    }
+    // 不可达（循环内要么 return 要么 throw），但 TS 需要兜底
+    throw lastError ?? new Error(`[TelegramClient] ${method} exhausted retries without result`)
   }
 
   private unwrapResponse<T>(data: TgApiResponse<T>, httpStatus: number): T {
@@ -224,6 +281,10 @@ export class TelegramClient {
     }
     return data.result
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 // ============================================================================

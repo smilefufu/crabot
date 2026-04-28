@@ -107,6 +107,11 @@ export interface TgApiResponse<T> {
   result?: T
   description?: string
   error_code?: number
+  /** Telegram 在 429 / 5xx 时返回的退避建议（秒） */
+  parameters?: {
+    retry_after?: number
+    migrate_to_chat_id?: number
+  }
 }
 
 // ============================================================================
