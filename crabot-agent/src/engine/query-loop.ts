@@ -99,6 +99,16 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     const processed = partitionResponseContent(response.content)
     totalTurns++
 
+    // Live progress: assistant text arrived (fires before tool execution).
+    // 注意：emit 在 totalTurns++ 之后，turn 数与 onTurn.turnNumber 对齐。
+    if (options.onLiveProgress && processed.text.length > 0) {
+      options.onLiveProgress({
+        type: 'turn_assistant',
+        turn: totalTurns,
+        text: processed.text,
+      })
+    }
+
     // Update usage tracking
     if (response.usage) {
       contextManager.updateFromUsage(response.usage)
@@ -178,11 +188,32 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
 
     // Execute tools
     const batches = partitionToolCalls(processed.toolUseBlocks, currentTools)
+    // Live progress: tools about to start
+    if (options.onLiveProgress) {
+      options.onLiveProgress({
+        type: 'tools_start',
+        tools: processed.toolUseBlocks.map(b => ({
+          name: b.name,
+          input_summary: summarizeToolInput(b.input),
+        })),
+      })
+    }
     const toolStartTime = Date.now()
     const toolResults = await executeToolBatches(batches, currentTools, {
       abortSignal,
     }, options.permissionConfig, hooks)
     const toolExecutionMs = Date.now() - toolStartTime
+    // Live progress: tools finished
+    if (options.onLiveProgress) {
+      options.onLiveProgress({
+        type: 'tools_end',
+        results: processed.toolUseBlocks.map((b, i) => ({
+          name: b.name,
+          input_summary: summarizeToolInput(b.input),
+          is_error: toolResults[i]?.is_error ?? false,
+        })),
+      })
+    }
 
     // Fire onTurn callback
     if (options.onTurn) {
@@ -314,5 +345,26 @@ function normalizeStopReason(
       return raw
     default:
       return null
+  }
+}
+
+/**
+ * 把工具输入压缩成 200 字以内的人类可读摘要，用于 live snapshot。
+ * Bash 优先取 command 第一行；其它工具走 JSON.stringify 截断。
+ */
+function summarizeToolInput(input: Record<string, unknown> | undefined): string {
+  if (!input || typeof input !== 'object') return ''
+  const cmd = (input as { command?: unknown }).command
+  if (typeof cmd === 'string') {
+    const firstLine = cmd.split('\n', 1)[0].trim()
+    return firstLine.length > 200 ? firstLine.slice(0, 200) + '…' : firstLine
+  }
+  const file = (input as { file_path?: unknown }).file_path
+  if (typeof file === 'string') return file.length > 200 ? file.slice(0, 200) + '…' : file
+  try {
+    const json = JSON.stringify(input)
+    return json.length > 200 ? json.slice(0, 200) + '…' : json
+  } catch {
+    return ''
   }
 }

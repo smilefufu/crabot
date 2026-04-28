@@ -155,6 +155,32 @@ export interface EngineTurnEvent {
 /** 既可传静态值也可传 callback（每轮 resolve） */
 export type Resolvable<T> = T | (() => T)
 
+/**
+ * 实时进度事件（细粒度）。
+ *
+ * 与 `EngineTurnEvent` 的区别：onTurn 是事后回调（工具执行完才触发，所有 span
+ * 一次性写入），而 `LiveProgressEvent` 在 LLM 返回 / 工具开始 / 工具结束三个时
+ * 间点都会发送，让外部观察者能感知"飞行中"状态。
+ */
+export type LiveProgressEvent =
+  | {
+      readonly type: 'turn_assistant'
+      readonly turn: number
+      readonly text: string
+    }
+  | {
+      readonly type: 'tools_start'
+      readonly tools: ReadonlyArray<{ readonly name: string; readonly input_summary: string }>
+    }
+  | {
+      readonly type: 'tools_end'
+      readonly results: ReadonlyArray<{
+        readonly name: string
+        readonly input_summary: string
+        readonly is_error: boolean
+      }>
+    }
+
 export interface EngineOptions {
   readonly systemPrompt: Resolvable<string>
   readonly tools: Resolvable<ReadonlyArray<ToolDefinition>>
@@ -163,6 +189,8 @@ export interface EngineOptions {
   readonly maxTokens?: number
   readonly abortSignal?: AbortSignal
   readonly onTurn?: (event: EngineTurnEvent) => void
+  /** 实时进度回调（fires LLM 返回 / 工具开始 / 工具结束三处）—— 见 LiveProgressEvent */
+  readonly onLiveProgress?: (event: LiveProgressEvent) => void
   readonly permissionConfig?: ToolPermissionConfig
   readonly supportsVision?: boolean
   readonly humanMessageQueue?: HumanMessageQueueLike

@@ -170,7 +170,7 @@ describe('buildUserMessage', () => {
 
     expect(result).toContain('## 活跃任务列表')
     expect(result).toContain('[task-1] "发送统计报告到飞书" (status: executing, 来源session: sess-1)')
-    expect(result).toContain('最近进度: 正在查找飞书渠道...')
+    expect(result).toContain('最近进度（事后摘要）: 正在查找飞书渠道...')
   })
 
   // -----------------------------------------------------------------------

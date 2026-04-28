@@ -25,6 +25,7 @@ import type {
   ProgressDigestConfig,
   ProgressDigestDeps,
   ToolPermissionConfig,
+  LiveProgressEvent,
 } from '../engine/index.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { MemoryWriter } from '../orchestration/memory-writer.js'
@@ -39,6 +40,9 @@ import type {
   TraceCallback,
   SkillConfig,
   BuiltinToolConfig,
+  LiveTaskSnapshot,
+  LiveToolCall,
+  LiveCompletedTool,
 } from '../types.js'
 import type { RpcClient } from 'crabot-shared'
 import { createCrabMemoryServer } from '../mcp/crab-memory.js'
@@ -95,6 +99,8 @@ export interface WorkerDeps {
   moduleId: string
   resolveChannelPort: (channelId: string) => Promise<number>
   getMemoryPort: () => Promise<number>
+  /** Admin RPC 端口解析（get_task_details 工具用） */
+  getAdminPort?: () => Promise<number>
   /**
    * 返回当前 session 的 permissionConfig（基于 session 模板 + 覆盖）。
    * 未配置时返回 { mode: 'bypass' }（向后兼容）。
@@ -160,6 +166,14 @@ export class WorkerHandler {
   private activeTasks: Map<TaskId, WorkerTaskState> = new Map()
   /** Human message queues for active tasks */
   private humanQueues: Map<TaskId, HumanMessageQueue> = new Map()
+  /**
+   * 飞行中任务的实时快照：current_turn / 上一轮模型话 / active_tools / 最近完成的工具。
+   * 由 onLiveProgress 回调维护；executeTask 完成时清理。
+   * ContextAssembler 同进程同步读取（getLiveSnapshot）以注入 Front prompt。
+   */
+  private liveSnapshots: Map<TaskId, LiveTaskSnapshot> = new Map()
+  /** recent_completed 保留的最大条数 */
+  private static readonly RECENT_COMPLETED_LIMIT = 5
   private mcpConfigFactory: (() => Record<string, McpServer>) | undefined
   private deps?: WorkerDeps
   private builtinToolConfig?: BuiltinToolConfig
@@ -263,6 +277,15 @@ export class WorkerHandler {
     }
     this.activeTasks.set(task.task_id, taskState)
 
+    // Init live snapshot（query-loop 的 onLiveProgress 会逐步填充）
+    this.liveSnapshots.set(task.task_id, {
+      task_id: task.task_id,
+      current_turn: 0,
+      started_at: Date.now(),
+      active_tools: [],
+      recent_completed: [],
+    })
+
     // Create human message queue for this task
     const humanQueue = new HumanMessageQueue()
     this.humanQueues.set(task.task_id, humanQueue)
@@ -298,6 +321,20 @@ export class WorkerHandler {
       // Trace search tool (异步 import，提前加载，lambda 内只用同步引用)
       const traceSearchTool = traceContext
         ? (await import('./trace-search-tool.js')).createSearchTracesTool(traceContext.traceStore)
+        : undefined
+
+      // get_task_details 工具：让 worker 能查任意历史任务的完整执行复盘（用于"继续上次"场景）
+      // digest LLM 用于超阈值时压缩；缺省则只截断
+      const digestAdapterForTool = this.digestSdkEnv ? adapterFromSdkEnv(this.digestSdkEnv) : undefined
+      const getTaskDetailsTool = (traceContext && this.deps?.getAdminPort)
+        ? (await import('./get-task-details-tool.js')).createGetTaskDetailsTool({
+            rpcClient: this.deps.rpcClient,
+            moduleId: this.deps.moduleId,
+            getAdminPort: this.deps.getAdminPort,
+            traceStore: traceContext.traceStore,
+            digestAdapter: digestAdapterForTool,
+            digestModelId: this.digestSdkEnv?.modelId,
+          })
         : undefined
 
       // 工具列表构造改为 callback 形式：每轮 LLM 调用前由 query-loop 重新 resolve，
@@ -426,6 +463,11 @@ export class WorkerHandler {
           tools.push(traceSearchTool)
         }
 
+        // 3i. get_task_details tool（人话化的任务复盘）
+        if (getTaskDetailsTool) {
+          tools.push(getTaskDetailsTool)
+        }
+
         // 最终过滤：无权限工具不注入 LLM
         return filterToolsByPermission(tools, localPermissionConfig)
       }
@@ -548,6 +590,47 @@ export class WorkerHandler {
           abortSignal: taskState.abortController.signal as AbortSignal,
           humanMessageQueue: humanQueue,
           hookRegistry: workerHookRegistry,
+          onLiveProgress: (event: LiveProgressEvent) => {
+            // Update in-memory snapshot so ContextAssembler can read it.
+            // 容错：如果任务已被清理（极端情况下 abort 后还有 in-flight 回调），略过。
+            if (!this.liveSnapshots.has(task.task_id)) return
+            switch (event.type) {
+              case 'turn_assistant':
+                this.updateLiveSnapshot(task.task_id, prev => ({
+                  ...prev,
+                  current_turn: event.turn,
+                  last_assistant_text: event.text.slice(0, 400),
+                }))
+                break
+              case 'tools_start': {
+                const now = Date.now()
+                const active: LiveToolCall[] = event.tools.map(t => ({
+                  name: t.name,
+                  input_summary: t.input_summary,
+                  started_at: now,
+                }))
+                this.updateLiveSnapshot(task.task_id, prev => ({ ...prev, active_tools: active }))
+                break
+              }
+              case 'tools_end': {
+                const now = Date.now()
+                const completed: LiveCompletedTool[] = event.results.map(r => ({
+                  name: r.name,
+                  input_summary: r.input_summary,
+                  is_error: r.is_error,
+                  ended_at: now,
+                }))
+                this.updateLiveSnapshot(task.task_id, prev => {
+                  const merged = [...prev.recent_completed, ...completed]
+                  const trimmed = merged.length > WorkerHandler.RECENT_COMPLETED_LIMIT
+                    ? merged.slice(merged.length - WorkerHandler.RECENT_COMPLETED_LIMIT)
+                    : merged
+                  return { ...prev, active_tools: [], recent_completed: trimmed }
+                })
+                break
+              }
+            }
+          },
           onTurn: (event: EngineTurnEvent) => {
             // Trace: LLM call
             const inputSummary = event.turnNumber === 1
@@ -643,6 +726,7 @@ export class WorkerHandler {
       this.humanQueues.get(task.task_id)?.clearBarrier()
       this.humanQueues.delete(task.task_id)
       this.activeTasks.delete(task.task_id)
+      this.liveSnapshots.delete(task.task_id)
       await this.cleanupTaskDir()
     }
   }
@@ -760,6 +844,20 @@ export class WorkerHandler {
   clearBarrierForTask(taskId: TaskId): void {
     const queue = this.humanQueues.get(taskId)
     queue?.clearBarrier()
+  }
+
+  /**
+   * 同进程同步读取某个任务的实时执行快照。
+   * 仅当任务正在 worker engine 内执行时才有值；任务结束（成功/失败/中止）后即被清理。
+   */
+  getLiveSnapshot(taskId: TaskId): LiveTaskSnapshot | undefined {
+    return this.liveSnapshots.get(taskId)
+  }
+
+  private updateLiveSnapshot(taskId: TaskId, mutate: (prev: LiveTaskSnapshot) => LiveTaskSnapshot): void {
+    const prev = this.liveSnapshots.get(taskId)
+    if (!prev) return
+    this.liveSnapshots.set(taskId, mutate(prev))
   }
 
   getActiveTasksByOrigin(channelId: string, sessionId: string): TaskId[] {

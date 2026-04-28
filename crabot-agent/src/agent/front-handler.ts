@@ -119,6 +119,17 @@ export class FrontHandler {
   }
 }
 
+/** 把毫秒时长格式化为"X分Y秒"或"X小时Y分"，给 LLM 看的人话 */
+function formatElapsed(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return '?'
+  const sec = Math.floor(ms / 1000)
+  if (sec < 60) return `${sec}秒`
+  const min = Math.floor(sec / 60)
+  if (min < 60) return `${min}分${sec % 60}秒`
+  const hr = Math.floor(min / 60)
+  return `${hr}小时${min % 60}分`
+}
+
 /**
  * 构建 Front Handler 发给 LLM 的 user message
  *
@@ -166,15 +177,49 @@ export function buildUserMessage(
       const sessionInfo = task.source_session_id ? `, 来源session: ${task.source_session_id}` : ''
       parts.push(`- [${task.task_id}] "${task.title}" (status: ${task.status}${sessionInfo})`)
       if (task.latest_progress) {
-        parts.push(`  最近进度: ${task.latest_progress}`)
+        parts.push(`  最近进度（事后摘要）: ${task.latest_progress}`)
       }
       if (task.plan_summary) {
         parts.push(`  计划摘要: ${task.plan_summary}`)
       }
+      // 飞行中任务：注入实时执行快照（避免用户问"现在在干什么"时只能拿事后摘要回答）
+      const live = task.live
+      if (live) {
+        const elapsedMs = Date.now() - live.started_at
+        parts.push(`  执行已 ${formatElapsed(elapsedMs)} / 第 ${live.current_turn} 轮`)
+        if (live.last_assistant_text) {
+          const t = live.last_assistant_text.trim()
+          if (t.length > 0) parts.push(`  上轮模型说: ${t.slice(0, 200)}${t.length > 200 ? '…' : ''}`)
+        }
+        if (live.active_tools.length > 0) {
+          for (const at of live.active_tools) {
+            const dur = formatElapsed(Date.now() - at.started_at)
+            parts.push(`  正在跑工具: ${at.name}（已 ${dur}）— ${at.input_summary}`)
+          }
+        }
+        if (live.recent_completed.length > 0) {
+          const tail = live.recent_completed.slice(-3).map(c =>
+            `${c.name}${c.is_error ? '(失败)' : ''}`
+          ).join(' / ')
+          parts.push(`  最近完成: ${tail}`)
+        }
+      }
     }
-    parts.push('\n当用户询问任务进度时，请根据上述任务列表回答。')
+    parts.push('\n当用户询问任务进度时，请根据上述任务列表（特别是"正在跑工具"和"上轮模型说"）具体说明当前在做什么，不要笼统说"还在执行"。')
     parts.push('当用户消息可能是对某个任务的纠偏/补充时，使用 supplement_task 决策。')
     parts.push('纠偏判断优先匹配来源 session 与当前 session 相同的任务。')
+  }
+
+  // ── 最近结束的任务（用于"继续之前那个 ..."类提问的指代解析）──
+  if (context.recently_closed_tasks && context.recently_closed_tasks.length > 0) {
+    parts.push('\n## 本会话最近结束的任务（已 completed / failed / aborted）')
+    for (const task of context.recently_closed_tasks) {
+      parts.push(`- [${task.task_id}] "${task.title}" (status: ${task.status}, 结束于: ${task.updated_at ?? '?'})`)
+      if (task.latest_progress) {
+        parts.push(`  最终结果: ${task.latest_progress}`)
+      }
+    }
+    parts.push('\n如果用户提到"继续之前的"/"上次那个"/"接着之前的 ..."等指代过去任务的说法，从上面这个列表里挑出对应的 task_id，然后通过 create_task 决策开新任务，在新任务描述里包含 task_id，让 worker 用 get_task_details 工具拉详情、决定下一步。')
   }
 
   // ── Channel/Session 元信息 ──

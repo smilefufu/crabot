@@ -301,6 +301,10 @@ export class UnifiedAgent extends ModuleBase {
           this.sdkEnvWorker, config.model_config, workerPersonality,
           createMcpConfigs, config.builtin_tool_config, config.skills)
         this.decisionDispatcher.setWorkerHandler(this.workerHandler)
+        // 让 ContextAssembler 同进程同步读取 worker 实时快照（用于 Front 汇报进度）
+        this.contextAssembler.setLiveSnapshotProvider(
+          (taskId) => this.workerHandler?.getLiveSnapshot(taskId)
+        )
       }
     }
   }
@@ -417,6 +421,7 @@ export class UnifiedAgent extends ModuleBase {
         moduleId: this.config.moduleId,
         resolveChannelPort: (channelId) => this.getChannelPort(channelId),
         getMemoryPort: () => this.getMemoryPort(),
+        getAdminPort: () => this.getAdminPort(),
         getPermissionConfig: (tools) => this.getToolPermissionConfig(tools),
       },
       builtinToolConfig,

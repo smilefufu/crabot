@@ -280,6 +280,37 @@ export interface TaskSummary {
   source_channel_id?: string
   source_session_id?: string
   updated_at?: string
+  /** 当前正在执行的实时快照（仅 status=executing 且 worker 在本进程时有值） */
+  live?: LiveTaskSnapshot
+}
+
+/** 飞行中的工具调用（写入 LiveTaskSnapshot.active_tools） */
+export interface LiveToolCall {
+  readonly name: string
+  readonly input_summary: string
+  readonly started_at: number
+}
+
+/** 已完成的工具调用（写入 LiveTaskSnapshot.recent_completed） */
+export interface LiveCompletedTool {
+  readonly name: string
+  readonly input_summary: string
+  readonly is_error: boolean
+  readonly ended_at: number
+}
+
+/**
+ * Worker 运行时的实时进度快照。
+ * 由 worker-handler 维护内存映射，ContextAssembler 同进程同步读取，
+ * 用于 Front 回答"汇报进度"类提问时拥有飞行中状态信息。
+ */
+export interface LiveTaskSnapshot {
+  readonly task_id: TaskId
+  readonly current_turn: number
+  readonly started_at: number
+  readonly last_assistant_text?: string
+  readonly active_tools: ReadonlyArray<LiveToolCall>
+  readonly recent_completed: ReadonlyArray<LiveCompletedTool>
 }
 
 export interface ShortTermMemoryEntry {
@@ -333,6 +364,12 @@ export interface FrontAgentContext {
   recent_messages: ChannelMessage[]
   short_term_memories: ShortTermMemoryEntry[]
   active_tasks: TaskSummary[]
+  /**
+   * 本 session 最近结束（completed / failed / aborted）的若干个任务，
+   * 让 LLM 在用户说"继续之前那个 ..."时能挑出 task_id，
+   * 然后用 get_task_details 工具拉详情、决定下一步。
+   */
+  recently_closed_tasks?: TaskSummary[]
   available_tools: ToolDeclaration[]
   /** 当前场景画像，由 Memory 模块直接返回并映射为运行时格式 */
   scene_profile?: RuntimeSceneProfile

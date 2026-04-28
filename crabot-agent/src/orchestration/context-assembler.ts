@@ -22,6 +22,7 @@ import type {
   RuntimeSceneProfile,
   SceneProfile,
   SceneIdentity,
+  LiveTaskSnapshot,
 } from '../types.js'
 import { buildRuntimeSceneProfile } from './scene-profile-resolver.js'
 
@@ -54,6 +55,12 @@ interface FetchLongTermMemoryParams extends MemoryFetchParams {
 }
 
 export class ContextAssembler {
+  /**
+   * 同进程读取 Worker 实时快照的回调（由 UnifiedAgent 注入）。
+   * Worker 与 ContextAssembler 同属一个 Agent 进程，无需 RPC，函数引用直读 Map。
+   */
+  private getLiveSnapshot?: (taskId: string) => LiveTaskSnapshot | undefined
+
   constructor(
     private rpcClient: RpcClient,
     private moduleId: string,
@@ -61,6 +68,14 @@ export class ContextAssembler {
     private getAdminPort: () => number | Promise<number>,
     private getMemoryPort: () => number | Promise<number>
   ) {}
+
+  /**
+   * 由 UnifiedAgent 在 worker handler 实例化后调用，注入 live snapshot getter。
+   * 注入式而非构造时传入：worker handler 创建晚于 ContextAssembler。
+   */
+  setLiveSnapshotProvider(getter: (taskId: string) => LiveTaskSnapshot | undefined): void {
+    this.getLiveSnapshot = getter
+  }
 
   /**
    * 组装 Front Agent 上下文
@@ -72,7 +87,7 @@ export class ContextAssembler {
     memoryPermissions: MemoryPermissions
   ): Promise<FrontAgentContext> {
     const sessionType = params.session_type ?? 'private'
-    const [recentMessages, shortTermMemories, activeTasks, sceneProfile] = await Promise.all([
+    const [recentMessages, shortTermMemories, activeTasks, recentlyClosedTasks, sceneProfile] = await Promise.all([
       this.fetchRecentMessages(
         params.session_id,
         params.channel_id,
@@ -87,6 +102,7 @@ export class ContextAssembler {
         sessionType,
       }),
       this.fetchActiveTasks(),
+      this.fetchRecentlyClosedTasks(params.channel_id, params.session_id, 5),
       this.resolveSceneProfile(params.channel_id, params.session_id, sessionType, params.friend_id),
     ])
 
@@ -102,6 +118,7 @@ export class ContextAssembler {
       recent_messages: recentMessages,
       short_term_memories: shortTermMemories,
       active_tasks: activeTasks,
+      ...(recentlyClosedTasks.length > 0 ? { recently_closed_tasks: recentlyClosedTasks } : {}),
       crab_display_name: params.crab_display_name,
       available_tools: [],
       ...(sceneProfile ? { scene_profile: sceneProfile } : {}),
@@ -398,6 +415,8 @@ export class ContextAssembler {
         source_channel_id: t.source.channel_id,
         source_session_id: t.source.session_id,
         updated_at: t.updated_at,
+        // 飞行中状态：worker 同进程内存表，仅 status=executing 且本进程在跑时有值
+        live: t.status === 'executing' ? this.getLiveSnapshot?.(t.id) : undefined,
       }))
     } catch {
       return []
@@ -410,6 +429,69 @@ export class ContextAssembler {
     if (!messages || messages.length === 0) return undefined
     const last = messages[messages.length - 1]
     return last.content.length > 100 ? last.content.slice(0, 100) + '...' : last.content
+  }
+
+  /**
+   * 抓本 session 最近结束（completed / failed / aborted）的若干个任务，
+   * 按 updated_at desc 排序。给 Front 用来识别"继续之前那个 ..."的指代。
+   *
+   * 注意：list_tasks 已经有 source_channel_id / source_friend_id 的过滤，但没有
+   * source_session_id 过滤。这里先按 channel_id 拉一批，本地按 session_id 二次过滤。
+   */
+  private async fetchRecentlyClosedTasks(
+    channelId: ModuleId,
+    sessionId: SessionId,
+    limit: number,
+  ): Promise<TaskSummary[]> {
+    try {
+      const adminPort = await this.getAdminPort()
+      const result = await this.rpcClient.call<
+        { filter: { status: string[]; source_channel_id?: string }; pagination?: { page: number; page_size: number } },
+        {
+          items: Array<{
+            id: string
+            title: string
+            status: string
+            priority: string
+            assigned_worker?: string
+            plan?: { summary?: string }
+            source: { channel_id?: string; session_id?: string }
+            messages?: Array<{ content: string; timestamp: string }>
+            updated_at?: string
+            result?: { summary?: string; final_reply?: { text?: string } }
+          }>
+        }
+      >(
+        adminPort,
+        'list_tasks',
+        {
+          filter: { status: ['completed', 'failed', 'aborted'], source_channel_id: channelId },
+          pagination: { page: 1, page_size: 50 },
+        },
+        this.moduleId
+      )
+      return result.items
+        .filter(t => t.source.session_id === sessionId)
+        .sort((a, b) => (b.updated_at ?? '').localeCompare(a.updated_at ?? ''))
+        .slice(0, limit)
+        .map(t => ({
+          task_id: t.id,
+          title: t.title,
+          status: t.status,
+          priority: t.priority,
+          assigned_worker: t.assigned_worker,
+          plan_summary: t.plan?.summary,
+          // 已结束任务的"latest_progress"用 result.summary 比 messages 末条更精准
+          latest_progress: t.result?.summary
+            ? (t.result.summary.length > 100 ? t.result.summary.slice(0, 100) + '...' : t.result.summary)
+            : this.extractLatestProgress(t.messages),
+          source_channel_id: t.source.channel_id,
+          source_session_id: t.source.session_id,
+          updated_at: t.updated_at,
+        }))
+    } catch {
+      return []
+    }
   }
 
   // ==========================================================================
