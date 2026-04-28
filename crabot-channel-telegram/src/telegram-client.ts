@@ -41,7 +41,7 @@ export class TelegramClient {
     params.allowed_updates = ['message', 'edited_message']
     // long polling 自身就是循环操作，pollLoop 失败后会自然进入下一轮；
     // 客户端层再加重试只会放大单次失败的等待时间和日志噪音。
-    return this.callApi<TgUpdate[]>('getUpdates', params, { retry: false })
+    return this.callApi<TgUpdate[]>('getUpdates', params, false)
   }
 
   // ── 消息发送 ──────────────────────────────────────────────────────────────
@@ -168,7 +168,7 @@ export class TelegramClient {
   private async callApi<T>(
     method: string,
     params?: Record<string, unknown>,
-    options?: { retry?: boolean },
+    retry = true,
   ): Promise<T> {
     const url = `${this.baseUrl}/${method}`
     const body = params ? JSON.stringify(params) : undefined
@@ -176,7 +176,7 @@ export class TelegramClient {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body,
-    }), options?.retry !== false)
+    }), retry)
   }
 
   private async callApiMultipart<T>(
@@ -230,15 +230,17 @@ export class TelegramClient {
    *
    * 退避：指数递增，base=300ms（300 / 600 / 1200ms），最多 3 次尝试。
    *
-   * `enabled=false` 时退化为单次请求（用于 long polling 等本身具循环语义的调用）。
+   * `retry=false` 时退化为单次请求（用于 long polling 等本身具循环语义的调用）。
    */
   private async fetchWithRetry<T>(
     method: string,
     doFetch: () => Promise<Response>,
-    enabled = true,
+    retry = true,
   ): Promise<T> {
-    const MAX_ATTEMPTS = enabled ? 3 : 1
+    const MAX_ATTEMPTS = retry ? 3 : 1
     const BASE_DELAY_MS = 300
+    // Telegram 偶发返回大数值的 retry_after（曾观察到几百秒），不能让单次调用阻塞那么久。
+    const RETRY_AFTER_CAP_MS = 5000
 
     let lastError: unknown
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -251,9 +253,10 @@ export class TelegramClient {
         const retryable =
           status >= 500 || status === 429 || errorCode === 429
         if (!data.ok && retryable && attempt < MAX_ATTEMPTS) {
-          const retryAfter = typeof data.parameters?.retry_after === 'number'
+          const suggested = typeof data.parameters?.retry_after === 'number'
             ? data.parameters.retry_after * 1000
             : BASE_DELAY_MS * 2 ** (attempt - 1)
+          const retryAfter = Math.min(suggested, RETRY_AFTER_CAP_MS)
           console.warn(
             `[TelegramClient] ${method} retryable status=${status} code=${errorCode} attempt ${attempt}/${MAX_ATTEMPTS}, retrying in ${retryAfter}ms`
           )

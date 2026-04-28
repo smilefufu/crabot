@@ -12,6 +12,19 @@ import path from 'node:path'
 import type { ApiResponse } from './types.js'
 import { proxyManager } from 'crabot-shared'
 
+/** 标记为可重试的瞬态错误（网络层、5xx、timeout）。业务错误不应使用。 */
+class TransientError extends Error {
+  readonly transient = true as const
+}
+
+function isTransient(err: unknown): boolean {
+  return err instanceof TransientError
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
 export class WechatClient {
   private readonly baseUrl: string
   private readonly apiKey: string
@@ -278,11 +291,12 @@ export class WechatClient {
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const MAX_ATTEMPTS = 3
     const BASE_DELAY_MS = 200
+    const bodyStr = body ? JSON.stringify(body) : undefined
 
     let lastError: unknown
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       try {
-        return await this.executeRequest<T>(method, path, body)
+        return await this.executeRequest<T>(method, path, bodyStr)
       } catch (err: unknown) {
         lastError = err
         if (!isTransient(err) || attempt >= MAX_ATTEMPTS) throw err
@@ -297,12 +311,10 @@ export class WechatClient {
     throw lastError ?? new Error(`[WechatClient] ${method} ${path} exhausted retries`)
   }
 
-  private executeRequest<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private executeRequest<T>(method: string, path: string, bodyStr?: string): Promise<T> {
     const url = new URL(path, this.baseUrl)
     const isHttps = url.protocol === 'https:'
     const transport = isHttps ? https : http
-
-    const bodyStr = body ? JSON.stringify(body) : undefined
 
     return new Promise((resolve, reject) => {
       const req = transport.request(
@@ -323,7 +335,6 @@ export class WechatClient {
           let data = ''
           res.on('data', (chunk: string) => { data += chunk })
           res.on('end', () => {
-            // HTTP 5xx：服务端临时故障，标记为 transient
             if (res.statusCode !== undefined && res.statusCode >= 500) {
               reject(new TransientError(`HTTP ${res.statusCode}: ${data.slice(0, 200)}`))
               return
@@ -353,19 +364,6 @@ export class WechatClient {
       req.end()
     })
   }
-}
-
-/** 标记为可重试的瞬态错误（网络层、5xx、timeout）。业务错误不应使用。 */
-class TransientError extends Error {
-  readonly transient = true as const
-}
-
-function isTransient(err: unknown): boolean {
-  return err instanceof TransientError
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 const MIME_MAP: Record<string, string> = {
