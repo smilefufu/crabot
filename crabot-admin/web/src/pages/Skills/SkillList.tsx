@@ -4,6 +4,7 @@ import { MainLayout } from '../../components/Layout/MainLayout'
 import { Card } from '../../components/Common/Card'
 import { Button } from '../../components/Common/Button'
 import { Loading } from '../../components/Common/Loading'
+import { StatusBadge } from '../../components/Common/StatusBadge'
 import type { SkillRegistryEntry } from '../../types'
 import { useToast } from '../../contexts/ToastContext'
 
@@ -504,13 +505,9 @@ export const SkillList: React.FC = () => {
                     {s.is_essential && (
                       <span style={{ fontSize: '0.75rem', padding: '0.1rem 0.5rem', background: 'rgba(59,130,246,0.15)', color: '#3b82f6', borderRadius: '4px' }}>必要</span>
                     )}
-                    <span style={{
-                      fontSize: '0.75rem', padding: '0.1rem 0.5rem', borderRadius: '4px',
-                      background: s.enabled ? 'rgba(34,197,94,0.15)' : 'rgba(107,114,128,0.15)',
-                      color: s.enabled ? '#22c55e' : '#6b7280',
-                    }}>
+                    <StatusBadge status={s.enabled ? 'active' : 'inactive'}>
                       {s.enabled ? '已启用' : '已禁用'}
-                    </span>
+                    </StatusBadge>
                   </div>
                   {s.description && (
                     <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '0.25rem' }}>{s.description}</div>
