@@ -93,8 +93,11 @@ export class ProgressDigest {
     }
     this.buffer = { texts: newTexts, detailedTools, silentCounts, turnCount: this.buffer.turnCount + 1 }
 
-    // Immediate flush on ask_human or errors
-    if (event.toolCalls.some(tc => tc.name === 'mcp__crabot-worker__ask_human' || tc.isError)) {
+    // Immediate flush only on ask_human (interactive — user must see the question now).
+    // Tool execution errors are part of the LLM's normal self-correction loop and should
+    // respect the configured digest interval; flushing on every isError bypasses the
+    // user-configured cadence (e.g. 1800s) and produces minute-by-minute digests.
+    if (event.toolCalls.some(tc => tc.name === 'mcp__crabot-worker__ask_human')) {
       this.flushNow()
     }
   }
