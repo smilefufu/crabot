@@ -6,11 +6,13 @@
  */
 
 import type { LLMAdapter } from '../engine/llm-adapter.js'
-import type { ContentBlock } from '../engine/types.js'
+import type { ContentBlock, ToolDefinition } from '../engine/types.js'
 import { ToolExecutor, type ToolExecutorDeps } from './tool-executor.js'
 import { runFrontLoop } from './front-loop.js'
+import { mcpServerToToolDefinitions } from './mcp-tool-bridge.js'
 import { resolveImageBlocks } from './media-resolver.js'
 import { formatMessageContent } from './media-resolver.js'
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type {
   ChannelMessage,
   FrontAgentContext,
@@ -23,6 +25,12 @@ export type UserMessageContent = string | ContentBlock[]
 
 export interface FrontHandlerConfig {
   getSystemPrompt: (isGroup: boolean) => string
+  /**
+   * 工厂返回 MCP server 实例集合（与 Worker 同款）。Front 启动每次 handleMessage 前调用，
+   * 把这些 server 转成 ToolDefinition[] 拼到 Front 工具集中。messaging 工具在此注入，
+   * 无需在 front-tools.ts 重新声明。
+   */
+  mcpConfigFactory: () => Record<string, McpServer>
 }
 
 export interface FrontHandlerLlmConfig {
@@ -36,6 +44,7 @@ export class FrontHandler {
   private model: string
   private toolExecutor: ToolExecutor
   private getSystemPrompt: (isGroup: boolean) => string
+  private mcpConfigFactory: () => Record<string, McpServer>
 
   constructor(
     llmConfig: FrontHandlerLlmConfig,
@@ -46,6 +55,7 @@ export class FrontHandler {
     this.model = llmConfig.model
     this.toolExecutor = new ToolExecutor(toolExecutorDeps)
     this.getSystemPrompt = config.getSystemPrompt
+    this.mcpConfigFactory = config.mcpConfigFactory
   }
 
   async handleMessage(
@@ -61,6 +71,13 @@ export class FrontHandler {
     const userMessage = buildUserMessage(messages, context, imageBlocks)
     const rawUserText = messages.map(m => m.content.text ?? '').join('\n').trim()
 
+    // 装配 messaging 工具（来自 crab-messaging MCP；与 Worker 同一份实现）
+    const mcpServers = this.mcpConfigFactory()
+    const messagingTools: ToolDefinition[] = []
+    for (const [serverName, server] of Object.entries(mcpServers)) {
+      messagingTools.push(...mcpServerToToolDefinitions(server, serverName))
+    }
+
     try {
       const result = await runFrontLoop({
         systemPrompt: this.getSystemPrompt(isGroup),
@@ -71,6 +88,7 @@ export class FrontHandler {
         adapter: this.adapter,
         model: this.model,
         toolExecutor: this.toolExecutor,
+        messagingTools,
         traceCallback,
       })
 

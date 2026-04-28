@@ -276,6 +276,7 @@ export class UnifiedAgent extends ModuleBase {
           getSystemPrompt: (isGroup) => this.promptManager.assembleFrontPrompt({
             isGroup, adminPersonality: basePersonality, workerCapabilities: this.getWorkerCapabilitySummary(), skillListing: frontSkillListing,
           }),
+          mcpConfigFactory: createMcpConfigs,
         })
         this.frontHandlerFormat = frontModelConfig.format as LLMFormat
       }
@@ -309,7 +310,6 @@ export class UnifiedAgent extends ModuleBase {
       rpcClient: this.rpcClient,
       moduleId: this.config.moduleId,
       getAdminPort: () => this.getAdminPort(),
-      resolveChannelPort: (channelId) => this.getChannelPort(channelId),
       getActiveTasks: () => this.getActiveTasksList(),
       getMemoryPort: () => this.getMemoryPort(),
       memoryWriteVisibility: () => this.currentMemPerms?.write_visibility ?? 'public',
@@ -2122,6 +2122,7 @@ export class UnifiedAgent extends ModuleBase {
             getSystemPrompt: (isGroup) => this.promptManager.assembleFrontPrompt({
               isGroup, adminPersonality: basePersonality, workerCapabilities: this.getWorkerCapabilitySummary(), skillListing: frontSkillListing,
             }),
+            mcpConfigFactory: createMcpConfigs,
           })
           this.frontHandlerFormat = frontConfig.format as LLMFormat
           console.log(`[${this.config.moduleId}] Front Agent handler created (format: ${frontConfig.format})`)

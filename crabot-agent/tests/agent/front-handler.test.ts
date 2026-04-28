@@ -30,10 +30,16 @@ function makeFrontHandler() {
     rpcClient: {} as any,
     moduleId: 'test',
     getAdminPort: async () => 3001,
-    resolveChannelPort: async () => 3003,
     getActiveTasks: () => [],
+    getMemoryPort: async () => 3005,
+    memoryWriteVisibility: () => 'public' as const,
+    memoryWriteScopes: () => [],
   }
-  const config = { getSystemPrompt: () => 'You are helpful' }
+  const config = {
+    getSystemPrompt: () => 'You are helpful',
+    // 测试不依赖 messaging 工具；返回空 server map 即可
+    mcpConfigFactory: () => ({}),
+  }
   return { handler: new FrontHandler(llmConfig, toolDeps, config), adapter }
 }
 

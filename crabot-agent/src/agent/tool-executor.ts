@@ -1,19 +1,22 @@
 /**
  * Tool Executor - Dispatches Front tool calls to backend services
  *
- * crab-messaging tools -> RPC calls to Admin/Channel modules
- * query_tasks -> local activeTasks + Admin RPC
- * create_schedule -> Admin RPC
+ * 仅承载 Front 私有的非 MCP 工具：
+ * - query_tasks   → local activeTasks + Admin RPC
+ * - create_schedule → Admin RPC
+ * - store_memory / search_memory / get_memory_detail → Memory RPC
+ *
+ * Messaging 类工具（lookup_friend / list_* / send_message / send_private_message
+ * / get_history / get_message）由 crab-messaging MCP server 单一来源提供，Front
+ * 通过 mcpServerToToolDefinitions 复用 Worker 同款实现，不在此处重复。
  */
 
 import type { RpcClient } from 'crabot-shared'
-import type { Friend } from '../types.js'
 
 export interface ToolExecutorDeps {
   rpcClient: RpcClient
   moduleId: string
   getAdminPort: () => Promise<number>
-  resolveChannelPort: (channelId: string) => Promise<number>
   getActiveTasks: () => Array<{
     task_id: string
     status: string
@@ -61,14 +64,6 @@ export class ToolExecutor {
   async execute(toolName: string, input: Record<string, unknown>): Promise<ToolResult> {
     try {
       switch (toolName) {
-        case 'lookup_friend': return await this.lookupFriend(input)
-        case 'list_contacts': return await this.listContacts(input)
-        case 'list_groups': return await this.listGroups(input)
-        case 'list_sessions': return await this.listSessions(input)
-        case 'open_private_session': return await this.openPrivateSession(input)
-        case 'send_message': return await this.sendMessage(input)
-        case 'get_history': return await this.getHistory(input)
-        case 'get_message': return await this.getMessage(input)
         case 'query_tasks': return await this.queryTasks(input)
         case 'create_schedule': return await this.createSchedule(input)
         case 'store_memory': return await this.storeMemory(input)
@@ -81,134 +76,6 @@ export class ToolExecutor {
       const msg = err instanceof Error ? err.message : String(err)
       return { output: JSON.stringify({ error: msg }), isError: true }
     }
-  }
-
-  private async lookupFriend(input: Record<string, unknown>): Promise<ToolResult> {
-    const adminPort = await this.deps.getAdminPort()
-    const { rpcClient, moduleId } = this.deps
-
-    if (input.friend_id) {
-      const result = await rpcClient.call<{ friend_id: string }, { friend: Friend }>(
-        adminPort, 'get_friend', { friend_id: input.friend_id as string }, moduleId,
-      )
-      return { output: JSON.stringify({ friends: [this.formatFriend(result.friend)] }), isError: false }
-    }
-
-    if (input.name) {
-      const result = await rpcClient.call<
-        { search?: string; pagination?: { page: number; page_size: number } },
-        { items: Friend[]; pagination: { total_items: number } }
-      >(adminPort, 'list_friends', { search: input.name as string, pagination: { page: 1, page_size: 20 } }, moduleId)
-      return { output: JSON.stringify({ friends: result.items.map(f => this.formatFriend(f)) }), isError: false }
-    }
-
-    return { output: JSON.stringify({ error: '必须提供 name 或 friend_id' }), isError: true }
-  }
-
-  private async listContacts(input: Record<string, unknown>): Promise<ToolResult> {
-    const adminPort = await this.deps.getAdminPort()
-    const result = await this.deps.rpcClient.call(
-      adminPort,
-      'list_sessions',
-      {
-        channel_id: input.channel_id as string,
-        type: 'private',
-        search: input.search as string | undefined,
-        limit: (input.limit as number) ?? 50,
-        offset: (input.offset as number) ?? 0,
-      },
-      this.deps.moduleId,
-    )
-    return { output: JSON.stringify(result), isError: false }
-  }
-
-  private async listGroups(input: Record<string, unknown>): Promise<ToolResult> {
-    const adminPort = await this.deps.getAdminPort()
-    const result = await this.deps.rpcClient.call(
-      adminPort,
-      'list_sessions',
-      {
-        channel_id: input.channel_id as string,
-        type: 'group',
-        search: input.search as string | undefined,
-        limit: (input.limit as number) ?? 50,
-        offset: (input.offset as number) ?? 0,
-      },
-      this.deps.moduleId,
-    )
-    return { output: JSON.stringify(result), isError: false }
-  }
-
-  private async listSessions(input: Record<string, unknown>): Promise<ToolResult> {
-    const channelPort = await this.deps.resolveChannelPort(input.channel_id as string)
-    const result = await this.deps.rpcClient.call<
-      { type?: string },
-      { sessions: Array<{ session_id: string; type: string; title: string; participant_count: number }> }
-    >(channelPort, 'get_sessions', { type: input.type as string | undefined }, this.deps.moduleId)
-    return { output: JSON.stringify(result), isError: false }
-  }
-
-  private async openPrivateSession(input: Record<string, unknown>): Promise<ToolResult> {
-    const adminPort = await this.deps.getAdminPort()
-    const friendResult = await this.deps.rpcClient.call<{ friend_id: string }, { friend: Friend }>(
-      adminPort, 'get_friend', { friend_id: input.friend_id as string }, this.deps.moduleId,
-    )
-    const identity = friendResult.friend.channel_identities.find(ci => ci.channel_id === input.channel_id)
-    if (!identity) {
-      return {
-        output: JSON.stringify({
-          error: `熟人在 Channel ${input.channel_id} 上没有身份`,
-          available_channels: friendResult.friend.channel_identities.map(ci => ci.channel_id),
-        }),
-        isError: true,
-      }
-    }
-    const channelPort = await this.deps.resolveChannelPort(input.channel_id as string)
-    const result = await this.deps.rpcClient.call<
-      { platform_user_id: string }, { session_id: string; created: boolean }
-    >(channelPort, 'find_or_create_private_session', { platform_user_id: identity.platform_user_id }, this.deps.moduleId)
-    return { output: JSON.stringify(result), isError: false }
-  }
-
-  private async sendMessage(input: Record<string, unknown>): Promise<ToolResult> {
-    const channelPort = await this.deps.resolveChannelPort(input.channel_id as string)
-    const result = await this.deps.rpcClient.call<
-      { session_id: string; content: { type: string; text?: string } },
-      { platform_message_id: string; sent_at: string }
-    >(channelPort, 'send_message', {
-      session_id: input.session_id as string,
-      content: { type: (input.content_type as string) ?? 'text', text: input.content as string },
-    }, this.deps.moduleId)
-    return { output: JSON.stringify(result), isError: false }
-  }
-
-  private async getHistory(input: Record<string, unknown>): Promise<ToolResult> {
-    const channelPort = await this.deps.resolveChannelPort(input.channel_id as string)
-    const timeRange = (input.before || input.after)
-      ? { before: input.before as string | undefined, after: input.after as string | undefined }
-      : undefined
-    const result = await this.deps.rpcClient.call<
-      { session_id: string; time_range?: { before?: string; after?: string }; keyword?: string; limit?: number },
-      { items: Array<{ platform_message_id: string; sender_name: string; content: string; content_type: string; timestamp: string }> }
-    >(channelPort, 'get_history', {
-      session_id: input.session_id as string,
-      ...(timeRange ? { time_range: timeRange } : {}),
-      ...(input.keyword ? { keyword: input.keyword as string } : {}),
-      limit: (input.limit as number) ?? 20,
-    }, this.deps.moduleId)
-    return { output: JSON.stringify({ messages: result.items ?? [] }), isError: false }
-  }
-
-  private async getMessage(input: Record<string, unknown>): Promise<ToolResult> {
-    const channelPort = await this.deps.resolveChannelPort(input.channel_id as string)
-    const result = await this.deps.rpcClient.call<
-      { session_id: string; platform_message_id: string },
-      Record<string, unknown>
-    >(channelPort, 'get_message', {
-      session_id: input.session_id as string,
-      platform_message_id: input.platform_message_id as string,
-    }, this.deps.moduleId)
-    return { output: JSON.stringify(result), isError: false }
   }
 
   private async queryTasks(input: Record<string, unknown>): Promise<ToolResult> {
@@ -392,18 +259,5 @@ export class ToolExecutor {
     }, this.deps.moduleId)
 
     return { output: JSON.stringify(result), isError: false }
-  }
-
-  private formatFriend(f: Friend) {
-    return {
-      friend_id: f.id,
-      display_name: f.display_name,
-      permission: f.permission,
-      channels: f.channel_identities.map(ci => ({
-        channel_id: ci.channel_id,
-        platform_user_id: ci.platform_user_id,
-        platform_display_name: ci.platform_display_name ?? ci.platform_user_id,
-      })),
-    }
   }
 }

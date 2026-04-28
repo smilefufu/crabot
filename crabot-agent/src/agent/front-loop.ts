@@ -30,6 +30,7 @@ import type {
   TraceCallback,
 } from '../types.js'
 import { getAllFrontTools, DECISION_TOOL_NAMES, type DecisionToolName } from './front-tools.js'
+import { isMcpProxyToolName } from './mcp-tool-bridge.js'
 
 const FRONT_MAX_ROUNDS = 5
 
@@ -45,12 +46,18 @@ export interface FrontLoopParams {
   readonly adapter: LLMAdapter
   readonly model: string
   readonly toolExecutor: ToolExecutor
+  /**
+   * 由 mcpServerToToolDefinitions 派生的 messaging 工具集合（来自 crab-messaging MCP）。
+   * 工具名带 `mcp__crab-messaging__` 前缀，含可执行的 `call`，front-loop 直接调用其 handler。
+   */
+  readonly messagingTools: readonly ToolDefinition[]
   readonly traceCallback?: TraceCallback
 }
 
 export async function runFrontLoop(params: FrontLoopParams): Promise<FrontLoopResult> {
-  const { systemPrompt, userMessage, rawUserText, allowSilent, activeTaskIds, adapter, model, toolExecutor, traceCallback } = params
-  const tools: ToolDefinition[] = getAllFrontTools(allowSilent, activeTaskIds)
+  const { systemPrompt, userMessage, rawUserText, allowSilent, activeTaskIds, adapter, model, toolExecutor, messagingTools, traceCallback } = params
+  const tools: ToolDefinition[] = getAllFrontTools(allowSilent, activeTaskIds, messagingTools)
+  const mcpToolByName = new Map(messagingTools.map(t => [t.name, t]))
   const messages: EngineMessage[] = [createUserMessage(userMessage)]
   const toolHistory: ToolHistoryEntry[] = []
 
@@ -144,8 +151,16 @@ export async function runFrontLoop(params: FrontLoopParams): Promise<FrontLoopRe
           }
 
           // Other tools -> execute
+          // MCP-proxied tools (mcp__<server>__<name>) 自带可执行 call，直接走 ToolDefinition.call；
+          // 其余 Front 私有工具（query_tasks/create_schedule/store_memory/...）走 toolExecutor。
           const toolSpanId = traceCallback?.onToolCallStart(block.name, JSON.stringify(block.input).slice(0, 200))
-          const result = await toolExecutor.execute(block.name, block.input as Record<string, unknown>)
+          const input = block.input as Record<string, unknown>
+          const result = isMcpProxyToolName(block.name)
+            ? await (mcpToolByName.get(block.name)?.call(input, {}) ?? Promise.resolve({
+                output: JSON.stringify({ error: `MCP tool "${block.name}" not registered` }),
+                isError: true,
+              }))
+            : await toolExecutor.execute(block.name, input)
 
           if (toolSpanId) {
             traceCallback?.onToolCallEnd(toolSpanId, result.output.slice(0, 200), result.isError ? result.output : undefined)

@@ -28,7 +28,6 @@ import type {
 } from '../engine/index.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { MemoryWriter } from '../orchestration/memory-writer.js'
-import { z } from 'zod/v4'
 import type {
   ExecuteTaskParams,
   ExecuteTaskResult,
@@ -44,6 +43,7 @@ import type {
 import type { RpcClient } from 'crabot-shared'
 import { createCrabMemoryServer } from '../mcp/crab-memory.js'
 import type { MemoryTaskContext } from '../mcp/crab-memory.js'
+import { mcpServerToToolDefinitions } from './mcp-tool-bridge.js'
 import { formatMessageContent, resolveImageBlocks } from './media-resolver.js'
 import type { McpConnector } from './mcp-connector.js'
 import { createSubAgentTool } from '../engine/sub-agent.js'
@@ -126,79 +126,6 @@ function adapterFromSdkEnv(sdkEnv: SdkEnvConfig) {
   })
 }
 
-
-// ============================================================================
-// MCP Server → ToolDefinition conversion
-// ============================================================================
-
-interface RegisteredMcpTool {
-  description?: string
-  inputSchema?: unknown
-  enabled?: boolean
-  handler: {
-    (args: Record<string, unknown>, extra: unknown): Promise<{ content: Array<{ type: string; text?: string }>; isError?: boolean }>
-  }
-}
-
-/**
- * Convert a McpServer's registered tools into engine ToolDefinition[].
- * Uses the internal _registeredTools map (McpServer from @modelcontextprotocol/sdk).
- */
-function mcpServerToToolDefinitions(
-  server: McpServer,
-  serverName: string,
-): ToolDefinition[] {
-  // Access the internal _registeredTools map
-  const registeredTools = (server as unknown as { _registeredTools: Record<string, RegisteredMcpTool> })._registeredTools
-  if (!registeredTools) return []
-
-  const tools: ToolDefinition[] = []
-
-  for (const [toolName, registeredTool] of Object.entries(registeredTools)) {
-    if (registeredTool.enabled === false) continue
-
-    const prefixedName = `mcp__${serverName}__${toolName}`
-
-    // Convert zod schema to JSON schema for the engine
-    let inputSchema: Record<string, unknown> = { type: 'object', properties: {} }
-    if (registeredTool.inputSchema) {
-      try {
-        // Use zod's toJSONSchema if available, otherwise use a basic conversion
-        const zodSchema = registeredTool.inputSchema as { _def?: unknown }
-        if (typeof (z as unknown as { toJSONSchema?: unknown }).toJSONSchema === 'function') {
-          inputSchema = (z as unknown as { toJSONSchema: (s: unknown) => Record<string, unknown> }).toJSONSchema(zodSchema)
-        }
-      } catch {
-        // Fallback: empty object schema
-      }
-    }
-
-    const handler = registeredTool.handler
-    tools.push(defineTool({
-      name: prefixedName,
-      description: registeredTool.description ?? '',
-      inputSchema,
-      isReadOnly: false,
-      call: async (input) => {
-        try {
-          const result = await handler(input, {})
-          const textParts = (result.content ?? [])
-            .filter((block) => block.type === 'text' && block.text)
-            .map((block) => block.text as string)
-          return {
-            output: textParts.join('\n') || JSON.stringify(result.content),
-            isError: !!result.isError,
-          }
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
-          return { output: message, isError: true }
-        }
-      },
-    }))
-  }
-
-  return tools
-}
 
 // ============================================================================
 // WorkerHandler

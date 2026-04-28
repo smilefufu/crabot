@@ -1,14 +1,18 @@
 /**
  * Front Tools - Engine ToolDefinition format for Front Handler v2
  *
- * Decision tools: reply, create_task, supplement_task, stay_silent
- * Info tools: query_tasks, create_schedule
- * Messaging tools: lookup_friend, list_contacts, list_groups, list_sessions,
- *   open_private_session, send_message, get_history, get_message
- * Memory tools: store_memory, search_memory, get_memory_detail
+ * 本文件仅声明 Front **私有**的工具：
+ * - Decision tools: reply / create_task / supplement_task / stay_silent
+ * - Info tools:     query_tasks / create_schedule
+ * - Memory tools:   store_memory / search_memory / get_memory_detail
  *
- * NOTE: These tools are NOT executed by the engine — the front-loop handles
- * them manually. The `call` property is a no-op placeholder.
+ * **Messaging 工具不在这里声明**——由 `crab-messaging` MCP server 单一来源提供，
+ * 通过 `mcpServerToToolDefinitions` 转成 ToolDefinition[] 注入 Front loop（与 Worker
+ * 同一份实现）。删/增/改 messaging 工具只动 `src/mcp/crab-messaging.ts`，Front 自动
+ * 同步，避免漂移。
+ *
+ * NOTE: 决策工具与 info/memory 工具的 `call` 都是 NOOP，由 front-loop 手工解析或
+ * 转发给 ToolExecutor。MCP 派生工具自带真实 `call`，front-loop 直接调用其 handler。
  */
 
 import type { ToolDefinition } from '../engine/types.js'
@@ -176,142 +180,8 @@ export const CREATE_SCHEDULE_TOOL: ToolDefinition = {
   call: NOOP_CALL,
 }
 
-export const LOOKUP_FRIEND_TOOL: ToolDefinition = {
-  name: 'lookup_friend',
-  category: 'messaging' as const,
-  description: '搜索熟人信息，包括该熟人在哪些 Channel 上有身份。可按名称模糊搜索或按 friend_id 精确查找。',
-  inputSchema: {
-    type: 'object' as const,
-    properties: {
-      name: { type: 'string', description: '按名称模糊搜索' },
-      friend_id: { type: 'string', description: '按 friend_id 精确查找' },
-    },
-    required: [],
-  },
-  isReadOnly: true,
-  call: NOOP_CALL,
-}
-
-export const LIST_CONTACTS_TOOL: ToolDefinition = {
-  name: 'list_contacts',
-  category: 'messaging' as const,
-  description: '列出渠道的联系人列表（包含非熟人）',
-  inputSchema: {
-    type: 'object' as const,
-    properties: {
-      channel_id: { type: 'string', description: '渠道 ID' },
-      search: { type: 'string', description: '联系人名称搜索关键词' },
-      limit: { type: 'number', description: '返回数量上限' },
-    },
-    required: ['channel_id'],
-  },
-  isReadOnly: true,
-  call: NOOP_CALL,
-}
-
-export const LIST_GROUPS_TOOL: ToolDefinition = {
-  name: 'list_groups',
-  category: 'messaging' as const,
-  description: '列出渠道的群聊列表',
-  inputSchema: {
-    type: 'object' as const,
-    properties: {
-      channel_id: { type: 'string', description: '渠道 ID' },
-      search: { type: 'string', description: '群名搜索关键词' },
-      limit: { type: 'number', description: '返回数量上限' },
-    },
-    required: ['channel_id'],
-  },
-  isReadOnly: true,
-  call: NOOP_CALL,
-}
-
-export const LIST_SESSIONS_TOOL: ToolDefinition = {
-  name: 'list_sessions',
-  category: 'messaging' as const,
-  description: '查看指定 Channel 上的会话列表。',
-  inputSchema: {
-    type: 'object' as const,
-    properties: {
-      channel_id: { type: 'string', description: 'Channel 模块实例 ID' },
-      type: { type: 'string', enum: ['private', 'group'], description: '按类型过滤' },
-    },
-    required: ['channel_id'],
-  },
-  isReadOnly: true,
-  call: NOOP_CALL,
-}
-
-export const OPEN_PRIVATE_SESSION_TOOL: ToolDefinition = {
-  name: 'open_private_session',
-  category: 'messaging' as const,
-  description: '在指定 Channel 上查找或创建与某个熟人的私聊 Session。',
-  inputSchema: {
-    type: 'object' as const,
-    properties: {
-      channel_id: { type: 'string', description: 'Channel 模块实例 ID' },
-      friend_id: { type: 'string', description: '目标熟人 ID' },
-    },
-    required: ['channel_id', 'friend_id'],
-  },
-  isReadOnly: false,
-  call: NOOP_CALL,
-}
-
-export const SEND_MESSAGE_TOOL: ToolDefinition = {
-  name: 'send_message',
-  category: 'messaging' as const,
-  description: '在指定 Channel 的指定 Session 中发送消息。',
-  inputSchema: {
-    type: 'object' as const,
-    properties: {
-      channel_id: { type: 'string', description: 'Channel 模块实例 ID' },
-      session_id: { type: 'string', description: '目标 Session ID' },
-      content: { type: 'string', description: '消息内容' },
-      content_type: { type: 'string', enum: ['text', 'image', 'file'], description: '消息类型，默认 text' },
-    },
-    required: ['channel_id', 'session_id', 'content'],
-  },
-  isReadOnly: false,
-  call: NOOP_CALL,
-}
-
-export const GET_HISTORY_TOOL: ToolDefinition = {
-  name: 'get_history',
-  category: 'messaging' as const,
-  description: '查看指定 Channel 上某个 Session 的历史消息。',
-  inputSchema: {
-    type: 'object' as const,
-    properties: {
-      channel_id: { type: 'string', description: 'Channel 模块实例 ID' },
-      session_id: { type: 'string', description: 'Session ID' },
-      keyword: { type: 'string', description: '关键词过滤' },
-      limit: { type: 'number', description: '返回条数上限，默认 20' },
-      before: { type: 'string', description: '查询此时间之前的消息（ISO 8601）' },
-      after: { type: 'string', description: '查询此时间之后的消息（ISO 8601）' },
-    },
-    required: ['channel_id', 'session_id'],
-  },
-  isReadOnly: true,
-  call: NOOP_CALL,
-}
-
-export const GET_MESSAGE_TOOL: ToolDefinition = {
-  name: 'get_message',
-  category: 'messaging' as const,
-  description: '按消息 ID 查询单条消息详情。当历史消息中某条消息的内容不完整时（如只显示占位符），可用此工具查看完整内容。',
-  inputSchema: {
-    type: 'object' as const,
-    properties: {
-      channel_id: { type: 'string', description: 'Channel 模块实例 ID' },
-      session_id: { type: 'string', description: 'Session ID' },
-      platform_message_id: { type: 'string', description: '要查询的消息 ID' },
-    },
-    required: ['channel_id', 'session_id', 'platform_message_id'],
-  },
-  isReadOnly: true,
-  call: NOOP_CALL,
-}
+// Messaging tools 由 crab-messaging MCP server 提供，本文件不再重复声明。
+// 参见: src/mcp/crab-messaging.ts
 
 export const STORE_MEMORY_TOOL: ToolDefinition = {
   name: 'store_memory',
@@ -387,25 +257,31 @@ export const GET_MEMORY_DETAIL_TOOL: ToolDefinition = {
   call: NOOP_CALL,
 }
 
-/** All Front tools in order */
-export function getAllFrontTools(allowSilent: boolean, activeTaskIds: readonly string[]): ToolDefinition[] {
+/**
+ * 装配 Front 工具集 = Front 私有工具 + 注入的 messaging 工具（来自 crab-messaging MCP）。
+ *
+ * @param allowSilent          是否暴露 stay_silent（仅群聊未被 @ 时为 true）
+ * @param activeTaskIds        活跃任务 ID（非空时才注册 supplement_task）
+ * @param messagingTools       由 mcpServerToToolDefinitions(crabMessagingServer) 提供的 messaging
+ *                             工具集；Front 与 Worker 共用同一份实现
+ */
+export function getAllFrontTools(
+  allowSilent: boolean,
+  activeTaskIds: readonly string[],
+  messagingTools: readonly ToolDefinition[],
+): ToolDefinition[] {
   return [
     // Decision tools
     REPLY_TOOL,
     CREATE_TASK_TOOL,
     ...(activeTaskIds.length > 0 ? [supplementTaskTool(activeTaskIds)] : []),
     ...(allowSilent ? [STAY_SILENT_TOOL] : []),
-    // Info tools
+    // Info tools (Front-private)
     QUERY_TASKS_TOOL,
     CREATE_SCHEDULE_TOOL,
-    LOOKUP_FRIEND_TOOL,
-    LIST_CONTACTS_TOOL,
-    LIST_GROUPS_TOOL,
-    LIST_SESSIONS_TOOL,
-    OPEN_PRIVATE_SESSION_TOOL,
-    SEND_MESSAGE_TOOL,
-    GET_HISTORY_TOOL,
-    GET_MESSAGE_TOOL,
+    // Messaging tools (来自 crab-messaging MCP，名字带 mcp__crab-messaging__ 前缀)
+    ...messagingTools,
+    // Memory tools (Front-private; long-term & short-term)
     STORE_MEMORY_TOOL,
     SEARCH_MEMORY_TOOL,
     GET_MEMORY_DETAIL_TOOL,
