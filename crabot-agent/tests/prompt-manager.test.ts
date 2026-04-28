@@ -268,3 +268,126 @@ describe('PromptManager.assembleWorkerPrompt — opts 签名', () => {
     expect(out).toContain('visual_analyzer')
   })
 })
+
+describe('Crabot 产品自我认知 — Front + Worker 同源注入', () => {
+  it('Front 私聊版含产品自我认知段', () => {
+    expect(frontPrivate).toContain('## 你是 Crabot')
+    expect(frontPrivate).toContain('完整运营基础设施')
+  })
+
+  it('Front 群聊版同样含产品自我认知段', () => {
+    expect(frontGroup).toContain('## 你是 Crabot')
+    expect(frontGroup).toContain('完整运营基础设施')
+  })
+
+  it('Worker 含产品自我认知段', () => {
+    expect(worker).toContain('## 你是 Crabot')
+    expect(worker).toContain('完整运营基础设施')
+  })
+
+  it('明确"主动型 AI 员工"产品定位（不是仅响应式问答机器人）', () => {
+    expect(frontPrivate).toContain('主动型 AI 员工')
+    expect(worker).toContain('主动型 AI 员工')
+    // 主动 = 自发推动事情（产品定位的核心动词）
+    expect(frontPrivate).toContain('自发推动事情')
+  })
+
+  it('涵盖 Crabot 全部基础设施类别（不是只 schedule + task + memory 三件套）', () => {
+    // 这条测试把"涵盖度"固化下来——以后想精简，必须显式把项目从这里删掉，
+    // 提醒维护者"自我认知文案的目的就是描绘整个能力空间"。
+    for (const infra of [
+      '多 Channel',
+      '任务系统',
+      '调度系统',
+      '记忆系统',
+      '权限系统',
+      '工具生态',
+      '自管理 CLI',
+    ]) {
+      expect(frontPrivate).toContain(infra)
+      expect(worker).toContain(infra)
+    }
+  })
+
+  it('主动性的 4 类具体动作都有提及（每条对应当前可执行的载体）', () => {
+    // 时间主动 / 任务内主动反应 / 收尾主动多想一步 / 自我维护
+    // 用动作动词而非触发词，避免 specification gaming
+    expect(frontPrivate).toContain('crabot schedule add')        // 时间主动
+    expect(frontPrivate).toContain('send_private_message')       // 任务内主动反应
+    expect(frontPrivate).toContain('多想一步')                    // 收尾主动
+    expect(frontPrivate).toContain('daily-reflection')           // 自我维护
+    expect(frontPrivate).toContain('memory-curate')
+    expect(frontPrivate).toContain('quick_reflection')
+  })
+
+  it('"任务收尾时多想一步" 显式守 specification gaming 边界', () => {
+    expect(frontPrivate).toContain('多想一步')
+    expect(frontPrivate).toContain('specification gaming')
+    expect(frontPrivate).toContain('别擅自扩张到未授权的事')
+  })
+
+  it('用"承诺 → 产物"目标语义引导，不依赖触发词清单', () => {
+    expect(frontPrivate).toContain('承诺 → 产物')
+    expect(frontPrivate).toContain('可观测、可重放的产物')
+    expect(worker).toContain('承诺 → 产物')
+  })
+
+  it('显式点出"我会想着 / 盯着 / 主动观察"是没有产物的反模式', () => {
+    expect(frontPrivate).toContain('我会想着')
+    expect(worker).toContain('我会想着')
+  })
+
+  it('对话对象是"人类"而非 master（Crabot 是多 Channel / 多 Friend 角色）', () => {
+    // CRABOT_PRODUCT_SELF 段不应出现"对 master 的承诺"——多 Friend 场景下不准确
+    expect(frontPrivate).toContain('对人类的承诺')
+    expect(worker).toContain('对人类的承诺')
+  })
+})
+
+describe('Worker prompt — 主动性诉求的物化段', () => {
+  it('收尾段含"主动性诉求的物化"小节（按当前 schedule 机制描述，不预告未来）', () => {
+    expect(worker).toContain('### 主动性诉求的物化')
+    expect(worker).toContain('系统也能按预期触发')
+  })
+
+  it('给出三条物化路径', () => {
+    expect(worker).toContain('项目自治')
+    expect(worker).toContain('系统级调度')
+    expect(worker).toContain('crabot schedule add')
+    expect(worker).toContain('信息留痕')
+  })
+
+  it('调度参数提示完整（cron / once / 两种 action）', () => {
+    expect(worker).toContain('--cron')
+    expect(worker).toContain('--trigger-at')
+    expect(worker).toContain('create_task')
+    expect(worker).toContain('send_reminder')
+  })
+
+  it('不再使用旧"持续性"框架命名（避免把主动性窄化成持续性）', () => {
+    expect(worker).not.toContain('### 持续性需求的物化')
+  })
+})
+
+describe('Front 工具调用硬性规则 — 措辞精准（修复 A→B 间发现的 over-restriction）', () => {
+  it('不再写死"你唯一能调用的工具是 4 个决策工具"', () => {
+    const out = pm.assembleFrontPrompt({
+      isGroup: false,
+      workerCapabilities: [{ category: 'browser', tools: [] }],
+    })
+    // 旧措辞会让 LLM 误以为 query_tasks / create_schedule / messaging MCP 等
+    // 已注册工具都不能调用——本次放宽为"已注册给你的工具列表"。
+    expect(out).not.toContain('你唯一能调用的工具是你的决策工具')
+    expect(out).toContain('已注册给你的工具列表')
+  })
+
+  it('保留反幻觉防护：禁止模拟 Worker 端工具', () => {
+    const out = pm.assembleFrontPrompt({
+      isGroup: false,
+      workerCapabilities: [{ category: 'browser', tools: [] }],
+    })
+    expect(out).toContain('Worker 端能力')
+    expect(out).toContain('<invoke name="...">')
+    expect(out).toContain('必须通过 create_task 委派')
+  })
+})
