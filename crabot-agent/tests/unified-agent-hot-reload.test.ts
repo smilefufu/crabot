@@ -6,8 +6,10 @@ function buildAgent(deps: {
   workerHandler?: {
     updateSkills?: ReturnType<typeof vi.fn>
     updateSystemPrompt?: ReturnType<typeof vi.fn>
+    updateExtra?: ReturnType<typeof vi.fn>
   }
   agentConfig?: Record<string, unknown>
+  extra?: Record<string, unknown>
 }): unknown {
   // Bypass UnifiedAgent's heavy constructor by skipping it.
   // We construct a bare object with only the fields handleUpdateConfig touches.
@@ -15,6 +17,7 @@ function buildAgent(deps: {
   agent.agentConfig = deps.agentConfig ?? { mcp_servers: [], skills: [] }
   if (deps.mcpConnector) agent.mcpConnector = deps.mcpConnector
   if (deps.workerHandler) agent.workerHandler = deps.workerHandler
+  agent.extra = deps.extra ?? {}
   // 'config' is referenced for moduleId logging — provide minimal stub
   agent.config = { moduleId: 'test-agent' }
   // 'roles' is consulted by updateLlmClients (called when skills/model_config change).
@@ -112,6 +115,21 @@ describe('UnifiedAgent.handleUpdateConfig — hot reload', () => {
     const callArg = updateLlmClients.mock.calls[0][1] as { forceFrontRebuild: boolean; skipWorkerRebuild: boolean }
     expect(callArg.forceFrontRebuild).toBe(true)
     expect(callArg.skipWorkerRebuild).toBe(true)
+  })
+
+  it('extra 变更触发 workerHandler.updateExtra（防止 progress_digest_interval_seconds 等不生效）', async () => {
+    const updateExtra = vi.fn()
+    const agent = buildAgent({
+      workerHandler: { updateExtra },
+      extra: { progress_digest_interval_seconds: 60 },
+    })
+
+    const result = await (agent as { handleUpdateConfig: (p: unknown) => Promise<{ changed_fields: string[]; restart_required: boolean }> })
+      .handleUpdateConfig({ extra: { progress_digest_interval_seconds: 30 } })
+
+    expect(updateExtra).toHaveBeenCalledWith({ progress_digest_interval_seconds: 30 })
+    expect(result.changed_fields).toContain('extra')
+    expect(result.restart_required).toBe(false)
   })
 
   it('model_config 变更时不跳过 Worker 重建', async () => {

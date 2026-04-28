@@ -236,6 +236,14 @@ export class WorkerHandler {
     this.systemPrompt = newPrompt
   }
 
+  /**
+   * 热加载：更新 extra（progress_digest_interval_seconds 等）。
+   * 下次 executeTask 构造 ProgressDigest 时会读到新值。
+   */
+  updateExtra(extra: Record<string, unknown>): void {
+    this.extra = { ...this.extra, ...extra }
+  }
+
   async executeTask(
     params: ExecuteTaskParams,
     traceCallback?: TraceCallback,

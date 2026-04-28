@@ -2044,8 +2044,9 @@ export class UnifiedAgent extends ModuleBase {
     }
 
     // 更新扩展配置（热生效，下次使用对应功能时生效）
-    if (params.extra !== undefined) {
+    if (params.extra !== undefined && Object.keys(params.extra).length > 0) {
       this.extra = { ...this.extra, ...params.extra }
+      this.workerHandler?.updateExtra(params.extra)
       changedFields.push('extra')
     }
 
