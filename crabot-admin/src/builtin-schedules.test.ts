@@ -107,4 +107,35 @@ describe('AdminModule - ensureBuiltinSchedules', () => {
     const builtins = result.items.filter(s => s.is_builtin)
     expect(builtins).toHaveLength(3)
   })
+
+  it('should converge same-name builtin duplicates to one (keep earliest created_at)', async () => {
+    // Simulates the historical bug where multiple same-name builtin schedules
+    // accumulated across migrations / failed loads. ensureBuiltinSchedules
+    // must collapse them, keeping the earliest one.
+    const schedulesMap = (admin as unknown as { schedules: Map<string, Schedule> }).schedules
+    const original = Array.from(schedulesMap.values()).find(s => s.is_builtin && s.name === '记忆整理')
+    expect(original, 'pre-existing 记忆整理 seed must exist').toBeDefined()
+
+    const baseTs = Date.parse(original!.created_at)
+    const dupe1: Schedule = {
+      ...original!,
+      id: 'dupe-curate-1',
+      created_at: new Date(baseTs + 60_000).toISOString(),
+      execution_count: 99,
+    }
+    const dupe2: Schedule = {
+      ...original!,
+      id: 'dupe-curate-2',
+      created_at: new Date(baseTs + 120_000).toISOString(),
+      execution_count: 50,
+    }
+    schedulesMap.set(dupe1.id, dupe1)
+    schedulesMap.set(dupe2.id, dupe2)
+
+    await (admin as unknown as { ensureBuiltinSchedules: () => Promise<void> }).ensureBuiltinSchedules()
+
+    const curatesAfter = Array.from(schedulesMap.values()).filter(s => s.is_builtin && s.name === '记忆整理')
+    expect(curatesAfter).toHaveLength(1)
+    expect(curatesAfter[0].id).toBe(original!.id)
+  })
 })

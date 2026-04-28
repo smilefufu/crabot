@@ -3956,6 +3956,22 @@ export class AdminModule extends ModuleBase {
       }
     }
 
+    // 同名 builtin 多条时只保留 created_at 最早的，避免历史迁移 / loadData
+    // 异常 / 多次 seed 累积出的重复条目（曾出现 3 条 "记忆整理" 同时跑）。
+    const builtinByName = new Map<string, Schedule[]>()
+    for (const sched of this.schedules.values()) {
+      if (!sched.is_builtin) continue
+      const arr = builtinByName.get(sched.name) ?? []
+      arr.push(sched)
+      builtinByName.set(sched.name, arr)
+    }
+    for (const [name, group] of builtinByName) {
+      if (group.length <= 1) continue
+      const [keep, ...drop] = [...group].sort((a, b) => a.created_at.localeCompare(b.created_at))
+      for (const dup of drop) this.schedules.delete(dup.id)
+      console.warn(`[Admin] Collapsed ${drop.length} duplicate builtin schedule(s) named "${name}", kept ${keep.id}`)
+    }
+
     const existing = new Set(
       Array.from(this.schedules.values()).filter(s => s.is_builtin).map(s => s.name),
     )
