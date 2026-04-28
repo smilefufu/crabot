@@ -8,6 +8,12 @@ import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
+
+// 让下游（auth.ts、scripts/*）能在任意 cwd 下找到安装根目录
+if (!process.env.CRABOT_HOME) {
+  process.env.CRABOT_HOME = __dirname
+}
+
 const args = process.argv.slice(2)
 const command = args[0] ?? 'help'
 

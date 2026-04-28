@@ -48,7 +48,7 @@ function resolveToken(opts: { token?: string; crabotHome?: string }, offset: num
   }
 
   const dataDir = resolveDataDir(offset)
-  const basePath = opts.crabotHome ?? process.cwd()
+  const basePath = opts.crabotHome ?? process.env['CRABOT_HOME'] ?? process.cwd()
   const tokenPath = join(basePath, dataDir, 'admin', 'internal-token')
 
   try {
