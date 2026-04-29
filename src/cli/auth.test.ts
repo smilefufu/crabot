@@ -87,4 +87,25 @@ describe('resolveAuth', () => {
     process.env['CRABOT_HOME'] = '/non/existent/path'
     expect(resolveAuth({}).token).toBe('env-token')
   })
+
+  it('DATA_DIR 为绝对路径（MM 注入 agent 子目录）时正确解析 token', () => {
+    // 模拟 MM 给 agent 进程注入的场景：
+    //   DATA_DIR = /path/to/crabot/data/agent  (绝对路径，指向模块子目录)
+    //   CRABOT_HOME = /path/to/crabot           (cli.mjs 注入)
+    // token 实际位于 /path/to/crabot/data/admin/internal-token
+    const home = makeFakeHome('agent-context-token\n')
+    process.env['CRABOT_HOME'] = home
+    // 模拟 MM 注入的 agent-specific DATA_DIR（绝对路径）
+    process.env['DATA_DIR'] = join(home, 'data', 'agent')
+    expect(resolveAuth({}).token).toBe('agent-context-token')
+  })
+
+  it('DATA_DIR 绝对路径不应与 CRABOT_HOME 拼接产生双份路径', () => {
+    const home = makeFakeHome()
+    process.env['CRABOT_HOME'] = home
+    process.env['DATA_DIR'] = join(home, 'data', 'agent')
+    // 如果路径被拼接两次，readFileSync 会抛 ENOENT（路径不存在）
+    // 正确行为：应该能读到 token，而不是报路径错误
+    expect(() => resolveAuth({})).not.toThrow()
+  })
 })

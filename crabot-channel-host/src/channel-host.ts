@@ -191,26 +191,27 @@ export class ChannelHost extends ModuleBase {
   private async handleSendMessage(params: SendMessageParams): Promise<SendMessageResult> {
     console.log(`[ChannelHost] handleSendMessage: session_id=${params.session_id}`)
 
-    const dispatch = this.pendingDispatches.get(params.session_id)
-
-    // 群聊：跳过 pendingDispatch（避免飞书插件的强制引用回复），改走 proactiveSend
-    const session = this.sessionManager.findById(params.session_id)
-    if (dispatch && session?.type === 'group') {
-      console.log(`[ChannelHost] handleSendMessage: group session, using proactive send`)
+    // 优先走 proactiveSend（直接调用插件 outbound API），与 pendingDispatch 解耦。
+    // 原因：高级风格插件（飞书/Telegram 等）的 dispatchReplyFromConfig 是 fire-and-forget，
+    // Shim 立即返回后插件会 markFullyComplete()，再调它的 dispatcher.sendFinalReply 会被丢弃。
+    // 群聊也避免飞书插件的强制引用回复格式。
+    // 仅当插件未提供 outbound（简单插件如 zalo / googlechat）时回退到 deliver 路径。
+    if (this.pluginOutbound?.sendText) {
       this.pendingDispatches.delete(params.session_id)
       await this.proactiveSend(params)
-    } else if (dispatch) {
-      // 私聊：被动回复
+    } else {
+      const dispatch = this.pendingDispatches.get(params.session_id)
+      if (!dispatch) {
+        throw new Error(
+          `无可用发送通道：插件未提供 outbound adapter，且无 pendingDispatch。Session: ${params.session_id}`
+        )
+      }
       const replyPayload = messageContentToReplyPayload(params.content)
       const textChunks = splitTextByTableLimit(replyPayload.text ?? '')
-      console.log(`[ChannelHost] handleSendMessage: using pending dispatch (passive reply), text length=${(replyPayload.text ?? '').length}, chunks=${textChunks.length}`)
+      console.log(`[ChannelHost] handleSendMessage: using pending dispatch (no outbound), text length=${(replyPayload.text ?? '').length}, chunks=${textChunks.length}`)
       for (const chunk of textChunks) {
         await dispatch.deliver({ ...replyPayload, text: chunk }, { kind: 'final' })
       }
-    } else {
-      // 路径 2：主动发送（无入站消息，直接通过 outbound adapter 调用平台 API）
-      console.log(`[ChannelHost] handleSendMessage: no pending dispatch, trying proactive send`)
-      await this.proactiveSend(params)
     }
 
     const messageId = generateId()

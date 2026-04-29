@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, isAbsolute, resolve } from 'node:path'
 
 export interface AuthConfig {
   readonly endpoint: string
@@ -47,9 +47,19 @@ function resolveToken(opts: { token?: string; crabotHome?: string }, offset: num
     return envToken
   }
 
-  const dataDir = resolveDataDir(offset)
-  const basePath = opts.crabotHome ?? process.env['CRABOT_HOME'] ?? process.cwd()
-  const tokenPath = join(basePath, dataDir, 'admin', 'internal-token')
+  // When DATA_DIR is absolute (set by MM to a module-specific path like /path/data/agent),
+  // the admin token lives in the sibling admin directory.
+  // path.join does NOT reset on absolute mid-segments (unlike path.resolve), so we must
+  // handle absolute DATA_DIR separately to avoid doubled paths.
+  const envDataDir = process.env['DATA_DIR']
+  let tokenPath: string
+  if (envDataDir && isAbsolute(envDataDir)) {
+    tokenPath = resolve(envDataDir, '..', 'admin', 'internal-token')
+  } else {
+    const dataDir = resolveDataDir(offset)
+    const basePath = opts.crabotHome ?? process.env['CRABOT_HOME'] ?? process.cwd()
+    tokenPath = join(basePath, dataDir, 'admin', 'internal-token')
+  }
 
   try {
     return readFileSync(tokenPath, 'utf-8').trim()

@@ -53,7 +53,9 @@ export function createReplyRuntime(
      *   3. 触发 onMessageReceived（发布 channel.message_received 事件）
      *   4. 立即返回，不等待 Agent 回复
      *
-     * Agent 回复走 handleSendMessage → 群聊用 proactiveSend，私聊用 dispatch.deliver()。
+     * Agent 回复走 handleSendMessage：插件提供 outbound 时直接 proactiveSend
+     * （绕开飞书等高级插件 fire-and-forget 后立刻 markFullyComplete 的生命周期），
+     * 仅简单插件无 outbound 时回退到 dispatch.deliver()。
      * dispatch 由 TTL（5 分钟）自动清理。
      */
     async dispatchReplyFromConfig(params: {
