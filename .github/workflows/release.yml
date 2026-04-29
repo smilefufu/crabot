@@ -34,7 +34,7 @@ jobs:
           node-version: '22'
           cache: 'pnpm'
 
-      - name: Install and Build
+      - name: Install dependencies (with devDeps for build)
         shell: bash
         run: |
           pnpm install
@@ -44,17 +44,59 @@ jobs:
           # crabot-shared 已有 dist/ 之后再 install，否则拿到的是空快照。
           (cd crabot-shared && pnpm install && pnpm run build)
 
+          # 其他模块并行 install（pnpm store 缓存共享，并发安全）
+          pids=()
+          for mod in crabot-core crabot-agent \
+                     crabot-channel-host crabot-channel-telegram crabot-channel-wechat \
+                     crabot-mcp-tools crabot-admin; do
+            if [ -d "$mod" ]; then
+              (cd "$mod" && pnpm install) &
+              pids+=($!)
+            fi
+          done
+          for pid in "${pids[@]}"; do wait "$pid" || exit 1; done
+
+      - name: Build all modules in parallel
+        shell: bash
+        run: |
+          pids=()
           for mod in crabot-core crabot-agent \
                      crabot-channel-host crabot-channel-telegram crabot-channel-wechat \
                      crabot-mcp-tools; do
             if [ -d "$mod" ]; then
-              (cd "$mod" && pnpm install && pnpm run build)
+              (cd "$mod" && pnpm run build) &
+              pids+=($!)
             fi
           done
+          # 根 CLI 构建独立
+          pnpm run build:cli &
+          pids+=($!)
+          for pid in "${pids[@]}"; do wait "$pid" || exit 1; done
 
-          # admin 单独：build 前需要 install（含前端依赖）
-          (cd crabot-admin && pnpm install && pnpm run build && pnpm run build:web)
-          pnpm run build:cli
+          # admin: 后端 build → 前端 build:web（顺序执行，build:web 会进入 web/ 子项目自己 install）
+          (cd crabot-admin && pnpm run build && pnpm run build:web)
+
+      - name: Prune to production-only dependencies
+        shell: bash
+        run: |
+          # build 已完成，dist 产物保留。重装去 devDeps（typescript / vitest / tsx 等）。
+          # native 模块 (better-sqlite3 / node-pty) 用 prebuild 二进制，不需现场编译。
+          # crabot-shared 必须先 prune：其他模块 file: 引用，install 时基于其当时状态做快照。
+          (cd crabot-shared && rm -rf node_modules && pnpm install --prod --prefer-offline)
+
+          # 其他模块和 root 并行 prune
+          pids=()
+          (rm -rf node_modules && pnpm install --prod --prefer-offline) &
+          pids+=($!)
+          for mod in crabot-core crabot-agent \
+                     crabot-channel-host crabot-channel-telegram crabot-channel-wechat \
+                     crabot-mcp-tools crabot-admin; do
+            if [ -d "$mod" ]; then
+              (cd "$mod" && rm -rf node_modules && pnpm install --prod --prefer-offline) &
+              pids+=($!)
+            fi
+          done
+          for pid in "${pids[@]}"; do wait "$pid" || exit 1; done
 
       - name: Package (Unix)
         if: matrix.platform != 'windows'
@@ -65,28 +107,72 @@ jobs:
 
           # 复制运行时文件
           cp cli.mjs crabot.cmd package.json install.sh install.ps1 "/tmp/${DIRNAME}/"
-          cp -r dist scripts node_modules "/tmp/${DIRNAME}/"
+          cp -r dist "/tmp/${DIRNAME}/"
+
+          # rsync -H 保留 pnpm store 单模块内的 hardlink，避免每个文件被 inflate 成独立副本。
+          # 第三方包广泛用 src/ 作运行时入口（如 ecdsa-sig-formatter 的 main = src/...js），
+          # 不能 unanchored 排除 src/，必须用 /src/ 锚定到模块自身根目录。
+          COMMON_EXCLUDES=(
+            --exclude='node_modules/.cache/'
+            --exclude='.venv/'
+            --exclude='.env'
+            --exclude='.git/'
+            --exclude='.github/'
+            --exclude='.gitignore'
+            --exclude='.npmignore'
+            --exclude='.editorconfig'
+            --exclude='.eslintrc*'
+            --exclude='.prettierrc*'
+            --exclude='*.md'
+            --exclude='*.markdown'
+            --exclude='*.map'
+            --exclude='*.ts'
+            --exclude='__tests__/'
+            --exclude='*.test.*'
+            --exclude='*.spec.*'
+            --exclude='tsconfig*.json'
+            --exclude='*.tsbuildinfo'
+          )
+
+          # 根 node_modules（已 prune）
+          rsync -aH "${COMMON_EXCLUDES[@]}" node_modules "/tmp/${DIRNAME}/"
+
+          # scripts/（含 upgrade-lib，运行时不需要 node_modules，但开发机可能装过测试用的 vitest）
+          rsync -aH "${COMMON_EXCLUDES[@]}" \
+                --exclude='node_modules' --exclude='vitest.config.*' \
+                scripts "/tmp/${DIRNAME}/"
 
           # TS 模块：src/ 是源码，构建产物在 dist/，可排除 src/
-          for mod in crabot-shared crabot-admin crabot-core crabot-agent \
+          for mod in crabot-shared crabot-core crabot-agent \
                      crabot-channel-host crabot-channel-telegram crabot-channel-wechat \
                      crabot-mcp-tools; do
             if [ -d "$mod" ]; then
-              rsync -a --exclude='/src/' --exclude='/test*/' --exclude='.git/' \
-                    --exclude='node_modules/.cache/' --exclude='.venv/' \
-                    --exclude='.env' "$mod/" "/tmp/${DIRNAME}/$mod/"
+              rsync -aH "${COMMON_EXCLUDES[@]}" \
+                    --exclude='/src/' --exclude='/test*/' \
+                    "$mod/" "/tmp/${DIRNAME}/$mod/"
             fi
           done
 
+          # crabot-admin：额外排 web/（前端源码 + 构建依赖；构建产物已在 dist/web/）
+          if [ -d "crabot-admin" ]; then
+            rsync -aH "${COMMON_EXCLUDES[@]}" \
+                  --exclude='/src/' --exclude='/test*/' --exclude='/web/' \
+                  "crabot-admin/" "/tmp/${DIRNAME}/crabot-admin/"
+          fi
+
           # Python 模块（crabot-memory）：src/ 是运行时代码，必须保留
           if [ -d "crabot-memory" ]; then
-            rsync -a --exclude='/test*/' --exclude='.git/' \
-                  --exclude='node_modules/.cache/' --exclude='.venv/' \
-                  --exclude='.env' --exclude='__pycache__/' \
+            rsync -aH \
+                  --exclude='/test*/' \
+                  --exclude='node_modules/.cache/' \
+                  --exclude='.venv/' --exclude='.env' \
+                  --exclude='.git/' --exclude='.github/' \
+                  --exclude='__pycache__/' \
+                  --exclude='*.md' --exclude='*.markdown' \
                   "crabot-memory/" "/tmp/${DIRNAME}/crabot-memory/"
           fi
 
-          # 打包
+          # 打包（tar 默认保留 staging 目录内的 hardlink）
           cd /tmp
           tar -czf "${DIRNAME}.tar.gz" "${DIRNAME}"
           shasum -a 256 "${DIRNAME}.tar.gz" > "${DIRNAME}.tar.gz.sha256"
@@ -105,6 +191,9 @@ jobs:
 
           Copy-Item cli.mjs, crabot.cmd, package.json, install.sh, install.ps1 $TempDir
           Copy-Item -Recurse dist, scripts, node_modules $TempDir
+          # 清理 scripts 子项目内可能存在的 node_modules（开发机痕迹；CI fresh checkout 通常没有）
+          Get-ChildItem -Path "$TempDir\scripts" -Recurse -Directory -Filter 'node_modules' -ErrorAction SilentlyContinue |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
           # TS 模块：src/ 是源码，构建产物在 dist/，可排除 src/
           $tsModules = @('crabot-shared','crabot-admin','crabot-core','crabot-agent',
@@ -117,6 +206,10 @@ jobs:
               Remove-Item -Recurse -Force "$dest\src" -ErrorAction SilentlyContinue
               Remove-Item -Recurse -Force "$dest\test*" -ErrorAction SilentlyContinue
               Remove-Item -Recurse -Force "$dest\.venv" -ErrorAction SilentlyContinue
+              # crabot-admin 额外排 web/（前端源码+构建依赖，产物已在 dist/web/）
+              if ($mod -eq 'crabot-admin') {
+                Remove-Item -Recurse -Force "$dest\web" -ErrorAction SilentlyContinue
+              }
             }
           }
 
@@ -128,6 +221,23 @@ jobs:
             Remove-Item -Recurse -Force "$dest\.venv" -ErrorAction SilentlyContinue
             Remove-Item -Recurse -Force "$dest\__pycache__" -ErrorAction SilentlyContinue
           }
+
+          # 清理无用文件（递归扫整个 staging 目录）
+          $filePatterns = @('*.md','*.markdown','*.map','*.ts','tsconfig*.json',
+                            '*.tsbuildinfo','.eslintrc*','.prettierrc*','.editorconfig',
+                            '.gitignore','.npmignore')
+          foreach ($pat in $filePatterns) {
+            Get-ChildItem -Path $TempDir -Recurse -File -Filter $pat -ErrorAction SilentlyContinue |
+              Remove-Item -Force -ErrorAction SilentlyContinue
+          }
+          $dirPatterns = @('__tests__','.github')
+          foreach ($pat in $dirPatterns) {
+            Get-ChildItem -Path $TempDir -Recurse -Directory -Filter $pat -ErrorAction SilentlyContinue |
+              Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          # *.test.* / *.spec.* 用 -Include（多 pattern）
+          Get-ChildItem -Path $TempDir -Recurse -File -Include '*.test.*','*.spec.*' -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
 
           Compress-Archive -Path $TempDir -DestinationPath "$DirName.zip"
           (Get-FileHash "$DirName.zip" -Algorithm SHA256).Hash | Out-File "$DirName.zip.sha256"
