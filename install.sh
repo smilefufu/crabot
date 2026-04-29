@@ -148,9 +148,13 @@ main() {
     # 获取版本
     local version="$CRABOT_VERSION"
     if [ "$version" = "latest" ]; then
-      version=$(curl -sL "https://github.com/smilefufu/crabot/releases.atom" \
-        | grep -o '<title>[^<]*</title>' | sed -n '2s/<[^>]*>//gp' | tr -d '[:space:]')
-      if [ -z "$version" ]; then
+      # 用 /releases/latest 的重定向拿真实 tag
+      # （atom feed 的 <title> 是 release 标题，可能含 commit message + 中文，不能当 tag 用）
+      local latest_url
+      latest_url=$(curl -sLI -o /dev/null -w '%{url_effective}' \
+        "https://github.com/smilefufu/crabot/releases/latest")
+      version="${latest_url##*/tag/}"
+      if [ -z "$version" ] || [ "$version" = "$latest_url" ]; then
         error "Failed to fetch latest version from GitHub. Set CRABOT_VERSION manually."
         exit 1
       fi

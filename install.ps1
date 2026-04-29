@@ -83,11 +83,19 @@ if ($FromSource) {
 } else {
     Write-Info "Release install..."
     if ($Version -eq "latest") {
-        $atom = (Invoke-WebRequest -Uri "https://github.com/smilefufu/crabot/releases.atom").Content
-        if ($atom -match '<title>([^<]+)</title>.*?<title>([^<]+)</title>') {
-            $Version = $Matches[2].Trim()
+        # 用 /releases/latest 的重定向拿真实 tag
+        # （atom feed 的 <title> 是 release 标题，可能含 commit message + 中文，不能当 tag 用）
+        try {
+            $resp = Invoke-WebRequest -Uri "https://github.com/smilefufu/crabot/releases/latest" -UseBasicParsing -MaximumRedirection 5
+            $finalUrl = $resp.BaseResponse.ResponseUri.AbsoluteUri
+        } catch {
+            Write-Err "Failed to fetch latest version from GitHub: $_"
+            exit 1
+        }
+        if ($finalUrl -match '/tag/(.+)$') {
+            $Version = $Matches[1]
         } else {
-            Write-Err "Failed to fetch latest version from GitHub."
+            Write-Err "Failed to parse latest version from $finalUrl"
             exit 1
         }
         Write-Info "Latest version: $Version"
