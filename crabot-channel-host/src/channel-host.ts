@@ -12,6 +12,7 @@ import { PendingDispatchMap } from './pending-dispatch.js'
 import { SessionManager } from './session-manager.js'
 import { MessageStore } from './message-store.js'
 import { loadPlugin, type OutboundAdapter } from './plugin-loader.js'
+import { resolveSecretRefs } from './secret-resolver.js'
 import { createChannelRuntime } from './runtime/index.js'
 import { msgContextToChannelMessage, messageContentToReplyPayload } from './msg-converter.js'
 import { extractPlatformTarget } from './proactive-send.js'
@@ -119,8 +120,11 @@ export class ChannelHost extends ModuleBase {
     this.pluginAbortController = new AbortController()
 
     // 启动 OpenClaw 插件（长期运行，不 await）
-    // 注入 Crabot 策略覆盖：群消息不需要 @bot（Crabot 由 Admin 层统一做准入控制）
-    const cfg = injectCrabotPolicy(this.hostConfig.plugin_config)
+    // 1. 先把 SecretRef（如 {source:"file", provider, id}）解析为明文。
+    //    新版安装向导（@larksuite/openclaw-lark）写出的是引用对象，但插件本身不解析 → 必须在这里展开
+    // 2. 再注入 Crabot 策略覆盖：群消息不需要 @bot（Crabot 由 Admin 层统一做准入控制）
+    const resolvedCfg = resolveSecretRefs(this.hostConfig.plugin_config)
+    const cfg = injectCrabotPolicy(resolvedCfg)
 
     // 保存 cfg 用于 outbound 调用
     this.pluginCfg = cfg
