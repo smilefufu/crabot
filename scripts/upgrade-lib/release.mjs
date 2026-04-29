@@ -22,15 +22,21 @@ export function detectPlatform() {
 }
 
 export async function getLatestVersion() {
-  const res = await fetch('https://api.github.com/repos/smilefufu/crabot/releases/latest', {
+  // 走 /releases/latest 的 302 重定向拿 tag，避开 api.github.com 的 60 次/小时未认证限制
+  // 与 install.sh 保持一致
+  const res = await fetch('https://github.com/smilefufu/crabot/releases/latest', {
+    redirect: 'manual',
     headers: { 'User-Agent': 'crabot-upgrade' },
   })
-  if (!res.ok) {
-    throw new Error(`failed to fetch latest release: ${res.status} ${res.statusText}`)
+  const location = res.headers.get('location')
+  if (!location) {
+    throw new Error(`failed to fetch latest release: status=${res.status}, no Location header`)
   }
-  const data = await res.json()
-  if (!data.tag_name) throw new Error('release response missing tag_name')
-  return { tag: data.tag_name, publishedAt: data.published_at }
+  const m = location.match(/\/releases\/tag\/([^/?#]+)/)
+  if (!m) {
+    throw new Error(`failed to parse tag from redirect: ${location}`)
+  }
+  return { tag: decodeURIComponent(m[1]), publishedAt: null }
 }
 
 async function downloadFile(url, destPath) {
