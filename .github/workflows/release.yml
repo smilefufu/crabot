@@ -67,16 +67,24 @@ jobs:
           cp cli.mjs crabot.cmd package.json install.sh install.ps1 "/tmp/${DIRNAME}/"
           cp -r dist scripts node_modules "/tmp/${DIRNAME}/"
 
-          # 复制各模块（排除顶层 src、test、.git）
+          # TS 模块：src/ 是源码，构建产物在 dist/，可排除 src/
           for mod in crabot-shared crabot-admin crabot-core crabot-agent \
                      crabot-channel-host crabot-channel-telegram crabot-channel-wechat \
-                     crabot-memory crabot-mcp-tools; do
+                     crabot-mcp-tools; do
             if [ -d "$mod" ]; then
               rsync -a --exclude='/src/' --exclude='/test*/' --exclude='.git/' \
                     --exclude='node_modules/.cache/' --exclude='.venv/' \
                     --exclude='.env' "$mod/" "/tmp/${DIRNAME}/$mod/"
             fi
           done
+
+          # Python 模块（crabot-memory）：src/ 是运行时代码，必须保留
+          if [ -d "crabot-memory" ]; then
+            rsync -a --exclude='/test*/' --exclude='.git/' \
+                  --exclude='node_modules/.cache/' --exclude='.venv/' \
+                  --exclude='.env' --exclude='__pycache__/' \
+                  "crabot-memory/" "/tmp/${DIRNAME}/crabot-memory/"
+          fi
 
           # 打包
           cd /tmp
@@ -98,18 +106,27 @@ jobs:
           Copy-Item cli.mjs, crabot.cmd, package.json, install.sh, install.ps1 $TempDir
           Copy-Item -Recurse dist, scripts, node_modules $TempDir
 
-          $modules = @('crabot-shared','crabot-admin','crabot-core','crabot-agent',
-                       'crabot-channel-host','crabot-channel-telegram','crabot-channel-wechat',
-                       'crabot-memory','crabot-mcp-tools')
-          foreach ($mod in $modules) {
+          # TS 模块：src/ 是源码，构建产物在 dist/，可排除 src/
+          $tsModules = @('crabot-shared','crabot-admin','crabot-core','crabot-agent',
+                         'crabot-channel-host','crabot-channel-telegram','crabot-channel-wechat',
+                         'crabot-mcp-tools')
+          foreach ($mod in $tsModules) {
             if (Test-Path $mod) {
               $dest = Join-Path $TempDir $mod
               Copy-Item -Recurse $mod $dest
-              # 清理不需要的目录
               Remove-Item -Recurse -Force "$dest\src" -ErrorAction SilentlyContinue
               Remove-Item -Recurse -Force "$dest\test*" -ErrorAction SilentlyContinue
               Remove-Item -Recurse -Force "$dest\.venv" -ErrorAction SilentlyContinue
             }
+          }
+
+          # Python 模块（crabot-memory）：src/ 是运行时代码，必须保留
+          if (Test-Path 'crabot-memory') {
+            $dest = Join-Path $TempDir 'crabot-memory'
+            Copy-Item -Recurse 'crabot-memory' $dest
+            Remove-Item -Recurse -Force "$dest\test*" -ErrorAction SilentlyContinue
+            Remove-Item -Recurse -Force "$dest\.venv" -ErrorAction SilentlyContinue
+            Remove-Item -Recurse -Force "$dest\__pycache__" -ErrorAction SilentlyContinue
           }
 
           Compress-Archive -Path $TempDir -DestinationPath "$DirName.zip"
