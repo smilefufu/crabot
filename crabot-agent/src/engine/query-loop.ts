@@ -201,6 +201,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     const toolStartTime = Date.now()
     const toolResults = await executeToolBatches(batches, currentTools, {
       abortSignal,
+      ...(options.timezone ? { timezone: options.timezone } : {}),
     }, options.permissionConfig, hooks)
     const toolExecutionMs = Date.now() - toolStartTime
     // Live progress: tools finished

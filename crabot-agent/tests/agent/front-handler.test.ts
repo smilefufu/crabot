@@ -39,6 +39,7 @@ function makeFrontHandler() {
     getSystemPrompt: () => 'You are helpful',
     // 测试不依赖 messaging 工具；返回空 server map 即可
     mcpConfigFactory: () => ({}),
+    getTimezone: () => 'Asia/Shanghai',
   }
   return { handler: new FrontHandler(llmConfig, toolDeps, config), adapter }
 }
@@ -209,7 +210,7 @@ describe('FrontHandler', () => {
             scene: { type: 'group_session', channel_id: 'ch_1', session_id: 'session-1' },
           },
         },
-      })
+      }, undefined, 'Asia/Shanghai')
 
       expect(typeof message).toBe('string')
       expect(message).toContain('进入本群后先做技术支持与问题排查。')
@@ -228,7 +229,7 @@ describe('FrontHandler', () => {
             scene: { type: 'group_session', channel_id: 'ch_1', session_id: 'session-1' },
           },
         },
-      })
+      }, undefined, 'Asia/Shanghai')
 
       expect(typeof message).toBe('string')
       expect(message).toContain('## 场景画像（空画像）')

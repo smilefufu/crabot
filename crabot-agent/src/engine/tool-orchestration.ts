@@ -4,6 +4,7 @@ import { checkToolPermission } from './permission-checker'
 import type { HookExecutorContext } from '../hooks/types'
 import type { HookRegistry } from '../hooks/hook-registry'
 import { executeHooks } from '../hooks/hook-executor'
+import { stampToolResult, resolveTimezone } from '../utils/time'
 
 export interface ToolResultEntry {
   readonly tool_use_id: string
@@ -33,14 +34,18 @@ async function executeSingleTool(
   permissionConfig?: ToolPermissionConfig,
   hooks?: HookConfig,
 ): Promise<ToolResultEntry> {
+  // context.timezone 由调用方（runEngine / front-loop）保证已 resolve；缺省时兜底
+  const timezone = context.timezone ?? resolveTimezone(undefined)
+  const stamp = (content: string): string => stampToolResult(content, timezone)
+
   const tool = findTool(tools, block.name)
   if (tool === undefined) {
-    return { tool_use_id: block.id, content: `Tool not found: ${block.name}`, is_error: true }
+    return { tool_use_id: block.id, content: stamp(`Tool not found: ${block.name}`), is_error: true }
   }
 
   const permission = await checkToolPermission(block.name, block.input, tool, permissionConfig)
   if (!permission.allowed) {
-    return { tool_use_id: block.id, content: `Permission denied: ${permission.reason}`, is_error: true }
+    return { tool_use_id: block.id, content: stamp(`Permission denied: ${permission.reason}`), is_error: true }
   }
 
   // --- PreToolUse hook ---
@@ -58,7 +63,7 @@ async function executeSingleTool(
     if (matching.length > 0) {
       const preResult = await executeHooks(matching, preInput, hooks.context)
       if (preResult.action === 'block') {
-        return { tool_use_id: block.id, content: preResult.message ?? 'Blocked by hook', is_error: true }
+        return { tool_use_id: block.id, content: stamp(preResult.message ?? 'Blocked by hook'), is_error: true }
       }
       if (preResult.modifiedInput) {
         effectiveInput = { ...effectiveInput, ...preResult.modifiedInput }
@@ -95,13 +100,13 @@ async function executeSingleTool(
 
     return {
       tool_use_id: block.id,
-      content: finalContent,
+      content: stamp(finalContent),
       ...(result.images !== undefined ? { images: result.images } : {}),
       is_error: result.isError,
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    return { tool_use_id: block.id, content: `Tool execution error: ${message}`, is_error: true }
+    return { tool_use_id: block.id, content: stamp(`Tool execution error: ${message}`), is_error: true }
   }
 }
 

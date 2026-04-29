@@ -30,8 +30,20 @@ function evaluateVisibleWhen(
 }
 import { useToast } from '../../contexts/ToastContext'
 
+const DEFAULT_TIMEZONE_HINT = 'Asia/Shanghai'
+
+function isValidTimezone(tz: string): boolean {
+  try {
+    Intl.DateTimeFormat(undefined, { timeZone: tz })
+    return true
+  } catch {
+    return false
+  }
+}
+
 interface AgentUnifiedConfig {
   system_prompt: string
+  timezone: string
   model_roles: Record<string, ModelSlotRef>
   extra: Record<string, unknown>
 }
@@ -47,12 +59,14 @@ export const AgentConfig: React.FC = () => {
   const enabledSkills = useMemo(() => allSkills.filter(s => s.enabled), [allSkills])
   const [config, setConfig] = useState<AgentUnifiedConfig>({
     system_prompt: '',
+    timezone: '',
     model_roles: {},
     extra: {},
   })
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [timezoneError, setTimezoneError] = useState('')
 
   useEffect(() => {
     loadData()
@@ -78,6 +92,7 @@ export const AgentConfig: React.FC = () => {
         const existingConfig = await agentService.getConfig()
         setConfig({
           system_prompt: existingConfig.system_prompt || '',
+          timezone: existingConfig.timezone || '',
           model_roles: existingConfig.model_config || {},
           extra: existingConfig.extra || {},
         })
@@ -92,10 +107,16 @@ export const AgentConfig: React.FC = () => {
   }
 
   const handleSave = async () => {
+    const trimmedTimezone = config.timezone.trim()
+    if (trimmedTimezone && !isValidTimezone(trimmedTimezone)) {
+      toast.error('时区无效，请填 IANA 时区名（如 Asia/Shanghai）或留空使用默认')
+      return
+    }
     try {
       setSaving(true)
       await agentService.updateConfig({
         system_prompt: config.system_prompt,
+        timezone: trimmedTimezone || undefined,
         model_config: config.model_roles,
         extra: Object.keys(config.extra).length > 0 ? config.extra : undefined,
       })
@@ -179,6 +200,33 @@ export const AgentConfig: React.FC = () => {
           style={{ minHeight: '80px' }}
           placeholder="例如：你是一个专业友善的客服助手，帮助用户解决售后问题。回答时请保持简洁、耐心..."
         />
+        <div style={{ marginTop: '0.875rem' }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.5rem', marginBottom: '0.25rem' }}>
+            <label style={{ fontWeight: 500, fontSize: '0.8125rem' }}>时区</label>
+            <span style={{ color: 'var(--text-muted)', fontSize: '0.6875rem' }}>留空使用默认（{DEFAULT_TIMEZONE_HINT}）</span>
+          </div>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '0.6875rem', marginBottom: '0.375rem' }}>
+            影响 Agent prompt 中的"当前时间"和工具结果时间戳显示。填 IANA 时区名（如 {DEFAULT_TIMEZONE_HINT}、Asia/Tokyo、UTC、Europe/London）。
+          </p>
+          <input
+            className="input"
+            type="text"
+            value={config.timezone}
+            onChange={(e) => {
+              const value = e.target.value
+              setConfig((prev) => ({ ...prev, timezone: value }))
+              if (timezoneError) setTimezoneError('')
+            }}
+            onBlur={(e) => {
+              const trimmed = e.target.value.trim()
+              setTimezoneError(trimmed && !isValidTimezone(trimmed) ? '无效的 IANA 时区名' : '')
+            }}
+            placeholder={DEFAULT_TIMEZONE_HINT}
+          />
+          {timezoneError && (
+            <p style={{ color: 'var(--error)', fontSize: '0.6875rem', marginTop: '0.25rem' }}>{timezoneError}</p>
+          )}
+        </div>
       </Card>
 
       {/* Model Roles */}

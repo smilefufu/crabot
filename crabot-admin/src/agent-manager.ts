@@ -512,6 +512,7 @@ export class AgentManager {
       ...(params.skill_ids !== undefined && { skill_ids: params.skill_ids }),
       ...(params.max_iterations !== undefined && { max_iterations: params.max_iterations }),
       ...(params.tools_readonly !== undefined && { tools_readonly: params.tools_readonly }),
+      ...(params.timezone !== undefined && { timezone: params.timezone }),
       ...(params.extra !== undefined && { extra: params.extra }),
     }
 

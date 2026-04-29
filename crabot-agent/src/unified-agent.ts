@@ -7,6 +7,7 @@
  */
 
 import { ModuleBase, type ModuleConfig, type Event, type ModuleId, type TraceStoreInterface } from 'crabot-shared'
+import { resolveTimezone } from './utils/time.js'
 import type {
   UnifiedAgentConfig,
   OrchestrationConfig,
@@ -277,6 +278,7 @@ export class UnifiedAgent extends ModuleBase {
             isGroup, adminPersonality: basePersonality, workerCapabilities: this.getWorkerCapabilitySummary(), skillListing: frontSkillListing,
           }),
           mcpConfigFactory: createMcpConfigs,
+          getTimezone: () => resolveTimezone(this.agentConfig?.timezone),
         })
         this.frontHandlerFormat = frontModelConfig.format as LLMFormat
       }
@@ -414,6 +416,7 @@ export class UnifiedAgent extends ModuleBase {
       systemPrompt: workerPersonality ?? '',
       longTermPreloadLimit: this.orchestrationConfig.worker_long_term_memory_limit,
       extra: this.extra,
+      getTimezone: () => resolveTimezone(this.agentConfig?.timezone),
     }, {
       mcpConfigFactory: createMcpConfigs,
       deps: {
@@ -2129,6 +2132,7 @@ export class UnifiedAgent extends ModuleBase {
               isGroup, adminPersonality: basePersonality, workerCapabilities: this.getWorkerCapabilitySummary(), skillListing: frontSkillListing,
             }),
             mcpConfigFactory: createMcpConfigs,
+            getTimezone: () => resolveTimezone(this.agentConfig?.timezone),
           })
           this.frontHandlerFormat = frontConfig.format as LLMFormat
           console.log(`[${this.config.moduleId}] Front Agent handler created (format: ${frontConfig.format})`)

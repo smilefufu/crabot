@@ -20,6 +20,8 @@ import type {
   HandleMessageResult,
   TraceCallback,
 } from '../types.js'
+import { formatNow, formatTaskCreatedAt } from '../utils/time.js'
+import { formatChannelMessageLine } from '../prompt-manager.js'
 
 export type UserMessageContent = string | ContentBlock[]
 
@@ -31,6 +33,8 @@ export interface FrontHandlerConfig {
    * 无需在 front-tools.ts 重新声明。
    */
   mcpConfigFactory: () => Record<string, McpServer>
+  /** 已解析的 IANA 时区名（如 "Asia/Shanghai"），用于 prompt 时间渲染 */
+  getTimezone: () => string
 }
 
 export interface FrontHandlerLlmConfig {
@@ -45,6 +49,7 @@ export class FrontHandler {
   private toolExecutor: ToolExecutor
   private getSystemPrompt: (isGroup: boolean) => string
   private mcpConfigFactory: () => Record<string, McpServer>
+  private getTimezone: () => string
 
   constructor(
     llmConfig: FrontHandlerLlmConfig,
@@ -56,6 +61,7 @@ export class FrontHandler {
     this.toolExecutor = new ToolExecutor(toolExecutorDeps)
     this.getSystemPrompt = config.getSystemPrompt
     this.mcpConfigFactory = config.mcpConfigFactory
+    this.getTimezone = config.getTimezone
   }
 
   async handleMessage(
@@ -68,7 +74,8 @@ export class FrontHandler {
     // silent 仅在群聊且未被 @ 时可用
     const allowSilent = isGroup && !hasMention
     const imageBlocks = await resolveImageBlocks(messages)
-    const userMessage = buildUserMessage(messages, context, imageBlocks)
+    const timezone = this.getTimezone()
+    const userMessage = buildUserMessage(messages, context, imageBlocks, timezone)
     const rawUserText = messages.map(m => m.content.text ?? '').join('\n').trim()
 
     // 装配 messaging 工具（来自 crab-messaging MCP；与 Worker 同一份实现）
@@ -89,6 +96,7 @@ export class FrontHandler {
         model: this.model,
         toolExecutor: this.toolExecutor,
         messagingTools,
+        timezone,
         traceCallback,
       })
 
@@ -139,11 +147,16 @@ function formatElapsed(ms: number): string {
 export function buildUserMessage(
   messages: ChannelMessage[],
   context: FrontAgentContext,
-  imageBlocks?: Array<{ type: 'image'; source: { type: 'base64' | 'url'; media_type: string; data: string } }>,
+  imageBlocks: Array<{ type: 'image'; source: { type: 'base64' | 'url'; media_type: string; data: string } }> | undefined,
+  timezone: string,
 ): UserMessageContent {
   const parts: string[] = []
   const isGroup = messages[0]?.session?.type === 'group'
   const hasMention = messages.some(m => m.features.is_mention_crab)
+  const now = new Date()
+
+  parts.push(`当前时间: ${formatNow(timezone, now)}`)
+  parts.push('')
 
   if (context.scene_profile) {
     parts.push(`## 场景画像（${context.scene_profile.label}）`)
@@ -185,8 +198,7 @@ export function buildUserMessage(
       // 飞行中任务：注入实时执行快照（避免用户问"现在在干什么"时只能拿事后摘要回答）
       const live = task.live
       if (live) {
-        const elapsedMs = Date.now() - live.started_at
-        parts.push(`  执行已 ${formatElapsed(elapsedMs)} / 第 ${live.current_turn} 轮`)
+        parts.push(`  创建于 ${formatTaskCreatedAt(live.started_at, timezone, now)} / 第 ${live.current_turn} 轮`)
         if (live.last_assistant_text) {
           const t = live.last_assistant_text.trim()
           if (t.length > 0) parts.push(`  上轮模型说: ${t.slice(0, 200)}${t.length > 200 ? '…' : ''}`)
@@ -238,10 +250,7 @@ export function buildUserMessage(
   if (context.recent_messages.length > 0) {
     parts.push(`\n## 最近消息（共 ${context.recent_messages.length} 条）`)
     for (const msg of context.recent_messages) {
-      const sender = msg.sender.platform_display_name
-      const fullText = formatMessageContent(msg)
-      const text = fullText.length > 300 ? fullText.slice(0, 300) + '...[内容截断]' : fullText
-      parts.push(`- ${sender}: ${text}`)
+      parts.push(formatChannelMessageLine(msg, { timezone, now, maxLen: 300 }))
     }
   }
 

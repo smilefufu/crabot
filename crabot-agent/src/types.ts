@@ -80,6 +80,8 @@ export interface AgentLayerConfig {
   specialization?: string
   /** Built-in tool configuration (Admin-controlled) */
   builtin_tool_config?: BuiltinToolConfig
+  /** IANA 时区名（如 "Asia/Shanghai"），用于 prompt 时间感知 */
+  timezone?: string
 }
 
 export interface UnifiedAgentConfig {

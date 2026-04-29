@@ -1,8 +1,22 @@
 # Crabot 项目进度
 
-> 最后更新：2026-04-28 — Agent 配置层简化（per-instance MCP/Skill ID → 全局启用）
+> 最后更新：2026-04-29 — Agent 时间感知（Time Awareness）
 
-## 最新里程碑（2026-04-28 — Simplify Agent MCP/Skill Config）
+## 最新里程碑（2026-04-29 — Time Awareness）
+
+让 Agent 拥有持续的时间感知能力。spec：`crabot-docs/superpowers/specs/2026-04-29-time-awareness-design.md`。
+
+- **新增 `crabot-agent/src/utils/time.ts`**：`resolveTimezone`（含 IANA 校验 + env / Asia/Shanghai 三级 fallback）、`formatNow`（完整：日期+周+时分秒+offset+IANA）、`formatToolTimestamp`（紧凑：HH:MM:SS / 跨日 MM-DD HH:MM:SS）、`formatChannelMessageTime`（同日 HH:MM / 跨日 MM-DD HH:MM / 跨年 YYYY-MM-DD HH:MM）、`formatTaskCreatedAt`。
+- **AgentInstanceConfig 加 `timezone?: string`**：admin types + agent-manager updateConfig 透传 + handleGetAgentConfig 通过 `...config` spread 自动透传给 Agent；web AgentInstanceConfig 镜像类型同步；Admin Web AgentConfig 页面加 timezone input（留空使用 Asia/Shanghai 默认）。
+- **Tool result 时间戳前缀**：`tool-orchestration.ts:executeSingleTool` 所有返回路径（成功/Tool not found/Permission denied/Hook block/Tool execution error）统一在 content 前 prepend `[HH:MM:SS]\n`；`front-loop.ts` tool_result push 等价处理；`ToolCallContext` + `EngineOptions` 加 `timezone` 字段透传。
+- **User message 顶部当前时间**：`buildUserMessage`（front-handler）和 `buildTaskMessage`（worker-handler）顶部拼 `当前时间: 2026-04-29 周三 18:30:00 +08:00 (Asia/Shanghai)`，作为日期/时区基准。
+- **Channel 消息渲染统一**：抽 `prompt-manager.ts:formatChannelMessageLine`，Front recent_messages、Worker recent_messages、Worker trigger_messages 全部切到统一函数（之前 trigger 带 ISO、recent 不带的不一致已修复）。
+- **任务字段调整**：Front handler 任务级别"执行已 X 秒"改"创建于 HH:MM"（绝对时间、cache 友好）；保留"第 N 轮"和工具级别"已 X 秒"。
+- **System prompt 时间约定**：`FRONT_RULES_SHARED` 和 `WORKER_RULES` 各加"## 时间感知"段，约 80 tokens，被 cache，说明 user message / tool_result / 历史消息 / 任务字段的时间格式语义。
+- **测试**：crabot-agent 573/573 + crabot-admin 298/298 + crabot-admin-web tsc 0 errors。手动验证：buildUserMessage 输出含 "[11:57] / [04-28 11:27]" 跨日切换；executeToolBatches 输出含 `[HH:MM:SS]\n<output>` 头部；invalid timezone 自动 fallback Asia/Shanghai。
+- **已否决方案**：ephemeral marker（不写回历史无锚点）、每工具自己加（30+ 工具维护成本）、完整格式（p99 增量 1568 tokens 偏大）、按工具选择性（复杂度收益比不划算）、Hermes 式 system prompt 一次性注入（长任务跨小时失准）。
+
+## 上一里程碑（2026-04-28 — Simplify Agent MCP/Skill Config）
 
 砍掉 Agent 实例配置里的 `mcp_server_ids` / `skill_ids` 维度——这一层从来没被 Admin Web UI 暴露过（AgentConfig.tsx 是 unified 单页，没 instance/role 选择入口），数据模型表达 per-instance 灵活性但 UI 没对应入口暴露，是虚假能力。改成全局启用层：MCP/Skill 在各自管理页 enable/disable，所有 agent 实例共用。spec：`crabot-docs/superpowers/specs/2026-04-27-simplify-agent-mcp-skill-config-design.md`，plan：`crabot-docs/superpowers/plans/2026-04-27-simplify-agent-mcp-skill-config.md`。
 

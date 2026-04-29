@@ -111,6 +111,8 @@ export type PermissionDecision =
 export interface ToolCallContext {
   readonly abortSignal?: AbortSignal
   readonly onProgress?: (message: string) => void
+  /** IANA 时区名（如 "Asia/Shanghai"），用于 tool_result 时间戳渲染 */
+  readonly timezone?: string
 }
 
 export interface ToolCallResult {
@@ -196,6 +198,8 @@ export interface EngineOptions {
   readonly humanMessageQueue?: HumanMessageQueueLike
   readonly hookRegistry?: import('../hooks/hook-registry').HookRegistry
   readonly lspManager?: import('../hooks/types').LspManagerLike
+  /** IANA 时区名（如 "Asia/Shanghai"），用于 tool_result 时间戳渲染 */
+  readonly timezone?: string
 }
 
 export interface HumanMessageQueueLike {

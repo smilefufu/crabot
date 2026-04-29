@@ -56,7 +56,8 @@ import { DELEGATE_TASK_SYSTEM_PROMPT } from './subagent-prompts.js'
 import { HumanMessageQueue } from '../engine/human-message-queue.js'
 import { createCodingExpertHookRegistry, createCliBlockHook } from '../hooks/defaults.js'
 import { HookRegistry } from '../hooks/hook-registry.js'
-import { PromptManager } from '../prompt-manager.js'
+import { PromptManager, formatChannelMessageLine } from '../prompt-manager.js'
+import { formatNow, formatChannelMessageTime, resolveTimezone } from '../utils/time.js'
 
 import * as fs from 'fs'
 import * as path from 'path'
@@ -92,6 +93,8 @@ export interface WorkerHandlerConfig {
   systemPrompt: string
   longTermPreloadLimit?: number
   extra?: Record<string, unknown>
+  /** 解析已校验的 IANA 时区，用于 prompt 时间感知。每次 LLM 调用 / 工具执行前重新读取，反映 admin 配置热更新 */
+  getTimezone?: () => string
 }
 
 export interface WorkerDeps {
@@ -187,6 +190,7 @@ export class WorkerHandler {
   private confirmedSnapshotBlock: string = ''
   private readonly promptManager?: PromptManager
   private readonly subAgentHints: ReadonlyArray<{ readonly toolName: string; readonly workerHint: string }>
+  private readonly getTimezone: () => string
 
   constructor(
     sdkEnv: SdkEnvConfig,
@@ -208,6 +212,7 @@ export class WorkerHandler {
     this.memoryWriter = options?.memoryWriter
     this.promptManager = options?.promptManager
     this.subAgentHints = options?.subAgentHints ?? []
+    this.getTimezone = config.getTimezone ?? (() => resolveTimezone(undefined))
   }
 
   async loadConfirmedSnapshot(): Promise<void> {
@@ -587,6 +592,7 @@ export class WorkerHandler {
           model: this.sdkEnv.modelId,
           supportsVision: this.sdkEnv.supportsVision,
           permissionConfig: initialPermissionConfig,
+          timezone: this.getTimezone(),
           abortSignal: taskState.abortController.signal as AbortSignal,
           humanMessageQueue: humanQueue,
           hookRegistry: workerHookRegistry,
@@ -926,6 +932,12 @@ export class WorkerHandler {
 
   private async buildTaskMessage(task: ExecuteTaskParams['task'], context: WorkerAgentContext): Promise<string | ContentBlock[]> {
     const parts: string[] = []
+    const now = new Date()
+    const timezone = this.getTimezone()
+
+    parts.push(`当前时间: ${formatNow(timezone, now)}`)
+    parts.push('')
+
     if (context.scene_profile) {
       parts.push(`## 场景画像（${context.scene_profile.label}）`)
       parts.push('以下内容是当前场景必须加载并遵守的上下文：')
@@ -939,11 +951,13 @@ export class WorkerHandler {
     if (task.plan) { parts.push(`- 计划: ${task.plan}`) }
 
     // trigger_messages: 用户的原始请求（核心内容）
+    // 多行格式保留：trigger 可能含完整的用户原文，单行渲染会强制截断
     if (context.trigger_messages && context.trigger_messages.length > 0) {
       parts.push(`\n## 用户请求（共 ${context.trigger_messages.length} 条消息）`)
       for (const msg of context.trigger_messages) {
-        const time = msg.platform_timestamp ? ` (${msg.platform_timestamp})` : ''
-        parts.push(`\n### ${msg.sender.platform_display_name}${time}`)
+        const time = msg.platform_timestamp ? formatChannelMessageTime(msg.platform_timestamp, timezone, now) : ''
+        const stamp = time ? ` [${time}]` : ''
+        parts.push(`\n### ${msg.sender.platform_display_name}${stamp}`)
         parts.push(formatMessageContent(msg))
       }
       if (task.task_description) {
@@ -998,7 +1012,7 @@ export class WorkerHandler {
     if (context.recent_messages && context.recent_messages.length > 0) {
       parts.push(`\n## 最近相关消息（共 ${context.recent_messages.length} 条）`)
       for (const m of context.recent_messages) {
-        parts.push(`- ${m.sender.platform_display_name}: ${formatMessageContent(m)}`)
+        parts.push(formatChannelMessageLine(m, { timezone, now, maxLen: 500 }))
       }
     }
 

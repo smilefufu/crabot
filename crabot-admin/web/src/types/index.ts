@@ -225,6 +225,7 @@ export interface AgentInstanceConfig {
   skill_ids?: string[]
   max_iterations?: number
   tools_readonly?: boolean
+  timezone?: string
   extra?: Record<string, unknown>
 }
 

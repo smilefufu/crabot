@@ -74,8 +74,8 @@ describe('executeToolBatches', () => {
     // If sequential, would take >=60ms. Parallel should be ~50ms.
     expect(elapsed).toBeLessThan(80)
     expect(results).toHaveLength(2)
-    expect(results[0].content).toBe('slow_done')
-    expect(results[1].content).toBe('fast_done')
+    expect(results[0].content).toContain('slow_done')
+    expect(results[1].content).toContain('fast_done')
   })
 
   it('results in original order regardless of completion order', async () => {
@@ -93,9 +93,9 @@ describe('executeToolBatches', () => {
 
     // slow_read finishes after fast_read, but should be first in results
     expect(results[0].tool_use_id).toBe('first')
-    expect(results[0].content).toBe('slow_done')
+    expect(results[0].content).toContain('slow_done')
     expect(results[1].tool_use_id).toBe('second')
-    expect(results[1].content).toBe('fast_done')
+    expect(results[1].content).toContain('fast_done')
   })
 
   it('serial write tools execute sequentially', async () => {
@@ -165,7 +165,7 @@ describe('executeToolBatches', () => {
 
     const okResult = results.find((r) => r.tool_use_id === 'ok1')!
     expect(okResult.is_error).toBe(false)
-    expect(okResult.content).toBe('fast_done')
+    expect(okResult.content).toContain('fast_done')
   })
 
   it('unknown tool returns error result', async () => {
@@ -180,6 +180,6 @@ describe('executeToolBatches', () => {
 
     expect(results).toHaveLength(1)
     expect(results[0].is_error).toBe(true)
-    expect(results[0].content).toBe('Tool not found: nonexistent_tool')
+    expect(results[0].content).toContain('Tool not found: nonexistent_tool')
   })
 })

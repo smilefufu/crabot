@@ -31,6 +31,7 @@ import type {
 } from '../types.js'
 import { getAllFrontTools, DECISION_TOOL_NAMES, type DecisionToolName } from './front-tools.js'
 import { isMcpProxyToolName } from './mcp-tool-bridge.js'
+import { stampToolResult } from '../utils/time.js'
 
 const FRONT_MAX_ROUNDS = 5
 
@@ -51,11 +52,13 @@ export interface FrontLoopParams {
    * 工具名带 `mcp__crab-messaging__` 前缀，含可执行的 `call`，front-loop 直接调用其 handler。
    */
   readonly messagingTools: readonly ToolDefinition[]
+  /** IANA 时区名，用于 tool_result 时间戳渲染 */
+  readonly timezone: string
   readonly traceCallback?: TraceCallback
 }
 
 export async function runFrontLoop(params: FrontLoopParams): Promise<FrontLoopResult> {
-  const { systemPrompt, userMessage, rawUserText, allowSilent, activeTaskIds, adapter, model, toolExecutor, messagingTools, traceCallback } = params
+  const { systemPrompt, userMessage, rawUserText, allowSilent, activeTaskIds, adapter, model, toolExecutor, messagingTools, timezone, traceCallback } = params
   const tools: ToolDefinition[] = getAllFrontTools(allowSilent, activeTaskIds, messagingTools)
   const mcpToolByName = new Map(messagingTools.map(t => [t.name, t]))
   const messages: EngineMessage[] = [createUserMessage(userMessage)]
@@ -166,7 +169,7 @@ export async function runFrontLoop(params: FrontLoopParams): Promise<FrontLoopRe
             traceCallback?.onToolCallEnd(toolSpanId, result.output.slice(0, 200), result.isError ? result.output : undefined)
           }
 
-          toolResultMessages.push(createToolResultMessage(block.id, result.output, result.isError))
+          toolResultMessages.push(createToolResultMessage(block.id, stampToolResult(result.output, timezone), result.isError))
 
           if (!result.isError) {
             toolHistory.push({

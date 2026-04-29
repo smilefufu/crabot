@@ -207,7 +207,7 @@ describe('executeToolBatches with permission config (integration)', () => {
     const results = await executeToolBatches(batches, tools, undefined, config)
     expect(results).toHaveLength(1)
     expect(results[0].is_error).toBe(false)
-    expect(results[0].content).toBe('read_file_ok')
+    expect(results[0].content).toContain('read_file_ok')
   })
 
   it('no permission config → all tools execute normally', async () => {
@@ -226,7 +226,7 @@ describe('executeToolBatches with permission config (integration)', () => {
     const results = await executeToolBatches(batches, tools)
     expect(results).toHaveLength(1)
     expect(results[0].is_error).toBe(false)
-    expect(results[0].content).toBe('write_file_ok')
+    expect(results[0].content).toContain('write_file_ok')
   })
 })
 

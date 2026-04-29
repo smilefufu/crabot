@@ -49,6 +49,6 @@ describe('tool-orchestration with hooks', () => {
     const results = await executeToolBatches(batches, tools, {})
 
     expect(results[0].is_error).toBe(false)
-    expect(results[0].content).toBe('wrote:/tmp/x.ts')
+    expect(results[0].content).toContain('wrote:/tmp/x.ts')
   })
 })

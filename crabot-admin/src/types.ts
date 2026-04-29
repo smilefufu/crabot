@@ -1322,6 +1322,8 @@ export interface AgentInstanceConfig {
   max_iterations?: number
   /** 工具是否只读（Front 默认 true） */
   tools_readonly?: boolean
+  /** IANA 时区名（如 "Asia/Shanghai"），用于 prompt 时间感知。缺省时 fallback 到 env CRABOT_DEFAULT_TIMEZONE / Asia/Shanghai */
+  timezone?: string
   /** 扩展配置（非协议固定字段，由 Agent 实现自定义，见 protocol-agent-v2 §6） */
   extra?: Record<string, unknown>
 }
@@ -1419,6 +1421,7 @@ export interface UpdateAgentConfigParams {
   skill_ids?: string[]
   max_iterations?: number
   tools_readonly?: boolean
+  timezone?: string
   extra?: Record<string, unknown>
 }
 
