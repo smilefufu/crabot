@@ -34,32 +34,26 @@ jobs:
           node-version: '22'
           cache: 'pnpm'
 
-      - name: Install dependencies
+      - name: Install and Build
         shell: bash
         run: |
           pnpm install
-          for mod in crabot-shared crabot-core crabot-admin crabot-agent \
-                     crabot-channel-host crabot-channel-telegram crabot-channel-wechat \
-                     crabot-mcp-tools; do
-            if [ -d "$mod" ]; then
-              (cd "$mod" && pnpm install)
-            fi
-          done
 
-      - name: Build
-        shell: bash
-        run: |
-          # shared 必须先编译（其他模块依赖它）
-          (cd crabot-shared && pnpm run build)
+          # crabot-shared 必须先 install + build，其他模块通过 file: 引用它。
+          # pnpm 对 file: 依赖在 install 时做快照复制，所以其他模块必须在
+          # crabot-shared 已有 dist/ 之后再 install，否则拿到的是空快照。
+          (cd crabot-shared && pnpm install && pnpm run build)
+
           for mod in crabot-core crabot-agent \
                      crabot-channel-host crabot-channel-telegram crabot-channel-wechat \
                      crabot-mcp-tools; do
             if [ -d "$mod" ]; then
-              (cd "$mod" && pnpm run build)
+              (cd "$mod" && pnpm install && pnpm run build)
             fi
           done
-          # admin 单独：跑 build + build:web（含前端 install）
-          (cd crabot-admin && pnpm run build && pnpm run build:web)
+
+          # admin 单独：build 前需要 install（含前端依赖）
+          (cd crabot-admin && pnpm install && pnpm run build && pnpm run build:web)
           pnpm run build:cli
 
       - name: Package (Unix)
