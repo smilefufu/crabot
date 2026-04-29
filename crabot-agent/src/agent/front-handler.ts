@@ -247,10 +247,14 @@ export function buildUserMessage(
   }
 
   // ── 最近消息 ──
+  // 越靠近当前消息越重要，给更大的字符预算，保留完整的行动 offer / 决策上下文。
   if (context.recent_messages.length > 0) {
     parts.push(`\n## 最近消息（共 ${context.recent_messages.length} 条）`)
-    for (const msg of context.recent_messages) {
-      parts.push(formatChannelMessageLine(msg, { timezone, now, maxLen: 300 }))
+    const total = context.recent_messages.length
+    for (let i = 0; i < total; i++) {
+      const distFromEnd = total - 1 - i
+      const maxLen = distFromEnd < 3 ? 2000 : distFromEnd < 10 ? 600 : 300
+      parts.push(formatChannelMessageLine(context.recent_messages[i], { timezone, now, maxLen }))
     }
   }
 
