@@ -4348,7 +4348,7 @@ export class AdminModule extends ModuleBase {
     }
 
     // 自验证：确认 server 能响应
-    const ok = await oauthMod.selfCheckCallbackServer()
+    const ok = await oauthMod.selfCheckCallbackServer(redirectHost)
     if (!ok) {
       oauthMod.cancelOAuthFlow()
       this.oauthLoginPromise = null

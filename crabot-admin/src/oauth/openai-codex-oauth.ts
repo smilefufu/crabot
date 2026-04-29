@@ -45,6 +45,17 @@ function resolveBindAddress(host: string): string {
 }
 
 /**
+ * 解析自验证请求应访问的地址。
+ * 如果 callback server 绑定到具体 IP，自验证也必须访问该 IP；否则 127.0.0.1 上没有监听会误判失败。
+ * DNS 名称绑定到 0.0.0.0，仍可通过 127.0.0.1 从本机验证。
+ */
+export function resolveSelfCheckHost(host: string): string {
+  if (isLoopbackHost(host)) return '127.0.0.1'
+  if (net.isIP(host)) return host
+  return '127.0.0.1'
+}
+
+/**
  * 从可选的显式值和 HTTP Host 头中解析回调使用的主机名。
  * 用于 Admin 模块决定 OAuth redirect_uri 的域名——让 OpenAI 回调到浏览器实际访问的地址。
  */
@@ -385,9 +396,9 @@ export function isOAuthPending(): boolean {
 
 /**
  * 使用 node:http 原生请求（绕过 undici globalDispatcher 代理）验证回调 server 是否属于本实例。
- * 向 127.0.0.1:1455/__selfcheck?nonce=<随机值> 发送 GET，校验响应体是否原样返回该 nonce。
+ * 向 callback server 实际可达地址发送 GET，校验响应体是否原样返回该 nonce。
  */
-export function selfCheckCallbackServer(): Promise<boolean> {
+export function selfCheckCallbackServer(redirectHost: string = DEFAULT_REDIRECT_HOST): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false
     const done = (value: boolean): void => {
@@ -396,9 +407,10 @@ export function selfCheckCallbackServer(): Promise<boolean> {
       resolve(value)
     }
     const nonce = crypto.randomBytes(16).toString('hex')
+    const host = resolveSelfCheckHost(redirectHost)
     const req = http.request(
       {
-        host: '127.0.0.1',
+        host,
         port: OAUTH_CONFIG.callbackPort,
         path: `/__selfcheck?nonce=${nonce}`,
         method: 'GET',

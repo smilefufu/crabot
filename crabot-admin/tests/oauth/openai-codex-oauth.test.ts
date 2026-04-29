@@ -7,6 +7,7 @@ import {
   extractTokenInfo,
   selfCheckCallbackServer,
   resolveRedirectHost,
+  resolveSelfCheckHost,
 } from '../../src/oauth/openai-codex-oauth.js'
 
 describe('openai-codex-oauth', () => {
@@ -72,6 +73,21 @@ describe('openai-codex-oauth', () => {
 
     it('Host 头格式异常时回退到 localhost', () => {
       expect(resolveRedirectHost(undefined, 'not valid')).toBe('localhost')
+    })
+  })
+
+  describe('resolveSelfCheckHost', () => {
+    it('loopback redirect host 使用 127.0.0.1 自检', () => {
+      expect(resolveSelfCheckHost('localhost')).toBe('127.0.0.1')
+      expect(resolveSelfCheckHost('127.0.0.1')).toBe('127.0.0.1')
+    })
+
+    it('局域网 IP redirect host 使用同一个 IP 自检', () => {
+      expect(resolveSelfCheckHost('192.168.1.10')).toBe('192.168.1.10')
+    })
+
+    it('域名 redirect host 绑定 0.0.0.0 时仍可用 127.0.0.1 自检', () => {
+      expect(resolveSelfCheckHost('crabot.local')).toBe('127.0.0.1')
     })
   })
 
