@@ -1,5 +1,6 @@
 """Long-term v2 RPC handlers."""
 import asyncio
+import logging
 from datetime import datetime, timezone
 
 from src.long_term_v2.maintenance import run_maintenance as _run_maintenance, MaintenanceConfig
@@ -24,6 +25,8 @@ from src.long_term_v2.paths import entry_path
 from src.long_term_v2.recall_pipeline import RecallPipeline
 from src.long_term_v2.agentic_tools import AgenticTools
 
+
+logger = logging.getLogger(__name__)
 
 _UPDATABLE_FIELDS = frozenset({
     "brief", "tags", "entities", "maturity",
@@ -70,11 +73,14 @@ class LongTermV2Rpc:
         self.index.upsert(entry, path=path, status=status)
         if self.embedder is not None:
             fields = [(f, t) for f, t in texts_for_entry(entry).items() if t]
-            vecs = await asyncio.gather(
-                *(embed_text_async(t, self.embedder) for _, t in fields)
-            )
-            for (field, _), vec in zip(fields, vecs):
-                self.index.upsert_embedding(mem_id, field, vec)
+            try:
+                vecs = await asyncio.gather(
+                    *(embed_text_async(t, self.embedder) for _, t in fields)
+                )
+                for (field, _), vec in zip(fields, vecs):
+                    self.index.upsert_embedding(mem_id, field, vec)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("long-term embedding index skipped: %s", e)
         return {"id": mem_id, "status": "ok"}
 
     async def search_long_term(self, params: dict) -> dict:

@@ -91,7 +91,7 @@ class MemoryModule:
         self._lt_v2_rpc = LongTermV2Rpc(
             store=self._lt_v2_store,
             index=self._lt_v2_index,
-            embedder=self.embedding_client,
+            embedder=self._long_term_embedder(),
             llm=self.llm_client,
             reranker=reranker,
         )
@@ -115,6 +115,19 @@ class MemoryModule:
             self.config.embedding.base_url and
             self.config.embedding.model
         )
+
+    def is_configured(self) -> bool:
+        """Memory v2 的基础能力只要求 LLM；embedding 是可选增强。"""
+        return self.is_llm_configured()
+
+    def _long_term_embedder(self):
+        """长期记忆 v2 仅在 embedding 配置完整时启用 dense 索引。"""
+        return self.embedding_client if self.is_embedding_configured() else None
+
+    def _sync_long_term_embedder(self) -> None:
+        embedder = self._long_term_embedder()
+        self._lt_v2_rpc.embedder = embedder
+        self._lt_v2_rpc.pipeline.embedder = embedder
 
     def _register_routes(self):
         """注册 JSON-RPC 路由"""
@@ -208,7 +221,7 @@ class MemoryModule:
                 "total_tokens": (short_count * 100 + long_count * 500),
                 "embedding_model_status": "ready" if self.is_embedding_configured() else "not_configured",
                 "llm_status": "ready" if self.is_llm_configured() else "not_configured",
-                "configured": self.is_llm_configured() and self.is_embedding_configured(),
+                "configured": self.is_configured(),
             },
         }
 
@@ -221,7 +234,7 @@ class MemoryModule:
     async def _get_status(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """获取配置状态"""
         return {
-            "configured": self.is_llm_configured() and self.is_embedding_configured(),
+            "configured": self.is_configured(),
             "llm_configured": self.is_llm_configured(),
             "embedding_configured": self.is_embedding_configured(),
             "version": self.config.version
@@ -231,6 +244,13 @@ class MemoryModule:
         """写入短期记忆"""
         if not self.is_llm_configured():
             raise ValueError("Memory module not configured. Please configure LLM settings in Admin.")
+        if not self.is_embedding_configured():
+            logger.info("Short-term memory write skipped: embedding not configured")
+            return {
+                "memory": None,
+                "skipped": True,
+                "reason": "embedding_not_configured",
+            }
         write_params = WriteShortTermParams(**params)
         memory = await self.short_term.write(write_params)
 
@@ -257,7 +277,8 @@ class MemoryModule:
     async def _search_short_term(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """检索短期记忆"""
         if not self.is_embedding_configured():
-            raise ValueError("Memory module not configured. Please configure Embedding settings in Admin.")
+            logger.info("Short-term memory search skipped: embedding not configured")
+            return {"results": []}
         search_params = SearchShortTermParams(**params)
         results = await self.short_term.search(search_params)
         return {"results": [m.model_dump() for m in results]}
@@ -409,6 +430,7 @@ class MemoryModule:
             # 维度可能变了，让 VectorStore 下次操作时重新校验
             if emb.get("model") is not None or emb.get("dimension") is not None:
                 self.vector_store._tables_initialized = False
+            self._sync_long_term_embedder()
             updated.append("embedding")
 
         logger.info("Config hot-reloaded: %s", updated)

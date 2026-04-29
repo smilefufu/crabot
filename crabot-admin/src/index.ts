@@ -4454,9 +4454,6 @@ export class AdminModule extends ModuleBase {
     if (!globalConfig.default_llm_provider_id || !globalConfig.default_llm_model_id) {
       missing.push('全局 LLM 模型未配置')
     }
-    if (!globalConfig.default_embedding_provider_id || !globalConfig.default_embedding_model_id) {
-      missing.push('全局 Embedding 模型未配置')
-    }
 
     // 检查 Provider 是否存在
     if (globalConfig.default_llm_provider_id) {

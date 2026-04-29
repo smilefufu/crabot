@@ -162,6 +162,148 @@ async def test_write_long_term(memory_module):
 
 
 @pytest.mark.asyncio
+async def test_v2_write_long_term_does_not_require_embedding(tmp_path):
+    """未配置 embedding 时，Memory v2 写入应跳过向量索引。"""
+    config = MemoryConfig()
+    config.storage.data_dir = str(tmp_path)
+    module = MemoryModule(config)
+
+    async def _fail_embed(_text: str):
+        raise AssertionError("embedding should not be called")
+
+    module.embedding_client.embed_single = _fail_embed
+
+    try:
+        result = await module._dispatch("write_long_term", {
+            "type": "fact",
+            "brief": "不依赖 embedding 的事实",
+            "content": "Memory v2 在未配置 embedding 时仍应可写入。",
+            "author": "user",
+            "source_ref": {"type": "manual"},
+            "source_trust": 5,
+            "content_confidence": 5,
+            "importance_factors": {
+                "proximity": 0.5, "surprisal": 0.5,
+                "entity_priority": 0.5, "unambiguity": 0.5,
+            },
+            "event_time": "2026-04-29T00:00:00Z",
+        })
+        assert result["status"] == "ok"
+    finally:
+        module.vector_store.close()
+        module.sqlite_store.close()
+        module.scene_profile_store.close()
+
+
+@pytest.mark.asyncio
+async def test_v2_write_long_term_continues_when_optional_embedding_fails(tmp_path):
+    """即便已配置 embedding 但调用失败，v2 写入仍应保留文本索引。"""
+    config = MemoryConfig()
+    config.storage.data_dir = str(tmp_path)
+    config.embedding.api_key = "test-key"
+    config.embedding.base_url = "http://localhost:11434/v1"
+    config.embedding.model = "test-embedding"
+    module = MemoryModule(config)
+
+    async def _fail_embed(_text: str):
+        raise RuntimeError("embedding backend unavailable")
+
+    module.embedding_client.embed_single = _fail_embed
+
+    try:
+        result = await module._dispatch("write_long_term", {
+            "type": "fact",
+            "brief": "embedding 失败也能写入",
+            "content": "Memory v2 应保留 SQLite/BM25 可召回索引。",
+            "author": "user",
+            "source_ref": {"type": "manual"},
+            "source_trust": 5,
+            "content_confidence": 5,
+            "importance_factors": {
+                "proximity": 0.5, "surprisal": 0.5,
+                "entity_priority": 0.5, "unambiguity": 0.5,
+            },
+            "event_time": "2026-04-29T00:00:00Z",
+        })
+        assert result["status"] == "ok"
+    finally:
+        module.vector_store.close()
+        module.sqlite_store.close()
+        module.scene_profile_store.close()
+
+
+@pytest.mark.asyncio
+async def test_search_short_term_without_embedding_returns_empty(tmp_path):
+    """未配置 embedding 时，短期记忆搜索降级为空结果而不是 500。"""
+    config = MemoryConfig()
+    config.storage.data_dir = str(tmp_path)
+    module = MemoryModule(config)
+
+    try:
+        result = await module._search_short_term(SearchShortTermParams(
+            query="任意查询",
+            limit=10,
+        ).model_dump())
+        assert result == {"results": []}
+    finally:
+        module.vector_store.close()
+        module.sqlite_store.close()
+        module.scene_profile_store.close()
+
+
+@pytest.mark.asyncio
+async def test_write_short_term_without_embedding_is_skipped(tmp_path):
+    """未配置 embedding 时，短期记忆写入应跳过而不是触发远程 embedding。"""
+    config = MemoryConfig()
+    config.storage.data_dir = str(tmp_path)
+    config.llm.api_key = "test-key"
+    config.llm.base_url = "http://localhost:11434/v1"
+    config.llm.model = "test-model"
+    module = MemoryModule(config)
+
+    async def _fail_embed(_text: str):
+        raise AssertionError("embedding should not be called")
+
+    module.embedding_client.embed_single = _fail_embed
+
+    try:
+        result = await module._write_short_term(WriteShortTermParams(
+            content="短期记忆在无 embedding 时不写入",
+            source=MemorySource(type="conversation"),
+        ).model_dump())
+        assert result == {
+            "memory": None,
+            "skipped": True,
+            "reason": "embedding_not_configured",
+        }
+    finally:
+        module.vector_store.close()
+        module.sqlite_store.close()
+        module.scene_profile_store.close()
+
+
+@pytest.mark.asyncio
+async def test_status_configured_does_not_require_embedding(tmp_path):
+    """Memory v2 改版后，整体 configured 不应要求 embedding。"""
+    config = MemoryConfig()
+    config.storage.data_dir = str(tmp_path)
+    config.llm.api_key = "test-key"
+    config.llm.base_url = "http://localhost:11434/v1"
+    config.llm.model = "test-model"
+    module = MemoryModule(config)
+
+    try:
+        result = await module._get_status({})
+        assert result["configured"] is True
+        assert result["llm_configured"] is True
+        assert result["embedding_configured"] is False
+    finally:
+        module.vector_store.close()
+        module.sqlite_store.close()
+        module.scene_profile_store.close()
+
+
+@pytest.mark.asyncio
 async def test_health(memory_module):
     """测试健康检查"""
     result = await memory_module._health({})
