@@ -32,14 +32,55 @@ import { useToast } from '../../contexts/ToastContext'
 
 const DEFAULT_TIMEZONE_HINT = 'Asia/Shanghai'
 
-function isValidTimezone(tz: string): boolean {
-  try {
-    Intl.DateTimeFormat(undefined, { timeZone: tz })
-    return true
-  } catch {
-    return false
-  }
-}
+const TIMEZONE_GROUPS: ReadonlyArray<{ label: string; options: ReadonlyArray<{ value: string; label: string }> }> = [
+  {
+    label: '亚洲',
+    options: [
+      { value: 'Asia/Shanghai', label: 'Asia/Shanghai — 中国（+08:00）' },
+      { value: 'Asia/Hong_Kong', label: 'Asia/Hong_Kong — 香港（+08:00）' },
+      { value: 'Asia/Taipei', label: 'Asia/Taipei — 台北（+08:00）' },
+      { value: 'Asia/Singapore', label: 'Asia/Singapore — 新加坡（+08:00）' },
+      { value: 'Asia/Tokyo', label: 'Asia/Tokyo — 日本（+09:00）' },
+      { value: 'Asia/Seoul', label: 'Asia/Seoul — 韩国（+09:00）' },
+      { value: 'Asia/Bangkok', label: 'Asia/Bangkok — 泰国（+07:00）' },
+      { value: 'Asia/Kolkata', label: 'Asia/Kolkata — 印度（+05:30）' },
+      { value: 'Asia/Dubai', label: 'Asia/Dubai — 阿联酋（+04:00）' },
+    ],
+  },
+  {
+    label: '美洲',
+    options: [
+      { value: 'America/New_York', label: 'America/New_York — 美东（-05:00 / 夏令时 -04:00）' },
+      { value: 'America/Chicago', label: 'America/Chicago — 美中（-06:00 / 夏令时 -05:00）' },
+      { value: 'America/Denver', label: 'America/Denver — 美山地（-07:00 / 夏令时 -06:00）' },
+      { value: 'America/Los_Angeles', label: 'America/Los_Angeles — 美西（-08:00 / 夏令时 -07:00）' },
+      { value: 'America/Toronto', label: 'America/Toronto — 加拿大东（-05:00 / 夏令时 -04:00）' },
+      { value: 'America/Sao_Paulo', label: 'America/Sao_Paulo — 巴西（-03:00）' },
+    ],
+  },
+  {
+    label: '欧洲',
+    options: [
+      { value: 'Europe/London', label: 'Europe/London — 英国（+00:00 / 夏令时 +01:00）' },
+      { value: 'Europe/Paris', label: 'Europe/Paris — 法国（+01:00 / 夏令时 +02:00）' },
+      { value: 'Europe/Berlin', label: 'Europe/Berlin — 德国（+01:00 / 夏令时 +02:00）' },
+      { value: 'Europe/Moscow', label: 'Europe/Moscow — 俄罗斯（+03:00）' },
+    ],
+  },
+  {
+    label: '大洋洲',
+    options: [
+      { value: 'Australia/Sydney', label: 'Australia/Sydney — 澳大利亚东（+10:00 / 夏令时 +11:00）' },
+      { value: 'Pacific/Auckland', label: 'Pacific/Auckland — 新西兰（+12:00 / 夏令时 +13:00）' },
+    ],
+  },
+  {
+    label: '其他',
+    options: [
+      { value: 'UTC', label: 'UTC — 协调世界时（+00:00）' },
+    ],
+  },
+]
 
 interface AgentUnifiedConfig {
   system_prompt: string
@@ -66,7 +107,6 @@ export const AgentConfig: React.FC = () => {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
-  const [timezoneError, setTimezoneError] = useState('')
 
   useEffect(() => {
     loadData()
@@ -107,16 +147,11 @@ export const AgentConfig: React.FC = () => {
   }
 
   const handleSave = async () => {
-    const trimmedTimezone = config.timezone.trim()
-    if (trimmedTimezone && !isValidTimezone(trimmedTimezone)) {
-      toast.error('时区无效，请填 IANA 时区名（如 Asia/Shanghai）或留空使用默认')
-      return
-    }
     try {
       setSaving(true)
       await agentService.updateConfig({
         system_prompt: config.system_prompt,
-        timezone: trimmedTimezone || undefined,
+        timezone: config.timezone || undefined,
         model_config: config.model_roles,
         extra: Object.keys(config.extra).length > 0 ? config.extra : undefined,
       })
@@ -203,29 +238,22 @@ export const AgentConfig: React.FC = () => {
         <div style={{ marginTop: '0.875rem' }}>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.5rem', marginBottom: '0.25rem' }}>
             <label style={{ fontWeight: 500, fontSize: '0.8125rem' }}>时区</label>
-            <span style={{ color: 'var(--text-muted)', fontSize: '0.6875rem' }}>留空使用默认（{DEFAULT_TIMEZONE_HINT}）</span>
+            <span style={{ color: 'var(--text-muted)', fontSize: '0.6875rem' }}>影响 prompt 中"当前时间"与工具结果时间戳的显示</span>
           </div>
-          <p style={{ color: 'var(--text-secondary)', fontSize: '0.6875rem', marginBottom: '0.375rem' }}>
-            影响 Agent prompt 中的"当前时间"和工具结果时间戳显示。填 IANA 时区名（如 {DEFAULT_TIMEZONE_HINT}、Asia/Tokyo、UTC、Europe/London）。
-          </p>
-          <input
-            className="input"
-            type="text"
+          <select
+            className="select"
             value={config.timezone}
-            onChange={(e) => {
-              const value = e.target.value
-              setConfig((prev) => ({ ...prev, timezone: value }))
-              if (timezoneError) setTimezoneError('')
-            }}
-            onBlur={(e) => {
-              const trimmed = e.target.value.trim()
-              setTimezoneError(trimmed && !isValidTimezone(trimmed) ? '无效的 IANA 时区名' : '')
-            }}
-            placeholder={DEFAULT_TIMEZONE_HINT}
-          />
-          {timezoneError && (
-            <p style={{ color: 'var(--error)', fontSize: '0.6875rem', marginTop: '0.25rem' }}>{timezoneError}</p>
-          )}
+            onChange={(e) => setConfig((prev) => ({ ...prev, timezone: e.target.value }))}
+          >
+            <option value="">使用默认（{DEFAULT_TIMEZONE_HINT}）</option>
+            {TIMEZONE_GROUPS.map((group) => (
+              <optgroup key={group.label} label={group.label}>
+                {group.options.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
         </div>
       </Card>
 
