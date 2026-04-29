@@ -50,8 +50,21 @@ detect_platform() {
   echo "${os}-${arch}"
 }
 
-# --- Node.js 检查/安装 ---
+# --- Node.js 检查/安装（统一走 nvm，避免与系统包冲突）---
+NVM_INSTALLER_URL="https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh"
+
+load_nvm() {
+  # nvm 是 shell function，必须 source 才能调用
+  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  if [ -s "$NVM_DIR/nvm.sh" ]; then
+    # shellcheck disable=SC1091
+    \. "$NVM_DIR/nvm.sh" >/dev/null 2>&1 || true
+  fi
+}
+
 ensure_node() {
+  load_nvm
+
   if command -v node &>/dev/null; then
     local current
     current=$(node -v | tr -d 'v')
@@ -59,21 +72,26 @@ ensure_node() {
       info "Node.js $current found (>= $REQUIRED_NODE_VERSION)"
       return
     fi
-    warn "Node.js $current found, but >= $REQUIRED_NODE_VERSION required"
+    warn "Node.js $current found, but >= $REQUIRED_NODE_VERSION required; switching via nvm"
   fi
 
-  section "Installing Node.js"
-  if command -v nvm &>/dev/null; then
-    nvm install 22
-    nvm use 22
-  elif command -v brew &>/dev/null; then
-    brew install node@22
-  else
-    # 使用 NodeSource 安装脚本
-    curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-    sudo apt-get install -y nodejs
+  section "Installing Node.js (via nvm)"
+
+  if [ ! -s "$NVM_DIR/nvm.sh" ]; then
+    info "Installing nvm..."
+    curl -fsSL "$NVM_INSTALLER_URL" | bash
+    load_nvm
+    if [ ! -s "$NVM_DIR/nvm.sh" ]; then
+      error "nvm installation failed (NVM_DIR=$NVM_DIR)"
+      exit 1
+    fi
   fi
-  info "Node.js $(node -v) installed"
+
+  nvm install 22
+  nvm use 22
+  nvm alias default 22
+
+  info "Node.js $(node -v) installed via nvm"
 }
 
 # --- uv 检查/安装 ---
@@ -222,79 +240,12 @@ main() {
     echo "  export PATH=\"$bin_dir:\$PATH\""
   fi
 
-  # 生成 .env（含密码、ADMIN_ENCRYPTION_KEY、CRABOT_JWT_SECRET）
-  section "Environment Configuration"
-  local crabot_root
-  if [ "$FROM_SOURCE" = true ]; then
-    crabot_root="$(pwd)"
-  else
-    crabot_root="$INSTALL_DIR"
-  fi
-  setup_env_file "$crabot_root"
-
   section "Done!"
-  info "Run 'crabot start' to start Crabot."
+  info "Run 'crabot start' to start Crabot (will prompt for admin password on first run)."
   info "Run 'crabot --help' for all commands."
 }
 
-# --- .env 生成（密码 + 加密密钥 + JWT secret）---
-setup_env_file() {
-  local root="$1"
-  local env_file="$root/.env"
-  local example="$root/.env.example"
-
-  if [ -f "$env_file" ] && grep -q CRABOT_ADMIN_PASSWORD "$env_file" 2>/dev/null; then
-    info ".env already configured at $env_file"
-    return 0
-  fi
-
-  if [ ! -f "$example" ]; then
-    error ".env.example not found at $example"
-    exit 1
-  fi
-
-  # 自动生成密钥
-  local jwt_secret encryption_key
-  jwt_secret="$(openssl rand -hex 32 2>/dev/null || head -c 64 /dev/urandom | xxd -p | tr -d '\n' | head -c 64)"
-  encryption_key="$(openssl rand -hex 32 2>/dev/null || head -c 64 /dev/urandom | xxd -p | tr -d '\n' | head -c 64)"
-
-  # 获取管理员密码
-  local password="" confirm=""
-  while true; do
-    printf "%s" "Set admin password: " >/dev/tty
-    read -rs password </dev/tty
-    echo >/dev/tty
-    if [ ${#password} -lt 4 ]; then
-      warn "Password must be at least 4 characters."
-      continue
-    fi
-    printf "%s" "Confirm password: " >/dev/tty
-    read -rs confirm </dev/tty
-    echo >/dev/tty
-    if [ "$password" != "$confirm" ]; then
-      warn "Passwords do not match. Try again."
-      continue
-    fi
-    break
-  done
-
-  # 用 awk 替换占位符（不依赖 sed/python，避免特殊字符注入）
-  cp "$example" "$env_file"
-  local tmp
-  tmp="$(mktemp)"
-  awk -v "v1=$password" \
-      -v "v2=$jwt_secret" \
-      -v "v3=$encryption_key" \
-      'BEGIN{FS=OFS="="}
-       /^CRABOT_ADMIN_PASSWORD=/{$2=v1}
-       /^CRABOT_JWT_SECRET=/{$2=v2}
-       /^ADMIN_ENCRYPTION_KEY=/{$2=v3}
-       {print}' "$env_file" > "$tmp"
-  mv "$tmp" "$env_file"
-  chmod 600 "$env_file"
-
-  mkdir -p "$root/data/admin"
-  info ".env saved to $env_file"
-}
-
-main "$@"
+# 仅在被直接执行时跑 main；被 source 时（例如测试）只暴露函数。
+if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then
+  main "$@"
+fi

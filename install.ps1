@@ -130,44 +130,6 @@ if (-not (Test-Path $cmdPath)) {
     '@echo off`nnode "%~dp0cli.mjs" %*' | Out-File -FilePath $cmdPath -Encoding ASCII
 }
 
-# 设置管理密码
-Write-Host "`n== Admin Password ==`n" -ForegroundColor Cyan
-$dataDir = if ($FromSource) { Join-Path (Get-Location) "data" } else { Join-Path $InstallDir "data" }
-$adminDir = Join-Path $dataDir "admin"
-$adminEnv = Join-Path $adminDir ".env"
-New-Item -ItemType Directory -Force -Path $adminDir | Out-Null
-
-$needPassword = $true
-if (Test-Path $adminEnv) {
-    $content = Get-Content $adminEnv -Raw
-    if ($content -match "CRABOT_ADMIN_PASSWORD=") {
-        Write-Info "Admin password already configured."
-        $needPassword = $false
-    }
-}
-
-if ($needPassword) {
-    while ($true) {
-        $secPass = Read-Host "Set admin password" -AsSecureString
-        $password = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-            [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secPass))
-        if ($password.Length -lt 4) {
-            Write-Warn "Password must be at least 4 characters."
-            continue
-        }
-        $secConfirm = Read-Host "Confirm password" -AsSecureString
-        $confirm = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-            [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secConfirm))
-        if ($password -ne $confirm) {
-            Write-Warn "Passwords do not match. Try again."
-            continue
-        }
-        break
-    }
-    Add-Content -Path $adminEnv -Value "CRABOT_ADMIN_PASSWORD=$password"
-    Write-Info "Password saved."
-}
-
 Write-Host "`n== Done! ==`n" -ForegroundColor Cyan
-Write-Info "Run 'crabot start' to start Crabot."
+Write-Info "Run 'crabot start' to start Crabot (will prompt for admin password on first run)."
 Write-Info "Run 'crabot --help' for all commands."
