@@ -88,7 +88,8 @@ export function registerPermissionCommands(parent: Command): void {
           }
         }
 
-        const before = await ctx.client.get<unknown>(`/api/permission-templates/${id}`)
+        // admin GET 返回 { template: ... }（wrap）；PATCH 接受 flat。snapshot 必须 unwrap。
+        const before = await ctx.client.getUnwrap<Record<string, unknown>>(`/api/permission-templates/${id}`, 'template')
         const args: Record<string, unknown> = { _positional: ref }
         if (opts.confirm) args['--confirm'] = opts.confirm
 

@@ -44,10 +44,13 @@ function flatten(cmd: Command, prefix: string[] = []): SchemaCommand[] {
         name: a._name ?? a.name?.() ?? '',
         required: a.required ?? false,
       })),
+      // commander Option：`mandatory` 表示 flag 本身是否必填（requiredOption），
+      // `required` 表示"flag 给定时是否必须带值"（<value> vs [value]）。
+      // schema 给 LLM 看的"required" 是前者——是否必须传这个 flag。
       options: cmd.options.map(o => ({
         flags: o.flags,
         description: o.description ?? '',
-        required: !!o.required,
+        required: !!(o as unknown as { mandatory?: boolean }).mandatory,
       })),
     })
   } else {

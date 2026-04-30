@@ -1,16 +1,60 @@
 import { Command } from 'commander'
 import { createContext } from '../main.js'
+import { CliError } from '../errors.js'
 import { renderResult, type Column, shortId } from '../output.js'
 import { resolveRef } from '../resolve.js'
 import { maskSensitive } from '../mask.js'
 import { runWrite } from '../run-write.js'
-import { buildDeleteParams } from './_utils.js'
+import { assertEnum, assertNonEmpty, buildDeleteParams, extractCreatedId } from './_utils.js'
 
 const COLUMNS: Column[] = [
   { key: 'id', header: 'ID', transform: (v) => shortId(String(v ?? '')) },
-  { key: 'name', header: 'NAME' },
+  { key: 'display_name', header: 'NAME' },
   { key: 'permission', header: 'PERMISSION' },
 ]
+
+const ALLOWED_PERMISSIONS = ['master', 'normal'] as const
+
+export interface FriendAddOpts {
+  readonly name: string
+  readonly permission: string
+  readonly permissionTemplate?: string
+}
+
+export interface FriendUpdateOpts {
+  readonly name?: string
+  readonly permission?: string
+  readonly permissionTemplate?: string
+}
+
+/**
+ * 构造 admin POST /api/friends 的请求体（CreateFriendParams）。
+ * admin 协议要求 display_name + permission（master|normal）必填；
+ * permission_template_id 在 normal 时通常需要（admin handler fallback 'standard'）。
+ */
+export function buildCreateFriendBody(opts: FriendAddOpts): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    display_name: assertNonEmpty('--name', opts.name),
+    permission: assertEnum('--permission', opts.permission, ALLOWED_PERMISSIONS),
+  }
+  if (opts.permissionTemplate?.trim()) body['permission_template_id'] = opts.permissionTemplate.trim()
+  return body
+}
+
+/**
+ * 构造 admin PATCH /api/friends/:id 的请求体（UpdateFriendParams 不含 friend_id）。
+ * 至少一个可选字段必须提供（避免空 PATCH）。
+ */
+export function buildUpdateFriendBody(opts: FriendUpdateOpts): Record<string, unknown> {
+  const body: Record<string, unknown> = {}
+  if (opts.name?.trim()) body['display_name'] = opts.name.trim()
+  if (opts.permission) body['permission'] = assertEnum('--permission', opts.permission, ALLOWED_PERMISSIONS)
+  if (opts.permissionTemplate?.trim()) body['permission_template_id'] = opts.permissionTemplate.trim()
+  if (Object.keys(body).length === 0) {
+    throw new CliError('INVALID_ARGUMENT', '至少需要提供 --name / --permission / --permission-template 其中一个')
+  }
+  return body
+}
 
 export function registerFriendCommands(parent: Command): void {
   const friend = parent.command('friend').description('Manage friends')
@@ -39,23 +83,27 @@ export function registerFriendCommands(parent: Command): void {
   friend
     .command('add')
     .description('Add a friend')
-    .requiredOption('--name <name>', 'Friend name')
-    .option('--permission <templateId>', 'Permission template ID')
-    .action(async (opts: { name: string; permission?: string }) => {
+    .requiredOption('--name <name>', 'Friend display name')
+    .requiredOption('--permission <permission>', `Friend permission (${ALLOWED_PERMISSIONS.join('|')})`)
+    .option('--permission-template <templateId>', 'Permission template ID（normal 通常需要，缺省 fallback 到 standard）')
+    .action(async (opts: FriendAddOpts) => {
       const ctx = createContext(parent)
+      const body = buildCreateFriendBody(opts)
 
-      const body: Record<string, unknown> = { name: opts.name }
-      if (opts.permission) {
-        body['permission_template_id'] = opts.permission
-      }
+      const cmdParts = [
+        'friend add',
+        `--name ${JSON.stringify(opts.name)}`,
+        `--permission ${opts.permission}`,
+      ]
+      if (opts.permissionTemplate) cmdParts.push(`--permission-template ${opts.permissionTemplate}`)
 
       const result = await runWrite({
         subcommand: 'friend add',
-        args: { '--name': opts.name },
-        command_text: `friend add --name ${opts.name}${opts.permission ? ` --permission ${opts.permission}` : ''}`,
+        args: { '--name': opts.name, '--permission': opts.permission },
+        command_text: cmdParts.join(' '),
         execute: () => ctx.client.post('/api/friends', body),
         reverseFromResult: (r) => {
-          const newId = (r as { id?: string })?.id ?? '<unknown>'
+          const newId = extractCreatedId(r, 'friend')
           return {
             command: `friend delete ${newId}`,
             preview_description: `delete friend ${opts.name} (${newId})`,
@@ -71,24 +119,25 @@ export function registerFriendCommands(parent: Command): void {
   friend
     .command('update <ref>')
     .description('Update a friend')
-    .option('--name <name>', 'Friend name')
-    .option('--permission <templateId>', 'Permission template ID')
+    .option('--name <name>', 'Friend display name')
+    .option('--permission <permission>', `Friend permission (${ALLOWED_PERMISSIONS.join('|')})`)
+    .option('--permission-template <templateId>', 'Permission template ID')
     .option('--confirm <token>', 'Confirmation token from preview response')
-    .action(async (ref: string, opts: { name?: string; permission?: string; confirm?: string }) => {
+    .action(async (ref: string, opts: FriendUpdateOpts & { confirm?: string }) => {
       const ctx = createContext(parent)
       const { id } = await resolveRef(ctx.client, 'friend', ref)
+      const body = buildUpdateFriendBody(opts)
 
-      const body: Record<string, unknown> = {}
-      if (opts.name) body['name'] = opts.name
-      if (opts.permission) body['permission_template_id'] = opts.permission
-
-      const before = await ctx.client.get<unknown>(`/api/friends/${id}`)
+      // admin GET 返回 { friend: Friend }；PATCH 接受 flat UpdateFriendParams。snapshot 必须 unwrap 后再存，
+      // 否则 undo --restore-snapshot 时 PATCH body 是 {friend:{...}}，admin 读不到字段。
+      const before = await ctx.client.getUnwrap<Record<string, unknown>>(`/api/friends/${id}`, 'friend')
       const args: Record<string, unknown> = { _positional: ref }
       if (opts.confirm) args['--confirm'] = opts.confirm
 
       const setParts: string[] = []
-      if (opts.name) setParts.push(`--name ${opts.name}`)
+      if (opts.name) setParts.push(`--name ${JSON.stringify(opts.name)}`)
       if (opts.permission) setParts.push(`--permission ${opts.permission}`)
+      if (opts.permissionTemplate) setParts.push(`--permission-template ${opts.permissionTemplate}`)
       const cmdText = opts.confirm
         ? `friend update ${ref} ${setParts.join(' ')} --confirm ${opts.confirm}`
         : `friend update ${ref} ${setParts.join(' ')}`

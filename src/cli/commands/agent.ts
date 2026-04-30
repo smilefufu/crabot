@@ -6,10 +6,17 @@ import { maskSensitive } from '../mask.js'
 import { runWrite } from '../run-write.js'
 import { parseKeyValuePairs } from './_utils.js'
 
+/**
+ * Crabot 架构里 Front Handler / Worker Handler 都跑在同一个 `crabot-agent` 模块进程里
+ * （`agent list` 看到的 instances 是 module 内的 role/配置，不是独立进程）。admin REST 只
+ * 暴露 module-level restart，所以 `agent restart` 没有 per-instance 语义——直接重启整个 module。
+ */
+const AGENT_MODULE_ID = 'crabot-agent'
+
 const COLUMNS: Column[] = [
   { key: 'id', header: 'ID', transform: (v) => shortId(String(v ?? '')) },
   { key: 'name', header: 'NAME' },
-  { key: 'status', header: 'STATUS' },
+  { key: 'role', header: 'ROLE' },
 ]
 
 export function registerAgentCommands(parent: Command): void {
@@ -44,7 +51,9 @@ export function registerAgentCommands(parent: Command): void {
 
       if (opts.set && opts.set.length > 0) {
         const body = parseKeyValuePairs(opts.set)
-        const before = await ctx.client.get<unknown>(`/api/agent-instances/${id}/config`)
+        // admin GET 返回 { config: ... }（wrap）；PATCH 接受 flat。snapshot 必须存 unwrap 后的形态，
+        // 否则 undo --restore-snapshot 时 PATCH body 是 {config:{...}}，admin 读不到字段。
+        const before = await ctx.client.getUnwrap<Record<string, unknown>>(`/api/agent-instances/${id}/config`, 'config')
         const result = await runWrite({
           subcommand: 'agent config',
           args: { '_positional': ref, '--set': opts.set.join(' ') },
@@ -67,12 +76,11 @@ export function registerAgentCommands(parent: Command): void {
     })
 
   agent
-    .command('restart <ref>')
-    .description('Restart an agent instance')
-    .action(async (ref: string) => {
+    .command('restart')
+    .description(`Restart the ${AGENT_MODULE_ID} module（同时重启所有 agent instance，因为它们共用同一个进程）`)
+    .action(async () => {
       const ctx = createContext(parent)
-      const { id } = await resolveRef(ctx.client, 'agent', ref)
-      const data = await ctx.client.post<unknown>(`/api/agent-instances/${id}/restart`)
+      const data = await ctx.client.post<unknown>(`/api/modules/${AGENT_MODULE_ID}/restart`)
       renderResult(data, { mode: ctx.mode })
     })
 }

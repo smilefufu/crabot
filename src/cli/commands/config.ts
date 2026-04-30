@@ -30,7 +30,8 @@ export function registerConfigCommands(parent: Command): void {
       const ctx = createContext(parent)
 
       const body = parseKeyValuePairs(pairs)
-      const before = await ctx.client.get<unknown>('/api/model-config/global')
+      // admin GET 返回 { config: GlobalModelConfig }（wrap）；PATCH 接受 flat。snapshot 必须 unwrap。
+      const before = await ctx.client.getUnwrap<Record<string, unknown>>('/api/model-config/global', 'config')
       const args: Record<string, unknown> = { _positional: pairs.join(' ') }
       if (opts.confirm) args['--confirm'] = opts.confirm
 
@@ -75,7 +76,8 @@ export function registerConfigCommands(parent: Command): void {
       const ctx = createContext(parent)
 
       const body = parseKeyValuePairs([pair])
-      const before = await ctx.client.get<unknown>('/api/proxy-config')
+      // admin GET 返回 { config, system_proxy_url }（wrap）；PATCH 接受 flat ProxyConfig。
+      const before = await ctx.client.getUnwrap<Record<string, unknown>>('/api/proxy-config', 'config')
       const args: Record<string, unknown> = { _positional: pair }
       if (opts.confirm) args['--confirm'] = opts.confirm
 

@@ -1,4 +1,48 @@
 import { readFileSync } from 'node:fs'
+import { CliError } from '../errors.js'
+
+/**
+ * 从 admin POST 响应里取新建实体的 id。
+ * admin 的创建响应有时包一层（如 `{schedule: {id}}` / `{friend: {id}}`），有时直接 flat（如 `{id}`）。
+ * 传 wrapKey 时先尝试包装路径，再 fallback 到 flat。
+ */
+export function extractCreatedId(result: unknown, wrapKey?: string): string {
+  const r = result as Record<string, unknown> | null
+  if (wrapKey) {
+    const wrapped = r?.[wrapKey] as { id?: string } | undefined
+    if (wrapped?.id) return wrapped.id
+  }
+  return (r as { id?: string } | null)?.id ?? '<unknown>'
+}
+
+/**
+ * 校验 value 是否在白名单内，否则抛 INVALID_ARGUMENT。
+ * 用于 CLI flag 值（priority / format / permission 等）的枚举校验。
+ */
+export function assertEnum<T extends string>(
+  flag: string,
+  value: string | undefined,
+  allowed: readonly T[]
+): T {
+  if (!value || !allowed.includes(value as T)) {
+    throw new CliError(
+      'INVALID_ARGUMENT',
+      `${flag} 必须是 ${allowed.join(' | ')}，收到: "${value ?? ''}"`
+    )
+  }
+  return value as T
+}
+
+/**
+ * 校验 value trim 后非空，否则抛 INVALID_ARGUMENT 并返回 trimmed 字符串。
+ */
+export function assertNonEmpty(flag: string, value: string | undefined): string {
+  const trimmed = value?.trim()
+  if (!trimmed) {
+    throw new CliError('INVALID_ARGUMENT', `${flag} 不能为空`)
+  }
+  return trimmed
+}
 
 export function setNestedValue(
   obj: Record<string, unknown>,

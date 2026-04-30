@@ -65,4 +65,22 @@ describe('buildSchema', () => {
     expect(schema.commands.every(c => c.name !== '')).toBe(true)
     expect(schema.commands.every(c => c.name !== 'crabot')).toBe(true)
   })
+
+  it('option.required 反映 flag 本身是否必填（不是值是否必填）', () => {
+    // commander Option：mandatory = flag 必填（requiredOption），required = flag 给定时值必填（<value>）
+    // schema 给 LLM 看的 required 应是前者，否则 LLM 会以为所有 <value> 选项都必填
+    const p = new Command('crabot')
+    const provider = p.command('provider')
+    provider
+      .command('add')
+      .requiredOption('--name <n>', 'Provider name')   // mandatory=true, required=true
+      .option('--apikey <k>', 'API key')                // mandatory=false, required=true（值带 <>）
+      .option('--dry-run', 'Just preview')              // mandatory=false, required=false
+    const schema = buildSchema(p, '1.0.0')
+    const add = schema.commands.find(c => c.name === 'provider add')!
+    const byFlag = (f: string) => add.options.find(o => o.flags.startsWith(f))!
+    expect(byFlag('--name').required).toBe(true)        // requiredOption → required=true
+    expect(byFlag('--apikey').required).toBe(false)     // option <value> → required=false（核心断言）
+    expect(byFlag('--dry-run').required).toBe(false)
+  })
 })

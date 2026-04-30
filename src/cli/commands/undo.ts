@@ -88,14 +88,24 @@ async function executeReverse(ctx: CliContext, entry: UndoEntry): Promise<unknow
     if (slotIdx < 0 || provIdx < 0 || modelIdx < 0) {
       throw new CliError('UNDO_STALE', `Malformed set-model reverse: ${cmd}`, { command: cmd })
     }
-    const { id: agentId } = await resolveRef(ctx.client, 'agent', ref)
     const slot = rest[slotIdx + 1]!
     const providerRef = rest[provIdx + 1]!
     const model = rest[modelIdx + 1]!
-    const { id: providerId } = await resolveRef(ctx.client, 'provider', providerRef)
-    return ctx.client.patch(`/api/agent-instances/${agentId}/config`, {
-      models: { [slot]: { provider_id: providerId, model_id: model } },
-    })
+    const [{ id: agentId }, { id: providerId }] = await Promise.all([
+      resolveRef(ctx.client, 'agent', ref),
+      resolveRef(ctx.client, 'provider', providerRef),
+    ])
+    // admin updateConfig 整体替换 model_config（不 merge），必须先读出当前完整 map 再合并，否则其他 slot 被清掉。
+    const current = await ctx.client.getUnwrap<{ model_config?: Record<string, { provider_id: string; model_id: string } | null> }>(
+      `/api/agent-instances/${agentId}/config`,
+      'config',
+    )
+    const merged: Record<string, { provider_id: string; model_id: string }> = {}
+    for (const [k, v] of Object.entries(current.model_config ?? {})) {
+      if (v && v.provider_id && v.model_id) merged[k] = v
+    }
+    merged[slot] = { provider_id: providerId, model_id: model }
+    return ctx.client.patch(`/api/agent-instances/${agentId}/config`, { model_config: merged })
   }
 
   // config switch-default

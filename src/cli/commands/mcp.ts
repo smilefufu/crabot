@@ -1,10 +1,11 @@
 import { Command } from 'commander'
+import { readFileSync } from 'node:fs'
 import { createContext } from '../main.js'
 import { renderResult, type Column, shortId } from '../output.js'
 import { resolveRef } from '../resolve.js'
 import { maskSensitive } from '../mask.js'
 import { runWrite } from '../run-write.js'
-import { buildDeleteParams, readJsonFile } from './_utils.js'
+import { buildDeleteParams } from './_utils.js'
 
 const COLUMNS: Column[] = [
   { key: 'id', header: 'ID', transform: (v) => shortId(String(v ?? '')) },
@@ -74,18 +75,18 @@ export function registerMcpCommands(parent: Command): void {
     .action(async (file: string) => {
       const ctx = createContext(parent)
 
-      const fileContent = readJsonFile(file)
+      // admin handler 期望 body 是 { json: string }（自己负责 parse），不是 parse 好的对象
+      const fileContent = readFileSync(file, 'utf-8')
 
       const result = await runWrite({
         subcommand: 'mcp import',
         args: { _positional: file },
         command_text: `mcp import ${file}`,
-        execute: () => ctx.client.post('/api/mcp-servers/import-json', fileContent),
+        execute: () => ctx.client.post('/api/mcp-servers/import-json', { json: fileContent }),
         reverseFromResult: (r) => {
-          const created = r as Array<{ id?: string }> | { id?: string }
-          const ids = Array.isArray(created)
-            ? created.map((item) => item.id ?? '').filter(Boolean)
-            : [(created as { id?: string }).id ?? ''].filter(Boolean)
+          // admin 返回 { entries: [...], count: N }
+          const result = r as { entries?: Array<{ id?: string }> }
+          const ids = (result.entries ?? []).map((e) => e.id ?? '').filter(Boolean)
           const idList = ids.join(',')
           return {
             command: `mcp undo-import ${idList}`,

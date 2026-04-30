@@ -29,8 +29,37 @@ for (const c of schema.commands) {
   lines.push(`| \`crabot ${c.name}\` | ${desc} | ${c.permission} | ${c.must_confirm ? '✅' : '❌'} |`)
 }
 
+// Write 命令的参数详情。read 命令通常无参数或只接受 ref，不需要列出。
+const writeCommands = schema.commands.filter(c => c.permission === 'write')
+if (writeCommands.length > 0) {
+  lines.push('', '## Write 命令参数详情', '')
+  lines.push('> 仅列 write 命令的位置参数和 flag。read 命令一般是 `crabot xxx list` / `xxx show <ref>`，参数自明。')
+  lines.push('')
+  for (const c of writeCommands) {
+    lines.push(`### \`crabot ${c.name}\``)
+    lines.push('')
+    if (c.description) lines.push(`${c.description}`, '')
+    if (c.args.length > 0) {
+      lines.push('**位置参数**:', '')
+      for (const a of c.args) {
+        lines.push(`- \`${a.required ? `<${a.name}>` : `[${a.name}]`}\`${a.required ? '（必填）' : ''}`)
+      }
+      lines.push('')
+    }
+    if (c.options.length > 0) {
+      lines.push('**Flag**:', '')
+      lines.push('| Flag | 说明 | 必填 |')
+      lines.push('|---|---|---|')
+      for (const o of c.options) {
+        const desc = (o.description || '').replace(/\|/g, '\\|')
+        lines.push(`| \`${o.flags}\` | ${desc} | ${o.required ? '✅' : '' } |`)
+      }
+      lines.push('')
+    }
+  }
+}
+
 lines.push(
-  '',
   '## 通用选项',
   '',
   '| 选项 | 说明 |',

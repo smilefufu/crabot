@@ -14,10 +14,14 @@ export function registerConfigSwitchDefaultCommand(parent: Command): void {
     .requiredOption('--model <model>', 'Model id (e.g. gpt-4o)')
     .action(async (opts: { provider: string; model: string }) => {
       const ctx = createContext(parent)
-      const provider = await resolveRef(ctx.client, 'provider', opts.provider)
-      const before = await ctx.client.get<{ default_llm_provider_id?: string; default_llm_model_id?: string }>(
-        '/api/model-config/global'
-      )
+      // admin GET 返回 { config: GlobalModelConfig }（包了一层）；PATCH 接受 flat。
+      const [provider, before] = await Promise.all([
+        resolveRef(ctx.client, 'provider', opts.provider),
+        ctx.client.getUnwrap<{ default_llm_provider_id?: string; default_llm_model_id?: string }>(
+          '/api/model-config/global',
+          'config',
+        ),
+      ])
 
       const result = await runWrite({
         subcommand: 'config switch-default',

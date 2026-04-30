@@ -43,13 +43,14 @@ export function registerChannelCommands(parent: Command): void {
       const { id } = await resolveRef(ctx.client, 'channel', ref)
 
       if (opts.set && opts.set.length > 0) {
-        const body = parseKeyValuePairs(opts.set)
+        // admin 协议 PATCH body 是 { config: Partial<ChannelConfig> }（外层包一层 config:）
+        const config = parseKeyValuePairs(opts.set)
         const before = await ctx.client.get<unknown>(`/api/channel-instances/${id}/config`)
         const result = await runWrite({
           subcommand: 'channel config',
           args: { _positional: ref, '--set': opts.set.join(' ') },
           command_text: `channel config ${ref} --set ${opts.set.join(' ')}`,
-          execute: () => ctx.client.patch(`/api/channel-instances/${id}/config`, body),
+          execute: () => ctx.client.patch(`/api/channel-instances/${id}/config`, { config }),
           reverse: {
             command: `channel config ${ref} --restore-snapshot`,
             preview_description: `restore channel ${ref} config to snapshot taken before this change`,

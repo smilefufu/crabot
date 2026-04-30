@@ -39,29 +39,54 @@ export function registerSkillCommands(parent: Command): void {
   const add = skill
     .command('add')
     .description('Add a skill from git or local path')
-    .option('--git <url>', 'Git repository URL')
-    .option('--path <dir>', 'Local directory path')
-    .action(async (opts: { git?: string; path?: string }) => {
+    .option('--git <url>', 'Git repository URL（GitHub）')
+    .option('--skill-md-url <url>', 'GitHub raw SKILL.md URL（多 skill 仓库时显式指定要装的那个）')
+    .option('--path <dir>', 'Local directory path（包含 SKILL.md）')
+    .option('--overwrite', '同名 skill 已存在时覆盖', false)
+    .action(async (opts: { git?: string; skillMdUrl?: string; path?: string; overwrite?: boolean }) => {
       const ctx = createContext(parent)
 
-      if (opts.git) {
+      if (opts.git || opts.skillMdUrl) {
         const gitUrl = opts.git
         const result = await runWrite({
           subcommand: 'skill add',
-          args: { '--git': gitUrl },
-          command_text: `skill add --git ${gitUrl}`,
+          args: gitUrl ? { '--git': gitUrl } : { '--skill-md-url': opts.skillMdUrl as string },
+          command_text: gitUrl
+            ? `skill add --git ${gitUrl}${opts.overwrite ? ' --overwrite' : ''}`
+            : `skill add --skill-md-url ${opts.skillMdUrl}${opts.overwrite ? ' --overwrite' : ''}`,
           execute: async () => {
-            const scanResult = await ctx.client.post<{ install_id?: string; [key: string]: unknown }>(
-              '/api/skills/import-git/scan',
-              { url: gitUrl },
-            )
-            return ctx.client.post<unknown>('/api/skills/import-git/install', scanResult)
+            // admin 协议：scan body {git_url}，返回 {skills: [{skill_md_url, ...}]}；install body {skill_md_url, source_git_url?, overwrite?}
+            let skillMdUrl: string
+            let sourceGitUrl: string | undefined
+            if (opts.skillMdUrl) {
+              skillMdUrl = opts.skillMdUrl
+            } else {
+              const scanResult = await ctx.client.post<{ skills: Array<{ skill_md_url: string; name: string; path: string }> }>(
+                '/api/skills/import-git/scan',
+                { git_url: gitUrl },
+              )
+              if (!scanResult.skills?.length) {
+                throw new Error(`仓库 ${gitUrl} 内没有发现 SKILL.md`)
+              }
+              if (scanResult.skills.length > 1) {
+                const candidates = scanResult.skills.map((s) => `  - ${s.name} (${s.skill_md_url})`).join('\n')
+                throw new Error(
+                  `仓库 ${gitUrl} 包含多个 skill，请用 --skill-md-url 指定要装的那个：\n${candidates}`
+                )
+              }
+              skillMdUrl = scanResult.skills[0]!.skill_md_url
+              sourceGitUrl = gitUrl
+            }
+            const installBody: Record<string, unknown> = { skill_md_url: skillMdUrl }
+            if (sourceGitUrl) installBody['source_git_url'] = sourceGitUrl
+            if (opts.overwrite) installBody['overwrite'] = true
+            return ctx.client.post<unknown>('/api/skills/import-git/install', installBody)
           },
           reverseFromResult: (r) => {
             const newId = (r as { id?: string })?.id ?? '<unknown>'
             return {
               command: `skill delete ${newId}`,
-              preview_description: `delete skill imported from git ${gitUrl} (${newId})`,
+              preview_description: `delete skill imported from git ${gitUrl ?? opts.skillMdUrl} (${newId})`,
             }
           },
           dataDir: ctx.dataDir,
@@ -74,8 +99,13 @@ export function registerSkillCommands(parent: Command): void {
         const result = await runWrite({
           subcommand: 'skill add',
           args: { '--path': localPath },
-          command_text: `skill add --path ${localPath}`,
-          execute: () => ctx.client.post<unknown>('/api/skills/import-local', { path: localPath }),
+          command_text: `skill add --path ${localPath}${opts.overwrite ? ' --overwrite' : ''}`,
+          // admin 协议：{dir_path: string, overwrite?: boolean}（不是 {path}）
+          execute: () => {
+            const body: Record<string, unknown> = { dir_path: localPath }
+            if (opts.overwrite) body['overwrite'] = true
+            return ctx.client.post<unknown>('/api/skills/import-local', body)
+          },
           reverseFromResult: (r) => {
             const newId = (r as { id?: string })?.id ?? '<unknown>'
             return {
@@ -89,7 +119,7 @@ export function registerSkillCommands(parent: Command): void {
         })
         renderResult(maskSensitive(result), { mode: ctx.mode })
       } else {
-        add.error('Either --git or --path is required')
+        add.error('Either --git, --skill-md-url, or --path is required')
       }
     })
 

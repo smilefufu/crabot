@@ -83,4 +83,12 @@ export class AdminClient {
     }
     return []
   }
+
+  // Helper for single-resource GET endpoints that wrap response as { <key>: T }.
+  // admin REST 普遍包一层（{config:{...}} / {friend:{...}} / {template:{...}} / {schedule:{...}}），
+  // 但对应的 PATCH 接受 flat body — snapshot 取自 GET 时必须 unwrap，否则反向 PATCH 字段全丢。
+  async getUnwrap<T>(path: string, key: string): Promise<T> {
+    const raw = await this.get<Record<string, unknown>>(path)
+    return (raw?.[key] ?? {}) as T
+  }
 }
