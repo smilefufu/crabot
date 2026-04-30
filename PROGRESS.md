@@ -1,8 +1,18 @@
 # Crabot 项目进度
 
-> 最后更新：2026-04-29 — Agent 时间感知（Time Awareness）
+> 最后更新：2026-04-30 — 原生飞书 Channel
 
-## 最新里程碑（2026-04-29 — Time Awareness）
+## 最新里程碑（2026-04-30 — 原生飞书 Channel）
+
+新增 `crabot-channel-feishu` 模块，飞书接入脱离 OpenClaw shim，扫码 onboarding 完整 Web 流程。spec：`crabot-docs/superpowers/specs/2026-04-30-native-feishu-channel-design.md`，plan：`crabot-docs/superpowers/plans/2026-04-30-native-feishu-channel.md`。
+
+- **新增模块 `crabot-channel-feishu`**（10 文件，41 个单测）：基于 `@larksuiteoapi/node-sdk` v1.62.1 长连接事件订阅。结构 = wechat 模块的飞书翻译版（types / SessionManager / MessageStore / event-mapper / FeishuClient / WsSubscriber / FeishuChannel / main）。支持 text/image/file 收发 + mention/quote 特性 + 6 类 IM 事件（im.message.receive_v1 + bot/user 群成员变更 + chat.updated）。WSClient onReady/onError/onReconnecting 状态对接 health。
+- **Admin onboarding 后端**（`crabot-admin/src/feishu-onboard.ts` + 4 REST 端点）：实现飞书设备码 OAuth（`POST /oauth/v1/app/registration` 的 init/begin/poll），AsyncIterable poll 发出 pending / slow_down / success / error 事件。SSE 走 `?token=` query string 鉴权（EventSource 不支持自定义 header）。9 个单测覆盖三态机各路径。
+- **Admin Web UI**（2 个新页面）：`/channels/new` 平台选择 picker（飞书/微信/Telegram/OpenClaw 四张卡），`/channels/new/feishu` 扫码页（qrcode npm 渲 SVG 二维码 + 倒计时 + SSE 实时进度 + finish 后跳转实例详情）。ChannelConfig 顶部"+ 新建实例"按钮指向 picker；OpenClaw "兼容" 卡注明"已不推荐走 OpenClaw"。
+- **BUILTIN_MODULE_PATHS** 增加 `'../crabot-channel-feishu'`，channel-host 保留过渡期，spec §11 "Step 2" 删除 channel-host 留作独立 PR。
+- **测试**：channel-feishu 41/41 + admin 310/310 + admin-web 145/145，0 tsc 错误。
+
+## 上一里程碑（2026-04-29 — Time Awareness）
 
 让 Agent 拥有持续的时间感知能力。spec：`crabot-docs/superpowers/specs/2026-04-29-time-awareness-design.md`。
 
