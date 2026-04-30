@@ -3102,8 +3102,15 @@ export class AdminModule extends ModuleBase {
       return
     }
 
-    // 其他私聊陌生人消息：回复引导话术，节流避免轰炸
-    console.log(`[Admin] ⚠️ Unknown private sender ${platform_user_id} sent non-claim message; replying with onboarding hint`)
+    // 其他私聊陌生人消息：
+    // - channel 整体未认主（无任何 master friend 在此 channel 上）→ 回复引导话术，帮用户上路
+    // - channel 已认主但此发信人不是 friend → 静默丢弃（防陌生人骚扰已认主的实例）
+    const channelHasMaster = this.getMasterPlatformUserIdsForChannel(channelId).length > 0
+    if (channelHasMaster) {
+      console.log(`[Admin] ⚠️ Private message from unknown sender dropped (channel already claimed): ${platform_user_id}, text="${(message.content.text ?? '').slice(0, 30)}"`)
+      return
+    }
+    console.log(`[Admin] ⚠️ Unknown private sender ${platform_user_id} on unclaimed channel; replying with onboarding hint`)
     await this.replyUnclaimedHint(channelId, message.session.session_id, platform_user_id)
   }
 
