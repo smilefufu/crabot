@@ -109,16 +109,10 @@ export class FeishuOnboarder implements Onboarder {
       expires_at: expiresAt,
     })
 
-    // 与 @larksuite/openclaw-lark-tools v1.0.40 install-prompts.js 一致：
-    //   const qrUrl = new URL(beginRes.verification_uri_complete)
-    //   qrUrl.searchParams.set('from', 'onboard')
-    const qrUrl = new URL(verifUri)
-    qrUrl.searchParams.set('from', 'onboard')
-
     return {
       session_id: sessionId,
       ui_mode: 'qrcode',
-      verification_uri: qrUrl.toString(),
+      verification_uri: appendFromOnboard(verifUri),
       interval,
       expires_at: expiresAt,
       display: {
@@ -236,6 +230,11 @@ export class FeishuOnboarder implements Onboarder {
 
 /** Onboarder 工厂——admin 通过该函数创建实例 */
 export const createOnboarder: OnboarderFactory = () => new FeishuOnboarder()
+
+function appendFromOnboard(uri: string): string {
+  const sep = uri.includes('?') ? '&' : '?'
+  return `${uri}${sep}from=onboard`
+}
 
 function defaultDelay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
