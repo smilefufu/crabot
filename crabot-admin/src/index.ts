@@ -129,6 +129,7 @@ import {
 } from './dialog-objects.js'
 import { createMemoryV2RestRouter } from './memory-v2-rest.js'
 import { OnboardingManager } from './onboarding-manager.js'
+import type { Onboarder } from 'crabot-shared'
 
 // ============================================================================
 // JWT 工具函数
@@ -235,6 +236,19 @@ function normalizeSceneProfileTextField(
   }
   const trimmed = value.trim()
   return trimmed || fallback
+}
+
+function sendJson(res: ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, { 'Content-Type': 'application/json' })
+  res.end(JSON.stringify(body))
+}
+
+async function wrapJsonHandler(res: ServerResponse, errorLabel: string, fn: () => Promise<unknown>): Promise<void> {
+  try {
+    sendJson(res, 200, await fn())
+  } catch (err) {
+    sendJson(res, 500, { error: err instanceof Error ? err.message : errorLabel })
+  }
 }
 
 // ============================================================================
@@ -1510,45 +1524,22 @@ export class AdminModule extends ModuleBase {
       }
 
       // ── 通用 Channel onboarding（base-protocol §10）─────────────────────
-      // 路由：begin / poll(SSE) / finish / cancel
-      // 路由由 implementation_id + method_id 寻找对应 onboarder（OnboardingManager 启动时加载）
-      // 注：SSE poll 走 query string token（EventSource 不支持自定义 header），其他三条走标准 Bearer
+      // SSE poll 走 query string token（EventSource 不支持自定义 header），其他三条走标准 Bearer
       if (req.method === 'POST' && pathname === '/api/channels/onboard/begin') {
         const body = await this.readJsonBody<{ implementation_id?: string; method_id?: string; params?: Record<string, unknown> }>(req).catch(() => ({} as { implementation_id?: string; method_id?: string; params?: Record<string, unknown> }))
-        if (!body.implementation_id || !body.method_id) {
-          res.writeHead(400, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'implementation_id and method_id are required' }))
-          return
-        }
-        const onboarder = this.onboardingManager.get(body.implementation_id, body.method_id)
-        if (!onboarder) {
-          res.writeHead(404, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: `onboarder not found: ${body.implementation_id}:${body.method_id}` }))
-          return
-        }
-        try {
-          const r = await onboarder.begin(body.params)
-          res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify(r))
-        } catch (err) {
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'onboard begin failed' }))
-        }
+        const onboarder = this.resolveOnboarder(res, body.implementation_id, body.method_id)
+        if (!onboarder) return
+        await wrapJsonHandler(res, 'onboard begin failed', () => onboarder.begin(body.params))
         return
       }
       if (req.method === 'GET' && pathname === '/api/channels/onboard/poll') {
         const implementationId = url.searchParams.get('implementation_id')
         const methodId = url.searchParams.get('method_id')
         const sessionId = url.searchParams.get('session_id')
-        if (!implementationId || !methodId || !sessionId) {
-          res.writeHead(400, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'implementation_id, method_id and session_id are required' }))
-          return
-        }
-        const onboarder = this.onboardingManager.get(implementationId, methodId)
-        if (!onboarder) {
-          res.writeHead(404, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: `onboarder not found: ${implementationId}:${methodId}` }))
+        const onboarder = this.resolveOnboarder(res, implementationId, methodId)
+        if (!onboarder) return
+        if (!sessionId) {
+          sendJson(res, 400, { error: 'session_id is required' })
           return
         }
         res.writeHead(200, {
@@ -1573,31 +1564,22 @@ export class AdminModule extends ModuleBase {
       }
       if (req.method === 'POST' && pathname === '/api/channels/onboard/finish') {
         const body = await this.readJsonBody<{ implementation_id?: string; method_id?: string; session_id?: string; name?: string; finish_params?: Record<string, unknown> }>(req)
-        if (!body.implementation_id || !body.method_id || !body.session_id || !body.name) {
-          res.writeHead(400, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'implementation_id, method_id, session_id and name are required' }))
+        const onboarder = this.resolveOnboarder(res, body.implementation_id, body.method_id)
+        if (!onboarder) return
+        if (!body.session_id || !body.name) {
+          sendJson(res, 400, { error: 'session_id and name are required' })
           return
         }
-        const onboarder = this.onboardingManager.get(body.implementation_id, body.method_id)
-        if (!onboarder) {
-          res.writeHead(404, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: `onboarder not found: ${body.implementation_id}:${body.method_id}` }))
-          return
-        }
-        try {
-          const finishResult = await onboarder.finish(body.session_id, body.finish_params)
+        await wrapJsonHandler(res, 'onboard finish failed', async () => {
+          const finishResult = await onboarder.finish(body.session_id!, body.finish_params)
           const instance = await this.channelManager.createInstance({
-            implementation_id: body.implementation_id,
-            name: body.name,
+            implementation_id: body.implementation_id!,
+            name: body.name!,
             auto_start: true,
             env: finishResult.env,
           })
-          res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ instance }))
-        } catch (err) {
-          res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'onboard finish failed' }))
-        }
+          return { instance }
+        })
         return
       }
       if (req.method === 'POST' && pathname === '/api/channels/onboard/cancel') {
@@ -1605,8 +1587,7 @@ export class AdminModule extends ModuleBase {
         if (body.implementation_id && body.method_id && body.session_id) {
           this.onboardingManager.get(body.implementation_id, body.method_id)?.cancel(body.session_id)
         }
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ ok: true }))
+        sendJson(res, 200, { ok: true })
         return
       }
 
@@ -1875,6 +1856,23 @@ export class AdminModule extends ModuleBase {
       res.writeHead(404)
       res.end('Web UI not found. Run "npm run build:web" in crabot-admin to build it.')
     }
+  }
+
+  private resolveOnboarder(
+    res: ServerResponse,
+    implementationId: string | null | undefined,
+    methodId: string | null | undefined,
+  ): Onboarder | null {
+    if (!implementationId || !methodId) {
+      sendJson(res, 400, { error: 'implementation_id and method_id are required' })
+      return null
+    }
+    const onboarder = this.onboardingManager.get(implementationId, methodId)
+    if (!onboarder) {
+      sendJson(res, 404, { error: `onboarder not found: ${implementationId}:${methodId}` })
+      return null
+    }
+    return onboarder
   }
 
   private async readJsonBody<T>(req: IncomingMessage, maxBytes = 10 * 1024 * 1024): Promise<T> {

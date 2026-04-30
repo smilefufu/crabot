@@ -73,8 +73,4 @@ export class OnboardingManager {
   get(implementationId: string, methodId: string): Onboarder | undefined {
     return this.onboarders.get(OnboardingManager.key(implementationId, methodId))?.onboarder
   }
-
-  has(implementationId: string, methodId: string): boolean {
-    return this.onboarders.has(OnboardingManager.key(implementationId, methodId))
-  }
 }

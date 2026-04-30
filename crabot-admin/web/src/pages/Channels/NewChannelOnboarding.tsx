@@ -44,8 +44,8 @@ export const NewChannelOnboarding: React.FC = () => {
   const [status, setStatus] = useState<Status>({ step: 'idle' })
   const [now, setNow] = useState(Date.now())
   const sseRef = useRef<{ close: () => void } | null>(null)
+  const sessionIdRef = useRef<string | null>(null)
 
-  // 加载 impl + method
   useEffect(() => {
     channelService.getImplementation(implId)
       .then((r) => {
@@ -58,27 +58,31 @@ export const NewChannelOnboarding: React.FC = () => {
       .finally(() => setImplLoading(false))
   }, [implId, methodId])
 
-  // tick 1s for countdown
+  // 倒计时显示需要 1Hz 刷新；只在有 expires_at 时跑
+  const expiresAt = status.begin?.expires_at
   useEffect(() => {
+    if (!expiresAt) return
     const t = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(t)
-  }, [])
+  }, [expiresAt])
 
-  // unmount: cancel session
+  // unmount 时取消正在进行的 session
   useEffect(() => {
     return () => {
       sseRef.current?.close()
-      const sessionId = status.begin?.session_id
+      const sessionId = sessionIdRef.current
       if (sessionId) channelService.onboardCancel(implId, methodId, sessionId).catch(() => {})
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [implId, methodId])
 
-  const remainingSec = status.begin?.expires_at ? Math.max(0, Math.floor((status.begin.expires_at - now) / 1000)) : 0
-  if (status.begin?.expires_at && remainingSec === 0 && status.step !== 'expired' && status.step !== 'done' && status.step !== 'error' && status.step !== 'creating') {
+  const remainingSec = expiresAt ? Math.max(0, Math.floor((expiresAt - now) / 1000)) : 0
+
+  useEffect(() => {
+    if (!expiresAt || remainingSec > 0) return
+    if (status.step === 'expired' || status.step === 'done' || status.step === 'error' || status.step === 'creating') return
     sseRef.current?.close()
     setStatus((s) => ({ ...s, step: 'expired', message: '会话已过期，请重新开始' }))
-  }
+  }, [expiresAt, remainingSec, status.step])
 
   const handleStart = useCallback(async () => {
     if (!NAME_PATTERN.test(name)) {
@@ -94,10 +98,10 @@ export const NewChannelOnboarding: React.FC = () => {
       if (r.ui_mode === 'qrcode' && r.verification_uri) {
         qrSvg = await QRCode.toString(r.verification_uri, { type: 'svg', margin: 1, width: 240 })
       }
+      sessionIdRef.current = r.session_id
       setStatus({ step: 'pending', begin: r, qrSvg, message: r.display?.description })
       const conn = channelService.onboardPoll(implId, methodId, r.session_id, (ev) => handlePollEvent(r.session_id, ev))
       sseRef.current = conn
-      // ui_mode=redirect: 自动打开
       if (r.ui_mode === 'redirect' && r.verification_uri) {
         window.open(r.verification_uri, '_blank', 'noopener,noreferrer')
       }
@@ -133,9 +137,10 @@ export const NewChannelOnboarding: React.FC = () => {
     setStatus((s) => ({ ...s, step: 'creating', message: '正在创建 Channel 实例…' }))
     try {
       const r = await channelService.onboardFinish(implId, methodId, sessionId, name)
+      sessionIdRef.current = null
       setStatus({ step: 'done', message: '实例已创建' })
       toast.success(`Channel "${name}" 创建成功，已自动启动`)
-      const instanceId = (r.instance as { id?: string } | undefined)?.id
+      const instanceId = r.instance?.id
       navigate(instanceId ? `/channels/config?selected=${encodeURIComponent(instanceId)}` : '/channels/config')
     } catch (err) {
       setStatus({ step: 'error', message: err instanceof Error ? err.message : '创建失败' })
@@ -145,8 +150,9 @@ export const NewChannelOnboarding: React.FC = () => {
   const handleRestart = () => {
     sseRef.current?.close()
     sseRef.current = null
-    const sessionId = status.begin?.session_id
+    const sessionId = sessionIdRef.current
     if (sessionId) channelService.onboardCancel(implId, methodId, sessionId).catch(() => {})
+    sessionIdRef.current = null
     setStatus({ step: 'idle' })
   }
 

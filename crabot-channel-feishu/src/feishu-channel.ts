@@ -47,7 +47,6 @@ import type {
 } from './types.js'
 
 const MAX_FILE_SIZE = 30 * 1024 * 1024 // 30MB（飞书附件上限）
-const SENSITIVE_KEYS: Array<keyof FeishuChannelConfig> = ['app_secret']
 
 export interface FeishuChannelInitConfig {
   module_id: string
@@ -393,35 +392,29 @@ export class FeishuChannel extends ModuleBase {
     return { msgType: 'text', contentJson: JSON.stringify({ text }) }
   }
 
-  private async materializeImage(content: MessageContent): Promise<string> {
+  private async loadContentBuffer(content: MessageContent): Promise<{ buf: Buffer; filename: string }> {
     if (content.file_path) {
       this.assertFilePathAllowed(content.file_path)
-      const buf = await fsp.readFile(content.file_path)
+      const buf = await readFileOrThrow(content.file_path)
       this.assertFileSize(buf.length)
-      return await this.client.uploadImage(buf)
+      return { buf, filename: content.filename ?? path.basename(content.file_path) }
     }
     if (content.media_url) {
       const buf = await fetchAsBuffer(content.media_url)
       this.assertFileSize(buf.length)
-      return await this.client.uploadImage(buf)
+      const filename = content.filename ?? (path.basename(new URL(content.media_url).pathname) || 'file.bin')
+      return { buf, filename }
     }
-    throwError('CHANNEL_SEND_FAILED', 'image content requires file_path or media_url')
+    throwError('CHANNEL_SEND_FAILED', `${content.type} content requires file_path or media_url`)
+  }
+
+  private async materializeImage(content: MessageContent): Promise<string> {
+    const { buf } = await this.loadContentBuffer(content)
+    return await this.client.uploadImage(buf)
   }
 
   private async materializeFile(content: MessageContent): Promise<string> {
-    let buf: Buffer
-    let filename: string
-    if (content.file_path) {
-      this.assertFilePathAllowed(content.file_path)
-      buf = await fsp.readFile(content.file_path)
-      filename = content.filename ?? path.basename(content.file_path)
-    } else if (content.media_url) {
-      buf = await fetchAsBuffer(content.media_url)
-      filename = content.filename ?? (path.basename(new URL(content.media_url).pathname) || 'file.bin')
-    } else {
-      throwError('CHANNEL_SEND_FAILED', 'file content requires file_path or media_url')
-    }
-    this.assertFileSize(buf.length)
+    const { buf, filename } = await this.loadContentBuffer(content)
     return await this.client.uploadFile(buf, filename)
   }
 
@@ -455,12 +448,8 @@ export class FeishuChannel extends ModuleBase {
   private assertFilePathAllowed(filePath: string): void {
     const allowed = this.allowedFilePaths()
     const normalized = path.resolve(filePath)
-    const ok = allowed.some((prefix) => normalized.startsWith(path.resolve(prefix)))
-    if (!ok) {
+    if (!allowed.some((prefix) => normalized.startsWith(path.resolve(prefix)))) {
       throwError('CHANNEL_FILE_PATH_NOT_ALLOWED', `file_path not allowed: ${filePath}`)
-    }
-    if (!fs.existsSync(normalized)) {
-      throwError('CHANNEL_FILE_NOT_FOUND', `file not found: ${filePath}`)
     }
   }
 
@@ -688,9 +677,7 @@ export class FeishuChannel extends ModuleBase {
     if (incoming.owner_open_id !== undefined) {
       this.feishuConfig.owner_open_id = incoming.owner_open_id
     }
-    // SENSITIVE_KEYS not exposed in returned config
     const masked = this.handleGetConfig().config
-    void SENSITIVE_KEYS
     return { config: masked, requires_restart: requiresRestart }
   }
 
@@ -769,6 +756,19 @@ function feishuMsgToHistory(m: Record<string, unknown>): HistoryMessage {
     features: { is_mention_crab: false },
     platform_timestamp: isoFromMillis((m.create_time as string) ?? '') ?? new Date().toISOString(),
   }
+}
+
+async function readFileOrThrow(filePath: string): Promise<Buffer> {
+  try {
+    return await fsp.readFile(filePath)
+  } catch (err) {
+    if (isErrnoCode(err, 'ENOENT')) throwError('CHANNEL_FILE_NOT_FOUND', `file not found: ${filePath}`)
+    throwError('CHANNEL_FILE_READ_FAILED', err instanceof Error ? err.message : String(err))
+  }
+}
+
+function isErrnoCode(err: unknown, code: string): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === code
 }
 
 async function fetchAsBuffer(url: string): Promise<Buffer> {

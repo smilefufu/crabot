@@ -221,9 +221,16 @@ export class SessionManager {
   }
 
   private load(): void {
+    let content: string
     try {
-      if (!fs.existsSync(this.filePath)) return
-      const raw = JSON.parse(fs.readFileSync(this.filePath, 'utf-8'))
+      content = fs.readFileSync(this.filePath, 'utf-8')
+    } catch (err) {
+      if ((err as { code?: string })?.code === 'ENOENT') return
+      console.warn('[SessionManager] Failed to load sessions:', err)
+      return
+    }
+    try {
+      const raw = JSON.parse(content)
       const sessions: Session[] = Array.isArray(raw)
         ? raw
         : raw.sessions
@@ -233,15 +240,14 @@ export class SessionManager {
         this.sessions.set(session.id, session)
         this.platformToId.set(session.platform_session_id, session.id)
       }
-    } catch (error) {
-      console.warn('[SessionManager] Failed to load sessions:', error)
+    } catch (err) {
+      console.warn('[SessionManager] Failed to parse sessions:', err)
     }
   }
 
   private save(): void {
     try {
-      const dir = path.dirname(this.filePath)
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+      fs.mkdirSync(path.dirname(this.filePath), { recursive: true })
       const data = Array.from(this.sessions.values())
       fs.writeFileSync(this.filePath, JSON.stringify(data, null, 2), 'utf-8')
     } catch (error) {
