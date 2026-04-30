@@ -301,4 +301,71 @@ describe('ContextAssembler', () => {
     const getSceneCalls = mockRpc.call.mock.calls.filter(([, method]) => method === 'get_scene_profile')
     expect(getSceneCalls).toHaveLength(1)
   })
+
+  it('filters claim commands and unclaimed-hint replies out of recent_messages', async () => {
+    // history 里混了 admin 拦截过的指令和自动回的引导话术；agent 不该看到它们，
+    // 否则 LLM 会照着 history 鹦鹉学舌、反复让用户去后台审批。
+    const messages = [
+      {
+        platform_message_id: 'm1',
+        session: { session_id: 'session-1', channel_id: 'admin-web', type: 'private' },
+        sender: { friend_id: 'friend-1', platform_user_id: 'u1', platform_display_name: 'Stranger' },
+        content: { type: 'text', text: '/认主' },
+        features: { is_mention_crab: false },
+        platform_timestamp: '2026-04-30T09:30:00Z',
+      },
+      {
+        platform_message_id: 'm2',
+        session: { session_id: 'session-1', channel_id: 'admin-web', type: 'private' },
+        sender: { platform_user_id: 'self', platform_display_name: 'Crabot' },
+        content: {
+          type: 'text',
+          text: '渠道未认主，请输入"/认主"，然后到 crabot 后台 对话对象->申请队列 中进行审批创建 Master 后方可正常对话。',
+        },
+        features: { is_mention_crab: false },
+        platform_timestamp: '2026-04-30T09:30:01Z',
+      },
+      {
+        platform_message_id: 'm3',
+        session: { session_id: 'session-1', channel_id: 'admin-web', type: 'private' },
+        sender: { friend_id: 'friend-1', platform_user_id: 'u1', platform_display_name: 'Stranger' },
+        content: { type: 'text', text: 'hi' },
+        features: { is_mention_crab: false },
+        platform_timestamp: '2026-04-30T09:31:00Z',
+      },
+    ]
+
+    mockRpc.call.mockImplementation((_port, method) => {
+      if (method === 'get_chat_history') return Promise.resolve({ messages })
+      if (method === 'search_short_term') return Promise.resolve({ results: [] })
+      if (method === 'list_tasks') return Promise.resolve({ items: [] })
+      if (method === 'get_scene_profile') return Promise.resolve({ profile: null })
+      throw new Error(`unexpected call: ${String(method)}`)
+    })
+
+    const friend = {
+      id: 'friend-1',
+      display_name: 'Stranger',
+      permission: 'master' as const,
+      channel_identities: [],
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+    }
+
+    const ctx = await assembler.assembleFrontContext(
+      {
+        channel_id: 'admin-web',
+        session_id: 'session-1',
+        sender_id: 'user-1',
+        message: 'hi',
+        friend_id: 'friend-1',
+        session_type: 'private',
+      },
+      friend,
+      defaultMemoryPermissions,
+    )
+
+    expect(ctx.recent_messages).toHaveLength(1)
+    expect(ctx.recent_messages[0].platform_message_id).toBe('m3')
+  })
 })

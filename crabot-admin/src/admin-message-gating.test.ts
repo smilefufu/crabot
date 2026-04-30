@@ -108,6 +108,96 @@ function mockGroupSessionLookup(admin: AdminModule, participants: Array<{
   })
 }
 
+function makePrivateMessage(
+  platformUserId: string,
+  platformDisplayName: string,
+  text: string,
+): ChannelMessageRef {
+  return {
+    platform_message_id: 'msg-private-1',
+    session: {
+      session_id: 'private-session-1',
+      channel_id: 'wechat-main',
+      type: 'private',
+    },
+    sender: {
+      platform_user_id: platformUserId,
+      platform_display_name: platformDisplayName,
+    },
+    content: {
+      type: 'text',
+      text,
+    },
+    features: {
+      is_mention_crab: false,
+    },
+    platform_timestamp: '2026-04-19T00:00:00.000Z',
+  }
+}
+
+describe('Admin claim command interception', () => {
+  it('intercepts /认主 from a known friend without forwarding to agent', async () => {
+    const admin = makeAdmin()
+    const master = makeFriend({
+      id: 'friend-master',
+      permission: 'master',
+      channel_identities: [makeIdentity('master-user', 'Master User')],
+    })
+    seedFriend(admin, master)
+
+    vi.spyOn(admin['rpcClient'], 'resolve').mockResolvedValue([
+      { module_id: 'wechat-main', module_type: 'channel', version: '0.1.0', port: 19998 },
+    ] as any)
+    const callSpy = vi.spyOn(admin['rpcClient'], 'call').mockResolvedValue({} as any)
+    const publishSpy = vi.spyOn(admin['rpcClient'], 'publishEvent').mockResolvedValue(1)
+
+    await admin['handleChannelMessage']('wechat-main', makePrivateMessage('master-user', 'Master User', '/认主'))
+
+    expect(publishSpy).not.toHaveBeenCalled()
+    // 应该向 channel 发了一条「已认主」固定话术
+    const sendCalls = callSpy.mock.calls.filter((c) => c[1] === 'send_message')
+    expect(sendCalls).toHaveLength(1)
+    expect((sendCalls[0][2] as any).content.text).toContain('已认主')
+  })
+
+  it('intercepts /认主 from an unknown sender and routes it into the pending queue', async () => {
+    const admin = makeAdmin()
+
+    const upsertSpy = vi
+      .spyOn(admin as unknown as { handleUpsertPendingMessage: (...args: unknown[]) => Promise<unknown> }, 'handleUpsertPendingMessage')
+      .mockResolvedValue({} as any)
+    const publishSpy = vi.spyOn(admin['rpcClient'], 'publishEvent').mockResolvedValue(1)
+
+    await admin['handleChannelMessage']('wechat-main', makePrivateMessage('stranger-user', 'Stranger', '/认主'))
+
+    expect(publishSpy).not.toHaveBeenCalled()
+    expect(upsertSpy).toHaveBeenCalledTimes(1)
+    expect(upsertSpy.mock.calls[0][0]).toMatchObject({
+      channel_id: 'wechat-main',
+      platform_user_id: 'stranger-user',
+      content_preview: '/认主',
+      intent: 'pair',
+    })
+  })
+
+  it('forwards regular messages from known friends to the agent (not affected by interception)', async () => {
+    const admin = makeAdmin()
+    const friend = makeFriend({
+      id: 'friend-1',
+      permission: 'normal',
+      channel_identities: [makeIdentity('user-1', 'User 1')],
+    })
+    seedFriend(admin, friend)
+
+    const publishSpy = vi.spyOn(admin['rpcClient'], 'publishEvent').mockResolvedValue(1)
+
+    await admin['handleChannelMessage']('wechat-main', makePrivateMessage('user-1', 'User 1', 'hi'))
+
+    expect(publishSpy).toHaveBeenCalledTimes(1)
+    expect((publishSpy.mock.calls[0][0] as any).type).toBe('channel.message_authorized')
+  })
+})
+
 describe('Admin group message gating', () => {
   it('authorizes a group message when the concrete group session contains a master', async () => {
     const admin = makeAdmin()

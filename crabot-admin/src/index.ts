@@ -24,6 +24,10 @@ import {
   proxyManager,
   ProxyManager,
   type ProxyConfig,
+  CLAIM_COMMANDS,
+  CLAIM_PAIR_COMMANDS,
+  UNCLAIMED_HINT_TEXT,
+  ALREADY_CLAIMED_HINT_TEXT,
 } from 'crabot-shared'
 import {
   type Friend,
@@ -237,10 +241,6 @@ function normalizeSceneProfileTextField(
   const trimmed = value.trim()
   return trimmed || fallback
 }
-
-/** 私聊未知发信人发这些命令时进入 pending 申请队列 */
-const CLAIM_PAIR_COMMANDS = new Set(['/pair', '/认主'])
-const CLAIM_COMMANDS = new Set(['/pair', '/认主', '/apply'])
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json' })
@@ -3056,12 +3056,40 @@ export class AdminModule extends ModuleBase {
 
     console.log(`[Admin] 📩 handleChannelMessage: channel=${channelId}, sender=${platform_user_id} (${platform_display_name}), friend=${friend ? friend.id : 'NOT_FOUND'}, sessionType=${message.session.type}`)
 
+    // 群聊：master 不在场直接丢弃
     if (message.session.type !== 'private') {
       const masterInGroup = await this.checkMasterInSession(channelId, message.session.session_id)
       if (!masterInGroup) {
         console.log(`[Admin] ⚠️ Group message dropped: no master in session ${message.session.session_id} on channel ${channelId}`)
         return
       }
+    }
+
+    // 认主类指令在 admin 层完整处理：不放行到 agent，避免 agent 看到指令字面后鹦鹉学舌。
+    // 已知 friend 发命令属于无意义/误触，回固定话术；未知发信人按现有 pending 队列流程。
+    const body = (message.content.type === 'text' ? (message.content.text ?? '') : '').trim()
+    if (CLAIM_COMMANDS.has(body)) {
+      if (message.session.type !== 'private') {
+        // 群聊里发命令现在没有特别语义，直接静默丢弃
+        console.log(`[Admin] ⚠️ Claim command in group session dropped: ${body} from ${platform_user_id} on ${channelId}`)
+        return
+      }
+      if (friend) {
+        console.log(`[Admin] ⚠️ Claim command from known friend ${friend.id} (${platform_user_id}) intercepted; replying with already-claimed hint`)
+        await this.replyClaimHint(channelId, message.session.session_id, platform_user_id, ALREADY_CLAIMED_HINT_TEXT)
+        return
+      }
+      const intent: 'pair' | 'apply' = CLAIM_PAIR_COMMANDS.has(body) ? 'pair' : 'apply'
+      await this.handleUpsertPendingMessage({
+        channel_id: channelId,
+        platform_user_id,
+        platform_display_name,
+        content_preview: body,
+        intent,
+        raw_message: message,
+      })
+      console.log(`[Admin] Upserted pending message (${intent}) for unknown sender: ${platform_user_id} (${platform_display_name})`)
+      return
     }
 
     if (friend) {
@@ -3091,54 +3119,46 @@ export class AdminModule extends ModuleBase {
       return
     }
 
-    const body = (message.content.type === 'text' ? (message.content.text ?? '') : '').trim()
-    if (CLAIM_COMMANDS.has(body)) {
-      const intent: 'pair' | 'apply' = CLAIM_PAIR_COMMANDS.has(body) ? 'pair' : 'apply'
-      await this.handleUpsertPendingMessage({
-        channel_id: channelId,
-        platform_user_id,
-        platform_display_name,
-        content_preview: body,
-        intent,
-        raw_message: message,
-      })
-      console.log(`[Admin] Upserted pending message (${intent}) for unknown sender: ${platform_user_id} (${platform_display_name})`)
-      return
-    }
-
     // 已认主 channel 上的陌生人静默丢弃，未认主 channel 才回引导话术
     if (this.isChannelClaimed(channelId)) {
       console.log(`[Admin] ⚠️ Private message from unknown sender dropped (channel already claimed): ${platform_user_id}, text="${(message.content.text ?? '').slice(0, 30)}"`)
       return
     }
     console.log(`[Admin] ⚠️ Unknown private sender ${platform_user_id} on unclaimed channel; replying with onboarding hint`)
-    await this.replyUnclaimedHint(channelId, message.session.session_id, platform_user_id)
+    await this.replyClaimHint(channelId, message.session.session_id, platform_user_id, UNCLAIMED_HINT_TEXT)
   }
 
   private isChannelClaimed(channelId: ModuleId): boolean {
     return this.getMasterPlatformUserIdsForChannel(channelId).length > 0
   }
 
-  /** 未认主私聊用户的固定回复 + 节流（同一发信人 5 分钟内只回一次） */
-  private readonly unclaimedHintReplies: Map<string, number> = new Map()
-  private static readonly UNCLAIMED_HINT_TTL_MS = 5 * 60 * 1000
+  /**
+   * 提示话术节流：同一 (channel, sender) 5 分钟内只回一次，避免被人刷消息打爆。
+   * 复用一个 map 给 unclaimed / already-claimed 两种话术，因为对单一发信人来说同时
+   * 只可能命中其中一种语义。
+   */
+  private readonly claimHintReplies: Map<string, number> = new Map()
+  private static readonly CLAIM_HINT_TTL_MS = 5 * 60 * 1000
   // 防止 Map 无界增长：超过 cap 时按插入顺序删最早项 + 顺手扫一次过期项
-  private static readonly UNCLAIMED_HINT_CACHE_MAX = 5000
-  private static readonly UNCLAIMED_HINT_TEXT =
-    '渠道未认主，请输入"/认主"，然后到 crabot 后台 对话对象->申请队列 中进行审批创建 Master 后方可正常对话。'
+  private static readonly CLAIM_HINT_CACHE_MAX = 5000
 
-  private async replyUnclaimedHint(channelId: ModuleId, sessionId: string, platformUserId: string): Promise<void> {
+  private async replyClaimHint(
+    channelId: ModuleId,
+    sessionId: string,
+    platformUserId: string,
+    text: string,
+  ): Promise<void> {
     const key = `${channelId}:${platformUserId}`
     const now = Date.now()
-    const last = this.unclaimedHintReplies.get(key) ?? 0
-    if (now - last < AdminModule.UNCLAIMED_HINT_TTL_MS) return
-    this.evictStaleUnclaimedHintEntries(now)
-    this.unclaimedHintReplies.set(key, now)
+    const last = this.claimHintReplies.get(key) ?? 0
+    if (now - last < AdminModule.CLAIM_HINT_TTL_MS) return
+    this.evictStaleClaimHintEntries(now)
+    this.claimHintReplies.set(key, now)
 
     try {
       const modules = await this.rpcClient.resolve({ module_id: channelId }, this.config.moduleId)
       if (modules.length === 0) {
-        console.warn(`[Admin] replyUnclaimedHint: channel module ${channelId} not resolvable`)
+        console.warn(`[Admin] replyClaimHint: channel module ${channelId} not resolvable`)
         return
       }
       await this.rpcClient.call(
@@ -3146,23 +3166,22 @@ export class AdminModule extends ModuleBase {
         'send_message',
         {
           session_id: sessionId,
-          content: { type: 'text', text: AdminModule.UNCLAIMED_HINT_TEXT },
+          content: { type: 'text', text },
         },
         this.config.moduleId,
       )
     } catch (err) {
-      console.warn(`[Admin] replyUnclaimedHint failed for ${channelId}/${platformUserId}:`, err)
+      console.warn(`[Admin] replyClaimHint failed for ${channelId}/${platformUserId}:`, err)
     }
   }
 
-  private evictStaleUnclaimedHintEntries(now: number): void {
-    const map = this.unclaimedHintReplies
-    if (map.size < AdminModule.UNCLAIMED_HINT_CACHE_MAX) return
+  private evictStaleClaimHintEntries(now: number): void {
+    const map = this.claimHintReplies
+    if (map.size < AdminModule.CLAIM_HINT_CACHE_MAX) return
     for (const [k, ts] of map) {
-      if (now - ts >= AdminModule.UNCLAIMED_HINT_TTL_MS) map.delete(k)
+      if (now - ts >= AdminModule.CLAIM_HINT_TTL_MS) map.delete(k)
     }
-    // 仍然超 cap：按插入顺序删最早项直到回到 cap 内
-    while (map.size >= AdminModule.UNCLAIMED_HINT_CACHE_MAX) {
+    while (map.size >= AdminModule.CLAIM_HINT_CACHE_MAX) {
       const oldest = map.keys().next().value
       if (oldest === undefined) break
       map.delete(oldest)

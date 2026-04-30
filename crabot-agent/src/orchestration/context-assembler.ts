@@ -7,7 +7,7 @@
  * @see protocol-agent-v2.md 3.2.3 WorkerAgentContext
  */
 
-import type { ModuleId, SessionId, RpcClient } from 'crabot-shared'
+import { isClaimCommand, isClaimSystemHint, type ModuleId, type SessionId, type RpcClient } from 'crabot-shared'
 import type {
   OrchestrationConfig,
   FrontAgentContext,
@@ -52,6 +52,18 @@ interface FetchLongTermMemoryParams extends MemoryFetchParams {
   query?: string
   /** 调用方传入的 task_id，会作为 task_id 参数传给 search_long_term */
   taskId?: string
+}
+
+/**
+ * 过滤 channel.history 里的认主类噪声：
+ * - 用户发的 `/认主` `/pair` `/apply` 指令本身（admin 已拦截，agent 看到也只会鹦鹉学舌）
+ * - admin 自动回出的引导话术（"渠道未认主..." 等）
+ * 这些消息被注入 history 会让 LLM 误以为还要继续走"让用户去后台审批"流程。
+ */
+function filterChannelClaimNoise(message: ChannelMessage): boolean {
+  if (message.content?.type !== 'text') return true
+  const text = message.content.text
+  return !isClaimCommand(text) && !isClaimSystemHint(text)
 }
 
 export class ContextAssembler {
@@ -240,7 +252,7 @@ export class ContextAssembler {
           { limit: number; before?: string },
           { messages: ChannelMessage[] }
         >(adminPort, 'get_chat_history', { limit }, this.moduleId)
-        return result.messages
+        return result.messages.filter(filterChannelClaimNoise)
       }
 
       // 其他 Channel：通过 Module Manager 解析 Channel 模块并调用 get_history
@@ -263,29 +275,31 @@ export class ContextAssembler {
         { session_id: sessionId, limit },
         this.moduleId
       )
-      // 注入 session 上下文，转换为 ChannelMessage
-      return result.items.map((msg) => ({
-        platform_message_id: msg.platform_message_id,
-        session: {
-          session_id: sessionId,
-          channel_id: channelId,
-          type: sessionType,
-        },
-        sender: {
-          friend_id: msg.sender.friend_id,
-          platform_user_id: msg.sender.platform_user_id,
-          platform_display_name: msg.sender.platform_display_name,
-        },
-        content: {
-          type: msg.content.type as 'text' | 'image' | 'file',
-          text: msg.content.text,
-          media_url: msg.content.media_url,
-        },
-        features: {
-          is_mention_crab: msg.features.is_mention_crab,
-        },
-        platform_timestamp: msg.platform_timestamp,
-      }))
+      // 注入 session 上下文，转换为 ChannelMessage，并过滤认主指令 + 引导话术
+      return result.items
+        .map((msg) => ({
+          platform_message_id: msg.platform_message_id,
+          session: {
+            session_id: sessionId,
+            channel_id: channelId,
+            type: sessionType,
+          },
+          sender: {
+            friend_id: msg.sender.friend_id,
+            platform_user_id: msg.sender.platform_user_id,
+            platform_display_name: msg.sender.platform_display_name,
+          },
+          content: {
+            type: msg.content.type as 'text' | 'image' | 'file',
+            text: msg.content.text,
+            media_url: msg.content.media_url,
+          },
+          features: {
+            is_mention_crab: msg.features.is_mention_crab,
+          },
+          platform_timestamp: msg.platform_timestamp,
+        }))
+        .filter(filterChannelClaimNoise)
     } catch {
       return []
     }

@@ -52,6 +52,15 @@ export { ProxyManager, proxyManager } from './proxy-manager.js'
 export { CLI_WRITE_SUBCOMMANDS, CLI_MUST_CONFIRM_SUBCOMMANDS } from './cli-write-commands.js'
 
 export {
+  CLAIM_COMMANDS,
+  CLAIM_PAIR_COMMANDS,
+  UNCLAIMED_HINT_TEXT,
+  ALREADY_CLAIMED_HINT_TEXT,
+  isClaimCommand,
+  isClaimSystemHint,
+} from './claim-commands.js'
+
+export {
   type Onboarder,
   type OnboarderEvent,
   type OnboarderBeginResult,
