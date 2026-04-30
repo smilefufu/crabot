@@ -236,6 +236,11 @@ export class ChannelManager {
         await this.saveInstances()
 
         console.log(`[ChannelManager] ${impl.id} instance registered: ${instance.id}`)
+
+        // MM 的 register_module_definition 仅注册定义（status=stopped），
+        // 运行时新建实例需要显式 startModule 才能拉起进程。
+        await this.startInstanceIfAutoStart(registered)
+
         return registered
       } catch (error) {
         console.error(`[ChannelManager] Failed to register ${impl.id} module:`, error)
@@ -247,6 +252,26 @@ export class ChannelManager {
     }
 
     return instance
+  }
+
+  /**
+   * 若实例配置了 auto_start，调用 MM startModule 拉起进程。
+   *
+   * 启动失败不抛错（实例已落盘 + 注册成功），仅记日志，与 reRegisterInstances 行为一致。
+   * ALREADY_RUNNING 视为成功。
+   */
+  private async startInstanceIfAutoStart(instance: ChannelInstance): Promise<void> {
+    if (!instance.auto_start) return
+    try {
+      await this.rpcClient.startModule(instance.id, 'admin')
+      console.log(`[ChannelManager] Auto-started: ${instance.id}`)
+    } catch (error: any) {
+      if (error?.message?.includes('ALREADY_RUNNING')) {
+        console.log(`[ChannelManager] Already running: ${instance.id}`)
+        return
+      }
+      console.error(`[ChannelManager] Failed to auto-start ${instance.id}:`, error)
+    }
   }
 
   /**
@@ -508,17 +533,7 @@ export class ChannelManager {
       .sort((a, b) => a.start_priority - b.start_priority)
 
     for (const instance of autoStartInstances) {
-      try {
-        await this.rpcClient.startModule(instance.id, 'admin')
-        console.log(`[ChannelManager] Auto-started: ${instance.id}`)
-      } catch (error: any) {
-        // 已在运行则忽略
-        if (error?.message?.includes('ALREADY_RUNNING')) {
-          console.log(`[ChannelManager] Already running: ${instance.id}`)
-        } else {
-          console.error(`[ChannelManager] Failed to auto-start ${instance.id}:`, error)
-        }
-      }
+      await this.startInstanceIfAutoStart(instance)
     }
   }
 
