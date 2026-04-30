@@ -45,6 +45,10 @@ export const NewChannelOnboarding: React.FC = () => {
   const [now, setNow] = useState(Date.now())
   const sseRef = useRef<{ close: () => void } | null>(null)
   const sessionIdRef = useRef<string | null>(null)
+  // handlePollEvent 是 useCallback([])，闭包里的 name 永远是初始 ''
+  // 用 ref 把当前 name 暴露给 finishOnboarding
+  const nameRef = useRef('')
+  nameRef.current = name
 
   useEffect(() => {
     channelService.getImplementation(implId)
@@ -134,12 +138,13 @@ export const NewChannelOnboarding: React.FC = () => {
   }, [])
 
   const finishOnboarding = async (sessionId: string) => {
+    const instanceName = nameRef.current
     setStatus((s) => ({ ...s, step: 'creating', message: '正在创建 Channel 实例…' }))
     try {
-      const r = await channelService.onboardFinish(implId, methodId, sessionId, name)
+      const r = await channelService.onboardFinish(implId, methodId, sessionId, instanceName)
       sessionIdRef.current = null
       setStatus({ step: 'done', message: '实例已创建' })
-      toast.success(`Channel "${name}" 创建成功，已自动启动`)
+      toast.success(`Channel "${instanceName}" 创建成功，已自动启动`)
       const instanceId = r.instance?.id
       navigate(instanceId ? `/channels/config?selected=${encodeURIComponent(instanceId)}` : '/channels/config')
     } catch (err) {
