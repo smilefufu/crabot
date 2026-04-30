@@ -128,6 +128,7 @@ import {
   sessionHasMasterParticipant,
 } from './dialog-objects.js'
 import { createMemoryV2RestRouter } from './memory-v2-rest.js'
+import { FeishuOnboard } from './feishu-onboard.js'
 
 // ============================================================================
 // JWT 工具函数
@@ -277,6 +278,9 @@ export class AdminModule extends ModuleBase {
   // PTY 管理器（Web CLI 终端）
   private ptyManager: PtyManager | null = null
 
+  // 飞书扫码 onboarding（设备码 OAuth）
+  private feishuOnboard: FeishuOnboard
+
   // MCP Server 管理器
   private mcpServerManager!: MCPServerManager
 
@@ -340,6 +344,8 @@ export class AdminModule extends ModuleBase {
     this.scheduleEngine = new ScheduleEngine({
       onTrigger: (schedule) => this.handleScheduleTrigger(schedule),
     })
+
+    this.feishuOnboard = new FeishuOnboard({ channelManager: this.channelManager })
 
     this.memoryV2Router = createMemoryV2RestRouter({
       rpcClient: this.rpcClient,
@@ -521,6 +527,9 @@ export class AdminModule extends ModuleBase {
 
     // 重新注册 channel-host 实例到 MM（MM 重启后动态注册会丢失）
     await this.channelManager.reRegisterInstances()
+
+    // 启动飞书 onboarding session GC
+    this.feishuOnboard.startGc()
 
     // 初始化模块安装器
     await this.moduleInstaller.initialize()
@@ -706,13 +715,20 @@ export class AdminModule extends ModuleBase {
     // 认证检查（排除登录接口和静态文件）
     if (pathname.startsWith('/api/') && pathname !== '/api/auth/login') {
       const authHeader = req.headers.authorization
-      if (!authHeader?.startsWith('Bearer ')) {
+      let token: string | null = null
+      if (authHeader?.startsWith('Bearer ')) {
+        token = authHeader.slice(7)
+      } else if (pathname === '/api/channels/feishu/onboard/poll') {
+        // SSE：EventSource 不支持自定义 header，允许 ?token=xxx
+        token = url.searchParams.get('token')
+      }
+
+      if (!token) {
         res.writeHead(401)
         res.end(JSON.stringify({ error: 'Unauthorized' }))
         return
       }
 
-      const token = authHeader.slice(7)
       const payload = verifyJwt(token, this.jwtSecret)
       if (!payload) {
         res.writeHead(401)
@@ -1490,6 +1506,72 @@ export class AdminModule extends ModuleBase {
         const result = await this.handleRestartModuleAdmin({ module_id: moduleId })
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(result))
+        return
+      }
+
+      // ── 飞书扫码 onboarding ─────────────────────────────────────────────
+      // 注：SSE poll 走 query string token（EventSource 不支持自定义 header）；其他三条走标准 Bearer
+      if (req.method === 'POST' && pathname === '/api/channels/feishu/onboard/begin') {
+        const body = await this.readJsonBody<{ domain?: 'feishu' | 'lark' }>(req).catch(() => ({} as { domain?: 'feishu' | 'lark' }))
+        try {
+          const r = await this.feishuOnboard.begin({ domain: body.domain })
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify(r))
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'feishu onboard begin failed' }))
+        }
+        return
+      }
+      if (req.method === 'GET' && pathname === '/api/channels/feishu/onboard/poll') {
+        const sessionId = url.searchParams.get('session_id')
+        if (!sessionId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'session_id is required' }))
+          return
+        }
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+        })
+        let aborted = false
+        req.on('close', () => { aborted = true })
+        try {
+          for await (const ev of this.feishuOnboard.poll(sessionId)) {
+            if (aborted) break
+            res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`)
+            if (ev.type === 'success' || ev.type === 'error') break
+          }
+        } catch (err) {
+          const payload = JSON.stringify({ type: 'error', code: 'unknown', message: err instanceof Error ? err.message : 'poll failed' })
+          res.write(`event: error\ndata: ${payload}\n\n`)
+        }
+        res.end()
+        return
+      }
+      if (req.method === 'POST' && pathname === '/api/channels/feishu/onboard/finish') {
+        const body = await this.readJsonBody<{ session_id?: string; name?: string }>(req)
+        if (!body.session_id || !body.name) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'session_id and name are required' }))
+          return
+        }
+        try {
+          const inst = await this.feishuOnboard.finish(body.session_id, { name: body.name })
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ instance: inst }))
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'finish failed' }))
+        }
+        return
+      }
+      if (req.method === 'POST' && pathname === '/api/channels/feishu/onboard/cancel') {
+        const body = await this.readJsonBody<{ session_id?: string }>(req).catch(() => ({} as { session_id?: string }))
+        if (body.session_id) this.feishuOnboard.cancel(body.session_id)
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true }))
         return
       }
 
