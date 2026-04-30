@@ -10,6 +10,7 @@ const JS_MODULES = [
   'crabot-channel-host',
   'crabot-channel-wechat',
   'crabot-channel-telegram',
+  'crabot-channel-feishu',
   'crabot-mcp-tools',
 ]
 const PY_MODULE = 'crabot-memory'

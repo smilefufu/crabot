@@ -148,7 +148,7 @@ main() {
     info "Building all modules..."
     # shared 必须先编译（其他模块依赖它）
     (cd crabot-shared && corepack pnpm install && corepack pnpm run build)
-    for dir in crabot-core crabot-admin crabot-agent crabot-channel-host crabot-channel-wechat crabot-channel-telegram crabot-mcp-tools; do
+    for dir in crabot-core crabot-admin crabot-agent crabot-channel-host crabot-channel-wechat crabot-channel-telegram crabot-channel-feishu crabot-mcp-tools; do
       if [ -d "$dir" ]; then
         (cd "$dir" && corepack pnpm install && corepack pnpm run build)
       fi

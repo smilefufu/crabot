@@ -64,7 +64,7 @@ if ($FromSource) {
     Push-Location crabot-shared
     corepack pnpm install; corepack pnpm run build
     Pop-Location
-    foreach ($mod in @('crabot-core','crabot-admin','crabot-agent','crabot-channel-host','crabot-channel-wechat','crabot-channel-telegram','crabot-mcp-tools')) {
+    foreach ($mod in @('crabot-core','crabot-admin','crabot-agent','crabot-channel-host','crabot-channel-wechat','crabot-channel-telegram','crabot-channel-feishu','crabot-mcp-tools')) {
         if (Test-Path $mod) {
             Push-Location $mod
             corepack pnpm install; corepack pnpm run build
