@@ -3099,9 +3099,45 @@ export class AdminModule extends ModuleBase {
         raw_message: message,
       })
       console.log(`[Admin] Upserted pending message (${intent}) for unknown sender: ${platform_user_id} (${platform_display_name})`)
+      return
     }
-    // 其他私聊陌生人消息静默丢弃
-    console.log(`[Admin] ⚠️ Private message from unknown sender dropped (not /pair, /认主 or /apply): ${platform_user_id}, text="${(message.content.text ?? '').slice(0, 30)}"`)
+
+    // 其他私聊陌生人消息：回复引导话术，节流避免轰炸
+    console.log(`[Admin] ⚠️ Unknown private sender ${platform_user_id} sent non-claim message; replying with onboarding hint`)
+    await this.replyUnclaimedHint(channelId, message.session.session_id, platform_user_id)
+  }
+
+  /** 未认主私聊用户的固定回复 + 节流（同一发信人 5 分钟内只回一次） */
+  private readonly unclaimedHintReplies: Map<string, number> = new Map()
+  private static readonly UNCLAIMED_HINT_TTL_MS = 5 * 60 * 1000
+  private static readonly UNCLAIMED_HINT_TEXT =
+    '渠道未认主，请输入"/认主"，然后到 crabot 后台 对话对象->申请队列 中进行审批创建 Master 后方可正常对话。'
+
+  private async replyUnclaimedHint(channelId: ModuleId, sessionId: string, platformUserId: string): Promise<void> {
+    const key = `${channelId}:${platformUserId}`
+    const last = this.unclaimedHintReplies.get(key) ?? 0
+    const now = Date.now()
+    if (now - last < AdminModule.UNCLAIMED_HINT_TTL_MS) return
+    this.unclaimedHintReplies.set(key, now)
+
+    try {
+      const modules = await this.rpcClient.resolve({ module_id: channelId }, this.config.moduleId)
+      if (modules.length === 0) {
+        console.warn(`[Admin] replyUnclaimedHint: channel module ${channelId} not resolvable`)
+        return
+      }
+      await this.rpcClient.call(
+        modules[0].port,
+        'send_message',
+        {
+          session_id: sessionId,
+          content: { type: 'text', text: AdminModule.UNCLAIMED_HINT_TEXT },
+        },
+        this.config.moduleId,
+      )
+    } catch (err) {
+      console.warn(`[Admin] replyUnclaimedHint failed for ${channelId}/${platformUserId}:`, err)
+    }
   }
 
   /**
