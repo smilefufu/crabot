@@ -3,8 +3,10 @@
  *
  * 仅承载 Front 私有的非 MCP 工具：
  * - query_tasks   → local activeTasks + Admin RPC
- * - create_schedule → Admin RPC
  * - store_memory / search_memory / get_memory_detail → Memory RPC
+ *
+ * 创建 schedule 的工具已废弃。Front 不再直接创建调度项；需要排定时任务
+ * 通过 create_task 派 worker 用 `crabot schedule add` CLI 创建。
  *
  * Messaging 类工具（lookup_friend / list_* / send_message / send_private_message
  * / get_history / get_message）由 crab-messaging MCP server 单一来源提供，Front
@@ -65,7 +67,6 @@ export class ToolExecutor {
     try {
       switch (toolName) {
         case 'query_tasks': return await this.queryTasks(input)
-        case 'create_schedule': return await this.createSchedule(input)
         case 'store_memory': return await this.storeMemory(input)
         case 'search_memory': return await this.searchMemory(input)
         case 'get_memory_detail': return await this.getMemoryDetail(input)
@@ -98,70 +99,6 @@ export class ToolExecutor {
       output: JSON.stringify({ local_active: localTasks, admin_tasks: adminTasks }),
       isError: false,
     }
-  }
-
-  private async createSchedule(input: Record<string, unknown>): Promise<ToolResult> {
-    // ---- 参数校验 ----
-    const title = (input.title as string | undefined)?.trim()
-    if (!title) {
-      return { output: JSON.stringify({ error: 'title 不能为空' }), isError: true }
-    }
-
-    const action = (input.action as string) ?? 'send_reminder'
-    if (action !== 'send_reminder' && action !== 'create_task') {
-      return { output: JSON.stringify({ error: `action 必须是 "send_reminder" 或 "create_task"，收到: "${action}"` }), isError: true }
-    }
-
-    // trigger: 必须提供 trigger_at 或 cron 二选一
-    let trigger: Record<string, unknown>
-    if (input.cron) {
-      const expression = (input.cron as string).trim()
-      const parts = expression.split(/\s+/)
-      if (parts.length < 5) {
-        return { output: JSON.stringify({ error: `cron 表达式无效: "${expression}"，至少需要 5 个字段（分 时 日 月 周）` }), isError: true }
-      }
-      trigger = { type: 'cron', expression }
-    } else if (input.trigger_at) {
-      const executeAt = input.trigger_at as string
-      const ts = new Date(executeAt).getTime()
-      if (Number.isNaN(ts)) {
-        return { output: JSON.stringify({ error: `trigger_at 格式无效: "${executeAt}"，请使用 ISO 8601 格式，如 2026-04-15T16:45:00+08:00` }), isError: true }
-      }
-      trigger = { type: 'once', execute_at: new Date(executeAt).toISOString() }
-    } else {
-      return { output: JSON.stringify({ error: '必须提供 trigger_at（一次性）或 cron（周期性），不能都为空' }), isError: true }
-    }
-
-    // send_reminder 时校验 channel/session
-    if (action === 'send_reminder' && (!input.target_channel_id || !input.target_session_id)) {
-      return { output: JSON.stringify({ error: 'action 为 send_reminder 时必须提供 target_channel_id 和 target_session_id' }), isError: true }
-    }
-
-    // ---- 构建 task_template ----
-    const descParts: string[] = []
-    if (input.description) descParts.push(input.description as string)
-
-    if (action === 'send_reminder') {
-      descParts.push(`\n[提醒指令] 使用 send_message 工具向 channel_id="${input.target_channel_id}" session_id="${input.target_session_id}" 发送提醒消息。提醒内容: ${title}`)
-    }
-
-    const task_template = {
-      title,
-      description: descParts.join('\n') || undefined,
-      priority: 'normal' as const,
-      tags: action === 'send_reminder' ? ['reminder'] : ['scheduled'],
-    }
-
-    // ---- 调用 Admin RPC ----
-    const adminPort = await this.deps.getAdminPort()
-    const result = await this.deps.rpcClient.call(adminPort, 'create_schedule', {
-      name: title,
-      description: input.description as string | undefined,
-      enabled: true,
-      trigger,
-      task_template,
-    }, this.deps.moduleId)
-    return { output: JSON.stringify(result), isError: false }
   }
 
   private async storeMemory(input: Record<string, unknown>): Promise<ToolResult> {

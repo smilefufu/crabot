@@ -325,8 +325,8 @@ const WORKER_RULES = `## 时间感知
 而是要让"你不在场"的系统也能按预期触发。把这种主动性物化到下面其中一类载体：
 
 - **项目自治**：项目内有自己的 cron / scheduler 时，沉淀到项目目录的代码 + 调度配置
-- **系统级调度**：\`crabot schedule add --title <X> --action <create_task|send_reminder> --cron <expr> | --trigger-at <iso>\`
-  （cli 详见 crabot-cli skill。\`action=create_task\` 到点拉起任务；\`action=send_reminder\` 到点向指定 channel/session 发提醒）
+- **系统级调度**：\`crabot schedule add --title <task 标题> --priority <low|normal|high|urgent> --cron <expr> | --trigger-at <iso>\`
+  （cli 详见 crabot-cli skill。可选参数 \`--name\` schedule 名 / \`--task-description\` 触发时给 worker 的 prompt / \`--task-type\` trace 过滤标签 / \`--tag\` 可重复 / \`--target-channel <id> --target-session <id>\` 触发后向指定会话发提醒）
 - **信息留痕**：\`store_memory\` 记下后续触发条件——仅当系统调度不适用时使用，弱物化
 
 判定原则：能不能让"无你在场"的系统在未来正确触发？能 → 完成（按上方"完成判定"段给 evidence：调度项 ID、文件路径或类似产物）；不能 → 还差一步，别交付。

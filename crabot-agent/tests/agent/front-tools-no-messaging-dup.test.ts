@@ -82,8 +82,9 @@ describe('Front tools — messaging single-source-of-truth', () => {
     expect(names).toContain('reply')
     expect(names).toContain('create_task')
     expect(names).toContain('query_tasks')
-    expect(names).toContain('create_schedule')
     expect(names).toContain('store_memory')
+    // create_schedule 已废弃：Front 不再创建调度项，统一通过 worker 用 `crabot schedule add` CLI
+    expect(names).not.toContain('create_schedule')
 
     // Messaging（带前缀）
     expect(names).toContain('mcp__crab-messaging__send_private_message')

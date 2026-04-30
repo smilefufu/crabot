@@ -155,7 +155,7 @@ export async function runFrontLoop(params: FrontLoopParams): Promise<FrontLoopRe
 
           // Other tools -> execute
           // MCP-proxied tools (mcp__<server>__<name>) 自带可执行 call，直接走 ToolDefinition.call；
-          // 其余 Front 私有工具（query_tasks/create_schedule/store_memory/...）走 toolExecutor。
+          // 其余 Front 私有工具（query_tasks/store_memory/...）走 toolExecutor。
           const toolSpanId = traceCallback?.onToolCallStart(block.name, JSON.stringify(block.input).slice(0, 200))
           const input = block.input as Record<string, unknown>
           const result = isMcpProxyToolName(block.name)

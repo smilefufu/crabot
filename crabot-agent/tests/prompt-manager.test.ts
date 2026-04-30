@@ -357,11 +357,14 @@ describe('Worker prompt — 主动性诉求的物化段', () => {
     expect(worker).toContain('信息留痕')
   })
 
-  it('调度参数提示完整（cron / once / 两种 action）', () => {
+  it('调度参数提示完整（cron / once / 必填 priority / 目标会话）', () => {
     expect(worker).toContain('--cron')
     expect(worker).toContain('--trigger-at')
-    expect(worker).toContain('create_task')
-    expect(worker).toContain('send_reminder')
+    // priority 是 admin 协议必填字段，CLI 要求显式传
+    expect(worker).toContain('--priority')
+    // 提醒类调度通过 task_template.input 把目标 channel/session 透传给 worker
+    expect(worker).toContain('--target-channel')
+    expect(worker).toContain('--target-session')
   })
 
   it('不再使用旧"持续性"框架命名（避免把主动性窄化成持续性）', () => {

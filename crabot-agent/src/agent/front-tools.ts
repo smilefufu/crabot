@@ -3,8 +3,11 @@
  *
  * 本文件仅声明 Front **私有**的工具：
  * - Decision tools: reply / create_task / supplement_task / stay_silent
- * - Info tools:     query_tasks / create_schedule
+ * - Info tools:     query_tasks
  * - Memory tools:   store_memory / search_memory / get_memory_detail
+ *
+ * 创建定时任务（schedule）的工具已废弃：Front 不再有该能力，需要排定时
+ * 任务时通过 create_task 派 worker 用 `crabot schedule add` CLI 创建。
  *
  * **Messaging 工具不在这里声明**——由 `crab-messaging` MCP server 单一来源提供，
  * 通过 `mcpServerToToolDefinitions` 转成 ToolDefinition[] 注入 Front loop（与 Worker
@@ -155,31 +158,6 @@ export const QUERY_TASKS_TOOL: ToolDefinition = {
   call: NOOP_CALL,
 }
 
-export const CREATE_SCHEDULE_TOOL: ToolDefinition = {
-  name: 'create_schedule',
-  category: 'task' as const,
-  description: '创建定时任务或提醒。支持一次性（trigger_at）和周期性（cron）。创建后由系统在到达指定时间时自动执行，无需额外操作。',
-  inputSchema: {
-    type: 'object' as const,
-    properties: {
-      title: { type: 'string', description: '任务/提醒标题' },
-      description: { type: 'string', description: '详细描述' },
-      trigger_at: { type: 'string', description: '触发时间，必须是完整的 ISO 8601 格式含时区，如 "2026-04-15T16:45:00+08:00"。一次性提醒用此字段' },
-      cron: { type: 'string', description: 'Cron 表达式（分 时 日 月 周），如 "0 9 * * *"。周期性任务用此字段' },
-      action: {
-        type: 'string',
-        enum: ['send_reminder', 'create_task'],
-        description: 'send_reminder=到时间后发送提醒消息给用户, create_task=到时间后创建后台任务执行',
-      },
-      target_channel_id: { type: 'string', description: '提醒发送到的 channel（send_reminder 时必填，使用当前 Channel ID）' },
-      target_session_id: { type: 'string', description: '提醒发送到的 session（send_reminder 时必填，使用当前 Session ID）' },
-    },
-    required: ['title', 'action'],
-  },
-  isReadOnly: false,
-  call: NOOP_CALL,
-}
-
 // Messaging tools 由 crab-messaging MCP server 提供，本文件不再重复声明。
 // 参见: src/mcp/crab-messaging.ts
 
@@ -278,7 +256,6 @@ export function getAllFrontTools(
     ...(allowSilent ? [STAY_SILENT_TOOL] : []),
     // Info tools (Front-private)
     QUERY_TASKS_TOOL,
-    CREATE_SCHEDULE_TOOL,
     // Messaging tools (来自 crab-messaging MCP，名字带 mcp__crab-messaging__ 前缀)
     ...messagingTools,
     // Memory tools (Front-private; long-term & short-term)

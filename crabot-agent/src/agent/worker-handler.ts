@@ -567,7 +567,7 @@ export class WorkerHandler {
         workerHookRegistry.register(createCliBlockHook())
       }
 
-      // 6c. 注入 CLI 环境变量（CRABOT_TOKEN）
+      // 6c. 注入 CLI 环境变量（CRABOT_TOKEN + CRABOT_ACTOR）
       // 总是注入（不论 isMasterPrivate）—— token 只是让子进程能调 CLI；
       // 真正的权限边界在 CLI 层 (block-cli-write hook 限制 write 命令到 master_private)。
       // 不注入会让群聊/非 master 任务的 read 类 CLI（如 'crabot mcp list'）也跑不起来。
@@ -581,6 +581,9 @@ export class WorkerHandler {
           // internal-token 不存在时不注入，CLI 命令将报错
         }
       }
+      // CRABOT_ACTOR 让 CLI undo log / audit log 把 worker 子进程的写操作正确记为 'agent'
+      // 而不是默认的 'human'。
+      process.env.CRABOT_ACTOR = 'agent'
 
       // 7. Run engine — systemPrompt 和 tools 传 lambda，每轮 LLM 调用前 query-loop 重新 resolve
       const engineResult = await runEngine({
