@@ -4,10 +4,12 @@
  * 由 admin 在用户进入 onboarding 流程时 require()，不通过 RPC 暴露。
  * 实现 base-protocol §10 的 Onboarder 接口。
  *
- * 端点来源参考：@larksuite/openclaw-lark-tools v1.0.39
- *   POST https://open.feishu.cn/oauth/v1/app/registration
+ * 端点来源参考：@larksuite/openclaw-lark-tools v1.0.40 (utils/feishu-auth.js)
+ *   POST https://accounts.feishu.cn/oauth/v1/app/registration  (国际版：accounts.larksuite.com)
  *   body Content-Type: application/x-www-form-urlencoded
  *   action ∈ init | begin | poll
+ *
+ * 注：是 accounts.* 账号网关，不是 open.* OpenAPI 网关。
  */
 
 import { randomUUID } from 'node:crypto'
@@ -40,9 +42,10 @@ export interface FeishuOnboarderOptions {
 const SESSION_TTL_MS = 10 * 60 * 1000
 const GC_INTERVAL_MS = 60 * 1000
 
+// 设备码 OAuth host（注：不是 open.* 的 OpenAPI 网关，是 accounts.* 的账号网关）
 const BASE_BY_DOMAIN: Record<Brand, string> = {
-  feishu: 'https://open.feishu.cn',
-  lark: 'https://open.larksuite.com',
+  feishu: 'https://accounts.feishu.cn',
+  lark: 'https://accounts.larksuite.com',
 }
 
 export class FeishuOnboarder implements Onboarder {
