@@ -95,8 +95,9 @@ export class FeishuOnboarder implements Onboarder {
     if (!deviceCode || !verifUri) {
       throw new Error('飞书 OAuth begin 响应缺少 device_code / verification_uri_complete')
     }
-    const interval = Number(beginResp.interval) || 2
-    const expireIn = Number(beginResp.expire_in) || 600
+    const interval = Number(beginResp.interval) || 5
+    // 飞书实际返回 expires_in；npm 包源码错把它写成 expire_in，两个字段都兼容
+    const expireIn = Number(beginResp.expires_in ?? beginResp.expire_in) || 3600
 
     const sessionId = randomUUID()
     const expiresAt = Date.now() + expireIn * 1000
@@ -108,10 +109,16 @@ export class FeishuOnboarder implements Onboarder {
       expires_at: expiresAt,
     })
 
+    // 与 @larksuite/openclaw-lark-tools v1.0.40 install-prompts.js 一致：
+    //   const qrUrl = new URL(beginRes.verification_uri_complete)
+    //   qrUrl.searchParams.set('from', 'onboard')
+    const qrUrl = new URL(verifUri)
+    qrUrl.searchParams.set('from', 'onboard')
+
     return {
       session_id: sessionId,
       ui_mode: 'qrcode',
-      verification_uri: appendQuery(verifUri, 'from=onboard'),
+      verification_uri: qrUrl.toString(),
       interval,
       expires_at: expiresAt,
       display: {
@@ -229,11 +236,6 @@ export class FeishuOnboarder implements Onboarder {
 
 /** Onboarder 工厂——admin 通过该函数创建实例 */
 export const createOnboarder: OnboarderFactory = () => new FeishuOnboarder()
-
-function appendQuery(uri: string, query: string): string {
-  const sep = uri.includes('?') ? '&' : '?'
-  return `${uri}${sep}${query}`
-}
 
 function defaultDelay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))

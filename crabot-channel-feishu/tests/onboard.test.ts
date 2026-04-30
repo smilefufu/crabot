@@ -53,7 +53,7 @@ describe('begin', () => {
           device_code: 'dc1',
           verification_uri_complete: 'https://feishu.cn/qr',
           interval: 2,
-          expire_in: 600,
+          expires_in: 600,
         })
       }
       throw new Error(`unexpected action: ${action}`)
@@ -67,6 +67,50 @@ describe('begin', () => {
     expect(r.verification_uri).toMatch(/from=onboard/)
     expect(r.interval).toBe(2)
     expect(r.display?.title).toMatch(/扫码/)
+  })
+
+  it('verification_uri matches @larksuite/openclaw-lark-tools URL construction byte-for-byte', async () => {
+    // npm 包做法：const qrUrl = new URL(verification_uri_complete); qrUrl.searchParams.set('from','onboard'); qrUrl.toString()
+    const fetchImpl = makeFetch(async (init) => {
+      const action = bodyAction(init)
+      if (action === 'init') return jsonResponse({ supported_auth_methods: ['client_secret'] })
+      if (action === 'begin') return jsonResponse({
+        device_code: 'dc',
+        verification_uri_complete: 'https://open.feishu.cn/page/launcher?user_code=A9J6-J73A',
+        interval: 5,
+        expires_in: 3600,
+      })
+      throw new Error('unexpected')
+    })
+    const ob = new FeishuOnboarder({ fetchImpl })
+    const r = await ob.begin()
+    const expected = (() => {
+      const u = new URL('https://open.feishu.cn/page/launcher?user_code=A9J6-J73A')
+      u.searchParams.set('from', 'onboard')
+      return u.toString()
+    })()
+    expect(r.verification_uri).toBe(expected)
+  })
+
+  it('expires_at honors API expires_in (not the buggy expire_in fallback)', async () => {
+    const fetchImpl = makeFetch(async (init) => {
+      const action = bodyAction(init)
+      if (action === 'init') return jsonResponse({ supported_auth_methods: ['client_secret'] })
+      if (action === 'begin') return jsonResponse({
+        device_code: 'dc',
+        verification_uri_complete: 'https://x',
+        interval: 5,
+        expires_in: 3600,
+      })
+      throw new Error('unexpected')
+    })
+    const ob = new FeishuOnboarder({ fetchImpl })
+    const before = Date.now()
+    const r = await ob.begin()
+    const window = r.expires_at! - before
+    // 应在 3600 秒附近，远大于旧的 600 秒 fallback
+    expect(window).toBeGreaterThan(3000 * 1000)
+    expect(window).toBeLessThan(4000 * 1000)
   })
 
   it('throws when client_secret method not supported', async () => {
