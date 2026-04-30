@@ -494,11 +494,8 @@ export const ChannelConfig: React.FC = () => {
             </p>
           </div>
           <div style={{ display: 'flex', gap: '0.625rem' }}>
-            <Button variant="secondary" onClick={() => navigate('/channels/pty')}>
-              安装向导
-            </Button>
-            <Button variant="primary" onClick={() => setShowCreateForm((v) => !v)}>
-              {showCreateForm ? '收起' : '+ 新建实例'}
+            <Button variant="primary" onClick={() => navigate('/channels/new')}>
+              + 新建实例
             </Button>
           </div>
         </div>

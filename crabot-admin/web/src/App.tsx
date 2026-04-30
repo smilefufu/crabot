@@ -11,6 +11,8 @@ import { ModuleDetail } from './pages/Modules/ModuleDetail'
 import { AgentConfig } from './pages/Agents/AgentConfig'
 import { ChannelConfig } from './pages/Channels/ChannelConfig'
 import { ChannelPty } from './pages/Channels/ChannelPty'
+import { NewChannel } from './pages/Channels/NewChannel'
+import { NewFeishuChannel } from './pages/Channels/NewFeishuChannel'
 import { GlobalSettings } from './pages/Settings/GlobalSettings'
 import { MemoryV2Page } from './pages/Memory/v2/MemoryV2Page'
 import { ShortTermBrowser } from './pages/Memory/ShortTermBrowser'
@@ -86,6 +88,22 @@ const AppRoutes: React.FC = () => {
         element={
           <PrivateRoute>
             <ChannelPty />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/channels/new"
+        element={
+          <PrivateRoute>
+            <NewChannel />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/channels/new/feishu"
+        element={
+          <PrivateRoute>
+            <NewFeishuChannel />
           </PrivateRoute>
         }
       />

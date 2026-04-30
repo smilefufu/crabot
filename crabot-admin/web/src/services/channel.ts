@@ -1,4 +1,5 @@
 import { api } from './api'
+import { storage } from '../utils/storage'
 import type {
   ChannelImplementation,
   ChannelInstance,
@@ -6,6 +7,8 @@ import type {
   CreateChannelInstanceParams,
   UpdateChannelInstanceParams,
   ScanResult,
+  FeishuOnboardBeginResult,
+  FeishuOnboardPollEvent,
 } from '../types'
 
 export const channelService = {
@@ -81,5 +84,36 @@ export const channelService = {
   // State Dir Scan
   async scanStateDir(stateDir: string) {
     return api.post<ScanResult>('/channels/scan-state-dir', { state_dir: stateDir })
+  },
+
+  // ── 飞书扫码 onboarding ───────────────────────────────────────────────
+  async feishuBegin(domain?: 'feishu' | 'lark') {
+    return api.post<FeishuOnboardBeginResult>('/channels/feishu/onboard/begin', { domain })
+  },
+
+  feishuPoll(sessionId: string, onEvent: (ev: FeishuOnboardPollEvent) => void): { close: () => void } {
+    const token = storage.getToken() ?? ''
+    const url = `/api/channels/feishu/onboard/poll?session_id=${encodeURIComponent(sessionId)}&token=${encodeURIComponent(token)}`
+    const es = new EventSource(url)
+    const types: FeishuOnboardPollEvent['type'][] = ['pending', 'slow_down', 'success', 'error']
+    types.forEach((t) => {
+      es.addEventListener(t, (ev) => {
+        const messageEv = ev as MessageEvent
+        try {
+          onEvent(JSON.parse(messageEv.data) as FeishuOnboardPollEvent)
+        } catch {
+          // ignore malformed
+        }
+      })
+    })
+    return { close: () => es.close() }
+  },
+
+  async feishuFinish(sessionId: string, name: string) {
+    return api.post<{ instance: ChannelInstance }>('/channels/feishu/onboard/finish', { session_id: sessionId, name })
+  },
+
+  async feishuCancel(sessionId: string) {
+    return api.post('/channels/feishu/onboard/cancel', { session_id: sessionId })
   },
 }

@@ -326,6 +326,21 @@ export interface ChannelConfig {
   [key: string]: any
 }
 
+// ── 飞书扫码 onboarding ───────────────────────────────────────────────
+
+export interface FeishuOnboardBeginResult {
+  session_id: string
+  verification_uri: string
+  interval: number
+  expires_at: number
+}
+
+export type FeishuOnboardPollEvent =
+  | { type: 'pending' }
+  | { type: 'slow_down' }
+  | { type: 'success'; app_id: string; app_secret: string; open_id: string; domain: 'feishu' | 'lark' }
+  | { type: 'error'; code: string; message?: string }
+
 export interface CreateChannelInstanceParams {
   implementation_id: string
   name: string
