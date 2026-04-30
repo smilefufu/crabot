@@ -282,12 +282,19 @@ export class ModuleManager {
     runtime.protocol_version = params.protocol_version
     runtime.registered_at = generateTimestamp()
 
-    // 注册事件订阅
+    // 模块重启时订阅会重复注册，必须先清掉同 subscriber 的旧记录再写入，
+    // 否则 publish_event 会把同一事件投递给同一模块多次。
     if (params.subscriptions && params.subscriptions.length > 0) {
+      const removed = this.removeSubscriptionsBySubscriber(params.module_id)
       this.subscriptions.push({
         subscriber: params.module_id,
         eventTypes: params.subscriptions,
       })
+      if (removed > 0) {
+        console.log(
+          `[ModuleManager] Replaced ${removed} stale subscription record(s) for ${params.module_id}`
+        )
+      }
     }
 
     // 发布事件
@@ -309,11 +316,7 @@ export class ModuleManager {
       throw Object.assign(new Error('Module not found'), { code: 'NOT_FOUND' })
     }
 
-    // 移除订阅
-    const subIndex = this.subscriptions.findIndex((s) => s.subscriber === params.module_id)
-    if (subIndex !== -1) {
-      this.subscriptions.splice(subIndex, 1)
-    }
+    this.removeSubscriptionsBySubscriber(params.module_id)
 
     runtime.status = 'stopped'
     console.log(`[ModuleManager] Module unregistered: ${params.module_id}`)
@@ -432,11 +435,8 @@ export class ModuleManager {
   // --- 事件 ---
 
   private handleSubscribe(params: SubscribeParams): { subscribed: true; event_types: string[] } {
-    // 移除旧订阅
-    const index = this.subscriptions.findIndex((s) => s.subscriber === params.subscriber)
-    if (index !== -1) {
-      this.subscriptions.splice(index, 1)
-    }
+    // 移除该 subscriber 的所有旧订阅记录后再写入（与 register 行为一致）
+    this.removeSubscriptionsBySubscriber(params.subscriber)
 
     this.subscriptions.push({
       subscriber: params.subscriber,
@@ -726,6 +726,9 @@ export class ModuleManager {
       const wasRunning = runtime.status === 'running'
       runtime.status = 'stopped'
 
+      // 模块进程消亡 → 同步清订阅，防止重启后 register 累加
+      this.removeSubscriptionsBySubscriber(moduleId)
+
       if (wasRunning && !this.isShuttingDown) {
         // 意外退出
         const reason: ModuleStopReason =
@@ -887,6 +890,18 @@ export class ModuleManager {
   // ============================================================================
   // 辅助方法
   // ============================================================================
+
+  // 倒序遍历以避免 splice 后索引偏移
+  private removeSubscriptionsBySubscriber(moduleId: ModuleId): number {
+    let removed = 0
+    for (let i = this.subscriptions.length - 1; i >= 0; i--) {
+      if (this.subscriptions[i].subscriber === moduleId) {
+        this.subscriptions.splice(i, 1)
+        removed++
+      }
+    }
+    return removed
+  }
 
   private findSubscribers(eventType: string): ModuleId[] {
     const result: ModuleId[] = []

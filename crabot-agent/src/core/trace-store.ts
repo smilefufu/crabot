@@ -496,8 +496,10 @@ export class TraceStore {
       if (trace.related_task_id) {
         this.addToTaskIndex(trace.related_task_id, trace.trace_id)
       }
-    } catch {
+    } catch (err) {
       // persist failure must not affect main flow
+      const msg = err instanceof Error ? err.message : String(err)
+      console.warn(`[TraceStore] persistTrace failed for ${trace.trace_id}: ${msg}`)
     }
   }
 }

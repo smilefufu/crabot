@@ -661,7 +661,13 @@ export class UnifiedAgent extends ModuleBase {
       }, traceCallback)
 
       // 9. Abort 检查：若已被更新消息取代，跳过 dispatch（防止并发双发 reply）
-      if (this.sessionManager.getPendingRequest(session.session_id) !== requestId) {
+      const currentPending = this.sessionManager.getPendingRequest(session.session_id)
+      if (currentPending !== requestId) {
+        console.warn(
+          `[${this.config.moduleId}] supersede(direct): session=${session.session_id} ` +
+          `requestId=${requestId} currentPending=${currentPending ?? '(none)'} ` +
+          `traceId=${trace.trace_id}`
+        )
         this.traceStore.endTrace(trace.trace_id, 'completed', {
           summary: 'superseded by newer message',
         })
