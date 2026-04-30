@@ -1,0 +1,55 @@
+module_id: channel-feishu
+name: Feishu (飞书 / Lark)
+version: 0.1.0
+module_type: channel
+description: 飞书 / Lark Channel 模块，长连接事件订阅，无需公网回调
+
+protocol_version: "0.1.0"
+
+runtime:
+  type: nodejs
+  version: ">=20.0.0"
+
+install: corepack pnpm install
+build: corepack pnpm run build
+entry: dist/main.js
+
+config_schema:
+  type: object
+  required:
+    - FEISHU_APP_ID
+    - FEISHU_APP_SECRET
+  properties:
+    FEISHU_APP_ID:
+      type: string
+      title: App ID
+      description: 飞书应用的 App ID（cli_ 前缀）
+    FEISHU_APP_SECRET:
+      type: string
+      title: App Secret
+      description: 飞书应用的 App Secret
+      format: password
+    FEISHU_DOMAIN:
+      type: string
+      title: 接入域
+      description: feishu = 国内飞书；lark = 国际版 Lark
+      enum: ["feishu", "lark"]
+      default: "feishu"
+    FEISHU_OWNER_OPEN_ID:
+      type: string
+      title: 拥有者 open_id
+      description: 扫码时绑定的飞书账号 open_id，用于默认 allowFrom
+    FEISHU_ONLY_RESPOND_TO_MENTIONS:
+      type: string
+      title: 群聊仅响应 @ Crabot
+      description: true 时群聊中只有 @ Crabot 的消息会触发事件
+      enum: ["true", "false"]
+      default: "true"
+
+author: Crabot Team
+license: MIT
+keywords:
+  - feishu
+  - lark
+  - channel
+  - messaging

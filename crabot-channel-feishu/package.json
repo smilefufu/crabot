@@ -1,0 +1,26 @@
+{
+  "name": "crabot-channel-feishu",
+  "version": "0.1.0",
+  "description": "Crabot Channel module for Feishu / Lark via long-lived event subscription",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "keywords": ["crabot", "channel", "feishu", "lark"],
+  "author": "Crabot Team",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.46.0",
+    "crabot-shared": "file:../crabot-shared"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.37",
+    "@vitest/coverage-v8": "^1.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^1.0.0"
+  }
+}
