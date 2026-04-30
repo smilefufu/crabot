@@ -138,6 +138,56 @@ sync_node_deps() {
 
 # ── 构建 ──────────────────────────────────────────────────
 
+# crabot-shared 编译后，比对依赖方 .pnpm 缓存里的 dist 文件清单。
+# 文件清单不一致（增删文件）的依赖方必须 install --force 重建 hard-link 集合。
+sync_shared_links() {
+  local shared_dist="$SCRIPT_DIR/crabot-shared/dist"
+  [ -d "$shared_dist" ] || return 0
+
+  local shared_sig
+  shared_sig="$(cd "$shared_dist" && find . -type f | LC_ALL=C sort | shasum | awk '{print $1}')"
+
+  local need_resync=()
+  for mod in crabot-core crabot-admin crabot-agent crabot-channel-host crabot-channel-wechat crabot-channel-telegram crabot-channel-feishu; do
+    [ -d "$SCRIPT_DIR/$mod" ] || continue
+    local linked_dist
+    linked_dist=$(ls -d "$SCRIPT_DIR/$mod"/node_modules/.pnpm/crabot-shared@*/node_modules/crabot-shared/dist 2>/dev/null | head -1)
+    if [ -z "$linked_dist" ] || [ ! -d "$linked_dist" ]; then
+      need_resync+=("$mod")
+      continue
+    fi
+    local linked_sig
+    linked_sig="$(cd "$linked_dist" && find . -type f | LC_ALL=C sort | shasum | awk '{print $1}')"
+    if [ "$shared_sig" != "$linked_sig" ]; then
+      need_resync+=("$mod")
+    fi
+  done
+
+  if [ "${#need_resync[@]}" -eq 0 ]; then
+    return 0
+  fi
+
+  log_info "crabot-shared 文件清单变更，重链 ${#need_resync[@]} 个依赖方..."
+  local pids=()
+  for mod in "${need_resync[@]}"; do
+    log_dim "  $mod"
+    (cd "$SCRIPT_DIR/$mod" && corepack pnpm install --force --prefer-offline \
+      >/tmp/.crabot-dev-relink-"${mod//\//-}".log 2>&1) &
+    pids+=($!)
+  done
+
+  local fail=0
+  for i in "${!pids[@]}"; do
+    if ! wait "${pids[$i]}"; then
+      log_error "${need_resync[$i]} 重链失败:"
+      tail -10 "/tmp/.crabot-dev-relink-${need_resync[$i]//\//-}.log" | sed 's/^/    /'
+      fail=1
+    fi
+  done
+  rm -f /tmp/.crabot-dev-relink-*.log
+  [ "$fail" -eq 1 ] && exit 1
+}
+
 build_all() {
   log_info "构建 TypeScript 模块..."
 
@@ -148,6 +198,10 @@ build_all() {
       log_error "crabot-shared 构建失败"
       exit 1
     }
+    # pnpm 把 crabot-shared/dist/* 用 hard-link 链到每个依赖方的 .pnpm 缓存。
+    # 「修改已有文件」共享 inode 自动同步，但「新增/删除文件」必须 install --force
+    # 才能重建 link 集合，否则依赖方启动时会 ERR_MODULE_NOT_FOUND。
+    sync_shared_links
   fi
 
   local fail=0
