@@ -104,7 +104,14 @@ export function mapMessageContent(
     case 'file': {
       const file_key = (raw.file_key as string | undefined) ?? ''
       const filename = (raw.file_name as string | undefined) ?? undefined
-      const file_size = typeof raw.file_size === 'number' ? raw.file_size : undefined
+      // 飞书事件的 file_size 可能是 number 或 numeric string，两种都接受
+      const sizeRaw = raw.file_size
+      const file_size =
+        typeof sizeRaw === 'number'
+          ? sizeRaw
+          : typeof sizeRaw === 'string' && sizeRaw.length > 0 && Number.isFinite(Number(sizeRaw))
+            ? Number(sizeRaw)
+            : undefined
       return {
         content: {
           type: 'file',

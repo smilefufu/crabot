@@ -184,12 +184,23 @@ export class FeishuChannel extends ModuleBase {
 
     let content: MessageContent = mapped.content
     if (mapped.content.type === 'image' && mapped.raw?.image_key) {
-      const filePath = await this.tryDownloadResource(message.message_id, mapped.raw.image_key, 'image', '.jpg')
-      if (filePath) content = { ...content, file_path: filePath }
+      const r = await this.downloadAndPersistMedia(message.message_id, mapped.raw.image_key, 'image')
+      if (r) {
+        content = { ...content, file_path: r.filePath, mime_type: r.mimeType ?? content.mime_type }
+        if (r.size !== undefined) content = { ...content, size: r.size }
+      } else {
+        content = { type: 'text', text: '[图片下载失败]' }
+      }
     } else if (mapped.content.type === 'file' && mapped.raw?.file_key) {
-      const ext = mapped.raw.filename ? path.extname(mapped.raw.filename) : ''
-      const filePath = await this.tryDownloadResource(message.message_id, mapped.raw.file_key, 'file', ext)
-      if (filePath) content = { ...content, file_path: filePath }
+      const r = await this.downloadAndPersistMedia(
+        message.message_id, mapped.raw.file_key, 'file', mapped.raw.filename
+      )
+      if (r) {
+        content = { ...content, file_path: r.filePath }
+      } else {
+        const fname = mapped.raw.filename ?? '未知文件'
+        content = { type: 'text', text: `[文件 ${fname} 下载失败]` }
+      }
     }
 
     const platformTimestamp = isoFromMillis(message.create_time) ?? generateTimestamp()
@@ -254,17 +265,37 @@ export class FeishuChannel extends ModuleBase {
     }
   }
 
-  private async tryDownloadResource(messageId: string, fileKey: string, type: 'image' | 'file', ext: string): Promise<string | undefined> {
+  /**
+   * 下载消息媒体到本地，按 magic bytes 探测真实格式。
+   *
+   * - image: 用 magic bytes 检测 png/jpg/gif/webp/bmp，决定扩展名 + mime_type
+   * - file: 用 filenameHint 的扩展名；没有就 .bin
+   * - 失败返回 null（调用方自行降级）
+   */
+  private async downloadAndPersistMedia(
+    messageId: string,
+    fileKey: string,
+    type: 'image' | 'file',
+    filenameHint?: string,
+  ): Promise<{ filePath: string; mimeType?: string; size: number } | null> {
     try {
       const buffer = await this.client.downloadResource(messageId, fileKey, type)
-      const safeExt = ext && /^\.[A-Za-z0-9]{1,8}$/.test(ext) ? ext : (type === 'image' ? '.bin' : '.bin')
-      const fileName = `${messageId}${safeExt}`
-      const filePath = path.join(this.dataDir, 'media', fileName)
+      let ext: string
+      let mimeType: string | undefined
+      if (type === 'image') {
+        const det = detectImageMime(buffer)
+        ext = det.ext
+        mimeType = det.mime
+      } else {
+        const fromHint = filenameHint ? path.extname(filenameHint) : ''
+        ext = fromHint && /^\.[A-Za-z0-9]{1,8}$/.test(fromHint) ? fromHint : '.bin'
+      }
+      const filePath = path.join(this.dataDir, 'media', `${messageId}${ext}`)
       await fsp.writeFile(filePath, buffer)
-      return filePath
+      return { filePath, mimeType, size: buffer.length }
     } catch (err) {
-      console.warn(`[FeishuChannel] resource download failed for ${messageId} (${type}):`, err)
-      return undefined
+      console.warn(`[FeishuChannel] media download failed for ${messageId} (${type}):`, err)
+      return null
     }
   }
 
@@ -789,6 +820,28 @@ function feishuMsgToHistory(m: Record<string, unknown>): HistoryMessage {
     features: { is_mention_crab: false },
     platform_timestamp: isoFromMillis((m.create_time as string) ?? '') ?? new Date().toISOString(),
   }
+}
+
+/** Magic-bytes 探测图片格式（PNG / JPEG / GIF / WebP / BMP） */
+function detectImageMime(buffer: Buffer): { mime: string; ext: string } {
+  if (buffer.length >= 8 &&
+      buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) {
+    return { mime: 'image/png', ext: '.png' }
+  }
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return { mime: 'image/jpeg', ext: '.jpg' }
+  }
+  if (buffer.length >= 6 && buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46) {
+    return { mime: 'image/gif', ext: '.gif' }
+  }
+  if (buffer.length >= 12 &&
+      buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP') {
+    return { mime: 'image/webp', ext: '.webp' }
+  }
+  if (buffer.length >= 2 && buffer[0] === 0x42 && buffer[1] === 0x4d) {
+    return { mime: 'image/bmp', ext: '.bmp' }
+  }
+  return { mime: 'application/octet-stream', ext: '.bin' }
 }
 
 async function readFileOrThrow(filePath: string): Promise<Buffer> {

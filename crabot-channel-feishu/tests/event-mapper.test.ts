@@ -65,6 +65,18 @@ describe('mapMessageContent — image / file', () => {
     expect(out.content.filename).toBe('a.pdf')
     expect(out.content.size).toBe(1234)
   })
+
+  it('file accepts numeric-string file_size', () => {
+    const content = JSON.stringify({ file_key: 'file_x', file_name: 'a.pdf', file_size: '5678' })
+    const out = mapMessageContent('file', content, [])
+    expect(out.content.size).toBe(5678)
+  })
+
+  it('file size left undefined when value is junk string', () => {
+    const content = JSON.stringify({ file_key: 'file_x', file_name: 'a.pdf', file_size: 'abc' })
+    const out = mapMessageContent('file', content, [])
+    expect(out.content.size).toBeUndefined()
+  })
 })
 
 describe('mapMessageContent — fallback types', () => {
