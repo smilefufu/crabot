@@ -128,7 +128,7 @@ import {
   sessionHasMasterParticipant,
 } from './dialog-objects.js'
 import { createMemoryV2RestRouter } from './memory-v2-rest.js'
-import { FeishuOnboard } from './feishu-onboard.js'
+import { OnboardingManager } from './onboarding-manager.js'
 
 // ============================================================================
 // JWT 工具函数
@@ -278,8 +278,8 @@ export class AdminModule extends ModuleBase {
   // PTY 管理器（Web CLI 终端）
   private ptyManager: PtyManager | null = null
 
-  // 飞书扫码 onboarding（设备码 OAuth）
-  private feishuOnboard: FeishuOnboard
+  // Channel 配置入口管理（onboarding_methods）
+  private onboardingManager: OnboardingManager
 
   // MCP Server 管理器
   private mcpServerManager!: MCPServerManager
@@ -345,7 +345,7 @@ export class AdminModule extends ModuleBase {
       onTrigger: (schedule) => this.handleScheduleTrigger(schedule),
     })
 
-    this.feishuOnboard = new FeishuOnboard({ channelManager: this.channelManager })
+    this.onboardingManager = new OnboardingManager()
 
     this.memoryV2Router = createMemoryV2RestRouter({
       rpcClient: this.rpcClient,
@@ -528,8 +528,8 @@ export class AdminModule extends ModuleBase {
     // 重新注册 channel-host 实例到 MM（MM 重启后动态注册会丢失）
     await this.channelManager.reRegisterInstances()
 
-    // 启动飞书 onboarding session GC
-    this.feishuOnboard.startGc()
+    // 加载 onboarding handler（从 builtin 模块的 yaml 读取 onboarding_methods）
+    this.onboardingManager.loadFromImplementations(this.channelManager.listImplementations().items)
 
     // 初始化模块安装器
     await this.moduleInstaller.initialize()
@@ -718,7 +718,7 @@ export class AdminModule extends ModuleBase {
       let token: string | null = null
       if (authHeader?.startsWith('Bearer ')) {
         token = authHeader.slice(7)
-      } else if (pathname === '/api/channels/feishu/onboard/poll') {
+      } else if (pathname === '/api/channels/onboard/poll') {
         // SSE：EventSource 不支持自定义 header，允许 ?token=xxx
         token = url.searchParams.get('token')
       }
@@ -1509,25 +1509,46 @@ export class AdminModule extends ModuleBase {
         return
       }
 
-      // ── 飞书扫码 onboarding ─────────────────────────────────────────────
-      // 注：SSE poll 走 query string token（EventSource 不支持自定义 header）；其他三条走标准 Bearer
-      if (req.method === 'POST' && pathname === '/api/channels/feishu/onboard/begin') {
-        const body = await this.readJsonBody<{ domain?: 'feishu' | 'lark' }>(req).catch(() => ({} as { domain?: 'feishu' | 'lark' }))
+      // ── 通用 Channel onboarding（base-protocol §10）─────────────────────
+      // 路由：begin / poll(SSE) / finish / cancel
+      // 路由由 implementation_id + method_id 寻找对应 onboarder（OnboardingManager 启动时加载）
+      // 注：SSE poll 走 query string token（EventSource 不支持自定义 header），其他三条走标准 Bearer
+      if (req.method === 'POST' && pathname === '/api/channels/onboard/begin') {
+        const body = await this.readJsonBody<{ implementation_id?: string; method_id?: string; params?: Record<string, unknown> }>(req).catch(() => ({} as { implementation_id?: string; method_id?: string; params?: Record<string, unknown> }))
+        if (!body.implementation_id || !body.method_id) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'implementation_id and method_id are required' }))
+          return
+        }
+        const onboarder = this.onboardingManager.get(body.implementation_id, body.method_id)
+        if (!onboarder) {
+          res.writeHead(404, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: `onboarder not found: ${body.implementation_id}:${body.method_id}` }))
+          return
+        }
         try {
-          const r = await this.feishuOnboard.begin({ domain: body.domain })
+          const r = await onboarder.begin(body.params)
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify(r))
         } catch (err) {
           res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'feishu onboard begin failed' }))
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'onboard begin failed' }))
         }
         return
       }
-      if (req.method === 'GET' && pathname === '/api/channels/feishu/onboard/poll') {
+      if (req.method === 'GET' && pathname === '/api/channels/onboard/poll') {
+        const implementationId = url.searchParams.get('implementation_id')
+        const methodId = url.searchParams.get('method_id')
         const sessionId = url.searchParams.get('session_id')
-        if (!sessionId) {
+        if (!implementationId || !methodId || !sessionId) {
           res.writeHead(400, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'session_id is required' }))
+          res.end(JSON.stringify({ error: 'implementation_id, method_id and session_id are required' }))
+          return
+        }
+        const onboarder = this.onboardingManager.get(implementationId, methodId)
+        if (!onboarder) {
+          res.writeHead(404, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: `onboarder not found: ${implementationId}:${methodId}` }))
           return
         }
         res.writeHead(200, {
@@ -1538,7 +1559,7 @@ export class AdminModule extends ModuleBase {
         let aborted = false
         req.on('close', () => { aborted = true })
         try {
-          for await (const ev of this.feishuOnboard.poll(sessionId)) {
+          for await (const ev of onboarder.poll(sessionId)) {
             if (aborted) break
             res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`)
             if (ev.type === 'success' || ev.type === 'error') break
@@ -1550,26 +1571,40 @@ export class AdminModule extends ModuleBase {
         res.end()
         return
       }
-      if (req.method === 'POST' && pathname === '/api/channels/feishu/onboard/finish') {
-        const body = await this.readJsonBody<{ session_id?: string; name?: string }>(req)
-        if (!body.session_id || !body.name) {
+      if (req.method === 'POST' && pathname === '/api/channels/onboard/finish') {
+        const body = await this.readJsonBody<{ implementation_id?: string; method_id?: string; session_id?: string; name?: string; finish_params?: Record<string, unknown> }>(req)
+        if (!body.implementation_id || !body.method_id || !body.session_id || !body.name) {
           res.writeHead(400, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'session_id and name are required' }))
+          res.end(JSON.stringify({ error: 'implementation_id, method_id, session_id and name are required' }))
+          return
+        }
+        const onboarder = this.onboardingManager.get(body.implementation_id, body.method_id)
+        if (!onboarder) {
+          res.writeHead(404, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: `onboarder not found: ${body.implementation_id}:${body.method_id}` }))
           return
         }
         try {
-          const inst = await this.feishuOnboard.finish(body.session_id, { name: body.name })
+          const finishResult = await onboarder.finish(body.session_id, body.finish_params)
+          const instance = await this.channelManager.createInstance({
+            implementation_id: body.implementation_id,
+            name: body.name,
+            auto_start: true,
+            env: finishResult.env,
+          })
           res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ instance: inst }))
+          res.end(JSON.stringify({ instance }))
         } catch (err) {
           res.writeHead(500, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'finish failed' }))
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'onboard finish failed' }))
         }
         return
       }
-      if (req.method === 'POST' && pathname === '/api/channels/feishu/onboard/cancel') {
-        const body = await this.readJsonBody<{ session_id?: string }>(req).catch(() => ({} as { session_id?: string }))
-        if (body.session_id) this.feishuOnboard.cancel(body.session_id)
+      if (req.method === 'POST' && pathname === '/api/channels/onboard/cancel') {
+        const body = await this.readJsonBody<{ implementation_id?: string; method_id?: string; session_id?: string }>(req).catch(() => ({} as { implementation_id?: string; method_id?: string; session_id?: string }))
+        if (body.implementation_id && body.method_id && body.session_id) {
+          this.onboardingManager.get(body.implementation_id, body.method_id)?.cancel(body.session_id)
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ ok: true }))
         return

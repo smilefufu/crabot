@@ -7,6 +7,7 @@
 import fs from 'fs/promises'
 import fsSync from 'fs'
 import path from 'path'
+import yaml from 'js-yaml'
 import { generateTimestamp, type RpcClient } from 'crabot-shared'
 import type {
   ChannelImplementation,
@@ -18,6 +19,7 @@ import type {
   UpdateChannelConfigParams,
   ListChannelImplementationsParams,
   ListChannelInstancesParams,
+  ChannelOnboardingMethod,
 } from './types.js'
 
 // ============================================================================
@@ -46,9 +48,12 @@ function loadBuiltinImplementation(modulePath: string): ChannelImplementation | 
 
   try {
     const content = fsSync.readFileSync(yamlPath, 'utf-8')
-    const parsed = parseSimpleYaml(content)
+    const parsed = (yaml.load(content) as Record<string, unknown>) ?? {}
 
     const now = generateTimestamp()
+    const onboardingMethods = Array.isArray(parsed.onboarding_methods)
+      ? (parsed.onboarding_methods as ChannelOnboardingMethod[])
+      : undefined
     return {
       id: parsed.module_id as string,
       name: parsed.name as string,
@@ -57,6 +62,7 @@ function loadBuiltinImplementation(modulePath: string): ChannelImplementation | 
       module_path: modulePath,
       version: (parsed.version as string) ?? '0.1.0',
       config_schema: parsed.config_schema as Record<string, unknown> | undefined,
+      onboarding_methods: onboardingMethods,
       created_at: now,
       updated_at: now,
     }

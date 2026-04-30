@@ -50,3 +50,11 @@ export {
 export { ProxyManager, proxyManager } from './proxy-manager.js'
 
 export { CLI_WRITE_SUBCOMMANDS, CLI_MUST_CONFIRM_SUBCOMMANDS } from './cli-write-commands.js'
+
+export {
+  type Onboarder,
+  type OnboarderEvent,
+  type OnboarderBeginResult,
+  type OnboarderFinishResult,
+  type OnboarderFactory,
+} from './onboarder.js'

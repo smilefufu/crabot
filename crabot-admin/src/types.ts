@@ -1559,6 +1559,22 @@ export interface GetChatHistoryResult {
 // ============================================================================
 
 /**
+ * Channel 模块声明的交互式配置入口（base-protocol §10）
+ */
+export interface ChannelOnboardingMethod {
+  /** 该方法在模块内的唯一标识 */
+  id: string
+  /** 用户可读名称（卡片标题） */
+  name: string
+  /** 用户可读说明 */
+  description?: string
+  /** UI 类型词表：device_code / redirect / pending */
+  type: 'device_code' | 'redirect' | 'pending'
+  /** handler 文件，相对模块根目录；导出 createOnboarder() 工厂 */
+  handler: string
+}
+
+/**
  * Channel 实现
  */
 export interface ChannelImplementation {
@@ -1571,6 +1587,8 @@ export interface ChannelImplementation {
   version: string
   /** 配置 JSON Schema（来自 crabot-module.yaml config_schema），供 Admin UI 动态渲染表单 */
   config_schema?: Record<string, unknown>
+  /** 交互式配置入口（来自 crabot-module.yaml onboarding_methods） */
+  onboarding_methods?: ChannelOnboardingMethod[]
   created_at: string
   updated_at: string
 }

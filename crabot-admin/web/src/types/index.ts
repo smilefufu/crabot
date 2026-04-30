@@ -275,6 +275,14 @@ export interface PaginatedResult<T> {
 // Channel 管理类型
 // ============================================================================
 
+export interface ChannelOnboardingMethod {
+  id: string
+  name: string
+  description?: string
+  type: 'device_code' | 'redirect' | 'pending'
+  handler: string
+}
+
 export interface ChannelImplementation {
   id: string
   name: string
@@ -284,6 +292,7 @@ export interface ChannelImplementation {
   installed_path?: string
   version: string
   config_schema?: JsonSchema
+  onboarding_methods?: ChannelOnboardingMethod[]
   created_at: string
   updated_at: string
 }
@@ -326,19 +335,21 @@ export interface ChannelConfig {
   [key: string]: any
 }
 
-// ── 飞书扫码 onboarding ───────────────────────────────────────────────
+// ── Channel onboarding (base-protocol §10) ──────────────────────────
 
-export interface FeishuOnboardBeginResult {
+export interface OnboardBeginResult {
   session_id: string
-  verification_uri: string
-  interval: number
-  expires_at: number
+  ui_mode: 'qrcode' | 'redirect' | 'pending'
+  verification_uri?: string
+  interval?: number
+  expires_at?: number
+  display?: { title?: string; description?: string }
 }
 
-export type FeishuOnboardPollEvent =
+export type OnboardPollEvent =
   | { type: 'pending' }
   | { type: 'slow_down' }
-  | { type: 'success'; app_id: string; app_secret: string; open_id: string; domain: 'feishu' | 'lark' }
+  | { type: 'success' }
   | { type: 'error'; code: string; message?: string }
 
 export interface CreateChannelInstanceParams {
