@@ -77,6 +77,13 @@ describe('mapMessageContent — image / file', () => {
     const out = mapMessageContent('file', content, [])
     expect(out.content.size).toBeUndefined()
   })
+
+  it('file size left undefined when value is whitespace-only string', () => {
+    // 之前 sizeRaw.length > 0 会把 '   ' 当合法 → Number('   ') = 0 → size=0
+    const content = JSON.stringify({ file_key: 'file_x', file_name: 'a.pdf', file_size: '   ' })
+    const out = mapMessageContent('file', content, [])
+    expect(out.content.size).toBeUndefined()
+  })
 })
 
 describe('mapMessageContent — fallback types', () => {

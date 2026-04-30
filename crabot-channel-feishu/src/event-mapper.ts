@@ -41,6 +41,16 @@ const FALLBACK_PLACEHOLDERS: Record<string, string> = {
   todo: '[任务]',
 }
 
+/** 飞书事件 file_size / duration 等数值字段可能是 number 或 numeric string，统一容错 */
+function coerceNumeric(v: unknown): number | undefined {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : undefined
+  if (typeof v !== 'string') return undefined
+  const trimmed = v.trim()
+  if (!trimmed) return undefined
+  const n = Number(trimmed)
+  return Number.isFinite(n) ? n : undefined
+}
+
 function safeParseContent(content: string): Record<string, unknown> {
   try {
     return JSON.parse(content) as Record<string, unknown>
@@ -104,14 +114,7 @@ export function mapMessageContent(
     case 'file': {
       const file_key = (raw.file_key as string | undefined) ?? ''
       const filename = (raw.file_name as string | undefined) ?? undefined
-      // 飞书事件的 file_size 可能是 number 或 numeric string，两种都接受
-      const sizeRaw = raw.file_size
-      const file_size =
-        typeof sizeRaw === 'number'
-          ? sizeRaw
-          : typeof sizeRaw === 'string' && sizeRaw.length > 0 && Number.isFinite(Number(sizeRaw))
-            ? Number(sizeRaw)
-            : undefined
+      const file_size = coerceNumeric(raw.file_size)
       return {
         content: {
           type: 'file',

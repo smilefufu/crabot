@@ -72,6 +72,8 @@ export class FeishuChannel extends ModuleBase {
   /** open_id → 飞书用户昵称缓存。事件 payload 不含 sender 名，需要调 contact API */
   private readonly displayNameCache: Map<string, { name: string; fetchedAt: number }> = new Map()
   private static readonly DISPLAY_NAME_TTL_MS = 24 * 60 * 60 * 1000 // 24h
+  // 负缓存：getUser 失败 / 用户无名时短期内不再重试，避免每条消息都走 contact API
+  private static readonly DISPLAY_NAME_NEG_TTL_MS = 5 * 60 * 1000
   private static readonly DISPLAY_NAME_CACHE_MAX = 2000
 
   constructor(config: FeishuChannelInitConfig) {
@@ -170,7 +172,14 @@ export class FeishuChannel extends ModuleBase {
       return
     }
 
-    const senderName = senderOpenId ? await this.resolveDisplayName(senderOpenId) : ''
+    const mapped = mapMessageContent(message.message_type ?? 'text', message.content ?? '{}', mentions)
+
+    // sender 昵称解析（contact API）和媒体下载彼此独立，并行节省 ~100ms
+    const [senderName, content] = await Promise.all([
+      senderOpenId ? this.resolveDisplayName(senderOpenId) : Promise.resolve(''),
+      this.applyMediaContent(mapped, message.message_id),
+    ])
+
     const placeholderTitle = isGroup ? message.chat_id : (senderName || senderOpenId || message.chat_id)
     const { session } = this.sessionManager.upsert({
       platform_session_id: platformSessionId,
@@ -179,29 +188,6 @@ export class FeishuChannel extends ModuleBase {
       sender_id: senderOpenId,
       sender_name: senderName || senderOpenId,
     })
-
-    const mapped = mapMessageContent(message.message_type ?? 'text', message.content ?? '{}', mentions)
-
-    let content: MessageContent = mapped.content
-    if (mapped.content.type === 'image' && mapped.raw?.image_key) {
-      const r = await this.downloadAndPersistMedia(message.message_id, mapped.raw.image_key, 'image')
-      if (r) {
-        content = { ...content, file_path: r.filePath, mime_type: r.mimeType ?? content.mime_type }
-        if (r.size !== undefined) content = { ...content, size: r.size }
-      } else {
-        content = { type: 'text', text: '[图片下载失败]' }
-      }
-    } else if (mapped.content.type === 'file' && mapped.raw?.file_key) {
-      const r = await this.downloadAndPersistMedia(
-        message.message_id, mapped.raw.file_key, 'file', mapped.raw.filename
-      )
-      if (r) {
-        content = { ...content, file_path: r.filePath }
-      } else {
-        const fname = mapped.raw.filename ?? '未知文件'
-        content = { type: 'text', text: `[文件 ${fname} 下载失败]` }
-      }
-    }
 
     const platformTimestamp = isoFromMillis(message.create_time) ?? generateTimestamp()
 
@@ -239,30 +225,60 @@ export class FeishuChannel extends ModuleBase {
   }
 
   /**
+   * 把 mapper 输出的 image/file 内容补齐 file_path / mime_type / size，下载失败则降级为文本占位。
+   */
+  private async applyMediaContent(
+    mapped: ReturnType<typeof mapMessageContent>,
+    messageId: string,
+  ): Promise<MessageContent> {
+    const { content, raw } = mapped
+    if (content.type === 'image' && raw?.image_key) {
+      const r = await this.downloadAndPersistMedia(messageId, raw.image_key, 'image')
+      if (!r) return { type: 'text', text: '[图片下载失败]' }
+      return {
+        ...content,
+        file_path: r.filePath,
+        mime_type: r.mimeType ?? content.mime_type,
+        ...(r.size !== undefined ? { size: r.size } : {}),
+      }
+    }
+    if (content.type === 'file' && raw?.file_key) {
+      const r = await this.downloadAndPersistMedia(messageId, raw.file_key, 'file', raw.filename)
+      if (!r) {
+        const fname = raw.filename ?? '未知文件'
+        return { type: 'text', text: `[文件 ${fname} 下载失败]` }
+      }
+      return { ...content, file_path: r.filePath }
+    }
+    return content
+  }
+
+  /**
    * 拿用户昵称：先查缓存，未命中调 contact API。
-   * 失败时返回空串，调用方自行 fallback 到 open_id。
+   * 失败 / 用户无名时存入短 TTL 负缓存（避免每条消息都重试），返回空串供调用方 fallback。
    */
   private async resolveDisplayName(openId: string): Promise<string> {
     const cached = this.displayNameCache.get(openId)
-    if (cached && Date.now() - cached.fetchedAt < FeishuChannel.DISPLAY_NAME_TTL_MS) {
-      return cached.name
+    if (cached) {
+      const ttl = cached.name ? FeishuChannel.DISPLAY_NAME_TTL_MS : FeishuChannel.DISPLAY_NAME_NEG_TTL_MS
+      if (Date.now() - cached.fetchedAt < ttl) return cached.name
     }
+    let name = ''
     try {
-      const user = await this.client.getUser(openId)
-      const name = user.name || ''
-      if (name) {
-        if (this.displayNameCache.size >= FeishuChannel.DISPLAY_NAME_CACHE_MAX) {
-          // 简单 LRU：删最早插入的一个（Map 保留插入顺序）
-          const firstKey = this.displayNameCache.keys().next().value
-          if (firstKey !== undefined) this.displayNameCache.delete(firstKey)
-        }
-        this.displayNameCache.set(openId, { name, fetchedAt: Date.now() })
-      }
-      return name
+      name = (await this.client.getUser(openId)).name || ''
     } catch (err) {
       console.warn(`[FeishuChannel] resolveDisplayName failed for ${openId}:`, err)
-      return ''
     }
+    this.cacheDisplayName(openId, name)
+    return name
+  }
+
+  private cacheDisplayName(openId: string, name: string): void {
+    if (this.displayNameCache.size >= FeishuChannel.DISPLAY_NAME_CACHE_MAX) {
+      const firstKey = this.displayNameCache.keys().next().value
+      if (firstKey !== undefined) this.displayNameCache.delete(firstKey)
+    }
+    this.displayNameCache.set(openId, { name, fetchedAt: Date.now() })
   }
 
   /**
@@ -822,26 +838,23 @@ function feishuMsgToHistory(m: Record<string, unknown>): HistoryMessage {
   }
 }
 
-/** Magic-bytes 探测图片格式（PNG / JPEG / GIF / WebP / BMP） */
+interface ImageSignature {
+  mime: string
+  ext: string
+  match: (buf: Buffer) => boolean
+}
+
+const IMAGE_SIGNATURES: ReadonlyArray<ImageSignature> = [
+  { mime: 'image/png',  ext: '.png',  match: (b) => b.length >= 8  && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 },
+  { mime: 'image/jpeg', ext: '.jpg',  match: (b) => b.length >= 3  && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
+  { mime: 'image/gif',  ext: '.gif',  match: (b) => b.length >= 6  && b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 },
+  { mime: 'image/webp', ext: '.webp', match: (b) => b.length >= 12 && b.toString('ascii', 0, 4) === 'RIFF' && b.toString('ascii', 8, 12) === 'WEBP' },
+  { mime: 'image/bmp',  ext: '.bmp',  match: (b) => b.length >= 2  && b[0] === 0x42 && b[1] === 0x4d },
+]
+
 function detectImageMime(buffer: Buffer): { mime: string; ext: string } {
-  if (buffer.length >= 8 &&
-      buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) {
-    return { mime: 'image/png', ext: '.png' }
-  }
-  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
-    return { mime: 'image/jpeg', ext: '.jpg' }
-  }
-  if (buffer.length >= 6 && buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46) {
-    return { mime: 'image/gif', ext: '.gif' }
-  }
-  if (buffer.length >= 12 &&
-      buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP') {
-    return { mime: 'image/webp', ext: '.webp' }
-  }
-  if (buffer.length >= 2 && buffer[0] === 0x42 && buffer[1] === 0x4d) {
-    return { mime: 'image/bmp', ext: '.bmp' }
-  }
-  return { mime: 'application/octet-stream', ext: '.bin' }
+  const hit = IMAGE_SIGNATURES.find((s) => s.match(buffer))
+  return hit ?? { mime: 'application/octet-stream', ext: '.bin' }
 }
 
 async function readFileOrThrow(filePath: string): Promise<Buffer> {
