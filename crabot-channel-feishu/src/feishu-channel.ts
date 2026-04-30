@@ -69,6 +69,11 @@ export class FeishuChannel extends ModuleBase {
   private botOpenId: string | null = null
   private botName: string | null = null
 
+  /** open_id → 飞书用户昵称缓存。事件 payload 不含 sender 名，需要调 contact API */
+  private readonly displayNameCache: Map<string, { name: string; fetchedAt: number }> = new Map()
+  private static readonly DISPLAY_NAME_TTL_MS = 24 * 60 * 60 * 1000 // 24h
+  private static readonly DISPLAY_NAME_CACHE_MAX = 2000
+
   constructor(config: FeishuChannelInitConfig) {
     const moduleConfig: ModuleConfig = {
       moduleId: config.module_id,
@@ -165,13 +170,14 @@ export class FeishuChannel extends ModuleBase {
       return
     }
 
-    const placeholderTitle = isGroup ? message.chat_id : (senderOpenId || message.chat_id)
+    const senderName = senderOpenId ? await this.resolveDisplayName(senderOpenId) : ''
+    const placeholderTitle = isGroup ? message.chat_id : (senderName || senderOpenId || message.chat_id)
     const { session } = this.sessionManager.upsert({
       platform_session_id: platformSessionId,
       type: sessionType,
       title: placeholderTitle,
       sender_id: senderOpenId,
-      sender_name: senderOpenId,
+      sender_name: senderName || senderOpenId,
     })
 
     const mapped = mapMessageContent(message.message_type ?? 'text', message.content ?? '{}', mentions)
@@ -191,7 +197,7 @@ export class FeishuChannel extends ModuleBase {
     const channelMessage: ChannelMessage = {
       platform_message_id: message.message_id,
       session: { session_id: session.id, channel_id: this.config.moduleId, type: session.type },
-      sender: { platform_user_id: senderOpenId, platform_display_name: senderOpenId },
+      sender: { platform_user_id: senderOpenId, platform_display_name: senderName || senderOpenId },
       content,
       features: {
         is_mention_crab: isMentionCrab,
@@ -219,6 +225,33 @@ export class FeishuChannel extends ModuleBase {
       timestamp: generateTimestamp(),
     }
     await this.rpcClient.publishEvent(event, this.config.moduleId)
+  }
+
+  /**
+   * 拿用户昵称：先查缓存，未命中调 contact API。
+   * 失败时返回空串，调用方自行 fallback 到 open_id。
+   */
+  private async resolveDisplayName(openId: string): Promise<string> {
+    const cached = this.displayNameCache.get(openId)
+    if (cached && Date.now() - cached.fetchedAt < FeishuChannel.DISPLAY_NAME_TTL_MS) {
+      return cached.name
+    }
+    try {
+      const user = await this.client.getUser(openId)
+      const name = user.name || ''
+      if (name) {
+        if (this.displayNameCache.size >= FeishuChannel.DISPLAY_NAME_CACHE_MAX) {
+          // 简单 LRU：删最早插入的一个（Map 保留插入顺序）
+          const firstKey = this.displayNameCache.keys().next().value
+          if (firstKey !== undefined) this.displayNameCache.delete(firstKey)
+        }
+        this.displayNameCache.set(openId, { name, fetchedAt: Date.now() })
+      }
+      return name
+    } catch (err) {
+      console.warn(`[FeishuChannel] resolveDisplayName failed for ${openId}:`, err)
+      return ''
+    }
   }
 
   private async tryDownloadResource(messageId: string, fileKey: string, type: 'image' | 'file', ext: string): Promise<string | undefined> {
