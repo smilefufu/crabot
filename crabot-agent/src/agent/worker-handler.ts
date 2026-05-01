@@ -306,8 +306,6 @@ export class WorkerHandler {
     traceContext?: WorkerTraceContext,
   ): Promise<ExecuteTaskResult> {
     const { task, context } = params
-    const taskDir = `/tmp/crabot-task-${task.task_id}`
-
     const taskState: WorkerTaskState = {
       taskId: task.task_id,
       status: 'executing',
@@ -334,25 +332,9 @@ export class WorkerHandler {
 
     let digest: ProgressDigest | undefined
     try {
-      // 1. Create isolated task directory
-      await fs.promises.mkdir(taskDir, { recursive: true })
+      // skillsDir 在 worker init / updateSkills 时已经写好（instance-level），这里不再 per-task 写盘
 
-      // 2. Write Admin Skills to task directory (from instance config, not RPC params)
-      const skills = this.skills
-      if (skills.length > 0) {
-        const skillsDir = path.join(taskDir, '.claude', 'skills')
-        await fs.promises.mkdir(skillsDir, { recursive: true })
-        for (const skill of skills) {
-          const skillDir = path.join(skillsDir, skill.name)
-          await fs.promises.mkdir(skillDir, { recursive: true })
-          await fs.promises.writeFile(path.join(skillDir, 'SKILL.md'), skill.content, 'utf-8')
-          if (skill.skill_dir) {
-            await fs.promises.writeFile(path.join(skillDir, '.skill_dir'), skill.skill_dir, 'utf-8')
-          }
-        }
-      }
-
-      // 3. Build tools — adapter / sub-agent trace config 等无依赖项先行构造
+      // Build tools — adapter / sub-agent trace config 等无依赖项先行构造
       const adapter = adapterFromSdkEnv(this.sdkEnv)
       const subAgentTraceConfig = traceContext ? {
         traceStore: traceContext.traceStore,
@@ -381,7 +363,7 @@ export class WorkerHandler {
 
       // 工具列表构造改为 callback 形式：每轮 LLM 调用前由 query-loop 重新 resolve，
       // 让 admin push config（updateSkills / updateSystemPrompt）能在同一 task 内热生效。
-      // 注意：lambda 内捕获 taskState / taskDir / context / humanQueue 等闭包变量，
+      // 注意：lambda 内捕获 taskState / context / humanQueue 等闭包变量，
       // 行为与原一次性构造等价。
       const buildToolsDynamic = (): ReadonlyArray<ToolDefinition> => {
         const tools: ToolDefinition[] = []
@@ -800,7 +782,6 @@ export class WorkerHandler {
       this.humanQueues.delete(task.task_id)
       this.activeTasks.delete(task.task_id)
       this.liveSnapshots.delete(task.task_id)
-      await this.cleanupTaskDir()
     }
   }
 
@@ -1112,26 +1093,4 @@ export class WorkerHandler {
     } catch { /* ignore send failures */ }
   }
 
-  private async cleanupTaskDir(): Promise<void> {
-    try {
-      const maxRetained = 5
-      const entries = await fs.promises.readdir('/tmp')
-      const dirs = entries.filter(d => d.startsWith('crabot-task-')).map(d => `/tmp/${d}`)
-      if (dirs.length > maxRetained) {
-        const withStats = await Promise.all(
-          dirs.map(async d => {
-            try {
-              const stat = await fs.promises.stat(d)
-              return { path: d, mtime: stat.mtimeMs }
-            } catch { return null }
-          }),
-        )
-        const valid = withStats.filter((s): s is { path: string; mtime: number } => s !== null)
-        const sorted = valid.sort((a, b) => a.mtime - b.mtime)
-        for (const dir of sorted.slice(0, dirs.length - maxRetained)) {
-          await fs.promises.rm(dir.path, { recursive: true, force: true })
-        }
-      }
-    } catch { /* ignore cleanup errors */ }
-  }
 }
