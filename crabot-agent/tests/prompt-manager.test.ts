@@ -105,7 +105,7 @@ describe('Worker prompt — 三段式章节标题', () => {
 
 describe('Worker prompt — 已搬移规则保留', () => {
   it('工作目录段保留', () => {
-    expect(worker).toContain('/tmp/crabot-task-{task_id}/')
+    expect(worker).toContain('os.homedir()')
     expect(worker).toContain('不要修改 Crabot 自身的代码目录')
   })
 

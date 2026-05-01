@@ -3,6 +3,8 @@ import { mkdtempSync, rmSync, readFileSync, existsSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { WorkerHandler } from '../../src/agent/worker-handler.js'
+import { createSkillTool } from '../../src/engine/tools/skill-tool.js'
+import { getInstanceSkillsDir } from '../../src/core/data-paths.js'
 import { resolveSceneAnchorLabel } from '../../src/mcp/crab-memory.js'
 import type {
   ExecuteTaskParams,
@@ -455,5 +457,35 @@ describe('WorkerHandler.updateSkills atomic write', () => {
 
     const skillsRoot = join(dataDir, 'instance', 'skills')
     expect(readFileSync(join(skillsRoot, 'skill-c', '.skill_dir'), 'utf-8')).toBe('/some/source/path')
+  })
+
+  it('Skill tool reflects updateSkills changes immediately (hot-reload bug fix)', async () => {
+    const handler = createTestWorkerHandler()
+
+    // First push: skill-a v1
+    handler.updateSkills([
+      { id: 'skill-a', name: 'skill-a', content: '# Skill A v1\nold body', description: 'A' },
+    ])
+    await new Promise((r) => setTimeout(r, 50))
+
+    const skillsDir = getInstanceSkillsDir()
+    const skillTool = createSkillTool(skillsDir)
+
+    const result1 = await skillTool.call({ skill: 'skill-a' }, {})
+    expect(result1.output).toContain('Skill A v1')
+    expect(result1.output).toContain('old body')
+
+    // Second push: skill-a v2, simulating admin pushing a new version while task is mid-flight
+    handler.updateSkills([
+      { id: 'skill-a', name: 'skill-a', content: '# Skill A v2\nNEW body', description: 'A' },
+    ])
+    await new Promise((r) => setTimeout(r, 50))
+
+    // Key assertion: same skillTool instance (as if tool ref was constructed at task start),
+    // calling again should read v2 content from disk
+    const result2 = await skillTool.call({ skill: 'skill-a' }, {})
+    expect(result2.output).toContain('Skill A v2')
+    expect(result2.output).toContain('NEW body')
+    expect(result2.output).not.toContain('old body')
   })
 })
