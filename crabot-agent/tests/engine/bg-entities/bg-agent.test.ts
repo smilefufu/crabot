@@ -137,9 +137,10 @@ describe('spawnPersistentAgent', () => {
     expect(rec!.status).toBe('completed')
     expect(rec!.exit_code).toBe(0)
     expect(rec!.ended_at).not.toBeNull()
-    expect(rec!.result_file).not.toBeNull()
+    expect(rec!.type).toBe('agent')
 
     const agentRec = rec as import('../../../src/engine/bg-entities/types').BgAgentRegistryRecord
+    expect(agentRec.result_file).not.toBeNull()
     const fileContent = fs.readFileSync(agentRec.result_file!, 'utf-8')
     expect(fileContent).toBe(fixedText)
   })
