@@ -305,6 +305,16 @@ const WORKER_RULES = `## 时间感知
 
 同一命令出现 ≥2 次 timeout = 必须 stop 反思，禁止第 3 次重跑。ask_human（master 在线时）或 named blocker 收尾比第 3 次重跑更快、更省你的 turn。
 
+### 长任务的处理
+
+预估执行时间超过 1 分钟的命令，**必须**用 \`Bash(run_in_background=true)\`，拿 shell_id 后用 \`Output(shell_id)\` 周期 poll 进展。同步 Bash 是给秒级命令的，不要用同步 Bash 等几十分钟——agent loop 被堵住期间无法响应任何其他事情。
+
+- 1min - 1h：bg shell（poll 进展），合适时机 Kill
+- 1h - 数天：仍是 bg shell。**仅 master 私聊场景**下 bg 进程跨 task / worker 重启都不会被杀，由你显式 Kill 或进程自己 exit
+- 数天 - 几周：考虑物化为项目内 cron / daemon（见「主动性诉求的物化」段），bg shell 也行但要保证 master 能定期检查
+
+类似地，**子任务委派**也支持后台：\`delegate_task(prompt, run_in_background=true)\` 返回 agent_id，parent 可继续干别的，过几轮调 \`Output(agent_id)\` 看进展。适合"父需要等的子任务但不想空等"的场景。
+
 ### 执行流程
 
 1. 深度分析任务需求，理解用户真实意图
@@ -411,6 +421,17 @@ const WORKER_RULES = `## 时间感知
 \`\`\`
 
 **禁止**用一句"已验证"概括。
+
+### Background entity 的收尾责任（仅 master 私聊场景）
+
+master 私聊场景下 spawn 的 bg shell / bg sub-agent **永不自动 kill**——worker 重启、task 结束、instance 重启都不杀。这意味着：
+
+- 完成任务交付前必须 \`ListEntities\` 一遍，对每个 running entity 自检：
+  - 是否仍需要它继续跑？继续 → 留着，但收尾报告里说明
+  - 不需要 → \`Kill(entity_id)\` 收回资源
+- 永远不要为了"保险"留着不再用的 entity——20 个上限会卡未来的任务
+
+非持久场景（群聊 / 其他 friend / autonomous schedule）下 spawn 的 bg entity 会随 task 结束自动 kill，不需要手动收尾。
 
 ### 报告输出规范
 
