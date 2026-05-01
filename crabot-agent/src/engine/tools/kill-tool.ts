@@ -1,0 +1,114 @@
+/**
+ * Kill tool — terminate a background entity.
+ *
+ * Plan 2 Tasks 7–9: crabot-docs/superpowers/plans/2026-05-01-long-running-agent-plan-2.md
+ */
+
+import { defineTool } from '../tool-framework'
+import type { ToolDefinition } from '../types'
+import type { BgToolDeps } from './output-tool'
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+async function killShell(
+  entityId: string,
+  deps: BgToolDeps,
+): Promise<{ output: string; isError: boolean }> {
+  // 1. Check transient registry first
+  const transientState = deps.transient.get(entityId)
+  if (transientState) {
+    if (transientState.status !== 'running') {
+      return {
+        output: `Already ${transientState.status}, no-op`,
+        isError: false,
+      }
+    }
+    deps.transient.kill(entityId)
+    return { output: `Sent SIGTERM to transient shell ${entityId}`, isError: false }
+  }
+
+  // 2. Check persistent registry
+  const record = await deps.registry.get(entityId)
+  if (!record) {
+    return { output: `Entity not found: ${entityId}`, isError: true }
+  }
+
+  if (record.type !== 'shell') {
+    return { output: `Entity ${entityId} is not a shell entity`, isError: true }
+  }
+
+  if (record.status !== 'running') {
+    return { output: `Already ${record.status}, no-op`, isError: false }
+  }
+
+  // Send SIGTERM to process group
+  try {
+    process.kill(-record.pgid, 'SIGTERM')
+  } catch {
+    // Process may already be dead — proceed with registry update
+  }
+
+  // Immediately update registry
+  await deps.registry.update(entityId, {
+    status: 'killed',
+    exit_code: -1,
+    ended_at: new Date().toISOString(),
+  })
+
+  // SIGKILL fallback after 3 seconds
+  const pgid = record.pgid
+  setTimeout(() => {
+    try {
+      process.kill(-pgid, 'SIGKILL')
+    } catch {
+      // Already dead — ignore
+    }
+  }, 3000).unref()
+
+  return { output: `Sent SIGTERM to persistent shell ${entityId} (SIGKILL fallback in 3s)`, isError: false }
+}
+
+// ---------------------------------------------------------------------------
+// Factory
+// ---------------------------------------------------------------------------
+
+export function createKillTool(deps: BgToolDeps): ToolDefinition {
+  return defineTool({
+    name: 'Kill',
+    category: 'shell',
+    description: 'Terminate a background entity (shell or sub-agent).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entity_id: {
+          type: 'string',
+          description: 'shell_xxx or agent_xxx',
+        },
+      },
+      required: ['entity_id'],
+    },
+    isReadOnly: false,
+    permissionLevel: 'dangerous',
+    call: async (input) => {
+      const entityId = input.entity_id as string
+
+      if (entityId.startsWith('shell_')) {
+        return killShell(entityId, deps)
+      }
+
+      if (entityId.startsWith('agent_')) {
+        return {
+          output: 'Agent kill not yet implemented (Plan 2 Task 14).',
+          isError: true,
+        }
+      }
+
+      return {
+        output: `Invalid entity_id: ${entityId}`,
+        isError: true,
+      }
+    },
+  })
+}

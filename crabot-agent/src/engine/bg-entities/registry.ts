@@ -90,6 +90,18 @@ export class BgEntityRegistry {
       const file = await this.readFile()
       const existing = file.entities[entity_id]
       if (!existing) return
+
+      // Do not allow downgrading from a terminal state that was set intentionally
+      // (e.g. kill tool sets 'killed'; exit handler must not overwrite with 'failed').
+      const TERMINAL_PRIORITY: ReadonlyArray<BgEntityStatus> = ['killed', 'stalled']
+      if (
+        TERMINAL_PRIORITY.includes(existing.status) &&
+        patch.status !== undefined &&
+        !TERMINAL_PRIORITY.includes(patch.status as BgEntityStatus)
+      ) {
+        return
+      }
+
       const updated: RegistryFile = {
         entities: {
           ...file.entities,
