@@ -17,7 +17,6 @@ export interface LogModalProps {
 
 export const LogModal: React.FC<LogModalProps> = ({ entityId, onClose }) => {
   const [logContent, setLogContent] = useState('')
-  const [offset, setOffset] = useState(0)
   const [status, setStatus] = useState('')
   const [type, setType] = useState('')
   const [loading, setLoading] = useState(false)
@@ -39,7 +38,6 @@ export const LogModal: React.FC<LogModalProps> = ({ entityId, onClose }) => {
       } else if (result.content) {
         setLogContent(prev => prev + result.content)
       }
-      setOffset(result.new_offset)
       currentOffsetRef.current = result.new_offset
       // Auto-scroll to bottom
       if (logRef.current) {
@@ -59,7 +57,6 @@ export const LogModal: React.FC<LogModalProps> = ({ entityId, onClose }) => {
 
     // Reset state
     setLogContent('')
-    setOffset(0)
     currentOffsetRef.current = 0
     setStatus('')
     setType('')
