@@ -212,9 +212,13 @@ class LLMClient:
         kwargs: Dict[str, Any] = {
             "model": self.model,
             "input": input_messages,
-            "temperature": temperature,
             "store": False,
         }
+        # ChatGPT Codex 后端不支持 temperature（"Unsupported parameter: temperature"）；
+        # OpenAI 官方 Responses API 支持。与 Agent OpenAIResponsesAdapter 对 max_output_tokens 的
+        # 处理同模式：Codex 不支持的字段按 is_codex 跳过。
+        if not is_codex:
+            kwargs["temperature"] = temperature
         if instructions:
             kwargs["instructions"] = instructions
         if is_codex:

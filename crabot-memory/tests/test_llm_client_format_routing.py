@@ -136,6 +136,8 @@ async def test_responses_format_routes_to_responses_stream_official_endpoint():
     kwargs = stream_factory.call_args.kwargs
     assert kwargs["instructions"] == "be brief"
     assert kwargs["input"] == [{"type": "message", "role": "user", "content": "hi"}]
+    # 官方 Responses API 支持 temperature，应该传递（默认 0.1）
+    assert kwargs["temperature"] == pytest.approx(0.1)
     # 非 Codex 端点不应注入 reasoning / include / extra_headers
     assert "reasoning" not in kwargs
     assert "include" not in kwargs
@@ -166,6 +168,9 @@ async def test_responses_format_codex_backend_injects_account_id_and_reasoning()
     assert kwargs["reasoning"] == {"effort": "medium", "summary": "auto"}
     assert kwargs["include"] == ["reasoning.encrypted_content"]
     assert kwargs["extra_headers"]["ChatGPT-Account-Id"] == "acc-xxx"
+    # ChatGPT Codex 后端不支持 temperature（会 400 "Unsupported parameter: temperature"），
+    # 必须省略；OpenAI 官方 Responses API 才支持。
+    assert "temperature" not in kwargs
 
 
 @pytest.mark.asyncio
