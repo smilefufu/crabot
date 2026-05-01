@@ -9,6 +9,7 @@ import type { ToolDefinition, ToolPermissionLevel } from '../types'
 import type { BuiltinToolConfig } from '../../types.js'
 
 export interface BuiltinToolsOptions {
+  /** Absolute path to the skills directory (typically ${DATA_DIR}/agent/instance/skills/) */
   readonly skillsDir?: string
 }
 

@@ -63,6 +63,7 @@ import { getInstanceSkillsDir } from '../core/data-paths.js'
 
 import * as fs from 'fs'
 import * as path from 'path'
+import * as os from 'os'
 
 type ProgressReportMode = 'silent' | 'text_forward' | 'digest'
 
@@ -450,9 +451,9 @@ export class WorkerHandler {
         // 3e. Built-in file/shell tools (filtered by Admin config)
         const skillsSnapshot = this.skills
         tools.push(...getConfiguredBuiltinTools(
-          taskDir,
+          os.homedir(),
           this.builtinToolConfig,
-          skillsSnapshot.length > 0 ? { skillsDir: taskDir } : undefined,
+          skillsSnapshot.length > 0 ? { skillsDir: getInstanceSkillsDir() } : undefined,
         ))
 
         // 3f. Sub-agent delegation tools
