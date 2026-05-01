@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
@@ -419,7 +419,7 @@ describe('WorkerHandler.updateSkills atomic write', () => {
   it('writes skills atomically to instance skills dir', async () => {
     const handler = createTestWorkerHandler()
     handler.updateSkills([
-      { name: 'skill-a', content: '# Skill A\nbody', description: 'A' },
+      { id: 'skill-a', name: 'skill-a', content: '# Skill A\nbody', description: 'A' },
     ])
     // 等异步写完成
     await new Promise((r) => setTimeout(r, 50))
@@ -432,12 +432,12 @@ describe('WorkerHandler.updateSkills atomic write', () => {
   it('replaces old skills atomically when called again', async () => {
     const handler = createTestWorkerHandler()
     handler.updateSkills([
-      { name: 'skill-a', content: 'old content', description: 'A' },
+      { id: 'skill-a', name: 'skill-a', content: 'old content', description: 'A' },
     ])
     await new Promise((r) => setTimeout(r, 50))
 
     handler.updateSkills([
-      { name: 'skill-b', content: 'new b', description: 'B' },
+      { id: 'skill-b', name: 'skill-b', content: 'new b', description: 'B' },
     ])
     await new Promise((r) => setTimeout(r, 50))
 
@@ -449,7 +449,7 @@ describe('WorkerHandler.updateSkills atomic write', () => {
   it('writes skill_dir marker when skill_dir field is set', async () => {
     const handler = createTestWorkerHandler()
     handler.updateSkills([
-      { name: 'skill-c', content: 'c body', description: 'C', skill_dir: '/some/source/path' },
+      { id: 'skill-c', name: 'skill-c', content: 'c body', description: 'C', skill_dir: '/some/source/path' },
     ])
     await new Promise((r) => setTimeout(r, 50))
 
