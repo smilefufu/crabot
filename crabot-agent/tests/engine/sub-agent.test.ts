@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { forkEngine, createSubAgentTool } from '../../src/engine/sub-agent'
 import type { SubAgentBgContext } from '../../src/engine/sub-agent'
 import type { LLMAdapter } from '../../src/engine/llm-adapter'
-import type { StreamChunk, ToolDefinition } from '../../src/engine/types'
+import type { StreamChunk } from '../../src/engine/types'
 import { defineTool } from '../../src/engine/tool-framework'
 import { HumanMessageQueue } from '../../src/engine/human-message-queue'
 import { TraceStore } from '../../src/core/trace-store'
@@ -149,7 +149,6 @@ describe('forkEngine', () => {
 
   it('passes supportsVision to engine options', async () => {
     // Mock runEngine to capture params
-    const { runEngine } = await import('../../src/engine/query-loop')
     const runEngineSpy = vi.spyOn(
       await import('../../src/engine/query-loop'),
       'runEngine'
