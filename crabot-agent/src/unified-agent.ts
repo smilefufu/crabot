@@ -58,6 +58,7 @@ import { PromptManager } from './prompt-manager.js'
 import { SUBAGENT_DEFINITIONS, type SubAgentDefinition } from './agent/subagent-prompts.js'
 import { createLSPManager, type LSPManager } from './lsp/lsp-manager.js'
 import type { SupplementTaskDecision } from './types.js'
+import type { BgEntityRecord, BgEntityStatus, BgEntityType } from './engine/bg-entities/types.js'
 
 const BARRIER_TIMEOUT_MS = 8_000
 
@@ -517,6 +518,11 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('clear_traces', this.handleClearTraces.bind(this))
     this.registerMethod('search_traces', this.handleSearchTraces.bind(this))
     this.registerMethod('get_trace_tree', this.handleGetTraceTree.bind(this))
+
+    // Bg-entity admin 接口（Plan 3 Task 1）
+    this.registerMethod('list_bg_entities', this.handleListBgEntities.bind(this))
+    this.registerMethod('kill_bg_entity', this.handleKillBgEntity.bind(this))
+    this.registerMethod('get_bg_entity_log', this.handleGetBgEntityLog.bind(this))
   }
 
   // ============================================================================
@@ -2316,6 +2322,43 @@ export class UnifiedAgent extends ModuleBase {
 
   private handleGetTraceTree(params: { task_id: string }): import('./core/trace-store.js').TraceTree {
     return this.traceStore.getTraceTree(params.task_id)
+  }
+
+  // ============================================================================
+  // Bg-entity admin RPC handlers（Plan 3 Task 1）
+  // ============================================================================
+
+  private async handleListBgEntities(params: {
+    owner_friend_id?: string
+    status?: BgEntityStatus[]
+    type?: BgEntityType
+  }): Promise<{ entities: BgEntityRecord[] }> {
+    if (!this.workerHandler) {
+      throw new Error('Worker handler not initialized')
+    }
+    const entities = await this.workerHandler.listBgEntities(params)
+    return { entities }
+  }
+
+  private async handleKillBgEntity(params: {
+    entity_id: string
+  }): Promise<{ ok: boolean; message?: string }> {
+    if (!this.workerHandler) throw new Error('Worker handler not initialized')
+    return this.workerHandler.killBgEntity(params.entity_id)
+  }
+
+  private async handleGetBgEntityLog(params: {
+    entity_id: string
+    from_offset?: number
+    max_bytes?: number
+  }): Promise<{
+    content: string
+    new_offset: number
+    status: BgEntityStatus
+    type: BgEntityType
+  }> {
+    if (!this.workerHandler) throw new Error('Worker handler not initialized')
+    return this.workerHandler.getBgEntityLog(params.entity_id, params)
   }
 
   // ============================================================================

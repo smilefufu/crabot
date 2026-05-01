@@ -19,7 +19,7 @@ import {
 } from '../engine/index.js'
 import { BgEntityRegistry } from '../engine/bg-entities/registry.js'
 import { TransientShellRegistry } from '../engine/bg-entities/bg-shell.js'
-import type { BgEntityOwner } from '../engine/bg-entities/types.js'
+import type { BgEntityOwner, BgEntityRecord, BgEntityStatus, BgEntityType } from '../engine/bg-entities/types.js'
 import type { BashBgContext } from '../engine/tools/index.js'
 import type { BgToolDeps } from '../engine/tools/index.js'
 import type {
@@ -1176,6 +1176,122 @@ export class WorkerHandler {
         content: { type: 'text', text },
       }, this.deps.moduleId)
     } catch { /* ignore send failures */ }
+  }
+
+  // ============================================================================
+  // Bg-entity admin RPC methods (Plan 3 Task 1)
+  // ============================================================================
+
+  async listBgEntities(opts?: {
+    owner_friend_id?: string
+    status?: BgEntityStatus[]
+    type?: BgEntityType
+  }): Promise<BgEntityRecord[]> {
+    return this.bgRegistry.list(opts)
+  }
+
+  async killBgEntity(entity_id: string): Promise<{ ok: boolean; message?: string }> {
+    if (entity_id.startsWith('shell_')) {
+      // Try transient shell first
+      const transientState = this.transientShells.get(entity_id)
+      if (transientState) {
+        this.transientShells.kill(entity_id)
+        return { ok: true }
+      }
+      // Persistent shell
+      const rec = await this.bgRegistry.get(entity_id)
+      if (!rec) return { ok: false, message: 'Entity not found' }
+      if (rec.status !== 'running') return { ok: false, message: `Already ${rec.status}` }
+      if (rec.type !== 'shell') return { ok: false, message: 'Mismatched type' }
+      try {
+        process.kill(-rec.pgid, 'SIGTERM')
+        setTimeout(() => {
+          try { process.kill(-rec.pgid, 'SIGKILL') } catch { /* already dead */ }
+        }, 3000).unref()
+      } catch { /* already dead */ }
+      await this.bgRegistry.update(entity_id, {
+        status: 'killed',
+        ended_at: new Date().toISOString(),
+      })
+      return { ok: true }
+    }
+    if (entity_id.startsWith('agent_')) {
+      const rec = await this.bgRegistry.get(entity_id)
+      if (!rec) return { ok: false, message: 'Entity not found' }
+      if (rec.status !== 'running') return { ok: false, message: `Already ${rec.status}` }
+      const controller = this.agentAbortControllers.get(entity_id)
+      if (controller) controller.abort()
+      await this.bgRegistry.update(entity_id, {
+        status: 'killed',
+        ended_at: new Date().toISOString(),
+      })
+      return { ok: true }
+    }
+    return { ok: false, message: `Invalid entity_id: ${entity_id}` }
+  }
+
+  async getBgEntityLog(
+    entity_id: string,
+    opts?: { from_offset?: number; max_bytes?: number },
+  ): Promise<{
+    content: string
+    new_offset: number
+    status: BgEntityStatus
+    type: BgEntityType
+  }> {
+    const fromOffset = opts?.from_offset ?? 0
+    const maxBytes = opts?.max_bytes ?? 100_000
+
+    // Check transient shell first
+    const transientState = this.transientShells.get(entity_id)
+    if (transientState) {
+      return {
+        content: transientState.ringBuffer,
+        new_offset: transientState.ringBuffer.length,
+        status: transientState.status,
+        type: 'shell',
+      }
+    }
+
+    const rec = await this.bgRegistry.get(entity_id)
+    if (!rec) throw new Error(`Entity not found: ${entity_id}`)
+
+    let logFile: string
+    if (rec.type === 'shell') {
+      logFile = rec.log_file
+    } else {
+      // agent: completed → result_file; otherwise messages_log_file
+      if (rec.status === 'completed' && rec.result_file) {
+        const content = await fs.promises.readFile(rec.result_file, 'utf-8')
+        return { content, new_offset: content.length, status: rec.status, type: 'agent' }
+      }
+      logFile = rec.messages_log_file
+    }
+
+    // Incremental log read
+    try {
+      const stat = await fs.promises.stat(logFile)
+      const start = Math.min(fromOffset, stat.size)
+      const length = Math.min(maxBytes, stat.size - start)
+      if (length <= 0) {
+        return { content: '', new_offset: stat.size, status: rec.status, type: rec.type }
+      }
+      const fd = await fs.promises.open(logFile, 'r')
+      try {
+        const buf = Buffer.alloc(length)
+        await fd.read(buf, 0, length, start)
+        return {
+          content: buf.toString('utf-8'),
+          new_offset: start + length,
+          status: rec.status,
+          type: rec.type,
+        }
+      } finally {
+        await fd.close()
+      }
+    } catch {
+      return { content: '', new_offset: 0, status: rec.status, type: rec.type }
+    }
   }
 
 }

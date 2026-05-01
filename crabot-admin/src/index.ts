@@ -1691,6 +1691,22 @@ export class AdminModule extends ModuleBase {
         return
       }
 
+      // Bg-entity admin REST API（Plan 3 Tasks 2+3）
+      if (req.method === 'GET' && pathname === '/api/bg-entities') {
+        await this.handleListBgEntitiesApi(req, res)
+        return
+      }
+      const bgEntityLogMatch = pathname.match(/^\/api\/bg-entities\/([^/]+)\/log$/)
+      if (bgEntityLogMatch && req.method === 'GET') {
+        await this.handleGetBgEntityLogApi(req, res, decodeURIComponent(bgEntityLogMatch[1]))
+        return
+      }
+      const bgEntityIdMatch = pathname.match(/^\/api\/bg-entities\/([^/]+)$/)
+      if (bgEntityIdMatch && req.method === 'DELETE') {
+        await this.handleKillBgEntityApi(req, res, decodeURIComponent(bgEntityIdMatch[1]))
+        return
+      }
+
       // Memory v2 REST API
       if (pathname.startsWith('/api/memory/v2/')) {
         const bodyText = req.method && ['POST', 'PATCH', 'PUT'].includes(req.method)
@@ -6771,6 +6787,92 @@ export class AdminModule extends ModuleBase {
         { task_id: string },
         unknown
       >(port, 'get_trace_tree', { task_id: taskId }, this.config.moduleId)
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(result))
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      res.writeHead(500, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: msg }))
+    }
+  }
+
+  // ============================================================================
+  // Bg-entity admin REST API（Plan 3 Tasks 2+3）
+  // ============================================================================
+
+  private async handleListBgEntitiesApi(
+    _req: IncomingMessage,
+    res: ServerResponse
+  ): Promise<void> {
+    try {
+      const port = await this.ensureAgentPort()
+      if (!port) {
+        res.writeHead(503, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Agent not available' }))
+        return
+      }
+      const result = await this.rpcClient.call<
+        Record<string, never>,
+        { entities: unknown[] }
+      >(port, 'list_bg_entities', {}, this.config.moduleId)
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(result))
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      res.writeHead(500, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: msg }))
+    }
+  }
+
+  private async handleGetBgEntityLogApi(
+    req: IncomingMessage,
+    res: ServerResponse,
+    entityId: string
+  ): Promise<void> {
+    try {
+      const port = await this.ensureAgentPort()
+      if (!port) {
+        res.writeHead(503, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Agent not available' }))
+        return
+      }
+      const url = new URL(req.url ?? '', 'http://localhost')
+      const fromOffset = parseInt(url.searchParams.get('from_offset') ?? '0', 10)
+      const maxBytes = parseInt(url.searchParams.get('max_bytes') ?? '100000', 10)
+      const result = await this.rpcClient.call<
+        { entity_id: string; from_offset: number; max_bytes: number },
+        { content: string; new_offset: number; status: string; type: string }
+      >(port, 'get_bg_entity_log', { entity_id: entityId, from_offset: fromOffset, max_bytes: maxBytes }, this.config.moduleId)
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(result))
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      if (msg.includes('not found') || msg.includes('Entity not found')) {
+        res.writeHead(404, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: msg }))
+      } else {
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: msg }))
+      }
+    }
+  }
+
+  private async handleKillBgEntityApi(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    entityId: string
+  ): Promise<void> {
+    try {
+      const port = await this.ensureAgentPort()
+      if (!port) {
+        res.writeHead(503, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Agent not available' }))
+        return
+      }
+      const result = await this.rpcClient.call<
+        { entity_id: string },
+        { ok: boolean; message?: string }
+      >(port, 'kill_bg_entity', { entity_id: entityId }, this.config.moduleId)
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(result))
     } catch (error) {

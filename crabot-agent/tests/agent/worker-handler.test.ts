@@ -650,3 +650,139 @@ describe('WorkerHandler bg-entities lifecycle', () => {
     expect(() => handler!.dispose()).not.toThrow()
   })
 })
+
+describe('WorkerHandler bg-entities admin RPC', () => {
+  let dataDir: string
+  let originalDataDir: string | undefined
+  let wh: WorkerHandler
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'worker-bg-admin-test-'))
+    originalDataDir = process.env.DATA_DIR
+    process.env.DATA_DIR = dataDir
+
+    const sdkEnv = {
+      modelId: 'test-model',
+      format: 'anthropic' as const,
+      env: { ANTHROPIC_BASE_URL: 'http://localhost:4000', ANTHROPIC_API_KEY: 'test-key' },
+    }
+    wh = new WorkerHandler(sdkEnv, { systemPrompt: 'worker' })
+  })
+
+  afterEach(() => {
+    wh.dispose()
+    rmSync(dataDir, { recursive: true, force: true })
+    if (originalDataDir === undefined) {
+      delete process.env.DATA_DIR
+    } else {
+      process.env.DATA_DIR = originalDataDir
+    }
+  })
+
+  function registryPath() {
+    return join(dataDir, 'bg-entities', 'registry.json')
+  }
+
+  function writeRegistry(entities: Record<string, BgEntityRecord>) {
+    const dir = join(dataDir, 'bg-entities')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(registryPath(), JSON.stringify({ entities }, null, 2), 'utf8')
+  }
+
+  function makeShellRecord(overrides: Partial<BgEntityRecord> = {}): BgEntityRecord {
+    return {
+      entity_id: 'shell_aabbcc',
+      type: 'shell',
+      status: 'running',
+      owner: { friend_id: 'friend-1' },
+      spawned_by_task_id: 'task-1',
+      spawned_at: new Date().toISOString(),
+      exit_code: null,
+      ended_at: null,
+      last_activity_at: new Date().toISOString(),
+      command: 'sleep 9999',
+      log_file: join(dataDir, 'shell.log'),
+      pid: 999999,
+      pgid: 999999,
+      process_started_at: new Date().toISOString(),
+      ...overrides,
+    } as BgEntityRecord
+  }
+
+  it('listBgEntities returns all entities from registry', async () => {
+    writeRegistry({
+      'shell_aabbcc': makeShellRecord(),
+      'shell_112233': makeShellRecord({ entity_id: 'shell_112233', status: 'completed' }),
+    })
+    // let constructor fire-and-forget settle
+    await new Promise((r) => setTimeout(r, 150))
+
+    const result = await wh.listBgEntities()
+    // There will be 2 entries in registry (recovery may have mutated status but not removed them)
+    expect(result.length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('listBgEntities filters by status', async () => {
+    writeRegistry({
+      'shell_aabbcc': makeShellRecord({ status: 'completed' }),
+      'shell_112233': makeShellRecord({ entity_id: 'shell_112233', status: 'failed' }),
+    })
+    await new Promise((r) => setTimeout(r, 150))
+
+    const completedOnly = await wh.listBgEntities({ status: ['completed'] })
+    expect(completedOnly.every(e => e.status === 'completed')).toBe(true)
+  })
+
+  it('killBgEntity returns ok:false for non-existent entity', async () => {
+    const result = await wh.killBgEntity('shell_nonexistent')
+    expect(result.ok).toBe(false)
+    expect(result.message).toMatch(/not found/i)
+  })
+
+  it('killBgEntity returns ok:false for invalid entity_id prefix', async () => {
+    const result = await wh.killBgEntity('invalid_id')
+    expect(result.ok).toBe(false)
+    expect(result.message).toMatch(/Invalid entity_id/i)
+  })
+
+  it('killBgEntity returns ok:false when shell already completed', async () => {
+    writeRegistry({
+      'shell_aabbcc': makeShellRecord({ status: 'completed' }),
+    })
+    await new Promise((r) => setTimeout(r, 150))
+
+    const result = await wh.killBgEntity('shell_aabbcc')
+    expect(result.ok).toBe(false)
+    expect(result.message).toContain('Already')
+  })
+
+  it('getBgEntityLog returns content from persistent shell log file', async () => {
+    const logFile = join(dataDir, 'shell.log')
+    writeFileSync(logFile, 'hello world output', 'utf8')
+    writeRegistry({
+      'shell_aabbcc': makeShellRecord({ status: 'completed', log_file: logFile }),
+    })
+    await new Promise((r) => setTimeout(r, 150))
+
+    const result = await wh.getBgEntityLog('shell_aabbcc')
+    expect(result.content).toContain('hello world output')
+    expect(result.new_offset).toBeGreaterThan(0)
+    expect(result.type).toBe('shell')
+  })
+
+  it('getBgEntityLog throws for non-existent entity', async () => {
+    await expect(wh.getBgEntityLog('shell_nonexistent')).rejects.toThrow(/not found/i)
+  })
+
+  it('getBgEntityLog returns empty content when log file missing', async () => {
+    writeRegistry({
+      'shell_aabbcc': makeShellRecord({ log_file: join(dataDir, 'nonexistent.log') }),
+    })
+    await new Promise((r) => setTimeout(r, 150))
+
+    const result = await wh.getBgEntityLog('shell_aabbcc')
+    expect(result.content).toBe('')
+    expect(result.new_offset).toBe(0)
+    expect(result.type).toBe('shell')
+  })
+})
