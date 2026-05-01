@@ -1,10 +1,16 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { forkEngine, createSubAgentTool } from '../../src/engine/sub-agent'
+import type { SubAgentBgContext } from '../../src/engine/sub-agent'
 import type { LLMAdapter } from '../../src/engine/llm-adapter'
 import type { StreamChunk, ToolDefinition } from '../../src/engine/types'
 import { defineTool } from '../../src/engine/tool-framework'
 import { HumanMessageQueue } from '../../src/engine/human-message-queue'
 import { TraceStore } from '../../src/core/trace-store'
+import { BgEntityRegistry } from '../../src/engine/bg-entities/registry'
+import type { WorkerAgentContext } from '../../src/types'
+import * as os from 'os'
+import * as fs from 'fs'
+import * as path from 'path'
 
 // --- Test Helpers (same pattern as query-loop tests) ---
 
@@ -487,5 +493,259 @@ describe('createSubAgentTool with trace', () => {
     const parsed = JSON.parse(result.output)
     expect(parsed.child_trace_id).toBeDefined()
     expect(typeof parsed.child_trace_id).toBe('string')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Helpers for bg-context tests
+// ---------------------------------------------------------------------------
+
+function makeMasterPrivateCtx(): WorkerAgentContext {
+  return {
+    task_origin: {
+      channel_id: 'channel-test',
+      session_id: 'session-test',
+      friend_id: 'friend-master',
+      session_type: 'private',
+    },
+    sender_friend: {
+      id: 'friend-master',
+      display_name: 'Master',
+      permission: 'master',
+      channel_identities: [],
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    },
+    short_term_memories: [],
+    long_term_memories: [],
+    available_tools: [],
+    admin_endpoint: { module_id: 'admin', port: 3001 },
+    memory_endpoint: { module_id: 'memory', port: 3002 },
+    channel_endpoints: [],
+  }
+}
+
+function makeGroupCtx(): WorkerAgentContext {
+  return {
+    task_origin: {
+      channel_id: 'channel-test',
+      session_id: 'session-group',
+      friend_id: 'friend-normal',
+      session_type: 'group',
+    },
+    sender_friend: {
+      id: 'friend-normal',
+      display_name: 'Normal',
+      permission: 'normal',
+      channel_identities: [],
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    },
+    short_term_memories: [],
+    long_term_memories: [],
+    available_tools: [],
+    admin_endpoint: { module_id: 'admin', port: 3001 },
+    memory_endpoint: { module_id: 'memory', port: 3002 },
+    channel_endpoints: [],
+  }
+}
+
+// ---------------------------------------------------------------------------
+// describe block: createSubAgentTool with bgContext (run_in_background)
+// ---------------------------------------------------------------------------
+
+describe('createSubAgentTool with bgContext (run_in_background)', () => {
+  let tmpDataDir: string
+  let registry: BgEntityRegistry
+
+  beforeEach(() => {
+    tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sub-agent-bg-test-'))
+    const registryPath = path.join(tmpDataDir, 'registry.json')
+    registry = new BgEntityRegistry(registryPath)
+  })
+
+  afterEach(() => {
+    fs.rmSync(tmpDataDir, { recursive: true, force: true })
+  })
+
+  it('case 1: bgContext undefined → run_in_background not in schema', () => {
+    const tool = createSubAgentTool({
+      name: 'delegate_task',
+      description: 'Delegate',
+      adapter: mockAdapter([]),
+      model: 'test-model',
+      systemPrompt: 'You are a sub-agent.',
+      subTools: [],
+    })
+
+    const props = (tool.inputSchema as any).properties
+    expect(props).not.toHaveProperty('run_in_background')
+  })
+
+  it('case 2: bgContext provided + master private + run_in_background=true → spawnPersistentAgent, registry has agent entry', async () => {
+    const workerContext = makeMasterPrivateCtx()
+    const abortControllers = new Map<string, AbortController>()
+    const bgContext: SubAgentBgContext = {
+      registry,
+      workerContext,
+      owner: { friend_id: 'friend-master' },
+      spawned_by_task_id: 'task-001',
+      abortControllers,
+    }
+
+    const tool = createSubAgentTool({
+      name: 'delegate_task',
+      description: 'Delegate',
+      adapter: mockAdapter([]),
+      model: 'test-model',
+      systemPrompt: 'You are a sub-agent.',
+      subTools: [],
+      bgContext,
+    })
+
+    // schema should include run_in_background
+    const props = (tool.inputSchema as any).properties
+    expect(props).toHaveProperty('run_in_background')
+
+    const result = await tool.call({ task: 'Do research', run_in_background: true }, {})
+    expect(result.isError).toBe(false)
+    expect(result.output).toMatch(/Sub-agent spawned \(persistent\): agent_/)
+    expect(result.output).toContain('Output(')
+    expect(result.output).toContain('Kill(')
+
+    const match = result.output.match(/agent_[0-9a-f]+/)
+    expect(match).not.toBeNull()
+    const entityId = match![0]
+
+    const entity = await registry.get(entityId)
+    expect(entity).not.toBeNull()
+    expect(entity?.type).toBe('agent')
+
+    // cleanup: abort all spawned agents
+    for (const [, ctrl] of abortControllers) {
+      ctrl.abort()
+    }
+  })
+
+  it('case 3: bgContext provided + group ctx + run_in_background=true → silent fallback to sync', async () => {
+    const workerContext = makeGroupCtx()
+    const abortControllers = new Map<string, AbortController>()
+    const bgContext: SubAgentBgContext = {
+      registry,
+      workerContext,
+      owner: { friend_id: 'friend-normal' },
+      spawned_by_task_id: 'task-002',
+      abortControllers,
+    }
+
+    const adapter = mockAdapter([textResponse('Sync result')])
+    const tool = createSubAgentTool({
+      name: 'delegate_task',
+      description: 'Delegate',
+      adapter,
+      model: 'test-model',
+      systemPrompt: 'You are a sub-agent.',
+      subTools: [],
+      bgContext,
+    })
+
+    // run_in_background=true but non-persistent scene → silent fallback to sync
+    const result = await tool.call({ task: 'Do research', run_in_background: true }, {})
+    expect(result.isError).toBe(false)
+    // Sync path returns JSON with output field
+    const parsed = JSON.parse(result.output)
+    expect(parsed.output).toBe('Sync result')
+
+    // Registry should NOT have a new agent entry
+    const all = await registry.list({ status: ['running'] })
+    expect(all).toHaveLength(0)
+  })
+
+  it('case 4: bgContext provided + 20 entity limit → returns isError with limit message', async () => {
+    const friendId = 'friend-limit-test'
+    const workerContext: WorkerAgentContext = {
+      ...makeMasterPrivateCtx(),
+      sender_friend: {
+        ...makeMasterPrivateCtx().sender_friend!,
+        id: friendId,
+      },
+      task_origin: {
+        ...makeMasterPrivateCtx().task_origin!,
+        friend_id: friendId,
+      },
+    }
+    const abortControllers = new Map<string, AbortController>()
+    const bgContext: SubAgentBgContext = {
+      registry,
+      workerContext,
+      owner: { friend_id: friendId },
+      spawned_by_task_id: 'task-limit',
+      abortControllers,
+    }
+
+    // Pre-register 20 running agent entities
+    for (let i = 0; i < 20; i++) {
+      await registry.register({
+        entity_id: `agent_fake${i.toString().padStart(4, '0')}`,
+        type: 'agent',
+        status: 'running',
+        task_description: 'fake task',
+        messages_log_file: '/tmp/fake.jsonl',
+        result_file: null,
+        owner: { friend_id: friendId },
+        spawned_by_task_id: 'task-limit',
+        spawned_at: new Date().toISOString(),
+        exit_code: null,
+        ended_at: null,
+        last_activity_at: new Date().toISOString(),
+      })
+    }
+
+    const tool = createSubAgentTool({
+      name: 'delegate_task',
+      description: 'Delegate',
+      adapter: mockAdapter([]),
+      model: 'test-model',
+      systemPrompt: 'You are a sub-agent.',
+      subTools: [],
+      bgContext,
+    })
+
+    const result = await tool.call({ task: 'overflow task', run_in_background: true }, {})
+    expect(result.isError).toBe(true)
+    expect(result.output).toContain('20 个 bg entity 上限')
+  })
+
+  it('case 5: bgContext provided + run_in_background not passed → sync path', async () => {
+    const workerContext = makeMasterPrivateCtx()
+    const abortControllers = new Map<string, AbortController>()
+    const bgContext: SubAgentBgContext = {
+      registry,
+      workerContext,
+      owner: { friend_id: 'friend-master' },
+      spawned_by_task_id: 'task-003',
+      abortControllers,
+    }
+
+    const adapter = mockAdapter([textResponse('Sync output')])
+    const tool = createSubAgentTool({
+      name: 'delegate_task',
+      description: 'Delegate',
+      adapter,
+      model: 'test-model',
+      systemPrompt: 'You are a sub-agent.',
+      subTools: [],
+      bgContext,
+    })
+
+    // No run_in_background → sync execution
+    const result = await tool.call({ task: 'Analyze data' }, {})
+    expect(result.isError).toBe(false)
+    const parsed = JSON.parse(result.output)
+    expect(parsed.output).toBe('Sync output')
+
+    // Registry should NOT have any new entries
+    const all = await registry.list({ status: ['running'] })
+    expect(all).toHaveLength(0)
   })
 })

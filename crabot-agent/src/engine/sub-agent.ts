@@ -1,11 +1,16 @@
 import type { LLMAdapter } from './llm-adapter'
 import type { ToolDefinition, EngineTurnEvent, EngineResult, ContentBlock, HumanMessageQueueLike, ToolPermissionConfig } from './types'
-import type { AgentTrace } from '../types'
+import type { AgentTrace, WorkerAgentContext } from '../types'
 import type { TraceStore } from '../core/trace-store'
 import { runEngine } from './query-loop'
 import { resolveImageFromPaths } from '../agent/media-resolver'
 import { formatSupplementForSubAgent } from '../agent/subagent-prompts'
 import { HumanMessageQueue } from './human-message-queue'
+import { spawnPersistentAgent } from './bg-entities/bg-agent'
+import { isPersistentMode } from './bg-entities/permission'
+import type { BgEntityRegistry } from './bg-entities/registry'
+import type { BgEntityOwner } from './bg-entities/types'
+import { BG_ENTITY_LIMIT_PER_OWNER } from './bg-entities/types'
 
 // --- Fork Engine ---
 
@@ -105,6 +110,18 @@ export interface SubAgentTraceConfig {
 
 // --- Sub-Agent Tool ---
 
+/**
+ * Background context for sub-agent. When provided, the tool exposes
+ * the `run_in_background` input parameter. Parallel to BashBgContext.
+ */
+export interface SubAgentBgContext {
+  readonly registry: BgEntityRegistry
+  readonly workerContext: WorkerAgentContext
+  readonly owner: BgEntityOwner
+  readonly spawned_by_task_id: string
+  readonly abortControllers: Map<string, AbortController>
+}
+
 export interface SubAgentToolConfig {
   /** Tool name (e.g., 'research_agent', 'code_review_agent') */
   readonly name: string
@@ -122,6 +139,8 @@ export interface SubAgentToolConfig {
   readonly lspManager?: import('../hooks/types').LspManagerLike
   /** 从父 Worker 继承的 permissionConfig；sub-agent 的工具执行也需遵守同一 session 的权限策略 */
   readonly permissionConfig?: ToolPermissionConfig
+  /** Optional bg-entities deps. 提供时本工具支持 run_in_background 入参 */
+  readonly bgContext?: SubAgentBgContext
 }
 
 export function createSubAgentTool(config: SubAgentToolConfig): ToolDefinition {
@@ -136,6 +155,13 @@ export function createSubAgentTool(config: SubAgentToolConfig): ToolDefinition {
       description: 'Local file paths of images to pass to the sub-agent for visual analysis',
     }
   }
+  if (config.bgContext) {
+    properties.run_in_background = {
+      type: 'boolean',
+      description:
+        'Spawn sub-agent asynchronously and return agent_id immediately. 仅 master 私聊场景生效（持久化 + survive worker 重启）；其他场景被静默忽略并改为同步执行。',
+    }
+  }
 
   return {
     name: config.name,
@@ -147,6 +173,40 @@ export function createSubAgentTool(config: SubAgentToolConfig): ToolDefinition {
       required: ['task'],
     },
     call: async (input, callContext) => {
+      const bgRequested = input.run_in_background === true
+
+      if (bgRequested && config.bgContext) {
+        const persistent = isPersistentMode(config.bgContext.workerContext)
+        if (persistent) {
+          const count = await config.bgContext.registry.countActiveByOwner(
+            config.bgContext.owner.friend_id,
+          )
+          if (count >= BG_ENTITY_LIMIT_PER_OWNER) {
+            return {
+              output: `已达 ${BG_ENTITY_LIMIT_PER_OWNER} 个 bg entity 上限，请先 ListEntities + Kill 清理。`,
+              isError: true,
+            }
+          }
+
+          const agent_id = await spawnPersistentAgent({
+            task_description: String(input.task),
+            tools: config.subTools,
+            systemPrompt: config.systemPrompt,
+            model: config.model,
+            adapter: config.adapter,
+            owner: config.bgContext.owner,
+            spawned_by_task_id: config.bgContext.spawned_by_task_id,
+            registry: config.bgContext.registry,
+            abortControllers: config.bgContext.abortControllers,
+          })
+          return {
+            output: `Sub-agent spawned (persistent): ${agent_id}\nUse Output("${agent_id}") to poll, Kill("${agent_id}") to terminate.`,
+            isError: false,
+          }
+        }
+        // 非持久场景（群聊 / 非 master）：bg 入参静默忽略，fall through 到同步路径
+      }
+
       let childQueue: HumanMessageQueue | undefined
       if (config.parentHumanQueue) {
         childQueue = config.parentHumanQueue.createChild((content) => {
