@@ -1,4 +1,5 @@
 import { createBashTool } from './bash-tool'
+import type { BashBgContext } from './bash-tool'
 import { createReadTool } from './read-tool'
 import { createWriteTool } from './write-tool'
 import { createEditTool } from './edit-tool'
@@ -8,14 +9,18 @@ import { createSkillTool } from './skill-tool'
 import type { ToolDefinition, ToolPermissionLevel } from '../types'
 import type { BuiltinToolConfig } from '../../types.js'
 
+export type { BashBgContext }
+
 export interface BuiltinToolsOptions {
   /** Absolute path to the skills directory (typically ${DATA_DIR}/agent/instance/skills/) */
   readonly skillsDir?: string
+  /** Optional bg-entities deps. 提供时 Bash 支持 run_in_background；不提供时只能跑同步前台 */
+  readonly bgEntityCtx?: BashBgContext
 }
 
-function buildBaseTools(cwd: string, bashTimeout?: number, skillsDir?: string): ToolDefinition[] {
+function buildBaseTools(cwd: string, bashTimeout?: number, skillsDir?: string, bgCtx?: BashBgContext): ToolDefinition[] {
   const tools: ToolDefinition[] = [
-    createBashTool(cwd, bashTimeout),
+    createBashTool(cwd, bashTimeout, bgCtx),
     createReadTool(cwd),
     createWriteTool(cwd),
     createEditTool(cwd),
@@ -29,7 +34,7 @@ function buildBaseTools(cwd: string, bashTimeout?: number, skillsDir?: string): 
 }
 
 export function getAllBuiltinTools(cwd: string, options?: BuiltinToolsOptions): ReadonlyArray<ToolDefinition> {
-  return buildBaseTools(cwd, undefined, options?.skillsDir)
+  return buildBaseTools(cwd, undefined, options?.skillsDir, options?.bgEntityCtx)
 }
 
 export function getConfiguredBuiltinTools(
@@ -41,7 +46,7 @@ export function getConfiguredBuiltinTools(
     return [...getAllBuiltinTools(cwd, options)]
   }
 
-  const baseTools = buildBaseTools(cwd, config.bash_timeout, options?.skillsDir)
+  const baseTools = buildBaseTools(cwd, config.bash_timeout, options?.skillsDir, options?.bgEntityCtx)
 
   // Filter: enabled_tools takes precedence over disabled_tools
   let filtered: ToolDefinition[]
