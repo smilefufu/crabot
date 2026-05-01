@@ -12,13 +12,12 @@ import pytest
 from src.long_term_v2.rpc import LongTermV2Rpc
 from src.long_term_v2.store import MemoryStore
 from src.long_term_v2.sqlite_index import SqliteIndex
-from tests.long_term_v2.test_pe_gated_write_e2e import FakeEmbedder
 
 
 def _build_rpc(tmp_path):
     store = MemoryStore(str(tmp_path / "lt"))
     index = SqliteIndex(str(tmp_path / "v2.db"))
-    rpc = LongTermV2Rpc(store=store, index=index, embedder=FakeEmbedder())
+    rpc = LongTermV2Rpc(store=store, index=index)
     return rpc, store, index
 
 

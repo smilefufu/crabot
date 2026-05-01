@@ -87,6 +87,14 @@ export function buildCreateScheduleBody(opts: ScheduleAddOpts): Record<string, u
     enabled: !opts.disabled,
   }
   if (opts.description?.trim()) body['description'] = opts.description.trim()
+
+  // creator_friend_id 不暴露 CLI flag，从 env 读 — 由 worker 在 task 启动时
+  // 把 task_origin.friend_id 注入到 CRABOT_TASK_FRIEND_ID，agent 没法通过命令行参数伪造身份。
+  // 没设环境变量（如直接调 CLI 的运维场景）就不传，让 admin 兜底（POST /api/schedules
+  // 会自动填 master friend）。
+  const envFriendId = process.env.CRABOT_TASK_FRIEND_ID?.trim()
+  if (envFriendId) body['creator_friend_id'] = envFriendId
+
   return body
 }
 

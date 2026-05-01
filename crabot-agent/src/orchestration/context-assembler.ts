@@ -7,14 +7,13 @@
  * @see protocol-agent-v2.md 3.2.3 WorkerAgentContext
  */
 
-import { isClaimCommand, isClaimSystemHint, type ModuleId, type SessionId, type RpcClient } from 'crabot-shared'
+import { isClaimCommand, isClaimSystemHint, type ModuleId, type SessionId, type RpcClient, type RpcTraceContext } from 'crabot-shared'
 import type {
   OrchestrationConfig,
   FrontAgentContext,
   WorkerAgentContext,
   ChannelMessage,
   ShortTermMemoryEntry,
-  LongTermMemoryRef,
   TaskSummary,
   ResolvedModule,
   Friend,
@@ -34,8 +33,6 @@ interface AssembleParams {
   friend_id?: string
   session_type?: 'private' | 'group'
   crab_display_name?: string
-  /** Worker scope 的 task_id，传给 search_long_term 用于写入 lesson_task_usage */
-  task_id?: string
 }
 
 interface MemoryFetchParams {
@@ -47,12 +44,6 @@ interface MemoryFetchParams {
 }
 
 type FetchShortTermMemoryParams = MemoryFetchParams
-
-interface FetchLongTermMemoryParams extends MemoryFetchParams {
-  query?: string
-  /** 调用方传入的 task_id，会作为 task_id 参数传给 search_long_term */
-  taskId?: string
-}
 
 /**
  * 过滤 channel.history 里的认主类噪声：
@@ -90,32 +81,60 @@ export class ContextAssembler {
   }
 
   /**
+   * Trace 用：在 traceCtx 提供时把内部并行子任务包成子 span，方便定位耗时。
+   * 没有 traceCtx 时直接执行 fn，0 开销。
+   */
+  private async withSubSpan<T>(
+    traceCtx: RpcTraceContext | undefined,
+    label: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    if (!traceCtx) return fn()
+    const span = traceCtx.traceStore.startSpan(traceCtx.traceId, {
+      type: 'context_fetch',
+      parent_span_id: traceCtx.parentSpanId,
+      details: { label },
+    })
+    try {
+      const result = await fn()
+      traceCtx.traceStore.endSpan(traceCtx.traceId, span.span_id, 'completed')
+      return result
+    } catch (err) {
+      traceCtx.traceStore.endSpan(traceCtx.traceId, span.span_id, 'failed', {
+        error: err instanceof Error ? err.message : String(err),
+      })
+      throw err
+    }
+  }
+
+  /**
    * 组装 Front Agent 上下文
    * @see protocol-agent-v2.md 3.2.2
    */
   async assembleFrontContext(
     params: AssembleParams,
     friend: Friend | undefined,
-    memoryPermissions: MemoryPermissions
+    memoryPermissions: MemoryPermissions,
+    traceCtx?: RpcTraceContext,
   ): Promise<FrontAgentContext> {
     const sessionType = params.session_type ?? 'private'
     const [recentMessages, shortTermMemories, activeTasks, recentlyClosedTasks, sceneProfile] = await Promise.all([
-      this.fetchRecentMessages(
+      this.withSubSpan(traceCtx, 'fetch_recent_messages', () => this.fetchRecentMessages(
         params.session_id,
         params.channel_id,
         this.config.front_context_recent_messages_limit,
         sessionType
-      ),
-      this.fetchShortTermMemory({
+      )),
+      this.withSubSpan(traceCtx, 'fetch_short_term_memory', () => this.fetchShortTermMemory({
         friendId: params.friend_id,
         limit: this.config.front_context_memory_limit,
         minVisibility: memoryPermissions.read_min_visibility,
         accessibleScopes: memoryPermissions.read_accessible_scopes,
         sessionType,
-      }),
-      this.fetchActiveTasks(),
-      this.fetchRecentlyClosedTasks(params.channel_id, params.session_id, 5),
-      this.resolveSceneProfile(params.channel_id, params.session_id, sessionType, params.friend_id),
+      })),
+      this.withSubSpan(traceCtx, 'fetch_active_tasks', () => this.fetchActiveTasks()),
+      this.withSubSpan(traceCtx, 'fetch_recently_closed_tasks', () => this.fetchRecentlyClosedTasks(params.channel_id, params.session_id, 5)),
+      this.withSubSpan(traceCtx, 'resolve_scene_profile', () => this.resolveSceneProfile(params.channel_id, params.session_id, sessionType, params.friend_id)),
     ])
 
     return {
@@ -143,49 +162,43 @@ export class ContextAssembler {
    */
   async assembleWorkerContext(
     params: AssembleParams,
-    memoryPermissions: MemoryPermissions
+    memoryPermissions: MemoryPermissions,
+    traceCtx?: RpcTraceContext,
   ): Promise<WorkerAgentContext> {
     const workerSessionType = params.session_type ?? 'private'
+    // long_term_memories 不在此处预 fetch：用消息原话当 query 召回质量差（短/抽象/无主题
+    // 的指令性消息常见），而且 worker 已经有 crab-memory MCP 的 search_long_term tool，
+    // 需要历史背景时由 worker 自己按需精准查。预填 + tool 双路径只会污染上下文。
     const [
       recentMessages,
       shortTermMemories,
-      longTermMemories,
       adminEndpoint,
       memoryEndpoint,
       channelEndpoints,
       sceneProfile,
     ] = await Promise.all([
-      this.fetchRecentMessages(
+      this.withSubSpan(traceCtx, 'fetch_recent_messages', () => this.fetchRecentMessages(
         params.session_id,
         params.channel_id,
         this.config.worker_recent_messages_limit,
         workerSessionType
-      ),
-      this.fetchShortTermMemory({
+      )),
+      this.withSubSpan(traceCtx, 'fetch_short_term_memory', () => this.fetchShortTermMemory({
         friendId: params.friend_id,
         limit: this.config.worker_short_term_memory_limit,
         minVisibility: memoryPermissions.read_min_visibility,
         accessibleScopes: memoryPermissions.read_accessible_scopes,
         sessionType: workerSessionType,
-      }),
-      this.fetchLongTermMemory({
-        friendId: params.friend_id,
-        query: params.message,
-        limit: this.config.worker_long_term_memory_limit,
-        minVisibility: memoryPermissions.read_min_visibility,
-        accessibleScopes: memoryPermissions.read_accessible_scopes,
-        sessionType: workerSessionType,
-        taskId: params.task_id,
-      }),
-      this.resolveModule('admin'),
-      this.resolveModule('memory'),
-      this.resolveModules('channel'),
-      this.resolveSceneProfile(
+      })),
+      this.withSubSpan(traceCtx, 'resolve_admin_module', () => this.resolveModule('admin')),
+      this.withSubSpan(traceCtx, 'resolve_memory_module', () => this.resolveModule('memory')),
+      this.withSubSpan(traceCtx, 'resolve_channel_modules', () => this.resolveModules('channel')),
+      this.withSubSpan(traceCtx, 'resolve_scene_profile', () => this.resolveSceneProfile(
         params.channel_id,
         params.session_id,
         workerSessionType,
         params.friend_id,
-      ),
+      )),
     ])
 
     return {
@@ -197,7 +210,7 @@ export class ContextAssembler {
       },
       recent_messages: recentMessages,
       short_term_memories: shortTermMemories,
-      long_term_memories: longTermMemories,
+      long_term_memories: [],  // worker 用 search_long_term tool 按需查，不再预 fetch
       available_tools: [],
       admin_endpoint: adminEndpoint,
       memory_endpoint: memoryEndpoint,
@@ -338,52 +351,6 @@ export class ContextAssembler {
           limit: limit ?? this.config.worker_short_term_memory_limit,
           min_visibility: minVisibility,
           ...(accessibleScopes !== undefined && { accessible_scopes: accessibleScopes }),
-        },
-        this.moduleId
-      )
-      return result.results
-    } catch {
-      return []
-    }
-  }
-
-  private async fetchLongTermMemory(params: FetchLongTermMemoryParams): Promise<LongTermMemoryRef[]> {
-    const { friendId, query, limit, minVisibility = 'public', accessibleScopes, sessionType = 'private', taskId } = params
-
-    if (!query) return []
-    if (sessionType === 'private' && !friendId) return []
-
-    try {
-      const memoryPort = await this.getMemoryPort()
-
-      // 私聊：按 friend 关联的实体过滤
-      // 群聊：不按 entity_id 过滤，靠 scope 隔离
-      const filters = sessionType === 'group'
-        ? undefined
-        : { entity_id: friendId }
-
-      const result = await this.rpcClient.call<
-        {
-          query: string
-          include: 'brief' | 'full'
-          k?: number
-          filters?: { entity_id?: string }
-          min_visibility?: string
-          accessible_scopes?: string[]
-          task_id?: string
-        },
-        { results: LongTermMemoryRef[] }
-      >(
-        memoryPort,
-        'search_long_term',
-        {
-          query,
-          include: 'brief',
-          k: limit ?? this.config.worker_long_term_memory_limit,
-          ...(filters && { filters }),
-          min_visibility: minVisibility,
-          ...(accessibleScopes !== undefined && { accessible_scopes: accessibleScopes }),
-          ...(taskId ? { task_id: taskId } : {}),
         },
         this.moduleId
       )

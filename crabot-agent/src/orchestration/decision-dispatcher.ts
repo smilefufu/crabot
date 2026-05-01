@@ -17,6 +17,8 @@ import type {
   Friend,
   ExecuteTaskParams,
   ExecuteTaskResult,
+  WorkerAgentContext,
+  ResolvedPermissions,
 } from '../types.js'
 import type { WorkerHandler } from '../agent/worker-handler.js'
 import { ContextAssembler } from './context-assembler.js'
@@ -68,6 +70,11 @@ export class DecisionDispatcher {
       messages: ChannelMessage[]
       senderFriend?: Friend
       memoryPermissions: MemoryPermissions
+      /**
+       * 调用方刚刚解析好的执行权限快照。create_task 时随 worker 上下文一起下发，
+       * 避免 worker 读 UnifiedAgent 上的全局 currentResolvedPerms（并发 task 会互相串改）。
+       */
+      resolvedPerms?: ResolvedPermissions | null
       admin_chat_callback?: {
         source_module_id: string
         request_id: string
@@ -156,6 +163,7 @@ export class DecisionDispatcher {
       messages: ChannelMessage[]
       senderFriend?: Friend
       memoryPermissions: MemoryPermissions
+      resolvedPerms?: ResolvedPermissions | null
       admin_chat_callback?: {
         source_module_id: string
         request_id: string
@@ -255,24 +263,51 @@ export class DecisionDispatcher {
       store.updateTrace?.(traceCtx.traceId, { related_task_id: task.id })
     }
 
-    // 3. 组装 Worker 上下文
+    // 3. 组装 Worker 上下文（包父 span，看清是哪个 fetch 拖慢的）
     const lastMessage = params.messages[params.messages.length - 1]
     const sessionType = params.messages[0]?.session?.type ?? 'private'
-    const workerContext = await this.contextAssembler.assembleWorkerContext({
-      channel_id: params.channel_id,
-      session_id: params.session_id,
-      sender_id: lastMessage.sender.platform_user_id,
-      message: params.messages.map(m => m.content.text ?? '').join('\n'),
-      friend_id: lastMessage.sender.friend_id,
-      session_type: sessionType,
-      task_id: task.id,
-    }, params.memoryPermissions)
 
-    const enrichedContext = {
+    let workerCtxSpanId: string | undefined
+    if (traceCtx?.traceStore && traceCtx.traceId) {
+      workerCtxSpanId = traceCtx.traceStore.startSpan(traceCtx.traceId, {
+        type: 'context_assembly',
+        parent_span_id: traceCtx.parentSpanId,
+        details: { context_type: 'worker', task_id: task.id },
+      }).span_id
+    }
+
+    const subTraceCtx: RpcTraceContext | undefined = workerCtxSpanId && traceCtx
+      ? { traceStore: traceCtx.traceStore, traceId: traceCtx.traceId, parentSpanId: workerCtxSpanId }
+      : undefined
+
+    let workerContext: WorkerAgentContext
+    try {
+      workerContext = await this.contextAssembler.assembleWorkerContext({
+        channel_id: params.channel_id,
+        session_id: params.session_id,
+        sender_id: lastMessage.sender.platform_user_id,
+        message: params.messages.map(m => m.content.text ?? '').join('\n'),
+        friend_id: lastMessage.sender.friend_id,
+        session_type: sessionType,
+      }, params.memoryPermissions, subTraceCtx)
+      if (workerCtxSpanId && traceCtx?.traceStore && traceCtx.traceId) {
+        traceCtx.traceStore.endSpan(traceCtx.traceId, workerCtxSpanId, 'completed')
+      }
+    } catch (err) {
+      if (workerCtxSpanId && traceCtx?.traceStore && traceCtx.traceId) {
+        traceCtx.traceStore.endSpan(traceCtx.traceId, workerCtxSpanId, 'failed', {
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+      throw err
+    }
+
+    const enrichedContext: WorkerAgentContext = {
       ...workerContext,
       trigger_messages: params.messages,
       sender_friend: params.senderFriend,
       front_immediate_reply: replyText,
+      ...(params.resolvedPerms ? { resolved_permissions: params.resolvedPerms } : {}),
     }
 
     // 4. 直接调用本地 Worker 执行（fire-and-forget，不阻塞 Front）

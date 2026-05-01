@@ -7,12 +7,7 @@ from src.config import MemoryConfig
 def _module(tmp_path) -> MemoryModule:
     config = MemoryConfig()
     config.storage.data_dir = str(tmp_path)
-    mod = MemoryModule(config)
-    # Disable embedder on the v2 RPC so tests don't need a live embedding API.
-    # This matches the pattern used in test_rpc_phase3.py (embedder=None).
-    mod._lt_v2_rpc.embedder = None
-    mod._lt_v2_rpc.pipeline.embedder = None
-    return mod
+    return MemoryModule(config)
 
 
 @pytest.mark.asyncio

@@ -84,9 +84,13 @@ export const providerService = {
 
   // OAuth
   async startOAuthLogin(): Promise<{ auth_url: string }> {
-    return api.post('/oauth/chatgpt/login', {
-      redirect_host: window.location.hostname,
-    })
+    return api.post('/oauth/chatgpt/login', {})
+  },
+
+  async submitOAuthManualCallback(
+    redirectUrl: string,
+  ): Promise<{ status: 'success'; email?: string; account_id?: string }> {
+    return api.post('/oauth/chatgpt/manual-callback', { redirect_url: redirectUrl })
   },
 
   async getOAuthStatus(): Promise<{

@@ -15,36 +15,13 @@ from src.long_term_v2.sqlite_index import SqliteIndex
 from src.long_term_v2.recall_pipeline import RecallPipeline
 
 
-import numpy as np
-
-
-class FakeEmbedder:
-    """Deterministic embedder; similar text → similar vec. Mirrors EmbeddingClient API."""
-    def __init__(self):
-        self.dim = 16
-
-    def _embed(self, text: str):
-        v = [0.0] * self.dim
-        for i, ch in enumerate(text):
-            v[i % self.dim] += float(ord(ch) % 13)
-        n = sum(x * x for x in v) ** 0.5 or 1.0
-        return np.asarray([x / n for x in v], dtype=np.float32)
-
-    async def embed_single(self, text: str):
-        return self._embed(text)
-
-    async def embed_batch(self, texts):
-        return [self._embed(t) for t in texts]
-
-
 def _build_rpc(tmp_path):
     store = MemoryStore(str(tmp_path / "lt"))
     index = SqliteIndex(str(tmp_path / "v2.db"))
-    embedder = FakeEmbedder()
     pipeline = RecallPipeline(
-        store=store, index=index, embedder=embedder, llm=None, reranker=None,
+        store=store, index=index, llm=None, reranker=None,
     )
-    rpc = LongTermV2Rpc(store=store, index=index, embedder=embedder)
+    rpc = LongTermV2Rpc(store=store, index=index)
     rpc.pipeline = pipeline
     return rpc, store, index
 

@@ -1,19 +1,27 @@
-"""Two answerer implementations: v1 (legacy) and v2 (recall pipeline)."""
-from typing import Any, List
+"""V2/V3 answerer: builds a fresh memory store per sample, runs recall pipeline.
+
+v3：embedding 子系统已移除，dense path 已删。V1Answerer（dense-only baseline）也一并删除——
+没有 dense path 后它跟 V2Answerer 等价。eval framework 只保留 V2/V3 路径。
+"""
+from typing import List
 
 from src.long_term_v2.store import MemoryStore
 from src.long_term_v2.sqlite_index import SqliteIndex
 from src.long_term_v2.recall_pipeline import RecallPipeline
 from src.long_term_v2.schema import (
-    MemoryEntry, MemoryFrontmatter, SourceRef, ImportanceFactors, EntityRef,
-    new_memory_id, default_maturity_fresh,
+    EntityRef,
+    ImportanceFactors,
+    MemoryEntry,
+    MemoryFrontmatter,
+    SourceRef,
+    default_maturity_fresh,
+    new_memory_id,
 )
 from src.long_term_v2.paths import entry_path
-from src.long_term_v2.embedder import texts_for_entry, embed_text_async
 from eval.sample_loader import EvalSample
 
 
-async def _setup_memories(store, index, embedder, mems: List[dict]) -> None:
+def _setup_memories(store, index, mems: List[dict]) -> None:
     for m in mems:
         type_ = m["type"]
         fm = MemoryFrontmatter(
@@ -23,7 +31,8 @@ async def _setup_memories(store, index, embedder, mems: List[dict]) -> None:
             brief=m["brief"],
             author="system",
             source_ref=SourceRef(type="manual"),
-            source_trust=5, content_confidence=5,
+            source_trust=5,
+            content_confidence=5,
             importance_factors=ImportanceFactors(
                 proximity=0.5, surprisal=0.5,
                 entity_priority=0.5, unambiguity=0.5,
@@ -37,19 +46,13 @@ async def _setup_memories(store, index, embedder, mems: List[dict]) -> None:
         store.write(entry, status="confirmed")
         path = entry_path(store.data_root, "confirmed", type_, fm.id)
         index.upsert(entry, path=path, status="confirmed")
-        for field, text in texts_for_entry(entry).items():
-            if not text:
-                continue
-            vec = await embed_text_async(text, embedder)
-            index.upsert_embedding(fm.id, field, vec)
 
 
 class V2Answerer:
-    """Builds a fresh memory store per sample, indexes setup_memories, runs recall pipeline."""
+    """Per-sample memory store + 4-path recall pipeline."""
 
-    def __init__(self, embedder, llm=None, reranker=None, tmp_root: str = None):
+    def __init__(self, llm=None, reranker=None, tmp_root: str = None):
         from tempfile import mkdtemp
-        self.embedder = embedder
         self.llm = llm
         self.reranker = reranker
         self.tmp_root = tmp_root or mkdtemp(prefix="eval-v2-")
@@ -60,9 +63,9 @@ class V2Answerer:
         store = MemoryStore(os.path.join(slot, "long_term"))
         index = SqliteIndex(os.path.join(slot, "idx.db"))
         try:
-            await _setup_memories(store, index, self.embedder, sample.setup_memories)
+            _setup_memories(store, index, sample.setup_memories)
             pipeline = RecallPipeline(
-                store=store, index=index, embedder=self.embedder,
+                store=store, index=index,
                 llm=self.llm, reranker=self.reranker,
             )
             results = await pipeline.recall(query=query, k=3, filters={})
@@ -71,36 +74,3 @@ class V2Answerer:
         if not results:
             return "我没有这个信息"
         return results[0]["brief"]
-
-
-class V1Answerer:
-    """Stub baseline: dense-only single recall over the same setup_memories.
-
-    Mirrors the pre-Phase-2 path: cosine similarity over `content` field, top-1.
-    """
-
-    def __init__(self, embedder, tmp_root: str = None):
-        from tempfile import mkdtemp
-        self.embedder = embedder
-        self.tmp_root = tmp_root or mkdtemp(prefix="eval-v1-")
-
-    async def answer(self, query: str, sample: EvalSample) -> str:
-        import os
-        slot = os.path.join(self.tmp_root, sample.id)
-        store = MemoryStore(os.path.join(slot, "long_term"))
-        index = SqliteIndex(os.path.join(slot, "idx.db"))
-        try:
-            await _setup_memories(store, index, self.embedder, sample.setup_memories)
-            qv = await embed_text_async(query, self.embedder)
-            scored = index.cosine_topk(qv, k=1, field="content")
-            if not scored:
-                return "我没有这个信息"
-            mid, _ = scored[0]
-            loc = index.locate(mid)
-            if not loc:
-                return "我没有这个信息"
-            status, type_, _ = loc
-            entry = store.read(status, type_, mid)
-            return entry.frontmatter.brief
-        finally:
-            index.close()

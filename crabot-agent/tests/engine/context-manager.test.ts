@@ -202,6 +202,91 @@ describe('ContextManager', () => {
       expect(compacted[0]).toBe(messages[0])
       expect(compacted[1]).toBe(messages[1])
     })
+
+    it('should not split between assistant tool_use and its tool_result', () => {
+      // 默认切点会落在 tool_result 上 → recent 首条会变成孤儿。
+      // findSafeSplitIndex 回退 1 步，把 assistant_with_tool_use 一起带进 recent。
+      const cm = new ContextManager({
+        maxContextTokens: 10000,
+        keepRecentMessages: 2,
+      })
+
+      const messages: EngineMessage[] = [
+        createUserMessage('Question 1'),
+        createAssistantMessage([{ type: 'text', text: 'Answer 1' }], 'end_turn'),
+        createUserMessage('Question 2'),
+        createAssistantMessage([
+          { type: 'tool_use', id: 'tu_X', name: 'search', input: { q: 'foo' } },
+        ], 'tool_use'),
+        createToolResultMessage('tu_X', 'Found something', false),
+      ]
+      // 默认 splitIndex = 5 - 2 = 3 → messages[3] = assistant_with_tool_use（不是 tool_result）。
+      // 但 messages[3] 后面紧跟 messages[4] = tool_result，所以这个 split 本身是安全的：
+      // recent[0]=assistant_with_tool_use, recent[1]=tool_result，配对完整。
+      const compacted = cm.compactMessages(messages)
+
+      // 1 summary + 2 recent，且 recent 完整保留 tool_use → tool_result 配对
+      expect(compacted).toHaveLength(3)
+      expect(compacted[1]).toBe(messages[3]) // assistant_with_tool_use
+      expect(compacted[2]).toBe(messages[4]) // tool_result
+    })
+
+    it('should retreat split when default split lands on a tool_result', () => {
+      // 构造让默认 split 直接落在 tool_result：
+      // [user, assistant_tool_use, tool_result, user, assistant, tool_result]
+      //                                ^splitIndex=2 (= 6 - 4) 落在 tool_result 上
+      // findSafeSplitIndex 应回退 1 步到 1（assistant_tool_use），让两者一起进 recent
+      const cm = new ContextManager({
+        maxContextTokens: 10000,
+        keepRecentMessages: 4,
+      })
+
+      const messages: EngineMessage[] = [
+        createUserMessage('Q1'),
+        createAssistantMessage([
+          { type: 'tool_use', id: 'tu_A', name: 'search', input: {} },
+        ], 'tool_use'),
+        createToolResultMessage('tu_A', 'A', false),
+        createUserMessage('Q2'),
+        createAssistantMessage([
+          { type: 'tool_use', id: 'tu_B', name: 'search', input: {} },
+        ], 'tool_use'),
+        createToolResultMessage('tu_B', 'B', false),
+      ]
+
+      const compacted = cm.compactMessages(messages)
+
+      // 回退后 splitIndex=1，oldMessages=[Q1]，recent=后 5 条，全部带配对
+      expect(compacted).toHaveLength(6) // 1 summary + 5 recent
+      expect(compacted[1]).toBe(messages[1]) // assistant_tool_use A
+      expect(compacted[2]).toBe(messages[2]) // tool_result A
+      expect(compacted[3]).toBe(messages[3])
+      expect(compacted[4]).toBe(messages[4])
+      expect(compacted[5]).toBe(messages[5])
+      // 关键不变量：recent 第一条不是孤儿 tool_result
+      expect('toolResults' in compacted[1]).toBe(false)
+    })
+
+    it('should return as-is when retreating split would leave nothing to summarize', () => {
+      // 全部消息几乎都是 tool_result，回退到 0 → 没东西可压缩
+      const cm = new ContextManager({
+        maxContextTokens: 10000,
+        keepRecentMessages: 1,
+      })
+
+      const messages: EngineMessage[] = [
+        createAssistantMessage([
+          { type: 'tool_use', id: 'tu_X', name: 'x', input: {} },
+        ], 'tool_use'),
+        createToolResultMessage('tu_X', 'r', false),
+      ]
+      // splitIndex 默认 = 1，messages[1] 是 tool_result → 回退到 0 → 不压缩
+      const compacted = cm.compactMessages(messages)
+
+      expect(compacted).toHaveLength(2)
+      expect(compacted[0]).toBe(messages[0])
+      expect(compacted[1]).toBe(messages[1])
+    })
   })
 
   describe('updateFromUsage / getCumulativeUsage', () => {

@@ -79,6 +79,8 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     const currentTools = typeof options.tools === 'function'
       ? (options.tools as () => ReadonlyArray<import('./types').ToolDefinition>)()
       : options.tools
+    const llmStartedAtMs = Date.now()
+    let llmCallMs = 0
     try {
       response = await callNonStreaming(adapter, {
         messages,
@@ -88,6 +90,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         maxTokens: options.maxTokens,
         signal: abortSignal,
       })
+      llmCallMs = Date.now() - llmStartedAtMs
     } catch (error) {
       if (abortSignal?.aborted) {
         return buildResult('aborted', finalText, totalTurns, contextManager)
@@ -163,7 +166,8 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
           messages.push(createUserMessage(content))
         }
 
-        // Fire onTurn with cancelled tools for trace recording
+        // Fire onTurn with cancelled tools for trace recording.
+        // Cancelled tools never executed → omit per-tool timing entirely.
         if (options.onTurn) {
           const turnEvent: EngineTurnEvent = {
             turnNumber: totalTurns,
@@ -176,7 +180,8 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
               isError: false,
             })),
             stopReason,
-            toolExecutionMs: 0,
+            llmCallMs,
+            llmStartedAtMs,
           }
           options.onTurn(turnEvent)
         }
@@ -198,12 +203,10 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         })),
       })
     }
-    const toolStartTime = Date.now()
     const toolResults = await executeToolBatches(batches, currentTools, {
       abortSignal,
       ...(options.timezone ? { timezone: options.timezone } : {}),
     }, options.permissionConfig, hooks)
-    const toolExecutionMs = Date.now() - toolStartTime
     // Live progress: tools finished
     if (options.onLiveProgress) {
       options.onLiveProgress({
@@ -221,15 +224,22 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       const turnEvent: EngineTurnEvent = {
         turnNumber: totalTurns,
         assistantText: processed.text,
-        toolCalls: processed.toolUseBlocks.map((b, i) => ({
-          id: b.id,
-          name: b.name,
-          input: b.input,
-          output: toolResults[i]?.content ?? '',
-          isError: toolResults[i]?.is_error ?? false,
-        })),
+        toolCalls: processed.toolUseBlocks.map((b, i) => {
+          const r = toolResults[i]
+          const tc: EngineTurnEvent['toolCalls'][number] = {
+            id: b.id,
+            name: b.name,
+            input: b.input,
+            output: r?.content ?? '',
+            isError: r?.is_error ?? false,
+            ...(r?.duration_ms !== undefined ? { durationMs: r.duration_ms } : {}),
+            ...(r?.started_at_ms !== undefined ? { startedAtMs: r.started_at_ms } : {}),
+          }
+          return tc
+        }),
         stopReason,
-        toolExecutionMs,
+        llmCallMs,
+        llmStartedAtMs,
       }
       options.onTurn(turnEvent)
     }

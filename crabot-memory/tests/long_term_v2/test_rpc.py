@@ -1,23 +1,15 @@
-"""RPC handler tests with fake embedder."""
+"""RPC handler tests (v3: no embedder)."""
 import pytest
 from src.long_term_v2.store import MemoryStore
 from src.long_term_v2.sqlite_index import SqliteIndex
 from src.long_term_v2.rpc import LongTermV2Rpc
 
 
-class FakeEmbedder:
-    async def embed_single(self, text):
-        # deterministic fake: hash → 8-d vector
-        import hashlib
-        h = hashlib.sha256(text.encode()).digest()
-        return [b / 255.0 for b in h[:8]]
-
-
 @pytest.fixture
 def rpc(tmp_path):
     store = MemoryStore(str(tmp_path / "long_term"))
     idx = SqliteIndex(str(tmp_path / "idx.db"))
-    return LongTermV2Rpc(store=store, index=idx, embedder=FakeEmbedder())
+    return LongTermV2Rpc(store=store, index=idx)
 
 
 @pytest.mark.asyncio

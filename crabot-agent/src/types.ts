@@ -402,6 +402,17 @@ export interface WorkerAgentContext {
     write_visibility: 'private' | 'internal' | 'public'
     write_scopes: string[]
   }
+  /**
+   * 任务执行权限（模板 + Session 覆盖）。
+   *
+   * 三种来源：
+   * 1. 私聊/群聊消息触发：Front 处理消息时由 UnifiedAgent.resolveSessionPermissions 解析后塞入
+   * 2. Schedule 触发：Admin 端按 `creator_friend_id` 解析（系统内置走 master_private）后随 RPC 下发
+   * 3. 都没有：worker 兜底回 FAIL_CLOSED_TOOL_ACCESS（仅 messaging）
+   *
+   * 每个任务都带自己的快照，避免共享字段在并发任务间被串改。
+   */
+  resolved_permissions?: ResolvedPermissions
   /** 当前场景画像，由 Memory 模块直接返回并映射为运行时格式 */
   scene_profile?: RuntimeSceneProfile
   /** Front Agent 已发送给用户的即时回复（避免 Worker 重复确认） */
@@ -732,6 +743,7 @@ export type AgentSpanType =
   | 'sub_agent_call'
   | 'decision'
   | 'context_assembly'
+  | 'context_fetch'
   | 'memory_write'
   | 'rpc_call'
 
@@ -860,10 +872,12 @@ export interface TraceCallback {
     skills?: string[]
   }): string
   onLoopEnd(spanId: string, status: 'completed' | 'failed', iterationCount: number): void
-  onLlmCallStart(iteration: number, inputSummary: string, attempt?: number): string
-  onLlmCallEnd(spanId: string, result: { stopReason?: string; outputSummary?: string; toolCallsCount?: number; fullInput?: string; fullOutput?: string; error?: string }): void
-  onToolCallStart(toolName: string, inputSummary: string): string
-  onToolCallEnd(spanId: string, outputSummary: string, error?: string): void
+  /** `startedAtMs`/`endedAtMs` back-date spans for post-hoc callers (e.g.
+   * worker-handler's onTurn fires after the LLM call already completed). */
+  onLlmCallStart(iteration: number, inputSummary: string, attempt?: number, startedAtMs?: number): string
+  onLlmCallEnd(spanId: string, result: { stopReason?: string; outputSummary?: string; toolCallsCount?: number; fullInput?: string; fullOutput?: string; error?: string }, endedAtMs?: number): void
+  onToolCallStart(toolName: string, inputSummary: string, startedAtMs?: number): string
+  onToolCallEnd(spanId: string, outputSummary: string, error?: string, endedAtMs?: number): void
 }
 
 // ============================================================================

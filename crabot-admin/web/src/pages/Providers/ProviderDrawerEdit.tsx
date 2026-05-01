@@ -25,9 +25,7 @@ export const ProviderDrawerEdit: React.FC<ProviderDrawerEditProps> = ({
   const [showApiKey, setShowApiKey] = useState(false)
 
   const llmModels = provider.models.filter(m => m.type === 'llm').map(m => m.model_id)
-  const embeddingModels = provider.models.filter(m => m.type === 'embedding').map(m => m.model_id)
   const [llmText, setLlmText] = useState(llmModels.join('\n'))
-  const [embeddingText, setEmbeddingText] = useState(embeddingModels.join('\n'))
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -38,18 +36,11 @@ export const ProviderDrawerEdit: React.FC<ProviderDrawerEditProps> = ({
       const parseLine = (text: string) =>
         text.split('\n').map(l => l.trim()).filter(Boolean)
 
-      const models: ModelInfo[] = [
-        ...parseLine(llmText).map(id => ({
-          model_id: id,
-          display_name: id,
-          type: 'llm' as const,
-        })),
-        ...parseLine(embeddingText).map(id => ({
-          model_id: id,
-          display_name: id,
-          type: 'embedding' as const,
-        })),
-      ]
+      const models: ModelInfo[] = parseLine(llmText).map(id => ({
+        model_id: id,
+        display_name: id,
+        type: 'llm' as const,
+      }))
       updateData.models = models
     }
 
@@ -123,29 +114,16 @@ export const ProviderDrawerEdit: React.FC<ProviderDrawerEditProps> = ({
         </div>
 
         {provider.type === 'manual' && (
-          <>
-            <div className="form-group">
-              <label className="form-label">LLM 模型（每行一个）</label>
-              <textarea
-                className="textarea"
-                value={llmText}
-                onChange={e => setLlmText(e.target.value)}
-                rows={4}
-                placeholder="gpt-4o&#10;gpt-4o-mini"
-              />
-            </div>
-
-            <div className="form-group">
-              <label className="form-label">Embedding 模型（每行一个）</label>
-              <textarea
-                className="textarea"
-                value={embeddingText}
-                onChange={e => setEmbeddingText(e.target.value)}
-                rows={3}
-                placeholder="text-embedding-3-small"
-              />
-            </div>
-          </>
+          <div className="form-group">
+            <label className="form-label">LLM 模型（每行一个）</label>
+            <textarea
+              className="textarea"
+              value={llmText}
+              onChange={e => setLlmText(e.target.value)}
+              rows={4}
+              placeholder="gpt-4o&#10;gpt-4o-mini"
+            />
+          </div>
         )}
 
         {provider.type === 'preset' && (

@@ -172,18 +172,27 @@ export function createSubAgentTool(config: SubAgentToolConfig): ToolDefinition {
           related_task_id: tc.relatedTaskId,
         })
 
-        // Build trace callback that writes spans to the sub-agent's own trace
+        // onTurn fires post-hoc (after LLM + tools), so back-date span timestamps
+        // with engine-measured ms to keep the waterfall accurate.
         subTraceCallback = (event: EngineTurnEvent) => {
+          const llmEndedAtMs = event.llmStartedAtMs !== undefined && event.llmCallMs !== undefined
+            ? event.llmStartedAtMs + event.llmCallMs
+            : undefined
+
           const llmSpan = tc.traceStore.startSpan(subTrace!.trace_id, {
             type: 'llm_call',
             details: {
               iteration: event.turnNumber,
               input_summary: `turn ${event.turnNumber}`,
             },
+            ...(event.llmStartedAtMs !== undefined ? { started_at_ms: event.llmStartedAtMs } : {}),
           })
 
-          // Record tool_call spans as children of the llm_call span
           for (const toolCall of event.toolCalls) {
+            const toolEndedAtMs = toolCall.startedAtMs !== undefined && toolCall.durationMs !== undefined
+              ? toolCall.startedAtMs + toolCall.durationMs
+              : undefined
+
             const toolSpan = tc.traceStore.startSpan(subTrace!.trace_id, {
               type: 'tool_call',
               parent_span_id: llmSpan.span_id,
@@ -191,20 +200,31 @@ export function createSubAgentTool(config: SubAgentToolConfig): ToolDefinition {
                 tool_name: toolCall.name,
                 input_summary: JSON.stringify(toolCall.input ?? {}).slice(0, 200),
               },
+              ...(toolCall.startedAtMs !== undefined ? { started_at_ms: toolCall.startedAtMs } : {}),
             })
-            tc.traceStore.endSpan(subTrace!.trace_id, toolSpan.span_id,
+            tc.traceStore.endSpan(
+              subTrace!.trace_id,
+              toolSpan.span_id,
               toolCall.isError ? 'failed' : 'completed',
               {
                 output_summary: String(toolCall.output).slice(0, 500),
                 error: toolCall.isError ? String(toolCall.output) : undefined,
-              })
+              },
+              toolEndedAtMs,
+            )
           }
 
-          tc.traceStore.endSpan(subTrace!.trace_id, llmSpan.span_id, 'completed', {
-            stop_reason: event.stopReason ?? undefined,
-            output_summary: event.assistantText.slice(0, 200) || undefined,
-            tool_calls_count: event.toolCalls.length > 0 ? event.toolCalls.length : undefined,
-          })
+          tc.traceStore.endSpan(
+            subTrace!.trace_id,
+            llmSpan.span_id,
+            'completed',
+            {
+              stop_reason: event.stopReason ?? undefined,
+              output_summary: event.assistantText.slice(0, 200) || undefined,
+              tool_calls_count: event.toolCalls.length > 0 ? event.toolCalls.length : undefined,
+            },
+            llmEndedAtMs,
+          )
         }
       }
 

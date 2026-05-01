@@ -21,7 +21,7 @@ _BASE_PARAMS = {
 def rpc(tmp_path):
     store = MemoryStore(str(tmp_path / "long_term"))
     idx = SqliteIndex(str(tmp_path / "idx.db"))
-    return LongTermV2Rpc(store=store, index=idx, embedder=None)
+    return LongTermV2Rpc(store=store, index=idx)
 
 
 def _write_payload(**overrides):

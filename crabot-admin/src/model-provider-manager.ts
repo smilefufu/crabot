@@ -15,7 +15,6 @@ import type {
   GlobalModelConfig,
   ModuleModelConfig,
   LLMConnectionInfo,
-  EmbeddingConnectionInfo,
   ValidationResult,
   CreateModelProviderParams,
   UpdateModelProviderParams,
@@ -70,8 +69,11 @@ function parseOpenAIModels(raw: unknown[]): ModelInfo[] {
       ''
     if (!modelId) continue
 
-    const isEmbedding = modelId.includes('embedding') || modelId.includes('embed')
-    const type: ModelType = isEmbedding ? 'embedding' : 'llm'
+    // v3 起 admin 只识别 LLM 模型；embedding 类型已被移除（memory 模块不再需要）。
+    // 列出来的 embedding 模型直接跳过，不再注入到 provider.models。
+    if (modelId.includes('embedding') || modelId.includes('embed')) continue
+
+    const type: ModelType = 'llm'
 
     const capabilities = item.capabilities as { vision?: boolean } | undefined
     const modalities = Array.isArray(item.input) ? (item.input as unknown[]) : []
@@ -251,28 +253,14 @@ export class ModelProviderManager {
 
       // 测试第一个模型的连接
       const model = provider.models[0]
-      if (model.type === 'embedding') {
-        const result = await this.detectEmbeddingDimension(
-          provider.endpoint,
-          provider.api_key,
-          model.model_id,
-          provider.format
-        )
-        if (!result.success) {
-          return result
-        }
-        // 更新维度
-        model.dimension = result.dimension
-      } else {
-        const result = await this.testLLMConnection(
-          provider.endpoint,
-          provider.api_key,
-          model.model_id,
-          provider.format
-        )
-        if (!result.success) {
-          return result
-        }
+      const result = await this.testLLMConnection(
+        provider.endpoint,
+        provider.api_key,
+        model.model_id,
+        provider.format
+      )
+      if (!result.success) {
+        return result
       }
 
       // 更新验证状态
@@ -324,19 +312,9 @@ export class ModelProviderManager {
 
     const startTime = Date.now()
     try {
-      let result: ValidationResult
-      if (model.type === 'embedding') {
-        result = await this.detectEmbeddingDimension(
-          provider.endpoint, provider.api_key, model.model_id, provider.format
-        )
-        if (result.success && result.dimension) {
-          model.dimension = result.dimension
-        }
-      } else {
-        result = await this.testLLMConnection(
-          provider.endpoint, provider.api_key, model.model_id, provider.format
-        )
-      }
+      const result: ValidationResult = await this.testLLMConnection(
+        provider.endpoint, provider.api_key, model.model_id, provider.format
+      )
       const latency_ms = Date.now() - startTime
 
       if (result.success && !modelId) {
@@ -391,10 +369,7 @@ export class ModelProviderManager {
     const added = freshModels.filter(m => !oldIds.has(m.model_id)).map(m => m.model_id)
     const removed = provider.models.filter(m => !newIds.has(m.model_id)).map(m => m.model_id)
 
-    const mergedModels = freshModels.map(fresh => {
-      const existing = provider.models.find(m => m.model_id === fresh.model_id)
-      return existing ? { ...fresh, dimension: existing.dimension } : fresh
-    })
+    const mergedModels = freshModels
 
     provider.models = mergedModels
     provider.updated_at = generateTimestamp()
@@ -410,16 +385,10 @@ export class ModelProviderManager {
     if (this.globalConfig.default_llm_provider_id === id) {
       refs.push('全局默认 LLM 模型')
     }
-    if (this.globalConfig.default_embedding_provider_id === id) {
-      refs.push('全局默认 Embedding 模型')
-    }
 
     for (const [moduleId, config] of this.moduleConfigs.entries()) {
       if (config.llm_provider_id === id) {
         refs.push(`模块 "${moduleId}" 的 LLM 配置`)
-      }
-      if (config.embedding_provider_id === id) {
-        refs.push(`模块 "${moduleId}" 的 Embedding 配置`)
       }
     }
 
@@ -428,59 +397,6 @@ export class ModelProviderManager {
     }
 
     return { references: refs }
-  }
-
-  private async detectEmbeddingDimension(
-    endpoint: string,
-    apiKey: string,
-    modelId: string,
-    format: ApiFormat
-  ): Promise<ValidationResult> {
-    try {
-      if (format === 'openai') {
-        const response = await this.httpRequest(`${endpoint}/embeddings`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${apiKey}`,
-          },
-          body: JSON.stringify({
-            model: modelId,
-            input: 'dimension probe',
-          }),
-        })
-
-        const data = JSON.parse(response)
-        if (data.data?.[0]?.embedding) {
-          return { success: true, dimension: data.data[0].embedding.length }
-        }
-        return { success: false, error: 'Invalid response format' }
-      } else if (format === 'gemini') {
-        const response = await this.httpRequest(
-          `${endpoint}/models/${modelId}:embedContent?key=${apiKey}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              content: { parts: [{ text: 'dimension probe' }] },
-            }),
-          }
-        )
-
-        const data = JSON.parse(response)
-        if (data.embedding?.values) {
-          return { success: true, dimension: data.embedding.values.length }
-        }
-        return { success: false, error: 'Invalid response format' }
-      }
-
-      return { success: false, error: `Unsupported format: ${format}` }
-    } catch (error) {
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : String(error),
-      }
-    }
   }
 
   private async testLLMConnection(
@@ -649,16 +565,13 @@ export class ModelProviderManager {
   // Config Resolution
   // ============================================================================
 
-  async resolveModelConfig(params: ResolveModelConfigParams): Promise<LLMConnectionInfo | EmbeddingConnectionInfo> {
+  async resolveModelConfig(params: ResolveModelConfigParams): Promise<LLMConnectionInfo> {
+    // v3: role 仅 'llm'。embedding 路径已移除。
     // 1. 查找模块专属配置
     const moduleConfig = this.moduleConfigs.get(params.module_id)
     if (moduleConfig) {
-      const providerId =
-        params.role === 'llm'
-          ? moduleConfig.llm_provider_id
-          : moduleConfig.embedding_provider_id
-      const modelId =
-        params.role === 'llm' ? moduleConfig.llm_model_id : moduleConfig.embedding_model_id
+      const providerId = moduleConfig.llm_provider_id
+      const modelId = moduleConfig.llm_model_id
 
       if (providerId && modelId) {
         return this.buildConnectionInfo(providerId, modelId)
@@ -666,14 +579,8 @@ export class ModelProviderManager {
     }
 
     // 2. 使用全局默认配置
-    const providerId =
-      params.role === 'llm'
-        ? this.globalConfig.default_llm_provider_id
-        : this.globalConfig.default_embedding_provider_id
-    const modelId =
-      params.role === 'llm'
-        ? this.globalConfig.default_llm_model_id
-        : this.globalConfig.default_embedding_model_id
+    const providerId = this.globalConfig.default_llm_provider_id
+    const modelId = this.globalConfig.default_llm_model_id
 
     if (!providerId || !modelId) {
       throw new Error(`No ${params.role} configuration found for module ${params.module_id}`)
@@ -682,7 +589,7 @@ export class ModelProviderManager {
     return this.buildConnectionInfo(providerId, modelId)
   }
 
-  async buildConnectionInfo(providerId: string, modelId: string): Promise<LLMConnectionInfo | EmbeddingConnectionInfo> {
+  async buildConnectionInfo(providerId: string, modelId: string): Promise<LLMConnectionInfo> {
     const provider = this.providers.get(providerId)
     if (!provider) {
       throw new Error(`Provider not found: ${providerId}`)
@@ -737,10 +644,6 @@ export class ModelProviderManager {
       ...(provider.oauth_credential?.account_id
         ? { account_id: provider.oauth_credential.account_id }
         : {}),
-    }
-
-    if (model.dimension !== undefined) {
-      return { ...base, dimension: model.dimension } as EmbeddingConnectionInfo
     }
 
     return {
@@ -833,11 +736,10 @@ export class ModelProviderManager {
     try {
       const data = await fs.readFile(this.globalConfigFilePath, 'utf-8')
       const raw = JSON.parse(data)
+      // v3 起 default_embedding_* 字段已移除，老 raw 数据里如有这些字段直接忽略。
       this.globalConfig = {
         default_llm_provider_id: raw.default_llm_provider_id,
         default_llm_model_id: raw.default_llm_model_id,
-        default_embedding_provider_id: raw.default_embedding_provider_id,
-        default_embedding_model_id: raw.default_embedding_model_id,
         proxy: raw.proxy,
       }
       console.log('[ModelProviderManager] Loaded global config')

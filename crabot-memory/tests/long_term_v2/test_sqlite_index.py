@@ -77,18 +77,6 @@ def test_iter_brief_for_bm25_returns_all(tmp_path):
     assert ids == ["mem-l-1", "mem-l-2"]
 
 
-def test_upsert_embedding_and_cosine_topk(tmp_path):
-    import numpy as np
-    idx = SqliteIndex(str(tmp_path / "idx.db"))
-    idx.upsert(make_entry("mem-l-1"), path="/tmp/a.md", status="confirmed")
-    idx.upsert(make_entry("mem-l-2"), path="/tmp/b.md", status="confirmed")
-    idx.upsert_embedding("mem-l-1", "content", np.array([1.0, 0.0, 0.0]))
-    idx.upsert_embedding("mem-l-2", "content", np.array([0.0, 1.0, 0.0]))
-    res = idx.cosine_topk(np.array([0.9, 0.1, 0.0]), k=2)
-    assert res[0][0] == "mem-l-1"  # 更接近第一向量
-    assert res[1][0] == "mem-l-2"
-
-
 def _make_typed_entry(mem_id, type_="fact", maturity=None, tags=None,
                       ingestion_time="2026-04-23T10:01:00Z"):
     if maturity is None:

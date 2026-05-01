@@ -6,8 +6,8 @@ import {
   cancelOAuthFlow,
   extractTokenInfo,
   selfCheckCallbackServer,
-  resolveRedirectHost,
-  resolveSelfCheckHost,
+  parseManualCallbackInput,
+  submitManualCallback,
 } from '../../src/oauth/openai-codex-oauth.js'
 
 describe('openai-codex-oauth', () => {
@@ -44,11 +44,10 @@ describe('openai-codex-oauth', () => {
       expect(params.get('originator')).toBe('openclaw')
     })
 
-    it('redirect_uri 使用 localhost 不使用 127.0.0.1，端口固定 1455', () => {
+    it('redirect_uri 永远是 http://localhost:1455/auth/callback（OpenAI 白名单要求）', () => {
       const authUrl = getOAuthAuthUrl()
       const url = new URL(authUrl!)
-      const redirectUri = url.searchParams.get('redirect_uri')
-      expect(redirectUri).toBe('http://localhost:1455/auth/callback')
+      expect(url.searchParams.get('redirect_uri')).toBe('http://localhost:1455/auth/callback')
     })
 
     it('CRABOT_PORT_OFFSET 不影响 redirect_uri 端口', () => {
@@ -58,62 +57,32 @@ describe('openai-codex-oauth', () => {
     })
   })
 
-  describe('resolveRedirectHost', () => {
-    it('显式 host 优先，即使 Host 头存在', () => {
-      expect(resolveRedirectHost('192.168.1.10', 'crabot.local:3000')).toBe('192.168.1.10')
+  describe('parseManualCallbackInput', () => {
+    it('完整 URL 解析 code + state', () => {
+      const result = parseManualCallbackInput(
+        'http://localhost:1455/auth/callback?code=abc&state=xyz',
+      )
+      expect(result).toEqual({ code: 'abc', state: 'xyz' })
     })
 
-    it('显式 host 为空串时从 Host 头解析 hostname', () => {
-      expect(resolveRedirectHost('', '192.168.1.10:3000')).toBe('192.168.1.10')
+    it('code#state 短串', () => {
+      const result = parseManualCallbackInput('abc#xyz')
+      expect(result).toEqual({ code: 'abc', state: 'xyz' })
     })
 
-    it('两者都缺失时回退到 localhost', () => {
-      expect(resolveRedirectHost(undefined, undefined)).toBe('localhost')
+    it('裸 query 串', () => {
+      const result = parseManualCallbackInput('code=abc&state=xyz')
+      expect(result).toEqual({ code: 'abc', state: 'xyz' })
     })
 
-    it('Host 头格式异常时回退到 localhost', () => {
-      expect(resolveRedirectHost(undefined, 'not valid')).toBe('localhost')
-    })
-  })
-
-  describe('resolveSelfCheckHost', () => {
-    it('loopback redirect host 使用 127.0.0.1 自检', () => {
-      expect(resolveSelfCheckHost('localhost')).toBe('127.0.0.1')
-      expect(resolveSelfCheckHost('127.0.0.1')).toBe('127.0.0.1')
+    it('仅 code', () => {
+      const result = parseManualCallbackInput('abc')
+      expect(result).toEqual({ code: 'abc' })
     })
 
-    it('局域网 IP redirect host 使用同一个 IP 自检', () => {
-      expect(resolveSelfCheckHost('192.168.1.10')).toBe('192.168.1.10')
-    })
-
-    it('域名 redirect host 绑定 0.0.0.0 时仍可用 127.0.0.1 自检', () => {
-      expect(resolveSelfCheckHost('crabot.local')).toBe('127.0.0.1')
-    })
-  })
-
-  describe('waitForOAuthCallback redirectHost', () => {
-    it('传入 redirectHost 时 redirect_uri 使用该主机名', async () => {
-      const pending = waitForOAuthCallback({ redirectHost: '192.168.1.10' }).catch(() => undefined)
-      try {
-        const authUrl = getOAuthAuthUrl()!
-        const url = new URL(authUrl)
-        expect(url.searchParams.get('redirect_uri')).toBe('http://192.168.1.10:1455/auth/callback')
-      } finally {
-        cancelOAuthFlow()
-        await pending
-      }
-    })
-
-    it('redirectHost 为空字符串时回退到默认 localhost', async () => {
-      const pending = waitForOAuthCallback({ redirectHost: '   ' }).catch(() => undefined)
-      try {
-        const authUrl = getOAuthAuthUrl()!
-        const url = new URL(authUrl)
-        expect(url.searchParams.get('redirect_uri')).toBe('http://localhost:1455/auth/callback')
-      } finally {
-        cancelOAuthFlow()
-        await pending
-      }
+    it('空串返回空对象', () => {
+      expect(parseManualCallbackInput('')).toEqual({})
+      expect(parseManualCallbackInput('   ')).toEqual({})
     })
   })
 
@@ -327,6 +296,47 @@ describe('openai-codex-oauth', () => {
       expect(parsed.get('code')).toBe('test_code')
       expect(parsed.get('redirect_uri')).toBe('http://localhost:1455/auth/callback')
       expect(parsed.get('code_verifier')).toBeTruthy()
+    })
+
+    it('submitManualCallback 解析回调 URL 并完成 token 换取', async () => {
+      pendingFlow = waitForOAuthCallback().catch(() => undefined)
+      const authUrl = getOAuthAuthUrl()!
+      const state = new URL(authUrl).searchParams.get('state')!
+
+      const result = await submitManualCallback(
+        `http://localhost:1455/auth/callback?code=manual_code&state=${state}`,
+      )
+
+      expect(capturedRequest).toBeTruthy()
+      const body = new URLSearchParams(capturedRequest!.init.body as string)
+      expect(body.get('code')).toBe('manual_code')
+      expect(body.get('redirect_uri')).toBe('http://localhost:1455/auth/callback')
+      expect(result.access_token).toBe('eyJhbGciOiJub25lIn0.eyJpc3MiOiJ0ZXN0In0.')
+
+      await pendingFlow
+      pendingFlow = null
+    })
+
+    it('submitManualCallback 在 state 不匹配时抛错', async () => {
+      pendingFlow = waitForOAuthCallback().catch(() => undefined)
+
+      await expect(
+        submitManualCallback('http://localhost:1455/auth/callback?code=c&state=wrong'),
+      ).rejects.toThrow(/state/i)
+
+      cancelOAuthFlow()
+      await pendingFlow
+      pendingFlow = null
+    })
+
+    it('submitManualCallback 在缺 code 时抛错', async () => {
+      pendingFlow = waitForOAuthCallback().catch(() => undefined)
+
+      await expect(submitManualCallback('   ')).rejects.toThrow(/authorization code/i)
+
+      cancelOAuthFlow()
+      await pendingFlow
+      pendingFlow = null
     })
   })
 

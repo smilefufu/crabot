@@ -465,6 +465,22 @@ describe('AdminModule - Schedule Management', () => {
       expect(response.data.schedule.name).toBe('Test Schedule')
       expect(response.data.schedule.id).toBeDefined()
     })
+
+    it('rejects creator_friend_id pointing to a non-existent friend', async () => {
+      const response = await makeProtocolRequest<{ schedule: Schedule }>(
+        TEST_PROTOCOL_PORT,
+        'create_schedule',
+        {
+          name: 'Schedule with bogus creator',
+          trigger: { type: 'cron', expression: '0 0 * * *' },
+          task_template: { type: 'routine', title: 'Bogus', priority: 'normal' },
+          enabled: true,
+          creator_friend_id: 'friend-that-does-not-exist',
+        } as Record<string, unknown>
+      )
+
+      expect(response.success).toBe(false)
+    })
   })
 
   describe('get_schedule', () => {

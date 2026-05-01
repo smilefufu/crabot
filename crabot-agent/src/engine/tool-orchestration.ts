@@ -11,6 +11,8 @@ export interface ToolResultEntry {
   readonly content: string
   readonly images?: ReadonlyArray<{ readonly media_type: string; readonly data: string }>
   readonly is_error: boolean
+  readonly duration_ms?: number
+  readonly started_at_ms?: number
 }
 
 export interface HookConfig {
@@ -34,18 +36,24 @@ async function executeSingleTool(
   permissionConfig?: ToolPermissionConfig,
   hooks?: HookConfig,
 ): Promise<ToolResultEntry> {
+  const startedAtMs = Date.now()
+  const stampTiming = (entry: ToolResultEntry): ToolResultEntry => ({
+    ...entry,
+    started_at_ms: startedAtMs,
+    duration_ms: Date.now() - startedAtMs,
+  })
   // context.timezone 由调用方（runEngine / front-loop）保证已 resolve；缺省时兜底
   const timezone = context.timezone ?? resolveTimezone(undefined)
   const stamp = (content: string): string => stampToolResult(content, timezone)
 
   const tool = findTool(tools, block.name)
   if (tool === undefined) {
-    return { tool_use_id: block.id, content: stamp(`Tool not found: ${block.name}`), is_error: true }
+    return stampTiming({ tool_use_id: block.id, content: stamp(`Tool not found: ${block.name}`), is_error: true })
   }
 
   const permission = await checkToolPermission(block.name, block.input, tool, permissionConfig)
   if (!permission.allowed) {
-    return { tool_use_id: block.id, content: stamp(`Permission denied: ${permission.reason}`), is_error: true }
+    return stampTiming({ tool_use_id: block.id, content: stamp(`Permission denied: ${permission.reason}`), is_error: true })
   }
 
   // --- PreToolUse hook ---
@@ -63,7 +71,7 @@ async function executeSingleTool(
     if (matching.length > 0) {
       const preResult = await executeHooks(matching, preInput, hooks.context)
       if (preResult.action === 'block') {
-        return { tool_use_id: block.id, content: stamp(preResult.message ?? 'Blocked by hook'), is_error: true }
+        return stampTiming({ tool_use_id: block.id, content: stamp(preResult.message ?? 'Blocked by hook'), is_error: true })
       }
       if (preResult.modifiedInput) {
         effectiveInput = { ...effectiveInput, ...preResult.modifiedInput }
@@ -98,15 +106,15 @@ async function executeSingleTool(
       }
     }
 
-    return {
+    return stampTiming({
       tool_use_id: block.id,
       content: stamp(finalContent),
       ...(result.images !== undefined ? { images: result.images } : {}),
       is_error: result.isError,
-    }
+    })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    return { tool_use_id: block.id, content: stamp(`Tool execution error: ${message}`), is_error: true }
+    return stampTiming({ tool_use_id: block.id, content: stamp(`Tool execution error: ${message}`), is_error: true })
   }
 }
 

@@ -26,11 +26,6 @@ async def memory_module():
     config.storage.data_dir = tmp_dir
 
     module = MemoryModule(config)
-    module.embedding_client.dimension = 8
-    module.embedding_client._dimension_probed = True
-
-    async def _embed_single(text: str):
-        return [0.0] * 8
 
     async def _extract_keywords(text: str):
         return ["kw1", "kw2"] if text else []
@@ -54,40 +49,16 @@ async def memory_module():
     async def _noop_run_compression():
         return None
 
-    async def _delete_short_term_by_ids(ids):
-        if not ids:
-            return
-
-        def _delete():
-            table = module.vector_store.db.open_table("short_term_memory")
-            where = "id IN (" + ", ".join(f"'{entry_id}'" for entry_id in ids) + ")"
-            table.delete(where)
-            module.vector_store.short_term_table = table
-
-        await asyncio.get_running_loop().run_in_executor(None, _delete)
-
-    async def _rotate_short_term(before_time):
-        def _delete():
-            table = module.vector_store.db.open_table("short_term_memory")
-            where = f"event_time < '{before_time}'"
-            table.delete(where)
-            module.vector_store.short_term_table = table
-
-        await asyncio.get_running_loop().run_in_executor(None, _delete)
-
-    module.vector_store.embedding_client.embed_single = _embed_single
     module.llm_client.extract_keywords = _extract_keywords
     module.llm_client.generate_l0_l1 = _generate_l0_l1
     module.llm_client.judge_dedup = _judge_dedup
     module.llm_client.merge_contents = _merge_contents
     module.llm_client.compress_short_term = _compress_short_term
     module._run_compression = _noop_run_compression
-    module.vector_store.delete_short_term_by_ids = _delete_short_term_by_ids
-    module.vector_store.rotate_short_term = _rotate_short_term
 
     yield module
 
-    module.vector_store.close()
+    module.short_term_store.close()
     module.sqlite_store.close()
     module.scene_profile_store.close()
     shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -162,129 +133,8 @@ async def test_write_long_term(memory_module):
 
 
 @pytest.mark.asyncio
-async def test_v2_write_long_term_does_not_require_embedding(tmp_path):
-    """未配置 embedding 时，Memory v2 写入应跳过向量索引。"""
-    config = MemoryConfig()
-    config.storage.data_dir = str(tmp_path)
-    module = MemoryModule(config)
-
-    async def _fail_embed(_text: str):
-        raise AssertionError("embedding should not be called")
-
-    module.embedding_client.embed_single = _fail_embed
-
-    try:
-        result = await module._dispatch("write_long_term", {
-            "type": "fact",
-            "brief": "不依赖 embedding 的事实",
-            "content": "Memory v2 在未配置 embedding 时仍应可写入。",
-            "author": "user",
-            "source_ref": {"type": "manual"},
-            "source_trust": 5,
-            "content_confidence": 5,
-            "importance_factors": {
-                "proximity": 0.5, "surprisal": 0.5,
-                "entity_priority": 0.5, "unambiguity": 0.5,
-            },
-            "event_time": "2026-04-29T00:00:00Z",
-        })
-        assert result["status"] == "ok"
-    finally:
-        module.vector_store.close()
-        module.sqlite_store.close()
-        module.scene_profile_store.close()
-
-
-@pytest.mark.asyncio
-async def test_v2_write_long_term_continues_when_optional_embedding_fails(tmp_path):
-    """即便已配置 embedding 但调用失败，v2 写入仍应保留文本索引。"""
-    config = MemoryConfig()
-    config.storage.data_dir = str(tmp_path)
-    config.embedding.api_key = "test-key"
-    config.embedding.base_url = "http://localhost:11434/v1"
-    config.embedding.model = "test-embedding"
-    module = MemoryModule(config)
-
-    async def _fail_embed(_text: str):
-        raise RuntimeError("embedding backend unavailable")
-
-    module.embedding_client.embed_single = _fail_embed
-
-    try:
-        result = await module._dispatch("write_long_term", {
-            "type": "fact",
-            "brief": "embedding 失败也能写入",
-            "content": "Memory v2 应保留 SQLite/BM25 可召回索引。",
-            "author": "user",
-            "source_ref": {"type": "manual"},
-            "source_trust": 5,
-            "content_confidence": 5,
-            "importance_factors": {
-                "proximity": 0.5, "surprisal": 0.5,
-                "entity_priority": 0.5, "unambiguity": 0.5,
-            },
-            "event_time": "2026-04-29T00:00:00Z",
-        })
-        assert result["status"] == "ok"
-    finally:
-        module.vector_store.close()
-        module.sqlite_store.close()
-        module.scene_profile_store.close()
-
-
-@pytest.mark.asyncio
-async def test_search_short_term_without_embedding_returns_empty(tmp_path):
-    """未配置 embedding 时，短期记忆搜索降级为空结果而不是 500。"""
-    config = MemoryConfig()
-    config.storage.data_dir = str(tmp_path)
-    module = MemoryModule(config)
-
-    try:
-        result = await module._search_short_term(SearchShortTermParams(
-            query="任意查询",
-            limit=10,
-        ).model_dump())
-        assert result == {"results": []}
-    finally:
-        module.vector_store.close()
-        module.sqlite_store.close()
-        module.scene_profile_store.close()
-
-
-@pytest.mark.asyncio
-async def test_write_short_term_without_embedding_is_skipped(tmp_path):
-    """未配置 embedding 时，短期记忆写入应跳过而不是触发远程 embedding。"""
-    config = MemoryConfig()
-    config.storage.data_dir = str(tmp_path)
-    config.llm.api_key = "test-key"
-    config.llm.base_url = "http://localhost:11434/v1"
-    config.llm.model = "test-model"
-    module = MemoryModule(config)
-
-    async def _fail_embed(_text: str):
-        raise AssertionError("embedding should not be called")
-
-    module.embedding_client.embed_single = _fail_embed
-
-    try:
-        result = await module._write_short_term(WriteShortTermParams(
-            content="短期记忆在无 embedding 时不写入",
-            source=MemorySource(type="conversation"),
-        ).model_dump())
-        assert result == {
-            "memory": None,
-            "skipped": True,
-            "reason": "embedding_not_configured",
-        }
-    finally:
-        module.vector_store.close()
-        module.sqlite_store.close()
-        module.scene_profile_store.close()
-
-
-@pytest.mark.asyncio
-async def test_status_configured_does_not_require_embedding(tmp_path):
-    """Memory v2 改版后，整体 configured 不应要求 embedding。"""
+async def test_v3_status_configured_only_requires_llm(tmp_path):
+    """v3：embedding 子系统已移除；configured 只看 LLM。"""
     config = MemoryConfig()
     config.storage.data_dir = str(tmp_path)
     config.llm.api_key = "test-key"
@@ -296,9 +146,8 @@ async def test_status_configured_does_not_require_embedding(tmp_path):
         result = await module._get_status({})
         assert result["configured"] is True
         assert result["llm_configured"] is True
-        assert result["embedding_configured"] is False
     finally:
-        module.vector_store.close()
+        module.short_term_store.close()
         module.sqlite_store.close()
         module.scene_profile_store.close()
 
@@ -425,12 +274,12 @@ async def test_short_term_compression(memory_module):
             event_time=f"2026-01-0{i+1}T00:00:00Z",
         ).model_dump())
 
-    count_before_compress = memory_module.vector_store.get_short_term_count()
+    count_before_compress = memory_module.short_term_store.get_short_term_count()
 
     result = await memory_module.short_term.compress(memory_module.config.compression)
     assert result["compressed_count"] > 0
 
-    count_after = memory_module.vector_store.get_short_term_count()
+    count_after = memory_module.short_term_store.get_short_term_count()
     # 压缩将多条合并为更少条目，总数应减少
     assert count_after < count_before_compress
 

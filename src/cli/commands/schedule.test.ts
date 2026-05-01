@@ -205,6 +205,55 @@ describe('buildCreateScheduleBody', () => {
     })
   })
 
+  describe('creator_friend_id 通过 env 注入', () => {
+    it('CRABOT_TASK_FRIEND_ID 非空时塞进 body', () => {
+      const original = process.env.CRABOT_TASK_FRIEND_ID
+      process.env.CRABOT_TASK_FRIEND_ID = 'friend-master-123'
+      try {
+        const body = buildCreateScheduleBody({
+          title: 't',
+          priority: 'normal',
+          cron: '0 0 * * *',
+        })
+        expect(body['creator_friend_id']).toBe('friend-master-123')
+      } finally {
+        if (original === undefined) delete process.env.CRABOT_TASK_FRIEND_ID
+        else process.env.CRABOT_TASK_FRIEND_ID = original
+      }
+    })
+
+    it('CRABOT_TASK_FRIEND_ID 未设置时不塞 creator_friend_id', () => {
+      const original = process.env.CRABOT_TASK_FRIEND_ID
+      delete process.env.CRABOT_TASK_FRIEND_ID
+      try {
+        const body = buildCreateScheduleBody({
+          title: 't',
+          priority: 'normal',
+          cron: '0 0 * * *',
+        })
+        expect(body['creator_friend_id']).toBeUndefined()
+      } finally {
+        if (original !== undefined) process.env.CRABOT_TASK_FRIEND_ID = original
+      }
+    })
+
+    it('CRABOT_TASK_FRIEND_ID 是空白字符串时也不塞', () => {
+      const original = process.env.CRABOT_TASK_FRIEND_ID
+      process.env.CRABOT_TASK_FRIEND_ID = '   '
+      try {
+        const body = buildCreateScheduleBody({
+          title: 't',
+          priority: 'normal',
+          cron: '0 0 * * *',
+        })
+        expect(body['creator_friend_id']).toBeUndefined()
+      } finally {
+        if (original === undefined) delete process.env.CRABOT_TASK_FRIEND_ID
+        else process.env.CRABOT_TASK_FRIEND_ID = original
+      }
+    })
+  })
+
   describe('与现存 schedule 数据 shape 对齐回归测试', () => {
     // 验证 build 出的 body 喂给 admin handleCreateSchedule 后落盘的形态
     // 跟 data/admin/schedules.json 里的现存条目（Front 工具创建的那 5 条）字段同 shape

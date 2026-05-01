@@ -88,7 +88,7 @@ async def quick_test():
     print(f"   ✓ Passed\n")
 
     # 清理
-    module.vector_store.close()
+    module.short_term_store.close()
     module.sqlite_store.close()
 
     print("=== All tests passed! ===")

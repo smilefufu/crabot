@@ -1305,6 +1305,545 @@ code, pre, .mono {
   color: #d9a84a;
 }
 
+/* ============================================================================
+   Provider 引导工作流 — 状态机驱动的页面骨架
+   核心理念：用户视野里只出现"当前该做的那一步"
+   ============================================================================ */
+
+/* —— 页头 —— */
+.provider-page-header {
+  margin-bottom: 1.5rem;
+  padding-bottom: 1.25rem;
+  border-bottom: 1px dashed var(--border);
+}
+
+.provider-page-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.875rem;
+  margin-bottom: 0.4rem;
+}
+
+.provider-page-title {
+  font-size: 1.625rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.provider-page-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  letter-spacing: 0.08em;
+  text-transform: lowercase;
+  padding: 0.15rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg-secondary);
+}
+
+.provider-page-lede {
+  margin: 0;
+  font-size: 0.875rem;
+  line-height: 1.65;
+  color: var(--text-secondary);
+  max-width: 56ch;
+}
+
+/* —— 步骤导航：[01] → [02] → [03] —— */
+.provider-stepper {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0;
+  padding: 0;
+  margin: 0 0 1.75rem 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: linear-gradient(180deg, var(--bg-secondary) 0%, var(--bg-primary) 100%);
+}
+
+.provider-step {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  padding: 1rem 1.25rem;
+  border-right: 1px solid var(--border);
+  transition: background 0.2s ease;
+}
+
+.provider-step:last-child { border-right: none; }
+
+/* 当前步骤：醒目的左侧色条 + 微发光 */
+.provider-step-active {
+  background: var(--primary-subtle);
+  box-shadow: inset 4px 0 0 0 var(--primary);
+}
+
+.provider-step-active .provider-step-num {
+  color: var(--primary);
+  text-shadow: 0 0 18px var(--primary-glow);
+  animation: provider-step-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes provider-step-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.provider-step-done .provider-step-num {
+  color: var(--primary-dim);
+}
+
+.provider-step-done .provider-step-label {
+  color: var(--text-secondary);
+}
+
+.provider-step-done .provider-step-label::after {
+  content: ' ✓';
+  color: var(--primary-dim);
+  font-size: 0.85em;
+}
+
+.provider-step-pending {
+  opacity: 0.55;
+}
+
+.provider-step-num {
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  padding-top: 0.05rem;
+}
+
+.provider-step-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.provider-step-label {
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.005em;
+}
+
+.provider-step-sub {
+  font-size: 0.74rem;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.provider-step-rail {
+  display: none;
+}
+
+/* —— 阶段 A: NoProviderHero 大幅引导卡 —— */
+.provider-hero {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 2.25rem 2rem 2rem;
+  background:
+    radial-gradient(ellipse 80% 50% at 80% 0%, var(--primary-subtle) 0%, transparent 70%),
+    var(--bg-secondary);
+  overflow: hidden;
+}
+
+.provider-hero::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(var(--border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border) 1px, transparent 1px);
+  background-size: 32px 32px;
+  background-position: -1px -1px;
+  opacity: 0.18;
+  pointer-events: none;
+  mask-image: radial-gradient(ellipse 60% 50% at 30% 100%, black 0%, transparent 70%);
+  -webkit-mask-image: radial-gradient(ellipse 60% 50% at 30% 100%, black 0%, transparent 70%);
+}
+
+.provider-hero > * {
+  position: relative;
+}
+
+.provider-hero-mark {
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--primary);
+  margin-bottom: 0.75rem;
+}
+
+.provider-hero-title {
+  font-size: 1.625rem;
+  font-weight: 700;
+  letter-spacing: -0.018em;
+  margin: 0 0 0.6rem 0;
+  color: var(--text-primary);
+}
+
+.provider-hero-lede {
+  font-size: 0.95rem;
+  line-height: 1.65;
+  color: var(--text-secondary);
+  margin: 0 0 1.4rem 0;
+  max-width: 60ch;
+}
+
+.provider-hero-bullets {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 1.6rem 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  max-width: 64ch;
+}
+
+.provider-hero-bullets li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: baseline;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  padding: 0.6rem 0.85rem;
+  border-left: 2px solid var(--border-highlight);
+  background: var(--bg-primary);
+  transition: border-color 0.18s ease;
+}
+
+.provider-hero-bullets li:hover {
+  border-left-color: var(--primary);
+}
+
+.provider-hero-bullet-h {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.provider-hero-cta-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.provider-hero-cta-row .btn {
+  padding: 0.7rem 1.6rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.005em;
+}
+
+.provider-hero-note {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+
+/* —— 阶段 B / C: 召唤条 + 摘要条 —— */
+.provider-callout {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 1.5rem;
+  background: var(--bg-secondary);
+  transition: border-color 0.18s ease;
+}
+
+.provider-callout-attention {
+  border-color: var(--primary-dim);
+  box-shadow: 0 0 0 3px var(--primary-subtle);
+}
+
+.provider-callout-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  width: 100%;
+  padding: 0.95rem 1.1rem;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  transition: background 0.15s ease;
+}
+
+.provider-callout-summary:hover {
+  background: var(--primary-subtle);
+}
+
+.provider-callout-mark {
+  font-family: var(--font-mono);
+  font-size: 0.92rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--primary);
+  flex-shrink: 0;
+}
+
+.provider-callout-attention .provider-callout-mark {
+  animation: provider-step-pulse 2.4s ease-in-out infinite;
+}
+
+.provider-callout-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.provider-callout-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.55rem;
+}
+
+.provider-callout-value {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--primary-light);
+  padding: 0.1rem 0.5rem;
+  border: 1px solid var(--primary-dim);
+  border-radius: 3px;
+  background: var(--primary-subtle);
+}
+
+.provider-callout-sub {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.provider-callout-chevron {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  padding: 0.2rem 0.55rem;
+  border: 1px solid var(--border-highlight);
+  border-radius: 3px;
+  flex-shrink: 0;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.provider-callout-summary:hover .provider-callout-chevron {
+  color: var(--primary-light);
+  border-color: var(--primary-dim);
+}
+
+.provider-callout-body {
+  padding: 1rem 1.1rem 1.15rem;
+  border-top: 1px dashed var(--border);
+  background: var(--bg-primary);
+  border-radius: 0 0 6px 6px;
+}
+
+/* —— 全局模型表单（嵌入态） —— */
+.global-model-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.global-model-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.85rem;
+}
+
+.global-model-row .form-group {
+  margin-bottom: 0;
+}
+
+.global-model-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  margin-top: 0.4rem;
+}
+
+.global-model-hint {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+/* —— providers 列表区 —— */
+.provider-list-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  margin-bottom: 0.85rem;
+  gap: 1rem;
+}
+
+.provider-section-title {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0;
+  color: var(--text-primary);
+  display: inline;
+}
+
+.provider-section-count {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin-left: 0.55rem;
+}
+
+.provider-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.provider-empty-search {
+  text-align: center;
+  color: var(--text-secondary);
+  padding: 2rem 0;
+  font-size: 0.88rem;
+}
+
+.provider-card-type {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  padding: 0.05rem 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  letter-spacing: 0.02em;
+}
+
+.provider-card-models {
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+
+.provider-card-default-tag {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--primary);
+  padding: 0.1rem 0.45rem;
+  border: 1px solid var(--primary-dim);
+  background: var(--primary-subtle);
+  border-radius: 3px;
+}
+
+/* —— Drawer 内 Create 抽屉的引导态 —— */
+.provider-create-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 1.1rem;
+  padding-bottom: 0.95rem;
+  border-bottom: 1px dashed var(--border);
+}
+
+.provider-create-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--primary);
+  letter-spacing: 0.05em;
+  display: block;
+  margin-bottom: 0.25rem;
+  text-transform: lowercase;
+}
+
+.provider-create-title {
+  font-size: 1.2rem;
+  font-weight: 700;
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+.provider-create-close {
+  font-size: 1.4rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0 0.3rem;
+  line-height: 1;
+  transition: color 0.15s ease;
+}
+
+.provider-create-close:hover {
+  color: var(--primary-light);
+}
+
+.provider-create-modes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.55rem;
+  margin-bottom: 1.25rem;
+}
+
+.provider-create-mode-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+  padding: 0.7rem 0.85rem;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  transition: all 0.15s ease;
+}
+
+.provider-create-mode-btn:hover {
+  border-color: var(--border-highlight);
+  background: var(--bg-primary);
+}
+
+.provider-create-mode-btn.active {
+  border-color: var(--primary);
+  background: var(--primary-subtle);
+}
+
+.provider-create-mode-title {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.provider-create-mode-btn.active .provider-create-mode-title {
+  color: var(--primary-light);
+}
+
+.provider-create-mode-sub {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
 /* 抽屉内模型表格 */
 
 .model-table {

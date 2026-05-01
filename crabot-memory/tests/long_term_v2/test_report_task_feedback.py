@@ -20,7 +20,7 @@ def _seed_lesson(idx, mem_id):
 async def test_report_task_feedback_pass_increments_pass_count(tmp_path):
     store = MemoryStore(data_root=str(tmp_path))
     idx = SqliteIndex(str(tmp_path / "memories.db"))
-    rpc = LongTermV2Rpc(store=store, index=idx, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=idx)
     _seed_lesson(idx, "mem_l_1")
     idx.record_lesson_task_usage("task_a", "mem_l_1", now_iso="2026-04-25T10:00:00Z")
 
@@ -44,7 +44,7 @@ async def test_report_task_feedback_pass_increments_pass_count(tmp_path):
 async def test_report_task_feedback_strong_pass_weighted_2(tmp_path):
     store = MemoryStore(data_root=str(tmp_path))
     idx = SqliteIndex(str(tmp_path / "memories.db"))
-    rpc = LongTermV2Rpc(store=store, index=idx, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=idx)
     _seed_lesson(idx, "mem_l_1")
     idx.record_lesson_task_usage("task_a", "mem_l_1", now_iso="2026-04-25T10:00:00Z")
 
@@ -64,7 +64,7 @@ async def test_report_task_feedback_strong_pass_weighted_2(tmp_path):
 async def test_report_task_feedback_strong_fail_weighted_2(tmp_path):
     store = MemoryStore(data_root=str(tmp_path))
     idx = SqliteIndex(str(tmp_path / "memories.db"))
-    rpc = LongTermV2Rpc(store=store, index=idx, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=idx)
     _seed_lesson(idx, "mem_l_1")
     idx.record_lesson_task_usage("task_a", "mem_l_1", now_iso="2026-04-25T10:00:00Z")
 
@@ -84,7 +84,7 @@ async def test_report_task_feedback_strong_fail_weighted_2(tmp_path):
 async def test_report_task_feedback_no_lessons_returns_zero(tmp_path):
     store = MemoryStore(data_root=str(tmp_path))
     idx = SqliteIndex(str(tmp_path / "memories.db"))
-    rpc = LongTermV2Rpc(store=store, index=idx, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=idx)
     result = await rpc.report_task_feedback({
         "task_id": "nonexistent_task",
         "attitude": "pass",
@@ -97,7 +97,7 @@ async def test_report_task_feedback_no_lessons_returns_zero(tmp_path):
 async def test_report_task_feedback_multiple_lessons(tmp_path):
     store = MemoryStore(data_root=str(tmp_path))
     idx = SqliteIndex(str(tmp_path / "memories.db"))
-    rpc = LongTermV2Rpc(store=store, index=idx, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=idx)
     _seed_lesson(idx, "mem_l_1")
     _seed_lesson(idx, "mem_l_2")
     idx.record_lesson_task_usage("task_a", "mem_l_1", now_iso="2026-04-25T10:00:00Z")
@@ -121,7 +121,7 @@ async def test_report_task_feedback_multiple_lessons(tmp_path):
 async def test_report_task_feedback_rejects_invalid_attitude(tmp_path):
     store = MemoryStore(data_root=str(tmp_path))
     idx = SqliteIndex(str(tmp_path / "memories.db"))
-    rpc = LongTermV2Rpc(store=store, index=idx, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=idx)
     with pytest.raises(ValueError, match="invalid attitude"):
         await rpc.report_task_feedback({
             "task_id": "task_a",

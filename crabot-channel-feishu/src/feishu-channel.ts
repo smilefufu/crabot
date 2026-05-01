@@ -602,8 +602,9 @@ export class FeishuChannel extends ModuleBase {
     const session = this.sessionManager.findById(params.session_id)
     if (!session) throwError('NOT_FOUND', 'Session not found')
 
-    const page = params.pagination?.page ?? 1
     const pageSize = params.pagination?.page_size ?? params.limit ?? 20
+    // limit 语义 = 取最新 N 条；走 messageStore 的 slice(-limit) 分支需要 page=undefined
+    const page = params.limit ? undefined : (params.pagination?.page ?? 1)
 
     const local = await this.messageStore.query({
       sessionId: session.id,
@@ -614,7 +615,7 @@ export class FeishuChannel extends ModuleBase {
     })
 
     if (local.items.length > 0) {
-      return paginated(local.items.map(toHistoryMessage), page, pageSize, local.total)
+      return paginated(local.items.map(toHistoryMessage), page ?? 1, pageSize, local.total)
     }
 
     // fallback：飞书 im.v1.message.list（仅群聊支持 container_id_type='chat'）
@@ -633,7 +634,7 @@ export class FeishuChannel extends ModuleBase {
         console.warn('[FeishuChannel] history fallback failed:', err)
       }
     }
-    return paginated<HistoryMessage>([], page, pageSize, 0)
+    return paginated<HistoryMessage>([], page ?? 1, pageSize, 0)
   }
 
   private async handleGetMessage(params: GetMessageParams): Promise<HistoryMessage> {

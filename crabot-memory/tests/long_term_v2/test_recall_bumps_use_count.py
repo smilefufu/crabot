@@ -16,7 +16,7 @@ from src.long_term_v2.paths import entry_path
 def _make_rpc(tmp_path):
     store = MemoryStore(str(tmp_path / "lt"))
     index = SqliteIndex(str(tmp_path / "v2.db"))
-    return LongTermV2Rpc(store=store, index=index, embedder=None), store, index
+    return LongTermV2Rpc(store=store, index=index), store, index
 
 
 _TYPE_DEFAULT_MATURITY = {

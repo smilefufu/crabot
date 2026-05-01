@@ -54,7 +54,7 @@ def _seed_no_observation(store, index, mid="mem-f-1"):
 async def test_mark_observation_pass_updates_both_index_and_frontmatter(tmp_path):
     store = MemoryStore(str(tmp_path / "lt"))
     index = SqliteIndex(str(tmp_path / "v2.db"))
-    rpc = LongTermV2Rpc(store=store, index=index, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=index)
     mid = _seed_pending_rule(store, index)
     res = await rpc.mark_observation_pass({"id": mid})
     assert res["status"] == "ok"
@@ -69,7 +69,7 @@ async def test_mark_observation_pass_updates_both_index_and_frontmatter(tmp_path
 async def test_extend_observation_window_default_7_days(tmp_path):
     store = MemoryStore(str(tmp_path / "lt"))
     index = SqliteIndex(str(tmp_path / "v2.db"))
-    rpc = LongTermV2Rpc(store=store, index=index, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=index)
     mid = _seed_pending_rule(store, index)
     res = await rpc.extend_observation_window({"id": mid})
     assert res["new_window_days"] == 14
@@ -81,7 +81,7 @@ async def test_extend_observation_window_default_7_days(tmp_path):
 async def test_extend_observation_window_custom_days(tmp_path):
     store = MemoryStore(str(tmp_path / "lt"))
     index = SqliteIndex(str(tmp_path / "v2.db"))
-    rpc = LongTermV2Rpc(store=store, index=index, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=index)
     mid = _seed_pending_rule(store, index)
     res = await rpc.extend_observation_window({"id": mid, "days": 3})
     assert res["new_window_days"] == 10
@@ -91,7 +91,7 @@ async def test_extend_observation_window_custom_days(tmp_path):
 async def test_extend_observation_window_rejects_nonpositive_days(tmp_path):
     store = MemoryStore(str(tmp_path / "lt"))
     index = SqliteIndex(str(tmp_path / "v2.db"))
-    rpc = LongTermV2Rpc(store=store, index=index, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=index)
     mid = _seed_pending_rule(store, index)
     with pytest.raises(ValueError, match="positive"):
         await rpc.extend_observation_window({"id": mid, "days": 0})
@@ -103,7 +103,7 @@ async def test_extend_observation_window_rejects_nonpositive_days(tmp_path):
 async def test_mark_observation_pass_missing_entry(tmp_path):
     store = MemoryStore(str(tmp_path / "lt"))
     index = SqliteIndex(str(tmp_path / "v2.db"))
-    rpc = LongTermV2Rpc(store=store, index=index, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=index)
     with pytest.raises(ValueError, match="not found"):
         await rpc.mark_observation_pass({"id": "mem-missing-1"})
 
@@ -112,7 +112,7 @@ async def test_mark_observation_pass_missing_entry(tmp_path):
 async def test_mark_observation_pass_no_observation(tmp_path):
     store = MemoryStore(str(tmp_path / "lt"))
     index = SqliteIndex(str(tmp_path / "v2.db"))
-    rpc = LongTermV2Rpc(store=store, index=index, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=index)
     mid = _seed_no_observation(store, index)
     with pytest.raises(ValueError, match="no observation"):
         await rpc.mark_observation_pass({"id": mid})
@@ -122,7 +122,7 @@ async def test_mark_observation_pass_no_observation(tmp_path):
 async def test_extend_observation_window_missing_entry_and_no_observation(tmp_path):
     store = MemoryStore(str(tmp_path / "lt"))
     index = SqliteIndex(str(tmp_path / "v2.db"))
-    rpc = LongTermV2Rpc(store=store, index=index, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=index)
     with pytest.raises(ValueError, match="not found"):
         await rpc.extend_observation_window({"id": "mem-missing-2", "days": 3})
     mid = _seed_no_observation(store, index)

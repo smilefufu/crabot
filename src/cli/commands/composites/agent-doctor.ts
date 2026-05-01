@@ -40,13 +40,16 @@ async function checkAgent(
   agentName: string,
   cache: ProviderTestCache,
 ): Promise<DoctorReport> {
-  const config = await client.get<{ models?: Record<string, { provider_id?: string; model_id?: string } | null> }>(
+  // admin GET /agent-instances/{id}/config 返回 {config:{...}} 包一层，必须 unwrap；
+  // 字段名以 admin types.ts AgentInstanceConfig 为准 = `model_config`（不是 `models`）。
+  const config = await client.getUnwrap<{ model_config?: Record<string, { provider_id?: string; model_id?: string } | null> }>(
     `/api/agent-instances/${agentId}/config`,
+    'config',
   )
-  const models = config.models ?? {}
+  const slotMap = config.model_config ?? {}
 
   const slots = await Promise.all(
-    Object.entries(models).map(async ([slotName, slotData]) => {
+    Object.entries(slotMap).map(async ([slotName, slotData]) => {
       const providerId = slotData?.provider_id
       const modelId = slotData?.model_id
       const providerTest = providerId ? await testProvider(client, providerId, cache) : undefined

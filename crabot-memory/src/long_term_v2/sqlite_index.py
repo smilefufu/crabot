@@ -1,7 +1,6 @@
 """SQLite indexes for long_term v2."""
 import sqlite3
 import json
-import numpy as np
 from datetime import datetime, timedelta, timezone
 from typing import Iterator, List, Tuple
 from src.long_term_v2.schema import MemoryEntry
@@ -30,14 +29,6 @@ CREATE TABLE IF NOT EXISTS tag_index (
     tag TEXT NOT NULL,
     memory_id TEXT NOT NULL,
     PRIMARY KEY (tag, memory_id)
-);
-
-CREATE TABLE IF NOT EXISTS embeddings (
-    memory_id TEXT NOT NULL,
-    field TEXT NOT NULL,
-    vec BLOB NOT NULL,
-    dim INTEGER NOT NULL,
-    PRIMARY KEY (memory_id, field)
 );
 
 CREATE TABLE IF NOT EXISTS lesson_task_usage (
@@ -132,7 +123,6 @@ class SqliteIndex:
         cur.execute("DELETE FROM memories WHERE id = ?", (mem_id,))
         cur.execute("DELETE FROM entity_index WHERE memory_id = ?", (mem_id,))
         cur.execute("DELETE FROM tag_index WHERE memory_id = ?", (mem_id,))
-        cur.execute("DELETE FROM embeddings WHERE memory_id = ?", (mem_id,))
         self.conn.commit()
 
     def find_by_entity(self, entity_id: str) -> List[str]:
@@ -181,15 +171,6 @@ class SqliteIndex:
         for row in cur.fetchall():
             yield row
 
-    def upsert_embedding(self, mem_id: str, field: str, vec) -> None:
-        arr = np.asarray(vec, dtype=np.float32)
-        cur = self.conn.cursor()
-        cur.execute(
-            "INSERT OR REPLACE INTO embeddings (memory_id, field, vec, dim) VALUES (?, ?, ?, ?)",
-            (mem_id, field, arr.tobytes(), int(arr.shape[0])),
-        )
-        self.conn.commit()
-
     def locate(self, mem_id: str):
         cur = self.conn.cursor()
         cur.execute("SELECT status, type, path FROM memories WHERE id = ?", (mem_id,))
@@ -213,22 +194,6 @@ class SqliteIndex:
             (start, end, int(limit)),
         )
         return [row[0] for row in cur.fetchall()]
-
-    def cosine_topk(self, query_vec, k: int = 50, field: str = "content") -> list:
-        q = np.asarray(query_vec, dtype=np.float32)
-        qn = q / (np.linalg.norm(q) + 1e-9)
-        cur = self.conn.cursor()
-        cur.execute(
-            "SELECT memory_id, vec, dim FROM embeddings WHERE field = ?",
-            (field,),
-        )
-        scored = []
-        for mem_id, blob, dim in cur.fetchall():
-            v = np.frombuffer(blob, dtype=np.float32, count=dim)
-            vn = v / (np.linalg.norm(v) + 1e-9)
-            scored.append((mem_id, float(np.dot(qn, vn))))
-        scored.sort(key=lambda x: x[1], reverse=True)
-        return scored[:k]
 
     # ── Phase 3 helpers ──────────────────────────────────────────────────────
 

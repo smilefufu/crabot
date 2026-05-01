@@ -75,7 +75,6 @@ import {
   type GlobalModelConfig,
   type ModelConnectionInfo,
   type LLMConnectionInfo,
-  type EmbeddingConnectionInfo,
   type AgentImplementation,
   type AgentInstance,
   type AgentInstanceConfig,
@@ -979,6 +978,11 @@ export class AdminModule extends ModuleBase {
 
       if (pathname === '/api/oauth/chatgpt/status' && req.method === 'GET') {
         await this.handleOAuthChatGPTStatus(req, res)
+        return
+      }
+
+      if (pathname === '/api/oauth/chatgpt/manual-callback' && req.method === 'POST') {
+        await this.handleOAuthChatGPTManualCallback(req, res)
         return
       }
 
@@ -2515,7 +2519,7 @@ export class AdminModule extends ModuleBase {
     }
 
     const channelIdentity = this.getChannelIdentityFromPendingMessage(message)
-    const existingMaster = Array.from(this.friends.values()).find((friend) => friend.permission === 'master')
+    const existingMaster = this.findMasterFriend()
 
     const result = existingMaster
       ? await this.handleLinkChannelIdentity({
@@ -2665,13 +2669,8 @@ export class AdminModule extends ModuleBase {
 
   private handleCreateFriend(params: CreateFriendParams): { friend: Friend } {
     // 检查是否已存在 master
-    if (params.permission === 'master') {
-      const existingMaster = Array.from(this.friends.values()).find(
-        (f) => f.permission === 'master'
-      )
-      if (existingMaster) {
-        throw new Error('A master friend already exists')
-      }
+    if (params.permission === 'master' && this.findMasterFriend()) {
+      throw new Error('A master friend already exists')
     }
 
     // 检查 channel identity 是否已被使用
@@ -2907,7 +2906,7 @@ export class AdminModule extends ModuleBase {
     if (isPair) {
       // /pair 意图：如果已有 master，将新 channel identity 追加到已有 master 上
       // 这支持同一个人通过多个 channel（如企业版+个人版飞书）接入同一个 master 账号
-      const existingMaster = Array.from(this.friends.values()).find(f => f.permission === 'master')
+      const existingMaster = this.findMasterFriend()
       if (existingMaster) {
         result = await this.handleLinkChannelIdentity({
           friend_id: existingMaster.id,
@@ -3806,6 +3805,11 @@ export class AdminModule extends ModuleBase {
       }
     }
 
+    // 校验 creator_friend_id：传了就必须能解析到 friend；不传按系统级处理（触发时最高权限）。
+    if (params.creator_friend_id !== undefined && !this.friends.has(params.creator_friend_id)) {
+      throw new Error(`creator_friend_id ${params.creator_friend_id} not found`)
+    }
+
     const now = generateTimestamp()
     const schedule: Schedule = {
       id: generateId(),
@@ -3818,6 +3822,7 @@ export class AdminModule extends ModuleBase {
       next_trigger_at: this.calculateNextTriggerTime(params.trigger),
       execution_count: 0,
       last_task_id: undefined,
+      creator_friend_id: params.creator_friend_id,
       created_at: now,
       updated_at: now,
     }
@@ -3991,6 +3996,12 @@ export class AdminModule extends ModuleBase {
     const title = replaceVars(schedule.task_template.title)
     const description = replaceVars(schedule.task_template.description ?? '')
 
+    // 解析触发后任务的执行权限：
+    //   - 系统内置 / 没填 creator：按 master_private 系统模板（最高权限）跑；
+    //   - 用户创建：按 creator 当前 friend 的权限模板（含 session 覆盖）；
+    //   - creator 已删除：回退最高权限并 warn（避免历史 schedule 因 friend 缺失静默失败）。
+    const resolvedPermissions = this.resolveScheduleExecutionPermissions(schedule)
+
     // 找到 Agent 模块并 RPC 调用
     let result: { task_id: string; assigned_worker: string }
     try {
@@ -4001,7 +4012,13 @@ export class AdminModule extends ModuleBase {
       }
 
       result = await this.rpcClient.call<
-        { schedule_id: string; task_type?: string; title: string; description: string },
+        {
+          schedule_id: string
+          task_type?: string
+          title: string
+          description: string
+          resolved_permissions?: ResolvedPermissions
+        },
         { task_id: string; assigned_worker: string }
       >(
         port,
@@ -4011,6 +4028,7 @@ export class AdminModule extends ModuleBase {
           task_type: schedule.task_template.type,
           title,
           description,
+          ...(resolvedPermissions ? { resolved_permissions: resolvedPermissions } : {}),
         },
         this.config.moduleId
       )
@@ -4246,13 +4264,28 @@ export class AdminModule extends ModuleBase {
   ): Promise<void> {
     try {
       const params = await this.readJsonBody<CreateScheduleParams>(req)
-      const result = await this.handleCreateSchedule(params)
+      // Admin Web / 人类直接调 CLI 时 creator_friend_id 通常为空 → 自动填 master，
+      // 让触发时能解析到 master_private 的最高权限。Worker 子进程通过 env 显式带创建人，
+      // 走的是同一 REST 端点但已有值，跳过补 master。
+      let effectiveParams = params
+      if (params.creator_friend_id === undefined) {
+        const master = this.findMasterFriend()
+        if (master) effectiveParams = { ...params, creator_friend_id: master.id }
+      }
+      const result = await this.handleCreateSchedule(effectiveParams)
       res.writeHead(201, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(result))
     } catch (err) {
       res.writeHead(400, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'create failed' }))
     }
+  }
+
+  private findMasterFriend(): Friend | undefined {
+    for (const friend of this.friends.values()) {
+      if (friend.permission === 'master') return friend
+    }
+    return undefined
   }
 
   private async handleGetScheduleApi(
@@ -4505,25 +4538,12 @@ export class AdminModule extends ModuleBase {
   private oauthLoginPromise: Promise<import('./oauth/openai-codex-oauth.js').OAuthLoginResult> | null = null
   private lastOAuthResult: import('./oauth/openai-codex-oauth.js').OAuthLoginResult | null = null
 
-  private async handleOAuthChatGPTLogin(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  private async handleOAuthChatGPTLogin(_req: IncomingMessage, res: ServerResponse): Promise<void> {
     const oauthMod = await import('./oauth/openai-codex-oauth.js')
 
     this.lastOAuthResult = null
 
-    let explicitHost: string | undefined
-    try {
-      const body = await this.readJsonBody<{ redirect_host?: string }>(req)
-      explicitHost = body?.redirect_host
-    } catch (err) {
-      if (!(err instanceof SyntaxError) && !(err instanceof Error && err.message === 'Invalid JSON')) {
-        throw err
-      }
-    }
-
-    const redirectHost = oauthMod.resolveRedirectHost(explicitHost, req.headers.host)
-
-    // 启动 callback server（异步等待回调）
-    const flowPromise = oauthMod.waitForOAuthCallback({ redirectHost })
+    const flowPromise = oauthMod.waitForOAuthCallback()
     this.oauthLoginPromise = flowPromise
 
     // 在等待回调的同时，先用一个 race 拿到 listen 阶段的错误（PORT_IN_USE 等）
@@ -4547,7 +4567,7 @@ export class AdminModule extends ModuleBase {
     }
 
     // 自验证：确认 server 能响应
-    const ok = await oauthMod.selfCheckCallbackServer(redirectHost)
+    const ok = await oauthMod.selfCheckCallbackServer()
     if (!ok) {
       oauthMod.cancelOAuthFlow()
       this.oauthLoginPromise = null
@@ -4572,6 +4592,48 @@ export class AdminModule extends ModuleBase {
     flowPromise
       .then((result) => { this.lastOAuthResult = result })
       .catch(() => { /* 状态通过 /status 查询 */ })
+  }
+
+  private async handleOAuthChatGPTManualCallback(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const oauthMod = await import('./oauth/openai-codex-oauth.js')
+
+    let body: { redirect_url?: string } | null = null
+    try {
+      body = await this.readJsonBody<{ redirect_url?: string }>(req)
+    } catch (err) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'Invalid JSON' }))
+      return
+    }
+
+    const input = body?.redirect_url?.trim()
+    if (!input) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: '请粘贴授权回调 URL' }))
+      return
+    }
+
+    if (!this.oauthLoginPromise) {
+      res.writeHead(409, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: '当前没有进行中的 OAuth 登录流程，请先点击"登录"按钮' }))
+      return
+    }
+
+    try {
+      const result = await oauthMod.submitManualCallback(input)
+      this.lastOAuthResult = result
+      this.oauthLoginPromise = null
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ status: 'success', email: result.email, account_id: result.account_id }))
+    } catch (err) {
+      // 校验错误（缺 code / state mismatch）submitManualCallback 不会清 pending flow，
+      // 这里也就保留 oauthLoginPromise，让用户改了粘贴内容直接重提；token 兑换失败才会真正终结流程
+      if (!oauthMod.isOAuthPending()) {
+        this.oauthLoginPromise = null
+      }
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }))
+    }
   }
 
   private async handleOAuthChatGPTStatus(_req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -4659,13 +4721,6 @@ export class AdminModule extends ModuleBase {
       const provider = this.modelProviderManager.getProvider(globalConfig.default_llm_provider_id)
       if (!provider) {
         warnings.push(`LLM Provider ${globalConfig.default_llm_provider_id} 不存在`)
-      }
-    }
-
-    if (globalConfig.default_embedding_provider_id) {
-      const provider = this.modelProviderManager.getProvider(globalConfig.default_embedding_provider_id)
-      if (!provider) {
-        warnings.push(`Embedding Provider ${globalConfig.default_embedding_provider_id} 不存在`)
       }
     }
 
@@ -5830,54 +5885,32 @@ export class AdminModule extends ModuleBase {
         env.CRABOT_LLM_MODEL = info.model_id
         env.CRABOT_LLM_API_KEY = info.apikey
         env.CRABOT_LLM_FORMAT = info.format
-      }
-    } catch {
-      console.warn('[Admin] buildGlobalModelEnv: failed to resolve global LLM config')
-    }
-
-    try {
-      if (globalConfig.default_embedding_provider_id && globalConfig.default_embedding_model_id) {
-        const info = await this.modelProviderManager.buildConnectionInfo(
-          globalConfig.default_embedding_provider_id,
-          globalConfig.default_embedding_model_id
-        ) as EmbeddingConnectionInfo
-        env.CRABOT_EMBEDDING_BASE_URL = info.endpoint
-        env.CRABOT_EMBEDDING_MODEL = info.model_id
-        env.CRABOT_EMBEDDING_API_KEY = info.apikey
-        if (info.dimension !== undefined) {
-          env.CRABOT_EMBEDDING_DIMENSION = String(info.dimension)
+        // OAuth provider（openai-responses + ChatGPT Codex 后端）需要 ChatGPT-Account-Id header
+        if (info.account_id) {
+          env.CRABOT_LLM_ACCOUNT_ID = info.account_id
         }
       }
     } catch {
-      console.warn('[Admin] buildGlobalModelEnv: failed to resolve global embedding config')
+      console.warn('[Admin] buildGlobalModelEnv: failed to resolve global LLM config')
     }
 
     return env
   }
 
   /**
-   * 构建 Memory 模块的 RPC 配置参数（LLM + Embedding 连接信息）
+   * 构建 Memory 模块的 RPC 配置参数（仅 LLM；v3 起 embedding 子系统已移除）
    * 供 get_memory_config（模块启动 pull）和 syncGlobalConfigToMemoryModules（push）共用
    */
-  private async buildMemoryRpcConfig(): Promise<{ llm?: Record<string, string>; embedding?: Record<string, string | number> }> {
+  private async buildMemoryRpcConfig(): Promise<{ llm?: Record<string, string> }> {
     const newEnv = await this.buildGlobalModelEnv()
-    const rpcParams: { llm?: Record<string, string>; embedding?: Record<string, string | number> } = {}
+    const rpcParams: { llm?: Record<string, string> } = {}
     if (newEnv.CRABOT_LLM_MODEL) {
       rpcParams.llm = {
         api_key: newEnv.CRABOT_LLM_API_KEY ?? '',
         base_url: newEnv.CRABOT_LLM_BASE_URL ?? '',
         model: newEnv.CRABOT_LLM_MODEL,
         format: newEnv.CRABOT_LLM_FORMAT ?? 'openai',
-      }
-    }
-    if (newEnv.CRABOT_EMBEDDING_MODEL) {
-      rpcParams.embedding = {
-        api_key: newEnv.CRABOT_EMBEDDING_API_KEY ?? '',
-        base_url: newEnv.CRABOT_EMBEDDING_BASE_URL ?? '',
-        model: newEnv.CRABOT_EMBEDDING_MODEL,
-      }
-      if (newEnv.CRABOT_EMBEDDING_DIMENSION) {
-        rpcParams.embedding.dimension = parseInt(newEnv.CRABOT_EMBEDDING_DIMENSION, 10)
+        ...(newEnv.CRABOT_LLM_ACCOUNT_ID ? { account_id: newEnv.CRABOT_LLM_ACCOUNT_ID } : {}),
       }
     }
     return rpcParams
@@ -5888,7 +5921,7 @@ export class AdminModule extends ModuleBase {
    * 统一配置模式：模块启动 pull + 运行时 Admin push
    */
   private async handleGetMemoryConfig(_params: { instance_id: string }): Promise<{
-    config: { llm?: Record<string, string>; embedding?: Record<string, string | number> }
+    config: { llm?: Record<string, string> }
   }> {
     return { config: await this.buildMemoryRpcConfig() }
   }
@@ -6222,6 +6255,37 @@ export class AdminModule extends ModuleBase {
       return 'master_private'
     }
     return friend.permission_template_id ?? 'standard'
+  }
+
+  /**
+   * 计算 schedule 触发后任务执行的权限：
+   * - 系统内置 / 无 creator → master_private 模板（最高权限，含 desktop / shell / file_io）
+   * - 有 creator 且 friend 存在 → 沿用 creator 的解析结果
+   * - 有 creator 但 friend 已删除 → 退回 master_private 并 warn（防止 schedule 静默失活）
+   */
+  private resolveScheduleExecutionPermissions(schedule: Schedule): ResolvedPermissions | null {
+    const fallbackToMaster = (): ResolvedPermissions | null => {
+      try {
+        return this.permissionTemplateManager.resolvePermissions('master_private', null)
+      } catch (err) {
+        console.error(`[Admin] master_private template missing while resolving schedule ${schedule.id}:`, err)
+        return null
+      }
+    }
+
+    if (schedule.is_builtin || !schedule.creator_friend_id) {
+      return fallbackToMaster()
+    }
+
+    const friend = this.friends.get(schedule.creator_friend_id)
+    if (!friend) {
+      console.warn(
+        `[Admin] Schedule ${schedule.id} (${schedule.name}) creator_friend_id ${schedule.creator_friend_id} not found, falling back to master_private`
+      )
+      return fallbackToMaster()
+    }
+
+    return this.buildResolvedFriendPermissions(friend)
   }
 
   private buildResolvedFriendPermissions(friend: Friend): ResolvedPermissions | null {

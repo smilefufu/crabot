@@ -8,7 +8,7 @@
 // ============================================================================
 
 export type ApiFormat = 'openai' | 'anthropic' | 'gemini' | 'openai-responses'
-export type ModelType = 'llm' | 'embedding'
+export type ModelType = 'llm'
 export type ProviderStatus = 'active' | 'inactive' | 'error'
 export type ProviderConfigType = 'manual' | 'preset'
 
@@ -18,7 +18,6 @@ export interface ModelInfo {
   type: ModelType
   supports_vision?: boolean
   context_window?: number
-  dimension?: number
   description?: string
   tags?: string[]
 }
@@ -58,8 +57,6 @@ export interface PresetVendor {
 export interface GlobalModelConfig {
   default_llm_provider_id?: string
   default_llm_model_id?: string
-  default_embedding_provider_id?: string
-  default_embedding_model_id?: string
 }
 
 export interface ModelConnectionInfo {
@@ -67,7 +64,6 @@ export interface ModelConnectionInfo {
   apikey: string
   model_id: string
   format: ApiFormat
-  dimension?: number
   provider_id?: string
 }
 

@@ -252,6 +252,99 @@ describe('WorkerHandler', () => {
     })
   })
 
+  describe('buildToolsDynamic permission filtering', () => {
+    // 回归用例：之前用 baseToolsRaw 算出来的 permissionConfig 来过滤含 delegate_* 的完整工具集，
+    // 导致 delegate 工具漏过 filter 注入给 LLM，运行时又被拒（违反"无权限工具不注入 prompt"）。
+    it('filters delegate_task and delegate_to_* when their default category is denied', async () => {
+      mockRunEngine.mockResolvedValue(makeEngineResult())
+
+      const sdkEnv = {
+        modelId: 'test-model',
+        format: 'anthropic' as const,
+        env: { ANTHROPIC_BASE_URL: 'http://localhost:4000', ANTHROPIC_API_KEY: 'test-key' },
+      }
+      const subAgentDef = {
+        slotKey: 'coding_expert',
+        slotDescription: 'coding expert',
+        recommendedCapabilities: ['coding'] as const,
+        toolName: 'delegate_to_coding_expert',
+        toolDescription: 'delegate coding tasks',
+        systemPrompt: 'you are a coding expert',
+        workerHint: 'coding expert',
+        maxTurns: 30,
+      }
+      // mcp_skill 关闭 → tool.category（默认 'mcp_skill'）落入 denyList
+      const getPermissionConfig = (tools: ReadonlyArray<{ name: string; category?: string }>) => {
+        const deniedTools = tools
+          .filter(t => (t.category ?? 'mcp_skill') === 'mcp_skill')
+          .map(t => t.name)
+        return deniedTools.length === 0
+          ? { mode: 'bypass' as const }
+          : { mode: 'denyList' as const, toolNames: deniedTools }
+      }
+      const handler = new WorkerHandler(sdkEnv, { systemPrompt: 'worker' }, {
+        deps: {
+          rpcClient: { call: vi.fn() } as any,
+          moduleId: 'agent-test',
+          resolveChannelPort: async () => 3003,
+          getMemoryPort: async () => 3002,
+          getPermissionConfig,
+        },
+        subAgentConfigs: [{ definition: subAgentDef, sdkEnv }],
+      })
+
+      await handler.executeTask({ task: makeTask(), context: makeContext() })
+
+      const callArgs = mockRunEngine.mock.calls[0][0]
+      const buildTools = callArgs.options.tools as () => ReadonlyArray<{ name: string }>
+      expect(typeof buildTools).toBe('function')
+      const toolNames = buildTools().map(t => t.name)
+
+      expect(toolNames).not.toContain('delegate_task')
+      expect(toolNames).not.toContain('delegate_to_coding_expert')
+    })
+
+    it('keeps delegate tools visible when mcp_skill category is allowed', async () => {
+      mockRunEngine.mockResolvedValue(makeEngineResult())
+
+      const sdkEnv = {
+        modelId: 'test-model',
+        format: 'anthropic' as const,
+        env: { ANTHROPIC_BASE_URL: 'http://localhost:4000', ANTHROPIC_API_KEY: 'test-key' },
+      }
+      const subAgentDef = {
+        slotKey: 'coding_expert',
+        slotDescription: 'coding expert',
+        recommendedCapabilities: ['coding'] as const,
+        toolName: 'delegate_to_coding_expert',
+        toolDescription: 'delegate coding tasks',
+        systemPrompt: 'you are a coding expert',
+        workerHint: 'coding expert',
+        maxTurns: 30,
+      }
+      const getPermissionConfig = () => ({ mode: 'bypass' as const })
+      const handler = new WorkerHandler(sdkEnv, { systemPrompt: 'worker' }, {
+        deps: {
+          rpcClient: { call: vi.fn() } as any,
+          moduleId: 'agent-test',
+          resolveChannelPort: async () => 3003,
+          getMemoryPort: async () => 3002,
+          getPermissionConfig,
+        },
+        subAgentConfigs: [{ definition: subAgentDef, sdkEnv }],
+      })
+
+      await handler.executeTask({ task: makeTask(), context: makeContext() })
+
+      const callArgs = mockRunEngine.mock.calls[0][0]
+      const buildTools = callArgs.options.tools as () => ReadonlyArray<{ name: string }>
+      const toolNames = buildTools().map(t => t.name)
+
+      expect(toolNames).toContain('delegate_task')
+      expect(toolNames).toContain('delegate_to_coding_expert')
+    })
+  })
+
   describe('resolveSceneAnchorLabel', () => {
     it('preserves an existing scene label when a profile already exists', async () => {
       const rpcClient = {

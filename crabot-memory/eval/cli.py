@@ -9,37 +9,27 @@ from eval.sample_loader import load_suite
 from eval.runner import run_suite
 from eval.judge import judge_one
 from eval.report import render_markdown, render_json
-from eval.answerer import V1Answerer, V2Answerer
-from src.utils.embedding import EmbeddingClient
+from eval.answerer import V2Answerer
 from src.utils.llm_client import LLMClient
 
 _SUITES = ("IE", "MR", "TR", "KU", "Abstention")
 
 
-def _make_clients() -> tuple:
-    """Build embedder / llm from env vars (LITELLM-style names)."""
-    embedder = EmbeddingClient(
-        api_key=os.environ.get("EMBEDDING_API_KEY"),
-        base_url=os.environ.get("EMBEDDING_BASE_URL"),
-        model=os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small"),
-    )
-    llm = LLMClient(
+def _make_llm() -> LLMClient:
+    return LLMClient(
         api_key=os.environ.get("LLM_API_KEY"),
         base_url=os.environ.get("LLM_BASE_URL"),
         model=os.environ.get("LLM_MODEL", "gpt-4o-mini"),
         format=os.environ.get("LLM_FORMAT", "openai"),
     )
-    return embedder, llm
 
 
 async def _run(args) -> int:
     suites = _SUITES if args.suite == "all" else (args.suite,)
-    embedder, llm = _make_clients()
+    llm = _make_llm()
 
-    if args.candidate == "v2":
-        answerer = V2Answerer(embedder=embedder, llm=llm)
-    else:
-        answerer = V1Answerer(embedder=embedder)
+    # v3: 只支持 V2 路径（V1 dense-only baseline 已删，因为 dense path 不再存在）
+    answerer = V2Answerer(llm=llm)
 
     judge_callable = lambda **kw: judge_one(**kw)
 
@@ -71,7 +61,7 @@ async def _run(args) -> int:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--suite", default="all", choices=("all", *_SUITES))
-    ap.add_argument("--candidate", default="v2", choices=("v1", "v2"))
+    ap.add_argument("--candidate", default="v2", choices=("v2",))
     ap.add_argument("--out", default="eval/reports")
     args = ap.parse_args()
     sys.exit(asyncio.run(_run(args)))

@@ -62,14 +62,12 @@ describe('ContextAssembler', () => {
       },
     ]
     const shortMem = [{ memory_id: 'mem1', content: 'fact', timestamp: '2026-01-01T00:00:00Z' }]
-    const longMem = [{ id: 'mem2', type: 'fact', status: 'confirmed', brief: 'old fact' }]
 
-    // Call order: get_chat_history, search_short_term, search_long_term
-    // v2 search_long_term returns { results: LongTermMemoryRef[] } directly (no { memory, relevance } wrapper)
+    // worker context 不再预 fetch long_term：长期记忆改由 worker 用 search_long_term tool 按需查。
+    // Call order: get_chat_history, search_short_term
     mockRpc.call
       .mockResolvedValueOnce({ messages })
       .mockResolvedValueOnce({ results: shortMem })
-      .mockResolvedValueOnce({ results: longMem })
 
     // Resolve order: admin (module_type), memory (module_type), channel (module_type)
     mockRpc.resolve
@@ -90,7 +88,7 @@ describe('ContextAssembler', () => {
     expect(ctx.task_origin?.friend_id).toBe('friend-1')
     expect(ctx.recent_messages).toEqual(messages)
     expect(ctx.short_term_memories).toEqual(shortMem)
-    expect(ctx.long_term_memories).toEqual(longMem)
+    expect(ctx.long_term_memories).toEqual([])  // 不再预 fetch，永远空数组
     expect(ctx.admin_endpoint).toEqual({ module_id: 'admin', port: 19100 })
     expect(ctx.memory_endpoint).toEqual({ module_id: 'memory', port: 19200 })
     expect(ctx.channel_endpoints).toEqual([{ module_id: 'channel-web', port: 19500 }])

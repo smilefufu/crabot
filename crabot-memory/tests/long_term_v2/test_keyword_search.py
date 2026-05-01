@@ -36,7 +36,7 @@ def _seed(store, index, mid, brief, body, status="confirmed", type_="fact"):
 async def test_keyword_search_matches_brief(tmp_path):
     store = MemoryStore(str(tmp_path / "lt"))
     index = SqliteIndex(str(tmp_path / "v2.db"))
-    rpc = LongTermV2Rpc(store=store, index=index, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=index)
     _seed(store, index, "m1", brief="macOS 终端中文输入技巧", body="pbcopy + Cmd+V")
     _seed(store, index, "m2", brief="Linux 服务启动", body="systemctl start")
     r = await rpc.keyword_search({"query": "macOS"})
@@ -49,7 +49,7 @@ async def test_keyword_search_matches_brief(tmp_path):
 async def test_keyword_search_matches_body(tmp_path):
     store = MemoryStore(str(tmp_path / "lt"))
     index = SqliteIndex(str(tmp_path / "v2.db"))
-    rpc = LongTermV2Rpc(store=store, index=index, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=index)
     _seed(store, index, "m1", brief="终端技巧", body="pbcopy + Cmd+V")
     _seed(store, index, "m2", brief="Linux 启动", body="systemctl")
     r = await rpc.keyword_search({"query": "pbcopy"})
@@ -61,7 +61,7 @@ async def test_keyword_search_matches_body(tmp_path):
 async def test_keyword_search_respects_type_filter(tmp_path):
     store = MemoryStore(str(tmp_path / "lt"))
     index = SqliteIndex(str(tmp_path / "v2.db"))
-    rpc = LongTermV2Rpc(store=store, index=index, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=index)
     _seed(store, index, "f1", brief="macOS 事实", body="a", type_="fact")
     _seed(store, index, "l1", brief="macOS 经验", body="b", type_="lesson")
     r = await rpc.keyword_search({"query": "macOS", "type": "fact"})
@@ -73,7 +73,7 @@ async def test_keyword_search_respects_type_filter(tmp_path):
 async def test_keyword_search_excludes_trash_by_default(tmp_path):
     store = MemoryStore(str(tmp_path / "lt"))
     index = SqliteIndex(str(tmp_path / "v2.db"))
-    rpc = LongTermV2Rpc(store=store, index=index, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=index)
     _seed(store, index, "good", brief="macOS ok", body="a", status="confirmed")
     _seed(store, index, "gone", brief="macOS bad", body="b", status="trash")
     r = await rpc.keyword_search({"query": "macOS"})

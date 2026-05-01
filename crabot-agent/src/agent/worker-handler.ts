@@ -43,6 +43,7 @@ import type {
   LiveTaskSnapshot,
   LiveToolCall,
   LiveCompletedTool,
+  ResolvedPermissions,
 } from '../types.js'
 import type { RpcClient } from 'crabot-shared'
 import { createCrabMemoryServer } from '../mcp/crab-memory.js'
@@ -91,7 +92,6 @@ export interface WorkerHandlerConfig {
    * skillListing 通过 `updateSkills` 维护，由 worker-handler 内 buildSkillListingSnapshot 即时拼装。
    */
   systemPrompt: string
-  longTermPreloadLimit?: number
   extra?: Record<string, unknown>
   /** 解析已校验的 IANA 时区，用于 prompt 时间感知。每次 LLM 调用 / 工具执行前重新读取，反映 admin 配置热更新 */
   getTimezone?: () => string
@@ -105,10 +105,14 @@ export interface WorkerDeps {
   /** Admin RPC 端口解析（get_task_details 工具用） */
   getAdminPort?: () => Promise<number>
   /**
-   * 返回当前 session 的 permissionConfig（基于 session 模板 + 覆盖）。
-   * 未配置时返回 { mode: 'bypass' }（向后兼容）。
+   * 返回当前 task 的 permissionConfig（基于 task 自带的 resolved_permissions，
+   * 缺省时回退到全局/会话级解析或 FAIL_CLOSED 兜底）。
+   * 把 resolvedPerms 显式传入而不是读 UnifiedAgent 上的全局字段，是为了避免并发任务串改。
    */
-  getPermissionConfig?: (tools: ReadonlyArray<ToolDefinition>) => ToolPermissionConfig
+  getPermissionConfig?: (
+    tools: ReadonlyArray<ToolDefinition>,
+    resolvedPerms?: ResolvedPermissions,
+  ) => ToolPermissionConfig
 }
 
 import type { LLMFormat } from '../engine/llm-adapter'
@@ -165,7 +169,6 @@ export interface WorkerHandlerOptions {
 export class WorkerHandler {
   private sdkEnv: SdkEnvConfig
   private systemPrompt: string
-  private longTermPreloadLimit = 20
   private activeTasks: Map<TaskId, WorkerTaskState> = new Map()
   /** Human message queues for active tasks */
   private humanQueues: Map<TaskId, HumanMessageQueue> = new Map()
@@ -201,7 +204,6 @@ export class WorkerHandler {
     this.mcpConfigFactory = options?.mcpConfigFactory
     this.deps = options?.deps
     this.systemPrompt = config.systemPrompt
-    this.longTermPreloadLimit = config.longTermPreloadLimit ?? 20
     this.builtinToolConfig = options?.builtinToolConfig
     this.mcpConnector = options?.mcpConnector
     this.extra = config.extra ?? {}
@@ -420,11 +422,12 @@ export class WorkerHandler {
         ))
 
         // 3f. Sub-agent delegation tools
-        // 预过滤：被 deny 的工具不注入给 LLM（sub-agent 和 Worker 自己都拿过滤后的列表）
+        // baseToolsPermissionConfig 仅基于 base 工具集，给 sub-agent 用：
+        //   sub-agent 内部只能见 baseTools，所以它的 permissionConfig 也只需覆盖 base 工具命名。
         const baseToolsRaw = [...tools]
-        const localPermissionConfig: ToolPermissionConfig =
-          this.deps?.getPermissionConfig?.(baseToolsRaw) ?? { mode: 'bypass' }
-        const baseTools = filterToolsByPermission(baseToolsRaw, localPermissionConfig)
+        const baseToolsPermissionConfig: ToolPermissionConfig =
+          this.deps?.getPermissionConfig?.(baseToolsRaw, context.resolved_permissions) ?? { mode: 'bypass' }
+        const baseTools = filterToolsByPermission(baseToolsRaw, baseToolsPermissionConfig)
 
         for (const { definition, sdkEnv: subSdkEnv } of this.subAgentConfigs) {
           const hookRegistry = definition.hooks === 'coding_expert'
@@ -444,7 +447,7 @@ export class WorkerHandler {
             traceConfig: subAgentTraceConfig,
             hookRegistry,
             lspManager: hookRegistry ? this.lspManager : undefined,
-            permissionConfig: localPermissionConfig,
+            permissionConfig: baseToolsPermissionConfig,
           }))
         }
 
@@ -460,7 +463,7 @@ export class WorkerHandler {
           supportsVision: this.sdkEnv.supportsVision,
           parentHumanQueue: humanQueue,
           traceConfig: subAgentTraceConfig,
-          permissionConfig: localPermissionConfig,
+          permissionConfig: baseToolsPermissionConfig,
         }))
 
         // 3h. Trace search tool
@@ -473,8 +476,12 @@ export class WorkerHandler {
           tools.push(getTaskDetailsTool)
         }
 
-        // 最终过滤：无权限工具不注入 LLM
-        return filterToolsByPermission(tools, localPermissionConfig)
+        // 最终过滤：用「完整 tools 集合」重算 permissionConfig，
+        // 否则 delegate_*/trace_search 等后注入的工具因不在 baseToolsPermissionConfig 的 denyList 里而漏过 filter，
+        // 导致 LLM 看见但 runEngine 用 initialPermissionConfig 又拒绝（违反「无权限工具不注入 prompt」）。
+        const fullPermissionConfig: ToolPermissionConfig =
+          this.deps?.getPermissionConfig?.(tools, context.resolved_permissions) ?? { mode: 'bypass' }
+        return filterToolsByPermission(tools, fullPermissionConfig)
       }
 
       // System prompt 也改为 callback：admin push config 触发 updateSystemPrompt 后下一轮生效。
@@ -495,7 +502,7 @@ export class WorkerHandler {
       // runEngine 内部会在每轮调用 buildToolsDynamic 重新拿最新工具列表。
       const initialTools = buildToolsDynamic()
       const initialPermissionConfig: ToolPermissionConfig =
-        this.deps?.getPermissionConfig?.(initialTools) ?? { mode: 'bypass' }
+        this.deps?.getPermissionConfig?.(initialTools, context.resolved_permissions) ?? { mode: 'bypass' }
 
       log(`Starting worker engine: model=${this.sdkEnv.modelId}, task=${task.task_title}, tools=${initialTools.length}`)
 
@@ -585,7 +592,20 @@ export class WorkerHandler {
       // 而不是默认的 'human'。
       process.env.CRABOT_ACTOR = 'agent'
 
+      // CRABOT_TASK_FRIEND_ID：当前 task 关联的 friend（master 私聊 = master id；定时任务 = 空）。
+      // CLI write 命令（如 `crabot schedule add`）从这里读取并填到请求体的 creator_friend_id，
+      // **不通过 CLI flag 传**，避免 LLM 通过命令行参数伪造身份。block-cli-write hook 已经把
+      // write 命令限制在 master_private，所以这里非空时一定是 master。
+      const taskFriendId = context.task_origin?.friend_id
+      if (taskFriendId) {
+        process.env.CRABOT_TASK_FRIEND_ID = taskFriendId
+      } else {
+        delete process.env.CRABOT_TASK_FRIEND_ID
+      }
+
       // 7. Run engine — systemPrompt 和 tools 传 lambda，每轮 LLM 调用前 query-loop 重新 resolve
+      // maxTurns: 主任务允许长时间执行（探索类任务可能跑 1000+ turn）；context-manager 在
+      // 80% 窗口时自动 compaction 兜底。真正死循环可通过 supplement_task 或 abort 中断。
       const engineResult = await runEngine({
         prompt: taskMessage,
         adapter,
@@ -593,6 +613,7 @@ export class WorkerHandler {
           systemPrompt: buildSystemPromptDynamic,
           tools: buildToolsDynamic,
           model: this.sdkEnv.modelId,
+          maxTurns: 2000,
           supportsVision: this.sdkEnv.supportsVision,
           permissionConfig: initialPermissionConfig,
           timezone: this.getTimezone(),
@@ -641,36 +662,44 @@ export class WorkerHandler {
             }
           },
           onTurn: (event: EngineTurnEvent) => {
-            // Trace: LLM call
+            // onTurn fires after LLM + tools complete; back-date spans with engine timings.
             const inputSummary = event.turnNumber === 1
               ? task.task_title.slice(0, 150)
               : `(turn ${event.turnNumber})`
-            const llmSpanId = traceCallback?.onLlmCallStart(event.turnNumber, inputSummary)
+            const llmEndedAtMs = event.llmStartedAtMs !== undefined && event.llmCallMs !== undefined
+              ? event.llmStartedAtMs + event.llmCallMs
+              : undefined
+            const llmSpanId = traceCallback?.onLlmCallStart(event.turnNumber, inputSummary, undefined, event.llmStartedAtMs)
 
-            // Trace: tool calls
-            const perToolMs = event.toolCalls.length > 0
-              ? Math.round((event.toolExecutionMs ?? 0) / event.toolCalls.length)
-              : 0
             for (const tc of event.toolCalls) {
+              const toolEndedAtMs = tc.startedAtMs !== undefined && tc.durationMs !== undefined
+                ? tc.startedAtMs + tc.durationMs
+                : undefined
               const toolSpanId = traceCallback?.onToolCallStart(
                 tc.name,
                 JSON.stringify(tc.input ?? {}).slice(0, 200),
+                tc.startedAtMs,
               )
               if (toolSpanId) {
                 traceCallback?.onToolCallEnd(
                   toolSpanId,
-                  `${tc.output?.slice(0, 500) || '(no output)'}${perToolMs > 0 ? ` [${perToolMs}ms]` : ''}`,
+                  tc.output?.slice(0, 500) || '(no output)',
                   tc.isError ? tc.output : undefined,
+                  toolEndedAtMs,
                 )
               }
             }
 
             if (llmSpanId) {
-              traceCallback?.onLlmCallEnd(llmSpanId, {
-                stopReason: event.stopReason ?? undefined,
-                outputSummary: event.assistantText.slice(0, 200) || undefined,
-                toolCallsCount: event.toolCalls.length > 0 ? event.toolCalls.length : undefined,
-              })
+              traceCallback?.onLlmCallEnd(
+                llmSpanId,
+                {
+                  stopReason: event.stopReason ?? undefined,
+                  outputSummary: event.assistantText.slice(0, 200) || undefined,
+                  toolCallsCount: event.toolCalls.length > 0 ? event.toolCalls.length : undefined,
+                },
+                llmEndedAtMs,
+              )
             }
 
             // Progress: delegate based on report mode
@@ -983,35 +1012,14 @@ export class WorkerHandler {
       parts.push(`- Session ID: ${context.task_origin.session_id}`)
     }
     const hasShortTerm = context.short_term_memories.length > 0
-    const hasLongTerm = context.long_term_memories.length > 0
-    if (hasShortTerm || hasLongTerm) {
-      parts.push('\n## 记忆系统')
-
-      if (hasShortTerm) {
-        parts.push(`\n### 短期记忆（${context.short_term_memories.length} 条）`)
-        parts.push('近期事件流水账，记录跨所有 channel/session 的事件摘要。不是聊天记录。')
-      }
-
-      if (hasLongTerm) {
-        const count = context.long_term_memories.length
-        const isOverflow = count >= this.longTermPreloadLimit
-        if (isOverflow) {
-          parts.push(`\n### 长期记忆（相关度最高的 ${count} 条，可能还有更多）`)
-        } else {
-          parts.push(`\n### 长期记忆（共 ${count} 条）`)
-        }
-        for (const mem of context.long_term_memories) {
-          // TODO(memory-v2): 重新接入 importance 信号（v2 brief 不返回 importance_factors，需要 include='full' 才能拿到）
-          const tags = mem.tags ?? []
-          const tagStr = tags.length > 0 ? ` [${tags.slice(0, 3).join(', ')}]` : ''
-          parts.push(`- [${mem.id}]${tagStr} ${mem.brief}`)
-        }
-        if (isOverflow) {
-          parts.push('\n以上为相关度最高的记忆，可通过记忆搜索工具查找更多。')
-        }
-        parts.push('如需查看某条记忆详情，可使用记忆查询工具获取 frontmatter 与正文。')
-      }
+    parts.push('\n## 记忆系统')
+    if (hasShortTerm) {
+      parts.push(`\n### 短期记忆（${context.short_term_memories.length} 条）`)
+      parts.push('近期事件流水账，记录跨所有 channel/session 的事件摘要。不是聊天记录。')
     }
+    parts.push('\n### 长期记忆')
+    parts.push('长期记忆**不预填**到上下文。当任务需要历史经验、过去做过的类似事、相关事实背景时，')
+    parts.push('主动调用 `crab-memory.search_long_term` 工具按主题精准查询，必要时再用 `crab-memory.get_memory` 取详情。')
     if (context.recent_messages && context.recent_messages.length > 0) {
       parts.push(`\n## 最近相关消息（共 ${context.recent_messages.length} 条）`)
       for (const m of context.recent_messages) {

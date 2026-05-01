@@ -1,5 +1,46 @@
 # crabot-memory 升级说明
 
+## v2 → v3（2026-04-30）
+
+**主题**：移除 embedding 子系统。
+
+**做了什么**：
+
+- 短期记忆从 LanceDB 迁到 SQLite（不再需要 vector 列）
+- 长期记忆删除 dense recall path（5 路 → 4 路 RRF：sparse / entity / tag / bi_temporal）
+- 删除 EmbeddingClient + 所有 `CRABOT_EMBEDDING_*` 配置
+- Admin 删除 embedding provider 配置和 UI
+
+**升级脚本 `from_v2_to_v3.py` 行为**：
+
+1. `data/memory/lancedb/` 目录改名为 `lancedb.deprecated.{ts}/`（保留备份）
+2. `data/memory/long_term_v2.db` 中 drop `embeddings` 表 + VACUUM
+3. 清洗 `data/admin/module-configs/memory-*.json` 里的 `CRABOT_EMBEDDING_*` env vars
+4. 清洗 `data/admin/global-config.json` 里的 `default_embedding_*` 字段
+5. 写日志到 `data/memory/upgrade-v2-to-v3.log`
+
+**数据丢失说明**：
+
+- 老的 short_term LanceDB 数据**不再读取**（项目初期阶段，可接受丢失）
+- `lancedb.deprecated.{ts}/` 保留是为人工恢复路径（默认 7 天后由用户自行清理）
+- 长期记忆条目本身（`data/memory/long_term/{status}/{type}/*.md`）完整保留，只丢失向量索引
+
+**回滚**：
+
+```bash
+# 1. 切回旧代码
+git checkout v2.x
+# 2. 恢复数据（crabot upgrade 已自动备份整个 data/memory/ 目录）
+rm -rf data/memory
+mv data/memory.backup-{ts} data/memory
+# 3. 启动
+crabot start
+```
+
+**完整设计**：见 `crabot-docs/superpowers/specs/2026-04-30-remove-embedding-design.md`。
+
+---
+
 ## v1 → v2
 
 旧 LanceDB `long_term_memory` 表 → 新文件结构 `<DATA_DIR>/long_term/<status>/<type>/<uuid>.md` + SQLite 索引。

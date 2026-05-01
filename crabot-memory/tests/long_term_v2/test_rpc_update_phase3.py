@@ -27,7 +27,7 @@ def _seed(tmp_path, type_="fact", maturity="confirmed"):
     e = MemoryEntry(frontmatter=fm, body="body")
     store.write(e, status="confirmed")
     index.upsert(e, path=entry_path(store.data_root, "confirmed", type_, "m1"), status="confirmed")
-    rpc = LongTermV2Rpc(store=store, index=index, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=index)
     return rpc, store, index
 
 

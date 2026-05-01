@@ -1,5 +1,5 @@
-"""
-LLM 客户端 - 多格式支持（OpenAI / Anthropic）
+"""LLM 客户端 — 路由到 4 种 format（与 admin / agent 端口对齐）：
+openai / anthropic / gemini（走 OpenAI 兼容端点）/ openai-responses。
 """
 import json
 import logging
@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 class LLMClient:
-    """异步 LLM 客户端，支持 OpenAI 和 Anthropic 格式"""
+    """异步 LLM 客户端，支持 openai / anthropic / gemini / openai-responses。"""
 
     def __init__(
         self,
@@ -19,11 +19,14 @@ class LLMClient:
         base_url: Optional[str] = None,
         model: Optional[str] = None,
         format: Optional[str] = None,
+        account_id: Optional[str] = None,
     ):
         self._api_key = api_key
         self._base_url = base_url
         self._model = model
         self._format = format or "openai"
+        # 仅 openai-responses + ChatGPT Codex OAuth 用，作为 ChatGPT-Account-Id header
+        self._account_id = account_id or ""
         self._client: Any = None
 
     def reconfigure(
@@ -32,6 +35,7 @@ class LLMClient:
         base_url: Optional[str] = None,
         model: Optional[str] = None,
         format: Optional[str] = None,
+        account_id: Optional[str] = None,
     ) -> None:
         """热更新配置，下次调用时自动重建客户端"""
         if api_key is not None:
@@ -42,6 +46,8 @@ class LLMClient:
             self._model = model
         if format is not None:
             self._format = format
+        if account_id is not None:
+            self._account_id = account_id
         self._client = None
         logger.info("LLMClient reconfigured: format=%s model=%s base_url=%s", self._format, self._model, self._base_url)
 
@@ -54,7 +60,8 @@ class LLMClient:
                     base_url=self._base_url if self._base_url else None,
                 )
             else:
-                # openai, gemini 等都走 OpenAI 兼容 API
+                # openai / gemini / openai-responses 都用 OpenAI Python SDK
+                # （gemini 走 OpenAI 兼容端点；responses 走 SDK 自带的 .responses 资源）
                 from openai import AsyncOpenAI
                 self._client = AsyncOpenAI(
                     api_key=self._api_key,
@@ -73,7 +80,7 @@ class LLMClient:
         response_format: Optional[Dict[str, str]] = None,
         max_retries: int = 3,
     ) -> str:
-        """聊天补全，带重试。自动根据 format 选择 API"""
+        """聊天补全，带重试。按 format 路由到对应 API。"""
         client = self._ensure_client()
 
         last_err: Optional[Exception] = None
@@ -81,7 +88,10 @@ class LLMClient:
             try:
                 if self._format == "anthropic":
                     content = await self._call_anthropic(client, messages, temperature, needs_json=response_format is not None)
+                elif self._format == "openai-responses":
+                    content = await self._call_responses(client, messages, temperature, needs_json=response_format is not None)
                 else:
+                    # 'openai' 和 'gemini' 都走 OpenAI Chat Completions
                     content = await self._call_openai(client, messages, temperature, response_format)
                 return content
             except Exception as e:
@@ -92,8 +102,14 @@ class LLMClient:
 
     @property
     def _json_response_format(self) -> Optional[Dict[str, str]]:
-        """Anthropic 不支持 response_format 参数"""
-        return {"type": "json_object"} if self._format != "anthropic" else None
+        """JSON 输出意图标记。
+
+        统一返回 ``{"type": "json_object"}`` 让调用方表达"我要 JSON"的意图；
+        chat_completion 内部按 format 决定如何落实：
+        - openai / gemini：直接传给 chat.completions 的 response_format
+        - anthropic / openai-responses：仅用作 needs_json 标志，靠 prompt 或 API 特有字段实现
+        """
+        return {"type": "json_object"}
 
     async def _call_openai(
         self,
@@ -147,6 +163,69 @@ class LLMClient:
             if block.type == "text":
                 return block.text
         return ""
+
+    async def _call_responses(
+        self,
+        client: Any,
+        messages: List[Dict[str, str]],
+        temperature: float,
+        needs_json: bool = False,
+    ) -> str:
+        """OpenAI Responses API 调用（流式）。
+
+        ChatGPT Codex 后端**强制要求 stream=true**（非流式直接 400 "Stream must be set to true"），
+        OpenAI 官方端点也兼容流式。两边统一走流式，省一个分支。
+
+        兼容端点：
+        - OpenAI 官方 ``https://api.openai.com/v1``
+        - ChatGPT Codex 后端 ``https://chatgpt.com/backend-api/codex``（OAuth + 特殊 header）
+
+        Codex 端点要求：
+        - HTTP header ``ChatGPT-Account-Id``（用 self._account_id）
+        - body 含 ``reasoning`` 和 ``include`` 字段
+        """
+        # Responses API: system → instructions（顶层字段），user/assistant → input 列表
+        system_parts: List[str] = []
+        input_messages: List[Dict[str, Any]] = []
+        for msg in messages:
+            role = msg["role"]
+            content = msg["content"]
+            if role == "system":
+                system_parts.append(content)
+                continue
+            input_messages.append({
+                "type": "message",
+                "role": role,
+                "content": content,
+            })
+
+        instructions = "\n\n".join(system_parts) if system_parts else None
+
+        # Codex 不支持 text.format JSON 强约束，统一走 prompt 兜底
+        if needs_json and instructions and "JSON" not in instructions:
+            instructions += "\n\nIMPORTANT: You must respond with valid JSON only, no other text."
+
+        # account_id 只在 ChatGPT Codex OAuth 场景下被设置（admin.buildConnectionInfo 里只对
+        # OAuth provider 注入），所以它是 Codex 后端的可靠信号。
+        is_codex = bool(self._account_id)
+        # SDK 的 responses.stream(...) 内部固定 stream=True，不能再传 stream kwarg
+        kwargs: Dict[str, Any] = {
+            "model": self.model,
+            "input": input_messages,
+            "temperature": temperature,
+            "store": False,
+        }
+        if instructions:
+            kwargs["instructions"] = instructions
+        if is_codex:
+            kwargs["reasoning"] = {"effort": "medium", "summary": "auto"}
+            kwargs["include"] = ["reasoning.encrypted_content"]
+            kwargs["extra_headers"] = {"ChatGPT-Account-Id": self._account_id}
+
+        # get_final_response() 内部会自动 await until_done()，不需要外层手动 drain
+        async with client.responses.stream(**kwargs) as stream:
+            final = await stream.get_final_response()
+        return getattr(final, "output_text", "") or ""
 
     async def extract_keywords(self, text: str) -> List[str]:
         """从文本中提取关键词"""

@@ -678,6 +678,12 @@ export interface Schedule {
   last_task_id?: TaskId
   /** 是否为系统内置（不可删除） */
   is_builtin?: boolean
+  /**
+   * 创建者 Friend ID。
+   * - 用户创建：填写当前调用者对应的 Friend；触发时 task 沿用此 friend 的权限模板。
+   * - 系统内置（is_builtin=true）：留空，触发时按 master 等价的最高权限运行。
+   */
+  creator_friend_id?: FriendId
   /** 创建时间 */
   created_at: string
   /** 更新时间 */
@@ -825,6 +831,12 @@ export interface CreateScheduleParams {
   enabled?: boolean
   trigger: ScheduleTrigger
   task_template: ScheduleTaskTemplate
+  /**
+   * 创建者 Friend ID。
+   * - 用户/CLI 调用必须传：触发时 task 沿用该 friend 的权限。
+   * - 系统内置 seed 流程不经过此入口；外部调用方留空时按系统级处理（最高权限）。
+   */
+  creator_friend_id?: FriendId
 }
 
 export interface CreateScheduleResult {
@@ -895,7 +907,7 @@ export interface TriggerNowResult {
 export type ApiFormat = 'openai' | 'anthropic' | 'gemini' | 'openai-responses'
 
 /** 模型类型 */
-export type ModelType = 'llm' | 'embedding'
+export type ModelType = 'llm'
 
 /** 供应商状态 */
 export type ProviderStatus = 'active' | 'inactive' | 'error'
@@ -916,8 +928,6 @@ export interface ModelInfo {
   context_window?: number
   /** LLM: 最大输出 token 数（此值将传给 Anthropic SDK 的 max_tokens 参数，须与模型实际上限一致） */
   max_tokens?: number
-  /** Embedding: 向量维度（自动探测） */
-  dimension?: number
   description?: string
   tags?: string[]
 }
@@ -982,8 +992,6 @@ export interface OAuthCredential {
 export interface GlobalModelConfig {
   default_llm_provider_id?: string
   default_llm_model_id?: string
-  default_embedding_provider_id?: string
-  default_embedding_model_id?: string
   proxy?: ProxyConfig
 }
 
@@ -994,8 +1002,6 @@ export interface ModuleModelConfig {
   module_id: string
   llm_provider_id?: string
   llm_model_id?: string
-  embedding_provider_id?: string
-  embedding_model_id?: string
 }
 
 /**
@@ -1021,20 +1027,11 @@ export interface LLMConnectionInfo extends ModelConnectionInfo {
 }
 
 /**
- * Embedding 连接信息
- */
-export interface EmbeddingConnectionInfo extends ModelConnectionInfo {
-  dimension: number
-}
-
-/**
  * 验证结果
  */
 export interface ValidationResult {
   success: boolean
   error?: string
-  /** Embedding 探测到的维度 */
-  dimension?: number
 }
 
 // Model Provider API 参数类型

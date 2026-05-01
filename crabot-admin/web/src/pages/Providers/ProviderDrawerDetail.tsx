@@ -172,9 +172,7 @@ export const ProviderDrawerDetail: React.FC<ProviderDrawerDetailProps> = ({
               <div className="model-table-row" key={model.model_id}>
                 <span className="model-table-col-id">{model.model_id}</span>
                 <span className="model-table-col-type">
-                  <span className={`badge badge-${model.type === 'llm' ? 'success' : 'warning'}`}>
-                    {model.type === 'llm' ? 'LLM' : 'Embedding'}
-                  </span>
+                  <span className="badge badge-success">LLM</span>
                   {model.type === 'llm' && (
                     <span
                       className={`badge ${model.supports_vision ? 'badge-info' : 'badge-muted'}`}

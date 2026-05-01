@@ -88,7 +88,10 @@ export class ContextManager {
       return [...messages]
     }
 
-    const splitIndex = messages.length - this.keepRecentMessages
+    const splitIndex = this.findSafeSplitIndex(messages)
+    if (splitIndex <= 0) {
+      return [...messages]
+    }
     const oldMessages = messages.slice(0, splitIndex)
     const recentMessages = messages.slice(splitIndex)
 
@@ -107,7 +110,10 @@ export class ContextManager {
       return [...messages]
     }
 
-    const splitIndex = messages.length - this.keepRecentMessages
+    const splitIndex = this.findSafeSplitIndex(messages)
+    if (splitIndex <= 0) {
+      return [...messages]
+    }
     const oldMessages = messages.slice(0, splitIndex)
     const recentMessages = messages.slice(splitIndex)
 
@@ -147,6 +153,26 @@ export class ContextManager {
 
   getCumulativeUsage(): CumulativeUsage {
     return this.cumulativeUsage
+  }
+
+  /**
+   * 找到一个安全的 compaction 切割点：保证 recent 段第一条消息不是孤儿 tool_result
+   * （其匹配的 tool_use 在被压缩段，会触发 LLM API 400）。
+   *
+   * 默认切点 = messages.length - keepRecentMessages。如果该位置是 tool_result，
+   * 向前回退把对应的 assistant_with_tool_use 一起拉进 recent。assistant 与 tool_result
+   * 严格相邻，所以最多回退一步即可。
+   */
+  private findSafeSplitIndex(messages: ReadonlyArray<EngineMessage>): number {
+    let splitIndex = messages.length - this.keepRecentMessages
+    while (splitIndex > 0 && this.isToolResultMessage(messages[splitIndex])) {
+      splitIndex--
+    }
+    return splitIndex
+  }
+
+  private isToolResultMessage(msg: EngineMessage): boolean {
+    return 'toolResults' in msg
   }
 
   private estimateContentBlocks(blocks: ReadonlyArray<ContentBlock>): number {

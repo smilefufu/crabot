@@ -99,7 +99,7 @@ async def test_rule_retrievable_via_get_memory(tmp_path):
         brief="抽象出的 rule", content="rule body",
         scenario="测试场景",
     )
-    rpc = LongTermV2Rpc(store=store, index=index, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=index)
     out = await rpc.get_memory({"id": rule_id, "include": "full"})
     fm = out["frontmatter"]
     assert fm["maturity"] == "rule"
@@ -120,7 +120,7 @@ async def test_rule_appears_in_observation_pending(tmp_path):
         brief="g", content="b", scenario="s",
         window_days=7,
     )
-    rpc = LongTermV2Rpc(store=store, index=index, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=index)
     # 不传 now_iso，新 rule 当下就应该出现（未到期也算 pending）
     out = await rpc.get_observation_pending({})
     pending_ids = [r["id"] for r in out["items"]]

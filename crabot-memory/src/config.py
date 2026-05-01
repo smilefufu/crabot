@@ -1,10 +1,13 @@
 """
 Memory 模块配置
 """
-from typing import Optional
+from typing import Literal, Optional
 from pydantic import BaseModel, Field
 import os
 import yaml
+
+
+LLMFormat = Literal["openai", "anthropic", "gemini", "openai-responses"]
 
 
 class LLMConfig(BaseModel):
@@ -12,23 +15,16 @@ class LLMConfig(BaseModel):
     api_key: str = ""  # 允许空值，但标记为未配置
     base_url: str = ""
     model: str = ""
-    format: str = "openai"  # 'openai' | 'anthropic'
+    format: LLMFormat = "openai"
+    # 仅 openai-responses + ChatGPT 订阅 OAuth 时使用：用作 ChatGPT-Account-Id header
+    account_id: str = ""
     temperature: float = 0.1
     max_retries: int = 3
-
-
-class EmbeddingConfig(BaseModel):
-    """Embedding 配置"""
-    api_key: str = ""  # 允许空值，但标记为未配置
-    base_url: str = ""
-    model: str = ""
-    dimension: Optional[int] = None  # 自动探测，不硬编码默认值
 
 
 class StorageConfig(BaseModel):
     """存储配置"""
     data_dir: str = "./data/memory"
-    lancedb_dir: str = "lancedb"
     sqlite_file: str = "metadata.db"
 
 
@@ -65,7 +61,6 @@ class MemoryConfig(BaseModel):
     admin_endpoint: str = ""  # Admin RPC 地址，供启动时 pull 配置
 
     llm: LLMConfig = Field(default_factory=LLMConfig)
-    embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     dedup: DedupConfig = Field(default_factory=DedupConfig)
     compression: CompressionConfig = Field(default_factory=CompressionConfig)
@@ -100,14 +95,9 @@ def load_config(config_path: Optional[str] = None) -> MemoryConfig:
         config.llm.model = v
     if v := os.environ.get("CRABOT_LLM_FORMAT"):
         config.llm.format = v
-    if v := os.environ.get("CRABOT_EMBEDDING_API_KEY"):
-        config.embedding.api_key = v
-    if v := os.environ.get("CRABOT_EMBEDDING_BASE_URL"):
-        config.embedding.base_url = v
-    if v := os.environ.get("CRABOT_EMBEDDING_MODEL"):
-        config.embedding.model = v
-    if v := os.environ.get("CRABOT_EMBEDDING_DIMENSION"):
-        config.embedding.dimension = int(v)
+    if v := os.environ.get("CRABOT_LLM_ACCOUNT_ID"):
+        config.llm.account_id = v
+    # CRABOT_EMBEDDING_* env vars 在 v3 已废弃，启动时静默忽略（兼容老 admin push）
     if v := os.environ.get("CRABOT_MEMORY_DATA_DIR"):
         config.storage.data_dir = v
 

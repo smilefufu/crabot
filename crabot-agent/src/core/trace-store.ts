@@ -193,14 +193,18 @@ export class TraceStore {
       type: AgentSpanType
       parent_span_id?: string
       details: AgentSpanDetails
+      /** Back-date from post-hoc callbacks (e.g. worker-handler onTurn fires
+       * after LLM + tools complete). Defaults to Date.now(). */
+      started_at_ms?: number
     }
   ): AgentSpan {
+    const startedAtMs = params.started_at_ms ?? Date.now()
     const span: AgentSpan = {
       span_id: crypto.randomUUID(),
       parent_span_id: params.parent_span_id,
       trace_id: traceId,
       type: params.type,
-      started_at: new Date().toISOString(),
+      started_at: new Date(startedAtMs).toISOString(),
       status: 'running',
       details: params.details,
     }
@@ -217,7 +221,9 @@ export class TraceStore {
     traceId: string,
     spanId: string,
     status: 'completed' | 'failed',
-    detailsUpdate?: Partial<AgentSpanDetails>
+    detailsUpdate?: Partial<AgentSpanDetails>,
+    /** Back-date from post-hoc callbacks. Defaults to Date.now(). */
+    endedAtMs?: number,
   ): void {
     const trace = this.traces.get(traceId)
     if (!trace) return
@@ -225,9 +231,9 @@ export class TraceStore {
     const span = trace.spans.find((s) => s.span_id === spanId)
     if (!span) return
 
-    const now = new Date()
-    span.ended_at = now.toISOString()
-    span.duration_ms = now.getTime() - new Date(span.started_at).getTime()
+    const resolvedEndedAtMs = endedAtMs ?? Date.now()
+    span.ended_at = new Date(resolvedEndedAtMs).toISOString()
+    span.duration_ms = resolvedEndedAtMs - new Date(span.started_at).getTime()
     span.status = status
 
     if (detailsUpdate) {

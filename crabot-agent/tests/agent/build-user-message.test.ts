@@ -91,9 +91,48 @@ describe('buildUserMessage', () => {
     expect(result).not.toContain('## 最近消息')
   })
 
-  it('应该截断超过 300 字符的单条消息内容', () => {
-    const longText = 'A'.repeat(400)
+  it('最近 3 条消息按 maxLen=2000 截断', () => {
+    // 单条 recent_messages：distFromEnd=0 < 3 → maxLen=2000
+    const longText = 'A'.repeat(2500)
     const recentMessages = [makeMessage({ sender: 'Bot', text: longText })]
+
+    const result = buildUserMessage(
+      [makeMessage({ text: 'hi' })],
+      makeContext({ recent_messages: recentMessages }),
+    )
+
+    expect(result).toContain('A'.repeat(2000) + '...[内容截断]')
+    expect(result).not.toContain('A'.repeat(2001))
+  })
+
+  it('距离 3-10 的消息按 maxLen=600 截断', () => {
+    // 构造 5 条消息：第 0 条 distFromEnd=4 落入 3-10 区（maxLen=600）
+    const longText = 'A'.repeat(800)
+    const recentMessages = [
+      makeMessage({ sender: 'Bot', text: longText }),
+      ...Array.from({ length: 4 }, (_, i) =>
+        makeMessage({ sender: `User${i}`, text: `m${i}` }),
+      ),
+    ]
+
+    const result = buildUserMessage(
+      [makeMessage({ text: 'hi' })],
+      makeContext({ recent_messages: recentMessages }),
+    )
+
+    expect(result).toContain('A'.repeat(600) + '...[内容截断]')
+    expect(result).not.toContain('A'.repeat(601))
+  })
+
+  it('距离 ≥10 的远端消息按 maxLen=300 截断', () => {
+    // 构造 12 条消息：第 0 条 distFromEnd=11 落入 ≥10 区（maxLen=300）
+    const longText = 'A'.repeat(500)
+    const recentMessages = [
+      makeMessage({ sender: 'Bot', text: longText }),
+      ...Array.from({ length: 11 }, (_, i) =>
+        makeMessage({ sender: `User${i}`, text: `m${i}` }),
+      ),
+    ]
 
     const result = buildUserMessage(
       [makeMessage({ text: 'hi' })],

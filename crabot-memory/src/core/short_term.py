@@ -11,7 +11,7 @@ from ..types import (
     WriteShortTermParams,
     SearchShortTermParams,
 )
-from ..storage.vector_store import VectorStore
+from ..storage.short_term_store import ShortTermStore
 from ..utils.llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
@@ -22,10 +22,10 @@ class ShortTermMemory:
 
     def __init__(
         self,
-        vector_store: VectorStore,
+        short_term_store: ShortTermStore,
         llm_client: LLMClient,
     ):
-        self.vector_store = vector_store
+        self.short_term_store = short_term_store
         self.llm_client = llm_client
 
     async def write(self, params: WriteShortTermParams) -> ShortTermMemoryEntry:
@@ -58,14 +58,14 @@ class ShortTermMemory:
         )
 
         # 存储
-        await self.vector_store.add_short_term(entry)
+        await self.short_term_store.add_short_term(entry)
         logger.info("Short-term memory written: %s", entry.id)
         return entry
 
     async def search(self, params: SearchShortTermParams) -> List[ShortTermMemoryEntry]:
         """检索短期记忆"""
         f = params.filter
-        results = await self.vector_store.search_short_term(
+        results = await self.short_term_store.search_short_term(
             query=params.query,
             limit=params.limit,
             min_visibility=params.min_visibility or "public",
@@ -88,7 +88,7 @@ class ShortTermMemory:
         compressed_count = 0
 
         for vis in ["private", "internal", "public"]:
-            old_entries = await self.vector_store.query_old_short_term(
+            old_entries = await self.short_term_store.query_old_short_term(
                 before_time=cutoff, visibility=vis, compressed=False, limit=500,
             )
             if not old_entries:
@@ -111,7 +111,7 @@ class ShortTermMemory:
                     all_scopes.update(r.get("scopes") or [])
 
                 old_ids = [r["id"] for r in batch]
-                await self.vector_store.delete_short_term_by_ids(old_ids)
+                await self.short_term_store.delete_short_term_by_ids(old_ids)
 
                 for fact in compressed_facts:
                     entry = ShortTermMemoryEntry(
@@ -122,7 +122,7 @@ class ShortTermMemory:
                         visibility=vis,
                         scopes=list(all_scopes),
                     )
-                    await self.vector_store.add_short_term(entry)
+                    await self.short_term_store.add_short_term(entry)
                     compressed_count += 1
 
         return {"compressed_count": compressed_count}
@@ -132,12 +132,12 @@ class ShortTermMemory:
         from datetime import datetime, timedelta
 
         cutoff = (datetime.utcnow() - timedelta(days=config.max_retention_days)).isoformat() + "Z"
-        await self.vector_store.rotate_short_term(cutoff)
+        await self.short_term_store.rotate_short_term(cutoff)
         return {"rotated_before": cutoff}
 
     async def get_stats(self) -> dict:
         """获取短期记忆统计"""
-        count = self.vector_store.get_short_term_count()
+        count = self.short_term_store.get_short_term_count()
         # TODO: 实现更详细的统计（压缩数、token 数、时间范围等）
         return {
             "entry_count": count,

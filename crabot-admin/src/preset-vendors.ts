@@ -41,10 +41,6 @@ const DASHSCOPE_MODELS: ModelInfo[] = [
   { model_id: 'qwen-vl-max-latest', display_name: 'Qwen VL Max Latest', type: 'llm', supports_vision: true, context_window: 32768 },
   { model_id: 'qwen-vl-plus', display_name: 'Qwen VL Plus', type: 'llm', supports_vision: true, context_window: 131072 },
   { model_id: 'qwen-vl-plus-latest', display_name: 'Qwen VL Plus Latest', type: 'llm', supports_vision: true, context_window: 131072 },
-  // ---- Embedding ----
-  { model_id: 'text-embedding-v3', display_name: 'Text Embedding v3', type: 'embedding' },
-  { model_id: 'text-embedding-v2', display_name: 'Text Embedding v2', type: 'embedding' },
-  { model_id: 'text-embedding-v1', display_name: 'Text Embedding v1', type: 'embedding' },
 ]
 
 /**

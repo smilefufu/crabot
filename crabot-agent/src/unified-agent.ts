@@ -34,6 +34,7 @@ import type {
   TraceCallback,
   BuiltinToolConfig,
   SkillConfig,
+  WorkerAgentContext,
 } from './types.js'
 import { SessionManager } from './orchestration/session-manager.js'
 import { SwitchMapHandler } from './orchestration/switchmap-handler.js'
@@ -414,7 +415,6 @@ export class UnifiedAgent extends ModuleBase {
     // 保证 updateSkills 后下一轮 LLM 调用即时生效。
     const handler = new WorkerHandler(workerSdkEnv, {
       systemPrompt: workerPersonality ?? '',
-      longTermPreloadLimit: this.orchestrationConfig.worker_long_term_memory_limit,
       extra: this.extra,
       getTimezone: () => resolveTimezone(this.agentConfig?.timezone),
     }, {
@@ -425,7 +425,7 @@ export class UnifiedAgent extends ModuleBase {
         resolveChannelPort: (channelId) => this.getChannelPort(channelId),
         getMemoryPort: () => this.getMemoryPort(),
         getAdminPort: () => this.getAdminPort(),
-        getPermissionConfig: (tools) => this.getToolPermissionConfig(tools),
+        getPermissionConfig: (tools, resolvedPerms) => this.getToolPermissionConfig(tools, resolvedPerms),
       },
       builtinToolConfig,
       mcpConnector: this.mcpConnector,
@@ -624,7 +624,7 @@ export class UnifiedAgent extends ModuleBase {
       this.currentResolvedPerms = resolvedPerms
       const memPerms = await this.deriveMemoryPermissions(friend, session.session_id, resolvedPerms)
 
-      // 6. 组装上下文（带 span 追踪耗时）
+      // 6. 组装上下文（带 span 追踪耗时；子 fetch 挂在此 span 下）
       const ctxSpan = this.traceStore.startSpan(trace.trace_id, {
         type: 'context_assembly',
         details: {
@@ -644,7 +644,8 @@ export class UnifiedAgent extends ModuleBase {
           session_type: 'private',
         },
         friend,
-        memPerms
+        memPerms,
+        { traceStore: this.traceStore as TraceStoreInterface, traceId: trace.trace_id, parentSpanId: ctxSpan.span_id },
       )
       this.traceStore.endSpan(trace.trace_id, ctxSpan.span_id, 'completed')
 
@@ -706,6 +707,7 @@ export class UnifiedAgent extends ModuleBase {
                 messages: mergedMessages,
                 senderFriend: friend,
                 memoryPermissions: memPerms,
+                resolvedPerms,
               },
               {
                 traceStore: this.traceStore as TraceStoreInterface,
@@ -723,6 +725,7 @@ export class UnifiedAgent extends ModuleBase {
               messages: mergedMessages,
               senderFriend: friend,
               memoryPermissions: memPerms,
+              resolvedPerms,
             },
             {
               traceStore: this.traceStore as TraceStoreInterface,
@@ -868,7 +871,8 @@ export class UnifiedAgent extends ModuleBase {
           crab_display_name: this.crabDisplayNames.get(session.channel_id),
         },
         lastEntry.friend,
-        memPerms
+        memPerms,
+        { traceStore: this.traceStore as TraceStoreInterface, traceId: trace.trace_id, parentSpanId: ctxSpan.span_id },
       )
       this.traceStore.endSpan(trace.trace_id, ctxSpan.span_id, 'completed')
 
@@ -911,6 +915,7 @@ export class UnifiedAgent extends ModuleBase {
               messages: messages,
               senderFriend: lastEntry.friend,
               memoryPermissions: memPerms,
+              resolvedPerms,
             },
             {
               traceStore: this.traceStore as TraceStoreInterface,
@@ -1090,11 +1095,20 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   /**
-   * Get current session's tool permission config for worker use
+   * Get tool permission config for worker use.
+   *
+   * 优先使用任务自带的 `resolvedPerms`（per-task 快照，containsScheduled 任务由 Admin 解析后下发的），
+   * 其次回退到 currentResolvedPerms（Front 处理消息时残留的会话级解析），最后用 FAIL_CLOSED 兜底。
+   * 三段式兜底是为了让定时任务、并发会话各自拿到正确权限，不再依赖一个被串改的全局字段。
    */
-  getToolPermissionConfig(tools: ReadonlyArray<EngineToolDefinition>): ToolPermissionConfig {
-    // fail-closed：权限解析失败时按最小权限兜底，不放开全部工具
-    const toolAccess = this.currentResolvedPerms?.tool_access ?? FAIL_CLOSED_TOOL_ACCESS
+  getToolPermissionConfig(
+    tools: ReadonlyArray<EngineToolDefinition>,
+    resolvedPerms?: ResolvedPermissions,
+  ): ToolPermissionConfig {
+    const toolAccess =
+      resolvedPerms?.tool_access
+      ?? this.currentResolvedPerms?.tool_access
+      ?? FAIL_CLOSED_TOOL_ACCESS
     return toToolPermissionConfig(toolAccess, tools)
   }
 
@@ -1622,7 +1636,8 @@ export class UnifiedAgent extends ModuleBase {
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         },
-        masterMemPerms
+        masterMemPerms,
+        { traceStore: this.traceStore as TraceStoreInterface, traceId: trace.trace_id, parentSpanId: ctxSpan.span_id },
       )
       this.traceStore.endSpan(trace.trace_id, ctxSpan.span_id, 'completed')
 
@@ -1755,8 +1770,17 @@ export class UnifiedAgent extends ModuleBase {
     title: string
     description: string
     preferred_worker_specialization?: string
+    /** Admin 解析后下发的执行权限（按 schedule.creator 或系统内置 master_private 计算） */
+    resolved_permissions?: ResolvedPermissions
   }): Promise<{ task_id: string; assigned_worker: ModuleId }> {
-    const { schedule_id, task_type, title, description, preferred_worker_specialization } = params
+    const {
+      schedule_id,
+      task_type,
+      title,
+      description,
+      preferred_worker_specialization,
+      resolved_permissions,
+    } = params
 
     try {
       // 选择 Worker
@@ -1797,8 +1821,10 @@ export class UnifiedAgent extends ModuleBase {
         `[${this.config.moduleId}] Created task ${taskId} from schedule ${schedule_id}, assigned to ${workerId}`
       )
 
-      // 组装调度任务上下文并启动 Worker 执行
       const workerContext = await this.contextAssembler.assembleScheduledTaskContext()
+      const workerContextWithPerms: WorkerAgentContext = resolved_permissions
+        ? { ...workerContext, resolved_permissions }
+        : workerContext
 
       this.decisionDispatcher.executeScheduledTaskInBackground(
         {
@@ -1808,7 +1834,7 @@ export class UnifiedAgent extends ModuleBase {
           priority: 'normal',
           task_type,
         },
-        workerContext,
+        workerContextWithPerms,
       )
 
       return { task_id: taskId, assigned_worker: workerId }
@@ -2203,41 +2229,55 @@ export class UnifiedAgent extends ModuleBase {
         if (currentLoopSpanId === spanId) currentLoopSpanId = undefined
       },
 
-      onLlmCallStart(iteration: number, inputSummary: string, attempt?: number): string {
+      onLlmCallStart(iteration: number, inputSummary: string, attempt?: number, startedAtMs?: number): string {
         const span = store.startSpan(traceId, {
           type: 'llm_call',
           parent_span_id: currentLoopSpanId,
           details: { iteration, attempt, input_summary: inputSummary },
+          ...(startedAtMs !== undefined ? { started_at_ms: startedAtMs } : {}),
         })
         currentLlmSpanId = span.span_id
         return span.span_id
       },
 
-      onLlmCallEnd(spanId: string, result: { stopReason?: string; outputSummary?: string; toolCallsCount?: number; fullInput?: string; fullOutput?: string; error?: string }): void {
-        store.endSpan(traceId, spanId, result.error ? 'failed' : 'completed', {
-          stop_reason: result.stopReason,
-          output_summary: result.error ?? result.outputSummary,
-          tool_calls_count: result.toolCallsCount,
-          full_input: result.fullInput,
-          full_output: result.fullOutput,
-        } as Partial<import('./types.js').LlmCallDetails>)
+      onLlmCallEnd(spanId: string, result: { stopReason?: string; outputSummary?: string; toolCallsCount?: number; fullInput?: string; fullOutput?: string; error?: string }, endedAtMs?: number): void {
+        store.endSpan(
+          traceId,
+          spanId,
+          result.error ? 'failed' : 'completed',
+          {
+            stop_reason: result.stopReason,
+            output_summary: result.error ?? result.outputSummary,
+            tool_calls_count: result.toolCallsCount,
+            full_input: result.fullInput,
+            full_output: result.fullOutput,
+          } as Partial<import('./types.js').LlmCallDetails>,
+          endedAtMs,
+        )
         if (currentLlmSpanId === spanId) currentLlmSpanId = undefined
       },
 
-      onToolCallStart(toolName: string, inputSummary: string): string {
+      onToolCallStart(toolName: string, inputSummary: string, startedAtMs?: number): string {
         const span = store.startSpan(traceId, {
           type: 'tool_call',
           parent_span_id: currentLlmSpanId,
           details: { tool_name: toolName, input_summary: inputSummary },
+          ...(startedAtMs !== undefined ? { started_at_ms: startedAtMs } : {}),
         })
         return span.span_id
       },
 
-      onToolCallEnd(spanId: string, outputSummary: string, error?: string): void {
-        store.endSpan(traceId, spanId, error ? 'failed' : 'completed', {
-          output_summary: outputSummary,
-          error,
-        } as Partial<import('./types.js').ToolCallDetails>)
+      onToolCallEnd(spanId: string, outputSummary: string, error?: string, endedAtMs?: number): void {
+        store.endSpan(
+          traceId,
+          spanId,
+          error ? 'failed' : 'completed',
+          {
+            output_summary: outputSummary,
+            error,
+          } as Partial<import('./types.js').ToolCallDetails>,
+          endedAtMs,
+        )
       },
     }
   }

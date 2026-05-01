@@ -15,18 +15,29 @@ import uvicorn
 
 from .config import MemoryConfig
 from .types import *
-from .storage.vector_store import VectorStore
+from .storage.short_term_store import ShortTermStore
 from .storage.sqlite_store import SQLiteStore
 from .storage.scene_profile_store import SceneProfileStore
 from .core.short_term import ShortTermMemory
 from .utils.llm_client import LLMClient
-from .utils.embedding import EmbeddingClient
 from .long_term_v2.store import MemoryStore as LongTermV2Store
 from .long_term_v2.sqlite_index import SqliteIndex as LongTermV2Index
 from .long_term_v2.rpc import LongTermV2Rpc
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# 同时把 INFO 及以上日志写到固定文件（stdio:inherit 不落盘，文件方便事后排查）
+try:
+    _data_dir = Path(os.environ.get("DATA_DIR", "./data"))
+    _log_dir = _data_dir / "memory"
+    _log_dir.mkdir(parents=True, exist_ok=True)
+    _file_handler = logging.FileHandler(_log_dir / "memory.log", mode="a", encoding="utf-8")
+    _file_handler.setLevel(logging.INFO)
+    _file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    logging.getLogger().addHandler(_file_handler)
+except Exception as _e:  # noqa: BLE001
+    logger.warning("memory file logger setup failed: %s", _e)
 
 
 class MemoryModule:
@@ -42,16 +53,8 @@ class MemoryModule:
         data_dir = Path(self.config.storage.data_dir)
         data_dir.mkdir(parents=True, exist_ok=True)
 
-        self.embedding_client = EmbeddingClient(
-            api_key=self.config.embedding.api_key,
-            base_url=self.config.embedding.base_url,
-            model=self.config.embedding.model,
-            dimension=self.config.embedding.dimension,
-        )
-
-        self.vector_store = VectorStore(
-            db_path=str(data_dir / self.config.storage.lancedb_dir),
-            embedding_client=self.embedding_client,
+        self.short_term_store = ShortTermStore(
+            db_path=str(data_dir / "short_term.db"),
         )
 
         self.sqlite_store = SQLiteStore(
@@ -67,10 +70,11 @@ class MemoryModule:
             base_url=self.config.llm.base_url,
             model=self.config.llm.model,
             format=self.config.llm.format,
+            account_id=self.config.llm.account_id,
         )
 
         # 初始化核心模块
-        self.short_term = ShortTermMemory(self.vector_store, self.llm_client)
+        self.short_term = ShortTermMemory(self.short_term_store, self.llm_client)
 
         self._compression_running = False
 
@@ -91,7 +95,6 @@ class MemoryModule:
         self._lt_v2_rpc = LongTermV2Rpc(
             store=self._lt_v2_store,
             index=self._lt_v2_index,
-            embedder=self._long_term_embedder(),
             llm=self.llm_client,
             reranker=reranker,
         )
@@ -108,26 +111,9 @@ class MemoryModule:
             self.config.llm.model
         )
 
-    def is_embedding_configured(self) -> bool:
-        """检查 Embedding 配置是否完整"""
-        return bool(
-            self.config.embedding.api_key and
-            self.config.embedding.base_url and
-            self.config.embedding.model
-        )
-
     def is_configured(self) -> bool:
-        """Memory v2 的基础能力只要求 LLM；embedding 是可选增强。"""
+        """Memory v3 只依赖 LLM。embedding 子系统已移除。"""
         return self.is_llm_configured()
-
-    def _long_term_embedder(self):
-        """长期记忆 v2 仅在 embedding 配置完整时启用 dense 索引。"""
-        return self.embedding_client if self.is_embedding_configured() else None
-
-    def _sync_long_term_embedder(self) -> None:
-        embedder = self._long_term_embedder()
-        self._lt_v2_rpc.embedder = embedder
-        self._lt_v2_rpc.pipeline.embedder = embedder
 
     def _register_routes(self):
         """注册 JSON-RPC 路由"""
@@ -211,7 +197,7 @@ class MemoryModule:
 
     async def _health(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """健康检查"""
-        short_count = self.vector_store.get_short_term_count()
+        short_count = self.short_term_store.get_short_term_count()
         long_count = self._lt_v2_index.count_entries()
         return {
             "status": "healthy",
@@ -219,7 +205,6 @@ class MemoryModule:
                 "short_term_count": short_count,
                 "long_term_count": long_count,
                 "total_tokens": (short_count * 100 + long_count * 500),
-                "embedding_model_status": "ready" if self.is_embedding_configured() else "not_configured",
                 "llm_status": "ready" if self.is_llm_configured() else "not_configured",
                 "configured": self.is_configured(),
             },
@@ -236,7 +221,6 @@ class MemoryModule:
         return {
             "configured": self.is_configured(),
             "llm_configured": self.is_llm_configured(),
-            "embedding_configured": self.is_embedding_configured(),
             "version": self.config.version
         }
 
@@ -244,18 +228,11 @@ class MemoryModule:
         """写入短期记忆"""
         if not self.is_llm_configured():
             raise ValueError("Memory module not configured. Please configure LLM settings in Admin.")
-        if not self.is_embedding_configured():
-            logger.info("Short-term memory write skipped: embedding not configured")
-            return {
-                "memory": None,
-                "skipped": True,
-                "reason": "embedding_not_configured",
-            }
         write_params = WriteShortTermParams(**params)
         memory = await self.short_term.write(write_params)
 
         # 异步触发压缩检查
-        count = self.vector_store.get_short_term_count()
+        count = self.short_term_store.get_short_term_count()
         if count > self.config.compression.compression_threshold and not self._compression_running:
             asyncio.create_task(self._run_compression())
 
@@ -276,9 +253,6 @@ class MemoryModule:
 
     async def _search_short_term(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """检索短期记忆"""
-        if not self.is_embedding_configured():
-            logger.info("Short-term memory search skipped: embedding not configured")
-            return {"results": []}
         search_params = SearchShortTermParams(**params)
         results = await self.short_term.search(search_params)
         return {"results": [m.model_dump() for m in results]}
@@ -333,7 +307,7 @@ class MemoryModule:
         长期记忆现在由 long_term_v2 文件存储管理（``<DATA_DIR>/long_term/``），
         请用文件系统级备份/同步该目录；这里只负责短期记忆 + 反思水位。
         """
-        short_rows = await self.vector_store.get_all_short_term_rows()
+        short_rows = await self.short_term_store.get_all_short_term_rows()
         watermark = self.sqlite_store.get_reflection_watermark()
 
         return {
@@ -353,14 +327,14 @@ class MemoryModule:
             raise ValueError(f"Unsupported export version: {version}")
 
         if import_params.mode == "replace":
-            await self.vector_store.clear_all()
+            await self.short_term_store.clear_all()
             self.sqlite_store.conn.execute("DELETE FROM reflection_watermark")
             self.sqlite_store.conn.commit()
 
         short_count = 0
         for row in data.get("short_term", []):
             if import_params.mode == "merge":
-                existing = await self.vector_store.get_by_id(row["id"])
+                existing = await self.short_term_store.get_by_id(row["id"])
                 if existing:
                     continue
             source_data = json.loads(row["source_json"]) if isinstance(row.get("source_json"), str) else row.get("source_json", {})
@@ -378,7 +352,7 @@ class MemoryModule:
                 scopes=list(row.get("scopes") or []),
                 created_at=row.get("created_at", ""),
             )
-            await self.vector_store.add_short_term(entry)
+            await self.short_term_store.add_short_term(entry)
             short_count += 1
 
         if data.get("watermark"):
@@ -400,6 +374,7 @@ class MemoryModule:
                 base_url=llm.get("base_url"),
                 model=llm.get("model"),
                 format=llm.get("format"),
+                account_id=llm.get("account_id"),
             )
             if llm.get("api_key") is not None:
                 self.config.llm.api_key = llm["api_key"]
@@ -409,36 +384,19 @@ class MemoryModule:
                 self.config.llm.model = llm["model"]
             if llm.get("format") is not None:
                 self.config.llm.format = llm["format"]
+            if llm.get("account_id") is not None:
+                self.config.llm.account_id = llm["account_id"]
             updated.append("llm")
 
-        if "embedding" in params and isinstance(params["embedding"], dict):
-            emb = params["embedding"]
-            self.embedding_client.reconfigure(
-                api_key=emb.get("api_key"),
-                base_url=emb.get("base_url"),
-                model=emb.get("model"),
-                dimension=emb.get("dimension"),
-            )
-            if emb.get("api_key") is not None:
-                self.config.embedding.api_key = emb["api_key"]
-            if emb.get("base_url") is not None:
-                self.config.embedding.base_url = emb["base_url"]
-            if emb.get("model") is not None:
-                self.config.embedding.model = emb["model"]
-            if emb.get("dimension") is not None:
-                self.config.embedding.dimension = emb["dimension"]
-            # 维度可能变了，让 VectorStore 下次操作时重新校验
-            if emb.get("model") is not None or emb.get("dimension") is not None:
-                self.vector_store._tables_initialized = False
-            self._sync_long_term_embedder()
-            updated.append("embedding")
+        # v3: embedding 子系统已移除。如果 admin 仍 push 老的 embedding 字段，静默忽略。
+        if "embedding" in params:
+            logger.debug("ignoring deprecated 'embedding' update_config payload")
 
         logger.info("Config hot-reloaded: %s", updated)
         return {
             "updated": updated,
             "current": {
                 "llm": {"model": self.config.llm.model, "base_url": self.config.llm.base_url},
-                "embedding": {"model": self.config.embedding.model, "base_url": self.config.embedding.base_url, "dimension": self.config.embedding.dimension},
             },
         }
 
@@ -581,7 +539,7 @@ class MemoryModule:
     async def stop(self):
         """停止模块"""
         logger.info("Stopping Memory module")
-        self.vector_store.close()
+        self.short_term_store.close()
         self.sqlite_store.close()
         self.scene_profile_store.close()
         if self.server:

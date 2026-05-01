@@ -1,5 +1,4 @@
 """Long-term v2 RPC handlers."""
-import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -20,7 +19,6 @@ from src.long_term_v2.schema import (
     new_memory_id,
     utc_now_iso_z,
 )
-from src.long_term_v2.embedder import texts_for_entry, embed_text_async
 from src.long_term_v2.paths import entry_path
 from src.long_term_v2.recall_pipeline import RecallPipeline
 from src.long_term_v2.agentic_tools import AgenticTools
@@ -35,13 +33,11 @@ _UPDATABLE_FIELDS = frozenset({
 
 
 class LongTermV2Rpc:
-    def __init__(self, store, index, embedder, llm=None, reranker=None):
+    def __init__(self, store, index, llm=None, reranker=None):
         self.store = store
         self.index = index
-        self.embedder = embedder
         self.pipeline = RecallPipeline(
-            store=store, index=index, embedder=embedder,
-            llm=llm, reranker=reranker,
+            store=store, index=index, llm=llm, reranker=reranker,
         )
         self.tools = AgenticTools(store=store, index=index)
 
@@ -71,16 +67,9 @@ class LongTermV2Rpc:
         self.store.write(entry, status=status)
         path = entry_path(self.store.data_root, status, fm.type, fm.id)
         self.index.upsert(entry, path=path, status=status)
-        if self.embedder is not None:
-            fields = [(f, t) for f, t in texts_for_entry(entry).items() if t]
-            try:
-                vecs = await asyncio.gather(
-                    *(embed_text_async(t, self.embedder) for _, t in fields)
-                )
-                for (field, _), vec in zip(fields, vecs):
-                    self.index.upsert_embedding(mem_id, field, vec)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("long-term embedding index skipped: %s", e)
+        # Embedding 写入已废弃（schema v3）：
+        # - dense path 在 recall_pipeline 同步移除（Commit 2）
+        # - embeddings 表在 v2→v3 迁移时 drop（Commit 3）
         return {"id": mem_id, "status": "ok"}
 
     async def search_long_term(self, params: dict) -> dict:

@@ -1,20 +1,26 @@
 /**
  * OpenAI Codex OAuth 配置和工具函数
  *
- * 实现 OAuth 2.0 Authorization Code + PKCE 流程
- * 使用 Codex CLI 的公开 client_id（OpenAI 默许第三方工具使用）
+ * Authorization Code + PKCE 流程，参数和 pi-ai / openclaw 完全一致：
+ * - redirect_uri 永远是 http://localhost:1455/auth/callback（OpenAI 白名单只有这个）
+ * - client_id 用 Codex CLI 公开 ID
+ * - originator='openclaw'
+ *
+ * 两种回调收码方式：
+ *   1. 自动：用户浏览器和 Admin 在同一台机器（loopback 访问），本地 1455 server 接住回调
+ *   2. 手动：用户从 LAN/远程访问 Admin，本机浏览器打开 auth URL，把回调 URL 粘贴回来
  */
 
 import crypto from 'crypto'
 import http from 'http'
-import net from 'net'
 import { oauthErrorHtml, oauthSuccessHtml } from './oauth-page.js'
 
-// --- OAuth 配置 ---
+// --- OAuth 配置（和 pi-ai 完全一致） ---
 
 const CALLBACK_PORT = 1455
+const CALLBACK_BIND_HOST = '127.0.0.1'
+const REDIRECT_URI = `http://localhost:${CALLBACK_PORT}/auth/callback`
 const ORIGINATOR = 'openclaw'
-const DEFAULT_REDIRECT_HOST = 'localhost'
 
 const OAUTH_CONFIG = {
   authorizationEndpoint: 'https://auth.openai.com/oauth/authorize',
@@ -23,56 +29,6 @@ const OAUTH_CONFIG = {
   callbackPort: CALLBACK_PORT,
   scope: 'openid profile email offline_access',
   originator: ORIGINATOR,
-}
-
-function buildRedirectUri(host: string): string {
-  return `http://${host}:${CALLBACK_PORT}/auth/callback`
-}
-
-function isLoopbackHost(host: string): boolean {
-  return host === 'localhost' || host === '127.0.0.1' || host === '::1'
-}
-
-/**
- * 解析 callback server 应绑定的地址。
- * Loopback 主机只绑定到本机；IP 字面量绑定到该具体 IP（避免把端口暴露到其他网卡）；
- * DNS 名称无法在同步上下文解析，退回到 0.0.0.0。
- */
-function resolveBindAddress(host: string): string {
-  if (isLoopbackHost(host)) return '127.0.0.1'
-  if (net.isIP(host)) return host
-  return '0.0.0.0'
-}
-
-/**
- * 解析自验证请求应访问的地址。
- * 如果 callback server 绑定到具体 IP，自验证也必须访问该 IP；否则 127.0.0.1 上没有监听会误判失败。
- * DNS 名称绑定到 0.0.0.0，仍可通过 127.0.0.1 从本机验证。
- */
-export function resolveSelfCheckHost(host: string): string {
-  if (isLoopbackHost(host)) return '127.0.0.1'
-  if (net.isIP(host)) return host
-  return '127.0.0.1'
-}
-
-/**
- * 从可选的显式值和 HTTP Host 头中解析回调使用的主机名。
- * 用于 Admin 模块决定 OAuth redirect_uri 的域名——让 OpenAI 回调到浏览器实际访问的地址。
- */
-export function resolveRedirectHost(
-  explicit: string | undefined,
-  hostHeader: string | undefined,
-): string {
-  const trimmed = explicit?.trim()
-  if (trimmed) return trimmed
-  if (hostHeader) {
-    try {
-      return new URL(`http://${hostHeader}`).hostname || DEFAULT_REDIRECT_HOST
-    } catch {
-      // Host 头异常时退回默认
-    }
-  }
-  return DEFAULT_REDIRECT_HOST
 }
 
 // --- PKCE ---
@@ -143,7 +99,6 @@ export interface OAuthLoginResult {
 interface PendingOAuthFlow {
   state: string
   codeVerifier: string
-  redirectUri: string
   resolve: (result: OAuthLoginResult) => void
   reject: (error: Error) => void
   server: http.Server
@@ -152,27 +107,20 @@ interface PendingOAuthFlow {
 
 let pendingFlow: PendingOAuthFlow | null = null
 
-export interface WaitForOAuthCallbackOptions {
-  /** 回调 URL 使用的主机名。默认 'localhost'；从局域网/远程访问时应传入访问 UI 的域名。 */
-  redirectHost?: string
-}
-
 /**
  * 启动回调服务器，等待 OAuth 回调
- * 返回 Promise，登录成功时 resolve
+ *
+ * 自动模式下，本地 1455 server 接住浏览器回调直接 resolve；
+ * 手动模式下，调用方应通过 submitManualCallback() 完成同一个 pending flow。
+ *
+ * 注：1455 端口被占用是 hard error（PORT_IN_USE），即使最终走手动也报错。
+ * 因为 OpenAI 白名单只有 localhost:1455，被占就拿不到独占的 callback 通道。
  */
-export function waitForOAuthCallback(
-  options: WaitForOAuthCallbackOptions = {},
-): Promise<OAuthLoginResult> {
+export function waitForOAuthCallback(): Promise<OAuthLoginResult> {
   return new Promise((resolve, reject) => {
-    const redirectHost = options.redirectHost?.trim() || DEFAULT_REDIRECT_HOST
-    const redirectUri = buildRedirectUri(redirectHost)
-    const bindAddress = resolveBindAddress(redirectHost)
-
     const state = generateState()
     const codeVerifier = generateCodeVerifier()
 
-    // 清理之前的 pending flow
     if (pendingFlow) {
       pendingFlow.server.close()
       clearTimeout(pendingFlow.timeout)
@@ -226,7 +174,7 @@ export function waitForOAuthCallback(
         }
 
         try {
-          const tokenResult = await exchangeCodeForToken(code, codeVerifier, redirectUri)
+          const tokenResult = await exchangeCodeForToken(code, codeVerifier)
           sendHtml(res, 200, oauthSuccessHtml('OpenAI authentication completed. You can close this window.'))
           cleanup()
           resolve(tokenResult)
@@ -254,7 +202,7 @@ export function waitForOAuthCallback(
       reject(new Error('OAuth login timed out (5 minutes)'))
     }, 5 * 60 * 1000)
 
-    server.listen(OAUTH_CONFIG.callbackPort, bindAddress, () => {
+    server.listen(OAUTH_CONFIG.callbackPort, CALLBACK_BIND_HOST, () => {
       // Server ready
     })
 
@@ -272,14 +220,11 @@ export function waitForOAuthCallback(
     pendingFlow = {
       state,
       codeVerifier,
-      redirectUri,
       resolve,
       reject,
       server,
       timeout,
     }
-
-    // authUrl is accessible via getOAuthAuthUrl()
   })
 }
 
@@ -293,7 +238,7 @@ export function getOAuthAuthUrl(): string | null {
   const params = new URLSearchParams({
     response_type: 'code',
     client_id: OAUTH_CONFIG.clientId,
-    redirect_uri: pendingFlow.redirectUri,
+    redirect_uri: REDIRECT_URI,
     scope: OAUTH_CONFIG.scope,
     code_challenge: codeChallenge,
     code_challenge_method: 'S256',
@@ -306,19 +251,97 @@ export function getOAuthAuthUrl(): string | null {
   return `${OAUTH_CONFIG.authorizationEndpoint}?${params.toString()}`
 }
 
+// --- 手动粘贴回调 ---
+
+/**
+ * 解析用户粘贴的回调内容。和 pi-ai parseAuthorizationInput 的接受形式一致：
+ *   - 完整 URL：http://localhost:1455/auth/callback?code=...&state=...
+ *   - 裸 query 串：code=...&state=...
+ *   - code#state 短串
+ *   - 仅 code（不推荐，无 state 校验）
+ *
+ * LAN 场景下粘贴的几乎总是完整 URL。
+ */
+export function parseManualCallbackInput(input: string): { code?: string; state?: string } {
+  const value = input.trim()
+  if (!value) return {}
+
+  if (value.startsWith('http://') || value.startsWith('https://')) {
+    try {
+      const url = new URL(value)
+      return {
+        code: url.searchParams.get('code') ?? undefined,
+        state: url.searchParams.get('state') ?? undefined,
+      }
+    } catch {
+      // 不是合法 URL，继续尝试其他形式
+    }
+  }
+
+  if (value.includes('code=')) {
+    const params = new URLSearchParams(value)
+    return {
+      code: params.get('code') ?? undefined,
+      state: params.get('state') ?? undefined,
+    }
+  }
+
+  if (value.includes('#')) {
+    const [code, state] = value.split('#', 2)
+    return { code, state }
+  }
+
+  return { code: value }
+}
+
+/**
+ * 提交用户从浏览器地址栏复制回来的回调（手动模式）。
+ * 校验 state，做 token exchange，然后让 waitForOAuthCallback 的 promise resolve。
+ */
+export async function submitManualCallback(input: string): Promise<OAuthLoginResult> {
+  if (!pendingFlow) {
+    throw new Error('No pending OAuth flow to submit callback to')
+  }
+
+  const { code, state } = parseManualCallbackInput(input)
+
+  if (!code) {
+    throw new Error('粘贴内容里没找到 authorization code')
+  }
+  if (state !== undefined && state !== pendingFlow.state) {
+    throw new Error('State mismatch — 粘贴的回调链接和当前登录会话不匹配')
+  }
+
+  const flow = pendingFlow
+  try {
+    const tokenResult = await exchangeCodeForToken(code, flow.codeVerifier)
+    flow.server.close()
+    clearTimeout(flow.timeout)
+    pendingFlow = null
+    flow.resolve(tokenResult)
+    return tokenResult
+  } catch (err) {
+    flow.server.close()
+    clearTimeout(flow.timeout)
+    pendingFlow = null
+    const error = err instanceof Error ? err : new Error(String(err))
+    flow.reject(error)
+    throw error
+  }
+}
+
 // --- Token 换取 ---
 
 async function exchangeCodeForToken(
   code: string,
   codeVerifier: string,
-  redirectUri: string,
 ): Promise<OAuthLoginResult> {
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
     client_id: OAUTH_CONFIG.clientId,
     code,
     code_verifier: codeVerifier,
-    redirect_uri: redirectUri,
+    redirect_uri: REDIRECT_URI,
   })
 
   const response = await fetch(OAUTH_CONFIG.tokenEndpoint, {
@@ -398,7 +421,7 @@ export function isOAuthPending(): boolean {
  * 使用 node:http 原生请求（绕过 undici globalDispatcher 代理）验证回调 server 是否属于本实例。
  * 向 callback server 实际可达地址发送 GET，校验响应体是否原样返回该 nonce。
  */
-export function selfCheckCallbackServer(redirectHost: string = DEFAULT_REDIRECT_HOST): Promise<boolean> {
+export function selfCheckCallbackServer(): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false
     const done = (value: boolean): void => {
@@ -407,10 +430,9 @@ export function selfCheckCallbackServer(redirectHost: string = DEFAULT_REDIRECT_
       resolve(value)
     }
     const nonce = crypto.randomBytes(16).toString('hex')
-    const host = resolveSelfCheckHost(redirectHost)
     const req = http.request(
       {
-        host,
+        host: CALLBACK_BIND_HOST,
         port: OAUTH_CONFIG.callbackPort,
         path: `/__selfcheck?nonce=${nonce}`,
         method: 'GET',

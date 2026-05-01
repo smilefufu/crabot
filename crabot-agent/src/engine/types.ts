@@ -148,10 +148,22 @@ export type StreamChunk =
 export interface EngineTurnEvent {
   readonly turnNumber: number
   readonly assistantText: string
-  readonly toolCalls: ReadonlyArray<{ readonly id: string; readonly name: string; readonly input: Record<string, unknown>; readonly output: string; readonly isError: boolean }>
+  readonly toolCalls: ReadonlyArray<{
+    readonly id: string
+    readonly name: string
+    readonly input: Record<string, unknown>
+    readonly output: string
+    readonly isError: boolean
+    /** Per-tool wall-clock duration (ms) */
+    readonly durationMs?: number
+    /** Per-tool wall-clock start time (ms epoch) */
+    readonly startedAtMs?: number
+  }>
   readonly stopReason: EngineAssistantMessage['stopReason']
-  /** Total wall-clock time spent executing tools this turn (ms) */
-  readonly toolExecutionMs?: number
+  /** LLM API call wall-clock time this turn (ms) */
+  readonly llmCallMs?: number
+  /** LLM API call start (ms epoch) */
+  readonly llmStartedAtMs?: number
 }
 
 /** 既可传静态值也可传 callback（每轮 resolve） */

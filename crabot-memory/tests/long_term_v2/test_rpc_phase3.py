@@ -8,7 +8,7 @@ from src.long_term_v2.sqlite_index import SqliteIndex
 def _make_rpc(tmp_path):
     store = MemoryStore(str(tmp_path / "lt"))
     index = SqliteIndex(str(tmp_path / "v2.db"))
-    return LongTermV2Rpc(store=store, index=index, embedder=None), store, index
+    return LongTermV2Rpc(store=store, index=index), store, index
 
 
 @pytest.mark.asyncio

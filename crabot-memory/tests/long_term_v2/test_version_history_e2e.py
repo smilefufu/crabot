@@ -45,7 +45,7 @@ async def test_update_archives_old_version_and_fills_prev_version_ids(tmp_path):
     index = SqliteIndex(str(tmp_path / "v2.db"))
     mem_id = _seed_fact(store, index, body="v1 body", brief="v1 brief")
 
-    rpc = LongTermV2Rpc(store=store, index=index, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=index)
     await rpc.update_long_term({"id": mem_id, "patch": {"brief": "v2 brief", "body": "v2 body"}})
     await rpc.update_long_term({"id": mem_id, "patch": {"brief": "v3 brief", "body": "v3 body"}})
 
@@ -64,7 +64,7 @@ async def test_get_entry_version_returns_archived_body_and_frontmatter(tmp_path)
     store = MemoryStore(str(tmp_path / "lt"))
     index = SqliteIndex(str(tmp_path / "v2.db"))
     mem_id = _seed_fact(store, index, body="v1 body", brief="v1 brief")
-    rpc = LongTermV2Rpc(store=store, index=index, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=index)
     await rpc.update_long_term({"id": mem_id, "patch": {"brief": "v2 brief", "body": "v2 body"}})
     await rpc.update_long_term({"id": mem_id, "patch": {"brief": "v3 brief", "body": "v3 body"}})
 
@@ -84,7 +84,7 @@ async def test_get_entry_version_missing_version_returns_error(tmp_path):
     store = MemoryStore(str(tmp_path / "lt"))
     index = SqliteIndex(str(tmp_path / "v2.db"))
     mem_id = _seed_fact(store, index)
-    rpc = LongTermV2Rpc(store=store, index=index, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=index)
     out = await rpc.get_entry_version({"id": mem_id, "version": 99})
     assert out.get("error") == "version not found"
 
@@ -93,7 +93,7 @@ async def test_get_entry_version_missing_version_returns_error(tmp_path):
 async def test_get_entry_version_unknown_id_returns_error(tmp_path):
     store = MemoryStore(str(tmp_path / "lt"))
     index = SqliteIndex(str(tmp_path / "v2.db"))
-    rpc = LongTermV2Rpc(store=store, index=index, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=index)
     out = await rpc.get_entry_version({"id": "no-such-id", "version": 1})
     assert out.get("error") == "not found"
 
@@ -104,7 +104,7 @@ async def test_versions_survive_trash_and_restore(tmp_path):
     store = MemoryStore(str(tmp_path / "lt"))
     index = SqliteIndex(str(tmp_path / "v2.db"))
     mem_id = _seed_fact(store, index, body="v1 body")
-    rpc = LongTermV2Rpc(store=store, index=index, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=index)
     await rpc.update_long_term({"id": mem_id, "patch": {"body": "v2 body"}})
 
     # 进 trash

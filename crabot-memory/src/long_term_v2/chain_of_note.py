@@ -1,5 +1,6 @@
 """Step 4: Chain-of-Note — LLM labels each doc and we reorder to avoid Lost-in-Middle."""
 import logging
+import time
 from enum import Enum
 from typing import Any, Dict, List, Tuple
 
@@ -48,12 +49,23 @@ async def chain_of_note(
         {"role": "system", "content": _PROMPT},
         {"role": "user", "content": f"Query: {query}\nSnippets:\n{listing}"},
     ]
+    prompt_chars = sum(len(m["content"]) for m in messages)
+    t_llm = time.perf_counter()
+    resp = ""
     try:
         resp = await llm.chat_completion(messages, temperature=0.0)
+        elapsed_ms = (time.perf_counter() - t_llm) * 1000
+        logger.info(
+            "chain_of_note llm_call: docs=%d prompt_chars=%d resp_chars=%d latency_ms=%.0f",
+            len(docs), prompt_chars, len(resp or ""), elapsed_ms,
+        )
         data = extract_json(resp)
         notes = (data or {}).get("notes") or []
     except Exception as e:  # noqa: BLE001
-        logger.warning("chain-of-note LLM failed (%s) — keeping input order", e)
+        elapsed_ms = (time.perf_counter() - t_llm) * 1000
+        logger.warning(
+            "chain-of-note LLM failed after %.0fms (%s) — keeping input order", elapsed_ms, e,
+        )
         return docs
 
     label_by_id: Dict[str, NoteLabel] = {}

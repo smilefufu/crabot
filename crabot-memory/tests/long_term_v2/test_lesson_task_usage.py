@@ -153,7 +153,7 @@ async def test_search_long_term_records_task_usage(tmp_path, monkeypatch):
     """search_long_term 收到 task_id 时，给每条 lesson 命中写 lesson_task_usage 行。"""
     store = MemoryStore(data_root=str(tmp_path))
     idx = SqliteIndex(str(tmp_path / "memories.db"))
-    rpc = LongTermV2Rpc(store=store, index=idx, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=idx)
 
     # 用 AsyncMock 替换 pipeline.recall，绕开 embedding/索引初始化
     rpc.pipeline.recall = AsyncMock(return_value=[
@@ -183,7 +183,7 @@ async def test_search_long_term_skips_task_usage_when_no_task_id(tmp_path):
     """没有 task_id 参数时，不写 lesson_task_usage 表。"""
     store = MemoryStore(data_root=str(tmp_path))
     idx = SqliteIndex(str(tmp_path / "memories.db"))
-    rpc = LongTermV2Rpc(store=store, index=idx, embedder=None)
+    rpc = LongTermV2Rpc(store=store, index=idx)
     rpc.pipeline.recall = AsyncMock(return_value=[
         {"id": "mem_l_1", "type": "lesson", "status": "confirmed", "brief": "x"},
     ])

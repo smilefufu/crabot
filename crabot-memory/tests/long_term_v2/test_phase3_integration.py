@@ -8,11 +8,7 @@ from src.config import MemoryConfig
 def _module(tmp_path) -> MemoryModule:
     cfg = MemoryConfig()
     cfg.storage.data_dir = str(tmp_path)
-    mod = MemoryModule(cfg)
-    # Disable embedder so tests don't need a live embedding API.
-    mod._lt_v2_rpc.embedder = None
-    mod._lt_v2_rpc.pipeline.embedder = None
-    return mod
+    return MemoryModule(cfg)
 
 
 @pytest.mark.asyncio
