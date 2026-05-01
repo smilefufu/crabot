@@ -209,6 +209,8 @@ export class WorkerHandler {
   private readonly bgCursorMap = new Map<string, number>()
   /** AbortControllers for running bg sub-agents (key=entity_id); shared with BgToolDeps + SubAgentBgContext */
   private readonly agentAbortControllers = new Map<string, AbortController>()
+  /** Interval handle for periodic 24h GC of dead entities */
+  private gcIntervalHandle?: NodeJS.Timeout
 
   constructor(
     sdkEnv: SdkEnvConfig,
@@ -239,6 +241,35 @@ export class WorkerHandler {
       void this.writeSkillsToInstancePath(this.skills).catch((err) => {
         console.error('[WorkerHandler] init skills disk write failed:', err)
       })
+    }
+
+    // Startup: recover persistent bg entities (mark dead shells as failed, stalled agents)
+    void this.bgRegistry.recoverPersistent().catch((err) => {
+      console.error('[WorkerHandler] bg-entities recovery failed:', err)
+    })
+
+    // Startup: GC dead entities older than 7 days
+    void this.bgRegistry.gcDeadEntities(new Date()).catch((err) => {
+      console.error('[WorkerHandler] bg-entities gc failed:', err)
+    })
+
+    // Periodic 24h GC — .unref() so it does not block process exit
+    this.gcIntervalHandle = setInterval(() => {
+      void this.bgRegistry.gcDeadEntities(new Date()).catch((err) => {
+        console.error('[WorkerHandler] periodic gc failed:', err)
+      })
+    }, 24 * 60 * 60 * 1000)
+    this.gcIntervalHandle.unref()
+  }
+
+  /**
+   * Release resources (clears the periodic GC interval).
+   * Call this in tests and when the worker is being shut down to avoid timer leaks.
+   */
+  dispose(): void {
+    if (this.gcIntervalHandle) {
+      clearInterval(this.gcIntervalHandle)
+      this.gcIntervalHandle = undefined
     }
   }
 

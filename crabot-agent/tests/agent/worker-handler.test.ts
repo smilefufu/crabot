@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, readFileSync, existsSync } from 'fs'
+import { mkdtempSync, rmSync, readFileSync, existsSync, mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { WorkerHandler } from '../../src/agent/worker-handler.js'
+import { BgEntityRegistry } from '../../src/engine/bg-entities/registry.js'
 import { createSkillTool } from '../../src/engine/tools/skill-tool.js'
 import { getInstanceSkillsDir } from '../../src/core/data-paths.js'
 import { resolveSceneAnchorLabel } from '../../src/mcp/crab-memory.js'
@@ -10,6 +11,7 @@ import type {
   ExecuteTaskParams,
   WorkerAgentContext,
 } from '../../src/types.js'
+import type { BgEntityRecord } from '../../src/engine/bg-entities/types.js'
 
 // Mock the engine's runEngine function
 vi.mock('../../src/engine/index.js', async (importOriginal) => {
@@ -506,5 +508,145 @@ describe('WorkerHandler.updateSkills atomic write', () => {
     expect(result2.output).toContain('Skill A v2')
     expect(result2.output).toContain('NEW body')
     expect(result2.output).not.toContain('old body')
+  })
+})
+
+describe('WorkerHandler bg-entities lifecycle', () => {
+  let dataDir: string
+  let originalDataDir: string | undefined
+  let handler: WorkerHandler | undefined
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'worker-bg-lifecycle-test-'))
+    originalDataDir = process.env.DATA_DIR
+    process.env.DATA_DIR = dataDir
+    handler = undefined
+  })
+
+  afterEach(() => {
+    handler?.dispose()
+    rmSync(dataDir, { recursive: true, force: true })
+    if (originalDataDir === undefined) {
+      delete process.env.DATA_DIR
+    } else {
+      process.env.DATA_DIR = originalDataDir
+    }
+  })
+
+  function registryPath() {
+    // Must match getBgEntitiesRegistryPath() = DATA_DIR/bg-entities/registry.json
+    return join(dataDir, 'bg-entities', 'registry.json')
+  }
+
+  function writeRegistry(entities: Record<string, BgEntityRecord>) {
+    const dir = join(dataDir, 'bg-entities')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(registryPath(), JSON.stringify({ entities }, null, 2), 'utf8')
+  }
+
+  function makeShellRecord(overrides: Partial<BgEntityRecord> = {}): BgEntityRecord {
+    return {
+      entity_id: 'shell-001',
+      type: 'shell',
+      status: 'running',
+      owner: { friend_id: 'friend-1' },
+      spawned_by_task_id: 'task-1',
+      spawned_at: new Date().toISOString(),
+      exit_code: null,
+      ended_at: null,
+      last_activity_at: new Date().toISOString(),
+      command: 'sleep 9999',
+      log_file: '/tmp/shell.log',
+      // pid 999999 should not exist on any machine
+      pid: 999999,
+      pgid: 999999,
+      process_started_at: new Date().toISOString(),
+      ...overrides,
+    } as BgEntityRecord
+  }
+
+  function makeAgentRecord(overrides: Partial<BgEntityRecord> = {}): BgEntityRecord {
+    return {
+      entity_id: 'agent-001',
+      type: 'agent',
+      status: 'running',
+      owner: { friend_id: 'friend-1' },
+      spawned_by_task_id: 'task-1',
+      spawned_at: new Date().toISOString(),
+      exit_code: null,
+      ended_at: null,
+      last_activity_at: new Date().toISOString(),
+      task_description: 'do something',
+      messages_log_file: '/tmp/agent.log',
+      result_file: null,
+      ...overrides,
+    } as BgEntityRecord
+  }
+
+  function makeWorkerHandler() {
+    const sdkEnv = {
+      modelId: 'test-model',
+      format: 'anthropic' as const,
+      env: {
+        ANTHROPIC_BASE_URL: 'http://localhost:4000',
+        ANTHROPIC_API_KEY: 'test-key',
+      },
+    }
+    return new WorkerHandler(sdkEnv, { systemPrompt: 'You are a helpful worker.' })
+  }
+
+  it('recovery marks a running shell with non-existent pid as failed', async () => {
+    writeRegistry({ 'shell-001': makeShellRecord() })
+
+    handler = makeWorkerHandler()
+    // wait for fire-and-forget recoverPersistent to settle
+    await new Promise((r) => setTimeout(r, 150))
+
+    const registry = new BgEntityRegistry(registryPath())
+    const record = await registry.get('shell-001')
+    expect(record).not.toBeNull()
+    expect(record!.status).toBe('failed')
+    expect(record!.exit_code).toBe(-1)
+    expect(record!.ended_at).not.toBeNull()
+  })
+
+  it('recovery marks a running agent as stalled', async () => {
+    writeRegistry({ 'agent-001': makeAgentRecord() })
+
+    handler = makeWorkerHandler()
+    await new Promise((r) => setTimeout(r, 150))
+
+    const registry = new BgEntityRegistry(registryPath())
+    const record = await registry.get('agent-001')
+    expect(record).not.toBeNull()
+    expect(record!.status).toBe('stalled')
+    expect(record!.ended_at).not.toBeNull()
+  })
+
+  it('GC removes entities ended more than 7 days ago', async () => {
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString()
+    writeRegistry({
+      'shell-old': makeShellRecord({
+        entity_id: 'shell-old',
+        status: 'completed',
+        ended_at: eightDaysAgo,
+        last_activity_at: eightDaysAgo,
+      }),
+    })
+
+    handler = makeWorkerHandler()
+    await new Promise((r) => setTimeout(r, 150))
+
+    const registry = new BgEntityRegistry(registryPath())
+    const record = await registry.get('shell-old')
+    expect(record).toBeNull()
+  })
+
+  it('dispose() clears the interval (no timer leak)', () => {
+    handler = makeWorkerHandler()
+    // Disposing immediately should not throw and should clear the interval handle
+    expect(() => handler!.dispose()).not.toThrow()
+    // Calling dispose again is idempotent
+    expect(() => handler!.dispose()).not.toThrow()
   })
 })
