@@ -3,8 +3,6 @@ import { join, relative } from 'path'
 import { defineTool } from '../tool-framework'
 import type { ToolDefinition } from '../types'
 
-const SKILLS_REL_PATH = '.claude/skills'
-
 async function listSkillNames(skillsDir: string): Promise<ReadonlyArray<string>> {
   try {
     const entries = await readdir(skillsDir, { withFileTypes: true })
@@ -49,9 +47,7 @@ async function enumerateResources(skillDir: string): Promise<ReadonlyArray<strin
   return resources.sort()
 }
 
-export function createSkillTool(baseDir: string): ToolDefinition {
-  const skillsDir = join(baseDir, SKILLS_REL_PATH)
-
+export function createSkillTool(skillsDir: string): ToolDefinition {
   return defineTool({
     name: 'Skill',
     category: 'mcp_skill',

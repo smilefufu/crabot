@@ -6,9 +6,12 @@ import { createSkillTool } from '../../../src/engine/tools/skill-tool'
 
 describe('createSkillTool', () => {
   let tempDir: string
+  let skillsDir: string
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), 'skill-tool-test-'))
+    skillsDir = join(tempDir, 'skills')
+    mkdirSync(skillsDir, { recursive: true })
   })
 
   afterEach(() => {
@@ -16,7 +19,7 @@ describe('createSkillTool', () => {
   })
 
   function writeSkill(name: string, content: string): void {
-    const skillDir = join(tempDir, '.claude', 'skills', name)
+    const skillDir = join(skillsDir, name)
     mkdirSync(skillDir, { recursive: true })
     writeFileSync(join(skillDir, 'SKILL.md'), content, 'utf-8')
   }
@@ -26,7 +29,7 @@ describe('createSkillTool', () => {
     content: string,
     resources: Record<string, string>,
   ): void {
-    const skillDir = join(tempDir, '.claude', 'skills', name)
+    const skillDir = join(skillsDir, name)
     mkdirSync(skillDir, { recursive: true })
     writeFileSync(join(skillDir, 'SKILL.md'), content, 'utf-8')
     for (const [relPath, fileContent] of Object.entries(resources)) {
@@ -37,7 +40,7 @@ describe('createSkillTool', () => {
   }
 
   it('returns correct ToolDefinition metadata', () => {
-    const tool = createSkillTool(tempDir)
+    const tool = createSkillTool(skillsDir)
 
     expect(tool.name).toBe('Skill')
     expect(tool.description).toContain('MUST')
@@ -55,7 +58,7 @@ describe('createSkillTool', () => {
 
   it('loads a skill by name with <skill_content> wrapping', async () => {
     writeSkill('code-review', '---\nname: code-review\ndescription: Review code\n---\n# Code Review\nReview the code carefully.')
-    const tool = createSkillTool(tempDir)
+    const tool = createSkillTool(skillsDir)
 
     const result = await tool.call({ skill: 'code-review' }, {})
 
@@ -68,7 +71,7 @@ describe('createSkillTool', () => {
 
   it('strips YAML frontmatter from output', async () => {
     writeSkill('my-skill', '---\nname: my-skill\ndescription: A skill\n---\n# Body Content')
-    const tool = createSkillTool(tempDir)
+    const tool = createSkillTool(skillsDir)
 
     const result = await tool.call({ skill: 'my-skill' }, {})
 
@@ -80,7 +83,7 @@ describe('createSkillTool', () => {
 
   it('handles content without frontmatter', async () => {
     writeSkill('plain', '# Plain Skill\nNo frontmatter here.')
-    const tool = createSkillTool(tempDir)
+    const tool = createSkillTool(skillsDir)
 
     const result = await tool.call({ skill: 'plain' }, {})
 
@@ -98,7 +101,7 @@ describe('createSkillTool', () => {
         'scripts/run.py': 'print("hello")',
       },
     )
-    const tool = createSkillTool(tempDir)
+    const tool = createSkillTool(skillsDir)
 
     const result = await tool.call({ skill: 'with-resources' }, {})
 
@@ -111,7 +114,7 @@ describe('createSkillTool', () => {
 
   it('omits <skill_resources> when no resources exist', async () => {
     writeSkill('no-resources', '---\nname: no-resources\ndescription: test\n---\n# Skill')
-    const tool = createSkillTool(tempDir)
+    const tool = createSkillTool(skillsDir)
 
     const result = await tool.call({ skill: 'no-resources' }, {})
 
@@ -121,7 +124,7 @@ describe('createSkillTool', () => {
 
   it('includes skill directory path', async () => {
     writeSkill('my-skill', '# Skill')
-    const tool = createSkillTool(tempDir)
+    const tool = createSkillTool(skillsDir)
 
     const result = await tool.call({ skill: 'my-skill' }, {})
 
@@ -131,12 +134,12 @@ describe('createSkillTool', () => {
 
   it('resolves .skill_dir marker for real skill directory', async () => {
     const realDir = '/original/skill/path'
-    const skillDir = join(tempDir, '.claude', 'skills', 'marker-test')
+    const skillDir = join(skillsDir, 'marker-test')
     mkdirSync(skillDir, { recursive: true })
     writeFileSync(join(skillDir, 'SKILL.md'), '# Skill', 'utf-8')
     writeFileSync(join(skillDir, '.skill_dir'), realDir, 'utf-8')
 
-    const tool = createSkillTool(tempDir)
+    const tool = createSkillTool(skillsDir)
     const result = await tool.call({ skill: 'marker-test' }, {})
 
     expect(result.isError).toBe(false)
@@ -146,7 +149,7 @@ describe('createSkillTool', () => {
   it('lists available skills', async () => {
     writeSkill('code-review', '# Code Review')
     writeSkill('testing', '# Testing Guide')
-    const tool = createSkillTool(tempDir)
+    const tool = createSkillTool(skillsDir)
 
     const result = await tool.call({ skill: 'list' }, {})
 
@@ -157,7 +160,7 @@ describe('createSkillTool', () => {
 
   it('returns error for non-existent skill', async () => {
     writeSkill('code-review', '# Code Review')
-    const tool = createSkillTool(tempDir)
+    const tool = createSkillTool(skillsDir)
 
     const result = await tool.call({ skill: 'nonexistent' }, {})
 
@@ -168,7 +171,7 @@ describe('createSkillTool', () => {
 
   it('matches skill name case-insensitively', async () => {
     writeSkill('daily-reflection', '# Reflection')
-    const tool = createSkillTool(tempDir)
+    const tool = createSkillTool(skillsDir)
 
     const result = await tool.call({ skill: 'Daily-Reflection' }, {})
 
@@ -177,7 +180,7 @@ describe('createSkillTool', () => {
   })
 
   it('handles empty skills directory', async () => {
-    const tool = createSkillTool(tempDir)
+    const tool = createSkillTool(skillsDir)
 
     const result = await tool.call({ skill: 'list' }, {})
 
