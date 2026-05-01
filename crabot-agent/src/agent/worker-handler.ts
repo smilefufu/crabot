@@ -216,6 +216,16 @@ export class WorkerHandler {
     this.promptManager = options?.promptManager
     this.subAgentHints = options?.subAgentHints ?? []
     this.getTimezone = config.getTimezone ?? (() => resolveTimezone(undefined))
+
+    // 确保 instance skills 目录存在；如果 ctor 已经注入了 skills，立刻 sync 到磁盘
+    // 让目录反映当前内存状态（防止 worker 重启后磁盘是空的而内存是 stale 的）
+    const skillsRoot = getInstanceSkillsDir()
+    fs.mkdirSync(skillsRoot, { recursive: true })
+    if (this.skills.length > 0) {
+      void this.writeSkillsToInstancePath(this.skills).catch((err) => {
+        console.error('[WorkerHandler] init skills disk write failed:', err)
+      })
+    }
   }
 
   async loadConfirmedSnapshot(): Promise<void> {
