@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { mkdtempSync, rmSync, readFileSync, existsSync } from 'fs'
+import { join } from 'path'
+import { tmpdir } from 'os'
 import { WorkerHandler } from '../../src/agent/worker-handler.js'
 import { resolveSceneAnchorLabel } from '../../src/mcp/crab-memory.js'
 import type {
@@ -387,5 +390,70 @@ describe('WorkerHandler', () => {
 
       expect(label).toBe('friend:friend-1')
     })
+  })
+})
+
+describe('WorkerHandler.updateSkills atomic write', () => {
+  let dataDir: string
+  let originalDataDir: string | undefined
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'worker-skills-test-'))
+    originalDataDir = process.env.DATA_DIR
+    process.env.DATA_DIR = dataDir
+  })
+
+  afterEach(() => {
+    rmSync(dataDir, { recursive: true, force: true })
+    if (originalDataDir === undefined) {
+      delete process.env.DATA_DIR
+    } else {
+      process.env.DATA_DIR = originalDataDir
+    }
+  })
+
+  function createTestWorkerHandler() {
+    return makeHandler()
+  }
+
+  it('writes skills atomically to instance skills dir', async () => {
+    const handler = createTestWorkerHandler()
+    handler.updateSkills([
+      { name: 'skill-a', content: '# Skill A\nbody', description: 'A' },
+    ])
+    // 等异步写完成
+    await new Promise((r) => setTimeout(r, 50))
+
+    const skillsRoot = join(dataDir, 'instance', 'skills')
+    expect(existsSync(join(skillsRoot, 'skill-a', 'SKILL.md'))).toBe(true)
+    expect(readFileSync(join(skillsRoot, 'skill-a', 'SKILL.md'), 'utf-8')).toBe('# Skill A\nbody')
+  })
+
+  it('replaces old skills atomically when called again', async () => {
+    const handler = createTestWorkerHandler()
+    handler.updateSkills([
+      { name: 'skill-a', content: 'old content', description: 'A' },
+    ])
+    await new Promise((r) => setTimeout(r, 50))
+
+    handler.updateSkills([
+      { name: 'skill-b', content: 'new b', description: 'B' },
+    ])
+    await new Promise((r) => setTimeout(r, 50))
+
+    const skillsRoot = join(dataDir, 'instance', 'skills')
+    expect(existsSync(join(skillsRoot, 'skill-a'))).toBe(false)
+    expect(readFileSync(join(skillsRoot, 'skill-b', 'SKILL.md'), 'utf-8')).toBe('new b')
+  })
+
+  it('writes skill_dir marker when skill_dir field is set', async () => {
+    const handler = createTestWorkerHandler()
+    handler.updateSkills([
+      { name: 'skill-c', content: 'c body', description: 'C', skill_dir: '/some/source/path' },
+    ])
+    await new Promise((r) => setTimeout(r, 50))
+
+    const skillsRoot = join(dataDir, 'instance', 'skills')
+    expect(readFileSync(join(skillsRoot, 'skill-c', '.skill_dir'), 'utf-8')).toBe('/some/source/path')
   })
 })

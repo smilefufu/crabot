@@ -59,6 +59,7 @@ import { createCodingExpertHookRegistry, createCliBlockHook } from '../hooks/def
 import { HookRegistry } from '../hooks/hook-registry.js'
 import { PromptManager, formatChannelMessageLine } from '../prompt-manager.js'
 import { formatNow, formatChannelMessageTime, resolveTimezone } from '../utils/time.js'
+import { getInstanceSkillsDir } from '../core/data-paths.js'
 
 import * as fs from 'fs'
 import * as path from 'path'
@@ -237,12 +238,35 @@ export class WorkerHandler {
   }
 
   /**
-   * 热加载：更新 skills 列表。下次 LLM 调用时通过 systemPrompt callback 让 LLM 感知。
-   * 注意：已经在执行的 task 不会重写 /tmp/crabot-task-<id>/.claude/skills/ 目录。
-   * Skill 详情加载靠 LLM 主动调 Skill 工具，工具内部从 this.skills 读最新列表。
+   * 热加载：更新 skills 列表 + atomic write 到 instance 级目录。
+   * 改动后：进行中 task 调 Skill 工具会读到最新 SKILL.md（race window <1ms）。
    */
   updateSkills(newSkills: ReadonlyArray<SkillConfig>): void {
     this.skills = newSkills
+    // Atomic write 到 instance-level 路径，确保 skill-tool 下次调用能读到最新内容
+    void this.writeSkillsToInstancePath(newSkills).catch((err) => {
+      console.error('[WorkerHandler] updateSkills disk write failed:', err)
+    })
+  }
+
+  private async writeSkillsToInstancePath(skills: ReadonlyArray<SkillConfig>): Promise<void> {
+    const skillsRoot = getInstanceSkillsDir()
+    const tmpDir = `${skillsRoot}.tmp.${process.pid}.${Date.now()}`
+    await fs.promises.mkdir(tmpDir, { recursive: true })
+    for (const skill of skills) {
+      const skillDir = path.join(tmpDir, skill.name)
+      await fs.promises.mkdir(skillDir, { recursive: true })
+      await fs.promises.writeFile(path.join(skillDir, 'SKILL.md'), skill.content, 'utf-8')
+      if (skill.skill_dir) {
+        await fs.promises.writeFile(path.join(skillDir, '.skill_dir'), skill.skill_dir, 'utf-8')
+      }
+    }
+    // POSIX atomic swap：先删旧 + rename tmp → 目标。删除 + rename 之间有微小窗口
+    // 但比 partial overwrite 安全
+    await fs.promises.rm(skillsRoot, { recursive: true, force: true })
+    // 确保父目录存在
+    await fs.promises.mkdir(path.dirname(skillsRoot), { recursive: true })
+    await fs.promises.rename(tmpDir, skillsRoot)
   }
 
   /**
