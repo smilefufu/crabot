@@ -350,6 +350,25 @@ describe('WorkerHandler', () => {
     })
   })
 
+  describe('bg entity tools wiring', () => {
+    it('includes Output, Kill, ListEntities in tools built by buildToolsDynamic', async () => {
+      mockRunEngine.mockResolvedValue(makeEngineResult())
+
+      const handler = makeHandler()
+      await handler.executeTask({ task: makeTask(), context: makeContext() })
+
+      expect(mockRunEngine).toHaveBeenCalledTimes(1)
+      const callArgs = mockRunEngine.mock.calls[0][0]
+      const buildTools = callArgs.options.tools as () => ReadonlyArray<{ name: string }>
+      expect(typeof buildTools).toBe('function')
+      const toolNames = buildTools().map((t: { name: string }) => t.name)
+
+      expect(toolNames).toContain('Output')
+      expect(toolNames).toContain('Kill')
+      expect(toolNames).toContain('ListEntities')
+    })
+  })
+
   describe('resolveSceneAnchorLabel', () => {
     it('preserves an existing scene label when a profile already exists', async () => {
       const rpcClient = {

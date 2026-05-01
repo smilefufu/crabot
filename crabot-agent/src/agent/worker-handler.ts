@@ -17,6 +17,11 @@ import {
   ProgressDigest,
   filterToolsByPermission,
 } from '../engine/index.js'
+import { BgEntityRegistry } from '../engine/bg-entities/registry.js'
+import { TransientShellRegistry } from '../engine/bg-entities/bg-shell.js'
+import type { BgEntityOwner } from '../engine/bg-entities/types.js'
+import type { BashBgContext } from '../engine/tools/index.js'
+import type { BgToolDeps } from '../engine/tools/index.js'
 import type {
   ToolDefinition,
   EngineTurnEvent,
@@ -196,6 +201,12 @@ export class WorkerHandler {
   private readonly promptManager?: PromptManager
   private readonly subAgentHints: ReadonlyArray<{ readonly toolName: string; readonly workerHint: string }>
   private readonly getTimezone: () => string
+  /** Worker-singleton bg entity registry (persistent, disk-backed) */
+  private readonly bgRegistry = new BgEntityRegistry()
+  /** Worker-singleton transient shell registry (in-memory, task-bound) */
+  private readonly transientShells = new TransientShellRegistry()
+  /** Per-task output cursor map: key = `${taskId}:${entityId}` → byte offset */
+  private readonly bgCursorMap = new Map<string, number>()
 
   constructor(
     sdkEnv: SdkEnvConfig,
@@ -432,10 +443,33 @@ export class WorkerHandler {
 
         // 3e. Built-in file/shell tools (filtered by Admin config)
         const skillsSnapshot = this.skills
+        const bgOwner: BgEntityOwner = {
+          friend_id: context.sender_friend?.id ?? `__system_${context.task_origin?.session_id ?? 'unknown'}`,
+          session_id: context.task_origin?.session_id,
+          channel_id: context.task_origin?.channel_id,
+        }
+        const bgEntityCtx: BashBgContext = {
+          registry: this.bgRegistry,
+          transient: this.transientShells,
+          workerContext: context,
+          owner: bgOwner,
+          taskId: task.task_id,
+        }
+        const bgToolDeps: BgToolDeps = {
+          registry: this.bgRegistry,
+          transient: this.transientShells,
+          cursorMap: this.bgCursorMap,
+          taskId: task.task_id,
+          ownerFriendId: bgOwner.friend_id,
+        }
         tools.push(...getConfiguredBuiltinTools(
           os.homedir(),
           this.builtinToolConfig,
-          skillsSnapshot.length > 0 ? { skillsDir: getInstanceSkillsDir() } : undefined,
+          {
+            skillsDir: skillsSnapshot.length > 0 ? getInstanceSkillsDir() : undefined,
+            bgEntityCtx,
+            bgToolDeps,
+          },
         ))
 
         // 3f. Sub-agent delegation tools
@@ -782,6 +816,14 @@ export class WorkerHandler {
       this.humanQueues.delete(task.task_id)
       this.activeTasks.delete(task.task_id)
       this.liveSnapshots.delete(task.task_id)
+      // Kill all transient shells owned by this task (persistent shells survive)
+      this.transientShells.killAllOwnedBy(task.task_id)
+      // Clean up cursor map entries for this task to avoid memory leak
+      for (const key of this.bgCursorMap.keys()) {
+        if (key.startsWith(`${task.task_id}:`)) {
+          this.bgCursorMap.delete(key)
+        }
+      }
     }
   }
 
