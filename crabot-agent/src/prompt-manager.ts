@@ -292,6 +292,20 @@ const WORKER_RULES = `## 时间感知
 
 承上：context 长度不是停下来的理由——超过 80% 上下文窗口时引擎会自动 compaction，你不必为窗口预算节省工具调用。
 
+### 工具失败的诊断（vs 研究负向结论）
+
+"Bash 失败" 和 "研究结果负向" 是两件事，处理方式相反：
+
+- 研究负向 → 换方向继续推进（见上一段）
+- 工具失败 → **诊断根因，不是换参数重试**
+
+特别是 Bash timeout（output 形如 "Command timed out after Xms" 或 "Command failed" 无 stderr），意味着进程被 kill 没机会输出诊断信息。此时禁止「缩短 / 延长 timeout 重跑同一命令」。必须二选一：
+
+- **缩小问题域**：数据切片更小（head -n 100 / sample 1%）、算法 N=10 不是 N=10000、加 --limit / --dry-run / --debug 等开关
+- **加可见性**：在脚本里 print 阶段进度、先 print 数据集大小 / 内存占用、用 timeout + cProfile 跑一小段看慢在哪
+
+同一命令出现 ≥2 次 timeout = 必须 stop 反思，禁止第 3 次重跑。ask_human（master 在线时）或 named blocker 收尾比第 3 次重跑更快、更省你的 turn。
+
 ### 执行流程
 
 1. 深度分析任务需求，理解用户真实意图
