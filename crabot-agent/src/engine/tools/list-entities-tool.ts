@@ -52,6 +52,7 @@ function truncateCommand(cmd: string, maxLen = 40): string {
 }
 
 interface RowData {
+  type: string
   entityId: string
   status: string
   spawnedAt: string
@@ -62,34 +63,27 @@ interface RowData {
 function buildTable(rows: RowData[]): string {
   if (rows.length === 0) return '(no entities matching filter)'
 
-  const header: RowData = {
-    entityId: 'ID',
-    status: 'STATUS',
-    spawnedAt: 'SPAWNED_AT',
-    runtime: 'RUNTIME',
-    command: 'COMMAND/TASK',
-  }
-
   const colWidths = {
-    entityId: Math.max(header.entityId.length, ...rows.map((r) => r.entityId.length)),
-    status: Math.max(header.status.length, ...rows.map((r) => r.status.length)),
-    spawnedAt: Math.max(header.spawnedAt.length, ...rows.map((r) => r.spawnedAt.length)),
-    runtime: Math.max(header.runtime.length, ...rows.map((r) => r.runtime.length)),
+    entityId: Math.max('ID'.length, ...rows.map((r) => r.entityId.length)),
+    status: Math.max('STATUS'.length, ...rows.map((r) => r.status.length)),
+    spawnedAt: Math.max('SPAWNED_AT'.length, ...rows.map((r) => r.spawnedAt.length)),
+    runtime: Math.max('RUNTIME'.length, ...rows.map((r) => r.runtime.length)),
   }
 
   const pad = (s: string, w: number) => s.padEnd(w)
+  const TYPE_COL = 'TYPE '
 
   const headerLine =
-    `TYPE   ` +
-    `${pad(header.entityId, colWidths.entityId)}  ` +
-    `${pad(header.status, colWidths.status)}  ` +
-    `${pad(header.spawnedAt, colWidths.spawnedAt)}  ` +
-    `${pad(header.runtime, colWidths.runtime)}  ` +
-    `${header.command}`
+    `${TYPE_COL}  ` +
+    `${pad('ID', colWidths.entityId)}  ` +
+    `${pad('STATUS', colWidths.status)}  ` +
+    `${pad('SPAWNED_AT', colWidths.spawnedAt)}  ` +
+    `${pad('RUNTIME', colWidths.runtime)}  ` +
+    `COMMAND/TASK`
 
   const dataLines = rows.map(
     (r) =>
-      `shell  ` +
+      `${r.type.padEnd(TYPE_COL.length)}  ` +
       `${pad(r.entityId, colWidths.entityId)}  ` +
       `${pad(r.status, colWidths.status)}  ` +
       `${pad(r.spawnedAt, colWidths.spawnedAt)}  ` +
@@ -153,6 +147,7 @@ export function createListEntitiesTool(deps: BgToolDeps): ToolDefinition {
 
       // --- Merge + deduplicate (transient ids won't collide with persistent ids) ---
       const persistentRows: RowData[] = persistentRecords.map((rec: BgEntityRecord) => ({
+        type: rec.type,
         entityId: rec.entity_id,
         status: rec.status,
         spawnedAt: formatSpawnedAt(rec.spawned_at),
@@ -164,6 +159,7 @@ export function createListEntitiesTool(deps: BgToolDeps): ToolDefinition {
       }))
 
       const transientRows: RowData[] = transientStates.map((s: TransientShellState) => ({
+        type: 'shell',
         entityId: s.entity_id,
         status: s.status,
         spawnedAt: formatSpawnedAt(s.spawned_at),

@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { BgEntityRegistry } from '../../../src/engine/bg-entities/registry'
@@ -14,6 +14,7 @@ import { createOutputTool } from '../../../src/engine/tools/output-tool'
 import { createKillTool } from '../../../src/engine/tools/kill-tool'
 import { createListEntitiesTool } from '../../../src/engine/tools/list-entities-tool'
 import type { BgToolDeps } from '../../../src/engine/tools/output-tool'
+import type { BgAgentRegistryRecord } from '../../../src/engine/bg-entities/types'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -164,13 +165,12 @@ describe('Output tool', () => {
     expect(result.output).toContain('Invalid entity_id format')
   })
 
-  it('agent_xxx returns not-yet-implemented placeholder with isError=true', async () => {
+  it('agent_xxx not in registry returns entity-not-found error', async () => {
     const tool = createOutputTool(deps)
     const result = await tool.call({ entity_id: 'agent_aabbccdd1122' }, {})
 
     expect(result.isError).toBe(true)
-    expect(result.output).toContain('not yet implemented')
-    expect(result.output).toContain('Task 14')
+    expect(result.output).toContain('Entity not found')
   })
 
   it('two tasks reading the same persistent shell do not share cursors', async () => {
@@ -278,13 +278,12 @@ describe('Kill tool', () => {
     expect(transient.get(entityId)?.status).toBe('killed')
   })
 
-  it('agent_xxx returns not-yet-implemented placeholder', async () => {
+  it('agent_xxx not in registry returns entity-not-found error', async () => {
     const tool = createKillTool(deps)
     const result = await tool.call({ entity_id: 'agent_aabbccdd1122' }, {})
 
     expect(result.isError).toBe(true)
-    expect(result.output).toContain('not yet implemented')
-    expect(result.output).toContain('Task 14')
+    expect(result.output).toContain('Entity not found')
   })
 
   it('invalid entity_id prefix returns error', async () => {
@@ -443,5 +442,188 @@ describe('ListEntities tool', () => {
     expect(result.isError).toBe(false)
     expect(result.output).toContain(myTransientId)
     expect(result.output).not.toContain(otherTransientId)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Agent entity type branch tests (Plan 2 Task 14)
+// ---------------------------------------------------------------------------
+
+function makeAgentRecord(
+  overrides: Partial<BgAgentRegistryRecord> & { entity_id: string; messages_log_file: string },
+): BgAgentRegistryRecord {
+  return {
+    type: 'agent',
+    entity_id: overrides.entity_id,
+    status: overrides.status ?? 'running',
+    owner: overrides.owner ?? { friend_id: OWNER_FRIEND_ID, session_id: 'sess-A' },
+    spawned_by_task_id: overrides.spawned_by_task_id ?? TASK_ID,
+    spawned_at: overrides.spawned_at ?? new Date().toISOString(),
+    exit_code: overrides.exit_code ?? null,
+    ended_at: overrides.ended_at ?? null,
+    last_activity_at: overrides.last_activity_at ?? new Date().toISOString(),
+    task_description: overrides.task_description ?? 'do some work',
+    messages_log_file: overrides.messages_log_file,
+    result_file: overrides.result_file ?? null,
+  }
+}
+
+describe('agent type branch', () => {
+  it('Output completed agent — returns result_file content', async () => {
+    const resultFile = path.join(tmpDir, 'agent_result.txt')
+    writeFileSync(resultFile, 'final reply from agent')
+
+    const messagesLog = path.join(tmpDir, 'agent_messages.jsonl')
+    writeFileSync(messagesLog, '')
+
+    const agentId = 'agent_complete001'
+    const record = makeAgentRecord({
+      entity_id: agentId,
+      status: 'completed',
+      exit_code: 0,
+      result_file: resultFile,
+      messages_log_file: messagesLog,
+    })
+    await registry.register(record)
+
+    const tool = createOutputTool(deps)
+    const result = await tool.call({ entity_id: agentId }, {})
+
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('final reply from agent')
+    expect(result.output).toContain('completed')
+  })
+
+  it('Output running agent — returns last 10 lines of messages_log', async () => {
+    const messagesLog = path.join(tmpDir, 'agent_running.jsonl')
+    const lines = Array.from({ length: 15 }, (_, i) =>
+      JSON.stringify({ turn: i, type: 'text', text: `progress-line-${i}` }),
+    ).join('\n')
+    writeFileSync(messagesLog, lines)
+
+    const agentId = 'agent_running001'
+    const record = makeAgentRecord({
+      entity_id: agentId,
+      status: 'running',
+      messages_log_file: messagesLog,
+    })
+    await registry.register(record)
+
+    const tool = createOutputTool(deps)
+    const result = await tool.call({ entity_id: agentId }, {})
+
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('running')
+    // Should include the last few lines
+    expect(result.output).toContain('progress-line-14')
+    // Should not include line 0 (it's beyond the last-10 window)
+    expect(result.output).not.toContain('progress-line-0')
+  })
+
+  it('Output stalled agent — returns stalled status with ended_at', async () => {
+    const messagesLog = path.join(tmpDir, 'agent_stalled.jsonl')
+    writeFileSync(messagesLog, JSON.stringify({ turn: 1, type: 'text', text: 'last message' }))
+
+    const agentId = 'agent_stalled001'
+    const stalledAt = new Date().toISOString()
+    const record = makeAgentRecord({
+      entity_id: agentId,
+      status: 'stalled',
+      ended_at: stalledAt,
+      messages_log_file: messagesLog,
+    })
+    await registry.register(record)
+
+    const tool = createOutputTool(deps)
+    const result = await tool.call({ entity_id: agentId }, {})
+
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('stalled')
+    expect(result.output).toContain(stalledAt)
+  })
+
+  it('Kill running agent — aborts controller and marks registry status=killed', async () => {
+    const messagesLog = path.join(tmpDir, 'agent_kill.jsonl')
+    writeFileSync(messagesLog, '')
+
+    const agentId = 'agent_kill001'
+    const record = makeAgentRecord({
+      entity_id: agentId,
+      status: 'running',
+      messages_log_file: messagesLog,
+    })
+    await registry.register(record)
+
+    const controller = new AbortController()
+    const agentAbortControllers = new Map<string, AbortController>([[agentId, controller]])
+    const depsWithControllers: BgToolDeps = { ...deps, agentAbortControllers }
+
+    const tool = createKillTool(depsWithControllers)
+    const result = await tool.call({ entity_id: agentId }, {})
+
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('killed')
+    expect(controller.signal.aborted).toBe(true)
+
+    const updated = await registry.get(agentId)
+    expect(updated?.status).toBe('killed')
+  })
+
+  it('Kill already-completed agent — returns no-op message', async () => {
+    const messagesLog = path.join(tmpDir, 'agent_completed.jsonl')
+    writeFileSync(messagesLog, '')
+
+    const agentId = 'agent_done001'
+    const record = makeAgentRecord({
+      entity_id: agentId,
+      status: 'completed',
+      exit_code: 0,
+      messages_log_file: messagesLog,
+    })
+    await registry.register(record)
+
+    const tool = createKillTool(deps)
+    const result = await tool.call({ entity_id: agentId }, {})
+
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('Already completed')
+    expect(result.output).toContain('no-op')
+  })
+
+  it('ListEntities includes both shell and agent rows with correct type column', async () => {
+    // Register a persistent shell
+    const shellId = await spawnPersistentShell({
+      command: 'sleep 30',
+      owner: { friend_id: OWNER_FRIEND_ID, session_id: 'sess-A' },
+      spawned_by_task_id: TASK_ID,
+      registry,
+    })
+    const shellRec = await registry.get(shellId)
+    if (shellRec?.type === 'shell') spawnedPids.push(shellRec.pid)
+
+    // Register an agent record
+    const messagesLog = path.join(tmpDir, 'agent_list.jsonl')
+    writeFileSync(messagesLog, '')
+    const agentId = 'agent_list001'
+    const agentRecord = makeAgentRecord({
+      entity_id: agentId,
+      status: 'running',
+      task_description: 'analyze the data thoroughly',
+      messages_log_file: messagesLog,
+    })
+    await registry.register(agentRecord)
+
+    const tool = createListEntitiesTool(deps)
+    const result = await tool.call({ status: 'running' }, {})
+
+    expect(result.isError).toBe(false)
+    // Both IDs appear
+    expect(result.output).toContain(shellId)
+    expect(result.output).toContain(agentId)
+    // Type column distinguishes them
+    expect(result.output).toContain('shell')
+    expect(result.output).toContain('agent')
+    // Agent description visible
+    expect(result.output).toContain('analyze the data')
   })
 })

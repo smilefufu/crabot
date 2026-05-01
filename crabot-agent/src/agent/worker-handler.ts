@@ -207,6 +207,8 @@ export class WorkerHandler {
   private readonly transientShells = new TransientShellRegistry()
   /** Per-task output cursor map: key = `${taskId}:${entityId}` → byte offset */
   private readonly bgCursorMap = new Map<string, number>()
+  /** AbortControllers for running bg sub-agents (key=entity_id); shared with BgToolDeps + SubAgentBgContext */
+  private readonly agentAbortControllers = new Map<string, AbortController>()
 
   constructor(
     sdkEnv: SdkEnvConfig,
@@ -461,6 +463,14 @@ export class WorkerHandler {
           cursorMap: this.bgCursorMap,
           taskId: task.task_id,
           ownerFriendId: bgOwner.friend_id,
+          agentAbortControllers: this.agentAbortControllers,
+        }
+        const subAgentBgContext = {
+          registry: this.bgRegistry,
+          workerContext: context,
+          owner: bgOwner,
+          spawned_by_task_id: task.task_id,
+          abortControllers: this.agentAbortControllers,
         }
         tools.push(...getConfiguredBuiltinTools(
           os.homedir(),
@@ -499,6 +509,7 @@ export class WorkerHandler {
             hookRegistry,
             lspManager: hookRegistry ? this.lspManager : undefined,
             permissionConfig: baseToolsPermissionConfig,
+            bgContext: subAgentBgContext,
           }))
         }
 
@@ -515,6 +526,7 @@ export class WorkerHandler {
           parentHumanQueue: humanQueue,
           traceConfig: subAgentTraceConfig,
           permissionConfig: baseToolsPermissionConfig,
+          bgContext: subAgentBgContext,
         }))
 
         // 3h. Trace search tool

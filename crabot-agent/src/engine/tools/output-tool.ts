@@ -17,6 +17,8 @@ export interface BgToolDeps {
   readonly cursorMap: Map<string, number>
   readonly taskId: string
   readonly ownerFriendId?: string
+  /** Sub-agent abortControllers map (key=entity_id); used to abort a running bg agent on Kill */
+  readonly agentAbortControllers?: Map<string, AbortController>
 }
 
 // ---------------------------------------------------------------------------
@@ -95,6 +97,67 @@ async function readShellOutput(
   return { output, isError: false }
 }
 
+async function readLastJsonlLines(file: string, n: number): Promise<string> {
+  try {
+    const text = await fs.readFile(file, 'utf-8')
+    const lines = text.split('\n').filter((l) => l.trim())
+    return lines.slice(-n).join('\n')
+  } catch {
+    return '(no activity log)'
+  }
+}
+
+async function readAgentOutput(
+  id: string,
+  _explicitOffset: number | undefined,
+  deps: BgToolDeps,
+): Promise<{ output: string; isError: boolean }> {
+  const record = await deps.registry.get(id)
+  if (!record) {
+    return { output: `Entity not found: ${id}`, isError: true }
+  }
+  if (record.type !== 'agent') {
+    return { output: `Mismatched entity type for ${id}: expected agent, got ${record.type}`, isError: true }
+  }
+
+  if (record.status === 'completed' && record.result_file) {
+    try {
+      const content = await fs.readFile(record.result_file, 'utf-8')
+      await deps.registry.update(id, { last_activity_at: new Date().toISOString() })
+      return {
+        output: `[status: completed, exit_code: ${record.exit_code}]\n${content}`,
+        isError: false,
+      }
+    } catch (err) {
+      return { output: `[status: completed but result_file read failed: ${err}]`, isError: true }
+    }
+  }
+
+  if (record.status === 'failed' || record.status === 'killed') {
+    const recent = await readLastJsonlLines(record.messages_log_file, 5)
+    return {
+      output: `[status: ${record.status}, exit_code: ${record.exit_code}]\n${recent}`,
+      isError: false,
+    }
+  }
+
+  if (record.status === 'stalled') {
+    const recent = await readLastJsonlLines(record.messages_log_file, 5)
+    return {
+      output: `[status: stalled, ended_at: ${record.ended_at}]\n${recent}`,
+      isError: false,
+    }
+  }
+
+  // running → return last 10 lines of messages_log
+  const recent = await readLastJsonlLines(record.messages_log_file, 10)
+  await deps.registry.update(id, { last_activity_at: new Date().toISOString() })
+  return {
+    output: `[status: running, in progress; recent activity:]\n${recent}`,
+    isError: false,
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
@@ -131,10 +194,7 @@ export function createOutputTool(deps: BgToolDeps): ToolDefinition {
       }
 
       if (entityId.startsWith('agent_')) {
-        return {
-          output: 'Agent entity output not yet implemented (Plan 2 Task 14).',
-          isError: true,
-        }
+        return readAgentOutput(entityId, explicitOffset, deps)
       }
 
       return {

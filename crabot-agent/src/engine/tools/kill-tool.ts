@@ -70,6 +70,36 @@ async function killShell(
   return { output: `Sent SIGTERM to persistent shell ${entityId} (SIGKILL fallback in 3s)`, isError: false }
 }
 
+async function killAgent(
+  entityId: string,
+  deps: BgToolDeps,
+): Promise<{ output: string; isError: boolean }> {
+  const record = await deps.registry.get(entityId)
+  if (!record) {
+    return { output: `Entity not found: ${entityId}`, isError: true }
+  }
+  if (record.type !== 'agent') {
+    return { output: `Mismatched type for ${entityId}: expected agent, got ${record.type}`, isError: true }
+  }
+
+  if (record.status !== 'running') {
+    return { output: `Already ${record.status}, no-op`, isError: false }
+  }
+
+  const controller = deps.agentAbortControllers?.get(entityId)
+  if (controller) {
+    controller.abort()
+  }
+
+  await deps.registry.update(entityId, {
+    status: 'killed',
+    ended_at: new Date().toISOString(),
+  })
+  // Note: do not remove from agentAbortControllers map — bg-agent.ts finally block will do that
+
+  return { output: `Agent ${entityId} killed.`, isError: false }
+}
+
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
@@ -99,10 +129,7 @@ export function createKillTool(deps: BgToolDeps): ToolDefinition {
       }
 
       if (entityId.startsWith('agent_')) {
-        return {
-          output: 'Agent kill not yet implemented (Plan 2 Task 14).',
-          isError: true,
-        }
+        return killAgent(entityId, deps)
       }
 
       return {
