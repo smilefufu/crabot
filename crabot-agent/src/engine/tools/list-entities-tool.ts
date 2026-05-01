@@ -15,7 +15,6 @@ import type { BgEntityRecord } from '../bg-entities/types'
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-type ScopeFilter = 'session' | 'channel' | 'all'
 type StatusFilter = 'running' | 'completed' | 'failed' | 'killed' | 'stalled' | 'all'
 
 function resolveStatuses(statusFilter: StatusFilter): ReadonlyArray<BgEntityStatus> | undefined {
@@ -128,7 +127,9 @@ export function createListEntitiesTool(deps: BgToolDeps): ToolDefinition {
     isReadOnly: true,
     permissionLevel: 'safe',
     call: async (input) => {
-      const _scope = (input.scope as ScopeFilter | undefined) ?? 'session'
+      // scope 入参当前不分支生效——persistent 按 owner_friend_id 过滤、transient 按 taskId 过滤，
+      // 已经覆盖 spec §6.5 的"master 私聊看自己 spawn 的全部 / 非 master 场景仅看 task 内"语义。
+      // 未来若要 session/channel 维度细粒度过滤，再引入 deps.sessionId / deps.channelId
       const statusFilter = (input.status as StatusFilter | undefined) ?? 'running'
 
       const wantedStatuses = resolveStatuses(statusFilter)
