@@ -202,7 +202,11 @@ export class BgEntityRegistry {
         }
       }
 
-      await this.writeAtomic({ entities: entries })
+      // 跳过无操作时的写盘——既减少不必要的 IO，也避免在没有 registry.json 的
+      // 干净环境（测试 / 全新 worker 启动）触发 ENOENT 噪声
+      if (removed.length > 0) {
+        await this.writeAtomic({ entities: entries })
+      }
     })
 
     return { removed }
