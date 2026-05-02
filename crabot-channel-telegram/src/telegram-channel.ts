@@ -472,10 +472,9 @@ export class TelegramChannel extends ModuleBase {
         ? this.client.sendPhoto.bind(this.client)
         : this.client.sendDocument.bind(this.client)
 
-      // 切分以 caption 上限为准：第一段塞 caption，后续段独立发 text。
-      // 每段 <= MAX_CAPTION_LENGTH < MAX_MESSAGE_LENGTH，单条 sendMessage 安全。
-      const chunks = splitText(text, MAX_CAPTION_LENGTH)
-      const captionRender = chunks.length > 0 ? this.renderTextForTelegram(chunks[0]) : null
+      // 第一段塞 caption（按 MAX_CAPTION_LENGTH 切分 + 膨胀比折扣），后续段独立发 text
+      const captionChunks = this.splitForRender(text, MAX_CAPTION_LENGTH)
+      const captionRender = captionChunks.length > 0 ? this.renderTextForTelegram(captionChunks[0]) : null
 
       const firstMsg = await sendFn(chatId, media, {
         ...(replyTo ? { reply_to_message_id: replyTo } : {}),
@@ -484,8 +483,8 @@ export class TelegramChannel extends ModuleBase {
       })
       const ids = [firstMsg.message_id]
 
-      for (let i = 1; i < chunks.length; i++) {
-        const render = this.renderTextForTelegram(chunks[i])
+      for (let i = 1; i < captionChunks.length; i++) {
+        const render = this.renderTextForTelegram(captionChunks[i])
         const sent = await this.client.sendMessage(chatId, render.text, { parse_mode: render.parseMode })
         ids.push(sent.message_id)
       }
@@ -496,16 +495,15 @@ export class TelegramChannel extends ModuleBase {
   }
 
   /**
-   * 切分以原始 markdown 文本为准，每段独立渲染：标签膨胀超限时整段降级纯文本。
-   * 跨段的 markdown 标记（如 chunk N-1 开 ** 在 chunk N 闭）会丢格式，但不会发出非法 HTML。
+   * 切分先按原始 markdown 文本算，再逐段渲染。渲染后 HTML 超阈时按膨胀比把
+   * 原始段进一步切到能容纳的目标长度——避免整段直接降级丢失格式。
    */
   private async sendTextChunks(
     chatId: string,
     text: string,
     replyTo: number | undefined
   ): Promise<number[]> {
-    const chunks = splitText(text, MAX_MESSAGE_LENGTH)
-    const sources = chunks.length === 0 ? [text] : chunks
+    const sources = this.splitForRender(text)
 
     const ids: number[] = []
     for (let i = 0; i < sources.length; i++) {
@@ -519,7 +517,40 @@ export class TelegramChannel extends ModuleBase {
     return ids
   }
 
-  /** 渲染结果若超过 Telegram 长度上限会整段降级为纯文本。 */
+  /**
+   * 切分到「渲染后每段都不超 MAX_MESSAGE_LENGTH」。markdown 渲染（尤其 GFM 表格 → <pre>）
+   * 会把原文撑大 1.3~2x，所以切分预算要按膨胀比折扣，超阈段按比例进一步切。
+   *
+   * 注意要拿 markdownToTelegramHtml 的"裸渲染长度"判断膨胀，而不是 renderTextForTelegram
+   * 的输出长度——后者超阈时已经回退成纯文本，长度反而落回原值，会让超阈段悄悄漏过。
+   */
+  private splitForRender(text: string, maxOut = MAX_MESSAGE_LENGTH): string[] {
+    if (!text) return []
+    const initial = splitText(text, maxOut)
+    const sources = initial.length === 0 ? [text] : initial
+
+    const result: string[] = []
+    for (const chunk of sources) {
+      const enabled = decideMarkdownEnabled(this.telegramConfig.markdown_format, chunk)
+      const renderedLen = enabled ? markdownToTelegramHtml(chunk).length : chunk.length
+      if (renderedLen <= maxOut) {
+        result.push(chunk)
+        continue
+      }
+      // 按膨胀比反推安全的原文上限再切；留 10% 安全余量
+      const ratio = Math.max(1, renderedLen / Math.max(1, chunk.length))
+      const targetRaw = Math.max(256, Math.floor((maxOut / ratio) * 0.9))
+      const subChunks = splitText(chunk, targetRaw)
+      for (const sub of subChunks.length === 0 ? [chunk] : subChunks) {
+        // 极端情况下二次切完仍可能超阈（例如单个超大代码块），那时 renderTextForTelegram
+        // 自身的 length 守门会再降级为纯文本，至少不会发出非法 HTML
+        result.push(sub)
+      }
+    }
+    return result
+  }
+
+  /** 渲染结果若仍超过 Telegram 长度上限，整段降级为纯文本作为最后的安全网。 */
   private renderTextForTelegram(chunk: string): { text: string; parseMode?: TelegramParseMode } {
     if (!decideMarkdownEnabled(this.telegramConfig.markdown_format, chunk)) {
       return { text: chunk }

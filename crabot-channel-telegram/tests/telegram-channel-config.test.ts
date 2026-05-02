@@ -37,6 +37,36 @@ afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true })
 })
 
+describe('splitForRender (回归 trace 81b59d76 看到的现象)', () => {
+  it('原文不超 4096 但渲染后超阈时，按膨胀比进一步切分而不是整段降级', () => {
+    // fixture 来自 trace 81b59d76 的真实消息：原文 3343 字符，含 GFM 表格 + 多级标题，
+    // 朴素 splitText 切不动，markdownToTelegramHtml 后膨胀到 ~4433 超阈，旧逻辑会整段降级
+    const md = fs.readFileSync(
+      path.join(__dirname, 'fixtures', 'long-markdown-with-table.md'),
+      'utf-8'
+    )
+
+    const chunks: string[] = (channel as any).splitForRender(md)
+    expect(chunks.length).toBeGreaterThan(1)
+    for (const c of chunks) {
+      const rendered = (channel as any).renderTextForTelegram(c)
+      expect(rendered.text.length).toBeLessThanOrEqual(4096)
+      // 每段都应保留 markdown 渲染（parseMode=HTML），不再整段降级为纯文本
+      expect(rendered.parseMode).toBe('HTML')
+    }
+  })
+
+  it('短文本不会被错误地切碎', () => {
+    const chunks: string[] = (channel as any).splitForRender('**简短** 一句')
+    expect(chunks.length).toBe(1)
+  })
+
+  it('空字符串返回空数组', () => {
+    const chunks: string[] = (channel as any).splitForRender('')
+    expect(chunks).toEqual([])
+  })
+})
+
 describe('handleGetConfig', () => {
   it('暴露 markdown_format 顶层字段 + hot_reload schema', () => {
     const result = (channel as any).handleGetConfig()
