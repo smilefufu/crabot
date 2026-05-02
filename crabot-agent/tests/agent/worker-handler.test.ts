@@ -509,6 +509,37 @@ describe('WorkerHandler.updateSkills atomic write', () => {
     expect(result2.output).toContain('NEW body')
     expect(result2.output).not.toContain('old body')
   })
+
+  it('serializes concurrent updateSkills writes; final state reflects last call', async () => {
+    const handler = createTestWorkerHandler()
+    // 模拟启动期 admin 多个 trigger 同 ms 撞击的场景
+    handler.updateSkills([{ id: 'a', name: 'a', content: 'v1', description: '' }])
+    handler.updateSkills([{ id: 'a', name: 'a', content: 'v2', description: '' }])
+    handler.updateSkills([{ id: 'a', name: 'a', content: 'v3', description: '' }])
+    // 等所有排队的写完成
+    await new Promise((r) => setTimeout(r, 200))
+
+    const skillsRoot = join(dataDir, 'instance', 'skills')
+    expect(readFileSync(join(skillsRoot, 'a', 'SKILL.md'), 'utf-8')).toBe('v3')
+    // 没有 .tmp.* 残留
+    const entries = require('fs').readdirSync(join(dataDir, 'instance')).filter((e: string) => e.startsWith('skills.tmp'))
+    expect(entries).toHaveLength(0)
+  })
+
+  it('skips disk write when content unchanged (dedupe via hash)', async () => {
+    const handler = createTestWorkerHandler()
+    handler.updateSkills([{ id: 'a', name: 'a', content: 'same', description: '' }])
+    await new Promise((r) => setTimeout(r, 50))
+    const skillsRoot = join(dataDir, 'instance', 'skills')
+    const mtime1 = require('fs').statSync(join(skillsRoot, 'a', 'SKILL.md')).mtimeMs
+
+    // 同样的内容再推一次——应该跳过 IO，文件 mtime 不变
+    handler.updateSkills([{ id: 'a', name: 'a', content: 'same', description: '' }])
+    await new Promise((r) => setTimeout(r, 50))
+    const mtime2 = require('fs').statSync(join(skillsRoot, 'a', 'SKILL.md')).mtimeMs
+
+    expect(mtime2).toBe(mtime1)
+  })
 })
 
 describe('WorkerHandler bg-entities lifecycle', () => {

@@ -6006,11 +6006,30 @@ export class AdminModule extends ModuleBase {
    * 支持热更新：model_config、skills、extra
    * 仍需重启：system_prompt、mcp_servers
    */
-  /** Fire-and-forget push trigger; 调用方传 reason 用于日志区分。 */
+  /**
+   * Fire-and-forget push trigger; 调用方传 reason 用于日志区分。
+   *
+   * 200ms debounce：启动期 / 用户连续操作时多个 trigger（onConfigChanged、
+   * skill CRUD、mcp CRUD 等）合并为一次推送，减少与 worker 端 updateSkills
+   * 写盘的并发量。窗口内多次 reason 拼成一条日志便于追踪。
+   */
+  private pushDebounceTimer?: NodeJS.Timeout
+  private pushDebouncedReasons?: string[]
   private triggerPushAfter(reason: string): void {
-    this.pushConfigToAgentModules().catch((err: Error) => {
-      console.warn(`[Admin] pushConfigToAgentModules after ${reason} failed:`, err.message)
-    })
+    // 防御 Object.create 跳过 ctor 的场景（测试 fixture 常用）
+    this.pushDebouncedReasons ??= []
+    this.pushDebouncedReasons.push(reason)
+    if (this.pushDebounceTimer) clearTimeout(this.pushDebounceTimer)
+    this.pushDebounceTimer = setTimeout(() => {
+      const reasons = Array.from(new Set(this.pushDebouncedReasons ?? []))
+      this.pushDebouncedReasons = []
+      this.pushDebounceTimer = undefined
+      const reasonLabel = reasons.length === 1 ? reasons[0] : `${reasons.length} triggers: ${reasons.join(', ')}`
+      this.pushConfigToAgentModules().catch((err: Error) => {
+        console.warn(`[Admin] pushConfigToAgentModules after ${reasonLabel} failed:`, err.message)
+      })
+    }, 200)
+    this.pushDebounceTimer.unref?.()
   }
 
   private async pushConfigToAgentModules(): Promise<void> {

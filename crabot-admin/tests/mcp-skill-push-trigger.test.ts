@@ -33,14 +33,15 @@ function makeReq(body: unknown): IncomingMessage {
   } as unknown as IncomingMessage
 }
 
-/** 调 admin 上的 handler 方法（绕过类型检查）+ 等 fire-and-forget microtask 完成。 */
+/** 调 admin 上的 handler 方法（绕过类型检查）+ 等 200ms debounce 窗口 + fire-and-forget microtask 完成。 */
 async function invoke<A extends unknown[]>(
   admin: unknown,
   method: string,
   ...args: A
 ): Promise<void> {
   await (admin as Record<string, (...a: A) => Promise<void>>)[method](...args)
-  await new Promise((resolve) => setImmediate(resolve))
+  // triggerPushAfter 现在 200ms debounce，等够窗口期 + 微任务清空
+  await new Promise((resolve) => setTimeout(resolve, 250))
 }
 
 /** 断言 push 触发了恰好一次。 */

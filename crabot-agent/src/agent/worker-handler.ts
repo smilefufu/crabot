@@ -69,6 +69,7 @@ import { getInstanceSkillsDir } from '../core/data-paths.js'
 
 import * as fs from 'fs'
 import * as path from 'path'
+import { createHash, randomBytes } from 'crypto'
 import * as os from 'os'
 
 type ProgressReportMode = 'silent' | 'text_forward' | 'digest'
@@ -147,6 +148,20 @@ function adapterFromSdkEnv(sdkEnv: SdkEnvConfig) {
   })
 }
 
+/** 给 skills 列表算一个内容 hash 用于 dedupe；name + content + skill_dir 三元组决定身份 */
+function computeSkillsHash(skills: ReadonlyArray<SkillConfig>): string {
+  const h = createHash('sha256')
+  for (const s of [...skills].sort((a, b) => a.name.localeCompare(b.name))) {
+    h.update(s.name)
+    h.update('\0')
+    h.update(s.content)
+    h.update('\0')
+    h.update(s.skill_dir ?? '')
+    h.update('\0')
+  }
+  return h.digest('hex')
+}
+
 
 // ============================================================================
 // WorkerHandler
@@ -210,6 +225,9 @@ export class WorkerHandler {
   private readonly bgCursorMap = new Map<string, number>()
   /** AbortControllers for running bg sub-agents (key=entity_id); shared with BgToolDeps + SubAgentBgContext */
   private readonly agentAbortControllers = new Map<string, AbortController>()
+  /** Skills 写盘的串行化 + 内容指纹去重；防止 admin 启动期多个 trigger 并发推送时的写盘竞态 */
+  private skillsWritePromise: Promise<void> = Promise.resolve()
+  private lastSkillsHash: string = ''
   /** Interval handle for periodic 24h GC of dead entities */
   private gcIntervalHandle?: NodeJS.Timeout
 
@@ -234,15 +252,10 @@ export class WorkerHandler {
     this.subAgentHints = options?.subAgentHints ?? []
     this.getTimezone = config.getTimezone ?? (() => resolveTimezone(undefined))
 
-    // 确保 instance skills 目录存在；如果 ctor 已经注入了 skills，立刻 sync 到磁盘
-    // 让目录反映当前内存状态（防止 worker 重启后磁盘是空的而内存是 stale 的）
-    const skillsRoot = getInstanceSkillsDir()
-    fs.mkdirSync(skillsRoot, { recursive: true })
-    if (this.skills.length > 0) {
-      void this.writeSkillsToInstancePath(this.skills).catch((err) => {
-        console.error('[WorkerHandler] init skills disk write failed:', err)
-      })
-    }
+    // 确保 instance skills 目录存在；实际内容靠 admin 的 update_config 推送
+    // （admin 在 module_started 事件后 1s 内必推一次），不在 ctor 里 fire-and-forget 写盘
+    // 避免与 admin push 撞 race（启动期 admin 多个 trigger 可能并发触发 updateSkills）
+    fs.mkdirSync(getInstanceSkillsDir(), { recursive: true })
 
     // Startup: recover persistent bg entities (mark dead shells as failed, stalled agents)
     void this.bgRegistry.recoverPersistent().catch((err) => {
@@ -295,21 +308,39 @@ export class WorkerHandler {
 
   /**
    * 热加载：更新 skills 列表 + atomic write 到 instance 级目录。
-   * 改动后：进行中 task 调 Skill 工具会读到最新 SKILL.md（race window <1ms）。
+   * - 先同步更新 this.skills（保证后续 buildSystemPrompt / Skill 工具读到最新 list）
+   * - 串行化磁盘写：所有写盘排队执行，进入临界区时读最新 this.skills snapshot；
+   *   即使 admin 启动期多个 trigger 并发推送，最终落盘的也是最后一次的内容
+   * - 内容指纹去重：连续同样内容的 push 跳过 IO
    */
   updateSkills(newSkills: ReadonlyArray<SkillConfig>): void {
     this.skills = newSkills
-    // Atomic write 到 instance-level 路径，确保 skill-tool 下次调用能读到最新内容
-    void this.writeSkillsToInstancePath(newSkills).catch((err) => {
-      console.error('[WorkerHandler] updateSkills disk write failed:', err)
-    })
+    void this.scheduleSkillsDiskSync()
   }
 
-  private async writeSkillsToInstancePath(skills: ReadonlyArray<SkillConfig>): Promise<void> {
+  /** 把"写最新 this.skills 到 disk"排到串行队列尾部 */
+  private scheduleSkillsDiskSync(): void {
+    this.skillsWritePromise = this.skillsWritePromise
+      .then(() => this.writeSkillsToInstancePath())
+      .catch((err) => {
+        console.error('[WorkerHandler] skills disk write failed:', err)
+      })
+  }
+
+  private async writeSkillsToInstancePath(): Promise<void> {
+    // 进入临界区时读最新 snapshot——保证最后排队的写赢，且内容是最新
+    const snapshot = this.skills
+    const hash = computeSkillsHash(snapshot)
+    if (hash === this.lastSkillsHash) {
+      // 内容未变化，跳过 IO（启动期 admin 多个 trigger 推同样 config 的常见场景）
+      return
+    }
+
     const skillsRoot = getInstanceSkillsDir()
-    const tmpDir = `${skillsRoot}.tmp.${process.pid}.${Date.now()}`
+    // tmpDir 加 8 字节随机后缀防同 ms 撞名（若 mutex 被绕过也安全）
+    const tmpDir = `${skillsRoot}.tmp.${process.pid}.${Date.now()}.${randomBytes(4).toString('hex')}`
     await fs.promises.mkdir(tmpDir, { recursive: true })
-    for (const skill of skills) {
+    for (const skill of snapshot) {
       const skillDir = path.join(tmpDir, skill.name)
       await fs.promises.mkdir(skillDir, { recursive: true })
       await fs.promises.writeFile(path.join(skillDir, 'SKILL.md'), skill.content, 'utf-8')
@@ -317,12 +348,11 @@ export class WorkerHandler {
         await fs.promises.writeFile(path.join(skillDir, '.skill_dir'), skill.skill_dir, 'utf-8')
       }
     }
-    // POSIX atomic swap：先删旧 + rename tmp → 目标。删除 + rename 之间有微小窗口
-    // 但比 partial overwrite 安全
+    // POSIX atomic swap：先删旧 + rename tmp → 目标
     await fs.promises.rm(skillsRoot, { recursive: true, force: true })
-    // 确保父目录存在
     await fs.promises.mkdir(path.dirname(skillsRoot), { recursive: true })
     await fs.promises.rename(tmpDir, skillsRoot)
+    this.lastSkillsHash = hash
   }
 
   /**
