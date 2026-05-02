@@ -7,9 +7,9 @@
  * - 飞书开放平台 IM 消息事件 schema（@larksuiteoapi/node-sdk 派生子集）
  */
 
-import type { ModuleId, SessionId } from 'crabot-shared'
+import type { ModuleId, SessionId, MarkdownFormat } from 'crabot-shared'
 
-export type { ModuleId, SessionId }
+export type { ModuleId, SessionId, MarkdownFormat }
 
 // ============================================================================
 // Crabot Channel 协议类型
@@ -306,4 +306,6 @@ export interface FeishuChannelConfig {
   /** 拥有者 open_id（扫码绑定时记录，用于默认 allowFrom） */
   owner_open_id?: string
   only_respond_to_mentions: boolean
+  /** bot 发文本时是否按 Markdown 渲染（启用时改用 interactive 卡片 + markdown 元素）。默认 auto */
+  markdown_format: MarkdownFormat
 }

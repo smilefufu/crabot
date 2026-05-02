@@ -7,9 +7,9 @@
  * - crabot protocol-channel.md §3 的 Channel 接口
  */
 
-import type { ModuleId, SessionId } from 'crabot-shared'
+import type { ModuleId, SessionId, MarkdownFormat } from 'crabot-shared'
 
-export type { ModuleId, SessionId }
+export type { ModuleId, SessionId, MarkdownFormat }
 
 // ============================================================================
 // Telegram Bot API 类型（精简，只包含本模块用到的字段）
@@ -295,6 +295,8 @@ export interface TelegramChannelConfig {
   mode: 'polling' | 'webhook'
   webhook_url?: string
   webhook_secret?: string
+  /** bot 发文本时是否按 Markdown 渲染。默认 auto（仅在检测到 markdown 标记时启用） */
+  markdown_format: MarkdownFormat
 }
 
 export interface TelegramCacheConfig {

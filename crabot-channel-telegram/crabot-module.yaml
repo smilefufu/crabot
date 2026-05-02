@@ -39,6 +39,13 @@ config_schema:
       title: Webhook Secret
       description: webhook 模式下的签名验证密钥（可选，推荐设置）
       format: password
+    TELEGRAM_MARKDOWN_FORMAT:
+      type: string
+      title: 按 Markdown 格式发送
+      description: bot 给 Telegram 发文本时是否按 Markdown 渲染（内部会转换为 HTML 后用 parse_mode=HTML 发送）。auto 仅在检测到 markdown 标记时启用
+      enum: ["auto", "on", "off"]
+      enum_titles: ["自动", "开启", "关闭"]
+      default: "auto"
 
 author: Crabot Team
 license: MIT

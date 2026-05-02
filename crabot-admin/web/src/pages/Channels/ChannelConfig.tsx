@@ -73,9 +73,12 @@ function SchemaField({ propKey, prop, value, required, onChange }: {
           onChange={(e) => onChange(propKey, e.target.value)}
         >
           {!required && <option value="">（未设置）</option>}
-          {prop.enum.map((v) => (
-            <option key={String(v)} value={String(v)}>{String(v)}</option>
-          ))}
+          {prop.enum.map((v, i) => {
+            const label = prop.enum_titles?.[i] ?? String(v)
+            return (
+              <option key={String(v)} value={String(v)}>{label}</option>
+            )
+          })}
         </select>
       ) : prop.type === 'boolean' ? (
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.625rem' }}>

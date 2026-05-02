@@ -14,6 +14,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import { parseMarkdownFormat } from 'crabot-shared'
 import { FeishuChannel } from './feishu-channel.js'
 import type { FeishuDomain } from './types.js'
 
@@ -46,6 +47,7 @@ async function main(): Promise<void> {
   const domain: FeishuDomain = domainEnv === 'lark' ? 'lark' : 'feishu'
 
   const onlyMentions = (process.env.FEISHU_ONLY_RESPOND_TO_MENTIONS ?? 'true').toLowerCase() !== 'false'
+  const markdownFormat = parseMarkdownFormat(process.env.FEISHU_MARKDOWN_FORMAT)
 
   const dataDir = process.env.DATA_DIR ?? path.join(process.cwd(), 'data')
   fs.mkdirSync(dataDir, { recursive: true })
@@ -63,6 +65,7 @@ async function main(): Promise<void> {
       domain,
       owner_open_id: process.env.FEISHU_OWNER_OPEN_ID,
       only_respond_to_mentions: onlyMentions,
+      markdown_format: markdownFormat,
     },
   })
 
@@ -81,6 +84,7 @@ async function main(): Promise<void> {
     console.log(`- Port: ${port}`)
     console.log(`- Domain: ${domain}`)
     console.log(`- Only @ Crabot in groups: ${onlyMentions}`)
+    console.log(`- Markdown format: ${markdownFormat}`)
     console.log(`- Data Dir: ${dataDir}`)
   } catch (error) {
     console.error('Failed to start Feishu Channel module:', error)

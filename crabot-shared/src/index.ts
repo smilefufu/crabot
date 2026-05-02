@@ -67,3 +67,13 @@ export {
   type OnboarderFinishResult,
   type OnboarderFactory,
 } from './onboarder.js'
+
+export {
+  type MarkdownFormat,
+  type TelegramParseMode,
+  MARKDOWN_FORMAT_VALUES,
+  parseMarkdownFormat,
+  decideMarkdownEnabled,
+  hasMarkdownMarkers,
+  markdownToTelegramHtml,
+} from './markdown.js'

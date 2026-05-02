@@ -307,6 +307,8 @@ export interface JsonSchemaProperty {
   format?: string // password, uri, email 等
   default?: unknown
   enum?: (string | number)[]
+  /** 与 enum 一一对应的展示文案。比 enum 多 / 少时按位置取值，缺失则显示原始 enum 值 */
+  enum_titles?: string[]
 }
 
 export interface ChannelInstance {

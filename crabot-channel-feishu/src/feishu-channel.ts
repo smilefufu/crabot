@@ -13,7 +13,15 @@ import * as lark from '@larksuiteoapi/node-sdk'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
-import { ModuleBase, type ModuleConfig, generateId, generateTimestamp, type Event } from 'crabot-shared'
+import {
+  ModuleBase,
+  type ModuleConfig,
+  generateId,
+  generateTimestamp,
+  type Event,
+  decideMarkdownEnabled,
+  MARKDOWN_FORMAT_VALUES,
+} from 'crabot-shared'
 
 import { FeishuClient, FeishuClientError, type SendReceive } from './feishu-client.js'
 import { WsSubscriber } from './ws-subscriber.js'
@@ -29,12 +37,14 @@ import type {
   ChannelCapabilities,
   FeishuChannelConfig,
   FeishuChatType,
+  FeishuDomain,
   FindOrCreatePrivateSessionParams,
   GetHistoryParams,
   GetMessageParams,
   GetSessionParams,
   GetSessionsParams,
   HistoryMessage,
+  MarkdownFormat,
   MessageContent,
   PlatformUserInfoResult,
   Session,
@@ -450,7 +460,10 @@ export class FeishuChannel extends ModuleBase {
       result = await this.client.sendFile(receive, fileKey)
     } else {
       const text = injectMentionTags(params.content.text ?? '', await this.resolveMentionsToOpenIds(params.features?.mentions))
-      result = await this.client.sendText(receive, text)
+      const card = this.buildMarkdownCard(text)
+      result = card
+        ? await this.client.sendCard(receive, card)
+        : await this.client.sendText(receive, text)
     }
 
     const sentAt = isoFromMillis(result.create_time) ?? generateTimestamp()
@@ -469,7 +482,28 @@ export class FeishuChannel extends ModuleBase {
       return { msgType: 'file', contentJson: JSON.stringify({ file_key: fileKey }) }
     }
     const text = injectMentionTags(params.content.text ?? '', await this.resolveMentionsToOpenIds(params.features?.mentions))
-    return { msgType: 'text', contentJson: JSON.stringify({ text }) }
+    const card = this.buildMarkdownCard(text)
+    return card
+      ? { msgType: 'interactive', contentJson: JSON.stringify(card) }
+      : { msgType: 'text', contentJson: JSON.stringify({ text }) }
+  }
+
+  /**
+   * 飞书 interactive 卡片 schema 2.0 + markdown 元素：原生支持完整 GFM（含 header /
+   * table / 代码块 / 列表）。schema 1.0 的 markdown 子集残缺——直接踩过坑，别回退。
+   * 返回 null 表示走纯文本 msg_type=text。@ 标签由调用方注入。
+   */
+  private buildMarkdownCard(text: string): {
+    schema: '2.0'
+    config: { wide_screen_mode: boolean }
+    body: { elements: Array<{ tag: string; content: string }> }
+  } | null {
+    if (!decideMarkdownEnabled(this.feishuConfig.markdown_format, text)) return null
+    return {
+      schema: '2.0',
+      config: { wide_screen_mode: true },
+      body: { elements: [{ tag: 'markdown', content: text }] },
+    }
   }
 
   private async loadContentBuffer(content: MessageContent): Promise<{ buf: Buffer; filename: string }> {
@@ -724,6 +758,7 @@ export class FeishuChannel extends ModuleBase {
         ...(this.feishuConfig.owner_open_id ? { owner_open_id: this.feishuConfig.owner_open_id } : {}),
       },
       group: { only_respond_to_mentions: this.feishuConfig.only_respond_to_mentions },
+      markdown_format: this.feishuConfig.markdown_format,
       crab_platform_user_id: this.botOpenId ?? '',
     }
     return {
@@ -733,31 +768,52 @@ export class FeishuChannel extends ModuleBase {
         'credentials.app_id': { hot_reload: false, description: 'App ID，变更需重启' },
         'credentials.domain': { hot_reload: false, description: '接入域，变更需重启' },
         'group.only_respond_to_mentions': { hot_reload: true, description: '群聊仅响应 @ Crabot' },
+        'markdown_format': { hot_reload: true, description: 'Markdown 渲染开关：auto / on / off' },
       },
     }
   }
 
-  private handleUpdateConfig(params: { config?: Partial<FeishuChannelConfig> }): { config: Record<string, unknown>; requires_restart: boolean } {
+  /**
+   * Admin Web 把 handleGetConfig 的嵌套结构原样回传，所以 incoming 字段路径必须
+   * 跟 get 输出一一对应：credentials.* / group.* / markdown_format。敏感字段如果
+   * 收到 mask 占位符 *** 表示用户没改，跳过覆盖避免清掉真值。
+   */
+  private handleUpdateConfig(params: {
+    config?: {
+      credentials?: { app_id?: string; app_secret?: string; domain?: FeishuDomain; owner_open_id?: string }
+      group?: { only_respond_to_mentions?: boolean }
+      markdown_format?: MarkdownFormat
+    }
+  }): { config: Record<string, unknown>; requires_restart: boolean } {
     const incoming = params.config ?? {}
     let requiresRestart = false
-    if (incoming.app_id && incoming.app_id !== this.feishuConfig.app_id) {
-      this.feishuConfig.app_id = incoming.app_id
+
+    const creds = incoming.credentials ?? {}
+    if (typeof creds.app_id === 'string' && creds.app_id && creds.app_id !== this.feishuConfig.app_id) {
+      this.feishuConfig.app_id = creds.app_id
       requiresRestart = true
     }
-    if (incoming.app_secret) {
-      this.feishuConfig.app_secret = incoming.app_secret
+    if (typeof creds.app_secret === 'string' && creds.app_secret && creds.app_secret !== '***') {
+      this.feishuConfig.app_secret = creds.app_secret
       requiresRestart = true
     }
-    if (incoming.domain && incoming.domain !== this.feishuConfig.domain) {
-      this.feishuConfig.domain = incoming.domain
+    if (creds.domain && creds.domain !== this.feishuConfig.domain) {
+      this.feishuConfig.domain = creds.domain
       requiresRestart = true
     }
-    if (typeof incoming.only_respond_to_mentions === 'boolean') {
-      this.feishuConfig.only_respond_to_mentions = incoming.only_respond_to_mentions
+    if (creds.owner_open_id !== undefined) {
+      this.feishuConfig.owner_open_id = creds.owner_open_id || undefined
     }
-    if (incoming.owner_open_id !== undefined) {
-      this.feishuConfig.owner_open_id = incoming.owner_open_id
+
+    const group = incoming.group ?? {}
+    if (typeof group.only_respond_to_mentions === 'boolean') {
+      this.feishuConfig.only_respond_to_mentions = group.only_respond_to_mentions
     }
+
+    if (incoming.markdown_format && MARKDOWN_FORMAT_VALUES.includes(incoming.markdown_format)) {
+      this.feishuConfig.markdown_format = incoming.markdown_format
+    }
+
     const masked = this.handleGetConfig().config
     return { config: masked, requires_restart: requiresRestart }
   }

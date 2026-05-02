@@ -11,7 +11,18 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { ModuleBase, type ModuleConfig, generateId, generateTimestamp, type Event } from 'crabot-shared'
+import {
+  ModuleBase,
+  type ModuleConfig,
+  generateId,
+  generateTimestamp,
+  type Event,
+  decideMarkdownEnabled,
+  markdownToTelegramHtml,
+  MARKDOWN_FORMAT_VALUES,
+  type MarkdownFormat,
+  type TelegramParseMode,
+} from 'crabot-shared'
 import { TelegramClient, TelegramApiError } from './telegram-client.js'
 import { SessionManager } from './session-manager.js'
 import { MessageStore } from './message-store.js'
@@ -401,6 +412,8 @@ export class TelegramChannel extends ModuleBase {
     this.registerMethod('get_history', this.handleGetHistory.bind(this))
     this.registerMethod('get_message', this.handleGetMessage.bind(this))
     this.registerMethod('get_platform_user_info', this.handleGetPlatformUserInfo.bind(this))
+    this.registerMethod('get_config', this.handleGetConfig.bind(this))
+    this.registerMethod('update_config', this.handleUpdateConfig.bind(this))
   }
 
   // ============================================================================
@@ -458,22 +471,22 @@ export class TelegramChannel extends ModuleBase {
       const sendFn = type === 'image'
         ? this.client.sendPhoto.bind(this.client)
         : this.client.sendDocument.bind(this.client)
-      const fileOpts = type === 'file' && filename ? { filename } : {}
 
-      // 把文本按 caption 上限切分：第一段塞进 caption，后续段独立发 text。
+      // 切分以 caption 上限为准：第一段塞 caption，后续段独立发 text。
       // 每段 <= MAX_CAPTION_LENGTH < MAX_MESSAGE_LENGTH，单条 sendMessage 安全。
       const chunks = splitText(text, MAX_CAPTION_LENGTH)
-      const caption = chunks.length > 0 ? chunks[0] : undefined
+      const captionRender = chunks.length > 0 ? this.renderTextForTelegram(chunks[0]) : null
 
       const firstMsg = await sendFn(chatId, media, {
         ...(replyTo ? { reply_to_message_id: replyTo } : {}),
-        caption,
-        ...fileOpts,
+        ...(captionRender ? { caption: captionRender.text, parse_mode: captionRender.parseMode } : {}),
+        ...(type === 'file' && filename ? { filename } : {}),
       })
       const ids = [firstMsg.message_id]
 
       for (let i = 1; i < chunks.length; i++) {
-        const sent = await this.client.sendMessage(chatId, chunks[i])
+        const render = this.renderTextForTelegram(chunks[i])
+        const sent = await this.client.sendMessage(chatId, render.text, { parse_mode: render.parseMode })
         ids.push(sent.message_id)
       }
       return ids
@@ -483,7 +496,8 @@ export class TelegramChannel extends ModuleBase {
   }
 
   /**
-   * 按 MAX_MESSAGE_LENGTH 智能切分文本并依次发送。第一条带 reply_to，后续不带。
+   * 切分以原始 markdown 文本为准，每段独立渲染：标签膨胀超限时整段降级纯文本。
+   * 跨段的 markdown 标记（如 chunk N-1 开 ** 在 chunk N 闭）会丢格式，但不会发出非法 HTML。
    */
   private async sendTextChunks(
     chatId: string,
@@ -491,22 +505,28 @@ export class TelegramChannel extends ModuleBase {
     replyTo: number | undefined
   ): Promise<number[]> {
     const chunks = splitText(text, MAX_MESSAGE_LENGTH)
-    if (chunks.length === 0) {
-      const sent = await this.client.sendMessage(
-        chatId,
-        text,
-        replyTo ? { reply_to_message_id: replyTo } : undefined
-      )
-      return [sent.message_id]
-    }
+    const sources = chunks.length === 0 ? [text] : chunks
 
     const ids: number[] = []
-    for (let i = 0; i < chunks.length; i++) {
-      const opts = i === 0 && replyTo ? { reply_to_message_id: replyTo } : undefined
-      const sent = await this.client.sendMessage(chatId, chunks[i], opts)
+    for (let i = 0; i < sources.length; i++) {
+      const render = this.renderTextForTelegram(sources[i])
+      const sent = await this.client.sendMessage(chatId, render.text, {
+        ...(i === 0 && replyTo ? { reply_to_message_id: replyTo } : {}),
+        parse_mode: render.parseMode,
+      })
       ids.push(sent.message_id)
     }
     return ids
+  }
+
+  /** 渲染结果若超过 Telegram 长度上限会整段降级为纯文本。 */
+  private renderTextForTelegram(chunk: string): { text: string; parseMode?: TelegramParseMode } {
+    if (!decideMarkdownEnabled(this.telegramConfig.markdown_format, chunk)) {
+      return { text: chunk }
+    }
+    const html = markdownToTelegramHtml(chunk)
+    if (html.length > MAX_MESSAGE_LENGTH) return { text: chunk }
+    return { text: html, parseMode: 'HTML' }
   }
 
   private handleGetCapabilities(): ChannelCapabilities {
@@ -608,6 +628,72 @@ export class TelegramChannel extends ModuleBase {
         chat_type: chat.type,
       },
     }
+  }
+
+  // ============================================================================
+  // 配置管理（protocol-channel §6.1）
+  // ============================================================================
+
+  private handleGetConfig() {
+    const cfg: Record<string, unknown> = {
+      platform: 'telegram',
+      credentials: {
+        bot_token: '***',
+        ...(this.telegramConfig.webhook_secret ? { webhook_secret: '***' } : {}),
+      },
+      mode: this.telegramConfig.mode,
+      ...(this.telegramConfig.webhook_url ? { webhook_url: this.telegramConfig.webhook_url } : {}),
+      markdown_format: this.telegramConfig.markdown_format,
+      crab_platform_user_id: this.botUser ? String(this.botUser.id) : '',
+    }
+    return {
+      config: cfg,
+      schema: {
+        'credentials.bot_token': { sensitive: true, hot_reload: false, description: 'Bot Token，变更需重启' },
+        'credentials.webhook_secret': { sensitive: true, hot_reload: false, description: 'Webhook 签名密钥，变更需重启' },
+        'mode': { hot_reload: false, description: '消息接收模式 polling / webhook，变更需重启' },
+        'webhook_url': { hot_reload: false, description: 'Webhook 模式回调地址，变更需重启' },
+        'markdown_format': { hot_reload: true, description: 'Markdown 渲染开关：auto / on / off' },
+      },
+    }
+  }
+
+  private handleUpdateConfig(params: {
+    config?: {
+      credentials?: { bot_token?: string; webhook_secret?: string }
+      mode?: 'polling' | 'webhook'
+      webhook_url?: string
+      markdown_format?: MarkdownFormat
+    }
+  }): { config: Record<string, unknown>; requires_restart: boolean } {
+    const incoming = params.config ?? {}
+    let requiresRestart = false
+
+    const creds = incoming.credentials ?? {}
+    // 空串与 *** 占位符一律跳过（admin 端 mask 回显或留空都是"未改动"信号；
+    // 真要清掉敏感字段请走"停模块 + 改 env"，避免一次保存意外擦掉凭证）
+    if (typeof creds.bot_token === 'string' && creds.bot_token && creds.bot_token !== '***') {
+      this.telegramConfig.bot_token = creds.bot_token
+      requiresRestart = true
+    }
+    if (typeof creds.webhook_secret === 'string' && creds.webhook_secret && creds.webhook_secret !== '***') {
+      this.telegramConfig.webhook_secret = creds.webhook_secret
+      requiresRestart = true
+    }
+    if (incoming.mode && incoming.mode !== this.telegramConfig.mode) {
+      this.telegramConfig.mode = incoming.mode
+      requiresRestart = true
+    }
+    if (typeof incoming.webhook_url === 'string' && incoming.webhook_url !== this.telegramConfig.webhook_url) {
+      this.telegramConfig.webhook_url = incoming.webhook_url || undefined
+      requiresRestart = true
+    }
+    if (incoming.markdown_format && MARKDOWN_FORMAT_VALUES.includes(incoming.markdown_format)) {
+      this.telegramConfig.markdown_format = incoming.markdown_format
+    }
+
+    const masked = this.handleGetConfig().config
+    return { config: masked, requires_restart: requiresRestart }
   }
 
   // ============================================================================

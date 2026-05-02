@@ -145,6 +145,11 @@ export class FeishuClient {
     return this.sendRaw(receive, 'file', JSON.stringify({ file_key: fileKey }))
   }
 
+  /** 发送 interactive 卡片（飞书 markdown 渲染必走这个 msg_type） */
+  async sendCard(receive: SendReceive, card: unknown): Promise<SendResult> {
+    return this.sendRaw(receive, 'interactive', JSON.stringify(card))
+  }
+
   async reply(messageId: string, msgType: string, contentJson: string, replyInThread?: boolean): Promise<SendResult> {
     const resp = await this.client.im.message.reply({
       path: { message_id: messageId },

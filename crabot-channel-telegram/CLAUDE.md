@@ -32,6 +32,7 @@ Telegram 消息
 | `TELEGRAM_MODE` | 否 | polling（默认）或 webhook |
 | `TELEGRAM_WEBHOOK_URL` | webhook 模式 | 公网回调 URL |
 | `TELEGRAM_WEBHOOK_SECRET` | 否 | Webhook 签名密钥 |
+| `TELEGRAM_MARKDOWN_FORMAT` | 否 | `auto`（默认）/ `on` / `off`：发文本时是否按 Markdown 渲染。auto 仅在检测到 markdown 标记时启用，启用后转 HTML 用 `parse_mode=HTML` 发送 |
 
 ## 消息类型支持
 

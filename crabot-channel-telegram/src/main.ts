@@ -13,6 +13,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import { parseMarkdownFormat } from 'crabot-shared'
 import { TelegramChannel } from './telegram-channel.js'
 
 async function main(): Promise<void> {
@@ -37,6 +38,7 @@ async function main(): Promise<void> {
   const mode = (process.env.TELEGRAM_MODE ?? 'polling') as 'polling' | 'webhook'
   const webhookUrl = process.env.TELEGRAM_WEBHOOK_URL
   const webhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET
+  const markdownFormat = parseMarkdownFormat(process.env.TELEGRAM_MARKDOWN_FORMAT)
 
   if (mode === 'webhook' && !webhookUrl) {
     console.error('TELEGRAM_WEBHOOK_URL is required for webhook mode')
@@ -58,6 +60,7 @@ async function main(): Promise<void> {
       mode,
       webhook_url: webhookUrl,
       webhook_secret: webhookSecret,
+      markdown_format: markdownFormat,
     },
   })
 
@@ -75,6 +78,7 @@ async function main(): Promise<void> {
     console.log(`- Module ID: ${moduleId}`)
     console.log(`- Port: ${port}`)
     console.log(`- Mode: ${mode}`)
+    console.log(`- Markdown format: ${markdownFormat}`)
     console.log(`- Data Dir: ${dataDir}`)
   } catch (error) {
     console.error('Failed to start Telegram Channel module:', error)

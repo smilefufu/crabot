@@ -34,6 +34,7 @@
 | `FEISHU_DOMAIN` | 否 | `feishu`（默认）或 `lark`（国际版） |
 | `FEISHU_OWNER_OPEN_ID` | 否 | 扫码时绑定的飞书账号 open_id |
 | `FEISHU_ONLY_RESPOND_TO_MENTIONS` | 否 | 群聊是否仅响应 @ Crabot（默认 `true`） |
+| `FEISHU_MARKDOWN_FORMAT` | 否 | `auto`（默认）/ `on` / `off`：发文本时是否按 Markdown 渲染。启用时改用 `interactive` 卡片 + `markdown` 元素，飞书才会渲染样式 |
 
 ## 消息类型支持
 

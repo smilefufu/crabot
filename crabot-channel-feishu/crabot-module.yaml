@@ -53,6 +53,13 @@ config_schema:
       description: true 时群聊中只有 @ Crabot 的消息会触发事件
       enum: ["true", "false"]
       default: "true"
+    FEISHU_MARKDOWN_FORMAT:
+      type: string
+      title: 按 Markdown 格式发送
+      description: bot 给飞书发文本时是否按 Markdown 渲染（启用时改用 interactive 卡片 + markdown 元素）。auto 仅在检测到 markdown 标记时启用
+      enum: ["auto", "on", "off"]
+      enum_titles: ["自动", "开启", "关闭"]
+      default: "auto"
 
 author: Crabot Team
 license: MIT
