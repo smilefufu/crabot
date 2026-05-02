@@ -144,7 +144,13 @@ export class OpenAIResponsesAdapter implements LLMAdapter {
     yield* streamWithRetry(
       'openai-responses-adapter',
       () => this.streamOnce(params),
-      { abortSignal: params.signal, isMaterial: isMaterialChunk },
+      {
+        abortSignal: params.signal,
+        isMaterial: isMaterialChunk,
+        onRetry: params.onRetry
+          ? (e) => params.onRetry!({ ...e, source: 'pre-stream' })
+          : undefined,
+      },
     )
   }
 

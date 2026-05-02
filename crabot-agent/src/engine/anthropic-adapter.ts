@@ -152,7 +152,13 @@ export class AnthropicAdapter implements LLMAdapter {
     yield* streamWithRetry(
       'anthropic-adapter',
       () => this.streamOnce(params),
-      { abortSignal: params.signal, isMaterial: isMaterialChunk },
+      {
+        abortSignal: params.signal,
+        isMaterial: isMaterialChunk,
+        onRetry: params.onRetry
+          ? (e) => params.onRetry!({ ...e, source: 'pre-stream' })
+          : undefined,
+      },
     )
   }
 
@@ -170,7 +176,12 @@ export class AnthropicAdapter implements LLMAdapter {
           messages,
           ...(tools.length > 0 ? { tools } : {}),
         }, { signal: params.signal }),
-      { abortSignal: params.signal },
+      {
+        abortSignal: params.signal,
+        onRetry: params.onRetry
+          ? (e) => params.onRetry!({ ...e, source: 'complete' })
+          : undefined,
+      },
     )
 
     const content: ContentBlock[] = []

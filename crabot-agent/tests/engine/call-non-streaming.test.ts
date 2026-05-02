@@ -150,4 +150,37 @@ describe('callNonStreaming', () => {
     await expect(callNonStreaming(adapter, defaultParams)).rejects.toThrow('400 bad request')
     expect(attempt).toBe(1)
   })
+
+  it('invokes onRetry callback on mid-stream retry', async () => {
+    let attempt = 0
+    const adapter: LLMAdapter = {
+      async *stream(): AsyncGenerator<StreamChunk> {
+        attempt++
+        yield { type: 'message_start', messageId: 'msg' }
+        yield { type: 'text_delta', text: 'partial' }
+        if (attempt === 1) {
+          const e = new Error('socket dropped') as Error & { code?: string }
+          e.code = 'ETIMEDOUT'
+          throw e
+        }
+        yield { type: 'text_delta', text: ' rest' }
+        yield { type: 'message_end', stopReason: 'end_turn' }
+      },
+      updateConfig() {},
+    }
+
+    const retries: Array<{ attempt: number; source: string; error: string }> = []
+    await callNonStreaming(adapter, {
+      ...defaultParams,
+      signal: new AbortController().signal,
+      onRetry: (e) => {
+        retries.push({ attempt: e.attempt, source: e.source, error: e.error.message })
+      },
+    })
+
+    expect(retries).toHaveLength(1)
+    expect(retries[0].attempt).toBe(1)
+    expect(retries[0].source).toBe('mid-stream')
+    expect(retries[0].error).toBe('socket dropped')
+  }, 30_000)
 })

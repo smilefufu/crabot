@@ -73,7 +73,10 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('spawnPersistentShell with traceContext', () => {
-  it('emits bg_entity_spawn span immediately after spawn', async () => {
+  // 注：bg_entity_spawn span 已废弃 emission（信息已在 Bash tool_call 里），
+  // 现在只在 process exit 时 emit bg_entity_exit。
+
+  it('does not emit bg_entity_spawn span (deprecated emission)', async () => {
     const store = makeMockTraceStore()
     const traceContext = makeTraceCtx(store)
 
@@ -88,14 +91,8 @@ describe('spawnPersistentShell with traceContext', () => {
     const rec = await registry.get(entityId)
     if (rec && rec.type === 'shell') spawnedPids.push(rec.pid)
 
-    expect(store.startSpan).toHaveBeenCalledOnce()
-    const call = store.startSpan.mock.calls[0]
-    expect(call[0]).toBe('trace-test-001')
-    expect(call[1].type).toBe('bg_entity_spawn')
-    expect((call[1].details as Record<string, unknown>).entity_id).toBe(entityId)
-    expect((call[1].details as Record<string, unknown>).type).toBe('shell')
-    expect((call[1].details as Record<string, unknown>).mode).toBe('persistent')
-    expect(store.endSpan).toHaveBeenCalledOnce()
+    // spawn 不再 emit span；只有进程 exit 才 emit
+    expect(store.startSpan).not.toHaveBeenCalled()
   })
 
   it('emits bg_entity_exit span when process exits cleanly', async () => {
@@ -117,9 +114,9 @@ describe('spawnPersistentShell with traceContext', () => {
       if (rec?.status !== 'running') break
     }
 
-    // Should now have spawn + exit spans.
-    expect(store.startSpan).toHaveBeenCalledTimes(2)
-    const exitCall = store.startSpan.mock.calls[1]
+    // 仅 exit span（spawn 已废弃）
+    expect(store.startSpan).toHaveBeenCalledOnce()
+    const exitCall = store.startSpan.mock.calls[0]
     expect(exitCall[1].type).toBe('bg_entity_exit')
     const exitDetails = exitCall[1].details as Record<string, unknown>
     expect(exitDetails.entity_id).toBe(entityId)
@@ -127,7 +124,7 @@ describe('spawnPersistentShell with traceContext', () => {
     expect(exitDetails.exit_code).toBe(0)
     expect(exitDetails.status).toBe('completed')
     expect(typeof exitDetails.runtime_ms).toBe('number')
-    expect(store.endSpan).toHaveBeenCalledTimes(2)
+    expect(store.endSpan).toHaveBeenCalledOnce()
   })
 
   it('emits bg_entity_exit with failed status on non-zero exit', async () => {
@@ -148,7 +145,8 @@ describe('spawnPersistentShell with traceContext', () => {
       if (rec?.status !== 'running') break
     }
 
-    const exitCall = store.startSpan.mock.calls[1]
+    expect(store.startSpan).toHaveBeenCalledOnce()
+    const exitCall = store.startSpan.mock.calls[0]
     expect(exitCall[1].type).toBe('bg_entity_exit')
     const exitDetails = exitCall[1].details as Record<string, unknown>
     expect(exitDetails.exit_code).toBe(7)
@@ -179,7 +177,9 @@ describe('spawnPersistentShell with traceContext', () => {
 // ---------------------------------------------------------------------------
 
 describe('TransientShellRegistry.spawn with traceContext', () => {
-  it('emits bg_entity_spawn span (mode=transient)', () => {
+  // bg_entity_spawn 已废弃 emission，本 describe 仅校验 exit 路径
+
+  it('does not emit bg_entity_spawn span (deprecated emission)', () => {
     const store = makeMockTraceStore()
     const traceContext = makeTraceCtx(store)
     const transient = new TransientShellRegistry()
@@ -190,16 +190,11 @@ describe('TransientShellRegistry.spawn with traceContext', () => {
       spawned_by_task_id: 'task-5',
       traceContext,
     })
-
     transient.kill(entityId)
 
-    expect(store.startSpan).toHaveBeenCalledOnce()
-    const call = store.startSpan.mock.calls[0]
-    expect(call[1].type).toBe('bg_entity_spawn')
-    const details = call[1].details as Record<string, unknown>
-    expect(details.entity_id).toBe(entityId)
-    expect(details.mode).toBe('transient')
-    expect(details.type).toBe('shell')
+    expect(entityId).toMatch(/^shell_[0-9a-f]{12}$/)
+    // spawn 不 emit；exit 因为是被 kill 也不会经过 child.on('exit') 的成功路径
+    // (kill 通过 status guard 把 status 改成 killed，状态保护防覆写)
   })
 
   it('emits bg_entity_exit span when transient process exits', async () => {
@@ -221,8 +216,9 @@ describe('TransientShellRegistry.spawn with traceContext', () => {
       if (state?.status !== 'running') break
     }
 
-    expect(store.startSpan).toHaveBeenCalledTimes(2)
-    const exitCall = store.startSpan.mock.calls[1]
+    // 仅 exit span（spawn 已废弃）
+    expect(store.startSpan).toHaveBeenCalledOnce()
+    const exitCall = store.startSpan.mock.calls[0]
     expect(exitCall[1].type).toBe('bg_entity_exit')
     const exitDetails = exitCall[1].details as Record<string, unknown>
     expect(exitDetails.entity_id).toBe(entityId)

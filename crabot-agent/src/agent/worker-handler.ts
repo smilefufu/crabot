@@ -851,6 +851,7 @@ export class WorkerHandler {
                   ...prev,
                   current_turn: event.turn,
                   last_assistant_text: event.text.slice(0, 400),
+                  llm_retry: undefined,  // LLM 成功返回了，清掉 retry 状态
                 }))
                 break
               case 'tools_start': {
@@ -876,8 +877,26 @@ export class WorkerHandler {
                   const trimmed = merged.length > WorkerHandler.RECENT_COMPLETED_LIMIT
                     ? merged.slice(merged.length - WorkerHandler.RECENT_COMPLETED_LIMIT)
                     : merged
-                  return { ...prev, active_tools: [], recent_completed: trimmed }
+                  // 工具完成时清掉 llm_retry 状态（之前的 retry 已经过去）
+                  const next = { ...prev, active_tools: [], recent_completed: trimmed }
+                  if (prev.llm_retry) {
+                    return { ...next, llm_retry: undefined }
+                  }
+                  return next
                 })
+                break
+              }
+              case 'llm_retry': {
+                this.updateLiveSnapshot(task.task_id, prev => ({
+                  ...prev,
+                  llm_retry: {
+                    attempt: event.attempt,
+                    max_attempts: event.maxAttempts,
+                    source: event.source,
+                    last_error: event.error.slice(0, 200),
+                    since: Date.now(),
+                  },
+                }))
                 break
               }
             }

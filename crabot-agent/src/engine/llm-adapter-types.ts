@@ -19,6 +19,14 @@ import type {
 
 // --- Interfaces ---
 
+export interface LLMRetryEvent {
+  readonly attempt: number      // 1-indexed (第 N 次失败正在准备 retry)
+  readonly maxAttempts: number  // 总配额
+  readonly delayMs: number      // 即将 sleep 多久后 retry
+  readonly error: Error         // 触发本次 retry 的错
+  readonly source: 'pre-stream' | 'mid-stream' | 'complete'  // 哪一层 retry
+}
+
 export interface LLMStreamParams {
   readonly messages: EngineMessage[]
   readonly systemPrompt: string
@@ -26,6 +34,8 @@ export interface LLMStreamParams {
   readonly model: string
   readonly maxTokens?: number
   readonly signal?: AbortSignal
+  /** 可观测性回调：retry 发生时触发；用于 worker → admin web 实时显示"LLM 正在重试" */
+  readonly onRetry?: (event: LLMRetryEvent) => void
 }
 
 export interface LLMAdapter {
@@ -122,6 +132,15 @@ async function withStreamConsumptionRetry(
         `[callNonStreaming] stream attempt ${attempt + 1}/${maxRetries + 1} failed, retrying in ${delayMs}ms:`,
         err,
       )
+      try {
+        params.onRetry?.({
+          attempt: attempt + 1,
+          maxAttempts: maxRetries + 1,
+          delayMs,
+          error: err instanceof Error ? err : new Error(String(err)),
+          source: 'mid-stream',
+        })
+      } catch { /* observability callback must not break retry */ }
       await sleep(delayMs, params.signal)
       // 下一轮 loop 会用全新 processor + 重新 call adapter.stream()，
       // 服务端生成新 response（partial 浪费，但 task 能完成）

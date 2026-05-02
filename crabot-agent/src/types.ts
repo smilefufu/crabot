@@ -313,6 +313,17 @@ export interface LiveTaskSnapshot {
   readonly last_assistant_text?: string
   readonly active_tools: ReadonlyArray<LiveToolCall>
   readonly recent_completed: ReadonlyArray<LiveCompletedTool>
+  /**
+   * 当前 LLM 调用 retry 状态（undefined 表示未在 retry 中）。
+   * Admin web 可据此显示"正在重试"提示，避免用户看到"卡住"。
+   */
+  readonly llm_retry?: {
+    readonly attempt: number
+    readonly max_attempts: number
+    readonly source: 'pre-stream' | 'mid-stream' | 'complete'
+    readonly last_error: string
+    readonly since: number  // ms timestamp
+  }
 }
 
 export interface ShortTermMemoryEntry {

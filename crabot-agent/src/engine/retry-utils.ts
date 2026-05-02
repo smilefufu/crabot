@@ -92,6 +92,11 @@ export interface RetryOptions {
   readonly maxRetries?: number
   readonly delayMs?: number
   readonly abortSignal?: AbortSignal
+  /**
+   * 可观测性回调：retry 发生（catch 后、sleep 前）触发。
+   * 主要用途是 worker → admin web 显示"LLM 正在重试中"。
+   */
+  readonly onRetry?: (event: { attempt: number; maxAttempts: number; delayMs: number; error: Error }) => void
 }
 
 export interface StreamRetryOptions<T = unknown> extends RetryOptions {
@@ -131,6 +136,14 @@ export async function withRetry<T>(
         `[${label}] attempt ${attempt + 1}/${maxRetries + 1} failed, retrying in ${delayMs}ms:`,
         err,
       )
+      try {
+        options.onRetry?.({
+          attempt: attempt + 1,
+          maxAttempts: maxRetries + 1,
+          delayMs,
+          error: err instanceof Error ? err : new Error(String(err)),
+        })
+      } catch { /* observability callback must not break retry */ }
       await sleep(delayMs, abortSignal)
     }
   }
@@ -172,6 +185,14 @@ export async function* streamWithRetry<T>(
         `[${label}] attempt ${attempt + 1}/${maxRetries + 1} failed, retrying in ${delayMs}ms:`,
         err,
       )
+      try {
+        options.onRetry?.({
+          attempt: attempt + 1,
+          maxAttempts: maxRetries + 1,
+          delayMs,
+          error: err instanceof Error ? err : new Error(String(err)),
+        })
+      } catch { /* observability callback must not break retry */ }
       await sleep(delayMs, abortSignal)
     }
   }

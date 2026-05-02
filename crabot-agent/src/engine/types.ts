@@ -194,6 +194,15 @@ export type LiveProgressEvent =
         readonly is_error: boolean
       }>
     }
+  | {
+      /** LLM 调用 mid-stream / pre-stream / complete 路径 retry 触发；用于 admin web 显示"正在重试"状态 */
+      readonly type: 'llm_retry'
+      readonly turn: number          // 当前正在尝试的 turn 编号
+      readonly attempt: number       // 第几次失败 (1-indexed)
+      readonly maxAttempts: number   // 总配额
+      readonly source: 'pre-stream' | 'mid-stream' | 'complete'
+      readonly error: string         // 触发 retry 的 error message（截断 200）
+    }
 
 export interface EngineOptions {
   readonly systemPrompt: Resolvable<string>

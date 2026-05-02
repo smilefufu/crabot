@@ -90,15 +90,7 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
   }
   await opts.registry.register(record)
 
-  // Emit spawn span.
-  if (opts.traceContext) {
-    emitInstantSpan(opts.traceContext, 'bg_entity_spawn', {
-      entity_id,
-      type: 'agent',
-      mode: 'persistent',
-      task_description: opts.task_description,
-    })
-  }
+  // 不再 emit bg_entity_spawn span：信息已在 delegate_task tool_call 中（含 entity_id 返回值）
 
   const agentSpawnedAtMs = Date.now()
 

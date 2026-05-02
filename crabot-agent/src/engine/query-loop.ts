@@ -89,6 +89,18 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         model: options.model,
         maxTokens: options.maxTokens,
         signal: abortSignal,
+        onRetry: (event) => {
+          if (options.onLiveProgress) {
+            options.onLiveProgress({
+              type: 'llm_retry',
+              turn: totalTurns + 1,                  // 即将开始的这一轮
+              attempt: event.attempt,
+              maxAttempts: event.maxAttempts,
+              source: event.source,
+              error: event.error.message,
+            })
+          }
+        },
       })
       llmCallMs = Date.now() - llmStartedAtMs
     } catch (error) {

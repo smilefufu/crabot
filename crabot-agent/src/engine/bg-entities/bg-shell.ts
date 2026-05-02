@@ -167,15 +167,8 @@ export async function spawnPersistentShell(opts: SpawnPersistentShellOpts): Prom
   // Unblock the exit/error handlers — they will now apply any pending update.
   resolveRegistered()
 
-  // Emit spawn span after registration so traceId is valid.
-  if (opts.traceContext) {
-    emitInstantSpan(opts.traceContext, 'bg_entity_spawn', {
-      entity_id,
-      type: 'shell',
-      mode: 'persistent',
-      command: opts.command,
-    })
-  }
+  // 不再 emit bg_entity_spawn span：信息已经在 Bash tool_call 里完整记录（含 entity_id 返回值），
+  // 单独再发一条 trace 根级的 span 是冗余噪声。
 
   return entity_id
 }
@@ -317,15 +310,7 @@ export class TransientShellRegistry {
     // Unref so host process event loop can exit without waiting for child.
     child.unref()
 
-    // Emit spawn span.
-    if (opts.traceContext) {
-      emitInstantSpan(opts.traceContext, 'bg_entity_spawn', {
-        entity_id,
-        type: 'shell',
-        mode: 'transient',
-        command: opts.command,
-      })
-    }
+    // 不再 emit bg_entity_spawn span（参 spawnPersistentShell 同款注释）
 
     return entity_id
   }

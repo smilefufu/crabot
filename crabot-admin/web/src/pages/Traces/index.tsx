@@ -30,6 +30,11 @@ function spanTypeLabel(type: AgentSpan['type']): string {
     context_assembly: 'ctx',
     memory_write: 'mem-w',
     rpc_call: 'rpc',
+    bg_entity_exit: 'bg-exit',
+    bg_entity_spawn: 'bg-spawn',     // 已不再 emit；遗留 trace 还有
+    bg_entity_output: 'bg-out',      // 同上
+    bg_entity_kill: 'bg-kill',       // 同上
+    llm_retry: 'retry',
   }
   return map[type] ?? type
 }
@@ -44,6 +49,11 @@ function spanTypeBg(type: AgentSpan['type']): string {
     context_assembly: '#0ea5e9',
     memory_write: '#14b8a6',
     rpc_call: '#6366f1',
+    bg_entity_exit: '#84cc16',       // lime — 区分 lifecycle event
+    bg_entity_spawn: '#84cc16',
+    bg_entity_output: '#84cc16',
+    bg_entity_kill: '#84cc16',
+    llm_retry: '#fb923c',            // orange — 警示但非错误
   }
   return map[type] ?? '#6b7280'
 }
@@ -326,6 +336,35 @@ const SpanRow: React.FC<SpanRowProps> = ({ span, spans, depth, expandedDetails, 
     }
     if (span.type === 'rpc_call') {
       return `${details.target_module ?? ''}::${details.method ?? ''}`
+    }
+    if (span.type === 'bg_entity_exit') {
+      const id = String(details.entity_id ?? '?')
+      const status = String(details.status ?? '?')
+      const exitCode = details.exit_code !== undefined ? `, exit=${details.exit_code}` : ''
+      const runtimeMs = typeof details.runtime_ms === 'number' ? details.runtime_ms : 0
+      const totalSecs = Math.floor(runtimeMs / 1000)
+      const runtime = totalSecs < 60
+        ? `${totalSecs}s`
+        : totalSecs < 3600
+        ? `${Math.floor(totalSecs / 60)}m${totalSecs % 60}s`
+        : `${Math.floor(totalSecs / 3600)}h${Math.floor((totalSecs % 3600) / 60)}m`
+      return `${id} → ${status}${exitCode}, ran ${runtime}`
+    }
+    if (span.type === 'bg_entity_spawn') {
+      // 已废弃 emission，仅渲染遗留 trace
+      const id = String(details.entity_id ?? '?')
+      const mode = details.mode ? ` (${details.mode})` : ''
+      return `${id}${mode}`
+    }
+    if (span.type === 'bg_entity_output' || span.type === 'bg_entity_kill') {
+      // 已废弃 emission
+      return String(details.entity_id ?? '?')
+    }
+    if (span.type === 'llm_retry') {
+      const attempt = details.attempt ?? '?'
+      const max = details.max_attempts ?? '?'
+      const reason = String(details.error ?? '').slice(0, 80)
+      return `attempt ${attempt}/${max}: ${reason}`
     }
     return ''
   }

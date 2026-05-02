@@ -215,6 +215,11 @@ export function buildUserMessage(
           ).join(' / ')
           parts.push(`  最近完成: ${tail}`)
         }
+        if (live.llm_retry) {
+          const r = live.llm_retry
+          const elapsed = formatElapsed(Date.now() - r.since)
+          parts.push(`  ⚠️ LLM 调用 retry 中: ${r.attempt}/${r.max_attempts} (${r.source})，已 ${elapsed}，原因: ${r.last_error}`)
+        }
       }
     }
     parts.push('\n当用户询问任务进度时，请根据上述任务列表（特别是"正在跑工具"和"上轮模型说"）具体说明当前在做什么，不要笼统说"还在执行"。')
