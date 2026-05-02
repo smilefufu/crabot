@@ -501,7 +501,9 @@ class MemoryModule:
             },
             "timestamp": datetime.utcnow().isoformat() + "Z",
         }
-        async with httpx.AsyncClient() as client:
+        # trust_env=False：内部 RPC 是回环地址，强制不读 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY，
+        # 避免系统代理把 localhost:19000 当外网拦截后回 502 Bad Gateway。
+        async with httpx.AsyncClient(trust_env=False) as client:
             resp = await client.post(url, json=payload, timeout=10.0)
             resp.raise_for_status()
             logger.info("Registered to Module Manager")
@@ -522,7 +524,8 @@ class MemoryModule:
             "timestamp": datetime.utcnow().isoformat() + "Z",
         }
         try:
-            async with httpx.AsyncClient() as client:
+            # trust_env=False：admin endpoint 也是回环，统一不读环境代理变量。
+            async with httpx.AsyncClient(trust_env=False) as client:
                 resp = await client.post(url, json=payload, timeout=10.0)
                 resp.raise_for_status()
                 data = resp.json()
