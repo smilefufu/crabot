@@ -584,12 +584,8 @@ export class AdminModule extends ModuleBase {
     // 初始化 PTY 管理器（Web CLI 终端）
     this.ptyManager = new PtyManager(this.jwtSecret, parseInt(process.env.CRABOT_MM_PORT || '19000', 10), verifyJwt)
 
-    // 延迟解析 Agent 端口，等待 Agent 模块启动
-    setTimeout(() => {
-      this.resolveAgentPortWithRetry(3, 2000).catch((error) => {
-        console.warn('[Admin] Failed to resolve Agent port after retries:', error)
-      })
-    }, 2000)
+    // Agent 端口由 module_started 事件驱动写入（见 onEvent），
+    // 若 Admin 单独重启错过事件，由 ensureAgentPort() 惰性兜底。
 
     await this.ensureBuiltinSchedules()
 
@@ -645,7 +641,7 @@ export class AdminModule extends ModuleBase {
     // 3. module_started 事件的 push 作为补充保障（覆盖 pull 与 push 之间的时间窗口）
     switch (event.type) {
       case 'module_manager.module_started': {
-        const { module_id, module_type } = event.payload as { module_id: string; module_type: string }
+        const { module_id, module_type, port } = event.payload as { module_id: string; module_type: string; port: number }
         if (module_type === 'memory') {
           console.log(`[Admin] Memory module ${module_id} started, pushing config as safety net...`)
           this.syncGlobalConfigToMemoryModules().catch((err: Error) => {
@@ -653,13 +649,14 @@ export class AdminModule extends ModuleBase {
           })
         }
         if (module_type === 'agent') {
-          console.log(`[Admin] Agent module ${module_id} started, pushing config as safety net...`)
-          // Agent 端口可能刚注册，给一点时间让 MM 更新端口映射
-          setTimeout(() => {
-            this.pushConfigToAgentModules().catch((err: Error) => {
-              console.warn(`[Admin] Failed to push config to ${module_id}:`, err.message)
-            })
-          }, 1000)
+          // 事件 payload 已带端口，直接缓存避免后续 ensureAgentPort 多走一次 resolve
+          if (typeof port === 'number' && port > 0) {
+            this.agentPort = port
+          }
+          console.log(`[Admin] Agent module ${module_id} started (port=${port}), pushing config as safety net...`)
+          this.pushConfigToAgentModules().catch((err: Error) => {
+            console.warn(`[Admin] Failed to push config to ${module_id}:`, err.message)
+          })
         }
         // 新启动的模块推送代理配置
         this.pushProxyConfigToModule(module_id).catch((err: Error) => {
@@ -7154,22 +7151,6 @@ export class AdminModule extends ModuleBase {
     )
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(result))
-  }
-
-  private async resolveAgentPortWithRetry(maxRetries: number, delayMs: number): Promise<void> {
-    for (let i = 0; i < maxRetries; i++) {
-      try {
-        await this.resolveAgentPort()
-        console.log('[Admin] Successfully resolved Agent port')
-        return
-      } catch (error: unknown) {
-        if (i < maxRetries - 1) {
-          await new Promise(resolve => setTimeout(resolve, delayMs))
-        } else {
-          throw error
-        }
-      }
-    }
   }
 
   private async resolveAgentPort(): Promise<void> {
