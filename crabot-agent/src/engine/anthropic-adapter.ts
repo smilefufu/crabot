@@ -14,7 +14,7 @@ import type {
 import { proxyManager } from 'crabot-shared'
 import type { LLMAdapter, LLMAdapterConfig, LLMStreamParams, LLMCallResponse } from './llm-adapter-types.js'
 import { streamWithRetry, withRetry } from './retry-utils.js'
-import { isToolResultMessage, mergeConsecutiveUserMessages } from './llm-adapter-types.js'
+import { isToolResultMessage, mergeConsecutiveUserMessages, wrapOnRetry } from './llm-adapter-types.js'
 import { isMaterialChunk } from './stream-processor.js'
 import type { EngineMessage, ToolDefinition, StreamChunk, ContentBlock } from './types.js'
 
@@ -155,9 +155,7 @@ export class AnthropicAdapter implements LLMAdapter {
       {
         abortSignal: params.signal,
         isMaterial: isMaterialChunk,
-        onRetry: params.onRetry
-          ? (e) => params.onRetry!({ ...e, source: 'pre-stream' })
-          : undefined,
+        onRetry: wrapOnRetry(params.onRetry, 'pre-stream'),
       },
     )
   }
@@ -178,9 +176,7 @@ export class AnthropicAdapter implements LLMAdapter {
         }, { signal: params.signal }),
       {
         abortSignal: params.signal,
-        onRetry: params.onRetry
-          ? (e) => params.onRetry!({ ...e, source: 'complete' })
-          : undefined,
+        onRetry: wrapOnRetry(params.onRetry, 'complete'),
       },
     )
 

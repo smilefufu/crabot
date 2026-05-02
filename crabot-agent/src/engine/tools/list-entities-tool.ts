@@ -5,6 +5,7 @@
  */
 
 import { defineTool } from '../tool-framework'
+import { formatRuntimeMs } from '../../utils/time.js'
 import type { ToolDefinition } from '../types'
 import type { BgEntityStatus } from '../bg-entities/types'
 import type { BgToolDeps } from './output-tool'
@@ -25,15 +26,7 @@ function resolveStatuses(statusFilter: StatusFilter): ReadonlyArray<BgEntityStat
 function formatRuntime(spawnedAt: string, endedAt: string | null): string {
   const startMs = new Date(spawnedAt).getTime()
   const endMs = endedAt ? new Date(endedAt).getTime() : Date.now()
-  const totalSecs = Math.max(0, Math.floor((endMs - startMs) / 1000))
-
-  if (totalSecs < 60) return `${totalSecs}s`
-  const mins = Math.floor(totalSecs / 60)
-  const secs = totalSecs % 60
-  if (mins < 60) return `${mins}m${secs}s`
-  const hours = Math.floor(mins / 60)
-  const remainMins = mins % 60
-  return `${hours}h${remainMins}m`
+  return formatRuntimeMs(endMs - startMs)
 }
 
 function formatSpawnedAt(spawnedAt: string): string {

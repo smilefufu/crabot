@@ -90,8 +90,6 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
   }
   await opts.registry.register(record)
 
-  // 不再 emit bg_entity_spawn span：信息已在 delegate_task tool_call 中（含 entity_id 返回值）
-
   const agentSpawnedAtMs = Date.now()
 
   // fire-and-forget — intentionally not awaited by caller

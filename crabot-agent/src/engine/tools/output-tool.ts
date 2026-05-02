@@ -6,6 +6,7 @@
 
 import fs from 'node:fs/promises'
 import { defineTool } from '../tool-framework'
+import { sleep } from '../retry-utils'
 import type { ToolDefinition } from '../types'
 import type { BgEntityRegistry } from '../bg-entities/registry'
 import type { TransientShellRegistry } from '../bg-entities/bg-shell'
@@ -35,57 +36,52 @@ function cursorKey(taskId: string, entityId: string): string {
   return `${taskId}:${entityId}`
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
 
-/** 判断 entity 是否仍在 running（用于 block 模式提前终止）。 */
-async function isStillRunning(entityId: string, deps: BgToolDeps): Promise<boolean> {
-  if (entityId.startsWith('shell_')) {
-    const transientState = deps.transient.get(entityId)
-    if (transientState) return transientState.status === 'running'
-  }
-  const record = await deps.registry.get(entityId)
-  return record?.status === 'running'
+interface ReadResult {
+  output: string
+  isError: boolean
+  /** 用于 block 模式判断是否值得继续 poll；终态（completed/failed/killed/stalled/error）下为 false */
+  isRunning: boolean
 }
 
 async function readShellOutput(
   entityId: string,
   explicitOffset: number | undefined,
   deps: BgToolDeps,
-): Promise<{ output: string; isError: boolean }> {
+): Promise<ReadResult> {
   // 1. Check transient first (in-memory ring buffer, no offset concept)
   const transientState = deps.transient.get(entityId)
   if (transientState) {
     const header = `[status: ${transientState.status}, exit_code: ${transientState.exit_code ?? 'null'}]`
     const output = `${header}\n${transientState.ringBuffer}`
-    return { output, isError: false }
+    return { output, isError: false, isRunning: transientState.status === 'running' }
   }
 
   // 2. Check persistent registry (disk log file with per-task cursor)
   const record = await deps.registry.get(entityId)
   if (!record) {
-    return { output: `Entity not found: ${entityId}`, isError: true }
+    return { output: `Entity not found: ${entityId}`, isError: true, isRunning: false }
   }
 
   if (record.type !== 'shell') {
-    return { output: `Entity ${entityId} is not a shell entity`, isError: true }
+    return { output: `Entity ${entityId} is not a shell entity`, isError: true, isRunning: false }
   }
 
   const key = cursorKey(deps.taskId, entityId)
   const currentOffset = explicitOffset ?? deps.cursorMap.get(key) ?? 0
+  const isRunning = record.status === 'running'
 
   let fileStats: { size: number }
   try {
     fileStats = await fs.stat(record.log_file)
   } catch {
-    return { output: `Log file not accessible for ${entityId}`, isError: true }
+    return { output: `Log file not accessible for ${entityId}`, isError: true, isRunning }
   }
 
   const fileSize = fileStats.size
   if (fileSize <= currentOffset) {
     const header = `[status: ${record.status}, exit_code: ${record.exit_code ?? 'null'}]`
-    return { output: `${header}\n(no new output)`, isError: false }
+    return { output: `${header}\n(no new output)`, isError: false, isRunning }
   }
 
   const bytesToRead = Math.min(BG_OUTPUT_MAX_BYTES, fileSize - currentOffset)
@@ -114,7 +110,7 @@ async function readShellOutput(
     output += `\n[truncated, more available with from_offset=${newOffset}]`
   }
 
-  return { output, isError: false }
+  return { output, isError: false, isRunning }
 }
 
 async function readLastJsonlLines(file: string, n: number): Promise<string> {
@@ -131,13 +127,13 @@ async function readAgentOutput(
   id: string,
   _explicitOffset: number | undefined,
   deps: BgToolDeps,
-): Promise<{ output: string; isError: boolean }> {
+): Promise<ReadResult> {
   const record = await deps.registry.get(id)
   if (!record) {
-    return { output: `Entity not found: ${id}`, isError: true }
+    return { output: `Entity not found: ${id}`, isError: true, isRunning: false }
   }
   if (record.type !== 'agent') {
-    return { output: `Mismatched entity type for ${id}: expected agent, got ${record.type}`, isError: true }
+    return { output: `Mismatched entity type for ${id}: expected agent, got ${record.type}`, isError: true, isRunning: false }
   }
 
   if (record.status === 'completed' && record.result_file) {
@@ -147,25 +143,20 @@ async function readAgentOutput(
       return {
         output: `[status: completed, exit_code: ${record.exit_code}]\n${content}`,
         isError: false,
+        isRunning: false,
       }
     } catch (err) {
-      return { output: `[status: completed but result_file read failed: ${err}]`, isError: true }
+      return { output: `[status: completed but result_file read failed: ${err}]`, isError: true, isRunning: false }
     }
   }
 
-  if (record.status === 'failed' || record.status === 'killed') {
+  if (record.status === 'failed' || record.status === 'killed' || record.status === 'stalled') {
     const recent = await readLastJsonlLines(record.messages_log_file, 5)
+    const tail = record.status === 'stalled' ? `, ended_at: ${record.ended_at}` : `, exit_code: ${record.exit_code}`
     return {
-      output: `[status: ${record.status}, exit_code: ${record.exit_code}]\n${recent}`,
+      output: `[status: ${record.status}${tail}]\n${recent}`,
       isError: false,
-    }
-  }
-
-  if (record.status === 'stalled') {
-    const recent = await readLastJsonlLines(record.messages_log_file, 5)
-    return {
-      output: `[status: stalled, ended_at: ${record.ended_at}]\n${recent}`,
-      isError: false,
+      isRunning: false,
     }
   }
 
@@ -175,6 +166,7 @@ async function readAgentOutput(
   return {
     output: `[status: running, in progress; recent activity:]\n${recent}`,
     isError: false,
+    isRunning: true,
   }
 }
 
@@ -219,42 +211,44 @@ export function createOutputTool(deps: BgToolDeps): ToolDefinition {
     },
     isReadOnly: true,
     permissionLevel: 'safe',
-    call: async (input) => {
+    call: async (input, context) => {
       const entityId = input.entity_id as string
       const explicitOffset = input.from_offset as number | undefined
       const block = input.block === true
       const requestedTimeout = typeof input.timeout_ms === 'number' ? input.timeout_ms : BLOCK_DEFAULT_TIMEOUT_MS
       const timeoutMs = Math.min(Math.max(0, requestedTimeout), BLOCK_MAX_TIMEOUT_MS)
+      const abortSignal = context.abortSignal
 
-      const readOnce = async (): Promise<{ output: string; isError: boolean }> => {
+      const readOnce = async (): Promise<ReadResult> => {
         if (entityId.startsWith('shell_')) {
           return readShellOutput(entityId, explicitOffset, deps)
         }
         if (entityId.startsWith('agent_')) {
           return readAgentOutput(entityId, explicitOffset, deps)
         }
-        return { output: `Invalid entity_id format: ${entityId}`, isError: true }
+        return { output: `Invalid entity_id format: ${entityId}`, isError: true, isRunning: false }
       }
 
+      const toResult = (r: ReadResult) => ({ output: r.output, isError: r.isError })
+
       const first = await readOnce()
-      if (!block || first.isError) return first
+      if (!block || first.isError || !first.isRunning || !first.output.includes(NO_NEW_OUTPUT_MARKER)) {
+        return toResult(first)
+      }
 
-      // block 模式判断：第一次结果是否含 "(no new output)" 且 entity 还在 running
-      const hasNoNewOutput = first.output.includes(NO_NEW_OUTPUT_MARKER)
-      const stillRunning = await isStillRunning(entityId, deps)
-      if (!hasNoNewOutput || !stillRunning) return first
-
-      // 进入 poll loop：等到有新内容 / 状态变化 / 超时
+      // 进入 poll loop：每 2s 重读，等到有新内容 / 状态变化 / 超时 / abort
       const startMs = Date.now()
       let last = first
       while (Date.now() - startMs < timeoutMs) {
-        await sleep(BLOCK_POLL_INTERVAL_MS)
+        try {
+          await sleep(BLOCK_POLL_INTERVAL_MS, abortSignal)
+        } catch {
+          break  // abort
+        }
         last = await readOnce()
-        if (last.isError) break
-        if (!last.output.includes(NO_NEW_OUTPUT_MARKER)) break
-        if (!(await isStillRunning(entityId, deps))) break
+        if (last.isError || !last.isRunning || !last.output.includes(NO_NEW_OUTPUT_MARKER)) break
       }
-      return last
+      return toResult(last)
     },
   })
 }

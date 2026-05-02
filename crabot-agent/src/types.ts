@@ -757,7 +757,9 @@ export type AgentSpanType =
   | 'context_fetch'
   | 'memory_write'
   | 'rpc_call'
-  // bg-entities lifecycle events. Plan 2 §9.1 引入；Plan 3 Task 20 wire emission
+  // bg-entities lifecycle events. Plan 2 §9.1 引入；Plan 3 Task 20 wire emission。
+  // 当前仅 'bg_entity_exit' 实际 emit；spawn/output/kill 的信息已通过对应 tool_call
+  // 完整记录，留在 union 里只为兼容历史 trace 渲染（参 Traces/index.tsx）。
   | 'bg_entity_spawn'
   | 'bg_entity_output'
   | 'bg_entity_kill'

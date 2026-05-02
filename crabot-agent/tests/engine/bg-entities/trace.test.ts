@@ -73,9 +73,6 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('spawnPersistentShell with traceContext', () => {
-  // 注：bg_entity_spawn span 已废弃 emission（信息已在 Bash tool_call 里），
-  // 现在只在 process exit 时 emit bg_entity_exit。
-
   it('does not emit bg_entity_spawn span (deprecated emission)', async () => {
     const store = makeMockTraceStore()
     const traceContext = makeTraceCtx(store)
@@ -177,8 +174,6 @@ describe('spawnPersistentShell with traceContext', () => {
 // ---------------------------------------------------------------------------
 
 describe('TransientShellRegistry.spawn with traceContext', () => {
-  // bg_entity_spawn 已废弃 emission，本 describe 仅校验 exit 路径
-
   it('does not emit bg_entity_spawn span (deprecated emission)', () => {
     const store = makeMockTraceStore()
     const traceContext = makeTraceCtx(store)

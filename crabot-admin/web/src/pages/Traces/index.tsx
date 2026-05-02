@@ -30,10 +30,11 @@ function spanTypeLabel(type: AgentSpan['type']): string {
     context_assembly: 'ctx',
     memory_write: 'mem-w',
     rpc_call: 'rpc',
+    // bg_entity_spawn/output/kill 仅渲染遗留 trace（参 types.ts AgentSpanType 注释）
     bg_entity_exit: 'bg-exit',
-    bg_entity_spawn: 'bg-spawn',     // 已不再 emit；遗留 trace 还有
-    bg_entity_output: 'bg-out',      // 同上
-    bg_entity_kill: 'bg-kill',       // 同上
+    bg_entity_spawn: 'bg-spawn',
+    bg_entity_output: 'bg-out',
+    bg_entity_kill: 'bg-kill',
     llm_retry: 'retry',
   }
   return map[type] ?? type
@@ -351,13 +352,11 @@ const SpanRow: React.FC<SpanRowProps> = ({ span, spans, depth, expandedDetails, 
       return `${id} → ${status}${exitCode}, ran ${runtime}`
     }
     if (span.type === 'bg_entity_spawn') {
-      // 已废弃 emission，仅渲染遗留 trace
       const id = String(details.entity_id ?? '?')
       const mode = details.mode ? ` (${details.mode})` : ''
       return `${id}${mode}`
     }
     if (span.type === 'bg_entity_output' || span.type === 'bg_entity_kill') {
-      // 已废弃 emission
       return String(details.entity_id ?? '?')
     }
     if (span.type === 'llm_retry') {

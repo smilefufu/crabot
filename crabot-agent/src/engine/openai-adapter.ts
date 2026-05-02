@@ -3,7 +3,7 @@
  */
 
 import type { LLMAdapter, LLMAdapterConfig, LLMStreamParams, LLMCallResponse } from './llm-adapter-types.js'
-import { isToolResultMessage, extractText, buildImageUrl, readSSELines, mergeConsecutiveUserMessages } from './llm-adapter-types.js'
+import { isToolResultMessage, extractText, buildImageUrl, readSSELines, mergeConsecutiveUserMessages, wrapOnRetry } from './llm-adapter-types.js'
 import type { EngineMessage, ToolDefinition, StreamChunk, ContentBlock } from './types.js'
 import { HttpResponseError, streamWithRetry, withRetry } from './retry-utils.js'
 import { isMaterialChunk, parseToolInput } from './stream-processor.js'
@@ -160,9 +160,7 @@ export class OpenAIAdapter implements LLMAdapter {
       {
         abortSignal: params.signal,
         isMaterial: isMaterialChunk,
-        onRetry: params.onRetry
-          ? (e) => params.onRetry!({ ...e, source: 'pre-stream' })
-          : undefined,
+        onRetry: wrapOnRetry(params.onRetry, 'pre-stream'),
       },
     )
   }
@@ -214,9 +212,7 @@ export class OpenAIAdapter implements LLMAdapter {
       },
       {
         abortSignal: params.signal,
-        onRetry: params.onRetry
-          ? (e) => params.onRetry!({ ...e, source: 'complete' })
-          : undefined,
+        onRetry: wrapOnRetry(params.onRetry, 'complete'),
       },
     )
 

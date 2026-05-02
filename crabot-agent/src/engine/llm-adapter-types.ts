@@ -27,6 +27,18 @@ export interface LLMRetryEvent {
   readonly source: 'pre-stream' | 'mid-stream' | 'complete'  // 哪一层 retry
 }
 
+/**
+ * 把 LLMStreamParams.onRetry 包装成 retry-utils 的 onRetry 签名（差别只是补一个 source 字段）。
+ * 三个 adapter（anthropic/openai/openai-responses）的 stream / complete 方法共用此 helper。
+ */
+export function wrapOnRetry(
+  cb: ((e: LLMRetryEvent) => void) | undefined,
+  source: LLMRetryEvent['source'],
+): ((e: { attempt: number; maxAttempts: number; delayMs: number; error: Error }) => void) | undefined {
+  if (!cb) return undefined
+  return (e) => cb({ ...e, source })
+}
+
 export interface LLMStreamParams {
   readonly messages: EngineMessage[]
   readonly systemPrompt: string

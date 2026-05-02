@@ -149,3 +149,19 @@ export function formatTaskCreatedAt(epochMs: number, timezone: string, now: Date
 export function stampToolResult(content: string, timezone: string, now: Date = new Date()): string {
   return `[${formatToolTimestamp(timezone, now)}]\n${content}`
 }
+
+/**
+ * 把毫秒数渲染成紧凑的 "1h23m45s" / "5m12s" / "32s" 字符串。
+ * worker-handler bg-notification、list-entities-tool 表格共用。
+ */
+export function formatRuntimeMs(ms: number): string {
+  const totalSecs = Math.max(0, Math.floor(ms / 1000))
+  if (totalSecs < 60) return `${totalSecs}s`
+  const mins = Math.floor(totalSecs / 60)
+  const secs = totalSecs % 60
+  if (mins < 60) return `${mins}m${secs}s`
+  const hours = Math.floor(mins / 60)
+  const remainMins = mins % 60
+  return `${hours}h${remainMins}m${secs}s`
+}
+

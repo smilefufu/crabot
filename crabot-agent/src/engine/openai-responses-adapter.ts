@@ -5,7 +5,7 @@
  */
 
 import type { LLMAdapter, LLMAdapterConfig, LLMStreamParams } from './llm-adapter-types.js'
-import { isToolResultMessage, extractText, buildImageUrl, readSSEEvents } from './llm-adapter-types.js'
+import { isToolResultMessage, extractText, buildImageUrl, readSSEEvents, wrapOnRetry } from './llm-adapter-types.js'
 import type { EngineMessage, ToolDefinition, StreamChunk, ContentBlock } from './types.js'
 import { HttpResponseError, streamWithRetry } from './retry-utils.js'
 import { isMaterialChunk } from './stream-processor.js'
@@ -147,9 +147,7 @@ export class OpenAIResponsesAdapter implements LLMAdapter {
       {
         abortSignal: params.signal,
         isMaterial: isMaterialChunk,
-        onRetry: params.onRetry
-          ? (e) => params.onRetry!({ ...e, source: 'pre-stream' })
-          : undefined,
+        onRetry: wrapOnRetry(params.onRetry, 'pre-stream'),
       },
     )
   }

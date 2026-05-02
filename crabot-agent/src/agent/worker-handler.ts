@@ -64,7 +64,7 @@ import { HumanMessageQueue } from '../engine/human-message-queue.js'
 import { createCodingExpertHookRegistry, createCliBlockHook } from '../hooks/defaults.js'
 import { HookRegistry } from '../hooks/hook-registry.js'
 import { PromptManager, formatChannelMessageLine } from '../prompt-manager.js'
-import { formatNow, formatChannelMessageTime, resolveTimezone } from '../utils/time.js'
+import { formatNow, formatChannelMessageTime, resolveTimezone, formatRuntimeMs } from '../utils/time.js'
 import { getInstanceSkillsDir } from '../core/data-paths.js'
 
 import * as fs from 'fs'
@@ -146,18 +146,6 @@ function adapterFromSdkEnv(sdkEnv: SdkEnvConfig) {
     format: sdkEnv.format,
     ...(sdkEnv.env.LLM_ACCOUNT_ID ? { accountId: sdkEnv.env.LLM_ACCOUNT_ID } : {}),
   })
-}
-
-/** 把毫秒数渲染成 "1h23m45s" / "5m12s" / "32s" 的友好字符串，用于 bg-notification */
-function formatRuntime(ms: number): string {
-  const totalSecs = Math.max(0, Math.floor(ms / 1000))
-  if (totalSecs < 60) return `${totalSecs}s`
-  const mins = Math.floor(totalSecs / 60)
-  const secs = totalSecs % 60
-  if (mins < 60) return `${mins}m${secs}s`
-  const hours = Math.floor(mins / 60)
-  const remainMins = mins % 60
-  return `${hours}h${remainMins}m${secs}s`
 }
 
 /** 给 skills 列表算一个内容 hash 用于 dedupe；name + content + skill_dir 三元组决定身份 */
@@ -564,7 +552,7 @@ export class WorkerHandler {
         // 仅持久（master 私聊）路径有意义；transient 在 task 结束被 kill，agent 此时也不在了
         const onShellExit: BashBgContext['onShellExit'] = (info) => {
           if (info.mode !== 'persistent') return
-          const runtimeStr = formatRuntime(info.runtime_ms)
+          const runtimeStr = formatRuntimeMs(info.runtime_ms)
           const message =
             `Background shell ${info.entity_id} 已退出。\n` +
             `状态: ${info.status} (exit_code=${info.exit_code})\n` +
@@ -599,7 +587,7 @@ export class WorkerHandler {
           spawned_at: string
           result_file: string | null
         }): void => {
-          const runtimeStr = formatRuntime(info.runtime_ms)
+          const runtimeStr = formatRuntimeMs(info.runtime_ms)
           const message =
             `Background sub-agent ${info.entity_id} 已结束。\n` +
             `状态: ${info.status} (exit_code=${info.exit_code})\n` +
@@ -847,12 +835,15 @@ export class WorkerHandler {
             if (!this.liveSnapshots.has(task.task_id)) return
             switch (event.type) {
               case 'turn_assistant':
-                this.updateLiveSnapshot(task.task_id, prev => ({
-                  ...prev,
-                  current_turn: event.turn,
-                  last_assistant_text: event.text.slice(0, 400),
-                  llm_retry: undefined,  // LLM 成功返回了，清掉 retry 状态
-                }))
+                this.updateLiveSnapshot(task.task_id, prev => {
+                  const next = {
+                    ...prev,
+                    current_turn: event.turn,
+                    last_assistant_text: event.text.slice(0, 400),
+                  }
+                  // LLM 成功返回了，清掉 retry 状态（仅当之前真有 retry 才更新，避免无谓的 store 通知）
+                  return prev.llm_retry ? { ...next, llm_retry: undefined } : next
+                })
                 break
               case 'tools_start': {
                 const now = Date.now()
