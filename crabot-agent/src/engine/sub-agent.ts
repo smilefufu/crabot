@@ -122,6 +122,16 @@ export interface SubAgentBgContext {
   readonly spawned_by_task_id: string
   readonly abortControllers: Map<string, AbortController>
   readonly traceContext?: BgEntityTraceContext
+  /** Push notification sink — sub-agent loop 自然结束 / 失败时调；worker 排到下一次 task 的 prompt */
+  readonly onAgentExit?: (info: {
+    entity_id: string
+    task_description: string
+    status: 'completed' | 'failed'
+    exit_code: number
+    runtime_ms: number
+    spawned_at: string
+    result_file: string | null
+  }) => void
 }
 
 export interface SubAgentToolConfig {
@@ -201,6 +211,7 @@ export function createSubAgentTool(config: SubAgentToolConfig): ToolDefinition {
             registry: config.bgContext.registry,
             abortControllers: config.bgContext.abortControllers,
             traceContext: config.bgContext.traceContext,
+            onExit: config.bgContext.onAgentExit,
           })
           return {
             output: `Sub-agent spawned (persistent): ${agent_id}\nUse Output("${agent_id}") to poll, Kill("${agent_id}") to terminate.`,

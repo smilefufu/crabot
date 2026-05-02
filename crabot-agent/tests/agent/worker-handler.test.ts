@@ -542,6 +542,34 @@ describe('WorkerHandler.updateSkills atomic write', () => {
   })
 })
 
+describe('WorkerHandler bg-entity push notifications', () => {
+  it('enqueueBgNotification + drainBgNotifications round-trip', () => {
+    // 用 any 旁路 private 访问限制——drainBgNotifications 是内部 helper
+    const handler: any = makeHandler()
+
+    handler.enqueueBgNotification('friend:f1', 'shell_aaa exited (exit 0)')
+    handler.enqueueBgNotification('friend:f1', 'agent_bbb completed')
+    handler.enqueueBgNotification('friend:f2', 'shell_ccc failed')
+
+    const f1 = handler.drainBgNotifications('friend:f1')
+    expect(f1).toContain('<bg-notification>')
+    expect(f1).toContain('shell_aaa exited (exit 0)')
+    expect(f1).toContain('agent_bbb completed')
+    expect(f1).not.toContain('shell_ccc')
+
+    // f1 已 drain，第二次为空
+    expect(handler.drainBgNotifications('friend:f1')).toBe('')
+
+    // f2 独立保留
+    expect(handler.drainBgNotifications('friend:f2')).toContain('shell_ccc')
+  })
+
+  it('drain returns empty when no notifications', () => {
+    const handler: any = makeHandler()
+    expect(handler.drainBgNotifications('friend:none')).toBe('')
+  })
+})
+
 describe('WorkerHandler bg-entities lifecycle', () => {
   let dataDir: string
   let originalDataDir: string | undefined

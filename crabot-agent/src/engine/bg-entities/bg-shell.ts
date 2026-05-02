@@ -27,6 +27,19 @@ export interface SpawnPersistentShellOpts {
   readonly spawned_by_task_id: string
   readonly registry: BgEntityRegistry
   readonly traceContext?: BgEntityTraceContext
+  /**
+   * Async exit hook — 进程 exit 后、registry update 完成后调用。
+   * 用于推送 push notification（worker 把它接到 enqueueBgNotification）。
+   * 抛错只 log 不影响其他逻辑。
+   */
+  readonly onExit?: (info: {
+    entity_id: string
+    command: string
+    status: 'completed' | 'failed' | 'killed'
+    exit_code: number
+    runtime_ms: number
+    spawned_at: string
+  }) => void
 }
 
 /**
@@ -70,23 +83,40 @@ export async function spawnPersistentShell(opts: SpawnPersistentShellOpts): Prom
   child.on('exit', (code) => {
     const exitCode = code ?? -1
     const exitedAt = Date.now()
+    const runtimeMs = exitedAt - spawnedAtMs
     void registeredPromise
-      .then(() => {
-        const status = exitCode === 0 ? 'completed' : 'failed'
+      .then(async () => {
+        const status: 'completed' | 'failed' = exitCode === 0 ? 'completed' : 'failed'
         if (opts.traceContext) {
           emitInstantSpan(opts.traceContext, 'bg_entity_exit', {
             entity_id,
             type: 'shell',
             status,
             exit_code: exitCode,
-            runtime_ms: exitedAt - spawnedAtMs,
+            runtime_ms: runtimeMs,
           }, status)
         }
-        return opts.registry.update(entity_id, {
+        await opts.registry.update(entity_id, {
           status,
           exit_code: exitCode,
           ended_at: new Date(exitedAt).toISOString(),
         } as Partial<BgShellRegistryRecord>)
+        // 触发 push notification 给 worker（以便下一次 task 启动时通知 agent）
+        // status='killed' 由 Kill 工具直接 update，bg-shell 这里只看 exit code
+        if (opts.onExit) {
+          try {
+            opts.onExit({
+              entity_id,
+              command: opts.command,
+              status,
+              exit_code: exitCode,
+              runtime_ms: runtimeMs,
+              spawned_at: now,
+            })
+          } catch (err) {
+            console.error(`[bg-shell] onExit callback failed for ${entity_id}:`, err)
+          }
+        }
       })
       .catch((err: unknown) => {
         console.error(`[bg-shell] exit registry update failed for ${entity_id}:`, err)
@@ -179,6 +209,19 @@ export interface SpawnTransientShellOpts {
   readonly owner: BgEntityOwner
   readonly spawned_by_task_id: string
   readonly traceContext?: BgEntityTraceContext
+  /**
+   * Async exit hook，与 SpawnPersistentShellOpts.onExit 同款；
+   * 用于 worker 推 push notification（transient 在 task 内 exit 的场景）。
+   * Phase 1 仅 plumbing，worker 端目前不消费 transient 通知（mid-task 注入靠 humanMessageQueue 待 Phase 2）。
+   */
+  readonly onExit?: (info: {
+    entity_id: string
+    command: string
+    status: 'completed' | 'failed' | 'killed'
+    exit_code: number
+    runtime_ms: number
+    spawned_at: string
+  }) => void
 }
 
 export class TransientShellRegistry {
@@ -224,7 +267,8 @@ export class TransientShellRegistry {
     child.on('exit', (code) => {
       if (state.status === 'running') {
         const exitCode = code ?? -1
-        const exitStatus = exitCode === 0 ? 'completed' : 'failed'
+        const exitStatus: 'completed' | 'failed' = exitCode === 0 ? 'completed' : 'failed'
+        const runtimeMs = Date.now() - spawnedAtMs
         state.status = exitStatus
         state.exit_code = exitCode
         state.ended_at = new Date().toISOString()
@@ -234,8 +278,22 @@ export class TransientShellRegistry {
             type: 'shell',
             status: exitStatus,
             exit_code: exitCode,
-            runtime_ms: Date.now() - spawnedAtMs,
+            runtime_ms: runtimeMs,
           }, exitStatus)
+        }
+        if (opts.onExit) {
+          try {
+            opts.onExit({
+              entity_id,
+              command: opts.command,
+              status: exitStatus,
+              exit_code: exitCode,
+              runtime_ms: runtimeMs,
+              spawned_at: now,
+            })
+          } catch (err) {
+            console.error(`[bg-shell-transient] onExit callback failed for ${entity_id}:`, err)
+          }
         }
       }
     })

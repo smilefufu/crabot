@@ -307,13 +307,27 @@ const WORKER_RULES = `## 时间感知
 
 ### 长任务的处理
 
-预估执行时间超过 1 分钟的命令，**必须**用 \`Bash(run_in_background=true)\`，拿 shell_id 后用 \`Output(shell_id)\` 周期 poll 进展。同步 Bash 是给秒级命令的，不要用同步 Bash 等几十分钟——agent loop 被堵住期间无法响应任何其他事情。
+预估执行时间超过 1 分钟的命令，**必须**用 \`Bash(run_in_background=true)\`，拿 shell_id 后**优先靠 push notification**而不是主动 poll。同步 Bash 是给秒级命令的，不要用同步 Bash 等几十分钟——agent loop 被堵住期间无法响应任何其他事情。
 
-- 1min - 1h：bg shell（poll 进展），合适时机 Kill
-- 1h - 数天：仍是 bg shell。**仅 master 私聊场景**下 bg 进程跨 task / worker 重启都不会被杀，由你显式 Kill 或进程自己 exit
-- 数天 - 几周：考虑物化为项目内 cron / daemon（见「主动性诉求的物化」段），bg shell 也行但要保证 master 能定期检查
+**架构：bg entity 的 exit / 完成事件会自动 push 给你**——下一次任意 task 启动时，prompt 头部会出现 \`<bg-notification>\` 块告诉你"shell_xxx 已退出，状态 X，运行 Y"。你不需要主动确认 entity 是否结束。
 
-类似地，**子任务委派**也支持后台：\`delegate_task(prompt, run_in_background=true)\` 返回 agent_id，parent 可继续干别的，过几轮调 \`Output(agent_id)\` 看进展。适合"父需要等的子任务但不想空等"的场景。
+**调 Output 的正确姿势**：
+
+| 场景 | 正确做法 |
+|---|---|
+| spawn 完想立刻看几行启动输出 | \`Output(id)\` snapshot 读一次即可，看完该干别的就干别的 |
+| 想等下一段输出再继续 | \`Output(id, block=true)\` 工具内部阻塞 30s（或显式 timeout_ms）等到有新内容 / exit / timeout |
+| 想知道 entity 跑完没 | **不要主动 poll**——等 push notification。你想做别的事就去做，下次 task 启动时自然收到通知 |
+| 真要在当前 task 内等到结束 | \`Output(id, block=true, timeout_ms=120000)\` 一次到位，不要每轮 LLM 调一次裸 \`Output(id)\` |
+
+**反 pattern（明令禁止）**：在 agent 主循环里反复调 \`Output(id)\`（不带 block）等同一个 entity——每次调用都污染上下文（tool_call + tool_result 对），且没新内容时纯空跑。**同一 entity 连续 ≥2 次 Output 都返回 \`(no new output)\`，下一次必须 block=true 或干别的事**。
+
+**时长分级**：
+- 1min - 1h：bg shell；spawn 后干别的事，等 push notification
+- 1h - 数天：bg shell；**仅 master 私聊场景**下 bg 跨 task / worker 重启都不被杀，由你显式 Kill 或进程自己 exit
+- 数天 - 几周：考虑物化为项目内 cron / daemon（见「主动性诉求的物化」段）
+
+**子任务委派**同款：\`delegate_task(prompt, run_in_background=true)\` → agent_id → 等 push notification 或用 \`Output(agent_id, block=true)\` 主动等。
 
 ### 执行流程
 

@@ -36,6 +36,19 @@ export interface SpawnPersistentAgentOpts {
   /** Worker-maintained abort-controller map: written on spawn, deleted on finish/kill. */
   readonly abortControllers: Map<string, AbortController>
   readonly traceContext?: BgEntityTraceContext
+  /**
+   * Async exit hook —— sub-agent loop 自然结束 / 失败时调用（killed 由 Kill 工具发出，不走这里）。
+   * 用于 worker 推 push notification。抛错只 log。
+   */
+  readonly onExit?: (info: {
+    entity_id: string
+    task_description: string
+    status: 'completed' | 'failed'
+    exit_code: number
+    runtime_ms: number
+    spawned_at: string
+    result_file: string | null
+  }) => void
 }
 
 /**
@@ -122,33 +135,51 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
 
       const endedStatus =
         result.outcome === 'completed' ? ('completed' as const) : ('failed' as const)
+      const exitCode = result.outcome === 'completed' ? 0 : 1
+      const runtimeMs = Date.now() - agentSpawnedAtMs
       if (opts.traceContext) {
         emitInstantSpan(opts.traceContext, 'bg_entity_exit', {
           entity_id,
           type: 'agent',
           status: endedStatus,
-          exit_code: result.outcome === 'completed' ? 0 : 1,
-          runtime_ms: Date.now() - agentSpawnedAtMs,
+          exit_code: exitCode,
+          runtime_ms: runtimeMs,
         }, endedStatus)
       }
       await opts.registry
         .update(entity_id, {
           status: endedStatus,
           result_file: resultFile,
-          exit_code: result.outcome === 'completed' ? 0 : 1,
+          exit_code: exitCode,
           ended_at: new Date().toISOString(),
         } as Partial<BgAgentRegistryRecord>)
         .catch(() => {})
+      if (opts.onExit) {
+        try {
+          opts.onExit({
+            entity_id,
+            task_description: opts.task_description,
+            status: endedStatus,
+            exit_code: exitCode,
+            runtime_ms: runtimeMs,
+            spawned_at: now,
+            result_file: resultFile,
+          })
+        } catch (err) {
+          console.error(`[bg-agent] onExit callback failed for ${entity_id}:`, err)
+        }
+      }
     } catch {
       // Handles both abort and unexpected errors.
       // registry.update's status-guard prevents overwriting an already-killed entry.
+      const runtimeMs = Date.now() - agentSpawnedAtMs
       if (opts.traceContext) {
         emitInstantSpan(opts.traceContext, 'bg_entity_exit', {
           entity_id,
           type: 'agent',
           status: 'failed',
           exit_code: 1,
-          runtime_ms: Date.now() - agentSpawnedAtMs,
+          runtime_ms: runtimeMs,
         }, 'failed')
       }
       await opts.registry
@@ -158,6 +189,21 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
           ended_at: new Date().toISOString(),
         } as Partial<BgAgentRegistryRecord>)
         .catch(() => {})
+      if (opts.onExit) {
+        try {
+          opts.onExit({
+            entity_id,
+            task_description: opts.task_description,
+            status: 'failed',
+            exit_code: 1,
+            runtime_ms: runtimeMs,
+            spawned_at: now,
+            result_file: null,
+          })
+        } catch (err) {
+          console.error(`[bg-agent] onExit callback failed for ${entity_id}:`, err)
+        }
+      }
     } finally {
       opts.abortControllers.delete(entity_id)
     }

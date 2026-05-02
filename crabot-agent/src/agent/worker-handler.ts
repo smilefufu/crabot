@@ -148,6 +148,18 @@ function adapterFromSdkEnv(sdkEnv: SdkEnvConfig) {
   })
 }
 
+/** 把毫秒数渲染成 "1h23m45s" / "5m12s" / "32s" 的友好字符串，用于 bg-notification */
+function formatRuntime(ms: number): string {
+  const totalSecs = Math.max(0, Math.floor(ms / 1000))
+  if (totalSecs < 60) return `${totalSecs}s`
+  const mins = Math.floor(totalSecs / 60)
+  const secs = totalSecs % 60
+  if (mins < 60) return `${mins}m${secs}s`
+  const hours = Math.floor(mins / 60)
+  const remainMins = mins % 60
+  return `${hours}h${remainMins}m${secs}s`
+}
+
 /** 给 skills 列表算一个内容 hash 用于 dedupe；name + content + skill_dir 三元组决定身份 */
 function computeSkillsHash(skills: ReadonlyArray<SkillConfig>): string {
   const h = createHash('sha256')
@@ -228,6 +240,13 @@ export class WorkerHandler {
   /** Skills 写盘的串行化 + 内容指纹去重；防止 admin 启动期多个 trigger 并发推送时的写盘竞态 */
   private skillsWritePromise: Promise<void> = Promise.resolve()
   private lastSkillsHash: string = ''
+  /**
+   * Bg entity exit / 重要事件的待发通知队列。key 是 address——
+   *   - `friend:<friend_id>`：持久 entity 的 owner，下一次该 friend 任意 task 启动时收到
+   *   - `task:<task_id>`：transient entity（task 内事件），下一轮 agent loop 收到（待 Phase 2，本期未实现）
+   * 参 Claude Code enqueueShellNotification + LocalAgentTask.enqueueAgentNotification 设计。
+   */
+  private readonly pendingBgNotifications = new Map<string, string[]>()
   /** Interval handle for periodic 24h GC of dead entities */
   private gcIntervalHandle?: NodeJS.Timeout
 
@@ -304,6 +323,30 @@ export class WorkerHandler {
     } catch (error) {
       console.error('[WorkerHandler] Failed to load confirmed snapshot:', error)
     }
+  }
+
+  /**
+   * 把一条 bg entity 通知挂到队列，下一次匹配 addressKey 的 task 启动时被 drain 出来
+   * 拼到 user message 头部（参 Claude Code enqueueShellNotification 设计）。
+   *
+   * addressKey 形式：
+   *   - `friend:<friend_id>`：跨 task 持久通知（持久 entity 的 owner_friend）
+   *   - `task:<task_id>`：仅当前 task 内通知（transient entity；当前 phase 未实现 mid-task 注入）
+   */
+  enqueueBgNotification(addressKey: string, message: string): void {
+    const list = this.pendingBgNotifications.get(addressKey) ?? []
+    list.push(message)
+    this.pendingBgNotifications.set(addressKey, list)
+  }
+
+  /** Drain 并返回 wrapped 的 <bg-notification> 块（已包标签）。无则返回空串。 */
+  private drainBgNotifications(addressKey: string): string {
+    const list = this.pendingBgNotifications.get(addressKey)
+    if (!list || list.length === 0) return ''
+    this.pendingBgNotifications.delete(addressKey)
+    return list
+      .map((m) => `<bg-notification>\n${m}\n</bg-notification>`)
+      .join('\n')
   }
 
   /**
@@ -517,6 +560,19 @@ export class WorkerHandler {
           session_id: context.task_origin?.session_id,
           channel_id: context.task_origin?.channel_id,
         }
+        // push notification 接线：bg shell 自然 exit 时排到该 friend 的下一次 task prompt
+        // 仅持久（master 私聊）路径有意义；transient 在 task 结束被 kill，agent 此时也不在了
+        const onShellExit: BashBgContext['onShellExit'] = (info) => {
+          if (info.mode !== 'persistent') return
+          const runtimeStr = formatRuntime(info.runtime_ms)
+          const message =
+            `Background shell ${info.entity_id} 已退出。\n` +
+            `状态: ${info.status} (exit_code=${info.exit_code})\n` +
+            `运行时长: ${runtimeStr}\n` +
+            `命令: ${info.command.slice(0, 200)}${info.command.length > 200 ? '...' : ''}\n` +
+            `提示: 用 Output("${info.entity_id}") 读完整输出，确认后用 Kill 清理（即使已 exit 也建议清以防混淆）`
+          this.enqueueBgNotification(`friend:${bgOwner.friend_id}`, message)
+        }
         const bgEntityCtx: BashBgContext = {
           registry: this.bgRegistry,
           transient: this.transientShells,
@@ -524,6 +580,7 @@ export class WorkerHandler {
           owner: bgOwner,
           taskId: task.task_id,
           traceContext: bgTraceCtx,
+          onShellExit,
         }
         const bgToolDeps: BgToolDeps = {
           registry: this.bgRegistry,
@@ -532,7 +589,25 @@ export class WorkerHandler {
           taskId: task.task_id,
           ownerFriendId: bgOwner.friend_id,
           agentAbortControllers: this.agentAbortControllers,
-          traceContext: bgTraceCtx,
+        }
+        const onAgentExit = (info: {
+          entity_id: string
+          task_description: string
+          status: 'completed' | 'failed'
+          exit_code: number
+          runtime_ms: number
+          spawned_at: string
+          result_file: string | null
+        }): void => {
+          const runtimeStr = formatRuntime(info.runtime_ms)
+          const message =
+            `Background sub-agent ${info.entity_id} 已结束。\n` +
+            `状态: ${info.status} (exit_code=${info.exit_code})\n` +
+            `运行时长: ${runtimeStr}\n` +
+            `任务: ${info.task_description.slice(0, 200)}${info.task_description.length > 200 ? '...' : ''}\n` +
+            (info.result_file ? `结果文件: ${info.result_file}\n` : '') +
+            `提示: 用 Output("${info.entity_id}") 读最终结果`
+          this.enqueueBgNotification(`friend:${bgOwner.friend_id}`, message)
         }
         const subAgentBgContext = {
           registry: this.bgRegistry,
@@ -541,6 +616,7 @@ export class WorkerHandler {
           spawned_by_task_id: task.task_id,
           abortControllers: this.agentAbortControllers,
           traceContext: bgTraceCtx,
+          onAgentExit,
         }
         tools.push(...getConfiguredBuiltinTools(
           os.homedir(),
@@ -621,7 +697,19 @@ export class WorkerHandler {
       const buildSystemPromptDynamic = (): string => this.buildSystemPrompt(context)
 
       // 5. Build task message（一次性，task 启动后用户请求/记忆等不变）
-      const taskMessage = await this.buildTaskMessage(task, context)
+      // 拼接 bg-notification：上一次该 friend 留下的 bg entity exit 等事件
+      let taskMessage = await this.buildTaskMessage(task, context)
+      const ownerFriendId = context.sender_friend?.id
+        ?? `__system_${context.task_origin?.session_id ?? 'unknown'}`
+      const bgNotifBlock = this.drainBgNotifications(`friend:${ownerFriendId}`)
+      if (bgNotifBlock) {
+        if (typeof taskMessage === 'string') {
+          taskMessage = `${bgNotifBlock}\n\n${taskMessage}`
+        } else {
+          // ContentBlock[] 形式：在最前面加一个 text block
+          taskMessage = [{ type: 'text', text: `${bgNotifBlock}\n\n` }, ...taskMessage]
+        }
+      }
 
       // 6. Set up trace and progress tracking
       const isMasterPrivate =

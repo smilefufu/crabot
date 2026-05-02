@@ -21,6 +21,16 @@ export interface BashBgContext {
   readonly owner: BgEntityOwner
   readonly taskId: string
   readonly traceContext?: BgEntityTraceContext
+  /** Push notification sink — bg entity exit / 重要事件触发后调，由 worker 排到下一次 task 的 prompt */
+  readonly onShellExit?: (info: {
+    entity_id: string
+    command: string
+    status: 'completed' | 'failed' | 'killed'
+    exit_code: number
+    runtime_ms: number
+    spawned_at: string
+    mode: 'persistent' | 'transient'
+  }) => void
 }
 
 function truncateOutput(output: string): string {
@@ -131,6 +141,9 @@ async function runBg(command: string, bgCtx: BashBgContext): Promise<ToolCallRes
       spawned_by_task_id: bgCtx.taskId,
       registry: bgCtx.registry,
       traceContext: bgCtx.traceContext,
+      onExit: bgCtx.onShellExit
+        ? (info) => bgCtx.onShellExit!({ ...info, mode: 'persistent' })
+        : undefined,
     })
     return {
       output: `Shell spawned (persistent): ${id}\nUse Output("${id}") to poll, Kill("${id}") to terminate.`,
@@ -142,6 +155,9 @@ async function runBg(command: string, bgCtx: BashBgContext): Promise<ToolCallRes
       owner: bgCtx.owner,
       spawned_by_task_id: bgCtx.taskId,
       traceContext: bgCtx.traceContext,
+      onExit: bgCtx.onShellExit
+        ? (info) => bgCtx.onShellExit!({ ...info, mode: 'transient' })
+        : undefined,
     })
     return {
       output: `Shell spawned (transient, dies with task): ${id}\nUse Output("${id}") to poll, Kill("${id}") to terminate.`,

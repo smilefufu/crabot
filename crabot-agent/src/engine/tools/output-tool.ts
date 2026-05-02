@@ -10,7 +10,6 @@ import type { ToolDefinition } from '../types'
 import type { BgEntityRegistry } from '../bg-entities/registry'
 import type { TransientShellRegistry } from '../bg-entities/bg-shell'
 import { BG_OUTPUT_MAX_BYTES } from '../bg-entities/types'
-import { emitInstantSpan, type BgEntityTraceContext } from '../bg-entities/trace'
 
 export interface BgToolDeps {
   readonly registry: BgEntityRegistry
@@ -20,9 +19,13 @@ export interface BgToolDeps {
   readonly ownerFriendId?: string
   /** Sub-agent abortControllers map (key=entity_id); used to abort a running bg agent on Kill */
   readonly agentAbortControllers?: Map<string, AbortController>
-  /** Optional trace context for emitting bg_entity_output spans */
-  readonly traceContext?: BgEntityTraceContext
 }
+
+// block 模式参数（参 Claude Code BashOutput）
+const BLOCK_DEFAULT_TIMEOUT_MS = 30_000
+const BLOCK_MAX_TIMEOUT_MS = 120_000
+const BLOCK_POLL_INTERVAL_MS = 2_000
+const NO_NEW_OUTPUT_MARKER = '(no new output)'
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -30,6 +33,20 @@ export interface BgToolDeps {
 
 function cursorKey(taskId: string, entityId: string): string {
   return `${taskId}:${entityId}`
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** 判断 entity 是否仍在 running（用于 block 模式提前终止）。 */
+async function isStillRunning(entityId: string, deps: BgToolDeps): Promise<boolean> {
+  if (entityId.startsWith('shell_')) {
+    const transientState = deps.transient.get(entityId)
+    if (transientState) return transientState.status === 'running'
+  }
+  const record = await deps.registry.get(entityId)
+  return record?.status === 'running'
 }
 
 async function readShellOutput(
@@ -171,7 +188,11 @@ export function createOutputTool(deps: BgToolDeps): ToolDefinition {
     category: 'shell',
     description:
       'Read incremental output from a background entity (shell or sub-agent). ' +
-      'Default returns content since last Output call from this task.',
+      '默认非阻塞 snapshot 读。' +
+      '若 entity 还在 running 且想等下一段输出，**强烈建议**用 `block=true` 阻塞等到有新输出 / 状态变 terminal / 超时——' +
+      '避免在 agent 主循环里反复短间隔 poll 污染上下文。' +
+      '注意：bg entity 的 exit / kill 事件本身会通过下一轮 prompt 的 <bg-notification> 自动通知到 agent，' +
+      '通常不需要主动 block 等终止——block 仅适用于"我要立刻拿到下一段输出再继续"的场景。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -183,6 +204,16 @@ export function createOutputTool(deps: BgToolDeps): ToolDefinition {
           type: 'integer',
           description: 'Optional: explicit byte offset; default uses per-task cursor',
         },
+        block: {
+          type: 'boolean',
+          description:
+            '为 true 时，若 entity 仍在 running 且当前无新输出，工具内部 poll 等到有新输出 / 状态结束 / 超时再返回。' +
+            '默认 false（snapshot 读，立即返回）。',
+        },
+        timeout_ms: {
+          type: 'integer',
+          description: `block=true 时的最长等待时间（默认 ${BLOCK_DEFAULT_TIMEOUT_MS}，最大 ${BLOCK_MAX_TIMEOUT_MS}）。`,
+        },
       },
       required: ['entity_id'],
     },
@@ -191,36 +222,39 @@ export function createOutputTool(deps: BgToolDeps): ToolDefinition {
     call: async (input) => {
       const entityId = input.entity_id as string
       const explicitOffset = input.from_offset as number | undefined
+      const block = input.block === true
+      const requestedTimeout = typeof input.timeout_ms === 'number' ? input.timeout_ms : BLOCK_DEFAULT_TIMEOUT_MS
+      const timeoutMs = Math.min(Math.max(0, requestedTimeout), BLOCK_MAX_TIMEOUT_MS)
 
-      let result: { output: string; isError: boolean }
-
-      if (entityId.startsWith('shell_')) {
-        result = await readShellOutput(entityId, explicitOffset, deps)
-      } else if (entityId.startsWith('agent_')) {
-        result = await readAgentOutput(entityId, explicitOffset, deps)
-      } else {
-        return {
-          output: `Invalid entity_id format: ${entityId}`,
-          isError: true,
+      const readOnce = async (): Promise<{ output: string; isError: boolean }> => {
+        if (entityId.startsWith('shell_')) {
+          return readShellOutput(entityId, explicitOffset, deps)
         }
+        if (entityId.startsWith('agent_')) {
+          return readAgentOutput(entityId, explicitOffset, deps)
+        }
+        return { output: `Invalid entity_id format: ${entityId}`, isError: true }
       }
 
-      if (deps.traceContext && !result.isError) {
-        // Retrieve status and type for the span details.
-        const transientState = deps.transient.get(entityId)
-        const entityStatus = transientState?.status
-          ?? (await deps.registry.get(entityId))?.status
-          ?? 'unknown'
-        const entityType = transientState ? 'shell' : (entityId.startsWith('agent_') ? 'agent' : 'shell')
-        emitInstantSpan(deps.traceContext, 'bg_entity_output', {
-          entity_id: entityId,
-          bytes_read: result.output.length,
-          status: entityStatus,
-          type: entityType,
-        })
-      }
+      const first = await readOnce()
+      if (!block || first.isError) return first
 
-      return result
+      // block 模式判断：第一次结果是否含 "(no new output)" 且 entity 还在 running
+      const hasNoNewOutput = first.output.includes(NO_NEW_OUTPUT_MARKER)
+      const stillRunning = await isStillRunning(entityId, deps)
+      if (!hasNoNewOutput || !stillRunning) return first
+
+      // 进入 poll loop：等到有新内容 / 状态变化 / 超时
+      const startMs = Date.now()
+      let last = first
+      while (Date.now() - startMs < timeoutMs) {
+        await sleep(BLOCK_POLL_INTERVAL_MS)
+        last = await readOnce()
+        if (last.isError) break
+        if (!last.output.includes(NO_NEW_OUTPUT_MARKER)) break
+        if (!(await isStillRunning(entityId, deps))) break
+      }
+      return last
     },
   })
 }
