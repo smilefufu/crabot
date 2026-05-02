@@ -65,6 +65,19 @@ load_env() {
   export CRABOT_ADMIN_PASSWORD="${CRABOT_ADMIN_PASSWORD:-admin123}"
   export CRABOT_JWT_SECRET="${CRABOT_JWT_SECRET:-$(openssl rand -hex 32 2>/dev/null || echo dev-secret)}"
   export DATA_DIR="$DATA_DIR"
+
+  # NO_PROXY 兜底：用户开系统代理时，Python httpx (trust_env=True) 会把 localhost RPC
+  # 也走代理 → 502 Bad Gateway，memory 模块 register 失败卡在 starting。
+  local loopback="localhost,127.0.0.1,::1"
+  if [ -n "${NO_PROXY:-}" ]; then
+    case ",$NO_PROXY," in
+      *,localhost,*) ;;
+      *) export NO_PROXY="$NO_PROXY,$loopback" ;;
+    esac
+  else
+    export NO_PROXY="$loopback"
+  fi
+  export no_proxy="$NO_PROXY"
 }
 
 # ── Node 依赖同步 ─────────────────────────────────────────

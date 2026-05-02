@@ -53,6 +53,24 @@ if (existsSync(LOCAL_BIN)) {
   }
 }
 
+// NO_PROXY 兜底：用户开了系统代理（HTTP_PROXY/HTTPS_PROXY/ALL_PROXY）时，
+// Python httpx 默认 trust_env=True 会把 localhost RPC 也走代理 → 502 Bad Gateway，
+// memory 等 Python 模块 register 失败、卡在 starting。Node http 不读代理变量不受影响，
+// 但显式声明 loopback 不走代理对 TS 也无害。
+{
+  const required = ['localhost', '127.0.0.1', '::1']
+  const merge = (existing) => {
+    const set = new Set(
+      (existing || '').split(',').map((s) => s.trim()).filter(Boolean)
+    )
+    for (const h of required) set.add(h)
+    return Array.from(set).join(',')
+  }
+  const merged = merge(process.env.NO_PROXY || process.env.no_proxy)
+  process.env.NO_PROXY = merged
+  process.env.no_proxy = merged
+}
+
 // ── 数据目录 ──
 
 for (const sub of ['admin', 'agent', 'memory']) {
