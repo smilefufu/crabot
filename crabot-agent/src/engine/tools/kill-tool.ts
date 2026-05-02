@@ -7,6 +7,7 @@
 import { defineTool } from '../tool-framework'
 import type { ToolDefinition } from '../types'
 import type { BgToolDeps } from './output-tool'
+import { emitInstantSpan } from '../bg-entities/trace'
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -25,7 +26,14 @@ async function killShell(
         isError: false,
       }
     }
+    const statusBefore = transientState.status
     deps.transient.kill(entityId)
+    if (deps.traceContext) {
+      emitInstantSpan(deps.traceContext, 'bg_entity_kill', {
+        entity_id: entityId,
+        status_before: statusBefore,
+      })
+    }
     return { output: `Sent SIGTERM to transient shell ${entityId}`, isError: false }
   }
 
@@ -43,6 +51,8 @@ async function killShell(
     return { output: `Already ${record.status}, no-op`, isError: false }
   }
 
+  const statusBefore = record.status
+
   // Send SIGTERM to process group
   try {
     process.kill(-record.pgid, 'SIGTERM')
@@ -56,6 +66,13 @@ async function killShell(
     exit_code: -1,
     ended_at: new Date().toISOString(),
   })
+
+  if (deps.traceContext) {
+    emitInstantSpan(deps.traceContext, 'bg_entity_kill', {
+      entity_id: entityId,
+      status_before: statusBefore,
+    })
+  }
 
   // SIGKILL fallback after 3 seconds
   const pgid = record.pgid
@@ -86,6 +103,8 @@ async function killAgent(
     return { output: `Already ${record.status}, no-op`, isError: false }
   }
 
+  const statusBefore = record.status
+
   const controller = deps.agentAbortControllers?.get(entityId)
   if (controller) {
     controller.abort()
@@ -95,6 +114,13 @@ async function killAgent(
     status: 'killed',
     ended_at: new Date().toISOString(),
   })
+
+  if (deps.traceContext) {
+    emitInstantSpan(deps.traceContext, 'bg_entity_kill', {
+      entity_id: entityId,
+      status_before: statusBefore,
+    })
+  }
   // Note: do not remove from agentAbortControllers map — bg-agent.ts finally block will do that
 
   return { output: `Agent ${entityId} killed.`, isError: false }

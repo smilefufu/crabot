@@ -4,6 +4,7 @@ import type { ToolDefinition, ToolCallContext, ToolCallResult } from '../types'
 import type { BgEntityRegistry } from '../bg-entities/registry.js'
 import type { TransientShellRegistry } from '../bg-entities/bg-shell.js'
 import type { BgEntityOwner } from '../bg-entities/types.js'
+import type { BgEntityTraceContext } from '../bg-entities/trace.js'
 import type { WorkerAgentContext } from '../../types.js'
 import { spawnPersistentShell } from '../bg-entities/bg-shell.js'
 import { isPersistentMode } from '../bg-entities/permission.js'
@@ -19,6 +20,7 @@ export interface BashBgContext {
   readonly workerContext: WorkerAgentContext
   readonly owner: BgEntityOwner
   readonly taskId: string
+  readonly traceContext?: BgEntityTraceContext
 }
 
 function truncateOutput(output: string): string {
@@ -128,6 +130,7 @@ async function runBg(command: string, bgCtx: BashBgContext): Promise<ToolCallRes
       owner: bgCtx.owner,
       spawned_by_task_id: bgCtx.taskId,
       registry: bgCtx.registry,
+      traceContext: bgCtx.traceContext,
     })
     return {
       output: `Shell spawned (persistent): ${id}\nUse Output("${id}") to poll, Kill("${id}") to terminate.`,
@@ -138,6 +141,7 @@ async function runBg(command: string, bgCtx: BashBgContext): Promise<ToolCallRes
       command,
       owner: bgCtx.owner,
       spawned_by_task_id: bgCtx.taskId,
+      traceContext: bgCtx.traceContext,
     })
     return {
       output: `Shell spawned (transient, dies with task): ${id}\nUse Output("${id}") to poll, Kill("${id}") to terminate.`,

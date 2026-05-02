@@ -13,6 +13,7 @@ import { promisify } from 'node:util'
 import { getBgEntitiesLogsDir } from '../../core/data-paths.js'
 import type { BgEntityOwner, BgShellRegistryRecord } from './types.js'
 import type { BgEntityRegistry } from './registry.js'
+import { emitInstantSpan, type BgEntityTraceContext } from './trace.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -25,6 +26,7 @@ export interface SpawnPersistentShellOpts {
   readonly owner: BgEntityOwner
   readonly spawned_by_task_id: string
   readonly registry: BgEntityRegistry
+  readonly traceContext?: BgEntityTraceContext
 }
 
 /**
@@ -67,14 +69,25 @@ export async function spawnPersistentShell(opts: SpawnPersistentShellOpts): Prom
   // so fast-exiting processes (e.g. `exit 0`) are captured.
   child.on('exit', (code) => {
     const exitCode = code ?? -1
+    const exitedAt = Date.now()
     void registeredPromise
-      .then(() =>
-        opts.registry.update(entity_id, {
-          status: exitCode === 0 ? 'completed' : 'failed',
+      .then(() => {
+        const status = exitCode === 0 ? 'completed' : 'failed'
+        if (opts.traceContext) {
+          emitInstantSpan(opts.traceContext, 'bg_entity_exit', {
+            entity_id,
+            type: 'shell',
+            status,
+            exit_code: exitCode,
+            runtime_ms: exitedAt - spawnedAtMs,
+          }, status)
+        }
+        return opts.registry.update(entity_id, {
+          status,
           exit_code: exitCode,
-          ended_at: new Date().toISOString(),
-        } as Partial<BgShellRegistryRecord>),
-      )
+          ended_at: new Date(exitedAt).toISOString(),
+        } as Partial<BgShellRegistryRecord>)
+      })
       .catch((err: unknown) => {
         console.error(`[bg-shell] exit registry update failed for ${entity_id}:`, err)
       })
@@ -98,8 +111,9 @@ export async function spawnPersistentShell(opts: SpawnPersistentShellOpts): Prom
   // Unref so the host process event loop can exit without waiting for the child.
   child.unref()
 
+  const spawnedAtMs = Date.now()
   const processStartedAt = await readProcStartTime(child.pid)
-  const now = new Date().toISOString()
+  const now = new Date(spawnedAtMs).toISOString()
 
   const record: BgShellRegistryRecord = {
     entity_id,
@@ -122,6 +136,16 @@ export async function spawnPersistentShell(opts: SpawnPersistentShellOpts): Prom
 
   // Unblock the exit/error handlers — they will now apply any pending update.
   resolveRegistered()
+
+  // Emit spawn span after registration so traceId is valid.
+  if (opts.traceContext) {
+    emitInstantSpan(opts.traceContext, 'bg_entity_spawn', {
+      entity_id,
+      type: 'shell',
+      mode: 'persistent',
+      command: opts.command,
+    })
+  }
 
   return entity_id
 }
@@ -154,6 +178,7 @@ export interface SpawnTransientShellOpts {
   readonly command: string
   readonly owner: BgEntityOwner
   readonly spawned_by_task_id: string
+  readonly traceContext?: BgEntityTraceContext
 }
 
 export class TransientShellRegistry {
@@ -162,7 +187,8 @@ export class TransientShellRegistry {
   /** spawn + 注册 + 接管 stdout/stderr → ringBuffer。返回 entity_id。 */
   spawn(opts: SpawnTransientShellOpts): string {
     const entity_id = `shell_${randomBytes(6).toString('hex')}`
-    const now = new Date().toISOString()
+    const spawnedAtMs = Date.now()
+    const now = new Date(spawnedAtMs).toISOString()
 
     const child = nodeSpawn('bash', ['-c', opts.command], {
       detached: true,
@@ -197,9 +223,20 @@ export class TransientShellRegistry {
 
     child.on('exit', (code) => {
       if (state.status === 'running') {
-        state.status = code === 0 ? 'completed' : 'failed'
-        state.exit_code = code ?? -1
+        const exitCode = code ?? -1
+        const exitStatus = exitCode === 0 ? 'completed' : 'failed'
+        state.status = exitStatus
+        state.exit_code = exitCode
         state.ended_at = new Date().toISOString()
+        if (opts.traceContext) {
+          emitInstantSpan(opts.traceContext, 'bg_entity_exit', {
+            entity_id,
+            type: 'shell',
+            status: exitStatus,
+            exit_code: exitCode,
+            runtime_ms: Date.now() - spawnedAtMs,
+          }, exitStatus)
+        }
       }
     })
     child.on('error', () => {
@@ -207,11 +244,30 @@ export class TransientShellRegistry {
         state.status = 'failed'
         state.exit_code = -1
         state.ended_at = new Date().toISOString()
+        if (opts.traceContext) {
+          emitInstantSpan(opts.traceContext, 'bg_entity_exit', {
+            entity_id,
+            type: 'shell',
+            status: 'failed',
+            exit_code: -1,
+            runtime_ms: Date.now() - spawnedAtMs,
+          }, 'failed')
+        }
       }
     })
 
     // Unref so host process event loop can exit without waiting for child.
     child.unref()
+
+    // Emit spawn span.
+    if (opts.traceContext) {
+      emitInstantSpan(opts.traceContext, 'bg_entity_spawn', {
+        entity_id,
+        type: 'shell',
+        mode: 'transient',
+        command: opts.command,
+      })
+    }
 
     return entity_id
   }

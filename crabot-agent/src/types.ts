@@ -746,11 +746,11 @@ export type AgentSpanType =
   | 'context_fetch'
   | 'memory_write'
   | 'rpc_call'
-  // bg-entities lifecycle events. Plan 2 §9.1 引入；emission 由 Plan 3 admin UI
-  // 接 trace 数据时再 wire（保持 union 完整性以免后续加 emission 时改 schema）
+  // bg-entities lifecycle events. Plan 2 §9.1 引入；Plan 3 Task 20 wire emission
   | 'bg_entity_spawn'
   | 'bg_entity_output'
   | 'bg_entity_kill'
+  | 'bg_entity_exit'
 
 export interface AgentLoopDetails {
   loop_label?: string

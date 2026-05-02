@@ -10,6 +10,7 @@ import type { ToolDefinition } from '../types'
 import type { BgEntityRegistry } from '../bg-entities/registry'
 import type { TransientShellRegistry } from '../bg-entities/bg-shell'
 import { BG_OUTPUT_MAX_BYTES } from '../bg-entities/types'
+import { emitInstantSpan, type BgEntityTraceContext } from '../bg-entities/trace'
 
 export interface BgToolDeps {
   readonly registry: BgEntityRegistry
@@ -19,6 +20,8 @@ export interface BgToolDeps {
   readonly ownerFriendId?: string
   /** Sub-agent abortControllers map (key=entity_id); used to abort a running bg agent on Kill */
   readonly agentAbortControllers?: Map<string, AbortController>
+  /** Optional trace context for emitting bg_entity_output spans */
+  readonly traceContext?: BgEntityTraceContext
 }
 
 // ---------------------------------------------------------------------------
@@ -189,18 +192,35 @@ export function createOutputTool(deps: BgToolDeps): ToolDefinition {
       const entityId = input.entity_id as string
       const explicitOffset = input.from_offset as number | undefined
 
+      let result: { output: string; isError: boolean }
+
       if (entityId.startsWith('shell_')) {
-        return readShellOutput(entityId, explicitOffset, deps)
+        result = await readShellOutput(entityId, explicitOffset, deps)
+      } else if (entityId.startsWith('agent_')) {
+        result = await readAgentOutput(entityId, explicitOffset, deps)
+      } else {
+        return {
+          output: `Invalid entity_id format: ${entityId}`,
+          isError: true,
+        }
       }
 
-      if (entityId.startsWith('agent_')) {
-        return readAgentOutput(entityId, explicitOffset, deps)
+      if (deps.traceContext && !result.isError) {
+        // Retrieve status and type for the span details.
+        const transientState = deps.transient.get(entityId)
+        const entityStatus = transientState?.status
+          ?? (await deps.registry.get(entityId))?.status
+          ?? 'unknown'
+        const entityType = transientState ? 'shell' : (entityId.startsWith('agent_') ? 'agent' : 'shell')
+        emitInstantSpan(deps.traceContext, 'bg_entity_output', {
+          entity_id: entityId,
+          bytes_read: result.output.length,
+          status: entityStatus,
+          type: entityType,
+        })
       }
 
-      return {
-        output: `Invalid entity_id format: ${entityId}`,
-        isError: true,
-      }
+      return result
     },
   })
 }

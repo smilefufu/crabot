@@ -22,6 +22,7 @@ import { TransientShellRegistry } from '../engine/bg-entities/bg-shell.js'
 import type { BgEntityOwner, BgEntityRecord, BgEntityStatus, BgEntityType } from '../engine/bg-entities/types.js'
 import type { BashBgContext } from '../engine/tools/index.js'
 import type { BgToolDeps } from '../engine/tools/index.js'
+import type { BgEntityTraceContext } from '../engine/bg-entities/trace.js'
 import type {
   ToolDefinition,
   EngineTurnEvent,
@@ -405,6 +406,11 @@ export class WorkerHandler {
           })
         : undefined
 
+      // bg-entities trace context: attach to current task's agent_loop trace.
+      const bgTraceCtx: BgEntityTraceContext | undefined = traceContext
+        ? { traceStore: traceContext.traceStore, traceId: traceContext.traceId }
+        : undefined
+
       // 工具列表构造改为 callback 形式：每轮 LLM 调用前由 query-loop 重新 resolve，
       // 让 admin push config（updateSkills / updateSystemPrompt）能在同一 task 内热生效。
       // 注意：lambda 内捕获 taskState / context / humanQueue 等闭包变量，
@@ -487,6 +493,7 @@ export class WorkerHandler {
           workerContext: context,
           owner: bgOwner,
           taskId: task.task_id,
+          traceContext: bgTraceCtx,
         }
         const bgToolDeps: BgToolDeps = {
           registry: this.bgRegistry,
@@ -495,6 +502,7 @@ export class WorkerHandler {
           taskId: task.task_id,
           ownerFriendId: bgOwner.friend_id,
           agentAbortControllers: this.agentAbortControllers,
+          traceContext: bgTraceCtx,
         }
         const subAgentBgContext = {
           registry: this.bgRegistry,
@@ -502,6 +510,7 @@ export class WorkerHandler {
           owner: bgOwner,
           spawned_by_task_id: task.task_id,
           abortControllers: this.agentAbortControllers,
+          traceContext: bgTraceCtx,
         }
         tools.push(...getConfiguredBuiltinTools(
           os.homedir(),

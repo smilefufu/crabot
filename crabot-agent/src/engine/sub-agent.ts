@@ -11,6 +11,7 @@ import { isPersistentMode } from './bg-entities/permission'
 import type { BgEntityRegistry } from './bg-entities/registry'
 import type { BgEntityOwner } from './bg-entities/types'
 import { BG_ENTITY_LIMIT_PER_OWNER } from './bg-entities/types'
+import type { BgEntityTraceContext } from './bg-entities/trace'
 
 // --- Fork Engine ---
 
@@ -120,6 +121,7 @@ export interface SubAgentBgContext {
   readonly owner: BgEntityOwner
   readonly spawned_by_task_id: string
   readonly abortControllers: Map<string, AbortController>
+  readonly traceContext?: BgEntityTraceContext
 }
 
 export interface SubAgentToolConfig {
@@ -198,6 +200,7 @@ export function createSubAgentTool(config: SubAgentToolConfig): ToolDefinition {
             spawned_by_task_id: config.bgContext.spawned_by_task_id,
             registry: config.bgContext.registry,
             abortControllers: config.bgContext.abortControllers,
+            traceContext: config.bgContext.traceContext,
           })
           return {
             output: `Sub-agent spawned (persistent): ${agent_id}\nUse Output("${agent_id}") to poll, Kill("${agent_id}") to terminate.`,

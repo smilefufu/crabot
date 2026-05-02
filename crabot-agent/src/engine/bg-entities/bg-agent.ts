@@ -18,6 +18,7 @@ import { runEngine } from '../query-loop.js'
 import { getBgEntitiesLogsDir } from '../../core/data-paths.js'
 import type { BgEntityRegistry } from './registry.js'
 import type { BgEntityOwner, BgAgentRegistryRecord } from './types.js'
+import { emitInstantSpan, type BgEntityTraceContext } from './trace.js'
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -34,6 +35,7 @@ export interface SpawnPersistentAgentOpts {
   readonly registry: BgEntityRegistry
   /** Worker-maintained abort-controller map: written on spawn, deleted on finish/kill. */
   readonly abortControllers: Map<string, AbortController>
+  readonly traceContext?: BgEntityTraceContext
 }
 
 /**
@@ -75,6 +77,18 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
   }
   await opts.registry.register(record)
 
+  // Emit spawn span.
+  if (opts.traceContext) {
+    emitInstantSpan(opts.traceContext, 'bg_entity_spawn', {
+      entity_id,
+      type: 'agent',
+      mode: 'persistent',
+      task_description: opts.task_description,
+    })
+  }
+
+  const agentSpawnedAtMs = Date.now()
+
   // fire-and-forget — intentionally not awaited by caller
   void (async () => {
     try {
@@ -108,6 +122,15 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
 
       const endedStatus =
         result.outcome === 'completed' ? ('completed' as const) : ('failed' as const)
+      if (opts.traceContext) {
+        emitInstantSpan(opts.traceContext, 'bg_entity_exit', {
+          entity_id,
+          type: 'agent',
+          status: endedStatus,
+          exit_code: result.outcome === 'completed' ? 0 : 1,
+          runtime_ms: Date.now() - agentSpawnedAtMs,
+        }, endedStatus)
+      }
       await opts.registry
         .update(entity_id, {
           status: endedStatus,
@@ -119,6 +142,15 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
     } catch {
       // Handles both abort and unexpected errors.
       // registry.update's status-guard prevents overwriting an already-killed entry.
+      if (opts.traceContext) {
+        emitInstantSpan(opts.traceContext, 'bg_entity_exit', {
+          entity_id,
+          type: 'agent',
+          status: 'failed',
+          exit_code: 1,
+          runtime_ms: Date.now() - agentSpawnedAtMs,
+        }, 'failed')
+      }
       await opts.registry
         .update(entity_id, {
           status: 'failed' as const,
