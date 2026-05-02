@@ -3,6 +3,12 @@
  */
 
 import { StreamProcessor } from './stream-processor.js'
+import {
+  DEFAULT_MAX_RETRIES,
+  DEFAULT_RETRY_DELAY_MS,
+  isRetryableError,
+  sleep,
+} from './retry-utils.js'
 import type {
   EngineMessage,
   EngineToolResultMessage,
@@ -67,31 +73,61 @@ export async function callNonStreaming(
     return adapter.complete(effectiveParams)
   }
 
-  // Fallback: consume stream and aggregate. Still used by adapters that can't
-  // express their full response via a single non-streaming call (e.g. Codex
-  // with encrypted reasoning), and as an escape hatch if we ever need to
-  // re-enable the streaming path.
-  const processor = new StreamProcessor()
-  for await (const chunk of adapter.stream(effectiveParams)) {
-    if (effectiveParams.signal?.aborted) {
-      throw new DOMException('Aborted', 'AbortError')
+  // Fallback: consume stream and aggregate. Some adapters（如 OpenAI Responses）
+  // 不支持 stream:false——必须走 SSE。streamWithRetry 内部仅在首 chunk 前能 retry，
+  // 一旦中途断流（mid-stream socket drop），它会向上抛错。
+  //
+  // 但 callNonStreaming 这一层是纯 buffer 消费——丢弃 partial processor 状态、
+  // 重发整个请求是安全的（server 端会生成新 response，没有下游 streaming 消费者
+  // 看得到重复 chunk）。所以这里加 iter-level retry：mid-stream 断了就重跑全流，
+  // 直到拿到完整结果或耗尽 retry 配额。
+  return await withStreamConsumptionRetry(adapter, effectiveParams)
+}
+
+async function withStreamConsumptionRetry(
+  adapter: LLMAdapter,
+  params: LLMStreamParams,
+): Promise<LLMCallResponse> {
+  const maxRetries = DEFAULT_MAX_RETRIES
+  const delayMs = DEFAULT_RETRY_DELAY_MS
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const processor = new StreamProcessor()
+      for await (const chunk of adapter.stream(params)) {
+        if (params.signal?.aborted) {
+          throw new DOMException('Aborted', 'AbortError')
+        }
+        if (chunk.type === 'error') {
+          throw new Error(chunk.error)
+        }
+        processor.process(chunk)
+      }
+      const result = processor.finalize()
+      return {
+        content: [
+          // Reasoning items come first so they precede text/tool_use when replayed to Codex
+          ...result.reasoningBlocks,
+          ...(result.text ? [{ type: 'text' as const, text: result.text }] : []),
+          ...result.toolUseBlocks,
+        ],
+        stopReason: result.stopReason,
+        usage: result.usage,
+      }
+    } catch (err) {
+      if (params.signal?.aborted) throw err
+      if (!isRetryableError(err)) throw err
+      if (attempt >= maxRetries) throw err
+      console.error(
+        `[callNonStreaming] stream attempt ${attempt + 1}/${maxRetries + 1} failed, retrying in ${delayMs}ms:`,
+        err,
+      )
+      await sleep(delayMs, params.signal)
+      // 下一轮 loop 会用全新 processor + 重新 call adapter.stream()，
+      // 服务端生成新 response（partial 浪费，但 task 能完成）
     }
-    if (chunk.type === 'error') {
-      throw new Error(chunk.error)
-    }
-    processor.process(chunk)
   }
-  const result = processor.finalize()
-  return {
-    content: [
-      // Reasoning items come first so they precede text/tool_use when replayed to Codex
-      ...result.reasoningBlocks,
-      ...(result.text ? [{ type: 'text' as const, text: result.text }] : []),
-      ...result.toolUseBlocks,
-    ],
-    stopReason: result.stopReason,
-    usage: result.usage,
-  }
+  throw new Error('callNonStreaming: retry loop exited unexpectedly')
 }
 
 // --- Shared Helpers ---

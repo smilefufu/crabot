@@ -105,4 +105,49 @@ describe('callNonStreaming', () => {
 
     expect(result.usage).toBeUndefined()
   })
+
+  it('retries the whole stream when mid-stream throws a retryable error', async () => {
+    let attempt = 0
+    const adapter: LLMAdapter = {
+      async *stream(): AsyncGenerator<StreamChunk> {
+        attempt++
+        yield { type: 'message_start', messageId: 'msg' }
+        yield { type: 'text_delta', text: 'partial' }
+        if (attempt === 1) {
+          // 模拟 mid-stream socket drop（material 已 yield，streamWithRetry 救不了）
+          // ETIMEDOUT 是 retryable code
+          const e = new Error('socket dropped') as Error & { code?: string }
+          e.code = 'ETIMEDOUT'
+          throw e
+        }
+        // 第二次 attempt：完整发完
+        yield { type: 'text_delta', text: ' rest' }
+        yield { type: 'message_end', stopReason: 'end_turn' }
+      },
+      updateConfig() {},
+    }
+
+    const result = await callNonStreaming(adapter, {
+      ...defaultParams,
+      signal: new AbortController().signal,
+    })
+
+    expect(attempt).toBe(2)
+    expect(result.content).toEqual([{ type: 'text', text: 'partial rest' }])
+    expect(result.stopReason).toBe('end_turn')
+  }, 30_000)
+
+  it('does not retry non-retryable errors mid-stream', async () => {
+    let attempt = 0
+    const adapter: LLMAdapter = {
+      async *stream(): AsyncGenerator<StreamChunk> {
+        attempt++
+        yield { type: 'message_start', messageId: 'msg' }
+        throw new Error('400 bad request: invalid params')
+      },
+      updateConfig() {},
+    }
+    await expect(callNonStreaming(adapter, defaultParams)).rejects.toThrow('400 bad request')
+    expect(attempt).toBe(1)
+  })
 })
