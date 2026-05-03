@@ -12,6 +12,7 @@
 import {
   runEngine,
   createAdapter,
+  createUserMessage,
   defineTool,
   getConfiguredBuiltinTools,
   ProgressDigest,
@@ -66,6 +67,8 @@ import { HookRegistry } from '../hooks/hook-registry.js'
 import { PromptManager, formatChannelMessageLine } from '../prompt-manager.js'
 import { formatNow, formatChannelMessageTime, resolveTimezone, formatRuntimeMs } from '../utils/time.js'
 import { getInstanceSkillsDir } from '../core/data-paths.js'
+import { TodoStore } from './worker-todo-store.js'
+import { createTodoTool } from './worker-todo-tool.js'
 
 import * as fs from 'fs'
 import * as path from 'path'
@@ -420,6 +423,7 @@ export class WorkerHandler {
       abortController: new AbortController(),
       pendingHumanMessages: [],
       taskOrigin: context.task_origin,
+      todoStore: new TodoStore(),
     }
     this.activeTasks.set(task.task_id, taskState)
 
@@ -673,6 +677,9 @@ export class WorkerHandler {
           tools.push(getTaskDetailsTool)
         }
 
+        // 3j. todo tool — per-task mutable plan
+        tools.push(createTodoTool(taskState.todoStore))
+
         // 最终过滤：用「完整 tools 集合」重算 permissionConfig，
         // 否则 delegate_*/trace_search 等后注入的工具因不在 baseToolsPermissionConfig 的 denyList 里而漏过 filter，
         // 导致 LLM 看见但 runEngine 用 initialPermissionConfig 又拒绝（违反「无权限工具不注入 prompt」）。
@@ -828,6 +835,11 @@ export class WorkerHandler {
           timezone: this.getTimezone(),
           abortSignal: taskState.abortController.signal as AbortSignal,
           humanMessageQueue: humanQueue,
+          onAfterCompaction: (messages) => {
+            const injection = taskState.todoStore.formatForInjection()
+            if (!injection) return messages
+            return [createUserMessage(injection), ...messages]
+          },
           hookRegistry: workerHookRegistry,
           onLiveProgress: (event: LiveProgressEvent) => {
             // Update in-memory snapshot so ContextAssembler can read it.

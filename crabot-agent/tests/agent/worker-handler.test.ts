@@ -844,4 +844,73 @@ describe('WorkerHandler bg-entities admin RPC', () => {
     expect(result.new_offset).toBe(0)
     expect(result.type).toBe('shell')
   })
+
+  describe('todo tool integration', () => {
+    it('registers todo tool in worker tool list', async () => {
+      const handler = makeHandler()
+      let capturedTools: ReadonlyArray<{ name: string }> = []
+      mockRunEngine.mockImplementation(async (params) => {
+        const toolsFn = params.options.tools as () => ReadonlyArray<{ name: string }>
+        capturedTools = toolsFn()
+        return makeEngineResult()
+      })
+      await handler.executeTask({ task: makeTask(), context: makeContext() })
+      expect(capturedTools.some(t => t.name === 'todo')).toBe(true)
+    })
+
+    it('creates fresh TodoStore per task', async () => {
+      const handler = makeHandler()
+      const todoTools: unknown[] = []
+      mockRunEngine.mockImplementation(async (params) => {
+        const toolsFn = params.options.tools as () => ReadonlyArray<{ name: string }>
+        const todoTool = toolsFn().find(t => t.name === 'todo')!
+        todoTools.push(todoTool)
+        return makeEngineResult()
+      })
+      await handler.executeTask({ task: makeTask({ task_id: 'task_a' }), context: makeContext() })
+      await handler.executeTask({ task: makeTask({ task_id: 'task_b' }), context: makeContext() })
+      expect(todoTools[0]).not.toBe(todoTools[1])
+    })
+
+    it('passes onAfterCompaction that prepends todo active list to messages', async () => {
+      const handler = makeHandler()
+      let capturedHook: ((msgs: ReadonlyArray<unknown>) => ReadonlyArray<unknown>) | undefined
+      mockRunEngine.mockImplementation(async (params) => {
+        capturedHook = params.options.onAfterCompaction as typeof capturedHook
+        // 模拟 worker 已经写了一个 in_progress item
+        const toolsFn = params.options.tools as () => ReadonlyArray<{ name: string; call: Function }>
+        const todoTool = toolsFn().find(t => t.name === 'todo')!
+        await todoTool.call({
+          todos: [{ id: 'work', content: '研究 X', status: 'in_progress' }],
+        }, {} as never)
+        return makeEngineResult()
+      })
+      await handler.executeTask({ task: makeTask(), context: makeContext() })
+
+      expect(capturedHook).toBeDefined()
+      // 模拟 compaction 后传入若干 messages，验证 hook 把 todo 注入到头部
+      const compactedMsgs = [
+        { role: 'user', content: '...summary...' },
+        { role: 'assistant', content: '...' },
+      ]
+      const result = capturedHook!(compactedMsgs as never)
+      expect(result.length).toBe(3)
+      expect(JSON.stringify(result[0])).toContain('Your active task list was preserved')
+      expect(JSON.stringify(result[0])).toContain('研究 X')
+    })
+
+    it('onAfterCompaction is no-op when todo store is empty', async () => {
+      const handler = makeHandler()
+      let capturedHook: ((msgs: ReadonlyArray<unknown>) => ReadonlyArray<unknown>) | undefined
+      mockRunEngine.mockImplementation(async (params) => {
+        capturedHook = params.options.onAfterCompaction as typeof capturedHook
+        return makeEngineResult()
+      })
+      await handler.executeTask({ task: makeTask(), context: makeContext() })
+
+      const compactedMsgs = [{ role: 'user', content: 'x' }]
+      const result = capturedHook!(compactedMsgs as never)
+      expect(result).toEqual(compactedMsgs)
+    })
+  })
 })
