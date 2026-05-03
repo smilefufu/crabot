@@ -844,4 +844,32 @@ describe('WorkerHandler bg-entities admin RPC', () => {
     expect(result.new_offset).toBe(0)
     expect(result.type).toBe('shell')
   })
+
+  describe('todo tool integration', () => {
+    it('registers todo tool in worker tool list', async () => {
+      const handler = makeHandler()
+      let capturedTools: ReadonlyArray<{ name: string }> = []
+      mockRunEngine.mockImplementation(async (params) => {
+        const toolsFn = params.options.tools as () => ReadonlyArray<{ name: string }>
+        capturedTools = toolsFn()
+        return makeEngineResult()
+      })
+      await handler.executeTask({ task: makeTask(), context: makeContext() })
+      expect(capturedTools.some(t => t.name === 'todo')).toBe(true)
+    })
+
+    it('creates fresh TodoStore per task', async () => {
+      const handler = makeHandler()
+      const todoTools: unknown[] = []
+      mockRunEngine.mockImplementation(async (params) => {
+        const toolsFn = params.options.tools as () => ReadonlyArray<{ name: string }>
+        const todoTool = toolsFn().find(t => t.name === 'todo')!
+        todoTools.push(todoTool)
+        return makeEngineResult()
+      })
+      await handler.executeTask({ task: makeTask({ task_id: 'task_a' }), context: makeContext() })
+      await handler.executeTask({ task: makeTask({ task_id: 'task_b' }), context: makeContext() })
+      expect(todoTools[0]).not.toBe(todoTools[1])
+    })
+  })
 })
