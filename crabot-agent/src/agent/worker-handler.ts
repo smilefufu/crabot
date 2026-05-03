@@ -928,6 +928,7 @@ export class WorkerHandler {
                   stopReason: event.stopReason ?? undefined,
                   outputSummary: event.assistantText.slice(0, 200) || undefined,
                   toolCallsCount: event.toolCalls.length > 0 ? event.toolCalls.length : undefined,
+                  ...(event.forcedSummaryAttempt !== undefined ? { forcedSummaryAttempt: event.forcedSummaryAttempt } : {}),
                 },
                 llmEndedAtMs,
               )
@@ -960,19 +961,10 @@ export class WorkerHandler {
         log(`Engine error (outcome=${engineResult.outcome}, turns=${engineResult.totalTurns}): ${engineResult.error}`)
       }
 
-      // 8. Summarize if finalText is empty or the default placeholder
-      // For failed outcomes, use the engine error as the summary instead of generating an optimistic one
+      // 8. Failed outcomes: surface the engine error as the summary.
       let finalEngineResult = engineResult
       if (isError && engineResult.error) {
         finalEngineResult = { ...engineResult, finalText: `执行失败 (${engineResult.totalTurns}轮后): ${engineResult.error}` }
-      } else if (!engineResult.finalText || engineResult.finalText === '任务已完成，但模型未生成输出') {
-        const summary = await this.summarizeTaskOutcome(
-          task.task_title,
-          engineResult.totalTurns,
-          engineResult.outcome,
-          engineResult.finalText,
-        )
-        finalEngineResult = { ...engineResult, finalText: summary }
       }
 
       // 9. Map EngineResult → ExecuteTaskResult
@@ -1007,59 +999,30 @@ export class WorkerHandler {
     }
   }
 
-  /**
-   * Call LLM to generate a human-readable summary when the engine finishes
-   * without producing a clear final text.
-   */
-  private async summarizeTaskOutcome(
-    taskTitle: string,
-    turnCount: number,
-    outcome: string,
-    lastText: string,
-  ): Promise<string> {
-    try {
-      const adapter = adapterFromSdkEnv(this.sdkEnv)
-      const { callNonStreaming } = await import('../engine/llm-adapter.js')
-      const { createUserMessage } = await import('../engine/types.js')
-      const response = await callNonStreaming(adapter, {
-        messages: [createUserMessage(
-          `任务"${taskTitle}"已${outcome === 'completed' ? '完成' : '结束'}，共执行了${turnCount}轮操作。` +
-          (lastText ? `\n最后的输出是：${lastText.slice(0, 500)}` : '') +
-          `\n请用1-2句话向用户简要报告任务执行情况和结果。不要提及内部实现细节。`
-        )],
-        systemPrompt: '你是一个任务执行助手，需要向用户简要报告任务结果。语言简洁自然。',
-        tools: [],
-        model: this.sdkEnv.modelId,
-      })
-      const text = response.content
-        .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
-        .map(b => b.text)
-        .join('')
-      return text || lastText || '任务已完成'
-    } catch {
-      return lastText || '任务已完成'
-    }
-  }
 
   /**
-   * Map EngineResult to ExecuteTaskResult
+   * Map EngineResult to ExecuteTaskResult.
+   *
+   * 当 finalText 为空（模型坚持沉默 end_turn）：summary 用诚实占位、final_reply
+   * 留空让 channel 不发假托汇报。用户追问时由 Front 走 create_task 让 worker
+   * 用 get_task_details 拉 trace 自己再汇报。
    */
   private mapEngineResult(
     taskId: TaskId,
     result: EngineResult,
   ): ExecuteTaskResult {
-    const isError = result.outcome === 'failed' || result.outcome === 'aborted'
-    const finalText = result.finalText || '任务已完成，但模型未生成输出'
-
     if (result.outcome === 'aborted') {
       return { task_id: taskId, outcome: 'failed', summary: '任务被取消' }
     }
 
+    const isError = result.outcome === 'failed'
+    const hasFinalText = !!result.finalText
+
     return {
       task_id: taskId,
       outcome: isError ? 'failed' : 'completed',
-      summary: finalText,
-      final_reply: { type: 'text', text: finalText },
+      summary: hasFinalText ? result.finalText : '任务已结束，模型未生成最终汇报',
+      ...(hasFinalText ? { final_reply: { type: 'text', text: result.finalText } } : {}),
     }
   }
 

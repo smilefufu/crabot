@@ -302,6 +302,114 @@ describe('runEngine', () => {
   })
 })
 
+describe('runEngine silent end_turn retry', () => {
+  // 推理模型（如 OpenAI Responses gpt-5.5）有概率在 end_turn 时只发 reasoning
+  // 不发 text。query-loop 的"沉默 end_turn 追问"机制应介入：注入强制汇报 user
+  // msg、最多重试 3 次、超过仍空才老实返回 finalText=''。
+
+  it('retries on silent end_turn and accepts subsequent text', async () => {
+    const capturedMessages: unknown[][] = []
+    let callIndex = 0
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        capturedMessages.push([...params.messages])
+        const chunks = callIndex === 0 ? textResponse('') : textResponse('真实汇报：跑通了 X')
+        callIndex++
+        for (const chunk of chunks) yield chunk
+      },
+      updateConfig() {},
+    }
+
+    const result = await runEngine({
+      prompt: 'do work',
+      adapter,
+      options: baseOptions(),
+    })
+
+    expect(result.outcome).toBe('completed')
+    expect(result.finalText).toBe('真实汇报：跑通了 X')
+    expect(result.totalTurns).toBe(2)
+    // 第二轮的 messages 应包含追问 user msg
+    const secondCall = capturedMessages[1] as Array<{ role: string; content: unknown }>
+    const lastUserMsg = [...secondCall].reverse().find(m => m.role === 'user')
+    expect(JSON.stringify(lastUserMsg)).toContain('end_turn 结束但没有输出任何文字')
+  })
+
+  it('gives up after 3 retries and returns empty finalText', async () => {
+    let callIndex = 0
+    const adapter: LLMAdapter = {
+      async *stream() {
+        callIndex++
+        for (const chunk of textResponse('')) yield chunk
+      },
+      updateConfig() {},
+    }
+
+    const result = await runEngine({
+      prompt: 'do work',
+      adapter,
+      options: baseOptions(),
+    })
+
+    expect(result.outcome).toBe('completed')
+    expect(result.finalText).toBe('')
+    // 1 轮原始 + 3 轮追问 = 4 轮（不再追问第 4 次）
+    expect(result.totalTurns).toBe(4)
+    expect(callIndex).toBe(4)
+  })
+
+  it('forwards forcedSummaryAttempt on the post-retry turn via onTurn', async () => {
+    // 用 tool_use → end_turn 序列覆盖"模型被追问后先用工具查资料、再汇报"的场景。
+    // tool_use 轮一定 fire onTurn（不像 end_turn 早 return 路径），便于断言透传。
+    const dummyTool = defineTool({
+      name: 'dummy',
+      description: 'dummy',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      call: async () => ({ output: 'ok', isError: false }),
+    })
+
+    let callIndex = 0
+    const adapter: LLMAdapter = {
+      async *stream() {
+        let chunks: ReadonlyArray<StreamChunk>
+        if (callIndex === 0) chunks = textResponse('')
+        else if (callIndex === 1) chunks = toolUseResponse('tu-1', 'dummy', {})
+        else chunks = textResponse('done after lookup')
+        callIndex++
+        for (const chunk of chunks) yield chunk
+      },
+      updateConfig() {},
+    }
+
+    const turns: Array<{ turnNumber: number; forcedSummaryAttempt?: number; assistantText: string; toolCount: number }> = []
+    await runEngine({
+      prompt: 'do work',
+      adapter,
+      options: baseOptions({
+        tools: [dummyTool],
+        onTurn: (e) => {
+          turns.push({
+            turnNumber: e.turnNumber,
+            forcedSummaryAttempt: e.forcedSummaryAttempt,
+            assistantText: e.assistantText,
+            toolCount: e.toolCalls.length,
+          })
+        },
+      }),
+    })
+
+    // 第 1 轮（silent end_turn 触发追问）：fire onTurn 但不带标记
+    // 第 2 轮（追问后立即调工具）：fire onTurn 带 forcedSummaryAttempt=1
+    // 第 3 轮（end_turn 有 text）：早 return 路径不 fire onTurn — 已知留待后续
+    expect(turns).toHaveLength(2)
+    expect(turns[0].forcedSummaryAttempt).toBeUndefined()
+    expect(turns[0].assistantText).toBe('')
+    expect(turns[0].toolCount).toBe(0)
+    expect(turns[1].forcedSummaryAttempt).toBe(1)
+    expect(turns[1].toolCount).toBe(1)
+  })
+})
+
 describe('runEngine humanMessageQueue integration', () => {
   it('injects supplement messages between turns', async () => {
     const capturedMessages: unknown[][] = []

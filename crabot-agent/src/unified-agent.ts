@@ -2246,7 +2246,7 @@ export class UnifiedAgent extends ModuleBase {
         return span.span_id
       },
 
-      onLlmCallEnd(spanId: string, result: { stopReason?: string; outputSummary?: string; toolCallsCount?: number; fullInput?: string; fullOutput?: string; error?: string }, endedAtMs?: number): void {
+      onLlmCallEnd(spanId: string, result: { stopReason?: string; outputSummary?: string; toolCallsCount?: number; fullInput?: string; fullOutput?: string; error?: string; forcedSummaryAttempt?: number }, endedAtMs?: number): void {
         store.endSpan(
           traceId,
           spanId,
@@ -2257,6 +2257,7 @@ export class UnifiedAgent extends ModuleBase {
             tool_calls_count: result.toolCallsCount,
             full_input: result.fullInput,
             full_output: result.fullOutput,
+            forced_summary_attempt: result.forcedSummaryAttempt,
           } as Partial<import('./types.js').LlmCallDetails>,
           endedAtMs,
         )

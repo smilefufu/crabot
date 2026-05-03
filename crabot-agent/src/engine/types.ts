@@ -164,6 +164,12 @@ export interface EngineTurnEvent {
   readonly llmCallMs?: number
   /** LLM API call start (ms epoch) */
   readonly llmStartedAtMs?: number
+  /**
+   * 当前轮是否由"沉默 end_turn 追问"机制触发（1-indexed）。
+   * 未触发时 undefined。turnNumber 仍按全局 LLM 调用次数递增；该字段
+   * 单独标识"这一轮 user msg 是 engine 注入的强制汇报追问"。
+   */
+  readonly forcedSummaryAttempt?: number
 }
 
 /** 既可传静态值也可传 callback（每轮 resolve） */

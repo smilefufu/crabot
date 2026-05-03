@@ -785,6 +785,8 @@ export interface LlmCallDetails {
   tool_calls_count?: number
   full_input?: string
   full_output?: string
+  /** 1-indexed；存在表示本轮由"沉默 end_turn 追问"机制触发 */
+  forced_summary_attempt?: number
 }
 
 export interface ToolCallDetails {
@@ -893,7 +895,7 @@ export interface TraceCallback {
   /** `startedAtMs`/`endedAtMs` back-date spans for post-hoc callers (e.g.
    * worker-handler's onTurn fires after the LLM call already completed). */
   onLlmCallStart(iteration: number, inputSummary: string, attempt?: number, startedAtMs?: number): string
-  onLlmCallEnd(spanId: string, result: { stopReason?: string; outputSummary?: string; toolCallsCount?: number; fullInput?: string; fullOutput?: string; error?: string }, endedAtMs?: number): void
+  onLlmCallEnd(spanId: string, result: { stopReason?: string; outputSummary?: string; toolCallsCount?: number; fullInput?: string; fullOutput?: string; error?: string; forcedSummaryAttempt?: number }, endedAtMs?: number): void
   onToolCallStart(toolName: string, inputSummary: string, startedAtMs?: number): string
   onToolCallEnd(spanId: string, outputSummary: string, error?: string, endedAtMs?: number): void
 }

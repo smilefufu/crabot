@@ -34,6 +34,19 @@ export interface RunEngineParams {
 const DEFAULT_MAX_TURNS = 200
 const DEFAULT_MAX_CONTEXT_TOKENS = 200_000
 
+// 推理类模型有概率在 end_turn 时只发 reasoning 不发 text，导致汇报丢失。
+// 注入追问 user msg 让模型重说一次；超过上限仍空就让 finalText 空诚实上抛——
+// 绝不让另一个 LLM 替它编。
+const MAX_SILENT_END_TURN_RETRIES = 3
+
+// 规则细节由 worker 自己的 system prompt（WORKER_RULES「三、收尾」段）维护，
+// 这里只做 engine 层的机制兜底钩子——告诉模型违反了哪条规则、要求重新汇报。
+// 把规则写两份会产生维护漂移。
+const FORCED_SUMMARY_PROMPT =
+  '你刚才以 end_turn 结束但没有输出任何文字。本次任务由用户派发并在等待结果，必须给出最终汇报。\n\n' +
+  '请按你 system prompt 中 WORKER_RULES「三、收尾」段的规则给出完整汇报（"可验证的产出" 或 "Named blocker" 二选一）。\n' +
+  '如需回看任务历史、重读文档或工具输出再汇报，可继续用工具。'
+
 // --- Core Loop ---
 
 export async function runEngine(params: RunEngineParams): Promise<EngineResult> {
@@ -48,6 +61,9 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
 
   let totalTurns = 0
   let finalText = ''
+  let silentEndTurnCount = 0
+  // 由上一轮追问设置、下一轮 onTurn 消费一次后清零。
+  let pendingForcedSummaryAttempt: number | undefined = undefined
 
   const workingDirectory = process.cwd()
   const hooks: HookConfig | undefined = options.hookRegistry ? {
@@ -136,9 +152,11 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     const assistantMessage = createAssistantMessage(contentBlocks, stopReason, response.usage)
     messages.push(assistantMessage)
 
+    const forcedSummaryAttempt = pendingForcedSummaryAttempt
+    pendingForcedSummaryAttempt = undefined
+
     finalText = processed.text
 
-    // If no tool use, we're done
     if (stopReason !== 'tool_use') {
       // --- Stop hook ---
       if (hooks) {
@@ -152,6 +170,28 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
           }
         }
       }
+
+      // 推理类模型在 end_turn 时偶尔只发 reasoning 不发 text。早 return 路径
+      // 也不 fire onTurn，所以这里先补 fire 让 trace 看到这一轮，再注入追问。
+      if (processed.text.trim().length === 0 && silentEndTurnCount < MAX_SILENT_END_TURN_RETRIES) {
+        silentEndTurnCount++
+        if (options.onTurn) {
+          const turnEvent: EngineTurnEvent = {
+            turnNumber: totalTurns,
+            assistantText: processed.text,
+            toolCalls: [],
+            stopReason,
+            llmCallMs,
+            llmStartedAtMs,
+            ...(forcedSummaryAttempt !== undefined ? { forcedSummaryAttempt } : {}),
+          }
+          options.onTurn(turnEvent)
+        }
+        messages.push(createUserMessage(FORCED_SUMMARY_PROMPT))
+        pendingForcedSummaryAttempt = silentEndTurnCount
+        continue
+      }
+
       return buildResult('completed', finalText, totalTurns, contextManager)
     }
 
@@ -194,6 +234,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
             stopReason,
             llmCallMs,
             llmStartedAtMs,
+            ...(forcedSummaryAttempt !== undefined ? { forcedSummaryAttempt } : {}),
           }
           options.onTurn(turnEvent)
         }
@@ -252,6 +293,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         stopReason,
         llmCallMs,
         llmStartedAtMs,
+        ...(forcedSummaryAttempt !== undefined ? { forcedSummaryAttempt } : {}),
       }
       options.onTurn(turnEvent)
     }
