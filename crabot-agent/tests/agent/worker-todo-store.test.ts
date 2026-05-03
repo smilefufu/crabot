@@ -59,6 +59,13 @@ describe('TodoStore', () => {
     ])).toThrow(/id must be non-empty/)
   })
 
+  it('rejects invalid status enum value', () => {
+    const store = new TodoStore()
+    expect(() => store.replace([
+      { id: 'a', content: 'A', status: 'bogus' as never },
+    ])).toThrow(/invalid status/)
+  })
+
   it('formatForInjection returns null when list empty', () => {
     expect(new TodoStore().formatForInjection()).toBeNull()
   })
