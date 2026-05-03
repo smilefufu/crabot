@@ -678,6 +678,8 @@ export interface WorkerTaskState {
   }
   pendingHumanMessages: ChannelMessage[]
   taskOrigin?: TaskOrigin
+  /** Per-task mutable todo plan store; created on task start, dropped on cleanup. */
+  todoStore: import('./agent/worker-todo-store.js').TodoStore
 }
 
 export interface SilentDecision {
