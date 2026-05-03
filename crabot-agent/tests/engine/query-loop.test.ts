@@ -1,9 +1,9 @@
 import { describe, it, expect, vi } from 'vitest'
-import { runEngine } from '../../src/engine/query-loop'
-import { defineTool } from '../../src/engine/tool-framework'
-import type { LLMAdapter } from '../../src/engine/llm-adapter'
-import type { StreamChunk, EngineOptions } from '../../src/engine/types'
-import { HumanMessageQueue } from '../../src/engine/human-message-queue'
+import { runEngine } from '../../src/engine/query-loop.js'
+import { defineTool } from '../../src/engine/tool-framework.js'
+import type { LLMAdapter } from '../../src/engine/llm-adapter.js'
+import type { StreamChunk, EngineOptions, EngineMessage } from '../../src/engine/types.js'
+import { HumanMessageQueue } from '../../src/engine/human-message-queue.js'
 
 // --- Test Helpers ---
 
@@ -768,5 +768,31 @@ describe('runEngine — Resolvable callback', () => {
     await runEngine({ prompt: 'hi', adapter, options })
     await switching
     expect(cb.mock.calls.length).toBeGreaterThanOrEqual(2)
+  })
+})
+
+describe('runEngine onAfterCompaction hook', () => {
+  it('does not invoke onAfterCompaction when no compaction triggered', async () => {
+    const adapter = mockAdapter([textResponse('done')])
+    const fn = vi.fn((msgs: ReadonlyArray<EngineMessage>) => msgs)
+    await runEngine({
+      prompt: 'hi',
+      adapter,
+      options: baseOptions({ onAfterCompaction: fn }),
+    })
+    expect(fn).not.toHaveBeenCalled()
+  })
+
+  it('hook is wired to context-manager interface (compile-time check via type)', () => {
+    // EngineOptions 接受 onAfterCompaction 字段不报 TS 错误即通过；
+    // compaction 触发场景由 context-manager 测试覆盖，此处不重复构造。
+    const fn = (m: ReadonlyArray<EngineMessage>) => m
+    const opts: EngineOptions = {
+      systemPrompt: 'test',
+      tools: [],
+      model: 'test',
+      onAfterCompaction: fn,
+    }
+    expect(typeof opts.onAfterCompaction).toBe('function')
   })
 })

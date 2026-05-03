@@ -80,8 +80,11 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     // Check if context compaction is needed
     if (contextManager.shouldCompact(messages)) {
       const compacted = await contextManager.compactWithLLM(messages, adapter, options.model)
+      const final = options.onAfterCompaction
+        ? options.onAfterCompaction(compacted)
+        : compacted
       messages.length = 0
-      for (const msg of compacted) {
+      for (const msg of final) {
         messages.push(msg)
       }
     }

@@ -227,6 +227,13 @@ export interface EngineOptions {
   readonly lspManager?: import('../hooks/types').LspManagerLike
   /** IANA 时区名（如 "Asia/Shanghai"），用于 tool_result 时间戳渲染 */
   readonly timezone?: string
+  /**
+   * 在 context-manager compaction 完成后回调，返回最终注入到 messages 的数组。
+   * 用于在 compaction 边界注入 per-task 状态（如 worker 的 todo active list），
+   * 注入到 user msg 而非 system prompt 以保护 prompt cache。
+   * 不传时不做任何处理。
+   */
+  readonly onAfterCompaction?: (messages: ReadonlyArray<EngineMessage>) => ReadonlyArray<EngineMessage>
 }
 
 export interface HumanMessageQueueLike {
