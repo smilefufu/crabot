@@ -419,7 +419,7 @@ export class WechatChannel extends ModuleBase {
     if ((params.content.type === 'image' || params.content.type === 'file') && params.content.file_path) {
       // 本地文件：通过 connector 的 send-file 接口上传并发送
       const fileType = params.content.type === 'image' ? 'image' as const : 'file' as const
-      await this.client.sendLocalFile(wxid, params.content.file_path, fileType)
+      await this.client.sendLocalFile(wxid, params.content.file_path, fileType, params.content.filename)
     } else if (params.content.type === 'image' && params.content.media_url) {
       await this.client.sendImage(wxid, params.content.media_url)
     } else if (params.content.type === 'file' && params.content.media_url) {

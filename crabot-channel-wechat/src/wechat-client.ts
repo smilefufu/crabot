@@ -69,11 +69,21 @@ export class WechatClient {
 
   /**
    * 发送本地文件（通过 /api/v1/bot/send-file multipart 上传并发送）
+   *
+   * displayFilename 用于覆盖微信端展示的文件名。connector 端取 multipart 的
+   * `filename="..."`（即 multer 的 `req.file.originalname`）作为展示名。
+   * 当 filePath 是临时落盘路径（uuid / tmp 名）时必须显式传 displayFilename，
+   * 否则用户在微信里看到的是临时名而不是真实文件名。
    */
-  async sendLocalFile(wxid: string, filePath: string, type: 'image' | 'file' = 'image'): Promise<{ taskId: string; url: string }> {
+  async sendLocalFile(
+    wxid: string,
+    filePath: string,
+    type: 'image' | 'file' = 'image',
+    displayFilename?: string
+  ): Promise<{ taskId: string; url: string }> {
     const fileBuffer = fs.readFileSync(filePath)
-    const filename = path.basename(filePath)
-    const mimeType = inferMimeType(filename)
+    const filename = sanitizeMultipartFilename(displayFilename ?? path.basename(filePath))
+    const mimeType = inferMimeType(path.basename(filePath))
     const boundary = `----CrabotBoundary${Date.now()}`
 
     const parts: Buffer[] = []
@@ -393,4 +403,9 @@ const MIME_MAP: Record<string, string> = {
 function inferMimeType(filename: string): string {
   const ext = path.extname(filename).toLowerCase()
   return MIME_MAP[ext] ?? 'application/octet-stream'
+}
+
+/** 防止 multipart Content-Disposition filename 头里的字符注入。 */
+function sanitizeMultipartFilename(name: string): string {
+  return name.replace(/[\r\n]/g, '').replace(/["\\]/g, '_')
 }
