@@ -12,6 +12,7 @@
 import {
   runEngine,
   createAdapter,
+  createUserMessage,
   defineTool,
   getConfiguredBuiltinTools,
   ProgressDigest,
@@ -834,6 +835,11 @@ export class WorkerHandler {
           timezone: this.getTimezone(),
           abortSignal: taskState.abortController.signal as AbortSignal,
           humanMessageQueue: humanQueue,
+          onAfterCompaction: (messages) => {
+            const injection = taskState.todoStore.formatForInjection()
+            if (!injection) return messages
+            return [createUserMessage(injection), ...messages]
+          },
           hookRegistry: workerHookRegistry,
           onLiveProgress: (event: LiveProgressEvent) => {
             // Update in-memory snapshot so ContextAssembler can read it.
