@@ -184,3 +184,149 @@ describe('DecisionDispatcher.handleSupplementTask resilience', () => {
     expect(deliverSpy).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('DecisionDispatcher.handleSupplementTask scheduled-task fallback', () => {
+  it('downgrades supplement to create_task when target is scheduled (admin chat / group route)', async () => {
+    // 历史 bug：Front 误把用户新需求 supplement 到正在跑的定时巡检任务上，
+    // 巡检 worker 被纠偏后偏离本职，新需求也没有独立 task。
+    // 兜底：dispatcher 看到目标 task trigger_type='scheduled' → 转 create_task。
+    const memoryWriter = {
+      reportTaskFeedback: vi.fn(async () => undefined),
+      listRecentLessons: vi.fn(async () => []),
+      markValidationOutcome: vi.fn(async () => undefined),
+      writeTaskCreated: vi.fn(async () => undefined),
+      writeTaskFinished: vi.fn(async () => undefined),
+      writeTriageDecision: vi.fn(async () => undefined),
+      quickCapture: vi.fn(async () => undefined),
+    } as any
+
+    const rpcCalls: Array<{ port: number; method: string; params: any }> = []
+    const rpcClient = {
+      call: vi.fn(async (port: number, method: string, params: any) => {
+        rpcCalls.push({ port, method, params })
+        if (method === 'get_task') {
+          return { task: { id: params.task_id, source: { trigger_type: 'scheduled' } } }
+        }
+        if (method === 'create_task') {
+          return { task: { id: 't_new_via_fallback', title: params.title, description: params.description, priority: 'medium' } }
+        }
+        return {}
+      }),
+    } as any
+
+    const contextAssembler = { assembleWorkerContext: vi.fn(async () => ({})) } as any
+    const executeTaskFn = vi.fn(async (params: any) => ({
+      task_id: params?.task?.task_id ?? 't_new_via_fallback',
+      outcome: 'completed' as const,
+      summary: 'done',
+      final_reply: { type: 'text' as const, text: '' },
+    }))
+
+    const dispatcher = new DecisionDispatcher(
+      rpcClient, 'agent-test', contextAssembler, memoryWriter,
+      async () => ADMIN_PORT,
+      async () => CHANNEL_PORT,
+      executeTaskFn,
+    )
+
+    const deliverSpy = vi.fn()
+    dispatcher.setWorkerHandler({
+      executeTask: vi.fn(),
+      hasActiveTask: vi.fn(() => true),
+      deliverHumanResponse: deliverSpy,
+    } as any)
+
+    const result = await dispatcher.dispatch(
+      {
+        type: 'supplement_task',
+        task_id: 't_scheduled',
+        supplement_content: '研究一下 UTC 0 点信号差异',
+        immediate_reply: { type: 'text', text: '好的，调整一下方向' },
+      },
+      {
+        channel_id: 'telegram-001',
+        session_id: 'sess-x',
+        messages: [{
+          platform_message_id: 'm1',
+          session: { channel_id: 'telegram-001', session_id: 'sess-x', type: 'private' as const },
+          sender: { friend_id: 'f_wu', platform_user_id: 'u1', platform_display_name: 'Mr.Wu' },
+          content: { type: 'text' as const, text: '研究一下' },
+          features: { is_mention_crab: false },
+          platform_timestamp: new Date().toISOString(),
+        }],
+        senderFriend: { id: 'f_wu', display_name: 'Mr.Wu' } as any,
+        memoryPermissions: { write_visibility: 'internal', write_scopes: [] } as any,
+      },
+    )
+
+    // 走 create_task 路径，返回新创建的 task_id
+    expect(result).toEqual({ task_id: 't_new_via_fallback' })
+
+    const methods = rpcCalls.map(c => c.method)
+    expect(methods).toContain('get_task')      // 兜底前先查类型
+    expect(methods).toContain('create_task')   // 触发 create_task fallback
+
+    // supplement 不应投递到 worker（巡检本职被保护）
+    expect(deliverSpy).not.toHaveBeenCalled()
+
+    // worker 仍被调度去做用户的新需求（fire-and-forget）
+    await new Promise(r => setTimeout(r, 30))
+    expect(executeTaskFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('proceeds with normal supplement when target is manual (regression: happy path unchanged)', async () => {
+    const memoryWriter = {
+      reportTaskFeedback: vi.fn(async () => undefined),
+      listRecentLessons: vi.fn(async () => []),
+      markValidationOutcome: vi.fn(async () => undefined),
+      writeTaskCreated: vi.fn(async () => undefined),
+      writeTaskFinished: vi.fn(async () => undefined),
+      writeTriageDecision: vi.fn(async () => undefined),
+      quickCapture: vi.fn(async () => undefined),
+    } as any
+
+    const rpcClient = {
+      call: vi.fn(async (_port: number, method: string, params: any) => {
+        if (method === 'get_task') {
+          return { task: { id: params.task_id, source: { trigger_type: 'manual' } } }
+        }
+        return {}
+      }),
+    } as any
+
+    const dispatcher = new DecisionDispatcher(
+      rpcClient, 'agent-test',
+      { assembleWorkerContext: vi.fn(async () => ({})) } as any,
+      memoryWriter,
+      async () => ADMIN_PORT,
+      async () => CHANNEL_PORT,
+      vi.fn(),
+    )
+
+    const deliverSpy = vi.fn()
+    dispatcher.setWorkerHandler({
+      executeTask: vi.fn(),
+      hasActiveTask: vi.fn(() => true),
+      deliverHumanResponse: deliverSpy,
+    } as any)
+
+    await dispatcher.dispatch(
+      {
+        type: 'supplement_task',
+        task_id: 't_manual',
+        supplement_content: '调整方向',
+        immediate_reply: { type: 'text', text: '好的' },
+      },
+      {
+        channel_id: 'telegram-001',
+        session_id: 'sess-x',
+        messages: [],
+        senderFriend: { id: 'f_wu', display_name: 'Mr.Wu' } as any,
+        memoryPermissions: {} as any,
+      },
+    )
+
+    // manual task 走 supplement 投递
+    expect(deliverSpy).toHaveBeenCalledTimes(1)
+  })
+})

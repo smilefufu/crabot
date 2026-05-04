@@ -723,12 +723,21 @@ export class DecisionDispatcher {
 
   /**
    * 处理补充/纠偏任务：直接调用本地 Worker 投递
+   *
+   * 兜底规则：目标 task 是定时/巡检（trigger_type='scheduled'）时，
+   * 改走 create_task 流程——避免 LLM 误判把用户新需求覆盖到巡检本职上。
+   * 此兜底覆盖 admin chat / 群聊批量等所有走 dispatcher 的路径；
+   * processDirectMessage 路径在 unified-agent.handleLocalSupplement 也有同样判断。
    */
   private async handleSupplementTask(
     decision: SupplementTaskDecision,
     params: {
       channel_id: ModuleId
       session_id: string
+      messages: ChannelMessage[]
+      senderFriend?: Friend
+      memoryPermissions: MemoryPermissions
+      resolvedPerms?: ResolvedPermissions | null
       admin_chat_callback?: { source_module_id: string; request_id: string }
     },
     traceCtx?: RpcTraceContext,
@@ -745,6 +754,19 @@ export class DecisionDispatcher {
 
     // Step 1: 验证任务存在（本地 O(1) 查询）
     const taskExists = this.workerHandler.hasActiveTask(decision.task_id)
+
+    // Step 1.5: 拉目标 task 元信息检查 trigger_type；scheduled 则在 ack 之前转 create_task
+    if (taskExists) {
+      const triggerType = await this.fetchTaskTriggerType(decision.task_id)
+      if (triggerType === 'scheduled') {
+        return this.handleCreateTask({
+          type: 'create_task',
+          task_title: decision.supplement_content.slice(0, 60) || '用户追加请求',
+          task_description: decision.supplement_content,
+          immediate_reply: decision.immediate_reply ?? { type: 'text', text: '' },
+        }, params, traceCtx)
+      }
+    }
 
     // Step 2: 发送即时回复（ack 失败不阻塞 supplement 投递，理由同 handleCreateTask）
     if (decision.immediate_reply?.text) {
@@ -877,6 +899,28 @@ export class DecisionDispatcher {
       .sort((a, b) => Date.parse(b.finished_at!) - Date.parse(a.finished_at!))
 
     return candidates[0]?.id
+  }
+
+  /**
+   * 拉取目标 task 的 trigger_type（用于 supplement scheduled 兜底判断）。
+   * RPC 失败时返回 undefined，让 supplement 走默认路径——失败不应阻塞用户请求。
+   */
+  private async fetchTaskTriggerType(taskId: string): Promise<string | undefined> {
+    try {
+      const adminPort = await this.getAdminPort()
+      const result = await this.rpcClient.call<
+        { task_id: string },
+        { task: { source?: { trigger_type?: string } } }
+      >(
+        adminPort,
+        'get_task',
+        { task_id: taskId },
+        this.moduleId,
+      )
+      return result.task?.source?.trigger_type
+    } catch {
+      return undefined
+    }
   }
 
   /**

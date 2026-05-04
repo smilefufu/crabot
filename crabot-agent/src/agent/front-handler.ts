@@ -188,7 +188,9 @@ export function buildUserMessage(
     parts.push('\n## 活跃任务列表')
     for (const task of context.active_tasks) {
       const sessionInfo = task.source_session_id ? `, 来源session: ${task.source_session_id}` : ''
-      parts.push(`- [${task.task_id}] "${task.title}" (status: ${task.status}${sessionInfo})`)
+      // 定时/巡检任务用显式标签让 LLM 一眼分辨，禁止对其 supplement
+      const kindTag = task.trigger_type === 'scheduled' ? ' [定时/巡检任务，禁止 supplement]' : ''
+      parts.push(`- [${task.task_id}] "${task.title}" (status: ${task.status}${sessionInfo})${kindTag}`)
       if (task.latest_progress) {
         parts.push(`  最近进度（事后摘要）: ${task.latest_progress}`)
       }
@@ -225,6 +227,7 @@ export function buildUserMessage(
     parts.push('\n当用户询问任务进度时，请根据上述任务列表（特别是"正在跑工具"和"上轮模型说"）具体说明当前在做什么，不要笼统说"还在执行"。')
     parts.push('当用户消息可能是对某个任务的纠偏/补充时，使用 supplement_task 决策。')
     parts.push('纠偏判断优先匹配来源 session 与当前 session 相同的任务。')
+    parts.push('**带 [定时/巡检任务，禁止 supplement] 标签的任务一律不可作为 supplement 目标**：用户的新需求即使主题相关，也必须 create_task，不要 supplement 到定时任务上覆盖它本职。')
   }
 
   // ── 最近结束的任务（用于"继续之前那个 ..."类提问的指代解析）──

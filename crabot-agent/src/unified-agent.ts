@@ -697,7 +697,7 @@ export class UnifiedAgent extends ModuleBase {
         })
 
         if (decision.type === 'supplement_task' && this.workerHandler) {
-          const delivered = await this.handleLocalSupplement(decision, session, trace.trace_id, decisionSpan.span_id)
+          const delivered = await this.handleLocalSupplement(decision, session, trace.trace_id, decisionSpan.span_id, context.active_tasks)
           if (!delivered) {
             // 目标任务不存在 → 改写为 create_task，确保用户请求被真正执行
             await this.decisionDispatcher.dispatch(
@@ -1160,13 +1160,14 @@ export class UnifiedAgent extends ModuleBase {
 
   /**
    * 本地投递纠偏消息给 Worker。
-   * 返回 true 表示成功投递，false 表示任务不存在（调用方应回退为 create_task）。
+   * 返回 true 表示成功投递，false 表示任务不存在或为定时/巡检任务（调用方应回退为 create_task）。
    */
   private async handleLocalSupplement(
     decision: import('./types.js').SupplementTaskDecision,
     session: { channel_id: string; session_id: string },
     traceId: string,
     parentSpanId: string,
+    activeTasks: ReadonlyArray<import('./types.js').TaskSummary>,
   ): Promise<boolean> {
     // Step 1: Verify task exists BEFORE doing anything
     if (!this.workerHandler!.hasActiveTask(decision.task_id)) {
@@ -1180,6 +1181,24 @@ export class UnifiedAgent extends ModuleBase {
       })
       this.traceStore.endSpan(traceId, span.span_id, 'completed', {
         output_summary: 'task not found, fallback to create_task',
+      })
+      return false
+    }
+
+    // Step 1.5: Engine 兜底——定时/巡检任务不接受 supplement，降级为 create_task
+    // （Front prompt 已显式禁止，但 LLM 可能误判，此处兜底防止覆盖巡检本职）
+    const target = activeTasks.find(t => t.task_id === decision.task_id)
+    if (target?.trigger_type === 'scheduled') {
+      const span = this.traceStore.startSpan(traceId, {
+        type: 'tool_call' as const,
+        parent_span_id: parentSpanId,
+        details: {
+          tool_name: 'supplement_fallback',
+          input_summary: `task ${decision.task_id} is scheduled (${target.title}), downgrade supplement to create_task`,
+        },
+      })
+      this.traceStore.endSpan(traceId, span.span_id, 'completed', {
+        output_summary: 'scheduled task, fallback to create_task',
       })
       return false
     }

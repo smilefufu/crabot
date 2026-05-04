@@ -281,6 +281,12 @@ export interface TaskSummary {
   latest_progress?: string
   source_channel_id?: string
   source_session_id?: string
+  /**
+   * 任务触发类型（来自 admin TaskSource.trigger_type）。
+   * `scheduled` 表示由调度引擎创建的定时/巡检任务，Front 在 prompt 中需要标记，
+   * 且不允许 supplement_task；engine 收到针对 scheduled 的 supplement 时改走 create_task。
+   */
+  trigger_type?: 'manual' | 'scheduled' | 'auto' | 'event'
   updated_at?: string
   /** 当前正在执行的实时快照（仅 status=executing 且 worker 在本进程时有值） */
   live?: LiveTaskSnapshot

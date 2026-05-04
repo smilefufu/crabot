@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { channelService } from '../../services/channel'
 import { MainLayout } from '../../components/Layout/MainLayout'
 import { Button } from '../../components/Common/Button'
@@ -177,6 +177,7 @@ function setNestedValue(obj: any, path: string, value: any): any {
 export const ChannelConfig: React.FC = () => {
   const toast = useToast()
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [instances, setInstances] = useState<ChannelInstance[]>([])
   const [implementations, setImplementations] = useState<ChannelImplementation[]>([])
   const [selectedInstanceId, setSelectedInstanceId] = useState<string | null>(null)
@@ -217,6 +218,29 @@ export const ChannelConfig: React.FC = () => {
     loadInstances()
     loadImplementations()
   }, [])
+
+  // 来自 /channels/new "手动填写" 入口：?implementation_id=xxx
+  useEffect(() => {
+    const implId = searchParams.get('implementation_id')
+    if (!implId || implementations.length === 0) return
+    if (!implementations.some((i) => i.id === implId)) return
+    handleImplChange(implId)
+    setShowCreateForm(true)
+    const next = new URLSearchParams(searchParams)
+    next.delete('implementation_id')
+    setSearchParams(next, { replace: true })
+  }, [implementations, searchParams, setSearchParams])
+
+  // 来自 onboarding finish 跳转：?selected=xxx
+  useEffect(() => {
+    const selected = searchParams.get('selected')
+    if (!selected || instances.length === 0) return
+    if (!instances.some((i) => i.id === selected)) return
+    handleSelectInstance(selected)
+    const next = new URLSearchParams(searchParams)
+    next.delete('selected')
+    setSearchParams(next, { replace: true })
+  }, [instances, searchParams, setSearchParams])
 
   const loadInstances = async () => {
     try {
