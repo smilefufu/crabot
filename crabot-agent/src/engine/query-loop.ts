@@ -34,10 +34,13 @@ export interface RunEngineParams {
 const DEFAULT_MAX_TURNS = 200
 const DEFAULT_MAX_CONTEXT_TOKENS = 200_000
 
-// 推理类模型有概率在 end_turn 时只发 reasoning 不发 text，导致汇报丢失。
-// 注入追问 user msg 让模型重说一次；超过上限仍空就让 finalText 空诚实上抛——
-// 绝不让另一个 LLM 替它编。
+// 推理类模型偶尔以 end_turn 结束但只发 reasoning 不发 text。注入追问让其重说，
+// 超过上限仍空就老实返回空 finalText——绝不让另一个 LLM 替它编。
 const MAX_SILENT_END_TURN_RETRIES = 3
+
+// stop_reason='max_tokens' + text='' 走独立计数器：单纯加 prompt 会让 input 更大、
+// reasoning 烧得更多，必须先压缩再重跑。
+const MAX_MAX_TOKENS_COMPACT_RETRIES = 2
 
 // 规则细节由 worker 自己的 system prompt（WORKER_RULES「三、收尾」段）维护，
 // 这里只做 engine 层的机制兜底钩子——告诉模型违反了哪条规则、要求重新汇报。
@@ -62,6 +65,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
   let totalTurns = 0
   let finalText = ''
   let silentEndTurnCount = 0
+  let maxTokensCompactRetryCount = 0
   // 由上一轮追问设置、下一轮 onTurn 消费一次后清零。
   let pendingForcedSummaryAttempt: number | undefined = undefined
 
@@ -79,14 +83,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
 
     // Check if context compaction is needed
     if (contextManager.shouldCompact(messages)) {
-      const compacted = await contextManager.compactWithLLM(messages, adapter, options.model)
-      const final = options.onAfterCompaction
-        ? options.onAfterCompaction(compacted)
-        : compacted
-      messages.length = 0
-      for (const msg of final) {
-        messages.push(msg)
-      }
+      await compactInPlace(messages, contextManager, adapter, options)
     }
 
     // Call LLM (non-streaming by default; streaming infra preserved for rollback
@@ -174,21 +171,34 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         }
       }
 
-      // 推理类模型在 end_turn 时偶尔只发 reasoning 不发 text。早 return 路径
-      // 也不 fire onTurn，所以这里先补 fire 让 trace 看到这一轮，再注入追问。
-      if (processed.text.trim().length === 0 && silentEndTurnCount < MAX_SILENT_END_TURN_RETRIES) {
+      const isSilentText = processed.text.trim().length === 0
+
+      // max_tokens + text='' 单独走 compact-retry 路径。单纯加 FORCED_SUMMARY_PROMPT
+      // 反而让 input 更大；正确做法是丢掉空回复 + 压缩 + 重跑。
+      // 压缩阈值无视 shouldCompact——后者估算不含 system prompt + tools，对 reasoning
+      // 模型 + 大量工具的场景系统性低估。
+      if (isSilentText && stopReason === 'max_tokens') {
+        if (maxTokensCompactRetryCount < MAX_MAX_TOKENS_COMPACT_RETRIES) {
+          maxTokensCompactRetryCount++
+          if (options.onTurn) {
+            options.onTurn(buildSilentTurnEvent(totalTurns, processed.text, stopReason, llmCallMs, llmStartedAtMs))
+          }
+          messages.pop()
+          await compactInPlace(messages, contextManager, adapter, options)
+          continue
+        }
+        // 配额耗尽：input 已被压过两次仍 max_tokens，再走 forced-summary 会让 input
+        // 更大；此时只能诚实返回空 finalText。
+        return buildResult('completed', finalText, totalTurns, contextManager)
+      }
+
+      // 真静默 end_turn：早 return 路径不 fire onTurn，这里先补 fire 让 trace 看到这一轮。
+      if (isSilentText && silentEndTurnCount < MAX_SILENT_END_TURN_RETRIES) {
         silentEndTurnCount++
         if (options.onTurn) {
-          const turnEvent: EngineTurnEvent = {
-            turnNumber: totalTurns,
-            assistantText: processed.text,
-            toolCalls: [],
-            stopReason,
-            llmCallMs,
-            llmStartedAtMs,
-            ...(forcedSummaryAttempt !== undefined ? { forcedSummaryAttempt } : {}),
-          }
-          options.onTurn(turnEvent)
+          options.onTurn(buildSilentTurnEvent(
+            totalTurns, processed.text, stopReason, llmCallMs, llmStartedAtMs, forcedSummaryAttempt,
+          ))
         }
         messages.push(createUserMessage(FORCED_SUMMARY_PROMPT))
         pendingForcedSummaryAttempt = silentEndTurnCount
@@ -345,6 +355,41 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
 }
 
 // --- Helpers ---
+
+async function compactInPlace(
+  messages: EngineMessage[],
+  contextManager: ContextManager,
+  adapter: LLMAdapter,
+  options: EngineOptions,
+): Promise<void> {
+  const compacted = await contextManager.compactWithLLM(messages, adapter, options.model)
+  const finalMessages = options.onAfterCompaction
+    ? options.onAfterCompaction(compacted)
+    : compacted
+  messages.length = 0
+  for (const msg of finalMessages) {
+    messages.push(msg)
+  }
+}
+
+function buildSilentTurnEvent(
+  turnNumber: number,
+  assistantText: string,
+  stopReason: 'end_turn' | 'tool_use' | 'max_tokens' | 'stop_sequence' | null,
+  llmCallMs: number,
+  llmStartedAtMs: number | undefined,
+  forcedSummaryAttempt?: number,
+): EngineTurnEvent {
+  return {
+    turnNumber,
+    assistantText,
+    toolCalls: [],
+    stopReason,
+    llmCallMs,
+    ...(llmStartedAtMs !== undefined ? { llmStartedAtMs } : {}),
+    ...(forcedSummaryAttempt !== undefined ? { forcedSummaryAttempt } : {}),
+  }
+}
 
 function buildResult(
   outcome: EngineResult['outcome'],

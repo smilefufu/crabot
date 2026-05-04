@@ -119,6 +119,13 @@ function toResponsesTool(tool: ToolDefinition): ResponsesTool {
   }
 }
 
+// response.failed 的 error.code 映射到 HTTP status，让 isRetryableError 直接复用
+// 状态码分类（5xx/429 重试、4xx 不重试）。未列出的 code 默认 400（不可重试）。
+const STATUS_BY_FAILED_CODE: Record<string, number> = {
+  server_error: 500,
+  rate_limit_exceeded: 429,
+}
+
 // --- OpenAI Responses Adapter ---
 
 export class OpenAIResponsesAdapter implements LLMAdapter {
@@ -293,6 +300,49 @@ export class OpenAIResponsesAdapter implements LLMAdapter {
             ...(usage ? { usage: { inputTokens: usage.input_tokens ?? 0, outputTokens: usage.output_tokens ?? 0 } } : {}),
           }
           break
+        }
+
+        case 'response.incomplete': {
+          // 终态事件，响应被截断但 stream 正常结束。不处理这条会让 stopReason 落到
+          // null，被上游 query-loop 误判为 silent end_turn，触发反向放大的重试链。
+          const resp = parsed.response as {
+            usage?: { input_tokens?: number; output_tokens?: number }
+            incomplete_details?: { reason?: string }
+          } | undefined
+          const reason = resp?.incomplete_details?.reason
+          const usage = resp?.usage
+
+          // content_filter 不可恢复（同输入必再被拦）；status=400 走 non-retryable。
+          if (reason === 'content_filter') {
+            throw new HttpResponseError(
+              400,
+              JSON.stringify({ code: 'content_filter', incomplete_details: resp?.incomplete_details ?? {} }),
+              'openai-responses-adapter',
+            )
+          }
+
+          // max_output_tokens：暴露 stopReason='max_tokens' 让 query-loop 走 compact 而非追问。
+          yield {
+            type: 'message_end',
+            stopReason: 'max_tokens',
+            ...(usage ? { usage: { inputTokens: usage.input_tokens ?? 0, outputTokens: usage.output_tokens ?? 0 } } : {}),
+          }
+          break
+        }
+
+        case 'response.failed': {
+          // 终态事件，error.code 映射到 HTTP status 复用 isRetryableError 的状态码分类。
+          const resp = parsed.response as {
+            error?: { code?: string; message?: string }
+          } | undefined
+          const errorCode = resp?.error?.code ?? 'unknown'
+          const errorMessage = resp?.error?.message ?? 'response.failed without error details'
+          const status = STATUS_BY_FAILED_CODE[errorCode] ?? 400
+          throw new HttpResponseError(
+            status,
+            JSON.stringify({ code: errorCode, message: errorMessage }),
+            'openai-responses-adapter',
+          )
         }
 
         default:

@@ -410,6 +410,95 @@ describe('runEngine silent end_turn retry', () => {
   })
 })
 
+describe('runEngine max_tokens silent compact retry', () => {
+  function maxTokensEmptyResponse(): ReadonlyArray<StreamChunk> {
+    return [
+      { type: 'message_start', messageId: 'msg-1' },
+      { type: 'message_end', stopReason: 'max_tokens', usage: { inputTokens: 100, outputTokens: 4096 } },
+    ]
+  }
+
+  it('on max_tokens empty: pops empty assistant, no FORCED_SUMMARY_PROMPT, accepts subsequent text', async () => {
+    const capturedMessages: EngineMessage[][] = []
+    let callIndex = 0
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        capturedMessages.push([...params.messages])
+        const chunks = callIndex === 0 ? maxTokensEmptyResponse() : textResponse('压缩后真实汇报：完成 X')
+        callIndex++
+        for (const chunk of chunks) yield chunk
+      },
+      updateConfig() {},
+    }
+
+    const result = await runEngine({
+      prompt: 'do work',
+      adapter,
+      options: baseOptions(),
+    })
+
+    expect(result.outcome).toBe('completed')
+    expect(result.finalText).toBe('压缩后真实汇报：完成 X')
+    expect(result.totalTurns).toBe(2)
+    // 关键差异（vs 真静默 end_turn 路径）：空 assistant 已 pop、无 FORCED_SUMMARY_PROMPT 注入
+    const secondCall = capturedMessages[1] as Array<{ role: string; content: unknown }>
+    expect(secondCall).toHaveLength(1)
+    expect(secondCall[0].role).toBe('user')
+    const lastUserContent = JSON.stringify(secondCall[0].content)
+    expect(lastUserContent).not.toContain('end_turn 结束但没有输出任何文字')
+    expect(lastUserContent).toContain('do work')
+  })
+
+  it('returns partial text without retry when max_tokens has non-empty text', async () => {
+    let callIndex = 0
+    const adapter: LLMAdapter = {
+      async *stream() {
+        callIndex++
+        yield { type: 'message_start', messageId: 'msg-1' }
+        yield { type: 'text_delta', text: '部分汇报但被截断' }
+        yield { type: 'message_end', stopReason: 'max_tokens', usage: { inputTokens: 100, outputTokens: 4096 } }
+      },
+      updateConfig() {},
+    }
+
+    const result = await runEngine({
+      prompt: 'do work',
+      adapter,
+      options: baseOptions(),
+    })
+
+    expect(result.outcome).toBe('completed')
+    expect(result.finalText).toBe('部分汇报但被截断')
+    expect(result.totalTurns).toBe(1)
+    expect(callIndex).toBe(1)
+  })
+
+  it('returns immediately with empty finalText after compact retries exhausted', async () => {
+    // 连续 max_tokens-empty：跑完 MAX_MAX_TOKENS_COMPACT_RETRIES=2 次重试后立即返回，
+    // 不再走 FORCED_SUMMARY_PROMPT（input 已被压过两次，再加 user msg 只会更糟）。
+    let callIndex = 0
+    const adapter: LLMAdapter = {
+      async *stream() {
+        callIndex++
+        for (const chunk of maxTokensEmptyResponse()) yield chunk
+      },
+      updateConfig() {},
+    }
+
+    const result = await runEngine({
+      prompt: 'do work',
+      adapter,
+      options: baseOptions(),
+    })
+
+    expect(result.outcome).toBe('completed')
+    expect(result.finalText).toBe('')
+    // 1 次原始 + 2 次 compact 重试 = 3 轮（MAX_MAX_TOKENS_COMPACT_RETRIES=2）
+    expect(result.totalTurns).toBe(3)
+    expect(callIndex).toBe(3)
+  })
+})
+
 describe('runEngine humanMessageQueue integration', () => {
   it('injects supplement messages between turns', async () => {
     const capturedMessages: unknown[][] = []

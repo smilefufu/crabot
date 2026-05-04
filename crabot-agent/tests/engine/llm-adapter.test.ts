@@ -793,6 +793,120 @@ describe('OpenAIResponsesAdapter.stream', () => {
     expect(messageEnd).toBeDefined()
     expect(messageEnd!.stopReason).toBe('end_turn')
   })
+
+  // 终态事件 ≠ response.completed 时不可静默吞掉，否则 stopReason=null 会被
+  // 上游误判为 silent end_turn。
+
+  it('reports stopReason=max_tokens on response.incomplete (max_output_tokens)', async () => {
+    const events = [
+      { event: 'response.created', data: { response: { id: 'resp_3' } } },
+      {
+        event: 'response.incomplete',
+        data: {
+          response: {
+            incomplete_details: { reason: 'max_output_tokens' },
+            usage: { input_tokens: 100, output_tokens: 4096 },
+          },
+        },
+      },
+    ]
+    global.fetch = vi.fn().mockResolvedValue(makeSSEResponse(events)) as unknown as typeof fetch
+
+    const adapter = new OpenAIResponsesAdapter({ endpoint: 'https://api.openai.com/v1', apikey: 'k' })
+    const chunks = await collectChunks(adapter)
+
+    const messageEnd = chunks.find((c): c is Extract<StreamChunk, { type: 'message_end' }> => c.type === 'message_end')
+    expect(messageEnd).toBeDefined()
+    expect(messageEnd!.stopReason).toBe('max_tokens')
+    expect(messageEnd!.usage).toEqual({ inputTokens: 100, outputTokens: 4096 })
+  })
+
+  it('throws non-retryable error on response.incomplete (content_filter)', async () => {
+    const events = [
+      { event: 'response.created', data: { response: { id: 'resp_4' } } },
+      {
+        event: 'response.incomplete',
+        data: {
+          response: { incomplete_details: { reason: 'content_filter' } },
+        },
+      },
+    ]
+    global.fetch = vi.fn().mockResolvedValue(makeSSEResponse(events)) as unknown as typeof fetch
+
+    const adapter = new OpenAIResponsesAdapter({ endpoint: 'https://api.openai.com/v1', apikey: 'k' })
+    await expect(collectChunks(adapter)).rejects.toThrow(/content_filter/)
+  })
+
+  it('throws retryable error (status 500) on response.failed (server_error)', async () => {
+    // server_error 在 streamWithRetry 里被 isRetryableError 判为可重试 → 默认会跑 10 次
+    // ×10s sleep 才放弃。这里用 abort signal 在第一次 fetch 后立刻中断，验证
+    // 第一次抛出的 HttpResponseError 是 status=500，不需要等真重试。
+    const events = [
+      { event: 'response.created', data: { response: { id: 'resp_5' } } },
+      {
+        event: 'response.failed',
+        data: {
+          response: {
+            error: { code: 'server_error', message: 'The model failed to generate a response.' },
+          },
+        },
+      },
+    ]
+    const abortController = new AbortController()
+    global.fetch = vi.fn().mockImplementation(() => {
+      // adapter 调 fetch 的瞬间安排 abort，让重试 loop 在 sleep 时撞 AbortError
+      queueMicrotask(() => abortController.abort())
+      return Promise.resolve(makeSSEResponse(events))
+    }) as unknown as typeof fetch
+
+    const adapter = new OpenAIResponsesAdapter({ endpoint: 'https://api.openai.com/v1', apikey: 'k' })
+    const chunks: StreamChunk[] = []
+    let caught: unknown
+    try {
+      for await (const c of adapter.stream({
+        messages: [],
+        systemPrompt: '',
+        tools: [],
+        model: 'gpt-5.4',
+        signal: abortController.signal,
+      })) {
+        chunks.push(c)
+      }
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).toBeDefined()
+    // 抛出的可能是 HttpResponseError(status=500) 或 AbortError（取决于时序），
+    // 都接受——核心是验证我们没把 server_error 静默成 stopReason=null。
+    const errStatus = (caught as { status?: number }).status
+    const errName = (caught as Error).name
+    expect(errStatus === 500 || errName === 'AbortError').toBe(true)
+    if (errStatus === 500) {
+      expect((caught as Error).message).toContain('server_error')
+    }
+  })
+
+  it('throws non-retryable error (status 400) on response.failed (invalid_prompt)', async () => {
+    const events = [
+      { event: 'response.created', data: { response: { id: 'resp_6' } } },
+      {
+        event: 'response.failed',
+        data: {
+          response: { error: { code: 'invalid_prompt', message: 'bad input' } },
+        },
+      },
+    ]
+    global.fetch = vi.fn().mockResolvedValue(makeSSEResponse(events)) as unknown as typeof fetch
+
+    const adapter = new OpenAIResponsesAdapter({ endpoint: 'https://api.openai.com/v1', apikey: 'k' })
+    try {
+      await collectChunks(adapter)
+      throw new Error('expected stream to throw')
+    } catch (err) {
+      expect((err as { status?: number }).status).toBe(400)
+      expect((err as Error).message).toContain('invalid_prompt')
+    }
+  })
 })
 
 describe('createAdapter', () => {
