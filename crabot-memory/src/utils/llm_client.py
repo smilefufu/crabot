@@ -10,6 +10,33 @@ from .._config_ref import get_llm_config
 logger = logging.getLogger(__name__)
 
 
+# OpenAI Responses API 终态事件中的非 completed 路径需要单独区分，
+# 不然会被通用 except 吞成"重试 3 次失败"。两类错误的处理意图也不一样：
+# - incomplete：同输入再跑还是会被截断（max_output_tokens / content_filter），不该重试
+# - failed：error.code 决定是否重试（server_error / rate_limit_exceeded 可以，invalid_prompt 等不行）
+class LLMResponseIncompleteError(Exception):
+    """OpenAI Responses API 返回 response.incomplete。"""
+
+    def __init__(self, reason: Optional[str], message: str = ""):
+        self.reason = reason
+        super().__init__(message or f"response.incomplete: reason={reason}")
+
+
+class LLMResponseFailedError(Exception):
+    """OpenAI Responses API 返回 response.failed。"""
+
+    # 与 OpenAI 官方 error code 命名一致；非这两个码视为不可重试（如 invalid_prompt）
+    RETRYABLE_CODES = frozenset({"server_error", "rate_limit_exceeded"})
+
+    def __init__(self, code: Optional[str], message: str = ""):
+        self.code = code
+        super().__init__(message or f"response.failed: code={code}")
+
+    @property
+    def retryable(self) -> bool:
+        return self.code in self.RETRYABLE_CODES
+
+
 class LLMClient:
     """异步 LLM 客户端，支持 openai / anthropic / gemini / openai-responses。"""
 
@@ -94,6 +121,16 @@ class LLMClient:
                     # 'openai' 和 'gemini' 都走 OpenAI Chat Completions
                     content = await self._call_openai(client, messages, temperature, response_format)
                 return content
+            except LLMResponseIncompleteError as e:
+                # 同输入重跑还是会被同样原因截断，提前抛出避免无意义的 3 次重试
+                logger.warning("LLM call hit response.incomplete (reason=%s): %s", e.reason, e)
+                raise
+            except LLMResponseFailedError as e:
+                if not e.retryable:
+                    logger.warning("LLM call hit response.failed (code=%s, non-retryable): %s", e.code, e)
+                    raise
+                last_err = e
+                logger.warning("LLM call attempt %d/%d failed (code=%s): %s", attempt + 1, max_retries, e.code, e)
             except Exception as e:
                 last_err = e
                 logger.warning("LLM call attempt %d/%d failed: %s", attempt + 1, max_retries, e)
@@ -226,10 +263,40 @@ class LLMClient:
             kwargs["include"] = ["reasoning.encrypted_content"]
             kwargs["extra_headers"] = {"ChatGPT-Account-Id": self._account_id}
 
-        # get_final_response() 内部会自动 await until_done()，不需要外层手动 drain
+        # 手动迭代终态事件——不能用 get_final_response()，SDK 只把 response.completed
+        # 写入 _completed_response，遇 incomplete/failed 抛通用 RuntimeError 把真因丢了。
+        terminal: Optional[tuple[str, Any]] = None  # (kind, payload)，三种终态互斥
+
         async with client.responses.stream(**kwargs) as stream:
-            final = await stream.get_final_response()
-        return getattr(final, "output_text", "") or ""
+            async for event in stream:
+                etype = getattr(event, "type", None)
+                if etype == "response.completed":
+                    terminal = ("completed", getattr(event, "response", None))
+                elif etype == "response.incomplete":
+                    resp = getattr(event, "response", None)
+                    details = getattr(resp, "incomplete_details", None) if resp else None
+                    terminal = ("incomplete", getattr(details, "reason", None) if details else None)
+                elif etype == "response.failed":
+                    resp = getattr(event, "response", None)
+                    err = getattr(resp, "error", None) if resp else None
+                    terminal = (
+                        "failed",
+                        (
+                            getattr(err, "code", None) if err else None,
+                            getattr(err, "message", "") if err else "",
+                        ),
+                    )
+
+        if terminal is None:
+            raise RuntimeError("openai-responses stream ended without a terminal event")
+
+        kind, payload = terminal
+        if kind == "failed":
+            code, message = payload
+            raise LLMResponseFailedError(code, message)
+        if kind == "incomplete":
+            raise LLMResponseIncompleteError(payload)
+        return getattr(payload, "output_text", "") or ""
 
     async def extract_keywords(self, text: str) -> List[str]:
         """从文本中提取关键词"""

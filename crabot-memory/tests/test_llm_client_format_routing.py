@@ -6,11 +6,16 @@
 - openai-responses + ChatGPT Codex 后端能注入 ChatGPT-Account-Id header + reasoning/include
 """
 from types import SimpleNamespace
+from typing import List, Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.utils.llm_client import LLMClient
+from src.utils.llm_client import (
+    LLMClient,
+    LLMResponseFailedError,
+    LLMResponseIncompleteError,
+)
 
 
 def _make_openai_response(text: str):
@@ -27,14 +32,20 @@ def _make_anthropic_response(text: str):
 
 
 class FakeResponsesStream:
-    """模拟 openai.responses.stream(...) 返回的 async context manager。
+    """模拟 openai.responses.stream(...) 返回的 async context manager + async iterator。
 
-    LLMClient 只用 ``await stream.get_final_response()``（SDK 内部会自动 drain），
-    所以 mock 不需要实现 __aiter__/__anext__。
+    LLMClient 通过 ``async for event in stream`` 消费 stream events，所以 fake 需要
+    实现 __aiter__。两种构造方式：
+    - ``final_text`` 简写：自动生成 1 条 response.completed 事件（保持老 test 兼容）
+    - ``events`` 显式传入：用于 incomplete / failed 等终态分支测试
     """
 
-    def __init__(self, final_text: str):
-        self._final = SimpleNamespace(output_text=final_text)
+    def __init__(self, events: Optional[List[SimpleNamespace]] = None, final_text: Optional[str] = None):
+        if events is None:
+            assert final_text is not None, "FakeResponsesStream needs events or final_text"
+            response = SimpleNamespace(output_text=final_text)
+            events = [SimpleNamespace(type="response.completed", response=response)]
+        self._events = events
 
     async def __aenter__(self):
         return self
@@ -42,14 +53,15 @@ class FakeResponsesStream:
     async def __aexit__(self, *_args):
         return None
 
-    async def get_final_response(self):
-        return self._final
+    async def __aiter__(self):
+        for e in self._events:
+            yield e
 
 
-def _fake_responses_client(final_text: str):
+def _fake_responses_client(final_text: Optional[str] = None, events: Optional[List[SimpleNamespace]] = None):
     """构造一个 fake AsyncOpenAI client，让 .responses.stream(**kwargs) 同步返回
     一个 FakeResponsesStream 实例（SDK 行为：stream() 是同步函数，返回值才是 ctx mgr）。"""
-    stream_factory = MagicMock(return_value=FakeResponsesStream(final_text))
+    stream_factory = MagicMock(return_value=FakeResponsesStream(events=events, final_text=final_text))
     return SimpleNamespace(responses=SimpleNamespace(stream=stream_factory)), stream_factory
 
 
@@ -171,6 +183,108 @@ async def test_responses_format_codex_backend_injects_account_id_and_reasoning()
     # ChatGPT Codex 后端不支持 temperature（会 400 "Unsupported parameter: temperature"），
     # 必须省略；OpenAI 官方 Responses API 才支持。
     assert "temperature" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_responses_incomplete_max_output_tokens_raises_typed_error_and_skips_retry():
+    """response.incomplete 是终态：同输入再跑还是会被截断，不该重试。"""
+    incomplete_resp = SimpleNamespace(
+        output_text="",
+        incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+    )
+    events = [SimpleNamespace(type="response.incomplete", response=incomplete_resp)]
+    fake_client, stream_factory = _fake_responses_client(events=events)
+    client = LLMClient(
+        api_key="k",
+        base_url="https://api.openai.com/v1",
+        model="gpt-5",
+        format="openai-responses",
+    )
+    client._client = fake_client
+
+    with pytest.raises(LLMResponseIncompleteError) as exc:
+        await client.chat_completion([{"role": "user", "content": "hi"}], max_retries=3)
+    assert exc.value.reason == "max_output_tokens"
+    # 不该重试：3 次 max_retries 但只调 1 次
+    assert stream_factory.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_responses_incomplete_content_filter_raises_typed_error():
+    """content_filter 也是 incomplete 一种，同样不重试，但 reason 区分让上层决定怎么提示用户。"""
+    incomplete_resp = SimpleNamespace(
+        output_text="",
+        incomplete_details=SimpleNamespace(reason="content_filter"),
+    )
+    events = [SimpleNamespace(type="response.incomplete", response=incomplete_resp)]
+    fake_client, stream_factory = _fake_responses_client(events=events)
+    client = LLMClient(
+        api_key="k",
+        base_url="https://api.openai.com/v1",
+        model="gpt-5",
+        format="openai-responses",
+    )
+    client._client = fake_client
+
+    with pytest.raises(LLMResponseIncompleteError) as exc:
+        await client.chat_completion([{"role": "user", "content": "hi"}], max_retries=3)
+    assert exc.value.reason == "content_filter"
+    assert stream_factory.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_responses_failed_invalid_prompt_not_retried():
+    """response.failed + 4xx 类 code（如 invalid_prompt）：不可重试。"""
+    failed_resp = SimpleNamespace(
+        error=SimpleNamespace(code="invalid_prompt", message="bad input"),
+    )
+    events = [SimpleNamespace(type="response.failed", response=failed_resp)]
+    fake_client, stream_factory = _fake_responses_client(events=events)
+    client = LLMClient(
+        api_key="k",
+        base_url="https://api.openai.com/v1",
+        model="gpt-5",
+        format="openai-responses",
+    )
+    client._client = fake_client
+
+    with pytest.raises(LLMResponseFailedError) as exc:
+        await client.chat_completion([{"role": "user", "content": "hi"}], max_retries=3)
+    assert exc.value.code == "invalid_prompt"
+    assert exc.value.retryable is False
+    assert stream_factory.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_responses_failed_server_error_retried_then_succeeds():
+    """response.failed + server_error 是可重试的：第 1 次失败、第 2 次成功。"""
+    failed_resp = SimpleNamespace(
+        error=SimpleNamespace(code="server_error", message="transient"),
+    )
+    fail_events = [SimpleNamespace(type="response.failed", response=failed_resp)]
+    success_events = [SimpleNamespace(
+        type="response.completed",
+        response=SimpleNamespace(output_text="recovered"),
+    )]
+
+    # MagicMock side_effect: 第一次返回失败 stream，第二次返回成功 stream。
+    stream_factory = MagicMock(side_effect=[
+        FakeResponsesStream(events=fail_events),
+        FakeResponsesStream(events=success_events),
+    ])
+    fake_client = SimpleNamespace(responses=SimpleNamespace(stream=stream_factory))
+
+    client = LLMClient(
+        api_key="k",
+        base_url="https://api.openai.com/v1",
+        model="gpt-5",
+        format="openai-responses",
+    )
+    client._client = fake_client
+
+    out = await client.chat_completion([{"role": "user", "content": "hi"}], max_retries=3)
+    assert out == "recovered"
+    assert stream_factory.call_count == 2
 
 
 @pytest.mark.asyncio
