@@ -193,12 +193,12 @@ describe('Output tool', () => {
     expect(result.output).toContain('Invalid entity_id format')
   })
 
-  it('agent_xxx not in registry returns entity-not-found error', async () => {
+  it('agent_xxx 被拒：Output 只读 shell，指向 get_subagent_output', async () => {
     const tool = createOutputTool(deps)
     const result = await tool.call({ entity_id: 'agent_aabbccdd1122' }, {})
 
     expect(result.isError).toBe(true)
-    expect(result.output).toContain('Entity not found')
+    expect(result.output).toContain('get_subagent_output')
   })
 
   it('two tasks reading the same persistent shell do not share cursors', async () => {
@@ -450,78 +450,7 @@ function makeAgentRecord(
 }
 
 describe('agent type branch', () => {
-  it('Output completed agent — returns result_file content', async () => {
-    const resultFile = path.join(tmpDir, 'agent_result.txt')
-    writeFileSync(resultFile, 'final reply from agent')
-
-    const messagesLog = path.join(tmpDir, 'agent_messages.jsonl')
-    writeFileSync(messagesLog, '')
-
-    const agentId = 'agent_complete001'
-    const record = makeAgentRecord({
-      entity_id: agentId,
-      status: 'completed',
-      exit_code: 0,
-      result_file: resultFile,
-      messages_log_file: messagesLog,
-    })
-    await registry.register(record)
-
-    const tool = createOutputTool(deps)
-    const result = await tool.call({ entity_id: agentId }, {})
-
-    expect(result.isError).toBe(false)
-    expect(result.output).toContain('final reply from agent')
-    expect(result.output).toContain('completed')
-  })
-
-  it('Output running agent — returns last 10 lines of messages_log', async () => {
-    const messagesLog = path.join(tmpDir, 'agent_running.jsonl')
-    const lines = Array.from({ length: 15 }, (_, i) =>
-      JSON.stringify({ turn: i, type: 'text', text: `progress-line-${i}` }),
-    ).join('\n')
-    writeFileSync(messagesLog, lines)
-
-    const agentId = 'agent_running001'
-    const record = makeAgentRecord({
-      entity_id: agentId,
-      status: 'running',
-      messages_log_file: messagesLog,
-    })
-    await registry.register(record)
-
-    const tool = createOutputTool(deps)
-    const result = await tool.call({ entity_id: agentId }, {})
-
-    expect(result.isError).toBe(false)
-    expect(result.output).toContain('running')
-    // Should include the last few lines
-    expect(result.output).toContain('progress-line-14')
-    // Should not include line 0 (it's beyond the last-10 window)
-    expect(result.output).not.toContain('progress-line-0')
-  })
-
-  it('Output stalled agent — returns stalled status with ended_at', async () => {
-    const messagesLog = path.join(tmpDir, 'agent_stalled.jsonl')
-    writeFileSync(messagesLog, JSON.stringify({ turn: 1, type: 'text', text: 'last message' }))
-
-    const agentId = 'agent_stalled001'
-    const stalledAt = new Date().toISOString()
-    const record = makeAgentRecord({
-      entity_id: agentId,
-      status: 'stalled',
-      ended_at: stalledAt,
-      messages_log_file: messagesLog,
-    })
-    await registry.register(record)
-
-    const tool = createOutputTool(deps)
-    const result = await tool.call({ entity_id: agentId }, {})
-
-    expect(result.isError).toBe(false)
-    expect(result.output).toContain('stalled')
-    expect(result.output).toContain(stalledAt)
-  })
+  // Output 不再支持 agent_xxx（与 get_subagent_output 重复，已移除）；这里只测 Kill / ListEntities 的 agent 分支。
 
   it('Kill running agent — aborts controller and marks registry status=killed', async () => {
     const messagesLog = path.join(tmpDir, 'agent_kill.jsonl')
