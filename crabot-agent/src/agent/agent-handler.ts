@@ -207,6 +207,50 @@ function getReportMode(
 
 const LOG_FILE = path.join(getAgentDataDir(), 'agent-handler-debug.log')
 
+/** subagent 完成通知里内联结果预览的字符上限；超过则截断并提示用 get_subagent_output 读全文。 */
+const SUBAGENT_RESULT_PREVIEW_MAX = 2000
+
+export interface SubAgentExitInfo {
+  readonly entity_id: string
+  readonly task_description: string
+  readonly status: 'completed' | 'failed'
+  readonly runtime_ms: number
+  readonly error?: string
+  readonly result_file: string | null
+  readonly finalText?: string
+}
+
+/**
+ * 构造 \`<sub_agent_notification>\`：成功时内联**有界结果预览**——小结果（预览即全文）让 main
+ * 直接用、省掉一次 get_subagent_output；大结果截断到 SUBAGENT_RESULT_PREVIEW_MAX 并提示读全文。
+ * 失败时给 error + guidance。output_file 始终附上作为全文/审计指针。
+ */
+export function formatSubAgentNotification(info: SubAgentExitInfo): string {
+  const failed = info.status === 'failed'
+  const result = info.finalText ?? ''
+  const truncated = result.length > SUBAGENT_RESULT_PREVIEW_MAX
+  const preview = truncated ? result.slice(0, SUBAGENT_RESULT_PREVIEW_MAX) : result
+  return [
+    '<sub_agent_notification>',
+    `<agent_id>${info.entity_id}</agent_id>`,
+    `<description>${info.task_description.slice(0, 200)}</description>`,
+    `<status>${info.status}</status>`,
+    `<runtime_ms>${info.runtime_ms}</runtime_ms>`,
+    failed && info.error ? `<error>${info.error.slice(0, 500)}</error>` : '',
+    !failed && preview
+      ? `<result_preview${truncated ? ' truncated="true"' : ''}>\n${preview}\n</result_preview>`
+      : '',
+    info.result_file ? `<output_file>${info.result_file}</output_file>` : '',
+    !failed && truncated
+      ? `<guidance>结果已截断；完整内容用 get_subagent_output("${info.entity_id}") 读。</guidance>`
+      : '',
+    // 失败时由 main 决定如何处理：接口/网络/额度类失败（HTTP 4xx/5xx、超时等）通常应通知人类；
+    // 任务逻辑问题可自行续办或调整方案。
+    failed ? '<guidance>子任务失败，请判断失败性质并决定是否通知人类（接口类失败通常应通知）。</guidance>' : '',
+    '</sub_agent_notification>',
+  ].filter(Boolean).join('\n')
+}
+
 function log(msg: string) {
   const ts = new Date().toISOString()
   try { fs.appendFileSync(LOG_FILE, `[${ts}] ${msg}\n`) } catch { /* ignore */ }
@@ -3519,21 +3563,7 @@ export class AgentHandler {
         : {}),
       onExit: (info) => {
         if (!deps.humanQueue) return
-        const failed = info.status === 'failed'
-        const notification = [
-          '<sub_agent_notification>',
-          `<agent_id>${info.entity_id}</agent_id>`,
-          `<description>${info.task_description.slice(0, 200)}</description>`,
-          `<status>${info.status}</status>`,
-          `<runtime_ms>${info.runtime_ms}</runtime_ms>`,
-          failed && info.error ? `<error>${info.error.slice(0, 500)}</error>` : '',
-          info.result_file ? `<output_file>${info.result_file}</output_file>` : '',
-          // 失败时由你（main）决定如何处理：若是接口/网络/额度类失败（HTTP 4xx/5xx、超时等），
-          // 通常应通知人类；若是任务逻辑问题，可自行续办或调整方案。
-          failed ? '<guidance>子任务失败，请判断失败性质并决定是否通知人类（接口类失败通常应通知）。</guidance>' : '',
-          '</sub_agent_notification>',
-        ].filter(Boolean).join('\n')
-        deps.humanQueue.push(notification)
+        deps.humanQueue.push(formatSubAgentNotification(info))
       },
     })
 

@@ -108,9 +108,10 @@ subagent 完成时，系统自动推送 \`<sub_agent_notification>\` 到你的�
 用户的任何 supplement（进度询问、改方向、取消）也会同步回流——你不会被长任务卡住。
 
 **通知中包含：**
-- agent_id（可用来读取输出或 stop）
+- agent_id（可用来读取全文或 stop）
 - status（completed / failed）
-- output_file（结果文件路径；用 \`get_subagent_output(agent_id)\` 读内容）
+- result_preview（成功时**内联结果预览**）：没有 \`truncated="true"\` 就是完整结果，**直接用，不必再读**
+- output_file（结果文件路径）；仅当预览被截断（\`truncated="true"\`）或你要全文时，用 \`get_subagent_output(agent_id)\` 读
 
 **\`sync: true\` 仅在以下场景使用（极少）：**
 - subagent 输出需要在同 turn 立即被读取后再决策
