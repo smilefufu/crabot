@@ -13,7 +13,7 @@ const DEFAULT_TIMEOUT_MS = 120000
 export const MAX_FOREGROUND_TIMEOUT_MS = 600_000
 
 /**
- * 前台宽限期：默认路径（非 run_in_background）的命令先前台运行这么久。
+ * 前台宽限期：命令先前台运行这么久。
  * 期内退出 → 同步内联返回（等同普通同步调用）；超过仍在跑 → 转后台（命令不中断）+
  * 引导 agent 用 wait_for_signal 挂起等待。取代旧的「显式 timeout>60s 直接转 bg」破坏性逻辑。
  */

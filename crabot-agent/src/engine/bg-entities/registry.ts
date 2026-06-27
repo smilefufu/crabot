@@ -211,6 +211,7 @@ export class BgEntityRegistry {
         const latestMs = Math.max(lastActivityMs, endedMs)
 
         if (latestMs < cutoffMs) {
+          if (rec.type === 'shell') await this.unlinkShellFiles(rec)
           delete entries[id]
           removed.push(id)
         }
@@ -224,6 +225,40 @@ export class BgEntityRegistry {
     })
 
     return { removed }
+  }
+
+  /**
+   * task 完成时清理它名下所有**终态** shell（记录 + 日志 + sentinel 文件）；running 的留存。
+   * D1 后所有后台 shell 都落账，靠这条在 task 结束即回收，避免 registry / 磁盘日志无限增长
+   * （7d gcDeadEntities 只作跨 task / 孤儿兜底）。
+   */
+  async removeTerminalShellsByTask(taskId: string): Promise<string[]> {
+    const removed: string[] = []
+    await this.mutex.run(async () => {
+      const file = await this.readFile()
+      const entries: Record<string, BgEntityRecord> = { ...file.entities }
+      for (const [id, rec] of Object.entries(entries)) {
+        if (rec.type !== 'shell' || rec.spawned_by_task_id !== taskId || rec.status === 'running') continue
+        await this.unlinkShellFiles(rec)
+        delete entries[id]
+        removed.push(id)
+      }
+      if (removed.length > 0) {
+        await this.writeAtomic({ entities: entries })
+      }
+    })
+    return removed
+  }
+
+  /** 删除一个 shell 的磁盘日志 + exitcode sentinel；不存在则忽略。 */
+  private async unlinkShellFiles(rec: BgShellRegistryRecord): Promise<void> {
+    for (const f of [rec.log_file, exitcodeFileForLog(rec.log_file)]) {
+      try {
+        await fs.unlink(f)
+      } catch {
+        /* 文件不存在 / 已删 — 忽略 */
+      }
+    }
   }
 
   async countActiveByOwner(friend_id: string): Promise<number> {

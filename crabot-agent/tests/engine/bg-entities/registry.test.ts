@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { BgEntityRegistry } from '../../../src/engine/bg-entities/registry'
@@ -304,6 +304,34 @@ describe('BgEntityRegistry', () => {
     const { removed } = await registry.gcDeadEntities(new Date())
     expect(removed).not.toContain('running-old')
     expect(await registry.get('running-old')).not.toBeNull()
+  })
+
+  it('removeTerminalShellsByTask: 清本 task 终态 shell（含日志/sentinel），保留 running 与他 task', async () => {
+    const logDone = path.join(tmpDir, 'done.log')
+    const ecDone = path.join(tmpDir, 'done.exitcode')
+    writeFileSync(logDone, 'some output')
+    writeFileSync(ecDone, '0')
+
+    await registry.register(makeShellRecord({
+      entity_id: 'done-1', status: 'completed', exit_code: 0, ended_at: new Date().toISOString(),
+      log_file: logDone, spawned_by_task_id: 'task-clean',
+    }))
+    await registry.register(makeShellRecord({
+      entity_id: 'run-1', status: 'running', pid: process.pid,
+      log_file: path.join(tmpDir, 'run.log'), spawned_by_task_id: 'task-clean',
+    }))
+    await registry.register(makeShellRecord({
+      entity_id: 'other-1', status: 'completed', exit_code: 0, ended_at: new Date().toISOString(),
+      log_file: path.join(tmpDir, 'other.log'), spawned_by_task_id: 'task-OTHER',
+    }))
+
+    const removed = await registry.removeTerminalShellsByTask('task-clean')
+    expect(removed).toEqual(['done-1'])
+    expect(await registry.get('done-1')).toBeNull()        // 终态 → 清掉
+    expect(await registry.get('run-1')).not.toBeNull()     // running → 留存
+    expect(await registry.get('other-1')).not.toBeNull()   // 他 task → 不动
+    expect(existsSync(logDone)).toBe(false)                // 日志删了
+    expect(existsSync(ecDone)).toBe(false)                 // sentinel 删了
   })
 
   it('countActiveByOwner: counts only running entities for that owner', async () => {

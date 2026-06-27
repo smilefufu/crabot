@@ -4,7 +4,7 @@
  * 适用场景：
  * 1) worker 派出了 async subagent（delegate_task），此刻没有别的事可干；
  * 2) 系统注入 [audit_pending]，告知 worker 有审计正在跑；
- * 3) worker 起了 bg shell（Bash run_in_background），等它退出再看结果；
+ * 3) worker 起了会转后台的 bash（命令超 10s 自动转后台），等它退出再看结果；
  * 4) 定时等待：带 timeout_ms 挂起 N 毫秒后自动唤醒（如"10 分钟后复查长任务进度"）。
  *
  * 实现：复用 humanQueue.setBarrier 机制（跟 ask_human 同一套 barrier 路径）。
@@ -44,7 +44,7 @@ const inputSchema = z.object({
 const TOOL_DESCRIPTION =
   '挂起当前任务，等待外部异步事件唤醒。适用场景：' +
   '1) 你派出了 async subagent（delegate_task）没有别的事可干；' +
-  '2) 你起了 bg shell（Bash run_in_background），等它退出再处理结果——shell 退出会自动唤醒你；' +
+  '2) 你起了会转后台的 bash（命令超 10s 自动转后台），等它退出再处理结果——shell 退出会自动唤醒你；' +
   '3) 定时等待：带 timeout_ms 最长挂起 N 毫秒（如周期性复查长任务：timeout_ms=600000 即最多等 10 分钟，' +
   '期间 bg shell 退出等任何事件都会提前唤醒；醒来后可再次调用继续等）。' +
   '注意：等待可能永不退出的进程（监控、服务）必须带 timeout_ms，否则会拒绝或挂到 24h 兜底。' +

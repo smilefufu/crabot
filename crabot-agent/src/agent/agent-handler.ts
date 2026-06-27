@@ -20,7 +20,7 @@ import {
 import { createSetCwdTool, createReadTool } from '../engine/tools/index.js'
 import { BgEntityRegistry } from '../engine/bg-entities/registry.js'
 import { killShellTree } from '../engine/bg-entities/bg-shell.js'
-import { ReadoptReaper, type ReadoptedExitInfo } from '../engine/bg-entities/reaper.js'
+import { ReadoptReaper } from '../engine/bg-entities/reaper.js'
 import type { BgEntityOwner, BgEntityRecord, BgEntityStatus, BgEntityType, BgShellRegistryRecord } from '../engine/bg-entities/types.js'
 import type { BashBgContext } from '../engine/tools/index.js'
 import type { BgToolDeps } from '../engine/tools/index.js'
@@ -95,7 +95,7 @@ import { resolveSenderIdentity } from '../utils/sender-identity.js'
 import { prefetchQuotedMessages } from './quoted-message-prefetcher.js'
 import { formatNow, formatChannelMessageTime, resolveTimezone, formatRuntimeMs } from '../utils/time.js'
 import { renderActiveTasksSection } from './active-tasks-section.js'
-import { getAgentDataDir, getAdminDataDir, getAdminInternalTokenPath, getWorkspaceDir } from '../core/data-paths.js'
+import { getAgentDataDir, getAdminDataDir, getAdminInternalTokenPath, getWorkspaceDir, getBgEntitiesLogsDir } from '../core/data-paths.js'
 import { llmUsageToTrace } from '../core/trace-usage.js'
 import { TodoStore } from './worker-todo-store.js'
 import { createTodoTool } from './worker-todo-tool.js'
@@ -488,7 +488,7 @@ export class AgentHandler {
   /** 监视跨重启认领回来、仍存活的 shell；退出时通知（唤醒 resumed worker + 持久通知）。 */
   private readonly readoptReaper = new ReadoptReaper(
     this.bgRegistry,
-    (info) => this.notifyBgShellExit(info),
+    (info) => void this.deliverShellExitNotification(info),
   )
   /** Per-task output cursor map: key = `${taskId}:${entityId}` → byte offset */
   private readonly bgCursorMap = new Map<string, number>()
@@ -536,7 +536,7 @@ export class AgentHandler {
     void this.bgRegistry.recoverPersistent()
       .then(({ alive, deadShells }) => {
         for (const rec of deadShells) {
-          this.notifyBgShellExit({
+          void this.deliverShellExitNotification({
             entity_id: rec.entity_id,
             command: rec.command,
             status: rec.status === 'completed' ? 'completed' : 'failed',
@@ -593,18 +593,52 @@ export class AgentHandler {
     this.pendingBgNotifications.set(addressKey, list)
   }
 
+  /** 读后台 shell 磁盘日志的尾部（默认末 4KB）；失败返回空串。用于退出通知内联输出。 */
+  private async readShellLogTail(entity_id: string, maxBytes = 4000): Promise<string> {
+    try {
+      const logFile = path.join(getBgEntitiesLogsDir(), `${entity_id}.log`)
+      const stat = await fs.promises.stat(logFile)
+      const start = Math.max(0, stat.size - maxBytes)
+      const fh = await fs.promises.open(logFile, 'r')
+      try {
+        const buf = Buffer.allocUnsafe(stat.size - start)
+        await fh.read(buf, 0, buf.length, start)
+        const text = buf.toString('utf8').trim()
+        return start > 0 ? `[...前 ${start} 字节省略]\n${text}` : text
+      } finally {
+        await fh.close()
+      }
+    } catch {
+      return ''
+    }
+  }
+
   /**
-   * 通知一条「跨重启认领回来的 / 宕机期间已退出的」后台 shell 退出（R3）：
-   * - push 该 shell 所属 task 的 humanQueue：若该 task 已被 checkpoint-resume 在跑且挂起，立即唤醒（in-process）。
-   * - enqueueBgNotification(friend)：跨 turn / 下一个 task 也能收到（resumed worker 首轮会 drain，见 §3.4 修复）。
-   * 本进程自己 spawn 的 shell 不走这里（由 onShellExit 处理）。
+   * 统一的后台 shell 退出通知（Phase 2 §2.4：内联输出尾部）。
+   * 既服务本进程 spawn 的 shell（runShellWithGrace 转后台后退出），也服务跨重启 re-adopt /
+   * 宕机期间退出的 shell（reaper / recoverPersistent）。
+   * - push 该 shell 所属 task 的 humanQueue：若该 task 正挂起，立即唤醒（in-process）。
+   * - enqueueBgNotification(friend)：跨 turn / 跨重启 / 下一个 task 也能收到（resumed worker 首轮会 drain）。
+   * 退出通知**内联日志尾部**，常见场景无需再单独调 Output。
    */
-  private notifyBgShellExit(info: ReadoptedExitInfo): void {
+  private async deliverShellExitNotification(info: {
+    entity_id: string
+    command: string
+    status: 'completed' | 'failed' | 'killed'
+    exit_code: number
+    spawned_by_task_id: string
+    owner_friend_id?: string
+    runtime_ms?: number
+  }): Promise<void> {
     const command = `${info.command.slice(0, 200)}${info.command.length > 200 ? '...' : ''}`
+    const runtimeStr = info.runtime_ms !== undefined ? `, 运行 ${formatRuntimeMs(info.runtime_ms)}` : ''
+    const tail = await this.readShellLogTail(info.entity_id)
+    const tailBlock = tail
+      ? `\n--- 输出尾部 ---\n${tail}\n--- 更多用 Output("${info.entity_id}") ---`
+      : `\n用 Output("${info.entity_id}") 读取完整输出。`
     const message =
-      `Background shell ${info.entity_id} 已退出 (status=${info.status}, exit_code=${info.exit_code})。\n` +
-      `命令: ${command}\n` +
-      `用 Output("${info.entity_id}") 读取完整输出。`
+      `Background shell ${info.entity_id} 已退出 (status=${info.status}, exit_code=${info.exit_code}${runtimeStr})。\n` +
+      `命令: ${command}${tailBlock}`
     this.humanQueues.get(info.spawned_by_task_id)?.push(`[系统] ${message}`)
     if (info.owner_friend_id) {
       this.enqueueBgNotification(`friend:${info.owner_friend_id}`, message)
@@ -1140,19 +1174,18 @@ export class AgentHandler {
           channel_id: context.task_origin?.channel_id,
         }
         // push notification 接线（R1：唤醒语义统一，不再分 transient/persistent）：
-        // 后台 shell 退出时两条都发——
-        // - push 本 task humanQueue：worker 若正 wait_for_signal 挂起，立即唤醒（in-process）。
-        // - enqueueBgNotification(friend)：跨 turn / 跨重启 / 下一个 task 也能收到（持久通知）。
-        //   task 已结束时 humanQueues.get 返回 undefined（可选链 no-op），friend 通知仍投递。
+        // 委托统一的 deliverShellExitNotification——既 push 本 task humanQueue 唤醒挂起的 worker，
+        // 又 enqueueBgNotification(friend) 做持久通知，且内联日志尾部（§2.4）。
         const onShellExit: BashBgContext['onShellExit'] = (info) => {
-          const runtimeStr = formatRuntimeMs(info.runtime_ms)
-          const command = `${info.command.slice(0, 200)}${info.command.length > 200 ? '...' : ''}`
-          const message =
-            `Background shell ${info.entity_id} 已退出 (status=${info.status}, exit_code=${info.exit_code}, 运行 ${runtimeStr})。\n` +
-            `命令: ${command}\n` +
-            `用 Output("${info.entity_id}") 读取完整输出。`
-          this.humanQueues.get(task.task_id)?.push(`[系统] ${message}`)
-          this.enqueueBgNotification(`friend:${bgOwner.friend_id}`, message)
+          void this.deliverShellExitNotification({
+            entity_id: info.entity_id,
+            command: info.command,
+            status: info.status,
+            exit_code: info.exit_code,
+            spawned_by_task_id: task.task_id,
+            owner_friend_id: bgOwner.friend_id,
+            runtime_ms: info.runtime_ms,
+          })
         }
         const bgEntityCtx: BashBgContext = {
           registry: this.bgRegistry,
@@ -1860,6 +1893,10 @@ export class AgentHandler {
         this.bgCursorMap.delete(key)
       }
     }
+    // task 完成即回收名下终态 shell（记录 + 日志 + sentinel）；running 的留存（持久）。
+    void this.bgRegistry.removeTerminalShellsByTask(taskId).catch((err) => {
+      console.error(`[AgentHandler] removeTerminalShellsByTask(${taskId}) failed:`, err)
+    })
   }
 
   /**
