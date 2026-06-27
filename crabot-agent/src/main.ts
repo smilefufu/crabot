@@ -10,6 +10,7 @@ import { ConfigLoader } from './core/config-loader.js'
 import { startHeapSampler } from './diagnostics/heap-sampler.js'
 import { checkFdaIfEnabled } from './engine/tools/fda-check.js'
 import type { UnifiedAgentConfig } from './types.js'
+import { getAgentDataDir } from './core/data-paths.js'
 
 startHeapSampler({ intervalMs: 30_000 })
 
@@ -19,7 +20,7 @@ checkFdaIfEnabled((msg) => console.log(msg))
 
 // 未捕获错误兜底：写到 fatal.log 并退出（让 MM 看到 code≠0 → status=error）
 // 此前 agent 静默猝死无栈，是因为 process.on('unhandledRejection'/'uncaughtException') 缺失
-const fatalLogPath = path.join(process.env.DATA_DIR ?? './data', 'fatal.log')
+const fatalLogPath = path.join(getAgentDataDir(), 'fatal.log')
 function writeFatal(kind: string, err: unknown, extra?: Record<string, unknown>): void {
   const ts = new Date().toISOString()
   const stack = err instanceof Error ? (err.stack ?? err.message) : String(err)

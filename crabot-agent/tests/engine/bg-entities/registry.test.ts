@@ -57,15 +57,15 @@ let registry: BgEntityRegistry
 
 beforeEach(() => {
   tmpDir = mkdtempSync(path.join(tmpdir(), 'bg-registry-test-'))
-  // Override DATA_DIR so getBgEntitiesRegistryPath() resolves to our tmpDir
-  process.env.DATA_DIR = tmpDir
+  // Override CRABOT_AGENT_DATA_DIR so getBgEntitiesRegistryPath() resolves to our tmpDir
+  process.env.CRABOT_AGENT_DATA_DIR = tmpDir
   // registryPath = <tmpDir>/bg-entities/registry.json
   registry = new BgEntityRegistry()
 })
 
 afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true })
-  delete process.env.DATA_DIR
+  delete process.env.CRABOT_AGENT_DATA_DIR
 })
 
 describe('BgEntityRegistry', () => {

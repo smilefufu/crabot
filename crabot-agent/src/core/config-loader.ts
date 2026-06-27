@@ -113,7 +113,6 @@ export class ConfigLoader {
       protocol_version: '0.2.0',
       port: process.env.Crabot_PORT ? parseInt(process.env.Crabot_PORT, 10) : 19002,
       orchestration: {
-        admin_config_path: process.env.DATA_DIR || './data',
         front_context_recent_messages_window_hours: 6,
         front_context_recent_messages_max_cap: 50,
         front_context_short_term_memory_window_hours: 12,
@@ -147,7 +146,6 @@ export class ConfigLoader {
       protocol_version: '0.2.0',
       port: process.env.Crabot_PORT ? parseInt(process.env.Crabot_PORT, 10) : 19002,
       orchestration: {
-        admin_config_path: process.env.DATA_DIR || './data',
         front_context_recent_messages_window_hours: 6,
         front_context_recent_messages_max_cap: 50,
         front_context_short_term_memory_window_hours: 12,

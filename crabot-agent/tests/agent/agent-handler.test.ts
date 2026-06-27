@@ -751,8 +751,8 @@ describe('AgentHandler.updateSkills hot-reload', () => {
 
   beforeEach(() => {
     dataDir = mkdtempSync(join(tmpdir(), 'worker-skills-test-'))
-    originalDataDir = process.env.DATA_DIR
-    process.env.DATA_DIR = dataDir
+    originalDataDir = process.env.CRABOT_AGENT_DATA_DIR
+    process.env.CRABOT_AGENT_DATA_DIR = dataDir
     // admin 端 skill 源目录 —— 模拟 admin 把 SKILL.md 落在 data 目录后传 skill_dir 给 agent
     skillSourceRoot = mkdtempSync(join(tmpdir(), 'admin-skills-src-'))
   })
@@ -761,9 +761,9 @@ describe('AgentHandler.updateSkills hot-reload', () => {
     rmSync(dataDir, { recursive: true, force: true })
     rmSync(skillSourceRoot, { recursive: true, force: true })
     if (originalDataDir === undefined) {
-      delete process.env.DATA_DIR
+      delete process.env.CRABOT_AGENT_DATA_DIR
     } else {
-      process.env.DATA_DIR = originalDataDir
+      process.env.CRABOT_AGENT_DATA_DIR = originalDataDir
     }
   })
 
@@ -874,8 +874,8 @@ describe('AgentHandler bg-entities lifecycle', () => {
 
   beforeEach(() => {
     dataDir = mkdtempSync(join(tmpdir(), 'worker-bg-lifecycle-test-'))
-    originalDataDir = process.env.DATA_DIR
-    process.env.DATA_DIR = dataDir
+    originalDataDir = process.env.CRABOT_AGENT_DATA_DIR
+    process.env.CRABOT_AGENT_DATA_DIR = dataDir
     handler = undefined
   })
 
@@ -883,14 +883,14 @@ describe('AgentHandler bg-entities lifecycle', () => {
     handler?.dispose()
     rmSync(dataDir, { recursive: true, force: true })
     if (originalDataDir === undefined) {
-      delete process.env.DATA_DIR
+      delete process.env.CRABOT_AGENT_DATA_DIR
     } else {
-      process.env.DATA_DIR = originalDataDir
+      process.env.CRABOT_AGENT_DATA_DIR = originalDataDir
     }
   })
 
   function registryPath() {
-    // Must match getBgEntitiesRegistryPath() = DATA_DIR/bg-entities/registry.json
+    // Must match getBgEntitiesRegistryPath() = CRABOT_AGENT_DATA_DIR/bg-entities/registry.json
     return join(dataDir, 'bg-entities', 'registry.json')
   }
 
@@ -1014,8 +1014,8 @@ describe('AgentHandler bg-entities admin RPC', () => {
 
   beforeEach(() => {
     dataDir = mkdtempSync(join(tmpdir(), 'worker-bg-admin-test-'))
-    originalDataDir = process.env.DATA_DIR
-    process.env.DATA_DIR = dataDir
+    originalDataDir = process.env.CRABOT_AGENT_DATA_DIR
+    process.env.CRABOT_AGENT_DATA_DIR = dataDir
 
     const sdkEnv = {
       modelId: 'test-model',
@@ -1029,9 +1029,9 @@ describe('AgentHandler bg-entities admin RPC', () => {
     wh.dispose()
     rmSync(dataDir, { recursive: true, force: true })
     if (originalDataDir === undefined) {
-      delete process.env.DATA_DIR
+      delete process.env.CRABOT_AGENT_DATA_DIR
     } else {
-      process.env.DATA_DIR = originalDataDir
+      process.env.CRABOT_AGENT_DATA_DIR = originalDataDir
     }
   })
 

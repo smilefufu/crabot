@@ -10,9 +10,6 @@ port: 19300
 
 # 编排层配置
 orchestration:
-  # Admin 共享存储路径（用于直接访问 Friend 数据）
-  admin_config_path: ../crabot-admin/data/admin.db
-
   # Session 状态 TTL (秒)
   session_state_ttl: 300
 

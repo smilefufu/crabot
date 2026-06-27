@@ -523,7 +523,9 @@ export function getBuiltinSubAgents(): SubAgentRegistryEntry[] {
       model_id: null,
       model_role: 'powerful',
       builtin_capabilities: { file_system: true, shell: true, task_intel: true, crab_memory: true, crab_messaging: false },
-      allowed_mcp_server_ids: [],
+      // lsp：探代码库找定义/引用/符号；git：读 status/diff/log 理解近期改动惯例（写操作由 git-write-fence 拦）。
+      // 注意：白名单按 MCP server **name** 匹配（运行时工具名 mcp__<name>__*），不是 id。
+      allowed_mcp_server_ids: ['lsp', 'git'],
       allowed_skill_ids: [BUILTIN_SKILL_IDS.writingPlans],
       // 全局对齐 300：避免触顶 fail loud；任务过载靠 BLOCKED + TASK_TOO_LARGE 信号上报由 main 拆细。
       max_turns: 300,
@@ -545,8 +547,12 @@ export function getBuiltinSubAgents(): SubAgentRegistryEntry[] {
       model_id: null,
       model_role: 'cost_effective',
       builtin_capabilities: { file_system: true, shell: true, task_intel: false, crab_memory: false, crab_messaging: false },
-      allowed_mcp_server_ids: [],
+      // lsp：改完代码即时拿诊断/跳定义，弱模型尤其受益；git：读改动核对 FILES_CHANGED（写操作由 git-write-fence 拦）。
+      allowed_mcp_server_ids: ['lsp', 'git'],
       allowed_skill_ids: [BUILTIN_SKILL_IDS.systematicDebugging, BUILTIN_SKILL_IDS.verificationBeforeCompletion],
+      // lsp_diagnostics：每次 Write/Edit 后自动跑 LSP 诊断 push，有 error 级当场 block 让弱模型自修；
+      // 不含 compile-check / 测试 prompt（那两件由 code_writer 自跑 Verification + 下游 reviewer/auditor 兜底）。
+      hook_preset: 'lsp_diagnostics',
       // 实写阶段 read/edit/test/grep 反复，120 实战仍易触顶（trace bbcbe0fc 案例：plan 8 task/34 step，
       // ~18% turn 被长 wait 轮询吃掉），上调到 300。参考 Claude Code FORK_AGENT=200，我们任务粒度更大。
       max_turns: 300,
@@ -574,7 +580,10 @@ export function getBuiltinSubAgents(): SubAgentRegistryEntry[] {
         crab_memory: true,
         crab_messaging: false,
       },
-      allowed_mcp_server_ids: [],
+      // scrapling：网络/学术调研（workflow 明列要用 web mcp，此前白名单为空是个 bug，调研根本调不到）；
+      // lsp/git：代码库探索找定义/引用 + 读 git 历史定位 bug 根因（git 写操作由 git-write-fence 拦）。
+      // scrapling 默认 disabled，需在 MCP Servers 页启用后才会出现在工具盘。
+      allowed_mcp_server_ids: ['scrapling', 'lsp', 'git'],
       allowed_skill_ids: [],
       // 全局对齐 300：避免触顶 fail loud；任务过载靠 BLOCKED + TASK_TOO_LARGE 信号上报由 main 拆细。
       max_turns: 300,
@@ -602,7 +611,8 @@ export function getBuiltinSubAgents(): SubAgentRegistryEntry[] {
         crab_memory: false,
         crab_messaging: false,
       },
-      allowed_mcp_server_ids: [],
+      // git：读 diff/status 作为"worker 实际改了什么"的客观采证（不信 worker 自述）；写操作由 git-write-fence 拦。
+      allowed_mcp_server_ids: ['git'],
       allowed_skill_ids: [BUILTIN_SKILL_IDS.verificationBeforeCompletion],
       // 全局对齐 300：避免触顶 fail loud；任务过载靠 BLOCKED + TASK_TOO_LARGE 信号上报由 main 拆细。
       max_turns: 300,
@@ -633,7 +643,8 @@ export function getBuiltinSubAgents(): SubAgentRegistryEntry[] {
         crab_memory: false,
         crab_messaging: false,
       },
-      allowed_mcp_server_ids: [],
+      // git：读 status/diff 拿真实改动文件清单，直接服务"不多做/文件越界"核查（写操作由 git-write-fence 拦）。
+      allowed_mcp_server_ids: ['git'],
       allowed_skill_ids: [],
       // 全局对齐 300：避免触顶 fail loud；任务过载靠 BLOCKED + TASK_TOO_LARGE 信号上报由 main 拆细。
       max_turns: 300,
@@ -661,7 +672,9 @@ export function getBuiltinSubAgents(): SubAgentRegistryEntry[] {
         crab_memory: false,
         crab_messaging: false,
       },
-      allowed_mcp_server_ids: [],
+      // lsp：find_references/document_symbols 精准判"死代码/未引用"，get_diagnostics 吐 unused 告警；
+      // git：读 diff 聚焦只审改动（写操作由 git-write-fence 拦）。
+      allowed_mcp_server_ids: ['lsp', 'git'],
       allowed_skill_ids: [],
       // 全局对齐 300：避免触顶 fail loud；任务过载靠 BLOCKED + TASK_TOO_LARGE 信号上报由 main 拆细。
       max_turns: 300,

@@ -238,6 +238,7 @@ import {
   formatMissingIdResponse,
 } from './goal-slash.js'
 import { readCredentials, verifyPassword, rotateCredentials, writeCredentials } from './credentials.js'
+import { getAdminLogsDir } from './core/data-paths.js'
 
 // ============================================================================
 // JWT 工具函数
@@ -9452,9 +9453,7 @@ export class AdminModule extends ModuleBase {
       const lines = parseInt(url.searchParams.get('tail') ?? '500', 10)
       const cappedLines = Math.min(Math.max(lines, 1), 5000)
       // MM 子进程日志统一在 ${DATA_DIR}/logs/<id>.log（见 crabot-core/index.ts spawn）
-      // admin 自己的 DATA_DIR 是 ${DATA_DIR}/admin，所以要 resolve 到上一级
-      const dataDir = process.env.DATA_DIR ?? './data'
-      const logsDir = path.resolve(dataDir, '..', 'logs')
+      const logsDir = getAdminLogsDir()
       const logFile = path.join(logsDir, `${moduleId}.log`)
       const content = await tailLogFile(logFile, cappedLines)
       res.writeHead(200, { 'Content-Type': 'application/json' })

@@ -74,6 +74,7 @@ import type { SubAgentTraceConfig } from '../engine/sub-agent.js'
 import { createDelegateTaskTool } from './delegate-task-tool.js'
 import type { RunSubAgentFn, RunSubAgentInput } from './delegate-task-tool.js'
 import { createSubagentCoordinatorTools } from './subagent-coordinator-tools.js'
+import { createRestartInstanceTool } from './restart-instance-tool.js'
 import { buildSubAgentFailureOutput } from './subagent-error-classifier.js'
 import { filterToolsForSubAgent } from './subagent-tool-filter.js'
 import { assembleSubAgentPrompt } from './subagent-prompt-assembler.js'
@@ -84,7 +85,7 @@ import {
 } from '../prompts/agent-sections.js'
 import type { SubAgentConfig } from '../types.js'
 import { HumanMessageQueue } from '../engine/human-message-queue.js'
-import { createCodingExpertHookRegistry, createCliPermissionHook, createSkillDirFenceHook } from '../hooks/defaults.js'
+import { createSubAgentHookRegistry, createCliPermissionHook, createSkillDirFenceHook } from '../hooks/defaults.js'
 import { HookRegistry } from '../hooks/hook-registry.js'
 import type { ContentReviewer } from '../hooks/types.js'
 import { reviewCliContent } from './cli-content-reviewer.js'
@@ -93,7 +94,7 @@ import { resolveSenderIdentity } from '../utils/sender-identity.js'
 import { prefetchQuotedMessages } from './quoted-message-prefetcher.js'
 import { formatNow, formatChannelMessageTime, resolveTimezone, formatRuntimeMs } from '../utils/time.js'
 import { renderActiveTasksSection } from './active-tasks-section.js'
-import { getAgentDataDir, getWorkspaceDir } from '../core/data-paths.js'
+import { getAgentDataDir, getAdminDataDir, getAdminInternalTokenPath, getWorkspaceDir } from '../core/data-paths.js'
 import { llmUsageToTrace } from '../core/trace-usage.js'
 import { TodoStore } from './worker-todo-store.js'
 import { createTodoTool } from './worker-todo-tool.js'
@@ -1232,6 +1233,10 @@ export class AgentHandler {
             bgRegistry: this.bgRegistry,
             killBgEntity: (entity_id) => this.killBgEntity(entity_id),
           }))
+          tools.push(createRestartInstanceTool({
+            crabotHome: process.env.CRABOT_HOME ?? path.resolve(__dirname, '../..'),
+            adminDataDir: getAdminDataDir(),
+          }))
         }
 
         // 3k2. wait_for_signal — 通用挂起原语，总是注入
@@ -1410,8 +1415,7 @@ export class AgentHandler {
       // 真正的权限边界在 cli-permission-gate hook（按 effective cli_access 判定）。
       // 不注入会让群聊/非 master 任务的 read 类 CLI（如 'crabot mcp list'）也跑不起来。
       if (!process.env.CRABOT_TOKEN) {
-        const dataDir = process.env.DATA_DIR ?? './data'
-        const tokenPath = path.join(dataDir, 'admin', 'internal-token')
+        const tokenPath = getAdminInternalTokenPath()
         try {
           const token = fs.readFileSync(tokenPath, 'utf-8').trim()
           process.env.CRABOT_TOKEN = token
@@ -2896,11 +2900,14 @@ export class AgentHandler {
     // 3. build adapter from subagent's resolved model
     const subAdapter = adapterFromModel(subagent.model)
 
-    // 4. resolve hook registry based on hook_preset
-    const hookRegistry = subagent.hook_preset === 'coding_expert'
-      ? createCodingExpertHookRegistry()
-      : undefined
-    const lspManager = hookRegistry ? this.lspManager : undefined
+    // 4. resolve hook registry：lsp_diagnostics 预设（post-edit 诊断 push） + git 写操作 fence（按能力叠加）
+    const wantsLspDiagnostics = subagent.hook_preset === 'lsp_diagnostics'
+    const hookRegistry = createSubAgentHookRegistry({
+      lspDiagnostics: wantsLspDiagnostics,
+      gitWriteFence: subagent.allowed_mcp_server_ids.includes('git'),
+    })
+    // lspManager 仅 lsp-diagnostics 钩子需要；git-fence 不依赖它。
+    const lspManager = wantsLspDiagnostics ? this.lspManager : undefined
 
     // 5. trace stitching: create sub-trace linked to parent trace
     const tc = deps.traceConfig

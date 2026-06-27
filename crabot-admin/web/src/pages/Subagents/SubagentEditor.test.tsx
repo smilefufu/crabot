@@ -153,4 +153,23 @@ describe('SubagentEditor', () => {
       expect(onSaved).toHaveBeenCalled()
     })
   })
+
+  it('MCP 白名单勾选存 server name 而非 id（运行时按 name 过滤）', async () => {
+    // 内置 server id 每实例随机，运行时工具名是 mcp__<name>__*，白名单必须存 name 才能匹配。
+    ;(mcpService.list as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: 'random-id-xyz', name: 'git', enabled: true },
+    ])
+    renderEditor()
+    const nameInput = screen.getByLabelText('名称') as HTMLInputElement
+    fireEvent.change(nameInput, { target: { value: 'my_new_one' } })
+    fireEvent.click(screen.getByText('MCP + Skill 白名单'))
+    const gitCheckbox = await screen.findByLabelText('git')
+    fireEvent.click(gitCheckbox)
+    fireEvent.click(screen.getByText('保存'))
+    await waitFor(() => {
+      expect(subagentService.create).toHaveBeenCalledWith(
+        expect.objectContaining({ allowed_mcp_server_ids: ['git'] }),
+      )
+    })
+  })
 })

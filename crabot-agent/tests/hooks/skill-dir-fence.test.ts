@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { getInternalHandler } from '../../src/hooks/internal-handlers.js'
 import type { InternalHandlerContext } from '../../src/hooks/types.js'
 
-// agent 子进程的 DATA_DIR 形态：<root>/data/agent；admin skills 在 <root>/data/admin/skills
+// agent 数据目录（由 CRABOT_AGENT_DATA_DIR 注入，等价于 <root>/data/agent）；
+// admin skills 在同级 <root>/data/admin/skills（通过 getAdminDataDir() = join(agentDir, '..', 'admin') 推导）
 const AGENT_DATA_DIR = '/var/crabot/data/agent'
 const ADMIN_SKILLS_DIR = '/var/crabot/data/admin/skills'
 
@@ -16,7 +17,7 @@ function makeCtx(): InternalHandlerContext {
 
 describe('skill-dir-fence hook', () => {
   beforeEach(() => {
-    vi.stubEnv('DATA_DIR', AGENT_DATA_DIR)
+    vi.stubEnv('CRABOT_AGENT_DATA_DIR', AGENT_DATA_DIR)
   })
 
   afterEach(() => {

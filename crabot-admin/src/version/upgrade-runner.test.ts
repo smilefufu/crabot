@@ -1,8 +1,8 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { readUpgradeStatus, canUpgrade, isUpgradeInProgress, writeUpgradeStarting } from './upgrade-runner.js'
+import { readUpgradeStatus, canUpgrade, isUpgradeInProgress, writeUpgradeStarting, startUpgrade } from './upgrade-runner.js'
 import type { VersionState } from './types.js'
 
 function tmpDataDir(): string {
@@ -83,5 +83,35 @@ describe('canUpgrade', () => {
   })
   it('无可用更新 → 拒绝', () => {
     expect(canUpgrade(base({ upgrade_available: false })).ok).toBe(false)
+  })
+})
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+  return {
+    ...actual,
+    spawn: vi.fn(() => ({ on: () => {}, unref: () => {} })),
+  }
+})
+
+describe('startUpgrade：不再覆盖 DATA_DIR（已全局统一为顶层）', () => {
+  let spawnMock: ReturnType<typeof vi.fn>
+
+  beforeEach(async () => {
+    const cp = await import('node:child_process')
+    spawnMock = cp.spawn as unknown as ReturnType<typeof vi.fn>
+    spawnMock.mockClear()
+  })
+
+  afterEach(() => {
+    delete process.env.DATA_DIR
+  })
+
+  it('spawn 的 env.DATA_DIR 等于进程当前 DATA_DIR，不做 ../ 偏移', async () => {
+    process.env.DATA_DIR = '/home/u/.crabot/data'
+    const dir = tmpDataDir()  // .../admin
+    startUpgrade('/repo', dir, 'v1')
+    const passedEnv = (spawnMock.mock.calls[0][2] as { env: Record<string, string> }).env
+    expect(passedEnv.DATA_DIR).toBe('/home/u/.crabot/data')
   })
 })

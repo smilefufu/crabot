@@ -58,10 +58,9 @@ export function startUpgrade(crabotHome: string, dataDir: string, fromVersion?: 
     cwd: crabotHome,
     detached: true,
     stdio: ['ignore', logFd, logFd],
-    // admin 进程继承的 DATA_DIR 是模块级（.../data/admin）；ui-upgrade 会把它当顶层再 join('admin')，
-    // 导致 status 写到 .../data/admin/admin、start -d 也去错层级找 credentials（误报「无密码」、停机后起不来）。
-    // 这里显式还原顶层 DATA_DIR（dataDir 的上一级），让 ui-upgrade 与 admin / CLI 的路径口径一致。
-    env: { ...process.env, DATA_DIR: join(dataDir, '..') },
+    // DATA_DIR 已全局统一为顶层（admin 进程继承到的 DATA_DIR 即顶层），
+    // ui-upgrade 直接继承即正确，无需覆盖。
+    env: process.env,
   })
   // 必须在 unref 前挂 error 监听：spawn 失败异步 emit 'error'，
   // 任何 await 间隙都会让它漏成 uncaughtException 干掉主进程。

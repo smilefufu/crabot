@@ -2140,7 +2140,7 @@ export interface SubAgentBase {
 
   /** subagent engine 最大轮数。默认 20。0 表示无限制（不推荐） */
   max_turns: number
-  /** 代码层注册的 hook bundle 名（可选）。当前唯一已知值：'coding_expert' */
+  /** 代码层注册的 hook bundle 名（可选）。当前唯一已知值：'lsp_diagnostics'（post-edit LSP 诊断 push） */
   hook_preset?: string
 
   /** 系统专用：仅由系统隐式触发（如 send_message(intent='final') 的 audit gate），

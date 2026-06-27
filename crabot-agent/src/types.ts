@@ -21,8 +21,6 @@ import type { EngineMessage, EngineMessagesRef } from './engine/types.js'
 // ============================================================================
 
 export interface OrchestrationConfig {
-  /** Admin 共享存储路径 */
-  admin_config_path: string
   /** Front Agent 近期聊天记录的时间窗口（小时） */
   front_context_recent_messages_window_hours: number
   /** Front Agent 近期聊天记录的硬上限（防止 busy 群爆 prompt） */
@@ -102,7 +100,7 @@ export interface SubAgentConfig {
   allowed_skill_ids: string[]
 
   max_turns: number
-  /** 代码内置 hook bundle 名（如 'coding_expert'） */
+  /** 代码内置 hook bundle 名（如 'lsp_diagnostics'：post-edit LSP 诊断 push） */
   hook_preset?: string
   /** 系统专用：仅由系统隐式触发（如 goal_auditor 由引擎 endTurnGate 触发），
    *  不出现在 delegate_task 工具的 enum / description 里，worker 无法主动调。

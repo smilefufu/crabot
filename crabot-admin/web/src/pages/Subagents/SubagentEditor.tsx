@@ -514,12 +514,14 @@ const WhitelistTab: React.FC<{
     })
   }, [])
 
-  const toggleMcp = (id: string) =>
+  // 白名单存 MCP server **name**，不是 id：运行时工具名是 mcp__<name>__*，agent 侧 subagent-tool-filter
+  // 按 name 过滤；内置 server 的 id 还是每实例随机的（generateId），存 id 永远匹配不上。
+  const toggleMcp = (name: string) =>
     setForm((f) => ({
       ...f,
-      allowed_mcp_server_ids: f.allowed_mcp_server_ids.includes(id)
-        ? f.allowed_mcp_server_ids.filter((x) => x !== id)
-        : [...f.allowed_mcp_server_ids, id],
+      allowed_mcp_server_ids: f.allowed_mcp_server_ids.includes(name)
+        ? f.allowed_mcp_server_ids.filter((x) => x !== name)
+        : [...f.allowed_mcp_server_ids, name],
     }))
 
   const toggleSkill = (id: string) =>
@@ -544,8 +546,8 @@ const WhitelistTab: React.FC<{
           >
             <input
               type="checkbox"
-              checked={form.allowed_mcp_server_ids.includes(m.id)}
-              onChange={() => toggleMcp(m.id)}
+              checked={form.allowed_mcp_server_ids.includes(m.name)}
+              onChange={() => toggleMcp(m.name)}
             />
             <span>{m.name}</span>
           </label>

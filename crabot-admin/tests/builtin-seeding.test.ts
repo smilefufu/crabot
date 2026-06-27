@@ -121,6 +121,11 @@ describe('getBuiltinSubAgents', () => {
     expect(w.allowed_skill_ids).toContain(BUILTIN_SKILL_IDS.verificationBeforeCompletion)
   })
 
+  it('code_writer 挂 lsp_diagnostics 预设（post-edit 自动诊断 push）', () => {
+    const w = getBuiltinSubAgents().find((s) => s.name === 'code_writer')!
+    expect(w.hook_preset).toBe('lsp_diagnostics')
+  })
+
   it('research_collector 使用 vision role + 通用调查员 capabilities 全开', () => {
     // memory: feedback_research_collector_is_general — 2026-05-21 把 capabilities 全开恢复
     // 原意（通用调查员，不是 web 专科），断言同步跟上代码 entry。
@@ -128,7 +133,22 @@ describe('getBuiltinSubAgents', () => {
     expect(r.model_role).toBe('vision')
     expect(r.builtin_capabilities.file_system).toBe(true)
     expect(r.builtin_capabilities.crab_memory).toBe(true)
-    expect(r.allowed_mcp_server_ids).toEqual([])
+    // scrapling 是调研用的 web mcp（workflow 明列要用），此前白名单为空导致调研根本调不到，已修。
+    expect(r.allowed_mcp_server_ids).toContain('scrapling')
+  })
+
+  it('allowed_mcp_server_ids 按 MCP server name 开放（lsp/git/scrapling 内置 MCP）', () => {
+    // 注意：白名单按 server **name** 匹配（运行时工具名 mcp__<name>__*），不是 id；
+    // 内置 server 的 id 每实例随机（generateId），代码只能按 name 引用。
+    const byName = Object.fromEntries(
+      getBuiltinSubAgents().map((s) => [s.name, s.allowed_mcp_server_ids]),
+    )
+    expect(byName.code_planner).toEqual(['lsp', 'git'])
+    expect(byName.code_writer).toEqual(['lsp', 'git'])
+    expect(byName.research_collector).toEqual(['scrapling', 'lsp', 'git'])
+    expect(byName.goal_auditor).toEqual(['git'])
+    expect(byName.spec_reviewer).toEqual(['git'])
+    expect(byName.code_quality_reviewer).toEqual(['lsp', 'git'])
   })
 })
 

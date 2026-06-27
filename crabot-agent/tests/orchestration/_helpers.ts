@@ -12,7 +12,6 @@ export function createMockRpcClient() {
 }
 
 export const defaultOrchestrationConfig: OrchestrationConfig = {
-  admin_config_path: '',
   front_context_recent_messages_window_hours: 6,
   front_context_recent_messages_max_cap: 50,
   front_context_short_term_memory_window_hours: 12,

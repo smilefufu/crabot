@@ -2,7 +2,20 @@ import path from 'node:path'
 import { homedir } from 'node:os'
 
 export function getAgentDataDir(): string {
-  return path.resolve(process.env.DATA_DIR ?? './data')
+  // CRABOT_AGENT_DATA_DIR（模块级专用 env，MM 注入）优先；
+  // 仅有顶层 DATA_DIR 时 join('agent') 推导；都没有则 ./data/agent。
+  // 注意：DATA_DIR 全局语义=顶层，此处绝不直接 resolve(DATA_DIR)。
+  if (process.env.CRABOT_AGENT_DATA_DIR) {
+    return path.resolve(process.env.CRABOT_AGENT_DATA_DIR)
+  }
+  if (process.env.DATA_DIR) {
+    return path.resolve(process.env.DATA_DIR, 'agent')
+  }
+  return path.resolve('./data/agent')
+}
+
+export function getAgentLogsDir(): string {
+  return path.join(getAgentDataDir(), 'logs')
 }
 
 export function getAgentTraceDir(): string {

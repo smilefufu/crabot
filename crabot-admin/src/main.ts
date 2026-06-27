@@ -4,11 +4,12 @@
 
 import path from 'node:path'
 import AdminModule from './index.js'
+import { getAdminDataDir } from './core/data-paths.js'
 
 // CommonJS 兼容的 __dirname
 // 在编译后的 CommonJS 中，__dirname 是自动可用的
 // 这里使用 process.cwd() 作为后备
-const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data')
+const dataDir = getAdminDataDir()
 
 async function main(): Promise<void> {
   // Admin 模块配置

@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import v8 from 'node:v8'
+import { getAgentLogsDir } from '../core/data-paths.js'
 
 type ExtrasProvider = () => Record<string, unknown>
 
@@ -20,7 +21,7 @@ interface StartOptions {
 export function startHeapSampler(opts: StartOptions = {}): SamplerHandle {
   const intervalMs = opts.intervalMs ?? 30_000
   const highWaterRatio = opts.highWaterRatio ?? 0.8
-  const logDir = path.join(process.env.DATA_DIR ?? './data', 'logs')
+  const logDir = getAgentLogsDir()
   const logPath = path.join(logDir, 'heap-stats.log')
 
   try {

@@ -52,7 +52,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { McpConnector } from './agent/mcp-connector.js'
 import { createCrabMessagingServer, type PathMapping, type TaskContext } from './mcp/crab-messaging.js'
 import { TraceStore } from './core/trace-store.js'
-import { getAgentTraceDir, getWorkspaceDir } from './core/data-paths.js'
+import { getAgentTraceDir, getAgentLogsDir, getWorkspaceDir } from './core/data-paths.js'
 import { PromptManager } from './prompt-manager.js'
 import { createLSPManager, type LSPManager } from './lsp/lsp-manager.js'
 import type { BgEntityRecord, BgEntityStatus, BgEntityType } from './engine/bg-entities/types.js'
@@ -2844,7 +2844,7 @@ export class UnifiedAgent extends ModuleBase {
       if (lag > this.peakEventLoopLagMs) this.peakEventLoopLagMs = lag
       if (lag > UnifiedAgent.WATCHDOG_LAG_WARN_MS) {
         try {
-          const logDir = path.join(process.env.DATA_DIR ?? './data', 'logs')
+          const logDir = getAgentLogsDir()
           fs.mkdirSync(logDir, { recursive: true })
           const line = `[${new Date(now).toISOString()}] lag_ms=${lag} active_tasks=${this.agentHandler?.getActiveTaskCount() ?? 0}\n`
           fs.appendFileSync(path.join(logDir, UnifiedAgent.WATCHDOG_LOG_FILE), line, 'utf-8')
