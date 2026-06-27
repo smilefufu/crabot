@@ -595,21 +595,25 @@ export class AgentHandler {
 
   /** 读后台 shell 磁盘日志的尾部（默认末 4KB）；失败返回空串。用于退出通知内联输出。 */
   private async readShellLogTail(entity_id: string, maxBytes = 4000): Promise<string> {
+    const logFile = path.join(getBgEntitiesLogsDir(), `${entity_id}.log`)
+    let fh: Awaited<ReturnType<typeof fs.promises.open>>
     try {
-      const logFile = path.join(getBgEntitiesLogsDir(), `${entity_id}.log`)
-      const stat = await fs.promises.stat(logFile)
-      const start = Math.max(0, stat.size - maxBytes)
-      const fh = await fs.promises.open(logFile, 'r')
-      try {
-        const buf = Buffer.allocUnsafe(stat.size - start)
-        await fh.read(buf, 0, buf.length, start)
-        const text = buf.toString('utf8').trim()
-        return start > 0 ? `[...前 ${start} 字节省略]\n${text}` : text
-      } finally {
-        await fh.close()
-      }
+      fh = await fs.promises.open(logFile, 'r')
     } catch {
       return ''
+    }
+    try {
+      // 只读尾部 maxBytes（避免把超大日志整读进内存）；size 取自已开 fd，省一次 stat syscall。
+      const { size } = await fh.stat()
+      const start = Math.max(0, size - maxBytes)
+      const buf = Buffer.allocUnsafe(size - start)
+      await fh.read(buf, 0, buf.length, start)
+      const text = buf.toString('utf8').trim()
+      return start > 0 ? `[...前 ${start} 字节省略]\n${text}` : text
+    } catch {
+      return ''
+    } finally {
+      await fh.close()
     }
   }
 
@@ -643,6 +647,14 @@ export class AgentHandler {
     if (info.owner_friend_id) {
       this.enqueueBgNotification(`friend:${info.owner_friend_id}`, message)
     }
+  }
+
+  /**
+   * 本 task 对应的 bg-notification 地址 key：`friend:<sender_friend.id 或 __system_<session>>`。
+   * onShellExit 入队、各处 drain 共用此 key，保证投递/读取口径一致。
+   */
+  private bgFriendKey(context: WorkerAgentContext): string {
+    return `friend:${context.sender_friend?.id ?? `__system_${context.task_origin?.session_id ?? 'unknown'}`}`
   }
 
   /** Drain 并返回 wrapped 的 <bg-notification> 块（已包标签）。无则返回空串。 */
@@ -752,9 +764,7 @@ export class AgentHandler {
       // 里 buildTaskMessage 的 friend 队列 drain 被丢弃（drain-and-discard）。这里在 resume 装配处
       // 主动 drain 一次并注入首轮消息，否则宕机期间到达的 bg-notification（如 re-adopt 的 shell 退出）
       // 会丢失，resumed worker 可能等一个早已到达的信号而永久挂死。
-      const resumeBgNotif = this.drainBgNotifications(
-        `friend:${context.sender_friend?.id ?? `__system_${context.task_origin?.session_id ?? 'unknown'}`}`,
-      )
+      const resumeBgNotif = this.drainBgNotifications(this.bgFriendKey(context))
       // 唤醒消息只注入一次（resume 首轮）；后续 waiting 续跑沿用现有重设逻辑。
       // bg-notification 必须**并入** wakeup 这条 user message，不能另起一条——否则 checkpoint 末尾
       // 若是 assistant 消息，会出现连续两条 user，违反 Anthropic 的 user/assistant 严格交替。
@@ -1384,9 +1394,7 @@ export class AgentHandler {
       } else {
         // 拼接 bg-notification：上一次该 friend 留下的 bg entity exit 等事件
         taskMessage = await this.buildTaskMessage(task, context)
-        const ownerFriendId = context.sender_friend?.id
-          ?? `__system_${context.task_origin?.session_id ?? 'unknown'}`
-        const bgNotifBlock = this.drainBgNotifications(`friend:${ownerFriendId}`)
+        const bgNotifBlock = this.drainBgNotifications(this.bgFriendKey(context))
         if (bgNotifBlock) {
           if (typeof taskMessage === 'string') {
             taskMessage = `${bgNotifBlock}\n\n${taskMessage}`

@@ -196,34 +196,13 @@ export class BgEntityRegistry {
   }
 
   async gcDeadEntities(now: Date): Promise<{ removed: string[] }> {
-    const removed: string[] = []
     const cutoffMs = now.getTime() - BG_ENTITY_GC_AFTER_DAYS * 24 * 60 * 60 * 1000
-
-    await this.mutex.run(async () => {
-      const file = await this.readFile()
-      const entries: Record<string, BgEntityRecord> = { ...file.entities }
-
-      for (const [id, rec] of Object.entries(entries)) {
-        if (rec.status === 'running') continue
-
-        const lastActivityMs = new Date(rec.last_activity_at).getTime()
-        const endedMs = rec.ended_at ? new Date(rec.ended_at).getTime() : 0
-        const latestMs = Math.max(lastActivityMs, endedMs)
-
-        if (latestMs < cutoffMs) {
-          if (rec.type === 'shell') await this.unlinkShellFiles(rec)
-          delete entries[id]
-          removed.push(id)
-        }
-      }
-
-      // 跳过无操作时的写盘——既减少不必要的 IO，也避免在没有 registry.json 的
-      // 干净环境（测试 / 全新 worker 启动）触发 ENOENT 噪声
-      if (removed.length > 0) {
-        await this.writeAtomic({ entities: entries })
-      }
+    const removed = await this.deleteEntriesWhere((rec) => {
+      if (rec.status === 'running') return false
+      const lastActivityMs = new Date(rec.last_activity_at).getTime()
+      const endedMs = rec.ended_at ? new Date(rec.ended_at).getTime() : 0
+      return Math.max(lastActivityMs, endedMs) < cutoffMs
     })
-
     return { removed }
   }
 
@@ -233,16 +212,27 @@ export class BgEntityRegistry {
    * （7d gcDeadEntities 只作跨 task / 孤儿兜底）。
    */
   async removeTerminalShellsByTask(taskId: string): Promise<string[]> {
+    return this.deleteEntriesWhere(
+      (rec) => rec.type === 'shell' && rec.spawned_by_task_id === taskId && rec.status !== 'running',
+    )
+  }
+
+  /**
+   * 删除所有满足 predicate 的实体（记录 + shell 的日志/sentinel 文件），返回被删 id 列表。
+   * gcDeadEntities / removeTerminalShellsByTask 共用——只读盘一次、互斥下原子写一次。
+   */
+  private async deleteEntriesWhere(predicate: (rec: BgEntityRecord) => boolean): Promise<string[]> {
     const removed: string[] = []
     await this.mutex.run(async () => {
       const file = await this.readFile()
       const entries: Record<string, BgEntityRecord> = { ...file.entities }
       for (const [id, rec] of Object.entries(entries)) {
-        if (rec.type !== 'shell' || rec.spawned_by_task_id !== taskId || rec.status === 'running') continue
-        await this.unlinkShellFiles(rec)
+        if (!predicate(rec)) continue
+        if (rec.type === 'shell') await this.unlinkShellFiles(rec)
         delete entries[id]
         removed.push(id)
       }
+      // 跳过无操作时的写盘——既减少 IO，也避免在没有 registry.json 的干净环境触发 ENOENT 噪声
       if (removed.length > 0) {
         await this.writeAtomic({ entities: entries })
       }
@@ -252,13 +242,13 @@ export class BgEntityRegistry {
 
   /** 删除一个 shell 的磁盘日志 + exitcode sentinel；不存在则忽略。 */
   private async unlinkShellFiles(rec: BgShellRegistryRecord): Promise<void> {
-    for (const f of [rec.log_file, exitcodeFileForLog(rec.log_file)]) {
-      try {
-        await fs.unlink(f)
-      } catch {
-        /* 文件不存在 / 已删 — 忽略 */
-      }
-    }
+    await Promise.all(
+      [rec.log_file, exitcodeFileForLog(rec.log_file)].map((f) =>
+        fs.unlink(f).catch(() => {
+          /* 文件不存在 / 已删 — 忽略 */
+        }),
+      ),
+    )
   }
 
   async countActiveByOwner(friend_id: string): Promise<number> {
