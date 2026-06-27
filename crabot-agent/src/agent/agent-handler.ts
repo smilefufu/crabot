@@ -20,7 +20,8 @@ import {
 import { createSetCwdTool, createReadTool } from '../engine/tools/index.js'
 import { BgEntityRegistry } from '../engine/bg-entities/registry.js'
 import { killShellTree } from '../engine/bg-entities/bg-shell.js'
-import type { BgEntityOwner, BgEntityRecord, BgEntityStatus, BgEntityType } from '../engine/bg-entities/types.js'
+import { ReadoptReaper, type ReadoptedExitInfo } from '../engine/bg-entities/reaper.js'
+import type { BgEntityOwner, BgEntityRecord, BgEntityStatus, BgEntityType, BgShellRegistryRecord } from '../engine/bg-entities/types.js'
 import type { BashBgContext } from '../engine/tools/index.js'
 import type { BgToolDeps } from '../engine/tools/index.js'
 import type { TaskContext } from '../mcp/crab-messaging.js'
@@ -484,6 +485,11 @@ export class AgentHandler {
   private readonly tmpPageBaseUrl?: string
   /** Worker-singleton bg entity registry (persistent, disk-backed) */
   private readonly bgRegistry = new BgEntityRegistry()
+  /** 监视跨重启认领回来、仍存活的 shell；退出时通知（唤醒 resumed worker + 持久通知）。 */
+  private readonly readoptReaper = new ReadoptReaper(
+    this.bgRegistry,
+    (info) => this.notifyBgShellExit(info),
+  )
   /** Per-task output cursor map: key = `${taskId}:${entityId}` → byte offset */
   private readonly bgCursorMap = new Map<string, number>()
   /** AbortControllers for running bg sub-agents (key=entity_id); shared with BgToolDeps */
@@ -523,10 +529,30 @@ export class AgentHandler {
     this.getTimezone = config.getTimezone ?? (() => resolveTimezone(undefined))
     this.tmpPageBaseUrl = config.tmpPageBaseUrl
 
-    // Startup: recover persistent bg entities (mark dead shells as failed, stalled agents)
-    void this.bgRegistry.recoverPersistent().catch((err) => {
-      console.error('[AgentHandler] bg-entities recovery failed:', err)
-    })
+    // Startup: recover persistent bg entities（跨重启对账）。
+    // - deadShells（宕机期间已退出）：已读 sentinel 定真实终态，这里补发退出通知（resumed/recovery worker 会收到）。
+    // - alive（仍存活的 re-adopt shell）：交 reaper 周期探活，退出时再通知（本进程非其父，收不到 child exit）。
+    // - stalledAgents：已在 recoverPersistent 内标 stalled（agent 循环活在进程里，重启即无）。
+    void this.bgRegistry.recoverPersistent()
+      .then(({ alive, deadShells }) => {
+        for (const rec of deadShells) {
+          this.notifyBgShellExit({
+            entity_id: rec.entity_id,
+            command: rec.command,
+            status: rec.status === 'completed' ? 'completed' : 'failed',
+            exit_code: rec.exit_code ?? -1,
+            spawned_by_task_id: rec.spawned_by_task_id,
+            ...(rec.owner.friend_id ? { owner_friend_id: rec.owner.friend_id } : {}),
+          })
+        }
+        const aliveShells = alive.filter(
+          (r): r is BgShellRegistryRecord => r.type === 'shell',
+        )
+        this.readoptReaper.watch(aliveShells)
+      })
+      .catch((err) => {
+        console.error('[AgentHandler] bg-entities recovery failed:', err)
+      })
 
     // Startup: GC dead entities older than 7 days
     void this.bgRegistry.gcDeadEntities(new Date()).catch((err) => {
@@ -565,6 +591,24 @@ export class AgentHandler {
     const list = this.pendingBgNotifications.get(addressKey) ?? []
     list.push(message)
     this.pendingBgNotifications.set(addressKey, list)
+  }
+
+  /**
+   * 通知一条「跨重启认领回来的 / 宕机期间已退出的」后台 shell 退出（R3）：
+   * - push 该 shell 所属 task 的 humanQueue：若该 task 已被 checkpoint-resume 在跑且挂起，立即唤醒（in-process）。
+   * - enqueueBgNotification(friend)：跨 turn / 下一个 task 也能收到（resumed worker 首轮会 drain，见 §3.4 修复）。
+   * 本进程自己 spawn 的 shell 不走这里（由 onShellExit 处理）。
+   */
+  private notifyBgShellExit(info: ReadoptedExitInfo): void {
+    const command = `${info.command.slice(0, 200)}${info.command.length > 200 ? '...' : ''}`
+    const message =
+      `Background shell ${info.entity_id} 已退出 (status=${info.status}, exit_code=${info.exit_code})。\n` +
+      `命令: ${command}\n` +
+      `用 Output("${info.entity_id}") 读取完整输出。`
+    this.humanQueues.get(info.spawned_by_task_id)?.push(`[系统] ${message}`)
+    if (info.owner_friend_id) {
+      this.enqueueBgNotification(`friend:${info.owner_friend_id}`, message)
+    }
   }
 
   /** Drain 并返回 wrapped 的 <bg-notification> 块（已包标签）。无则返回空串。 */
@@ -670,8 +714,22 @@ export class AgentHandler {
     let currentInitialMessages: ReadonlyArray<EngineMessage> | undefined
     if (params.resumeFrom) {
       const { initialMessages, todoItems, goalRevisionUnlocked, cwd: resumedCwd } = params.resumeFrom
+      // §3.4 修复：resume 走 initialMessages 分支，query-loop 会忽略 prompt，导致 runWorkerLoop
+      // 里 buildTaskMessage 的 friend 队列 drain 被丢弃（drain-and-discard）。这里在 resume 装配处
+      // 主动 drain 一次并注入首轮消息，否则宕机期间到达的 bg-notification（如 re-adopt 的 shell 退出）
+      // 会丢失，resumed worker 可能等一个早已到达的信号而永久挂死。
+      const resumeBgNotif = this.drainBgNotifications(
+        `friend:${context.sender_friend?.id ?? `__system_${context.task_origin?.session_id ?? 'unknown'}`}`,
+      )
       // 唤醒消息只注入一次（resume 首轮）；后续 waiting 续跑沿用现有重设逻辑。
-      currentInitialMessages = [...initialMessages, buildResumeWakeupMessage()]
+      // bg-notification 必须**并入** wakeup 这条 user message，不能另起一条——否则 checkpoint 末尾
+      // 若是 assistant 消息，会出现连续两条 user，违反 Anthropic 的 user/assistant 严格交替。
+      const wakeup = buildResumeWakeupMessage()
+      const wakeupMsg =
+        resumeBgNotif && 'content' in wakeup && typeof wakeup.content === 'string'
+          ? createUserMessage(`${resumeBgNotif}\n\n${wakeup.content}`)
+          : wakeup
+      currentInitialMessages = [...initialMessages, wakeupMsg]
       // 预建 taskState 让 runWorkerLoop 直接复用（不再用 new TodoStore()）
       if (!this.activeTasks.has(task.task_id)) {
         this.activeTasks.set(task.task_id, {

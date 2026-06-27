@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { BgEntityRegistry } from '../../../src/engine/bg-entities/registry'
@@ -208,6 +208,56 @@ describe('BgEntityRegistry', () => {
     expect(alive).toHaveLength(0)
     expect(deadShells).toHaveLength(0)
     expect(stalledAgents).toHaveLength(0)
+  })
+
+  it('reapShellIfDead: 存活 shell（当前 pid）→ 返回 null，状态不变', async () => {
+    const { readProcStartTime } = await import('../../../src/engine/bg-entities/bg-shell')
+    const starttime = await readProcStartTime(process.pid)
+    const rec = makeShellRecord({
+      entity_id: 'shell-reap-alive',
+      pid: process.pid,
+      pgid: process.pid,
+      process_started_at: starttime,
+    })
+    await registry.register(rec)
+
+    const result = await registry.reapShellIfDead(rec)
+    expect(result).toBeNull()
+    expect((await registry.get('shell-reap-alive'))?.status).toBe('running')
+  })
+
+  it('reapShellIfDead: 已死 + sentinel=0 → completed/0 并更新 registry', async () => {
+    const logFile = path.join(tmpDir, 'shell-reap-ok.log')
+    writeFileSync(path.join(tmpDir, 'shell-reap-ok.exitcode'), '0')
+    const rec = makeShellRecord({
+      entity_id: 'shell-reap-ok',
+      pid: 999999,
+      pgid: 999999,
+      log_file: logFile,
+      process_started_at: new Date(Date.now() - 10000).toISOString(),
+    })
+    await registry.register(rec)
+
+    const result = await registry.reapShellIfDead(rec)
+    expect(result).toEqual({ status: 'completed', exit_code: 0 })
+    const updated = await registry.get('shell-reap-ok')
+    expect(updated?.status).toBe('completed')
+    expect(updated?.exit_code).toBe(0)
+  })
+
+  it('reapShellIfDead: 已死 + 无 sentinel（强杀/没写盘）→ failed/-1', async () => {
+    const rec = makeShellRecord({
+      entity_id: 'shell-reap-killed',
+      pid: 999999,
+      pgid: 999999,
+      log_file: path.join(tmpDir, 'shell-reap-killed.log'), // 无对应 .exitcode
+      process_started_at: new Date(Date.now() - 10000).toISOString(),
+    })
+    await registry.register(rec)
+
+    const result = await registry.reapShellIfDead(rec)
+    expect(result).toEqual({ status: 'failed', exit_code: -1 })
+    expect((await registry.get('shell-reap-killed'))?.exit_code).toBe(-1)
   })
 
   it('gcDeadEntities: removes entities ended more than 7 days ago', async () => {

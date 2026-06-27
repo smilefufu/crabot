@@ -153,21 +153,12 @@ export class BgEntityRegistry {
       if (rec.status !== 'running') continue
 
       if (rec.type === 'shell') {
-        const isAlive = await this.isShellAlive(rec)
-        if (isAlive) {
-          alive.push(rec)
+        const reaped = await this.reapShellIfDead(rec)
+        if (reaped) {
+          // 带上终态返回，便于调用方据此发准确的退出通知。
+          deadShells.push({ ...rec, status: reaped.status, exit_code: reaped.exit_code, ended_at: new Date().toISOString() })
         } else {
-          // 进程在宕机期间已退出：读 exitcode sentinel 拿真实成败，而非一律 failed/-1。
-          // sentinel 不存在（被强杀 / 没走到写盘）才回退 failed/-1。
-          const sentinelEc = await this.readSentinelExitCode(rec)
-          const status: 'completed' | 'failed' =
-            sentinelEc === 0 ? 'completed' : 'failed'
-          deadShells.push(rec)
-          await this.update(rec.entity_id, {
-            status,
-            exit_code: sentinelEc ?? -1,
-            ended_at: new Date().toISOString(),
-          })
+          alive.push(rec)
         }
       } else {
         // Agent loops run inside the worker process — after any restart they are gone
@@ -180,6 +171,28 @@ export class BgEntityRegistry {
     }
 
     return { alive, deadShells, stalledAgents }
+  }
+
+  /**
+   * 检查一个 running shell 是否已退出；若是，读 exitcode sentinel 定真实成败、更新 registry 为终态，
+   * 返回 `{status, exit_code}`；仍存活返回 null。
+   *
+   * 供 recoverPersistent（启动对账已死的 shell）与 ReadoptReaper（运行期轮询跨重启认领回来、仍存活
+   * 的 shell）共用。sentinel 不存在（强杀 / 没走到写盘）→ 回退 failed/-1。
+   */
+  async reapShellIfDead(
+    rec: BgShellRegistryRecord,
+  ): Promise<{ status: 'completed' | 'failed'; exit_code: number } | null> {
+    if (await this.isShellAlive(rec)) return null
+    const sentinelEc = await this.readSentinelExitCode(rec)
+    const status: 'completed' | 'failed' = sentinelEc === 0 ? 'completed' : 'failed'
+    const exit_code = sentinelEc ?? -1
+    await this.update(rec.entity_id, {
+      status,
+      exit_code,
+      ended_at: new Date().toISOString(),
+    } as Partial<BgShellRegistryRecord>)
+    return { status, exit_code }
   }
 
   async gcDeadEntities(now: Date): Promise<{ removed: string[] }> {
