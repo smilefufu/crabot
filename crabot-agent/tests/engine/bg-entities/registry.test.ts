@@ -155,14 +155,10 @@ describe('BgEntityRegistry', () => {
   })
 
   it('recoverPersistent: shell with current pid is classified as alive', async () => {
-    // Get the actual start time of the current process so starttime comparison passes
-    const { execFile } = await import('child_process')
-    const starttime = await new Promise<string>((resolve, reject) => {
-      execFile('ps', ['-o', 'lstart=', '-p', String(process.pid)], (err, stdout) => {
-        if (err) reject(err)
-        else resolve(new Date(stdout.trim()).toISOString())
-      })
-    })
+    // 复用 impl 同一个 readProcStartTime（带 ps-parse 失败兜底），与 isShellAlive 解析口径一致：
+    // ps 可解析时两边都得真实 starttime；某些 locale 解析失败时两边都退化为 now，仍落在 5s 窗口内。
+    const { readProcStartTime } = await import('../../../src/engine/bg-entities/bg-shell')
+    const starttime = await readProcStartTime(process.pid)
 
     const shellRec = makeShellRecord({
       entity_id: 'shell-alive',

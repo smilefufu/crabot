@@ -9,7 +9,6 @@ import { formatRuntimeMs } from '../../utils/time.js'
 import type { ToolDefinition } from '../types'
 import type { BgEntityStatus } from '../bg-entities/types'
 import type { BgToolDeps } from './output-tool'
-import type { TransientShellState } from '../bg-entities/bg-shell'
 import type { BgEntityRecord } from '../bg-entities/types'
 
 // ---------------------------------------------------------------------------
@@ -121,49 +120,25 @@ export function createListEntitiesTool(deps: BgToolDeps): ToolDefinition {
 
       const wantedStatuses = resolveStatuses(statusFilter)
 
-      // --- Persistent (disk-backed) entities ---
+      // Persistent (disk-backed) entities — 后台 shell / sub-agent 现在全是持久实体
       const persistentRecords = await deps.registry.list({
         owner_friend_id: deps.ownerFriendId,
         status: wantedStatuses,
       })
 
-      // --- Transient (in-memory) entities — only current task's shells ---
-      const transientFilter: { owner_friend_id?: string; status?: ReadonlyArray<BgEntityStatus> } = {
-        status: wantedStatuses,
-      }
-      if (deps.ownerFriendId) {
-        transientFilter.owner_friend_id = deps.ownerFriendId
-      }
-      const transientStates = deps.transient
-        .list(transientFilter)
-        .filter((s) => s.spawned_by_task_id === deps.taskId)
-
-      // --- Merge + deduplicate (transient ids won't collide with persistent ids) ---
-      const persistentRows: RowData[] = persistentRecords.map((rec: BgEntityRecord) => ({
-        type: rec.type,
-        entityId: rec.entity_id,
-        status: rec.status,
-        spawnedAt: formatSpawnedAt(rec.spawned_at),
-        runtime: formatRuntime(rec.spawned_at, rec.ended_at),
-        command:
-          rec.type === 'shell'
-            ? truncateCommand(rec.command)
-            : truncateCommand(rec.task_description),
-      }))
-
-      const transientRows: RowData[] = transientStates.map((s: TransientShellState) => ({
-        type: 'shell',
-        entityId: s.entity_id,
-        status: s.status,
-        spawnedAt: formatSpawnedAt(s.spawned_at),
-        runtime: formatRuntime(s.spawned_at, s.ended_at),
-        command: truncateCommand(s.command),
-      }))
-
-      // Combine and sort by spawned_at descending
-      const allRows = [...persistentRows, ...transientRows].sort((a, b) =>
-        b.spawnedAt.localeCompare(a.spawnedAt),
-      )
+      const allRows: RowData[] = persistentRecords
+        .map((rec: BgEntityRecord) => ({
+          type: rec.type,
+          entityId: rec.entity_id,
+          status: rec.status,
+          spawnedAt: formatSpawnedAt(rec.spawned_at),
+          runtime: formatRuntime(rec.spawned_at, rec.ended_at),
+          command:
+            rec.type === 'shell'
+              ? truncateCommand(rec.command)
+              : truncateCommand(rec.task_description),
+        }))
+        .sort((a, b) => b.spawnedAt.localeCompare(a.spawnedAt))
 
       return { output: buildTable(allRows), isError: false }
     },

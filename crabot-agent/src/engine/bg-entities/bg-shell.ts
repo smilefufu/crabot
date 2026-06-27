@@ -39,6 +39,33 @@ function spawnBash(command: string, extraOpts: SpawnOptions = {}): ChildProcess 
   })
 }
 
+/** POSIX 单引号转义：把任意字符串安全包成 bash 单引号字面量。 */
+function shSingleQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`
+}
+
+/**
+ * 给命令包一层 exitcode sentinel：用户命令跑完后把退出码写到 `<exitcodeFile>`，再以同样
+ * 退出码退出（保持 child.on('exit') 的码不变）。
+ *
+ * 目的：detached 进程的退出码只有父进程能 reap；agent 重启后新进程不是父进程、拿不到码。
+ * 把码落盘后，任何进程（含重启后的新 agent）都能读 sentinel 得到真实成败，而非只能判活/死。
+ * sentinel 不存在 = 进程还在跑或被强杀（未走到写盘那步）。
+ */
+export function wrapCommandWithExitSentinel(command: string, exitcodeFile: string): string {
+  return (
+    `${command}\n` +
+    `__crabot_ec=$?\n` +
+    `printf '%s' "$__crabot_ec" > ${shSingleQuote(exitcodeFile)} 2>/dev/null\n` +
+    `exit $__crabot_ec`
+  )
+}
+
+/** 由 shell entity 的 log_file 路径推导其 exitcode sentinel 路径（`.log` → `.exitcode`）。 */
+export function exitcodeFileForLog(logFile: string): string {
+  return logFile.replace(/\.log$/, '.exitcode')
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -79,6 +106,7 @@ export async function spawnPersistentShell(opts: SpawnPersistentShellOpts): Prom
   await fs.promises.mkdir(logsDir, { recursive: true })
 
   const logFile = path.join(logsDir, `${entity_id}.log`)
+  const exitcodeFile = exitcodeFileForLog(logFile)
   const logFd = await fs.promises.open(logFile, 'a')
 
   // `registeredPromise` resolves after registry.register() succeeds, ensuring
@@ -90,7 +118,7 @@ export async function spawnPersistentShell(opts: SpawnPersistentShellOpts): Prom
     resolveRegistered = resolve
   })
 
-  const child = spawnBash(opts.command, {
+  const child = spawnBash(wrapCommandWithExitSentinel(opts.command, exitcodeFile), {
     stdio: ['ignore', logFd.fd, logFd.fd],
     cwd: opts.cwd,
   })
@@ -202,43 +230,24 @@ export async function spawnPersistentShell(opts: SpawnPersistentShellOpts): Prom
 }
 
 // ---------------------------------------------------------------------------
-// TransientShellRegistry — in-memory only, no disk, task-bound lifecycle
+// runShellWithGrace — 统一前台/后台 shell 执行原语
 // ---------------------------------------------------------------------------
 
-import type { BgEntityStatus } from './types.js'
-import { BG_TRANSIENT_RING_BUFFER_BYTES } from './types.js'
-
-/** 临时 shell 内存状态——不写 disk，task 结束自动 kill */
-export interface TransientShellState {
-  readonly entity_id: string
-  status: BgEntityStatus
+export interface RunShellWithGraceOpts {
   readonly command: string
-  readonly spawned_at: string
-  readonly owner: BgEntityOwner
-  readonly spawned_by_task_id: string
-  exit_code: number | null
-  ended_at: string | null
-  /** 滚动 buffer：超 200KB 时从头截 */
-  ringBuffer: string
-  /** 累计输出字符数（不随 ring 截断减少）——Output 工具增量读用的单调游标 */
-  totalOutputChars: number
-  readonly child: ChildProcess
-}
-
-export interface SpawnTransientShellOpts {
-  readonly command: string
-  readonly owner: BgEntityOwner
-  readonly spawned_by_task_id: string
-  readonly traceContext?: BgEntityTraceContext
-  /** 子进程工作目录。subprocess 启动后锁死；调用方需 snapshot 当前 cwd 传入。 */
   readonly cwd: string
+  readonly owner: BgEntityOwner
+  readonly spawned_by_task_id: string
+  readonly registry: BgEntityRegistry
+  readonly traceContext?: BgEntityTraceContext
+  /** 前台宽限期（ms）。期内退出 → inline 返回；超期仍在跑 → 转后台（注册 bgRegistry）。 */
+  readonly gracePeriodMs: number
+  readonly abortSignal?: AbortSignal
   /**
-   * Async exit hook，与 SpawnPersistentShellOpts.onExit 同款；
-   * 用于 worker 推 push notification（transient 在 task 内 exit 的场景）。
-   * worker 端（agent-handler onShellExit）把它接到本 task 的 humanMessageQueue——
-   * exit 时 push 唤醒 wait_for_signal 挂起的 worker，或在下个 turn 边界作为 supplement 注入。
+   * 转后台后子进程退出时回调（worker 接它做唤醒 + 通知）。
+   * 仅 promotion 路径触发；宽限期内退出走 inline 返回、不触发。
    */
-  readonly onExit?: (info: {
+  readonly onShellExit?: (info: {
     entity_id: string
     command: string
     status: 'completed' | 'failed' | 'killed'
@@ -248,158 +257,213 @@ export interface SpawnTransientShellOpts {
   }) => void
 }
 
-export class TransientShellRegistry {
-  private shells = new Map<string, TransientShellState>()
+export type RunShellWithGraceResult =
+  | { kind: 'inline'; exitCode: number; status: 'completed' | 'failed'; output: string }
+  | { kind: 'background'; entity_id: string }
+  | { kind: 'aborted' }
+  | { kind: 'spawn_error'; message: string }
 
-  /** spawn + 注册 + 接管 stdout/stderr → ringBuffer。返回 entity_id。 */
-  spawn(opts: SpawnTransientShellOpts): string {
-    const entity_id = `shell_${randomBytes(6).toString('hex')}`
-    const spawnedAtMs = Date.now()
-    const now = new Date(spawnedAtMs).toISOString()
+async function unlinkQuiet(file: string): Promise<void> {
+  try {
+    await fs.promises.unlink(file)
+  } catch {
+    /* 文件不存在 / 已删 — 忽略 */
+  }
+}
 
-    const child = spawnBash(opts.command, { cwd: opts.cwd })
+async function readFileQuiet(file: string): Promise<string> {
+  try {
+    return await fs.promises.readFile(file, 'utf8')
+  } catch {
+    return ''
+  }
+}
 
-    const state: TransientShellState = {
-      entity_id,
-      status: 'running',
-      command: opts.command,
-      spawned_at: now,
-      owner: opts.owner,
-      spawned_by_task_id: opts.spawned_by_task_id,
-      exit_code: null,
-      ended_at: null,
-      ringBuffer: '',
-      totalOutputChars: 0,
-      child,
+/**
+ * 统一 shell 执行：命令从 spawn 起就 OS 直写磁盘日志（detached + sentinel），前台宽限
+ * `gracePeriodMs`。
+ * - 宽限期内退出：读日志 inline 同步返回（kind='inline'），删日志/sentinel，**不入 bgRegistry**。
+ * - 超过宽限期仍在跑：注册进 bgRegistry（kind='background'），命令**不中断**；其后退出经
+ *   onShellExit push 唤醒挂起的 worker。
+ * - 期间 abort：kill + 清文件，返回 kind='aborted'。
+ *
+ * 「spawn 即直写盘」是 re-adopt 的物理前提（父进程死后子进程仍能继续写文件）；故任何命令
+ * 都按可转后台对待。registeredPromise 门控解决「转后台瞬间退出但记录尚未注册」的竞态。
+ */
+export async function runShellWithGrace(opts: RunShellWithGraceOpts): Promise<RunShellWithGraceResult> {
+  const entity_id = `shell_${randomBytes(6).toString('hex')}`
+  const logsDir = getBgEntitiesLogsDir()
+  await fs.promises.mkdir(logsDir, { recursive: true })
+  const logFile = path.join(logsDir, `${entity_id}.log`)
+  const exitcodeFile = exitcodeFileForLog(logFile)
+
+  const spawnedAtMs = Date.now()
+  const now = new Date(spawnedAtMs).toISOString()
+
+  let backgrounded = false
+  let resolveRegistered!: () => void
+  const registeredPromise = new Promise<void>((resolve) => {
+    resolveRegistered = resolve
+  })
+
+  type Outcome =
+    | { kind: 'exit'; exitCode: number }
+    | { kind: 'grace' }
+    | { kind: 'abort' }
+    | { kind: 'spawnerr'; message: string }
+  let resolveRace!: (o: Outcome) => void
+  const racePromise = new Promise<Outcome>((resolve) => {
+    resolveRace = resolve
+  })
+
+  const graceTimer = setTimeout(() => {
+    backgrounded = true
+    resolveRace({ kind: 'grace' })
+  }, opts.gracePeriodMs)
+  graceTimer.unref?.()
+
+  const onAbort = (): void => resolveRace({ kind: 'abort' })
+  if (opts.abortSignal) {
+    if (opts.abortSignal.aborted) resolveRace({ kind: 'abort' })
+    else opts.abortSignal.addEventListener('abort', onAbort, { once: true })
+  }
+  const cleanupListeners = (): void => {
+    clearTimeout(graceTimer)
+    if (opts.abortSignal) opts.abortSignal.removeEventListener('abort', onAbort)
+  }
+
+  let logFd: Awaited<ReturnType<typeof fs.promises.open>>
+  try {
+    logFd = await fs.promises.open(logFile, 'a')
+  } catch (err) {
+    cleanupListeners()
+    return { kind: 'spawn_error', message: err instanceof Error ? err.message : String(err) }
+  }
+
+  const child = spawnBash(wrapCommandWithExitSentinel(opts.command, exitcodeFile), {
+    stdio: ['ignore', logFd.fd, logFd.fd],
+    cwd: opts.cwd,
+  })
+
+  // 'error' 必须在任何 await 前挂（spawn 失败异步派发，漏挂 → uncaughtException 杀进程）。
+  child.on('error', (err) => {
+    const message = err instanceof Error ? err.message : String(err)
+    if (backgrounded) {
+      void registeredPromise
+        .then(() =>
+          opts.registry.update(entity_id, {
+            status: 'failed',
+            exit_code: -1,
+            ended_at: new Date().toISOString(),
+          } as Partial<BgShellRegistryRecord>),
+        )
+        .catch(() => {})
+    } else {
+      resolveRace({ kind: 'spawnerr', message })
     }
-    this.shells.set(entity_id, state)
+  })
 
-    const append = (chunk: Buffer | string) => {
-      const text = chunk.toString()
-      state.totalOutputChars += text.length
-      const combined = state.ringBuffer + text
-      if (combined.length > BG_TRANSIENT_RING_BUFFER_BYTES) {
-        state.ringBuffer = combined.slice(combined.length - BG_TRANSIENT_RING_BUFFER_BYTES)
-      } else {
-        state.ringBuffer = combined
-      }
+  await logFd.close()
+
+  child.on('exit', (code) => {
+    const exitCode = code ?? -1
+    if (!backgrounded) {
+      resolveRace({ kind: 'exit', exitCode })
+      return
     }
-    child.stdout?.on('data', append)
-    child.stderr?.on('data', append)
-
-    child.on('exit', (code) => {
-      if (state.status === 'running') {
-        const exitCode = code ?? -1
-        const exitStatus: 'completed' | 'failed' = exitCode === 0 ? 'completed' : 'failed'
-        const runtimeMs = Date.now() - spawnedAtMs
-        state.status = exitStatus
-        state.exit_code = exitCode
-        state.ended_at = new Date().toISOString()
+    // promotion 后退出：等注册完成 → 更新 registry + span + onShellExit
+    const exitedAt = Date.now()
+    const runtimeMs = exitedAt - spawnedAtMs
+    void registeredPromise
+      .then(async () => {
+        const status: 'completed' | 'failed' = exitCode === 0 ? 'completed' : 'failed'
         if (opts.traceContext) {
           emitInstantSpan(opts.traceContext, 'bg_entity_exit', {
             entity_id,
             type: 'shell',
-            status: exitStatus,
+            status,
             exit_code: exitCode,
             runtime_ms: runtimeMs,
-          }, exitStatus)
+          }, status)
         }
-        if (opts.onExit) {
+        await opts.registry.update(entity_id, {
+          status,
+          exit_code: exitCode,
+          ended_at: new Date(exitedAt).toISOString(),
+        } as Partial<BgShellRegistryRecord>)
+        if (opts.onShellExit) {
           try {
-            opts.onExit({
+            opts.onShellExit({
               entity_id,
               command: opts.command,
-              status: exitStatus,
+              status,
               exit_code: exitCode,
               runtime_ms: runtimeMs,
               spawned_at: now,
             })
           } catch (err) {
-            console.error(`[bg-shell-transient] onExit callback failed for ${entity_id}:`, err)
+            console.error(`[bg-shell] onShellExit callback failed for ${entity_id}:`, err)
           }
         }
-      }
-    })
-    child.on('error', () => {
-      if (state.status === 'running') {
-        state.status = 'failed'
-        state.exit_code = -1
-        state.ended_at = new Date().toISOString()
-        if (opts.traceContext) {
-          emitInstantSpan(opts.traceContext, 'bg_entity_exit', {
-            entity_id,
-            type: 'shell',
-            status: 'failed',
-            exit_code: -1,
-            runtime_ms: Date.now() - spawnedAtMs,
-          }, 'failed')
-        }
-      }
-    })
+      })
+      .catch((err: unknown) => {
+        console.error(`[bg-shell] promoted-exit registry update failed for ${entity_id}:`, err)
+      })
+  })
 
-    // Unref so host process event loop can exit without waiting for child.
-    child.unref()
+  child.unref()
 
-    return entity_id
+  const outcome = await racePromise
+  cleanupListeners()
+
+  if (outcome.kind === 'abort') {
+    if (child.pid) killShellTree(child.pid)
+    await unlinkQuiet(logFile)
+    await unlinkQuiet(exitcodeFile)
+    return { kind: 'aborted' }
   }
 
-  get(entity_id: string): TransientShellState | undefined {
-    return this.shells.get(entity_id)
+  if (outcome.kind === 'spawnerr') {
+    await unlinkQuiet(logFile)
+    await unlinkQuiet(exitcodeFile)
+    return { kind: 'spawn_error', message: outcome.message }
   }
 
-  list(filter?: {
-    owner_friend_id?: string
-    status?: ReadonlyArray<BgEntityStatus>
-  }): TransientShellState[] {
-    const all = Array.from(this.shells.values())
-    return all.filter((s) => {
-      if (filter?.owner_friend_id && s.owner.friend_id !== filter.owner_friend_id) return false
-      if (filter?.status && !filter.status.includes(s.status)) return false
-      return true
-    })
+  if (outcome.kind === 'exit') {
+    // 宽限期内退出：读日志全量 inline 返回，清文件，不入账。
+    const output = await readFileQuiet(logFile)
+    await unlinkQuiet(logFile)
+    await unlinkQuiet(exitcodeFile)
+    const status: 'completed' | 'failed' = outcome.exitCode === 0 ? 'completed' : 'failed'
+    return { kind: 'inline', exitCode: outcome.exitCode, status, output }
   }
 
-  /** 显式 kill 单个 shell（SIGTERM，3s 后 SIGKILL 兜底；Windows 用 taskkill /F /T） */
-  kill(entity_id: string): void {
-    const state = this.shells.get(entity_id)
-    if (!state || state.status !== 'running') return
-    state.status = 'killed'
-    state.ended_at = new Date().toISOString()
-    if (state.child.pid) {
-      killShellTree(state.child.pid)
-    }
+  // outcome.kind === 'grace'：转后台 → 注册 bgRegistry（命令不中断）。
+  if (!child.pid) {
+    await unlinkQuiet(logFile)
+    await unlinkQuiet(exitcodeFile)
+    return { kind: 'spawn_error', message: 'no pid after grace' }
   }
-
-  /** task 结束时调用，kill 该 task 拥有的所有 shell */
-  killAllOwnedBy(task_id: string): void {
-    for (const state of this.shells.values()) {
-      if (state.spawned_by_task_id === task_id && state.status === 'running') {
-        this.kill(state.entity_id)
-      }
-    }
+  const processStartedAt = await readProcStartTime(child.pid)
+  const record: BgShellRegistryRecord = {
+    entity_id,
+    type: 'shell',
+    status: 'running',
+    command: opts.command,
+    log_file: logFile,
+    pid: child.pid,
+    pgid: child.pid,
+    process_started_at: processStartedAt,
+    owner: opts.owner,
+    spawned_by_task_id: opts.spawned_by_task_id,
+    spawned_at: now,
+    exit_code: null,
+    ended_at: null,
+    last_activity_at: now,
   }
-
-  /**
-   * 读取一个已终止 shell 的最终完整输出（ring buffer 全量）并把它从 Map 移除——
-   * 前台宽限期快路径专用：命令在宽限期内退出、已内联返回，读完即清，不让这种
-   * 「从未要求后台」的瞬时命令以 completed 态滞留在 ListEntities。
-   * 封装 ringBuffer / totalOutputChars 的字段访问，调用方不必直接读内部状态。
-   * 返回 undefined 表示 entity 不存在。仅应在 shell 已终止后调用。
-   */
-  takeFinalOutput(entity_id: string): { output: string; dropped: boolean } | undefined {
-    const state = this.shells.get(entity_id)
-    if (!state) return undefined
-    this.shells.delete(entity_id)
-    return {
-      output: state.ringBuffer,
-      dropped: state.totalOutputChars > state.ringBuffer.length,
-    }
-  }
-
-  /** entity 数量（用于 debug / metrics） */
-  size(): number {
-    return this.shells.size
-  }
+  await opts.registry.register(record)
+  resolveRegistered()
+  return { kind: 'background', entity_id }
 }
 
 // ---------------------------------------------------------------------------
@@ -408,10 +472,12 @@ export class TransientShellRegistry {
 
 /**
  * Read the actual start time of `pid` via `ps -o lstart=`.
- * Falls back to `now` if ps fails (e.g. process already exited, or Windows
- * where ps is unavailable — wall-clock is accurate enough since we just spawned).
+ * Falls back to `now` if ps fails (e.g. process already exited, Windows where
+ * ps is unavailable, or a locale whose `ps` date 不能被 `new Date()` 解析 —
+ * 兜底用 wall-clock，因为刚 spawn 时它足够准）。registry.isShellAlive 与测试共用此函数，
+ * 保证记录侧与探活侧解析口径一致（无 ps-parse 时两边都退化为 now，仍落在 5s 窗口内）。
  */
-async function readProcStartTime(pid: number): Promise<string> {
+export async function readProcStartTime(pid: number): Promise<string> {
   try {
     const { stdout } = await execFileAsync('ps', ['-o', 'lstart=', '-p', String(pid)])
     const trimmed = stdout.trim()

@@ -8,8 +8,8 @@
 
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { execFile } from 'node:child_process'
 import { getBgEntitiesRegistryPath } from '../../core/data-paths'
+import { exitcodeFileForLog, readProcStartTime } from './bg-shell'
 import {
   BG_ENTITY_GC_AFTER_DAYS,
   type BgAgentRegistryRecord,
@@ -44,20 +44,10 @@ class AsyncMutex {
 }
 
 // ---------------------------------------------------------------------------
-// PID starttime helper (cross-platform via `ps -o lstart=`)
+// PID starttime helper：复用 bg-shell 的健壮版（带 ps-parse 失败兜底），避免重复实现，
+// 也避免本文件旧拷贝在某些 locale 下 `new Date(...).toISOString()` 在 execFile 回调里
+// 同步抛、绕过 isShellAlive 的 `.catch` 而未捕获崩溃。
 // ---------------------------------------------------------------------------
-
-async function readProcStartTime(pid: number): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile('ps', ['-o', 'lstart=', '-p', String(pid)], (err, stdout) => {
-      if (err) {
-        reject(err)
-      } else {
-        resolve(new Date(stdout.trim()).toISOString())
-      }
-    })
-  })
-}
 
 // ---------------------------------------------------------------------------
 // Registry
@@ -167,10 +157,15 @@ export class BgEntityRegistry {
         if (isAlive) {
           alive.push(rec)
         } else {
+          // 进程在宕机期间已退出：读 exitcode sentinel 拿真实成败，而非一律 failed/-1。
+          // sentinel 不存在（被强杀 / 没走到写盘）才回退 failed/-1。
+          const sentinelEc = await this.readSentinelExitCode(rec)
+          const status: 'completed' | 'failed' =
+            sentinelEc === 0 ? 'completed' : 'failed'
           deadShells.push(rec)
           await this.update(rec.entity_id, {
-            status: 'failed',
-            exit_code: -1,
+            status,
+            exit_code: sentinelEc ?? -1,
             ended_at: new Date().toISOString(),
           })
         }
@@ -242,6 +237,20 @@ export class BgEntityRegistry {
     const tmp = `${this.registryPath}.tmp.${process.pid}.${Date.now()}`
     await fs.writeFile(tmp, JSON.stringify(file, null, 2), 'utf8')
     await fs.rename(tmp, this.registryPath)
+  }
+
+  /**
+   * 读 shell 的 exitcode sentinel（`<entity>.exitcode`）。返回解析出的退出码；
+   * 文件缺失 / 内容非法 → null（进程被强杀或没走到写盘那步）。
+   */
+  private async readSentinelExitCode(rec: BgShellRegistryRecord): Promise<number | null> {
+    try {
+      const raw = await fs.readFile(exitcodeFileForLog(rec.log_file), 'utf8')
+      const ec = Number.parseInt(raw.trim(), 10)
+      return Number.isNaN(ec) ? null : ec
+    } catch {
+      return null
+    }
   }
 
   private async isShellAlive(rec: BgShellRegistryRecord): Promise<boolean> {

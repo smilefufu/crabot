@@ -9,12 +9,10 @@ import { defineTool } from '../tool-framework'
 import { sleep } from '../retry-utils'
 import type { ToolDefinition } from '../types'
 import type { BgEntityRegistry } from '../bg-entities/registry'
-import type { TransientShellRegistry } from '../bg-entities/bg-shell'
 import { BG_OUTPUT_MAX_BYTES } from '../bg-entities/types'
 
 export interface BgToolDeps {
   readonly registry: BgEntityRegistry
-  readonly transient: TransientShellRegistry
   readonly cursorMap: Map<string, number>
   readonly taskId: string
   readonly ownerFriendId?: string
@@ -49,28 +47,7 @@ async function readShellOutput(
   explicitOffset: number | undefined,
   deps: BgToolDeps,
 ): Promise<ReadResult> {
-  // 1. Check transient first（内存 ring buffer + 单调字符游标做增量读，
-  //    与 persistent 的 cursor 语义一致——否则 block 模式因永远读到"有内容"而秒回）
-  const transientState = deps.transient.get(entityId)
-  if (transientState) {
-    const isRunning = transientState.status === 'running'
-    const header = `[status: ${transientState.status}, exit_code: ${transientState.exit_code ?? 'null'}]`
-    const key = cursorKey(deps.taskId, entityId)
-    const cursor = explicitOffset ?? deps.cursorMap.get(key) ?? 0
-    const total = transientState.totalOutputChars
-    if (total <= cursor) {
-      return { output: `${header}\n(no new output)`, isError: false, isRunning }
-    }
-    // ring buffer 只保留尾部 200KB：可返回的未读量受 buffer 实际长度限制
-    const unread = total - cursor
-    const buf = transientState.ringBuffer
-    const chunk = unread >= buf.length ? buf : buf.slice(buf.length - unread)
-    deps.cursorMap.set(key, total)
-    const dropNote = unread > buf.length ? '\n[earlier output dropped from ring buffer]' : ''
-    return { output: `${header}\n${chunk}${dropNote}`, isError: false, isRunning }
-  }
-
-  // 2. Check persistent registry (disk log file with per-task cursor)
+  // Persistent registry (disk log file with per-task cursor)
   const record = await deps.registry.get(entityId)
   if (!record) {
     return { output: `Entity not found: ${entityId}`, isError: true, isRunning: false }

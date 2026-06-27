@@ -19,7 +19,7 @@ import {
 } from '../engine/index.js'
 import { createSetCwdTool, createReadTool } from '../engine/tools/index.js'
 import { BgEntityRegistry } from '../engine/bg-entities/registry.js'
-import { TransientShellRegistry, killShellTree } from '../engine/bg-entities/bg-shell.js'
+import { killShellTree } from '../engine/bg-entities/bg-shell.js'
 import type { BgEntityOwner, BgEntityRecord, BgEntityStatus, BgEntityType } from '../engine/bg-entities/types.js'
 import type { BashBgContext } from '../engine/tools/index.js'
 import type { BgToolDeps } from '../engine/tools/index.js'
@@ -483,8 +483,6 @@ export class AgentHandler {
   private readonly tmpPageBaseUrl?: string
   /** Worker-singleton bg entity registry (persistent, disk-backed) */
   private readonly bgRegistry = new BgEntityRegistry()
-  /** Worker-singleton transient shell registry (in-memory, task-bound) */
-  private readonly transientShells = new TransientShellRegistry()
   /** Per-task output cursor map: key = `${taskId}:${entityId}` → byte offset */
   private readonly bgCursorMap = new Map<string, number>()
   /** AbortControllers for running bg sub-agents (key=entity_id); shared with BgToolDeps */
@@ -811,7 +809,7 @@ export class AgentHandler {
    * opts 允许 trigger 流注入 extraTools（exit 工具）、initialPrompt（user 侧 trigger prompt）、
    * overdueConfig（超期提醒），以及 onAfterTurn 回调（检测 send_message 工具调用）。
    *
-   * 注意：try/finally 清理（activeTasks / humanQueues / liveSnapshots / transientShells / bgCursorMap）
+   * 注意：try/finally 清理（activeTasks / humanQueues / liveSnapshots / bgCursorMap）
    * 在本方法内完成，对 executeTask 和 executeTriggerMessage 两个 caller 均透明。
    */
   private async runWorkerLoop(
@@ -1082,35 +1080,23 @@ export class AgentHandler {
           session_id: context.task_origin?.session_id,
           channel_id: context.task_origin?.channel_id,
         }
-        // push notification 接线：
-        // - persistent（master 私聊）：exit 排到该 friend 的下一次 task prompt
-        // - transient：exit 直接 push 本 task 的 humanQueue——worker 若正 wait_for_signal
-        //   挂起会被立即唤醒（等 bg shell 退出的场景），否则下个 turn 边界作为 supplement 注入。
-        //   task 结束时 transient 被 killAllOwnedBy 标 killed 不触发 onExit；
-        //   humanQueues 也已清理（get 返回 undefined），无幽灵推送。
+        // push notification 接线（R1：唤醒语义统一，不再分 transient/persistent）：
+        // 后台 shell 退出时两条都发——
+        // - push 本 task humanQueue：worker 若正 wait_for_signal 挂起，立即唤醒（in-process）。
+        // - enqueueBgNotification(friend)：跨 turn / 跨重启 / 下一个 task 也能收到（持久通知）。
+        //   task 已结束时 humanQueues.get 返回 undefined（可选链 no-op），friend 通知仍投递。
         const onShellExit: BashBgContext['onShellExit'] = (info) => {
           const runtimeStr = formatRuntimeMs(info.runtime_ms)
           const command = `${info.command.slice(0, 200)}${info.command.length > 200 ? '...' : ''}`
-          if (info.mode !== 'persistent') {
-            this.humanQueues.get(task.task_id)?.push(
-              `[系统] Background shell ${info.entity_id} 已退出 (status=${info.status}, exit_code=${info.exit_code}, 运行 ${runtimeStr})。\n` +
-              `命令: ${command}\n` +
-              `用 Output("${info.entity_id}") 读取输出。`,
-            )
-            return
-          }
           const message =
-            `Background shell ${info.entity_id} 已退出。\n` +
-            `状态: ${info.status} (exit_code=${info.exit_code})\n` +
-            `运行时长: ${runtimeStr}\n` +
+            `Background shell ${info.entity_id} 已退出 (status=${info.status}, exit_code=${info.exit_code}, 运行 ${runtimeStr})。\n` +
             `命令: ${command}\n` +
-            `提示: 用 Output("${info.entity_id}") 读完整输出，确认后用 Kill 清理（即使已 exit 也建议清以防混淆）`
+            `用 Output("${info.entity_id}") 读取完整输出。`
+          this.humanQueues.get(task.task_id)?.push(`[系统] ${message}`)
           this.enqueueBgNotification(`friend:${bgOwner.friend_id}`, message)
         }
         const bgEntityCtx: BashBgContext = {
           registry: this.bgRegistry,
-          transient: this.transientShells,
-          workerContext: context,
           owner: bgOwner,
           taskId: task.task_id,
           traceContext: bgTraceCtx,
@@ -1118,7 +1104,6 @@ export class AgentHandler {
         }
         const bgToolDeps: BgToolDeps = {
           registry: this.bgRegistry,
-          transient: this.transientShells,
           cursorMap: this.bgCursorMap,
           taskId: task.task_id,
           ownerFriendId: bgOwner.friend_id,
@@ -1266,11 +1251,12 @@ export class AgentHandler {
               }
               return false
             },
-            // 本 task 的 running transient shell——退出时 onShellExit push humanQueue 唤醒，
-            // 所以"等它退出"是合法挂起。persistent shell 可能永不退出，不算（等它得带 timeout_ms）。
-            hasRunningBgEntity: () =>
-              this.transientShells.list({ status: ['running'] })
-                .some((s) => s.spawned_by_task_id === task.task_id),
+            // R2：本 task 名下 running 的（持久）bg shell——退出时 onShellExit push humanQueue 唤醒，
+            // 所以"等它退出"是合法裸挂起。可能永不退出的进程（服务/监控）仍建议带 timeout_ms。
+            hasRunningBgEntity: async () => {
+              const running = await this.bgRegistry.list({ status: ['running'] })
+              return running.some((s) => s.type === 'shell' && s.spawned_by_task_id === task.task_id)
+            },
           },
         )
         if (waitForSignalTool) tools.push(waitForSignalTool)
@@ -1782,8 +1768,7 @@ export class AgentHandler {
         this.activeTasks.delete(task.task_id)
         this.liveSnapshots.delete(task.task_id)
         this.taskTraceStores.delete(task.task_id)
-        // Kill all transient shells owned by this task (persistent shells survive)
-        this.transientShells.killAllOwnedBy(task.task_id)
+        // 后台 shell 现在全是持久实体，随 task 结束存活（终态由 reaper/GC 清；可被 Kill 杀）。
         // Clean up cursor map entries for this task to avoid memory leak
         for (const key of this.bgCursorMap.keys()) {
           if (key.startsWith(`${task.task_id}:`)) {
@@ -1808,7 +1793,6 @@ export class AgentHandler {
     this.activeTasks.delete(taskId)
     this.liveSnapshots.delete(taskId)
     this.taskTraceStores.delete(taskId)
-    this.transientShells.killAllOwnedBy(taskId)
     for (const key of this.bgCursorMap.keys()) {
       if (key.startsWith(`${taskId}:`)) {
         this.bgCursorMap.delete(key)
@@ -3673,13 +3657,6 @@ export class AgentHandler {
 
   async killBgEntity(entity_id: string): Promise<{ ok: boolean; message?: string }> {
     if (entity_id.startsWith('shell_')) {
-      // Try transient shell first
-      const transientState = this.transientShells.get(entity_id)
-      if (transientState) {
-        this.transientShells.kill(entity_id)
-        return { ok: true }
-      }
-      // Persistent shell
       const rec = await this.bgRegistry.get(entity_id)
       if (!rec) return { ok: false, message: 'Entity not found' }
       if (rec.status !== 'running') return { ok: false, message: `Already ${rec.status}` }
@@ -3717,17 +3694,6 @@ export class AgentHandler {
   }> {
     const fromOffset = opts?.from_offset ?? 0
     const maxBytes = opts?.max_bytes ?? 100_000
-
-    // Check transient shell first
-    const transientState = this.transientShells.get(entity_id)
-    if (transientState) {
-      return {
-        content: transientState.ringBuffer,
-        new_offset: transientState.ringBuffer.length,
-        status: transientState.status,
-        type: 'shell',
-      }
-    }
 
     const rec = await this.bgRegistry.get(entity_id)
     if (!rec) throw new Error(`Entity not found: ${entity_id}`)

@@ -31,8 +31,8 @@ export interface WaitForSignalDeps {
   readonly humanQueue: HumanMessageQueue
   readonly hasActiveAudit: () => boolean
   readonly hasActiveAsyncSubagent: () => boolean
-  /** 本 task 是否有 running 的 bg entity（transient shell 等）——它退出时会 push 唤醒 */
-  readonly hasRunningBgEntity: () => boolean
+  /** 本 task 是否有 running 的 bg shell——它退出时会 push 唤醒。查 bgRegistry，故异步。 */
+  readonly hasRunningBgEntity: () => boolean | Promise<boolean>
 }
 
 const inputSchema = z.object({
@@ -77,7 +77,7 @@ export function createWaitForSignalTool(deps: WaitForSignalDeps): ToolDefinition
       const hasPending = deps.humanQueue.hasPending
       const hasAudit = deps.hasActiveAudit()
       const hasSubagent = deps.hasActiveAsyncSubagent()
-      const hasBgEntity = deps.hasRunningBgEntity()
+      const hasBgEntity = await deps.hasRunningBgEntity()
 
       if (!hasPending && !hasAudit && !hasSubagent && !hasBgEntity && timeout_ms === undefined) {
         return {
