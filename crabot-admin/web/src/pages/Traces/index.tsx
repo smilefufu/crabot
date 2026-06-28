@@ -49,7 +49,7 @@ import { Modal } from '../../components/Common/Modal'
 
 interface TraceTreeData {
   fronts: TraceIndexEntry[]
-  worker: TraceIndexEntry | null
+  workers: TraceIndexEntry[]
   subagents: TraceIndexEntry[]
 }
 
@@ -106,7 +106,7 @@ function RelatedTraceTree({
   }
   if (!tree) return null
 
-  const total = tree.fronts.length + (tree.worker ? 1 : 0) + tree.subagents.length
+  const total = tree.fronts.length + tree.workers.length + tree.subagents.length
 
   const renderRole = (label: string, color: string, items: TraceIndexEntry[]) => {
     if (items.length === 0) return null
@@ -157,7 +157,7 @@ function RelatedTraceTree({
         <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>· 共 {total} trace</span>
       </div>
       {renderRole('Dispatch', '#3b82f6', tree.fronts)}
-      {tree.worker && renderRole('Task', '#8b5cf6', [tree.worker])}
+      {tree.workers.length > 0 && renderRole('Task', '#8b5cf6', tree.workers)}
       {renderRole('Sub-agent', '#ec4899', tree.subagents)}
     </div>
   )
@@ -690,7 +690,7 @@ function ExpandedTraceRows({
   }
   const members: Array<{ entry: TraceIndexEntry; role: 'dispatcher' | 'worker' | 'subagent' }> = [
     ...tree.tree.fronts.map((e) => ({ entry: e, role: 'dispatcher' as const })),
-    ...(tree.tree.worker ? [{ entry: tree.tree.worker, role: 'worker' as const }] : []),
+    ...tree.tree.workers.map((e) => ({ entry: e, role: 'worker' as const })),
     ...tree.tree.subagents.map((e) => ({ entry: e, role: 'subagent' as const })),
   ]
   if (members.length === 0) {

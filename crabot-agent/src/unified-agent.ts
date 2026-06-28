@@ -1975,7 +1975,10 @@ export class UnifiedAgent extends ModuleBase {
           },
         },
       )
-      this.traceStore.consumeResumableCheckpoint(task_id)
+      // 不再 consumeResumableCheckpoint（那会 finalize 旧 trace + 另起新 trace = 一个 task 两条
+      // trace）。改由后台 handleExecuteTask 的 reactivateResumableTrace **复用**旧 trace 续写——
+      // 它从 resumableCheckpoints 摘除该 entry，旧 trace 不 finalize、新 run 的 span 追加上去，
+      // 一个 task 跨重启就是一条连续 trace。
       return { resumed: true }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
@@ -2070,8 +2073,14 @@ export class UnifiedAgent extends ModuleBase {
     // 更新 sandbox 路径映射（crab-messaging send_message 需要路径转换）
     this.sandboxPathMappingsRef.current = taskParams.context.sandbox_path_mappings ?? []
 
-    // 创建 Trace
-    const trace = this.traceStore.startTrace({
+    // 创建 / 复用 Trace。
+    // resume 续写：若是 resume（resumeFrom 存在），复用重启/恢复前那条 trace（已连 spans 载入），
+    // 让一个 task 跨重启是**一条连续 trace**，而非每个 run 一条；新 run 的 span 追加到旧 trace 上。
+    // 非 resume，或复用失败（罕见边界），正常新建。
+    const reactivated = taskParams.resumeFrom
+      ? this.traceStore.reactivateResumableTrace(taskParams.task.task_id)
+      : null
+    const trace = reactivated ?? this.traceStore.startTrace({
       module_id: this.config.moduleId,
       trigger: {
         type: 'task',
@@ -2105,6 +2114,11 @@ export class UnifiedAgent extends ModuleBase {
 
     try {
       const result = await this.agentHandler.executeTask(taskParams, traceCallback, traceContext)
+      if (result.outcome === 'suspended_for_restart') {
+        // task 已挂起等重启，trace 保持 running；重启后 resume-sweep 会接管。
+        // 不调 endTrace，不 finalize，让 checkpoint 完整保留。
+        return { ...result, trace_id: trace.trace_id }
+      }
       const status = result.outcome === 'completed' ? 'completed' : 'failed'
       const summary = result.error ? result.error.slice(0, 200) : (status === 'completed' ? '任务已完成' : '任务失败')
       this.traceStore.endTrace(trace.trace_id, status, {

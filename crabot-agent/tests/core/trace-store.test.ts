@@ -297,8 +297,30 @@ describe('TraceStore getTraceTree', () => {
 
       expect(tree.task_id).toBe('task-1')
       expect(tree.tree.fronts).toHaveLength(2)
-      expect(tree.tree.worker?.trace_id).toBe('worker-1')
+      expect(tree.tree.workers).toHaveLength(1)
+      expect(tree.tree.workers[0]?.trace_id).toBe('worker-1')
       expect(tree.tree.subagents).toHaveLength(1)
+    } finally {
+      fs.rmSync(dir, { recursive: true })
+    }
+  })
+
+  it('返回一个 task 的全部 worker run（resume 续起的多条 trace 不被合并丢弃），按时间升序', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-tree-multi-'))
+    try {
+      const traces = [
+        { trace_id: 'front-1', module_id: 'a', related_task_id: 'task-1', started_at: '2026-04-13T10:00:00Z', status: 'completed', trigger: { type: 'message', summary: 'create' }, spans: [] },
+        // 重启后那条 run（时间更晚）写在前面，验证返回时被按时间升序排
+        { trace_id: 'worker-post', module_id: 'a', related_task_id: 'task-1', started_at: '2026-04-13T10:05:00Z', status: 'completed', trigger: { type: 'task', summary: 'resumed' }, spans: [] },
+        { trace_id: 'worker-pre', module_id: 'a', related_task_id: 'task-1', started_at: '2026-04-13T10:01:00Z', status: 'completed', trigger: { type: 'task', summary: 'pre-restart' }, spans: [] },
+      ]
+      fs.writeFileSync(path.join(dir, 'traces-2026-04-13.jsonl'), traces.map(t => JSON.stringify(t)).join('\n') + '\n')
+
+      const store = new TraceStore(10, dir)
+      const tree = store.getTraceTree('task-1')
+
+      expect(tree.tree.workers).toHaveLength(2)                       // 两条 worker run 都在
+      expect(tree.tree.workers.map(w => w.trace_id)).toEqual(['worker-pre', 'worker-post']) // 时间升序
     } finally {
       fs.rmSync(dir, { recursive: true })
     }
@@ -308,7 +330,7 @@ describe('TraceStore getTraceTree', () => {
     const store = new TraceStore(10)
     const tree = store.getTraceTree('nonexistent')
     expect(tree.tree.fronts).toHaveLength(0)
-    expect(tree.tree.worker).toBeNull()
+    expect(tree.tree.workers).toHaveLength(0)
     expect(tree.tree.subagents).toHaveLength(0)
   })
 })
@@ -662,5 +684,57 @@ describe('prompts 退役', () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('TraceStore reactivateResumableTrace（resume 续写复用旧 trace）', () => {
+  function makeTempDir(): string {
+    return fs.mkdtempSync(path.join(os.tmpdir(), 'trace-store-reactivate-'))
+  }
+
+  it('复用重启前的 trace：保留旧 span、status 仍 running、从 resumableCheckpoints 摘除', () => {
+    const dir = makeTempDir()
+    try {
+      const store1 = new TraceStore(10, dir)
+      const trace = store1.startTrace({
+        module_id: 'agent-1',
+        trigger: { type: 'task', summary: '重启一下整个 crabot 实例' },
+        related_task_id: 'task-restart',
+      })
+      // 重启前那条 run 调了 request_restart（一个 span）
+      const span = store1.startSpan(trace.trace_id, { type: 'llm_call', details: { iteration: 1 } })
+      store1.endSpan(trace.trace_id, span.span_id, 'completed')
+      // 写 per-task checkpoint → traces-running-<taskId>.jsonl（含 resume_checkpoint）
+      store1.flushWorkerCheckpoint('task-restart', trace.trace_id, {
+        agent_version: 'v1',
+        system_prompt: 'sys',
+        messages: [{ id: 'm1', role: 'user', content: 'hi', timestamp: 1 }] as never,
+        worker_state: { todo_items: [], goal_revision_unlocked: false },
+      })
+
+      // 模拟重启：新 store 从同一 dir 加载（loadResumableCheckpoints 连 spans 载入 this.traces）
+      const store2 = new TraceStore(10, dir)
+      expect(store2.getResumableCheckpoint('task-restart')).toBeDefined()
+
+      const reactivated = store2.reactivateResumableTrace('task-restart')
+      expect(reactivated).not.toBeNull()
+      expect(reactivated!.trace_id).toBe(trace.trace_id)            // 同一条 trace，非新建
+      expect(reactivated!.status).toBe('running')                   // 没被 finalize
+      expect(reactivated!.spans?.length ?? 0).toBeGreaterThan(0)    // 旧 span 还在
+      expect(store2.getResumableCheckpoint('task-restart')).toBeUndefined() // 已摘除
+
+      // 续写：新 run 的 span 追加到同一条 trace
+      const span2 = store2.startSpan(reactivated!.trace_id, { type: 'llm_call', details: { iteration: 2 } })
+      store2.endSpan(reactivated!.trace_id, span2.span_id, 'completed')
+      const full = store2.getTrace(trace.trace_id)
+      expect(full!.spans?.length ?? 0).toBeGreaterThanOrEqual(2)    // 旧+新 span 在同一条 trace
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('无 resumable entry 时返回 null（调用方回退到新建）', () => {
+    const store = new TraceStore(10)
+    expect(store.reactivateResumableTrace('nope')).toBeNull()
   })
 })

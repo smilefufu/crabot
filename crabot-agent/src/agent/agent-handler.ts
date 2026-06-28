@@ -74,7 +74,7 @@ import type { SubAgentTraceConfig } from '../engine/sub-agent.js'
 import { createDelegateTaskTool } from './delegate-task-tool.js'
 import type { RunSubAgentFn, RunSubAgentInput } from './delegate-task-tool.js'
 import { createSubagentCoordinatorTools } from './subagent-coordinator-tools.js'
-import { createRestartInstanceTool } from './restart-instance-tool.js'
+import { createRequestRestartTool } from './restart-instance-tool.js'
 import { buildSubAgentFailureOutput } from './subagent-error-classifier.js'
 import { filterToolsForSubAgent } from './subagent-tool-filter.js'
 import { assembleSubAgentPrompt } from './subagent-prompt-assembler.js'
@@ -114,13 +114,14 @@ import { createSubmitAuditResultTool } from './goal-auditor-tools.js'
 import { createWaitForSignalTool, type WaitForSignalDeps } from '../mcp/wait-for-signal.js'
 import { createAsyncAuditEndTurnGate } from './end-turn-gate.js'
 import { buildAuditAbortedMarker } from './audit-result-marker.js'
-import { buildResumeWakeupMessage } from '../core/resume-checkpoint.js'
+import { buildResumeWakeupMessage, buildRestartCompletedWakeupMessage } from '../core/resume-checkpoint.js'
 
 import { reflectStructuredOutcome } from '../orchestration/structured-outcome-reflector.js'
 import { AGENT_VERSION } from '../constants.js'
 
 import * as fs from 'fs'
 import * as path from 'path'
+import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'crypto'
 
 /**
@@ -673,7 +674,11 @@ export class AgentHandler {
     if (params.resumeFrom) {
       const { initialMessages, todoItems, goalRevisionUnlocked, cwd: resumedCwd } = params.resumeFrom
       // 唤醒消息只注入一次（resume 首轮）；后续 waiting 续跑沿用现有重设逻辑。
-      currentInitialMessages = [...initialMessages, buildResumeWakeupMessage()]
+      // request_restart 挂起的任务恢复时，注入重启专用唤醒，让 worker 自判是否已完成。
+      const wakeup = this.consumeRestartResumeMarker(task.task_id)
+        ? buildRestartCompletedWakeupMessage()
+        : buildResumeWakeupMessage()
+      currentInitialMessages = [...initialMessages, wakeup]
       // 预建 taskState 让 runWorkerLoop 直接复用（不再用 new TodoStore()）
       if (!this.activeTasks.has(task.task_id)) {
         this.activeTasks.set(task.task_id, {
@@ -1248,9 +1253,9 @@ export class AgentHandler {
             bgRegistry: this.bgRegistry,
             killBgEntity: (entity_id) => this.killBgEntity(entity_id),
           }))
-          tools.push(createRestartInstanceTool({
-            crabotHome: process.env.CRABOT_HOME ?? path.resolve(__dirname, '../..'),
+          tools.push(createRequestRestartTool({
             adminDataDir: getAdminDataDir(),
+            requestRestart: (reason) => this.requestRestartForTask(task.task_id, reason),
           }))
         }
 
@@ -1818,6 +1823,65 @@ export class AgentHandler {
         this.bgCursorMap.delete(key)
       }
     }
+  }
+
+  /**
+   * 工具 request_restart 的落点：**复用 ask_human 的 barrier 挂起机制**（跟 send_message(ask_human)
+   * / wait_for_signal 同一套 humanQueue.setBarrier 路径）。
+   *
+   * 为什么用 barrier 而不是 abort：barrier 是「工具执行完（tool_result 已入 messages、checkpoint
+   * 已完整 flush、fireOnTurn 已 record）之后，engine 的 post-tool barrier check 停住 loop、不再发起
+   * 下一轮 LLM（主动权不交回 agent）」——这正是 ask_human 的实现。abort 则会在工具执行中途打断底层
+   * stream，让 checkpoint 残缺（只有 tool_use 无 tool_result）、resume 畸形失败（已踩过的坑）。
+   *
+   * 流程：setBarrier 让 worker 在本 turn 干净收尾后 park（checkpoint 完整）→ spawn detached 重启
+   * 杀掉 parked 的 agent（~秒级，checkpoint 早已落盘）→ reboot 后 resume-sweep 续起（task 仍是
+   * 可 resume 的 in-flight 态）→ worker 收到 buildRestartCompletedWakeupMessage 后自判收尾/续跑。
+   */
+  private requestRestartForTask(taskId: string, reason?: string): void {
+    this.writeRestartResumeMarker(taskId)
+    // barrier 超时给足（重启实际只需秒级；超时仅作兜底，避免重启异常时 worker 永久 park）。
+    this.humanQueues.get(taskId)?.setBarrier(10 * 60 * 1000)
+    this.spawnInstanceRestart(reason)
+  }
+
+  /** detached spawn restart.mjs；搬自旧 restart-instance-tool，由 executeTask 拦截调用。 */
+  private spawnInstanceRestart(reason?: string): void {
+    const crabotHome = process.env.CRABOT_HOME ?? path.resolve(__dirname, '../..')
+    const script = path.join(crabotHome, 'scripts', 'restart.mjs')
+    if (!fs.existsSync(script)) {
+      log(`[request_restart] 找不到重启脚本：${script}`)
+      return
+    }
+    const logDir = path.join(getAdminDataDir(), '..', 'logs')
+    fs.mkdirSync(logDir, { recursive: true })
+    const logFd = fs.openSync(path.join(logDir, 'restart.log'), 'a')
+    const child = spawn(process.execPath, [script], {
+      cwd: crabotHome,
+      detached: true,
+      stdio: ['ignore', logFd, logFd],
+      env: { ...process.env, CRABOT_RESTART_REASON: reason ?? '' },
+    })
+    child.on('error', (err) => log(`[request_restart] spawn restart.mjs failed: ${err}`))
+    child.unref()
+  }
+
+  private restartResumeMarkerPath(taskId: string): string {
+    return path.join(getAgentDataDir(), 'restart-resume', `${taskId}.flag`)
+  }
+
+  private writeRestartResumeMarker(taskId: string): void {
+    const p = this.restartResumeMarkerPath(taskId)
+    fs.mkdirSync(path.dirname(p), { recursive: true })
+    fs.writeFileSync(p, new Date().toISOString())
+  }
+
+  /** 消费（存在即返回 true 并删除） */
+  private consumeRestartResumeMarker(taskId: string): boolean {
+    const p = this.restartResumeMarkerPath(taskId)
+    if (!fs.existsSync(p)) return false
+    try { fs.unlinkSync(p) } catch { /* ok */ }
+    return true
   }
 
   /**

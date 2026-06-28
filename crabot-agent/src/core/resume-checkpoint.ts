@@ -35,3 +35,15 @@ export function buildResumeWakeupMessage(): EngineMessage {
     timestamp: Date.now(),
   }
 }
+
+export function buildRestartCompletedWakeupMessage(): EngineMessage {
+  return {
+    id: `restart-done-${Date.now()}`,
+    role: 'user',
+    content:
+      '[系统] 你请求的整实例重启已完成，你现在运行在重启后的新进程里。控制权交回给你：' +
+      '若重启就是本任务的全部目标，向 master 确认重启完成即可（任务随之结束）；' +
+      '若重启只是中间一步（如自我进化），用 list_entities / find_task / get_task_progress 自查后继续后续工作。',
+    timestamp: Date.now(),
+  }
+}
