@@ -471,21 +471,28 @@ export async function runShellWithGrace(opts: RunShellWithGraceOpts): Promise<Ru
 // ---------------------------------------------------------------------------
 
 /**
- * Read the actual start time of `pid` via `ps -o lstart=`.
- * Falls back to `now` if ps fails (e.g. process already exited, Windows where
- * ps is unavailable, or a locale whose `ps` date 不能被 `new Date()` 解析 —
- * 兜底用 wall-clock，因为刚 spawn 时它足够准）。registry.isShellAlive 与测试共用此函数，
- * 保证记录侧与探活侧解析口径一致（无 ps-parse 时两边都退化为 now，仍落在 5s 窗口内）。
+ * Read the actual start time of `pid` via `ps -o lstart=`，返回稳定的进程启动时间（ISO）。
+ *
+ * **必须强制 `LC_ALL=C`**：否则在中文等 locale 下 `ps -o lstart=` 输出本地化日期
+ * （如 `一  6月/29 06:50:35 2026`），`new Date()` 解析失败 → 退化为 wall-clock now。
+ * 那会毁掉 isShellAlive 的防-PID-复用校验：spawn 时记 now1、跨重启重读得 now2（相差宕机时长）
+ * → |now1-now2| 远超 5s 窗口 → **活进程被误判为死、re-adopt 失效**（生产实测踩到）。
+ * 强制 C locale 后 `ps` 输出英文日期（`Mon Jun 29 ...`）可解析，拿到真实稳定的启动时间，跨重启可比对。
+ *
+ * 仅在 ps 不可用（进程已退出、Windows）等真正失败时才退化为 now——此时 isShellAlive 已先用
+ * `kill(pid,0)` 判出死/活，不依赖这里的时间。
  */
 export async function readProcStartTime(pid: number): Promise<string> {
   try {
-    const { stdout } = await execFileAsync('ps', ['-o', 'lstart=', '-p', String(pid)])
+    const { stdout } = await execFileAsync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+      env: { ...process.env, LC_ALL: 'C' },
+    })
     const trimmed = stdout.trim()
     if (!trimmed) throw new Error('empty ps output')
-    return new Date(trimmed).toISOString()
+    const ms = Date.parse(trimmed)
+    if (Number.isNaN(ms)) throw new Error(`unparseable ps lstart: ${trimmed}`)
+    return new Date(ms).toISOString()
   } catch {
-    // Windows (no ps), process already exited, etc. Wall-clock is accurate
-    // enough — we just spawned.
     return new Date().toISOString()
   }
 }

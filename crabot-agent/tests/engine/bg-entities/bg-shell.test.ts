@@ -1,10 +1,34 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { BgEntityRegistry } from '../../../src/engine/bg-entities/registry'
-import { spawnPersistentShell } from '../../../src/engine/bg-entities/bg-shell'
+import { spawnPersistentShell, readProcStartTime } from '../../../src/engine/bg-entities/bg-shell'
 import type { BgShellRegistryRecord } from '../../../src/engine/bg-entities/types'
+
+// ---------------------------------------------------------------------------
+// readProcStartTime：必须返回真实的进程启动时间（稳定、跨重启可比对），而非 wall-clock now。
+// 回归守卫：中文等 locale 下 `ps -o lstart=` 输出本地化日期，若不强制 LC_ALL=C 会解析失败、
+// 退化为 now，导致 isShellAlive 防-PID-复用校验跨重启误判活进程为死（生产实测踩到）。
+// ---------------------------------------------------------------------------
+
+describe('readProcStartTime', () => {
+  it('返回真实启动时间（约 2s 前），而非 now；两次调用稳定一致', async () => {
+    const child = spawn('sleep', ['10'])
+    try {
+      await new Promise((r) => setTimeout(r, 2100)) // 让启动时间明显早于 now
+      const t1 = await readProcStartTime(child.pid!)
+      const t2 = await readProcStartTime(child.pid!)
+      expect(Number.isNaN(new Date(t1).getTime())).toBe(false) // 可解析
+      expect(t1).toBe(t2) // 稳定（真实启动时间不随调用时刻变）
+      // 关键：返回的是真实启动时间（~2s 前），不是 now。坏 locale 下未强制 LC_ALL=C 会退化为 now → 此断言失败。
+      expect(Date.now() - new Date(t1).getTime()).toBeGreaterThan(1000)
+    } finally {
+      child.kill('SIGKILL')
+    }
+  })
+})
 
 // ---------------------------------------------------------------------------
 // Test helpers
