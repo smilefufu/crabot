@@ -129,4 +129,51 @@ describe('sweepInterruptedTasksForResume through applyStatusTransition', () => {
     // resumed 成功 → 任务保持 executing，不被标 failed
     expect((admin as any).tasks.get(task.id).status).toBe('executing')
   })
+
+  it('module_started 丢失时，轮询兜底仍可靠触发 sweep（agent 延迟就绪）', async () => {
+    ;(admin as any).agentPort = 0 // 模拟没接住 agent 的 module_started 事件
+    let resolveCalls = 0
+    const originalResolve = (admin as any).resolveAgentPort.bind(admin)
+    ;(admin as any).resolveAgentPort = async () => {
+      resolveCalls++
+      ;(admin as any).agentPort = 19999 // 轮询时 agent「注册」上
+    }
+    let sweepCalled = false
+    const originalSweep = (admin as any).sweepInterruptedTasksForResume.bind(admin)
+    ;(admin as any).sweepInterruptedTasksForResume = async () => {
+      sweepCalled = true
+    }
+
+    try {
+      await (admin as any).ensureResumeSweepAfterAgentReady(10, 5000)
+    } finally {
+      ;(admin as any).resolveAgentPort = originalResolve
+      ;(admin as any).sweepInterruptedTasksForResume = originalSweep
+    }
+
+    expect(resolveCalls).toBeGreaterThanOrEqual(1)
+    expect(sweepCalled).toBe(true)
+  })
+
+  it('agent 一直不就绪时 sweep 不被调用（超时放弃，不误标 failed）', async () => {
+    ;(admin as any).agentPort = 0
+    const originalResolve = (admin as any).resolveAgentPort.bind(admin)
+    ;(admin as any).resolveAgentPort = async () => {
+      /* 永不设 agentPort */
+    }
+    let sweepCalled = false
+    const originalSweep = (admin as any).sweepInterruptedTasksForResume.bind(admin)
+    ;(admin as any).sweepInterruptedTasksForResume = async () => {
+      sweepCalled = true
+    }
+
+    try {
+      await (admin as any).ensureResumeSweepAfterAgentReady(5, 30) // 30ms 超时
+    } finally {
+      ;(admin as any).resolveAgentPort = originalResolve
+      ;(admin as any).sweepInterruptedTasksForResume = originalSweep
+    }
+
+    expect(sweepCalled).toBe(false)
+  })
 })
