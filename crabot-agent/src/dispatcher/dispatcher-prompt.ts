@@ -23,6 +23,11 @@ export function assembleDispatcherPrompt(ctx: DispatchContext): string {
   const parts: string[] = []
   parts.push(PRODUCT_SELF)
   parts.push('')
+  // 群聊才有收件人歧义（多人 + 多 bot 共存）；私聊/admin chat 只有两方，不需要这段
+  if (ctx.sessionType === 'group') {
+    parts.push(GROUP_RECIPIENT_PREAMBLE)
+    parts.push('')
+  }
   parts.push(buildDispatchRules(ctx.sessionType, hasActiveTasks))
   parts.push('')
   if (ctx.crabSelfHandle) {
@@ -51,6 +56,14 @@ const PRODUCT_SELF = `## 你是 Crabot 的消息分诊器
 
 你不直接与人类对话——你的判断会让系统调起相应的 agent 实例执行任务，或把消息作为补充投递给已经在跑的任务，或者忽略（仅群聊）。`
 
+const GROUP_RECIPIENT_PREAMBLE = `## 分诊前置：先判收件人（最高优先级）
+
+判断 new_task / supplement / stay_silent 之前，先逐条判断这条消息发给谁。**收件人判定优先于“消息里有动词/任务/服务器/代码”等任务特征。**
+
+- 明确发给我的信号：消息带 mention="@you"，或正文出现「你在本渠道的身份」段里我的 @handle，或当前消息明确在追问我刚才发出的内容。满足才可 new_task / supplement。
+- 正文 @ 了其他人/其他 bot、又没有同时明确 @ 我 → 默认不是发给我。
+- 仅当没有指定个人收件人的公共群请求，才继续判断我是否该承担。`
+
 function buildDispatchRules(
   sessionType: DispatchContext['sessionType'],
   hasActiveTasks: boolean,
@@ -72,6 +85,7 @@ const SUPPLEMENT_WHITELIST_REMINDER =
  */
 const NEW_TASK_IMMEDIATE_REPLY_HINT =
   `   - immediate_reply（可选）：worker 需要动手（查记忆/查配置/查日志/调命令/读代码/多步推理）才能答的任务，在 worker 起来前先发一句简短 ack 让用户知道收到了（worker 看历史不会重复 ack）
+     · 前提：先确认这条确实发给我再考虑；不要因为有动词/服务器/命令/代码等任务特征就跳过收件人判定
      · 倾向带：**需要 agent 动手才能答的请求**——即使字面是单一问句也算（如「服务器 X 的 root 密码是多少」「为什么接口返回 500」「这个表怎么同步的」） / 动词类指令（写/查/调研/分析/做/帮我/给我一个示例） / 多步骤连接词（然后/还要/最后） / 涉及代码生成 / 用户发来代码片段/日志/截图描述让 crab 排查 / 场景画像明示
      · 倾向不带：寒暄（在吗/谢谢/好的，agent 会立即回） / **agent 不用动手就能秒回的字面常识问句**（今天几号 / 你是谁 / 你用的什么模型） / 简短 ack（嗯/行/👍） / 用户单纯分享想法不带请求
      · 拿不准：不带（错带显得啰嗦；而且拿不准时大概率也不知道该写什么 ack）
@@ -121,7 +135,7 @@ const GROUP_RULES_WITH_ACTIVE = `## 分诊规则（群聊）
    - text 用户原话（去掉无关客套即可）。**不要替 agent 解读意图**
 
 2. **new_task** — 某条消息发起一个跟我相关的新任务。
-   - text 用户原话（去掉无关客套即可）。**不要替 agent 提炼意图或加方向性引导**
+   - text 用户原话，**必须保留 @对象、收件人说明与否定范围（如「不是给 X 的」）**，只删与收件人无关的寒暄。**不要替 agent 提炼意图或加方向性引导**
 ${NEW_TASK_IMMEDIATE_REPLY_HINT}
 
 3. **stay_silent** — 这批（或这部分）消息跟我无关。
@@ -141,7 +155,7 @@ const GROUP_RULES_NO_ACTIVE = `## 分诊规则（群聊）
 当前没有任何活跃任务。群聊批次（多消息多用户）的每个动作可以是：
 
 1. **new_task** — 某条消息发起一个跟我相关的新任务。
-   - text 用户原话（去掉无关客套即可）。**不要替 agent 提炼意图或加方向性引导**
+   - text 用户原话，**必须保留 @对象、收件人说明与否定范围（如「不是给 X 的」）**，只删与收件人无关的寒暄。**不要替 agent 提炼意图或加方向性引导**
 ${NEW_TASK_IMMEDIATE_REPLY_HINT}
 
 2. **stay_silent** — 这批（或这部分）消息跟我无关。
