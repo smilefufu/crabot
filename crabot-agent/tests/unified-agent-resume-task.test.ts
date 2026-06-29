@@ -99,6 +99,12 @@ function buildAgent(deps: {
     agent: agent as {
       handleResumeTask: (p: { task_id: string }) => Promise<{ resumed: boolean; reason?: string }>
       handleResumeTaskWithSupplement: (p: { task_id: string; supplement_text: string }) => Promise<{ resumed: boolean; reason?: string }>
+      reviveTerminalSupplementTask: (
+        taskId: string,
+        text: string,
+        channelId: string,
+        sessionId: string
+      ) => Promise<{ outcome: 'revived'; traceId?: string } | { outcome: 'fallback'; reason?: string }>
     },
     executeScheduledTaskInBackground,
     consumeResumableCheckpoint,
@@ -198,6 +204,79 @@ describe('UnifiedAgent.handleResumeTaskWithSupplement', () => {
       { resumeFrom?: { terminalSupplementText?: string } },
     ]
     expect(options.resumeFrom?.terminalSupplementText).toBe('继续刚才失败的任务')
+  })
+})
+
+describe('UnifiedAgent.reviveTerminalSupplementTask', () => {
+  function buildReviveAgent(deps: {
+    rpcCallError?: Error
+    resumeResult?: { resumed: boolean; reason?: string }
+  } = {}) {
+    const agent = Object.create(UnifiedAgent.prototype) as Record<string, unknown>
+    agent.config = { moduleId: 'test-agent' }
+    agent.getAdminPort = vi.fn().mockResolvedValue(18000)
+    agent.rpcClient = {
+      call: deps.rpcCallError
+        ? vi.fn().mockRejectedValue(deps.rpcCallError)
+        : vi.fn().mockResolvedValue({ ok: true }),
+    }
+    agent.handleResumeTaskWithSupplement = vi.fn().mockResolvedValue(deps.resumeResult ?? { resumed: true })
+    return agent as {
+      getAdminPort: ReturnType<typeof vi.fn>
+      rpcClient: { call: ReturnType<typeof vi.fn> }
+      handleResumeTaskWithSupplement: ReturnType<typeof vi.fn>
+      reviveTerminalSupplementTask: (
+        taskId: string,
+        text: string,
+        channelId: string,
+        sessionId: string
+      ) => Promise<{ outcome: 'revived'; traceId?: string } | { outcome: 'fallback'; reason?: string }>
+    }
+  }
+
+  it('revives task through Admin and resumes it in-process', async () => {
+    const agent = buildReviveAgent()
+
+    const result = await agent.reviveTerminalSupplementTask('task-1', '继续刚才失败的任务', 'wechat-x', 'sess-y')
+
+    expect(result).toEqual({ outcome: 'revived' })
+    expect(agent.getAdminPort).toHaveBeenCalledOnce()
+    expect(agent.rpcClient.call).toHaveBeenCalledWith(
+      18000,
+      'revive_task_for_supplement',
+      {
+        task_id: 'task-1',
+        channel_id: 'wechat-x',
+        session_id: 'sess-y',
+        supplement_text: '继续刚才失败的任务',
+      },
+      'test-agent'
+    )
+    expect(agent.handleResumeTaskWithSupplement).toHaveBeenCalledWith({
+      task_id: 'task-1',
+      supplement_text: '继续刚才失败的任务',
+    })
+  })
+
+  it('returns fallback when in-process resume rejects the revive', async () => {
+    const agent = buildReviveAgent({
+      resumeResult: { resumed: false, reason: 'no_checkpoint' },
+    })
+
+    const result = await agent.reviveTerminalSupplementTask('task-missing', '继续', 'wechat-x', 'sess-y')
+
+    expect(result).toEqual({ outcome: 'fallback', reason: 'no_checkpoint' })
+  })
+
+  it('returns fallback when Admin revive RPC throws', async () => {
+    const agent = buildReviveAgent({
+      rpcCallError: new Error('admin unavailable'),
+    })
+
+    const result = await agent.reviveTerminalSupplementTask('task-err', '继续', 'wechat-x', 'sess-y')
+
+    expect(result).toEqual({ outcome: 'fallback', reason: 'admin unavailable' })
+    expect(agent.handleResumeTaskWithSupplement).not.toHaveBeenCalled()
   })
 })
 

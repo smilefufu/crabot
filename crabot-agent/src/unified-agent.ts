@@ -678,6 +678,8 @@ export class UnifiedAgent extends ModuleBase {
 
       await executeDispatchActions(actions, {
         dispatchCtx,
+        reviveTerminalSupplement: (taskId, text) =>
+          this.reviveTerminalSupplementTask(taskId, text, session.channel_id, session.session_id),
         pushSupplement: async (taskId: string, _text: string): Promise<'delivered' | 'fallback'> => {
           // 故意忽略 _text：dispatcher LLM 摘要不如原始消息保真。
           // Task 3 后 deliverHumanResponse 已能渲染含媒体的 ChannelMessage[]，传整批 messages。
@@ -897,6 +899,8 @@ export class UnifiedAgent extends ModuleBase {
 
       await executeDispatchActions(actions, {
         dispatchCtx,
+        reviveTerminalSupplement: (taskId, text) =>
+          this.reviveTerminalSupplementTask(taskId, text, session.channel_id, sessionId),
         pushSupplement: async (taskId: string, _text: string): Promise<'delivered' | 'fallback'> => {
           // 故意忽略 _text：dispatcher LLM 摘要不如原始消息保真。
           // Task 3 后 deliverHumanResponse 已能渲染含媒体的 ChannelMessage[]，传整批 messages。
@@ -1544,6 +1548,8 @@ export class UnifiedAgent extends ModuleBase {
       await executeDispatchActions(actions, {
         dispatchCtx,
         sendImmediateReply,
+        reviveTerminalSupplement: (taskId, text) =>
+          this.reviveTerminalSupplementTask(taskId, text, 'admin-web', sessionId),
         pushSupplement: async (taskId: string, text: string): Promise<'delivered' | 'fallback'> => {
           if (!this.agentHandler!.hasActiveTask(taskId)) return 'fallback'
 
@@ -1898,6 +1904,28 @@ export class UnifiedAgent extends ModuleBase {
 
   private async handleResumeTaskWithSupplement(params: { task_id: string; supplement_text: string }): Promise<{ resumed: boolean; reason?: string }> {
     return this.resumeTaskInternal({ task_id: params.task_id, terminalSupplementText: params.supplement_text })
+  }
+
+  private async reviveTerminalSupplementTask(
+    taskId: string,
+    text: string,
+    channelId: string,
+    sessionId: string,
+  ): Promise<{ outcome: 'revived'; traceId?: string } | { outcome: 'fallback'; reason?: string }> {
+    try {
+      const adminPort = await this.getAdminPort()
+      await this.rpcClient.call(adminPort, 'revive_task_for_supplement', {
+        task_id: taskId,
+        channel_id: channelId,
+        session_id: sessionId,
+        supplement_text: text,
+      }, this.config.moduleId)
+      const r = await this.handleResumeTaskWithSupplement({ task_id: taskId, supplement_text: text })
+      if (r.resumed === true) return { outcome: 'revived' }
+      return { outcome: 'fallback', reason: r.reason ?? 'resume_rejected' }
+    } catch (err) {
+      return { outcome: 'fallback', reason: err instanceof Error ? err.message : String(err) }
+    }
   }
 
   private async resumeTaskInternal(params: { task_id: string; terminalSupplementText?: string }): Promise<{ resumed: boolean; reason?: string }> {
