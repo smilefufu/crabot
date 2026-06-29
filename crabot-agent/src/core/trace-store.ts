@@ -26,7 +26,8 @@ export interface TraceTree {
   task_id: string
   tree: {
     fronts: TraceIndexEntry[]
-    worker: TraceIndexEntry | null
+    /** 一个 task 可能有多条 worker run（resume / 崩溃恢复续起时另起新 trace）；全部返回，按时间升序。 */
+    workers: TraceIndexEntry[]
     subagents: TraceIndexEntry[]
   }
 }
@@ -176,6 +177,25 @@ export class TraceStore {
     if (!this.persistDir) return
     const file = path.join(this.persistDir, TraceStore.runningCheckpointFile(taskId))
     try { if (fs.existsSync(file)) fs.unlinkSync(file) } catch { /* best effort */ }
+  }
+
+  /**
+   * resume **续写**模式：复用重启/恢复前那条 trace（loadResumableCheckpoints 已把它连 spans
+   * 一起载入 this.traces，status 仍 running），让一个 task 跨重启是**一条连续 trace**，而非每个
+   * run 一条。从 resumableCheckpoints 摘除（已被续写接管，不再当可 resume 的孤儿）；**不** finalize
+   * 旧 trace——resumed run 的 span 直接往它上追加，由 handleExecuteTask 的 endTrace 正常收尾。
+   * per-task running 文件不在此删：续写期间每轮 flushWorkerCheckpoint 仍覆盖它，最终由
+   * cleanupWorkerLoopResources 的 clearCheckpointFile 清掉。
+   *
+   * 返回被复用的 trace；若不存在（罕见边界）返回 null，调用方回退到 startTrace 新建。
+   */
+  reactivateResumableTrace(taskId: string): import('../types.js').AgentTrace | null {
+    const entry = this.resumableCheckpoints.get(taskId)
+    if (!entry) return null
+    const trace = this.traces.get(entry.traceId)
+    if (!trace) return null
+    this.resumableCheckpoints.delete(taskId)
+    return trace
   }
 
   /** admin 放弃 resume 时调用：finalize 成 failed 落日期文件 + 清 running 文件。 */
@@ -654,7 +674,7 @@ export class TraceStore {
     const { traces } = this.searchTraces({ task_id: taskId, limit: 100 })
 
     const fronts: TraceIndexEntry[] = []
-    let worker: TraceIndexEntry | null = null
+    const workers: TraceIndexEntry[] = []
     const subagents: TraceIndexEntry[] = []
 
     for (const t of traces) {
@@ -663,11 +683,10 @@ export class TraceStore {
           fronts.push(t)
           break
         case 'task':
-          // 一个 task 可能有多条 worker trace（resume 后旧 trace 被接管、另起新 trace）。
-          // traces 已按 started_at DESC 排序——取最新那条；若更老的那条仍 running（罕见边界），
-          // 优先 running。这样 UI「当前」显示的是真正在跑的 resumed run，而非被接管的旧 trace。
-          if (!worker) worker = t
-          else if (t.status === 'running' && worker.status !== 'running') worker = t
+          // 一个 task 可能有多条 worker trace（resume / 崩溃恢复续起时，旧 run 的 trace 被接管、
+          // 另起新 trace）。**全部收集**——否则触发动作（如重启前调 request_restart 那条 run）在
+          // UI 上整个消失，只剩 resume 后的 run，看着像没执行。按 started_at 升序展示完整执行链。
+          workers.push(t)
           break
         case 'sub_agent_call':
           subagents.push(t)
@@ -676,8 +695,9 @@ export class TraceStore {
           fronts.push(t)
       }
     }
+    workers.sort((a, b) => new Date(a.started_at).getTime() - new Date(b.started_at).getTime())
 
-    return { task_id: taskId, tree: { fronts, worker, subagents } }
+    return { task_id: taskId, tree: { fronts, workers, subagents } }
   }
 
   getDiskUsage(): {

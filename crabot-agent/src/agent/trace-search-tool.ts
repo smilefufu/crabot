@@ -57,7 +57,7 @@ export function createSearchTracesTool(traceStore: TraceStore): ToolDefinition {
           const tree = traceStore.getTraceTree(params.task_id)
           const allTraceIds = [
             ...tree.tree.fronts.map(t => t.trace_id),
-            ...(tree.tree.worker ? [tree.tree.worker.trace_id] : []),
+            ...tree.tree.workers.map(t => t.trace_id),
             ...tree.tree.subagents.map(t => t.trace_id),
           ]
           const targetTraceId = allTraceIds[0]

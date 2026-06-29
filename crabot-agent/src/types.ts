@@ -720,7 +720,7 @@ export interface AgentRole {
 
 export interface ExecuteTaskResult {
   task_id: TaskId
-  outcome: 'completed' | 'failed'
+  outcome: 'completed' | 'failed' | 'suspended_for_restart'
   /** 失败时填错误描述；成功路径不填。worker 完成内容已通过 send_message 发出 +
    *  通过 admin update_task_outcome 写入 task.result.outcome_brief，dispatcher 不再消费 */
   error?: string

@@ -165,12 +165,15 @@ describe('UnifiedAgent.handleResumeTask — I1: task_origin 从 task.source 重�
     expect(workerContext.task_origin).toBeUndefined()
   })
 
-  it('成功 resume 后调用 consumeResumableCheckpoint', async () => {
+  it('成功 resume 后不 finalize 旧 trace（改由 handleExecuteTask 的 reactivate 复用续写，一个 task 一条连续 trace）', async () => {
     const { agent, consumeResumableCheckpoint } = buildAgent({})
 
-    await agent.handleResumeTask({ task_id: 'task-1' })
+    const result = await agent.handleResumeTask({ task_id: 'task-1' })
 
-    expect(consumeResumableCheckpoint).toHaveBeenCalledWith('task-1')
+    expect(result.resumed).toBe(true)
+    // 旧行为：consumeResumableCheckpoint finalize 旧 trace + 另起新 trace = 一个 task 两条 trace。
+    // 新行为：不 consume；旧 trace 由 reactivateResumableTrace 复用续写，一个 task 一条连续 trace。
+    expect(consumeResumableCheckpoint).not.toHaveBeenCalled()
   })
 })
 

@@ -100,7 +100,7 @@ describe('search_traces tool', () => {
 
       expect(parsed.tree).toBeDefined()
       expect(parsed.tree.fronts).toHaveLength(1)
-      expect(parsed.tree.worker.trace_id).toBe('w1')
+      expect(parsed.tree.workers[0].trace_id).toBe('w1')
     } finally {
       fs.rmSync(dir, { recursive: true })
     }

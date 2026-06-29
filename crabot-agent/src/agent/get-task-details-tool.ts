@@ -253,7 +253,7 @@ export function createGetTaskProgressTool(deps: GetTaskProgressToolDeps): ToolDe
       const tree = deps.traceStore.getTraceTree(task_id)
       const traceIds = [
         ...tree.tree.fronts.map(t => t.trace_id),
-        ...(tree.tree.worker ? [tree.tree.worker.trace_id] : []),
+        ...tree.tree.workers.map(t => t.trace_id),
         ...tree.tree.subagents.map(t => t.trace_id),
       ]
       const traces: AgentTrace[] = []

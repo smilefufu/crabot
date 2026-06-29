@@ -133,7 +133,8 @@ export interface TraceTree {
   task_id: string
   tree: {
     fronts: TraceIndexEntry[]
-    worker: TraceIndexEntry | null
+    /** 一个 task 可能有多条 worker run（resume 续起时另起新 trace）；全部返回，按时间升序。 */
+    workers: TraceIndexEntry[]
     subagents: TraceIndexEntry[]
   }
 }

@@ -709,15 +709,13 @@ export class AdminModule extends ModuleBase {
     this.dataLoaded = true
     await this.saveTasks()
 
-    // Resume sweep 兜底触发：若 agent 的 module_started 在 dataLoaded 之前就到了（被守卫跳过），
-    // 这里补一次。仅当 agent 已就绪（agentPort 已写）才跑——否则 RPC 会失败、把 in-flight 误判
-    // 成 needRecovery；agent 没起来就等它的 module_started 事件触发。sweep 幂等（worker-alive +
-    // checkpoint 守卫），与事件触发重复执行也安全。
-    if (this.agentPort) {
-      this.sweepInterruptedTasksForResume(0).catch((err: Error) => {
-        console.warn(`[Admin] Resume sweep (post-loadData) failed: ${err.message}`)
-      })
-    }
+    // Resume sweep 触发可靠化：不再依赖「接住 agent 的 module_started 事件」——冷启动订阅竞态会
+    // 漏接该事件（admin 订阅晚于 agent 发事件），导致整实例重启后 in-flight 任务永远卡 executing。
+    // 这里主动轮询 MM 解析 agent 端口，确认 agent 注册后再 sweep；事件触发（onEvent module_started）
+    // 保留为快路径。sweep 幂等（worker-alive + checkpoint 守卫），与事件触发重复执行也安全。
+    this.ensureResumeSweepAfterAgentReady().catch((err: Error) => {
+      console.warn(`[Admin] Resume sweep (post-loadData) failed: ${err.message}`)
+    })
 
     // 初始化系统权限模板
     await this.initSystemTemplates()
@@ -4768,6 +4766,46 @@ export class AdminModule extends ModuleBase {
     //    已完结、admin 不再认的——finalize 掉，杜绝 per-task 文件永驻磁盘。best-effort。
     this.callAgentRpc('finalize_orphan_checkpoints', { keep_task_ids: inFlight.map((t) => t.id) })
       .catch((err: Error) => console.warn(`[Admin] finalize_orphan_checkpoints failed: ${err.message}`))
+  }
+
+  /**
+   * 保证 resume sweep 在重启后可靠跑一次，不依赖接住 agent 的 module_started 事件。
+   *
+   * 冷启动（整实例 stop/start）时 admin 先起、agent 后起，admin 跑到 onStart 兜底时 agentPort
+   * 还没设；且冷启动订阅竞态下 admin 可能漏接 agent 的 module_started 事件——两者叠加会让 sweep
+   * 永不触发，in-flight 任务（含 restart_instance 触发的重启任务）永远卡 executing / trace running。
+   *
+   * 这里主动轮询 MM 解析 agent 端口（resolveAgentPort），确认 agent 注册后再 sweep。等到 agent
+   * 真正就绪才跑，避免 agent 没起来就 sweep → resume_task RPC 失败 → 误判 needRecovery → 标 failed。
+   * sweep 幂等，与 onEvent module_started 的快路径触发重复执行也安全。
+   *
+   * pollMs / timeoutMs 仅为可测注入，生产用默认值。
+   */
+  private async ensureResumeSweepAfterAgentReady(
+    pollMs = 1000,
+    timeoutMs = 60_000,
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      if (this.agentPort) {
+        await this.sweepInterruptedTasksForResume(0)
+        return
+      }
+      try {
+        await this.resolveAgentPort()
+      } catch {
+        // MM / agent 未就绪，继续轮询
+      }
+      if (this.agentPort) {
+        await this.sweepInterruptedTasksForResume(0)
+        return
+      }
+      if (Date.now() >= deadline) {
+        console.warn('[Admin] Resume sweep 跳过：等待 agent 就绪超时')
+        return
+      }
+      await new Promise((r) => setTimeout(r, pollMs))
+    }
   }
 
   private async handleListTasks(params: ListTasksParams): Promise<{ items: Task[]; pagination: { page: number; page_size: number; total_items: number; total_pages: number } }> {
