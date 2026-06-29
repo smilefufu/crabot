@@ -380,6 +380,12 @@ export interface TaskSummary {
   latest_progress?: string
   source_channel_id?: string
   source_session_id?: string
+  /** Dispatcher supplement candidate source. Undefined is treated as active for compatibility. */
+  candidate_kind?: 'active' | 'recent_terminal'
+  /** Terminal time for recent completed/failed candidates; used for prompt rendering and sorting. */
+  completed_at?: string
+  /** Failed candidate error summary; omitted for completed candidates. */
+  error?: string
   /**
    * 任务触发类型（来自 admin TaskSource.trigger_type）。
    * `scheduled` 表示由调度引擎创建的定时/巡检任务，Front 在 prompt 中需要标记，
@@ -764,6 +770,7 @@ export interface ExecuteTaskParams {
     goalRevisionUnlocked?: boolean
     /** Task-scoped cwd（set_cwd 设置）；从 checkpoint worker_state.cwd 恢复，缺失则回退 home。 */
     cwd?: string
+    terminalSupplementText?: string
   }
 }
 

@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { isResumable, buildResumeWakeupMessage, redactCheckpoint } from '../../src/core/resume-checkpoint.js'
+import {
+  isResumable,
+  buildResumeWakeupMessage,
+  buildTerminalSupplementWakeupMessage,
+  redactCheckpoint,
+} from '../../src/core/resume-checkpoint.js'
 
 const base = {
   agent_version: '1.0.0',
@@ -30,6 +35,15 @@ describe('buildResumeWakeupMessage', () => {
     expect(m.role).toBe('user')
     expect(String(m.content)).toContain('重启')
     expect(String(m.content)).toContain('自查')
+  })
+})
+
+describe('buildTerminalSupplementWakeupMessage', () => {
+  it('builds a user message containing supplement text', () => {
+    const msg = buildTerminalSupplementWakeupMessage('继续刚才失败的任务')
+    expect(msg.role).toBe('user')
+    expect(String(msg.content)).toContain('此 task 已结束')
+    expect(String(msg.content)).toContain('继续刚才失败的任务')
   })
 })
 

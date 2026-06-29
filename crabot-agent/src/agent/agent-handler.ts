@@ -115,7 +115,11 @@ import { createSubmitAuditResultTool } from './goal-auditor-tools.js'
 import { createWaitForSignalTool, type WaitForSignalDeps } from '../mcp/wait-for-signal.js'
 import { createAsyncAuditEndTurnGate } from './end-turn-gate.js'
 import { buildAuditAbortedMarker } from './audit-result-marker.js'
-import { buildResumeWakeupMessage, buildRestartCompletedWakeupMessage } from '../core/resume-checkpoint.js'
+import {
+  buildResumeWakeupMessage,
+  buildRestartCompletedWakeupMessage,
+  buildTerminalSupplementWakeupMessage,
+} from '../core/resume-checkpoint.js'
 
 import { reflectStructuredOutcome } from '../orchestration/structured-outcome-reflector.js'
 import { AGENT_VERSION } from '../constants.js'
@@ -812,9 +816,11 @@ export class AgentHandler {
       const resumeBgNotif = this.drainBgNotifications(this.bgFriendKey(context))
       // 唤醒消息只注入一次（resume 首轮）；后续 waiting 续跑沿用现有重设逻辑。
       // request_restart 挂起的任务恢复时，注入重启专用唤醒，让 worker 自判是否已完成。
-      const wakeup = this.consumeRestartResumeMarker(task.task_id)
-        ? buildRestartCompletedWakeupMessage()
-        : buildResumeWakeupMessage()
+      const wakeup = params.resumeFrom.terminalSupplementText
+        ? buildTerminalSupplementWakeupMessage(params.resumeFrom.terminalSupplementText)
+        : this.consumeRestartResumeMarker(task.task_id)
+          ? buildRestartCompletedWakeupMessage()
+          : buildResumeWakeupMessage()
       // §3.4：bg-notification 必须**并入** wakeup 这条 user message，不能另起一条——否则 checkpoint 末尾
       // 若是 assistant 消息，会出现连续两条 user，违反 Anthropic 的 user/assistant 严格交替。
       const wakeupMsg =

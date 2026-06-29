@@ -440,6 +440,7 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('start_task', this.handleStartTask.bind(this))
     this.registerMethod('start_recovery_task', this.handleStartTask.bind(this))
     this.registerMethod('resume_task', this.handleResumeTask.bind(this))
+    this.registerMethod('resume_task_with_supplement', this.handleResumeTaskWithSupplement.bind(this))
     this.registerMethod('finalize_orphan_checkpoints', this.handleFinalizeOrphanCheckpoints.bind(this))
 
     // Agent 接口
@@ -677,6 +678,8 @@ export class UnifiedAgent extends ModuleBase {
 
       await executeDispatchActions(actions, {
         dispatchCtx,
+        reviveTerminalSupplement: (taskId, text) =>
+          this.reviveTerminalSupplementTask(taskId, text, session.channel_id, session.session_id),
         pushSupplement: async (taskId: string, _text: string): Promise<'delivered' | 'fallback'> => {
           // 故意忽略 _text：dispatcher LLM 摘要不如原始消息保真。
           // Task 3 后 deliverHumanResponse 已能渲染含媒体的 ChannelMessage[]，传整批 messages。
@@ -896,6 +899,8 @@ export class UnifiedAgent extends ModuleBase {
 
       await executeDispatchActions(actions, {
         dispatchCtx,
+        reviveTerminalSupplement: (taskId, text) =>
+          this.reviveTerminalSupplementTask(taskId, text, session.channel_id, sessionId),
         pushSupplement: async (taskId: string, _text: string): Promise<'delivered' | 'fallback'> => {
           // 故意忽略 _text：dispatcher LLM 摘要不如原始消息保真。
           // Task 3 后 deliverHumanResponse 已能渲染含媒体的 ChannelMessage[]，传整批 messages。
@@ -1543,6 +1548,8 @@ export class UnifiedAgent extends ModuleBase {
       await executeDispatchActions(actions, {
         dispatchCtx,
         sendImmediateReply,
+        reviveTerminalSupplement: (taskId, text) =>
+          this.reviveTerminalSupplementTask(taskId, text, 'admin-web', sessionId),
         pushSupplement: async (taskId: string, text: string): Promise<'delivered' | 'fallback'> => {
           if (!this.agentHandler!.hasActiveTask(taskId)) return 'fallback'
 
@@ -1892,6 +1899,49 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   private async handleResumeTask(params: { task_id: string }): Promise<{ resumed: boolean; reason?: string }> {
+    return this.resumeTaskInternal({ task_id: params.task_id })
+  }
+
+  private async handleResumeTaskWithSupplement(params: { task_id: string; supplement_text: string }): Promise<{ resumed: boolean; reason?: string }> {
+    return this.resumeTaskInternal({ task_id: params.task_id, terminalSupplementText: params.supplement_text })
+  }
+
+  private async reviveTerminalSupplementTask(
+    taskId: string,
+    text: string,
+    channelId: string,
+    sessionId: string,
+  ): Promise<{ outcome: 'revived'; traceId?: string } | { outcome: 'fallback'; reason?: string }> {
+    try {
+      const adminPort = await this.getAdminPort()
+      await this.rpcClient.call(adminPort, 'revive_task_for_supplement', {
+        task_id: taskId,
+        channel_id: channelId,
+        session_id: sessionId,
+        supplement_text: text,
+      }, this.config.moduleId)
+      const r = await this.handleResumeTaskWithSupplement({ task_id: taskId, supplement_text: text })
+      if (r.resumed === true) return { outcome: 'revived' }
+      const reason = r.reason ?? 'resume_rejected'
+      try {
+        await this.rpcClient.call(adminPort, 'update_task_status', {
+          task_id: taskId,
+          status: 'failed',
+          error: `Revived terminal supplement task could not be resumed: ${reason}`,
+        }, this.config.moduleId)
+      } catch (cleanupErr) {
+        console.error(
+          `[${this.config.moduleId}] failed to mark rejected revived task ${taskId} failed:`,
+          cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+        )
+      }
+      return { outcome: 'fallback', reason }
+    } catch (err) {
+      return { outcome: 'fallback', reason: err instanceof Error ? err.message : String(err) }
+    }
+  }
+
+  private async resumeTaskInternal(params: { task_id: string; terminalSupplementText?: string }): Promise<{ resumed: boolean; reason?: string }> {
     const { task_id } = params
 
     // worker-alive 守卫：admin 单独重启时 agent 没重启、worker loop 仍在内存里跑这条 task。
@@ -1972,6 +2022,7 @@ export class UnifiedAgent extends ModuleBase {
             todoItems: entry.checkpoint.worker_state.todo_items,
             goalRevisionUnlocked: entry.checkpoint.worker_state.goal_revision_unlocked,
             cwd: entry.checkpoint.worker_state.cwd,
+            ...(params.terminalSupplementText !== undefined ? { terminalSupplementText: params.terminalSupplementText } : {}),
           },
         },
       )

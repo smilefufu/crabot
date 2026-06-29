@@ -5,12 +5,13 @@ import type { LLMAdapter, LLMStreamParams } from '../../src/engine/llm-adapter-t
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 import type { ChannelMessage, TaskSummary } from '../../src/types.js'
 
-function makeTask(id: string): TaskSummary {
+function makeTask(id: string, overrides: Partial<TaskSummary> = {}): TaskSummary {
   return {
     task_id: id as never,
     title: `t-${id}`,
     status: 'executing',
     priority: 'normal',
+    ...overrides,
   }
 }
 
@@ -161,6 +162,42 @@ describe('dispatch', () => {
     const prompt = buildUserPrompt(ctx)
     expect(prompt).not.toMatch(/## 最近聊天历史/)
     expect(prompt).toMatch(/## 当前消息批次/)
+  })
+
+  it('userPrompt renders recent completed and failed candidates under 可补充任务', () => {
+    const ctx = makeCtx({
+      activeTasks: [
+        makeTask('task-active'),
+        makeTask('task-done', {
+          status: 'completed',
+          candidate_kind: 'recent_terminal',
+          completed_at: '2026-06-29T10:00:00.000Z',
+        }),
+        makeTask('task-failed', {
+          status: 'failed',
+          candidate_kind: 'recent_terminal',
+          completed_at: '2026-06-29T10:05:00.000Z',
+          error: 'TypeError: terminated',
+        }),
+      ],
+    })
+    const prompt = buildUserPrompt(ctx, { timezone: 'Asia/Shanghai' })
+    expect(prompt).toMatch(/## 可补充任务/)
+    expect(prompt).toMatch(/status: executing/)
+    expect(prompt).toMatch(/status: completed_recently/)
+    expect(prompt).toMatch(/status: failed_recently/)
+    expect(prompt).toMatch(/TypeError: terminated/)
+  })
+
+  it('LLM can supplement a recent completed candidate because it is in the candidate whitelist', async () => {
+    const adapter = makeMockAdapter(JSON.stringify({
+      actions: [{ kind: 'supplement', target_task_id: 'task-done', text: '继续刚才的' }],
+    }))
+    const { actions } = await dispatch(
+      makeCtx({ activeTasks: [makeTask('task-done', { status: 'completed', candidate_kind: 'recent_terminal' })] }),
+      { adapter, modelId: 'm', sendErrorToUser: vi.fn() },
+    )
+    expect(actions).toEqual([{ kind: 'supplement', target_task_id: 'task-done', text: '继续刚才的' }])
   })
 
   // ============================================================================

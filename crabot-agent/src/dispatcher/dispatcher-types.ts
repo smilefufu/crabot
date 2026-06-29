@@ -90,12 +90,18 @@ export interface ImmediateReplySentInfo {
   readonly sent_at: string
 }
 
+export type TerminalSupplementResult =
+  | { readonly outcome: 'revived'; readonly traceId?: string }
+  | { readonly outcome: 'fallback'; readonly reason?: string }
+
 /** 动作执行器的运行时上下文（注入 unified-agent 提供的回调）。 */
 export interface ExecuteContext {
   readonly dispatchCtx: DispatchContext
   /** supplement 投递回调：把 text push 到目标 task 的 humanQueue。
    *  返回值：'delivered' = 投递成功；'fallback' = task not found（agent 进程内 activeTasks 没有）。 */
   readonly pushSupplement: (taskId: string, text: string) => Promise<'delivered' | 'fallback'>
+  /** recent_terminal supplement 恢复回调：尝试复活已终止任务；不可用或失败时 executor 降级为 new_task。 */
+  readonly reviveTerminalSupplement?: (taskId: string, text: string) => Promise<TerminalSupplementResult>
   /** new_task spawn 回调：启动一个 agent 实例。
    *  实施细节：内部调 admin create_task with client-provided id 注册，然后跑 runWorkerLoop + finalizeTask。
    *  spawnOptions.immediateReply 透传 dispatcher 已发出的 ack 元数据（仅 new_task

@@ -118,6 +118,92 @@ describe('executeDispatchActions', () => {
     expect(spawn).not.toHaveBeenCalled()
   })
 
+  it('supplement targeting recent terminal candidate calls reviveTerminalSupplement instead of pushSupplement', async () => {
+    const reviveTerminalSupplement = vi.fn().mockResolvedValue({ outcome: 'revived' as const, traceId: 'trace-old' })
+    const pushSupplement = vi.fn().mockResolvedValue('delivered')
+    const base = makeExecCtx()
+    const ctx = makeExecCtx({
+      dispatchCtx: {
+        ...base.dispatchCtx,
+        activeTasks: [{
+          task_id: 'task-done' as never,
+          title: 'done',
+          status: 'completed',
+          priority: 'normal',
+          candidate_kind: 'recent_terminal',
+        } as never],
+      },
+      pushSupplement,
+      reviveTerminalSupplement,
+    } as Partial<ExecuteContext>)
+    await executeDispatchActions([{ kind: 'supplement', target_task_id: 'task-done', text: '继续' }], ctx)
+    expect(pushSupplement).not.toHaveBeenCalled()
+    expect(reviveTerminalSupplement).toHaveBeenCalledWith('task-done', '继续')
+  })
+
+  it('terminal supplement revive fallback spawns new task with original supplement text', async () => {
+    const spawn = vi.fn().mockResolvedValue({ spawnedTraceId: 'spawn-new' })
+    const base = makeExecCtx()
+    const ctx = makeExecCtx({
+      dispatchCtx: {
+        ...base.dispatchCtx,
+        activeTasks: [{
+          task_id: 'task-failed' as never,
+          title: 'failed',
+          status: 'failed',
+          priority: 'normal',
+          candidate_kind: 'recent_terminal',
+        } as never],
+      },
+      reviveTerminalSupplement: vi.fn().mockResolvedValue({ outcome: 'fallback' as const }),
+      spawnAgentInstance: spawn,
+    } as Partial<ExecuteContext>)
+    await executeDispatchActions([{ kind: 'supplement', target_task_id: 'task-failed', text: '继续' }], ctx)
+    expect(spawn).toHaveBeenCalledWith('继续')
+  })
+
+  it('terminal supplement revive rejection spawns new task with original supplement text', async () => {
+    const spawn = vi.fn().mockResolvedValue({ spawnedTraceId: 'spawn-new' })
+    const base = makeExecCtx()
+    const ctx = makeExecCtx({
+      dispatchCtx: {
+        ...base.dispatchCtx,
+        activeTasks: [{
+          task_id: 'task-failed' as never,
+          title: 'failed',
+          status: 'failed',
+          priority: 'normal',
+          candidate_kind: 'recent_terminal',
+        } as never],
+      },
+      reviveTerminalSupplement: vi.fn().mockRejectedValue(new Error('admin down')),
+      spawnAgentInstance: spawn,
+    } as Partial<ExecuteContext>)
+    await expect(executeDispatchActions([{ kind: 'supplement', target_task_id: 'task-failed', text: '继续' }], ctx))
+      .resolves.toBeUndefined()
+    expect(spawn).toHaveBeenCalledWith('继续')
+  })
+
+  it('terminal supplement missing revive callback spawns new task with original supplement text', async () => {
+    const spawn = vi.fn().mockResolvedValue({ spawnedTraceId: 'spawn-new' })
+    const base = makeExecCtx()
+    const ctx = makeExecCtx({
+      dispatchCtx: {
+        ...base.dispatchCtx,
+        activeTasks: [{
+          task_id: 'task-done' as never,
+          title: 'done',
+          status: 'completed',
+          priority: 'normal',
+          candidate_kind: 'recent_terminal',
+        } as never],
+      },
+      spawnAgentInstance: spawn,
+    } as Partial<ExecuteContext>)
+    await executeDispatchActions([{ kind: 'supplement', target_task_id: 'task-done', text: '继续' }], ctx)
+    expect(spawn).toHaveBeenCalledWith('继续')
+  })
+
   it('supplement fallback 触发 span outcome=supplement_fallback_recovered 并带 spawned_trace_id', async () => {
     const endSpan = vi.fn()
     const trace = {

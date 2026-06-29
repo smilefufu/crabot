@@ -1,6 +1,13 @@
 # Crabot 项目进度
 
-> 最后更新：2026-06-29 — Agent LLM 重试策略改为固定 10 次
+> 最后更新：2026-06-29 — Dispatcher 支持 recent terminal task 续聊
+
+## 2026-06-29 — Dispatcher 支持 recent terminal task 续聊
+
+- dispatcher 的「可补充任务」清单从仅活跃任务扩展为：活跃任务 + 同 channel/session 最近 24h 内结束的 completed / recoverable failed 任务，recent terminal 按 `completed_at desc` 取最多 3 个；不限制 sender，排除 cancelled 和自恢复/人工取消类 failed。
+- LLM 动作集合保持不变，仍然只暴露 `supplement / new_task / stay_silent`；recent terminal supplement 走内部 `revive_task_for_supplement` + `resume_task_with_supplement`，普通状态机仍禁止终态直接转回 executing。
+- 失败兜底：revive 或本地 resume 失败时降级新建 task；若 admin revive 已成功但本地 resume 拒绝，会 best-effort 标 failed，避免留下假 executing。
+- 协议已同步到 `crabot-docs`：`protocol-agent-v2.md` / `protocol-admin.md`。验证：agent dispatcher/orchestration/resume 测试 151 个通过，admin recent-task/state/self-healing 测试 45 个通过，agent/admin `tsc --noEmit` 通过。
 
 ## 2026-06-29 — Agent LLM 重试策略改为固定 10 次
 

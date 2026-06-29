@@ -15,7 +15,7 @@
  * Spec: crabot-docs/superpowers/specs/2026-05-19-prefront-dispatcher-design.md §3.4 §3.6 §6
  */
 
-import type { DispatchAction, ExecuteContext, ImmediateReplySentInfo } from './dispatcher-types.js'
+import type { DispatchAction, ExecuteContext, ImmediateReplySentInfo, TerminalSupplementResult } from './dispatcher-types.js'
 
 /**
  * 取批次最后一条消息的 platform_message_id。空批次返回 null。
@@ -52,6 +52,49 @@ export async function executeDispatchActions(
 
     try {
       if (action.kind === 'supplement') {
+        const target = ctx.dispatchCtx.activeTasks.find((t) => t.task_id === action.target_task_id)
+        if (target?.candidate_kind === 'recent_terminal') {
+          let revive: TerminalSupplementResult
+          if (ctx.reviveTerminalSupplement) {
+            try {
+              revive = await ctx.reviveTerminalSupplement(action.target_task_id, action.text)
+            } catch (err) {
+              revive = {
+                outcome: 'fallback' as const,
+                reason: err instanceof Error ? err.message : String(err),
+              }
+            }
+          } else {
+            revive = { outcome: 'fallback' as const, reason: 'revive_callback_missing' }
+          }
+          if (revive.outcome === 'revived') {
+            if (span && ctx.trace) {
+              ctx.trace.endSpan(span.span_id, 'completed', {
+                outcome: 'terminal_task_revived',
+                target_task_status: target.status,
+                target_task_completed_at: target.completed_at,
+                ...(revive.traceId ? { spawned_trace_id: revive.traceId } : {}),
+              })
+            }
+            await fireReaction(ctx)
+            continue
+          }
+
+          const { spawnedTraceId } = await ctx.spawnAgentInstance(action.text)
+          if (span && ctx.trace) {
+            ctx.trace.endSpan(span.span_id, 'completed', {
+              outcome: 'supplement_fallback_recovered',
+              recovered_via: 'new_task',
+              spawned_trace_id: spawnedTraceId,
+              attempted_target_task_id: action.target_task_id,
+              target_task_status: target.status,
+              target_task_completed_at: target.completed_at,
+            })
+          }
+          await fireReaction(ctx)
+          continue
+        }
+
         const outcome = await ctx.pushSupplement(action.target_task_id, action.text)
         if (outcome === 'fallback') {
           const visibleIds = ctx.dispatchCtx.activeTasks.map((t) => t.task_id).join(', ') || '(empty)'
