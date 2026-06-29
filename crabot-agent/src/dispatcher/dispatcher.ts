@@ -170,14 +170,19 @@ export function buildUserPrompt(
     }))
   }
   if (ctx.activeTasks.length > 0) {
-    lines.push('\n## 活跃任务')
+    lines.push('\n## 可补充任务')
     for (const t of ctx.activeTasks) {
-      lines.push(`- [${t.task_id}] "${t.title}" (status: ${t.status})`)
+      const statusLabel = t.candidate_kind === 'recent_terminal'
+        ? (t.status === 'failed' ? 'failed_recently' : 'completed_recently')
+        : t.status
+      const completed = t.completed_at ? `, completed_at: ${t.completed_at}` : ''
+      lines.push(`- [${t.task_id}] "${t.title}" (status: ${statusLabel}${completed})`)
       if (t.latest_progress) lines.push(`  最近进度: ${t.latest_progress}`)
       if (t.pending_question) lines.push(`  正在等回答: ${t.pending_question.slice(0, 200)}`)
+      if (t.error && t.candidate_kind === 'recent_terminal') lines.push(`  失败原因: ${t.error.slice(0, 200)}`)
     }
   } else {
-    lines.push('\n## 活跃任务\n（无）')
+    lines.push('\n## 可补充任务\n（无）')
   }
   lines.push('\n按 system prompt 描述的 schema 输出 JSON。')
   return lines.join('\n')
@@ -210,15 +215,15 @@ function parseAndValidate(text: string, ctx: DispatchContext): ValidationResult 
       if (typeof a.target_task_id !== 'string' || typeof a.text !== 'string') {
         return { ok: false, error: `action[${i}] supplement 缺 target_task_id 或 text` }
       }
-      // 白名单校验：target_task_id 必须实际存在于本次输入的 activeTasks 中。
+      // 白名单校验：target_task_id 必须实际存在于本次输入的可补充任务候选中。
       // 防止 LLM 编造 / 截断 / 拼造前缀（典型反例：编出 trigger-<uuid> 这种 syntheticTaskId 形态）。
       if (!ctx.activeTasks.some((t) => t.task_id === a.target_task_id)) {
         const visible = ctx.activeTasks.length === 0
-          ? '（无活跃任务，本次禁止使用 supplement，请改用 new_task）'
+          ? '（无可补充任务，本次禁止使用 supplement，请改用 new_task）'
           : ctx.activeTasks.map((t) => t.task_id).join(', ')
         return {
           ok: false,
-          error: `action[${i}] supplement.target_task_id="${a.target_task_id}" 不在活跃任务清单中。当前可见 task_id：${visible}`,
+          error: `action[${i}] supplement.target_task_id="${a.target_task_id}" 不在可补充任务清单中。当前可见 task_id：${visible}`,
         }
       }
       validated.push({ kind: 'supplement', target_task_id: a.target_task_id, text: a.text })

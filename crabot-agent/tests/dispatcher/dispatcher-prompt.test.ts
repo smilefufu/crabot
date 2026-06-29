@@ -27,7 +27,7 @@ describe('assembleDispatcherPrompt', () => {
     expect(p).toMatch(/Crabot/)
   })
 
-  it('群聊场景 + 有活跃任务 → 三种动作都暴露', () => {
+  it('群聊场景 + 有可补充任务 → 三种动作都暴露', () => {
     const p = assembleDispatcherPrompt(ctx({ sessionType: 'group', activeTasks: [task('task-A')] }))
     expect(p).toMatch(/supplement/)
     expect(p).toMatch(/new_task/)
@@ -51,37 +51,38 @@ describe('assembleDispatcherPrompt', () => {
   })
 
   // ============================================================================
-  // Regression: activeTasks 为空时不向 LLM 暴露 supplement 选项
+  // Regression: candidate list 为空时不向 LLM 暴露 supplement 选项
   // 修复来源：trace db206eaf — group 会话首条消息（无任何 active task），LLM 仍
   // 凭空输出 supplement + 编造 trigger-<uuid> 的 target_task_id。根因是 prompt
   // 仍把 supplement 描述为合法选项，加上 schema 只校验类型不校验白名单。
   // ============================================================================
 
-  it('空 activeTasks + 私聊 → prompt 完全不含 supplement 字串', () => {
+  it('空 candidate list + 私聊 → prompt 完全不含 supplement 字串', () => {
     const p = assembleDispatcherPrompt(ctx({ sessionType: 'private', activeTasks: [] }))
     expect(p).not.toMatch(/supplement/)
     expect(p).toMatch(/new_task/)
-    // 提示语应说明"没有活跃任务"
-    expect(p).toMatch(/没有任何活跃任务/)
+    // 提示语应说明没有可补充任务
+    expect(p).toMatch(/没有任何可补充任务/)
   })
 
-  it('空 activeTasks + 群聊 → prompt 完全不含 supplement 字串，但保留 stay_silent', () => {
+  it('空 candidate list + 群聊 → prompt 完全不含 supplement 字串，但保留 stay_silent', () => {
     const p = assembleDispatcherPrompt(ctx({ sessionType: 'group', activeTasks: [] }))
     expect(p).not.toMatch(/supplement/)
     expect(p).toMatch(/new_task/)
     expect(p).toMatch(/stay_silent/)
-    expect(p).toMatch(/没有任何活跃任务/)
+    expect(p).toMatch(/没有任何可补充任务/)
     // SYSTEM_EVENT_GUIDANCE 段也必须按 hasActiveTasks=false 走精简路径，不出 supplement
     expect(p).toContain('## 群系统事件')
   })
 
-  it('非空 activeTasks → prompt 含白名单硬约束提醒（防 LLM 编造 task_id）', () => {
+  it('非空 candidate list → prompt 含白名单硬约束提醒（防 LLM 编造 task_id）', () => {
     const p = assembleDispatcherPrompt(ctx({ sessionType: 'private', activeTasks: [task('task-A')] }))
     expect(p).toMatch(/target_task_id 硬约束/)
     expect(p).toMatch(/字面完全一致/)
+    expect(p).toMatch(/可补充任务/)
   })
 
-  it('空 activeTasks → 不显示白名单提醒（没有 supplement 选项时不需要）', () => {
+  it('空 candidate list → 不显示白名单提醒（没有 supplement 选项时不需要）', () => {
     const p = assembleDispatcherPrompt(ctx({ sessionType: 'private', activeTasks: [] }))
     expect(p).not.toMatch(/target_task_id 硬约束/)
   })
