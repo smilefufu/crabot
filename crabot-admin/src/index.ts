@@ -4787,14 +4787,12 @@ export class AdminModule extends ModuleBase {
   ): Promise<void> {
     const deadline = Date.now() + timeoutMs
     for (;;) {
-      if (this.agentPort) {
-        await this.sweepInterruptedTasksForResume(0)
-        return
-      }
-      try {
-        await this.resolveAgentPort()
-      } catch {
-        // MM / agent 未就绪，继续轮询
+      if (!this.agentPort) {
+        try {
+          await this.resolveAgentPort()
+        } catch {
+          // MM / agent 未就绪，继续轮询
+        }
       }
       if (this.agentPort) {
         await this.sweepInterruptedTasksForResume(0)
