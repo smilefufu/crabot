@@ -1,7 +1,7 @@
 import { promises as fs, constants as fsConstants } from 'node:fs'
-import * as path from 'node:path'
 import { defineTool } from '../tool-framework'
 import type { ToolDefinition, ToolCallResult } from '../types'
+import { resolvePath } from './utils'
 
 export interface SetCwdContext {
   /** 当前 cwd getter（用于解析相对路径） */
@@ -29,7 +29,7 @@ export function createSetCwdTool(ctx: SetCwdContext): ToolDefinition {
       properties: {
         path: {
           type: 'string',
-          description: '项目根目录的绝对路径，或相对当前 cwd 的相对路径（会自动解析为绝对）',
+          description: '项目根目录的绝对路径，或相对当前 cwd 的相对路径（会自动解析为绝对）。支持前导 `~`（展开到 home）。',
         },
       },
       required: ['path'],
@@ -38,9 +38,8 @@ export function createSetCwdTool(ctx: SetCwdContext): ToolDefinition {
     permissionLevel: 'safe',
     async call(input: Record<string, unknown>): Promise<ToolCallResult> {
       const inputPath = input.path as string
-      const absPath = path.isAbsolute(inputPath)
-        ? inputPath
-        : path.resolve(ctx.getCwd(), inputPath)
+      // resolvePath 统一处理前导 `~` 展开 + 相对 cwd 解析（见 utils.ts）。
+      const absPath = resolvePath(ctx.getCwd(), inputPath)
 
       // 校验：路径必须存在、是目录、可读
       try {

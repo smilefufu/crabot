@@ -1,7 +1,8 @@
-import { resolve, isAbsolute } from 'path'
+import { existsSync } from 'node:fs'
 import { defineTool } from '../tool-framework'
 import type { ToolDefinition } from '../types'
 import { byteLength } from '../byte-cap'
+import { resolvePath } from './utils'
 import { runRipgrep, DEFAULT_EXCLUDE_GLOBS, getProtectedExcludeGlobs } from './ripgrep-helper'
 
 // Grep 输出按 UTF-8 字节累加上限。命中行内容很长（K 线 / CSV / JSON 单行数 KB～MB）时，
@@ -134,7 +135,7 @@ export function createGrepTool(getCwd: () => string): ToolDefinition {
       }
       // macOS 受保护目录（~/Library / ~/Documents 等）：搜索根落在家目录或其祖先时
       // 默认排除以避开 TCC 弹窗 / EPERM，仅当用户开启 CRABOT_ENABLE_FDA 且真持有 FDA 时放开。
-      const searchRoot = isAbsolute(searchPath) ? searchPath : resolve(getCwd(), searchPath)
+      const searchRoot = resolvePath(getCwd(), searchPath)
       for (const g of getProtectedExcludeGlobs(searchRoot)) {
         args.push('--glob', g)
       }
@@ -169,7 +170,15 @@ export function createGrepTool(getCwd: () => string): ToolDefinition {
       // 不丢弃已搜到的结果（--no-messages 已抑制 stderr 噪音）。
       if (rg.exitCode === 2 && !rg.stdout) {
         const msg = (rg.stderr || '').trim() || 'ripgrep exited with code 2'
-        return { output: `Grep error: ${msg}`, isError: true }
+        // code-2 最常见的真因：searchPath 相对当前 cwd 不存在（cwd 没锚定到项目）。
+        // --no-messages 抑制了 stderr，generic 报错没法让 agent 自纠，会反复
+        // fallback 到 bash rg / python 白烧多轮（m2u 实测）。这里补结构化提示：
+        // 点明解析后的绝对路径不存在 + 当前 cwd，引导用绝对路径或先 set_cwd。
+        const hint = !existsSync(searchRoot)
+          ? `\n搜索路径不存在：${searchRoot}（当前 cwd=${getCwd()}）。`
+            + `若目标在别的项目目录，请先用 set_cwd 锚定到该项目，或给 path 传绝对路径。`
+          : ''
+        return { output: `Grep error: ${msg}${hint}`, isError: true }
       }
 
       const output = joinWithCap(splitLines(rg.stdout), headLimit)

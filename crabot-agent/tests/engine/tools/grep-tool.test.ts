@@ -177,6 +177,24 @@ describe('createGrepTool', () => {
     expect(result.output).toContain('Invalid regex')
   })
 
+  // 复现 m2u 现场：cwd 未锚定到项目时 agent 用相对路径搜 → rg 退出码 2，
+  // 旧实现只回 generic "ripgrep exited with code 2"，毫无线索，agent 反复
+  // fallback 到 bash rg（机器没装）再到 python，白烧多轮。修复后错误信息
+  // 必须点明解析后的绝对路径不存在 + 当前 cwd，引导用绝对路径或先 set_cwd。
+  it('gives an actionable hint when the search path does not exist', async () => {
+    const result = await tool.call(
+      { pattern: 'hello', path: 'no-such-subdir' },
+      {},
+    )
+
+    expect(result.isError).toBe(true)
+    expect(result.output).toContain('Grep error')
+    // 解析后的绝对路径（相对当前 cwd）应出现在提示里
+    expect(result.output).toContain(path.join(tmpDir, 'no-such-subdir'))
+    // 引导信息：提及 cwd 与 set_cwd
+    expect(result.output).toContain('set_cwd')
+  })
+
   it('truncates content output when total bytes exceed 200KB cap', async () => {
     // 单行 ~400 字节（在 ripgrep --max-columns=500 之内不被压成占位符），
     // 写 600 行 → ~240KB 总字节，超 200KB cap
