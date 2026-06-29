@@ -9,11 +9,24 @@ function buildAssembler(opts: {
 }) {
   const rpcClient = {
     call: vi.fn().mockImplementation((_port, method, args) => {
+      if (method === 'list_recent_terminal_tasks') {
+        const items = opts.recentItems ?? []
+        return Promise.resolve({
+          items: items.map(t => ({
+            id: t.id,
+            title: t.title,
+            status: t.status,
+            type: 'task',
+            priority: 'normal',
+            source: t.source ?? { trigger_type: 'message', channel_id: 'ch', session_id: 'sess' },
+            messages: [],
+            completed_at: 'completed_at' in t ? t.completed_at : undefined,
+            error: 'error' in t ? t.error : undefined,
+          })),
+        })
+      }
       if (method !== 'list_tasks') return Promise.reject(new Error(`unexpected call: ${String(method)}`))
-      const statuses = args?.filter?.status ?? []
-      const items = statuses.includes('completed') || statuses.includes('failed')
-        ? opts.recentItems ?? []
-        : opts.adminItems
+      const items = opts.adminItems
       return Promise.resolve({
         items: items.map(t => ({
           id: t.id,
@@ -123,19 +136,10 @@ describe('fetchActiveTasks union agent in-flight', () => {
     expect(tasks.map(t => t.task_id)).toEqual(['task-active', 'task-new', 'task-failed', 'task-old'])
     expect(tasks.find(t => t.task_id === 'task-new')?.candidate_kind).toBe('recent_terminal')
     expect(tasks.find(t => t.task_id === 'task-failed')?.error).toBe('TypeError: terminated')
-    expect(rpcClient.call).toHaveBeenNthCalledWith(
-      2,
+    expect(rpcClient.call).toHaveBeenCalledWith(
       19001,
-      'list_tasks',
-      {
-        filter: {
-          status: ['completed', 'failed'],
-          source_channel_id: 'ch',
-          source_session_id: 'sess',
-        },
-        sort: { field: 'updated_at', order: 'desc' },
-        page_size: 100,
-      },
+      'list_recent_terminal_tasks',
+      expect.objectContaining({ channel_id: 'ch', session_id: 'sess', limit: 3 }),
       'test-agent',
     )
   })

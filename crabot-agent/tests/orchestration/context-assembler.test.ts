@@ -177,7 +177,7 @@ describe('ContextAssembler', () => {
     }]
 
     // 2026-05-14：Front 短期记忆改按需查，assembleFrontContext 不再调 search_short_term。
-    // 调用顺序：get_chat_history, active list_tasks, recent terminal list_tasks
+    // 调用顺序：get_chat_history, active list_tasks, recent terminal list_recent_terminal_tasks
     mockRpc.call
       .mockResolvedValueOnce({ messages })
       .mockResolvedValueOnce({ items: rawActiveTasks })
@@ -281,6 +281,7 @@ describe('ContextAssembler', () => {
       if (method === 'get_chat_history') return Promise.resolve({ messages: [] })
       if (method === 'search_short_term') return Promise.resolve({ results: [] })
       if (method === 'list_tasks') return Promise.resolve({ items: [] })
+      if (method === 'list_recent_terminal_tasks') return Promise.resolve({ items: [] })
       if (method === 'get_scene_profile') {
         expect(args).toEqual({
           scene: { type: 'friend', friend_id: 'friend-1' },
@@ -355,6 +356,7 @@ describe('ContextAssembler', () => {
       if (method === 'get_chat_history') return Promise.resolve({ messages })
       if (method === 'search_short_term') return Promise.resolve({ results: [] })
       if (method === 'list_tasks') return Promise.resolve({ items: [] })
+      if (method === 'list_recent_terminal_tasks') return Promise.resolve({ items: [] })
       if (method === 'get_scene_profile') return Promise.resolve({ profile: null })
       throw new Error(`unexpected call: ${String(method)}`)
     })
@@ -455,6 +457,7 @@ describe('ContextAssembler', () => {
         if (method === 'get_chat_history') return Promise.resolve({ messages: [] })
         if (method === 'search_short_term') return Promise.resolve({ results: memoryResults })
         if (method === 'list_tasks') return Promise.resolve({ items: [] })
+        if (method === 'list_recent_terminal_tasks') return Promise.resolve({ items: [] })
         if (method === 'get_scene_profile') return Promise.resolve({ profile: null })
         throw new Error(`unexpected call: ${String(method)}`)
       })

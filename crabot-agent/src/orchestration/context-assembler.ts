@@ -588,45 +588,37 @@ export class ContextAssembler {
 
   private async fetchRecentTerminalTasks(channelId: string, sessionId: string): Promise<TaskSummary[]> {
     const sinceMs = Date.now() - RECENT_TERMINAL_WINDOW_HOURS * 3600 * 1000
+    const since = new Date(sinceMs).toISOString()
     try {
       const adminPort = await this.getAdminPort()
       const result = await this.rpcClient.call<
-        {
-          filter: {
-            status: string[]
-            source_channel_id: string
-            source_session_id: string
-          }
-          sort: { field: 'updated_at'; order: 'desc' }
-          page_size: number
-        },
+        { channel_id: string; session_id: string; since: string; limit: number },
         {
           items: Array<{
             id: string
             title: string
             status: string
-            type: string
             priority: string
+            assigned_worker?: string
             source: {
               channel_id?: string
               session_id?: string
               trigger_type?: 'manual' | 'scheduled' | 'auto' | 'event'
             }
+            messages?: Array<{ content: string; timestamp: string }>
+            updated_at?: string
             completed_at?: string
             error?: string
           }>
         }
       >(
         adminPort,
-        'list_tasks',
+        'list_recent_terminal_tasks',
         {
-          filter: {
-            status: [...RECENT_TERMINAL_STATUSES],
-            source_channel_id: channelId,
-            source_session_id: sessionId,
-          },
-          sort: { field: 'updated_at', order: 'desc' },
-          page_size: 100,
+          channel_id: channelId,
+          session_id: sessionId,
+          since,
+          limit: RECENT_TERMINAL_LIMIT,
         },
         this.moduleId
       )
@@ -657,7 +649,7 @@ export class ContextAssembler {
         }))
     } catch (err) {
       console.warn(
-        `[context-assembler] admin recent terminal list_tasks failed, continuing without recent terminal candidates:`,
+        `[context-assembler] admin list_recent_terminal_tasks failed, continuing without recent terminal candidates:`,
         err instanceof Error ? err.message : String(err)
       )
       return []
@@ -676,8 +668,8 @@ export class ContextAssembler {
    * 抓本 session 最近结束（completed / failed / aborted）的若干个任务，
    * 按 updated_at desc 排序。给 Front 用来识别"继续之前那个 ..."的指代。
    *
-   * 注意：list_tasks 已经有 source_channel_id / source_friend_id 的过滤，但没有
-   * source_session_id 过滤。这里先按 channel_id 拉一批，本地按 session_id 二次过滤。
+   * 注意：list_recent_terminal_tasks 已经有 source_channel_id / source_session_id 过滤。
+   * 本地仍保留二次过滤，避免 Admin 侧行为漂移时扩大候选范围。
    */
 
   // ==========================================================================
