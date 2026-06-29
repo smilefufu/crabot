@@ -150,6 +150,8 @@ describe('assembleDispatcherPrompt', () => {
     expect(sysEventSection).toMatch(/supplement/)
     expect(sysEventSection).toMatch(/new_task/)
     expect(sysEventSection).toMatch(/stay_silent/)
+    expect(sysEventSection).toContain('可补充任务清单')
+    expect(sysEventSection).not.toContain('活跃任务清单')
   })
 
   it('SYSTEM_EVENT_GUIDANCE 不教 dispatcher 调 send_message 的 mentions 参数（那是 worker 的事）', () => {

@@ -791,14 +791,14 @@ master 可以在 IM 输入以 / 开头的指令（slash command），由 admin e
 清单未来会扩，所有 slash 一律由 engine 处理，你不需要识别或执行。`
 
 /**
- * dispatcher prompt 注入。hasActiveTasks 控制是否暴露 supplement 路径——
- * 跟 buildDispatchRules 设计原则一致：activeTasks 为空时 prompt 物理上
+ * dispatcher prompt 注入。hasSupplementCandidates 控制是否暴露 supplement 路径——
+ * 跟 buildDispatchRules 设计原则一致：候选为空时 prompt 物理上
  * 不提 supplement，防止 LLM 凭空编 target_task_id（trace db206eaf 回归约束）。
  */
-export function buildSystemEventGuidance(hasActiveTasks: boolean): string {
-  const pathOptions = hasActiveTasks
+export function buildSystemEventGuidance(hasSupplementCandidates: boolean): string {
+  const pathOptions = hasSupplementCandidates
     ? `  - **完全没规则 → stay_silent。** 不要自作主张推断。
-  - **规则把事件绑到了某个进行中的 task**（如 master 写过"新人入职走 X-入职追踪 task"）→ 走 supplement，target_task_id 必须是上方活跃任务清单里的 task_id
+  - **规则把事件绑到了某个可补充任务**（如 master 写过"新人入职走 X-入职追踪 task"）→ 走 supplement，target_task_id 必须是上方可补充任务清单里的 task_id
   - **规则要求开新动作**（如"主动问职责"）→ 走 new_task
   - 选 supplement / new_task 完全跟着场景画像走，规则没明说就 stay_silent`
     : `  - **完全没规则 → stay_silent。** 不要自作主张推断。
@@ -844,4 +844,3 @@ export const SYSTEM_TRIGGER_NO_TARGET_GUIDANCE = `## 系统触发任务说明
 - 若文本也没指明汇报对象：默认静默完成任务，仅落 task outcome / 必要时写记忆
 - 不可直接调 crab-messaging.send_message 到 channel_id='system' / session_id='system' 的占位 session（工具会硬拒）
 `
-
