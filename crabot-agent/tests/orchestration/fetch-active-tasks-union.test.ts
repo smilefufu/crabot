@@ -40,6 +40,21 @@ function buildAssembler(opts: {
 }
 
 describe('fetchActiveTasks union agent in-flight', () => {
+  it('TaskSummary can represent a recent terminal supplement candidate', () => {
+    const candidate: TaskSummary = {
+      task_id: 'task-done' as never,
+      title: 'done task',
+      status: 'completed',
+      priority: 'normal',
+      candidate_kind: 'recent_terminal',
+      completed_at: '2026-06-29T10:00:00.000Z',
+      error: undefined,
+      source_channel_id: 'ch',
+      source_session_id: 'sess',
+    }
+    expect(candidate.candidate_kind).toBe('recent_terminal')
+  })
+
   it('admin 与 agent in-flight 按 task_id 去重 union', async () => {
     const assembler = buildAssembler({
       adminItems: [{ id: 'task-A', title: 'admin A', status: 'executing' }],
