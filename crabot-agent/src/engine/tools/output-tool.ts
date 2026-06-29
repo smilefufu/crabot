@@ -9,12 +9,10 @@ import { defineTool } from '../tool-framework'
 import { sleep } from '../retry-utils'
 import type { ToolDefinition } from '../types'
 import type { BgEntityRegistry } from '../bg-entities/registry'
-import type { TransientShellRegistry } from '../bg-entities/bg-shell'
 import { BG_OUTPUT_MAX_BYTES } from '../bg-entities/types'
 
 export interface BgToolDeps {
   readonly registry: BgEntityRegistry
-  readonly transient: TransientShellRegistry
   readonly cursorMap: Map<string, number>
   readonly taskId: string
   readonly ownerFriendId?: string
@@ -49,28 +47,7 @@ async function readShellOutput(
   explicitOffset: number | undefined,
   deps: BgToolDeps,
 ): Promise<ReadResult> {
-  // 1. Check transient first（内存 ring buffer + 单调字符游标做增量读，
-  //    与 persistent 的 cursor 语义一致——否则 block 模式因永远读到"有内容"而秒回）
-  const transientState = deps.transient.get(entityId)
-  if (transientState) {
-    const isRunning = transientState.status === 'running'
-    const header = `[status: ${transientState.status}, exit_code: ${transientState.exit_code ?? 'null'}]`
-    const key = cursorKey(deps.taskId, entityId)
-    const cursor = explicitOffset ?? deps.cursorMap.get(key) ?? 0
-    const total = transientState.totalOutputChars
-    if (total <= cursor) {
-      return { output: `${header}\n(no new output)`, isError: false, isRunning }
-    }
-    // ring buffer 只保留尾部 200KB：可返回的未读量受 buffer 实际长度限制
-    const unread = total - cursor
-    const buf = transientState.ringBuffer
-    const chunk = unread >= buf.length ? buf : buf.slice(buf.length - unread)
-    deps.cursorMap.set(key, total)
-    const dropNote = unread > buf.length ? '\n[earlier output dropped from ring buffer]' : ''
-    return { output: `${header}\n${chunk}${dropNote}`, isError: false, isRunning }
-  }
-
-  // 2. Check persistent registry (disk log file with per-task cursor)
+  // Persistent registry (disk log file with per-task cursor)
   const record = await deps.registry.get(entityId)
   if (!record) {
     return { output: `Entity not found: ${entityId}`, isError: true, isRunning: false }
@@ -126,63 +103,6 @@ async function readShellOutput(
   return { output, isError: false, isRunning }
 }
 
-async function readLastJsonlLines(file: string, n: number): Promise<string> {
-  try {
-    const text = await fs.readFile(file, 'utf-8')
-    const lines = text.split('\n').filter((l) => l.trim())
-    return lines.slice(-n).join('\n')
-  } catch {
-    return '(no activity log)'
-  }
-}
-
-async function readAgentOutput(
-  id: string,
-  _explicitOffset: number | undefined,
-  deps: BgToolDeps,
-): Promise<ReadResult> {
-  const record = await deps.registry.get(id)
-  if (!record) {
-    return { output: `Entity not found: ${id}`, isError: true, isRunning: false }
-  }
-  if (record.type !== 'agent') {
-    return { output: `Mismatched entity type for ${id}: expected agent, got ${record.type}`, isError: true, isRunning: false }
-  }
-
-  if (record.status === 'completed' && record.result_file) {
-    try {
-      const content = await fs.readFile(record.result_file, 'utf-8')
-      await deps.registry.update(id, { last_activity_at: new Date().toISOString() })
-      return {
-        output: `[status: completed, exit_code: ${record.exit_code}]\n${content}`,
-        isError: false,
-        isRunning: false,
-      }
-    } catch (err) {
-      return { output: `[status: completed but result_file read failed: ${err}]`, isError: true, isRunning: false }
-    }
-  }
-
-  if (record.status === 'failed' || record.status === 'killed' || record.status === 'stalled') {
-    const recent = await readLastJsonlLines(record.messages_log_file, 5)
-    const tail = record.status === 'stalled' ? `, ended_at: ${record.ended_at}` : `, exit_code: ${record.exit_code}`
-    return {
-      output: `[status: ${record.status}${tail}]\n${recent}`,
-      isError: false,
-      isRunning: false,
-    }
-  }
-
-  // running → return last 10 lines of messages_log
-  const recent = await readLastJsonlLines(record.messages_log_file, 10)
-  await deps.registry.update(id, { last_activity_at: new Date().toISOString() })
-  return {
-    output: `[status: running, in progress; recent activity:]\n${recent}`,
-    isError: false,
-    isRunning: true,
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
@@ -192,18 +112,19 @@ export function createOutputTool(deps: BgToolDeps): ToolDefinition {
     name: 'Output',
     category: 'shell',
     description:
-      'Read incremental output from a background entity (shell or sub-agent). ' +
+      'Read incremental output from a background shell (shell_xxx). ' +
       '默认非阻塞 snapshot 读。' +
-      '若 entity 还在 running 且想等下一段输出，**强烈建议**用 `block=true` 阻塞等到有新输出 / 状态变 terminal / 超时——' +
+      '若 shell 还在 running 且想等下一段输出，**强烈建议**用 `block=true` 阻塞等到有新输出 / 状态变 terminal / 超时——' +
       '避免在 agent 主循环里反复短间隔 poll 污染上下文。' +
-      '注意：bg entity 的 exit / kill 事件本身会通过下一轮 prompt 的 <bg-notification> 自动通知到 agent，' +
-      '通常不需要主动 block 等终止——block 仅适用于"我要立刻拿到下一段输出再继续"的场景。',
+      '注意：bg shell 的 exit 事件本身会通过 <bg-notification> 自动通知到 agent（且内联输出尾部），' +
+      '通常不需要主动 block 等终止——block 仅适用于"我要立刻拿到下一段输出再继续"的场景。' +
+      '读 subagent 结果请用 get_subagent_output(agent_id)，不是本工具。',
     inputSchema: {
       type: 'object',
       properties: {
         entity_id: {
           type: 'string',
-          description: 'shell_xxx or agent_xxx',
+          description: 'shell_xxx',
         },
         from_offset: {
           type: 'integer',
@@ -237,7 +158,12 @@ export function createOutputTool(deps: BgToolDeps): ToolDefinition {
           return readShellOutput(entityId, explicitOffset, deps)
         }
         if (entityId.startsWith('agent_')) {
-          return readAgentOutput(entityId, explicitOffset, deps)
+          // Output 只读 shell；subagent 结果走专门的 get_subagent_output（读 result_file）。
+          return {
+            output: `Output 只读 shell；读 subagent 结果请用 get_subagent_output("${entityId}")。`,
+            isError: true,
+            isRunning: false,
+          }
         }
         return { output: `Invalid entity_id format: ${entityId}`, isError: true, isRunning: false }
       }

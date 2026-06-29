@@ -55,3 +55,4 @@ docs/superpowers/
 
 # Git worktrees
 .worktrees/
+.mcp.json

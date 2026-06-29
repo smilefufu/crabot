@@ -25,7 +25,7 @@ export interface BuiltinToolsOptions {
    * agent 子进程同主机直接 fs.read 这些路径，无需复制到 instance 目录。
    */
   readonly availableSkills?: ReadonlyArray<SkillConfig>
-  /** Optional bg-entities deps. 提供时 Bash 支持 run_in_background；不提供时只能跑同步前台 */
+  /** Optional bg-entities deps. 提供时 Bash 支持超 10s 自动转后台；不提供时只能跑同步前台 */
   readonly bgEntityCtx?: BashBgContext
   /** Optional bg-tool deps (Output / Kill / ListEntities). 提供时注册这三个工具 */
   readonly bgToolDeps?: BgToolDeps

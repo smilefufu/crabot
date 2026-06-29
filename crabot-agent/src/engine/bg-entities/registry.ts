@@ -8,8 +8,8 @@
 
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { execFile } from 'node:child_process'
 import { getBgEntitiesRegistryPath } from '../../core/data-paths'
+import { exitcodeFileForLog, readProcStartTime } from './bg-shell'
 import {
   BG_ENTITY_GC_AFTER_DAYS,
   type BgAgentRegistryRecord,
@@ -44,20 +44,10 @@ class AsyncMutex {
 }
 
 // ---------------------------------------------------------------------------
-// PID starttime helper (cross-platform via `ps -o lstart=`)
+// PID starttime helper：复用 bg-shell 的健壮版（带 ps-parse 失败兜底），避免重复实现，
+// 也避免本文件旧拷贝在某些 locale 下 `new Date(...).toISOString()` 在 execFile 回调里
+// 同步抛、绕过 isShellAlive 的 `.catch` 而未捕获崩溃。
 // ---------------------------------------------------------------------------
-
-async function readProcStartTime(pid: number): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile('ps', ['-o', 'lstart=', '-p', String(pid)], (err, stdout) => {
-      if (err) {
-        reject(err)
-      } else {
-        resolve(new Date(stdout.trim()).toISOString())
-      }
-    })
-  })
-}
 
 // ---------------------------------------------------------------------------
 // Registry
@@ -163,16 +153,12 @@ export class BgEntityRegistry {
       if (rec.status !== 'running') continue
 
       if (rec.type === 'shell') {
-        const isAlive = await this.isShellAlive(rec)
-        if (isAlive) {
-          alive.push(rec)
+        const reaped = await this.reapShellIfDead(rec)
+        if (reaped) {
+          // 带上终态返回，便于调用方据此发准确的退出通知。
+          deadShells.push({ ...rec, status: reaped.status, exit_code: reaped.exit_code, ended_at: new Date().toISOString() })
         } else {
-          deadShells.push(rec)
-          await this.update(rec.entity_id, {
-            status: 'failed',
-            exit_code: -1,
-            ended_at: new Date().toISOString(),
-          })
+          alive.push(rec)
         }
       } else {
         // Agent loops run inside the worker process — after any restart they are gone
@@ -187,35 +173,82 @@ export class BgEntityRegistry {
     return { alive, deadShells, stalledAgents }
   }
 
-  async gcDeadEntities(now: Date): Promise<{ removed: string[] }> {
-    const removed: string[] = []
-    const cutoffMs = now.getTime() - BG_ENTITY_GC_AFTER_DAYS * 24 * 60 * 60 * 1000
+  /**
+   * 检查一个 running shell 是否已退出；若是，读 exitcode sentinel 定真实成败、更新 registry 为终态，
+   * 返回 `{status, exit_code}`；仍存活返回 null。
+   *
+   * 供 recoverPersistent（启动对账已死的 shell）与 ReadoptReaper（运行期轮询跨重启认领回来、仍存活
+   * 的 shell）共用。sentinel 不存在（强杀 / 没走到写盘）→ 回退 failed/-1。
+   */
+  async reapShellIfDead(
+    rec: BgShellRegistryRecord,
+  ): Promise<{ status: 'completed' | 'failed'; exit_code: number } | null> {
+    if (await this.isShellAlive(rec)) return null
+    const sentinelEc = await this.readSentinelExitCode(rec)
+    const status: 'completed' | 'failed' = sentinelEc === 0 ? 'completed' : 'failed'
+    const exit_code = sentinelEc ?? -1
+    await this.update(rec.entity_id, {
+      status,
+      exit_code,
+      ended_at: new Date().toISOString(),
+    } as Partial<BgShellRegistryRecord>)
+    return { status, exit_code }
+  }
 
+  async gcDeadEntities(now: Date): Promise<{ removed: string[] }> {
+    const cutoffMs = now.getTime() - BG_ENTITY_GC_AFTER_DAYS * 24 * 60 * 60 * 1000
+    const removed = await this.deleteEntriesWhere((rec) => {
+      if (rec.status === 'running') return false
+      const lastActivityMs = new Date(rec.last_activity_at).getTime()
+      const endedMs = rec.ended_at ? new Date(rec.ended_at).getTime() : 0
+      return Math.max(lastActivityMs, endedMs) < cutoffMs
+    })
+    return { removed }
+  }
+
+  /**
+   * task 完成时清理它名下所有**终态** shell（记录 + 日志 + sentinel 文件）；running 的留存。
+   * D1 后所有后台 shell 都落账，靠这条在 task 结束即回收，避免 registry / 磁盘日志无限增长
+   * （7d gcDeadEntities 只作跨 task / 孤儿兜底）。
+   */
+  async removeTerminalShellsByTask(taskId: string): Promise<string[]> {
+    return this.deleteEntriesWhere(
+      (rec) => rec.type === 'shell' && rec.spawned_by_task_id === taskId && rec.status !== 'running',
+    )
+  }
+
+  /**
+   * 删除所有满足 predicate 的实体（记录 + shell 的日志/sentinel 文件），返回被删 id 列表。
+   * gcDeadEntities / removeTerminalShellsByTask 共用——只读盘一次、互斥下原子写一次。
+   */
+  private async deleteEntriesWhere(predicate: (rec: BgEntityRecord) => boolean): Promise<string[]> {
+    const removed: string[] = []
     await this.mutex.run(async () => {
       const file = await this.readFile()
       const entries: Record<string, BgEntityRecord> = { ...file.entities }
-
       for (const [id, rec] of Object.entries(entries)) {
-        if (rec.status === 'running') continue
-
-        const lastActivityMs = new Date(rec.last_activity_at).getTime()
-        const endedMs = rec.ended_at ? new Date(rec.ended_at).getTime() : 0
-        const latestMs = Math.max(lastActivityMs, endedMs)
-
-        if (latestMs < cutoffMs) {
-          delete entries[id]
-          removed.push(id)
-        }
+        if (!predicate(rec)) continue
+        if (rec.type === 'shell') await this.unlinkShellFiles(rec)
+        delete entries[id]
+        removed.push(id)
       }
-
-      // 跳过无操作时的写盘——既减少不必要的 IO，也避免在没有 registry.json 的
-      // 干净环境（测试 / 全新 worker 启动）触发 ENOENT 噪声
+      // 跳过无操作时的写盘——既减少 IO，也避免在没有 registry.json 的干净环境触发 ENOENT 噪声
       if (removed.length > 0) {
         await this.writeAtomic({ entities: entries })
       }
     })
+    return removed
+  }
 
-    return { removed }
+  /** 删除一个 shell 的磁盘日志 + exitcode sentinel；不存在则忽略。 */
+  private async unlinkShellFiles(rec: BgShellRegistryRecord): Promise<void> {
+    await Promise.all(
+      [rec.log_file, exitcodeFileForLog(rec.log_file)].map((f) =>
+        fs.unlink(f).catch(() => {
+          /* 文件不存在 / 已删 — 忽略 */
+        }),
+      ),
+    )
   }
 
   async countActiveByOwner(friend_id: string): Promise<number> {
@@ -242,6 +275,20 @@ export class BgEntityRegistry {
     const tmp = `${this.registryPath}.tmp.${process.pid}.${Date.now()}`
     await fs.writeFile(tmp, JSON.stringify(file, null, 2), 'utf8')
     await fs.rename(tmp, this.registryPath)
+  }
+
+  /**
+   * 读 shell 的 exitcode sentinel（`<entity>.exitcode`）。返回解析出的退出码；
+   * 文件缺失 / 内容非法 → null（进程被强杀或没走到写盘那步）。
+   */
+  private async readSentinelExitCode(rec: BgShellRegistryRecord): Promise<number | null> {
+    try {
+      const raw = await fs.readFile(exitcodeFileForLog(rec.log_file), 'utf8')
+      const ec = Number.parseInt(raw.trim(), 10)
+      return Number.isNaN(ec) ? null : ec
+    } catch {
+      return null
+    }
   }
 
   private async isShellAlive(rec: BgShellRegistryRecord): Promise<boolean> {

@@ -19,8 +19,9 @@ import {
 } from '../engine/index.js'
 import { createSetCwdTool, createReadTool } from '../engine/tools/index.js'
 import { BgEntityRegistry } from '../engine/bg-entities/registry.js'
-import { TransientShellRegistry, killShellTree } from '../engine/bg-entities/bg-shell.js'
-import type { BgEntityOwner, BgEntityRecord, BgEntityStatus, BgEntityType } from '../engine/bg-entities/types.js'
+import { killShellTree } from '../engine/bg-entities/bg-shell.js'
+import { ReadoptReaper } from '../engine/bg-entities/reaper.js'
+import type { BgEntityOwner, BgEntityRecord, BgEntityStatus, BgEntityType, BgShellRegistryRecord } from '../engine/bg-entities/types.js'
 import type { BashBgContext } from '../engine/tools/index.js'
 import type { BgToolDeps } from '../engine/tools/index.js'
 import type { TaskContext } from '../mcp/crab-messaging.js'
@@ -94,7 +95,7 @@ import { resolveSenderIdentity } from '../utils/sender-identity.js'
 import { prefetchQuotedMessages } from './quoted-message-prefetcher.js'
 import { formatNow, formatChannelMessageTime, resolveTimezone, formatRuntimeMs } from '../utils/time.js'
 import { renderActiveTasksSection } from './active-tasks-section.js'
-import { getAgentDataDir, getAdminDataDir, getAdminInternalTokenPath, getWorkspaceDir } from '../core/data-paths.js'
+import { getAgentDataDir, getAdminDataDir, getAdminInternalTokenPath, getWorkspaceDir, getBgEntitiesLogsDir } from '../core/data-paths.js'
 import { llmUsageToTrace } from '../core/trace-usage.js'
 import { TodoStore } from './worker-todo-store.js'
 import { createTodoTool } from './worker-todo-tool.js'
@@ -206,6 +207,50 @@ function getReportMode(
 }
 
 const LOG_FILE = path.join(getAgentDataDir(), 'agent-handler-debug.log')
+
+/** subagent 完成通知里内联结果预览的字符上限；超过则截断并提示用 get_subagent_output 读全文。 */
+const SUBAGENT_RESULT_PREVIEW_MAX = 2000
+
+export interface SubAgentExitInfo {
+  readonly entity_id: string
+  readonly task_description: string
+  readonly status: 'completed' | 'failed'
+  readonly runtime_ms: number
+  readonly error?: string
+  readonly result_file: string | null
+  readonly finalText?: string
+}
+
+/**
+ * 构造 \`<sub_agent_notification>\`：成功时内联**有界结果预览**——小结果（预览即全文）让 main
+ * 直接用、省掉一次 get_subagent_output；大结果截断到 SUBAGENT_RESULT_PREVIEW_MAX 并提示读全文。
+ * 失败时给 error + guidance。output_file 始终附上作为全文/审计指针。
+ */
+export function formatSubAgentNotification(info: SubAgentExitInfo): string {
+  const failed = info.status === 'failed'
+  const result = info.finalText ?? ''
+  const truncated = result.length > SUBAGENT_RESULT_PREVIEW_MAX
+  const preview = truncated ? result.slice(0, SUBAGENT_RESULT_PREVIEW_MAX) : result
+  return [
+    '<sub_agent_notification>',
+    `<agent_id>${info.entity_id}</agent_id>`,
+    `<description>${info.task_description.slice(0, 200)}</description>`,
+    `<status>${info.status}</status>`,
+    `<runtime_ms>${info.runtime_ms}</runtime_ms>`,
+    failed && info.error ? `<error>${info.error.slice(0, 500)}</error>` : '',
+    !failed && preview
+      ? `<result_preview${truncated ? ' truncated="true"' : ''}>\n${preview}\n</result_preview>`
+      : '',
+    info.result_file ? `<output_file>${info.result_file}</output_file>` : '',
+    !failed && truncated
+      ? `<guidance>结果已截断；完整内容用 get_subagent_output("${info.entity_id}") 读。</guidance>`
+      : '',
+    // 失败时由 main 决定如何处理：接口/网络/额度类失败（HTTP 4xx/5xx、超时等）通常应通知人类；
+    // 任务逻辑问题可自行续办或调整方案。
+    failed ? '<guidance>子任务失败，请判断失败性质并决定是否通知人类（接口类失败通常应通知）。</guidance>' : '',
+    '</sub_agent_notification>',
+  ].filter(Boolean).join('\n')
+}
 
 function log(msg: string) {
   const ts = new Date().toISOString()
@@ -485,8 +530,11 @@ export class AgentHandler {
   private readonly tmpPageBaseUrl?: string
   /** Worker-singleton bg entity registry (persistent, disk-backed) */
   private readonly bgRegistry = new BgEntityRegistry()
-  /** Worker-singleton transient shell registry (in-memory, task-bound) */
-  private readonly transientShells = new TransientShellRegistry()
+  /** 监视跨重启认领回来、仍存活的 shell；退出时通知（唤醒 resumed worker + 持久通知）。 */
+  private readonly readoptReaper = new ReadoptReaper(
+    this.bgRegistry,
+    (info) => void this.deliverShellExitNotification(info),
+  )
   /** Per-task output cursor map: key = `${taskId}:${entityId}` → byte offset */
   private readonly bgCursorMap = new Map<string, number>()
   /** AbortControllers for running bg sub-agents (key=entity_id); shared with BgToolDeps */
@@ -526,10 +574,30 @@ export class AgentHandler {
     this.getTimezone = config.getTimezone ?? (() => resolveTimezone(undefined))
     this.tmpPageBaseUrl = config.tmpPageBaseUrl
 
-    // Startup: recover persistent bg entities (mark dead shells as failed, stalled agents)
-    void this.bgRegistry.recoverPersistent().catch((err) => {
-      console.error('[AgentHandler] bg-entities recovery failed:', err)
-    })
+    // Startup: recover persistent bg entities（跨重启对账）。
+    // - deadShells（宕机期间已退出）：已读 sentinel 定真实终态，这里补发退出通知（resumed/recovery worker 会收到）。
+    // - alive（仍存活的 re-adopt shell）：交 reaper 周期探活，退出时再通知（本进程非其父，收不到 child exit）。
+    // - stalledAgents：已在 recoverPersistent 内标 stalled（agent 循环活在进程里，重启即无）。
+    void this.bgRegistry.recoverPersistent()
+      .then(({ alive, deadShells }) => {
+        for (const rec of deadShells) {
+          void this.deliverShellExitNotification({
+            entity_id: rec.entity_id,
+            command: rec.command,
+            status: rec.status === 'completed' ? 'completed' : 'failed',
+            exit_code: rec.exit_code ?? -1,
+            spawned_by_task_id: rec.spawned_by_task_id,
+            ...(rec.owner.friend_id ? { owner_friend_id: rec.owner.friend_id } : {}),
+          })
+        }
+        const aliveShells = alive.filter(
+          (r): r is BgShellRegistryRecord => r.type === 'shell',
+        )
+        this.readoptReaper.watch(aliveShells)
+      })
+      .catch((err) => {
+        console.error('[AgentHandler] bg-entities recovery failed:', err)
+      })
 
     // Startup: GC dead entities older than 7 days
     void this.bgRegistry.gcDeadEntities(new Date()).catch((err) => {
@@ -568,6 +636,70 @@ export class AgentHandler {
     const list = this.pendingBgNotifications.get(addressKey) ?? []
     list.push(message)
     this.pendingBgNotifications.set(addressKey, list)
+  }
+
+  /** 读后台 shell 磁盘日志的尾部（默认末 4KB）；失败返回空串。用于退出通知内联输出。 */
+  private async readShellLogTail(entity_id: string, maxBytes = 4000): Promise<string> {
+    const logFile = path.join(getBgEntitiesLogsDir(), `${entity_id}.log`)
+    let fh: Awaited<ReturnType<typeof fs.promises.open>>
+    try {
+      fh = await fs.promises.open(logFile, 'r')
+    } catch {
+      return ''
+    }
+    try {
+      // 只读尾部 maxBytes（避免把超大日志整读进内存）；size 取自已开 fd，省一次 stat syscall。
+      const { size } = await fh.stat()
+      const start = Math.max(0, size - maxBytes)
+      const buf = Buffer.allocUnsafe(size - start)
+      await fh.read(buf, 0, buf.length, start)
+      const text = buf.toString('utf8').trim()
+      return start > 0 ? `[...前 ${start} 字节省略]\n${text}` : text
+    } catch {
+      return ''
+    } finally {
+      await fh.close()
+    }
+  }
+
+  /**
+   * 统一的后台 shell 退出通知（Phase 2 §2.4：内联输出尾部）。
+   * 既服务本进程 spawn 的 shell（runShellWithGrace 转后台后退出），也服务跨重启 re-adopt /
+   * 宕机期间退出的 shell（reaper / recoverPersistent）。
+   * - push 该 shell 所属 task 的 humanQueue：若该 task 正挂起，立即唤醒（in-process）。
+   * - enqueueBgNotification(friend)：跨 turn / 跨重启 / 下一个 task 也能收到（resumed worker 首轮会 drain）。
+   * 退出通知**内联日志尾部**，常见场景无需再单独调 Output。
+   */
+  private async deliverShellExitNotification(info: {
+    entity_id: string
+    command: string
+    status: 'completed' | 'failed' | 'killed'
+    exit_code: number
+    spawned_by_task_id: string
+    owner_friend_id?: string
+    runtime_ms?: number
+  }): Promise<void> {
+    const command = `${info.command.slice(0, 200)}${info.command.length > 200 ? '...' : ''}`
+    const runtimeStr = info.runtime_ms !== undefined ? `, 运行 ${formatRuntimeMs(info.runtime_ms)}` : ''
+    const tail = await this.readShellLogTail(info.entity_id)
+    const tailBlock = tail
+      ? `\n--- 输出尾部 ---\n${tail}\n--- 更多用 Output("${info.entity_id}") ---`
+      : `\n用 Output("${info.entity_id}") 读取完整输出。`
+    const message =
+      `Background shell ${info.entity_id} 已退出 (status=${info.status}, exit_code=${info.exit_code}${runtimeStr})。\n` +
+      `命令: ${command}${tailBlock}`
+    this.humanQueues.get(info.spawned_by_task_id)?.push(`[系统] ${message}`)
+    if (info.owner_friend_id) {
+      this.enqueueBgNotification(`friend:${info.owner_friend_id}`, message)
+    }
+  }
+
+  /**
+   * 本 task 对应的 bg-notification 地址 key：`friend:<sender_friend.id 或 __system_<session>>`。
+   * onShellExit 入队、各处 drain 共用此 key，保证投递/读取口径一致。
+   */
+  private bgFriendKey(context: WorkerAgentContext): string {
+    return `friend:${context.sender_friend?.id ?? `__system_${context.task_origin?.session_id ?? 'unknown'}`}`
   }
 
   /** Drain 并返回 wrapped 的 <bg-notification> 块（已包标签）。无则返回空串。 */
@@ -673,12 +805,23 @@ export class AgentHandler {
     let currentInitialMessages: ReadonlyArray<EngineMessage> | undefined
     if (params.resumeFrom) {
       const { initialMessages, todoItems, goalRevisionUnlocked, cwd: resumedCwd } = params.resumeFrom
+      // §3.4 修复：resume 走 initialMessages 分支，query-loop 会忽略 prompt，导致 runWorkerLoop
+      // 里 buildTaskMessage 的 friend 队列 drain 被丢弃（drain-and-discard）。这里在 resume 装配处
+      // 主动 drain 一次并注入首轮消息，否则宕机期间到达的 bg-notification（如 re-adopt 的 shell 退出）
+      // 会丢失，resumed worker 可能等一个早已到达的信号而永久挂死。
+      const resumeBgNotif = this.drainBgNotifications(this.bgFriendKey(context))
       // 唤醒消息只注入一次（resume 首轮）；后续 waiting 续跑沿用现有重设逻辑。
       // request_restart 挂起的任务恢复时，注入重启专用唤醒，让 worker 自判是否已完成。
       const wakeup = this.consumeRestartResumeMarker(task.task_id)
         ? buildRestartCompletedWakeupMessage()
         : buildResumeWakeupMessage()
-      currentInitialMessages = [...initialMessages, wakeup]
+      // §3.4：bg-notification 必须**并入** wakeup 这条 user message，不能另起一条——否则 checkpoint 末尾
+      // 若是 assistant 消息，会出现连续两条 user，违反 Anthropic 的 user/assistant 严格交替。
+      const wakeupMsg =
+        resumeBgNotif && 'content' in wakeup && typeof wakeup.content === 'string'
+          ? createUserMessage(`${resumeBgNotif}\n\n${wakeup.content}`)
+          : wakeup
+      currentInitialMessages = [...initialMessages, wakeupMsg]
       // 预建 taskState 让 runWorkerLoop 直接复用（不再用 new TodoStore()）
       if (!this.activeTasks.has(task.task_id)) {
         this.activeTasks.set(task.task_id, {
@@ -724,11 +867,15 @@ export class AgentHandler {
         break
       }
 
-      // 检查本 task 派出的、仍在运行的异步 bg-agent
-      const pendingChildren = await this.bgRegistry.list({ spawned_by_task_id: task.task_id, status: ['running'] })
+      // 检查本 task 派出的、仍在运行的异步 bg-agent（subagent）。
+      // **只等 subagent，不等 bg shell**：subagent 是"派出去就该等结果"；bg shell 的 fire-and-forget
+      // 是合法用法（要等用显式 wait_for_signal，退出通知会唤醒），否则永不退出的后台命令会把 task
+      // 永久卡在 waiting。（shell 现在也落 bgRegistry，故这里按 type 过滤。）
+      const pendingChildren = (await this.bgRegistry.list({ spawned_by_task_id: task.task_id, status: ['running'] }))
+        .filter((c) => c.type === 'agent')
 
       if (pendingChildren.length === 0) {
-        break  // 无异步子 agent：正常完成路径
+        break  // 无 in-flight subagent：正常完成路径
       }
 
       // 有 pending children → 进 waiting 态
@@ -737,6 +884,7 @@ export class AgentHandler {
         if (this.deps?.getAdminPort && this.deps.rpcClient) {
           const adminPort = await this.deps.getAdminPort()
           await this.deps.rpcClient.call(adminPort, 'update_task_status', {
+            // TODO(protocol): 协议命名为 waiting_bg；待 admin task-state-machine 支持后 rename。
             task_id: task.task_id,
             status: 'waiting',
           }, this.deps.moduleId)
@@ -817,7 +965,7 @@ export class AgentHandler {
    * opts 允许 trigger 流注入 extraTools（exit 工具）、initialPrompt（user 侧 trigger prompt）、
    * overdueConfig（超期提醒），以及 onAfterTurn 回调（检测 send_message 工具调用）。
    *
-   * 注意：try/finally 清理（activeTasks / humanQueues / liveSnapshots / transientShells / bgCursorMap）
+   * 注意：try/finally 清理（activeTasks / humanQueues / liveSnapshots / bgCursorMap）
    * 在本方法内完成，对 executeTask 和 executeTriggerMessage 两个 caller 均透明。
    */
   private async runWorkerLoop(
@@ -1088,35 +1236,22 @@ export class AgentHandler {
           session_id: context.task_origin?.session_id,
           channel_id: context.task_origin?.channel_id,
         }
-        // push notification 接线：
-        // - persistent（master 私聊）：exit 排到该 friend 的下一次 task prompt
-        // - transient：exit 直接 push 本 task 的 humanQueue——worker 若正 wait_for_signal
-        //   挂起会被立即唤醒（等 bg shell 退出的场景），否则下个 turn 边界作为 supplement 注入。
-        //   task 结束时 transient 被 killAllOwnedBy 标 killed 不触发 onExit；
-        //   humanQueues 也已清理（get 返回 undefined），无幽灵推送。
+        // push notification 接线（R1：唤醒语义统一，不再分 transient/persistent）：
+        // 委托统一的 deliverShellExitNotification——既 push 本 task humanQueue 唤醒挂起的 worker，
+        // 又 enqueueBgNotification(friend) 做持久通知，且内联日志尾部（§2.4）。
         const onShellExit: BashBgContext['onShellExit'] = (info) => {
-          const runtimeStr = formatRuntimeMs(info.runtime_ms)
-          const command = `${info.command.slice(0, 200)}${info.command.length > 200 ? '...' : ''}`
-          if (info.mode !== 'persistent') {
-            this.humanQueues.get(task.task_id)?.push(
-              `[系统] Background shell ${info.entity_id} 已退出 (status=${info.status}, exit_code=${info.exit_code}, 运行 ${runtimeStr})。\n` +
-              `命令: ${command}\n` +
-              `用 Output("${info.entity_id}") 读取输出。`,
-            )
-            return
-          }
-          const message =
-            `Background shell ${info.entity_id} 已退出。\n` +
-            `状态: ${info.status} (exit_code=${info.exit_code})\n` +
-            `运行时长: ${runtimeStr}\n` +
-            `命令: ${command}\n` +
-            `提示: 用 Output("${info.entity_id}") 读完整输出，确认后用 Kill 清理（即使已 exit 也建议清以防混淆）`
-          this.enqueueBgNotification(`friend:${bgOwner.friend_id}`, message)
+          void this.deliverShellExitNotification({
+            entity_id: info.entity_id,
+            command: info.command,
+            status: info.status,
+            exit_code: info.exit_code,
+            spawned_by_task_id: task.task_id,
+            owner_friend_id: bgOwner.friend_id,
+            runtime_ms: info.runtime_ms,
+          })
         }
         const bgEntityCtx: BashBgContext = {
           registry: this.bgRegistry,
-          transient: this.transientShells,
-          workerContext: context,
           owner: bgOwner,
           taskId: task.task_id,
           traceContext: bgTraceCtx,
@@ -1124,7 +1259,6 @@ export class AgentHandler {
         }
         const bgToolDeps: BgToolDeps = {
           registry: this.bgRegistry,
-          transient: this.transientShells,
           cursorMap: this.bgCursorMap,
           taskId: task.task_id,
           ownerFriendId: bgOwner.friend_id,
@@ -1276,11 +1410,12 @@ export class AgentHandler {
               }
               return false
             },
-            // 本 task 的 running transient shell——退出时 onShellExit push humanQueue 唤醒，
-            // 所以"等它退出"是合法挂起。persistent shell 可能永不退出，不算（等它得带 timeout_ms）。
-            hasRunningBgEntity: () =>
-              this.transientShells.list({ status: ['running'] })
-                .some((s) => s.spawned_by_task_id === task.task_id),
+            // R2：本 task 名下 running 的（持久）bg shell——退出时 onShellExit push humanQueue 唤醒，
+            // 所以"等它退出"是合法裸挂起。可能永不退出的进程（服务/监控）仍建议带 timeout_ms。
+            hasRunningBgEntity: async () => {
+              const running = await this.bgRegistry.list({ status: ['running'] })
+              return running.some((s) => s.type === 'shell' && s.spawned_by_task_id === task.task_id)
+            },
           },
         )
         if (waitForSignalTool) tools.push(waitForSignalTool)
@@ -1312,9 +1447,7 @@ export class AgentHandler {
       } else {
         // 拼接 bg-notification：上一次该 friend 留下的 bg entity exit 等事件
         taskMessage = await this.buildTaskMessage(task, context)
-        const ownerFriendId = context.sender_friend?.id
-          ?? `__system_${context.task_origin?.session_id ?? 'unknown'}`
-        const bgNotifBlock = this.drainBgNotifications(`friend:${ownerFriendId}`)
+        const bgNotifBlock = this.drainBgNotifications(this.bgFriendKey(context))
         if (bgNotifBlock) {
           if (typeof taskMessage === 'string') {
             taskMessage = `${bgNotifBlock}\n\n${taskMessage}`
@@ -1791,8 +1924,7 @@ export class AgentHandler {
         this.activeTasks.delete(task.task_id)
         this.liveSnapshots.delete(task.task_id)
         this.taskTraceStores.delete(task.task_id)
-        // Kill all transient shells owned by this task (persistent shells survive)
-        this.transientShells.killAllOwnedBy(task.task_id)
+        // 后台 shell 现在全是持久实体，随 task 结束存活（终态由 reaper/GC 清；可被 Kill 杀）。
         // Clean up cursor map entries for this task to avoid memory leak
         for (const key of this.bgCursorMap.keys()) {
           if (key.startsWith(`${task.task_id}:`)) {
@@ -1817,12 +1949,15 @@ export class AgentHandler {
     this.activeTasks.delete(taskId)
     this.liveSnapshots.delete(taskId)
     this.taskTraceStores.delete(taskId)
-    this.transientShells.killAllOwnedBy(taskId)
     for (const key of this.bgCursorMap.keys()) {
       if (key.startsWith(`${taskId}:`)) {
         this.bgCursorMap.delete(key)
       }
     }
+    // task 完成即回收名下终态 shell（记录 + 日志 + sentinel）；running 的留存（持久）。
+    void this.bgRegistry.removeTerminalShellsByTask(taskId).catch((err) => {
+      console.error(`[AgentHandler] removeTerminalShellsByTask(${taskId}) failed:`, err)
+    })
   }
 
   /**
@@ -3496,21 +3631,7 @@ export class AgentHandler {
         : {}),
       onExit: (info) => {
         if (!deps.humanQueue) return
-        const failed = info.status === 'failed'
-        const notification = [
-          '<sub_agent_notification>',
-          `<agent_id>${info.entity_id}</agent_id>`,
-          `<description>${info.task_description.slice(0, 200)}</description>`,
-          `<status>${info.status}</status>`,
-          `<runtime_ms>${info.runtime_ms}</runtime_ms>`,
-          failed && info.error ? `<error>${info.error.slice(0, 500)}</error>` : '',
-          info.result_file ? `<output_file>${info.result_file}</output_file>` : '',
-          // 失败时由你（main）决定如何处理：若是接口/网络/额度类失败（HTTP 4xx/5xx、超时等），
-          // 通常应通知人类；若是任务逻辑问题，可自行续办或调整方案。
-          failed ? '<guidance>子任务失败，请判断失败性质并决定是否通知人类（接口类失败通常应通知）。</guidance>' : '',
-          '</sub_agent_notification>',
-        ].filter(Boolean).join('\n')
-        deps.humanQueue.push(notification)
+        deps.humanQueue.push(formatSubAgentNotification(info))
       },
     })
 
@@ -3744,13 +3865,6 @@ export class AgentHandler {
 
   async killBgEntity(entity_id: string): Promise<{ ok: boolean; message?: string }> {
     if (entity_id.startsWith('shell_')) {
-      // Try transient shell first
-      const transientState = this.transientShells.get(entity_id)
-      if (transientState) {
-        this.transientShells.kill(entity_id)
-        return { ok: true }
-      }
-      // Persistent shell
       const rec = await this.bgRegistry.get(entity_id)
       if (!rec) return { ok: false, message: 'Entity not found' }
       if (rec.status !== 'running') return { ok: false, message: `Already ${rec.status}` }
@@ -3788,17 +3902,6 @@ export class AgentHandler {
   }> {
     const fromOffset = opts?.from_offset ?? 0
     const maxBytes = opts?.max_bytes ?? 100_000
-
-    // Check transient shell first
-    const transientState = this.transientShells.get(entity_id)
-    if (transientState) {
-      return {
-        content: transientState.ringBuffer,
-        new_offset: transientState.ringBuffer.length,
-        status: transientState.status,
-        type: 'shell',
-      }
-    }
 
     const rec = await this.bgRegistry.get(entity_id)
     if (!rec) throw new Error(`Entity not found: ${entity_id}`)

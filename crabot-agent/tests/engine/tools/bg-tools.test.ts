@@ -2,6 +2,7 @@
  * Tests for Output / Kill / ListEntities bg entity tools.
  *
  * Plan 2 Tasks 7–9: crabot-docs/superpowers/plans/2026-05-01-long-running-agent-plan-2.md
+ * 后台 shell / sub-agent 现在统一为持久实体（bgRegistry + 磁盘日志）；transient 已移除。
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
@@ -9,7 +10,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { BgEntityRegistry } from '../../../src/engine/bg-entities/registry'
-import { spawnPersistentShell, TransientShellRegistry } from '../../../src/engine/bg-entities/bg-shell'
+import { spawnPersistentShell } from '../../../src/engine/bg-entities/bg-shell'
 import { createOutputTool } from '../../../src/engine/tools/output-tool'
 import { createKillTool } from '../../../src/engine/tools/kill-tool'
 import { createListEntitiesTool } from '../../../src/engine/tools/list-entities-tool'
@@ -35,7 +36,6 @@ const OWNER_B = { friend_id: 'friend-B', session_id: 'sess-B' }
 
 let tmpDir: string
 let registry: BgEntityRegistry
-let transient: TransientShellRegistry
 let cursorMap: Map<string, number>
 let deps: BgToolDeps
 
@@ -46,12 +46,10 @@ beforeEach(() => {
   process.env.DATA_DIR = tmpDir
 
   registry = new BgEntityRegistry()
-  transient = new TransientShellRegistry()
   cursorMap = new Map()
 
   deps = {
     registry,
-    transient,
     cursorMap,
     taskId: TASK_ID,
     ownerFriendId: OWNER_FRIEND_ID,
@@ -59,13 +57,6 @@ beforeEach(() => {
 })
 
 afterEach(() => {
-  // Kill any still-running transient shells
-  for (const shell of transient.list()) {
-    if (shell.status === 'running') {
-      transient.kill(shell.entity_id)
-    }
-  }
-
   // Kill any tracked persistent shell pids
   for (const pid of spawnedPids) {
     try {
@@ -135,52 +126,17 @@ describe('Output tool', () => {
     expect(result2.output).not.toContain('first')
   })
 
-  it('transient shell: reads ringBuffer content', async () => {
-    const entityId = transient.spawn({
-      command: 'echo transient_output',
-      owner: OWNER_A,
-      spawned_by_task_id: TASK_ID,
-      cwd: process.cwd(),
-    })
-
-    await sleep(300)
-
-    const tool = createOutputTool(deps)
-    const result = await tool.call({ entity_id: entityId }, {})
-
-    expect(result.isError).toBe(false)
-    expect(result.output).toContain('transient_output')
-  })
-
-  it('transient shell: incremental read — second call does not repeat first output', async () => {
-    const entityId = transient.spawn({
-      command: 'echo first; sleep 0.3; echo second',
-      cwd: process.cwd(),
-      owner: OWNER_A,
-      spawned_by_task_id: TASK_ID,
-    })
-
-    const tool = createOutputTool(deps)
-
-    await sleep(150)
-    const result1 = await tool.call({ entity_id: entityId }, {})
-    expect(result1.isError).toBe(false)
-    expect(result1.output).toContain('first')
-
-    await sleep(400)
-    const result2 = await tool.call({ entity_id: entityId }, {})
-    expect(result2.isError).toBe(false)
-    expect(result2.output).toContain('second')
-    expect(result2.output).not.toContain('first')
-  })
-
-  it('transient shell: no new output since last read returns (no new output) marker', async () => {
-    const entityId = transient.spawn({
+  it('persistent shell: no new output since last read returns (no new output) marker', async () => {
+    const entityId = await spawnPersistentShell({
       command: 'echo once; sleep 30',
-      cwd: process.cwd(),
       owner: OWNER_A,
       spawned_by_task_id: TASK_ID,
+      cwd: process.cwd(),
+      registry,
     })
+
+    const rec = await registry.get(entityId)
+    if (rec?.type === 'shell') spawnedPids.push(rec.pid)
 
     const tool = createOutputTool(deps)
 
@@ -194,13 +150,17 @@ describe('Output tool', () => {
     expect(result2.output).toContain('[status: running')
   })
 
-  it('transient shell: block=true waits for next output instead of returning immediately (trace ec8618b8 bug)', async () => {
-    const entityId = transient.spawn({
+  it('persistent shell: block=true waits for next output instead of returning immediately (trace ec8618b8 bug)', async () => {
+    const entityId = await spawnPersistentShell({
       command: 'sleep 2.5; echo late_output',
-      cwd: process.cwd(),
       owner: OWNER_A,
       spawned_by_task_id: TASK_ID,
+      cwd: process.cwd(),
+      registry,
     })
+
+    const rec = await registry.get(entityId)
+    if (rec?.type === 'shell') spawnedPids.push(rec.pid)
 
     const tool = createOutputTool(deps)
 
@@ -233,12 +193,12 @@ describe('Output tool', () => {
     expect(result.output).toContain('Invalid entity_id format')
   })
 
-  it('agent_xxx not in registry returns entity-not-found error', async () => {
+  it('agent_xxx 被拒：Output 只读 shell，指向 get_subagent_output', async () => {
     const tool = createOutputTool(deps)
     const result = await tool.call({ entity_id: 'agent_aabbccdd1122' }, {})
 
     expect(result.isError).toBe(true)
-    expect(result.output).toContain('Entity not found')
+    expect(result.output).toContain('get_subagent_output')
   })
 
   it('two tasks reading the same persistent shell do not share cursors', async () => {
@@ -331,25 +291,6 @@ describe('Kill tool', () => {
     expect(result.output).toContain('no-op')
   })
 
-  it('transient running shell is killed via TransientShellRegistry.kill()', async () => {
-    const entityId = transient.spawn({
-      command: 'sleep 30',
-      owner: OWNER_A,
-      spawned_by_task_id: TASK_ID,
-      cwd: process.cwd(),
-    })
-
-    await sleep(100)
-
-    const tool = createKillTool(deps)
-    const result = await tool.call({ entity_id: entityId }, {})
-
-    expect(result.isError).toBe(false)
-
-    await sleep(200)
-    expect(transient.get(entityId)?.status).toBe('killed')
-  })
-
   it('agent_xxx not in registry returns entity-not-found error', async () => {
     const tool = createKillTool(deps)
     const result = await tool.call({ entity_id: 'agent_aabbccdd1122' }, {})
@@ -372,7 +313,7 @@ describe('Kill tool', () => {
 // ---------------------------------------------------------------------------
 
 describe('ListEntities tool', () => {
-  it('lists both persistent and transient running entities', async () => {
+  it('lists persistent running entities', async () => {
     const persistId = await spawnPersistentShell({
       command: 'sleep 30',
       owner: OWNER_A,
@@ -384,23 +325,14 @@ describe('ListEntities tool', () => {
     const rec = await registry.get(persistId)
     if (rec?.type === 'shell') spawnedPids.push(rec.pid)
 
-    const transientId = transient.spawn({
-      command: 'sleep 30',
-      owner: OWNER_A,
-      spawned_by_task_id: TASK_ID,
-      cwd: process.cwd(),
-    })
-
     const tool = createListEntitiesTool(deps)
     const result = await tool.call({ status: 'running' }, {})
 
     expect(result.isError).toBe(false)
     expect(result.output).toContain(persistId)
-    expect(result.output).toContain(transientId)
   })
 
   it('owner_friend_id filter: only returns entities for owner A', async () => {
-    // Two entities for owner A (one persistent, one transient)
     const persistIdA = await spawnPersistentShell({
       command: 'sleep 30',
       owner: OWNER_A,
@@ -411,13 +343,6 @@ describe('ListEntities tool', () => {
 
     const recA = await registry.get(persistIdA)
     if (recA?.type === 'shell') spawnedPids.push(recA.pid)
-
-    const transientIdA = transient.spawn({
-      command: 'sleep 30',
-      owner: OWNER_A,
-      spawned_by_task_id: TASK_ID,
-      cwd: process.cwd(),
-    })
 
     // One entity for owner B
     const persistIdB = await spawnPersistentShell({
@@ -436,7 +361,6 @@ describe('ListEntities tool', () => {
 
     expect(result.isError).toBe(false)
     expect(result.output).toContain(persistIdA)
-    expect(result.output).toContain(transientIdA)
     expect(result.output).not.toContain(persistIdB)
   })
 
@@ -500,31 +424,6 @@ describe('ListEntities tool', () => {
     expect(result.isError).toBe(false)
     expect(result.output).toBe('(no entities matching filter)')
   })
-
-  it('transient entities filtered to current task only', async () => {
-    // This task's transient shell
-    const myTransientId = transient.spawn({
-      command: 'sleep 30',
-      owner: OWNER_A,
-      spawned_by_task_id: TASK_ID,
-      cwd: process.cwd(),
-    })
-
-    // Another task's transient shell (same owner, different task)
-    const otherTransientId = transient.spawn({
-      command: 'sleep 30',
-      owner: OWNER_A,
-      spawned_by_task_id: 'task-other-xyz',
-      cwd: process.cwd(),
-    })
-
-    const tool = createListEntitiesTool(deps) // taskId = TASK_ID
-    const result = await tool.call({ status: 'running' }, {})
-
-    expect(result.isError).toBe(false)
-    expect(result.output).toContain(myTransientId)
-    expect(result.output).not.toContain(otherTransientId)
-  })
 })
 
 // ---------------------------------------------------------------------------
@@ -551,78 +450,7 @@ function makeAgentRecord(
 }
 
 describe('agent type branch', () => {
-  it('Output completed agent — returns result_file content', async () => {
-    const resultFile = path.join(tmpDir, 'agent_result.txt')
-    writeFileSync(resultFile, 'final reply from agent')
-
-    const messagesLog = path.join(tmpDir, 'agent_messages.jsonl')
-    writeFileSync(messagesLog, '')
-
-    const agentId = 'agent_complete001'
-    const record = makeAgentRecord({
-      entity_id: agentId,
-      status: 'completed',
-      exit_code: 0,
-      result_file: resultFile,
-      messages_log_file: messagesLog,
-    })
-    await registry.register(record)
-
-    const tool = createOutputTool(deps)
-    const result = await tool.call({ entity_id: agentId }, {})
-
-    expect(result.isError).toBe(false)
-    expect(result.output).toContain('final reply from agent')
-    expect(result.output).toContain('completed')
-  })
-
-  it('Output running agent — returns last 10 lines of messages_log', async () => {
-    const messagesLog = path.join(tmpDir, 'agent_running.jsonl')
-    const lines = Array.from({ length: 15 }, (_, i) =>
-      JSON.stringify({ turn: i, type: 'text', text: `progress-line-${i}` }),
-    ).join('\n')
-    writeFileSync(messagesLog, lines)
-
-    const agentId = 'agent_running001'
-    const record = makeAgentRecord({
-      entity_id: agentId,
-      status: 'running',
-      messages_log_file: messagesLog,
-    })
-    await registry.register(record)
-
-    const tool = createOutputTool(deps)
-    const result = await tool.call({ entity_id: agentId }, {})
-
-    expect(result.isError).toBe(false)
-    expect(result.output).toContain('running')
-    // Should include the last few lines
-    expect(result.output).toContain('progress-line-14')
-    // Should not include line 0 (it's beyond the last-10 window)
-    expect(result.output).not.toContain('progress-line-0')
-  })
-
-  it('Output stalled agent — returns stalled status with ended_at', async () => {
-    const messagesLog = path.join(tmpDir, 'agent_stalled.jsonl')
-    writeFileSync(messagesLog, JSON.stringify({ turn: 1, type: 'text', text: 'last message' }))
-
-    const agentId = 'agent_stalled001'
-    const stalledAt = new Date().toISOString()
-    const record = makeAgentRecord({
-      entity_id: agentId,
-      status: 'stalled',
-      ended_at: stalledAt,
-      messages_log_file: messagesLog,
-    })
-    await registry.register(record)
-
-    const tool = createOutputTool(deps)
-    const result = await tool.call({ entity_id: agentId }, {})
-
-    expect(result.isError).toBe(false)
-    expect(result.output).toContain('stalled')
-    expect(result.output).toContain(stalledAt)
-  })
+  // Output 不再支持 agent_xxx（与 get_subagent_output 重复，已移除）；这里只测 Kill / ListEntities 的 agent 分支。
 
   it('Kill running agent — aborts controller and marks registry status=killed', async () => {
     const messagesLog = path.join(tmpDir, 'agent_kill.jsonl')

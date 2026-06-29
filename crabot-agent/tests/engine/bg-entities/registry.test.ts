@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { BgEntityRegistry } from '../../../src/engine/bg-entities/registry'
@@ -155,14 +155,10 @@ describe('BgEntityRegistry', () => {
   })
 
   it('recoverPersistent: shell with current pid is classified as alive', async () => {
-    // Get the actual start time of the current process so starttime comparison passes
-    const { execFile } = await import('child_process')
-    const starttime = await new Promise<string>((resolve, reject) => {
-      execFile('ps', ['-o', 'lstart=', '-p', String(process.pid)], (err, stdout) => {
-        if (err) reject(err)
-        else resolve(new Date(stdout.trim()).toISOString())
-      })
-    })
+    // 复用 impl 同一个 readProcStartTime（带 ps-parse 失败兜底），与 isShellAlive 解析口径一致：
+    // ps 可解析时两边都得真实 starttime；某些 locale 解析失败时两边都退化为 now，仍落在 5s 窗口内。
+    const { readProcStartTime } = await import('../../../src/engine/bg-entities/bg-shell')
+    const starttime = await readProcStartTime(process.pid)
 
     const shellRec = makeShellRecord({
       entity_id: 'shell-alive',
@@ -214,6 +210,56 @@ describe('BgEntityRegistry', () => {
     expect(stalledAgents).toHaveLength(0)
   })
 
+  it('reapShellIfDead: 存活 shell（当前 pid）→ 返回 null，状态不变', async () => {
+    const { readProcStartTime } = await import('../../../src/engine/bg-entities/bg-shell')
+    const starttime = await readProcStartTime(process.pid)
+    const rec = makeShellRecord({
+      entity_id: 'shell-reap-alive',
+      pid: process.pid,
+      pgid: process.pid,
+      process_started_at: starttime,
+    })
+    await registry.register(rec)
+
+    const result = await registry.reapShellIfDead(rec)
+    expect(result).toBeNull()
+    expect((await registry.get('shell-reap-alive'))?.status).toBe('running')
+  })
+
+  it('reapShellIfDead: 已死 + sentinel=0 → completed/0 并更新 registry', async () => {
+    const logFile = path.join(tmpDir, 'shell-reap-ok.log')
+    writeFileSync(path.join(tmpDir, 'shell-reap-ok.exitcode'), '0')
+    const rec = makeShellRecord({
+      entity_id: 'shell-reap-ok',
+      pid: 999999,
+      pgid: 999999,
+      log_file: logFile,
+      process_started_at: new Date(Date.now() - 10000).toISOString(),
+    })
+    await registry.register(rec)
+
+    const result = await registry.reapShellIfDead(rec)
+    expect(result).toEqual({ status: 'completed', exit_code: 0 })
+    const updated = await registry.get('shell-reap-ok')
+    expect(updated?.status).toBe('completed')
+    expect(updated?.exit_code).toBe(0)
+  })
+
+  it('reapShellIfDead: 已死 + 无 sentinel（强杀/没写盘）→ failed/-1', async () => {
+    const rec = makeShellRecord({
+      entity_id: 'shell-reap-killed',
+      pid: 999999,
+      pgid: 999999,
+      log_file: path.join(tmpDir, 'shell-reap-killed.log'), // 无对应 .exitcode
+      process_started_at: new Date(Date.now() - 10000).toISOString(),
+    })
+    await registry.register(rec)
+
+    const result = await registry.reapShellIfDead(rec)
+    expect(result).toEqual({ status: 'failed', exit_code: -1 })
+    expect((await registry.get('shell-reap-killed'))?.exit_code).toBe(-1)
+  })
+
   it('gcDeadEntities: removes entities ended more than 7 days ago', async () => {
     const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString()
     const oldRec = makeShellRecord({
@@ -258,6 +304,34 @@ describe('BgEntityRegistry', () => {
     const { removed } = await registry.gcDeadEntities(new Date())
     expect(removed).not.toContain('running-old')
     expect(await registry.get('running-old')).not.toBeNull()
+  })
+
+  it('removeTerminalShellsByTask: 清本 task 终态 shell（含日志/sentinel），保留 running 与他 task', async () => {
+    const logDone = path.join(tmpDir, 'done.log')
+    const ecDone = path.join(tmpDir, 'done.exitcode')
+    writeFileSync(logDone, 'some output')
+    writeFileSync(ecDone, '0')
+
+    await registry.register(makeShellRecord({
+      entity_id: 'done-1', status: 'completed', exit_code: 0, ended_at: new Date().toISOString(),
+      log_file: logDone, spawned_by_task_id: 'task-clean',
+    }))
+    await registry.register(makeShellRecord({
+      entity_id: 'run-1', status: 'running', pid: process.pid,
+      log_file: path.join(tmpDir, 'run.log'), spawned_by_task_id: 'task-clean',
+    }))
+    await registry.register(makeShellRecord({
+      entity_id: 'other-1', status: 'completed', exit_code: 0, ended_at: new Date().toISOString(),
+      log_file: path.join(tmpDir, 'other.log'), spawned_by_task_id: 'task-OTHER',
+    }))
+
+    const removed = await registry.removeTerminalShellsByTask('task-clean')
+    expect(removed).toEqual(['done-1'])
+    expect(await registry.get('done-1')).toBeNull()        // 终态 → 清掉
+    expect(await registry.get('run-1')).not.toBeNull()     // running → 留存
+    expect(await registry.get('other-1')).not.toBeNull()   // 他 task → 不动
+    expect(existsSync(logDone)).toBe(false)                // 日志删了
+    expect(existsSync(ecDone)).toBe(false)                 // sentinel 删了
   })
 
   it('countActiveByOwner: counts only running entities for that owner', async () => {

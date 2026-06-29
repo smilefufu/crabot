@@ -502,11 +502,9 @@ list_groups / list_contacts 的返回是**分页结果**——看到 \`paginatio
 
 ### 长任务 / bg shell
 
-预估执行时间超过 1 分钟的命令，**优先**直接用 \`Bash(run_in_background=true)\`，拿 shell_id 后**靠 push notification / wait_for_signal**而不是主动 poll。
+**Bash 有 10s 前台宽限期**：命令在 10s 内完成就正常同步返回；**超过 10s 仍在跑会自动转入后台（命令不中断）并返回 entity_id**——你不用预先判断时长、也没有什么"后台开关"要打开，长命令照常直接跑即可，不会堵住 agent loop。收到「已转入后台」后：有别的事就去做，没有就调 \`wait_for_signal({reason:"等 <命令>"})\` 挂起，该命令退出会自动唤醒你。**不要对转后台的命令反复裸 poll \`Output\`。**
 
-**默认同步 Bash 有 10s 前台宽限期**：命令在 10s 内完成就正常同步返回；**超过 10s 仍在跑会自动转入后台（命令不中断）并返回 entity_id**——所以你不会再因为同步命令堵住 agent loop。收到「已转入后台」后：有别的事就去做，没有就调 \`wait_for_signal({reason:"等 <命令>"})\` 挂起，该命令退出会自动唤醒你，醒来用 \`Output(entity_id)\` 读完整输出。**不要对转后台的命令反复裸 poll \`Output\`。**
-
-**架构：bg entity 的 exit / 完成事件会自动 push 给你**——下一次任意 task 启动时，prompt 头部会出现 \`<bg-notification>\` 块告诉你"shell_xxx 已退出，状态 X，运行 Y"。你不需要主动确认 entity 是否结束。
+**架构：bg entity 的 exit / 完成事件会自动 push 给你**——退出时 prompt 里会出现 \`<bg-notification>\` 块告诉你"shell_xxx 已退出，状态 X" **并内联输出尾部**，常见场景你无需再调 Output；只有要看完整 / 分页输出时才用 \`Output(entity_id)\`。你不需要主动确认 entity 是否结束。
 
 **调 Output 的正确姿势**：
 
@@ -520,11 +518,11 @@ list_groups / list_contacts 的返回是**分页结果**——看到 \`paginatio
 **反 pattern（明令禁止）**：在 agent 主循环里反复调 \`Output(id)\`（不带 block）等同一个 entity——每次调用都污染上下文（tool_call + tool_result 对），且没新内容时纯空跑。**同一 entity 连续 ≥2 次 Output 都返回 \`(no new output)\`，下一次必须 block=true 或干别的事**。
 
 **时长分级**：
-- 1min - 1h：bg shell；spawn 后干别的事，等 push notification
-- 1h - 数天：bg shell；**仅人类私聊场景**下 bg 跨 task / worker 重启都不被杀，由你显式 Kill 或进程自己 exit
+- 1min - 1h：转后台 shell；交给它跑、干别的事，等 push notification
+- 1h - 数天：转后台 shell；**转后台的命令跨 task / worker 重启都不被杀（持久）**，由你显式 Kill 或进程自己 exit
 - 数天 - 几周：考虑物化为项目内 cron / daemon
 
-**子任务委派**同款：\`delegate_task(prompt, run_in_background=true)\` → agent_id → 等 push notification 或用 \`Output(agent_id, block=true)\` 主动等。`
+**子任务委派**类似但工具不同：\`delegate_task(subagent_type, task)\` 默认**异步**立即返回 agent_id → 没别的事就 \`wait_for_signal\` 挂起 → 完成时系统推 \`<sub_agent_notification>\`（含 status + 结果文件路径）唤醒你 → 用 \`get_subagent_output(agent_id)\` 读结果（**不要用 Output**，Output 只读 shell；也不要轮询进度）。`
 
 export const TASK_HARD_CONSTRAINTS = `## 任务推进硬约束
 

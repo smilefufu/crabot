@@ -17,20 +17,6 @@ async function killShell(
   entityId: string,
   deps: BgToolDeps,
 ): Promise<{ output: string; isError: boolean }> {
-  // 1. Check transient registry first
-  const transientState = deps.transient.get(entityId)
-  if (transientState) {
-    if (transientState.status !== 'running') {
-      return {
-        output: `Already ${transientState.status}, no-op`,
-        isError: false,
-      }
-    }
-    deps.transient.kill(entityId)
-    return { output: `Sent SIGTERM to transient shell ${entityId}`, isError: false }
-  }
-
-  // 2. Check persistent registry
   const record = await deps.registry.get(entityId)
   if (!record) {
     return { output: `Entity not found: ${entityId}`, isError: true }
