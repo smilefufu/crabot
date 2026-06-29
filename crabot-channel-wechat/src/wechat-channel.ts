@@ -299,6 +299,13 @@ export class WechatChannel extends ModuleBase {
       ? await this.getCrabGroupNick(platformSessionId, event.puppet.wxid)
       : undefined
 
+    // dispatcher / worker 用它区分"哪个 @ 是发给我的"。微信正文里的 @ 是 @昵称，
+    // self 锚点必须用群昵称才能跟正文对得上；wxid 永远不出现在正文里、对照不上
+    // （实测会导致 bot 认不出 @ 自己 / 误判收件人）。群昵称取不到时回退 wxid。
+    const crabSelfHandle = crabDisplayName
+      ? `@${crabDisplayName}`
+      : (event.puppet?.wxid ? `@${event.puppet.wxid}` : undefined)
+
     // 构建 ChannelMessage
     const channelMessage: ChannelMessage = {
       platform_message_id: event.message.id,
@@ -328,10 +335,7 @@ export class WechatChannel extends ModuleBase {
         channel_id: this.config.moduleId,
         message: channelMessage,
         ...(crabDisplayName !== undefined ? { crab_display_name: crabDisplayName } : {}),
-        // 群里多机器人共存时，dispatcher / worker 用它区分"哪个 @ 是发给我的"。
-        // 微信消息正文 @ 通常是 @昵称，但 puppet.wxid 是稳定标识，至少让 LLM 拥有
-        // 一个可对照的 self 锚点。
-        ...(event.puppet?.wxid ? { crab_self_handle: `@${event.puppet.wxid}` } : {}),
+        ...(crabSelfHandle ? { crab_self_handle: crabSelfHandle } : {}),
       },
       timestamp: generateTimestamp(),
     }
