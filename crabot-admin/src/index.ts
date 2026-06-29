@@ -83,6 +83,10 @@ import {
   type CleanupOldTasksByCountParams,
   type CleanupOldTasksByCountResult,
   type UpdateTaskStatusParams,
+  type ListRecentTerminalTasksParams,
+  type ListRecentTerminalTasksResult,
+  type ReviveTaskForSupplementParams,
+  type ReviveTaskForSupplementResult,
   type AssignWorkerParams,
   type UpdatePlanParams,
   type AppendMessageParams,
@@ -574,6 +578,8 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('create_task', this.handleCreateTask.bind(this))
     this.registerMethod('get_task', this.handleGetTask.bind(this))
     this.registerMethod('list_tasks', this.handleListTasks.bind(this))
+    this.registerMethod('list_recent_terminal_tasks', this.handleListRecentTerminalTasks.bind(this))
+    this.registerMethod('revive_task_for_supplement', this.handleReviveTaskForSupplement.bind(this))
     // spec 2026-06-09-task-trace-tool-unification.md §4.3 + §4.4
     this.registerMethod('list_conversation_units', this.handleListConversationUnits.bind(this))
     this.registerMethod('cleanup_old_tasks_by_count', this.handleCleanupOldTasksByCount.bind(this))
@@ -4905,6 +4911,84 @@ export class AdminModule extends ModuleBase {
         total_pages: totalPages,
       },
     }
+  }
+
+  private isRecoverableFailedTask(task: Task): boolean {
+    if (task.status !== 'failed') return false
+    const error = (task.error ?? '').toLowerCase()
+    if (!error) return true
+    return !(
+      error.includes('agent_restarted_during_execution') ||
+      error.includes('user-canceled') ||
+      error.includes('user cancelled') ||
+      error.includes('人工取消')
+    )
+  }
+
+  private async handleListRecentTerminalTasks(
+    params: ListRecentTerminalTasksParams,
+  ): Promise<ListRecentTerminalTasksResult> {
+    const limit = Math.max(0, params.limit)
+    const items = Array.from(this.tasks.values())
+      .filter((task) => task.source.channel_id === params.channel_id)
+      .filter((task) => task.source.session_id === params.session_id)
+      .filter((task) => task.status === 'completed' || this.isRecoverableFailedTask(task))
+      .filter((task) => typeof task.completed_at === 'string' && task.completed_at >= params.since)
+      .sort((a, b) => (b.completed_at ?? '').localeCompare(a.completed_at ?? ''))
+      .slice(0, limit)
+
+    return { items }
+  }
+
+  private async handleReviveTaskForSupplement(
+    params: ReviveTaskForSupplementParams,
+  ): Promise<ReviveTaskForSupplementResult> {
+    const task = this.tasks.get(params.task_id)
+    if (!task) {
+      throw new Error(AdminErrorCode.TASK_NOT_FOUND)
+    }
+    if (task.source.channel_id !== params.channel_id || task.source.session_id !== params.session_id) {
+      throw new Error(AdminErrorCode.TASK_NOT_FOUND)
+    }
+    if (task.status !== 'completed' && task.status !== 'failed') {
+      throw new Error(AdminErrorCode.INVALID_STATUS_TRANSITION)
+    }
+
+    const oldStatus = task.status
+    const now = generateTimestamp()
+    task.status = 'executing'
+    task.updated_at = now
+    task.started_at = task.started_at ?? now
+    task.completed_at = undefined
+    task.error = undefined
+    task.waiting_human_at = undefined
+    task.waiting_at = undefined
+    task.pending_question = undefined
+    task.messages.push({
+      id: generateId(),
+      role: 'human',
+      content: `[系统] 此 task 已结束，但同一会话收到新的后续补充。请基于前文继续处理，不要从头重做。\n\n用户补充：\n${params.supplement_text}`,
+      timestamp: now,
+      source: {
+        channel_id: params.channel_id,
+        session_id: params.session_id,
+      },
+    })
+    assertTaskInvariants(task)
+
+    await this.upsertTask(task)
+
+    this.publishAdminEvent('admin.task_status_changed', {
+      task_id: task.id,
+      old_status: oldStatus,
+      new_status: 'executing',
+    })
+
+    if (task.source.channel_id === 'admin-web') {
+      this.chatManager?.pushTaskUpdate(buildChatTaskSnapshot(task))
+    }
+
+    return { task }
   }
 
   /**
