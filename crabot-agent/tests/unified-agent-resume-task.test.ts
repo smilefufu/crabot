@@ -211,14 +211,21 @@ describe('UnifiedAgent.reviveTerminalSupplementTask', () => {
   function buildReviveAgent(deps: {
     rpcCallError?: Error
     resumeResult?: { resumed: boolean; reason?: string }
+    cleanupError?: Error
   } = {}) {
     const agent = Object.create(UnifiedAgent.prototype) as Record<string, unknown>
     agent.config = { moduleId: 'test-agent' }
     agent.getAdminPort = vi.fn().mockResolvedValue(18000)
     agent.rpcClient = {
-      call: deps.rpcCallError
-        ? vi.fn().mockRejectedValue(deps.rpcCallError)
-        : vi.fn().mockResolvedValue({ ok: true }),
+      call: vi.fn().mockImplementation((_port: number, method: string) => {
+        if (method === 'revive_task_for_supplement' && deps.rpcCallError) {
+          return Promise.reject(deps.rpcCallError)
+        }
+        if (method === 'update_task_status' && deps.cleanupError) {
+          return Promise.reject(deps.cleanupError)
+        }
+        return Promise.resolve({ ok: true })
+      }),
     }
     agent.handleResumeTaskWithSupplement = vi.fn().mockResolvedValue(deps.resumeResult ?? { resumed: true })
     return agent as {
@@ -266,6 +273,16 @@ describe('UnifiedAgent.reviveTerminalSupplementTask', () => {
     const result = await agent.reviveTerminalSupplementTask('task-missing', '继续', 'wechat-x', 'sess-y')
 
     expect(result).toEqual({ outcome: 'fallback', reason: 'no_checkpoint' })
+    expect(agent.rpcClient.call).toHaveBeenCalledWith(
+      18000,
+      'update_task_status',
+      {
+        task_id: 'task-missing',
+        status: 'failed',
+        error: 'Revived terminal supplement task could not be resumed: no_checkpoint',
+      },
+      'test-agent'
+    )
   })
 
   it('returns fallback when Admin revive RPC throws', async () => {
@@ -277,6 +294,7 @@ describe('UnifiedAgent.reviveTerminalSupplementTask', () => {
 
     expect(result).toEqual({ outcome: 'fallback', reason: 'admin unavailable' })
     expect(agent.handleResumeTaskWithSupplement).not.toHaveBeenCalled()
+    expect(agent.rpcClient.call).toHaveBeenCalledTimes(1)
   })
 })
 

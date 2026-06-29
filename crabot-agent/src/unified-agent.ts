@@ -1922,7 +1922,20 @@ export class UnifiedAgent extends ModuleBase {
       }, this.config.moduleId)
       const r = await this.handleResumeTaskWithSupplement({ task_id: taskId, supplement_text: text })
       if (r.resumed === true) return { outcome: 'revived' }
-      return { outcome: 'fallback', reason: r.reason ?? 'resume_rejected' }
+      const reason = r.reason ?? 'resume_rejected'
+      try {
+        await this.rpcClient.call(adminPort, 'update_task_status', {
+          task_id: taskId,
+          status: 'failed',
+          error: `Revived terminal supplement task could not be resumed: ${reason}`,
+        }, this.config.moduleId)
+      } catch (cleanupErr) {
+        console.error(
+          `[${this.config.moduleId}] failed to mark rejected revived task ${taskId} failed:`,
+          cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+        )
+      }
+      return { outcome: 'fallback', reason }
     } catch (err) {
       return { outcome: 'fallback', reason: err instanceof Error ? err.message : String(err) }
     }
