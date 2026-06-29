@@ -106,7 +106,7 @@ describe('fetchActiveTasks union agent in-flight', () => {
     expect(ids).not.toContain('task-sched')
   })
 
-  it('adds recent completed and failed tasks from same channel/session ordered by completed_at desc', async () => {
+  it('adds long-running recent completed and failed tasks ordered by completed_at desc without created_at prefilter', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-06-29T09:00:00.000Z'))
 
@@ -132,7 +132,6 @@ describe('fetchActiveTasks union agent in-flight', () => {
           status: ['completed', 'failed'],
           source_channel_id: 'ch',
           source_session_id: 'sess',
-          created_after: '2026-06-28T09:00:00.000Z',
         },
         sort: { field: 'updated_at', order: 'desc' },
         page_size: 100,

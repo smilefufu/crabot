@@ -588,7 +588,6 @@ export class ContextAssembler {
 
   private async fetchRecentTerminalTasks(channelId: string, sessionId: string): Promise<TaskSummary[]> {
     const sinceMs = Date.now() - RECENT_TERMINAL_WINDOW_HOURS * 3600 * 1000
-    const sinceIso = new Date(sinceMs).toISOString()
     try {
       const adminPort = await this.getAdminPort()
       const result = await this.rpcClient.call<
@@ -597,7 +596,6 @@ export class ContextAssembler {
             status: string[]
             source_channel_id: string
             source_session_id: string
-            created_after: string
           }
           sort: { field: 'updated_at'; order: 'desc' }
           page_size: number
@@ -626,8 +624,6 @@ export class ContextAssembler {
             status: [...RECENT_TERMINAL_STATUSES],
             source_channel_id: channelId,
             source_session_id: sessionId,
-            // Admin 当前只能按 created_at 粗过滤；completed_at 的 24h 窗口仍在本地精确校验。
-            created_after: sinceIso,
           },
           sort: { field: 'updated_at', order: 'desc' },
           page_size: 100,
