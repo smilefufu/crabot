@@ -80,6 +80,15 @@ function isRecoverableFailedCandidate(error: unknown): boolean {
   )
 }
 
+function normalizeTaskSummaryTriggerType(
+  triggerType: 'manual' | 'scheduled' | 'auto' | 'event' | 'message' | undefined
+): TaskSummary['trigger_type'] {
+  if (triggerType === 'manual' || triggerType === 'scheduled' || triggerType === 'auto' || triggerType === 'event') {
+    return triggerType
+  }
+  return undefined
+}
+
 /**
  * 对老 message store 残留的裸 claim hint outbound 做读时兜底改写：
  * - 新版（已带 [系统响应 /认主] 前缀）→ 原样
@@ -541,7 +550,7 @@ export class ContextAssembler {
             source: {
               channel_id?: string
               session_id?: string
-              trigger_type?: 'manual' | 'scheduled' | 'auto' | 'event'
+              trigger_type?: 'manual' | 'scheduled' | 'auto' | 'event' | 'message'
             }
             messages?: Array<{ content: string; timestamp: string }>
             updated_at?: string
@@ -570,7 +579,7 @@ export class ContextAssembler {
         latest_progress: this.extractLatestProgress(t.messages),
         source_channel_id: t.source.channel_id,
         source_session_id: t.source.session_id,
-        trigger_type: t.source.trigger_type,
+        trigger_type: normalizeTaskSummaryTriggerType(t.source.trigger_type),
         updated_at: t.updated_at,
         pending_question: t.pending_question,
         candidate_kind: 'active',
@@ -603,7 +612,7 @@ export class ContextAssembler {
             source: {
               channel_id?: string
               session_id?: string
-              trigger_type?: 'manual' | 'scheduled' | 'auto' | 'event'
+              trigger_type?: 'manual' | 'scheduled' | 'auto' | 'event' | 'message'
             }
             messages?: Array<{ content: string; timestamp: string }>
             updated_at?: string
@@ -642,7 +651,7 @@ export class ContextAssembler {
           priority: t.priority,
           source_channel_id: t.source.channel_id,
           source_session_id: t.source.session_id,
-          trigger_type: t.source.trigger_type,
+          trigger_type: normalizeTaskSummaryTriggerType(t.source.trigger_type),
           candidate_kind: 'recent_terminal',
           completed_at: t.completed_at,
           error: t.error,
@@ -665,8 +674,8 @@ export class ContextAssembler {
   }
 
   /**
-   * 抓本 session 最近结束（completed / failed / aborted）的若干个任务，
-   * 按 updated_at desc 排序。给 Front 用来识别"继续之前那个 ..."的指代。
+   * 抓本 session 最近结束（completed / recoverable failed）的若干个任务，
+   * 按 completed_at desc 排序。给 Front 用来识别"继续之前那个 ..."的指代。
    *
    * 注意：list_recent_terminal_tasks 已经有 source_channel_id / source_session_id 过滤。
    * 本地仍保留二次过滤，避免 Admin 侧行为漂移时扩大候选范围。

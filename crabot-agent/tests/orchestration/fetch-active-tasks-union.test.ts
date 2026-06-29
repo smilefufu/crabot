@@ -127,7 +127,13 @@ describe('fetchActiveTasks union agent in-flight', () => {
       adminItems: [{ id: 'task-active', title: 'active', status: 'executing' }],
       recentItems: [
         { id: 'task-old', title: 'old', status: 'completed', completed_at: '2026-06-28T09:00:00.000Z' },
-        { id: 'task-new', title: 'new', status: 'completed', completed_at: '2026-06-29T09:00:00.000Z' },
+        {
+          id: 'task-new',
+          title: 'new',
+          status: 'completed',
+          completed_at: '2026-06-29T09:00:00.000Z',
+          source: { trigger_type: 'message', channel_id: 'ch', session_id: 'sess' },
+        },
         { id: 'task-failed', title: 'failed', status: 'failed', completed_at: '2026-06-29T08:00:00.000Z', error: 'TypeError: terminated' },
       ],
     })
@@ -135,6 +141,7 @@ describe('fetchActiveTasks union agent in-flight', () => {
       .fetchActiveTasks('ch', 'sess')
     expect(tasks.map(t => t.task_id)).toEqual(['task-active', 'task-new', 'task-failed', 'task-old'])
     expect(tasks.find(t => t.task_id === 'task-new')?.candidate_kind).toBe('recent_terminal')
+    expect(tasks.find(t => t.task_id === 'task-new')?.trigger_type).toBeUndefined()
     expect(tasks.find(t => t.task_id === 'task-failed')?.error).toBe('TypeError: terminated')
     expect(rpcClient.call).toHaveBeenCalledWith(
       19001,
