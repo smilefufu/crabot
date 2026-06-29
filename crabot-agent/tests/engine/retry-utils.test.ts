@@ -222,20 +222,15 @@ describe('streamWithRetry', () => {
     expect(computeRetryDelayMs(5, 1_000, false)).toBe(1_000)
   })
 
-  it('computeRetryDelayMs: exponential growth with ±20% jitter, capped at BACKOFF_MAX_DELAY_MS', () => {
+  it('computeRetryDelayMs: exponential growth capped at BACKOFF_MAX_DELAY_MS', () => {
     const base = 10_000
-    // attempt 0 → ~base; attempt 3 → ~base*8 = 80k → capped at 60k
-    const samples0 = Array.from({ length: 50 }, () => computeRetryDelayMs(0, base, true))
-    const samples3 = Array.from({ length: 50 }, () => computeRetryDelayMs(3, base, true))
-
-    for (const v of samples0) {
-      expect(v).toBeGreaterThanOrEqual(base * 0.8 - 1)
-      expect(v).toBeLessThanOrEqual(base * 1.2 + 1)
-    }
-    for (const v of samples3) {
-      expect(v).toBeGreaterThanOrEqual(BACKOFF_MAX_DELAY_MS * 0.8 - 1)
-      expect(v).toBeLessThanOrEqual(BACKOFF_MAX_DELAY_MS * 1.2 + 1)
-    }
+    expect(computeRetryDelayMs(0, base, true)).toBe(BACKOFF_MAX_DELAY_MS)
+    expect(computeRetryDelayMs(3, base, true)).toBe(BACKOFF_MAX_DELAY_MS)
+    expect(computeRetryDelayMs(0, 1_000, true)).toBe(1_000)
+    expect(computeRetryDelayMs(1, 1_000, true)).toBe(2_000)
+    expect(computeRetryDelayMs(2, 1_000, true)).toBe(4_000)
+    expect(computeRetryDelayMs(3, 1_000, true)).toBe(8_000)
+    expect(computeRetryDelayMs(4, 1_000, true)).toBe(8_000)
   })
 
   it('withRetry: surfaces backoff delay via onRetry callback for overloaded errors', async () => {
@@ -265,17 +260,15 @@ describe('streamWithRetry', () => {
 
     expect(result).toBe('ok')
     expect(attempts).toBe(3)
-    // attempt 0 delay ≈ base (±20%); attempt 1 delay ≈ base*2 (±20%)
+    // attempt 0 delay = base; attempt 1 delay = base*2
     expect(calls).toHaveLength(2)
-    expect(calls[0]).toBeGreaterThanOrEqual(baseDelay * 0.8 - 1)
-    expect(calls[0]).toBeLessThanOrEqual(baseDelay * 1.2 + 1)
-    expect(calls[1]).toBeGreaterThanOrEqual(baseDelay * 2 * 0.8 - 1)
-    expect(calls[1]).toBeLessThanOrEqual(baseDelay * 2 * 1.2 + 1)
+    expect(calls[0]).toBe(baseDelay)
+    expect(calls[1]).toBe(baseDelay * 2)
   })
 
   it('withRetry: uses exponential backoff for non-overloaded retryable (network) errors', async () => {
-    // 新语义：网络错误（ECONNRESET 等）与过载错误一样走指数退避，不再固定间隔。
-    // attempt 0 delay ≈ base (±20%); attempt 1 delay ≈ base*2 (±20%)
+    // 网络错误（ECONNRESET 等）与过载错误一样走指数退避。
+    // attempt 0 delay = base; attempt 1 delay = base*2
     const calls: number[] = []
     const baseDelay = 50
     let attempts = 0
@@ -298,30 +291,8 @@ describe('streamWithRetry', () => {
     )
 
     expect(calls).toHaveLength(2)
-    // attempt 0 → computeRetryDelayMs(0, 50, true) ≈ 50 ± 20%
-    expect(calls[0]).toBeGreaterThanOrEqual(baseDelay * 0.8 - 1)
-    expect(calls[0]).toBeLessThanOrEqual(baseDelay * 1.2 + 1)
-    // attempt 1 → computeRetryDelayMs(1, 50, true) ≈ 100 ± 20%
-    expect(calls[1]).toBeGreaterThanOrEqual(baseDelay * 2 * 0.8 - 1)
-    expect(calls[1]).toBeLessThanOrEqual(baseDelay * 2 * 1.2 + 1)
-  })
-
-  it('gives up by time window on persistent pre-material network error', async () => {
-    let attempts = 0
-    await expect((async () => {
-      const stream = streamWithRetry<Chunk>(
-        'test',
-        async function* () {
-          attempts += 1
-          yield { type: 'message_start' } as Chunk
-          throw makeRetryableError()
-        },
-        { isMaterial, delayMs: 50, maxRetryWindowMs: 180, maxRetries: 100 },
-      )
-      for await (const _ of stream) { /* drain */ }
-    })()).rejects.toThrow('terminated')
-    expect(attempts).toBeGreaterThanOrEqual(2)
-    expect(attempts).toBeLessThan(8)
+    expect(calls[0]).toBe(baseDelay)
+    expect(calls[1]).toBe(baseDelay * 2)
   })
 
   it('honors maxRetries cap when failures keep happening pre-material', async () => {
@@ -345,26 +316,7 @@ describe('streamWithRetry', () => {
 
     expect(attempts).toBe(3)
   })
-})
-
-describe('withRetry time-budget termination', () => {
-  it('gives up by time window (not by maxRetries count) on persistent network error', async () => {
-    let attempts = 0
-    const started = Date.now()
-    await expect(
-      withRetry(
-        'test',
-        async () => { attempts += 1; throw makeRetryableError() },
-        { delayMs: 50, maxRetryWindowMs: 180, maxRetries: 100 },
-      ),
-    ).rejects.toThrow('terminated')
-    const elapsed = Date.now() - started
-    expect(attempts).toBeGreaterThanOrEqual(2)
-    expect(attempts).toBeLessThan(8)
-    expect(elapsed).toBeLessThan(180 + 300)
-  })
-
-  it('uses exponential backoff for network errors (delays grow across attempts)', async () => {
+  it('withRetry: uses capped exponential backoff for network errors', async () => {
     const delays: number[] = []
     let attempts = 0
     await expect(
@@ -373,13 +325,12 @@ describe('withRetry time-budget termination', () => {
         async () => { attempts += 1; throw makeRetryableError() },
         {
           delayMs: 20,
-          maxRetryWindowMs: 200,
-          maxRetries: 100,
+          maxRetries: 5,
           onRetry: (e) => delays.push(e.delayMs),
         },
       ),
     ).rejects.toThrow('terminated')
-    expect(delays.length).toBeGreaterThanOrEqual(2)
-    expect(delays[1]!).toBeGreaterThan(delays[0]! * 1.2)
+    expect(attempts).toBe(6)
+    expect(delays).toEqual([20, 40, 80, 160, 320])
   })
 })

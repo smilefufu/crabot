@@ -1,18 +1,6 @@
-// LLM adapter retry policy: fixed interval, applied ONLY before the first
-// stream chunk has been yielded. Retrying after partial output would duplicate
-// text deltas to the consumer (query-loop → UI/trace), so we never retry a
-// stream that has already started emitting.
-
 export const DEFAULT_MAX_RETRIES = 10
-export const DEFAULT_RETRY_DELAY_MS = 10_000
-// 可重试错误（网络/5xx/429）的总重试时长上限。到点仍失败则放弃。
-// 取代旧的「固定 10s × 11 次 ≈ 100s」——断流耐受窗口提升到 180s。
-export const DEFAULT_RETRY_WINDOW_MS = 180_000
-
-// 指数退避参数。所有可重试错误（网络/socket、5xx、过载/限流）统一走指数退避，
-// 在 DEFAULT_RETRY_WINDOW_MS 时间窗口内重试；BACKOFF_MAX_DELAY_MS 是单次延时上限。
-export const BACKOFF_MAX_DELAY_MS = 60_000
-const BACKOFF_JITTER_RATIO = 0.2
+export const DEFAULT_RETRY_DELAY_MS = 1_000
+export const BACKOFF_MAX_DELAY_MS = 8_000
 
 const RETRYABLE_CODES = new Set([
   // POSIX
@@ -142,15 +130,13 @@ export function isOverloadedError(err: unknown): boolean {
 /**
  * 计算单次重试前的等待时间。
  *   - useBackoff=false：固定 baseDelayMs
- *   - useBackoff=true：base * 2^attempt（cap 在 BACKOFF_MAX_DELAY_MS），叠加 ±20% 抖动避免雷暴
+ *   - useBackoff=true：base * 2^attempt（cap 在 BACKOFF_MAX_DELAY_MS）
  *
  * attempt 为 0-indexed —— 第一次失败时 attempt=0，对应 base * 1。
  */
 export function computeRetryDelayMs(attempt: number, baseDelayMs: number, useBackoff: boolean): number {
   if (!useBackoff) return baseDelayMs
-  const exp = Math.min(baseDelayMs * Math.pow(2, attempt), BACKOFF_MAX_DELAY_MS)
-  const jitter = exp * BACKOFF_JITTER_RATIO * (Math.random() * 2 - 1)
-  return Math.max(0, Math.round(exp + jitter))
+  return Math.min(baseDelayMs * Math.pow(2, attempt), BACKOFF_MAX_DELAY_MS)
 }
 
 export function isRetryableError(err: unknown): boolean {
@@ -215,9 +201,6 @@ export interface RetryOptions {
   readonly maxRetries?: number
   readonly delayMs?: number
   readonly abortSignal?: AbortSignal
-  /** 可重试错误的总重试时长上限（ms）。默认 DEFAULT_RETRY_WINDOW_MS。
-   *  与 maxRetries 取「先到者」放弃。 */
-  readonly maxRetryWindowMs?: number
   /**
    * 可观测性回调：retry 发生（catch 后、sleep 前）触发。
    * 主要用途是 worker → admin web 显示"LLM 正在重试中"。
@@ -249,9 +232,7 @@ export async function withRetry<T>(
 ): Promise<T> {
   const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES
   const delayMs = options.delayMs ?? DEFAULT_RETRY_DELAY_MS
-  const windowMs = options.maxRetryWindowMs ?? DEFAULT_RETRY_WINDOW_MS
   const abortSignal = options.abortSignal
-  const startedAt = Date.now()
 
   for (let attempt = 0; ; attempt++) {
     try {
@@ -260,12 +241,9 @@ export async function withRetry<T>(
       if (abortSignal?.aborted) throw err
       if (!isRetryableError(err)) throw err
       if (attempt >= maxRetries) throw err
-      // 所有可重试错误统一走指数退避（此前仅 overloaded 退避，网络错误固定间隔）
       const actualDelay = computeRetryDelayMs(attempt, delayMs, true)
-      // 时间预算：本次睡完会越过窗口则放弃（先到者终止）
-      if (Date.now() - startedAt + actualDelay > windowMs) throw err
       console.error(
-        `[${label}] attempt ${attempt + 1} failed, retrying in ${actualDelay}ms (backoff, window ${windowMs}ms):`,
+        `[${label}] attempt ${attempt + 1} failed, retrying in ${actualDelay}ms (backoff):`,
         err,
       )
       try {
@@ -286,8 +264,7 @@ export async function withRetry<T>(
  * Retries are only attempted BEFORE the first *material* chunk is yielded;
  * once a material chunk has been forwarded to the consumer, errors propagate
  * (partial output cannot be safely replayed).
- * Uses exponential backoff for all retryable errors, and terminates by a
- * time budget (maxRetryWindowMs) rather than a fixed count.
+ * Uses capped exponential backoff for all retryable errors.
  */
 export async function* streamWithRetry<T>(
   label: string,
@@ -296,10 +273,8 @@ export async function* streamWithRetry<T>(
 ): AsyncGenerator<T> {
   const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES
   const delayMs = options.delayMs ?? DEFAULT_RETRY_DELAY_MS
-  const windowMs = options.maxRetryWindowMs ?? DEFAULT_RETRY_WINDOW_MS
   const abortSignal = options.abortSignal
   const isMaterial = options.isMaterial ?? (() => true)
-  const startedAt = Date.now()
 
   for (let attempt = 0; ; attempt++) {
     let materialYielded = false
@@ -317,9 +292,8 @@ export async function* streamWithRetry<T>(
       if (!isRetryableError(err)) throw err
       if (attempt >= maxRetries) throw err
       const actualDelay = computeRetryDelayMs(attempt, delayMs, true)
-      if (Date.now() - startedAt + actualDelay > windowMs) throw err
       console.error(
-        `[${label}] attempt ${attempt + 1} failed, retrying in ${actualDelay}ms (backoff, window ${windowMs}ms):`,
+        `[${label}] attempt ${attempt + 1} failed, retrying in ${actualDelay}ms (backoff):`,
         err,
       )
       try {

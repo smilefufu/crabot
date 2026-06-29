@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { callNonStreaming, type LLMAdapter, type LLMStreamParams } from '../../src/engine/llm-adapter'
 import type { StreamChunk } from '../../src/engine/types'
 
@@ -183,4 +183,40 @@ describe('callNonStreaming', () => {
     expect(retries[0].source).toBe('mid-stream')
     expect(retries[0].error).toBe('socket dropped')
   }, 30_000)
+
+  it('still retries when the first stream attempt runs longer than the old retry window', async () => {
+    vi.useFakeTimers()
+    try {
+      let attempt = 0
+      const adapter: LLMAdapter = {
+        async *stream(): AsyncGenerator<StreamChunk> {
+          attempt++
+          yield { type: 'message_start', messageId: 'msg' }
+          yield { type: 'text_delta', text: 'partial' }
+          if (attempt === 1) {
+            vi.setSystemTime(Date.now() + 301_000)
+            const e = new TypeError('terminated') as TypeError & { cause?: Error }
+            e.cause = Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' })
+            throw e
+          }
+          yield { type: 'text_delta', text: ' recovered' }
+          yield { type: 'message_end', stopReason: 'end_turn' }
+        },
+        updateConfig() {},
+      }
+
+      const resultPromise = callNonStreaming(adapter, {
+        ...defaultParams,
+        onRetry: () => undefined,
+      })
+      await vi.advanceTimersByTimeAsync(1_000)
+      const result = await resultPromise
+
+      expect(attempt).toBe(2)
+      expect(result.content).toEqual([{ type: 'text', text: 'partial recovered' }])
+      expect(result.diagnostics?.retries).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

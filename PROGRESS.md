@@ -1,6 +1,13 @@
 # Crabot 项目进度
 
-> 最后更新：2026-06-26 — Admin UI 升级提醒与一键升级（已合 main + push origin bf8b3f7，端到端验证通过）
+> 最后更新：2026-06-29 — Agent LLM 重试策略改为固定 10 次
+
+## 2026-06-29 — Agent LLM 重试策略改为固定 10 次
+
+- 按主人确认，取消 180s retry window；LLM 可重试错误改为固定最多 10 次重试，间隔 `1s → 2s → 4s → 8s`，之后封顶 `8s`。
+- `retry-utils` 和 `callNonStreaming` 都走同一套 capped exponential backoff；保留流式缓冲整流重试，mid-stream 断流会重发整请求直到成功或 10 次耗尽。
+- 回归：更新 `retry-utils.test.ts` 覆盖固定延迟序列；`tests/engine/call-non-streaming.test.ts` 覆盖“首个 attempt 超长仍继续重试”。验证：`pnpm --dir crabot-agent exec vitest run tests/engine/call-non-streaming.test.ts`、`pnpm --dir crabot-agent build`。
+- 说明：`crabot-docs/superpowers/specs/2026-06-22-network-suspend-resume-design.md` 仍标记为草拟；正式协议/状态机尚无 `suspended`，本次未引入未定稿状态。
 
 ## 2026-06-26 — Admin UI 升级提醒与一键升级（已合 main + push origin `bf8b3f7`）
 
