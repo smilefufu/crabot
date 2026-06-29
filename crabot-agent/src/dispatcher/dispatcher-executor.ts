@@ -15,7 +15,7 @@
  * Spec: crabot-docs/superpowers/specs/2026-05-19-prefront-dispatcher-design.md §3.4 §3.6 §6
  */
 
-import type { DispatchAction, ExecuteContext, ImmediateReplySentInfo } from './dispatcher-types.js'
+import type { DispatchAction, ExecuteContext, ImmediateReplySentInfo, TerminalSupplementResult } from './dispatcher-types.js'
 
 /**
  * 取批次最后一条消息的 platform_message_id。空批次返回 null。
@@ -54,9 +54,19 @@ export async function executeDispatchActions(
       if (action.kind === 'supplement') {
         const target = ctx.dispatchCtx.activeTasks.find((t) => t.task_id === action.target_task_id)
         if (target?.candidate_kind === 'recent_terminal') {
-          const revive = ctx.reviveTerminalSupplement
-            ? await ctx.reviveTerminalSupplement(action.target_task_id, action.text)
-            : { outcome: 'fallback' as const, reason: 'revive_callback_missing' }
+          let revive: TerminalSupplementResult
+          if (ctx.reviveTerminalSupplement) {
+            try {
+              revive = await ctx.reviveTerminalSupplement(action.target_task_id, action.text)
+            } catch (err) {
+              revive = {
+                outcome: 'fallback' as const,
+                reason: err instanceof Error ? err.message : String(err),
+              }
+            }
+          } else {
+            revive = { outcome: 'fallback' as const, reason: 'revive_callback_missing' }
+          }
           if (revive.outcome === 'revived') {
             if (span && ctx.trace) {
               ctx.trace.endSpan(span.span_id, 'completed', {
