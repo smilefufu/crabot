@@ -867,11 +867,15 @@ export class AgentHandler {
         break
       }
 
-      // 检查本 task 派出的、仍在运行的异步 bg-agent
-      const pendingChildren = await this.bgRegistry.list({ spawned_by_task_id: task.task_id, status: ['running'] })
+      // 检查本 task 派出的、仍在运行的异步 bg-agent（subagent）。
+      // **只等 subagent，不等 bg shell**：subagent 是"派出去就该等结果"；bg shell 的 fire-and-forget
+      // 是合法用法（要等用显式 wait_for_signal，退出通知会唤醒），否则永不退出的后台命令会把 task
+      // 永久卡在 waiting。（shell 现在也落 bgRegistry，故这里按 type 过滤。）
+      const pendingChildren = (await this.bgRegistry.list({ spawned_by_task_id: task.task_id, status: ['running'] }))
+        .filter((c) => c.type === 'agent')
 
       if (pendingChildren.length === 0) {
-        break  // 无异步子 agent：正常完成路径
+        break  // 无 in-flight subagent：正常完成路径
       }
 
       // 有 pending children → 进 waiting 态
@@ -880,6 +884,7 @@ export class AgentHandler {
         if (this.deps?.getAdminPort && this.deps.rpcClient) {
           const adminPort = await this.deps.getAdminPort()
           await this.deps.rpcClient.call(adminPort, 'update_task_status', {
+            // TODO(protocol): 协议命名为 waiting_bg；待 admin task-state-machine 支持后 rename。
             task_id: task.task_id,
             status: 'waiting',
           }, this.deps.moduleId)
