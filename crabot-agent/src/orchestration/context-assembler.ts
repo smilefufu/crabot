@@ -492,11 +492,10 @@ export class ContextAssembler {
     const byId = new Map<string, TaskSummary>()
 
     // Union with agent in-flight tasks (避免 30s admin 同步延迟导致 race)
-    // 新快照按 session 过滤；旧 mock / 旧进程快照缺 source 字段时保留，避免兼容性破坏。
+    // in-flight 侧按 session 严格过滤——只保留 channel_id + session_id 完全匹配当前 session 的。
     const inflight = this.getInflightTriggerTasks?.() ?? []
     for (const t of inflight) {
-      if (t.source_channel_id && t.source_channel_id !== channelId) continue
-      if (t.source_session_id && t.source_session_id !== sessionId) continue
+      if (t.source_channel_id !== channelId || t.source_session_id !== sessionId) continue
       byId.set(t.task_id, {
         task_id: t.task_id,
         title: t.title,
@@ -589,10 +588,20 @@ export class ContextAssembler {
 
   private async fetchRecentTerminalTasks(channelId: string, sessionId: string): Promise<TaskSummary[]> {
     const sinceMs = Date.now() - RECENT_TERMINAL_WINDOW_HOURS * 3600 * 1000
+    const sinceIso = new Date(sinceMs).toISOString()
     try {
       const adminPort = await this.getAdminPort()
       const result = await this.rpcClient.call<
-        { filter: { status: string[]; source_channel_id: string; source_session_id: string } },
+        {
+          filter: {
+            status: string[]
+            source_channel_id: string
+            source_session_id: string
+            created_after: string
+          }
+          sort: { field: 'updated_at'; order: 'desc' }
+          page_size: number
+        },
         {
           items: Array<{
             id: string
@@ -617,7 +626,11 @@ export class ContextAssembler {
             status: [...RECENT_TERMINAL_STATUSES],
             source_channel_id: channelId,
             source_session_id: sessionId,
+            // Admin 当前只能按 created_at 粗过滤；completed_at 的 24h 窗口仍在本地精确校验。
+            created_after: sinceIso,
           },
+          sort: { field: 'updated_at', order: 'desc' },
+          page_size: 100,
         },
         this.moduleId
       )
