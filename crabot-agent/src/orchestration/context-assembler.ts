@@ -57,6 +57,29 @@ interface MemoryFetchParams {
 
 type FetchShortTermMemoryParams = MemoryFetchParams
 
+const RECENT_TERMINAL_WINDOW_HOURS = 24
+const RECENT_TERMINAL_LIMIT = 3
+const ACTIVE_TASK_STATUSES = ['pending', 'planning', 'executing', 'waiting_human', 'waiting'] as const
+const RECENT_TERMINAL_STATUSES = ['completed', 'failed'] as const
+const NON_RECOVERABLE_FAILED_ERROR_PATTERNS = [
+  'agent_restarted_during_execution',
+  'user-canceled',
+  'user cancelled',
+  '人工取消',
+] as const
+
+function isRecoverableFailedCandidate(error: unknown): boolean {
+  const message = typeof error === 'string'
+    ? error
+    : error instanceof Error
+      ? error.message
+      : String(error ?? '')
+  const normalized = message.toLowerCase()
+  return !NON_RECOVERABLE_FAILED_ERROR_PATTERNS.some(pattern =>
+    normalized.includes(pattern.toLowerCase())
+  )
+}
+
 /**
  * 对老 message store 残留的裸 claim hint outbound 做读时兜底改写：
  * - 新版（已带 [系统响应 /认主] 前缀）→ 原样
@@ -455,13 +478,54 @@ export class ContextAssembler {
    * 取"当前 session 的活跃任务清单"——dispatcher / front 视野里能 supplement 的候选。
    *
    * 过滤规则（spec 2026-05-19 §3.2 + protocol-agent-v2.md §5.1）：
-   * - status ∈ {pending, planning, executing, waiting_human}（admin 侧）
+   * - status ∈ {pending, planning, executing, waiting_human, waiting}（admin 侧）
    * - source_channel_id + source_session_id 完全匹配当前 session（admin 侧 + in-flight 侧都过滤）
    * - 排除 trigger_type='scheduled'（最终 union 后过滤）
-   * - 来源 = admin list_tasks ∪ agent 进程内 in-flight，按 task_id 去重（避免 admin 同步延迟 race）
+   * - 来源 = admin list_tasks ∪ agent 进程内 in-flight ∪ 最近终态补充候选，按 task_id 去重（避免 admin 同步延迟 race）
    */
   private async fetchActiveTasks(channelId: string, sessionId: string): Promise<TaskSummary[]> {
-    let adminItems: TaskSummary[] = []
+    const [adminItems, recentItems] = await Promise.all([
+      this.fetchAdminActiveTasks(channelId, sessionId),
+      this.fetchRecentTerminalTasks(channelId, sessionId),
+    ])
+
+    const byId = new Map<string, TaskSummary>()
+
+    // Union with agent in-flight tasks (避免 30s admin 同步延迟导致 race)
+    // 新快照按 session 过滤；旧 mock / 旧进程快照缺 source 字段时保留，避免兼容性破坏。
+    const inflight = this.getInflightTriggerTasks?.() ?? []
+    for (const t of inflight) {
+      if (t.source_channel_id && t.source_channel_id !== channelId) continue
+      if (t.source_session_id && t.source_session_id !== sessionId) continue
+      byId.set(t.task_id, {
+        task_id: t.task_id,
+        title: t.title,
+        status: 'executing',
+        priority: 'normal',
+        candidate_kind: 'active',
+        // 'message' 不在 TaskSummary.trigger_type 联合内，归一化为 undefined（即非 scheduled）
+        trigger_type: t.trigger_type === 'scheduled' ? 'scheduled' : undefined,
+        source_channel_id: t.source_channel_id,
+        source_session_id: t.source_session_id,
+      } as TaskSummary)
+    }
+    // admin 优先覆盖 in-flight
+    for (const t of adminItems) byId.set(t.task_id, t)
+
+    // 过滤 scheduled task（dispatcher 不对 scheduled 做 supplement）
+    const filtered: TaskSummary[] = []
+    for (const t of byId.values()) {
+      if (t.trigger_type === 'scheduled') continue
+      filtered.push(t)
+    }
+
+    for (const t of recentItems) {
+      if (!byId.has(t.task_id)) filtered.push(t)
+    }
+    return filtered
+  }
+
+  private async fetchAdminActiveTasks(channelId: string, sessionId: string): Promise<TaskSummary[]> {
     try {
       const adminPort = await this.getAdminPort()
       const result = await this.rpcClient.call<
@@ -490,14 +554,14 @@ export class ContextAssembler {
         'list_tasks',
         {
           filter: {
-            status: ['pending', 'planning', 'executing', 'waiting_human'],
+            status: [...ACTIVE_TASK_STATUSES],
             source_channel_id: channelId,
             source_session_id: sessionId,
           },
         },
         this.moduleId
       )
-      adminItems = result.items.map(t => ({
+      return result.items.map(t => ({
         task_id: t.id,
         title: t.title,
         status: t.status,
@@ -510,6 +574,7 @@ export class ContextAssembler {
         trigger_type: t.source.trigger_type,
         updated_at: t.updated_at,
         pending_question: t.pending_question,
+        candidate_kind: 'active',
         // 飞行中状态：worker 同进程内存表，仅 status=executing 且本进程在跑时有值
         live: t.status === 'executing' ? this.getLiveSnapshot?.(t.id) : undefined,
       }))
@@ -518,35 +583,76 @@ export class ContextAssembler {
         `[context-assembler] admin list_tasks failed, falling back to agent in-flight only:`,
         err instanceof Error ? err.message : String(err)
       )
+      return []
     }
+  }
 
-    // Union with agent in-flight tasks (避免 30s admin 同步延迟导致 race)
-    // in-flight 侧按 session 过滤——只保留 channel_id + session_id 完全匹配当前 session 的
-    const inflight = this.getInflightTriggerTasks?.() ?? []
-    const byId = new Map<string, TaskSummary>()
-    for (const t of inflight) {
-      if (t.source_channel_id !== channelId || t.source_session_id !== sessionId) continue
-      byId.set(t.task_id, {
-        task_id: t.task_id,
-        title: t.title,
-        status: 'executing',
-        priority: 'normal',
-        // 'message' 不在 TaskSummary.trigger_type 联合内，归一化为 undefined（即非 scheduled）
-        trigger_type: t.trigger_type === 'scheduled' ? 'scheduled' : undefined,
-        source_channel_id: t.source_channel_id,
-        source_session_id: t.source_session_id,
-      } as TaskSummary)
-    }
-    // admin 优先覆盖 in-flight
-    for (const t of adminItems) byId.set(t.task_id, t)
+  private async fetchRecentTerminalTasks(channelId: string, sessionId: string): Promise<TaskSummary[]> {
+    const sinceMs = Date.now() - RECENT_TERMINAL_WINDOW_HOURS * 3600 * 1000
+    try {
+      const adminPort = await this.getAdminPort()
+      const result = await this.rpcClient.call<
+        { filter: { status: string[]; source_channel_id: string; source_session_id: string } },
+        {
+          items: Array<{
+            id: string
+            title: string
+            status: string
+            type: string
+            priority: string
+            source: {
+              channel_id?: string
+              session_id?: string
+              trigger_type?: 'manual' | 'scheduled' | 'auto' | 'event'
+            }
+            completed_at?: string
+            error?: string
+          }>
+        }
+      >(
+        adminPort,
+        'list_tasks',
+        {
+          filter: {
+            status: [...RECENT_TERMINAL_STATUSES],
+            source_channel_id: channelId,
+            source_session_id: sessionId,
+          },
+        },
+        this.moduleId
+      )
 
-    // 过滤 scheduled task（dispatcher 不对 scheduled 做 supplement）
-    const filtered: TaskSummary[] = []
-    for (const t of byId.values()) {
-      if (t.trigger_type === 'scheduled') continue
-      filtered.push(t)
+      return result.items
+        .filter((t) => RECENT_TERMINAL_STATUSES.includes(t.status as typeof RECENT_TERMINAL_STATUSES[number]))
+        .filter((t) => t.source.channel_id === channelId && t.source.session_id === sessionId)
+        .filter((t) => t.source.trigger_type !== 'scheduled')
+        .filter((t) => {
+          if (!t.completed_at) return false
+          const completedMs = new Date(t.completed_at).getTime()
+          return Number.isFinite(completedMs) && completedMs >= sinceMs
+        })
+        .filter((t) => t.status !== 'failed' || isRecoverableFailedCandidate(t.error))
+        .sort((a, b) => (b.completed_at ?? '').localeCompare(a.completed_at ?? ''))
+        .slice(0, RECENT_TERMINAL_LIMIT)
+        .map(t => ({
+          task_id: t.id,
+          title: t.title,
+          status: t.status,
+          priority: t.priority,
+          source_channel_id: t.source.channel_id,
+          source_session_id: t.source.session_id,
+          trigger_type: t.source.trigger_type,
+          candidate_kind: 'recent_terminal',
+          completed_at: t.completed_at,
+          error: t.error,
+        }))
+    } catch (err) {
+      console.warn(
+        `[context-assembler] admin recent terminal list_tasks failed, continuing without recent terminal candidates:`,
+        err instanceof Error ? err.message : String(err)
+      )
+      return []
     }
-    return filtered
   }
 
   private extractLatestProgress(

@@ -159,12 +159,29 @@ describe('ContextAssembler', () => {
     ]
     // Raw admin API format (id, type — before mapping by fetchActiveTasks)
     const rawActiveTasks = [{ id: 't1', title: 'test', status: 'pending', priority: 'normal', source: {} }]
-    const mappedActiveTasks = [{ task_id: 't1', title: 'test', status: 'pending', priority: 'normal', plan_summary: undefined, source_channel_id: undefined, source_session_id: undefined, latest_progress: undefined }]
+    const mappedActiveTasks = [{
+      task_id: 't1',
+      title: 'test',
+      status: 'pending',
+      priority: 'normal',
+      assigned_worker: undefined,
+      plan_summary: undefined,
+      latest_progress: undefined,
+      source_channel_id: undefined,
+      source_session_id: undefined,
+      trigger_type: undefined,
+      updated_at: undefined,
+      pending_question: undefined,
+      candidate_kind: 'active',
+      live: undefined,
+    }]
 
-    // 2026-05-14：Front 短期记忆改按需查，assembleFrontContext 不再调 search_short_term。调用顺序剩 2 个：get_chat_history, list_tasks
+    // 2026-05-14：Front 短期记忆改按需查，assembleFrontContext 不再调 search_short_term。
+    // 调用顺序：get_chat_history, active list_tasks, recent terminal list_tasks
     mockRpc.call
       .mockResolvedValueOnce({ messages })
       .mockResolvedValueOnce({ items: rawActiveTasks })
+      .mockResolvedValueOnce({ items: [] })
 
     const friend = {
       id: 'friend-1',
