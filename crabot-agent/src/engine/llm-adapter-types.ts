@@ -6,9 +6,7 @@ import { StreamProcessor } from './stream-processor.js'
 import {
   DEFAULT_MAX_RETRIES,
   DEFAULT_RETRY_DELAY_MS,
-  DEFAULT_RETRY_WINDOW_MS,
   computeRetryDelayMs,
-  isOverloadedError,
   isRetryableError,
   sleep,
 } from './retry-utils.js'
@@ -86,7 +84,7 @@ export async function callNonStreaming(
   // 统一走流式消费 + 缓冲整流重试（2026-06 起移除非流式 complete() 路径）：
   //   - 流式让字节持续流动，链路网关 / 反代不易把"静默连接"当死连接掐掉；
   //   - 本层是纯 buffer 消费——丢弃 partial、重发整请求是安全的（无下游看得到重复
-  //     chunk），所以 mid-stream 断流也能整流重跑，直到成功或耗尽时间预算；
+  //     chunk），所以 mid-stream 断流也能整流重跑，直到成功或耗尽重试次数；
   //   - 单次 attempt 的 TTFB / 空闲超时由各 adapter stream() 内的 withStreamTimeout 负责，
   //     超时抛 StreamTimeoutError（可重试）→ 在这里换新连接重发。
   return await withStreamConsumptionRetry(adapter, params)
@@ -98,7 +96,6 @@ async function withStreamConsumptionRetry(
 ): Promise<LLMCallResponse> {
   const maxRetries = DEFAULT_MAX_RETRIES
   const delayMs = DEFAULT_RETRY_DELAY_MS
-  const windowMs = DEFAULT_RETRY_WINDOW_MS
   const startedAt = Date.now()
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -140,13 +137,9 @@ async function withStreamConsumptionRetry(
       // 放弃可重试错误时把"尝试次数/总耗时"写进错误，让失败 trace 可诊断
       // （否则 outcome 只剩一句裸 "fetch failed"，看不出是重试耗尽还是首次即挂）
       if (attempt >= maxRetries) throw enrichGiveUp(err, attempt + 1, Date.now() - startedAt)
-      const useBackoff = isOverloadedError(err)
-      const actualDelay = computeRetryDelayMs(attempt, delayMs, useBackoff)
-      // 时间预算：本次睡完会越过窗口则放弃（与 maxRetries 取先到者）。每个 attempt 自身
-      // 还可能因 TTFB / 空闲超时跑满数十秒，没有这道闸会在持续抖动的上游上无限堆叠。
-      if (Date.now() - startedAt + actualDelay > windowMs) throw enrichGiveUp(err, attempt + 1, Date.now() - startedAt)
+      const actualDelay = computeRetryDelayMs(attempt, delayMs, true)
       console.error(
-        `[callNonStreaming] stream attempt ${attempt + 1}/${maxRetries + 1} failed, retrying in ${actualDelay}ms${useBackoff ? ' (backoff)' : ''}:`,
+        `[callNonStreaming] stream attempt ${attempt + 1}/${maxRetries + 1} failed, retrying in ${actualDelay}ms (backoff):`,
         err,
       )
       try {
