@@ -2114,11 +2114,6 @@ export class UnifiedAgent extends ModuleBase {
 
     try {
       const result = await this.agentHandler.executeTask(taskParams, traceCallback, traceContext)
-      if (result.outcome === 'suspended_for_restart') {
-        // task 已挂起等重启，trace 保持 running；重启后 resume-sweep 会接管。
-        // 不调 endTrace，不 finalize，让 checkpoint 完整保留。
-        return { ...result, trace_id: trace.trace_id }
-      }
       const status = result.outcome === 'completed' ? 'completed' : 'failed'
       const summary = result.error ? result.error.slice(0, 200) : (status === 'completed' ? '任务已完成' : '任务失败')
       this.traceStore.endTrace(trace.trace_id, status, {

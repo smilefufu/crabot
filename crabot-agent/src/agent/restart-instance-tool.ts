@@ -23,7 +23,7 @@ function isInProgress(adminDataDir: string, file: string, activePhases: Readonly
 export interface RequestRestartToolDeps {
   /** admin 数据目录（restart-status.json / upgrade-status.json 所在）。 */
   readonly adminDataDir: string
-  /** 向 engine 登记重启申请并 abort 当前 worker loop 的回调（由 agent-handler 注入）。 */
+  /** 向 agent-handler 登记重启申请（barrier 挂起当前 worker + spawn 重启）。 */
   readonly requestRestart: (reason?: string) => void
 }
 
