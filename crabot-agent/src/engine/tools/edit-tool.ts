@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync } from 'fs'
-import { resolve, isAbsolute } from 'path'
 import { defineTool } from '../tool-framework'
 import type { ToolDefinition } from '../types'
+import { resolvePath } from './utils'
 
 function findOccurrenceLines(content: string, search: string): ReadonlyArray<number> {
   const collect = (from: number, acc: ReadonlyArray<number>): ReadonlyArray<number> => {
@@ -43,7 +43,7 @@ export function createEditTool(getCwd: () => string): ToolDefinition {
         return { output: 'old_string must differ from new_string', isError: true }
       }
 
-      const filePath = isAbsolute(rawPath) ? rawPath : resolve(getCwd(), rawPath)
+      const filePath = resolvePath(getCwd(), rawPath)
 
       let content: string
       try {

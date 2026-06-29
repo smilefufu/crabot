@@ -1,6 +1,7 @@
-import { resolve, isAbsolute, relative } from 'path'
+import { relative } from 'path'
 import { defineTool } from '../tool-framework'
 import type { ToolDefinition } from '../types'
+import { resolvePath } from './utils'
 import { runRipgrep, DEFAULT_EXCLUDE_GLOBS, getProtectedExcludeGlobs } from './ripgrep-helper'
 
 const MAX_RESULTS = 200
@@ -31,9 +32,7 @@ export function createGlobTool(getCwd: () => string): ToolDefinition {
       const pattern = input.pattern as string
       const pathInput = input.path as string | undefined
 
-      const resolvedPath = pathInput
-        ? (isAbsolute(pathInput) ? pathInput : resolve(getCwd(), pathInput))
-        : getCwd()
+      const resolvedPath = pathInput ? resolvePath(getCwd(), pathInput) : getCwd()
 
       const args: string[] = [
         '--no-config',

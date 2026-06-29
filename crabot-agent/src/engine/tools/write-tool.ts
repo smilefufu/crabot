@@ -2,6 +2,7 @@ import * as fs from 'fs/promises'
 import * as path from 'path'
 import { defineTool } from '../tool-framework'
 import type { ToolDefinition } from '../types'
+import { resolvePath } from './utils'
 
 export function createWriteTool(getCwd: () => string): ToolDefinition {
   return defineTool({
@@ -22,9 +23,7 @@ export function createWriteTool(getCwd: () => string): ToolDefinition {
       const filePath = input.file_path as string
       const content = input.content as string
 
-      const resolvedPath = path.isAbsolute(filePath)
-        ? filePath
-        : path.resolve(getCwd(), filePath)
+      const resolvedPath = resolvePath(getCwd(), filePath)
 
       try {
         await fs.mkdir(path.dirname(resolvedPath), { recursive: true })

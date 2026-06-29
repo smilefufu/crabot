@@ -1,8 +1,8 @@
 import * as fs from 'fs/promises'
-import * as path from 'path'
 import { defineTool } from '../tool-framework'
 import type { ToolDefinition } from '../types'
 import { compressImage } from '../image-utils'
+import { resolvePath } from './utils'
 import { inferMediaType } from '../../agent/media-resolver'
 import { FILE_UNCHANGED_STUB } from './file-read-state'
 import type { FileReadState } from './file-read-state'
@@ -85,9 +85,7 @@ export function createReadTool(getCwd: () => string, fileReadState?: FileReadSta
     permissionLevel: 'safe',
 
     async call(input) {
-      const filePath = path.isAbsolute(input.file_path as string)
-        ? (input.file_path as string)
-        : path.resolve(getCwd(), input.file_path as string)
+      const filePath = resolvePath(getCwd(), input.file_path as string)
 
       // 敏感路徑守衛：禁止直接讀取渠道憑證文件
       if (isSensitivePath(filePath)) {
