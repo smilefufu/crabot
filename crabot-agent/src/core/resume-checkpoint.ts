@@ -47,3 +47,14 @@ export function buildRestartCompletedWakeupMessage(): EngineMessage {
     timestamp: Date.now(),
   }
 }
+
+export function buildTerminalSupplementWakeupMessage(text: string): EngineMessage {
+  return {
+    id: `terminal-supplement-${Date.now()}`,
+    role: 'user',
+    content:
+      '[系统] 此 task 已结束，但同一会话收到新的后续补充。请基于前文继续处理，不要从头重做。\n\n' +
+      `用户补充：\n${text}`,
+    timestamp: Date.now(),
+  }
+}

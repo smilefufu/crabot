@@ -770,6 +770,7 @@ export interface ExecuteTaskParams {
     goalRevisionUnlocked?: boolean
     /** Task-scoped cwd（set_cwd 设置）；从 checkpoint worker_state.cwd 恢复，缺失则回退 home。 */
     cwd?: string
+    terminalSupplementText?: string
   }
 }
 

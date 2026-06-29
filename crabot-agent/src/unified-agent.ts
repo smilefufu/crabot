@@ -440,6 +440,7 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('start_task', this.handleStartTask.bind(this))
     this.registerMethod('start_recovery_task', this.handleStartTask.bind(this))
     this.registerMethod('resume_task', this.handleResumeTask.bind(this))
+    this.registerMethod('resume_task_with_supplement', this.handleResumeTaskWithSupplement.bind(this))
     this.registerMethod('finalize_orphan_checkpoints', this.handleFinalizeOrphanCheckpoints.bind(this))
 
     // Agent 接口
@@ -1892,6 +1893,14 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   private async handleResumeTask(params: { task_id: string }): Promise<{ resumed: boolean; reason?: string }> {
+    return this.resumeTaskInternal({ task_id: params.task_id })
+  }
+
+  private async handleResumeTaskWithSupplement(params: { task_id: string; supplement_text: string }): Promise<{ resumed: boolean; reason?: string }> {
+    return this.resumeTaskInternal({ task_id: params.task_id, terminalSupplementText: params.supplement_text })
+  }
+
+  private async resumeTaskInternal(params: { task_id: string; terminalSupplementText?: string }): Promise<{ resumed: boolean; reason?: string }> {
     const { task_id } = params
 
     // worker-alive 守卫：admin 单独重启时 agent 没重启、worker loop 仍在内存里跑这条 task。
@@ -1972,6 +1981,7 @@ export class UnifiedAgent extends ModuleBase {
             todoItems: entry.checkpoint.worker_state.todo_items,
             goalRevisionUnlocked: entry.checkpoint.worker_state.goal_revision_unlocked,
             cwd: entry.checkpoint.worker_state.cwd,
+            ...(params.terminalSupplementText !== undefined ? { terminalSupplementText: params.terminalSupplementText } : {}),
           },
         },
       )

@@ -96,7 +96,10 @@ function buildAgent(deps: {
   agent.getAdminPort = vi.fn().mockResolvedValue(18000)
 
   return {
-    agent: agent as { handleResumeTask: (p: { task_id: string }) => Promise<{ resumed: boolean; reason?: string }> },
+    agent: agent as {
+      handleResumeTask: (p: { task_id: string }) => Promise<{ resumed: boolean; reason?: string }>
+      handleResumeTaskWithSupplement: (p: { task_id: string; supplement_text: string }) => Promise<{ resumed: boolean; reason?: string }>
+    },
     executeScheduledTaskInBackground,
     consumeResumableCheckpoint,
     finalizeUnresumedCheckpoint,
@@ -174,6 +177,27 @@ describe('UnifiedAgent.handleResumeTask — I1: task_origin 从 task.source 重�
     // 旧行为：consumeResumableCheckpoint finalize 旧 trace + 另起新 trace = 一个 task 两条 trace。
     // 新行为：不 consume；旧 trace 由 reactivateResumableTrace 复用续写，一个 task 一条连续 trace。
     expect(consumeResumableCheckpoint).not.toHaveBeenCalled()
+  })
+})
+
+describe('UnifiedAgent.handleResumeTaskWithSupplement', () => {
+  it('schedules background execution with terminalSupplementText in resumeFrom', async () => {
+    const { agent, executeScheduledTaskInBackground } = buildAgent({})
+
+    const result = await agent.handleResumeTaskWithSupplement({
+      task_id: 'task-1',
+      supplement_text: '继续刚才失败的任务',
+    })
+
+    expect(result.resumed).toBe(true)
+    expect(executeScheduledTaskInBackground).toHaveBeenCalledOnce()
+
+    const [, , options] = executeScheduledTaskInBackground.mock.calls[0] as [
+      unknown,
+      unknown,
+      { resumeFrom?: { terminalSupplementText?: string } },
+    ]
+    expect(options.resumeFrom?.terminalSupplementText).toBe('继续刚才失败的任务')
   })
 })
 
