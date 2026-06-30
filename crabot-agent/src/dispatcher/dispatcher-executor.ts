@@ -68,6 +68,7 @@ export async function executeDispatchActions(
             revive = { outcome: 'fallback' as const, reason: 'revive_callback_missing' }
           }
           if (revive.outcome === 'revived') {
+            ctx.markSupplementLinkedToTask?.(action.target_task_id)
             if (span && ctx.trace) {
               ctx.trace.endSpan(span.span_id, 'completed', {
                 outcome: 'terminal_task_revived',
@@ -112,6 +113,9 @@ export async function executeDispatchActions(
           }
         } else if (span && ctx.trace) {
           ctx.trace.endSpan(span.span_id, 'completed', { outcome: 'supplement_delivered' })
+          ctx.markSupplementLinkedToTask?.(action.target_task_id)
+        } else {
+          ctx.markSupplementLinkedToTask?.(action.target_task_id)
         }
         await fireReaction(ctx)
       } else if (action.kind === 'new_task') {

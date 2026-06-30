@@ -141,6 +141,48 @@ describe('executeDispatchActions', () => {
     expect(reviveTerminalSupplement).toHaveBeenCalledWith('task-done', '继续')
   })
 
+  it('terminal supplement revive success links dispatch trace to revived task', async () => {
+    const markSupplementLinkedToTask = vi.fn()
+    const base = makeExecCtx()
+    const ctx = makeExecCtx({
+      dispatchCtx: {
+        ...base.dispatchCtx,
+        activeTasks: [{
+          task_id: 'task-done' as never,
+          title: 'done',
+          status: 'completed',
+          priority: 'normal',
+          candidate_kind: 'recent_terminal',
+        } as never],
+      },
+      reviveTerminalSupplement: vi.fn().mockResolvedValue({ outcome: 'revived' as const }),
+      markSupplementLinkedToTask,
+    } as Partial<ExecuteContext>)
+    await executeDispatchActions([{ kind: 'supplement', target_task_id: 'task-done', text: '继续' }], ctx)
+    expect(markSupplementLinkedToTask).toHaveBeenCalledWith('task-done')
+  })
+
+  it('terminal supplement revive fallback does not link dispatch trace to attempted task', async () => {
+    const markSupplementLinkedToTask = vi.fn()
+    const base = makeExecCtx()
+    const ctx = makeExecCtx({
+      dispatchCtx: {
+        ...base.dispatchCtx,
+        activeTasks: [{
+          task_id: 'task-done' as never,
+          title: 'done',
+          status: 'completed',
+          priority: 'normal',
+          candidate_kind: 'recent_terminal',
+        } as never],
+      },
+      reviveTerminalSupplement: vi.fn().mockResolvedValue({ outcome: 'fallback' as const }),
+      markSupplementLinkedToTask,
+    } as Partial<ExecuteContext>)
+    await executeDispatchActions([{ kind: 'supplement', target_task_id: 'task-done', text: '继续' }], ctx)
+    expect(markSupplementLinkedToTask).not.toHaveBeenCalled()
+  })
+
   it('terminal supplement revive fallback spawns new task with original supplement text', async () => {
     const spawn = vi.fn().mockResolvedValue({ spawnedTraceId: 'spawn-new' })
     const base = makeExecCtx()

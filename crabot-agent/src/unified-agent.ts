@@ -688,12 +688,14 @@ export class UnifiedAgent extends ModuleBase {
           try {
             // 传整批 ChannelMessage（保留媒体，Task 3 已让 deliverHumanResponse 渲染媒体）
             this.agentHandler!.deliverHumanResponse(taskId, messages)
-            // 把本次 dispatch trace 关联到目标 task，"按任务聚合" 视图把多次 dispatch + task trace 合并到同一组
-            this.traceStore.updateTrace(trace.trace_id, { related_task_id: taskId })
             return 'delivered'
           } catch {
             return 'fallback'
           }
+        },
+        // 把本次 dispatch trace 关联到目标 task，"按任务聚合" 视图把多次 dispatch + task trace 合并到同一组。
+        markSupplementLinkedToTask: (taskId) => {
+          this.traceStore.updateTrace(trace.trace_id, { related_task_id: taskId })
         },
         sendImmediateReply,
         reactToTriggerMessage: this.buildReactToTriggerMessage(session.channel_id, session.session_id),
@@ -909,12 +911,14 @@ export class UnifiedAgent extends ModuleBase {
           try {
             // 传整批 ChannelMessage（保留媒体，Task 3 已让 deliverHumanResponse 渲染媒体）
             this.agentHandler!.deliverHumanResponse(taskId, messages)
-            // 把本次 dispatch trace 关联到目标 task，"按任务聚合" 视图把多次 dispatch + task trace 合并到同一组
-            this.traceStore.updateTrace(trace.trace_id, { related_task_id: taskId })
             return 'delivered'
           } catch {
             return 'fallback'
           }
+        },
+        // 把本次 dispatch trace 关联到目标 task，"按任务聚合" 视图把多次 dispatch + task trace 合并到同一组。
+        markSupplementLinkedToTask: (taskId) => {
+          this.traceStore.updateTrace(trace.trace_id, { related_task_id: taskId })
         },
         sendImmediateReply,
         reactToTriggerMessage: this.buildReactToTriggerMessage(session.channel_id, sessionId),
@@ -1587,12 +1591,14 @@ export class UnifiedAgent extends ModuleBase {
               platform_timestamp: new Date().toISOString(),
             }
             this.agentHandler!.deliverHumanResponse(taskId, [syntheticMessage])
-            // 把本次 dispatch trace 关联到目标 task
-            this.traceStore.updateTrace(trace.trace_id, { related_task_id: taskId })
             return 'delivered'
           } catch {
             return 'fallback'
           }
+        },
+        // 把本次 dispatch trace 关联到目标 task；recent-terminal revive 也走这条，避免作为孤儿 dispatcher 展示。
+        markSupplementLinkedToTask: (taskId) => {
+          this.traceStore.updateTrace(trace.trace_id, { related_task_id: taskId })
         },
         spawnAgentInstance: async (actionText: string, spawnOptions) => {
           // admin_chat：params.messages 只放当前 trigger（单条），历史 + dispatcher

@@ -133,6 +133,12 @@ export interface ExecuteContext {
    * Spec: 2026-06-04-channel-task-pickup-reaction-design.md §4
    */
   readonly reactToTriggerMessage?: (platformMessageId: string) => Promise<void>
+  /**
+   * supplement 成功归属到目标 task 后的关联回调。
+   * 调用方通常用它把当前 dispatch trace 的 related_task_id 写成目标 task_id，
+   * 让 Trace UI 按 task 聚合 active supplement 和 recent-terminal revive。
+   */
+  readonly markSupplementLinkedToTask?: (taskId: string) => void
   /** trace 写入回调（可选）。注入后 executeDispatchActions 为每个 action 写 dispatch_action span。 */
   readonly trace?: DispatchTraceCallback
 }
