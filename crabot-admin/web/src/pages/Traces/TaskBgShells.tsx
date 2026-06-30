@@ -9,6 +9,7 @@ import {
 import { Button } from '../../components/Common/Button'
 import { ConfirmModal } from '../../components/Common/ConfirmModal'
 import { LogModal } from './LogModal'
+import { useToast } from '../../contexts/ToastContext'
 
 /** 终态附加：exit code（completed/failed 有意义）。 */
 function exitSuffix(e: BgEntity): string {
@@ -24,6 +25,7 @@ const POLL_INTERVAL_MS = 5000
 // ---------------------------------------------------------------------------
 
 export const TaskBgShells: React.FC<{ taskId: string }> = ({ taskId }) => {
+  const toast = useToast()
   const [shells, setShells] = useState<BgEntity[]>([])
   const [loaded, setLoaded] = useState(false)
   const [showTerminal, setShowTerminal] = useState(false)
@@ -64,8 +66,12 @@ export const TaskBgShells: React.FC<{ taskId: string }> = ({ taskId }) => {
     setKilling(true)
     try {
       await bgEntitiesService.kill(killTarget.entity_id)
+      toast.success('已发送停止指令')
       setKillTarget(null)
       await load()
+    } catch (err) {
+      // kill 失败（agent 离线 / 实体已结束）时给出反馈，并保留 killTarget 以便重试或取消
+      toast.error(err instanceof Error ? err.message : '停止失败')
     } finally {
       setKilling(false)
     }
