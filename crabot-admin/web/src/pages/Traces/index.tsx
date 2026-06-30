@@ -3,6 +3,7 @@ import { MainLayout } from '../../components/Layout/MainLayout'
 import { Button } from '../../components/Common/Button'
 import { Loading } from '../../components/Common/Loading'
 import { Tooltip } from '../../components/Common/Tooltip'
+import { TaskBgShells } from './TaskBgShells'
 import { useToast } from '../../contexts/ToastContext'
 import {
   traceService,
@@ -298,6 +299,8 @@ export function TraceDetailPanel({
             onJumpToTrace={onNavigateTrace}
           />
         )}
+
+        {trace.related_task_id && <TaskBgShells taskId={trace.related_task_id} />}
 
         {trace.outcome && (
           <div

@@ -1,22 +1,15 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { Modal } from '../../components/Common/Modal'
 import { Button } from '../../components/Common/Button'
-import { bgEntitiesService } from '../../services/bg-entities'
+import { bgEntitiesService, bgStatusLabel, type BgEntity } from '../../services/bg-entities'
 
 export interface LogModalProps {
-  entityId: string | null
+  /** 要查看的实体；null 时关闭。调用方持有整个对象，元信息（命令等）随它一起传入。 */
+  entity: BgEntity | null
   onClose: () => void
 }
 
 type LogStatus = '' | 'running' | 'completed' | 'failed' | 'killed' | 'stalled' | string
-
-const STATUS_LABEL: Record<string, string> = {
-  running: '运行中',
-  completed: '已完成',
-  failed: '失败',
-  killed: '已停止',
-  stalled: '停滞',
-}
 
 const STATUS_TONE: Record<string, 'success' | 'error' | 'muted'> = {
   running: 'success',
@@ -26,7 +19,9 @@ const STATUS_TONE: Record<string, 'success' | 'error' | 'muted'> = {
   stalled: 'muted',
 }
 
-export const LogModal: React.FC<LogModalProps> = ({ entityId, onClose }) => {
+export const LogModal: React.FC<LogModalProps> = ({ entity, onClose }) => {
+  const entityId = entity?.entity_id ?? null
+  const command = entity?.command
   const [logContent, setLogContent] = useState('')
   const [status, setStatus] = useState<LogStatus>('')
   const [type, setType] = useState('')
@@ -124,7 +119,7 @@ export const LogModal: React.FC<LogModalProps> = ({ entityId, onClose }) => {
       contentClassName="log-modal"
       title={
         <span className="log-modal__title-row">
-          <span className="log-modal__title-text">实体日志</span>
+          <span className="log-modal__title-text">实体详情</span>
           {type && (
             <span className={`log-modal__tag log-modal__tag--${type === 'shell' ? 'shell' : 'agent'}`}>
               {type === 'shell' ? 'Shell' : 'Agent'}
@@ -132,7 +127,7 @@ export const LogModal: React.FC<LogModalProps> = ({ entityId, onClose }) => {
           )}
           {status && (
             <span className={`log-modal__status log-modal__status--${statusTone}`}>
-              {STATUS_LABEL[status] ?? status}
+              {bgStatusLabel(status)}
             </span>
           )}
           {status === 'running' && (
@@ -161,6 +156,41 @@ export const LogModal: React.FC<LogModalProps> = ({ entityId, onClose }) => {
       }
     >
       <div className="log-modal__body">
+        {command && (
+          <div style={{ marginBottom: 10 }}>
+            <div
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                textTransform: 'uppercase',
+                letterSpacing: '0.04em',
+                color: 'var(--text-muted)',
+                marginBottom: 4,
+              }}
+            >
+              命令
+            </div>
+            <code
+              style={{
+                display: 'block',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-all',
+                fontFamily: 'var(--font-mono)',
+                fontSize: 12,
+                lineHeight: 1.5,
+                color: 'var(--text-primary)',
+                background: 'var(--bg-primary)',
+                border: '1px solid var(--border)',
+                borderRadius: 6,
+                padding: '8px 10px',
+                maxHeight: 140,
+                overflowY: 'auto',
+              }}
+            >
+              {command}
+            </code>
+          </div>
+        )}
         {loading ? (
           <div className="log-modal__loading">加载中…</div>
         ) : (
