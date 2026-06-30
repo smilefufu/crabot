@@ -307,30 +307,53 @@ export async function dispatchOutboundMessage(
   return sendResult
 }
 
+/** flush 时单条消息发送失败的回传项——engine 据此注入给 worker，避免失败被静默吞掉。 */
+export interface OutboundFlushFailure {
+  /** 失败消息的内容摘要，让 worker 认出是哪条。 */
+  readonly summary: string
+  /** 失败原因（dispatch 抛出的错误信息）。 */
+  readonly error: string
+}
+
+/** 把 buffer entry 压成一句话摘要，供失败回传时让 worker 辨认。 */
+function summarizeEntry(entry: OutboundBufferEntry): string {
+  const text = (entry.content ?? '').trim()
+  const attachment = entry.file_path
+    ? `[文件: ${entry.filename ?? entry.file_path}]`
+    : entry.media_url
+      ? `[媒体: ${entry.filename ?? entry.media_url}]`
+      : ''
+  const base = [text, attachment].filter(Boolean).join(' ').trim() || '(空消息)'
+  return base.length > 60 ? `${base.slice(0, 60)}…` : base
+}
+
 /**
  * 工厂返回 flush 函数：splice buffer + 逐 entry dispatch + continue on error。
  *
  * - splice(0) 一次性取出所有缓冲项，失败的不放回；buffer 永远不被反复 flush
- * - 单条 entry dispatch 抛异常时仅 warn log，不阻塞后续 entry（spec §4.5 显式取舍）
+ * - 单条 entry dispatch 抛异常时不阻塞后续 entry，但把"摘要+原因"收进返回的 failures：
+ *   engine 据此把发送失败注入给 worker（旧版只 warn 一行就吞掉，让 worker 误以为已送达——
+ *   trace a72623ec 成因之二）。
  *
  * spec: 2026-06-07-goal-audit-async-buffered-info-design.md Task 8
  */
 export function createOutboundFlush(
   outboundBuffer: Array<OutboundBufferEntry>,
   deps: OutboundDispatchDeps,
-): () => Promise<void> {
+): () => Promise<OutboundFlushFailure[]> {
   return async () => {
-    if (outboundBuffer.length === 0) return
+    if (outboundBuffer.length === 0) return []
     const entries = outboundBuffer.splice(0)
+    const failures: OutboundFlushFailure[] = []
     for (const entry of entries) {
       try {
         await dispatchOutboundMessage(entry, deps)
       } catch (err) {
-        console.warn(
-          '[outbound flush] entry failed:',
-          err instanceof Error ? err.message : String(err),
-        )
+        const error = err instanceof Error ? err.message : String(err)
+        console.warn('[outbound flush] entry failed:', error)
+        failures.push({ summary: summarizeEntry(entry), error })
       }
     }
+    return failures
   }
 }

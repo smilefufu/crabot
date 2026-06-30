@@ -297,4 +297,75 @@ describe('send_message buffering (goal mode)', () => {
     // 缺少缓冲 deps → 走立即发路径
     expect(rpcMethods).toContain('send_message')
   })
+
+  it('相对 file_path + 本地无沙盒映射 → 用 getCwd 就地解析成绝对路径再缓冲（B: 工具自愈，trace a72623ec）', async () => {
+    const queue = new HumanMessageQueue()
+    const buffer: BufferEntry[] = []
+
+    const tools = buildMessagingTools({
+      rpcClient: { call: vi.fn() } as never,
+      moduleId: 'worker-test',
+      getAdminPort: async () => 19001,
+      resolveChannelPort: async () => 19009,
+      getTaskContext: () => ({
+        taskId: 't1',
+        humanQueue: queue,
+        triggerType: 'message' as const,
+        hasGoal: () => true,
+        outboundBuffer: buffer,
+        hasActiveAudit: () => false,
+        getCwd: () => '/Users/fufu/codes/playground/quant-signal',
+      }),
+    }) // 第二参 sandboxPathMappingsRef 不传 = 本地无映射
+
+    const sendTool = findTool(tools, 'send_message')
+    await sendTool.handler({
+      channel_id: 'telegram-001',
+      session_id: 'sess',
+      content: '改成 HTML 了',
+      intent: 'info',
+      content_type: 'file',
+      file_path: 'reports/research/viz.html', // ← 相对路径（旧版会拖到 flush 才抛错、失败被吞）
+    })
+
+    expect(buffer).toHaveLength(1)
+    // 相对路径已基于 cwd 解析成绝对路径，不会再在延迟 flush 阶段抛错
+    expect(buffer[0].file_path).toBe(
+      '/Users/fufu/codes/playground/quant-signal/reports/research/viz.html',
+    )
+  })
+
+  it('绝对 file_path → 保持不变（不被 cwd 二次拼接）', async () => {
+    const queue = new HumanMessageQueue()
+    const buffer: BufferEntry[] = []
+
+    const tools = buildMessagingTools({
+      rpcClient: { call: vi.fn() } as never,
+      moduleId: 'worker-test',
+      getAdminPort: async () => 19001,
+      resolveChannelPort: async () => 19009,
+      getTaskContext: () => ({
+        taskId: 't1',
+        humanQueue: queue,
+        triggerType: 'message' as const,
+        hasGoal: () => true,
+        outboundBuffer: buffer,
+        hasActiveAudit: () => false,
+        getCwd: () => '/some/cwd',
+      }),
+    })
+
+    const sendTool = findTool(tools, 'send_message')
+    await sendTool.handler({
+      channel_id: 'telegram-001',
+      session_id: 'sess',
+      content: 'x',
+      intent: 'info',
+      content_type: 'file',
+      file_path: '/abs/path/viz.html',
+    })
+
+    expect(buffer).toHaveLength(1)
+    expect(buffer[0].file_path).toBe('/abs/path/viz.html')
+  })
 })

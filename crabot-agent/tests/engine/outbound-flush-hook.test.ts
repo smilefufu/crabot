@@ -355,4 +355,77 @@ describe('engine: flushOutboundBuffer hook', () => {
     // tool_call 之后必有 flush（不必判定具体次数，只判定相对顺序）
     expect(events.indexOf('flush')).toBeGreaterThan(events.indexOf('tool_call'))
   })
+
+  it('end_turn flush 失败 → 续轮注入失败提示、不静默标完成（A: 发送失败回传，trace a72623ec）', async () => {
+    let flushCall = 0
+    // 第一次发送失败（返回 failures），第二次成功（[]）
+    const flushFn = vi.fn(async () => {
+      flushCall++
+      return flushCall === 1
+        ? [{ summary: 'HTML 交付', error: '相对路径需要路径映射配置，请使用绝对路径' }]
+        : []
+    })
+    const gateFn = vi.fn(async () => null) // gate pass
+    const injections: string[] = []
+
+    // 两轮都 end_turn（无 tool_use）：第一轮 flush 失败 → 续轮；第二轮 flush 成功 → completed
+    const adapter = makeAdapter([
+      { kind: 'end_turn', text: '完毕1' },
+      { kind: 'end_turn', text: '完毕2' },
+    ])
+
+    const result = await runEngine({
+      prompt: 'go',
+      adapter,
+      options: {
+        tools: [],
+        systemPrompt: '',
+        model: 'test-model',
+        endTurnGate: gateFn,
+        flushOutboundBuffer: flushFn,
+        onSystemInjection: (e) => injections.push(e.text),
+      },
+    })
+
+    expect(result.outcome).toBe('completed')
+    // 第一轮 flush 失败 → 没有立即 completed，而是续了一轮（gate/flush 各被调 2 次）
+    expect(flushFn).toHaveBeenCalledTimes(2)
+    expect(gateFn).toHaveBeenCalledTimes(2)
+    // 失败详情（原因 + 摘要）被注入回 worker，而不是静默吞掉
+    const injected = injections.join('\n')
+    expect(injected).toContain('没有成功发出')
+    expect(injected).toContain('相对路径需要路径映射配置')
+    expect(injected).toContain('HTML 交付')
+  })
+
+  it('end_turn flush 一直失败 → 重试耗尽后标 failed、error 写清原因（不静默标完成）', async () => {
+    // flush 每次都失败
+    const flushFn = vi.fn(async () => [
+      { summary: '回测结果.html', error: 'channel down: telegram-001 不可用' },
+    ])
+    const gateFn = vi.fn(async () => null) // gate pass
+
+    // 一直 end_turn：每轮 flush 失败续轮，直到重试耗尽
+    const adapter = makeAdapter([{ kind: 'end_turn', text: '完毕' }])
+
+    const result = await runEngine({
+      prompt: 'go',
+      adapter,
+      options: {
+        tools: [],
+        systemPrompt: '',
+        model: 'test-model',
+        endTurnGate: gateFn,
+        flushOutboundBuffer: flushFn,
+      },
+    })
+
+    // 超限 → 任务标失败，而不是静默 completed
+    expect(result.outcome).toBe('failed')
+    // 失败原因写清了：哪条没送达、为什么
+    expect(result.error).toBeDefined()
+    expect(result.error).toContain('回测结果.html')
+    expect(result.error).toContain('channel down')
+    expect(result.error).toContain('始终无法送达用户')
+  })
 })

@@ -7,6 +7,7 @@
  * @see crabot-docs/protocols/protocol-crab-messaging.md
  */
 
+import { resolvePath } from '../engine/tools/utils.js'
 import { createMcpServer, type McpServer } from './mcp-helpers.js'
 import { z } from 'zod/v4'
 import { SYSTEM_CHANNEL_ID, SYSTEM_SESSION_ID, type RpcClient } from 'crabot-shared'
@@ -81,6 +82,10 @@ export interface TaskContext {
    *  区分"从未交付"和"交付被拦"两种 NO_DELIVERY 文案。
    *  spec: 2026-06-10-audit-anchor-human-request §3.5 */
   onBuffered?: () => void
+  /** 当前 task 的工作目录（set_cwd 改的 taskState.cwd，缺省落到 workspace）。
+   *  send_message 收到相对 file_path 时用它就地解析成绝对路径——相对路径若拖到延迟 flush
+   *  阶段才在 dispatch 里抛错，那时已无法把失败回传给 worker（trace a72623ec 成因）。 */
+  getCwd?: () => string
 }
 
 // ============================================================================
@@ -779,7 +784,20 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
         const intent = args.intent as 'info' | 'ask_human' | undefined
         const content_type = args.content_type as 'text' | 'image' | 'file' | undefined
         const media_url = args.media_url as string | undefined
-        const file_path = args.file_path as string | undefined
+        let file_path = args.file_path as string | undefined
+
+        // === 工具自愈（B）：本地（无沙盒映射）→ 就地用当前 cwd 把相对路径 / `~` 解析成绝对路径 ===
+        // 远程 worker（有 sandboxPathMappings）的相对路径交给 dispatch 的 mapSandboxPathToHost 处理，不动。
+        // 本地 unified agent 无映射时，相对路径若不在此解析，会拖到延迟 flush 才在 dispatch 抛错，
+        // 且那时该消息已脱离工具调用轮、失败无法回传给 worker（trace a72623ec 成因）。
+        // 用 canonical resolvePath（含 `~` 展开；对已是绝对路径的输入是 no-op）。
+        if (
+          file_path !== undefined
+          && (!sandboxPathMappingsRef || sandboxPathMappingsRef.current.length === 0)
+        ) {
+          const cwd = deps.getTaskContext?.()?.getCwd?.()
+          if (cwd) file_path = resolvePath(cwd, file_path)
+        }
         const filename = args.filename as string | undefined
         const mentions = args.mentions as Array<{ friend_id?: string; platform_user_id?: string; at_name?: string }> | undefined
         const quote_message_id = args.quote_message_id as string | undefined

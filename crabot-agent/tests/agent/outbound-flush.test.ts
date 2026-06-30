@@ -257,7 +257,7 @@ describe('createOutboundFlush', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
 
     const flush = createOutboundFlush(buffer, deps)
-    await flush()
+    const failures = await flush()
 
     // 后续 2 个 entry 应该都已发出
     expect(sentSessions).toEqual(['sess2', 'sess3'])
@@ -267,6 +267,10 @@ describe('createOutboundFlush', () => {
     expect(warnSpy).toHaveBeenCalled()
     const warnArgs = warnSpy.mock.calls.flat().map(String).join(' ')
     expect(warnArgs).toContain('first entry boom')
+    // 失败 entry 的摘要+原因回传给 caller（不再静默吞掉）——engine 据此注入给 worker
+    expect(failures).toHaveLength(1)
+    expect(failures[0]!.error).toContain('first entry boom')
+    expect(failures[0]!.summary).toContain('first')
 
     warnSpy.mockRestore()
   })
@@ -298,8 +302,10 @@ describe('createOutboundFlush', () => {
     }
     const buffer: OutboundBufferEntry[] = [makeEntry(), makeEntry({ session_id: 'sess2' })]
     const flush = createOutboundFlush(buffer, deps)
-    await flush()
+    const failures = await flush()
     expect(buffer.length).toBe(0)
+    // 全部成功 → 无失败回传
+    expect(failures).toEqual([])
   })
 })
 

@@ -1217,6 +1217,8 @@ export class AgentHandler {
           onBuffered: () => {
             taskState.everBufferedMessage = true
           },
+          // send_message 工具自愈相对 file_path 用：当前 task cwd（set_cwd 改的 taskState.cwd）。
+          getCwd,
           // 透传 sub-agent trace 上下文：让 audit gate 触发的 audit subagent
           // 产生的 sub_agent_call span 挂到主 worker trace 下，admin UI 能渲染。
           // spec: 2026-05-23-goal-mode-design.md §4.2
