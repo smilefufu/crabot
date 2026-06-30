@@ -120,7 +120,10 @@ export function createGrepTool(getCwd: () => string): ToolDefinition {
         '--no-ignore',          // 测试 / 用户场景不一定有 .gitignore，保留显式排除（DEFAULT_EXCLUDE_GLOBS）
         '--hidden',             // 默认搜 hidden 文件，VCS 目录靠下面 glob 排除
         `--max-columns=${MAX_COLUMNS}`,
-        '--no-messages',        // 抑制 "No such file" 之类的 stderr 噪音
+        // 不加 --no-messages：runRipgrep 把 stdout/stderr 分开收集，给 agent 的结果只用
+        // rg.stdout，stderr 噪音本就不会污染输出；而 --no-messages 会把 code-2 时的真实
+        // 错误（哪个文件 / 什么原因）一并吞掉，导致事后无法定位。stderr 改为单独处理：
+        // 正常路径只记日志、不给 agent；判错路径用作错误原因（见下）。
       ]
 
       // ripgrep glob 顺序敏感：**最后匹配胜出**。用户 include glob（如 `*.ts`）
@@ -164,16 +167,25 @@ export function createGrepTool(getCwd: () => string): ToolDefinition {
         }
       }
 
-      // exitCode 1 = 无匹配（合法，对外 "No matches found"）
-      // exitCode 2 = 错误，但仅当没有任何 stdout 时才判错（路径不存在 / 真正异常）。
+      // stderr 拆开走：不混进给 agent 的结果，但有内容就记日志（agent 子进程 stderr
+      // 落到 data/logs/<agent>.log），便于事后排查到底是哪个文件 / 什么原因出的错。
+      const stderr = (rg.stderr || '').trim()
+      if (stderr) {
+        console.error(
+          `[Grep] ripgrep stderr (exit=${rg.exitCode}) pattern=${JSON.stringify(pattern)} path=${searchRoot}:\n${stderr}`,
+        )
+      }
+
+      // exitCode 1 = 无匹配（合法，对外 "No matches found"）。
+      // exitCode 2 = 错误，但仅当没有任何 stdout 时才判错（路径不存在 / 真正异常）；
       // 有 stdout 时（如某子目录权限被拒 EPERM，其它文件已命中）→ 当 partial 返回，
-      // 不丢弃已搜到的结果（--no-messages 已抑制 stderr 噪音）。
+      // 不丢弃已搜到的结果（stderr 噪音上面已记日志、不进 agent 输出）。
       if (rg.exitCode === 2 && !rg.stdout) {
-        const msg = (rg.stderr || '').trim() || 'ripgrep exited with code 2'
+        // code-2 + 无 stdout = 真错误。stderr 此时带具体原因（如某文件 Permission denied），
+        // 直接当错误返回给 agent，使其能自纠、且 trace 可追溯。
+        const msg = stderr || 'ripgrep exited with code 2'
         // code-2 最常见的真因：searchPath 相对当前 cwd 不存在（cwd 没锚定到项目）。
-        // --no-messages 抑制了 stderr，generic 报错没法让 agent 自纠，会反复
-        // fallback 到 bash rg / python 白烧多轮（m2u 实测）。这里补结构化提示：
-        // 点明解析后的绝对路径不存在 + 当前 cwd，引导用绝对路径或先 set_cwd。
+        // 补结构化提示：点明解析后的绝对路径不存在 + 当前 cwd，引导用绝对路径或先 set_cwd。
         const hint = !existsSync(searchRoot)
           ? `\n搜索路径不存在：${searchRoot}（当前 cwd=${getCwd()}）。`
             + `若目标在别的项目目录，请先用 set_cwd 锚定到该项目，或给 path 传绝对路径。`
