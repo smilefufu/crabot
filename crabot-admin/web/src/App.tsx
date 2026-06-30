@@ -25,7 +25,6 @@ import { SkillList } from './pages/Skills/SkillList'
 import { SubagentList } from './pages/Subagents/SubagentList'
 import { Traces } from './pages/Traces'
 import { ScheduleList } from './pages/Schedules/ScheduleList'
-import BgEntitiesPage from './pages/BgEntities'
 import { OpenClawImportWizard } from './pages/OpenClawImport/OpenClawImportWizard'
 import { BackupExportPage } from './pages/Backup/BackupExportPage'
 import './App.css'
@@ -231,14 +230,6 @@ const AppRoutes: React.FC = () => {
         element={
           <PrivateRoute>
             <ScheduleList />
-          </PrivateRoute>
-        }
-      />
-      <Route
-        path="/bg-entities"
-        element={
-          <PrivateRoute>
-            <BgEntitiesPage />
           </PrivateRoute>
         }
       />
