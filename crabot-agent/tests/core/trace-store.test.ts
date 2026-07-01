@@ -138,6 +138,66 @@ describe('TraceStore', () => {
 })
 
 describe('TraceStore index', () => {
+  it('finds the latest resume checkpoint for a completed worker trace by related task id', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-test-'))
+    try {
+      const older = {
+        trace_id: 'trace-old',
+        related_task_id: 'task-done',
+        module_id: 'agent-1',
+        started_at: '2026-04-13T10:00:00.000Z',
+        ended_at: '2026-04-13T10:01:00.000Z',
+        status: 'completed',
+        trigger: { type: 'task', summary: 'older worker' },
+        spans: [],
+        resume_checkpoint: {
+          agent_version: '1.0.0',
+          system_prompt: 'SP-old',
+          messages: [{ id: 'old', role: 'user', content: 'old', timestamp: 1 }],
+          worker_state: { todo_items: [] },
+        },
+      }
+      const newer = {
+        trace_id: 'trace-new',
+        related_task_id: 'task-done',
+        module_id: 'agent-1',
+        started_at: '2026-04-13T11:00:00.000Z',
+        ended_at: '2026-04-13T11:01:00.000Z',
+        status: 'completed',
+        trigger: { type: 'task', summary: 'newer worker' },
+        spans: [],
+        resume_checkpoint: {
+          agent_version: '1.0.0',
+          system_prompt: 'SP-new',
+          messages: [{ id: 'new', role: 'user', content: 'new', timestamp: 2 }],
+          worker_state: { todo_items: [] },
+        },
+      }
+      const dispatcher = {
+        trace_id: 'trace-dispatcher',
+        related_task_id: 'task-done',
+        module_id: 'agent-1',
+        started_at: '2026-04-13T12:00:00.000Z',
+        ended_at: '2026-04-13T12:01:00.000Z',
+        status: 'completed',
+        trigger: { type: 'message', summary: 'supplement dispatch' },
+        spans: [],
+      }
+      fs.writeFileSync(
+        path.join(dir, 'traces-2026-04-13.jsonl'),
+        [older, newer, dispatcher].map(t => JSON.stringify(t)).join('\n') + '\n',
+      )
+
+      const store = new TraceStore(10, dir)
+      const result = store.findLatestResumeCheckpointByTaskId('task-done')
+
+      expect(result?.traceId).toBe('trace-new')
+      expect(result?.checkpoint.system_prompt).toBe('SP-new')
+    } finally {
+      fs.rmSync(dir, { recursive: true })
+    }
+  })
+
   it('rebuilds index from JSONL files on init', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-test-'))
     try {

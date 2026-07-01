@@ -1912,12 +1912,51 @@ export class UnifiedAgent extends ModuleBase {
     return this.resumeTaskInternal({ task_id: params.task_id, terminalSupplementText: params.supplement_text })
   }
 
+  /**
+   * 只读预检查：这个 task 现在能不能被 resume（逻辑与 resumeTaskInternal 的前置门一致）。
+   *
+   * 关键用途：terminal supplement revive 必须在改动 admin task 状态**之前**判断能否 resume。
+   * 否则会先把一个已完成任务经 revive_task_for_supplement 翻成 executing、再发现 resume 不了、
+   * 只能兜底把它标 failed——把本已 completed 的任务写坏，且违反 recent-task-supplement spec
+   * （2026-06-29 设计 §Revive/Resume §3：checkpoint 不可用时应降级 new_task、不动原 task 状态）。
+   */
+  private getCheckpointForResume(
+    taskId: string,
+    mode: 'restart' | 'terminal_supplement',
+  ): { traceId: string; checkpoint: import('./types.js').ResumeCheckpoint } | undefined {
+    return mode === 'terminal_supplement'
+      ? this.traceStore.findLatestResumeCheckpointByTaskId(taskId)
+      : this.traceStore.getResumableCheckpoint(taskId)
+  }
+
+  private canResumeTask(taskId: string, mode: 'restart' | 'terminal_supplement' = 'restart'): { ok: true } | { ok: false; reason: string } {
+    if (this.agentHandler?.hasActiveTask(taskId)) return { ok: true }
+    const entry = this.getCheckpointForResume(taskId, mode)
+    if (!entry) return { ok: false, reason: 'no_checkpoint' }
+    const guard = isResumable(entry.checkpoint, AGENT_VERSION)
+    if (!guard.ok) {
+      if (mode === 'restart') {
+        // 版本不匹配/空 checkpoint 的死快照就地清理（与 resumeTaskInternal 一致），
+        // 免得残留文件下次启动又被当 in-flight 载入。
+        this.traceStore.finalizeUnresumedCheckpoint(taskId)
+      }
+      return { ok: false, reason: guard.reason }
+    }
+    return { ok: true }
+  }
+
   private async reviveTerminalSupplementTask(
     taskId: string,
     text: string,
     channelId: string,
     sessionId: string,
   ): Promise<{ outcome: 'revived'; traceId?: string } | { outcome: 'fallback'; reason?: string }> {
+    // 预检查 resumability——必须在 admin 改状态之前。不可 resume 就直接降级：返回
+    // fallback 让 dispatcher-executor 走 new_task，原 task 保持原终态（不被翻成 executing、
+    // 更不会被兜底标 failed）。这是本方法此前把 completed 任务误写成 failed 的根因修复。
+    const pre = this.canResumeTask(taskId, 'terminal_supplement')
+    if (!pre.ok) return { outcome: 'fallback', reason: pre.reason }
+
     try {
       const adminPort = await this.getAdminPort()
       await this.rpcClient.call(adminPort, 'revive_task_for_supplement', {
@@ -1928,6 +1967,10 @@ export class UnifiedAgent extends ModuleBase {
       }, this.config.moduleId)
       const r = await this.handleResumeTaskWithSupplement({ task_id: taskId, supplement_text: text })
       if (r.resumed === true) return { outcome: 'revived' }
+
+      // 预检查通过、admin 已翻成 executing，resume 却仍失败——极窄竞态（checkpoint 在两次读
+      // 之间被并发清掉）。此时 task 已脱离终态，必须兜底回收到 failed。常态的 no_checkpoint
+      // 已被上面的预检查拦在改状态之前，不会再走到这里。
       const reason = r.reason ?? 'resume_rejected'
       try {
         await this.rpcClient.call(adminPort, 'update_task_status', {
@@ -1949,6 +1992,7 @@ export class UnifiedAgent extends ModuleBase {
 
   private async resumeTaskInternal(params: { task_id: string; terminalSupplementText?: string }): Promise<{ resumed: boolean; reason?: string }> {
     const { task_id } = params
+    const mode = params.terminalSupplementText !== undefined ? 'terminal_supplement' : 'restart'
 
     // worker-alive 守卫：admin 单独重启时 agent 没重启、worker loop 仍在内存里跑这条 task。
     // 此时绝不能据 checkpoint 再起第二个 loop（会双重执行 + 双发消息）——直接当作已 resumed。
@@ -1956,12 +2000,14 @@ export class UnifiedAgent extends ModuleBase {
       return { resumed: true }
     }
 
-    const entry = this.traceStore.getResumableCheckpoint(task_id)
+    const entry = this.getCheckpointForResume(task_id, mode)
     if (!entry) return { resumed: false, reason: 'no_checkpoint' }
 
     const guard = isResumable(entry.checkpoint, AGENT_VERSION)
     if (!guard.ok) {
-      this.traceStore.finalizeUnresumedCheckpoint(task_id)
+      if (mode === 'restart') {
+        this.traceStore.finalizeUnresumedCheckpoint(task_id)
+      }
       return { resumed: false, reason: guard.reason }
     }
 
@@ -2040,8 +2086,10 @@ export class UnifiedAgent extends ModuleBase {
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
       console.error(`[${this.config.moduleId}] resume_task ${task_id} failed: ${msg}`)
-      // M2: resume_error 时清理 checkpoint，防止文件永驻磁盘被反复加载
-      this.traceStore.finalizeUnresumedCheckpoint(task_id)
+      if (mode === 'restart') {
+        // M2: resume_error 时清理 checkpoint，防止文件永驻磁盘被反复加载
+        this.traceStore.finalizeUnresumedCheckpoint(task_id)
+      }
       return { resumed: false, reason: 'resume_error' }
     }
   }

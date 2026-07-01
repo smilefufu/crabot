@@ -1,6 +1,13 @@
 # Crabot 项目进度
 
-> 最后更新：2026-06-29 — Dispatcher 支持 recent terminal task 续聊
+> 最后更新：2026-07-01 — 修复 recent terminal supplement 的 checkpoint 来源
+
+## 2026-07-01 — 修复 recent terminal supplement 的 checkpoint 来源
+
+- recent-terminal supplement 的 revive/resume 不再依赖 `resumableCheckpoints`（该 map 只负责 agent 重启后的 in-flight 任务恢复），改为按 `related_task_id` 查最近一条带 `resume_checkpoint` 的 worker trace。
+- `TraceStore.findLatestResumeCheckpointByTaskId()` 先查内存 trace，再按 task index 读落盘 JSONL；只接受 `trigger.type='task'` 且有 checkpoint 的 trace，避免 dispatcher/message trace 干扰。
+- 普通 `resume_task` / self-healing 重启恢复路径保持原语义，仍使用 `traces-running-<taskId>.jsonl` 加载的 `resumableCheckpoints`，并继续负责清理死 running checkpoint 文件。
+- 回归：同进程刚完成的 task 即使不在 restart map 里，也能被 recent-terminal supplement 复活；历史 checkpoint 版本不匹配时只降级 new_task，不误清 running checkpoint。
 
 ## 2026-06-29 — Dispatcher 支持 recent terminal task 续聊
 

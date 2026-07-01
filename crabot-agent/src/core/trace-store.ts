@@ -136,6 +136,38 @@ export class TraceStore {
     return this.resumableCheckpoints.get(taskId)
   }
 
+  /**
+   * Recent terminal supplement 用：按 task_id 找最近一条已落盘/内存中的 worker trace checkpoint。
+   * 这和 resumableCheckpoints 不同；后者只代表 agent 重启时遗留的 in-flight checkpoint。
+   */
+  findLatestResumeCheckpointByTaskId(taskId: string): { traceId: string; checkpoint: import('../types.js').ResumeCheckpoint } | undefined {
+    let latest: { traceId: string; checkpoint: import('../types.js').ResumeCheckpoint; timeMs: number } | undefined
+
+    const consider = (trace: AgentTrace | undefined) => {
+      if (!trace) return
+      if (trace.related_task_id !== taskId) return
+      if (trace.trigger.type !== 'task') return
+      if (!trace.resume_checkpoint) return
+      const timeMs = new Date(trace.ended_at ?? trace.started_at).getTime()
+      if (!Number.isFinite(timeMs)) return
+      if (!latest || timeMs > latest.timeMs) {
+        latest = { traceId: trace.trace_id, checkpoint: trace.resume_checkpoint, timeMs }
+      }
+    }
+
+    for (const trace of this.traces.values()) {
+      consider(trace)
+    }
+
+    const traceIds = this.taskIndex.get(taskId) ?? []
+    for (const traceId of traceIds) {
+      if (this.traces.has(traceId)) continue
+      consider(this.readTraceFromIndex(traceId))
+    }
+
+    return latest ? { traceId: latest.traceId, checkpoint: latest.checkpoint } : undefined
+  }
+
   /** 当前持有的所有可 resume checkpoint 的 taskId（admin 对账孤儿用）。 */
   getResumableTaskIds(): string[] {
     return Array.from(this.resumableCheckpoints.keys())
@@ -550,39 +582,30 @@ export class TraceStore {
     return this.traces.get(traceId)
   }
 
-  async getFullTrace(traceId: string): Promise<AgentTrace | undefined> {
-    // 1. 先查 ring buffer
-    const cached = this.traces.get(traceId)
-    if (cached) return cached
-
-    // 2. 从索引找到文件位置
+  private readTraceFromIndex(traceId: string): AgentTrace | undefined {
     const indexEntry = this.traceIndex.find(e => e.trace_id === traceId)
     if (!indexEntry || !this.persistDir || !indexEntry.file) return undefined
 
-    // 3. 从 JSONL 按需读取——分块循环读直到遇到换行符（容纳任意大小 trace；
-    //    历史 bug：固定 64KB buffer 会把 spans 较多的 trace 截断 → JSON parse 失败 → 404）
     try {
       const filePath = path.join(this.persistDir, indexEntry.file)
       const fd = fs.openSync(filePath, 'r')
       try {
-        const CHUNK = 64 * 1024 // 64KB per read
+        const CHUNK = 64 * 1024
         const buf = Buffer.allocUnsafe(CHUNK)
         const chunks: string[] = []
         let position = indexEntry.file_offset
-        let foundNewline = false
 
-        while (!foundNewline) {
+        while (true) {
           const bytesRead = fs.readSync(fd, buf, 0, CHUNK, position)
-          if (bytesRead === 0) break // EOF
+          if (bytesRead === 0) break
           const slice = buf.toString('utf-8', 0, bytesRead)
           const nlIdx = slice.indexOf('\n')
           if (nlIdx >= 0) {
             chunks.push(slice.slice(0, nlIdx))
-            foundNewline = true
-          } else {
-            chunks.push(slice)
-            position += bytesRead
+            break
           }
+          chunks.push(slice)
+          position += bytesRead
         }
 
         const line = chunks.join('')
@@ -594,6 +617,16 @@ export class TraceStore {
     } catch {
       return undefined
     }
+  }
+
+  async getFullTrace(traceId: string): Promise<AgentTrace | undefined> {
+    // 1. 先查 ring buffer
+    const cached = this.traces.get(traceId)
+    if (cached) return cached
+
+    // 2. 从 JSONL 按需读取——分块循环读直到遇到换行符（容纳任意大小 trace；
+    //    历史 bug：固定 64KB buffer 会把 spans 较多的 trace 截断 → JSON parse 失败 → 404）
+    return this.readTraceFromIndex(traceId)
   }
 
   getSpansAtDepth(

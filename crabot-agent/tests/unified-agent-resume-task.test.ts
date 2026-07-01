@@ -12,6 +12,7 @@ import { AGENT_VERSION } from '../src/constants.js'
 /** 构造最小可调用的 handleResumeTask 宿主对象（原型绕过） */
 function buildAgent(deps: {
   getResumableCheckpoint?: ReturnType<typeof vi.fn>
+  findLatestResumeCheckpointByTaskId?: ReturnType<typeof vi.fn>
   finalizeUnresumedCheckpoint?: ReturnType<typeof vi.fn>
   consumeResumableCheckpoint?: ReturnType<typeof vi.fn>
   isResumableOk?: boolean
@@ -38,6 +39,7 @@ function buildAgent(deps: {
 
   agent.traceStore = {
     getResumableCheckpoint,
+    findLatestResumeCheckpointByTaskId: deps.findLatestResumeCheckpointByTaskId ?? vi.fn(),
     finalizeUnresumedCheckpoint,
     consumeResumableCheckpoint,
   }
@@ -111,6 +113,7 @@ function buildAgent(deps: {
     finalizeUnresumedCheckpoint,
     traceStore: agent.traceStore as {
       getResumableCheckpoint: ReturnType<typeof vi.fn>
+      findLatestResumeCheckpointByTaskId: ReturnType<typeof vi.fn>
       finalizeUnresumedCheckpoint: ReturnType<typeof vi.fn>
       consumeResumableCheckpoint: ReturnType<typeof vi.fn>
     },
@@ -188,7 +191,18 @@ describe('UnifiedAgent.handleResumeTask — I1: task_origin 从 task.source 重�
 
 describe('UnifiedAgent.handleResumeTaskWithSupplement', () => {
   it('schedules background execution with terminalSupplementText in resumeFrom', async () => {
-    const { agent, executeScheduledTaskInBackground } = buildAgent({})
+    const { agent, executeScheduledTaskInBackground } = buildAgent({
+      findLatestResumeCheckpointByTaskId: vi.fn().mockReturnValue({
+        traceId: 'trace-completed',
+        checkpoint: {
+          agent_version: AGENT_VERSION,
+          messages: [{ id: 'm-history', role: 'user', content: 'history', timestamp: 1 }],
+          worker_state: { todo_items: [] },
+          system_prompt: 'SP-history',
+        },
+      }),
+      getResumableCheckpoint: vi.fn().mockReturnValue(undefined),
+    })
 
     const result = await agent.handleResumeTaskWithSupplement({
       task_id: 'task-1',
@@ -212,6 +226,9 @@ describe('UnifiedAgent.reviveTerminalSupplementTask', () => {
     rpcCallError?: Error
     resumeResult?: { resumed: boolean; reason?: string }
     cleanupError?: Error
+    hasCheckpoint?: boolean
+    checkpointVersion?: string
+    hasActiveTask?: boolean
   } = {}) {
     const agent = Object.create(UnifiedAgent.prototype) as Record<string, unknown>
     agent.config = { moduleId: 'test-agent' }
@@ -228,10 +245,34 @@ describe('UnifiedAgent.reviveTerminalSupplementTask', () => {
       }),
     }
     agent.handleResumeTaskWithSupplement = vi.fn().mockResolvedValue(deps.resumeResult ?? { resumed: true })
+
+    // 预检查依赖：agentHandler.hasActiveTask + 历史 worker trace checkpoint。
+    agent.agentHandler = { hasActiveTask: vi.fn().mockReturnValue(deps.hasActiveTask ?? false) }
+    const checkpoint = {
+      agent_version: deps.checkpointVersion ?? AGENT_VERSION,
+      messages: [{ id: 'm1', role: 'user', content: 'hi', timestamp: 1 }],
+      worker_state: { todo_items: [] },
+      system_prompt: 'SP',
+    }
+    const finalizeUnresumedCheckpoint = vi.fn()
+    agent.traceStore = {
+      getResumableCheckpoint: vi.fn().mockReturnValue(undefined),
+      findLatestResumeCheckpointByTaskId: vi
+        .fn()
+        .mockReturnValue((deps.hasCheckpoint ?? true) ? { traceId: 'trace-completed', checkpoint } : undefined),
+      finalizeUnresumedCheckpoint,
+    }
+
     return agent as {
       getAdminPort: ReturnType<typeof vi.fn>
       rpcClient: { call: ReturnType<typeof vi.fn> }
       handleResumeTaskWithSupplement: ReturnType<typeof vi.fn>
+      agentHandler: { hasActiveTask: ReturnType<typeof vi.fn> }
+      traceStore: {
+        getResumableCheckpoint: ReturnType<typeof vi.fn>
+        findLatestResumeCheckpointByTaskId: ReturnType<typeof vi.fn>
+        finalizeUnresumedCheckpoint: ReturnType<typeof vi.fn>
+      }
       reviveTerminalSupplementTask: (
         taskId: string,
         text: string,
@@ -265,19 +306,43 @@ describe('UnifiedAgent.reviveTerminalSupplementTask', () => {
     })
   })
 
-  it('returns fallback when in-process resume rejects the revive', async () => {
-    const agent = buildReviveAgent({
-      resumeResult: { resumed: false, reason: 'no_checkpoint' },
-    })
+  // 回归：checkpoint 不可用时，绝不能先把已完成任务翻成 executing 再兜底标 failed。
+  // 预检查必须拦在 admin 改状态之前 → 直接降级 fallback（executor 走 new_task），
+  // 原 task 保持原终态。Spec: 2026-06-29-dispatcher-recent-task-supplement-design §Revive/Resume §3。
+  it('degrades to fallback WITHOUT touching admin when no checkpoint is available', async () => {
+    const agent = buildReviveAgent({ hasCheckpoint: false })
 
     const result = await agent.reviveTerminalSupplementTask('task-missing', '继续', 'wechat-x', 'sess-y')
+
+    expect(result).toEqual({ outcome: 'fallback', reason: 'no_checkpoint' })
+    // 关键：admin 完全没被触碰——既没 revive、也没标 failed
+    expect(agent.rpcClient.call).not.toHaveBeenCalled()
+    expect(agent.handleResumeTaskWithSupplement).not.toHaveBeenCalled()
+  })
+
+  // 回归：历史 trace checkpoint 版本不匹配时只降级，不碰 admin，也不清 running checkpoint 文件。
+  it('degrades to fallback on historical checkpoint version mismatch, without touching admin or running checkpoint files', async () => {
+    const agent = buildReviveAgent({ checkpointVersion: 'v-ancient' })
+
+    const result = await agent.reviveTerminalSupplementTask('task-old', '继续', 'wechat-x', 'sess-y')
+
+    expect(result).toEqual({ outcome: 'fallback', reason: 'version_mismatch' })
+    expect(agent.rpcClient.call).not.toHaveBeenCalled()
+    expect(agent.traceStore.finalizeUnresumedCheckpoint).not.toHaveBeenCalled()
+  })
+
+  // 极窄竞态：预检查通过、admin 已翻 executing，resume 却仍失败 → 才允许兜底标 failed。
+  it('marks task failed only when resume rejects AFTER a passing pre-check (race)', async () => {
+    const agent = buildReviveAgent({ resumeResult: { resumed: false, reason: 'no_checkpoint' } })
+
+    const result = await agent.reviveTerminalSupplementTask('task-race', '继续', 'wechat-x', 'sess-y')
 
     expect(result).toEqual({ outcome: 'fallback', reason: 'no_checkpoint' })
     expect(agent.rpcClient.call).toHaveBeenCalledWith(
       18000,
       'update_task_status',
       {
-        task_id: 'task-missing',
+        task_id: 'task-race',
         status: 'failed',
         error: 'Revived terminal supplement task could not be resumed: no_checkpoint',
       },
