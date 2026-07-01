@@ -251,7 +251,7 @@ const SEND_MESSAGE_SCHEMA = {
   intent: z.enum(['info', 'ask_human']).optional().describe('意图：info=进度告知 / 最终交付（默认，单向，不等回复）；ask_human=阻塞等人类同步回复'),
   content_type: z.enum(['text', 'image', 'file']).optional().describe('消息类型，默认 text'),
   media_url: z.string().optional().describe('媒体 URL（网络地址，与 file_path 二选一）'),
-  file_path: z.string().optional().describe('沙盒内本地文件路径（自动转换为主机路径）'),
+  file_path: z.string().optional().describe('要发送的本地文件路径。可用绝对路径或相对路径/`~`（相对路径按当前工作目录解析）；远程沙盒场景自动转换为主机路径'),
   filename: z.string().optional().describe('文件名（可选）'),
   mentions: z.array(z.object({
     friend_id: z.string().optional().describe('熟人 ID（与 platform_user_id 二选一）'),
