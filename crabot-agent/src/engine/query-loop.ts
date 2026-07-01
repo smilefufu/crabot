@@ -99,10 +99,9 @@ interface DrainDispatchResult {
   readonly flushFailedReason?: string
 }
 
-/** flush 失败统一决策签名：未超限 → 注入提示让 worker 重发（'retry'）；超限 → 返回失败原因。 */
-type FlushFailureHandler = (
-  failures: ReadonlyArray<{ readonly summary: string; readonly error: string }>,
-) => 'retry' | { readonly failedReason: string }
+/** 缓冲 flush + 交付追踪的统一入口签名（见 runEngine 内 flushAndTrackDelivery）。
+ *  'ok'=无失败；'retry'=有失败未超限（已注入提示让 worker 重发）；{failedReason}=重试耗尽。 */
+type FlushDeliveryTracker = () => Promise<'ok' | 'retry' | { readonly failedReason: string }>
 
 /**
  * 把 humanQueue.drainPending 的内容按 system marker 分流：
@@ -120,7 +119,7 @@ async function drainAndDispatchMarkers(
   options: EngineOptions,
   messages: EngineMessage[],
   totalTurns: number,
-  handleFlushFailures?: FlushFailureHandler,
+  flushAndTrack?: FlushDeliveryTracker,
 ): Promise<DrainDispatchResult> {
   const remainingTexts: Array<string | ContentBlock[]> = []
   const auditResults: AuditResultMarker[] = []
@@ -173,20 +172,15 @@ async function drainAndDispatchMarkers(
   for (const result of auditResults) {
     options.clearActiveAuditId?.()
     if (result.pass) {
-      // pass：engine 内部 flush buffer，不作为 user message 注入
-      if (options.flushOutboundBuffer) {
-        const flushFailures = (await options.flushOutboundBuffer()) ?? []
-        // 交付发送失败 → 统一决策：注入提示让 worker 重发，或超限标失败。任一失败都阻止静默标完成。
-        if (flushFailures.length > 0) {
-          auditPassFlushHadFailure = true
-          const decision = handleFlushFailures?.(flushFailures)
-          if (decision && decision !== 'retry') {
-            flushFailedReason = decision.failedReason
-          } else if (!decision) {
-            // 未传 handleFlushFailures（worker loop 必传；防御性回退）→ 注入提示让 caller 续轮。
-            remainingTexts.push(buildOutboundFlushFailurePrompt(flushFailures))
-          }
-        }
+      // pass：engine 内部 flush buffer，不作为 user message 注入。
+      // flushAndTrack 内部处理 flush + pending 追踪 + 失败提示注入：
+      //   'retry' → 提示已进 messages，置 auditPassFlushHadFailure 阻止静默标完成；
+      //   {failedReason} → 重试耗尽，让 caller 标失败。
+      const r = flushAndTrack ? await flushAndTrack() : 'ok'
+      if (r === 'retry') {
+        auditPassFlushHadFailure = true
+      } else if (r !== 'ok') {
+        flushFailedReason = r.failedReason
       }
       lastPass = true
     } else {
@@ -272,7 +266,7 @@ async function waitGateAuditAndDispatch(
   messages: EngineMessage[],
   totalTurns: number,
   abortSignal?: AbortSignal,
-  handleFlushFailures?: FlushFailureHandler,
+  flushAndTrack?: FlushDeliveryTracker,
 ): Promise<'exit' | 'continue' | { readonly failedReason: string }> {
   const queue = options.humanMessageQueue
   if (!queue) {
@@ -286,7 +280,7 @@ async function waitGateAuditAndDispatch(
     await queue.waitBarrier(abortSignal)
   }
   const drained = queue.drainPending()
-  const dispatch = await drainAndDispatchMarkers(drained, options, messages, totalTurns, handleFlushFailures)
+  const dispatch = await drainAndDispatchMarkers(drained, options, messages, totalTurns, flushAndTrack)
   // audit pass 后交付始终发不出去、重试耗尽 → 让 caller 把任务标失败（不静默标完成）。
   if (dispatch.flushFailedReason) return { failedReason: dispatch.flushFailedReason }
   if (dispatch.shouldExitCompleted) return 'exit'
@@ -332,6 +326,10 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
   let finalText = ''
   let silentEndTurnCount = 0
   let outboundFlushFailureRetries = 0
+  // 未解决的交付失败：flush 失败后置上，只有后续真正送出至少一条（sentCount>0）才清除。
+  // 收尾时若仍非 null → 标 failed，避免"worker 续轮不重发、直接 end_turn，空 buffer flush 被当成送达"
+  // 的静默完成（PR #8 review Finding 1）。
+  let pendingDeliveryFailure: string | null = null
   let maxTokensCompactRetryCount = 0
   // Task 13: audit 跑中 LLM 直接 end_turn 兜底拦截计数器，独立于 silentEndTurnCount。
   // spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.6
@@ -349,20 +347,38 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
   // 早退工具：调用后 engine 立刻退出 loop
   let exitToolCall: { name: string; input: Record<string, unknown> } | undefined = undefined
 
-  // flush 失败统一决策：未超限 → 注入失败详情让 worker 修正重发（返回 'retry'，由调用方决定是否 continue）；
-  // 超限 → 返回失败原因，调用方据此 buildResult('failed', …, reason)，把任务标失败并写清原因（不再静默标完成）。
-  const handleOutboundFlushFailures = (
-    failures: ReadonlyArray<{ readonly summary: string; readonly error: string }>,
-  ): 'retry' | { readonly failedReason: string } => {
-    if (outboundFlushFailureRetries < MAX_OUTBOUND_FLUSH_FAILURE_RETRIES) {
-      outboundFlushFailureRetries++
-      const failPrompt = buildOutboundFlushFailurePrompt(failures)
-      messages.push(createUserMessage(failPrompt))
-      options.onSystemInjection?.({ type: 'supplement', text: failPrompt, turnNumber: totalTurns, injectedAtMs: Date.now() })
-      return 'retry'
+  // 唯一的缓冲 flush 入口：调 flushOutboundBuffer 并据结果维护 pendingDeliveryFailure 追踪。
+  //   'ok'            → 无失败（可能已清 pending），调用方照常收尾
+  //   'retry'         → 有失败但未超限：已注入提示 + 记 pending，调用方续轮让 worker 重发
+  //   { failedReason} → 有失败且重试耗尽：调用方 buildResult('failed', …, reason)
+  const flushAndTrackDelivery = async (): Promise<'ok' | 'retry' | { readonly failedReason: string }> => {
+    if (!options.flushOutboundBuffer) return 'ok'
+    const result = await options.flushOutboundBuffer()
+    const failures = result?.failures ?? []
+    const sentCount = result?.sentCount ?? 0
+    if (failures.length > 0) {
+      if (outboundFlushFailureRetries < MAX_OUTBOUND_FLUSH_FAILURE_RETRIES) {
+        outboundFlushFailureRetries++
+        pendingDeliveryFailure = buildOutboundFlushFailureReason(failures)
+        const failPrompt = buildOutboundFlushFailurePrompt(failures)
+        messages.push(createUserMessage(failPrompt))
+        options.onSystemInjection?.({ type: 'supplement', text: failPrompt, turnNumber: totalTurns, injectedAtMs: Date.now() })
+        return 'retry'
+      }
+      return { failedReason: buildOutboundFlushFailureReason(failures) }
     }
-    return { failedReason: buildOutboundFlushFailureReason(failures) }
+    // 真送出至少一条 → 交付已送达，清 pending；空 buffer no-op 则保持 pending 不变。
+    if (sentCount > 0) pendingDeliveryFailure = null
+    return 'ok'
   }
+
+  // 收尾出口：有未解决的交付失败（flush 失败后 worker 没重发成功）→ 标 failed 写清原因，否则 completed。
+  const finishTask = (): EngineResult =>
+    buildResult(
+      pendingDeliveryFailure ? 'failed' : 'completed',
+      finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene,
+      pendingDeliveryFailure ?? undefined,
+    )
 
   const workingDirectory = getWorkspaceDir()
   const hooks: HookConfig | undefined = options.hookRegistry ? {
@@ -490,12 +506,12 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       // spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.5
       if (options.humanMessageQueue?.hasPending) {
         const supplements = options.humanMessageQueue.drainPending()
-        const dispatch = await drainAndDispatchMarkers(supplements, options, messages, totalTurns, handleOutboundFlushFailures)
+        const dispatch = await drainAndDispatchMarkers(supplements, options, messages, totalTurns, flushAndTrackDelivery)
         if (dispatch.flushFailedReason) {
           return buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, dispatch.flushFailedReason)
         }
         if (dispatch.shouldExitCompleted) {
-          return buildResult('completed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene)
+          return finishTask()
         }
         for (const content of dispatch.remainingTexts) {
           messages.push(createUserMessage(content))
@@ -573,7 +589,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         }
         // 配额耗尽（或 subagent 禁用了 compact）：input 已被压过两次仍 max_tokens，
         // 再走 forced-summary 会让 input 更大；此时只能诚实返回空 finalText。
-        return buildResult('completed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene)
+        return finishTask()
       }
 
       // 真静默 end_turn：早 return 路径不 fire onTurn，这里先补 fire 让 trace 看到这一轮。
@@ -597,9 +613,9 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
           }
           if (gateResult !== null) {
             // { kind: 'wait' }：audit 已派出，engine 直接挂起等结果（spec 2026-06-10 §4.7）
-            const outcome = await waitGateAuditAndDispatch(options, messages, totalTurns, abortSignal, handleOutboundFlushFailures)
+            const outcome = await waitGateAuditAndDispatch(options, messages, totalTurns, abortSignal, flushAndTrackDelivery)
             if (outcome === 'exit') {
-              return buildResult('completed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene)
+              return finishTask()
             }
             if (typeof outcome === 'object') {
               return buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, outcome.failedReason)
@@ -611,16 +627,14 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         // 防御性 guard：理论上 endTurnGate null 意味着无 audit 或 audit 已 pass；
         // 万一 gate 实现 bug 返回 null 但 audit 仍在跑，此 guard 防止 pre-audit 内容 leak。
         // spec: 2026-06-07-goal-audit-async-buffered-info-design.md Task 8 + §4.1
-        if (options.flushOutboundBuffer && options.hasActiveAudit?.() !== true) {
-          const flushFailures = (await options.flushOutboundBuffer()) ?? []
-          if (flushFailures.length > 0) {
-            // 缓冲消息发送失败 → 注入失败详情让 worker 修正重发；重试耗尽 → 标失败、写清原因（不静默标完成）。
-            const decision = handleOutboundFlushFailures(flushFailures)
-            if (decision === 'retry') continue
-            return buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, decision.failedReason)
+        if (options.hasActiveAudit?.() !== true) {
+          const r = await flushAndTrackDelivery()
+          if (r === 'retry') continue
+          if (r !== 'ok') {
+            return buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, r.failedReason)
           }
         }
-        return buildResult('completed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene)
+        return finishTask()
       }
       if (isSilentText && silentEndTurnCount < MAX_SILENT_END_TURN_RETRIES) {
         silentEndTurnCount++
@@ -657,9 +671,9 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         }
         if (gateResult !== null) {
           // { kind: 'wait' }：audit 已派出，engine 直接挂起等结果（spec 2026-06-10 §4.7）
-          const outcome = await waitGateAuditAndDispatch(options, messages, totalTurns, abortSignal, handleOutboundFlushFailures)
+          const outcome = await waitGateAuditAndDispatch(options, messages, totalTurns, abortSignal, flushAndTrackDelivery)
           if (outcome === 'exit') {
-            return buildResult('completed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene)
+            return finishTask()
           }
           if (typeof outcome === 'object') {
             return buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, outcome.failedReason)
@@ -671,16 +685,14 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       // 防御性 guard：理论上 endTurnGate null 意味着无 audit 或 audit 已 pass；
       // 万一 gate 实现 bug 返回 null 但 audit 仍在跑，此 guard 防止 pre-audit 内容 leak。
       // spec: 2026-06-07-goal-audit-async-buffered-info-design.md Task 8 + §4.1
-      if (options.flushOutboundBuffer && options.hasActiveAudit?.() !== true) {
-        const flushFailures = (await options.flushOutboundBuffer()) ?? []
-        if (flushFailures.length > 0) {
-          // 缓冲消息发送失败 → 注入失败详情让 worker 修正重发；重试耗尽 → 标失败、写清原因（不静默标完成）。
-          const decision = handleOutboundFlushFailures(flushFailures)
-          if (decision === 'retry') continue
-          return buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, decision.failedReason)
+      if (options.hasActiveAudit?.() !== true) {
+        const r = await flushAndTrackDelivery()
+        if (r === 'retry') continue
+        if (r !== 'ok') {
+          return buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, r.failedReason)
         }
       }
-      return buildResult('completed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene)
+      return finishTask()
     }
 
     // ── Barrier check: wait for potential supplement before executing tools ──
@@ -705,7 +717,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         // wait_for_signal 之后唤醒，走 post-tool 路径），但为防 marker 从此路径漏过去，统一走分流。
         // 这里如果拿到 audit_result.pass=true 且无剩余内容，仍按"已完成"退出。
         const supplements = options.humanMessageQueue.drainPending()
-        const dispatch = await drainAndDispatchMarkers(supplements, options, messages, totalTurns, handleOutboundFlushFailures)
+        const dispatch = await drainAndDispatchMarkers(supplements, options, messages, totalTurns, flushAndTrackDelivery)
         if (dispatch.flushFailedReason) {
           return buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, dispatch.flushFailedReason)
         }
@@ -728,7 +740,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
             ...(forcedSummaryAttempt !== undefined ? { forcedSummaryAttempt } : {}),
             ...(response.usage ? { usage: response.usage } : {}),
           })
-          return buildResult('completed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene)
+          return finishTask()
         }
         for (const content of dispatch.remainingTexts) {
           messages.push(createUserMessage(content))
@@ -830,7 +842,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         ...(forcedSummaryAttempt !== undefined ? { forcedSummaryAttempt } : {}),
         ...(response.usage ? { usage: response.usage } : {}),
       })
-      return buildResult('completed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene)
+      return finishTask()
     }
 
     // Execute tools
@@ -950,14 +962,14 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     // 这是 audit_result marker 的主要进入路径（wait_for_signal setBarrier → audit 完成 push 唤醒 → 此处 drain）。
     if (options.humanMessageQueue && !bufferedSendMessageInTurn) {
       const supplements = options.humanMessageQueue.drainPending()
-      const dispatch = await drainAndDispatchMarkers(supplements, options, messages, totalTurns, handleOutboundFlushFailures)
+      const dispatch = await drainAndDispatchMarkers(supplements, options, messages, totalTurns, flushAndTrackDelivery)
       if (dispatch.flushFailedReason) {
         // audit pass 后交付始终发不出去、重试耗尽 → 标失败、写清原因（不静默标完成）。
         return buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, dispatch.flushFailedReason)
       }
       if (dispatch.shouldExitCompleted) {
         // audit pass + 无后续 pending：直接以 completed 退出 agent 实例。spec §4.5
-        return buildResult('completed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene)
+        return finishTask()
       }
       for (const content of dispatch.remainingTexts) {
         messages.push(createUserMessage(content))
@@ -987,17 +999,13 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     // 与 L788 的 drainPending 守门是一对，必须同时挡。
     // spec: 2026-06-07-goal-audit-async-buffered-info-design.md Task 8 + §4.1 + §4.2 Revision 第 1 段
     if (
-      options.flushOutboundBuffer
-      && options.hasActiveAudit?.() !== true
+      options.hasActiveAudit?.() !== true
       && !bufferedSendMessageInTurn
     ) {
-      const flushFailures = (await options.flushOutboundBuffer()) ?? []
-      // 发送失败 → 注入失败详情（下一轮 LLM 修正重发）；重试耗尽 → 标失败退出、写清原因。
-      if (flushFailures.length > 0) {
-        const decision = handleOutboundFlushFailures(flushFailures)
-        if (decision !== 'retry') {
-          return buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, decision.failedReason)
-        }
+      // 发送失败 → flushAndTrackDelivery 注入提示（下一轮 LLM 修正重发）+ 记 pending；重试耗尽 → 标失败退出。
+      const r = await flushAndTrackDelivery()
+      if (r !== 'ok' && r !== 'retry') {
+        return buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, r.failedReason)
       }
     }
 

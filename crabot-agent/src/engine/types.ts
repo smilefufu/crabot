@@ -354,10 +354,14 @@ export interface EngineOptions {
    * - drain 路径识别到 audit_result.pass=true 时（异步 audit pass 路径）
    * 实现：caller 遍历 taskState.outboundBuffer 调 channel.sendMessage，清空 buffer。
    * 非 goal mode / 空 buffer 场景为 no-op；不传时 engine 跳过 flush。
-   * 返回发送失败的消息列表（空=全部成功）；engine 据此把失败注入给 worker、收尾时不静默标完成。
+   * 返回 { sentCount, failures }：sentCount=真正送达条数（engine 据此清除 pending-delivery 追踪），
+   * failures=失败明细（engine 据此注入给 worker、收尾时不静默标完成）。
    * spec: 2026-06-07-goal-audit-async-buffered-info-design.md Task 8 / §4.5
    */
-  readonly flushOutboundBuffer?: () => Promise<ReadonlyArray<{ readonly summary: string; readonly error: string }>>
+  readonly flushOutboundBuffer?: () => Promise<{
+    readonly sentCount: number
+    readonly failures: ReadonlyArray<{ readonly summary: string; readonly error: string }>
+  }>
   /**
    * 丢弃 outboundBuffer 中尚未发出的消息。drain 路径识别到 audit_result.pass=false
    * 或 audit_aborted marker 时调——audit 不通过 / 被废，缓冲的"完工汇报"不应该再发。

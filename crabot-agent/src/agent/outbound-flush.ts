@@ -315,6 +315,12 @@ export interface OutboundFlushFailure {
   readonly error: string
 }
 
+/** flush 结果：sentCount=本次真正送达的条数（engine 据此清除 pending-delivery 追踪），failures=失败明细。 */
+export interface OutboundFlushResult {
+  readonly sentCount: number
+  readonly failures: OutboundFlushFailure[]
+}
+
 /** 把 buffer entry 压成一句话摘要，供失败回传时让 worker 辨认。 */
 function summarizeEntry(entry: OutboundBufferEntry): string {
   const text = (entry.content ?? '').trim()
@@ -334,26 +340,30 @@ function summarizeEntry(entry: OutboundBufferEntry): string {
  * - 单条 entry dispatch 抛异常时不阻塞后续 entry，但把"摘要+原因"收进返回的 failures：
  *   engine 据此把发送失败注入给 worker（旧版只 warn 一行就吞掉，让 worker 误以为已送达——
  *   trace a72623ec 成因之二）。
+ * - 返回 sentCount：engine 用它区分"真送出去了"和"空 buffer no-op"——只有真送出至少一条
+ *   才允许清除 pending-delivery 追踪；否则 worker 续轮不重发直接 end_turn 会被空 flush 骗过。
  *
  * spec: 2026-06-07-goal-audit-async-buffered-info-design.md Task 8
  */
 export function createOutboundFlush(
   outboundBuffer: Array<OutboundBufferEntry>,
   deps: OutboundDispatchDeps,
-): () => Promise<OutboundFlushFailure[]> {
+): () => Promise<OutboundFlushResult> {
   return async () => {
-    if (outboundBuffer.length === 0) return []
+    if (outboundBuffer.length === 0) return { sentCount: 0, failures: [] }
     const entries = outboundBuffer.splice(0)
     const failures: OutboundFlushFailure[] = []
+    let sentCount = 0
     for (const entry of entries) {
       try {
         await dispatchOutboundMessage(entry, deps)
+        sentCount++
       } catch (err) {
         const error = err instanceof Error ? err.message : String(err)
         console.warn('[outbound flush] entry failed:', error)
         failures.push({ summary: summarizeEntry(entry), error })
       }
     }
-    return failures
+    return { sentCount, failures }
   }
 }
