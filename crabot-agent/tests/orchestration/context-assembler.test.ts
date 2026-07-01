@@ -177,11 +177,13 @@ describe('ContextAssembler', () => {
     }]
 
     // 2026-05-14：Front 短期记忆改按需查，assembleFrontContext 不再调 search_short_term。
-    // 调用顺序：get_chat_history, active list_tasks, recent terminal list_recent_terminal_tasks
-    mockRpc.call
-      .mockResolvedValueOnce({ messages })
-      .mockResolvedValueOnce({ items: rawActiveTasks })
-      .mockResolvedValueOnce({ items: [] })
+    mockRpc.call.mockImplementation((_port, method) => {
+      if (method === 'get_chat_history') return Promise.resolve({ messages })
+      if (method === 'list_tasks') return Promise.resolve({ items: rawActiveTasks })
+      if (method === 'list_recent_terminal_tasks') return Promise.resolve({ items: [] })
+      if (method === 'get_scene_profile') return Promise.resolve({ profile: null })
+      throw new Error(`unexpected call: ${String(method)}`)
+    })
 
     const friend = {
       id: 'friend-1',
@@ -210,6 +212,171 @@ describe('ContextAssembler', () => {
     expect(ctx.short_term_memories).toEqual([])
     expect(ctx.active_tasks).toEqual(mappedActiveTasks)
     expect(ctx.available_tools).toEqual([])
+  })
+
+  it('extends front recent message window to oldest active task created_at in current session', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-01T12:00:00.000Z'))
+    try {
+      const messages: any[] = []
+      const rawActiveTasks = [{
+        id: 'task-old',
+        title: 'old running task',
+        status: 'executing',
+        priority: 'normal',
+        source: { channel_id: 'admin-web', session_id: 'session-1', trigger_type: 'message' },
+        created_at: '2026-06-30T08:00:00.000Z',
+      }]
+
+      mockRpc.call.mockImplementation((_port, method, args) => {
+        if (method === 'list_tasks') return Promise.resolve({ items: rawActiveTasks })
+        if (method === 'list_recent_terminal_tasks') return Promise.resolve({ items: [] })
+        if (method === 'get_chat_history') {
+          expect(args.after).toBe('2026-06-30T08:00:00.000Z')
+          return Promise.resolve({ messages })
+        }
+        if (method === 'get_scene_profile') return Promise.resolve({ profile: null })
+        throw new Error(`unexpected call: ${String(method)}`)
+      })
+
+      const friend = {
+        id: 'friend-1',
+        display_name: 'Test User',
+        permission: 'master' as const,
+        channel_identities: [],
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+      }
+
+      const ctx = await assembler.assembleFrontContext(
+        {
+          channel_id: 'admin-web',
+          session_id: 'session-1',
+          sender_id: 'user-1',
+          message: 'hello',
+          friend_id: 'friend-1',
+          session_type: 'private',
+        },
+        friend,
+        defaultMemoryPermissions,
+      )
+
+      expect(ctx.active_tasks[0].created_at).toBe('2026-06-30T08:00:00.000Z')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('extends front recent message window to oldest recent terminal completed_at', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-01T12:00:00.000Z'))
+    try {
+      mockRpc.call.mockImplementation((_port, method, args) => {
+        if (method === 'list_tasks') return Promise.resolve({ items: [] })
+        if (method === 'list_recent_terminal_tasks') {
+          return Promise.resolve({
+            items: [{
+              id: 'task-done',
+              title: 'done',
+              status: 'completed',
+              priority: 'normal',
+              source: { channel_id: 'admin-web', session_id: 'session-1', trigger_type: 'message' },
+              completed_at: '2026-06-30T20:00:00.000Z',
+              messages: [],
+            }],
+          })
+        }
+        if (method === 'get_chat_history') {
+          expect(args.after).toBe('2026-06-30T20:00:00.000Z')
+          return Promise.resolve({ messages: [] })
+        }
+        if (method === 'get_scene_profile') return Promise.resolve({ profile: null })
+        throw new Error(`unexpected call: ${String(method)}`)
+      })
+
+      const friend = {
+        id: 'friend-1',
+        display_name: 'Test User',
+        permission: 'master' as const,
+        channel_identities: [],
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+      }
+
+      await assembler.assembleFrontContext(
+        {
+          channel_id: 'admin-web',
+          session_id: 'session-1',
+          sender_id: 'user-1',
+          message: 'hello',
+          friend_id: 'friend-1',
+          session_type: 'private',
+        },
+        friend,
+        defaultMemoryPermissions,
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('annotates recent history messages with task_id from task message platform ids', async () => {
+    const messages = [
+      {
+        platform_message_id: 'platform-msg-1',
+        session: { session_id: 'session-1', channel_id: 'admin-web', type: 'private' },
+        sender: { friend_id: 'friend-1', platform_user_id: 'u1', platform_display_name: 'Test User' },
+        content: { type: 'text', text: '按免费版跑一下' },
+        features: { is_mention_crab: false },
+        platform_timestamp: recentTs(),
+      },
+    ]
+    const rawActiveTasks = [{
+      id: 'task-1',
+      title: 'running',
+      status: 'executing',
+      priority: 'normal',
+      source: { channel_id: 'admin-web', session_id: 'session-1', trigger_type: 'message' },
+      messages: [
+        {
+          content: '按免费版跑一下',
+          timestamp: recentTs(),
+          source: { platform_message_id: 'platform-msg-1' },
+        },
+      ],
+    }]
+
+    mockRpc.call.mockImplementation((_port, method) => {
+      if (method === 'get_chat_history') return Promise.resolve({ messages })
+      if (method === 'list_tasks') return Promise.resolve({ items: rawActiveTasks })
+      if (method === 'list_recent_terminal_tasks') return Promise.resolve({ items: [] })
+      if (method === 'get_scene_profile') return Promise.resolve({ profile: null })
+      throw new Error(`unexpected call: ${String(method)}`)
+    })
+
+    const friend = {
+      id: 'friend-1',
+      display_name: 'Test User',
+      permission: 'master' as const,
+      channel_identities: [],
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+    }
+
+    const ctx = await assembler.assembleFrontContext(
+      {
+        channel_id: 'admin-web',
+        session_id: 'session-1',
+        sender_id: 'user-1',
+        message: '继续',
+        friend_id: 'friend-1',
+        session_type: 'private',
+      },
+      friend,
+      defaultMemoryPermissions,
+    )
+
+    expect(ctx.recent_messages[0].task_id).toBe('task-1')
   })
 
   it('loads only the current group scene profile for worker context', async () => {

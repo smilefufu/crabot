@@ -3017,6 +3017,7 @@ export class AgentHandler {
     trigger_type: 'message' | 'scheduled'
     source_channel_id?: string
     source_session_id?: string
+    started_at?: string
   }> {
     const result: Array<{
       task_id: string
@@ -3024,6 +3025,7 @@ export class AgentHandler {
       trigger_type: 'message' | 'scheduled'
       source_channel_id?: string
       source_session_id?: string
+      started_at?: string
     }> = []
     for (const [taskId, state] of this.activeTasks) {
       result.push({
@@ -3032,6 +3034,7 @@ export class AgentHandler {
         trigger_type: state.triggerType ?? 'message',
         source_channel_id: state.taskOrigin?.channel_id,
         source_session_id: state.taskOrigin?.session_id,
+        started_at: state.startedAt,
       })
     }
     return result

@@ -798,7 +798,7 @@ master 可以在 IM 输入以 / 开头的指令（slash command），由 admin e
 export function buildSystemEventGuidance(hasSupplementCandidates: boolean): string {
   const pathOptions = hasSupplementCandidates
     ? `  - **完全没规则 → stay_silent。** 不要自作主张推断。
-  - **规则把事件绑到了某个可补充任务**（如 master 写过"新人入职走 X-入职追踪 task"）→ 走 supplement，target_task_id 必须是上方可补充任务清单里的 task_id
+  - **规则把事件绑到了某个可见 task**（如 master 写过"新人入职走 X-入职追踪 task"）→ 走 supplement，target_task_id 必须来自最近聊天历史的 task 属性或当前正在运行 task 列表
   - **规则要求开新动作**（如"主动问职责"）→ 走 new_task
   - 选 supplement / new_task 完全跟着场景画像走，规则没明说就 stay_silent`
     : `  - **完全没规则 → stay_silent。** 不要自作主张推断。

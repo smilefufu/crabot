@@ -97,6 +97,7 @@ function renderMessageTag(
   const attrs: string[] = []
   attrs.push(`ts="${time}"`)
   if (msg.platform_message_id) attrs.push(`id="${escapeAttr(msg.platform_message_id)}"`)
+  if (msg.task_id) attrs.push(`task="${escapeAttr(msg.task_id)}"`)
   attrs.push(`from="${escapeAttr(sender)}"`)
   if (msg.sender.platform_user_id) attrs.push(`from_id="${escapeAttr(msg.sender.platform_user_id)}"`)
   attrs.push(`identity="${identity}"`)

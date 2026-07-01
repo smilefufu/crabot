@@ -131,6 +131,7 @@ interface ContextAssemblerDeps {
     trigger_type: 'message' | 'scheduled'
     source_channel_id?: string
     source_session_id?: string
+    started_at?: string
   }>
   /** 可选：由 UnifiedAgent 注入，读取 worker 实时快照（用于 Front 汇报进度）。 */
   getLiveSnapshot?: (taskId: string) => LiveTaskSnapshot | undefined
@@ -148,6 +149,7 @@ export class ContextAssembler {
     trigger_type: 'message' | 'scheduled'
     source_channel_id?: string
     source_session_id?: string
+    started_at?: string
   }>
   /**
    * 同进程读取 Worker 实时快照的回调（由 UnifiedAgent 注入）。
@@ -212,17 +214,20 @@ export class ContextAssembler {
   ): Promise<FrontAgentContext> {
     const sessionType = params.session_type ?? 'private'
     // 短期记忆改为按需查（Front/Worker 通过 search_short_term 工具自查），不再被动 fetch 拼 prompt
-    const [recentMessages, activeTasks, sceneProfile] = await Promise.all([
-      this.withSubSpan(traceCtx, 'fetch_recent_messages', () => this.fetchRecentMessages(
-        params.session_id,
-        params.channel_id,
-        this.config.front_context_recent_messages_window_hours,
-        this.config.front_context_recent_messages_max_cap,
-        sessionType
-      )),
+    const [activeTasks, sceneProfile] = await Promise.all([
       this.withSubSpan(traceCtx, 'fetch_active_tasks', () => this.fetchActiveTasks(params.channel_id, params.session_id)),
       this.withSubSpan(traceCtx, 'resolve_scene_profile', () => this.resolveSceneProfile(params.channel_id, params.session_id, sessionType, params.friend_id)),
     ])
+    const extendedHistorySince = this.findExtendedFrontHistorySince(activeTasks)
+    const recentMessages = await this.withSubSpan(traceCtx, 'fetch_recent_messages', () => this.fetchRecentMessages(
+      params.session_id,
+      params.channel_id,
+      this.config.front_context_recent_messages_window_hours,
+      this.config.front_context_recent_messages_max_cap,
+      sessionType,
+      extendedHistorySince,
+    ))
+    const attributedRecentMessages = this.annotateMessagesWithTaskIds(recentMessages, activeTasks)
 
     return {
       sender_friend: friend ?? {
@@ -233,7 +238,7 @@ export class ContextAssembler {
         created_at: '',
         updated_at: '',
       },
-      recent_messages: recentMessages,
+      recent_messages: attributedRecentMessages,
       short_term_memories: [],
       active_tasks: activeTasks,
       crab_display_name: params.crab_display_name,
@@ -357,9 +362,11 @@ export class ContextAssembler {
     channelId: ModuleId,
     windowHours: number,
     maxCap: number,
-    sessionType: 'private' | 'group' = 'private'
+    sessionType: 'private' | 'group' = 'private',
+    extendSinceIso?: string,
   ): Promise<ChannelMessage[]> {
-    const sinceIso = new Date(Date.now() - windowHours * 3600 * 1000).toISOString()
+    const defaultSinceIso = new Date(Date.now() - windowHours * 3600 * 1000).toISOString()
+    const sinceIso = extendSinceIso && extendSinceIso < defaultSinceIso ? extendSinceIso : defaultSinceIso
     try {
       // admin-web 频道：从 Admin 的 get_chat_history RPC 获取（无 Channel 模块）
       if (channelId === 'admin-web') {
@@ -515,6 +522,7 @@ export class ContextAssembler {
         trigger_type: t.trigger_type === 'scheduled' ? 'scheduled' : undefined,
         source_channel_id: t.source_channel_id,
         source_session_id: t.source_session_id,
+        created_at: t.started_at,
       } as TaskSummary)
     }
     // admin 优先覆盖 in-flight
@@ -552,8 +560,9 @@ export class ContextAssembler {
               session_id?: string
               trigger_type?: 'manual' | 'scheduled' | 'auto' | 'event' | 'message'
             }
-            messages?: Array<{ content: string; timestamp: string }>
+            messages?: Array<{ content: string; timestamp: string; source?: { platform_message_id?: string } }>
             updated_at?: string
+            created_at?: string
             pending_question?: string
           }>
         }
@@ -577,10 +586,12 @@ export class ContextAssembler {
         assigned_worker: t.assigned_worker,
         plan_summary: t.plan?.summary,
         latest_progress: this.extractLatestProgress(t.messages),
+        message_platform_ids: this.extractTaskMessagePlatformIds(t.messages),
         source_channel_id: t.source.channel_id,
         source_session_id: t.source.session_id,
         trigger_type: normalizeTaskSummaryTriggerType(t.source.trigger_type),
         updated_at: t.updated_at,
+        created_at: t.created_at,
         pending_question: t.pending_question,
         candidate_kind: 'active',
         // 飞行中状态：worker 同进程内存表，仅 status=executing 且本进程在跑时有值
@@ -614,8 +625,9 @@ export class ContextAssembler {
               session_id?: string
               trigger_type?: 'manual' | 'scheduled' | 'auto' | 'event' | 'message'
             }
-            messages?: Array<{ content: string; timestamp: string }>
+            messages?: Array<{ content: string; timestamp: string; source?: { platform_message_id?: string } }>
             updated_at?: string
+            created_at?: string
             completed_at?: string
             error?: string
           }>
@@ -649,10 +661,12 @@ export class ContextAssembler {
           title: t.title,
           status: t.status,
           priority: t.priority,
+          message_platform_ids: this.extractTaskMessagePlatformIds(t.messages),
           source_channel_id: t.source.channel_id,
           source_session_id: t.source.session_id,
           trigger_type: normalizeTaskSummaryTriggerType(t.source.trigger_type),
           candidate_kind: 'recent_terminal',
+          created_at: t.created_at,
           completed_at: t.completed_at,
           error: t.error,
         }))
@@ -671,6 +685,46 @@ export class ContextAssembler {
     if (!messages || messages.length === 0) return undefined
     const last = messages[messages.length - 1]
     return last.content.length > 100 ? last.content.slice(0, 100) + '...' : last.content
+  }
+
+  private extractTaskMessagePlatformIds(
+    messages?: Array<{ source?: { platform_message_id?: string } }>
+  ): string[] | undefined {
+    if (!messages || messages.length === 0) return undefined
+    const ids = messages
+      .map((m) => m.source?.platform_message_id)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0)
+    return ids.length > 0 ? Array.from(new Set(ids)) : undefined
+  }
+
+  private findExtendedFrontHistorySince(tasks: ReadonlyArray<TaskSummary>): string | undefined {
+    let oldest: string | undefined
+    for (const task of tasks) {
+      const anchor = task.candidate_kind === 'recent_terminal'
+        ? task.completed_at
+        : task.created_at
+      if (!anchor) continue
+      if (!oldest || anchor < oldest) oldest = anchor
+    }
+    return oldest
+  }
+
+  private annotateMessagesWithTaskIds(
+    messages: ReadonlyArray<ChannelMessage>,
+    tasks: ReadonlyArray<TaskSummary>,
+  ): ChannelMessage[] {
+    const byMessageId = new Map<string, string>()
+    for (const task of tasks) {
+      for (const id of task.message_platform_ids ?? []) {
+        if (!byMessageId.has(id)) byMessageId.set(id, task.task_id)
+      }
+    }
+    if (byMessageId.size === 0) return [...messages]
+    return messages.map((message) => {
+      if (message.task_id) return message
+      const taskId = byMessageId.get(message.platform_message_id)
+      return taskId ? { ...message, task_id: taskId as never } : message
+    })
   }
 
   /**

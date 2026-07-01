@@ -9047,6 +9047,7 @@ export class AdminModule extends ModuleBase {
         },
         features: { is_mention_crab: false as const },
         platform_timestamp: msg.timestamp,
+        ...(msg.task_id ? { task_id: msg.task_id } : {}),
       })),
     }
   }

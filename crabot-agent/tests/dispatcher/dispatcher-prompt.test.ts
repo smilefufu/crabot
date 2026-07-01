@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { assembleDispatcherPrompt } from '../../src/dispatcher/dispatcher-prompt.js'
 import type { DispatchContext } from '../../src/dispatcher/dispatcher-types.js'
-import type { TaskSummary } from '../../src/types.js'
+import { buildUserPrompt } from '../../src/dispatcher/dispatcher.js'
+import type { ChannelMessage, TaskSummary } from '../../src/types.js'
 
 function task(id: string): TaskSummary {
   return {
@@ -12,11 +13,23 @@ function task(id: string): TaskSummary {
   }
 }
 
+function msg(id: string, text: string, taskId?: string): ChannelMessage {
+  return {
+    platform_message_id: id,
+    session: { channel_id: 'c', session_id: 's', type: 'private' },
+    sender: { platform_user_id: 'u', platform_display_name: 'User' },
+    content: { type: 'text', text },
+    features: { is_mention_crab: false },
+    platform_timestamp: '2026-07-01T00:00:00.000Z',
+    ...(taskId ? { task_id: taskId as never } : {}),
+  }
+}
+
 function ctx(overrides: Partial<DispatchContext> = {}): DispatchContext {
   return {
     messages: [], recentMessages: [], activeTasks: [], sessionType: 'private',
     channelId: 'c', sessionId: 's',
-    senderFriend: { id: 'f', display_name: 'u', permission: 'master' } as never,
+    senderFriend: { id: 'f', display_name: 'u', permission: 'master', channel_identities: [] } as never,
     traceId: 't', ...overrides,
   }
 }
@@ -150,7 +163,7 @@ describe('assembleDispatcherPrompt', () => {
     expect(sysEventSection).toMatch(/supplement/)
     expect(sysEventSection).toMatch(/new_task/)
     expect(sysEventSection).toMatch(/stay_silent/)
-    expect(sysEventSection).toContain('可补充任务清单')
+    expect(sysEventSection).toContain('当前正在运行 task 列表')
     expect(sysEventSection).not.toContain('活跃任务清单')
   })
 
@@ -211,5 +224,60 @@ describe('assembleDispatcherPrompt', () => {
   it('OUTPUT_SCHEMA 的 new_task 示例含 immediate_reply 字段', () => {
     const p = assembleDispatcherPrompt(ctx({ sessionType: 'private' }))
     expect(p).toMatch(/"immediate_reply":/)
+  })
+})
+
+describe('buildUserPrompt task-aware context', () => {
+  it('renders task id on recent history messages as the main supplement signal', () => {
+    const p = buildUserPrompt(ctx({
+      messages: [msg('cur', '继续刚才那个')],
+      recentMessages: [msg('h1', '已经按免费方案跑完一版', 'task-done')],
+      activeTasks: [],
+    }))
+
+    expect(p).toContain('<message')
+    expect(p).toContain('task="task-done"')
+    expect(p).toContain('已经按免费方案跑完一版')
+  })
+
+  it('does not render recent terminal candidates in the task list by title', () => {
+    const p = buildUserPrompt(ctx({
+      messages: [msg('cur', '继续')],
+      activeTasks: [{
+        ...task('task-done'),
+        status: 'completed',
+        candidate_kind: 'recent_terminal',
+        completed_at: '2026-07-01T00:00:00.000Z',
+      }],
+    }))
+
+    expect(p).not.toContain('## 当前正在运行的本 session task')
+    expect(p).not.toContain('（无）')
+    expect(p).not.toContain('"t-task-done"')
+    expect(p).not.toContain('completed_recently')
+  })
+
+  it('renders only active session task id/status in the compact running task list', () => {
+    const p = buildUserPrompt(ctx({
+      messages: [msg('cur', '补充一下')],
+      activeTasks: [
+        {
+          ...task('task-active'),
+          status: 'waiting_human',
+          latest_progress: '这只是最后一条 task message，不是真进度',
+          pending_question: '请确认是否按免费版继续',
+        },
+        { ...task('task-done'), status: 'completed', candidate_kind: 'recent_terminal' },
+      ],
+    }))
+
+    expect(p).toContain('## 当前正在运行的本 session task')
+    expect(p).toContain('[task-active]')
+    expect(p).toContain('status: waiting_human')
+    expect(p).not.toContain('正在等回答')
+    expect(p).not.toContain('请确认是否按免费版继续')
+    expect(p).not.toContain('最近进度')
+    expect(p).not.toContain('这只是最后一条 task message，不是真进度')
+    expect(p).not.toContain('[task-done]')
   })
 })

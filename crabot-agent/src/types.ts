@@ -352,6 +352,8 @@ export interface ChannelMessage {
     action_callback?: { action_id: string; payload: Record<string, unknown> }
   }
   platform_timestamp: string
+  /** Optional task attribution used only as prompt context; not channel transport truth. */
+  task_id?: TaskId
 }
 
 // ============================================================================
@@ -378,6 +380,8 @@ export interface TaskSummary {
   assigned_worker?: string
   plan_summary?: string
   latest_progress?: string
+  /** Platform message ids known to belong to this task; used to annotate chat history in prompts. */
+  message_platform_ids?: string[]
   source_channel_id?: string
   source_session_id?: string
   /** Dispatcher supplement candidate source. Undefined is treated as active for compatibility. */
@@ -393,6 +397,7 @@ export interface TaskSummary {
    */
   trigger_type?: 'manual' | 'scheduled' | 'auto' | 'event'
   updated_at?: string
+  created_at?: string
   /**
    * 任务正在等待人类回答的问题（仅 status=waiting_human 时有值）。
    * 由 worker 调 ask_human 工具写入，Front prompt 渲染时作为 supplement 判断的参考。

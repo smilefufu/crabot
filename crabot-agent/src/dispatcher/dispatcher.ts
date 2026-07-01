@@ -169,20 +169,12 @@ export function buildUserPrompt(
       quotedMessages,
     }))
   }
-  if (ctx.activeTasks.length > 0) {
-    lines.push('\n## 可补充任务')
-    for (const t of ctx.activeTasks) {
-      const statusLabel = t.candidate_kind === 'recent_terminal'
-        ? (t.status === 'failed' ? 'failed_recently' : 'completed_recently')
-        : t.status
-      const completed = t.completed_at ? `, completed_at: ${t.completed_at}` : ''
-      lines.push(`- [${t.task_id}] "${t.title}" (status: ${statusLabel}${completed})`)
-      if (t.latest_progress) lines.push(`  最近进度: ${t.latest_progress}`)
-      if (t.pending_question) lines.push(`  正在等回答: ${t.pending_question.slice(0, 200)}`)
-      if (t.error && t.candidate_kind === 'recent_terminal') lines.push(`  失败原因: ${t.error.slice(0, 200)}`)
+  const activeSessionTasks = ctx.activeTasks.filter((t) => t.candidate_kind !== 'recent_terminal')
+  if (activeSessionTasks.length > 0) {
+    lines.push('\n## 当前正在运行的本 session task')
+    for (const t of activeSessionTasks) {
+      lines.push(`- [${t.task_id}] (status: ${t.status})`)
     }
-  } else {
-    lines.push('\n## 可补充任务\n（无）')
   }
   lines.push('\n按 system prompt 描述的 schema 输出 JSON。')
   return lines.join('\n')

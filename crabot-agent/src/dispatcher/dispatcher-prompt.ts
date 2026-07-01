@@ -6,7 +6,7 @@
  * 反模式 self-check 等）。
  *
  * 设计原则（详见 spec §3.6）：
- * 不告知 LLM 它不会看到也不需要处理的东西。activeTasks 为空时
+ * 不告知 LLM 它不会看到也不需要处理的东西。supplement candidates 为空时
  * 既不在 rules 里描述 supplement、也不在 OUTPUT_SCHEMA 里列出 supplement，
  * 让 LLM 物理上无从选择这个无效选项。
  *
@@ -79,7 +79,7 @@ function buildDispatchRules(
 }
 
 const SUPPLEMENT_WHITELIST_REMINDER =
-  '\n\n**target_task_id 硬约束**：必须与上方「可补充任务」清单里某个 task_id **字面完全一致**——禁止编造、截断、模糊匹配或拼造前缀。在清单里找不到合理匹配的 → 用 new_task，不要用 supplement。'
+  '\n\n**target_task_id 硬约束**：必须使用 prompt 中可见的 task_id（最近聊天历史 `<message task="...">` 或「当前正在运行的本 session task」里的 id）并字面完全一致——禁止编造、截断、模糊匹配或拼造前缀。找不到合理匹配的 → 用 new_task，不要用 supplement。系统会二次校验，不能补充的 task 会降级为 new_task。'
 
 /**
  * new_task 可选 immediate_reply 字段的字段说明。插在每个 dispatch rule
@@ -99,8 +99,8 @@ const PRIVATE_RULES_WITH_ACTIVE = `## 分诊规则（私聊 / admin chat）
 
 每个动作只能是以下两种之一：
 
-1. **supplement** — 这条消息是对某个**候选任务**的补充 / 追问 / 修正 / 继续讨论。
-   - target_task_id 必须是"可补充任务"清单里的 task_id
+1. **supplement** — 这条消息是对某个已知 task 的补充 / 追问 / 修正 / 继续讨论。
+   - target_task_id 必须来自最近聊天历史消息的 task="..." 属性，或「当前正在运行的本 session task」列表
    - text 用户原话（去掉无关客套即可）。**不要替 agent 解读意图或指定方向——agent 会自己读聊天历史**
 
 2. **new_task** — 这条消息发起一个新任务。
@@ -108,9 +108,9 @@ const PRIVATE_RULES_WITH_ACTIVE = `## 分诊规则（私聊 / admin chat）
 ${NEW_TASK_IMMEDIATE_REPLY_HINT}
 
 判断要点：
-- 用户明确指代某个候选任务（"那个手机调研"、"再加一条"、"算了改成 X"等）→ supplement
-- 如果候选任务已经 completed/failed，只有明确延续刚才任务时才 supplement；新话题或不确定时 new_task
-- 用户提出一个跟所有可补充任务都不相关的请求 → new_task
+- 用户明确指代历史中带 task="..." 的某个任务（"那个手机调研"、"再加一条"、"算了改成 X"等）→ supplement
+- 对已经完成/失败的历史 task，只有明确延续刚才任务时才 supplement；新话题或不确定时 new_task
+- 用户提出一个跟所有可见 task 都不相关的请求 → new_task
 - 不确定时优先 new_task（误判 new_task 后果较轻：开个新 agent 实例独立处理）
 
 **结合最近聊天历史判断**：用户当前消息常常引用历史上下文（"把这文件……"、"再加一条"），需要回看「最近聊天历史」段判断指代对象——尤其是文件 / 图片这类媒体消息（你能看到 \`[文件: xxx.pdf]\` / \`[图片: ...]\` 标记），它们就是用户当前指令要处理的素材。worker 启动后会拿到完整批次（含媒体），你只需把意图分诊清楚即可。
@@ -135,8 +135,8 @@ const GROUP_RULES_WITH_ACTIVE = `## 分诊规则（群聊）
 
 群聊批次（多消息多用户）的每个动作可以是以下三种之一：
 
-1. **supplement** — 某条消息是对某个候选任务的补充 / 追问 / 修正 / 继续讨论。
-   - target_task_id 必须是"可补充任务"清单里的 task_id
+1. **supplement** — 某条消息是对某个已知 task 的补充 / 追问 / 修正 / 继续讨论。
+   - target_task_id 必须来自最近聊天历史消息的 task="..." 属性，或「当前正在运行的本 session task」列表
    - text 用户原话（去掉无关客套即可）。**不要替 agent 解读意图**
 
 2. **new_task** — 某条消息发起一个跟我相关的新任务。
@@ -150,7 +150,7 @@ ${NEW_TASK_IMMEDIATE_REPLY_HINT}
 - 被 [@Crabot] 标注、上下文只有发送者和我、我之前的消息被引用 → 必须 supplement 或 new_task，不允许 stay_silent
 - 群成员之间互相讨论（不是在叫我）/ 系统通知 / 分享链接 → stay_silent
 - 一批多条消息可拆分：比如其中一条 @我 走 new_task，另一条群成员讨论走 stay_silent
-- 如果候选任务已经 completed/failed，只有明确延续刚才任务时才 supplement；新话题或不确定时 new_task
+- 如果历史 task 已经完成/失败，只有明确延续刚才任务时才 supplement；新话题或不确定时 new_task
 
 最多输出 ${MAX_ACTIONS_PER_DISPATCH} 个动作。
 
