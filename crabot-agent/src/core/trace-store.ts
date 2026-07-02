@@ -436,7 +436,7 @@ export class TraceStore {
     results.sort((a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime())
 
     const total = results.length
-    const limit = Math.min(params.limit ?? 20, 100)
+    const limit = Math.min(params.limit ?? 20, 1000)
     const off = params.offset ?? 0
     return { traces: results.slice(off, off + limit), total }
   }

@@ -295,6 +295,30 @@ describe('TraceStore index', () => {
     expect(result.traces).toHaveLength(1)
     expect(result.traces[0].status).toBe('running')
   })
+
+  it('allows internal callers to request up to 1000 trace index entries', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-test-'))
+    try {
+      const traces = Array.from({ length: 150 }, (_, i) => ({
+        trace_id: `trace-${String(i).padStart(3, '0')}`,
+        related_task_id: `task-${i}`,
+        module_id: 'a',
+        started_at: `2026-04-13T10:${String(i % 60).padStart(2, '0')}:${String(Math.floor(i / 60)).padStart(2, '0')}Z`,
+        status: 'completed',
+        trigger: { type: 'message', summary: `补充 ${i}` },
+        spans: [],
+      }))
+      fs.writeFileSync(path.join(dir, 'traces-2026-04-13.jsonl'), traces.map(t => JSON.stringify(t)).join('\n') + '\n')
+
+      const store = new TraceStore(10, dir)
+      const result = store.searchTraces({ limit: 1000 })
+
+      expect(result.total).toBe(150)
+      expect(result.traces).toHaveLength(150)
+    } finally {
+      fs.rmSync(dir, { recursive: true })
+    }
+  })
 })
 
 describe('TraceStore getFullTrace', () => {
