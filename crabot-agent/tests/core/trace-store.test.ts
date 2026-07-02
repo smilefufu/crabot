@@ -858,4 +858,31 @@ describe('TraceStore reactivateResumableTrace（resume 续写复用旧 trace）'
       fs.rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it('重启后 searchTraces 仍以 per-task checkpoint 中的 running trace 状态为准', () => {
+    const dir = makeTempDir()
+    try {
+      const store1 = new TraceStore(10, dir)
+      const trace = store1.startTrace({
+        module_id: 'agent-1',
+        trigger: { type: 'task', summary: '历史已完成任务' },
+        related_task_id: 'task-terminal',
+      })
+      store1.flushWorkerCheckpoint('task-terminal', trace.trace_id, {
+        agent_version: 'v1',
+        system_prompt: 'sys',
+        messages: [{ id: 'm1', role: 'user', content: 'hi', timestamp: 1 }] as never,
+        worker_state: { todo_items: [], goal_revision_unlocked: false },
+      })
+      store1.endTrace(trace.trace_id, 'completed', { summary: 'done' })
+
+      const store2 = new TraceStore(10, dir)
+      const resumed = store2.getTrace(trace.trace_id)
+      expect(resumed?.status).toBe('running')
+      expect(store2.searchTraces({ task_id: 'task-terminal' }).traces[0]!.status).toBe('running')
+      expect(store2.searchTraces({ task_id: 'task-terminal', status: 'completed' }).traces).toHaveLength(0)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
