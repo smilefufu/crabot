@@ -244,6 +244,12 @@ export class TraceStore {
     trace.outcome = undefined
     this.traces.set(trace.trace_id, trace)
     if (!this.order.includes(trace.trace_id)) this.order.push(trace.trace_id)
+    const existingIdx = this.traceIndex.findIndex(e => e.trace_id === trace.trace_id)
+    const existing = existingIdx >= 0 ? this.traceIndex[existingIdx] : undefined
+    const nextEntry = this.traceToIndexEntry(trace, existing?.file ?? '', existing?.file_offset ?? 0)
+    if (existingIdx >= 0) this.traceIndex[existingIdx] = nextEntry
+    else this.traceIndex.push(nextEntry)
+    if (trace.related_task_id) this.addToTaskIndex(trace.related_task_id, trace.trace_id)
     return trace
   }
 

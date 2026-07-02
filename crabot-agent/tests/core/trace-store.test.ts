@@ -848,6 +848,8 @@ describe('TraceStore reactivateResumableTrace（resume 续写复用旧 trace）'
       expect(reactivated!.trace_id).toBe(trace.trace_id)
       expect(reactivated!.status).toBe('running')
       expect(reactivated!.outcome).toBeUndefined()
+      expect(store2.searchTraces({ task_id: 'task-terminal' }).traces[0]!.status).toBe('running')
+      expect(store2.searchTraces({ task_id: 'task-terminal', status: 'completed' }).traces).toHaveLength(0)
 
       const span2 = store2.startSpan(trace.trace_id, { type: 'llm_call', details: { iteration: 2 } })
       store2.endSpan(trace.trace_id, span2.span_id, 'completed')
