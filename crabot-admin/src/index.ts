@@ -5299,7 +5299,7 @@ export class AdminModule extends ModuleBase {
     const triggerType = params.filter?.trigger_type ?? 'all'
     let orphans: TraceSummary[] = []
     let relatedDispatchByTask = new Map<string, TraceSummary[]>()
-    if (triggerType !== 'task') {
+    if (triggerType === 'all' || triggerType === 'task' || triggerType === 'message') {
       try {
         const result = await this.callAgentRpc<
           { keyword?: string; status?: string; time_range?: { start: string; end: string }; limit: number },
@@ -5316,7 +5316,9 @@ export class AdminModule extends ModuleBase {
           !keyword ||
           t.trigger_summary.toLowerCase().includes(keyword) ||
           (t.outcome_summary?.toLowerCase().includes(keyword) ?? false)
-        orphans = result.traces.filter((t) => t.trigger_type === 'message' && !t.related_task_id && matchesKeyword(t))
+        orphans = triggerType === 'task'
+          ? []
+          : result.traces.filter((t) => t.trigger_type === 'message' && !t.related_task_id && matchesKeyword(t))
         relatedDispatchByTask = result.traces
           .filter((t) => t.trigger_type === 'message' && Boolean(t.related_task_id) && matchesKeyword(t))
           .reduce((acc, t) => {

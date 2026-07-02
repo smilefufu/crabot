@@ -435,6 +435,8 @@ describe('Admin Web API', () => {
     })
 
     it('orders task rows by last activity instead of original creation time', async () => {
+      vi.spyOn(admin as unknown as { callAgentRpc: (...args: unknown[]) => Promise<unknown> }, 'callAgentRpc')
+        .mockResolvedValue({ traces: [], total: 0 })
       const revivedOldTask = makeTask({
         id: 'test-activity-old',
         title: '开卷考试策略 v2',
@@ -467,6 +469,57 @@ describe('Admin Web API', () => {
         .filter((u): u is Extract<typeof u, { kind: 'task' }> => u.kind === 'task')
         .map((u) => u.task.id)
       expect(ids.indexOf('test-activity-old')).toBeLessThan(ids.indexOf('test-activity-new'))
+    })
+
+    it('uses related dispatcher activity even when listing task-only rows', async () => {
+      const oldTask = makeTask({
+        id: 'test-activity-old',
+        title: '旧标题',
+        created_at: '2026-07-01T16:15:15.921Z',
+        updated_at: '2026-07-01T16:15:15.921Z',
+        messages: [
+          { id: 'm-old-1', role: 'human', content: '原始需求', timestamp: '2026-07-01T16:15:15.921Z' },
+        ],
+      })
+      const newTask = makeTask({
+        id: 'test-activity-new',
+        title: '较新创建但没有后续活动',
+        created_at: '2026-07-02T00:10:00.000Z',
+        updated_at: '2026-07-02T00:10:00.000Z',
+        messages: [
+          { id: 'm-new-1', role: 'human', content: '新任务', timestamp: '2026-07-02T00:10:00.000Z' },
+        ],
+      })
+      admin['tasks'].set(oldTask.id as never, oldTask)
+      admin['tasks'].set(newTask.id as never, newTask)
+      vi.spyOn(admin as unknown as { callAgentRpc: (...args: unknown[]) => Promise<unknown> }, 'callAgentRpc')
+        .mockResolvedValue({
+          traces: [
+            {
+              trace_id: 'trace-related',
+              trigger_type: 'message',
+              trigger_summary: '那你现在还不赶紧去做？',
+              started_at: '2026-07-02T00:12:42.281Z',
+              status: 'completed',
+              span_count: 1,
+              related_task_id: 'test-activity-old',
+            },
+          ],
+          total: 1,
+        })
+
+      const result = await admin['handleListConversationUnits']({
+        page: 1,
+        page_size: 10,
+        filter: { trigger_type: 'task' },
+      }) as ListConversationUnitsResult
+
+      const taskUnits = result.items.filter((u): u is Extract<typeof u, { kind: 'task' }> => u.kind === 'task')
+      const oldUnit = taskUnits.find((u) => u.task.id === 'test-activity-old')
+      expect(oldUnit?.activity_at).toBe('2026-07-02T00:12:42.281Z')
+      expect(oldUnit?.activity_summary).toBe('那你现在还不赶紧去做？')
+      expect(taskUnits.findIndex((u) => u.task.id === 'test-activity-old'))
+        .toBeLessThan(taskUnits.findIndex((u) => u.task.id === 'test-activity-new'))
     })
 
     it('filters orphan dispatcher traces by the search keyword', async () => {
