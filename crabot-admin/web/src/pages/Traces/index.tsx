@@ -615,12 +615,12 @@ function ConversationUnitRow({
           </Tooltip>
         </td>
         <td style={{ ...tCell, maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          <Tooltip content={t.title}>
-            <span style={{ fontWeight: 500 }}>{t.title}</span>
+          <Tooltip content={`${unit.activity_summary}\n\nTask: ${t.title}`}>
+            <span style={{ fontWeight: 500 }}>{unit.activity_summary}</span>
           </Tooltip>
         </td>
         <td style={{ ...tCell, fontSize: 11, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
-          {formatTime(t.created_at)}
+          {formatTime(unit.activity_at)}
         </td>
         <td style={{ ...tCell, fontSize: 11, color: 'var(--text-muted)', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
           {formatDuration(dur)}

@@ -494,6 +494,23 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
 
     finalText = processed.text
 
+    if (stopReason === null) {
+      fireOnTurn(buildSilentTurnEvent(
+        totalTurns, processed.text, stopReason, llmCallMs, llmStartedAtMs, forcedSummaryAttempt, response.usage,
+      ))
+      return buildResult(
+        'failed',
+        finalText,
+        totalTurns,
+        contextManager,
+        messages,
+        exitToolCall,
+        toolCallCount,
+        wroteMemoryOrScene,
+        'LLM stream missing terminal stopReason; task was not completed.',
+      )
+    }
+
     if (stopReason !== 'tool_use') {
       // end_turn 收口前最后一次 supplement check：防止 LLM end_turn 与 finalize 落盘之间
       // 的微秒级窗口窃听不到 supplement。supplement 自然取代 forced summary——LLM 看到

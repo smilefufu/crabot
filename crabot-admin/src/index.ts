@@ -5256,8 +5256,8 @@ export class AdminModule extends ModuleBase {
    * 列出 conversation units（task + 孤儿 dispatcher trace 按时间合并 + 分页）。
    *
    * 后端 union 分页：
-   *  1. 拉所有满足 filter 的 task（按 task.created_at）
-   *  2. 拉所有满足 filter 的孤儿 dispatcher trace（按 trace.started_at），通过 agent RPC
+   *  1. 拉所有满足 filter 的 task
+   *  2. 拉所有满足 filter 的 dispatcher trace（按 trace.started_at），通过 agent RPC
    *  3. union 后按统一时间字段排序
    *  4. 按 page / page_size 切片
    *
@@ -5294,22 +5294,40 @@ export class AdminModule extends ModuleBase {
       }
     }
 
-    // 2. 拉孤儿 dispatcher trace（trigger_type=all from agent，admin 侧过滤孤儿）
+    // 2. 拉 dispatcher trace（trigger_type=all from agent，admin 侧过滤 orphan / related）
     // trigger_type filter: 'message' = 仅孤儿 dispatcher；'task' = 仅 task；'all' = 全部
     const triggerType = params.filter?.trigger_type ?? 'all'
     let orphans: TraceSummary[] = []
-    if (triggerType !== 'task') {
+    let relatedDispatchByTask = new Map<string, TraceSummary[]>()
+    if (triggerType === 'all' || triggerType === 'task' || triggerType === 'message') {
       try {
         const result = await this.callAgentRpc<
           { keyword?: string; status?: string; time_range?: { start: string; end: string }; limit: number },
           { traces: Array<TraceSummary & { related_task_id?: string }>; total: number }
         >('search_traces', {
           limit: 1000,
+          ...(params.filter?.search ? { keyword: params.filter.search } : {}),
           ...(params.filter?.created_after && params.filter?.created_before
             ? { time_range: { start: params.filter.created_after, end: params.filter.created_before } }
             : {}),
         })
-        orphans = result.traces.filter((t) => t.trigger_type === 'message' && !t.related_task_id)
+        const keyword = params.filter?.search?.toLowerCase()
+        const matchesKeyword = (t: TraceSummary): boolean =>
+          !keyword ||
+          t.trigger_summary.toLowerCase().includes(keyword) ||
+          (t.outcome_summary?.toLowerCase().includes(keyword) ?? false)
+        orphans = triggerType === 'task'
+          ? []
+          : result.traces.filter((t) => t.trigger_type === 'message' && !t.related_task_id && matchesKeyword(t))
+        relatedDispatchByTask = result.traces
+          .filter((t) => t.trigger_type === 'message' && Boolean(t.related_task_id) && matchesKeyword(t))
+          .reduce((acc, t) => {
+            const taskId = t.related_task_id!
+            const list = acc.get(taskId)
+            if (list) list.push(t)
+            else acc.set(taskId, [t])
+            return acc
+          }, new Map<string, TraceSummary[]>())
       } catch (err) {
         console.warn('[Admin] list_conversation_units: agent search_traces failed:', err instanceof Error ? err.message : err)
       }
@@ -5319,19 +5337,31 @@ export class AdminModule extends ModuleBase {
     }
 
     // 3. union + 时间排序
-    const taskUnits: ConversationUnit[] = tasks.map((t) => ({
-      kind: 'task' as const,
-      task: t,
-      trace_count: 0,  // 列表层占位；前端展开时 lazy load
-      worker_trace_id: null,  // 同上
-    }))
+    const taskUnits: ConversationUnit[] = tasks.map((t) => {
+      const relatedDispatches = relatedDispatchByTask.get(t.id) ?? []
+      const latestDispatch = relatedDispatches
+        .slice()
+        .sort((a, b) => b.started_at.localeCompare(a.started_at))[0]
+      const activityAt = [t.updated_at, latestDispatch?.started_at]
+        .filter((x): x is string => Boolean(x))
+        .sort()
+        .at(-1) ?? t.updated_at
+      return {
+        kind: 'task' as const,
+        task: t,
+        activity_at: activityAt,
+        activity_summary: latestDispatch?.trigger_summary ?? t.title,
+        trace_count: 0,  // 列表层占位；前端展开时 lazy load
+        worker_trace_id: null,  // 同上
+      }
+    })
     const orphanUnits: ConversationUnit[] = orphans.map((t) => ({
       kind: 'orphan_dispatcher' as const,
       trace: t,
     }))
 
     const timeOf = (u: ConversationUnit): string =>
-      u.kind === 'task' ? u.task.created_at : u.trace.started_at
+      u.kind === 'task' ? u.activity_at : u.trace.started_at
 
     const all = [...taskUnits, ...orphanUnits]
     const sortOrder = params.sort?.order ?? 'desc'

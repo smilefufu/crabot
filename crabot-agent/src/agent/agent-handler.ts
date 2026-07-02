@@ -1086,7 +1086,8 @@ export class AgentHandler {
       const conversationLog: ConversationEntry[] = (context.trigger_messages ?? []).map(
         (m) => ({ role: 'human' as const, content: formatMessageContent(m) }),
       )
-      // sentInfoMessage：send_message(intent='info') 成功至少一次；forced_summary 判断依据
+      // sentInfoMessage：send_message(intent='info') 成功至少一次。明确 end_turn 场景下，
+      // 任意已送达 info 都允许作为"已有交付"收口；无法可靠判断某条 info 是过程播报还是真交付。
       let sentInfoMessage = false
       // 任务触发类型：scheduled 任务始终抑制 forced_summary
       const workerTriggerType: 'scheduled' | 'message' =
@@ -1630,10 +1631,10 @@ export class AgentHandler {
           ...(context.resolved_permissions ? { resolvedPermissions: context.resolved_permissions } : {}),
           contentReviewer: this.buildContentReviewer(),
           sessionType: context.task_origin?.session_type ?? 'private',
-          // spec §4.13.5 修订：去掉 goalSetCache 触发条件，让 silent end_turn 拦截 + audit gate 各管各、不再彼此假设兜底。
-          // - 第 1 道闸（FORCED_SUMMARY_PROMPT）：sentInfoMessage=false 时拦截
-          // - 第 2 道闸（endTurnGate §4.13.4 二级分支）：goal 设了但 everSentMessage=false 时拦截
-          // 两者独立计数、独立兜底；任何一道闸触发都不放过"goal mode + 静默 end_turn + 0 交付"。
+          // 一旦有 info 送达，就允许后续 silent end_turn 作为正常收口：系统无法可靠判断
+          // 某条 info 是过程播报还是真实交付，只能尊重已送达事实。scheduled 任务同样保持静默收口。
+          // 注意：这只适用于明确 stopReason='end_turn' 的收口；stopReason=null 是 adapter/stream
+          // 终态缺失，query-loop 会按失败处理，不能借此完成 task。
           suppressForcedSummary: () => workerTriggerType === 'scheduled' || sentInfoMessage,
           // Goal mode 缓冲消息 flush 钩子：engine 在 stop_reason='tool_use' 续 turn 之前
           // 和 endTurnGate 返回 null 后调用。把 taskState.outboundBuffer 里截留的 info
