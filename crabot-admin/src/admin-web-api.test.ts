@@ -6,7 +6,7 @@ import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest
 import http from 'node:http'
 import fs from 'node:fs/promises'
 import AdminModule from './index.js'
-import type { ChannelMessageRef, DialogObjectApplication, Friend, FriendPermissionConfig, LoginResponse } from './types.js'
+import type { ChannelMessageRef, DialogObjectApplication, Friend, FriendPermissionConfig, ListConversationUnitsResult, LoginResponse, Task } from './types.js'
 import { AdminErrorCode, createCliAccessConfig } from './types.js'
 import { newCredentialsFromPassword, writeCredentials } from './credentials.js'
 
@@ -424,6 +424,90 @@ describe('Admin Web API', () => {
       )
       const startCall = callSpy.mock.calls.find(c => c[1] === 'start_task')
       expect(startCall?.[2]).toHaveProperty('resolved_permissions')
+    })
+  })
+
+  describe('list_conversation_units activity ordering', () => {
+    const taskIds = ['test-activity-old', 'test-activity-new']
+
+    afterEach(() => {
+      for (const id of taskIds) admin['tasks'].delete(id as never)
+    })
+
+    it('orders task rows by last activity instead of original creation time', async () => {
+      const revivedOldTask = makeTask({
+        id: 'test-activity-old',
+        title: '开卷考试策略 v2',
+        created_at: '2026-07-01T16:15:15.921Z',
+        updated_at: '2026-07-02T00:17:45.462Z',
+        messages: [
+          { id: 'm-old-1', role: 'human', content: '原始需求', timestamp: '2026-07-01T16:15:15.921Z' },
+          { id: 'm-old-2', role: 'human', content: '那你现在还不赶紧去做？', timestamp: '2026-07-02T00:12:42.281Z' },
+        ],
+      })
+      const newlyCreatedTask = makeTask({
+        id: 'test-activity-new',
+        title: '较新创建但没有后续活动',
+        created_at: '2026-07-02T00:10:00.000Z',
+        updated_at: '2026-07-02T00:10:00.000Z',
+        messages: [
+          { id: 'm-new-1', role: 'human', content: '新任务', timestamp: '2026-07-02T00:10:00.000Z' },
+        ],
+      })
+      admin['tasks'].set(revivedOldTask.id as never, revivedOldTask)
+      admin['tasks'].set(newlyCreatedTask.id as never, newlyCreatedTask)
+
+      const result = await admin['handleListConversationUnits']({
+        page: 1,
+        page_size: 10,
+        filter: { trigger_type: 'task' },
+      }) as ListConversationUnitsResult
+
+      const ids = result.items
+        .filter((u): u is Extract<typeof u, { kind: 'task' }> => u.kind === 'task')
+        .map((u) => u.task.id)
+      expect(ids.indexOf('test-activity-old')).toBeLessThan(ids.indexOf('test-activity-new'))
+    })
+
+    it('filters orphan dispatcher traces by the search keyword', async () => {
+      const callAgentRpc = vi.spyOn(admin as unknown as { callAgentRpc: (...args: unknown[]) => Promise<unknown> }, 'callAgentRpc')
+        .mockResolvedValue({
+          traces: [
+            {
+              trace_id: 'trace-match',
+              trigger_type: 'message',
+              trigger_summary: '[private×1] needle message',
+              started_at: '2026-07-02T00:12:37.518Z',
+              status: 'completed',
+              span_count: 1,
+            },
+            {
+              trace_id: 'trace-unrelated',
+              trigger_type: 'message',
+              trigger_summary: '[group×1] unrelated chatter',
+              started_at: '2026-07-02T00:13:37.518Z',
+              status: 'completed',
+              span_count: 1,
+            },
+          ],
+          total: 2,
+        })
+
+      const result = await admin['handleListConversationUnits']({
+        page: 1,
+        page_size: 10,
+        filter: { trigger_type: 'message', search: 'needle' },
+      }) as ListConversationUnitsResult
+
+      expect(callAgentRpc).toHaveBeenCalledWith(
+        'search_traces',
+        expect.objectContaining({ keyword: 'needle' }),
+      )
+      expect(result.items).toHaveLength(1)
+      expect(result.items[0]).toMatchObject({
+        kind: 'orphan_dispatcher',
+        trace: { trace_id: 'trace-match' },
+      })
     })
   })
 
@@ -1484,6 +1568,22 @@ function makePrivateMessageRef(params: {
       is_mention_crab: false,
     },
     platform_timestamp: '2026-04-19T00:00:00.000Z',
+  }
+}
+
+function makeTask(overrides: Partial<Task> & Pick<Task, 'id' | 'title' | 'created_at' | 'updated_at'>): Task {
+  return {
+    id: overrides.id,
+    status: overrides.status ?? 'completed',
+    priority: overrides.priority ?? 'normal',
+    title: overrides.title,
+    source: overrides.source ?? { origin: 'human', channel_id: 'telegram-001', session_id: 'session-1', trigger_type: 'message' },
+    messages: overrides.messages ?? [],
+    tags: overrides.tags ?? [],
+    created_at: overrides.created_at,
+    updated_at: overrides.updated_at,
+    ...(overrides.completed_at ? { completed_at: overrides.completed_at } : {}),
+    ...(overrides.result ? { result: overrides.result } : {}),
   }
 }
 

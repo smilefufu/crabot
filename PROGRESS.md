@@ -1,6 +1,14 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-01 — 修复 recent terminal supplement 的 checkpoint 来源
+> 最后更新：2026-07-02 — 修复 Traces UI 活动排序、terminal supplement trace 续写与 null stopReason 误完成
+
+## 2026-07-02 — 修复 Traces UI 活动排序、terminal supplement trace 续写与 null stopReason 误完成
+
+- Traces 主列表的 task 行改按最后活动时间排序：`activity_at = max(task.updated_at, 最近关联 dispatcher started_at)`；标题/摘要优先显示最近 dispatcher 消息，避免旧 task 收到 supplement 后仍沉在创建时间位置、也避免只能看到原始长标题。
+- `list_conversation_units` 搜索把关键词传给 `search_traces`，并在 Admin 侧对 orphan/related dispatcher 二次过滤，避免搜一个补充消息时混入大量无关孤儿对话。
+- terminal supplement resume 才把历史 worker trace id 写入 `resumeFrom.resumeTraceId`，`handleExecuteTask` 通过 `TraceStore.reactivateTraceById()` 复用已完成 worker trace 继续追加 spans；普通 restart resume 不携带 `resumeTraceId`，仍走 `resumableCheckpoints` + `reactivateResumableTrace(task_id)`。修复同一 task 每次 terminal supplement 生成一条新 worker trace 的问题，同时避免把 restart 语义污染成历史 trace revive。旧历史数据里已产生的多 worker trace 不自动合并。
+- 明确区分 `stopReason='end_turn'` 与 `stopReason=null`：任意已送达 `send_message(intent='info')` 仍允许作为“已有交付”收口；但 LLM stream 没有 terminal stopReason 时按失败处理，不能把空输出误标 completed（对应 trace `6646e158` 的事故形态）。
+- 验证：Admin 定向回归 2 个通过；Agent resume/trace-store/query-loop 定向回归 14 个通过；query-loop 全量 33 个通过；`crabot-admin` / `crabot-agent` / `crabot-admin/web` `tsc --noEmit` 均通过。
 
 ## 2026-07-01 — 修复 recent terminal supplement 的 checkpoint 来源
 

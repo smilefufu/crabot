@@ -187,6 +187,31 @@ describe('UnifiedAgent.handleResumeTask — I1: task_origin 从 task.source 重�
     // 新行为：不 consume；旧 trace 由 reactivateResumableTrace 复用续写，一个 task 一条连续 trace。
     expect(consumeResumableCheckpoint).not.toHaveBeenCalled()
   })
+
+  it('restart resume 不携带历史 trace id，继续由 resumable checkpoint 复用 running trace', async () => {
+    const { agent, executeScheduledTaskInBackground } = buildAgent({
+      getResumableCheckpoint: vi.fn().mockReturnValue({
+        traceId: 'trace-running',
+        checkpoint: {
+          agent_version: AGENT_VERSION,
+          messages: [{ id: 'm1', role: 'user', content: 'hi', timestamp: 1 }],
+          worker_state: { todo_items: [] },
+          system_prompt: 'SP',
+        },
+      }),
+    })
+
+    const result = await agent.handleResumeTask({ task_id: 'task-1' })
+
+    expect(result.resumed).toBe(true)
+    const [, , options] = executeScheduledTaskInBackground.mock.calls[0] as [
+      unknown,
+      unknown,
+      { resumeFrom?: { terminalSupplementText?: string; resumeTraceId?: string } },
+    ]
+    expect(options.resumeFrom?.terminalSupplementText).toBeUndefined()
+    expect(options.resumeFrom?.resumeTraceId).toBeUndefined()
+  })
 })
 
 describe('UnifiedAgent.handleResumeTaskWithSupplement', () => {
@@ -215,9 +240,10 @@ describe('UnifiedAgent.handleResumeTaskWithSupplement', () => {
     const [, , options] = executeScheduledTaskInBackground.mock.calls[0] as [
       unknown,
       unknown,
-      { resumeFrom?: { terminalSupplementText?: string } },
+      { resumeFrom?: { terminalSupplementText?: string; resumeTraceId?: string } },
     ]
     expect(options.resumeFrom?.terminalSupplementText).toBe('继续刚才失败的任务')
+    expect(options.resumeFrom?.resumeTraceId).toBe('trace-completed')
   })
 })
 

@@ -230,6 +230,23 @@ export class TraceStore {
     return trace
   }
 
+  /**
+   * Terminal supplement resume 用：从已完成的历史 worker trace 继续追加 spans。
+   * 与 reactivateResumableTrace 不同，这里的 checkpoint 来自已落盘 trace.resume_checkpoint，
+   * 不在 resumableCheckpoints 集合里。
+   */
+  reactivateTraceById(traceId: string): import('../types.js').AgentTrace | null {
+    const trace = this.traces.get(traceId) ?? this.readTraceFromIndex(traceId)
+    if (!trace) return null
+    trace.status = 'running'
+    trace.ended_at = undefined
+    trace.duration_ms = undefined
+    trace.outcome = undefined
+    this.traces.set(trace.trace_id, trace)
+    if (!this.order.includes(trace.trace_id)) this.order.push(trace.trace_id)
+    return trace
+  }
+
   /** admin 放弃 resume 时调用：finalize 成 failed 落日期文件 + 清 running 文件。 */
   finalizeUnresumedCheckpoint(taskId: string): void {
     const entry = this.resumableCheckpoints.get(taskId)

@@ -797,4 +797,39 @@ describe('TraceStore reactivateResumableTrace（resume 续写复用旧 trace）'
     const store = new TraceStore(10)
     expect(store.reactivateResumableTrace('nope')).toBeNull()
   })
+
+  it('按历史 trace_id 复用已完成 worker trace，供 terminal supplement 续写', () => {
+    const dir = makeTempDir()
+    try {
+      const store1 = new TraceStore(10, dir)
+      const trace = store1.startTrace({
+        module_id: 'agent-1',
+        trigger: { type: 'task', summary: '历史已完成任务' },
+        related_task_id: 'task-terminal',
+      })
+      const span = store1.startSpan(trace.trace_id, { type: 'llm_call', details: { iteration: 1 } })
+      store1.endSpan(trace.trace_id, span.span_id, 'completed')
+      store1.flushWorkerCheckpoint('task-terminal', trace.trace_id, {
+        agent_version: 'v1',
+        system_prompt: 'sys',
+        messages: [{ id: 'm1', role: 'user', content: 'hi', timestamp: 1 }] as never,
+        worker_state: { todo_items: [], goal_revision_unlocked: false },
+      })
+      store1.endTrace(trace.trace_id, 'completed', { summary: 'done' })
+      store1.clearCheckpointFile('task-terminal')
+
+      const store2 = new TraceStore(10, dir)
+      const reactivated = store2.reactivateTraceById(trace.trace_id)
+      expect(reactivated).not.toBeNull()
+      expect(reactivated!.trace_id).toBe(trace.trace_id)
+      expect(reactivated!.status).toBe('running')
+      expect(reactivated!.outcome).toBeUndefined()
+
+      const span2 = store2.startSpan(trace.trace_id, { type: 'llm_call', details: { iteration: 2 } })
+      store2.endSpan(trace.trace_id, span2.span_id, 'completed')
+      expect(store2.getTrace(trace.trace_id)!.spans).toHaveLength(2)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })

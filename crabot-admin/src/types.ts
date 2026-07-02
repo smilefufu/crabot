@@ -921,7 +921,7 @@ export type ListTasksResult = PaginatedResult<Task>
 // Conversation Units —— spec 2026-06-09-task-trace-tool-unification.md §4.3
 // ============================================================================
 // Admin UI 主列表的混合渲染单元：task 维度 + 孤儿 dispatcher trace 按时间合并。
-// 替代旧的 TraceTable grouped/flat 模式。后端原生分页（task.created_at / trace.started_at
+// 替代旧的 TraceTable grouped/flat 模式。后端原生分页（task activity / trace.started_at
 // 作为统一时间字段）。
 
 /** Admin 视角下的 trace 元数据子集（agent 模块 TraceIndexEntry 的简化版）。 */
@@ -947,6 +947,10 @@ export type ConversationUnit =
   | {
       kind: 'task'
       task: Task
+      /** 主列表排序/展示使用的最后活动时间：max(task.updated_at, related dispatcher/task trace time). */
+      activity_at: string
+      /** 主列表摘要：优先显示最近 dispatcher trigger_summary，回退 task.title。 */
+      activity_summary: string
       /** 含 dispatcher + worker + subagents trace 总数（lazy load tree 时再拉完整） */
       trace_count: number
       /** 主 worker trace_id；无 worker 时为 null */

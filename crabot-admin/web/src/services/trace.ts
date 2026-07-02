@@ -263,6 +263,8 @@ export type ConversationUnit =
   | {
       kind: 'task'
       task: ConvTaskBrief
+      activity_at: string
+      activity_summary: string
       trace_count: number
       worker_trace_id: string | null
     }

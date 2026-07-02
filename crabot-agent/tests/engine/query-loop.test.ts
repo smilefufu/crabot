@@ -61,6 +61,13 @@ function silentEndTurnResponse(): ReadonlyArray<StreamChunk> {
   ]
 }
 
+function nullStopResponse(): ReadonlyArray<StreamChunk> {
+  return [
+    { type: 'message_start', messageId: 'msg-1' },
+    { type: 'message_end', stopReason: null, usage: { inputTokens: 10, outputTokens: 0 } },
+  ]
+}
+
 // --- Tests ---
 
 describe('runEngine', () => {
@@ -235,6 +242,19 @@ describe('runEngine', () => {
     expect(result.error).toContain('Network timeout')
   })
 
+  it('returns failed when LLM stream ends without a terminal stopReason', async () => {
+    const adapter = mockAdapter([nullStopResponse()])
+
+    const result = await runEngine({
+      prompt: 'Hi',
+      adapter,
+      options: baseOptions({ suppressForcedSummary: () => true }),
+    })
+
+    expect(result.outcome).toBe('failed')
+    expect(result.error).toContain('missing terminal stopReason')
+  })
+
   it('returns failed when adapter yields error chunk', async () => {
     const adapter = mockAdapter([
       [
@@ -327,6 +347,25 @@ describe('runEngine', () => {
 
       expect(gate).toHaveBeenCalledOnce()
       expect(result.outcome).toBe('completed')
+    })
+
+    it('suppressForcedSummary=false + silent end_turn: forces a follow-up instead of completing empty', async () => {
+      const adapter = mockAdapter([
+        silentEndTurnResponse(),
+        textResponse('补充后的最终交付'),
+      ])
+
+      const result = await runEngine({
+        prompt: 'test',
+        adapter,
+        options: baseOptions({
+          suppressForcedSummary: () => false,
+        }),
+      })
+
+      expect(result.outcome).toBe('completed')
+      expect(result.finalText).toBe('补充后的最终交付')
+      expect(result.totalTurns).toBe(2)
     })
 
     it('text end_turn: endTurnGate 也会被调用', async () => {

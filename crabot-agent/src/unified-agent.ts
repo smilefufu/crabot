@@ -2074,6 +2074,7 @@ export class UnifiedAgent extends ModuleBase {
             todoItems: entry.checkpoint.worker_state.todo_items,
             goalRevisionUnlocked: entry.checkpoint.worker_state.goal_revision_unlocked,
             cwd: entry.checkpoint.worker_state.cwd,
+            ...(mode === 'terminal_supplement' ? { resumeTraceId: entry.traceId } : {}),
             ...(params.terminalSupplementText !== undefined ? { terminalSupplementText: params.terminalSupplementText } : {}),
           },
         },
@@ -2183,7 +2184,11 @@ export class UnifiedAgent extends ModuleBase {
     // 让一个 task 跨重启是**一条连续 trace**，而非每个 run 一条；新 run 的 span 追加到旧 trace 上。
     // 非 resume，或复用失败（罕见边界），正常新建。
     const reactivated = taskParams.resumeFrom
-      ? this.traceStore.reactivateResumableTrace(taskParams.task.task_id)
+      ? (
+          taskParams.resumeFrom.resumeTraceId
+            ? this.traceStore.reactivateTraceById(taskParams.resumeFrom.resumeTraceId)
+            : this.traceStore.reactivateResumableTrace(taskParams.task.task_id)
+        )
       : null
     const trace = reactivated ?? this.traceStore.startTrace({
       module_id: this.config.moduleId,
