@@ -87,6 +87,13 @@ export class SessionManager {
     return type ? all.filter((s) => s.type === type) : all
   }
 
+  legacyIdsFor(sessionId: string): string[] {
+    const canonicalId = this.aliases.get(sessionId) ?? sessionId
+    return Array.from(this.aliases.entries())
+      .filter(([, targetId]) => targetId === canonicalId)
+      .map(([legacyId]) => legacyId)
+  }
+
   private ensureParticipant(session: Session, userId: string): boolean {
     const exists = session.participants.some((p) => p.platform_user_id === userId)
     if (exists) return false

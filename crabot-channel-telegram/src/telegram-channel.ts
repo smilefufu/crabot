@@ -517,7 +517,7 @@ export class TelegramChannel extends ModuleBase {
     const firstId = String(sentIds[0])
     const sentAt = generateTimestamp()
 
-    await this.messageStore.migrateSessionId(params.session_id, session.id)
+    await this.migrateLegacySessionHistory(params.session_id, session.id)
     await this.messageStore.appendOutbound({
       sessionId: session.id,
       platformMessageId: firstId,
@@ -747,7 +747,7 @@ export class TelegramChannel extends ModuleBase {
     const pageSize = params.limit ?? params.pagination?.page_size ?? 20
     const page = params.limit ? undefined : (params.pagination?.page ?? 1)
 
-    await this.messageStore.migrateSessionId(params.session_id, session.id)
+    await this.migrateLegacySessionHistory(params.session_id, session.id)
     const { items, total } = await this.messageStore.query({
       sessionId: session.id,
       keyword: params.keyword,
@@ -771,11 +771,21 @@ export class TelegramChannel extends ModuleBase {
     const session = this.sessionManager.findById(params.session_id)
     if (!session) throw new Error('Session not found')
 
-    await this.messageStore.migrateSessionId(params.session_id, session.id)
+    await this.migrateLegacySessionHistory(params.session_id, session.id)
     const msg = await this.messageStore.findByMessageId(session.id, params.platform_message_id)
     if (!msg) throw new Error('Message not found')
 
     return storedMessageToProtocol(msg)
+  }
+
+  private async migrateLegacySessionHistory(requestedSessionId: string, canonicalSessionId: string): Promise<void> {
+    const legacyIds = new Set([
+      requestedSessionId,
+      ...this.sessionManager.legacyIdsFor(canonicalSessionId),
+    ])
+    for (const legacyId of legacyIds) {
+      await this.messageStore.migrateSessionId(legacyId, canonicalSessionId)
+    }
   }
 
   private async handleGetPlatformUserInfo(params: { platform_user_id: string }) {

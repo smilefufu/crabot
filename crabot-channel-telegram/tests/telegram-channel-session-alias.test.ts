@@ -165,12 +165,8 @@ describe('TelegramChannel session aliases', () => {
       session_id: stableId,
       pagination: { page: 1, page_size: 20 },
     })
-    const legacyHistory = await (channel as any).handleGetHistory({
-      session_id: legacyId,
-      pagination: { page: 1, page_size: 20 },
-    })
-    const legacyMessage = await (channel as any).handleGetMessage({
-      session_id: legacyId,
+    const canonicalMessage = await (channel as any).handleGetMessage({
+      session_id: stableId,
       platform_message_id: 'legacy-message-1',
     })
     const migratedCanonicalHistory = await (channel as any).handleGetHistory({
@@ -178,9 +174,11 @@ describe('TelegramChannel session aliases', () => {
       pagination: { page: 1, page_size: 20 },
     })
 
-    expect(canonicalHistory.items.map((m: any) => m.platform_message_id)).toEqual(['stable-message-1'])
-    expect(legacyHistory.items.map((m: any) => m.platform_message_id)).toEqual(['stable-message-1', 'legacy-message-1'])
-    expect(legacyMessage.content.text).toBe('legacy history')
+    expect(canonicalHistory.items.map((m: any) => m.platform_message_id)).toEqual([
+      'stable-message-1',
+      'legacy-message-1',
+    ])
+    expect(canonicalMessage.content.text).toBe('legacy history')
     expect(migratedCanonicalHistory.items.map((m: any) => m.platform_message_id)).toEqual([
       'stable-message-1',
       'legacy-message-1',
