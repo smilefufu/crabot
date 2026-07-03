@@ -123,6 +123,30 @@ export class MessageStore {
     return records.find((r) => r.platform_message_id === platformMessageId)
   }
 
+  async migrateSessionId(fromSessionId: string, toSessionId: string): Promise<void> {
+    if (fromSessionId === toSessionId) return
+
+    const fromPath = this.sessionFilePath(fromSessionId)
+    const toPath = this.sessionFilePath(toSessionId)
+    if (!fsSync.existsSync(fromPath)) return
+
+    if (!fsSync.existsSync(toPath)) {
+      await fs.rename(fromPath, toPath)
+      return
+    }
+
+    const [stableContent, legacyContent] = await Promise.all([
+      fs.readFile(toPath, 'utf-8'),
+      fs.readFile(fromPath, 'utf-8'),
+    ])
+    if (legacyContent) {
+      const prefix = stableContent && !stableContent.endsWith('\n') ? '\n' : ''
+      const suffix = legacyContent.endsWith('\n') ? '' : '\n'
+      await fs.appendFile(toPath, prefix + legacyContent + suffix, 'utf-8')
+    }
+    await fs.unlink(fromPath)
+  }
+
   // ── 内部方法 ──────────────────────────────────────────────────────────────
 
   private sessionFilePath(sessionId: string): string {
