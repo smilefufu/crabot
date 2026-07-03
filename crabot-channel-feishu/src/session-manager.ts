@@ -243,11 +243,18 @@ export class SessionManager {
           ? Object.values(raw.sessions)
           : []
       for (const session of sessions) {
+        if (!session.platform_session_id) continue
+        const legacyId = session.id
         const stableId = this.stableSessionId(session.platform_session_id)
-        this.sessions.set(session.id, session)
-        this.platformToId.set(session.platform_session_id, session.id)
-        if (stableId !== session.id) {
-          this.aliases.set(stableId, session.id)
+        const canonical: Session = {
+          ...session,
+          id: stableId,
+          channel_id: this.channelId,
+        }
+        this.sessions.set(stableId, canonical)
+        this.platformToId.set(canonical.platform_session_id, stableId)
+        if (legacyId && legacyId !== stableId) {
+          this.aliases.set(legacyId, stableId)
         }
       }
     } catch (err) {

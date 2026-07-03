@@ -44,7 +44,7 @@ describe('upsert (private)', () => {
     expect(second.session.id).toMatch(/^[0-9a-z]{8}$/)
   })
 
-  it('keeps loaded session ids canonical and accepts new short stable ids as aliases', () => {
+  it('canonicalizes loaded legacy session ids to stable ids and keeps legacy lookup aliases', () => {
     fs.writeFileSync(path.join(tmpDir, 'sessions.json'), JSON.stringify([
       {
         id: 'legacy-feishu-session-id',
@@ -59,46 +59,25 @@ describe('upsert (private)', () => {
         created_at: '2026-01-01T00:00:00.000Z',
         updated_at: '2026-01-01T00:00:00.000Z',
       },
-      {
-        id: 'f3080c32-210f-57f3-6e5c-c8f1a6166c69',
-        channel_id: 'channel-feishu-test',
-        type: 'private',
-        platform_session_id: 'ou_bob',
-        title: 'Bob',
-        participants: [{ platform_user_id: 'ou_bob', role: 'member' }],
-        permissions: { desktop: false, network: { mode: 'allow_all', rules: [] }, storage: [] },
-        memory_scopes: ['ou_bob'],
-        workspace_path: '',
-        created_at: '2026-01-01T00:00:00.000Z',
-        updated_at: '2026-01-01T00:00:00.000Z',
-      },
     ]), 'utf-8')
 
-    const fresh = new SessionManager('channel-feishu-test', tmpDir)
-    const session = fresh.findByPlatformId('ou_alice')
-    const uuidSession = fresh.findByPlatformId('ou_bob')
-    const probe = new SessionManager('channel-feishu-test', path.join(tmpDir, 'short-id-probe'))
-    const shortId = probe.upsert({
+    const probe = new SessionManager('channel-feishu-test', path.join(tmpDir, 'stable-id-probe'))
+    const stableId = probe.upsert({
       platform_session_id: 'ou_alice',
       type: 'private',
       title: 'Alice',
       sender_id: 'ou_alice',
       sender_name: 'Alice',
-    }).session
-    const uuidShortId = probe.upsert({
-      platform_session_id: 'ou_bob',
-      type: 'private',
-      title: 'Bob',
-      sender_id: 'ou_bob',
-      sender_name: 'Bob',
-    }).session
+    }).session.id
 
-    expect(session?.id).toBe('legacy-feishu-session-id')
-    expect(uuidSession?.id).toBe('f3080c32-210f-57f3-6e5c-c8f1a6166c69')
-    expect(shortId.id).toMatch(/^[0-9a-z]{8}$/)
-    expect(uuidShortId.id).toMatch(/^[0-9a-z]{8}$/)
-    expect(fresh.findById(shortId.id)?.id).toBe('legacy-feishu-session-id')
-    expect(fresh.findById(uuidShortId.id)?.id).toBe('f3080c32-210f-57f3-6e5c-c8f1a6166c69')
+    const fresh = new SessionManager('channel-feishu-test', tmpDir)
+    const session = fresh.findByPlatformId('ou_alice')
+
+    expect(stableId).toMatch(/^[0-9a-z]{8}$/)
+    expect(session?.id).toBe(stableId)
+    expect(fresh.findById(stableId)?.id).toBe(stableId)
+    expect(fresh.findById('legacy-feishu-session-id')?.id).toBe(stableId)
+    expect(fresh.listSessions('private').map((s) => s.id)).toEqual([stableId])
   })
 
   it('first call creates a private session', () => {
@@ -266,8 +245,9 @@ describe('removeByPlatformId', () => {
     ]), 'utf-8')
 
     const fresh = new SessionManager('channel-feishu-test', tmpDir)
-    expect(fresh.findById(shortId)?.id).toBe('legacy-feishu-session-id')
-    fresh.removeById(shortId)
+    expect(fresh.findById(shortId)?.id).toBe(shortId)
+    expect(fresh.findById('legacy-feishu-session-id')?.id).toBe(shortId)
+    fresh.removeById('legacy-feishu-session-id')
 
     const recreated = fresh.upsert({
       platform_session_id: 'ou_alice',
