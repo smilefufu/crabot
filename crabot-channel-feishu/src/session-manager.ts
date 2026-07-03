@@ -7,7 +7,8 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
-import { generateId, generateTimestamp } from 'crabot-shared'
+import crypto from 'node:crypto'
+import { generateTimestamp } from 'crabot-shared'
 import type {
   ModuleId,
   Session,
@@ -32,6 +33,7 @@ function isBetterTitle(incoming: string, current: string, platformSessionId: str
 export class SessionManager {
   private sessions: Map<string, Session> = new Map()
   private platformToId: Map<string, string> = new Map()
+  private aliases: Map<string, string> = new Map()
   private readonly filePath: string
   private readonly channelId: ModuleId
 
@@ -156,21 +158,25 @@ export class SessionManager {
     if (!existing) return undefined
     this.sessions.delete(existing.id)
     this.platformToId.delete(platformSessionId)
+    this.deleteAliasesFor(existing.id)
     this.save()
     return existing
   }
 
   removeById(sessionId: string): Session | undefined {
-    const existing = this.sessions.get(sessionId)
+    const canonicalId = this.aliases.get(sessionId) ?? sessionId
+    const existing = this.sessions.get(canonicalId)
     if (!existing) return undefined
     this.sessions.delete(existing.id)
     this.platformToId.delete(existing.platform_session_id)
+    this.deleteAliasesFor(existing.id)
     this.save()
     return existing
   }
 
   findById(sessionId: string): Session | undefined {
-    return this.sessions.get(sessionId)
+    const canonicalId = this.aliases.get(sessionId) ?? sessionId
+    return this.sessions.get(canonicalId)
   }
 
   findByPlatformId(platformSessionId: string): Session | undefined {
@@ -191,7 +197,7 @@ export class SessionManager {
   }): Session {
     const now = generateTimestamp()
     const session: Session = {
-      id: generateId(),
+      id: this.stableSessionId(params.platform_session_id),
       channel_id: this.channelId,
       type: params.type,
       platform_session_id: params.platform_session_id,
@@ -237,11 +243,31 @@ export class SessionManager {
           ? Object.values(raw.sessions)
           : []
       for (const session of sessions) {
+        const stableId = this.stableSessionId(session.platform_session_id)
         this.sessions.set(session.id, session)
         this.platformToId.set(session.platform_session_id, session.id)
+        if (stableId !== session.id) {
+          this.aliases.set(stableId, session.id)
+        }
       }
     } catch (err) {
       console.warn('[SessionManager] Failed to parse sessions:', err)
+    }
+  }
+
+  private stableSessionId(platformSessionId: string): string {
+    const digest = crypto
+      .createHash('sha256')
+      .update(`${this.channelId}\0${platformSessionId}`)
+      .digest()
+    return digest.readUIntBE(0, 6).toString(36).padStart(8, '0').slice(0, 8)
+  }
+
+  private deleteAliasesFor(canonicalId: string): void {
+    for (const [alias, target] of Array.from(this.aliases.entries())) {
+      if (target === canonicalId) {
+        this.aliases.delete(alias)
+      }
     }
   }
 

@@ -14,7 +14,9 @@ import { describe, it, expect } from 'vitest'
 import type { Schedule, ScheduleTargetSession } from './types.js'
 import {
   migrateScheduleTargetSession,
+  repairScheduleTargetSession,
   type SessionTypeLookup,
+  type TargetSessionRepairLookup,
 } from './schedule-migration.js'
 
 function makeSchedule(overrides: Partial<Schedule> = {}): Schedule {
@@ -235,5 +237,88 @@ describe('migrateScheduleTargetSession', () => {
     const lookup: SessionTypeLookup = async () => 'group'
     const migrated = await migrateScheduleTargetSession(schedule, lookup)
     expect(migrated).toBe(schedule)
+  })
+})
+
+describe('repairScheduleTargetSession', () => {
+  it('preserves valid target_session', async () => {
+    const schedule = makeSchedule({
+      target_session: {
+        channel_id: 'wechat-X',
+        session_id: 'valid-session',
+        type: 'group',
+      },
+    })
+
+    const lookup: TargetSessionRepairLookup = async () => ({
+      session_id: 'valid-session',
+      type: 'group',
+    })
+
+    expect(await repairScheduleTargetSession(schedule, lookup)).toBe(schedule)
+  })
+
+  it('rewrites stale target_session to the current session id', async () => {
+    const schedule = makeSchedule({
+      target_session: {
+        channel_id: 'wechat-X',
+        session_id: 'stale-session',
+        type: 'group',
+      },
+    })
+
+    const lookup: TargetSessionRepairLookup = async () => ({
+      session_id: 'current-session',
+      type: 'group',
+    })
+
+    const repaired = await repairScheduleTargetSession(schedule, lookup)
+
+    expect(repaired).not.toBe(schedule)
+    expect(repaired.target_session).toEqual({
+      channel_id: 'wechat-X',
+      session_id: 'current-session',
+      type: 'group',
+    })
+    expect(new Date(repaired.updated_at).getTime()).toBeGreaterThan(
+      new Date(schedule.updated_at).getTime(),
+    )
+  })
+
+  it('uses platform_session_id when present for deterministic repair', async () => {
+    const schedule = makeSchedule({
+      target_session: {
+        channel_id: 'wechat-X',
+        session_id: 'stale-session',
+        platform_session_id: '12345@chatroom',
+        type: 'group',
+      },
+    })
+
+    let seenPlatformSessionId: string | undefined
+    const lookup: TargetSessionRepairLookup = async (_channelId, _sessionId, platformSessionId) => {
+      seenPlatformSessionId = platformSessionId
+      return { session_id: 'current-session', type: 'group' }
+    }
+
+    const repaired = await repairScheduleTargetSession(schedule, lookup)
+
+    expect(seenPlatformSessionId).toBe('12345@chatroom')
+    expect(repaired.target_session?.session_id).toBe('current-session')
+    expect(repaired.target_session?.platform_session_id).toBe('12345@chatroom')
+  })
+
+  it('preserves schedule when lookup cannot repair', async () => {
+    const schedule = makeSchedule({
+      target_session: {
+        channel_id: 'wechat-X',
+        session_id: 'stale-session',
+        type: 'group',
+      },
+    })
+
+    const lookup: TargetSessionRepairLookup = async () => undefined
+
+    expect(await repairScheduleTargetSession(schedule, lookup)).toBe(schedule)
   })
 })

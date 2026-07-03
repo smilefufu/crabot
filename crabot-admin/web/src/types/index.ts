@@ -674,6 +674,7 @@ export interface Schedule {
   target_session?: {
     channel_id: string
     session_id: string
+    platform_session_id?: string
     type: 'private' | 'group'
   }
   last_triggered_at?: string

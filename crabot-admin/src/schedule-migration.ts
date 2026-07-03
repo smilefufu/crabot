@@ -28,6 +28,13 @@ export type SessionTypeLookup = (
   sessionId: string,
 ) => Promise<'private' | 'group' | undefined>
 
+export type TargetSessionRepairLookup = (
+  channelId: string,
+  sessionId: string,
+  platformSessionId?: string,
+  schedule?: Schedule,
+) => Promise<{ session_id: string; platform_session_id?: string; type: 'private' | 'group' } | undefined>
+
 /**
  * 迁移单个 schedule：把 task_template.input.target_channel_id + target_session_id
  * 提升为顶层 target_session 字段。
@@ -80,6 +87,45 @@ export async function migrateScheduleTargetSession(
     task_template: {
       ...schedule.task_template,
       input: newInput,
+    },
+    updated_at: new Date().toISOString(),
+  }
+}
+
+export async function repairScheduleTargetSession(
+  schedule: Schedule,
+  lookupTargetSession: TargetSessionRepairLookup,
+): Promise<Schedule> {
+  const target = schedule.target_session
+  if (!target) return schedule
+
+  let resolved: Awaited<ReturnType<TargetSessionRepairLookup>>
+  try {
+    resolved = await lookupTargetSession(
+      target.channel_id,
+      target.session_id,
+      target.platform_session_id,
+      schedule,
+    )
+  } catch {
+    resolved = undefined
+  }
+
+  if (!resolved) return schedule
+  const platformSessionId = resolved.platform_session_id ?? target.platform_session_id
+  const same =
+    resolved.session_id === target.session_id
+    && resolved.type === target.type
+    && platformSessionId === target.platform_session_id
+  if (same) return schedule
+
+  return {
+    ...schedule,
+    target_session: {
+      channel_id: target.channel_id,
+      session_id: resolved.session_id,
+      ...(platformSessionId ? { platform_session_id: platformSessionId } : {}),
+      type: resolved.type,
     },
     updated_at: new Date().toISOString(),
   }
