@@ -518,7 +518,7 @@ export class TelegramChannel extends ModuleBase {
     const sentAt = generateTimestamp()
 
     await this.messageStore.appendOutbound({
-      sessionId: params.session_id,
+      sessionId: session.id,
       platformMessageId: firstId,
       text: text || '[非文本消息]',
       contentType: params.content.type,
@@ -747,7 +747,7 @@ export class TelegramChannel extends ModuleBase {
     const page = params.limit ? undefined : (params.pagination?.page ?? 1)
 
     const { items, total } = await this.messageStore.query({
-      sessionId: params.session_id,
+      sessionId: session.id,
       keyword: params.keyword,
       timeRange: params.time_range,
       page: page,
@@ -769,7 +769,7 @@ export class TelegramChannel extends ModuleBase {
     const session = this.sessionManager.findById(params.session_id)
     if (!session) throw new Error('Session not found')
 
-    const msg = await this.messageStore.findByMessageId(params.session_id, params.platform_message_id)
+    const msg = await this.messageStore.findByMessageId(session.id, params.platform_message_id)
     if (!msg) throw new Error('Message not found')
 
     return storedMessageToProtocol(msg)
