@@ -91,6 +91,7 @@ describe('send_message buffering (goal mode)', () => {
         hasGoal: () => true, // ← goal mode
         outboundBuffer: buffer,
         hasActiveAudit: () => false, // ← 工作态
+        getHumanInputEpoch: () => 7,
       }),
     })
 
@@ -110,6 +111,7 @@ describe('send_message buffering (goal mode)', () => {
       session_id: 's1',
       content: '正在干活',
       intent: 'info',
+      human_input_epoch: 7,
     })
     expect(buffer[0].sent_at_attempt_ms).toBeGreaterThan(0)
 
