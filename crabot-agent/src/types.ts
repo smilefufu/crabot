@@ -777,6 +777,8 @@ export interface ExecuteTaskParams {
     resumeTraceId?: string
     /** Task-scoped cwd（set_cwd 设置）；从 checkpoint worker_state.cwd 恢复，缺失则回退 home。 */
     cwd?: string
+    /** checkpoint 恢复用：当前 worker 对话里的真实人类输入轮次。 */
+    humanInputEpoch?: number
     /** checkpoint 恢复用：最近一次成功 info/default send_message 送达对应的人类输入轮次。 */
     lastDeliveredInfoEpoch?: number
     terminalSupplementText?: string
@@ -1171,6 +1173,8 @@ export interface WorkerStateSnapshot {
    * 持久——否则跨重启 resume 后 cwd 回退到 home，相对路径解析错位、后续上下文出问题。
    */
   cwd?: string
+  /** 当前 worker 对话里的真实人类输入轮次。 */
+  human_input_epoch?: number
   /** 最近一次成功 info/default send_message 送达对应的人类输入轮次。 */
   last_delivered_info_epoch?: number
 }

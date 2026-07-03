@@ -808,7 +808,7 @@ export class AgentHandler {
     // runWorkerLoop 检查 activeTasks.get(task_id)——提前写入即可完成 todoStore/goalRevisionUnlocked 的恢复。
     let currentInitialMessages: ReadonlyArray<EngineMessage> | undefined
     if (params.resumeFrom) {
-      const { initialMessages, todoItems, goalRevisionUnlocked, cwd: resumedCwd, lastDeliveredInfoEpoch } = params.resumeFrom
+      const { initialMessages, todoItems, goalRevisionUnlocked, cwd: resumedCwd, humanInputEpoch, lastDeliveredInfoEpoch } = params.resumeFrom
       // §3.4 修复：resume 走 initialMessages 分支，query-loop 会忽略 prompt，导致 runWorkerLoop
       // 里 buildTaskMessage 的 friend 队列 drain 被丢弃（drain-and-discard）。这里在 resume 装配处
       // 主动 drain 一次并注入首轮消息，否则宕机期间到达的 bg-notification（如 re-adopt 的 shell 退出）
@@ -828,6 +828,7 @@ export class AgentHandler {
           ? createUserMessage(`${resumeBgNotif}\n\n${wakeup.content}`)
           : wakeup
       currentInitialMessages = [...initialMessages, wakeupMsg]
+      const resumedHumanInputEpoch = (humanInputEpoch ?? 0) + (params.resumeFrom.terminalSupplementText ? 1 : 0)
       // 预建 taskState 让 runWorkerLoop 直接复用（不再用 new TodoStore()）
       if (!this.activeTasks.has(task.task_id)) {
         this.activeTasks.set(task.task_id, {
@@ -843,7 +844,7 @@ export class AgentHandler {
           activeAuditId: undefined,
           activeAsyncSubagentIds: new Set<string>(),
           everSentMessage: false,
-          humanInputEpoch: params.resumeFrom.terminalSupplementText ? 1 : 0,
+          humanInputEpoch: resumedHumanInputEpoch,
           ...(lastDeliveredInfoEpoch !== undefined ? { lastDeliveredInfoEpoch } : {}),
           everBufferedMessage: false,
           silentNoDeliveryRetries: 0,
@@ -1906,6 +1907,7 @@ export class AgentHandler {
                 worker_state: {
                   todo_items: [...taskState.todoStore.list()],
                   goal_revision_unlocked: taskState.goalRevisionUnlocked,
+                  human_input_epoch: taskState.humanInputEpoch,
                   last_delivered_info_epoch: taskState.lastDeliveredInfoEpoch,
                   ...(taskState.cwd !== undefined ? { cwd: taskState.cwd } : {}),
                 },
@@ -2926,6 +2928,7 @@ export class AgentHandler {
           worker_state: {
             todo_items: [...taskState.todoStore.list()],
             goal_revision_unlocked: taskState.goalRevisionUnlocked,
+            human_input_epoch: taskState.humanInputEpoch,
             last_delivered_info_epoch: taskState.lastDeliveredInfoEpoch,
             ...(taskState.cwd !== undefined ? { cwd: taskState.cwd } : {}),
           },

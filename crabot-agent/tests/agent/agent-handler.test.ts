@@ -853,6 +853,47 @@ describe('AgentHandler', () => {
       const gateResult = await callArgs.options.endTurnGate()
       expect(gateResult).toBeNull()
     })
+
+    it('跨重启 resume：恢复 humanInputEpoch，live supplement 后旧汇报不算当前轮汇报', async () => {
+      mockRunEngine.mockImplementation(async () => {
+        await new Promise(resolve => setTimeout(resolve, 20))
+        return makeEngineResult()
+      })
+      const rpcCall = vi.fn().mockResolvedValue({
+        task: { id: 'task_1', goal: { objective: 'finish current user request' } },
+      })
+      const handler = new AgentHandler(
+        {
+          modelId: 'test-model',
+          format: 'anthropic' as const,
+          env: { ANTHROPIC_BASE_URL: 'http://localhost:4000', ANTHROPIC_API_KEY: 'test-key' },
+        },
+        { systemPrompt: 'You are a helpful worker.' },
+        {
+          deps: {
+            rpcClient: { call: rpcCall } as never,
+            moduleId: 'agent-test',
+            resolveChannelPort: async () => 3003,
+            getAdminPort: async () => 3001,
+            getMemoryPort: async () => 3002,
+          },
+        },
+      )
+      await handler.executeTask({
+        task: makeTask({ goal: { objective: 'finish current user request' } } as never),
+        context: makeContext(),
+        resumeFrom: {
+          initialMessages: [{ id: 'm1', role: 'user', content: 'resume me', timestamp: 1 }] as never,
+          todoItems: [],
+          humanInputEpoch: 1,
+          lastDeliveredInfoEpoch: 0,
+        },
+      })
+
+      const callArgs = mockRunEngine.mock.calls[0][0]
+      const gateResult = await callArgs.options.endTurnGate()
+      expect(gateResult).toBe(GOAL_MODE_NO_DELIVERY_PROMPT)
+    })
   })
 
   describe('resolveSceneAnchorLabel', () => {

@@ -213,14 +213,14 @@ describe('UnifiedAgent.handleResumeTask — I1: task_origin 从 task.source 重�
     expect(options.resumeFrom?.resumeTraceId).toBeUndefined()
   })
 
-  it('restart resume 从 checkpoint worker_state 传递 lastDeliveredInfoEpoch', async () => {
+  it('restart resume 从 checkpoint worker_state 传递 humanInputEpoch 和 lastDeliveredInfoEpoch', async () => {
     const { agent, executeScheduledTaskInBackground } = buildAgent({
       getResumableCheckpoint: vi.fn().mockReturnValue({
         traceId: 'trace-running',
         checkpoint: {
           agent_version: AGENT_VERSION,
           messages: [{ id: 'm1', role: 'user', content: 'hi', timestamp: 1 }],
-          worker_state: { todo_items: [], last_delivered_info_epoch: 0 },
+          worker_state: { todo_items: [], human_input_epoch: 1, last_delivered_info_epoch: 0 },
           system_prompt: 'SP',
         },
       }),
@@ -232,8 +232,9 @@ describe('UnifiedAgent.handleResumeTask — I1: task_origin 从 task.source 重�
     const [, , options] = executeScheduledTaskInBackground.mock.calls[0] as [
       unknown,
       unknown,
-      { resumeFrom?: { lastDeliveredInfoEpoch?: number } },
+      { resumeFrom?: { humanInputEpoch?: number; lastDeliveredInfoEpoch?: number } },
     ]
+    expect(options.resumeFrom?.humanInputEpoch).toBe(1)
     expect(options.resumeFrom?.lastDeliveredInfoEpoch).toBe(0)
   })
 })

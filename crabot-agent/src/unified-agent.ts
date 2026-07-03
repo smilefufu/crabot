@@ -2074,6 +2074,7 @@ export class UnifiedAgent extends ModuleBase {
             todoItems: entry.checkpoint.worker_state.todo_items,
             goalRevisionUnlocked: entry.checkpoint.worker_state.goal_revision_unlocked,
             cwd: entry.checkpoint.worker_state.cwd,
+            humanInputEpoch: entry.checkpoint.worker_state.human_input_epoch,
             lastDeliveredInfoEpoch: entry.checkpoint.worker_state.last_delivered_info_epoch,
             ...(mode === 'terminal_supplement' ? { resumeTraceId: entry.traceId } : {}),
             ...(params.terminalSupplementText !== undefined ? { terminalSupplementText: params.terminalSupplementText } : {}),
