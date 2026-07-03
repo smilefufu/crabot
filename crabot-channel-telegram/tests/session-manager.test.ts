@@ -40,7 +40,7 @@ describe('SessionManager', () => {
     expect(second.session.id).toMatch(/^[0-9a-z]{8}$/)
   })
 
-  it('keeps loaded session ids canonical and accepts new short stable ids as aliases', () => {
+  it('canonicalizes loaded legacy session ids to stable ids and keeps legacy lookup aliases', () => {
     fs.writeFileSync(path.join(dataDir, 'sessions.json'), JSON.stringify([
       {
         id: 'legacy-telegram-session-id',
@@ -55,45 +55,24 @@ describe('SessionManager', () => {
         created_at: '2026-01-01T00:00:00.000Z',
         updated_at: '2026-01-01T00:00:00.000Z',
       },
-      {
-        id: '21c6ef56-a63b-e1dd-d3f6-a337320ac3aa',
-        channel_id: 'telegram-test',
-        type: 'private',
-        platform_session_id: '123456789',
-        title: 'Other',
-        participants: [{ platform_user_id: '123456789', role: 'member' }],
-        permissions: { desktop: false, network: { mode: 'allow_all', rules: [] }, storage: [] },
-        memory_scopes: ['123456789'],
-        workspace_path: '',
-        created_at: '2026-01-01T00:00:00.000Z',
-        updated_at: '2026-01-01T00:00:00.000Z',
-      },
     ]), 'utf-8')
 
-    const manager = new SessionManager('telegram-test', dataDir)
-    const session = manager.findByPlatformId('7692507087')
-    const uuidSession = manager.findByPlatformId('123456789')
-    const probe = new SessionManager('telegram-test', path.join(dataDir, 'short-id-probe'))
-    const shortId = probe.upsert({
+    const probe = new SessionManager('telegram-test', path.join(dataDir, 'stable-id-probe'))
+    const stableId = probe.upsert({
       platform_session_id: '7692507087',
       type: 'private',
       title: 'FuFu',
       sender_user_id: '7692507087',
       sender_name: 'FuFu',
-    }).session
-    const uuidShortId = probe.upsert({
-      platform_session_id: '123456789',
-      type: 'private',
-      title: 'Other',
-      sender_user_id: '123456789',
-      sender_name: 'Other',
-    }).session
+    }).session.id
 
-    expect(session?.id).toBe('legacy-telegram-session-id')
-    expect(uuidSession?.id).toBe('21c6ef56-a63b-e1dd-d3f6-a337320ac3aa')
-    expect(shortId.id).toMatch(/^[0-9a-z]{8}$/)
-    expect(uuidShortId.id).toMatch(/^[0-9a-z]{8}$/)
-    expect(manager.findById(shortId.id)?.id).toBe('legacy-telegram-session-id')
-    expect(manager.findById(uuidShortId.id)?.id).toBe('21c6ef56-a63b-e1dd-d3f6-a337320ac3aa')
+    const manager = new SessionManager('telegram-test', dataDir)
+    const session = manager.findByPlatformId('7692507087')
+
+    expect(stableId).toMatch(/^[0-9a-z]{8}$/)
+    expect(session?.id).toBe(stableId)
+    expect(manager.findById(stableId)?.id).toBe(stableId)
+    expect(manager.findById('legacy-telegram-session-id')?.id).toBe(stableId)
+    expect(manager.listSessions('private').map((s) => s.id)).toEqual([stableId])
   })
 })
