@@ -101,9 +101,9 @@ export function createAsyncAuditEndTurnGate(
     //    - 从未 audit（agent 全程没 send_message 触发过 audit）
     //    - 上一轮 audit fail，agent 看完 detailedReport 又直接 end_turn（buffer 在 fail 时已 drop）
     //    - 上一轮 audit aborted（改 goal 触发），agent 看完 abort marker 又直接 end_turn
-    //    按 everSentMessage 区分讨论型 vs 从未交付。
+    //    按当前 human input epoch 是否已送达区分讨论型 vs 从未交付。
     if (deps.taskState.outboundBuffer.length === 0) {
-      if (deps.taskState.everSentMessage) {
+      if (deps.taskState.lastDeliveredInfoEpoch === deps.taskState.humanInputEpoch) {
         // 讨论型放行：之前 flush 过 info，这次没事干 end_turn 是预期行为
         return null
       }

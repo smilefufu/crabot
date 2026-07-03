@@ -82,6 +82,8 @@ export interface TaskContext {
    *  区分"从未交付"和"交付被拦"两种 NO_DELIVERY 文案。
    *  spec: 2026-06-10-audit-anchor-human-request §3.5 */
   onBuffered?: () => void
+  /** 当前真实人类输入轮次；send_message entry 创建时绑定，用于后续送达确认。 */
+  getHumanInputEpoch?: () => number
   /** 当前 task 的工作目录（set_cwd 改的 taskState.cwd，缺省落到 workspace）。
    *  send_message 收到相对 file_path 时用它就地解析成绝对路径——相对路径若拖到延迟 flush
    *  阶段才在 dispatch 里抛错，那时已无法把失败回传给 worker（trace a72623ec 成因）。 */
@@ -887,6 +889,7 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
               ...(filename !== undefined ? { filename } : {}),
               ...(mentions !== undefined ? { mentions } : {}),
               ...(quote_message_id !== undefined ? { quote_message_id } : {}),
+              ...(taskCtx.getHumanInputEpoch !== undefined ? { human_input_epoch: taskCtx.getHumanInputEpoch() } : {}),
               sent_at_attempt_ms: Date.now(),
             })
             taskCtx.onBuffered?.()
@@ -901,6 +904,7 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
         // === Step 1: 先 send（高失败率操作先做；失败 → state 完全不变）===
         // 路径选择 + mention 解析 + channel sendMessage 共用 dispatchOutboundMessage，保证 immediate-send
         // 与 flush 路径（createOutboundFlush）功能等价（同样的 path mapping + friend_id resolve + §4.13 钩子）。
+        const currentTaskCtx = deps.getTaskContext?.()
         const dispatchEntry: OutboundBufferEntry = {
           channel_id,
           session_id,
@@ -915,6 +919,9 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
           ...(filename !== undefined ? { filename } : {}),
           ...(mentions !== undefined ? { mentions } : {}),
           ...(quote_message_id !== undefined ? { quote_message_id } : {}),
+          ...(currentTaskCtx?.getHumanInputEpoch !== undefined
+            ? { human_input_epoch: currentTaskCtx.getHumanInputEpoch() }
+            : {}),
           sent_at_attempt_ms: Date.now(),
         }
         let sendResult: { platform_message_id: string; sent_at: string }
