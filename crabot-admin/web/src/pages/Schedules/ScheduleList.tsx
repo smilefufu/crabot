@@ -114,6 +114,32 @@ const EMPTY_FORM: ScheduleFormState = {
   targetSessionType: '',
 }
 
+export function buildScheduleTargetSession(
+  form: Pick<ScheduleFormState, 'targetChannelId' | 'targetSessionId' | 'targetSessionType'>,
+  sessions: ChannelSession[],
+  existingTargetSession?: Schedule['target_session'],
+): Schedule['target_session'] | undefined {
+  const targetSet = !!(form.targetChannelId && form.targetSessionId && form.targetSessionType)
+  if (!targetSet) return undefined
+
+  const targetSession = sessions.find((s) => s.id === form.targetSessionId)
+  const platformSessionId = targetSession?.platform_session_id
+    ?? (
+      existingTargetSession?.channel_id === form.targetChannelId
+      && existingTargetSession.session_id === form.targetSessionId
+      && existingTargetSession.type === form.targetSessionType
+        ? existingTargetSession.platform_session_id
+        : undefined
+    )
+
+  return {
+    channel_id: form.targetChannelId,
+    session_id: form.targetSessionId,
+    ...(platformSessionId ? { platform_session_id: platformSessionId } : {}),
+    type: form.targetSessionType as 'private' | 'group',
+  }
+}
+
 function formToPayload(
   form: ScheduleFormState,
   sessions: ChannelSession[],
@@ -143,19 +169,15 @@ function formToPayload(
     tags: form.taskTags.split(',').map(s => s.trim()).filter(Boolean),
   }
 
-  const targetSet = !!(form.targetChannelId && form.targetSessionId && form.targetSessionType)
-  const targetSession = targetSet
-    ? sessions.find(s => s.id === form.targetSessionId)
-    : undefined
-  const existingTargetSession = existingSchedule?.target_session
-  const platformSessionId = targetSession?.platform_session_id
-    ?? (
-      targetSet
-      && existingTargetSession?.channel_id === form.targetChannelId
-      && existingTargetSession.session_id === form.targetSessionId
-        ? existingTargetSession.platform_session_id
-        : undefined
-    )
+  const targetSession = buildScheduleTargetSession(
+    {
+      targetChannelId: form.targetChannelId,
+      targetSessionId: form.targetSessionId,
+      targetSessionType: form.targetSessionType,
+    },
+    sessions,
+    existingSchedule?.target_session,
+  )
 
   return {
     name: form.name.trim(),
@@ -163,16 +185,7 @@ function formToPayload(
     enabled: form.enabled,
     trigger,
     task_template,
-    ...(targetSet
-      ? {
-          target_session: {
-            channel_id: form.targetChannelId,
-            session_id: form.targetSessionId,
-            ...(platformSessionId ? { platform_session_id: platformSessionId } : {}),
-            type: form.targetSessionType as 'private' | 'group',
-          },
-        }
-      : {}),
+    ...(targetSession ? { target_session: targetSession } : {}),
   }
 }
 
