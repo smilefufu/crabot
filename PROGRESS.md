@@ -1,6 +1,14 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-03 — 修复 async goal audit 结果未持久化与 no-delivery 空审计
+> 最后更新：2026-07-04 — 稳定 Channel Session ID 与无痛备份导入
+
+## 2026-07-04 — 稳定 Channel Session ID 与无痛备份导入
+
+- `Session.id` 明确为 Admin/Agent 使用的稳定对话指针，由 `channel_id + platform_session_id` 确定性派生；WeChat/Feishu/Telegram 加载旧 `sessions.json` 时把 legacy 随机 ID canonicalize 到 stable ID，legacy ID 仅作为兼容 lookup alias。
+- `Schedule.target_session` 同时保存 `session_id` 和可选 `platform_session_id`：前者是运行时发送主指针，后者是迁移/修复锚点。Admin 只按 `channel_id + type + platform_session_id` 做确定性修复；缺证据的 legacy-only stale 引用保持无效，不做 fuzzy repair。
+- 备份/导入不依赖 channel-local `sessions.json`。只要导入后 channel 实例和平台原生会话 ID 不变，重新发现会话即可得到同一 stable `Session.id`，导入的 schedule/config 能重新对上。
+- Legacy-only `session-configs.json` 缺少 `channel_id/platform_session_id`，不安全自动迁移；这类旧配置保持无效，避免错误套用到另一个会话。
+- 验证：三个 channel session-manager 测试与 build；Admin schedule repair / backup gather / target_session 测试与 build；Admin Web schedule 保存测试与 build。
 
 ## 2026-07-03 — 修复 async goal audit 结果未持久化与 no-delivery 空审计
 

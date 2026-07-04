@@ -184,7 +184,9 @@ import { buildOnboardFinishResponse } from './onboard-finish-response.js'
 import { ChannelManager } from './channel-manager.js'
 import {
   migrateScheduleTargetSession,
+  repairScheduleTargetSession,
   type SessionTypeLookup,
+  type TargetSessionRepairLookup,
 } from './schedule-migration.js'
 import { ModuleInstaller } from './module-installer.js'
 import { ChatManager, buildChatTaskSnapshot } from './chat-manager.js'
@@ -3293,6 +3295,7 @@ export class AdminModule extends ModuleBase {
     id: string
     channel_id: ModuleId
     type: 'private' | 'group'
+    platform_session_id?: string
     title: string
     participants: Array<{ friend_id?: FriendId; platform_user_id: string; role: 'owner' | 'admin' | 'member' }>
   }> {
@@ -3311,6 +3314,7 @@ export class AdminModule extends ModuleBase {
           id: string
           channel_id: ModuleId
           type: 'private' | 'group'
+          platform_session_id?: string
           title: string
           participants: Array<{ friend_id?: FriendId; platform_user_id: string; role: 'owner' | 'admin' | 'member' }>
         }
@@ -3328,6 +3332,61 @@ export class AdminModule extends ModuleBase {
     )
 
     return result.session
+  }
+
+  private async listChannelSessions(channelId: ModuleId): Promise<Array<{
+    id: string
+    channel_id: ModuleId
+    type: 'private' | 'group'
+    platform_session_id: string
+    title: string
+  }>> {
+    const modules = await this.rpcClient.resolve(
+      { module_id: channelId },
+      this.config.moduleId
+    )
+    if (modules.length === 0) {
+      throw new Error('Channel module not found')
+    }
+
+    type ChannelSessionListResult = {
+      items: Array<{
+        id: string
+        channel_id: ModuleId
+        type: 'private' | 'group'
+        platform_session_id: string
+        title: string
+      }>
+      pagination: { page: number; page_size: number; total_items: number; total_pages: number }
+    }
+
+    const pageSize = 500
+    const all: Array<{
+      id: string
+      channel_id: ModuleId
+      type: 'private' | 'group'
+      platform_session_id: string
+      title: string
+    }> = []
+    let page = 1
+    let totalPages = 1
+
+    do {
+      const result = await this.rpcClient.call<
+        { pagination: { page: number; page_size: number } },
+        ChannelSessionListResult
+      >(
+        modules[0].port,
+        'get_sessions',
+        { pagination: { page, page_size: pageSize } },
+        this.config.moduleId,
+      )
+      all.push(...result.items)
+      totalPages = Math.max(1, result.pagination.total_pages)
+      page++
+    } while (page <= totalPages)
+
+    return all
   }
 
   private async resolveChannelIdentityFromPrivateSession(channelId: ModuleId, sessionId: string): Promise<ChannelIdentity> {
@@ -4197,8 +4256,9 @@ export class AdminModule extends ModuleBase {
     let migratedCount = 0
     for (const schedule of Array.from(this.schedules.values())) {
       const migrated = await migrateScheduleTargetSession(schedule, sessionTypeLookup)
-      if (migrated !== schedule) {
-        this.schedules.set(migrated.id, migrated)
+      const repaired = await this.repairScheduleTargetSessionReference(migrated)
+      if (repaired !== schedule) {
+        this.schedules.set(repaired.id, repaired)
         migratedCount++
       }
     }
@@ -4212,6 +4272,43 @@ export class AdminModule extends ModuleBase {
         `[Admin] Migrated ${migratedCount} schedule(s) to target_session field`,
       )
     }
+  }
+
+  private async repairScheduleTargetSessionReference(schedule: Schedule): Promise<Schedule> {
+    const targetSessionLookup: TargetSessionRepairLookup = async (channelId, sessionId, platformSessionId, scheduleForLookup) => {
+      const expectedType = scheduleForLookup?.target_session?.type
+      if (platformSessionId && expectedType) {
+        try {
+          const sessions = await this.listChannelSessions(channelId as ModuleId)
+          const match = sessions.find(
+            (s) => s.platform_session_id === platformSessionId && s.type === expectedType,
+          )
+          if (match) {
+            return {
+              session_id: match.id,
+              platform_session_id: match.platform_session_id,
+              type: match.type,
+            }
+          }
+          return undefined
+        } catch {
+          return undefined
+        }
+      }
+
+      try {
+        const session = await this.resolveChannelSession(channelId as ModuleId, sessionId)
+        return {
+          session_id: session.id,
+          type: session.type,
+          ...(session.platform_session_id ? { platform_session_id: session.platform_session_id } : {}),
+        }
+      } catch {
+        return undefined
+      }
+    }
+
+    return repairScheduleTargetSession(schedule, targetSessionLookup)
   }
 
   /**
@@ -5840,6 +5937,12 @@ export class AdminModule extends ModuleBase {
    * 替换模板变量 → RPC 调 Agent create_task_from_schedule → 更新 Schedule 状态
    */
   private async handleScheduleTrigger(schedule: Schedule): Promise<{ task_id: string } | void> {
+    const repairedSchedule = await this.repairScheduleTargetSessionReference(schedule)
+    if (repairedSchedule !== schedule) {
+      this.schedules.set(repairedSchedule.id, repairedSchedule)
+      schedule = repairedSchedule
+    }
+
     const now = new Date()
 
     // 替换模板变量

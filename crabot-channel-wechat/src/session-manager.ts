@@ -7,7 +7,8 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
-import { generateId, generateTimestamp } from 'crabot-shared'
+import crypto from 'node:crypto'
+import { generateTimestamp } from 'crabot-shared'
 import type { ModuleId, Session, SessionType, SessionParticipant, SessionPermissions } from './types.js'
 
 const DEFAULT_PERMISSIONS: SessionPermissions = {
@@ -26,6 +27,7 @@ function isBetterTitle(incoming: string, current: string, platformSessionId: str
 export class SessionManager {
   private sessions: Map<string, Session> = new Map()
   private platformToId: Map<string, string> = new Map()
+  private aliases: Map<string, string> = new Map()
   private readonly filePath: string
   private readonly channelId: ModuleId
 
@@ -110,7 +112,7 @@ export class SessionManager {
   }): Session {
     const now = generateTimestamp()
     const session: Session = {
-      id: generateId(),
+      id: this.stableSessionId(params.platform_session_id),
       channel_id: this.channelId,
       type: params.type,
       platform_session_id: params.platform_session_id,
@@ -129,7 +131,8 @@ export class SessionManager {
   }
 
   findById(sessionId: string): Session | undefined {
-    return this.sessions.get(sessionId)
+    const canonicalId = this.aliases.get(sessionId) ?? sessionId
+    return this.sessions.get(canonicalId)
   }
 
   findByPlatformId(platformSessionId: string): Session | undefined {
@@ -167,12 +170,31 @@ export class SessionManager {
           ? Object.values(raw.sessions)
           : []
       for (const session of sessions) {
-        this.sessions.set(session.id, session)
-        this.platformToId.set(session.platform_session_id, session.id)
+        if (!session.platform_session_id) continue
+        const legacyId = session.id
+        const stableId = this.stableSessionId(session.platform_session_id)
+        const canonical: Session = {
+          ...session,
+          id: stableId,
+          channel_id: this.channelId,
+        }
+        this.sessions.set(stableId, canonical)
+        this.platformToId.set(canonical.platform_session_id, stableId)
+        if (legacyId && legacyId !== stableId) {
+          this.aliases.set(legacyId, stableId)
+        }
       }
     } catch (error) {
       console.warn('[SessionManager] Failed to load sessions:', error)
     }
+  }
+
+  private stableSessionId(platformSessionId: string): string {
+    const digest = crypto
+      .createHash('sha256')
+      .update(`${this.channelId}\0${platformSessionId}`)
+      .digest()
+    return digest.readUIntBE(0, 6).toString(36).padStart(8, '0').slice(0, 8)
   }
 
   private save(): void {
