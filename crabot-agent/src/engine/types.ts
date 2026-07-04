@@ -151,8 +151,8 @@ export interface ToolDefinition {
   readonly turnZeroOnly?: boolean
   /**
    * 调用后引擎立刻退出 loop，把工具调用信息（name + input）写入 EngineResult.exitToolCall。
-   * 引擎不调用 `call` 函数（exit 工具本身无需执行），也不 push tool_result——
-   * 直接 buildResult('completed', ...) 返回。
+   * 引擎不调用 `call` 函数（exit 工具本身无需执行），但会为本轮所有 tool_use
+   * push 合成 tool_result，确保 finalMessages / checkpoint 可被 LLM API 重放。
    *
    * 用于"调完就走"的早退工具（如 submit_audit_result）。
    */

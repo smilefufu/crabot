@@ -830,7 +830,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
             name: b.name,
             input: b.input,
             output: violatingResults.find(r => r.tool_use_id === b.id)?.content ?? '',
-            isError: violatingResults.some(r => r.tool_use_id === b.id),
+            isError: violatingResults.find(r => r.tool_use_id === b.id)?.is_error ?? false,
           })),
           stopReason,
           llmCallMs,
@@ -857,7 +857,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       const exitToolResultById = new Map(processed.toolUseBlocks.map(b => {
         const def = currentTools.find(t => t.name === b.name)
         const content = def?.exitsLoop === true ? '[exit_tool]' : '[skipped: exitsLoop tool selected]'
-        return [b.id, { content, isError: false }] as const
+        return [b.id, { content, isError: def?.exitsLoop !== true }] as const
       }))
       messages.push(createBatchToolResultMessage(processed.toolUseBlocks.map(b => {
         const r = exitToolResultById.get(b.id)
