@@ -185,6 +185,54 @@ describe('runEngine', () => {
     )
   })
 
+  it('refreshes messagesRef with tool results before onTurn observers run', async () => {
+    const readTool = defineTool({
+      name: 'Read',
+      description: 'Read a file',
+      inputSchema: {},
+      isReadOnly: true,
+      call: async () => ({ output: 'file content', isError: false }),
+    })
+    const messagesRef = { current: [] as EngineMessage[] }
+    const snapshots: EngineMessage[][] = []
+
+    const adapter = mockAdapter([
+      toolUseResponse('tu-1', 'Read', { path: '/test' }),
+      textResponse('Done'),
+    ])
+
+    await runEngine({
+      prompt: 'Read it',
+      adapter,
+      options: baseOptions({
+        tools: [readTool],
+        messagesRef,
+        onTurn: () => snapshots.push(messagesRef.current.slice()),
+      }),
+    })
+
+    const firstTurnSnapshot = snapshots[0]
+    expect(firstTurnSnapshot).toEqual([
+      expect.objectContaining({ role: 'user', content: 'Read it' }),
+      expect.objectContaining({
+        role: 'assistant',
+        content: expect.arrayContaining([
+          expect.objectContaining({ type: 'tool_use', id: 'tu-1', name: 'Read' }),
+        ]),
+      }),
+      expect.objectContaining({
+        role: 'user',
+        toolResults: [
+          expect.objectContaining({
+            tool_use_id: 'tu-1',
+            content: expect.stringContaining('file content'),
+            is_error: false,
+          }),
+        ],
+      }),
+    ])
+  })
+
   it('returns aborted when abort signal fires', async () => {
     const controller = new AbortController()
 
