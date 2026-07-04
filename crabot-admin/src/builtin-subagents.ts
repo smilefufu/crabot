@@ -74,9 +74,9 @@ const CODE_PLANNER_WORKFLOW = `0. 【项目背景】第一步先 Read 项目根�
    □ CROSS-TASK：类型名/函数名跨 task 引用一致
    □ WEAK EXECUTOR TEST：假设 writer 从未见过代码库，仅凭这个 task 能完成吗？
    □ NON-GOALS：每个 task 是否写了「不做什么」来防止 scope creep？
-7. 【保存】plan 文件保存到 docs/plans/YYYY-MM-DD-<feature-name>.md`
+7. 【保存】plan 文件保存到 crabot-docs/superpowers/plans/YYYY-MM-DD-<feature-name>.md`
 
-const CODE_PLANNER_DELIVERABLES = `产出：一个 markdown 格式的 plan 文件，路径 docs/plans/YYYY-MM-DD-<feature-name>.md
+const CODE_PLANNER_DELIVERABLES = `产出：一个 markdown 格式的 plan 文件，路径 crabot-docs/superpowers/plans/YYYY-MM-DD-<feature-name>.md
 
 Plan 文件必须包含：
 - 文件头（Goal / Architecture / Tech Stack / Tasks Overview）

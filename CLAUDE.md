@@ -171,7 +171,7 @@ node scripts/debug-agent.mjs modules  # 查看 MM 注册的模块
 
 旧的 `./scripts/debug-agent.sh` 仍可用（转发到 .mjs）。
 
-完整调试手册：[docs/agent-debugging.md](docs/agent-debugging.md)
+完整调试手册：[crabot-docs/guides/agent-debugging.md](crabot-docs/guides/agent-debugging.md)
 
 ## 模块恢复机制（已上线）
 

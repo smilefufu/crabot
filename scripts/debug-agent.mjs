@@ -3,7 +3,7 @@
 // Crabot Agent 调试脚本
 //
 // 封装常用调试 RPC 查询，适用于所有 Agent 模块实现
-// 详细用法说明：docs/agent-debugging.md
+// 详细用法说明：crabot-docs/guides/agent-debugging.md
 // =============================================================================
 
 import { readFileSync, existsSync } from 'node:fs'
@@ -473,7 +473,7 @@ ${c.bold('Crabot Agent 调试脚本')}
     node ${name} tasks executing     # 列出进行中的任务
     node ${name} logs 100            # 查看最近 100 行日志
 
-  ${c.dim(`详细说明：docs/agent-debugging.md`)}
+  ${c.dim(`详细说明：crabot-docs/guides/agent-debugging.md`)}
 `)
 }
 
