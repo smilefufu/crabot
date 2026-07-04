@@ -4,6 +4,7 @@ import path from 'node:path'
 import os from 'node:os'
 
 import { TelegramChannel } from '../src/telegram-channel'
+import { MessageStore } from '../src/message-store'
 
 let tmpDir: string
 let channel: TelegramChannel
@@ -183,6 +184,51 @@ describe('TelegramChannel session aliases', () => {
       'stable-message-1',
       'legacy-message-1',
     ])
+    expect(fs.existsSync(path.join(messagesDir, `${legacyId}.jsonl`))).toBe(false)
+  })
+})
+
+describe('MessageStore session history migration', () => {
+  it('serializes concurrent migrations for the same legacy file without duplicates', async () => {
+    const store = new MessageStore(tmpDir)
+    const legacyId = 'legacy-session-id'
+    const stableId = 'stable-session-id'
+    const messagesDir = path.join(tmpDir, 'messages')
+    fs.mkdirSync(messagesDir, { recursive: true })
+    fs.writeFileSync(
+      path.join(messagesDir, `${stableId}.jsonl`),
+      JSON.stringify({
+        platform_message_id: 'stable-message-1',
+        direction: 'outbound',
+        sender_platform_user_id: 'self',
+        sender_name: 'Crabot',
+        content_type: 'text',
+        text: 'stable history',
+        timestamp: '2026-01-01T00:01:00.000Z',
+      }) + '\n',
+      'utf-8',
+    )
+    fs.writeFileSync(
+      path.join(messagesDir, `${legacyId}.jsonl`),
+      JSON.stringify({
+        platform_message_id: 'legacy-message-1',
+        direction: 'inbound',
+        sender_platform_user_id: '7692507087',
+        sender_name: 'FuFu',
+        content_type: 'text',
+        text: 'legacy history',
+        timestamp: '2026-01-01T00:00:00.000Z',
+      }) + '\n',
+      'utf-8',
+    )
+
+    await expect(Promise.all([
+      store.migrateSessionId(legacyId, stableId),
+      store.migrateSessionId(legacyId, stableId),
+    ])).resolves.toEqual([undefined, undefined])
+
+    const { items } = await store.query({ sessionId: stableId })
+    expect(items.map((m) => m.platform_message_id)).toEqual(['stable-message-1', 'legacy-message-1'])
     expect(fs.existsSync(path.join(messagesDir, `${legacyId}.jsonl`))).toBe(false)
   })
 })

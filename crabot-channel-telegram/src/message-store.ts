@@ -23,6 +23,7 @@ export class MessageStore {
   private readonly messagesDir: string
   private readonly cacheConfig: TelegramCacheConfig
   private cleanupTimer: ReturnType<typeof setInterval> | null = null
+  private migrationLocks = new Map<string, Promise<void>>()
 
   constructor(dataDir: string, cacheConfig?: Partial<TelegramCacheConfig>) {
     this.messagesDir = path.join(dataDir, 'messages')
@@ -126,25 +127,58 @@ export class MessageStore {
   async migrateSessionId(fromSessionId: string, toSessionId: string): Promise<void> {
     if (fromSessionId === toSessionId) return
 
+    const key = `${fromSessionId}\0${toSessionId}`
+    const existing = this.migrationLocks.get(key)
+    if (existing) return existing
+
+    const migration = this.migrateSessionIdLocked(fromSessionId, toSessionId)
+      .finally(() => {
+        if (this.migrationLocks.get(key) === migration) {
+          this.migrationLocks.delete(key)
+        }
+      })
+    this.migrationLocks.set(key, migration)
+    return migration
+  }
+
+  private async migrateSessionIdLocked(fromSessionId: string, toSessionId: string): Promise<void> {
     const fromPath = this.sessionFilePath(fromSessionId)
     const toPath = this.sessionFilePath(toSessionId)
     if (!fsSync.existsSync(fromPath)) return
 
     if (!fsSync.existsSync(toPath)) {
-      await fs.rename(fromPath, toPath)
+      try {
+        await fs.rename(fromPath, toPath)
+      } catch (error) {
+        if (isNotFoundError(error)) return
+        throw error
+      }
       return
     }
 
-    const [stableContent, legacyContent] = await Promise.all([
-      fs.readFile(toPath, 'utf-8'),
-      fs.readFile(fromPath, 'utf-8'),
-    ])
+    let stableContent: string
+    let legacyContent: string
+    try {
+      const contents = await Promise.all([
+        fs.readFile(toPath, 'utf-8'),
+        fs.readFile(fromPath, 'utf-8'),
+      ])
+      stableContent = contents[0]
+      legacyContent = contents[1]
+    } catch (error) {
+      if (isNotFoundError(error)) return
+      throw error
+    }
     if (legacyContent) {
       const prefix = stableContent && !stableContent.endsWith('\n') ? '\n' : ''
       const suffix = legacyContent.endsWith('\n') ? '' : '\n'
       await fs.appendFile(toPath, prefix + legacyContent + suffix, 'utf-8')
     }
-    await fs.unlink(fromPath)
+    try {
+      await fs.unlink(fromPath)
+    } catch (error) {
+      if (!isNotFoundError(error)) throw error
+    }
   }
 
   // ── 内部方法 ──────────────────────────────────────────────────────────────
@@ -218,4 +252,8 @@ export class MessageStore {
       }
     }
   }
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT'
 }
