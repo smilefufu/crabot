@@ -231,4 +231,88 @@ describe('MessageStore session history migration', () => {
     expect(items.map((m) => m.platform_message_id)).toEqual(['stable-message-1', 'legacy-message-1'])
     expect(fs.existsSync(path.join(messagesDir, `${legacyId}.jsonl`))).toBe(false)
   })
+
+  it('serializes concurrent migrations from different legacy files into one stable file', async () => {
+    const store = new MessageStore(tmpDir)
+    const stableId = 'stable-session-id'
+    const legacyA = 'legacy-session-a'
+    const legacyB = 'legacy-session-b'
+    const messagesDir = path.join(tmpDir, 'messages')
+    fs.mkdirSync(messagesDir, { recursive: true })
+
+    const writeRecord = (sessionId: string, platformMessageId: string, text: string) => {
+      fs.writeFileSync(
+        path.join(messagesDir, `${sessionId}.jsonl`),
+        JSON.stringify({
+          platform_message_id: platformMessageId,
+          direction: 'inbound',
+          sender_platform_user_id: '7692507087',
+          sender_name: 'FuFu',
+          content_type: 'text',
+          text,
+          timestamp: '2026-01-01T00:00:00.000Z',
+        }) + '\n',
+        'utf-8',
+      )
+    }
+
+    writeRecord(stableId, 'stable-message-1', 'stable history')
+    writeRecord(legacyA, 'legacy-message-a', 'legacy history a')
+    writeRecord(legacyB, 'legacy-message-b', 'legacy history b')
+
+    await expect(Promise.all([
+      store.migrateSessionId(legacyA, stableId),
+      store.migrateSessionId(legacyB, stableId),
+    ])).resolves.toEqual([undefined, undefined])
+
+    const { items } = await store.query({ sessionId: stableId })
+    expect(items.map((m) => m.platform_message_id).sort()).toEqual([
+      'legacy-message-a',
+      'legacy-message-b',
+      'stable-message-1',
+    ])
+    expect(fs.existsSync(path.join(messagesDir, `${legacyA}.jsonl`))).toBe(false)
+    expect(fs.existsSync(path.join(messagesDir, `${legacyB}.jsonl`))).toBe(false)
+  })
+
+  it('preserves both legacy files when concurrent target migration creates the stable file', async () => {
+    const store = new MessageStore(tmpDir)
+    const stableId = 'stable-session-id'
+    const legacyA = 'legacy-session-a'
+    const legacyB = 'legacy-session-b'
+    const messagesDir = path.join(tmpDir, 'messages')
+    fs.mkdirSync(messagesDir, { recursive: true })
+
+    for (const [sessionId, platformMessageId] of [
+      [legacyA, 'legacy-message-a'],
+      [legacyB, 'legacy-message-b'],
+    ]) {
+      fs.writeFileSync(
+        path.join(messagesDir, `${sessionId}.jsonl`),
+        JSON.stringify({
+          platform_message_id: platformMessageId,
+          direction: 'inbound',
+          sender_platform_user_id: '7692507087',
+          sender_name: 'FuFu',
+          content_type: 'text',
+          text: platformMessageId,
+          timestamp: '2026-01-01T00:00:00.000Z',
+        }) + '\n',
+        'utf-8',
+      )
+    }
+
+    await expect(Promise.all([
+      store.migrateSessionId(legacyA, stableId),
+      store.migrateSessionId(legacyB, stableId),
+    ])).resolves.toEqual([undefined, undefined])
+
+    const { items } = await store.query({ sessionId: stableId })
+    expect(items.map((m) => m.platform_message_id).sort()).toEqual([
+      'legacy-message-a',
+      'legacy-message-b',
+    ])
+    expect(fs.existsSync(path.join(messagesDir, `${legacyA}.jsonl`))).toBe(false)
+    expect(fs.existsSync(path.join(messagesDir, `${legacyB}.jsonl`))).toBe(false)
+  })
 })

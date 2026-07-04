@@ -127,11 +127,11 @@ export class MessageStore {
   async migrateSessionId(fromSessionId: string, toSessionId: string): Promise<void> {
     if (fromSessionId === toSessionId) return
 
-    const key = `${fromSessionId}\0${toSessionId}`
-    const existing = this.migrationLocks.get(key)
-    if (existing) return existing
-
-    const migration = this.migrateSessionIdLocked(fromSessionId, toSessionId)
+    const key = `to:${toSessionId}`
+    const previous = this.migrationLocks.get(key) ?? Promise.resolve()
+    const migration = previous
+      .catch(() => undefined)
+      .then(() => this.migrateSessionIdLocked(fromSessionId, toSessionId))
       .finally(() => {
         if (this.migrationLocks.get(key) === migration) {
           this.migrationLocks.delete(key)
@@ -144,33 +144,20 @@ export class MessageStore {
   private async migrateSessionIdLocked(fromSessionId: string, toSessionId: string): Promise<void> {
     const fromPath = this.sessionFilePath(fromSessionId)
     const toPath = this.sessionFilePath(toSessionId)
-    if (!fsSync.existsSync(fromPath)) return
 
-    if (!fsSync.existsSync(toPath)) {
-      try {
-        await fs.rename(fromPath, toPath)
-      } catch (error) {
-        if (isNotFoundError(error)) return
-        throw error
-      }
-      return
-    }
-
-    let stableContent: string
     let legacyContent: string
     try {
-      const contents = await Promise.all([
-        fs.readFile(toPath, 'utf-8'),
-        fs.readFile(fromPath, 'utf-8'),
-      ])
-      stableContent = contents[0]
-      legacyContent = contents[1]
+      legacyContent = await fs.readFile(fromPath, 'utf-8')
     } catch (error) {
       if (isNotFoundError(error)) return
       throw error
     }
+
     if (legacyContent) {
-      const prefix = stableContent && !stableContent.endsWith('\n') ? '\n' : ''
+      const stableNeedsNewline = fsSync.existsSync(toPath)
+        && fsSync.statSync(toPath).size > 0
+        && !fsSync.readFileSync(toPath, 'utf-8').endsWith('\n')
+      const prefix = stableNeedsNewline ? '\n' : ''
       const suffix = legacyContent.endsWith('\n') ? '' : '\n'
       await fs.appendFile(toPath, prefix + legacyContent + suffix, 'utf-8')
     }
