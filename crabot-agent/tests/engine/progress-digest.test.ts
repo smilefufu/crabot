@@ -193,6 +193,35 @@ describe('ProgressDigest fork mode', () => {
     digest.dispose()
   })
 
+  it('empty digest output still marks snapshot observed to avoid repeated empty trace spans', async () => {
+    const sendToUser = vi.fn().mockResolvedValue(undefined)
+    const { adapter, complete } = makeAdapter('')
+    const messagesRef = makeRef([createUserMessage('go')])
+    const onTraceStart = vi.fn((reason: string) => `span-${reason}`)
+    const onTraceEnd = vi.fn()
+    const config: ProgressDigestConfig = {
+      intervalMs: 1_000,
+      isMasterPrivate: true,
+      onTraceStart,
+      onTraceEnd,
+    }
+    const digest = new ProgressDigest(config, makeDeps({ sendToUser, messagesRef, adapter }))
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    await Promise.resolve()
+    await Promise.resolve()
+    await vi.advanceTimersByTimeAsync(1_000)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(complete).toHaveBeenCalledTimes(1)
+    expect(sendToUser).not.toHaveBeenCalled()
+    expect(onTraceStart).toHaveBeenCalledTimes(1)
+    expect(onTraceEnd).toHaveBeenCalledTimes(1)
+    expect(onTraceEnd.mock.calls[0][2]).toMatchObject({ output_summary: '(empty)' })
+    digest.dispose()
+  })
+
   it('ask_human tool call triggers immediate flush', async () => {
     const sendToUser = vi.fn().mockResolvedValue(undefined)
     const { adapter, complete } = makeAdapter()

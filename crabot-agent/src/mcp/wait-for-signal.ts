@@ -79,6 +79,13 @@ export function createWaitForSignalTool(deps: WaitForSignalDeps): ToolDefinition
       const hasSubagent = deps.hasActiveAsyncSubagent()
       const hasBgEntity = await deps.hasRunningBgEntity()
 
+      if (hasPending) {
+        return {
+          isError: false,
+          output: '已有 pending 唤醒事件，无需再次挂起；请继续处理队列中的事件。',
+        }
+      }
+
       if (!hasPending && !hasAudit && !hasSubagent && !hasBgEntity && timeout_ms === undefined) {
         return {
           isError: true,

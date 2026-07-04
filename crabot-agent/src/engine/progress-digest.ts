@@ -172,6 +172,7 @@ export class ProgressDigest {
         this.lastFlushMessagesCount = observedCount
         details = { output_summary: message.slice(0, 200), messages_count: observedCount }
       } else {
+        this.lastFlushMessagesCount = observedCount
         details = { output_summary: '(empty)', messages_count: observedCount }
       }
     } catch (err) {
