@@ -802,19 +802,24 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     // turnZeroOnly 强制：在 turn 0 之后的轮次，turnZeroOnly 工具调用被拒绝
     const isAfterTurnZero = totalTurns > 1  // totalTurns=1 表示刚处理完 turn 0 响应
     if (isAfterTurnZero) {
-      const violatingResults = processed.toolUseBlocks
-        .filter(b => {
-          const def = currentTools.find(t => t.name === b.name)
-          return def?.turnZeroOnly === true
-        })
+      const violatingBlocks = processed.toolUseBlocks
+        .filter(b => currentTools.find(t => t.name === b.name)?.turnZeroOnly === true)
+      const violatingIds = new Set(violatingBlocks.map(b => b.id))
+      const turnZeroViolationMessage = (name: string) =>
+        `[Tool '${name}' is only callable on turn 0; the trigger message has already been processed. If you need to early-exit, you cannot do so anymore—proceed with the task normally.]`
+
+      if (violatingBlocks.length > 0) {
+        const violatingResults = processed.toolUseBlocks
         .map(b => ({
           tool_use_id: b.id,
-          content: `[Tool '${b.name}' is only callable on turn 0; the trigger message has already been processed. If you need to early-exit, you cannot do so anymore—proceed with the task normally.]`,
-          is_error: true,
+          content: violatingIds.has(b.id)
+            ? turnZeroViolationMessage(b.name)
+            : '[skipped: turnZeroOnly violation in same turn]',
+          is_error: violatingIds.has(b.id),
         }))
 
-      if (violatingResults.length > 0) {
-        // 全转 error tool result，跳过 executeToolBatches；下一轮 LLM 重试
+        // 本轮只要有 turnZeroOnly 违规，就跳过实际工具执行；但必须为所有
+        // tool_use 补齐 tool_result，否则下一轮重放会触发 LLM API 400。
         messages.push(createBatchToolResultMessage(violatingResults))
         // fire onTurn for trace recording
         fireOnTurn({
@@ -849,22 +854,33 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         name: exitBlock.name,
         input: exitBlock.input as Record<string, unknown>,
       }
-      messages.push(createBatchToolResultMessage([{
-        tool_use_id: exitBlock.id,
-        content: '[exit_tool]',
-        is_error: false,
-      }]))
-      // Fire onTurn with this single tool call for trace recording
+      const exitToolResultById = new Map(processed.toolUseBlocks.map(b => {
+        const def = currentTools.find(t => t.name === b.name)
+        const content = def?.exitsLoop === true ? '[exit_tool]' : '[skipped: exitsLoop tool selected]'
+        return [b.id, { content, isError: false }] as const
+      }))
+      messages.push(createBatchToolResultMessage(processed.toolUseBlocks.map(b => {
+        const r = exitToolResultById.get(b.id)
+        return {
+          tool_use_id: b.id,
+          content: r?.content ?? '[skipped: exitsLoop tool selected]',
+          is_error: r?.isError ?? false,
+        }
+      })))
+      // Fire onTurn for trace recording after all same-turn tool_use blocks have results.
       fireOnTurn({
         turnNumber: totalTurns,
         assistantText: processed.text,
-        toolCalls: [{
-          id: exitBlock.id,
-          name: exitBlock.name,
-          input: exitBlock.input,
-          output: '[exit_tool]',
-          isError: false,
-        }],
+        toolCalls: processed.toolUseBlocks.map(b => {
+          const r = exitToolResultById.get(b.id)
+          return {
+            id: b.id,
+            name: b.name,
+            input: b.input,
+            output: r?.content ?? '[skipped: exitsLoop tool selected]',
+            isError: r?.isError ?? false,
+          }
+        }),
         stopReason,
         llmCallMs,
         llmStartedAtMs,
