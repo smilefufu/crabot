@@ -153,6 +153,7 @@ export class TelegramChannel extends ModuleBase {
     await fs.mkdir(path.join(this.dataDir, 'media'), { recursive: true })
 
     await this.mediaHandleStore.init()
+    await this.migrateKnownLegacySessionHistories()
     this.messageStore.startCleanup()
     this.mediaCleaner.startCleanup()
 
@@ -785,6 +786,12 @@ export class TelegramChannel extends ModuleBase {
     ])
     for (const legacyId of legacyIds) {
       await this.messageStore.migrateSessionId(legacyId, canonicalSessionId)
+    }
+  }
+
+  private async migrateKnownLegacySessionHistories(): Promise<void> {
+    for (const { legacyId, stableId } of this.sessionManager.legacyAliasPairs()) {
+      await this.messageStore.migrateSessionId(legacyId, stableId)
     }
   }
 

@@ -154,12 +154,15 @@ export class MessageStore {
     }
 
     if (legacyContent) {
-      const stableNeedsNewline = fsSync.existsSync(toPath)
-        && fsSync.statSync(toPath).size > 0
-        && !fsSync.readFileSync(toPath, 'utf-8').endsWith('\n')
-      const prefix = stableNeedsNewline ? '\n' : ''
-      const suffix = legacyContent.endsWith('\n') ? '' : '\n'
-      await fs.appendFile(toPath, prefix + legacyContent + suffix, 'utf-8')
+      const stableContent = fsSync.existsSync(toPath) ? fsSync.readFileSync(toPath, 'utf-8') : ''
+      const existingMessageIds = collectPlatformMessageIds(stableContent)
+      const linesToAppend = legacyContent
+        .split('\n')
+        .filter((line) => shouldAppendJsonlLine(line, existingMessageIds))
+      if (linesToAppend.length > 0) {
+        const prefix = stableContent && !stableContent.endsWith('\n') ? '\n' : ''
+        await fs.appendFile(toPath, prefix + linesToAppend.join('\n') + '\n', 'utf-8')
+      }
     }
     try {
       await fs.unlink(fromPath)
@@ -243,4 +246,29 @@ export class MessageStore {
 
 function isNotFoundError(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT'
+}
+
+function collectPlatformMessageIds(content: string): Set<string> {
+  const ids = new Set<string>()
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue
+    const id = platformMessageIdFromLine(line)
+    if (id) ids.add(id)
+  }
+  return ids
+}
+
+function shouldAppendJsonlLine(line: string, existingMessageIds: Set<string>): boolean {
+  if (!line.trim()) return false
+  const id = platformMessageIdFromLine(line)
+  return !id || !existingMessageIds.has(id)
+}
+
+function platformMessageIdFromLine(line: string): string | undefined {
+  try {
+    const parsed = JSON.parse(line) as { platform_message_id?: unknown }
+    return typeof parsed.platform_message_id === 'string' ? parsed.platform_message_id : undefined
+  } catch {
+    return undefined
+  }
 }

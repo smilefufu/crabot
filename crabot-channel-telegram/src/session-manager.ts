@@ -94,6 +94,10 @@ export class SessionManager {
       .map(([legacyId]) => legacyId)
   }
 
+  legacyAliasPairs(): Array<{ legacyId: string; stableId: string }> {
+    return Array.from(this.aliases.entries()).map(([legacyId, stableId]) => ({ legacyId, stableId }))
+  }
+
   private ensureParticipant(session: Session, userId: string): boolean {
     const exists = session.participants.some((p) => p.platform_user_id === userId)
     if (exists) return false

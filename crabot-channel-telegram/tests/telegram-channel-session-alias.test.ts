@@ -186,6 +186,68 @@ describe('TelegramChannel session aliases', () => {
     ])
     expect(fs.existsSync(path.join(messagesDir, `${legacyId}.jsonl`))).toBe(false)
   })
+
+  it('migrates known legacy history files during startup before handling stable-id requests', async () => {
+    const legacyId = 'legacy-telegram-session-id'
+    fs.writeFileSync(path.join(tmpDir, 'sessions.json'), JSON.stringify([
+      {
+        id: legacyId,
+        channel_id: 'telegram-test',
+        type: 'private',
+        platform_session_id: '7692507087',
+        title: 'FuFu',
+        participants: [{ platform_user_id: '7692507087', role: 'member' }],
+        permissions: { desktop: false, network: { mode: 'allow_all', rules: [] }, storage: [] },
+        memory_scopes: ['7692507087'],
+        workspace_path: '',
+        created_at: '2026-01-01T00:00:00.000Z',
+        updated_at: '2026-01-01T00:00:00.000Z',
+      },
+    ]), 'utf-8')
+
+    channel = new TelegramChannel({
+      module_id: 'telegram-test',
+      module_type: 'channel',
+      version: '0.1.0',
+      protocol_version: '0.1.0',
+      port: 0,
+      data_dir: tmpDir,
+      telegram: {
+        bot_token: 'token-secret',
+        mode: 'polling',
+        webhook_url: undefined,
+        webhook_secret: undefined,
+        markdown_format: 'off',
+      },
+    })
+
+    const session = (channel as any).sessionManager.findById(legacyId)
+    const stableId = session.id
+    const messagesDir = path.join(tmpDir, 'messages')
+    fs.mkdirSync(messagesDir, { recursive: true })
+    fs.writeFileSync(
+      path.join(messagesDir, `${legacyId}.jsonl`),
+      JSON.stringify({
+        platform_message_id: 'startup-legacy-message',
+        direction: 'inbound',
+        sender_platform_user_id: '7692507087',
+        sender_name: 'FuFu',
+        content_type: 'text',
+        text: 'startup legacy history',
+        timestamp: '2026-01-01T00:00:00.000Z',
+      }) + '\n',
+      'utf-8',
+    )
+
+    await (channel as any).migrateKnownLegacySessionHistories()
+
+    const canonicalHistory = await (channel as any).handleGetHistory({
+      session_id: stableId,
+      pagination: { page: 1, page_size: 20 },
+    })
+    expect(canonicalHistory.items.map((m: any) => m.platform_message_id)).toEqual(['startup-legacy-message'])
+    expect(fs.existsSync(path.join(messagesDir, `${legacyId}.jsonl`))).toBe(false)
+  })
 })
 
 describe('MessageStore session history migration', () => {
@@ -229,6 +291,40 @@ describe('MessageStore session history migration', () => {
 
     const { items } = await store.query({ sessionId: stableId })
     expect(items.map((m) => m.platform_message_id)).toEqual(['stable-message-1', 'legacy-message-1'])
+    expect(fs.existsSync(path.join(messagesDir, `${legacyId}.jsonl`))).toBe(false)
+  })
+
+  it('does not duplicate records already merged into stable history when retried', async () => {
+    const store = new MessageStore(tmpDir)
+    const legacyId = 'legacy-session-id'
+    const stableId = 'stable-session-id'
+    const messagesDir = path.join(tmpDir, 'messages')
+    fs.mkdirSync(messagesDir, { recursive: true })
+    const mergedRecord = {
+      platform_message_id: 'legacy-message-1',
+      direction: 'inbound',
+      sender_platform_user_id: '7692507087',
+      sender_name: 'FuFu',
+      content_type: 'text',
+      text: 'legacy history',
+      timestamp: '2026-01-01T00:00:00.000Z',
+    }
+    fs.writeFileSync(
+      path.join(messagesDir, `${stableId}.jsonl`),
+      JSON.stringify({ ...mergedRecord, text: 'already merged' }) + '\n',
+      'utf-8',
+    )
+    fs.writeFileSync(
+      path.join(messagesDir, `${legacyId}.jsonl`),
+      JSON.stringify(mergedRecord) + '\n',
+      'utf-8',
+    )
+
+    await store.migrateSessionId(legacyId, stableId)
+
+    const { items } = await store.query({ sessionId: stableId })
+    expect(items.map((m) => m.platform_message_id)).toEqual(['legacy-message-1'])
+    expect(items[0].text).toBe('already merged')
     expect(fs.existsSync(path.join(messagesDir, `${legacyId}.jsonl`))).toBe(false)
   })
 
