@@ -66,6 +66,8 @@ export interface OutboundBufferEntry {
     readonly at_name?: string
   }>
   readonly quote_message_id?: string
+  /** send_message 工具调用发生时所属的人类输入轮次。 */
+  readonly human_input_epoch?: number
   readonly sent_at_attempt_ms: number
 }
 

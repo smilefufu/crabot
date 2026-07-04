@@ -15,7 +15,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { AgentHandler } from '../../src/agent/agent-handler.js'
 import type { SubAgentConfig } from '../../src/types.js'
-import type { GoalAuditTaskGoal } from '../../src/agent/goal-audit.js'
+import type { GoalAuditTaskGoal, ParsedAuditReport } from '../../src/agent/goal-audit.js'
 
 function sampleGoal(): GoalAuditTaskGoal {
   return {
@@ -274,6 +274,87 @@ describe('AgentHandler.runGoalAudit', () => {
         handler.runGoalAudit({ taskId: 't', conversationLog: [{ role: 'agent', intent: 'info', content: 'x' }] }),
       ).rejects.toThrow(/goal_auditor.*not configured/)
       expect(runSubAgentDirect).not.toHaveBeenCalled()
+    } finally {
+      handler.dispose()
+    }
+  })
+})
+
+describe('AgentHandler.persistAsyncAuditResult', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('async audit pass → 写 audit_history、complete goal、patch audit trace outcome', async () => {
+    const rpcCall = vi.fn()
+      .mockResolvedValueOnce({ task: { id: 't-async', goal: { ...sampleGoal(), status: 'active' } } })
+      .mockResolvedValueOnce({ task: { id: 't-async', goal: { ...sampleGoal(), status: 'complete' } } })
+    const appendTraceOutcome = vi.fn()
+    const handler = makeHandler({ rpcCall })
+    try {
+      await (handler as any).persistAsyncAuditResult({
+        taskId: 't-async',
+        auditId: 'audit-trace-1',
+        parsed: {
+          pass: true,
+          failedCriteria: [],
+          rawOutput: 'ok',
+        } satisfies ParsedAuditReport,
+        verdictSummary: { summary: '[audit PASS]' },
+        traceStore: { appendTraceOutcome },
+      })
+
+      expect(rpcCall).toHaveBeenCalledTimes(2)
+      expect(rpcCall.mock.calls[0][1]).toBe('append_task_goal_audit_entry')
+      expect(rpcCall.mock.calls[0][2]).toMatchObject({
+        task_id: 't-async',
+        entry: expect.objectContaining({
+          pass: true,
+          failed_criteria: [],
+          audit_trace_id: 'audit-trace-1',
+        }),
+      })
+      expect(rpcCall.mock.calls[1][1]).toBe('complete_task_goal')
+      expect(rpcCall.mock.calls[1][2]).toEqual({ task_id: 't-async' })
+      expect(appendTraceOutcome).toHaveBeenCalledWith('audit-trace-1', { summary: '[audit PASS]' })
+    } finally {
+      handler.dispose()
+    }
+  })
+
+  it('async audit fail → 写 audit_history、不中断 complete，并 patch fail verdict', async () => {
+    const rpcCall = vi.fn()
+      .mockResolvedValueOnce({ task: { id: 't-async', goal: { ...sampleGoal(), status: 'active' } } })
+    const appendTraceOutcome = vi.fn()
+    const handler = makeHandler({ rpcCall })
+    try {
+      await (handler as any).persistAsyncAuditResult({
+        taskId: 't-async',
+        auditId: 'audit-trace-2',
+        parsed: {
+          pass: false,
+          failedCriteria: ['c1'],
+          rawOutput: 'missing c1',
+        } satisfies ParsedAuditReport,
+        verdictSummary: { summary: '[audit FAIL] 不达标: c1', error: '不达标: c1' },
+        traceStore: { appendTraceOutcome },
+      })
+
+      expect(rpcCall).toHaveBeenCalledTimes(1)
+      expect(rpcCall.mock.calls[0][1]).toBe('append_task_goal_audit_entry')
+      expect(rpcCall.mock.calls[0][2]).toMatchObject({
+        task_id: 't-async',
+        entry: expect.objectContaining({
+          pass: false,
+          failed_criteria: ['c1'],
+          audit_trace_id: 'audit-trace-2',
+        }),
+      })
+      expect(rpcCall.mock.calls.some((c) => c[1] === 'complete_task_goal')).toBe(false)
+      expect(appendTraceOutcome).toHaveBeenCalledWith('audit-trace-2', {
+        summary: '[audit FAIL] 不达标: c1',
+        error: '不达标: c1',
+      })
     } finally {
       handler.dispose()
     }

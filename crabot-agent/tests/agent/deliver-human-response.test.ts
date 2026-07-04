@@ -76,6 +76,7 @@ describe('deliverHumanResponse 渲染媒体', () => {
         session_type: 'private',
       },
       todoStore: { get current() { return [] } },
+      humanInputEpoch: 0,
     })
     ;(handler as any).humanQueues.set(taskId, {
       push: (content: string) => pushed.push(content),
@@ -163,12 +164,24 @@ describe('deliverHumanResponse 渲染媒体', () => {
     expect(taskState.goalRevisionUnlocked).toBe(true)
   })
 
+  it('投递真实 supplement → 推进 humanInputEpoch', () => {
+    const taskState = (handler as any).activeTasks.get('task-test')
+    expect(taskState.humanInputEpoch).toBe(0)
+
+    handler.deliverHumanResponse('task-test' as TaskId, [
+      msg({ content: { type: 'text', text: '补充一个条件' } as any }),
+    ])
+
+    expect(taskState.humanInputEpoch).toBe(1)
+  })
+
   it('全空消息（无内容投递）→ 不发券', () => {
     handler.deliverHumanResponse('task-test' as TaskId, [
       msg({ content: { type: 'text', text: '' } }),
     ])
     const taskState = (handler as any).activeTasks.get('task-test')
     expect(taskState.goalRevisionUnlocked).toBeFalsy()
+    expect(taskState.humanInputEpoch).toBe(0)
   })
 
   it('全为空消息（无 text 也无 media）不 push humanQueue，但 status 仍更新为 executing', () => {
@@ -234,6 +247,7 @@ describe('deliverHumanResponse template variant', () => {
         session_type: 'private',
       },
       todoStore: { get current() { return [] } },
+      humanInputEpoch: 0,
     })
     ;(handler as any).humanQueues.set(taskId, {
       push: (content: string) => pushed.push(content),

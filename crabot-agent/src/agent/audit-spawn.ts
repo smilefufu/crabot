@@ -47,6 +47,7 @@ export interface BgAgentExitInfo {
   readonly runtime_ms: number
   readonly spawned_at: string
   readonly result_file: string | null
+  readonly trace_id?: string
   readonly outcome?: 'completed' | 'failed' | 'max_turns' | 'aborted'
   readonly exitToolCall?: { readonly name: string; readonly input: Record<string, unknown> }
   readonly finalText?: string
@@ -84,6 +85,17 @@ export interface SpawnAuditSubagentDeps {
 
   /** audit 完成时 onExit 回调推 marker 的目的地 queue。 */
   readonly humanQueue: HumanMessageQueue
+
+  /**
+   * audit verdict 解析完成后的系统回调。
+   * 用于 async audit 路径把判决持久化到 admin audit_history，并 patch audit trace
+   * 顶层 outcome。失败只记录，不影响 marker push 回 worker loop。
+   */
+  readonly onAuditResult?: (result: {
+    readonly auditId: string
+    readonly parsed: ParsedAuditReport
+    readonly verdictSummary: { readonly summary: string; readonly error?: string }
+  }) => void | Promise<void>
 
   /**
    * 测试 hook —— 默认走真 spawnPersistentAgent；测试里 inject mock 控制 onExit 触发时序。
@@ -162,8 +174,8 @@ export async function spawnAuditSubagent(
           },
         }
       : {}),
-    onExit: (info) => {
-      handleAuditExit(info as BgAgentExitInfo, deps)
+    onExit: async (info) => {
+      await handleAuditExit(info as BgAgentExitInfo, deps)
     },
   })
 
@@ -176,13 +188,25 @@ export async function spawnAuditSubagent(
  * 所有失败路径都被 try/catch 包住——bg-agent 的 onExit 在 fire-and-forget 异步 IIFE
  * 内调用，throw 会逃逸成 unhandled rejection。
  */
-function handleAuditExit(
+async function handleAuditExit(
   info: BgAgentExitInfo,
-  deps: Pick<SpawnAuditSubagentDeps, 'goal' | 'humanQueue'>,
-): void {
+  deps: Pick<SpawnAuditSubagentDeps, 'goal' | 'humanQueue' | 'onAuditResult'>,
+): Promise<void> {
   try {
     const parsed = resolveAuditJudgmentFromExitInfo(info)
     const verdictSummary = buildAuditVerdictSummary(parsed, deps.goal)
+    const auditTraceId = info.trace_id ?? info.entity_id
+    if (deps.onAuditResult) {
+      try {
+        await deps.onAuditResult({
+          auditId: auditTraceId,
+          parsed,
+          verdictSummary,
+        })
+      } catch (err) {
+        console.error(`[audit-spawn] onAuditResult failed for ${info.entity_id}:`, err)
+      }
+    }
     const reportParts = [verdictSummary.summary]
     if (verdictSummary.error) reportParts.push(verdictSummary.error)
     if (parsed.rawOutput) reportParts.push(parsed.rawOutput)

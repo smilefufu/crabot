@@ -270,7 +270,11 @@ export type LiveProgressEvent =
  * endTurnGate 的决策结果（见 EngineOptions.endTurnGate 注释）。
  * spec: 2026-06-10-audit-anchor-human-request-design.md §4.7
  */
-export type EndTurnGateResult = string | { readonly kind: 'wait' } | null
+export type EndTurnGateResult =
+  | string
+  | { readonly kind: 'wait' }
+  | { readonly kind: 'fail'; readonly reason: string }
+  | null
 
 export interface EngineOptions {
   readonly systemPrompt: Resolvable<string>
@@ -343,6 +347,7 @@ export interface EngineOptions {
    * - 返回 { kind: 'wait' } → audit 已异步派出；engine 直接挂起等 humanQueue push
    *   （audit 结果 / 用户 supplement），不注入文本、不烧 LLM 轮次。
    *   spec 2026-06-10-audit-anchor-human-request §4.7
+   * - 返回 { kind: 'fail' } → gate 判定无法安全收口，engine 以 failed 结束
    * - 返回 null → 正常退出
    * 不传时直接退出。
    */

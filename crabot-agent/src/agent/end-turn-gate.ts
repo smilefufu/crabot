@@ -10,7 +10,7 @@
  *  2. buffer 空：
  *     2a. everSentMessage=true → null（讨论型场景：之前 flush 过 info，这次没事干 end_turn）
  *     2b. !everSentMessage + retries < 3 → 塞 GOAL_MODE_NO_DELIVERY_PROMPT、retries++
- *     2c. !everSentMessage + retries ≥ 3 → 强制走"派 audit"路径（即使 buffer 空），让 auditor 跑一次正式评估
+ *     2c. !everSentMessage + retries ≥ 3 → 直接 failed，不派空 buffer audit
  *  3. buffer 非空 → 走"派 audit"路径
  *  4. "派 audit"共享路径：拿 goal（admin get_task RPC）；缺失/RPC 挂 → null（fail-open）
  *  5. spawnAuditSubagent → 设 taskState.activeAuditId → 返回 [audit_pending] marker
@@ -27,14 +27,14 @@ import type { EndTurnGateResult } from '../engine/types.js'
 
 /**
  * "buffer 空 + has goal + !everSentMessage" 路径前 3 次注入的提示文案。
- * 第 4 次起切走强制派 audit 路径（spec §4.13.4 / §4.13.5）。
+ * 第 4 次起直接失败，不派空 buffer audit。
  */
 export const GOAL_MODE_NO_DELIVERY_PROMPT =
   '你设了 task goal 但从未通过 send_message 交付任何内容给人类。\n'
   + 'audit 在这种情况下默认判 incomplete。请选一条路径继续：\n'
   + '  ① 继续工作（调你需要的工具完成 acceptance_criteria）\n'
   + '  ② 如果遇到实际阻塞或需要人类决策，调 send_message(intent=\'ask_human\') 提问\n'
-  + '不要再次直接 end_turn——它会再次注入本提示，反复 3 次后强制派 audit subagent 评估你的进度。'
+  + '不要再次直接 end_turn——它会再次注入本提示，反复 3 次后系统会终止本任务并标记为未交付。'
 
 /**
  * 同一路径但 everBufferedMessage=true 时的变体：worker 调过 send_message，消息进过
@@ -48,7 +48,10 @@ export const GOAL_MODE_INTERCEPTED_DELIVERY_PROMPT =
   + '  ① 对照上一轮自检报告指出的差距，把缺口补完后重新 send_message 交付，系统会自动再审\n'
   + '  ② 客观做不到 / 你认为自检理解错了需求 → 调 send_message(intent=\'ask_human\') 向人类'
   + '说明情况（用人话描述你想做什么、卡在哪，不要提自检机制）\n'
-  + '不要再次直接 end_turn——它会再次注入本提示，反复 3 次后强制派 audit subagent 评估你的进度。'
+  + '不要再次直接 end_turn——它会再次注入本提示，反复 3 次后系统会终止本任务并标记为未交付。'
+
+export const GOAL_MODE_NO_DELIVERY_FAILURE_REASON =
+  '任务设定了 goal，但 worker 多次直接 end_turn，始终没有通过 send_message(intent=info) 交付，也没有通过 send_message(intent=ask_human) 求助；为避免空 buffer audit 反复消耗，系统终止本任务。'
 
 const MAX_SILENT_NO_DELIVERY_RETRIES = 3
 
@@ -101,9 +104,9 @@ export function createAsyncAuditEndTurnGate(
     //    - 从未 audit（agent 全程没 send_message 触发过 audit）
     //    - 上一轮 audit fail，agent 看完 detailedReport 又直接 end_turn（buffer 在 fail 时已 drop）
     //    - 上一轮 audit aborted（改 goal 触发），agent 看完 abort marker 又直接 end_turn
-    //    按 everSentMessage 区分讨论型 vs 从未交付。
+    //    按当前 human input epoch 是否已送达区分讨论型 vs 从未交付。
     if (deps.taskState.outboundBuffer.length === 0) {
-      if (deps.taskState.everSentMessage) {
+      if (deps.taskState.lastDeliveredInfoEpoch === deps.taskState.humanInputEpoch) {
         // 讨论型放行：之前 flush 过 info，这次没事干 end_turn 是预期行为
         return null
       }
@@ -114,7 +117,10 @@ export function createAsyncAuditEndTurnGate(
           ? GOAL_MODE_INTERCEPTED_DELIVERY_PROMPT
           : GOAL_MODE_NO_DELIVERY_PROMPT
       }
-      // 兜底耗尽：fall through 到 audit-spawn 共享路径，强制派 audit（buffer 空也派，让 auditor 跑一次正式评估）
+      return {
+        kind: 'fail' as const,
+        reason: GOAL_MODE_NO_DELIVERY_FAILURE_REASON,
+      }
     }
 
     // 3. 拿 goal（闭包触发时 RPC，保证拿到最新值；set_task_goal 改 goal 后立刻生效）

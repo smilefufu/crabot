@@ -777,6 +777,10 @@ export interface ExecuteTaskParams {
     resumeTraceId?: string
     /** Task-scoped cwd（set_cwd 设置）；从 checkpoint worker_state.cwd 恢复，缺失则回退 home。 */
     cwd?: string
+    /** checkpoint 恢复用：当前 worker 对话里的真实人类输入轮次。 */
+    humanInputEpoch?: number
+    /** checkpoint 恢复用：最近一次成功 info/default send_message 送达对应的人类输入轮次。 */
+    lastDeliveredInfoEpoch?: number
     terminalSupplementText?: string
   }
 }
@@ -870,6 +874,18 @@ export interface WorkerTaskState {
    */
   everSentMessage: boolean
   /**
+   * 当前 worker 对话里的真实人类输入轮次。
+   *
+   * 初始触发消息是 epoch 0；每次 live supplement 或 terminal-supplement resume 注入
+   * 新的人类补充时递增。send_message 工具调用创建 entry 时绑定当前 epoch；
+   * 成功送达后把 lastDeliveredInfoEpoch 写成该 entry 的调用 epoch。
+   * 这样 end_turn 收口判定看的是"最后一次人类输入之后是否已汇报"，而不是 task 历史上
+   * 是否曾经发过消息。
+   */
+  humanInputEpoch: number
+  /** 最近一次成功送达 info/默认 send_message 时对应的 humanInputEpoch。 */
+  lastDeliveredInfoEpoch?: number
+  /**
    * Task 生命周期内是否至少一次 send_message(intent='info') 进过 outboundBuffer
    * （即"worker 交付过但可能被 audit 拦下/丢弃"）。一旦置 true 不再清零。
    *
@@ -880,8 +896,8 @@ export interface WorkerTaskState {
    */
   everBufferedMessage: boolean
   /**
-   * endTurnGate "buffer 空 + has goal + !everSentMessage" 路径已塞 GOAL_MODE_NO_DELIVERY_PROMPT 次数。
-   * 累计 3 次仍 silent end_turn → 第 4 次切换强制派 audit subagent 路径（even with empty buffer）。
+   * endTurnGate "buffer 空 + has goal + 当前 humanInputEpoch 未送达" 路径已塞提醒次数。
+   * 累计 3 次仍 silent end_turn → 第 4 次直接 failed，不再派空 buffer audit。
    * spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.13.3 / §4.13.4
    */
   silentNoDeliveryRetries: number
@@ -1157,6 +1173,10 @@ export interface WorkerStateSnapshot {
    * 持久——否则跨重启 resume 后 cwd 回退到 home，相对路径解析错位、后续上下文出问题。
    */
   cwd?: string
+  /** 当前 worker 对话里的真实人类输入轮次。 */
+  human_input_epoch?: number
+  /** 最近一次成功 info/default send_message 送达对应的人类输入轮次。 */
+  last_delivered_info_epoch?: number
 }
 
 /**

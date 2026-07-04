@@ -110,6 +110,7 @@ import {
   type ConversationEntry,
   type GoalAuditTaskGoal,
   type GoalStatus,
+  type ParsedAuditReport,
 } from './goal-audit.js'
 import { createSubmitAuditResultTool } from './goal-auditor-tools.js'
 import { createWaitForSignalTool, type WaitForSignalDeps } from '../mcp/wait-for-signal.js'
@@ -808,7 +809,7 @@ export class AgentHandler {
     // runWorkerLoop 检查 activeTasks.get(task_id)——提前写入即可完成 todoStore/goalRevisionUnlocked 的恢复。
     let currentInitialMessages: ReadonlyArray<EngineMessage> | undefined
     if (params.resumeFrom) {
-      const { initialMessages, todoItems, goalRevisionUnlocked, cwd: resumedCwd } = params.resumeFrom
+      const { initialMessages, todoItems, goalRevisionUnlocked, cwd: resumedCwd, humanInputEpoch, lastDeliveredInfoEpoch } = params.resumeFrom
       // §3.4 修复：resume 走 initialMessages 分支，query-loop 会忽略 prompt，导致 runWorkerLoop
       // 里 buildTaskMessage 的 friend 队列 drain 被丢弃（drain-and-discard）。这里在 resume 装配处
       // 主动 drain 一次并注入首轮消息，否则宕机期间到达的 bg-notification（如 re-adopt 的 shell 退出）
@@ -828,6 +829,7 @@ export class AgentHandler {
           ? createUserMessage(`${resumeBgNotif}\n\n${wakeup.content}`)
           : wakeup
       currentInitialMessages = [...initialMessages, wakeupMsg]
+      const resumedHumanInputEpoch = (humanInputEpoch ?? 0) + (params.resumeFrom.terminalSupplementText ? 1 : 0)
       // 预建 taskState 让 runWorkerLoop 直接复用（不再用 new TodoStore()）
       if (!this.activeTasks.has(task.task_id)) {
         this.activeTasks.set(task.task_id, {
@@ -843,6 +845,8 @@ export class AgentHandler {
           activeAuditId: undefined,
           activeAsyncSubagentIds: new Set<string>(),
           everSentMessage: false,
+          humanInputEpoch: resumedHumanInputEpoch,
+          ...(lastDeliveredInfoEpoch !== undefined ? { lastDeliveredInfoEpoch } : {}),
           everBufferedMessage: false,
           silentNoDeliveryRetries: 0,
           ...(goalRevisionUnlocked !== undefined ? { goalRevisionUnlocked } : {}),
@@ -998,6 +1002,7 @@ export class AgentHandler {
         activeAuditId: undefined,
         activeAsyncSubagentIds: new Set<string>(),
         everSentMessage: false,
+        humanInputEpoch: 0,
         everBufferedMessage: false,
         silentNoDeliveryRetries: 0,
       }
@@ -1211,6 +1216,9 @@ export class AgentHandler {
           // PR-2 effect：追加 task.messages（role='agent'）—— spec 2026-06-09 §4.2 invariant #3 叠加。
           onDispatched: (entry, sendResult) => {
             taskState.everSentMessage = true
+            if (entry.intent === 'info') {
+              taskState.lastDeliveredInfoEpoch = entry.human_input_epoch ?? taskState.humanInputEpoch
+            }
             this.appendAgentMessageBestEffort(taskState.taskId, entry, sendResult)
           },
           // 进 buffer ≠ 送达：audit fail 会整体丢弃 buffer。endTurnGate 用此标志
@@ -1218,6 +1226,7 @@ export class AgentHandler {
           onBuffered: () => {
             taskState.everBufferedMessage = true
           },
+          getHumanInputEpoch: () => taskState.humanInputEpoch,
           // send_message 工具自愈相对 file_path 用：当前 task cwd（set_cwd 改的 taskState.cwd）。
           getCwd,
           // 透传 sub-agent trace 上下文：让 audit gate 触发的 audit subagent
@@ -1663,6 +1672,9 @@ export class AgentHandler {
               // PR-2 effect：append task.messages（role='agent'）— spec 2026-06-09 §4.2 invariant #3。
               onDispatched: (entry, sendResult) => {
                 taskState.everSentMessage = true
+                if (entry.intent === 'info') {
+                  taskState.lastDeliveredInfoEpoch = entry.human_input_epoch ?? taskState.humanInputEpoch
+                }
                 this.appendAgentMessageBestEffort(taskState.taskId, entry, sendResult)
               },
             }
@@ -1896,6 +1908,8 @@ export class AgentHandler {
                 worker_state: {
                   todo_items: [...taskState.todoStore.list()],
                   goal_revision_unlocked: taskState.goalRevisionUnlocked,
+                  human_input_epoch: taskState.humanInputEpoch,
+                  last_delivered_info_epoch: taskState.lastDeliveredInfoEpoch,
                   ...(taskState.cwd !== undefined ? { cwd: taskState.cwd } : {}),
                 },
                 ...(taskState.resumeWorkerContext ? { worker_context: taskState.resumeWorkerContext } : {}),
@@ -2148,6 +2162,7 @@ export class AgentHandler {
       activeAuditId: undefined,
       activeAsyncSubagentIds: new Set<string>(),
       everSentMessage: false,
+      humanInputEpoch: 0,
       everBufferedMessage: false,
       silentNoDeliveryRetries: 0,
     })
@@ -2828,6 +2843,7 @@ export class AgentHandler {
       .join('\n')
 
     if (supplement) {
+      taskState.humanInputEpoch++
       const humanQueue = this.humanQueues.get(taskId)
       if (humanQueue) {
         const template = this.isGoalModeEnabled(taskState.triggerType)
@@ -2913,6 +2929,8 @@ export class AgentHandler {
           worker_state: {
             todo_items: [...taskState.todoStore.list()],
             goal_revision_unlocked: taskState.goalRevisionUnlocked,
+            human_input_epoch: taskState.humanInputEpoch,
+            last_delivered_info_epoch: taskState.lastDeliveredInfoEpoch,
             ...(taskState.cwd !== undefined ? { cwd: taskState.cwd } : {}),
           },
           ...(taskState.resumeWorkerContext ? { worker_context: taskState.resumeWorkerContext } : {}),
@@ -3536,9 +3554,72 @@ export class AgentHandler {
             ? { traceContext: { traceStore: opts.traceConfig.traceStore, traceId: opts.traceConfig.parentTraceId } }
             : {}),
           humanQueue: opts.humanQueue,
+          onAuditResult: ({ auditId, parsed, verdictSummary }) => {
+            void handler.persistAsyncAuditResult({
+              taskId: opts.taskId,
+              auditId,
+              parsed,
+              verdictSummary,
+              ...(opts.traceConfig ? { traceStore: opts.traceConfig.traceStore } : {}),
+            })
+          },
         }
       },
     })
+  }
+
+  private async persistAsyncAuditResult(params: {
+    readonly taskId: string
+    readonly auditId: string
+    readonly parsed: ParsedAuditReport
+    readonly verdictSummary: { readonly summary: string; readonly error?: string }
+    readonly traceStore?: SubAgentTraceConfig['traceStore']
+  }): Promise<void> {
+    if (!this.deps?.getAdminPort || !this.deps.rpcClient) {
+      console.error('[goal-audit] persistAsyncAuditResult skipped: getAdminPort/rpcClient deps 缺失')
+      return
+    }
+
+    try {
+      const adminPort = await this.deps.getAdminPort()
+      await this.deps.rpcClient.call<unknown, { task?: { goal?: { status?: GoalStatus } } }>(
+        adminPort,
+        'append_task_goal_audit_entry',
+        {
+          task_id: params.taskId,
+          entry: {
+            at: new Date().toISOString(),
+            pass: params.parsed.pass,
+            failed_criteria: [...params.parsed.failedCriteria],
+            audit_trace_id: params.auditId,
+          },
+        },
+        this.deps.moduleId,
+      )
+
+      if (params.parsed.pass) {
+        await this.deps.rpcClient.call<unknown, unknown>(
+          adminPort,
+          'complete_task_goal',
+          { task_id: params.taskId },
+          this.deps.moduleId,
+        )
+      }
+    } catch (err) {
+      console.error(
+        `[goal-audit] persistAsyncAuditResult failed for ${params.taskId}/${params.auditId}:`,
+        err instanceof Error ? err.message : String(err),
+      )
+    }
+
+    try {
+      params.traceStore?.appendTraceOutcome(params.auditId, params.verdictSummary)
+    } catch (err) {
+      console.error(
+        `[goal-audit] append audit trace outcome failed for ${params.auditId}:`,
+        err instanceof Error ? err.message : String(err),
+      )
+    }
   }
 
   /**

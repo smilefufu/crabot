@@ -10,11 +10,19 @@
 - Legacy-only `session-configs.json` 缺少 `channel_id/platform_session_id`，不安全自动迁移；这类旧配置保持无效，避免错误套用到另一个会话。
 - 验证：三个 channel session-manager 测试与 build；Admin schedule repair / backup gather / target_session 测试与 build；Admin Web schedule 保存测试与 build。
 
+## 2026-07-03 — 修复 async goal audit 结果未持久化与 no-delivery 空审计
+
+- 根因：admin-chat 里用户看到的“收到...”来自 dispatcher `immediate_reply` / supplement ack，经 `chat_callback` 写入聊天消息；它不是 worker 的 `send_message` 工具调用。实际 worker trace 没有 `send_message`，所以 goal gate 判断“从未向人类交付”是成立的。
+- no-delivery 路径不再在空 outboundBuffer 上强制派 audit；连续提醒 3 次仍直接 end_turn 时，engine 直接以 no-delivery failure 结束，要求 worker 在阈值前先 `send_message(intent=info)` 汇报或 `send_message(intent=ask_human)` 求助。
+- async goal audit 路径只把 `<audit_result>` marker 推回 worker loop，没有像同步 `runGoalAudit()` 一样写 `append_task_goal_audit_entry` / trace verdict，导致 `audit_history` 为空、auto-block 失效、audit trace 顶层 outcome 空。已在 async audit on-exit 增加结构化 verdict 回调，由 `AgentHandler` 写 audit history，pass 时完成 goal，并 best-effort patch audit trace outcome。
+- `scripts/debug-agent.mjs` 改为从 Module Manager 自动发现 Admin/Agent 端口，`tasks` 改用 `list_tasks` + 正确 filter/分页字段，trace 的 dispatcher action 显示 `dispatcher_ack=sent/none` 与 `supplement_ack=...`，避免把 dispatcher/admin ack 误读成 worker 交付。
+
 ## 2026-07-02 — 修复 Traces UI 活动排序、terminal supplement trace 续写与 null stopReason 误完成
 
 - Traces 主列表的 task 行改按最后活动时间排序：`activity_at = max(task.updated_at, 最近关联 dispatcher started_at)`；标题/摘要优先显示最近 dispatcher 消息，避免旧 task 收到 supplement 后仍沉在创建时间位置、也避免只能看到原始长标题。
 - `list_conversation_units` 搜索把关键词传给 `search_traces`，并在 Admin 侧对 orphan/related dispatcher 二次过滤，避免搜一个补充消息时混入大量无关孤儿对话。
 - terminal supplement resume 才把历史 worker trace id 写入 `resumeFrom.resumeTraceId`，`handleExecuteTask` 通过 `TraceStore.reactivateTraceById()` 复用已完成 worker trace 继续追加 spans；普通 restart resume 不携带 `resumeTraceId`，仍走 `resumableCheckpoints` + `reactivateResumableTrace(task_id)`。修复同一 task 每次 terminal supplement 生成一条新 worker trace 的问题，同时避免把 restart 语义污染成历史 trace revive。旧历史数据里已产生的多 worker trace 不自动合并。
+- `reactivateTraceById()` 同步刷新 `traceIndex` / `taskIndex`，避免详情页 full trace 已 running、列表 search/index 仍显示 completed 的状态漂移。
 - 明确区分 `stopReason='end_turn'` 与 `stopReason=null`：任意已送达 `send_message(intent='info')` 仍允许作为“已有交付”收口；但 LLM stream 没有 terminal stopReason 时按失败处理，不能把空输出误标 completed（对应 trace `6646e158` 的事故形态）。
 - 验证：Admin 定向回归 2 个通过；Agent resume/trace-store/query-loop 定向回归 14 个通过；query-loop 全量 33 个通过；`crabot-admin` / `crabot-agent` / `crabot-admin/web` `tsc --noEmit` 均通过。
 

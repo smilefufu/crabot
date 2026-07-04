@@ -10,7 +10,7 @@
  *  - spawn 抛错 → null（fail-open，console.warn）
  *  - **§4.13.9 新增**：
  *    - buffer 空 + has goal + !everSentMessage + retries<3 → GOAL_MODE_NO_DELIVERY_PROMPT + retries++
- *    - 3 次兜底耗尽 → 强制 spawn audit（buffer 空也派）
+ *    - 3 次兜底耗尽 → 直接 fail，不派空 buffer audit
  *    - 讨论型不误伤：buffer 空 + has goal + everSentMessage=true → null
  *
  * spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.3 + §4.13
@@ -21,6 +21,7 @@ import {
   createAsyncAuditEndTurnGate,
   GOAL_MODE_NO_DELIVERY_PROMPT,
   GOAL_MODE_INTERCEPTED_DELIVERY_PROMPT,
+  GOAL_MODE_NO_DELIVERY_FAILURE_REASON,
   type AsyncAuditEndTurnGateDeps,
 } from '../../src/agent/end-turn-gate'
 import { parseSystemMarker } from '../../src/agent/audit-result-marker'
@@ -62,6 +63,7 @@ function makeTaskState(overrides: Partial<WorkerTaskState> = {}): WorkerTaskStat
     activeAsyncSubagentIds: new Set<string>(),
     // §4.13 默认：未发过、零计数。具体测试按需 override 模拟"讨论型 / 已塞过 N 次 prompt"等场景。
     everSentMessage: false,
+    humanInputEpoch: 0,
     everBufferedMessage: false,
     silentNoDeliveryRetries: 0,
     ...overrides,
@@ -86,6 +88,8 @@ function makeHarness(opts: {
   spawnThrows?: Error
   /** §4.13 — 显式控制初始 everSentMessage / silentNoDeliveryRetries */
   everSentMessage?: boolean
+  humanInputEpoch?: number
+  lastDeliveredInfoEpoch?: number
   silentNoDeliveryRetries?: number
 } = {}): Harness {
   const goal: GoalAuditTaskGoal | undefined =
@@ -97,6 +101,8 @@ function makeHarness(opts: {
   const taskState = makeTaskState({
     outboundBuffer: [...(opts.bufferEntries ?? [makeBufferEntry()])],
     ...(opts.everSentMessage !== undefined ? { everSentMessage: opts.everSentMessage } : {}),
+    ...(opts.humanInputEpoch !== undefined ? { humanInputEpoch: opts.humanInputEpoch } : {}),
+    ...(opts.lastDeliveredInfoEpoch !== undefined ? { lastDeliveredInfoEpoch: opts.lastDeliveredInfoEpoch } : {}),
     ...(opts.silentNoDeliveryRetries !== undefined ? { silentNoDeliveryRetries: opts.silentNoDeliveryRetries } : {}),
   })
 
@@ -143,7 +149,12 @@ describe('createAsyncAuditEndTurnGate', () => {
   })
 
   it('empty outboundBuffer + everSentMessage=true → returns null (讨论型放行；§4.13.4)', async () => {
-    const h = makeHarness({ bufferEntries: [], everSentMessage: true })
+    const h = makeHarness({
+      bufferEntries: [],
+      everSentMessage: true,
+      humanInputEpoch: 1,
+      lastDeliveredInfoEpoch: 1,
+    })
     const gate = createAsyncAuditEndTurnGate(h.deps)
 
     const result = await gate()
@@ -311,7 +322,7 @@ describe('createAsyncAuditEndTurnGate § 4.13 二级分支', () => {
     }
   })
 
-  it('retries=3 → 强制派 audit（buffer 空也派；走完整 RPC+spawn 路径，设 activeAuditId）', async () => {
+  it('retries=3 → 直接 fail，不派空 buffer audit', async () => {
     const h = makeHarness({
       bufferEntries: [],
       everSentMessage: false,
@@ -322,22 +333,22 @@ describe('createAsyncAuditEndTurnGate § 4.13 二级分支', () => {
 
     const result = await gate()
 
-    // 不再塞 prompt，直接走 audit 路径
-    expect(result).not.toBe(GOAL_MODE_NO_DELIVERY_PROMPT)
-    expect(h.rpcCall).toHaveBeenCalledOnce()
-    expect(h.spawnFn).toHaveBeenCalledOnce()
-    expect(h.taskState.activeAuditId).toBe('forced-audit-zzz')
-    // 强制路径不再 ++ 计数器（计数器本就 ≥3）
+    expect(result).toEqual({
+      kind: 'fail',
+      reason: GOAL_MODE_NO_DELIVERY_FAILURE_REASON,
+    })
+    expect(h.rpcCall).not.toHaveBeenCalled()
+    expect(h.spawnFn).not.toHaveBeenCalled()
+    expect(h.taskState.activeAuditId).toBeUndefined()
     expect(h.taskState.silentNoDeliveryRetries).toBe(3)
-
-    // 返回 wait 信号（spec 2026-06-10 §4.7）
-    expect(result).toEqual({ kind: 'wait' })
   })
 
   it('讨论型不误伤：buffer 空 + has goal + everSentMessage=true + retries=0 → null', async () => {
     const h = makeHarness({
       bufferEntries: [],
       everSentMessage: true,
+      humanInputEpoch: 1,
+      lastDeliveredInfoEpoch: 1,
       silentNoDeliveryRetries: 0,
     })
     const gate = createAsyncAuditEndTurnGate(h.deps)
@@ -352,10 +363,31 @@ describe('createAsyncAuditEndTurnGate § 4.13 二级分支', () => {
     expect(h.taskState.silentNoDeliveryRetries).toBe(0)
   })
 
+  it('terminal supplement 后仅有历史送达不算本轮已汇报：current epoch 未送达 → 注入 NO_DELIVERY prompt', async () => {
+    const h = makeHarness({
+      bufferEntries: [],
+      everSentMessage: true,
+      humanInputEpoch: 2,
+      lastDeliveredInfoEpoch: 1,
+      silentNoDeliveryRetries: 0,
+    })
+    const gate = createAsyncAuditEndTurnGate(h.deps)
+
+    const result = await gate()
+
+    expect(result).toBe(GOAL_MODE_NO_DELIVERY_PROMPT)
+    expect(h.taskState.silentNoDeliveryRetries).toBe(1)
+    expect(h.rpcCall).not.toHaveBeenCalled()
+    expect(h.spawnFn).not.toHaveBeenCalled()
+    expect(h.taskState.activeAuditId).toBeUndefined()
+  })
+
   it('讨论型也不受 retries 影响：everSentMessage=true 在 retries=5 时仍 null', async () => {
     const h = makeHarness({
       bufferEntries: [],
       everSentMessage: true,
+      humanInputEpoch: 1,
+      lastDeliveredInfoEpoch: 1,
       silentNoDeliveryRetries: 5,
     })
     const gate = createAsyncAuditEndTurnGate(h.deps)

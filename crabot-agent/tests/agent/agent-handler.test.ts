@@ -6,12 +6,15 @@ import { AgentHandler } from '../../src/agent/agent-handler.js'
 import { BgEntityRegistry } from '../../src/engine/bg-entities/registry.js'
 import { createSkillTool } from '../../src/engine/tools/skill-tool.js'
 import { resolveSceneAnchorLabel } from '../../src/mcp/crab-memory.js'
+import { createCrabMessagingServer } from '../../src/mcp/crab-messaging.js'
 import type {
   ExecuteTaskParams,
   WorkerAgentContext,
   ChannelMessage,
 } from '../../src/types.js'
 import type { BgEntityRecord } from '../../src/engine/bg-entities/types.js'
+import type { ToolDefinition } from '../../src/engine/types.js'
+import { GOAL_MODE_NO_DELIVERY_PROMPT } from '../../src/agent/end-turn-gate.js'
 
 // Mock the engine's runEngine function
 vi.mock('../../src/engine/index.js', async (importOriginal) => {
@@ -38,6 +41,41 @@ function makeHandler() {
     systemPrompt: 'You are a helpful worker.',
   }
   return new AgentHandler(sdkEnv, config)
+}
+
+function makeMessagingHandler(rpcCall: ReturnType<typeof vi.fn>) {
+  return new AgentHandler(
+    {
+      modelId: 'test-model',
+      format: 'anthropic' as const,
+      env: { ANTHROPIC_BASE_URL: 'http://localhost:4000', ANTHROPIC_API_KEY: 'test-key' },
+    },
+    { systemPrompt: 'You are a helpful worker.' },
+    {
+      deps: {
+        rpcClient: { call: rpcCall } as never,
+        moduleId: 'agent-test',
+        resolveChannelPort: async () => 3003,
+        getAdminPort: async () => 3001,
+        getMemoryPort: async () => 3002,
+      },
+      mcpConfigFactory: taskCtx => ({
+        'crab-messaging': createCrabMessagingServer({
+          rpcClient: { call: rpcCall } as never,
+          moduleId: 'agent-test',
+          resolveChannelPort: async () => 3003,
+          getAdminPort: async () => 3001,
+          getTaskContext: () => taskCtx,
+        }),
+      }),
+    },
+  )
+}
+
+function findTool(tools: ReadonlyArray<ToolDefinition>, name: string): ToolDefinition {
+  const tool = tools.find(t => t.name === name || t.name.endsWith(`__${name}`))
+  if (!tool) throw new Error(`tool ${name} not found`)
+  return tool
 }
 
 function makeTask(overrides?: Partial<ExecuteTaskParams['task']>): ExecuteTaskParams['task'] {
@@ -478,6 +516,84 @@ describe('AgentHandler', () => {
       resolveEngine!(makeEngineResult())
       await promise
     })
+
+    it('buffered info send_message uses call-time humanInputEpoch when later dispatched', async () => {
+      mockRunEngine.mockImplementation(async () => {
+        await new Promise(resolve => setTimeout(resolve, 60))
+        return makeEngineResult()
+      })
+      const rpcCall = vi.fn().mockImplementation(async (_port: number, method: string) => {
+        if (method === 'send_message') return { platform_message_id: 'mid-info', sent_at: 'now' }
+        return { task: { id: 'task_1', goal: { objective: 'finish current user request' } } }
+      })
+      const handler = makeMessagingHandler(rpcCall)
+
+      const promise = handler.executeTask({ task: makeTask(), context: makeContext() })
+      await new Promise(resolve => setTimeout(resolve, 20))
+      const callArgs = mockRunEngine.mock.calls[0][0]
+      const tools = (callArgs.options.tools as () => ReadonlyArray<ToolDefinition>)()
+      const sendMessage = findTool(tools, 'send_message')
+
+      await sendMessage.call({
+        channel_id: 'channel_1',
+        session_id: 'session_1',
+        content: '旧输入下的汇报',
+      }, {} as never)
+      handler.deliverHumanResponse('task_1', [{
+        platform_message_id: 'msg_human_epoch_1',
+        session: { session_id: 'session_1', channel_id: 'channel_1', type: 'private' },
+        sender: { friend_id: 'friend_1', platform_user_id: 'user_1', platform_display_name: 'Test User' },
+        content: { type: 'text', text: '新的补充' },
+        features: { is_mention_crab: false },
+        platform_timestamp: '2024-01-01T00:02:00Z',
+      }])
+
+      await sendMessage.call({
+        channel_id: 'channel_1',
+        session_id: 'session_1',
+        content: '新输入下的汇报',
+      }, {} as never)
+
+      const taskState = (handler as any).activeTasks.get('task_1')
+      expect(taskState.lastDeliveredInfoEpoch).toBe(0)
+      expect(taskState.outboundBuffer).toHaveLength(1)
+      expect(taskState.outboundBuffer[0].human_input_epoch).toBe(1)
+
+      await promise
+      handler.dispose()
+    })
+
+    it('ask_human dispatch does not count as info delivery for current epoch', async () => {
+      mockRunEngine.mockImplementation(async () => {
+        await new Promise(resolve => setTimeout(resolve, 60))
+        return makeEngineResult()
+      })
+      const rpcCall = vi.fn().mockImplementation(async (_port: number, method: string) => {
+        if (method === 'send_message') return { platform_message_id: 'mid-ask', sent_at: 'now' }
+        if (method === 'update_task_status') return { task: { id: 'task_1', status: 'waiting_human' } }
+        return { task: { id: 'task_1', goal: { objective: 'finish current user request' } } }
+      })
+      const handler = makeMessagingHandler(rpcCall)
+
+      const promise = handler.executeTask({ task: makeTask(), context: makeContext() })
+      await new Promise(resolve => setTimeout(resolve, 20))
+      const callArgs = mockRunEngine.mock.calls[0][0]
+      const tools = (callArgs.options.tools as () => ReadonlyArray<ToolDefinition>)()
+      const sendMessage = findTool(tools, 'send_message')
+
+      await sendMessage.call({
+        channel_id: 'channel_1',
+        session_id: 'session_1',
+        content: '需要你确认一下',
+        intent: 'ask_human',
+      }, {} as never)
+
+      const gateResult = await callArgs.options.endTurnGate()
+      expect(gateResult).toBe(GOAL_MODE_NO_DELIVERY_PROMPT)
+
+      await promise
+      handler.dispose()
+    })
   })
 
   describe('cancelTask', () => {
@@ -696,6 +812,87 @@ describe('AgentHandler', () => {
       } finally {
         rmSync(projectDir, { recursive: true, force: true })
       }
+    })
+
+    it('跨重启 resume：恢复 lastDeliveredInfoEpoch，避免已汇报任务被误判未汇报', async () => {
+      mockRunEngine.mockImplementation(async () => {
+        await new Promise(resolve => setTimeout(resolve, 20))
+        return makeEngineResult()
+      })
+      const rpcCall = vi.fn().mockResolvedValue({
+        task: { id: 'task_1', goal: { objective: 'finish current user request' } },
+      })
+      const handler = new AgentHandler(
+        {
+          modelId: 'test-model',
+          format: 'anthropic' as const,
+          env: { ANTHROPIC_BASE_URL: 'http://localhost:4000', ANTHROPIC_API_KEY: 'test-key' },
+        },
+        { systemPrompt: 'You are a helpful worker.' },
+        {
+          deps: {
+            rpcClient: { call: rpcCall } as never,
+            moduleId: 'agent-test',
+            resolveChannelPort: async () => 3003,
+            getAdminPort: async () => 3001,
+            getMemoryPort: async () => 3002,
+          },
+        },
+      )
+      await handler.executeTask({
+        task: makeTask({ goal: { objective: 'finish current user request' } } as never),
+        context: makeContext(),
+        resumeFrom: {
+          initialMessages: [{ id: 'm1', role: 'user', content: 'resume me', timestamp: 1 }] as never,
+          todoItems: [],
+          lastDeliveredInfoEpoch: 0,
+        },
+      })
+
+      const callArgs = mockRunEngine.mock.calls[0][0]
+      const gateResult = await callArgs.options.endTurnGate()
+      expect(gateResult).toBeNull()
+    })
+
+    it('跨重启 resume：恢复 humanInputEpoch，live supplement 后旧汇报不算当前轮汇报', async () => {
+      mockRunEngine.mockImplementation(async () => {
+        await new Promise(resolve => setTimeout(resolve, 20))
+        return makeEngineResult()
+      })
+      const rpcCall = vi.fn().mockResolvedValue({
+        task: { id: 'task_1', goal: { objective: 'finish current user request' } },
+      })
+      const handler = new AgentHandler(
+        {
+          modelId: 'test-model',
+          format: 'anthropic' as const,
+          env: { ANTHROPIC_BASE_URL: 'http://localhost:4000', ANTHROPIC_API_KEY: 'test-key' },
+        },
+        { systemPrompt: 'You are a helpful worker.' },
+        {
+          deps: {
+            rpcClient: { call: rpcCall } as never,
+            moduleId: 'agent-test',
+            resolveChannelPort: async () => 3003,
+            getAdminPort: async () => 3001,
+            getMemoryPort: async () => 3002,
+          },
+        },
+      )
+      await handler.executeTask({
+        task: makeTask({ goal: { objective: 'finish current user request' } } as never),
+        context: makeContext(),
+        resumeFrom: {
+          initialMessages: [{ id: 'm1', role: 'user', content: 'resume me', timestamp: 1 }] as never,
+          todoItems: [],
+          humanInputEpoch: 1,
+          lastDeliveredInfoEpoch: 0,
+        },
+      })
+
+      const callArgs = mockRunEngine.mock.calls[0][0]
+      const gateResult = await callArgs.options.endTurnGate()
+      expect(gateResult).toBe(GOAL_MODE_NO_DELIVERY_PROMPT)
     })
   })
 
