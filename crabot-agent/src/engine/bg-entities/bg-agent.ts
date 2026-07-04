@@ -91,12 +91,14 @@ export interface SpawnPersistentAgentOpts {
     runtime_ms: number
     spawned_at: string
     result_file: string | null
+    /** subTrace 开启时创建的 child trace id；不同于 bg entity_id。 */
+    trace_id?: string
     /** 失败原因（status='failed' 时填），供 caller 把失败原因回传给父 agent / 通知人类。 */
     error?: string
     outcome?: 'completed' | 'failed' | 'max_turns' | 'aborted'
     exitToolCall?: { readonly name: string; readonly input: Record<string, unknown> }
     finalText?: string
-  }) => void
+  }) => void | Promise<void>
 }
 
 /**
@@ -233,7 +235,7 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
         .catch(() => {})
       if (opts.onExit) {
         try {
-          opts.onExit({
+          await opts.onExit({
             entity_id,
             task_description: opts.task_description,
             status: endedStatus,
@@ -241,6 +243,7 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
             runtime_ms: runtimeMs,
             spawned_at: now,
             result_file: resultFile,
+            ...(subTrace ? { trace_id: subTrace.trace_id } : {}),
             ...(failureError ? { error: failureError } : {}),
             outcome: result.outcome,
             ...(result.exitToolCall ? { exitToolCall: result.exitToolCall } : {}),
@@ -280,7 +283,7 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
         .catch(() => {})
       if (opts.onExit) {
         try {
-          opts.onExit({
+          await opts.onExit({
             entity_id,
             task_description: opts.task_description,
             status: 'failed',
@@ -288,6 +291,7 @@ export async function spawnPersistentAgent(opts: SpawnPersistentAgentOpts): Prom
             runtime_ms: runtimeMs,
             spawned_at: now,
             result_file: null,
+            ...(subTrace ? { trace_id: subTrace.trace_id } : {}),
             error: errMsg,
           })
         } catch (err) {

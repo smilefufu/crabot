@@ -349,6 +349,27 @@ describe('runEngine', () => {
       expect(result.outcome).toBe('completed')
     })
 
+    it('suppressForcedSummary=true + silent end_turn: gate 返回 fail 时任务失败', async () => {
+      const gate = vi.fn(async () => ({
+        kind: 'fail' as const,
+        reason: 'no delivery after repeated reminders',
+      }))
+      const adapter = mockAdapter([silentEndTurnResponse()])
+
+      const result = await runEngine({
+        prompt: 'test',
+        adapter,
+        options: baseOptions({
+          suppressForcedSummary: () => true,
+          endTurnGate: gate,
+        }),
+      })
+
+      expect(gate).toHaveBeenCalledOnce()
+      expect(result.outcome).toBe('failed')
+      expect(result.error).toBe('no delivery after repeated reminders')
+    })
+
     it('suppressForcedSummary=false + silent end_turn: forces a follow-up instead of completing empty', async () => {
       const adapter = mockAdapter([
         silentEndTurnResponse(),

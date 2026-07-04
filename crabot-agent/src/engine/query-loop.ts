@@ -628,6 +628,9 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
             })
             continue
           }
+          if (gateResult?.kind === 'fail') {
+            return buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, gateResult.reason)
+          }
           if (gateResult !== null) {
             // { kind: 'wait' }：audit 已派出，engine 直接挂起等结果（spec 2026-06-10 §4.7）
             const outcome = await waitGateAuditAndDispatch(options, messages, totalTurns, abortSignal, flushAndTrackDelivery)
@@ -685,6 +688,9 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
             injectedAtMs: Date.now(),
           })
           continue
+        }
+        if (gateResult?.kind === 'fail') {
+          return buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, gateResult.reason)
         }
         if (gateResult !== null) {
           // { kind: 'wait' }：audit 已派出，engine 直接挂起等结果（spec 2026-06-10 §4.7）

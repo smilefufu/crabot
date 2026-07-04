@@ -1,6 +1,13 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-02 — 修复 Traces UI 活动排序、terminal supplement trace 续写与 null stopReason 误完成
+> 最后更新：2026-07-03 — 修复 async goal audit 结果未持久化与 no-delivery 空审计
+
+## 2026-07-03 — 修复 async goal audit 结果未持久化与 no-delivery 空审计
+
+- 根因：admin-chat 里用户看到的“收到...”来自 dispatcher `immediate_reply` / supplement ack，经 `chat_callback` 写入聊天消息；它不是 worker 的 `send_message` 工具调用。实际 worker trace 没有 `send_message`，所以 goal gate 判断“从未向人类交付”是成立的。
+- no-delivery 路径不再在空 outboundBuffer 上强制派 audit；连续提醒 3 次仍直接 end_turn 时，engine 直接以 no-delivery failure 结束，要求 worker 在阈值前先 `send_message(intent=info)` 汇报或 `send_message(intent=ask_human)` 求助。
+- async goal audit 路径只把 `<audit_result>` marker 推回 worker loop，没有像同步 `runGoalAudit()` 一样写 `append_task_goal_audit_entry` / trace verdict，导致 `audit_history` 为空、auto-block 失效、audit trace 顶层 outcome 空。已在 async audit on-exit 增加结构化 verdict 回调，由 `AgentHandler` 写 audit history，pass 时完成 goal，并 best-effort patch audit trace outcome。
+- `scripts/debug-agent.mjs` 改为从 Module Manager 自动发现 Admin/Agent 端口，`tasks` 改用 `list_tasks` + 正确 filter/分页字段，trace 的 dispatcher action 显示 `dispatcher_ack=sent/none` 与 `supplement_ack=...`，避免把 dispatcher/admin ack 误读成 worker 交付。
 
 ## 2026-07-02 — 修复 Traces UI 活动排序、terminal supplement trace 续写与 null stopReason 误完成
 

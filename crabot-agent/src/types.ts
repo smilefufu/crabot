@@ -896,8 +896,8 @@ export interface WorkerTaskState {
    */
   everBufferedMessage: boolean
   /**
-   * endTurnGate "buffer 空 + has goal + !everSentMessage" 路径已塞 GOAL_MODE_NO_DELIVERY_PROMPT 次数。
-   * 累计 3 次仍 silent end_turn → 第 4 次切换强制派 audit subagent 路径（even with empty buffer）。
+   * endTurnGate "buffer 空 + has goal + 当前 humanInputEpoch 未送达" 路径已塞提醒次数。
+   * 累计 3 次仍 silent end_turn → 第 4 次直接 failed，不再派空 buffer audit。
    * spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.13.3 / §4.13.4
    */
   silentNoDeliveryRetries: number

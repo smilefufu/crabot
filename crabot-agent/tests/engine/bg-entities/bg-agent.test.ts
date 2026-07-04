@@ -4,7 +4,7 @@
  * Each case uses mkdtempSync to isolate DATA_DIR and a mock LLMAdapter.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import * as fs from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -262,10 +262,12 @@ describe('spawnPersistentAgent', () => {
       trigger: { type: 'task', summary: 'parent worker task' },
     })
     const adapter = mockAdapter([textResponse('audit done')])
+    const onExit = vi.fn()
 
     const id = await spawnPersistentAgent({
       ...baseOpts(adapter),
       task_description: '[goal_audit] verify acceptance criteria',
+      onExit,
       subTrace: {
         traceStore,
         parentTraceId: parent.trace_id,
@@ -288,6 +290,11 @@ describe('spawnPersistentAgent', () => {
     // 子 trace 应记录内部 llm span（drill-in 才有内容）
     expect(audit.spans.some((s) => s.type === 'llm_call')).toBe(true)
     expect(audit.status).toBe('completed')
+    expect(onExit).toHaveBeenCalledOnce()
+    expect(onExit.mock.calls[0][0]).toMatchObject({
+      entity_id: id,
+      trace_id: audit.trace_id,
+    })
   })
 
   it('multiple parallel spawns produce independent result_files without mixing', async () => {

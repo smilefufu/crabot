@@ -110,6 +110,7 @@ import {
   type ConversationEntry,
   type GoalAuditTaskGoal,
   type GoalStatus,
+  type ParsedAuditReport,
 } from './goal-audit.js'
 import { createSubmitAuditResultTool } from './goal-auditor-tools.js'
 import { createWaitForSignalTool, type WaitForSignalDeps } from '../mcp/wait-for-signal.js'
@@ -3553,9 +3554,72 @@ export class AgentHandler {
             ? { traceContext: { traceStore: opts.traceConfig.traceStore, traceId: opts.traceConfig.parentTraceId } }
             : {}),
           humanQueue: opts.humanQueue,
+          onAuditResult: ({ auditId, parsed, verdictSummary }) => {
+            void handler.persistAsyncAuditResult({
+              taskId: opts.taskId,
+              auditId,
+              parsed,
+              verdictSummary,
+              ...(opts.traceConfig ? { traceStore: opts.traceConfig.traceStore } : {}),
+            })
+          },
         }
       },
     })
+  }
+
+  private async persistAsyncAuditResult(params: {
+    readonly taskId: string
+    readonly auditId: string
+    readonly parsed: ParsedAuditReport
+    readonly verdictSummary: { readonly summary: string; readonly error?: string }
+    readonly traceStore?: SubAgentTraceConfig['traceStore']
+  }): Promise<void> {
+    if (!this.deps?.getAdminPort || !this.deps.rpcClient) {
+      console.error('[goal-audit] persistAsyncAuditResult skipped: getAdminPort/rpcClient deps 缺失')
+      return
+    }
+
+    try {
+      const adminPort = await this.deps.getAdminPort()
+      await this.deps.rpcClient.call<unknown, { task?: { goal?: { status?: GoalStatus } } }>(
+        adminPort,
+        'append_task_goal_audit_entry',
+        {
+          task_id: params.taskId,
+          entry: {
+            at: new Date().toISOString(),
+            pass: params.parsed.pass,
+            failed_criteria: [...params.parsed.failedCriteria],
+            audit_trace_id: params.auditId,
+          },
+        },
+        this.deps.moduleId,
+      )
+
+      if (params.parsed.pass) {
+        await this.deps.rpcClient.call<unknown, unknown>(
+          adminPort,
+          'complete_task_goal',
+          { task_id: params.taskId },
+          this.deps.moduleId,
+        )
+      }
+    } catch (err) {
+      console.error(
+        `[goal-audit] persistAsyncAuditResult failed for ${params.taskId}/${params.auditId}:`,
+        err instanceof Error ? err.message : String(err),
+      )
+    }
+
+    try {
+      params.traceStore?.appendTraceOutcome(params.auditId, params.verdictSummary)
+    } catch (err) {
+      console.error(
+        `[goal-audit] append audit trace outcome failed for ${params.auditId}:`,
+        err instanceof Error ? err.message : String(err),
+      )
+    }
   }
 
   /**
