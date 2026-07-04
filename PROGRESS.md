@@ -1,14 +1,14 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-03 — 修复 Channel Session 随机 ID 导致的计划任务目标失效
+> 最后更新：2026-07-04 — 稳定 Channel Session ID 与无痛备份导入
 
-## 2026-07-03 — 修复 Channel Session 随机 ID 导致的计划任务目标失效
+## 2026-07-04 — 稳定 Channel Session ID 与无痛备份导入
 
-- 根因不是上游 IM session 过期：微信 `chatroomName`、飞书 `open_id/chat_id`、Telegram chat id 都是稳定的平台会话标识；问题是 Channel 层把平台会话包了一层随机内部 `Session.id`，Schedule 持久化引用该随机 ID 后，`sessions.json` 重建/迁移/重扫会让同一平台会话生成新 ID，旧 schedule 触发时 `send_message` 查不到 session。
-- WeChat / Feishu / Telegram 的 `SessionManager` 改为按 `channel_id + platform_session_id` 派生 8 位 base36 短稳定内部 session id；加载旧 `sessions.json` 时把旧随机 id / 早期 UUID 形稳定 id 保留为内存 alias，兼容当前磁盘里仍存在的旧引用。
-- `Schedule.target_session` 增加可选 `platform_session_id`；Admin Web 保存计划任务目标时一并写入平台会话 ID，后续即使内部 ID 变化也能确定性修复。
-- Admin 启动迁移和 schedule 触发前都会修复 stale `target_session`：优先验证现有 `session_id`；失效后只在存在 `platform_session_id` 时按平台会话 ID 精确匹配当前 session。旧数据缺平台 ID 时不自动改写目标，避免猜错私聊或群聊。
-- 验证：wechat/feishu/telegram session manager 单测通过；admin schedule migration / target_session / task schedule 回归通过；admin、admin web、三个 channel `tsc --noEmit` 通过。
+- `Session.id` 明确为 Admin/Agent 使用的稳定对话指针，由 `channel_id + platform_session_id` 确定性派生；WeChat/Feishu/Telegram 加载旧 `sessions.json` 时把 legacy 随机 ID canonicalize 到 stable ID，legacy ID 仅作为兼容 lookup alias。
+- `Schedule.target_session` 同时保存 `session_id` 和可选 `platform_session_id`：前者是运行时发送主指针，后者是迁移/修复锚点。Admin 只按 `channel_id + type + platform_session_id` 做确定性修复；缺证据的 legacy-only stale 引用保持无效，不做 fuzzy repair。
+- 备份/导入不依赖 channel-local `sessions.json`。只要导入后 channel 实例和平台原生会话 ID 不变，重新发现会话即可得到同一 stable `Session.id`，导入的 schedule/config 能重新对上。
+- Legacy-only `session-configs.json` 缺少 `channel_id/platform_session_id`，不安全自动迁移；这类旧配置保持无效，避免错误套用到另一个会话。
+- 验证：三个 channel session-manager 测试与 build；Admin schedule repair / backup gather / target_session 测试与 build；Admin Web schedule 保存测试与 build。
 
 ## 2026-07-02 — 修复 Traces UI 活动排序、terminal supplement trace 续写与 null stopReason 误完成
 
