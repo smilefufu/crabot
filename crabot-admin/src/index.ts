@@ -4289,8 +4289,11 @@ export class AdminModule extends ModuleBase {
 
       try {
         const sessions = await this.listChannelSessions(channelId as ModuleId)
-        if (platformSessionId) {
-          const match = sessions.find((s) => s.platform_session_id === platformSessionId)
+        const expectedType = scheduleForLookup?.target_session?.type
+        if (platformSessionId && expectedType) {
+          const match = sessions.find(
+            (s) => s.platform_session_id === platformSessionId && s.type === expectedType,
+          )
           if (match) {
             return {
               session_id: match.id,

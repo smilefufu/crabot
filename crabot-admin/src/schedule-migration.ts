@@ -112,6 +112,7 @@ export async function repairScheduleTargetSession(
   }
 
   if (!resolved) return schedule
+  if (resolved.type !== target.type) return schedule
   const platformSessionId = resolved.platform_session_id ?? target.platform_session_id
   const same =
     resolved.session_id === target.session_id
