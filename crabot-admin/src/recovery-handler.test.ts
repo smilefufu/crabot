@@ -82,6 +82,7 @@ describe('partitionResumeResults', () => {
     ])
     expect(r.resumed.map((x) => x.id)).toEqual(['a'])
     expect(r.needRecovery.map((x) => x.id)).toEqual(['b'])
+    expect(r.retryLater).toHaveLength(0)
   })
 
   it('全部 resumed', () => {
@@ -91,6 +92,7 @@ describe('partitionResumeResults', () => {
     ])
     expect(r.resumed.map((x) => x.id)).toEqual(['x', 'y'])
     expect(r.needRecovery).toHaveLength(0)
+    expect(r.retryLater).toHaveLength(0)
   })
 
   it('全部 needRecovery', () => {
@@ -100,12 +102,25 @@ describe('partitionResumeResults', () => {
     ])
     expect(r.resumed).toHaveLength(0)
     expect(r.needRecovery.map((x) => x.id)).toEqual(['p', 'q'])
+    expect(r.retryLater).toHaveLength(0)
+  })
+
+  it('not_configured 不进入 recovery，保留给下一次 sweep 重试', () => {
+    const r = partitionResumeResults([
+      { task: t('ready'), resumed: true },
+      { task: t('early'), resumed: false, reason: 'not_configured' },
+      { task: t('bad'), resumed: false, reason: 'no_checkpoint' },
+    ])
+    expect(r.resumed.map((x) => x.id)).toEqual(['ready'])
+    expect(r.retryLater.map((x) => x.id)).toEqual(['early'])
+    expect(r.needRecovery.map((x) => x.id)).toEqual(['bad'])
   })
 
   it('空输入返回两个空数组', () => {
     const r = partitionResumeResults([])
     expect(r.resumed).toHaveLength(0)
     expect(r.needRecovery).toHaveLength(0)
+    expect(r.retryLater).toHaveLength(0)
   })
 
   // TaskStatus 引用，确保类型 import 不被 lint 当未用

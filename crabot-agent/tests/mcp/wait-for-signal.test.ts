@@ -42,13 +42,15 @@ describe('wait_for_signal', () => {
     humanQueue.clearBarrier()
   })
 
-  it('sets barrier when humanQueue has pending push', async () => {
+  it('does not set barrier when humanQueue already has a pending push', async () => {
     const humanQueue = new HumanMessageQueue()
     humanQueue.push('pending message')
     const tool = createWaitForSignalTool(makeDeps({ humanQueue }))
-    await tool.call({ reason: 'await pending' }, {} as ToolCallContext)
-    expect(humanQueue.hasBarrier).toBe(true)
-    humanQueue.clearBarrier()
+    const result = await tool.call({ reason: 'await pending' }, {} as ToolCallContext)
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('已有 pending')
+    expect(humanQueue.hasBarrier).toBe(false)
+    expect(humanQueue.drainPending()).toEqual(['pending message'])
   })
 
   it('sets barrier when a bg entity is running', async () => {

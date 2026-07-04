@@ -949,13 +949,7 @@ export class AdminModule extends ModuleBase {
           }
           const restartCount = (event.payload as { restart_count?: number }).restart_count ?? 0
           console.log(`[Admin] Agent module ${module_id} started (port=${port}, restart_count=${restartCount}), pushing config as safety net...`)
-          this.pushConfigToAgentModules().catch((err: Error) => {
-            console.warn(`[Admin] Failed to push config to ${module_id}:`, err.message)
-          })
-
-          // Resume sweep：agent 一就绪即对所有 in-flight 任务尝试无损 resume，
-          // 失败的才标 failed + 生成 recovery 兜底。**任何 restart_count 都跑**（含完整重启=0）。
-          this.sweepInterruptedTasksForResume(restartCount).catch((err: Error) => {
+          this.pushAgentConfigThenSweepResume(module_id, restartCount).catch((err: Error) => {
             console.warn(`[Admin] Resume sweep for ${module_id} failed: ${err.message}`)
           })
         }
@@ -4797,7 +4791,10 @@ export class AdminModule extends ModuleBase {
    *
    * @param restartCount agent 此次启动是第几次（0=首次，不做 self-healing）
    */
-  private async sweepInterruptedTasksForResume(restartCount: number): Promise<void> {
+  private async sweepInterruptedTasksForResume(
+    restartCount: number,
+    options: { retryDelayMs?: number } = {},
+  ): Promise<void> {
     // dataLoaded 未完时（启动早期 module_started 抢跑）跳过——loadData 完成后还有兜底触发。
     if (!this.dataLoaded) return
 
@@ -4810,26 +4807,38 @@ export class AdminModule extends ModuleBase {
 
     // 1. 先尝试无损 resume（仅非 recovery task；recovery 自身不 resume，防雪崩）
     const candidates = inFlight.filter((t) => !t.tags.includes('recovery'))
-    const results: { task: Task; resumed: boolean }[] = []
-    for (const t of candidates) {
-      let resumed = false
-      try {
-        const r = await this.callAgentRpc<{ task_id: string }, { resumed?: boolean }>(
-          'resume_task',
-          { task_id: t.id },
-        )
-        resumed = r?.resumed === true
-      } catch (err) {
-        console.warn(`[Admin] Self-healing: resume_task ${t.id} RPC failed: ${(err as Error).message}`)
-      }
-      results.push({ task: t, resumed })
-    }
-    const { resumed, needRecovery } = partitionResumeResults(results)
+    const results = await this.tryResumeTasks(candidates)
+    const { resumed, needRecovery, retryLater } = partitionResumeResults(results)
     if (resumed.length > 0) {
       console.log(
         `[Admin] Self-healing: resumed ${resumed.length} task(s): ${resumed.map((t) => t.id).join(', ')}`,
       )
       // resumed 的保持 executing（agent 已接管），不动状态
+    }
+    if (retryLater.length > 0) {
+      console.log(
+        `[Admin] Self-healing: ${retryLater.length} task(s) waiting for agent configuration before resume retry: ${retryLater.map((t) => t.id).join(', ')}`,
+      )
+
+      const retryDelayMs = options.retryDelayMs ?? 1000
+      if (retryDelayMs > 0) {
+        await new Promise((r) => setTimeout(r, retryDelayMs))
+      }
+
+      const pushed = await this.pushConfigToAgentModules()
+      if (pushed) {
+        const retryResults = await this.tryResumeTasks(retryLater)
+        const retryPartition = partitionResumeResults(retryResults, { deferNotConfigured: false })
+        resumed.push(...retryPartition.resumed)
+        needRecovery.push(...retryPartition.needRecovery)
+        if (retryPartition.resumed.length > 0) {
+          console.log(
+            `[Admin] Self-healing: resumed ${retryPartition.resumed.length} task(s) after config retry: ${retryPartition.resumed.map((t) => t.id).join(', ')}`,
+          )
+        }
+      } else {
+        console.warn('[Admin] Self-healing: config retry push failed; deferred task(s) will wait for a later resume sweep')
+      }
     }
 
     // 2. 不能 resume 的（含 recovery 自身）→ 标 failed
@@ -4871,6 +4880,40 @@ export class AdminModule extends ModuleBase {
       .catch((err: Error) => console.warn(`[Admin] finalize_orphan_checkpoints failed: ${err.message}`))
   }
 
+  private async tryResumeTasks(
+    tasks: Task[],
+  ): Promise<Array<{ task: Task; resumed: boolean; reason?: string }>> {
+    const results: Array<{ task: Task; resumed: boolean; reason?: string }> = []
+    for (const t of tasks) {
+      let resumed = false
+      let reason: string | undefined
+      try {
+        const r = await this.callAgentRpc<{ task_id: string }, { resumed?: boolean; reason?: string }>(
+          'resume_task',
+          { task_id: t.id },
+        )
+        resumed = r?.resumed === true
+        reason = typeof r?.reason === 'string' ? r.reason : undefined
+      } catch (err) {
+        console.warn(`[Admin] Self-healing: resume_task ${t.id} RPC failed: ${(err as Error).message}`)
+      }
+      results.push({ task: t, resumed, reason })
+    }
+    return results
+  }
+
+  private async pushAgentConfigThenSweepResume(moduleId: string, restartCount: number): Promise<void> {
+    const pushed = await this.pushConfigToAgentModules()
+    if (!pushed) {
+      console.warn(`[Admin] Resume sweep for ${moduleId} deferred: config push failed`)
+      return
+    }
+
+    // Resume sweep：agent 配置 push 完成后再对所有 in-flight 任务尝试无损 resume。
+    // 失败的才标 failed + 生成 recovery 兜底。**任何 restart_count 都跑**（含完整重启=0）。
+    await this.sweepInterruptedTasksForResume(restartCount)
+  }
+
   /**
    * 保证 resume sweep 在重启后可靠跑一次，不依赖接住 agent 的 module_started 事件。
    *
@@ -4898,7 +4941,7 @@ export class AdminModule extends ModuleBase {
         }
       }
       if (this.agentPort) {
-        await this.sweepInterruptedTasksForResume(0)
+        await this.pushAgentConfigThenSweepResume('crabot-agent', 0)
         return
       }
       if (Date.now() >= deadline) {
@@ -8558,10 +8601,10 @@ export class AdminModule extends ModuleBase {
     })
   }
 
-  private async pushConfigToAgentModules(): Promise<void> {
+  private async pushConfigToAgentModules(): Promise<boolean> {
     try {
       const port = await this.ensureAgentPort()
-      if (!port) return
+      if (!port) return false
 
       // 复用 handleGetAgentConfig 的配置解析逻辑
       const { config } = await this.handleGetAgentConfig({ instance_id: 'crabot-agent' })
@@ -8588,10 +8631,12 @@ export class AdminModule extends ModuleBase {
         `[Admin] Agent config pushed, changed: ${result.changed_fields?.join(', ') || 'none'}` +
         ` (subagents: ${subagents.length})`
       )
+      return true
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       const stack = e instanceof Error && e.stack ? `\n${e.stack}` : ''
       console.warn(`[Admin] Failed to push config to Agent:`, msg, stack)
+      return false
     }
   }
 

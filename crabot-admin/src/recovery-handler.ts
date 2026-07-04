@@ -43,12 +43,23 @@ export function isResumableInflightStatus(status: TaskStatus): boolean {
  * 纯函数，方便单元测试。由 sweepInterruptedTasksForResume 调用。
  */
 export function partitionResumeResults(
-  results: ReadonlyArray<{ task: Task; resumed: boolean }>,
-): { resumed: Task[]; needRecovery: Task[] } {
+  results: ReadonlyArray<{ task: Task; resumed: boolean; reason?: string }>,
+  options: { deferNotConfigured?: boolean } = {},
+): { resumed: Task[]; needRecovery: Task[]; retryLater: Task[] } {
+  const deferNotConfigured = options.deferNotConfigured ?? true
   const resumed: Task[] = []
   const needRecovery: Task[] = []
-  for (const r of results) (r.resumed ? resumed : needRecovery).push(r.task)
-  return { resumed, needRecovery }
+  const retryLater: Task[] = []
+  for (const r of results) {
+    if (r.resumed) {
+      resumed.push(r.task)
+    } else if (deferNotConfigured && r.reason === 'not_configured') {
+      retryLater.push(r.task)
+    } else {
+      needRecovery.push(r.task)
+    }
+  }
+  return { resumed, needRecovery, retryLater }
 }
 
 /**

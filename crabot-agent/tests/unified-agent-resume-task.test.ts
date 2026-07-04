@@ -121,8 +121,19 @@ function buildAgent(deps: {
 }
 
 describe('UnifiedAgent.handleResumeTask — I1: task_origin 从 task.source 重建', () => {
+  it('returns not_configured instead of claiming resumed when worker handler is not ready', async () => {
+    const { agent, executeScheduledTaskInBackground, finalizeUnresumedCheckpoint } = buildAgent({})
+
+    const result = await agent.handleResumeTask({ task_id: 'task-1' })
+
+    expect(result).toEqual({ resumed: false, reason: 'not_configured' })
+    expect(executeScheduledTaskInBackground).not.toHaveBeenCalled()
+    expect(finalizeUnresumedCheckpoint).not.toHaveBeenCalled()
+  })
+
   it('human 来源：task_origin.channel_id/session_id/friend_id 与 task.source 一致', async () => {
     const { agent, executeScheduledTaskInBackground } = buildAgent({})
+    ;(agent as unknown as { agentHandler: { hasActiveTask: () => boolean } }).agentHandler = { hasActiveTask: () => false }
 
     const result = await agent.handleResumeTask({ task_id: 'task-1' })
 
@@ -150,6 +161,7 @@ describe('UnifiedAgent.handleResumeTask — I1: task_origin 从 task.source 重�
         },
       },
     })
+    ;(agent as unknown as { agentHandler: { hasActiveTask: () => boolean } }).agentHandler = { hasActiveTask: () => false }
 
     const result = await agent.handleResumeTask({ task_id: 'task-2' })
 
@@ -169,6 +181,7 @@ describe('UnifiedAgent.handleResumeTask — I1: task_origin 从 task.source 重�
         },
       },
     })
+    ;(agent as unknown as { agentHandler: { hasActiveTask: () => boolean } }).agentHandler = { hasActiveTask: () => false }
 
     const result = await agent.handleResumeTask({ task_id: 'task-3' })
 
@@ -179,6 +192,7 @@ describe('UnifiedAgent.handleResumeTask — I1: task_origin 从 task.source 重�
 
   it('成功 resume 后不 finalize 旧 trace（改由 handleExecuteTask 的 reactivate 复用续写，一个 task 一条连续 trace）', async () => {
     const { agent, consumeResumableCheckpoint } = buildAgent({})
+    ;(agent as unknown as { agentHandler: { hasActiveTask: () => boolean } }).agentHandler = { hasActiveTask: () => false }
 
     const result = await agent.handleResumeTask({ task_id: 'task-1' })
 
@@ -200,6 +214,7 @@ describe('UnifiedAgent.handleResumeTask — I1: task_origin 从 task.source 重�
         },
       }),
     })
+    ;(agent as unknown as { agentHandler: { hasActiveTask: () => boolean } }).agentHandler = { hasActiveTask: () => false }
 
     const result = await agent.handleResumeTask({ task_id: 'task-1' })
 
@@ -225,6 +240,7 @@ describe('UnifiedAgent.handleResumeTask — I1: task_origin 从 task.source 重�
         },
       }),
     })
+    ;(agent as unknown as { agentHandler: { hasActiveTask: () => boolean } }).agentHandler = { hasActiveTask: () => false }
 
     const result = await agent.handleResumeTask({ task_id: 'task-1' })
 
@@ -253,6 +269,7 @@ describe('UnifiedAgent.handleResumeTaskWithSupplement', () => {
       }),
       getResumableCheckpoint: vi.fn().mockReturnValue(undefined),
     })
+    ;(agent as unknown as { agentHandler: { hasActiveTask: () => boolean } }).agentHandler = { hasActiveTask: () => false }
 
     const result = await agent.handleResumeTaskWithSupplement({
       task_id: 'task-1',
@@ -419,6 +436,7 @@ describe('UnifiedAgent.handleResumeTask — M2: resume_error 清理 checkpoint',
     const { agent, finalizeUnresumedCheckpoint } = buildAgent({
       rpcCallError: new Error('network error'),
     })
+    ;(agent as unknown as { agentHandler: { hasActiveTask: () => boolean } }).agentHandler = { hasActiveTask: () => false }
 
     const result = await agent.handleResumeTask({ task_id: 'task-err' })
 
@@ -431,6 +449,7 @@ describe('UnifiedAgent.handleResumeTask — M2: resume_error 清理 checkpoint',
     const { agent, finalizeUnresumedCheckpoint } = buildAgent({
       assembleError: new Error('context assembly failed'),
     })
+    ;(agent as unknown as { agentHandler: { hasActiveTask: () => boolean } }).agentHandler = { hasActiveTask: () => false }
 
     const result = await agent.handleResumeTask({ task_id: 'task-assemble-err' })
 

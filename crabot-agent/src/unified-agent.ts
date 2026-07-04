@@ -2000,6 +2000,10 @@ export class UnifiedAgent extends ModuleBase {
       return { resumed: true }
     }
 
+    if (!this.agentHandler) {
+      return { resumed: false, reason: 'not_configured' }
+    }
+
     const entry = this.getCheckpointForResume(task_id, mode)
     if (!entry) return { resumed: false, reason: 'no_checkpoint' }
 
