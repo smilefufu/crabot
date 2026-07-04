@@ -4276,21 +4276,10 @@ export class AdminModule extends ModuleBase {
 
   private async repairScheduleTargetSessionReference(schedule: Schedule): Promise<Schedule> {
     const targetSessionLookup: TargetSessionRepairLookup = async (channelId, sessionId, platformSessionId, scheduleForLookup) => {
-      try {
-        const session = await this.resolveChannelSession(channelId as ModuleId, sessionId)
-        return {
-          session_id: session.id,
-          type: session.type,
-          ...(session.platform_session_id ? { platform_session_id: session.platform_session_id } : {}),
-        }
-      } catch {
-        // Continue below: stale internal id may still be repairable via current session list.
-      }
-
-      try {
-        const sessions = await this.listChannelSessions(channelId as ModuleId)
-        const expectedType = scheduleForLookup?.target_session?.type
-        if (platformSessionId && expectedType) {
+      const expectedType = scheduleForLookup?.target_session?.type
+      if (platformSessionId && expectedType) {
+        try {
+          const sessions = await this.listChannelSessions(channelId as ModuleId)
           const match = sessions.find(
             (s) => s.platform_session_id === platformSessionId && s.type === expectedType,
           )
@@ -4301,9 +4290,19 @@ export class AdminModule extends ModuleBase {
               type: match.type,
             }
           }
+          return undefined
+        } catch {
+          return undefined
         }
+      }
 
-        return undefined
+      try {
+        const session = await this.resolveChannelSession(channelId as ModuleId, sessionId)
+        return {
+          session_id: session.id,
+          type: session.type,
+          ...(session.platform_session_id ? { platform_session_id: session.platform_session_id } : {}),
+        }
       } catch {
         return undefined
       }

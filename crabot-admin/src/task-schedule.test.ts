@@ -869,6 +869,79 @@ describe('AdminModule - Schedule Management', () => {
       })
     })
 
+    it('prefers stored platform_session_id over a mismatched resolvable session_id', async () => {
+      const defaultCallImplementation = triggerCallSpy.getMockImplementation()
+      triggerCallSpy.mockImplementation(
+        (_port: unknown, method: string, params: unknown) => {
+          if (method === 'create_task_from_schedule') {
+            return Promise.resolve({ task_id: 'mock-task-id', assigned_worker: 'mock-worker' })
+          }
+          if (method === 'get_session') {
+            return Promise.resolve({
+              id: (params as { session_id?: string }).session_id,
+              channel_id: 'wechat-棉花糖',
+              type: 'group',
+              platform_session_id: '11111111111@chatroom',
+              title: 'Wrong current group',
+            })
+          }
+          if (method === 'get_sessions') {
+            return Promise.resolve({
+              items: [
+                {
+                  id: 'current-claude-codex-session',
+                  channel_id: 'wechat-棉花糖',
+                  type: 'group',
+                  platform_session_id: '54213229026@chatroom',
+                  title: 'Claude&codex开发工具',
+                },
+              ],
+              pagination: { page: 1, page_size: 500, total_items: 1, total_pages: 1 },
+            })
+          }
+          return defaultCallImplementation?.(_port, method, params) ?? Promise.resolve({})
+        }
+      )
+
+      try {
+        const schedResult = await makeProtocolRequest<{ schedule: Schedule }>(
+          TEST_PROTOCOL_PORT,
+          'create_schedule',
+          {
+            name: 'Mismatched platform repair anchor',
+            trigger: { type: 'cron', expression: '0 0 * * *' },
+            task_template: {
+              type: 'routine',
+              title: 'Daily AI News',
+              priority: 'normal',
+              tags: [],
+            },
+            target_session: {
+              channel_id: 'wechat-棉花糖',
+              session_id: 'wrong-current-session',
+              platform_session_id: '54213229026@chatroom',
+              type: 'group',
+            },
+          }
+        )
+
+        expect(schedResult.success).toBe(true)
+        await makeProtocolRequest(TEST_PROTOCOL_PORT, 'trigger_now', { schedule_id: schedResult.data!.schedule.id })
+
+        const agentCall = triggerCallSpy.mock.calls.findLast((call) => call[1] === 'create_task_from_schedule')
+        expect(agentCall).toBeTruthy()
+        const payload = agentCall![2] as { target_session?: Record<string, unknown> }
+        expect(payload.target_session).toEqual({
+          channel_id: 'wechat-棉花糖',
+          session_id: 'current-claude-codex-session',
+          platform_session_id: '54213229026@chatroom',
+          type: 'group',
+        })
+      } finally {
+        triggerCallSpy.mockImplementation(defaultCallImplementation)
+      }
+    })
+
     it('does not repair target_session to a session with the wrong type', async () => {
       const defaultCallImplementation = triggerCallSpy.getMockImplementation()
       triggerCallSpy.mockImplementation(

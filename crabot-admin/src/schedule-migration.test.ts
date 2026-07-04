@@ -308,6 +308,25 @@ describe('repairScheduleTargetSession', () => {
     expect(repaired.target_session?.platform_session_id).toBe('12345@chatroom')
   })
 
+  it('preserves schedule when resolved session conflicts with stored platform_session_id', async () => {
+    const schedule = makeSchedule({
+      target_session: {
+        channel_id: 'wechat-X',
+        session_id: 'wrong-current-session',
+        platform_session_id: '12345@chatroom',
+        type: 'group',
+      },
+    })
+
+    const lookup: TargetSessionRepairLookup = async () => ({
+      session_id: 'wrong-current-session',
+      platform_session_id: '67890@chatroom',
+      type: 'group',
+    })
+
+    expect(await repairScheduleTargetSession(schedule, lookup)).toBe(schedule)
+  })
+
   it('preserves schedule when lookup cannot repair', async () => {
     const schedule = makeSchedule({
       target_session: {
