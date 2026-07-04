@@ -837,8 +837,9 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       }
     }
 
-    // exitsLoop 检测：若任一 tool_use 是 exitsLoop 工具，直接退出 loop
-    // 不调用 call、不 push tool_result、不 fire normal onTurn
+    // exitsLoop 检测：若任一 tool_use 是 exitsLoop 工具，直接退出 loop。
+    // 不调用 call，但仍 push 合成 tool_result，保证 finalMessages / checkpoint
+    // 可被 LLM API 重放（assistant tool_use 不能悬空）。
     const exitBlock = processed.toolUseBlocks.find(b => {
       const def = currentTools.find(t => t.name === b.name)
       return def?.exitsLoop === true
@@ -848,6 +849,11 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         name: exitBlock.name,
         input: exitBlock.input as Record<string, unknown>,
       }
+      messages.push(createBatchToolResultMessage([{
+        tool_use_id: exitBlock.id,
+        content: '[exit_tool]',
+        is_error: false,
+      }]))
       // Fire onTurn with this single tool call for trace recording
       fireOnTurn({
         turnNumber: totalTurns,
@@ -896,31 +902,6 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       })
     }
 
-    // Fire onTurn callback
-    fireOnTurn({
-      turnNumber: totalTurns,
-      assistantText: processed.text,
-      toolCalls: processed.toolUseBlocks.map((b, i) => {
-        const r = toolResults[i]
-        const tc: EngineTurnEvent['toolCalls'][number] = {
-          id: b.id,
-          name: b.name,
-          input: b.input,
-          output: r?.content ?? '',
-          isError: r?.is_error ?? false,
-          ...(r?.duration_ms !== undefined ? { durationMs: r.duration_ms } : {}),
-          ...(r?.started_at_ms !== undefined ? { startedAtMs: r.started_at_ms } : {}),
-        }
-        return tc
-      }),
-      stopReason,
-      llmCallMs,
-      llmStartedAtMs,
-      ...(forcedSummaryAttempt !== undefined ? { forcedSummaryAttempt } : {}),
-      ...(response.usage ? { usage: response.usage } : {}),
-      ...(response.diagnostics ? { diagnostics: response.diagnostics } : {}),
-    })
-
     // Process images based on model capability
     let processedResults: typeof toolResults
     if (options.supportsVision) {
@@ -946,12 +927,32 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     // Add tool results as a single batched message
     messages.push(createBatchToolResultMessage(processedResults))
 
-    // Refresh messagesRef again after tool_result push: fireOnTurn 上方触发的
-    // refresh 此刻拍下的快照里只有 assistant(tool_use) 还没有 tool_result——
-    // ProgressDigest 异步 fork 时若读到这个半截状态，调 OpenAI Responses API
-    // 会 400（function_call 缺 output）。这里再刷一次让 ref 反映完整的 tool_use
-    // + tool_result 配对。
-    refreshMessagesRef()
+    // Fire onTurn only after tool_result is in messages. Checkpoint/resume and
+    // progress observers treat onTurn as the clean turn boundary, so every
+    // assistant tool_use must already have matching toolResults here.
+    fireOnTurn({
+      turnNumber: totalTurns,
+      assistantText: processed.text,
+      toolCalls: processed.toolUseBlocks.map((b, i) => {
+        const r = toolResults[i]
+        const tc: EngineTurnEvent['toolCalls'][number] = {
+          id: b.id,
+          name: b.name,
+          input: b.input,
+          output: r?.content ?? '',
+          isError: r?.is_error ?? false,
+          ...(r?.duration_ms !== undefined ? { durationMs: r.duration_ms } : {}),
+          ...(r?.started_at_ms !== undefined ? { startedAtMs: r.started_at_ms } : {}),
+        }
+        return tc
+      }),
+      stopReason,
+      llmCallMs,
+      llmStartedAtMs,
+      ...(forcedSummaryAttempt !== undefined ? { forcedSummaryAttempt } : {}),
+      ...(response.usage ? { usage: response.usage } : {}),
+      ...(response.diagnostics ? { diagnostics: response.diagnostics } : {}),
+    })
 
     // ── Post-tool barrier check ──
     // 工具可能在执行中 setBarrier（如 send_message(intent='ask_human')）。

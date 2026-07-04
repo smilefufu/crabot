@@ -10,6 +10,12 @@
 - Legacy-only `session-configs.json` 缺少 `channel_id/platform_session_id`，不安全自动迁移；这类旧配置保持无效，避免错误套用到另一个会话。
 - 验证：三个 channel session-manager 测试与 build；Admin schedule repair / backup gather / target_session 测试与 build；Admin Web schedule 保存测试与 build。
 
+## 2026-07-04 — 修复 resume checkpoint 悬空 tool_use 导致 OpenAI 400
+
+- 根因：普通工具路径在 `toolResults` 入栈前触发 `onTurn`，worker checkpoint flush 把半截 `messages` 落盘；terminal supplement / restart resume 重放该 checkpoint 时，OpenAI 拒绝无 output 的 function call。
+- 修复：`query-loop` 改为先写 tool result 再触发 `onTurn`；`exitsLoop` / `turnZeroOnly` 早退或拒绝路径对同轮所有 `tool_use` 补齐 tool result；新增 `tool-message-integrity` 共享校验，`isResumable` 拒绝历史坏 checkpoint。
+- 验证：`resume-checkpoint.test.ts`、`query-loop.test.ts`、`query-loop-exit-tools.test.ts` 通过，并覆盖多 tool_use + exitsLoop / turnZeroOnly 混合场景。
+
 ## 2026-07-03 — 修复 async goal audit 结果未持久化与 no-delivery 空审计
 
 - 根因：admin-chat 里用户看到的“收到...”来自 dispatcher `immediate_reply` / supplement ack，经 `chat_callback` 写入聊天消息；它不是 worker 的 `send_message` 工具调用。实际 worker trace 没有 `send_message`，所以 goal gate 判断“从未向人类交付”是成立的。

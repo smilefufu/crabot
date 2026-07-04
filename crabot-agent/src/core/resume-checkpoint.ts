@@ -1,12 +1,14 @@
 import type { ResumeCheckpoint } from '../types.js'
 import type { EngineMessage } from '../engine/types.js'
 import { redactSecrets } from '../engine/redact-secrets.js'
+import { hasDanglingToolUse } from '../engine/tool-message-integrity.js'
 
-export type ResumeGuard = { ok: true } | { ok: false; reason: 'empty_checkpoint' | 'version_mismatch' }
+export type ResumeGuard = { ok: true } | { ok: false; reason: 'empty_checkpoint' | 'version_mismatch' | 'dangling_tool_use' }
 
 export function isResumable(cp: ResumeCheckpoint, currentVersion: string): ResumeGuard {
   if (cp.agent_version !== currentVersion) return { ok: false, reason: 'version_mismatch' }
   if (!cp.messages || cp.messages.length === 0) return { ok: false, reason: 'empty_checkpoint' }
+  if (hasDanglingToolUse(cp.messages)) return { ok: false, reason: 'dangling_tool_use' }
   return { ok: true }
 }
 

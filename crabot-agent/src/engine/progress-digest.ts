@@ -2,6 +2,7 @@ import type { LLMAdapter } from './llm-adapter'
 import { callNonStreaming } from './llm-adapter'
 import type { EngineMessage, EngineMessagesRef, EngineTurnEvent } from './types'
 import { createUserMessage } from './types'
+import { hasDanglingToolUse } from './tool-message-integrity.js'
 
 /**
  * 进度汇报（fork 模式）。
@@ -219,29 +220,4 @@ export class ProgressDigest {
       .join('')
       .trim()
   }
-}
-
-// --- Helpers ---
-
-/**
- * 末尾是否有"孤立 tool_use"：最后一条 assistant 含 tool_use 块，但后面没有
- * 配对的 tool_result。LLM API 严格要求 function_call 配 output，否则 400。
- */
-function hasDanglingToolUse(messages: ReadonlyArray<EngineMessage>): boolean {
-  // 从尾向前找最后一条 assistant
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]
-    if (m.role !== 'assistant') continue
-    // 找到最后一条 assistant：看它有没有 tool_use 块
-    const hasToolUse = Array.isArray(m.content)
-      && m.content.some((b) => (b as { type?: string }).type === 'tool_use')
-    if (!hasToolUse) return false
-    // 有 tool_use → 检查后面是否有 tool_result（用 toolResults 字段判定 EngineToolResultMessage）
-    for (let j = i + 1; j < messages.length; j++) {
-      const after = messages[j] as { toolResults?: unknown }
-      if (Array.isArray(after.toolResults) && after.toolResults.length > 0) return false
-    }
-    return true
-  }
-  return false
 }

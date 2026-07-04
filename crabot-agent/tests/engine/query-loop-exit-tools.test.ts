@@ -69,6 +69,21 @@ describe('query-loop: exitsLoop 工具退出', () => {
       name: 'do_exit',
       input: { reason: 'turn 0 决定退出' },
     })
+    expect(result.finalMessages).toEqual([
+      expect.objectContaining({ role: 'user', content: 'test' }),
+      expect.objectContaining({
+        role: 'assistant',
+        content: expect.arrayContaining([
+          expect.objectContaining({ type: 'tool_use', id: 'call_1', name: 'do_exit' }),
+        ]),
+      }),
+      expect.objectContaining({
+        role: 'user',
+        toolResults: [
+          expect.objectContaining({ tool_use_id: 'call_1', content: '[exit_tool]', is_error: false }),
+        ],
+      }),
+    ])
     expect(result.totalTurns).toBe(1)
     expect((adapter.stream as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1)
   })
