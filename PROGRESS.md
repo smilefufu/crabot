@@ -607,7 +607,7 @@ plan：`crabot-docs/superpowers/plans/2026-05-08-messaging-list-tools-alignment.
 
 ## 上一里程碑（2026-05-07 — CLI 权限统一进 Friend + Session 模板）
 
-把 crabot CLI 的权限闸从硬编码 `isMasterPrivate` 单 bit 升级为按发起人解析 effective permissions（friend ∪ session 并集）+ schedule add 内容 LLM 审核。master 在群聊享完整 CLI 权限；群友在被升级到 `group_scheduler` 模板的群里可创建受审核的简单定时任务。plan：`docs/superpowers/plans/2026-05-06-cli-permission-friend-session-union.md`。
+把 crabot CLI 的权限闸从硬编码 `isMasterPrivate` 单 bit 升级为按发起人解析 effective permissions（friend ∪ session 并集）+ schedule add 内容 LLM 审核。master 在群聊享完整 CLI 权限；群友在被升级到 `group_scheduler` 模板的群里可创建受审核的简单定时任务。plan：`crabot-docs/superpowers/plans/2026-05-06-cli-permission-friend-session-union.md`。
 
 - **types.ts（admin / agent / web）**：新增 `CliPerm`/`CliDomain`/`CLI_DOMAINS`/`CliAccessConfig`，扩 `PermissionTemplate`/`SessionPermissionConfig`/`FriendPermissionConfig`/`ResolvedPermissions` 各加 `cli_access` 字段。`crabot-shared` 是 `CliDomain` 的单一真相来源，admin/agent 各自重新定义 `CliPerm`/`CliAccessConfig` 但 union 字面量从 shared import 来防漂移。
 - **PermissionTemplateManager**：5 个系统模板（master_private 全 write / group_default 全 none / minimal 全 none / standard 全 none / 新增 group_scheduler 仅 schedule=write 且 tool_access 含 messaging+memory+task）；normalize 自动给旧持久化数据补默认；resolvePermissions 合并 session.cli_access；旧 friendPermissionConfig 缺 cli_access 时由 normalizeFriendPermissionConfig 兜底全 'none'。
@@ -698,7 +698,7 @@ plan：`crabot-docs/superpowers/plans/2026-05-08-messaging-list-tools-alignment.
 ## 当前进行中：Agent Engine V2
 
 **目标**：自研执行引擎，支持多 LLM 格式，内置工具，MCP 工具服务器  
-**计划文档**：`crabot-agent/docs/plans/2026-04-03-engine-v2.md`  
+**后续设计文档**：`crabot-docs/superpowers/specs/2026-05-15-agent-unified-loop-redesign-design.md`
 **分支**：`feat/engine-v2`
 
 ### Phase 1 — 引擎核心 ✅ (2026-04-03)
