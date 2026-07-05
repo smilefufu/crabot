@@ -29,6 +29,29 @@ describe('createSetCwdTool', () => {
     expect(cwd).toBe(tmpDir)
   })
 
+  it('returns a Chinese workspace orientation notice with scanned context candidates', async () => {
+    fs.writeFileSync(path.join(tmpDir, 'AGENTS.md'), '# Agent rules\n')
+    fs.writeFileSync(path.join(tmpDir, 'README.md'), '# Project\n')
+    fs.mkdirSync(path.join(tmpDir, 'docs', 'plans'), { recursive: true })
+    fs.writeFileSync(path.join(tmpDir, 'docs', 'CURRENT_CONTEXT.md'), '# Current\n')
+
+    const result = await tool.call({ path: tmpDir }, {})
+
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('工作区上下文提示')
+    expect(result.output).toContain('按 Crabot 默认标准扫描到以下疑似上下文候选')
+    expect(result.output).toContain('[Agent 规则入口]')
+    expect(result.output).toContain('- AGENTS.md')
+    expect(result.output).toContain('[当前状态/交接上下文]')
+    expect(result.output).toContain('- docs/CURRENT_CONTEXT.md')
+    expect(result.output).toContain('[项目总览]')
+    expect(result.output).toContain('- README.md')
+    expect(result.output).toContain('[计划/规格]')
+    expect(result.output).toContain('- docs/plans/')
+    expect(result.output).toContain('未扫描到的默认候选')
+    expect(result.output).toContain('不得编造项目状态')
+  })
+
   it('resolves a relative path against the current cwd', async () => {
     fs.mkdirSync(path.join(tmpDir, 'sub'), { recursive: true })
     const result = await tool.call({ path: 'sub' }, {})
@@ -57,6 +80,7 @@ describe('createSetCwdTool', () => {
     const result = await tool.call({ path: missing }, {})
     expect(result.isError).toBe(true)
     expect(result.output).toContain('set_cwd failed')
+    expect(result.output).not.toContain('工作区上下文提示')
     expect(cwd).toBe(tmpDir) // cwd 不变
   })
 })
