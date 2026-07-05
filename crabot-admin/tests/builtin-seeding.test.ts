@@ -60,13 +60,14 @@ describe('SkillManager.seedBuiltinSkills', () => {
 })
 
 describe('getBuiltinSkills', () => {
-  it('返回 3 个 builtin skill', () => {
+  it('返回 4 个 builtin skill', () => {
     const list = getBuiltinSkills()
-    expect(list).toHaveLength(3)
+    expect(list).toHaveLength(4)
     expect(list.map((s) => s.id).sort()).toEqual([
       BUILTIN_SKILL_IDS.writingPlans,
       BUILTIN_SKILL_IDS.systematicDebugging,
       BUILTIN_SKILL_IDS.verificationBeforeCompletion,
+      BUILTIN_SKILL_IDS.workspaceContextMaintenance,
     ].sort())
   })
 
@@ -75,7 +76,7 @@ describe('getBuiltinSkills', () => {
       expect(s.skill_dir).toBeTruthy()
       const skillMd = readFileSync(join(s.skill_dir, 'SKILL.md'), 'utf-8')
       expect(skillMd.length).toBeGreaterThan(100)
-      expect(skillMd).toContain('Source: superpowers v5.0.7')
+      expect(skillMd).toContain('Source:')
     }
   })
 

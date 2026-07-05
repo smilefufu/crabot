@@ -97,6 +97,7 @@ async function buildWorkspaceOrientationNotice(root: string): Promise<string> {
     '工作区上下文提示：',
     '- 你已进入一个文件工作区。请先理解当前目录的长期上下文，再进行大范围搜索、修改或生成产物。',
     '- 若存在 AGENTS.md，它是本工作区的 agent 规则入口；请优先阅读并遵守。用户当前指令和 Crabot 记忆中的明确偏好优先级高于默认路径建议。',
+    '- 若未发现 AGENTS.md，或本任务会修改文件、创建报告/脚本/数据产物、依赖工作区长期状态，请先使用 workspace-context-maintenance skill 判断是否需要初始化 AGENTS.md / CURRENT_CONTEXT.md；如果当前环境没有该 skill，请按本提示中的最小规则手动处理。',
     '- 按 Crabot 默认标准扫描到以下疑似上下文候选：',
     foundBlock,
     '- 未扫描到的默认候选：',

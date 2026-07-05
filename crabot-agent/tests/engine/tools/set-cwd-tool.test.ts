@@ -49,6 +49,7 @@ describe('createSetCwdTool', () => {
     expect(result.output).toContain('[计划/规格]')
     expect(result.output).toContain('- docs/plans/')
     expect(result.output).toContain('未扫描到的默认候选')
+    expect(result.output).toContain('workspace-context-maintenance')
     expect(result.output).toContain('不得编造项目状态')
   })
 
