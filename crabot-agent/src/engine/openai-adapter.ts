@@ -5,7 +5,7 @@
 import type { LLMAdapter, LLMAdapterConfig, LLMStreamParams } from './llm-adapter-types.js'
 import { isToolResultMessage, extractText, buildImageUrl, readSSELines, mergeConsecutiveUserMessages, capToolResultForLLM } from './llm-adapter-types.js'
 import type { EngineMessage, ToolDefinition, StreamChunk, ContentBlock, LLMTokenUsage } from './types.js'
-import { HttpResponseError } from './retry-utils.js'
+import { HttpResponseError, StreamProtocolError } from './retry-utils.js'
 import { streamWithTimeoutAndRetry } from './stream-timeout.js'
 
 // --- OpenAI Message Types ---
@@ -276,6 +276,17 @@ export class OpenAIAdapter implements LLMAdapter {
           }
         }
 
+        if (choice.finish_reason === 'content_filter') {
+          throw new HttpResponseError(
+            400,
+            JSON.stringify({ code: 'content_filter', message: 'OpenAI chat completion stopped by content_filter' }),
+            'openai-adapter',
+          )
+        }
+        if (choice.finish_reason === 'function_call') {
+          throw new Error('openai-adapter legacy function_call streaming is not supported')
+        }
+
         const stopReason = mapOpenAIFinishReason(choice.finish_reason)
         if (stopReason !== null) {
           finalStopReason = stopReason
@@ -295,6 +306,9 @@ export class OpenAIAdapter implements LLMAdapter {
     // 单次 message_end：流正常结束（[DONE] / 自然收尾）后发出。中途 throw 不会走到这里
     // （异常从 for-await 抛出，经 finally 后传播），符合「不重放半截流」的重试语义。
     if (messageStarted) {
+      if (finalStopReason === null) {
+        throw new StreamProtocolError('openai-adapter stream ended without finish_reason')
+      }
       yield {
         type: 'message_end',
         stopReason: finalStopReason,

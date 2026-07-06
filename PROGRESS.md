@@ -1,6 +1,12 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-05 — 移除 dispatcher action.text 上下文污染
+> 最后更新：2026-07-06 — LLM 流缺终态改为可重试协议错误
+
+## 2026-07-06 — LLM 流缺终态改为可重试协议错误
+
+- OpenAI Chat Completions / Responses stream 在已开始输出但缺少 `finish_reason` 或 terminal event 时，不再把 `stopReason=null` 传到 `query-loop`，而是在 adapter 层抛 `StreamProtocolError`，由 buffered LLM 调用重试整次请求。
+- Chat Completions 明确拒绝旧版 `finish_reason='function_call'` 流式协议（当前 xinshu 实测为新版 `delta.tool_calls` + `finish_reason='tool_calls'`）；`content_filter` 明确抛非重试 provider 错误，避免落成 null stopReason。
+- 验证：`llm-adapter.test.ts` 62 个通过；`retry-utils.test.ts` + `stream-timeout.test.ts` 24 个通过；`query-loop.test.ts` 35 个通过；`crabot-agent` `tsc --noEmit` 通过。
 
 ## 2026-07-05 — 移除 dispatcher action.text 上下文污染
 
