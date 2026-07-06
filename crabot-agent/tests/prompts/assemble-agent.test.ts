@@ -103,3 +103,33 @@ describe('assembleAgentPrompt goalModeEnabled 分支', () => {
   })
 })
 
+describe('assembleAgentPrompt coding routing policy', () => {
+  it('renders coordinator-first routing instead of main-direct coding as default', () => {
+    const prompt = assembleAgentPrompt({
+      goalModeEnabled: true,
+      availableSubAgents: [
+        { toolName: 'research_collector', workerHint: '信息收集类工作的默认派遣对象' },
+        { toolName: 'code_planner', workerHint: '复杂编码任务的计划拆解专家' },
+        { toolName: 'code_writer', workerHint: '执行一个自包含编码 task' },
+        { toolName: 'spec_reviewer', workerHint: '按 task 规范审查实现是否合规' },
+        { toolName: 'code_quality_reviewer', workerHint: '审查代码质量、命名、错误处理和测试覆盖' },
+      ],
+    })
+
+    expect(prompt).toContain('你是 coordinator')
+    expect(prompt).toContain('你负责 task slicing')
+    expect(prompt).toContain('信息不足，不靠你深挖')
+    expect(prompt).toContain('delegate_task(subagent_type="research_collector"')
+    expect(prompt).toContain('任务已自包含，直接派 code_writer')
+    expect(prompt).toContain('bounded execution unit')
+    expect(prompt).toContain('需要拆解 / 设计，才派 code_planner')
+    expect(prompt).toContain('不要 specification gaming')
+
+    expect(prompt).not.toContain('main 是 coordinator')
+    expect(prompt).not.toContain('main 负责 task slicing')
+    expect(prompt).not.toContain('信息不足，不靠 main 深挖')
+    expect(prompt).not.toContain('默认路径（轻量探索 + 直做）')
+    expect(prompt).not.toContain('自己用 Write / Edit / Bash 直接动手')
+    expect(prompt).not.toContain('这是默认路径——大多数 coding 任务')
+  })
+})

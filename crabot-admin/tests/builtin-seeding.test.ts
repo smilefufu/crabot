@@ -122,6 +122,21 @@ describe('getBuiltinSubAgents', () => {
     expect(w.allowed_skill_ids).toContain(BUILTIN_SKILL_IDS.verificationBeforeCompletion)
   })
 
+  it('code_writer 只关心自包含 task，不绑定 task 来源', () => {
+    const w = getBuiltinSubAgents().find((s) => s.name === 'code_writer')!
+    expect(w.when_to_use).toContain('自包含')
+    expect(w.when_to_use).toContain('拆好的')
+    expect(w.when_to_use).toContain('bounded execution unit')
+    expect(w.workflow).toContain('不要自行拆分大任务')
+    expect(w.workflow).toContain('要做的全部内容都在这份 task 输入里')
+    expect(w.workflow).toContain('BLOCKED')
+    expect(w.when_to_use).not.toContain('来自 plan')
+    expect(w.when_to_use).not.toContain('来自 main')
+    expect(w.when_to_use).not.toContain('来自 research_collector')
+    expect(w.when_to_use).not.toContain('main 已整理')
+    expect(w.workflow).not.toContain('让 main 决定')
+  })
+
   it('code_writer 挂 lsp_diagnostics 预设（post-edit 自动诊断 push）', () => {
     const w = getBuiltinSubAgents().find((s) => s.name === 'code_writer')!
     expect(w.hook_preset).toBe('lsp_diagnostics')
@@ -136,6 +151,16 @@ describe('getBuiltinSubAgents', () => {
     expect(r.builtin_capabilities.crab_memory).toBe(true)
     // scrapling 是调研用的 web mcp（workflow 明列要用），此前白名单为空导致调研根本调不到，已修。
     expect(r.allowed_mcp_server_ids).toContain('scrapling')
+  })
+
+  it('research_collector 支持 coding reconnaissance 且保持只读边界', () => {
+    const r = getBuiltinSubAgents().find((s) => s.name === 'research_collector')!
+    expect(r.when_to_use).toContain('coding reconnaissance')
+    expect(r.workflow).toContain('What did you inspect?')
+    expect(r.workflow).toContain('What is the smallest safe next step?')
+    expect(r.workflow).toContain('Can the coordinator slice this into one bounded code_writer task?')
+    expect(r.workflow).not.toContain('Can main slice this into one bounded code_writer task?')
+    expect(r.role).toContain('不写代码 / 不改代码')
   })
 
   it('allowed_mcp_server_ids 按 MCP server name 开放（lsp/git/scrapling 内置 MCP）', () => {
