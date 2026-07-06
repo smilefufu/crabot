@@ -415,11 +415,13 @@ class SqliteIndex:
         type_: str | None = None,
         status: str | None = None,
         tags: list[str] | None = None,
+        ingestion_time_start: str | None = None,
+        ingestion_time_end: str | None = None,
         limit: int = 100,
         offset: int = 0,
         sort: str = "ingestion_time_desc",
     ) -> list[dict]:
-        """按 type/status/tags 过滤，按 sort 排序，分页返回。
+        """按 type/status/tags/ingestion_time 过滤，按 sort 排序，分页返回。
 
         Note: there is no `author` column on the `memories` table. Author
         filtering must happen at the RPC layer after loading the entry's
@@ -433,6 +435,12 @@ class SqliteIndex:
         if status:
             where.append("status = ?")
             params.append(status)
+        if ingestion_time_start:
+            where.append("ingestion_time >= ?")
+            params.append(ingestion_time_start)
+        if ingestion_time_end:
+            where.append("ingestion_time < ?")
+            params.append(ingestion_time_end)
         where_sql = "WHERE " + " AND ".join(where) if where else ""
 
         order = {

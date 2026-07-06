@@ -1,6 +1,6 @@
 ---
 name: memory-curate
-description: "记忆整理：扫 inbox 候选，去重 + 多因子打分，高分高置信晋升 confirmed。仅当任务标题以'记忆整理'开头或 trigger=memory_curate 时使用，与 daily-reflection 互斥（daily-reflection 用于深度反思，会读 trace 并委派 sub-agent）。"
+description: "记忆整理：按 schedule watermark 增量扫描 inbox 候选，去重 + 多因子打分，高分高置信晋升 confirmed。仅当任务标题以'记忆整理'开头或 trigger=memory_curate 时使用，与 daily-reflection 互斥（daily-reflection 用于深度反思，会读 trace 并委派 sub-agent）。"
 version: "2.0.0"
 ---
 
@@ -8,25 +8,28 @@ version: "2.0.0"
 
 ## Overview
 
-每小时（默认）跑一次：扫近期 inbox 中的 fact/lesson 候选，做去重 + 多因子打分。
+每小时（默认）跑一次：按本次 schedule 的 `ingestion_time_start` 到 `ingestion_time_end` 增量扫描 inbox 中的 fact/lesson 候选，做去重 + 多因子打分。
 高分 + 高置信 → `update_long_term` 升级到 confirmed；
 低分 / 模糊 → 留给 daily-reflection 深加工。
 **这是机械整理，不是反思**：仅做去重 hash 比对、IDF / entity_priority / 高 proximity 阈值过滤，不调贵 LLM、不读 trace、不委派 sub-agent。
 
 ## 流程
 
-### Step 1：拉 inbox 候选
+### Step 1：增量拉 inbox 候选
 
 ```
-mcp__crab-memory__search_long_term({
-  query: "*",
-  filters: { status: "inbox" },
-  k: 50,
-  include: "brief"
+mcp__crab-memory__list_entries({
+  status: "inbox",
+  ingestion_time_start: "<任务 input.ingestion_time_start；若缺失则从任务描述的整理范围起点解析>",
+  ingestion_time_end: "<任务 input.ingestion_time_end；若缺失则从任务描述的整理范围终点解析>",
+  limit: 100,
+  offset: 0
 })
 ```
 
-> 现实现需要查询字符串；可用 `"recent"` 占位 + filters 过滤。如不够，用 `mcp__crab-memory__list_recent({ window_days: 1 })` 拉最近 24 小时新增的全部条目。
+如返回数量达到 `limit`，继续用 `offset += 100` 翻页，直到返回少于 `limit`。
+
+**禁止**用长期记忆语义检索工具拉 inbox 候选。记忆整理是增量列表处理，不是语义召回；不要传无主题查询，也不要请求 full body。
 
 ### Step 2：去重
 

@@ -225,6 +225,10 @@ const LIST_ENTRIES_SCHEMA = {
     .describe('按审核状态过滤'),
   tags: z.array(z.string()).optional()
     .describe('按标签过滤'),
+  ingestion_time_start: z.string().optional()
+    .describe('按入库时间过滤，包含起点；ISO8601。记忆整理按 schedule watermark 增量扫描时使用'),
+  ingestion_time_end: z.string().optional()
+    .describe('按入库时间过滤，排除终点；ISO8601。记忆整理按 schedule 当前时间增量扫描时使用'),
   limit: z.number().int().min(1).max(200).optional()
     .describe('返回数量上限'),
   offset: z.number().int().min(0).optional()
