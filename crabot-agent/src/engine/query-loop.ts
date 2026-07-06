@@ -704,6 +704,23 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
           continue
         }
       }
+      if (!isSilentText && options.assistantTextEndTurnHandler) {
+        const assistantTextResult = await options.assistantTextEndTurnHandler({
+          assistantText: processed.text,
+          turnNumber: totalTurns,
+        })
+        if (assistantTextResult.kind === 'inject') {
+          messages.push(createUserMessage(assistantTextResult.text))
+          options.onSystemInjection?.({
+            type: 'assistant_text_end_turn',
+            text: assistantTextResult.text,
+            turnNumber: totalTurns,
+            injectedAtMs: Date.now(),
+          })
+          continue
+        }
+        return finishTask()
+      }
       // endTurnGate 返回 null（audit pass / 无 gate）→ flush 缓冲后正常退出。
       // 防御性 guard：理论上 endTurnGate null 意味着无 audit 或 audit 已 pass；
       // 万一 gate 实现 bug 返回 null 但 audit 仍在跑，此 guard 防止 pre-audit 内容 leak。

@@ -25,7 +25,7 @@ import type { BgEntityOwner, BgEntityRecord, BgEntityStatus, BgEntityType, BgShe
 import type { BashBgContext } from '../engine/tools/index.js'
 import type { BgToolDeps } from '../engine/tools/index.js'
 import type { TaskContext } from '../mcp/crab-messaging.js'
-import { createOutboundFlush, type PathMapping, type OutboundDispatchDeps, type OutboundBufferEntry, type OutboundSendResult } from './outbound-flush.js'
+import { createOutboundFlush, dispatchOutboundMessage, type PathMapping, type OutboundDispatchDeps, type OutboundBufferEntry, type OutboundSendResult } from './outbound-flush.js'
 import type { BgEntityTraceContext } from '../engine/bg-entities/trace.js'
 import type {
   ToolDefinition,
@@ -1090,6 +1090,7 @@ export class AgentHandler {
       // 任务触发类型：scheduled 任务始终抑制 forced_summary
       const workerTriggerType: 'scheduled' | 'message' =
         task.source?.trigger_type === 'scheduled' ? 'scheduled' : 'message'
+      let assistantTextEndTurnReminderSent = false
       if (goalModeEnabled && this.deps?.getAdminPort && this.deps.rpcClient) {
         try {
           const adminPort = await this.deps.getAdminPort()
@@ -1208,11 +1209,7 @@ export class AgentHandler {
           // PR-1 effect：置 everSentMessage=true（永不清零）。
           // PR-2 effect：追加 task.messages（role='agent'）—— spec 2026-06-09 §4.2 invariant #3 叠加。
           onDispatched: (entry, sendResult) => {
-            taskState.everSentMessage = true
-            if (entry.intent === 'info') {
-              taskState.lastDeliveredInfoEpoch = entry.human_input_epoch ?? taskState.humanInputEpoch
-            }
-            this.appendAgentMessageBestEffort(taskState.taskId, entry, sendResult)
+            this.markOutboundDelivered(taskState, entry, sendResult)
           },
           // 进 buffer ≠ 送达：audit fail 会整体丢弃 buffer。endTurnGate 用此标志
           // 把"交付被拦"与"从未交付"区分开（spec 2026-06-10 §3.5）。
@@ -1638,6 +1635,86 @@ export class AgentHandler {
           // 注意：这只适用于明确 stopReason='end_turn' 的收口；stopReason=null 是 adapter/stream
           // 终态缺失，query-loop 会按失败处理，不能借此完成 task。
           suppressForcedSummary: () => workerTriggerType === 'scheduled' || sentInfoMessage,
+          assistantTextEndTurnHandler: async ({ assistantText }) => {
+            const currentEpochDelivered = taskState.lastDeliveredInfoEpoch === taskState.humanInputEpoch
+
+            if (workerTriggerType === 'scheduled' || taskState.activeAuditId !== undefined || taskState.outboundBuffer.length > 0) {
+              return { kind: 'complete' as const }
+            }
+
+            if (currentEpochDelivered) {
+              if (assistantTextEndTurnReminderSent) {
+                return { kind: 'complete' as const }
+              }
+              assistantTextEndTurnReminderSent = true
+              return {
+                kind: 'inject' as const,
+                text: '你刚才使用 assistant text + end_turn 结束了 loop。请注意：assistant text 内容不会送达人类。\n'
+                  + '如果你想给人类发消息，请使用 send_message 工具发送；发送完成后直接 end_turn，不要再输出 assistant text。',
+              }
+            }
+
+            const taskOrigin = context.task_origin
+            if (!taskOrigin || !this.deps?.rpcClient || !this.deps.resolveChannelPort || !this.deps.getAdminPort) {
+              return { kind: 'complete' as const }
+            }
+
+            const entry: OutboundBufferEntry = {
+              channel_id: taskOrigin.channel_id,
+              session_id: taskOrigin.session_id,
+              content: assistantText,
+              intent: 'info',
+              human_input_epoch: taskState.humanInputEpoch,
+              sent_at_attempt_ms: Date.now(),
+            }
+            const dispatchDeps: OutboundDispatchDeps = {
+              rpcClient: this.deps.rpcClient,
+              moduleId: this.deps.moduleId,
+              resolveChannelPort: this.deps.resolveChannelPort,
+              getAdminPort: this.deps.getAdminPort,
+              ...(this.deps.sandboxPathMappingsRef
+                ? { sandboxPathMappingsRef: this.deps.sandboxPathMappingsRef }
+                : {}),
+              onDispatched: (deliveredEntry, sendResult) => {
+                this.markOutboundDelivered(taskState, deliveredEntry, sendResult)
+              },
+            }
+
+            const startedAtMs = Date.now()
+            const spanId = traceCallback?.onToolCallStart(
+              '__assistant_text_autodelivery_fallback__',
+              assistantText.slice(0, 200),
+              startedAtMs,
+            )
+            try {
+              const sendResult = await dispatchOutboundMessage(entry, dispatchDeps)
+              if (spanId) {
+                traceCallback?.onToolCallEnd(
+                  spanId,
+                  `channel=${entry.channel_id} session=${entry.session_id} platform_message_id=${sendResult.platform_message_id}`,
+                  undefined,
+                  Date.now(),
+                )
+              }
+            } catch (err) {
+              const errorMessage = err instanceof Error ? err.message : String(err)
+              if (spanId) {
+                traceCallback?.onToolCallEnd(
+                  spanId,
+                  errorMessage,
+                  errorMessage,
+                  Date.now(),
+                )
+              }
+              return {
+                kind: 'inject' as const,
+                text: '[系统] 你刚才用 assistant text + end_turn 写出的最终消息没有成功发给用户，用户没有收到。\n'
+                  + `发送失败原因：${errorMessage}\n`
+                  + '请修正问题后重新用 send_message 发送。',
+              }
+            }
+            return { kind: 'complete' as const }
+          },
           // Goal mode 缓冲消息 flush 钩子：engine 在 stop_reason='tool_use' 续 turn 之前
           // 和 endTurnGate 返回 null 后调用。把 taskState.outboundBuffer 里截留的 info
           // 消息真正发到 channel 并清空 buffer。失败 entry 不阻塞后续 entry（continue on error）。
@@ -1664,11 +1741,7 @@ export class AgentHandler {
               // PR-1 effect：everSentMessage=true。
               // PR-2 effect：append task.messages（role='agent'）— spec 2026-06-09 §4.2 invariant #3。
               onDispatched: (entry, sendResult) => {
-                taskState.everSentMessage = true
-                if (entry.intent === 'info') {
-                  taskState.lastDeliveredInfoEpoch = entry.human_input_epoch ?? taskState.humanInputEpoch
-                }
-                this.appendAgentMessageBestEffort(taskState.taskId, entry, sendResult)
+                this.markOutboundDelivered(taskState, entry, sendResult)
               },
             }
             return createOutboundFlush(taskState.outboundBuffer, dispatchDeps)
@@ -2752,6 +2825,18 @@ export class AgentHandler {
       return { task_id: taskId, outcome: 'failed', error: result.error ?? 'unknown' }
     }
     return { task_id: taskId, outcome: 'completed' }
+  }
+
+  private markOutboundDelivered(
+    taskState: WorkerTaskState,
+    entry: OutboundBufferEntry,
+    sendResult: OutboundSendResult,
+  ): void {
+    taskState.everSentMessage = true
+    if (entry.intent === 'info') {
+      taskState.lastDeliveredInfoEpoch = entry.human_input_epoch ?? taskState.humanInputEpoch
+    }
+    this.appendAgentMessageBestEffort(taskState.taskId, entry, sendResult)
   }
 
   /**

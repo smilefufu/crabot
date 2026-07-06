@@ -450,6 +450,53 @@ describe('runEngine', () => {
       expect(gate).toHaveBeenCalledOnce()
     })
 
+    it('text end_turn: assistantTextEndTurnHandler 可接管并完成 loop', async () => {
+      const handler = vi.fn(async () => ({ kind: 'complete' as const }))
+      const adapter = mockAdapter([textResponse('要发给用户的内容')])
+
+      const result = await runEngine({
+        prompt: 'test',
+        adapter,
+        options: baseOptions({
+          assistantTextEndTurnHandler: handler,
+        }),
+      })
+
+      expect(handler).toHaveBeenCalledOnce()
+      expect(handler).toHaveBeenCalledWith({
+        assistantText: '要发给用户的内容',
+        turnNumber: 1,
+      })
+      expect(result.outcome).toBe('completed')
+      expect(result.finalText).toBe('要发给用户的内容')
+    })
+
+    it('text end_turn: assistantTextEndTurnHandler 返回 supplement 时注入一次并继续 loop', async () => {
+      const injections: string[] = []
+      const handler = vi
+        .fn()
+        .mockResolvedValueOnce({ kind: 'inject' as const, text: '请改用 send_message' })
+        .mockResolvedValueOnce({ kind: 'complete' as const })
+      const adapter = mockAdapter([
+        textResponse('第一段 assistant text'),
+        textResponse('第二段 assistant text'),
+      ])
+
+      const result = await runEngine({
+        prompt: 'test',
+        adapter,
+        options: baseOptions({
+          assistantTextEndTurnHandler: handler,
+          onSystemInjection: (event) => injections.push(`${event.type}:${event.text}`),
+        }),
+      })
+
+      expect(handler).toHaveBeenCalledTimes(2)
+      expect(injections).toEqual(['assistant_text_end_turn:请改用 send_message'])
+      expect(result.outcome).toBe('completed')
+      expect(result.finalText).toBe('第二段 assistant text')
+    })
+
     it('endTurnGate 不传时正常退出，无报错', async () => {
       const adapter = mockAdapter([silentEndTurnResponse()])
       const result = await runEngine({

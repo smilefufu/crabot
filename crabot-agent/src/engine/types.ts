@@ -330,6 +330,20 @@ export interface EngineOptions {
    */
   readonly onSystemInjection?: (event: SystemInjectionEvent) => void
   /**
+   * 非空 assistant text + end_turn 的收尾处理钩子。unified worker 用它区分：
+   * - assistant text 走错通道且当前 epoch 未送达 → caller 可自动交付并返回 complete
+   * - 当前 epoch 已送达但仍输出 assistant text → caller 可注入一次纠偏提醒
+   *
+   * 不传时 engine 保持原行为：assistant text 作为 finalText 返回，不做任何交付假设。
+   */
+  readonly assistantTextEndTurnHandler?: (event: {
+    readonly assistantText: string
+    readonly turnNumber: number
+  }) => Promise<
+    | { readonly kind: 'complete' }
+    | { readonly kind: 'inject'; readonly text: string }
+  >
+  /**
    * 抑制 forced_summary 注入的判定回调。返回 true → engine 跳过 silent end_turn 的
    * forced_summary 兜底机制，直接接受 silent end_turn 作为正常完成态。
    *
@@ -443,8 +457,9 @@ export interface SystemInjectionEvent {
    * - `forced_summary`：silent end_turn 兜底要求模型重说
    * - `stop_hook`：Stop hook block 后注入的引导文本
    * - `audit_pending_intercept`：audit 跑中 LLM 直接 end_turn 兜底拦截（Task 13）
+   * - `assistant_text_end_turn`：非空 assistant text + end_turn 走错通道纠偏提醒
    */
-  readonly type: 'supplement' | 'forced_summary' | 'stop_hook' | 'audit_pending_intercept'
+  readonly type: 'supplement' | 'forced_summary' | 'stop_hook' | 'audit_pending_intercept' | 'assistant_text_end_turn'
   /** 注入的文本内容（不含 ContentBlock[] 形态——supplement 的 ContentBlock 注入退化为 type 字符串描述） */
   readonly text: string
   /** 注入发生时的 turn 序号（与 EngineTurnEvent.turnNumber 同口径） */
