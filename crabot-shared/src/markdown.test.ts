@@ -148,6 +148,15 @@ test('markdownToTelegramHtml: 表格单元格里的 < > & 被 HTML escape', () =
   assert.ok(!out.includes('<a&b>'))
 })
 
+test('markdownToTelegramHtml: 表格单元格里的行内代码不能泄漏内部占位符', () => {
+  const md = '| 新策略名 | 是否模拟盘 |\n|---|---|\n| `profit-lock-v1` | 是 |\n| `trend-hold-v1` | 是 |'
+  const out = markdownToTelegramHtml(md)
+  assert.ok(out.includes('profit-lock-v1'), `expected strategy name in rendered table: ${out}`)
+  assert.ok(out.includes('trend-hold-v1'), `expected strategy name in rendered table: ${out}`)
+  assert.ok(!/\bIC\d+\b/.test(out), `inline-code sentinel leaked into rendered table: ${out}`)
+  assert.ok(!out.includes('`'), `table pre text should not keep markdown backticks: ${out}`)
+})
+
 test('markdownToTelegramHtml: 表格不影响周围的 markdown 渲染', () => {
   const md = '**重点**\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n_后文_'
   const out = markdownToTelegramHtml(md)
