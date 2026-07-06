@@ -82,6 +82,7 @@ describe('detailSummary for dispatch_action', () => {
     const summary = detailSummary(span)
     expect(summary).toContain('supplement')
     expect(summary).toContain('supplement_delivered')
+    expect(summary).not.toContain('帮你查一下')
   })
 
   it('shows kind for stay_silent', () => {
@@ -100,6 +101,7 @@ describe('detailSummary for dispatch_action', () => {
     const summary = detailSummary(span)
     expect(summary).toContain('new_task')
     expect(summary).toContain('new_task_spawned')
+    expect(summary).not.toContain('创建一个新任务')
   })
 })
 

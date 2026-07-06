@@ -471,13 +471,6 @@ export interface ExecuteTriggerMessageParams {
   readonly channelId: string
   readonly sessionId: string
   /**
-   * Dispatch LLM 生成的任务摘要（dispatchAction.text）。
-   * 用作 task title / description；缺省时回退到 triggerSummary（原始消息切片）。
-   * 仅影响 task 元数据展示（Admin UI / Dispatcher supplement 决策清单 / Worker prompt 任务信息段），
-   * worker 拿到的 trigger_messages 仍是原始保真消息。
-   */
-  readonly dispatchActionText?: string
-  /**
    * 完整的 Front Agent context（由 unified-agent 在调用 executeTriggerMessage 前装配）。
    * 包含 recent_messages / time_windows / active_tasks / sender_friend / scene_profile / crab_display_name 等，
    * 用于构造 worker 风格的 user prompt（含 channel/session/聊天历史/活跃任务）。
@@ -2076,26 +2069,21 @@ export class AgentHandler {
     task: ExecuteTaskParams['task']
     context: WorkerAgentContext
     /**
-     * Task 的标题 / 触发摘要。优先用 dispatch LLM 生成的 actionText（清晰任务化），
-     * 缺省回退到 messages 最后一条切 100 字。同时作为 task_title /
-     * activeTasks.title / task trace.trigger.summary 使用。
+     * Task 的标题 / 触发摘要。仅从当前 trigger 批次生成，避免 dispatcher 生成文本污染
+     * task_title / activeTasks.title / task trace.trigger.summary。
      */
     taskTitle: string
   }> {
     const { messages, isGroup, senderFriend, memoryPermissions, resolvedPermissions,
-      channelId, sessionId, frontContext, dispatchActionText } = params
+      channelId, sessionId, frontContext } = params
 
-    // Fallback 路径：dispatchActionText 缺省时从原始消息切片。
+    // 从原始消息切片生成标题。
     // messages 就是当前 trigger 批次（spec 2026-06-04 §3：单段时间线后，messages
     // 不再 prepend baseHistory）；取最后一条作为 trigger 摘要 = 触发批次的尾部。
     const lastMsg = messages[messages.length - 1]
     const lastMsgText = lastMsg?.content.type === 'text' ? (lastMsg.content.text ?? '') : '[非文本]'
     const triggerSummary = lastMsgText.slice(0, 100)
-    // 优先用 Dispatch LLM 生成的任务摘要（清晰、抽象到任务层面），缺省时才回退到原始消息切片。
-    // Spec: title 不只是 UI 展示——dispatcher 做 supplement 决策时活跃任务清单里展示的就是它。
-    const taskTitle = (dispatchActionText && dispatchActionText.trim().length > 0)
-      ? dispatchActionText.slice(0, 200)
-      : triggerSummary
+    const taskTitle = triggerSummary
     const syntheticTaskId = `trigger-${randomUUID()}` as TaskId
 
     let registered = false

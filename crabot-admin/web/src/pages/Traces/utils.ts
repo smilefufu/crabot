@@ -341,9 +341,8 @@ export function detailSummary(span: AgentSpan): string {
   }
   if (span.type === 'dispatch_action') {
     const kind = String(d.kind ?? '')
-    const summary = d.text_summary ? ` "${String(d.text_summary).slice(0, 60)}"` : ''
     const outcome = d.outcome ? ` [${d.outcome}]` : ''
-    return `${kind}${summary}${outcome}`
+    return `${kind}${outcome}`
   }
   return ''
 }

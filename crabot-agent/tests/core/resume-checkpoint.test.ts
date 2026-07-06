@@ -87,7 +87,9 @@ describe('buildTerminalSupplementWakeupMessage', () => {
   it('builds a user message containing supplement text', () => {
     const msg = buildTerminalSupplementWakeupMessage('继续刚才失败的任务')
     expect(msg.role).toBe('user')
-    expect(String(msg.content)).toContain('此 task 已结束')
+    expect(String(msg.content)).not.toContain('此 task 已结束')
+    expect(String(msg.content)).not.toContain('请基于前文继续处理')
+    expect(String(msg.content)).toMatch(/^用户补充：/)
     expect(String(msg.content)).toContain('继续刚才失败的任务')
   })
 })

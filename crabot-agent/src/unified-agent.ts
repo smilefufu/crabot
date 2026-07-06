@@ -680,10 +680,7 @@ export class UnifiedAgent extends ModuleBase {
         dispatchCtx,
         reviveTerminalSupplement: (taskId, text) =>
           this.reviveTerminalSupplementTask(taskId, text, session.channel_id, session.session_id),
-        pushSupplement: async (taskId: string, _text: string): Promise<'delivered' | 'fallback'> => {
-          // 故意忽略 _text：dispatcher LLM 摘要不如原始消息保真。
-          // Task 3 后 deliverHumanResponse 已能渲染含媒体的 ChannelMessage[]，传整批 messages。
-          // Spec §3.5
+        pushSupplement: async (taskId: string): Promise<'delivered' | 'fallback'> => {
           if (!this.agentHandler!.hasActiveTask(taskId)) return 'fallback'
           try {
             // 传整批 ChannelMessage（保留媒体，Task 3 已让 deliverHumanResponse 渲染媒体）
@@ -699,7 +696,7 @@ export class UnifiedAgent extends ModuleBase {
         },
         sendImmediateReply,
         reactToTriggerMessage: this.buildReactToTriggerMessage(session.channel_id, session.session_id),
-        spawnAgentInstance: async (actionText: string, spawnOptions) => {
+        spawnAgentInstance: async (_actionText?: string, spawnOptions?) => {
           // params.messages 只放当前 trigger 批次；historic context（含 dispatcher
           // immediate_reply）放 frontContext.recent_messages。buildTriggerUserPrompt
           // 合并两者按 timestamp 单段渲染（spec 2026-06-04 §3）。
@@ -726,7 +723,6 @@ export class UnifiedAgent extends ModuleBase {
             resolvedPermissions: resolvedPerms as ResolvedPermissions,
             channelId: session.channel_id,
             sessionId: session.session_id,
-            dispatchActionText: actionText,
             frontContext: { ...frontContext, recent_messages: recentMessagesWithAck },
           }
           const taskTraceId = await this.spawnTaskTrace({
@@ -903,10 +899,7 @@ export class UnifiedAgent extends ModuleBase {
         dispatchCtx,
         reviveTerminalSupplement: (taskId, text) =>
           this.reviveTerminalSupplementTask(taskId, text, session.channel_id, sessionId),
-        pushSupplement: async (taskId: string, _text: string): Promise<'delivered' | 'fallback'> => {
-          // 故意忽略 _text：dispatcher LLM 摘要不如原始消息保真。
-          // Task 3 后 deliverHumanResponse 已能渲染含媒体的 ChannelMessage[]，传整批 messages。
-          // Spec §3.5
+        pushSupplement: async (taskId: string): Promise<'delivered' | 'fallback'> => {
           if (!this.agentHandler!.hasActiveTask(taskId)) return 'fallback'
           try {
             // 传整批 ChannelMessage（保留媒体，Task 3 已让 deliverHumanResponse 渲染媒体）
@@ -922,7 +915,7 @@ export class UnifiedAgent extends ModuleBase {
         },
         sendImmediateReply,
         reactToTriggerMessage: this.buildReactToTriggerMessage(session.channel_id, sessionId),
-        spawnAgentInstance: async (actionText: string, spawnOptions) => {
+        spawnAgentInstance: async (_actionText?: string, spawnOptions?) => {
           // 群聊：params.messages 只放当前 attention 批次（含群成员发的文件/图片）；
           // 历史 + dispatcher immediate_reply 放 frontContext.recent_messages。
           // buildTriggerUserPrompt 合并两者按 timestamp 单段渲染（spec 2026-06-04 §3）。
@@ -949,7 +942,6 @@ export class UnifiedAgent extends ModuleBase {
             resolvedPermissions: resolvedPerms as ResolvedPermissions,
             channelId: session.channel_id,
             sessionId,
-            dispatchActionText: actionText,
             frontContext: { ...frontContext, recent_messages: recentMessagesWithAck },
           }
           const taskTraceId = await this.spawnTaskTrace({
@@ -1554,7 +1546,7 @@ export class UnifiedAgent extends ModuleBase {
         sendImmediateReply,
         reviveTerminalSupplement: (taskId, text) =>
           this.reviveTerminalSupplementTask(taskId, text, 'admin-web', sessionId),
-        pushSupplement: async (taskId: string, text: string): Promise<'delivered' | 'fallback'> => {
+        pushSupplement: async (taskId: string): Promise<'delivered' | 'fallback'> => {
           if (!this.agentHandler!.hasActiveTask(taskId)) return 'fallback'
 
           // scheduled task 不接受 supplement
@@ -1569,7 +1561,7 @@ export class UnifiedAgent extends ModuleBase {
 
             // 即时回复（通过 chat_callback）。带 task_id：让前端把这条 supplement
             // 人类消息关联到目标任务（消息旁任务状态图标的数据源）
-            const replyText = `收到，正在调整：${text.slice(0, 60)}`
+            const replyText = '收到，正在调整。'
             try {
               await this.rpcClient.call(adminPort, 'chat_callback', {
                 request_id: callbackInfo.request_id,
@@ -1586,7 +1578,7 @@ export class UnifiedAgent extends ModuleBase {
               platform_message_id: `supplement-${Date.now()}`,
               session: { channel_id: 'admin-web', session_id: sessionId, type: 'private' as const },
               sender: { friend_id: 'master', platform_user_id: 'master', platform_display_name: 'Master' },
-              content: { type: 'text' as const, text: `用户补充指示：${text}` },
+              content: message.content,
               features: { is_mention_crab: false },
               platform_timestamp: new Date().toISOString(),
             }
@@ -1600,7 +1592,7 @@ export class UnifiedAgent extends ModuleBase {
         markSupplementLinkedToTask: (taskId) => {
           this.traceStore.updateTrace(trace.trace_id, { related_task_id: taskId })
         },
-        spawnAgentInstance: async (actionText: string, spawnOptions) => {
+        spawnAgentInstance: async (_actionText?: string, spawnOptions?) => {
           // admin_chat：params.messages 只放当前 trigger（单条），历史 + dispatcher
           // immediate_reply 放 frontContext.recent_messages，buildTriggerUserPrompt
           // 合并两者按 timestamp 单段渲染（spec 2026-06-04 §3）。
@@ -1632,7 +1624,6 @@ export class UnifiedAgent extends ModuleBase {
             resolvedPermissions: (masterResolvedPerms ?? masterMemPerms) as unknown as ResolvedPermissions,
             channelId: 'admin-web',
             sessionId,
-            dispatchActionText: actionText,
             frontContext: { ...frontContext, recent_messages: recentMessagesWithAck },
           }
           const taskTraceId = await this.spawnTaskTrace({

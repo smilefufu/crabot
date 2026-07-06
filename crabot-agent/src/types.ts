@@ -1111,8 +1111,6 @@ export interface DispatchActionDetails {
   kind: 'supplement' | 'new_task' | 'stay_silent'
   /** supplement 专用：目标 task id */
   target_task_id?: string
-  /** supplement / new_task 专用：文本摘要（截断 200 字符） */
-  text_summary?: string
   /** stay_silent 专用：原因（当 action.reason 存在时写入） */
   reason?: string
   /** 完成后追加：动作结果。

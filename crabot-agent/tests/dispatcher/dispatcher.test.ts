@@ -55,14 +55,14 @@ describe('dispatch', () => {
       { adapter, modelId: 'm', sendErrorToUser: vi.fn() },
     )
     expect(actions).toEqual<DispatchAction[]>([
-      { kind: 'supplement', target_task_id: 'task-A', text: '只看红米' },
+      { kind: 'supplement', target_task_id: 'task-A' },
     ])
   })
 
   it('LLM 返回多个动作（拆分）时按顺序输出', async () => {
     const adapter = makeMockAdapter(JSON.stringify({
       actions: [
-        { kind: 'new_task', text: '查 github 早报' },
+        { kind: 'new_task' },
         { kind: 'supplement', target_task_id: 'task-A', text: '对比 CPU' },
       ],
     }))
@@ -76,7 +76,7 @@ describe('dispatch', () => {
   })
 
   it('LLM 返回的动作数超过 MAX_ACTIONS_PER_DISPATCH 时截断', async () => {
-    const tooMany = Array.from({ length: 10 }, (_, i) => ({ kind: 'new_task' as const, text: `task ${i}` }))
+    const tooMany = Array.from({ length: 10 }, () => ({ kind: 'new_task' as const }))
     const adapter = makeMockAdapter(JSON.stringify({ actions: tooMany }))
     const { actions } = await dispatch(makeCtx(), { adapter, modelId: 'm', sendErrorToUser: vi.fn() })
     expect(actions.length).toBeLessThanOrEqual(5)
@@ -182,11 +182,8 @@ describe('dispatch', () => {
       ],
     })
     const prompt = buildUserPrompt(ctx, { timezone: 'Asia/Shanghai' })
-    expect(prompt).toMatch(/## 可补充任务/)
+    expect(prompt).toMatch(/## 当前正在运行的本 session task/)
     expect(prompt).toMatch(/status: executing/)
-    expect(prompt).toMatch(/status: completed_recently/)
-    expect(prompt).toMatch(/status: failed_recently/)
-    expect(prompt).toMatch(/TypeError: terminated/)
   })
 
   it('LLM can supplement a recent completed candidate because it is in the candidate whitelist', async () => {
@@ -197,7 +194,7 @@ describe('dispatch', () => {
       makeCtx({ activeTasks: [makeTask('task-done', { status: 'completed', candidate_kind: 'recent_terminal' })] }),
       { adapter, modelId: 'm', sendErrorToUser: vi.fn() },
     )
-    expect(actions).toEqual([{ kind: 'supplement', target_task_id: 'task-done', text: '继续刚才的' }])
+    expect(actions).toEqual([{ kind: 'supplement', target_task_id: 'task-done' }])
   })
 
   // ============================================================================
@@ -212,7 +209,7 @@ describe('dispatch', () => {
         callCount++
         const text = callCount === 1
           ? JSON.stringify({ actions: [{ kind: 'supplement', target_task_id: 'task-NONEXISTENT', text: 'x' }] })
-          : JSON.stringify({ actions: [{ kind: 'new_task', text: '查 X' }] })
+          : JSON.stringify({ actions: [{ kind: 'new_task' }] })
         yield* chunksFromContent([{ type: 'text', text }], 'end_turn')
       }),
       updateConfig: () => {},
@@ -222,7 +219,7 @@ describe('dispatch', () => {
       { adapter, modelId: 'm', sendErrorToUser: vi.fn(), maxParseRetries: 3 },
     )
     expect(callCount).toBe(2)
-    expect(actions).toEqual([{ kind: 'new_task', text: '查 X' }])
+    expect(actions).toEqual([{ kind: 'new_task' }])
   })
 
   it('空 activeTasks + LLM 编造 supplement → 校验失败 retry → LLM 改输出 new_task', async () => {
@@ -232,7 +229,7 @@ describe('dispatch', () => {
         callCount++
         const text = callCount === 1
           ? JSON.stringify({ actions: [{ kind: 'supplement', target_task_id: 'trigger-fake', text: 'x' }] })
-          : JSON.stringify({ actions: [{ kind: 'new_task', text: 'hi' }] })
+          : JSON.stringify({ actions: [{ kind: 'new_task' }] })
         yield* chunksFromContent([{ type: 'text', text }], 'end_turn')
       }),
       updateConfig: () => {},
@@ -256,7 +253,7 @@ describe('dispatch', () => {
         callCount++
         const text = callCount === 1
           ? JSON.stringify({ actions: [{ kind: 'supplement', target_task_id: 'bogus', text: 'x' }] })
-          : JSON.stringify({ actions: [{ kind: 'new_task', text: 'ok' }] })
+          : JSON.stringify({ actions: [{ kind: 'new_task' }] })
         yield* chunksFromContent([{ type: 'text', text }], 'end_turn')
       }),
       updateConfig: () => {},
@@ -280,7 +277,7 @@ describe('dispatch', () => {
         callCount++
         const text = callCount === 1
           ? JSON.stringify({ actions: [{ kind: 'stay_silent', reason: '...' }] })
-          : JSON.stringify({ actions: [{ kind: 'new_task', text: 'hi' }] })
+          : JSON.stringify({ actions: [{ kind: 'new_task' }] })
         yield* chunksFromContent([{ type: 'text', text }], 'end_turn')
       }),
       updateConfig: () => {},

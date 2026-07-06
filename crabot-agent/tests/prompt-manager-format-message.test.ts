@@ -158,7 +158,7 @@ describe('formatChannelMessageLine', () => {
     const parent = makeMsg({
       platform_message_id: 'msg-parent',
       sender: { platform_user_id: 'u-2', platform_display_name: 'Bob' },
-      content: { type: 'text', text: '原话内容' },
+      content: { type: 'text', text: '原话内容'.repeat(200) },
       platform_timestamp: '2026-05-31T03:00:00Z',
     })
     const quotedMessages = new Map<string, QuotedMessageEntry>([
@@ -175,7 +175,10 @@ describe('formatChannelMessageLine', () => {
     })
     expect(out).toContain('reply_to="msg-parent"')
     expect(out).toContain('<quoted_message')
+    expect(out).toContain('id="msg-parent"')
     expect(out).toContain('原话内容')
+    expect(out).toContain('...[引用已精简，可按 id 查原文]')
+    expect((out.match(/原话内容/g) ?? []).length).toBeLessThan(50)
     expect(out).toContain('我说的是引用里那个')
     expect(out).toContain('</quoted_message>')
   })

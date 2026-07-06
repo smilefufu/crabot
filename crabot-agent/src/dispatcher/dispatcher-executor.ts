@@ -16,6 +16,7 @@
  */
 
 import type { DispatchAction, ExecuteContext, ImmediateReplySentInfo, TerminalSupplementResult } from './dispatcher-types.js'
+import { formatMessageContent, EMPTY_MESSAGE_PLACEHOLDER } from '../agent/media-resolver.js'
 
 /**
  * 取批次最后一条消息的 platform_message_id。空批次返回 null。
@@ -39,6 +40,14 @@ async function fireReaction(ctx: ExecuteContext): Promise<void> {
   }
 }
 
+function renderCurrentHumanInput(ctx: ExecuteContext): string {
+  const text = ctx.dispatchCtx.messages
+    .map((m) => formatMessageContent(m))
+    .filter((t) => t !== EMPTY_MESSAGE_PLACEHOLDER)
+    .join('\n')
+  return text || EMPTY_MESSAGE_PLACEHOLDER
+}
+
 export async function executeDispatchActions(
   actions: ReadonlyArray<DispatchAction>,
   ctx: ExecuteContext,
@@ -52,12 +61,13 @@ export async function executeDispatchActions(
 
     try {
       if (action.kind === 'supplement') {
+        const currentHumanInput = renderCurrentHumanInput(ctx)
         const target = ctx.dispatchCtx.activeTasks.find((t) => t.task_id === action.target_task_id)
         if (target?.candidate_kind === 'recent_terminal') {
           let revive: TerminalSupplementResult
           if (ctx.reviveTerminalSupplement) {
             try {
-              revive = await ctx.reviveTerminalSupplement(action.target_task_id, action.text)
+              revive = await ctx.reviveTerminalSupplement(action.target_task_id, currentHumanInput)
             } catch (err) {
               revive = {
                 outcome: 'fallback' as const,
@@ -81,7 +91,7 @@ export async function executeDispatchActions(
             continue
           }
 
-          const { spawnedTraceId } = await ctx.spawnAgentInstance(action.text)
+          const { spawnedTraceId } = await ctx.spawnAgentInstance(currentHumanInput)
           if (span && ctx.trace) {
             ctx.trace.endSpan(span.span_id, 'completed', {
               outcome: 'supplement_fallback_recovered',
@@ -96,13 +106,13 @@ export async function executeDispatchActions(
           continue
         }
 
-        const outcome = await ctx.pushSupplement(action.target_task_id, action.text)
+        const outcome = await ctx.pushSupplement(action.target_task_id)
         if (outcome === 'fallback') {
           const visibleIds = ctx.dispatchCtx.activeTasks.map((t) => t.task_id).join(', ') || '(empty)'
           console.warn(
             `[dispatcher-executor] supplement_fallback: target_task_id=${action.target_task_id} not in agent activeTasks; visible=${visibleIds} — falling back to new_task to avoid silently dropping the user message`,
           )
-          const { spawnedTraceId } = await ctx.spawnAgentInstance(action.text)
+          const { spawnedTraceId } = await ctx.spawnAgentInstance(currentHumanInput)
           if (span && ctx.trace) {
             ctx.trace.endSpan(span.span_id, 'completed', {
               outcome: 'supplement_fallback_recovered',
@@ -140,7 +150,7 @@ export async function executeDispatchActions(
           }
         }
         const { spawnedTraceId } = await ctx.spawnAgentInstance(
-          action.text,
+          undefined,
           immediateReplyInfo ? { immediateReply: immediateReplyInfo } : undefined,
         )
         if (span && ctx.trace) {
@@ -172,13 +182,11 @@ function buildActionSpanDetails(action: DispatchAction): Record<string, unknown>
     return {
       kind: action.kind,
       target_task_id: action.target_task_id,
-      text_summary: action.text.slice(0, 200),
     }
   }
   if (action.kind === 'new_task') {
     return {
       kind: action.kind,
-      text_summary: action.text.slice(0, 200),
     }
   }
   // stay_silent

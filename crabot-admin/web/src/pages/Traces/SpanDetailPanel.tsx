@@ -189,7 +189,6 @@ export const SpanDetailPanel: React.FC<{
   if (span.type === 'dispatch_action') {
     if (d.kind) rows.push({ label: '动作类型', value: String(d.kind), monospace: true })
     if (d.target_task_id) rows.push({ label: '目标 Task', value: String(d.target_task_id), monospace: true })
-    if (d.text_summary) rows.push({ label: '摘要', value: String(d.text_summary) })
     if (d.reason) rows.push({ label: '原因', value: String(d.reason) })
     if (d.outcome) rows.push({ label: '结果', value: String(d.outcome) })
     if (d.kind === 'new_task' && d.immediate_reply_sent != null) {

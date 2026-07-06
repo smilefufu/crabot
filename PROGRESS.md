@@ -1,6 +1,13 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-04 — 稳定 Channel Session ID 与无痛备份导入
+> 最后更新：2026-07-05 — 移除 dispatcher action.text 上下文污染
+
+## 2026-07-05 — 移除 dispatcher action.text 上下文污染
+
+- Dispatcher action schema 不再携带 supplement/new_task 正文；executor 对 active supplement 只路由 task_id，对 terminal revive/fallback 使用本轮真实 `ChannelMessage` 渲染内容，避免 completed task 拉起时把 `action.text` 当用户输入注入。
+- terminal supplement wakeup 删除无用系统提示，只保留真实用户补充；引用消息渲染改短截断并保留 message id，降低大段引用原文造成的上下文漂移。
+- Trace 页不再展示 `dispatch_action.text_summary`，协议 `protocol-agent-v2.md` 同步移除该字段与旧 `new_task(text)` / `supplement(target,text)` 语义。
+- 验证：agent dispatcher/resume/prompt/register 定向测试 78 个通过；Admin Web trace utils 测试 19 个通过；`crabot-agent` / `crabot-admin/web` `tsc --noEmit` 通过。
 
 ## 2026-07-04 — 稳定 Channel Session ID 与无痛备份导入
 
