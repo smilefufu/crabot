@@ -18,6 +18,7 @@ import path from 'node:path'
 const REPO_ROOT = path.join(__dirname, '..', '..', '..')
 const CRAB_MEMORY_TS = path.join(REPO_ROOT, 'crabot-agent', 'src', 'mcp', 'crab-memory.ts')
 const SKILLS_DIR = path.join(REPO_ROOT, 'crabot-admin', 'builtins', 'skills')
+const MEMORY_CURATE_SKILL = path.join(SKILLS_DIR, 'memory-curate', 'SKILL.md')
 
 function extractRegisteredToolNames(): Set<string> {
   const src = fs.readFileSync(CRAB_MEMORY_TS, 'utf-8')
@@ -79,6 +80,18 @@ describe('crab-memory MCP server ↔ SKILL.md 引用契约', () => {
       `SKILL 引用了未在 crab-memory.ts 注册的工具，跑起来必 "tool not found":\n  ` +
         violations.join('\n  '),
     ).toEqual([])
+  })
+})
+
+describe('memory-curate 增量整理契约', () => {
+  it('使用 list_entries 按 ingestion_time 窗口拉 inbox，不用 search_long_term 做无主题扫描', () => {
+    const md = fs.readFileSync(MEMORY_CURATE_SKILL, 'utf-8')
+    expect(md).toContain('mcp__crab-memory__list_entries')
+    expect(md).toContain('ingestion_time_start')
+    expect(md).toContain('ingestion_time_end')
+    expect(md).not.toContain('mcp__crab-memory__search_long_term')
+    expect(md).not.toContain('query: "*"')
+    expect(md).not.toContain('include: "full"')
   })
 })
 

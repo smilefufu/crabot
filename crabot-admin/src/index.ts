@@ -6167,8 +6167,12 @@ export class AdminModule extends ModuleBase {
         task_template: {
           type: 'memory_curate',
           title: '记忆整理 — {{datetime}}',
-          description: '第一步必须调用 Skill("memory-curate")，禁止加载其他 reflection skill。流程：扫近期 inbox → 去重 → 多因子打分 → 晋升 confirmed / 丢弃 / 留待 daily-reflection。',
+          description: '第一步必须调用 Skill("memory-curate")，禁止加载其他 reflection skill。整理范围：{{watermark}} 到 {{datetime}}。流程：按 ingestion_time 增量列出此窗口内的 inbox → 去重 → 多因子打分 → 晋升 confirmed / 丢弃 / 留待 daily-reflection。禁止用 search_long_term 拉 inbox 候选。',
           priority: 'low',
+          input: {
+            ingestion_time_start: '{{watermark}}',
+            ingestion_time_end: '{{datetime}}',
+          },
           tags: ['memory_curate', 'builtin'],
         },
       },

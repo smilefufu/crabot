@@ -172,6 +172,30 @@ def test_list_entries_sort_ingestion_time_desc(tmp_path):
     assert [r["id"] for r in rows_asc] == ["mem-l-old", "mem-l-new"]
 
 
+def test_list_entries_filters_by_ingestion_time_window(tmp_path):
+    idx = SqliteIndex(str(tmp_path / "idx.db"))
+    idx.upsert(
+        _make_typed_entry("mem-l-before", ingestion_time="2026-04-23T09:59:59Z"),
+        path="/tmp/before.md", status="inbox",
+    )
+    idx.upsert(
+        _make_typed_entry("mem-l-in-window", ingestion_time="2026-04-23T10:30:00Z"),
+        path="/tmp/in-window.md", status="inbox",
+    )
+    idx.upsert(
+        _make_typed_entry("mem-l-after", ingestion_time="2026-04-23T11:00:00Z"),
+        path="/tmp/after.md", status="inbox",
+    )
+
+    rows = idx.list_entries(
+        status="inbox",
+        ingestion_time_start="2026-04-23T10:00:00Z",
+        ingestion_time_end="2026-04-23T11:00:00Z",
+    )
+
+    assert [r["id"] for r in rows] == ["mem-l-in-window"]
+
+
 def test_extend_observation_window_adds_days(tmp_path):
     from src.long_term_v2.sqlite_index import SqliteIndex
     from src.long_term_v2.schema import (
