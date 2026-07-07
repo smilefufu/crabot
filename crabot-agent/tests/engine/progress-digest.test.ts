@@ -222,7 +222,7 @@ describe('ProgressDigest fork mode', () => {
     digest.dispose()
   })
 
-  it('ask_human tool call triggers immediate flush', async () => {
+  it('ask_human send_message does NOT trigger an extra digest', async () => {
     const sendToUser = vi.fn().mockResolvedValue(undefined)
     const { adapter, complete } = makeAdapter()
     const messagesRef = makeRef([createUserMessage('confirm?')])
@@ -237,12 +237,11 @@ describe('ProgressDigest fork mode', () => {
       })],
     }))
 
-    await vi.runOnlyPendingTimersAsync()
     await Promise.resolve()
     await Promise.resolve()
 
-    expect(complete).toHaveBeenCalledTimes(1)
-    expect(sendToUser).toHaveBeenCalledTimes(1)
+    expect(complete).not.toHaveBeenCalled()
+    expect(sendToUser).not.toHaveBeenCalled()
     digest.dispose()
   })
 

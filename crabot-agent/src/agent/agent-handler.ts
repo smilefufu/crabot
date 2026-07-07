@@ -1533,7 +1533,7 @@ export class AgentHandler {
             intervalMs: intervalSec * 1000,
             isMasterPrivate,
             // trace span：让 admin UI 上能看到 digest 在哪个时刻被触发以及由谁触发
-            // （定时 / 超期 / ask_human）。span 命名沿用 `__system_*__` 内部 span 风格。
+            // （定时 / 超期）。span 命名沿用 `__system_*__` 内部 span 风格。
             ...(traceCallback ? {
               onTraceStart: (reason) =>
                 traceCallback.onToolCallStart('__system_progress_digest__', `reason=${reason}`),

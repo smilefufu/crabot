@@ -22,7 +22,7 @@ import { hasDanglingToolUse } from './tool-message-integrity.js'
 
 // --- Config & Deps ---
 
-export type DigestReason = 'interval' | 'overdue' | 'ask_human'
+export type DigestReason = 'interval' | 'overdue'
 
 export interface ProgressDigestConfig {
   /** 定时 flush 间隔（毫秒）；不传或 ≤0 表示不启用定时触发 */
@@ -95,25 +95,20 @@ export class ProgressDigest {
   }
 
   /**
-   * 入口做两件事：
-   * 1. 检测 send_message 调用 → 标记 sentMessageSinceStart（影响 overdue 是否触发）
-   * 2. ask_human 立即 flush（用户必须立刻看到问题）
+   * 检测 send_message 调用并标记 sentMessageSinceStart（影响 overdue 是否触发）。
+   * ask_human 本身已通过 send_message 真实发给用户；这里不再额外生成 digest。
    */
   ingest(event: EngineTurnEvent): void {
     if (this.disposed) return
-    let askHuman = false
     for (const tc of event.toolCalls) {
       const bare = tc.name.replace(/^mcp__[^_]+__/, '')
       const isSendMsg = bare === 'send_message' || bare === 'send_private_message'
       if (!isSendMsg || tc.isError) continue
       this.sentMessageSinceStart = true
-      const intent = (tc.input as { intent?: string } | undefined)?.intent
-      if (intent === 'ask_human') askHuman = true
     }
-    if (askHuman) this.flushNow('ask_human')
   }
 
-  flushNow(reason: DigestReason = 'ask_human'): void {
+  flushNow(reason: DigestReason = 'overdue'): void {
     if (this.disposed) return
     this.doFlush(reason).catch(() => {})
   }
@@ -147,8 +142,8 @@ export class ProgressDigest {
   private async doFlush(reason: DigestReason): Promise<void> {
     if (this.flushing) return
     // overdue 触发但 agent 已经 send_message 过 → 跳过：用户已经收到 agent 自己写的
-    // 进度（带工作记忆 + 后续行动），再发一份 fork digest 是冗余。interval / ask_human
-    // 不受此判断影响。
+    // 进度（带工作记忆 + 后续行动），再发一份 fork digest 是冗余。
+    // interval 不受此判断影响（interval 是稳定节奏）。
     if (reason === 'overdue' && this.sentMessageSinceStart) return
     const snapshot = this.deps.messagesRef.current
     if (snapshot.length === 0) return
