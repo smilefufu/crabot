@@ -1123,6 +1123,7 @@ export interface DispatchActionDetails {
     | 'supplement_fallback'
     | 'supplement_fallback_recovered'
     | 'supplement_delivered'
+    | 'terminal_task_revived'
     | 'new_task_spawned'
     | 'silent_discard'
   /** new_task 完成后追加：spawn 出的子 trace id；
@@ -1132,6 +1133,10 @@ export interface DispatchActionDetails {
   attempted_target_task_id?: string
   /** supplement_fallback_recovered 专用：降级路径标记。 */
   recovered_via?: 'new_task'
+  /** terminal_task_revived / supplement_fallback_recovered 专用：目标任务在 dispatcher 决策时的状态。 */
+  target_task_status?: string
+  /** terminal_task_revived / supplement_fallback_recovered 专用：目标任务原完成时间，用于 trace epoch 边界。 */
+  target_task_completed_at?: string
   /** 失败时追加：错误信息 */
   error?: string
 }

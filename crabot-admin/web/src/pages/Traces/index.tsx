@@ -10,6 +10,7 @@ import {
   totalPromptTokens,
   cacheHitRate,
   type AgentTrace,
+  type AgentSpan,
   type TraceIndexEntry,
   type ConversationUnit,
   type ConvTaskBrief,
@@ -27,7 +28,10 @@ import {
   formatTokens,
   statusColor,
   DEFAULT_FILTER,
+  buildTraceEpochs,
   type FilterState,
+  type TraceEpoch,
+  type TraceEpochRole,
 } from './utils'
 import { FilterBar } from './FilterBar'
 import { PaginationBar } from './PaginationBar'
@@ -54,6 +58,24 @@ interface TraceTreeData {
   subagents: TraceIndexEntry[]
 }
 
+interface TraceFocusWindow {
+  startedAt: string
+  endedAt?: string
+  epochLabel: string
+}
+
+const epochRoleLabel: Record<TraceEpochRole, string> = {
+  dispatcher: 'Dispatch',
+  worker: 'Task',
+  subagent: 'Sub-agent',
+}
+
+const epochRoleColor: Record<TraceEpochRole, string> = {
+  dispatcher: '#3b82f6',
+  worker: '#8b5cf6',
+  subagent: '#ec4899',
+}
+
 // ============================================================================
 // 子组件：RelatedTraceTree — 同 task_id 的 fronts/worker/sub-agents 关联视图
 // ============================================================================
@@ -61,11 +83,13 @@ interface TraceTreeData {
 function RelatedTraceTree({
   taskId,
   currentTraceId,
+  focusWindow,
   onJumpToTrace,
 }: {
   taskId: string
   currentTraceId: string
-  onJumpToTrace?: (traceId: string) => void
+  focusWindow?: TraceFocusWindow | null
+  onJumpToTrace?: (traceId: string, focusWindow?: TraceFocusWindow) => void
 }) {
   const [tree, setTree] = useState<TraceTreeData | null>(null)
   const [loading, setLoading] = useState(false)
@@ -108,34 +132,12 @@ function RelatedTraceTree({
   if (!tree) return null
 
   const total = tree.fronts.length + tree.workers.length + tree.subagents.length
-
-  const renderRole = (label: string, color: string, items: TraceIndexEntry[]) => {
-    if (items.length === 0) return null
-    return (
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-        <span
-          style={{
-            fontSize: 10,
-            color,
-            fontWeight: 600,
-            letterSpacing: 0.3,
-            textTransform: 'uppercase',
-            minWidth: 64,
-          }}
-        >
-          {label} ({items.length})
-        </span>
-        {items.map((e) => (
-          <TraceChip
-            key={e.trace_id}
-            entry={e}
-            current={e.trace_id === currentTraceId}
-            onClick={() => onJumpToTrace?.(e.trace_id)}
-          />
-        ))}
-      </div>
-    )
-  }
+  const epochs = buildTraceEpochs({
+    fronts: tree.fronts,
+    workers: tree.workers,
+    subagents: tree.subagents,
+    currentTraceId,
+  })
 
   return (
     <div
@@ -155,13 +157,172 @@ function RelatedTraceTree({
         <span style={{ color: 'var(--text-muted)', fontWeight: 400, fontFamily: 'var(--font-mono)' }}>
           task {taskId.slice(0, 12)}
         </span>
-        <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>· 共 {total} trace</span>
+        <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>· {epochs.length} epoch / 共 {total} trace</span>
       </div>
-      {renderRole('Dispatch', '#3b82f6', tree.fronts)}
-      {tree.workers.length > 0 && renderRole('Task', '#8b5cf6', tree.workers)}
-      {renderRole('Sub-agent', '#ec4899', tree.subagents)}
+      <EpochList epochs={epochs} currentTraceId={currentTraceId} focusWindow={focusWindow} onJumpToTrace={onJumpToTrace} />
     </div>
   )
+}
+
+function EpochList({
+  epochs,
+  currentTraceId,
+  focusWindow,
+  onJumpToTrace,
+}: {
+  epochs: TraceEpoch[]
+  currentTraceId: string
+  focusWindow?: TraceFocusWindow | null
+  onJumpToTrace?: (traceId: string, focusWindow?: TraceFocusWindow) => void
+}) {
+  const [historyExpanded, setHistoryExpanded] = useState(false)
+  if (epochs.length === 0) {
+    return <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>(无关联 trace)</div>
+  }
+  const visible = epochs.filter((epoch) => (
+    epoch.isLatest || epoch.isCurrent || (focusWindow && epoch.label === focusWindow.epochLabel)
+  ))
+  const history = epochs.filter((epoch) => !visible.includes(epoch))
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      {visible.map((epoch) => (
+        <EpochBlock key={epoch.id} epoch={epoch} currentTraceId={currentTraceId} onJumpToTrace={onJumpToTrace} />
+      ))}
+      {history.length > 0 && (
+        <button
+          type="button"
+          onClick={() => setHistoryExpanded((v) => !v)}
+          style={{
+            border: '1px solid rgba(148,163,184,0.24)',
+            borderRadius: 4,
+            background: 'rgba(15,23,42,0.12)',
+            color: 'var(--text-muted)',
+            padding: '5px 8px',
+            cursor: 'pointer',
+            textAlign: 'left',
+            fontSize: 11,
+            fontFamily: 'var(--font-body)',
+          }}
+        >
+          {historyExpanded ? '▼' : '▶'} 历史 epoch ({history.length})
+        </button>
+      )}
+      {historyExpanded && history.map((epoch) => (
+        <EpochBlock key={epoch.id} epoch={epoch} currentTraceId={currentTraceId} onJumpToTrace={onJumpToTrace} />
+      ))}
+    </div>
+  )
+}
+
+function EpochBlock({
+  epoch,
+  currentTraceId,
+  onJumpToTrace,
+}: {
+  epoch: TraceEpoch
+  currentTraceId: string
+  onJumpToTrace?: (traceId: string, focusWindow?: TraceFocusWindow) => void
+}) {
+  const [expanded, setExpanded] = useState(epoch.isLatest || epoch.isCurrent)
+  useEffect(() => {
+    if (epoch.isLatest || epoch.isCurrent) setExpanded(true)
+  }, [epoch.isLatest, epoch.isCurrent])
+  const title = `${epoch.label}${epoch.isLatest ? ' · 最新' : ''}${epoch.isCurrent && !epoch.isLatest ? ' · 当前' : ''}`
+  return (
+    <div
+      style={{
+        border: `1px solid ${epoch.isLatest ? 'rgba(16,185,129,0.38)' : 'rgba(148,163,184,0.28)'}`,
+        borderRadius: 4,
+        background: epoch.isLatest ? 'rgba(16,185,129,0.06)' : 'rgba(15,23,42,0.18)',
+        overflow: 'hidden',
+      }}
+    >
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        style={{
+          width: '100%',
+          border: 'none',
+          background: 'transparent',
+          color: 'var(--text-primary)',
+          padding: '6px 8px',
+          display: 'grid',
+          gridTemplateColumns: 'minmax(96px, auto) 1fr auto',
+          gap: 8,
+          alignItems: 'center',
+          textAlign: 'left',
+          cursor: 'pointer',
+          fontFamily: 'var(--font-body)',
+        }}
+      >
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 700 }}>
+          <span style={{ color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 10 }}>
+            {expanded ? '▼' : '▶'}
+          </span>
+          {title}
+        </span>
+        <span
+          style={{
+            minWidth: 0,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            color: 'var(--text-muted)',
+            fontSize: 11,
+            fontFamily: 'var(--font-mono)',
+          }}
+        >
+          {formatTime(epoch.startedAt)} - {epoch.endedAt ? formatTime(epoch.endedAt) : 'now'} · {formatDuration(epoch.durationMs)}
+        </span>
+        <span style={{ display: 'inline-flex', gap: 5, alignItems: 'center', justifyContent: 'flex-end', fontSize: 10, color: 'var(--text-muted)' }}>
+          <span>{epoch.roleCounts.dispatcher}D</span>
+          <span>{epoch.roleCounts.worker}T</span>
+          <span>{epoch.roleCounts.subagent}S</span>
+          <span style={{ color: statusColor(epoch.status), fontWeight: 700 }}>{epoch.status}</span>
+        </span>
+      </button>
+      {expanded && (
+        <div style={{ padding: '0 8px 7px', display: 'flex', flexDirection: 'column', gap: 5 }}>
+          {(['dispatcher', 'worker', 'subagent'] as TraceEpochRole[]).map((role) => {
+            const items = epoch.traces.filter((m) => m.role === role).map((m) => m.entry)
+            if (items.length === 0) return null
+            return (
+              <div key={role} style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                <span
+                  style={{
+                    fontSize: 10,
+                    color: epochRoleColor[role],
+                    fontWeight: 600,
+                    letterSpacing: 0.3,
+                    textTransform: 'uppercase',
+                    minWidth: 76,
+                  }}
+                >
+                  {epochRoleLabel[role]} ({items.length})
+                </span>
+                {items.map((e) => (
+                  <TraceChip
+                    key={e.trace_id}
+                    entry={e}
+                    current={e.trace_id === currentTraceId && (role !== 'worker' || epoch.isLatest || epoch.isCurrent)}
+                    onClick={() => onJumpToTrace?.(e.trace_id, epochFocusWindow(epoch))}
+                  />
+                ))}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function epochFocusWindow(epoch: TraceEpoch): TraceFocusWindow {
+  return {
+    startedAt: epoch.startedAt,
+    ...(epoch.endedAt ? { endedAt: epoch.endedAt } : {}),
+    epochLabel: epoch.label,
+  }
 }
 
 // ============================================================================
@@ -202,11 +363,13 @@ function UsageStat({
 export function TraceDetailPanel({
   trace,
   loading,
+  focusWindow,
   onNavigateTrace,
 }: {
   trace: AgentTrace | null
   loading: boolean
-  onNavigateTrace?: (traceId: string) => void
+  focusWindow?: TraceFocusWindow | null
+  onNavigateTrace?: (traceId: string, focusWindow?: TraceFocusWindow) => void
 }) {
   const [expandedDetails, setExpandedDetails] = useState<Set<string>>(new Set())
   const [convModalOpen, setConvModalOpen] = useState(false)
@@ -296,6 +459,7 @@ export function TraceDetailPanel({
           <RelatedTraceTree
             taskId={trace.related_task_id}
             currentTraceId={trace.trace_id}
+            focusWindow={focusWindow}
             onJumpToTrace={onNavigateTrace}
           />
         )}
@@ -387,9 +551,10 @@ export function TraceDetailPanel({
 
       {/* Span 树 */}
       {(() => {
+        const visibleSpans = focusWindow ? filterSpansByWindow(trace.spans, focusWindow) : trace.spans
         // 计算 orderedLlmSpans：所有 llm_call span 按 started_at 排序，携带 message_count_after
         const orderedLlmSpans = trace.resume_checkpoint
-          ? trace.spans
+          ? visibleSpans
               .filter((s) => s.type === 'llm_call')
               .sort((a, b) => {
                 if (a.started_at < b.started_at) return -1
@@ -405,11 +570,28 @@ export function TraceDetailPanel({
 
         return (
           <div>
-            {trace.spans.length === 0 ? (
+            {focusWindow && (
+              <div
+                style={{
+                  padding: '7px 12px',
+                  borderBottom: '1px solid var(--border)',
+                  background: 'rgba(16,185,129,0.05)',
+                  color: 'var(--text-secondary)',
+                  fontSize: 12,
+                  fontFamily: 'var(--font-mono)',
+                }}
+              >
+                Span 已按 {focusWindow.epochLabel} 切片：{formatTime(focusWindow.startedAt)} - {focusWindow.endedAt ? formatTime(focusWindow.endedAt) : 'now'}
+                <span style={{ marginLeft: 8, color: 'var(--text-muted)' }}>
+                  {visibleSpans.length} / {trace.spans.length}
+                </span>
+              </div>
+            )}
+            {visibleSpans.length === 0 ? (
               <div style={{ padding: 16, color: 'var(--text-muted)', fontSize: 13 }}>暂无 Span 数据</div>
             ) : (
               <SpanTree
-                spans={trace.spans}
+                spans={visibleSpans}
                 parentSpanId={undefined}
                 depth={0}
                 expandedDetails={expandedDetails}
@@ -449,6 +631,25 @@ export function TraceDetailPanel({
       )}
     </div>
   )
+}
+
+function filterSpansByWindow(spans: AgentSpan[], window: TraceFocusWindow): AgentSpan[] {
+  const start = new Date(window.startedAt).getTime()
+  const end = window.endedAt ? new Date(window.endedAt).getTime() : Number.POSITIVE_INFINITY
+  const byId = new Map(spans.map((span) => [span.span_id, span]))
+  const keep = new Set<string>()
+  for (const span of spans) {
+    const spanStart = new Date(span.started_at).getTime()
+    const spanEnd = span.ended_at ? new Date(span.ended_at).getTime() : spanStart + (span.duration_ms ?? 0)
+    if (spanStart <= end && spanEnd >= start) {
+      let cursor: AgentSpan | undefined = span
+      while (cursor) {
+        keep.add(cursor.span_id)
+        cursor = cursor.parent_span_id ? byId.get(cursor.parent_span_id) : undefined
+      }
+    }
+  }
+  return spans.filter((span) => keep.has(span.span_id))
 }
 
 // ============================================================================
@@ -497,7 +698,7 @@ function ConversationUnitRow({
   /** 切换 checkbox 选中状态（仅 task 行调） */
   onToggleSelect: (taskId: string) => void
   /** 点击 trace 行 → 加载 trace detail（task 展开后的子行 / 孤儿 dispatcher 整行都用） */
-  onSelectTrace: (traceId: string) => void
+  onSelectTrace: (traceId: string, focusWindow?: TraceFocusWindow) => void
   /** 点击删除按钮 → confirm 后永久删除 task（活跃 task 后端会拒绝） */
   onDeleteTask: (taskId: string, title: string) => void
   /** 触发 lazy load trace tree（task 展开时调） */
@@ -664,15 +865,16 @@ function ConversationUnitRow({
 }
 
 /** task 展开后渲染 fronts/worker/subagents 子 trace 行 */
-function ExpandedTraceRows({
+export function ExpandedTraceRows({
   tree,
   selectedTraceId,
   onSelectTrace,
 }: {
   tree: TraceTree | null | undefined
   selectedTraceId: string | null
-  onSelectTrace: (traceId: string) => void
+  onSelectTrace: (traceId: string, focusWindow?: TraceFocusWindow) => void
 }) {
+  const [historyExpanded, setHistoryExpanded] = useState(false)
   if (tree === undefined) {
     return (
       <tr>
@@ -691,12 +893,14 @@ function ExpandedTraceRows({
       </tr>
     )
   }
-  const members: Array<{ entry: TraceIndexEntry; role: 'dispatcher' | 'worker' | 'subagent' }> = [
-    ...tree.tree.fronts.map((e) => ({ entry: e, role: 'dispatcher' as const })),
-    ...tree.tree.workers.map((e) => ({ entry: e, role: 'worker' as const })),
-    ...tree.tree.subagents.map((e) => ({ entry: e, role: 'subagent' as const })),
-  ]
-  if (members.length === 0) {
+  const total = tree.tree.fronts.length + tree.tree.workers.length + tree.tree.subagents.length
+  const epochs = buildTraceEpochs({
+    fronts: tree.tree.fronts,
+    workers: tree.tree.workers,
+    subagents: tree.tree.subagents,
+    currentTraceId: selectedTraceId ?? '',
+  })
+  if (total === 0) {
     return (
       <tr>
         <td colSpan={11} style={{ padding: '6px 24px', fontSize: 11, color: 'var(--text-muted)' }}>
@@ -705,11 +909,108 @@ function ExpandedTraceRows({
       </tr>
     )
   }
-  const roleLabel = { dispatcher: 'Dispatch', worker: 'Worker', subagent: 'Subagent' }
-  const roleColor = { dispatcher: '#3b82f6', worker: '#8b5cf6', subagent: '#ec4899' }
+  const visibleEpochs = epochs.filter((epoch) => epoch.isLatest || epoch.isCurrent)
+  const historyEpochs = epochs.filter((epoch) => !visibleEpochs.includes(epoch))
   return (
     <>
-      {members.map((m) => {
+      {visibleEpochs.map((epoch) => (
+        <ExpandedEpochRows
+          key={epoch.id}
+          epoch={epoch}
+          selectedTraceId={selectedTraceId}
+          onSelectTrace={onSelectTrace}
+        />
+      ))}
+      {historyEpochs.length > 0 && (
+        <tr
+          onClick={(e) => {
+            e.stopPropagation()
+            setHistoryExpanded((v) => !v)
+          }}
+          style={{ cursor: 'pointer' }}
+        >
+          <td colSpan={11} style={{
+            padding: '6px 28px',
+            borderBottom: '1px solid var(--border)',
+            color: 'var(--text-muted)',
+            fontSize: 11,
+            background: 'rgba(15,23,42,0.03)',
+          }}>
+            <span style={{ fontFamily: 'var(--font-mono)', marginRight: 6 }}>
+              {historyExpanded ? '▼' : '▶'}
+            </span>
+            历史 epoch ({historyEpochs.length})
+          </td>
+        </tr>
+      )}
+      {historyExpanded && historyEpochs.map((epoch) => (
+        <ExpandedEpochRows
+          key={epoch.id}
+          epoch={epoch}
+          selectedTraceId={selectedTraceId}
+          onSelectTrace={onSelectTrace}
+        />
+      ))}
+    </>
+  )
+}
+
+function ExpandedEpochRows({
+  epoch,
+  selectedTraceId,
+  onSelectTrace,
+}: {
+  epoch: TraceEpoch
+  selectedTraceId: string | null
+  onSelectTrace: (traceId: string, focusWindow?: TraceFocusWindow) => void
+}) {
+  const [expanded, setExpanded] = useState(epoch.isLatest || epoch.isCurrent)
+  useEffect(() => {
+    if (epoch.isLatest || epoch.isCurrent) setExpanded(true)
+  }, [epoch.isLatest, epoch.isCurrent])
+
+  const headerCell: React.CSSProperties = {
+    padding: '5px 10px',
+    borderBottom: '1px solid var(--border)',
+    verticalAlign: 'middle',
+    fontSize: 11,
+    background: epoch.isLatest ? 'rgba(16,185,129,0.06)' : 'rgba(15,23,42,0.04)',
+  }
+
+  const roleLabel = { dispatcher: 'Dispatch', worker: 'Worker', subagent: 'Subagent' }
+  const roleColor = { dispatcher: '#3b82f6', worker: '#8b5cf6', subagent: '#ec4899' }
+
+  return (
+    <>
+      <tr
+        onClick={(e) => {
+          e.stopPropagation()
+          setExpanded((v) => !v)
+        }}
+        style={{ cursor: 'pointer' }}
+      >
+        <td style={headerCell}>{/* checkbox 占位 */}</td>
+        <td style={{ ...headerCell, paddingLeft: 28, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+          {expanded ? '▼' : '▶'}
+        </td>
+        <td style={headerCell}><StatusDot status={epoch.status} size={6} /></td>
+        <td style={headerCell} colSpan={4}>
+          <span style={{ fontWeight: 700, color: 'var(--text-primary)' }}>
+            {epoch.label}{epoch.isLatest ? ' · 最新' : ''}{epoch.isCurrent && !epoch.isLatest ? ' · 当前' : ''}
+          </span>
+          <span style={{ marginLeft: 8, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+            {formatTime(epoch.startedAt)} - {epoch.endedAt ? formatTime(epoch.endedAt) : 'now'} · {formatDuration(epoch.durationMs)}
+          </span>
+        </td>
+        <td style={{ ...headerCell, color: 'var(--text-muted)', whiteSpace: 'nowrap' }} colSpan={2}>
+          {epoch.roleCounts.dispatcher} Dispatch / {epoch.roleCounts.worker} Task / {epoch.roleCounts.subagent} Sub-agent
+        </td>
+        <td style={{ ...headerCell, textAlign: 'right', color: 'var(--text-muted)', fontVariantNumeric: 'tabular-nums' }}>
+          {epoch.totalSpans}
+        </td>
+        <td style={headerCell}>{/* 单条 trace 不在此处删 */}</td>
+      </tr>
+      {expanded && epoch.traces.map((m) => {
         const isSelected = selectedTraceId === m.entry.trace_id
         const cell: React.CSSProperties = {
           padding: '4px 10px',
@@ -720,14 +1021,17 @@ function ExpandedTraceRows({
         return (
           <tr
             key={m.entry.trace_id}
-            onClick={() => onSelectTrace(m.entry.trace_id)}
+            onClick={(e) => {
+              e.stopPropagation()
+              onSelectTrace(m.entry.trace_id, epochFocusWindow(epoch))
+            }}
             style={{
               cursor: 'pointer',
               background: isSelected ? 'var(--bg-highlight, rgba(59,130,246,0.08))' : 'rgba(0,0,0,0.02)',
             }}
           >
             <td style={cell}>{/* checkbox 占位 */}</td>
-            <td style={{ ...cell, paddingLeft: 28, color: 'var(--text-muted)' }}>↳</td>
+            <td style={{ ...cell, paddingLeft: 42, color: 'var(--text-muted)' }}>↳</td>
             <td style={cell}><StatusDot status={m.entry.status} size={6} /></td>
             <td style={cell}>
               <span style={{
@@ -804,6 +1108,7 @@ export const Traces: React.FC = () => {
 
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null)
   const [selectedTrace, setSelectedTrace] = useState<AgentTrace | null>(null)
+  const [selectedFocusWindow, setSelectedFocusWindow] = useState<TraceFocusWindow | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
 
   const [autoRefresh, setAutoRefresh] = useState(true)
@@ -884,14 +1189,15 @@ export const Traces: React.FC = () => {
     return () => clearInterval(id)
   }, [selectedTrace, selectedTraceId, autoRefresh, loadDetail])
 
-  const handleSelectTrace = useCallback(async (traceId: string) => {
+  const handleSelectTrace = useCallback(async (traceId: string, focusWindow?: TraceFocusWindow) => {
     setSelectedTraceId(traceId)
+    setSelectedFocusWindow(focusWindow ?? null)
     setSelectedTrace(null)
     await loadDetail(traceId)
   }, [loadDetail])
 
-  const handleNavigateTrace = useCallback(async (traceId: string) => {
-    handleSelectTrace(traceId)
+  const handleNavigateTrace = useCallback(async (traceId: string, focusWindow?: TraceFocusWindow) => {
+    handleSelectTrace(traceId, focusWindow)
   }, [handleSelectTrace])
 
   // 永久删除单条 task。活跃 task 后端会拒绝。
@@ -1006,6 +1312,7 @@ export const Traces: React.FC = () => {
       await loadList()
       setSelectedTrace(null)
       setSelectedTraceId(null)
+      setSelectedFocusWindow(null)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       toast.error(`清理失败: ${msg}`)
@@ -1225,6 +1532,7 @@ export const Traces: React.FC = () => {
             <TraceDetailPanel
               trace={selectedTrace}
               loading={detailLoading}
+              focusWindow={selectedFocusWindow}
               onNavigateTrace={handleNavigateTrace}
             />
           </div>

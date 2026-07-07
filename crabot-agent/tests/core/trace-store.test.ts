@@ -417,6 +417,45 @@ describe('TraceStore getTraceTree', () => {
     expect(tree.tree.workers).toHaveLength(0)
     expect(tree.tree.subagents).toHaveLength(0)
   })
+
+  it('includes dispatch action outcomes in trace tree entries', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-tree-actions-'))
+    try {
+      const store = new TraceStore(10, dir)
+      const trace = store.startTrace({
+        module_id: 'agent-1',
+        related_task_id: 'task-1',
+        trigger: { type: 'message', summary: 'revive task' },
+      })
+      const span = store.startSpan(trace.trace_id, {
+        type: 'dispatch_action',
+        details: {
+          kind: 'supplement',
+          target_task_id: 'task-1',
+        },
+      })
+
+      store.endSpan(trace.trace_id, span.span_id, 'completed', {
+        outcome: 'terminal_task_revived',
+        target_task_status: 'completed',
+        target_task_completed_at: '2026-07-06T15:23:13.854Z',
+      } as never)
+      store.endTrace(trace.trace_id, 'completed', { summary: 'dispatched (1 actions)' })
+
+      const tree = store.getTraceTree('task-1')
+
+      expect(tree.tree.fronts[0]!.dispatch_actions).toEqual([
+        {
+          kind: 'supplement',
+          outcome: 'terminal_task_revived',
+          target_task_id: 'task-1',
+          target_task_completed_at: '2026-07-06T15:23:13.854Z',
+        },
+      ])
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('TraceStore cleanupOldFiles', () => {
