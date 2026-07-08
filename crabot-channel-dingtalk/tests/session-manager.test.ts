@@ -103,6 +103,21 @@ describe('upsert (group)', () => {
     const { session } = mgr.upsert({ platform_session_id: 'cid_chat1', type: 'group', title: 'Team Crabot', sender_id: 'staff_alice', sender_name: 'Alice' })
     expect(session.title).toBe('Team Crabot')
   })
+
+  it('does not add an empty participant when sender_id is unresolved (create path)', () => {
+    // 群里首条消息来自无法解析身份的成员（senderStaffId/senderId 都空）→ 不能写入空 platform_user_id
+    const { session, created } = mgr.upsert({
+      platform_session_id: 'cid_chat1', type: 'group', title: 'Team', sender_id: '', sender_name: '',
+    })
+    expect(created).toBe(true)
+    expect(session.participants).toEqual([])
+  })
+
+  it('skips empty sender_id but still admits later identifiable members', () => {
+    mgr.upsert({ platform_session_id: 'cid_chat1', type: 'group', title: 'Team', sender_id: '', sender_name: '' })
+    const { session } = mgr.upsert({ platform_session_id: 'cid_chat1', type: 'group', title: 'Team', sender_id: 'uid_bob', sender_name: 'Bob' })
+    expect(session.participants).toEqual([{ platform_user_id: 'uid_bob', role: 'member' }])
+  })
 })
 
 describe('upsertGroupSessionFromSnapshot', () => {

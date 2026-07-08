@@ -378,7 +378,8 @@ export interface DingtalkChannelConfig {
   app_secret: string
   /** 机器人 robotCode（出站发送必需） */
   robot_code: string
-  /** 拥有者 staffId（引导绑定时记录，用于默认 allowFrom） */
+  /** 拥有者 staffId（可选，手动配置 DINGTALK_OWNER_STAFF_ID；跨渠道复用主人身份）。
+   *  v1 不做运行时「绑定」自动认主，需手动填写。 */
   owner_staff_id?: string
   only_respond_to_mentions: boolean
   /** bot 发文本时是否按 Markdown 渲染（启用时改用 sampleMarkdown）。默认 auto */

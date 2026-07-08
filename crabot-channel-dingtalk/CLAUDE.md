@@ -16,7 +16,7 @@
      sessionWebhook 兜底）→ open.dingtalk.com REST API
 ```
 
-引导式 onboarding 由本模块 `onboard.ts` 提供（`crabot-module.yaml` 的 `onboarding_methods` → `dist/onboard.js`）；channel 主体只关心「已有 AppKey/AppSecret/robotCode 时如何工作」。
+配置由用户在 Admin「手动填写」表单录入 AppKey/AppSecret/robotCode（`crabot-module.yaml` 的 `config_schema` 通用渲染）；channel 主体只关心「已有 AppKey/AppSecret/robotCode 时如何工作」。引导式 onboarding + auto-master 绑定为**后续项**（v1 不声明 `onboarding_methods`，详见「已知取舍」）。
 
 ## 环境变量
 
@@ -56,7 +56,7 @@ corepack pnpm start
 ## 测试
 
 ```bash
-corepack pnpm test    # vitest；纯逻辑（event-mapper / dingtalk-client / text-splitter）+ 数据层 + onboard，共 56 用例
+corepack pnpm test    # vitest；纯逻辑（event-mapper / dingtalk-client / text-splitter）+ 数据层，共 58 用例
 ```
 
 ## 依赖
@@ -76,14 +76,13 @@ src/
 ├── session-manager.ts   ← Session 持久化（conversationId/staffId → Crabot Session）
 ├── message-store.ts     ← 历史消息 JSONL 存储 + 周期清理
 ├── text-splitter.ts     ← 超长文本按语义边界切分
-├── onboard.ts           ← 引导式 Onboarder（建应用引导 + 凭据校验），导出 createOnboarder
 └── types.ts             ← 钉钉事件类型 + Crabot 协议子集 + DingtalkChannelConfig
 ```
 
 ## 已知取舍 / 后续项
 
-- **auto-master「绑定」**：设计 §9 的「主人私聊机器人发『绑定』自动认主」是**运行时**行为（onboarding 在模块启动前跑、拿不到发送者 staffId），当前未实现；`DINGTALK_OWNER_STAFF_ID` 需运行时/手动补齐。属后续项。
-- **配置方式**：钉钉无 OAuth，凭据（AppKey/Secret/robotCode）由用户在 Admin 配置表单**手填**（config_schema 字段可编辑、非 readOnly）。引导式 onboarding 的 `finish` 需前端透传凭据表单参数；若 Admin 向导暂不支持表单式 finish（当前通用向导只采集实例名），直接走手填配置即可。
+- **配置方式（v1 = 手动填写）**：钉钉无 OAuth/扫码，凭据（AppKey/Secret/robotCode）由用户在 Admin「手动填写」表单录入（config_schema 字段可编辑、非 readOnly）。**v1 不声明 `onboarding_methods`**——通用 onboarding 向导当前只采集实例名、不透传表单式 `finish` 参数，无法把凭据交给引导式 `finish`。
+- **引导式 onboarding + auto-master（后续项，v1 不实现）**：设计稿曾规划「引导建应用 + 校验凭据 + 主人私聊发『绑定』自动认主」。auto-master 是**运行时**行为（onboarding 在模块启动前跑、拿不到发送者 staffId），且引导式 `finish` 依赖向导支持表单式凭据透传——两者 v1 均未实现。`DINGTALK_OWNER_STAFF_ID` 由用户**手动配置**（可选）。待通用向导支持表单式 finish 后再补引导式 onboarding + auto-master。
 - **出站媒体**：v1 出站仅 text/markdown，不发图片/文件/卡片（设计 §2 非目标）。
 - **出站 @**：v1 出站不注入 @（`supported_features` 留空，不声明 'mention'）；入站 @ 正常解析（`is_mention_crab` / `features.mentions`）。
 - **cache 热更**：`update_config` 改 `cache.*` 经 `MessageStore.updateCacheConfig` 即时生效（下次清理循环按新值执行，无需重启），对齐协议 §6.1。

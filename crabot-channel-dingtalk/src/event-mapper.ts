@@ -54,6 +54,18 @@ function coerceNumeric(v: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined
 }
 
+/**
+ * 解析发送者的稳定用户标识。
+ * 钉钉 `senderStaffId` 只有本企业成员有值；外部群 / 外部联系人（跨企业会话）拿不到本企业
+ * staffId，`senderStaffId` 为空串，此时回退到 `senderId`（钉钉全局用户 id，回调里恒有），
+ * 保证群里仍能区分「谁是谁」。两者都缺时返回空串，由调用方决定不写入空身份。
+ */
+export function resolveSenderId(
+  msg: Pick<DingtalkInboundMessage, 'senderStaffId' | 'senderId'>,
+): string {
+  return msg.senderStaffId || msg.senderId || ''
+}
+
 /** atUsers → Crabot MessageMention[]；friend_id 留空由 Admin 鉴权回填 */
 export function buildMentionsList(atUsers?: DingtalkAtUser[]): MessageMention[] {
   return (atUsers ?? [])

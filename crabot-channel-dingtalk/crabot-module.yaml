@@ -14,14 +14,9 @@ install: corepack pnpm install
 build: corepack pnpm run build
 entry: dist/main.js
 
-# 交互式配置入口（base-protocol §10）：用户在 Admin Web 选这种入口替代手动填表
-onboarding_methods:
-  - id: guided_setup
-    name: 引导式配置
-    description: 引导创建企业内部应用机器人（Stream 模式）→ 填入 AppKey/AppSecret/robotCode → 校验凭据
-    type: pending
-    handler: dist/onboard.js
-
+# 钉钉无 OAuth/扫码交互，凭据由用户在 Admin「手动填写」表单录入（config_schema 通用渲染）。
+# 通用 onboarding 向导当前只采集实例名、不透传表单式 finish 参数，故 v1 不声明 onboarding_methods；
+# 引导式配置 + auto-master 绑定为后续项（待向导支持表单式 finish 后再补）。
 config_schema:
   type: object
   required:

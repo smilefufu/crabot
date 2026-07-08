@@ -72,7 +72,11 @@ export class SessionManager {
       type: params.type,
       platform_session_id: params.platform_session_id,
       title: params.title,
-      participants: [{ platform_user_id: params.sender_id, role: 'member' }],
+      // sender_id 可能为空（群里无法解析身份的外部成员）→ 不写入空 platform_user_id 参与者，
+      // 对齐 ensureParticipant 的空值守卫，避免污染群成员表。
+      participants: params.sender_id
+        ? [{ platform_user_id: params.sender_id, role: 'member' }]
+        : [],
     })
     return { session, created: true }
   }

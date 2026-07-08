@@ -8,6 +8,7 @@ import {
   detectMentionCrab,
   flattenRichText,
   buildMentionsList,
+  resolveSenderId,
 } from '../src/event-mapper'
 import type { DingtalkInboundMessage } from '../src/types'
 
@@ -137,6 +138,19 @@ describe('flattenRichText', () => {
   })
   it('returns empty for non-array', () => {
     expect(flattenRichText(undefined)).toBe('')
+  })
+})
+
+describe('resolveSenderId', () => {
+  it('uses senderStaffId when present (internal enterprise member)', () => {
+    expect(resolveSenderId(baseMsg({ senderStaffId: 'staff_alice', senderId: 'uid_alice' }))).toBe('staff_alice')
+  })
+  it('falls back to senderId when staffId is empty (external member / cross-org group)', () => {
+    // 钉钉真机：外部群/外部联系人拿不到本企业 staffId，senderStaffId 为空串，但 senderId 恒有
+    expect(resolveSenderId(baseMsg({ senderStaffId: '', senderId: 'uid_bob' }))).toBe('uid_bob')
+  })
+  it('returns empty string when neither id is available', () => {
+    expect(resolveSenderId(baseMsg({ senderStaffId: '', senderId: undefined }))).toBe('')
   })
 })
 

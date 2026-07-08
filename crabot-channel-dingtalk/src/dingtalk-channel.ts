@@ -33,7 +33,7 @@ import { StreamSubscriber } from './stream-subscriber.js'
 import { SessionManager } from './session-manager.js'
 import { MessageStore, type StoredMessage } from './message-store.js'
 import { splitText } from './text-splitter.js'
-import { mapMessageContent, detectMentionCrab, type MappedMessage } from './event-mapper.js'
+import { mapMessageContent, detectMentionCrab, resolveSenderId, type MappedMessage } from './event-mapper.js'
 import type {
   DingtalkInboundMessage,
   DingtalkChannelConfig,
@@ -197,7 +197,10 @@ export class DingtalkChannel extends ModuleBase {
     const mapped = mapMessageContent(msg)
     const content = await this.applyMediaContent(mapped)
 
-    const senderName = msg.senderNick || msg.senderStaffId
+    // 发送者稳定身份：本企业成员用 senderStaffId；外部群/外部联系人缺 staffId 时回退 senderId。
+    // 群里据此区分成员，避免空身份污染成员表（见 event-mapper.resolveSenderId）。
+    const senderUserId = resolveSenderId(msg)
+    const senderName = msg.senderNick || senderUserId
     const placeholderTitle = isGroup
       ? (msg.conversationTitle?.trim() || platformSessionId)
       : senderName
@@ -207,7 +210,7 @@ export class DingtalkChannel extends ModuleBase {
       platform_session_id: platformSessionId,
       type: sessionType,
       title: placeholderTitle,
-      sender_id: msg.senderStaffId,
+      sender_id: senderUserId,
       sender_name: senderName,
     })
     if (created) await this.publishSessionChanged('created', session)
@@ -231,7 +234,7 @@ export class DingtalkChannel extends ModuleBase {
     const channelMessage: ChannelMessage = {
       platform_message_id: msg.msgId,
       session: { session_id: session.id, channel_id: this.config.moduleId, type: session.type },
-      sender: { platform_user_id: msg.senderStaffId, platform_display_name: senderName },
+      sender: { platform_user_id: senderUserId, platform_display_name: senderName },
       content,
       features: {
         is_mention_crab: isMentionCrab,
