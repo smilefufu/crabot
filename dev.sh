@@ -92,6 +92,7 @@ NODE_MODULES_DIRS=(
   crabot-channel-wechat
   crabot-channel-telegram
   crabot-channel-feishu
+  crabot-channel-dingtalk
   crabot-mcp-tools
 )
 
@@ -157,7 +158,7 @@ sync_shared_links() {
   shared_sig="$(cd "$shared_dist" && find . -type f | LC_ALL=C sort | shasum | awk '{print $1}')"
 
   local need_resync=()
-  for mod in crabot-core crabot-admin crabot-agent crabot-channel-wechat crabot-channel-telegram crabot-channel-feishu; do
+  for mod in crabot-core crabot-admin crabot-agent crabot-channel-wechat crabot-channel-telegram crabot-channel-feishu crabot-channel-dingtalk; do
     [ -d "$SCRIPT_DIR/$mod" ] || continue
     local linked_dist
     linked_dist=$(ls -d "$SCRIPT_DIR/$mod"/node_modules/.pnpm/crabot-shared@*/node_modules/crabot-shared/dist 2>/dev/null | head -1)
@@ -214,7 +215,7 @@ build_all() {
   fi
 
   local fail=0
-  for mod in crabot-core crabot-admin crabot-agent crabot-channel-wechat crabot-channel-telegram crabot-channel-feishu; do
+  for mod in crabot-core crabot-admin crabot-agent crabot-channel-wechat crabot-channel-telegram crabot-channel-feishu crabot-channel-dingtalk; do
     if [ ! -d "$SCRIPT_DIR/$mod" ]; then
       continue
     fi
