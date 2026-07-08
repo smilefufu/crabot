@@ -395,7 +395,7 @@ export interface TaskSummary {
    * `scheduled` 表示由调度引擎创建的定时/巡检任务，Front 在 prompt 中需要标记，
    * 且不允许 supplement_task；engine 收到针对 scheduled 的 supplement 时改走 create_task。
    */
-  trigger_type?: 'manual' | 'scheduled' | 'auto' | 'event'
+  trigger_type?: 'manual' | 'scheduled' | 'auto' | 'event' | 'message'
   updated_at?: string
   created_at?: string
   /**
@@ -758,9 +758,9 @@ export interface ExecuteTaskParams {
     plan?: string
     task_type?: string
     /** 任务来源信息。Schedule 路径由 ScheduledTaskRunner 填入 trigger_type='scheduled'；
-     *  trigger 路径合成 task 不填此字段（视为 'message'）。 */
+     *  trigger 路径合成 task 可能显式填入 trigger_type='message'；旧调用不填时也视为 'message'。 */
     source?: {
-      trigger_type?: 'manual' | 'scheduled' | 'auto' | 'event'
+      trigger_type?: 'manual' | 'scheduled' | 'auto' | 'event' | 'message'
     }
   }
   context: WorkerAgentContext

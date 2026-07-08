@@ -8,6 +8,15 @@
 import { describe, it, expect, vi } from 'vitest'
 import { UnifiedAgent } from '../src/unified-agent.js'
 import { AGENT_VERSION } from '../src/constants.js'
+import { AgentLoopSubstrate } from '../src/orchestration/agent-loop-substrate.js'
+
+async function waitFor(condition: () => boolean): Promise<void> {
+  for (let i = 0; i < 50; i++) {
+    if (condition()) return
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error('condition was not met within 500ms')
+}
 
 /** 构造最小可调用的 handleResumeTask 宿主对象（原型绕过） */
 function buildAgent(deps: {
@@ -18,7 +27,8 @@ function buildAgent(deps: {
   isResumableOk?: boolean
   rpcCallResult?: unknown
   assembleScheduledTaskContextResult?: unknown
-  executeScheduledTaskInBackground?: ReturnType<typeof vi.fn>
+  executeAgentLoopInBackground?: ReturnType<typeof vi.fn>
+  agentLoopSubstrate?: { executeAgentLoopInBackground: (...args: never[]) => void }
   rpcCallError?: Error
   assembleError?: Error
 }) {
@@ -45,27 +55,32 @@ function buildAgent(deps: {
   }
 
   // rpcClient stub
+  const defaultGetTaskResult = deps.rpcCallResult ?? {
+    task: {
+      id: 'task-1',
+      title: '测试任务',
+      description: '描述',
+      priority: 'normal',
+      source: {
+        origin: 'human',
+        channel_id: 'wechat-x',
+        session_id: 'sess-y',
+        friend_id: 'friend-z',
+        trigger_type: 'message',
+      },
+    },
+  }
+  let rpcCall: ReturnType<typeof vi.fn>
   if (deps.rpcCallError) {
-    agent.rpcClient = { call: vi.fn().mockRejectedValue(deps.rpcCallError) }
+    rpcCall = vi.fn().mockRejectedValue(deps.rpcCallError)
+    agent.rpcClient = { call: rpcCall }
   } else {
+    rpcCall = vi.fn().mockImplementation((_port: number, method: string) => {
+      if (method === 'get_task') return Promise.resolve(defaultGetTaskResult)
+      return Promise.resolve({ ok: true })
+    })
     agent.rpcClient = {
-      call: vi.fn().mockResolvedValue(
-        deps.rpcCallResult ?? {
-          task: {
-            id: 'task-1',
-            title: '测试任务',
-            description: '描述',
-            priority: 'normal',
-            source: {
-              origin: 'human',
-              channel_id: 'wechat-x',
-              session_id: 'sess-y',
-              friend_id: 'friend-z',
-              trigger_type: 'message',
-            },
-          },
-        }
-      ),
+      call: rpcCall,
     }
   }
 
@@ -90,9 +105,9 @@ function buildAgent(deps: {
     }
   }
 
-  // scheduledTaskRunner stub
-  const executeScheduledTaskInBackground = deps.executeScheduledTaskInBackground ?? vi.fn()
-  agent.scheduledTaskRunner = { executeScheduledTaskInBackground }
+  // agentLoopSubstrate stub
+  const executeAgentLoopInBackground = deps.executeAgentLoopInBackground ?? vi.fn()
+  agent.agentLoopSubstrate = deps.agentLoopSubstrate ?? { executeAgentLoopInBackground }
 
   // getAdminPort
   agent.getAdminPort = vi.fn().mockResolvedValue(18000)
@@ -108,7 +123,8 @@ function buildAgent(deps: {
         sessionId: string
       ) => Promise<{ outcome: 'revived'; traceId?: string } | { outcome: 'fallback'; reason?: string }>
     },
-    executeScheduledTaskInBackground,
+    executeAgentLoopInBackground,
+    rpcCall,
     consumeResumableCheckpoint,
     finalizeUnresumedCheckpoint,
     traceStore: agent.traceStore as {
@@ -122,32 +138,57 @@ function buildAgent(deps: {
 
 describe('UnifiedAgent.handleResumeTask — I1: task_origin 从 task.source 重建', () => {
   it('returns not_configured instead of claiming resumed when worker handler is not ready', async () => {
-    const { agent, executeScheduledTaskInBackground, finalizeUnresumedCheckpoint } = buildAgent({})
+    const { agent, executeAgentLoopInBackground, finalizeUnresumedCheckpoint } = buildAgent({})
 
     const result = await agent.handleResumeTask({ task_id: 'task-1' })
 
     expect(result).toEqual({ resumed: false, reason: 'not_configured' })
-    expect(executeScheduledTaskInBackground).not.toHaveBeenCalled()
+    expect(executeAgentLoopInBackground).not.toHaveBeenCalled()
     expect(finalizeUnresumedCheckpoint).not.toHaveBeenCalled()
   })
 
   it('human 来源：task_origin.channel_id/session_id/friend_id 与 task.source 一致', async () => {
-    const { agent, executeScheduledTaskInBackground } = buildAgent({})
+    const { agent, executeAgentLoopInBackground } = buildAgent({})
     ;(agent as unknown as { agentHandler: { hasActiveTask: () => boolean } }).agentHandler = { hasActiveTask: () => false }
 
     const result = await agent.handleResumeTask({ task_id: 'task-1' })
 
     expect(result.resumed).toBe(true)
-    expect(executeScheduledTaskInBackground).toHaveBeenCalledOnce()
+    expect(executeAgentLoopInBackground).toHaveBeenCalledOnce()
 
-    const [, workerContext] = executeScheduledTaskInBackground.mock.calls[0] as [unknown, { task_origin?: { channel_id: string; session_id: string; friend_id?: string } }]
+    const [payload] = executeAgentLoopInBackground.mock.calls[0] as [{
+      context: { task_origin?: { channel_id: string; session_id: string; friend_id?: string } }
+    }]
+    const workerContext = payload.context
     expect(workerContext.task_origin?.channel_id).toBe('wechat-x')
     expect(workerContext.task_origin?.session_id).toBe('sess-y')
     expect(workerContext.task_origin?.friend_id).toBe('friend-z')
   })
 
+  it('restart resume human task: executes worker loop with source.trigger_type=message, never scheduled', async () => {
+    const { agent, executeAgentLoopInBackground } = buildAgent({})
+    ;(agent as unknown as { agentHandler: { hasActiveTask: () => boolean } }).agentHandler = { hasActiveTask: () => false }
+
+    const result = await agent.handleResumeTask({ task_id: 'task-1' })
+
+    expect(result.resumed).toBe(true)
+    expect(executeAgentLoopInBackground).toHaveBeenCalledOnce()
+    const [payload] = executeAgentLoopInBackground.mock.calls[0] as [{
+      task: { source?: { trigger_type?: string } }
+      context: { task_origin?: { channel_id: string; session_id: string; friend_id?: string } }
+      resumeFrom?: { initialMessages?: unknown[] }
+    }]
+    expect(payload.task.source?.trigger_type).toBe('message')
+    expect(payload.context.task_origin).toEqual({
+      channel_id: 'wechat-x',
+      session_id: 'sess-y',
+      friend_id: 'friend-z',
+    })
+    expect(payload.resumeFrom?.initialMessages).toHaveLength(1)
+  })
+
   it('system 来源（无 channel_id）：task_origin 为 undefined，用 system session 兜底', async () => {
-    const { agent, executeScheduledTaskInBackground } = buildAgent({
+    const { agent, executeAgentLoopInBackground } = buildAgent({
       rpcCallResult: {
         task: {
           id: 'task-2',
@@ -166,12 +207,12 @@ describe('UnifiedAgent.handleResumeTask — I1: task_origin 从 task.source 重�
     const result = await agent.handleResumeTask({ task_id: 'task-2' })
 
     expect(result.resumed).toBe(true)
-    const [, workerContext] = executeScheduledTaskInBackground.mock.calls[0] as [unknown, { task_origin?: unknown }]
-    expect(workerContext.task_origin).toBeUndefined()
+    const [payload] = executeAgentLoopInBackground.mock.calls[0] as [{ context: { task_origin?: unknown } }]
+    expect(payload.context.task_origin).toBeUndefined()
   })
 
   it('source 字段缺失时：task_origin 为 undefined', async () => {
-    const { agent, executeScheduledTaskInBackground } = buildAgent({
+    const { agent, executeAgentLoopInBackground } = buildAgent({
       rpcCallResult: {
         task: {
           id: 'task-3',
@@ -186,8 +227,8 @@ describe('UnifiedAgent.handleResumeTask — I1: task_origin 从 task.source 重�
     const result = await agent.handleResumeTask({ task_id: 'task-3' })
 
     expect(result.resumed).toBe(true)
-    const [, workerContext] = executeScheduledTaskInBackground.mock.calls[0] as [unknown, { task_origin?: unknown }]
-    expect(workerContext.task_origin).toBeUndefined()
+    const [payload] = executeAgentLoopInBackground.mock.calls[0] as [{ context: { task_origin?: unknown } }]
+    expect(payload.context.task_origin).toBeUndefined()
   })
 
   it('成功 resume 后不 finalize 旧 trace（改由 handleExecuteTask 的 reactivate 复用续写，一个 task 一条连续 trace）', async () => {
@@ -202,8 +243,33 @@ describe('UnifiedAgent.handleResumeTask — I1: task_origin 从 task.source 重�
     expect(consumeResumableCheckpoint).not.toHaveBeenCalled()
   })
 
+  it('background worker loop reject 时：把 resumed task 标记为 failed，不 consume checkpoint', async () => {
+    const executeTaskFn = vi.fn().mockRejectedValue(new Error('worker crashed after resume'))
+    const substrate = new AgentLoopSubstrate(executeTaskFn as never)
+    const { agent, rpcCall, consumeResumableCheckpoint } = buildAgent({
+      agentLoopSubstrate: substrate,
+    })
+    ;(agent as unknown as { agentHandler: { hasActiveTask: () => boolean } }).agentHandler = { hasActiveTask: () => false }
+
+    const result = await agent.handleResumeTask({ task_id: 'task-1' })
+
+    expect(result.resumed).toBe(true)
+    await waitFor(() => rpcCall.mock.calls.some((call: unknown[]) => call[1] === 'update_task_status'))
+    expect(rpcCall).toHaveBeenCalledWith(
+      18000,
+      'update_task_status',
+      {
+        task_id: 'task-1',
+        status: 'failed',
+        error: 'worker crashed after resume',
+      },
+      'test-agent',
+    )
+    expect(consumeResumableCheckpoint).not.toHaveBeenCalled()
+  })
+
   it('restart resume 不携带历史 trace id，继续由 resumable checkpoint 复用 running trace', async () => {
-    const { agent, executeScheduledTaskInBackground } = buildAgent({
+    const { agent, executeAgentLoopInBackground } = buildAgent({
       getResumableCheckpoint: vi.fn().mockReturnValue({
         traceId: 'trace-running',
         checkpoint: {
@@ -219,17 +285,15 @@ describe('UnifiedAgent.handleResumeTask — I1: task_origin 从 task.source 重�
     const result = await agent.handleResumeTask({ task_id: 'task-1' })
 
     expect(result.resumed).toBe(true)
-    const [, , options] = executeScheduledTaskInBackground.mock.calls[0] as [
-      unknown,
-      unknown,
-      { resumeFrom?: { terminalSupplementText?: string; resumeTraceId?: string } },
-    ]
-    expect(options.resumeFrom?.terminalSupplementText).toBeUndefined()
-    expect(options.resumeFrom?.resumeTraceId).toBeUndefined()
+    const [payload] = executeAgentLoopInBackground.mock.calls[0] as [{
+      resumeFrom?: { terminalSupplementText?: string; resumeTraceId?: string }
+    }]
+    expect(payload.resumeFrom?.terminalSupplementText).toBeUndefined()
+    expect(payload.resumeFrom?.resumeTraceId).toBeUndefined()
   })
 
   it('restart resume 从 checkpoint worker_state 传递 humanInputEpoch 和 lastDeliveredInfoEpoch', async () => {
-    const { agent, executeScheduledTaskInBackground } = buildAgent({
+    const { agent, executeAgentLoopInBackground } = buildAgent({
       getResumableCheckpoint: vi.fn().mockReturnValue({
         traceId: 'trace-running',
         checkpoint: {
@@ -245,19 +309,37 @@ describe('UnifiedAgent.handleResumeTask — I1: task_origin 从 task.source 重�
     const result = await agent.handleResumeTask({ task_id: 'task-1' })
 
     expect(result.resumed).toBe(true)
-    const [, , options] = executeScheduledTaskInBackground.mock.calls[0] as [
-      unknown,
-      unknown,
-      { resumeFrom?: { humanInputEpoch?: number; lastDeliveredInfoEpoch?: number } },
-    ]
-    expect(options.resumeFrom?.humanInputEpoch).toBe(1)
-    expect(options.resumeFrom?.lastDeliveredInfoEpoch).toBe(0)
+    const [payload] = executeAgentLoopInBackground.mock.calls[0] as [{
+      resumeFrom?: { humanInputEpoch?: number; lastDeliveredInfoEpoch?: number }
+    }]
+    expect(payload.resumeFrom?.humanInputEpoch).toBe(1)
+    expect(payload.resumeFrom?.lastDeliveredInfoEpoch).toBe(0)
+  })
+
+  it('restart resume scheduled task: preserves scheduled source instead of forcing message', async () => {
+    const { agent, executeAgentLoopInBackground } = buildAgent({
+      rpcCallResult: {
+        task: {
+          id: 'task-scheduled',
+          title: '系统巡检',
+          priority: 'normal',
+          source: { origin: 'system', trigger_type: 'scheduled' },
+        },
+      },
+    })
+    ;(agent as unknown as { agentHandler: { hasActiveTask: () => boolean } }).agentHandler = { hasActiveTask: () => false }
+
+    const result = await agent.handleResumeTask({ task_id: 'task-scheduled' })
+
+    expect(result.resumed).toBe(true)
+    const [payload] = executeAgentLoopInBackground.mock.calls[0] as [{ task: { source?: { trigger_type?: string } } }]
+    expect(payload.task.source?.trigger_type).toBe('scheduled')
   })
 })
 
 describe('UnifiedAgent.handleResumeTaskWithSupplement', () => {
   it('schedules background execution with terminalSupplementText in resumeFrom', async () => {
-    const { agent, executeScheduledTaskInBackground } = buildAgent({
+    const { agent, executeAgentLoopInBackground } = buildAgent({
       findLatestResumeCheckpointByTaskId: vi.fn().mockReturnValue({
         traceId: 'trace-completed',
         checkpoint: {
@@ -277,15 +359,50 @@ describe('UnifiedAgent.handleResumeTaskWithSupplement', () => {
     })
 
     expect(result.resumed).toBe(true)
-    expect(executeScheduledTaskInBackground).toHaveBeenCalledOnce()
+    expect(executeAgentLoopInBackground).toHaveBeenCalledOnce()
 
-    const [, , options] = executeScheduledTaskInBackground.mock.calls[0] as [
-      unknown,
-      unknown,
-      { resumeFrom?: { terminalSupplementText?: string; resumeTraceId?: string } },
-    ]
-    expect(options.resumeFrom?.terminalSupplementText).toBe('继续刚才失败的任务')
-    expect(options.resumeFrom?.resumeTraceId).toBe('trace-completed')
+    const [payload] = executeAgentLoopInBackground.mock.calls[0] as [{
+      resumeFrom?: { terminalSupplementText?: string; resumeTraceId?: string }
+    }]
+    expect(payload.resumeFrom?.terminalSupplementText).toBe('继续刚才失败的任务')
+    expect(payload.resumeFrom?.resumeTraceId).toBe('trace-completed')
+  })
+
+  it('terminal supplement revive human task: executes worker loop as message with terminal supplement resume data', async () => {
+    const { agent, executeAgentLoopInBackground } = buildAgent({
+      findLatestResumeCheckpointByTaskId: vi.fn().mockReturnValue({
+        traceId: 'trace-completed',
+        checkpoint: {
+          agent_version: AGENT_VERSION,
+          messages: [{ id: 'm-history', role: 'user', content: 'history', timestamp: 1 }],
+          worker_state: { todo_items: [], human_input_epoch: 31, last_delivered_info_epoch: 23 },
+          system_prompt: 'SP-history',
+        },
+      }),
+      getResumableCheckpoint: vi.fn().mockReturnValue(undefined),
+    })
+    ;(agent as unknown as { agentHandler: { hasActiveTask: () => boolean } }).agentHandler = { hasActiveTask: () => false }
+
+    const result = await agent.handleResumeTaskWithSupplement({
+      task_id: 'task-1',
+      supplement_text: '继续刚才失败的任务',
+    })
+
+    expect(result.resumed).toBe(true)
+    const [payload] = executeAgentLoopInBackground.mock.calls[0] as [{
+      task: { source?: { trigger_type?: string } }
+      resumeFrom?: {
+        terminalSupplementText?: string
+        resumeTraceId?: string
+        humanInputEpoch?: number
+        lastDeliveredInfoEpoch?: number
+      }
+    }]
+    expect(payload.task.source?.trigger_type).toBe('message')
+    expect(payload.resumeFrom?.terminalSupplementText).toBe('继续刚才失败的任务')
+    expect(payload.resumeFrom?.resumeTraceId).toBe('trace-completed')
+    expect(payload.resumeFrom?.humanInputEpoch).toBe(31)
+    expect(payload.resumeFrom?.lastDeliveredInfoEpoch).toBe(23)
   })
 })
 

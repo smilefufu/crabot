@@ -10,11 +10,11 @@ import { SYSTEM_SESSION, type RpcClient } from 'crabot-shared'
 import type {
   ChannelMessage,
   ExecuteTaskParams,
-  ExecuteTaskResult,
   WorkerAgentContext,
 } from '../types.js'
 import type { AgentHandler } from '../agent/agent-handler.js'
 import { MemoryWriter } from './memory-writer.js'
+import { AgentLoopSubstrate } from './agent-loop-substrate.js'
 
 /** Admin create_task 返回的任务信息 */
 interface AdminTask {
@@ -37,21 +37,19 @@ interface AdminTask {
 }
 
 export class ScheduledTaskRunner {
-  private agentHandler: AgentHandler | null = null
-
   constructor(
     private rpcClient: RpcClient,
     private moduleId: string,
     private memoryWriter: MemoryWriter,
     private getAdminPort: () => number | Promise<number>,
-    private executeTaskFn?: (params: ExecuteTaskParams & { related_task_id?: string }) => Promise<ExecuteTaskResult & { trace_id?: string }>,
+    private agentLoopSubstrate: AgentLoopSubstrate,
   ) {}
 
   /**
    * 设置本地 Worker Handler 引用（UnifiedAgent 在初始化 Worker 后调用）
    */
   setWorkerHandler(handler: AgentHandler): void {
-    this.agentHandler = handler
+    this.agentLoopSubstrate.setWorkerHandler(handler)
   }
 
   /**
@@ -171,18 +169,11 @@ export class ScheduledTaskRunner {
         }
 
         // worker handler 内部已完成：update_task_status + update_task_outcome + 记忆写入
-        if (this.executeTaskFn) {
-          await this.executeTaskFn({
-            ...taskPayload,
-            related_task_id: task.id,
-            ...(opts?.resumeFrom ? { resumeFrom: opts.resumeFrom } : {}),
-          })
-        } else {
-          await this.agentHandler!.executeTask({
-            ...taskPayload,
-            ...(opts?.resumeFrom ? { resumeFrom: opts.resumeFrom } : {}),
-          })
-        }
+        await this.agentLoopSubstrate.executeAgentLoop({
+          ...taskPayload,
+          related_task_id: task.id,
+          ...(opts?.resumeFrom ? { resumeFrom: opts.resumeFrom } : {}),
+        })
       } catch (error) {
         // worker handler 自身崩溃（throw）——兜底：标失败 + 写失败记忆
         const msg = error instanceof Error ? error.message : String(error)

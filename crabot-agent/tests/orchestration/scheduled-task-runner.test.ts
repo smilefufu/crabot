@@ -7,6 +7,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
+import { AgentLoopSubstrate } from '../../src/orchestration/agent-loop-substrate.js'
 import { ScheduledTaskRunner } from '../../src/orchestration/scheduled-task-runner.js'
 import { MemoryWriter } from '../../src/orchestration/memory-writer.js'
 import type {
@@ -37,13 +38,14 @@ function setupRunner() {
     task_id: 'task-x' as any,
     outcome: 'completed' as const,
   })
+  const substrate = new AgentLoopSubstrate(executeTaskFn as never)
 
   const runner = new ScheduledTaskRunner(
     rpcClient,
     'agent-1',
     memoryWriter,
     () => 18000,
-    executeTaskFn,
+    substrate,
   )
 
   return { runner, executeTaskFn, rpcCall }
