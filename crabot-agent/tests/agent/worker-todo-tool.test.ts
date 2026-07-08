@@ -67,6 +67,29 @@ describe('createTodoTool', () => {
     expect(result.output).toMatch(/Only one item can be in_progress/)
   })
 
+  it('explains how to recover when merge adds a second in_progress item', async () => {
+    const store = new TodoStore()
+    await callTool(store, {
+      todos: [
+        { id: 'old-task', content: 'finish old work', status: 'in_progress' },
+        { id: 'later', content: 'wait', status: 'pending' },
+      ],
+    })
+
+    const result = await callTool(store, {
+      merge: true,
+      todos: [
+        { id: 'new-task', content: 'start new work', status: 'in_progress' },
+      ],
+    })
+
+    expect(result.isError).toBe(true)
+    expect(result.output).toContain('Current in_progress item(s): old-task: finish old work')
+    expect(result.output).toContain('Recovery options:')
+    expect(result.output).toContain('merge=true')
+    expect(result.output).toContain('merge=false')
+  })
+
   it('returns isError on duplicate id', async () => {
     const store = new TodoStore()
     const result = await callTool(store, {
@@ -86,4 +109,3 @@ describe('createTodoTool', () => {
     expect(result.output).toMatch(/todos must be an array/)
   })
 })
-
