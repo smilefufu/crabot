@@ -314,7 +314,8 @@ export function buildMessagingTools(
   sandboxPathMappingsRef?: { current: PathMapping[] },
 ): MessagingTool[] {
   const { rpcClient, moduleId, getAdminPort, resolveChannelPort } = deps
-  const isDailyReflection = deps.getTaskContext?.()?.taskType === 'daily_reflection'
+  const taskCtx = deps.getTaskContext?.() ?? null
+  const isDailyReflection = taskCtx?.taskType === 'daily_reflection'
 
   // 解析飞书 channel port 的公共 helper（供 read_feishu_document / feishu_raw_get / feishu_download_file 共用）
   async function resolveFeishuChannelPort(args: Record<string, unknown>): Promise<
@@ -1274,6 +1275,8 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
 
   return isDailyReflection
     ? allTools.filter(t => DAILY_REFLECTION_ALLOWED_TOOLS.has(t.name))
+    : taskCtx?.triggerType === 'message'
+      ? allTools.filter(t => t.name !== 'send_master_private')
     : allTools
 }
 

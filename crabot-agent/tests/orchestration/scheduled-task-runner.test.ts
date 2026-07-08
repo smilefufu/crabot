@@ -7,6 +7,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
+import { AgentLoopSubstrate } from '../../src/orchestration/agent-loop-substrate.js'
 import { ScheduledTaskRunner } from '../../src/orchestration/scheduled-task-runner.js'
 import { MemoryWriter } from '../../src/orchestration/memory-writer.js'
 import type {
@@ -29,21 +30,25 @@ function makeWorkerContext(): WorkerAgentContext {
 }
 
 /** Common harness: 拦截 update_task_status RPC + 捕获 executeTaskFn 收到的 payload */
-function setupRunner() {
+function setupRunner(opts?: {
+  executeTaskFn?: ReturnType<typeof vi.fn>
+  memoryWriter?: Pick<MemoryWriter, 'writeTaskFinished' | 'quickCapture' | 'runMaintenance'>
+}) {
   const rpcCall = vi.fn().mockResolvedValue({ data: { status: 'ok' } })
   const rpcClient: any = { call: rpcCall }
-  const memoryWriter = new MemoryWriter(rpcClient, 'agent-1', () => 18000)
-  const executeTaskFn = vi.fn().mockResolvedValue({
+  const memoryWriter = opts?.memoryWriter ?? new MemoryWriter(rpcClient, 'agent-1', () => 18000)
+  const executeTaskFn = opts?.executeTaskFn ?? vi.fn().mockResolvedValue({
     task_id: 'task-x' as any,
     outcome: 'completed' as const,
   })
+  const substrate = new AgentLoopSubstrate(executeTaskFn as never)
 
   const runner = new ScheduledTaskRunner(
     rpcClient,
     'agent-1',
     memoryWriter,
     () => 18000,
-    executeTaskFn,
+    substrate,
   )
 
   return { runner, executeTaskFn, rpcCall }
@@ -241,5 +246,50 @@ describe('ScheduledTaskRunner — M3: resumeFrom 时跳过 planning/executing �
     const statuses = statusCalls.map((c: unknown[]) => (c[2] as { status?: string }).status)
     expect(statuses).toContain('planning')
     expect(statuses).toContain('executing')
+  })
+})
+
+describe('ScheduledTaskRunner — failed worker loop memory boundary', () => {
+  it('worker crash only marks scheduled task failed and does not write failure memory', async () => {
+    const executeTaskFn = vi.fn().mockRejectedValue(new Error('worker crashed'))
+    const memoryWriter = {
+      writeTaskFinished: vi.fn().mockResolvedValue(undefined),
+      quickCapture: vi.fn().mockResolvedValue(undefined),
+      runMaintenance: vi.fn().mockResolvedValue(undefined),
+    }
+    const { runner, rpcCall } = setupRunner({ executeTaskFn, memoryWriter })
+
+    runner.executeScheduledTaskInBackground(
+      {
+        id: 'task-crash',
+        title: '崩溃任务',
+        description: '会崩',
+        priority: 'normal',
+      },
+      makeWorkerContext(),
+    )
+
+    await waitForExecute(executeTaskFn)
+    for (let i = 0; i < 50; i++) {
+      const failedCall = rpcCall.mock.calls.find((c: unknown[]) => {
+        const body = c[2] as { task_id?: string; status?: string }
+        return c[1] === 'update_task_status' && body.task_id === 'task-crash' && body.status === 'failed'
+      })
+      if (failedCall) break
+      await new Promise(r => setTimeout(r, 10))
+    }
+
+    expect(rpcCall).toHaveBeenCalledWith(
+      18000,
+      'update_task_status',
+      expect.objectContaining({
+        task_id: 'task-crash',
+        status: 'failed',
+        error: 'worker crashed',
+      }),
+      'agent-1',
+    )
+    expect(memoryWriter.writeTaskFinished).not.toHaveBeenCalled()
+    expect(memoryWriter.quickCapture).not.toHaveBeenCalled()
   })
 })

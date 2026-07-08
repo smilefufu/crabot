@@ -1,6 +1,13 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-06 — LLM 流缺终态改为可重试协议错误
+> 最后更新：2026-07-08 — 修复 resume 执行入口语义污染
+
+## 2026-07-08 — 修复 resume 执行入口语义污染
+
+- 根因：`resume_task` / terminal supplement revive 复用了 `ScheduledTaskRunner.executeScheduledTaskInBackground`，该 runner 硬编码 `source.trigger_type='scheduled'`，导致 human message task 续跑后关闭 goal/end-turn delivery gate，空 `end_turn` 可直接完成。
+- 修复：新增通用 Agent Loop Substrate，scheduled / human resume 通过显式 source/profile 进入同一个 worker loop；`ScheduledTaskRunner` 只保留真实 scheduled 任务组装职责；resume 后台执行失败会 best-effort 标 Admin task failed；失败任务只保留 Admin result / trace / log，不再写短期或长期记忆。
+- 回归：human resume / terminal supplement revive 保留 `trigger_type='message'` 和 delivery epoch gate；scheduled resume 仍保持 scheduled silent policy；`send_master_private` 收紧为 scheduled/system 场景工具，human message task 不再暴露。
+- 验证：`crabot-agent` resume/scheduled、memory-writer、agent-handler、messaging focused vitest 与 `tsc --noEmit`。
 
 ## 2026-07-06 — LLM 流缺终态改为可重试协议错误
 

@@ -39,6 +39,7 @@ import { SessionManager } from './orchestration/session-manager.js'
 import { PermissionChecker } from './orchestration/permission-checker.js'
 import { WorkerSelector } from './orchestration/worker-selector.js'
 import { ContextAssembler } from './orchestration/context-assembler.js'
+import { AgentLoopSubstrate } from './orchestration/agent-loop-substrate.js'
 import { ScheduledTaskRunner } from './orchestration/scheduled-task-runner.js'
 import { MemoryWriter } from './orchestration/memory-writer.js'
 import { AttentionScheduler, type AttentionConfig, type BufferedMessage } from './orchestration/attention-scheduler.js'
@@ -96,6 +97,10 @@ function toToolPermissionConfig(
     : { mode: 'denyList' as const, toolNames: deniedTools }
 }
 
+function normalizeResumeTriggerType(triggerType: string | undefined): 'message' | 'scheduled' {
+  return triggerType === 'scheduled' ? 'scheduled' : 'message'
+}
+
 /**
  * Admin Web 对话的 master Friend 常量。channel_identities 不参与 admin chat 流程，
  * created_at / updated_at 用零值——master 没有真实账户创建时刻语义。
@@ -127,6 +132,7 @@ export class UnifiedAgent extends ModuleBase {
   private permissionChecker: PermissionChecker
   private workerSelector: WorkerSelector
   private contextAssembler: ContextAssembler
+  private agentLoopSubstrate: AgentLoopSubstrate
   private scheduledTaskRunner: ScheduledTaskRunner
   private memoryWriter: MemoryWriter
   private attentionScheduler: AttentionScheduler
@@ -255,12 +261,13 @@ export class UnifiedAgent extends ModuleBase {
       config.module_id,
       async () => await this.getMemoryPort()
     )
+    this.agentLoopSubstrate = new AgentLoopSubstrate((params) => this.handleExecuteTask(params))
     this.scheduledTaskRunner = new ScheduledTaskRunner(
       this.rpcClient,
       config.module_id,
       this.memoryWriter,
       async () => await this.getAdminPort(),
-      (params) => this.handleExecuteTask(params),
+      this.agentLoopSubstrate,
     )
 
     // 初始化群聊注意力调度（从 extra 读取配置，fallback 到协议默认值）
@@ -349,6 +356,7 @@ export class UnifiedAgent extends ModuleBase {
         this.agentHandler = this.createWorkerHandler(
           this.sdkEnvWorker, workerPersonality,
           createMcpConfigs, config.builtin_tool_config, config.skills)
+        this.agentLoopSubstrate.setWorkerHandler(this.agentHandler)
         this.scheduledTaskRunner.setWorkerHandler(this.agentHandler)
         // 让 ContextAssembler 同进程同步读取 worker 实时快照（用于 Front 汇报进度）
         this.contextAssembler.setLiveSnapshotProvider(
@@ -2021,7 +2029,7 @@ export class UnifiedAgent extends ModuleBase {
               channel_id?: string
               session_id?: string
               friend_id?: string
-              trigger_type: string
+              trigger_type?: string
             }
           }
         }
@@ -2055,25 +2063,49 @@ export class UnifiedAgent extends ModuleBase {
         ...(wc?.scene_profile ? { scene_profile: wc.scene_profile } : {}),
       }
 
-      this.scheduledTaskRunner.executeScheduledTaskInBackground(
-        {
-          id: task.id,
-          title: task.title,
+      const triggerType = normalizeResumeTriggerType(task.source?.trigger_type)
+      const taskSource = {
+        ...(task.source ?? {}),
+        trigger_type: triggerType,
+      }
+      const taskPayload: ExecuteTaskParams & { related_task_id?: string } = {
+        task: {
+          task_id: task.id,
+          task_title: task.title,
           priority: task.priority,
           plan: task.plan,
+          source: taskSource,
         },
-        resumedContext,
-        {
-          resumeFrom: {
-            initialMessages: [...entry.checkpoint.messages],
-            todoItems: entry.checkpoint.worker_state.todo_items,
-            goalRevisionUnlocked: entry.checkpoint.worker_state.goal_revision_unlocked,
-            cwd: entry.checkpoint.worker_state.cwd,
-            humanInputEpoch: entry.checkpoint.worker_state.human_input_epoch,
-            lastDeliveredInfoEpoch: entry.checkpoint.worker_state.last_delivered_info_epoch,
-            ...(mode === 'terminal_supplement' ? { resumeTraceId: entry.traceId } : {}),
-            ...(params.terminalSupplementText !== undefined ? { terminalSupplementText: params.terminalSupplementText } : {}),
-          },
+        context: resumedContext,
+        related_task_id: task.id,
+        resumeFrom: {
+          initialMessages: [...entry.checkpoint.messages],
+          todoItems: entry.checkpoint.worker_state.todo_items,
+          goalRevisionUnlocked: entry.checkpoint.worker_state.goal_revision_unlocked,
+          cwd: entry.checkpoint.worker_state.cwd,
+          humanInputEpoch: entry.checkpoint.worker_state.human_input_epoch,
+          lastDeliveredInfoEpoch: entry.checkpoint.worker_state.last_delivered_info_epoch,
+          ...(mode === 'terminal_supplement' ? { resumeTraceId: entry.traceId } : {}),
+          ...(params.terminalSupplementText !== undefined ? { terminalSupplementText: params.terminalSupplementText } : {}),
+        },
+      }
+
+      this.agentLoopSubstrate.executeAgentLoopInBackground(
+        taskPayload,
+        `resume task ${task.id}`,
+        async (error) => {
+          const msg = error instanceof Error ? error.message : String(error)
+          try {
+            await this.rpcClient.call(
+              adminPort,
+              'update_task_status',
+              { task_id: task.id, status: 'failed', error: msg },
+              this.config.moduleId,
+            )
+          } catch (updateError) {
+            const updateMsg = updateError instanceof Error ? updateError.message : String(updateError)
+            console.error(`[${this.config.moduleId}] Failed to mark resumed task ${task.id} failed: ${updateMsg}`)
+          }
         },
       )
       // 不再 consumeResumableCheckpoint（那会 finalize 旧 trace + 另起新 trace = 一个 task 两条
@@ -2452,6 +2484,7 @@ export class UnifiedAgent extends ModuleBase {
           this.agentHandler = this.createWorkerHandler(
             newWorkerSdkEnv, workerPersonality,
             createMcpConfigs, this.agentConfig?.builtin_tool_config, this.agentConfig?.skills)
+          this.agentLoopSubstrate.setWorkerHandler(this.agentHandler)
           this.scheduledTaskRunner.setWorkerHandler(this.agentHandler)
           console.log(`[${this.config.moduleId}] Worker Agent SDK env created from config push`)
         }
