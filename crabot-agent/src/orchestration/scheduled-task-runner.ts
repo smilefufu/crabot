@@ -175,7 +175,8 @@ export class ScheduledTaskRunner {
           ...(opts?.resumeFrom ? { resumeFrom: opts.resumeFrom } : {}),
         })
       } catch (error) {
-        // worker handler 自身崩溃（throw）——兜底：标失败 + 写失败记忆
+        // worker handler 自身崩溃（throw）——兜底标失败；失败详情留在 task result / trace / log，
+        // 不写跨 task 记忆，避免把临时错误污染后续上下文。
         const msg = error instanceof Error ? error.message : String(error)
         console.error(`[ScheduledTaskRunner] Background scheduled task ${task.id} failed: ${msg}`)
 
@@ -188,19 +189,6 @@ export class ScheduledTaskRunner {
           )
         } catch { /* best effort */ }
 
-        this.finalizeTaskMemory({
-          taskId: task.id,
-          taskTitle: task.title,
-          outcome: 'failed',
-          outcomeBrief: msg.slice(0, 200),
-          processHighlights: [],
-          friendName: 'system',
-          friendId: '',
-          channelId: '',
-          sessionId: '',
-          visibility: 'internal',
-          scopes: [],
-        })
       }
     }
 
@@ -209,60 +197,4 @@ export class ScheduledTaskRunner {
     })
   }
 
-  /**
-   * worker handler 自身崩溃时的失败记忆兜底写入（短期 + 长期）。两者均 fire-and-forget。
-   *
-   * 成功路径的记忆已由 agent-handler.finalizeMemoryWrite 内部写入，dispatcher 不再重复。
-   */
-  private finalizeTaskMemory(args: {
-    taskId: string
-    taskTitle: string
-    outcome: 'completed' | 'failed'
-    outcomeBrief: string
-    processHighlights: readonly string[]
-    friendName: string
-    friendId: string
-    channelId: string
-    sessionId: string
-    visibility: 'private' | 'internal' | 'public'
-    scopes: string[]
-    traceId?: string
-  }): void {
-    const {
-      taskId, taskTitle, outcome, outcomeBrief, processHighlights,
-      friendName, friendId, channelId, sessionId, visibility, scopes, traceId,
-    } = args
-
-    this.memoryWriter.writeTaskFinished({
-      task_id: taskId,
-      task_title: taskTitle,
-      outcome,
-      outcome_brief: outcomeBrief,
-      process_highlights: [...processHighlights],
-      friend_name: friendName,
-      friend_id: friendId,
-      channel_id: channelId,
-      session_id: sessionId,
-      visibility,
-      scopes,
-      ...(traceId ? { trace_id: traceId } : {}),
-    }).catch(() => {})
-
-    const briefSrc = `${taskTitle} → ${outcomeBrief}`.slice(0, 80)
-    const outcomeLabel = outcome === 'completed' ? '完成' : '失败'
-    this.memoryWriter.quickCapture({
-      type: 'lesson',
-      brief: briefSrc,
-      content: `任务 ${taskId}（${taskTitle}）${outcomeLabel}：${outcomeBrief}`,
-      source_ref: { type: 'conversation', task_id: taskId, channel_id: channelId, session_id: sessionId },
-      entities: [],
-      tags: [`task_outcome:${outcome}`],
-      importance_factors: {
-        proximity: 0.6,
-        surprisal: outcome === 'failed' ? 0.8 : 0.4,
-        entity_priority: 0.5,
-        unambiguity: 0.6,
-      },
-    }).catch(() => undefined)
-  }
 }

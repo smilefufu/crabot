@@ -59,10 +59,11 @@ export class MemoryWriter {
     private getMemoryPort: () => number | Promise<number>
   ) {}
 
-  /** Task 完成/失败事件 */
+  /** Task 成功完成事件；失败任务只保留在 Admin task result / trace，不写跨 task 记忆。 */
   async writeTaskFinished(params: WriteTaskFinishedParams): Promise<void> {
-    const outcomeLabel = params.outcome === 'completed' ? '完成' : '失败'
-    const head = `任务 ${params.task_id}（${params.task_title}）${outcomeLabel}：${params.outcome_brief}`
+    if (params.outcome !== 'completed') return
+
+    const head = `任务 ${params.task_id}（${params.task_title}）完成：${params.outcome_brief}`
 
     const lines: string[] = [head]
     if (params.process_highlights.length > 0) {

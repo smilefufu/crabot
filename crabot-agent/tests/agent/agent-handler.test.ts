@@ -28,7 +28,7 @@ vi.mock('../../src/engine/index.js', async (importOriginal) => {
 import { runEngine } from '../../src/engine/index.js'
 const mockRunEngine = vi.mocked(runEngine)
 
-function makeHandler() {
+function makeHandler(options?: ConstructorParameters<typeof AgentHandler>[2]) {
   const sdkEnv = {
     modelId: 'test-model',
     format: 'anthropic' as const,
@@ -40,7 +40,7 @@ function makeHandler() {
   const config = {
     systemPrompt: 'You are a helpful worker.',
   }
-  return new AgentHandler(sdkEnv, config)
+  return new AgentHandler(sdkEnv, config, options)
 }
 
 function makeMessagingHandler(rpcCall: ReturnType<typeof vi.fn>) {
@@ -158,6 +158,49 @@ describe('AgentHandler', () => {
 
       expect(result.task_id).toBe('task_1')
       expect(result.outcome).toBe('failed')
+    })
+
+    it('does not write task memory for failed engine outcomes', async () => {
+      mockRunEngine.mockResolvedValue(makeEngineResult({
+        outcome: 'failed',
+        finalText: 'API error',
+        error: 'API error',
+      }))
+      const rpcCall = vi.fn().mockResolvedValue({ task: {} })
+      const memoryWriter = {
+        writeTaskFinished: vi.fn().mockResolvedValue(undefined),
+        quickCapture: vi.fn().mockResolvedValue(undefined),
+      }
+
+      const handler = makeHandler({
+        deps: {
+          rpcClient: { call: rpcCall } as never,
+          moduleId: 'agent-test',
+          getAdminPort: async () => 3001,
+        },
+        memoryWriter: memoryWriter as never,
+      })
+
+      const result = await handler.executeTask({
+        task: makeTask({ task_id: 'task_1' }),
+        context: makeContext(),
+      })
+
+      expect(result.outcome).toBe('failed')
+      expect(rpcCall).toHaveBeenCalledWith(
+        3001,
+        'update_task_status',
+        expect.objectContaining({ task_id: 'task_1', status: 'failed' }),
+        'agent-test',
+      )
+      expect(rpcCall).toHaveBeenCalledWith(
+        3001,
+        'update_task_outcome',
+        expect.objectContaining({ task_id: 'task_1', outcome_brief: 'API error' }),
+        'agent-test',
+      )
+      expect(memoryWriter.writeTaskFinished).not.toHaveBeenCalled()
+      expect(memoryWriter.quickCapture).not.toHaveBeenCalled()
     })
 
     it('should call runEngine with correct parameters', async () => {

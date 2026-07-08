@@ -2648,8 +2648,9 @@ export class AgentHandler {
   }
 
   /**
-   * 把 outcome_brief / process_highlights 同时落到 admin（update_task_outcome）和短期/长期记忆。
-   * RPC 失败 best-effort（log + 继续）；memory write 在 finalizeMemoryWrite 里也是 fire-and-forget。
+   * 把 outcome_brief / process_highlights 落到 admin（update_task_outcome）。
+   * 只有 completed 任务写短期/长期记忆；failed/max_turns/aborted 只保留在 task result / trace，
+   * 避免把临时错误或阻塞叙述污染后续跨 task 上下文。
    */
   private async writeOutcome(
     taskId: TaskId,
@@ -2664,7 +2665,9 @@ export class AgentHandler {
       outcome_brief: outcomeBrief,
       process_highlights: processHighlights,
     }, 'update_task_outcome')
-    this.finalizeMemoryWrite(taskId, { outcome, outcome_brief: outcomeBrief, process_highlights: processHighlights }, context)
+    if (outcome === 'completed') {
+      this.finalizeMemoryWrite(taskId, { outcome, outcome_brief: outcomeBrief, process_highlights: processHighlights }, context)
+    }
   }
 
   /** finalize 阶段调 admin RPC 的 best-effort 包装：失败只 log 不抛，让后续步骤继续跑。 */
@@ -2749,15 +2752,13 @@ export class AgentHandler {
   }
 
   /**
-   * 任务结束（成功 / 失败）后写短期记忆 + 长期记忆候选。
-   * - completed：reflection 来自 reflectFn 的真实总结
-   * - failed：reflection 来自 engine.error 截断兜底
+   * 任务成功完成后写短期记忆 + 长期记忆候选。
    * 两个写入均 fire-and-forget：失败只打日志，不影响 task 状态。
    */
   private finalizeMemoryWrite(
     taskId: TaskId,
     reflection: {
-      outcome: 'completed' | 'failed'
+      outcome: 'completed'
       outcome_brief: string
       process_highlights: readonly string[]
     },
@@ -2774,8 +2775,6 @@ export class AgentHandler {
     const scopes = context.memory_permissions?.write_scopes ?? []
 
     const taskTitle = this.activeTasks.get(taskId)?.title ?? taskId
-    const outcomeLabel = reflection.outcome === 'completed' ? '完成' : '失败'
-
     this.memoryWriter.writeTaskFinished({
       task_id: taskId,
       task_title: taskTitle,
@@ -2795,13 +2794,13 @@ export class AgentHandler {
     this.memoryWriter.quickCapture({
       type: 'lesson',
       brief: `${taskTitle} → ${reflection.outcome_brief}`.slice(0, 80),
-      content: `任务 ${taskId}（${taskTitle}）${outcomeLabel}：${reflection.outcome_brief}`,
+      content: `任务 ${taskId}（${taskTitle}）完成：${reflection.outcome_brief}`,
       source_ref: { type: 'conversation', task_id: taskId, channel_id: channelId, session_id: sessionId },
       entities: [],
       tags: [`task_outcome:${reflection.outcome}`],
       importance_factors: {
         proximity: 0.6,
-        surprisal: reflection.outcome === 'failed' ? 0.8 : 0.4,
+        surprisal: 0.4,
         entity_priority: 0.5,
         unambiguity: 0.6,
       },

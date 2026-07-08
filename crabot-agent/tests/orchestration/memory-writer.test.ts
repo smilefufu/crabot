@@ -198,7 +198,7 @@ describe('writeTaskFinished — Phase 2 structured content', () => {
     expect(content).toMatch(/- GitHub API 403/)
   })
 
-  it('outcome failed 时 content 用"失败"措辞', async () => {
+  it('outcome failed 时不写 task_finished 记忆', async () => {
     const calls: any[] = []
     const rpcClient = { call: vi.fn((_p, _m, payload) => { calls.push(payload); return Promise.resolve({}) }) } as any
     const writer = new MemoryWriter(rpcClient, 'agent-test', () => 19002)
@@ -217,6 +217,6 @@ describe('writeTaskFinished — Phase 2 structured content', () => {
       scopes: [],
     })
 
-    expect(calls[0].content).toMatch(/^任务 t-3（失败任务）失败：API 限流/)
+    expect(calls).toHaveLength(0)
   })
 })
