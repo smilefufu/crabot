@@ -31,6 +31,7 @@ const BUILTIN_MODULE_PATHS: readonly string[] = [
   '../crabot-channel-wechat',
   '../crabot-channel-telegram',
   '../crabot-channel-feishu',
+  '../crabot-channel-dingtalk',
 ]
 
 /**
