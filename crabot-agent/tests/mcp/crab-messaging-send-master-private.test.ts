@@ -71,12 +71,26 @@ describe('daily_reflection task messaging tool whitelist', () => {
 
     expect(findTool(tools, 'send_message')).toBeDefined()
     expect(findTool(tools, 'send_private_message')).toBeDefined()
+    expect(findTool(tools, 'send_master_private')).toBeDefined()
     expect(findTool(tools, 'lookup_friend')).toBeDefined()
     expect(findTool(tools, 'list_groups')).toBeDefined()
     expect(findTool(tools, 'list_sessions')).toBeDefined()
   })
 
-  it('message 触发的任务保留全部工具', () => {
+  it('无 task context 的非 worker/front 场景不被误过滤', () => {
+    const tools = buildMessagingTools({
+      rpcClient: { call: vi.fn() } as never,
+      moduleId: 'front',
+      getAdminPort: async () => 19001,
+      resolveChannelPort: async () => 19009,
+    })
+
+    expect(findTool(tools, 'send_master_private')).toBeDefined()
+    expect(findTool(tools, 'send_message')).toBeDefined()
+    expect(findTool(tools, 'send_private_message')).toBeDefined()
+  })
+
+  it('message 触发的任务不暴露 send_master_private', () => {
     const tools = buildMessagingTools({
       rpcClient: { call: vi.fn() } as never,
       moduleId: 'worker',
@@ -92,7 +106,7 @@ describe('daily_reflection task messaging tool whitelist', () => {
 
     expect(findTool(tools, 'send_message')).toBeDefined()
     expect(findTool(tools, 'send_private_message')).toBeDefined()
-    expect(findTool(tools, 'send_master_private')).toBeDefined()
+    expect(findTool(tools, 'send_master_private')).toBeUndefined()
     expect(findTool(tools, 'lookup_friend')).toBeDefined()
     expect(findTool(tools, 'list_sessions')).toBeDefined()
   })

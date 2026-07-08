@@ -620,7 +620,7 @@ describe('AgentHandler', () => {
       })
 
       await handler.executeTask({
-        task: makeTask({ source: { trigger_type: 'message' } as never }),
+        task: makeTask({ source: { trigger_type: 'message' } }),
         context: {
           ...makeContext(),
           task_origin: {
@@ -688,7 +688,7 @@ describe('AgentHandler', () => {
       } as never
 
       const result = await handler.executeTask({
-        task: makeTask({ source: { trigger_type: 'message' } as never }),
+        task: makeTask({ source: { trigger_type: 'message' } }),
         context: makeContext(),
       }, traceCallback)
 
@@ -727,7 +727,7 @@ describe('AgentHandler', () => {
       const handler = makeMessagingHandler(rpcCall)
 
       await handler.executeTask({
-        task: makeTask({ source: { trigger_type: 'message' } as never }),
+        task: makeTask({ source: { trigger_type: 'message' } }),
         context: {
           ...makeContext(),
           task_origin: {
@@ -1041,6 +1041,99 @@ describe('AgentHandler', () => {
       const callArgs = mockRunEngine.mock.calls[0][0]
       const gateResult = await callArgs.options.endTurnGate()
       expect(gateResult).toBe(GOAL_MODE_NO_DELIVERY_PROMPT)
+    })
+
+    it('resumed message task with goal keeps human no-delivery gate active', async () => {
+      mockRunEngine.mockImplementation(async () => {
+        await new Promise(resolve => setTimeout(resolve, 20))
+        return makeEngineResult()
+      })
+      const rpcCall = vi.fn().mockResolvedValue({
+        task: { id: 'task_1', goal: { objective: 'finish current user request' } },
+      })
+      const handler = new AgentHandler(
+        {
+          modelId: 'test-model',
+          format: 'anthropic' as const,
+          env: { ANTHROPIC_BASE_URL: 'http://localhost:4000', ANTHROPIC_API_KEY: 'test-key' },
+        },
+        { systemPrompt: 'You are a helpful worker.' },
+        {
+          deps: {
+            rpcClient: { call: rpcCall } as never,
+            moduleId: 'agent-test',
+            resolveChannelPort: async () => 3003,
+            getAdminPort: async () => 3001,
+            getMemoryPort: async () => 3002,
+          },
+        },
+      )
+      await handler.executeTask({
+        task: makeTask({
+          source: { trigger_type: 'message' },
+        }),
+        context: makeContext(),
+        resumeFrom: {
+          initialMessages: [{ id: 'm1', role: 'user', content: 'resume me', timestamp: 1 }] as never,
+          todoItems: [],
+          humanInputEpoch: 31,
+          lastDeliveredInfoEpoch: 23,
+        },
+      })
+
+      const callArgs = mockRunEngine.mock.calls[0][0]
+      expect(callArgs.options.suppressForcedSummary()).toBe(false)
+      expect(callArgs.options.endTurnGate).toBeDefined()
+      const gateResult = await callArgs.options.endTurnGate()
+      expect(gateResult).toBe(GOAL_MODE_NO_DELIVERY_PROMPT)
+      handler.dispose()
+    })
+
+    it('resumed scheduled task suppresses forced summary and skips human no-delivery gate', async () => {
+      mockRunEngine.mockImplementation(async () => {
+        await new Promise(resolve => setTimeout(resolve, 20))
+        return makeEngineResult()
+      })
+      const rpcCall = vi.fn().mockResolvedValue({
+        task: { id: 'task_1', goal: { objective: 'finish scheduled task' } },
+      })
+      const handler = new AgentHandler(
+        {
+          modelId: 'test-model',
+          format: 'anthropic' as const,
+          env: { ANTHROPIC_BASE_URL: 'http://localhost:4000', ANTHROPIC_API_KEY: 'test-key' },
+        },
+        { systemPrompt: 'You are a helpful worker.' },
+        {
+          deps: {
+            rpcClient: { call: rpcCall } as never,
+            moduleId: 'agent-test',
+            resolveChannelPort: async () => 3003,
+            getAdminPort: async () => 3001,
+            getMemoryPort: async () => 3002,
+          },
+        },
+      )
+      await handler.executeTask({
+        task: makeTask({
+          source: { trigger_type: 'scheduled' },
+        }),
+        context: makeContext(),
+        resumeFrom: {
+          initialMessages: [{ id: 'm1', role: 'user', content: 'resume me', timestamp: 1 }] as never,
+          todoItems: [],
+          humanInputEpoch: 31,
+          lastDeliveredInfoEpoch: 23,
+        },
+      })
+
+      const callArgs = mockRunEngine.mock.calls[0][0]
+      expect(callArgs.options.suppressForcedSummary()).toBe(true)
+      if (callArgs.options.endTurnGate) {
+        const gateResult = await callArgs.options.endTurnGate()
+        expect(gateResult).toBeNull()
+      }
+      handler.dispose()
     })
   })
 
