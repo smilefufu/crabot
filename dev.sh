@@ -6,6 +6,7 @@
 #       ./dev.sh build     仅构建（含 Admin Web 前端 dist/web/），不启动
 
 set -e
+set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -39,6 +40,18 @@ log_info()  { echo -e "${GREEN}[dev]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[dev]${NC} $1"; }
 log_error() { echo -e "${RED}[dev]${NC} $1"; }
 log_dim()   { echo -e "${DIM}$1${NC}"; }
+
+cleanup_placeholder_pnpm_workspaces() {
+  local file rel
+  for file in "$SCRIPT_DIR"/crabot-*/pnpm-workspace.yaml; do
+    [ -f "$file" ] || continue
+    if grep -q '^allowBuilds:' "$file" && grep -q 'set this to true or false' "$file"; then
+      rel="${file#$SCRIPT_DIR/}"
+      log_warn "移除 pnpm approve-builds 占位文件: $rel"
+      rm -f "$file"
+    fi
+  done
+}
 
 # ── 环境变量 ──────────────────────────────────────────────
 
@@ -108,6 +121,8 @@ needs_sync() {
 }
 
 sync_node_deps() {
+  cleanup_placeholder_pnpm_workspaces
+
   if ! command -v corepack &>/dev/null; then
     log_warn "corepack 未找到（需要 Node 16.13+），跳过依赖同步"
     log_dim "  首次安装请运行: ./install.sh --from-source"
@@ -199,6 +214,8 @@ sync_shared_links() {
 }
 
 build_all() {
+  cleanup_placeholder_pnpm_workspaces
+
   log_info "构建 TypeScript 模块..."
 
   # crabot-shared 必须先编译
