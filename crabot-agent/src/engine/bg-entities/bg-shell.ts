@@ -389,20 +389,37 @@ export async function runShellWithGrace(opts: RunShellWithGraceOpts): Promise<Ru
     return { kind: 'spawn_error', message: err instanceof Error ? err.message : String(err) }
   }
 
-  const child = spawnBash(
-    wrapCommandWithInlineStreamCapture(
-      opts.command,
-      exitcodeFile,
-      stdoutFile,
-      stderrFile,
-      stdoutFifo,
-      stderrFifo,
-    ),
-    {
-      stdio: ['ignore', logFd.fd, logFd.fd],
-      cwd: opts.cwd,
-    },
-  )
+  let child: ChildProcess
+  try {
+    child = spawnBash(
+      wrapCommandWithInlineStreamCapture(
+        opts.command,
+        exitcodeFile,
+        stdoutFile,
+        stderrFile,
+        stdoutFifo,
+        stderrFifo,
+      ),
+      {
+        stdio: ['ignore', logFd.fd, logFd.fd],
+        cwd: opts.cwd,
+      },
+    )
+  } catch (err) {
+    cleanupListeners()
+    try {
+      await logFd.close()
+    } catch {
+      /* best effort */
+    }
+    await unlinkQuiet(logFile)
+    await unlinkQuiet(exitcodeFile)
+    await unlinkQuiet(stdoutFile)
+    await unlinkQuiet(stderrFile)
+    await unlinkQuiet(stdoutFifo)
+    await unlinkQuiet(stderrFifo)
+    return { kind: 'spawn_error', message: err instanceof Error ? err.message : String(err) }
+  }
 
   // 'error' 必须在任何 await 前挂（spawn 失败异步派发，漏挂 → uncaughtException 杀进程）。
   child.on('error', (err) => {

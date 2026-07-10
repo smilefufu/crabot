@@ -1,11 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { mkdtempSync, rmSync, readFileSync, existsSync, readdirSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { BgEntityRegistry } from '../../../src/engine/bg-entities/registry'
 import { spawnPersistentShell, readProcStartTime, runShellWithGrace } from '../../../src/engine/bg-entities/bg-shell'
 import type { BgShellRegistryRecord } from '../../../src/engine/bg-entities/types'
+import * as resolveBashPathModule from '../../../src/utils/resolve-bash-path'
 
 // ---------------------------------------------------------------------------
 // readProcStartTime：必须返回真实的进程启动时间（稳定、跨重启可比对），而非 wall-clock now。
@@ -226,6 +227,32 @@ describe('spawnPersistentShell', () => {
 })
 
 describe('runShellWithGrace', () => {
+  it('returns spawn_error and removes temp log artifacts when bash resolution throws before child spawn', async () => {
+    const resolveBashPathSpy = vi.spyOn(resolveBashPathModule, 'resolveBashPath').mockReturnValue(null)
+
+    try {
+      await expect(
+        runShellWithGrace({
+          command: 'echo should_not_run',
+          cwd: process.cwd(),
+          owner: { friend_id: 'user-A' },
+          spawned_by_task_id: 'task-inline-spawn-error',
+          registry,
+          gracePeriodMs: 1_000,
+        }),
+      ).resolves.toMatchObject({
+        kind: 'spawn_error',
+        message: resolveBashPathModule.BASH_NOT_FOUND_MESSAGE,
+      })
+
+      const logsDir = path.join(tmpDir, 'agent', 'bg-entities', 'logs')
+      expect(existsSync(logsDir)).toBe(true)
+      expect(readdirSync(logsDir)).toEqual([])
+    } finally {
+      resolveBashPathSpy.mockRestore()
+    }
+  })
+
   it('inline capture waits for late inherited stdout/stderr writers before cleanup', async () => {
     const stdoutChunk = 'O'.repeat(200_000)
     const stderrChunk = 'E'.repeat(200_000)
