@@ -267,7 +267,8 @@ const WORKFLOW_PLANNING_AND_EXECUTION = `[规划与执行]
                                          → 修完后重新跑对应 split reviewers
       · 仅 code_quality_reviewer 的 minor / nit
                                       → 视情况自行处理，默认不阻塞
-      · 缺少固定尾段或 verdict / severity 字段
+      · split reviewer 缺少 STATUS，或 spec 缺少 MISSING / EXTRA，
+        或 quality 缺少 CRITICAL / IMPORTANT / NIT
                                       → 作为 subagent contract issue，补上下文后重派或升级
       （同一 task review-fix 循环 ≥3 次仍未通过 → send_message(intent="ask_human")）
 
