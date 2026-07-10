@@ -38,6 +38,11 @@ interface TmpPageEvent {
   readonly trusted: false
 }
 
+interface TmpPageReadEventsResult {
+  readonly events: TmpPageEvent[]
+  readonly has_more: boolean
+}
+
 const PAGE_ID_RE = /^[A-Za-z0-9_-]{16,}$/
 const DEFAULT_TTL_SECONDS = 24 * 60 * 60
 const MIN_TTL_SECONDS = 60
@@ -149,8 +154,8 @@ function fitEventForOutput(event: TmpPageEvent): TmpPageEvent {
   return fitted
 }
 
-function readEventsOutputBytes(page_id: string, events: TmpPageEvent[], next_after_event_id: number): number {
-  return byteLength(JSON.stringify({ page_id, events, next_after_event_id }))
+function readEventsOutputBytes(page_id: string, events: TmpPageEvent[], next_after_event_id: number, has_more: boolean): number {
+  return byteLength(JSON.stringify({ page_id, events, next_after_event_id, has_more }))
 }
 
 function defaultServerScriptPath(): string {
@@ -345,7 +350,9 @@ export function createTmpPageTools(deps: TmpPageToolsDeps): ToolDefinition[] {
         if (input.html === undefined && input.title === undefined && input.ttl_seconds === undefined) {
           return fail('TMP_PAGE_EMPTY_UPDATE')
         }
-        if (input.html !== undefined && typeof input.html !== 'string') return fail('TMP_PAGE_INVALID_HTML', { page_id })
+        if (input.html !== undefined && (typeof input.html !== 'string' || input.html.trim() === '')) {
+          return fail('TMP_PAGE_INVALID_HTML', { page_id })
+        }
         if (input.title !== undefined && (typeof input.title !== 'string' || input.title.trim() === '')) {
           return fail('TMP_PAGE_INVALID_TITLE', { page_id })
         }
@@ -407,10 +414,10 @@ export function createTmpPageTools(deps: TmpPageToolsDeps): ToolDefinition[] {
           return fail('TMP_PAGE_INVALID_LIMIT', { page_id })
         }
         const limit = Math.min(Math.max(typeof input.limit === 'number' ? Math.trunc(input.limit) : 50, 1), 200)
-        const events = await readEvents(path.join(dir, 'events.jsonl'), page_id, after, limit)
+        const { events, has_more } = await readEvents(path.join(dir, 'events.jsonl'), page_id, after, limit)
         const next_after_event_id = events.length > 0 ? events[events.length - 1].event_id : after
 
-        return ok({ page_id, events, next_after_event_id })
+        return ok({ page_id, events, next_after_event_id, has_more })
       },
     },
     {
@@ -480,10 +487,11 @@ export function createTmpPageTools(deps: TmpPageToolsDeps): ToolDefinition[] {
   ]
 }
 
-async function readEvents(filePath: string, page_id: string, after: number, limit: number): Promise<TmpPageEvent[]> {
-  if (!existsSync(filePath)) return []
+async function readEvents(filePath: string, page_id: string, after: number, limit: number): Promise<TmpPageReadEventsResult> {
+  if (!existsSync(filePath)) return { events: [], has_more: false }
 
   const events: TmpPageEvent[] = []
+  let has_more = false
   let event_id = 0
   const rl = createInterface({
     input: createReadStream(filePath, { encoding: 'utf8' }),
@@ -493,22 +501,26 @@ async function readEvents(filePath: string, page_id: string, after: number, limi
   for await (const line of rl) {
     event_id += 1
     if (event_id <= after) continue
+    if (events.length >= limit) {
+      has_more = true
+      break
+    }
 
     const event = fitEventForOutput(eventFromLine(line, event_id))
     const candidate = [...events, event]
     if (
       events.length > 0
-      && readEventsOutputBytes(page_id, candidate, event.event_id) > MAX_READ_EVENTS_OUTPUT_BYTES
+      && readEventsOutputBytes(page_id, candidate, event.event_id, true) > MAX_READ_EVENTS_OUTPUT_BYTES
     ) {
+      has_more = true
       break
     }
 
     events.push(event)
-    if (events.length >= limit) break
   }
 
   rl.close()
-  return events
+  return { events, has_more }
 }
 
 function eventFromLine(line: string, event_id: number): TmpPageEvent {

@@ -263,6 +263,17 @@ describe('tmp-page tools', () => {
       page_id: '00112233445566778899aabbccddeeff',
     })
 
+    const blankHtml = await callTool('tmp_page_update', {
+      page_id: '00112233445566778899aabbccddeeff',
+      html: '',
+    })
+    expect(blankHtml.isError).toBe(true)
+    expect(blankHtml.json).toEqual({
+      success: false,
+      error_code: 'TMP_PAGE_INVALID_HTML',
+      page_id: '00112233445566778899aabbccddeeff',
+    })
+
     const pageDir = path.join(currentDataDir, 'tmp-pages', '00112233445566778899aabbccddeeff')
     const meta = JSON.parse(await readFile(path.join(pageDir, 'meta.json'), 'utf8'))
     expect(meta.title).toBe('Initial')
@@ -295,17 +306,41 @@ describe('tmp-page tools', () => {
       { event_id: 4, at: '2026-07-10T00:02:00.000Z', data: null, trusted: false },
     ])
     expect(result.json.next_after_event_id).toBe(4)
+    expect(result.json.has_more).toBe(false)
     expect(result.output).not.toContain('events.jsonl')
   })
 
-  it('keeps large anonymous event output as complete JSON under the orchestration cap', async () => {
+  it('marks read_events as has_more when limit leaves unread events', async () => {
     currentDataDir = await mkdtemp(path.join(tmpdir(), 'tmp-page-tools-'))
     await callTool('tmp_page_create', { title: 'Feedback', html: '<button>ok</button>' })
     const pageDir = path.join(currentDataDir, 'tmp-pages', '00112233445566778899aabbccddeeff')
-    const bigPayload = 'x'.repeat(60_000)
     await writeFile(
       path.join(pageDir, 'events.jsonl'),
-      Array.from({ length: 5 }, (_, i) => JSON.stringify({
+      [
+        JSON.stringify({ at: '2026-07-10T00:01:00.000Z', data: { choice: 'a' } }),
+        JSON.stringify({ at: '2026-07-10T00:02:00.000Z', data: { choice: 'b' } }),
+      ].join('\n') + '\n',
+    )
+
+    const result = await callTool('tmp_page_read_events', {
+      page_id: '00112233445566778899aabbccddeeff',
+      limit: 1,
+    })
+
+    expect(result.isError).toBe(false)
+    expect(result.json.events).toHaveLength(1)
+    expect(result.json.next_after_event_id).toBe(1)
+    expect(result.json.has_more).toBe(true)
+  })
+
+  it('marks read_events as has_more when the orchestration output cap leaves unread events', async () => {
+    currentDataDir = await mkdtemp(path.join(tmpdir(), 'tmp-page-tools-'))
+    await callTool('tmp_page_create', { title: 'Feedback', html: '<button>ok</button>' })
+    const pageDir = path.join(currentDataDir, 'tmp-pages', '00112233445566778899aabbccddeeff')
+    const bigPayload = 'x'.repeat(35_000)
+    await writeFile(
+      path.join(pageDir, 'events.jsonl'),
+      Array.from({ length: 8 }, (_, i) => JSON.stringify({
         at: `2026-07-10T00:0${i}:00.000Z`,
         data: { payload: bigPayload },
       })).join('\n') + '\n',
@@ -318,16 +353,12 @@ describe('tmp-page tools', () => {
 
     expect(result.isError).toBe(false)
     expect(Buffer.byteLength(result.output, 'utf8')).toBeLessThan(200_000)
-    expect(result.json.next_after_event_id).toBe(5)
-    expect(result.json.events).toHaveLength(5)
+    expect(result.json.has_more).toBe(true)
+    expect(result.json.next_after_event_id).toBeLessThan(8)
     expect(result.json.events).toEqual(result.json.events.map((event: any, index: number) => ({
       event_id: index + 1,
       at: `2026-07-10T00:0${index}:00.000Z`,
-      data: {
-        truncated: true,
-        original_type: 'object',
-        preview: expect.any(String),
-      },
+      data: { payload: bigPayload },
       trusted: false,
     })))
   })

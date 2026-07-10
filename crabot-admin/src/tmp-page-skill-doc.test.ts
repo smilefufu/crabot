@@ -11,6 +11,7 @@ describe('tmp-page skill doc', () => {
 
     expect(doc).toContain('tmp_page_create')
     expect(doc).toContain('tmp_page_read_events')
+    expect(doc).toContain('has_more')
     expect(doc).toContain('tmp_page_delete')
     expect(doc).not.toContain('$DATA_DIR/tmp-pages')
     expect(doc).not.toContain('.crabot/data/tmp-pages')

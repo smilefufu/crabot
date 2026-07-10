@@ -60,7 +60,7 @@ version: "2.0.0"
 ## 更新、读取、删除
 
 - 更新页面：`tmp_page_update({ page_id, html?, title?, ttl_seconds? })`
-- 读取反馈：`tmp_page_read_events({ page_id, after_event_id?, limit? })`
+- 读取反馈：`tmp_page_read_events({ page_id, after_event_id?, limit? })`，返回 `events`、`next_after_event_id` 和 `has_more`；`has_more=true` 时用 `after_event_id=next_after_event_id` 继续读取。
 - 删除页面：`tmp_page_delete({ page_id })`
 - 列出页面：`tmp_page_list({ include_expired? })`
 
