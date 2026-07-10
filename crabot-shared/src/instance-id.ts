@@ -26,3 +26,13 @@ export function validateInstanceId(raw: string): InstanceIdResult {
   }
   return { ok: true, id }
 }
+
+/**
+ * 文件系统碰撞键：在大小写不敏感文件系统（macOS/Windows）上会折叠到同一文件名的
+ * 实例 id 返回同一键。用于查重，防止如 `aσ` / `aς`（都大写为 `Σ`）落到同一
+ * `<id>.json` 互相覆盖配置——仅 NFC 归一化挡不住大小写折叠。
+ * 查重专用，不作为存储 id。
+ */
+export function instanceIdFoldKey(id: string): string {
+  return id.normalize('NFC').toUpperCase()
+}

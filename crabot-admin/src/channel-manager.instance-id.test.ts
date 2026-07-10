@@ -91,6 +91,16 @@ describe('ChannelManager.createInstance 实例 id 校验', () => {
       })
     ).rejects.toThrow(/already exists/)
   })
+
+  it('大小写折叠碰撞（aσ vs aς）视为同名，拒绝第二个防配置互相覆盖', async () => {
+    const manager = new ChannelManager(dataDir, makeRpc() as any)
+    await manager.addImplementation(fakeImpl)
+
+    await manager.createInstance({ implementation_id: fakeImpl.id, name: 'aσ' })
+    await expect(
+      manager.createInstance({ implementation_id: fakeImpl.id, name: 'aς' })
+    ).rejects.toThrow(/already exists/)
+  })
 })
 
 describe('ChannelManager.upsertInstanceById NFC 归一化', () => {

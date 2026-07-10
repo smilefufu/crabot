@@ -103,4 +103,4 @@ export {
 
 export * from './media-fetch/index.js'
 
-export { INSTANCE_ID_REGEX, validateInstanceId, type InstanceIdResult } from './instance-id.js'
+export { INSTANCE_ID_REGEX, validateInstanceId, instanceIdFoldKey, type InstanceIdResult } from './instance-id.js'

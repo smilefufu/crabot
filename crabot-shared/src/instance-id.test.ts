@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { validateInstanceId, INSTANCE_ID_REGEX } from './instance-id.js'
+import { validateInstanceId, INSTANCE_ID_REGEX, instanceIdFoldKey } from './instance-id.js'
 
 test('接受中文、小写英文、数字、连字符', () => {
   for (const name of ['微信客服', 'feishu-prod', '客服', '微信2号', 'tg-bot-01']) {
@@ -41,4 +41,16 @@ test('空串与纯空白拒绝', () => {
 test('导出的正则与校验行为一致', () => {
   assert.equal(INSTANCE_ID_REGEX.test('微信客服'), true)
   assert.equal(INSTANCE_ID_REGEX.test('WeChat'), false)
+})
+
+test('instanceIdFoldKey 让大小写不敏感文件系统上折叠的名字得同一键', () => {
+  // 希腊小写 sigma σ 与词尾 sigma ς 都大写为 Σ，在折叠文件系统上会撞同一 <id>.json
+  assert.equal(instanceIdFoldKey('aσ'), instanceIdFoldKey('aς'))
+  // 真正不同的名字不误撞
+  assert.notEqual(instanceIdFoldKey('微信客服'), instanceIdFoldKey('微信机器人'))
+  assert.notEqual(instanceIdFoldKey('feishu-a'), instanceIdFoldKey('feishu-b'))
+  // 中文名折叠是恒等
+  assert.equal(instanceIdFoldKey('微信客服'), '微信客服')
+  // NFD 与 NFC 折叠一致
+  assert.equal(instanceIdFoldKey('café'.normalize('NFD')), instanceIdFoldKey('café'.normalize('NFC')))
 })
