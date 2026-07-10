@@ -62,4 +62,42 @@ describe('importChannels', () => {
     expect(deps.createChannel).not.toHaveBeenCalled()
     expect(results).toEqual([{ kind: 'channel', name: 'feishu-ref', status: 'skipped', reason: 'missing-secret' }])
   })
+
+  it('createChannel 因非法实例名抛异常 → 记为 skipped 且不中断循环，其余 channel 继续导入', async () => {
+    const twoAccounts: OpenClawChannelsConfig = {
+      feishu: {
+        accounts: {
+          'Bad.Name': { appId: 'cli_x', appSecret: 'secret32' },
+          main: { appId: 'cli_y', appSecret: 'secret64' },
+        },
+      },
+    }
+    const { created, deps } = makeDeps()
+    deps.createChannel = vi.fn(async (p: CreateChannelInstanceParams) => {
+      if (p.name.includes('Bad.Name')) {
+        throw new Error(`Invalid instance name: ${p.name}`)
+      }
+      created.push(p)
+    })
+
+    const results = await importChannels(
+      twoAccounts,
+      [
+        { source_channel: 'feishu', account_id: 'Bad.Name' },
+        { source_channel: 'feishu', account_id: 'main' },
+      ],
+      deps,
+    )
+
+    expect(deps.createChannel).toHaveBeenCalledTimes(2)
+    expect(results).toEqual([
+      {
+        kind: 'channel',
+        name: 'feishu-Bad.Name',
+        status: 'skipped',
+        reason: 'Invalid instance name: feishu-Bad.Name',
+      },
+      { kind: 'channel', name: 'feishu-main', status: 'imported' },
+    ])
+  })
 })

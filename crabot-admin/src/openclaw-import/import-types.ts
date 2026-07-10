@@ -15,5 +15,5 @@ export type ImportItemResult = {
   kind: 'provider' | 'channel' | 'mcp' | 'skill' | 'memory' | 'workspace'
   name: string
   status: ImportItemStatus
-  reason?: ImportSkipReason
+  reason?: ImportSkipReason | string
 }

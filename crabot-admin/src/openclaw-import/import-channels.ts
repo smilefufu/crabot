@@ -47,8 +47,17 @@ export async function importChannels(
       continue
     }
 
-    await deps.createChannel(mapped.params)
-    results.push({ kind: 'channel', name, status: 'imported' })
+    try {
+      await deps.createChannel(mapped.params)
+      results.push({ kind: 'channel', name, status: 'imported' })
+    } catch (err) {
+      results.push({
+        kind: 'channel',
+        name,
+        status: 'skipped',
+        reason: err instanceof Error ? err.message : String(err),
+      })
+    }
   }
 
   return results
