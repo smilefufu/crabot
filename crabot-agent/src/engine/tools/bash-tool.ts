@@ -64,6 +64,23 @@ function formatBashToolOutput(
   ).trim()
 }
 
+function formatBashToolExecutionError(
+  message: string,
+  stdout: string,
+  stderr: string,
+): string {
+  const parts = [`Command execution failed: ${message}`]
+  const stdoutText = stripOneTrailingNewline(stdout)
+  const stderrText = stripOneTrailingNewline(stderr)
+  if (stdoutText) {
+    parts.push('stdout:', stdoutText)
+  }
+  if (stderrText) {
+    parts.push('stderr:', stderrText)
+  }
+  return truncateOutput(parts.join('\n')).trim()
+}
+
 function extractExitCode(error: Error & Partial<NodeJS.ErrnoException>): number | null {
   return typeof error.code === 'number' ? error.code : null
 }
@@ -114,8 +131,17 @@ function execCommand(
             return
           }
 
+          const exitCode = extractExitCode(error)
+          if (exitCode === null) {
+            resolve({
+              output: formatBashToolExecutionError(error.message, stdoutText, stderrText),
+              isError: true,
+            })
+            return
+          }
+
           resolve({
-            output: formatBashToolOutput(extractExitCode(error), stdoutText, stderrText),
+            output: formatBashToolOutput(exitCode, stdoutText, stderrText),
             isError: false,
           })
           return

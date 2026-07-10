@@ -63,6 +63,16 @@ describe('createBashTool', () => {
     expect(result.output).toContain(`stdout:\n${resolvedTmpDir}`)
   })
 
+  it('returns a tool error when cwd is missing', async () => {
+    const missingCwd = path.join(tmpDir, 'missing-cwd')
+    const missingTool = createBashTool(() => missingCwd)
+
+    const result = await missingTool.call({ command: 'echo hi' }, {})
+
+    expect(result.isError).toBe(true)
+    expect(result.output).toMatch(/Command execution failed|ENOENT/)
+  })
+
   it('truncates large output', async () => {
     // Generate output > 100000 chars
     const result = await tool.call(
