@@ -132,7 +132,7 @@ describe('createReadTool', () => {
     expect(result.images![0].media_type).toBe('image/jpeg')
   })
 
-  it('still rejects non-image binary files', async () => {
+  it('returns display-only result for non-image binary files', async () => {
     const filePath = path.join(tmpDir, 'data.bin')
     const buf = Buffer.alloc(100)
     buf[50] = 0x00
