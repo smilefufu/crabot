@@ -8340,6 +8340,12 @@ export class AdminModule extends ModuleBase {
   private async handleGetModuleConfig(params: {
     module_id: string
   }): Promise<{ config: Record<string, string> }> {
+    // 权威守卫：module_id 会拼进配置文件路径。除 config 路由外，start/restart 也经
+    // handleStartModuleAdmin 走到这里，故守卫必须落在文件 sink 而非仅路由层。
+    // 解码后的穿越 id（如 ../../x）当作不存在处理，返回空配置。
+    if (!isPathSafeSegment(params.module_id)) {
+      return { config: {} }
+    }
     const filePath = path.join(this.moduleConfigsDir, `${params.module_id}.json`)
     try {
       const content = await fs.readFile(filePath, 'utf-8')
@@ -8358,6 +8364,10 @@ export class AdminModule extends ModuleBase {
     module_id: string
     config: Record<string, string>
   }): Promise<{ updated: true }> {
+    // 权威守卫：写 sink 必须硬拒穿越 id，防止 ../ 逃逸出 module-configs 目录写任意文件
+    if (!isPathSafeSegment(params.module_id)) {
+      throw Object.assign(new Error('Invalid module id'), { code: 'INVALID_MODULE_ID' })
+    }
     await fs.mkdir(this.moduleConfigsDir, { recursive: true })
     const filePath = path.join(this.moduleConfigsDir, `${params.module_id}.json`)
     const data = {
