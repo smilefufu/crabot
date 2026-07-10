@@ -170,6 +170,9 @@ describe('getBuiltinSubAgents', () => {
     expect(r.deliverables).toContain('spec_compliance:')
     expect(r.deliverables).toContain('code_quality:')
     expect(r.deliverables).toContain('assessment: APPROVED | NEEDS_FIX')
+    expect(r.verification).toContain('FILES_CHANGED')
+    expect(r.verification).toContain('PLAN_PATH')
+    expect(r.verification).toContain('累计改动文件')
     expect(r.allowed_mcp_server_ids).toEqual(['lsp', 'git'])
   })
 

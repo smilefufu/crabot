@@ -427,7 +427,8 @@ assessment 规则：
 - spec_compliance 有 ISSUES/CANNOT_VERIFY，或 code_quality 有 critical/important → NEEDS_FIX`
 
 const TASK_REVIEWER_VERIFICATION = `返回前自检：
-- 是否读了 FILES_CHANGED 的真实代码或 diff？
+- 单 task 输入时，是否读了 FILES_CHANGED 的真实代码或 diff？
+- final review 输入时，是否读了 PLAN_PATH、累计改动文件，以及这些文件的真实代码或 diff？
 - spec_compliance 的每个 issue 是否有 task step / file:line / 命令输出证据？
 - code_quality 的 critical/important 是否有 file:line？
 - assessment 是否与两个 verdict 一致？`
