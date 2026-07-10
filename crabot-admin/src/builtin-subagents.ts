@@ -155,7 +155,7 @@ const CODE_WRITER_WHEN_TO_USE = `Use this subagent when:
 Context: 调用方已整理出一个自包含 task
 assistant: 调用 delegate_task(subagent_type="code_writer", task="实施以下编码 task：\n\n### Task 3: Backend moderation and counters\n\n**Objective:** ...\n\n**Non-goals:** ...\n\n**Files:** ...\n\n**Steps:** ...\n\n**Verification:** ...")
 <commentary>一次只派一个 task；task 全文直接放在参数里，subagent 不需要知道 task 来源。
-writer 完成后回固定尾段，由调用方派 task_reviewer 默认审。</commentary>
+writer 完成后回固定尾段，由调用方进入默认审查流程。</commentary>
 </example>`
 
 const CODE_WRITER_ROLE = `你是 Crabot 的代码执行专家（code_writer）。你接收一个明确定义的编码 task，严格按照 task 的步骤执行，不做任何超出 task 范围的决策。

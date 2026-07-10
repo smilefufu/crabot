@@ -147,6 +147,9 @@ describe('getBuiltinSubAgents', () => {
     expect(w.deliverables).toContain('TESTS_PASSED:')
     expect(w.deliverables).toContain('CONCERNS:')
     expect(w.deliverables).toContain('BLOCKERS:')
+    expect(w.deliverables).not.toContain('REASON:')
+    expect(w.deliverables).not.toContain('DETAIL:')
+    expect(w.deliverables).not.toContain('PARTIAL_WORK:')
     expect(w.deliverables).not.toContain('BLOCKER_TYPE:')
   })
 
