@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
+import net from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { beforeEach, describe, expect, it } from 'vitest'
@@ -34,6 +35,36 @@ function expectNoRuntimeLeak(output: string) {
   expect(output).not.toContain('events.jsonl')
   expect(output).not.toContain('CRABOT_TMP_PAGE_PORT')
   expect(output).not.toContain('_manage')
+}
+
+function getFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer()
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address()
+      if (!address || typeof address === 'string') {
+        server.close(() => reject(new Error('no port assigned')))
+        return
+      }
+      const { port } = address
+      server.close(() => resolve(port))
+    })
+  })
+}
+
+function canConnect(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: '127.0.0.1', port })
+    const done = (open: boolean) => {
+      socket.removeAllListeners()
+      socket.destroy()
+      resolve(open)
+    }
+    socket.once('connect', () => done(true))
+    socket.once('error', () => done(false))
+    socket.setTimeout(500, () => done(false))
+  })
 }
 
 describe('tmp-page tools', () => {
@@ -80,6 +111,67 @@ describe('tmp-page tools', () => {
 
     expect(result.isError).toBe(true)
     expect(result.json).toEqual({ success: false, error_code: 'TMP_PAGE_SERVER_START_FAILED' })
+  })
+
+  it('waits until the spawned server is reachable before returning a URL', async () => {
+    currentDataDir = await mkdtemp(path.join(tmpdir(), 'tmp-page-tools-'))
+    ensureServer = undefined
+    const port = await getFreePort()
+    const serverScript = path.join(currentDataDir, 'delayed-server.cjs')
+    await writeFile(
+      serverScript,
+      [
+        "const http = require('http')",
+        "const port = Number(process.env.CRABOT_TMP_PAGE_PORT)",
+        'setTimeout(() => {',
+        "  const server = http.createServer((req, res) => res.end('ok'))",
+        "  server.listen(port, '127.0.0.1')",
+        '  setTimeout(() => server.close(() => process.exit(0)), 1500)',
+        '}, 150)',
+      ].join('\n'),
+      'utf8',
+    )
+
+    const tool = createTmpPageTools({
+      dataDir: currentDataDir,
+      getTmpPageBaseUrl: () => 'http://localhost:3000',
+      taskId: 'task-123',
+      now: () => new Date('2026-07-10T00:00:00.000Z'),
+      randomBytes: () => Buffer.from('00112233445566778899aabbccddeeff', 'hex'),
+      serverScriptPath: serverScript,
+      tmpPagePort: port,
+      serverStartupTimeoutMs: 2000,
+      serverProbeIntervalMs: 25,
+    }).find((t) => t.name === 'tmp_page_create')!
+
+    const result = await tool.call({ title: 'Choice page', html: '<p>x</p>' }, {} as never)
+
+    expect(result.isError).toBe(false)
+    expectNoRuntimeLeak(result.output)
+    expect(await canConnect(port)).toBe(true)
+  })
+
+  it('returns a structured error when the spawned server exits before listening', async () => {
+    currentDataDir = await mkdtemp(path.join(tmpdir(), 'tmp-page-tools-'))
+    ensureServer = undefined
+    const port = await getFreePort()
+    const serverScript = path.join(currentDataDir, 'failing-server.cjs')
+    await writeFile(serverScript, 'process.exit(1)\n', 'utf8')
+    const tool = createTmpPageTools({
+      dataDir: currentDataDir,
+      getTmpPageBaseUrl: () => 'http://localhost:3000',
+      taskId: 'task-123',
+      serverScriptPath: serverScript,
+      tmpPagePort: port,
+      serverStartupTimeoutMs: 500,
+      serverProbeIntervalMs: 25,
+    }).find((t) => t.name === 'tmp_page_create')!
+
+    const result = await tool.call({ title: 'Choice page', html: '<p>x</p>' }, {} as never)
+
+    expect(result.isError).toBe(true)
+    expect(JSON.parse(result.output)).toEqual({ success: false, error_code: 'TMP_PAGE_SERVER_START_FAILED' })
+    expectNoRuntimeLeak(result.output)
   })
 
   it('updates page content and keeps the same url', async () => {

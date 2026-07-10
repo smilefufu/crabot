@@ -2,6 +2,7 @@ import { randomBytes as nodeRandomBytes } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import net from 'node:net'
 import path from 'node:path'
 import type { ToolCallResult, ToolDefinition } from '../engine/types.js'
 
@@ -11,8 +12,11 @@ export interface TmpPageToolsDeps {
   readonly taskId: string
   readonly now?: () => Date
   readonly randomBytes?: (size: number) => Buffer
-  /** 已安装 tmp-page builtin skill 中的 server.cjs 路径。 */
+  /** 内部 tmp-page server.cjs 路径。 */
   readonly serverScriptPath?: string
+  readonly tmpPagePort?: number
+  readonly serverStartupTimeoutMs?: number
+  readonly serverProbeIntervalMs?: number
   /** 测试或宿主可替换的 server 启动保障。 */
   readonly ensureServer?: () => Promise<void> | void
 }
@@ -29,6 +33,10 @@ const PAGE_ID_RE = /^[A-Za-z0-9_-]{16,}$/
 const DEFAULT_TTL_SECONDS = 24 * 60 * 60
 const MIN_TTL_SECONDS = 60
 const MAX_TTL_SECONDS = 7 * 24 * 60 * 60
+const DEFAULT_TMP_PAGE_PORT = 19099
+const DEFAULT_SERVER_STARTUP_TIMEOUT_MS = 5_000
+const DEFAULT_SERVER_PROBE_INTERVAL_MS = 50
+const serverStartPromises = new Map<string, Promise<void>>()
 
 function ok(data: unknown): ToolCallResult {
   return { isError: false, output: JSON.stringify(data) }
@@ -92,21 +100,97 @@ function defaultServerScriptPath(): string {
   return path.join(crabotHome, 'crabot-admin', 'builtins', 'skills', 'tmp-page', 'scripts', 'server.cjs')
 }
 
-function ensureTmpPageServer(deps: TmpPageToolsDeps): Promise<void> | void {
+function tmpPagePort(deps: TmpPageToolsDeps): number {
+  if (deps.tmpPagePort !== undefined) return deps.tmpPagePort
+  const envPort = Number.parseInt(process.env.CRABOT_TMP_PAGE_PORT ?? '', 10)
+  return Number.isFinite(envPort) ? envPort : DEFAULT_TMP_PAGE_PORT
+}
+
+function probeLocalPort(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: '127.0.0.1', port })
+    const done = (open: boolean) => {
+      socket.removeAllListeners()
+      socket.destroy()
+      resolve(open)
+    }
+    socket.once('connect', () => done(true))
+    socket.once('error', () => done(false))
+    socket.setTimeout(500, () => done(false))
+  })
+}
+
+async function ensureTmpPageServer(deps: TmpPageToolsDeps): Promise<void> {
   if (deps.ensureServer) return deps.ensureServer()
   const serverScriptPath = deps.serverScriptPath ?? defaultServerScriptPath()
   if (!existsSync(serverScriptPath)) throw new Error('tmp-page server script unavailable')
+  const port = tmpPagePort(deps)
+  if (await probeLocalPort(port)) return
 
-  const child = spawn(process.execPath, [serverScriptPath], {
-    detached: true,
-    stdio: 'ignore',
-    env: {
-      ...process.env,
-      DATA_DIR: deps.dataDir,
-      CRABOT_TMP_PAGE_PORT: process.env.CRABOT_TMP_PAGE_PORT ?? '19099',
-    },
+  const key = `${serverScriptPath}:${deps.dataDir}:${port}`
+  const pending = serverStartPromises.get(key)
+  if (pending) return pending
+
+  const promise = startTmpPageServer(deps, serverScriptPath, port).finally(() => {
+    serverStartPromises.delete(key)
   })
-  child.unref()
+  serverStartPromises.set(key, promise)
+  return promise
+}
+
+function startTmpPageServer(deps: TmpPageToolsDeps, serverScriptPath: string, port: number): Promise<void> {
+  const timeoutMs = deps.serverStartupTimeoutMs ?? DEFAULT_SERVER_STARTUP_TIMEOUT_MS
+  const probeIntervalMs = deps.serverProbeIntervalMs ?? DEFAULT_SERVER_PROBE_INTERVAL_MS
+
+  return new Promise((resolve, reject) => {
+    let settled = false
+    let childExited = false
+    const timer = setTimeout(() => finish(new Error('tmp-page server startup timed out')), timeoutMs)
+    const interval = setInterval(() => {
+      void probeLocalPort(port).then((open) => {
+        if (open) finish()
+        else if (childExited) finish(new Error('tmp-page server exited before listening'))
+      })
+    }, probeIntervalMs)
+
+    const finish = (err?: Error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      clearInterval(interval)
+      if (err) reject(err)
+      else resolve()
+    }
+
+    let child
+    try {
+      child = spawn(process.execPath, [serverScriptPath], {
+        detached: true,
+        stdio: 'ignore',
+        env: {
+          ...process.env,
+          DATA_DIR: deps.dataDir,
+          CRABOT_TMP_PAGE_PORT: String(port),
+        },
+      })
+    } catch (err) {
+      finish(err instanceof Error ? err : new Error(String(err)))
+      return
+    }
+
+    child.once('error', (err) => finish(err))
+    child.once('exit', () => {
+      childExited = true
+      void probeLocalPort(port).then((open) => {
+        if (open) finish()
+      })
+    })
+    child.unref()
+
+    void probeLocalPort(port).then((open) => {
+      if (open) finish()
+    })
+  })
 }
 
 export function createTmpPageTools(deps: TmpPageToolsDeps): ToolDefinition[] {
