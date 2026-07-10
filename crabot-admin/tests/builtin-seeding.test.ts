@@ -164,10 +164,25 @@ describe('getBuiltinSubAgents', () => {
     const r = getBuiltinSubAgents().find((s) => s.name === 'task_reviewer')!
     expect(r.description).toContain('默认 task 审查员')
     expect(r.when_to_use).toContain('默认使用')
+    expect(r.when_to_use).toContain('整 plan 范围 final review')
+    expect(r.workflow).toContain('PLAN_PATH')
+    expect(r.workflow).toContain('累计改动文件')
     expect(r.deliverables).toContain('spec_compliance:')
     expect(r.deliverables).toContain('code_quality:')
     expect(r.deliverables).toContain('assessment: APPROVED | NEEDS_FIX')
     expect(r.allowed_mcp_server_ids).toEqual(['lsp', 'git'])
+  })
+
+  it('split reviewers stay specialized instead of describing the default path', () => {
+    const spec = getBuiltinSubAgents().find((s) => s.name === 'spec_reviewer')!
+    const quality = getBuiltinSubAgents().find((s) => s.name === 'code_quality_reviewer')!
+
+    expect(spec.when_to_use).toContain('专项拆审')
+    expect(quality.when_to_use).toContain('专项拆审')
+    expect(spec.when_to_use).not.toContain('APPROVED 后进入 code_quality_reviewer 阶段')
+    expect(spec.when_to_use).not.toContain('整 plan 可进入 code_quality_reviewer 综合质量审')
+    expect(quality.when_to_use).not.toContain('spec_reviewer 已 APPROVED')
+    expect(quality.workflow).not.toContain('spec_reviewer 已 APPROVED')
   })
 
   it('research_collector 使用 vision role + 通用调查员 capabilities 全开', () => {

@@ -128,9 +128,12 @@ describe('assembleAgentPrompt coding routing policy', () => {
     expect(prompt).toContain('delegate_task(subagent_type="task_reviewer"')
     expect(prompt).toContain('spec_compliance')
     expect(prompt).toContain('code_quality')
+    expect(prompt).toContain('整 plan 范围 final review：PLAN_PATH=<path>，累计改动文件 = <list>')
     expect(prompt).toContain('只有命中拆分规则才拆成 spec_reviewer / code_quality_reviewer')
     expect(prompt).toContain('同一 task review-fix 循环 ≥3 次仍未通过')
     expect(prompt).not.toContain('一个 message 内 batch 派两类 reviewer')
+    expect(prompt).not.toContain('spec_reviewer 阶段')
+    expect(prompt).not.toContain('整 plan 可进入 code_quality_reviewer 综合质量审')
 
     expect(prompt).not.toContain('main 是 coordinator')
     expect(prompt).not.toContain('main 负责 task slicing')
