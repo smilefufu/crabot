@@ -103,9 +103,16 @@ export const NewChannelOnboarding: React.FC = () => {
   }, [expiresAt, remainingSec, status.step])
 
   const handleStart = useCallback(async () => {
-    if (!NAME_PATTERN.test(name)) {
+    // 先 NFC 归一化再校验并提交，与后端 validateInstanceId 一致：
+    // 否则 NFD 输入（如 macOS 组合字符）会被前端拒绝、后端却接受。
+    const normalizedName = name.normalize('NFC')
+    if (!NAME_PATTERN.test(normalizedName)) {
       toast.error('实例名可用中文、小写字母、数字、连字符（2-50 字符）')
       return
+    }
+    if (normalizedName !== name) {
+      setName(normalizedName)
+      nameRef.current = normalizedName
     }
     setStatus({ step: 'starting', message: '正在初始化…' })
     try {
