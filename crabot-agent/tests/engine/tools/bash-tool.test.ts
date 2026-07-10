@@ -38,15 +38,20 @@ describe('createBashTool', () => {
     expect(result.output).toContain('hello')
   })
 
-  it('captures stderr', async () => {
-    const result = await tool.call({ command: 'echo err >&2' }, {})
+  it('formats stdout and stderr with exit_code fields', async () => {
+    const result = await tool.call({ command: 'printf "out"; printf "err" >&2' }, {})
     expect(result.isError).toBe(false)
-    expect(result.output).toContain('err')
+    expect(result.output).toContain('exit_code: 0')
+    expect(result.output).toContain('stdout:\nout')
+    expect(result.output).toContain('stderr:\nerr')
   })
 
-  it('returns error for failing command', async () => {
-    const result = await tool.call({ command: 'exit 1' }, {})
-    expect(result.isError).toBe(true)
+  it('returns command result for non-zero exit without tool error', async () => {
+    const result = await tool.call({ command: 'printf "out"; printf "err" >&2; exit 1' }, {})
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('exit_code: 1')
+    expect(result.output).toContain('stdout:\nout')
+    expect(result.output).toContain('stderr:\nerr')
   })
 
   it('respects cwd', async () => {
@@ -54,7 +59,8 @@ describe('createBashTool', () => {
     expect(result.isError).toBe(false)
     // Resolve symlinks (macOS /tmp -> /private/tmp)
     const resolvedTmpDir = fs.realpathSync(tmpDir)
-    expect(result.output.trim()).toBe(resolvedTmpDir)
+    expect(result.output).toContain('exit_code: 0')
+    expect(result.output).toContain(`stdout:\n${resolvedTmpDir}`)
   })
 
   it('truncates large output', async () => {

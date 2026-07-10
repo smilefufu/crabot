@@ -43,6 +43,31 @@ function truncateOutput(output: string): string {
   return `${output.slice(0, halfLimit)}\n[...truncated...]\n${output.slice(-halfLimit)}`
 }
 
+function stripOneTrailingNewline(value: string): string {
+  return value.replace(/\n$/, '')
+}
+
+function formatBashToolOutput(
+  exitCode: number | null,
+  stdout: string,
+  stderr: string,
+): string {
+  const exit = exitCode === null ? 'null' : String(exitCode)
+  return truncateOutput(
+    [
+      `exit_code: ${exit}`,
+      'stdout:',
+      stripOneTrailingNewline(stdout),
+      'stderr:',
+      stripOneTrailingNewline(stderr),
+    ].join('\n'),
+  ).trim()
+}
+
+function extractExitCode(error: Error & Partial<NodeJS.ErrnoException>): number | null {
+  return typeof error.code === 'number' ? error.code : null
+}
+
 function execCommand(
   command: string,
   cwd: string,
@@ -67,8 +92,8 @@ function execCommand(
         env: process.env,
       },
       (error, stdout, stderr) => {
-        const stderrTrimmed = stderr.trim()
-        const stdoutTrimmed = stdout ?? ''
+        const stdoutText = stdout ?? ''
+        const stderrText = stderr ?? ''
 
         if (error !== null) {
           // Timeout
@@ -89,31 +114,15 @@ function execCommand(
             return
           }
 
-          // Command failure
-          const parts: string[] = []
-          if (error.message) {
-            parts.push(error.message)
-          }
-          if (stdoutTrimmed) {
-            parts.push(stdoutTrimmed)
-          }
-          if (stderrTrimmed) {
-            parts.push(`stderr: ${stderrTrimmed}`)
-          }
           resolve({
-            output: truncateOutput(parts.join('\n') || 'Command failed'),
-            isError: true,
+            output: formatBashToolOutput(extractExitCode(error), stdoutText, stderrText),
+            isError: false,
           })
           return
         }
 
-        // Success
-        const outputParts: string[] = [stdoutTrimmed]
-        if (stderrTrimmed) {
-          outputParts.push(`stderr: ${stderrTrimmed}`)
-        }
         resolve({
-          output: truncateOutput(outputParts.join('\n')),
+          output: formatBashToolOutput(0, stdoutText, stderrText),
           isError: false,
         })
       },
