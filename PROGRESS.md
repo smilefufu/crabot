@@ -1,6 +1,10 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-08 — 修复 resume 执行入口语义污染
+> 最后更新：2026-07-10 — 渠道实例 id 放开 Unicode 命名与路由 decode 修复
+
+## 2026-07-10 — 渠道实例 id 放开 Unicode 命名与路由 decode 修复
+
+- 渠道实例 id 放开 Unicode 命名（白名单 + NFC）+ 修复 /api/modules/:id/* 路由 percent-decode 缺失（中文模块无法重启的事故根因）。spec: crabot-docs superpowers/specs/2026-07-10-unicode-instance-id-design.md
 
 ## 2026-07-08 — 修复 resume 执行入口语义污染
 
