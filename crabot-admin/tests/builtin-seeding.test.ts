@@ -139,6 +139,7 @@ describe('getBuiltinSubAgents', () => {
 
   it('code_writer final output uses the fixed status tail contract', () => {
     const w = getBuiltinSubAgents().find((s) => s.name === 'code_writer')!
+    const contract = [w.workflow, w.deliverables, w.verification].join('\n')
     expect(w.workflow).toContain('DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED')
     expect(w.deliverables).toContain('STATUS: DONE | DONE_WITH_CONCERNS | NEEDS_CONTEXT | BLOCKED')
     expect(w.deliverables).toContain('SUMMARY:')
@@ -147,10 +148,10 @@ describe('getBuiltinSubAgents', () => {
     expect(w.deliverables).toContain('TESTS_PASSED:')
     expect(w.deliverables).toContain('CONCERNS:')
     expect(w.deliverables).toContain('BLOCKERS:')
-    expect(w.deliverables).not.toContain('REASON:')
-    expect(w.deliverables).not.toContain('DETAIL:')
-    expect(w.deliverables).not.toContain('PARTIAL_WORK:')
-    expect(w.deliverables).not.toContain('BLOCKER_TYPE:')
+    expect(contract).not.toContain('REASON:')
+    expect(contract).not.toContain('DETAIL:')
+    expect(contract).not.toContain('PARTIAL_WORK:')
+    expect(contract).not.toContain('BLOCKER_TYPE:')
   })
 
   it('code_writer 挂 lsp_diagnostics 预设（post-edit 自动诊断 push）', () => {

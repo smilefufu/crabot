@@ -202,7 +202,7 @@ BLOCKERS: <仅 NEEDS_CONTEXT/BLOCKED 时填写；其他状态写 none>
 
 const CODE_WRITER_VERIFICATION = `每完成一个 task 后必须运行 task 末尾的 Verification 命令并确认输出符合预期。
 不允许：跳过 verification、用 mock 替代真实运行、声称"测试应该会通过"。
-verification 失败时优先用 systematic-debugging skill 找根因；2 次尝试后仍未通过则上报 BLOCKED + BLOCKER_TYPE=PLAN_ERROR。`
+verification 失败时优先用 systematic-debugging skill 找根因；2 次尝试后仍未通过则上报 STATUS: BLOCKED，并在 BLOCKERS 写清失败命令、失败现象、已尝试的修复。`
 
 const RESEARCH_COLLECTOR_WHEN_TO_USE = `Use this subagent when:
 - **信息收集类工作的默认派遣对象**——主控 agent 工作流 [信息收集] 段位优先派此 subagent
