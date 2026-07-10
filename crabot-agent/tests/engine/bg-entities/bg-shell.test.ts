@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { BgEntityRegistry } from '../../../src/engine/bg-entities/registry'
-import { spawnPersistentShell, readProcStartTime } from '../../../src/engine/bg-entities/bg-shell'
+import { spawnPersistentShell, readProcStartTime, runShellWithGrace } from '../../../src/engine/bg-entities/bg-shell'
 import type { BgShellRegistryRecord } from '../../../src/engine/bg-entities/types'
 
 // ---------------------------------------------------------------------------
@@ -223,4 +223,31 @@ describe('spawnPersistentShell', () => {
     expect(logContent).toContain('survived_detach')
     expect(rec?.status).toBe('completed')
   })
+})
+
+describe('runShellWithGrace', () => {
+  it('inline capture waits for late inherited stdout/stderr writers before cleanup', async () => {
+    const stdoutChunk = 'O'.repeat(200_000)
+    const stderrChunk = 'E'.repeat(200_000)
+
+    const result = await runShellWithGrace({
+      command: [
+        `python3 -c "import sys,time; time.sleep(0.2); sys.stdout.write('${stdoutChunk}')" &`,
+        `python3 -c "import sys,time; time.sleep(0.2); sys.stderr.write('${stderrChunk}')" &`,
+      ].join('\n'),
+      cwd: process.cwd(),
+      owner: { friend_id: 'user-A' },
+      spawned_by_task_id: 'task-inline-late-writers',
+      registry,
+      gracePeriodMs: 1_000,
+    })
+
+    expect(result.kind).toBe('inline')
+    if (result.kind !== 'inline') {
+      return
+    }
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toBe(stdoutChunk)
+    expect(result.stderr).toBe(stderrChunk)
+  }, 5_000)
 })

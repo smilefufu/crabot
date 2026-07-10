@@ -74,16 +74,38 @@ function stderrFileForLog(logFile: string): string {
   return logFile.replace(/\.log$/, '.stderr')
 }
 
+function stdoutFifoForLog(logFile: string): string {
+  return logFile.replace(/\.log$/, '.stdout.fifo')
+}
+
+function stderrFifoForLog(logFile: string): string {
+  return logFile.replace(/\.log$/, '.stderr.fifo')
+}
+
 function wrapCommandWithInlineStreamCapture(
   command: string,
   exitcodeFile: string,
   stdoutFile: string,
   stderrFile: string,
+  stdoutFifo: string,
+  stderrFifo: string,
 ): string {
   return (
+    `rm -f ${shSingleQuote(stdoutFifo)} ${shSingleQuote(stderrFifo)}\n` +
+    `mkfifo ${shSingleQuote(stdoutFifo)} ${shSingleQuote(stderrFifo)}\n` +
+    `cleanup() {\n` +
+    `  rm -f ${shSingleQuote(stdoutFifo)} ${shSingleQuote(stderrFifo)}\n` +
+    `}\n` +
+    `trap cleanup EXIT\n` +
+    `tee -a ${shSingleQuote(stdoutFile)} < ${shSingleQuote(stdoutFifo)} &\n` +
+    `__crabot_stdout_tee=$!\n` +
+    `tee -a ${shSingleQuote(stderrFile)} >&2 < ${shSingleQuote(stderrFifo)} &\n` +
+    `__crabot_stderr_tee=$!\n` +
     `{\n${command}\n` +
-    `} > >(tee -a ${shSingleQuote(stdoutFile)}) 2> >(tee -a ${shSingleQuote(stderrFile)} >&2)\n` +
+    `} > ${shSingleQuote(stdoutFifo)} 2> ${shSingleQuote(stderrFifo)}\n` +
     `__crabot_ec=$?\n` +
+    `wait "$__crabot_stdout_tee"\n` +
+    `wait "$__crabot_stderr_tee"\n` +
     `printf '%s' "$__crabot_ec" > ${shSingleQuote(exitcodeFile)} 2>/dev/null\n` +
     `exit $__crabot_ec`
   )
@@ -302,33 +324,10 @@ async function readFileQuiet(file: string): Promise<string> {
   }
 }
 
-async function statSizeQuiet(file: string): Promise<number | null> {
-  try {
-    return (await fs.promises.stat(file)).size
-  } catch {
-    return null
-  }
-}
-
-async function waitForCaptureFilesToSettle(stdoutFile: string, stderrFile: string): Promise<void> {
-  let prevOut = await statSizeQuiet(stdoutFile)
-  let prevErr = await statSizeQuiet(stderrFile)
-  for (let i = 0; i < 10; i += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 10))
-    const nextOut = await statSizeQuiet(stdoutFile)
-    const nextErr = await statSizeQuiet(stderrFile)
-    if (nextOut !== null && nextErr !== null && nextOut === prevOut && nextErr === prevErr) {
-      return
-    }
-    prevOut = nextOut
-    prevErr = nextErr
-  }
-}
-
 /**
  * 统一 shell 执行：命令从 spawn 起就 OS 直写磁盘日志（detached + sentinel），前台宽限
  * `gracePeriodMs`。
- * - 宽限期内退出：读日志 inline 同步返回（kind='inline'），删日志/sentinel，**不入 bgRegistry**。
+ * - 宽限期内退出：读完整 stdout/stderr capture inline 同步返回（kind='inline'），删临时文件，**不入 bgRegistry**。
  * - 超过宽限期仍在跑：注册进 bgRegistry（kind='background'），命令**不中断**；其后退出经
  *   onShellExit push 唤醒挂起的 worker。
  * - 期间 abort：kill + 清文件，返回 kind='aborted'。
@@ -344,6 +343,8 @@ export async function runShellWithGrace(opts: RunShellWithGraceOpts): Promise<Ru
   const exitcodeFile = exitcodeFileForLog(logFile)
   const stdoutFile = stdoutFileForLog(logFile)
   const stderrFile = stderrFileForLog(logFile)
+  const stdoutFifo = stdoutFifoForLog(logFile)
+  const stderrFifo = stderrFifoForLog(logFile)
 
   const spawnedAtMs = Date.now()
   const now = new Date(spawnedAtMs).toISOString()
@@ -389,10 +390,17 @@ export async function runShellWithGrace(opts: RunShellWithGraceOpts): Promise<Ru
   }
 
   const child = spawnBash(
-    wrapCommandWithInlineStreamCapture(opts.command, exitcodeFile, stdoutFile, stderrFile),
+    wrapCommandWithInlineStreamCapture(
+      opts.command,
+      exitcodeFile,
+      stdoutFile,
+      stderrFile,
+      stdoutFifo,
+      stderrFifo,
+    ),
     {
-    stdio: ['ignore', logFd.fd, logFd.fd],
-    cwd: opts.cwd,
+      stdio: ['ignore', logFd.fd, logFd.fd],
+      cwd: opts.cwd,
     },
   )
 
@@ -427,34 +435,41 @@ export async function runShellWithGrace(opts: RunShellWithGraceOpts): Promise<Ru
     const runtimeMs = exitedAt - spawnedAtMs
     void registeredPromise
       .then(async () => {
-        const status: 'completed' | 'failed' = exitCode === 0 ? 'completed' : 'failed'
-        if (opts.traceContext) {
-          emitInstantSpan(opts.traceContext, 'bg_entity_exit', {
-            entity_id,
-            type: 'shell',
-            status,
-            exit_code: exitCode,
-            runtime_ms: runtimeMs,
-          }, status)
-        }
-        await opts.registry.update(entity_id, {
-          status,
-          exit_code: exitCode,
-          ended_at: new Date(exitedAt).toISOString(),
-        } as Partial<BgShellRegistryRecord>)
-        if (opts.onShellExit) {
-          try {
-            opts.onShellExit({
+        try {
+          const status: 'completed' | 'failed' = exitCode === 0 ? 'completed' : 'failed'
+          if (opts.traceContext) {
+            emitInstantSpan(opts.traceContext, 'bg_entity_exit', {
               entity_id,
-              command: opts.command,
+              type: 'shell',
               status,
               exit_code: exitCode,
               runtime_ms: runtimeMs,
-              spawned_at: now,
-            })
-          } catch (err) {
-            console.error(`[bg-shell] onShellExit callback failed for ${entity_id}:`, err)
+            }, status)
           }
+          await opts.registry.update(entity_id, {
+            status,
+            exit_code: exitCode,
+            ended_at: new Date(exitedAt).toISOString(),
+          } as Partial<BgShellRegistryRecord>)
+          if (opts.onShellExit) {
+            try {
+              opts.onShellExit({
+                entity_id,
+                command: opts.command,
+                status,
+                exit_code: exitCode,
+                runtime_ms: runtimeMs,
+                spawned_at: now,
+              })
+            } catch (err) {
+              console.error(`[bg-shell] onShellExit callback failed for ${entity_id}:`, err)
+            }
+          }
+        } finally {
+          await unlinkQuiet(stdoutFile)
+          await unlinkQuiet(stderrFile)
+          await unlinkQuiet(stdoutFifo)
+          await unlinkQuiet(stderrFifo)
         }
       })
       .catch((err: unknown) => {
@@ -473,6 +488,8 @@ export async function runShellWithGrace(opts: RunShellWithGraceOpts): Promise<Ru
     await unlinkQuiet(exitcodeFile)
     await unlinkQuiet(stdoutFile)
     await unlinkQuiet(stderrFile)
+    await unlinkQuiet(stdoutFifo)
+    await unlinkQuiet(stderrFifo)
     return { kind: 'aborted' }
   }
 
@@ -481,18 +498,21 @@ export async function runShellWithGrace(opts: RunShellWithGraceOpts): Promise<Ru
     await unlinkQuiet(exitcodeFile)
     await unlinkQuiet(stdoutFile)
     await unlinkQuiet(stderrFile)
+    await unlinkQuiet(stdoutFifo)
+    await unlinkQuiet(stderrFifo)
     return { kind: 'spawn_error', message: outcome.message }
   }
 
   if (outcome.kind === 'exit') {
     // 宽限期内退出：读分流 stdout/stderr 内联返回，combined log 仅供后台路径使用。
-    await waitForCaptureFilesToSettle(stdoutFile, stderrFile)
     const stdout = await readFileQuiet(stdoutFile)
     const stderr = await readFileQuiet(stderrFile)
     await unlinkQuiet(logFile)
     await unlinkQuiet(exitcodeFile)
     await unlinkQuiet(stdoutFile)
     await unlinkQuiet(stderrFile)
+    await unlinkQuiet(stdoutFifo)
+    await unlinkQuiet(stderrFifo)
     const status: 'completed' | 'failed' = outcome.exitCode === 0 ? 'completed' : 'failed'
     return { kind: 'inline', exitCode: outcome.exitCode, status, stdout, stderr }
   }
@@ -503,10 +523,10 @@ export async function runShellWithGrace(opts: RunShellWithGraceOpts): Promise<Ru
     await unlinkQuiet(exitcodeFile)
     await unlinkQuiet(stdoutFile)
     await unlinkQuiet(stderrFile)
+    await unlinkQuiet(stdoutFifo)
+    await unlinkQuiet(stderrFifo)
     return { kind: 'spawn_error', message: 'no pid after grace' }
   }
-  await unlinkQuiet(stdoutFile)
-  await unlinkQuiet(stderrFile)
   const processStartedAt = await readProcStartTime(child.pid)
   const record: BgShellRegistryRecord = {
     entity_id,
