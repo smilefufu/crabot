@@ -23,6 +23,7 @@ import { validateBackupManifest } from './backup/manifest.js'
 import { runCrabotImport, type ImportDeps } from './backup/import/run-import.js'
 import type { ImportStatus, OnConflict, ImportItemResult } from './backup/import/import-types.js'
 import { shouldDisableOnImport } from './backup/import/schedule-arm.js'
+import { normalizeFriendChannelRefs, normalizeTaskChannelRefs, normalizeScheduleChannelRefs } from './import-channel-ref-normalize.js'
 import { VersionService } from './version/version-service.js'
 import { startUpgrade, canUpgrade, isUpgradeInProgress } from './version/upgrade-runner.js'
 import { readArchiveTextFile, listArchiveEntries } from './openclaw-import/archive-reader.js'
@@ -10277,8 +10278,8 @@ export class AdminModule extends ModuleBase {
         const config = cfgText ? (JSON.parse(cfgText) as Record<string, string>) : null
         return this.channelManager.upsertInstanceById(inst, config, onConflict)
       },
-      upsertFriend: async (r) => this.upsertImportedRecord(this.friends as Map<string, { id: string }>, r as { id: string }, onConflict),
-      upsertTask: async (r) => this.upsertImportedRecord(this.tasks as unknown as Map<string, { id: string }>, r as { id: string }, onConflict),
+      upsertFriend: async (r) => this.upsertImportedRecord(this.friends as Map<string, { id: string }>, normalizeFriendChannelRefs(r as Friend) as { id: string }, onConflict),
+      upsertTask: async (r) => this.upsertImportedRecord(this.tasks as unknown as Map<string, { id: string }>, normalizeTaskChannelRefs(r as Task) as unknown as { id: string }, onConflict),
       upsertSessionConfig: async (r) => {
         // session-configs 导出格式为 { session_id, config } 数组（见 saveDataImpl），按 session_id 归并。
         const entry = r as { session_id: string; config: SessionPermissionConfig }
@@ -10294,7 +10295,7 @@ export class AdminModule extends ModuleBase {
         return status
       },
       upsertSchedule: async (r) => {
-        const sched = r as Schedule
+        const sched = normalizeScheduleChannelRefs(r as Schedule)
         if (shouldDisableOnImport(sched, Date.now())) sched.enabled = false
         const exists = this.schedules.has(sched.id)
         if (exists && onConflict === 'skip') return 'skipped'
