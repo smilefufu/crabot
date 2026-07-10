@@ -18,6 +18,7 @@ export const BUILTIN_SUBAGENT_IDS = {
   codeWriter: 'builtin-code-writer',
   researchCollector: 'builtin-research-collector',
   goalAuditor: 'builtin-goal-auditor',  // Phase 2 新增
+  taskReviewer: 'builtin-task-reviewer',  // 2026-07 agent-loop-efficiency 新增
   specReviewer: 'builtin-spec-reviewer',  // 2026-06 subagent-driven-execution 新增
   codeQualityReviewer: 'builtin-code-quality-reviewer',  // 2026-06 subagent-driven-execution 新增
 } as const
@@ -378,7 +379,54 @@ const GOAL_AUDITOR_VERIFICATION = `调 submit_audit_result 之前自检：
 - 一律 submit_audit_result({pass: false, failed_criteria: [无法验证的 id], evidence: "无法验证：<原因>"})
 - 不要因为自己工具受限就给 worker 放水`
 
+const TASK_REVIEWER_WHEN_TO_USE = `Use this subagent when:
+- 默认使用：单个 code_writer task 已完成，调用方需要一次性审查 spec compliance 和 code quality
+- 输入包含 Task N 完整段文本、FILES_CHANGED、writer 固定尾段、必要的 verification 命令
+
+不要在以下情况使用：
+- 还没有可审代码改动
+- 任务跨多个明显风险域、diff 很大、需要安全/threat model/协议专项证据，或用户明确要求拆审；这些场景才拆成 spec_reviewer / code_quality_reviewer`
+
+const TASK_REVIEWER_ROLE = `你是默认 task 审查员。你收到一个已完成的 code_writer task，必须同时审两个维度：
+- spec_compliance：实施是否严格符合 task 规范，不少做、不多做、不越界修改文件
+- code_quality：实现质量、错误处理、现有风格、测试覆盖是否可接受
+
+你必须读真实代码、必要时跑 verification；不要把 writer 自述当证据。`
+
+const TASK_REVIEWER_WORKFLOW = `接到 task 后：
+1. 读 Task N 完整规范、writer 固定尾段、FILES_CHANGED。
+2. 读每个改动文件，必要时用 git diff 聚焦实际改动。
+3. 跑 task 的 Verification 命令；失败要记录到 spec_compliance 或 code_quality 的 issues。
+4. 先判断 spec_compliance，再判断 code_quality。
+5. Critical / Important 必须进入 NEEDS_FIX；Minor 默认不阻塞。`
+
+const TASK_REVIEWER_DELIVERABLES = `最终 output 必须以以下固定格式结尾：
+
+---
+STATUS: APPROVED | NEEDS_FIX | CANNOT_VERIFY
+spec_compliance:
+  verdict: APPROVED | ISSUES | CANNOT_VERIFY
+  issues: <bullet list；无则写 none>
+code_quality:
+  verdict: APPROVED | ISSUES
+  critical: <bullet list；无则写 none>
+  important: <bullet list；无则写 none>
+  minor: <bullet list；无则写 none>
+assessment: APPROVED | NEEDS_FIX
+EVIDENCE: <file:line 锚点和 verification 命令输出摘要>
+
+assessment 规则：
+- spec_compliance.verdict=APPROVED 且 code_quality 没有 critical/important → APPROVED
+- spec_compliance 有 ISSUES/CANNOT_VERIFY，或 code_quality 有 critical/important → NEEDS_FIX`
+
+const TASK_REVIEWER_VERIFICATION = `返回前自检：
+- 是否读了 FILES_CHANGED 的真实代码或 diff？
+- spec_compliance 的每个 issue 是否有 task step / file:line / 命令输出证据？
+- code_quality 的 critical/important 是否有 file:line？
+- assessment 是否与两个 verdict 一致？`
+
 const SPEC_REVIEWER_WHEN_TO_USE = `Use this subagent when:
+- 专项拆审：默认 task_reviewer 不够时，单独拉 spec 维度做专项合规审
 - 单 task：已有一份代码改动 + 一份 task 规范，需要独立验证「改动是否严格匹配规范」（不少做、不多做）
 - 综合审：一组 task 完成后需要跨 task 综合合规审（如整 plan 跑完后验证 spec 全部需求是否兑现）
 - 实施方已报 STATUS=DONE 或 DONE_WITH_CONCERNS，有具体 FILES_CHANGED 列表（或累计改动）可审
@@ -450,6 +498,7 @@ const SPEC_REVIEWER_VERIFICATION = `返回前自检：
 不允许：跳过 verification、用 mock 替代真实运行、声称"代码看起来对"就 APPROVED。`
 
 const CODE_QUALITY_REVIEWER_WHEN_TO_USE = `Use this subagent when:
+- 专项拆审：默认 task_reviewer 不够时，单独拉 code quality 维度做专项质量审
 - 单个编码 task 完成 spec 合规审后，做工程质量门
 - 一组完成的代码改动需要综合质量审（如整个 plan 跑完后的总览审）
 
@@ -631,9 +680,36 @@ export function getBuiltinSubAgents(): SubAgentRegistryEntry[] {
       updated_at: '2026-05-23T00:00:00.000Z',
     },
     {
+      id: BUILTIN_SUBAGENT_IDS.taskReviewer,
+      name: 'task_reviewer',
+      description: '默认 task 审查员：一次性审 spec_compliance 与 code_quality',
+      when_to_use: TASK_REVIEWER_WHEN_TO_USE,
+      role: TASK_REVIEWER_ROLE,
+      workflow: TASK_REVIEWER_WORKFLOW,
+      deliverables: TASK_REVIEWER_DELIVERABLES,
+      verification: TASK_REVIEWER_VERIFICATION,
+      provider_id: null,
+      model_id: null,
+      model_role: 'powerful',
+      builtin_capabilities: {
+        file_system: true,
+        shell: true,
+        task_intel: false,
+        crab_memory: false,
+        crab_messaging: false,
+      },
+      allowed_mcp_server_ids: ['lsp', 'git'],
+      allowed_skill_ids: [],
+      max_turns: 300,
+      enabled: true,
+      is_builtin: true,
+      created_at: '2026-07-10T00:00:00.000Z',
+      updated_at: '2026-07-10T00:00:00.000Z',
+    },
+    {
       id: BUILTIN_SUBAGENT_IDS.specReviewer,
       name: 'spec_reviewer',
-      description: 'spec 合规审查员：对照 task 规范验证实施代码不少做、不多做',
+      description: 'spec 专项审查员：默认 reviewer 不够时，对照 task 规范验证实施代码不少做、不多做',
       when_to_use: SPEC_REVIEWER_WHEN_TO_USE,
       role: SPEC_REVIEWER_ROLE,
       workflow: SPEC_REVIEWER_WORKFLOW,
@@ -664,7 +740,7 @@ export function getBuiltinSubAgents(): SubAgentRegistryEntry[] {
     {
       id: BUILTIN_SUBAGENT_IDS.codeQualityReviewer,
       name: 'code_quality_reviewer',
-      description: '代码质量审查员：审命名 / 错误处理 / 死代码 / 风格对齐 / 测试覆盖',
+      description: '代码质量专项审查员：默认 reviewer 不够时，审命名 / 错误处理 / 死代码 / 风格对齐 / 测试覆盖',
       when_to_use: CODE_QUALITY_REVIEWER_WHEN_TO_USE,
       role: CODE_QUALITY_REVIEWER_ROLE,
       workflow: CODE_QUALITY_REVIEWER_WORKFLOW,

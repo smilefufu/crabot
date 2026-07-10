@@ -111,6 +111,7 @@ describe('assembleAgentPrompt coding routing policy', () => {
         { toolName: 'research_collector', workerHint: '信息收集类工作的默认派遣对象' },
         { toolName: 'code_planner', workerHint: '复杂编码任务的计划拆解专家' },
         { toolName: 'code_writer', workerHint: '执行一个自包含编码 task' },
+        { toolName: 'task_reviewer', workerHint: '默认 task 审查员：一次性审 spec_compliance 与 code_quality' },
         { toolName: 'spec_reviewer', workerHint: '按 task 规范审查实现是否合规' },
         { toolName: 'code_quality_reviewer', workerHint: '审查代码质量、命名、错误处理和测试覆盖' },
       ],
@@ -124,6 +125,12 @@ describe('assembleAgentPrompt coding routing policy', () => {
     expect(prompt).toContain('bounded execution unit')
     expect(prompt).toContain('需要拆解 / 设计，才派 code_planner')
     expect(prompt).toContain('不要 specification gaming')
+    expect(prompt).toContain('delegate_task(subagent_type="task_reviewer"')
+    expect(prompt).toContain('spec_compliance')
+    expect(prompt).toContain('code_quality')
+    expect(prompt).toContain('只有命中拆分规则才拆成 spec_reviewer / code_quality_reviewer')
+    expect(prompt).toContain('同一 task review-fix 循环 ≥3 次仍未通过')
+    expect(prompt).not.toContain('一个 message 内 batch 派两类 reviewer')
 
     expect(prompt).not.toContain('main 是 coordinator')
     expect(prompt).not.toContain('main 负责 task slicing')

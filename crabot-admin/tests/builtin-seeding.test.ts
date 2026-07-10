@@ -89,14 +89,15 @@ describe('getBuiltinSkills', () => {
 })
 
 describe('getBuiltinSubAgents', () => {
-  it('返回 6 个 builtin subagent', () => {
+  it('返回 7 个 builtin subagent', () => {
     const list = getBuiltinSubAgents()
-    expect(list).toHaveLength(6)
+    expect(list).toHaveLength(7)
     expect(list.map((s) => s.id).sort()).toEqual([
       BUILTIN_SUBAGENT_IDS.codePlanner,
       BUILTIN_SUBAGENT_IDS.codeWriter,
       BUILTIN_SUBAGENT_IDS.researchCollector,
       BUILTIN_SUBAGENT_IDS.goalAuditor,
+      BUILTIN_SUBAGENT_IDS.taskReviewer,
       BUILTIN_SUBAGENT_IDS.specReviewer,
       BUILTIN_SUBAGENT_IDS.codeQualityReviewer,
     ].sort())
@@ -159,6 +160,16 @@ describe('getBuiltinSubAgents', () => {
     expect(w.hook_preset).toBe('lsp_diagnostics')
   })
 
+  it('task_reviewer is the default combined task review gate', () => {
+    const r = getBuiltinSubAgents().find((s) => s.name === 'task_reviewer')!
+    expect(r.description).toContain('默认 task 审查员')
+    expect(r.when_to_use).toContain('默认使用')
+    expect(r.deliverables).toContain('spec_compliance:')
+    expect(r.deliverables).toContain('code_quality:')
+    expect(r.deliverables).toContain('assessment: APPROVED | NEEDS_FIX')
+    expect(r.allowed_mcp_server_ids).toEqual(['lsp', 'git'])
+  })
+
   it('research_collector 使用 vision role + 通用调查员 capabilities 全开', () => {
     // memory: feedback_research_collector_is_general — 2026-05-21 把 capabilities 全开恢复
     // 原意（通用调查员，不是 web 专科），断言同步跟上代码 entry。
@@ -190,6 +201,7 @@ describe('getBuiltinSubAgents', () => {
     expect(byName.code_writer).toEqual(['lsp', 'git'])
     expect(byName.research_collector).toEqual(['scrapling', 'lsp', 'git'])
     expect(byName.goal_auditor).toEqual(['git'])
+    expect(byName.task_reviewer).toEqual(['lsp', 'git'])
     expect(byName.spec_reviewer).toEqual(['git'])
     expect(byName.code_quality_reviewer).toEqual(['lsp', 'git'])
   })
@@ -209,15 +221,15 @@ describe('SubAgentManager.seedBuiltin via getBuiltinSubAgents', () => {
     rmSync(tmpDir2, { recursive: true, force: true })
   })
 
-  it('空 registry 注入全 6 个', async () => {
+  it('空 registry 注入全 7 个', async () => {
     await mgr2.seedBuiltin(getBuiltinSubAgents())
-    expect(mgr2.list()).toHaveLength(6)
+    expect(mgr2.list()).toHaveLength(7)
   })
 
   it('idempotent — 第二次调用不变', async () => {
     await mgr2.seedBuiltin(getBuiltinSubAgents())
     await mgr2.seedBuiltin(getBuiltinSubAgents())
-    expect(mgr2.list()).toHaveLength(6)
+    expect(mgr2.list()).toHaveLength(7)
   })
 })
 
