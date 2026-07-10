@@ -75,6 +75,7 @@ import type { SubAgentTraceConfig } from '../engine/sub-agent.js'
 import { createDelegateTaskTool } from './delegate-task-tool.js'
 import type { RunSubAgentFn, RunSubAgentInput } from './delegate-task-tool.js'
 import { createSubagentCoordinatorTools } from './subagent-coordinator-tools.js'
+import { createTmpPageTools } from './tmp-page-tools.js'
 import { createRequestRestartTool } from './restart-instance-tool.js'
 import { buildSubAgentFailureOutput } from './subagent-error-classifier.js'
 import { filterToolsForSubAgent } from './subagent-tool-filter.js'
@@ -1232,6 +1233,12 @@ export class AgentHandler {
           const externalTools = this.mcpConnector.getAllTools()
           tools.push(...externalTools)
         }
+
+        tools.push(...createTmpPageTools({
+          dataDir: getAdminDataDir(),
+          getTmpPageBaseUrl: () => this.tmpPageBaseUrl,
+          taskId: task.task_id,
+        }))
 
         // task-scoped cwd（getCwd/setCwd 声明在 buildToolsDynamic 外，跨 turn 持久——见上）。
         // 子 subagent 通过 parentTools 继承 main 的工具列表（其工具内部 closure 在 getCwd 上），

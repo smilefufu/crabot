@@ -42,14 +42,20 @@ describe('UnifiedAgent.handleDeliverPageFeedback (deliver_page_feedback RPC)', (
       wakeForPageFeedback: wake,
     }
 
-    const result = agent.handleDeliverPageFeedback({ task_id: 't1' })
+    const result = agent.handleDeliverPageFeedback({ task_id: 't1', page_id: 'page_abcdefghijklmnop' })
 
     expect(result.delivered).toBe(true)
     expect(wake).toHaveBeenCalledOnce()
     const [taskId, note] = wake.mock.calls[0] as [string, string]
     expect(taskId).toBe('t1')
     expect(note).toContain('[系统]')
-    expect(note).toContain('events.jsonl')
+    expect(note).toContain('page_abcdefghijklmnop')
+    expect(note).toContain('tmp_page_read_events')
+    expect(note).toContain('"page_id": "page_abcdefghijklmnop"')
+    expect(note).not.toContain('$DATA_DIR')
+    expect(note).not.toContain('.crabot')
+    expect(note).not.toContain('events.jsonl')
+    expect(note).not.toContain('CRABOT_TMP_PAGE_PORT')
   })
 
   it('task 不活跃 → 返回 {delivered:false,reason:"not_active"}，不调 wake', () => {
@@ -60,7 +66,7 @@ describe('UnifiedAgent.handleDeliverPageFeedback (deliver_page_feedback RPC)', (
       wakeForPageFeedback: wake,
     }
 
-    const result = agent.handleDeliverPageFeedback({ task_id: 'gone' })
+    const result = agent.handleDeliverPageFeedback({ task_id: 'gone', page_id: 'page_abcdefghijklmnop' })
 
     expect(result.delivered).toBe(false)
     expect(result.reason).toBe('not_active')
@@ -71,7 +77,7 @@ describe('UnifiedAgent.handleDeliverPageFeedback (deliver_page_feedback RPC)', (
     const agent = Object.create(UnifiedAgent.prototype) as any
     agent.agentHandler = undefined
 
-    expect(() => agent.handleDeliverPageFeedback({ task_id: 't1' })).toThrow(
+    expect(() => agent.handleDeliverPageFeedback({ task_id: 't1', page_id: 'page_abcdefghijklmnop' })).toThrow(
       'Worker handler not configured',
     )
   })
