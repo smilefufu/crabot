@@ -194,6 +194,39 @@ describe('tmp-page tools', () => {
     expect(meta.expires_at).toBe('2026-07-10T02:00:00.000Z')
   })
 
+  it('rejects invalid update field types instead of reporting a no-op success', async () => {
+    currentDataDir = await mkdtemp(path.join(tmpdir(), 'tmp-page-tools-'))
+    await callTool('tmp_page_create', { title: 'Initial', html: '<h1>old</h1>' })
+
+    const badHtml = await callTool('tmp_page_update', {
+      page_id: '00112233445566778899aabbccddeeff',
+      html: 123,
+      title: '',
+    })
+    expect(badHtml.isError).toBe(true)
+    expect(badHtml.json).toEqual({
+      success: false,
+      error_code: 'TMP_PAGE_INVALID_HTML',
+      page_id: '00112233445566778899aabbccddeeff',
+    })
+
+    const badTtl = await callTool('tmp_page_update', {
+      page_id: '00112233445566778899aabbccddeeff',
+      ttl_seconds: '3600',
+    })
+    expect(badTtl.isError).toBe(true)
+    expect(badTtl.json).toEqual({
+      success: false,
+      error_code: 'TMP_PAGE_INVALID_TTL',
+      page_id: '00112233445566778899aabbccddeeff',
+    })
+
+    const pageDir = path.join(currentDataDir, 'tmp-pages', '00112233445566778899aabbccddeeff')
+    const meta = JSON.parse(await readFile(path.join(pageDir, 'meta.json'), 'utf8'))
+    expect(meta.title).toBe('Initial')
+    expect(await readFile(path.join(pageDir, 'page.html'), 'utf8')).toContain('old')
+  })
+
   it('reads events incrementally and marks them untrusted', async () => {
     currentDataDir = await mkdtemp(path.join(tmpdir(), 'tmp-page-tools-'))
     await callTool('tmp_page_create', { title: 'Feedback', html: '<button>ok</button>' })
@@ -221,6 +254,40 @@ describe('tmp-page tools', () => {
     ])
     expect(result.json.next_after_event_id).toBe(4)
     expect(result.output).not.toContain('events.jsonl')
+  })
+
+  it('keeps large anonymous event output as complete JSON under the orchestration cap', async () => {
+    currentDataDir = await mkdtemp(path.join(tmpdir(), 'tmp-page-tools-'))
+    await callTool('tmp_page_create', { title: 'Feedback', html: '<button>ok</button>' })
+    const pageDir = path.join(currentDataDir, 'tmp-pages', '00112233445566778899aabbccddeeff')
+    const bigPayload = 'x'.repeat(60_000)
+    await writeFile(
+      path.join(pageDir, 'events.jsonl'),
+      Array.from({ length: 5 }, (_, i) => JSON.stringify({
+        at: `2026-07-10T00:0${i}:00.000Z`,
+        data: { payload: bigPayload },
+      })).join('\n') + '\n',
+    )
+
+    const result = await callTool('tmp_page_read_events', {
+      page_id: '00112233445566778899aabbccddeeff',
+      limit: 200,
+    })
+
+    expect(result.isError).toBe(false)
+    expect(Buffer.byteLength(result.output, 'utf8')).toBeLessThan(200_000)
+    expect(result.json.next_after_event_id).toBe(5)
+    expect(result.json.events).toHaveLength(5)
+    expect(result.json.events).toEqual(result.json.events.map((event: any, index: number) => ({
+      event_id: index + 1,
+      at: `2026-07-10T00:0${index}:00.000Z`,
+      data: {
+        truncated: true,
+        original_type: 'object',
+        preview: expect.any(String),
+      },
+      trusted: false,
+    })))
   })
 
   it('lists and deletes pages without leaking paths', async () => {
@@ -269,6 +336,18 @@ describe('tmp-page tools', () => {
     const badId = await callTool('tmp_page_delete', { page_id: '../bad' })
     expect(badId.isError).toBe(true)
     expect(badId.output).toContain('TMP_PAGE_INVALID_ID')
+
+    const badCreate = await callTool('tmp_page_create', {
+      title: 'Bad',
+      html: '<p>x</p>',
+      ttl_seconds: '3600',
+    })
+    expect(badCreate.isError).toBe(true)
+    expect(badCreate.output).toContain('TMP_PAGE_INVALID_TTL')
+
+    const badList = await callTool('tmp_page_list', { include_expired: 'yes' })
+    expect(badList.isError).toBe(true)
+    expect(badList.output).toContain('TMP_PAGE_INVALID_INCLUDE_EXPIRED')
   })
 
   it('exports exactly the Worker-facing tmp_page tools and no wait tool', async () => {

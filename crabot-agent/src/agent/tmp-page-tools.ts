@@ -1,10 +1,12 @@
 import { randomBytes as nodeRandomBytes } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { createReadStream, existsSync } from 'node:fs'
 import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import net from 'node:net'
 import path from 'node:path'
+import { createInterface } from 'node:readline'
 import type { ToolCallResult, ToolDefinition } from '../engine/types.js'
+import { byteLength, truncateUtf8 } from '../engine/byte-cap.js'
 
 export interface TmpPageToolsDeps {
   readonly dataDir: string
@@ -29,6 +31,13 @@ interface TmpPageMeta {
   readonly mode: 'single' | 'multi'
 }
 
+interface TmpPageEvent {
+  readonly event_id: number
+  readonly at: string
+  readonly data: unknown
+  readonly trusted: false
+}
+
 const PAGE_ID_RE = /^[A-Za-z0-9_-]{16,}$/
 const DEFAULT_TTL_SECONDS = 24 * 60 * 60
 const MIN_TTL_SECONDS = 60
@@ -36,6 +45,9 @@ const MAX_TTL_SECONDS = 7 * 24 * 60 * 60
 const DEFAULT_TMP_PAGE_PORT = 19099
 const DEFAULT_SERVER_STARTUP_TIMEOUT_MS = 5_000
 const DEFAULT_SERVER_PROBE_INTERVAL_MS = 50
+const MAX_READ_EVENTS_OUTPUT_BYTES = 200_000
+const MAX_SINGLE_EVENT_BYTES = 40_000
+const MAX_EVENT_PREVIEW_BYTES = 8_000
 const serverStartPromises = new Map<string, Promise<void>>()
 
 function ok(data: unknown): ToolCallResult {
@@ -46,10 +58,13 @@ function fail(error_code: string, extra: Record<string, unknown> = {}): ToolCall
   return { isError: true, output: JSON.stringify({ success: false, error_code, ...extra }) }
 }
 
-function clampTtl(input: unknown): number {
+function clampTtl(input: number | undefined): number {
   if (input === undefined) return DEFAULT_TTL_SECONDS
-  if (typeof input !== 'number' || !Number.isFinite(input)) return DEFAULT_TTL_SECONDS
   return Math.min(Math.max(Math.trunc(input), MIN_TTL_SECONDS), MAX_TTL_SECONDS)
+}
+
+function isValidTtl(input: unknown): boolean {
+  return input === undefined || (typeof input === 'number' && Number.isFinite(input))
 }
 
 function pageIdFrom(input: unknown): string | undefined {
@@ -93,6 +108,49 @@ function makePageId(deps: TmpPageToolsDeps): string {
 function getBaseUrl(deps: TmpPageToolsDeps): string | undefined {
   const base = deps.getTmpPageBaseUrl()?.trim()
   return base ? base.replace(/\/+$/, '') : undefined
+}
+
+function safeJson(data: unknown): string {
+  try {
+    return JSON.stringify(data)
+  } catch {
+    return JSON.stringify(String(data))
+  }
+}
+
+function eventJsonBytes(event: TmpPageEvent): number {
+  return byteLength(safeJson(event))
+}
+
+function fitEventForOutput(event: TmpPageEvent): TmpPageEvent {
+  if (eventJsonBytes(event) <= MAX_SINGLE_EVENT_BYTES) return event
+  const originalType = Array.isArray(event.data) ? 'array' : typeof event.data
+  const raw = typeof event.data === 'string' ? event.data : safeJson(event.data)
+  let previewBytes = MAX_EVENT_PREVIEW_BYTES
+  let fitted: TmpPageEvent = {
+    ...event,
+    data: {
+      truncated: true,
+      original_type: originalType,
+      preview: truncateUtf8(raw, previewBytes),
+    },
+  }
+  while (eventJsonBytes(fitted) > MAX_SINGLE_EVENT_BYTES && previewBytes > 256) {
+    previewBytes = Math.floor(previewBytes / 2)
+    fitted = {
+      ...event,
+      data: {
+        truncated: true,
+        original_type: originalType,
+        preview: truncateUtf8(raw, previewBytes),
+      },
+    }
+  }
+  return fitted
+}
+
+function readEventsOutputBytes(page_id: string, events: TmpPageEvent[], next_after_event_id: number): number {
+  return byteLength(JSON.stringify({ page_id, events, next_after_event_id }))
 }
 
 function defaultServerScriptPath(): string {
@@ -217,12 +275,15 @@ export function createTmpPageTools(deps: TmpPageToolsDeps): ToolDefinition[] {
         if (!base) return fail('TMP_PAGE_BASE_URL_MISSING')
         if (typeof input.title !== 'string' || input.title.trim() === '') return fail('TMP_PAGE_INVALID_TITLE')
         if (typeof input.html !== 'string' || input.html.trim() === '') return fail('TMP_PAGE_INVALID_HTML')
+        if (!isValidTtl(input.ttl_seconds)) return fail('TMP_PAGE_INVALID_TTL')
+        if (input.mode !== undefined && input.mode !== 'single' && input.mode !== 'multi') return fail('TMP_PAGE_INVALID_MODE')
         try {
           await ensureTmpPageServer(deps)
         } catch {
           return fail('TMP_PAGE_SERVER_START_FAILED')
         }
 
+        const ttlSeconds = input.ttl_seconds as number | undefined
         const page_id = makePageId(deps)
         const currentTime = now()
         const mode = input.mode === 'multi' ? 'multi' : 'single'
@@ -231,7 +292,7 @@ export function createTmpPageTools(deps: TmpPageToolsDeps): ToolDefinition[] {
           created_at: currentTime.toISOString(),
           title: input.title.trim(),
           owner_task_id: deps.taskId,
-          expires_at: expiresAt(currentTime, clampTtl(input.ttl_seconds)),
+          expires_at: expiresAt(currentTime, clampTtl(ttlSeconds)),
           mode,
         }
 
@@ -269,6 +330,12 @@ export function createTmpPageTools(deps: TmpPageToolsDeps): ToolDefinition[] {
         if (input.html === undefined && input.title === undefined && input.ttl_seconds === undefined) {
           return fail('TMP_PAGE_EMPTY_UPDATE')
         }
+        if (input.html !== undefined && typeof input.html !== 'string') return fail('TMP_PAGE_INVALID_HTML', { page_id })
+        if (input.title !== undefined && (typeof input.title !== 'string' || input.title.trim() === '')) {
+          return fail('TMP_PAGE_INVALID_TITLE', { page_id })
+        }
+        if (!isValidTtl(input.ttl_seconds)) return fail('TMP_PAGE_INVALID_TTL', { page_id })
+        const ttlSeconds = input.ttl_seconds as number | undefined
 
         const dir = pageDir(deps.dataDir, page_id)
         const prev = await readMeta(dir)
@@ -277,7 +344,7 @@ export function createTmpPageTools(deps: TmpPageToolsDeps): ToolDefinition[] {
         const next: TmpPageMeta = {
           ...prev,
           ...(typeof input.title === 'string' && input.title.trim() ? { title: input.title.trim() } : {}),
-          ...(input.ttl_seconds !== undefined ? { expires_at: expiresAt(now(), clampTtl(input.ttl_seconds)) } : {}),
+          ...(ttlSeconds !== undefined ? { expires_at: expiresAt(now(), clampTtl(ttlSeconds)) } : {}),
         }
         try {
           if (typeof input.html === 'string') {
@@ -313,23 +380,14 @@ export function createTmpPageTools(deps: TmpPageToolsDeps): ToolDefinition[] {
         if (!meta) return fail('TMP_PAGE_NOT_FOUND', { page_id })
 
         const after = typeof input.after_event_id === 'number' ? Math.trunc(input.after_event_id) : 0
-        const limit = Math.min(Math.max(typeof input.limit === 'number' ? Math.trunc(input.limit) : 50, 1), 200)
-        let raw = ''
-        try {
-          raw = await readFile(path.join(dir, 'events.jsonl'), 'utf8')
-        } catch {
-          raw = ''
+        if (input.after_event_id !== undefined && (typeof input.after_event_id !== 'number' || !Number.isFinite(input.after_event_id) || after < 0)) {
+          return fail('TMP_PAGE_INVALID_AFTER_EVENT_ID', { page_id })
         }
-
-        const lines = raw === ''
-          ? []
-          : raw.endsWith('\n')
-            ? raw.slice(0, -1).split('\n')
-            : raw.split('\n')
-        const events = lines
-          .map((line, idx) => eventFromLine(line, idx + 1))
-          .filter((event) => event.event_id > after)
-          .slice(0, limit)
+        if (input.limit !== undefined && (typeof input.limit !== 'number' || !Number.isFinite(input.limit))) {
+          return fail('TMP_PAGE_INVALID_LIMIT', { page_id })
+        }
+        const limit = Math.min(Math.max(typeof input.limit === 'number' ? Math.trunc(input.limit) : 50, 1), 200)
+        const events = await readEvents(path.join(dir, 'events.jsonl'), page_id, after, limit)
         const next_after_event_id = events.length > 0 ? events[events.length - 1].event_id : after
 
         return ok({ page_id, events, next_after_event_id })
@@ -368,6 +426,9 @@ export function createTmpPageTools(deps: TmpPageToolsDeps): ToolDefinition[] {
       call: async (input) => {
         const base = getBaseUrl(deps)
         if (!base) return fail('TMP_PAGE_BASE_URL_MISSING')
+        if (input.include_expired !== undefined && typeof input.include_expired !== 'boolean') {
+          return fail('TMP_PAGE_INVALID_INCLUDE_EXPIRED')
+        }
         let ids: string[] = []
         try {
           ids = await readdir(pagesRoot(deps.dataDir))
@@ -399,7 +460,38 @@ export function createTmpPageTools(deps: TmpPageToolsDeps): ToolDefinition[] {
   ]
 }
 
-function eventFromLine(line: string, event_id: number): { event_id: number; at: string; data: unknown; trusted: false } {
+async function readEvents(filePath: string, page_id: string, after: number, limit: number): Promise<TmpPageEvent[]> {
+  if (!existsSync(filePath)) return []
+
+  const events: TmpPageEvent[] = []
+  let event_id = 0
+  const rl = createInterface({
+    input: createReadStream(filePath, { encoding: 'utf8' }),
+    crlfDelay: Infinity,
+  })
+
+  for await (const line of rl) {
+    event_id += 1
+    if (event_id <= after) continue
+
+    const event = fitEventForOutput(eventFromLine(line, event_id))
+    const candidate = [...events, event]
+    if (
+      events.length > 0
+      && readEventsOutputBytes(page_id, candidate, event.event_id) > MAX_READ_EVENTS_OUTPUT_BYTES
+    ) {
+      break
+    }
+
+    events.push(event)
+    if (events.length >= limit) break
+  }
+
+  rl.close()
+  return events
+}
+
+function eventFromLine(line: string, event_id: number): TmpPageEvent {
   try {
     const parsed = JSON.parse(line) as unknown
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
