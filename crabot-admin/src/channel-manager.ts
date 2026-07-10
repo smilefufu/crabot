@@ -588,12 +588,15 @@ export class ChannelManager {
     config: Record<string, string> | null,
     onConflict: OnConflict,
   ): Promise<'imported' | 'overwritten' | 'skipped'> {
-    const exists = this.instances.has(instance.id)
+    // 备份可能来自 macOS（NFD 文件名），归一化后再匹配，防跨平台 id 对不上号
+    const id = instance.id.normalize('NFC')
+    const normalized: ChannelInstance = { ...instance, id, name: instance.name.normalize('NFC') }
+    const exists = this.instances.has(id)
     if (exists && onConflict === 'skip') return 'skipped'
-    this.instances.set(instance.id, instance)
+    this.instances.set(id, normalized)
     await this.saveInstances()
     if (config !== null) {
-      await this.saveLocalConfig(instance.id, config)
+      await this.saveLocalConfig(id, config)
     }
     return exists ? 'overwritten' : 'imported'
   }
