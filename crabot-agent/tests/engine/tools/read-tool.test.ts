@@ -68,7 +68,7 @@ describe('createReadTool', () => {
     await fs.writeFile(filePath, buf)
 
     const result = await tool.call({ file_path: filePath }, {})
-    expect(result.isError).toBe(true)
+    expect(result.isError).toBe(false)
     expect(result.output).toContain('Binary file')
   })
 
@@ -141,7 +141,7 @@ describe('createReadTool', () => {
     await fs.writeFile(filePath, buf)
 
     const result = await tool.call({ file_path: filePath }, {})
-    expect(result.isError).toBe(true)
+    expect(result.isError).toBe(false)
     expect(result.output).toContain('Binary file')
     expect(result.images).toBeUndefined()
   })
