@@ -8,7 +8,7 @@ import fs from 'fs/promises'
 import fsSync from 'fs'
 import path from 'path'
 import yaml from 'js-yaml'
-import { generateTimestamp, type RpcClient } from 'crabot-shared'
+import { generateTimestamp, type RpcClient, validateInstanceId } from 'crabot-shared'
 import type {
   ChannelImplementation,
   ChannelInstance,
@@ -188,8 +188,12 @@ export class ChannelManager {
       throw new Error(`Implementation not found: ${params.implementation_id}`)
     }
 
-    // 实例名即 module_id，确保唯一性
-    const instanceId = params.name
+    // 实例名即 module_id：校验 + NFC 归一化（crabot-module-spec.md §4.3），确保唯一性
+    const validated = validateInstanceId(params.name)
+    if (!validated.ok) {
+      throw new Error(`Invalid instance name: ${validated.reason}`)
+    }
+    const instanceId = validated.id
     if (this.instances.has(instanceId)) {
       throw new Error(`Instance name already exists: ${params.name}`)
     }
@@ -200,7 +204,7 @@ export class ChannelManager {
     const instance: ChannelInstance = {
       id: instanceId,
       implementation_id: params.implementation_id,
-      name: params.name,
+      name: instanceId,
       platform,
       auto_start: params.auto_start ?? false,
       start_priority: 30,
