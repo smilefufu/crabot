@@ -249,24 +249,26 @@ const WORKFLOW_PLANNING_AND_EXECUTION = `[规划与执行]
       · BLOCKED                       → 判断是任务切分、模型能力、环境还是需求问题；不盲目重试
 
     reviewer 状态处理（默认 task_reviewer）：
-      · assessment=APPROVED           → todo 这一项完成
+      · assessment=APPROVED 且 code_quality minor=none
+                                      → todo 这一项完成
+      · assessment=APPROVED 且仅 code_quality minor
+                                      → 自行判断是否值得修；默认不阻塞
       · spec_compliance ISSUES/CANNOT_VERIFY
         或 code_quality critical/important
                                       → 派 writer 一次性修复必须修的问题
                                          → 修完后重新跑 task_reviewer
-      · 仅 code_quality minor         → 自行判断是否值得修
       · 缺少固定尾段或 verdict 字段     → 作为 subagent contract issue，补上下文后重派或升级
       （同一 task review-fix 循环 ≥3 次仍未通过 → send_message(intent="ask_human")）
 
     reviewer 状态处理（split reviewers）：
-      · spec_reviewer=APPROVED 且 code_quality_reviewer=APPROVED
+      · spec_reviewer=APPROVED 且 code_quality_reviewer=APPROVED，且 NIT=none
                                       → todo 这一项完成
+      · spec_reviewer=APPROVED 且 code_quality_reviewer=APPROVED，且仅有 NIT
+                                      → 视情况自行处理，默认不阻塞
       · spec_reviewer=NEEDS_FIX
         或 code_quality_reviewer=ISSUES 且含 Critical / Important
                                       → 把两边必须修的问题合并后一次性派 writer
                                          → 修完后重新跑对应 split reviewers
-      · 仅 code_quality_reviewer 的 minor / nit
-                                      → 视情况自行处理，默认不阻塞
       · split reviewer 缺少 STATUS，或在 NEEDS_FIX / ISSUES 时缺少对应问题字段
         （spec: MISSING / EXTRA；quality: CRITICAL / IMPORTANT / NIT）
                                       → 作为 subagent contract issue，补上下文后重派或升级
