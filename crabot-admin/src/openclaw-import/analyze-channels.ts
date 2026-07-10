@@ -7,6 +7,7 @@
  */
 import type { OpenClawChannelAccount, OpenClawChannelsConfig } from './openclaw-config.js'
 import { resolveSecret } from './resolve-secret.js'
+import { isValidChannelInstanceName } from './channel-instance-name.js'
 
 export type AnalyzedChannel = {
   /** OpenClaw channels 的 key（如 feishu/telegram） */
@@ -20,7 +21,7 @@ export type AnalyzedChannel = {
   feishu_domain?: 'feishu' | 'lark'
   /** 必需明文 secret 是否齐全（available 才能无痛迁，unavailable 需用户手填） */
   credentials?: 'available' | 'unavailable'
-  skip_reason?: 'unsupported-channel'
+  skip_reason?: 'unsupported-channel' | 'invalid-name'
 }
 
 const MIGRATABLE: Record<string, Pick<AnalyzedChannel, 'crabot_type' | 'feishu_domain'>> = {
@@ -65,6 +66,12 @@ export function analyzeChannels(channels: OpenClawChannelsConfig | undefined): A
     }
 
     for (const [account_id, account] of accounts) {
+      // 派生实例名非法（account_id 含大写/点号等）→ 预览即标不可迁，
+      // 与执行侧（import-channels）判定一致，避免“预览可迁、执行跳过”。
+      if (!isValidChannelInstanceName(source_channel, account_id)) {
+        result.push({ source_channel, account_id, channel, migratable: false, skip_reason: 'invalid-name' })
+        continue
+      }
       result.push({
         source_channel,
         account_id,

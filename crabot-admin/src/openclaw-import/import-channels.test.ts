@@ -63,7 +63,7 @@ describe('importChannels', () => {
     expect(results).toEqual([{ kind: 'channel', name: 'feishu-ref', status: 'skipped', reason: 'missing-secret' }])
   })
 
-  it('createChannel 因非法实例名抛异常 → 记为 skipped 且不中断循环，其余 channel 继续导入', async () => {
+  it('account_id 派生出非法实例名（Bad.Name）→ 预校验跳过 invalid-name，不调 createChannel；合法账号仍导入', async () => {
     const twoAccounts: OpenClawChannelsConfig = {
       feishu: {
         accounts: {
@@ -73,12 +73,6 @@ describe('importChannels', () => {
       },
     }
     const { created, deps } = makeDeps()
-    deps.createChannel = vi.fn(async (p: CreateChannelInstanceParams) => {
-      if (p.name.includes('Bad.Name')) {
-        throw new Error(`Invalid instance name: ${p.name}`)
-      }
-      created.push(p)
-    })
 
     const results = await importChannels(
       twoAccounts,
@@ -89,15 +83,23 @@ describe('importChannels', () => {
       deps,
     )
 
-    expect(deps.createChannel).toHaveBeenCalledTimes(2)
+    // 非法名走确定性预校验跳过，不进入 createChannel
+    expect(deps.createChannel).toHaveBeenCalledTimes(1)
+    expect(created.map((p) => p.name)).toEqual(['feishu-main'])
     expect(results).toEqual([
-      {
-        kind: 'channel',
-        name: 'feishu-Bad.Name',
-        status: 'skipped',
-        reason: 'Invalid instance name: feishu-Bad.Name',
-      },
+      { kind: 'channel', name: 'feishu-Bad.Name', status: 'skipped', reason: 'invalid-name' },
       { kind: 'channel', name: 'feishu-main', status: 'imported' },
     ])
+  })
+
+  it('createChannel 抛运行时错误（如磁盘/MM 故障）→ 向上传播，不吞成 skipped', async () => {
+    const { deps } = makeDeps()
+    deps.createChannel = vi.fn(async () => {
+      throw new Error('ENOSPC: no space left on device')
+    })
+
+    await expect(
+      importChannels(channels, [{ source_channel: 'feishu', account_id: 'main' }], deps),
+    ).rejects.toThrow(/ENOSPC/)
   })
 })

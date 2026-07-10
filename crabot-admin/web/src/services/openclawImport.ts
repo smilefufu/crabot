@@ -24,7 +24,7 @@ export interface ChannelOverviewItem {
   crabot_type?: 'telegram' | 'feishu'
   feishu_domain?: 'feishu' | 'lark'
   credentials?: 'available' | 'unavailable'
-  skip_reason?: 'unsupported-channel'
+  skip_reason?: 'unsupported-channel' | 'invalid-name'
 }
 
 export interface McpOverviewItem {
@@ -59,7 +59,7 @@ export interface ImportSummary {
     kind: 'provider' | 'channel' | 'mcp' | 'skill' | 'memory' | 'workspace'
     name: string
     status: 'imported' | 'skipped'
-    reason?: 'conflict' | 'not-migratable' | 'missing-secret'
+    reason?: 'conflict' | 'not-migratable' | 'missing-secret' | 'invalid-name'
   }>
   errors: string[]
 }
