@@ -66,19 +66,19 @@ export function exitcodeFileForLog(logFile: string): string {
   return logFile.replace(/\.log$/, '.exitcode')
 }
 
-function stdoutFileForLog(logFile: string): string {
+export function stdoutFileForLog(logFile: string): string {
   return logFile.replace(/\.log$/, '.stdout')
 }
 
-function stderrFileForLog(logFile: string): string {
+export function stderrFileForLog(logFile: string): string {
   return logFile.replace(/\.log$/, '.stderr')
 }
 
-function stdoutFifoForLog(logFile: string): string {
+export function stdoutFifoForLog(logFile: string): string {
   return logFile.replace(/\.log$/, '.stdout.fifo')
 }
 
-function stderrFifoForLog(logFile: string): string {
+export function stderrFifoForLog(logFile: string): string {
   return logFile.replace(/\.log$/, '.stderr.fifo')
 }
 
