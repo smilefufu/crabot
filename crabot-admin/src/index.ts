@@ -29,7 +29,7 @@ import { readArchiveTextFile, listArchiveEntries } from './openclaw-import/archi
 import { extractArchiveSubtree } from './openclaw-import/extract-subtree.js'
 import { BrowserManager } from './browser-manager.js'
 import { PermissionTemplateManager } from './permission-template-manager.js'
-import { decodePathSegment } from './http-path.js'
+import { decodePathSegment, isPathSafeSegment } from './http-path.js'
 import {
   ModuleBase,
   type ModuleConfig,
@@ -1983,6 +1983,10 @@ export class AdminModule extends ModuleBase {
       // 模块配置管理 API
       if (req.method === 'GET' && pathname.match(/^\/api\/modules\/[^/]+\/config$/)) {
         const moduleId = decodePathSegment(pathname, 3)
+        if (!isPathSafeSegment(moduleId)) {
+          sendJson(res, 400, { error: 'Invalid module id' })
+          return
+        }
         const result = await this.handleGetModuleConfig({ module_id: moduleId })
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(result))
@@ -1991,6 +1995,10 @@ export class AdminModule extends ModuleBase {
 
       if (req.method === 'PUT' && pathname.match(/^\/api\/modules\/[^/]+\/config$/)) {
         const moduleId = decodePathSegment(pathname, 3)
+        if (!isPathSafeSegment(moduleId)) {
+          sendJson(res, 400, { error: 'Invalid module id' })
+          return
+        }
         const body = await this.readJsonBody<{ config: Record<string, string> }>(req)
         const result = await this.handleSetModuleConfig({
           module_id: moduleId,

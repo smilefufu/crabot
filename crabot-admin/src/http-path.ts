@@ -14,3 +14,11 @@ export function decodePathSegment(pathname: string, index: number): string {
     return segment
   }
 }
+
+/**
+ * 解码后的路径段用于文件路径拼接前的安全检查。
+ * percent-encoding 解码可能引入 '/'、'\'，拼进 path.join 会逃逸目标目录。
+ */
+export function isPathSafeSegment(segment: string): boolean {
+  return segment.length > 0 && !segment.includes('/') && !segment.includes('\\')
+}
