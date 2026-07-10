@@ -261,9 +261,9 @@ const WORKFLOW_PLANNING_AND_EXECUTION = `[规划与执行]
       （同一 task review-fix 循环 ≥3 次仍未通过 → send_message(intent="ask_human")）
 
     reviewer 状态处理（split reviewers）：
-      · spec_reviewer=APPROVED 且 code_quality_reviewer=APPROVED，且 NIT=none
+      · spec_reviewer=APPROVED 且 code_quality_reviewer=APPROVED，且未返回 NIT 字段
                                       → todo 这一项完成
-      · spec_reviewer=APPROVED 且 code_quality_reviewer=APPROVED，且仅有 NIT
+      · spec_reviewer=APPROVED 且 code_quality_reviewer=APPROVED，且返回了 NIT
                                       → 视情况自行处理，默认不阻塞
       · spec_reviewer=NEEDS_FIX
         或 code_quality_reviewer=ISSUES 且含 Critical / Important
