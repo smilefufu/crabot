@@ -81,7 +81,7 @@ function formatBashToolExecutionError(
   return truncateOutput(parts.join('\n')).trim()
 }
 
-function extractExitCode(error: Error & Partial<NodeJS.ErrnoException>): number | null {
+function extractExitCode(error: { code?: string | number | null }): number | null {
   return typeof error.code === 'number' ? error.code : null
 }
 
