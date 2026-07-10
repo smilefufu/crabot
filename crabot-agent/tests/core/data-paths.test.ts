@@ -3,6 +3,7 @@ import { resolve } from 'node:path'
 import {
   getAgentDataDir,
   getAgentLogsDir,
+  getDataRootDir,
   getAdminDataDir,
   getAdminInternalTokenPath,
 } from '../../src/core/data-paths.js'
@@ -37,6 +38,12 @@ describe('data-paths：agent 数据目录解析', () => {
     process.env.CRABOT_AGENT_DATA_DIR = '/x/.crabot/data/agent'
     expect(getAdminDataDir()).toBe(resolve('/x/.crabot/data/agent', '..', 'admin'))
     expect(getAdminInternalTokenPath()).toBe(resolve('/x/.crabot/data/admin', 'internal-token'))
+  })
+
+  it('getDataRootDir 是 agent 数据目录的父目录', () => {
+    clearEnv()
+    process.env.CRABOT_AGENT_DATA_DIR = '/x/.crabot/data/agent'
+    expect(getDataRootDir()).toBe(resolve('/x/.crabot/data/agent', '..'))
   })
 
   it('getAgentLogsDir = agent 目录下 logs', () => {

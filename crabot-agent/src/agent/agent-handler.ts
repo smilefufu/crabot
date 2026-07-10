@@ -96,7 +96,7 @@ import { resolveSenderIdentity } from '../utils/sender-identity.js'
 import { prefetchQuotedMessages } from './quoted-message-prefetcher.js'
 import { formatNow, formatChannelMessageTime, resolveTimezone, formatRuntimeMs } from '../utils/time.js'
 import { renderActiveTasksSection } from './active-tasks-section.js'
-import { getAgentDataDir, getAdminDataDir, getAdminInternalTokenPath, getWorkspaceDir, getBgEntitiesLogsDir } from '../core/data-paths.js'
+import { getAgentDataDir, getDataRootDir, getAdminDataDir, getAdminInternalTokenPath, getWorkspaceDir, getBgEntitiesLogsDir } from '../core/data-paths.js'
 import { llmUsageToTrace } from '../core/trace-usage.js'
 import { TodoStore } from './worker-todo-store.js'
 import { createTodoTool } from './worker-todo-tool.js'
@@ -1235,7 +1235,7 @@ export class AgentHandler {
         }
 
         tools.push(...createTmpPageTools({
-          dataDir: getAdminDataDir(),
+          dataDir: getDataRootDir(),
           getTmpPageBaseUrl: () => this.tmpPageBaseUrl,
           taskId: task.task_id,
         }))

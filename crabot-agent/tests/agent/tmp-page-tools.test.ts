@@ -1,10 +1,11 @@
 import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { createTmpPageTools } from '../../src/agent/tmp-page-tools.js'
 
 let currentDataDir = ''
+let ensureServer: (() => Promise<void> | void) | undefined
 
 function getTool(name: string) {
   const tools = createTmpPageTools({
@@ -13,6 +14,7 @@ function getTool(name: string) {
     taskId: 'task-123',
     now: () => new Date('2026-07-10T00:00:00.000Z'),
     randomBytes: () => Buffer.from('00112233445566778899aabbccddeeff', 'hex'),
+    ensureServer,
   })
   const tool = tools.find((t) => t.name === name)
   if (!tool) throw new Error(`missing tool ${name}`)
@@ -35,8 +37,14 @@ function expectNoRuntimeLeak(output: string) {
 }
 
 describe('tmp-page tools', () => {
+  beforeEach(() => {
+    ensureServer = () => {}
+  })
+
   it('creates a page with owner task id and returns no runtime path', async () => {
     currentDataDir = await mkdtemp(path.join(tmpdir(), 'tmp-page-tools-'))
+    let ensureCalls = 0
+    ensureServer = () => { ensureCalls += 1 }
 
     const result = await callTool('tmp_page_create', {
       title: 'Choice page',
@@ -45,6 +53,7 @@ describe('tmp-page tools', () => {
     })
 
     expect(result.isError).toBe(false)
+    expect(ensureCalls).toBe(1)
     expect(result.json).toMatchObject({
       page_id: '00112233445566778899aabbccddeeff',
       url: 'http://localhost:3000/tmp-pages/00112233445566778899aabbccddeeff',
@@ -61,6 +70,16 @@ describe('tmp-page tools', () => {
     expect(meta.owner_task_id).toBe('task-123')
     expect(meta.mode).toBe('single')
     expect(await readFile(path.join(pageDir, 'page.html'), 'utf8')).toContain('data-choice')
+  })
+
+  it('returns a path-free structured error when starting the server fails', async () => {
+    currentDataDir = await mkdtemp(path.join(tmpdir(), 'tmp-page-tools-'))
+    ensureServer = () => { throw new Error(`cannot start from ${currentDataDir}`) }
+
+    const result = await callTool('tmp_page_create', { title: 'Choice page', html: '<p>x</p>' })
+
+    expect(result.isError).toBe(true)
+    expect(result.json).toEqual({ success: false, error_code: 'TMP_PAGE_SERVER_START_FAILED' })
   })
 
   it('updates page content and keeps the same url', async () => {
@@ -91,8 +110,9 @@ describe('tmp-page tools', () => {
       path.join(pageDir, 'events.jsonl'),
       [
         JSON.stringify({ at: '2026-07-10T00:01:00.000Z', data: { choice: 'a' } }),
+        '',
         'not-json',
-        JSON.stringify({ at: '2026-07-10T00:02:00.000Z', data: { choice: 'b' } }),
+        JSON.stringify({ at: '2026-07-10T00:02:00.000Z', data: null }),
       ].join('\n') + '\n',
     )
 
@@ -103,10 +123,11 @@ describe('tmp-page tools', () => {
 
     expect(result.isError).toBe(false)
     expect(result.json.events).toEqual([
-      { event_id: 2, at: expect.any(String), data: 'not-json', trusted: false },
-      { event_id: 3, at: '2026-07-10T00:02:00.000Z', data: { choice: 'b' }, trusted: false },
+      { event_id: 2, at: expect.any(String), data: '', trusted: false },
+      { event_id: 3, at: expect.any(String), data: 'not-json', trusted: false },
+      { event_id: 4, at: '2026-07-10T00:02:00.000Z', data: null, trusted: false },
     ])
-    expect(result.json.next_after_event_id).toBe(3)
+    expect(result.json.next_after_event_id).toBe(4)
     expect(result.output).not.toContain('events.jsonl')
   })
 

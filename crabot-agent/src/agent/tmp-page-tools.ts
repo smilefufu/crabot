@@ -1,4 +1,6 @@
 import { randomBytes as nodeRandomBytes } from 'node:crypto'
+import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { ToolCallResult, ToolDefinition } from '../engine/types.js'
@@ -9,6 +11,10 @@ export interface TmpPageToolsDeps {
   readonly taskId: string
   readonly now?: () => Date
   readonly randomBytes?: (size: number) => Buffer
+  /** 已安装 tmp-page builtin skill 中的 server.cjs 路径。 */
+  readonly serverScriptPath?: string
+  /** 测试或宿主可替换的 server 启动保障。 */
+  readonly ensureServer?: () => Promise<void> | void
 }
 
 interface TmpPageMeta {
@@ -81,6 +87,28 @@ function getBaseUrl(deps: TmpPageToolsDeps): string | undefined {
   return base ? base.replace(/\/+$/, '') : undefined
 }
 
+function defaultServerScriptPath(): string {
+  const crabotHome = process.env.CRABOT_HOME ?? path.resolve(__dirname, '../../..')
+  return path.join(crabotHome, 'crabot-admin', 'builtins', 'skills', 'tmp-page', 'scripts', 'server.cjs')
+}
+
+function ensureTmpPageServer(deps: TmpPageToolsDeps): Promise<void> | void {
+  if (deps.ensureServer) return deps.ensureServer()
+  const serverScriptPath = deps.serverScriptPath ?? defaultServerScriptPath()
+  if (!existsSync(serverScriptPath)) throw new Error('tmp-page server script unavailable')
+
+  const child = spawn(process.execPath, [serverScriptPath], {
+    detached: true,
+    stdio: 'ignore',
+    env: {
+      ...process.env,
+      DATA_DIR: deps.dataDir,
+      CRABOT_TMP_PAGE_PORT: process.env.CRABOT_TMP_PAGE_PORT ?? '19099',
+    },
+  })
+  child.unref()
+}
+
 export function createTmpPageTools(deps: TmpPageToolsDeps): ToolDefinition[] {
   const now = (): Date => deps.now?.() ?? new Date()
 
@@ -105,6 +133,11 @@ export function createTmpPageTools(deps: TmpPageToolsDeps): ToolDefinition[] {
         if (!base) return fail('TMP_PAGE_BASE_URL_MISSING')
         if (typeof input.title !== 'string' || input.title.trim() === '') return fail('TMP_PAGE_INVALID_TITLE')
         if (typeof input.html !== 'string' || input.html.trim() === '') return fail('TMP_PAGE_INVALID_HTML')
+        try {
+          await ensureTmpPageServer(deps)
+        } catch {
+          return fail('TMP_PAGE_SERVER_START_FAILED')
+        }
 
         const page_id = makePageId(deps)
         const currentTime = now()
@@ -204,9 +237,12 @@ export function createTmpPageTools(deps: TmpPageToolsDeps): ToolDefinition[] {
           raw = ''
         }
 
-        const events = raw
-          .split('\n')
-          .filter(Boolean)
+        const lines = raw === ''
+          ? []
+          : raw.endsWith('\n')
+            ? raw.slice(0, -1).split('\n')
+            : raw.split('\n')
+        const events = lines
           .map((line, idx) => eventFromLine(line, idx + 1))
           .filter((event) => event.event_id > after)
           .slice(0, limit)
@@ -287,7 +323,7 @@ function eventFromLine(line: string, event_id: number): { event_id: number; at: 
       return {
         event_id,
         at: typeof record.at === 'string' ? record.at : new Date(0).toISOString(),
-        data: record.data ?? parsed,
+        data: Object.prototype.hasOwnProperty.call(record, 'data') ? record.data : parsed,
         trusted: false,
       }
     }

@@ -51,7 +51,7 @@ version: "2.0.0"
 如果不想把 task 标成 `waiting_human`，可以：
 
 1. 用 `send_message(intent='info')` 发 URL。
-2. 调 `wait_for_signal({ reason: "等 tmp-page 页面反馈", timeout_ms? })` 挂起。
+2. 调 `wait_for_signal({ reason: "等 tmp-page 页面反馈", timeout_ms: 300000 })` 挂起。
 3. 页面提交后系统同样会唤醒你。
 4. 醒来后调 `tmp_page_read_events`。
 

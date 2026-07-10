@@ -18,5 +18,7 @@ describe('tmp-page skill doc', () => {
     expect(doc).not.toContain('CRABOT_TMP_PAGE_PORT')
     expect(doc).not.toContain('_manage')
     expect(doc).not.toContain('start-server.sh')
+    expect(doc).toContain('wait_for_signal({ reason: "等 tmp-page 页面反馈", timeout_ms:')
+    expect(doc).not.toContain('wait_for_signal({ reason: "等 tmp-page 页面反馈", timeout_ms? })')
   })
 })
