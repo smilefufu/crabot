@@ -73,6 +73,30 @@ describe('UnifiedAgent.handleDeliverPageFeedback (deliver_page_feedback RPC)', (
     expect(wake).not.toHaveBeenCalled()
   })
 
+  it('旧版 server 未携带 page_id → 唤醒文案引导先 list 再 read，不生成 undefined id', () => {
+    const agent = Object.create(UnifiedAgent.prototype) as any
+    const wake = vi.fn()
+    agent.agentHandler = {
+      hasActiveTask: (id: string) => id === 't1',
+      wakeForPageFeedback: wake,
+    }
+
+    const result = agent.handleDeliverPageFeedback({ task_id: 't1' } as any)
+
+    expect(result.delivered).toBe(true)
+    const [taskId, note] = wake.mock.calls[0] as [string, string]
+    expect(taskId).toBe('t1')
+    expect(note).toContain('[系统]')
+    expect(note).toContain('tmp_page_list')
+    expect(note).toContain('tmp_page_read_events')
+    expect(note).not.toContain('undefined')
+    expect(note).not.toContain('"page_id": "undefined"')
+    expect(note).not.toContain('$DATA_DIR')
+    expect(note).not.toContain('.crabot')
+    expect(note).not.toContain('events.jsonl')
+    expect(note).not.toContain('CRABOT_TMP_PAGE_PORT')
+  })
+
   it('worker handler 未配置 → 抛错', () => {
     const agent = Object.create(UnifiedAgent.prototype) as any
     agent.agentHandler = undefined

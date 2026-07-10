@@ -1,7 +1,7 @@
 import { randomBytes as nodeRandomBytes } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { createReadStream, existsSync } from 'node:fs'
-import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, open, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import net from 'node:net'
 import path from 'node:path'
 import { createInterface } from 'node:readline'
@@ -164,6 +164,12 @@ function tmpPagePort(deps: TmpPageToolsDeps): number {
   return Number.isFinite(envPort) ? envPort : DEFAULT_TMP_PAGE_PORT
 }
 
+async function openTmpPageServerLog(dataDir: string) {
+  const logDir = path.join(dataDir, 'logs')
+  await mkdir(logDir, { recursive: true })
+  return open(path.join(logDir, 'tmp-page-server.log'), 'a')
+}
+
 function probeLocalPort(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const socket = net.connect({ host: '127.0.0.1', port })
@@ -196,13 +202,15 @@ async function ensureTmpPageServer(deps: TmpPageToolsDeps): Promise<void> {
   return promise
 }
 
-function startTmpPageServer(deps: TmpPageToolsDeps, serverScriptPath: string, port: number): Promise<void> {
+async function startTmpPageServer(deps: TmpPageToolsDeps, serverScriptPath: string, port: number): Promise<void> {
   const timeoutMs = deps.serverStartupTimeoutMs ?? DEFAULT_SERVER_STARTUP_TIMEOUT_MS
   const probeIntervalMs = deps.serverProbeIntervalMs ?? DEFAULT_SERVER_PROBE_INTERVAL_MS
+  const logHandle = await openTmpPageServerLog(deps.dataDir)
 
   return new Promise((resolve, reject) => {
     let settled = false
     let childExited = false
+    let parentLogClosed = false
     const timer = setTimeout(() => finish(new Error('tmp-page server startup timed out')), timeoutMs)
     const interval = setInterval(() => {
       void probeLocalPort(port).then((open) => {
@@ -219,12 +227,17 @@ function startTmpPageServer(deps: TmpPageToolsDeps, serverScriptPath: string, po
       if (err) reject(err)
       else resolve()
     }
+    const closeParentLog = () => {
+      if (parentLogClosed) return
+      parentLogClosed = true
+      void logHandle.close().catch(() => {})
+    }
 
     let child
     try {
       child = spawn(process.execPath, [serverScriptPath], {
         detached: true,
-        stdio: 'ignore',
+        stdio: ['ignore', logHandle.fd, logHandle.fd],
         env: {
           ...process.env,
           DATA_DIR: deps.dataDir,
@@ -232,9 +245,11 @@ function startTmpPageServer(deps: TmpPageToolsDeps, serverScriptPath: string, po
         },
       })
     } catch (err) {
+      closeParentLog()
       finish(err instanceof Error ? err : new Error(String(err)))
       return
     }
+    closeParentLog()
 
     child.once('error', (err) => finish(err))
     child.once('exit', () => {
@@ -340,6 +355,11 @@ export function createTmpPageTools(deps: TmpPageToolsDeps): ToolDefinition[] {
         const dir = pageDir(deps.dataDir, page_id)
         const prev = await readMeta(dir)
         if (!prev) return fail('TMP_PAGE_NOT_FOUND', { page_id })
+        try {
+          await ensureTmpPageServer(deps)
+        } catch {
+          return fail('TMP_PAGE_SERVER_START_FAILED', { page_id })
+        }
 
         const next: TmpPageMeta = {
           ...prev,

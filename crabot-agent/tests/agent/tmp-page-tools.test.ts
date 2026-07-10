@@ -151,6 +151,44 @@ describe('tmp-page tools', () => {
     expect(await canConnect(port)).toBe(true)
   })
 
+  it('appends spawned tmp-page server stdout and stderr to the top-level log file', async () => {
+    currentDataDir = await mkdtemp(path.join(tmpdir(), 'tmp-page-tools-'))
+    ensureServer = undefined
+    const port = await getFreePort()
+    const serverScript = path.join(currentDataDir, 'logging-server.cjs')
+    await writeFile(
+      serverScript,
+      [
+        "const http = require('http')",
+        "const port = Number(process.env.CRABOT_TMP_PAGE_PORT)",
+        "console.log('server-started-test')",
+        "console.error('wake-failed-test')",
+        "const server = http.createServer((req, res) => res.end('ok'))",
+        "server.listen(port, '127.0.0.1')",
+        'setTimeout(() => server.close(() => process.exit(0)), 500)',
+      ].join('\n'),
+      'utf8',
+    )
+    const tool = createTmpPageTools({
+      dataDir: currentDataDir,
+      getTmpPageBaseUrl: () => 'http://localhost:3000',
+      taskId: 'task-123',
+      now: () => new Date('2026-07-10T00:00:00.000Z'),
+      randomBytes: () => Buffer.from('00112233445566778899aabbccddeeff', 'hex'),
+      serverScriptPath: serverScript,
+      tmpPagePort: port,
+      serverStartupTimeoutMs: 2000,
+      serverProbeIntervalMs: 25,
+    }).find((t) => t.name === 'tmp_page_create')!
+
+    const result = await tool.call({ title: 'Choice page', html: '<p>x</p>' }, {} as never)
+
+    expect(result.isError).toBe(false)
+    const log = await readFile(path.join(currentDataDir, 'logs', 'tmp-page-server.log'), 'utf8')
+    expect(log).toContain('server-started-test')
+    expect(log).toContain('wake-failed-test')
+  })
+
   it('returns a structured error when the spawned server exits before listening', async () => {
     currentDataDir = await mkdtemp(path.join(tmpdir(), 'tmp-page-tools-'))
     ensureServer = undefined
@@ -176,7 +214,10 @@ describe('tmp-page tools', () => {
 
   it('updates page content and keeps the same url', async () => {
     currentDataDir = await mkdtemp(path.join(tmpdir(), 'tmp-page-tools-'))
+    let ensureCalls = 0
+    ensureServer = () => { ensureCalls += 1 }
     await callTool('tmp_page_create', { title: 'Initial', html: '<h1>old</h1>' })
+    expect(ensureCalls).toBe(1)
 
     const result = await callTool('tmp_page_update', {
       page_id: '00112233445566778899aabbccddeeff',
@@ -186,6 +227,7 @@ describe('tmp-page tools', () => {
     })
 
     expect(result.isError).toBe(false)
+    expect(ensureCalls).toBe(2)
     expect(result.json.url).toBe('http://localhost:3000/tmp-pages/00112233445566778899aabbccddeeff')
     const pageDir = path.join(currentDataDir, 'tmp-pages', '00112233445566778899aabbccddeeff')
     expect(await readFile(path.join(pageDir, 'page.html'), 'utf8')).toContain('new')
