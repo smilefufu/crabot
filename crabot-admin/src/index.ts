@@ -29,6 +29,7 @@ import { readArchiveTextFile, listArchiveEntries } from './openclaw-import/archi
 import { extractArchiveSubtree } from './openclaw-import/extract-subtree.js'
 import { BrowserManager } from './browser-manager.js'
 import { PermissionTemplateManager } from './permission-template-manager.js'
+import { decodePathSegment } from './http-path.js'
 import {
   ModuleBase,
   type ModuleConfig,
@@ -1981,7 +1982,7 @@ export class AdminModule extends ModuleBase {
 
       // 模块配置管理 API
       if (req.method === 'GET' && pathname.match(/^\/api\/modules\/[^/]+\/config$/)) {
-        const moduleId = pathname.split('/')[3]
+        const moduleId = decodePathSegment(pathname, 3)
         const result = await this.handleGetModuleConfig({ module_id: moduleId })
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(result))
@@ -1989,7 +1990,7 @@ export class AdminModule extends ModuleBase {
       }
 
       if (req.method === 'PUT' && pathname.match(/^\/api\/modules\/[^/]+\/config$/)) {
-        const moduleId = pathname.split('/')[3]
+        const moduleId = decodePathSegment(pathname, 3)
         const body = await this.readJsonBody<{ config: Record<string, string> }>(req)
         const result = await this.handleSetModuleConfig({
           module_id: moduleId,
@@ -2002,7 +2003,7 @@ export class AdminModule extends ModuleBase {
 
       // 模块生命周期控制 API
       if (req.method === 'POST' && pathname.match(/^\/api\/modules\/[^/]+\/start$/)) {
-        const moduleId = pathname.split('/')[3]
+        const moduleId = decodePathSegment(pathname, 3)
         const result = await this.handleStartModuleAdmin({ module_id: moduleId })
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(result))
@@ -2010,7 +2011,7 @@ export class AdminModule extends ModuleBase {
       }
 
       if (req.method === 'POST' && pathname.match(/^\/api\/modules\/[^/]+\/stop$/)) {
-        const moduleId = pathname.split('/')[3]
+        const moduleId = decodePathSegment(pathname, 3)
         const body = await this.readJsonBody<{ force?: boolean }>(req)
         const result = await this.handleStopModuleAdmin({
           module_id: moduleId,
@@ -2022,7 +2023,7 @@ export class AdminModule extends ModuleBase {
       }
 
       if (req.method === 'POST' && pathname.match(/^\/api\/modules\/[^/]+\/restart$/)) {
-        const moduleId = pathname.split('/')[3]
+        const moduleId = decodePathSegment(pathname, 3)
         const result = await this.handleRestartModuleAdmin({ module_id: moduleId })
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(result))
@@ -2219,11 +2220,6 @@ export class AdminModule extends ModuleBase {
       const moduleLogMatch = pathname.match(/^\/api\/modules\/([^/]+)\/log$/)
       if (moduleLogMatch && req.method === 'GET') {
         await this.handleGetModuleLogApi(req, res, decodeURIComponent(moduleLogMatch[1]), url)
-        return
-      }
-      const moduleRestartMatch = pathname.match(/^\/api\/modules\/([^/]+)\/restart$/)
-      if (moduleRestartMatch && req.method === 'POST') {
-        await this.handleRestartModuleApi(req, res, decodeURIComponent(moduleRestartMatch[1]))
         return
       }
 
@@ -9757,26 +9753,6 @@ export class AdminModule extends ModuleBase {
       const content = await tailLogFile(logFile, cappedLines)
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ module_id: moduleId, lines: cappedLines, content }))
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error)
-      res.writeHead(500, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: msg }))
-    }
-  }
-
-  private async handleRestartModuleApi(
-    _req: IncomingMessage,
-    res: ServerResponse,
-    moduleId: string
-  ): Promise<void> {
-    try {
-      const result = await this.rpcClient.callModuleManager<{ module_id: string }, unknown>(
-        'restart_module',
-        { module_id: moduleId },
-        this.config.moduleId
-      )
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, result }))
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
       res.writeHead(500, { 'Content-Type': 'application/json' })
