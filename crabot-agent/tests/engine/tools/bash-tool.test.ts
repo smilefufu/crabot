@@ -158,12 +158,16 @@ describe('createBashTool with bgCtx', () => {
     expect(all.filter((e) => e.spawned_by_task_id === 'task-grace-fast')).toHaveLength(0)
   })
 
-  it('grace 快路径：非零退出码 → isError + 含退出码', async () => {
+  it('grace 快路径：非零退出码是命令结果，不是 tool error', async () => {
     const tool = createBashTool(() => cwd, undefined, makeBgCtx('task-grace-fail'))
-    const result = await tool.call({ command: 'echo oops; exit 3' }, {} as ToolCallContext)
-    expect(result.isError).toBe(true)
-    expect(result.output).toContain('oops')
-    expect(result.output).toContain('exited with code 3')
+    const result = await tool.call(
+      { command: 'printf "oops"; printf "bad" >&2; exit 3' },
+      {} as ToolCallContext,
+    )
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('exit_code: 3')
+    expect(result.output).toContain('stdout:\noops')
+    expect(result.output).toContain('stderr:\nbad')
   })
 
   it('grace 慢路径：超期仍在跑 → 转后台注册 bgRegistry + 引导 wait_for_signal（命令不中断），退出触发 onShellExit', async () => {
@@ -178,6 +182,7 @@ describe('createBashTool with bgCtx', () => {
     expect(result.isError).toBe(false)
     expect(result.output).toContain('转入后台继续运行')
     expect(result.output).toContain('wait_for_signal')
+    expect(result.output).not.toContain('exit_code:')
     const match = result.output.match(/shell_[0-9a-f]+/)
     expect(match).not.toBeNull()
     const shellId = match![0]

@@ -66,6 +66,29 @@ export function exitcodeFileForLog(logFile: string): string {
   return logFile.replace(/\.log$/, '.exitcode')
 }
 
+function stdoutFileForLog(logFile: string): string {
+  return logFile.replace(/\.log$/, '.stdout')
+}
+
+function stderrFileForLog(logFile: string): string {
+  return logFile.replace(/\.log$/, '.stderr')
+}
+
+function wrapCommandWithInlineStreamCapture(
+  command: string,
+  exitcodeFile: string,
+  stdoutFile: string,
+  stderrFile: string,
+): string {
+  return (
+    `{\n${command}\n` +
+    `} > >(tee -a ${shSingleQuote(stdoutFile)}) 2> >(tee -a ${shSingleQuote(stderrFile)} >&2)\n` +
+    `__crabot_ec=$?\n` +
+    `printf '%s' "$__crabot_ec" > ${shSingleQuote(exitcodeFile)} 2>/dev/null\n` +
+    `exit $__crabot_ec`
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -258,7 +281,7 @@ export interface RunShellWithGraceOpts {
 }
 
 export type RunShellWithGraceResult =
-  | { kind: 'inline'; exitCode: number; status: 'completed' | 'failed'; output: string }
+  | { kind: 'inline'; exitCode: number; status: 'completed' | 'failed'; stdout: string; stderr: string }
   | { kind: 'background'; entity_id: string }
   | { kind: 'aborted' }
   | { kind: 'spawn_error'; message: string }
@@ -279,6 +302,29 @@ async function readFileQuiet(file: string): Promise<string> {
   }
 }
 
+async function statSizeQuiet(file: string): Promise<number | null> {
+  try {
+    return (await fs.promises.stat(file)).size
+  } catch {
+    return null
+  }
+}
+
+async function waitForCaptureFilesToSettle(stdoutFile: string, stderrFile: string): Promise<void> {
+  let prevOut = await statSizeQuiet(stdoutFile)
+  let prevErr = await statSizeQuiet(stderrFile)
+  for (let i = 0; i < 10; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    const nextOut = await statSizeQuiet(stdoutFile)
+    const nextErr = await statSizeQuiet(stderrFile)
+    if (nextOut !== null && nextErr !== null && nextOut === prevOut && nextErr === prevErr) {
+      return
+    }
+    prevOut = nextOut
+    prevErr = nextErr
+  }
+}
+
 /**
  * 统一 shell 执行：命令从 spawn 起就 OS 直写磁盘日志（detached + sentinel），前台宽限
  * `gracePeriodMs`。
@@ -296,6 +342,8 @@ export async function runShellWithGrace(opts: RunShellWithGraceOpts): Promise<Ru
   await fs.promises.mkdir(logsDir, { recursive: true })
   const logFile = path.join(logsDir, `${entity_id}.log`)
   const exitcodeFile = exitcodeFileForLog(logFile)
+  const stdoutFile = stdoutFileForLog(logFile)
+  const stderrFile = stderrFileForLog(logFile)
 
   const spawnedAtMs = Date.now()
   const now = new Date(spawnedAtMs).toISOString()
@@ -340,10 +388,13 @@ export async function runShellWithGrace(opts: RunShellWithGraceOpts): Promise<Ru
     return { kind: 'spawn_error', message: err instanceof Error ? err.message : String(err) }
   }
 
-  const child = spawnBash(wrapCommandWithExitSentinel(opts.command, exitcodeFile), {
+  const child = spawnBash(
+    wrapCommandWithInlineStreamCapture(opts.command, exitcodeFile, stdoutFile, stderrFile),
+    {
     stdio: ['ignore', logFd.fd, logFd.fd],
     cwd: opts.cwd,
-  })
+    },
+  )
 
   // 'error' 必须在任何 await 前挂（spawn 失败异步派发，漏挂 → uncaughtException 杀进程）。
   child.on('error', (err) => {
@@ -420,30 +471,42 @@ export async function runShellWithGrace(opts: RunShellWithGraceOpts): Promise<Ru
     if (child.pid) killShellTree(child.pid)
     await unlinkQuiet(logFile)
     await unlinkQuiet(exitcodeFile)
+    await unlinkQuiet(stdoutFile)
+    await unlinkQuiet(stderrFile)
     return { kind: 'aborted' }
   }
 
   if (outcome.kind === 'spawnerr') {
     await unlinkQuiet(logFile)
     await unlinkQuiet(exitcodeFile)
+    await unlinkQuiet(stdoutFile)
+    await unlinkQuiet(stderrFile)
     return { kind: 'spawn_error', message: outcome.message }
   }
 
   if (outcome.kind === 'exit') {
-    // 宽限期内退出：读日志全量 inline 返回，清文件，不入账。
-    const output = await readFileQuiet(logFile)
+    // 宽限期内退出：读分流 stdout/stderr 内联返回，combined log 仅供后台路径使用。
+    await waitForCaptureFilesToSettle(stdoutFile, stderrFile)
+    const stdout = await readFileQuiet(stdoutFile)
+    const stderr = await readFileQuiet(stderrFile)
     await unlinkQuiet(logFile)
     await unlinkQuiet(exitcodeFile)
+    await unlinkQuiet(stdoutFile)
+    await unlinkQuiet(stderrFile)
     const status: 'completed' | 'failed' = outcome.exitCode === 0 ? 'completed' : 'failed'
-    return { kind: 'inline', exitCode: outcome.exitCode, status, output }
+    return { kind: 'inline', exitCode: outcome.exitCode, status, stdout, stderr }
   }
 
   // outcome.kind === 'grace'：转后台 → 注册 bgRegistry（命令不中断）。
   if (!child.pid) {
     await unlinkQuiet(logFile)
     await unlinkQuiet(exitcodeFile)
+    await unlinkQuiet(stdoutFile)
+    await unlinkQuiet(stderrFile)
     return { kind: 'spawn_error', message: 'no pid after grace' }
   }
+  await unlinkQuiet(stdoutFile)
+  await unlinkQuiet(stderrFile)
   const processStartedAt = await readProcStartTime(child.pid)
   const record: BgShellRegistryRecord = {
     entity_id,

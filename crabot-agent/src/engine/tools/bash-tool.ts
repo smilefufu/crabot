@@ -203,12 +203,10 @@ async function runForegroundWithGrace(
       }
     }
     case 'inline': {
-      const body = truncateOutput(result.output.replace(/\n$/, ''))
-      const suffix =
-        result.status === 'completed' && result.exitCode === 0
-          ? ''
-          : `\n[command exited with code ${result.exitCode}]`
-      return { output: `${body}${suffix}`.trim(), isError: result.status !== 'completed' }
+      return {
+        output: formatBashToolOutput(result.exitCode, result.stdout, result.stderr),
+        isError: false,
+      }
     }
   }
 }
