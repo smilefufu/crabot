@@ -40,7 +40,8 @@ interface Status {
   masterDisplayName?: string
 }
 
-const NAME_PATTERN = /^[a-z0-9-]{3,32}$/
+// 与 crabot-shared/src/instance-id.ts 的 INSTANCE_ID_REGEX 保持一致（web 不依赖该包，字面量复制，改动需双向同步）
+const NAME_PATTERN = /^[\p{Ll}\p{Lo}\p{N}-]{2,50}$/u
 
 export const NewChannelOnboarding: React.FC = () => {
   const navigate = useNavigate()
@@ -103,7 +104,7 @@ export const NewChannelOnboarding: React.FC = () => {
 
   const handleStart = useCallback(async () => {
     if (!NAME_PATTERN.test(name)) {
-      toast.error('实例名只能包含小写字母 / 数字 / 连字符（3-32 字符）')
+      toast.error('实例名可用中文、小写字母、数字、连字符（2-50 字符）')
       return
     }
     setStatus({ step: 'starting', message: '正在初始化…' })
@@ -258,7 +259,7 @@ export const NewChannelOnboarding: React.FC = () => {
                 style={{ width: '100%' }}
               />
               <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.375rem' }}>
-                只能小写字母 / 数字 / 连字符，3-32 字符。这就是 module_id，全局唯一。
+                可用中文、小写字母、数字、连字符，2-50 字符。这就是 module_id，全局唯一。
               </p>
             </div>
 
