@@ -1,7 +1,7 @@
 ---
 name: memory-curate
 description: "记忆整理：按 schedule watermark 增量扫描 inbox 候选，去重 + 多因子打分，高分高置信晋升 confirmed。仅当任务标题以'记忆整理'开头或 trigger=memory_curate 时使用，与 daily-reflection 互斥（daily-reflection 用于深度反思，会读 trace 并委派 sub-agent）。"
-version: "2.0.0"
+version: "2.1.0"
 ---
 
 # 记忆整理 Skill
@@ -17,17 +17,20 @@ version: "2.0.0"
 
 ### Step 1：增量拉 inbox 候选
 
+整理窗口从**任务描述**里解析：描述中的「整理范围：<起点> 到 <终点>」即 `ingestion_time_start` / `ingestion_time_end`（trigger message 只携带描述，任务 input 通常不在上下文里；若恰好能看到 input.ingestion_time_start / input.ingestion_time_end，两者是同一份数据）。
+
 ```
 mcp__crab-memory__list_entries({
   status: "inbox",
-  ingestion_time_start: "<任务 input.ingestion_time_start；若缺失则从任务描述的整理范围起点解析>",
-  ingestion_time_end: "<任务 input.ingestion_time_end；若缺失则从任务描述的整理范围终点解析>",
+  ingestion_time_start: "<整理范围起点，ISO8601>",
+  ingestion_time_end: "<整理范围终点，ISO8601>",
   limit: 100,
   offset: 0
 })
 ```
 
 如返回数量达到 `limit`，继续用 `offset += 100` 翻页，直到返回少于 `limit`。
+**必须先翻完所有页、收齐全部候选，再进入 Step 2**——边翻页边晋升/删除会让 `status: "inbox"` 结果集收缩，`offset` 直接跳过未读条目。
 
 **禁止**用长期记忆语义检索工具拉 inbox 候选。记忆整理是增量列表处理，不是语义召回；不要传无主题查询，也不要请求 full body。
 

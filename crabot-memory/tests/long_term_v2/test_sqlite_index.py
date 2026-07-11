@@ -232,6 +232,23 @@ def test_list_entries_filters_mixed_precision_ingestion_window(tmp_path):
     assert [r["id"] for r in rows_before_millis_end] == ["mem-l-before-start-seconds", "mem-l-before-end-micros"]
 
 
+def test_list_entries_same_ingestion_time_orders_by_id(tmp_path):
+    """同 ingestion_time 条目按 id 次级排序，保证 offset 分页跨页顺序稳定。"""
+    idx = SqliteIndex(str(tmp_path / "idx.db"))
+    # 故意按 id 逆序插入，暴露"无 tiebreaker 时按 rowid 返回"的不稳定顺序
+    for mem_id in ["mem-l-c", "mem-l-b", "mem-l-a"]:
+        idx.upsert(
+            _make_typed_entry(mem_id, ingestion_time="2026-04-23T10:00:00Z"),
+            path=f"/tmp/{mem_id}.md", status="inbox",
+        )
+
+    rows_desc = idx.list_entries(sort="ingestion_time_desc")
+    assert [r["id"] for r in rows_desc] == ["mem-l-a", "mem-l-b", "mem-l-c"]
+
+    rows_asc = idx.list_entries(sort="ingestion_time_asc")
+    assert [r["id"] for r in rows_asc] == ["mem-l-a", "mem-l-b", "mem-l-c"]
+
+
 def test_extend_observation_window_adds_days(tmp_path):
     from src.long_term_v2.sqlite_index import SqliteIndex
     from src.long_term_v2.schema import (

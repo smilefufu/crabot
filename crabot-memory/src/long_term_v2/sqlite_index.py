@@ -62,6 +62,8 @@ _PHASE3_ADDITIVE_COLUMNS = [
 
 
 def _iso_to_epoch_us(value: str | None) -> int | None:
+    # 解析失败返回 None（SQL 里 NULL 比较恒假）：格式非法的时间戳行会被
+    # 时间过滤查询静默排除，而不是让整条查询失败。这是有意的取舍。
     if not value:
         return None
     try:
@@ -457,11 +459,13 @@ class SqliteIndex:
             params.append(ingestion_time_end)
         where_sql = "WHERE " + " AND ".join(where) if where else ""
 
+        # id 次级排序：同一时间戳的条目（批量导入常见）顺序确定，
+        # 否则 offset 分页在平局处跨页可能跳过 / 重复条目。
         order = {
-            "ingestion_time_desc": "iso_to_epoch_us(ingestion_time) DESC",
-            "ingestion_time_asc": "iso_to_epoch_us(ingestion_time) ASC",
-            "event_time_desc": "iso_to_epoch_us(event_time) DESC",
-        }.get(sort, "iso_to_epoch_us(ingestion_time) DESC")
+            "ingestion_time_desc": "iso_to_epoch_us(ingestion_time) DESC, id ASC",
+            "ingestion_time_asc": "iso_to_epoch_us(ingestion_time) ASC, id ASC",
+            "event_time_desc": "iso_to_epoch_us(event_time) DESC, id ASC",
+        }.get(sort, "iso_to_epoch_us(ingestion_time) DESC, id ASC")
 
         cur = self.conn.execute(
             f"SELECT id, type, status FROM memories {where_sql} "
