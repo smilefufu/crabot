@@ -1,6 +1,14 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-10 — 渠道实例 id 放开 Unicode 命名与路由 decode 修复
+> 最后更新：2026-07-10 — tmp-pages v2 专用工具化
+
+## 2026-07-10 — tmp-pages v2 专用工具化
+
+- 背景：trace 复盘发现 agent 曾把 `.crabot/data/tmp-pages` 等 runtime 路径写入项目脚本、summary 和 `CURRENT_CONTEXT.md`。根因是 tmp-page v1 skill 直接指导 Worker 操作 runtime 文件。
+- 修复：新增 Worker 内置 `tmp_page_create/update/read_events/delete/list` 工具，工具内部负责 `owner_task_id`、TTL、HTML/meta/events 文件和公开 URL，Worker 只接触 `page_id`、`url`、结构化 events；`read_events` 返回 `has_more`/`next_after_event_id` 以支持继续读取。
+- 等待语义：不新增 `tmp_page_wait_feedback`。发页面后等待人类操作继续走 `send_message(intent='ask_human')` 或 `wait_for_signal`；页面提交仍由 `deliver_page_feedback{task_id,page_id}` 唤醒 owner task。
+- 边界：工具结果、唤醒文案、skill 文档均不得暴露 `$DATA_DIR/tmp-pages`、`.crabot/data/tmp-pages`、`events.jsonl` 或内部端口；`tmp_page_update` 与 create 一样拒绝空 HTML。
+- 验证：tmp-page tools / feedback wakeup / server source / skill doc focused tests，`crabot-agent` / `crabot-admin` `tsc --noEmit`。
 
 ## 2026-07-10 — 渠道实例 id 放开 Unicode 命名与路由 decode 修复
 

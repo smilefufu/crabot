@@ -96,7 +96,7 @@ function handle(req, res) {
       fs.appendFileSync(path.join(dir, 'events.jsonl'), line)
       // 反馈已落盘，先回 200；再尝试唤醒 owner task（缺失跳过、失败只记日志，不阻塞返回）
       send(res, 200, 'application/json', JSON.stringify({ ok: true }))
-      wakeOwnerTask(meta && meta.owner_task_id)
+      wakeOwnerTask(meta && meta.owner_task_id, id)
     })
     return
   }
@@ -144,20 +144,20 @@ function rpc(port, method, params) {
   })
 }
 
-async function wakeOwnerTask(taskId) {
-  if (!taskId) return
+async function wakeOwnerTask(taskId, pageId) {
+  if (!taskId || !pageId) return
   try {
     const mmPort = parseInt(process.env.CRABOT_MM_PORT || '19000', 10)
     const resolved = await rpc(mmPort, 'resolve', { module_type: 'agent' })
     const agent = resolved && resolved.success && resolved.data && resolved.data.modules && resolved.data.modules.find((m) => m.port)
     if (!agent) {
-      console.error(JSON.stringify({ type: 'wake-failed', task_id: taskId, reason: 'agent-unresolved' }))
+      console.error(JSON.stringify({ type: 'wake-failed', task_id: taskId, page_id: pageId, reason: 'agent-unresolved' }))
       return
     }
-    await rpc(agent.port, 'deliver_page_feedback', { task_id: taskId })
+    await rpc(agent.port, 'deliver_page_feedback', { task_id: taskId, page_id: pageId })
   } catch (err) {
     // 反馈已落盘 events.jsonl，唤醒尽力而为：只记日志，不影响 submit 已返回的 200
-    console.error(JSON.stringify({ type: 'wake-failed', task_id: taskId, error: err && err.message }))
+    console.error(JSON.stringify({ type: 'wake-failed', task_id: taskId, page_id: pageId, error: err && err.message }))
   }
 }
 
