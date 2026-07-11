@@ -5206,9 +5206,15 @@ export class AdminModule extends ModuleBase {
       if (typeof scheduleId === 'string') {
         const schedule = this.schedules.get(scheduleId)
         if (schedule) {
+          // 优先用任务声明的窗口终点（input.ingestion_time_end，触发时渲染的 {{datetime}}）。
+          // 用 completed_at 会把任务执行期间 [触发时刻, 完成时刻) 入库的条目
+          // 永久排除在后续增量窗口之外。
+          const windowEnd = task.input?.ingestion_time_end
           const updated: Schedule = {
             ...schedule,
-            watermark: task.completed_at ?? task.updated_at,
+            watermark: typeof windowEnd === 'string' && windowEnd
+              ? windowEnd
+              : task.completed_at ?? task.updated_at,
             updated_at: task.updated_at,
           }
           this.schedules.set(scheduleId, updated)
