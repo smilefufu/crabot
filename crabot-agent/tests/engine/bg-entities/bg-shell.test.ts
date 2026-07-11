@@ -333,8 +333,8 @@ describe('runShellWithGrace', () => {
 
     const result = await runShellWithGrace({
       command: [
-        `python3 -c "import sys,time; time.sleep(0.2); sys.stdout.write('${stdoutChunk}')" &`,
-        `python3 -c "import sys,time; time.sleep(0.2); sys.stderr.write('${stderrChunk}')" &`,
+        `python3 -c "import sys,time; time.sleep(0.2); sys.stdout.write('O' * ${stdoutChunk.length})" &`,
+        `python3 -c "import sys,time; time.sleep(0.2); sys.stderr.write('E' * ${stderrChunk.length})" &`,
       ].join('\n'),
       cwd: process.cwd(),
       owner: { friend_id: 'user-A' },
