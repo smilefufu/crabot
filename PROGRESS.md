@@ -1,6 +1,13 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-10 — tmp-pages v2 专用工具化
+> 最后更新：2026-07-11 — 私聊自动寻址捷径收紧为 scheduled-only
+
+## 2026-07-11 — 私聊自动寻址捷径收紧为 scheduled-only
+
+- 事故：human message task `b664e743` 获得并调用 `send_private_message`；消息实际送达，但绕过标准 outbound buffer / goal audit / delivery epoch，随后系统仍判定未通过 `send_message` 交付。
+- 修复：新增 messaging tool profile；`send_private_message` / `send_master_private` 仅 scheduled 场景可见并有 handler 运行时防御，无 task context 与 human task 均拒绝。`daily_reflection` 保持只允许 `send_master_private` + 只读工具。
+- 能力边界：human task 仍可查找任意真实会话并用 `send_message` 跨会话投递；未删除 Agent 主动使用 IM 的能力。
+- 未来兼容：profile 读取当前 execution context；未来 scheduled 结果被人类追问时，只需切到 message profile。本期未修改 resume/source/checkpoint。
 
 ## 2026-07-10 — tmp-pages v2 专用工具化
 
