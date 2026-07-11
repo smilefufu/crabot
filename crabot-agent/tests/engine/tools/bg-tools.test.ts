@@ -10,7 +10,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { BgEntityRegistry } from '../../../src/engine/bg-entities/registry'
-import { spawnPersistentShell } from '../../../src/engine/bg-entities/bg-shell'
+import { spawnPersistentShell, runShellWithGrace } from '../../../src/engine/bg-entities/bg-shell'
 import { createOutputTool } from '../../../src/engine/tools/output-tool'
 import { createKillTool } from '../../../src/engine/tools/kill-tool'
 import { createListEntitiesTool } from '../../../src/engine/tools/list-entities-tool'
@@ -176,6 +176,38 @@ describe('Output tool', () => {
     // bug 形态是秒回 [status: running] 空内容；修复后应真正等到输出（>2s）
     expect(elapsed).toBeGreaterThan(2_000)
   }, 15_000)
+
+  it('runShellWithGrace promoted shell still feeds combined log output into Output', async () => {
+    const result = await runShellWithGrace({
+      command: 'sleep 0.15; printf "after-promotion-out\\n"; printf "after-promotion-err\\n" >&2',
+      cwd: process.cwd(),
+      owner: OWNER_A,
+      spawned_by_task_id: TASK_ID,
+      registry,
+      gracePeriodMs: 50,
+    })
+
+    expect(result.kind).toBe('background')
+    if (result.kind !== 'background') {
+      return
+    }
+
+    for (let i = 0; i < 20; i++) {
+      const rec = await registry.get(result.entity_id)
+      if (rec?.type === 'shell' && rec.status !== 'running') {
+        break
+      }
+      await sleep(50)
+    }
+
+    const tool = createOutputTool(deps)
+    const output = await tool.call({ entity_id: result.entity_id }, {})
+
+    expect(output.isError).toBe(false)
+    expect(output.output).toContain('after-promotion-out')
+    expect(output.output).toContain('after-promotion-err')
+    expect(output.output).toContain('[status: completed, exit_code: 0]')
+  })
 
   it('non-existent entity_id returns error', async () => {
     const tool = createOutputTool(deps)

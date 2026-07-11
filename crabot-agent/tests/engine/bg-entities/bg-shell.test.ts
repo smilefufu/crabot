@@ -1,11 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { mkdtempSync, rmSync, readFileSync, existsSync, readdirSync, writeFileSync, chmodSync, mkdirSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { BgEntityRegistry } from '../../../src/engine/bg-entities/registry'
-import { spawnPersistentShell, readProcStartTime } from '../../../src/engine/bg-entities/bg-shell'
+import { spawnPersistentShell, readProcStartTime, runShellWithGrace } from '../../../src/engine/bg-entities/bg-shell'
 import type { BgShellRegistryRecord } from '../../../src/engine/bg-entities/types'
+import * as resolveBashPathModule from '../../../src/utils/resolve-bash-path'
 
 // ---------------------------------------------------------------------------
 // readProcStartTime：必须返回真实的进程启动时间（稳定、跨重启可比对），而非 wall-clock now。
@@ -223,4 +224,131 @@ describe('spawnPersistentShell', () => {
     expect(logContent).toContain('survived_detach')
     expect(rec?.status).toBe('completed')
   })
+})
+
+describe('runShellWithGrace', () => {
+  it('returns inline when a short command starts a background child that keeps stdout open', async () => {
+    const startedAt = Date.now()
+
+    const result = await runShellWithGrace({
+      command: 'sleep 2 & echo started',
+      cwd: process.cwd(),
+      owner: { friend_id: 'user-A' },
+      spawned_by_task_id: 'task-inline-background-child',
+      registry,
+      gracePeriodMs: 1_500,
+    })
+
+    expect(Date.now() - startedAt).toBeLessThan(1_500)
+    expect(result.kind).toBe('inline')
+    if (result.kind !== 'inline') {
+      return
+    }
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toBe('started\n')
+  }, 5_000)
+
+  it('does not kill background children that write after inline return', async () => {
+    const pidFile = path.join(tmpDir, 'daemon.pid')
+
+    const result = await runShellWithGrace({
+      command: `( sleep 1; echo daemon-log; sleep 2 ) & echo $! > ${JSON.stringify(pidFile)}; echo started`,
+      cwd: process.cwd(),
+      owner: { friend_id: 'user-A' },
+      spawned_by_task_id: 'task-inline-background-child-survives',
+      registry,
+      gracePeriodMs: 1_500,
+    })
+
+    expect(result.kind).toBe('inline')
+    expect(readFileSync(pidFile, 'utf8').trim()).toMatch(/^\d+$/)
+    const pid = Number(readFileSync(pidFile, 'utf8').trim())
+    spawnedPids.push(pid)
+
+    await sleep(1_500)
+    expect(() => process.kill(pid, 0)).not.toThrow()
+  }, 6_000)
+
+  it('falls back to sidecar redirection when mkfifo is unavailable', async () => {
+    const fakeBin = path.join(tmpDir, 'bin')
+    rmSync(fakeBin, { recursive: true, force: true })
+    mkdirSync(fakeBin, { recursive: true })
+    const fakeMkfifo = path.join(fakeBin, 'mkfifo')
+    writeFileSync(fakeMkfifo, '#!/bin/sh\necho mkfifo unavailable >&2\nexit 1\n')
+    chmodSync(fakeMkfifo, 0o755)
+
+    const oldPath = process.env.PATH
+    process.env.PATH = `${fakeBin}:${oldPath ?? ''}`
+    try {
+      const result = await runShellWithGrace({
+        command: 'echo hello',
+        cwd: process.cwd(),
+        owner: { friend_id: 'user-A' },
+        spawned_by_task_id: 'task-inline-mkfifo-fallback',
+        registry,
+        gracePeriodMs: 1_000,
+      })
+
+      expect(result.kind).toBe('inline')
+      if (result.kind !== 'inline') {
+        return
+      }
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toBe('hello\n')
+      expect(result.stderr).toBe('')
+    } finally {
+      process.env.PATH = oldPath
+    }
+  })
+
+  it('returns spawn_error and removes temp log artifacts when bash resolution throws before child spawn', async () => {
+    const resolveBashPathSpy = vi.spyOn(resolveBashPathModule, 'resolveBashPath').mockReturnValue(null)
+
+    try {
+      await expect(
+        runShellWithGrace({
+          command: 'echo should_not_run',
+          cwd: process.cwd(),
+          owner: { friend_id: 'user-A' },
+          spawned_by_task_id: 'task-inline-spawn-error',
+          registry,
+          gracePeriodMs: 1_000,
+        }),
+      ).resolves.toMatchObject({
+        kind: 'spawn_error',
+        message: resolveBashPathModule.BASH_NOT_FOUND_MESSAGE,
+      })
+
+      const logsDir = path.join(tmpDir, 'agent', 'bg-entities', 'logs')
+      expect(existsSync(logsDir)).toBe(true)
+      expect(readdirSync(logsDir)).toEqual([])
+    } finally {
+      resolveBashPathSpy.mockRestore()
+    }
+  })
+
+  it('inline capture waits for late inherited stdout/stderr writers before cleanup', async () => {
+    const stdoutChunk = 'O'.repeat(200_000)
+    const stderrChunk = 'E'.repeat(200_000)
+
+    const result = await runShellWithGrace({
+      command: [
+        `python3 -c "import sys,time; time.sleep(0.2); sys.stdout.write('O' * ${stdoutChunk.length})" &`,
+        `python3 -c "import sys,time; time.sleep(0.2); sys.stderr.write('E' * ${stderrChunk.length})" &`,
+      ].join('\n'),
+      cwd: process.cwd(),
+      owner: { friend_id: 'user-A' },
+      spawned_by_task_id: 'task-inline-late-writers',
+      registry,
+      gracePeriodMs: 1_000,
+    })
+
+    expect(result.kind).toBe('inline')
+    if (result.kind !== 'inline') {
+      return
+    }
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toBe(stdoutChunk)
+    expect(result.stderr).toBe(stderrChunk)
+  }, 5_000)
 })

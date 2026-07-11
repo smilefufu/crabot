@@ -43,6 +43,48 @@ function truncateOutput(output: string): string {
   return `${output.slice(0, halfLimit)}\n[...truncated...]\n${output.slice(-halfLimit)}`
 }
 
+function stripOneTrailingNewline(value: string): string {
+  return value.replace(/\n$/, '')
+}
+
+function formatBashToolOutput(
+  exitCode: number | null,
+  stdout: string,
+  stderr: string,
+): string {
+  const exit = exitCode === null ? 'null' : String(exitCode)
+  return truncateOutput(
+    [
+      `exit_code: ${exit}`,
+      'stdout:',
+      stripOneTrailingNewline(stdout),
+      'stderr:',
+      stripOneTrailingNewline(stderr),
+    ].join('\n'),
+  ).trim()
+}
+
+function formatBashToolExecutionError(
+  message: string,
+  stdout: string,
+  stderr: string,
+): string {
+  const parts = [`Command execution failed: ${message}`]
+  const stdoutText = stripOneTrailingNewline(stdout)
+  const stderrText = stripOneTrailingNewline(stderr)
+  if (stdoutText) {
+    parts.push('stdout:', stdoutText)
+  }
+  if (stderrText) {
+    parts.push('stderr:', stderrText)
+  }
+  return truncateOutput(parts.join('\n')).trim()
+}
+
+function extractExitCode(error: { code?: string | number | null }): number | null {
+  return typeof error.code === 'number' ? error.code : null
+}
+
 function execCommand(
   command: string,
   cwd: string,
@@ -67,8 +109,8 @@ function execCommand(
         env: process.env,
       },
       (error, stdout, stderr) => {
-        const stderrTrimmed = stderr.trim()
-        const stdoutTrimmed = stdout ?? ''
+        const stdoutText = stdout ?? ''
+        const stderrText = stderr ?? ''
 
         if (error !== null) {
           // Timeout
@@ -89,31 +131,24 @@ function execCommand(
             return
           }
 
-          // Command failure
-          const parts: string[] = []
-          if (error.message) {
-            parts.push(error.message)
+          const exitCode = extractExitCode(error)
+          if (exitCode === null) {
+            resolve({
+              output: formatBashToolExecutionError(error.message, stdoutText, stderrText),
+              isError: true,
+            })
+            return
           }
-          if (stdoutTrimmed) {
-            parts.push(stdoutTrimmed)
-          }
-          if (stderrTrimmed) {
-            parts.push(`stderr: ${stderrTrimmed}`)
-          }
+
           resolve({
-            output: truncateOutput(parts.join('\n') || 'Command failed'),
-            isError: true,
+            output: formatBashToolOutput(exitCode, stdoutText, stderrText),
+            isError: false,
           })
           return
         }
 
-        // Success
-        const outputParts: string[] = [stdoutTrimmed]
-        if (stderrTrimmed) {
-          outputParts.push(`stderr: ${stderrTrimmed}`)
-        }
         resolve({
-          output: truncateOutput(outputParts.join('\n')),
+          output: formatBashToolOutput(0, stdoutText, stderrText),
           isError: false,
         })
       },
@@ -168,12 +203,10 @@ async function runForegroundWithGrace(
       }
     }
     case 'inline': {
-      const body = truncateOutput(result.output.replace(/\n$/, ''))
-      const suffix =
-        result.status === 'completed' && result.exitCode === 0
-          ? ''
-          : `\n[command exited with code ${result.exitCode}]`
-      return { output: `${body}${suffix}`.trim(), isError: result.status !== 'completed' }
+      return {
+        output: formatBashToolOutput(result.exitCode, result.stdout, result.stderr),
+        isError: false,
+      }
     }
   }
 }

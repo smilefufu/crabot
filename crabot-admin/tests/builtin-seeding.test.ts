@@ -89,14 +89,15 @@ describe('getBuiltinSkills', () => {
 })
 
 describe('getBuiltinSubAgents', () => {
-  it('返回 6 个 builtin subagent', () => {
+  it('返回 7 个 builtin subagent', () => {
     const list = getBuiltinSubAgents()
-    expect(list).toHaveLength(6)
+    expect(list).toHaveLength(7)
     expect(list.map((s) => s.id).sort()).toEqual([
       BUILTIN_SUBAGENT_IDS.codePlanner,
       BUILTIN_SUBAGENT_IDS.codeWriter,
       BUILTIN_SUBAGENT_IDS.researchCollector,
       BUILTIN_SUBAGENT_IDS.goalAuditor,
+      BUILTIN_SUBAGENT_IDS.taskReviewer,
       BUILTIN_SUBAGENT_IDS.specReviewer,
       BUILTIN_SUBAGENT_IDS.codeQualityReviewer,
     ].sort())
@@ -137,9 +138,57 @@ describe('getBuiltinSubAgents', () => {
     expect(w.workflow).not.toContain('让 main 决定')
   })
 
+  it('code_writer final output uses the fixed status tail contract', () => {
+    const w = getBuiltinSubAgents().find((s) => s.name === 'code_writer')!
+    const contract = [w.workflow, w.deliverables, w.verification].join('\n')
+    expect(w.workflow).toContain('DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED')
+    expect(w.deliverables).toContain('STATUS: DONE | DONE_WITH_CONCERNS | NEEDS_CONTEXT | BLOCKED')
+    expect(w.deliverables).toContain('SUMMARY:')
+    expect(w.deliverables).toContain('FILES_CHANGED:')
+    expect(w.deliverables).toContain('ARTIFACTS:')
+    expect(w.deliverables).toContain('TESTS_PASSED:')
+    expect(w.deliverables).toContain('CONCERNS:')
+    expect(w.deliverables).toContain('BLOCKERS:')
+    expect(contract).not.toContain('REASON:')
+    expect(contract).not.toContain('DETAIL:')
+    expect(contract).not.toContain('PARTIAL_WORK:')
+    expect(contract).not.toContain('BLOCKER_TYPE:')
+  })
+
   it('code_writer 挂 lsp_diagnostics 预设（post-edit 自动诊断 push）', () => {
     const w = getBuiltinSubAgents().find((s) => s.name === 'code_writer')!
     expect(w.hook_preset).toBe('lsp_diagnostics')
+  })
+
+  it('task_reviewer is the default combined task review gate', () => {
+    const r = getBuiltinSubAgents().find((s) => s.name === 'task_reviewer')!
+    expect(r.description).toContain('默认 task 审查员')
+    expect(r.when_to_use).toContain('默认使用')
+    expect(r.when_to_use).toContain('整 plan 范围 final review')
+    expect(r.workflow).toContain('PLAN_PATH')
+    expect(r.workflow).toContain('累计改动文件')
+    expect(r.deliverables).toContain('spec_compliance:')
+    expect(r.deliverables).toContain('code_quality:')
+    expect(r.deliverables).toContain('assessment: APPROVED | NEEDS_FIX')
+    expect(r.deliverables).not.toContain('STATUS: APPROVED | NEEDS_FIX | CANNOT_VERIFY')
+    expect(r.deliverables).not.toContain('STATUS=CANNOT_VERIFY')
+    expect(r.verification).toContain('FILES_CHANGED')
+    expect(r.verification).toContain('PLAN_PATH')
+    expect(r.verification).toContain('累计改动文件')
+    expect(r.verification).not.toContain('STATUS=CANNOT_VERIFY')
+    expect(r.allowed_mcp_server_ids).toEqual(['lsp', 'git'])
+  })
+
+  it('split reviewers stay specialized instead of describing the default path', () => {
+    const spec = getBuiltinSubAgents().find((s) => s.name === 'spec_reviewer')!
+    const quality = getBuiltinSubAgents().find((s) => s.name === 'code_quality_reviewer')!
+
+    expect(spec.when_to_use).toContain('专项拆审')
+    expect(quality.when_to_use).toContain('专项拆审')
+    expect(spec.when_to_use).not.toContain('APPROVED 后进入 code_quality_reviewer 阶段')
+    expect(spec.when_to_use).not.toContain('整 plan 可进入 code_quality_reviewer 综合质量审')
+    expect(quality.when_to_use).not.toContain('spec_reviewer 已 APPROVED')
+    expect(quality.workflow).not.toContain('spec_reviewer 已 APPROVED')
   })
 
   it('research_collector 使用 vision role + 通用调查员 capabilities 全开', () => {
@@ -173,6 +222,7 @@ describe('getBuiltinSubAgents', () => {
     expect(byName.code_writer).toEqual(['lsp', 'git'])
     expect(byName.research_collector).toEqual(['scrapling', 'lsp', 'git'])
     expect(byName.goal_auditor).toEqual(['git'])
+    expect(byName.task_reviewer).toEqual(['lsp', 'git'])
     expect(byName.spec_reviewer).toEqual(['git'])
     expect(byName.code_quality_reviewer).toEqual(['lsp', 'git'])
   })
@@ -192,15 +242,15 @@ describe('SubAgentManager.seedBuiltin via getBuiltinSubAgents', () => {
     rmSync(tmpDir2, { recursive: true, force: true })
   })
 
-  it('空 registry 注入全 6 个', async () => {
+  it('空 registry 注入全 7 个', async () => {
     await mgr2.seedBuiltin(getBuiltinSubAgents())
-    expect(mgr2.list()).toHaveLength(6)
+    expect(mgr2.list()).toHaveLength(7)
   })
 
   it('idempotent — 第二次调用不变', async () => {
     await mgr2.seedBuiltin(getBuiltinSubAgents())
     await mgr2.seedBuiltin(getBuiltinSubAgents())
-    expect(mgr2.list()).toHaveLength(6)
+    expect(mgr2.list()).toHaveLength(7)
   })
 })
 

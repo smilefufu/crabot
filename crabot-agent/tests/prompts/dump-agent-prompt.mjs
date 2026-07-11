@@ -23,6 +23,7 @@ const prompt = assembleAgentPrompt({
     { toolName: 'research_collector', workerHint: '信息收集类工作的默认派遣对象' },
     { toolName: 'code_planner', workerHint: '复杂编码任务的计划拆解专家' },
     { toolName: 'code_writer', workerHint: '执行一个自包含编码 task' },
+    { toolName: 'task_reviewer', workerHint: '默认 task 审查员：一次性审 spec_compliance 与 code_quality' },
     { toolName: 'spec_reviewer', workerHint: '按 task 规范审查实现是否合规' },
     { toolName: 'code_quality_reviewer', workerHint: '审查代码质量、命名、错误处理和测试覆盖' },
   ],

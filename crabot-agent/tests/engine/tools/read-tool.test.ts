@@ -68,7 +68,7 @@ describe('createReadTool', () => {
     await fs.writeFile(filePath, buf)
 
     const result = await tool.call({ file_path: filePath }, {})
-    expect(result.isError).toBe(true)
+    expect(result.isError).toBe(false)
     expect(result.output).toContain('Binary file')
   })
 
@@ -132,7 +132,7 @@ describe('createReadTool', () => {
     expect(result.images![0].media_type).toBe('image/jpeg')
   })
 
-  it('still rejects non-image binary files', async () => {
+  it('returns display-only result for non-image binary files', async () => {
     const filePath = path.join(tmpDir, 'data.bin')
     const buf = Buffer.alloc(100)
     buf[50] = 0x00
@@ -141,7 +141,7 @@ describe('createReadTool', () => {
     await fs.writeFile(filePath, buf)
 
     const result = await tool.call({ file_path: filePath }, {})
-    expect(result.isError).toBe(true)
+    expect(result.isError).toBe(false)
     expect(result.output).toContain('Binary file')
     expect(result.images).toBeUndefined()
   })

@@ -119,6 +119,7 @@ describe('assembleAgentPrompt coding routing policy', () => {
         { toolName: 'research_collector', workerHint: '信息收集类工作的默认派遣对象' },
         { toolName: 'code_planner', workerHint: '复杂编码任务的计划拆解专家' },
         { toolName: 'code_writer', workerHint: '执行一个自包含编码 task' },
+        { toolName: 'task_reviewer', workerHint: '默认 task 审查员：一次性审 spec_compliance 与 code_quality' },
         { toolName: 'spec_reviewer', workerHint: '按 task 规范审查实现是否合规' },
         { toolName: 'code_quality_reviewer', workerHint: '审查代码质量、命名、错误处理和测试覆盖' },
       ],
@@ -132,6 +133,33 @@ describe('assembleAgentPrompt coding routing policy', () => {
     expect(prompt).toContain('bounded execution unit')
     expect(prompt).toContain('需要拆解 / 设计，才派 code_planner')
     expect(prompt).toContain('不要 specification gaming')
+    expect(prompt).toContain('delegate_task(subagent_type="task_reviewer"')
+    expect(prompt).toContain('spec_compliance')
+    expect(prompt).toContain('code_quality')
+    expect(prompt).toContain('整 plan 范围 final review：PLAN_PATH=<path>，累计改动文件 = <list>')
+    expect(prompt).toContain('assessment=APPROVED 且 code_quality minor=none')
+    expect(prompt).toContain('assessment=APPROVED 且仅 code_quality minor')
+    expect(prompt).toContain('spec_compliance=CANNOT_VERIFY')
+    expect(prompt).toContain('先补 context / 环境 / verification 证据')
+    expect(prompt).toContain('spec_compliance=ISSUES')
+    expect(prompt).toContain('只有命中拆分规则才拆成 spec_reviewer / code_quality_reviewer')
+    expect(prompt).toContain('reviewer 状态处理（split reviewers）')
+    expect(prompt).toContain('spec_reviewer=APPROVED 且 code_quality_reviewer=APPROVED，且未返回 NIT 字段')
+    expect(prompt).toContain('spec_reviewer=APPROVED 且 code_quality_reviewer=APPROVED，且返回了 NIT')
+    expect(prompt).not.toContain('NIT=none')
+    expect(prompt).toContain('spec_reviewer=NEEDS_FIX')
+    expect(prompt).toContain('code_quality_reviewer=ISSUES 且含 Critical / Important')
+    expect(prompt).toContain('把两边必须修的问题合并后一次性派 writer')
+    expect(prompt).toContain('split reviewer 缺少 STATUS')
+    expect(prompt).toContain('在 NEEDS_FIX / ISSUES 时缺少对应问题字段')
+    expect(prompt).toContain('spec: MISSING / EXTRA')
+    expect(prompt).toContain('quality: CRITICAL / IMPORTANT / NIT')
+    expect(prompt).not.toContain('verdict / severity')
+    expect(prompt).toContain('同一 task review-fix 循环 ≥3 次仍未通过')
+    expect(prompt).not.toContain('spec_compliance ISSUES/CANNOT_VERIFY')
+    expect(prompt).not.toContain('一个 message 内 batch 派两类 reviewer')
+    expect(prompt).not.toContain('spec_reviewer 阶段')
+    expect(prompt).not.toContain('整 plan 可进入 code_quality_reviewer 综合质量审')
 
     expect(prompt).not.toContain('main 是 coordinator')
     expect(prompt).not.toContain('main 负责 task slicing')

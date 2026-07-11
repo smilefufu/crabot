@@ -206,19 +206,21 @@ const WORKFLOW_PLANNING_AND_EXECUTION = `[规划与执行]
              b. 等齐所有 writer STATUS，按 [核验] 段分别分支处理；
                 需要重派的 task 同样 batch 处理（一个 message 内 batch 复派多个 writer）
              c. 本 layer 全部 writer DONE / DONE_WITH_CONCERNS(observation) 后，
-                **一个 message 内 batch 派两类 reviewer**（每个 task 配一对，独立并发）：
-                - delegate_task(subagent_type="spec_reviewer",
-                  task=<同 Task N 段文本> + FILES_CHANGED=<writer 报的改动文件列表>) × N
-                - delegate_task(subagent_type="code_quality_reviewer",
-                  task=<FILES_CHANGED 列表>) × N
-             d. 收齐所有 reviewer 结果，按 [核验] 段统一分支处理；
+                **一个 message 内 batch 派默认 task_reviewer**（每个 task 一个 reviewer）：
+                - delegate_task(subagent_type="task_reviewer",
+                  task=<同 Task N 段文本> + FILES_CHANGED=<writer 报的改动文件列表> +
+                       WRITER_RESULT=<writer 固定尾段>) × N
+             d. 只有命中拆分规则才拆成 spec_reviewer / code_quality_reviewer：
+                多风险域、diff 过大、需要专项 threat model / 协议证据、两个维度证据来源明显不同、
+                前一轮某维度反复失败、或用户明确要求拆分。
+             e. 收齐 reviewer 结果，按 [核验] 段统一分支处理；
                 需 fix 的 task batch 复派 writer + 再 batch 复审
-             e. 本 layer 所有 task 都两 reviewer APPROVED → todo 这些项 completed，
+             f. 本 layer 所有 task reviewer assessment=APPROVED → todo 这些项 completed，
                 进入下一 layer
           5. 所有 layer 完成后，
-             delegate_task(subagent_type="code_quality_reviewer",
-             task="整 plan 范围 final review：PLAN_PATH=<path>，累计改动文件 = <list>")
-          防死循环：同一 task 进入 review-fix 循环 ≥2 次仍未通过 →
+             delegate_task(subagent_type="task_reviewer",
+             task="整 plan 范围 final review：PLAN_PATH=<path>，累计改动文件 = <list>；同时给 spec_compliance / code_quality verdict")
+          防死循环：同一 task 进入 review-fix 循环 ≥3 次仍未通过 →
              send_message(intent="ask_human") 告知"task N 卡在 review 循环，需人类介入"
           此模式下：禁止用 Write / Edit / Bash 直接改用户项目代码——那是 code_writer 的事
 
@@ -240,24 +242,39 @@ const WORKFLOW_PLANNING_AND_EXECUTION = `[规划与执行]
     plan 文件已生成 / subagent 回报 STATUS=DONE 或 APPROVED）。
 
     code_writer 状态处理：
-      · DONE                          → 进入 spec_reviewer 阶段
+      · DONE                          → 进入 task_reviewer 阶段
       · DONE_WITH_CONCERNS            → 读 CONCERNS：涉及 correctness / scope
-                                         → 回 writer 修；纯 observation → 进入 spec_reviewer
+                                         → 回 writer 修；纯 observation → 进入 task_reviewer
       · NEEDS_CONTEXT                 → 补 context 后重派 writer
-      · BLOCKED + MISSING_CONTEXT     → 提供缺失的 context 后重派 writer
-      · BLOCKED + TASK_TOO_LARGE      → 让 code_planner 拆这个 task → 重派 writer
-      · BLOCKED + PLAN_ERROR          → 让 code_planner 修订 plan → 重派 writer
-      · BLOCKED + ENV_ERROR           → 自己修环境（装依赖 / 起服务等）→ 重派 writer
-      （超过 2 次同种 BLOCKED retry → send_message(intent="ask_human") 等人类）
+      · BLOCKED                       → 判断是任务切分、模型能力、环境还是需求问题；不盲目重试
 
-    reviewer 状态处理（两 reviewer 并发完成后统一分支）：
-      · 两者皆 APPROVED               → todo 这一项完成
-      · spec NEEDS_FIX 或 quality
-        ISSUES(Critical / Important)  → 派 writer 一次性修两边的问题
-                                         （MISSING / EXTRA + Critical / Important 一并交付 writer）
-                                         → 修完后重新并发跑两 reviewer 复审
-      · 仅 quality 报 Nit             → 自行判断是否值得修
-      （同 task review-fix 循环 ≥2 次仍未通过 → send_message(intent="ask_human")）
+    reviewer 状态处理（默认 task_reviewer）：
+      · assessment=APPROVED 且 code_quality minor=none
+                                      → todo 这一项完成
+      · assessment=APPROVED 且仅 code_quality minor
+                                      → 自行判断是否值得修；默认不阻塞
+      · spec_compliance=CANNOT_VERIFY  → 先补 context / 环境 / verification 证据；
+                                         证据补齐后重派 task_reviewer，不默认派 writer
+      · spec_compliance=ISSUES
+        或 code_quality critical/important
+                                      → 派 writer 一次性修复必须修的问题
+                                         → 修完后重新跑 task_reviewer
+      · 缺少固定尾段或 verdict 字段     → 作为 subagent contract issue，补上下文后重派或升级
+      （同一 task review-fix 循环 ≥3 次仍未通过 → send_message(intent="ask_human")）
+
+    reviewer 状态处理（split reviewers）：
+      · spec_reviewer=APPROVED 且 code_quality_reviewer=APPROVED，且未返回 NIT 字段
+                                      → todo 这一项完成
+      · spec_reviewer=APPROVED 且 code_quality_reviewer=APPROVED，且返回了 NIT
+                                      → 视情况自行处理，默认不阻塞
+      · spec_reviewer=NEEDS_FIX
+        或 code_quality_reviewer=ISSUES 且含 Critical / Important
+                                      → 把两边必须修的问题合并后一次性派 writer
+                                         → 修完后重新跑对应 split reviewers
+      · split reviewer 缺少 STATUS，或在 NEEDS_FIX / ISSUES 时缺少对应问题字段
+        （spec: MISSING / EXTRA；quality: CRITICAL / IMPORTANT / NIT）
+                                      → 作为 subagent contract issue，补上下文后重派或升级
+      （同一 task review-fix 循环 ≥3 次仍未通过 → send_message(intent="ask_human")）
 
   最终 send_message(intent="info", 报告结果) → end_turn ✔`
 
