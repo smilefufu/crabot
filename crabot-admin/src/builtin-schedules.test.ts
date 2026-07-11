@@ -81,6 +81,18 @@ describe('AdminModule - ensureBuiltinSchedules', () => {
     expect(memoryCurate!.task_template.type).toBe('memory_curate')
   })
 
+  it('should seed 记忆整理 with explicit watermark input for incremental inbox curation', async () => {
+    const result = await (admin as unknown as { handleListSchedules: (params: { page: number; page_size: number; filter: Record<string, unknown> }) => Promise<{ items: Schedule[] }> }).handleListSchedules({ page: 1, page_size: 50, filter: {} })
+    const memoryCurate = result.items.find(s => s.name === '记忆整理')
+    expect(memoryCurate, '记忆整理 should exist').toBeDefined()
+    expect(memoryCurate!.task_template.description).toContain('{{watermark}}')
+    expect(memoryCurate!.task_template.description).toContain('{{datetime}}')
+    expect(memoryCurate!.task_template.input).toMatchObject({
+      ingestion_time_start: '{{watermark}}',
+      ingestion_time_end: '{{datetime}}',
+    })
+  })
+
   it('should seed 记忆维护 (cron, 0 4 * * *)', async () => {
     const result = await (admin as unknown as { handleListSchedules: (params: { page: number; page_size: number; filter: Record<string, unknown> }) => Promise<{ items: Schedule[] }> }).handleListSchedules({ page: 1, page_size: 50, filter: {} })
     const memoryMaintenance = result.items.find(s => s.name === '记忆维护')

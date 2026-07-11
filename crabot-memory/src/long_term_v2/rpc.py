@@ -542,13 +542,18 @@ class LongTermV2Rpc:
         status = params.get("status")
         author = params.get("author")
         tags = params.get("tags") or []
+        ingestion_time_start = params.get("ingestion_time_start")
+        ingestion_time_end = params.get("ingestion_time_end")
         limit = int(params.get("limit", 100))
         offset = int(params.get("offset", 0))
         sort = params.get("sort", "ingestion_time_desc")
 
         rows = self.index.list_entries(
             type_=type_, status=status,
-            tags=tags, limit=limit, offset=offset, sort=sort,
+            tags=tags,
+            ingestion_time_start=ingestion_time_start,
+            ingestion_time_end=ingestion_time_end,
+            limit=limit, offset=offset, sort=sort,
         )
         items = [
             item for r in rows

@@ -98,6 +98,56 @@ describe('handleUpdateTaskStatus through applyStatusTransition', () => {
     ).rejects.toThrow()
   })
 
+  it('completed 推进 schedule watermark 到 input.ingestion_time_end（窗口终点），避免任务执行期间的覆盖缺口', async () => {
+    const scheduleId = 'sched-watermark-window-end'
+    ;(admin as any).schedules.set(scheduleId, {
+      id: scheduleId,
+      name: 'watermark-window-test',
+      description: '',
+      trigger: { type: 'interval', seconds: 3600 },
+      task_template: { type: 'memory_curate', title: 't', description: 'd' },
+      enabled: true,
+      is_builtin: false,
+      execution_count: 0,
+      created_at: '2026-07-01T00:00:00.000Z',
+      updated_at: '2026-07-01T00:00:00.000Z',
+    })
+    const windowEnd = '2026-07-11T10:00:00.000Z'
+    const task = await createTask({
+      input: { schedule_id: scheduleId, ingestion_time_start: '2026-07-11T09:00:00.000Z', ingestion_time_end: windowEnd },
+    })
+    await (admin as any).handleUpdateTaskStatus({ task_id: task.id, status: 'planning' })
+    await (admin as any).handleUpdateTaskStatus({ task_id: task.id, status: 'executing' })
+    await (admin as any).handleUpdateTaskStatus({ task_id: task.id, status: 'completed' })
+
+    const schedule = (admin as any).schedules.get(scheduleId)
+    expect(schedule.watermark).toBe(windowEnd)
+  })
+
+  it('completed 时无 input.ingestion_time_end 的 schedule 任务，watermark 回退到 completed_at', async () => {
+    const scheduleId = 'sched-watermark-completed-at'
+    ;(admin as any).schedules.set(scheduleId, {
+      id: scheduleId,
+      name: 'watermark-fallback-test',
+      description: '',
+      trigger: { type: 'interval', seconds: 3600 },
+      task_template: { type: 'daily_reflection', title: 't', description: 'd' },
+      enabled: true,
+      is_builtin: false,
+      execution_count: 0,
+      created_at: '2026-07-01T00:00:00.000Z',
+      updated_at: '2026-07-01T00:00:00.000Z',
+    })
+    const task = await createTask({ input: { schedule_id: scheduleId } })
+    await (admin as any).handleUpdateTaskStatus({ task_id: task.id, status: 'planning' })
+    await (admin as any).handleUpdateTaskStatus({ task_id: task.id, status: 'executing' })
+    await (admin as any).handleUpdateTaskStatus({ task_id: task.id, status: 'completed' })
+
+    const done = (admin as any).tasks.get(task.id)
+    const schedule = (admin as any).schedules.get(scheduleId)
+    expect(schedule.watermark).toBe(done.completed_at)
+  })
+
   it('waiting_human → failed clears waiting_human_at and pending_question', async () => {
     const task = await createTask()
     await (admin as any).handleUpdateTaskStatus({ task_id: task.id, status: 'planning' })

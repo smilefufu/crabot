@@ -61,10 +61,27 @@ _PHASE3_ADDITIVE_COLUMNS = [
 ]
 
 
+def _iso_to_epoch_us(value: str | None) -> int | None:
+    # 解析失败返回 None（SQL 里 NULL 比较恒假）：格式非法的时间戳行会被
+    # 时间过滤查询静默排除，而不是让整条查询失败。这是有意的取舍。
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        return int(dt.timestamp() * 1_000_000)
+    except Exception:
+        return None
+
+
 class SqliteIndex:
     def __init__(self, db_path: str):
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
+        self.conn.create_function("iso_to_epoch_us", 1, _iso_to_epoch_us, deterministic=True)
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
@@ -217,16 +234,15 @@ class SqliteIndex:
         self, field: str, start: str, end: str, limit: int = 50,
     ) -> list[str]:
         """Return memory_ids whose `event_time` or `ingestion_time` ∈ [start, end).
-
-        ISO-8601 strings sort lexicographically equal to chronologically; safe to
-        compare with SQLite text comparison.
         """
         if field not in {"event_time", "ingestion_time"}:
             raise ValueError(f"invalid field: {field}")
         cur = self.conn.cursor()
         cur.execute(
-            f"SELECT id FROM memories WHERE {field} >= ? AND {field} < ? "
-            f"ORDER BY {field} DESC LIMIT ?",
+            f"SELECT id FROM memories "
+            f"WHERE iso_to_epoch_us({field}) >= iso_to_epoch_us(?) "
+            f"AND iso_to_epoch_us({field}) < iso_to_epoch_us(?) "
+            f"ORDER BY iso_to_epoch_us({field}) DESC LIMIT ?",
             (start, end, int(limit)),
         )
         return [row[0] for row in cur.fetchall()]
@@ -415,11 +431,13 @@ class SqliteIndex:
         type_: str | None = None,
         status: str | None = None,
         tags: list[str] | None = None,
+        ingestion_time_start: str | None = None,
+        ingestion_time_end: str | None = None,
         limit: int = 100,
         offset: int = 0,
         sort: str = "ingestion_time_desc",
     ) -> list[dict]:
-        """按 type/status/tags 过滤，按 sort 排序，分页返回。
+        """按 type/status/tags/ingestion_time 过滤，按 sort 排序，分页返回。
 
         Note: there is no `author` column on the `memories` table. Author
         filtering must happen at the RPC layer after loading the entry's
@@ -433,13 +451,21 @@ class SqliteIndex:
         if status:
             where.append("status = ?")
             params.append(status)
+        if ingestion_time_start:
+            where.append("iso_to_epoch_us(ingestion_time) >= iso_to_epoch_us(?)")
+            params.append(ingestion_time_start)
+        if ingestion_time_end:
+            where.append("iso_to_epoch_us(ingestion_time) < iso_to_epoch_us(?)")
+            params.append(ingestion_time_end)
         where_sql = "WHERE " + " AND ".join(where) if where else ""
 
+        # id 次级排序：同一时间戳的条目（批量导入常见）顺序确定，
+        # 否则 offset 分页在平局处跨页可能跳过 / 重复条目。
         order = {
-            "ingestion_time_desc": "ingestion_time DESC",
-            "ingestion_time_asc": "ingestion_time ASC",
-            "event_time_desc": "event_time DESC",
-        }.get(sort, "ingestion_time DESC")
+            "ingestion_time_desc": "iso_to_epoch_us(ingestion_time) DESC, id ASC",
+            "ingestion_time_asc": "iso_to_epoch_us(ingestion_time) ASC, id ASC",
+            "event_time_desc": "iso_to_epoch_us(event_time) DESC, id ASC",
+        }.get(sort, "iso_to_epoch_us(ingestion_time) DESC, id ASC")
 
         cur = self.conn.execute(
             f"SELECT id, type, status FROM memories {where_sql} "

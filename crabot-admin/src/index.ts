@@ -5210,9 +5210,15 @@ export class AdminModule extends ModuleBase {
       if (typeof scheduleId === 'string') {
         const schedule = this.schedules.get(scheduleId)
         if (schedule) {
+          // 优先用任务声明的窗口终点（input.ingestion_time_end，触发时渲染的 {{datetime}}）。
+          // 用 completed_at 会把任务执行期间 [触发时刻, 完成时刻) 入库的条目
+          // 永久排除在后续增量窗口之外。
+          const windowEnd = task.input?.ingestion_time_end
           const updated: Schedule = {
             ...schedule,
-            watermark: task.completed_at ?? task.updated_at,
+            watermark: typeof windowEnd === 'string' && windowEnd
+              ? windowEnd
+              : task.completed_at ?? task.updated_at,
             updated_at: task.updated_at,
           }
           this.schedules.set(scheduleId, updated)
@@ -6171,8 +6177,12 @@ export class AdminModule extends ModuleBase {
         task_template: {
           type: 'memory_curate',
           title: '记忆整理 — {{datetime}}',
-          description: '第一步必须调用 Skill("memory-curate")，禁止加载其他 reflection skill。流程：扫近期 inbox → 去重 → 多因子打分 → 晋升 confirmed / 丢弃 / 留待 daily-reflection。',
+          description: '第一步必须调用 Skill("memory-curate")，禁止加载其他 reflection skill。整理范围：{{watermark}} 到 {{datetime}}。流程：按 ingestion_time 增量列出此窗口内的 inbox → 去重 → 多因子打分 → 晋升 confirmed / 丢弃 / 留待 daily-reflection。禁止用 search_long_term 拉 inbox 候选。',
           priority: 'low',
+          input: {
+            ingestion_time_start: '{{watermark}}',
+            ingestion_time_end: '{{datetime}}',
+          },
           tags: ['memory_curate', 'builtin'],
         },
       },
