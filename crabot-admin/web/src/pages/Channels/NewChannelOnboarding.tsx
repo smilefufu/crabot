@@ -41,7 +41,7 @@ interface Status {
 }
 
 // 与 crabot-shared/src/instance-id.ts 的 INSTANCE_ID_REGEX 保持一致（web 不依赖该包，字面量复制，改动需双向同步）
-const NAME_PATTERN = /^[\p{Ll}\p{Lo}\p{N}-]{2,50}$/u
+const NAME_PATTERN = /^[\p{Script=Han}a-z0-9-]{2,50}$/u
 
 export const NewChannelOnboarding: React.FC = () => {
   const navigate = useNavigate()

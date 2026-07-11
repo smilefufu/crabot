@@ -8,7 +8,7 @@ import fs from 'fs/promises'
 import fsSync from 'fs'
 import path from 'path'
 import yaml from 'js-yaml'
-import { generateTimestamp, type RpcClient, validateInstanceId, instanceIdFoldKey } from 'crabot-shared'
+import { generateTimestamp, type RpcClient, validateInstanceId } from 'crabot-shared'
 import type {
   ChannelImplementation,
   ChannelInstance,
@@ -194,14 +194,8 @@ export class ChannelManager {
       throw new Error(`Invalid instance name: ${validated.reason}`)
     }
     const instanceId = validated.id
-    // 用文件系统碰撞键查重：大小写不敏感文件系统上会折叠到同一 <id>.json 的名字
-    // （如 aσ / aς）视为同名，防止第二个实例覆盖第一个的配置。fold(x)===fold(x)，
-    // 故本检查同时覆盖精确同名。
-    const foldKey = instanceIdFoldKey(instanceId)
-    for (const existingId of this.instances.keys()) {
-      if (instanceIdFoldKey(existingId) === foldKey) {
-        throw new Error(`Instance name already exists: ${params.name}`)
-      }
+    if (this.instances.has(instanceId)) {
+      throw new Error(`Instance name already exists: ${params.name}`)
     }
 
     const now = generateTimestamp()

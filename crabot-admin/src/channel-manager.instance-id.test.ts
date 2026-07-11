@@ -64,41 +64,13 @@ describe('ChannelManager.createInstance 实例 id 校验', () => {
     }
   })
 
-  it('NFD 输入以 NFC 形式存储', async () => {
+  it('同名中文实例重复创建被拒绝', async () => {
     const manager = new ChannelManager(dataDir, makeRpc() as any)
     await manager.addImplementation(fakeImpl)
 
-    const nfd = 'café'.normalize('NFD')
-    const instance = await manager.createInstance({
-      implementation_id: fakeImpl.id,
-      name: nfd,
-    })
-    expect(instance.id).toBe('café'.normalize('NFC'))
-  })
-
-  it('NFC/NFD 视为同名，重复创建被拒绝', async () => {
-    const manager = new ChannelManager(dataDir, makeRpc() as any)
-    await manager.addImplementation(fakeImpl)
-
-    await manager.createInstance({
-      implementation_id: fakeImpl.id,
-      name: 'café'.normalize('NFC'),
-    })
+    await manager.createInstance({ implementation_id: fakeImpl.id, name: '微信客服' })
     await expect(
-      manager.createInstance({
-        implementation_id: fakeImpl.id,
-        name: 'café'.normalize('NFD'),
-      })
-    ).rejects.toThrow(/already exists/)
-  })
-
-  it('大小写折叠碰撞（aσ vs aς）视为同名，拒绝第二个防配置互相覆盖', async () => {
-    const manager = new ChannelManager(dataDir, makeRpc() as any)
-    await manager.addImplementation(fakeImpl)
-
-    await manager.createInstance({ implementation_id: fakeImpl.id, name: 'aσ' })
-    await expect(
-      manager.createInstance({ implementation_id: fakeImpl.id, name: 'aς' })
+      manager.createInstance({ implementation_id: fakeImpl.id, name: '微信客服' })
     ).rejects.toThrow(/already exists/)
   })
 })
