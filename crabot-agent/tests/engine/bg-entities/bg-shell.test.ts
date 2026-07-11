@@ -248,6 +248,27 @@ describe('runShellWithGrace', () => {
     expect(result.stdout).toBe('started\n')
   }, 5_000)
 
+  it('does not kill background children that write after inline return', async () => {
+    const pidFile = path.join(tmpDir, 'daemon.pid')
+
+    const result = await runShellWithGrace({
+      command: `( sleep 1; echo daemon-log; sleep 2 ) & echo $! > ${JSON.stringify(pidFile)}; echo started`,
+      cwd: process.cwd(),
+      owner: { friend_id: 'user-A' },
+      spawned_by_task_id: 'task-inline-background-child-survives',
+      registry,
+      gracePeriodMs: 1_500,
+    })
+
+    expect(result.kind).toBe('inline')
+    expect(readFileSync(pidFile, 'utf8').trim()).toMatch(/^\d+$/)
+    const pid = Number(readFileSync(pidFile, 'utf8').trim())
+    spawnedPids.push(pid)
+
+    await sleep(1_500)
+    expect(() => process.kill(pid, 0)).not.toThrow()
+  }, 6_000)
+
   it('falls back to sidecar redirection when mkfifo is unavailable', async () => {
     const fakeBin = path.join(tmpDir, 'bin')
     rmSync(fakeBin, { recursive: true, force: true })

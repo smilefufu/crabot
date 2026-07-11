@@ -195,7 +195,7 @@ describe('createBashTool with bgCtx', () => {
     expect(rec?.status).toBe('running')
 
     // 命令真正退出 → onShellExit 触发 + registry 标 completed
-    await settle()
+    await settle(1200)
     expect(pushed.map((i) => i.entity_id)).toContain(shellId)
     expect(pushed.find((i) => i.entity_id === shellId)?.status).toBe('completed')
     const rec2 = await registry.get(shellId)

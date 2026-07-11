@@ -93,35 +93,32 @@ function wrapCommandWithInlineStreamCapture(
 ): string {
   return (
     `rm -f ${shSingleQuote(stdoutFifo)} ${shSingleQuote(stderrFifo)}\n` +
-    `if mkfifo ${shSingleQuote(stdoutFifo)} ${shSingleQuote(stderrFifo)}; then\n` +
-    `  cleanup() {\n` +
-    `    rm -f ${shSingleQuote(stdoutFifo)} ${shSingleQuote(stderrFifo)}\n` +
-    `  }\n` +
-    `  trap cleanup EXIT\n` +
-    `  tee -a ${shSingleQuote(stdoutFile)} < ${shSingleQuote(stdoutFifo)} &\n` +
-    `  __crabot_stdout_tee=$!\n` +
-    `  tee -a ${shSingleQuote(stderrFile)} >&2 < ${shSingleQuote(stderrFifo)} &\n` +
-    `  __crabot_stderr_tee=$!\n` +
-    `  {\n${command}\n` +
-    `  } > ${shSingleQuote(stdoutFifo)} 2> ${shSingleQuote(stderrFifo)}\n` +
-    `  __crabot_ec=$?\n` +
-    `  __crabot_wait_tee() {\n` +
-    `    local __pid="$1"\n` +
-    `    local __timer\n` +
-    `    ( sleep ${INLINE_TEE_DRAIN_TIMEOUT_SECONDS}; kill "$__pid" 2>/dev/null ) &\n` +
-    `    __timer=$!\n` +
-    `    wait "$__pid" 2>/dev/null\n` +
-    `    kill "$__timer" 2>/dev/null\n` +
-    `    wait "$__timer" 2>/dev/null\n` +
-    `    return 0\n` +
-    `  }\n` +
-    `  __crabot_wait_tee "$__crabot_stdout_tee"\n` +
-    `  __crabot_wait_tee "$__crabot_stderr_tee"\n` +
-    `else\n` +
-    `  {\n${command}\n` +
-    `  } > ${shSingleQuote(stdoutFile)} 2> ${shSingleQuote(stderrFile)}\n` +
-    `  __crabot_ec=$?\n` +
-    `fi\n` +
+    `: > ${shSingleQuote(stdoutFile)}\n` +
+    `: > ${shSingleQuote(stderrFile)}\n` +
+    `tail -n +1 -f ${shSingleQuote(stdoutFile)} &\n` +
+    `__crabot_stdout_tail=$!\n` +
+    `tail -n +1 -f ${shSingleQuote(stderrFile)} >&2 &\n` +
+    `__crabot_stderr_tail=$!\n` +
+    `__crabot_drain_tails() {\n` +
+    `  local __timer\n` +
+    `  ( sleep ${INLINE_TEE_DRAIN_TIMEOUT_SECONDS}; kill "$__crabot_stdout_tail" "$__crabot_stderr_tail" 2>/dev/null ) &\n` +
+    `  __timer=$!\n` +
+    `  wait "$__crabot_stdout_tail" 2>/dev/null\n` +
+    `  wait "$__crabot_stderr_tail" 2>/dev/null\n` +
+    `  kill "$__timer" 2>/dev/null\n` +
+    `  wait "$__timer" 2>/dev/null\n` +
+    `  return 0\n` +
+    `}\n` +
+    `cleanup() {\n` +
+    `  kill "$__crabot_stdout_tail" "$__crabot_stderr_tail" 2>/dev/null\n` +
+    `  rm -f ${shSingleQuote(stdoutFifo)} ${shSingleQuote(stderrFifo)}\n` +
+    `}\n` +
+    `trap cleanup EXIT\n` +
+    `{\n${command}\n` +
+    `} > ${shSingleQuote(stdoutFile)} 2> ${shSingleQuote(stderrFile)}\n` +
+    `__crabot_ec=$?\n` +
+    `__crabot_drain_tails\n` +
+    `trap - EXIT\n` +
     `rm -f ${shSingleQuote(stdoutFifo)} ${shSingleQuote(stderrFifo)}\n` +
     `printf '%s' "$__crabot_ec" > ${shSingleQuote(exitcodeFile)} 2>/dev/null\n` +
     `exit $__crabot_ec`
