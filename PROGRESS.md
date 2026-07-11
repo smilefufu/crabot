@@ -10,6 +10,10 @@
 - 边界：工具结果、唤醒文案、skill 文档均不得暴露 `$DATA_DIR/tmp-pages`、`.crabot/data/tmp-pages`、`events.jsonl` 或内部端口；`tmp_page_update` 与 create 一样拒绝空 HTML。
 - 验证：tmp-page tools / feedback wakeup / server source / skill doc focused tests，`crabot-agent` / `crabot-admin` `tsc --noEmit`。
 
+## 2026-07-10 — 渠道实例 id 放开 Unicode 命名与路由 decode 修复
+
+- 渠道实例 id 放开 Unicode 命名（白名单 + NFC）+ 修复 /api/modules/:id/* 路由 percent-decode 缺失（中文模块无法重启的事故根因）。spec: crabot-docs superpowers/specs/2026-07-10-unicode-instance-id-design.md
+
 ## 2026-07-08 — 修复 resume 执行入口语义污染
 
 - 根因：`resume_task` / terminal supplement revive 复用了 `ScheduledTaskRunner.executeScheduledTaskInBackground`，该 runner 硬编码 `source.trigger_type='scheduled'`，导致 human message task 续跑后关闭 goal/end-turn delivery gate，空 `end_turn` 可直接完成。

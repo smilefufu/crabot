@@ -8,6 +8,7 @@ import type { CreateChannelInstanceParams } from '../types.js'
 import type { OpenClawChannelsConfig } from './openclaw-config.js'
 import { extractChannelSecrets } from './extract-channel-secrets.js'
 import { mapChannel } from './map-channel.js'
+import { isValidChannelInstanceName } from './channel-instance-name.js'
 import type { ImportItemResult } from './import-types.js'
 
 export type ChannelImportDeps = {
@@ -44,6 +45,14 @@ export async function importChannels(
 
     if (deps.existingChannelNames.has(name)) {
       results.push({ kind: 'channel', name, status: 'skipped', reason: 'conflict' })
+      continue
+    }
+
+    // 确定性预校验：非法派生名（如 account_id 含大写/点号）在创建前就跳过，
+    // 与预览（analyze-channels）判定一致。运行时错误（磁盘/MM 故障）不在此吞掉——
+    // 让其向上传播到 runStep，进入 summary.errors，避免把系统故障伪装成 skipped。
+    if (!isValidChannelInstanceName(source_channel, account_id)) {
+      results.push({ kind: 'channel', name, status: 'skipped', reason: 'invalid-name' })
       continue
     }
 

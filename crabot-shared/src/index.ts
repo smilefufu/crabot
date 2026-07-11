@@ -102,3 +102,5 @@ export {
 } from './markdown.js'
 
 export * from './media-fetch/index.js'
+
+export { INSTANCE_ID_REGEX, validateInstanceId, type InstanceIdResult } from './instance-id.js'
