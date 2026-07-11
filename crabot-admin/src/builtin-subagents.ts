@@ -410,7 +410,6 @@ const TASK_REVIEWER_WORKFLOW = `接到 task 后：
 const TASK_REVIEWER_DELIVERABLES = `最终 output 必须以以下固定格式结尾：
 
 ---
-STATUS: APPROVED | NEEDS_FIX | CANNOT_VERIFY
 spec_compliance:
   verdict: APPROVED | ISSUES | CANNOT_VERIFY
   issues: <bullet list；无则写 none>
@@ -424,15 +423,13 @@ EVIDENCE: <file:line 锚点和 verification 命令输出摘要>
 
 assessment 规则：
 - spec_compliance.verdict=APPROVED 且 code_quality 没有 critical/important → APPROVED
-- spec_compliance 有 ISSUES/CANNOT_VERIFY，或 code_quality 有 critical/important → NEEDS_FIX
-- 若 STATUS=CANNOT_VERIFY，则 spec_compliance.verdict 必须为 CANNOT_VERIFY，且 assessment 必须为 NEEDS_FIX`
+- spec_compliance 有 ISSUES/CANNOT_VERIFY，或 code_quality 有 critical/important → NEEDS_FIX`
 
 const TASK_REVIEWER_VERIFICATION = `返回前自检：
 - 单 task 输入时，是否读了 FILES_CHANGED 的真实代码或 diff？
 - final review 输入时，是否读了 PLAN_PATH、累计改动文件，以及这些文件的真实代码或 diff？
 - spec_compliance 的每个 issue 是否有 task step / file:line / 命令输出证据？
 - code_quality 的 critical/important 是否有 file:line？
-- 若 STATUS=CANNOT_VERIFY，spec_compliance.verdict 是否也是 CANNOT_VERIFY，且 assessment=NEEDS_FIX？
 - assessment 是否与两个 verdict 一致？`
 
 const SPEC_REVIEWER_WHEN_TO_USE = `Use this subagent when:

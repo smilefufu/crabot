@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { mkdtempSync, rmSync, readFileSync, existsSync, readdirSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, existsSync, readdirSync, writeFileSync, chmodSync, mkdirSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -227,6 +227,59 @@ describe('spawnPersistentShell', () => {
 })
 
 describe('runShellWithGrace', () => {
+  it('returns inline when a short command starts a background child that keeps stdout open', async () => {
+    const startedAt = Date.now()
+
+    const result = await runShellWithGrace({
+      command: 'sleep 2 & echo started',
+      cwd: process.cwd(),
+      owner: { friend_id: 'user-A' },
+      spawned_by_task_id: 'task-inline-background-child',
+      registry,
+      gracePeriodMs: 1_500,
+    })
+
+    expect(Date.now() - startedAt).toBeLessThan(1_500)
+    expect(result.kind).toBe('inline')
+    if (result.kind !== 'inline') {
+      return
+    }
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toBe('started\n')
+  }, 5_000)
+
+  it('falls back to sidecar redirection when mkfifo is unavailable', async () => {
+    const fakeBin = path.join(tmpDir, 'bin')
+    rmSync(fakeBin, { recursive: true, force: true })
+    mkdirSync(fakeBin, { recursive: true })
+    const fakeMkfifo = path.join(fakeBin, 'mkfifo')
+    writeFileSync(fakeMkfifo, '#!/bin/sh\necho mkfifo unavailable >&2\nexit 1\n')
+    chmodSync(fakeMkfifo, 0o755)
+
+    const oldPath = process.env.PATH
+    process.env.PATH = `${fakeBin}:${oldPath ?? ''}`
+    try {
+      const result = await runShellWithGrace({
+        command: 'echo hello',
+        cwd: process.cwd(),
+        owner: { friend_id: 'user-A' },
+        spawned_by_task_id: 'task-inline-mkfifo-fallback',
+        registry,
+        gracePeriodMs: 1_000,
+      })
+
+      expect(result.kind).toBe('inline')
+      if (result.kind !== 'inline') {
+        return
+      }
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toBe('hello\n')
+      expect(result.stderr).toBe('')
+    } finally {
+      process.env.PATH = oldPath
+    }
+  })
+
   it('returns spawn_error and removes temp log artifacts when bash resolution throws before child spawn', async () => {
     const resolveBashPathSpy = vi.spyOn(resolveBashPathModule, 'resolveBashPath').mockReturnValue(null)
 

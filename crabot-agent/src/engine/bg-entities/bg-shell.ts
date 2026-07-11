@@ -17,6 +17,7 @@ import type { BgEntityRegistry } from './registry.js'
 import { emitInstantSpan, type BgEntityTraceContext } from './trace.js'
 
 const execFileAsync = promisify(execFile)
+const INLINE_TEE_DRAIN_TIMEOUT_SECONDS = 0.5
 
 /**
  * Spawn `bash -c <command>` with the cross-platform defaults bg-shell needs:
@@ -92,20 +93,36 @@ function wrapCommandWithInlineStreamCapture(
 ): string {
   return (
     `rm -f ${shSingleQuote(stdoutFifo)} ${shSingleQuote(stderrFifo)}\n` +
-    `mkfifo ${shSingleQuote(stdoutFifo)} ${shSingleQuote(stderrFifo)}\n` +
-    `cleanup() {\n` +
-    `  rm -f ${shSingleQuote(stdoutFifo)} ${shSingleQuote(stderrFifo)}\n` +
-    `}\n` +
-    `trap cleanup EXIT\n` +
-    `tee -a ${shSingleQuote(stdoutFile)} < ${shSingleQuote(stdoutFifo)} &\n` +
-    `__crabot_stdout_tee=$!\n` +
-    `tee -a ${shSingleQuote(stderrFile)} >&2 < ${shSingleQuote(stderrFifo)} &\n` +
-    `__crabot_stderr_tee=$!\n` +
-    `{\n${command}\n` +
-    `} > ${shSingleQuote(stdoutFifo)} 2> ${shSingleQuote(stderrFifo)}\n` +
-    `__crabot_ec=$?\n` +
-    `wait "$__crabot_stdout_tee"\n` +
-    `wait "$__crabot_stderr_tee"\n` +
+    `if mkfifo ${shSingleQuote(stdoutFifo)} ${shSingleQuote(stderrFifo)}; then\n` +
+    `  cleanup() {\n` +
+    `    rm -f ${shSingleQuote(stdoutFifo)} ${shSingleQuote(stderrFifo)}\n` +
+    `  }\n` +
+    `  trap cleanup EXIT\n` +
+    `  tee -a ${shSingleQuote(stdoutFile)} < ${shSingleQuote(stdoutFifo)} &\n` +
+    `  __crabot_stdout_tee=$!\n` +
+    `  tee -a ${shSingleQuote(stderrFile)} >&2 < ${shSingleQuote(stderrFifo)} &\n` +
+    `  __crabot_stderr_tee=$!\n` +
+    `  {\n${command}\n` +
+    `  } > ${shSingleQuote(stdoutFifo)} 2> ${shSingleQuote(stderrFifo)}\n` +
+    `  __crabot_ec=$?\n` +
+    `  __crabot_wait_tee() {\n` +
+    `    local __pid="$1"\n` +
+    `    local __timer\n` +
+    `    ( sleep ${INLINE_TEE_DRAIN_TIMEOUT_SECONDS}; kill "$__pid" 2>/dev/null ) &\n` +
+    `    __timer=$!\n` +
+    `    wait "$__pid" 2>/dev/null\n` +
+    `    kill "$__timer" 2>/dev/null\n` +
+    `    wait "$__timer" 2>/dev/null\n` +
+    `    return 0\n` +
+    `  }\n` +
+    `  __crabot_wait_tee "$__crabot_stdout_tee"\n` +
+    `  __crabot_wait_tee "$__crabot_stderr_tee"\n` +
+    `else\n` +
+    `  {\n${command}\n` +
+    `  } > ${shSingleQuote(stdoutFile)} 2> ${shSingleQuote(stderrFile)}\n` +
+    `  __crabot_ec=$?\n` +
+    `fi\n` +
+    `rm -f ${shSingleQuote(stdoutFifo)} ${shSingleQuote(stderrFifo)}\n` +
     `printf '%s' "$__crabot_ec" > ${shSingleQuote(exitcodeFile)} 2>/dev/null\n` +
     `exit $__crabot_ec`
   )

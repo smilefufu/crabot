@@ -253,7 +253,9 @@ const WORKFLOW_PLANNING_AND_EXECUTION = `[规划与执行]
                                       → todo 这一项完成
       · assessment=APPROVED 且仅 code_quality minor
                                       → 自行判断是否值得修；默认不阻塞
-      · spec_compliance ISSUES/CANNOT_VERIFY
+      · spec_compliance=CANNOT_VERIFY  → 先补 context / 环境 / verification 证据；
+                                         证据补齐后重派 task_reviewer，不默认派 writer
+      · spec_compliance=ISSUES
         或 code_quality critical/important
                                       → 派 writer 一次性修复必须修的问题
                                          → 修完后重新跑 task_reviewer
