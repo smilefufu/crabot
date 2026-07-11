@@ -1,4 +1,6 @@
 """RPC handler tests (v3: no embedder)."""
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from src.long_term_v2.store import MemoryStore
 from src.long_term_v2.sqlite_index import SqliteIndex
@@ -236,7 +238,10 @@ async def test_list_recent_rpc(rpc):
         "author": "u", "source_ref": {"type": "manual"},
         "source_trust": 5, "content_confidence": 5,
         "importance_factors": {"proximity":0.5,"surprisal":0.5,"entity_priority":0.5,"unambiguity":0.5},
-        "event_time": "2026-04-23T10:00:00Z",
+        # list_recent 按 now - window_days 过滤 event_time，硬编码日期会随时间流逝
+        # 掉出窗口（本测试曾因此在写入约一个月后开始失败）
+        "event_time": (datetime.now(timezone.utc) - timedelta(days=1))
+            .isoformat().replace("+00:00", "Z"),
     })
     res = await rpc.list_recent({"window_days": 30})
     assert len(res["results"]) >= 1

@@ -43,6 +43,8 @@ EXPECTED_V2_RPC_METHODS = frozenset({
     "get_confirmed_snapshot",
     "get_entry_version",
     "get_memory_graph",
+    # 后续独立设计文档新增（已回填 spec §10.1 修订注记）
+    "import_long_term",  # 2026-06-19-crabot-backup-import-design.md
 })
 
 
