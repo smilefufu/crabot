@@ -49,8 +49,8 @@ export interface TaskContext {
    *  与 Task.source.trigger_type 同名同枚举。 */
   triggerType: 'message' | 'scheduled'
   /** 任务子分类（来自 Schedule.task_template.type 或人类指派）。
-   *  现仅 'daily_reflection' 用于 messaging 工具白名单过滤——反思任务工具集合卡死到
-   *  send_master_private + 只读工具，避免反思内容被发到任意群/私聊。
+   *  现仅 scheduled + 'daily_reflection' 用于 messaging 工具白名单过滤——反思任务工具
+   *  集合卡死到 send_master_private + 只读工具，避免反思内容被发到任意群/私聊。
    *  其他 scheduled 任务（用户自建的推送 / 巡检 / 数据采集）不受白名单影响。 */
   taskType?: string
   /** 当前 task 是否挂了 goal；agent-handler 在装 deps 时由 admin task 查询结果维护 cache，
@@ -88,6 +88,19 @@ export interface TaskContext {
    *  send_message 收到相对 file_path 时用它就地解析成绝对路径——相对路径若拖到延迟 flush
    *  阶段才在 dispatch 里抛错，那时已无法把失败回传给 worker（trace a72623ec 成因）。 */
   getCwd?: () => string
+}
+
+type MessagingToolProfile =
+  | 'human_message'
+  | 'scheduled'
+  | 'scheduled_daily_reflection'
+
+function resolveMessagingToolProfile(
+  taskCtx: Pick<TaskContext, 'triggerType' | 'taskType'> | null,
+): MessagingToolProfile {
+  if (taskCtx?.triggerType !== 'scheduled') return 'human_message'
+  if (taskCtx.taskType === 'daily_reflection') return 'scheduled_daily_reflection'
+  return 'scheduled'
 }
 
 // ============================================================================
@@ -160,6 +173,17 @@ function wrapText(payload: unknown, opts?: { isError?: boolean }) {
   return opts?.isError ? { ...base, isError: true } : base
 }
 
+function requireScheduledShortcutContext(
+  deps: CrabMessagingDeps,
+  toolName: 'send_private_message' | 'send_master_private',
+): ReturnType<typeof wrapText> | null {
+  if (deps.getTaskContext?.()?.triggerType === 'scheduled') return null
+  return wrapText({
+    error_code: 'SCHEDULED_ONLY_TOOL',
+    error: `${toolName} is only available in scheduled tasks`,
+  }, { isError: true })
+}
+
 function clampPageSize(n: number, max = 100): number {
   if (!Number.isFinite(n) || n <= 0) return 50
   return Math.min(Math.floor(n), max)
@@ -177,7 +201,7 @@ function clampPageSize(n: number, max = 100): number {
  * agent 可能 lookup_friend / list_sessions 自行挑一个 session 把内部产物发出去
  * （已发生：2026-05-30 daily-reflection 把反思报告发到群"全栈工程师哈哈 & Mr.Wu"）。
  *
- * 仅对 task_type='daily_reflection' 生效：
+ * 仅对 triggerType='scheduled' + taskType='daily_reflection' 生效：
  *   - 对外唯一通道：send_master_private（admin 按 permission='master' 定位，封死目标）
  *   - 只读分析工具：get_history / get_message / read_feishu_document（用 trace 里拿到的 channel/session 查历史）
  *   - 其他工具不暴露：lookup_friend、list_contacts、list_groups、list_sessions、send_message、send_private_message
@@ -315,7 +339,7 @@ export function buildMessagingTools(
 ): MessagingTool[] {
   const { rpcClient, moduleId, getAdminPort, resolveChannelPort } = deps
   const taskCtx = deps.getTaskContext?.() ?? null
-  const isDailyReflection = taskCtx?.taskType === 'daily_reflection'
+  const toolProfile = resolveMessagingToolProfile(taskCtx)
 
   // 解析飞书 channel port 的公共 helper（供 read_feishu_document / feishu_raw_get / feishu_download_file 共用）
   async function resolveFeishuChannelPort(args: Record<string, unknown>): Promise<
@@ -582,6 +606,8 @@ export function buildMessagingTools(
       description: '给熟人发私聊消息。当你不关心使用哪个 Channel 或不知道该用哪个 Channel 时使用此工具。系统自动查找可用 Channel 并创建/复用私聊 Session。如果你已知 channel_id 和 session_id，请直接使用 send_message。',
       schema: SEND_PRIVATE_MESSAGE_SCHEMA,
       handler: async (args) => {
+        const contextError = requireScheduledShortcutContext(deps, 'send_private_message')
+        if (contextError) return contextError
         const friend_id = args.friend_id as string
         const content = args.content as string
         try {
@@ -671,6 +697,8 @@ export function buildMessagingTools(
 注意：发出的内容会被人类看到——禁止塞 trace 数据 / Evolution Mode / case→rule / Audit 等内部黑话，必须翻译成一行人话（"今日整理 X 条经验，无重大发现"这种），多行长报告请走 task outcome 不要外发。`,
       schema: SEND_MASTER_PRIVATE_SCHEMA,
       handler: async (args) => {
+        const contextError = requireScheduledShortcutContext(deps, 'send_master_private')
+        if (contextError) return contextError
         const content = args.content as string
         const preferredChannelId = args.channel_id as string | undefined
 
@@ -1273,11 +1301,17 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
     } as MessagingTool] : []),
   ]
 
-  return isDailyReflection
-    ? allTools.filter(t => DAILY_REFLECTION_ALLOWED_TOOLS.has(t.name))
-    : taskCtx?.triggerType === 'message'
-      ? allTools.filter(t => t.name !== 'send_master_private')
-    : allTools
+  switch (toolProfile) {
+    case 'scheduled_daily_reflection':
+      return allTools.filter(tool => DAILY_REFLECTION_ALLOWED_TOOLS.has(tool.name))
+    case 'scheduled':
+      return allTools
+    case 'human_message':
+      return allTools.filter(tool =>
+        tool.name !== 'send_private_message'
+        && tool.name !== 'send_master_private'
+      )
+  }
 }
 
 // ============================================================================
