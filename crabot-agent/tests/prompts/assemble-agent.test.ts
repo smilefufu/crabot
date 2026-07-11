@@ -103,6 +103,14 @@ describe('assembleAgentPrompt goalModeEnabled 分支', () => {
   })
 })
 
+describe('assembleAgentPrompt messaging shortcut scope', () => {
+  it('通用 prompt 不引导 human task 使用 scheduled 私聊捷径', () => {
+    const prompt = assembleAgentPrompt({ goalModeEnabled: true })
+    expect(prompt).not.toContain('主动 `send_private_message`')
+    expect(prompt).toContain('使用当前可见的消息工具')
+  })
+})
+
 describe('assembleAgentPrompt coding routing policy', () => {
   it('renders coordinator-first routing instead of main-direct coding as default', () => {
     const prompt = assembleAgentPrompt({

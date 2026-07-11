@@ -482,6 +482,10 @@ describe('AgentHandler', () => {
       const callArgs = mockRunEngine.mock.calls[0][0]
       const resolved = (callArgs.options.systemPrompt as () => string)()
       expect(resolved).toContain('## 系统触发任务说明')
+      expect(resolved).toContain('只知道目标 Friend')
+      expect(resolved).toContain('send_private_message')
+      expect(resolved).toContain('需要通知 master')
+      expect(resolved).toContain('send_master_private')
       expect(resolved).toContain('不可直接调 crab-messaging.send_message')
     })
 
