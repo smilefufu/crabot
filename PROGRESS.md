@@ -9,6 +9,13 @@
 - 能力边界：human task 仍可查找任意真实会话并用 `send_message` 跨会话投递；未删除 Agent 主动使用 IM 的能力。
 - 未来兼容：profile 读取当前 execution context；未来 scheduled 结果被人类追问时，只需切到 message profile。本期未修改 resume/source/checkpoint。
 
+## 2026-07-10 — Follow-up：tmp-pages v2 专用工具化
+
+- 背景：trace 复盘发现 agent 曾把 `$DATA_DIR/tmp-pages/<page_id>/page.html` 对应的 `.crabot/data/tmp-pages/...` 真实运行时路径写入项目脚本、summary 和 `docs/CURRENT_CONTEXT.md`，后续又误把 `.crabot` 当工作区数据根探索。
+- 结论：tmp-page 原设计支持页面按钮/表单反馈（`data-choice` / `crabotSubmit` → `events.jsonl` → `deliver_page_feedback` 唤醒 owner task），不能只当静态 HTML 发布处理。后续应单独做 tmp-pages v2，不并入当前 agent loop/tool-result 优化。
+- 建议方向：新增专用工具闭环，隐藏真实 `$DATA_DIR` 路径，仅向 agent 暴露 `page_id` / `url` / 结构化 events：`tmp_page_create`、`tmp_page_update`、`tmp_page_wait_feedback`、`tmp_page_read_events`、`tmp_page_delete`、`tmp_page_list`。工具内部负责 `owner_task_id`、TTL、HTML helper 注入、反馈唤醒与 events 读取。
+- 边界：项目脚本、报告、summary、`CURRENT_CONTEXT.md` 不得记录 `.crabot/data/tmp-pages` 或其他 Crabot runtime 路径；如需持久可复现页面，先生成项目内 report，再由 tmp-page 工具发布临时 URL。
+
 ## 2026-07-10 — tmp-pages v2 专用工具化
 
 - 背景：trace 复盘发现 agent 曾把 `.crabot/data/tmp-pages` 等 runtime 路径写入项目脚本、summary 和 `CURRENT_CONTEXT.md`。根因是 tmp-page v1 skill 直接指导 Worker 操作 runtime 文件。
