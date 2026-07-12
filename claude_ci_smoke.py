@@ -2,8 +2,11 @@
 
 
 def parse_port(value):
-    return int(value)
+    port = int(value)
+    if not 0 < port < 65536:
+        raise ValueError(f"非法端口: {value}")
+    return port
 
 
 def is_empty(s):
-    return s is ""
+    return s == ""
