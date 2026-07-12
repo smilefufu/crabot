@@ -647,7 +647,7 @@ export class UnifiedAgent extends ModuleBase {
       const dispatchCtx = {
         messages: messages as ReadonlyArray<ChannelMessage>,
         recentMessages: (frontContext.recent_messages ?? []) as ReadonlyArray<ChannelMessage>,
-        activeTasks: frontContext.active_tasks ?? [],
+        activeTasks: frontContext.supplement_candidates ?? [],
         sessionType: 'private' as const,
         channelId: session.channel_id,
         sessionId: session.session_id,
@@ -863,7 +863,7 @@ export class UnifiedAgent extends ModuleBase {
       const dispatchCtx = {
         messages: messages as ReadonlyArray<ChannelMessage>,
         recentMessages: (frontContext.recent_messages ?? []) as ReadonlyArray<ChannelMessage>,
-        activeTasks: frontContext.active_tasks ?? [],
+        activeTasks: frontContext.supplement_candidates ?? [],
         sessionType: 'group' as const,
         channelId: session.channel_id,
         sessionId,
@@ -1490,7 +1490,7 @@ export class UnifiedAgent extends ModuleBase {
       const dispatchCtx = {
         messages: [message] as ReadonlyArray<ChannelMessage>,
         recentMessages: (frontContext.recent_messages ?? []) as ReadonlyArray<ChannelMessage>,
-        activeTasks: frontContext.active_tasks ?? [],
+        activeTasks: frontContext.supplement_candidates ?? [],
         sessionType: 'admin_chat' as const,
         channelId: 'admin-web',
         sessionId,

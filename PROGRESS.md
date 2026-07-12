@@ -1,6 +1,13 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-11 — 私聊自动寻址捷径收紧为 scheduled-only
+> 最后更新：2026-07-12 — 修复终态任务误入活跃列表与 WeChat 原始时间戳丢失
+
+## 2026-07-12 — 修复终态任务误入活跃列表与 WeChat 原始时间戳丢失
+
+- ContextAssembler 将 dispatcher 可补充候选与协议里的 `active_tasks` 分开：recent terminal 仅在关联平台消息可见时供 dispatcher 判断，并通过 Channel `get_message` 有界补取缺失历史、回填 `task_id`；Worker 的“活跃任务”只保留真正活跃任务。
+- recent terminal 的历史回溯锚点改用任务 `created_at`，避免任务完成时间晚于原始消息时漏掉关联聊天。
+- WeChat 实时入站 `platform_timestamp` 改用 connector 的 `message.createTime`，兼容秒和毫秒 epoch；不再用 Crabot 接收时间覆盖平台发送时间。
+- 验证：Agent 全量 1490 tests passed（2 skipped），WeChat Channel 全量 56 tests passed；两个包 TypeScript build 通过。
 
 ## 2026-07-11 — 私聊自动寻址捷径收紧为 scheduled-only
 
