@@ -22,7 +22,7 @@ export interface BgToolDeps {
 
 // block 模式参数（参 Claude Code BashOutput）
 const BLOCK_DEFAULT_TIMEOUT_MS = 30_000
-const BLOCK_MAX_TIMEOUT_MS = 120_000
+const BLOCK_MAX_TIMEOUT_MS = 600_000
 const BLOCK_POLL_INTERVAL_MS = 2_000
 const NO_NEW_OUTPUT_MARKER = '(no new output)'
 
@@ -116,8 +116,8 @@ export function createOutputTool(deps: BgToolDeps): ToolDefinition {
       '默认非阻塞 snapshot 读。' +
       '若 shell 还在 running 且想等下一段输出，**强烈建议**用 `block=true` 阻塞等到有新输出 / 状态变 terminal / 超时——' +
       '避免在 agent 主循环里反复短间隔 poll 污染上下文。' +
-      '注意：bg shell 的 exit 事件本身会通过 <bg-notification> 自动通知到 agent（且内联输出尾部），' +
-      '通常不需要主动 block 等终止——block 仅适用于"我要立刻拿到下一段输出再继续"的场景。' +
+      '工具列表中有 wait_for_signal 的主控 agent 通常可等待退出通知；' +
+      '没有 wait_for_signal 的 subagent 应用 block=true 等待，不依赖 <bg-notification>。' +
       '读 subagent 结果请用 get_subagent_output(agent_id)，不是本工具。',
     inputSchema: {
       type: 'object',

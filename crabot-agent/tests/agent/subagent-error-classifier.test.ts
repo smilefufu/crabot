@@ -77,6 +77,16 @@ describe('classifySubAgentError', () => {
       const c = classifySubAgentError(err)
       expect(c.kind).toBe('model_error')
     })
+
+    it.each([
+      'Subagent LLM 调用失败: HTTP 502: Bad Gateway',
+      'Subagent LLM 调用失败: HTTP 503: upstream connect error',
+      'Service temporarily unavailable. Please try again later.',
+    ])('字符串化上游错误 %s → model_error', (message) => {
+      const c = classifySubAgentError(new Error(message))
+      expect(c.kind).toBe('model_error')
+      expect(c.retryable).toBe(true)
+    })
   })
 
   describe('timeout / abort', () => {

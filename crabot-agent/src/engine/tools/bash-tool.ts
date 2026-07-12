@@ -15,7 +15,8 @@ export const MAX_FOREGROUND_TIMEOUT_MS = 600_000
 /**
  * 前台宽限期：命令先前台运行这么久。
  * 期内退出 → 同步内联返回（等同普通同步调用）；超过仍在跑 → 转后台（命令不中断）+
- * 引导 agent 用 wait_for_signal 挂起等待。取代旧的「显式 timeout>60s 直接转 bg」破坏性逻辑。
+ * 按实际工具表引导 agent 用 wait_for_signal 或 blocking Output 等待。
+ * 取代旧的「显式 timeout>60s 直接转 bg」破坏性逻辑。
  */
 export const FOREGROUND_GRACE_PERIOD_MS = 10_000
 
@@ -164,7 +165,7 @@ function execCommand(
 /**
  * 默认前台执行：委托 runShellWithGrace（spawn 即 OS 直写磁盘日志，前台宽限 gracePeriodMs）。
  * - 宽限期内退出：读日志内联同步返回（不入 bgRegistry）。
- * - 超过宽限期仍在跑：转后台（注册 bgRegistry，命令**不中断**），返回 entity_id + 引导 wait_for_signal；
+ * - 超过宽限期仍在跑：转后台（注册 bgRegistry，命令**不中断**），返回 entity_id + 条件等待引导；
  *   其后退出经 onShellExit 唤醒挂起的 worker。
  * - 期间 abort：kill + 清文件，返回 aborted。
  */
@@ -197,8 +198,9 @@ async function runForegroundWithGrace(
       return {
         output:
           `命令运行已超过 ${sec}s，转入后台继续运行（entity_id: ${result.entity_id}）——命令未中断。\n` +
-          `若你还有别的事可做，现在就去做；若没有，调 wait_for_signal(reason="等 ${command.slice(0, 40)}") 挂起，` +
-          `该命令退出时会自动唤醒你，届时用 Output("${result.entity_id}") 读取完整输出。`,
+          `若你还有别的事可做，现在就去做。若工具列表中有 wait_for_signal，可调 ` +
+          `wait_for_signal(reason="等 ${command.slice(0, 40)}") 挂起，命令退出会唤醒主任务；` +
+          `若工具列表中没有 wait_for_signal，请调 Output("${result.entity_id}", block=true, timeout_ms=600000) 阻塞等待并读取输出。`,
         isError: false,
       }
     }
@@ -231,7 +233,7 @@ export function createBashTool(
     description:
       'Executes a bash command and returns its output. ' +
       `命令前台运行；若运行超过 ${Math.round(FOREGROUND_GRACE_PERIOD_MS / 1000)}s 仍未结束，自动转入后台并返回 entity_id（命令**继续运行、不中断**），` +
-      '随后你可继续做别的，或调 wait_for_signal 挂起等待其退出（退出会自动唤醒你），届时用 Output(entity_id) 读完整输出。',
+      '随后可继续做别的。工具列表中有 wait_for_signal 时可挂起等待主任务唤醒；没有该工具时用 Output(entity_id, block=true, timeout_ms=600000) 阻塞等待。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -252,7 +254,7 @@ export function createBashTool(
         }
       }
 
-      // 默认路径：前台宽限期内完成则同步内联返回；超期仍在跑则转后台 + 引导 wait_for_signal。
+      // 默认路径：前台宽限期内完成则同步内联返回；超期仍在跑则转后台 + 条件等待引导。
       if (bgCtx) {
         return runForegroundWithGrace(command, bgCtx, getCwd(), context.abortSignal, gracePeriodMs)
       }

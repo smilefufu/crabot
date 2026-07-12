@@ -170,7 +170,7 @@ describe('createBashTool with bgCtx', () => {
     expect(result.output).toContain('stderr:\nbad')
   })
 
-  it('grace 慢路径：超期仍在跑 → 转后台注册 bgRegistry + 引导 wait_for_signal（命令不中断），退出触发 onShellExit', async () => {
+  it('grace 慢路径：共享文案按工具表区分 wait_for_signal 与 blocking Output', async () => {
     const pushed: ExitInfo[] = []
     // 注入 50ms 短 grace，命令 sleep 0.4s 必然超期
     const tool = createBashTool(() => cwd, undefined, makeBgCtx('task-grace-slow', (info) => pushed.push(info)), 50)
@@ -181,7 +181,11 @@ describe('createBashTool with bgCtx', () => {
     )
     expect(result.isError).toBe(false)
     expect(result.output).toContain('转入后台继续运行')
-    expect(result.output).toContain('wait_for_signal')
+    expect(result.output).toContain('工具列表中有 wait_for_signal')
+    expect(result.output).toContain('工具列表中没有 wait_for_signal')
+    expect(result.output).toContain('block=true')
+    expect(result.output).toContain('timeout_ms=600000')
+    expect(result.output).not.toContain('若没有，调 wait_for_signal')
     expect(result.output).not.toContain('exit_code:')
     const match = result.output.match(/shell_[0-9a-f]+/)
     expect(match).not.toBeNull()
