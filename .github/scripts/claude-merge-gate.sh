@@ -9,7 +9,7 @@ pr="$PR_NUMBER"
 skip() { echo "merge-gate: $1 — 跳过合并"; exit 0; }
 
 # 登录名归一化：去掉 app/ 前缀与 [bot] 后缀
-norm() { local s="${1#app/}"; echo "${s%\[bot\]}"; }
+norm() { local s="${1#app/}"; s="${s%\[bot\]}"; printf '%s\n' "$s" | tr '[:upper:]' '[:lower:]'; }
 
 # 1. PR 基本状态（mergeable 刚计算时可能为 UNKNOWN，重试最多 6 次）
 mergeable="UNKNOWN"
@@ -37,16 +37,18 @@ done
 
 # 3. 所有 review 线程已 resolved
 owner="${repo%/*}"; name="${repo#*/}"
-unresolved=$(gh api graphql \
-  -f query='query($owner:String!,$name:String!,$pr:Int!){repository(owner:$owner,name:$name){pullRequest(number:$pr){reviewThreads(first:100){nodes{isResolved}}}}}' \
-  -f owner="$owner" -f name="$name" -F pr="$pr" \
-  --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not)] | length')
+threads_json=$(gh api graphql \
+  -f query='query($owner:String!,$name:String!,$pr:Int!){repository(owner:$owner,name:$name){pullRequest(number:$pr){reviewThreads(first:100){pageInfo{hasNextPage} nodes{isResolved}}}}}' \
+  -f owner="$owner" -f name="$name" -F pr="$pr")
+[ "$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage' <<<"$threads_json")" = "false" ] \
+  || skip "review 线程超过 100 个，无法完整校验"
+unresolved=$(jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not)] | length' <<<"$threads_json")
 [ "$unresolved" = "0" ] || skip "还有 $unresolved 个未 resolve 的 review 线程"
 
-# 4. Claude（claude[bot]，兜底 github-actions[bot]）的最新 review 必须是针对当前 head 的 APPROVED
+# 4. Claude（claude[bot]）的最新 review 必须是针对当前 head 的 APPROVED
 head_sha=$(jq -r '.headRefOid' <<<"$pr_json")
 last_review=$(gh api "repos/$repo/pulls/$pr/reviews" --paginate \
-  --jq '.[] | select(.user.login == "claude[bot]" or .user.login == "github-actions[bot]")
+  --jq '.[] | select(.user.login == "claude[bot]")
             | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "COMMENTED")' \
   | jq -s 'last // empty')
 [ -n "$last_review" ] || skip "尚无 Claude 的 review"
@@ -55,27 +57,37 @@ last_review=$(gh api "repos/$repo/pulls/$pr/reviews" --paginate \
 
 # 5. CI checks：排除本套 workflow 自身，等待其余 checks 完成（最长 30 分钟）
 pending=0
+fetch_fail=0
 for _ in $(seq 1 60); do
   checks_json=$(gh pr checks "$pr" -R "$repo" --json name,state,workflow 2>/dev/null) || true
   if ! jq -e . >/dev/null 2>&1 <<<"$checks_json"; then
-    # 拿不到合法 JSON：区分"无 checks"与真实调用失败（失败时安全退出，绝不当作无 checks）
+    # 拿不到合法 JSON：区分“无 checks”与调用失败（失败重试，连续 3 次才放弃；绝不当作无 checks）
     err=$(gh pr checks "$pr" -R "$repo" --json name,state,workflow 2>&1 >/dev/null) || true
     case "$err" in
       *"no checks reported"*) checks_json="[]" ;;
-      *) skip "无法获取 CI checks（gh 调用失败：${err:-未知错误}）" ;;
+      *)
+        fetch_fail=$((fetch_fail + 1))
+        [ "$fetch_fail" -lt 3 ] || skip "无法获取 CI checks（gh 连续失败：${err:-未知错误}）"
+        echo "merge-gate: 获取 CI checks 失败，重试（$fetch_fail/3）..."
+        sleep 30
+        continue
+        ;;
     esac
   fi
+  fetch_fail=0
   checks=$(jq '[.[] | select(.workflow != "Claude PR Review" and .workflow != "Claude PR Discuss")]' <<<"$checks_json")
-  failed=$(jq '[.[] | select(.state == "FAILURE" or .state == "ERROR" or .state == "CANCELLED" or .state == "TIMED_OUT")] | length' <<<"$checks")
   pending=$(jq '[.[] | select(.state == "PENDING" or .state == "QUEUED" or .state == "IN_PROGRESS" or .state == "WAITING")] | length' <<<"$checks")
-  [ "$failed" = "0" ] || skip "有 $failed 个 CI check 失败"
+  # 通过状态白名单：清单外的任何状态（ACTION_REQUIRED/STARTUP_FAILURE/STALE 等）一律按失败处理，fail-closed
+  failed=$(jq '[.[] | select((.state == "SUCCESS" or .state == "SKIPPED" or .state == "NEUTRAL" or .state == "PENDING" or .state == "QUEUED" or .state == "IN_PROGRESS" or .state == "WAITING") | not)] | length' <<<"$checks")
+  [ "$failed" = "0" ] || skip "有 $failed 个 CI check 未通过"
   [ "$pending" = "0" ] && break
   echo "merge-gate: 等待 $pending 个 CI check..."
   sleep 30
 done
 [ "$pending" = "0" ] || skip "等待 CI 超时（30 分钟）"
 
-# 6. 合并
+# 6. 合并：钉住已验证的 head，等待期间有新提交则安全放弃；先合并后评论
 echo "merge-gate: 所有条件满足，执行 squash 合并"
-gh pr comment "$pr" -R "$repo" --body "✅ 所有 review 意见已解决且检查通过，由自动流程执行 squash 合并。"
-gh pr merge "$pr" -R "$repo" --squash --delete-branch
+gh pr merge "$pr" -R "$repo" --squash --delete-branch --match-head-commit "$head_sha" \
+  || skip "合并未执行（可能等待期间有新提交，或 PR 已被合并）"
+gh pr comment "$pr" -R "$repo" --body "✅ 所有 review 意见已解决且检查通过，由自动流程执行 squash 合并。" || true

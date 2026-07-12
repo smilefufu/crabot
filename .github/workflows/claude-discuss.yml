@@ -24,6 +24,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # 统一钉住默认分支（pull_request_review_comment 的默认 ref 是 PR merge ref，PR 不可合并时可能不存在）
+          ref: ${{ github.event.repository.default_branch }}
 
       # issue_comment 事件默认 checkout 到默认分支，需切到 PR head 才能读到 PR 的实际代码
       - name: Checkout PR head
@@ -41,6 +43,7 @@ jobs:
 
   merge-gate:
     needs: discuss
+    if: ${{ success() }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     permissions:
