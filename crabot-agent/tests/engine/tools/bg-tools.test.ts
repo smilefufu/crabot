@@ -177,6 +177,14 @@ describe('Output tool', () => {
     expect(elapsed).toBeGreaterThan(2_000)
   }, 15_000)
 
+  it('block=true documents the 600s maximum used by timeout clamping', () => {
+    const tool = createOutputTool(deps)
+    const properties = (tool.inputSchema as {
+      properties: Record<string, { description?: string }>
+    }).properties
+    expect(properties.timeout_ms?.description).toContain('600000')
+  })
+
   it('runShellWithGrace promoted shell still feeds combined log output into Output', async () => {
     const result = await runShellWithGrace({
       command: 'sleep 0.15; printf "after-promotion-out\\n"; printf "after-promotion-err\\n" >&2',
