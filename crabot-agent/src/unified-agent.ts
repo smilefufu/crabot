@@ -51,6 +51,7 @@ import type { ToolPermissionConfig, ToolDefinition as EngineToolDefinition } fro
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { McpConnector } from './agent/mcp-connector.js'
 import { createCrabMessagingServer, type PathMapping, type TaskContext } from './mcp/crab-messaging.js'
+import { toImageConnInfo, type ImageConnInfo } from './mcp/crab-image.js'
 import { TraceStore } from './core/trace-store.js'
 import { getAgentTraceDir, getAgentLogsDir, getWorkspaceDir } from './core/data-paths.js'
 import { PromptManager } from './prompt-manager.js'
@@ -139,6 +140,8 @@ export class UnifiedAgent extends ModuleBase {
 
   // 智能体层组件（可选，取决于配置）
   private agentHandler?: AgentHandler
+  private imageConnInfo?: ImageConnInfo
+  private imageCapability: { available: boolean; reason?: string } = { available: false }
   private mcpConnector: McpConnector = new McpConnector()
   private roles: Set<'front' | 'worker'> = new Set()
   /** SDK 环境配置（Worker 专用） */
@@ -382,6 +385,8 @@ export class UnifiedAgent extends ModuleBase {
     builtinToolConfig?: BuiltinToolConfig,
     skills?: ReadonlyArray<SkillConfig>,
   ): AgentHandler {
+    const imageConnInfo = this.imageConnInfo
+    const imageCapability = this.imageCapability
     const subAgents = this.agentConfig?.subagents ?? []
     // workerPersonality 仅承载 admin personality（system_prompt）；skill listing 走独立通道，
     // 由 AgentHandler 内部 buildSkillListingSnapshot 实时从 this.skills 拼装，
@@ -413,6 +418,8 @@ export class UnifiedAgent extends ModuleBase {
       lspManager: this.lspManager,
       memoryWriter: this.memoryWriter,
       promptManager: this.promptManager,
+      ...(imageConnInfo ? { imageConnInfo } : {}),
+      imageCapability,
     })
     return handler
   }
@@ -2371,6 +2378,14 @@ export class UnifiedAgent extends ModuleBase {
     if (modelConfigChanged || skillsChanged || systemPromptChanged || subagentsChanged) {
       const mergedModelConfig = this.agentConfig.model_config ?? {}
       await this.updateLlmClients(mergedModelConfig)
+    }
+
+    // 更新生图配置（热更新：存实例状态 + 原地更新 handler；下个 worker turn 的 buildToolsDynamic 生效）
+    if (params.image_config !== undefined || params.image_capability !== undefined) {
+      this.imageConnInfo = toImageConnInfo(params)
+      this.imageCapability = params.image_capability ?? { available: false }
+      this.agentHandler?.updateImageConfig(this.imageConnInfo, this.imageCapability)
+      changedFields.push('image_config')
     }
 
     // 更新扩展配置（热生效，下次使用对应功能时生效）

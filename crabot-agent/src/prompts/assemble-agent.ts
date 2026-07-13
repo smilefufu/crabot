@@ -36,6 +36,7 @@ export interface AssembleAgentPromptOptions {
     readonly toolName: string
     readonly workerHint: string
   }>
+  readonly imageCapability?: { readonly available: boolean }
 }
 
 function escapeSceneProfileContent(content: string): string {

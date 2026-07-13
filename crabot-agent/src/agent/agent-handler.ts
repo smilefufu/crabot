@@ -68,6 +68,7 @@ import { SYSTEM_CHANNEL_ID } from 'crabot-shared'
 import { createCrabMemoryServer } from '../mcp/crab-memory.js'
 import type { MemoryTaskContext } from '../mcp/crab-memory.js'
 import { mcpServerToToolDefinitions } from './mcp-tool-bridge.js'
+import { imageToolsFor, type ImageConnInfo } from '../mcp/crab-image.js'
 import { formatMessageContent, resolveImageBlocks, EMPTY_MESSAGE_PLACEHOLDER } from './media-resolver.js'
 import type { McpConnector } from './mcp-connector.js'
 import { forkEngine } from '../engine/sub-agent.js'
@@ -449,6 +450,10 @@ export interface AgentHandlerOptions {
    * 重新拼成 system prompt，以便 updateSkills / updateSystemPrompt 即时生效。
    */
   promptManager?: PromptManager
+  /** 生图连接信息（解析后的图像 slot）；有值时 buildToolsDynamic 暴露 generate_image */
+  imageConnInfo?: ImageConnInfo
+  /** 生图能力可用性，驱动 self-aware 提示词 */
+  imageCapability?: { available: boolean; reason?: string }
 }
 
 export interface ExecuteTriggerMessageParams {
@@ -515,6 +520,8 @@ export class AgentHandler {
   private static readonly RECENT_COMPLETED_LIMIT = 5
   private mcpConfigFactory: ((taskCtx: TaskContext) => Record<string, McpServer>) | undefined
   private deps?: AgentHandlerDeps
+  private imageConnInfo: ImageConnInfo | undefined
+  private imageCapability: { available: boolean; reason?: string } = { available: false }
   private builtinToolConfig?: BuiltinToolConfig
   private mcpConnector?: McpConnector
   private extra: Record<string, unknown>
@@ -577,6 +584,8 @@ export class AgentHandler {
     this.promptManager = options?.promptManager
     this.getTimezone = config.getTimezone ?? (() => resolveTimezone(undefined))
     this.tmpPageBaseUrl = config.tmpPageBaseUrl
+    this.imageConnInfo = options?.imageConnInfo
+    if (options?.imageCapability) this.imageCapability = options.imageCapability
 
     // Startup: recover persistent bg entities（跨重启对账）。
     // - deadShells（宕机期间已退出）：已读 sentinel 定真实终态，这里补发退出通知（resumed/recovery worker 会收到）。
@@ -767,6 +776,15 @@ export class AgentHandler {
     if (digestSdkEnv !== undefined) {
       this.digestSdkEnv = digestSdkEnv
     }
+  }
+
+  /** 热更图像配置（provider/key/model 变化或从有到无时由 unified-agent 调用） */
+  updateImageConfig(
+    connInfo: ImageConnInfo | undefined,
+    capability: { available: boolean; reason?: string },
+  ): void {
+    this.imageConnInfo = connInfo
+    this.imageCapability = capability
   }
 
   /** 暴露 subagents 当前值的只读快照（测试 / 诊断用，不应在 hot loop 中调）。 */
@@ -1195,6 +1213,12 @@ export class AgentHandler {
           }, memoryTaskCtx)
           tools.push(...mcpServerToToolDefinitions(crabMemoryServer, 'crab-memory'))
         }
+
+        // 3b. crab-image MCP server tools（仅当图像配置可用时暴露 generate_image）
+        tools.push(...imageToolsFor(this.imageConnInfo, {
+          moduleId: this.deps?.moduleId ?? 'crabot-agent',
+          outputDir: path.join(getAgentDataDir(), 'generated-images'),
+        }))
 
         // 3c. External MCP server tools (crab-messaging, etc.)
         const externalMcpServers = this.mcpConfigFactory?.({
@@ -3692,6 +3716,7 @@ export class AgentHandler {
         adminPersonality: this.systemPrompt || undefined,
         skillListing: this.buildSkillListingSnapshot(),
         availableSubAgents: availableSubAgents.length > 0 ? availableSubAgents : undefined,
+        imageCapability: { available: this.imageCapability.available },
         ...(sceneProfile ? { sceneProfile } : {}),
       })
       : this.systemPrompt
