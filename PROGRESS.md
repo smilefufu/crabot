@@ -1,6 +1,19 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-02 — 修复 Traces UI 活动排序、terminal supplement trace 续写与 null stopReason 误完成
+> 最后更新：2026-07-13 — 新增经中转站的图像生成能力（gpt-image）+ agent 生图自我认知
+
+## 2026-07-13 — 图像生成能力（中转站 gpt-image + 自我认知）
+
+设计/计划：`crabot-docs/superpowers/specs/2026-07-13-image-generation-design.md` + `crabot-docs/superpowers/plans/2026-07-13-image-generation.md`。分支 `feat/image-generation`（未合 main）。核心不只是"调一次生图 API"，而是让 agent 像 codex/claude-code 认知插件那样**自知**：能画 / 当前配没配 / 未配时引导人配 / 配好自动生效。
+
+- **模型发现不再丢弃图像模型**（`model-provider-manager.ts`）：`ModelType` 扩为 `'llm' | 'image'`；`parseOpenAIModels` 把 `gpt-image` / `dall-e` 名族从"skip"改为归类 `type:'image'`（embedding/whisper/tts/moderation 仍排除）；image 模型不置 `supports_vision`。
+- **图像 slot 配置 + 自动配置**（存引用不存快照）：`GlobalModelConfig` 加 `default_image_provider_id/model_id/image_slot_user_set`；`resolveImageConfig()` 实时解析（OAuth provider 判不可用）；`autoConfigureImageSlot()` 在 `refreshModels`/`importFromVendor` 后自动指向首个图像模型，用户手动设过则不覆盖、指向模型消失允许重设。
+- **可用性推给 agent**：`handleGetAgentConfig` 经 `imageResultToConfigFields` 注入 `image_config?` + `image_capability`，随 config 推送（`pushConfigToAgentModules` + 全局配置变更 `triggerPushAfter`）。
+- **agent 条件暴露 + 热更**：新增 `crab-image` in-process MCP（`generate_image`：调 `/images/generations` → 落盘 `data/agent/generated-images/` → 返回路径，不自动发送）；`buildToolsDynamic` 仅 `imageConnInfo` 存在时纳入工具；`updateImageConfig` 热更（下个 worker turn 生效）。交付复用现成 `send_message(content_type='image', file_path)`。
+- **self-aware 提示词两态**（`agent-sections.buildImageCapability`）：可用态教用法；不可用态"你具备能力但需先配生图模型"，引导去 Admin 配置、不说"我不会画"。
+- **界面三态**：模型徽标 `llm`→LLM(+VLM 开关) / `image`→"生图"标（无 VLM 开关）；全局配置卡加"默认生图模型"选择器；SubagentEditor 过滤掉 image 模型（AgentConfig/GlobalModelConfigCard 已正向过滤 llm）。
+- **验证**：新增单测全绿（admin classify/resolve/auto-config/config-fields 12 个；agent crab-image 7 个、image-capability 4 个）；admin + agent `tsc --noEmit` 干净；web `tsc` + `vite build` 通过。**既有失败与本功能无关**：agent dispatcher 2 个（fork main 上 test/代码措辞不一致，未碰过的文件）、admin v1-cleanup 4 个（残留 v1 记忆词汇，未碰过）、admin-api auth 1 个（测试污染，隔离下通过）。
+- **待办**：真实中转站端到端自测（需 live key/环境）；PR 到 upstream smilefufu。
 
 ## 2026-07-02 — 修复 Traces UI 活动排序、terminal supplement trace 续写与 null stopReason 误完成
 
