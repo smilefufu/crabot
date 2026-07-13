@@ -945,7 +945,7 @@ export interface UpdateConfigParams {
   extra?: Record<string, unknown>
   /** Phase 5: 更新的 Subagent 列表 */
   subagents?: SubAgentConfig[]
-  /** 对外可达 base URL（tmp-page 链接用）；admin push 时带上，更新到 this.agentConfig 供下个 worker handler 读 */
+  /** 对外可达 base URL（tmp-page 链接用）；admin push 时带上，并同步到当前 worker handler */
   tmp_page_base_url?: string
 }
 

@@ -2389,6 +2389,14 @@ export class UnifiedAgent extends ModuleBase {
       changedFields.push('subagents')
     }
 
+    // 必须先写 agentConfig：启动期首次拉配置失败时，updateLlmClients 会在本次
+    // update_config 内创建 handler，createWorkerHandler 需要立即读到这个地址。
+    if (params.tmp_page_base_url !== undefined) {
+      this.agentConfig.tmp_page_base_url = params.tmp_page_base_url
+      this.agentHandler?.updateTmpPageBaseUrl(params.tmp_page_base_url)
+      changedFields.push('tmp_page_base_url')
+    }
+
     // 根据变更字段，按需更新 LLM client。
     //
     // 历史：modelConfig / subagents 变化曾走 createWorkerHandler 重建路径，
@@ -2417,13 +2425,6 @@ export class UnifiedAgent extends ModuleBase {
       // AgentHandler 的 max_iterations 在构造时设置
       // 更新后需要重新创建 Handler 或重启
       restartRequired = true
-    }
-
-    // 更新对外可达 base URL：写回 this.agentConfig，下个 worker task 的
-    // createWorkerHandler 即时读到（每 task 重新读 this.agentConfig.tmp_page_base_url）。
-    if (params.tmp_page_base_url !== undefined) {
-      this.agentConfig.tmp_page_base_url = params.tmp_page_base_url
-      changedFields.push('tmp_page_base_url')
     }
 
     console.log(`[${this.config.moduleId}] Config updated: ${changedFields.join(', ')}`)

@@ -140,4 +140,25 @@ describe('updateSubagents during in-flight worker loop', () => {
     await handler.executeTask({ task: makeTask(), context: makeContext() })
     expect(capturedModel).toBe('new-model')
   })
+
+  it('updateTmpPageBaseUrl 后启动的新 loop 把地址注入 system prompt', async () => {
+    const handler = new AgentHandler(makeSdkEnv(), { systemPrompt: 'sys' })
+    handler.updateTmpPageBaseUrl('https://pages.example.com')
+
+    let capturedPrompt = ''
+    mockRunEngine.mockImplementation(async (params: any) => {
+      const systemPrompt = params.options.systemPrompt
+      capturedPrompt = typeof systemPrompt === 'function' ? systemPrompt() : String(systemPrompt)
+      return {
+        outcome: 'completed', finalText: 'ok', totalTurns: 1,
+        usage: { inputTokens: 1, outputTokens: 1 },
+        finalMessages: [],
+      } as never
+    })
+
+    await handler.executeTask({ task: makeTask(), context: makeContext() })
+
+    expect(capturedPrompt).toContain('临时页面对外地址: https://pages.example.com')
+    expect(capturedPrompt).toContain('你的 task_id: t1')
+  })
 })

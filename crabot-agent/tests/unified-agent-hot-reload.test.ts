@@ -9,6 +9,7 @@ function buildAgent(deps: {
     updateExtra?: ReturnType<typeof vi.fn>
     updateSubagents?: ReturnType<typeof vi.fn>
     updateSdkEnv?: ReturnType<typeof vi.fn>
+    updateTmpPageBaseUrl?: ReturnType<typeof vi.fn>
   }
   agentConfig?: Record<string, unknown>
   extra?: Record<string, unknown>
@@ -144,5 +145,48 @@ describe('UnifiedAgent.handleUpdateConfig — hot reload', () => {
     expect(updateLlmClients).toHaveBeenCalledTimes(1)
     // 签名是 updateLlmClients(modelConfig)，单参数
     expect(updateLlmClients.mock.calls[0]).toHaveLength(1)
+  })
+
+  it('tmp_page_base_url 变更同步到现有 handler', async () => {
+    const updateTmpPageBaseUrl = vi.fn()
+    const agent = buildAgent({
+      agentHandler: { updateTmpPageBaseUrl },
+      agentConfig: { mcp_servers: [], skills: [] },
+    })
+
+    const result = await (agent as { handleUpdateConfig: (p: unknown) => Promise<{ changed_fields: string[] }> })
+      .handleUpdateConfig({ tmp_page_base_url: 'https://pages.example.com' })
+
+    expect(updateTmpPageBaseUrl).toHaveBeenCalledWith('https://pages.example.com')
+    expect(result.changed_fields).toContain('tmp_page_base_url')
+  })
+
+  it('首次配置补推时先保存 tmp_page_base_url，再进入 handler 创建路径', async () => {
+    const agent = buildAgent({
+      agentConfig: { mcp_servers: [], skills: [], model_config: {} },
+    }) as {
+      agentConfig: { tmp_page_base_url?: string }
+      updateLlmClients: ReturnType<typeof vi.fn>
+      handleUpdateConfig: (p: unknown) => Promise<unknown>
+    }
+    const observedBaseUrls: Array<string | undefined> = []
+    agent.updateLlmClients = vi.fn(async () => {
+      observedBaseUrls.push(agent.agentConfig.tmp_page_base_url)
+    })
+
+    await agent.handleUpdateConfig({
+      model_config: {
+        powerful: {
+          endpoint: 'https://llm.example.com',
+          apikey: 'k',
+          model_id: 'm',
+          format: 'anthropic',
+          provider_id: 'p',
+        },
+      },
+      tmp_page_base_url: 'https://pages.example.com',
+    })
+
+    expect(observedBaseUrls).toEqual(['https://pages.example.com'])
   })
 })

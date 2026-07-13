@@ -526,7 +526,7 @@ export class AgentHandler {
   private readonly promptManager?: PromptManager
   private readonly getTimezone: () => string
   /** 对外 base URL（临时页面链接拼接用），注入 worker system prompt；未配置时为 undefined（不注入） */
-  private readonly tmpPageBaseUrl?: string
+  private tmpPageBaseUrl?: string
   /** Worker-singleton bg entity registry (persistent, disk-backed) */
   private readonly bgRegistry = new BgEntityRegistry()
   /** 监视跨重启认领回来、仍存活的 shell；退出时通知（唤醒 resumed worker + 持久通知）。 */
@@ -735,6 +735,11 @@ export class AgentHandler {
   updateSystemPrompt(newPrompt: string | undefined): void {
     if (newPrompt === undefined) return
     this.systemPrompt = newPrompt
+  }
+
+  /** 热加载临时页面对外地址；下次 prompt 构建和 tmp_page_* 工具调用立即读取新值。 */
+  updateTmpPageBaseUrl(baseUrl: string): void {
+    this.tmpPageBaseUrl = baseUrl
   }
 
   /**
