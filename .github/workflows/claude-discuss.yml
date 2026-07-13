@@ -28,10 +28,12 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
 
       # issue_comment 事件默认 checkout 到默认分支，需切到 PR head 才能读到 PR 的实际代码
+      # --detach：action 自身也会把 PR 检出为同名本地分支（fork PR 走 git fetch pull/N/head:分支名），
+      # 若这里占住分支名，该 fetch 会被 git 拒绝导致整个 job 失败（2026-07-13 crabot PR #26 实测）
       - name: Checkout PR head
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh pr checkout "${{ github.event.issue.number || github.event.pull_request.number }}"
+        run: gh pr checkout --detach "${{ github.event.issue.number || github.event.pull_request.number }}"
 
       # 不提供 prompt → 交互（tag）模式：action 自带触发短语与写权限校验
       - uses: anthropics/claude-code-action@v1
