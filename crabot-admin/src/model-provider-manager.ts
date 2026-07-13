@@ -741,6 +741,8 @@ export class ModelProviderManager {
     this.providers.set(id, provider)
     await this.saveProviders()
 
+    await this.autoConfigureImageSlot(id)
+
     return { models: mergedModels, added, removed }
   }
 
@@ -791,6 +793,8 @@ export class ModelProviderManager {
       auth_type: vendor.auth_type,
       models,
     })
+
+    await this.autoConfigureImageSlot(provider.id)
 
     return { provider, models }
   }
@@ -940,6 +944,33 @@ export class ModelProviderManager {
     } catch (error) {
       return { available: false, reason: error instanceof Error ? error.message : String(error) }
     }
+  }
+
+  /**
+   * 供应商发现图像模型后自动配置全局图像 slot。
+   * 仅在未被用户手动设过、且当前 slot 为空或指向已消失的模型时填充。
+   * @returns 是否发生了配置写入
+   */
+  async autoConfigureImageSlot(providerId: string): Promise<boolean> {
+    if (this.globalConfig.image_slot_user_set) return false
+
+    const curP = this.globalConfig.default_image_provider_id
+    const curM = this.globalConfig.default_image_model_id
+    if (curP && curM) {
+      const cur = this.providers.get(curP)
+      const stillValid = cur?.models.some((m) => m.model_id === curM && m.type === 'image')
+      if (stillValid) return false
+    }
+
+    const provider = this.providers.get(providerId)
+    const imageModel = provider?.models.find((m) => m.type === 'image')
+    if (!imageModel) return false
+
+    await this.updateGlobalConfig({
+      default_image_provider_id: providerId,
+      default_image_model_id: imageModel.model_id,
+    })
+    return true
   }
 
   /**
