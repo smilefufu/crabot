@@ -234,6 +234,16 @@ export function classifyModelType(modelId: string): ModelType {
   return IMAGE_MODEL_HINTS.some((h) => modelId.includes(h)) ? 'image' : 'llm'
 }
 
+/** 把 resolveImageConfig 的结果映射成 ResolvedAgentConfig 的 image 字段 */
+export function imageResultToConfigFields(
+  res: { available: true; config: LLMConnectionInfo } | { available: false; reason: string },
+): { image_config?: LLMConnectionInfo; image_capability: { available: boolean; reason?: string } } {
+  if (res.available) {
+    return { image_config: res.config, image_capability: { available: true } }
+  }
+  return { image_capability: { available: false, reason: res.reason } }
+}
+
 /**
  * OpenAI 兼容 `/models` 响应解析：{data: [{id, ...}]}
  */
