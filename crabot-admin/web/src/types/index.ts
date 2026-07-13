@@ -8,7 +8,7 @@
 // ============================================================================
 
 export type ApiFormat = 'openai' | 'anthropic' | 'gemini' | 'openai-responses'
-export type ModelType = 'llm'
+export type ModelType = 'llm' | 'image'
 export type ProviderStatus = 'active' | 'inactive' | 'error'
 export type ProviderConfigType = 'manual' | 'preset'
 
@@ -59,6 +59,11 @@ export interface PresetVendor {
 export interface GlobalModelConfig {
   default_llm_provider_id?: string
   default_llm_model_id?: string
+  /** 全局默认生图模型（存引用） */
+  default_image_provider_id?: string
+  default_image_model_id?: string
+  /** true 时后端 autoConfigureImageSlot 不再覆盖图像 slot */
+  image_slot_user_set?: boolean
   /**
    * 对外可达 base URL，供 agent 拼临时页面链接（<base>/tmp-pages/<id>）。
    * 可选；未配置时后端退化为 http://localhost:<web_port>。

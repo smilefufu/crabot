@@ -355,7 +355,7 @@ const ModelTab: React.FC<{
   }, [])
 
   const selectedProvider = providers.find((p) => p.id === form.provider_id)
-  const modelsForSelected = selectedProvider?.models ?? []
+  const modelsForSelected = (selectedProvider?.models ?? []).filter((m) => m.type === 'llm')
 
   return (
     <div>

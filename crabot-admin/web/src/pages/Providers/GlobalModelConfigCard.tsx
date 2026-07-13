@@ -44,6 +44,8 @@ export const GlobalModelConfigCard: React.FC<GlobalModelConfigCardProps> = ({
 
   const llmProviders = providers.filter(p => p.models.some(m => m.type === 'llm'))
   const selectedLlmProvider = providers.find(p => p.id === config.default_llm_provider_id)
+  const imageProviders = providers.filter(p => p.models.some(m => m.type === 'image'))
+  const selectedImageProvider = providers.find(p => p.id === config.default_image_provider_id)
   const canSave = !!config.default_llm_provider_id && !!config.default_llm_model_id
 
   const body = (
@@ -78,6 +80,41 @@ export const GlobalModelConfigCard: React.FC<GlobalModelConfigCardProps> = ({
               }))}
             value={config.default_llm_model_id || ''}
             onChange={e => setConfig({ ...config, default_llm_model_id: e.target.value || undefined })}
+          />
+        )}
+      </div>
+      <div className="global-model-row">
+        <Select
+          label="生图供应商"
+          options={[
+            { value: '', label: '— 未设置 —' },
+            ...imageProviders.map(p => ({ value: p.id, label: `${p.name}  ·  ${p.format}` })),
+          ]}
+          value={config.default_image_provider_id || ''}
+          onChange={e => {
+            const providerId = e.target.value || undefined
+            const provider = providers.find(p => p.id === providerId)
+            const firstImage = provider?.models.find(m => m.type === 'image')
+            setConfig({
+              ...config,
+              default_image_provider_id: providerId,
+              default_image_model_id: firstImage?.model_id,
+              image_slot_user_set: true,
+            })
+          }}
+        />
+        {selectedImageProvider && (
+          <Select
+            label="生图模型"
+            options={selectedImageProvider.models
+              .filter(m => m.type === 'image')
+              .map(m => ({ value: m.model_id, label: m.display_name }))}
+            value={config.default_image_model_id || ''}
+            onChange={e => setConfig({
+              ...config,
+              default_image_model_id: e.target.value || undefined,
+              image_slot_user_set: true,
+            })}
           />
         )}
       </div>
