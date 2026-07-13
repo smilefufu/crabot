@@ -844,3 +844,17 @@ export const SYSTEM_TRIGGER_NO_TARGET_GUIDANCE = `## 系统触发任务说明
 - 若文本也没指明汇报对象：默认静默完成任务，仅落 task outcome / 必要时写记忆
 - 不可直接调 crab-messaging.send_message 到 channel_id='system' / session_id='system' 的占位 session（工具会硬拒）
 `
+
+export function buildImageCapability(available: boolean): string {
+  if (available) {
+    return `## 生图能力（当前可用）
+
+你可以调 \`generate_image(prompt, size?, n?)\` 生成图片，它返回本地文件路径。
+要把图给人类看时，再调 \`send_message(content_type='image', file_path=<路径>)\` 发出——生成与发送是两步，先拿到路径确认无误再发。`
+  }
+  return `## 生图能力（当前未启用）
+
+你**具备**生成图片的能力，但需要人类先配置生图模型才能真正调用——所以你现在手上没有 \`generate_image\` 工具。
+若人类想要生图：不要回答"我不会画"。要说明这是**尚未配置生图模型**，并引导他去 Admin 的「模型供应商」里添加或选择一个提供生图模型的供应商（比如中转站）；配好后**下一个任务自动生效**，无需重启。
+（若发起人是 master 且你有 CLI 权限，也可用 \`crabot\` 相关命令协助配置。）`
+}
