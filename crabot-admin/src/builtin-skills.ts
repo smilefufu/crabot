@@ -21,6 +21,7 @@ export const BUILTIN_SKILL_IDS = {
   writingPlans: 'builtin-skill-writing-plans',
   systematicDebugging: 'builtin-skill-systematic-debugging',
   verificationBeforeCompletion: 'builtin-skill-verification-before-completion',
+  workspaceContextMaintenance: 'builtin-skill-workspace-context-maintenance',
 } as const
 
 export function getBuiltinSkills(): SkillRegistryEntry[] {
@@ -59,6 +60,20 @@ export function getBuiltinSkills(): SkillRegistryEntry[] {
       description: '完成前必须运行 verification 命令再上报；用于 code_writer 防"假完成"',
       version: '1.0.0-superpowers-5.0.7',
       skill_dir: join(SKILL_ROOT, 'verification-before-completion'),
+      source_type: 'builtin',
+      is_builtin: true,
+      is_essential: false,
+      can_disable: true,
+      enabled: true,
+      created_at: SEED_TIMESTAMP,
+      updated_at: SEED_TIMESTAMP,
+    },
+    {
+      id: BUILTIN_SKILL_IDS.workspaceContextMaintenance,
+      name: 'workspace-context-maintenance',
+      description: '进入文件工作区后维护 AGENTS.md / CURRENT_CONTEXT.md 等上下文文档；缺少上下文、会生成长期产物或用户要求记住项目规则时使用',
+      version: '1.0.0-crabot',
+      skill_dir: join(SKILL_ROOT, 'workspace-context-maintenance'),
       source_type: 'builtin',
       is_builtin: true,
       is_essential: false,

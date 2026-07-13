@@ -125,6 +125,13 @@ export interface TraceIndexEntry {
   duration_ms?: number
   status: 'running' | 'completed' | 'failed'
   outcome_summary?: string
+  dispatch_actions?: Array<{
+    kind?: string
+    outcome?: string
+    target_task_id?: string
+    spawned_trace_id?: string
+    target_task_completed_at?: string
+  }>
   span_count: number
   total_usage?: TokenUsage
 }

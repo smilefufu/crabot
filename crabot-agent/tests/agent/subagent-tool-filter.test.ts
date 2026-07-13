@@ -39,6 +39,7 @@ describe('classifyTool', () => {
     ['Skill', 'skill_loading'],
     ['mcp__user-mcp-x__some_tool', 'mcp_user'],
     ['delegate_task', 'delegate_task'],
+    ['wait_for_signal', 'unknown'],
     ['UnknownTool', 'unknown'],
   ])('classifyTool("%s") === %s', (name, expected) => {
     expect(classifyTool(name)).toBe(expected)
@@ -90,5 +91,11 @@ describe('filterToolsForSubAgent', () => {
     const tools = [fakeTool('Read'), fakeTool('SomeRandomTool')]
     const out = filterToolsForSubAgent(tools, ALL_ON, [], [])
     expect(out.map((t) => t.name)).toEqual(['Read'])
+  })
+
+  it('wait_for_signal 是 main-only，即使 shell capability 开启也不注入 subagent', () => {
+    const tools = [fakeTool('Bash'), fakeTool('Output'), fakeTool('wait_for_signal')]
+    const out = filterToolsForSubAgent(tools, ALL_ON, [], [])
+    expect(out.map((t) => t.name)).toEqual(['Bash', 'Output'])
   })
 })

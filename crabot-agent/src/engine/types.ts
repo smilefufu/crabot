@@ -151,8 +151,8 @@ export interface ToolDefinition {
   readonly turnZeroOnly?: boolean
   /**
    * 调用后引擎立刻退出 loop，把工具调用信息（name + input）写入 EngineResult.exitToolCall。
-   * 引擎不调用 `call` 函数（exit 工具本身无需执行），也不 push tool_result——
-   * 直接 buildResult('completed', ...) 返回。
+   * 引擎不调用 `call` 函数（exit 工具本身无需执行），但会为本轮所有 tool_use
+   * push 合成 tool_result，确保 finalMessages / checkpoint 可被 LLM API 重放。
    *
    * 用于"调完就走"的早退工具（如 submit_audit_result）。
    */
@@ -270,7 +270,11 @@ export type LiveProgressEvent =
  * endTurnGate 的决策结果（见 EngineOptions.endTurnGate 注释）。
  * spec: 2026-06-10-audit-anchor-human-request-design.md §4.7
  */
-export type EndTurnGateResult = string | { readonly kind: 'wait' } | null
+export type EndTurnGateResult =
+  | string
+  | { readonly kind: 'wait' }
+  | { readonly kind: 'fail'; readonly reason: string }
+  | null
 
 export interface EngineOptions {
   readonly systemPrompt: Resolvable<string>
@@ -326,6 +330,20 @@ export interface EngineOptions {
    */
   readonly onSystemInjection?: (event: SystemInjectionEvent) => void
   /**
+   * 非空 assistant text + end_turn 的收尾处理钩子。unified worker 用它区分：
+   * - assistant text 走错通道且当前 epoch 未送达 → caller 可自动交付并返回 complete
+   * - 当前 epoch 已送达但仍输出 assistant text → caller 可注入一次纠偏提醒
+   *
+   * 不传时 engine 保持原行为：assistant text 作为 finalText 返回，不做任何交付假设。
+   */
+  readonly assistantTextEndTurnHandler?: (event: {
+    readonly assistantText: string
+    readonly turnNumber: number
+  }) => Promise<
+    | { readonly kind: 'complete' }
+    | { readonly kind: 'inject'; readonly text: string }
+  >
+  /**
    * 抑制 forced_summary 注入的判定回调。返回 true → engine 跳过 silent end_turn 的
    * forced_summary 兜底机制，直接接受 silent end_turn 作为正常完成态。
    *
@@ -343,6 +361,7 @@ export interface EngineOptions {
    * - 返回 { kind: 'wait' } → audit 已异步派出；engine 直接挂起等 humanQueue push
    *   （audit 结果 / 用户 supplement），不注入文本、不烧 LLM 轮次。
    *   spec 2026-06-10-audit-anchor-human-request §4.7
+   * - 返回 { kind: 'fail' } → gate 判定无法安全收口，engine 以 failed 结束
    * - 返回 null → 正常退出
    * 不传时直接退出。
    */
@@ -438,8 +457,9 @@ export interface SystemInjectionEvent {
    * - `forced_summary`：silent end_turn 兜底要求模型重说
    * - `stop_hook`：Stop hook block 后注入的引导文本
    * - `audit_pending_intercept`：audit 跑中 LLM 直接 end_turn 兜底拦截（Task 13）
+   * - `assistant_text_end_turn`：非空 assistant text + end_turn 走错通道纠偏提醒
    */
-  readonly type: 'supplement' | 'forced_summary' | 'stop_hook' | 'audit_pending_intercept'
+  readonly type: 'supplement' | 'forced_summary' | 'stop_hook' | 'audit_pending_intercept' | 'assistant_text_end_turn'
   /** 注入的文本内容（不含 ContentBlock[] 形态——supplement 的 ContentBlock 注入退化为 type 字符串描述） */
   readonly text: string
   /** 注入发生时的 turn 序号（与 EngineTurnEvent.turnNumber 同口径） */

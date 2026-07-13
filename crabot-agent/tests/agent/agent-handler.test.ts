@@ -28,7 +28,7 @@ vi.mock('../../src/engine/index.js', async (importOriginal) => {
 import { runEngine } from '../../src/engine/index.js'
 const mockRunEngine = vi.mocked(runEngine)
 
-function makeHandler() {
+function makeHandler(options?: ConstructorParameters<typeof AgentHandler>[2]) {
   const sdkEnv = {
     modelId: 'test-model',
     format: 'anthropic' as const,
@@ -40,7 +40,7 @@ function makeHandler() {
   const config = {
     systemPrompt: 'You are a helpful worker.',
   }
-  return new AgentHandler(sdkEnv, config)
+  return new AgentHandler(sdkEnv, config, options)
 }
 
 function makeMessagingHandler(rpcCall: ReturnType<typeof vi.fn>) {
@@ -124,6 +124,8 @@ function makeEngineResult(overrides?: Partial<{
 describe('AgentHandler', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockRunEngine.mockReset()
+    mockRunEngine.mockResolvedValue(makeEngineResult())
   })
 
   describe('executeTask', () => {
@@ -156,6 +158,49 @@ describe('AgentHandler', () => {
 
       expect(result.task_id).toBe('task_1')
       expect(result.outcome).toBe('failed')
+    })
+
+    it('does not write task memory for failed engine outcomes', async () => {
+      mockRunEngine.mockResolvedValue(makeEngineResult({
+        outcome: 'failed',
+        finalText: 'API error',
+        error: 'API error',
+      }))
+      const rpcCall = vi.fn().mockResolvedValue({ task: {} })
+      const memoryWriter = {
+        writeTaskFinished: vi.fn().mockResolvedValue(undefined),
+        quickCapture: vi.fn().mockResolvedValue(undefined),
+      }
+
+      const handler = makeHandler({
+        deps: {
+          rpcClient: { call: rpcCall } as never,
+          moduleId: 'agent-test',
+          getAdminPort: async () => 3001,
+        },
+        memoryWriter: memoryWriter as never,
+      })
+
+      const result = await handler.executeTask({
+        task: makeTask({ task_id: 'task_1' }),
+        context: makeContext(),
+      })
+
+      expect(result.outcome).toBe('failed')
+      expect(rpcCall).toHaveBeenCalledWith(
+        3001,
+        'update_task_status',
+        expect.objectContaining({ task_id: 'task_1', status: 'failed' }),
+        'agent-test',
+      )
+      expect(rpcCall).toHaveBeenCalledWith(
+        3001,
+        'update_task_outcome',
+        expect.objectContaining({ task_id: 'task_1', outcome_brief: 'API error' }),
+        'agent-test',
+      )
+      expect(memoryWriter.writeTaskFinished).not.toHaveBeenCalled()
+      expect(memoryWriter.quickCapture).not.toHaveBeenCalled()
     })
 
     it('should call runEngine with correct parameters', async () => {
@@ -437,6 +482,10 @@ describe('AgentHandler', () => {
       const callArgs = mockRunEngine.mock.calls[0][0]
       const resolved = (callArgs.options.systemPrompt as () => string)()
       expect(resolved).toContain('## 系统触发任务说明')
+      expect(resolved).toContain('只知道目标 Friend')
+      expect(resolved).toContain('send_private_message')
+      expect(resolved).toContain('需要通知 master')
+      expect(resolved).toContain('send_master_private')
       expect(resolved).toContain('不可直接调 crab-messaging.send_message')
     })
 
@@ -592,6 +641,152 @@ describe('AgentHandler', () => {
       expect(gateResult).toBe(GOAL_MODE_NO_DELIVERY_PROMPT)
 
       await promise
+      handler.dispose()
+    })
+
+    it('assistant text end_turn fallback: current epoch 未送达时自动用标准 channel dispatch 交付 assistant text', async () => {
+      let observedDeliveryEpoch: { lastDeliveredInfoEpoch: number; humanInputEpoch: number } | undefined
+      const rpcCall = vi.fn().mockImplementation(async (_port: number, method: string, params?: any) => {
+        if (method === 'send_message') return { platform_message_id: 'mid-auto', sent_at: '2026-07-06T12:00:00Z' }
+        if (method === 'append_message') return { ok: true }
+        return { task: { id: 'task_1' } }
+      })
+      const handler = makeMessagingHandler(rpcCall)
+      mockRunEngine.mockImplementation(async (params: any) => {
+        const result = await params.options.assistantTextEndTurnHandler({
+          assistantText: '实现进度如下：MVP 已经跑起来了',
+          turnNumber: 7,
+        })
+        expect(result).toEqual({ kind: 'complete' })
+        const taskState = (handler as any).activeTasks.get('task_1')
+        observedDeliveryEpoch = {
+          lastDeliveredInfoEpoch: taskState.lastDeliveredInfoEpoch,
+          humanInputEpoch: taskState.humanInputEpoch,
+        }
+        return makeEngineResult({ finalText: '实现进度如下：MVP 已经跑起来了' })
+      })
+
+      await handler.executeTask({
+        task: makeTask({ source: { trigger_type: 'message' } }),
+        context: {
+          ...makeContext(),
+          task_origin: {
+            channel_id: 'channel_1',
+            session_id: 'session_1',
+            session_type: 'private',
+            friend_id: 'friend_1',
+          },
+        },
+      })
+
+      const channelSend = rpcCall.mock.calls.find(call => call[1] === 'send_message')
+      expect(channelSend?.[2]).toMatchObject({
+        session_id: 'session_1',
+        content: {
+          type: 'text',
+          text: '实现进度如下：MVP 已经跑起来了',
+        },
+      })
+      expect(rpcCall.mock.calls.some(call => call[1] === 'append_message' && call[2].agent_intent === 'info')).toBe(true)
+      expect(observedDeliveryEpoch?.lastDeliveredInfoEpoch).toBe(observedDeliveryEpoch?.humanInputEpoch)
+      handler.dispose()
+    })
+
+    it('assistant text end_turn fallback: current epoch 已送达时只提醒一次，不自动交付', async () => {
+      const injections: string[] = []
+      let capturedSystemInjection:
+        | ((event: { type: 'assistant_text_end_turn'; text: string; turnNumber: number; injectedAtMs: number }) => void)
+        | undefined
+      let capturedReminderText: string | undefined
+      const rpcCall = vi.fn().mockImplementation(async (_port: number, method: string) => {
+        if (method === 'send_message') return { platform_message_id: 'unexpected', sent_at: 'now' }
+        return { task: { id: 'task_1' } }
+      })
+      const handler = makeMessagingHandler(rpcCall)
+      mockRunEngine.mockImplementation(async (params: any) => {
+        const taskState = (handler as any).activeTasks.get('task_1')
+        taskState.lastDeliveredInfoEpoch = taskState.humanInputEpoch
+        const first = await params.options.assistantTextEndTurnHandler({
+          assistantText: '多余的 assistant text',
+          turnNumber: 3,
+        })
+        const second = await params.options.assistantTextEndTurnHandler({
+          assistantText: '再次多余的 assistant text',
+          turnNumber: 4,
+        })
+        expect(first.kind).toBe('inject')
+        capturedSystemInjection = params.options.onSystemInjection
+        capturedReminderText = first.text
+        expect(second).toEqual({ kind: 'complete' })
+        return makeEngineResult()
+      })
+      const traceCallback = {
+        onLoopStart: vi.fn(() => 'loop-span'),
+        onLoopEnd: vi.fn(),
+        onLlmCallStart: vi.fn(() => 'llm-span'),
+        onLlmCallEnd: vi.fn(),
+        onToolCallStart: vi.fn((toolName: string, inputSummary: string) => {
+          if (toolName === '__system_assistant_text_end_turn__') {
+            injections.push(inputSummary)
+          }
+          return 'span-assistant-text-end-turn'
+        }),
+        onToolCallEnd: vi.fn(),
+      } as never
+
+      const result = await handler.executeTask({
+        task: makeTask({ source: { trigger_type: 'message' } }),
+        context: makeContext(),
+      }, traceCallback)
+
+      expect(result.outcome).toBe('completed')
+      expect(rpcCall.mock.calls.some(call => call[1] === 'send_message')).toBe(false)
+      expect(capturedSystemInjection).toBeDefined()
+      capturedSystemInjection!({
+        type: 'assistant_text_end_turn',
+        text: capturedReminderText ?? '',
+        turnNumber: 3,
+        injectedAtMs: Date.now(),
+      })
+      expect(injections).toHaveLength(1)
+      expect(injections[0]).toContain('assistant text + end_turn')
+      handler.dispose()
+    })
+
+    it('assistant text end_turn fallback: 自动交付失败时注入重试提醒，不标记送达', async () => {
+      mockRunEngine.mockImplementation(async (params: any) => {
+        const result = await params.options.assistantTextEndTurnHandler({
+          assistantText: '最终结果',
+          turnNumber: 9,
+        })
+        expect(result.kind).toBe('inject')
+        expect(result.text).toContain('没有成功发给用户')
+        expect(result.text).toContain('channel down')
+
+        const taskState = (handler as any).activeTasks.get('task_1')
+        expect(taskState.lastDeliveredInfoEpoch).toBeUndefined()
+        return makeEngineResult()
+      })
+      const rpcCall = vi.fn().mockImplementation(async (_port: number, method: string) => {
+        if (method === 'send_message') throw new Error('channel down')
+        return { task: { id: 'task_1' } }
+      })
+      const handler = makeMessagingHandler(rpcCall)
+
+      await handler.executeTask({
+        task: makeTask({ source: { trigger_type: 'message' } }),
+        context: {
+          ...makeContext(),
+          task_origin: {
+            channel_id: 'channel_1',
+            session_id: 'session_1',
+            session_type: 'private',
+            friend_id: 'friend_1',
+          },
+        },
+      })
+
+      expect(rpcCall.mock.calls.some(call => call[1] === 'append_message')).toBe(false)
       handler.dispose()
     })
   })
@@ -893,6 +1088,99 @@ describe('AgentHandler', () => {
       const callArgs = mockRunEngine.mock.calls[0][0]
       const gateResult = await callArgs.options.endTurnGate()
       expect(gateResult).toBe(GOAL_MODE_NO_DELIVERY_PROMPT)
+    })
+
+    it('resumed message task with goal keeps human no-delivery gate active', async () => {
+      mockRunEngine.mockImplementation(async () => {
+        await new Promise(resolve => setTimeout(resolve, 20))
+        return makeEngineResult()
+      })
+      const rpcCall = vi.fn().mockResolvedValue({
+        task: { id: 'task_1', goal: { objective: 'finish current user request' } },
+      })
+      const handler = new AgentHandler(
+        {
+          modelId: 'test-model',
+          format: 'anthropic' as const,
+          env: { ANTHROPIC_BASE_URL: 'http://localhost:4000', ANTHROPIC_API_KEY: 'test-key' },
+        },
+        { systemPrompt: 'You are a helpful worker.' },
+        {
+          deps: {
+            rpcClient: { call: rpcCall } as never,
+            moduleId: 'agent-test',
+            resolveChannelPort: async () => 3003,
+            getAdminPort: async () => 3001,
+            getMemoryPort: async () => 3002,
+          },
+        },
+      )
+      await handler.executeTask({
+        task: makeTask({
+          source: { trigger_type: 'message' },
+        }),
+        context: makeContext(),
+        resumeFrom: {
+          initialMessages: [{ id: 'm1', role: 'user', content: 'resume me', timestamp: 1 }] as never,
+          todoItems: [],
+          humanInputEpoch: 31,
+          lastDeliveredInfoEpoch: 23,
+        },
+      })
+
+      const callArgs = mockRunEngine.mock.calls[0][0]
+      expect(callArgs.options.suppressForcedSummary()).toBe(false)
+      expect(callArgs.options.endTurnGate).toBeDefined()
+      const gateResult = await callArgs.options.endTurnGate()
+      expect(gateResult).toBe(GOAL_MODE_NO_DELIVERY_PROMPT)
+      handler.dispose()
+    })
+
+    it('resumed scheduled task suppresses forced summary and skips human no-delivery gate', async () => {
+      mockRunEngine.mockImplementation(async () => {
+        await new Promise(resolve => setTimeout(resolve, 20))
+        return makeEngineResult()
+      })
+      const rpcCall = vi.fn().mockResolvedValue({
+        task: { id: 'task_1', goal: { objective: 'finish scheduled task' } },
+      })
+      const handler = new AgentHandler(
+        {
+          modelId: 'test-model',
+          format: 'anthropic' as const,
+          env: { ANTHROPIC_BASE_URL: 'http://localhost:4000', ANTHROPIC_API_KEY: 'test-key' },
+        },
+        { systemPrompt: 'You are a helpful worker.' },
+        {
+          deps: {
+            rpcClient: { call: rpcCall } as never,
+            moduleId: 'agent-test',
+            resolveChannelPort: async () => 3003,
+            getAdminPort: async () => 3001,
+            getMemoryPort: async () => 3002,
+          },
+        },
+      )
+      await handler.executeTask({
+        task: makeTask({
+          source: { trigger_type: 'scheduled' },
+        }),
+        context: makeContext(),
+        resumeFrom: {
+          initialMessages: [{ id: 'm1', role: 'user', content: 'resume me', timestamp: 1 }] as never,
+          todoItems: [],
+          humanInputEpoch: 31,
+          lastDeliveredInfoEpoch: 23,
+        },
+      })
+
+      const callArgs = mockRunEngine.mock.calls[0][0]
+      expect(callArgs.options.suppressForcedSummary()).toBe(true)
+      if (callArgs.options.endTurnGate) {
+        const gateResult = await callArgs.options.endTurnGate()
+        expect(gateResult).toBeNull()
+      }
+      handler.dispose()
     })
   })
 

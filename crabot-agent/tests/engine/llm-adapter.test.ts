@@ -8,6 +8,7 @@ import {
   OpenAIAdapter,
   OpenAIResponsesAdapter,
   createAdapter,
+  callNonStreaming,
   type LLMAdapterConfig,
 } from '../../src/engine/llm-adapter'
 import { normalizeMessagesForResponses } from '../../src/engine/openai-responses-adapter'
@@ -983,6 +984,72 @@ describe('OpenAIAdapter.stream', () => {
     expect(result.stopReason).toBe('end_turn')
     expect(result.usage?.outputTokens).toBe(3)
   })
+
+  it('throws when a chat stream ends without finish_reason', async () => {
+    const streamChunks = [
+      { id: 'c', choices: [{ index: 0, delta: { role: 'assistant', content: 'Hello' }, finish_reason: null }] },
+    ]
+    global.fetch = vi.fn().mockResolvedValue(makeChatSSEResponse(streamChunks)) as unknown as typeof fetch
+
+    const adapter = new OpenAIAdapter({ endpoint: 'https://mirror.example.ai/v1', apikey: 'k' })
+
+    await expect(collectOpenAIChunks(adapter)).rejects.toThrow(/ended without finish_reason/)
+  })
+
+  it('retries a chat stream that ends without finish_reason during buffered consumption', async () => {
+    const firstAttempt = [
+      { id: 'c1', choices: [{ index: 0, delta: { role: 'assistant', content: 'partial' }, finish_reason: null }] },
+    ]
+    const secondAttempt = [
+      { id: 'c2', choices: [{ index: 0, delta: { role: 'assistant', content: 'final' }, finish_reason: null }] },
+      { id: 'c2', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+    ]
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(makeChatSSEResponse(firstAttempt))
+      .mockResolvedValueOnce(makeChatSSEResponse(secondAttempt)) as unknown as typeof fetch
+
+    const adapter = new OpenAIAdapter({ endpoint: 'https://mirror.example.ai/v1', apikey: 'k' })
+    const response = await callNonStreaming(adapter, {
+      messages: [],
+      systemPrompt: '',
+      tools: [],
+      model: 'm',
+    })
+
+    expect(response.content).toEqual([{ type: 'text', text: 'final' }])
+    expect(response.stopReason).toBe('end_turn')
+    expect(global.fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('throws on legacy function_call finish_reason instead of half-mapping it to tool_use', async () => {
+    const streamChunks = [
+      {
+        id: 'chatcmpl-legacy',
+        choices: [{ index: 0, delta: { role: 'assistant', function_call: { name: 'Bash', arguments: '' } }, finish_reason: null }],
+      },
+      {
+        id: 'chatcmpl-legacy',
+        choices: [{ index: 0, delta: { function_call: { arguments: '{"command":"pwd"}' } }, finish_reason: null }],
+      },
+      { id: 'chatcmpl-legacy', choices: [{ index: 0, delta: {}, finish_reason: 'function_call' }] },
+    ]
+    global.fetch = vi.fn().mockResolvedValue(makeChatSSEResponse(streamChunks)) as unknown as typeof fetch
+
+    const adapter = new OpenAIAdapter({ endpoint: 'https://mirror.example.ai/v1', apikey: 'k' })
+
+    await expect(collectOpenAIChunks(adapter)).rejects.toThrow(/function_call/)
+  })
+
+  it('throws on content_filter finish_reason instead of returning null stopReason', async () => {
+    const streamChunks = [
+      { id: 'c', choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: 'content_filter' }] },
+    ]
+    global.fetch = vi.fn().mockResolvedValue(makeChatSSEResponse(streamChunks)) as unknown as typeof fetch
+
+    const adapter = new OpenAIAdapter({ endpoint: 'https://mirror.example.ai/v1', apikey: 'k' })
+
+    await expect(collectOpenAIChunks(adapter)).rejects.toThrow(/content_filter/)
+  })
 })
 
 describe('OpenAIResponsesAdapter.stream', () => {
@@ -1072,6 +1139,18 @@ describe('OpenAIResponsesAdapter.stream', () => {
     const messageEnd = chunks.find((c): c is Extract<StreamChunk, { type: 'message_end' }> => c.type === 'message_end')
     expect(messageEnd).toBeDefined()
     expect(messageEnd!.stopReason).toBe('end_turn')
+  })
+
+  it('throws when a responses stream ends without a terminal event', async () => {
+    const events = [
+      { event: 'response.created', data: { response: { id: 'resp_no_terminal' } } },
+      { event: 'response.output_text.delta', data: { delta: 'Hello' } },
+    ]
+    global.fetch = vi.fn().mockResolvedValue(makeSSEResponse(events)) as unknown as typeof fetch
+
+    const adapter = new OpenAIResponsesAdapter({ endpoint: 'https://api.openai.com/v1', apikey: 'k' })
+
+    await expect(collectChunks(adapter)).rejects.toThrow(/ended without terminal event/)
   })
 
   // 终态事件 ≠ response.completed 时不可静默吞掉，否则 stopReason=null 会被

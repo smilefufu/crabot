@@ -94,7 +94,6 @@ describe('dispatcher race fix - msg₂ 立即可 supplement msg₁ 的 agent 实
     expect(actions[0]).toEqual<DispatchAction>({
       kind: 'supplement',
       target_task_id: 'task-A',
-      text: '收窄到只查红米 K90 MAX',
     })
 
     // Step E: executor 调 pushSupplement → 成功投递到 A
@@ -110,7 +109,7 @@ describe('dispatcher race fix - msg₂ 立即可 supplement msg₁ 的 agent 实
 
     // 验证 supplement 投递成功
     expect(pushSupplement).toHaveBeenCalledTimes(1)
-    expect(pushSupplement).toHaveBeenCalledWith('task-A', '收窄到只查红米 K90 MAX')
+    expect(pushSupplement).toHaveBeenCalledWith('task-A')
     expect(spawnAgentInstance).not.toHaveBeenCalled()  // 不应开新 agent 实例
   })
 
@@ -130,7 +129,7 @@ describe('dispatcher race fix - msg₂ 立即可 supplement msg₁ 的 agent 实
     })
 
     const adapter = makeMockAdapter(JSON.stringify({
-      actions: [{ kind: 'new_task', text: '查一下今天 github 早报' }],
+      actions: [{ kind: 'new_task' }],
     }))
 
     const { actions } = await dispatch(ctx, {
@@ -153,7 +152,7 @@ describe('dispatcher race fix - msg₂ 立即可 supplement msg₁ 的 agent 实
     expect(pushSupplement).not.toHaveBeenCalled()
     expect(spawnAgentInstance).toHaveBeenCalledTimes(1)
     // 第二参数是 spawnOptions：无 immediate_reply 时 executor 显式传 undefined
-    expect(spawnAgentInstance).toHaveBeenCalledWith('查一下今天 github 早报', undefined)
+    expect(spawnAgentInstance).toHaveBeenCalledWith(undefined, undefined)
   })
 
   it('混合：dispatcher 输出 supplement + new_task → executor 两个都执行（按顺序）', async () => {
@@ -183,8 +182,8 @@ describe('dispatcher race fix - msg₂ 立即可 supplement msg₁ 的 agent 实
 
     const adapter = makeMockAdapter(JSON.stringify({
       actions: [
-        { kind: 'supplement', target_task_id: 'task-A', text: '只查红米' },
-        { kind: 'new_task', text: '查一下今天 github 早报' },
+        { kind: 'supplement', target_task_id: 'task-A' },
+        { kind: 'new_task' },
       ],
     }))
 
@@ -210,7 +209,7 @@ describe('dispatcher race fix - msg₂ 立即可 supplement msg₁ 的 agent 实
 
     // supplement 必须先于 new_task 执行（顺序保证）
     expect(calls).toEqual(['supp', 'spawn'])
-    expect(pushSupplement).toHaveBeenCalledWith('task-A', '只查红米')
-    expect(spawnAgentInstance).toHaveBeenCalledWith('查一下今天 github 早报', undefined)
+    expect(pushSupplement).toHaveBeenCalledWith('task-A')
+    expect(spawnAgentInstance).toHaveBeenCalledWith(undefined, undefined)
   })
 })

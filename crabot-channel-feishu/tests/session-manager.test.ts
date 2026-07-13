@@ -21,6 +21,65 @@ afterEach(() => {
 })
 
 describe('upsert (private)', () => {
+  it('derives a stable session id from channel and platform session id', () => {
+    const first = mgr.upsert({
+      platform_session_id: 'ou_alice',
+      type: 'private',
+      title: 'Alice',
+      sender_id: 'ou_alice',
+      sender_name: 'Alice',
+    })
+
+    fs.rmSync(path.join(tmpDir, 'sessions.json'), { force: true })
+    const fresh = new SessionManager('channel-feishu-test', tmpDir)
+    const second = fresh.upsert({
+      platform_session_id: 'ou_alice',
+      type: 'private',
+      title: 'Alice',
+      sender_id: 'ou_alice',
+      sender_name: 'Alice',
+    })
+
+    expect(second.session.id).toBe(first.session.id)
+    expect(second.session.id).toMatch(/^[0-9a-z]{8}$/)
+  })
+
+  it('canonicalizes loaded legacy session ids to stable ids and keeps legacy lookup aliases', () => {
+    fs.writeFileSync(path.join(tmpDir, 'sessions.json'), JSON.stringify([
+      {
+        id: 'legacy-feishu-session-id',
+        channel_id: 'channel-feishu-test',
+        type: 'private',
+        platform_session_id: 'ou_alice',
+        title: 'Alice',
+        participants: [{ platform_user_id: 'ou_alice', role: 'member' }],
+        permissions: { desktop: false, network: { mode: 'allow_all', rules: [] }, storage: [] },
+        memory_scopes: ['ou_alice'],
+        workspace_path: '',
+        created_at: '2026-01-01T00:00:00.000Z',
+        updated_at: '2026-01-01T00:00:00.000Z',
+      },
+    ]), 'utf-8')
+
+    const probe = new SessionManager('channel-feishu-test', path.join(tmpDir, 'stable-id-probe'))
+    const stableId = probe.upsert({
+      platform_session_id: 'ou_alice',
+      type: 'private',
+      title: 'Alice',
+      sender_id: 'ou_alice',
+      sender_name: 'Alice',
+    }).session.id
+
+    const fresh = new SessionManager('channel-feishu-test', tmpDir)
+    const session = fresh.findByPlatformId('ou_alice')
+
+    expect(stableId).toMatch(/^[0-9a-z]{8}$/)
+    expect(session?.id).toBe(stableId)
+    expect(fresh.findById(stableId)?.id).toBe(stableId)
+    expect(fresh.findById('legacy-feishu-session-id')?.id).toBe(stableId)
+    expect(fresh.listSessions('private').map((s) => s.id)).toEqual([stableId])
+  })
+
   it('first call creates a private session', () => {
     const { session, created } = mgr.upsert({
       platform_session_id: 'ou_alice',
@@ -157,6 +216,49 @@ describe('removeByPlatformId', () => {
     mgr.removeByPlatformId('ou_alice')
     expect(mgr.findById(r.session.id)).toBeUndefined()
     expect(mgr.findByPlatformId('ou_alice')).toBeUndefined()
+  })
+
+  it('clears stable aliases when deleting a loaded legacy session by id', () => {
+    const probe = new SessionManager('channel-feishu-test', path.join(tmpDir, 'short-id-probe'))
+    const shortId = probe.upsert({
+      platform_session_id: 'ou_alice',
+      type: 'private',
+      title: 'Alice',
+      sender_id: 'ou_alice',
+      sender_name: 'Alice',
+    }).session.id
+
+    fs.writeFileSync(path.join(tmpDir, 'sessions.json'), JSON.stringify([
+      {
+        id: 'legacy-feishu-session-id',
+        channel_id: 'channel-feishu-test',
+        type: 'private',
+        platform_session_id: 'ou_alice',
+        title: 'Alice',
+        participants: [{ platform_user_id: 'ou_alice', role: 'member' }],
+        permissions: { desktop: false, network: { mode: 'allow_all', rules: [] }, storage: [] },
+        memory_scopes: ['ou_alice'],
+        workspace_path: '',
+        created_at: '2026-01-01T00:00:00.000Z',
+        updated_at: '2026-01-01T00:00:00.000Z',
+      },
+    ]), 'utf-8')
+
+    const fresh = new SessionManager('channel-feishu-test', tmpDir)
+    expect(fresh.findById(shortId)?.id).toBe(shortId)
+    expect(fresh.findById('legacy-feishu-session-id')?.id).toBe(shortId)
+    fresh.removeById('legacy-feishu-session-id')
+
+    const recreated = fresh.upsert({
+      platform_session_id: 'ou_alice',
+      type: 'private',
+      title: 'Alice',
+      sender_id: 'ou_alice',
+      sender_name: 'Alice',
+    }).session
+
+    expect(recreated.id).toBe(shortId)
+    expect(fresh.findById(shortId)?.id).toBe(shortId)
   })
 })
 

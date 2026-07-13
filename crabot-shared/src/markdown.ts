@@ -113,6 +113,15 @@ function padCell(text: string, width: number, align: ColAlign): string {
   return text + ' '.repeat(pad)
 }
 
+function restoreSentinelPlainText(text: string, codeBlocks: string[], inlineCodes: string[]): string {
+  return text
+    .replace(CODE_BLOCK_RESTORE_RE, (_match, idxStr: string) => {
+      const code = codeBlocks[Number(idxStr)] ?? ''
+      return code.replace(/^\n+/, '').replace(/\n+$/, '')
+    })
+    .replace(INLINE_CODE_RESTORE_RE, (_match, idxStr: string) => inlineCodes[Number(idxStr)] ?? '')
+}
+
 /**
  * GFM 表格 → 等宽文本：Telegram parse_mode=HTML 不认 <table>，只能塞进 <pre>
  * 让列在等宽字体下视觉对齐。返回值的单元格内容已 HTML escape，可直接放入 <pre>。
@@ -135,7 +144,7 @@ function formatTable(rows: string[][], aligns: ColAlign[]): string {
 }
 
 /** 扫描原文找 GFM 表格块（header + 对齐行 + 至少一行数据），就地用占位符替换 */
-function extractTables(input: string): { stripped: string; tables: string[] } {
+function extractTables(input: string, codeBlocks: string[], inlineCodes: string[]): { stripped: string; tables: string[] } {
   const lines = input.split('\n')
   const out: string[] = []
   const tables: string[] = []
@@ -154,7 +163,10 @@ function extractTables(input: string): { stripped: string; tables: string[] } {
       }
       if (dataRows.length > 0) {
         const idx = tables.length
-        tables.push(formatTable([header, ...dataRows], aligns))
+        const tableRows = [header, ...dataRows].map((row) =>
+          row.map((cell) => restoreSentinelPlainText(cell, codeBlocks, inlineCodes))
+        )
+        tables.push(formatTable(tableRows, aligns))
         out.push(`\u0001TB${idx}\u0002`)
         i = j
         continue
@@ -190,7 +202,7 @@ export function markdownToTelegramHtml(md: string): string {
     return `${SENTINEL_OPEN}IC${idx}${SENTINEL_CLOSE}`
   })
 
-  const tableExtract = extractTables(text)
+  const tableExtract = extractTables(text, codeBlocks, inlineCodes)
   text = tableExtract.stripped
   const tables = tableExtract.tables
 

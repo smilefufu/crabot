@@ -1,19 +1,80 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-13 — 新增经中转站的图像生成能力（gpt-image）+ agent 生图自我认知
+> 最后更新：2026-07-12 — 修复终态任务误入活跃列表与 WeChat 原始时间戳丢失
 
-## 2026-07-13 — 图像生成能力（中转站 gpt-image + 自我认知）
+## 2026-07-12 — 修复终态任务误入活跃列表与 WeChat 原始时间戳丢失
 
-设计/计划：`crabot-docs/superpowers/specs/2026-07-13-image-generation-design.md` + `crabot-docs/superpowers/plans/2026-07-13-image-generation.md`。分支 `feat/image-generation`（未合 main）。核心不只是"调一次生图 API"，而是让 agent 像 codex/claude-code 认知插件那样**自知**：能画 / 当前配没配 / 未配时引导人配 / 配好自动生效。
+- ContextAssembler 将 dispatcher 可补充候选与协议里的 `active_tasks` 分开：recent terminal 仅在关联平台消息可见时供 dispatcher 判断，并通过 Channel `get_message` 有界补取缺失历史、回填 `task_id`；Worker 的“活跃任务”只保留真正活跃任务。
+- recent terminal 的历史回溯锚点改用任务 `created_at`，避免任务完成时间晚于原始消息时漏掉关联聊天。
+- WeChat 实时入站 `platform_timestamp` 改用 connector 的 `message.createTime`，兼容秒和毫秒 epoch；不再用 Crabot 接收时间覆盖平台发送时间。
+- 验证：Agent 全量 1490 tests passed（2 skipped），WeChat Channel 全量 56 tests passed；两个包 TypeScript build 通过。
 
-- **模型发现不再丢弃图像模型**（`model-provider-manager.ts`）：`ModelType` 扩为 `'llm' | 'image'`；`parseOpenAIModels` 把 `gpt-image` / `dall-e` 名族从"skip"改为归类 `type:'image'`（embedding/whisper/tts/moderation 仍排除）；image 模型不置 `supports_vision`。
-- **图像 slot 配置 + 自动配置**（存引用不存快照）：`GlobalModelConfig` 加 `default_image_provider_id/model_id/image_slot_user_set`；`resolveImageConfig()` 实时解析（OAuth provider 判不可用）；`autoConfigureImageSlot()` 在 `refreshModels`/`importFromVendor` 后自动指向首个图像模型，用户手动设过则不覆盖、指向模型消失允许重设。
-- **可用性推给 agent**：`handleGetAgentConfig` 经 `imageResultToConfigFields` 注入 `image_config?` + `image_capability`，随 config 推送（`pushConfigToAgentModules` + 全局配置变更 `triggerPushAfter`）。
-- **agent 条件暴露 + 热更**：新增 `crab-image` in-process MCP（`generate_image`：调 `/images/generations` → 落盘 `data/agent/generated-images/` → 返回路径，不自动发送）；`buildToolsDynamic` 仅 `imageConnInfo` 存在时纳入工具；`updateImageConfig` 热更（下个 worker turn 生效）。交付复用现成 `send_message(content_type='image', file_path)`。
-- **self-aware 提示词两态**（`agent-sections.buildImageCapability`）：可用态教用法；不可用态"你具备能力但需先配生图模型"，引导去 Admin 配置、不说"我不会画"。
-- **界面三态**：模型徽标 `llm`→LLM(+VLM 开关) / `image`→"生图"标（无 VLM 开关）；全局配置卡加"默认生图模型"选择器；SubagentEditor 过滤掉 image 模型（AgentConfig/GlobalModelConfigCard 已正向过滤 llm）。
-- **验证**：新增单测全绿（admin classify/resolve/auto-config/config-fields 12 个；agent crab-image 7 个、image-capability 4 个）；admin + agent `tsc --noEmit` 干净；web `tsc` + `vite build` 通过。**既有失败与本功能无关**：agent dispatcher 2 个（fork main 上 test/代码措辞不一致，未碰过的文件）、admin v1-cleanup 4 个（残留 v1 记忆词汇，未碰过）、admin-api auth 1 个（测试污染，隔离下通过）。
-- **待办**：真实中转站端到端自测（需 live key/环境）；PR 到 upstream smilefufu。
+## 2026-07-11 — 私聊自动寻址捷径收紧为 scheduled-only
+
+- 事故：human message task `b664e743` 获得并调用 `send_private_message`；消息实际送达，但绕过标准 outbound buffer / goal audit / delivery epoch，随后系统仍判定未通过 `send_message` 交付。
+- 修复：新增 messaging tool profile；`send_private_message` / `send_master_private` 仅 scheduled 场景可见并有 handler 运行时防御，无 task context 与 human task 均拒绝。`daily_reflection` 保持只允许 `send_master_private` + 只读工具。
+- 能力边界：human task 仍可查找任意真实会话并用 `send_message` 跨会话投递；未删除 Agent 主动使用 IM 的能力。
+- 未来兼容：profile 读取当前 execution context；未来 scheduled 结果被人类追问时，只需切到 message profile。本期未修改 resume/source/checkpoint。
+
+## 2026-07-10 — Follow-up：tmp-pages v2 专用工具化
+
+- 背景：trace 复盘发现 agent 曾把 `$DATA_DIR/tmp-pages/<page_id>/page.html` 对应的 `.crabot/data/tmp-pages/...` 真实运行时路径写入项目脚本、summary 和 `docs/CURRENT_CONTEXT.md`，后续又误把 `.crabot` 当工作区数据根探索。
+- 结论：tmp-page 原设计支持页面按钮/表单反馈（`data-choice` / `crabotSubmit` → `events.jsonl` → `deliver_page_feedback` 唤醒 owner task），不能只当静态 HTML 发布处理。后续应单独做 tmp-pages v2，不并入当前 agent loop/tool-result 优化。
+- 建议方向：新增专用工具闭环，隐藏真实 `$DATA_DIR` 路径，仅向 agent 暴露 `page_id` / `url` / 结构化 events：`tmp_page_create`、`tmp_page_update`、`tmp_page_wait_feedback`、`tmp_page_read_events`、`tmp_page_delete`、`tmp_page_list`。工具内部负责 `owner_task_id`、TTL、HTML helper 注入、反馈唤醒与 events 读取。
+- 边界：项目脚本、报告、summary、`CURRENT_CONTEXT.md` 不得记录 `.crabot/data/tmp-pages` 或其他 Crabot runtime 路径；如需持久可复现页面，先生成项目内 report，再由 tmp-page 工具发布临时 URL。
+
+## 2026-07-10 — tmp-pages v2 专用工具化
+
+- 背景：trace 复盘发现 agent 曾把 `.crabot/data/tmp-pages` 等 runtime 路径写入项目脚本、summary 和 `CURRENT_CONTEXT.md`。根因是 tmp-page v1 skill 直接指导 Worker 操作 runtime 文件。
+- 修复：新增 Worker 内置 `tmp_page_create/update/read_events/delete/list` 工具，工具内部负责 `owner_task_id`、TTL、HTML/meta/events 文件和公开 URL，Worker 只接触 `page_id`、`url`、结构化 events；`read_events` 返回 `has_more`/`next_after_event_id` 以支持继续读取。
+- 等待语义：不新增 `tmp_page_wait_feedback`。发页面后等待人类操作继续走 `send_message(intent='ask_human')` 或 `wait_for_signal`；页面提交仍由 `deliver_page_feedback{task_id,page_id}` 唤醒 owner task。
+- 边界：工具结果、唤醒文案、skill 文档均不得暴露 `$DATA_DIR/tmp-pages`、`.crabot/data/tmp-pages`、`events.jsonl` 或内部端口；`tmp_page_update` 与 create 一样拒绝空 HTML。
+- 验证：tmp-page tools / feedback wakeup / server source / skill doc focused tests，`crabot-agent` / `crabot-admin` `tsc --noEmit`。
+
+## 2026-07-10 — 渠道实例 id 放开 Unicode 命名与路由 decode 修复
+
+- 渠道实例 id 放开 Unicode 命名（白名单 + NFC）+ 修复 /api/modules/:id/* 路由 percent-decode 缺失（中文模块无法重启的事故根因）。spec: crabot-docs superpowers/specs/2026-07-10-unicode-instance-id-design.md
+
+## 2026-07-08 — 修复 resume 执行入口语义污染
+
+- 根因：`resume_task` / terminal supplement revive 复用了 `ScheduledTaskRunner.executeScheduledTaskInBackground`，该 runner 硬编码 `source.trigger_type='scheduled'`，导致 human message task 续跑后关闭 goal/end-turn delivery gate，空 `end_turn` 可直接完成。
+- 修复：新增通用 Agent Loop Substrate，scheduled / human resume 通过显式 source/profile 进入同一个 worker loop；`ScheduledTaskRunner` 只保留真实 scheduled 任务组装职责；resume 后台执行失败会 best-effort 标 Admin task failed；失败任务只保留 Admin result / trace / log，不再写短期或长期记忆。
+- 回归：human resume / terminal supplement revive 保留 `trigger_type='message'` 和 delivery epoch gate；scheduled resume 仍保持 scheduled silent policy；`send_master_private` 收紧为 scheduled/system 场景工具，human message task 不再暴露。
+- 验证：`crabot-agent` resume/scheduled、memory-writer、agent-handler、messaging focused vitest 与 `tsc --noEmit`。
+
+## 2026-07-06 — LLM 流缺终态改为可重试协议错误
+
+- OpenAI Chat Completions / Responses stream 在已开始输出但缺少 `finish_reason` 或 terminal event 时，不再把 `stopReason=null` 传到 `query-loop`，而是在 adapter 层抛 `StreamProtocolError`，由 buffered LLM 调用重试整次请求。
+- Chat Completions 明确拒绝旧版 `finish_reason='function_call'` 流式协议（当前 xinshu 实测为新版 `delta.tool_calls` + `finish_reason='tool_calls'`）；`content_filter` 明确抛非重试 provider 错误，避免落成 null stopReason。
+- 验证：`llm-adapter.test.ts` 62 个通过；`retry-utils.test.ts` + `stream-timeout.test.ts` 24 个通过；`query-loop.test.ts` 35 个通过；`crabot-agent` `tsc --noEmit` 通过。
+
+## 2026-07-05 — 移除 dispatcher action.text 上下文污染
+
+- Dispatcher action schema 不再携带 supplement/new_task 正文；executor 对 active supplement 只路由 task_id，对 terminal revive/fallback 使用本轮真实 `ChannelMessage` 渲染内容，避免 completed task 拉起时把 `action.text` 当用户输入注入。
+- terminal supplement wakeup 删除无用系统提示，只保留真实用户补充；引用消息渲染改短截断并保留 message id，降低大段引用原文造成的上下文漂移。
+- Trace 页不再展示 `dispatch_action.text_summary`，协议 `protocol-agent-v2.md` 同步移除该字段与旧 `new_task(text)` / `supplement(target,text)` 语义。
+- 验证：agent dispatcher/resume/prompt/register 定向测试 78 个通过；Admin Web trace utils 测试 19 个通过；`crabot-agent` / `crabot-admin/web` `tsc --noEmit` 通过。
+
+## 2026-07-04 — 稳定 Channel Session ID 与无痛备份导入
+
+- `Session.id` 明确为 Admin/Agent 使用的稳定对话指针，由 `channel_id + platform_session_id` 确定性派生；WeChat/Feishu/Telegram 加载旧 `sessions.json` 时把 legacy 随机 ID canonicalize 到 stable ID，legacy ID 仅作为兼容 lookup alias。
+- `Schedule.target_session` 同时保存 `session_id` 和可选 `platform_session_id`：前者是运行时发送主指针，后者是迁移/修复锚点。Admin 只按 `channel_id + type + platform_session_id` 做确定性修复；缺证据的 legacy-only stale 引用保持无效，不做 fuzzy repair。
+- 备份/导入不依赖 channel-local `sessions.json`。只要导入后 channel 实例和平台原生会话 ID 不变，重新发现会话即可得到同一 stable `Session.id`，导入的 schedule/config 能重新对上。
+- Legacy-only `session-configs.json` 缺少 `channel_id/platform_session_id`，不安全自动迁移；这类旧配置保持无效，避免错误套用到另一个会话。
+- 验证：三个 channel session-manager 测试与 build；Admin schedule repair / backup gather / target_session 测试与 build；Admin Web schedule 保存测试与 build。
+
+## 2026-07-04 — 修复 resume checkpoint 悬空 tool_use 导致 OpenAI 400
+
+- 根因：普通工具路径在 `toolResults` 入栈前触发 `onTurn`，worker checkpoint flush 把半截 `messages` 落盘；terminal supplement / restart resume 重放该 checkpoint 时，OpenAI 拒绝无 output 的 function call。
+- 修复：`query-loop` 改为先写 tool result 再触发 `onTurn`；`exitsLoop` / `turnZeroOnly` 早退或拒绝路径对同轮所有 `tool_use` 补齐 tool result；新增 `tool-message-integrity` 共享校验，`isResumable` 拒绝历史坏 checkpoint。
+- 验证：`resume-checkpoint.test.ts`、`query-loop.test.ts`、`query-loop-exit-tools.test.ts` 通过，并覆盖多 tool_use + exitsLoop / turnZeroOnly 混合场景。
+
+## 2026-07-03 — 修复 async goal audit 结果未持久化与 no-delivery 空审计
+
+- 根因：admin-chat 里用户看到的“收到...”来自 dispatcher `immediate_reply` / supplement ack，经 `chat_callback` 写入聊天消息；它不是 worker 的 `send_message` 工具调用。实际 worker trace 没有 `send_message`，所以 goal gate 判断“从未向人类交付”是成立的。
+- no-delivery 路径不再在空 outboundBuffer 上强制派 audit；连续提醒 3 次仍直接 end_turn 时，engine 直接以 no-delivery failure 结束，要求 worker 在阈值前先 `send_message(intent=info)` 汇报或 `send_message(intent=ask_human)` 求助。
+- async goal audit 路径只把 `<audit_result>` marker 推回 worker loop，没有像同步 `runGoalAudit()` 一样写 `append_task_goal_audit_entry` / trace verdict，导致 `audit_history` 为空、auto-block 失效、audit trace 顶层 outcome 空。已在 async audit on-exit 增加结构化 verdict 回调，由 `AgentHandler` 写 audit history，pass 时完成 goal，并 best-effort patch audit trace outcome。
+- `scripts/debug-agent.mjs` 改为从 Module Manager 自动发现 Admin/Agent 端口，`tasks` 改用 `list_tasks` + 正确 filter/分页字段，trace 的 dispatcher action 显示 `dispatcher_ack=sent/none` 与 `supplement_ack=...`，避免把 dispatcher/admin ack 误读成 worker 交付。
 
 ## 2026-07-02 — 修复 Traces UI 活动排序、terminal supplement trace 续写与 null stopReason 误完成
 
@@ -599,7 +660,7 @@ plan：`crabot-docs/superpowers/plans/2026-05-08-messaging-list-tools-alignment.
 
 ## 上一里程碑（2026-05-07 — CLI 权限统一进 Friend + Session 模板）
 
-把 crabot CLI 的权限闸从硬编码 `isMasterPrivate` 单 bit 升级为按发起人解析 effective permissions（friend ∪ session 并集）+ schedule add 内容 LLM 审核。master 在群聊享完整 CLI 权限；群友在被升级到 `group_scheduler` 模板的群里可创建受审核的简单定时任务。plan：`docs/superpowers/plans/2026-05-06-cli-permission-friend-session-union.md`。
+把 crabot CLI 的权限闸从硬编码 `isMasterPrivate` 单 bit 升级为按发起人解析 effective permissions（friend ∪ session 并集）+ schedule add 内容 LLM 审核。master 在群聊享完整 CLI 权限；群友在被升级到 `group_scheduler` 模板的群里可创建受审核的简单定时任务。plan：`crabot-docs/superpowers/plans/2026-05-06-cli-permission-friend-session-union.md`。
 
 - **types.ts（admin / agent / web）**：新增 `CliPerm`/`CliDomain`/`CLI_DOMAINS`/`CliAccessConfig`，扩 `PermissionTemplate`/`SessionPermissionConfig`/`FriendPermissionConfig`/`ResolvedPermissions` 各加 `cli_access` 字段。`crabot-shared` 是 `CliDomain` 的单一真相来源，admin/agent 各自重新定义 `CliPerm`/`CliAccessConfig` 但 union 字面量从 shared import 来防漂移。
 - **PermissionTemplateManager**：5 个系统模板（master_private 全 write / group_default 全 none / minimal 全 none / standard 全 none / 新增 group_scheduler 仅 schedule=write 且 tool_access 含 messaging+memory+task）；normalize 自动给旧持久化数据补默认；resolvePermissions 合并 session.cli_access；旧 friendPermissionConfig 缺 cli_access 时由 normalizeFriendPermissionConfig 兜底全 'none'。
@@ -690,7 +751,7 @@ plan：`crabot-docs/superpowers/plans/2026-05-08-messaging-list-tools-alignment.
 ## 当前进行中：Agent Engine V2
 
 **目标**：自研执行引擎，支持多 LLM 格式，内置工具，MCP 工具服务器  
-**计划文档**：`crabot-agent/docs/plans/2026-04-03-engine-v2.md`  
+**后续设计文档**：`crabot-docs/superpowers/specs/2026-05-15-agent-unified-loop-redesign-design.md`
 **分支**：`feat/engine-v2`
 
 ### Phase 1 — 引擎核心 ✅ (2026-04-03)

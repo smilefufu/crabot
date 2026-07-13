@@ -26,10 +26,9 @@ export interface DispatchTraceCallback {
 
 /** Dispatcher 输出的单个动作。LLM 通过 structured output 约束格式。 */
 export type DispatchAction =
-  | { readonly kind: 'supplement'; readonly target_task_id: string; readonly text: string }
+  | { readonly kind: 'supplement'; readonly target_task_id: string }
   | {
       readonly kind: 'new_task'
-      readonly text: string
       /**
        * 可选预回复：dispatcher 判断任务复杂时给出。executor 在 spawnAgentInstance
        * 之前 await 一次 channel.send_message 发出去，再把 ack 元数据透给 spawn 闭包，
@@ -97,9 +96,9 @@ export type TerminalSupplementResult =
 /** 动作执行器的运行时上下文（注入 unified-agent 提供的回调）。 */
 export interface ExecuteContext {
   readonly dispatchCtx: DispatchContext
-  /** supplement 投递回调：把 text push 到目标 task 的 humanQueue。
+  /** supplement 投递回调：把当前 trigger messages push 到目标 task 的 humanQueue。
    *  返回值：'delivered' = 投递成功；'fallback' = task not found（agent 进程内 activeTasks 没有）。 */
-  readonly pushSupplement: (taskId: string, text: string) => Promise<'delivered' | 'fallback'>
+  readonly pushSupplement: (taskId: string) => Promise<'delivered' | 'fallback'>
   /** recent_terminal supplement 恢复回调：尝试复活已终止任务；不可用或失败时 executor 降级为 new_task。 */
   readonly reviveTerminalSupplement?: (taskId: string, text: string) => Promise<TerminalSupplementResult>
   /** new_task spawn 回调：启动一个 agent 实例。
@@ -109,7 +108,7 @@ export interface ExecuteContext {
    *  这条 outbound 拼进 worker 的 recent_messages。
    *  返回值 spawnedTraceId 用于 cross-trace link。 */
   readonly spawnAgentInstance: (
-    text: string,
+    text?: string,
     spawnOptions?: { readonly immediateReply?: ImmediateReplySentInfo },
   ) => Promise<{ readonly spawnedTraceId: string }>
   /** channel send 回调：dispatcher 失败兜底走这条向人类报错。 */

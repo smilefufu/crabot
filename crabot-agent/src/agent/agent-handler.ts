@@ -25,7 +25,7 @@ import type { BgEntityOwner, BgEntityRecord, BgEntityStatus, BgEntityType, BgShe
 import type { BashBgContext } from '../engine/tools/index.js'
 import type { BgToolDeps } from '../engine/tools/index.js'
 import type { TaskContext } from '../mcp/crab-messaging.js'
-import { createOutboundFlush, type PathMapping, type OutboundDispatchDeps, type OutboundBufferEntry, type OutboundSendResult } from './outbound-flush.js'
+import { createOutboundFlush, dispatchOutboundMessage, type PathMapping, type OutboundDispatchDeps, type OutboundBufferEntry, type OutboundSendResult } from './outbound-flush.js'
 import type { BgEntityTraceContext } from '../engine/bg-entities/trace.js'
 import type {
   ToolDefinition,
@@ -76,6 +76,7 @@ import type { SubAgentTraceConfig } from '../engine/sub-agent.js'
 import { createDelegateTaskTool } from './delegate-task-tool.js'
 import type { RunSubAgentFn, RunSubAgentInput } from './delegate-task-tool.js'
 import { createSubagentCoordinatorTools } from './subagent-coordinator-tools.js'
+import { createTmpPageTools } from './tmp-page-tools.js'
 import { createRequestRestartTool } from './restart-instance-tool.js'
 import { buildSubAgentFailureOutput } from './subagent-error-classifier.js'
 import { filterToolsForSubAgent } from './subagent-tool-filter.js'
@@ -96,7 +97,7 @@ import { resolveSenderIdentity } from '../utils/sender-identity.js'
 import { prefetchQuotedMessages } from './quoted-message-prefetcher.js'
 import { formatNow, formatChannelMessageTime, resolveTimezone, formatRuntimeMs } from '../utils/time.js'
 import { renderActiveTasksSection } from './active-tasks-section.js'
-import { getAgentDataDir, getAdminDataDir, getAdminInternalTokenPath, getWorkspaceDir, getBgEntitiesLogsDir } from '../core/data-paths.js'
+import { getAgentDataDir, getDataRootDir, getAdminDataDir, getAdminInternalTokenPath, getWorkspaceDir, getBgEntitiesLogsDir } from '../core/data-paths.js'
 import { llmUsageToTrace } from '../core/trace-usage.js'
 import { TodoStore } from './worker-todo-store.js'
 import { createTodoTool } from './worker-todo-tool.js'
@@ -111,6 +112,7 @@ import {
   type ConversationEntry,
   type GoalAuditTaskGoal,
   type GoalStatus,
+  type ParsedAuditReport,
 } from './goal-audit.js'
 import { createSubmitAuditResultTool } from './goal-auditor-tools.js'
 import { createWaitForSignalTool, type WaitForSignalDeps } from '../mcp/wait-for-signal.js'
@@ -474,13 +476,6 @@ export interface ExecuteTriggerMessageParams {
   /** Channel / session 标识 */
   readonly channelId: string
   readonly sessionId: string
-  /**
-   * Dispatch LLM 生成的任务摘要（dispatchAction.text）。
-   * 用作 task title / description；缺省时回退到 triggerSummary（原始消息切片）。
-   * 仅影响 task 元数据展示（Admin UI / Dispatcher supplement 决策清单 / Worker prompt 任务信息段），
-   * worker 拿到的 trigger_messages 仍是原始保真消息。
-   */
-  readonly dispatchActionText?: string
   /**
    * 完整的 Front Agent context（由 unified-agent 在调用 executeTriggerMessage 前装配）。
    * 包含 recent_messages / time_windows / active_tasks / sender_friend / scene_profile / crab_display_name 等，
@@ -1114,6 +1109,7 @@ export class AgentHandler {
       // 任务触发类型：scheduled 任务始终抑制 forced_summary
       const workerTriggerType: 'scheduled' | 'message' =
         task.source?.trigger_type === 'scheduled' ? 'scheduled' : 'message'
+      let assistantTextEndTurnReminderSent = false
       if (goalModeEnabled && this.deps?.getAdminPort && this.deps.rpcClient) {
         try {
           const adminPort = await this.deps.getAdminPort()
@@ -1238,11 +1234,7 @@ export class AgentHandler {
           // PR-1 effect：置 everSentMessage=true（永不清零）。
           // PR-2 effect：追加 task.messages（role='agent'）—— spec 2026-06-09 §4.2 invariant #3 叠加。
           onDispatched: (entry, sendResult) => {
-            taskState.everSentMessage = true
-            if (entry.intent === 'info') {
-              taskState.lastDeliveredInfoEpoch = entry.human_input_epoch ?? taskState.humanInputEpoch
-            }
-            this.appendAgentMessageBestEffort(taskState.taskId, entry, sendResult)
+            this.markOutboundDelivered(taskState, entry, sendResult)
           },
           // 进 buffer ≠ 送达：audit fail 会整体丢弃 buffer。endTurnGate 用此标志
           // 把"交付被拦"与"从未交付"区分开（spec 2026-06-10 §3.5）。
@@ -1265,6 +1257,12 @@ export class AgentHandler {
           const externalTools = this.mcpConnector.getAllTools()
           tools.push(...externalTools)
         }
+
+        tools.push(...createTmpPageTools({
+          dataDir: getDataRootDir(),
+          getTmpPageBaseUrl: () => this.tmpPageBaseUrl,
+          taskId: task.task_id,
+        }))
 
         // task-scoped cwd（getCwd/setCwd 声明在 buildToolsDynamic 外，跨 turn 持久——见上）。
         // 子 subagent 通过 parentTools 继承 main 的工具列表（其工具内部 closure 在 getCwd 上），
@@ -1566,7 +1564,7 @@ export class AgentHandler {
             intervalMs: intervalSec * 1000,
             isMasterPrivate,
             // trace span：让 admin UI 上能看到 digest 在哪个时刻被触发以及由谁触发
-            // （定时 / 超期 / ask_human）。span 命名沿用 `__system_*__` 内部 span 风格。
+            // （定时 / 超期）。span 命名沿用 `__system_*__` 内部 span 风格。
             ...(traceCallback ? {
               onTraceStart: (reason) =>
                 traceCallback.onToolCallStart('__system_progress_digest__', `reason=${reason}`),
@@ -1668,6 +1666,86 @@ export class AgentHandler {
           // 注意：这只适用于明确 stopReason='end_turn' 的收口；stopReason=null 是 adapter/stream
           // 终态缺失，query-loop 会按失败处理，不能借此完成 task。
           suppressForcedSummary: () => workerTriggerType === 'scheduled' || sentInfoMessage,
+          assistantTextEndTurnHandler: async ({ assistantText }) => {
+            const currentEpochDelivered = taskState.lastDeliveredInfoEpoch === taskState.humanInputEpoch
+
+            if (workerTriggerType === 'scheduled' || taskState.activeAuditId !== undefined || taskState.outboundBuffer.length > 0) {
+              return { kind: 'complete' as const }
+            }
+
+            if (currentEpochDelivered) {
+              if (assistantTextEndTurnReminderSent) {
+                return { kind: 'complete' as const }
+              }
+              assistantTextEndTurnReminderSent = true
+              return {
+                kind: 'inject' as const,
+                text: '你刚才使用 assistant text + end_turn 结束了 loop。请注意：assistant text 内容不会送达人类。\n'
+                  + '如果你想给人类发消息，请使用 send_message 工具发送；发送完成后直接 end_turn，不要再输出 assistant text。',
+              }
+            }
+
+            const taskOrigin = context.task_origin
+            if (!taskOrigin || !this.deps?.rpcClient || !this.deps.resolveChannelPort || !this.deps.getAdminPort) {
+              return { kind: 'complete' as const }
+            }
+
+            const entry: OutboundBufferEntry = {
+              channel_id: taskOrigin.channel_id,
+              session_id: taskOrigin.session_id,
+              content: assistantText,
+              intent: 'info',
+              human_input_epoch: taskState.humanInputEpoch,
+              sent_at_attempt_ms: Date.now(),
+            }
+            const dispatchDeps: OutboundDispatchDeps = {
+              rpcClient: this.deps.rpcClient,
+              moduleId: this.deps.moduleId,
+              resolveChannelPort: this.deps.resolveChannelPort,
+              getAdminPort: this.deps.getAdminPort,
+              ...(this.deps.sandboxPathMappingsRef
+                ? { sandboxPathMappingsRef: this.deps.sandboxPathMappingsRef }
+                : {}),
+              onDispatched: (deliveredEntry, sendResult) => {
+                this.markOutboundDelivered(taskState, deliveredEntry, sendResult)
+              },
+            }
+
+            const startedAtMs = Date.now()
+            const spanId = traceCallback?.onToolCallStart(
+              '__assistant_text_autodelivery_fallback__',
+              assistantText.slice(0, 200),
+              startedAtMs,
+            )
+            try {
+              const sendResult = await dispatchOutboundMessage(entry, dispatchDeps)
+              if (spanId) {
+                traceCallback?.onToolCallEnd(
+                  spanId,
+                  `channel=${entry.channel_id} session=${entry.session_id} platform_message_id=${sendResult.platform_message_id}`,
+                  undefined,
+                  Date.now(),
+                )
+              }
+            } catch (err) {
+              const errorMessage = err instanceof Error ? err.message : String(err)
+              if (spanId) {
+                traceCallback?.onToolCallEnd(
+                  spanId,
+                  errorMessage,
+                  errorMessage,
+                  Date.now(),
+                )
+              }
+              return {
+                kind: 'inject' as const,
+                text: '[系统] 你刚才用 assistant text + end_turn 写出的最终消息没有成功发给用户，用户没有收到。\n'
+                  + `发送失败原因：${errorMessage}\n`
+                  + '请修正问题后重新用 send_message 发送。',
+              }
+            }
+            return { kind: 'complete' as const }
+          },
           // Goal mode 缓冲消息 flush 钩子：engine 在 stop_reason='tool_use' 续 turn 之前
           // 和 endTurnGate 返回 null 后调用。把 taskState.outboundBuffer 里截留的 info
           // 消息真正发到 channel 并清空 buffer。失败 entry 不阻塞后续 entry（continue on error）。
@@ -1694,11 +1772,7 @@ export class AgentHandler {
               // PR-1 effect：everSentMessage=true。
               // PR-2 effect：append task.messages（role='agent'）— spec 2026-06-09 §4.2 invariant #3。
               onDispatched: (entry, sendResult) => {
-                taskState.everSentMessage = true
-                if (entry.intent === 'info') {
-                  taskState.lastDeliveredInfoEpoch = entry.human_input_epoch ?? taskState.humanInputEpoch
-                }
-                this.appendAgentMessageBestEffort(taskState.taskId, entry, sendResult)
+                this.markOutboundDelivered(taskState, entry, sendResult)
               },
             }
             return createOutboundFlush(taskState.outboundBuffer, dispatchDeps)
@@ -2099,26 +2173,21 @@ export class AgentHandler {
     task: ExecuteTaskParams['task']
     context: WorkerAgentContext
     /**
-     * Task 的标题 / 触发摘要。优先用 dispatch LLM 生成的 actionText（清晰任务化），
-     * 缺省回退到 messages 最后一条切 100 字。同时作为 task_title /
-     * activeTasks.title / task trace.trigger.summary 使用。
+     * Task 的标题 / 触发摘要。仅从当前 trigger 批次生成，避免 dispatcher 生成文本污染
+     * task_title / activeTasks.title / task trace.trigger.summary。
      */
     taskTitle: string
   }> {
     const { messages, isGroup, senderFriend, memoryPermissions, resolvedPermissions,
-      channelId, sessionId, frontContext, dispatchActionText } = params
+      channelId, sessionId, frontContext } = params
 
-    // Fallback 路径：dispatchActionText 缺省时从原始消息切片。
+    // 从原始消息切片生成标题。
     // messages 就是当前 trigger 批次（spec 2026-06-04 §3：单段时间线后，messages
     // 不再 prepend baseHistory）；取最后一条作为 trigger 摘要 = 触发批次的尾部。
     const lastMsg = messages[messages.length - 1]
     const lastMsgText = lastMsg?.content.type === 'text' ? (lastMsg.content.text ?? '') : '[非文本]'
     const triggerSummary = lastMsgText.slice(0, 100)
-    // 优先用 Dispatch LLM 生成的任务摘要（清晰、抽象到任务层面），缺省时才回退到原始消息切片。
-    // Spec: title 不只是 UI 展示——dispatcher 做 supplement 决策时活跃任务清单里展示的就是它。
-    const taskTitle = (dispatchActionText && dispatchActionText.trim().length > 0)
-      ? dispatchActionText.slice(0, 200)
-      : triggerSummary
+    const taskTitle = triggerSummary
     const syntheticTaskId = `trigger-${randomUUID()}` as TaskId
 
     let registered = false
@@ -2610,8 +2679,9 @@ export class AgentHandler {
   }
 
   /**
-   * 把 outcome_brief / process_highlights 同时落到 admin（update_task_outcome）和短期/长期记忆。
-   * RPC 失败 best-effort（log + 继续）；memory write 在 finalizeMemoryWrite 里也是 fire-and-forget。
+   * 把 outcome_brief / process_highlights 落到 admin（update_task_outcome）。
+   * 只有 completed 任务写短期/长期记忆；failed/max_turns/aborted 只保留在 task result / trace，
+   * 避免把临时错误或阻塞叙述污染后续跨 task 上下文。
    */
   private async writeOutcome(
     taskId: TaskId,
@@ -2626,7 +2696,9 @@ export class AgentHandler {
       outcome_brief: outcomeBrief,
       process_highlights: processHighlights,
     }, 'update_task_outcome')
-    this.finalizeMemoryWrite(taskId, { outcome, outcome_brief: outcomeBrief, process_highlights: processHighlights }, context)
+    if (outcome === 'completed') {
+      this.finalizeMemoryWrite(taskId, { outcome, outcome_brief: outcomeBrief, process_highlights: processHighlights }, context)
+    }
   }
 
   /** finalize 阶段调 admin RPC 的 best-effort 包装：失败只 log 不抛，让后续步骤继续跑。 */
@@ -2711,15 +2783,13 @@ export class AgentHandler {
   }
 
   /**
-   * 任务结束（成功 / 失败）后写短期记忆 + 长期记忆候选。
-   * - completed：reflection 来自 reflectFn 的真实总结
-   * - failed：reflection 来自 engine.error 截断兜底
+   * 任务成功完成后写短期记忆 + 长期记忆候选。
    * 两个写入均 fire-and-forget：失败只打日志，不影响 task 状态。
    */
   private finalizeMemoryWrite(
     taskId: TaskId,
     reflection: {
-      outcome: 'completed' | 'failed'
+      outcome: 'completed'
       outcome_brief: string
       process_highlights: readonly string[]
     },
@@ -2736,8 +2806,6 @@ export class AgentHandler {
     const scopes = context.memory_permissions?.write_scopes ?? []
 
     const taskTitle = this.activeTasks.get(taskId)?.title ?? taskId
-    const outcomeLabel = reflection.outcome === 'completed' ? '完成' : '失败'
-
     this.memoryWriter.writeTaskFinished({
       task_id: taskId,
       task_title: taskTitle,
@@ -2757,13 +2825,13 @@ export class AgentHandler {
     this.memoryWriter.quickCapture({
       type: 'lesson',
       brief: `${taskTitle} → ${reflection.outcome_brief}`.slice(0, 80),
-      content: `任务 ${taskId}（${taskTitle}）${outcomeLabel}：${reflection.outcome_brief}`,
+      content: `任务 ${taskId}（${taskTitle}）完成：${reflection.outcome_brief}`,
       source_ref: { type: 'conversation', task_id: taskId, channel_id: channelId, session_id: sessionId },
       entities: [],
       tags: [`task_outcome:${reflection.outcome}`],
       importance_factors: {
         proximity: 0.6,
-        surprisal: reflection.outcome === 'failed' ? 0.8 : 0.4,
+        surprisal: 0.4,
         entity_priority: 0.5,
         unambiguity: 0.6,
       },
@@ -2787,6 +2855,18 @@ export class AgentHandler {
       return { task_id: taskId, outcome: 'failed', error: result.error ?? 'unknown' }
     }
     return { task_id: taskId, outcome: 'completed' }
+  }
+
+  private markOutboundDelivered(
+    taskState: WorkerTaskState,
+    entry: OutboundBufferEntry,
+    sendResult: OutboundSendResult,
+  ): void {
+    taskState.everSentMessage = true
+    if (entry.intent === 'info') {
+      taskState.lastDeliveredInfoEpoch = entry.human_input_epoch ?? taskState.humanInputEpoch
+    }
+    this.appendAgentMessageBestEffort(taskState.taskId, entry, sendResult)
   }
 
   /**
@@ -3577,9 +3657,72 @@ export class AgentHandler {
             ? { traceContext: { traceStore: opts.traceConfig.traceStore, traceId: opts.traceConfig.parentTraceId } }
             : {}),
           humanQueue: opts.humanQueue,
+          onAuditResult: ({ auditId, parsed, verdictSummary }) => {
+            void handler.persistAsyncAuditResult({
+              taskId: opts.taskId,
+              auditId,
+              parsed,
+              verdictSummary,
+              ...(opts.traceConfig ? { traceStore: opts.traceConfig.traceStore } : {}),
+            })
+          },
         }
       },
     })
+  }
+
+  private async persistAsyncAuditResult(params: {
+    readonly taskId: string
+    readonly auditId: string
+    readonly parsed: ParsedAuditReport
+    readonly verdictSummary: { readonly summary: string; readonly error?: string }
+    readonly traceStore?: SubAgentTraceConfig['traceStore']
+  }): Promise<void> {
+    if (!this.deps?.getAdminPort || !this.deps.rpcClient) {
+      console.error('[goal-audit] persistAsyncAuditResult skipped: getAdminPort/rpcClient deps 缺失')
+      return
+    }
+
+    try {
+      const adminPort = await this.deps.getAdminPort()
+      await this.deps.rpcClient.call<unknown, { task?: { goal?: { status?: GoalStatus } } }>(
+        adminPort,
+        'append_task_goal_audit_entry',
+        {
+          task_id: params.taskId,
+          entry: {
+            at: new Date().toISOString(),
+            pass: params.parsed.pass,
+            failed_criteria: [...params.parsed.failedCriteria],
+            audit_trace_id: params.auditId,
+          },
+        },
+        this.deps.moduleId,
+      )
+
+      if (params.parsed.pass) {
+        await this.deps.rpcClient.call<unknown, unknown>(
+          adminPort,
+          'complete_task_goal',
+          { task_id: params.taskId },
+          this.deps.moduleId,
+        )
+      }
+    } catch (err) {
+      console.error(
+        `[goal-audit] persistAsyncAuditResult failed for ${params.taskId}/${params.auditId}:`,
+        err instanceof Error ? err.message : String(err),
+      )
+    }
+
+    try {
+      params.traceStore?.appendTraceOutcome(params.auditId, params.verdictSummary)
+    } catch (err) {
+      console.error(
+        `[goal-audit] append audit trace outcome failed for ${params.auditId}:`,
+        err instanceof Error ? err.message : String(err),
+      )
+    }
   }
 
   /**

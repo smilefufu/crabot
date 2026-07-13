@@ -89,7 +89,13 @@ const TIMEOUT_NEEDLES = ['etimedout', 'timed out', 'timeout', 'aborted', 'reques
 
 const NETWORK_NEEDLES = ['econnreset', 'econnrefused', 'enotfound', 'enetunreach', 'socket hang up', 'getaddrinfo']
 
-const MODEL_ERROR_NEEDLES = ['overloaded_error', 'overloaded', 'internal server error', 'service unavailable']
+const MODEL_ERROR_NEEDLES = [
+  'overloaded_error',
+  'overloaded',
+  'internal server error',
+  'service unavailable',
+  'temporarily unavailable',
+]
 
 export function classifySubAgentError(err: unknown): SubAgentErrorClassification {
   const text = `${getMessage(err)} ${getBodyText(err)}`
@@ -130,7 +136,11 @@ export function classifySubAgentError(err: unknown): SubAgentErrorClassification
   }
 
   // model_error: 5xx
-  if ((status !== undefined && status >= 500 && status < 600) || hasAny(text, MODEL_ERROR_NEEDLES)) {
+  if (
+    (status !== undefined && status >= 500 && status < 600) ||
+    /\bhttp\s+50[23]\b/i.test(text) ||
+    hasAny(text, MODEL_ERROR_NEEDLES)
+  ) {
     return {
       kind: 'model_error',
       retryable: true,
@@ -260,4 +270,3 @@ export function buildSubAgentFailureOutput(ctx: SubAgentFailureContext): SubAgen
   }
   return out as unknown as SubAgentFailureOutput
 }
-

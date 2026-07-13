@@ -469,6 +469,39 @@ describe('ContextManager', () => {
       expect(compacted[0]).toBe(messages[0]) // 首条 user message 钉住
     })
 
+    it('should use the default task-continuity compaction prompts', async () => {
+      const cm = new ContextManager({
+        maxContextTokens: 10000,
+        keepRecentMessages: 2,
+      })
+
+      const messages: EngineMessage[] = [
+        createUserMessage('用户后来纠正：旧指标作废，必须逐笔核对。'),
+        createAssistantMessage([{ type: 'text', text: '收到，我会重新核对。' }], 'end_turn'),
+        createUserMessage('继续'),
+        createAssistantMessage([
+          { type: 'tool_use', id: 'tu_1', name: 'run_audit', input: { strict: true } },
+        ], 'tool_use'),
+        createToolResultMessage('tu_1', '审计完成', false),
+        createUserMessage('继续下一步'),
+        createAssistantMessage([{ type: 'text', text: '继续处理。' }], 'end_turn'),
+      ]
+
+      const { adapter, captured } = capturingAdapter('摘要')
+      await cm.compactWithLLM(messages, adapter, 'test-model')
+
+      expect(captured.systemPrompt).toContain('[任务连续性状态]')
+      expect(captured.systemPrompt).toContain('已作废或被替换的信息')
+      expect(captured.systemPrompt).toContain('不要把旧结论和新纠偏混在一起')
+      expect(captured.systemPrompt).toContain('不要把它当作系统 goal 状态')
+
+      const promptContent = (captured.messages[0] as { content: string | ContentBlock[] }).content
+      expect(typeof promptContent).toBe('string')
+      expect(promptContent as string).toContain('以下是需要压缩的历史上下文')
+      expect(promptContent as string).toContain('使用过的工具: run_audit')
+      expect(promptContent as string).not.toContain('Summarize the following conversation')
+    })
+
     it('should pin first user message (task_origin) across LLM compaction', async () => {
       // 回归：压缩丢首条 user message 的 channel_id 导致 worker 回复发错 channel。
       // 不变量：首条 user message 不进摘要 LLM 输入、原对象引用保留。

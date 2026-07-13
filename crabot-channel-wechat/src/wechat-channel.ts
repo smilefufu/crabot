@@ -323,7 +323,7 @@ export class WechatChannel extends ModuleBase {
         is_mention_crab: isMentionCrab,
         ...extraFeatures,
       },
-      platform_timestamp: generateTimestamp(),
+      platform_timestamp: connectorTimeToISO(event.message.createTime),
     }
 
     // 发布 channel.message_received 事件
@@ -795,10 +795,12 @@ function connectorMsgToProtocolItem(m: Record<string, unknown>, talker: string) 
   }
 }
 
-/** wechat-connector 毫秒时间戳字符串 → ISO 8601 */
+/** wechat-connector 秒/毫秒时间戳字符串 → ISO 8601 */
 function connectorTimeToISO(ts: string): string {
-  const ms = parseInt(ts, 10)
-  return isNaN(ms) ? new Date().toISOString() : new Date(ms).toISOString()
+  const value = Number(ts)
+  if (!Number.isFinite(value)) return new Date().toISOString()
+  const ms = value < 1e12 ? value * 1000 : value
+  return new Date(ms).toISOString()
 }
 
 function throwError(code: string, message: string): never {
@@ -806,4 +808,3 @@ function throwError(code: string, message: string): never {
   err.code = code
   throw err
 }
-

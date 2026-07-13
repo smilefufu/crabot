@@ -172,6 +172,83 @@ def test_list_entries_sort_ingestion_time_desc(tmp_path):
     assert [r["id"] for r in rows_asc] == ["mem-l-old", "mem-l-new"]
 
 
+def test_list_entries_filters_by_ingestion_time_window(tmp_path):
+    idx = SqliteIndex(str(tmp_path / "idx.db"))
+    idx.upsert(
+        _make_typed_entry("mem-l-before", ingestion_time="2026-04-23T09:59:59Z"),
+        path="/tmp/before.md", status="inbox",
+    )
+    idx.upsert(
+        _make_typed_entry("mem-l-in-window", ingestion_time="2026-04-23T10:30:00Z"),
+        path="/tmp/in-window.md", status="inbox",
+    )
+    idx.upsert(
+        _make_typed_entry("mem-l-after", ingestion_time="2026-04-23T11:00:00Z"),
+        path="/tmp/after.md", status="inbox",
+    )
+
+    rows = idx.list_entries(
+        status="inbox",
+        ingestion_time_start="2026-04-23T10:00:00Z",
+        ingestion_time_end="2026-04-23T11:00:00Z",
+    )
+
+    assert [r["id"] for r in rows] == ["mem-l-in-window"]
+
+
+def test_list_entries_filters_mixed_precision_ingestion_window(tmp_path):
+    idx = SqliteIndex(str(tmp_path / "idx.db"))
+    idx.upsert(
+        _make_typed_entry("mem-l-before-start-seconds", ingestion_time="2026-04-23T10:00:00Z"),
+        path="/tmp/before-start-seconds.md", status="inbox",
+    )
+    idx.upsert(
+        _make_typed_entry("mem-l-after-start-micros", ingestion_time="2026-04-23T10:00:00.500001Z"),
+        path="/tmp/after-start-micros.md", status="inbox",
+    )
+    idx.upsert(
+        _make_typed_entry("mem-l-before-end-micros", ingestion_time="2026-04-23T10:00:00.122999Z"),
+        path="/tmp/before-end-micros.md", status="inbox",
+    )
+    idx.upsert(
+        _make_typed_entry("mem-l-after-end-micros", ingestion_time="2026-04-23T10:00:00.123456Z"),
+        path="/tmp/after-end-micros.md", status="inbox",
+    )
+
+    rows_after_millis_start = idx.list_entries(
+        status="inbox",
+        ingestion_time_start="2026-04-23T10:00:00.500Z",
+        ingestion_time_end="2026-04-23T10:00:01Z",
+        sort="ingestion_time_asc",
+    )
+    assert [r["id"] for r in rows_after_millis_start] == ["mem-l-after-start-micros"]
+
+    rows_before_millis_end = idx.list_entries(
+        status="inbox",
+        ingestion_time_start="2026-04-23T10:00:00Z",
+        ingestion_time_end="2026-04-23T10:00:00.123Z",
+        sort="ingestion_time_asc",
+    )
+    assert [r["id"] for r in rows_before_millis_end] == ["mem-l-before-start-seconds", "mem-l-before-end-micros"]
+
+
+def test_list_entries_same_ingestion_time_orders_by_id(tmp_path):
+    """同 ingestion_time 条目按 id 次级排序，保证 offset 分页跨页顺序稳定。"""
+    idx = SqliteIndex(str(tmp_path / "idx.db"))
+    # 故意按 id 逆序插入，暴露"无 tiebreaker 时按 rowid 返回"的不稳定顺序
+    for mem_id in ["mem-l-c", "mem-l-b", "mem-l-a"]:
+        idx.upsert(
+            _make_typed_entry(mem_id, ingestion_time="2026-04-23T10:00:00Z"),
+            path=f"/tmp/{mem_id}.md", status="inbox",
+        )
+
+    rows_desc = idx.list_entries(sort="ingestion_time_desc")
+    assert [r["id"] for r in rows_desc] == ["mem-l-a", "mem-l-b", "mem-l-c"]
+
+    rows_asc = idx.list_entries(sort="ingestion_time_asc")
+    assert [r["id"] for r in rows_asc] == ["mem-l-a", "mem-l-b", "mem-l-c"]
+
+
 def test_extend_observation_window_adds_days(tmp_path):
     from src.long_term_v2.sqlite_index import SqliteIndex
     from src.long_term_v2.schema import (

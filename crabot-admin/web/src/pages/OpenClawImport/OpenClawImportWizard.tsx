@@ -36,6 +36,7 @@ const SKIP_REASON_LABEL: Record<string, string> = {
   conflict: 'crabot 已存在同名，已跳过',
   'not-migratable': '不可迁移',
   'missing-secret': '密钥不在备份中',
+  'invalid-name': '实例名不合法（含大写/点号等）',
 }
 
 // ── Crabot 类别标签 ────────────────────────────────────────
@@ -589,7 +590,11 @@ const ConfigStep: React.FC<{
                 </span>
               )}
             </span>
-            {!c.migratable && <span className="oci-tag oci-tag--muted">无对应模块</span>}
+            {!c.migratable && (
+              <span className="oci-tag oci-tag--muted">
+                {c.skip_reason === 'invalid-name' ? '实例名不合法' : '无对应模块'}
+              </span>
+            )}
             {c.migratable && c.credentials === 'unavailable' && (
               <span className="oci-tag">密钥不在备份，需手填</span>
             )}

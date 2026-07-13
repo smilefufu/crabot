@@ -1,0 +1,26 @@
+{
+  "name": "crabot-channel-dingtalk",
+  "version": "0.1.0",
+  "description": "Crabot Channel module for DingTalk (钉钉) via Stream mode long connection",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "keywords": ["crabot", "channel", "dingtalk"],
+  "author": "Crabot Team",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "crabot-shared": "file:../crabot-shared",
+    "dingtalk-stream-sdk-nodejs": "^2.0.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.37",
+    "@vitest/coverage-v8": "^1.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^1.0.0"
+  }
+}

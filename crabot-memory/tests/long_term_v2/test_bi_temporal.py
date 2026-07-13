@@ -64,6 +64,22 @@ def test_find_by_time_range_ingestion_time(idx):
     assert out == ["b"]
 
 
+def test_find_by_time_range_handles_mixed_iso_precision(idx):
+    idx.upsert(_make_entry("before", "2026-04-23T10:00:00Z", "2026-04-23T10:00:00Z"),
+               path="/x/before.md", status="confirmed")
+    idx.upsert(_make_entry("inside", "2026-04-23T10:00:00.500001Z", "2026-04-23T10:00:00.500001Z"),
+               path="/x/inside.md", status="confirmed")
+
+    out = idx.find_by_time_range(
+        field="event_time",
+        start="2026-04-23T10:00:00.500Z",
+        end="2026-04-23T10:00:01Z",
+        limit=10,
+    )
+
+    assert out == ["inside"]
+
+
 def test_find_by_time_range_limit(idx):
     for i in range(5):
         idx.upsert(

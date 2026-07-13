@@ -395,7 +395,7 @@ export interface TaskSummary {
    * `scheduled` 表示由调度引擎创建的定时/巡检任务，Front 在 prompt 中需要标记，
    * 且不允许 supplement_task；engine 收到针对 scheduled 的 supplement 时改走 create_task。
    */
-  trigger_type?: 'manual' | 'scheduled' | 'auto' | 'event'
+  trigger_type?: 'manual' | 'scheduled' | 'auto' | 'event' | 'message'
   updated_at?: string
   created_at?: string
   /**
@@ -758,9 +758,9 @@ export interface ExecuteTaskParams {
     plan?: string
     task_type?: string
     /** 任务来源信息。Schedule 路径由 ScheduledTaskRunner 填入 trigger_type='scheduled'；
-     *  trigger 路径合成 task 不填此字段（视为 'message'）。 */
+     *  trigger 路径合成 task 可能显式填入 trigger_type='message'；旧调用不填时也视为 'message'。 */
     source?: {
-      trigger_type?: 'manual' | 'scheduled' | 'auto' | 'event'
+      trigger_type?: 'manual' | 'scheduled' | 'auto' | 'event' | 'message'
     }
   }
   context: WorkerAgentContext
@@ -896,8 +896,8 @@ export interface WorkerTaskState {
    */
   everBufferedMessage: boolean
   /**
-   * endTurnGate "buffer 空 + has goal + !everSentMessage" 路径已塞 GOAL_MODE_NO_DELIVERY_PROMPT 次数。
-   * 累计 3 次仍 silent end_turn → 第 4 次切换强制派 audit subagent 路径（even with empty buffer）。
+   * endTurnGate "buffer 空 + has goal + 当前 humanInputEpoch 未送达" 路径已塞提醒次数。
+   * 累计 3 次仍 silent end_turn → 第 4 次直接 failed，不再派空 buffer audit。
    * spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.13.3 / §4.13.4
    */
   silentNoDeliveryRetries: number
@@ -1115,8 +1115,6 @@ export interface DispatchActionDetails {
   kind: 'supplement' | 'new_task' | 'stay_silent'
   /** supplement 专用：目标 task id */
   target_task_id?: string
-  /** supplement / new_task 专用：文本摘要（截断 200 字符） */
-  text_summary?: string
   /** stay_silent 专用：原因（当 action.reason 存在时写入） */
   reason?: string
   /** 完成后追加：动作结果。
@@ -1129,6 +1127,7 @@ export interface DispatchActionDetails {
     | 'supplement_fallback'
     | 'supplement_fallback_recovered'
     | 'supplement_delivered'
+    | 'terminal_task_revived'
     | 'new_task_spawned'
     | 'silent_discard'
   /** new_task 完成后追加：spawn 出的子 trace id；
@@ -1138,6 +1137,10 @@ export interface DispatchActionDetails {
   attempted_target_task_id?: string
   /** supplement_fallback_recovered 专用：降级路径标记。 */
   recovered_via?: 'new_task'
+  /** terminal_task_revived / supplement_fallback_recovered 专用：目标任务在 dispatcher 决策时的状态。 */
+  target_task_status?: string
+  /** terminal_task_revived / supplement_fallback_recovered 专用：目标任务原完成时间，用于 trace epoch 边界。 */
+  target_task_completed_at?: string
   /** 失败时追加：错误信息 */
   error?: string
 }

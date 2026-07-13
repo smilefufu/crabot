@@ -2,6 +2,7 @@ import type { LLMAdapter } from './llm-adapter'
 import { callNonStreaming } from './llm-adapter'
 import type { EngineMessage, EngineMessagesRef, EngineTurnEvent } from './types'
 import { createUserMessage } from './types'
+import { hasDanglingToolUse } from './tool-message-integrity.js'
 
 /**
  * 进度汇报（fork 模式）。
@@ -21,7 +22,7 @@ import { createUserMessage } from './types'
 
 // --- Config & Deps ---
 
-export type DigestReason = 'interval' | 'overdue' | 'ask_human'
+export type DigestReason = 'interval' | 'overdue'
 
 export interface ProgressDigestConfig {
   /** 定时 flush 间隔（毫秒）；不传或 ≤0 表示不启用定时触发 */
@@ -94,25 +95,20 @@ export class ProgressDigest {
   }
 
   /**
-   * 入口做两件事：
-   * 1. 检测 send_message 调用 → 标记 sentMessageSinceStart（影响 overdue 是否触发）
-   * 2. ask_human 立即 flush（用户必须立刻看到问题）
+   * 检测 send_message 调用并标记 sentMessageSinceStart（影响 overdue 是否触发）。
+   * ask_human 本身已通过 send_message 真实发给用户；这里不再额外生成 digest。
    */
   ingest(event: EngineTurnEvent): void {
     if (this.disposed) return
-    let askHuman = false
     for (const tc of event.toolCalls) {
       const bare = tc.name.replace(/^mcp__[^_]+__/, '')
       const isSendMsg = bare === 'send_message' || bare === 'send_private_message'
       if (!isSendMsg || tc.isError) continue
       this.sentMessageSinceStart = true
-      const intent = (tc.input as { intent?: string } | undefined)?.intent
-      if (intent === 'ask_human') askHuman = true
     }
-    if (askHuman) this.flushNow('ask_human')
   }
 
-  flushNow(reason: DigestReason = 'ask_human'): void {
+  flushNow(reason: DigestReason = 'overdue'): void {
     if (this.disposed) return
     this.doFlush(reason).catch(() => {})
   }
@@ -146,8 +142,8 @@ export class ProgressDigest {
   private async doFlush(reason: DigestReason): Promise<void> {
     if (this.flushing) return
     // overdue 触发但 agent 已经 send_message 过 → 跳过：用户已经收到 agent 自己写的
-    // 进度（带工作记忆 + 后续行动），再发一份 fork digest 是冗余。interval / ask_human
-    // 不受此判断影响。
+    // 进度（带工作记忆 + 后续行动），再发一份 fork digest 是冗余。
+    // interval 不受此判断影响（interval 是稳定节奏）。
     if (reason === 'overdue' && this.sentMessageSinceStart) return
     const snapshot = this.deps.messagesRef.current
     if (snapshot.length === 0) return
@@ -171,6 +167,7 @@ export class ProgressDigest {
         this.lastFlushMessagesCount = observedCount
         details = { output_summary: message.slice(0, 200), messages_count: observedCount }
       } else {
+        this.lastFlushMessagesCount = observedCount
         details = { output_summary: '(empty)', messages_count: observedCount }
       }
     } catch (err) {
@@ -219,29 +216,4 @@ export class ProgressDigest {
       .join('')
       .trim()
   }
-}
-
-// --- Helpers ---
-
-/**
- * 末尾是否有"孤立 tool_use"：最后一条 assistant 含 tool_use 块，但后面没有
- * 配对的 tool_result。LLM API 严格要求 function_call 配 output，否则 400。
- */
-function hasDanglingToolUse(messages: ReadonlyArray<EngineMessage>): boolean {
-  // 从尾向前找最后一条 assistant
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]
-    if (m.role !== 'assistant') continue
-    // 找到最后一条 assistant：看它有没有 tool_use 块
-    const hasToolUse = Array.isArray(m.content)
-      && m.content.some((b) => (b as { type?: string }).type === 'tool_use')
-    if (!hasToolUse) return false
-    // 有 tool_use → 检查后面是否有 tool_result（用 toolResults 字段判定 EngineToolResultMessage）
-    for (let j = i + 1; j < messages.length; j++) {
-      const after = messages[j] as { toolResults?: unknown }
-      if (Array.isArray(after.toolResults) && after.toolResults.length > 0) return false
-    }
-    return true
-  }
-  return false
 }

@@ -146,7 +146,7 @@ export function createReadTool(getCwd: () => string, fileReadState?: FileReadSta
           await fileHandle.read(buffer, 0, bytesToRead, 0)
 
           if (containsNullBytes(buffer)) {
-            return { output: 'Binary file, cannot display', isError: true }
+            return { output: 'Binary file, cannot display', isError: false }
           }
 
           const text = buffer.toString('utf-8')

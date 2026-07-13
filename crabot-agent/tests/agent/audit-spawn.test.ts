@@ -76,9 +76,9 @@ function makeAdapter(): LLMAdapter {
 function makeDeps(
   overrides: Partial<SpawnAuditSubagentDeps> = {},
 ): SpawnAuditSubagentDeps & {
-  capturedOnExit: { current?: (info: BgAgentExitInfo) => void }
+  capturedOnExit: { current?: (info: BgAgentExitInfo) => void | Promise<void> }
 } {
-  const capturedOnExit: { current?: (info: BgAgentExitInfo) => void } = {}
+  const capturedOnExit: { current?: (info: BgAgentExitInfo) => void | Promise<void> } = {}
   const humanQueue = overrides.humanQueue ?? new HumanMessageQueue()
   const spawnFn = (overrides.spawnFn ?? vi.fn(async (opts: any) => {
     // 抓 onExit 回调供测试触发
@@ -101,6 +101,7 @@ function makeDeps(
     registry: overrides.registry ?? ({} as any),
     abortControllers: overrides.abortControllers ?? new Map(),
     humanQueue,
+    ...(overrides.onAuditResult ? { onAuditResult: overrides.onAuditResult } : {}),
     ...(overrides.traceContext ? { traceContext: overrides.traceContext } : {}),
     spawnFn,
     capturedOnExit,
@@ -116,6 +117,7 @@ function exitInfo(overrides: Partial<BgAgentExitInfo> = {}): BgAgentExitInfo {
     runtime_ms: 1234,
     spawned_at: new Date().toISOString(),
     result_file: '/tmp/agent.result.txt',
+    trace_id: 'trace-child-default',
     outcome: 'completed',
     finalText: '',
     ...overrides,
@@ -199,7 +201,7 @@ describe('spawnAuditSubagent', () => {
     await spawnAuditSubagent(deps)
     expect(deps.capturedOnExit.current).toBeDefined()
 
-    deps.capturedOnExit.current!(exitInfo({
+    await deps.capturedOnExit.current!(exitInfo({
       exitToolCall: {
         name: 'submit_audit_result',
         input: { pass: true, failed_criteria: [], evidence: 'all green' },
@@ -216,9 +218,70 @@ describe('spawnAuditSubagent', () => {
     expect(parsed.failedCriteria).toEqual([])
   })
 
+  it('onExit with submit_audit_result uses child trace id for persistence and entity id for marker', async () => {
+    const events: string[] = []
+    pushSpy.mockImplementation((...args: Parameters<HumanMessageQueue['push']>) => {
+      events.push('push')
+      return HumanMessageQueue.prototype.push.apply(humanQueue, args)
+    })
+    const onAuditResult = vi.fn(async () => {
+      events.push('persist')
+    })
+    deps = makeDeps({ humanQueue, onAuditResult } as Partial<SpawnAuditSubagentDeps>)
+
+    await spawnAuditSubagent(deps)
+    await deps.capturedOnExit.current!(exitInfo({
+      entity_id: 'agent_entity123',
+      trace_id: 'trace-child-123',
+      exitToolCall: {
+        name: 'submit_audit_result',
+        input: { pass: false, failed_criteria: ['c-1'], evidence: 'still missing' },
+      },
+    }))
+
+    expect(onAuditResult).toHaveBeenCalledOnce()
+    expect(onAuditResult).toHaveBeenCalledWith({
+      auditId: 'trace-child-123',
+      parsed: expect.objectContaining({
+        pass: false,
+        failedCriteria: ['c-1'],
+      }),
+      verdictSummary: expect.objectContaining({
+        summary: expect.stringContaining('[audit FAIL]'),
+        error: expect.any(String),
+      }),
+    })
+    expect(pushSpy).toHaveBeenCalledOnce()
+    const marker = parseSystemMarker(pushSpy.mock.calls[0][0] as string)
+    if (marker?.type !== 'audit_result') throw new Error('marker type mismatch')
+    expect(marker.auditId).toBe('agent_entity123')
+    expect(events).toEqual(['persist', 'push'])
+  })
+
+  it('onExit still pushes marker when onAuditResult throws', async () => {
+    const onAuditResult = vi.fn(() => {
+      throw new Error('persist failed')
+    })
+    deps = makeDeps({ humanQueue, onAuditResult } as Partial<SpawnAuditSubagentDeps>)
+
+    await spawnAuditSubagent(deps)
+    await deps.capturedOnExit.current!(exitInfo({
+      exitToolCall: {
+        name: 'submit_audit_result',
+        input: { pass: true, failed_criteria: [], evidence: 'ok' },
+      },
+    }))
+
+    expect(onAuditResult).toHaveBeenCalledOnce()
+    expect(pushSpy).toHaveBeenCalledOnce()
+    const parsed = parseSystemMarker(pushSpy.mock.calls[0][0] as string)
+    if (parsed?.type !== 'audit_result') throw new Error('marker type mismatch')
+    expect(parsed.pass).toBe(true)
+  })
+
   it('onExit with submit_audit_result(pass=false, failed_criteria) pushes audit_result(fail) marker', async () => {
     await spawnAuditSubagent(deps)
-    deps.capturedOnExit.current!(exitInfo({
+    await deps.capturedOnExit.current!(exitInfo({
       exitToolCall: {
         name: 'submit_audit_result',
         input: {
@@ -242,7 +305,7 @@ describe('spawnAuditSubagent', () => {
   it('onExit when bg-agent failed (no outcome / no exitToolCall) pushes sentinel marker', async () => {
     await spawnAuditSubagent(deps)
     // bg-agent catch 路径：status=failed, 没 outcome/exitToolCall/finalText
-    deps.capturedOnExit.current!({
+    await deps.capturedOnExit.current!({
       entity_id: 'agent_test1234',
       task_description: '[goal_audit] xxx',
       status: 'failed',
@@ -263,7 +326,7 @@ describe('spawnAuditSubagent', () => {
   it('onExit with max_turns outcome pushes sentinel (not Layer 3 regex on partial output)', async () => {
     await spawnAuditSubagent(deps)
     // 中途有 free-text 但被 max_turns 截断 —— 不能误抓那条
-    deps.capturedOnExit.current!(exitInfo({
+    await deps.capturedOnExit.current!(exitInfo({
       outcome: 'max_turns',
       exit_code: 1,
       finalText: 'thinking ... AUDIT_RESULT: pass\nFAILED_CRITERIA: []',
@@ -287,14 +350,12 @@ describe('spawnAuditSubagent', () => {
 
     await spawnAuditSubagent(localDeps)
     // onExit 抛错不应该 propagate
-    expect(() => {
-      localDeps.capturedOnExit.current!(exitInfo({
-        exitToolCall: {
-          name: 'submit_audit_result',
-          input: { pass: true, failed_criteria: [], evidence: '' },
-        },
-      }))
-    }).not.toThrow()
+    await expect(localDeps.capturedOnExit.current!(exitInfo({
+      exitToolCall: {
+        name: 'submit_audit_result',
+        input: { pass: true, failed_criteria: [], evidence: '' },
+      },
+    }))).resolves.toBeUndefined()
 
     expect(errSpy).toHaveBeenCalled()
     errSpy.mockRestore()
@@ -303,7 +364,7 @@ describe('spawnAuditSubagent', () => {
   it('onExit handler sanitizes forbidden literals in evidence so marker constructs', async () => {
     // evidence 里含 </audit_result> 会让 buildAuditResultMarker throw —— sanitizer 应替换掉
     await spawnAuditSubagent(deps)
-    deps.capturedOnExit.current!(exitInfo({
+    await deps.capturedOnExit.current!(exitInfo({
       exitToolCall: {
         name: 'submit_audit_result',
         input: {

@@ -1,6 +1,18 @@
 import { describe, it, expect, vi } from 'vitest'
 import { executeDispatchActions } from '../../src/dispatcher/dispatcher-executor.js'
 import type { ExecuteContext, DispatchAction } from '../../src/dispatcher/dispatcher-types.js'
+import type { ChannelMessage } from '../../src/types.js'
+
+function makeMsg(text: string, id = 'm1'): ChannelMessage {
+  return {
+    platform_message_id: id,
+    session: { session_id: 'sess', channel_id: 'ch', type: 'private' },
+    sender: { platform_user_id: 'u1', platform_display_name: 'U' },
+    content: { type: 'text', text },
+    features: { is_mention_crab: false },
+    platform_timestamp: '2026-06-04T00:00:00Z',
+  }
+}
 
 function makeExecCtx(overrides: Partial<ExecuteContext> = {}): ExecuteContext {
   return {
@@ -20,17 +32,17 @@ describe('executeDispatchActions', () => {
   it('单个 supplement 动作调 pushSupplement', async () => {
     const ctx = makeExecCtx()
     const actions: DispatchAction[] = [
-      { kind: 'supplement', target_task_id: 'task-A', text: '改成红米' },
+      { kind: 'supplement', target_task_id: 'task-A' },
     ]
     await executeDispatchActions(actions, ctx)
-    expect(ctx.pushSupplement).toHaveBeenCalledWith('task-A', '改成红米')
+    expect(ctx.pushSupplement).toHaveBeenCalledWith('task-A')
   })
 
   it('单个 new_task 动作调 spawnAgentInstance', async () => {
     const ctx = makeExecCtx()
-    const actions: DispatchAction[] = [{ kind: 'new_task', text: '查 github' }]
+    const actions: DispatchAction[] = [{ kind: 'new_task' }]
     await executeDispatchActions(actions, ctx)
-    expect(ctx.spawnAgentInstance).toHaveBeenCalledWith('查 github', undefined)
+    expect(ctx.spawnAgentInstance).toHaveBeenCalledWith(undefined, undefined)
   })
 
   it('stay_silent 动作不调任何回调', async () => {
@@ -49,9 +61,9 @@ describe('executeDispatchActions', () => {
       spawnAgentInstance: vi.fn().mockImplementation(async () => { calls.push('spawn'); return { spawnedTraceId: 's' } }),
     })
     const actions: DispatchAction[] = [
-      { kind: 'new_task', text: 'A' },
-      { kind: 'supplement', target_task_id: 'T', text: 'B' },
-      { kind: 'new_task', text: 'C' },
+      { kind: 'new_task' },
+      { kind: 'supplement', target_task_id: 'T' },
+      { kind: 'new_task' },
     ]
     await executeDispatchActions(actions, ctx)
     expect(calls).toEqual(['spawn', 'supp', 'spawn'])
@@ -62,11 +74,11 @@ describe('executeDispatchActions', () => {
       pushSupplement: vi.fn().mockRejectedValue(new Error('boom')),
     })
     const actions: DispatchAction[] = [
-      { kind: 'supplement', target_task_id: 'T', text: 'x' },
-      { kind: 'new_task', text: 'after-failure' },
+      { kind: 'supplement', target_task_id: 'T' },
+      { kind: 'new_task' },
     ]
     await executeDispatchActions(actions, ctx)
-    expect(ctx.spawnAgentInstance).toHaveBeenCalledWith('after-failure', undefined)
+    expect(ctx.spawnAgentInstance).toHaveBeenCalledWith(undefined, undefined)
   })
 
   it('supplement target not found 返回 fallback，不影响后续', async () => {
@@ -74,14 +86,14 @@ describe('executeDispatchActions', () => {
       pushSupplement: vi.fn().mockResolvedValue('fallback'),
     })
     const actions: DispatchAction[] = [
-      { kind: 'supplement', target_task_id: 'gone', text: 'x' },
-      { kind: 'new_task', text: 'follow' },
+      { kind: 'supplement', target_task_id: 'gone' },
+      { kind: 'new_task' },
     ]
     await executeDispatchActions(actions, ctx)
-    // 现在 fallback 会触发降级 → spawnAgentInstance(action.text) + 后续 new_task 各 1 次
+    // 现在 fallback 会触发降级 → spawnAgentInstance(当前原始消息文本) + 后续 new_task 各 1 次
     // supplement fallback 路径不传 spawnOptions（1 参）；new_task 路径无 immediate_reply 时传 undefined 第二参
-    expect(ctx.spawnAgentInstance).toHaveBeenCalledWith('x')
-    expect(ctx.spawnAgentInstance).toHaveBeenCalledWith('follow', undefined)
+    expect(ctx.spawnAgentInstance).toHaveBeenCalledWith('[非文本消息]')
+    expect(ctx.spawnAgentInstance).toHaveBeenCalledWith(undefined, undefined)
     expect(ctx.spawnAgentInstance).toHaveBeenCalledTimes(2)
   })
 
@@ -91,18 +103,19 @@ describe('executeDispatchActions', () => {
   // 旧实现仅 log warn 就丢消息；现改为自动降级 new_task 并写恢复 span。
   // ============================================================================
 
-  it('supplement → fallback 时降级到 spawnAgentInstance，参数是 action.text', async () => {
+  it('supplement → fallback 时降级到 spawnAgentInstance，参数是当前原始消息文本', async () => {
     const spawn = vi.fn().mockResolvedValue({ spawnedTraceId: 'spawn-recovered' })
     const ctx = makeExecCtx({
+      dispatchCtx: { ...makeExecCtx().dispatchCtx, messages: [makeMsg('真实人类输入')] },
       pushSupplement: vi.fn().mockResolvedValue('fallback'),
       spawnAgentInstance: spawn,
     })
     const actions: DispatchAction[] = [
-      { kind: 'supplement', target_task_id: 'gone', text: '请帮我查 X' },
+      { kind: 'supplement', target_task_id: 'gone' },
     ]
     await executeDispatchActions(actions, ctx)
     expect(spawn).toHaveBeenCalledTimes(1)
-    expect(spawn).toHaveBeenCalledWith('请帮我查 X')
+    expect(spawn).toHaveBeenCalledWith('真实人类输入')
   })
 
   it('supplement → delivered 时不调 spawnAgentInstance（不误降级）', async () => {
@@ -112,7 +125,7 @@ describe('executeDispatchActions', () => {
       spawnAgentInstance: spawn,
     })
     const actions: DispatchAction[] = [
-      { kind: 'supplement', target_task_id: 'task-A', text: '改成红米' },
+      { kind: 'supplement', target_task_id: 'task-A' },
     ]
     await executeDispatchActions(actions, ctx)
     expect(spawn).not.toHaveBeenCalled()
@@ -136,9 +149,9 @@ describe('executeDispatchActions', () => {
       pushSupplement,
       reviveTerminalSupplement,
     } as Partial<ExecuteContext>)
-    await executeDispatchActions([{ kind: 'supplement', target_task_id: 'task-done', text: '继续' }], ctx)
+    await executeDispatchActions([{ kind: 'supplement', target_task_id: 'task-done' }], ctx)
     expect(pushSupplement).not.toHaveBeenCalled()
-    expect(reviveTerminalSupplement).toHaveBeenCalledWith('task-done', '继续')
+    expect(reviveTerminalSupplement).toHaveBeenCalledWith('task-done', '[非文本消息]')
   })
 
   it('terminal supplement revive success links dispatch trace to revived task', async () => {
@@ -158,7 +171,7 @@ describe('executeDispatchActions', () => {
       reviveTerminalSupplement: vi.fn().mockResolvedValue({ outcome: 'revived' as const }),
       markSupplementLinkedToTask,
     } as Partial<ExecuteContext>)
-    await executeDispatchActions([{ kind: 'supplement', target_task_id: 'task-done', text: '继续' }], ctx)
+    await executeDispatchActions([{ kind: 'supplement', target_task_id: 'task-done' }], ctx)
     expect(markSupplementLinkedToTask).toHaveBeenCalledWith('task-done')
   })
 
@@ -179,11 +192,11 @@ describe('executeDispatchActions', () => {
       reviveTerminalSupplement: vi.fn().mockResolvedValue({ outcome: 'fallback' as const }),
       markSupplementLinkedToTask,
     } as Partial<ExecuteContext>)
-    await executeDispatchActions([{ kind: 'supplement', target_task_id: 'task-done', text: '继续' }], ctx)
+    await executeDispatchActions([{ kind: 'supplement', target_task_id: 'task-done' }], ctx)
     expect(markSupplementLinkedToTask).not.toHaveBeenCalled()
   })
 
-  it('terminal supplement revive fallback spawns new task with original supplement text', async () => {
+  it('terminal supplement revive fallback spawns new task with current human input text', async () => {
     const spawn = vi.fn().mockResolvedValue({ spawnedTraceId: 'spawn-new' })
     const base = makeExecCtx()
     const ctx = makeExecCtx({
@@ -196,15 +209,16 @@ describe('executeDispatchActions', () => {
           priority: 'normal',
           candidate_kind: 'recent_terminal',
         } as never],
+        messages: [makeMsg('当前真实补充')],
       },
       reviveTerminalSupplement: vi.fn().mockResolvedValue({ outcome: 'fallback' as const }),
       spawnAgentInstance: spawn,
     } as Partial<ExecuteContext>)
-    await executeDispatchActions([{ kind: 'supplement', target_task_id: 'task-failed', text: '继续' }], ctx)
-    expect(spawn).toHaveBeenCalledWith('继续')
+    await executeDispatchActions([{ kind: 'supplement', target_task_id: 'task-failed' }], ctx)
+    expect(spawn).toHaveBeenCalledWith('当前真实补充')
   })
 
-  it('terminal supplement revive rejection spawns new task with original supplement text', async () => {
+  it('terminal supplement revive rejection spawns new task with current human input text', async () => {
     const spawn = vi.fn().mockResolvedValue({ spawnedTraceId: 'spawn-new' })
     const base = makeExecCtx()
     const ctx = makeExecCtx({
@@ -221,12 +235,12 @@ describe('executeDispatchActions', () => {
       reviveTerminalSupplement: vi.fn().mockRejectedValue(new Error('admin down')),
       spawnAgentInstance: spawn,
     } as Partial<ExecuteContext>)
-    await expect(executeDispatchActions([{ kind: 'supplement', target_task_id: 'task-failed', text: '继续' }], ctx))
+    await expect(executeDispatchActions([{ kind: 'supplement', target_task_id: 'task-failed' }], ctx))
       .resolves.toBeUndefined()
-    expect(spawn).toHaveBeenCalledWith('继续')
+    expect(spawn).toHaveBeenCalledWith('[非文本消息]')
   })
 
-  it('terminal supplement missing revive callback spawns new task with original supplement text', async () => {
+  it('terminal supplement missing revive callback spawns new task with current human input text', async () => {
     const spawn = vi.fn().mockResolvedValue({ spawnedTraceId: 'spawn-new' })
     const base = makeExecCtx()
     const ctx = makeExecCtx({
@@ -242,8 +256,8 @@ describe('executeDispatchActions', () => {
       },
       spawnAgentInstance: spawn,
     } as Partial<ExecuteContext>)
-    await executeDispatchActions([{ kind: 'supplement', target_task_id: 'task-done', text: '继续' }], ctx)
-    expect(spawn).toHaveBeenCalledWith('继续')
+    await executeDispatchActions([{ kind: 'supplement', target_task_id: 'task-done' }], ctx)
+    expect(spawn).toHaveBeenCalledWith('[非文本消息]')
   })
 
   it('supplement fallback 触发 span outcome=supplement_fallback_recovered 并带 spawned_trace_id', async () => {
@@ -258,7 +272,7 @@ describe('executeDispatchActions', () => {
       trace,
     })
     await executeDispatchActions(
-      [{ kind: 'supplement', target_task_id: 'gone', text: 'x' }],
+      [{ kind: 'supplement', target_task_id: 'gone' }],
       ctx,
     )
     expect(endSpan).toHaveBeenCalledTimes(1)
@@ -269,6 +283,10 @@ describe('executeDispatchActions', () => {
       recovered_via: 'new_task',
       spawned_trace_id: 'trace-child-9',
       attempted_target_task_id: 'gone',
+    })
+    expect(trace.startSpan).toHaveBeenCalledWith({
+      type: 'dispatch_action',
+      details: { kind: 'supplement', target_task_id: 'gone' },
     })
   })
 
@@ -288,12 +306,12 @@ describe('executeDispatchActions', () => {
     })
     const ctx = makeExecCtx({ sendImmediateReply, spawnAgentInstance })
     await executeDispatchActions(
-      [{ kind: 'new_task', text: '查 github trending', immediate_reply: '好的，我看下' }],
+      [{ kind: 'new_task', immediate_reply: '好的，我看下' }],
       ctx,
     )
     expect(calls).toEqual(['reply', 'spawn'])
     expect(sendImmediateReply).toHaveBeenCalledWith('好的，我看下')
-    expect(spawnAgentInstance).toHaveBeenCalledWith('查 github trending', {
+    expect(spawnAgentInstance).toHaveBeenCalledWith(undefined, {
       immediateReply: { text: '好的，我看下', platform_message_id: 'pm-1', sent_at: '2026-06-08T00:00:00.000Z' },
     })
   })
@@ -302,9 +320,9 @@ describe('executeDispatchActions', () => {
     const sendImmediateReply = vi.fn()
     const spawnAgentInstance = vi.fn().mockResolvedValue({ spawnedTraceId: 's' })
     const ctx = makeExecCtx({ sendImmediateReply, spawnAgentInstance })
-    await executeDispatchActions([{ kind: 'new_task', text: 'hi' }], ctx)
+    await executeDispatchActions([{ kind: 'new_task' }], ctx)
     expect(sendImmediateReply).not.toHaveBeenCalled()
-    expect(spawnAgentInstance).toHaveBeenCalledWith('hi', undefined)
+    expect(spawnAgentInstance).toHaveBeenCalledWith(undefined, undefined)
   })
 
   it('sendImmediateReply 抛错时 warn 但不阻塞 spawn 继续，且 spawn 不带 immediateReply', async () => {
@@ -313,11 +331,11 @@ describe('executeDispatchActions', () => {
     const ctx = makeExecCtx({ sendImmediateReply, spawnAgentInstance })
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     await executeDispatchActions(
-      [{ kind: 'new_task', text: '调研', immediate_reply: '好' }],
+      [{ kind: 'new_task', immediate_reply: '好' }],
       ctx,
     )
     warnSpy.mockRestore()
-    expect(spawnAgentInstance).toHaveBeenCalledWith('调研', undefined)
+    expect(spawnAgentInstance).toHaveBeenCalledWith(undefined, undefined)
   })
 
   it('immediate_reply 出现在 dispatch_action span outcome 详情里', async () => {
@@ -333,7 +351,7 @@ describe('executeDispatchActions', () => {
       trace,
     })
     await executeDispatchActions(
-      [{ kind: 'new_task', text: '调研', immediate_reply: '好的' }],
+      [{ kind: 'new_task', immediate_reply: '好的' }],
       ctx,
     )
     const [, status, details] = endSpan.mock.calls[0]
@@ -348,10 +366,10 @@ describe('executeDispatchActions', () => {
     const spawnAgentInstance = vi.fn().mockResolvedValue({ spawnedTraceId: 's' })
     const ctx = makeExecCtx({ spawnAgentInstance })  // 未传 sendImmediateReply
     await executeDispatchActions(
-      [{ kind: 'new_task', text: '调研', immediate_reply: '好的' }],
+      [{ kind: 'new_task', immediate_reply: '好的' }],
       ctx,
     )
-    expect(spawnAgentInstance).toHaveBeenCalledWith('调研', undefined)
+    expect(spawnAgentInstance).toHaveBeenCalledWith(undefined, undefined)
   })
 
   it('sendImmediateReply 抛错时 span outcome.immediate_reply_sent=false', async () => {
@@ -366,7 +384,7 @@ describe('executeDispatchActions', () => {
     })
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     await executeDispatchActions(
-      [{ kind: 'new_task', text: 'x', immediate_reply: '好' }],
+      [{ kind: 'new_task', immediate_reply: '好' }],
       ctx,
     )
     warnSpy.mockRestore()
@@ -401,7 +419,7 @@ describe('executeDispatchActions', () => {
           senderFriend: {} as never, traceId: 'trace-1',
         },
       })
-      await executeDispatchActions([{ kind: 'new_task', text: 'go' }], ctx)
+      await executeDispatchActions([{ kind: 'new_task' }], ctx)
       expect(react).toHaveBeenCalledTimes(1)
       expect(react).toHaveBeenCalledWith('m2')
     })
@@ -418,7 +436,7 @@ describe('executeDispatchActions', () => {
         },
       })
       await executeDispatchActions(
-        [{ kind: 'supplement', target_task_id: 't', text: 'add' }],
+        [{ kind: 'supplement', target_task_id: 't' }],
         ctx,
       )
       expect(react).toHaveBeenCalledWith('m9')
@@ -437,7 +455,7 @@ describe('executeDispatchActions', () => {
         },
       })
       await executeDispatchActions(
-        [{ kind: 'supplement', target_task_id: 'gone', text: 'x' }],
+        [{ kind: 'supplement', target_task_id: 'gone' }],
         ctx,
       )
       expect(react).toHaveBeenCalledTimes(1)
@@ -471,7 +489,7 @@ describe('executeDispatchActions', () => {
           senderFriend: {} as never, traceId: 'trace-1',
         },
       })
-      await executeDispatchActions([{ kind: 'new_task', text: 'go' }], ctx)
+      await executeDispatchActions([{ kind: 'new_task' }], ctx)
       expect(spawn).toHaveBeenCalledTimes(1)
     })
 
@@ -484,14 +502,14 @@ describe('executeDispatchActions', () => {
           senderFriend: {} as never, traceId: 'trace-1',
         },
       })
-      await executeDispatchActions([{ kind: 'new_task', text: 'go' }], ctx)
+      await executeDispatchActions([{ kind: 'new_task' }], ctx)
       expect(ctx.spawnAgentInstance).toHaveBeenCalledTimes(1)
     })
 
     it('messages 为空时不报错也不调 react（防御）', async () => {
       const react = vi.fn().mockResolvedValue(undefined)
       const ctx = makeExecCtx({ reactToTriggerMessage: react })
-      await executeDispatchActions([{ kind: 'new_task', text: 'go' }], ctx)
+      await executeDispatchActions([{ kind: 'new_task' }], ctx)
       expect(react).not.toHaveBeenCalled()
     })
   })

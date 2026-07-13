@@ -71,12 +71,26 @@ describe('daily_reflection task messaging tool whitelist', () => {
 
     expect(findTool(tools, 'send_message')).toBeDefined()
     expect(findTool(tools, 'send_private_message')).toBeDefined()
+    expect(findTool(tools, 'send_master_private')).toBeDefined()
     expect(findTool(tools, 'lookup_friend')).toBeDefined()
     expect(findTool(tools, 'list_groups')).toBeDefined()
     expect(findTool(tools, 'list_sessions')).toBeDefined()
   })
 
-  it('message 触发的任务保留全部工具', () => {
+  it('无 task context 时不暴露 scheduled 私聊捷径', () => {
+    const tools = buildMessagingTools({
+      rpcClient: { call: vi.fn() } as never,
+      moduleId: 'front',
+      getAdminPort: async () => 19001,
+      resolveChannelPort: async () => 19009,
+    })
+
+    expect(findTool(tools, 'send_message')).toBeDefined()
+    expect(findTool(tools, 'send_private_message')).toBeUndefined()
+    expect(findTool(tools, 'send_master_private')).toBeUndefined()
+  })
+
+  it('message task 只保留精确 send_message，不暴露 scheduled 私聊捷径', () => {
     const tools = buildMessagingTools({
       rpcClient: { call: vi.fn() } as never,
       moduleId: 'worker',
@@ -86,16 +100,54 @@ describe('daily_reflection task messaging tool whitelist', () => {
         taskId: 't1',
         humanQueue: new HumanMessageQueue(),
         triggerType: 'message',
+        taskType: 'daily_reflection',
         hasGoal: () => false,
       }),
     })
 
     expect(findTool(tools, 'send_message')).toBeDefined()
-    expect(findTool(tools, 'send_private_message')).toBeDefined()
-    expect(findTool(tools, 'send_master_private')).toBeDefined()
+    expect(findTool(tools, 'send_private_message')).toBeUndefined()
+    expect(findTool(tools, 'send_master_private')).toBeUndefined()
     expect(findTool(tools, 'lookup_friend')).toBeDefined()
     expect(findTool(tools, 'list_sessions')).toBeDefined()
   })
+})
+
+describe('scheduled-only shortcut runtime guard', () => {
+  it.each(['send_private_message', 'send_master_private'] as const)(
+    '%s 在构建后切到 message context 时拒绝且零 RPC',
+    async (toolName) => {
+      let triggerType: 'scheduled' | 'message' = 'scheduled'
+      const rpcCall = vi.fn()
+      const tools = buildMessagingTools({
+        rpcClient: { call: rpcCall } as never,
+        moduleId: 'worker',
+        getAdminPort: async () => 19001,
+        resolveChannelPort: async () => 19009,
+        getTaskContext: () => ({
+          taskId: 't1',
+          humanQueue: new HumanMessageQueue(),
+          triggerType,
+          hasGoal: () => false,
+        }),
+      })
+      const tool = findTool(tools, toolName)!
+
+      triggerType = 'message'
+      const result = await tool.handler(
+        toolName === 'send_private_message'
+          ? { friend_id: 'friend-1', content: 'hello' }
+          : { content: 'hello' },
+      )
+
+      expect(result.isError).toBe(true)
+      expect(parsePayload(result)).toMatchObject({
+        error_code: 'SCHEDULED_ONLY_TOOL',
+        error: `${toolName} is only available in scheduled tasks`,
+      })
+      expect(rpcCall).not.toHaveBeenCalled()
+    },
+  )
 })
 
 describe('send_master_private', () => {

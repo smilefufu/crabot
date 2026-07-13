@@ -57,6 +57,11 @@ interface MemoryFetchParams {
 
 type FetchShortTermMemoryParams = MemoryFetchParams
 
+/** ContextAssembler 内部结果；额外候选只供同进程 dispatcher 使用，不属于协议上下文。 */
+interface AssembledFrontContext extends FrontAgentContext {
+  supplement_candidates: TaskSummary[]
+}
+
 const RECENT_TERMINAL_WINDOW_HOURS = 24
 const RECENT_TERMINAL_LIMIT = 3
 const ACTIVE_TASK_STATUSES = ['pending', 'planning', 'executing', 'waiting_human', 'waiting'] as const
@@ -211,14 +216,14 @@ export class ContextAssembler {
     friend: Friend | undefined,
     _memoryPermissions: MemoryPermissions,
     traceCtx?: RpcTraceContext,
-  ): Promise<FrontAgentContext> {
+  ): Promise<AssembledFrontContext> {
     const sessionType = params.session_type ?? 'private'
     // 短期记忆改为按需查（Front/Worker 通过 search_short_term 工具自查），不再被动 fetch 拼 prompt
-    const [activeTasks, sceneProfile] = await Promise.all([
+    const [supplementCandidateTasks, sceneProfile] = await Promise.all([
       this.withSubSpan(traceCtx, 'fetch_active_tasks', () => this.fetchActiveTasks(params.channel_id, params.session_id)),
       this.withSubSpan(traceCtx, 'resolve_scene_profile', () => this.resolveSceneProfile(params.channel_id, params.session_id, sessionType, params.friend_id)),
     ])
-    const extendedHistorySince = this.findExtendedFrontHistorySince(activeTasks)
+    const extendedHistorySince = this.findExtendedFrontHistorySince(supplementCandidateTasks)
     const recentMessages = await this.withSubSpan(traceCtx, 'fetch_recent_messages', () => this.fetchRecentMessages(
       params.session_id,
       params.channel_id,
@@ -227,7 +232,23 @@ export class ContextAssembler {
       sessionType,
       extendedHistorySince,
     ))
-    const attributedRecentMessages = this.annotateMessagesWithTaskIds(recentMessages, activeTasks)
+    const hydratedRecentMessages = await this.withSubSpan(traceCtx, 'hydrate_task_messages', () => this.hydrateRecentTerminalMessages(
+      recentMessages,
+      supplementCandidateTasks,
+      params.channel_id,
+      params.session_id,
+      sessionType,
+    ))
+    const attributedRecentMessages = this.annotateMessagesWithTaskIds(hydratedRecentMessages, supplementCandidateTasks)
+    const activeTasks = supplementCandidateTasks.filter((task) => task.candidate_kind !== 'recent_terminal')
+    const visibleTaskIds = new Set(
+      attributedRecentMessages
+        .map((message) => message.task_id)
+        .filter((taskId): taskId is TaskSummary['task_id'] => taskId !== undefined),
+    )
+    const supplementCandidates = supplementCandidateTasks.filter(
+      (task) => task.candidate_kind !== 'recent_terminal' || visibleTaskIds.has(task.task_id),
+    )
 
     return {
       sender_friend: friend ?? {
@@ -241,6 +262,7 @@ export class ContextAssembler {
       recent_messages: attributedRecentMessages,
       short_term_memories: [],
       active_tasks: activeTasks,
+      supplement_candidates: supplementCandidates,
       crab_display_name: params.crab_display_name,
       crab_self_handle: params.crab_self_handle,
       available_tools: [],
@@ -700,13 +722,75 @@ export class ContextAssembler {
   private findExtendedFrontHistorySince(tasks: ReadonlyArray<TaskSummary>): string | undefined {
     let oldest: string | undefined
     for (const task of tasks) {
-      const anchor = task.candidate_kind === 'recent_terminal'
-        ? task.completed_at
-        : task.created_at
+      const anchor = task.created_at
       if (!anchor) continue
       if (!oldest || anchor < oldest) oldest = anchor
     }
     return oldest
+  }
+
+  private async hydrateRecentTerminalMessages(
+    recentMessages: ReadonlyArray<ChannelMessage>,
+    tasks: ReadonlyArray<TaskSummary>,
+    channelId: ModuleId,
+    sessionId: SessionId,
+    sessionType: 'private' | 'group',
+  ): Promise<ChannelMessage[]> {
+    if (channelId === 'admin-web') return [...recentMessages]
+
+    const existingIds = new Set(recentMessages.map((message) => message.platform_message_id))
+    const requestedIds: string[] = []
+    for (const task of tasks) {
+      if (task.candidate_kind !== 'recent_terminal') continue
+      const ids = task.message_platform_ids ?? []
+      for (const id of [ids[0], ids[ids.length - 1]]) {
+        if (!id || existingIds.has(id) || requestedIds.includes(id)) continue
+        requestedIds.push(id)
+      }
+    }
+    if (requestedIds.length === 0) return [...recentMessages]
+
+    try {
+      const modules = await this.rpcClient.resolve({ module_id: channelId }, this.moduleId)
+      if (modules.length === 0) return [...recentMessages]
+      const channelPort = modules[0].port
+      const fetched = await Promise.all(requestedIds.map(async (platformMessageId) => {
+        try {
+          const message = await this.rpcClient.call<
+            { session_id: SessionId; platform_message_id: string },
+            Omit<ChannelMessage, 'session'>
+          >(
+            channelPort,
+            'get_message',
+            { session_id: sessionId, platform_message_id: platformMessageId },
+            this.moduleId,
+          )
+          return compatLegacyClaimHint({
+            ...message,
+            session: { session_id: sessionId, channel_id: channelId, type: sessionType },
+          })
+        } catch {
+          return null
+        }
+      }))
+      const hydrated = fetched.filter((message): message is ChannelMessage => message !== null)
+      if (hydrated.length === 0) return [...recentMessages]
+
+      const hydratedIds = new Set(hydrated.map((message) => message.platform_message_id))
+      const remainingCapacity = Math.max(0, this.config.front_context_recent_messages_max_cap - hydrated.length)
+      const retainedHistory = remainingCapacity === 0
+        ? []
+        : recentMessages
+            .filter((message) => !hydratedIds.has(message.platform_message_id))
+            .slice(-remainingCapacity)
+      const merged = [...retainedHistory, ...hydrated]
+        .sort((a, b) => a.platform_timestamp.localeCompare(b.platform_timestamp))
+      return this.config.front_context_recent_messages_max_cap === 0
+        ? []
+        : merged.slice(-this.config.front_context_recent_messages_max_cap)
+    } catch {
+      return [...recentMessages]
+    }
   }
 
   private annotateMessagesWithTaskIds(

@@ -267,7 +267,7 @@ describe('ContextAssembler', () => {
     }
   })
 
-  it('extends front recent message window to oldest recent terminal completed_at', async () => {
+  it('extends admin front history to recent terminal created_at instead of completed_at', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-01T12:00:00.000Z'))
     try {
@@ -281,13 +281,14 @@ describe('ContextAssembler', () => {
               status: 'completed',
               priority: 'normal',
               source: { channel_id: 'admin-web', session_id: 'session-1', trigger_type: 'message' },
+              created_at: '2026-06-30T19:00:00.000Z',
               completed_at: '2026-06-30T20:00:00.000Z',
               messages: [],
             }],
           })
         }
         if (method === 'get_chat_history') {
-          expect(args.after).toBe('2026-06-30T20:00:00.000Z')
+          expect(args.after).toBe('2026-06-30T19:00:00.000Z')
           return Promise.resolve({ messages: [] })
         }
         if (method === 'get_scene_profile') return Promise.resolve({ profile: null })
@@ -318,6 +319,97 @@ describe('ContextAssembler', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('keeps recent terminal out of active_tasks and hydrates its tagged history message', async () => {
+    const platformTimestamp = '2026-07-12T09:58:44.000Z'
+    assembler = new ContextAssembler({
+      rpcClient: mockRpc as any,
+      moduleId: 'flow-default',
+      config: { ...defaultConfig, front_context_recent_messages_max_cap: 1 },
+      getAdminPort: () => 19100,
+      getMemoryPort: () => 19200,
+    })
+    mockRpc.resolve.mockResolvedValue([{ module_id: 'wechat-test', port: 19500 }])
+    mockRpc.call.mockImplementation((_port, method, args) => {
+      if (method === 'list_tasks') return Promise.resolve({ items: [] })
+      if (method === 'list_recent_terminal_tasks') {
+        return Promise.resolve({
+          items: [{
+            id: 'task-done',
+            title: '[非文本]',
+            status: 'completed',
+            priority: 'normal',
+            source: { channel_id: 'wechat-test', session_id: 'session-1', trigger_type: 'message' },
+            created_at: '2026-07-12T12:12:58.000Z',
+            completed_at: '2026-07-12T12:13:30.000Z',
+            messages: [{
+              content: '[非文本]',
+              timestamp: '2026-07-12T12:12:58.000Z',
+              source: { platform_message_id: 'platform-image-1' },
+            }],
+          }],
+        })
+      }
+      if (method === 'get_history') {
+        return Promise.resolve({
+          items: [{
+            platform_message_id: 'ordinary-history-1',
+            sender: { platform_user_id: 'assfox', platform_display_name: 'assfox' },
+            content: { type: 'text', text: 'ordinary history' },
+            features: { is_mention_crab: false },
+            platform_timestamp: '2026-07-12T12:13:00.000Z',
+          }],
+        })
+      }
+      if (method === 'get_message') {
+        expect(args).toEqual({
+          session_id: 'session-1',
+          platform_message_id: 'platform-image-1',
+        })
+        return Promise.resolve({
+          platform_message_id: 'platform-image-1',
+          sender: { platform_user_id: 'assfox', platform_display_name: 'assfox' },
+          content: { type: 'image', media_url: 'https://example.com/image.jpg' },
+          features: { is_mention_crab: false },
+          platform_timestamp: platformTimestamp,
+        })
+      }
+      if (method === 'get_scene_profile') return Promise.resolve({ profile: null })
+      throw new Error(`unexpected call: ${String(method)}`)
+    })
+
+    const friend = {
+      id: 'friend-1',
+      display_name: 'Test User',
+      permission: 'master' as const,
+      channel_identities: [],
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+    }
+
+    const ctx = await assembler.assembleFrontContext(
+      {
+        channel_id: 'wechat-test',
+        session_id: 'session-1',
+        sender_id: 'assfox',
+        message: '继续',
+        friend_id: 'friend-1',
+        session_type: 'group',
+      },
+      friend,
+      defaultMemoryPermissions,
+    )
+
+    expect(ctx.active_tasks).toEqual([])
+    expect(ctx.supplement_candidates.map((task) => task.task_id)).toEqual(['task-done'])
+    expect(ctx.recent_messages).toEqual([
+      expect.objectContaining({
+        platform_message_id: 'platform-image-1',
+        platform_timestamp: platformTimestamp,
+        task_id: 'task-done',
+      }),
+    ])
   })
 
   it('annotates recent history messages with task_id from task message platform ids', async () => {

@@ -75,6 +75,17 @@ export class StreamTimeoutError extends Error {
   }
 }
 
+/**
+ * 上游以 HTTP 200/SSE 正常结束，但缺少协议要求的终态事件/字段。
+ * 这类结果不可信，但重发整次 buffered LLM 请求通常可以恢复。
+ */
+export class StreamProtocolError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'StreamProtocolError'
+  }
+}
+
 // OpenAI 风格错误体把 code 放在 `error.code`（如 `{error:{code,message,type}}`）；
 // 仅少数上游用顶层 `code`。优先读嵌套，找不到再回退顶层，保证两种结构都能识别。
 function extractBodyCode(body: string): string | null {
@@ -145,6 +156,7 @@ export function isRetryableError(err: unknown): boolean {
 
   // 流式超时（TTFB / 空闲）总是可重试——换新连接重发
   if (err instanceof StreamTimeoutError) return true
+  if (err instanceof StreamProtocolError) return true
 
   if (err instanceof HttpResponseError) {
     // 先短路 body code 黑名单（如 content_filter）—— 这类错误即使包在 5xx 里也不该重试

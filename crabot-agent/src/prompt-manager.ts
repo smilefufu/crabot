@@ -44,7 +44,7 @@ export interface FormatChannelMessageOpts {
   readonly maxQuoteDepth?: number
 }
 
-const QUOTED_MAX_LEN = 800
+const QUOTED_MAX_LEN = 180
 
 /**
  * 统一渲染 channel 消息为 XML `<message>` 标签。
@@ -87,7 +87,10 @@ function renderMessageTag(
     ? formatChannelMessageTime(msg.platform_timestamp, timezone, now ?? new Date())
     : ''
   const fullText = formatMessageContent(msg)
-  const truncated = fullText.length > maxLen ? fullText.slice(0, maxLen) + '...[内容截断]' : fullText
+  const truncationSuffix = tagName === 'quoted_message'
+    ? '...[引用已精简，可按 id 查原文]'
+    : '...[内容截断]'
+  const truncated = fullText.length > maxLen ? fullText.slice(0, maxLen) + truncationSuffix : fullText
   // 正文里出现 </message> 或 </quoted_message> 都要转义，避免提前闭合外层标签
   const escaped = truncated
     .replace(/<\/message>/g, '&lt;/message&gt;')

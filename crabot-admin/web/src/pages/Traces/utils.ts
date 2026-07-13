@@ -272,6 +272,236 @@ export function groupEntries(entries: TraceIndexEntry[]): TraceGroup[] {
 }
 
 // ============================================================================
+// Trace Epochs
+// ============================================================================
+
+export type TraceEpochRole = 'dispatcher' | 'worker' | 'subagent'
+
+export interface TraceEpochMember {
+  role: TraceEpochRole
+  entry: TraceIndexEntry
+}
+
+export interface TraceEpoch {
+  id: string
+  label: string
+  traces: TraceEpochMember[]
+  startedAt: string
+  endedAt?: string
+  durationMs?: number
+  status: 'running' | 'completed' | 'failed'
+  isLatest: boolean
+  isCurrent: boolean
+  roleCounts: Record<TraceEpochRole, number>
+  totalSpans: number
+  totalUsage?: TokenUsage
+}
+
+export function buildTraceEpochs({
+  fronts,
+  workers,
+  subagents,
+  currentTraceId,
+}: {
+  fronts: TraceIndexEntry[]
+  workers: TraceIndexEntry[]
+  subagents: TraceIndexEntry[]
+  currentTraceId: string
+}): TraceEpoch[] {
+  const sortedWorkers = workers
+    .slice()
+    .sort((a, b) => timeMs(a.started_at) - timeMs(b.started_at))
+  const epochStartMode = buildEpochStarts(fronts, sortedWorkers)
+  const epochStarts = epochStartMode.starts
+
+  const allMembers: TraceEpochMember[] = [
+    ...fronts.map((entry) => ({ role: 'dispatcher' as const, entry })),
+    ...sortedWorkers.map((entry) => ({ role: 'worker' as const, entry })),
+    ...subagents.map((entry) => ({ role: 'subagent' as const, entry })),
+  ].sort((a, b) => timeMs(a.entry.started_at) - timeMs(b.entry.started_at))
+
+  if (epochStarts.length === 0) {
+    if (allMembers.length === 0) return []
+    return [makeEpoch({
+      index: 1,
+      members: allMembers,
+      isLatest: true,
+      currentTraceId,
+    })]
+  }
+
+  const buckets = epochStarts.map((start, index) => ({
+    start,
+    index: index + 1,
+    startedAt: start.started_at,
+    endedAt: epochStartMode.mode === 'action'
+      ? epochEndFromNextAction(epochStarts[index + 1])
+      : undefined,
+    members: [] as TraceEpochMember[],
+  }))
+
+  if (epochStartMode.mode === 'action') {
+    for (const member of allMembers) {
+      if (member.role === 'worker') {
+        const memberStart = timeMs(member.entry.started_at)
+        const memberEnd = member.entry.ended_at ? timeMs(member.entry.ended_at) : Number.POSITIVE_INFINITY
+        for (let i = 0; i < buckets.length; i++) {
+          const windowStart = timeMs(buckets[i]!.startedAt)
+          const nextStart = epochStarts[i + 1] ? timeMs(epochStarts[i + 1]!.started_at) : Number.POSITIVE_INFINITY
+          if (memberStart < nextStart && memberEnd >= windowStart) {
+            buckets[i]!.members.push(member)
+          }
+        }
+        continue
+      }
+      const bucketIndex = epochBucketIndexForTrace(timeMs(member.entry.started_at), epochStarts)
+      buckets[bucketIndex]!.members.push(member)
+    }
+  } else {
+    for (const member of allMembers) {
+      const started = timeMs(member.entry.started_at)
+      const bucketIndex = epochBucketIndexForTrace(started, epochStarts, sortedWorkers)
+      buckets[bucketIndex]!.members.push(member)
+    }
+  }
+
+  const repeatedWorkerTraceIds = new Set<string>()
+  const workerMembershipCounts = new Map<string, number>()
+  for (const bucket of buckets) {
+    for (const member of bucket.members) {
+      if (member.role !== 'worker') continue
+      workerMembershipCounts.set(member.entry.trace_id, (workerMembershipCounts.get(member.entry.trace_id) ?? 0) + 1)
+    }
+  }
+  for (const [traceId, count] of workerMembershipCounts) {
+    if (count > 1) repeatedWorkerTraceIds.add(traceId)
+  }
+
+  return buckets
+    .filter((bucket) => bucket.members.length > 0)
+    .map((bucket, idx, arr) => makeEpoch({
+      index: bucket.index,
+      members: bucket.members.sort((a, b) => {
+        const bucketStarted = timeMs(bucket.startedAt)
+        const aTime = Math.max(timeMs(a.entry.started_at), bucketStarted)
+        const bTime = Math.max(timeMs(b.entry.started_at), bucketStarted)
+        if (aTime !== bTime) return aTime - bTime
+        return traceEpochRoleOrder(a.role) - traceEpochRoleOrder(b.role)
+      }),
+      isLatest: idx === arr.length - 1,
+      currentTraceId,
+      startedAtOverride: bucket.startedAt,
+      endedAtOverride: bucket.endedAt,
+      repeatedWorkerTraceIds,
+    }))
+    .reverse()
+}
+
+function makeEpoch({
+  index,
+  members,
+  isLatest,
+  currentTraceId,
+  startedAtOverride,
+  endedAtOverride,
+  repeatedWorkerTraceIds,
+}: {
+  index: number
+  members: TraceEpochMember[]
+  isLatest: boolean
+  currentTraceId: string
+  startedAtOverride?: string
+  endedAtOverride?: string
+  repeatedWorkerTraceIds?: Set<string>
+}): TraceEpoch {
+  const entries = members.map((m) => m.entry)
+  const startedAt = startedAtOverride ?? entries.reduce((min, e) => timeMs(e.started_at) < timeMs(min) ? e.started_at : min, entries[0]!.started_at)
+  const endedEntries = entries.filter((e) => e.ended_at)
+  const naturalEndedAt = endedEntries.length === entries.length
+    ? endedEntries.reduce((max, e) => timeMs(e.ended_at!) > timeMs(max) ? e.ended_at! : max, endedEntries[0]!.ended_at!)
+    : undefined
+  const endedAt = endedAtOverride ?? naturalEndedAt
+  const durationMs = endedAt ? timeMs(endedAt) - timeMs(startedAt) : undefined
+
+  return {
+    id: `epoch-${index}`,
+    label: `Epoch ${index}`,
+    traces: members,
+    startedAt,
+    ...(endedAt ? { endedAt } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
+    status: aggregateGroupStatus(entries),
+    isLatest,
+    isCurrent: members.some((m) =>
+      m.entry.trace_id === currentTraceId
+      && (m.role !== 'worker' || !repeatedWorkerTraceIds?.has(m.entry.trace_id) || isLatest),
+    ),
+    roleCounts: {
+      dispatcher: members.filter((m) => m.role === 'dispatcher').length,
+      worker: members.filter((m) => m.role === 'worker').length,
+      subagent: members.filter((m) => m.role === 'subagent').length,
+    },
+    totalSpans: entries.reduce((sum, e) => sum + e.span_count, 0),
+    totalUsage: aggregateGroupUsage(entries),
+  }
+}
+
+function timeMs(iso: string): number {
+  return new Date(iso).getTime()
+}
+
+function buildEpochStarts(fronts: TraceIndexEntry[], workers: TraceIndexEntry[]): { mode: 'action' | 'worker'; starts: TraceIndexEntry[] } {
+  const actionStarts = fronts
+    .filter((entry) => entry.dispatch_actions?.some((action) =>
+      action.outcome === 'new_task_spawned' || action.outcome === 'terminal_task_revived',
+    ))
+    .sort((a, b) => timeMs(a.started_at) - timeMs(b.started_at))
+
+  if (actionStarts.length > 0) return { mode: 'action', starts: actionStarts }
+  return { mode: 'worker', starts: workers }
+}
+
+function epochEndFromNextAction(next?: TraceIndexEntry): string | undefined {
+  return next?.dispatch_actions?.find((action) =>
+    action.outcome === 'terminal_task_revived' && action.target_task_completed_at,
+  )?.target_task_completed_at
+}
+
+function traceEpochRoleOrder(role: TraceEpochRole): number {
+  if (role === 'dispatcher') return 0
+  if (role === 'worker') return 1
+  return 2
+}
+
+function epochBucketIndexForTrace(started: number, starts: TraceIndexEntry[], workerFallback?: TraceIndexEntry[]): number {
+  if (workerFallback) {
+    for (let i = 0; i < workerFallback.length; i++) {
+      const current = workerFallback[i]!
+      const next = workerFallback[i + 1]
+      const currentStart = timeMs(current.started_at)
+      const currentEnd = current.ended_at ? timeMs(current.ended_at) : undefined
+      if (!next) {
+        if (started >= currentStart) return i
+        return 0
+      }
+      const nextStart = timeMs(next.started_at)
+      if (started < nextStart) {
+        if (currentEnd !== undefined && started > currentEnd) return i + 1
+        return i
+      }
+    }
+    return workerFallback.length - 1
+  }
+
+  let bucketIndex = 0
+  for (let i = 0; i < starts.length; i++) {
+    if (timeMs(starts[i]!.started_at) <= started) bucketIndex = i
+    else break
+  }
+  return bucketIndex
+}
+
+// ============================================================================
 // agentLoopLabel — 把 loop_label 渲染为用户可见 label
 // ============================================================================
 
@@ -341,9 +571,8 @@ export function detailSummary(span: AgentSpan): string {
   }
   if (span.type === 'dispatch_action') {
     const kind = String(d.kind ?? '')
-    const summary = d.text_summary ? ` "${String(d.text_summary).slice(0, 60)}"` : ''
     const outcome = d.outcome ? ` [${d.outcome}]` : ''
-    return `${kind}${summary}${outcome}`
+    return `${kind}${outcome}`
   }
   return ''
 }

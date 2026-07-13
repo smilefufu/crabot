@@ -153,6 +153,7 @@ export class TelegramChannel extends ModuleBase {
     await fs.mkdir(path.join(this.dataDir, 'media'), { recursive: true })
 
     await this.mediaHandleStore.init()
+    await this.migrateKnownLegacySessionHistories()
     this.messageStore.startCleanup()
     this.mediaCleaner.startCleanup()
 
@@ -517,8 +518,9 @@ export class TelegramChannel extends ModuleBase {
     const firstId = String(sentIds[0])
     const sentAt = generateTimestamp()
 
+    await this.migrateLegacySessionHistory(params.session_id, session.id)
     await this.messageStore.appendOutbound({
-      sessionId: params.session_id,
+      sessionId: session.id,
       platformMessageId: firstId,
       text: text || '[非文本消息]',
       contentType: params.content.type,
@@ -746,8 +748,9 @@ export class TelegramChannel extends ModuleBase {
     const pageSize = params.limit ?? params.pagination?.page_size ?? 20
     const page = params.limit ? undefined : (params.pagination?.page ?? 1)
 
+    await this.migrateLegacySessionHistory(params.session_id, session.id)
     const { items, total } = await this.messageStore.query({
-      sessionId: params.session_id,
+      sessionId: session.id,
       keyword: params.keyword,
       timeRange: params.time_range,
       page: page,
@@ -769,10 +772,27 @@ export class TelegramChannel extends ModuleBase {
     const session = this.sessionManager.findById(params.session_id)
     if (!session) throw new Error('Session not found')
 
-    const msg = await this.messageStore.findByMessageId(params.session_id, params.platform_message_id)
+    await this.migrateLegacySessionHistory(params.session_id, session.id)
+    const msg = await this.messageStore.findByMessageId(session.id, params.platform_message_id)
     if (!msg) throw new Error('Message not found')
 
     return storedMessageToProtocol(msg)
+  }
+
+  private async migrateLegacySessionHistory(requestedSessionId: string, canonicalSessionId: string): Promise<void> {
+    const legacyIds = new Set([
+      requestedSessionId,
+      ...this.sessionManager.legacyIdsFor(canonicalSessionId),
+    ])
+    for (const legacyId of legacyIds) {
+      await this.messageStore.migrateSessionId(legacyId, canonicalSessionId)
+    }
+  }
+
+  private async migrateKnownLegacySessionHistories(): Promise<void> {
+    for (const { legacyId, stableId } of this.sessionManager.legacyAliasPairs()) {
+      await this.messageStore.migrateSessionId(legacyId, stableId)
+    }
   }
 
   private async handleGetPlatformUserInfo(params: { platform_user_id: string }) {

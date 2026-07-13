@@ -7,7 +7,7 @@
 import type { LLMAdapter, LLMAdapterConfig, LLMStreamParams } from './llm-adapter-types.js'
 import { isToolResultMessage, extractText, buildImageUrl, readSSEEvents, capToolResultForLLM } from './llm-adapter-types.js'
 import type { EngineMessage, ToolDefinition, StreamChunk, ContentBlock, LLMTokenUsage } from './types.js'
-import { HttpResponseError } from './retry-utils.js'
+import { HttpResponseError, StreamProtocolError } from './retry-utils.js'
 import { streamWithTimeoutAndRetry } from './stream-timeout.js'
 
 // --- Responses API Message Normalization ---
@@ -208,6 +208,7 @@ export class OpenAIResponsesAdapter implements LLMAdapter {
     }
 
     let messageStarted = false
+    let sawTerminalEvent = false
     // Maps streamed item.id (fc_xxx) to the encoded block id ("call_xxx|fc_xxx") that
     // we use internally so replay emits both id and call_id to the Responses API.
     const activeFunctionCalls = new Map<string, { encodedId: string; name: string }>()
@@ -280,6 +281,7 @@ export class OpenAIResponsesAdapter implements LLMAdapter {
         }
 
         case 'response.completed': {
+          sawTerminalEvent = true
           const resp = parsed.response as {
             output?: Array<{ type?: string }>
             usage?: ResponsesApiUsage
@@ -301,6 +303,7 @@ export class OpenAIResponsesAdapter implements LLMAdapter {
         }
 
         case 'response.incomplete': {
+          sawTerminalEvent = true
           // 终态事件，响应被截断但 stream 正常结束。不处理这条会让 stopReason 落到
           // null，被上游 query-loop 误判为 silent end_turn，触发反向放大的重试链。
           const resp = parsed.response as {
@@ -329,6 +332,7 @@ export class OpenAIResponsesAdapter implements LLMAdapter {
         }
 
         case 'response.failed': {
+          sawTerminalEvent = true
           // 终态事件，error.code 映射到 HTTP status 复用 isRetryableError 的状态码分类。
           const resp = parsed.response as {
             error?: { code?: string; message?: string }
@@ -349,6 +353,9 @@ export class OpenAIResponsesAdapter implements LLMAdapter {
     }
     } finally {
       try { await sseBody.cancel() } catch { /* already drained / errored */ }
+    }
+    if (messageStarted && !sawTerminalEvent) {
+      throw new StreamProtocolError('openai-responses-adapter stream ended without terminal event')
     }
   }
 }

@@ -27,6 +27,51 @@ describe('isResumable', () => {
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.reason).toBe('empty_checkpoint')
   })
+
+  it('存在悬空 tool_use → 拒绝，避免 resume 重放到 LLM 触发 400', () => {
+    const r = isResumable({
+      ...base,
+      messages: [
+        { id: 'm1', role: 'user' as const, content: 'hi', timestamp: 1 },
+        {
+          id: 'm2',
+          role: 'assistant' as const,
+          stopReason: 'tool_use' as const,
+          timestamp: 2,
+          content: [
+            { type: 'tool_use' as const, id: 'call_1', name: 'Read', input: { path: '/tmp/a' } },
+          ],
+        },
+      ],
+    }, '1.0.0')
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toBe('dangling_tool_use')
+  })
+
+  it('tool_use 有匹配 toolResults → 可 resume', () => {
+    const r = isResumable({
+      ...base,
+      messages: [
+        { id: 'm1', role: 'user' as const, content: 'hi', timestamp: 1 },
+        {
+          id: 'm2',
+          role: 'assistant' as const,
+          stopReason: 'tool_use' as const,
+          timestamp: 2,
+          content: [
+            { type: 'tool_use' as const, id: 'call_1', name: 'Read', input: { path: '/tmp/a' } },
+          ],
+        },
+        {
+          id: 'm3',
+          role: 'user' as const,
+          timestamp: 3,
+          toolResults: [{ tool_use_id: 'call_1', content: 'ok', is_error: false }],
+        },
+      ],
+    }, '1.0.0')
+    expect(r.ok).toBe(true)
+  })
 })
 
 describe('buildResumeWakeupMessage', () => {
@@ -42,7 +87,9 @@ describe('buildTerminalSupplementWakeupMessage', () => {
   it('builds a user message containing supplement text', () => {
     const msg = buildTerminalSupplementWakeupMessage('继续刚才失败的任务')
     expect(msg.role).toBe('user')
-    expect(String(msg.content)).toContain('此 task 已结束')
+    expect(String(msg.content)).not.toContain('此 task 已结束')
+    expect(String(msg.content)).not.toContain('请基于前文继续处理')
+    expect(String(msg.content)).toMatch(/^用户补充：/)
     expect(String(msg.content)).toContain('继续刚才失败的任务')
   })
 })

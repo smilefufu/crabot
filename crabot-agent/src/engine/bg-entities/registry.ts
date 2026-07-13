@@ -9,7 +9,14 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { getBgEntitiesRegistryPath } from '../../core/data-paths'
-import { exitcodeFileForLog, readProcStartTime } from './bg-shell'
+import {
+  exitcodeFileForLog,
+  readProcStartTime,
+  stdoutFileForLog,
+  stderrFileForLog,
+  stdoutFifoForLog,
+  stderrFifoForLog,
+} from './bg-shell'
 import {
   BG_ENTITY_GC_AFTER_DAYS,
   type BgAgentRegistryRecord,
@@ -240,10 +247,18 @@ export class BgEntityRegistry {
     return removed
   }
 
-  /** 删除一个 shell 的磁盘日志 + exitcode sentinel；不存在则忽略。 */
+  /** 删除一个 shell 的磁盘日志 + sidecar/sentinel；不存在则忽略。 */
   private async unlinkShellFiles(rec: BgShellRegistryRecord): Promise<void> {
+    const logFile = rec.log_file
     await Promise.all(
-      [rec.log_file, exitcodeFileForLog(rec.log_file)].map((f) =>
+      [
+        logFile,
+        exitcodeFileForLog(logFile),
+        stdoutFileForLog(logFile),
+        stderrFileForLog(logFile),
+        stdoutFifoForLog(logFile),
+        stderrFifoForLog(logFile),
+      ].map((f) =>
         fs.unlink(f).catch(() => {
           /* 文件不存在 / 已删 — 忽略 */
         }),

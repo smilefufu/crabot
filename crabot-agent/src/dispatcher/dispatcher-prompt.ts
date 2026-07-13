@@ -101,10 +101,10 @@ const PRIVATE_RULES_WITH_ACTIVE = `## 分诊规则（私聊 / admin chat）
 
 1. **supplement** — 这条消息是对某个已知 task 的补充 / 追问 / 修正 / 继续讨论。
    - target_task_id 必须来自最近聊天历史消息的 task="..." 属性，或「当前正在运行的本 session task」列表
-   - text 用户原话（去掉无关客套即可）。**不要替 agent 解读意图或指定方向——agent 会自己读聊天历史**
+   - 不要输出补充正文；系统会把当前真实消息批次原样投递给 task
 
 2. **new_task** — 这条消息发起一个新任务。
-   - text 用户原话（去掉无关客套即可）。**不要替 agent 提炼意图、拆解步骤或加方向性引导——agent 会自己读聊天历史**
+   - 不要输出任务正文；系统会把当前真实消息批次原样交给 worker
 ${NEW_TASK_IMMEDIATE_REPLY_HINT}
 
 判断要点：
@@ -122,7 +122,7 @@ const PRIVATE_RULES_NO_ACTIVE = `## 分诊规则（私聊 / admin chat）
 当前没有任何可补充任务。每个动作只能是：
 
 1. **new_task** — 这条消息发起一个新任务。
-   - text 用户原话（去掉无关客套即可）。**不要替 agent 提炼意图、拆解步骤或加方向性引导——agent 会自己读聊天历史**
+   - 不要输出任务正文；系统会把当前真实消息批次原样交给 worker
 ${NEW_TASK_IMMEDIATE_REPLY_HINT}
 
 判断要点：
@@ -137,10 +137,10 @@ const GROUP_RULES_WITH_ACTIVE = `## 分诊规则（群聊）
 
 1. **supplement** — 某条消息是对某个已知 task 的补充 / 追问 / 修正 / 继续讨论。
    - target_task_id 必须来自最近聊天历史消息的 task="..." 属性，或「当前正在运行的本 session task」列表
-   - text 用户原话（去掉无关客套即可）。**不要替 agent 解读意图**
+   - 不要输出补充正文；系统会把当前真实消息批次原样投递给 task
 
 2. **new_task** — 某条消息发起一个跟我相关的新任务。
-   - text 用户原话，**必须保留 @对象、收件人说明与否定范围（如「不是给 X 的」）**，只删与收件人无关的寒暄。**不要替 agent 提炼意图或加方向性引导**
+   - 不要输出任务正文；系统会把当前真实消息批次原样交给 worker
 ${NEW_TASK_IMMEDIATE_REPLY_HINT}
 
 3. **stay_silent** — 这批（或这部分）消息跟我无关。
@@ -161,7 +161,7 @@ const GROUP_RULES_NO_ACTIVE = `## 分诊规则（群聊）
 当前没有任何可补充任务。群聊批次（多消息多用户）的每个动作可以是：
 
 1. **new_task** — 某条消息发起一个跟我相关的新任务。
-   - text 用户原话，**必须保留 @对象、收件人说明与否定范围（如「不是给 X 的」）**，只删与收件人无关的寒暄。**不要替 agent 提炼意图或加方向性引导**
+   - 不要输出任务正文；系统会把当前真实消息批次原样交给 worker
 ${NEW_TASK_IMMEDIATE_REPLY_HINT}
 
 2. **stay_silent** — 这批（或这部分）消息跟我无关。
@@ -183,9 +183,9 @@ function buildOutputSchema(
 ): string {
   const lines: string[] = []
   if (hasActiveTasks) {
-    lines.push(`    { "kind": "supplement", "target_task_id": "<task_id>", "text": "<补充内容>" },`)
+    lines.push(`    { "kind": "supplement", "target_task_id": "<task_id>" },`)
   }
-  lines.push(`    { "kind": "new_task", "text": "<新任务内容>", "immediate_reply": "<可选，简短预回复>" }${sessionType === 'group' ? ',' : ''}`)
+  lines.push(`    { "kind": "new_task", "immediate_reply": "<可选，简短预回复>" }${sessionType === 'group' ? ',' : ''}`)
   if (sessionType === 'group') {
     lines.push(`    { "kind": "stay_silent", "reason": "<可选简短说明>" }`)
   }

@@ -114,7 +114,37 @@ const EMPTY_FORM: ScheduleFormState = {
   targetSessionType: '',
 }
 
-function formToPayload(form: ScheduleFormState): CreateScheduleData {
+export function buildScheduleTargetSession(
+  form: Pick<ScheduleFormState, 'targetChannelId' | 'targetSessionId' | 'targetSessionType'>,
+  sessions: ChannelSession[],
+  existingTargetSession?: Schedule['target_session'],
+): Schedule['target_session'] | undefined {
+  const targetSet = !!(form.targetChannelId && form.targetSessionId && form.targetSessionType)
+  if (!targetSet) return undefined
+
+  const targetSession = sessions.find((s) => s.id === form.targetSessionId)
+  const platformSessionId = targetSession?.platform_session_id
+    ?? (
+      existingTargetSession?.channel_id === form.targetChannelId
+      && existingTargetSession.session_id === form.targetSessionId
+      && existingTargetSession.type === form.targetSessionType
+        ? existingTargetSession.platform_session_id
+        : undefined
+    )
+
+  return {
+    channel_id: form.targetChannelId,
+    session_id: form.targetSessionId,
+    ...(platformSessionId ? { platform_session_id: platformSessionId } : {}),
+    type: form.targetSessionType as 'private' | 'group',
+  }
+}
+
+function formToPayload(
+  form: ScheduleFormState,
+  sessions: ChannelSession[],
+  existingSchedule?: Schedule | null,
+): CreateScheduleData {
   let trigger: ScheduleTrigger
   switch (form.triggerType) {
     case 'cron':
@@ -139,7 +169,15 @@ function formToPayload(form: ScheduleFormState): CreateScheduleData {
     tags: form.taskTags.split(',').map(s => s.trim()).filter(Boolean),
   }
 
-  const targetSet = !!(form.targetChannelId && form.targetSessionId && form.targetSessionType)
+  const targetSession = buildScheduleTargetSession(
+    {
+      targetChannelId: form.targetChannelId,
+      targetSessionId: form.targetSessionId,
+      targetSessionType: form.targetSessionType,
+    },
+    sessions,
+    existingSchedule?.target_session,
+  )
 
   return {
     name: form.name.trim(),
@@ -147,15 +185,7 @@ function formToPayload(form: ScheduleFormState): CreateScheduleData {
     enabled: form.enabled,
     trigger,
     task_template,
-    ...(targetSet
-      ? {
-          target_session: {
-            channel_id: form.targetChannelId,
-            session_id: form.targetSessionId,
-            type: form.targetSessionType as 'private' | 'group',
-          },
-        }
-      : {}),
+    ...(targetSession ? { target_session: targetSession } : {}),
   }
 }
 
@@ -331,7 +361,7 @@ export const ScheduleList: React.FC = () => {
 
     setSaving(true)
     try {
-      const payload = formToPayload(form)
+      const payload = formToPayload(form, sessions, editingSchedule)
       if (editingId) {
         // 更新路径：若用户清空了原本配置过的 target_session，传 null 显式清除
         const wasTargetSet = !!editingSchedule?.target_session

@@ -126,4 +126,67 @@ describe('gatherCategories', () => {
     )
     expect(keptDir).toBe('# b')
   })
+
+  it('exports stable schedule/config references without channel-local sessions cache', async () => {
+    await fs.writeFile(
+      path.join(adminDir, 'channel-instances.json'),
+      JSON.stringify([{ id: 'wechat-1', type: 'wechat', name: 'wechat' }]),
+    )
+    await fs.mkdir(path.join(adminDir, 'channels', 'wechat-1'), { recursive: true })
+    await fs.writeFile(
+      path.join(adminDir, 'channels', 'wechat-1', 'sessions.json'),
+      JSON.stringify([{ id: 'cache-only-session', platform_session_id: '12345@chatroom' }]),
+    )
+    await fs.writeFile(
+      path.join(adminDir, 'schedules.json'),
+      JSON.stringify([
+        {
+          id: 'sched-1',
+          name: 'stable schedule',
+          trigger: { type: 'cron', expression: '0 0 * * *' },
+          task_template: { type: 'routine', title: 'daily', priority: 'normal', tags: [] },
+          enabled: true,
+          target_session: {
+            channel_id: 'wechat-1',
+            session_id: 'stable-abc',
+            platform_session_id: '12345@chatroom',
+            type: 'group',
+          },
+          created_at: '2026-07-04T00:00:00.000Z',
+          updated_at: '2026-07-04T00:00:00.000Z',
+        },
+      ]),
+    )
+    await fs.writeFile(
+      path.join(adminDir, 'session-configs.json'),
+      JSON.stringify([{ session_id: 'stable-abc', config: { updated_at: '2026-07-04T00:00:00.000Z' } }]),
+    )
+
+    await gatherCategories({
+      staging,
+      selection: { categories: ['channels', 'tasks', 'config'], includeSecrets: true },
+      deps: deps(),
+    })
+
+    await expect(
+      fs.access(path.join(staging, 'payload', 'channels', 'channels', 'wechat-1', 'sessions.json')),
+    ).rejects.toThrow()
+
+    const schedules = JSON.parse(
+      await fs.readFile(path.join(staging, 'payload', 'tasks', 'schedules.json'), 'utf-8'),
+    )
+    expect(schedules[0].target_session).toEqual({
+      channel_id: 'wechat-1',
+      session_id: 'stable-abc',
+      platform_session_id: '12345@chatroom',
+      type: 'group',
+    })
+
+    const sessionConfigs = JSON.parse(
+      await fs.readFile(path.join(staging, 'payload', 'config', 'session-configs.json'), 'utf-8'),
+    )
+    expect(sessionConfigs).toEqual([
+      { session_id: 'stable-abc', config: { updated_at: '2026-07-04T00:00:00.000Z' } },
+    ])
+  })
 })

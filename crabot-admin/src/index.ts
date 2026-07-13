@@ -29,6 +29,7 @@ import { readArchiveTextFile, listArchiveEntries } from './openclaw-import/archi
 import { extractArchiveSubtree } from './openclaw-import/extract-subtree.js'
 import { BrowserManager } from './browser-manager.js'
 import { PermissionTemplateManager } from './permission-template-manager.js'
+import { decodePathSegment, isPathSafeSegment } from './http-path.js'
 import {
   ModuleBase,
   type ModuleConfig,
@@ -184,7 +185,9 @@ import { buildOnboardFinishResponse } from './onboard-finish-response.js'
 import { ChannelManager } from './channel-manager.js'
 import {
   migrateScheduleTargetSession,
+  repairScheduleTargetSession,
   type SessionTypeLookup,
+  type TargetSessionRepairLookup,
 } from './schedule-migration.js'
 import { ModuleInstaller } from './module-installer.js'
 import { ChatManager, buildChatTaskSnapshot } from './chat-manager.js'
@@ -947,13 +950,7 @@ export class AdminModule extends ModuleBase {
           }
           const restartCount = (event.payload as { restart_count?: number }).restart_count ?? 0
           console.log(`[Admin] Agent module ${module_id} started (port=${port}, restart_count=${restartCount}), pushing config as safety net...`)
-          this.pushConfigToAgentModules().catch((err: Error) => {
-            console.warn(`[Admin] Failed to push config to ${module_id}:`, err.message)
-          })
-
-          // Resume sweep：agent 一就绪即对所有 in-flight 任务尝试无损 resume，
-          // 失败的才标 failed + 生成 recovery 兜底。**任何 restart_count 都跑**（含完整重启=0）。
-          this.sweepInterruptedTasksForResume(restartCount).catch((err: Error) => {
+          this.pushAgentConfigThenSweepResume(module_id, restartCount).catch((err: Error) => {
             console.warn(`[Admin] Resume sweep for ${module_id} failed: ${err.message}`)
           })
         }
@@ -1985,7 +1982,11 @@ export class AdminModule extends ModuleBase {
 
       // 模块配置管理 API
       if (req.method === 'GET' && pathname.match(/^\/api\/modules\/[^/]+\/config$/)) {
-        const moduleId = pathname.split('/')[3]
+        const moduleId = decodePathSegment(pathname, 3)
+        if (!isPathSafeSegment(moduleId)) {
+          sendJson(res, 400, { error: 'Invalid module id' })
+          return
+        }
         const result = await this.handleGetModuleConfig({ module_id: moduleId })
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(result))
@@ -1993,7 +1994,11 @@ export class AdminModule extends ModuleBase {
       }
 
       if (req.method === 'PUT' && pathname.match(/^\/api\/modules\/[^/]+\/config$/)) {
-        const moduleId = pathname.split('/')[3]
+        const moduleId = decodePathSegment(pathname, 3)
+        if (!isPathSafeSegment(moduleId)) {
+          sendJson(res, 400, { error: 'Invalid module id' })
+          return
+        }
         const body = await this.readJsonBody<{ config: Record<string, string> }>(req)
         const result = await this.handleSetModuleConfig({
           module_id: moduleId,
@@ -2006,7 +2011,7 @@ export class AdminModule extends ModuleBase {
 
       // 模块生命周期控制 API
       if (req.method === 'POST' && pathname.match(/^\/api\/modules\/[^/]+\/start$/)) {
-        const moduleId = pathname.split('/')[3]
+        const moduleId = decodePathSegment(pathname, 3)
         const result = await this.handleStartModuleAdmin({ module_id: moduleId })
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(result))
@@ -2014,7 +2019,7 @@ export class AdminModule extends ModuleBase {
       }
 
       if (req.method === 'POST' && pathname.match(/^\/api\/modules\/[^/]+\/stop$/)) {
-        const moduleId = pathname.split('/')[3]
+        const moduleId = decodePathSegment(pathname, 3)
         const body = await this.readJsonBody<{ force?: boolean }>(req)
         const result = await this.handleStopModuleAdmin({
           module_id: moduleId,
@@ -2026,7 +2031,7 @@ export class AdminModule extends ModuleBase {
       }
 
       if (req.method === 'POST' && pathname.match(/^\/api\/modules\/[^/]+\/restart$/)) {
-        const moduleId = pathname.split('/')[3]
+        const moduleId = decodePathSegment(pathname, 3)
         const result = await this.handleRestartModuleAdmin({ module_id: moduleId })
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(result))
@@ -2223,11 +2228,6 @@ export class AdminModule extends ModuleBase {
       const moduleLogMatch = pathname.match(/^\/api\/modules\/([^/]+)\/log$/)
       if (moduleLogMatch && req.method === 'GET') {
         await this.handleGetModuleLogApi(req, res, decodeURIComponent(moduleLogMatch[1]), url)
-        return
-      }
-      const moduleRestartMatch = pathname.match(/^\/api\/modules\/([^/]+)\/restart$/)
-      if (moduleRestartMatch && req.method === 'POST') {
-        await this.handleRestartModuleApi(req, res, decodeURIComponent(moduleRestartMatch[1]))
         return
       }
 
@@ -3293,6 +3293,7 @@ export class AdminModule extends ModuleBase {
     id: string
     channel_id: ModuleId
     type: 'private' | 'group'
+    platform_session_id?: string
     title: string
     participants: Array<{ friend_id?: FriendId; platform_user_id: string; role: 'owner' | 'admin' | 'member' }>
   }> {
@@ -3311,6 +3312,7 @@ export class AdminModule extends ModuleBase {
           id: string
           channel_id: ModuleId
           type: 'private' | 'group'
+          platform_session_id?: string
           title: string
           participants: Array<{ friend_id?: FriendId; platform_user_id: string; role: 'owner' | 'admin' | 'member' }>
         }
@@ -3328,6 +3330,61 @@ export class AdminModule extends ModuleBase {
     )
 
     return result.session
+  }
+
+  private async listChannelSessions(channelId: ModuleId): Promise<Array<{
+    id: string
+    channel_id: ModuleId
+    type: 'private' | 'group'
+    platform_session_id: string
+    title: string
+  }>> {
+    const modules = await this.rpcClient.resolve(
+      { module_id: channelId },
+      this.config.moduleId
+    )
+    if (modules.length === 0) {
+      throw new Error('Channel module not found')
+    }
+
+    type ChannelSessionListResult = {
+      items: Array<{
+        id: string
+        channel_id: ModuleId
+        type: 'private' | 'group'
+        platform_session_id: string
+        title: string
+      }>
+      pagination: { page: number; page_size: number; total_items: number; total_pages: number }
+    }
+
+    const pageSize = 500
+    const all: Array<{
+      id: string
+      channel_id: ModuleId
+      type: 'private' | 'group'
+      platform_session_id: string
+      title: string
+    }> = []
+    let page = 1
+    let totalPages = 1
+
+    do {
+      const result = await this.rpcClient.call<
+        { pagination: { page: number; page_size: number } },
+        ChannelSessionListResult
+      >(
+        modules[0].port,
+        'get_sessions',
+        { pagination: { page, page_size: pageSize } },
+        this.config.moduleId,
+      )
+      all.push(...result.items)
+      totalPages = Math.max(1, result.pagination.total_pages)
+      page++
+    } while (page <= totalPages)
+
+    return all
   }
 
   private async resolveChannelIdentityFromPrivateSession(channelId: ModuleId, sessionId: string): Promise<ChannelIdentity> {
@@ -4197,8 +4254,9 @@ export class AdminModule extends ModuleBase {
     let migratedCount = 0
     for (const schedule of Array.from(this.schedules.values())) {
       const migrated = await migrateScheduleTargetSession(schedule, sessionTypeLookup)
-      if (migrated !== schedule) {
-        this.schedules.set(migrated.id, migrated)
+      const repaired = await this.repairScheduleTargetSessionReference(migrated)
+      if (repaired !== schedule) {
+        this.schedules.set(repaired.id, repaired)
         migratedCount++
       }
     }
@@ -4212,6 +4270,43 @@ export class AdminModule extends ModuleBase {
         `[Admin] Migrated ${migratedCount} schedule(s) to target_session field`,
       )
     }
+  }
+
+  private async repairScheduleTargetSessionReference(schedule: Schedule): Promise<Schedule> {
+    const targetSessionLookup: TargetSessionRepairLookup = async (channelId, sessionId, platformSessionId, scheduleForLookup) => {
+      const expectedType = scheduleForLookup?.target_session?.type
+      if (platformSessionId && expectedType) {
+        try {
+          const sessions = await this.listChannelSessions(channelId as ModuleId)
+          const match = sessions.find(
+            (s) => s.platform_session_id === platformSessionId && s.type === expectedType,
+          )
+          if (match) {
+            return {
+              session_id: match.id,
+              platform_session_id: match.platform_session_id,
+              type: match.type,
+            }
+          }
+          return undefined
+        } catch {
+          return undefined
+        }
+      }
+
+      try {
+        const session = await this.resolveChannelSession(channelId as ModuleId, sessionId)
+        return {
+          session_id: session.id,
+          type: session.type,
+          ...(session.platform_session_id ? { platform_session_id: session.platform_session_id } : {}),
+        }
+      } catch {
+        return undefined
+      }
+    }
+
+    return repairScheduleTargetSession(schedule, targetSessionLookup)
   }
 
   /**
@@ -4700,7 +4795,10 @@ export class AdminModule extends ModuleBase {
    *
    * @param restartCount agent 此次启动是第几次（0=首次，不做 self-healing）
    */
-  private async sweepInterruptedTasksForResume(restartCount: number): Promise<void> {
+  private async sweepInterruptedTasksForResume(
+    restartCount: number,
+    options: { retryDelayMs?: number } = {},
+  ): Promise<void> {
     // dataLoaded 未完时（启动早期 module_started 抢跑）跳过——loadData 完成后还有兜底触发。
     if (!this.dataLoaded) return
 
@@ -4713,26 +4811,38 @@ export class AdminModule extends ModuleBase {
 
     // 1. 先尝试无损 resume（仅非 recovery task；recovery 自身不 resume，防雪崩）
     const candidates = inFlight.filter((t) => !t.tags.includes('recovery'))
-    const results: { task: Task; resumed: boolean }[] = []
-    for (const t of candidates) {
-      let resumed = false
-      try {
-        const r = await this.callAgentRpc<{ task_id: string }, { resumed?: boolean }>(
-          'resume_task',
-          { task_id: t.id },
-        )
-        resumed = r?.resumed === true
-      } catch (err) {
-        console.warn(`[Admin] Self-healing: resume_task ${t.id} RPC failed: ${(err as Error).message}`)
-      }
-      results.push({ task: t, resumed })
-    }
-    const { resumed, needRecovery } = partitionResumeResults(results)
+    const results = await this.tryResumeTasks(candidates)
+    const { resumed, needRecovery, retryLater } = partitionResumeResults(results)
     if (resumed.length > 0) {
       console.log(
         `[Admin] Self-healing: resumed ${resumed.length} task(s): ${resumed.map((t) => t.id).join(', ')}`,
       )
       // resumed 的保持 executing（agent 已接管），不动状态
+    }
+    if (retryLater.length > 0) {
+      console.log(
+        `[Admin] Self-healing: ${retryLater.length} task(s) waiting for agent configuration before resume retry: ${retryLater.map((t) => t.id).join(', ')}`,
+      )
+
+      const retryDelayMs = options.retryDelayMs ?? 1000
+      if (retryDelayMs > 0) {
+        await new Promise((r) => setTimeout(r, retryDelayMs))
+      }
+
+      const pushed = await this.pushConfigToAgentModules()
+      if (pushed) {
+        const retryResults = await this.tryResumeTasks(retryLater)
+        const retryPartition = partitionResumeResults(retryResults, { deferNotConfigured: false })
+        resumed.push(...retryPartition.resumed)
+        needRecovery.push(...retryPartition.needRecovery)
+        if (retryPartition.resumed.length > 0) {
+          console.log(
+            `[Admin] Self-healing: resumed ${retryPartition.resumed.length} task(s) after config retry: ${retryPartition.resumed.map((t) => t.id).join(', ')}`,
+          )
+        }
+      } else {
+        console.warn('[Admin] Self-healing: config retry push failed; deferred task(s) will wait for a later resume sweep')
+      }
     }
 
     // 2. 不能 resume 的（含 recovery 自身）→ 标 failed
@@ -4774,6 +4884,40 @@ export class AdminModule extends ModuleBase {
       .catch((err: Error) => console.warn(`[Admin] finalize_orphan_checkpoints failed: ${err.message}`))
   }
 
+  private async tryResumeTasks(
+    tasks: Task[],
+  ): Promise<Array<{ task: Task; resumed: boolean; reason?: string }>> {
+    const results: Array<{ task: Task; resumed: boolean; reason?: string }> = []
+    for (const t of tasks) {
+      let resumed = false
+      let reason: string | undefined
+      try {
+        const r = await this.callAgentRpc<{ task_id: string }, { resumed?: boolean; reason?: string }>(
+          'resume_task',
+          { task_id: t.id },
+        )
+        resumed = r?.resumed === true
+        reason = typeof r?.reason === 'string' ? r.reason : undefined
+      } catch (err) {
+        console.warn(`[Admin] Self-healing: resume_task ${t.id} RPC failed: ${(err as Error).message}`)
+      }
+      results.push({ task: t, resumed, reason })
+    }
+    return results
+  }
+
+  private async pushAgentConfigThenSweepResume(moduleId: string, restartCount: number): Promise<void> {
+    const pushed = await this.pushConfigToAgentModules()
+    if (!pushed) {
+      console.warn(`[Admin] Resume sweep for ${moduleId} deferred: config push failed`)
+      return
+    }
+
+    // Resume sweep：agent 配置 push 完成后再对所有 in-flight 任务尝试无损 resume。
+    // 失败的才标 failed + 生成 recovery 兜底。**任何 restart_count 都跑**（含完整重启=0）。
+    await this.sweepInterruptedTasksForResume(restartCount)
+  }
+
   /**
    * 保证 resume sweep 在重启后可靠跑一次，不依赖接住 agent 的 module_started 事件。
    *
@@ -4801,7 +4945,7 @@ export class AdminModule extends ModuleBase {
         }
       }
       if (this.agentPort) {
-        await this.sweepInterruptedTasksForResume(0)
+        await this.pushAgentConfigThenSweepResume('crabot-agent', 0)
         return
       }
       if (Date.now() >= deadline) {
@@ -5066,9 +5210,15 @@ export class AdminModule extends ModuleBase {
       if (typeof scheduleId === 'string') {
         const schedule = this.schedules.get(scheduleId)
         if (schedule) {
+          // 优先用任务声明的窗口终点（input.ingestion_time_end，触发时渲染的 {{datetime}}）。
+          // 用 completed_at 会把任务执行期间 [触发时刻, 完成时刻) 入库的条目
+          // 永久排除在后续增量窗口之外。
+          const windowEnd = task.input?.ingestion_time_end
           const updated: Schedule = {
             ...schedule,
-            watermark: task.completed_at ?? task.updated_at,
+            watermark: typeof windowEnd === 'string' && windowEnd
+              ? windowEnd
+              : task.completed_at ?? task.updated_at,
             updated_at: task.updated_at,
           }
           this.schedules.set(scheduleId, updated)
@@ -5840,6 +5990,12 @@ export class AdminModule extends ModuleBase {
    * 替换模板变量 → RPC 调 Agent create_task_from_schedule → 更新 Schedule 状态
    */
   private async handleScheduleTrigger(schedule: Schedule): Promise<{ task_id: string } | void> {
+    const repairedSchedule = await this.repairScheduleTargetSessionReference(schedule)
+    if (repairedSchedule !== schedule) {
+      this.schedules.set(repairedSchedule.id, repairedSchedule)
+      schedule = repairedSchedule
+    }
+
     const now = new Date()
 
     // 替换模板变量
@@ -6021,8 +6177,12 @@ export class AdminModule extends ModuleBase {
         task_template: {
           type: 'memory_curate',
           title: '记忆整理 — {{datetime}}',
-          description: '第一步必须调用 Skill("memory-curate")，禁止加载其他 reflection skill。流程：扫近期 inbox → 去重 → 多因子打分 → 晋升 confirmed / 丢弃 / 留待 daily-reflection。',
+          description: '第一步必须调用 Skill("memory-curate")，禁止加载其他 reflection skill。整理范围：{{watermark}} 到 {{datetime}}。流程：按 ingestion_time 增量列出此窗口内的 inbox → 去重 → 多因子打分 → 晋升 confirmed / 丢弃 / 留待 daily-reflection。禁止用 search_long_term 拉 inbox 候选。',
           priority: 'low',
+          input: {
+            ingestion_time_start: '{{watermark}}',
+            ingestion_time_end: '{{datetime}}',
+          },
           tags: ['memory_curate', 'builtin'],
         },
       },
@@ -8203,6 +8363,12 @@ export class AdminModule extends ModuleBase {
   private async handleGetModuleConfig(params: {
     module_id: string
   }): Promise<{ config: Record<string, string> }> {
+    // 权威守卫：module_id 会拼进配置文件路径。除 config 路由外，start/restart 也经
+    // handleStartModuleAdmin 走到这里，故守卫必须落在文件 sink 而非仅路由层。
+    // 解码后的穿越 id（如 ../../x）当作不存在处理，返回空配置。
+    if (!isPathSafeSegment(params.module_id)) {
+      return { config: {} }
+    }
     const filePath = path.join(this.moduleConfigsDir, `${params.module_id}.json`)
     try {
       const content = await fs.readFile(filePath, 'utf-8')
@@ -8221,6 +8387,10 @@ export class AdminModule extends ModuleBase {
     module_id: string
     config: Record<string, string>
   }): Promise<{ updated: true }> {
+    // 权威守卫：写 sink 必须硬拒穿越 id，防止 ../ 逃逸出 module-configs 目录写任意文件
+    if (!isPathSafeSegment(params.module_id)) {
+      throw Object.assign(new Error('Invalid module id'), { code: 'INVALID_MODULE_ID' })
+    }
     await fs.mkdir(this.moduleConfigsDir, { recursive: true })
     const filePath = path.join(this.moduleConfigsDir, `${params.module_id}.json`)
     const data = {
@@ -8468,10 +8638,10 @@ export class AdminModule extends ModuleBase {
     })
   }
 
-  private async pushConfigToAgentModules(): Promise<void> {
+  private async pushConfigToAgentModules(): Promise<boolean> {
     try {
       const port = await this.ensureAgentPort()
-      if (!port) return
+      if (!port) return false
 
       // 复用 handleGetAgentConfig 的配置解析逻辑
       const { config } = await this.handleGetAgentConfig({ instance_id: 'crabot-agent' })
@@ -8500,10 +8670,12 @@ export class AdminModule extends ModuleBase {
         `[Admin] Agent config pushed, changed: ${result.changed_fields?.join(', ') || 'none'}` +
         ` (subagents: ${subagents.length})`
       )
+      return true
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       const stack = e instanceof Error && e.stack ? `\n${e.stack}` : ''
       console.warn(`[Admin] Failed to push config to Agent:`, msg, stack)
+      return false
     }
   }
 
@@ -9624,26 +9796,6 @@ export class AdminModule extends ModuleBase {
       const content = await tailLogFile(logFile, cappedLines)
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ module_id: moduleId, lines: cappedLines, content }))
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error)
-      res.writeHead(500, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: msg }))
-    }
-  }
-
-  private async handleRestartModuleApi(
-    _req: IncomingMessage,
-    res: ServerResponse,
-    moduleId: string
-  ): Promise<void> {
-    try {
-      const result = await this.rpcClient.callModuleManager<{ module_id: string }, unknown>(
-        'restart_module',
-        { module_id: moduleId },
-        this.config.moduleId
-      )
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, result }))
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
       res.writeHead(500, { 'Content-Type': 'application/json' })

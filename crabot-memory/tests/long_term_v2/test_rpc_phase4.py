@@ -3,6 +3,8 @@ import pytest
 from src.long_term_v2.store import MemoryStore
 from src.long_term_v2.sqlite_index import SqliteIndex
 from src.long_term_v2.rpc import LongTermV2Rpc
+from src.long_term_v2.schema import MemoryEntry, MemoryFrontmatter, SourceRef, ImportanceFactors
+from src.long_term_v2.paths import entry_path
 
 
 _BASE_PARAMS = {
@@ -36,6 +38,31 @@ def _write_payload(**overrides):
     return payload
 
 
+def _seed_entry(rpc, mem_id, brief, *, status, ingestion_time):
+    fm = MemoryFrontmatter(
+        id=mem_id,
+        type="fact",
+        maturity="observed",
+        brief=brief,
+        author="user",
+        source_ref=SourceRef(type="manual"),
+        source_trust=5,
+        content_confidence=5,
+        importance_factors=ImportanceFactors(
+            proximity=0.5, surprisal=0.5, entity_priority=0.5, unambiguity=0.5,
+        ),
+        event_time="2026-04-23T10:00:00Z",
+        ingestion_time=ingestion_time,
+    )
+    entry = MemoryEntry(frontmatter=fm, body=f"body {brief}")
+    rpc.store.write(entry, status=status)
+    rpc.index.upsert(
+        entry,
+        path=entry_path(rpc.store.data_root, status, "fact", mem_id),
+        status=status,
+    )
+
+
 @pytest.mark.asyncio
 async def test_list_entries_returns_written_entry(rpc):
     w = await rpc.write_long_term(_write_payload(brief="alpha"))
@@ -64,6 +91,25 @@ async def test_list_entries_filters_by_status(rpc):
     res = await rpc.list_entries({"status": "confirmed"})
     assert res["total"] == 1
     assert res["items"][0]["brief"] == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_list_entries_filters_by_ingestion_time_window(rpc):
+    _seed_entry(rpc, "mem-l-before", "before", status="inbox",
+                ingestion_time="2026-04-23T09:59:59Z")
+    _seed_entry(rpc, "mem-l-in-window", "in-window", status="inbox",
+                ingestion_time="2026-04-23T10:30:00Z")
+    _seed_entry(rpc, "mem-l-confirmed", "confirmed in window", status="confirmed",
+                ingestion_time="2026-04-23T10:40:00Z")
+
+    res = await rpc.list_entries({
+        "status": "inbox",
+        "ingestion_time_start": "2026-04-23T10:00:00Z",
+        "ingestion_time_end": "2026-04-23T11:00:00Z",
+    })
+
+    assert res["total"] == 1
+    assert res["items"][0]["brief"] == "in-window"
 
 
 @pytest.mark.asyncio

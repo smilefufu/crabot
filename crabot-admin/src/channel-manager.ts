@@ -8,7 +8,7 @@ import fs from 'fs/promises'
 import fsSync from 'fs'
 import path from 'path'
 import yaml from 'js-yaml'
-import { generateTimestamp, type RpcClient } from 'crabot-shared'
+import { generateTimestamp, type RpcClient, validateInstanceId } from 'crabot-shared'
 import type {
   ChannelImplementation,
   ChannelInstance,
@@ -31,6 +31,7 @@ const BUILTIN_MODULE_PATHS: readonly string[] = [
   '../crabot-channel-wechat',
   '../crabot-channel-telegram',
   '../crabot-channel-feishu',
+  '../crabot-channel-dingtalk',
 ]
 
 /**
@@ -187,8 +188,12 @@ export class ChannelManager {
       throw new Error(`Implementation not found: ${params.implementation_id}`)
     }
 
-    // 实例名即 module_id，确保唯一性
-    const instanceId = params.name
+    // 实例名即 module_id：校验 + NFC 归一化（crabot-module-spec.md §4.3），确保唯一性
+    const validated = validateInstanceId(params.name)
+    if (!validated.ok) {
+      throw new Error(`Invalid instance name: ${validated.reason}`)
+    }
+    const instanceId = validated.id
     if (this.instances.has(instanceId)) {
       throw new Error(`Instance name already exists: ${params.name}`)
     }
@@ -199,7 +204,7 @@ export class ChannelManager {
     const instance: ChannelInstance = {
       id: instanceId,
       implementation_id: params.implementation_id,
-      name: params.name,
+      name: instanceId,
       platform,
       auto_start: params.auto_start ?? false,
       start_priority: 30,
@@ -583,12 +588,15 @@ export class ChannelManager {
     config: Record<string, string> | null,
     onConflict: OnConflict,
   ): Promise<'imported' | 'overwritten' | 'skipped'> {
-    const exists = this.instances.has(instance.id)
+    // 备份可能来自 macOS（NFD 文件名），归一化后再匹配，防跨平台 id 对不上号
+    const id = instance.id.normalize('NFC')
+    const normalized: ChannelInstance = { ...instance, id, name: instance.name.normalize('NFC') }
+    const exists = this.instances.has(id)
     if (exists && onConflict === 'skip') return 'skipped'
-    this.instances.set(instance.id, instance)
+    this.instances.set(id, normalized)
     await this.saveInstances()
     if (config !== null) {
-      await this.saveLocalConfig(instance.id, config)
+      await this.saveLocalConfig(id, config)
     }
     return exists ? 'overwritten' : 'imported'
   }

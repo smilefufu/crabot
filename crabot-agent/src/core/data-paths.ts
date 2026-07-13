@@ -14,6 +14,10 @@ export function getAgentDataDir(): string {
   return path.resolve('./data/agent')
 }
 
+export function getDataRootDir(): string {
+  return path.resolve(getAgentDataDir(), '..')
+}
+
 export function getAgentLogsDir(): string {
   return path.join(getAgentDataDir(), 'logs')
 }

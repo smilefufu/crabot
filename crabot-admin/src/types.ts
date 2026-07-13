@@ -796,6 +796,8 @@ export interface ScheduleTaskTemplate {
 export interface ScheduleTargetSession {
   channel_id: ModuleId
   session_id: SessionId
+  /** Stable platform-native conversation id, used to repair stale internal session ids. */
+  platform_session_id?: string
   type: 'private' | 'group'
 }
 

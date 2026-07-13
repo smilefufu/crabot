@@ -17,7 +17,7 @@ export const channelService = {
   },
 
   async getImplementation(id: string) {
-    return api.get<{ implementation: ChannelImplementation }>(`/channel-implementations/${id}`)
+    return api.get<{ implementation: ChannelImplementation }>(`/channel-implementations/${encodeURIComponent(id)}`)
   },
 
   // Instance
@@ -26,7 +26,7 @@ export const channelService = {
   },
 
   async getInstance(id: string) {
-    return api.get<{ instance: ChannelInstance }>(`/channel-instances/${id}`)
+    return api.get<{ instance: ChannelInstance }>(`/channel-instances/${encodeURIComponent(id)}`)
   },
 
   async createInstance(params: CreateChannelInstanceParams) {
@@ -34,50 +34,50 @@ export const channelService = {
   },
 
   async updateInstance(id: string, params: Partial<UpdateChannelInstanceParams>) {
-    return api.patch<{ instance: ChannelInstance }>(`/channel-instances/${id}`, params)
+    return api.patch<{ instance: ChannelInstance }>(`/channel-instances/${encodeURIComponent(id)}`, params)
   },
 
   async deleteInstance(id: string) {
-    return api.delete(`/channel-instances/${id}`)
+    return api.delete(`/channel-instances/${encodeURIComponent(id)}`)
   },
 
   // Config
   async getInstanceConfig(id: string) {
-    return api.get<{ config: ChannelConfig; schema?: any }>(`/channel-instances/${id}/config`)
+    return api.get<{ config: ChannelConfig; schema?: any }>(`/channel-instances/${encodeURIComponent(id)}/config`)
   },
 
   async updateInstanceConfig(id: string, config: Partial<ChannelConfig>) {
     return api.patch<{ config: ChannelConfig; requires_restart: boolean }>(
-      `/channel-instances/${id}/config`,
+      `/channel-instances/${encodeURIComponent(id)}/config`,
       { config }
     )
   },
 
   // Local Config（启动前环境变量配置）
   async getLocalConfig(id: string) {
-    return api.get<{ config: Record<string, string> }>(`/channel-instances/${id}/local-config`)
+    return api.get<{ config: Record<string, string> }>(`/channel-instances/${encodeURIComponent(id)}/local-config`)
   },
 
   async saveLocalConfig(id: string, config: Record<string, string>) {
-    return api.post<{ config: Record<string, string> }>(`/channel-instances/${id}/local-config`, { config })
+    return api.post<{ config: Record<string, string> }>(`/channel-instances/${encodeURIComponent(id)}/local-config`, { config })
   },
 
   // Health（protocol-channel §7.1）
   async getHealth(id: string) {
-    return api.get<{ status: string; details: Record<string, unknown> }>(`/channel-instances/${id}/health`)
+    return api.get<{ status: string; details: Record<string, unknown> }>(`/channel-instances/${encodeURIComponent(id)}/health`)
   },
 
   // Module Control
   async startInstance(id: string) {
-    return api.post(`/channel-instances/${id}/start`)
+    return api.post(`/channel-instances/${encodeURIComponent(id)}/start`)
   },
 
   async stopInstance(id: string) {
-    return api.post(`/channel-instances/${id}/stop`)
+    return api.post(`/channel-instances/${encodeURIComponent(id)}/stop`)
   },
 
   async restartInstance(id: string) {
-    return api.post(`/channel-instances/${id}/restart`)
+    return api.post(`/channel-instances/${encodeURIComponent(id)}/restart`)
   },
 
   // ── 通用 Channel onboarding（base-protocol §10）────────────────────

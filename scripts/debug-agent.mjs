@@ -3,7 +3,7 @@
 // Crabot Agent 调试脚本
 //
 // 封装常用调试 RPC 查询，适用于所有 Agent 模块实现
-// 详细用法说明：docs/agent-debugging.md
+// 详细用法说明：crabot-docs/guides/agent-debugging.md
 // =============================================================================
 
 import { readFileSync, existsSync } from 'node:fs'
@@ -17,8 +17,8 @@ const PROJECT_ROOT = resolve(__dirname, '..')
 
 const PORTS = {
   mm: parseInt(process.env.CRABOT_MM_PORT ?? '19000'),
-  admin: parseInt(process.env.CRABOT_ADMIN_PORT ?? '19001'),
-  agent: parseInt(process.env.CRABOT_AGENT_PORT ?? '19005'),
+  admin: process.env.CRABOT_ADMIN_PORT ? parseInt(process.env.CRABOT_ADMIN_PORT) : null,
+  agent: process.env.CRABOT_AGENT_PORT ? parseInt(process.env.CRABOT_AGENT_PORT) : null,
 }
 
 // ── 颜色 ──────────────────────────────────────────────────────────────────────
@@ -36,6 +36,7 @@ const c = {
 // ── 基础工具 ──────────────────────────────────────────────────────────────────
 
 async function rpcCall(port, method, params = {}) {
+  if (!port) return null
   const body = {
     id: `dbg-${Date.now()}`,
     source: 'debug',
@@ -53,6 +54,62 @@ async function rpcCall(port, method, params = {}) {
   } catch {
     return null
   }
+}
+
+async function isHealthy(port) {
+  const res = await rpcCall(port, 'health')
+  return res?.success ? res : null
+}
+
+function pickModulePort(modules, matcher) {
+  const mod = modules.find((m) => m?.port && matcher(m))
+  return mod?.port ?? null
+}
+
+async function findHealthyPort(candidates) {
+  for (const port of candidates) {
+    if (await isHealthy(port)) return port
+  }
+  return null
+}
+
+async function resolveModulePorts() {
+  const envAdmin = PORTS.admin != null
+  const envAgent = PORTS.agent != null
+  if (PORTS.admin && PORTS.agent) return PORTS
+
+  const list = await rpcCall(PORTS.mm, 'list_modules')
+  const modules = list?.success ? (list.data?.modules ?? []) : []
+  if (modules.length > 0) {
+    if (!PORTS.admin) {
+      PORTS.admin = pickModulePort(
+        modules,
+        (m) => m.module_type === 'admin' || m.module_id === 'admin-web' || m.module_id === 'crabot-admin',
+      )
+    }
+    if (!PORTS.agent) {
+      PORTS.agent = pickModulePort(
+        modules,
+        (m) => m.module_type === 'agent' || m.module_id === 'crabot-agent',
+      )
+    }
+  }
+
+  if (!PORTS.admin) {
+    const resolved = await rpcCall(PORTS.mm, 'resolve', { module_type: 'admin' })
+    PORTS.admin = resolved?.success ? pickModulePort(resolved.data?.modules ?? [], (m) => Boolean(m.port)) : null
+  }
+  if (!PORTS.agent) {
+    const resolved = await rpcCall(PORTS.mm, 'resolve', { module_type: 'agent' })
+    PORTS.agent = resolved?.success ? pickModulePort(resolved.data?.modules ?? [], (m) => Boolean(m.port)) : null
+  }
+
+  if (!PORTS.admin && !envAdmin) PORTS.admin = await findHealthyPort([19002, 19001])
+  if (!PORTS.agent && !envAgent) PORTS.agent = await findHealthyPort([19003, 19005])
+
+  PORTS.admin ??= 19001
+  PORTS.agent ??= 19005
+  return PORTS
 }
 
 function formatDuration(ms) {
@@ -84,6 +141,7 @@ function short(id, len = 8) {
  * 支持短 ID 前缀匹配（如 traces 列表中显示的 8 字符 ID）。
  */
 async function resolveTraceId(prefix) {
+  await resolveModulePorts()
   if (!prefix) return null
 
   // 先精确查找
@@ -111,6 +169,7 @@ async function resolveTraceId(prefix) {
 // =============================================================================
 
 async function cmdHealth() {
+  await resolveModulePorts()
   console.log(`${c.bold(c.cyan('── Module Health ──'))}\n`)
 
   const modules = [
@@ -139,6 +198,7 @@ async function cmdHealth() {
 // =============================================================================
 
 async function cmdTraces(limit = 10, statusFilter) {
+  await resolveModulePorts()
   const params = { limit }
   if (statusFilter) params.status = statusFilter
 
@@ -172,6 +232,7 @@ async function cmdTraces(limit = 10, statusFilter) {
 // =============================================================================
 
 async function cmdTrace(traceIdArg) {
+  await resolveModulePorts()
   let traceId = traceIdArg
 
   if (!traceId) {
@@ -257,6 +318,11 @@ async function cmdTrace(traceIdArg) {
           : kind === 'stay_silent' ? c.dim(kind)
           : kind
         const parts = [kindLabel]
+        if (d.immediate_reply_sent === true) parts.push(c.cyan('dispatcher_ack=sent'))
+        if (d.immediate_reply_sent === false) parts.push(c.dim('dispatcher_ack=none'))
+        if (d.outcome === 'supplement_delivered') parts.push(c.blue('supplement_ack=delivered_to_worker'))
+        if (d.outcome === 'terminal_task_revived') parts.push(c.blue('supplement_ack=revived_worker'))
+        if (d.outcome === 'supplement_fallback_recovered') parts.push(c.yellow('supplement_ack=fallback_new_task'))
         if (d.target_task_id) parts.push(`task=${short(d.target_task_id)}`)
         if (d.text_summary) parts.push(`"${String(d.text_summary).slice(0, 50)}"`)
         if (d.reason) parts.push(`reason=${String(d.reason).slice(0, 40)}`)
@@ -278,25 +344,30 @@ async function cmdTrace(traceIdArg) {
 // =============================================================================
 
 async function cmdTasks(statusFilter) {
-  const params = { limit: 20 }
-  if (statusFilter) params.status = statusFilter
+  await resolveModulePorts()
+  const params = {
+    page: 1,
+    page_size: 20,
+    sort: { field: 'created_at', order: 'desc' },
+  }
+  if (statusFilter) params.filter = { status: statusFilter }
 
-  const res = await rpcCall(PORTS.admin, 'get_tasks', params)
+  const res = await rpcCall(PORTS.admin, 'list_tasks', params)
   if (!res?.success) {
     console.log(`${c.red('[error]')} Admin (port ${PORTS.admin}) 无响应`)
     if (res) console.log(JSON.stringify(res, null, 2))
     return
   }
 
-  const tasks = res.data?.tasks ?? []
-  const total = res.data?.total ?? tasks.length
+  const tasks = res.data?.items ?? []
+  const total = res.data?.pagination?.total_items ?? tasks.length
   console.log(`${c.bold(c.cyan(`── Tasks (${total} 条) ──`))}\n`)
 
   for (const t of tasks) {
-    const tid = c.dim(short(t.task_id))
+    const tid = c.dim(short(t.id ?? t.task_id))
     const title = (t.title ?? '').slice(0, 50)
     const created = (t.created_at ?? '').slice(0, 19)
-    console.log(`  ${tid}  ${pad(statusColor(t.status), 24)}  ${pad(t.task_type, 12)}  ${pad(t.priority, 8)}  ${title}  ${c.dim(created)}`)
+    console.log(`  ${tid}  ${pad(statusColor(t.status), 24)}  ${pad(t.type ?? t.task_type, 12)}  ${pad(t.priority, 8)}  ${title}  ${c.dim(created)}`)
   }
   console.log()
 }
@@ -335,6 +406,7 @@ function cmdLogs(lines = 50) {
 // =============================================================================
 
 async function cmdModules() {
+  await resolveModulePorts()
   const res = await rpcCall(PORTS.mm, 'list_modules')
 
   console.log(`${c.bold(c.cyan('── Registered Modules ──'))}\n`)
@@ -401,7 +473,7 @@ ${c.bold('Crabot Agent 调试脚本')}
     node ${name} tasks executing     # 列出进行中的任务
     node ${name} logs 100            # 查看最近 100 行日志
 
-  ${c.dim(`详细说明：docs/agent-debugging.md`)}
+  ${c.dim(`详细说明：crabot-docs/guides/agent-debugging.md`)}
 `)
 }
 

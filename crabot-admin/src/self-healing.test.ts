@@ -130,6 +130,109 @@ describe('sweepInterruptedTasksForResume through applyStatusTransition', () => {
     expect((admin as any).tasks.get(task.id).status).toBe('executing')
   })
 
+  it('agent 已注册但 worker handler 尚未配置时，不把任务标 failed，留待下一次 sweep', async () => {
+    const { task } = await (admin as any).handleCreateTask({
+      title: 't',
+      description: 'd',
+      priority: 'normal',
+      source: { trigger_type: 'manual', origin: 'human' },
+    })
+    await (admin as any).handleUpdateTaskStatus({ task_id: task.id, status: 'planning' })
+    await (admin as any).handleUpdateTaskStatus({ task_id: task.id, status: 'executing' })
+
+    const originalRpc = (admin as any).callAgentRpc.bind(admin)
+    ;(admin as any).callAgentRpc = async (method: string) => {
+      if (method === 'resume_task') return { resumed: false, reason: 'not_configured' }
+      return {}
+    }
+
+    try {
+      await (admin as any).sweepInterruptedTasksForResume(0, { retryDelayMs: 0 })
+    } finally {
+      ;(admin as any).callAgentRpc = originalRpc
+    }
+
+    const kept = (admin as any).tasks.get(task.id)
+    expect(kept.status).toBe('executing')
+    expect(kept.error).toBeUndefined()
+  })
+
+  it('not_configured 后触发一次配置成功后的二阶段 resume sweep', async () => {
+    const { task } = await (admin as any).handleCreateTask({
+      title: 't',
+      description: 'd',
+      priority: 'normal',
+      source: { trigger_type: 'manual', origin: 'human' },
+    })
+    await (admin as any).handleUpdateTaskStatus({ task_id: task.id, status: 'planning' })
+    await (admin as any).handleUpdateTaskStatus({ task_id: task.id, status: 'executing' })
+
+    const resumeResults = [
+      { resumed: false, reason: 'not_configured' },
+      { resumed: true },
+    ]
+    const calls: Array<{ method: string; params: any }> = []
+    const originalRpc = (admin as any).callAgentRpc.bind(admin)
+    const originalPush = (admin as any).pushConfigToAgentModules.bind(admin)
+    ;(admin as any).callAgentRpc = async (method: string, params: any) => {
+      calls.push({ method, params })
+      if (method === 'resume_task' && params.task_id === task.id) return resumeResults.shift()
+      if (method === 'resume_task') return { resumed: true }
+      return {}
+    }
+    ;(admin as any).pushConfigToAgentModules = async () => true
+
+    try {
+      await (admin as any).sweepInterruptedTasksForResume(0, { retryDelayMs: 0 })
+    } finally {
+      ;(admin as any).callAgentRpc = originalRpc
+      ;(admin as any).pushConfigToAgentModules = originalPush
+    }
+
+    expect(calls.filter((c) => c.method === 'resume_task' && c.params.task_id === task.id)).toHaveLength(2)
+    const kept = (admin as any).tasks.get(task.id)
+    expect(kept.status).toBe('executing')
+    expect(kept.error).toBeUndefined()
+  })
+
+  it('not_configured 二阶段重试仍失败时进入 recovery 兜底', async () => {
+    const { task } = await (admin as any).handleCreateTask({
+      title: 't',
+      description: 'd',
+      priority: 'normal',
+      source: { trigger_type: 'manual', origin: 'human' },
+    })
+    await (admin as any).handleUpdateTaskStatus({ task_id: task.id, status: 'planning' })
+    await (admin as any).handleUpdateTaskStatus({ task_id: task.id, status: 'executing' })
+
+    const resumeResults = [
+      { resumed: false, reason: 'not_configured' },
+      { resumed: false, reason: 'not_configured' },
+    ]
+    const calls: Array<{ method: string; params: any }> = []
+    const originalRpc = (admin as any).callAgentRpc.bind(admin)
+    const originalPush = (admin as any).pushConfigToAgentModules.bind(admin)
+    ;(admin as any).callAgentRpc = async (method: string, params: any) => {
+      calls.push({ method, params })
+      if (method === 'resume_task' && params.task_id === task.id) return resumeResults.shift()
+      if (method === 'resume_task') return { resumed: true }
+      return {}
+    }
+    ;(admin as any).pushConfigToAgentModules = async () => true
+
+    try {
+      await (admin as any).sweepInterruptedTasksForResume(0, { retryDelayMs: 0 })
+    } finally {
+      ;(admin as any).callAgentRpc = originalRpc
+      ;(admin as any).pushConfigToAgentModules = originalPush
+    }
+
+    expect(calls.filter((c) => c.method === 'resume_task' && c.params.task_id === task.id)).toHaveLength(2)
+    const failed = (admin as any).tasks.get(task.id)
+    expect(failed.status).toBe('failed')
+    expect(failed.error).toBe('agent_restarted_during_execution')
+  })
+
   it('module_started 丢失时，轮询兜底仍可靠触发 sweep（agent 延迟就绪）', async () => {
     ;(admin as any).agentPort = 0 // 模拟没接住 agent 的 module_started 事件
     let resolveCalls = 0
@@ -139,7 +242,9 @@ describe('sweepInterruptedTasksForResume through applyStatusTransition', () => {
       ;(admin as any).agentPort = 19999 // 轮询时 agent「注册」上
     }
     let sweepCalled = false
+    const originalPush = (admin as any).pushConfigToAgentModules.bind(admin)
     const originalSweep = (admin as any).sweepInterruptedTasksForResume.bind(admin)
+    ;(admin as any).pushConfigToAgentModules = async () => true
     ;(admin as any).sweepInterruptedTasksForResume = async () => {
       sweepCalled = true
     }
@@ -148,11 +253,31 @@ describe('sweepInterruptedTasksForResume through applyStatusTransition', () => {
       await (admin as any).ensureResumeSweepAfterAgentReady(10, 5000)
     } finally {
       ;(admin as any).resolveAgentPort = originalResolve
+      ;(admin as any).pushConfigToAgentModules = originalPush
       ;(admin as any).sweepInterruptedTasksForResume = originalSweep
     }
 
     expect(resolveCalls).toBeGreaterThanOrEqual(1)
     expect(sweepCalled).toBe(true)
+  })
+
+  it('配置 push 失败时不触发 sweep，避免把尚未 ready 的任务误判 failed', async () => {
+    let sweepCalled = false
+    const originalPush = (admin as any).pushConfigToAgentModules.bind(admin)
+    const originalSweep = (admin as any).sweepInterruptedTasksForResume.bind(admin)
+    ;(admin as any).pushConfigToAgentModules = async () => false
+    ;(admin as any).sweepInterruptedTasksForResume = async () => {
+      sweepCalled = true
+    }
+
+    try {
+      await (admin as any).pushAgentConfigThenSweepResume('crabot-agent', 0)
+    } finally {
+      ;(admin as any).pushConfigToAgentModules = originalPush
+      ;(admin as any).sweepInterruptedTasksForResume = originalSweep
+    }
+
+    expect(sweepCalled).toBe(false)
   })
 
   it('agent 一直不就绪时 sweep 不被调用（超时放弃，不误标 failed）', async () => {

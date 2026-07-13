@@ -44,6 +44,13 @@ export interface TraceIndexEntry {
   duration_ms?: number
   status: 'running' | 'completed' | 'failed'
   outcome_summary?: string
+  dispatch_actions?: Array<{
+    kind?: string
+    outcome?: string
+    target_task_id?: string
+    spawned_trace_id?: string
+    target_task_completed_at?: string
+  }>
   span_count: number
   /** 全 trace 的 token 用量汇总（持久化时聚合，rebuild 时按 spans 重算） */
   total_usage?: TokenUsage
@@ -953,6 +960,7 @@ export class TraceStore {
   private traceToIndexEntry(trace: AgentTrace, file: string, fileOffset: number): TraceIndexEntry {
     // total_usage 优先取持久化时计算的值（endTrace 已回填）；rebuild 时若缺失则按 spans 重算。
     const totalUsage = trace.total_usage ?? aggregateUsage(trace.spans ?? [])
+    const dispatchActions = extractDispatchActions(trace.spans ?? [])
     return {
       trace_id: trace.trace_id,
       related_task_id: trace.related_task_id,
@@ -965,6 +973,7 @@ export class TraceStore {
       duration_ms: trace.duration_ms,
       status: trace.status,
       outcome_summary: trace.outcome?.summary,
+      ...(dispatchActions.length > 0 ? { dispatch_actions: dispatchActions } : {}),
       span_count: trace.spans?.length ?? 0,
       ...(totalUsage ? { total_usage: totalUsage } : {}),
       file,
@@ -1011,4 +1020,20 @@ export class TraceStore {
       console.warn(`[TraceStore] persistTrace failed for ${trace.trace_id}: ${msg}`)
     }
   }
+}
+
+function extractDispatchActions(spans: AgentSpan[]): NonNullable<TraceIndexEntry['dispatch_actions']> {
+  return spans
+    .filter((span) => span.type === 'dispatch_action')
+    .map((span) => {
+      const details = span.details as Record<string, unknown>
+      return {
+        ...(typeof details.kind === 'string' ? { kind: details.kind } : {}),
+        ...(typeof details.outcome === 'string' ? { outcome: details.outcome } : {}),
+        ...(typeof details.target_task_id === 'string' ? { target_task_id: details.target_task_id } : {}),
+        ...(typeof details.spawned_trace_id === 'string' ? { spawned_trace_id: details.spawned_trace_id } : {}),
+        ...(typeof details.target_task_completed_at === 'string' ? { target_task_completed_at: details.target_task_completed_at } : {}),
+      }
+    })
+    .filter((action) => Object.keys(action).length > 0)
 }

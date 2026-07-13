@@ -1,0 +1,75 @@
+module_id: channel-dingtalk
+name: DingTalk (钉钉)
+version: 0.1.0
+module_type: channel
+description: 钉钉 Channel 模块，Stream 模式长连接，无需公网回调
+
+protocol_version: "0.1.0"
+
+runtime:
+  type: nodejs
+  version: ">=20.0.0"
+
+install: corepack pnpm install
+build: corepack pnpm run build
+entry: dist/main.js
+
+# 钉钉无 OAuth/扫码交互，凭据由用户在 Admin「手动填写」表单录入（config_schema 通用渲染）。
+# 通用 onboarding 向导当前只采集实例名、不透传表单式 finish 参数，故 v1 不声明 onboarding_methods；
+# 引导式配置 + auto-master 绑定为后续项（待向导支持表单式 finish 后再补）。
+config_schema:
+  type: object
+  required:
+    - DINGTALK_APP_KEY
+    - DINGTALK_APP_SECRET
+    - DINGTALK_ROBOT_CODE
+  # 扩展约定（Admin Web 用，不影响 channel 模块本身）：
+  #   x-runtime-path: 运行时 get_config / update_config RPC 里嵌套对象的路径
+  #   钉钉无 OAuth，凭据由用户手填，故不设 readOnly（可在 Admin 配置表单直接录入/修改）
+  #   schema 里没列出的运行时字段（如 platform / crab_platform_user_id）默认不渲染
+  properties:
+    DINGTALK_APP_KEY:
+      type: string
+      title: 钉钉 AppKey
+      description: 企业内部应用 AppKey（同时用作 Stream clientId）
+      x-runtime-path: credentials.app_key
+    DINGTALK_APP_SECRET:
+      type: string
+      title: 钉钉 AppSecret
+      description: 企业内部应用 AppSecret（同时用作 Stream clientSecret）
+      format: password
+      x-runtime-path: credentials.app_secret
+    DINGTALK_ROBOT_CODE:
+      type: string
+      title: 机器人 robotCode
+      description: 机器人 robotCode，出站发送必需
+      x-runtime-path: credentials.robot_code
+    DINGTALK_OWNER_STAFF_ID:
+      type: string
+      title: 主人 staffId
+      description: 主人钉钉账号 staffId（可选，跨渠道复用主人身份）
+      x-runtime-path: credentials.owner_staff_id
+    DINGTALK_ONLY_RESPOND_TO_MENTIONS:
+      type: string
+      title: 群聊仅响应 @ Crabot
+      description: 启用时群聊里只有 @ Crabot 的消息才会触发事件
+      enum: ["true", "false"]
+      enum_titles: ["是", "否"]
+      default: "true"
+      x-runtime-path: group.only_respond_to_mentions
+    DINGTALK_MARKDOWN_FORMAT:
+      type: string
+      title: Markdown 渲染
+      description: bot 给钉钉发文本时是否按 Markdown 渲染（启用时改用 sampleMarkdown）；auto 仅在检测到 markdown 标记时启用
+      enum: ["auto", "on", "off"]
+      enum_titles: ["自动", "启用", "关闭"]
+      default: "auto"
+      x-runtime-path: markdown_format
+
+author: Crabot Team
+license: Apache-2.0
+keywords:
+  - dingtalk
+  - 钉钉
+  - channel
+  - messaging

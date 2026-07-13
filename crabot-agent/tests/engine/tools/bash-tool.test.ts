@@ -38,15 +38,20 @@ describe('createBashTool', () => {
     expect(result.output).toContain('hello')
   })
 
-  it('captures stderr', async () => {
-    const result = await tool.call({ command: 'echo err >&2' }, {})
+  it('formats stdout and stderr with exit_code fields', async () => {
+    const result = await tool.call({ command: 'printf "out"; printf "err" >&2' }, {})
     expect(result.isError).toBe(false)
-    expect(result.output).toContain('err')
+    expect(result.output).toContain('exit_code: 0')
+    expect(result.output).toContain('stdout:\nout')
+    expect(result.output).toContain('stderr:\nerr')
   })
 
-  it('returns error for failing command', async () => {
-    const result = await tool.call({ command: 'exit 1' }, {})
-    expect(result.isError).toBe(true)
+  it('returns command result for non-zero exit without tool error', async () => {
+    const result = await tool.call({ command: 'printf "out"; printf "err" >&2; exit 1' }, {})
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('exit_code: 1')
+    expect(result.output).toContain('stdout:\nout')
+    expect(result.output).toContain('stderr:\nerr')
   })
 
   it('respects cwd', async () => {
@@ -54,7 +59,18 @@ describe('createBashTool', () => {
     expect(result.isError).toBe(false)
     // Resolve symlinks (macOS /tmp -> /private/tmp)
     const resolvedTmpDir = fs.realpathSync(tmpDir)
-    expect(result.output.trim()).toBe(resolvedTmpDir)
+    expect(result.output).toContain('exit_code: 0')
+    expect(result.output).toContain(`stdout:\n${resolvedTmpDir}`)
+  })
+
+  it('returns a tool error when cwd is missing', async () => {
+    const missingCwd = path.join(tmpDir, 'missing-cwd')
+    const missingTool = createBashTool(() => missingCwd)
+
+    const result = await missingTool.call({ command: 'echo hi' }, {})
+
+    expect(result.isError).toBe(true)
+    expect(result.output).toMatch(/Command execution failed|ENOENT/)
   })
 
   it('truncates large output', async () => {
@@ -142,15 +158,19 @@ describe('createBashTool with bgCtx', () => {
     expect(all.filter((e) => e.spawned_by_task_id === 'task-grace-fast')).toHaveLength(0)
   })
 
-  it('grace 快路径：非零退出码 → isError + 含退出码', async () => {
+  it('grace 快路径：非零退出码是命令结果，不是 tool error', async () => {
     const tool = createBashTool(() => cwd, undefined, makeBgCtx('task-grace-fail'))
-    const result = await tool.call({ command: 'echo oops; exit 3' }, {} as ToolCallContext)
-    expect(result.isError).toBe(true)
-    expect(result.output).toContain('oops')
-    expect(result.output).toContain('exited with code 3')
+    const result = await tool.call(
+      { command: 'printf "oops"; printf "bad" >&2; exit 3' },
+      {} as ToolCallContext,
+    )
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('exit_code: 3')
+    expect(result.output).toContain('stdout:\noops')
+    expect(result.output).toContain('stderr:\nbad')
   })
 
-  it('grace 慢路径：超期仍在跑 → 转后台注册 bgRegistry + 引导 wait_for_signal（命令不中断），退出触发 onShellExit', async () => {
+  it('grace 慢路径：共享文案按工具表区分 wait_for_signal 与 blocking Output', async () => {
     const pushed: ExitInfo[] = []
     // 注入 50ms 短 grace，命令 sleep 0.4s 必然超期
     const tool = createBashTool(() => cwd, undefined, makeBgCtx('task-grace-slow', (info) => pushed.push(info)), 50)
@@ -161,7 +181,12 @@ describe('createBashTool with bgCtx', () => {
     )
     expect(result.isError).toBe(false)
     expect(result.output).toContain('转入后台继续运行')
-    expect(result.output).toContain('wait_for_signal')
+    expect(result.output).toContain('工具列表中有 wait_for_signal')
+    expect(result.output).toContain('工具列表中没有 wait_for_signal')
+    expect(result.output).toContain('block=true')
+    expect(result.output).toContain('timeout_ms=600000')
+    expect(result.output).not.toContain('若没有，调 wait_for_signal')
+    expect(result.output).not.toContain('exit_code:')
     const match = result.output.match(/shell_[0-9a-f]+/)
     expect(match).not.toBeNull()
     const shellId = match![0]
@@ -174,7 +199,7 @@ describe('createBashTool with bgCtx', () => {
     expect(rec?.status).toBe('running')
 
     // 命令真正退出 → onShellExit 触发 + registry 标 completed
-    await settle()
+    await settle(1200)
     expect(pushed.map((i) => i.entity_id)).toContain(shellId)
     expect(pushed.find((i) => i.entity_id === shellId)?.status).toBe('completed')
     const rec2 = await registry.get(shellId)

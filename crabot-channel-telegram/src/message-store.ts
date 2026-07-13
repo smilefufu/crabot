@@ -23,6 +23,7 @@ export class MessageStore {
   private readonly messagesDir: string
   private readonly cacheConfig: TelegramCacheConfig
   private cleanupTimer: ReturnType<typeof setInterval> | null = null
+  private migrationLocks = new Map<string, Promise<void>>()
 
   constructor(dataDir: string, cacheConfig?: Partial<TelegramCacheConfig>) {
     this.messagesDir = path.join(dataDir, 'messages')
@@ -123,6 +124,53 @@ export class MessageStore {
     return records.find((r) => r.platform_message_id === platformMessageId)
   }
 
+  async migrateSessionId(fromSessionId: string, toSessionId: string): Promise<void> {
+    if (fromSessionId === toSessionId) return
+
+    const key = `to:${toSessionId}`
+    const previous = this.migrationLocks.get(key) ?? Promise.resolve()
+    const migration = previous
+      .catch(() => undefined)
+      .then(() => this.migrateSessionIdLocked(fromSessionId, toSessionId))
+      .finally(() => {
+        if (this.migrationLocks.get(key) === migration) {
+          this.migrationLocks.delete(key)
+        }
+      })
+    this.migrationLocks.set(key, migration)
+    return migration
+  }
+
+  private async migrateSessionIdLocked(fromSessionId: string, toSessionId: string): Promise<void> {
+    const fromPath = this.sessionFilePath(fromSessionId)
+    const toPath = this.sessionFilePath(toSessionId)
+
+    let legacyContent: string
+    try {
+      legacyContent = await fs.readFile(fromPath, 'utf-8')
+    } catch (error) {
+      if (isNotFoundError(error)) return
+      throw error
+    }
+
+    if (legacyContent) {
+      const stableContent = fsSync.existsSync(toPath) ? fsSync.readFileSync(toPath, 'utf-8') : ''
+      const existingMessageIds = collectPlatformMessageIds(stableContent)
+      const linesToAppend = legacyContent
+        .split('\n')
+        .filter((line) => shouldAppendJsonlLine(line, existingMessageIds))
+      if (linesToAppend.length > 0) {
+        const prefix = stableContent && !stableContent.endsWith('\n') ? '\n' : ''
+        await fs.appendFile(toPath, prefix + linesToAppend.join('\n') + '\n', 'utf-8')
+      }
+    }
+    try {
+      await fs.unlink(fromPath)
+    } catch (error) {
+      if (!isNotFoundError(error)) throw error
+    }
+  }
+
   // ── 内部方法 ──────────────────────────────────────────────────────────────
 
   private sessionFilePath(sessionId: string): string {
@@ -193,5 +241,34 @@ export class MessageStore {
         await fs.writeFile(filePath, content, 'utf-8')
       }
     }
+  }
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT'
+}
+
+function collectPlatformMessageIds(content: string): Set<string> {
+  const ids = new Set<string>()
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue
+    const id = platformMessageIdFromLine(line)
+    if (id) ids.add(id)
+  }
+  return ids
+}
+
+function shouldAppendJsonlLine(line: string, existingMessageIds: Set<string>): boolean {
+  if (!line.trim()) return false
+  const id = platformMessageIdFromLine(line)
+  return !id || !existingMessageIds.has(id)
+}
+
+function platformMessageIdFromLine(line: string): string | undefined {
+  try {
+    const parsed = JSON.parse(line) as { platform_message_id?: unknown }
+    return typeof parsed.platform_message_id === 'string' ? parsed.platform_message_id : undefined
+  } catch {
+    return undefined
   }
 }

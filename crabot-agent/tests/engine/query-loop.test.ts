@@ -185,6 +185,54 @@ describe('runEngine', () => {
     )
   })
 
+  it('refreshes messagesRef with tool results before onTurn observers run', async () => {
+    const readTool = defineTool({
+      name: 'Read',
+      description: 'Read a file',
+      inputSchema: {},
+      isReadOnly: true,
+      call: async () => ({ output: 'file content', isError: false }),
+    })
+    const messagesRef = { current: [] as EngineMessage[] }
+    const snapshots: EngineMessage[][] = []
+
+    const adapter = mockAdapter([
+      toolUseResponse('tu-1', 'Read', { path: '/test' }),
+      textResponse('Done'),
+    ])
+
+    await runEngine({
+      prompt: 'Read it',
+      adapter,
+      options: baseOptions({
+        tools: [readTool],
+        messagesRef,
+        onTurn: () => snapshots.push(messagesRef.current.slice()),
+      }),
+    })
+
+    const firstTurnSnapshot = snapshots[0]
+    expect(firstTurnSnapshot).toEqual([
+      expect.objectContaining({ role: 'user', content: 'Read it' }),
+      expect.objectContaining({
+        role: 'assistant',
+        content: expect.arrayContaining([
+          expect.objectContaining({ type: 'tool_use', id: 'tu-1', name: 'Read' }),
+        ]),
+      }),
+      expect.objectContaining({
+        role: 'user',
+        toolResults: [
+          expect.objectContaining({
+            tool_use_id: 'tu-1',
+            content: expect.stringContaining('file content'),
+            is_error: false,
+          }),
+        ],
+      }),
+    ])
+  })
+
   it('returns aborted when abort signal fires', async () => {
     const controller = new AbortController()
 
@@ -349,6 +397,27 @@ describe('runEngine', () => {
       expect(result.outcome).toBe('completed')
     })
 
+    it('suppressForcedSummary=true + silent end_turn: gate 返回 fail 时任务失败', async () => {
+      const gate = vi.fn(async () => ({
+        kind: 'fail' as const,
+        reason: 'no delivery after repeated reminders',
+      }))
+      const adapter = mockAdapter([silentEndTurnResponse()])
+
+      const result = await runEngine({
+        prompt: 'test',
+        adapter,
+        options: baseOptions({
+          suppressForcedSummary: () => true,
+          endTurnGate: gate,
+        }),
+      })
+
+      expect(gate).toHaveBeenCalledOnce()
+      expect(result.outcome).toBe('failed')
+      expect(result.error).toBe('no delivery after repeated reminders')
+    })
+
     it('suppressForcedSummary=false + silent end_turn: forces a follow-up instead of completing empty', async () => {
       const adapter = mockAdapter([
         silentEndTurnResponse(),
@@ -379,6 +448,53 @@ describe('runEngine', () => {
       })
 
       expect(gate).toHaveBeenCalledOnce()
+    })
+
+    it('text end_turn: assistantTextEndTurnHandler 可接管并完成 loop', async () => {
+      const handler = vi.fn(async () => ({ kind: 'complete' as const }))
+      const adapter = mockAdapter([textResponse('要发给用户的内容')])
+
+      const result = await runEngine({
+        prompt: 'test',
+        adapter,
+        options: baseOptions({
+          assistantTextEndTurnHandler: handler,
+        }),
+      })
+
+      expect(handler).toHaveBeenCalledOnce()
+      expect(handler).toHaveBeenCalledWith({
+        assistantText: '要发给用户的内容',
+        turnNumber: 1,
+      })
+      expect(result.outcome).toBe('completed')
+      expect(result.finalText).toBe('要发给用户的内容')
+    })
+
+    it('text end_turn: assistantTextEndTurnHandler 返回 supplement 时注入一次并继续 loop', async () => {
+      const injections: string[] = []
+      const handler = vi
+        .fn()
+        .mockResolvedValueOnce({ kind: 'inject' as const, text: '请改用 send_message' })
+        .mockResolvedValueOnce({ kind: 'complete' as const })
+      const adapter = mockAdapter([
+        textResponse('第一段 assistant text'),
+        textResponse('第二段 assistant text'),
+      ])
+
+      const result = await runEngine({
+        prompt: 'test',
+        adapter,
+        options: baseOptions({
+          assistantTextEndTurnHandler: handler,
+          onSystemInjection: (event) => injections.push(`${event.type}:${event.text}`),
+        }),
+      })
+
+      expect(handler).toHaveBeenCalledTimes(2)
+      expect(injections).toEqual(['assistant_text_end_turn:请改用 send_message'])
+      expect(result.outcome).toBe('completed')
+      expect(result.finalText).toBe('第二段 assistant text')
     })
 
     it('endTurnGate 不传时正常退出，无报错', async () => {

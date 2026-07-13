@@ -66,8 +66,27 @@ export function createTodoTool(store: TodoStore): ToolDefinition {
         return { output: JSON.stringify(store.list()), isError: false }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
-        return { output: `todo: ${msg}`, isError: true }
+        return { output: `todo: ${formatTodoError(msg, store)}`, isError: true }
       }
     },
   })
+}
+
+function formatTodoError(message: string, store: TodoStore): string {
+  if (!message.includes('Only one item can be in_progress at a time')) {
+    return message
+  }
+
+  const current = store.list().filter(item => item.status === 'in_progress')
+  const currentText = current.length > 0
+    ? current.map(item => `${item.id}: ${item.content}`).join('; ')
+    : '(none in current stored list; check the todos payload you just sent)'
+
+  return [
+    message,
+    `Current in_progress item(s): ${currentText}`,
+    'Recovery options:',
+    '- Use merge=true to mark the existing in_progress item completed or cancelled before starting a new one.',
+    '- Or use merge=false to replace the entire todo list when the plan has changed.',
+  ].join('\n')
 }

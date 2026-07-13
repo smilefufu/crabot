@@ -262,18 +262,37 @@ describe('BgEntityRegistry', () => {
 
   it('gcDeadEntities: removes entities ended more than 7 days ago', async () => {
     const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString()
+    const logFile = path.join(tmpDir, 'old-shell.log')
+    const exitcodeFile = path.join(tmpDir, 'old-shell.exitcode')
+    const stdoutFile = path.join(tmpDir, 'old-shell.stdout')
+    const stderrFile = path.join(tmpDir, 'old-shell.stderr')
+    const stdoutFifo = path.join(tmpDir, 'old-shell.stdout.fifo')
+    const stderrFifo = path.join(tmpDir, 'old-shell.stderr.fifo')
+    writeFileSync(logFile, 'old log')
+    writeFileSync(exitcodeFile, '0')
+    writeFileSync(stdoutFile, 'old stdout')
+    writeFileSync(stderrFile, 'old stderr')
+    writeFileSync(stdoutFifo, '')
+    writeFileSync(stderrFifo, '')
     const oldRec = makeShellRecord({
       entity_id: 'old-shell',
       status: 'completed',
       exit_code: 0,
       ended_at: eightDaysAgo,
       last_activity_at: eightDaysAgo,
+      log_file: logFile,
     })
     await registry.register(oldRec)
 
     const { removed } = await registry.gcDeadEntities(new Date())
     expect(removed).toContain('old-shell')
     expect(await registry.get('old-shell')).toBeNull()
+    expect(existsSync(logFile)).toBe(false)
+    expect(existsSync(exitcodeFile)).toBe(false)
+    expect(existsSync(stdoutFile)).toBe(false)
+    expect(existsSync(stderrFile)).toBe(false)
+    expect(existsSync(stdoutFifo)).toBe(false)
+    expect(existsSync(stderrFifo)).toBe(false)
   })
 
   it('gcDeadEntities: keeps entities ended less than 7 days ago', async () => {
@@ -309,8 +328,16 @@ describe('BgEntityRegistry', () => {
   it('removeTerminalShellsByTask: 清本 task 终态 shell（含日志/sentinel），保留 running 与他 task', async () => {
     const logDone = path.join(tmpDir, 'done.log')
     const ecDone = path.join(tmpDir, 'done.exitcode')
+    const stdoutDone = path.join(tmpDir, 'done.stdout')
+    const stderrDone = path.join(tmpDir, 'done.stderr')
+    const stdoutFifoDone = path.join(tmpDir, 'done.stdout.fifo')
+    const stderrFifoDone = path.join(tmpDir, 'done.stderr.fifo')
     writeFileSync(logDone, 'some output')
     writeFileSync(ecDone, '0')
+    writeFileSync(stdoutDone, 'stdout output')
+    writeFileSync(stderrDone, 'stderr output')
+    writeFileSync(stdoutFifoDone, '')
+    writeFileSync(stderrFifoDone, '')
 
     await registry.register(makeShellRecord({
       entity_id: 'done-1', status: 'completed', exit_code: 0, ended_at: new Date().toISOString(),
@@ -332,6 +359,10 @@ describe('BgEntityRegistry', () => {
     expect(await registry.get('other-1')).not.toBeNull()   // 他 task → 不动
     expect(existsSync(logDone)).toBe(false)                // 日志删了
     expect(existsSync(ecDone)).toBe(false)                 // sentinel 删了
+    expect(existsSync(stdoutDone)).toBe(false)
+    expect(existsSync(stderrDone)).toBe(false)
+    expect(existsSync(stdoutFifoDone)).toBe(false)
+    expect(existsSync(stderrFifoDone)).toBe(false)
   })
 
   it('countActiveByOwner: counts only running entities for that owner', async () => {

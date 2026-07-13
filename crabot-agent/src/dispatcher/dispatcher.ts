@@ -204,8 +204,8 @@ function parseAndValidate(text: string, ctx: DispatchContext): ValidationResult 
     const a = actions[i] as Record<string, unknown>
     if (typeof a?.kind !== 'string') return { ok: false, error: `action[${i}].kind 缺失` }
     if (a.kind === 'supplement') {
-      if (typeof a.target_task_id !== 'string' || typeof a.text !== 'string') {
-        return { ok: false, error: `action[${i}] supplement 缺 target_task_id 或 text` }
+      if (typeof a.target_task_id !== 'string') {
+        return { ok: false, error: `action[${i}] supplement 缺 target_task_id` }
       }
       // 白名单校验：target_task_id 必须实际存在于本次输入的可补充任务候选中。
       // 防止 LLM 编造 / 截断 / 拼造前缀（典型反例：编出 trigger-<uuid> 这种 syntheticTaskId 形态）。
@@ -218,9 +218,8 @@ function parseAndValidate(text: string, ctx: DispatchContext): ValidationResult 
           error: `action[${i}] supplement.target_task_id="${a.target_task_id}" 不在可补充任务清单中。当前可见 task_id：${visible}`,
         }
       }
-      validated.push({ kind: 'supplement', target_task_id: a.target_task_id, text: a.text })
+      validated.push({ kind: 'supplement', target_task_id: a.target_task_id })
     } else if (a.kind === 'new_task') {
-      if (typeof a.text !== 'string') return { ok: false, error: `action[${i}] new_task 缺 text` }
       // immediate_reply 可选：非空 string 时才透传，其他形态（空串 / 非 string）一律忽略
       // 视为"没带"，不报错——保持 LLM 输出宽容
       const immediateReply = typeof a.immediate_reply === 'string' && a.immediate_reply.length > 0
@@ -228,7 +227,6 @@ function parseAndValidate(text: string, ctx: DispatchContext): ValidationResult 
         : undefined
       validated.push({
         kind: 'new_task',
-        text: a.text,
         ...(immediateReply !== undefined ? { immediate_reply: immediateReply } : {}),
       })
     } else if (a.kind === 'stay_silent') {
