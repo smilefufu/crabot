@@ -25,6 +25,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      # 检出私有文档仓库到子目录，供 review 对照设计文档（只读 deploy key）
+      # 仅 crabot 需要；tikrush 部署同一份文件时此步自动跳过
+      - name: Checkout crabot-docs
+        if: github.repository == 'smilefufu/crabot'
+        uses: actions/checkout@v4
+        with:
+          repository: smilefufu/crabot-docs
+          ssh-key: ${{ secrets.CRABOT_DOCS_DEPLOY_KEY }}
+          path: crabot-docs
+          persist-credentials: false
+
       - uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -34,6 +45,8 @@ jobs:
 
             你是本仓库的自动 code reviewer。执行以下流程：
             1. 用 `gh pr diff`、`gh pr view` 了解改动，结合仓库 CLAUDE.md 阅读相关代码。
+               若工作区存在 crabot-docs/ 目录（独立的产品/设计文档仓库），且改动涉及功能设计，
+               对照其中相关设计文档核对实现一致性，不一致处按问题报告。
             2. 用 `gh api graphql` 查询本 PR 未 resolve 的 review 线程，逐条核对当前代码：
                已修复或不再适用的，回复确认并用 resolveReviewThread mutation resolve；
                仍未解决的保留原样，不要重复评论。
