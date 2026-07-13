@@ -1,6 +1,13 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-12 — 修复终态任务误入活跃列表与 WeChat 原始时间戳丢失
+> 最后更新：2026-07-14 — 修复大型 Trace 执行树遗漏主 Worker
+
+## 2026-07-14 — 修复大型 Trace 执行树遗漏主 Worker
+
+- `get_trace_tree` 不再只读取最新 100 条关联 trace；现在同步分页取回同一 task 的全部 trace 后再按 dispatcher / worker / sub-agent 分组。
+- 修复长任务产生超过 100 条 sub-agent trace 后，最早启动且仍运行中的主 Worker 被截断、Trace 页面只显示 Dispatch 和 Subagent 的问题。
+- 回归覆盖 1 条旧 Worker + 1000 条后续 Sub-agent，强制跨页并确保完整执行树仍包含 Worker。
+- 验证：TraceStore 定向测试 43/43 通过，Agent TypeScript `--noEmit` 检查通过。
 
 ## 2026-07-12 — 修复终态任务误入活跃列表与 WeChat 原始时间戳丢失
 

@@ -389,6 +389,45 @@ describe('TraceStore getTraceTree', () => {
     }
   })
 
+  it('returns the worker when a task spans more than one trace search page', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-tree-large-'))
+    try {
+      const taskId = 'task-large'
+      const baseTime = new Date('2026-04-13T10:00:00.000Z').getTime()
+      const worker = {
+        trace_id: 'worker-oldest',
+        module_id: 'a',
+        related_task_id: taskId,
+        started_at: new Date(baseTime).toISOString(),
+        status: 'running',
+        trigger: { type: 'task', summary: 'long-running worker' },
+        spans: [],
+      }
+      const subagents = Array.from({ length: 1000 }, (_, index) => ({
+        trace_id: `sub-${index}`,
+        module_id: 'a',
+        related_task_id: taskId,
+        parent_trace_id: worker.trace_id,
+        started_at: new Date(baseTime + (index + 1) * 1000).toISOString(),
+        status: 'completed',
+        trigger: { type: 'sub_agent_call', summary: `delegate ${index}` },
+        spans: [],
+      }))
+      fs.writeFileSync(
+        path.join(dir, 'traces-2026-04-13.jsonl'),
+        [worker, ...subagents].map(trace => JSON.stringify(trace)).join('\n') + '\n',
+      )
+
+      const store = new TraceStore(10, dir)
+      const tree = store.getTraceTree(taskId)
+
+      expect(tree.tree.workers.map(trace => trace.trace_id)).toEqual(['worker-oldest'])
+      expect(tree.tree.subagents).toHaveLength(1000)
+    } finally {
+      fs.rmSync(dir, { recursive: true })
+    }
+  })
+
   it('返回一个 task 的全部 worker run（resume 续起的多条 trace 不被合并丢弃），按时间升序', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-tree-multi-'))
     try {

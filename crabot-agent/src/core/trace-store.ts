@@ -730,7 +730,14 @@ export class TraceStore {
   }
 
   getTraceTree(taskId: string): TraceTree {
-    const { traces } = this.searchTraces({ task_id: taskId, limit: 100 })
+    const traces: TraceIndexEntry[] = []
+    let offset = 0
+    while (true) {
+      const page = this.searchTraces({ task_id: taskId, limit: 1000, offset })
+      traces.push(...page.traces)
+      offset += page.traces.length
+      if (offset >= page.total || page.traces.length === 0) break
+    }
 
     const fronts: TraceIndexEntry[] = []
     const workers: TraceIndexEntry[] = []
