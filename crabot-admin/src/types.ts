@@ -1185,7 +1185,7 @@ export interface TriggerNowResult {
 export type ApiFormat = 'openai' | 'anthropic' | 'gemini' | 'openai-responses'
 
 /** 模型类型 */
-export type ModelType = 'llm'
+export type ModelType = 'llm' | 'image'
 
 /** 供应商状态 */
 export type ProviderStatus = 'active' | 'inactive' | 'error'

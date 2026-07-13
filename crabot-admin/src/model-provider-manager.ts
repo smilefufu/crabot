@@ -221,10 +221,23 @@ function parseCodexModels(raw: unknown[]): ModelInfo[] {
   return models
 }
 
+const IMAGE_MODEL_HINTS = ['gpt-image', 'dall-e', 'image']
+const NON_CHAT_MODEL_HINTS = ['embedding', 'embed', 'whisper', 'tts', 'moderation']
+
+/** 非 chat 且非生图的模型（embedding/asr/tts/moderation），发现时直接排除 */
+export function isNonChatModel(modelId: string): boolean {
+  return NON_CHAT_MODEL_HINTS.some((h) => modelId.includes(h))
+}
+
+/** 按模型名判定 llm / image（v1 命名前缀/子串，宽进） */
+export function classifyModelType(modelId: string): ModelType {
+  return IMAGE_MODEL_HINTS.some((h) => modelId.includes(h)) ? 'image' : 'llm'
+}
+
 /**
  * OpenAI 兼容 `/models` 响应解析：{data: [{id, ...}]}
  */
-function parseOpenAIModels(raw: unknown[]): ModelInfo[] {
+export function parseOpenAIModels(raw: unknown[]): ModelInfo[] {
   const models: ModelInfo[] = []
   for (const entry of raw) {
     const item = entry as Record<string, unknown>
@@ -235,26 +248,19 @@ function parseOpenAIModels(raw: unknown[]): ModelInfo[] {
       ''
     if (!modelId) continue
 
-    // v3 起 admin 只识别 LLM 模型；embedding 类型已被移除（memory 模块不再需要）。
-    // 列出来的 embedding / image / audio / tts / whisper / moderation 等非 chat 模型直接跳过。
-    // 走 chat completions 调它们会 4xx，不应该混进 provider.models 里。
-    if (
-      modelId.includes('embedding') ||
-      modelId.includes('embed') ||
-      modelId.includes('image') ||
-      modelId.includes('dall-e') ||
-      modelId.includes('whisper') ||
-      modelId.includes('tts') ||
-      modelId.includes('moderation')
-    ) {
+    // embedding / asr / tts / moderation 等非 chat 非生图模型直接跳过（走 chat completions 会 4xx）。
+    // 生图模型（gpt-image / dall-e）不再跳过，归类 type:'image' 供图像 slot 引用。
+    if (isNonChatModel(modelId)) {
       continue
     }
 
-    const type: ModelType = 'llm'
+    const type: ModelType = classifyModelType(modelId)
 
     const capabilities = item.capabilities as { vision?: boolean } | undefined
     const modalities = Array.isArray(item.input) ? (item.input as unknown[]) : []
-    const supportsVision = capabilities?.vision === true || modalities.includes('image')
+    // 仅 llm 认视觉；image 模型的 input=image 是"生图输入"不是"看图"，不置 supports_vision
+    const supportsVision =
+      type === 'llm' && (capabilities?.vision === true || modalities.includes('image'))
 
     models.push({
       model_id: modelId,
