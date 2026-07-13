@@ -1278,6 +1278,11 @@ export interface OAuthCredential {
 export interface GlobalModelConfig {
   default_llm_provider_id?: string
   default_llm_model_id?: string
+  /** 全局默认生图模型（存引用，运行时 buildConnectionInfo 解析） */
+  default_image_provider_id?: string
+  default_image_model_id?: string
+  /** true 时 autoConfigureImageSlot 不再覆盖图像 slot（用户在 Admin 手动设过） */
+  image_slot_user_set?: boolean
   proxy?: ProxyConfig
   /**
    * 对外可达 base URL，供 agent 拼临时页面链接（<base>/tmp-pages/<id>）。

@@ -920,6 +920,29 @@ export class ModelProviderManager {
   }
 
   /**
+   * 解析全局图像 slot 为连接信息。存引用不存快照——运行时实时解析。
+   * OAuth provider 不能调 images API，判为不可用。
+   */
+  async resolveImageConfig(): Promise<
+    { available: true; config: LLMConnectionInfo } | { available: false; reason: string }
+  > {
+    const providerId = this.globalConfig.default_image_provider_id
+    const modelId = this.globalConfig.default_image_model_id
+    if (!providerId || !modelId) return { available: false, reason: 'not_configured' }
+    const provider = this.providers.get(providerId)
+    if (!provider) return { available: false, reason: 'provider_not_found' }
+    if (provider.auth_type === 'oauth') {
+      return { available: false, reason: 'oauth_provider_cannot_generate_images' }
+    }
+    try {
+      const config = await this.buildConnectionInfo(providerId, modelId)
+      return { available: true, config }
+    } catch (error) {
+      return { available: false, reason: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  /**
    * 获取代理配置
    */
   getProxyConfig(): ProxyConfig {
