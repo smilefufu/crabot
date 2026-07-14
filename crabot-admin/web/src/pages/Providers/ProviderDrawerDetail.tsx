@@ -196,22 +196,24 @@ export const ProviderDrawerDetail: React.FC<ProviderDrawerDetailProps> = ({
                   )}
                 </span>
                 <span className="model-table-col-test">
-                  <ProviderTestBadge
-                    result={testResult}
-                    successTooltip="首字到达耗时（TTFT）。payload 形态对齐生产 adapter（system + tools + 真实 max_tokens），中转兼容性问题在这里就会暴露"
-                    showErrorText
-                    idleButton={
-                      <Tooltip content="按生产 adapter 的 payload 形态打一次 stream，记录首字到达时间">
-                        <button
-                          className="btn btn-secondary"
-                          style={{ padding: '0.15rem 0.5rem', fontSize: '0.75rem' }}
-                          onClick={() => handleTestModel(model.model_id)}
-                        >
-                          首字测速
-                        </button>
-                      </Tooltip>
-                    }
-                  />
+                  {model.type === 'image' ? null : (
+                    <ProviderTestBadge
+                      result={testResult}
+                      successTooltip="首字到达耗时（TTFT）。payload 形态对齐生产 adapter（system + tools + 真实 max_tokens），中转兼容性问题在这里就会暴露"
+                      showErrorText
+                      idleButton={
+                        <Tooltip content="按生产 adapter 的 payload 形态打一次 stream，记录首字到达时间">
+                          <button
+                            className="btn btn-secondary"
+                            style={{ padding: '0.15rem 0.5rem', fontSize: '0.75rem' }}
+                            onClick={() => handleTestModel(model.model_id)}
+                          >
+                            首字测速
+                          </button>
+                        </Tooltip>
+                      }
+                    />
+                  )}
                 </span>
               </div>
             )
