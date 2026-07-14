@@ -947,6 +947,10 @@ export interface UpdateConfigParams {
   subagents?: SubAgentConfig[]
   /** 对外可达 base URL（tmp-page 链接用）；admin push 时带上，并同步到当前 worker handler */
   tmp_page_base_url?: string
+  /** 解析后的生图连接信息；有值时 worker 暴露 generate_image */
+  image_config?: LLMConnectionInfo
+  /** 生图能力可用性，驱动 self-aware 提示词 */
+  image_capability?: { available: boolean; reason?: string }
 }
 
 export interface UpdateConfigResult {

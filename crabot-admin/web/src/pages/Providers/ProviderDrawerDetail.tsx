@@ -174,40 +174,46 @@ export const ProviderDrawerDetail: React.FC<ProviderDrawerDetailProps> = ({
               <div className="model-table-row" key={model.model_id}>
                 <span className="model-table-col-id">{model.model_id}</span>
                 <span className="model-table-col-type">
-                  <span className="badge badge-success">LLM</span>
-                  {model.type === 'llm' && (
-                    <Tooltip content={model.supports_vision ? '支持视觉/图片理解（点击关闭）' : '不支持视觉（点击启用）'}>
-                      <span
-                        className={`badge ${model.supports_vision ? 'badge-info' : 'badge-muted'}`}
-                        style={{
-                          marginLeft: '0.25rem',
-                          cursor: togglingVision === model.model_id ? 'wait' : 'pointer',
-                          opacity: model.supports_vision ? 1 : 0.4,
-                        }}
-                        onClick={() => !togglingVision && handleToggleVision(model.model_id, !!model.supports_vision)}
-                      >
-                        VLM
-                      </span>
-                    </Tooltip>
+                  {model.type === 'image' ? (
+                    <span className="badge badge-warning">生图</span>
+                  ) : (
+                    <>
+                      <span className="badge badge-success">LLM</span>
+                      <Tooltip content={model.supports_vision ? '支持视觉/图片理解（点击关闭）' : '不支持视觉（点击启用）'}>
+                        <span
+                          className={`badge ${model.supports_vision ? 'badge-info' : 'badge-muted'}`}
+                          style={{
+                            marginLeft: '0.25rem',
+                            cursor: togglingVision === model.model_id ? 'wait' : 'pointer',
+                            opacity: model.supports_vision ? 1 : 0.4,
+                          }}
+                          onClick={() => !togglingVision && handleToggleVision(model.model_id, !!model.supports_vision)}
+                        >
+                          VLM
+                        </span>
+                      </Tooltip>
+                    </>
                   )}
                 </span>
                 <span className="model-table-col-test">
-                  <ProviderTestBadge
-                    result={testResult}
-                    successTooltip="首字到达耗时（TTFT）。payload 形态对齐生产 adapter（system + tools + 真实 max_tokens），中转兼容性问题在这里就会暴露"
-                    showErrorText
-                    idleButton={
-                      <Tooltip content="按生产 adapter 的 payload 形态打一次 stream，记录首字到达时间">
-                        <button
-                          className="btn btn-secondary"
-                          style={{ padding: '0.15rem 0.5rem', fontSize: '0.75rem' }}
-                          onClick={() => handleTestModel(model.model_id)}
-                        >
-                          首字测速
-                        </button>
-                      </Tooltip>
-                    }
-                  />
+                  {model.type === 'image' ? null : (
+                    <ProviderTestBadge
+                      result={testResult}
+                      successTooltip="首字到达耗时（TTFT）。payload 形态对齐生产 adapter（system + tools + 真实 max_tokens），中转兼容性问题在这里就会暴露"
+                      showErrorText
+                      idleButton={
+                        <Tooltip content="按生产 adapter 的 payload 形态打一次 stream，记录首字到达时间">
+                          <button
+                            className="btn btn-secondary"
+                            style={{ padding: '0.15rem 0.5rem', fontSize: '0.75rem' }}
+                            onClick={() => handleTestModel(model.model_id)}
+                          >
+                            首字测速
+                          </button>
+                        </Tooltip>
+                      }
+                    />
+                  )}
                 </span>
               </div>
             )

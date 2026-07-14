@@ -25,6 +25,7 @@ import {
   SLASH_AWARENESS_GUIDANCE,
   MEMORY_STORE_GUIDE,
   CLOSURE_DUTIES,
+  buildImageCapability,
 } from './agent-sections.js'
 
 export interface AssembleAgentPromptOptions {
@@ -36,6 +37,7 @@ export interface AssembleAgentPromptOptions {
     readonly toolName: string
     readonly workerHint: string
   }>
+  readonly imageCapability?: { readonly available: boolean }
 }
 
 function escapeSceneProfileContent(content: string): string {
@@ -65,6 +67,7 @@ export function assembleAgentPrompt(opts: AssembleAgentPromptOptions): string {
   parts.push(TIME_AWARENESS)
   parts.push(INFO_QUERY_GUIDE)
   parts.push(TOOL_USAGE)
+  parts.push(buildImageCapability(opts.imageCapability?.available ?? false))
   parts.push(TASK_HARD_CONSTRAINTS)
   if (opts.goalModeEnabled) {
     parts.push(GOAL_MODE_DETAILS)

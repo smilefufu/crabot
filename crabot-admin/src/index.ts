@@ -179,7 +179,7 @@ import {
   TASK_GOAL_BLOCKED_THRESHOLD,
 } from './task-goal.js'
 import { unionResolved } from './permission-resolution.js'
-import { ModelProviderManager } from './model-provider-manager.js'
+import { ModelProviderManager, imageResultToConfigFields } from './model-provider-manager.js'
 import { AgentManager } from './agent-manager.js'
 import { buildOnboardFinishResponse } from './onboard-finish-response.js'
 import { ChannelManager } from './channel-manager.js'
@@ -6698,6 +6698,13 @@ export class AdminModule extends ModuleBase {
 
   private async handleUpdateGlobalConfigApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await this.readJsonBody<Partial<GlobalModelConfig>>(req)
+    // 手动改图像 slot 视为用户设定，锁定不被 autoConfigureImageSlot 覆盖（前端会显式带 true，此为兜底）
+    if (
+      (body.default_image_provider_id !== undefined || body.default_image_model_id !== undefined) &&
+      body.image_slot_user_set === undefined
+    ) {
+      body.image_slot_user_set = true
+    }
     const config = await this.modelProviderManager.updateGlobalConfig(body)
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ config }))
@@ -7222,10 +7229,16 @@ export class AdminModule extends ModuleBase {
       this.adminConfig.web_port,
     )
 
+    // 生图能力：解析全局图像 slot，随 config 推给 agent
+    const imageFields = imageResultToConfigFields(
+      await this.modelProviderManager.resolveImageConfig(),
+    )
+
     return {
       config: {
         ...config,
         model_config: resolvedModelConfig,
+        ...imageFields,
         tmp_page_base_url: tmpPageBaseUrl,
         // 所有 enabled MCP server 自动对所有 agent 可见，
         // 不再读 config.mcp_server_ids（已 @deprecated）
@@ -8646,6 +8659,8 @@ export class AdminModule extends ModuleBase {
         extra: config.extra,
         subagents,
         tmp_page_base_url: config.tmp_page_base_url,
+        image_config: config.image_config,
+        image_capability: config.image_capability,
       }
 
       const result = await this.rpcClient.call<typeof updateParams, { restart_required: boolean; changed_fields: string[] }>(

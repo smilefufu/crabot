@@ -221,10 +221,33 @@ function parseCodexModels(raw: unknown[]): ModelInfo[] {
   return models
 }
 
+const IMAGE_MODEL_HINTS = ['gpt-image', 'dall-e', 'image']
+const NON_CHAT_MODEL_HINTS = ['embedding', 'embed', 'whisper', 'tts', 'moderation']
+
+/** 非 chat 且非生图的模型（embedding/asr/tts/moderation），发现时直接排除 */
+export function isNonChatModel(modelId: string): boolean {
+  return NON_CHAT_MODEL_HINTS.some((h) => modelId.includes(h))
+}
+
+/** 按模型名判定 llm / image（v1 命名前缀/子串，宽进） */
+export function classifyModelType(modelId: string): ModelType {
+  return IMAGE_MODEL_HINTS.some((h) => modelId.includes(h)) ? 'image' : 'llm'
+}
+
+/** 把 resolveImageConfig 的结果映射成 ResolvedAgentConfig 的 image 字段 */
+export function imageResultToConfigFields(
+  res: { available: true; config: LLMConnectionInfo } | { available: false; reason: string },
+): { image_config?: LLMConnectionInfo; image_capability: { available: boolean; reason?: string } } {
+  if (res.available) {
+    return { image_config: res.config, image_capability: { available: true } }
+  }
+  return { image_capability: { available: false, reason: res.reason } }
+}
+
 /**
  * OpenAI 兼容 `/models` 响应解析：{data: [{id, ...}]}
  */
-function parseOpenAIModels(raw: unknown[]): ModelInfo[] {
+export function parseOpenAIModels(raw: unknown[]): ModelInfo[] {
   const models: ModelInfo[] = []
   for (const entry of raw) {
     const item = entry as Record<string, unknown>
@@ -235,26 +258,19 @@ function parseOpenAIModels(raw: unknown[]): ModelInfo[] {
       ''
     if (!modelId) continue
 
-    // v3 起 admin 只识别 LLM 模型；embedding 类型已被移除（memory 模块不再需要）。
-    // 列出来的 embedding / image / audio / tts / whisper / moderation 等非 chat 模型直接跳过。
-    // 走 chat completions 调它们会 4xx，不应该混进 provider.models 里。
-    if (
-      modelId.includes('embedding') ||
-      modelId.includes('embed') ||
-      modelId.includes('image') ||
-      modelId.includes('dall-e') ||
-      modelId.includes('whisper') ||
-      modelId.includes('tts') ||
-      modelId.includes('moderation')
-    ) {
+    // embedding / asr / tts / moderation 等非 chat 非生图模型直接跳过（走 chat completions 会 4xx）。
+    // 生图模型（gpt-image / dall-e）不再跳过，归类 type:'image' 供图像 slot 引用。
+    if (isNonChatModel(modelId)) {
       continue
     }
 
-    const type: ModelType = 'llm'
+    const type: ModelType = classifyModelType(modelId)
 
     const capabilities = item.capabilities as { vision?: boolean } | undefined
     const modalities = Array.isArray(item.input) ? (item.input as unknown[]) : []
-    const supportsVision = capabilities?.vision === true || modalities.includes('image')
+    // 仅 llm 认视觉；image 模型的 input=image 是"生图输入"不是"看图"，不置 supports_vision
+    const supportsVision =
+      type === 'llm' && (capabilities?.vision === true || modalities.includes('image'))
 
     models.push({
       model_id: modelId,
@@ -735,6 +751,8 @@ export class ModelProviderManager {
     this.providers.set(id, provider)
     await this.saveProviders()
 
+    await this.autoConfigureImageSlot(id)
+
     return { models: mergedModels, added, removed }
   }
 
@@ -785,6 +803,8 @@ export class ModelProviderManager {
       auth_type: vendor.auth_type,
       models,
     })
+
+    await this.autoConfigureImageSlot(provider.id)
 
     return { provider, models }
   }
@@ -911,6 +931,56 @@ export class ModelProviderManager {
 
   getGlobalConfig(): GlobalModelConfig {
     return { ...this.globalConfig }
+  }
+
+  /**
+   * 解析全局图像 slot 为连接信息。存引用不存快照——运行时实时解析。
+   * OAuth provider 不能调 images API，判为不可用。
+   */
+  async resolveImageConfig(): Promise<
+    { available: true; config: LLMConnectionInfo } | { available: false; reason: string }
+  > {
+    const providerId = this.globalConfig.default_image_provider_id
+    const modelId = this.globalConfig.default_image_model_id
+    if (!providerId || !modelId) return { available: false, reason: 'not_configured' }
+    const provider = this.providers.get(providerId)
+    if (!provider) return { available: false, reason: 'provider_not_found' }
+    if (provider.auth_type === 'oauth') {
+      return { available: false, reason: 'oauth_provider_cannot_generate_images' }
+    }
+    try {
+      const config = await this.buildConnectionInfo(providerId, modelId)
+      return { available: true, config }
+    } catch (error) {
+      return { available: false, reason: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  /**
+   * 供应商发现图像模型后自动配置全局图像 slot。
+   * 仅在未被用户手动设过、且当前 slot 为空或指向已消失的模型时填充。
+   * @returns 是否发生了配置写入
+   */
+  async autoConfigureImageSlot(providerId: string): Promise<boolean> {
+    if (this.globalConfig.image_slot_user_set) return false
+
+    const curP = this.globalConfig.default_image_provider_id
+    const curM = this.globalConfig.default_image_model_id
+    if (curP && curM) {
+      const cur = this.providers.get(curP)
+      const stillValid = cur?.models.some((m) => m.model_id === curM && m.type === 'image')
+      if (stillValid) return false
+    }
+
+    const provider = this.providers.get(providerId)
+    const imageModel = provider?.models.find((m) => m.type === 'image')
+    if (!imageModel) return false
+
+    await this.updateGlobalConfig({
+      default_image_provider_id: providerId,
+      default_image_model_id: imageModel.model_id,
+    })
+    return true
   }
 
   /**

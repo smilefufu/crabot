@@ -60,6 +60,8 @@ function buildAdmin(deps: {
     resolveModelConfig: async () => {
       throw new Error('no global llm')
     },
+    // 图像 slot 解析：本测试默认未配置生图模型
+    resolveImageConfig: async () => ({ available: false, reason: 'not_configured' }),
     // tmp_page_base_url 注入需读全局设置的 public_base_url（默认未配置）
     getGlobalConfig: () => ({}),
   }

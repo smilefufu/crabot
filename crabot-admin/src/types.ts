@@ -1187,7 +1187,7 @@ export interface TriggerNowResult {
 export type ApiFormat = 'openai' | 'anthropic' | 'gemini' | 'openai-responses'
 
 /** 模型类型 */
-export type ModelType = 'llm'
+export type ModelType = 'llm' | 'image'
 
 /** 供应商状态 */
 export type ProviderStatus = 'active' | 'inactive' | 'error'
@@ -1280,6 +1280,11 @@ export interface OAuthCredential {
 export interface GlobalModelConfig {
   default_llm_provider_id?: string
   default_llm_model_id?: string
+  /** 全局默认生图模型（存引用，运行时 buildConnectionInfo 解析） */
+  default_image_provider_id?: string
+  default_image_model_id?: string
+  /** true 时 autoConfigureImageSlot 不再覆盖图像 slot（用户在 Admin 手动设过） */
+  image_slot_user_set?: boolean
   proxy?: ProxyConfig
   /**
    * 对外可达 base URL，供 agent 拼临时页面链接（<base>/tmp-pages/<id>）。
@@ -1633,6 +1638,10 @@ export interface ResolvedAgentConfig extends Omit<AgentInstanceConfig, 'model_co
   subagents?: SubAgentConfig[]
   /** 对外可达 base URL，供 agent 拼临时页面链接（<base>/tmp-pages/<id>）；未配置时为 admin 本地地址 */
   tmp_page_base_url?: string
+  /** 解析后的生图连接信息；未配置/不可用时 undefined */
+  image_config?: LLMConnectionInfo
+  /** 生图能力可用性，随 config 推给 agent，驱动工具暴露 + self-aware 提示词 */
+  image_capability?: { available: boolean; reason?: string }
 }
 
 // Agent 实现管理 API 参数类型
