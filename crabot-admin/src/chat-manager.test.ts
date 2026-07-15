@@ -234,6 +234,19 @@ describe('出站媒体收存（handleSendMessage Phase 2）', () => {
     expect(msg.content.media![0].media_url).toMatch(/^\/api\/media\//)
   })
 
+  it('image file_path 未传 mime_type 时按扩展名识别为图片', async () => {
+    const mgr = await makeManager()
+    const src = path.join(TEST_DATA_DIR, 'generated.png')
+    await fs.writeFile(src, 'png-bytes')
+    await mgr.handleSendMessage({
+      session_id: 'admin-chat',
+      content: { type: 'image', file_path: src, filename: '生成图.png' },
+    })
+    const [msg] = mgr.getMessages(10)
+    expect(msg.content.type).toBe('image')
+    expect(msg.content.media![0].mime_type).toBe('image/png')
+  })
+
   it('http URL → 直接存引用不下载', async () => {
     const mgr = await makeManager()
     await mgr.handleSendMessage({

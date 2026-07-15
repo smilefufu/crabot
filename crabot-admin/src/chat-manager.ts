@@ -23,6 +23,19 @@ import type {
   MediaItem,
 } from './types.js'
 
+const IMAGE_MIME_BY_EXT: Readonly<Record<string, string>> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+}
+
+function inferImageMimeType(filenameOrPath: string | undefined): string | undefined {
+  if (!filenameOrPath) return undefined
+  return IMAGE_MIME_BY_EXT[path.extname(filenameOrPath).toLowerCase()]
+}
+
 export class ChatManager {
   private messages: Map<string, ChatMessage> = new Map()
   private wsServer: WebSocketServer | null = null
@@ -372,9 +385,13 @@ export class ChatManager {
           // 本地路径：复制进 MediaStore
           const localPath = m.file_path ?? m.media_url
           if (!localPath) continue
+          const mimeType = m.mime_type
+            ?? (c.type === 'image'
+              ? inferImageMimeType(m.filename) ?? inferImageMimeType(localPath)
+              : undefined)
           media.push(await this.mediaStore.ingestFile(localPath, {
             ...(m.filename !== undefined ? { filename: m.filename } : {}),
-            ...(m.mime_type !== undefined ? { mime_type: m.mime_type } : {}),
+            ...(mimeType !== undefined ? { mime_type: mimeType } : {}),
           }))
         }
       } catch {
