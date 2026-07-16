@@ -648,7 +648,6 @@ export class TelegramChannel extends ModuleBase {
       max_message_length: MAX_MESSAGE_LENGTH,
       max_file_size: MAX_FILE_SIZE,
       supports_file_path: true,
-      allowed_file_paths: [path.join(this.dataDir, 'media')],
       supports_list_contacts: false,
       supports_list_groups: false,
       supports_list_group_members: true,

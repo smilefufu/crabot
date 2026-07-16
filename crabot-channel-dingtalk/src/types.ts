@@ -126,7 +126,6 @@ export interface ChannelCapabilities {
   max_message_length: number | null
   max_file_size: number | null
   supports_file_path: boolean
-  allowed_file_paths: string[]
   /** 是否支持 list_contacts */
   supports_list_contacts: boolean
   /** 是否支持 list_groups */
