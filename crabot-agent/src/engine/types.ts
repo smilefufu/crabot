@@ -324,7 +324,7 @@ export interface EngineOptions {
    * - `supplement` —— humanMessageQueue 实时纠偏注入
    * - `forced_summary` —— silent end_turn 兜底要求模型重说
    * - `stop_hook` —— Stop hook block 后注入的引导文本
-   * - `audit_pending_intercept` —— audit 跑中 LLM 直接 end_turn 兜底拦截（Task 13）
+   * - `assistant_text_end_turn` —— 非空 assistant text + end_turn 走错通道纠偏提醒
    *
    * caller 可把它接到 traceCallback / 日志 / metric——engine 自身不做任何 trace 写入。
    */
@@ -397,21 +397,13 @@ export interface EngineOptions {
    */
   readonly clearActiveAuditId?: () => void
   /**
-   * 检查当前是否有 active audit subagent 在跑（Task 13 兜底用）。
-   * 用于 audit 跑中 LLM 直接 end_turn 兜底拦截路径：drain 处理完 marker 后，若仍有活跃 audit
-   * + LLM 想 end_turn，engine 注入"你不能直接 end_turn" 拦截续 loop（最多 3 次后 abort）。
-   * 不传时 engine 跳过兜底拦截（caller 自己负责 audit 生命周期）。
-   * spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.6
+   * 检查当前是否有 active audit subagent 在跑。
+   * 用于 audit 跑中 LLM 直接 end_turn 路径：drain 处理完 marker 后，若仍有活跃 audit
+   * + LLM 想 end_turn，engine 直接挂起等 audit 结果（复用 gate 'wait' 路径，
+   * 零文案注入、幂等可重入）。不传时 engine 跳过（caller 自己负责 audit 生命周期）。
+   * spec: 2026-07-16-wait-signal-targets-goal-lifecycle-design §3.2
    */
   readonly hasActiveAudit?: () => boolean
-  /**
-   * abort active audit。Task 13 兜底拦截耗尽 3 次后调，强制把当前 audit 标废 + 推 audit_aborted
-   * marker 让 worker 看到提示后正常 end_turn。
-   * 注：set_task_goal 改 goal 触发的 abort 走 agent-handler 内 abortAudit closure 直接调，不走此回调。
-   * 不传时 engine 跳过 abort（兜底拦截耗尽仍会 fall through 让 end_turn 通过）。
-   * spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.6 / §4.7
-   */
-  readonly abortActiveAudit?: (reason: string) => void
   /**
    * 上下文压缩开始时触发（trace 可见性钩子）。
    * compaction 内部跑一次 LLM call 做摘要，可能耗时几秒——不接 trace 就是黑洞。
@@ -456,10 +448,9 @@ export interface SystemInjectionEvent {
    * - `supplement`：humanMessageQueue 实时纠偏注入
    * - `forced_summary`：silent end_turn 兜底要求模型重说
    * - `stop_hook`：Stop hook block 后注入的引导文本
-   * - `audit_pending_intercept`：audit 跑中 LLM 直接 end_turn 兜底拦截（Task 13）
    * - `assistant_text_end_turn`：非空 assistant text + end_turn 走错通道纠偏提醒
    */
-  readonly type: 'supplement' | 'forced_summary' | 'stop_hook' | 'audit_pending_intercept' | 'assistant_text_end_turn'
+  readonly type: 'supplement' | 'forced_summary' | 'stop_hook' | 'assistant_text_end_turn'
   /** 注入的文本内容（不含 ContentBlock[] 形态——supplement 的 ContentBlock 注入退化为 type 字符串描述） */
   readonly text: string
   /** 注入发生时的 turn 序号（与 EngineTurnEvent.turnNumber 同口径） */

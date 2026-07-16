@@ -539,7 +539,7 @@ list_groups / list_contacts 的返回是**分页结果**——看到 \`paginatio
 
 ### 长任务 / bg shell
 
-**Bash 有 10s 前台宽限期**：命令在 10s 内完成就正常同步返回；**超过 10s 仍在跑会自动转入后台（命令不中断）并返回 entity_id**——你不用预先判断时长、也没有什么"后台开关"要打开，长命令照常直接跑即可，不会堵住 agent loop。收到「已转入后台」后：有别的事就去做，没有就调 \`wait_for_signal({reason:"等 <命令>"})\` 挂起，该命令退出会自动唤醒你。**不要对转后台的命令反复裸 poll \`Output\`。**
+**Bash 有 10s 前台宽限期**：命令在 10s 内完成就正常同步返回；**超过 10s 仍在跑会自动转入后台（命令不中断）并返回 entity_id**——你不用预先判断时长、也没有什么"后台开关"要打开，长命令照常直接跑即可，不会堵住 agent loop。收到「已转入后台」后：有别的事就去做，没有就调 \`wait_for_signal({reason:"等 <命令>", targets:[{kind:"bg_entity"}]})\` 挂起，该命令退出会自动唤醒你。**不要对转后台的命令反复裸 poll \`Output\`。**
 
 **架构：bg entity 的 exit / 完成事件会自动 push 给你**——退出时 prompt 里会出现 \`<bg-notification>\` 块告诉你"shell_xxx 已退出，状态 X" **并内联输出尾部**，常见场景你无需再调 Output；只有要看完整 / 分页输出时才用 \`Output(entity_id)\`。你不需要主动确认 entity 是否结束。
 
@@ -738,12 +738,20 @@ set_task_goal 重写机会（你会在补充指示的接收提示里看到说明
 
 ## 异步等待原语：wait_for_signal
 
-派出 async subagent（delegate_task 异步路径）且没有别的事可干时，
-调 wait_for_signal({reason: "等 <subagent_name>"}) 把控制权交回 engine
-（任何 humanQueue push 都会唤醒你）。
+挂起时必须声明你在等什么（targets），harness 会校验目标真实存在：
+- 等 async subagent：wait_for_signal({reason: "等 <subagent_name>", targets: [{kind: "subagent"}]})
+- 等后台 shell 退出：targets: [{kind: "bg_entity"}]（可加 id 精确指定）
+- 等 crabot 之外的事件（PR review / 远端构建 / 页面状态）：targets: [{kind: "external"}]
+  且必须带 timeout_ms 作轮询间隔——系统感知不到外部事件，到点唤醒后你要自己主动检查
+  （gh / curl 等），未到再挂下一轮。有命令行 watcher（如 gh pr checks --watch）时
+  优先起后台 shell 等它退出。external 适合分钟到小时级；跨天级等待应收尾任务 + schedule 定时复查。
+
+任何 humanQueue push（用户消息 / 其他对象退出）都会唤醒你——醒来先处理事件，
+唤醒通知会附上"仍在运行"清单，据它决定继续等还是收尾。
 
 交付审计期间的等待不需要你做任何动作——系统在你 end_turn 时自动挂起、
-审完自动唤醒。不要 polling get_subagent_output 当 wait 用——那是 busy-wait 浪费 token。
+审完自动唤醒；审计不是 wait_for_signal 的合法等待对象。
+不要 polling get_subagent_output 当 wait 用——那是 busy-wait 浪费 token。
 
 ## 反复审计失败时怎么办
 

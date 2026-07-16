@@ -176,6 +176,60 @@ describe('createAsyncAuditEndTurnGate', () => {
     expect(h.spawnFn).not.toHaveBeenCalled()
   })
 
+  it('activeAuditId 非空（已有 audit 在跑）→ null，绝不派第二个 audit（spec 2026-07-16 §4.2）', async () => {
+    const h = makeHarness()
+    h.taskState.activeAuditId = 'audit-already-running'
+    const gate = createAsyncAuditEndTurnGate(h.deps)
+
+    const result = await gate()
+
+    expect(result).toBeNull()
+    expect(h.spawnFn).not.toHaveBeenCalled()
+    expect(h.rpcCall).not.toHaveBeenCalled()
+    // 原 audit 不受影响
+    expect(h.taskState.activeAuditId).toBe('audit-already-running')
+  })
+
+  it('goal 终态（status=complete）→ null fail-open，不 spawn（spec 2026-07-16 §2.2-2）', async () => {
+    const rpcCall = vi.fn(async () => ({
+      task: { id: 'task-1', goal: { ...makeGoal(), status: 'complete' } },
+    }))
+    const h = makeHarness({ rpcCallOverride: rpcCall })
+    const gate = createAsyncAuditEndTurnGate(h.deps)
+
+    const result = await gate()
+
+    expect(result).toBeNull()
+    expect(h.spawnFn).not.toHaveBeenCalled()
+    expect(h.taskState.activeAuditId).toBeUndefined()
+  })
+
+  it('goal 终态（status=cleared）→ null fail-open，不 spawn（spec 2026-07-16 §2.2-2）', async () => {
+    const rpcCall = vi.fn(async () => ({
+      task: { id: 'task-1', goal: { ...makeGoal(), status: 'cleared' } },
+    }))
+    const h = makeHarness({ rpcCallOverride: rpcCall })
+    const gate = createAsyncAuditEndTurnGate(h.deps)
+
+    const result = await gate()
+
+    expect(result).toBeNull()
+    expect(h.spawnFn).not.toHaveBeenCalled()
+  })
+
+  it('goal status=active → 照常 spawn（终态检查不误伤）', async () => {
+    const rpcCall = vi.fn(async () => ({
+      task: { id: 'task-1', goal: { ...makeGoal(), status: 'active' } },
+    }))
+    const h = makeHarness({ rpcCallOverride: rpcCall })
+    const gate = createAsyncAuditEndTurnGate(h.deps)
+
+    const result = await gate()
+
+    expect(result).toEqual({ kind: 'wait' })
+    expect(h.spawnFn).toHaveBeenCalledTimes(1)
+  })
+
   it('非空 buffer + goal 存在 → spawn audit + 设 activeAuditId + 返回 [audit_pending] marker', async () => {
     const h = makeHarness({ spawnReturn: 'audit-test-xyz' })
     const gate = createAsyncAuditEndTurnGate(h.deps)

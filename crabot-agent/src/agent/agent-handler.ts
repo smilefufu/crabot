@@ -108,6 +108,7 @@ import {
   buildHumanQueueReport,
   buildBlockedGuidance,
   resolveAuditJudgment,
+  shouldArmGoalGate,
   type AuditResult,
   type ConversationEntry,
   type GoalAuditTaskGoal,
@@ -115,7 +116,12 @@ import {
   type ParsedAuditReport,
 } from './goal-audit.js'
 import { createSubmitAuditResultTool } from './goal-auditor-tools.js'
-import { createWaitForSignalTool, type WaitForSignalDeps } from '../mcp/wait-for-signal.js'
+import {
+  createWaitForSignalTool,
+  formatStillRunningSnapshot,
+  type WaitForSignalDeps,
+  type RunningWaitTarget,
+} from '../mcp/wait-for-signal.js'
 import { createAsyncAuditEndTurnGate } from './end-turn-gate.js'
 import { buildAuditAbortedMarker } from './audit-result-marker.js'
 import {
@@ -262,6 +268,28 @@ export function formatSubAgentNotification(info: SubAgentExitInfo): string {
 function log(msg: string) {
   const ts = new Date().toISOString()
   try { fs.appendFileSync(LOG_FILE, `[${ts}] ${msg}\n`) } catch { /* ignore */ }
+}
+
+/**
+ * 从 bgRegistry running 记录中提取某 task 名下的在跑对象（唤醒快照数据源）。
+ * async subagent 与 bg shell 都是 registry 记录（type='agent'/'shell'），统一在此映射。
+ * excludeEntityId：正在退出的 entity 自身（registry 可能尚未更新为终态）。
+ * spec: 2026-07-16-wait-signal-targets-goal-lifecycle-design §6
+ */
+export function summarizeRunningEntities(
+  records: ReadonlyArray<import('../engine/bg-entities/types.js').BgEntityRecord>,
+  taskId: string,
+  excludeEntityId?: string,
+  nowMs: number = Date.now(),
+): RunningWaitTarget[] {
+  return records
+    .filter((r) => r.spawned_by_task_id === taskId && r.entity_id !== excludeEntityId && r.status === 'running')
+    .map((r) => ({
+      id: r.entity_id,
+      kind: r.type === 'agent' ? ('subagent' as const) : ('bg_entity' as const),
+      runtime_ms: Math.max(0, nowMs - new Date(r.spawned_at).getTime()),
+      description: r.type === 'shell' ? r.command : r.task_description,
+    }))
 }
 
 /**
@@ -696,9 +724,27 @@ export class AgentHandler {
     const message =
       `Background shell ${info.entity_id} 已退出 (status=${info.status}, exit_code=${info.exit_code}${runtimeStr})。\n` +
       `命令: ${command}${tailBlock}`
-    this.humanQueues.get(info.spawned_by_task_id)?.push(`[系统] ${message}`)
+    // 唤醒快照：只进本 task 的 humanQueue（friend 通知跨 task 场景下该清单无意义）。
+    // spec: 2026-07-16-wait-signal-targets-goal-lifecycle-design §6
+    const stillRunning = await this.buildStillRunningLine(info.spawned_by_task_id, info.entity_id)
+    this.humanQueues.get(info.spawned_by_task_id)?.push(
+      `[系统] ${message}${stillRunning ? `\n${stillRunning}` : ''}`,
+    )
     if (info.owner_friend_id) {
       this.enqueueBgNotification(`friend:${info.owner_friend_id}`, message)
+    }
+  }
+
+  /**
+   * 唤醒消息的"仍在运行"快照行——push 时刻现查现写，无新状态（spec 2026-07-16 §6）。
+   * 查询失败降级为空串（快照是增强信息，绝不阻塞通知投递）。
+   */
+  private async buildStillRunningLine(taskId: string, excludeEntityId?: string): Promise<string> {
+    try {
+      const running = await this.bgRegistry.list({ status: ['running'] })
+      return formatStillRunningSnapshot(summarizeRunningEntities(running, taskId, excludeEntityId))
+    } catch {
+      return ''
     }
   }
 
@@ -1122,7 +1168,9 @@ export class AgentHandler {
             { task_id: string },
             { task: { goal?: unknown } }
           >(adminPort, 'get_task', { task_id: task.task_id }, this.deps.moduleId)
-          goalSetCache = resp.task.goal !== undefined
+          // 终态 goal（complete/cleared/…）不武装 gate——承诺已兑现的任务被追问 re-pull 时
+          // 不再产生幽灵 audit（spec 2026-07-16 §2.2-1）。active goal 跨 epoch 继续生效不变。
+          goalSetCache = shouldArmGoalGate(resp.task.goal)
         } catch {
           // admin 不可用：保持 backward-compat，等同 no goal（audit gate 透明放行）
         }
@@ -1438,27 +1486,22 @@ export class AgentHandler {
         }
 
         // 3k2. wait_for_signal — 通用挂起原语，总是注入
-        // 合法性由工具内部预检判定（无 pending 事件且无 timeout_ms 时拒绝空挂起）。
-        // hasActiveAudit：taskState.activeAuditId 非空表示 task 处于"等审态"。
-        // hasActiveAsyncSubagent：跟全局 agentAbortControllers 取交集——bg-agent.ts 在 finally 清理 controller，
-        // 所以 "id 还在 Map 里" 等价于 "subagent 还没退出"。
-        // spec: 2026-06-07-goal-audit-async-buffered-info-design.md Task 3 / Task 5
+        // 合法性由工具内部 targets 准入校验判定（命名目标不存在 → 立即拒绝）。
+        // listActiveAsyncSubagentIds：跟全局 agentAbortControllers 取交集——bg-agent.ts 在
+        // finally 清理 controller，所以 "id 还在 Map 里" 等价于 "subagent 还没退出"。
+        // spec: 2026-07-16-wait-signal-targets-goal-lifecycle-design §5
         const waitForSignalTool = maybeCreateWaitForSignalTool(
           { goalModeEnabled, asyncEnabled: isMasterPrivate },
           {
             humanQueue,
-            hasActiveAudit: () => taskState.activeAuditId !== undefined,
-            hasActiveAsyncSubagent: () => {
-              for (const id of taskState.activeAsyncSubagentIds) {
-                if (this.agentAbortControllers.has(id)) return true
-              }
-              return false
-            },
-            // R2：本 task 名下 running 的（持久）bg shell——退出时 onShellExit push humanQueue 唤醒，
-            // 所以"等它退出"是合法裸挂起。可能永不退出的进程（服务/监控）仍建议带 timeout_ms。
-            hasRunningBgEntity: async () => {
+            listActiveAsyncSubagentIds: () =>
+              [...taskState.activeAsyncSubagentIds].filter((id) => this.agentAbortControllers.has(id)),
+            // 本 task 名下 running 的（持久）bg shell——退出时 onShellExit push humanQueue 唤醒。
+            // 可能永不退出的进程（服务/监控）仍建议带 timeout_ms。
+            listRunningBgEntities: async () => {
               const running = await this.bgRegistry.list({ status: ['running'] })
-              return running.some((s) => s.type === 'shell' && s.spawned_by_task_id === task.task_id)
+              return summarizeRunningEntities(running, task.task_id)
+                .filter((t) => t.kind === 'bg_entity')
             },
           },
         )
@@ -1792,15 +1835,10 @@ export class AgentHandler {
           clearActiveAuditId: () => {
             taskState.activeAuditId = undefined
           },
-          // Task 13 兜底：audit 跑中 LLM 直接 end_turn 时 engine 判定是否仍有活跃 audit。
+          // audit 跑中 LLM 直接 end_turn 时 engine 判定是否仍有活跃 audit → 直接挂起等结果。
           // taskState.activeAuditId 非空表示 audit 子进程还没完成。
-          // spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.6
+          // spec: 2026-07-16-wait-signal-targets-goal-lifecycle-design §3.2
           hasActiveAudit: () => taskState.activeAuditId !== undefined,
-          // Task 13 兜底拦截耗尽 3 次后，engine 调此 abort 当前 audit。
-          // 复用 set_task_goal 路径相同的 abortAudit closure——
-          // controller.abort + push audit_aborted marker + 清 outboundBuffer + activeAuditId。
-          // spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.6 / §4.7
-          abortActiveAudit: (reason: string) => abortAudit(reason),
           endTurnGate: this.buildAsyncAuditEndTurnGate({
             goalModeEnabled,
             goalSetCacheGetter: () => goalSetCache,
@@ -3688,8 +3726,19 @@ export class AgentHandler {
       return
     }
 
+    // append 与 complete 拆独立 try：append 失败（如 goal 已终态的竞态）不应连带跳过
+    // complete 调用（spec 2026-07-16 §2.2-3）。
+    let adminPort: number
     try {
-      const adminPort = await this.deps.getAdminPort()
+      adminPort = await this.deps.getAdminPort()
+    } catch (err) {
+      console.error(
+        `[goal-audit] persistAsyncAuditResult getAdminPort failed for ${params.taskId}/${params.auditId}:`,
+        err instanceof Error ? err.message : String(err),
+      )
+      return
+    }
+    try {
       await this.deps.rpcClient.call<unknown, { task?: { goal?: { status?: GoalStatus } } }>(
         adminPort,
         'append_task_goal_audit_entry',
@@ -3704,20 +3753,27 @@ export class AgentHandler {
         },
         this.deps.moduleId,
       )
+    } catch (err) {
+      console.warn(
+        `[goal-audit] persistAsyncAuditResult append failed for ${params.taskId}/${params.auditId}:`,
+        err instanceof Error ? err.message : String(err),
+      )
+    }
 
-      if (params.parsed.pass) {
+    if (params.parsed.pass) {
+      try {
         await this.deps.rpcClient.call<unknown, unknown>(
           adminPort,
           'complete_task_goal',
           { task_id: params.taskId },
           this.deps.moduleId,
         )
+      } catch (err) {
+        console.error(
+          `[goal-audit] persistAsyncAuditResult complete failed for ${params.taskId}/${params.auditId}:`,
+          err instanceof Error ? err.message : String(err),
+        )
       }
-    } catch (err) {
-      console.error(
-        `[goal-audit] persistAsyncAuditResult failed for ${params.taskId}/${params.auditId}:`,
-        err instanceof Error ? err.message : String(err),
-      )
     }
 
     try {
@@ -3831,8 +3887,17 @@ export class AgentHandler {
           }
         : {}),
       onExit: (info) => {
-        if (!deps.humanQueue) return
-        deps.humanQueue.push(formatSubAgentNotification(info))
+        const queue = deps.humanQueue
+        if (!queue) return
+        // 唤醒快照：附上还在跑的其他对象，agent 醒来即知是否要继续等（spec 2026-07-16 §6）。
+        // 快照查询失败降级为纯通知，绝不阻塞投递。
+        void this.buildStillRunningLine(deps.parentTaskId, info.entity_id)
+          .then((line) => {
+            queue.push(line ? `${formatSubAgentNotification(info)}\n${line}` : formatSubAgentNotification(info))
+          })
+          .catch(() => {
+            queue.push(formatSubAgentNotification(info))
+          })
       },
     })
 

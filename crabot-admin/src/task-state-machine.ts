@@ -6,6 +6,7 @@
  */
 
 import type { Task, TaskStatus } from './types.js'
+import { transitionGoalStatus } from './task-goal.js'
 
 // pending → failed 是合法转换（兜底/异常路径会用到）。
 export const VALID_TRANSITIONS: Readonly<Record<TaskStatus, ReadonlyArray<TaskStatus>>> = {
@@ -52,6 +53,17 @@ export function applyDerivedFields(
 
   if (isTerminalStatus(newStatus)) {
     next.completed_at = nowISO
+    // 收尾清理：task 进终态时 still-active goal 无条件切 cleared——goal 生命周期闭环，
+    // 防止"task 终态 + goal active"组合在后续 re-pull 时重新武装 audit gate（幽灵 audit）。
+    // warn 留统计口径："未审即收尾"的实际发生率，事后 audit 是否值得做以此为据（spec §4.3）。
+    // spec: 2026-07-16-wait-signal-targets-goal-lifecycle-design §4.2
+    if (next.goal && next.goal.status === 'active') {
+      console.warn(
+        `[TaskStateMachine] task ${task.id} 切 ${newStatus} 时 goal 仍 active，自动切 cleared`
+        + `（objective="${next.goal.objective.slice(0, 50)}", audit_history=${next.goal.audit_history.length} 条）`,
+      )
+      next.goal = transitionGoalStatus(next.goal, 'cleared', nowISO)
+    }
   }
 
   next.waiting_human_at = newStatus === 'waiting_human' ? nowISO : undefined
