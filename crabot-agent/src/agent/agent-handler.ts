@@ -273,17 +273,19 @@ function log(msg: string) {
 /**
  * 从 bgRegistry running 记录中提取某 task 名下的在跑对象（唤醒快照数据源）。
  * async subagent 与 bg shell 都是 registry 记录（type='agent'/'shell'），统一在此映射。
- * excludeEntityId：正在退出的 entity 自身（registry 可能尚未更新为终态）。
+ * excludeEntityIds：正在退出的 entity 自身（registry 可能尚未更新为终态）+ 在跑的
+ * goal-audit subagent（它也以 parentTaskId 注册，但对 worker 必须不可见——快照泄漏它
+ * 会重新引入"教 agent 等 audit"污染，且与 wait_for_signal 的 targets 准入自相矛盾）。
  * spec: 2026-07-16-wait-signal-targets-goal-lifecycle-design §6
  */
 export function summarizeRunningEntities(
   records: ReadonlyArray<import('../engine/bg-entities/types.js').BgEntityRecord>,
   taskId: string,
-  excludeEntityId?: string,
+  excludeEntityIds: ReadonlyArray<string> = [],
   nowMs: number = Date.now(),
 ): RunningWaitTarget[] {
   return records
-    .filter((r) => r.spawned_by_task_id === taskId && r.entity_id !== excludeEntityId && r.status === 'running')
+    .filter((r) => r.spawned_by_task_id === taskId && !excludeEntityIds.includes(r.entity_id) && r.status === 'running')
     .map((r) => ({
       id: r.entity_id,
       kind: r.type === 'agent' ? ('subagent' as const) : ('bg_entity' as const),
@@ -737,12 +739,17 @@ export class AgentHandler {
 
   /**
    * 唤醒消息的"仍在运行"快照行——push 时刻现查现写，无新状态（spec 2026-07-16 §6）。
+   * 在跑的 goal-audit subagent 一并排除：它对 worker 必须不可见（B 修复的语义边界）。
    * 查询失败降级为空串（快照是增强信息，绝不阻塞通知投递）。
    */
   private async buildStillRunningLine(taskId: string, excludeEntityId?: string): Promise<string> {
     try {
       const running = await this.bgRegistry.list({ status: ['running'] })
-      return formatStillRunningSnapshot(summarizeRunningEntities(running, taskId, excludeEntityId))
+      const exclude: string[] = []
+      if (excludeEntityId) exclude.push(excludeEntityId)
+      const activeAuditId = this.activeTasks.get(taskId)?.activeAuditId
+      if (activeAuditId) exclude.push(activeAuditId)
+      return formatStillRunningSnapshot(summarizeRunningEntities(running, taskId, exclude))
     } catch {
       return ''
     }

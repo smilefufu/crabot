@@ -151,7 +151,7 @@ describe('summarizeRunningEntities（唤醒快照数据源，spec 2026-07-16 §6
       shellRec('shell_live', 'task-1', '2026-07-16T10:08:00.000Z'),
       shellRec('shell_other_task', 'task-2', '2026-07-16T10:00:00.000Z'),
     ]
-    const items = summarizeRunningEntities(records, 'task-1', 'agent_done', NOW)
+    const items = summarizeRunningEntities(records, 'task-1', ['agent_done'], NOW)
     expect(items.map((i) => i.id).sort()).toEqual(['agent_live', 'shell_live'])
     const agent = items.find((i) => i.id === 'agent_live')!
     expect(agent.kind).toBe('subagent')
@@ -162,7 +162,18 @@ describe('summarizeRunningEntities（唤醒快照数据源，spec 2026-07-16 §6
     expect(shell.description).toBe('pnpm test --watch')
   })
 
+  it('在跑的 goal-audit subagent 被排除——不向 agent 泄漏 audit 存在（PR #31 review）', () => {
+    // audit subagent 也以 spawned_by_task_id=parentTaskId 注册 registry（audit-spawn.ts），
+    // 快照若包含它 = 重新引入"教 agent 等 audit"的污染源 + 与 targets 准入自相矛盾。
+    const records = [
+      agentRec('agent_audit', 'task-1', '2026-07-16T10:09:00.000Z'),  // 在跑的 audit
+      shellRec('shell_live', 'task-1', '2026-07-16T10:08:00.000Z'),
+    ]
+    const items = summarizeRunningEntities(records, 'task-1', ['shell_exiting', 'agent_audit'], NOW)
+    expect(items.map((i) => i.id)).toEqual(['shell_live'])
+  })
+
   it('无在跑对象 → 空数组', () => {
-    expect(summarizeRunningEntities([], 'task-1', undefined, NOW)).toEqual([])
+    expect(summarizeRunningEntities([], 'task-1', [], NOW)).toEqual([])
   })
 })
