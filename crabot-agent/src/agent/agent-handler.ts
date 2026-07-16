@@ -1839,6 +1839,9 @@ export class AgentHandler {
           // taskState.activeAuditId 非空表示 audit 子进程还没完成。
           // spec: 2026-07-16-wait-signal-targets-goal-lifecycle-design §3.2
           hasActiveAudit: () => taskState.activeAuditId !== undefined,
+          // audit 等待兜底超时触发时 abort 卡死的 audit（复用 set_task_goal 路径同款 closure：
+          // controller.abort + push audit_aborted marker + 清 outboundBuffer + activeAuditId）。
+          abortActiveAudit: (reason: string) => abortAudit(reason),
           endTurnGate: this.buildAsyncAuditEndTurnGate({
             goalModeEnabled,
             goalSetCacheGetter: () => goalSetCache,

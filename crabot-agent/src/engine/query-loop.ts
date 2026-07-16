@@ -241,6 +241,14 @@ function formatAuditFailReport(result: AuditResultMarker): string {
 // 正常路径不依赖它：audit onExit 必然 push marker 唤醒。
 const GATE_WAIT_BARRIER_TIMEOUT_MS = 24 * 60 * 60 * 1000
 
+// audit 等待的有界兜底：audit subagent 只有 maxTurns 界、无墙钟界，若其 onExit push
+// marker 失败（audit-spawn catch 吞掉且不清 activeAuditId）或 adapter 悬挂，
+// activeAuditId 永不清除——不设界会退化成「24h 挂起 + 1 轮 LLM」的无限循环。
+// 超时 → abortActiveAudit（push audit_aborted marker 唤醒 + drain 清状态）→ fail-open
+// 放行后续 end_turn，保证前进性。audit 是有界审阅任务，实测秒到分钟级，10 分钟余量充足。
+// spec: 2026-07-16-wait-signal-targets-goal-lifecycle-design §3.2
+export const AUDIT_WAIT_FALLBACK_TIMEOUT_MS = 10 * 60 * 1000
+
 /**
  * endTurnGate 返回 { kind: 'wait' } 后的挂起处理：audit 已异步派出，engine 直接
  * setBarrier + waitBarrier 等 humanQueue push（audit 结果 / 用户 supplement），唤醒后
@@ -267,7 +275,16 @@ async function waitGateAuditAndDispatch(
   }
   // push 先于挂起到达（如 supplement 已 pending）→ 跳过 barrier 直接 drain，避免错过唤醒。
   if (!queue.hasPending) {
-    queue.setBarrier(GATE_WAIT_BARRIER_TIMEOUT_MS)
+    // audit 在跑且有 abort 能力时用有界兜底（见 AUDIT_WAIT_FALLBACK_TIMEOUT_MS 注释）；
+    // 否则退化为 24h 通用兜底（fail-open，行为同旧版）。
+    const abort = options.abortActiveAudit
+    if (options.hasActiveAudit?.() === true && abort) {
+      queue.setBarrier(AUDIT_WAIT_FALLBACK_TIMEOUT_MS, () => {
+        abort('audit_wait_timeout: audit 结果超时未到达，自动废弃本次 audit 以恢复任务前进')
+      })
+    } else {
+      queue.setBarrier(GATE_WAIT_BARRIER_TIMEOUT_MS)
+    }
     await queue.waitBarrier(abortSignal)
   }
   const drained = queue.drainPending()

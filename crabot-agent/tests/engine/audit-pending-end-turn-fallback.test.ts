@@ -12,12 +12,16 @@
  *   - 挂起幂等可重入：人类追问唤醒 → 处理 → 再 end_turn → 再挂起（B-追问重入）
  */
 
-import { describe, it, expect, vi } from 'vitest'
-import { runEngine } from '../../src/engine/query-loop.js'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { runEngine, AUDIT_WAIT_FALLBACK_TIMEOUT_MS } from '../../src/engine/query-loop.js'
 import { HumanMessageQueue } from '../../src/engine/human-message-queue.js'
-import { buildAuditResultMarker } from '../../src/agent/audit-result-marker.js'
+import { buildAuditResultMarker, buildAuditAbortedMarker } from '../../src/agent/audit-result-marker.js'
 import type { LLMAdapter } from '../../src/engine/llm-adapter-types.js'
 import { chunksFromContent } from './helpers/mock-stream.js'
+
+afterEach(() => {
+  vi.useRealTimers()
+})
 
 type AdapterStep =
   | { kind: 'tool'; toolId: string; toolName: string; input?: Record<string, unknown> }
@@ -168,6 +172,52 @@ describe('query-loop: audit 跑中 end_turn → engine 直接挂起（spec 2026-
     expect(injections.filter((e) => e.type === 'audit_pending_intercept')).toHaveLength(0)
     // 追问以 supplement 注入
     expect(injections.some((e) => e.type === 'supplement' && e.text.includes('昨天那个'))).toBe(true)
+  })
+
+  it('audit 卡死（marker 永不到达）→ 兜底超时 abort + fail-open 放行（spec §3.2 前进性保证）', async () => {
+    vi.useFakeTimers()
+    const queue = new HumanMessageQueue()
+    const injections: Array<{ type: string; text: string }> = []
+    let auditActive = true
+    const clearActiveAuditId = vi.fn(() => { auditActive = false })
+    // 模拟 agent-handler 的 abortAudit closure：清状态 + push audit_aborted marker
+    const abortActiveAudit = vi.fn((reason: string) => {
+      auditActive = false
+      queue.push(buildAuditAbortedMarker({ auditId: 'audit-stuck', reason }))
+    })
+
+    // turn 1: end_turn → 挂起 → 无任何事件（audit 卡死）→ 兜底超时 → abort
+    // → audit_aborted marker 注入"已被取消"提示 → turn 2: end_turn → audit 已清 → 正常收尾
+    const adapter = makeAdapter([
+      { kind: 'end_turn', text: '搞定' },
+      { kind: 'end_turn', text: '收尾' },
+    ])
+
+    const resultPromise = runEngine({
+      prompt: 'go',
+      adapter,
+      options: {
+        humanMessageQueue: queue,
+        tools: [],
+        systemPrompt: '',
+        model: 'test-model',
+        hasActiveAudit: () => auditActive,
+        clearActiveAuditId,
+        abortActiveAudit,
+        flushOutboundBuffer: vi.fn(async () => {}),
+        dropOutboundBuffer: vi.fn(),
+        onSystemInjection: (e) => injections.push({ type: e.type, text: e.text }),
+      },
+    })
+    await vi.advanceTimersByTimeAsync(AUDIT_WAIT_FALLBACK_TIMEOUT_MS + 1000)
+    const result = await resultPromise
+
+    expect(result.outcome).toBe('completed')
+    expect(abortActiveAudit).toHaveBeenCalledTimes(1)
+    // 不再有旧式拦截文案
+    expect(injections.filter((e) => e.type === 'audit_pending_intercept')).toHaveLength(0)
+    // 前进性：不是 24h 死等——两轮 LLM 内收尾
+    expect(result.totalTurns).toBe(2)
   })
 
   it('hasActiveAudit=false 时不挂起，正常 end_turn', async () => {

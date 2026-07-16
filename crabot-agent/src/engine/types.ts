@@ -405,6 +405,15 @@ export interface EngineOptions {
    */
   readonly hasActiveAudit?: () => boolean
   /**
+   * abort active audit。audit 等待兜底超时（AUDIT_WAIT_FALLBACK_TIMEOUT_MS）触发时调，
+   * 把卡死的 audit 标废 + push audit_aborted marker——唤醒挂起的 loop 并经 drain 清状态，
+   * 保证前进性（audit onExit push 失败 / adapter 悬挂时 activeAuditId 永不清除的兜底）。
+   * 注：set_task_goal 改 goal 触发的 abort 走 agent-handler 内 abortAudit closure 直接调，不走此回调。
+   * 不传时 engine 退化为 24h 通用兜底（fail-open）。
+   * spec: 2026-07-16-wait-signal-targets-goal-lifecycle-design §3.2
+   */
+  readonly abortActiveAudit?: (reason: string) => void
+  /**
    * 上下文压缩开始时触发（trace 可见性钩子）。
    * compaction 内部跑一次 LLM call 做摘要，可能耗时几秒——不接 trace 就是黑洞。
    */
@@ -433,8 +442,9 @@ export interface HumanMessageQueueLike {
   readonly drainPending: () => Array<string | ContentBlock[]>
   readonly hasPending: boolean
   readonly hasBarrier: boolean
-  /** endTurnGate 'wait' 路径用：engine 自行布防 barrier 再 waitBarrier（spec 2026-06-10 §4.7） */
-  readonly setBarrier: (timeoutMs: number) => void
+  /** endTurnGate 'wait' 路径用：engine 自行布防 barrier 再 waitBarrier（spec 2026-06-10 §4.7）。
+   *  onTimeout 仅真超时触发（push/clearBarrier 提前唤醒不触发）——audit 等待兜底 abort 用。 */
+  readonly setBarrier: (timeoutMs: number, onTimeout?: () => void) => void
   readonly waitBarrier: (signal?: AbortSignal) => Promise<void>
   readonly clearBarrier: () => void
 }
