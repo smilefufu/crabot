@@ -20,7 +20,7 @@
  */
 
 import { spawnAuditSubagent, type SpawnAuditSubagentDeps } from './audit-spawn.js'
-import type { GoalAuditTaskGoal } from './goal-audit.js'
+import { shouldArmGoalGate, type GoalAuditTaskGoal } from './goal-audit.js'
 import type { RpcClient } from 'crabot-shared'
 import type { WorkerTaskState } from '../types.js'
 import type { EndTurnGateResult } from '../engine/types.js'
@@ -96,6 +96,11 @@ export function createAsyncAuditEndTurnGate(
   const spawn = deps.spawnAuditSubagentFn ?? spawnAuditSubagent
 
   return async () => {
+    // 0. 已有 audit 在跑 → 绝不派第二个，交给 engine 的 hasActiveAudit 挂起路径接管。
+    //    防御性不变量：正常时序下 engine 在调 gate 前已按 hasActiveAudit 挂起，到不了这里；
+    //    显式挡住是防未来时序改动引入双 audit 并发（spec 2026-07-16 §4.2）。
+    if (deps.taskState.activeAuditId !== undefined) return null
+
     // 1. 工作态门控：worker 尚未 set_task_goal → 没东西要审 → 透明放行
     if (!deps.goalSetCacheGetter()) return null
 
@@ -132,12 +137,13 @@ export function createAsyncAuditEndTurnGate(
         { task_id: string },
         { task: { id: string; goal?: GoalAuditTaskGoal } }
       >(adminPort, 'get_task', { task_id: deps.taskId }, deps.moduleId)
-      if (!taskResp.task.goal) {
-        // goalModeEnabled + goalSetCache=true 才进得了这条 gate；理论上不该没 goal。
-        // 防御：缺失 → fail-open。
+      if (!shouldArmGoalGate(taskResp.task.goal)) {
+        // 缺失 → fail-open（goalModeEnabled + goalSetCache=true 才进得了这条 gate，理论上不该没 goal）。
+        // 终态（complete/cleared/…）→ 同样放行：承诺已兑现/已清除，不对终态 goal 派 audit
+        // （spec 2026-07-16 §2.2-2；防 set_task_goal 与 end_turn 并发竞态的第二道防线）。
         return null
       }
-      goal = taskResp.task.goal
+      goal = taskResp.task.goal!
     } catch (err) {
       console.warn(
         '[endTurnGate] get_task RPC failed open:',

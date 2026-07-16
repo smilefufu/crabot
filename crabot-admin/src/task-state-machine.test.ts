@@ -72,6 +72,53 @@ describe('applyDerivedFields', () => {
     }
   })
 
+  // spec 2026-07-16-wait-signal-targets-goal-lifecycle-design §4.2：
+  // task 切终态时 still-active goal 无条件切 cleared（收尾清理），goal 生命周期闭环。
+  describe('terminal transition 收尾清理 active goal（spec 2026-07-16 §4.2）', () => {
+    const activeGoal = () => ({
+      objective: '验证 X',
+      acceptance_criteria: [{ id: 'c1', kind: 'semantic' as const, spec: '完成 X' }],
+      status: 'active' as const,
+      tokens_used: 0,
+      audit_history: [],
+      created_at: NOW,
+      updated_at: NOW,
+    })
+
+    it('切终态（completed/failed/cancelled）时 active goal → cleared + completed_at', () => {
+      for (const s of ['completed', 'failed', 'cancelled'] as const) {
+        const next = applyDerivedFields(
+          fakeTask({ status: 'executing', started_at: NOW, goal: activeGoal() }),
+          s, NOW,
+        )
+        expect(next.goal?.status, `task→${s}`).toBe('cleared')
+        expect(next.goal?.completed_at, `task→${s}`).toBe(NOW)
+      }
+    })
+
+    it('goal 已终态（complete）→ 原样保留不动', () => {
+      const goal = { ...activeGoal(), status: 'complete' as const, completed_at: NOW }
+      const next = applyDerivedFields(
+        fakeTask({ status: 'executing', started_at: NOW, goal }),
+        'completed', NOW,
+      )
+      expect(next.goal?.status).toBe('complete')
+    })
+
+    it('非终态迁移不碰 goal', () => {
+      const next = applyDerivedFields(
+        fakeTask({ status: 'executing', started_at: NOW, goal: activeGoal() }),
+        'waiting', NOW,
+      )
+      expect(next.goal?.status).toBe('active')
+    })
+
+    it('无 goal 的 task 切终态不受影响', () => {
+      const next = applyDerivedFields(fakeTask({ status: 'executing', started_at: NOW }), 'completed', NOW)
+      expect(next.goal).toBeUndefined()
+    })
+  })
+
   it('sets waiting_human_at on enter, clears on leave', () => {
     const entering = applyDerivedFields(fakeTask({ status: 'executing' }), 'waiting_human', NOW)
     expect(entering.waiting_human_at).toBe(NOW)

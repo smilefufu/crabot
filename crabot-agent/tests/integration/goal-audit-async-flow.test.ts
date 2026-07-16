@@ -444,29 +444,19 @@ describe('E2E: goal-audit async flow', () => {
   // -------------------------------------------------------------------------
   // Case E: 等审态 + tool_use 续 turn 不 flush buffer
   // -------------------------------------------------------------------------
-  it('Case E: hasActiveAudit=true 时 tool_use 续 turn 不 flush + end_turn 3 次后 abort', async () => {
-    // 这个 case 直接验证 query-loop line 806 / 516 的等审态 guard:
-    // - hasActiveAudit 永远为 true（audit 不完成）
-    // - outboundBuffer 含 1 个 pre-audit final 候选
-    // - turn 1: Bash tool_use → 续 turn 时 line 806 guard 应拦截 flush
-    // - turn 2-4: end_turn → audit_pending_intercept 3 次注入
-    // - turn 5: end_turn → 配额耗尽 → abortActiveAudit('end_turn_retries_exhausted')
-    // 关键断言：channelSendSpy 全程 NOT called（pre-audit 内容绝不到 channel）
+  it('Case E: 等审态 tool_use 续 turn 不 flush + end_turn 直接挂起等 audit（spec 2026-07-16 §3.2）', async () => {
+    // 验证 query-loop 的等审态 guard + 新挂起路径:
+    // - outboundBuffer 含 1 个 pre-audit final 候选，activeAuditId 已设（等审态）
+    // - turn 1: Bash tool_use → 续 turn 时等审态 guard 拦截 flush（pre-audit 内容不泄漏）
+    // - turn 2: end_turn → engine 直接挂起（不注入拦截文案、不烧额外 LLM 轮）
+    // - audit pass marker 到达 → drain pass → clear + flush → completed
+    // 关键断言：pass 之前 channel 绝不收到 pre-audit 内容；pass 后恰好 flush 一次
     const wiring = makeWiring()
     const queue = new HumanMessageQueue()
     const injections: Array<{ type: string; text: string }> = []
-    const abortReasons: string[] = []
 
     wiring.outboundBuffer.push(makeBufferEntry('pre-audit 候选交付'))
-
-    // hasActiveAudit 永远 true——模拟 audit subagent 卡住不完成
-    const alwaysActiveAudit = (): boolean => true
-
-    // abortActiveAudit 只记录调用，不真改 state（让我们能验证它被调用且 buffer 仍非空——
-    // 这样可以单独验证 guard 行为，不被 abort 副作用混淆）
-    const abortActiveAuditSpy = vi.fn((reason: string) => {
-      abortReasons.push(reason)
-    })
+    wiring.setActiveAuditId('audit-E')
 
     // 简单的 Bash 工具——立即返回，不设 barrier
     const bashTool: ToolDefinition = {
@@ -478,17 +468,26 @@ describe('E2E: goal-audit async flow', () => {
     }
 
     // adapter:
-    //  turn 1: Bash tool_use → 续 turn 前 line 806 flush 被 guard 拦截
-    //  turn 2-4: end_turn → audit_pending_intercept 3 次
-    //  turn 5: end_turn → 配额耗尽 → abort 调用 + fall through 到 line 520 flush
-    //          line 520 flush 也被 guard 拦截（hasActiveAudit 仍为 true）→ 退出 completed
+    //  turn 1: Bash tool_use → 续 turn 前 flush 被等审态 guard 拦截
+    //  turn 2: end_turn → 等审态 → 直接挂起等 audit 结果
     const adapter = makeAdapter([
       { kind: 'tool', toolId: 't1', toolName: 'Bash' },
       { kind: 'end_turn', text: '完毕' },
-      { kind: 'end_turn', text: '完毕' },
-      { kind: 'end_turn', text: '完毕' },
-      { kind: 'end_turn', text: '完毕' },
     ])
+
+    // 挂起后 audit pass 到达；push 前采样 channel 调用数——验证 pass 前零泄漏
+    let sendCountBeforePass = -1
+    setTimeout(() => {
+      sendCountBeforePass = wiring.channelSendSpy.mock.calls.length
+      queue.push(
+        buildAuditResultMarker({
+          auditId: 'audit-E',
+          pass: true,
+          failedCriteria: [],
+          detailedReport: '',
+        }),
+      )
+    }, 50)
 
     const result = await runEngine({
       prompt: 'go',
@@ -498,29 +497,27 @@ describe('E2E: goal-audit async flow', () => {
         tools: [bashTool],
         systemPrompt: '',
         model: 'test-model',
-        // 不传 endTurnGate——确保 end_turn 路径直接走到 flush
+        // 不传 endTurnGate——聚焦 hasActiveAudit 挂起路径本身
         flushOutboundBuffer: wiring.flushOutboundBuffer,
         dropOutboundBuffer: wiring.dropOutboundBuffer,
         clearActiveAuditId: wiring.clearActiveAuditId,
-        hasActiveAudit: alwaysActiveAudit,
-        abortActiveAudit: abortActiveAuditSpy,
+        hasActiveAudit: wiring.hasActiveAudit,
         onSystemInjection: (e) =>
           injections.push({ type: e.type, text: e.text }),
       },
     })
 
     expect(result.outcome).toBe('completed')
-    // 核心断言 1: channel 全程未被调用——pre-audit 候选交付绝不到达用户
-    expect(wiring.channelSendSpy).not.toHaveBeenCalled()
-    // 核心断言 2: outboundBuffer 仍含 pre-audit 内容（guard 拦截两个 flush 点）
-    expect(wiring.outboundBuffer.length).toBe(1)
-    expect(wiring.outboundBuffer[0].content).toBe('pre-audit 候选交付')
-    // 核心断言 3: audit_pending_intercept 注入了 3 次（MAX_AUDIT_PENDING_END_TURN_RETRIES）
-    const intercepts = injections.filter((e) => e.type === 'audit_pending_intercept')
-    expect(intercepts.length).toBe(3)
-    // 核心断言 4: 配额耗尽时 abortActiveAudit 被调用 with 正确 reason
-    expect(abortActiveAuditSpy).toHaveBeenCalledTimes(1)
-    expect(abortReasons[0]).toBe('end_turn_retries_exhausted')
+    // 核心断言 1: audit pass 之前 channel 零调用——tool_use 续 turn 的 flush 被 guard 拦截
+    expect(sendCountBeforePass).toBe(0)
+    // 核心断言 2: pass 后 flush 恰好一次、buffer 清空
+    expect(wiring.channelSendSpy).toHaveBeenCalledTimes(1)
+    expect(wiring.outboundBuffer.length).toBe(0)
+    // 核心断言 3: 全程零拦截文案注入、零额外 LLM 轮（挂起不经过 LLM）
+    expect(injections.filter((e) => e.type === 'audit_pending_intercept')).toHaveLength(0)
+    expect(result.totalTurns).toBe(2)
+    // 核心断言 4: activeAuditId 已被 drain pass 路径清掉
+    expect(wiring.getActiveAuditId()).toBeUndefined()
   })
 
   // -------------------------------------------------------------------------

@@ -46,15 +46,6 @@ const MAX_SILENT_END_TURN_RETRIES = 3
 // reasoning 烧得更多，必须先压缩再重跑。
 const MAX_MAX_TOKENS_COMPACT_RETRIES = 2
 
-// audit 跑中 LLM 直接 end_turn 兜底拦截（Task 13）：drain 之后若仍有活跃 audit
-// + LLM 想 end_turn，engine 注入提示拦截续 loop，最多 3 次后 abort active audit
-// + 放行 end_turn。独立计数器，跟 silentEndTurnCount 不复用——前者是"没说话"
-// 后者是"audit 在跑你不能走"，语义不同。
-// spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.6
-const MAX_AUDIT_PENDING_END_TURN_RETRIES = 3
-const AUDIT_PENDING_END_TURN_PROMPT =
-  '你不能直接 end_turn——audit 仍在跑。请调 wait_for_signal 等审完成，或调其他工具响应当前任务。'
-
 // 规则细节由 agent 自己的 system prompt 维护（assembleAgentPrompt 的 end_turn
 // self-check + 收尾责任段），这里只做 engine 层的机制兜底钩子——告诉模型违反了
 // 哪条规则、要求重新汇报。把规则写两份会产生维护漂移。
@@ -250,6 +241,14 @@ function formatAuditFailReport(result: AuditResultMarker): string {
 // 正常路径不依赖它：audit onExit 必然 push marker 唤醒。
 const GATE_WAIT_BARRIER_TIMEOUT_MS = 24 * 60 * 60 * 1000
 
+// audit 等待的有界兜底：audit subagent 只有 maxTurns 界、无墙钟界，若其 onExit push
+// marker 失败（audit-spawn catch 吞掉且不清 activeAuditId）或 adapter 悬挂，
+// activeAuditId 永不清除——不设界会退化成「24h 挂起 + 1 轮 LLM」的无限循环。
+// 超时 → abortActiveAudit（push audit_aborted marker 唤醒 + drain 清状态）→ fail-open
+// 放行后续 end_turn，保证前进性。audit 是有界审阅任务，实测秒到分钟级，10 分钟余量充足。
+// spec: 2026-07-16-wait-signal-targets-goal-lifecycle-design §3.2
+export const AUDIT_WAIT_FALLBACK_TIMEOUT_MS = 10 * 60 * 1000
+
 /**
  * endTurnGate 返回 { kind: 'wait' } 后的挂起处理：audit 已异步派出，engine 直接
  * setBarrier + waitBarrier 等 humanQueue push（audit 结果 / 用户 supplement），唤醒后
@@ -276,7 +275,16 @@ async function waitGateAuditAndDispatch(
   }
   // push 先于挂起到达（如 supplement 已 pending）→ 跳过 barrier 直接 drain，避免错过唤醒。
   if (!queue.hasPending) {
-    queue.setBarrier(GATE_WAIT_BARRIER_TIMEOUT_MS)
+    // audit 在跑且有 abort 能力时用有界兜底（见 AUDIT_WAIT_FALLBACK_TIMEOUT_MS 注释）；
+    // 否则退化为 24h 通用兜底（fail-open，行为同旧版）。
+    const abort = options.abortActiveAudit
+    if (options.hasActiveAudit?.() === true && abort) {
+      queue.setBarrier(AUDIT_WAIT_FALLBACK_TIMEOUT_MS, () => {
+        abort('audit_wait_timeout: audit 结果超时未到达，自动废弃本次 audit 以恢复任务前进')
+      })
+    } else {
+      queue.setBarrier(GATE_WAIT_BARRIER_TIMEOUT_MS)
+    }
     await queue.waitBarrier(abortSignal)
   }
   const drained = queue.drainPending()
@@ -331,9 +339,6 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
   // 的静默完成（PR #8 review Finding 1）。
   let pendingDeliveryFailure: string | null = null
   let maxTokensCompactRetryCount = 0
-  // Task 13: audit 跑中 LLM 直接 end_turn 兜底拦截计数器，独立于 silentEndTurnCount。
-  // spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.6
-  let auditPendingEndTurnRetries = 0
   // 由上一轮追问设置、下一轮 onTurn 消费一次后清零。
   let pendingForcedSummaryAttempt: number | undefined = undefined
 
@@ -561,31 +566,27 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         }
       }
 
-      // Task 13: audit 跑中 LLM 直接 end_turn 兜底拦截。
+      // audit 跑中 LLM 直接 end_turn → engine 直接挂起等 audit 结果。
       // 顺序意义：在 drain（上方 humanMessageQueue?.hasPending 块）之后判断——
       // 让 audit_result.pass=true 优先 drained → clearActiveAuditId → 此处 hasActiveAudit=false
-      // 不会误拦截已完成的 audit。drain 没拿到 result 但 audit 仍在跑时（agent 跳过 wait_for_signal
-      // 直接 end_turn 的非法路径），注入拦截续 loop；3 次后 abort active audit + 放行 end_turn。
-      // spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.6
+      // 不会误挂起已完成的 audit。
+      // 旧版（2026-06-07 §4.6 Task 13）注入"请调 wait_for_signal 等审完成"续 loop——该文案会
+      // 教坏 agent 在无 audit 时也主动 wait（trace ac9676e3 空转实证），且每轮拦截烧一次全量
+      // context 的 LLM 调用。现直接复用 gate 'wait' 的挂起路径：零注入、零额外 LLM 轮，
+      // 挂起幂等可重入（人类追问唤醒 → 处理 → 再 end_turn → 再挂起）。
+      // spec: 2026-07-16-wait-signal-targets-goal-lifecycle-design §3.2
       if (options.hasActiveAudit?.() === true) {
-        if (auditPendingEndTurnRetries < MAX_AUDIT_PENDING_END_TURN_RETRIES) {
-          auditPendingEndTurnRetries++
-          fireOnTurn(buildSilentTurnEvent(
-            totalTurns, processed.text, stopReason, llmCallMs, llmStartedAtMs, undefined, response.usage,
-          ))
-          messages.push(createUserMessage(AUDIT_PENDING_END_TURN_PROMPT))
-          options.onSystemInjection?.({
-            type: 'audit_pending_intercept',
-            text: AUDIT_PENDING_END_TURN_PROMPT,
-            turnNumber: totalTurns,
-            injectedAtMs: Date.now(),
-          })
-          continue
+        fireOnTurn(buildSilentTurnEvent(
+          totalTurns, processed.text, stopReason, llmCallMs, llmStartedAtMs, undefined, response.usage,
+        ))
+        const outcome = await waitGateAuditAndDispatch(options, messages, totalTurns, abortSignal, flushAndTrackDelivery)
+        if (outcome === 'exit') {
+          return finishTask()
         }
-        // 兜底耗尽：abort active audit + fall through 让 end_turn 通过。
-        // abortActiveAudit 内部会清 activeAuditId / 推 audit_aborted marker / dropOutboundBuffer——
-        // 后续路径（max_tokens compact / silent forced_summary / endTurnGate）按正常 end_turn 收尾。
-        options.abortActiveAudit?.('end_turn_retries_exhausted')
+        if (typeof outcome === 'object') {
+          return buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, outcome.failedReason)
+        }
+        continue
       }
 
       const isSilentText = processed.text.trim().length === 0

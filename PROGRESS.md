@@ -1,6 +1,12 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-14 — 修复大型 Trace 执行树遗漏主 Worker
+> 最后更新：2026-07-16 — 挂起/唤醒语义 + goal 生命周期闭环已实现（PR #31）
+
+## 2026-07-16 — 挂起/唤醒语义收紧 + Goal 生命周期闭环（已实现，PR #31）
+
+- 起因：m2u 生产 trace `ac9676e3` 复盘，暴露 4 个缺陷：A) 终态 goal 跨 epoch 重新武装 audit gate（幽灵 audit + 持久化报错丢结果，日志证实 ≥4 个任务命中）；B) Task-13 拦截文案教 agent 主动 wait audit → 空转 ≈14 分钟；C) set_task_goal 替换 goal 后新承诺从未被审计即完成任务；D) wait_for_signal 自由文本 + timeout_ms 旁路无准入校验。
+- spec：`crabot-docs/superpowers/specs/2026-07-16-wait-signal-targets-goal-lifecycle-design.md`。C 简化为收尾清理（cleared + warn），事后 audit 暂缓（升级触发条件见 spec §4.3）。
+- 实现（PR #31）：A/B/C/D 全部落地 + audit 等待兜底超时（10 分钟 → abort + fail-open，防 audit 卡死时 24h 挂起循环，review 发现补上）。resume 两条路径的 goal 语义交互见 spec §7，遗留脏数据（completed task + active goal）由收尾清理惰性消化，无需迁移。
 
 ## 2026-07-14 — 修复大型 Trace 执行树遗漏主 Worker
 

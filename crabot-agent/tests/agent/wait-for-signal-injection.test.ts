@@ -2,8 +2,10 @@ import { describe, it, expect } from 'vitest'
 import {
   extractLaunchedSubagentId,
   maybeCreateWaitForSignalTool,
+  summarizeRunningEntities,
 } from '../../src/agent/agent-handler.js'
 import { HumanMessageQueue } from '../../src/engine/human-message-queue.js'
+import type { BgEntityRecord } from '../../src/engine/bg-entities/types.js'
 
 describe('extractLaunchedSubagentId', () => {
   it('从 delegate_task 异步路径 JSON 输出抓 agent_id', () => {
@@ -42,9 +44,8 @@ describe('extractLaunchedSubagentId', () => {
 describe('maybeCreateWaitForSignalTool', () => {
   const stubDeps = {
     humanQueue: new HumanMessageQueue(),
-    hasActiveAudit: () => false,
-    hasActiveAsyncSubagent: () => false,
-    hasRunningBgEntity: () => false,
+    listActiveAsyncSubagentIds: () => [] as string[],
+    listRunningBgEntities: async () => [],
   }
 
   it('goalMode + async 都开 → 注入', () => {
@@ -83,23 +84,96 @@ describe('maybeCreateWaitForSignalTool', () => {
     expect(tool?.name).toBe('wait_for_signal')
   })
 
-  it('注入的工具透传 deps（hasActiveAsyncSubagent 真正被调）', async () => {
+  it('注入的工具透传 deps（listActiveAsyncSubagentIds 真正被调）', async () => {
     let callCount = 0
     const tool = maybeCreateWaitForSignalTool(
       { goalModeEnabled: false, asyncEnabled: true },
       {
         ...stubDeps,
-        hasActiveAsyncSubagent: () => {
+        listActiveAsyncSubagentIds: () => {
           callCount += 1
-          return true
+          return ['agent_x']
         },
       },
     )
     expect(tool).toBeDefined()
-    // 触发 tool.call —— 应该看到 hasActiveAsyncSubagent 被调用
-    await tool!.call({ reason: 'test' }, {} as never)
+    // 触发 tool.call —— 应该看到 listActiveAsyncSubagentIds 被调用
+    await tool!.call({ reason: 'test', targets: [{ kind: 'subagent' }] }, {} as never)
     expect(callCount).toBeGreaterThan(0)
-    // 清理 barrier（hasActiveAsyncSubagent=true 时 tool.call 会 setBarrier(24h)，否则会泄露 setTimeout）
+    // 清理 barrier（目标存在时 tool.call 会 setBarrier(24h)，否则会泄露 setTimeout）
     stubDeps.humanQueue.clearBarrier()
+  })
+})
+
+describe('summarizeRunningEntities（唤醒快照数据源，spec 2026-07-16 §6）', () => {
+  const NOW = Date.parse('2026-07-16T10:10:00.000Z')
+
+  function shellRec(id: string, taskId: string, spawnedAt: string): BgEntityRecord {
+    return {
+      entity_id: id,
+      type: 'shell',
+      status: 'running',
+      owner: { friend_id: 'f1' },
+      spawned_by_task_id: taskId,
+      spawned_at: spawnedAt,
+      exit_code: null,
+      ended_at: null,
+      last_activity_at: spawnedAt,
+      command: 'pnpm test --watch',
+      log_file: '/tmp/x.log',
+      pid: 1,
+      pgid: 1,
+      process_started_at: spawnedAt,
+    }
+  }
+
+  function agentRec(id: string, taskId: string, spawnedAt: string): BgEntityRecord {
+    return {
+      entity_id: id,
+      type: 'agent',
+      status: 'running',
+      owner: { friend_id: 'f1' },
+      spawned_by_task_id: taskId,
+      spawned_at: spawnedAt,
+      exit_code: null,
+      ended_at: null,
+      last_activity_at: spawnedAt,
+      task_description: 'research something',
+      messages_log_file: '/tmp/m.jsonl',
+      result_file: null,
+    }
+  }
+
+  it('按 task 过滤 + 排除指定 entity + kind 映射 + runtime 计算', () => {
+    const records = [
+      agentRec('agent_done', 'task-1', '2026-07-16T10:00:00.000Z'),   // 即将退出的（排除）
+      agentRec('agent_live', 'task-1', '2026-07-16T10:05:00.000Z'),
+      shellRec('shell_live', 'task-1', '2026-07-16T10:08:00.000Z'),
+      shellRec('shell_other_task', 'task-2', '2026-07-16T10:00:00.000Z'),
+    ]
+    const items = summarizeRunningEntities(records, 'task-1', ['agent_done'], NOW)
+    expect(items.map((i) => i.id).sort()).toEqual(['agent_live', 'shell_live'])
+    const agent = items.find((i) => i.id === 'agent_live')!
+    expect(agent.kind).toBe('subagent')
+    expect(agent.runtime_ms).toBe(5 * 60_000)
+    expect(agent.description).toBe('research something')
+    const shell = items.find((i) => i.id === 'shell_live')!
+    expect(shell.kind).toBe('bg_entity')
+    expect(shell.description).toBe('pnpm test --watch')
+  })
+
+  it('在跑的 goal-audit subagent 被排除——不向 agent 泄漏 audit 存在（PR #31 review）', () => {
+    // audit subagent 也以 spawned_by_task_id=parentTaskId 注册 registry（audit-spawn.ts），
+    // 快照若包含它 = 重新引入"教 agent 等 audit"的污染源 + 与 targets 准入自相矛盾。
+    const records = [
+      agentRec('agent_audit', 'task-1', '2026-07-16T10:09:00.000Z'),  // 在跑的 audit
+      shellRec('shell_live', 'task-1', '2026-07-16T10:08:00.000Z'),
+    ]
+    const items = summarizeRunningEntities(records, 'task-1', ['shell_exiting', 'agent_audit'], NOW)
+    expect(items.map((i) => i.id)).toEqual(['shell_live'])
+  })
+
+  it('无在跑对象 → 空数组', () => {
+    expect(summarizeRunningEntities([], 'task-1', [], NOW)).toEqual([])
   })
 })

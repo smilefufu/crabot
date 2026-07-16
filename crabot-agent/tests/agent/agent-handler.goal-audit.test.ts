@@ -322,6 +322,35 @@ describe('AgentHandler.persistAsyncAuditResult', () => {
     }
   })
 
+  it('append RPC 抛错（如终态竞态）→ pass 场景 complete_task_goal 仍被调用（spec 2026-07-16 §2.2-3）', async () => {
+    const rpcCall = vi.fn(async (_port: unknown, method: unknown) => {
+      if (method === 'append_task_goal_audit_entry') {
+        throw new Error('TaskGoal 当前 status=complete，非 active 不可追加 audit 历史')
+      }
+      return { task: { id: 't-async' } }
+    })
+    const appendTraceOutcome = vi.fn()
+    const handler = makeHandler({ rpcCall })
+    try {
+      await (handler as any).persistAsyncAuditResult({
+        taskId: 't-async',
+        auditId: 'audit-trace-3',
+        parsed: {
+          pass: true,
+          failedCriteria: [],
+          rawOutput: 'ok',
+        } satisfies ParsedAuditReport,
+        verdictSummary: { summary: '[audit PASS]' },
+        traceStore: { appendTraceOutcome },
+      })
+
+      expect(rpcCall.mock.calls.some((c) => c[1] === 'complete_task_goal')).toBe(true)
+      expect(appendTraceOutcome).toHaveBeenCalledWith('audit-trace-3', { summary: '[audit PASS]' })
+    } finally {
+      handler.dispose()
+    }
+  })
+
   it('async audit fail → 写 audit_history、不中断 complete，并 patch fail verdict', async () => {
     const rpcCall = vi.fn()
       .mockResolvedValueOnce({ task: { id: 't-async', goal: { ...sampleGoal(), status: 'active' } } })

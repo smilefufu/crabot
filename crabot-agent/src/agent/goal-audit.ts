@@ -50,6 +50,35 @@ export interface ConversationEntry {
  */
 export type GoalStatus = 'active' | 'complete' | 'blocked' | 'budget_limited' | 'cleared'
 
+/**
+ * 终态集合。与 crabot-admin/src/task-goal.ts 的 TERMINAL_STATUSES 对齐
+ * （对齐由 tests/agent/goal-terminal.test.ts 跨包断言锁定）。
+ * spec: 2026-07-16-wait-signal-targets-goal-lifecycle-design §2.2
+ */
+export const TERMINAL_GOAL_STATUSES: ReadonlySet<GoalStatus> = new Set([
+  'complete',
+  'blocked',
+  'budget_limited',
+  'cleared',
+])
+
+export function isGoalTerminal(status: GoalStatus): boolean {
+  return TERMINAL_GOAL_STATUSES.has(status)
+}
+
+/**
+ * goal 是否应武装 audit gate：存在且非终态。
+ * 接受 admin get_task 返回的宽松 shape（status 缺失的旧数据按 active 防御处理）。
+ * worker 启动快照与 endTurnGate 第 3 步共用，保证两处判定不漂移。
+ * spec: 2026-07-16-wait-signal-targets-goal-lifecycle-design §2.2
+ */
+export function shouldArmGoalGate(goal: unknown): boolean {
+  if (goal === undefined || goal === null) return false
+  const status = (goal as { status?: unknown }).status
+  if (typeof status !== 'string') return true
+  return !TERMINAL_GOAL_STATUSES.has(status as GoalStatus)
+}
+
 /** Crab-messaging audit gate 拿到的结果；Task 8 会从这里 import */
 export interface AuditResult {
   readonly pass: boolean
