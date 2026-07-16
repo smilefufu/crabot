@@ -482,7 +482,6 @@ export class DingtalkChannel extends ModuleBase {
       max_message_length: MAX_MESSAGE_LENGTH,
       max_file_size: null,
       supports_file_path: false,
-      allowed_file_paths: [],
       supports_list_contacts: false,
       supports_list_groups: false,
       supports_list_group_members: true,

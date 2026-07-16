@@ -1,6 +1,13 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-16 — 挂起/唤醒语义 + goal 生命周期闭环已实现（PR #31）
+> 最后更新：2026-07-16 — 移除 Channel 出站文件路径白名单
+
+## 2026-07-16 — 移除 Channel 出站文件路径白名单
+
+- 根因：`generate_image` 生成成功后返回 Agent 本地路径，但 Feishu Channel 额外维护静态路径白名单，导致后续 `send_message(file_path)` 被拒绝；Telegram、WeChat、DingTalk 的同名 capability 字段未参与运行时校验。
+- 修复：四个 Channel 删除 `allowed_file_paths`；Feishu 同时删除实际拦截，保留文件读取、30 MB 限制与平台上传流程，并新增旧白名单外 `generated-images` 路径的发送回归测试。
+- Follow-up：Admin 统一管理出站路径策略、Agent crab-messaging `send_message` 执行审核；本轮不修改 Agent 或 `generate_image` 存储位置。
+- 验证：四个 Channel TypeScript build 通过；Feishu 214、WeChat 56、DingTalk 58 个测试通过；Telegram capability 定向测试通过，全量套件唯一失败为既有 reaction emoji 断言漂移（与本次 diff 无关）。
 
 ## 2026-07-16 — 挂起/唤醒语义收紧 + Goal 生命周期闭环（已实现，PR #31）
 

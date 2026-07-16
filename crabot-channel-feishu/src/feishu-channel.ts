@@ -789,11 +789,6 @@ export class FeishuChannel extends ModuleBase {
     const session = this.sessionManager.findById(params.session_id)
     if (!session) throwError('NOT_FOUND', `Session not found: ${params.session_id}`)
 
-    // file path 安全校验
-    if (params.content.file_path) {
-      this.assertFilePathAllowed(params.content.file_path)
-    }
-
     const receive: SendReceive = {
       type: session.type === 'group' ? 'chat_id' : 'open_id',
       id: session.platform_session_id,
@@ -890,7 +885,6 @@ export class FeishuChannel extends ModuleBase {
 
   private async loadContentBuffer(content: MessageContent): Promise<{ buf: Buffer; filename: string }> {
     if (content.file_path) {
-      this.assertFilePathAllowed(content.file_path)
       const buf = await readFileOrThrow(content.file_path)
       this.assertFileSize(buf.length)
       return { buf, filename: content.filename ?? path.basename(content.file_path) }
@@ -939,22 +933,10 @@ export class FeishuChannel extends ModuleBase {
     }
   }
 
-  private assertFilePathAllowed(filePath: string): void {
-    const allowed = this.allowedFilePaths()
-    const normalized = path.resolve(filePath)
-    if (!allowed.some((prefix) => normalized.startsWith(path.resolve(prefix)))) {
-      throwError('CHANNEL_FILE_PATH_NOT_ALLOWED', `file_path not allowed: ${filePath}`)
-    }
-  }
-
   private assertFileSize(size: number): void {
     if (size > MAX_FILE_SIZE) {
       throwError('CHANNEL_FILE_TOO_LARGE', `file size ${size} exceeds limit ${MAX_FILE_SIZE}`)
     }
-  }
-
-  private allowedFilePaths(): string[] {
-    return ['/tmp/', '/private/tmp/', path.join(this.dataDir, 'sessions'), path.join(this.dataDir, 'media')]
   }
 
   // ── capabilities ───────────────────────────────────────────────────────────
@@ -968,7 +950,6 @@ export class FeishuChannel extends ModuleBase {
       max_message_length: null,
       max_file_size: MAX_FILE_SIZE,
       supports_file_path: true,
-      allowed_file_paths: this.allowedFilePaths(),
       supports_list_contacts: true,
       supports_list_groups: true,
       supports_list_group_members: true,

@@ -524,7 +524,6 @@ export class WechatChannel extends ModuleBase {
       max_message_length: null,
       max_file_size: null,
       supports_file_path: true,
-      allowed_file_paths: ['/tmp/', '/private/tmp/'],
       supports_list_contacts: true,
       supports_list_groups: true,
       supports_list_group_members: true,
