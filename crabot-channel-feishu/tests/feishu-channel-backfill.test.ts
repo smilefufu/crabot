@@ -603,3 +603,104 @@ describe('image 消息回归契约（远端 history/message/backfill 三条路�
     expect(msg.content.status).toBeUndefined()
   })
 })
+
+describe('纯图片 post 消息回归契约（远端 history/message/backfill 三条路径）', () => {
+  /** 构造一条纯图片 post 消息（elements 只有 img，无任何文本） */
+  function makePureImagePostMsg(id: string, imageKey: string, createTimeMs: number) {
+    return {
+      message_id: id,
+      msg_type: 'post',
+      create_time: String(createTimeMs),
+      sender: { id: 'ou_alice' },
+      body: {
+        content: JSON.stringify({
+          content: [[{ tag: 'img', image_key: imageKey }]],
+        }),
+      },
+    }
+  }
+
+  it('handleGetHistory 远端 fallback 返回纯图片 post 消息含 [图片] 占位，不触发下载', async () => {
+    const internals = channel as unknown as ChannelInternals
+    const { session } = internals.sessionManager.upsertGroupSessionFromSnapshot({
+      platform_session_id: 'oc_postimg_history',
+      title: '纯图片 post 测试群',
+      participants: [],
+    })
+
+    internals.client = {
+      listMessages: vi.fn().mockResolvedValueOnce({
+        items: [makePureImagePostMsg('om_pph1', 'img_post_key_a', 1_700_000_030_000)],
+        has_more: false,
+      }),
+    } as never
+
+    const result = await internals.handleGetHistory({ session_id: session.id })
+    const msg = result.items[0]
+
+    // type 应为 image（post 拍平后含 img 元素）
+    expect(msg.content.type).toBe('image')
+    // text 不为空，被 [图片] 兜住
+    expect(msg.content.text).toBe('[图片]')
+    // 不触发下载
+    expect(msg.content.file_path).toBeUndefined()
+    expect(msg.content.handle).toBeUndefined()
+    expect(msg.content.status).toBeUndefined()
+  })
+
+  it('handleGetMessage 远端查询返回纯图片 post 消息含 [图片] 占位，不触发下载', async () => {
+    const internals = channel as unknown as ChannelInternals
+    const { session } = internals.sessionManager.upsertGroupSessionFromSnapshot({
+      platform_session_id: 'oc_postimg_getmsg',
+      title: '纯图片 post 测试群',
+      participants: [],
+    })
+
+    internals.client = {
+      getMessage: vi.fn().mockResolvedValueOnce(
+        makePureImagePostMsg('om_ppg1', 'img_post_key_b', 1_700_000_040_000),
+      ),
+    } as never
+
+    const msg = await internals.handleGetMessage({
+      session_id: session.id,
+      platform_message_id: 'om_ppg1',
+    })
+
+    expect(msg.content.type).toBe('image')
+    expect(msg.content.text).toBe('[图片]')
+    expect(msg.content.file_path).toBeUndefined()
+    expect(msg.content.handle).toBeUndefined()
+    expect(msg.content.status).toBeUndefined()
+  })
+
+  it('backfillHistory 持久化纯图片 post 消息含 [图片] 占位，不触发下载', async () => {
+    const internals = channel as unknown as ChannelInternals
+    const { session } = internals.sessionManager.upsertGroupSessionFromSnapshot({
+      platform_session_id: 'oc_postimg_backfill',
+      title: '纯图片 post 测试群',
+      participants: [],
+    })
+
+    internals.client = {
+      listMessages: vi.fn().mockResolvedValueOnce({
+        items: [makePureImagePostMsg('om_ppb1', 'img_post_key_c', 1_700_000_050_000)],
+        has_more: false,
+      }),
+    } as never
+
+    const result = await internals.backfillHistory({ session_id: session.id, max_count: 100 })
+
+    expect(result.backfilled_count).toBe(1)
+    expect(result.skipped_count).toBe(0)
+
+    const stored = await (channel as any).messageStore.query({ sessionId: session.id })
+    expect(stored.items).toHaveLength(1)
+    const msg = stored.items[0]
+    expect(msg.content.type).toBe('image')
+    expect(msg.content.text).toBe('[图片]')
+    expect(msg.content.file_path).toBeUndefined()
+    expect(msg.content.handle).toBeUndefined()
+    expect(msg.content.status).toBeUndefined()
+  })
+})

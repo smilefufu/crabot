@@ -1615,7 +1615,7 @@ export class FeishuChannel extends ModuleBase {
     } else if (mapped.content.type === 'image') {
       // 历史 image 不下载图片，补 text 占位避免 agent 侧渲染空白
       // post 内嵌图片已有 text（拍平后的富文本），仅纯 image 消息需补 `[图片]`
-      content = { ...mapped.content, text: mapped.content.text ?? '[图片]' }
+      content = { ...mapped.content, text: mapped.content.text?.trim() ? mapped.content.text : '[图片]' }
     } else {
       content = mapped.content
     }
