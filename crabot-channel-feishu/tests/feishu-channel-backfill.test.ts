@@ -368,4 +368,140 @@ describe('file 消息回归契约（远端 history/message/backfill 三条路径
     expect(msg.features.reply_to_message_id).toBe('om_parent3')
     expect(msg.features.root_message_id).toBe('om_root3')
   })
+
+  it('REST mentions 归一化：open_id mention 在 history/getMessage/backfill 三条路径保留', async () => {
+    const internals = channel as unknown as ChannelInternals
+    await (channel as any).mediaHandleStore.init()
+
+    const { session } = internals.sessionManager.upsertGroupSessionFromSnapshot({
+      platform_session_id: 'oc_mentions',
+      title: 'mentions 测试群',
+      participants: [],
+    })
+
+    // REST 格式的 mentions：id 是字符串 + id_type
+    const restMention = {
+      key: '@_user_1',
+      id: 'ou_rest_user',
+      id_type: 'open_id',
+      name: 'Alice',
+      tenant_key: 'tk_1',
+    }
+
+    // handleGetHistory 远端 fallback
+    internals.client = {
+      listMessages: vi.fn().mockResolvedValueOnce({
+        items: [{
+          message_id: 'om_men_h',
+          msg_type: 'text',
+          create_time: String(1_700_000_000_000),
+          sender: { id: 'ou_bob' },
+          body: { content: JSON.stringify({ text: 'Hi @_user_1' }) },
+          mentions: [restMention],
+        }],
+        has_more: false,
+      }),
+    } as never
+
+    const histResult = await internals.handleGetHistory({ session_id: session.id })
+    expect(histResult.items).toHaveLength(1)
+    const histMsg = histResult.items[0]
+    expect(histMsg.features.mentions).toBeDefined()
+    expect(histMsg.features.mentions).toHaveLength(1)
+    expect(histMsg.features.mentions![0].platform_user_id).toBe('ou_rest_user')
+    expect(histMsg.content.text).toContain('@Alice')
+
+    // handleGetMessage 远端查询
+    internals.client = {
+      getMessage: vi.fn().mockResolvedValueOnce({
+        message_id: 'om_men_m',
+        msg_type: 'text',
+        create_time: String(1_700_000_001_000),
+        sender: { id: 'ou_bob' },
+        body: { content: JSON.stringify({ text: 'Hi @_user_1' }) },
+        mentions: [restMention],
+      }),
+    } as never
+
+    const getMsg = await internals.handleGetMessage({ session_id: session.id, platform_message_id: 'om_men_m' })
+    expect(getMsg.features.mentions).toBeDefined()
+    expect(getMsg.features.mentions).toHaveLength(1)
+    expect(getMsg.features.mentions![0].platform_user_id).toBe('ou_rest_user')
+
+    // backfillHistory 持久化后保留 mentions
+    internals.client = {
+      listMessages: vi.fn().mockResolvedValueOnce({
+        items: [{
+          message_id: 'om_men_b',
+          msg_type: 'text',
+          create_time: String(1_700_000_002_000),
+          sender: { id: 'ou_bob' },
+          body: { content: JSON.stringify({ text: 'Hi @_user_1' }) },
+          mentions: [restMention],
+        }],
+        has_more: false,
+      }),
+    } as never
+
+    const bfResult = await internals.backfillHistory({ session_id: session.id, max_count: 100 })
+    expect(bfResult.backfilled_count).toBe(1)
+
+    const stored = await (channel as any).messageStore.query({ sessionId: session.id })
+    const bfMsg = stored.items.find((m: { platform_message_id: string }) => m.platform_message_id === 'om_men_b')
+    expect(bfMsg).toBeDefined()
+    expect(bfMsg.features.mentions).toBeDefined()
+    expect(bfMsg.features.mentions).toHaveLength(1)
+    expect(bfMsg.features.mentions[0].platform_user_id).toBe('ou_rest_user')
+  })
+
+  it('handle 去重：同一 message_id+file_key 重复查询复用已有 handle，store 条目不增长', async () => {
+    const internals = channel as unknown as ChannelInternals
+    await (channel as any).mediaHandleStore.init()
+
+    const { session } = internals.sessionManager.upsertGroupSessionFromSnapshot({
+      platform_session_id: 'oc_dedup',
+      title: 'handle 去重测试群',
+      participants: [],
+    })
+
+    const fileMsg = makeFeishuFileMsg('om_dedup', 'fk_dedup', 'doc.pdf', 1000, 1_700_000_000_000)
+
+    // 第一次查询：mint 新 handle
+    internals.client = {
+      listMessages: vi.fn().mockResolvedValue({
+        items: [fileMsg],
+        has_more: false,
+      }),
+    } as never
+
+    const r1 = await internals.handleGetHistory({ session_id: session.id })
+    expect(r1.items).toHaveLength(1)
+    const handle1 = r1.items[0].content.handle
+    expect(handle1).toMatch(/^fm_[0-9a-f]{12}$/)
+
+    const storeSizeAfterFirst = (channel as any).mediaHandleStore['map'].size
+
+    // 第二次查询：同一 message_id+file_key 应复用 handle
+    const r2 = await internals.handleGetHistory({ session_id: session.id })
+    expect(r2.items).toHaveLength(1)
+    const handle2 = r2.items[0].content.handle
+    expect(handle2).toBe(handle1) // 复用！
+
+    const storeSizeAfterSecond = (channel as any).mediaHandleStore['map'].size
+    expect(storeSizeAfterSecond).toBe(storeSizeAfterFirst) // 条目不增长
+
+    // 不同 message_id+file_key 应产生不同 handle
+    const anotherMsg = makeFeishuFileMsg('om_dedup2', 'fk_dedup2', 'other.pdf', 2000, 1_700_000_010_000)
+    internals.client = {
+      listMessages: vi.fn().mockResolvedValue({
+        items: [anotherMsg],
+        has_more: false,
+      }),
+    } as never
+
+    const r3 = await internals.handleGetHistory({ session_id: session.id })
+    expect(r3.items).toHaveLength(1)
+    const handle3 = r3.items[0].content.handle
+    expect(handle3).not.toBe(handle1) // 不同文件不同 handle
+  })
 })

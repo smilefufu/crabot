@@ -55,6 +55,17 @@ export class MediaHandleStore {
     }
   }
 
+  /**
+   * 按 credential 查找已有 handle。遍历全表 O(n)，但 handle 总数通常在数百以内。
+   * 返回第一个匹配的 handle，或 undefined。
+   */
+  findByCredential(credential: Record<string, unknown>): string | undefined {
+    for (const [handle, rec] of this.map) {
+      if (this.credentialMatch(rec.credential, credential)) return handle
+    }
+    return undefined
+  }
+
   /** 补写 crabot session id（入站时 session 在 applyMediaContent 之后才解析，故分两步）。未知 handle no-op。 */
   async setSessionId(handle: string, sessionId: string): Promise<void> {
     const rec = this.map.get(handle)
@@ -65,6 +76,18 @@ export class MediaHandleStore {
     } catch (err) {
       console.warn('[MediaHandleStore] setSessionId persist failed:', err)
     }
+  }
+
+  /** 比较两个 credential 是否逻辑相等（按 key-value 逐项相等，忽略顺序）。 */
+  private credentialMatch(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
+    const aKeys = Object.keys(a).sort()
+    const bKeys = Object.keys(b).sort()
+    if (aKeys.length !== bKeys.length) return false
+    for (let i = 0; i < aKeys.length; i++) {
+      if (aKeys[i] !== bKeys[i]) return false
+      if (a[aKeys[i]] !== b[bKeys[i]]) return false
+    }
+    return true
   }
 
   private async persist(): Promise<void> {

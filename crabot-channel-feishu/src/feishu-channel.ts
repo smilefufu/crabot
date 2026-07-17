@@ -1588,15 +1588,27 @@ export class FeishuChannel extends ModuleBase {
     const body = (m.body as Record<string, unknown> | undefined) ?? {}
     const msgType = (m.msg_type as string) ?? 'text'
     const contentJson = (body.content as string) ?? '{}'
-    const mentions = (m.mentions as Array<FeishuMention>) ?? []
+    // REST API 返回的 mentions 格式与事件不同（id 为字符串 + id_type），归一化后再传给 mapMessageContent
+    const rawMentions = (m.mentions as Array<Record<string, unknown>> | undefined) ?? []
+    const mentions = normalizeRESTMentions(rawMentions)
     const messageId = (m.message_id as string) ?? ''
 
     const mapped = mapMessageContent(msgType, contentJson, mentions)
 
-    // 仅 file 类型调用 applyMediaContent 登记惰性 handle（图片在历史查询不下载）
+    // 仅 file 类型登记惰性 handle（图片在历史查询不下载）
+    // 优先复用已有 handle（按 message_id + file_key 去重），避免每次查询 mint 新 handle 导致 store 无界增长
     let content: MessageContent
     if (mapped.content.type === 'file') {
-      content = await this.applyMediaContent(mapped, messageId)
+      const fileKey = mapped.raw?.file_key
+      let existingHandle: string | undefined
+      if (fileKey) {
+        existingHandle = this.mediaHandleStore.findByCredential({ platform_message_id: messageId, file_key: fileKey })
+      }
+      if (existingHandle) {
+        content = { ...mapped.content, handle: existingHandle, status: 'not_fetched' as const }
+      } else {
+        content = await this.applyMediaContent(mapped, messageId)
+      }
       if (sessionId && content.type === 'file' && content.handle) {
         await this.mediaHandleStore.setSessionId(content.handle, sessionId)
       }
@@ -1629,6 +1641,44 @@ export class FeishuChannel extends ModuleBase {
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/**
+ * 归一化飞书 REST API（im.v1.message.list / getMessage）的 mentions 格式为事件格式（FeishuMention）。
+ *
+ * REST 返回：
+ *   { key, id: "ou_xxx", id_type: "open_id", name, tenant_key }
+ * 事件格式：
+ *   { key, id: { open_id: "ou_xxx" }, name, tenant_key }
+ *
+ * 已符合事件格式的（id 是对象）原样返回。
+ */
+function normalizeRESTMentions(raw: Array<Record<string, unknown>>): FeishuMention[] {
+  return raw.map((m) => {
+    const id = m.id
+    if (typeof id === 'string' && id) {
+      const idType = (m.id_type as string) ?? 'open_id'
+      const normalizedId: FeishuMention['id'] = {}
+      if (idType === 'open_id') {
+        normalizedId.open_id = id
+      } else if (idType === 'user_id') {
+        normalizedId.user_id = id
+      } else if (idType === 'union_id') {
+        normalizedId.union_id = id
+      } else {
+        // 未知 id_type 兜底为 open_id
+        normalizedId.open_id = id
+      }
+      return {
+        key: (m.key as string) ?? '',
+        id: normalizedId,
+        name: (m.name as string) ?? '',
+        tenant_key: m.tenant_key as string | undefined,
+      }
+    }
+    // id 已经是对象（事件格式），直接 cast
+    return m as unknown as FeishuMention
+  })
+}
 
 function isoFromMillis(ms: string | number | undefined): string | undefined {
   if (ms === undefined || ms === null || ms === '') return undefined
