@@ -48,7 +48,7 @@ describe('reconcileTasksAgainstTraces', () => {
     expect(patches[0].newStatus).toBe('completed')
   })
 
-  it('task=executing + 任一 trace=failed → 修成 failed', async () => {
+  it('task=executing + 最后 worker=failed → 修成 failed', async () => {
     const tasks = [makeTask({ id: 't-2', status: 'executing', updated_at: '2026-06-09T18:00:00.000Z' })]
     const patches = await reconcileTasksAgainstTraces({
       tasks,
@@ -64,6 +64,23 @@ describe('reconcileTasksAgainstTraces', () => {
     expect(patches[0].newStatus).toBe('failed')
   })
 
+  it('最后启动的 worker completed 时忽略旧 worker failed', async () => {
+    const tasks = [makeTask({ id: 't-latest-completed', status: 'executing', updated_at: '2026-06-09T18:00:00.000Z' })]
+    const patches = await reconcileTasksAgainstTraces({
+      tasks,
+      fetchTracesByTaskId: mockFetchTraces({
+        't-latest-completed': [
+          { trace_id: 'worker-old', status: 'failed' },
+          { trace_id: 'worker-new', status: 'completed' },
+        ],
+      }),
+      now: FIXED_NOW,
+    })
+
+    expect(patches).toHaveLength(1)
+    expect(patches[0].newStatus).toBe('completed')
+  })
+
   it('任一 trace 仍 running → 不修', async () => {
     const tasks = [makeTask({ id: 't-3', status: 'waiting_human', updated_at: '2026-06-09T18:00:00.000Z' })]
     const patches = await reconcileTasksAgainstTraces({
@@ -76,6 +93,26 @@ describe('reconcileTasksAgainstTraces', () => {
       }),
       now: FIXED_NOW,
     })
+    expect(patches).toHaveLength(0)
+  })
+
+  it('早期 worker running 且后续有超过 100 条终态 worker 时不收口', async () => {
+    const tasks = [makeTask({ id: 't-running-oldest', status: 'executing', updated_at: '2026-06-09T18:00:00.000Z' })]
+    const terminalWorkers = Array.from({ length: 101 }, (_, index) => ({
+      trace_id: `worker-${index}`,
+      status: 'completed' as const,
+    }))
+    const patches = await reconcileTasksAgainstTraces({
+      tasks,
+      fetchTracesByTaskId: mockFetchTraces({
+        't-running-oldest': [
+          { trace_id: 'worker-running', status: 'running' },
+          ...terminalWorkers,
+        ],
+      }),
+      now: FIXED_NOW,
+    })
+
     expect(patches).toHaveLength(0)
   })
 

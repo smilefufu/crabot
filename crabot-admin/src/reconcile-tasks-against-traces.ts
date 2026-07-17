@@ -12,14 +12,14 @@
  * - admin 状态机判定 waiting_human → completed 非法，拒绝
  * - bestEffortRpc 吞错，task 永远卡在 waiting_human
  *
- * 修复策略：检测到"task 仍活跃 + 所有 trace 终态 + 距上次更新 > minStaleAgeMs"时，
- * 按 trace.outcome 决定切 completed/failed。reconciliation 不修 status=pending 的 task
+ * 修复策略：检测到"task 仍活跃 + 所有 worker trace 终态 + 距上次更新 > minStaleAgeMs"时，
+ * 按最后启动的 worker 状态切 completed/failed。reconciliation 不修 status=pending 的 task
  * （刚创建还没起 worker 的，留给 dispatcher 重新调度）。
  */
 
 import type { Task, TaskStatus } from './types.js'
 
-/** Trace 索引子集，对账只关心这几个字段 */
+/** Worker trace 索引子集，对账只关心这几个字段 */
 export interface TraceIndexLite {
   trace_id: string
   related_task_id?: string
@@ -30,7 +30,7 @@ export interface TraceIndexLite {
 export interface ReconcileInput {
   /** admin 全部 task（pure function 不读磁盘） */
   readonly tasks: ReadonlyArray<Task>
-  /** 拉单个 task 关联的所有 trace（注入式，便于 mock） */
+  /** 拉单个 task 按 started_at 升序排列的所有 worker trace（注入式，便于 mock） */
   readonly fetchTracesByTaskId: (taskId: string) => Promise<ReadonlyArray<TraceIndexLite>>
   /**
    * task 多久没更新才纳入对账（防止刚 spawn 还没写 trace 的 task 被误判 stale）。
@@ -77,35 +77,34 @@ export async function reconcileTasksAgainstTraces(input: ReconcileInput): Promis
       continue
     }
 
-    // 拉 task 关联的所有 trace
-    let traces: ReadonlyArray<TraceIndexLite>
+    // 拉 task 关联的所有 worker trace
+    let workers: ReadonlyArray<TraceIndexLite>
     try {
-      traces = await fetchTracesByTaskId(task.id)
+      workers = await fetchTracesByTaskId(task.id)
     } catch {
       // 拉失败（agent 不可达 / RPC 错）就跳过本轮 —— 下轮再试
       continue
     }
 
-    // 无 trace：可能是 task 刚建还没 spawn 第一条 trace。保守跳过。
-    if (traces.length === 0) continue
+    // 无 worker：可能是 task 刚建还没 spawn。保守跳过。
+    if (workers.length === 0) continue
 
-    // 任一 trace 仍 running → task 真在跑，不对账
-    const anyRunning = traces.some(t => t.status === 'running')
+    // 任一 worker 仍 running → task 真在跑，不对账
+    const anyRunning = workers.some(t => t.status === 'running')
     if (anyRunning) continue
 
-    // 所有 trace 都终态 + task 仍活跃 → drift，需修复
-    // 决策：任一 trace=failed → task 标 failed；全 completed → task 标 completed
-    const anyFailed = traces.some(t => t.status === 'failed')
-    const newStatus: 'completed' | 'failed' = anyFailed ? 'failed' : 'completed'
+    // 所有 worker 都终态 + task 仍活跃 → 以后启动的 worker 为权威。
+    const latestWorker = workers.at(-1)
+    if (!latestWorker || latestWorker.status === 'running') continue
+    const newStatus = latestWorker.status
 
     patches.push({
       taskId: task.id,
       oldStatus: task.status,
       newStatus,
-      reason: `task ${task.status} but all ${traces.length} trace(s) terminal (${
-        anyFailed ? 'has failed trace' : 'all completed'
-      })`,
-      traces: traces.map(t => ({ trace_id: t.trace_id, status: t.status })),
+      reason: `task ${task.status} but all ${workers.length} worker trace(s) terminal ` +
+        `(latest worker ${latestWorker.trace_id.slice(0, 8)}=${latestWorker.status})`,
+      traces: workers.map(t => ({ trace_id: t.trace_id, status: t.status })),
     })
   }
 

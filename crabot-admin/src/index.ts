@@ -5613,10 +5613,10 @@ export class AdminModule extends ModuleBase {
     const fetchTracesByTaskId = async (taskId: string) => {
       try {
         const result = await this.callAgentRpc<
-          { task_id: string; limit: number },
-          { traces: Array<{ trace_id: string; related_task_id?: string; status: 'running' | 'completed' | 'failed'; outcome?: { summary?: string } }>; total: number }
-        >('search_traces', { task_id: taskId, limit: 100 })
-        return result.traces
+          { task_id: string },
+          { tree: { workers: Array<{ trace_id: string; status: 'running' | 'completed' | 'failed' }> } }
+        >('get_trace_tree', { task_id: taskId })
+        return result.tree.workers
       } catch (err) {
         throw err instanceof Error ? err : new Error(String(err))
       }

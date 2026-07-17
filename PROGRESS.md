@@ -1,6 +1,6 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-16 — 移除 Channel 出站文件路径白名单
+> 最后更新：2026-07-17 — 修复 Task/Trace 状态对账误判
 
 ## 2026-07-16 — 移除 Channel 出站文件路径白名单
 
@@ -15,12 +15,12 @@
 - spec：`crabot-docs/superpowers/specs/2026-07-16-wait-signal-targets-goal-lifecycle-design.md`。C 简化为收尾清理（cleared + warn），事后 audit 暂缓（升级触发条件见 spec §4.3）。
 - 实现（PR #31）：A/B/C/D 全部落地 + audit 等待兜底超时（10 分钟 → abort + fail-open，防 audit 卡死时 24h 挂起循环，review 发现补上）。resume 两条路径的 goal 语义交互见 spec §7，遗留脏数据（completed task + active goal）由收尾清理惰性消化，无需迁移。
 
-## 2026-07-14 — 修复大型 Trace 执行树遗漏主 Worker
+## 2026-07-17 — 修复大型 Trace 执行树与 Task 状态对账
 
 - `get_trace_tree` 不再只读取最新 100 条关联 trace；现在同步分页取回同一 task 的全部 trace 后再按 dispatcher / worker / sub-agent 分组。
-- 修复长任务产生超过 100 条 sub-agent trace 后，最早启动且仍运行中的主 Worker 被截断、Trace 页面只显示 Dispatch 和 Subagent 的问题。
-- 回归覆盖 1 条旧 Worker + 1000 条后续 Sub-agent，强制跨页并确保完整执行树仍包含 Worker。
-- 验证：TraceStore 定向测试 43/43 通过，Agent TypeScript `--noEmit` 检查通过。
+- Admin reconciliation 改用完整 `get_trace_tree`，只按 `workers` 判定任务状态：任一 Worker 仍运行则不收口；全部终态时以后启动的 Worker 为准，front/sub-agent 失败不再直接把 task 判成 failed。
+- 回归覆盖旧 Worker + 1000 条后续 Sub-agent 的跨页执行树，以及旧 Worker failed、后续 Worker completed 的状态收口。
+- 验证：Admin reconciliation 定向测试、Agent TraceStore 跨页回归与两个模块 TypeScript build 通过。
 
 ## 2026-07-12 — 修复终态任务误入活跃列表与 WeChat 原始时间戳丢失
 
