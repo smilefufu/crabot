@@ -505,3 +505,101 @@ describe('file 消息回归契约（远端 history/message/backfill 三条路径
     expect(handle3).not.toBe(handle1) // 不同文件不同 handle
   })
 })
+
+describe('image 消息回归契约（远端 history/message/backfill 三条路径）', () => {
+  function makeFeishuImageMsg(id: string, imageKey: string, createTimeMs: number) {
+    return {
+      message_id: id,
+      msg_type: 'image',
+      create_time: String(createTimeMs),
+      sender: { id: 'ou_alice' },
+      body: { content: JSON.stringify({ image_key: imageKey }) },
+    }
+  }
+
+  it('handleGetHistory 远端 fallback 返回 image 消息含 text 占位符 [图片]，不触发下载', async () => {
+    const internals = channel as unknown as ChannelInternals
+    const { session } = internals.sessionManager.upsertGroupSessionFromSnapshot({
+      platform_session_id: 'oc_image_history1',
+      title: 'image 测试群',
+      participants: [],
+    })
+
+    internals.client = {
+      listMessages: vi.fn().mockResolvedValueOnce({
+        items: [
+          makeFeishuImageMsg('om_ih1', 'img_key_a', 1_700_000_000_000),
+        ],
+        has_more: false,
+      }),
+    } as never
+
+    const result = await internals.handleGetHistory({ session_id: session.id })
+    const msg = result.items[0]
+
+    // type 保持不变（语义契约）
+    expect(msg.content.type).toBe('image')
+    // 有 text 占位
+    expect(msg.content.text).toBe('[图片]')
+    // 不触发下载：无 file_path / handle / status
+    expect(msg.content.file_path).toBeUndefined()
+    expect(msg.content.handle).toBeUndefined()
+    expect(msg.content.status).toBeUndefined()
+  })
+
+  it('handleGetMessage 远端查询返回 image 消息含 text 占位符 [图片]，不触发下载', async () => {
+    const internals = channel as unknown as ChannelInternals
+    const { session } = internals.sessionManager.upsertGroupSessionFromSnapshot({
+      platform_session_id: 'oc_image_getmsg',
+      title: 'image 测试群',
+      participants: [],
+    })
+
+    internals.client = {
+      getMessage: vi.fn().mockResolvedValueOnce(
+        makeFeishuImageMsg('om_igm1', 'img_key_b', 1_700_000_010_000),
+      ),
+    } as never
+
+    const msg = await internals.handleGetMessage({ session_id: session.id, platform_message_id: 'om_igm1' })
+
+    expect(msg.content.type).toBe('image')
+    expect(msg.content.text).toBe('[图片]')
+    expect(msg.content.file_path).toBeUndefined()
+    expect(msg.content.handle).toBeUndefined()
+    expect(msg.content.status).toBeUndefined()
+  })
+
+  it('backfillHistory 持久化 image 消息含 text 占位符 [图片]，不触发下载', async () => {
+    const internals = channel as unknown as ChannelInternals
+    const { session } = internals.sessionManager.upsertGroupSessionFromSnapshot({
+      platform_session_id: 'oc_image_backfill',
+      title: 'image 测试群',
+      participants: [],
+    })
+
+    internals.client = {
+      listMessages: vi.fn().mockResolvedValueOnce({
+        items: [
+          makeFeishuImageMsg('om_ibf1', 'img_key_c', 1_700_000_020_000),
+        ],
+        has_more: false,
+      }),
+    } as never
+
+    const result = await internals.backfillHistory({ session_id: session.id, max_count: 100 })
+
+    expect(result.backfilled_count).toBe(1)
+    expect(result.skipped_count).toBe(0)
+
+    // 检查 messageStore 中持久化的内容
+    const stored = await (channel as any).messageStore.query({ sessionId: session.id })
+    expect(stored.items).toHaveLength(1)
+    const msg = stored.items[0]
+    expect(msg.content.type).toBe('image')
+    expect(msg.content.text).toBe('[图片]')
+    expect(msg.content.file_path).toBeUndefined()
+    expect(msg.content.handle).toBeUndefined()
+    expect(msg.content.status).toBeUndefined()
+  })
+})
