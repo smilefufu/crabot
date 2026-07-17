@@ -160,6 +160,31 @@ describe('Admin claim command interception', () => {
     expect((sendCalls[0][2] as any).content.text).toContain('已认主')
   })
 
+  it('intercepts /认主 from image content carrying text', async () => {
+    const admin = makeAdmin()
+    const master = makeFriend({
+      id: 'friend-master',
+      permission: 'master',
+      channel_identities: [makeIdentity('master-user', 'Master User')],
+    })
+    seedFriend(admin, master)
+
+    vi.spyOn(admin['rpcClient'], 'resolve').mockResolvedValue([
+      { module_id: 'wechat-main', module_type: 'channel', version: '0.1.0', port: 19998 },
+    ] as any)
+    const callSpy = vi.spyOn(admin['rpcClient'], 'call').mockResolvedValue({} as any)
+    const publishSpy = vi.spyOn(admin['rpcClient'], 'publishEvent').mockResolvedValue(1)
+    const message = makePrivateMessage('master-user', 'Master User', '/认主')
+    message.content = { type: 'image', text: '/认主', media_url: '/tmp/image.png' }
+
+    await admin['handleChannelMessage']('wechat-main', message)
+
+    expect(publishSpy).not.toHaveBeenCalled()
+    const sendCalls = callSpy.mock.calls.filter((c) => c[1] === 'send_message')
+    expect(sendCalls).toHaveLength(1)
+    expect((sendCalls[0][2] as any).content.text).toContain('已认主')
+  })
+
   it('intercepts /认主 from an unknown sender and routes it into the pending queue', async () => {
     const admin = makeAdmin()
 

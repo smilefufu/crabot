@@ -23,6 +23,7 @@ export interface MappedMessage {
   /** 飞书侧附加结构（image_key / file_key 等），由 channel 层用于后续下载 */
   raw?: {
     image_key?: string
+    image_keys?: string[]
     file_key?: string
     filename?: string
     file_size?: number
@@ -97,10 +98,14 @@ export function mapMessageContent(
       }
     }
     case 'post': {
-      const flat = parsePostText(raw)
+      const parsed = parsePostContent(raw)
       return {
-        content: { type: 'text', text: applyMentionPlaceholders(flat, mentions) },
+        content: {
+          type: parsed.imageKeys.length > 0 ? 'image' : 'text',
+          text: applyMentionPlaceholders(parsed.text, mentions),
+        },
         features,
+        ...(parsed.imageKeys.length > 0 ? { raw: { image_keys: parsed.imageKeys } } : {}),
       }
     }
     case 'image': {
@@ -161,10 +166,11 @@ export function mapMessageContent(
 /**
  * 飞书 post 消息有结构：
  *   { title, content: [[ {tag,text|...}, ... ], ...] }
- * 这里把它拍平为多行文本，链接用 text + 'href'，at 用 '@user_name'。
+ * 文本拍平为多行；有效 img.image_key 另行收集供 channel 下载，缺 key 才保留占位。
  */
-export function parsePostText(post: Record<string, unknown>): string {
+function parsePostContent(post: Record<string, unknown>): { text: string; imageKeys: string[] } {
   const lines: string[] = []
+  const imageKeys: string[] = []
   const title = post.title
   if (typeof title === 'string' && title.trim()) lines.push(title)
 
@@ -185,13 +191,19 @@ export function parsePostText(post: Record<string, unknown>): string {
           const userName = (seg.user_name as string | undefined) ?? (seg.user_id as string | undefined) ?? ''
           segs.push(userName ? `@${userName}` : '')
         } else if (tag === 'img') {
-          segs.push('[图片]')
+          const imageKey = typeof seg.image_key === 'string' ? seg.image_key.trim() : ''
+          if (imageKey) imageKeys.push(imageKey)
+          else segs.push('[图片]')
         }
       }
       if (segs.length > 0) lines.push(segs.join(''))
     }
   }
-  return lines.join('\n')
+  return { text: lines.join('\n'), imageKeys }
+}
+
+export function parsePostText(post: Record<string, unknown>): string {
+  return parsePostContent(post).text
 }
 
 export function detectMentionCrab(mentions: FeishuMention[], botOpenId: string | undefined | null): boolean {

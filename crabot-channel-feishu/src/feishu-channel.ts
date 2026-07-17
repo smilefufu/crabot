@@ -369,6 +369,40 @@ export class FeishuChannel extends ModuleBase {
     messageId: string,
   ): Promise<MessageContent> {
     const { content, raw } = mapped
+    if (content.type === 'image' && raw?.image_keys?.length) {
+      const downloads: Array<{ filePath: string; mimeType?: string; size: number } | null> = []
+      for (let index = 0; index < raw.image_keys.length; index++) {
+        downloads.push(await this.downloadAndPersistMedia(
+          messageId,
+          raw.image_keys[index],
+          'image',
+          undefined,
+          `-${index + 1}`,
+        ))
+      }
+      const media = downloads.flatMap((r) => r ? [{
+        media_url: r.filePath,
+        mime_type: r.mimeType ?? 'application/octet-stream',
+        filename: path.basename(r.filePath),
+        size: r.size,
+      }] : [])
+      const failedCount = downloads.length - media.length
+      const failureNote = failedCount === 0
+        ? ''
+        : failedCount === downloads.length
+          ? '[图片下载失败]'
+          : `[${failedCount} 张图片下载失败]`
+      const text = [content.text, failureNote].filter(Boolean).join('\n')
+
+      if (media.length === 0) return { type: 'text', text: text || '[图片下载失败]' }
+      return {
+        ...content,
+        text,
+        media,
+        media_url: media[0].media_url,
+        status: 'ready',
+      }
+    }
     if (content.type === 'image' && raw?.image_key) {
       const r = await this.downloadAndPersistMedia(messageId, raw.image_key, 'image')
       if (!r) return { type: 'text', text: '[图片下载失败]' }
@@ -432,6 +466,7 @@ export class FeishuChannel extends ModuleBase {
     fileKey: string,
     type: 'image' | 'file',
     filenameHint?: string,
+    filenameSuffix = '',
   ): Promise<{ filePath: string; mimeType?: string; size: number } | null> {
     try {
       const buffer = await this.client.downloadResource(messageId, fileKey, type)
@@ -445,7 +480,7 @@ export class FeishuChannel extends ModuleBase {
         const fromHint = filenameHint ? path.extname(filenameHint) : ''
         ext = fromHint && /^\.[A-Za-z0-9]{1,8}$/.test(fromHint) ? fromHint : '.bin'
       }
-      const filePath = path.join(this.dataDir, 'media', `${messageId}${ext}`)
+      const filePath = path.join(this.dataDir, 'media', `${messageId}${filenameSuffix}${ext}`)
       await fsp.writeFile(filePath, buffer)
       return { filePath, mimeType, size: buffer.length }
     } catch (err) {
@@ -501,7 +536,7 @@ export class FeishuChannel extends ModuleBase {
    * 失败降级为 [飞书文档] url，绝不阻塞消息。
    */
   private async enrichContentWithDocTitles(content: MessageContent): Promise<MessageContent> {
-    if (content.type !== 'text' || !content.text) return content
+    if (!content.text) return content
     const urls = extractFeishuDocUrls(content.text)
     if (urls.length === 0) return content
 

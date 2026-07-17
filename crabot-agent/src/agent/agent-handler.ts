@@ -2238,7 +2238,7 @@ export class AgentHandler {
     // messages 就是当前 trigger 批次（spec 2026-06-04 §3：单段时间线后，messages
     // 不再 prepend baseHistory）；取最后一条作为 trigger 摘要 = 触发批次的尾部。
     const lastMsg = messages[messages.length - 1]
-    const lastMsgText = lastMsg?.content.type === 'text' ? (lastMsg.content.text ?? '') : '[非文本]'
+    const lastMsgText = lastMsg?.content.text || '[非文本]'
     const triggerSummary = lastMsgText.slice(0, 100)
     const taskTitle = triggerSummary
     const syntheticTaskId = `trigger-${randomUUID()}` as TaskId

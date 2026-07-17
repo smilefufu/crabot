@@ -3877,7 +3877,7 @@ export class AdminModule extends ModuleBase {
     // 已知 friend 发命令属于无意义/误触，回固定话术；未知发信人按现有 pending 队列流程。
     // 用 normalizeSlash 而非裸 trim：IM/复制粘贴常在 slash 词尾带零宽字符，
     // 裸 trim 去不掉，会让 "/认主" 精确匹配失败、漏到 dispatcher 触发无谓 LLM 调用。
-    const body = normalizeSlash(message.content.type === 'text' ? message.content.text : '')
+    const body = normalizeSlash(message.content.text ?? '')
     if (CLAIM_COMMANDS.has(body)) {
       if (message.session.type !== 'private') {
         // 群聊里发命令现在没有特别语义，直接静默丢弃

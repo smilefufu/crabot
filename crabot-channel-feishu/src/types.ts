@@ -22,6 +22,13 @@ export type ChannelFeature = 'mention' | 'quote' | 'reaction' | 'thread'
 /** system_event 子类型，见 base-protocol.md §5.4 system_event */
 export type SystemEventType = 'members_added' | 'scheduled'
 
+export interface MediaItem {
+  media_url: string
+  mime_type: string
+  filename?: string
+  size?: number
+}
+
 export interface MessageContent {
   type: MessageType
   text?: string
@@ -30,9 +37,11 @@ export interface MessageContent {
   filename?: string
   mime_type?: string
   size?: number
+  /** 多附件数组；存在时为权威，media_url 镜像 media[0].media_url */
+  media?: MediaItem[]
   /** 惰性媒体下载句柄（非图片文件 status=not_fetched 时携带，传给 fetch_media RPC） */
   handle?: string
-  /** 媒体就绪状态：ready=已就绪(见 file_path) / not_fetched=未下载 / fetching=下载中 / failed=失败 */
+  /** 媒体就绪状态：ready=已就绪(见 file_path/media[]) / not_fetched=未下载 / fetching=下载中 / failed=失败 */
   status?: 'ready' | 'not_fetched' | 'fetching' | 'failed'
   event_type?: SystemEventType
   affected_users?: Array<{ platform_user_id: string; platform_display_name: string }>

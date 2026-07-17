@@ -51,6 +51,24 @@ describe('mapMessageContent — post', () => {
     expect(out.content.text).toContain('Line1')
     expect(out.content.text).toContain('Line2 链接')
   })
+
+  it('keeps inline image keys and maps image + text post to image content', () => {
+    const post = JSON.stringify({
+      content: [
+        [{ tag: 'img', image_key: 'img_a' }],
+        [{ tag: 'text', text: '看下这个图上是什么内容' }],
+        [{ tag: 'img', image_key: 'img_b' }],
+      ],
+    })
+
+    const out = mapMessageContent('post', post, [])
+
+    expect(out.content).toEqual({
+      type: 'image',
+      text: '看下这个图上是什么内容',
+    })
+    expect(out.raw?.image_keys).toEqual(['img_a', 'img_b'])
+  })
 })
 
 describe('mapMessageContent — image / file', () => {
@@ -140,7 +158,7 @@ describe('detectMentionCrab', () => {
 })
 
 describe('parsePostText', () => {
-  it('handles nested rich text with at/img tags', () => {
+  it('handles nested rich text with at tags', () => {
     const post = {
       title: 'Hi',
       content: [

@@ -138,6 +138,28 @@ describe('registerTriggerAndActivate + runTriggerWorkerLoop 拆分契约', () =>
     expect(pre.taskId).toMatch(/^trigger-[0-9a-f-]{36}$/)
   })
 
+  it('图文消息用 text 生成 task title', async () => {
+    const params = makeParams()
+    params.messages[0].content = {
+      type: 'image',
+      text: '看下这个图上是什么内容',
+      media_url: '/tmp/image.png',
+    }
+
+    const pre = await handler.registerTriggerAndActivate(params)
+
+    expect(pre.taskTitle).toBe('看下这个图上是什么内容')
+  })
+
+  it('纯图片消息保留非文本 task title', async () => {
+    const params = makeParams()
+    params.messages[0].content = { type: 'image', text: '' }
+
+    const pre = await handler.registerTriggerAndActivate(params)
+
+    expect(pre.taskTitle).toBe('[非文本]')
+  })
+
   it('admin create_task 失败时 registered=false 但仍返回 taskState（best-effort）', async () => {
     const failingHandler = new AgentHandler(
       makeSdkEnv(),
