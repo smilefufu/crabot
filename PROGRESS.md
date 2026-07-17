@@ -1,6 +1,13 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-17 — 修复飞书富文本图文消息丢图
+> 最后更新：2026-07-17 — 恢复飞书外部群 PRD 获取流程
+
+## 2026-07-17 — 恢复飞书外部群 PRD 获取流程
+
+- 历史 `get_history` / `get_message` / `backfill_history` 统一复用消息 mapper；Word 等 file 保留文件名、大小、reply/root 引用并登记可由 `fetch_media` 下载的惰性 handle。
+- `rawGet` 可从 Axios HTTP 400 中提取飞书业务 payload；Wiki `41050 no user authority` 保留原始业务码/消息，并明确区分应用 scope、资源数据权限与跨租户授权。
+- 所需核心 scope：`im:message`、`im:resource`、`wiki:wiki:readonly`、`docx:document:readonly`、`drive:drive:readonly`；详见 `crabot-docs/guides/feishu-external-group-prd.md`。
+- 验证：Feishu 历史文件、rawGet、remediation、文档读取定向测试及全量测试/build 通过。
 
 ## 2026-07-17 — 修复飞书富文本图文消息丢图
 

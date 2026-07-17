@@ -75,3 +75,41 @@ test('未知 handle 的 setSessionId 静默 no-op', async () => {
   // 不应抛错
   await store.setSessionId('fm_nonexistent', 'sess_abc')
 })
+
+test('findByCredential 按 credential 找到已有 handle', async () => {
+  const store = new MediaHandleStore(mkdtemp())
+  const credA = { platform_message_id: 'msg_001', file_key: 'fk_abc' }
+  const credB = { platform_message_id: 'msg_002', file_key: 'fk_xyz' }
+  const handleA = await store.put({ kind: 'file', credential: credA })
+  await store.put({ kind: 'file', credential: credB })
+
+  const found = store.findByCredential({ platform_message_id: 'msg_001', file_key: 'fk_abc' })
+  assert.equal(found, handleA)
+})
+
+test('findByCredential 不存在的 credential 返回 undefined', () => {
+  const store = new MediaHandleStore(mkdtemp())
+  assert.equal(store.findByCredential({ platform_message_id: 'msg_999', file_key: 'noexist' }), undefined)
+})
+
+test('findByCredential 空 store 返回 undefined', () => {
+  const store = new MediaHandleStore(mkdtemp())
+  assert.equal(store.findByCredential({ anything: 'x' }), undefined)
+})
+
+test('findByCredential 部分匹配不命中', async () => {
+  const store = new MediaHandleStore(mkdtemp())
+  await store.put({ kind: 'file', credential: { platform_message_id: 'msg_001', file_key: 'fk_abc' } })
+  // 只提供 platform_message_id 不提供 file_key → 不匹配
+  assert.equal(store.findByCredential({ platform_message_id: 'msg_001' }), undefined)
+  // 多一个字段也不匹配
+  assert.equal(store.findByCredential({ platform_message_id: 'msg_001', file_key: 'fk_abc', extra: 'x' }), undefined)
+})
+
+test('findByCredential 忽略顺序差异', async () => {
+  const store = new MediaHandleStore(mkdtemp())
+  const handle = await store.put({ kind: 'file', credential: { file_key: 'fk_abc', platform_message_id: 'msg_001' } })
+  // 查询时顺序不同
+  const found = store.findByCredential({ platform_message_id: 'msg_001', file_key: 'fk_abc' })
+  assert.equal(found, handle)
+})

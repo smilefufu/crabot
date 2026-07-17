@@ -29,16 +29,22 @@ export interface FeishuClientErrorOpts {
   code: string
   message: string
   cause?: unknown
+  feishu_code?: number
+  feishu_message?: string
 }
 
 export class FeishuClientError extends Error {
   code: string
   cause?: unknown
+  feishu_code?: number
+  feishu_message?: string
   constructor(opts: FeishuClientErrorOpts) {
     super(opts.message)
     this.name = 'FeishuClientError'
     this.code = opts.code
     this.cause = opts.cause
+    this.feishu_code = opts.feishu_code
+    this.feishu_message = opts.feishu_message
   }
 }
 
@@ -299,11 +305,20 @@ export class FeishuClient {
       for (const [k, v] of Object.entries(query)) qs.set(k, String(v))
       url += (path.includes('?') ? '&' : '?') + qs.toString()
     }
-    const resp = await this.client.request<{ code?: number; msg?: string; data?: T }>({ url, method: 'GET' })
-    if (resp.code && resp.code !== 0) {
-      throw new FeishuClientError({ code: this.mapDocCode(resp.code), message: resp.msg ?? `feishu GET failed (code=${resp.code}) ${path}` })
+    try {
+      const resp = await this.client.request<{ code?: number; msg?: string; data?: T }>({ url, method: 'GET' })
+      if (resp.code && resp.code !== 0) {
+        throw this.makeDocError(resp.code, resp.msg ?? '', path)
+      }
+      return (resp.data ?? {}) as T
+    } catch (err: unknown) {
+      if (err instanceof FeishuClientError) throw err
+      const extracted = tryExtractFeishuError(err)
+      if (extracted) {
+        throw this.makeDocError(extracted.code, extracted.msg, path, err)
+      }
+      throw err
     }
-    return (resp.data ?? {}) as T
   }
 
   /**
@@ -344,10 +359,20 @@ export class FeishuClient {
   }
 
   private mapDocCode(code: number): string {
-    // 99991663/99991672: 权限不足  230001: 文档不存在
-    if (code === 99991663 || code === 99991672 || code === 403) return 'PERMISSION_DENIED'
+    // 41050: 无用户权限  99991663/99991672: 权限不足  230001: 文档不存在
+    if (code === 41050 || code === 99991663 || code === 99991672 || code === 403) return 'PERMISSION_DENIED'
     if (code === 230001 || code === 404) return 'NOT_FOUND'
     return 'CHANNEL_SEND_FAILED'
+  }
+
+  private makeDocError(code: number, msg: string, path?: string, cause?: unknown): FeishuClientError {
+    return new FeishuClientError({
+      code: this.mapDocCode(code),
+      message: msg || `feishu GET failed (code=${code})${path ? ' ' + path : ''}`,
+      feishu_code: code,
+      feishu_message: msg || undefined,
+      cause,
+    })
   }
 
   /** 历史消息查询：im.v1.message.list */
@@ -385,6 +410,20 @@ async function streamToBuffer(stream: Readable): Promise<Buffer> {
     stream.on('end', () => resolve(Buffer.concat(chunks)))
     stream.on('error', reject)
   })
+}
+
+/** 从 Axios/SDK 拒绝的 error.response.data 安全提取飞书业务 code/msg，无 payload 返回 null。 */
+function tryExtractFeishuError(err: unknown): { code: number; msg: string } | null {
+  if (!err || typeof err !== 'object') return null
+  const response = (err as { response?: unknown }).response
+  if (!response || typeof response !== 'object') return null
+  const data = (response as { data?: unknown }).data
+  if (!data || typeof data !== 'object') return null
+  const { code, msg } = data as { code?: unknown; msg?: unknown }
+  if (typeof code === 'number' && typeof msg === 'string') {
+    return { code, msg }
+  }
+  return null
 }
 
 /** 从 Content-Disposition 头解析文件名，支持 filename* (RFC 5987) 与普通 filename。 */

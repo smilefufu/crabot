@@ -12,6 +12,41 @@ describe('buildFeishuRemediation', () => {
     expect(r.steps.join('')).toContain('协作者')
     expect(r.alternatives.join('')).toContain('在线')
   })
+
+  it('grant_url 仅包含单 scope', () => {
+    const r = buildFeishuRemediation({ appId: 'cli_x', domain: 'feishu', missingScope: 'wiki:wiki:readonly' })
+    const decoded = decodeURIComponent(r.grant_url)
+    expect(decoded).toContain('wiki:wiki:readonly')
+    expect(decoded).not.toContain(',')
+  })
+
+  it('feishu_code=41050 时文案说明 scope 仅必要条件、协作者、外部租户策略，保留诊断字段', () => {
+    const r = buildFeishuRemediation({ appId: 'cli_x', domain: 'feishu', missingScope: 'docx:document:readonly', feishu_code: 41050, feishu_message: 'no user authority' })
+    expect(r.message).toContain('必要条件')
+    expect(r.message).toContain('协作者')
+    expect(r.message).toContain('外部租户')
+    expect(r.steps.some(s => s.includes('外部租户'))).toBe(true)
+    expect(r.feishu_code).toBe(41050)
+    expect(r.feishu_message).toBe('no user authority')
+  })
+
+  it('保留 feishu_code / feishu_message 诊断字段', () => {
+    const r = buildFeishuRemediation({
+      appId: 'cli_x', domain: 'feishu', missingScope: 'drive:drive:readonly',
+      feishu_code: 99999,
+      feishu_message: 'subscriber number limit',
+    })
+    expect(r.feishu_code).toBe(99999)
+    expect(r.feishu_message).toBe('subscriber number limit')
+  })
+
+  it('read 备选包含 fetch_media 下载 Word/群附件', () => {
+    const r = buildFeishuRemediation({ appId: 'cli_x', domain: 'feishu', missingScope: 'drive:drive:readonly' })
+    expect(r.alternatives.some(a => a.includes('fetch_media'))).toBe(true)
+    expect(r.alternatives.some(a => a.includes('群附件'))).toBe(true)
+    expect(r.alternatives.some(a => a.includes('docx'))).toBe(true)
+    expect(r.alternatives.some(a => a.includes('正文'))).toBe(true)
+  })
 })
 
 describe('writeScopeForPath', () => {
