@@ -33,6 +33,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
 })
 
 import { FeishuChannel } from '../src/feishu-channel.js'
+import type { GetHistoryParams, GetMessageParams, HistoryMessage } from '../src/types.js'
 
 interface BackfillResult {
   session_id: string
@@ -46,12 +47,15 @@ interface BackfillResult {
 interface ChannelInternals {
   client: {
     listMessages: (...args: unknown[]) => Promise<{ items: Array<Record<string, unknown>>; page_token?: string; has_more: boolean }>
+    getMessage?: (messageId: string) => Promise<Record<string, unknown> | null>
   }
   sessionManager: {
     upsertGroupSessionFromSnapshot: (p: { platform_session_id: string; title: string; participants: Array<{ platform_user_id: string; role: 'member' }> }) => { session: { id: string }; created: boolean }
     upsert: (p: { platform_session_id: string; type: 'private'; title: string; sender_id: string; sender_name: string }) => { session: { id: string }; created: boolean }
   }
   backfillHistory: (params: { session_id: string; max_count?: number; after?: string; before?: string }) => Promise<BackfillResult>
+  handleGetHistory: (params: GetHistoryParams) => Promise<{ items: HistoryMessage[]; pagination: { page: number; page_size: number; total_items: number; total_pages: number } }>
+  handleGetMessage: (params: GetMessageParams) => Promise<HistoryMessage>
 }
 
 let tmpDir: string
@@ -87,6 +91,18 @@ function makeFeishuMsg(id: string, text: string, createTimeMs: number) {
     create_time: String(createTimeMs),
     sender: { id: 'ou_alice' },
     body: { content: JSON.stringify({ text }) },
+  }
+}
+
+function makeFeishuFileMsg(id: string, fileKey: string, fileName: string, fileSize: number, createTimeMs: number, parentId?: string, rootId?: string) {
+  return {
+    message_id: id,
+    msg_type: 'file',
+    create_time: String(createTimeMs),
+    sender: { id: 'ou_alice' },
+    body: { content: JSON.stringify({ file_key: fileKey, file_name: fileName, file_size: fileSize }) },
+    ...(parentId ? { parent_id: parentId } : {}),
+    ...(rootId ? { root_id: rootId } : {}),
   }
 }
 
@@ -227,5 +243,129 @@ describe('FeishuChannel.backfillHistory', () => {
 
     resolveFirstCall({ items: [], has_more: false })
     await first
+  })
+})
+
+describe('file 消息回归契约（远端 history/message/backfill 三条路径）', () => {
+  it('handleGetHistory 远端 fallback 返回 file 消息含 filename/size/status/handle 及 parent_id/root_id', async () => {
+    const internals = channel as unknown as ChannelInternals
+    await (channel as any).mediaHandleStore.init()
+
+    const { session } = internals.sessionManager.upsertGroupSessionFromSnapshot({
+      platform_session_id: 'oc_file_history1',
+      title: 'file 测试群',
+      participants: [],
+    })
+
+    internals.client = {
+      listMessages: vi.fn().mockResolvedValueOnce({
+        items: [
+          makeFeishuFileMsg('om_fh1', 'file_key_x', 'report.pdf', 102400, 1_700_000_000_000, 'om_parent1', 'om_root1'),
+        ],
+        has_more: false,
+      }),
+    } as never
+
+    const result = await internals.handleGetHistory({ session_id: session.id })
+    const msg = result.items[0]
+
+    expect(msg.content.type).toBe('file')
+    expect(msg.content.filename).toBe('report.pdf')
+    expect(msg.content.size).toBe(102400)
+    expect(msg.content.status).toBe('not_fetched')
+    expect(msg.content.handle).toMatch(/^fm_[0-9a-f]{12}$/)
+    expect(msg.content.file_path).toBeUndefined()
+
+    // handle store 凭据含 platform_message_id + file_key
+    const record = (channel as any).mediaHandleStore.get(msg.content.handle)
+    expect(record.credential.platform_message_id).toBe('om_fh1')
+    expect(record.credential.file_key).toBe('file_key_x')
+    expect(record.session_id).toBe(session.id)
+
+    // parent_id → reply_to_message_id, root_id → root_message_id
+    expect(msg.features.reply_to_message_id).toBe('om_parent1')
+    expect(msg.features.root_message_id).toBe('om_root1')
+  })
+
+  it('handleGetMessage 远端查询返回 file 消息含 filename/size/status/handle', async () => {
+    const internals = channel as unknown as ChannelInternals
+    await (channel as any).mediaHandleStore.init()
+
+    const { session } = internals.sessionManager.upsertGroupSessionFromSnapshot({
+      platform_session_id: 'oc_file_getmsg',
+      title: 'file 测试群',
+      participants: [],
+    })
+
+    internals.client = {
+      getMessage: vi.fn().mockResolvedValueOnce(
+        makeFeishuFileMsg('om_fgm1', 'file_key_y', 'data.xlsx', 204800, 1_700_000_010_000, 'om_parent2', 'om_root2'),
+      ),
+    } as never
+
+    const msg = await internals.handleGetMessage({ session_id: session.id, platform_message_id: 'om_fgm1' })
+
+    expect(msg.content.type).toBe('file')
+    expect(msg.content.filename).toBe('data.xlsx')
+    expect(msg.content.size).toBe(204800)
+    expect(msg.content.status).toBe('not_fetched')
+    expect(msg.content.handle).toMatch(/^fm_[0-9a-f]{12}$/)
+    expect(msg.content.file_path).toBeUndefined()
+
+    // handle store 凭据
+    const record = (channel as any).mediaHandleStore.get(msg.content.handle)
+    expect(record.credential.platform_message_id).toBe('om_fgm1')
+    expect(record.credential.file_key).toBe('file_key_y')
+    expect(record.session_id).toBe(session.id)
+
+    // parent_id/root_id
+    expect(msg.features.reply_to_message_id).toBe('om_parent2')
+    expect(msg.features.root_message_id).toBe('om_root2')
+  })
+
+  it('backfillHistory 持久化 file 消息含 filename/size/status/handle 及 parent_id/root_id', async () => {
+    const internals = channel as unknown as ChannelInternals
+    await (channel as any).mediaHandleStore.init()
+
+    const { session } = internals.sessionManager.upsertGroupSessionFromSnapshot({
+      platform_session_id: 'oc_file_backfill',
+      title: 'file 测试群',
+      participants: [],
+    })
+
+    internals.client = {
+      listMessages: vi.fn().mockResolvedValueOnce({
+        items: [
+          makeFeishuFileMsg('om_bf1', 'file_key_z', 'architecture.png', 512000, 1_700_000_020_000, 'om_parent3', 'om_root3'),
+        ],
+        has_more: false,
+      }),
+    } as never
+
+    const result = await internals.backfillHistory({ session_id: session.id, max_count: 100 })
+
+    expect(result.backfilled_count).toBe(1)
+    expect(result.skipped_count).toBe(0)
+
+    // 检查 messageStore 中持久化的内容
+    const stored = await (channel as any).messageStore.query({ sessionId: session.id })
+    expect(stored.items).toHaveLength(1)
+    const msg = stored.items[0]
+    expect(msg.content.type).toBe('file')
+    expect(msg.content.filename).toBe('architecture.png')
+    expect(msg.content.size).toBe(512000)
+    expect(msg.content.status).toBe('not_fetched')
+    expect(msg.content.handle).toMatch(/^fm_[0-9a-f]{12}$/)
+    expect(msg.content.file_path).toBeUndefined()
+
+    // handle store 凭据
+    const record = (channel as any).mediaHandleStore.get(msg.content.handle)
+    expect(record.credential.platform_message_id).toBe('om_bf1')
+    expect(record.credential.file_key).toBe('file_key_z')
+    expect(record.session_id).toBe(session.id)
+
+    // parent_id/root_id
+    expect(msg.features.reply_to_message_id).toBe('om_parent3')
+    expect(msg.features.root_message_id).toBe('om_root3')
   })
 })

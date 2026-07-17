@@ -50,6 +50,7 @@ import type {
   FeishuChannelConfig,
   FeishuChatType,
   FeishuDomain,
+  FeishuMention,
   FindOrCreatePrivateSessionParams,
   GetHistoryParams,
   GetMessageParams,
@@ -58,6 +59,7 @@ import type {
   HistoryMessage,
   MarkdownFormat,
   MessageContent,
+  MessageFeatures,
   PlatformUserInfoResult,
   Session,
   SessionType,
@@ -1062,7 +1064,10 @@ export class FeishuChannel extends ModuleBase {
           end_time: msFromIso(params.time_range?.before),
           page_size: pageSize,
         })
-        const items = remote.items.map((m) => feishuMsgToHistory(m))
+        const items: HistoryMessage[] = []
+        for (const m of remote.items) {
+          items.push(await this.historyMapper(m, session.id))
+        }
         return paginated(items, 1, pageSize, items.length)
       } catch (err) {
         console.warn('[FeishuChannel] history fallback failed:', err)
@@ -1078,7 +1083,7 @@ export class FeishuChannel extends ModuleBase {
     if (local) return toHistoryMessage(local)
     const remote = await this.client.getMessage(params.platform_message_id)
     if (!remote) throwError('NOT_FOUND', 'Message not found')
-    return feishuMsgToHistory(remote)
+    return this.historyMapper(remote, session.id)
   }
 
   private handleBackfillHistory(params: BackfillHistoryParams): Promise<BackfillHistoryResult> {
@@ -1160,7 +1165,7 @@ export class FeishuChannel extends ModuleBase {
             continue
           }
 
-          const history = feishuMsgToHistory(m)
+          const history = await this.historyMapper(m, session.id)
           await this.messageStore.append(session.id, {
             ...history,
             direction: 'inbound',
@@ -1528,14 +1533,19 @@ export class FeishuChannel extends ModuleBase {
     } catch (err: unknown) {
       const code = (err as { code?: string }).code ?? ''
       if (code === 'PERMISSION_DENIED') {
-        const missingScope = (err as { missing_scope?: string }).missing_scope
+        const errCtx = err as { missing_scope?: string; feishu_code?: number; feishu_message?: string }
+        const missingScope = errCtx.missing_scope
           ?? READ_SCOPE_BY_KIND[ref!.kind] ?? 'drive:drive:readonly'
+        const feishu_code = errCtx.feishu_code
+        const feishu_message = errCtx.feishu_message
         const remediation = buildFeishuRemediation({
           appId: this.feishuConfig.app_id,
           domain: this.feishuConfig.domain,
           missingScope,
+          feishu_code,
+          feishu_message,
         })
-        return { error_code: 'PERMISSION_DENIED', message: remediation.message, remediation, url }
+        return { error_code: 'PERMISSION_DENIED', message: remediation.message, remediation, url, feishu_code, feishu_message }
       }
       if (code === 'NOT_FOUND') throwError('NOT_FOUND', `文档不存在或已删除：${url}`)
       if (code === 'UNSUPPORTED') throwError('UNSUPPORTED', (err as Error).message)
@@ -1556,6 +1566,62 @@ export class FeishuChannel extends ModuleBase {
       ws_last_error: this.subscriber.getLastError() ?? null,
       bot_open_id: this.botOpenId,
       active_sessions: this.sessionManager.listSessions().length,
+    }
+  }
+
+  // ============================================================================
+  // 历史消息 mapper（远端查询/回填复用）
+  // ============================================================================
+
+  /**
+   * 把飞书 im.v1.message.list / getMessage 返回的原始消息记录映射为 HistoryMessage，
+   * 复用 mapMessageContent + applyMediaContent，使 file 消息正确产生惰性 handle。
+   * 保留 mentions、parent_id→reply_to_message_id、root_id→root_message_id。
+   * @param sessionId 可选，传入时为 file handle 登记 session_id
+   */
+  private async historyMapper(
+    m: Record<string, unknown>,
+    sessionId?: string,
+  ): Promise<HistoryMessage> {
+    const sender = (m.sender as Record<string, unknown> | undefined) ?? {}
+    const senderId = (sender.id as string) ?? ''
+    const body = (m.body as Record<string, unknown> | undefined) ?? {}
+    const msgType = (m.msg_type as string) ?? 'text'
+    const contentJson = (body.content as string) ?? '{}'
+    const mentions = (m.mentions as Array<FeishuMention>) ?? []
+    const messageId = (m.message_id as string) ?? ''
+
+    const mapped = mapMessageContent(msgType, contentJson, mentions)
+
+    // 仅 file 类型调用 applyMediaContent 登记惰性 handle（图片在历史查询不下载）
+    let content: MessageContent
+    if (mapped.content.type === 'file') {
+      content = await this.applyMediaContent(mapped, messageId)
+      if (sessionId && content.type === 'file' && content.handle) {
+        await this.mediaHandleStore.setSessionId(content.handle, sessionId)
+      }
+    } else {
+      content = mapped.content
+    }
+
+    const features: MessageFeatures = {
+      is_mention_crab: false,
+      ...(mapped.features.mentions ? { mentions: mapped.features.mentions } : {}),
+      ...((m as Record<string, unknown>).parent_id
+        ? { reply_to_message_id: (m as Record<string, unknown>).parent_id as string }
+        : {}),
+      ...((m as Record<string, unknown>).root_id &&
+        (m as Record<string, unknown>).root_id !== (m as Record<string, unknown>).parent_id
+        ? { root_message_id: (m as Record<string, unknown>).root_id as string }
+        : {}),
+    }
+
+    return {
+      platform_message_id: messageId,
+      sender: { platform_user_id: senderId, platform_display_name: senderId },
+      content,
+      features,
+      platform_timestamp: isoFromMillis((m.create_time as string) ?? '') ?? new Date().toISOString(),
     }
   }
 }
@@ -1599,26 +1665,6 @@ function toHistoryMessage(stored: StoredMessage): HistoryMessage {
   }
 }
 
-function feishuMsgToHistory(m: Record<string, unknown>): HistoryMessage {
-  const sender = (m.sender as Record<string, unknown> | undefined) ?? {}
-  const senderId = (sender.id as string) ?? ''
-  const body = (m.body as Record<string, unknown> | undefined) ?? {}
-  const msgType = (m.msg_type as string) ?? 'text'
-  let text = ''
-  try {
-    const c = JSON.parse((body.content as string) ?? '{}')
-    text = (c.text as string) ?? ''
-  } catch {
-    // ignore
-  }
-  return {
-    platform_message_id: (m.message_id as string) ?? '',
-    sender: { platform_user_id: senderId, platform_display_name: senderId },
-    content: { type: 'text', text: text || `[${msgType}]` },
-    features: { is_mention_crab: false },
-    platform_timestamp: isoFromMillis((m.create_time as string) ?? '') ?? new Date().toISOString(),
-  }
-}
 
 interface ImageSignature {
   mime: string
