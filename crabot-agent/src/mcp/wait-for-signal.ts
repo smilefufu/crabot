@@ -34,9 +34,6 @@ export const WAIT_FOR_SIGNAL_TIMEOUT_MS = 24 * 60 * 60 * 1000
 /** timeout_ms 下限：防止 LLM 传毫秒级小值把挂起退化成空转 */
 export const WAIT_FOR_SIGNAL_MIN_TIMEOUT_MS = 1_000
 
-/** 连续 external 超时达到此次数后，超时文案追加"收尾 + schedule 复查"引导（spec §5.3） */
-export const EXTERNAL_TIMEOUT_GUIDANCE_THRESHOLD = 3
-
 /** 在跑对象快照条目——唤醒/超时消息的展示单元。 */
 export interface RunningWaitTarget {
   readonly id: string
@@ -103,10 +100,6 @@ const TOOL_DESCRIPTION =
   '挂起后任何事件（用户消息 / 其他 shell 退出）都会唤醒你，醒来先处理事件再决定是否继续等。'
 
 export function createWaitForSignalTool(deps: WaitForSignalDeps): ToolDefinition {
-  // 连续 external 超时计数（工具实例 = 单个 worker loop 生命周期）。
-  // 只增不减：无法观测"push 唤醒 vs 超时唤醒"，宁可多提示不漏提示。
-  let externalTimeoutStreak = 0
-
   return {
     name: 'wait_for_signal',
     description: TOOL_DESCRIPTION,
@@ -239,19 +232,12 @@ export function createWaitForSignalTool(deps: WaitForSignalDeps): ToolDefinition
       }).join('、')
 
       const buildTimeoutMessage = (waitedSec: number): string => {
-        if (hasExternal) externalTimeoutStreak++
         const lines = [
           `[wait_timeout] 等待超时（${reason}，已等 ${waitedSec}s），无外部事件到达。`,
           `挂起时声明的等待对象：${targetEcho}——未推送退出事件的对象通常仍在运行。`,
         ]
         if (hasExternal) {
           lines.push('external 目标请立即主动检查外部状态，未到再挂下一轮。')
-          if (externalTimeoutStreak >= EXTERNAL_TIMEOUT_GUIDANCE_THRESHOLD) {
-            lines.push(
-              '外部等待已连续多次超时——跨天级的等待不适合挂起轮询，'
-              + '考虑收尾本任务并创建 schedule 定时复查任务。',
-            )
-          }
         }
         lines.push('如需继续等，可再次调用 wait_for_signal。')
         return lines.join('\n')

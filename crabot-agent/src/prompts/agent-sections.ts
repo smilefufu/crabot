@@ -744,7 +744,7 @@ set_task_goal 重写机会（你会在补充指示的接收提示里看到说明
 - 等 crabot 之外的事件（PR review / 远端构建 / 页面状态）：targets: [{kind: "external"}]
   且必须带 timeout_ms 作轮询间隔——系统感知不到外部事件，到点唤醒后你要自己主动检查
   （gh / curl 等），未到再挂下一轮。有命令行 watcher（如 gh pr checks --watch）时
-  优先起后台 shell 等它退出。external 适合分钟到小时级；跨天级等待应收尾任务 + schedule 定时复查。
+  优先起后台 shell 等它退出。
 
 任何 humanQueue push（用户消息 / 其他对象退出）都会唤醒你——醒来先处理事件，
 唤醒通知会附上"仍在运行"清单，据它决定继续等还是收尾。

@@ -252,7 +252,7 @@ describe('wait_for_signal 超时消息', () => {
     expect(String(drained[0])).not.toContain('[wait_timeout]')
   })
 
-  it('连续 3 次 external 超时 → 追加"收尾 + schedule 复查"引导', async () => {
+  it('重复 external 超时仍只提示主动检查，不强制收尾或创建 schedule', async () => {
     vi.useFakeTimers()
     const humanQueue = new HumanMessageQueue()
     const tool = createWaitForSignalTool(makeDeps({ humanQueue }))
@@ -265,9 +265,11 @@ describe('wait_for_signal 超时消息', () => {
       messages.push(...humanQueue.drainPending().map(String))
     }
     expect(messages.length).toBe(3)
-    expect(messages[2]).toContain('schedule')
-    // 前两次不该有该引导
-    expect(messages[0]).not.toContain('schedule')
+    for (const message of messages) {
+      expect(message).toContain('立即主动检查外部状态')
+      expect(message).not.toContain('收尾')
+      expect(message).not.toContain('schedule')
+    }
   })
 })
 
