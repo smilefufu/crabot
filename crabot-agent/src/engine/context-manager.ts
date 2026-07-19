@@ -20,7 +20,7 @@ interface CumulativeUsage {
   readonly outputTokens: number
 }
 
-const DEFAULT_COMPACT_THRESHOLD = 0.8
+export const DEFAULT_COMPACT_THRESHOLD = 0.8
 const DEFAULT_KEEP_RECENT = 6
 const CHARS_PER_TOKEN = 4
 const MESSAGE_OVERHEAD_TOKENS = 4

@@ -61,6 +61,8 @@ import type { BgEntityRecord, BgEntityStatus, BgEntityType } from './engine/bg-e
 import { redactSecrets } from './engine/redact-secrets.js'
 import { isResumable, redactCheckpoint } from './core/resume-checkpoint.js'
 import { AGENT_VERSION } from './constants.js'
+import { ContextManager, DEFAULT_COMPACT_THRESHOLD } from './engine/context-manager.js'
+import { DEFAULT_MAX_CONTEXT_TOKENS } from './engine/query-loop.js'
 
 const BARRIER_TIMEOUT_MS = 8_000
 
@@ -1947,6 +1949,19 @@ export class UnifiedAgent extends ModuleBase {
         this.traceStore.finalizeUnresumedCheckpoint(taskId)
       }
       return { ok: false, reason: guard.reason }
+    }
+    // 体积门禁（仅 terminal supplement revive）：checkpoint 超预算时不复活、不碰 admin 状态，
+    // 返回 fallback 由 dispatcher 降级 new_task。二元判定——要么原样复活，要么 new_task，
+    // 不存在"压缩后复活"（复活的价值就是原样 checkpoint + prompt cache 前缀）。
+    // restart 模式不加：重启恢复走 loop 内 compaction，不在本期范围。
+    // Spec: 2026-07-18-revive-vs-new-task-decision-design §决策 2
+    if (mode === 'terminal_supplement') {
+      const estimator = new ContextManager({ maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS })
+      const estimated = estimator.estimateTotalTokens(entry.checkpoint.messages)
+      const budget = DEFAULT_MAX_CONTEXT_TOKENS * DEFAULT_COMPACT_THRESHOLD
+      if (estimated >= budget) {
+        return { ok: false, reason: `checkpoint_too_large(est≈${Math.round(estimated / 1000)}k tokens)` }
+      }
     }
     return { ok: true }
   }

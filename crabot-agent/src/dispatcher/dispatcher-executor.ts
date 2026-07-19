@@ -100,6 +100,9 @@ export async function executeDispatchActions(
               attempted_target_task_id: action.target_task_id,
               target_task_status: target.status,
               target_task_completed_at: target.completed_at,
+              // revive 拒绝原因（no_checkpoint / checkpoint_too_large(est≈…) 等）入 span，
+              // 让体积降级在 trace 可诊断。Spec: 2026-07-18-revive-vs-new-task-decision-design §决策 2
+              ...(revive.reason ? { fallback_reason: revive.reason } : {}),
             })
           }
           await fireReaction(ctx)

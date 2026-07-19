@@ -79,7 +79,7 @@ function buildDispatchRules(
 }
 
 const SUPPLEMENT_WHITELIST_REMINDER =
-  '\n\n**target_task_id 硬约束**：必须使用 prompt 中可见的 task_id（最近聊天历史 `<message task="...">` 或「当前正在运行的本 session task」里的 id）并字面完全一致——禁止编造、截断、模糊匹配或拼造前缀。找不到合理匹配的 → 用 new_task，不要用 supplement。系统会二次校验，不能补充的 task 会降级为 new_task。'
+  '\n\n**target_task_id 硬约束**：必须使用 prompt 中可见的 task_id（最近聊天历史 `<message task="...">`、`「当前正在运行的本 session task」或「近期结束的本 session task」里的 id）并字面完全一致——禁止编造、截断、模糊匹配或拼造前缀。找不到合理匹配的 → 用 new_task，不要用 supplement。系统会二次校验，不能补充的 task 会降级为 new_task。'
 
 /**
  * new_task 可选 immediate_reply 字段的字段说明。插在每个 dispatch rule
@@ -99,8 +99,8 @@ const PRIVATE_RULES_WITH_ACTIVE = `## 分诊规则（私聊 / admin chat）
 
 每个动作只能是以下两种之一：
 
-1. **supplement** — 这条消息是对某个已知 task 的补充 / 追问 / 修正 / 继续讨论。
-   - target_task_id 必须来自最近聊天历史消息的 task="..." 属性，或「当前正在运行的本 session task」列表
+1. **supplement** — 处理这条消息需要建立在某个已知 task 的已有上下文或结果之上（追问其结论、修正其产出、在其方案上追加条件、继续未完成的工作）。
+   - target_task_id 必须来自最近聊天历史消息的 task="..." 属性，或「当前正在运行的本 session task」/「近期结束的本 session task」列表
    - 不要输出补充正文；系统会把当前真实消息批次原样投递给 task
 
 2. **new_task** — 这条消息发起一个新任务。
@@ -108,10 +108,15 @@ const PRIVATE_RULES_WITH_ACTIVE = `## 分诊规则（私聊 / admin chat）
 ${NEW_TASK_IMMEDIATE_REPLY_HINT}
 
 判断要点：
+- supplement 的判据是**上下文价值**，不是消息形态：只有旧 task 的上下文/结果对处理这条新消息有复用价值时才 supplement；只是话题沾边、但旧上下文用不上的 → new_task
+- **判断与某 task 的关联时，以带该 task 「task="..."」归因的聊天消息内容为准**：归因消息在聊什么，这个 task 就是什么。归因内容与当前消息无关 → new_task；无归因消息里的词面重叠不构成关联依据
 - 用户明确指代历史中带 task="..." 的某个任务（"那个手机调研"、"再加一条"、"算了改成 X"等）→ supplement
-- 对已经完成/失败的历史 task，只有明确延续刚才任务时才 supplement；新话题或不确定时 new_task
+- 对已经完成的历史 task：明确延续其上下文才 supplement；开启新的工作事项（即使同主题领域）→ new_task
+- 对已失败的历史 task：用户表达"继续"/"再跑一次"→ supplement（失败重跑天然依赖原上下文）
 - 用户提出一个跟所有可见 task 都不相关的请求 → new_task
-- 不确定时优先 new_task（误判 new_task 后果较轻：开个新 agent 实例独立处理）
+- 上下文是否有复用价值拿不准时 → 优先 new_task（误判 new_task 后果较轻：开个新 agent 实例独立处理）
+- 用户指代「之前/以前/很久以前」的某项工作时：仅当某个可见 task 的归因消息**明确涉及同一项工作**才 supplement；可见 task 的归因消息均未涉及该项工作 → new_task（旧工作的上下文 worker 会自己检索找回，不要把指代旧工作的消息塞进正在运行的无关 task）
+- 「当前正在运行的本 session task」和「近期结束的本 session task」列表只提供 task_id 与状态，不代表任务内容；任务是什么，以它的归因消息为准
 
 **结合最近聊天历史判断**：用户当前消息常常引用历史上下文（"把这文件……"、"再加一条"），需要回看「最近聊天历史」段判断指代对象——尤其是文件 / 图片这类媒体消息（你能看到 \`[文件: xxx.pdf]\` / \`[图片: ...]\` 标记），它们就是用户当前指令要处理的素材。worker 启动后会拿到完整批次（含媒体），你只需把意图分诊清楚即可。
 
@@ -135,8 +140,8 @@ const GROUP_RULES_WITH_ACTIVE = `## 分诊规则（群聊）
 
 群聊批次（多消息多用户）的每个动作可以是以下三种之一：
 
-1. **supplement** — 某条消息是对某个已知 task 的补充 / 追问 / 修正 / 继续讨论。
-   - target_task_id 必须来自最近聊天历史消息的 task="..." 属性，或「当前正在运行的本 session task」列表
+1. **supplement** — 处理某条消息需要建立在某个已知 task 的已有上下文或结果之上（追问其结论、修正其产出、在其方案上追加条件、继续未完成的工作）。
+   - target_task_id 必须来自最近聊天历史消息的 task="..." 属性，或「当前正在运行的本 session task」/「近期结束的本 session task」列表
    - 不要输出补充正文；系统会把当前真实消息批次原样投递给 task
 
 2. **new_task** — 某条消息发起一个跟我相关的新任务。
@@ -150,7 +155,11 @@ ${NEW_TASK_IMMEDIATE_REPLY_HINT}
 - 被 [@Crabot] 标注、上下文只有发送者和我、我之前的消息被引用 → 必须 supplement 或 new_task，不允许 stay_silent
 - 群成员之间互相讨论（不是在叫我）/ 系统通知 / 分享链接 → stay_silent
 - 一批多条消息可拆分：比如其中一条 @我 走 new_task，另一条群成员讨论走 stay_silent
-- 如果历史 task 已经完成/失败，只有明确延续刚才任务时才 supplement；新话题或不确定时 new_task
+- supplement 的判据是**上下文价值**，不是消息形态：旧 task 的上下文/结果对处理这条消息有复用价值才 supplement；只是话题沾边 → new_task
+- **判断与某 task 的关联时，以带该 task 「task="..."」归因的聊天消息内容为准**：归因消息在聊什么，这个 task 就是什么。归因内容与当前消息无关 → new_task；无归因消息里的词面重叠不构成关联依据
+- 历史 task 已完成：明确延续其上下文才 supplement；开启新工作事项 → new_task。已失败：用户说"继续"/"再跑一次" → supplement。拿不准上下文价值 → new_task
+- 用户指代「之前/以前/很久以前」的某项工作时：仅当某个可见 task 的归因消息**明确涉及同一项工作**才 supplement；可见 task 的归因消息均未涉及该项工作 → new_task（旧工作的上下文 worker 会自己检索找回，不要把指代旧工作的消息塞进正在运行的无关 task）
+- 「当前正在运行的本 session task」和「近期结束的本 session task」列表只提供 task_id 与状态，不代表任务内容；任务是什么，以它的归因消息为准
 
 最多输出 ${MAX_ACTIONS_PER_DISPATCH} 个动作。
 

@@ -290,6 +290,42 @@ describe('executeDispatchActions', () => {
     })
   })
 
+  it('terminal revive fallback span 带 fallback_reason（体积门禁等降级原因可诊断）', async () => {
+    const endSpan = vi.fn()
+    const trace = {
+      startSpan: vi.fn().mockReturnValue({ span_id: 'sp-1' }),
+      endSpan,
+    }
+    const base = makeExecCtx()
+    const ctx = makeExecCtx({
+      dispatchCtx: {
+        ...base.dispatchCtx,
+        activeTasks: [{
+          task_id: 'task-huge' as never,
+          title: 'huge',
+          status: 'completed',
+          priority: 'normal',
+          candidate_kind: 'recent_terminal',
+        } as never],
+      },
+      reviveTerminalSupplement: vi.fn().mockResolvedValue({
+        outcome: 'fallback' as const,
+        reason: 'checkpoint_too_large(est≈175k tokens)',
+      }),
+      spawnAgentInstance: vi.fn().mockResolvedValue({ spawnedTraceId: 'trace-new' }),
+      trace,
+    } as Partial<ExecuteContext>)
+    await executeDispatchActions([{ kind: 'supplement', target_task_id: 'task-huge' }], ctx)
+    const [, status, details] = endSpan.mock.calls[0]
+    expect(status).toBe('completed')
+    expect(details).toMatchObject({
+      outcome: 'supplement_fallback_recovered',
+      recovered_via: 'new_task',
+      attempted_target_task_id: 'task-huge',
+      fallback_reason: 'checkpoint_too_large(est≈175k tokens)',
+    })
+  })
+
   // ============================================================================
   // immediate_reply（spec: 2026-06-03-dispatcher-immediate-reply-and-overdue-removal-design.md）
   // ============================================================================

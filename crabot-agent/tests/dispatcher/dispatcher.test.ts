@@ -172,6 +172,7 @@ describe('dispatch', () => {
           status: 'completed',
           candidate_kind: 'recent_terminal',
           completed_at: '2026-06-29T10:00:00.000Z',
+          latest_progress: '已输出对比表格',
         }),
         makeTask('task-failed', {
           status: 'failed',
@@ -184,6 +185,22 @@ describe('dispatch', () => {
     const prompt = buildUserPrompt(ctx, { timezone: 'Asia/Shanghai' })
     expect(prompt).toMatch(/## 当前正在运行的本 session task/)
     expect(prompt).toMatch(/status: executing/)
+    // recent terminal 候选段只渲染处置信息（status/completed_at/失败原因），
+    // 不渲染标题/进度——任务身份交给归因消息（2026-07-18 讨论结论）
+    expect(prompt).toMatch(/## 近期结束的本 session task（可作为 supplement 候选）/)
+    expect(prompt).toMatch(/\[task-done\] \(status: completed_recently, completed_at: 2026-06-29T10:00:00\.000Z\)/)
+    expect(prompt).toMatch(/\[task-failed\] \(status: failed_recently/)
+    expect(prompt).toMatch(/失败原因: TypeError: terminated/)
+    expect(prompt).not.toMatch(/t-task-done/)
+    expect(prompt).not.toMatch(/最近进度/)
+    // 活跃 task 不出现在 recent terminal 段
+    expect(prompt).not.toMatch(/\[task-active\].*completed_recently/)
+  })
+
+  it('userPrompt 无 recent terminal 候选时不渲染候选段', () => {
+    const ctx = makeCtx({ activeTasks: [makeTask('task-active')] })
+    const prompt = buildUserPrompt(ctx)
+    expect(prompt).not.toMatch(/近期结束的本 session task/)
   })
 
   it('LLM can supplement a recent completed candidate because it is in the candidate whitelist', async () => {
