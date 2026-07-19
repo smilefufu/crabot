@@ -1,6 +1,14 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-17 — 恢复飞书外部群 PRD 获取流程
+> 最后更新：2026-07-19 — subagent 模型配置热生效（delegate 时实时解析）
+
+## 2026-07-19 — subagent 模型配置热生效（delegate 时实时解析）
+
+- 起因：m2u 实例 cost_effective provider 余额耗尽（HTTP 402），Admin 改 slot 后"继续任务"仍用旧 provider，必须重启实例才生效。根因：worker loop 启动时固化 subAgentsSnapshot，delegate_task 闭包绑定快照里嵌入的 model 连接信息，热更只影响"下一个 loop"。
+- spec：`crabot-docs/superpowers/specs/2026-07-19-subagent-model-hot-reload-design.md`。方案：subagent **列表**保持 loop 级快照（工具 enum / prompt 一致性不变），列表内各项的 model 等配置在每次派发时从 live `this.subAgents` 按 name 重查；live 中已删除则回退快照。
+- 实现：`agent-handler.ts` 新增 `resolveLiveSubAgent`，接入 `makeRunSubAgent` 闭包（同步/异步 delegate 共用）与 goal_audit `buildSpawnDeps`；`runGoalAudit` 本就实时读 `this.subAgents` 无需改。主 adapter 与已 spawn 的持久 subagent 保持 loop/spawn 级快照（协议已写明，要立即生效则终止重派）。
+- 协议：protocol-agent-v2 §6.1 热更表把 model_config 拆成三种粒度（worker 主 adapter / subagent 派发 / 已 spawn subagent）；protocol-admin §3.19.6 补上"保存后触发 pushConfigToAgentModules"约定。
+- 验证：新增 `delegate-model-hot-reload.test.ts` 4 条（in-flight 派发用新 endpoint/apikey/model_id、enum 快照不变、删除回退、异步派发与 goal_audit 取 live）；agent 全量 1543/1544（另 2 skipped），唯一失败为 7-17 已记录的 context-assembler 固定时间漂移，stash 验证与本次 diff 无关。
 
 ## 2026-07-17 — 恢复飞书外部群 PRD 获取流程
 

@@ -3688,10 +3688,13 @@ export class AgentHandler {
       buildSpawnDeps: (goal) => {
         // auditor 配置不存在 → spawn 抛错 → caller fail-open（console.warn）。
         // 用 throw 把"找不到 auditor"统一走 spawn 异常分支，避免在多处分散判断。
-        const auditor = opts.subAgents.find((s) => s.id === 'builtin-goal-auditor')
-        if (!auditor) {
+        const auditorSnapshot = opts.subAgents.find((s) => s.id === 'builtin-goal-auditor')
+        if (!auditorSnapshot) {
           throw new Error('builtin-goal-auditor subagent not configured')
         }
+        // 每次 spawn audit 时从 live this.subAgents 重解析 model —— 与 delegate_task 一致，
+        // model_config 热更新对 audit 派发 in-flight 生效（spec 2026-07-19）。
+        const auditor = handler.resolveLiveSubAgent(auditorSnapshot)
         const auditAdapter = adapterFromModel(auditor.model)
         const auditPermission = opts.getAuditPermissionConfig()
         return {
@@ -3820,15 +3823,33 @@ export class AgentHandler {
     return async (subagent, input, ctx) => {
       const typedInput = input as RunSubAgentInput & { sync?: boolean }
 
+      // 派发时从最新热更的 this.subAgents 重解析：loop 启动时的 snapshot 只保证
+      // subagent「列表」一致（工具 enum / prompt），列表内各项的 model 等配置在每次
+      // 派发时取 live 值 —— model_config 热更新对 subagent 派发 in-flight 生效。
+      // live 列表中已被删除时回退快照，不打断 in-flight 推理。
+      // spec: 2026-07-19-subagent-model-hot-reload-design.md
+      const effective = this.resolveLiveSubAgent(subagent)
+
       // 异步路径：asyncEnabled + 没有显式 sync=true
       if (deps.asyncEnabled && !typedInput.sync && deps.asyncCtx && deps.humanQueue) {
-        return this.runSubAgentAsync(subagent, typedInput, deps.asyncCtx, deps)
+        return this.runSubAgentAsync(effective, typedInput, deps.asyncCtx, deps)
       }
 
       // 同步路径（默认 fallback / 显式 sync=true）
-      const { traceId: _traceId, ...result } = await this.runSubAgentDirect(subagent, input, ctx, deps)
+      const { traceId: _traceId, ...result } = await this.runSubAgentDirect(effective, input, ctx, deps)
       return result
     }
+  }
+
+  /**
+   * 按 name 从 live this.subAgents 重查 subagent 配置，找不到（loop 运行期间被删）回退快照。
+   * 用 name 而非 id：delegate_task 本身就按 name 派发（工具 enum 即 name 列表），
+   * 且"name"承载语义身份——admin 删除再重建同名 subagent 视为同一 subagent 换了配置，
+   * 派发应用新配置而不是静默回退旧快照。
+   * 见 makeRunSubAgent 闭包注释 / spec 2026-07-19-subagent-model-hot-reload-design.md。
+   */
+  private resolveLiveSubAgent(snapshot: SubAgentConfig): SubAgentConfig {
+    return this.subAgents.find((s) => s.name === snapshot.name) ?? snapshot
   }
 
   /** 异步派发 subagent：via spawnPersistentAgent，工具立即返回，完成时通知父 humanQueue。 */
