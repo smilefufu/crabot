@@ -3842,11 +3842,14 @@ export class AgentHandler {
   }
 
   /**
-   * 按 id 从 live this.subAgents 重查 subagent 配置，找不到（loop 运行期间被删）回退快照。
+   * 按 name 从 live this.subAgents 重查 subagent 配置，找不到（loop 运行期间被删）回退快照。
+   * 用 name 而非 id：delegate_task 本身就按 name 派发（工具 enum 即 name 列表），
+   * 且"name"承载语义身份——admin 删除再重建同名 subagent 视为同一 subagent 换了配置，
+   * 派发应用新配置而不是静默回退旧快照。
    * 见 makeRunSubAgent 闭包注释 / spec 2026-07-19-subagent-model-hot-reload-design.md。
    */
   private resolveLiveSubAgent(snapshot: SubAgentConfig): SubAgentConfig {
-    return this.subAgents.find((s) => s.id === snapshot.id) ?? snapshot
+    return this.subAgents.find((s) => s.name === snapshot.name) ?? snapshot
   }
 
   /** 异步派发 subagent：via spawnPersistentAgent，工具立即返回，完成时通知父 humanQueue。 */

@@ -182,6 +182,35 @@ describe('subagent model 热生效（delegate 时实时解析）', () => {
     expect(adapterEndpoint(call).endpoint).toBe('https://old.example.com')
   })
 
+  it('loop 运行期间同名 subagent 被删除再重建（新 id）→ 派发用重建后的新配置', async () => {
+    const handler = new AgentHandler(makeSdkEnv(), { systemPrompt: 'sys' }, {
+      subAgents: [makeSubAgent('code_writer', 'old')],
+    })
+
+    mockRunEngine.mockImplementation(async (params: any) => {
+      // admin 删除再重建同名 subagent：id 变了（重建），配置也换了
+      const recreated = { ...makeSubAgent('code_writer', 'new'), id: 'id-code_writer-recreated' }
+      handler.updateSubagents([recreated])
+
+      const dt = getDelegateTool(params.options)
+      await dt.call({ subagent_type: 'code_writer', task: 'after recreate' }, {})
+
+      return {
+        outcome: 'completed', finalText: 'ok', totalTurns: 1,
+        usage: { inputTokens: 1, outputTokens: 1 },
+        finalMessages: [],
+      } as never
+    })
+
+    await handler.executeTask({ task: makeTask(), context: makeContext() })
+
+    // name 匹配语义：同名重建视为同一 subagent 换配置，派发用新配置而非静默回退旧快照
+    expect(mockForkEngine).toHaveBeenCalledTimes(1)
+    const call = mockForkEngine.mock.calls[0][0] as any
+    expect(call.model).toBe('new-model')
+    expect(adapterEndpoint(call).endpoint).toBe('https://new.example.com')
+  })
+
   it('异步派发（spawnPersistentAgent）同样取 live model', async () => {
     const snapshotEntry = makeSubAgent('code_writer', 'old')
     const handler = new AgentHandler(makeSdkEnv(), { systemPrompt: 'sys' }, {
