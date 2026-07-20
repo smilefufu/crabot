@@ -7,6 +7,7 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { homedir } from 'node:os'
 import { buildCoreModules } from './core-modules.js'
+import { ensureAgentVenv } from './agent-venv.js'
 
 // 获取模块路径
 const CRABOT_ROOT = path.resolve(process.cwd(), '..')
@@ -25,6 +26,14 @@ const DATA_DIR = process.env.DATA_DIR
 const WORKSPACE_DIR = process.env.WORKSPACE_DIR || homedir()
 // 写回 process.env 确保子进程通过 process.env spread 时能继承此值
 process.env.WORKSPACE_DIR = WORKSPACE_DIR
+
+// Agent 专用 python 环境：确保 $DATA_DIR/agent-venv 存在（uv 懒创建），把其 bin
+// 前置到 PATH，让 agent shell 的 python3/pip3 落到实例 venv 而非系统 python。
+// uv 不可用或创建失败时返回 null，保持原 PATH（等价历史行为）。
+const agentVenvPath = ensureAgentVenv(DATA_DIR)
+if (agentVenvPath) {
+  process.env.PATH = agentVenvPath
+}
 
 // 加载环境变量文件（统一从根目录 .env 读取）
 const envFiles = [
