@@ -1,6 +1,14 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-19 — subagent 模型配置热生效（delegate 时实时解析）
+> 最后更新：2026-07-19 — Agent 专用 Python 环境（agent-venv）
+
+## 2026-07-19 — Agent 专用 Python 环境（agent-venv）
+
+- 背景：install.sh 装的 uv 只服务 memory 模块（`uv sync`），从未接入 agent shell 环境。trace 证实 agent 直接用系统 `python3` 并 `pip3 install` 污染系统 site-packages / user site；生产非登录 shell 下 uv 甚至不在 PATH。
+- 方案（spec 方案 B）：MM 启动时懒创建 `$DATA_DIR/agent-venv`（`uv venv --seed`，缺失/损坏自愈），并把 `<venv>/bin` 前置进 `process.env.PATH`，经 spawn 的 `...process.env` 透传给全部子模块。单一代码路径覆盖 dev / user / system 三模式；install.sh 零改动；uv 不可用或创建失败仅 warn 降级，不阻塞启动。
+- 实现：新增 `crabot-core/src/agent-venv.ts`（`ensureAgentVenv()`），`crabot-core/src/main.ts` 接入；`--seed` 必须带（uv venv 默认不装 pip）。
+- spec：`crabot-docs/superpowers/specs/2026-07-19-agent-python-venv-design.md`；AGENTS.md「开发环境」与 deployment/installation.md 已同步。
+- 验证：crabot-core 新增 5 个定向测试 + 全量 79 个通过；tsc build 通过；真实 uv 端到端验证（临时 DATA_DIR 建 venv、PATH 前置、venv 内 python3/pip3 可用）。生产/user mode 的完整验收（`which python3` 落到 venv）待实例下次重启后自然生效。
 
 ## 2026-07-19 — subagent 模型配置热生效（delegate 时实时解析）
 

@@ -305,6 +305,13 @@ node scripts/debug-agent.mjs modules  # 查看 MM 注册的模块
 - Vite 开发服务器（port 5173）代理 `/api` 和 `/ws` 到后端 port 3000
 - **改了前端代码不生效？** 检查是通过 port 5173（Vite）还是 port 3000（静态文件）访问的
 
+### Agent 专用 Python 环境（agent-venv）
+
+- agent shell（bash 工具 / bg-shell）里的 `python3` / `pip3` 解析到 **`$DATA_DIR/agent-venv`**——MM 启动时用 `uv venv --seed` 懒创建的实例级 venv（`crabot-core/src/agent-venv.ts`，缺失/损坏自愈）
+- MM 把 `<venv>/bin` 前置进 `process.env.PATH`（`crabot-core/src/main.ts`），经 spawn 的 `...process.env` 透传给所有子模块；uv 不可用或创建失败仅 warn 降级，不阻塞启动
+- agent 自行 `pip3 install` 的包落在该 venv，**不会污染系统 python**；memory 模块仍走 `uv run --frozen` 项目 venv，不受影响
+- spec：`crabot-docs/superpowers/specs/2026-07-19-agent-python-venv-design.md`
+
 ### 实例隔离（单实例约束）
 
 Crabot **强制单实例运行**。每个用户 / 每台机器（dev 模式）最多跑一个 Crabot MM。多用户场景请走 system mode（见下方）。
