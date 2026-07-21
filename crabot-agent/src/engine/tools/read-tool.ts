@@ -4,6 +4,7 @@ import * as readline from 'readline'
 import { defineTool } from '../tool-framework'
 import type { ToolDefinition } from '../types'
 import { compressImage } from '../image-utils'
+import { truncateUtf8 } from '../byte-cap'
 import { resolvePath } from './utils'
 import { inferMediaType } from '../../agent/media-resolver'
 import { FILE_UNCHANGED_STUB } from './file-read-state'
@@ -39,12 +40,28 @@ function formatLinesWithNumbers(lines: ReadonlyArray<string>, startLine: number)
 }
 
 /**
+ * 单行自身超 MAX_OUTPUT_BYTES 时的降级格式化：返回该行前 ~50KB + 行内续读提示。
+ * 整行丢弃返回空内容会让该行用任何 offset 都读不到（minified JS / 单行大 JSON 常见）。
+ */
+function formatOversizedLine(line: string, lineNo: number, totalDigits: number, filePath: string): string {
+  const lineBytes = Buffer.byteLength(line, 'utf8')
+  const head = truncateUtf8(line, MAX_OUTPUT_BYTES - 32) // 留行号前缀 + 提示的预算
+  const shownBytes = Buffer.byteLength(head, 'utf8')
+  return (
+    `${formatLineNumber(lineNo, totalDigits)}\t${head}` +
+    `[...line truncated: showing first ${shownBytes} bytes of a ${lineBytes}-byte line. ` +
+    `Use Bash: sed -n '${lineNo}p' '${filePath}' | tail -c +${shownBytes + 1} | head -c ${MAX_OUTPUT_BYTES} to read more.]`
+  )
+}
+
+/**
  * 逐行累加格式化，累计字节超 MAX_OUTPUT_BYTES 即截断（不切断行）。
  * 未截断时产物与 formatLinesWithNumbers 完全一致。
  */
 function formatLinesWithByteCap(
   lines: ReadonlyArray<string>,
   startLine: number,
+  filePath: string,
 ): { text: string; truncated: boolean } {
   if (lines.length === 0) {
     return { text: '', truncated: false }
@@ -56,6 +73,10 @@ function formatLinesWithByteCap(
     const part = `${formatLineNumber(startLine + i, totalDigits)}\t${lines[i]}`
     const partBytes = Buffer.byteLength(part, 'utf8') + 1 // + '\n'
     if (bytes + partBytes > MAX_OUTPUT_BYTES) {
+      if (parts.length === 0) {
+        // 第一行就超限：降级为行内截断，保证该行内容仍可（部分）读到
+        parts.push(formatOversizedLine(lines[i], startLine + i, totalDigits, filePath))
+      }
       return { text: parts.join('\n'), truncated: true }
     }
     parts.push(part)
@@ -203,6 +224,13 @@ export function createReadTool(getCwd: () => string, fileReadState?: FileReadSta
               }
               const lineBytes = Buffer.byteLength(line, 'utf8') + 16 // 行号前缀 + 换行余量
               if (bytes + lineBytes > MAX_OUTPUT_BYTES) {
+                if (collected.length === 0) {
+                  // 单行超限：行内截断降级（同非流式路径），不让该行完全不可读
+                  const lineNo = lineIdx + 1
+                  const oversized =
+                    formatOversizedLine(line, lineNo, String(lineNo + 1).length, filePath)
+                  return { output: `${oversized}${byteCapTruncatedMarker(fileSize)}`, isError: false }
+                }
                 byteTruncated = true
                 break
               }
@@ -246,7 +274,7 @@ export function createReadTool(getCwd: () => string, fileReadState?: FileReadSta
             allLines.length > 0 && allLines[allLines.length - 1] === '' && text.endsWith('\n')
           const lines = endsWithNewline ? allLines.slice(0, -1) : allLines
           const selected = lines.slice(offset, offset + limit)
-          const { text: formatted, truncated: byteTruncated } = formatLinesWithByteCap(selected, offset + 1)
+          const { text: formatted, truncated: byteTruncated } = formatLinesWithByteCap(selected, offset + 1, filePath)
 
           if (byteTruncated) {
             return { output: `${formatted}${byteCapTruncatedMarker(fileSize)}`, isError: false }

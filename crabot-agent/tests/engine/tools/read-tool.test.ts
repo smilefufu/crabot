@@ -147,6 +147,35 @@ describe('createReadTool', () => {
     expect(result.output).not.toContain('[...truncated')
   })
 
+  it('单行超 50KB 时降级为行内截断（不返回空内容，可 bash 续读）', async () => {
+    const filePath = path.join(tmpDir, 'minified.js')
+    const bigLine = 'a'.repeat(60 * 1024) // 单行 60KB，超 MAX_OUTPUT_BYTES
+    await fs.writeFile(filePath, bigLine + '\n' + 'second line\n')
+
+    const result = await tool.call({ file_path: filePath }, {})
+    expect(result.isError).toBe(false)
+    // 行内容真的返回了前 ~50KB，而不是空
+    expect(result.output).toContain(`1\t${'a'.repeat(100)}`)
+    expect(result.output).toContain('[...line truncated')
+    expect(result.output).toContain('60-byte line'.replace('60', String(60 * 1024)))
+    // 行内续读提示指向正确的行号和文件
+    expect(result.output).toContain(`sed -n '1p' '${filePath}'`)
+  })
+
+  it('流式路径下单行超 50KB 同样降级为行内截断', async () => {
+    const filePath = path.join(tmpDir, 'huge-longline.log')
+    // 首行 60KB + 13MB filler（走流式路径），第一行就超单次上限
+    const bigLine = 'b'.repeat(60 * 1024)
+    const filler = Array.from({ length: 150000 }, (_, i) => `row-${i}-${'z'.repeat(80)}`)
+    await fs.writeFile(filePath, [bigLine, ...filler].join('\n') + '\n')
+
+    const result = await tool.call({ file_path: filePath, limit: 10 }, {})
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('b'.repeat(100))
+    expect(result.output).toContain('[...line truncated')
+    expect(result.output).toContain(`sed -n '1p' '${filePath}'`)
+  })
+
   it('streams >10MB files line-by-line and can reach the tail via offset', async () => {
     const filePath = path.join(tmpDir, 'huge.txt')
     // 150000 行 × ~90B ≈ 13MB，走流式按行定位路径

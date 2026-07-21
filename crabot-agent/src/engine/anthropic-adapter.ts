@@ -33,7 +33,8 @@ function defaultAnthropicMaxTokens(model: string): number {
 // --- Anthropic Message Normalization ---
 
 export function normalizeMessagesForAnthropic(messages: ReadonlyArray<EngineMessage>): MessageParam[] {
-  const raw = messages.map((msg): MessageParam => {    if (isToolResultMessage(msg)) {
+  const raw = messages.map((msg): MessageParam => {
+    if (isToolResultMessage(msg)) {
       return {
         role: 'user',
         content: msg.toolResults.map((tr) => {
