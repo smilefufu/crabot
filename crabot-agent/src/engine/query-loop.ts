@@ -395,6 +395,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       lspManager: options.lspManager,
       senderIsMaster: options.senderIsMaster,
       resolvedPermissions: options.resolvedPermissions,
+      ...(options.getResolvedPermissions ? { getResolvedPermissions: options.getResolvedPermissions } : {}),
       contentReviewer: options.contentReviewer,
       sessionType: options.sessionType,
     },
