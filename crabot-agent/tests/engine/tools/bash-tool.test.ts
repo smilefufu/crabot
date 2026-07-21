@@ -145,6 +145,22 @@ describe('createBashTool — 输出截断与全文落盘', () => {
     expect(Buffer.byteLength(result.output, 'utf8')).toBeLessThan(100 * 1024)
   })
 
+  it('>50K 失败输出：exit_code 状态头不被尾部截断切掉', async () => {
+    // 非零退出 + 超 50KB 输出：exit_code 是模型判断成败的唯一信号（isError 为 false）
+    const result = await tool.call(
+      { command: `printf 'x%.0s' {1..60000}; echo; echo TAIL_MARKER; exit 3` },
+      {} as ToolCallContext,
+    )
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('[Showing last')
+    // 状态头必须在截断范围之外
+    expect(result.output.startsWith('exit_code: 3\n')).toBe(true)
+    // 落盘全文也带状态头
+    const match = result.output.match(/Full output: ([^\]]+)\]/)
+    const full = fs.readFileSync(match![1], 'utf8')
+    expect(full.startsWith('exit_code: 3\n')).toBe(true)
+  })
+
   it('≤50K 输出：行为不变，不落盘', async () => {
     const result = await tool.call({ command: 'echo small-output' }, {} as ToolCallContext)
     expect(result.isError).toBe(false)

@@ -88,8 +88,9 @@ function cleanupToolOutputsOnce(): void {
  * 按头部保留二次截断、把尾部和落盘路径 hint 切掉。
  * 截断时把完整输出落盘到 tmp/tool-outputs/，返回文本附全文路径，模型可用
  * Read/Grep 续查；落盘失败回退为纯截断，不阻断执行。
+ * spillContent 用于落盘内容与截断内容不同（如含状态头）的场景。
  */
-async function truncateOutput(output: string): Promise<string> {
+async function truncateOutput(output: string, spillContent: string = output): Promise<string> {
   const totalBytes = byteLength(output)
   if (totalBytes <= MAX_OUTPUT_BYTES) {
     return output
@@ -100,7 +101,7 @@ async function truncateOutput(output: string): Promise<string> {
     const dir = getToolOutputsDir()
     await fsp.mkdir(dir, { recursive: true })
     fullOutputPath = path.join(dir, `${randomUUID()}.log`)
-    await fsp.writeFile(fullOutputPath, output, 'utf8')
+    await fsp.writeFile(fullOutputPath, spillContent, 'utf8')
   } catch {
     fullOutputPath = null
   }
@@ -120,16 +121,17 @@ async function formatBashToolOutput(
   stderr: string,
 ): Promise<string> {
   const exit = exitCode === null ? 'null' : String(exitCode)
-  const truncated = await truncateOutput(
-    [
-      `exit_code: ${exit}`,
-      'stdout:',
-      stripOneTrailingNewline(stdout),
-      'stderr:',
-      stripOneTrailingNewline(stderr),
-    ].join('\n'),
-  )
-  return truncated.trim()
+  // exit_code 是模型判断命令成败的唯一信号（非零退出也以 isError:false 返回），
+  // 必须置于尾部截断范围之外；落盘全文里同样带状态头。
+  const header = `exit_code: ${exit}`
+  const body = [
+    'stdout:',
+    stripOneTrailingNewline(stdout),
+    'stderr:',
+    stripOneTrailingNewline(stderr),
+  ].join('\n')
+  const truncated = await truncateOutput(body, `${header}\n${body}`)
+  return `${header}\n${truncated}`.trim()
 }
 
 async function formatBashToolExecutionError(
@@ -137,17 +139,20 @@ async function formatBashToolExecutionError(
   stdout: string,
   stderr: string,
 ): Promise<string> {
-  const parts = [`Command execution failed: ${message}`]
+  // 状态头同样置于截断范围之外（isError:true 虽有失败信号，但头部 message 也不该被切）
+  const header = `Command execution failed: ${message}`
+  const bodyParts: string[] = []
   const stdoutText = stripOneTrailingNewline(stdout)
   const stderrText = stripOneTrailingNewline(stderr)
   if (stdoutText) {
-    parts.push('stdout:', stdoutText)
+    bodyParts.push('stdout:', stdoutText)
   }
   if (stderrText) {
-    parts.push('stderr:', stderrText)
+    bodyParts.push('stderr:', stderrText)
   }
-  const truncated = await truncateOutput(parts.join('\n'))
-  return truncated.trim()
+  const body = bodyParts.join('\n')
+  const truncated = await truncateOutput(body, `${header}\n${body}`)
+  return `${header}\n${truncated}`.trim()
 }
 
 function extractExitCode(error: { code?: string | number | null }): number | null {
