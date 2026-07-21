@@ -313,8 +313,14 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
 
   const messages: EngineMessage[] = initialMessages ? [...initialMessages] : [createUserMessage(prompt)]
   const contextManager = new ContextManager({
-    maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
+    maxContextTokens: options.contextWindowTokens ?? DEFAULT_MAX_CONTEXT_TOKENS,
   })
+
+  // compaction 真实 usage 触发（spec 2026-07-21 改动 3）：
+  // 每轮 LLM 响应后用 response.usage 算出全量 prompt 大小并记录当时的消息数；
+  // usage 缺失 / compaction 后观测失效时回退估算路径（含 system prompt + tools）。
+  let lastObservedContextTokens: number | undefined = undefined
+  let messageCountAtObservation = 0
 
   // 外部 observer（progress digest 等）通过 messagesRef 只读访问当前 messages。
   // 每轮 onTurn 之前以及主循环开头各刷新一次 —— 足以让定时 flush（≥秒级间隔）
@@ -408,19 +414,27 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
 
     // Check if context compaction is needed
     // disableCompaction=true 时整体 bypass（subagent 路径）；详见 EngineOptions 注释。
-    if (!options.disableCompaction && contextManager.shouldCompact(messages)) {
-      await compactInPlace(messages, contextManager, adapter, options)
-    }
-
-    // Call LLM (non-streaming by default; streaming infra preserved for rollback
-    // via adapters that opt out of `complete()`).
-    let response: import('./llm-adapter').LLMCallResponse
+    // systemPrompt/tools 在 shouldCompact 之前解析——usage 缺失的估算路径要计入两者。
     const currentSystemPrompt = typeof options.systemPrompt === 'function'
       ? (options.systemPrompt as () => string)()
       : options.systemPrompt
     const currentTools = typeof options.tools === 'function'
       ? (options.tools as () => ReadonlyArray<import('./types').ToolDefinition>)()
       : options.tools
+    if (!options.disableCompaction && contextManager.shouldCompact(messages, {
+      lastObservedContextTokens,
+      messageCountAtObservation,
+      systemPrompt: currentSystemPrompt,
+      tools: currentTools,
+    })) {
+      await compactInPlace(messages, contextManager, adapter, options)
+      // compaction 改写了 messages，上一轮的 usage 观测已失效，回退估算路径
+      lastObservedContextTokens = undefined
+    }
+
+    // Call LLM (non-streaming by default; streaming infra preserved for rollback
+    // via adapters that opt out of `complete()`).
+    let response: import('./llm-adapter').LLMCallResponse
     // 快照本轮实际使用的 systemPrompt/tools 给 fork observer（见 EngineMessagesRef 注释）
     if (messagesRef) {
       messagesRef.systemPrompt = currentSystemPrompt
@@ -474,6 +488,13 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     // Update usage tracking
     if (response.usage) {
       contextManager.updateFromUsage(response.usage)
+      // 记录全量 prompt 大小供下一轮 shouldCompact 判定（spec 2026-07-21 改动 3）。
+      // 此刻 messages 尚未 push 本轮 assistant 消息，长度正好是本次请求的 prompt 消息数。
+      lastObservedContextTokens =
+        response.usage.inputTokens +
+        (response.usage.cacheReadTokens ?? 0) +
+        (response.usage.cacheCreationTokens ?? 0)
+      messageCountAtObservation = messages.length
     }
 
     // Build assistant message content blocks (preserves reasoning ordering: reasoning → text → tool_use)
@@ -593,8 +614,8 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
 
       // max_tokens + text='' 单独走 compact-retry 路径。单纯加 FORCED_SUMMARY_PROMPT
       // 反而让 input 更大；正确做法是丢掉空回复 + 压缩 + 重跑。
-      // 压缩阈值无视 shouldCompact——后者估算不含 system prompt + tools，对 reasoning
-      // 模型 + 大量工具的场景系统性低估。
+      // 压缩无视 shouldCompact 阈值——max_tokens 已是 context 打满的硬信号，
+      // 保留这条无视阈值的兜底路径（spec 2026-07-21 改动 3 语义不变量）。
       if (isSilentText && stopReason === 'max_tokens') {
         // disableCompaction（subagent）路径：没有 compact 这条退路，直接以空 finalText 收尾。
         // 父 agent 通过 outcome + totalTurns + 空 output 判断要不要拆任务 / 上调 budget。
@@ -603,6 +624,8 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
           fireOnTurn(buildSilentTurnEvent(totalTurns, processed.text, stopReason, llmCallMs, llmStartedAtMs, undefined, response.usage))
           messages.pop()
           await compactInPlace(messages, contextManager, adapter, options)
+          // compaction 改写了 messages，上一轮的 usage 观测已失效，回退估算路径
+          lastObservedContextTokens = undefined
           continue
         }
         // 配额耗尽（或 subagent 禁用了 compact）：input 已被压过两次仍 max_tokens，

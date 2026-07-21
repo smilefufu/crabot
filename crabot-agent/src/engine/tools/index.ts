@@ -105,6 +105,25 @@ export function getConfiguredBuiltinTools(
   return filtered
 }
 
+/**
+ * MCP 桥接工具的 disabled_tools 过滤：按 `mcp__<server>__<tool>` 全名匹配剔除。
+ * 在 buildToolsDynamic 组装末尾对完整工具表统一调用（内置工具已在
+ * getConfiguredBuiltinTools 内过滤，此处对它们天然无命中）。
+ *
+ * 注意：enabled_tools 白名单语义**不**扩展到 MCP 工具——若套用，任何配过
+ * enabled_tools 的现有部署会把全部 MCP 工具静默摘光（行为风险）。MCP 侧只支持
+ * disabled_tools 黑名单；默认配置（无 disabled_tools）零行为变化。
+ */
+export function filterMcpToolsByConfig(
+  tools: ReadonlyArray<ToolDefinition>,
+  config?: BuiltinToolConfig,
+): ToolDefinition[] {
+  const disabled = config?.disabled_tools
+  if (!disabled || disabled.length === 0) return [...tools]
+  const disabledSet = new Set(disabled)
+  return tools.filter((t) => !t.name.startsWith('mcp__') || !disabledSet.has(t.name))
+}
+
 export {
   createBashTool,
   createReadTool,

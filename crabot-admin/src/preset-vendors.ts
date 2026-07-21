@@ -73,15 +73,6 @@ const ZHIPU_CODING_MODELS: ModelInfo[] = [
 ]
 
 /**
- * Kimi Coding Plan 静态模型列表
- * Kimi K2.7 Code 提供 Anthropic 兼容入口，官方 Claude Code 文档按静态模型配置。
- * 参考: https://platform.moonshot.cn/docs/guide/agent-support
- */
-const KIMI_CODING_MODELS: ModelInfo[] = [
-  { model_id: 'kimi-k2.7-code', display_name: 'Kimi K2.7 Code', type: 'llm', supports_vision: false, context_window: 262144 },
-]
-
-/**
  * 百炼 Coding Plan 静态模型列表
  * 百炼 Coding Plan 提供 Anthropic 兼容接口，不支持 GET /models
  */
@@ -162,10 +153,12 @@ export const BUILTIN_PRESET_VENDORS: readonly PresetVendor[] = [
     id: 'kimi-coding',
     name: 'Kimi Coding Plan',
     format: 'anthropic',
-    endpoint: 'https://api.moonshot.cn/anthropic',
+    endpoint: 'https://api.kimi.com/coding',
     docs_url: 'https://platform.moonshot.cn/docs/guide/agent-support',
     api_key_help_url: 'https://platform.kimi.com/console/api-keys',
-    default_models: KIMI_CODING_MODELS,
+    // Coding Plan 端点提供 GET /v1/models（x-api-key / Bearer 均可），模型列表走接口实时获取，
+    // 失败时无内置兜底（与 openai/deepseek 等 preset 一致，refresh 失败即清空）
+    models_api: '/v1/models',
   },
   {
     id: 'deepseek',

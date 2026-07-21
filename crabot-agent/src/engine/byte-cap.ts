@@ -2,7 +2,7 @@
  * UTF-8 byte-aware string truncation helpers.
  *
  * 三处共用：
- *   - tool-orchestration.ts：所有工具结果统一兜底（256KB），防止任何工具忘记自截断
+ *   - tool-orchestration.ts：所有工具结果统一兜底（100KB），防止任何工具忘记自截断
  *   - LLM adapters（anthropic / openai / openai-responses）：normalize 阶段最后防线（9MB），
  *     避免 OpenAI Responses API 单字符串 10MB 协议上限触发整轮失败
  *   - 单个工具自截断（如 Grep）也可用 `byteLength` 累计判断
@@ -31,6 +31,25 @@ export function truncateUtf8(s: string, maxBytes: number): string {
     end += ch.length // surrogate pair → 2，否则 1
   }
   return end === 0 ? '' : s.slice(0, end)
+}
+
+/**
+ * 保留尾部版本的 truncateUtf8：从末尾向前取不超过 maxBytes 个字节，不切多字节字符。
+ * 供「错误信息通常在结尾」的截断场景（如 Bash 输出）使用。
+ */
+export function truncateUtf8Tail(s: string, maxBytes: number): string {
+  const total = Buffer.byteLength(s, 'utf8')
+  if (total <= maxBytes) return s
+  // 至少要跳过的前导字节数；逐 code point 前进到累计 ≥ skip，保证不切多字节字符
+  const skip = total - maxBytes
+  let bytes = 0
+  let idx = 0
+  for (const ch of s) {
+    if (bytes >= skip) break
+    bytes += Buffer.byteLength(ch, 'utf8')
+    idx += ch.length // surrogate pair → 2，否则 1
+  }
+  return s.slice(idx)
 }
 
 export interface CapResult {

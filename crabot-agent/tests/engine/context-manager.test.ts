@@ -166,6 +166,85 @@ describe('ContextManager', () => {
 
       expect(cm.shouldCompact(messages)).toBe(true)
     })
+
+    // spec 2026-07-21 改动 3：真实 usage 触发
+    it('should trigger on lastObservedContextTokens even when message estimate is small', () => {
+      const cm = new ContextManager({ maxContextTokens: 1000, compactThreshold: 0.8 })
+      // 消息本身估算远低于阈值，但上一轮 usage 观测已达 900 >= 800
+      const messages = makeTextMessages(2, 20)
+
+      expect(cm.shouldCompact(messages, {
+        lastObservedContextTokens: 900,
+        messageCountAtObservation: 2,
+      })).toBe(true)
+    })
+
+    it('should not trigger when lastObservedContextTokens is under threshold', () => {
+      const cm = new ContextManager({ maxContextTokens: 1000, compactThreshold: 0.8 })
+      const messages = makeTextMessages(2, 20)
+
+      expect(cm.shouldCompact(messages, {
+        lastObservedContextTokens: 500,
+        messageCountAtObservation: 2,
+      })).toBe(false)
+    })
+
+    it('should add estimated delta of messages appended after the observation', () => {
+      const cm = new ContextManager({ maxContextTokens: 1000, compactThreshold: 0.8 })
+      // 观测时 2 条消息（700 tokens），其后新增 2 条大消息：
+      // 每条 400 chars / 4 + 4 = 104，delta=208，700+208=908 >= 800 → 触发
+      const messages = makeTextMessages(4, 400)
+
+      expect(cm.shouldCompact(messages, {
+        lastObservedContextTokens: 700,
+        messageCountAtObservation: 2,
+      })).toBe(true)
+
+      // 同一观测值但只算前 2 条（无新增消息）→ 不触发
+      expect(cm.shouldCompact(messages.slice(0, 2), {
+        lastObservedContextTokens: 700,
+        messageCountAtObservation: 2,
+      })).toBe(false)
+    })
+
+    it('should fall back to estimation when observation is stale (messages shrunk)', () => {
+      const cm = new ContextManager({ maxContextTokens: 1000, compactThreshold: 0.8 })
+      // messageCountAtObservation > messages.length（compaction 后消息数回缩）→ 观测失效
+      const messages = makeTextMessages(2, 20)
+
+      expect(cm.shouldCompact(messages, {
+        lastObservedContextTokens: 900,
+        messageCountAtObservation: 10,
+      })).toBe(false)
+    })
+
+    // spec 2026-07-21 改动 3：usage 缺失时估算计入 system prompt + tools schema
+    it('should count system prompt length in the estimation fallback', () => {
+      const cm = new ContextManager({ maxContextTokens: 1000, compactThreshold: 0.8 })
+      const messages = makeTextMessages(2, 20)
+      // 4000 chars / 4 = 1000 tokens >= 800 → 触发
+      const systemPrompt = 's'.repeat(4000)
+
+      expect(cm.shouldCompact(messages, { systemPrompt })).toBe(true)
+      // 不传 systemPrompt → 纯消息估算远低于阈值
+      expect(cm.shouldCompact(messages)).toBe(false)
+    })
+
+    it('should count tools schema in the estimation fallback', () => {
+      const cm = new ContextManager({ maxContextTokens: 1000, compactThreshold: 0.8 })
+      const messages = makeTextMessages(2, 20)
+      const tools = [
+        {
+          name: 'big_tool',
+          description: 'd'.repeat(3200),
+          inputSchema: { type: 'object', properties: {} },
+          isReadOnly: false,
+        },
+      ]
+      // description 3200 chars / 4 ≈ 800 tokens >= 800 → 触发
+      expect(cm.shouldCompact(messages, { tools })).toBe(true)
+      expect(cm.shouldCompact(messages)).toBe(false)
+    })
   })
 
   describe('compactMessages', () => {

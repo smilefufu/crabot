@@ -10,7 +10,7 @@
  * - **以磁盘 mtime 为准**：任何人（Edit / Write / Bash / 外部进程）改了文件，mtime 必变 →
  *   下次 Read 自动失效、走全量读。因此 Edit/Write **无需**主动失效本缓存。
  * - **不算 diff**：只处理「未变 → stub / 变了 → 全量读」，不做行级 diff（简单优先）。
- * - **截断读不缓存**：文件超 MAX_FILE_SIZE 被截断时不进缓存（部分视图，全量读才安全）。
+ * - **截断读不缓存**：单次读取被 50KB 字节上限截断时不进缓存（部分视图，全量读才安全）。
  * - **隔离**：只挂给 main worker；subagent 用普通 Read（不带本缓存）。否则 main 读过的文件
  *   会让 subagent 拿到一个指向「不在自己上下文里的旧 tool_result」的 stub。
  * - **压缩配合**：onCompactionStart 时 clear()。旧的 Read tool_result 可能被压缩摘要掉，

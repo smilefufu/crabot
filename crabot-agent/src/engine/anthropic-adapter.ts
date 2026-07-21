@@ -33,8 +33,7 @@ function defaultAnthropicMaxTokens(model: string): number {
 // --- Anthropic Message Normalization ---
 
 export function normalizeMessagesForAnthropic(messages: ReadonlyArray<EngineMessage>): MessageParam[] {
-  const raw = messages.map((msg): MessageParam => {
-    if (isToolResultMessage(msg)) {
+  const raw = messages.map((msg): MessageParam => {    if (isToolResultMessage(msg)) {
       return {
         role: 'user',
         content: msg.toolResults.map((tr) => {
@@ -70,19 +69,23 @@ export function normalizeMessagesForAnthropic(messages: ReadonlyArray<EngineMess
     if (msg.role === 'assistant') {
       return {
         role: 'assistant',
-        content: msg.content.map((block) => {
+        content: msg.content.flatMap((block): Array<TextBlockParam | ToolUseBlockParam> => {
           switch (block.type) {
             case 'text':
-              return { type: 'text' as const, text: block.text }
+              return [{ type: 'text' as const, text: block.text }]
             case 'tool_use':
-              return {
-                type: 'tool_use' as const,
-                id: block.id,
-                name: block.name,
-                input: block.input,
-              }
+              return [
+                {
+                  type: 'tool_use' as const,
+                  id: block.id,
+                  name: block.name,
+                  input: block.input,
+                },
+              ]
             default:
-              return { type: 'text' as const, text: '' }
+              // 不认识的 block（如 raw_reasoning）丢弃——原先映射成空 text block
+              // 发给 API 是纯垃圾 token，且空 text block 本身会被 API 拒绝
+              return []
           }
         }),
       }
@@ -93,24 +96,33 @@ export function normalizeMessagesForAnthropic(messages: ReadonlyArray<EngineMess
     }
 
     const content: Array<TextBlockParam | ImageBlockParam | ToolUseBlockParam | ToolResultBlockParam> =
-      msg.content.map((block): TextBlockParam | ImageBlockParam => {
+      msg.content.flatMap((block): Array<TextBlockParam | ImageBlockParam> => {
         if (block.type === 'image') {
-          return {
-            type: 'image',
-            source: {
-              type: block.source.type as 'base64',
-              media_type: block.source.media_type as ImageBlockParam.Source['media_type'],
-              data: block.source.data,
+          return [
+            {
+              type: 'image',
+              source: {
+                type: block.source.type as 'base64',
+                media_type: block.source.media_type as ImageBlockParam.Source['media_type'],
+                data: block.source.data,
+              },
             },
-          }
+          ]
         }
-        return { type: 'text', text: block.type === 'text' ? block.text : '' }
+        // 不认识的 block 丢弃，不映射成空 text block 发给 API
+        if (block.type !== 'text') return []
+        return [{ type: 'text', text: block.text }]
       })
 
     return { role: 'user', content }
   })
 
-  return mergeConsecutiveUserMessages(raw, (content) =>
+  // 不认识的 block 被丢弃后可能产生 content 为空数组的消息——发给 API 会 400，
+  // 整条丢弃。仅当 content 真正为空（无 text 无 tool_use）才丢：
+  // 含 tool_use 的 assistant 消息 content 非空，不影响 tool_use/tool_result 配对语义。
+  const nonEmpty = raw.filter((msg) => !(Array.isArray(msg.content) && msg.content.length === 0))
+
+  return mergeConsecutiveUserMessages(nonEmpty, (content) =>
     Array.isArray(content) ? content : [{ type: 'text' as const, text: content as string }],
   )
 }
@@ -169,12 +181,42 @@ export class AnthropicAdapter implements LLMAdapter {
     const messages = normalizeMessagesForAnthropic(params.messages)
     const tools = params.tools.map(AnthropicAdapter.toAnthropicTool)
 
+    // Prompt caching：注入 3 个 cache breakpoint（固定 5 分钟 ephemeral，SDK stable
+    // 类型尚未带出 cache_control 字段，靠结构化类型直接附加）。只加缓存标记，
+    // 不改消息内容本身。breakpoint 位置：1) system 末尾 2) 最后一个 tool 定义
+    // 3) 最后一条消息的最后一个 content block（缓存整段会话历史前缀）。
+    const EPHEMERAL = { type: 'ephemeral' } as const
+
+    // 空 system prompt 不传（空 text block 会被 API 拒绝）
+    const system = params.systemPrompt
+      ? [{ type: 'text' as const, text: params.systemPrompt, cache_control: EPHEMERAL }]
+      : undefined
+
+    const cachedTools = tools.map((tool, i) =>
+      i === tools.length - 1 ? { ...tool, cache_control: EPHEMERAL } : tool,
+    )
+
+    const cachedMessages = messages.map((msg, i) => {
+      if (i !== messages.length - 1) return msg
+      if (typeof msg.content === 'string') {
+        return {
+          ...msg,
+          content: [{ type: 'text' as const, text: msg.content, cache_control: EPHEMERAL }],
+        }
+      }
+      if (msg.content.length === 0) return msg
+      const blocks = msg.content.map((block, j) =>
+        j === msg.content.length - 1 ? { ...block, cache_control: EPHEMERAL } : block,
+      )
+      return { ...msg, content: blocks }
+    })
+
     const stream = this.client.messages.stream({
       model: params.model,
       max_tokens: params.maxTokens ?? defaultAnthropicMaxTokens(params.model),
-      system: params.systemPrompt,
-      messages,
-      ...(tools.length > 0 ? { tools } : {}),
+      ...(system ? { system } : {}),
+      messages: cachedMessages,
+      ...(cachedTools.length > 0 ? { tools: cachedTools } : {}),
     })
 
     // signal 通常是 task 级长寿命的（一个 task 内每个 turn 都共用）。如果只 addEventListener

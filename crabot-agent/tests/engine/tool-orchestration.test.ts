@@ -183,7 +183,7 @@ describe('executeToolBatches', () => {
     expect(results[0].content).toContain('Tool not found: nonexistent_tool')
   })
 
-  it('caps oversized tool output at 256KB to protect LLM context', async () => {
+  it('caps oversized tool output at 100KB to protect LLM context', async () => {
     // 模拟一个忘记自截断的工具（如 MCP server 直接返回大文件）
     const hugeOutputTool = defineTool({
       name: 'huge_output',
@@ -200,9 +200,11 @@ describe('executeToolBatches', () => {
 
     expect(results).toHaveLength(1)
     // stamp 加了时间戳头部，留余量
-    expect(Buffer.byteLength(results[0].content, 'utf8')).toBeLessThan(258_000)
+    expect(Buffer.byteLength(results[0].content, 'utf8')).toBeLessThan(102_000)
     expect(results[0].content).toContain('orchestration: tool output truncated')
     expect(results[0].content).toContain('1000000 bytes') // 原始字节数
+    // 截断标记提示用分页参数收窄
+    expect(results[0].content).toContain('分页参数')
   })
 
   it('does not modify normal-sized tool output', async () => {

@@ -17,7 +17,7 @@ import {
   ProgressDigest,
   filterToolsByPermission,
 } from '../engine/index.js'
-import { createSetCwdTool, createReadTool } from '../engine/tools/index.js'
+import { createSetCwdTool, createReadTool, filterMcpToolsByConfig } from '../engine/tools/index.js'
 import { BgEntityRegistry } from '../engine/bg-entities/registry.js'
 import { killShellTree } from '../engine/bg-entities/bg-shell.js'
 import { ReadoptReaper } from '../engine/bg-entities/reaper.js'
@@ -65,7 +65,7 @@ import type {
 } from '../types.js'
 import type { RpcClient } from 'crabot-shared'
 import { SYSTEM_CHANNEL_ID } from 'crabot-shared'
-import { createCrabMemoryServer } from '../mcp/crab-memory.js'
+import { createCrabMemoryServer, resolveMemoryToolProfile, filterMemoryToolsByProfile } from '../mcp/crab-memory.js'
 import type { MemoryTaskContext } from '../mcp/crab-memory.js'
 import { mcpServerToToolDefinitions } from './mcp-tool-bridge.js'
 import { imageToolsFor, type ImageConnInfo } from '../mcp/crab-image.js'
@@ -415,6 +415,8 @@ export interface SdkEnvConfig {
   supportsVision?: boolean
   /** Provider 配置的 max_output_tokens；未配置时 adapter 走各自的处理策略 */
   maxTokens?: number
+  /** Provider 模型配置的 context_window；未配置时 engine 回退内置默认 200000 */
+  contextWindow?: number
   env: Record<string, string>
 }
 
@@ -1267,7 +1269,16 @@ export class AgentHandler {
             moduleId: this.deps.moduleId,
             getMemoryPort: this.deps.getMemoryPort,
           }, memoryTaskCtx)
-          tools.push(...mcpServerToToolDefinitions(crabMemoryServer, 'crab-memory'))
+          // 按任务用途分组注册：daily_reflection / memory_curate / tags 含 memory_rebuild
+          // → 全量 18 个；其他任务 → 仅 A 组 6 个（普通对话不需要反思级精细工具）。
+          const memoryProfile = resolveMemoryToolProfile({
+            taskType: task.task_type,
+            tags: task.tags,
+          })
+          tools.push(...filterMemoryToolsByProfile(
+            mcpServerToToolDefinitions(crabMemoryServer, 'crab-memory'),
+            memoryProfile,
+          ))
         }
 
         // 3b. crab-image MCP server tools（仅当图像配置可用时暴露 generate_image）
@@ -1379,7 +1390,10 @@ export class AgentHandler {
         // 3f. delegate_task 工具（单一入口；sub-agent 按 subagent_type 路由）
         // baseToolsPermissionConfig 仅基于 base 工具集，给 sub-agent 用：
         //   sub-agent 内部只能见 baseTools，所以它的 permissionConfig 也只需覆盖 base 工具命名。
-        const baseToolsRaw = [...tools]
+        // disabled_tools 的 MCP 过滤同样作用于 baseToolsRaw——baseToolsRaw 喂给 subagent
+        // parentTools 与 auditBaseTools，不在这里过滤会让被禁 MCP 工具从这两条路径漏出
+        //（main worker 路径在组装末尾统一过滤）。
+        const baseToolsRaw = filterMcpToolsByConfig([...tools], this.builtinToolConfig)
         // Read dedup：仅 main worker 启用（subagent 用 baseToolsRaw 里的普通 Read，
         // 避免 stub 指向不在自己上下文里的旧读）。baseToolsRaw 已在上一行 capture（普通 Read），
         // 这里替换 main 的 tools[Read] 为带去重缓存的版本——不影响 subagent。
@@ -1519,12 +1533,17 @@ export class AgentHandler {
           tools.push(...opts.extraTools)
         }
 
+        // disabled_tools 扩展到 MCP 桥接工具：按 mcp__<server>__<tool> 全名过滤，
+        // 在组装末尾统一应用（内置工具的同名过滤在 getConfiguredBuiltinTools 内完成）。
+        // 默认配置（无 disabled_tools）零行为变化。
+        const configFiltered = filterMcpToolsByConfig(tools, this.builtinToolConfig)
+
         // 最终过滤：用「完整 tools 集合」重算 permissionConfig，
         // 否则 delegate_*/trace_search 等后注入的工具因不在 baseToolsPermissionConfig 的 denyList 里而漏过 filter，
         // 导致 LLM 看见但 runEngine 用 initialPermissionConfig 又拒绝（违反「无权限工具不注入 prompt」）。
         const fullPermissionConfig: ToolPermissionConfig =
-          this.deps?.getPermissionConfig?.(tools, context.resolved_permissions) ?? { mode: 'bypass' }
-        return filterToolsByPermission(tools, fullPermissionConfig)
+          this.deps?.getPermissionConfig?.(configFiltered, context.resolved_permissions) ?? { mode: 'bypass' }
+        return filterToolsByPermission(configFiltered, fullPermissionConfig)
       }
 
       // System prompt 也改为 callback：admin push config 触发 updateSystemPrompt 后下一轮生效。
@@ -1699,6 +1718,7 @@ export class AgentHandler {
           tools: buildToolsDynamic,
           model: this.sdkEnv.modelId,
           ...(this.sdkEnv.maxTokens !== undefined ? { maxTokens: this.sdkEnv.maxTokens } : {}),
+          ...(this.sdkEnv.contextWindow !== undefined ? { contextWindowTokens: this.sdkEnv.contextWindow } : {}),
           maxTurns: 2000,
           supportsVision: this.sdkEnv.supportsVision,
           permissionConfig: initialPermissionConfig,
@@ -3405,6 +3425,7 @@ export class AgentHandler {
         abortSignal: ctx.abortSignal,
         onTurn: subTraceCallback,
         supportsVision: subagent.model.supports_vision,
+        ...(subagent.model.context_window !== undefined ? { contextWindowTokens: subagent.model.context_window } : {}),
         hookRegistry,
         lspManager,
         permissionConfig: deps.permissionConfig,
@@ -3945,9 +3966,9 @@ export class AgentHandler {
     taskId: TaskId,
   ): string {
     // unified loop spec §3.1：使用 assembleAgentPrompt。
-    const sceneProfile = context.scene_profile
-      ? { label: context.scene_profile.label, content: context.scene_profile.content }
-      : undefined
+    // 场景画像（scene_profile）不再注入 system prompt——只在首条 task message 注入一次
+    // （buildTaskMessage），避免双重注入浪费 token，也让 system prompt 前缀更稳定。
+    // spec: 2026-07-21-agent-token-efficiency-design.md 改动 5
     // subAgents 由 runWorkerLoop 在 loop 启动时 snapshot 后传入，
     // 防止 in-flight loop 中 admin 改 subagents 后 system prompt 列表跳变。
     const availableSubAgents = subAgents.map((s) => ({
@@ -3961,7 +3982,6 @@ export class AgentHandler {
         skillListing: this.buildSkillListingSnapshot(),
         availableSubAgents: availableSubAgents.length > 0 ? availableSubAgents : undefined,
         imageCapability: { available: this.imageCapability.available },
-        ...(sceneProfile ? { sceneProfile } : {}),
       })
       : this.systemPrompt
     const parts: string[] = [baseAssembled]

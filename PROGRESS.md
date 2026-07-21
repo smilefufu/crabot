@@ -1,6 +1,23 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-19 — subagent 模型配置热生效（delegate 时实时解析）
+> 最后更新：2026-07-21 — crabot-agent token 使用效率优化（对标 Pi agent）
+
+## 2026-07-21 — crabot-agent token 使用效率优化（对标 Pi agent）
+
+- 起因：对比开源 Pi agent（极简 prompt + 4 工具 + 输出硬截断 + prompt caching）后，发现 crabot-agent 五个差距：Anthropic 无 cache_control、工具输出截断宽松且不可恢复、compaction 用 chars/4 低估、工具盘臃肿、prompt 冗余。
+- spec：`crabot-docs/superpowers/specs/2026-07-21-agent-token-efficiency-design.md`（含 §10 实施偏离记录）。
+- 实现（5 项）：
+  1. anthropic-adapter 注入 3 处 cache breakpoint（system 末块 / 末 tool / 末消息末块，5min ephemeral）；顺带清理空 text block 垃圾 token。
+  2. bash 截断 100K→50K 改纯尾部 + 完整输出落盘 `data/tmp/tool-outputs/` 可恢复；read 解除 500KB 后不可读限制（流式分页全覆盖，单次 ≤50KB）；编排层兜底 256KB→100KB。
+  3. compaction 触发改用 API 真实 usage（lastObservedContextTokens + 增量估算），usage 缺失回退估算且计入 system+tools；context_window 从 admin buildConnectionInfo → agent → EngineOptions 全链路接线。
+  4. delegate_task 的 when_to_use 截断 300 字符；memory 工具按任务类型分组（普通任务 A 组 6 个 / daily_reflection 全量 18 个，对齐 protocol-memory §3.30）；disabled_tools 扩展到 MCP 工具（仅黑名单，enabled_tools 不套 MCP）。
+  5. scene profile 去除 system prompt 侧的重复注入（保留 task message 单次注入）。
+- 协议：protocol-admin §3.19.8（context_window）+ BuiltinToolConfig 小节（disabled_tools 覆盖 MCP）；protocol-memory §3.30（工具分组）；base-protocol §5.14 / protocol-agent-v2 补 context_window 字段。
+- 验证：agent 全量 1590/1591（唯一失败为 7-17 已记录的 context-assembler 固定时间漂移，HEAD 复现确认与本次无关）；admin 全量 1013 通过（schedule-target-session 的 EADDRINUSE 为并行跑套件的环境 flake，单跑 6/6 通过）。
+- 自审修复（2026-07-21 当天第二轮）：4 路并行 diff review 后修复 6 项——①memory 分组放宽为按任务用途（memory_curate + tags memory_rebuild，原条件会废掉内置每小时记忆整理和重建图谱端点；顺带打通 start_task RPC 的 tags/task_type 透传链路）；②bash 截断 char→byte 口径（CJK 输出下原实现会让编排层 100KB 兜底切掉尾部 hint）；③disabled_tools 覆盖 subagent/audit 继承路径；④anthropic adapter 丢弃空 content 消息；⑤补落盘失败回退测试 + read offset 归一化；⑥delegate_task 截断 surrogate 安全。修复后 agent 全量 1607/1608（仍只有那个既有时间漂移）。
+- **待办**：部署对比（cache_read 比例、bash/read 大输出场景体积）待上线后进行；**reasoning effort 配置开放**（k3 支持 low/high/max，协议无对应字段）留作 follow-up 单开 spec。
+- moonshot 实测后续（2026-07-21 当天完成）：401 根因是内置 kimi-coding preset 端点错误（`api.moonshot.cn/anthropic` 是平台 key 端点，Coding Plan key 走 `api.kimi.com/coding`），preset-vendors.ts 已修正。实测 `https://api.kimi.com/coding/v1/messages`：接受 `cache_control` 无 400；且该端点**自带自动前缀缓存**——不带 cache_control 的相同请求第二次也 100% cache_read，故改动1 对 kimi 端点是兼容增强、对官方 Anthropic 端点才是必需。注意：已部署实例 model_providers.json 里存的旧端点不会随 preset 自动更新，需在 Admin UI 手动改 provider endpoint。
+- kimi-coding preset 模型改走接口（2026-07-21 follow-up）：`GET /v1/models` 实测可用（x-api-key / Bearer 均可，返回 kimi-for-coding / kimi-for-coding-highspeed / k3）；preset 加 `models_api: '/v1/models'` 并删除 KIMI_CODING_MODELS 内置列表（失败无兜底即清空，与 openai/deepseek 等 preset 一致）；`parseOpenAIModels` 新增 `supports_image_in` → supports_vision 映射（内置原写 false，实测三模型均支持视觉）。已知：`kimi-k2.7-code` 是可用别名但不在接口返回中，旧 provider 里引用它的 slot 在 refresh 后会变成未知模型，需要重新选择。
 
 ## 2026-07-19 — subagent 模型配置热生效（delegate 时实时解析）
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { byteLength, truncateUtf8, capWithMarker } from '../../src/engine/byte-cap'
+import { byteLength, truncateUtf8, truncateUtf8Tail, capWithMarker } from '../../src/engine/byte-cap'
 
 describe('byte-cap', () => {
   describe('byteLength', () => {
@@ -37,6 +37,43 @@ describe('byte-cap', () => {
       // cap to 3 → keep 'a' only (next char would push to 5 bytes)
       const out = truncateUtf8(s, 3)
       expect(out).toBe('a')
+    })
+  })
+
+  describe('truncateUtf8Tail', () => {
+    it('returns original when under cap', () => {
+      expect(truncateUtf8Tail('hello', 100)).toBe('hello')
+    })
+
+    it('keeps the tail, drops the head (ASCII)', () => {
+      expect(truncateUtf8Tail('abcdef', 3)).toBe('def')
+    })
+
+    it('does not split multi-byte char at the cut point (Chinese)', () => {
+      // '你好' = 6 bytes；cap 4 → 从尾部取 ≤4 字节 → 只能保留 '好'（3 字节）
+      const out = truncateUtf8Tail('你好', 4)
+      expect(out).toBe('好')
+      expect(byteLength(out)).toBeLessThanOrEqual(4)
+      expect(out).not.toContain('�')
+    })
+
+    it('handles 4-byte emoji at the cut point without lone surrogates', () => {
+      const s = 'ab😀cd' // 1+1+4+1+1 = 8 bytes
+      const out = truncateUtf8Tail(s, 6)
+      // 尾部 6 字节处恰落在 😀 中间 → 整个 😀 被跳过，保留 'cd'... 实际：skip=2，
+      // 逐 code point 跳过 'a'(1) 'b'(1) 后 bytes=2 ≥ skip → 从 '😀cd' 开始保留（6 字节）
+      expect(out).toBe('😀cd')
+      expect(byteLength(out)).toBeLessThanOrEqual(6)
+      // cap 5 → skip=3，需再跳过 '😀'(4) → 保留 'cd'
+      expect(truncateUtf8Tail(s, 5)).toBe('cd')
+    })
+
+    it('large CJK payload: kept tail is always ≤ cap', () => {
+      const s = '中'.repeat(20000) // 60000 bytes
+      const out = truncateUtf8Tail(s, 50000)
+      expect(byteLength(out)).toBeLessThanOrEqual(50000)
+      expect(out.endsWith('中')).toBe(true)
+      expect(out).not.toContain('�')
     })
   })
 
