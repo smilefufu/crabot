@@ -1,4 +1,7 @@
 import { execFile } from 'child_process'
+import { randomUUID } from 'crypto'
+import * as fsp from 'fs/promises'
+import * as path from 'path'
 import { defineTool } from '../tool-framework'
 import type { ToolDefinition, ToolCallContext, ToolCallResult } from '../types'
 import type { BgEntityRegistry } from '../bg-entities/registry.js'
@@ -6,8 +9,13 @@ import type { BgEntityOwner } from '../bg-entities/types.js'
 import type { BgEntityTraceContext } from '../bg-entities/trace.js'
 import { runShellWithGrace } from '../bg-entities/bg-shell.js'
 import { resolveBashPath, BASH_NOT_FOUND_MESSAGE } from '../../utils/resolve-bash-path.js'
+import { getAgentDataDir } from '../../core/data-paths.js'
+import { byteLength, truncateUtf8Tail } from '../byte-cap.js'
 
-const MAX_OUTPUT_LENGTH = 100000
+/** 截断阈值（UTF-8 字节）：自截产物恒 < 编排层 100KB 兜底，尾部 hint 不会被再截掉。 */
+const MAX_OUTPUT_BYTES = 50000
+/** 截断输出全文落盘的保留时长，超过即被惰性清理。 */
+const TOOL_OUTPUT_RETENTION_MS = 24 * 60 * 60 * 1000
 const DEFAULT_TIMEOUT_MS = 120000
 /** 无 bgCtx（legacy / subagent 未接 bg）时退回旧同步前台执行的 timeout 上限。 */
 export const MAX_FOREGROUND_TIMEOUT_MS = 600_000
@@ -36,50 +44,115 @@ export interface BashBgContext {
   }) => void
 }
 
-function truncateOutput(output: string): string {
-  if (output.length <= MAX_OUTPUT_LENGTH) {
+/** 截断输出全文落盘目录：agent data 目录下 tmp/tool-outputs/。 */
+function getToolOutputsDir(): string {
+  return path.join(getAgentDataDir(), 'tmp', 'tool-outputs')
+}
+
+let toolOutputsCleanupDone = false
+
+/**
+ * 工具首次调用时惰性清理 tool-outputs/ 下超过 24h 的落盘文件
+ *（worker 无统一启动钩子可挂，放这里；清理失败静默，不阻断工具执行）。
+ */
+function cleanupToolOutputsOnce(): void {
+  if (toolOutputsCleanupDone) return
+  toolOutputsCleanupDone = true
+  void (async () => {
+    try {
+      const dir = getToolOutputsDir()
+      const entries = await fsp.readdir(dir).catch(() => [] as string[])
+      const cutoff = Date.now() - TOOL_OUTPUT_RETENTION_MS
+      await Promise.all(
+        entries.map(async (name) => {
+          try {
+            const filePath = path.join(dir, name)
+            const stat = await fsp.stat(filePath)
+            if (stat.isFile() && stat.mtimeMs < cutoff) {
+              await fsp.unlink(filePath)
+            }
+          } catch {
+            // 单文件清理失败忽略
+          }
+        }),
+      )
+    } catch {
+      // 清理整体失败静默
+    }
+  })()
+}
+
+/**
+ * 保留尾部截断（错误信息通常在结尾），字节口径（UTF-8 不切字符）——与编排层
+ * 100KB 字节兜底同一口径，避免 CJK 输出按字符保留 50000 却超 100KB 被编排层
+ * 按头部保留二次截断、把尾部和落盘路径 hint 切掉。
+ * 截断时把完整输出落盘到 tmp/tool-outputs/，返回文本附全文路径，模型可用
+ * Read/Grep 续查；落盘失败回退为纯截断，不阻断执行。
+ * spillContent 用于落盘内容与截断内容不同（如含状态头）的场景。
+ */
+async function truncateOutput(output: string, spillContent: string = output): Promise<string> {
+  const totalBytes = byteLength(output)
+  if (totalBytes <= MAX_OUTPUT_BYTES) {
     return output
   }
-  const halfLimit = Math.floor((MAX_OUTPUT_LENGTH - 20) / 2)
-  return `${output.slice(0, halfLimit)}\n[...truncated...]\n${output.slice(-halfLimit)}`
+  const tail = truncateUtf8Tail(output, MAX_OUTPUT_BYTES)
+  let fullOutputPath: string | null = null
+  try {
+    const dir = getToolOutputsDir()
+    await fsp.mkdir(dir, { recursive: true })
+    fullOutputPath = path.join(dir, `${randomUUID()}.log`)
+    await fsp.writeFile(fullOutputPath, spillContent, 'utf8')
+  } catch {
+    fullOutputPath = null
+  }
+  const hint = fullOutputPath
+    ? `[Showing last ${byteLength(tail)} bytes of ${totalBytes}. Full output: ${fullOutputPath}]`
+    : `[Showing last ${byteLength(tail)} bytes of ${totalBytes}.]`
+  return `${tail}\n${hint}`
 }
 
 function stripOneTrailingNewline(value: string): string {
   return value.replace(/\n$/, '')
 }
 
-function formatBashToolOutput(
+async function formatBashToolOutput(
   exitCode: number | null,
   stdout: string,
   stderr: string,
-): string {
+): Promise<string> {
   const exit = exitCode === null ? 'null' : String(exitCode)
-  return truncateOutput(
-    [
-      `exit_code: ${exit}`,
-      'stdout:',
-      stripOneTrailingNewline(stdout),
-      'stderr:',
-      stripOneTrailingNewline(stderr),
-    ].join('\n'),
-  ).trim()
+  // exit_code 是模型判断命令成败的唯一信号（非零退出也以 isError:false 返回），
+  // 必须置于尾部截断范围之外；落盘全文里同样带状态头。
+  const header = `exit_code: ${exit}`
+  const body = [
+    'stdout:',
+    stripOneTrailingNewline(stdout),
+    'stderr:',
+    stripOneTrailingNewline(stderr),
+  ].join('\n')
+  const truncated = await truncateOutput(body, `${header}\n${body}`)
+  return `${header}\n${truncated}`.trim()
 }
 
-function formatBashToolExecutionError(
+async function formatBashToolExecutionError(
   message: string,
   stdout: string,
   stderr: string,
-): string {
-  const parts = [`Command execution failed: ${message}`]
+): Promise<string> {
+  // 状态头同样置于截断范围之外（isError:true 虽有失败信号，但头部 message 也不该被切）
+  const header = `Command execution failed: ${message}`
+  const bodyParts: string[] = []
   const stdoutText = stripOneTrailingNewline(stdout)
   const stderrText = stripOneTrailingNewline(stderr)
   if (stdoutText) {
-    parts.push('stdout:', stdoutText)
+    bodyParts.push('stdout:', stdoutText)
   }
   if (stderrText) {
-    parts.push('stderr:', stderrText)
+    bodyParts.push('stderr:', stderrText)
   }
-  return truncateOutput(parts.join('\n')).trim()
+  const body = bodyParts.join('\n')
+  const truncated = await truncateOutput(body, `${header}\n${body}`)
+  return `${header}\n${truncated}`.trim()
 }
 
 function extractExitCode(error: { code?: string | number | null }): number | null {
@@ -110,48 +183,50 @@ function execCommand(
         env: process.env,
       },
       (error, stdout, stderr) => {
-        const stdoutText = stdout ?? ''
-        const stderrText = stderr ?? ''
+        void (async () => {
+          const stdoutText = stdout ?? ''
+          const stderrText = stderr ?? ''
 
-        if (error !== null) {
-          // Timeout
-          if (error.killed && (error as NodeJS.ErrnoException).code === undefined) {
-            resolve({
-              output: `Command timed out after ${timeoutMs}ms`,
-              isError: true,
-            })
-            return
-          }
+          if (error !== null) {
+            // Timeout
+            if (error.killed && (error as NodeJS.ErrnoException).code === undefined) {
+              resolve({
+                output: `Command timed out after ${timeoutMs}ms`,
+                isError: true,
+              })
+              return
+            }
 
-          // Abort
-          if (error.name === 'AbortError' || signal?.aborted === true) {
-            resolve({
-              output: 'Command aborted',
-              isError: true,
-            })
-            return
-          }
+            // Abort
+            if (error.name === 'AbortError' || signal?.aborted === true) {
+              resolve({
+                output: 'Command aborted',
+                isError: true,
+              })
+              return
+            }
 
-          const exitCode = extractExitCode(error)
-          if (exitCode === null) {
+            const exitCode = extractExitCode(error)
+            if (exitCode === null) {
+              resolve({
+                output: await formatBashToolExecutionError(error.message, stdoutText, stderrText),
+                isError: true,
+              })
+              return
+            }
+
             resolve({
-              output: formatBashToolExecutionError(error.message, stdoutText, stderrText),
-              isError: true,
+              output: await formatBashToolOutput(exitCode, stdoutText, stderrText),
+              isError: false,
             })
             return
           }
 
           resolve({
-            output: formatBashToolOutput(exitCode, stdoutText, stderrText),
+            output: await formatBashToolOutput(0, stdoutText, stderrText),
             isError: false,
           })
-          return
-        }
-
-        resolve({
-          output: formatBashToolOutput(0, stdoutText, stderrText),
-          isError: false,
-        })
+        })()
       },
     )
 
@@ -206,7 +281,7 @@ async function runForegroundWithGrace(
     }
     case 'inline': {
       return {
-        output: formatBashToolOutput(result.exitCode, result.stdout, result.stderr),
+        output: await formatBashToolOutput(result.exitCode, result.stdout, result.stderr),
         isError: false,
       }
     }
@@ -245,6 +320,9 @@ export function createBashTool(
     permissionLevel: 'dangerous',
     call: async (input: Record<string, unknown>, context: ToolCallContext): Promise<ToolCallResult> => {
       const command = input.command as string
+
+      // 首次调用时惰性清理 24h 前的截断落盘文件
+      cleanupToolOutputsOnce()
 
       // 軟攔截：命令中直接引用 channel-configs 路徑
       if (containsSensitivePath(command)) {

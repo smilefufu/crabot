@@ -1,13 +1,14 @@
 /**
  * Crab-Memory MCP Server — Agent 长期记忆能力
  *
- * 两组工具：
- * - 简化工具组（Worker 普通对话用）：store_memory / search_memory / set_scene_profile / get_memory_detail
+ * 两组工具（共 18 个，按任务 profile 分组注册，见 resolveMemoryToolProfile）：
+ * - A 组 6 个（Worker 普通对话可见）：store_memory / search_memory / get_memory_detail /
+ *   set_scene_profile / get_scene_profile / delete_scene_profile
  *   importance / brief 等字段自动推断，最少参数即可落盘
- * - 原生 RPC 工具组（反思 SKILL 用）：quick_capture / search_long_term / update_long_term /
- *   delete_memory / run_maintenance / get_memory_stats / get_evolution_mode / set_evolution_mode /
- *   get_scene_profile / list_recent / promote_to_rule
- *   字段精细可控，工具名与 Memory RPC 一一对应
+ * - B 组 12 个（反思/整理/重建类任务可见）：quick_capture / search_long_term /
+ *   update_long_term / delete_memory / list_recent / list_entries / set_memory_links /
+ *   run_maintenance / get_stats / get_evolution_mode / set_evolution_mode / promote_to_rule
+ *   字段精细可控，工具名与 Memory RPC 一一对应，供反思/整理/重建 SKILL 使用
  *
  * @see crabot-docs/protocols/protocol-memory.md
  */
@@ -93,6 +94,62 @@ export async function resolveSceneAnchorLabel(params: {
 
   const existingLabel = result?.profile?.label?.trim()
   return existingLabel || defaultSceneProfileLabel(params.scene)
+}
+
+// ============================================================================
+// 工具分组 profile（同构于 crab-messaging.ts 的 resolveMessagingToolProfile）
+// ============================================================================
+
+export type MemoryToolProfile =
+  | 'conversation'
+  /** 全量 18 个：daily_reflection 反思 / memory_curate 整理 / memory_rebuild 重建任务 */
+  | 'daily_reflection'
+
+/**
+ * A 组：Worker 普通对话可见的 6 个简化工具（未加 mcp__ 前缀的工具名）。
+ * 其余 12 个（B 组）仅在反思/整理/重建类任务中注册。
+ */
+export const CRAB_MEMORY_CONVERSATION_TOOLS: ReadonlySet<string> = new Set([
+  'store_memory',
+  'search_memory',
+  'get_memory_detail',
+  'set_scene_profile',
+  'get_scene_profile',
+  'delete_scene_profile',
+])
+
+/** buildToolsDynamic 转换后的工具名前缀（mcp__<server>__<tool>） */
+const CRAB_MEMORY_TOOL_PREFIX = 'mcp__crab-memory__'
+
+/**
+ * 按任务用途决定 crab-memory 工具注册范围（不再要求 trigger_type==='scheduled'）：
+ * - task_type ∈ {daily_reflection, memory_curate} 或 tags 含 'memory_rebuild' → 全量 18 个
+ *   （反思/整理/重建 SKILL 需要 B 组精细工具：list_entries / delete_memory /
+ *    update_long_term / set_memory_links 等）
+ * - 其他所有任务 → 仅 A 组 6 个
+ * memory_maintenance 任务不经 Worker（scheduled-task-runner 直接 RPC），不受此影响。
+ */
+export function resolveMemoryToolProfile(
+  taskCtx: { taskType?: string; tags?: readonly string[] } | null,
+): MemoryToolProfile {
+  if (
+    taskCtx?.taskType === 'daily_reflection'
+    || taskCtx?.taskType === 'memory_curate'
+    || taskCtx?.tags?.includes('memory_rebuild') === true
+  ) {
+    return 'daily_reflection'
+  }
+  return 'conversation'
+}
+
+/** 按 profile 过滤已转换的 crab-memory 工具列表（conversation → 仅 A 组） */
+export function filterMemoryToolsByProfile<T extends { name: string }>(
+  tools: ReadonlyArray<T>,
+  profile: MemoryToolProfile,
+): T[] {
+  if (profile === 'daily_reflection') return [...tools]
+  return tools.filter((t) =>
+    CRAB_MEMORY_CONVERSATION_TOOLS.has(t.name.slice(CRAB_MEMORY_TOOL_PREFIX.length)))
 }
 
 // ============================================================================
@@ -421,7 +478,7 @@ export function createCrabMemoryServer(
   // ============================================================================
   // 这一组工具直接透传到 Memory 后端 RPC，工具名与 RPC 一一对应，
   // 供 daily-reflection / memory-curate 等内置 SKILL 在反思 / 整理流程中精细操作。
-  // 与上面 4 个 Worker 简化工具的区别：参数完整、字段精细可控、不做隐式推断。
+  // 与 A 组 Worker 简化工具的区别：参数完整、字段精细可控、不做隐式推断。
   // 详见 protocol-memory.md。
 
   // 透传 helper：统一错误返回格式

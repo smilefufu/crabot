@@ -51,5 +51,8 @@ export interface RegistryFile {
 
 export const BG_ENTITY_LIMIT_PER_OWNER = 20
 export const BG_ENTITY_GC_AFTER_DAYS = 7
-export const BG_OUTPUT_MAX_BYTES = 100_000
+// Output 工具单次读取上限。必须低于编排层兜底（tool-orchestration MAX_TOOL_OUTPUT_BYTES=100KB）
+// 并留出 status header + from_offset 提示的包装余量——否则 chunk 尾部会被兜底切掉，
+// 而游标已推进，被切字节静默丢失。
+export const BG_OUTPUT_MAX_BYTES = 95_000
 export const BG_TRANSIENT_RING_BUFFER_BYTES = 200_000

@@ -441,6 +441,12 @@ export interface EngineOptions {
    * 由父 agent 根据 totalTurns + 空 output 判断是否拆任务 / 上调 budget。
    */
   readonly disableCompaction?: boolean
+
+  /**
+   * 当前模型的 context window（token 数），来自 provider 模型配置的 context_window。
+   * 缺失时 engine 回退到内置默认 200000。仅影响 compaction 触发阈值，不影响请求参数。
+   */
+  readonly contextWindowTokens?: number
 }
 
 export interface HumanMessageQueueLike {

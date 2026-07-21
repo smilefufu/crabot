@@ -373,4 +373,41 @@ describe('ModelProviderManager', () => {
       expect(manager.getProvider('provider-import-3')?.name).toBe('Updated')
     })
   })
+
+  describe('buildConnectionInfo', () => {
+    it('透传模型级可选字段 max_tokens / supports_vision / context_window', async () => {
+      const provider = await manager.createProvider({
+        name: 'Conn Info Provider',
+        type: 'manual',
+        format: 'openai',
+        endpoint: 'http://localhost:11434/v1',
+        api_key: 'test-key',
+        models: [
+          {
+            model_id: 'full-model',
+            display_name: 'Full Model',
+            type: 'llm',
+            max_tokens: 8192,
+            supports_vision: true,
+            context_window: 131072,
+          },
+          {
+            model_id: 'bare-model',
+            display_name: 'Bare Model',
+            type: 'llm',
+          },
+        ],
+      })
+
+      const full = await manager.buildConnectionInfo(provider.id, 'full-model')
+      expect(full.max_tokens).toBe(8192)
+      expect(full.supports_vision).toBe(true)
+      expect(full.context_window).toBe(131072)
+
+      // 未配置 context_window 的模型不应带出该字段（agent 侧走 200000 回退）
+      const bare = await manager.buildConnectionInfo(provider.id, 'bare-model')
+      expect(bare.context_window).toBeUndefined()
+      expect('context_window' in bare).toBe(false)
+    })
+  })
 })

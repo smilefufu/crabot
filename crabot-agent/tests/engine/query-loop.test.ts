@@ -1124,3 +1124,180 @@ describe('runEngine onAfterCompaction hook', () => {
     expect(typeof opts.onAfterCompaction).toBe('function')
   })
 })
+
+// spec 2026-07-21 改动 3：compaction 真实 usage 触发
+describe('runEngine compaction triggered by real usage', () => {
+  const readTool = defineTool({
+    name: 'Read',
+    description: 'Read a file',
+    inputSchema: { type: 'object', properties: { path: { type: 'string' } } },
+    isReadOnly: true,
+    call: async () => ({ output: 'file content', isError: false }),
+  })
+
+  function toolUseResponseWithUsage(
+    usage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheCreationTokens?: number },
+  ): ReadonlyArray<StreamChunk> {
+    return [
+      { type: 'message_start', messageId: 'msg-1' },
+      { type: 'tool_use_start', id: 'tu-1', name: 'Read' },
+      { type: 'tool_use_delta', id: 'tu-1', inputJson: JSON.stringify({ path: '/tmp/a' }) },
+      { type: 'tool_use_end', id: 'tu-1' },
+      { type: 'message_end', stopReason: 'tool_use', usage },
+    ]
+  }
+
+  function textResponseNoUsage(text: string): ReadonlyArray<StreamChunk> {
+    return [
+      { type: 'message_start', messageId: 'msg-1' },
+      { type: 'text_delta', text },
+      { type: 'message_end', stopReason: 'end_turn' },
+    ]
+  }
+
+  // 构造 5 轮 tool_use 历史（消息数 11 > keepRecentMessages=6，compaction 会真正执行），
+  // 前 4 轮小 usage、第 5 轮带指定 usage；之后接 compaction 摘要响应 + 主轮 end_turn 响应。
+  function historyThenDone(
+    lastUsage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheCreationTokens?: number },
+  ): ReadonlyArray<ReadonlyArray<StreamChunk>> {
+    const small = { inputTokens: 10, outputTokens: 10 }
+    return [
+      toolUseResponseWithUsage(small),
+      toolUseResponseWithUsage(small),
+      toolUseResponseWithUsage(small),
+      toolUseResponseWithUsage(small),
+      toolUseResponseWithUsage(lastUsage),
+      textResponse('对话摘要'),  // compaction 摘要 LLM 调用
+      textResponse('done'),      // 主轮 6
+    ]
+  }
+
+  it('triggers compaction when observed prompt tokens exceed threshold', async () => {
+    // contextWindowTokens=100 → 阈值 80。第 5 轮 usage 观测 90 >= 80 → 第 6 轮前触发压缩。
+    const adapter = mockAdapter(historyThenDone({ inputTokens: 90, outputTokens: 10 }))
+    const onCompactionStart = vi.fn()
+    const result = await runEngine({
+      prompt: 'hi',
+      adapter,
+      options: baseOptions({
+        tools: [readTool],
+        contextWindowTokens: 100,
+        onCompactionStart,
+      }),
+    })
+
+    expect(onCompactionStart).toHaveBeenCalledTimes(1)
+    expect(result.outcome).toBe('completed')
+    expect(result.finalText).toBe('done')
+    // compaction 后 messages 被改写：首条钉住 + 摘要 + recent
+    expect(
+      result.finalMessages.some(
+        (m) => m.role === 'user' && typeof m.content === 'string' && m.content.includes('[Earlier conversation summary]'),
+      ),
+    ).toBe(true)
+  })
+
+  it('counts cacheReadTokens and cacheCreationTokens into the observed prompt size', async () => {
+    // inputTokens=10 本身远低于阈值 80，但 10+60+20=90 >= 80 → 触发
+    const adapter = mockAdapter(historyThenDone({ inputTokens: 10, outputTokens: 10, cacheReadTokens: 60, cacheCreationTokens: 20 }))
+    const onCompactionStart = vi.fn()
+    const result = await runEngine({
+      prompt: 'hi',
+      adapter,
+      options: baseOptions({
+        tools: [readTool],
+        contextWindowTokens: 100,
+        onCompactionStart,
+      }),
+    })
+
+    expect(onCompactionStart).toHaveBeenCalledTimes(1)
+    expect(result.outcome).toBe('completed')
+    expect(result.finalText).toBe('done')
+  })
+
+  it('does not trigger compaction when observed tokens stay under threshold', async () => {
+    const adapter = mockAdapter([
+      toolUseResponseWithUsage({ inputTokens: 10, outputTokens: 10 }),
+      textResponse('done'),
+    ])
+    const onCompactionStart = vi.fn()
+    const result = await runEngine({
+      prompt: 'hi',
+      adapter,
+      options: baseOptions({
+        tools: [readTool],
+        contextWindowTokens: 100,
+        onCompactionStart,
+      }),
+    })
+
+    expect(onCompactionStart).not.toHaveBeenCalled()
+    expect(result.outcome).toBe('completed')
+    expect(result.finalText).toBe('done')
+  })
+
+  it('falls back to estimation including system prompt when usage is missing', async () => {
+    // usage 缺失 → 估算路径。systemPrompt 400 chars / 4 = 100 >= 阈值 80 → 首轮前就触发压缩。
+    // 消息数 1 <= keepRecentMessages，compaction 提前返回、不调摘要 LLM，
+    // 所以 adapter 第一个响应就是主轮响应。
+    const adapter = mockAdapter([textResponseNoUsage('done')])
+    const onCompactionStart = vi.fn()
+    const result = await runEngine({
+      prompt: 'hi',
+      adapter,
+      options: baseOptions({
+        systemPrompt: 's'.repeat(400),
+        contextWindowTokens: 100,
+        onCompactionStart,
+      }),
+    })
+
+    expect(onCompactionStart).toHaveBeenCalledTimes(1)
+    expect(result.outcome).toBe('completed')
+    expect(result.finalText).toBe('done')
+  })
+
+  it('falls back to estimation including tools schema when usage is missing', async () => {
+    // 工具 description 320 chars / 4 = 80 >= 阈值 80 → 触发（旧实现不计 tools，不会触发）
+    const bigTool = defineTool({
+      name: 'BigTool',
+      description: 'd'.repeat(320),
+      inputSchema: { type: 'object', properties: {} },
+      isReadOnly: true,
+      call: async () => ({ output: 'ok', isError: false }),
+    })
+    const adapter = mockAdapter([textResponseNoUsage('done')])
+    const onCompactionStart = vi.fn()
+    const result = await runEngine({
+      prompt: 'hi',
+      adapter,
+      options: baseOptions({
+        tools: [bigTool],
+        contextWindowTokens: 100,
+        onCompactionStart,
+      }),
+    })
+
+    expect(onCompactionStart).toHaveBeenCalledTimes(1)
+    expect(result.outcome).toBe('completed')
+    expect(result.finalText).toBe('done')
+  })
+
+  it('does not trigger estimation fallback when system prompt and tools are small', async () => {
+    const adapter = mockAdapter([textResponseNoUsage('done')])
+    const onCompactionStart = vi.fn()
+    const result = await runEngine({
+      prompt: 'hi',
+      adapter,
+      options: baseOptions({
+        tools: [readTool],
+        contextWindowTokens: 100,
+        onCompactionStart,
+      }),
+    })
+
+    expect(onCompactionStart).not.toHaveBeenCalled()
+    expect(result.outcome).toBe('completed')
+  })
+})

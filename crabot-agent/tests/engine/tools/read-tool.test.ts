@@ -52,6 +52,32 @@ describe('createReadTool', () => {
     expect(result.output).not.toContain('6\tline 6')
   })
 
+  it('负数 offset 归一化为 0（与流式路径行为一致，不再从尾部数）', async () => {
+    const filePath = path.join(tmpDir, 'neg-offset.txt')
+    const lines = Array.from({ length: 10 }, (_, i) => `line ${i + 1}`)
+    await fs.writeFile(filePath, lines.join('\n'))
+
+    const result = await tool.call({ file_path: filePath, offset: -3, limit: 2 }, {})
+    expect(result.isError).toBe(false)
+    // 归一化为 offset=0 → 从第 1 行开始，而非 slice(-3) 的尾部 3 行
+    expect(result.output).toContain('1\tline 1')
+    expect(result.output).toContain('2\tline 2')
+    expect(result.output).not.toContain('line 10')
+  })
+
+  it('小数 offset 归一化为向下取整的整数', async () => {
+    const filePath = path.join(tmpDir, 'frac-offset.txt')
+    const lines = Array.from({ length: 10 }, (_, i) => `line ${i + 1}`)
+    await fs.writeFile(filePath, lines.join('\n'))
+
+    const result = await tool.call({ file_path: filePath, offset: 3.7, limit: 2 }, {})
+    expect(result.isError).toBe(false)
+    // floor(3.7)=3 → 从第 4 行开始（流式与非流式路径一致）
+    expect(result.output).toContain('4\tline 4')
+    expect(result.output).toContain('5\tline 5')
+    expect(result.output).not.toContain('3\tline 3')
+  })
+
   it('returns error for non-existent file', async () => {
     const filePath = path.join(tmpDir, 'does-not-exist.txt')
     const result = await tool.call({ file_path: filePath }, {})
@@ -90,7 +116,7 @@ describe('createReadTool', () => {
     expect(result.output).toContain('1\tcontent here')
   })
 
-  it('truncates files larger than 500KB', async () => {
+  it('caps a single response at 50KB for large files', async () => {
     const filePath = path.join(tmpDir, 'large.txt')
     // Create a file slightly over 500KB
     const lineContent = 'x'.repeat(100) + '\n'
@@ -100,7 +126,72 @@ describe('createReadTool', () => {
 
     const result = await tool.call({ file_path: filePath }, {})
     expect(result.isError).toBe(false)
+    // 单次返回字节上限 50KB（截断标记除外，留余量）
+    expect(Buffer.byteLength(result.output, 'utf8')).toBeLessThanOrEqual(50 * 1024 + 200)
+    // 截断提示引导 offset 续读
     expect(result.output).toContain('[...truncated')
+    expect(result.output).toContain('offset')
+  })
+
+  it('reads the tail of a >500KB file via offset (no more 500KB hard cap)', async () => {
+    const filePath = path.join(tmpDir, 'paged.txt')
+    // 8000 行 × ~90B ≈ 700KB，超过旧的 500KB 硬上限
+    const lines = Array.from({ length: 8000 }, (_, i) => `line-${i + 1}-${'y'.repeat(80)}`)
+    await fs.writeFile(filePath, lines.join('\n') + '\n')
+
+    const result = await tool.call({ file_path: filePath, offset: 7900, limit: 100 }, {})
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('8000\tline-8000-')
+    expect(result.output).toContain('7901\tline-7901-')
+    // 尾部完整读到了，不是截断视图
+    expect(result.output).not.toContain('[...truncated')
+  })
+
+  it('单行超 50KB 时降级为行内截断（不返回空内容，可 bash 续读）', async () => {
+    const filePath = path.join(tmpDir, 'minified.js')
+    const bigLine = 'a'.repeat(60 * 1024) // 单行 60KB，超 MAX_OUTPUT_BYTES
+    await fs.writeFile(filePath, bigLine + '\n' + 'second line\n')
+
+    const result = await tool.call({ file_path: filePath }, {})
+    expect(result.isError).toBe(false)
+    // 行内容真的返回了前 ~50KB，而不是空
+    expect(result.output).toContain(`1\t${'a'.repeat(100)}`)
+    expect(result.output).toContain('[...line truncated')
+    expect(result.output).toContain('60-byte line'.replace('60', String(60 * 1024)))
+    // 行内续读提示指向正确的行号和文件
+    expect(result.output).toContain(`sed -n '1p' '${filePath}'`)
+  })
+
+  it('流式路径下单行超 50KB 同样降级为行内截断', async () => {
+    const filePath = path.join(tmpDir, 'huge-longline.log')
+    // 首行 60KB + 13MB filler（走流式路径），第一行就超单次上限
+    const bigLine = 'b'.repeat(60 * 1024)
+    const filler = Array.from({ length: 150000 }, (_, i) => `row-${i}-${'z'.repeat(80)}`)
+    await fs.writeFile(filePath, [bigLine, ...filler].join('\n') + '\n')
+
+    const result = await tool.call({ file_path: filePath, limit: 10 }, {})
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('b'.repeat(100))
+    expect(result.output).toContain('[...line truncated')
+    expect(result.output).toContain(`sed -n '1p' '${filePath}'`)
+  })
+
+  it('streams >10MB files line-by-line and can reach the tail via offset', async () => {
+    const filePath = path.join(tmpDir, 'huge.txt')
+    // 150000 行 × ~90B ≈ 13MB，走流式按行定位路径
+    const lines = Array.from({ length: 150000 }, (_, i) => `row-${i + 1}-${'z'.repeat(80)}`)
+    await fs.writeFile(filePath, lines.join('\n') + '\n')
+
+    const tail = await tool.call({ file_path: filePath, offset: 149900, limit: 100 }, {})
+    expect(tail.isError).toBe(false)
+    expect(tail.output).toContain('150000\trow-150000-')
+    expect(tail.output).not.toContain('[...truncated')
+
+    // 从头读同样受 50KB 单次上限约束
+    const head = await tool.call({ file_path: filePath }, {})
+    expect(head.isError).toBe(false)
+    expect(Buffer.byteLength(head.output, 'utf8')).toBeLessThanOrEqual(50 * 1024 + 200)
+    expect(head.output).toContain('[...truncated')
   })
 
   it('returns image data for image files', async () => {
@@ -210,5 +301,21 @@ describe('createReadTool — read dedup', () => {
     expect(r1.output).toContain('1\thello')
     expect(r2.output).toContain('1\thello')
     expect(r2.output).not.toBe(FILE_UNCHANGED_STUB)
+  })
+
+  it('byte-capped (partial) reads never stub and do not poison the cache', async () => {
+    const filePath = path.join(tmpDir, 'big.txt')
+    // ~264KB，默认 limit 下超 50KB 单次上限 → 部分视图
+    const lines = Array.from({ length: 3000 }, (_, i) => `row-${i + 1}-${'q'.repeat(80)}`)
+    await fs.writeFile(filePath, lines.join('\n') + '\n')
+
+    const first = await tool.call({ file_path: filePath }, {})
+    expect(first.output).toContain('[...truncated')
+
+    // 部分视图不进 dedup 缓存：第二次相同读取仍返回内容，不是 stub
+    const second = await tool.call({ file_path: filePath }, {})
+    expect(second.output).not.toBe(FILE_UNCHANGED_STUB)
+    expect(second.output).toContain('[...truncated')
+    expect(second.output).toContain('1\trow-1-')
   })
 })

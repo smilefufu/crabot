@@ -73,17 +73,6 @@ describe('createBashTool', () => {
     expect(result.output).toMatch(/Command execution failed|ENOENT/)
   })
 
-  it('truncates large output', async () => {
-    // Generate output > 100000 chars
-    const result = await tool.call(
-      { command: 'python3 -c "print(\'x\' * 120000)"' },
-      {},
-    )
-    expect(result.isError).toBe(false)
-    expect(result.output).toContain('[...truncated...]')
-    expect(result.output.length).toBeLessThanOrEqual(100000 + 100) // some margin for the truncation marker
-  })
-
   it('respects abort signal', async () => {
     const controller = new AbortController()
     // Abort immediately
@@ -92,6 +81,93 @@ describe('createBashTool', () => {
     const context: ToolCallContext = { abortSignal: controller.signal }
     const result = await tool.call({ command: 'sleep 10' }, context)
     expect(result.isError).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 输出截断：>50K 保留尾部 + 完整 stdout/stderr 落盘 tmp/tool-outputs/，
+// 返回文本附全文路径；≤50K 行为不变、不落盘。
+// ---------------------------------------------------------------------------
+
+describe('createBashTool — 输出截断与全文落盘', () => {
+  let tmpDataDir: string
+  let tool: ReturnType<typeof createBashTool>
+  const cwd = os.tmpdir()
+
+  beforeEach(() => {
+    tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bash-trunc-test-'))
+    // 落盘目录从 CRABOT_AGENT_DATA_DIR 推导（优先级高于 DATA_DIR）
+    process.env.CRABOT_AGENT_DATA_DIR = tmpDataDir
+    tool = createBashTool(() => cwd)
+  })
+
+  afterEach(() => {
+    fs.rmSync(tmpDataDir, { recursive: true, force: true })
+    delete process.env.CRABOT_AGENT_DATA_DIR
+  })
+
+  it('>50K 输出：保留尾部，全文落盘且路径出现在返回文本中', async () => {
+    const result = await tool.call(
+      { command: `echo HEAD_MARKER; printf 'x%.0s' {1..60000}; echo; echo TAIL_MARKER` },
+      {} as ToolCallContext,
+    )
+    expect(result.isError).toBe(false)
+    // 尾部保留：结尾的标记在，开头的标记被截掉
+    expect(result.output).toContain('TAIL_MARKER')
+    expect(result.output).not.toContain('HEAD_MARKER')
+    expect(result.output).toContain('[Showing last')
+    expect(result.output).toContain('bytes of')
+
+    // 返回文本带全文路径，落盘文件包含被截掉的头部
+    const match = result.output.match(/Full output: ([^\]]+)\]/)
+    expect(match).not.toBeNull()
+    const fullPath = match![1]
+    expect(fullPath.startsWith(path.join(tmpDataDir, 'tmp', 'tool-outputs'))).toBe(true)
+    const full = fs.readFileSync(fullPath, 'utf8')
+    expect(full).toContain('HEAD_MARKER')
+    expect(full).toContain('TAIL_MARKER')
+  })
+
+  it('CJK 多字节输出：按字节截断（不切字符），自截产物恒 < 编排层 100KB 兜底', async () => {
+    // 20000 个"中" = 60000 字节 > 50000 字节阈值；按字符口径会保留 ~150KB 字节
+    const result = await tool.call(
+      { command: `printf '中%.0s' {1..20000}; echo; echo CJK_TAIL` },
+      {} as ToolCallContext,
+    )
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('CJK_TAIL')
+    expect(result.output).toContain('[Showing last')
+    // 尾部 hint 带落盘路径，且就在返回文本末尾（不会被编排层二次截断切掉）
+    expect(result.output).toMatch(/Full output: [^\]]+\]\s*$/)
+    // 不出现 UTF-8 截断产生的替换字符
+    expect(result.output).not.toContain('�')
+    // 关键不变量：自截产物字节数 < 编排层 100KB 兜底阈值
+    expect(Buffer.byteLength(result.output, 'utf8')).toBeLessThan(100 * 1024)
+  })
+
+  it('>50K 失败输出：exit_code 状态头不被尾部截断切掉', async () => {
+    // 非零退出 + 超 50KB 输出：exit_code 是模型判断成败的唯一信号（isError 为 false）
+    const result = await tool.call(
+      { command: `printf 'x%.0s' {1..60000}; echo; echo TAIL_MARKER; exit 3` },
+      {} as ToolCallContext,
+    )
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('[Showing last')
+    // 状态头必须在截断范围之外
+    expect(result.output.startsWith('exit_code: 3\n')).toBe(true)
+    // 落盘全文也带状态头
+    const match = result.output.match(/Full output: ([^\]]+)\]/)
+    const full = fs.readFileSync(match![1], 'utf8')
+    expect(full.startsWith('exit_code: 3\n')).toBe(true)
+  })
+
+  it('≤50K 输出：行为不变，不落盘', async () => {
+    const result = await tool.call({ command: 'echo small-output' }, {} as ToolCallContext)
+    expect(result.isError).toBe(false)
+    expect(result.output).toContain('small-output')
+    expect(result.output).not.toContain('Full output:')
+    expect(result.output).not.toContain('Showing last')
+    expect(fs.existsSync(path.join(tmpDataDir, 'tmp', 'tool-outputs'))).toBe(false)
   })
 })
 

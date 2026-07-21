@@ -169,4 +169,42 @@ describe('forkEngine', () => {
 
     runEngineSpy.mockRestore()
   })
+
+  it('passes contextWindowTokens to engine options when provided', async () => {
+    const runEngineSpy = vi.spyOn(
+      await import('../../src/engine/query-loop'),
+      'runEngine'
+    )
+    runEngineSpy.mockResolvedValue({
+      outcome: 'completed',
+      finalText: 'done',
+      totalTurns: 1,
+      usage: { inputTokens: 10, outputTokens: 5 },
+    })
+
+    const adapter = mockAdapter([])
+
+    // 传了 context_window → 透传到 engine options
+    await forkEngine({
+      prompt: 'Hi',
+      adapter,
+      model: 'test-model',
+      systemPrompt: 'You are a sub-agent.',
+      tools: [],
+      contextWindowTokens: 131072,
+    })
+    expect(runEngineSpy.mock.calls[0][0].options.contextWindowTokens).toBe(131072)
+
+    // 未传 → options 不带该字段（engine 走 200000 内置回退）
+    await forkEngine({
+      prompt: 'Hi',
+      adapter,
+      model: 'test-model',
+      systemPrompt: 'You are a sub-agent.',
+      tools: [],
+    })
+    expect(runEngineSpy.mock.calls[1][0].options.contextWindowTokens).toBeUndefined()
+
+    runEngineSpy.mockRestore()
+  })
 })

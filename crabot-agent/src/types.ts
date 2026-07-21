@@ -690,6 +690,8 @@ export interface LLMConnectionInfo {
   format: 'anthropic' | 'openai' | 'gemini' | 'openai-responses'
   max_tokens?: number
   supports_vision?: boolean
+  /** 模型上下文窗口（token 数）；用于 compaction 触发阈值，缺失时 engine 回退内置默认 200000 */
+  context_window?: number
   /** ChatGPT OAuth 账号 ID（仅 openai-responses + ChatGPT 订阅需要） */
   account_id?: string
 }
@@ -760,6 +762,8 @@ export interface ExecuteTaskParams {
     priority: string
     plan?: string
     task_type?: string
+    /** 任务标签（如 memory_rebuild）；agent 侧按 tags 做工具分组等任务用途判定。 */
+    tags?: string[]
     /** 任务来源信息。Schedule 路径由 ScheduledTaskRunner 填入 trigger_type='scheduled'；
      *  trigger 路径合成 task 可能显式填入 trigger_type='message'；旧调用不填时也视为 'message'。 */
     source?: {

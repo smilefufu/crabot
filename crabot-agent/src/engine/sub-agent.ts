@@ -28,6 +28,8 @@ export interface ForkEngineParams {
   readonly onTurn?: (event: EngineTurnEvent) => void
   /** Whether the sub-agent's model supports vision (image inputs) */
   readonly supportsVision?: boolean
+  /** 模型 context_window；当前 subagent disableCompaction=true 时不生效，仅为语义完整透传 */
+  readonly contextWindowTokens?: number
   readonly humanMessageQueue?: HumanMessageQueueLike
   readonly hookRegistry?: import('../hooks/hook-registry').HookRegistry
   readonly lspManager?: import('../hooks/types').LspManagerLike
@@ -85,6 +87,7 @@ export async function forkEngine(params: ForkEngineParams): Promise<ForkEngineRe
       abortSignal: params.abortSignal,
       onTurn: params.onTurn,
       supportsVision: params.supportsVision,
+      ...(params.contextWindowTokens !== undefined ? { contextWindowTokens: params.contextWindowTokens } : {}),
       humanMessageQueue: params.humanMessageQueue,
       hookRegistry: params.hookRegistry,
       lspManager: params.lspManager,

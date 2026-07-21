@@ -378,6 +378,7 @@ export class UnifiedAgent extends ModuleBase {
       format: connInfo.format,
       supportsVision: connInfo.supports_vision,
       ...(connInfo.max_tokens !== undefined ? { maxTokens: connInfo.max_tokens } : {}),
+      ...(connInfo.context_window !== undefined ? { contextWindow: connInfo.context_window } : {}),
       env: {
         LLM_BASE_URL: connInfo.endpoint,
         LLM_API_KEY: connInfo.apikey || 'dummy-key',
@@ -1872,6 +1873,8 @@ export class UnifiedAgent extends ModuleBase {
             title: string
             priority: string
             plan?: string
+            task_type?: string
+            tags?: string[]
             messages?: Array<{ content: string }>
           }
         }
@@ -1898,6 +1901,8 @@ export class UnifiedAgent extends ModuleBase {
           title: task.title,
           priority: task.priority,
           plan: task.plan,
+          task_type: task.task_type,
+          tags: task.tags,
           description,
         },
         workerContext,

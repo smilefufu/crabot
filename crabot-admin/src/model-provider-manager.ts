@@ -268,9 +268,11 @@ export function parseOpenAIModels(raw: unknown[]): ModelInfo[] {
 
     const capabilities = item.capabilities as { vision?: boolean } | undefined
     const modalities = Array.isArray(item.input) ? (item.input as unknown[]) : []
-    // 仅 llm 认视觉；image 模型的 input=image 是"生图输入"不是"看图"，不置 supports_vision
+    // 仅 llm 认视觉；image 模型的 input=image 是"生图输入"不是"看图"，不置 supports_vision。
+    // supports_image_in：kimi coding 端点 /v1/models 的字段（非 OpenAI 标准），同为布尔。
     const supportsVision =
-      type === 'llm' && (capabilities?.vision === true || modalities.includes('image'))
+      type === 'llm' &&
+      (capabilities?.vision === true || modalities.includes('image') || item.supports_image_in === true)
 
     models.push({
       model_id: modelId,
@@ -922,6 +924,7 @@ export class ModelProviderManager {
       ...base,
       ...(model.max_tokens !== undefined && { max_tokens: model.max_tokens }),
       ...(model.supports_vision && { supports_vision: true }),
+      ...(model.context_window !== undefined && { context_window: model.context_window }),
     } as LLMConnectionInfo
   }
 

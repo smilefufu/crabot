@@ -37,6 +37,30 @@ describe('buildDelegateTaskDescription', () => {
     expect(typeof desc).toBe('string')
   })
 
+  it('when_to_use 超过 300 字符时截断并加省略标记', () => {
+    const longWhenToUse = 'x'.repeat(400)
+    const desc = buildDelegateTaskDescription([fakeSubAgent('alpha', longWhenToUse)])
+    // 截断到 300 字符 + 省略标记，400 个 x 不再完整出现
+    expect(desc).not.toContain(longWhenToUse)
+    expect(desc).toContain(`${'x'.repeat(300)}…[truncated]`)
+  })
+
+  it('when_to_use 不超过 300 字符时保持原文', () => {
+    const exact = 'y'.repeat(300)
+    const desc = buildDelegateTaskDescription([fakeSubAgent('beta', exact)])
+    expect(desc).toContain(exact)
+    expect(desc).not.toContain('[truncated]')
+  })
+
+  it('截断点落在代理对中间时去掉 lone high surrogate，不产生非法字符', () => {
+    // 299 个 a + 😀（\uD83D\uDE00）→ slice(0,300) 末尾恰是 lone high surrogate
+    const whenToUse = `${'a'.repeat(299)}😀${'b'.repeat(200)}`
+    const desc = buildDelegateTaskDescription([fakeSubAgent('emoji', whenToUse)])
+    // lone high surrogate 被去掉：截断产物是 299 个 a + 省略标记
+    expect(desc).toContain(`${'a'.repeat(299)}…[truncated]`)
+    expect(desc).not.toContain('\uD83D')
+  })
+
   it('含使用提示（不继承父对话历史 / 不能再委派下一层）', () => {
     const desc = buildDelegateTaskDescription([fakeSubAgent('x')])
     expect(desc).toContain('不继承父对话历史')

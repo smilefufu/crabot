@@ -2,7 +2,7 @@
  * delegate_task 工具
  *
  * worker 工具表里唯一的 subagent 入口。
- * - description 含 <available_subagents> 段 + 每个 subagent 的 when_to_use 原文
+ * - description 含 <available_subagents> 段 + 每个 subagent 的 when_to_use（截断到 300 字符）
  * - inputSchema.subagent_type.enum 限制为已 enabled 的 subagent name
  * - call: 按 subagent_type 查表 → 调 runSubAgent（caller 提供）
  *
@@ -40,8 +40,24 @@ export type RunSubAgentFn = (
 
 /**
  * 组装 delegate_task 工具的 description。
- * 内含 <available_subagents> 列表 + 每个 subagent 的 when_to_use 原文。
+ * 内含 <available_subagents> 列表 + 每个 subagent 的 when_to_use（截断到 300 字符）。
  */
+
+/** when_to_use 内嵌全文的字符上限：超出部分截断并加省略标记，控制 description 体积 */
+const WHEN_TO_USE_MAX_CHARS = 300
+
+function truncateWhenToUse(text: string): string {
+  if (text.length <= WHEN_TO_USE_MAX_CHARS) return text
+  let cut = text.slice(0, WHEN_TO_USE_MAX_CHARS)
+  // 末尾若落在 lone high surrogate（代理对中间被切开）则去掉该码元，
+  // 避免 description 里出现非法字符
+  const lastCode = cut.charCodeAt(cut.length - 1)
+  if (lastCode >= 0xd800 && lastCode <= 0xdbff) {
+    cut = cut.slice(0, -1)
+  }
+  return `${cut}…[truncated]`
+}
+
 export function buildDelegateTaskDescription(subAgents: ReadonlyArray<SubAgentConfig>): string {
   const lines: string[] = [
     'Launch a specialized subagent to autonomously handle a task that benefits from a focused expert + 独立上下文。',
@@ -61,7 +77,7 @@ export function buildDelegateTaskDescription(subAgents: ReadonlyArray<SubAgentCo
   if (subAgents.length > 0) {
     lines.push('', 'When to use each subagent type:')
     for (const s of subAgents) {
-      lines.push('', `=== ${s.name} ===`, s.when_to_use)
+      lines.push('', `=== ${s.name} ===`, truncateWhenToUse(s.when_to_use))
     }
   }
 
