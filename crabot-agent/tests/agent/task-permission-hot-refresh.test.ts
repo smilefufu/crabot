@@ -217,6 +217,22 @@ describe('AgentHandler 任务权限持有者', () => {
     expect(() => h.updateTaskPermissions('nope', FRESH_PERMS)).not.toThrow()
     h.dispose()
   })
+
+  it('scheduled 任务（带 target_session、无 sender_friend）不返回 principal（review #38 回归）', () => {
+    const h = makeHandler()
+    internalsOf(h).activeTasks.set('sched-1', {
+      resolvedPermissions: OLD_PERMS,
+      resumeWorkerContext: {
+        resolved_permissions: OLD_PERMS,
+        // 带 target_session 的 scheduled 任务也有 task_origin —— 只判 session 会误判
+        task_origin: { channel_id: 'c1', session_id: 'group-s1', session_type: 'group' },
+      },
+      triggerType: 'scheduled',
+    } as never)
+
+    expect(h.getTaskPrincipal('sched-1')).toBeNull()
+    h.dispose()
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -364,5 +380,34 @@ describe('UnifiedAgent resumeTaskInternal（resume 触发点）', () => {
       context: { resolved_permissions?: ResolvedPermissions }
     }
     expect(payload.context.resolved_permissions).toEqual(OLD_PERMS)
+  })
+
+  it('scheduled 任务（带 target_session）resume 不重新解析，保留 creator 下发的 checkpoint 权限（review #38 回归）', async () => {
+    const rpcCall = vi.fn().mockImplementation(async (_port: unknown, method: string) => {
+      if (method === 'get_task') {
+        return {
+          task: {
+            id: 'task-1',
+            title: 't',
+            priority: 'normal',
+            source: { trigger_type: 'scheduled', channel_id: 'c1', session_id: 's1' },
+          },
+        }
+      }
+      return {}
+    })
+    const { agent, executeAgentLoopInBackground } = buildResumeAgent(rpcCall)
+
+    const result = await (agent as { resumeTaskInternal: ResumeFn }).resumeTaskInternal({ task_id: 'task-1' })
+
+    expect(result.resumed).toBe(true)
+    const payload = executeAgentLoopInBackground.mock.calls[0][0] as {
+      context: { resolved_permissions?: ResolvedPermissions }
+    }
+    expect(payload.context.resolved_permissions).toEqual(OLD_PERMS)
+    // 不得发起匿名会话重解析
+    expect(
+      rpcCall.mock.calls.some((c) => c[1] === 'resolve_principal_permissions'),
+    ).toBe(false)
   })
 })

@@ -2996,7 +2996,7 @@ export class AgentHandler {
   /**
    * 取任务的权限主体（原发起人身份 + 会话），供 unified-agent 在 supplement/resume 时
    * 重新解析权限（spec 2026-07-20-task-permission-hot-refresh §方案A）。
-   * 返回 null = 任务不存在或不是消息触发任务（scheduled / 系统任务无 task_origin，不刷新）。
+   * 返回 null = 任务不存在或不是消息触发任务（scheduled / 系统任务不刷新）。
    */
   getTaskPrincipal(taskId: TaskId): {
     senderFriend?: Friend
@@ -3004,8 +3004,11 @@ export class AgentHandler {
     sessionType: 'private' | 'group'
   } | null {
     const taskState = this.activeTasks.get(taskId)
-    const origin = taskState?.resumeWorkerContext?.task_origin
-    if (!taskState || !origin?.session_id || !origin.session_type) return null
+    // scheduled 任务带 target_session 时也有 task_origin（但无 sender_friend）——
+    // 其权限由 Admin 按 creator（含 master_private）解析下发，严禁按匿名会话身份重解析。
+    if (!taskState || taskState.triggerType !== 'message') return null
+    const origin = taskState.resumeWorkerContext?.task_origin
+    if (!origin?.session_id || !origin.session_type) return null
     return {
       ...(taskState.resumeWorkerContext?.sender_friend
         ? { senderFriend: taskState.resumeWorkerContext.sender_friend }

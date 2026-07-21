@@ -2076,10 +2076,13 @@ export class UnifiedAgent extends ModuleBase {
       //
       // 权限例外（spec 2026-07-20-task-permission-hot-refresh）：resolved_permissions 不直接
       // 还原 checkpoint 冻结值，而是用任务原发起人身份重新解析——agent 停机期间人类改的权限
-      // 对 resume 任务即时生效。解析失败 / 无会话主体（scheduled 等）→ 回退 checkpoint 快照。
+      // 对 resume 任务即时生效。解析失败 / 无会话主体 → 回退 checkpoint 快照。
+      // scheduled 任务（含带 target_session 的）不刷新：其权限由 Admin 按 creator
+      // （含 master_private）解析下发，按匿名会话身份重解析会造成降级/抬升（review #38）。
+      const triggerType = normalizeResumeTriggerType(task.source?.trigger_type)
       const wc = entry.checkpoint.worker_context
       let resumeResolvedPerms = wc?.resolved_permissions
-      if (wc?.task_origin?.session_id && wc.task_origin.session_type) {
+      if (triggerType !== 'scheduled' && wc?.task_origin?.session_id && wc.task_origin.session_type) {
         const freshPerms = await this.resolvePrincipalPermissions(
           wc.sender_friend,
           wc.task_origin.session_id,
@@ -2107,7 +2110,6 @@ export class UnifiedAgent extends ModuleBase {
         ...(wc?.scene_profile ? { scene_profile: wc.scene_profile } : {}),
       }
 
-      const triggerType = normalizeResumeTriggerType(task.source?.trigger_type)
       const taskSource = {
         ...(task.source ?? {}),
         trigger_type: triggerType,
