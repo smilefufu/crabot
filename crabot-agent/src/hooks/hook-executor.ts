@@ -31,6 +31,7 @@ async function executeSingleHook(
         lspManager: context.lspManager,
         senderIsMaster: context.senderIsMaster,
         resolvedPermissions: context.resolvedPermissions,
+        ...(context.getResolvedPermissions ? { getResolvedPermissions: context.getResolvedPermissions } : {}),
         contentReviewer: context.contentReviewer,
         sessionType: context.sessionType,
       })

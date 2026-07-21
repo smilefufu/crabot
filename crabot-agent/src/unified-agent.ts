@@ -698,6 +698,8 @@ export class UnifiedAgent extends ModuleBase {
         pushSupplement: async (taskId: string): Promise<'delivered' | 'fallback'> => {
           if (!this.agentHandler!.hasActiveTask(taskId)) return 'fallback'
           try {
+            // 权限热刷新：supplement 进任务前按原发起人身份重新解析（spec 2026-07-20）
+            await this.refreshTaskPermissions(taskId)
             // 传整批 ChannelMessage（保留媒体，Task 3 已让 deliverHumanResponse 渲染媒体）
             this.agentHandler!.deliverHumanResponse(taskId, messages)
             return 'delivered'
@@ -917,6 +919,8 @@ export class UnifiedAgent extends ModuleBase {
         pushSupplement: async (taskId: string): Promise<'delivered' | 'fallback'> => {
           if (!this.agentHandler!.hasActiveTask(taskId)) return 'fallback'
           try {
+            // 权限热刷新：supplement 进任务前按原发起人身份重新解析（spec 2026-07-20）
+            await this.refreshTaskPermissions(taskId)
             // 传整批 ChannelMessage（保留媒体，Task 3 已让 deliverHumanResponse 渲染媒体）
             this.agentHandler!.deliverHumanResponse(taskId, messages)
             return 'delivered'
@@ -1054,6 +1058,24 @@ export class UnifiedAgent extends ModuleBase {
       console.warn(`[Agent] resolvePrincipalPermissions failed for session ${sessionId}:`, err)
       return null
     }
+  }
+
+  /**
+   * 权限热刷新（spec 2026-07-20-task-permission-hot-refresh）：supplement 送达任务前调用，
+   * 用任务**原发起人**身份重新解析权限并热替换该任务的持有者——Admin 侧权限变更因此对
+   * in-flight 任务即时生效，无需新任务。
+   * fail-soft：解析失败 / 非消息触发任务（无 principal）→ 保留任务当前权限，不抛错。
+   */
+  private async refreshTaskPermissions(taskId: TaskId): Promise<void> {
+    if (!this.agentHandler) return
+    const principal = this.agentHandler.getTaskPrincipal(taskId)
+    if (!principal) return
+    const perms = await this.resolvePrincipalPermissions(
+      principal.senderFriend,
+      principal.sessionId,
+      principal.sessionType,
+    )
+    if (perms) this.agentHandler.updateTaskPermissions(taskId, perms)
   }
 
   /**
@@ -1589,6 +1611,8 @@ export class UnifiedAgent extends ModuleBase {
             }
 
             // 投递纠偏消息（deliverHumanResponse 内部会调 transitionTaskStatus('executing')）
+            // 权限热刷新：supplement 进任务前按原发起人身份重新解析（spec 2026-07-20）
+            await this.refreshTaskPermissions(taskId)
             const syntheticMessage: ChannelMessage = {
               platform_message_id: `supplement-${Date.now()}`,
               session: { channel_id: 'admin-web', session_id: sessionId, type: 'private' as const },
@@ -2046,10 +2070,23 @@ export class UnifiedAgent extends ModuleBase {
       // assembleScheduledTaskContext 现装配（不存进 checkpoint，避免过期）。
       const baseContext = await this.contextAssembler.assembleScheduledTaskContext()
 
-      // 关键：用 checkpoint 里存的「worker 执行上下文子集」覆盖回执行身份/权限/场景，
+      // 关键：用 checkpoint 里存的「worker 执行上下文子集」覆盖回执行身份/场景，
       // 让 resumed worker 拿回和原任务一样的工具集 + 投递目标 + report mode。
       // 缺失（旧 checkpoint）时回退到从 task.source 重建 task_origin（仅修投递，工具仍可能受限）。
+      //
+      // 权限例外（spec 2026-07-20-task-permission-hot-refresh）：resolved_permissions 不直接
+      // 还原 checkpoint 冻结值，而是用任务原发起人身份重新解析——agent 停机期间人类改的权限
+      // 对 resume 任务即时生效。解析失败 / 无会话主体（scheduled 等）→ 回退 checkpoint 快照。
       const wc = entry.checkpoint.worker_context
+      let resumeResolvedPerms = wc?.resolved_permissions
+      if (wc?.task_origin?.session_id && wc.task_origin.session_type) {
+        const freshPerms = await this.resolvePrincipalPermissions(
+          wc.sender_friend,
+          wc.task_origin.session_id,
+          wc.task_origin.session_type,
+        )
+        if (freshPerms) resumeResolvedPerms = freshPerms
+      }
       const fallbackOrigin: TaskOrigin | undefined =
         task.source?.channel_id && task.source?.session_id
           ? {
@@ -2066,7 +2103,7 @@ export class UnifiedAgent extends ModuleBase {
         ...(wc?.task_origin ?? fallbackOrigin ? { task_origin: wc?.task_origin ?? fallbackOrigin } : {}),
         ...(wc?.sender_friend ? { sender_friend: wc.sender_friend } : {}),
         ...(wc?.memory_permissions ? { memory_permissions: wc.memory_permissions } : {}),
-        ...(wc?.resolved_permissions ? { resolved_permissions: wc.resolved_permissions } : {}),
+        ...(resumeResolvedPerms ? { resolved_permissions: resumeResolvedPerms } : {}),
         ...(wc?.scene_profile ? { scene_profile: wc.scene_profile } : {}),
       }
 
@@ -2274,14 +2311,16 @@ export class UnifiedAgent extends ModuleBase {
     }
   }
 
-  private handleDeliverHumanResponse(params: {
+  private async handleDeliverHumanResponse(params: {
     task_id: TaskId
     messages: ChannelMessage[]
-  }): DeliverHumanResponseResult {
+  }): Promise<DeliverHumanResponseResult> {
     if (!this.agentHandler) {
       throw new Error('Worker handler not configured')
     }
 
+    // 权限热刷新：supplement 进任务前按原发起人身份重新解析（spec 2026-07-20）
+    await this.refreshTaskPermissions(params.task_id)
     this.agentHandler.deliverHumanResponse(params.task_id, params.messages)
     return { received: true, task_status: 'executing' }
   }

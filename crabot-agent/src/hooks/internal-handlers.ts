@@ -84,7 +84,10 @@ registerInternalHandler('cli-permission-gate', async (input, context) => {
   }
 
   // 4. 硬闸：cli_access[domain]
-  const cliAccess = context.resolvedPermissions?.cli_access
+  // 活值优先：getResolvedPermissions 读 taskState 持有者（supplement/resume 刷新即生效），
+  // 静态 resolvedPermissions 仅作兜底（无 getter 的调用方）。
+  const effectivePerms = context.getResolvedPermissions?.() ?? context.resolvedPermissions
+  const cliAccess = effectivePerms?.cli_access
   if (!cliAccess) {
     return {
       action: 'block',
@@ -113,7 +116,7 @@ registerInternalHandler('cli-permission-gate', async (input, context) => {
 
   // 5. 软闸：内容审核（仅 schedule add）
   if (REQUIRES_CONTENT_REVIEW.has(parsed.subcommand)) {
-    if (!context.contentReviewer || !context.resolvedPermissions) {
+    if (!context.contentReviewer || !effectivePerms) {
       return {
         action: 'block',
         message: 'PERMISSION_DENIED: 内容审核器未配置（fail-closed）。',
@@ -125,7 +128,7 @@ registerInternalHandler('cli-permission-gate', async (input, context) => {
     let review
     try {
       review = await context.contentReviewer({
-        effectivePermissions: context.resolvedPermissions,
+        effectivePermissions: effectivePerms,
         commandText: cmdStr,
       })
     } catch (err) {

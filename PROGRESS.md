@@ -1,6 +1,15 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-19 — Agent 专用 Python 环境（agent-venv）
+> 最后更新：2026-07-20 — 任务权限热刷新（supplement / resume 即时生效）
+
+## 2026-07-20 — 任务权限热刷新（supplement / resume 即时生效）
+
+- 起因：群任务内 agent 要求人类改 `cli_access.provider`，人类在 Admin 改完（落盘正确）并回复"改好了"，worker 仍持任务创建时的冻结快照报 `none`；重启也无效——resume 从 checkpoint `worker_context` 原样还原旧权限。只能开新任务才能拿到新权限。
+- 方案（spec 方案 A）：在两个"人类刚做过事"的边界用任务**原发起人身份**重新解析——① supplement 送达任务前（私聊/群聊/admin-chat/RPC 四个 `deliverHumanResponse` 入口）；② 从 checkpoint resume 时。每轮轮询与 admin 事件推送两个方案均否决（成本/故障面 vs 边际收益）。
+- 实现：`resolved_permissions` 从闭包冻结值改为 `taskState.resolvedPermissions` 活持有者（`agent-handler.ts`，同 `taskState.cwd` 模式）；engine/hook 链路新增 `getResolvedPermissions` getter（`engine/types.ts` → `query-loop.ts` → `hook-executor.ts` → cli-permission-gate），工具过滤与 CLI 闸每轮读活值；`updateTaskPermissions` 同步刷新 `resumeWorkerContext` 让 checkpoint 落"最近已知"。fail-soft：解析失败/admin 不可达保留任务当前权限，绝不降级 FAIL_CLOSED；放宽与收紧对称生效。
+- 协议：protocol-admin §3.2.7 语义新增第 4 条（任务级刷新时机 + 必须用原 `sender_friend_id`，防止群成员中途注入自己的权限）。
+- spec：`crabot-docs/superpowers/specs/2026-07-20-task-permission-hot-refresh-design.md`。
+- 验证：新增 `task-permission-hot-refresh.test.ts` 10 条（持有者初始化/热替换/原身份/隔离/resume 覆盖与回退）+ cli-permission-gate getter 优先级 4 条；agent 全量 1558/1559（另 2 skipped），唯一失败为 7-17 已记录的 context-assembler 固定时间漂移（主仓库同样失败，与本次 diff 无关）。
 
 ## 2026-07-19 — Agent 专用 Python 环境（agent-venv）
 
