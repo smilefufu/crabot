@@ -19,6 +19,25 @@
 - moonshot 实测后续（2026-07-21 当天完成）：401 根因是内置 kimi-coding preset 端点错误（`api.moonshot.cn/anthropic` 是平台 key 端点，Coding Plan key 走 `api.kimi.com/coding`），preset-vendors.ts 已修正。实测 `https://api.kimi.com/coding/v1/messages`：接受 `cache_control` 无 400；且该端点**自带自动前缀缓存**——不带 cache_control 的相同请求第二次也 100% cache_read，故改动1 对 kimi 端点是兼容增强、对官方 Anthropic 端点才是必需。注意：已部署实例 model_providers.json 里存的旧端点不会随 preset 自动更新，需在 Admin UI 手动改 provider endpoint。
 - kimi-coding preset 模型改走接口（2026-07-21 follow-up）：`GET /v1/models` 实测可用（x-api-key / Bearer 均可，返回 kimi-for-coding / kimi-for-coding-highspeed / k3）；preset 加 `models_api: '/v1/models'` 并删除 KIMI_CODING_MODELS 内置列表（失败无兜底即清空，与 openai/deepseek 等 preset 一致）；`parseOpenAIModels` 新增 `supports_image_in` → supports_vision 映射（内置原写 false，实测三模型均支持视觉）。已知：`kimi-k2.7-code` 是可用别名但不在接口返回中，旧 provider 里引用它的 slot 在 refresh 后会变成未知模型，需要重新选择。
 
+> 最后更新：2026-07-20 — 任务权限热刷新（supplement / resume 即时生效）
+
+## 2026-07-20 — 任务权限热刷新（supplement / resume 即时生效）
+
+- 起因：群任务内 agent 要求人类改 `cli_access.provider`，人类在 Admin 改完（落盘正确）并回复"改好了"，worker 仍持任务创建时的冻结快照报 `none`；重启也无效——resume 从 checkpoint `worker_context` 原样还原旧权限。只能开新任务才能拿到新权限。
+- 方案（spec 方案 A）：在两个"人类刚做过事"的边界用任务**原发起人身份**重新解析——① supplement 送达任务前（私聊/群聊/admin-chat/RPC 四个 `deliverHumanResponse` 入口）；② 从 checkpoint resume 时。每轮轮询与 admin 事件推送两个方案均否决（成本/故障面 vs 边际收益）。
+- 实现：`resolved_permissions` 从闭包冻结值改为 `taskState.resolvedPermissions` 活持有者（`agent-handler.ts`，同 `taskState.cwd` 模式）；engine/hook 链路新增 `getResolvedPermissions` getter（`engine/types.ts` → `query-loop.ts` → `hook-executor.ts` → cli-permission-gate），工具过滤与 CLI 闸每轮读活值；`updateTaskPermissions` 同步刷新 `resumeWorkerContext` 让 checkpoint 落"最近已知"。fail-soft：解析失败/admin 不可达保留任务当前权限，绝不降级 FAIL_CLOSED；放宽与收紧对称生效。
+- 协议：protocol-admin §3.2.7 语义新增第 4 条（任务级刷新时机 + 必须用原 `sender_friend_id`，防止群成员中途注入自己的权限）。
+- spec：`crabot-docs/superpowers/specs/2026-07-20-task-permission-hot-refresh-design.md`。
+- 验证：新增 `task-permission-hot-refresh.test.ts` 10 条（持有者初始化/热替换/原身份/隔离/resume 覆盖与回退）+ cli-permission-gate getter 优先级 4 条；agent 全量 1558/1559（另 2 skipped），唯一失败为 7-17 已记录的 context-assembler 固定时间漂移（主仓库同样失败，与本次 diff 无关）。
+
+## 2026-07-19 — Agent 专用 Python 环境（agent-venv）
+
+- 背景：install.sh 装的 uv 只服务 memory 模块（`uv sync`），从未接入 agent shell 环境。trace 证实 agent 直接用系统 `python3` 并 `pip3 install` 污染系统 site-packages / user site；生产非登录 shell 下 uv 甚至不在 PATH。
+- 方案（spec 方案 B）：MM 启动时懒创建 `$DATA_DIR/agent-venv`（`uv venv --seed`，缺失/损坏自愈），并把 `<venv>/bin` 前置进 `process.env.PATH`，经 spawn 的 `...process.env` 透传给全部子模块。单一代码路径覆盖 dev / user / system 三模式；install.sh 零改动；uv 不可用或创建失败仅 warn 降级，不阻塞启动。
+- 实现：新增 `crabot-core/src/agent-venv.ts`（`ensureAgentVenv()`），`crabot-core/src/main.ts` 接入；`--seed` 必须带（uv venv 默认不装 pip）。
+- spec：`crabot-docs/superpowers/specs/2026-07-19-agent-python-venv-design.md`；AGENTS.md「开发环境」与 deployment/installation.md 已同步。
+- 验证：crabot-core 新增 5 个定向测试 + 全量 79 个通过；tsc build 通过；真实 uv 端到端验证（临时 DATA_DIR 建 venv、PATH 前置、venv 内 python3/pip3 可用）。生产/user mode 的完整验收（`which python3` 落到 venv）待实例下次重启后自然生效。
+
 ## 2026-07-19 — subagent 模型配置热生效（delegate 时实时解析）
 
 - 起因：m2u 实例 cost_effective provider 余额耗尽（HTTP 402），Admin 改 slot 后"继续任务"仍用旧 provider，必须重启实例才生效。根因：worker loop 启动时固化 subAgentsSnapshot，delegate_task 闭包绑定快照里嵌入的 model 连接信息，热更只影响"下一个 loop"。

@@ -1081,6 +1081,11 @@ export class AgentHandler {
       this.activeTasks.set(task.task_id, taskState)
     }
 
+    // 任务权限活持有者：loop 启动时由 context 初始化（已有值说明是 supplement 刷新过的
+    // in-flight 任务，不被旧 context 回盖；spec 2026-07-20-task-permission-hot-refresh）。
+    // buildToolsDynamic / cli-permission-gate 每轮经此读取，不再用冻结快照。
+    taskState.resolvedPermissions = taskState.resolvedPermissions ?? context.resolved_permissions
+
     // Init live snapshot（query-loop 的 onLiveProgress 会逐步填充）
     this.liveSnapshots.set(task.task_id, {
       task_id: task.task_id,
@@ -1410,7 +1415,7 @@ export class AgentHandler {
         // set_cwd 工具单独 push（仅 main worker 用；子 subagent 严格继承 parent cwd 不允许改）
         tools.push(createSetCwdTool({ getCwd, setCwd }))
         const baseToolsPermissionConfig: ToolPermissionConfig =
-          this.deps?.getPermissionConfig?.(baseToolsRaw, context.resolved_permissions) ?? { mode: 'bypass' }
+          this.deps?.getPermissionConfig?.(baseToolsRaw, taskState.resolvedPermissions) ?? { mode: 'bypass' }
         // baseTools 构造后立刻把 outer auditBaseTools 接上，给 audit gate 的 getter 用。
         // 见 mcpConfigFactory 上方的 outer let 声明。
         const baseTools = filterToolsByPermission(baseToolsRaw, baseToolsPermissionConfig)
@@ -1542,7 +1547,7 @@ export class AgentHandler {
         // 否则 delegate_*/trace_search 等后注入的工具因不在 baseToolsPermissionConfig 的 denyList 里而漏过 filter，
         // 导致 LLM 看见但 runEngine 用 initialPermissionConfig 又拒绝（违反「无权限工具不注入 prompt」）。
         const fullPermissionConfig: ToolPermissionConfig =
-          this.deps?.getPermissionConfig?.(configFiltered, context.resolved_permissions) ?? { mode: 'bypass' }
+          this.deps?.getPermissionConfig?.(configFiltered, taskState.resolvedPermissions) ?? { mode: 'bypass' }
         return filterToolsByPermission(configFiltered, fullPermissionConfig)
       }
 
@@ -1585,7 +1590,7 @@ export class AgentHandler {
       // runEngine 内部会在每轮调用 buildToolsDynamic 重新拿最新工具列表。
       const initialTools = buildToolsDynamic()
       const initialPermissionConfig: ToolPermissionConfig =
-        this.deps?.getPermissionConfig?.(initialTools, context.resolved_permissions) ?? { mode: 'bypass' }
+        this.deps?.getPermissionConfig?.(initialTools, taskState.resolvedPermissions) ?? { mode: 'bypass' }
 
       log(`Starting worker engine: model=${this.sdkEnv.modelId}, task=${task.task_title}, tools=${initialTools.length}`)
 
@@ -1606,11 +1611,13 @@ export class AgentHandler {
       taskState.messagesRef = messagesRef
       // 快照 worker 执行上下文子集（权限/身份/场景）——resumed worker 据此复原工具集 + 投递
       // 目标 + report mode。缺了它 resumed worker 会落进 FAIL_CLOSED（几乎无工具）。
+      // 注：resolved_permissions 初始取任务权限持有者的当前值；后续 updateTaskPermissions
+      // 热刷新时会同步更新这里，checkpoint 始终落"最近已知"权限。
       taskState.resumeWorkerContext = {
         task_origin: context.task_origin,
         sender_friend: context.sender_friend,
         memory_permissions: context.memory_permissions,
-        resolved_permissions: context.resolved_permissions,
+        resolved_permissions: taskState.resolvedPermissions,
         scene_profile: context.scene_profile,
       }
       // traceId 存 taskState + traceStore 存 Map，供 flushActiveCheckpoints（onStop 路径）补 flush。
@@ -1734,6 +1741,9 @@ export class AgentHandler {
           hookRegistry: workerHookRegistry,
           senderIsMaster,
           ...(context.resolved_permissions ? { resolvedPermissions: context.resolved_permissions } : {}),
+          // 任务权限活值：cli-permission-gate 每轮经 getter 读 taskState 持有者，
+          // supplement/resume 刷新后下一轮即生效（spec 2026-07-20-task-permission-hot-refresh）。
+          getResolvedPermissions: () => taskState.resolvedPermissions,
           contentReviewer: this.buildContentReviewer(),
           sessionType: context.task_origin?.session_type ?? 'private',
           // 一旦有 info 送达，就允许后续 silent end_turn 作为正常收口：系统无法可靠判断
@@ -3001,6 +3011,46 @@ export class AgentHandler {
         log(`[onDispatched] append_message admin RPC failed (non-fatal) task=${taskId}: ${err instanceof Error ? err.message : String(err)}`)
       }
     })()
+  }
+
+  /**
+   * 取任务的权限主体（原发起人身份 + 会话），供 unified-agent 在 supplement/resume 时
+   * 重新解析权限（spec 2026-07-20-task-permission-hot-refresh §方案A）。
+   * 返回 null = 任务不存在或不是消息触发任务（scheduled / 系统任务不刷新）。
+   */
+  getTaskPrincipal(taskId: TaskId): {
+    senderFriend?: Friend
+    sessionId: string
+    sessionType: 'private' | 'group'
+  } | null {
+    const taskState = this.activeTasks.get(taskId)
+    // scheduled 任务带 target_session 时也有 task_origin（但无 sender_friend）——
+    // 其权限由 Admin 按 creator（含 master_private）解析下发，严禁按匿名会话身份重解析。
+    if (!taskState || taskState.triggerType !== 'message') return null
+    const origin = taskState.resumeWorkerContext?.task_origin
+    if (!origin?.session_id || !origin.session_type) return null
+    return {
+      ...(taskState.resumeWorkerContext?.sender_friend
+        ? { senderFriend: taskState.resumeWorkerContext.sender_friend }
+        : {}),
+      sessionId: origin.session_id,
+      sessionType: origin.session_type,
+    }
+  }
+
+  /**
+   * 热替换任务当前生效的 ResolvedPermissions（仅本任务持有者 + checkpoint 快照，
+   * 不碰任何跨任务共享状态）。替换是原子引用交换：进行中的 turn 用它开始时的
+   * 权限跑完，下一 turn（buildToolsDynamic / cli gate 经 getter 重读）用新权限。
+   */
+  updateTaskPermissions(taskId: TaskId, perms: ResolvedPermissions): void {
+    const taskState = this.activeTasks.get(taskId)
+    if (!taskState) return
+    taskState.resolvedPermissions = perms
+    if (taskState.resumeWorkerContext) {
+      taskState.resumeWorkerContext = { ...taskState.resumeWorkerContext, resolved_permissions: perms }
+    }
+    log(`[permissions] task ${taskId} permissions hot-refreshed`)
   }
 
   deliverHumanResponse(taskId: TaskId, messages: ChannelMessage[]): void {

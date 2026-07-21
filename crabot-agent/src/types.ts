@@ -557,7 +557,10 @@ export interface WorkerAgentContext {
    * 2. Schedule 触发：Admin 端按 `creator_friend_id` 解析（系统内置走 master_private）后随 RPC 下发
    * 3. 都没有：worker 兜底回 FAIL_CLOSED_TOOL_ACCESS（仅 messaging）
    *
-   * 每个任务都带自己的快照，避免共享字段在并发任务间被串改。
+   * 每个任务都带自己的副本，避免共享字段在并发任务间被串改。
+   * 生命周期：loop 启动时以此初始化 taskState.resolvedPermissions；此后任务内活值以
+   * taskState 持有者为准（supplement / resume 时按原发起人身份重新解析并热替换，
+   * spec: 2026-07-20-task-permission-hot-refresh-design.md）。
    */
   resolved_permissions?: ResolvedPermissions
   /** 当前场景画像，由 Memory 模块直接返回并映射为运行时格式 */
@@ -838,6 +841,14 @@ export interface WorkerTaskState {
    * 拿回原工具集 + 投递目标 + report mode。runWorkerLoop 开始后从 context 快照写入。
    */
   resumeWorkerContext?: ResumeWorkerContext
+  /**
+   * 任务当前生效的 ResolvedPermissions（tool_access / cli_access 的活持有人）。
+   * runWorkerLoop 启动时由 context.resolved_permissions 初始化；之后可由
+   * updateTaskPermissions 热替换（supplement / resume 时按原身份重新解析，
+   * spec: 2026-07-20-task-permission-hot-refresh-design.md）。
+   * buildToolsDynamic 与 cli-permission-gate 每轮经 getter 读它，不再读冻结快照。
+   */
+  resolvedPermissions?: ResolvedPermissions
   /**
    * "改目标券"：人类 supplement 到达时置 true（上限 1，不叠加）。
    * set_task_goal 重设已有 goal 时消费它——没券不许 worker 自改目标（反 specification-gaming）。
