@@ -95,6 +95,22 @@ Spec 应按任务实际需要覆盖：
 
 Spec 是设计决策记录，不能取代协议文档。协议文档仍是最终契约的唯一真相来源。
 
+## 提交与 PR 流程（必须遵守）
+
+### crabot-docs（文档仓）
+
+不走 PR 流程：改动直接 commit 并 push 到 main。本地 main 可能落后远端，push 被拒时先 rebase origin/main 再推。
+
+### crabot 主仓
+
+走 PR 流程：开分支 → commit → push → 建 PR。**不要自己 merge PR**。
+
+- PR 有 @claude auto review，需定期跟踪其意见：
+  - 意见合理 → 修改代码、补测试、验证后重提交，并在对应行内评论下回复说明
+  - 意见不接受或存疑 → 在 PR 下回复 @claude 讨论，用证据说话
+- @claude approve 后会自动合并
+- main 前进导致冲突（CONFLICTING）时由实施者解决：merge origin/main、解冲突、跑全量测试后 push
+
 ## 文档驱动开发规范（必须遵守）
 
 ### 核心原则
