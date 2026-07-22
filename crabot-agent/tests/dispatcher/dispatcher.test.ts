@@ -178,7 +178,7 @@ describe('dispatch', () => {
           status: 'failed',
           candidate_kind: 'recent_terminal',
           completed_at: '2026-06-29T10:05:00.000Z',
-          error: 'TypeError: terminated',
+          error: `${'E'.repeat(250)}TAIL_SENTINEL`,
         }),
       ],
     })
@@ -190,7 +190,8 @@ describe('dispatch', () => {
     expect(prompt).toMatch(/## 近期结束的本 session task（可作为 supplement 候选）/)
     expect(prompt).toMatch(/\[task-done\] \(status: completed_recently, completed_at: 2026-06-29T10:00:00\.000Z\)/)
     expect(prompt).toMatch(/\[task-failed\] \(status: failed_recently/)
-    expect(prompt).toMatch(/失败原因: TypeError: terminated/)
+    expect(prompt).toContain(`失败原因: ${'E'.repeat(200)}`)
+    expect(prompt).not.toContain('TAIL_SENTINEL')
     expect(prompt).not.toMatch(/t-task-done/)
     expect(prompt).not.toMatch(/最近进度/)
     // 活跃 task 不出现在 recent terminal 段

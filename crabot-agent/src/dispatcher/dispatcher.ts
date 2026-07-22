@@ -187,7 +187,7 @@ export function buildUserPrompt(
       const statusLabel = t.status === 'failed' ? 'failed_recently' : 'completed_recently'
       const completedAt = t.completed_at ? `, completed_at: ${t.completed_at}` : ''
       lines.push(`- [${t.task_id}] (status: ${statusLabel}${completedAt})`)
-      if (t.status === 'failed' && t.error) lines.push(`  失败原因: ${t.error}`)
+      if (t.status === 'failed' && t.error) lines.push(`  失败原因: ${t.error.slice(0, 200)}`)
     }
   }
   lines.push('\n按 system prompt 描述的 schema 输出 JSON。')
