@@ -1,6 +1,50 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-18 — 复活 vs new_task 决策优化（价值关 + 体积关）
+> 最后更新：2026-07-21 — crabot-agent token 使用效率优化（对标 Pi agent）
+
+## 2026-07-21 — crabot-agent token 使用效率优化（对标 Pi agent）
+
+- 起因：对比开源 Pi agent（极简 prompt + 4 工具 + 输出硬截断 + prompt caching）后，发现 crabot-agent 五个差距：Anthropic 无 cache_control、工具输出截断宽松且不可恢复、compaction 用 chars/4 低估、工具盘臃肿、prompt 冗余。
+- spec：`crabot-docs/superpowers/specs/2026-07-21-agent-token-efficiency-design.md`（含 §10 实施偏离记录）。
+- 实现（5 项）：
+  1. anthropic-adapter 注入 3 处 cache breakpoint（system 末块 / 末 tool / 末消息末块，5min ephemeral）；顺带清理空 text block 垃圾 token。
+  2. bash 截断 100K→50K 改纯尾部 + 完整输出落盘 `data/tmp/tool-outputs/` 可恢复；read 解除 500KB 后不可读限制（流式分页全覆盖，单次 ≤50KB）；编排层兜底 256KB→100KB。
+  3. compaction 触发改用 API 真实 usage（lastObservedContextTokens + 增量估算），usage 缺失回退估算且计入 system+tools；context_window 从 admin buildConnectionInfo → agent → EngineOptions 全链路接线。
+  4. delegate_task 的 when_to_use 截断 300 字符；memory 工具按任务类型分组（普通任务 A 组 6 个 / daily_reflection 全量 18 个，对齐 protocol-memory §3.30）；disabled_tools 扩展到 MCP 工具（仅黑名单，enabled_tools 不套 MCP）。
+  5. scene profile 去除 system prompt 侧的重复注入（保留 task message 单次注入）。
+- 协议：protocol-admin §3.19.8（context_window）+ BuiltinToolConfig 小节（disabled_tools 覆盖 MCP）；protocol-memory §3.30（工具分组）；base-protocol §5.14 / protocol-agent-v2 补 context_window 字段。
+- 验证：agent 全量 1590/1591（唯一失败为 7-17 已记录的 context-assembler 固定时间漂移，HEAD 复现确认与本次无关）；admin 全量 1013 通过（schedule-target-session 的 EADDRINUSE 为并行跑套件的环境 flake，单跑 6/6 通过）。
+- 自审修复（2026-07-21 当天第二轮）：4 路并行 diff review 后修复 6 项——①memory 分组放宽为按任务用途（memory_curate + tags memory_rebuild，原条件会废掉内置每小时记忆整理和重建图谱端点；顺带打通 start_task RPC 的 tags/task_type 透传链路）；②bash 截断 char→byte 口径（CJK 输出下原实现会让编排层 100KB 兜底切掉尾部 hint）；③disabled_tools 覆盖 subagent/audit 继承路径；④anthropic adapter 丢弃空 content 消息；⑤补落盘失败回退测试 + read offset 归一化；⑥delegate_task 截断 surrogate 安全。修复后 agent 全量 1607/1608（仍只有那个既有时间漂移）。
+- **待办**：部署对比（cache_read 比例、bash/read 大输出场景体积）待上线后进行；**reasoning effort 配置开放**（k3 支持 low/high/max，协议无对应字段）留作 follow-up 单开 spec。
+- moonshot 实测后续（2026-07-21 当天完成）：401 根因是内置 kimi-coding preset 端点错误（`api.moonshot.cn/anthropic` 是平台 key 端点，Coding Plan key 走 `api.kimi.com/coding`），preset-vendors.ts 已修正。实测 `https://api.kimi.com/coding/v1/messages`：接受 `cache_control` 无 400；且该端点**自带自动前缀缓存**——不带 cache_control 的相同请求第二次也 100% cache_read，故改动1 对 kimi 端点是兼容增强、对官方 Anthropic 端点才是必需。注意：已部署实例 model_providers.json 里存的旧端点不会随 preset 自动更新，需在 Admin UI 手动改 provider endpoint。
+- kimi-coding preset 模型改走接口（2026-07-21 follow-up）：`GET /v1/models` 实测可用（x-api-key / Bearer 均可，返回 kimi-for-coding / kimi-for-coding-highspeed / k3）；preset 加 `models_api: '/v1/models'` 并删除 KIMI_CODING_MODELS 内置列表（失败无兜底即清空，与 openai/deepseek 等 preset 一致）；`parseOpenAIModels` 新增 `supports_image_in` → supports_vision 映射（内置原写 false，实测三模型均支持视觉）。已知：`kimi-k2.7-code` 是可用别名但不在接口返回中，旧 provider 里引用它的 slot 在 refresh 后会变成未知模型，需要重新选择。
+
+> 最后更新：2026-07-20 — 任务权限热刷新（supplement / resume 即时生效）
+
+## 2026-07-20 — 任务权限热刷新（supplement / resume 即时生效）
+
+- 起因：群任务内 agent 要求人类改 `cli_access.provider`，人类在 Admin 改完（落盘正确）并回复"改好了"，worker 仍持任务创建时的冻结快照报 `none`；重启也无效——resume 从 checkpoint `worker_context` 原样还原旧权限。只能开新任务才能拿到新权限。
+- 方案（spec 方案 A）：在两个"人类刚做过事"的边界用任务**原发起人身份**重新解析——① supplement 送达任务前（私聊/群聊/admin-chat/RPC 四个 `deliverHumanResponse` 入口）；② 从 checkpoint resume 时。每轮轮询与 admin 事件推送两个方案均否决（成本/故障面 vs 边际收益）。
+- 实现：`resolved_permissions` 从闭包冻结值改为 `taskState.resolvedPermissions` 活持有者（`agent-handler.ts`，同 `taskState.cwd` 模式）；engine/hook 链路新增 `getResolvedPermissions` getter（`engine/types.ts` → `query-loop.ts` → `hook-executor.ts` → cli-permission-gate），工具过滤与 CLI 闸每轮读活值；`updateTaskPermissions` 同步刷新 `resumeWorkerContext` 让 checkpoint 落"最近已知"。fail-soft：解析失败/admin 不可达保留任务当前权限，绝不降级 FAIL_CLOSED；放宽与收紧对称生效。
+- 协议：protocol-admin §3.2.7 语义新增第 4 条（任务级刷新时机 + 必须用原 `sender_friend_id`，防止群成员中途注入自己的权限）。
+- spec：`crabot-docs/superpowers/specs/2026-07-20-task-permission-hot-refresh-design.md`。
+- 验证：新增 `task-permission-hot-refresh.test.ts` 10 条（持有者初始化/热替换/原身份/隔离/resume 覆盖与回退）+ cli-permission-gate getter 优先级 4 条；agent 全量 1558/1559（另 2 skipped），唯一失败为 7-17 已记录的 context-assembler 固定时间漂移（主仓库同样失败，与本次 diff 无关）。
+
+## 2026-07-19 — Agent 专用 Python 环境（agent-venv）
+
+- 背景：install.sh 装的 uv 只服务 memory 模块（`uv sync`），从未接入 agent shell 环境。trace 证实 agent 直接用系统 `python3` 并 `pip3 install` 污染系统 site-packages / user site；生产非登录 shell 下 uv 甚至不在 PATH。
+- 方案（spec 方案 B）：MM 启动时懒创建 `$DATA_DIR/agent-venv`（`uv venv --seed`，缺失/损坏自愈），并把 `<venv>/bin` 前置进 `process.env.PATH`，经 spawn 的 `...process.env` 透传给全部子模块。单一代码路径覆盖 dev / user / system 三模式；install.sh 零改动；uv 不可用或创建失败仅 warn 降级，不阻塞启动。
+- 实现：新增 `crabot-core/src/agent-venv.ts`（`ensureAgentVenv()`），`crabot-core/src/main.ts` 接入；`--seed` 必须带（uv venv 默认不装 pip）。
+- spec：`crabot-docs/superpowers/specs/2026-07-19-agent-python-venv-design.md`；AGENTS.md「开发环境」与 deployment/installation.md 已同步。
+- 验证：crabot-core 新增 5 个定向测试 + 全量 79 个通过；tsc build 通过；真实 uv 端到端验证（临时 DATA_DIR 建 venv、PATH 前置、venv 内 python3/pip3 可用）。生产/user mode 的完整验收（`which python3` 落到 venv）待实例下次重启后自然生效。
+
+## 2026-07-19 — subagent 模型配置热生效（delegate 时实时解析）
+
+- 起因：m2u 实例 cost_effective provider 余额耗尽（HTTP 402），Admin 改 slot 后"继续任务"仍用旧 provider，必须重启实例才生效。根因：worker loop 启动时固化 subAgentsSnapshot，delegate_task 闭包绑定快照里嵌入的 model 连接信息，热更只影响"下一个 loop"。
+- spec：`crabot-docs/superpowers/specs/2026-07-19-subagent-model-hot-reload-design.md`。方案：subagent **列表**保持 loop 级快照（工具 enum / prompt 一致性不变），列表内各项的 model 等配置在每次派发时从 live `this.subAgents` 按 name 重查；live 中已删除则回退快照。
+- 实现：`agent-handler.ts` 新增 `resolveLiveSubAgent`，接入 `makeRunSubAgent` 闭包（同步/异步 delegate 共用）与 goal_audit `buildSpawnDeps`；`runGoalAudit` 本就实时读 `this.subAgents` 无需改。主 adapter 与已 spawn 的持久 subagent 保持 loop/spawn 级快照（协议已写明，要立即生效则终止重派）。
+- 协议：protocol-agent-v2 §6.1 热更表把 model_config 拆成三种粒度（worker 主 adapter / subagent 派发 / 已 spawn subagent）；protocol-admin §3.19.6 补上"保存后触发 pushConfigToAgentModules"约定。
+- 验证：新增 `delegate-model-hot-reload.test.ts` 4 条（in-flight 派发用新 endpoint/apikey/model_id、enum 快照不变、删除回退、异步派发与 goal_audit 取 live）；agent 全量 1543/1544（另 2 skipped），唯一失败为 7-17 已记录的 context-assembler 固定时间漂移，stash 验证与本次 diff 无关。
 
 ## 2026-07-18 — 复活 vs new_task 决策优化（价值关 + 体积关）
 

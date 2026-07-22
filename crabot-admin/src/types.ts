@@ -1338,6 +1338,8 @@ export interface ModelConnectionInfo {
 export interface LLMConnectionInfo extends ModelConnectionInfo {
   max_tokens?: number
   supports_vision?: boolean
+  /** 模型上下文窗口（token 数）；agent 侧用于 compaction 触发阈值，缺失时回退内置默认 */
+  context_window?: number
 }
 
 // Model Provider API 参数类型

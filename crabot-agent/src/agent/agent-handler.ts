@@ -17,7 +17,7 @@ import {
   ProgressDigest,
   filterToolsByPermission,
 } from '../engine/index.js'
-import { createSetCwdTool, createReadTool } from '../engine/tools/index.js'
+import { createSetCwdTool, createReadTool, filterMcpToolsByConfig } from '../engine/tools/index.js'
 import { BgEntityRegistry } from '../engine/bg-entities/registry.js'
 import { killShellTree } from '../engine/bg-entities/bg-shell.js'
 import { ReadoptReaper } from '../engine/bg-entities/reaper.js'
@@ -65,7 +65,7 @@ import type {
 } from '../types.js'
 import type { RpcClient } from 'crabot-shared'
 import { SYSTEM_CHANNEL_ID } from 'crabot-shared'
-import { createCrabMemoryServer } from '../mcp/crab-memory.js'
+import { createCrabMemoryServer, resolveMemoryToolProfile, filterMemoryToolsByProfile } from '../mcp/crab-memory.js'
 import type { MemoryTaskContext } from '../mcp/crab-memory.js'
 import { mcpServerToToolDefinitions } from './mcp-tool-bridge.js'
 import { imageToolsFor, type ImageConnInfo } from '../mcp/crab-image.js'
@@ -415,6 +415,8 @@ export interface SdkEnvConfig {
   supportsVision?: boolean
   /** Provider 配置的 max_output_tokens；未配置时 adapter 走各自的处理策略 */
   maxTokens?: number
+  /** Provider 模型配置的 context_window；未配置时 engine 回退内置默认 200000 */
+  contextWindow?: number
   env: Record<string, string>
 }
 
@@ -1079,6 +1081,11 @@ export class AgentHandler {
       this.activeTasks.set(task.task_id, taskState)
     }
 
+    // 任务权限活持有者：loop 启动时由 context 初始化（已有值说明是 supplement 刷新过的
+    // in-flight 任务，不被旧 context 回盖；spec 2026-07-20-task-permission-hot-refresh）。
+    // buildToolsDynamic / cli-permission-gate 每轮经此读取，不再用冻结快照。
+    taskState.resolvedPermissions = taskState.resolvedPermissions ?? context.resolved_permissions
+
     // Init live snapshot（query-loop 的 onLiveProgress 会逐步填充）
     this.liveSnapshots.set(task.task_id, {
       task_id: task.task_id,
@@ -1267,7 +1274,16 @@ export class AgentHandler {
             moduleId: this.deps.moduleId,
             getMemoryPort: this.deps.getMemoryPort,
           }, memoryTaskCtx)
-          tools.push(...mcpServerToToolDefinitions(crabMemoryServer, 'crab-memory'))
+          // 按任务用途分组注册：daily_reflection / memory_curate / tags 含 memory_rebuild
+          // → 全量 18 个；其他任务 → 仅 A 组 6 个（普通对话不需要反思级精细工具）。
+          const memoryProfile = resolveMemoryToolProfile({
+            taskType: task.task_type,
+            tags: task.tags,
+          })
+          tools.push(...filterMemoryToolsByProfile(
+            mcpServerToToolDefinitions(crabMemoryServer, 'crab-memory'),
+            memoryProfile,
+          ))
         }
 
         // 3b. crab-image MCP server tools（仅当图像配置可用时暴露 generate_image）
@@ -1379,7 +1395,10 @@ export class AgentHandler {
         // 3f. delegate_task 工具（单一入口；sub-agent 按 subagent_type 路由）
         // baseToolsPermissionConfig 仅基于 base 工具集，给 sub-agent 用：
         //   sub-agent 内部只能见 baseTools，所以它的 permissionConfig 也只需覆盖 base 工具命名。
-        const baseToolsRaw = [...tools]
+        // disabled_tools 的 MCP 过滤同样作用于 baseToolsRaw——baseToolsRaw 喂给 subagent
+        // parentTools 与 auditBaseTools，不在这里过滤会让被禁 MCP 工具从这两条路径漏出
+        //（main worker 路径在组装末尾统一过滤）。
+        const baseToolsRaw = filterMcpToolsByConfig([...tools], this.builtinToolConfig)
         // Read dedup：仅 main worker 启用（subagent 用 baseToolsRaw 里的普通 Read，
         // 避免 stub 指向不在自己上下文里的旧读）。baseToolsRaw 已在上一行 capture（普通 Read），
         // 这里替换 main 的 tools[Read] 为带去重缓存的版本——不影响 subagent。
@@ -1396,7 +1415,7 @@ export class AgentHandler {
         // set_cwd 工具单独 push（仅 main worker 用；子 subagent 严格继承 parent cwd 不允许改）
         tools.push(createSetCwdTool({ getCwd, setCwd }))
         const baseToolsPermissionConfig: ToolPermissionConfig =
-          this.deps?.getPermissionConfig?.(baseToolsRaw, context.resolved_permissions) ?? { mode: 'bypass' }
+          this.deps?.getPermissionConfig?.(baseToolsRaw, taskState.resolvedPermissions) ?? { mode: 'bypass' }
         // baseTools 构造后立刻把 outer auditBaseTools 接上，给 audit gate 的 getter 用。
         // 见 mcpConfigFactory 上方的 outer let 声明。
         const baseTools = filterToolsByPermission(baseToolsRaw, baseToolsPermissionConfig)
@@ -1519,12 +1538,17 @@ export class AgentHandler {
           tools.push(...opts.extraTools)
         }
 
+        // disabled_tools 扩展到 MCP 桥接工具：按 mcp__<server>__<tool> 全名过滤，
+        // 在组装末尾统一应用（内置工具的同名过滤在 getConfiguredBuiltinTools 内完成）。
+        // 默认配置（无 disabled_tools）零行为变化。
+        const configFiltered = filterMcpToolsByConfig(tools, this.builtinToolConfig)
+
         // 最终过滤：用「完整 tools 集合」重算 permissionConfig，
         // 否则 delegate_*/trace_search 等后注入的工具因不在 baseToolsPermissionConfig 的 denyList 里而漏过 filter，
         // 导致 LLM 看见但 runEngine 用 initialPermissionConfig 又拒绝（违反「无权限工具不注入 prompt」）。
         const fullPermissionConfig: ToolPermissionConfig =
-          this.deps?.getPermissionConfig?.(tools, context.resolved_permissions) ?? { mode: 'bypass' }
-        return filterToolsByPermission(tools, fullPermissionConfig)
+          this.deps?.getPermissionConfig?.(configFiltered, taskState.resolvedPermissions) ?? { mode: 'bypass' }
+        return filterToolsByPermission(configFiltered, fullPermissionConfig)
       }
 
       // System prompt 也改为 callback：admin push config 触发 updateSystemPrompt 后下一轮生效。
@@ -1566,7 +1590,7 @@ export class AgentHandler {
       // runEngine 内部会在每轮调用 buildToolsDynamic 重新拿最新工具列表。
       const initialTools = buildToolsDynamic()
       const initialPermissionConfig: ToolPermissionConfig =
-        this.deps?.getPermissionConfig?.(initialTools, context.resolved_permissions) ?? { mode: 'bypass' }
+        this.deps?.getPermissionConfig?.(initialTools, taskState.resolvedPermissions) ?? { mode: 'bypass' }
 
       log(`Starting worker engine: model=${this.sdkEnv.modelId}, task=${task.task_title}, tools=${initialTools.length}`)
 
@@ -1587,11 +1611,13 @@ export class AgentHandler {
       taskState.messagesRef = messagesRef
       // 快照 worker 执行上下文子集（权限/身份/场景）——resumed worker 据此复原工具集 + 投递
       // 目标 + report mode。缺了它 resumed worker 会落进 FAIL_CLOSED（几乎无工具）。
+      // 注：resolved_permissions 初始取任务权限持有者的当前值；后续 updateTaskPermissions
+      // 热刷新时会同步更新这里，checkpoint 始终落"最近已知"权限。
       taskState.resumeWorkerContext = {
         task_origin: context.task_origin,
         sender_friend: context.sender_friend,
         memory_permissions: context.memory_permissions,
-        resolved_permissions: context.resolved_permissions,
+        resolved_permissions: taskState.resolvedPermissions,
         scene_profile: context.scene_profile,
       }
       // traceId 存 taskState + traceStore 存 Map，供 flushActiveCheckpoints（onStop 路径）补 flush。
@@ -1699,6 +1725,7 @@ export class AgentHandler {
           tools: buildToolsDynamic,
           model: this.sdkEnv.modelId,
           ...(this.sdkEnv.maxTokens !== undefined ? { maxTokens: this.sdkEnv.maxTokens } : {}),
+          ...(this.sdkEnv.contextWindow !== undefined ? { contextWindowTokens: this.sdkEnv.contextWindow } : {}),
           maxTurns: 2000,
           supportsVision: this.sdkEnv.supportsVision,
           permissionConfig: initialPermissionConfig,
@@ -1714,6 +1741,9 @@ export class AgentHandler {
           hookRegistry: workerHookRegistry,
           senderIsMaster,
           ...(context.resolved_permissions ? { resolvedPermissions: context.resolved_permissions } : {}),
+          // 任务权限活值：cli-permission-gate 每轮经 getter 读 taskState 持有者，
+          // supplement/resume 刷新后下一轮即生效（spec 2026-07-20-task-permission-hot-refresh）。
+          getResolvedPermissions: () => taskState.resolvedPermissions,
           contentReviewer: this.buildContentReviewer(),
           sessionType: context.task_origin?.session_type ?? 'private',
           // 一旦有 info 送达，就允许后续 silent end_turn 作为正常收口：系统无法可靠判断
@@ -2983,6 +3013,46 @@ export class AgentHandler {
     })()
   }
 
+  /**
+   * 取任务的权限主体（原发起人身份 + 会话），供 unified-agent 在 supplement/resume 时
+   * 重新解析权限（spec 2026-07-20-task-permission-hot-refresh §方案A）。
+   * 返回 null = 任务不存在或不是消息触发任务（scheduled / 系统任务不刷新）。
+   */
+  getTaskPrincipal(taskId: TaskId): {
+    senderFriend?: Friend
+    sessionId: string
+    sessionType: 'private' | 'group'
+  } | null {
+    const taskState = this.activeTasks.get(taskId)
+    // scheduled 任务带 target_session 时也有 task_origin（但无 sender_friend）——
+    // 其权限由 Admin 按 creator（含 master_private）解析下发，严禁按匿名会话身份重解析。
+    if (!taskState || taskState.triggerType !== 'message') return null
+    const origin = taskState.resumeWorkerContext?.task_origin
+    if (!origin?.session_id || !origin.session_type) return null
+    return {
+      ...(taskState.resumeWorkerContext?.sender_friend
+        ? { senderFriend: taskState.resumeWorkerContext.sender_friend }
+        : {}),
+      sessionId: origin.session_id,
+      sessionType: origin.session_type,
+    }
+  }
+
+  /**
+   * 热替换任务当前生效的 ResolvedPermissions（仅本任务持有者 + checkpoint 快照，
+   * 不碰任何跨任务共享状态）。替换是原子引用交换：进行中的 turn 用它开始时的
+   * 权限跑完，下一 turn（buildToolsDynamic / cli gate 经 getter 重读）用新权限。
+   */
+  updateTaskPermissions(taskId: TaskId, perms: ResolvedPermissions): void {
+    const taskState = this.activeTasks.get(taskId)
+    if (!taskState) return
+    taskState.resolvedPermissions = perms
+    if (taskState.resumeWorkerContext) {
+      taskState.resumeWorkerContext = { ...taskState.resumeWorkerContext, resolved_permissions: perms }
+    }
+    log(`[permissions] task ${taskId} permissions hot-refreshed`)
+  }
+
   deliverHumanResponse(taskId: TaskId, messages: ChannelMessage[]): void {
     const taskState = this.activeTasks.get(taskId)
     if (!taskState) {
@@ -3405,6 +3475,7 @@ export class AgentHandler {
         abortSignal: ctx.abortSignal,
         onTurn: subTraceCallback,
         supportsVision: subagent.model.supports_vision,
+        ...(subagent.model.context_window !== undefined ? { contextWindowTokens: subagent.model.context_window } : {}),
         hookRegistry,
         lspManager,
         permissionConfig: deps.permissionConfig,
@@ -3688,10 +3759,13 @@ export class AgentHandler {
       buildSpawnDeps: (goal) => {
         // auditor 配置不存在 → spawn 抛错 → caller fail-open（console.warn）。
         // 用 throw 把"找不到 auditor"统一走 spawn 异常分支，避免在多处分散判断。
-        const auditor = opts.subAgents.find((s) => s.id === 'builtin-goal-auditor')
-        if (!auditor) {
+        const auditorSnapshot = opts.subAgents.find((s) => s.id === 'builtin-goal-auditor')
+        if (!auditorSnapshot) {
           throw new Error('builtin-goal-auditor subagent not configured')
         }
+        // 每次 spawn audit 时从 live this.subAgents 重解析 model —— 与 delegate_task 一致，
+        // model_config 热更新对 audit 派发 in-flight 生效（spec 2026-07-19）。
+        const auditor = handler.resolveLiveSubAgent(auditorSnapshot)
         const auditAdapter = adapterFromModel(auditor.model)
         const auditPermission = opts.getAuditPermissionConfig()
         return {
@@ -3820,15 +3894,33 @@ export class AgentHandler {
     return async (subagent, input, ctx) => {
       const typedInput = input as RunSubAgentInput & { sync?: boolean }
 
+      // 派发时从最新热更的 this.subAgents 重解析：loop 启动时的 snapshot 只保证
+      // subagent「列表」一致（工具 enum / prompt），列表内各项的 model 等配置在每次
+      // 派发时取 live 值 —— model_config 热更新对 subagent 派发 in-flight 生效。
+      // live 列表中已被删除时回退快照，不打断 in-flight 推理。
+      // spec: 2026-07-19-subagent-model-hot-reload-design.md
+      const effective = this.resolveLiveSubAgent(subagent)
+
       // 异步路径：asyncEnabled + 没有显式 sync=true
       if (deps.asyncEnabled && !typedInput.sync && deps.asyncCtx && deps.humanQueue) {
-        return this.runSubAgentAsync(subagent, typedInput, deps.asyncCtx, deps)
+        return this.runSubAgentAsync(effective, typedInput, deps.asyncCtx, deps)
       }
 
       // 同步路径（默认 fallback / 显式 sync=true）
-      const { traceId: _traceId, ...result } = await this.runSubAgentDirect(subagent, input, ctx, deps)
+      const { traceId: _traceId, ...result } = await this.runSubAgentDirect(effective, input, ctx, deps)
       return result
     }
+  }
+
+  /**
+   * 按 name 从 live this.subAgents 重查 subagent 配置，找不到（loop 运行期间被删）回退快照。
+   * 用 name 而非 id：delegate_task 本身就按 name 派发（工具 enum 即 name 列表），
+   * 且"name"承载语义身份——admin 删除再重建同名 subagent 视为同一 subagent 换了配置，
+   * 派发应用新配置而不是静默回退旧快照。
+   * 见 makeRunSubAgent 闭包注释 / spec 2026-07-19-subagent-model-hot-reload-design.md。
+   */
+  private resolveLiveSubAgent(snapshot: SubAgentConfig): SubAgentConfig {
+    return this.subAgents.find((s) => s.name === snapshot.name) ?? snapshot
   }
 
   /** 异步派发 subagent：via spawnPersistentAgent，工具立即返回，完成时通知父 humanQueue。 */
@@ -3924,9 +4016,9 @@ export class AgentHandler {
     taskId: TaskId,
   ): string {
     // unified loop spec §3.1：使用 assembleAgentPrompt。
-    const sceneProfile = context.scene_profile
-      ? { label: context.scene_profile.label, content: context.scene_profile.content }
-      : undefined
+    // 场景画像（scene_profile）不再注入 system prompt——只在首条 task message 注入一次
+    // （buildTaskMessage），避免双重注入浪费 token，也让 system prompt 前缀更稳定。
+    // spec: 2026-07-21-agent-token-efficiency-design.md 改动 5
     // subAgents 由 runWorkerLoop 在 loop 启动时 snapshot 后传入，
     // 防止 in-flight loop 中 admin 改 subagents 后 system prompt 列表跳变。
     const availableSubAgents = subAgents.map((s) => ({
@@ -3940,7 +4032,6 @@ export class AgentHandler {
         skillListing: this.buildSkillListingSnapshot(),
         availableSubAgents: availableSubAgents.length > 0 ? availableSubAgents : undefined,
         imageCapability: { available: this.imageCapability.available },
-        ...(sceneProfile ? { sceneProfile } : {}),
       })
       : this.systemPrompt
     const parts: string[] = [baseAssembled]

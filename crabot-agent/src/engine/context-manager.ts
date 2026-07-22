@@ -4,6 +4,7 @@ import {
   type EngineAssistantMessage,
   type EngineToolResultMessage,
   type ContentBlock,
+  type ToolDefinition,
   createUserMessage,
 } from './types'
 import { callNonStreaming, type LLMAdapter } from './llm-adapter'
@@ -13,6 +14,26 @@ export interface ContextManagerOptions {
   readonly compactThreshold?: number    // 0-1, default 0.8
   readonly keepRecentMessages?: number  // default 6
   readonly compactSystemPrompt?: string
+}
+
+/**
+ * shouldCompact 的触发上下文。spec: 2026-07-21-agent-token-efficiency-design.md 改动 3。
+ *
+ * 主路径：caller 每轮从 response.usage 算出全量 prompt 大小
+ * （inputTokens + cacheReadTokens + cacheCreationTokens）并传入；
+ * 其后新增的消息按 chars/4 估算增量累加。
+ * usage 缺失（provider 不上报）时不传 lastObservedContextTokens，
+ * 回退纯估算路径，但计入 system prompt 长度和 tools schema 估算。
+ */
+export interface ShouldCompactContext {
+  /** 上一轮 LLM 响应 usage 推算出的全量 prompt token 数 */
+  readonly lastObservedContextTokens?: number
+  /** 记录 lastObservedContextTokens 时的 messages 长度；其后新增消息按估算增量计入 */
+  readonly messageCountAtObservation?: number
+  /** 当前 system prompt 文本（usage 缺失的估算路径下计入） */
+  readonly systemPrompt?: string
+  /** 当前工具定义（usage 缺失的估算路径下计入 schema 估算） */
+  readonly tools?: ReadonlyArray<ToolDefinition>
 }
 
 interface CumulativeUsage {
@@ -131,9 +152,36 @@ export class ContextManager {
     )
   }
 
-  shouldCompact(messages: ReadonlyArray<EngineMessage>): boolean {
-    const estimated = this.estimateTotalTokens(messages)
-    return estimated >= this.maxContextTokens * this.compactThreshold
+  shouldCompact(messages: ReadonlyArray<EngineMessage>, context?: ShouldCompactContext): boolean {
+    const threshold = this.maxContextTokens * this.compactThreshold
+    const observed = context?.lastObservedContextTokens
+    const countAtObservation = context?.messageCountAtObservation
+    if (
+      observed !== undefined &&
+      countAtObservation !== undefined &&
+      countAtObservation <= messages.length
+    ) {
+      // 真实 usage 路径：观测值已是当时的全量 prompt 大小（含 system prompt + tools +
+      // 全部消息），只需补上其后新增消息的估算增量。
+      const delta = this.estimateTotalTokens(messages.slice(countAtObservation))
+      return observed + delta >= threshold
+    }
+    // 估算回退路径：usage 缺失，或观测已失效（compaction 后消息数回缩）。
+    // 计入 system prompt 与 tools schema——此前漏算导致系统性低估。
+    const staticTokens = this.estimateStaticPromptTokens(context?.systemPrompt, context?.tools)
+    return staticTokens + this.estimateTotalTokens(messages) >= threshold
+  }
+
+  /** system prompt + tools schema 的 chars/4 估算（估算回退路径用） */
+  private estimateStaticPromptTokens(
+    systemPrompt?: string,
+    tools?: ReadonlyArray<ToolDefinition>,
+  ): number {
+    let chars = systemPrompt?.length ?? 0
+    for (const tool of tools ?? []) {
+      chars += tool.name.length + tool.description.length + JSON.stringify(tool.inputSchema).length
+    }
+    return Math.ceil(chars / CHARS_PER_TOKEN)
   }
 
   compactMessages(messages: ReadonlyArray<EngineMessage>): ReadonlyArray<EngineMessage> {

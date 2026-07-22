@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { getConfiguredBuiltinTools } from '../../../src/engine/tools/index'
+import { getConfiguredBuiltinTools, filterMcpToolsByConfig } from '../../../src/engine/tools/index'
 import type { BuiltinToolConfig } from '../../../src/types'
 
 const CWD = '/tmp/test-config-cwd'
@@ -114,5 +114,47 @@ describe('getConfiguredBuiltinTools', () => {
     expect(tools).toHaveLength(3)
     const grepTool = tools.find((t) => t.name === 'Grep')
     expect(grepTool?.permissionLevel).toBe('dangerous')
+  })
+})
+
+describe('filterMcpToolsByConfig', () => {
+  function fakeTool(name: string) {
+    return { name } as never
+  }
+  const mixed = [
+    fakeTool('Bash'),
+    // 注意：示例不要用 store_memory 的 mcp 全名字面量——crabot-admin v1-cleanup 静态守卫禁止它出现在代码中
+    fakeTool('mcp__crab-memory__search_memory'),
+    fakeTool('mcp__crab-memory__run_maintenance'),
+    fakeTool('mcp__crab-messaging__send_message'),
+  ]
+
+  it('disabled_tools 按 mcp__<server>__<tool> 全名过滤 MCP 桥接工具', () => {
+    const filtered = filterMcpToolsByConfig(mixed, {
+      disabled_tools: ['mcp__crab-memory__run_maintenance'],
+    })
+    const names = filtered.map((t) => t.name)
+    expect(names).not.toContain('mcp__crab-memory__run_maintenance')
+    expect(names).toContain('mcp__crab-memory__search_memory')
+    expect(names).toContain('mcp__crab-messaging__send_message')
+    expect(names).toContain('Bash')
+  })
+
+  it('disabled_tools 只写工具短名时不误伤 MCP 工具（必须全名匹配）', () => {
+    const filtered = filterMcpToolsByConfig(mixed, { disabled_tools: ['run_maintenance'] })
+    expect(filtered.map((t) => t.name)).toContain('mcp__crab-memory__run_maintenance')
+  })
+
+  it('无 config / 无 disabled_tools 时全量保留（默认配置零行为变化）', () => {
+    expect(filterMcpToolsByConfig(mixed, undefined)).toHaveLength(4)
+    expect(filterMcpToolsByConfig(mixed, {})).toHaveLength(4)
+    expect(filterMcpToolsByConfig(mixed, { disabled_tools: [] })).toHaveLength(4)
+  })
+
+  it('enabled_tools 白名单不影响 MCP 工具（白名单语义只作用于内置工具）', () => {
+    const filtered = filterMcpToolsByConfig(mixed, { enabled_tools: ['Bash'] })
+    const names = filtered.map((t) => t.name)
+    expect(names).toContain('mcp__crab-memory__search_memory')
+    expect(names).toContain('mcp__crab-messaging__send_message')
   })
 })

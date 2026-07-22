@@ -96,6 +96,58 @@ describe('cli-permission-gate hook', () => {
     expect(r.action).toBe('continue')
   })
 
+  // 任务权限热刷新（spec 2026-07-20-task-permission-hot-refresh）：
+  // getResolvedPermissions 活值优先于静态 resolvedPermissions
+  it('getResolvedPermissions 活值优先：静态 none + 活值 read → 放行 read 命令', async () => {
+    const handler = getInternalHandler('cli-permission-gate')!
+    const ctx = makeCtx({
+      resolvedPermissions: minimalPerms, // 静态快照仍是 none
+      getResolvedPermissions: () => ({
+        ...minimalPerms,
+        cli_access: { ...NONE_CLI_ACCESS, provider: 'read' },
+      }),
+    })
+    const r = await handler({ event: 'PreToolUse', toolInput: { command: 'crabot provider list' } }, ctx)
+    expect(r.action).toBe('continue')
+  })
+
+  it('getResolvedPermissions 活值优先：静态 read + 活值 none → block（收紧也即时生效）', async () => {
+    const handler = getInternalHandler('cli-permission-gate')!
+    const ctx = makeCtx({
+      resolvedPermissions: {
+        ...minimalPerms,
+        cli_access: { ...NONE_CLI_ACCESS, provider: 'read' },
+      },
+      getResolvedPermissions: () => minimalPerms,
+    })
+    const r = await handler({ event: 'PreToolUse', toolInput: { command: 'crabot provider list' } }, ctx)
+    expect(r.action).toBe('block')
+  })
+
+  it('getResolvedPermissions 返回 undefined → 回退静态 resolvedPermissions', async () => {
+    const handler = getInternalHandler('cli-permission-gate')!
+    const ctx = makeCtx({
+      resolvedPermissions: {
+        ...minimalPerms,
+        cli_access: { ...NONE_CLI_ACCESS, provider: 'read' },
+      },
+      getResolvedPermissions: () => undefined,
+    })
+    const r = await handler({ event: 'PreToolUse', toolInput: { command: 'crabot provider list' } }, ctx)
+    expect(r.action).toBe('continue')
+  })
+
+  it('getResolvedPermissions 活值每次调用重读（同 ctx 中途变更立即生效）', async () => {
+    const handler = getInternalHandler('cli-permission-gate')!
+    let live = minimalPerms
+    const ctx = makeCtx({ getResolvedPermissions: () => live })
+    const cmd = { event: 'PreToolUse' as const, toolInput: { command: 'crabot provider list' } }
+
+    expect((await handler(cmd, ctx)).action).toBe('block')
+    live = { ...minimalPerms, cli_access: { ...NONE_CLI_ACCESS, provider: 'read' } }
+    expect((await handler(cmd, ctx)).action).toBe('continue')
+  })
+
   it('--reveal 永远 block', async () => {
     const handler = getInternalHandler('cli-permission-gate')!
     const ctx = makeCtx({ senderIsMaster: true, resolvedPermissions: masterPerms })

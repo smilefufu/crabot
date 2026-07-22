@@ -295,8 +295,13 @@ export interface EngineOptions {
   readonly timezone?: string
   /** 当前消息发起人是否 master——CLI permission gate hook 的 master 短路依据 */
   readonly senderIsMaster?: boolean
-  /** 发起人 effective permissions（friend ∪ session 并集）——CLI permission gate hook 用 */
+  /** 发起人 effective permissions（friend ∪ session 并集）——CLI permission gate hook 用（静态兜底） */
   readonly resolvedPermissions?: import('../types.js').ResolvedPermissions
+  /**
+   * 任务权限活值 getter（存在时 hook 优先读它）。由 worker loop 注入 taskState 持有者，
+   * supplement/resume 刷新后下一轮 hook 即生效（spec: 2026-07-20-task-permission-hot-refresh-design.md）。
+   */
+  readonly getResolvedPermissions?: () => import('../types.js').ResolvedPermissions | undefined
   /** 内容审核器——CLI permission gate 在 schedule add 时调用 */
   readonly contentReviewer?: import('../hooks/types.js').ContentReviewer
   /** 当前会话场景，用于拒绝指引文案区分群/私聊 */
@@ -436,6 +441,12 @@ export interface EngineOptions {
    * 由父 agent 根据 totalTurns + 空 output 判断是否拆任务 / 上调 budget。
    */
   readonly disableCompaction?: boolean
+
+  /**
+   * 当前模型的 context window（token 数），来自 provider 模型配置的 context_window。
+   * 缺失时 engine 回退到内置默认 200000。仅影响 compaction 触发阈值，不影响请求参数。
+   */
+  readonly contextWindowTokens?: number
 }
 
 export interface HumanMessageQueueLike {

@@ -53,8 +53,14 @@ export interface InternalHandlerContext {
   readonly lspManager?: LspManagerLike
   /** 当前消息发起人是否 master（master 短路免审核） */
   readonly senderIsMaster?: boolean
-  /** 发起人 effective permissions（friend ∪ session）*/
+  /** 发起人 effective permissions（friend ∪ session）——静态兜底值 */
   readonly resolvedPermissions?: ResolvedPermissions
+  /**
+   * 任务权限活值 getter（存在时优先于 resolvedPermissions）。
+   * 由 worker loop 注入，读 taskState 持有者——supplement/resume 刷新后下一轮 hook 即生效
+   * （spec: 2026-07-20-task-permission-hot-refresh-design.md）。
+   */
+  readonly getResolvedPermissions?: () => ResolvedPermissions | undefined
   /** 内容审核器（schedule add 等需要审核的命令使用） */
   readonly contentReviewer?: ContentReviewer
   /** 当前会话场景，用于拒绝指引文案区分群/私聊 */
@@ -74,6 +80,8 @@ export interface HookExecutorContext {
   /** ↓ Task 8 新增：CLI 权限闸需要的上下文 */
   readonly senderIsMaster?: boolean
   readonly resolvedPermissions?: ResolvedPermissions
+  /** 任务权限活值 getter（存在时优先于 resolvedPermissions；spec: 2026-07-20-task-permission-hot-refresh-design.md） */
+  readonly getResolvedPermissions?: () => ResolvedPermissions | undefined
   readonly contentReviewer?: ContentReviewer
   /** 当前会话场景，用于拒绝指引文案区分群/私聊 */
   readonly sessionType?: 'private' | 'group'

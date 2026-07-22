@@ -24,6 +24,8 @@ interface AdminTask {
   priority: string
   plan?: string
   task_type?: string
+  /** 任务标签（如 memory_rebuild）；透传给 worker 做按任务用途的工具分组判定。 */
+  tags?: string[]
   /**
    * Schedule 目标会话（来自 Schedule.target_session 顶层字段）。
    * - 有值：ScheduledTaskRunner 用它填 trigger_message.session
@@ -160,6 +162,7 @@ export class ScheduledTaskRunner {
             priority: task.priority,
             plan: task.plan,
             task_type: task.task_type,
+            tags: task.tags,
             source: { trigger_type: 'scheduled' },
           },
           context: {

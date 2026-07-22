@@ -7,7 +7,8 @@ import { runRipgrep, DEFAULT_EXCLUDE_GLOBS, getProtectedExcludeGlobs } from './r
 
 // Grep 输出按 UTF-8 字节累加上限。命中行内容很长（K 线 / CSV / JSON 单行数 KB～MB）时，
 // 仅靠 head_limit（行数）无法兜住——必须按字节裁剪，否则会塞 N MB 进 toolResult。
-const MAX_OUTPUT_BYTES = 200_000
+// 必须低于编排层兜底（tool-orchestration 100KB）并留包装余量，否则自截 hint 会被兜底硬切替换。
+const MAX_OUTPUT_BYTES = 95_000
 
 // 单行最大列数。base64 / minified 单行能到几 MB，rg 默认无上限会把这种行
 // 完整吐出来撑爆 stdout 缓冲；500 列已经足够人读、超出截断显示 "[...]"。
