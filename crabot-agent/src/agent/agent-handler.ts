@@ -1765,8 +1765,11 @@ export class AgentHandler {
               assistantTextEndTurnReminderSent = true
               return {
                 kind: 'inject' as const,
-                text: '你刚才使用 assistant text + end_turn 结束了 loop。请注意：assistant text 内容不会送达人类。\n'
-                  + '如果你想给人类发消息，请使用 send_message 工具发送；发送完成后直接 end_turn，不要再输出 assistant text。',
+                text: '[系统提醒] 你刚才直接输出了一段文字、没有调用 send_message，然后结束了回复。\n'
+                  + '请注意：直接输出的文字只留在系统内部，人类看不到；只有 send_message 发送的内容才能送达人类。\n'
+                  + '本轮对话中你已经通过 send_message 成功送达过消息。请据此判断刚才那段文字：\n'
+                  + '- 如果它是希望让人类看到的新内容，且与你已发送的内容不重复 → 调用 send_message 发送一次，然后直接结束，不要再输出任何文字；\n'
+                  + '- 如果它只是内部总结，或与你已发送的内容重复 → 不需要任何操作，直接结束即可，不要重复发送。',
               }
             }
 

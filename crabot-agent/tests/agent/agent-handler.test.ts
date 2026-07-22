@@ -749,7 +749,7 @@ describe('AgentHandler', () => {
         injectedAtMs: Date.now(),
       })
       expect(injections).toHaveLength(1)
-      expect(injections[0]).toContain('assistant text + end_turn')
+      expect(capturedReminderText).toContain('不要重复发送')
       handler.dispose()
     })
 
