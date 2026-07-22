@@ -413,6 +413,7 @@ describe('UnifiedAgent.reviveTerminalSupplementTask', () => {
     cleanupError?: Error
     hasCheckpoint?: boolean
     checkpointVersion?: string
+    checkpointMessages?: Array<Record<string, unknown>>
     hasActiveTask?: boolean
   } = {}) {
     const agent = Object.create(UnifiedAgent.prototype) as Record<string, unknown>
@@ -435,16 +436,15 @@ describe('UnifiedAgent.reviveTerminalSupplementTask', () => {
     agent.agentHandler = { hasActiveTask: vi.fn().mockReturnValue(deps.hasActiveTask ?? false) }
     const checkpoint = {
       agent_version: deps.checkpointVersion ?? AGENT_VERSION,
-      messages: [{ id: 'm1', role: 'user', content: 'hi', timestamp: 1 }],
+      messages: deps.checkpointMessages ?? [{ id: 'm1', role: 'user', content: 'hi', timestamp: 1 }],
       worker_state: { todo_items: [] },
       system_prompt: 'SP',
     }
+    const entry = (deps.hasCheckpoint ?? true) ? { traceId: 'trace-completed', checkpoint } : undefined
     const finalizeUnresumedCheckpoint = vi.fn()
     agent.traceStore = {
-      getResumableCheckpoint: vi.fn().mockReturnValue(undefined),
-      findLatestResumeCheckpointByTaskId: vi
-        .fn()
-        .mockReturnValue((deps.hasCheckpoint ?? true) ? { traceId: 'trace-completed', checkpoint } : undefined),
+      getResumableCheckpoint: vi.fn().mockReturnValue(entry),
+      findLatestResumeCheckpointByTaskId: vi.fn().mockReturnValue(entry),
       finalizeUnresumedCheckpoint,
     }
 
@@ -545,6 +545,35 @@ describe('UnifiedAgent.reviveTerminalSupplementTask', () => {
     expect(result).toEqual({ outcome: 'fallback', reason: 'admin unavailable' })
     expect(agent.handleResumeTaskWithSupplement).not.toHaveBeenCalled()
     expect(agent.rpcClient.call).toHaveBeenCalledTimes(1)
+  })
+
+  // 体积门禁（2026-07-18 spec §决策 2）：checkpoint 估算 ≥ 200k×0.8 时判定不适合复活，
+  // 必须在 admin 改状态之前降级——不 revive、不标 failed、原 task 保持终态。
+  it('degrades to fallback WITHOUT touching admin when checkpoint exceeds size budget', async () => {
+    // 700k 字符 → 估算 ≈ 175k tokens，超 160k 阈值
+    const agent = buildReviveAgent({
+      checkpointMessages: [{ id: 'm1', role: 'user', content: 'x'.repeat(700_000), timestamp: 1 }],
+    })
+
+    const result = await agent.reviveTerminalSupplementTask('task-huge', '继续', 'wechat-x', 'sess-y')
+
+    expect(result.outcome).toBe('fallback')
+    expect((result as { reason?: string }).reason).toMatch(/^checkpoint_too_large\(est≈\d+k tokens\)$/)
+    expect(agent.rpcClient.call).not.toHaveBeenCalled()
+    expect(agent.handleResumeTaskWithSupplement).not.toHaveBeenCalled()
+  })
+
+  // 体积门禁只作用于 terminal_supplement 模式；restart 恢复不受门禁影响（走 loop 内 compaction）。
+  it('restart-mode pre-check ignores the size gate for the same oversized checkpoint', () => {
+    const agent = buildReviveAgent({
+      checkpointMessages: [{ id: 'm1', role: 'user', content: 'x'.repeat(700_000), timestamp: 1 }],
+    }) as unknown as {
+      canResumeTask: (taskId: string, mode?: 'restart' | 'terminal_supplement') => { ok: boolean; reason?: string }
+    }
+
+    expect(agent.canResumeTask('task-huge', 'restart')).toEqual({ ok: true })
+    const terminalCheck = agent.canResumeTask('task-huge', 'terminal_supplement')
+    expect(terminalCheck.ok).toBe(false)
   })
 })
 

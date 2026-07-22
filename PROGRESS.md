@@ -46,6 +46,18 @@
 - 协议：protocol-agent-v2 §6.1 热更表把 model_config 拆成三种粒度（worker 主 adapter / subagent 派发 / 已 spawn subagent）；protocol-admin §3.19.6 补上"保存后触发 pushConfigToAgentModules"约定。
 - 验证：新增 `delegate-model-hot-reload.test.ts` 4 条（in-flight 派发用新 endpoint/apikey/model_id、enum 快照不变、删除回退、异步派发与 goal_audit 取 live）；agent 全量 1543/1544（另 2 skipped），唯一失败为 7-17 已记录的 context-assembler 固定时间漂移，stash 验证与本次 diff 无关。
 
+## 2026-07-18 — 复活 vs new_task 决策优化（价值关 + 体积关）
+
+- 背景：复活机制（06-29 上线）后出现"无限续杯"——续跑完成刷新 `completed_at`，24h 候选窗口滑动，候选资格永久续期。问题框定为"每条消息到来时该复活还是 new_task"的决策质量，而非候选出局规则；已排除次数上限、worker 自纠正、successor、复活时压缩等方案。
+- 价值关（dispatcher）：supplement 判据从"消息形态像补充"改为"处理新消息是否需要旧 task 上下文/结果"；拿不准偏向 new_task；failed 候选"继续/再跑一次"仍判 supplement。新增 recent terminal 候选段渲染，但只含处置信息（task_id+status+completed_at+失败原因），不含标题/进度——任务身份交给 07-12 设计的消息归因（task="..."）。
+- 上线后复盘追加（同日，经真实 LLM 重放验证）：归因优先规则（关联判断以 task= 归因消息内容为准，无归因词面重叠不构成依据）+ 活跃/terminal 两段列表降注（"只提供 id 与状态，不代表任务内容"）+ 旧工作指引（指代"很久以前"且可见 task 归因消息未涉及 → new_task）。复盘案例（alpha 词面冲突）经 6 次重放两轮规则均未改判，确认为可见信息下的边界案例；dispatcher 旧 task 检索留作后续方向。
+- 体积关（executor）：`canResumeTask` 预检查在 terminal_supplement 模式下估算 checkpoint messages，≥ 200k×0.8（复用现有常量，无新配置）→ `checkpoint_too_large(est≈…)` fallback，admin 状态不被触碰，直接降级 new_task；二元判定，不存在"压缩后复活"。restart 模式不受门禁影响。
+- trace：revive fallback span 新增 `fallback_reason`，体积降级可诊断。
+- spec：`crabot-docs/superpowers/specs/2026-07-18-revive-vs-new-task-decision-design.md`；plan：`crabot-docs/superpowers/plans/2026-07-18-revive-vs-new-task-decision.md`；协议 `protocol-agent-v2.md` §5.1 已同步。
+- Follow-up（暂缓）：context-overflow 韧性（错误不重试 + compaction 尾部治理 + 失败可诊断），spec 已写：`crabot-docs/superpowers/specs/2026-07-18-context-overflow-resilience-design.md`；候选"结果摘要"字段（若误判仍多再立项，涉及存储+协议）。
+- 顺手修复：context-assembler 既有 recent-terminal 测试写死 2026-07-12 时间戳掉出 24h 窗口，改为相对当前时间。
+- 验证：dispatcher/executor/resume 定向 89 个通过；crabot-agent 全量 1545 passed（2 skipped）；`tsc --noEmit` 通过。
+
 ## 2026-07-17 — 恢复飞书外部群 PRD 获取流程
 
 - 历史 `get_history` / `get_message` / `backfill_history` 统一复用消息 mapper；Word 等 file 保留文件名、大小、reply/root 引用并登记可由 `fetch_media` 下载的惰性 handle。

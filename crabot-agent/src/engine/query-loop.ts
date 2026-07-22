@@ -36,7 +36,7 @@ export interface RunEngineParams {
 }
 
 const DEFAULT_MAX_TURNS = 200
-const DEFAULT_MAX_CONTEXT_TOKENS = 200_000
+export const DEFAULT_MAX_CONTEXT_TOKENS = 200_000
 
 // 推理类模型偶尔以 end_turn 结束但只发 reasoning 不发 text。注入追问让其重说，
 // 超过上限仍空就老实返回空 finalText——绝不让另一个 LLM 替它编。

@@ -52,6 +52,24 @@ describe('assembleDispatcherPrompt', () => {
     expect(p).not.toMatch(/stay_silent/)
   })
 
+  it('supplement 判据为上下文价值（2026-07-18 spec）：含价值判据 / failed 继续指引 / 拿不准偏向 new_task', () => {
+    for (const sessionType of ['private', 'group'] as const) {
+      const p = assembleDispatcherPrompt(ctx({ sessionType, activeTasks: [task('task-A')] }))
+      expect(p).toContain('上下文价值')
+      expect(p).toContain('再跑一次')
+      expect(p).toMatch(/拿不准.*new_task|拿不准时.*new_task/)
+    }
+  })
+
+  it('归因优先指引（2026-07-18 讨论）：关联判断以 task= 归因消息为准，列表不代表任务内容', () => {
+    for (const sessionType of ['private', 'group'] as const) {
+      const p = assembleDispatcherPrompt(ctx({ sessionType, activeTasks: [task('task-A')] }))
+      expect(p).toContain('归因')
+      expect(p).toContain('词面重叠不构成关联依据')
+      expect(p).toContain('不代表任务内容')
+    }
+  })
+
   it('包含 JSON 输出 schema 与软上限 5', () => {
     const p = assembleDispatcherPrompt(ctx())
     expect(p).toMatch(/actions/)
@@ -240,7 +258,9 @@ describe('buildUserPrompt task-aware context', () => {
     expect(p).toContain('已经按免费方案跑完一版')
   })
 
-  it('does not render recent terminal candidates in the task list by title', () => {
+  it('renders recent terminal candidates in a dedicated section with status/reason only', () => {
+    // 2026-07-18 讨论结论：候选段只渲染消息归因承载不了的处置信息
+    // （status/completed_at/失败原因）；任务身份交给归因消息，不渲染标题/进度
     const p = buildUserPrompt(ctx({
       messages: [msg('cur', '继续')],
       activeTasks: [{
@@ -251,10 +271,11 @@ describe('buildUserPrompt task-aware context', () => {
       }],
     }))
 
-    expect(p).not.toContain('## 当前正在运行的本 session task')
-    expect(p).not.toContain('（无）')
+    expect(p).toContain('## 近期结束的本 session task（可作为 supplement 候选）')
+    expect(p).toContain('[task-done] (status: completed_recently')
     expect(p).not.toContain('"t-task-done"')
-    expect(p).not.toContain('completed_recently')
+    // 不出现在运行中列表
+    expect(p).not.toContain('## 当前正在运行的本 session task')
   })
 
   it('renders only active session task id/status in the compact running task list', () => {
@@ -276,8 +297,11 @@ describe('buildUserPrompt task-aware context', () => {
     expect(p).toContain('status: waiting_human')
     expect(p).not.toContain('正在等回答')
     expect(p).not.toContain('请确认是否按免费版继续')
-    expect(p).not.toContain('最近进度')
     expect(p).not.toContain('这只是最后一条 task message，不是真进度')
-    expect(p).not.toContain('[task-done]')
+    // 运行中列表不含 recent terminal 候选；候选出现在独立段落
+    const runningSection = p.split('## 当前正在运行的本 session task')[1]?.split('##')[0] ?? ''
+    expect(runningSection).not.toContain('[task-done]')
+    expect(p).toContain('## 近期结束的本 session task（可作为 supplement 候选）')
+    expect(p).toContain('[task-done]')
   })
 })

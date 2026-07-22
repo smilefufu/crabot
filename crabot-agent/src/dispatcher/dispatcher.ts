@@ -176,6 +176,20 @@ export function buildUserPrompt(
       lines.push(`- [${t.task_id}] (status: ${t.status})`)
     }
   }
+  // recent terminal 候选显式渲染。只渲染消息归因承载不了的处置信息——status /
+  // completed_at / 失败原因；任务内容身份交给聊天历史的 task="..." 归因（07-12 设计：
+  // 归因消息即 task 身份，标题/进度摘要既陈旧又可能是噪声，不渲染）。
+  // Spec: 2026-07-18-revive-vs-new-task-decision-design §决策 1
+  const recentTerminalTasks = ctx.activeTasks.filter((t) => t.candidate_kind === 'recent_terminal')
+  if (recentTerminalTasks.length > 0) {
+    lines.push('\n## 近期结束的本 session task（可作为 supplement 候选）')
+    for (const t of recentTerminalTasks) {
+      const statusLabel = t.status === 'failed' ? 'failed_recently' : 'completed_recently'
+      const completedAt = t.completed_at ? `, completed_at: ${t.completed_at}` : ''
+      lines.push(`- [${t.task_id}] (status: ${statusLabel}${completedAt})`)
+      if (t.status === 'failed' && t.error) lines.push(`  失败原因: ${t.error.slice(0, 200)}`)
+    }
+  }
   lines.push('\n按 system prompt 描述的 schema 输出 JSON。')
   return lines.join('\n')
 }

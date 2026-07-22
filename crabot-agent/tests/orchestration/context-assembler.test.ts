@@ -323,6 +323,10 @@ describe('ContextAssembler', () => {
 
   it('keeps recent terminal out of active_tasks and hydrates its tagged history message', async () => {
     const platformTimestamp = '2026-07-12T09:58:44.000Z'
+    // 时间戳用相对当前时间：recent terminal 候选有 completed_at 24h 窗口过滤，
+    // 写死日期会随时间推移掉出窗口（2026-07-18 曾因此整测试失败）。
+    const createdAt = new Date(Date.now() - 31 * 60_000).toISOString()
+    const completedAt = new Date(Date.now() - 30 * 60_000).toISOString()
     assembler = new ContextAssembler({
       rpcClient: mockRpc as any,
       moduleId: 'flow-default',
@@ -341,11 +345,11 @@ describe('ContextAssembler', () => {
             status: 'completed',
             priority: 'normal',
             source: { channel_id: 'wechat-test', session_id: 'session-1', trigger_type: 'message' },
-            created_at: '2026-07-12T12:12:58.000Z',
-            completed_at: '2026-07-12T12:13:30.000Z',
+            created_at: createdAt,
+            completed_at: completedAt,
             messages: [{
               content: '[非文本]',
-              timestamp: '2026-07-12T12:12:58.000Z',
+              timestamp: createdAt,
               source: { platform_message_id: 'platform-image-1' },
             }],
           }],
