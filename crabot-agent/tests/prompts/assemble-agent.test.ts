@@ -2,11 +2,12 @@ import { describe, it, expect } from 'vitest'
 import { assembleAgentPrompt } from '../../src/prompts/assemble-agent.js'
 
 describe('assembleAgentPrompt 装配顺序', () => {
-  it('私聊版按 spec 顺序拼接 12 段', () => {
+  it('私聊版按 spec 顺序拼接核心段', () => {
     const prompt = assembleAgentPrompt({ goalModeEnabled: true })
 
     const sections = [
       '## 你是 Crabot 的大脑',
+      '## 法内开放回答与表达',
       '## 你和 Crabot 系统的对话边界',
       '## 工作流',
       '## send_message 工具使用规范',
@@ -59,6 +60,12 @@ describe('assembleAgentPrompt 可选段渲染', () => {
     expect(prompt).toContain('<scene_profile label="dev-team">')
     expect(prompt).toContain('这是开发群')
     expect(prompt).toContain('</scene_profile>')
+    expect(prompt.indexOf('</scene_profile>')).toBeLessThan(
+      prompt.indexOf('## 法内开放回答与表达'),
+    )
+    expect(prompt.indexOf('## 法内开放回答与表达')).toBeLessThan(
+      prompt.indexOf('## 你和 Crabot 系统的对话边界'),
+    )
   })
 
   it('sceneProfile content 内含闭合标签时正确转义', () => {
@@ -87,6 +94,41 @@ describe('assembleAgentPrompt 可选段渲染', () => {
     })
     expect(prompt).toContain('Sub-agent')
     expect(prompt).toContain('reviewer')
+  })
+})
+
+describe('assembleAgentPrompt 法内开放回答策略', () => {
+  const countPolicySections = (prompt: string): number =>
+    prompt.split('## 法内开放回答与表达').length - 1
+
+  it.each([
+    { goalModeEnabled: true },
+    { goalModeEnabled: false, adminPersonality: '说话简短。' },
+    {
+      goalModeEnabled: true,
+      adminPersonality: '保持专业。',
+      sceneProfile: { label: 'team', content: '内部讨论群' },
+    },
+  ])('所有统一 prompt 变体只注入一次策略段', (opts) => {
+    expect(countPolicySections(assembleAgentPrompt(opts))).toBe(1)
+  })
+
+  it('明确默认回答、窄拒绝、部分回答与必要澄清', () => {
+    const prompt = assembleAgentPrompt({ goalModeEnabled: true })
+
+    expect(prompt).toContain('默认动作是回答，而不是找理由拒绝')
+    expect(prompt).toContain('只有同时满足下面两个条件时')
+    expect(prompt).toContain('只拒绝会实质促成违法的部分，其余部分继续回答')
+    expect(prompt).toContain('只问继续回答必需的一项背景')
+  })
+
+  it('明确自然表达、执行权限不变与供应商限制', () => {
+    const prompt = assembleAgentPrompt({ goalModeEnabled: true })
+
+    expect(prompt).toContain('不像公告、客服或合规文件')
+    expect(prompt).toContain('不用"作为 AI"')
+    expect(prompt).toContain('这段只规定你怎样回答，不授予任何工具权限')
+    expect(prompt).toContain('当前模型供应商的不可绕过限制仍然有效')
   })
 })
 

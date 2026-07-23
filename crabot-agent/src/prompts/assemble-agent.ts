@@ -2,7 +2,7 @@
  * 统一 Agent system prompt 装配函数。
  *
  * 装配顺序：
- *   [adminPersonality?] → 大脑身份 → [sceneProfile?] → 对话边界 →
+ *   [adminPersonality?] → 大脑身份 → [sceneProfile?] → 法内开放回答与表达 → 对话边界 →
  *   工作流（buildWorkflow，含 [目标承诺] 段位仅 goalModeEnabled 时注入）→
  *   send_message 规范 → end_turn self-check → 时间感知 → 信息查询指引 →
  *   工具使用规范 → 任务推进硬约束 → [GOAL_MODE_DETAILS 仅 goalModeEnabled 时注入] →
@@ -13,6 +13,7 @@
 
 import {
   CRABOT_BRAIN_IDENTITY,
+  OPEN_RESPONSE_POLICY,
   SYSTEM_DIALOGUE_BOUNDARY,
   buildWorkflow,
   SEND_MESSAGE_SPEC,
@@ -60,6 +61,7 @@ export function assembleAgentPrompt(opts: AssembleAgentPromptOptions): string {
     )
   }
 
+  parts.push(OPEN_RESPONSE_POLICY)
   parts.push(SYSTEM_DIALOGUE_BOUNDARY)
   parts.push(buildWorkflow(opts.goalModeEnabled))
   parts.push(SEND_MESSAGE_SPEC)
