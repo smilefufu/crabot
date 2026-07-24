@@ -192,7 +192,7 @@ import {
 import { ModuleInstaller } from './module-installer.js'
 import { ChatManager, buildChatTaskSnapshot } from './chat-manager.js'
 import { MediaStore } from './media-store.js'
-import { proxyTmpPage, resolveTmpPageBaseUrl, isManagePath } from './tmp-page-proxy.js'
+import { handleTmpPageRequest, resolveTmpPageBaseUrl } from './tmp-page-proxy.js'
 import {
   MCPServerManager,
   SkillManager,
@@ -245,7 +245,7 @@ import {
   formatMissingIdResponse,
 } from './goal-slash.js'
 import { readCredentials, verifyPassword, rotateCredentials, writeCredentials } from './credentials.js'
-import { getAdminLogsDir } from './core/data-paths.js'
+import { getAdminLogsDir, getDataRootDir } from './core/data-paths.js'
 
 // ============================================================================
 // JWT 工具函数
@@ -2344,19 +2344,17 @@ export class AdminModule extends ModuleBase {
         return
       }
 
-      // 临时交互页面反代（/tmp-pages/*）：纯透明转发到 agent 起的 server，不鉴权（匿名访问）
-      // 注意：/tmp-pages/ 不以 /api/ 开头，认证拦截本就不触发。
+      // 临时交互页面反代（/tmp-pages/*）：按需拉起 server 后透明转发，不鉴权（匿名访问）。
+      // 页面可用性以 meta.expires_at 为准；server 闲置退出由本入口与 agent 工具双侧复活
+      //（spec 2026-07-24-tmp-page-availability-design.md）。
+      // 注意：/tmp-pages/ 不以 /api/ 开头，认证拦截本就不触发。_manage 守卫在 handleTmpPageRequest 内。
       if (pathname.startsWith('/tmp-pages/')) {
-        // _manage 端点（列出/删除 page）仅供 agent 本机直连 127.0.0.1:<port> 使用，
-        // 不经公网反代暴露，否则匿名访问者可枚举/删除任意 page。
-        // isManagePath 归一化连续斜杠后再判，堵住 /tmp-pages//_manage 这类绕过。
-        if (isManagePath(pathname)) {
-          res.writeHead(404)
-          res.end(JSON.stringify({ error: 'Not found' }))
-          return
-        }
         const tmpPort = parseInt(process.env.CRABOT_TMP_PAGE_PORT ?? '19099', 10)
-        await proxyTmpPage(req, res, tmpPort)
+        await handleTmpPageRequest(req, res, pathname, {
+          serverScriptPath: path.join(CRABOT_HOME, 'crabot-admin', 'builtins', 'skills', 'tmp-page', 'scripts', 'server.cjs'),
+          dataDir: getDataRootDir(),
+          port: tmpPort,
+        })
         return
       }
 
