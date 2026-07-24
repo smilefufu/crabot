@@ -20,3 +20,8 @@ export function getAdminDataDir(): string {
 export function getAdminLogsDir(): string {
   return path.resolve(getAdminDataDir(), '..', 'logs')
 }
+
+/** 顶层数据根目录（admin 数据目录的父级），与 agent 侧 getDataRootDir 语义一致。 */
+export function getDataRootDir(): string {
+  return path.resolve(getAdminDataDir(), '..')
+}
