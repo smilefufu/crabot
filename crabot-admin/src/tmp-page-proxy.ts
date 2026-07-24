@@ -149,6 +149,33 @@ function startTmpPageServer(opts: EnsureTmpPageServerOpts): Promise<void> {
   })
 }
 
+/**
+ * /tmp-pages/* 请求的完整处理：_manage 守卫 → 幂等拉起 server → 透明转发。
+ * 守卫必须在 ensure 之前（管理端点永不经反代，也不该为它拉起 server）。
+ * ensure 失败只记日志并继续转发——转发对不可达上游自会回 502 现文案。
+ */
+export async function handleTmpPageRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  opts: EnsureTmpPageServerOpts,
+): Promise<void> {
+  if (isManagePath(pathname)) {
+    res.writeHead(404)
+    res.end(JSON.stringify({ error: 'Not found' }))
+    return
+  }
+  try {
+    await ensureTmpPageServer(opts)
+  } catch (err) {
+    console.error(JSON.stringify({
+      type: 'tmp-page-ensure-failed',
+      error: err instanceof Error ? err.message : String(err),
+    }))
+  }
+  return proxyTmpPage(req, res, opts.port)
+}
+
 /** 解析对外 base URL：优先用全局设置的 public_base_url，去尾斜杠；未配置退化为本地 web 地址 */
 export function resolveTmpPageBaseUrl(
   publicBaseUrl: string | undefined,

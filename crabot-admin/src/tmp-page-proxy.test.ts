@@ -4,7 +4,7 @@ import net from 'node:net'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { proxyTmpPage, isManagePath, ensureTmpPageServer } from './tmp-page-proxy'
+import { proxyTmpPage, isManagePath, ensureTmpPageServer, handleTmpPageRequest } from './tmp-page-proxy'
 
 describe('isManagePath', () => {
   it('命中 _manage 端点', () => {
@@ -135,5 +135,67 @@ describe('ensureTmpPageServer', () => {
     await Promise.all([1, 2, 3, 4, 5].map(() => ensureTmpPageServer(opts)))
     const lines = fs.readFileSync(path.join(dir, 'spawn.log'), 'utf8').trim().split('\n')
     expect(lines.length).toBe(1)
+  })
+})
+
+describe('handleTmpPageRequest', () => {
+  async function makeFront(opts: Parameters<typeof handleTmpPageRequest>[3]): Promise<{ server: http.Server; port: number }> {
+    const server = http.createServer((req, res) => {
+      const pathname = new URL(req.url ?? '/', 'http://x').pathname
+      void handleTmpPageRequest(req, res, pathname, opts)
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    return { server, port: (server.address() as { port: number }).port }
+  }
+
+  it('上游未运行 → 拉起后正常转发(复活主路径)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tmp-page-revive-'))
+    const scriptPath = writeFakeServerScript(dir)
+    const upstreamPort2 = await getFreePort()
+    const { server, port } = await makeFront({ serverScriptPath: scriptPath, dataDir: dir, port: upstreamPort2 })
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/tmp-pages/abcdef0123456789`)
+      expect(r.status).toBe(200)
+      expect(await r.text()).toContain('revived')
+    } finally { server.close() }
+  })
+
+  it('脚本缺失 → 降级 502 现文案,不 crash', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tmp-page-degrade-'))
+    const upstreamPort2 = await getFreePort()
+    const { server, port } = await makeFront({
+      serverScriptPath: path.join(dir, 'nope.cjs'), dataDir: dir, port: upstreamPort2,
+    })
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/tmp-pages/abcdef0123456789`)
+      expect(r.status).toBe(502)
+      expect(await r.text()).toContain('失效')
+    } finally { server.close() }
+  })
+
+  it('_manage 路径在上游未运行时直接 404,不触发拉起', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tmp-page-guard-'))
+    const scriptPath = writeFakeServerScript(dir)
+    const upstreamPort2 = await getFreePort()
+    const { server, port } = await makeFront({ serverScriptPath: scriptPath, dataDir: dir, port: upstreamPort2 })
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/tmp-pages//_manage/list`)
+      expect(r.status).toBe(404)
+      expect(fs.existsSync(path.join(dir, 'spawn.log'))).toBe(false)
+    } finally { server.close() }
+  })
+
+  it('并发首访只 spawn 一次', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tmp-page-conc2-'))
+    const scriptPath = writeFakeServerScript(dir)
+    const upstreamPort2 = await getFreePort()
+    const { server, port } = await makeFront({ serverScriptPath: scriptPath, dataDir: dir, port: upstreamPort2 })
+    try {
+      const rs = await Promise.all([1, 2, 3, 4, 5].map(() =>
+        fetch(`http://127.0.0.1:${port}/tmp-pages/abcdef0123456789`)))
+      for (const r of rs) expect(r.status).toBe(200)
+      const lines = fs.readFileSync(path.join(dir, 'spawn.log'), 'utf8').trim().split('\n')
+      expect(lines.length).toBe(1)
+    } finally { server.close() }
   })
 })
