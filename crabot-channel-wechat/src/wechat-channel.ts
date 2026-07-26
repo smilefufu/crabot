@@ -107,7 +107,7 @@ export class WechatChannel extends ModuleBase {
     this.mediaFetch = new MediaFetchManager({
       store: this.mediaHandleStore,
       channelId: this.config.moduleId,
-      download: (rec) => this.downloadFromUrl(rec),
+      download: (rec) => this.downloadFile(rec),
       publishEvent: (event) => this.rpcClient.publishEvent(event, this.config.moduleId).then(() => undefined),
     })
 
@@ -288,7 +288,7 @@ export class WechatChannel extends ModuleBase {
     const { content: formattedContent, features: extraFeatures } = formatWechatContent(msgType, rawContent)
 
     // 文件（公开 URL）惰性化：登记 handle，图片保持原样
-    const content = await this.lazifyFileContent(formattedContent, session.id)
+    const content = await this.lazifyFileContent(formattedContent, session.id, event.message.id)
 
     // 检测 @Crabot
     const atString = (rawContent.at_string as string | undefined) ?? ''
@@ -539,18 +539,60 @@ export class WechatChannel extends ModuleBase {
    * 把"带公开 URL 的文件"改成惰性 handle 形态（图片不动，仍传 media_url 供 agent 注入）。
    * type=file 且有 media_url → 登记 handle、改 status=not_fetched、去掉 media_url。
    */
-  private async lazifyFileContent(content: MessageContent, sessionId: string): Promise<MessageContent> {
-    if (content.type !== 'file' || !content.media_url) return content
+  private async lazifyFileContent(content: MessageContent, sessionId: string, messageId?: string): Promise<MessageContent> {
+    if (content.type !== 'file') return content
+    // 超时降级消息（connector 60s 内没拿到 file_url）没有 media_url，但凭 message_id
+    // 仍可在 fetch_media 时重查 connector 拿迟到补上的 file_url，故同样登记 handle。
+    // 本地文件（file_path）或既无 URL 也无 message_id 的消息无从下载，跳过。
+    if (!content.media_url && (content.file_path || !messageId)) return content
     const handle = await this.mediaHandleStore.put({
       kind: 'file',
       ...(content.filename !== undefined ? { filename: content.filename } : {}),
       ...(content.mime_type !== undefined ? { mime_type: content.mime_type } : {}),
       ...(content.size !== undefined ? { size: content.size } : {}),
       session_id: sessionId,
-      credential: { url: content.media_url },
+      credential: {
+        ...(content.media_url !== undefined ? { url: content.media_url } : {}),
+        ...(messageId !== undefined ? { message_id: messageId } : {}),
+      },
     })
     const { media_url: _omit, ...rest } = content
     return { ...rest, handle, status: 'not_fetched' }
+  }
+
+  /**
+   * wechat 媒体下载适配：credential 无 url（入站时 connector 60s 超时降级）→ 先重查
+   * connector 消息记录拿迟到补上的 file_url。重查失败 throw，异常 message 经
+   * MediaFetchManager 作为 fetch_media 的 error 透给 agent。
+   */
+  private async downloadFile(rec: MediaHandleRecord): Promise<{ filePath: string; mimeType?: string; size: number } | null> {
+    if (rec.credential.url) return this.downloadFromUrl(rec)
+    const url = await this.refetchLateFileUrl(rec)
+    return this.downloadFromUrl({ ...rec, credential: { ...rec.credential, url } })
+  }
+
+  /** 凭 credential.message_id 重查 connector，返回迟到补上的 file_url 并写回 handle 记录。拿不到则 throw。 */
+  private async refetchLateFileUrl(rec: MediaHandleRecord): Promise<string> {
+    const messageId = rec.credential.message_id as string | undefined
+    if (!messageId) throw new Error('媒体记录缺少下载凭证（无 url 也无 message_id），无法下载')
+    const msg = await this.client.getMessageById(messageId)
+    if (!msg) throw new Error(`重查渠道消息 ${messageId} 失败，暂时拿不到文件下载地址，可稍后重试 fetch_media`)
+    const content = msg.content as Record<string, unknown> | undefined
+    const fileUrl = typeof content?.file_url === 'string' ? content.file_url : undefined
+    if (!fileUrl) {
+      throw new Error(
+        '文件在微信渠道侧尚未下载完成（入站时下载超时）。可稍等片刻后重试 fetch_media；若多次重试仍失败，说明渠道侧下载失败，请告知用户重新发送该文件'
+      )
+    }
+    const handle = this.mediaHandleStore.findByCredential(rec.credential)
+    if (handle) {
+      const fileSize = content?.file_size
+      await this.mediaHandleStore.update(handle, {
+        credential: { ...rec.credential, url: fileUrl },
+        ...(rec.size === undefined && typeof fileSize === 'number' ? { size: fileSize } : {}),
+      })
+    }
+    return fileUrl
   }
 
   /** wechat 媒体下载：HTTP GET 公开 URL（connector 已传图床，无需 token）落盘。 */

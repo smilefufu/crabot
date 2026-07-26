@@ -78,6 +78,18 @@ export class MediaHandleStore {
     }
   }
 
+  /** 渠道侧补写 credential / size（如 wechat 重查拿到迟到的 file_url 后回写）。未知 handle no-op。 */
+  async update(handle: string, patch: Partial<Pick<MediaHandleRecord, 'credential' | 'size'>>): Promise<void> {
+    const rec = this.map.get(handle)
+    if (!rec) return
+    this.map = new Map(this.map).set(handle, { ...rec, ...patch })
+    try {
+      await this.persist()
+    } catch (err) {
+      console.warn('[MediaHandleStore] update persist failed:', err)
+    }
+  }
+
   /** 比较两个 credential 是否逻辑相等（按 key-value 逐项相等，忽略顺序）。 */
   private credentialMatch(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
     const aKeys = Object.keys(a).sort()

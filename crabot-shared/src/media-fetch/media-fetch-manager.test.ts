@@ -152,6 +152,25 @@ test('大文件（size >= asyncThreshold）立即返回 fetching，后台下载�
   assert.equal(payload['handle'], handle)
 })
 
+test('同步下载抛错 → 返回 failed，error 为异常 message，不向上抛', async () => {
+  const store = makeStore()
+  const pub = makePublisher()
+  const handle = await store.put({ kind: 'file', size: 1024, credential: {} })
+
+  const mgr = new MediaFetchManager({
+    store,
+    channelId: 'ch_test',
+    download: async (): Promise<DownloadResult | null> => {
+      throw new Error('文件在微信渠道侧尚未下载完成')
+    },
+    publishEvent: pub.fn,
+  })
+
+  const result = await mgr.fetch(handle)
+  assert.equal(result.status, 'failed')
+  assert.ok(result.error?.includes('文件在微信渠道侧尚未下载完成'))
+})
+
 test('后台下载抛错 → publishEvent 事件 status=failed', async () => {
   const dir = mkdtemp()
   const store = makeStore(dir)
