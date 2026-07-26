@@ -7,7 +7,7 @@ export interface MediaHandleRecord {
   session_id?: string
   /** 首次下载成功后写回的本地路径；再次 fetch 文件仍在则直接返回 */
   downloaded_file_path?: string
-  /** 渠道特定下载凭证（feishu: {platform_message_id, file_key}；telegram: {file_id}；wechat: {url}）。由该渠道的 download 适配函数解读。 */
+  /** 渠道特定下载凭证（feishu: {platform_message_id, file_key}；telegram: {file_id}；wechat: {url?, message_id}，url 缺失时凭 message_id 重查 connector 消息记录取迟到的 file_url）。由该渠道的 download 适配函数解读。 */
   credential: Record<string, unknown>
 }
 

@@ -70,6 +70,71 @@ describe('wechat fetch_media RPC', () => {
     expect(res.error).toBeTruthy()
   })
 
+  it('credential 无 url：重查 connector 拿迟到 file_url → ready，credential 写回 url 并补 size', async () => {
+    const fileContent = Buffer.from('late docx content')
+    const originalFetch = global.fetch
+    global.fetch = vi.fn(async () => ({
+      ok: true,
+      arrayBuffer: async () => fileContent.buffer,
+    })) as unknown as typeof fetch
+    const getMessageById = vi.fn(async () => ({
+      id: 'msg_conn_9',
+      content: { type: 9, file_url: 'http://cdn.example.com/late.docx', file_name: 'video1.docx', file_size: 2048 },
+    }))
+    ;(channel as any).client.getMessageById = getMessageById
+
+    const handle = await (channel as any).mediaHandleStore.put({
+      kind: 'file',
+      filename: 'video1.docx',
+      session_id: 'sess_1',
+      credential: { message_id: 'msg_conn_9' },
+    })
+
+    const res = await (channel as any).handleFetchMedia({ handle })
+    expect(res.status).toBe('ready')
+    expect(fs.existsSync(res.file_path)).toBe(true)
+    expect(getMessageById).toHaveBeenCalledWith('msg_conn_9')
+
+    const rec = (channel as any).mediaHandleStore.get(handle)
+    expect(rec.credential.url).toBe('http://cdn.example.com/late.docx')
+    expect(rec.credential.message_id).toBe('msg_conn_9')
+    expect(rec.size).toBe(2048)
+
+    global.fetch = originalFetch
+  })
+
+  it('重查后仍无 file_url → failed，error 含可行动指引', async () => {
+    ;(channel as any).client.getMessageById = vi.fn(async () => ({
+      id: 'msg_conn_10',
+      content: { type: 9, file_name: 'video1.docx', file_size: 52428800 },
+    }))
+
+    const handle = await (channel as any).mediaHandleStore.put({
+      kind: 'file',
+      filename: 'video1.docx',
+      credential: { message_id: 'msg_conn_10' },
+    })
+
+    const res = await (channel as any).handleFetchMedia({ handle })
+    expect(res.status).toBe('failed')
+    expect(res.error).toContain('尚未下载完成')
+    expect(res.error).toContain('fetch_media')
+  })
+
+  it('重查请求失败（getMessageById 返回 null）→ failed', async () => {
+    ;(channel as any).client.getMessageById = vi.fn(async () => null)
+
+    const handle = await (channel as any).mediaHandleStore.put({
+      kind: 'file',
+      filename: 'x.pdf',
+      credential: { message_id: 'msg_conn_11' },
+    })
+
+    const res = await (channel as any).handleFetchMedia({ handle })
+    expect(res.status).toBe('failed')
+    expect(res.error).toBeTruthy()
+  })
+
   it('HTTP 下载失败 → status=failed', async () => {
     const originalFetch = global.fetch
     global.fetch = vi.fn(async () => ({

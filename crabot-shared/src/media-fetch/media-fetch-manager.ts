@@ -46,7 +46,12 @@ export class MediaFetchManager {
       }
       return { status: 'fetching' }
     }
-    const r = await this.deps.download(rec)
+    let r: Awaited<ReturnType<MediaDownloadFn>>
+    try {
+      r = await this.deps.download(rec)
+    } catch (err) {
+      return { status: 'failed', error: err instanceof Error ? err.message : String(err) }
+    }
     if (!r) return { status: 'failed', error: `download failed for handle ${handle}` }
     await this.deps.store.markDownloaded(handle, r.filePath)
     return {

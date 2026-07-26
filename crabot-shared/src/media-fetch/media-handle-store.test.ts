@@ -113,3 +113,29 @@ test('findByCredential 忽略顺序差异', async () => {
   const found = store.findByCredential({ platform_message_id: 'msg_001', file_key: 'fk_abc' })
   assert.equal(found, handle)
 })
+
+test('update 合并 credential 与 size 并持久化', async () => {
+  const dir = mkdtemp()
+  const store = new MediaHandleStore(dir)
+  const handle = await store.put({ kind: 'file', filename: 'a.pdf', session_id: 'sess_1', credential: { message_id: 'm1' } })
+
+  await store.update(handle, { credential: { message_id: 'm1', url: 'http://cdn/a.pdf' }, size: 2048 })
+
+  const rec = store.get(handle)
+  assert.equal(rec?.credential['url'], 'http://cdn/a.pdf')
+  assert.equal(rec?.credential['message_id'], 'm1')
+  assert.equal(rec?.size, 2048)
+  // 未动的字段保留
+  assert.equal(rec?.filename, 'a.pdf')
+  assert.equal(rec?.session_id, 'sess_1')
+
+  // 持久化：新实例 init 后仍可见
+  const store2 = new MediaHandleStore(dir)
+  await store2.init()
+  assert.equal(store2.get(handle)?.credential['url'], 'http://cdn/a.pdf')
+})
+
+test('update 未知 handle no-op 不抛错', async () => {
+  const store = new MediaHandleStore(mkdtemp())
+  await store.update('fm_nonexistent', { size: 1 })
+})

@@ -49,13 +49,18 @@ it('权限不足时返回带 remediation 的对象，scope 按 ref.kind 选', as
   expect(res.remediation.grant_url).not.toContain('im%3Amessage')
 })
 
-it('drive 下载失败（403）时抛出可读的权限原因，而非 null/通用失败', async () => {
+it('drive 下载失败（403）时返回 failed 且 error 为可读的权限原因，而非通用失败', async () => {
   channel.client.downloadDriveFile = vi.fn(async () => { throw new Error('request failed with HTTP status 403 Forbidden') })
   const handle = await channel.mediaHandleStore.put({ kind: 'file', filename: 'a.pptx', credential: { file_token: 'boxT' } })
-  await expect(channel.mediaFetch.fetch(handle)).rejects.toThrow(/权限|分享|drive:drive:readonly/)
+  // 同步下载路径的异常由 MediaFetchManager 捕获为 {status:'failed', error}，经 fetch_media 透给 agent
+  const res = await channel.mediaFetch.fetch(handle)
+  expect(res.status).toBe('failed')
+  expect(res.error).toMatch(/权限|分享|drive:drive:readonly/)
 })
-it('drive 下载非权限错误也带原始原因', async () => {
+it('drive 下载非权限错误 failed，error 带原始原因', async () => {
   channel.client.downloadDriveFile = vi.fn(async () => { throw new Error('socket hang up') })
   const handle = await channel.mediaHandleStore.put({ kind: 'file', filename: 'a.pptx', credential: { file_token: 'boxT' } })
-  await expect(channel.mediaFetch.fetch(handle)).rejects.toThrow(/socket hang up/)
+  const res = await channel.mediaFetch.fetch(handle)
+  expect(res.status).toBe('failed')
+  expect(res.error).toMatch(/socket hang up/)
 })
