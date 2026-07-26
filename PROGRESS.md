@@ -1,6 +1,14 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-21 — crabot-agent token 使用效率优化（对标 Pi agent）
+> 最后更新：2026-07-26 — wechat 入站文件超时降级按需补取（PR #44）
+
+## 2026-07-26 — wechat 入站文件超时降级按需补取（PR #44）
+
+- 起因：wechat 大文件（如改名视频 video1.docx）触发 connector 60s down_file 超时降级，emit 仅含 file_name/file_size；crabot 不登记 handle，agent 无下载途径只能反复请用户重发（重发再超时死循环）。实际上迟到的 ack 已把 file_url 写进 connector 消息记录，bot 凭 `GET /api/v1/bot/messages/:id` 可查到。
+- 方案（拉模型，connector 零改动）：降级文件消息也登记 handle（credential `{message_id}`），`fetch_media` 时重查 connector 拿迟到 file_url 并回写 credential+size；正常链路 credential 扩展为 `{url, message_id}`，旧存量 `{url}` 兼容无迁移。shared 层 `MediaFetchManager` 同步下载路径 try/catch（异常 message 变 failed.error 透达 LLM）+ `MediaHandleStore.update`。
+- spec：`crabot-docs/superpowers/specs/2026-07-26-wechat-inbound-file-timeout-refetch-design.md`（含 §5.4 勘误：feishu drive 已用 throw 传错误，呈现从 RPC 异常变 failed 结果，测试断言同步对齐）。
+- 验证：shared 96 / wechat 62 / feishu 239 / agent media-resolver 定向 7 全通过；telegram 唯一失败为既有 reaction emoji 断言漂移（与本次无关）。@claude review APPROVED 无行内意见，自动 squash 合并。
+- 二期候选：connector 增加重触发 down_file 的 bot API，覆盖"puppet 下载真失败（ack 永不回）"场景；届时 crabot 重查无果后可主动触发重下。
 
 ## 2026-07-21 — crabot-agent token 使用效率优化（对标 Pi agent）
 
