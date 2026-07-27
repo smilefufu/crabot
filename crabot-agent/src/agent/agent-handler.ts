@@ -3168,7 +3168,10 @@ export class AgentHandler {
    * 失败（agent 忙 / 网络抖动），此时 worker 会在 barrier 超时后自己醒来——若 task 已是
    * 终态，它继续跑就会发出用户看不懂的消息、再撞上状态机拒绝。这里静默 abort 收口。
    *
-   * admin 不可达时保持现状继续跑（fail-open）：查不到状态不代表任务已死。
+   * admin 不可达时保持现状继续跑（fail-open）：查不到状态不代表任务已死。但 admin 明确
+   * 答复 task 不存在是另一回事——`delete_task` 拒删活跃任务、按量清理只删终态任务，所以
+   * "查无此 task" ⟹ 它已经终态过并被删掉，此时同样要 abort（人类在 UI 看到 failed 任务
+   * 顺手删掉是很自然的操作，不能让 worker 借这条更窄的路继续跑）。
    */
   async abortWorkerIfTaskTerminal(taskId: TaskId): Promise<void> {
     if (!this.deps?.getAdminPort || !this.deps.rpcClient) return
@@ -3183,7 +3186,12 @@ export class AgentHandler {
         this.abortWorker(taskId, `task already ${resp.task.status} (barrier timeout guard)`)
       }
     } catch (err) {
-      log(`[abort-worker] terminal guard skipped task=${taskId}: ${err instanceof Error ? err.message : String(err)}`)
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('TASK_NOT_FOUND')) {
+        this.abortWorker(taskId, 'task no longer exists (barrier timeout guard)')
+        return
+      }
+      log(`[abort-worker] terminal guard skipped task=${taskId}: ${msg}`)
     }
   }
 

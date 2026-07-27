@@ -5740,11 +5740,12 @@ export class AdminModule extends ModuleBase {
       throw new Error(AdminErrorCode.TASK_NOT_FOUND)
     }
 
-    // VALID_TRANSITIONS 已覆盖 pending/planning/executing/waiting_human → cancelled。
-    // applyStatusTransition 会抛 INVALID_STATUS_TRANSITION（含 waiting / 终态等不可取消的情况）。
+    // VALID_TRANSITIONS 覆盖全部四个 in-flight 态 → cancelled（pending / planning /
+    // executing / waiting_human / waiting）；只有终态会被 applyStatusTransition 拒。
     // 先叫停 worker 再切状态——取消一个还在跑的 worker 本来就是 cancel 的题中之义
-    // （旧 TODO"in-flight 取消应通知 worker"在此了结）。状态机拒绝时 abort 已经发出，
-    // 但那些场景（waiting / 终态）本就没有活着的 worker，abort 是 no-op。
+    // （旧 TODO"in-flight 取消应通知 worker"在此了结）。waiting 态的 worker 也是活着的
+    // （park 在 humanQueue.waitForPush 等 subagent / bg 通知），abort 唤醒它退出后
+    // waiting → cancelled 正常落地。只有对终态任务 abort 才是 no-op。
     await this.abortWorkerBeforeTerminal(task.id, params.reason ?? 'cancelled by human')
     try {
       this.applyStatusTransition(task, 'cancelled', { error: params.reason })

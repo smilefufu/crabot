@@ -851,6 +851,18 @@ describe('AgentHandler', () => {
       handler.dispose()
     })
 
+    it('barrier 兜底：task 已被删除（TASK_NOT_FOUND）→ abort', async () => {
+      // delete_task 拒删活跃任务、按量清理只删终态任务，所以"查无此 task" ⟹ 它已终态过。
+      const rpcCall = vi.fn().mockRejectedValue(new Error('ADMIN_TASK_NOT_FOUND'))
+      const handler = makeMessagingHandler(rpcCall)
+      const ac = withActiveTask(handler, 'task_1')
+
+      await handler.abortWorkerIfTaskTerminal('task_1')
+
+      expect(ac.signal.aborted).toBe(true)
+      handler.dispose()
+    })
+
     it('barrier 兜底：admin 不可达 → fail-open，不误杀 worker', async () => {
       const rpcCall = vi.fn().mockRejectedValue(new Error('admin unreachable'))
       const handler = makeMessagingHandler(rpcCall)

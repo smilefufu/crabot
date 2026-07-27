@@ -90,6 +90,19 @@ describe('admin 判死前 abort worker', () => {
     expect((admin as any).tasks.get(task.id).status).toBe('cancelled')
   })
 
+  it('cancel 一个 waiting 任务：worker 也活着（park 在 waitForPush），abort 后正常切 cancelled', async () => {
+    const task = await createTask()
+    const stored = (admin as any).tasks.get(task.id)
+    stored.status = 'waiting'
+    stored.started_at = new Date().toISOString()
+    stored.waiting_at = new Date().toISOString()
+
+    await (admin as any).handleCancelTask({ task_id: task.id, reason: 'user-canceled' })
+
+    expect(abortCalls()).toHaveLength(1)
+    expect((admin as any).tasks.get(task.id).status).toBe('cancelled')
+  })
+
   it('waiting_human 超时判死前叫停 worker', async () => {
     const task = await createTask()
     const stored = (admin as any).tasks.get(task.id)
