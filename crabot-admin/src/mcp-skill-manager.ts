@@ -910,18 +910,22 @@ export class SkillManager {
   /**
    * 注册内置 Skill（幂等：已存在同名的不会重复注册）
    * 在 Admin 初始化时调用，扫描 builtinsDir 下的子目录，每个子目录应包含 SKILL.md
+   *
+   * 返回本次扫到的可用 builtin skill 数量。扫不到任何一个是异常状态（历史上
+   * release 包漏打 SKILL.md 导致 memory-curate 等全部缺失且无声无息），必须报错。
    */
-  async registerBuiltins(builtinsDir: string): Promise<void> {
+  async registerBuiltins(builtinsDir: string): Promise<number> {
     let dirEntries: import('fs').Dirent[]
     try {
       dirEntries = await fs.readdir(builtinsDir, { withFileTypes: true })
     } catch {
-      // builtinsDir 不存在时静默跳过
-      return
+      console.error(`[SkillManager] builtin skills 目录不可读，内置 skill 全部缺失: ${builtinsDir}`)
+      return 0
     }
 
     const existingNames = new Set(this.list().map(s => s.name))
     let changed = false
+    let found = 0
 
     for (const dirent of dirEntries) {
       if (!dirent.isDirectory()) continue
@@ -932,11 +936,16 @@ export class SkillManager {
       try {
         content = await fs.readFile(skillMdPath, 'utf-8')
       } catch {
-        continue // 没有 SKILL.md 的子目录跳过
+        console.error(`[SkillManager] builtin skill "${dirent.name}" 缺 SKILL.md，已跳过: ${skillMdPath}`)
+        continue
       }
 
       const parsed = parseSkillMd(content)
-      if (!parsed.name) continue
+      if (!parsed.name) {
+        console.error(`[SkillManager] builtin skill "${dirent.name}" 的 SKILL.md 缺 frontmatter name，已跳过`)
+        continue
+      }
+      found++
 
       if (existingNames.has(parsed.name)) {
         // 已注册：用 SKILL.md 当前 frontmatter 同步条目
@@ -983,9 +992,15 @@ export class SkillManager {
       changed = true
     }
 
+    if (found === 0) {
+      console.error(`[SkillManager] builtin skills 目录下没扫到任何 SKILL.md，内置 skill 全部缺失: ${builtinsDir}`)
+    }
+
     if (changed) {
       await this.save()
     }
+
+    return found
   }
 
   /**

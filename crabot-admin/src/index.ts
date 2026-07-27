@@ -772,7 +772,8 @@ export class AdminModule extends ModuleBase {
 
     // 注册内置 Skill（幂等，仅首次启动时写入）
     const builtinSkillsPath = path.join(__dirname, '..', 'builtins', 'skills')
-    await this.skillManager.registerBuiltins(builtinSkillsPath)
+    const registeredBuiltins = await this.skillManager.registerBuiltins(builtinSkillsPath)
+    console.log(`[Admin] Registered ${registeredBuiltins} builtin skills from ${builtinSkillsPath}`)
 
     // Seed builtin skills（幂等）
     await this.skillManager.seedBuiltinSkills(getBuiltinSkills())
