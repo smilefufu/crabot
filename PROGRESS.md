@@ -1,6 +1,21 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-27 — release 包漏打 builtins skill 载荷（issue #43 上半）
+> 最后更新：2026-07-27 — 任务终态与 worker 生命周期对齐（issue #43 下半）
+
+## 2026-07-27 — 任务终态与 worker 生命周期对齐（issue #43 下半）
+
+- 现象：任务被 admin 判 failed 后，worker 仍在发消息（"还在等你回复……"），随后 `failed → executing` / `failed → completed` 被状态机拒绝。
+- 根因：**admin 是 task 状态的 SSOT，但 worker loop 活在 agent 进程里，改 tasks.json 不会让挂起的 loop 消失**。worker 调 ask_human 后 park 在自己的 24h barrier 上；barrier 到点**自己醒来**继续跑，而 admin 的 24h 超时 + 5min 扫描最多晚 5 分钟才判死——两个独立计时器互不通知，且顺序恰好反了。`crab-messaging.ts` 的常量注释证明作者预见了这个竞态（"barrier 先 timeout 但 admin 还没切 failed，worker 假醒空跑"），但把两个 24h 设成相等、漏算了扫描周期，导致"假醒"稳定发生而非偶发。
+- 不变量（本次确立）：**task 非终态 ⟺ worker 活着**。本 bug 与 2026-06-05 orphan bug（worker 死了但 task 卡 waiting_human）是同一不变量的正反两个方向；当年选方案 C（24h 超时兜底）只堵反向，顺手制造了正向。
+- 决策（与 master 逐条确认，未写独立 spec）：
+  1. **abort 失败仍落 failed** + agent 侧自检兜底。理由：agent 不可达时不落终态 = orphan bug 复现，比窄窗口内多发一条消息更糟。
+  2. **只做正向**，反向不动。反向已有 24h 超时兜底，且修好正向后这条兜底自己也会走 abort（worker 已不存在，no-op），语义闭合；期间人类回复走 pushSupplement 失败 → 降级 new_task，不丢消息。
+  3. **三条判死路径统一入口**（超时扫描 / 重启 sweep / trace 对账），顺带接上人类 `cancel_task`——`handleCancelTask` 里"in-flight 取消应通知 worker"的旧 TODO 在此了结（agent 侧 `cancel_task` RPC 早就备好，admin 从来没调过，是半条链路）。
+  4. **spec 2026-05-14 §3.6 的"超时推 system supplement 让 worker 收尾"作废**。它自相矛盾（failed 是无出边终态，收尾写不回状态），且"抢救 24h 上下文"的价值已被 revive 机制取代——`revive_task_for_supplement` + checkpoint resume 能原样恢复 messages + prompt cache 前缀（checkpoint 是 per-turn 落盘的，parked worker 的上下文已在盘上）。
+  5. 复用审查：`cancelTask` 带取消语义，抽出无场景语义的 `abortWorker(taskId, reason)`，cancel / timeout / sweep / 对账各自组装状态语义后调它。
+- 三道防线：① admin 判死前主动 `abort_worker`；② `ASK_HUMAN_BARRIER_TIMEOUT_MS` 24h → 24h+15min（> admin 24h + 5min 扫描周期），保证 admin 必然先判死；③ barrier 真超时自醒时 `abortIfTaskTerminal` 查一次状态，已终态则静默 abort（admin 不可达时 fail-open，不误杀）。
+- 协议：protocol-agent-v2 新增 §3.6.1 `abort_worker`；protocol-admin 状态机段补「终态与 worker 生命周期」不变量；spec 2026-05-14 §3.6 加修订说明。
+- 验证：新增 admin 4 条（cancel/超时各自 abort、abort 失败仍落 failed、worker 自报终态不 abort）+ agent 8 条（abortWorker 返回值与委托、终态兜底三态、barrier onTimeout 触发与不误触发）；admin 全量 1036 通过，agent 全量 1640/1641（唯一失败是并行满载下的 bg shell flake——两次跑失败的是不同文件，干净树同样复现过 2 条，单跑 25 条全绿）。
 
 ## 2026-07-27 — release 包漏打 builtins skill 载荷（issue #43 上半）
 
@@ -9,7 +24,9 @@
 - 审计：按 release.yml 规则本地重放打包并与源码求差集，除上述 24 个 md 外无第二处运行时资源被误删（dist 产物、memory 的 schema_version/uv.lock/config、各模块 crabot-module.yaml、panic-monitor 的 py/sh 均在包内）；顺带发现根 LICENSE 没进包（Apache-2.0 分发合规），一并补上。
 - 修复：① Unix rsync 加 `builtins/**` include，Windows 清理豁免改 `(builtin-skills|builtins)`；② 新增 `.github/scripts/verify-release-payload.mjs`，打包前比对源码 skill 载荷与 staging，缺任一文件即 fail（对旧规则重放确认能拦下这 24 个）；③ `registerBuiltins` 返回注册数并对"目录不可读 / 子目录缺 SKILL.md / 一个都没扫到"打 error，Admin 启动打印注册数量，不再静默。
 - 验证：新增 `crabot-admin/tests/builtin-skills-registration.test.ts` 4 条（正常注册 / 目录缺失 / 空壳目录 / 仓库载荷全量可注册）；admin 全量 1032 通过；agent skill 契约 21 条通过。升级路径无需迁移——`extractRelease` 整目录替换，老实例升级后 registerBuiltins 自动补注册。
-- **未做（issue #43 下半，需单开 spec）**：内部维护任务的外发边界（`external_output: forbidden` 之类系统级约束，而非靠 prompt）、skill 缺失时 fail closed、任务进终态后 worker 未取消仍发消息的生命周期竞态。
+- issue #43 下半：worker 生命周期竞态已由上面那条（PR #46）修复。**仍未做**：内部维护任务的外发边界（`external_output: forbidden` 之类系统级约束，而非靠 prompt）、skill 缺失时 fail closed——两者都与已确认 spec 2026-07-11 的工具矩阵冲突，要动得先改协议；先观察本次打包修复上线后 memory_curate 是否还私聊 Master（skill 在位时其 SKILL.md 明写"不汇报 master"）。
+
+> 最后更新：2026-07-26 — wechat 入站文件超时降级按需补取（PR #44）
 
 ## 2026-07-26 — wechat 入站文件超时降级按需补取（PR #44）
 

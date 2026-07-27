@@ -224,6 +224,10 @@ const LOG_FILE = path.join(getAgentDataDir(), 'agent-handler-debug.log')
 /** subagent 完成通知里内联结果预览的字符上限；超过则截断并提示用 get_subagent_output 读全文。 */
 const SUBAGENT_RESULT_PREVIEW_MAX = 2000
 
+/** Task 终态集合。与 crabot-admin/src/task-state-machine.ts 的 TERMINAL_STATUSES 对齐
+ *  （同 goal-audit.ts TERMINAL_GOAL_STATUSES 的同步一份 + 注释指向源的做法）。 */
+const TERMINAL_TASK_STATUSES: ReadonlySet<string> = new Set(['completed', 'failed', 'cancelled'])
+
 export interface SubAgentExitInfo {
   readonly entity_id: string
   readonly task_description: string
@@ -1300,6 +1304,9 @@ export class AgentHandler {
           taskType: task.task_type,
           // 用 getter 形式封装本地 cache，worker 中途 set_task_goal 后下一轮工具调用立即生效。
           hasGoal: () => goalSetCache,
+          // ask_human barrier 超时自醒时的兜底：admin 判死时的 abort_worker 若没送达，
+          // 这里查一次 task 状态，已终态就静默 abort，不让 worker 带着死任务继续跑。
+          abortIfTaskTerminal: () => this.abortWorkerIfTaskTerminal(task.task_id),
           // Goal mode 缓冲：send_message handler 在工作态（无 activeAudit）把 info 消息推入 outboundBuffer；
           // 等审态（hasActiveAudit=true）下立即 flush。引用 taskState 持久数组，跨 iteration 一致。
           // spec: 2026-06-07-goal-audit-async-buffered-info-design.md Task 6
@@ -3130,12 +3137,61 @@ export class AgentHandler {
     }
   }
 
-  cancelTask(taskId: TaskId, _reason: string): void {
+  /**
+   * 中止某个 task 的 worker loop。**无场景语义**——只负责 abort，不碰 task 状态、
+   * 不假设调用方是取消 / 超时 / 对账中的哪一种。各场景的状态语义由 admin 侧组装。
+   *
+   * 不变量：admin 把 task 落终态前必须先调本方法（经 abort_worker RPC），保证
+   * 「task 非终态 ⟺ worker 活着」。parked 在 barrier 上的 worker 也能被叫醒——
+   * humanQueue.waitBarrier 监听 abortSignal，醒来后在下一轮 LLM 前退出。
+   *
+   * @returns 是否找到活着的 worker（false = 本来就没在跑，abort 是 no-op）
+   */
+  abortWorker(taskId: TaskId, reason: string): boolean {
+    const taskState = this.activeTasks.get(taskId)
+    if (!taskState) return false
+    log(`[abort-worker] task=${taskId} reason=${reason}`)
+    taskState.abortController.abort()
+    return true
+  }
+
+  cancelTask(taskId: TaskId, reason: string): void {
     // SSOT: 不再 mutate agent 内存里的 task status —— admin 那侧的 cancel_task RPC 已经
     // 把 tasks.json 改成 'cancelled'，本方法只负责 abort 当前 worker loop。
-    const taskState = this.activeTasks.get(taskId)
-    if (taskState) {
-      taskState.abortController.abort()
+    this.abortWorker(taskId, reason)
+  }
+
+  /**
+   * 兜底：barrier 超时自醒时，先确认 task 还没被 admin 判死。
+   *
+   * 正常路径下 admin 判死时会经 abort_worker 叫停 worker，走不到这里。但那条 RPC 可能
+   * 失败（agent 忙 / 网络抖动），此时 worker 会在 barrier 超时后自己醒来——若 task 已是
+   * 终态，它继续跑就会发出用户看不懂的消息、再撞上状态机拒绝。这里静默 abort 收口。
+   *
+   * admin 不可达时保持现状继续跑（fail-open）：查不到状态不代表任务已死。但 admin 明确
+   * 答复 task 不存在是另一回事——`delete_task` 拒删活跃任务、按量清理只删终态任务，所以
+   * "查无此 task" ⟹ 它已经终态过并被删掉，此时同样要 abort（人类在 UI 看到 failed 任务
+   * 顺手删掉是很自然的操作，不能让 worker 借这条更窄的路继续跑）。
+   */
+  async abortWorkerIfTaskTerminal(taskId: TaskId): Promise<void> {
+    if (!this.deps?.getAdminPort || !this.deps.rpcClient) return
+    if (!this.activeTasks.has(taskId)) return
+    try {
+      const adminPort = await this.deps.getAdminPort()
+      const resp = await this.deps.rpcClient.call<
+        { task_id: string },
+        { task: { status: string } }
+      >(adminPort, 'get_task', { task_id: taskId }, this.deps.moduleId)
+      if (TERMINAL_TASK_STATUSES.has(resp.task.status)) {
+        this.abortWorker(taskId, `task already ${resp.task.status} (barrier timeout guard)`)
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('TASK_NOT_FOUND')) {
+        this.abortWorker(taskId, 'task no longer exists (barrier timeout guard)')
+        return
+      }
+      log(`[abort-worker] terminal guard skipped task=${taskId}: ${msg}`)
     }
   }
 

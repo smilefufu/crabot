@@ -475,6 +475,7 @@ export class UnifiedAgent extends ModuleBase {
       this.registerMethod('deliver_human_response', this.handleDeliverHumanResponse.bind(this))
       this.registerMethod('deliver_page_feedback', this.handleDeliverPageFeedback.bind(this))
       this.registerMethod('cancel_task', this.handleCancelTask.bind(this))
+      this.registerMethod('abort_worker', this.handleAbortWorker.bind(this))
     }
 
     // Trace 接口
@@ -2382,6 +2383,18 @@ export class UnifiedAgent extends ModuleBase {
 
     this.agentHandler.cancelTask(params.task_id, params.reason)
     return { cancelled: true }
+  }
+
+  /**
+   * 中止 worker loop，不带场景语义。admin 把 task 落终态（cancelled / failed）前调用，
+   * 维持「task 非终态 ⟺ worker 活着」。worker 本来就不在跑时返回 aborted=false（no-op）。
+   */
+  private handleAbortWorker(params: { task_id: TaskId; reason: string }): { aborted: boolean } {
+    if (!this.agentHandler) {
+      throw new Error('Worker handler not configured')
+    }
+
+    return { aborted: this.agentHandler.abortWorker(params.task_id, params.reason) }
   }
 
   // ============================================================================

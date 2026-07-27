@@ -4847,6 +4847,9 @@ export class AdminModule extends ModuleBase {
     // 2. 不能 resume 的（含 recovery 自身）→ 标 failed
     const toFail = [...needRecovery, ...inFlight.filter((t) => t.tags.includes('recovery'))]
     for (const t of toFail) {
+      // agent 刚重启，worker 通常已随进程消失，abort 多为 no-op；仍统一走判死入口，
+      // 覆盖"agent 没重启、只是 resume 失败"这类 worker 仍在的情形。
+      await this.abortWorkerBeforeTerminal(t.id, 'agent_restarted_during_execution')
       this.applyStatusTransition(t, 'failed', { error: 'agent_restarted_during_execution' })
     }
     if (toFail.length > 0) {
@@ -5148,6 +5151,34 @@ export class AdminModule extends ModuleBase {
    * 任何直接 mutate task.status 的新代码 = bug。如发现需要绕过本方法的场景，
    * 优先检查是不是 VALID_TRANSITIONS 缺一条；不是的话再考虑加 opt。
    */
+  /**
+   * admin 单方面把 task 判死前，先叫停对应的 worker loop。
+   *
+   * 不变量：**task 非终态 ⟺ worker 活着**。admin 是 task 状态的 SSOT，但 worker loop 的
+   * 生死在 agent 进程里——admin 改 tasks.json 不会让 agent 那边挂起的 loop 消失。三条
+   * 判死路径（waiting_human 超时 / 重启 sweep / trace 对账）+ 人类主动 cancel 都必须先
+   * 走这里，否则 worker 会带着已死的 task 继续跑（发消息、撞状态机拒绝）。
+   *
+   * **只用于 admin 主动判死**：worker 自己上报终态时不能调——那是它正常收尾，abort 会打断。
+   *
+   * 失败不阻断判死（决策 2026-07-27）：admin 不可达 agent 时若不落终态，任务会永久卡在
+   * 非终态——那正是 2026-06-05 orphan bug 的形态，比窄窗口内 worker 多说一句话更糟。
+   * abort 没送达的窄窗口由 agent 侧 barrier onTimeout 自检兜底。
+   */
+  private async abortWorkerBeforeTerminal(taskId: TaskId, reason: string): Promise<void> {
+    try {
+      await this.callAgentRpc<{ task_id: TaskId; reason: string }, { aborted: boolean }>(
+        'abort_worker',
+        { task_id: taskId, reason },
+      )
+    } catch (err) {
+      console.warn(
+        `[Admin] abort_worker failed for task ${taskId} (${reason}); ` +
+        `落终态继续，agent 侧 barrier 自检兜底: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+  }
+
   private applyStatusTransition(
     task: Task,
     newStatus: TaskStatus,
@@ -5645,6 +5676,9 @@ export class AdminModule extends ModuleBase {
       if (!task) continue  // race：扫描期间 task 被删了
 
       try {
+        // 判死前叫停 worker。对账的前提是"trace 已全终态"，worker 通常不在了（abort no-op），
+        // 但 trace 漏写 / worker 卡死等 drift 场景下它可能还活着，统一走判死入口。
+        await this.abortWorkerBeforeTerminal(patch.taskId, `reconciliation: ${patch.reason}`)
         // 智能恢复：current=waiting_human/waiting → 终态非法，需中转 executing
         if (task.status === 'waiting_human' || task.status === 'waiting') {
           this.applyStatusTransition(task, 'executing')
@@ -5682,10 +5716,12 @@ export class AdminModule extends ModuleBase {
     }
 
     for (const task of expiredTasks) {
-      // TODO(Phase 2 §3.6)：当 Phase 2 实现 humanQueue 注入路径后，超时切 failed 时还应
-      // 推一条 system supplement 给 worker（"超时未收到人类回复，请基于已掌握信息收尾"），
-      // 让 worker 优雅收尾而不是冷启动 recovery。当前 Phase 1 只切状态，supplement 留待
-      // Phase 2 完成 handleLocalSupplement + humanQueue 链路后补。
+      // 判死前先叫停 worker（它正 park 在 ask_human barrier 上，abort 会把它叫醒并退出）。
+      // spec 2026-05-14 §3.6 原设计是"切 failed + 推 system supplement 让 worker 收尾"，
+      // 已作废（决策 2026-07-27）：收尾要写回状态，而 failed 是无出边终态，语义自相矛盾；
+      // 且人类事后回复走 revive_task_for_supplement + checkpoint resume，上下文不会丢，
+      // 不需要临终抢救一份没人读的收尾报告。
+      await this.abortWorkerBeforeTerminal(task.id, 'waiting_human timeout')
       try {
         await this.handleUpdateTaskStatus({
           task_id: task.id,
@@ -5704,9 +5740,13 @@ export class AdminModule extends ModuleBase {
       throw new Error(AdminErrorCode.TASK_NOT_FOUND)
     }
 
-    // VALID_TRANSITIONS 已覆盖 pending/planning/executing/waiting_human → cancelled。
-    // applyStatusTransition 会抛 INVALID_STATUS_TRANSITION（含 waiting / 终态等不可取消的情况）。
-    // TODO: pending 之外的 in-flight 取消应通知 worker，现在仍是直切。
+    // VALID_TRANSITIONS 覆盖全部四个 in-flight 态 → cancelled（pending / planning /
+    // executing / waiting_human / waiting）；只有终态会被 applyStatusTransition 拒。
+    // 先叫停 worker 再切状态——取消一个还在跑的 worker 本来就是 cancel 的题中之义
+    // （旧 TODO"in-flight 取消应通知 worker"在此了结）。waiting 态的 worker 也是活着的
+    // （park 在 humanQueue.waitForPush 等 subagent / bg 通知），abort 唤醒它退出后
+    // waiting → cancelled 正常落地。只有对终态任务 abort 才是 no-op。
+    await this.abortWorkerBeforeTerminal(task.id, params.reason ?? 'cancelled by human')
     try {
       this.applyStatusTransition(task, 'cancelled', { error: params.reason })
     } catch (err) {

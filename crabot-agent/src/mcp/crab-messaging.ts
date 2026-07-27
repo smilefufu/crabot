@@ -66,6 +66,10 @@ export interface TaskContext {
    *
    *  spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.1 + Revision 第 1 段 */
   outboundBuffer?: Array<OutboundBufferEntry>
+  /** ask_human barrier 超时自醒时的兜底钩子：查一次 task 状态，已终态则 abort worker。
+   *  正常路径下 admin 判死会先经 abort_worker 叫停 worker，走不到这里；这条覆盖那次 RPC
+   *  失败的窄窗口。admin 不可达时 fail-open（继续跑）。 */
+  abortIfTaskTerminal?: () => Promise<void>
   /** 当前 task 是否处于"等审态"（activeAuditId 非空）。同步 getter，工具内每次调用现读。
    *  工作态（false）= 缓冲；等审态（true）= 立即 flush 给用户（过程响应）。
    *  spec: 2026-06-07-goal-audit-async-buffered-info-design.md Task 6 */
@@ -145,10 +149,16 @@ const ASK_HUMAN_PENDING_QUESTION_MAX_LEN = 2000
 
 /**
  * ask_human 设置 barrier 的超时。
- * 必须 >= admin WAITING_HUMAN_TIMEOUT_MS（24h），否则 barrier 先 timeout 但 admin 还没切 failed，worker 假醒空跑。
- * 注：admin 端常量在 crabot-admin/src/index.ts AdminModule.WAITING_HUMAN_TIMEOUT_MS。
+ *
+ * 必须 > admin 的 WAITING_HUMAN_TIMEOUT_MS(24h) + WAITING_HUMAN_SCAN_INTERVAL_MS(5min)：
+ * admin 判死发生在 [24h, 24h+5min] 区间（超时值 + 一个扫描周期），barrier 早于这个区间醒
+ * 就是 worker 假醒空跑。这里取 24h+15min 留足余量。
+ * 注：admin 端两个常量都在 crabot-admin/src/index.ts AdminModule 上。
+ *
+ * 顺序保证不只靠这个常量——admin 判死前会经 abort_worker 主动叫停 worker（维持
+ * 「task 非终态 ⟺ worker 活着」），本常量与 setBarrier 的 onTimeout 兜底是第二、三道防线。
  */
-const ASK_HUMAN_BARRIER_TIMEOUT_MS = 24 * 60 * 60 * 1000
+const ASK_HUMAN_BARRIER_TIMEOUT_MS = 24 * 60 * 60 * 1000 + 15 * 60 * 1000
 
 // ============================================================================
 // 工具类型定义
@@ -1026,7 +1036,10 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
           }
 
           // Step 3: setBarrier（本地内存操作，从不失败）
-          taskCtx.humanQueue.setBarrier(ASK_HUMAN_BARRIER_TIMEOUT_MS)
+          // onTimeout 兜底：barrier 自醒时先确认 admin 那边还没判死（见 abortIfTaskTerminal 注释）。
+          taskCtx.humanQueue.setBarrier(ASK_HUMAN_BARRIER_TIMEOUT_MS, () => {
+            void taskCtx.abortIfTaskTerminal?.()
+          })
         }
 
         return wrapText({
