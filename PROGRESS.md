@@ -17,6 +17,15 @@
 - 协议：protocol-agent-v2 新增 §3.6.1 `abort_worker`；protocol-admin 状态机段补「终态与 worker 生命周期」不变量；spec 2026-05-14 §3.6 加修订说明。
 - 验证：新增 admin 4 条（cancel/超时各自 abort、abort 失败仍落 failed、worker 自报终态不 abort）+ agent 8 条（abortWorker 返回值与委托、终态兜底三态、barrier onTimeout 触发与不误触发）；admin 全量 1036 通过，agent 全量 1640/1641（唯一失败是并行满载下的 bg shell flake——两次跑失败的是不同文件，干净树同样复现过 2 条，单跑 25 条全绿）。
 
+## 2026-07-27 — release 包漏打 builtins skill 载荷（issue #43 上半）
+
+- 现象（用户 v2026.7.14 system mode）：内置每小时 memory_curate 日程报 `Skill not found: memory-curate`，Available skills 只剩 4 个 superpowers；模型自行降级后每轮调 `send_master_private` 私聊 Master。
+- 根因：`release.yml` 打包 `--exclude='*.md'` 只给 `crabot-admin/builtin-skills/` 开了 include 白名单，`crabot-admin/builtins/skills/` 下 24 个 md（6 个 SKILL.md + crabot-cli/scrapling 的 references）全被剔掉——目录还在、内容没了，`SkillManager.registerBuiltins` 逐个 `continue` 且一条日志不打。Unix/Windows 两条打包路径同病。丢的不止 memory-curate：daily-reflection、memory-graph-linking、crabot-cli、tmp-page、scrapling 全缺（dev 跑源码永远复现不了）。
+- 审计：按 release.yml 规则本地重放打包并与源码求差集，除上述 24 个 md 外无第二处运行时资源被误删（dist 产物、memory 的 schema_version/uv.lock/config、各模块 crabot-module.yaml、panic-monitor 的 py/sh 均在包内）；顺带发现根 LICENSE 没进包（Apache-2.0 分发合规），一并补上。
+- 修复：① Unix rsync 加 `builtins/**` include，Windows 清理豁免改 `(builtin-skills|builtins)`；② 新增 `.github/scripts/verify-release-payload.mjs`，打包前比对源码 skill 载荷与 staging，缺任一文件即 fail（对旧规则重放确认能拦下这 24 个）；③ `registerBuiltins` 返回注册数并对"目录不可读 / 子目录缺 SKILL.md / 一个都没扫到"打 error，Admin 启动打印注册数量，不再静默。
+- 验证：新增 `crabot-admin/tests/builtin-skills-registration.test.ts` 4 条（正常注册 / 目录缺失 / 空壳目录 / 仓库载荷全量可注册）；admin 全量 1032 通过；agent skill 契约 21 条通过。升级路径无需迁移——`extractRelease` 整目录替换，老实例升级后 registerBuiltins 自动补注册。
+- issue #43 下半：worker 生命周期竞态已由上面那条（PR #46）修复。**仍未做**：内部维护任务的外发边界（`external_output: forbidden` 之类系统级约束，而非靠 prompt）、skill 缺失时 fail closed——两者都与已确认 spec 2026-07-11 的工具矩阵冲突，要动得先改协议；先观察本次打包修复上线后 memory_curate 是否还私聊 Master（skill 在位时其 SKILL.md 明写"不汇报 master"）。
+
 > 最后更新：2026-07-26 — wechat 入站文件超时降级按需补取（PR #44）
 
 ## 2026-07-26 — wechat 入站文件超时降级按需补取（PR #44）

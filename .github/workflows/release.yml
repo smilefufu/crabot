@@ -111,7 +111,7 @@ jobs:
           mkdir -p "/tmp/${DIRNAME}"
 
           # 复制运行时文件
-          cp cli.mjs crabot.cmd package.json install.sh install.ps1 "/tmp/${DIRNAME}/"
+          cp cli.mjs crabot.cmd package.json install.sh install.ps1 LICENSE "/tmp/${DIRNAME}/"
           cp -r dist "/tmp/${DIRNAME}/"
 
           # rsync -H 保留 pnpm store 单模块内的 hardlink，避免每个文件被 inflate 成独立副本。
@@ -162,11 +162,16 @@ jobs:
           done
 
           # crabot-admin：额外排 web/（前端源码 + 构建依赖；构建产物已在 dist/web/）
-          # builtin-skills/*.md 是运行时 snapshot（readFileSync 同步加载），include 必须在 *.md exclude 之前
+          # 两处 skill 载荷的 *.md 都是运行时内容（SkillManager 读 SKILL.md 及 references/），
+          # include 必须在 *.md exclude 之前：
+          #   builtin-skills/   → seedBuiltinSkills 的 superpowers snapshot
+          #   builtins/skills/  → registerBuiltins 扫描的 Crabot 自有 skill（memory-curate 等）
           if [ -d "crabot-admin" ]; then
             rsync -aH \
                   --include='builtin-skills/' \
                   --include='builtin-skills/**' \
+                  --include='builtins/' \
+                  --include='builtins/**' \
                   "${COMMON_EXCLUDES[@]}" \
                   --exclude='/src/' --exclude='/test*/' --exclude='/web/' \
                   "crabot-admin/" "/tmp/${DIRNAME}/crabot-admin/"
@@ -183,6 +188,9 @@ jobs:
                   --exclude='*.md' --exclude='*.markdown' \
                   "crabot-memory/" "/tmp/${DIRNAME}/crabot-memory/"
           fi
+
+          # 打包前校验运行时载荷齐全（防止 exclude 规则漏掉 skill 等运行时文件）
+          node .github/scripts/verify-release-payload.mjs "/tmp/${DIRNAME}"
 
           # 打包（tar 默认保留 staging 目录内的 hardlink）
           cd /tmp
@@ -201,7 +209,7 @@ jobs:
           $TempDir = "$env:TEMP\$DirName"
           New-Item -ItemType Directory -Force -Path $TempDir
 
-          Copy-Item cli.mjs, crabot.cmd, package.json, install.sh, install.ps1 $TempDir
+          Copy-Item cli.mjs, crabot.cmd, package.json, install.sh, install.ps1, LICENSE $TempDir
           Copy-Item -Recurse dist, scripts, node_modules $TempDir
           # 清理 scripts/lib/__tests__ 等 dev-only 测试目录；scripts/lib/node_modules 是运行时依赖必须保留
           Get-ChildItem -Path "$TempDir\scripts" -Recurse -Directory -Filter '__tests__' -ErrorAction SilentlyContinue |
@@ -235,13 +243,15 @@ jobs:
           }
 
           # 清理无用文件（递归扫整个 staging 目录）
-          # crabot-admin/builtin-skills/*.md 是运行时 snapshot，必须保留
+          # crabot-admin 下两处 skill 载荷的 *.md 是运行时内容，必须保留：
+          #   builtin-skills/  → seedBuiltinSkills 的 superpowers snapshot
+          #   builtins/skills/ → registerBuiltins 扫描的 Crabot 自有 skill（memory-curate 等）
           $filePatterns = @('*.md','*.markdown','*.map','*.ts','tsconfig*.json',
                             '*.tsbuildinfo','.eslintrc*','.prettierrc*','.editorconfig',
                             '.gitignore','.npmignore')
           foreach ($pat in $filePatterns) {
             Get-ChildItem -Path $TempDir -Recurse -File -Filter $pat -ErrorAction SilentlyContinue |
-              Where-Object { $_.FullName -notmatch '[\\/]builtin-skills[\\/]' } |
+              Where-Object { $_.FullName -notmatch '[\\/](builtin-skills|builtins)[\\/]' } |
               Remove-Item -Force -ErrorAction SilentlyContinue
           }
           $dirPatterns = @('__tests__','.github')
@@ -252,6 +262,10 @@ jobs:
           # *.test.* / *.spec.* 用 -Include（多 pattern）
           Get-ChildItem -Path $TempDir -Recurse -File -Include '*.test.*','*.spec.*' -ErrorAction SilentlyContinue |
             Remove-Item -Force -ErrorAction SilentlyContinue
+
+          # 打包前校验运行时载荷齐全（防止清理规则漏掉 skill 等运行时文件）
+          node .github/scripts/verify-release-payload.mjs "$TempDir"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           Compress-Archive -Path $TempDir -DestinationPath "$DirName.zip"
           (Get-FileHash "$DirName.zip" -Algorithm SHA256).Hash | Out-File "$DirName.zip.sha256"
