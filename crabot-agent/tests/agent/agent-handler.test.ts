@@ -798,6 +798,71 @@ describe('AgentHandler', () => {
     })
   })
 
+  // 不变量：task 非终态 ⟺ worker 活着（决策 2026-07-27，issue #43 现象二）。
+  // admin 判死前经 abort_worker RPC 调 abortWorker；abortWorkerIfTaskTerminal 是那条
+  // RPC 失败时、worker 从 barrier 超时自醒后的兜底。
+  describe('abortWorker / abortWorkerIfTaskTerminal', () => {
+    function withActiveTask(handler: AgentHandler, taskId: string): AbortController {
+      const abortController = new AbortController()
+      ;(handler as any).activeTasks.set(taskId, { abortController })
+      return abortController
+    }
+
+    it('abortWorker 中止活着的 worker 并返回 true', () => {
+      const handler = makeHandler()
+      const ac = withActiveTask(handler, 'task_1')
+
+      expect(handler.abortWorker('task_1', 'timeout')).toBe(true)
+      expect(ac.signal.aborted).toBe(true)
+    })
+
+    it('abortWorker 对不在跑的 task 返回 false（no-op）', () => {
+      const handler = makeHandler()
+      expect(handler.abortWorker('nonexistent_task', 'timeout')).toBe(false)
+    })
+
+    it('cancelTask 委托给 abortWorker', () => {
+      const handler = makeHandler()
+      const ac = withActiveTask(handler, 'task_1')
+
+      handler.cancelTask('task_1', 'user-canceled')
+      expect(ac.signal.aborted).toBe(true)
+    })
+
+    it('barrier 兜底：task 已终态 → abort', async () => {
+      const rpcCall = vi.fn().mockResolvedValue({ task: { id: 'task_1', status: 'failed' } })
+      const handler = makeMessagingHandler(rpcCall)
+      const ac = withActiveTask(handler, 'task_1')
+
+      await handler.abortWorkerIfTaskTerminal('task_1')
+
+      expect(ac.signal.aborted).toBe(true)
+      handler.dispose()
+    })
+
+    it('barrier 兜底：task 仍活跃 → 不动 worker', async () => {
+      const rpcCall = vi.fn().mockResolvedValue({ task: { id: 'task_1', status: 'waiting_human' } })
+      const handler = makeMessagingHandler(rpcCall)
+      const ac = withActiveTask(handler, 'task_1')
+
+      await handler.abortWorkerIfTaskTerminal('task_1')
+
+      expect(ac.signal.aborted).toBe(false)
+      handler.dispose()
+    })
+
+    it('barrier 兜底：admin 不可达 → fail-open，不误杀 worker', async () => {
+      const rpcCall = vi.fn().mockRejectedValue(new Error('admin unreachable'))
+      const handler = makeMessagingHandler(rpcCall)
+      const ac = withActiveTask(handler, 'task_1')
+
+      await expect(handler.abortWorkerIfTaskTerminal('task_1')).resolves.toBeUndefined()
+
+      expect(ac.signal.aborted).toBe(false)
+      handler.dispose()
+    })
+  })
+
   describe('getActiveTaskCount', () => {
     it('should be 0 after task completes', async () => {
       mockRunEngine.mockResolvedValue(makeEngineResult())
