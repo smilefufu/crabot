@@ -787,4 +787,121 @@ describe('BuiltinWorkerAdapter', () => {
     const thirdError = (thirdResumeResult[0] as PromiseRejectedResult).reason
     expect(thirdError instanceof Error ? thirdError.message : String(thirdError)).toMatch(/already resumed/)
   })
+
+  // --- kill / 崩溃恢复扫描 ---
+
+  it('kill running 化身：burst 的 abortSignal 被触发，终态 exited(killed)', async () => {
+    const runEngineSpy = vi.spyOn(engineModule, 'runEngine')
+    const gate = deferred<void>()
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({
+      adapter: makeGatedAdapter(gate.promise, [{ text: '不会被看到的回复', stopReason: 'end_turn' }]),
+    })
+
+    const h = await adapter.spawn(s)
+    expect(await adapter.state(h)).toBe('running')
+
+    await adapter.kill(h)
+
+    // abortSignal 已经被触发——burst 还卡在 gate 里，尚未来得及跑完。
+    const callArgs = runEngineSpy.mock.calls[0]?.[0]
+    const abortSignal = callArgs?.options?.abortSignal
+    expect(abortSignal).toBeDefined()
+    expect(abortSignal?.aborted).toBe(true)
+    expect(await adapter.state(h)).toBe('running') // burst 还没真正收尾
+
+    // 放行 gate：stream 恢复，query-loop 在检测到 abortSignal.aborted 后以 outcome='aborted' 收尾。
+    gate.resolve()
+    await waitState(adapter, h, 'exited')
+
+    const metaRaw = await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')
+    const meta = JSON.parse(metaRaw)
+    expect(meta.state).toBe('exited')
+    expect(meta.ended_reason).toBe('killed')
+  })
+
+  it('kill idle 化身 → 直接 exited(killed)，不经过 burst', async () => {
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({
+      adapter: makeAdapter([{ text: '首轮回复', stopReason: 'end_turn' }]),
+    })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'idle')
+
+    await adapter.kill(h)
+    expect(await adapter.state(h)).toBe('exited')
+
+    const metaRaw = await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')
+    const meta = JSON.parse(metaRaw)
+    expect(meta.state).toBe('exited')
+    expect(meta.ended_reason).toBe('killed')
+  })
+
+  it('kill 已 exited 的化身 → 幂等返回，不抛错、不覆盖原 ended_reason', async () => {
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({
+      adapter: makeAdapter([
+        { toolCalls: [{ name: 'finish_task', id: 'call_1', input: { outcome: 'completed', summary: '搞定了' } }], stopReason: 'tool_use' },
+      ]),
+    })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'exited')
+
+    await expect(adapter.kill(h)).resolves.toBeUndefined()
+    await expect(adapter.kill(h)).resolves.toBeUndefined()
+
+    const metaRaw = await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')
+    const meta = JSON.parse(metaRaw)
+    expect(meta.state).toBe('exited')
+    expect(meta.ended_reason).toBe('completed') // kill 没有覆盖掉原本的终态原因
+  })
+
+  // --- scanOrphans（崩溃恢复扫描）---
+
+  describe('BuiltinWorkerAdapter.scanOrphans', () => {
+    it('把 state=running 的 meta 原子改写为 exited(crashed) 并返回；坏 JSON 文件跳过', async () => {
+      const runningDir = join(tmp, 'worker-running')
+      await fs.mkdir(runningDir, { recursive: true })
+      await fs.writeFile(
+        join(runningDir, 'meta-1.json'),
+        JSON.stringify({ seq: 1, state: 'running', tip_node_id: 'node-1' }),
+        'utf-8',
+      )
+
+      const idleDir = join(tmp, 'worker-idle')
+      await fs.mkdir(idleDir, { recursive: true })
+      await fs.writeFile(
+        join(idleDir, 'meta-1.json'),
+        JSON.stringify({ seq: 1, state: 'idle', tip_node_id: 'node-2' }),
+        'utf-8',
+      )
+
+      const corruptDir = join(tmp, 'worker-corrupt')
+      await fs.mkdir(corruptDir, { recursive: true })
+      await fs.writeFile(join(corruptDir, 'meta-1.json'), '{ not valid json', 'utf-8')
+
+      const orphans = await BuiltinWorkerAdapter.scanOrphans(tmp)
+
+      expect(orphans).toEqual([{ worker_id: 'worker-running', seq: 1, impl: 'builtin' }])
+
+      const runningMeta = JSON.parse(await fs.readFile(join(runningDir, 'meta-1.json'), 'utf-8'))
+      expect(runningMeta.state).toBe('exited')
+      expect(runningMeta.ended_reason).toBe('crashed')
+      expect(runningMeta.tip_node_id).toBe('node-1') // 其余字段保留
+
+      const idleMeta = JSON.parse(await fs.readFile(join(idleDir, 'meta-1.json'), 'utf-8'))
+      expect(idleMeta.state).toBe('idle') // 未被扫描器改动
+
+      const corruptRaw = await fs.readFile(join(corruptDir, 'meta-1.json'), 'utf-8')
+      expect(corruptRaw).toBe('{ not valid json') // 坏文件原样保留，未被改写
+    })
+
+    it('空 dataDir 或不存在时返回空数组', async () => {
+      const emptyDir = join(tmp, 'does-not-exist')
+      const orphans = await BuiltinWorkerAdapter.scanOrphans(emptyDir)
+      expect(orphans).toEqual([])
+    })
+  })
 })

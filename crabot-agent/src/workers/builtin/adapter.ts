@@ -20,7 +20,15 @@
  * 结束即 exited，没有 idle 态）。newSeq 与 resume 共用 nextSeq()，在同一把互斥锁内
  * 计算，避免二者撞号。
  *
- * kill 留给后续 task（Task 8）。
+ * kill：每化身持有一个 AbortController，burst 启动时创建、其 signal 传给 runEngine。
+ * running 态 kill 只是 abort() 当前 burst——burst 自己以 outcome='aborted' 收尾时既有
+ * 分流会落 exited(killed)（见 runBurst/runForkBurst 收尾段）；idle 态（没有 burst 在跑）
+ * kill 直接在互斥锁内落 exited(killed)；已 exited 幂等返回，不覆盖原 ended_reason。
+ *
+ * scanOrphans：进程重启后，内存 instances 已丢失，只能凭磁盘 meta 文件识别"重启前还
+ * 没来得及收尾的化身"——把 state==='running' 的原子改写为 exited(crashed)。调用方须
+ * 在本进程任何 adapter 实例开始活动前调用一次，之后的 spawn/resume/fork 才读到一致
+ * 的磁盘状态。
  */
 import { promises as fs } from 'fs'
 import { join } from 'path'
@@ -44,8 +52,6 @@ import type {
   WorkerContractState,
   Workspace,
 } from '../types.js'
-
-const NOT_IMPLEMENTED = 'not implemented until Task 8'
 
 /** fork 是一次性侧问，maxTurns 取小值，避免侧问跑成一次完整任务。 */
 const FORK_MAX_TURNS = 8
@@ -104,6 +110,12 @@ interface WorkerInstance {
   pendingInputs: string[]
   /** 是否已经被 resume 过一次。用于在 resume() 里检测"对同一 prev 的重复 resume"（先到先得，后来者报错）。 */
   resumed?: boolean
+  /**
+   * 当前（或最近一次）burst 的 AbortController，在 runBurst/runForkBurst 每次调用 runEngine
+   * 前创建，其 signal 传给 runEngine。kill() 在 running 态下只是 abort() 它——不直接改状态，
+   * 状态迁移仍由 burst 自己收尾时的 outcome==='aborted' 分流完成。
+   */
+  abortController?: AbortController
 }
 
 function instanceKey(worker_id: string, seq: number): string {
@@ -355,8 +367,77 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     return meta.state
   }
 
-  async kill(_h: IncarnationHandle): Promise<void> {
-    throw new Error(NOT_IMPLEMENTED)
+  async kill(h: IncarnationHandle): Promise<void> {
+    const mutex = this.getMutex(h.worker_id)
+    await mutex.run(async () => {
+      const instance = this.instances.get(instanceKey(h.worker_id, h.seq))
+      if (!instance) {
+        throw new Error(`BuiltinWorkerAdapter.kill: no such incarnation ${h.worker_id}#${h.seq} resident in this process`)
+      }
+
+      // 已 exited：幂等返回，不覆盖原 ended_reason（kill 打晚了不该篡改真实终态原因）。
+      if (instance.state === 'exited') return
+
+      // idle：没有 burst 在跑，没有什么可 abort 的，直接落终态。
+      if (instance.state === 'idle') {
+        await this.transitionExited(instance, h, 'killed')
+        return
+      }
+
+      // running：只 abort 当前 burst 的 signal。burst 的 runEngine 调用本身在锁外跑（见
+      // runBurst 注释），abort() 后由它自己以 outcome='aborted' 收尾时落 exited(killed)——
+      // 这里不代为转态，避免和 burst 收尾段的互斥锁临界区打架。
+      instance.abortController?.abort()
+    })
+  }
+
+  /**
+   * 崩溃恢复扫描：遍历 dataDir 下所有 worker 目录的 meta-<seq>.json，把 state==='running'
+   * 的原子改写为 exited(crashed) 并收集返回。直接读写文件、不经过内存 instances、不加锁——
+   * 调用方必须保证在本进程任何 adapter 实例开始活动（spawn/resume/fork）之前调用一次，
+   * 此时不存在与运行中 burst 的并发写冲突。坏 meta 文件（读取或 JSON.parse 失败）原样跳过。
+   */
+  static async scanOrphans(dataDir: string): Promise<IncarnationHandle[]> {
+    const orphans: IncarnationHandle[] = []
+    let workerIds: string[]
+    try {
+      workerIds = await fs.readdir(dataDir)
+    } catch {
+      return orphans
+    }
+
+    for (const worker_id of workerIds) {
+      const dir = join(dataDir, worker_id)
+      let entries: string[]
+      try {
+        entries = await fs.readdir(dir)
+      } catch {
+        continue
+      }
+
+      for (const entry of entries) {
+        const match = /^meta-(\d+)\.json$/.exec(entry)
+        if (!match) continue
+        const seq = Number(match[1])
+        const metaPath = join(dir, entry)
+
+        let meta: { state?: WorkerContractState; [key: string]: unknown }
+        try {
+          meta = JSON.parse(await fs.readFile(metaPath, 'utf-8'))
+        } catch {
+          continue
+        }
+        if (meta.state !== 'running') continue
+
+        const updated = { ...meta, state: 'exited', ended_reason: 'crashed' }
+        const tmpPath = join(dir, `.meta-${seq}.json.tmp-${randomUUID()}`)
+        await fs.writeFile(tmpPath, JSON.stringify(updated), 'utf-8')
+        await fs.rename(tmpPath, metaPath)
+        orphans.push({ worker_id, seq, impl: 'builtin' })
+      }
+    }
+
+    return orphans
   }
 
   capabilities(): AdapterCapabilities {
@@ -373,6 +454,10 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     const tip = instance.tip
     const initialMessages = instance.sessionTree.pathTo(tip)
 
+    // 每次进入 runBurst（含续 burst 的递归调用）都换一个新 AbortController，供 kill() abort。
+    const abortController = new AbortController()
+    instance.abortController = abortController
+
     const pendingWrites: Promise<void>[] = []
     const result: EngineResult = await runEngine({
       prompt: '',
@@ -385,6 +470,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         ...(builtin.maxTurnsPerBurst !== undefined ? { maxTurns: builtin.maxTurnsPerBurst } : {}),
         // session 树以原始消息为真相源，burst 内禁用压缩。压缩与树的协同（折叠节点）是 P7 集成议题。
         disableCompaction: true,
+        abortSignal: abortController.signal,
         onTurn: (event) => {
           if (event.assistantText) {
             pendingWrites.push(instance.outputLog.append(event.assistantText + '\n'))
@@ -467,6 +553,10 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     const tip = instance.tip
     const initialMessages = instance.sessionTree.pathTo(tip)
 
+    // fork 化身同样支持被 kill() abort——见 runBurst 里对应注释。
+    const abortController = new AbortController()
+    instance.abortController = abortController
+
     const pendingWrites: Promise<void>[] = []
     const result: EngineResult = await runEngine({
       prompt: '',
@@ -478,6 +568,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         model: builtin.model,
         maxTurns: FORK_MAX_TURNS,
         disableCompaction: true,
+        abortSignal: abortController.signal,
         onTurn: (event) => {
           if (event.assistantText) {
             pendingWrites.push(instance.outputLog.append(event.assistantText + '\n'))
