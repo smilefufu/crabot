@@ -553,13 +553,30 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
   async state(h: IncarnationHandle): Promise<WorkerContractState> {
     const runtime = this.runtimes.get(instanceKey(h))
-    if (!runtime) {
-      const metaPath = join(this.deps.dataDir, h.worker_id, `meta-${h.seq}.json`)
-      const raw = await fs.readFile(metaPath, 'utf-8')
-      const meta = JSON.parse(raw) as { state: WorkerContractState }
-      return meta.state
-    }
-    return (await this.syncState(runtime, h)).state
+    if (runtime) return (await this.syncState(runtime, h)).state
+
+    // 无常驻 runtime(典型场景:agent 进程重启后新建的 adapter 实例,内存里还没有这个化身
+    // 的 runtime)——tmux 会话名是确定性命名(`crabot-w-<worker_id>-<seq>`,spawn/resume 落盘
+    // 时的同一约定),不依赖内存态也能重建,先做一次真实存活探测,而不是无条件回落读可能
+    // 早已过期的 meta 值(P3 Task 9 评审发现的缺口,与 cc adapter 同款修复:旧实现在无
+    // runtime 时直接读 meta,分不清"tmux 会话仍活着"与"已经真死",reconcileOnStartup 只能
+    // 照抄重启前的旧值,可能把一个真实已死的化身误判成 revived)。
+    //
+    // isAlive===false 时一律判 exited,不管 meta 写的是什么——消除"真死判活"的假阳性,是
+    // 本次修复要解决的核心问题;这个分支不需要 meta 文件的任何字段,连读都不读。
+    const sessionName = `crabot-w-${h.worker_id}-${h.seq}`
+    if (!(await this.tmux.isAlive(sessionName))) return 'exited'
+
+    // 会话仍存活:退回读 meta 的 running/idle——这只是"最近一次内存态 syncState 写盘时的
+    // 快照",精度有限(不代表此刻真实的 running/idle,可能已经又转了几轮而这个进程从未
+    // 观察到过),但至少不会再把一个真实存活的会话误判成 exited。未来若要提升精度,可以在
+    // 无 runtime 时也经 CliEventChannel 读一遍事件文件(与 syncState 同款三源合成逻辑);
+    // 这次修复先只解决"真死判活"这个更严重的假阳性,不做那一步。meta 文件缺失/损坏时的
+    // 既有兜底语义(直接抛错)保持不变,不在这里额外兜底。
+    const metaPath = join(this.deps.dataDir, h.worker_id, `meta-${h.seq}.json`)
+    const raw = await fs.readFile(metaPath, 'utf-8')
+    const meta = JSON.parse(raw) as { state: WorkerContractState }
+    return meta.state
   }
 
   async readTrace(h: IncarnationHandle, cursor?: TraceCursor): Promise<{ events: NormalizedTraceEvent[]; nextCursor: TraceCursor }> {
