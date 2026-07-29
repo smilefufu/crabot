@@ -669,4 +669,63 @@ describe('BuiltinWorkerAdapter', () => {
     expect(winner.seq).toBe(2)
     await waitState(adapter, winner, 'idle')
   })
+
+  it('resume 失败后可重试：append 抛错不阻断后续重试（幂等性）', async () => {
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({
+      adapter: makeAdapter([
+        { toolCalls: [{ name: 'finish_task', id: 'call_1', input: { outcome: 'completed', summary: '第一段完成' } }], stopReason: 'tool_use' },
+        { text: '欢迎回来', stopReason: 'end_turn' },
+      ]),
+    })
+
+    const h1 = await adapter.spawn(s)
+    await waitState(adapter, h1, 'exited')
+
+    const metaRaw = await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')
+    const meta = JSON.parse(metaRaw) as { tip_node_id: string }
+    const prevRef: IncarnationRef = { worker_id: s.worker_id, seq: 1, session_ref: meta.tip_node_id }
+
+    // 首次 resume 时 sessionTree.append 会抛错，模拟磁盘瞬时故障。
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const adapterAny = adapter as any
+    let appendCallCount = 0
+    // 找到 worker 的 sessionTree（从任意 instance 中取出）
+    let sessionTreeInstance: SessionTree | undefined
+    for (const inst of (adapterAny.instances as Map<string, any>).values()) {
+      if (inst.worker_id === s.worker_id) {
+        sessionTreeInstance = inst.sessionTree
+        break
+      }
+    }
+    expect(sessionTreeInstance).toBeDefined()
+
+    const originalAppend = sessionTreeInstance!.append.bind(sessionTreeInstance)
+    sessionTreeInstance!.append = vi.fn(async (...args) => {
+      appendCallCount++
+      if (appendCallCount === 1) {
+        throw new Error('simulated transient disk error')
+      }
+      return originalAppend(...args)
+    })
+
+    // 第一次 resume 失败
+    const firstResumeResult = await Promise.allSettled([adapter.resume(prevRef, '尝试1')])
+    expect(firstResumeResult[0]!.status).toBe('rejected')
+    const firstError = (firstResumeResult[0] as PromiseRejectedResult).reason
+    expect(firstError instanceof Error ? firstError.message : String(firstError)).toMatch(/transient disk error/)
+
+    // 第二次 resume 应该成功（不被"重复 resume"拒绝）
+    const secondResumeResult = await Promise.allSettled([adapter.resume(prevRef, '尝试2')])
+    expect(secondResumeResult[0]!.status).toBe('fulfilled')
+    const successfulHandle = (secondResumeResult[0] as PromiseFulfilledResult<IncarnationHandle>).value
+    expect(successfulHandle.seq).toBe(2)
+    await waitState(adapter, successfulHandle, 'idle')
+
+    // 第三次 resume 才应该被拒（真正的重复 resume）
+    const thirdResumeResult = await Promise.allSettled([adapter.resume(prevRef, '尝试3')])
+    expect(thirdResumeResult[0]!.status).toBe('rejected')
+    const thirdError = (thirdResumeResult[0] as PromiseRejectedResult).reason
+    expect(thirdError instanceof Error ? thirdError.message : String(thirdError)).toMatch(/already resumed/)
+  })
 })
