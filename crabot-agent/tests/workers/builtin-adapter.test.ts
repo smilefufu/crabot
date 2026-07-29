@@ -1135,6 +1135,61 @@ describe('BuiltinWorkerAdapter', () => {
     }
   })
 
+  // --- 安全网自身兜底：transitionExited 二次抛错不触发 unhandledRejection ---
+
+  it('safetyNetExit: runBurst 意外抛错后，安全网自己的 transitionExited(writeMeta) 再抛错也不触发 unhandledRejection、不崩进程', async () => {
+    const capture = captureUnhandledRejections()
+    try {
+      const gate = deferred<void>()
+      const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+      const s = spec({
+        adapter: makeGatedAdapter(gate.promise, [{ text: '首轮输出(落盘会失败)', stopReason: 'end_turn' }]),
+      })
+
+      const h = await adapter.spawn(s)
+      expect(await adapter.state(h)).toBe('running')
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const adapterAny = adapter as any
+      const instance = (adapterAny.instances as Map<string, { outputLog: { append: (t: string) => Promise<void> } }>).get(
+        `${s.worker_id}#1`,
+      )
+      expect(instance).toBeDefined()
+      // onTurn 里的落盘失败 → runBurst 走 writeErrors 分支，向外抛错，命中 spawn() 里
+      // this.runBurst(...).catch(...) 这层安全网。
+      instance!.outputLog.append = vi.fn(async () => {
+        throw new Error('simulated output-log disk error')
+      })
+
+      // 安全网内部会调 transitionExited → writeMeta：这里让它也抛错，模拟 ENOSPC/EIO 之类
+      // "安全网自己也救不回来"的场景——修复前这个 rejection 没人接，会成为 unhandledRejection。
+      let writeMetaCalled: () => void = () => {}
+      const writeMetaCalledPromise = new Promise<void>((resolve) => {
+        writeMetaCalled = resolve
+      })
+      const originalWriteMeta = adapterAny.writeMeta.bind(adapter)
+      adapterAny.writeMeta = vi.fn(async (...args: unknown[]) => {
+        writeMetaCalled()
+        throw new Error('simulated writeMeta disk error (safety net)')
+      })
+
+      gate.resolve()
+      await writeMetaCalledPromise
+      // writeMeta 抛错发生在微任务链路更深处，给事件循环留出真实的宏任务间隔，让
+      // Node 有机会把"没人接住的 rejection"判定为 unhandledRejection（修复前会命中）。
+      await new Promise((r) => setTimeout(r, 50))
+      await new Promise((r) => setTimeout(r, 50))
+
+      expect(capture.reasons).toEqual([])
+
+      // 化身状态不可靠是预期的（writeMeta 一直失败，磁盘/内存都没能落到 exited），
+      // 这里只关心"没有崩进程"，不对 instance.state 做强断言。
+      adapterAny.writeMeta = originalWriteMeta
+    } finally {
+      capture.restore()
+    }
+  })
+
   // --- spawn: 重复 worker_id fail-fast ---
 
   it('spawn 同一 worker_id 两次(本进程内存已有化身) → 第二次 fail-fast 抛错，不影响第一个化身', async () => {

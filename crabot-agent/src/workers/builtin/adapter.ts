@@ -214,22 +214,16 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 
     const handle: IncarnationHandle = { worker_id: spec.worker_id, seq, impl: 'builtin' }
     // writeMeta 成功之后才注册到 instances/builtinConfigs，跟 resume 保持一致的提交次序：
-    // 磁盘失败时不留孤儿实例（此时 session.jsonl 已经有 root 节点，重试会撞上面新加的
-    // "已 spawn"检查——与 resume/fork 的幂等重试语义不同，P1 范围内 spawn 失败要求调用方
-    // 换一个 worker_id 重试，不在本次修复范围内展开）。
+    // 磁盘失败时不留孤儿实例。注意此时上面的"已 spawn"三重守卫（builtinConfigs 命中 /
+    // instances 命中 / 磁盘 meta-${seq}.json 存在）全部落空——writeMeta 还没成功过，没有
+    // 一个会命中。调用方重试 spawn 因此不会被拦住，只会在 session.jsonl 里再 append 一个
+    // 孤儿根节点（不被任何化身的 tip 引用，是良性的，不影响 pathTo）。
     await this.writeMeta(instance)
     this.instances.set(instanceKey(spec.worker_id, seq), instance)
     this.builtinConfigs.set(spec.worker_id, spec.builtin)
 
     // fire-and-forget：burst 在后台跑，spawn 立刻以 running 态返回。
-    this.runBurst(instance, handle, spec.builtin).catch(async (err) => {
-      // 安全网：runBurst 内部已经把 runEngine 的失败路径处理成 exited(crashed)，
-      // 这里只兜住真正意外的同步/异步抛错（比如 append 磁盘写失败）。
-      console.error('[builtin-adapter] runBurst threw unexpectedly:', err)
-      await this.getMutex(instance.worker_id).run(async () => {
-        await this.transitionExited(instance, handle, 'crashed')
-      })
-    })
+    this.runBurst(instance, handle, spec.builtin).catch((err) => this.safetyNetExit(instance, handle, err, 'runBurst'))
 
     return handle
   }
@@ -286,12 +280,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       return { instance: newInstance, handle: newHandle }
     })
 
-    this.runBurst(instance, handle, builtin).catch(async (err) => {
-      console.error('[builtin-adapter] runBurst threw unexpectedly (resume):', err)
-      await this.getMutex(instance.worker_id).run(async () => {
-        await this.transitionExited(instance, handle, 'crashed')
-      })
-    })
+    this.runBurst(instance, handle, builtin).catch((err) => this.safetyNetExit(instance, handle, err, 'runBurst (resume)'))
 
     return handle
   }
@@ -339,12 +328,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     })
 
     // fire-and-forget：一次性 burst 在后台跑，fork 立刻以 running 态返回。
-    this.runForkBurst(instance, handle, builtin).catch(async (err) => {
-      console.error('[builtin-adapter] runForkBurst threw unexpectedly:', err)
-      await this.getMutex(instance.worker_id).run(async () => {
-        await this.transitionExited(instance, handle, 'crashed')
-      })
-    })
+    this.runForkBurst(instance, handle, builtin).catch((err) => this.safetyNetExit(instance, handle, err, 'runForkBurst'))
 
     return handle
   }
@@ -384,12 +368,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // burst 的整个执行时长堵死。
     const instance = this.instances.get(instanceKey(h.worker_id, h.seq))!
     const builtin = this.builtinConfigs.get(h.worker_id)!
-    this.runBurst(instance, h, builtin).catch(async (err) => {
-      console.error('[builtin-adapter] runBurst threw unexpectedly (sendInput continuation):', err)
-      await this.getMutex(instance.worker_id).run(async () => {
-        await this.transitionExited(instance, h, 'crashed')
-      })
-    })
+    this.runBurst(instance, h, builtin).catch((err) => this.safetyNetExit(instance, h, err, 'runBurst (sendInput continuation)'))
   }
 
   async readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
@@ -486,6 +465,32 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 
   capabilities(): AdapterCapabilities {
     return { fork: true, revive: true, goalMode: true, subagent: true, structuredTrace: true }
+  }
+
+  /**
+   * fire-and-forget 起 burst（spawn/resume/fork/sendInput 四处）后统一 .catch 到这里。
+   * runBurst/runForkBurst 内部已经把 runEngine 的失败路径处理成 exited(crashed)，能落到
+   * 这里的都是真正意外的同步/异步抛错（比如 pendingWrites 落盘失败后的兜底 throw）。
+   * transitionExited 自己还要再摸一次磁盘（writeMeta，pendingInputs 非空时还有 dead-letter
+   * append）——若它这次也抛错（ENOSPC/EIO 之类最容易撞上），这层 catch 回调本身就是一个
+   * 没人再接的 async 函数，rejection 会直接命中 main.ts 的 process.on('unhandledRejection')
+   * → process.exit(1)，把整个 agent 进程一起打崩。因此再包一层 try/catch 兜底：兜不住就
+   * 只能 console.error 记录——此时化身状态已经不可靠（内存/磁盘可能没落到 exited），但至少
+   * 保证不崩进程。
+   */
+  private async safetyNetExit(instance: WorkerInstance, handle: IncarnationHandle, err: unknown, context: string): Promise<void> {
+    console.error(`[builtin-adapter] ${context} threw unexpectedly:`, err)
+    try {
+      await this.getMutex(instance.worker_id).run(async () => {
+        await this.transitionExited(instance, handle, 'crashed')
+      })
+    } catch (innerErr) {
+      console.error(
+        `[builtin-adapter] safety net itself failed while exiting incarnation ${instance.worker_id}#${instance.seq} ` +
+        '(incarnation state may now be unreliable; process kept alive):',
+        innerErr,
+      )
+    }
   }
 
   // --- Internal: burst execution ---
