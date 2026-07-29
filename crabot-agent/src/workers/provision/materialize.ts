@@ -8,6 +8,23 @@ export interface ProvisionSources {
 }
 
 /**
+ * skill.name 校验:非空、不含路径分隔符(`/`、`\`)、不是 `..`,且 resolve 后仍落在
+ * targetRoot 前缀内。name 来自外部数据(skill 定义),未经校验直接拼进 fs.rm(recursive,
+ * force) 的目标路径会让恶意/畸形 name(如含 `/`、`..`)逃出 targetRoot、删掉 workspace 内
+ * 甚至外的任意目录(P2 review #3)。
+ */
+function validateSkillName(name: string, targetRoot: string): void {
+  if (!name || name.includes('/') || name.includes('\\') || name === '..') {
+    throw new Error(`materializeSkills: invalid skill.name ${JSON.stringify(name)} (must be non-empty, contain no path separators, and not be '..')`)
+  }
+  const resolvedRoot = path.resolve(targetRoot)
+  const resolved = path.resolve(targetRoot, name)
+  if (resolved !== resolvedRoot && !resolved.startsWith(resolvedRoot + path.sep)) {
+    throw new Error(`materializeSkills: skill.name ${JSON.stringify(name)} escapes target directory`)
+  }
+}
+
+/**
  * 逐 skill 把 skill_dir 整目录复制到 <ws>/<targetSubdir>/<name>/。
  * 目标目录已存在时先整体清空再复制,保证与源目录结构一致(不残留源中已删除的旧文件)。
  */
@@ -16,8 +33,10 @@ export async function materializeSkills(
   skills: ProvisionSources['skills'],
   targetSubdir: string
 ): Promise<void> {
+  const targetRoot = path.join(ws, targetSubdir)
   for (const skill of skills) {
-    const dest = path.join(ws, targetSubdir, skill.name)
+    validateSkillName(skill.name, targetRoot)
+    const dest = path.join(targetRoot, skill.name)
     await fs.rm(dest, { recursive: true, force: true })
     await fs.mkdir(path.dirname(dest), { recursive: true })
     await fs.cp(skill.skill_dir, dest, { recursive: true })
