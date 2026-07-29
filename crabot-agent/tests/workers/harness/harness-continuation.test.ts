@@ -8,6 +8,9 @@ import { WorkspaceManager } from '../../../src/workers/harness/workspace-manager
 import { dialogObjectIdForPrivate } from '../../../src/workers/harness/ledger-types'
 import type { HarnessEvent } from '../../../src/workers/harness/worker-events'
 import { WorkerExitedError } from '../../../src/workers/errors'
+import { BuiltinWorkerAdapter } from '../../../src/workers/builtin/adapter'
+import type { LLMAdapter } from '../../../src/engine/llm-adapter-types.js'
+import { chunksFromContent } from '../../engine/helpers/mock-stream'
 import type {
   WorkerAdapter,
   WorkerImplId,
@@ -421,5 +424,65 @@ describe('WorkerHarness — 接续过程中的并发', () => {
     expect(fake.resumeCalls).toHaveLength(1)
     // 第二条消息通过"mainline.seq !== sourceSeq"分支，作为普通投递补送到了新主线。
     expect(fake.sendInputCalls.some((c) => c.text === '第二条')).toBe(true)
+  })
+})
+
+// ---- session_ref 时效性修复：用真实 BuiltinWorkerAdapter（mock LLM），跑两轮 burst，
+// 断言台账里的 session_ref 已经推进到新 tip，而不是 spawn 时的初值。----
+
+function makeMockLLMAdapter(
+  responses: Array<{ text?: string; stopReason: 'end_turn' | 'tool_use' }>,
+): LLMAdapter {
+  let i = 0
+  return {
+    stream: async function* () {
+      const r = responses[i++] ?? responses[responses.length - 1]
+      const content: unknown[] = []
+      if (r.text) content.push({ type: 'text', text: r.text })
+      yield* chunksFromContent(content, r.stopReason, { inputTokens: 100, outputTokens: 50 })
+    },
+    updateConfig: () => {},
+  } as unknown as LLMAdapter
+}
+
+describe('BuiltinWorkerAdapter → WorkerHarness — session_ref 时效性修复', () => {
+  it('两轮 burst 后，台账里的 session_ref 已推进到新 tip（不是 spawn 时的初值）', async () => {
+    const builtinDataDir = join(dataDir, 'builtin-runtime')
+    await fs.mkdir(builtinDataDir, { recursive: true })
+
+    const { harness, adaptersMap } = await makeHarness()
+    const builtinAdapter = new BuiltinWorkerAdapter({ dataDir: builtinDataDir, onStateChange: harness.handleStateChange })
+    adaptersMap.set('builtin', builtinAdapter)
+
+    const llmAdapter = makeMockLLMAdapter([
+      { text: '第一轮回复', stopReason: 'end_turn' },
+      { text: '第二轮回复', stopReason: 'end_turn' },
+    ])
+
+    const worker = await harness.spawnWorker(
+      spawnParams({ builtin: { adapter: llmAdapter, model: 'test', systemPrompt: '', tools: [] } })
+    )
+    const spawnTimeSessionRef = worker.incarnations[0].session_ref
+    expect(spawnTimeSessionRef).toBeTruthy()
+
+    await waitUntil(async () => {
+      const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      return w.incarnations[0].state === 'idle'
+    })
+    const [afterFirstBurst] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    // 第一轮 burst 结束后，台账的 session_ref 已经从 spawn 时的根节点前进到新 tip——
+    // 不再是创建时刻的快照，而是"最近一次完成的状态转换点"。
+    expect(afterFirstBurst.incarnations[0].session_ref).not.toBe(spawnTimeSessionRef)
+    const afterFirstBurstRef = afterFirstBurst.incarnations[0].session_ref
+
+    await harness.sendToWorker(worker.worker_id, '第二轮输入')
+    await waitUntil(async () => {
+      const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      return w.incarnations[0].state === 'idle' && w.incarnations[0].session_ref !== afterFirstBurstRef
+    })
+
+    const [afterSecondBurst] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(afterSecondBurst.incarnations[0].session_ref).not.toBe(afterFirstBurstRef)
+    expect(afterSecondBurst.incarnations[0].session_ref).not.toBe(spawnTimeSessionRef)
   })
 })

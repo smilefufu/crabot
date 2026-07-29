@@ -793,8 +793,12 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     instance.state = state
     // 观察者（onStateChange）的异常永远不能中断状态机的推进。任何回调错误都被捕获
     // 并仅作 console.error 记录，防止阻塞状态转移或导致后续 burst/sendInput 卡死。
+    // session_ref 现读现取 instance.tip（不是调用方传入、创建化身那一刻闭包住的旧
+    // handle.session_ref）——builtin 的 tip 每轮 burst 前进，harness 侧靠这个字段把台账
+    // 刷新到"最近一次完成的状态转换点"，否则活跃化身上的 fork/resume 会从旧节点分叉、
+    // 丢中间上下文（cc/codex 的 session id 整个化身稳定，不受这个问题影响）。
     try {
-      this.deps.onStateChange?.(handle, state)
+      this.deps.onStateChange?.({ ...handle, session_ref: instance.tip }, state)
     } catch (err) {
       console.error(`[BuiltinWorkerAdapter] onStateChange callback error for ${handle.worker_id}#${handle.seq}:`, err)
     }
@@ -816,8 +820,9 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     if (outcome !== undefined) instance.outcome = outcome
     // 观察者（onStateChange）的异常永远不能中断状态机的推进。任何回调错误都被捕获
     // 并仅作 console.error 记录，防止阻塞状态转移或导致后续 burst/sendInput 卡死。
+    // session_ref 现读现取 instance.tip，同 transitionState 的注释。
     try {
-      this.deps.onStateChange?.(handle, 'exited')
+      this.deps.onStateChange?.({ ...handle, session_ref: instance.tip }, 'exited')
     } catch (err) {
       console.error(`[BuiltinWorkerAdapter] onStateChange callback error for ${handle.worker_id}#${handle.seq}:`, err)
     }
