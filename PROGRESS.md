@@ -1,6 +1,13 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-29 — Manager/Worker 拆分 P2：tmux 驱动与外部 CLI adapter（PR 待合并）
+> 最后更新：2026-07-29 — Manager/Worker 拆分 P3：台账与 harness（PR 待合并）
+
+## 2026-07-29 — Manager/Worker 拆分 P3：台账与 harness
+
+- P2（PR #48）当日两轮 review 后合并。P3 交付（纯新增未激活）：worker 台账（每对话对象一文件 + 互斥 + 跨文件 worker_id 索引）、v3 精简 task 状态机（从 admin 移植纯函数 + reviveTask 受控出口）、worker 事件流与原生 session 收割、workspace 管理（realpath 边界防串台）、信箱与安全态投递（in-flight 语义）、`WorkerHarness` 编排（spawn/send/read/list/kill/query + 状态回调路由）、透明接续（revive / handoff / switchWorkerImpl）、重启对账与监护移交。tests/workers 326 用例（P2 末 179 → P3 末 326）。
+- 协议同步三次：`Incarnation.forked_from` + `IncarnationHandle.session_ref`（1f65202）、§5.2 接续例外 + §6.1 seq 已知限制（cb47a4f）。
+- 评审沉淀（10 个 task + 全分支终审，多轮 PoC 实证）：fork 化身劫持主线、drain 与 in-flight 双投、workspace 软链绕过、revive 不回填旧化身终态、handoff 死结、主线守卫漏 impl、kill 与 in-flight 竞态复活 cancelled——均已修复并有回归测试；顺带修掉 cc/codex `state()` 无 runtime 时不探活（曾使"tmux worker 存活→重连接管"对 CLI worker 失效）。
+- 已知限制（入协议或执行记录）：化身 seq 非跨实例全局唯一（(impl,seq) 末条匹配已缓解）、`isAlive=true` 时 state 精度限于 meta 快照、tsconfig 排除 tests 致测试从未被类型检查（另开小 PR）。
 
 ## 2026-07-29 — Manager/Worker 拆分 P2：tmux 驱动与外部 CLI adapter
 
