@@ -728,4 +728,63 @@ describe('BuiltinWorkerAdapter', () => {
     const thirdError = (thirdResumeResult[0] as PromiseRejectedResult).reason
     expect(thirdError instanceof Error ? thirdError.message : String(thirdError)).toMatch(/already resumed/)
   })
+
+  it('resume 失败后可重试：writeMeta 抛错后重试成功（不留孤儿实例）', async () => {
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({
+      adapter: makeAdapter([
+        { toolCalls: [{ name: 'finish_task', id: 'call_1', input: { outcome: 'completed', summary: '第一段完成' } }], stopReason: 'tool_use' },
+        { text: '欢迎回来', stopReason: 'end_turn' },
+      ]),
+    })
+
+    const h1 = await adapter.spawn(s)
+    await waitState(adapter, h1, 'exited')
+
+    const metaRaw = await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')
+    const meta = JSON.parse(metaRaw) as { tip_node_id: string }
+    const prevRef: IncarnationRef = { worker_id: s.worker_id, seq: 1, session_ref: meta.tip_node_id }
+
+    // 首次 resume 时 writeMeta 会抛错，模拟磁盘写入瞬时故障。
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const adapterAny = adapter as any
+    let writeMetaCallCount = 0
+    const originalWriteMeta = adapterAny.writeMeta.bind(adapter)
+    adapterAny.writeMeta = vi.fn(async (...args) => {
+      writeMetaCallCount++
+      if (writeMetaCallCount === 1) {
+        throw new Error('simulated writeMeta disk error')
+      }
+      return originalWriteMeta(...args)
+    })
+
+    // 第一次 resume 失败（writeMeta 抛错）
+    const firstResumeResult = await Promise.allSettled([adapter.resume(prevRef, '尝试1')])
+    expect(firstResumeResult[0]!.status).toBe('rejected')
+    const firstError = (firstResumeResult[0] as PromiseRejectedResult).reason
+    expect(firstError instanceof Error ? firstError.message : String(firstError)).toMatch(/writeMeta disk error/)
+
+    // 验证没有留下孤儿实例：instances 里不应该有 seq=2 的条目
+    // （因为 writeMeta 失败了，instances.set 还没执行）
+    const key2Before = `${s.worker_id}#2`
+    expect((adapterAny.instances as Map<string, any>).has(key2Before)).toBe(false)
+
+    // 第二次 resume 应该成功（不被"重复 resume"拒绝）
+    const secondResumeResult = await Promise.allSettled([adapter.resume(prevRef, '尝试2')])
+    expect(secondResumeResult[0]!.status).toBe('fulfilled')
+    const successfulHandle = (secondResumeResult[0] as PromiseFulfilledResult<IncarnationHandle>).value
+    expect(successfulHandle.seq).toBe(2)
+    await waitState(adapter, successfulHandle, 'idle')
+
+    // 验证元数据确实被写入磁盘
+    const meta2Raw = await fs.readFile(join(tmp, s.worker_id, 'meta-2.json'), 'utf-8')
+    const meta2 = JSON.parse(meta2Raw)
+    expect(meta2.state).toBe('idle')
+
+    // 第三次 resume 才应该被拒（真正的重复 resume）
+    const thirdResumeResult = await Promise.allSettled([adapter.resume(prevRef, '尝试3')])
+    expect(thirdResumeResult[0]!.status).toBe('rejected')
+    const thirdError = (thirdResumeResult[0] as PromiseRejectedResult).reason
+    expect(thirdError instanceof Error ? thirdError.message : String(thirdError)).toMatch(/already resumed/)
+  })
 })

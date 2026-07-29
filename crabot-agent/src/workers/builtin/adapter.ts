@@ -196,8 +196,9 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // 视为对同一 prev 的重复 resume，直接失败，而不是静默产出第二个化身。newSeq 用 nextSeq()
     // 而非 prev.seq+1——fork 可能已经消耗掉 prev.seq+1 这个号位（fork 分支和主线共享同一
     // seq 序列），继续用 prev.seq+1 会在这种情况下误判"并发 resume"或直接撞号覆盖。
-    // resumed 标记必须在 append 及实例注册成功之后才能提交（同一时刻），以确保失败路径
-    // 幂等可重试：若 append 抛错，resumed 仍未被设置，后续重试不会被"重复 resume"检查拒绝。
+    // resumed 标记必须在 writeMeta 成功之后才能提交，以确保失败路径幂等可重试：若 writeMeta
+    // 抛错，resumed 仍未被设置，后续重试不会被"重复 resume"检查拒绝。instances.set 与
+    // resumed 标记同时提交，整体在锁内原子完成。
     const mutex = this.getMutex(prev.worker_id)
     const { instance, handle } = await mutex.run(async () => {
       await this.assertExited(prev.worker_id, prev.seq)
@@ -226,13 +227,12 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         state: 'running',
         pendingInputs: [],
       }
-      this.instances.set(instanceKey(prev.worker_id, newSeq), newInstance)
-      // 成功注册新实例之后、writeMeta 之前提交 resumed 标记：同一临界区内原子完成，
-      // 失败路径不会留下回滚不了的副作用。
-      if (prevInstance) prevInstance.resumed = true
 
       const newHandle: IncarnationHandle = { worker_id: prev.worker_id, seq: newSeq, impl: 'builtin' }
+      // writeMeta 成功之后才注册到 instances 并标记 resumed，确保磁盘失败时不留孤儿实例。
       await this.writeMeta(newInstance)
+      this.instances.set(instanceKey(prev.worker_id, newSeq), newInstance)
+      if (prevInstance) prevInstance.resumed = true
       return { instance: newInstance, handle: newHandle }
     })
 
