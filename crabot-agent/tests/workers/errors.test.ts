@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { WorkerExitedError, CapabilityNotSupportedError } from '../../src/workers/errors.js'
+import { WorkerExitedError as BuiltinExported } from '../../src/workers/builtin/adapter.js'
+import { WorkerExitedError as ClaudeCodeExported } from '../../src/workers/claude-code/adapter.js'
+import { WorkerExitedError as CodexExported, CapabilityNotSupportedError as CodexCapExported } from '../../src/workers/codex/adapter.js'
 
 describe('Shared error types', () => {
   describe('WorkerExitedError', () => {
@@ -53,37 +56,45 @@ describe('Shared error types', () => {
   })
 
   describe('Cross-implementation instanceof checks', () => {
-    it('WorkerExitedError from builtin should be instanceof shared WorkerExitedError', async () => {
-      const { BuiltinWorkerAdapter } = await import('../../src/workers/builtin/adapter.js')
-      // The builtin adapter now imports and re-exports the shared error class
-      // so an instance thrown by it should be instanceof the shared class
-      const BuiltinErr = (BuiltinWorkerAdapter as any).WorkerExitedError || WorkerExitedError
-      const err = new BuiltinErr('w1', 1)
+    it('WorkerExitedError from builtin is the same class reference as shared WorkerExitedError', () => {
+      // The builtin adapter imports and re-exports the shared error class
+      // Verify they are the same class reference
+      expect(BuiltinExported).toBe(WorkerExitedError)
+      // Verify instances created from the exported class work correctly
+      const err = new BuiltinExported('w1', 1)
       expect(err).toBeInstanceOf(WorkerExitedError)
+      expect(err.worker_id).toBe('w1')
+      expect(err.seq).toBe(1)
     })
 
-    it('WorkerExitedError from claude-code should be instanceof shared WorkerExitedError', async () => {
-      const { ClaudeCodeAdapter } = await import('../../src/workers/claude-code/adapter.js')
-      // The claude-code adapter now imports and re-exports the shared error class
-      const ClaudeErr = (ClaudeCodeAdapter as any).WorkerExitedError || WorkerExitedError
-      const err = new ClaudeErr('w2', 2)
+    it('WorkerExitedError from claude-code is the same class reference as shared WorkerExitedError', () => {
+      // The claude-code adapter imports and re-exports the shared error class
+      expect(ClaudeCodeExported).toBe(WorkerExitedError)
+      // Verify instances created from the exported class work correctly
+      const err = new ClaudeCodeExported('w2', 2)
       expect(err).toBeInstanceOf(WorkerExitedError)
+      expect(err.worker_id).toBe('w2')
+      expect(err.seq).toBe(2)
     })
 
-    it('WorkerExitedError from codex should be instanceof shared WorkerExitedError', async () => {
-      const { CodexWorkerAdapter } = await import('../../src/workers/codex/adapter.js')
-      // The codex adapter now imports and re-exports the shared error class
-      const CodexErr = (CodexWorkerAdapter as any).WorkerExitedError || WorkerExitedError
-      const err = new CodexErr('w3', 3)
+    it('WorkerExitedError from codex is the same class reference as shared WorkerExitedError', () => {
+      // The codex adapter imports and re-exports the shared error class
+      expect(CodexExported).toBe(WorkerExitedError)
+      // Verify instances created from the exported class work correctly
+      const err = new CodexExported('w3', 3)
       expect(err).toBeInstanceOf(WorkerExitedError)
+      expect(err.worker_id).toBe('w3')
+      expect(err.seq).toBe(3)
     })
 
-    it('CapabilityNotSupportedError from codex should be instanceof shared CapabilityNotSupportedError', async () => {
-      const { CodexWorkerAdapter } = await import('../../src/workers/codex/adapter.js')
-      // The codex adapter now imports and re-exports the shared error class
-      const CodexErr = (CodexWorkerAdapter as any).CapabilityNotSupportedError || CapabilityNotSupportedError
-      const err = new CodexErr('codex', 'fork')
+    it('CapabilityNotSupportedError from codex is the same class reference as shared CapabilityNotSupportedError', () => {
+      // The codex adapter imports and re-exports the shared error class
+      expect(CodexCapExported).toBe(CapabilityNotSupportedError)
+      // Verify instances created from the exported class work correctly
+      const err = new CodexCapExported('codex', 'fork')
       expect(err).toBeInstanceOf(CapabilityNotSupportedError)
+      expect(err.impl).toBe('codex')
+      expect(err.capability).toBe('fork')
     })
   })
 })
