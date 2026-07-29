@@ -1219,6 +1219,36 @@ describe('BuiltinWorkerAdapter', () => {
     await expect(adapter2.spawn(s2)).rejects.toThrow(/already has meta-1\.json on disk/)
   })
 
+  it('spawn 背靠背并发不 await 同一 worker_id：恰一个成功一个被拒，session.jsonl 单根，仅一个 burst 起跑', async () => {
+    const runEngineSpy = vi.spyOn(engineModule, 'runEngine')
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const workerId = randomUUID()
+    const s1 = spec({ adapter: makeAdapter([{ text: '第一个 spawn 的回复', stopReason: 'end_turn' }]), worker_id: workerId })
+    const s2 = spec({ adapter: makeAdapter([{ text: '第二个 spawn 的回复', stopReason: 'end_turn' }]), worker_id: workerId })
+
+    // 关键：两次调用之间不 await——复现"两次并发 spawn 同一 worker_id 都穿过三重守卫"的
+    // 竞态场景（守卫检查与提交之间隔着多个 await，不加锁的话两次调用都会读到守卫落空）。
+    const results = await Promise.allSettled([adapter.spawn(s1), adapter.spawn(s2)])
+
+    const fulfilled = results.filter((r): r is PromiseFulfilledResult<IncarnationHandle> => r.status === 'fulfilled')
+    const rejected = results.filter((r) => r.status === 'rejected')
+    expect(fulfilled.length).toBe(1)
+    expect(rejected.length).toBe(1)
+    const rejectedReason = (rejected[0] as PromiseRejectedResult).reason
+    expect(rejectedReason instanceof Error ? rejectedReason.message : String(rejectedReason)).toMatch(/already spawned/)
+
+    const winner = fulfilled[0]!.value
+    await waitState(adapter, winner, 'idle')
+
+    // session.jsonl 单根：被拒的那次从未建根节点/写 meta，不会跟赢家的根节点混进同一棵树。
+    const nodes = await loadRawNodes(workerId)
+    const roots = nodes.filter((n) => n.parent_id === null)
+    expect(roots.length).toBe(1)
+
+    // 仅一个 burst 起跑：被拒的那次从未提交，自然也不会 fire-and-forget 起 runBurst。
+    expect(runEngineSpy).toHaveBeenCalledTimes(1)
+  })
+
   // --- fork: 提交次序对齐 resume(writeMeta 成功后才 instances.set) ---
 
   it('fork: writeMeta 抛错 → instances 无残留(提交次序与 resume 对齐)', async () => {

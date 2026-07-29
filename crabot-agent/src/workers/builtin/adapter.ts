@@ -182,48 +182,60 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     if (!spec.builtin) {
       throw new Error(`BuiltinWorkerAdapter.spawn: spec.builtin missing for worker ${spec.worker_id}`)
     }
+    const builtin = spec.builtin
 
-    // fail-fast：拒绝对同一个 worker_id 重复 spawn。builtinConfigs/instances 命中说明本
-    // 进程已经 spawn 过；磁盘已有 meta-1.json 覆盖跨进程场景（上一进程 spawn 过、本进程
-    // 刚启动，内存态是空的但磁盘还留着旧化身）。不拦住的话，重复 spawn 会把新的根节点
-    // append 进同一个 session.jsonl，跟旧化身的节点混进一棵树，是脏数据源头。
-    if (this.builtinConfigs.has(spec.worker_id) || this.findSessionTreeForWorker(spec.worker_id)) {
-      throw new Error(`BuiltinWorkerAdapter.spawn: worker_id ${spec.worker_id} already spawned in this process`)
-    }
-    const seq = 1
-    const dir = join(this.deps.dataDir, spec.worker_id)
-    if (await fileExists(join(dir, `meta-${seq}.json`))) {
-      throw new Error(`BuiltinWorkerAdapter.spawn: worker_id ${spec.worker_id} already has meta-${seq}.json on disk`)
-    }
-    await fs.mkdir(dir, { recursive: true })
+    // 守卫（三重 fail-fast 检查）到提交（writeMeta→instances.set→builtinConfigs.set）整体
+    // 在该 worker 的互斥锁内原子完成，与 resume/fork 对齐：不然两次并发 spawn 同一
+    // worker_id 会双双穿过守卫（builtinConfigs/instances 命中检查、磁盘 meta-1.json 检查
+    // 之间隔着多个 await），各自建根节点、各自 writeMeta、各自注册，产出双根节点、meta
+    // 互相覆盖、两个 burst 各持不同 abortController 交错写同一 output/meta。锁内排队后，
+    // 后到的那次会命中"已 spawn"守卫被拒——先到先得，语义与 resume 的重复检测一致。
+    const mutex = this.getMutex(spec.worker_id)
+    const { instance, handle } = await mutex.run(async () => {
+      // fail-fast：拒绝对同一个 worker_id 重复 spawn。builtinConfigs/instances 命中说明本
+      // 进程已经 spawn 过；磁盘已有 meta-1.json 覆盖跨进程场景（上一进程 spawn 过、本进程
+      // 刚启动，内存态是空的但磁盘还留着旧化身）。不拦住的话，重复 spawn 会把新的根节点
+      // append 进同一个 session.jsonl，跟旧化身的节点混进一棵树，是脏数据源头。
+      if (this.builtinConfigs.has(spec.worker_id) || this.findSessionTreeForWorker(spec.worker_id)) {
+        throw new Error(`BuiltinWorkerAdapter.spawn: worker_id ${spec.worker_id} already spawned in this process`)
+      }
+      const seq = 1
+      const dir = join(this.deps.dataDir, spec.worker_id)
+      if (await fileExists(join(dir, `meta-${seq}.json`))) {
+        throw new Error(`BuiltinWorkerAdapter.spawn: worker_id ${spec.worker_id} already has meta-${seq}.json on disk`)
+      }
+      await fs.mkdir(dir, { recursive: true })
 
-    const sessionTree = new SessionTree(join(dir, 'session.jsonl'))
-    const outputLog = new OutputLog(join(dir, `output-${seq}.log`))
-    const rootId = await sessionTree.append(null, createUserMessage(spec.prompt))
+      const sessionTree = new SessionTree(join(dir, 'session.jsonl'))
+      const outputLog = new OutputLog(join(dir, `output-${seq}.log`))
+      const rootId = await sessionTree.append(null, createUserMessage(spec.prompt))
 
-    const instance: WorkerInstance = {
-      worker_id: spec.worker_id,
-      seq,
-      dir,
-      sessionTree,
-      outputLog,
-      tip: rootId,
-      state: 'running',
-      pendingInputs: [],
-    }
+      const newInstance: WorkerInstance = {
+        worker_id: spec.worker_id,
+        seq,
+        dir,
+        sessionTree,
+        outputLog,
+        tip: rootId,
+        state: 'running',
+        pendingInputs: [],
+      }
 
-    const handle: IncarnationHandle = { worker_id: spec.worker_id, seq, impl: 'builtin' }
-    // writeMeta 成功之后才注册到 instances/builtinConfigs，跟 resume 保持一致的提交次序：
-    // 磁盘失败时不留孤儿实例。注意此时上面的"已 spawn"三重守卫（builtinConfigs 命中 /
-    // instances 命中 / 磁盘 meta-${seq}.json 存在）全部落空——writeMeta 还没成功过，没有
-    // 一个会命中。调用方重试 spawn 因此不会被拦住，只会在 session.jsonl 里再 append 一个
-    // 孤儿根节点（不被任何化身的 tip 引用，是良性的，不影响 pathTo）。
-    await this.writeMeta(instance)
-    this.instances.set(instanceKey(spec.worker_id, seq), instance)
-    this.builtinConfigs.set(spec.worker_id, spec.builtin)
+      const newHandle: IncarnationHandle = { worker_id: spec.worker_id, seq, impl: 'builtin' }
+      // writeMeta 成功之后才注册到 instances/builtinConfigs，跟 resume 保持一致的提交次序：
+      // 磁盘失败时不留孤儿实例。注意此时上面的"已 spawn"三重守卫（builtinConfigs 命中 /
+      // instances 命中 / 磁盘 meta-${seq}.json 存在）全部落空——writeMeta 还没成功过，没有
+      // 一个会命中。调用方重试 spawn 因此不会被拦住，只会在 session.jsonl 里再 append 一个
+      // 孤儿根节点（不被任何化身的 tip 引用，是良性的，不影响 pathTo）。
+      await this.writeMeta(newInstance)
+      this.instances.set(instanceKey(spec.worker_id, seq), newInstance)
+      this.builtinConfigs.set(spec.worker_id, builtin)
+      return { instance: newInstance, handle: newHandle }
+    })
 
-    // fire-and-forget：burst 在后台跑，spawn 立刻以 running 态返回。
-    this.runBurst(instance, handle, spec.builtin).catch((err) => this.safetyNetExit(instance, handle, err, 'runBurst'))
+    // fire-and-forget：burst 在后台跑，spawn 立刻以 running 态返回。留在锁外，不然会把
+    // runEngine 的整个执行时长堵在锁里，挡住排队的其他 worker_id 无关操作。
+    this.runBurst(instance, handle, builtin).catch((err) => this.safetyNetExit(instance, handle, err, 'runBurst'))
 
     return handle
   }
