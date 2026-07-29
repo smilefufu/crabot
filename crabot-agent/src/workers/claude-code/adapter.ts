@@ -1,6 +1,5 @@
 /**
- * ClaudeCodeAdapter — WorkerAdapter 契约的 claude-code 实现(spawn/sendInput/state/kill 的
- * 核心生命周期)。resume/fork/readTrace 留给 Task 5,本文件里抛 not-implemented。
+ * ClaudeCodeAdapter — WorkerAdapter 契约的 claude-code 实现。
  *
  * spawn:session_id = randomUUID() 出生即定(即 session_ref);建 <dataDir>/<worker_id>/ 目录;
  * tmux newSession 拉起 `<claudeBin> --session-id <uuid> --permission-mode acceptEdits`,交互态
@@ -39,10 +38,44 @@
  *
  * meta-<seq>.json 布局沿用 P1:{ seq, state, session_id, ended_reason? },写法抽到
  * src/workers/meta-store.ts 共享(不改 builtin 自己的 writeMeta)。
+ *
+ * detect:`<claudeBin> --version`(经 `sh -c` 跑,claudeBin 本就是一段 shell 命令片段——
+ * 与 spawn 把它塞进 tmux pane 命令是同一语义)成功 → installed;activated 看
+ * `dirname(claudeProjectsDir)`(即约定的 `~/.claude/`)下是否有 settings.json 或
+ * .credentials.json,不做任何网络调用。
+ *
+ * resume:先取 prev 化身常驻 runtime(未常驻则报错,P1 同款约束:只能 resume 本进程 spawn 过
+ * 的化身),校验其已 exited(未 exited 直接拒绝)→ 新 tmux 会话跑
+ * `<claudeBin> --resume <prev.session_ref>`(不重复传 --permission-mode,provision 阶段已把
+ * acceptEdits 写进 settings.json 兜底命令行之外的场景)→ seq+1 化身、独立 meta/output、
+ * session_ref 原样透传(cc 侧同一个会话 id)。锁纪律与 spawn 一致:tmux newSession 成功后才
+ * 提交 meta+runtime,首条 wakeInput(sendText)失败按 kill 路径清理并落 exited(crashed)。
+ *
+ * fork(侧问,query_worker 的底座):无头一击,不进 tmux——
+ * `<claudeBin> -p <forkInput> --resume <prev.session_ref> --fork-session --output-format text`
+ * (经 `sh -c` 跑,forkInput/参数逐个 shQuote 转义)子进程 stdout 落到 fork 化身自己的
+ * output-<seq>.log;退出码 0 → exited(completed),非 0 → exited(crashed)。为可观测起见,
+ * 先在 per-worker 互斥锁内提交一段 meta(running)+注册 runtime,子进程本身(可能耗时较长)在
+ * 锁外跑不阻塞同 worker_id 上的其它操作(主线不受影响),跑完后再在锁内提交终态。cc 的
+ * --fork-session 在其内部生成一个新会话 id,但 `--output-format text` 的 stdout 不携带它,
+ * 拿不到就拿不到——fork 化身的 session_id 落一个本地生成的占位 UUID,不对应真实 cc 会话
+ * 文件,该化身自己的 readTrace 会优雅退化为空数组(已知限制,见 Task 5 报告)。
+ *
+ * readTrace:workspace root 经 cc 的 slug 规则(`/`与`.`都替换成`-`)映射到
+ * `<claudeProjectsDir>/<slug>/<session_id>.jsonl`,按行增量解析并归一化——
+ * type=user/assistant → kind message(role 对应,summary 取消息文本截 200);assistant 内的
+ * tool_use content block → kind tool_call;user 记录带 toolUseResult 字段 → kind
+ * tool_result;type=system → kind lifecycle;其余 type(mode/summary/queue-operation 等)跳过。
+ * cursor.offset 是行号(非字节偏移);文件不存在时返回空数组(见下方"与 brief 的偏差")。
+ * 只能对本进程内常驻 runtime 的化身调用——trace 文件路径依赖 workspace root,而这个信息
+ * 只存在于内存 runtime 里,meta.json 不落它。
  */
 import { promises as fs } from 'fs'
-import { join } from 'path'
+import { join, dirname } from 'path'
 import { randomUUID } from 'crypto'
+import { homedir } from 'os'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
 import { TmuxDriver } from '../tmux/driver.js'
 import { CliEventChannel } from '../cli-events.js'
 import { OutputLog } from '../output-log.js'
@@ -65,6 +98,13 @@ import type {
   Workspace,
 } from '../types.js'
 
+const execFileAsync = promisify(execFile)
+
+/** POSIX shell 单引号转义,与 tmux/driver.ts 的私有 shQuote 同款用法(独立复制一份)。 */
+function shQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`
+}
+
 /** sendInput 打到已 exited 的化身时抛出。与 builtin 的同名类语义一致,各自独立定义(不共享 import)。 */
 export class WorkerExitedError extends Error {
   constructor(
@@ -85,6 +125,8 @@ interface Runtime {
   readonly worker_id: string
   readonly seq: number
   readonly dir: string
+  readonly workspaceRoot: string
+  /** tmux 会话名;fork 化身不进 tmux,恒为空串。 */
   readonly sessionName: string
   readonly sessionId: string
   readonly outputLog: OutputLog
@@ -105,6 +147,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
   private readonly tmux: TmuxDriver
   private readonly claudeBin: string
+  private readonly claudeProjectsDir: string
   private readonly runtimes = new Map<string, Runtime>()
   private readonly mutexes = new Map<string, AsyncMutex>()
 
@@ -113,16 +156,36 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       readonly dataDir: string
       readonly claudeBin?: string
       readonly tmux?: TmuxDriver
+      /** cc trace 文件根目录,默认 ~/.claude/projects;detect() 的 activated 检查也复用它
+       *(取 dirname 得到 ~/.claude/)。测试用可注入 fixture 目录,不依赖开发机真实 home。 */
+      readonly claudeProjectsDir?: string
       readonly onStateChange?: (h: IncarnationHandle, state: WorkerContractState) => void
     },
   ) {
     this.tmux = deps.tmux ?? new TmuxDriver()
     this.claudeBin = deps.claudeBin ?? 'claude'
+    this.claudeProjectsDir = deps.claudeProjectsDir ?? join(homedir(), '.claude', 'projects')
   }
 
   async detect(): Promise<DetectResult> {
-    // 占位:真实探测(claude 二进制是否存在/是否已登录)留给 Task 5。
-    return { installed: false, activated: false, detail: 'ClaudeCodeAdapter.detect: not implemented until Task 5' }
+    let versionOutput: string
+    try {
+      const { stdout } = await execFileAsync('/bin/sh', ['-c', `${this.claudeBin} --version`])
+      versionOutput = stdout.trim()
+    } catch (err) {
+      return { installed: false, activated: false, detail: `claude binary not found or failed to run: ${(err as Error).message}` }
+    }
+
+    const claudeHomeDir = dirname(this.claudeProjectsDir)
+    let activated = false
+    try {
+      const entries = await fs.readdir(claudeHomeDir)
+      activated = entries.includes('settings.json') || entries.includes('.credentials.json')
+    } catch {
+      activated = false
+    }
+
+    return { installed: true, activated, detail: versionOutput }
   }
 
   async provision(ws: Workspace, caps: CapabilityBundle): Promise<void> {
@@ -181,6 +244,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       worker_id: spec.worker_id,
       seq,
       dir,
+      workspaceRoot: spec.workspace.root,
       sessionName,
       sessionId,
       outputLog: new OutputLog(outputFile),
@@ -210,12 +274,135 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return handle
   }
 
-  async resume(_prev: IncarnationRef, _wakeInput: string): Promise<IncarnationHandle> {
-    throw new Error('ClaudeCodeAdapter.resume: not implemented until Task 5')
+  async resume(prev: IncarnationRef, wakeInput: string): Promise<IncarnationHandle> {
+    const prevRuntime = this.runtimes.get(instanceKey(prev))
+    if (!prevRuntime) {
+      throw new Error(`ClaudeCodeAdapter.resume: no such incarnation ${prev.worker_id}#${prev.seq} resident in this process`)
+    }
+    const prevHandle: IncarnationHandle = { worker_id: prev.worker_id, seq: prev.seq, impl: 'claude-code' }
+    const { state: prevState } = await this.syncState(prevRuntime, prevHandle)
+    if (prevState !== 'exited') {
+      throw new Error(`ClaudeCodeAdapter.resume: incarnation ${prev.worker_id}#${prev.seq} has not exited yet (state=${prevState})`)
+    }
+
+    const seq = prev.seq + 1
+    const handle: IncarnationHandle = { worker_id: prev.worker_id, seq, impl: 'claude-code' }
+    if (this.runtimes.has(instanceKey(handle))) {
+      throw new Error(`ClaudeCodeAdapter.resume: worker_id ${prev.worker_id} seq ${seq} already exists in this process`)
+    }
+
+    const dir = prevRuntime.dir
+    const sessionName = `crabot-w-${prev.worker_id}-${seq}`
+    const outputFile = join(dir, `output-${seq}.log`)
+    // 不重复传 --permission-mode:provision 阶段已把 acceptEdits 写进 settings.json,覆盖
+    // 命令行没有重复声明的场景(resume 正是这样的场景)。session_ref 是 cc 侧的会话 uuid,
+    // 沿用不变。
+    const command = `${this.claudeBin} --resume ${prev.session_ref}`
+
+    // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime。
+    await this.tmux.newSession({ name: sessionName, cwd: prevRuntime.workspaceRoot, command, outputFile })
+
+    const runtime: Runtime = {
+      worker_id: prev.worker_id,
+      seq,
+      dir,
+      workspaceRoot: prevRuntime.workspaceRoot,
+      sessionName,
+      sessionId: prev.session_ref,
+      outputLog: new OutputLog(outputFile),
+      eventChannel: new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot })),
+      state: 'running',
+      stopBaseline: 0,
+      killed: false,
+    }
+
+    await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: prev.session_ref })
+    this.runtimes.set(instanceKey(handle), runtime)
+
+    // 首条 wakeInput 注入失败:按 spawn 同款纪律处理——已注册的化身清理 tmux 会话后落
+    // exited(crashed)(不是 killed,不是用户发起的 kill),resume 仍然 reject。
+    try {
+      await this.tmux.sendText(sessionName, wakeInput)
+    } catch (err) {
+      await this.getMutex(handle.worker_id).run(async () => {
+        if (runtime.state === 'exited') return
+        await this.tmux.killSession(sessionName)
+        await this.transitionExited(runtime, handle, 'crashed')
+      })
+      throw err
+    }
+
+    return handle
   }
 
-  async fork(_prev: IncarnationRef, _forkInput: string): Promise<IncarnationHandle> {
-    throw new Error('ClaudeCodeAdapter.fork: not implemented until Task 5')
+  async fork(prev: IncarnationRef, forkInput: string): Promise<IncarnationHandle> {
+    const prevRuntime = this.runtimes.get(instanceKey(prev))
+    if (!prevRuntime) {
+      throw new Error(`ClaudeCodeAdapter.fork: no such incarnation ${prev.worker_id}#${prev.seq} resident in this process`)
+    }
+
+    const seq = prev.seq + 1
+    const handle: IncarnationHandle = { worker_id: prev.worker_id, seq, impl: 'claude-code' }
+    if (this.runtimes.has(instanceKey(handle))) {
+      throw new Error(`ClaudeCodeAdapter.fork: worker_id ${prev.worker_id} seq ${seq} already exists in this process`)
+    }
+
+    const dir = prevRuntime.dir
+    const outputFile = join(dir, `output-${seq}.log`)
+    // cc 的 --fork-session 在其内部生成一个新会话 id,--output-format text 的 stdout 不
+    // 携带它,拿不到就拿不到:这里落一个本地占位 uuid,不对应真实 cc 会话文件(已知限制)。
+    const sessionId = randomUUID()
+
+    const runtime: Runtime = {
+      worker_id: prev.worker_id,
+      seq,
+      dir,
+      workspaceRoot: prevRuntime.workspaceRoot,
+      sessionName: '',
+      sessionId,
+      outputLog: new OutputLog(outputFile),
+      eventChannel: new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot })),
+      state: 'running',
+      stopBaseline: 0,
+      killed: false,
+    }
+
+    // 为可观测起见,先提交一段 meta(running)+注册 runtime——与最终提交 exited 一样,都在
+    // per-worker 互斥锁内完成(两次并发 fork 同一 prev 时,后到者会在锁内重新撞见"已存在"
+    // 而拒绝,不会双写同一个 seq)。
+    await this.getMutex(prev.worker_id).run(async () => {
+      if (this.runtimes.has(instanceKey(handle))) {
+        throw new Error(`ClaudeCodeAdapter.fork: worker_id ${prev.worker_id} seq ${seq} already exists in this process`)
+      }
+      await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: sessionId })
+      this.runtimes.set(instanceKey(handle), runtime)
+    })
+
+    // 无头一击,不进 tmux:子进程在锁外跑(可能耗时较长),不阻塞同 worker_id 上其它操作
+    // (主线不受影响)。claudeBin 与 spawn/resume 同款语义——一段 shell 命令片段,经 sh -c
+    // 跑;forkInput 与其它参数逐个 shQuote 转义,防止内容里的 shell 元字符注入。
+    const args = ['-p', forkInput, '--resume', prev.session_ref, '--fork-session', '--output-format', 'text']
+    const shellCommand = `${this.claudeBin} ${args.map(shQuote).join(' ')}`
+
+    let stdout = ''
+    let endedReason: IncarnationEndReason
+    try {
+      const result = await execFileAsync('/bin/sh', ['-c', shellCommand], { cwd: prevRuntime.workspaceRoot })
+      stdout = result.stdout
+      endedReason = 'completed'
+    } catch (err) {
+      stdout = (err as { stdout?: string }).stdout ?? ''
+      endedReason = 'crashed'
+    }
+
+    if (stdout) await runtime.outputLog.append(stdout)
+
+    await this.getMutex(prev.worker_id).run(async () => {
+      if (runtime.state === 'exited') return // 幂等兜底
+      await this.transitionExited(runtime, handle, endedReason)
+    })
+
+    return handle
   }
 
   async sendInput(h: IncarnationHandle, text: string, opts?: { raw?: boolean }): Promise<void> {
@@ -259,8 +446,36 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return (await this.syncState(runtime, h)).state
   }
 
-  async readTrace(_h: IncarnationHandle, _cursor?: TraceCursor): Promise<NormalizedTraceEvent[]> {
-    throw new Error('ClaudeCodeAdapter.readTrace: not implemented until Task 5')
+  async readTrace(h: IncarnationHandle, cursor?: TraceCursor): Promise<NormalizedTraceEvent[]> {
+    const runtime = this.runtimes.get(instanceKey(h))
+    if (!runtime) {
+      // trace 文件路径依赖 workspace root,这个信息只存在于内存 runtime 里(meta.json 不落
+      // 它),不像 readOutput 那样有约定路径可以脱离内存重建。
+      throw new Error(`ClaudeCodeAdapter.readTrace: no such incarnation ${h.worker_id}#${h.seq} resident in this process`)
+    }
+
+    const slug = projectSlug(runtime.workspaceRoot)
+    const filePath = join(this.claudeProjectsDir, slug, `${runtime.sessionId}.jsonl`)
+
+    let raw: string
+    try {
+      raw = await fs.readFile(filePath, 'utf-8')
+    } catch (err) {
+      // 契约(types.ts)里 readTrace 只返回 NormalizedTraceEvent[],没有 unavailable_reason
+      // 的位置——文件缺失(化身还没写过 trace,或 fork 化身的占位 session_id 本就对不上真实
+      // 文件)退化为空数组。
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []
+      throw err
+    }
+
+    const lines = raw.split('\n').filter((line) => line.length > 0)
+    const start = cursor?.offset ?? 0
+    const events: NormalizedTraceEvent[] = []
+    for (let i = start; i < lines.length; i++) {
+      const event = normalizeTraceLine(lines[i])
+      if (event) events.push(event)
+    }
+    return events
   }
 
   async kill(h: IncarnationHandle): Promise<void> {
@@ -360,4 +575,75 @@ function workerIdLabelFromWorkspace(ws: Workspace): string {
   const trimmed = ws.root.replace(/\/+$/, '')
   const idx = trimmed.lastIndexOf('/')
   return idx >= 0 ? trimmed.slice(idx + 1) : trimmed
+}
+
+/** cc 的 project 目录 slug 规则:cwd 路径里的 `/` 与 `.` 都替换成 `-`(已用真实 ~/.claude/projects/ 核实)。 */
+function projectSlug(cwd: string): string {
+  return cwd.replace(/[/.]/g, '-')
+}
+
+function truncate(text: string, max: number): string {
+  return text.length > max ? text.slice(0, max) : text
+}
+
+/** message.content 既可能是纯字符串,也可能是 content block 数组;后者只取 text 块拼接,跳过 thinking/tool_use/tool_result。 */
+function extractMessageText(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .filter((block): block is { type: string; text?: string } => !!block && typeof block === 'object' && (block as { type?: unknown }).type === 'text')
+      .map((block) => block.text ?? '')
+      .join('\n')
+  }
+  return ''
+}
+
+/**
+ * 归一化单行 cc trace JSONL 为 NormalizedTraceEvent;不认识的行(JSON 解析失败、或
+ * type 不在 user/assistant/system 之内,如 mode/summary/queue-operation 等)返回 null 跳过。
+ */
+function normalizeTraceLine(line: string): NormalizedTraceEvent | null {
+  let parsed: Record<string, unknown>
+  try {
+    parsed = JSON.parse(line)
+  } catch {
+    return null
+  }
+  if (!parsed || typeof parsed !== 'object') return null
+  const ts = typeof parsed.timestamp === 'string' ? parsed.timestamp : ''
+
+  if (parsed.type === 'system') {
+    const summary = typeof parsed.content === 'string' ? truncate(parsed.content, 200) : String(parsed.subtype ?? 'system')
+    return { ts, kind: 'lifecycle', role: 'system', summary, detail: parsed }
+  }
+
+  if (parsed.type === 'user') {
+    if ('toolUseResult' in parsed) {
+      const result = parsed.toolUseResult
+      const summary = truncate(typeof result === 'string' ? result : JSON.stringify(result ?? {}), 200)
+      return { ts, kind: 'tool_result', role: 'user', summary, detail: result }
+    }
+    const message = parsed.message as { content?: unknown } | undefined
+    const text = extractMessageText(message?.content)
+    return { ts, kind: 'message', role: 'user', summary: truncate(text, 200), detail: message }
+  }
+
+  if (parsed.type === 'assistant') {
+    const message = parsed.message as { content?: unknown } | undefined
+    const content = message?.content
+    if (Array.isArray(content)) {
+      const toolUse = content.find(
+        (block): block is { type: 'tool_use'; name: string; input?: unknown } =>
+          !!block && typeof block === 'object' && (block as { type?: unknown }).type === 'tool_use',
+      )
+      if (toolUse) {
+        const summary = truncate(`${toolUse.name}(${JSON.stringify(toolUse.input ?? {})})`, 200)
+        return { ts, kind: 'tool_call', role: 'assistant', summary, detail: toolUse }
+      }
+    }
+    const text = extractMessageText(content)
+    return { ts, kind: 'message', role: 'assistant', summary: truncate(text, 200), detail: message }
+  }
+
+  return null
 }
