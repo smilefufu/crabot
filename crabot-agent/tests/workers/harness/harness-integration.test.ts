@@ -370,6 +370,7 @@ describe.skipIf(!tmuxAvailable)(
   'WorkerHarness.reconcileOnStartup — 真实 tmux 存活探测(P3 Task 10 修复:cc 的 state() 无 runtime 时不再照抄 meta 旧值)',
   () => {
     let dataDir: string
+    let workspaceRoot: string | undefined
     let nowValue: number
     const sessionsToCleanup: string[] = []
 
@@ -380,6 +381,7 @@ describe.skipIf(!tmuxAvailable)(
 
     beforeEach(async () => {
       dataDir = await fs.mkdtemp(join(tmpdir(), 'harness-integ-cc-restart-'))
+      workspaceRoot = undefined
       nowValue = Date.parse('2026-01-01T00:00:00.000Z')
       sessionsToCleanup.length = 0
     })
@@ -387,6 +389,9 @@ describe.skipIf(!tmuxAvailable)(
     afterEach(async () => {
       await killTmuxSessionsQuietly(sessionsToCleanup)
       await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+      if (workspaceRoot) {
+        await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+      }
     })
 
     it(
@@ -487,7 +492,7 @@ describe.skipIf(!tmuxAvailable)(
       'adapter.state() 本身:isAlive 存活时回落读 meta,tmux 会话被外部杀掉后新实例判 exited(不是照抄 meta 旧值)',
       async () => {
         const ccDataDir = join(dataDir, 'cc-adapter-direct')
-        const workspaceRoot = await fs.mkdtemp(join(tmpdir(), 'harness-integ-cc-restart-ws-'))
+        workspaceRoot = await fs.mkdtemp(join(tmpdir(), 'harness-integ-cc-restart-ws-'))
 
         const claudeBin = claudeBinFor([{ output: '先答一句' }], ':')
         const adapterA = new ClaudeCodeAdapter({ dataDir: ccDataDir, claudeBin })
