@@ -11,10 +11,16 @@
  * 当前 burst 结束若判定为 idle 且队列非空则原地续 burst（不经过可见的 idle 态）；
  * exited 态抛 WorkerExitedError，交给上层 harness 做透明接续（P3）。
  *
- * resume：从已 exited 的化身的 session_ref（tip node_id）派生 seq+1 新化身，
+ * resume：从已 exited 的化身的 session_ref（tip node_id）派生新化身（seq 见 nextSeq），
  * append wakeInput 后起新 burst。
  *
- * fork/kill 留给后续 task（Task 7-8）。
+ * fork：侧问分支。不要求 prev 处于任何特定状态——主线 running/idle/exited 都能 fork。
+ * 从 prev.session_ref 节点 append forkInput 为分支（不动主线 tip，树因此分叉，这是
+ * fork 的合法用法）。新化身独立 meta/output，跑一次性 burst（不含 finish_task 工具，
+ * 结束即 exited，没有 idle 态）。newSeq 与 resume 共用 nextSeq()，在同一把互斥锁内
+ * 计算，避免二者撞号。
+ *
+ * kill 留给后续 task（Task 8）。
  */
 import { promises as fs } from 'fs'
 import { join } from 'path'
@@ -39,7 +45,10 @@ import type {
   Workspace,
 } from '../types.js'
 
-const NOT_IMPLEMENTED = 'not implemented until Task 7-8'
+const NOT_IMPLEMENTED = 'not implemented until Task 8'
+
+/** fork 是一次性侧问，maxTurns 取小值，避免侧问跑成一次完整任务。 */
+const FORK_MAX_TURNS = 8
 
 /**
  * sendInput 打到已 exited 的化身时抛出。透明接续（自动 resume 并重投）是 harness（P3）
@@ -80,11 +89,21 @@ interface WorkerInstance {
   readonly dir: string
   readonly sessionTree: SessionTree
   readonly outputLog: OutputLog
+  /**
+   * 本化身自己的当前 tip node_id（不是 sessionTree.latestTip()）。sessionTree 是跨化身
+   * 共享的同一个对象，其内部 tip 是"整个文件最后一次 append"的全局游标——fork 分支往
+   * 任意历史节点 append 时会把这个全局游标带偏。若主线继续依赖 sessionTree.latestTip()
+   * 判断自己的续接点，fork 期间/之后会读到 fork 分支的节点，把新一轮消息误挂在 fork
+   * 分支下面。每个化身必须维护自己的 tip，只在自己 append 时更新。
+   */
+  tip: string
   state: WorkerContractState
   ended_reason?: IncarnationEndReason
   outcome?: 'completed' | 'failed'
   /** running 态下经 sendInput 排队、等下一次 burst 间隙统一 append 的用户消息（P1：内存，不跨重启持久）。 */
   pendingInputs: string[]
+  /** 是否已经被 resume 过一次。用于在 resume() 里检测"对同一 prev 的重复 resume"（先到先得，后来者报错）。 */
+  resumed?: boolean
 }
 
 function instanceKey(worker_id: string, seq: number): string {
@@ -134,7 +153,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 
     const sessionTree = new SessionTree(join(dir, 'session.jsonl'))
     const outputLog = new OutputLog(join(dir, `output-${seq}.log`))
-    await sessionTree.append(null, createUserMessage(spec.prompt))
+    const rootId = await sessionTree.append(null, createUserMessage(spec.prompt))
 
     const instance: WorkerInstance = {
       worker_id: spec.worker_id,
@@ -142,6 +161,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       dir,
       sessionTree,
       outputLog,
+      tip: rootId,
       state: 'running',
       pendingInputs: [],
     }
@@ -170,27 +190,30 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       throw new Error(`BuiltinWorkerAdapter.resume: no builtin config resident in memory for worker ${prev.worker_id} (P1: worker must have been spawned in this process)`)
     }
 
-    // assertExited + newSeq 计算 + append + 实例注册整体在锁内原子完成：两次并发 resume
-    // 同一 prev 若不串行化，会各自算出相同的 newSeq、各自往 prev.session_ref 上挂一个孩子
-    // ——树分叉。这里选择"先到先得，后来者报错"的语义：newSeq 对应的实例位一旦被占用，
-    // 后来者视为对同一 prev 的重复 resume，直接失败，而不是静默产出第二个化身。
+    // assertExited + 重复 resume 检测 + newSeq 计算 + append + 实例注册整体在锁内原子完成：
+    // 两次并发 resume 同一 prev 若不串行化，会各自往 prev.session_ref 上挂一个孩子——树分叉。
+    // 这里选择"先到先得，后来者报错"的语义：prevInstance.resumed 标记一旦被占用，后来者
+    // 视为对同一 prev 的重复 resume，直接失败，而不是静默产出第二个化身。newSeq 用 nextSeq()
+    // 而非 prev.seq+1——fork 可能已经消耗掉 prev.seq+1 这个号位（fork 分支和主线共享同一
+    // seq 序列），继续用 prev.seq+1 会在这种情况下误判"并发 resume"或直接撞号覆盖。
     const mutex = this.getMutex(prev.worker_id)
     const { instance, handle } = await mutex.run(async () => {
       await this.assertExited(prev.worker_id, prev.seq)
 
-      const newSeq = prev.seq + 1
-      const newKey = instanceKey(prev.worker_id, newSeq)
-      if (this.instances.has(newKey)) {
-        throw new Error(`BuiltinWorkerAdapter.resume: incarnation ${newKey} already exists (concurrent resume of the same prev incarnation?)`)
+      const prevInstance = this.instances.get(instanceKey(prev.worker_id, prev.seq))
+      if (prevInstance?.resumed) {
+        throw new Error(`BuiltinWorkerAdapter.resume: incarnation ${prev.worker_id}#${prev.seq} already resumed (concurrent resume of the same prev incarnation?)`)
       }
+      if (prevInstance) prevInstance.resumed = true
 
+      const newSeq = this.nextSeq(prev.worker_id)
       const dir = join(this.deps.dataDir, prev.worker_id)
       let sessionTree = this.findSessionTreeForWorker(prev.worker_id)
       if (!sessionTree) {
         sessionTree = await SessionTree.load(join(dir, 'session.jsonl'))
       }
       const outputLog = new OutputLog(join(dir, `output-${newSeq}.log`))
-      await sessionTree.append(prev.session_ref, createUserMessage(wakeInput))
+      const wakeId = await sessionTree.append(prev.session_ref, createUserMessage(wakeInput))
 
       const newInstance: WorkerInstance = {
         worker_id: prev.worker_id,
@@ -198,10 +221,11 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         dir,
         sessionTree,
         outputLog,
+        tip: wakeId,
         state: 'running',
         pendingInputs: [],
       }
-      this.instances.set(newKey, newInstance)
+      this.instances.set(instanceKey(prev.worker_id, newSeq), newInstance)
 
       const newHandle: IncarnationHandle = { worker_id: prev.worker_id, seq: newSeq, impl: 'builtin' }
       await this.writeMeta(newInstance)
@@ -218,8 +242,55 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     return handle
   }
 
-  async fork(_prev: IncarnationRef, _forkInput: string): Promise<IncarnationHandle> {
-    throw new Error(NOT_IMPLEMENTED)
+  async fork(prev: IncarnationRef, forkInput: string): Promise<IncarnationHandle> {
+    const builtin = this.builtinConfigs.get(prev.worker_id)
+    if (!builtin) {
+      throw new Error(`BuiltinWorkerAdapter.fork: no builtin config resident in memory for worker ${prev.worker_id} (P1: worker must have been spawned in this process)`)
+    }
+
+    // fork 不要求 prev 处于任何特定状态——这就是侧问的意义：主线跑着的时候也能问。不像
+    // resume 那样校验 assertExited。newSeq 用 nextSeq()，与 resume 共用同一分配逻辑、
+    // 在同一把互斥锁内计算，避免二者撞号。append 挂在 prev.session_ref 上是分支，不动
+    // 主线 tip——session 树因此分叉，这是 fork 的合法用法（resume/sendInput 的"禁止分叉"
+    // 不变量是它们各自场景下的语义，不适用于 fork）。
+    const mutex = this.getMutex(prev.worker_id)
+    const { instance, handle } = await mutex.run(async () => {
+      const dir = join(this.deps.dataDir, prev.worker_id)
+      let sessionTree = this.findSessionTreeForWorker(prev.worker_id)
+      if (!sessionTree) {
+        sessionTree = await SessionTree.load(join(dir, 'session.jsonl'))
+      }
+
+      const newSeq = this.nextSeq(prev.worker_id)
+      const outputLog = new OutputLog(join(dir, `output-${newSeq}.log`))
+      const forkId = await sessionTree.append(prev.session_ref, createUserMessage(forkInput))
+
+      const newInstance: WorkerInstance = {
+        worker_id: prev.worker_id,
+        seq: newSeq,
+        dir,
+        sessionTree,
+        outputLog,
+        tip: forkId,
+        state: 'running',
+        pendingInputs: [],
+      }
+      this.instances.set(instanceKey(prev.worker_id, newSeq), newInstance)
+
+      const newHandle: IncarnationHandle = { worker_id: prev.worker_id, seq: newSeq, impl: 'builtin' }
+      await this.writeMeta(newInstance)
+      return { instance: newInstance, handle: newHandle }
+    })
+
+    // fire-and-forget：一次性 burst 在后台跑，fork 立刻以 running 态返回。
+    this.runForkBurst(instance, handle, builtin).catch(async (err) => {
+      console.error('[builtin-adapter] runForkBurst threw unexpectedly:', err)
+      await this.getMutex(instance.worker_id).run(async () => {
+        await this.transitionExited(instance, handle, 'crashed')
+      })
+    })
+
+    return handle
   }
 
   async sendInput(h: IncarnationHandle, text: string, _opts?: { raw?: boolean }): Promise<void> {
@@ -246,9 +317,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       if (!builtin) {
         throw new Error(`BuiltinWorkerAdapter.sendInput: no builtin config resident in memory for worker ${h.worker_id}`)
       }
-      const tip = instance.sessionTree.latestTip()
-      if (tip === null) throw new Error(`BuiltinWorkerAdapter: worker ${instance.worker_id} has empty session tree`)
-      await instance.sessionTree.append(tip, createUserMessage(text))
+      instance.tip = await instance.sessionTree.append(instance.tip, createUserMessage(text))
       await this.transitionState(instance, h, 'running')
       return true
     })
@@ -297,8 +366,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     handle: IncarnationHandle,
     builtin: NonNullable<SpawnSpec['builtin']>,
   ): Promise<void> {
-    const tip = instance.sessionTree.latestTip()
-    if (tip === null) throw new Error(`BuiltinWorkerAdapter: worker ${instance.worker_id} has empty session tree`)
+    const tip = instance.tip
     const initialMessages = instance.sessionTree.pathTo(tip)
 
     const pendingWrites: Promise<void>[] = []
@@ -345,6 +413,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       for (const msg of newMessages as EngineMessage[]) {
         parent = await instance.sessionTree.append(parent, msg)
       }
+      instance.tip = parent
 
       if (result.outcome === 'failed' || result.outcome === 'aborted') {
         await this.transitionExited(instance, handle, result.outcome === 'aborted' ? 'killed' : 'crashed')
@@ -362,11 +431,11 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       // （不经过可见的 idle 态）；否则转 idle，等待下一次 resume/sendInput 唤醒。
       if (instance.pendingInputs.length > 0) {
         const queued = instance.pendingInputs.splice(0, instance.pendingInputs.length)
-        let queueParent = instance.sessionTree.latestTip()
-        if (queueParent === null) throw new Error(`BuiltinWorkerAdapter: worker ${instance.worker_id} has empty session tree`)
+        let queueParent = instance.tip
         for (const text of queued) {
           queueParent = await instance.sessionTree.append(queueParent, createUserMessage(text))
         }
+        instance.tip = queueParent
         return true
       }
 
@@ -377,6 +446,69 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     if (continueBurst) {
       await this.runBurst(instance, handle, builtin)
     }
+  }
+
+  /**
+   * fork 专用的一次性 burst：不含 finish_task 工具（工具表用 spec 注入的原样），没有
+   * "提前退出"这回事——end_turn 或 maxTurns 耗尽都视为侧问正常收尾，直接 exited(completed)，
+   * 不经过 idle、不支持续 burst（没有 pendingInputs 排队逻辑）。engine 抛错/aborted 才是
+   * exited(crashed)。收尾在该 worker 的互斥锁内完成，append 只作用于 fork 自己的分支链路，
+   * 不触碰主线 tip。
+   */
+  private async runForkBurst(
+    instance: WorkerInstance,
+    handle: IncarnationHandle,
+    builtin: NonNullable<SpawnSpec['builtin']>,
+  ): Promise<void> {
+    const tip = instance.tip
+    const initialMessages = instance.sessionTree.pathTo(tip)
+
+    const pendingWrites: Promise<void>[] = []
+    const result: EngineResult = await runEngine({
+      prompt: '',
+      adapter: builtin.adapter,
+      initialMessages,
+      options: {
+        systemPrompt: builtin.systemPrompt,
+        tools: builtin.tools,
+        model: builtin.model,
+        maxTurns: FORK_MAX_TURNS,
+        disableCompaction: true,
+        onTurn: (event) => {
+          if (event.assistantText) {
+            pendingWrites.push(instance.outputLog.append(event.assistantText + '\n'))
+          }
+        },
+      },
+    })
+    await Promise.all(pendingWrites)
+
+    const mutex = this.getMutex(instance.worker_id)
+    await mutex.run(async () => {
+      if (result.finalMessages.length < initialMessages.length) {
+        console.error(
+          `[builtin-adapter] runForkBurst compaction guard triggered for worker ${instance.worker_id}: ` +
+          `finalMessages.length (${result.finalMessages.length}) < initialMessages.length (${initialMessages.length}). ` +
+          `Compaction was unexpectedly enabled; marking incarnation as crashed.`,
+        )
+        await this.transitionExited(instance, handle, 'crashed')
+        return
+      }
+      const newMessages = result.finalMessages.slice(initialMessages.length)
+      let parent = tip
+      for (const msg of newMessages as EngineMessage[]) {
+        parent = await instance.sessionTree.append(parent, msg)
+      }
+      instance.tip = parent
+
+      if (result.outcome === 'failed' || result.outcome === 'aborted') {
+        await this.transitionExited(instance, handle, 'crashed')
+        return
+      }
+
+      // 'completed'（end_turn）与 'max_turns' 都视为一次性侧问正常收尾。
+      await this.transitionExited(instance, handle, 'completed', 'completed')
+    })
   }
 
   /** worker_id 对应的互斥锁，惰性创建（见 workerMutexes 字段注释）。 */
@@ -394,6 +526,19 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       if (instance.worker_id === worker_id) return instance.sessionTree
     }
     return undefined
+  }
+
+  /**
+   * worker_id 对应下一个可用的化身序号：该 worker 现存所有化身（主线 + fork 分支）里
+   * 最大 seq + 1。resume 和 fork 共用这一个分配逻辑，且都在各自的 mutex.run 内调用，
+   * 保证两者不会分配出相同的 seq。
+   */
+  private nextSeq(worker_id: string): number {
+    let max = 0
+    for (const instance of this.instances.values()) {
+      if (instance.worker_id === worker_id && instance.seq > max) max = instance.seq
+    }
+    return max + 1
   }
 
   private async assertExited(worker_id: string, seq: number): Promise<void> {
@@ -456,7 +601,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     const meta = {
       seq: instance.seq,
       state,
-      tip_node_id: instance.sessionTree.latestTip(),
+      tip_node_id: instance.tip,
       ...(ended_reason !== undefined ? { ended_reason } : {}),
       ...(outcome !== undefined ? { outcome } : {}),
     }

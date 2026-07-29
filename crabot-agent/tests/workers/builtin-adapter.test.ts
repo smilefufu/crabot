@@ -107,6 +107,35 @@ function makeGatedAdapter(
   } as unknown as LLMAdapter
 }
 
+/**
+ * 像 makeAdapter，但从第二次 stream() 调用起先 await gate——用于制造"主线 burst 已经
+ * idle 落定、fork 的 burst 还卡着没跑完"这个可控窗口，同一个 mock adapter 被主线和
+ * fork 共用（贴合 builtinConfigs 按 worker_id 缓存、fork 复用同一 builtin.adapter 的实现）。
+ */
+function makeAdapterGatedFromSecondCall(
+  gate: Promise<void>,
+  responses: Array<{
+    text?: string
+    toolCalls?: Array<{ name: string; id: string; input: Record<string, unknown> }>
+    stopReason: 'end_turn' | 'tool_use'
+  }>,
+): LLMAdapter {
+  let i = 0
+  return {
+    stream: vi.fn(async function* () {
+      if (i > 0) await gate
+      const r = responses[i++] ?? responses[responses.length - 1]
+      const content: unknown[] = []
+      if (r.text) content.push({ type: 'text', text: r.text })
+      for (const tc of r.toolCalls ?? []) {
+        content.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
+      }
+      yield* chunksFromContent(content, r.stopReason, { inputTokens: 100, outputTokens: 50 })
+    }),
+    updateConfig: () => {},
+  } as unknown as LLMAdapter
+}
+
 function spec(opts: { adapter: LLMAdapter; worker_id?: string }): SpawnSpec {
   return {
     worker_id: opts.worker_id ?? randomUUID(),
@@ -331,6 +360,147 @@ describe('BuiltinWorkerAdapter', () => {
     const meta2Raw = await fs.readFile(join(tmp, s.worker_id, 'meta-2.json'), 'utf-8')
     const meta2 = JSON.parse(meta2Raw)
     expect(meta2.state).toBe('idle')
+  })
+
+  // --- fork（侧问分支）---
+
+  it('fork(prev, forkInput) → 主线 idle 状态和 tip 不受影响，fork 有独立输出，fork 能看到主线历史', async () => {
+    const runEngineSpy = vi.spyOn(engineModule, 'runEngine')
+    const gate = deferred<void>()
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({
+      adapter: makeAdapterGatedFromSecondCall(gate.promise, [
+        { text: '首轮回复', stopReason: 'end_turn' },
+        { text: '侧问回复', stopReason: 'end_turn' },
+      ]),
+    })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'idle')
+
+    const treeBeforeFork = await SessionTree.load(join(tmp, s.worker_id, 'session.jsonl'))
+    const mainTip = treeBeforeFork.latestTip()
+    expect(mainTip).not.toBeNull()
+
+    const prevRef: IncarnationRef = { worker_id: s.worker_id, seq: 1, session_ref: mainTip! }
+    const forkHandle = await adapter.fork(prevRef, '侧问问题')
+    expect(forkHandle.seq).toBe(2)
+
+    // fork 的 burst 还卡在 gate 里没跑完：此时主线状态/tip 必须完全不受影响。注意：不能
+    // 用 SessionTree.load(...).latestTip() 判断——那是整个共享文件"最后一次 append"的
+    // 全局游标，fork 往 prev.session_ref 上分支追加后，这个全局游标必然指向 fork 的新
+    // 节点。真正代表"主线自己的续接点"的是主线化身自己维护的 tip（落在 meta-1.json 的
+    // tip_node_id 里），必须仍然等于 fork 之前的 mainTip。
+    expect(await adapter.state(h)).toBe('idle')
+    let mainMeta = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')) as { tip_node_id: string }
+    expect(mainMeta.tip_node_id).toBe(mainTip)
+
+    gate.resolve()
+    await waitState(adapter, forkHandle, 'exited')
+
+    // fork 结束后主线依旧不受影响。
+    expect(await adapter.state(h)).toBe('idle')
+    mainMeta = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')) as { tip_node_id: string }
+    expect(mainMeta.tip_node_id).toBe(mainTip)
+
+    // fork 化身独立 meta：exited(completed)。
+    const forkMetaRaw = await fs.readFile(join(tmp, s.worker_id, 'meta-2.json'), 'utf-8')
+    const forkMeta = JSON.parse(forkMetaRaw)
+    expect(forkMeta.state).toBe('exited')
+    expect(forkMeta.ended_reason).toBe('completed')
+    expect(forkMeta.outcome).toBe('completed')
+
+    // fork 输出独立可读，且与主线输出互不串。
+    const forkOutput = await adapter.readOutput(forkHandle, { offset: 0 })
+    expect(forkOutput.chunk).toContain('侧问回复')
+    const mainOutput = await adapter.readOutput(h, { offset: 0 })
+    expect(mainOutput.chunk).toContain('首轮回复')
+    expect(mainOutput.chunk).not.toContain('侧问回复')
+
+    // fork 看得到主线历史：第二次 runEngine 调用（fork 的 burst）的 initialMessages 里
+    // 含首轮 prompt、首轮 assistant 回复、以及 forkInput 本身。
+    expect(runEngineSpy).toHaveBeenCalledTimes(2)
+    const forkCallArgs = runEngineSpy.mock.calls[1]?.[0]
+    const serialized = JSON.stringify(forkCallArgs?.initialMessages ?? [])
+    expect(serialized).toContain('测试任务')
+    expect(serialized).toContain('首轮回复')
+    expect(serialized).toContain('侧问问题')
+
+    // session 树分叉：mainTip 现在有且仅有一个孩子（fork 的分支节点），主线没有继续。
+    const raw = await fs.readFile(join(tmp, s.worker_id, 'session.jsonl'), 'utf-8')
+    const rawNodes = raw
+      .split('\n')
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l) as { node_id: string; parent_id: string | null })
+    const childrenOfMainTip = rawNodes.filter((n) => n.parent_id === mainTip)
+    expect(childrenOfMainTip.length).toBe(1)
+  })
+
+  it('fork 不要求 prev 处于任何特定状态：主线仍 running 时也能 fork', async () => {
+    const gate = deferred<void>()
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({
+      adapter: makeGatedAdapter(gate.promise, [
+        { text: '主线回复', stopReason: 'end_turn' },
+        { text: '侧问回复', stopReason: 'end_turn' },
+      ]),
+    })
+
+    const h = await adapter.spawn(s)
+    expect(await adapter.state(h)).toBe('running')
+
+    // 主线首个 burst 还没跑完（卡在 gate），此时 fork：session_ref 用根节点（prompt 节点）。
+    const tree = await SessionTree.load(join(tmp, s.worker_id, 'session.jsonl'))
+    const rootTip = tree.latestTip()
+    expect(rootTip).not.toBeNull()
+    const prevRef: IncarnationRef = { worker_id: s.worker_id, seq: 1, session_ref: rootTip! }
+
+    const forkHandle = await adapter.fork(prevRef, '侧问问题')
+    expect(forkHandle.seq).toBe(2)
+
+    gate.resolve()
+    await waitState(adapter, h, 'idle')
+    await waitState(adapter, forkHandle, 'exited')
+
+    expect(await adapter.state(h)).toBe('idle')
+    const forkMetaRaw = await fs.readFile(join(tmp, s.worker_id, 'meta-2.json'), 'utf-8')
+    const forkMeta = JSON.parse(forkMetaRaw)
+    expect(forkMeta.state).toBe('exited')
+    expect(forkMeta.outcome).toBe('completed')
+  })
+
+  it('fork 之后 resume 主线：seq 分配不与 fork 撞号（fork 消耗 seq 2，resume 应得 seq 3）', async () => {
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({
+      adapter: makeAdapter([
+        { text: '首轮回复', stopReason: 'end_turn' },
+        { text: '侧问回复', stopReason: 'end_turn' },
+        { toolCalls: [{ name: 'finish_task', id: 'call_1', input: { outcome: 'completed', summary: '主线完成' } }], stopReason: 'tool_use' },
+        { text: '欢迎回来', stopReason: 'end_turn' },
+      ]),
+    })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'idle')
+
+    const tree1 = await SessionTree.load(join(tmp, s.worker_id, 'session.jsonl'))
+    const mainTip = tree1.latestTip()!
+    const forkRef: IncarnationRef = { worker_id: s.worker_id, seq: 1, session_ref: mainTip }
+    const forkHandle = await adapter.fork(forkRef, '侧问问题')
+    expect(forkHandle.seq).toBe(2)
+    await waitState(adapter, forkHandle, 'exited')
+
+    // 主线继续跑到 finish_task → exited。
+    await adapter.sendInput(h, '继续')
+    await waitState(adapter, h, 'exited')
+
+    const mainMetaRaw = await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')
+    const mainMeta = JSON.parse(mainMetaRaw) as { tip_node_id: string }
+    const resumeRef: IncarnationRef = { worker_id: s.worker_id, seq: 1, session_ref: mainMeta.tip_node_id }
+
+    const resumedHandle = await adapter.resume(resumeRef, '我回来了')
+    expect(resumedHandle.seq).toBe(3)
+    await waitState(adapter, resumedHandle, 'idle')
   })
 
   // --- 并发竞态回归（per-worker 互斥）---
