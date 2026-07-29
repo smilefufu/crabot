@@ -112,6 +112,15 @@ export interface HarnessDeps {
   readonly onEvent?: (e: HarnessEvent) => void
   /** provision 素材(P3 可返回空集) */
   readonly capabilityBundle?: () => Promise<CapabilityBundle>
+  /**
+   * handoff(§5.3 交接续办 / switchWorkerImpl)目标实现是 'builtin' 时所需的 LLM 注入
+   * 默认值。`spawnWorker` 的 builtin 注入由调用方随每次调用显式传入(`SpawnWorkerParams.
+   * builtin`),但 handoff 是 harness 内部触发的动作(可能由 sendToWorker 命中终态化身
+   * 自动触发,调用方拿不到再传一次 builtin 注入的机会),因此在 HarnessDeps 这一级配置
+   * 一份可复用的默认值。缺省时 handoffIncarnation 对 builtin 目标做 pre-flight 拒绝
+   * (见该方法注释),不尝试传 `undefined` 让 `BuiltinWorkerAdapter.spawn` 自己再抛错。
+   */
+  readonly builtinSpawnDefaults?: () => SpawnSpec['builtin']
 }
 
 export interface SpawnWorkerParams {
@@ -439,6 +448,28 @@ export class WorkerHarness {
       session_ref: source.session_ref,
     }
 
+    // 0. Pre-flight(裁决 B 修复):目标 adapter 必须存在;若目标是 'builtin',调用方必须
+    // 通过 HarnessDeps.builtinSpawnDefaults 提供了 LLM 注入,否则 step 3 的 newAdapter.spawn
+    // 必然因 spec.builtin 缺失而抛错(BuiltinWorkerAdapter.spawn 本就 fail-loud)。修复前这
+    // 个抛错发生在 step 3——此时旧化身已经在 step 2 被 kill 并标 superseded,worker 卡进
+    // "旧的没了、新的没建成"的死结,且下次投递会重复整套 handoff(重复追加 HANDOFF.md)。
+    // 把这两项检查提到最前面、在写 HANDOFF.md 和 kill 旧化身之前做,失败时旧化身与
+    // HANDOFF.md 都不动,保持可重试。
+    const newAdapter = this.deps.adapters.get(targetImpl)
+    if (!newAdapter) {
+      throw new Error(`WorkerHarness.handoffIncarnation: no adapter registered for impl '${targetImpl}' (handoff target)`)
+    }
+    let builtinInjection: SpawnSpec['builtin']
+    if (targetImpl === 'builtin') {
+      builtinInjection = this.deps.builtinSpawnDefaults?.()
+      if (!builtinInjection) {
+        throw new Error(
+          `WorkerHarness.handoffIncarnation: handoff target impl is 'builtin' but no builtinSpawnDefaults ` +
+            `configured on HarnessDeps; refusing before touching the source incarnation (worker ${worker.worker_id}#${source.seq})`
+        )
+      }
+    }
+
     // 1. 组装交接材料(task.title/goal + 最近输出尾部,上限 4KB + 上一化身 outcome)并写
     // workspace 下的 HANDOFF.md(已存在则追加带时间戳的新段,不覆盖)。
     let tail = ''
@@ -484,10 +515,7 @@ export class WorkerHarness {
     }
 
     // 3. 同 workspace provision + spawn 新实现,开工输入 = 原任务 + 交接引用 + 本次输入。
-    const newAdapter = this.deps.adapters.get(targetImpl)
-    if (!newAdapter) {
-      throw new Error(`WorkerHarness.handoffIncarnation: no adapter registered for impl '${targetImpl}' (handoff target)`)
-    }
+    // newAdapter / builtinInjection 已在上面的 pre-flight 里取好,这里不用再判一次。
     const workspace: Workspace = { root: source.workspace }
     const caps = this.deps.capabilityBundle ? await this.deps.capabilityBundle() : EMPTY_CAPABILITY_BUNDLE
     await newAdapter.provision(workspace, caps)
@@ -497,6 +525,7 @@ export class WorkerHarness {
       prompt,
       workspace,
       goal: worker.task.goal,
+      builtin: builtinInjection,
     })
 
     // 4. 化身链 +1,task 重新回到 running(见 reopenTaskForContinuation 注释)。

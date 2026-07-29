@@ -160,6 +160,12 @@ async function makeHarness(): Promise<{
     workersDir,
     now,
     onEvent: (e) => events.push(e),
+    // 本文件里 FakeAdapter 缺省 implId 就是 'builtin'（多数测试拿它当泛化的"随便一个实现"
+    // 桩用，不关心真实 LLM 注入）；handoffIncarnation 的 pre-flight（裁决 B 修复）对目标
+    // impl==='builtin' 硬性要求 HarnessDeps.builtinSpawnDefaults，这里给个无害的桩值，
+    // 让不专门测这条 pre-flight 的既有用例不受影响。专门测 pre-flight 行为的用例会自建
+    // 不含这个字段的 deps（见下面两个 describe 块）。
+    builtinSpawnDefaults: () => ({ adapter: {} as LLMAdapter, model: 'test-model', systemPrompt: '', tools: [] }),
   }
   const harness = new WorkerHarness(deps)
   return { harness, ledger, adaptersMap, defaultImpl: 'builtin' }
@@ -471,6 +477,115 @@ describe('WorkerHarness — 接续过程中的并发', () => {
     expect(fake.resumeCalls).toHaveLength(1)
     // 第二条消息通过"mainline.seq !== sourceSeq"分支，作为普通投递补送到了新主线。
     expect(fake.sendInputCalls.some((c) => c.text === '第二条')).toBe(true)
+  })
+})
+
+describe('WorkerHarness.handoffIncarnation — handoff 目标是 builtin 时的 pre-flight（裁决 B 修复）', () => {
+  it('目标是 builtin 且未配置 HarnessDeps.builtinSpawnDefaults → pre-flight 直接抛错，旧化身状态与 HANDOFF.md 均未被改动（可重试）', async () => {
+    // 不用共享的 makeHarness() —— 它为了不影响其它不专门测这条 pre-flight 的既有用例，
+    // 默认给 builtinSpawnDefaults 配了桩值；这里要专门测"没配置"的场景，必须自建 deps。
+    const ledgersDir = join(dataDir, 'ledgers')
+    const workspacesRoot = join(dataDir, 'workspaces')
+    const workersDir = join(dataDir, 'workers')
+    await fs.mkdir(workspacesRoot, { recursive: true })
+    const ledger = new LedgerStore(ledgersDir)
+    const workspaces = new WorkspaceManager(workspacesRoot)
+    const adaptersMap = new Map<WorkerImplId, WorkerAdapter>()
+    const deps: HarnessDeps = {
+      adapters: adaptersMap,
+      defaultImpl: 'claude-code',
+      ledger,
+      workspaces,
+      workersDir,
+      now,
+      onEvent: (e) => events.push(e),
+      // 关键：没有 builtinSpawnDefaults。
+    }
+    const harness = new WorkerHarness(deps)
+    const source = new FakeAdapter({
+      implId: 'claude-code',
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      outputChunk: '还没做完的工作',
+    })
+    const builtinTarget = new FakeAdapter({ implId: 'builtin', onStateChange: harness.handleStateChange })
+    adaptersMap.set('claude-code', source)
+    adaptersMap.set('builtin', builtinTarget)
+
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    const workspaceRoot = worker.incarnations[0].workspace
+    events.length = 0
+
+    await expect(harness.switchWorkerImpl(worker.worker_id, 'builtin', '切到 builtin')).rejects.toThrow(
+      /builtinSpawnDefaults/
+    )
+
+    // pre-flight 失败必须发生在"碰旧化身"之前：不能 kill、不能改台账、不能写 HANDOFF.md，
+    // 否则下次重试会重复整套 handoff（重复追加 HANDOFF.md），且 worker 卡在"旧的没了、
+    // 新的没建成"的死结里。
+    expect(source.killCalls).toHaveLength(0)
+    expect(builtinTarget.spawnCalls).toHaveLength(0)
+    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(w.incarnations).toHaveLength(1)
+    expect(w.incarnations[0].state).toBe('running') // 源化身原样存活，未被标 superseded
+    expect(w.incarnations[0].ended_reason).toBeUndefined()
+
+    await expect(fs.readFile(join(workspaceRoot, 'HANDOFF.md'), 'utf-8')).rejects.toThrow() // 文件未被创建
+
+    expect(events.filter((e) => e.kind === 'handoff_started')).toHaveLength(0)
+    expect(events.filter((e) => e.kind === 'superseded')).toHaveLength(0)
+  })
+
+  it('目标是 builtin 且配置了 HarnessDeps.builtinSpawnDefaults → handoff 正常完成，新化身 spawn 时带上了注入的 builtin 配置', async () => {
+    const ledgersDir = join(dataDir, 'ledgers')
+    const workspacesRoot = join(dataDir, 'workspaces')
+    const workersDir = join(dataDir, 'workers')
+    await fs.mkdir(workspacesRoot, { recursive: true })
+    const ledger = new LedgerStore(ledgersDir)
+    const workspaces = new WorkspaceManager(workspacesRoot)
+    const builtinDefaults: NonNullable<SpawnSpec['builtin']> = {
+      adapter: {} as LLMAdapter,
+      model: 'test-model',
+      systemPrompt: '',
+      tools: [],
+    }
+
+    // 见 harness.ts 文件头"onStateChange 接线契约":先建空壳 Map、建 harness，再建各 adapter
+    // （构造时把 harness.handleStateChange 传进去），最后把 adapter 塞进 Map。
+    const adaptersMap = new Map<WorkerImplId, WorkerAdapter>()
+    const deps: HarnessDeps = {
+      adapters: adaptersMap,
+      defaultImpl: 'claude-code',
+      ledger,
+      workspaces,
+      workersDir,
+      now,
+      onEvent: (e) => events.push(e),
+      builtinSpawnDefaults: () => builtinDefaults,
+    }
+    const harness = new WorkerHarness(deps)
+    const source = new FakeAdapter({
+      implId: 'claude-code',
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      outputChunk: '还没做完的工作',
+    })
+    const builtinTarget = new FakeAdapter({ implId: 'builtin', onStateChange: harness.handleStateChange })
+    adaptersMap.set('claude-code', source)
+    adaptersMap.set('builtin', builtinTarget)
+
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    events.length = 0
+
+    await harness.switchWorkerImpl(worker.worker_id, 'builtin', '切到 builtin')
+
+    expect(builtinTarget.spawnCalls).toHaveLength(1)
+    expect(builtinTarget.spawnCalls[0].builtin).toBe(builtinDefaults)
+
+    const [w] = await ledger.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const newEntry = w.incarnations[w.incarnations.length - 1]
+    expect(newEntry.impl).toBe('builtin')
+    expect(newEntry.state).toBe('running')
   })
 })
 
