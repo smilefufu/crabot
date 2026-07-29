@@ -139,6 +139,16 @@ function resolve<T>(value: Resolvable<T>): T {
   return typeof value === 'function' ? (value as () => T)() : value
 }
 
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await fs.access(path)
+    return true
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw err
+  }
+}
+
 export class BuiltinWorkerAdapter implements WorkerAdapter {
   readonly implId = 'builtin' as const
 
@@ -172,8 +182,19 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     if (!spec.builtin) {
       throw new Error(`BuiltinWorkerAdapter.spawn: spec.builtin missing for worker ${spec.worker_id}`)
     }
+
+    // fail-fast：拒绝对同一个 worker_id 重复 spawn。builtinConfigs/instances 命中说明本
+    // 进程已经 spawn 过；磁盘已有 meta-1.json 覆盖跨进程场景（上一进程 spawn 过、本进程
+    // 刚启动，内存态是空的但磁盘还留着旧化身）。不拦住的话，重复 spawn 会把新的根节点
+    // append 进同一个 session.jsonl，跟旧化身的节点混进一棵树，是脏数据源头。
+    if (this.builtinConfigs.has(spec.worker_id) || this.findSessionTreeForWorker(spec.worker_id)) {
+      throw new Error(`BuiltinWorkerAdapter.spawn: worker_id ${spec.worker_id} already spawned in this process`)
+    }
     const seq = 1
     const dir = join(this.deps.dataDir, spec.worker_id)
+    if (await fileExists(join(dir, `meta-${seq}.json`))) {
+      throw new Error(`BuiltinWorkerAdapter.spawn: worker_id ${spec.worker_id} already has meta-${seq}.json on disk`)
+    }
     await fs.mkdir(dir, { recursive: true })
 
     const sessionTree = new SessionTree(join(dir, 'session.jsonl'))
@@ -190,11 +211,15 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       state: 'running',
       pendingInputs: [],
     }
-    this.instances.set(instanceKey(spec.worker_id, seq), instance)
-    this.builtinConfigs.set(spec.worker_id, spec.builtin)
 
     const handle: IncarnationHandle = { worker_id: spec.worker_id, seq, impl: 'builtin' }
+    // writeMeta 成功之后才注册到 instances/builtinConfigs，跟 resume 保持一致的提交次序：
+    // 磁盘失败时不留孤儿实例（此时 session.jsonl 已经有 root 节点，重试会撞上面新加的
+    // "已 spawn"检查——与 resume/fork 的幂等重试语义不同，P1 范围内 spawn 失败要求调用方
+    // 换一个 worker_id 重试，不在本次修复范围内展开）。
     await this.writeMeta(instance)
+    this.instances.set(instanceKey(spec.worker_id, seq), instance)
+    this.builtinConfigs.set(spec.worker_id, spec.builtin)
 
     // fire-and-forget：burst 在后台跑，spawn 立刻以 running 态返回。
     this.runBurst(instance, handle, spec.builtin).catch(async (err) => {
@@ -304,10 +329,12 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         state: 'running',
         pendingInputs: [],
       }
-      this.instances.set(instanceKey(prev.worker_id, newSeq), newInstance)
 
       const newHandle: IncarnationHandle = { worker_id: prev.worker_id, seq: newSeq, impl: 'builtin' }
+      // writeMeta 成功之后才注册到 instances，和 resume 保持一致的提交次序：磁盘失败时
+      // 不留孤儿实例。
       await this.writeMeta(newInstance)
+      this.instances.set(instanceKey(prev.worker_id, newSeq), newInstance)
       return { instance: newInstance, handle: newHandle }
     })
 
@@ -489,7 +516,16 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     })
     if (!abortController) return
 
+    // pendingWrites 里的 promise 必须在 push 的同一刻就挂上 catch：burst 可能跑几分钟，
+    // onTurn 到下面 await Promise.all(pendingWrites) 之间跨度很长，若 append 提前 reject
+    // 却没有 handler，Node 会在本轮微任务结束时就判定为 unhandledRejection——命中
+    // main.ts 的 process.on('unhandledRejection') 兜底，直接 process.exit(1) 打崩整个
+    // agent 进程。这里改成收集错误到 writeErrors，Promise.all 结束后统一判定：与
+    // spawn/resume/fork/sendInput 处包给 this.runBurst(...) 的安全网 catch（跑到
+    // transitionExited(..., 'crashed')）走同一条错误路径——不在这里代为转态，避免
+    // 和下面的收尾段互斥锁临界区重复处理。
     const pendingWrites: Promise<void>[] = []
+    const writeErrors: unknown[] = []
     const result: EngineResult = await runEngine({
       prompt: '',
       adapter: builtin.adapter,
@@ -504,12 +540,22 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         abortSignal: abortController.signal,
         onTurn: (event) => {
           if (event.assistantText) {
-            pendingWrites.push(instance.outputLog.append(event.assistantText + '\n'))
+            pendingWrites.push(
+              instance.outputLog.append(event.assistantText + '\n').catch((err) => {
+                writeErrors.push(err)
+              }),
+            )
           }
         },
       },
     })
     await Promise.all(pendingWrites)
+    if (writeErrors.length > 0) {
+      throw new Error(
+        `[builtin-adapter] runBurst: ${writeErrors.length} outputLog.append write(s) failed for worker ${instance.worker_id}: ` +
+        writeErrors.map((e) => (e instanceof Error ? e.message : String(e))).join('; '),
+      )
+    }
 
     // 收尾段（压缩防御 → append 新消息 → 判 outcome → 判队列 → 落 idle/续 burst）整体在该
     // worker 的互斥锁内原子完成：消除"同步判定 pendingInputs 为空后 await transitionState
@@ -607,7 +653,12 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     })
     if (!abortController) return
 
+    // 同 runBurst：push 时立即挂 catch，避免 append 在长时间跑的 burst 期间 reject 却
+    // 没有 handler，触发 unhandledRejection 打崩进程。错误收集到 writeErrors，
+    // Promise.all 后统一抛出，走 fork() 处包给 this.runForkBurst(...) 的安全网 catch
+    // （crashed 收尾），与 runBurst 保持一致的错误语义。
     const pendingWrites: Promise<void>[] = []
+    const writeErrors: unknown[] = []
     const result: EngineResult = await runEngine({
       prompt: '',
       adapter: builtin.adapter,
@@ -621,12 +672,22 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         abortSignal: abortController.signal,
         onTurn: (event) => {
           if (event.assistantText) {
-            pendingWrites.push(instance.outputLog.append(event.assistantText + '\n'))
+            pendingWrites.push(
+              instance.outputLog.append(event.assistantText + '\n').catch((err) => {
+                writeErrors.push(err)
+              }),
+            )
           }
         },
       },
     })
     await Promise.all(pendingWrites)
+    if (writeErrors.length > 0) {
+      throw new Error(
+        `[builtin-adapter] runForkBurst: ${writeErrors.length} outputLog.append write(s) failed for worker ${instance.worker_id}: ` +
+        writeErrors.map((e) => (e instanceof Error ? e.message : String(e))).join('; '),
+      )
+    }
 
     await mutex.run(async () => {
       if (result.finalMessages.length < initialMessages.length) {

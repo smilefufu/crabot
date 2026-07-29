@@ -997,4 +997,206 @@ describe('BuiltinWorkerAdapter', () => {
       expect(orphans).toEqual([])
     })
   })
+
+  // --- runBurst/runForkBurst: outputLog.append 失败不触发 unhandledRejection ---
+
+  /** 临时挂一个 unhandledRejection 监听，收集 reason，测试结束时摘掉。 */
+  function captureUnhandledRejections(): { reasons: unknown[]; restore: () => void } {
+    const reasons: unknown[] = []
+    const listener = (reason: unknown) => {
+      reasons.push(reason)
+    }
+    process.on('unhandledRejection', listener)
+    return { reasons, restore: () => process.removeListener('unhandledRejection', listener) }
+  }
+
+  /**
+   * 第一轮受 gate 控制（放行前装好 outputLog.append 的 reject mock）；第二轮起插入一段
+   * *真实*的宏任务延迟（setTimeout，不是受测试代码控制的 deferred）——复现"burst 跨越
+   * 多个真实事件循环 tick"的场景，让第一轮 onTurn 里 push 的 rejecting promise 在真正被
+   * Promise.all 接住之前，有机会先被 Node 判定为 unhandledRejection（这正是线上"burst
+   * 跑几分钟"场景的加速版：用一次真实 setTimeout 制造出同等性质的事件循环间隔，而不是
+   * 单纯堆微任务——否则 Promise.all 的 .then 几乎在同一轮微任务里就把 handler 接上，
+   * 复现不出 bug）。第一轮工具调一个不存在的工具名，让 engine 走"tool not found”错误
+   * 结果分支后继续下一轮，而不是直接 end_turn 收尾。
+   */
+  function makeAdapterGatedThenRealDelay(
+    gate: Promise<void>,
+    delayMs: number,
+    responses: Array<{
+      text?: string
+      toolCalls?: Array<{ name: string; id: string; input: Record<string, unknown> }>
+      stopReason: 'end_turn' | 'tool_use'
+    }>,
+  ): LLMAdapter {
+    let i = 0
+    return {
+      stream: vi.fn(async function* () {
+        if (i === 0) {
+          await gate
+        } else {
+          await new Promise((r) => setTimeout(r, delayMs))
+        }
+        const r = responses[i++] ?? responses[responses.length - 1]
+        const content: unknown[] = []
+        if (r.text) content.push({ type: 'text', text: r.text })
+        for (const tc of r.toolCalls ?? []) {
+          content.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
+        }
+        yield* chunksFromContent(content, r.stopReason, { inputTokens: 100, outputTokens: 50 })
+      }),
+      updateConfig: () => {},
+    } as unknown as LLMAdapter
+  }
+
+  it('runBurst: onTurn 里 outputLog.append reject 不触发 unhandledRejection，化身按 crashed 收尾', async () => {
+    const capture = captureUnhandledRejections()
+    try {
+      const gate = deferred<void>()
+      const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+      const s = spec({
+        adapter: makeAdapterGatedThenRealDelay(gate.promise, 50, [
+          { text: '第一轮输出(落盘会失败)', toolCalls: [{ name: 'no_such_tool', id: 'call_1', input: {} }], stopReason: 'tool_use' },
+          { text: '第二轮输出', stopReason: 'end_turn' },
+        ]),
+      })
+
+      const h = await adapter.spawn(s)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const adapterAny = adapter as any
+      const instance = (adapterAny.instances as Map<string, { outputLog: { append: (t: string) => Promise<void> } }>).get(
+        `${s.worker_id}#1`,
+      )
+      expect(instance).toBeDefined()
+      // 顶替掉 outputLog.append，让 onTurn 里的落盘调用 reject——模拟磁盘写失败。
+      instance!.outputLog.append = vi.fn(async () => {
+        throw new Error('simulated output-log disk error')
+      })
+
+      gate.resolve()
+      await waitState(adapter, h, 'exited')
+
+      expect(capture.reasons).toEqual([])
+
+      const metaRaw = await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')
+      const meta = JSON.parse(metaRaw)
+      expect(meta.state).toBe('exited')
+      expect(meta.ended_reason).toBe('crashed')
+    } finally {
+      capture.restore()
+    }
+  })
+
+  it('runForkBurst: onTurn 里 outputLog.append reject 不触发 unhandledRejection，fork 化身按 crashed 收尾', async () => {
+    const capture = captureUnhandledRejections()
+    try {
+      const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+      const s = spec({
+        adapter: makeAdapter([{ text: '主线首轮', stopReason: 'end_turn' }]),
+      })
+
+      const h = await adapter.spawn(s)
+      await waitState(adapter, h, 'idle')
+
+      const metaRaw = await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')
+      const meta = JSON.parse(metaRaw) as { tip_node_id: string }
+      const prevRef: IncarnationRef = { worker_id: s.worker_id, seq: 1, session_ref: meta.tip_node_id }
+
+      const forkGate = deferred<void>()
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const adapterAny = adapter as any
+      const builtinConfig = (adapterAny.builtinConfigs as Map<string, { adapter: unknown }>).get(s.worker_id)!
+      builtinConfig.adapter = makeAdapterGatedThenRealDelay(forkGate.promise, 50, [
+        { text: '侧问第一轮(落盘会失败)', toolCalls: [{ name: 'no_such_tool', id: 'call_1', input: {} }], stopReason: 'tool_use' },
+        { text: '侧问第二轮', stopReason: 'end_turn' },
+      ])
+
+      const forkHandle = await adapter.fork(prevRef, '侧问一下')
+      const forkInstance = (adapterAny.instances as Map<string, { outputLog: { append: (t: string) => Promise<void> } }>).get(
+        `${s.worker_id}#${forkHandle.seq}`,
+      )
+      expect(forkInstance).toBeDefined()
+      forkInstance!.outputLog.append = vi.fn(async () => {
+        throw new Error('simulated output-log disk error (fork)')
+      })
+
+      forkGate.resolve()
+      await waitState(adapter, forkHandle, 'exited')
+
+      expect(capture.reasons).toEqual([])
+
+      const forkMetaRaw = await fs.readFile(join(tmp, s.worker_id, `meta-${forkHandle.seq}.json`), 'utf-8')
+      const forkMeta = JSON.parse(forkMetaRaw)
+      expect(forkMeta.state).toBe('exited')
+      expect(forkMeta.ended_reason).toBe('crashed')
+    } finally {
+      capture.restore()
+    }
+  })
+
+  // --- spawn: 重复 worker_id fail-fast ---
+
+  it('spawn 同一 worker_id 两次(本进程内存已有化身) → 第二次 fail-fast 抛错，不影响第一个化身', async () => {
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const workerId = randomUUID()
+    const s1 = spec({ adapter: makeAdapter([{ text: '第一次', stopReason: 'end_turn' }]), worker_id: workerId })
+    const h1 = await adapter.spawn(s1)
+    await waitState(adapter, h1, 'idle')
+
+    const s2 = spec({ adapter: makeAdapter([{ text: '第二次', stopReason: 'end_turn' }]), worker_id: workerId })
+    await expect(adapter.spawn(s2)).rejects.toThrow(/already spawned/)
+
+    // 第一个化身状态未被破坏。
+    expect(await adapter.state(h1)).toBe('idle')
+  })
+
+  it('spawn 跨进程重复:磁盘已有 meta-1.json 但新 adapter 实例内存为空 → fail-fast 抛错', async () => {
+    const workerId = randomUUID()
+    const adapter1 = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s1 = spec({ adapter: makeAdapter([{ text: '第一次', stopReason: 'end_turn' }]), worker_id: workerId })
+    const h1 = await adapter1.spawn(s1)
+    await waitState(adapter1, h1, 'idle')
+
+    // 模拟新进程重启：全新 adapter 实例，instances/builtinConfigs 都是空的，只有磁盘留着旧化身。
+    const adapter2 = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s2 = spec({ adapter: makeAdapter([{ text: '第二次', stopReason: 'end_turn' }]), worker_id: workerId })
+    await expect(adapter2.spawn(s2)).rejects.toThrow(/already has meta-1\.json on disk/)
+  })
+
+  // --- fork: 提交次序对齐 resume(writeMeta 成功后才 instances.set) ---
+
+  it('fork: writeMeta 抛错 → instances 无残留(提交次序与 resume 对齐)', async () => {
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({ adapter: makeAdapter([{ text: '主线首轮', stopReason: 'end_turn' }]) })
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'idle')
+
+    const metaRaw = await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')
+    const meta = JSON.parse(metaRaw) as { tip_node_id: string }
+    const prevRef: IncarnationRef = { worker_id: s.worker_id, seq: 1, session_ref: meta.tip_node_id }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const adapterAny = adapter as any
+    const originalWriteMeta = adapterAny.writeMeta.bind(adapter)
+    let writeMetaCallCount = 0
+    adapterAny.writeMeta = vi.fn(async (...args: unknown[]) => {
+      writeMetaCallCount++
+      if (writeMetaCallCount === 1) {
+        throw new Error('simulated writeMeta disk error (fork)')
+      }
+      return originalWriteMeta(...args)
+    })
+
+    await expect(adapter.fork(prevRef, '侧问')).rejects.toThrow(/simulated writeMeta disk error \(fork\)/)
+
+    // writeMeta 失败了，instances 里不应该有 seq=2 的孤儿条目。
+    const key2 = `${s.worker_id}#2`
+    expect((adapterAny.instances as Map<string, unknown>).has(key2)).toBe(false)
+
+    // 重试应该能成功（fork 没有像 resume 那样的"重复"标记，重试是无副作用的）。
+    const retryHandle = await adapter.fork(prevRef, '侧问-重试')
+    expect(retryHandle.seq).toBe(2)
+    await waitState(adapter, retryHandle, 'exited')
+  })
 })
