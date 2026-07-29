@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// mock-cli.mjs — 测试用的假 cc/codex 进程,扮演其最小交互行为:每收到一行 stdin
-// (对应 tmux sendText 注入的一行输入)就消费脚本的下一步。脚本经 env MOCK_CLI_SCRIPT 传入
-// (JSON 数组,元素形如 { output？, emitStop？, exit？, exitCode？ })。
+// mock-cli.mjs — 测试用的假 cc/codex 进程,扮演其最小交互行为:每收到一条完整消息 stdin
+// (对应 tmux sendText 注入的一次输入,不区分单行/多行)就消费脚本的下一步。脚本经
+// env MOCK_CLI_SCRIPT 传入(JSON 数组,元素形如 { output？, emitStop？, exit？, exitCode？ })。
 //
 // 真实 cc 靠 .claude/settings.json 里配置的 Stop hook 命令来上报"我空闲了";真实 codex 靠
 // config.toml 的 notify 程序上报 agent-turn-complete。mock 不解析 settings.json/config.toml,
@@ -28,11 +28,22 @@
 // 出现 -p 就判定为这种一次性调用,原样把入参回显到 stdout 并立即 exit 0,不进入下面的
 // stdin 循环。同理,adapter.detect() 会拿同一条 claudeBin/codexBin 命令行加一个 --version
 // 单独跑一次(也是一次性调用,不写 stdin),argv 里出现 --version 同样立即打印版本号退出。
+//
+// bracketed paste(P2 review #2,tmux/driver.ts sendText 修复):真实 cc/codex TUI 启动时
+// 会请求 bracketed paste mode(发 \x1b[?2004h),这样 tmux `paste-buffer -p` 才会把整段
+// 粘贴内容用 \x1b[200~ ... \x1b[201~ 包裹,程序据此把包裹内的内容当"粘贴的一整块"处理,
+// 内部换行不当提交触发,只有标记外的真实 Enter 才提交。mock 复刻同款语义(而不是简单按行
+// readline),这样契约测试才能验证 sendText 对多行文本真的整段一次性到达,不会被拆成
+// 逐行提交。MOCK_CLI_STDIN_LOG(可选,绝对路径)——设置后每次"提交"(收到一条完整消息)
+// 都往这个文件追加一行 JSON 字符串(消息原文,含内部换行),供测试断言提交次数与内容。
+// MOCK_CLI_READY_FILE(可选,绝对路径)——请求 bracketed paste 之后落一个空文件,供测试在
+// 发送输入前等待"mock 已完成启动、已经请求过 bracketed paste",避免 tmux new-session 一
+// 返回就立刻 sendText 时与 node 进程自身的启动耗时赛跑(这个赛跑本身是测试时序问题,不是
+// sendText 机制的问题——真实 cc/codex 进程启动更慢,同样需要先起来才能谈 bracketed paste)。
 import { exec } from 'node:child_process'
 import { promisify } from 'node:util'
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
-import readline from 'node:readline'
 
 const execAsync = promisify(exec)
 
@@ -83,7 +94,75 @@ async function runStep() {
   }
 }
 
-const rl = readline.createInterface({ input: process.stdin })
-rl.on('line', () => {
+const stdinLogFile = process.env.MOCK_CLI_STDIN_LOG
+
+const PASTE_START = '\x1b[200~'
+const PASTE_END = '\x1b[201~'
+
+// 请求 bracketed paste mode——没有这一步,tmux `paste-buffer -p` 不会包裹标记,mock 就
+// 观察不到"一整块"与"逐行"的区别(等价于真实 TUI 没开这个能力时的降级行为)。
+if (process.stdin.isTTY) process.stdin.setRawMode(true)
+process.stdin.resume()
+process.stdout.write('\x1b[?2004h')
+
+const readyFile = process.env.MOCK_CLI_READY_FILE
+if (readyFile) writeFileSync(readyFile, '')
+
+let insidePaste = false
+let pending = '' // 尚未解析完的原始字节(可能横跨多个 data 事件,含被截断的半个标记)
+let lineBuffer = '' // 当前累积中的一条逻辑消息内容
+
+/** str 末尾是否是 marker 的某个前缀(用于避免把跨 chunk 被截断的标记误判成普通内容)。 */
+function trailingMarkerPrefixLen(str, marker) {
+  const maxLen = Math.min(str.length, marker.length - 1)
+  for (let len = maxLen; len > 0; len--) {
+    if (str.endsWith(marker.slice(0, len))) return len
+  }
+  return 0
+}
+
+function submit(content) {
+  if (stdinLogFile) appendFileSync(stdinLogFile, JSON.stringify(content) + '\n')
   void runStep()
+}
+
+process.stdin.on('data', (chunk) => {
+  pending += chunk.toString('utf-8')
+
+  while (pending.length > 0) {
+    if (insidePaste) {
+      const endIdx = pending.indexOf(PASTE_END)
+      if (endIdx !== -1) {
+        lineBuffer += pending.slice(0, endIdx)
+        pending = pending.slice(endIdx + PASTE_END.length)
+        insidePaste = false
+        continue
+      }
+      const holdBack = trailingMarkerPrefixLen(pending, PASTE_END)
+      lineBuffer += pending.slice(0, pending.length - holdBack)
+      pending = pending.slice(pending.length - holdBack)
+      break
+    }
+
+    const startIdx = pending.indexOf(PASTE_START)
+    const nlIdx = pending.search(/[\r\n]/)
+    if (startIdx !== -1 && (nlIdx === -1 || startIdx < nlIdx)) {
+      lineBuffer += pending.slice(0, startIdx)
+      pending = pending.slice(startIdx + PASTE_START.length)
+      insidePaste = true
+      continue
+    }
+    if (nlIdx !== -1) {
+      lineBuffer += pending.slice(0, nlIdx)
+      pending = pending.slice(nlIdx + 1)
+      const content = lineBuffer
+      lineBuffer = ''
+      submit(content)
+      continue
+    }
+    const holdBack = trailingMarkerPrefixLen(pending, PASTE_START)
+    lineBuffer += pending.slice(0, pending.length - holdBack)
+    pending = pending.slice(pending.length - holdBack)
+    break
+  }
 })
