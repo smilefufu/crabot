@@ -105,6 +105,17 @@ function shQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`
 }
 
+/** UUID 格式校验:标准 UUID 格式(8-4-4-4-12 十六进制段,由连字符分隔)。*/
+function validateSessionRef(sessionRef: string): void {
+  const uuidPattern = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+  if (!uuidPattern.test(sessionRef)) {
+    throw new Error(
+      `ClaudeCodeAdapter: invalid session_ref format (expected UUID, got '${sessionRef.slice(0, 50)}'). ` +
+        `session_ref must be a valid UUID and cannot contain shell metacharacters.`,
+    )
+  }
+}
+
 /** sendInput 打到已 exited 的化身时抛出。与 builtin 的同名类语义一致,各自独立定义(不共享 import)。 */
 export class WorkerExitedError extends Error {
   constructor(
@@ -275,6 +286,9 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   async resume(prev: IncarnationRef, wakeInput: string): Promise<IncarnationHandle> {
+    // API 边界校验:session_ref 必须是有效 UUID 格式,防止 shell 注入
+    validateSessionRef(prev.session_ref)
+
     const prevRuntime = this.runtimes.get(instanceKey(prev))
     if (!prevRuntime) {
       throw new Error(`ClaudeCodeAdapter.resume: no such incarnation ${prev.worker_id}#${prev.seq} resident in this process`)
@@ -296,8 +310,9 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     const outputFile = join(dir, `output-${seq}.log`)
     // 不重复传 --permission-mode:provision 阶段已把 acceptEdits 写进 settings.json,覆盖
     // 命令行没有重复声明的场景(resume 正是这样的场景)。session_ref 是 cc 侧的会话 uuid,
-    // 沿用不变。
-    const command = `${this.claudeBin} --resume ${prev.session_ref}`
+    // 沿用不变。拼接时用 shQuote 转义 session_ref,防止 shell 注入(双层防御:
+    // 入口已校验 UUID 格式,拼接时再加引号转义,提高防御深度)。
+    const command = `${this.claudeBin} --resume ${shQuote(prev.session_ref)}`
 
     // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime。
     await this.tmux.newSession({ name: sessionName, cwd: prevRuntime.workspaceRoot, command, outputFile })
@@ -336,6 +351,9 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   async fork(prev: IncarnationRef, forkInput: string): Promise<IncarnationHandle> {
+    // API 边界校验:session_ref 必须是有效 UUID 格式,防止 shell 注入
+    validateSessionRef(prev.session_ref)
+
     const prevRuntime = this.runtimes.get(instanceKey(prev))
     if (!prevRuntime) {
       throw new Error(`ClaudeCodeAdapter.fork: no such incarnation ${prev.worker_id}#${prev.seq} resident in this process`)

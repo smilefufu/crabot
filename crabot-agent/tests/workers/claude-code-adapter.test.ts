@@ -465,6 +465,102 @@ describe('ClaudeCodeAdapter.detect', () => {
   })
 })
 
+describe('ClaudeCodeAdapter — session_ref UUID 边界校验', () => {
+  let dataDir: string
+  let workspaceRoot: string
+
+  beforeEach(async () => {
+    dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-adapter-session-ref-data-'))
+    workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-adapter-session-ref-ws-'))
+  })
+
+  afterEach(async () => {
+    await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+  })
+
+  it('resume() 拒绝非 UUID 格式的 session_ref(含 shell 注入特征),不执行任何命令', async () => {
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeBin: 'unused' })
+    const workerId = `w-${randomUUID().slice(0, 8)}`
+
+    // 先 spawn 一个真实化身以供 resume 前置条件
+    // 但这里其实需要一个已 exited 的化身,测试难度较高。改为直接测试 fork() 的拒绝。
+    // 实际上 resume 入口需要前置化身已 exited,我们用一个简化的方式:
+    // 直接测试恶意 session_ref 被拒绝。
+
+    const maliciousSessionRef = 'x; touch /tmp/pwned'
+
+    await expect(
+      adapter.resume(
+        { worker_id: workerId, seq: 1, session_ref: maliciousSessionRef },
+        'payload',
+      ),
+    ).rejects.toThrow(/invalid.*session_ref|UUID|session reference/i)
+  })
+
+  it('fork() 拒绝非 UUID 格式的 session_ref(含 shell 注入特征),不执行子进程', async () => {
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeBin: 'unused' })
+    const workerId = `w-${randomUUID().slice(0, 8)}`
+
+    const maliciousSessionRef = 'x; touch /tmp/pwned'
+
+    await expect(
+      adapter.fork({ worker_id: workerId, seq: 1, session_ref: maliciousSessionRef }, 'payload'),
+    ).rejects.toThrow(/invalid.*session_ref|UUID|session reference/i)
+
+    // 验证没有副作用文件产生
+    await expect(fs.access('/tmp/pwned')).rejects.toThrow()
+  })
+
+  it('resume() 拒绝空白或特殊字符 session_ref', async () => {
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeBin: 'unused' })
+    const workerId = `w-${randomUUID().slice(0, 8)}`
+
+    const invalidRefs = ['', ' ', '$(whoami)', '`id`', '{test}', '../../../etc/passwd']
+
+    for (const ref of invalidRefs) {
+      await expect(
+        adapter.resume({ worker_id: workerId, seq: 1, session_ref: ref }, 'payload'),
+      ).rejects.toThrow(/invalid.*session_ref|UUID|session reference/i)
+    }
+  })
+
+  it('fork() 拒绝空白或特殊字符 session_ref', async () => {
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeBin: 'unused' })
+    const workerId = `w-${randomUUID().slice(0, 8)}`
+
+    const invalidRefs = ['', ' ', '$(whoami)', '`id`', '{test}', '../../../etc/passwd']
+
+    for (const ref of invalidRefs) {
+      await expect(
+        adapter.fork({ worker_id: workerId, seq: 1, session_ref: ref }, 'payload'),
+      ).rejects.toThrow(/invalid.*session_ref|UUID|session reference/i)
+    }
+  })
+
+  it('resume() 接受有效 UUID 格式的 session_ref(至少通过前置校验)', async () => {
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeBin: 'unused' })
+    const workerId = `w-${randomUUID().slice(0, 8)}`
+    const validUuid = randomUUID()
+
+    // 会因为"不存在该化身"抛错,但不是 session_ref 格式错误
+    await expect(
+      adapter.resume({ worker_id: workerId, seq: 1, session_ref: validUuid }, 'payload'),
+    ).rejects.toThrow(/no such incarnation|not resident/i)
+  })
+
+  it('fork() 接受有效 UUID 格式的 session_ref(至少通过前置校验)', async () => {
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeBin: 'unused' })
+    const workerId = `w-${randomUUID().slice(0, 8)}`
+    const validUuid = randomUUID()
+
+    // 会因为"不存在该化身"抛错,但不是 session_ref 格式错误
+    await expect(adapter.fork({ worker_id: workerId, seq: 1, session_ref: validUuid }, 'payload')).rejects.toThrow(
+      /no such incarnation|not resident/i,
+    )
+  })
+})
+
 describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.resume', () => {
   let dataDir: string
   let workspaceRoot: string
