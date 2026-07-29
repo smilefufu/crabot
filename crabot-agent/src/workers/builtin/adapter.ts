@@ -156,7 +156,9 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       // 安全网：runBurst 内部已经把 runEngine 的失败路径处理成 exited(crashed)，
       // 这里只兜住真正意外的同步/异步抛错（比如 append 磁盘写失败）。
       console.error('[builtin-adapter] runBurst threw unexpectedly:', err)
-      await this.transitionExited(instance, handle, 'crashed')
+      await this.getMutex(instance.worker_id).run(async () => {
+        await this.transitionExited(instance, handle, 'crashed')
+      })
     })
 
     return handle
@@ -208,7 +210,9 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 
     this.runBurst(instance, handle, builtin).catch(async (err) => {
       console.error('[builtin-adapter] runBurst threw unexpectedly (resume):', err)
-      await this.transitionExited(instance, handle, 'crashed')
+      await this.getMutex(instance.worker_id).run(async () => {
+        await this.transitionExited(instance, handle, 'crashed')
+      })
     })
 
     return handle
@@ -257,7 +261,9 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     const builtin = this.builtinConfigs.get(h.worker_id)!
     this.runBurst(instance, h, builtin).catch(async (err) => {
       console.error('[builtin-adapter] runBurst threw unexpectedly (sendInput continuation):', err)
-      await this.transitionExited(instance, h, 'crashed')
+      await this.getMutex(instance.worker_id).run(async () => {
+        await this.transitionExited(instance, h, 'crashed')
+      })
     })
   }
 
@@ -429,6 +435,9 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     ended_reason: IncarnationEndReason,
     outcome?: 'completed' | 'failed',
   ): Promise<void> {
+    if (instance.pendingInputs.length > 0) {
+      console.log(`[dead-letter] incarnation ${instance.worker_id}#${instance.seq} exited with ${instance.pendingInputs.length} unsent message(s)`)
+    }
     await this.writeMeta(instance, { state: 'exited', ended_reason, outcome })
     instance.state = 'exited'
     instance.ended_reason = ended_reason
