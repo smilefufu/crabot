@@ -12,6 +12,11 @@
  * CliEventChannel.hookCommand,permissions 预配置 acceptEdits 降弹窗)、.claude/skills/(复用
  * Task 3 的 materializeSkills)、.mcp.json(renderMcpJson)、CLAUDE.md(renderContextMd)。
  *
+ * spawn 提交纪律:tmux newSession 成功之后才落 meta(running)+注册 runtime——newSession 失败
+ * 时不留任何持久痕迹(session_id 可重生成,workspace 内 provision 产物残留可接受),同 worker_id
+ * 可安全重试 spawn。首条输入(sendText)失败:此时已注册的化身按 kill 路径清理 tmux 会话后落
+ * exited(crashed)(不是 killed——这不是用户发起的 kill),不放任 running;spawn 仍然 reject。
+ *
  * state 三源合成,按优先级依次判定(前一源给出确定结果就不再看后一源):
  *   1. 事件文件:自上一次 sendInput(或 spawn)以来出现过新的 'stop' 事件 → idle;
  *   2. tmux isAlive() 为 false → exited(是否 killed 由本地 killed 标记区分 killed/completed);
@@ -20,8 +25,11 @@
  * cc 每答完一轮都会再触发一次 Stop——sendInput 时必须把 baseline 推到当前计数,否则上一轮
  * 遗留的 stop 事件会让新一轮还没答完就被误判成 idle。
  *
- * 每次状态判定若与内存态不同,在该 worker 的互斥锁内原子完成"改内存 + 写 meta"(沿用 P1
- * builtin adapter 的锁纪律),避免并发 state()/sendInput()/kill() 交错写出不一致的 meta。
+ * 状态判定(读事件基线/isAlive)与提交(改内存 + 写 meta)整体在该 worker 的互斥锁内原子完成
+ * (锁按 worker 粒度,不阻塞其他 worker;isAlive 是 tmux 子进程调用,锁内执行可接受)——避免
+ * "判定用的是过期快照,提交时才发现已被另一次并发调用改写"的窗口:两次并发 state() 若只在
+ * 提交这一步加锁,后完成判定的那次会拿着过期快照无条件覆盖先完成的那次刚落的新鲜结果。
+ * 判定与提交现在是同一个不可分割的临界区,保证 exited 终态不可覆盖、也不丢并发更新。
  *
  * sendInput:活会话直接 tmux sendText(cc 自带 steering 队列,不需要我们排队);raw 选项走
  * tmux sendKeys(text 按空白切分成按键名数组,如 "y Enter" → ['y','Enter']);exited 态抛
@@ -163,6 +171,11 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     const sessionId = randomUUID()
     const sessionName = `crabot-w-${spec.worker_id}-${seq}`
     const outputFile = join(dir, `output-${seq}.log`)
+    const command = `${this.claudeBin} --session-id ${sessionId} --permission-mode acceptEdits`
+
+    // newSession 成功之后才落 meta(running)+注册 runtime:tmux 失败时不留任何持久痕迹
+    // (session_id 可重生成,workspace 内 provision 产物残留可接受),同 worker_id 可安全重试。
+    await this.tmux.newSession({ name: sessionName, cwd: spec.workspace.root, command, outputFile })
 
     const runtime: Runtime = {
       worker_id: spec.worker_id,
@@ -180,11 +193,19 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: sessionId })
     this.runtimes.set(instanceKey(handle), runtime)
 
-    const command = `${this.claudeBin} --session-id ${sessionId} --permission-mode acceptEdits`
-    await this.tmux.newSession({ name: sessionName, cwd: spec.workspace.root, command, outputFile })
-
-    // 首条任务输入经 sendText 注入,cc 把它当第一条用户消息。
-    await this.tmux.sendText(sessionName, spec.prompt)
+    // 首条任务输入经 sendText 注入,cc 把它当第一条用户消息。注入失败:session 可能已经起来
+    // 但没喂到任务,不能放任 running——按 kill 路径清理 tmux 会话后落 exited(crashed)(不是
+    // killed,这不是用户发起的 kill),spawn 仍然 reject 把失败如实报给调用方。
+    try {
+      await this.tmux.sendText(sessionName, spec.prompt)
+    } catch (err) {
+      await this.getMutex(handle.worker_id).run(async () => {
+        if (runtime.state === 'exited') return
+        await this.tmux.killSession(sessionName)
+        await this.transitionExited(runtime, handle, 'crashed')
+      })
+      throw err
+    }
 
     return handle
   }
@@ -269,30 +290,33 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   private async syncState(runtime: Runtime, h: IncarnationHandle): Promise<{ state: WorkerContractState; stopCount: number }> {
     if (runtime.state === 'exited') return { state: 'exited', stopCount: runtime.stopBaseline }
 
-    const events = await runtime.eventChannel.readAll()
-    const stopCount = events.filter((e) => e.kind === 'stop').length
+    return this.getMutex(h.worker_id).run(async () => {
+      // 锁内重读:进锁前 runtime.state 可能已被并发操作(如 kill,或排在前面的另一次
+      // syncState)抢先落定为 exited——终态不可覆盖。
+      if (runtime.state === 'exited') return { state: 'exited', stopCount: runtime.stopBaseline }
 
-    let computed: WorkerContractState
-    if (stopCount > runtime.stopBaseline) {
-      computed = 'idle'
-    } else if (!(await this.tmux.isAlive(runtime.sessionName))) {
-      computed = 'exited'
-    } else {
-      computed = 'running'
-    }
+      const events = await runtime.eventChannel.readAll()
+      const stopCount = events.filter((e) => e.kind === 'stop').length
 
-    if (computed !== runtime.state) {
-      await this.getMutex(h.worker_id).run(async () => {
-        if (runtime.state === 'exited') return // 已被并发操作(如 kill)抢先落定,不覆盖
+      let computed: WorkerContractState
+      if (stopCount > runtime.stopBaseline) {
+        computed = 'idle'
+      } else if (!(await this.tmux.isAlive(runtime.sessionName))) {
+        computed = 'exited'
+      } else {
+        computed = 'running'
+      }
+
+      if (computed !== runtime.state) {
         if (computed === 'exited') {
           await this.transitionExited(runtime, h, runtime.killed ? 'killed' : 'completed')
         } else {
           await this.transitionState(runtime, h, computed)
         }
-      })
-    }
+      }
 
-    return { state: runtime.state, stopCount }
+      return { state: runtime.state, stopCount }
+    })
   }
 
   private getMutex(worker_id: string): AsyncMutex {
