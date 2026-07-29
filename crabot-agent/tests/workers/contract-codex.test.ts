@@ -24,7 +24,7 @@ import * as path from 'node:path'
 import { CodexWorkerAdapter, eventsFilePath } from '../../src/workers/codex/adapter.js'
 import { TmuxDriver } from '../../src/workers/tmux/driver.js'
 import { CliEventChannel } from '../../src/workers/cli-events.js'
-import type { IncarnationHandle, IncarnationRef, SpawnSpec } from '../../src/workers/types.js'
+import type { SpawnSpec } from '../../src/workers/types.js'
 import { runContractSuite, type ScriptStep, type ContractFixture } from './contract-suite.js'
 
 function detectTmux(): boolean {
@@ -109,12 +109,6 @@ async function makeCodexFixture(): Promise<ContractFixture> {
     return { worker_id: workerId, prompt: '契约测试任务', workspace: { root: workspaceRoot } }
   }
 
-  const refFor = async (h: IncarnationHandle): Promise<IncarnationRef> => {
-    const metaRaw = await fs.readFile(path.join(dataDir, h.worker_id, `meta-${h.seq}.json`), 'utf-8')
-    const meta = JSON.parse(metaRaw) as { session_id: string }
-    return { worker_id: h.worker_id, seq: h.seq, session_ref: meta.session_id }
-  }
-
   const cleanup = async (): Promise<void> => {
     for (const workerId of workerIds) await killSessionsForWorker(workerId)
     await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
@@ -122,7 +116,7 @@ async function makeCodexFixture(): Promise<ContractFixture> {
     await fs.rm(codexHomeSource, { recursive: true, force: true }).catch(() => {})
   }
 
-  return { adapter, makeSpec, refFor, cleanup }
+  return { adapter, makeSpec, cleanup }
 }
 
 if (tmuxAvailable) {

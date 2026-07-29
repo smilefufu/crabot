@@ -54,3 +54,16 @@ export function getWorkspaceDir(): string {
   // 默认 homedir() 与 MM 默认一致（agent 看到用户真实文件，不是 Crabot 内脏）
   return homedir()
 }
+
+/**
+ * Per-task worker workspace 根目录。
+ * 与 getWorkspaceDir() 语义不同：
+ * - getWorkspaceDir()：Agent 的全局工作目录（WORKSPACE_DIR env，默认 homedir）
+ * - getWorkspacesRootDir()：Per-task worker 工作区根（WORKER_WORKSPACES_DIR env，默认 <dataRoot>/workspaces）
+ */
+export function getWorkspacesRootDir(): string {
+  if (process.env.WORKER_WORKSPACES_DIR) {
+    return path.resolve(process.env.WORKER_WORKSPACES_DIR)
+  }
+  return path.resolve(getDataRootDir(), 'workspaces')
+}

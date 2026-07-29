@@ -45,6 +45,7 @@ import type { Resolvable } from '../../engine/types.js'
 import { SessionTree } from '../session-tree.js'
 import { OutputLog } from '../output-log.js'
 import { AsyncMutex } from '../async-mutex.js'
+import { WorkerExitedError } from '../errors.js'
 import type {
   AdapterCapabilities,
   CapabilityBundle,
@@ -62,19 +63,8 @@ import type {
 /** fork 是一次性侧问，maxTurns 取小值，避免侧问跑成一次完整任务。 */
 const FORK_MAX_TURNS = 8
 
-/**
- * sendInput 打到已 exited 的化身时抛出。透明接续（自动 resume 并重投）是 harness（P3）
- * 的职责，adapter 层保持窄语义，只负责如实报告"这个化身已经结束了"。
- */
-export class WorkerExitedError extends Error {
-  constructor(
-    readonly worker_id: string,
-    readonly seq: number,
-  ) {
-    super(`BuiltinWorkerAdapter: incarnation ${worker_id}#${seq} has exited`)
-    this.name = 'WorkerExitedError'
-  }
-}
+/** Re-export for backward compatibility and convenience. */
+export { WorkerExitedError }
 
 const FINISH_TASK_TOOL: ToolDefinition = {
   ...defineTool({
@@ -221,7 +211,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         pendingInputs: [],
       }
 
-      const newHandle: IncarnationHandle = { worker_id: spec.worker_id, seq, impl: 'builtin' }
+      const newHandle: IncarnationHandle = { worker_id: spec.worker_id, seq, impl: 'builtin', session_ref: rootId }
       // writeMeta 成功之后才注册到 instances/builtinConfigs，跟 resume 保持一致的提交次序：
       // 磁盘失败时不留孤儿实例。注意此时上面的"已 spawn"三重守卫（builtinConfigs 命中 /
       // instances 命中 / 磁盘 meta-${seq}.json 存在）全部落空——writeMeta 还没成功过，没有
@@ -264,7 +254,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         throw new Error(`BuiltinWorkerAdapter.resume: incarnation ${prev.worker_id}#${prev.seq} already resumed (concurrent resume of the same prev incarnation?)`)
       }
 
-      const newSeq = this.nextSeq(prev.worker_id)
+      const newSeq = await this.nextSeq(prev.worker_id)
       const dir = join(this.deps.dataDir, prev.worker_id)
       let sessionTree = this.findSessionTreeForWorker(prev.worker_id)
       if (!sessionTree) {
@@ -284,7 +274,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         pendingInputs: [],
       }
 
-      const newHandle: IncarnationHandle = { worker_id: prev.worker_id, seq: newSeq, impl: 'builtin' }
+      const newHandle: IncarnationHandle = { worker_id: prev.worker_id, seq: newSeq, impl: 'builtin', session_ref: wakeId }
       // writeMeta 成功之后才注册到 instances 并标记 resumed，确保磁盘失败时不留孤儿实例。
       await this.writeMeta(newInstance)
       this.instances.set(instanceKey(prev.worker_id, newSeq), newInstance)
@@ -316,7 +306,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         sessionTree = await SessionTree.load(join(dir, 'session.jsonl'))
       }
 
-      const newSeq = this.nextSeq(prev.worker_id)
+      const newSeq = await this.nextSeq(prev.worker_id)
       const outputLog = new OutputLog(join(dir, `output-${newSeq}.log`))
       const forkId = await sessionTree.append(prev.session_ref, createUserMessage(forkInput))
 
@@ -331,7 +321,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         pendingInputs: [],
       }
 
-      const newHandle: IncarnationHandle = { worker_id: prev.worker_id, seq: newSeq, impl: 'builtin' }
+      const newHandle: IncarnationHandle = { worker_id: prev.worker_id, seq: newSeq, impl: 'builtin', session_ref: forkId }
       // writeMeta 成功之后才注册到 instances，和 resume 保持一致的提交次序：磁盘失败时
       // 不留孤儿实例。
       await this.writeMeta(newInstance)
@@ -468,7 +458,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         const tmpPath = join(dir, `.meta-${seq}.json.tmp-${randomUUID()}`)
         await fs.writeFile(tmpPath, JSON.stringify(updated), 'utf-8')
         await fs.rename(tmpPath, metaPath)
-        orphans.push({ worker_id, seq, impl: 'builtin' })
+        const tipNodeId = typeof meta.tip_node_id === 'string' ? meta.tip_node_id : ''
+        orphans.push({ worker_id, seq, impl: 'builtin', session_ref: tipNodeId })
       }
     }
 
@@ -761,11 +752,31 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
    * worker_id 对应下一个可用的化身序号：该 worker 现存所有化身（主线 + fork 分支）里
    * 最大 seq + 1。resume 和 fork 共用这一个分配逻辑，且都在各自的 mutex.run 内调用，
    * 保证两者不会分配出相同的 seq。
+   *
+   * 五轮 review 修复：磁盘感知，理由与 cc/codex adapter 的同名方法一致——只扫内存
+   * instances 会漏掉磁盘上未被重建到内存的旧化身（如跨进程重启后的历史化身），算出的
+   * "下一个"号位实际是别人已经占用的，静默覆盖其 meta-<seq>.json、复用其 output-<seq>.log。
+   * 改为 max(内存已知 seq, 磁盘上 <dataDir>/<worker_id>/ 下 meta-*.json 的最大 seq) + 1——
+   * builtin 的 writeMeta 是独立实现（不复用 meta-store.ts，见该方法注释），这里同样不引入
+   * 跨模块耦合，本地内联一份同款扫盘逻辑。目录不存在（还没 spawn 过）视为无历史，不报错。
    */
-  private nextSeq(worker_id: string): number {
+  private async nextSeq(worker_id: string): Promise<number> {
     let max = 0
     for (const instance of this.instances.values()) {
       if (instance.worker_id === worker_id && instance.seq > max) max = instance.seq
+    }
+    const dir = join(this.deps.dataDir, worker_id)
+    let entries: string[]
+    try {
+      entries = await fs.readdir(dir)
+    } catch {
+      entries = []
+    }
+    for (const name of entries) {
+      const m = /^meta-(\d+)\.json$/.exec(name)
+      if (!m) continue
+      const seq = Number(m[1])
+      if (Number.isFinite(seq) && seq > max) max = seq
     }
     return max + 1
   }
@@ -802,8 +813,12 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     instance.state = state
     // 观察者（onStateChange）的异常永远不能中断状态机的推进。任何回调错误都被捕获
     // 并仅作 console.error 记录，防止阻塞状态转移或导致后续 burst/sendInput 卡死。
+    // session_ref 现读现取 instance.tip（不是调用方传入、创建化身那一刻闭包住的旧
+    // handle.session_ref）——builtin 的 tip 每轮 burst 前进，harness 侧靠这个字段把台账
+    // 刷新到"最近一次完成的状态转换点"，否则活跃化身上的 fork/resume 会从旧节点分叉、
+    // 丢中间上下文（cc/codex 的 session id 整个化身稳定，不受这个问题影响）。
     try {
-      this.deps.onStateChange?.(handle, state)
+      this.deps.onStateChange?.({ ...handle, session_ref: instance.tip }, state)
     } catch (err) {
       console.error(`[BuiltinWorkerAdapter] onStateChange callback error for ${handle.worker_id}#${handle.seq}:`, err)
     }
@@ -825,8 +840,9 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     if (outcome !== undefined) instance.outcome = outcome
     // 观察者（onStateChange）的异常永远不能中断状态机的推进。任何回调错误都被捕获
     // 并仅作 console.error 记录，防止阻塞状态转移或导致后续 burst/sendInput 卡死。
+    // session_ref 现读现取 instance.tip，同 transitionState 的注释。
     try {
-      this.deps.onStateChange?.(handle, 'exited')
+      this.deps.onStateChange?.({ ...handle, session_ref: instance.tip }, 'exited')
     } catch (err) {
       console.error(`[BuiltinWorkerAdapter] onStateChange callback error for ${handle.worker_id}#${handle.seq}:`, err)
     }

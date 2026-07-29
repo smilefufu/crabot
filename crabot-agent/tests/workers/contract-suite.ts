@@ -8,10 +8,10 @@
  * 职责，契约套件本身不关心。
  *
  * session_ref（IncarnationRef 里喂给 fork/resume 的字段）是逐 impl 不透明的格式（builtin：
- * session 树 node_id；CLI：原生 session id），WorkerAdapter 接口没有从 handle 反查它的方法，
- * 所以 fixture 必须额外提供 refFor(handle) 这条通路——这是相对任务简报里给的三字段接口
- * （adapter/makeSpec/cleanup）的一个必要补充，否则 fork/revive 两条契约断言根本没法在
- * impl-agnostic 的前提下发起调用。
+ * session 树 node_id；CLI：原生 session id）。P3 Task 7 之前 WorkerAdapter 接口没有从 handle
+ * 反查它的方法，fixture 曾各自实现一个 refFor(handle) 读 meta 文件绕过这个缺口；现在
+ * IncarnationHandle 自身就带 session_ref（protocol-agent-v3 §6.1，spawn/resume/fork 返回前
+ * 由 adapter 填入真值），fixture 不再需要这条旁路，下面的 toRef() 直接从 handle 取值即可。
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { randomUUID } from 'crypto'
@@ -32,12 +32,16 @@ export interface ContractFixture {
   readonly adapter: WorkerAdapter
   /** 每次 sendInput 消费下一个 script step；第一个 step 由 spawn 的初始 burst 消费。 */
   readonly makeSpec: (workerId: string, script: ScriptStep[]) => SpawnSpec
-  /** 把一个已知 handle 转成可喂给 fork/resume 的 IncarnationRef（session_ref 格式不透明，见文件头注释）。 */
-  readonly refFor: (h: IncarnationHandle) => Promise<IncarnationRef>
   readonly cleanup: () => Promise<void>
 }
 
 export type MakeFixture = () => Promise<ContractFixture>
+
+/** IncarnationHandle → IncarnationRef：handle 自身已携带真实 session_ref（protocol-agent-v3
+ * §6.1），直接取值即可，不需要 fixture 另外提供反查通路。 */
+function toRef(h: IncarnationHandle): IncarnationRef {
+  return { worker_id: h.worker_id, seq: h.seq, session_ref: h.session_ref }
+}
 
 /**
  * 状态收敛轮询：100ms 间隔、5s 超时——给未来 tmux 实现（拉起真实进程）留够裕量。
@@ -84,6 +88,9 @@ export function runContractSuite(name: string, makeFixture: MakeFixture): void {
       async () => {
         const spec = fx.makeSpec(freshWorkerId(), [{ output: '第一段输出', then: 'idle' }])
         const h = await fx.adapter.spawn(spec)
+        // handle.session_ref 由 adapter 在 spawn 返回前即填入真值（protocol-agent-v3
+        // §6.1），跨三个实现的通用契约断言：不能是空串。
+        expect(h.session_ref).toBeTruthy()
         await waitForState(fx.adapter, h, 'idle')
 
         const { chunk } = await fx.adapter.readOutput(h, { offset: 0 })
@@ -184,7 +191,7 @@ export function runContractSuite(name: string, makeFixture: MakeFixture): void {
         const spec = fx.makeSpec(freshWorkerId(), [{ output: '主线输出', then: 'idle' }])
         const h = await fx.adapter.spawn(spec)
         await waitForState(fx.adapter, h, 'idle')
-        const ref = await fx.refFor(h)
+        const ref = toRef(h)
         const caps = fx.adapter.capabilities()
 
         if (caps.fork) {
@@ -206,7 +213,7 @@ export function runContractSuite(name: string, makeFixture: MakeFixture): void {
         const spec = fx.makeSpec(freshWorkerId(), [{ output: '主线输出', then: 'exit_success' }])
         const h = await fx.adapter.spawn(spec)
         await waitForState(fx.adapter, h, 'exited')
-        const ref = await fx.refFor(h)
+        const ref = toRef(h)
         const caps = fx.adapter.capabilities()
 
         if (caps.revive) {

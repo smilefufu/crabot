@@ -9,7 +9,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { vi } from 'vitest'
 import { BuiltinWorkerAdapter } from '../../src/workers/builtin/adapter.js'
-import type { SpawnSpec, IncarnationHandle, IncarnationRef } from '../../src/workers/types.js'
+import type { SpawnSpec } from '../../src/workers/types.js'
 import type { LLMAdapter } from '../../src/engine/llm-adapter-types.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 import { runContractSuite, type ScriptStep, type ContractFixture } from './contract-suite.js'
@@ -58,17 +58,11 @@ async function makeBuiltinFixture(): Promise<ContractFixture> {
     },
   })
 
-  const refFor = async (h: IncarnationHandle): Promise<IncarnationRef> => {
-    const metaRaw = await fs.readFile(join(tmp, h.worker_id, `meta-${h.seq}.json`), 'utf-8')
-    const meta = JSON.parse(metaRaw) as { tip_node_id: string }
-    return { worker_id: h.worker_id, seq: h.seq, session_ref: meta.tip_node_id }
-  }
-
   const cleanup = async (): Promise<void> => {
     await fs.rm(tmp, { recursive: true, force: true })
   }
 
-  return { adapter, makeSpec, refFor, cleanup }
+  return { adapter, makeSpec, cleanup }
 }
 
 runContractSuite('builtin', makeBuiltinFixture)

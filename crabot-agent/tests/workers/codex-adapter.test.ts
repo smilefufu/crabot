@@ -391,6 +391,136 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
   )
 })
 
+describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 四轮 review PoC 回归:重启后新 adapter 实例(runtimes 为空)重连 tmux 会话(ensureRuntime)', () => {
+  let dataDir: string
+  let workspaceRoot: string
+  let tmux: TmuxDriver
+
+  beforeEach(async () => {
+    dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-adapter-reattach-data-'))
+    workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-adapter-reattach-ws-'))
+    tmux = new TmuxDriver()
+  })
+
+  afterEach(async () => {
+    await cleanupTmuxSessions()
+    await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+  })
+
+  async function waitForOutputContains(adapter: CodexWorkerAdapter, h: IncarnationHandle, needle: string, timeoutMs = 8000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const { chunk } = await adapter.readOutput(h, { offset: 0 })
+      if (chunk.includes(needle)) return
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    throw new Error(`waitForOutputContains timeout: expected output to contain '${needle}'`)
+  }
+
+  it(
+    'PoC①:会话仍存活——新 adapter 实例的 sendInput/kill 应真正作用于该会话(修复前:sendInput 直接抛通用 Error "no such incarnation...resident in this process")',
+    async () => {
+      const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+      const stopHookCmd = channel.hookCommand('stop')
+      const codexBin = codexBinFor([{ output: '第一段输出' }, { output: '第二段输出' }], stopHookCmd)
+
+      const adapterA = new CodexWorkerAdapter({ dataDir, tmux, codexBin, sessionDiscoveryTimeoutMs: 500 })
+      await adapterA.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `codextest-${randomUUID().slice(0, 8)}`
+      const h = await adapterA.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+
+      await waitForOutputContains(adapterA, h, '第一段输出')
+
+      // "重启":全新 adapter 实例,同一 dataDir,内存 runtimes 为空,从未见过这个化身。
+      const adapterB = new CodexWorkerAdapter({ dataDir, tmux, codexBin: 'unused-not-invoked-by-sendInput' })
+
+      await expect(adapterB.sendInput(h, '继续')).resolves.toBeUndefined()
+      await waitForOutputContains(adapterB, h, '第二段输出')
+
+      await expect(adapterB.kill(h)).resolves.toBeUndefined()
+      await waitForState(adapterB, h, 'exited')
+
+      const metaRaw = await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')
+      const meta = JSON.parse(metaRaw) as { ended_reason?: string }
+      expect(meta.ended_reason).toBe('killed')
+    },
+    15000,
+  )
+
+  it(
+    'PoC②:会话已经死掉(外部 kill,未经 adapter.kill)——新 adapter 实例的 sendInput 应抛 WorkerExitedError,不是通用 Error',
+    async () => {
+      const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+      const stopHookCmd = channel.hookCommand('stop')
+      const codexBin = codexBinFor([{ output: '第一段输出' }], stopHookCmd)
+
+      const adapterA = new CodexWorkerAdapter({ dataDir, tmux, codexBin, sessionDiscoveryTimeoutMs: 500 })
+      await adapterA.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `codextest-${randomUUID().slice(0, 8)}`
+      const h = await adapterA.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+
+      await waitForOutputContains(adapterA, h, '第一段输出')
+
+      // 绕开 adapter.kill,直接杀死 tmux 会话,模拟"agent 进程重启前已经先一步真死"。
+      execFileSync('tmux', ['kill-session', '-t', `crabot-w-${workerId}-1`], { stdio: 'ignore' })
+
+      const adapterB = new CodexWorkerAdapter({ dataDir, tmux, codexBin: 'unused-not-invoked-by-sendInput' })
+
+      await expect(adapterB.sendInput(h, '还有件事')).rejects.toBeInstanceOf(WorkerExitedError)
+      await expect(adapterB.kill(h)).resolves.toBeUndefined()
+    },
+    15000,
+  )
+
+  it(
+    'PoC③(五轮 review):重启前有主线#1 与 resume 链 #2(两份 meta 落盘)——重启后新 adapter 实例再对#1 resume,' +
+      'nextSeq 必须磁盘感知,不能只看内存(只重建了#1)算出 2 而撞上#2 的 meta/output(修复前:seq=2,meta-2.json 被覆盖,output-2.log 被复用)',
+    async () => {
+      const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+      const stopHookCmd = channel.hookCommand('stop')
+      // 每次新起的进程(spawn/resume)都从脚本第 0 步重新跑——mock CLI 每次调用都是全新进程,
+      // 不记跨调用状态。这里让脚本第一步就 exit,主线与每一次 resume 都会立刻落 exited,
+      // 不需要真的等 notify。
+      const codexBin = codexBinFor([{ output: '输出', exit: true }], stopHookCmd)
+
+      const adapterA = new CodexWorkerAdapter({ dataDir, tmux, codexBin, sessionDiscoveryTimeoutMs: 500 })
+      await adapterA.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `codextest-${randomUUID().slice(0, 8)}`
+
+      // 重启前:主线 #1。
+      const h1 = await adapterA.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+      await waitForState(adapterA, h1, 'exited')
+      const meta1 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string }
+
+      // 重启前:resume 链 #2(同一进程内,落自己的 meta-2.json/output-2.log)。
+      const h2 = await adapterA.resume({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '继续 1')
+      expect(h2.seq).toBe(2)
+      await waitForState(adapterA, h2, 'exited')
+      const meta2Before = await fs.readFile(path.join(dataDir, workerId, 'meta-2.json'), 'utf-8')
+      const output2Before = await fs.readFile(path.join(dataDir, workerId, 'output-2.log'), 'utf-8')
+
+      // "重启":全新 adapter 实例,同一 dataDir,内存 runtimes 为空——只有磁盘还记得 #1、#2
+      // 两份历史。对 #1 再 resume 一次:ensureRuntime 只重建出 #1 这一条 runtime(#2 从未被
+      // 提及,不会被重建),旧版 nextSeq 只扫内存 runtimes(此时仅 #1)算出 2,与磁盘上的
+      // #2 撞号。
+      const adapterB = new CodexWorkerAdapter({ dataDir, tmux, codexBin, sessionDiscoveryTimeoutMs: 500 })
+      const h3 = await adapterB.resume({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '重启后继续')
+      await waitForState(adapterB, h3, 'exited')
+
+      // 磁盘感知修复后:新化身分配到 3(不是 2),不撞上 #2 的号位。
+      expect(h3.seq).toBe(3)
+
+      // #2 的 meta/output 原封不动,没有被 resume 静默覆盖/复用。
+      const meta2After = await fs.readFile(path.join(dataDir, workerId, 'meta-2.json'), 'utf-8')
+      const output2After = await fs.readFile(path.join(dataDir, workerId, 'output-2.log'), 'utf-8')
+      expect(meta2After).toBe(meta2Before.toString())
+      expect(output2After).toBe(output2Before.toString())
+    },
+    15000,
+  )
+})
+
 /** 转发到可替换的底层 TmuxDriver——用于"先用坏 bin 失败一次,再换成好 bin 重试"的测试场景。 */
 class SwitchableTmuxDriver extends TmuxDriver {
   current: TmuxDriver

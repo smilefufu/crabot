@@ -183,6 +183,16 @@ describe('BuiltinWorkerAdapter', () => {
     })
 
     const h = await adapter.spawn(s)
+
+    // IncarnationHandle.session_ref 由 adapter 在 spawn 返回前即填入真值(protocol-agent-v3
+    // §6.1),builtin 的真值是本化身创建那一刻的 tip node_id——与彼时磁盘 meta 记录一致。
+    // 必须在 burst(fire-and-forget)推进 tip 之前读,burst 结束后 tip 会前进到会话末尾,
+    // 不再等于 handle 创建时刻的快照(这本身是符合预期的:handle.session_ref 是创建时的
+    // 引用,不是持续跟随的实时游标)。
+    expect(h.session_ref).toBeTruthy()
+    const metaAtSpawn = JSON.parse(await fs.readFile(join(tmp, h.worker_id, 'meta-1.json'), 'utf-8'))
+    expect(h.session_ref).toBe(metaAtSpawn.tip_node_id)
+
     await waitState(adapter, h, 'idle')
 
     const { chunk } = await adapter.readOutput(h, { offset: 0 })
@@ -343,6 +353,15 @@ describe('BuiltinWorkerAdapter', () => {
 
     const h2 = await adapter.resume(prevRef, '我回来了')
     expect(h2.seq).toBe(2)
+
+    // h2.session_ref 是 resume 返回时刻新化身自己的引用，与彼时磁盘 meta-2.json 记录一致，
+    // 且不是 prevRef 那个已经结束的旧化身的引用（protocol-agent-v3 §6.1）。必须在续 burst
+    // （fire-and-forget）推进 tip 之前读，理由同 spawn 测试里的同款断言。
+    expect(h2.session_ref).toBeTruthy()
+    const meta2AtResume = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-2.json'), 'utf-8'))
+    expect(h2.session_ref).toBe(meta2AtResume.tip_node_id)
+    expect(h2.session_ref).not.toBe(prevRef.session_ref)
+
     await waitState(adapter, h2, 'idle')
 
     const tree = await SessionTree.load(join(tmp, s.worker_id, 'session.jsonl'))
@@ -385,6 +404,15 @@ describe('BuiltinWorkerAdapter', () => {
     const prevRef: IncarnationRef = { worker_id: s.worker_id, seq: 1, session_ref: mainTip! }
     const forkHandle = await adapter.fork(prevRef, '侧问问题')
     expect(forkHandle.seq).toBe(2)
+
+    // forkHandle.session_ref 是 fork 自己的引用(fork 分支节点自己的 tip node_id)，不是主线
+    // mainTip 的照抄(protocol-agent-v3 §6.1:"fork 化身填 fork 自己的引用，不是父化身的")。
+    // 必须在 gate.resolve() 放行 fork 的 burst、推进 fork 自己的 tip 之前读，理由同
+    // spawn/resume 测试里的同款断言。
+    expect(forkHandle.session_ref).toBeTruthy()
+    expect(forkHandle.session_ref).not.toBe(mainTip)
+    const forkMetaAtFork = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-2.json'), 'utf-8'))
+    expect(forkHandle.session_ref).toBe(forkMetaAtFork.tip_node_id)
 
     // fork 的 burst 还卡在 gate 里没跑完：此时主线状态/tip 必须完全不受影响。注意：不能
     // 用 SessionTree.load(...).latestTip() 判断——那是整个共享文件"最后一次 append"的
@@ -501,6 +529,68 @@ describe('BuiltinWorkerAdapter', () => {
     const resumedHandle = await adapter.resume(resumeRef, '我回来了')
     expect(resumedHandle.seq).toBe(3)
     await waitState(adapter, resumedHandle, 'idle')
+  })
+
+  it('五轮 review PoC：resume 时 nextSeq 必须磁盘感知，不能只看内存 instances（重建/常驻不全时会与磁盘上未重建的化身撞号，覆盖其 meta/output）', async () => {
+    // builtin 的 resume/fork 目前要求 worker_id 在 builtinConfigs 里“本进程 spawn 过”
+    // （见 resume()/fork() 顶部的 fail-fast 守卫），跨进程重启后这个守卫本身就会先于
+    // nextSeq 拒绝调用——不像 cc/codex 那样能在重启后经 ensureRuntime 走到 nextSeq。
+    // 但 nextSeq 只扫 this.instances（内存）这件事本身就是 bug：只要该 worker 有一个化身
+    // 不在 instances 里（不管是因为跨进程重启、还是内存表未完整重建），nextSeq 就会漏看
+    // 磁盘上它的号位。这里不模拟完整重启，而是直接删掉 fork 化身（#2）在内存 instances
+    // 里的条目——精确复现"内存不知道 #2 存在，但磁盘上 meta-2.json/output-2.log 都在"
+    // 这个 nextSeq 唯一关心的前提条件，同时保留 builtinConfigs/#1 条目以满足与本次修复
+    // 无关的既有守卫。
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({
+      adapter: makeAdapter([
+        { text: '首轮回复', stopReason: 'end_turn' },
+        { text: '侧问回复', stopReason: 'end_turn' },
+        { toolCalls: [{ name: 'finish_task', id: 'call_1', input: { outcome: 'completed', summary: '主线完成' } }], stopReason: 'tool_use' },
+        { text: '重启后继续', stopReason: 'end_turn' },
+      ]),
+    })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'idle')
+
+    const tree1 = await SessionTree.load(join(tmp, s.worker_id, 'session.jsonl'))
+    const mainTip = tree1.latestTip()!
+    const forkRef: IncarnationRef = { worker_id: s.worker_id, seq: 1, session_ref: mainTip }
+    const forkHandle = await adapter.fork(forkRef, '侧问问题')
+    expect(forkHandle.seq).toBe(2)
+    await waitState(adapter, forkHandle, 'exited')
+
+    // 主线继续跑到 finish_task → exited，满足 resume 的前置条件。
+    await adapter.sendInput(h, '继续')
+    await waitState(adapter, h, 'exited')
+
+    const meta2Before = await fs.readFile(join(tmp, s.worker_id, 'meta-2.json'), 'utf-8')
+    const output2Before = await fs.readFile(join(tmp, s.worker_id, 'output-2.log'), 'utf-8')
+
+    const mainMetaRaw = await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')
+    const mainMeta = JSON.parse(mainMetaRaw) as { tip_node_id: string }
+    const resumeRef: IncarnationRef = { worker_id: s.worker_id, seq: 1, session_ref: mainMeta.tip_node_id }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const adapterAny = adapter as any
+    expect((adapterAny.instances as Map<string, unknown>).has(`${s.worker_id}#2`)).toBe(true)
+    ;(adapterAny.instances as Map<string, unknown>).delete(`${s.worker_id}#2`)
+
+    // 旧版 nextSeq 只扫内存 instances：此时只剩 #1，算出 2——与磁盘上 #2 的号位撞上，
+    // resume 会用 writeMeta(dir, 2, ...) 覆盖 meta-2.json，新化身的 outputLog 也指向
+    // 复用中的 output-2.log。
+    const resumedHandle = await adapter.resume(resumeRef, '我回来了')
+    await waitState(adapter, resumedHandle, 'idle')
+
+    // 磁盘感知修复后：新化身分配到 3（不是 2），不撞上 #2 的号位。
+    expect(resumedHandle.seq).toBe(3)
+
+    // #2 的 meta/output 原封不动，没有被 resume 静默覆盖/复用。
+    const meta2After = await fs.readFile(join(tmp, s.worker_id, 'meta-2.json'), 'utf-8')
+    const output2After = await fs.readFile(join(tmp, s.worker_id, 'output-2.log'), 'utf-8')
+    expect(meta2After).toBe(meta2Before.toString())
+    expect(output2After).toBe(output2Before.toString())
   })
 
   it('kill running fork 化身：fork burst 的 abortSignal 被触发，终态 exited(killed) 而不是 crashed', async () => {
@@ -977,7 +1067,7 @@ describe('BuiltinWorkerAdapter', () => {
 
       const orphans = await BuiltinWorkerAdapter.scanOrphans(tmp)
 
-      expect(orphans).toEqual([{ worker_id: 'worker-running', seq: 1, impl: 'builtin' }])
+      expect(orphans).toEqual([{ worker_id: 'worker-running', seq: 1, impl: 'builtin', session_ref: 'node-1' }])
 
       const runningMeta = JSON.parse(await fs.readFile(join(runningDir, 'meta-1.json'), 'utf-8'))
       expect(runningMeta.state).toBe('exited')
