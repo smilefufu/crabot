@@ -25,3 +25,13 @@ export class CapabilityNotSupportedError extends Error {
     this.name = 'CapabilityNotSupportedError'
   }
 }
+
+/** Raised when workspace validation fails. */
+export class InvalidWorkspaceError extends Error {
+  constructor(
+    readonly reason: string,
+  ) {
+    super(`invalid workspace: ${reason}`)
+    this.name = 'InvalidWorkspaceError'
+  }
+}
