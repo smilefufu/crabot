@@ -82,6 +82,14 @@ import { join } from 'path'
 /** 交接材料里"最近输出尾部"的上限(字符数,近似 4KB,见 protocol-agent-v3 §5.3)。 */
 const HANDOFF_TAIL_MAX_CHARS = 4096
 
+/**
+ * continueTerminalWorker 锁内可重入求值循环的上限次数。每一轮代表"主线又换了一次"的
+ * 重新判定,防止病态并发抖动(主线连续多次接续/切换)让这次投递在临界区内无限打转。3
+ * 轮足以覆盖"补送失败一次 → 转接续一次"这种正常竞态收敛路径,仍在这个上限内打转说明
+ * 是异常情况,不应该继续悄悄重试。
+ */
+const MAX_CONTINUATION_ITERATIONS = 3
+
 /** 请求的 worker_id 在台账中不存在。 */
 export class WorkerNotFoundError extends Error {
   constructor(readonly worker_id: string) {
@@ -371,6 +379,26 @@ export class WorkerHarness {
    * raw 透传:"补送到当前主线"分支和 sendToWorker 正常路径(见上面的 adapter.sendInput 调用)
    * 必须保持同一投递语义——`raw: true` 的原始敲键消息若在补送时丢了这个标志,会被当成普通
    * 消息投递,行为对调用方不再透明。
+   *
+   * 二轮 review 收口(锁内可重入求值):上面"补送到当前主线"分支曾经无条件把当前主线当存活
+   * 化身直投,既不查 mainline.state,adapter.sendInput 抛出的 WorkerExitedError 也没像
+   * sendToWorker 正常路径那样被接住转接续——deliver 卡在旧主线投递期间若发生并发接续/
+   * 切换,且等锁期间新主线又自然退出(或 adapter 权威判定它已退出,即便台账还没追上),这个
+   * WorkerExitedError 会原样穿透 inbox.flush,条目 unshift 回队首、错误砸给 sendToWorker
+   * 的调用方,违反"投递永不因状态失败"与"接续对调用方无感"。
+   *
+   * 修法:整个"判定源化身 → 决定补送/接续"改成锁内(同一临界区,不重新拿锁——私有方法
+   * 自身持锁,递归调用会死锁)的可重入求值循环:每轮拿当前源 (curImpl, curSeq) 重新读一次
+   * 台账并判定——
+   *   - 主线就是当前源且已终态 → 走 revive/handoff,结束;
+   *   - 主线已换且存活 → 尝试补送;若 sendInput 抛 WorkerExitedError,不出锁,把这个新主线
+   *     当作新的源回到循环顶部重新求值(即转接续);
+   *   - 主线已换且台账里已是终态 → 不浪费一次注定失败的 sendInput,直接把它当作新的源
+   *     回到循环顶部(同样转接续)。
+   * 循环设上限(MAX_CONTINUATION_ITERATIONS)防病态抖动(主线在极端并发下连续多次切换/
+   * 自然退出撞上同一次投递):超限说明短时间内发生了异常密集的接续/切换,不是本方法能
+   * 收敛处理的情形,记事件后抛出明确错误(调用方 inbox.flush 会把这条消息放回队首,下次
+   * flush 重试)。
    */
   private async continueTerminalWorker(
     workerId: string,
@@ -380,63 +408,103 @@ export class WorkerHarness {
     raw: boolean
   ): Promise<void> {
     await this.withLock(workerId, async () => {
-      const found = await this.deps.ledger.findWorker(workerId)
-      if (!found) throw new WorkerNotFoundError(workerId)
-      const { worker, dialogObjectId } = found
+      let curImpl = sourceImpl
+      let curSeq = sourceSeq
 
-      // task 在锁外投递期间被 killWorker 打断(如 send 卡在 tmux 投递期间调 kill,这条
-      // 消息在拿到这把锁之前就已经确定要走接续路径了):§5.5"唯一硬拒绝:cancelled"只
-      // 约束 sendToWorker 入队前的把关(见该方法顶部),这里是入队之后才发现的迟到判定,
-      // 不能再用同一处把关。cancelled 是终态,不能被下面的 reviveIncarnation/handoffIncarnation
-      // 经 reopenTaskForContinuation → reviveTask 复活成 running——那样会让已经明确要求
-      // 终止的 task 又"activate"出一个新化身。同时"send_to_worker 投递永不因状态失败"
-      // 是调用方(inbox.flush)的既有契约,消息不能静默消失:丢弃这条并记 dead-letter 事件,
-      // 不重新抛出(抛出会砸向早已异步返回的 sendToWorker 调用方,变成没人处理的 rejection)。
-      if (worker.task.status === 'cancelled') {
-        await this.appendEvent(workerId, sourceSeq, 'state_changed', {
-          kind: 'dead_letter',
-          reason: 'task_cancelled',
-          text_len: text.length,
-        })
-        return
-      }
+      for (let iteration = 0; iteration < MAX_CONTINUATION_ITERATIONS; iteration++) {
+        const found = await this.deps.ledger.findWorker(workerId)
+        if (!found) throw new WorkerNotFoundError(workerId)
+        const { worker, dialogObjectId } = found
 
-      const mainline = mainlineIncarnation(worker)
+        // task 在锁外投递期间被 killWorker 打断(如 send 卡在 tmux 投递期间调 kill,这条
+        // 消息在拿到这把锁之前就已经确定要走接续路径了):§5.5"唯一硬拒绝:cancelled"只
+        // 约束 sendToWorker 入队前的把关(见该方法顶部),这里是入队之后才发现的迟到判定,
+        // 不能再用同一处把关。cancelled 是终态,不能被下面的 reviveIncarnation/handoffIncarnation
+        // 经 reopenTaskForContinuation → reviveTask 复活成 running——那样会让已经明确要求
+        // 终止的 task 又"activate"出一个新化身。同时"send_to_worker 投递永不因状态失败"
+        // 是调用方(inbox.flush)的既有契约,消息不能静默消失:丢弃这条并记 dead-letter 事件,
+        // 不重新抛出(抛出会砸向早已异步返回的 sendToWorker 调用方,变成没人处理的 rejection)。
+        if (worker.task.status === 'cancelled') {
+          await this.appendEvent(workerId, curSeq, 'state_changed', {
+            kind: 'dead_letter',
+            reason: 'task_cancelled',
+            text_len: text.length,
+          })
+          return
+        }
 
-      if (mainline.seq !== sourceSeq || mainline.impl !== sourceImpl) {
-        // 并发窗口:拿锁之前,该 worker 已经被另一次并发触发的接续/切换抢先完成——主线已经
-        // 前进到更新的化身(按 (impl, seq) 判定,不能只比 seq,见上面方法注释)。按普通投递
-        // 语义把这条消息补送到当前(存活)主线,不重复接续,并保留原条目的 raw 标志。
+        const mainline = mainlineIncarnation(worker)
+
+        if (mainline.seq !== curSeq || mainline.impl !== curImpl) {
+          // 并发窗口:拿锁之前,该 worker 已经被另一次并发触发的接续/切换抢先完成——主线已经
+          // 前进到更新的化身(按 (impl, seq) 判定,不能只比 seq,见上面方法注释)。
+          if (mainline.state === 'exited') {
+            // 台账已经把这个更新的主线也记为终态——不必再尝试一次注定失败的 sendInput,
+            // 把它当作新的源头,回到循环顶部,以它走接续。
+            curImpl = mainline.impl as WorkerImplId
+            curSeq = mainline.seq
+            continue
+          }
+          // 按普通投递语义把这条消息补送到当前(存活)主线,不重复接续,并保留原条目的
+          // raw 标志。
+          const adapter = this.deps.adapters.get(mainline.impl as WorkerImplId)
+          if (!adapter) {
+            throw new Error(`WorkerHarness.sendToWorker: no adapter registered for impl '${mainline.impl}'`)
+          }
+          const handle: IncarnationHandle = {
+            worker_id: workerId,
+            seq: mainline.seq,
+            impl: mainline.impl as WorkerImplId,
+            session_ref: mainline.session_ref,
+          }
+          try {
+            await adapter.sendInput(handle, text, { raw })
+          } catch (err) {
+            // adapter 侧权威判定这个"看起来存活"的新主线其实也已经终态(台账的异步状态
+            // 回调还没追上)——同样不出锁,把它当作新的源头回到循环顶部转接续,而不是把
+            // 这个错误当成"补送失败"直接抛给调用方。
+            if (err instanceof WorkerExitedError) {
+              curImpl = mainline.impl as WorkerImplId
+              curSeq = mainline.seq
+              continue
+            }
+            throw err
+          }
+          await this.appendEvent(workerId, handle.seq, 'input_sent', { text_len: text.length })
+          return
+        }
+
+        // 主线就是当前源:走接续(revive/handoff)。
         const adapter = this.deps.adapters.get(mainline.impl as WorkerImplId)
         if (!adapter) {
-          throw new Error(`WorkerHarness.sendToWorker: no adapter registered for impl '${mainline.impl}'`)
+          throw new Error(`WorkerHarness.sendToWorker: no adapter registered for impl '${mainline.impl}' (continuation)`)
         }
-        const handle: IncarnationHandle = {
-          worker_id: workerId,
-          seq: mainline.seq,
-          impl: mainline.impl as WorkerImplId,
-          session_ref: mainline.session_ref,
+
+        if (adapter.capabilities().revive) {
+          await this.reviveIncarnation(dialogObjectId, worker, mainline, adapter, text)
+        } else {
+          // "原 impl 若仍可用则沿用,否则 defaultImpl"(brief)。三个既有实现目前都是
+          // revive:true,这条分支走不到真实 adapter;为将来的不可复活实现(如 legacy)保留。
+          const targetImpl = this.deps.adapters.has(mainline.impl as WorkerImplId)
+            ? (mainline.impl as WorkerImplId)
+            : this.deps.defaultImpl
+          await this.handoffIncarnation(dialogObjectId, worker, mainline, targetImpl, text)
         }
-        await adapter.sendInput(handle, text, { raw })
-        await this.appendEvent(workerId, handle.seq, 'input_sent', { text_len: text.length })
         return
       }
 
-      const adapter = this.deps.adapters.get(mainline.impl as WorkerImplId)
-      if (!adapter) {
-        throw new Error(`WorkerHarness.sendToWorker: no adapter registered for impl '${mainline.impl}' (continuation)`)
-      }
-
-      if (adapter.capabilities().revive) {
-        await this.reviveIncarnation(dialogObjectId, worker, mainline, adapter, text)
-      } else {
-        // "原 impl 若仍可用则沿用,否则 defaultImpl"(brief)。三个既有实现目前都是
-        // revive:true,这条分支走不到真实 adapter;为将来的不可复活实现(如 legacy)保留。
-        const targetImpl = this.deps.adapters.has(mainline.impl as WorkerImplId)
-          ? (mainline.impl as WorkerImplId)
-          : this.deps.defaultImpl
-        await this.handoffIncarnation(dialogObjectId, worker, mainline, targetImpl, text)
-      }
+      // 超出重求值上限:短时间内主线连续多次切换/自然退出,撞上了同一次投递的每一次重新
+      // 判定,不是本方法能收敛处理的病态抖动。记事件留痕,抛出明确错误——inbox.flush 会把
+      // 这条消息放回队首、原样向上抛,不静默丢弃,调用方或下一轮 flush 有机会重试。
+      await this.appendEvent(workerId, curSeq, 'state_changed', {
+        kind: 'continuation_loop_exceeded',
+        max_iterations: MAX_CONTINUATION_ITERATIONS,
+        text_len: text.length,
+      })
+      throw new Error(
+        `WorkerHarness.continueTerminalWorker: exceeded max re-evaluation iterations (${MAX_CONTINUATION_ITERATIONS}) ` +
+          `for worker ${workerId}; mainline kept changing/exiting faster than this delivery could settle on a source`
+      )
     })
   }
 

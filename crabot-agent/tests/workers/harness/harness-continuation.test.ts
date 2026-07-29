@@ -1098,6 +1098,176 @@ describe('WorkerHarness — 终审 PoC 回归：M3 continueTerminalWorker 守卫
   })
 })
 
+describe('WorkerHarness — 二轮 review PoC 回归：continueTerminalWorker 补送分支的终态竞态收口（锁内可重入求值）', () => {
+  it('deliver 卡在旧主线投递期间发生跨实现切换，且新主线在本调用拿锁前也已自然终态（台账已落 exited）：不误对已终态化身调 sendInput，径直转接续，调用方无感', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    let releaseGate!: (err: Error) => void
+    const gate = new Promise<void>((_resolve, reject) => {
+      releaseGate = (err) => reject(err)
+    })
+    const source = new FakeAdapter({
+      implId: 'claude-code',
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      sendInputBehavior: async () => {
+        await gate
+      },
+    })
+    const target = new FakeAdapter({
+      implId: 'codex',
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      // 修复前：continueTerminalWorker 的"补送"分支无条件对当前主线调 sendInput，即使
+      // 台账已经把它记为 exited——真实 adapter 对已退出化身的 sendInput 权威地抛
+      // WorkerExitedError，这里如实模拟。修复后这条分支应当在读到 mainline.state==='exited'
+      // 后直接跳过 sendInput、转入接续，这个桩函数根本不会被调用（用 sendInputCalls 断言）。
+      sendInputBehavior: (h) => {
+        throw new WorkerExitedError(h.worker_id, h.seq)
+      },
+    })
+    adaptersMap.set('claude-code', source)
+    adaptersMap.set('codex', target)
+
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    events.length = 0
+
+    // 第一条投递卡在 claude-code 的 sendInput 里，此刻 per-worker 锁空闲。
+    const send = harness.sendToWorker(worker.worker_id, '并发终态竞态', { raw: true })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(source.sendInputCalls).toHaveLength(1)
+
+    // 投递期间发生跨实现切换：codex#1 顶替 claude-code#1。
+    await harness.switchWorkerImpl(worker.worker_id, 'codex', '并发切换')
+    const afterSwitch = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    const newMainline = afterSwitch.incarnations[afterSwitch.incarnations.length - 1]
+    expect(newMainline.impl).toBe('codex')
+    expect(newMainline.seq).toBe(1)
+    expect(newMainline.state).toBe('running')
+
+    // 关键并发窗口：在 continueTerminalWorker 真正拿到 per-worker 锁之前，新主线
+    // （codex#1）自己也已经自然退出——processStateChange 抢先拿锁，把它落定为 exited。
+    const newMainlineHandle: IncarnationHandle = {
+      worker_id: worker.worker_id,
+      seq: 1,
+      impl: 'codex',
+      session_ref: newMainline.session_ref,
+    }
+    target.emitStateChange(newMainlineHandle, 'exited')
+    await waitUntil(async () => {
+      const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      const ml = w.incarnations[w.incarnations.length - 1]
+      return ml.impl === 'codex' && ml.state === 'exited'
+    })
+
+    // 放行卡住的 sendInput，抛出 WorkerExitedError——deliver 的 catch 分支据此转入
+    // continueTerminalWorker(sourceImpl='claude-code', sourceSeq=1)，此时主线早已换成
+    // 已终态的 codex#1。
+    releaseGate(new WorkerExitedError(worker.worker_id, 1))
+
+    // 核心断言：修复前，补送分支对已终态的新主线仍无条件调 sendInput，抛出的
+    // WorkerExitedError 穿透 inbox.flush、条目 unshift 回队首，砸给 sendToWorker 的
+    // 调用方——这里会 reject。修复后应当无感 resolve。
+    await expect(send).resolves.toBeUndefined()
+
+    // 已终态的新主线不该被无谓地 sendInput 一次（对失败必然发生的调用做了跳过判断）。
+    expect(target.sendInputCalls).toHaveLength(0)
+    // 而是被当作接续的新源头，走 revive。
+    expect(target.resumeCalls).toHaveLength(1)
+    expect(target.resumeCalls[0].prev).toEqual({
+      worker_id: worker.worker_id,
+      seq: 1,
+      session_ref: newMainline.session_ref,
+    })
+    expect(target.resumeCalls[0].wakeInput).toBe('并发终态竞态')
+
+    const after = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    expect(after.incarnations).toHaveLength(3)
+    const finalMainline = after.incarnations[after.incarnations.length - 1]
+    expect(finalMainline.impl).toBe('codex')
+    expect(finalMainline.state).toBe('running')
+
+    // 消息没有滞留：没有产生 dead-letter。
+    const deadLetterEvents = events.filter(
+      (e) => e.kind === 'state_changed' && (e.detail as Record<string, unknown> | undefined)?.kind === 'dead_letter'
+    )
+    expect(deadLetterEvents).toHaveLength(0)
+  })
+
+  it('新主线仍存活（台账未落终态）但 adapter.sendInput 权威地抛 WorkerExitedError：同样转入接续，不砸向调用方', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    let releaseGate!: (err: Error) => void
+    const gate = new Promise<void>((_resolve, reject) => {
+      releaseGate = (err) => reject(err)
+    })
+    const source = new FakeAdapter({
+      implId: 'claude-code',
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      sendInputBehavior: async () => {
+        await gate
+      },
+    })
+    const target = new FakeAdapter({
+      implId: 'codex',
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      // 台账里新主线仍是 running（没有触发过任何状态回调），但 adapter 自己权威地判定
+      // 化身已经不在了——修复前，补送分支对这次 sendInput 抛出的 WorkerExitedError 不做
+      // 任何捕获，原样穿透。
+      sendInputBehavior: (h) => {
+        throw new WorkerExitedError(h.worker_id, h.seq)
+      },
+    })
+    adaptersMap.set('claude-code', source)
+    adaptersMap.set('codex', target)
+
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    events.length = 0
+
+    const send = harness.sendToWorker(worker.worker_id, '权威抛错场景', { raw: true })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(source.sendInputCalls).toHaveLength(1)
+
+    await harness.switchWorkerImpl(worker.worker_id, 'codex', '并发切换')
+    const afterSwitch = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    const newMainline = afterSwitch.incarnations[afterSwitch.incarnations.length - 1]
+    expect(newMainline.impl).toBe('codex')
+    expect(newMainline.seq).toBe(1)
+    expect(newMainline.state).toBe('running') // 台账未落终态，与上一条用例的区别所在
+
+    releaseGate(new WorkerExitedError(worker.worker_id, 1))
+
+    // 核心断言：修复前会 reject（补送分支的 sendInput 抛错未被捕获）。
+    await expect(send).resolves.toBeUndefined()
+
+    // 确实尝试过一次对新主线的正常投递，才发现它已经不在了。
+    expect(target.sendInputCalls).toHaveLength(1)
+    // 随后转入接续，以这个新主线为源头 revive。
+    expect(target.resumeCalls).toHaveLength(1)
+    expect(target.resumeCalls[0].prev).toEqual({
+      worker_id: worker.worker_id,
+      seq: 1,
+      session_ref: newMainline.session_ref,
+    })
+    expect(target.resumeCalls[0].wakeInput).toBe('权威抛错场景')
+
+    const after = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    expect(after.incarnations).toHaveLength(3)
+    // codex#1 被 revive 之前的补写收尾成终态（reviveIncarnation 既有逻辑：台账态未追上
+    // adapter 真实状态时先回填）。
+    const codexFirst = after.incarnations.find((i) => i.impl === 'codex' && i.state === 'exited')!
+    expect(codexFirst.ended_reason).toBe('completed')
+    const finalMainline = after.incarnations[after.incarnations.length - 1]
+    expect(finalMainline.impl).toBe('codex')
+    expect(finalMainline.state).toBe('running')
+
+    const deadLetterEvents = events.filter(
+      (e) => e.kind === 'state_changed' && (e.detail as Record<string, unknown> | undefined)?.kind === 'dead_letter'
+    )
+    expect(deadLetterEvents).toHaveLength(0)
+  })
+})
+
 describe('WorkerHarness.switchWorkerImpl — 终审 PoC 回归：M3 cancelled 是唯一硬拒绝，不得复活', () => {
   it('对已 cancelled 的 worker 调 switchWorkerImpl → 抛 TaskCancelledError，不 provision/不 spawn，task 仍是 cancelled', async () => {
     const { harness, adaptersMap } = await makeHarness()
