@@ -868,6 +868,51 @@ describe('BuiltinWorkerAdapter', () => {
     expect(meta.ended_reason).toBe('killed')
   })
 
+  it('kill 打在 sendInput(idle→running) 转态后、续 burst 安装新 controller 前的窗口 → 终态 exited(killed)，不起新 burst（P1 全分支终审回归）', async () => {
+    const runEngineSpy = vi.spyOn(engineModule, 'runEngine')
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({
+      adapter: makeAdapter([
+        { text: '第一轮回复', stopReason: 'end_turn' },
+        { text: '不应该被看到的第二轮回复', stopReason: 'end_turn' },
+      ]),
+    })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'idle')
+    expect(runEngineSpy).toHaveBeenCalledTimes(1)
+
+    // 精确命中窗口①：覆写 transitionState，在 sendInput 的 idle→running 转态落定后（仍在
+    // sendInput 那次 mutex.run 的临界区内、锁释放前）插入一次 kill 调用——kill 因此在锁
+    // 队列里排在"续 burst 安装新 controller"的 continuation 之前获锁，复现终审描述的
+    // "kill abort 了旧 controller、新 burst 照跑"竞态。覆写手法与既有窗口②测试一致。
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const adapterAny = adapter as any
+    const originalTransitionState = adapterAny.transitionState.bind(adapter)
+    let killPromise: Promise<void> | undefined
+    adapterAny.transitionState = async (instanceArg: unknown, handleArg: unknown, state: string) => {
+      const result = await originalTransitionState(instanceArg, handleArg, state)
+      if (state === 'running' && !killPromise) {
+        killPromise = adapter.kill(h)
+      }
+      return result
+    }
+
+    await adapter.sendInput(h, '追加的问题')
+    await killPromise
+    await waitState(adapter, h, 'exited')
+
+    const metaRaw = await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')
+    const meta = JSON.parse(metaRaw)
+    expect(meta.state).toBe('exited')
+    expect(meta.ended_reason).toBe('killed')
+
+    // 续 burst 没有真正起来：runEngine 调用次数仍停在 spawn 那一次，第二轮回复没被消费。
+    expect(runEngineSpy).toHaveBeenCalledTimes(1)
+    const { chunk } = await adapter.readOutput(h, { offset: 0 })
+    expect(chunk).not.toContain('不应该被看到的第二轮回复')
+  })
+
   it('kill idle 化身 → 直接 exited(killed)，不经过 burst', async () => {
     const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
     const s = spec({

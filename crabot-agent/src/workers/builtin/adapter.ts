@@ -21,9 +21,15 @@
  * 计算，避免二者撞号。
  *
  * kill：每化身持有一个 AbortController，burst 启动时创建、其 signal 传给 runEngine。
- * running 态 kill 只是 abort() 当前 burst——burst 自己以 outcome='aborted' 收尾时既有
- * 分流会落 exited(killed)（见 runBurst/runForkBurst 收尾段）；idle 态（没有 burst 在跑）
- * kill 直接在互斥锁内落 exited(killed)；已 exited 幂等返回，不覆盖原 ended_reason。
+ * running 态 kill 在互斥锁内先置 instance.killRequested = true，再 abort() 当前 burst——
+ * 单纯 abort 不够：sendInput(idle→running) 转态后到续 burst 安装新 controller 之间、以及
+ * runBurst 续 burst 路径锁释放到递归调用之间都有窗口，其间 instance.abortController 还
+ * 指向旧 burst，abort 旧 controller 对即将起的新 burst 无效。runBurst/runForkBurst 因此
+ * 在安装新 controller 时、以及收尾段判定是否续 burst/正常收尾前，各在锁内核对一次
+ * killRequested：已置位则不启动/不续 burst，直接落 exited(killed)，与 kill() 的置位+abort
+ * 共享同一把锁，消除上述窗口。burst 正常被 abort 命中时仍以 outcome='aborted' 收尾落
+ * exited(killed)（见 runBurst/runForkBurst 收尾段）；idle 态（没有 burst 在跑）kill 直接
+ * 在互斥锁内落 exited(killed)；已 exited 幂等返回，不覆盖原 ended_reason。
  *
  * scanOrphans：进程重启后，内存 instances 已丢失，只能凭磁盘 meta 文件识别"重启前还
  * 没来得及收尾的化身"——把 state==='running' 的原子改写为 exited(crashed)。调用方须
@@ -112,10 +118,17 @@ interface WorkerInstance {
   resumed?: boolean
   /**
    * 当前（或最近一次）burst 的 AbortController，在 runBurst/runForkBurst 每次调用 runEngine
-   * 前创建，其 signal 传给 runEngine。kill() 在 running 态下只是 abort() 它——不直接改状态，
+   * 前创建，其 signal 传给 runEngine。kill() 在 running 态下 abort() 它——不直接改状态，
    * 状态迁移仍由 burst 自己收尾时的 outcome==='aborted' 分流完成。
    */
   abortController?: AbortController
+  /**
+   * kill() 在 running 态下于互斥锁内置位，一旦置位永不复位（化身终将落 exited）。
+   * runBurst/runForkBurst 在安装新 controller 时、以及收尾段判定是否续 burst/正常收尾前，
+   * 各在同一把锁内核对它——用于兜住 abortController 指向旧 burst 而 abort 落空的窗口
+   * （见 kill() 顶部注释）。
+   */
+  killRequested?: boolean
 }
 
 function instanceKey(worker_id: string, seq: number): string {
@@ -384,9 +397,13 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         return
       }
 
-      // running：只 abort 当前 burst 的 signal。burst 的 runEngine 调用本身在锁外跑（见
-      // runBurst 注释），abort() 后由它自己以 outcome='aborted' 收尾时落 exited(killed)——
-      // 这里不代为转态，避免和 burst 收尾段的互斥锁临界区打架。
+      // running：先置位 killRequested，再 abort 当前 burst 的 signal。置位在 abort 之前，
+      // 确保 runBurst/runForkBurst 在同一把锁内做的 killRequested 核对不会漏判。burst 的
+      // runEngine 调用本身在锁外跑（见 runBurst 注释），abort() 后由它自己以
+      // outcome='aborted' 收尾时落 exited(killed)——这里不代为转态，避免和 burst 收尾段的
+      // 互斥锁临界区打架；abortController 若恰好指向已经跑完的旧 burst（交接窗口内），
+      // abort 对它是空操作，届时由 killRequested 兜底。
+      instance.killRequested = true
       instance.abortController?.abort()
     })
   }
@@ -453,10 +470,24 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
   ): Promise<void> {
     const tip = instance.tip
     const initialMessages = instance.sessionTree.pathTo(tip)
+    const mutex = this.getMutex(instance.worker_id)
 
     // 每次进入 runBurst（含续 burst 的递归调用）都换一个新 AbortController，供 kill() abort。
-    const abortController = new AbortController()
-    instance.abortController = abortController
+    // 安装与 killRequested 核对必须在同一把锁内原子完成，和 kill() 的"置位+abort"共享该锁：
+    // 否则会有窗口——kill 已经决定要杀这个（还没起的）新 burst，但读到的 abortController
+    // 还是上一个已经跑完的 burst 的，abort 它没有任何效果，新 burst 照样起来（P1 全分支
+    // 终审 Important，见 kill() 顶部注释）。已置位则不装 controller、不起 runEngine，直接
+    // 在锁内落 exited(killed)。
+    const abortController = await mutex.run(async () => {
+      if (instance.killRequested) {
+        await this.transitionExited(instance, handle, 'killed')
+        return undefined
+      }
+      const ac = new AbortController()
+      instance.abortController = ac
+      return ac
+    })
+    if (!abortController) return
 
     const pendingWrites: Promise<void>[] = []
     const result: EngineResult = await runEngine({
@@ -484,7 +515,6 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // worker 的互斥锁内原子完成：消除"同步判定 pendingInputs 为空后 await transitionState
     // 期间新 sendInput 插队"的窗口——判定与状态落定必须是同一个不可分割的临界区。
     // 续 burst 的递归调用放在锁外触发（见下），不然会把 runEngine 的执行时长堵在锁里。
-    const mutex = this.getMutex(instance.worker_id)
     const continueBurst = await mutex.run(async () => {
       // burst 结束：把新增消息（finalMessages 相对 initialMessages 的后缀）逐条 append 进 session 树。
       // 防御断言：若压缩被意外启用，finalMessages.length 会小于 initialMessages.length，
@@ -514,6 +544,15 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         const rawOutcome = result.exitToolCall.input.outcome
         const outcome: 'completed' | 'failed' = rawOutcome === 'failed' ? 'failed' : 'completed'
         await this.transitionExited(instance, handle, outcome, outcome)
+        return false
+      }
+
+      // burst 正常收尾（非 aborted/failed/finish_task）但期间 killRequested 已被置位：
+      // abort 大概率是打在了这次 burst 身上（下面 outcome==='aborted' 分支已经处理），但也
+      // 可能是打晚了——engine 已经决定 end_turn，abort 信号没赶上（P1 全分支终审 Important
+      // 收尾段检查点）。无论如何都不能继续/续 burst，直接落 exited(killed)。
+      if (instance.killRequested) {
+        await this.transitionExited(instance, handle, 'killed')
         return false
       }
 
@@ -552,10 +591,21 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
   ): Promise<void> {
     const tip = instance.tip
     const initialMessages = instance.sessionTree.pathTo(tip)
+    const mutex = this.getMutex(instance.worker_id)
 
-    // fork 化身同样支持被 kill() abort——见 runBurst 里对应注释。
-    const abortController = new AbortController()
-    instance.abortController = abortController
+    // fork 化身同样支持被 kill() abort——见 runBurst 里对应注释，同样的窗口①在 fork 的
+    // 一次性 burst 上也存在：fork() 把新化身以 running 态注册、锁外 fire-and-forget 起
+    // runForkBurst，安装 controller 前先在锁内核对 killRequested。
+    const abortController = await mutex.run(async () => {
+      if (instance.killRequested) {
+        await this.transitionExited(instance, handle, 'killed')
+        return undefined
+      }
+      const ac = new AbortController()
+      instance.abortController = ac
+      return ac
+    })
+    if (!abortController) return
 
     const pendingWrites: Promise<void>[] = []
     const result: EngineResult = await runEngine({
@@ -578,7 +628,6 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     })
     await Promise.all(pendingWrites)
 
-    const mutex = this.getMutex(instance.worker_id)
     await mutex.run(async () => {
       if (result.finalMessages.length < initialMessages.length) {
         console.error(
@@ -598,6 +647,13 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 
       if (result.outcome === 'failed' || result.outcome === 'aborted') {
         await this.transitionExited(instance, handle, result.outcome === 'aborted' ? 'killed' : 'crashed')
+        return
+      }
+
+      // outcome 是正常收尾但 killRequested 已置位：abort 打晚了，engine 已经决定收尾，
+      // 但用户明确要求过 kill，不该落 completed（P1 全分支终审 Important 收尾段检查点）。
+      if (instance.killRequested) {
+        await this.transitionExited(instance, handle, 'killed')
         return
       }
 
