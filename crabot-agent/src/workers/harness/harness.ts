@@ -56,6 +56,7 @@
  */
 
 import { randomUUID } from 'crypto'
+import { promises as fs } from 'fs'
 import type {
   WorkerAdapter,
   WorkerImplId,
@@ -66,16 +67,20 @@ import type {
   SpawnSpec,
   OutputCursor,
   CapabilityBundle,
+  Workspace,
 } from '../types'
-import { CapabilityNotSupportedError } from '../errors'
+import { CapabilityNotSupportedError, WorkerExitedError } from '../errors'
 import { AsyncMutex } from '../async-mutex'
 import type { DialogObjectId, Incarnation, LedgerWorker, TaskStatus } from './ledger-types'
 import type { LedgerStore } from './ledger-store'
 import type { WorkspaceManager } from './workspace-manager'
 import { WorkerInbox, type InboxItem } from './inbox'
 import { WorkerEventLog, type HarnessEvent, type HarnessEventKind } from './worker-events'
-import { applyStatusTransition, isTerminalStatus, taskStatusFromIncarnation } from './task-status'
+import { applyStatusTransition, canTransition, isTerminalStatus, taskStatusFromIncarnation } from './task-status'
 import { join } from 'path'
+
+/** 交接材料里"最近输出尾部"的上限(字符数,近似 4KB,见 protocol-agent-v3 §5.3)。 */
+const HANDOFF_TAIL_MAX_CHARS = 4096
 
 /** 请求的 worker_id 在台账中不存在。 */
 export class WorkerNotFoundError extends Error {
@@ -260,6 +265,14 @@ export class WorkerHarness {
       // 主线化身,不能用"数组最后一个"——fork 之后数组末尾是侧问分支,投递必须仍然打到
       // 主线(protocol-agent-v3 §5.3:fork 不影响主线)。
       const incarnation = mainlineIncarnation(found.worker)
+
+      // 台账已经把主线化身记为终态(如异步状态回调已经追上)——不必再尝试一次注定失败的
+      // sendInput,直接进入 §5.3 透明接续。
+      if (incarnation.state === 'exited') {
+        await this.continueTerminalWorker(workerId, item.text, incarnation.seq)
+        return
+      }
+
       const adapter = this.deps.adapters.get(incarnation.impl as WorkerImplId)
       if (!adapter) {
         throw new Error(`WorkerHarness.sendToWorker: no adapter registered for impl '${incarnation.impl}'`)
@@ -270,10 +283,220 @@ export class WorkerHarness {
         impl: incarnation.impl as WorkerImplId,
         session_ref: incarnation.session_ref,
       }
-      // WorkerExitedError 原样向上抛出,不在此拦截伪装——拦截并转入 §5.3 透明接续是
-      // Task 8 的范围(会修改本文件),Task 7 只保证正常路径投递正确。
-      await adapter.sendInput(handle, item.text, { raw: item.raw })
+      try {
+        await adapter.sendInput(handle, item.text, { raw: item.raw })
+      } catch (err) {
+        // adapter 侧权威地判定化身已终态,即使台账的异步状态回调还没追上(见
+        // continueTerminalWorker 的 sourceSeq 核对注释)——同样转入透明接续,对
+        // sendToWorker 的调用方完全无感(不重新抛出)。
+        if (err instanceof WorkerExitedError) {
+          await this.continueTerminalWorker(workerId, item.text, incarnation.seq)
+          return
+        }
+        throw err
+      }
       await this.appendEvent(workerId, handle.seq, 'input_sent', { text_len: item.text.length })
+    })
+  }
+
+  /**
+   * 跨实现切换(manager 主导,protocol-agent-v3 §5.3"跨实现切换")。走与透明接续完全
+   * 相同的交接路径(见 handoffIncarnation),区别只是:目标实现由调用方显式指定(不做
+   * "原 impl 若仍可用则沿用"的自动选择),且源化身可能仍然存活(由 handoffIncarnation
+   * 内部负责在这种情况下先 kill 再标 superseded)。
+   */
+  async switchWorkerImpl(workerId: string, impl: WorkerImplId, note?: string): Promise<void> {
+    await this.withLock(workerId, async () => {
+      const found = await this.deps.ledger.findWorker(workerId)
+      if (!found) throw new WorkerNotFoundError(workerId)
+      const { worker, dialogObjectId } = found
+      const mainline = mainlineIncarnation(worker)
+      await this.handoffIncarnation(dialogObjectId, worker, mainline, impl, note ?? '')
+    })
+  }
+
+  /**
+   * §5.3 透明接续:sendToWorker 命中终态化身时的分流入口。全程在该 worker 的 per-worker
+   * 锁临界区内完成(brief 要求:"接续全过程在该 worker 的临界区内完成,避免与并发
+   * sendToWorker/kill 交错"),调用方(inbox.flush 的 deliver 回调)本身跑在锁外,这里
+   * 重新拿锁。
+   *
+   * sourceSeq 是调用方在锁外观察到的"疑似已终态"的化身 seq(来自台账 incarnation.state
+   * ==='exited' 的读,或 adapter.sendInput 抛出的 WorkerExitedError 所对应的化身)。拿到
+   * 锁之后必须用 sourceSeq(而非再次读到的台账 state 字段)判断"这次接续还要不要做"——
+   * 台账的 state 字段可能滞后于 adapter 的真实状态(handleStateChange 是 fire-and-forget
+   * 异步写台账,sendInput 抛错时台账不一定已经写完),但 sourceSeq 对应的化身"已经不是
+   * 当前主线"这件事(mainline.seq !== sourceSeq)只有在真的发生过一次接续之后才可能为真
+   * ——这是判断"是否已被并发接续抢先完成"唯一可靠的信号,不能用可能滞后的 state 字段替代。
+   */
+  private async continueTerminalWorker(workerId: string, text: string, sourceSeq: number): Promise<void> {
+    await this.withLock(workerId, async () => {
+      const found = await this.deps.ledger.findWorker(workerId)
+      if (!found) throw new WorkerNotFoundError(workerId)
+      const { worker, dialogObjectId } = found
+      const mainline = mainlineIncarnation(worker)
+
+      if (mainline.seq !== sourceSeq) {
+        // 并发窗口:拿锁之前,该 worker 已经被另一次并发触发的接续抢先完成——主线已经
+        // 前进到更新的化身。按普通投递语义把这条消息补送到当前(存活)主线,不重复接续。
+        const adapter = this.deps.adapters.get(mainline.impl as WorkerImplId)
+        if (!adapter) {
+          throw new Error(`WorkerHarness.sendToWorker: no adapter registered for impl '${mainline.impl}'`)
+        }
+        const handle: IncarnationHandle = {
+          worker_id: workerId,
+          seq: mainline.seq,
+          impl: mainline.impl as WorkerImplId,
+          session_ref: mainline.session_ref,
+        }
+        await adapter.sendInput(handle, text)
+        await this.appendEvent(workerId, handle.seq, 'input_sent', { text_len: text.length })
+        return
+      }
+
+      const adapter = this.deps.adapters.get(mainline.impl as WorkerImplId)
+      if (!adapter) {
+        throw new Error(`WorkerHarness.sendToWorker: no adapter registered for impl '${mainline.impl}' (continuation)`)
+      }
+
+      if (adapter.capabilities().revive) {
+        await this.reviveIncarnation(dialogObjectId, worker, mainline, adapter, text)
+      } else {
+        // "原 impl 若仍可用则沿用,否则 defaultImpl"(brief)。三个既有实现目前都是
+        // revive:true,这条分支走不到真实 adapter;为将来的不可复活实现(如 legacy)保留。
+        const targetImpl = this.deps.adapters.has(mainline.impl as WorkerImplId)
+          ? (mainline.impl as WorkerImplId)
+          : this.deps.defaultImpl
+        await this.handoffIncarnation(dialogObjectId, worker, mainline, targetImpl, text)
+      }
+    })
+  }
+
+  /** capabilities().revive===true 分支:adapter.resume 拉起新化身,session 满保真接续。 */
+  private async reviveIncarnation(
+    dialogObjectId: DialogObjectId,
+    worker: LedgerWorker,
+    mainline: Incarnation,
+    adapter: WorkerAdapter,
+    text: string,
+  ): Promise<void> {
+    const prevRef: IncarnationRef = { worker_id: worker.worker_id, seq: mainline.seq, session_ref: mainline.session_ref }
+    // resume 直接把 text 作为 wakeInput 传入——接续就是这次输入的投递方式,不需要在
+    // resume 成功之后再补一次 adapter.sendInput。
+    const newHandle = await adapter.resume(prevRef, text)
+
+    const now = this.deps.now()
+    await this.deps.ledger.upsertWorker(dialogObjectId, worker.worker_id, (prev) => {
+      if (!prev) return undefined
+      const newIncarnation: Incarnation = {
+        seq: newHandle.seq,
+        impl: newHandle.impl,
+        state: 'running',
+        workspace: mainline.workspace,
+        session_ref: newHandle.session_ref,
+        started_at: now,
+        // forked_from 不填——resume 产出的新化身入主线链(protocol-agent-v3 §5.3)。
+      }
+      const nextTask = reopenTaskForContinuation(prev.task, now)
+      return { ...prev, task: nextTask, incarnations: [...prev.incarnations, newIncarnation], updated_at: now }
+    })
+    await this.appendEvent(worker.worker_id, newHandle.seq, 'resumed', { from_seq: mainline.seq })
+  }
+
+  /**
+   * capabilities().revive===false 分支(交接续办),以及 switchWorkerImpl 复用的公共路径。
+   * 顺序对齐 protocol-agent-v3 §5.3"跨实现切换":旧化身写交接文档收尾 → (若仍存活)
+   * kill 标 superseded → 同 workspace provision+spawn 新实现 → 化身链 +1。
+   */
+  private async handoffIncarnation(
+    dialogObjectId: DialogObjectId,
+    worker: LedgerWorker,
+    source: Incarnation,
+    targetImpl: WorkerImplId,
+    input: string,
+  ): Promise<void> {
+    const sourceAdapter = this.deps.adapters.get(source.impl as WorkerImplId)
+    const sourceHandle: IncarnationHandle = {
+      worker_id: worker.worker_id,
+      seq: source.seq,
+      impl: source.impl as WorkerImplId,
+      session_ref: source.session_ref,
+    }
+
+    // 1. 组装交接材料(task.title/goal + 最近输出尾部,上限 4KB + 上一化身 outcome)并写
+    // workspace 下的 HANDOFF.md(已存在则追加带时间戳的新段,不覆盖)。
+    let tail = ''
+    if (sourceAdapter) {
+      try {
+        const { chunk } = await sourceAdapter.readOutput(sourceHandle, { offset: 0 })
+        tail = chunk.length > HANDOFF_TAIL_MAX_CHARS ? chunk.slice(chunk.length - HANDOFF_TAIL_MAX_CHARS) : chunk
+      } catch (err) {
+        // 读取交接材料失败不阻断交接本身——没有尾部信息的 HANDOFF.md 好过完全不交接。
+        console.error(`[WorkerHarness] handoff: readOutput failed for ${worker.worker_id}#${source.seq}, tail omitted:`, err)
+      }
+    }
+    const outcome = worker.task.outcome ?? source.ended_reason ?? 'unknown'
+    const handoffTs = this.deps.now()
+    await appendHandoffFile(source.workspace, {
+      ts: handoffTs,
+      title: worker.task.title,
+      goal: worker.task.goal,
+      outcome,
+      tail,
+      input,
+    })
+    await this.appendEvent(worker.worker_id, source.seq, 'handoff_started', { target_impl: targetImpl })
+
+    // 2. 旧化身若仍非终态(如 switchWorkerImpl 打在一个仍存活的化身上,或台账的终态回调
+    // 还没追上 adapter 的真实状态),先 kill 再标 superseded——不覆盖已经真实记录过的
+    // ended_reason(那种情况下旧化身已经是它自己的终局,不是被这次交接顶替的)。
+    if (source.state !== 'exited') {
+      if (sourceAdapter) {
+        await sourceAdapter.kill(sourceHandle)
+      }
+      const killedAt = this.deps.now()
+      await this.deps.ledger.upsertWorker(dialogObjectId, worker.worker_id, (prev) => {
+        if (!prev) return undefined
+        const incarnations = patchIncarnationBySeq(prev.incarnations, source.seq, {
+          state: 'exited',
+          ended_at: killedAt,
+          ended_reason: 'superseded',
+        })
+        return { ...prev, incarnations, updated_at: killedAt }
+      })
+      await this.appendEvent(worker.worker_id, source.seq, 'superseded')
+    }
+
+    // 3. 同 workspace provision + spawn 新实现,开工输入 = 原任务 + 交接引用 + 本次输入。
+    const newAdapter = this.deps.adapters.get(targetImpl)
+    if (!newAdapter) {
+      throw new Error(`WorkerHarness.handoffIncarnation: no adapter registered for impl '${targetImpl}' (handoff target)`)
+    }
+    const workspace: Workspace = { root: source.workspace }
+    const caps = this.deps.capabilityBundle ? await this.deps.capabilityBundle() : EMPTY_CAPABILITY_BUNDLE
+    await newAdapter.provision(workspace, caps)
+    const prompt = buildHandoffPrompt(worker.task, input)
+    const newHandle = await newAdapter.spawn({
+      worker_id: worker.worker_id,
+      prompt,
+      workspace,
+      goal: worker.task.goal,
+    })
+
+    // 4. 化身链 +1,task 重新回到 running(见 reopenTaskForContinuation 注释)。
+    const now = this.deps.now()
+    await this.deps.ledger.upsertWorker(dialogObjectId, worker.worker_id, (prev) => {
+      if (!prev) return undefined
+      const newIncarnation: Incarnation = {
+        seq: newHandle.seq,
+        impl: targetImpl,
+        state: 'running',
+        workspace: source.workspace,
+        session_ref: newHandle.session_ref,
+        started_at: now,
+      }
+      const nextTask = reopenTaskForContinuation(prev.task, now)
+      return { ...prev, task: nextTask, incarnations: [...prev.incarnations, newIncarnation], updated_at: now }
     })
   }
 
@@ -411,10 +634,17 @@ export class WorkerHarness {
         if (target.state === 'exited') return // 已终态,迟到回调忽略
         await this.deps.ledger.upsertWorker(dialogObjectId, h.worker_id, (prev) => {
           if (!prev) return undefined
+          // session_ref 现读现取(h.session_ref,不是构造 handle 时闭包住的旧值)——
+          // builtin 的 session_ref 随每轮 burst 前进,adapter 侧在每次 onStateChange 回调
+          // 时都重新取 instance.tip 填入 handle(见 builtin/adapter.ts 的 transitionState/
+          // transitionExited);台账因此在每次状态回调时顺带刷新到"最近一次完成的状态
+          // 转换点"。cc/codex 的 session_ref 本就稳定,这里是等价 no-op。
           const incarnations = patchIncarnationBySeq(
             prev.incarnations,
             h.seq,
-            state === 'exited' ? { state, ended_at: now, ended_reason: endReason } : { state }
+            state === 'exited'
+              ? { state, ended_at: now, ended_reason: endReason, session_ref: h.session_ref }
+              : { state, session_ref: h.session_ref }
           )
           return { ...prev, incarnations, updated_at: now }
         })
@@ -441,10 +671,13 @@ export class WorkerHarness {
         // 吞掉,事件跟着一起丢。提前短路成 no-op,让调用方仍能走到 appendEvent 记录这次回调。
         if (nextStatus === prev.task.status) return prev
         const nextTask = applyStatusTransition(prev.task, nextStatus, { now })
+        // session_ref 现读现取,同上面 fork 分支的注释。
         const incarnations = patchIncarnationBySeq(
           prev.incarnations,
           h.seq,
-          state === 'exited' ? { state, ended_at: now, ended_reason: endReason } : { state }
+          state === 'exited'
+            ? { state, ended_at: now, ended_reason: endReason, session_ref: h.session_ref }
+            : { state, session_ref: h.session_ref }
         )
         return { ...prev, task: nextTask, incarnations, updated_at: now }
       })
@@ -513,6 +746,71 @@ function mainlineIncarnation(worker: LedgerWorker): Incarnation {
  */
 function patchIncarnationBySeq(incarnations: Incarnation[], seq: number, patch: Partial<Incarnation>): Incarnation[] {
   return incarnations.map((inc) => (inc.seq === seq ? { ...inc, ...patch } : inc))
+}
+
+/**
+ * §5.3 化身接续:把 task 的状态与派生字段重新置回 running,供接续产出的新化身使用。
+ *
+ * 终态化身之上继续开一个新化身是显式的"延续"动作,不是 task-status.ts 描述的线性状态机
+ * 内的一次迁移——VALID_TRANSITIONS 里终态(completed/failed/cancelled)无出边是"同一次
+ * 尝试内不允许原地复活"的不变量,但接续产出的是全新的化身,因此当 task 已经终态时直接
+ * 重置状态与派生字段,不经过 canTransition 校验(效果等价于 applyStatusTransition 到
+ * running 分支,只是跳过其内部的非法迁移检查)。task 尚未终态(如台账的终态回调还没追上
+ * adapter 的真实状态)时仍走 applyStatusTransition 的正常校验路径。
+ */
+function reopenTaskForContinuation(task: LedgerWorker['task'], now: string): LedgerWorker['task'] {
+  if (canTransition(task.status, 'running')) {
+    return applyStatusTransition(task, 'running', { now })
+  }
+  return { ...task, status: 'running', completed_at: undefined, error: undefined }
+}
+
+/** 交接续办产出的新化身 prompt:原任务描述 + 交接引用(指向 HANDOFF.md)+ 本次输入。 */
+function buildHandoffPrompt(task: LedgerWorker['task'], input: string): string {
+  const goalLine = task.goal ? `\n目标:${task.goal}` : ''
+  const inputBlock = input ? `\n\n${input}` : ''
+  return `${task.title}${goalLine}\n\n(交接续办:详见 workspace 下的 HANDOFF.md,记录了前一化身的执行现场与交接说明)${inputBlock}`
+}
+
+interface HandoffSection {
+  readonly ts: string
+  readonly title: string
+  readonly goal?: string
+  readonly outcome: string
+  readonly tail: string
+  readonly input: string
+}
+
+function renderHandoffSection(s: HandoffSection): string {
+  const lines = [
+    `## Handoff ${s.ts}`,
+    '',
+    `Task: ${s.title}`,
+    ...(s.goal ? [`Goal: ${s.goal}`] : []),
+    `Previous outcome: ${s.outcome}`,
+    ...(s.input ? [`This round input: ${s.input}`] : []),
+    '',
+    '### Recent output (tail)',
+    '```',
+    s.tail || '(no output)',
+    '```',
+  ]
+  return lines.join('\n') + '\n'
+}
+
+/** 写 workspace 下的 HANDOFF.md;已存在则追加带时间戳的新段,不覆盖(protocol-agent-v3 §5.3)。 */
+async function appendHandoffFile(workspaceRoot: string, section: HandoffSection): Promise<void> {
+  const filePath = join(workspaceRoot, 'HANDOFF.md')
+  const block = renderHandoffSection(section)
+  let existing = ''
+  try {
+    existing = await fs.readFile(filePath, 'utf-8')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+  }
+  const next = existing ? `${existing.replace(/\n+$/, '')}\n\n${block}` : block
+  await fs.mkdir(workspaceRoot, { recursive: true })
+  await fs.writeFile(filePath, next, 'utf-8')
 }
 
 // re-export for callers that only import from harness.ts
