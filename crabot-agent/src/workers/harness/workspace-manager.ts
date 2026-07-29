@@ -1,10 +1,17 @@
 import path from 'node:path'
 import { promises as fs } from 'node:fs'
 import { getWorkspacesRootDir } from '../../core/data-paths.js'
-import { InvalidWorkspaceError } from '../errors.js'
 import type { Workspace } from '../types.js'
 
-export { InvalidWorkspaceError }
+/** Raised when workspace validation fails. */
+export class InvalidWorkspaceError extends Error {
+  constructor(
+    readonly reason: string,
+  ) {
+    super(`invalid workspace: ${reason}`)
+    this.name = 'InvalidWorkspaceError'
+  }
+}
 
 export class WorkspaceManager {
   private root: string
@@ -44,10 +51,10 @@ export class WorkspaceManager {
       throw new InvalidWorkspaceError(`path must be absolute, got: ${requested}`)
     }
 
-    // 检查路径是否存在且是目录
-    let stat
+    // 检查路径是否存在，并解析出真实路径（消解符号链接，防止软链绕过边界校验）
+    let realRequested: string
     try {
-      stat = await fs.stat(requested)
+      realRequested = await fs.realpath(requested)
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         throw new InvalidWorkspaceError(`path does not exist: ${requested}`)
@@ -55,27 +62,48 @@ export class WorkspaceManager {
       throw new InvalidWorkspaceError(`failed to stat path: ${(err as Error).message}`)
     }
 
+    // 检查是否是目录（基于真实路径，与边界判断保持一致）
+    let stat
+    try {
+      stat = await fs.stat(realRequested)
+    } catch (err) {
+      throw new InvalidWorkspaceError(`failed to stat path: ${(err as Error).message}`)
+    }
+
     if (!stat.isDirectory()) {
       throw new InvalidWorkspaceError(`path is not a directory: ${requested}`)
     }
 
-    // 防串台检查：确保不落在其他 taskId 的目录内
-    this._checkTaskIdBoundary(taskId, requested)
+    // 防串台检查：确保不落在其他 taskId 的目录内（基于真实路径，防止软链绕过）
+    await this._checkTaskIdBoundary(taskId, realRequested, requested)
 
-    return { root: requested }
+    return { root: realRequested }
   }
 
   /**
    * 检查 requested 路径是否违反 task 边界。
    * 允许：<root>/<taskId> 及其子目录
    * 拒绝：<root>/<其他 taskId> 及其子目录
+   *
+   * @param realRequestedPath 已经过 fs.realpath 解析的真实路径
+   * @param originalRequested 原始请求路径（仅用于错误信息展示）
    */
-  private _checkTaskIdBoundary(taskId: string, requestedPath: string): void {
-    const resolved = path.resolve(requestedPath)
-    const rootResolved = path.resolve(this.root)
+  private async _checkTaskIdBoundary(
+    taskId: string,
+    realRequestedPath: string,
+    originalRequested: string,
+  ): Promise<void> {
+    // root 本身也可能是符号链接（如 macOS /tmp），两侧都需 realpath 后再比较，
+    // 否则会产生假阳性（合法路径被误拒）。root 尚不存在时退化为字符串规范化。
+    let realRoot: string
+    try {
+      realRoot = await fs.realpath(this.root)
+    } catch {
+      realRoot = path.resolve(this.root)
+    }
 
     // 检查是否在 <root> 内
-    const relative = path.relative(rootResolved, resolved)
+    const relative = path.relative(realRoot, realRequestedPath)
     if (relative.startsWith('..')) {
       // 在 root 外面，允许
       return
@@ -85,14 +113,14 @@ export class WorkspaceManager {
     const pathParts = relative.split(path.sep).filter((p) => p.length > 0)
     if (pathParts.length === 0) {
       // 路径指向 root 本身，拒绝
-      throw new InvalidWorkspaceError(`path must not be the workspaces root: ${requestedPath}`)
+      throw new InvalidWorkspaceError(`path must not be the workspaces root: ${originalRequested}`)
     }
 
     const topLevelTaskId = pathParts[0]
     if (topLevelTaskId !== taskId) {
       // 指向其他 taskId 的目录
       throw new InvalidWorkspaceError(
-        `path must not reference other task workspace (expected under ${taskId}, got ${topLevelTaskId}): ${requestedPath}`
+        `path must not reference other task workspace (expected under ${taskId}, got ${topLevelTaskId}): ${originalRequested}`
       )
     }
   }

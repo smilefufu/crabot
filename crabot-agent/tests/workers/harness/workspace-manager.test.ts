@@ -177,6 +177,58 @@ describe('WorkspaceManager', () => {
     })
   })
 
+  describe('requested 校验：防串台 - 符号链接绕过', () => {
+    it('root 外的软链指向其他 taskId 目录应被拒绝（PoC：符号链接绕过边界校验）', async () => {
+      const task2Dir = resolve(root, 'task-2')
+      await fs.mkdir(task2Dir, { recursive: true })
+
+      const outsideDir = await fs.mkdtemp(join(tmpdir(), 'symlink-poc-'))
+      const linkPath = join(outsideDir, 'link-to-task-2')
+      try {
+        await fs.symlink(task2Dir, linkPath, 'dir')
+        await expect(manager.resolve('task-1', linkPath)).rejects.toThrow(InvalidWorkspaceError)
+      } finally {
+        await fs.rm(outsideDir, { recursive: true, force: true })
+      }
+    })
+
+    it('软链指向自己 taskId 的目录应被允许，返回 realpath', async () => {
+      const task1Dir = resolve(root, 'task-1')
+      await fs.mkdir(task1Dir, { recursive: true })
+
+      const outsideDir = await fs.mkdtemp(join(tmpdir(), 'symlink-self-'))
+      const linkPath = join(outsideDir, 'link-to-task-1')
+      try {
+        await fs.symlink(task1Dir, linkPath, 'dir')
+        const ws = await manager.resolve('task-1', linkPath)
+        expect(ws.root).toBe(await fs.realpath(task1Dir))
+      } finally {
+        await fs.rm(outsideDir, { recursive: true, force: true })
+      }
+    })
+
+    it('root 本身是软链时，合法路径不应被误拒（两侧都要 realpath 再比较）', async () => {
+      const realRoot = await fs.mkdtemp(join(tmpdir(), 'real-root-'))
+      const rootLinkParent = await fs.mkdtemp(join(tmpdir(), 'root-link-parent-'))
+      const rootLink = join(rootLinkParent, 'root-link')
+      try {
+        await fs.symlink(realRoot, rootLink, 'dir')
+        const linkedManager = new WorkspaceManager(rootLink)
+
+        const task1Dir = resolve(realRoot, 'task-1')
+        await fs.mkdir(task1Dir, { recursive: true })
+
+        // 通过 root 软链路径请求，应通过（不因 root 是软链而误判越界）
+        const requestedViaLink = resolve(rootLink, 'task-1')
+        const ws = await linkedManager.resolve('task-1', requestedViaLink)
+        expect(ws.root).toBe(await fs.realpath(task1Dir))
+      } finally {
+        await fs.rm(realRoot, { recursive: true, force: true })
+        await fs.rm(rootLinkParent, { recursive: true, force: true })
+      }
+    })
+  })
+
   describe('constructor 默认 root', () => {
     it('不指定 root 时应使用 getWorkspacesRootDir()', async () => {
       // 临时更改环境变量来测试
