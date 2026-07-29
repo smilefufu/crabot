@@ -884,3 +884,141 @@ describe('WorkerHarness.processStateChange — 化身查找: 同 (impl, seq) 撞
     expect(current.task.status).toBe('running') // mainline task 不受影响
   })
 })
+
+describe('WorkerHarness — 终审 PoC 回归：M1 主线守卫按 (impl,seq) 收口', () => {
+  it('switchWorkerImpl 到新实现后（seq 撞号），旧实现的迟到 exited 回调不得误杀新主线，也不得覆盖旧化身的 superseded', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    const source = new FakeAdapter({ implId: 'claude-code', caps: { revive: true }, onStateChange: harness.handleStateChange })
+    const target = new FakeAdapter({ implId: 'codex', caps: { revive: true }, onStateChange: harness.handleStateChange })
+    adaptersMap.set('claude-code', source)
+    adaptersMap.set('codex', target)
+
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    // handoff 里 kill 旧化身触发的 exited 回调本该走这个 handle；这里手动重放，模拟它比
+    // handoff 收尾还慢的时序（真实 adapter 内部是异步触发 onStateChange，此处同型直调）。
+    const oldHandle: IncarnationHandle = { worker_id: worker.worker_id, seq: 1, impl: 'claude-code', session_ref: `ref-${worker.worker_id}#1` }
+    events.length = 0
+
+    await harness.switchWorkerImpl(worker.worker_id, 'codex', '手工切换到 codex')
+
+    // handoff 后新主线是 codex#1 —— target 是全新 FakeAdapter 实例，nextSeq 从 1 开始，
+    // 与被 kill 的旧化身 claude-code#1 在 seq 上撞号，这正是终审 PoC 复现的前提。
+    const afterHandoff = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    const newMainline = afterHandoff.incarnations[afterHandoff.incarnations.length - 1]
+    expect(newMainline.impl).toBe('codex')
+    expect(newMainline.seq).toBe(1)
+    expect(afterHandoff.task.status).toBe('running')
+
+    // 顺带修复：handoff 产出的新化身也发了 spawned 事件（与 revive 路径的 resumed 对称）。
+    expect(events.filter((e) => e.kind === 'spawned')).toHaveLength(1)
+
+    // 旧 adapter（claude-code）的迟到 exited 回调打到 handoff 之前的 handle 上，seq 与新
+    // 主线 codex#1 相同——只比 seq 不比 impl 的守卫会把它误判成"当前主线化身的回调"。
+    source.emitStateChange(oldHandle, 'exited')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    const after = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    // 新主线（codex#1）未被这条属于旧实现的迟到回调误杀。
+    expect(after.task.status).toBe('running')
+    const stillMainline = after.incarnations[after.incarnations.length - 1]
+    expect(stillMainline.impl).toBe('codex')
+    expect(stillMainline.state).toBe('running')
+
+    // 旧化身（claude-code#1）的终态记录不被这条迟到回调覆盖——仍是 handoff 时记录的
+    // superseded，不是被误判成 completed。
+    const oldEntry = after.incarnations.find((i) => i.impl === 'claude-code' && i.seq === 1)!
+    expect(oldEntry.ended_reason).toBe('superseded')
+  })
+})
+
+describe('WorkerHarness — 终审 PoC 回归：M2 kill 与 in-flight flush 竞态', () => {
+  it('send 卡在投递期间 kill：残留队列条目被 drain 并记 dead-letter，task 保持 cancelled，不触发 resume 复活', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    let releaseFirst!: () => void
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    const fake = new FakeAdapter({
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      sendInputBehavior: async (_h, text) => {
+        if (text === '第一条(卡住)') await firstGate
+      },
+    })
+    adaptersMap.set('builtin', fake)
+
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    // 第一条投递卡在 adapter.sendInput（模拟 tmux 命令挂起），占住 inbox 自己的 flush 锁。
+    const firstSend = harness.sendToWorker(worker.worker_id, '第一条(卡住)')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(fake.sendInputCalls).toHaveLength(1) // 确认已经卡在 sendInput 里面
+
+    // 第二条这时候只能排进 inbox 队列，还没被 deliver 摸到（flush 的 mutex 被第一条占着）。
+    const secondSend = harness.sendToWorker(worker.worker_id, '第二条(残留队列)')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(fake.sendInputCalls).toHaveLength(1) // 第二条还没被投递
+
+    // kill 走 harness 自己的 per-worker 锁，不被卡住的 sendInput 阻塞，立即完成。
+    await harness.killWorker(worker.worker_id, 'M2 PoC')
+
+    const afterKill = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    expect(afterKill.task.status).toBe('cancelled')
+
+    // 放行第一条，让它的 sendInput 正常返回，flush 的 while 循环继续处理队列里的第二条。
+    releaseFirst()
+    await firstSend
+    await secondSend
+
+    const after = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    // 核心断言：task 没有被第二条残留消息的透明接续复活成 running。
+    expect(after.task.status).toBe('cancelled')
+    expect(fake.resumeCalls).toHaveLength(0)
+
+    // 残留条目没有静默消失：有 dead-letter 记录。
+    const deadLetterEvents = events.filter((e) => e.kind === 'state_changed' && (e.detail as Record<string, unknown> | undefined)?.kind === 'dead_letter')
+    expect(deadLetterEvents.length).toBeGreaterThan(0)
+  })
+
+  it('send 卡住期间被 kill，之后 adapter.sendInput 才抛 WorkerExitedError 走透明接续：in-flight 条目不经过 drain，cancelled task 仍不被 continueTerminalWorker 复活', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    let releaseGate!: (err: Error) => void
+    const gate = new Promise<void>((_resolve, reject) => {
+      releaseGate = (err) => reject(err)
+    })
+    const fake = new FakeAdapter({
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      sendInputBehavior: async () => {
+        await gate
+      },
+    })
+    adaptersMap.set('builtin', fake)
+
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    const send = harness.sendToWorker(worker.worker_id, '卡住的一条')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(fake.sendInputCalls).toHaveLength(1) // 确认已经卡在 sendInput 里面，是 in-flight 条目
+
+    await harness.killWorker(worker.worker_id, 'M2 PoC 2')
+    const afterKill = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    expect(afterKill.task.status).toBe('cancelled')
+
+    // 放行卡住的 sendInput，让它抛出 WorkerExitedError（模拟 adapter 发现化身已经真的没了）
+    // —— deliver() 的 catch 分支会把它转入 continueTerminalWorker。这条条目在 kill 发生时
+    // 正处于 in-flight（已从 inbox 队列取出），drain() 明确不清空 in-flight 条目，所以这条
+    // 用例验证的是 continueTerminalWorker 自己的 cancelled 检查，而不是 killWorker 的 drain。
+    releaseGate(new WorkerExitedError(worker.worker_id, 1))
+    await send
+
+    const after = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    expect(after.task.status).toBe('cancelled') // 核心断言：没有被复活成 running
+    expect(fake.resumeCalls).toHaveLength(0)
+
+    const deadLetterEvents = events.filter((e) => e.kind === 'state_changed' && (e.detail as Record<string, unknown> | undefined)?.kind === 'dead_letter')
+    expect(deadLetterEvents.length).toBeGreaterThan(0)
+  })
+})

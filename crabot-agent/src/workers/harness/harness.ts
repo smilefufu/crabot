@@ -359,6 +359,24 @@ export class WorkerHarness {
       const found = await this.deps.ledger.findWorker(workerId)
       if (!found) throw new WorkerNotFoundError(workerId)
       const { worker, dialogObjectId } = found
+
+      // task 在锁外投递期间被 killWorker 打断(如 send 卡在 tmux 投递期间调 kill,这条
+      // 消息在拿到这把锁之前就已经确定要走接续路径了):§5.5"唯一硬拒绝:cancelled"只
+      // 约束 sendToWorker 入队前的把关(见该方法顶部),这里是入队之后才发现的迟到判定,
+      // 不能再用同一处把关。cancelled 是终态,不能被下面的 reviveIncarnation/handoffIncarnation
+      // 经 reopenTaskForContinuation → reviveTask 复活成 running——那样会让已经明确要求
+      // 终止的 task 又"activate"出一个新化身。同时"send_to_worker 投递永不因状态失败"
+      // 是调用方(inbox.flush)的既有契约,消息不能静默消失:丢弃这条并记 dead-letter 事件,
+      // 不重新抛出(抛出会砸向早已异步返回的 sendToWorker 调用方,变成没人处理的 rejection)。
+      if (worker.task.status === 'cancelled') {
+        await this.appendEvent(workerId, sourceSeq, 'state_changed', {
+          kind: 'dead_letter',
+          reason: 'task_cancelled',
+          text_len: text.length,
+        })
+        return
+      }
+
       const mainline = mainlineIncarnation(worker)
 
       if (mainline.seq !== sourceSeq) {
@@ -559,6 +577,9 @@ export class WorkerHarness {
       const nextTask = reopenTaskForContinuation(prev.task, now)
       return { ...prev, task: nextTask, incarnations: [...prev.incarnations, newIncarnation], updated_at: now }
     })
+    // 与 reviveIncarnation 收尾时发 'resumed' 事件对称——交接产出的新化身同样是一次"开工",
+    // 缺了这个事件会让事件流看不到 handoff 之后新主线是何时、以何种 impl 建起来的。
+    await this.appendEvent(worker.worker_id, newHandle.seq, 'spawned', { impl: targetImpl, from_seq: source.seq })
   }
 
   async readWorkerOutput(
@@ -802,6 +823,22 @@ export class WorkerHarness {
         return { ...prev, task: nextTask, incarnations, updated_at: now }
       })
       await this.appendEvent(workerId, incarnation.seq, 'killed', reason ? { reason } : undefined)
+
+      // 清空信箱残留:此刻队列里的条目是 kill 之前已入队、deliver 还没轮到的消息(kill 之后
+      // 的 sendToWorker 会命中上面已落定的 cancelled 直接拒绝,不会再有新条目挤进来——入队
+      // 段与这里同在这把 per-worker 锁的临界区内,互斥)。不清空的话,这些条目会在之后被
+      // inbox.flush 摸到、读到台账已 exited,落进 continueTerminalWorker 的接续分支(即使
+      // 加了上面的 cancelled 短路,也是"先接住再丢弃"而不是干脆不投递)。drain() 不等锁,
+      // 不会因为同一信箱另有 flush 卡在 deliver 而卡住这里;逐条记 dead-letter 事件,保证
+      // "消息不静默消失"的调用方契约。
+      const drained = this.getInbox(workerId).drain()
+      for (const item of drained) {
+        await this.appendEvent(workerId, incarnation.seq, 'state_changed', {
+          kind: 'dead_letter',
+          reason: 'killed',
+          text_len: item.text.length,
+        })
+      }
     })
   }
 
@@ -897,7 +934,13 @@ export class WorkerHarness {
       // 主线分支:只有"当前主线化身"的回调才驱动 task.status——fork 之后数组末尾是侧问
       // 分支,不能再用"数组最后一个"判定"是不是当前化身"。
       const mainline = mainlineIncarnation(worker)
-      if (mainline.seq !== h.seq) return // 非当前主线化身的迟到回调,忽略
+      // 按 (impl, seq) 判定,不能只比 seq——跨实现切换(switchWorkerImpl/handoff)后,新
+      // 实现的 adapter 是全新实例,其 seq 计数从头开始,与被 kill 的旧实现化身撞号是常态
+      // (如 codex#1 顶替 claude-code#1)。只比 seq 会把旧实现迟到的 exited 回调误判成
+      // "当前主线化身的回调",错误地把新主线整个判死。这是 findIncarnation/patchIncarnationBySeq
+      // 已经统一的 (impl,seq) 判定原则在这里的收口。
+      if (mainline.seq !== h.seq || mainline.impl !== h.impl) return // 非当前主线化身的迟到回调,忽略
+      if (target.state === 'exited') return // 目标化身已终态,迟到回调忽略(与上面 fork 分支的短路对称,避免对已终态化身再次施加迁移)
       if (isTerminalStatus(worker.task.status)) return // 已是终态(如已被 killWorker 落定),回调迟到,忽略
 
       // idle 是否算"等输入"本属 manager 判断职责(protocol-agent-v3 §5.2);P3 尚无 manager,
