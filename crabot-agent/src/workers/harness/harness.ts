@@ -1,0 +1,452 @@
+/**
+ * WorkerHarness —— 生命周期编排(protocol-agent-v3 §5.2/§5.5,plans/2026-07-29-mw-p3-ledger-harness.md Task 7)。
+ *
+ * 职责边界:harness 编排台账(LedgerStore)/信箱(WorkerInbox)/事件流(WorkerEventLog)/workspace
+ * (WorkspaceManager)与三个 WorkerAdapter 实现,是 P4 manager 唯一的调用对象。harness 不感知任何
+ * adapter 内部实现细节,只经 WorkerAdapter 契约方法(provision/spawn/sendInput/kill/fork/state/…)
+ * 获取运行时事实——不读 adapter 的 meta-<seq>.json。
+ *
+ * 锁层级(必须遵守,避免 ABBA):
+ *   外层:harness 自己维护的"每 worker 一把" AsyncMutex(this.mutexes,按 worker_id 取)。
+ *   内层:LedgerStore 内部按 DialogObjectId 维护的另一把 AsyncMutex,完全不透明,只在单次
+ *        `ledger.upsertWorker(...)` 调用内部短暂持有(mutator 是同步纯函数,写盘后立即释放)。
+ * harness 从不显式持有 ledger 的锁,也从不在“持有 ledger 锁”的状态下反过来等待自己的
+ * per-worker 锁——每次 upsertWorker 调用都是一次独立的、有限时长的原子读改写,不会在其
+ * 内部触发对 harness per-worker 锁的等待。因此两把锁只可能是“外层→内层”单向嵌套,不存在
+ * ABBA。同一 worker_id 的所有编排动作(spawnWorker 的注册段、handleStateChange、killWorker、
+ * queryWorker 的判定+fork 段)都在同一把 per-worker 锁的临界区内完成“读台账 → 判断 → 写台账”,
+ * 不允许 check-then-act 跨 await。
+ *
+ * 慢调用是否在锁内:
+ *   - adapter.provision / adapter.spawn:在锁内。理由——这是"从无到有注册一个 worker"的
+ *     唯一时机,必须与"台账已存在该 worker_id"这件事保持原子;锁内持有的时长等于一次
+ *     spawn 编排,不是高频路径,换来的正确性(不会有第二个并发操作在半注册状态下观察到
+ *     这个 worker)值得。
+ *   - adapter.kill / adapter.fork:同样在锁内。二者都是"一次性、有限时长"的编排动作
+ *     (不是像 sendInput 那样可能被连续高频调用的路径),放锁内换来"整个 kill/fork 序列
+ *     原子完成,不会被并发的状态回调或另一次 kill/fork 打断"的简单正确性论证,没有值得
+ *     牺牲这份简单性去换取的并发收益。
+ *   - adapter.sendInput:不在 harness 的 per-worker 锁内。sendToWorker 只把"查台账 + 校验
+ *     cancelled + 入信箱"这段放进锁的临界区(这段不含 slow adapter 调用),真正的投递
+ *     经 `WorkerInbox.flush()` 在锁外进行——inbox 自己的内部 AsyncMutex 已经保证同一信箱
+ *     的并发 flush 不会重复投递。这样长时间的 tmux/CLI 调用不会长期占住 harness 的
+ *     per-worker 锁,不阻塞同一 worker 上的其它编排操作(如状态回调、kill)排队等待。
+ *     deliver 内部对每个 item 都重新查一次台账取当前化身(而不是在入锁那次性 snapshot),
+ *     避免投递期间化身已发生变化(如被 kill/交接)却仍拿着过期 handle 投递的问题;
+ *     即便如此,`flush()` 与其它编排动作之间仍存在"投递到已失效化身"的极小窗口——
+ *     这属于 §5.3 透明接续要处理的场景(Task 8 范围),Task 7 只保证 WorkerExitedError
+ *     会原样从 sendInput → inbox.flush → sendToWorker 向上抛出,不做拦截或伪装。
+ *
+ * onStateChange 接线契约(P4 负责实际接线,P3 只提供出口):
+ *   三个 adapter(builtin/claude-code/codex)都在各自构造函数的 deps 里接受一个可选的
+ *   `onStateChange?: (h, state) => void`,但 HarnessDeps.adapters 要求把"已经构造好的
+ *   adapter"塞进来——adapter 构造在先、harness 构造在后,没法在 adapter 构造时就拿到
+ *   harness 实例的方法引用,形成先有鸡还是先有蛋的问题。
+ *
+ *   解法:harness 把 `handleStateChange` 做成一个公开的、构造时就绑定好 this 的箭头函数
+ *   字段(调用方不需要再 .bind),接线方(P4)按以下顺序组装:
+ *     1. const adapters = new Map<WorkerImplId, WorkerAdapter>()   // 先建一个空壳
+ *     2. const harness = new WorkerHarness({ adapters, ... })      // 把空壳传给 harness
+ *     3. 逐个构造 builtin/cc/codex adapter,构造时 onStateChange: harness.handleStateChange
+ *     4. adapters.set('builtin', builtinAdapter) 等
+ *   第 4 步之所以能生效:HarnessDeps.adapters 的类型是 ReadonlyMap,但底层对象仍是同一个
+ *   可写 Map 引用——本实现全程只通过 `this.deps.adapters.get(impl)` 按需取值,从不在构造
+ *   时把它拷贝成快照,所以第 4 步之后往里 set 的内容对 harness 立即可见。三个 adapter 的
+ *   状态回调最终都指向同一个 harness 实例的 `handleStateChange`,不需要 HarnessDeps 再加字段。
+ */
+
+import { randomUUID } from 'crypto'
+import type {
+  WorkerAdapter,
+  WorkerImplId,
+  WorkerContractState,
+  IncarnationHandle,
+  IncarnationRef,
+  IncarnationEndReason,
+  SpawnSpec,
+  OutputCursor,
+  CapabilityBundle,
+} from '../types'
+import { CapabilityNotSupportedError } from '../errors'
+import { AsyncMutex } from '../async-mutex'
+import type { DialogObjectId, Incarnation, LedgerWorker, TaskStatus } from './ledger-types'
+import type { LedgerStore } from './ledger-store'
+import type { WorkspaceManager } from './workspace-manager'
+import { WorkerInbox, type InboxItem } from './inbox'
+import { WorkerEventLog, type HarnessEvent, type HarnessEventKind } from './worker-events'
+import { applyStatusTransition, isTerminalStatus, taskStatusFromIncarnation } from './task-status'
+import { join } from 'path'
+
+/** 请求的 worker_id 在台账中不存在。 */
+export class WorkerNotFoundError extends Error {
+  constructor(readonly worker_id: string) {
+    super(`worker not found: ${worker_id}`)
+    this.name = 'WorkerNotFoundError'
+  }
+}
+
+/** send_to_worker 命中已 cancelled 的 task(唯一硬拒绝场景,protocol-agent-v3 §5.5)。 */
+export class TaskCancelledError extends Error {
+  constructor(readonly worker_id: string) {
+    super(`worker ${worker_id} task is cancelled`)
+    this.name = 'TaskCancelledError'
+  }
+}
+
+export interface HarnessDeps {
+  /** 已 detect 过的可用实现。见文件头"onStateChange 接线契约"——底层 Map 引用可在构造后继续填充。 */
+  readonly adapters: ReadonlyMap<WorkerImplId, WorkerAdapter>
+  readonly defaultImpl: WorkerImplId
+  readonly ledger: LedgerStore
+  readonly workspaces: WorkspaceManager
+  /** <dataRoot>/agent/workers */
+  readonly workersDir: string
+  /** ISO 时间注入,便于测试 */
+  readonly now: () => string
+  /** P4 manager 的唤醒入口(P3 是可插桩的出口) */
+  readonly onEvent?: (e: HarnessEvent) => void
+  /** provision 素材(P3 可返回空集) */
+  readonly capabilityBundle?: () => Promise<CapabilityBundle>
+}
+
+export interface SpawnWorkerParams {
+  readonly dialogObjectId: DialogObjectId
+  readonly title: string
+  readonly prompt: string
+  readonly origin: LedgerWorker['origin']
+  readonly report_to: LedgerWorker['report_to']
+  readonly impl?: WorkerImplId
+  readonly workspace?: string
+  readonly goal?: string
+  /** builtin 实现所需的 LLM 注入(P4 提供) */
+  readonly builtin?: SpawnSpec['builtin']
+}
+
+const EMPTY_CAPABILITY_BUNDLE: CapabilityBundle = { skills: [], mcp_servers: [] }
+
+export class WorkerHarness {
+  private readonly mutexes = new Map<string, AsyncMutex>()
+  private readonly inboxes = new Map<string, WorkerInbox>()
+  private readonly eventLogs = new Map<string, WorkerEventLog>()
+
+  constructor(private readonly deps: HarnessDeps) {}
+
+  /**
+   * 见文件头"onStateChange 接线契约"。箭头函数字段:构造时绑定 this,P4 可直接把它作为
+   * 三个 adapter 构造 deps 里的 `onStateChange` 传入,不需要 .bind(harness)。
+   * 签名对齐三个 adapter 的 `deps.onStateChange?: (h, state) => void`(同步、无返回值)——
+   * 内部把实际的异步台账更新做成 fire-and-forget,任何失败只 console.error,不抛给 adapter
+   * (adapter 侧本身也已经用 try/catch 包裹了对这个回调的调用,这里双重防御,理由一致:
+   * 观察者的异常不能中断 adapter 自己的状态机推进)。
+   */
+  readonly handleStateChange = (h: IncarnationHandle, state: WorkerContractState): void => {
+    this.processStateChange(h, state).catch((err) => {
+      console.error(`[WorkerHarness] handleStateChange failed for ${h.worker_id}#${h.seq}:`, err)
+    })
+  }
+
+  async spawnWorker(p: SpawnWorkerParams): Promise<LedgerWorker> {
+    const workerId = `w-${randomUUID()}`
+    const impl = p.impl ?? this.deps.defaultImpl
+    const adapter = this.deps.adapters.get(impl)
+    if (!adapter) {
+      throw new Error(`WorkerHarness.spawnWorker: no adapter registered for impl '${impl}'`)
+    }
+
+    // workspace 解析可能失败(InvalidWorkspaceError),放在拿锁/写台账之前——失败时台账
+    // 完全不会出现这条 worker,不留半成品。
+    const workspace = await this.deps.workspaces.resolve(workerId, p.workspace)
+
+    return this.withLock(workerId, async () => {
+      const startedAt = this.deps.now()
+      const initial: LedgerWorker = {
+        worker_id: workerId,
+        task: {
+          id: workerId,
+          title: p.title,
+          status: 'queued',
+          goal: p.goal,
+          created_at: startedAt,
+        },
+        origin: p.origin,
+        report_to: p.report_to,
+        incarnations: [
+          {
+            seq: 1,
+            impl,
+            state: 'running',
+            workspace: workspace.root,
+            // WorkerAdapter 契约没有"从 handle 反查 session_ref"的方法(P1/P2 遗留的已知
+            // 空缺,tests/workers/contract-suite.ts 的 fixture-only `refFor` 就是为了绕开
+            // 这个缺口而加的)。harness 在契约不扩展的前提下拿不到真实值,先用空串占位;
+            // queryWorker 的 fork 分支会原样把这个占位值透传给 adapter.fork,对真实
+            // cc/codex adapter(它们会校验 UUID 格式)会失败——这不是 Task 7 引入的新问题,
+            // 是既有契约的已知缺口,留给后续任务(扩展 WorkerAdapter 契约)解决。
+            session_ref: '',
+            started_at: startedAt,
+          },
+        ],
+        updated_at: startedAt,
+      }
+      await this.deps.ledger.upsertWorker(p.dialogObjectId, workerId, () => initial)
+
+      try {
+        const caps = this.deps.capabilityBundle ? await this.deps.capabilityBundle() : EMPTY_CAPABILITY_BUNDLE
+        await adapter.provision(workspace, caps)
+        const spec: SpawnSpec = {
+          worker_id: workerId,
+          prompt: p.prompt,
+          workspace,
+          goal: p.goal,
+          builtin: p.builtin,
+        }
+        await adapter.spawn(spec)
+      } catch (err) {
+        const now = this.deps.now()
+        await this.deps.ledger.upsertWorker(p.dialogObjectId, workerId, (prev) => {
+          if (!prev) return undefined
+          // VALID_TRANSITIONS 里 queued 没有直达 failed 的边(只能到 running/cancelled)。
+          // spawn 尝试确实发生过(我们已经调用了 provision/spawn),用 queued→running→failed
+          // 两跳把这次失败尝试如实记录下来,而不是绕开状态机改成不符合协议语义的 cancelled。
+          const running = applyStatusTransition(prev.task, 'running', { now })
+          const nextTask = applyStatusTransition(running, 'failed', {
+            error: err instanceof Error ? err.message : String(err),
+            now,
+          })
+          const incarnations = markLastIncarnation(prev.incarnations, {
+            state: 'exited',
+            ended_at: now,
+            ended_reason: 'failed',
+          })
+          return { ...prev, task: nextTask, incarnations, updated_at: now }
+        })
+        await this.appendEvent(workerId, 1, 'exited', {
+          reason: 'spawn_failed',
+          message: err instanceof Error ? err.message : String(err),
+        })
+        throw err
+      }
+
+      const now = this.deps.now()
+      const spawned = await this.deps.ledger.upsertWorker(p.dialogObjectId, workerId, (prev) => {
+        if (!prev) return undefined
+        const nextTask = applyStatusTransition(prev.task, 'running', { now })
+        return { ...prev, task: nextTask, updated_at: now }
+      })
+      await this.appendEvent(workerId, 1, 'spawned', { impl })
+      return spawned as LedgerWorker
+    })
+  }
+
+  async sendToWorker(workerId: string, text: string, opts?: { raw?: boolean }): Promise<void> {
+    const inbox = this.getInbox(workerId)
+
+    // "读台账状态 → 判断 cancelled → 入信箱"在同一临界区完成,不允许 check-then-act 跨 await。
+    await this.withLock(workerId, async () => {
+      const found = await this.deps.ledger.findWorker(workerId)
+      if (!found) throw new WorkerNotFoundError(workerId)
+      if (found.worker.task.status === 'cancelled') throw new TaskCancelledError(workerId)
+      inbox.enqueue({ text, raw: opts?.raw ?? false, enqueued_at: this.deps.now() })
+    })
+
+    // 真正的投递不占用 harness 的 per-worker 锁(见文件头说明);inbox 自身的锁保证同一
+    // 信箱的并发 flush 不重复投递。deliver 内部对每个 item 重新取一次当前化身,避免用
+    // 入队时刻的过期 handle 投递。
+    await inbox.flush(async (item) => {
+      const found = await this.deps.ledger.findWorker(workerId)
+      if (!found) throw new WorkerNotFoundError(workerId)
+      const incarnation = lastIncarnation(found.worker)
+      const adapter = this.deps.adapters.get(incarnation.impl as WorkerImplId)
+      if (!adapter) {
+        throw new Error(`WorkerHarness.sendToWorker: no adapter registered for impl '${incarnation.impl}'`)
+      }
+      const handle: IncarnationHandle = {
+        worker_id: workerId,
+        seq: incarnation.seq,
+        impl: incarnation.impl as WorkerImplId,
+      }
+      // WorkerExitedError 原样向上抛出,不在此拦截伪装——拦截并转入 §5.3 透明接续是
+      // Task 8 的范围(会修改本文件),Task 7 只保证正常路径投递正确。
+      await adapter.sendInput(handle, item.text, { raw: item.raw })
+      await this.appendEvent(workerId, handle.seq, 'input_sent', { text_len: item.text.length })
+    })
+  }
+
+  async readWorkerOutput(
+    workerId: string,
+    cursor: OutputCursor
+  ): Promise<{ chunk: string; nextCursor: OutputCursor }> {
+    const found = await this.deps.ledger.findWorker(workerId)
+    if (!found) throw new WorkerNotFoundError(workerId)
+    const incarnation = lastIncarnation(found.worker)
+    const adapter = this.deps.adapters.get(incarnation.impl as WorkerImplId)
+    if (!adapter) {
+      throw new Error(`WorkerHarness.readWorkerOutput: no adapter registered for impl '${incarnation.impl}'`)
+    }
+    const handle: IncarnationHandle = { worker_id: workerId, seq: incarnation.seq, impl: incarnation.impl as WorkerImplId }
+    return adapter.readOutput(handle, cursor)
+  }
+
+  async listWorkers(dialogObjectId: DialogObjectId): Promise<LedgerWorker[]> {
+    return this.deps.ledger.listWorkers(dialogObjectId)
+  }
+
+  async killWorker(workerId: string, reason?: string): Promise<void> {
+    await this.withLock(workerId, async () => {
+      const found = await this.deps.ledger.findWorker(workerId)
+      if (!found) throw new WorkerNotFoundError(workerId)
+      const { worker, dialogObjectId } = found
+
+      // 幂等:已是终态(含此前已经 kill 过)直接返回,不重复调 adapter.kill、不重复写台账/事件。
+      if (isTerminalStatus(worker.task.status)) return
+
+      const incarnation = lastIncarnation(worker)
+      const implId = incarnation.impl as WorkerImplId
+      const adapter = this.deps.adapters.get(implId)
+      if (adapter) {
+        const handle: IncarnationHandle = { worker_id: workerId, seq: incarnation.seq, impl: implId }
+        await adapter.kill(handle)
+      }
+
+      const now = this.deps.now()
+      await this.deps.ledger.upsertWorker(dialogObjectId, workerId, (prev) => {
+        if (!prev) return undefined
+        const nextTask = applyStatusTransition(prev.task, 'cancelled', { now })
+        const incarnations = markLastIncarnation(prev.incarnations, {
+          state: 'exited',
+          ended_at: now,
+          ended_reason: 'killed',
+        })
+        return { ...prev, task: nextTask, incarnations, updated_at: now }
+      })
+      await this.appendEvent(workerId, incarnation.seq, 'killed', reason ? { reason } : undefined)
+    })
+  }
+
+  async queryWorker(workerId: string, question: string): Promise<{ forkSeq: number }> {
+    return this.withLock(workerId, async () => {
+      const found = await this.deps.ledger.findWorker(workerId)
+      if (!found) throw new WorkerNotFoundError(workerId)
+      const { worker, dialogObjectId } = found
+      const incarnation = lastIncarnation(worker)
+      const implId = incarnation.impl as WorkerImplId
+      const adapter = this.deps.adapters.get(implId)
+      if (!adapter) {
+        throw new Error(`WorkerHarness.queryWorker: no adapter registered for impl '${implId}'`)
+      }
+      if (!adapter.capabilities().fork) {
+        throw new CapabilityNotSupportedError(implId, 'fork')
+      }
+
+      const ref: IncarnationRef = { worker_id: workerId, seq: incarnation.seq, session_ref: incarnation.session_ref }
+      const forkHandle = await adapter.fork(ref, question)
+
+      const now = this.deps.now()
+      await this.deps.ledger.upsertWorker(dialogObjectId, workerId, (prev) => {
+        if (!prev) return undefined
+        // fork 是一次性侧问,不影响主线 task.status(protocol-agent-v3 §5.3:"不影响主线")。
+        const forkIncarnation: Incarnation = {
+          seq: forkHandle.seq,
+          impl: implId,
+          state: 'running',
+          workspace: incarnation.workspace,
+          session_ref: incarnation.session_ref,
+          started_at: now,
+        }
+        return { ...prev, incarnations: [...prev.incarnations, forkIncarnation], updated_at: now }
+      })
+      // HarnessEventKind 没有专门的"fork/query"档位(worker-events.ts 是既定契约,Task 7
+      // 不新增枚举值),用 state_changed 承载,detail 里标明是 fork 产生的新化身。
+      await this.appendEvent(workerId, forkHandle.seq, 'state_changed', { kind: 'fork', from_seq: incarnation.seq })
+      return { forkSeq: forkHandle.seq }
+    })
+  }
+
+  // ---- 内部 ----
+
+  private async processStateChange(h: IncarnationHandle, state: WorkerContractState): Promise<void> {
+    await this.withLock(h.worker_id, async () => {
+      const found = await this.deps.ledger.findWorker(h.worker_id)
+      if (!found) return // 未知 worker,理论不该发生;防御性丢弃,不抛给 adapter 的回调
+      const { worker, dialogObjectId } = found
+
+      const latest = lastIncarnation(worker)
+      if (latest.seq !== h.seq) return // 非当前化身的迟到回调,忽略
+      if (isTerminalStatus(worker.task.status)) return // 已是终态(如已被 killWorker 落定),回调迟到,忽略
+
+      // WorkerAdapter.onStateChange 只携带 (handle, state) 三态,没有 endReason——kill 触发的
+      // exited 已经由 killWorker 自己直接落定台账(见上面的终态短路),能走到这里、还没被
+      // 判定为终态的 exited,只可能是"化身自然结束"(非 kill),endReason 取 completed。
+      // 真正的崩溃(crashed)辨别依赖主动巡检(protocol-agent-v3 §6.3/§12),不在这条被动
+      // 回调路径的能力范围内,由 Task 9 的 reconcileOnStartup 补正。
+      const endReason: IncarnationEndReason | undefined = state === 'exited' ? 'completed' : undefined
+      // idle 是否算"等输入"本属 manager 判断职责(protocol-agent-v3 §5.2);P3 尚无 manager,
+      // 保守默认 idle 一律记 waiting_input,P4 接线后可按需要覆盖这条映射。
+      const waitingInput = state === 'idle' ? true : undefined
+      const nextStatus: TaskStatus = taskStatusFromIncarnation(state, endReason, waitingInput)
+
+      const now = this.deps.now()
+      await this.deps.ledger.upsertWorker(dialogObjectId, h.worker_id, (prev) => {
+        if (!prev) return undefined
+        const nextTask = applyStatusTransition(prev.task, nextStatus, { now })
+        const incarnations = markLastIncarnation(
+          prev.incarnations,
+          state === 'exited' ? { state, ended_at: now, ended_reason: endReason } : { state }
+        )
+        return { ...prev, task: nextTask, incarnations, updated_at: now }
+      })
+      await this.appendEvent(h.worker_id, h.seq, 'state_changed', { to: state })
+    })
+  }
+
+  private withLock<T>(workerId: string, fn: () => Promise<T>): Promise<T> {
+    let mutex = this.mutexes.get(workerId)
+    if (!mutex) {
+      mutex = new AsyncMutex()
+      this.mutexes.set(workerId, mutex)
+    }
+    return mutex.run(fn)
+  }
+
+  private getInbox(workerId: string): WorkerInbox {
+    let inbox = this.inboxes.get(workerId)
+    if (!inbox) {
+      inbox = new WorkerInbox(workerId)
+      this.inboxes.set(workerId, inbox)
+    }
+    return inbox
+  }
+
+  private getEventLog(workerId: string): WorkerEventLog {
+    let log = this.eventLogs.get(workerId)
+    if (!log) {
+      log = new WorkerEventLog(join(this.deps.workersDir, workerId))
+      this.eventLogs.set(workerId, log)
+    }
+    return log
+  }
+
+  private async appendEvent(
+    workerId: string,
+    seq: number,
+    kind: HarnessEventKind,
+    detail?: Record<string, unknown>
+  ): Promise<void> {
+    const ts = this.deps.now()
+    const event: HarnessEvent = detail !== undefined ? { ts, kind, worker_id: workerId, seq, detail } : { ts, kind, worker_id: workerId, seq }
+    await this.getEventLog(workerId).append(event)
+    this.deps.onEvent?.(event)
+  }
+}
+
+function lastIncarnation(worker: LedgerWorker): Incarnation {
+  return worker.incarnations[worker.incarnations.length - 1]
+}
+
+function markLastIncarnation(incarnations: Incarnation[], patch: Partial<Incarnation>): Incarnation[] {
+  return incarnations.map((inc, idx) => (idx === incarnations.length - 1 ? { ...inc, ...patch } : inc))
+}
+
+// re-export for callers that only import from harness.ts
+export type { HarnessEvent, HarnessEventKind } from './worker-events'
+export type { InboxItem } from './inbox'
