@@ -822,4 +822,51 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter.readTrace(已发现 rollout 
 
     await adapter.kill(h)
   }, 15000)
+
+  it('半行(CLI 写入未完成,无结尾换行符)不消费,补全后续读不丢事件', async () => {
+    const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+    const stopHookCmd = channel.hookCommand('stop')
+    const codexHome = path.join(workspaceRoot, '.codex')
+    const rolloutUuid = randomUUID()
+    const now = new Date()
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const datePath = path.join(String(now.getFullYear()), pad(now.getMonth() + 1), pad(now.getDate()))
+    const rolloutFile = path.join(codexHome, 'sessions', datePath, rolloutFileNameFor(rolloutUuid))
+
+    const codexBin = codexBinFor([{ output: '第一段输出', emitStop: true }], stopHookCmd, { rolloutFile })
+    const adapter = new CodexWorkerAdapter({ dataDir, tmux: new TmuxDriver(), codexBin, sessionDiscoveryTimeoutMs: 1500 })
+    await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+    const workerId = `codextest-${randomUUID().slice(0, 8)}`
+
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+    await waitForState(adapter, h, 'idle')
+
+    // trace(rollout)文件由 codex 持续追加、readTrace 轮询懒解析,读到写入中途是常态:
+    // 第一行完整,第二行只写了一半(无结尾换行符)。
+    const line1 = { type: 'event_msg', payload: { type: 'task_started' } }
+    await fs.writeFile(rolloutFile, JSON.stringify(line1) + '\n{"type":"event_msg","payload":{"ty', 'utf-8')
+
+    const first = await adapter.readTrace(h)
+    expect(first.events).toHaveLength(1)
+    // 半行不算已消费的完整行——cursor 必须停在第一行之后,不能越过半行,否则半行补全后
+    // 的事件会被永久跳过。
+    expect(first.nextCursor.offset).toBe(1)
+
+    // 半行补全 + 追加新行。
+    const line2 = { type: 'event_msg', payload: { type: 'task_complete' } }
+    const line3 = { type: 'event_msg', payload: { type: 'shutdown_complete' } }
+    await fs.writeFile(
+      rolloutFile,
+      JSON.stringify(line1) + '\n' + JSON.stringify(line2) + '\n' + JSON.stringify(line3) + '\n',
+      'utf-8',
+    )
+
+    const second = await adapter.readTrace(h, first.nextCursor)
+    expect(second.events).toHaveLength(2)
+    expect(second.events[0].summary).toBe('task_complete')
+    expect(second.events[1].summary).toBe('shutdown_complete')
+    expect(second.nextCursor.offset).toBe(3)
+
+    await adapter.kill(h)
+  }, 15000)
 })

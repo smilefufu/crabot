@@ -1119,6 +1119,70 @@ describe('ClaudeCodeAdapter.readTrace', () => {
     await adapter.kill(h)
   })
 
+  it('半行(CLI 写入未完成,无结尾换行符)不消费,补全后续读不丢事件', async () => {
+    const tmux = new NoopTmux()
+    const adapter = new ClaudeCodeAdapter({ dataDir, tmux, claudeBin: 'unused', claudeProjectsDir })
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const { h, sessionId } = await spawnedHandle(adapter, workerId)
+
+    const slugDir = path.join(claudeProjectsDir, projectSlug(workspaceRoot))
+    await fs.mkdir(slugDir, { recursive: true })
+    const filePath = path.join(slugDir, `${sessionId}.jsonl`)
+
+    const line1 = {
+      parentUuid: null,
+      isSidechain: false,
+      type: 'user',
+      message: { role: 'user', content: '第一条' },
+      uuid: '11111111-1111-1111-1111-111111111111',
+      timestamp: '2026-07-29T01:00:00.000Z',
+      sessionId,
+    }
+    // trace 文件由 CLI 持续追加、readTrace 轮询懒解析,读到写入中途是常态:第一行完整,
+    // 第二行只写了一半(无结尾换行符)。
+    await fs.writeFile(filePath, JSON.stringify(line1) + '\n{"type":"user","message":{"rol', 'utf-8')
+
+    const first = await adapter.readTrace(h)
+    expect(first.events).toHaveLength(1)
+    expect(first.events[0].summary).toContain('第一条')
+    // 半行不算已消费的完整行——cursor 必须停在第一行之后,不能越过半行,否则半行补全后
+    // 的事件会被永久跳过。
+    expect(first.nextCursor.offset).toBe(1)
+
+    // 半行补全 + 追加新行。
+    const line2 = {
+      parentUuid: '11111111-1111-1111-1111-111111111111',
+      isSidechain: false,
+      type: 'user',
+      message: { role: 'user', content: '第二条(补全)' },
+      uuid: '22222222-2222-2222-2222-222222222222',
+      timestamp: '2026-07-29T01:00:01.000Z',
+      sessionId,
+    }
+    const line3 = {
+      parentUuid: '22222222-2222-2222-2222-222222222222',
+      isSidechain: false,
+      type: 'user',
+      message: { role: 'user', content: '第三条' },
+      uuid: '33333333-3333-3333-3333-333333333333',
+      timestamp: '2026-07-29T01:00:02.000Z',
+      sessionId,
+    }
+    await fs.writeFile(
+      filePath,
+      JSON.stringify(line1) + '\n' + JSON.stringify(line2) + '\n' + JSON.stringify(line3) + '\n',
+      'utf-8',
+    )
+
+    const second = await adapter.readTrace(h, first.nextCursor)
+    expect(second.events).toHaveLength(2)
+    expect(second.events[0].summary).toContain('第二条(补全)')
+    expect(second.events[1].summary).toContain('第三条')
+    expect(second.nextCursor.offset).toBe(3)
+
+    await adapter.kill(h)
+  })
+
   it('trace 文件不存在 → 返回空事件数组,不抛错,cursor 原样透传', async () => {
     const tmux = new NoopTmux()
     const adapter = new ClaudeCodeAdapter({ dataDir, tmux, claudeBin: 'unused', claudeProjectsDir })

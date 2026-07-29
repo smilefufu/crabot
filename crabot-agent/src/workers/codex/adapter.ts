@@ -600,7 +600,13 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       throw err
     }
 
-    const lines = raw.split('\n').filter((line) => line.length > 0)
+    // 半行纪律(对齐 cli-events.ts watch()):trace(rollout)文件由 codex 持续追加、这里懒
+    // 解析式轮询读取,读到写入中途是常态。split 末尾要么是空串(文本以 \n 结尾)要么是尚未
+    // 写完的半行,两种情况都不能当"已消费的完整行"处理——统一 pop 掉,不产事件也不推进
+    // nextCursor,保证下次连同补全后的内容重新完整读取该行,不会永久丢事件。
+    const rawLines = raw.split('\n')
+    rawLines.pop()
+    const lines = rawLines.filter((line) => line.length > 0)
     const start = cursor?.offset ?? 0
     const events: NormalizedTraceEvent[] = []
     // nextCursor.offset 是"实际消费到的行号",不是 start + events.length——未识别的顶层
