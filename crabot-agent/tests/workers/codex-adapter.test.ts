@@ -251,6 +251,39 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
   )
 
   it(
+    'notify 已到但会话被外部 kill(不经 adapter.kill)→ 判定 exited,不永远卡在 idle(P2 review #2)',
+    async () => {
+      const { adapter, workerId } = await provisionedAdapter([{ output: '答完但不退出', emitStop: true }])
+      const h = await adapter.spawn(makeSpec(workerId, '你好'))
+
+      // 等 mock CLI 真的跑完 emitStop(把 stop/notify 事件写进事件文件),再从外部直接杀掉
+      // tmux 会话(不经 adapter.kill,模拟进程自己崩溃/被系统杀掉)。旧实现:syncState 先看
+      // notify 事件,stopCount>baseline 恒判 idle,永远走不到 isAlive 分支——这里会一直卡在
+      // idle,waitForState(exited) 超时失败。
+      const deadline = Date.now() + 5000
+      let sawStop = false
+      while (Date.now() < deadline) {
+        const raw = await fs.readFile(eventsFilePath({ root: workspaceRoot }), 'utf-8').catch(() => '')
+        if (raw.includes('"kind":"stop"')) {
+          sawStop = true
+          break
+        }
+        await new Promise((r) => setTimeout(r, 50))
+      }
+      expect(sawStop).toBe(true)
+      execFileSync('tmux', ['kill-session', '-t', `crabot-w-${workerId}-1`], { stdio: 'ignore' })
+
+      await waitForState(adapter, h, 'exited')
+
+      const metaRaw = await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')
+      const meta = JSON.parse(metaRaw) as { state: WorkerContractState; ended_reason?: string }
+      expect(meta.state).toBe('exited')
+      expect(meta.ended_reason).toBe('completed')
+    },
+    15000,
+  )
+
+  it(
     '④ kill → tmux killSession,收敛 exited(killed),再次 kill 幂等',
     async () => {
       const { adapter, workerId } = await provisionedAdapter([{ output: '还在跑' }])

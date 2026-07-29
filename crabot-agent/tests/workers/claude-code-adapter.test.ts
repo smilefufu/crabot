@@ -190,6 +190,39 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter (tmux + mock CLI)', () => {
   )
 
   it(
+    'stop 事件已到但会话被外部 kill(不经 adapter.kill)→ 判定 exited,不永远卡在 idle(P2 review #2)',
+    async () => {
+      const { adapter, workerId } = await provisionedAdapter([{ output: '答完但不退出', emitStop: true }])
+      const h = await adapter.spawn(makeSpec(workerId, '你好'))
+
+      // 等 mock CLI 真的跑完 emitStop(把 stop 事件写进事件文件),再从外部直接杀掉 tmux
+      // 会话(不经 adapter.kill,模拟进程自己崩溃/被系统杀掉,adapter 对此完全不知情)。
+      // 旧实现:syncState 先看 stop 事件,stopCount>baseline 恒判 idle,永远走不到 isAlive
+      // 分支——这里会一直卡在 idle,waitForState(exited) 超时失败。
+      const deadline = Date.now() + 5000
+      let sawStop = false
+      while (Date.now() < deadline) {
+        const raw = await fs.readFile(eventsFilePath({ root: workspaceRoot }), 'utf-8').catch(() => '')
+        if (raw.includes('"kind":"stop"')) {
+          sawStop = true
+          break
+        }
+        await new Promise((r) => setTimeout(r, 50))
+      }
+      expect(sawStop).toBe(true)
+      execFileSync('tmux', ['kill-session', '-t', `crabot-w-${workerId}-1`], { stdio: 'ignore' })
+
+      await waitForState(adapter, h, 'exited')
+
+      const metaRaw = await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')
+      const meta = JSON.parse(metaRaw) as { state: WorkerContractState; ended_reason?: string }
+      expect(meta.state).toBe('exited')
+      expect(meta.ended_reason).toBe('completed')
+    },
+    15000,
+  )
+
+  it(
     '④ kill → tmux killSession,收敛 exited(killed),再次 kill 幂等',
     async () => {
       const { adapter, workerId } = await provisionedAdapter([{ output: '还在跑' }])
@@ -303,29 +336,29 @@ describe('ClaudeCodeAdapter — syncState 锁纪律(P2 Task 4 评审 Important #
       const workerId = `cctest-${randomUUID().slice(0, 8)}`
       const h = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
 
-      // A:第一次 state() 读到 stopCount=0(还没有 stop 事件),卡在 isAlive() 上等我们放行。
+      // A:第一次 state() 进锁,isAlive 检查提到最前(P2 review #2),无论 stopCount 是否已有
+      // 新事件都要先卡在 isAlive() 上等我们放行。
       const pA = adapter.state(h)
       await waitUntil(() => tmux.pendingCount === 1)
 
       // 此时才有一条新鲜 stop 事件抵达。
       await fs.appendFile(eventsFilePath({ root: workspaceRoot }), '{"ts":"2026-01-01T00:00:00Z","kind":"stop","raw":null}\n')
 
-      // B:第二次 state() 应该看到新事件、判定 idle 并落盘——不等待 A。
+      // B:第二次 state() 进同一把互斥锁排队——必须等 A 的读+判定+提交整体在锁内收尾之后才能
+      // 开始(锁纪律早已是这样;这里只是确认 isAlive 检查顺序调整后仍然成立)。
       const pB = adapter.state(h)
 
-      // 给 B 一点时间尽量在旧实现下抢先完成(新实现里 B 会排在 A 持锁期间之后,不影响正确性)。
-      await new Promise((r) => setTimeout(r, 300))
+      // 放行 A 的 isAlive(会话仍存活)→ A 判定 running(stopCount=0 未越 baseline),
+      // 与当前状态相同,无需落盘,锁释放。
+      tmux.releaseOne(true)
 
-      // 放行 A 的 isAlive(会话仍存活)。旧实现:A 用过期快照(stopCount=0,isAlive=true)算出
-      // computed='running',在锁内无条件覆盖 B 刚落的 idle。新实现:A/B 全程在锁内重读,
-      // 不会用过期快照覆盖新鲜结果。
+      // B 才真正开始执行:读到新的 stop 事件(stopCount=1),同样先卡在 isAlive() 上。
+      await waitUntil(() => tmux.pendingCount === 1)
       tmux.releaseOne(true)
 
       await Promise.all([pA, pB])
 
-      // 直接读盘上的终态,不经过 adapter.state()——避免再触发一次 syncState 把回退掩盖过去
-      // (回退后的 running 在下一次 syncState 时,若 stopCount 仍 > baseline 会被重新判成 idle,
-      // 从而掩盖了这次评审要抓的竞态)。
+      // 直接读盘上的终态,不经过 adapter.state()——避免再触发一次 syncState 把回退掩盖过去。
       const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { state: WorkerContractState }
       expect(meta.state).toBe('idle')
     },

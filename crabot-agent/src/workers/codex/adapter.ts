@@ -634,11 +634,15 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       const events = await runtime.eventChannel.readAll()
       const stopCount = events.filter((e) => e.kind === 'stop').length
 
+      // isAlive 检查提到最前(终态优先):进程可能在发过 turn-complete 通知之后自退(崩溃/
+      // OOM/自敲 exit)——stopCount 恒 > baseline 会一直判成 idle,永远走不到下面的 isAlive
+      // 分支,化身不落 exited,resume 被永久拒绝(P2 review #2,同 cc adapter 修复)。会话
+      // 已经不在了就直接 exited,不管有没有新通知;只有会话还活着,才轮到通知区分 idle/running。
       let computed: WorkerContractState
-      if (stopCount > runtime.stopBaseline) {
-        computed = 'idle'
-      } else if (!(await this.tmux.isAlive(runtime.sessionName))) {
+      if (!(await this.tmux.isAlive(runtime.sessionName))) {
         computed = 'exited'
+      } else if (stopCount > runtime.stopBaseline) {
+        computed = 'idle'
       } else {
         computed = 'running'
       }
