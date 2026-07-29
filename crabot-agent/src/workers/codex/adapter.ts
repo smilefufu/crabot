@@ -91,8 +91,9 @@
  * ## readTrace
  *
  * 解析 `<CODEX_HOME>/sessions/.../rollout-*.jsonl`,字段依据 codex-rs 源码抓取确认(见各
- * 归一化函数内的 codex-docs 注释),fixture 手工构造,真机校准留待安装。只能对本进程内常驻
- * runtime 的化身调用,同 cc(trace 路径依赖内存态)。
+ * 归一化函数内的 codex-docs 注释),fixture 手工构造,真机校准留待安装。rolloutPath 经
+ * ensureRuntime 从 meta 的 workspace_root + session_discovery 字段(四轮 review 新增持久化)
+ * 重新按 session_id 精确查找重建,不再要求"只能对本进程内常驻 runtime 的化身调用"(同 cc)。
  */
 import { promises as fs, type Dirent } from 'fs'
 import { join } from 'path'
@@ -254,6 +255,38 @@ async function pollForNewRollout(sessionsDir: string, cutoffMs: number, timeoutM
   }
 }
 
+/**
+ * 四轮 review 修复(ensureRuntime 专用):按已知 session_id 精确查找对应的 rollout 文件——
+ * 不看 mtime,只看文件名里嵌的 uuid 是否匹配 exactly。meta 只落 session_id +
+ * session_discovery 状态,不落 rolloutPath 这个绝对路径(升级前的 meta 结构就没有它,补
+ * 一个字段不如直接按已知的确定性文件名规则重新找一遍,与 sessionName/outputFile 等其它
+ * 重建字段的思路一致——见 ensureRuntime 注释)。同一遍历约定(深度不超过 4 层,目录不存在
+ * 按"没找到"处理)复用自 findNewestRolloutFile。
+ */
+async function findRolloutFileBySessionId(sessionsDir: string, sessionId: string): Promise<string | undefined> {
+  async function walk(dir: string, depth: number): Promise<string | undefined> {
+    if (depth > 4) return undefined
+    let entries: Dirent[]
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true })
+    } catch {
+      return undefined
+    }
+    for (const entry of entries) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        const found = await walk(full, depth + 1)
+        if (found) return found
+        continue
+      }
+      const match = ROLLOUT_FILENAME_RE.exec(entry.name)
+      if (match && match[1] === sessionId) return full
+    }
+    return undefined
+  }
+  return walk(sessionsDir, 0)
+}
+
 export class CodexWorkerAdapter implements WorkerAdapter {
   readonly implId = 'codex' as const
 
@@ -413,7 +446,13 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       killed: false,
     }
 
-    await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: sessionId, session_discovery: sessionDiscoveryStatus })
+    await writeMetaAtomic(dir, seq, {
+      seq,
+      state: 'running',
+      session_id: sessionId,
+      session_discovery: sessionDiscoveryStatus,
+      workspace_root: spec.workspace.root,
+    })
     this.runtimes.set(instanceKey(handle), runtime)
 
     // 首条任务输入注入失败:不能放任 running——按 kill 路径清理 tmux 会话后落
@@ -435,7 +474,10 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   async resume(prev: IncarnationRef, wakeInput: string): Promise<IncarnationHandle> {
     validateSessionRef(prev.session_ref)
 
-    const prevRuntime = this.runtimes.get(instanceKey(prev))
+    // 四轮 review 修复(同 cc adapter):prevRuntime 不再要求"常驻本进程"——resume 的合法
+    // 目标本来就是一个已终态的化身,ensureRuntime 从落盘 meta 重建它(重建不以 tmux 存活为
+    // 门槛,只有 meta 完全不存在才返回 undefined,见该方法注释)。
+    const prevRuntime = await this.ensureRuntime(prev)
     if (!prevRuntime) {
       throw new Error(`CodexWorkerAdapter.resume: no such incarnation ${prev.worker_id}#${prev.seq} resident in this process`)
     }
@@ -443,6 +485,14 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     const { state: prevState } = await this.syncState(prevRuntime, prevHandle)
     if (prevState !== 'exited') {
       throw new Error(`CodexWorkerAdapter.resume: incarnation ${prev.worker_id}#${prev.seq} has not exited yet (state=${prevState})`)
+    }
+    // 重建出的 prevRuntime 若来自缺 workspace_root 的老 meta(升级前写入,已知限制),
+    // workspaceRoot/codexHome 都退化为空串——不能悄悄传给 tmux newSession,显式拒绝。
+    if (!prevRuntime.workspaceRoot) {
+      throw new Error(
+        `CodexWorkerAdapter.resume: cannot rebuild workspace for ${prev.worker_id}#${prev.seq} ` +
+          `(meta.json predates workspace_root persistence; this incarnation cannot be resumed after an adapter restart)`,
+      )
     }
 
     const dir = prevRuntime.dir
@@ -490,7 +540,13 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         killed: false,
       }
 
-      await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: prev.session_ref, session_discovery: prevRuntime.sessionDiscoveryStatus })
+      await writeMetaAtomic(dir, seq, {
+        seq,
+        state: 'running',
+        session_id: prev.session_ref,
+        session_discovery: prevRuntime.sessionDiscoveryStatus,
+        workspace_root: prevRuntime.workspaceRoot,
+      })
       this.runtimes.set(instanceKey(handle), runtime)
       prevRuntime.resumed = true
     })
@@ -522,10 +578,12 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   async sendInput(h: IncarnationHandle, text: string, opts?: { raw?: boolean }): Promise<void> {
-    const runtime = this.runtimes.get(instanceKey(h))
-    if (!runtime) {
-      throw new Error(`CodexWorkerAdapter.sendInput: no such incarnation ${h.worker_id}#${h.seq} resident in this process`)
-    }
+    // 四轮 review 修复(同 cc adapter):重启后新建的 adapter 实例 runtimes 必为空,旧实现
+    // 在这里直接抛通用 Error,harness 只对 WorkerExitedError 转透明接续,通用 Error 会原样
+    // 穿透砸给调用方,消息永久卡在队首。ensureRuntime 拿不到任何落盘记录(真·未知化身)
+    // 时,对调用方而言效果与"已终态"等价,同样抛 WorkerExitedError。
+    const runtime = await this.ensureRuntime(h)
+    if (!runtime) throw new WorkerExitedError(h.worker_id, h.seq)
 
     const { state: current, stopCount } = await this.syncState(runtime, h)
     if (current === 'exited') throw new WorkerExitedError(h.worker_id, h.seq)
@@ -551,36 +609,25 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     return outputLog.read(cursor)
   }
 
+  /**
+   * P3 Task 9 修复"无常驻 runtime 时不做真实存活探测就照抄 meta 旧值"的假阳性(与 cc
+   * adapter 同款),四轮 review 进一步把这套重建逻辑收拢进 ensureRuntime,供 sendInput/
+   * kill/resume/state/readTrace 共用(见该方法注释;codex 没有 fork)。ensureRuntime 返回
+   * undefined 只有"落盘 meta 也完全不存在"这一种情形(真·未知化身)——与旧实现"tmux 会话
+   * 不存在则返回 exited"的兜底语义一致,直接判 exited。
+   */
   async state(h: IncarnationHandle): Promise<WorkerContractState> {
-    const runtime = this.runtimes.get(instanceKey(h))
-    if (runtime) return (await this.syncState(runtime, h)).state
-
-    // 无常驻 runtime(典型场景:agent 进程重启后新建的 adapter 实例,内存里还没有这个化身
-    // 的 runtime)——tmux 会话名是确定性命名(`crabot-w-<worker_id>-<seq>`,spawn/resume 落盘
-    // 时的同一约定),不依赖内存态也能重建,先做一次真实存活探测,而不是无条件回落读可能
-    // 早已过期的 meta 值(P3 Task 9 评审发现的缺口,与 cc adapter 同款修复:旧实现在无
-    // runtime 时直接读 meta,分不清"tmux 会话仍活着"与"已经真死",reconcileOnStartup 只能
-    // 照抄重启前的旧值,可能把一个真实已死的化身误判成 revived)。
-    //
-    // isAlive===false 时一律判 exited,不管 meta 写的是什么——消除"真死判活"的假阳性,是
-    // 本次修复要解决的核心问题;这个分支不需要 meta 文件的任何字段,连读都不读。
-    const sessionName = `crabot-w-${h.worker_id}-${h.seq}`
-    if (!(await this.tmux.isAlive(sessionName))) return 'exited'
-
-    // 会话仍存活:退回读 meta 的 running/idle——这只是"最近一次内存态 syncState 写盘时的
-    // 快照",精度有限(不代表此刻真实的 running/idle,可能已经又转了几轮而这个进程从未
-    // 观察到过),但至少不会再把一个真实存活的会话误判成 exited。未来若要提升精度,可以在
-    // 无 runtime 时也经 CliEventChannel 读一遍事件文件(与 syncState 同款三源合成逻辑);
-    // 这次修复先只解决"真死判活"这个更严重的假阳性,不做那一步。meta 文件缺失/损坏时的
-    // 既有兜底语义(直接抛错)保持不变,不在这里额外兜底。
-    const metaPath = join(this.deps.dataDir, h.worker_id, `meta-${h.seq}.json`)
-    const raw = await fs.readFile(metaPath, 'utf-8')
-    const meta = JSON.parse(raw) as { state: WorkerContractState }
-    return meta.state
+    const runtime = await this.ensureRuntime(h)
+    if (!runtime) return 'exited'
+    return (await this.syncState(runtime, h)).state
   }
 
   async readTrace(h: IncarnationHandle, cursor?: TraceCursor): Promise<{ events: NormalizedTraceEvent[]; nextCursor: TraceCursor }> {
-    const runtime = this.runtimes.get(instanceKey(h))
+    // 四轮 review 修复:以前只能对本进程内常驻的化身调用(rolloutPath 只存在于内存
+    // runtime)。ensureRuntime 现在从 meta 的 session_discovery + workspace_root(本轮新增
+    // 持久化)重新推导出 rolloutPath(见 findRolloutFileBySessionId),readTrace 因此也能在
+    // 无常驻 runtime 时工作。
+    const runtime = await this.ensureRuntime(h)
     if (!runtime) {
       throw new Error(`CodexWorkerAdapter.readTrace: no such incarnation ${h.worker_id}#${h.seq} resident in this process`)
     }
@@ -621,10 +668,13 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   async kill(h: IncarnationHandle): Promise<void> {
-    const runtime = this.runtimes.get(instanceKey(h))
-    if (!runtime) {
-      throw new Error(`CodexWorkerAdapter.kill: no such incarnation ${h.worker_id}#${h.seq} resident in this process`)
-    }
+    // 四轮 review 修复(同 cc adapter):重启后新建的 adapter 实例对确已终态(或压根没有
+    // 落盘记录)的化身调 kill,以前直接抛通用 Error,harness.killWorker/handoffIncarnation
+    // 没有 try/catch,错误会穿透打断整个操作。ensureRuntime 拿不到任何落盘记录时直接幂等
+    // 返回;拿到时 runtime.state 已经是探活得到的真实值,下面既有的 exited 幂等分支自然
+    // 覆盖"会话已经不在了"的情形。
+    const runtime = await this.ensureRuntime(h)
+    if (!runtime) return
     await this.getMutex(h.worker_id).run(async () => {
       if (runtime.state === 'exited') return // 幂等:不覆盖原 ended_reason
       runtime.killed = true
@@ -689,6 +739,84 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   /**
+   * 四轮 review 修复(与 cc adapter 同款设计,见其 ensureRuntime 注释——这里只记 codex
+   * 特有的差异):runtimes 命中直接返回;未命中时读 meta-<seq>.json,meta 完全不存在才
+   * 返回 undefined(真·未知化身)。tmux 会话是否还活着不作为"能不能重建"的门槛,只影响
+   * 重建出的 runtime.state。
+   *
+   * codex 专属字段:codexHome 从 workspace_root 派生(`<workspaceRoot>/.codex`,与
+   * provision/spawn 的约定一致);rolloutPath 不落盘(meta 只落 session_id +
+   * session_discovery),session_discovery==='discovered' 时用
+   * findRolloutFileBySessionId 按已知 session_id 重新在 codexHome/sessions 下精确查找,
+   * 找不到(文件被移走/清理)则退化为 undefined,readTrace 优雅降级为空数组(与 spawn 时
+   * 发现失败的已知限制同一降级路径)。
+   */
+  private async ensureRuntime(ref: { worker_id: string; seq: number; session_ref?: string }): Promise<Runtime | undefined> {
+    const key = instanceKey(ref)
+    const existing = this.runtimes.get(key)
+    if (existing) return existing
+
+    const dir = join(this.deps.dataDir, ref.worker_id)
+    const meta = await this.readMetaFile(dir, ref.seq)
+    if (!meta) return undefined
+
+    const sessionName = `crabot-w-${ref.worker_id}-${ref.seq}`
+    const alive = await this.tmux.isAlive(sessionName)
+    const workspaceRoot = meta.workspace_root ?? ''
+    const sessionId = meta.session_id ?? ref.session_ref ?? ''
+    const codexHome = workspaceRoot ? join(workspaceRoot, '.codex') : ''
+    const sessionDiscoveryStatus: 'discovered' | 'placeholder' = meta.session_discovery ?? 'placeholder'
+    const rolloutPath =
+      sessionDiscoveryStatus === 'discovered' && codexHome ? await findRolloutFileBySessionId(join(codexHome, 'sessions'), sessionId) : undefined
+    const outputFile = join(dir, `output-${ref.seq}.log`)
+    const eventsPath = workspaceRoot ? eventsFilePath({ root: workspaceRoot }) : join(dir, `.no-workspace-events-${ref.seq}.jsonl`)
+    const eventChannel = new CliEventChannel(eventsPath)
+
+    let stopBaseline = 0
+    if (workspaceRoot) {
+      const events = await eventChannel.readAll()
+      stopBaseline = events.filter((e) => e.kind === 'stop').length
+    }
+
+    const runtime: Runtime = {
+      worker_id: ref.worker_id,
+      seq: ref.seq,
+      dir,
+      workspaceRoot,
+      codexHome,
+      sessionName,
+      sessionId,
+      rolloutPath,
+      outputLog: new OutputLog(outputFile),
+      eventChannel,
+      sessionDiscoveryStatus,
+      state: alive ? 'running' : 'exited',
+      ended_reason: alive ? undefined : meta.ended_reason,
+      stopBaseline,
+      killed: false,
+    }
+    this.runtimes.set(key, runtime)
+    return runtime
+  }
+
+  /** meta-<seq>.json 读取,文件不存在/内容损坏一律返回 undefined(供 ensureRuntime 判定
+   * "真·未知化身")。 */
+  private async readMetaFile(
+    dir: string,
+    seq: number,
+  ): Promise<
+    | { session_id?: string; workspace_root?: string; ended_reason?: IncarnationEndReason; session_discovery?: 'discovered' | 'placeholder' }
+    | undefined
+  > {
+    try {
+      const raw = await fs.readFile(join(dir, `meta-${seq}.json`), 'utf-8')
+      return JSON.parse(raw)
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
    * worker_id 对应下一个可用的化身序号:该 worker 现存所有化身里最大 seq + 1。resume() 在
    * mutex.run 内调用,保证不与并发的另一次 resume 撞号。与 cc adapter 的同名方法同一思路
    * (codex 的 fork() 不支持,不参与这个分配)。
@@ -702,7 +830,13 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   private async transitionState(runtime: Runtime, h: IncarnationHandle, state: WorkerContractState): Promise<void> {
-    await writeMetaAtomic(runtime.dir, runtime.seq, { seq: runtime.seq, state, session_id: runtime.sessionId, session_discovery: runtime.sessionDiscoveryStatus })
+    await writeMetaAtomic(runtime.dir, runtime.seq, {
+      seq: runtime.seq,
+      state,
+      session_id: runtime.sessionId,
+      session_discovery: runtime.sessionDiscoveryStatus,
+      workspace_root: runtime.workspaceRoot,
+    })
     runtime.state = state
     try {
       this.deps.onStateChange?.(h, state)
@@ -718,6 +852,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       session_id: runtime.sessionId,
       ended_reason,
       session_discovery: runtime.sessionDiscoveryStatus,
+      workspace_root: runtime.workspaceRoot,
     })
     runtime.state = 'exited'
     runtime.ended_reason = ended_reason

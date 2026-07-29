@@ -765,10 +765,9 @@ export class WorkerHarness {
    * workersDir,是 harness 自己的 events/output 目录,与各 adapter 的私有 dataDir 是两个
    * 目录),因此不在本方法内部调用 scanOrphans,调用顺序由 P4/bootstrap 层保证(先
    * `BuiltinWorkerAdapter.scanOrphans(dataDir)`,adapter 塞进 `adapters` Map 之后,再调
-   * `harness.reconcileOnStartup()`)。claude-code/codex 目前没有等价的孤儿扫描——它们的
-   * `state()` 在无常驻 runtime 时同样回落读 meta 文件而不做真实 tmux 存活探测,这是现有
-   * adapter 实现的已知限制(§6.3 描述的"低频巡扫 tmux pane"兜底另有周期机制,不在本方法
-   * 范围内),不是本方法引入的新问题。
+   * `harness.reconcileOnStartup()`)。claude-code/codex 不需要等价的孤儿扫描——它们的
+   * `state()`(经 ensureRuntime,四轮 review 收拢)在无常驻 runtime 时会先做一次真实 tmux
+   * isAlive 探测再重建,不像 builtin 那样单纯回落读可能过期的 meta 文件。
    *
    * 判定规则(逐 worker 独立判定,整轮不持有任何全局锁——只在每个 worker 自己的
    * per-worker 临界区内完成"读台账→判adapter.state()→提交"):

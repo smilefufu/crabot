@@ -525,5 +525,145 @@ describe.skipIf(!tmuxAvailable)(
       },
       15000,
     )
+
+    it(
+      'PoC③(四轮 review):"重启"后 harness2 通过 sendToWorker/killWorker 真正操作仍存活的化身,' +
+        '不再抛通用 Error(修复前:adapter.sendInput/kill 对无常驻 runtime 的化身抛通用 Error,' +
+        'sendToWorker 会 reject、killWorker 整段失败,task 卡在 running 无法终止)',
+      async () => {
+        const ledgersDir = join(dataDir, 'ledgers')
+        const workspacesRoot = join(dataDir, 'workspaces')
+        const workersDir = join(dataDir, 'workers')
+        const ccDataDir = join(dataDir, 'cc-adapter')
+        await fs.mkdir(workspacesRoot, { recursive: true })
+
+        // 两步都不退出、不 emitStop——会话持续存活到显式 kill,给"重连一个仍存活的会话"
+        // 提供稳定的时间窗口。
+        const claudeBin = claudeBinFor([{ output: '第一段输出' }, { output: '第二段输出' }], ':')
+
+        const ledger = new LedgerStore(ledgersDir)
+        const workspaces = new WorkspaceManager(workspacesRoot)
+        const dialogObjectId = dialogObjectIdForPrivate('friend-cc-poc3')
+
+        const adaptersMap1 = new Map<WorkerImplId, WorkerAdapter>()
+        const harness1 = new WorkerHarness({ adapters: adaptersMap1, defaultImpl: 'claude-code', ledger, workspaces, workersDir, now })
+        const adapterA = new ClaudeCodeAdapter({ dataDir: ccDataDir, claudeBin, onStateChange: harness1.handleStateChange })
+        adaptersMap1.set('claude-code', adapterA)
+
+        const worker = await harness1.spawnWorker({
+          dialogObjectId,
+          title: 'PoC③ worker',
+          prompt: '你好',
+          origin: { spawned_by_session: 'wechat::sess-1', trigger_type: 'message' },
+          report_to: { channel_id: 'wechat', session_id: 'sess-1' },
+          impl: 'claude-code',
+        })
+        sessionsToCleanup.push(`crabot-w-${worker.worker_id}-1`)
+
+        await waitUntil(async () => {
+          const { chunk } = await harness1.readWorkerOutput(worker.worker_id, { offset: 0 })
+          return chunk.includes('第一段输出')
+        })
+
+        // "重启":全新 harness + adapter 实例,指向同一份台账/dataDir,内存 runtimes 为空。
+        const adaptersMap2 = new Map<WorkerImplId, WorkerAdapter>()
+        const harness2 = new WorkerHarness({ adapters: adaptersMap2, defaultImpl: 'claude-code', ledger, workspaces, workersDir, now })
+        const adapterB = new ClaudeCodeAdapter({ dataDir: ccDataDir, claudeBin, onStateChange: harness2.handleStateChange })
+        adaptersMap2.set('claude-code', adapterB)
+
+        const report = await harness2.reconcileOnStartup()
+        expect(report.revived).toContain(worker.worker_id)
+
+        // 会话仍然存活,压根不该走接续,只是简单投递——修复前这里会因为 adapterB.sendInput
+        // 抛通用 Error 而 reject(不是像 WorkerExitedError 那样被接住转接续,是直接穿透)。
+        await expect(harness2.sendToWorker(worker.worker_id, '继续')).resolves.toBeUndefined()
+
+        await waitUntil(async () => {
+          const { chunk } = await harness2.readWorkerOutput(worker.worker_id, { offset: 0 })
+          return chunk.includes('第二段输出')
+        })
+
+        // 修复前:adapterB.kill 对无常驻 runtime 的化身直接抛通用 Error,killWorker 没有
+        // try/catch,整段失败——task 卡在 running,用户无法终止。
+        await harness2.killWorker(worker.worker_id, 'PoC③ 收尾')
+
+        const [finalWorker] = await harness2.listWorkers(dialogObjectId)
+        expect(finalWorker.task.status).toBe('cancelled')
+        expect(finalWorker.incarnations[0].state).toBe('exited')
+        expect(finalWorker.incarnations[0].ended_reason).toBe('killed')
+      },
+      20000,
+    )
+
+    it(
+      'PoC④(四轮 review):sendToWorker 撞上已经死掉的 tmux 会话(未先调 reconcileOnStartup)时经透明接续正确续办,' +
+        '不永久卡在 running(修复前:WorkerExitedError 被通用 Error 掩盖,continueTerminalWorker 走不到,' +
+        '消息永久卡在 inbox 队首)',
+      async () => {
+        const ledgersDir = join(dataDir, 'ledgers')
+        const workspacesRoot = join(dataDir, 'workspaces')
+        const workersDir = join(dataDir, 'workers')
+        const ccDataDir = join(dataDir, 'cc-adapter')
+        await fs.mkdir(workspacesRoot, { recursive: true })
+
+        const claudeBin = claudeBinFor([{ output: '第一段输出' }], ':')
+
+        const ledger = new LedgerStore(ledgersDir)
+        const workspaces = new WorkspaceManager(workspacesRoot)
+        const dialogObjectId = dialogObjectIdForPrivate('friend-cc-poc4')
+
+        const adaptersMap1 = new Map<WorkerImplId, WorkerAdapter>()
+        const harness1 = new WorkerHarness({ adapters: adaptersMap1, defaultImpl: 'claude-code', ledger, workspaces, workersDir, now })
+        const adapterA = new ClaudeCodeAdapter({ dataDir: ccDataDir, claudeBin, onStateChange: harness1.handleStateChange })
+        adaptersMap1.set('claude-code', adapterA)
+
+        const worker = await harness1.spawnWorker({
+          dialogObjectId,
+          title: 'PoC④ worker',
+          prompt: '你好',
+          origin: { spawned_by_session: 'wechat::sess-1', trigger_type: 'message' },
+          report_to: { channel_id: 'wechat', session_id: 'sess-1' },
+          impl: 'claude-code',
+        })
+
+        await waitUntil(async () => {
+          const { chunk } = await harness1.readWorkerOutput(worker.worker_id, { offset: 0 })
+          return chunk.includes('第一段输出')
+        })
+
+        // 绕开 adapter.kill,直接杀死 tmux 会话——模拟"agent 进程重启前,这个 worker 的 tmux
+        // 会话已经先一步真死",台账此刻仍然认为它在 running(没人告诉它已经死了)。
+        execFileSync('tmux', ['kill-session', '-t', `crabot-w-${worker.worker_id}-1`], { stdio: 'ignore' })
+
+        const beforeRestart = await harness1.listWorkers(dialogObjectId)
+        expect(beforeRestart[0].task.status).toBe('running')
+        expect(beforeRestart[0].incarnations[0].state).not.toBe('exited')
+
+        // "重启":全新 harness + adapter,刻意不先调 reconcileOnStartup——只验证
+        // sendToWorker 自己的透明接续(adapter.sendInput 抛 WorkerExitedError →
+        // continueTerminalWorker → reviveIncarnation)能不能独立兜住这种场景。
+        const adaptersMap2 = new Map<WorkerImplId, WorkerAdapter>()
+        const harness2 = new WorkerHarness({ adapters: adaptersMap2, defaultImpl: 'claude-code', ledger, workspaces, workersDir, now })
+        const adapterB = new ClaudeCodeAdapter({ dataDir: ccDataDir, claudeBin, onStateChange: harness2.handleStateChange })
+        adaptersMap2.set('claude-code', adapterB)
+
+        await expect(harness2.sendToWorker(worker.worker_id, '接着办')).resolves.toBeUndefined()
+
+        const [afterWorker] = await harness2.listWorkers(dialogObjectId)
+        expect(afterWorker.task.status).toBe('running')
+        expect(afterWorker.incarnations).toHaveLength(2)
+        expect(afterWorker.incarnations[0].state).toBe('exited')
+        expect(afterWorker.incarnations[1].state).toBe('running')
+        sessionsToCleanup.push(`crabot-w-${worker.worker_id}-${afterWorker.incarnations[1].seq}`)
+
+        // 新化身真的在跑:wakeInput 送达 mock CLI,readWorkerOutput(读主线=新化身)应该
+        // 拿到新会话独立重跑一遍脚本产出的第一段输出。
+        await waitUntil(async () => {
+          const { chunk } = await harness2.readWorkerOutput(worker.worker_id, { offset: 0 })
+          return chunk.includes('第一段输出')
+        })
+      },
+      20000,
+    )
   },
 )

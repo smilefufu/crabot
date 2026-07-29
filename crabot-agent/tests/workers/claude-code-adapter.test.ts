@@ -255,6 +255,105 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter (tmux + mock CLI)', () => {
   )
 })
 
+describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 四轮 review PoC 回归:重启后新 adapter 实例(runtimes 为空)重连 tmux 会话(ensureRuntime)', () => {
+  let dataDir: string
+  let workspaceRoot: string
+  let tmux: TmuxDriver
+
+  beforeEach(async () => {
+    dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-adapter-reattach-data-'))
+    workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-adapter-reattach-ws-'))
+    tmux = new TmuxDriver()
+  })
+
+  afterEach(async () => {
+    await cleanupTmuxSessions()
+    await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+  })
+
+  async function waitForOutputContains(adapter: ClaudeCodeAdapter, h: IncarnationHandle, needle: string, timeoutMs = 8000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const { chunk } = await adapter.readOutput(h, { offset: 0 })
+      if (chunk.includes(needle)) return
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    throw new Error(`waitForOutputContains timeout: expected output to contain '${needle}'`)
+  }
+
+  it(
+    'PoC①:会话仍存活——新 adapter 实例的 sendInput/kill 应真正作用于该会话(修复前:sendInput 直接抛通用 Error "no such incarnation...resident in this process")',
+    async () => {
+      const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+      const stopHookCmd = channel.hookCommand('stop')
+      // 两步都不 exit/emitStop——mock CLI 消费完第一步后挂起原地等下一条 stdin,tmux 会话
+      // 因此持续存活,直到显式 kill,给"重连一个仍存活的会话"提供稳定的时间窗口。
+      const claudeBin = claudeBinFor([{ output: '第一段输出' }, { output: '第二段输出' }], stopHookCmd)
+
+      const adapterA = new ClaudeCodeAdapter({ dataDir, tmux, claudeBin })
+      await adapterA.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `cctest-${randomUUID().slice(0, 8)}`
+      const h = await adapterA.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+
+      await waitForOutputContains(adapterA, h, '第一段输出')
+
+      // "重启":全新 adapter 实例,同一 dataDir,内存 runtimes 为空,从未见过这个化身。
+      const adapterB = new ClaudeCodeAdapter({ dataDir, tmux, claudeBin: 'unused-not-invoked-by-sendInput' })
+
+      // 修复前这里直接抛通用 Error;修复后 ensureRuntime 从落盘 meta(含本轮新增的
+      // workspace_root)+ 真实 tmux isAlive 探测重建出可操作的 runtime。
+      await expect(adapterB.sendInput(h, '继续')).resolves.toBeUndefined()
+
+      // sendInput 真正送达存活会话:mock CLI 消费下一步,写出第二段输出。
+      await waitForOutputContains(adapterB, h, '第二段输出')
+
+      // kill 同样应该真正终止这个会话,不是抛错。
+      await expect(adapterB.kill(h)).resolves.toBeUndefined()
+      await waitForState(adapterB, h, 'exited')
+
+      const metaRaw = await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')
+      const meta = JSON.parse(metaRaw) as { ended_reason?: string }
+      expect(meta.ended_reason).toBe('killed')
+    },
+    15000,
+  )
+
+  it(
+    'PoC②:会话已经死掉(外部 kill,未经 adapter.kill)——新 adapter 实例的 sendInput 应抛 WorkerExitedError,不是通用 Error(harness 靠这个类型判断才会转透明接续)',
+    async () => {
+      const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+      const stopHookCmd = channel.hookCommand('stop')
+      const claudeBin = claudeBinFor([{ output: '第一段输出' }], stopHookCmd)
+
+      const adapterA = new ClaudeCodeAdapter({ dataDir, tmux, claudeBin })
+      await adapterA.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `cctest-${randomUUID().slice(0, 8)}`
+      const h = await adapterA.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+
+      await waitForOutputContains(adapterA, h, '第一段输出')
+
+      // 绕开 adapter.kill,直接杀死 tmux 会话——模拟"agent 进程重启前,这个 worker 的 tmux
+      // 会话已经先一步真死(崩溃/被系统 OOM kill 等)",没有任何机制把这件事记进 meta。
+      execFileSync('tmux', ['kill-session', '-t', `crabot-w-${workerId}-1`], { stdio: 'ignore' })
+
+      // "重启":全新 adapter 实例,同一 dataDir,内存 runtimes 为空。
+      const adapterB = new ClaudeCodeAdapter({ dataDir, tmux, claudeBin: 'unused-not-invoked-by-sendInput' })
+
+      // 修复前:sendInput 直接抛通用 Error("no such incarnation...resident in this
+      // process")——harness 只对 WorkerExitedError 转透明接续,通用 Error 会原样穿透砸给
+      // 调用方,消息永久卡在队首。修复后:ensureRuntime 重建出 runtime(meta 还在),真实
+      // tmux isAlive 探测发现会话已死 → runtime.state 直接是 'exited' → 既有的 syncState
+      // 快路径产出 WorkerExitedError。
+      await expect(adapterB.sendInput(h, '还有件事')).rejects.toBeInstanceOf(WorkerExitedError)
+
+      // kill 对已经不存在的会话应幂等成功,不抛错。
+      await expect(adapterB.kill(h)).resolves.toBeUndefined()
+    },
+    15000,
+  )
+})
+
 /** isAlive 可手动挂起/放行的假 TmuxDriver——不起真实 tmux 进程,专供锁纪律竞态测试控制时序。 */
 class RaceTmux extends TmuxDriver {
   private pending: Array<(v: boolean) => void> = []

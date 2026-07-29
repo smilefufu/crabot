@@ -391,6 +391,89 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
   )
 })
 
+describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 四轮 review PoC 回归:重启后新 adapter 实例(runtimes 为空)重连 tmux 会话(ensureRuntime)', () => {
+  let dataDir: string
+  let workspaceRoot: string
+  let tmux: TmuxDriver
+
+  beforeEach(async () => {
+    dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-adapter-reattach-data-'))
+    workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-adapter-reattach-ws-'))
+    tmux = new TmuxDriver()
+  })
+
+  afterEach(async () => {
+    await cleanupTmuxSessions()
+    await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+  })
+
+  async function waitForOutputContains(adapter: CodexWorkerAdapter, h: IncarnationHandle, needle: string, timeoutMs = 8000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const { chunk } = await adapter.readOutput(h, { offset: 0 })
+      if (chunk.includes(needle)) return
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    throw new Error(`waitForOutputContains timeout: expected output to contain '${needle}'`)
+  }
+
+  it(
+    'PoC①:会话仍存活——新 adapter 实例的 sendInput/kill 应真正作用于该会话(修复前:sendInput 直接抛通用 Error "no such incarnation...resident in this process")',
+    async () => {
+      const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+      const stopHookCmd = channel.hookCommand('stop')
+      const codexBin = codexBinFor([{ output: '第一段输出' }, { output: '第二段输出' }], stopHookCmd)
+
+      const adapterA = new CodexWorkerAdapter({ dataDir, tmux, codexBin, sessionDiscoveryTimeoutMs: 500 })
+      await adapterA.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `codextest-${randomUUID().slice(0, 8)}`
+      const h = await adapterA.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+
+      await waitForOutputContains(adapterA, h, '第一段输出')
+
+      // "重启":全新 adapter 实例,同一 dataDir,内存 runtimes 为空,从未见过这个化身。
+      const adapterB = new CodexWorkerAdapter({ dataDir, tmux, codexBin: 'unused-not-invoked-by-sendInput' })
+
+      await expect(adapterB.sendInput(h, '继续')).resolves.toBeUndefined()
+      await waitForOutputContains(adapterB, h, '第二段输出')
+
+      await expect(adapterB.kill(h)).resolves.toBeUndefined()
+      await waitForState(adapterB, h, 'exited')
+
+      const metaRaw = await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')
+      const meta = JSON.parse(metaRaw) as { ended_reason?: string }
+      expect(meta.ended_reason).toBe('killed')
+    },
+    15000,
+  )
+
+  it(
+    'PoC②:会话已经死掉(外部 kill,未经 adapter.kill)——新 adapter 实例的 sendInput 应抛 WorkerExitedError,不是通用 Error',
+    async () => {
+      const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+      const stopHookCmd = channel.hookCommand('stop')
+      const codexBin = codexBinFor([{ output: '第一段输出' }], stopHookCmd)
+
+      const adapterA = new CodexWorkerAdapter({ dataDir, tmux, codexBin, sessionDiscoveryTimeoutMs: 500 })
+      await adapterA.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `codextest-${randomUUID().slice(0, 8)}`
+      const h = await adapterA.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+
+      await waitForOutputContains(adapterA, h, '第一段输出')
+
+      // 绕开 adapter.kill,直接杀死 tmux 会话,模拟"agent 进程重启前已经先一步真死"。
+      execFileSync('tmux', ['kill-session', '-t', `crabot-w-${workerId}-1`], { stdio: 'ignore' })
+
+      const adapterB = new CodexWorkerAdapter({ dataDir, tmux, codexBin: 'unused-not-invoked-by-sendInput' })
+
+      await expect(adapterB.sendInput(h, '还有件事')).rejects.toBeInstanceOf(WorkerExitedError)
+      await expect(adapterB.kill(h)).resolves.toBeUndefined()
+    },
+    15000,
+  )
+})
+
 /** 转发到可替换的底层 TmuxDriver——用于"先用坏 bin 失败一次,再换成好 bin 重试"的测试场景。 */
 class SwitchableTmuxDriver extends TmuxDriver {
   current: TmuxDriver

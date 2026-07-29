@@ -46,8 +46,9 @@
  * `dirname(claudeProjectsDir)`(即约定的 `~/.claude/`)下是否有 settings.json 或
  * .credentials.json,不做任何网络调用。
  *
- * resume:先取 prev 化身常驻 runtime(未常驻则报错,P1 同款约束:只能 resume 本进程 spawn 过
- * 的化身),校验其已 exited(未 exited 直接拒绝)→ 新 tmux 会话跑
+ * resume:先经 ensureRuntime 取 prev 化身的 runtime(常驻内存直接用,否则从落盘 meta 重建,
+ * 四轮 review 修复;meta 也没有才报错——不再要求"只能 resume 本进程 spawn 过的化身"),校验
+ * 其已 exited(未 exited 直接拒绝)→ 新 tmux 会话跑
  * `<claudeBin> --resume <prev.session_ref>`(不重复传 --permission-mode,provision 阶段已把
  * acceptEdits 写进 settings.json 兜底命令行之外的场景)→ seq+1 化身、独立 meta/output、
  * session_ref 原样透传(cc 侧同一个会话 id)。锁纪律与 spawn 一致:tmux newSession 成功后才
@@ -69,8 +70,9 @@
  * tool_use content block → kind tool_call;user 记录带 toolUseResult 字段 → kind
  * tool_result;type=system → kind lifecycle;其余 type(mode/summary/queue-operation 等)跳过。
  * cursor.offset 是行号(非字节偏移);文件不存在时返回空数组(见下方"与 brief 的偏差")。
- * 只能对本进程内常驻 runtime 的化身调用——trace 文件路径依赖 workspace root,而这个信息
- * 只存在于内存 runtime 里,meta.json 不落它。
+ * trace 文件路径依赖 workspace root——经 ensureRuntime 从 meta 的 workspace_root 字段
+ * (四轮 review 新增持久化)重建,不再要求"只能对本进程内常驻 runtime 的化身调用";老化身
+ * (升级前写的 meta 缺这个字段)时拒绝并给出可诊断错误,不是本次修复能补的历史缺口。
  */
 import { promises as fs } from 'fs'
 import { join, dirname } from 'path'
@@ -263,7 +265,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       killed: false,
     }
 
-    await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: sessionId })
+    await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: sessionId, workspace_root: spec.workspace.root })
     this.runtimes.set(instanceKey(handle), runtime)
 
     // 首条任务输入经 sendText 注入,cc 把它当第一条用户消息。注入失败:session 可能已经起来
@@ -287,7 +289,10 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // API 边界校验:session_ref 必须是有效 UUID 格式,防止 shell 注入
     validateSessionRef(prev.session_ref)
 
-    const prevRuntime = this.runtimes.get(instanceKey(prev))
+    // 四轮 review 修复:prevRuntime 不再要求"常驻本进程"——resume 的合法目标本来就是一个
+    // 已终态的化身(它自己的 tmux 会话必然已经不在了),ensureRuntime 从落盘 meta 重建它
+    // (见该方法注释:重建不以 tmux 存活为门槛,只有 meta 完全不存在才返回 undefined)。
+    const prevRuntime = await this.ensureRuntime(prev)
     if (!prevRuntime) {
       throw new Error(`ClaudeCodeAdapter.resume: no such incarnation ${prev.worker_id}#${prev.seq} resident in this process`)
     }
@@ -295,6 +300,15 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     const { state: prevState } = await this.syncState(prevRuntime, prevHandle)
     if (prevState !== 'exited') {
       throw new Error(`ClaudeCodeAdapter.resume: incarnation ${prev.worker_id}#${prev.seq} has not exited yet (state=${prevState})`)
+    }
+    // 重建出的 prevRuntime 若来自缺 workspace_root 的老 meta(升级前写入,已知限制,见
+    // ensureRuntime 注释),workspaceRoot 退化为空串——不能把空串悄悄当 cwd 传给 tmux
+    // newSession,显式拒绝并给出可诊断的错误,而不是让 newSession 之后以费解的方式失败。
+    if (!prevRuntime.workspaceRoot) {
+      throw new Error(
+        `ClaudeCodeAdapter.resume: cannot rebuild workspace for ${prev.worker_id}#${prev.seq} ` +
+          `(meta.json predates workspace_root persistence; this incarnation cannot be resumed after an adapter restart)`,
+      )
     }
 
     const dir = prevRuntime.dir
@@ -345,7 +359,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         killed: false,
       }
 
-      await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: prev.session_ref })
+      await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: prev.session_ref, workspace_root: prevRuntime.workspaceRoot })
       this.runtimes.set(instanceKey(handle), runtime)
       prevRuntime.resumed = true
     })
@@ -370,9 +384,20 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // API 边界校验:session_ref 必须是有效 UUID 格式,防止 shell 注入
     validateSessionRef(prev.session_ref)
 
-    const prevRuntime = this.runtimes.get(instanceKey(prev))
+    // fork 不检查 prevRuntime 是否存活(cc 的 --fork-session 无头一击直接靠 --resume 打给
+    // cc 自己的会话文件,不依赖任何 tmux pane 还在跑)——ensureRuntime 因此对 fork 同样适用:
+    // 只要 meta 还在,不管 tmux 会话死活都能重建出这里需要的 dir/workspaceRoot。
+    const prevRuntime = await this.ensureRuntime(prev)
     if (!prevRuntime) {
       throw new Error(`ClaudeCodeAdapter.fork: no such incarnation ${prev.worker_id}#${prev.seq} resident in this process`)
+    }
+    if (!prevRuntime.workspaceRoot) {
+      // 重建自缺 workspace_root 的老 meta(已知限制,见 ensureRuntime 注释)——fork 的子进程
+      // cwd 依赖它,不能悄悄传空串。
+      throw new Error(
+        `ClaudeCodeAdapter.fork: cannot rebuild workspace for ${prev.worker_id}#${prev.seq} ` +
+          `(meta.json predates workspace_root persistence; this incarnation cannot be forked after an adapter restart)`,
+      )
     }
 
     const dir = prevRuntime.dir
@@ -405,7 +430,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         stopBaseline: 0,
         killed: false,
       }
-      await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: sessionId })
+      await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: sessionId, workspace_root: prevRuntime.workspaceRoot })
       this.runtimes.set(instanceKey(handle), runtime)
     })
 
@@ -437,10 +462,14 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   async sendInput(h: IncarnationHandle, text: string, opts?: { raw?: boolean }): Promise<void> {
-    const runtime = this.runtimes.get(instanceKey(h))
-    if (!runtime) {
-      throw new Error(`ClaudeCodeAdapter.sendInput: no such incarnation ${h.worker_id}#${h.seq} resident in this process`)
-    }
+    // 四轮 review 修复:重启后新建的 adapter 实例 runtimes 必为空,旧实现在这里直接抛通用
+    // Error("no such incarnation...resident in this process")——harness 只对 WorkerExitedError
+    // 转透明接续,通用 Error 会原样穿透砸给调用方,消息永久卡在队首(protocol-agent-v3 §13
+    // "tmux worker 独立存活 → 重启后 harness 重连接管"在操作层的失效)。改用 ensureRuntime
+    // 从落盘 meta 重建;它拿不到任何记录(真·未知化身)时,对 sendInput 的调用方而言效果
+    // 与"已终态"等价(harness 的透明接续兜底不区分这两种情况),同样抛 WorkerExitedError。
+    const runtime = await this.ensureRuntime(h)
+    if (!runtime) throw new WorkerExitedError(h.worker_id, h.seq)
 
     const { state: current, stopCount } = await this.syncState(runtime, h)
     if (current === 'exited') throw new WorkerExitedError(h.worker_id, h.seq)
@@ -466,40 +495,34 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return outputLog.read(cursor)
   }
 
+  /**
+   * P3 Task 9 修复"无常驻 runtime 时不做真实存活探测就照抄 meta 旧值"的假阳性(tmux 会话
+   * 名是确定性命名,不依赖内存态也能重建),四轮 review 进一步把这套重建逻辑收拢进
+   * ensureRuntime,供 sendInput/kill/resume/fork/state/readTrace 共用(见该方法注释)。
+   * ensureRuntime 返回 undefined 只有"落盘 meta 也完全不存在"这一种情形(真·未知化身)——
+   * 与旧实现"tmux 会话不存在则返回 exited"的兜底语义一致,直接判 exited。
+   */
   async state(h: IncarnationHandle): Promise<WorkerContractState> {
-    const runtime = this.runtimes.get(instanceKey(h))
-    if (runtime) return (await this.syncState(runtime, h)).state
-
-    // 无常驻 runtime(典型场景:agent 进程重启后新建的 adapter 实例,内存里还没有这个化身
-    // 的 runtime)——tmux 会话名是确定性命名(`crabot-w-<worker_id>-<seq>`,spawn/resume 落盘
-    // 时的同一约定),不依赖内存态也能重建,先做一次真实存活探测,而不是无条件回落读可能
-    // 早已过期的 meta 值(P3 Task 9 评审发现的缺口:旧实现在无 runtime 时直接读 meta,分不清
-    // "tmux 会话仍活着"与"已经真死",reconcileOnStartup 对 cc/codex 只能照抄重启前的旧值,
-    // 可能把一个真实已死的化身误判成 revived)。
-    //
-    // isAlive===false 时一律判 exited,不管 meta 写的是什么——消除"真死判活"的假阳性,是
-    // 本次修复要解决的核心问题;这个分支不需要 meta 文件的任何字段,连读都不读。
-    const sessionName = `crabot-w-${h.worker_id}-${h.seq}`
-    if (!(await this.tmux.isAlive(sessionName))) return 'exited'
-
-    // 会话仍存活:退回读 meta 的 running/idle——这只是"最近一次内存态 syncState 写盘时的
-    // 快照",精度有限(不代表此刻真实的 running/idle,可能已经又转了几轮而这个进程从未
-    // 观察到过),但至少不会再把一个真实存活的会话误判成 exited。未来若要提升精度,可以在
-    // 无 runtime 时也经 CliEventChannel 读一遍事件文件(与 syncState 同款三源合成逻辑);
-    // 这次修复先只解决"真死判活"这个更严重的假阳性,不做那一步。meta 文件缺失/损坏时的
-    // 既有兜底语义(直接抛错)保持不变,不在这里额外兜底。
-    const metaPath = join(this.deps.dataDir, h.worker_id, `meta-${h.seq}.json`)
-    const raw = await fs.readFile(metaPath, 'utf-8')
-    const meta = JSON.parse(raw) as { state: WorkerContractState }
-    return meta.state
+    const runtime = await this.ensureRuntime(h)
+    if (!runtime) return 'exited'
+    return (await this.syncState(runtime, h)).state
   }
 
   async readTrace(h: IncarnationHandle, cursor?: TraceCursor): Promise<{ events: NormalizedTraceEvent[]; nextCursor: TraceCursor }> {
-    const runtime = this.runtimes.get(instanceKey(h))
+    // 四轮 review 修复:trace 文件路径依赖 workspace root,以前这个信息只存在于内存 runtime
+    // 里(meta.json 不落它),不像 readOutput 那样有约定路径可以脱离内存重建——ensureRuntime
+    // 现在从 meta 里的 workspace_root 字段(本轮新增持久化)重建它,readTrace 因此也能在
+    // 无常驻 runtime 时工作,不再是"只能对本进程内常驻的化身调用"。
+    const runtime = await this.ensureRuntime(h)
     if (!runtime) {
-      // trace 文件路径依赖 workspace root,这个信息只存在于内存 runtime 里(meta.json 不落
-      // 它),不像 readOutput 那样有约定路径可以脱离内存重建。
       throw new Error(`ClaudeCodeAdapter.readTrace: no such incarnation ${h.worker_id}#${h.seq} resident in this process`)
+    }
+    if (!runtime.workspaceRoot) {
+      // 重建自缺 workspace_root 的老 meta(升级前写入,已知限制,见 ensureRuntime 注释)。
+      throw new Error(
+        `ClaudeCodeAdapter.readTrace: cannot rebuild workspace for ${h.worker_id}#${h.seq} ` +
+          `(meta.json predates workspace_root persistence; trace unavailable after an adapter restart)`,
+      )
     }
 
     const slug = projectSlug(runtime.workspaceRoot)
@@ -539,10 +562,13 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   async kill(h: IncarnationHandle): Promise<void> {
-    const runtime = this.runtimes.get(instanceKey(h))
-    if (!runtime) {
-      throw new Error(`ClaudeCodeAdapter.kill: no such incarnation ${h.worker_id}#${h.seq} resident in this process`)
-    }
+    // 四轮 review 修复:重启后新建的 adapter 实例对已经确已终态(或压根没有落盘记录)的
+    // 化身调 kill,以前直接抛通用 Error,harness.killWorker/handoffIncarnation 对此没有
+    // try/catch,错误会穿透打断整个操作(半成品:HANDOFF.md 已写、旧化身未标 superseded 却
+    // 卡死)。ensureRuntime 拿不到任何落盘记录时直接幂等返回(无事可做);拿到时 runtime.state
+    // 已经是探活得到的真实值,下面既有的 exited 幂等分支自然覆盖"会话已经不在了"的情形。
+    const runtime = await this.ensureRuntime(h)
+    if (!runtime) return
     await this.getMutex(h.worker_id).run(async () => {
       if (runtime.state === 'exited') return // 幂等:不覆盖原 ended_reason
       runtime.killed = true
@@ -608,6 +634,100 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   /**
+   * 四轮 review 修复:重启后新建的 adapter 实例 `runtimes` 必为空,以前 sendInput/kill/
+   * resume/fork/readTrace 在这种情况下清一色直接抛通用 Error("no such incarnation ...
+   * resident in this process")——这个错误不是 WorkerExitedError,harness 只对
+   * WorkerExitedError 转透明接续,通用 Error 会原样穿透砸给调用方,消息永久卡在队首、
+   * kill 抛错用户无法终止、switchWorkerImpl 半成品重复追加 HANDOFF.md(§13"tmux worker
+   * 独立存活 → 重启后 harness 重连接管"在操作层的失效;Task 10 只修了 state() 自己的探活
+   * 分支,这次把同一探活逻辑收拢成所有操作共用的单一重建入口)。
+   *
+   * runtimes 命中直接返回。未命中时读 meta-<seq>.json——**meta 完全不存在**(从未 spawn
+   * 过,或目录已被清理)是唯一返回 undefined 的情形,调用方据此判断"真·未知化身"。
+   *
+   * 关键设计取舍:tmux 会话是否还活着**不**作为"能不能重建"的门槛,只影响重建出的
+   * `runtime.state` 取值('exited'/'running')。原因:resume()/fork() 的合法调用目标本来
+   * 就是一个已终态的化身——它自己的 tmux 会话必然已经不在了;若"会话不存在"直接返回
+   * undefined,重启后 resume 永远无法工作,正好背离本轮修复的目的。改为让重建出的
+   * runtime.state 如实反映一次真实 tmux isAlive 探测的结果(不采信 meta 里可能陈旧的
+   * state 字段),后续操作各自基于这个准确的 state 得到正确行为:
+   *   - sendInput:见该方法注释,`runtime.state==='exited'` 时既有的 syncState 快路径
+   *     自然产出 WorkerExitedError,等价于"ensureRuntime 直接返回 undefined ⇒ 抛
+   *     WorkerExitedError"这一表面语义(仅当 meta 也不存在时才真的走这条兜底分支)。
+   *   - kill:既有的 exited 幂等分支(不重复 kill、不覆盖 ended_reason)天然覆盖"会话
+   *     已经不在了"的情形,不需要在 kill() 里另外判断。
+   *   - resume/fork:重建成功即可拿到 dir/workspaceRoot 继续走下去,不受 tmux 死活影响。
+   *
+   * workspace_root 是本轮修复新增进 meta 的持久化项(spawn/resume/fork/transitionState/
+   * transitionExited 统一写入)。老化身(升级前写的 meta)缺这个字段时按已知限制降级——
+   * workspaceRoot 退化为空串,eventChannel 指向一个不存在的占位路径(CliEventChannel.readAll
+   * 对不存在的文件返回空数组,不抛错,只是探测不到新 stop 事件,不影响 exited 判定,因为
+   * 那条判定只依赖 tmux isAlive,不依赖事件文件)。resume()/fork()/readTrace() 在真正需要
+   * workspaceRoot 时(tmux newSession 的 cwd、execFile 的 cwd、trace 文件路径)显式拒绝并
+   * 给出可诊断错误,不把空串悄悄传下去。
+   *
+   * stopBaseline 重建时刻起算新基线(当前已存在的 stop 事件数):不知道历史 baseline,把
+   * "此刻已经存在的 stop 事件"当作已核销,避免重启前遗留的 stop 事件被误判成本轮新完成
+   * (与 spawn()/sendInput() 推进 baseline 的动机一致)——代价是重建后首次 syncState 之前
+   * 无法准确复原"当时到底是 running 还是 idle"这个精细区分(只影响 idle 报告精度,不影响
+   * exited 判定的正确性,是可接受的已知限制)。
+   */
+  private async ensureRuntime(ref: { worker_id: string; seq: number; session_ref?: string }): Promise<Runtime | undefined> {
+    const key = instanceKey(ref)
+    const existing = this.runtimes.get(key)
+    if (existing) return existing
+
+    const dir = join(this.deps.dataDir, ref.worker_id)
+    const meta = await this.readMetaFile(dir, ref.seq)
+    if (!meta) return undefined
+
+    const sessionName = `crabot-w-${ref.worker_id}-${ref.seq}`
+    const alive = await this.tmux.isAlive(sessionName)
+    const workspaceRoot = meta.workspace_root ?? ''
+    const sessionId = meta.session_id ?? ref.session_ref ?? ''
+    const outputFile = join(dir, `output-${ref.seq}.log`)
+    const eventsPath = workspaceRoot ? eventsFilePath({ root: workspaceRoot }) : join(dir, `.no-workspace-events-${ref.seq}.jsonl`)
+    const eventChannel = new CliEventChannel(eventsPath)
+
+    let stopBaseline = 0
+    if (workspaceRoot) {
+      const events = await eventChannel.readAll()
+      stopBaseline = events.filter((e) => e.kind === 'stop').length
+    }
+
+    const runtime: Runtime = {
+      worker_id: ref.worker_id,
+      seq: ref.seq,
+      dir,
+      workspaceRoot,
+      sessionName,
+      sessionId,
+      outputLog: new OutputLog(outputFile),
+      eventChannel,
+      state: alive ? 'running' : 'exited',
+      ended_reason: alive ? undefined : meta.ended_reason,
+      stopBaseline,
+      killed: false,
+    }
+    this.runtimes.set(key, runtime)
+    return runtime
+  }
+
+  /** meta-<seq>.json 读取,文件不存在/内容损坏一律返回 undefined(供 ensureRuntime 判定
+   * "真·未知化身")。 */
+  private async readMetaFile(
+    dir: string,
+    seq: number,
+  ): Promise<{ session_id?: string; workspace_root?: string; ended_reason?: IncarnationEndReason } | undefined> {
+    try {
+      const raw = await fs.readFile(join(dir, `meta-${seq}.json`), 'utf-8')
+      return JSON.parse(raw)
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
    * worker_id 对应下一个可用的化身序号:该 worker 现存所有化身(主线 + fork 分支 + resume
    * 链)里最大 seq + 1。resume() 和 fork() 共用这一个分配逻辑,且都在各自的 mutex.run 内
    * 调用,保证互不撞号(fork 化身常驻不删,不能用 prev.seq+1 这种固定公式——见 fork()/
@@ -622,7 +742,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   private async transitionState(runtime: Runtime, h: IncarnationHandle, state: WorkerContractState): Promise<void> {
-    await writeMetaAtomic(runtime.dir, runtime.seq, { seq: runtime.seq, state, session_id: runtime.sessionId })
+    await writeMetaAtomic(runtime.dir, runtime.seq, { seq: runtime.seq, state, session_id: runtime.sessionId, workspace_root: runtime.workspaceRoot })
     runtime.state = state
     try {
       this.deps.onStateChange?.(h, state)
@@ -637,6 +757,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       state: 'exited',
       session_id: runtime.sessionId,
       ended_reason,
+      workspace_root: runtime.workspaceRoot,
     })
     runtime.state = 'exited'
     runtime.ended_reason = ended_reason
