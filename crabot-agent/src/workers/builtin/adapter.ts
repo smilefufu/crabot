@@ -436,7 +436,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     outcome?: 'completed' | 'failed',
   ): Promise<void> {
     if (instance.pendingInputs.length > 0) {
-      console.log(`[dead-letter] incarnation ${instance.worker_id}#${instance.seq} exited with ${instance.pendingInputs.length} unsent message(s)`)
+      const deadLetterMsg = `[dead-letter] incarnation ${instance.worker_id}#${instance.seq} exited with ${instance.pendingInputs.length} unsent message(s): ${instance.pendingInputs.join(' | ')}\n`
+      await instance.outputLog.append(deadLetterMsg)
     }
     await this.writeMeta(instance, { state: 'exited', ended_reason, outcome })
     instance.state = 'exited'

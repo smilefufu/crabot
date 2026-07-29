@@ -49,6 +49,33 @@ function deferred<T = void>(): { promise: Promise<T>; resolve: (v: T) => void } 
   return { promise, resolve }
 }
 
+/** 第一个 stream 调用返回给定响应，第二个及后续调用抛错——用于测试续 burst 崩溃场景。 */
+function makeAdapterWithSecondBurstError(
+  firstBurstResponse: {
+    text?: string
+    toolCalls?: Array<{ name: string; id: string; input: Record<string, unknown> }>
+    stopReason: 'end_turn' | 'tool_use'
+  },
+): LLMAdapter {
+  let callCount = 0
+  return {
+    stream: vi.fn(async function* () {
+      if (callCount > 0) {
+        throw new Error('second burst error')
+      }
+      callCount++
+      const r = firstBurstResponse
+      const content: unknown[] = []
+      if (r.text) content.push({ type: 'text', text: r.text })
+      for (const tc of r.toolCalls ?? []) {
+        content.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
+      }
+      yield* chunksFromContent(content, r.stopReason, { inputTokens: 100, outputTokens: 50 })
+    }),
+    updateConfig: () => {},
+  } as unknown as LLMAdapter
+}
+
 /** 像 makeAdapter，但每次 stream() 先 await gate——用于制造"burst 仍在跑"的可控窗口。 */
 function makeGatedAdapter(
   gate: Promise<void>,
@@ -395,6 +422,34 @@ describe('BuiltinWorkerAdapter', () => {
     assertNoFork(nodes)
     const serialized = nodes.map((n) => JSON.stringify(n.message))
     expect(serialized.some((c) => c.includes('窗口期消息'))).toBe(true)
+  })
+
+  it('transitionExited 时 pendingInputs 非空 → readOutput 能读到 dead-letter 消息', async () => {
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({
+      adapter: makeAdapter([{ text: '测试', stopReason: 'end_turn' }]),
+    })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'idle')
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const instance = (adapter as any).instances.get(`${s.worker_id}#1`)
+    expect(instance).toBeTruthy()
+
+    // 手动向 pendingInputs 添加消息，模拟"化身被外部中止前有待处理消息"的场景
+    instance.pendingInputs.push('待处理消息1', '待处理消息2')
+
+    // 调用 transitionExited，应该记录 dead-letter
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (adapter as any).transitionExited(instance, h, 'crashed')
+
+    // 验证 readOutput 包含 dead-letter 消息
+    const { chunk } = await adapter.readOutput(h, { offset: 0 })
+    expect(chunk).toContain('[dead-letter]')
+    expect(chunk).toContain('2')  // 未发送消息数
+    expect(chunk).toContain('待处理消息1')
+    expect(chunk).toContain('待处理消息2')
   })
 
   it('并发 resume 同一 prev：仅一次成功，无树分叉', async () => {
