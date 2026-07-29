@@ -133,4 +133,82 @@ describe('OutputLog', () => {
     expect(assembled).not.toContain('�')
     expect(cursor.offset).toBe(Buffer.byteLength(original, 'utf-8'))
   })
+
+  it('should guarantee progress with extremely small cap=1 when encountering 3-byte UTF-8 character', async () => {
+    const log = new OutputLog(logPath)
+
+    // File: 'A' (1 byte) + '中' (3 bytes) + 'B' (1 byte) = 5 bytes total
+    const original = 'A中B'
+    await log.append(original)
+
+    const cap = 1 // Extremely small cap, smaller than any multi-byte character
+    let cursor = { offset: 0 }
+    let assembled = ''
+    const offsets: number[] = []
+    let guard = 0
+
+    while (true) {
+      offsets.push(cursor.offset)
+      const { chunk, nextCursor } = await log.read(cursor, cap)
+      const contentBeforeTruncation = chunk.split('\n[output truncated')[0]
+      assembled += contentBeforeTruncation
+
+      // Check for progress: nextCursor.offset must strictly increase or we're done
+      if (nextCursor.offset === cursor.offset) {
+        break
+      }
+      expect(nextCursor.offset).toBeGreaterThan(cursor.offset)
+      cursor = nextCursor
+      guard += 1
+      if (guard > 20) throw new Error('read loop did not terminate')
+    }
+
+    // Verify the assembled content matches original
+    expect(assembled).toBe(original)
+    expect(assembled).not.toContain('�') // No broken characters
+    expect(cursor.offset).toBe(Buffer.byteLength(original, 'utf-8'))
+
+    // Verify offsets are strictly increasing
+    for (let i = 1; i < offsets.length; i++) {
+      expect(offsets[i]).toBeGreaterThan(offsets[i - 1])
+    }
+  })
+
+  it('should guarantee progress with cap=3 when encountering 4-byte emoji', async () => {
+    const log = new OutputLog(logPath)
+
+    // File: 'AB' (2 bytes) + '🎉' (4 bytes) + 'C' (1 byte) = 7 bytes total
+    const original = 'AB🎉C'
+    await log.append(original)
+
+    const cap = 3 // cap < emoji's 4-byte size
+    let cursor = { offset: 0 }
+    let assembled = ''
+    const offsets: number[] = []
+    let guard = 0
+
+    while (true) {
+      offsets.push(cursor.offset)
+      const { chunk, nextCursor } = await log.read(cursor, cap)
+      const contentBeforeTruncation = chunk.split('\n[output truncated')[0]
+      assembled += contentBeforeTruncation
+
+      if (nextCursor.offset === cursor.offset) {
+        break
+      }
+      expect(nextCursor.offset).toBeGreaterThan(cursor.offset)
+      cursor = nextCursor
+      guard += 1
+      if (guard > 20) throw new Error('read loop did not terminate')
+    }
+
+    expect(assembled).toBe(original)
+    expect(assembled).not.toContain('�')
+    expect(cursor.offset).toBe(Buffer.byteLength(original, 'utf-8'))
+
+    // Verify offsets are strictly increasing
+    for (let i = 1; i < offsets.length; i++) {
+      expect(offsets[i]).toBeGreaterThan(offsets[i - 1])
+    }
+  })
 })

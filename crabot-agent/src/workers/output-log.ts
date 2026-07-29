@@ -28,6 +28,15 @@ function trimIncompleteUtf8Tail(buffer: Buffer, len: number): number {
   return len
 }
 
+// Determine the byte length of a UTF-8 character given its lead byte.
+function utf8CharLength(leadByte: number): number {
+  if ((leadByte & 0x80) === 0x00) return 1
+  else if ((leadByte & 0xe0) === 0xc0) return 2
+  else if ((leadByte & 0xf0) === 0xe0) return 3
+  else if ((leadByte & 0xf8) === 0xf0) return 4
+  else return 1 // invalid lead byte; treat as standalone
+}
+
 export class OutputLog {
   private mutex = new AsyncMutex()
 
@@ -51,21 +60,39 @@ export class OutputLog {
         }
 
         // Calculate bytes to read: up to cap, but not beyond file size
-        const bytesToRead = Math.min(cap, fileSize - cursor.offset)
-        const buffer = Buffer.alloc(bytesToRead)
+        let bytesToRead = Math.min(cap, fileSize - cursor.offset)
+        let buffer = Buffer.alloc(bytesToRead)
 
         const fd = await fs.open(this.filePath, 'r')
         try {
           await fd.read(buffer, 0, bytesToRead, cursor.offset)
 
           // Truncation occurs only if we hit the cap limit and there's more content
-          const isTruncated = bytesToRead === cap && cursor.offset + bytesToRead < fileSize
+          let isTruncated = bytesToRead === cap && cursor.offset + bytesToRead < fileSize
 
           // Only cap-truncated reads risk splitting a multi-byte UTF-8 character
           // mid-sequence; a read that reaches EOF is complete and needs no trimming.
           let usedBytes = bytesToRead
           if (isTruncated) {
             usedBytes = trimIncompleteUtf8Tail(buffer, bytesToRead)
+          }
+
+          // If trimming left us with zero bytes (first character was incomplete) and
+          // there's more content in the file, we must guarantee progress by reading
+          // at least one complete character. cap is a soft limit; progress is a hard requirement.
+          if (usedBytes === 0 && cursor.offset + bytesToRead < fileSize) {
+            // Determine how many bytes the first character needs
+            const firstByte = buffer[0]
+            const charBytesNeeded = utf8CharLength(firstByte)
+
+            // Re-read with enough capacity for the complete character
+            const newBytesToRead = charBytesNeeded
+            buffer = Buffer.alloc(newBytesToRead)
+            await fd.read(buffer, 0, newBytesToRead, cursor.offset)
+
+            // Since we're reading the full character without truncation, no trimming needed
+            usedBytes = newBytesToRead
+            isTruncated = false
           }
 
           let chunk = buffer.toString('utf-8', 0, usedBytes)
