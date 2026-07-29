@@ -367,7 +367,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
   )
 
   it(
-    '对同一个已 exited 的 prev 连续 resume 两次,seq 用 nextSeq() 递增分配,不撞号(P2 review #1)',
+    '对同一个已 exited 的 prev 连续 resume 两次,第二次应被拒绝(先到先得,对齐 builtin,P2 review #2)',
     async () => {
       const { adapter, workerId } = await provisionedAdapter([{ output: '主线输出', exit: true }])
       const h1 = await adapter.spawn(makeSpec(workerId, '你好'))
@@ -378,14 +378,14 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
       const h2 = await adapter.resume({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '继续 1')
       expect(h2.seq).toBe(2)
 
-      // 对同一个 prev(h1,仍是 exited 终态)再 resume 一次:旧实现用固定公式 prev.seq+1
-      // 算出 seq=2,与 h2 撞号,抛"already exists"。新实现用 nextSeq()(该 worker 现存所有
-      // 化身 max seq + 1)分配到 3。
-      const h3 = await adapter.resume({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '继续 2')
-      expect(h3.seq).toBe(3)
+      // 对同一个 prev(h1,仍是 exited 终态)再 resume 一次:nextSeq() 本身不撞号(会分配到
+      // 3),但 prev 已被 h2 标记 resumed——后来者应被拒绝,不产出第二个 resume 化身(先到
+      // 先得,对齐 builtin 同款 resumed 语义,P2 review #2)。
+      await expect(
+        adapter.resume({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '继续 2'),
+      ).rejects.toThrow(/already resumed/)
 
       await adapter.kill(h2)
-      await adapter.kill(h3)
     },
     15000,
   )

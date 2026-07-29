@@ -699,6 +699,36 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.resume', () => {
     },
     15000,
   )
+
+  it(
+    '对同一个已 exited 的 prev 连续 resume 两次,第二次应被拒绝(先到先得,对齐 builtin,P2 review #2)',
+    async () => {
+      const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+      const stopHookCmd = channel.hookCommand('stop')
+      const claudeBin = claudeBinFor([{ output: '第一轮输出', exit: true }], stopHookCmd)
+      const adapter = new ClaudeCodeAdapter({ dataDir, tmux, claudeBin })
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `cctest-${randomUUID().slice(0, 8)}`
+
+      const h1 = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+      await waitForState(adapter, h1, 'exited')
+
+      const meta1 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string }
+
+      const h2 = await adapter.resume({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '继续 1')
+      expect(h2.seq).toBe(2)
+
+      // 对同一个 prev(h1)再 resume 一次:nextSeq() 本身不撞号,但 prev 已被 h2 标记
+      // resumed——后来者应被拒绝,不产出第二个 resume 化身(先到先得,对齐 builtin 同款
+      // resumed 语义)。
+      await expect(
+        adapter.resume({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '继续 2'),
+      ).rejects.toThrow(/already resumed/)
+
+      await adapter.kill(h2)
+    },
+    15000,
+  )
 })
 
 /** 转发到内部真实 TmuxDriver 并记调用次数——用于断言 fork() 全程没碰 tmux。 */

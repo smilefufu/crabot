@@ -149,6 +149,9 @@ interface Runtime {
   /** 自上一次 sendInput(或 spawn)以来"已计入"的 stop 事件数;新 stop 数超过它才判定本轮 idle。 */
   stopBaseline: number
   killed: boolean
+  /** 是否已经被 resume 过一次。resume() 锁内检测"对同一 prev 的重复 resume"(先到先得,
+   * 后来者报错),对齐 builtin 同款语义(P2 review #2)。fork 不受此限制。 */
+  resumed?: boolean
 }
 
 function instanceKey(h: { worker_id: string; seq: number }): string {
@@ -303,15 +306,25 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
     const dir = prevRuntime.dir
 
-    // seq 分配(nextSeq(),该 worker 现存所有化身 max seq + 1)+ tmux newSession + 提交
-    // (meta+runtime)整体在该 worker 的互斥锁内原子完成——不能再用 prev.seq+1 这种固定公式:
-    // fork 化身常驻 runtimes 不删,prev.seq+1 可能早被更早一次 fork/resume 占用,继续用它会
-    // 在"已存在"检查上假死(见文件头注释、P2 review #1)。newSession 只是起一个 tmux pane
-    // (不等待 CLI 完整应答),放进锁内不违反"耗时较长操作留在锁外"的纪律——那条纪律是专门
-    // 针对 fork() 的无头子进程调用(等一整轮 CLI 应答,可能耗时较长)定的,见 fork() 注释。
+    // 重复 resume 检测(先到先得)+ seq 分配(nextSeq(),该 worker 现存所有化身 max seq + 1)+
+    // tmux newSession + 提交(meta+runtime+resumed 标记)整体在该 worker 的互斥锁内原子完成:
+    // - nextSeq() 不能再用 prev.seq+1 这种固定公式:fork 化身常驻 runtimes 不删,prev.seq+1
+    //   可能早被更早一次 fork/resume 占用,继续用它会在"已存在"检查上假死(见文件头注释、
+    //   P2 review #1)。newSession 只是起一个 tmux pane(不等待 CLI 完整应答),放进锁内不
+    //   违反"耗时较长操作留在锁外"的纪律——那条纪律是专门针对 fork() 的无头子进程调用
+    //   (等一整轮 CLI 应答,可能耗时较长)定的,见 fork() 注释。
+    // - nextSeq() 修好撞号之后,并发/连续对同一 exited prev 的 resume 各自都能分到不撞号
+    //   的 seq、各起一个 tmux 会话跑 --resume 同一 session_ref——语义上变成了对同一个 cc
+    //   会话的并行续接,不是 resume 想要的语义。对齐 builtin 的 resumed 标记:prev 一旦被
+    //   某次 resume 占用就不能再被 resume,后来者直接报错(不产出第二个化身)。resumed 标记
+    //   必须在 writeMeta 成功之后才提交,保证失败路径(newSession 抛错)幂等可重试:若在
+    //   此之前失败,resumed 仍未被设置,后续重试不会被"已 resume"拒绝(P2 review #2)。
     let handle!: IncarnationHandle
     let runtime!: Runtime
     await this.getMutex(prev.worker_id).run(async () => {
+      if (prevRuntime.resumed) {
+        throw new Error(`ClaudeCodeAdapter.resume: incarnation ${prev.worker_id}#${prev.seq} already resumed (concurrent resume of the same prev incarnation?)`)
+      }
       const seq = this.nextSeq(prev.worker_id)
       handle = { worker_id: prev.worker_id, seq, impl: 'claude-code' }
       const sessionName = `crabot-w-${prev.worker_id}-${seq}`
@@ -341,6 +354,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
       await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: prev.session_ref })
       this.runtimes.set(instanceKey(handle), runtime)
+      prevRuntime.resumed = true
     })
 
     // 首条 wakeInput 注入失败:按 spawn 同款纪律处理——已注册的化身清理 tmux 会话后落

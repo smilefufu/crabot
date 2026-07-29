@@ -207,6 +207,9 @@ interface Runtime {
    * 本轮 idle。语义与 cc 的 stopBaseline 完全对应。 */
   stopBaseline: number
   killed: boolean
+  /** 是否已经被 resume 过一次。resume() 锁内检测"对同一 prev 的重复 resume"(先到先得,
+   * 后来者报错),对齐 builtin/cc 同款语义(P2 review #2)。 */
+  resumed?: boolean
 }
 
 function instanceKey(h: { worker_id: string; seq: number }): string {
@@ -462,14 +465,18 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
     const dir = prevRuntime.dir
 
-    // seq 分配(nextSeq(),该 worker 现存所有化身 max seq + 1)+ tmux newSession + 提交
-    // (meta+runtime)整体在该 worker 的互斥锁内原子完成——不能再用 prev.seq+1 这种固定公式:
-    // codex 的 resume 链条与 cc 同款语义,继续用 prev.seq+1 会在被更早一次操作占用同一号位
-    // 时假死(见 cc adapter.ts 同款修复、P2 review #1)。newSession 只是起一个 tmux pane
-    // (不等待 CLI 完整应答),放进锁内不违反"耗时较长操作留在锁外"的纪律。
+    // 重复 resume 检测(先到先得)+ seq 分配(nextSeq(),该 worker 现存所有化身 max seq + 1)+
+    // tmux newSession + 提交(meta+runtime+resumed 标记)整体在该 worker 的互斥锁内原子完成,
+    // 与 cc adapter.ts 同款修复(见其 resume() 注释、P2 review #1/#2):nextSeq() 避免撞号;
+    // resumed 标记避免并发/连续 resume 同一 exited prev 各起一个 tmux 会话跑 `codex resume`
+    // 同一 session id——那不是 resume 想要的语义,应先到先得、后来者报错。resumed 标记必须
+    // 在 writeMeta 成功之后才提交,保证失败路径(newSession 抛错)幂等可重试。
     let handle!: IncarnationHandle
     let runtime!: Runtime
     await this.getMutex(prev.worker_id).run(async () => {
+      if (prevRuntime.resumed) {
+        throw new Error(`CodexWorkerAdapter.resume: incarnation ${prev.worker_id}#${prev.seq} already resumed (concurrent resume of the same prev incarnation?)`)
+      }
       const seq = this.nextSeq(prev.worker_id)
       handle = { worker_id: prev.worker_id, seq, impl: 'codex' }
       const sessionName = `crabot-w-${prev.worker_id}-${seq}`
@@ -503,6 +510,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
       await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: prev.session_ref, session_discovery: prevRuntime.sessionDiscoveryStatus })
       this.runtimes.set(instanceKey(handle), runtime)
+      prevRuntime.resumed = true
     })
 
     // 首条 wakeInput 注入失败:按 spawn 同款纪律处理——已注册的化身清理 tmux 会话后落
