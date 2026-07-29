@@ -176,12 +176,9 @@ export class WorkerHarness {
             impl,
             state: 'running',
             workspace: workspace.root,
-            // WorkerAdapter 契约没有"从 handle 反查 session_ref"的方法(P1/P2 遗留的已知
-            // 空缺,tests/workers/contract-suite.ts 的 fixture-only `refFor` 就是为了绕开
-            // 这个缺口而加的)。harness 在契约不扩展的前提下拿不到真实值,先用空串占位;
-            // queryWorker 的 fork 分支会原样把这个占位值透传给 adapter.fork,对真实
-            // cc/codex adapter(它们会校验 UUID 格式)会失败——这不是 Task 7 引入的新问题,
-            // 是既有契约的已知缺口,留给后续任务(扩展 WorkerAdapter 契约)解决。
+            // adapter.spawn 尚未调用,真实 session_ref 此刻还不存在,先占位;spawn 成功后
+            // 下面会用 adapter.spawn 返回的 IncarnationHandle.session_ref(protocol-agent-v3
+            // §6.1,handle 自描述真值)原子补写,不依赖任何"从 handle 反查"的额外方法。
             session_ref: '',
             started_at: startedAt,
           },
@@ -190,6 +187,7 @@ export class WorkerHarness {
       }
       await this.deps.ledger.upsertWorker(p.dialogObjectId, workerId, () => initial)
 
+      let spawnedHandle: IncarnationHandle
       try {
         const caps = this.deps.capabilityBundle ? await this.deps.capabilityBundle() : EMPTY_CAPABILITY_BUNDLE
         await adapter.provision(workspace, caps)
@@ -200,7 +198,7 @@ export class WorkerHarness {
           goal: p.goal,
           builtin: p.builtin,
         }
-        await adapter.spawn(spec)
+        spawnedHandle = await adapter.spawn(spec)
       } catch (err) {
         const now = this.deps.now()
         await this.deps.ledger.upsertWorker(p.dialogObjectId, workerId, (prev) => {
@@ -213,7 +211,7 @@ export class WorkerHarness {
             error: err instanceof Error ? err.message : String(err),
             now,
           })
-          const incarnations = markLastIncarnation(prev.incarnations, {
+          const incarnations = patchIncarnationBySeq(prev.incarnations, 1, {
             state: 'exited',
             ended_at: now,
             ended_reason: 'failed',
@@ -228,10 +226,14 @@ export class WorkerHarness {
       }
 
       const now = this.deps.now()
+      // adapter.spawn 返回的 handle 自描述真实 session_ref(protocol-agent-v3 §6.1)——初始
+      // 化身注册时(见上面 initial.incarnations[0])这个值还不存在,只能占位;spawn 成功后
+      // 在这里补写真值,和 task 状态一起原子落盘。
       const spawned = await this.deps.ledger.upsertWorker(p.dialogObjectId, workerId, (prev) => {
         if (!prev) return undefined
         const nextTask = applyStatusTransition(prev.task, 'running', { now })
-        return { ...prev, task: nextTask, updated_at: now }
+        const incarnations = patchIncarnationBySeq(prev.incarnations, 1, { session_ref: spawnedHandle.session_ref })
+        return { ...prev, task: nextTask, incarnations, updated_at: now }
       })
       await this.appendEvent(workerId, 1, 'spawned', { impl })
       return spawned as LedgerWorker
@@ -255,7 +257,9 @@ export class WorkerHarness {
     await inbox.flush(async (item) => {
       const found = await this.deps.ledger.findWorker(workerId)
       if (!found) throw new WorkerNotFoundError(workerId)
-      const incarnation = lastIncarnation(found.worker)
+      // 主线化身,不能用"数组最后一个"——fork 之后数组末尾是侧问分支,投递必须仍然打到
+      // 主线(protocol-agent-v3 §5.3:fork 不影响主线)。
+      const incarnation = mainlineIncarnation(found.worker)
       const adapter = this.deps.adapters.get(incarnation.impl as WorkerImplId)
       if (!adapter) {
         throw new Error(`WorkerHarness.sendToWorker: no adapter registered for impl '${incarnation.impl}'`)
@@ -264,6 +268,7 @@ export class WorkerHarness {
         worker_id: workerId,
         seq: incarnation.seq,
         impl: incarnation.impl as WorkerImplId,
+        session_ref: incarnation.session_ref,
       }
       // WorkerExitedError 原样向上抛出,不在此拦截伪装——拦截并转入 §5.3 透明接续是
       // Task 8 的范围(会修改本文件),Task 7 只保证正常路径投递正确。
@@ -278,12 +283,18 @@ export class WorkerHarness {
   ): Promise<{ chunk: string; nextCursor: OutputCursor }> {
     const found = await this.deps.ledger.findWorker(workerId)
     if (!found) throw new WorkerNotFoundError(workerId)
-    const incarnation = lastIncarnation(found.worker)
+    // 主线化身,同 sendToWorker——读输出默认读主线,不被 fork 出的侧问分支顶替。
+    const incarnation = mainlineIncarnation(found.worker)
     const adapter = this.deps.adapters.get(incarnation.impl as WorkerImplId)
     if (!adapter) {
       throw new Error(`WorkerHarness.readWorkerOutput: no adapter registered for impl '${incarnation.impl}'`)
     }
-    const handle: IncarnationHandle = { worker_id: workerId, seq: incarnation.seq, impl: incarnation.impl as WorkerImplId }
+    const handle: IncarnationHandle = {
+      worker_id: workerId,
+      seq: incarnation.seq,
+      impl: incarnation.impl as WorkerImplId,
+      session_ref: incarnation.session_ref,
+    }
     return adapter.readOutput(handle, cursor)
   }
 
@@ -300,11 +311,17 @@ export class WorkerHarness {
       // 幂等:已是终态(含此前已经 kill 过)直接返回,不重复调 adapter.kill、不重复写台账/事件。
       if (isTerminalStatus(worker.task.status)) return
 
-      const incarnation = lastIncarnation(worker)
+      // 主线化身——kill 必须打在主线上,不能被 fork 出的侧问分支顶替(protocol-agent-v3 §5.3)。
+      const incarnation = mainlineIncarnation(worker)
       const implId = incarnation.impl as WorkerImplId
       const adapter = this.deps.adapters.get(implId)
       if (adapter) {
-        const handle: IncarnationHandle = { worker_id: workerId, seq: incarnation.seq, impl: implId }
+        const handle: IncarnationHandle = {
+          worker_id: workerId,
+          seq: incarnation.seq,
+          impl: implId,
+          session_ref: incarnation.session_ref,
+        }
         await adapter.kill(handle)
       }
 
@@ -312,7 +329,8 @@ export class WorkerHarness {
       await this.deps.ledger.upsertWorker(dialogObjectId, workerId, (prev) => {
         if (!prev) return undefined
         const nextTask = applyStatusTransition(prev.task, 'cancelled', { now })
-        const incarnations = markLastIncarnation(prev.incarnations, {
+        // 按 seq 精确定位主线化身条目,不假设它是数组最后一个(fork 之后数组末尾是 fork 化身)。
+        const incarnations = patchIncarnationBySeq(prev.incarnations, incarnation.seq, {
           state: 'exited',
           ended_at: now,
           ended_reason: 'killed',
@@ -328,7 +346,9 @@ export class WorkerHarness {
       const found = await this.deps.ledger.findWorker(workerId)
       if (!found) throw new WorkerNotFoundError(workerId)
       const { worker, dialogObjectId } = found
-      const incarnation = lastIncarnation(worker)
+      // 侧问永远从当前主线化身分叉,不是"数组最后一个"——否则连续两次 query_worker 会让
+      // 第二次 fork 挂在第一次 fork 的分支下面,而不是都从主线分叉(protocol-agent-v3 §5.3)。
+      const incarnation = mainlineIncarnation(worker)
       const implId = incarnation.impl as WorkerImplId
       const adapter = this.deps.adapters.get(implId)
       if (!adapter) {
@@ -345,13 +365,16 @@ export class WorkerHarness {
       await this.deps.ledger.upsertWorker(dialogObjectId, workerId, (prev) => {
         if (!prev) return undefined
         // fork 是一次性侧问,不影响主线 task.status(protocol-agent-v3 §5.3:"不影响主线")。
+        // forked_from 标记它不在主线化身链上(§3);session_ref 取 forkHandle 自己的引用,
+        // 不是父化身的(§6.1 IncarnationHandle 自描述,handle.session_ref 就是 fork 化身真值)。
         const forkIncarnation: Incarnation = {
           seq: forkHandle.seq,
           impl: implId,
           state: 'running',
           workspace: incarnation.workspace,
-          session_ref: incarnation.session_ref,
+          session_ref: forkHandle.session_ref,
           started_at: now,
+          forked_from: incarnation.seq,
         }
         return { ...prev, incarnations: [...prev.incarnations, forkIncarnation], updated_at: now }
       })
@@ -370,27 +393,57 @@ export class WorkerHarness {
       if (!found) return // 未知 worker,理论不该发生;防御性丢弃,不抛给 adapter 的回调
       const { worker, dialogObjectId } = found
 
-      const latest = lastIncarnation(worker)
-      if (latest.seq !== h.seq) return // 非当前化身的迟到回调,忽略
-      if (isTerminalStatus(worker.task.status)) return // 已是终态(如已被 killWorker 落定),回调迟到,忽略
+      const target = worker.incarnations.find((inc) => inc.seq === h.seq)
+      if (!target) return // 未知化身(理论不该发生),防御性丢弃
 
       // WorkerAdapter.onStateChange 只携带 (handle, state) 三态,没有 endReason——kill 触发的
-      // exited 已经由 killWorker 自己直接落定台账(见上面的终态短路),能走到这里、还没被
+      // exited 已经由 killWorker 自己直接落定台账(见下面两处终态短路),能走到这里、还没被
       // 判定为终态的 exited,只可能是"化身自然结束"(非 kill),endReason 取 completed。
       // 真正的崩溃(crashed)辨别依赖主动巡检(protocol-agent-v3 §6.3/§12),不在这条被动
       // 回调路径的能力范围内,由 Task 9 的 reconcileOnStartup 补正。
       const endReason: IncarnationEndReason | undefined = state === 'exited' ? 'completed' : undefined
+      const now = this.deps.now()
+
+      if (target.forked_from !== undefined) {
+        // fork 化身(一次性侧问分支)自己的生命周期只更新它自己的化身条目,不影响主线
+        // task.status——protocol-agent-v3 §5.3"fork 不影响主线"在这里的具体体现:即使这是
+        // fork 化身的终态回调,也绝不能像"当前化身"那样去推进 task 状态机。
+        if (target.state === 'exited') return // 已终态,迟到回调忽略
+        await this.deps.ledger.upsertWorker(dialogObjectId, h.worker_id, (prev) => {
+          if (!prev) return undefined
+          const incarnations = patchIncarnationBySeq(
+            prev.incarnations,
+            h.seq,
+            state === 'exited' ? { state, ended_at: now, ended_reason: endReason } : { state }
+          )
+          return { ...prev, incarnations, updated_at: now }
+        })
+        await this.appendEvent(h.worker_id, h.seq, 'state_changed', { to: state })
+        return
+      }
+
+      // 主线分支:只有"当前主线化身"的回调才驱动 task.status——fork 之后数组末尾是侧问
+      // 分支,不能再用"数组最后一个"判定"是不是当前化身"。
+      const mainline = mainlineIncarnation(worker)
+      if (mainline.seq !== h.seq) return // 非当前主线化身的迟到回调,忽略
+      if (isTerminalStatus(worker.task.status)) return // 已是终态(如已被 killWorker 落定),回调迟到,忽略
+
       // idle 是否算"等输入"本属 manager 判断职责(protocol-agent-v3 §5.2);P3 尚无 manager,
       // 保守默认 idle 一律记 waiting_input,P4 接线后可按需要覆盖这条映射。
       const waitingInput = state === 'idle' ? true : undefined
       const nextStatus: TaskStatus = taskStatusFromIncarnation(state, endReason, waitingInput)
 
-      const now = this.deps.now()
       await this.deps.ledger.upsertWorker(dialogObjectId, h.worker_id, (prev) => {
         if (!prev) return undefined
+        // 同状态重复回调(如 adapter 偶发对同一次转变重复通知)不是合法状态机边(VALID_TRANSITIONS
+        // 没有自环),会被 applyStatusTransition 当非法转换抛错——那样 upsertWorker 直接
+        // reject,连下面的 appendEvent 都不会跑,回调被 handleStateChange 的外层 catch 静默
+        // 吞掉,事件跟着一起丢。提前短路成 no-op,让调用方仍能走到 appendEvent 记录这次回调。
+        if (nextStatus === prev.task.status) return prev
         const nextTask = applyStatusTransition(prev.task, nextStatus, { now })
-        const incarnations = markLastIncarnation(
+        const incarnations = patchIncarnationBySeq(
           prev.incarnations,
+          h.seq,
           state === 'exited' ? { state, ended_at: now, ended_reason: endReason } : { state }
         )
         return { ...prev, task: nextTask, incarnations, updated_at: now }
@@ -439,12 +492,27 @@ export class WorkerHarness {
   }
 }
 
-function lastIncarnation(worker: LedgerWorker): Incarnation {
-  return worker.incarnations[worker.incarnations.length - 1]
+/**
+ * 主线化身链上的最新化身:排除所有 forked_from 有值的一次性侧问分支(protocol-agent-v3
+ * §3、§5.3)。fork 出的化身会被 push 进同一个 incarnations 数组,若继续取"数组最后一个"
+ * 当作当前化身,fork 之后 send_to_worker / kill_worker / read_worker_output / 化身自然结束
+ * 的状态回调全部会被错误地转发到侧问分支——主线因此失联(实测复现:spawn → queryWorker →
+ * sendToWorker/killWorker 都 target 到 fork 的 seq,而不是主线 seq)。
+ *
+ * 前提:worker.incarnations 非空(每个已注册的 worker 至少有 spawn 落下的 seq=1 主线化身)。
+ */
+function mainlineIncarnation(worker: LedgerWorker): Incarnation {
+  const mainline = worker.incarnations.filter((inc) => inc.forked_from === undefined)
+  return mainline[mainline.length - 1]
 }
 
-function markLastIncarnation(incarnations: Incarnation[], patch: Partial<Incarnation>): Incarnation[] {
-  return incarnations.map((inc, idx) => (idx === incarnations.length - 1 ? { ...inc, ...patch } : inc))
+/**
+ * 按 seq 精确定位并 patch 一个化身条目,不假设它是数组的最后一个——fork 之后数组末尾是
+ * fork 化身,继续用"改最后一个"的旧写法会把主线的落定动作(如 kill 后的 exited)误写进
+ * fork 条目,或反过来让 fork 化身自己的状态变化误写进主线条目,两个方向都是错的。
+ */
+function patchIncarnationBySeq(incarnations: Incarnation[], seq: number, patch: Partial<Incarnation>): Incarnation[] {
+  return incarnations.map((inc) => (inc.seq === seq ? { ...inc, ...patch } : inc))
 }
 
 // re-export for callers that only import from harness.ts

@@ -50,6 +50,9 @@ export interface Incarnation {
   started_at: string
   ended_at?: string
   ended_reason?: IncarnationEndReason
+  /** 本化身是从哪个 seq 的化身 fork 出来的一次性侧问分支;有值即表示它不在主线化身链上,
+   * 不参与 send_to_worker / kill_worker / 化身接续等主线判定(protocol-agent-v3 §3、§5.3)。 */
+  forked_from?: number
 }
 
 /** 台账中的 worker 条目(task 数据归并于此,agent 即真相源)(protocol-agent-v3 §3) */

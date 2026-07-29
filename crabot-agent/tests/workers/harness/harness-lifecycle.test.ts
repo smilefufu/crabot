@@ -44,6 +44,7 @@ class FakeAdapter implements WorkerAdapter {
   readonly sendInputCalls: Array<{ h: IncarnationHandle; text: string; opts?: { raw?: boolean } }> = []
   readonly killCalls: IncarnationHandle[] = []
   readonly forkCalls: Array<{ prev: IncarnationRef; forkInput: string }> = []
+  readonly readOutputCalls: IncarnationHandle[] = []
   private readonly states = new Map<string, WorkerContractState>()
   private nextForkSeq = 2
 
@@ -62,7 +63,7 @@ class FakeAdapter implements WorkerAdapter {
   async spawn(spec: SpawnSpec): Promise<IncarnationHandle> {
     this.spawnCalls.push(spec)
     if (this.opts.spawnShouldFail) throw this.opts.spawnShouldFail
-    const handle: IncarnationHandle = { worker_id: spec.worker_id, seq: 1, impl: this.implId }
+    const handle: IncarnationHandle = { worker_id: spec.worker_id, seq: 1, impl: this.implId, session_ref: `ref-${spec.worker_id}#1` }
     this.states.set(handleKey(handle), 'running')
     return handle
   }
@@ -74,7 +75,10 @@ class FakeAdapter implements WorkerAdapter {
   async fork(prev: IncarnationRef, forkInput: string): Promise<IncarnationHandle> {
     this.forkCalls.push({ prev, forkInput })
     if (this.opts.forkShouldFail) throw this.opts.forkShouldFail
-    const handle: IncarnationHandle = { worker_id: prev.worker_id, seq: this.nextForkSeq++, impl: this.implId }
+    const seq = this.nextForkSeq++
+    // fork 自己的 session_ref，刻意与 prev.session_ref(父化身/主线的引用)不同，好让
+    // 回归测试能验证 harness 没有把父化身的引用错抄给 fork 化身(protocol-agent-v3 §6.1)。
+    const handle: IncarnationHandle = { worker_id: prev.worker_id, seq, impl: this.implId, session_ref: `fork-ref-${prev.worker_id}#${seq}` }
     this.states.set(handleKey(handle), 'running')
     return handle
   }
@@ -84,7 +88,8 @@ class FakeAdapter implements WorkerAdapter {
     if (this.opts.sendInputBehavior) await this.opts.sendInputBehavior(h, text, opts)
   }
 
-  async readOutput(_h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
+  async readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
+    this.readOutputCalls.push(h)
     return { chunk: '', nextCursor: cursor }
   }
 
@@ -179,6 +184,9 @@ describe('WorkerHarness.spawnWorker', () => {
     expect(worker.task.status).toBe('running')
     expect(worker.incarnations).toHaveLength(1)
     expect(worker.incarnations[0]).toMatchObject({ seq: 1, impl: 'builtin', state: 'running' })
+    // adapter.spawn 返回的 handle.session_ref 原子补写进初始化身条目，不再是占位空串
+    // (protocol-agent-v3 §6.1，harness 从 handle 直接取真值存台账)。
+    expect(worker.incarnations[0].session_ref).toBe(`ref-${worker.worker_id}#1`)
 
     // provision 在 spawn 之前被调用,且拿到了解析后的 workspace
     expect(fake.provisionCalls).toHaveLength(1)
@@ -221,7 +229,7 @@ describe('WorkerHarness.handleStateChange', () => {
     const worker = await harness.spawnWorker(spawnParams())
     events.length = 0
 
-    fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin' }, 'idle')
+    fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }, 'idle')
 
     // handleStateChange 签名对齐 adapter 的同步回调(h, state) => void,内部是 fire-and-forget
     // 的异步台账更新——用轮询等待收敛(与 tests/workers/contract-suite.ts 的 waitForState
@@ -240,7 +248,7 @@ describe('WorkerHarness.handleStateChange', () => {
     expect(stateEvents[0].detail).toEqual({ to: 'idle' })
 
     // 化身自然结束(非 kill)→ completed
-    fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin' }, 'exited')
+    fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }, 'exited')
     await waitUntil(async () => {
       const [w2] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
       return w2.task.status === 'completed'
@@ -255,7 +263,7 @@ describe('WorkerHarness.handleStateChange', () => {
     const worker = await harness.spawnWorker(spawnParams())
     await harness.killWorker(worker.worker_id)
 
-    fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin' }, 'idle')
+    fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }, 'idle')
 
     // 确定性同步屏障(不用 setTimeout 猜时序):emitStateChange 同步触发的
     // handleStateChange 在其调用栈内同步完成了对同一 worker_id 的 per-worker 锁排队
@@ -280,7 +288,7 @@ describe('WorkerHarness.sendToWorker', () => {
     await harness.sendToWorker(worker.worker_id, '继续干活')
 
     expect(fake.sendInputCalls).toHaveLength(1)
-    expect(fake.sendInputCalls[0].h).toEqual({ worker_id: worker.worker_id, seq: 1, impl: 'builtin' })
+    expect(fake.sendInputCalls[0].h).toEqual({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` })
     expect(fake.sendInputCalls[0].text).toBe('继续干活')
 
     const inputEvents = events.filter((e) => e.kind === 'input_sent')
@@ -322,7 +330,7 @@ describe('WorkerHarness.killWorker', () => {
     await harness.killWorker(worker.worker_id, '用户要求终止')
 
     expect(fake.killCalls).toHaveLength(1)
-    expect(fake.killCalls[0]).toEqual({ worker_id: worker.worker_id, seq: 1, impl: 'builtin' })
+    expect(fake.killCalls[0]).toEqual({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` })
 
     const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
     expect(w.task.status).toBe('cancelled')
@@ -376,6 +384,11 @@ describe('WorkerHarness.queryWorker', () => {
     expect(w.incarnations).toHaveLength(2)
     expect(w.incarnations[1]).toMatchObject({ seq: 2, impl: 'builtin', state: 'running' })
     expect(w.task.status).toBe('running') // fork 不影响主线状态
+
+    // forked_from 标记它不在主线化身链上(protocol-agent-v3 §3);session_ref 取
+    // adapter.fork 返回的 handle 自己的引用,不是从主线(seq=1)照抄的(§6.1)。
+    expect(w.incarnations[1].forked_from).toBe(1)
+    expect(w.incarnations[1].session_ref).not.toBe(w.incarnations[0].session_ref)
 
     const stateEvents = events.filter((e) => e.kind === 'state_changed')
     expect(stateEvents).toHaveLength(1)
@@ -432,6 +445,122 @@ describe('WorkerHarness 锁纪律', () => {
     expect(sendResolved).toBe(true)
     expect(fake.sendInputCalls).toHaveLength(1)
     expect(fake.sendInputCalls[0].text).toBe('并发消息')
+  })
+})
+
+describe('WorkerHarness — fork 不劫持主线(protocol-agent-v3 §5.3 回归)', () => {
+  it('queryWorker fork 之后,sendToWorker/readWorkerOutput/killWorker 仍作用于主线化身(seq=1),不被 fork(seq=2)顶替', async () => {
+    const { harness, fake } = await makeHarness({ caps: { fork: true } })
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    const { forkSeq } = await harness.queryWorker(worker.worker_id, '侧问一下')
+    expect(forkSeq).toBe(2)
+
+    // 修复前:lastIncarnation() 取数组最后一个,fork 之后就是 seq=2 的侧问分支——
+    // sendToWorker/killWorker/readWorkerOutput 全部会错误地 target 到它,主线失联。
+    await harness.sendToWorker(worker.worker_id, '继续干活')
+    expect(fake.sendInputCalls).toHaveLength(1)
+    expect(fake.sendInputCalls[0].h.seq).toBe(1)
+
+    await harness.readWorkerOutput(worker.worker_id, { offset: 0 })
+    expect(fake.readOutputCalls).toHaveLength(1)
+    expect(fake.readOutputCalls[0].seq).toBe(1)
+
+    await harness.killWorker(worker.worker_id, '测试终止')
+    expect(fake.killCalls).toHaveLength(1)
+    expect(fake.killCalls[0].seq).toBe(1)
+
+    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(w.task.status).toBe('cancelled') // 主线被正确终结,不是台账显示 fork 被 kill 而主线孤儿
+    const mainEntry = w.incarnations.find((i) => i.seq === 1)!
+    expect(mainEntry.state).toBe('exited')
+    expect(mainEntry.ended_reason).toBe('killed')
+    // fork 化身条目不受主线 kill 动作影响(kill 只调用了 adapter.kill 一次,且 target 是 seq=1)。
+    const forkEntry = w.incarnations.find((i) => i.seq === 2)!
+    expect(forkEntry.state).toBe('running')
+  })
+
+  it('processStateChange:fork 化身(seq=2)自己的状态变化只更新它自己的化身条目,不推进主线 task.status', async () => {
+    const { harness, fake } = await makeHarness({ caps: { fork: true } })
+    const worker = await harness.spawnWorker(spawnParams())
+    await harness.queryWorker(worker.worker_id, '侧问一下')
+    events.length = 0
+
+    // fork 化身自然结束(如 builtin 的 runForkBurst 跑完侧问),不是 harness.killWorker 触发。
+    fake.emitStateChange({ worker_id: worker.worker_id, seq: 2, impl: 'builtin', session_ref: 'fork-ref' }, 'exited')
+
+    await waitUntil(async () => {
+      const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      return w.incarnations.find((i) => i.seq === 2)?.state === 'exited'
+    })
+
+    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    // 主线(seq=1)完全不受 fork 结束的影响——修复前 lastIncarnation() 会把这次回调当成
+    // "当前化身"的回调,错误地把 task.status 推进到 completed。
+    expect(w.task.status).toBe('running')
+    const mainEntry = w.incarnations.find((i) => i.seq === 1)!
+    expect(mainEntry.state).toBe('running')
+
+    const forkEntry = w.incarnations.find((i) => i.seq === 2)!
+    expect(forkEntry.state).toBe('exited')
+    expect(forkEntry.ended_reason).toBe('completed')
+
+    const stateEvents = events.filter((e) => e.kind === 'state_changed' && e.seq === 2)
+    expect(stateEvents).toHaveLength(1)
+    expect(stateEvents[0].detail).toEqual({ to: 'exited' })
+  })
+})
+
+describe('WorkerHarness.readWorkerOutput', () => {
+  it('正常路径:透传 adapter.readOutput 的结果', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+
+    const result = await harness.readWorkerOutput(worker.worker_id, { offset: 0 })
+
+    expect(result).toEqual({ chunk: '', nextCursor: { offset: 0 } })
+    expect(fake.readOutputCalls).toHaveLength(1)
+    expect(fake.readOutputCalls[0]).toEqual({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` })
+  })
+
+  it('不存在的 worker_id → WorkerNotFoundError', async () => {
+    const { harness } = await makeHarness()
+    await expect(harness.readWorkerOutput('w-does-not-exist', { offset: 0 })).rejects.toThrow(WorkerNotFoundError)
+  })
+
+  it('化身实现没有注册对应 adapter → 抛错,不静默返回空结果', async () => {
+    const { harness, fake, adaptersMap } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    adaptersMap.delete(fake.implId)
+
+    await expect(harness.readWorkerOutput(worker.worker_id, { offset: 0 })).rejects.toThrow(/no adapter registered/)
+  })
+})
+
+describe('WorkerHarness.handleStateChange — 同状态重复回调', () => {
+  it('重复收到同一状态的回调不抛错、不丢事件、台账状态保持不变', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    // worker 已是 running;再收一次 'running' 回调——taskStatusFromIncarnation 算出的
+    // nextStatus 与当前 task.status 相同,VALID_TRANSITIONS 里 running 没有到 running 的
+    // 自环边,applyStatusTransition 会抛 InvalidTaskTransitionError。修复前这个错误在
+    // handleStateChange 的 fire-and-forget catch 里被静默吞掉,appendEvent 也不会跑,
+    // 这次回调的事件凭空丢失。
+    fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }, 'running')
+
+    // 用一次已知会走同一把 per-worker 锁的调用作确定性屏障(手法与本文件"已终态 worker
+    // 的迟到状态回调被忽略"用例一致):等它 resolve,前面排队的状态回调必定已经跑完。
+    await harness.sendToWorker(worker.worker_id, '还在干活')
+
+    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(w.task.status).toBe('running') // 没有被非法转换破坏,也没有抛出未捕获错误
+
+    const stateEvents = events.filter((e) => e.kind === 'state_changed')
+    expect(stateEvents).toHaveLength(1) // 事件仍然被记录,没有跟着错误一起被吞掉
+    expect(stateEvents[0].detail).toEqual({ to: 'running' })
   })
 })
 
