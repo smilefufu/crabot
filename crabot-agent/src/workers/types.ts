@@ -1,4 +1,4 @@
-import type { ToolDefinition, LLMAdapter, EngineMessage } from '../engine/index.js'
+import type { ToolDefinition, LLMAdapter } from '../engine/index.js'
 import type { Resolvable } from '../engine/types.js'
 
 export type WorkerImplId = 'builtin' | 'claude-code' | 'codex'

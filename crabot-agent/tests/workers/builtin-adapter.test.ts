@@ -1249,6 +1249,58 @@ describe('BuiltinWorkerAdapter', () => {
     expect(runEngineSpy).toHaveBeenCalledTimes(1)
   })
 
+  // --- onStateChange 异常隔离：观察者永不阻断状态机 ---
+
+  it('onStateChange 回调同步抛错 → 状态机继续运行，终态正确，错误仅 console.error', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const onStateChangeErrors: Error[] = []
+
+    const adapter = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      onStateChange: () => {
+        const err = new Error('onStateChange observer error')
+        onStateChangeErrors.push(err)
+        throw err
+      },
+    })
+
+    const s = spec({
+      adapter: makeAdapter([
+        { text: '首轮回复', stopReason: 'end_turn' },
+        { text: '第二轮回复', stopReason: 'end_turn' },
+      ]),
+    })
+
+    // spawn 触发 transitionState(running→idle)，其中 onStateChange 会抛错。
+    // 状态机应该继续运转，不被回调错误打断。
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'idle')
+
+    // 第一次 transitionState 调用（spawn→idle）抛错被捕获
+    expect(onStateChangeErrors.length).toBeGreaterThan(0)
+    expect(consoleErrorSpy).toHaveBeenCalled()
+
+    // sendInput(idle→running)：状态机从 idle 正常转到 running，再回 idle，
+    // 第二次和第三次 onStateChange 调用都会抛错。
+    const errorCountBefore = onStateChangeErrors.length
+    await adapter.sendInput(h, '后续问题')
+    await waitState(adapter, h, 'idle')
+
+    // 状态机应该跑到底，终态正确，onStateChange 又被调用多次且每次都抛错
+    expect(await adapter.state(h)).toBe('idle')
+    expect(onStateChangeErrors.length).toBeGreaterThan(errorCountBefore)
+
+    // console.error 应该被多次调用（每次 onStateChange 抛错一次）
+    expect(consoleErrorSpy.mock.calls.length).toBeGreaterThan(1)
+
+    // 验证 meta 文件的最终状态正确（不被 onStateChange 抛错覆盖）
+    const metaRaw = await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')
+    const meta = JSON.parse(metaRaw)
+    expect(meta.state).toBe('idle')
+
+    consoleErrorSpy.mockRestore()
+  })
+
   // --- fork: 提交次序对齐 resume(writeMeta 成功后才 instances.set) ---
 
   it('fork: writeMeta 抛错 → instances 无残留(提交次序与 resume 对齐)', async () => {

@@ -800,7 +800,13 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
   private async transitionState(instance: WorkerInstance, handle: IncarnationHandle, state: WorkerContractState): Promise<void> {
     await this.writeMeta(instance, { state })
     instance.state = state
-    this.deps.onStateChange?.(handle, state)
+    // 观察者（onStateChange）的异常永远不能中断状态机的推进。任何回调错误都被捕获
+    // 并仅作 console.error 记录，防止阻塞状态转移或导致后续 burst/sendInput 卡死。
+    try {
+      this.deps.onStateChange?.(handle, state)
+    } catch (err) {
+      console.error(`[BuiltinWorkerAdapter] onStateChange callback error for ${handle.worker_id}#${handle.seq}:`, err)
+    }
   }
 
   private async transitionExited(
@@ -817,7 +823,13 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     instance.state = 'exited'
     instance.ended_reason = ended_reason
     if (outcome !== undefined) instance.outcome = outcome
-    this.deps.onStateChange?.(handle, 'exited')
+    // 观察者（onStateChange）的异常永远不能中断状态机的推进。任何回调错误都被捕获
+    // 并仅作 console.error 记录，防止阻塞状态转移或导致后续 burst/sendInput 卡死。
+    try {
+      this.deps.onStateChange?.(handle, 'exited')
+    } catch (err) {
+      console.error(`[BuiltinWorkerAdapter] onStateChange callback error for ${handle.worker_id}#${handle.seq}:`, err)
+    }
   }
 
   private async writeMeta(
