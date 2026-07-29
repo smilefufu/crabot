@@ -19,6 +19,24 @@ function detectTmux(): boolean {
 }
 const tmuxAvailable = detectTmux()
 
+/** 清理所有匹配前缀的 tmux 会话——兜底处理测试泄漏 */
+async function cleanupTmuxSessions(prefix = 'crabot-w-cctest-'): Promise<void> {
+  if (!tmuxAvailable) return
+  try {
+    const output = execFileSync('tmux', ['ls', '-F', '#{session_name}'], { encoding: 'utf-8' })
+    const sessions = output.trim().split('\n').filter((s) => s.startsWith(prefix))
+    for (const session of sessions) {
+      try {
+        execFileSync('tmux', ['kill-session', '-t', session], { stdio: 'ignore' })
+      } catch {
+        // 会话已不存在或其他错误，忽略
+      }
+    }
+  } catch {
+    // tmux ls 失败或其他问题，忽略
+  }
+}
+
 const MOCK_CLI = path.resolve(__dirname, 'fixtures/mock-cli.mjs')
 const FAKE_CLAUDE_VERSION = path.resolve(__dirname, 'fixtures/fake-claude-version.mjs')
 const FAKE_CLAUDE_FORK = path.resolve(__dirname, 'fixtures/fake-claude-fork.mjs')
@@ -101,6 +119,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter (tmux + mock CLI)', () => {
   })
 
   afterEach(async () => {
+    await cleanupTmuxSessions()
     await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
     await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
   })
@@ -111,7 +130,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter (tmux + mock CLI)', () => {
     const adapter = new ClaudeCodeAdapter({ dataDir, tmux, claudeBin: claudeBinFor(script, stopHookCmd) })
     // provision 建 .claude/ 目录 —— hook 写入目标目录必须先存在,否则 printf >> 静默失败。
     await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
-    return { adapter, workerId: `w-${randomUUID().slice(0, 8)}` }
+    return { adapter, workerId: `cctest-${randomUUID().slice(0, 8)}` }
   }
 
   function makeSpec(workerId: string, prompt: string): SpawnSpec {
@@ -281,7 +300,7 @@ describe('ClaudeCodeAdapter — syncState 锁纪律(P2 Task 4 评审 Important #
     async () => {
       const tmux = new RaceTmux()
       const adapter = new ClaudeCodeAdapter({ dataDir, tmux, claudeBin: 'unused-in-this-test' })
-      const workerId = `w-${randomUUID().slice(0, 8)}`
+      const workerId = `cctest-${randomUUID().slice(0, 8)}`
       const h = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
 
       // A:第一次 state() 读到 stopCount=0(还没有 stop 事件),卡在 isAlive() 上等我们放行。
@@ -324,6 +343,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — spawn 提交纪律(P2 Tas
   })
 
   afterEach(async () => {
+    await cleanupTmuxSessions()
     await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
     await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
   })
@@ -339,7 +359,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — spawn 提交纪律(P2 Tas
       // 只用来验证 tmux 会话能正常起来、sendText 能正常注入。
       const adapter = new ClaudeCodeAdapter({ dataDir, tmux, claudeBin: `bash -c 'sleep 5'` })
       await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
-      const workerId = `w-${randomUUID().slice(0, 8)}`
+      const workerId = `cctest-${randomUUID().slice(0, 8)}`
       const spec: SpawnSpec = { worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } }
 
       await expect(adapter.spawn(spec)).rejects.toThrow()
@@ -380,7 +400,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — spawn 提交纪律(P2 Tas
       const tmux = new NewSessionOkSendTextFailsTmux()
       const adapter = new ClaudeCodeAdapter({ dataDir, tmux, claudeBin: `bash -c 'sleep 5'` })
       await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
-      const workerId = `w-${randomUUID().slice(0, 8)}`
+      const workerId = `cctest-${randomUUID().slice(0, 8)}`
       const spec: SpawnSpec = { worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } }
 
       await expect(adapter.spawn(spec)).rejects.toThrow('simulated sendText failure')
@@ -481,7 +501,7 @@ describe('ClaudeCodeAdapter — session_ref UUID 边界校验', () => {
 
   it('resume() 拒绝非 UUID 格式的 session_ref(含 shell 注入特征),不执行任何命令', async () => {
     const adapter = new ClaudeCodeAdapter({ dataDir, claudeBin: 'unused' })
-    const workerId = `w-${randomUUID().slice(0, 8)}`
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
 
     // 先 spawn 一个真实化身以供 resume 前置条件
     // 但这里其实需要一个已 exited 的化身,测试难度较高。改为直接测试 fork() 的拒绝。
@@ -500,7 +520,7 @@ describe('ClaudeCodeAdapter — session_ref UUID 边界校验', () => {
 
   it('fork() 拒绝非 UUID 格式的 session_ref(含 shell 注入特征),不执行子进程', async () => {
     const adapter = new ClaudeCodeAdapter({ dataDir, claudeBin: 'unused' })
-    const workerId = `w-${randomUUID().slice(0, 8)}`
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
 
     const maliciousSessionRef = 'x; touch /tmp/pwned'
 
@@ -514,7 +534,7 @@ describe('ClaudeCodeAdapter — session_ref UUID 边界校验', () => {
 
   it('resume() 拒绝空白或特殊字符 session_ref', async () => {
     const adapter = new ClaudeCodeAdapter({ dataDir, claudeBin: 'unused' })
-    const workerId = `w-${randomUUID().slice(0, 8)}`
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
 
     const invalidRefs = ['', ' ', '$(whoami)', '`id`', '{test}', '../../../etc/passwd']
 
@@ -527,7 +547,7 @@ describe('ClaudeCodeAdapter — session_ref UUID 边界校验', () => {
 
   it('fork() 拒绝空白或特殊字符 session_ref', async () => {
     const adapter = new ClaudeCodeAdapter({ dataDir, claudeBin: 'unused' })
-    const workerId = `w-${randomUUID().slice(0, 8)}`
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
 
     const invalidRefs = ['', ' ', '$(whoami)', '`id`', '{test}', '../../../etc/passwd']
 
@@ -540,7 +560,7 @@ describe('ClaudeCodeAdapter — session_ref UUID 边界校验', () => {
 
   it('resume() 接受有效 UUID 格式的 session_ref(至少通过前置校验)', async () => {
     const adapter = new ClaudeCodeAdapter({ dataDir, claudeBin: 'unused' })
-    const workerId = `w-${randomUUID().slice(0, 8)}`
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
     const validUuid = randomUUID()
 
     // 会因为"不存在该化身"抛错,但不是 session_ref 格式错误
@@ -551,7 +571,7 @@ describe('ClaudeCodeAdapter — session_ref UUID 边界校验', () => {
 
   it('fork() 接受有效 UUID 格式的 session_ref(至少通过前置校验)', async () => {
     const adapter = new ClaudeCodeAdapter({ dataDir, claudeBin: 'unused' })
-    const workerId = `w-${randomUUID().slice(0, 8)}`
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
     const validUuid = randomUUID()
 
     // 会因为"不存在该化身"抛错,但不是 session_ref 格式错误
@@ -573,6 +593,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.resume', () => {
   })
 
   afterEach(async () => {
+    await cleanupTmuxSessions()
     await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
     await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
   })
@@ -586,7 +607,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.resume', () => {
       const claudeBin = claudeBinFor([{ output: '第一轮输出', exit: true }], stopHookCmd, argvFile)
       const adapter = new ClaudeCodeAdapter({ dataDir, tmux, claudeBin })
       await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
-      const workerId = `w-${randomUUID().slice(0, 8)}`
+      const workerId = `cctest-${randomUUID().slice(0, 8)}`
 
       const h1 = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
       await waitForState(adapter, h1, 'exited')
@@ -632,7 +653,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.resume', () => {
       const claudeBin = claudeBinFor([{ output: '还在跑,不退出也不 emitStop' }], stopHookCmd)
       const adapter = new ClaudeCodeAdapter({ dataDir, tmux, claudeBin })
       await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
-      const workerId = `w-${randomUUID().slice(0, 8)}`
+      const workerId = `cctest-${randomUUID().slice(0, 8)}`
 
       const h1 = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
       const meta1 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string }
@@ -682,6 +703,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
   })
 
   afterEach(async () => {
+    await cleanupTmuxSessions()
     await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
     await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
   })
@@ -699,7 +721,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
       const claudeBin = forkClaudeBin(argvFile, '侧问回复内容')
       const adapter = new ClaudeCodeAdapter({ dataDir, tmux, claudeBin })
       await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
-      const workerId = `w-${randomUUID().slice(0, 8)}`
+      const workerId = `cctest-${randomUUID().slice(0, 8)}`
 
       // 主线:交互态,fake-claude-fork.mjs 在无 -p 的调用形态下空转不退出。
       const h1 = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
@@ -758,7 +780,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
       const claudeBin = forkClaudeBin(argvFile, '', 1)
       const adapter = new ClaudeCodeAdapter({ dataDir, tmux, claudeBin })
       await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
-      const workerId = `w-${randomUUID().slice(0, 8)}`
+      const workerId = `cctest-${randomUUID().slice(0, 8)}`
 
       const h1 = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
       const meta1 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string }
@@ -800,6 +822,7 @@ describe('ClaudeCodeAdapter.readTrace', () => {
   })
 
   afterEach(async () => {
+    await cleanupTmuxSessions()
     await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
     await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
     await fs.rm(claudeProjectsDir, { recursive: true, force: true }).catch(() => {})
@@ -884,7 +907,7 @@ describe('ClaudeCodeAdapter.readTrace', () => {
   it('按 ~/.claude/projects/<slug>/<session_id>.jsonl 解析并归一化', async () => {
     const tmux = new NoopTmux()
     const adapter = new ClaudeCodeAdapter({ dataDir, tmux, claudeBin: 'unused', claudeProjectsDir })
-    const workerId = `w-${randomUUID().slice(0, 8)}`
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
     const { h, sessionId } = await spawnedHandle(adapter, workerId)
 
     const slugDir = path.join(claudeProjectsDir, projectSlug(workspaceRoot))
@@ -914,7 +937,7 @@ describe('ClaudeCodeAdapter.readTrace', () => {
   it('cursor.offset 按行号跳过已读部分', async () => {
     const tmux = new NoopTmux()
     const adapter = new ClaudeCodeAdapter({ dataDir, tmux, claudeBin: 'unused', claudeProjectsDir })
-    const workerId = `w-${randomUUID().slice(0, 8)}`
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
     const { h, sessionId } = await spawnedHandle(adapter, workerId)
 
     const slugDir = path.join(claudeProjectsDir, projectSlug(workspaceRoot))
@@ -933,7 +956,7 @@ describe('ClaudeCodeAdapter.readTrace', () => {
   it('trace 文件不存在 → 返回空数组,不抛错', async () => {
     const tmux = new NoopTmux()
     const adapter = new ClaudeCodeAdapter({ dataDir, tmux, claudeBin: 'unused', claudeProjectsDir })
-    const workerId = `w-${randomUUID().slice(0, 8)}`
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
     const { h } = await spawnedHandle(adapter, workerId)
     // 不写任何 fixture 文件。
 
