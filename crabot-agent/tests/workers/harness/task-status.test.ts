@@ -8,7 +8,7 @@ import {
   taskStatusFromIncarnation,
 } from '../../../src/workers/harness/task-status'
 import type { TaskStatus } from '../../../src/workers/harness/ledger-types'
-import type { WorkerContractState, IncarnationEndReason } from '../../src/workers/types'
+import type { WorkerContractState, IncarnationEndReason } from '../../../src/workers/types'
 
 describe('v3 task 状态机', () => {
   describe('VALID_TRANSITIONS', () => {
@@ -94,7 +94,7 @@ describe('v3 task 状态机', () => {
     it('合法迁移应成功', () => {
       const task = applyStatusTransition(baseTask, 'running', { now })
       expect(task.status).toBe('running')
-      expect(task.updated_at).toBe(now)
+      expect(task.updated_at).toBeUndefined()
       expect(task.completed_at).toBeUndefined()
     })
 

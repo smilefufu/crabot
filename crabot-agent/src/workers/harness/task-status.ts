@@ -60,15 +60,18 @@ export class InvalidTaskTransitionError extends Error {
 /**
  * 应用状态转换并回填派生字段。
  *
- * 派生字段维护规则：
+ * 派生字段维护规则（task 子对象内）：
  * - completed_at：仅在转换至终态时回填为 now；其他情况清空
  * - error：仅在转换至 failed 时设置（opts.error）；其他情况清空
  * - outcome：按 opts.outcome 透传（如未指定则保持）
  *
+ * 语义边界：updated_at 是 LedgerWorker（父级）的字段，不是 task 子对象的字段。
+ * 维护职责归调用方（harness 在 upsertWorker 时设 LedgerWorker.updated_at）。
+ *
  * @param task 当前 task（来自 LedgerWorker.task）
  * @param to 目标状态
  * @param opts 可选参数：{ error?, outcome?, now }
- * @returns 新的 task 对象（不修改原 task）
+ * @returns 新的 task 对象（不修改原 task，仅回填上述派生字段）
  * @throws InvalidTaskTransitionError 若状态转换非法
  */
 export function applyStatusTransition(
@@ -83,11 +86,6 @@ export function applyStatusTransition(
   }
 
   const next: LedgerWorker['task'] = { ...task, status: to }
-
-  // 派生字段：updated_at（总是更新）
-  if (now) {
-    ;(next as any).updated_at = now
-  }
 
   // 派生字段：completed_at（仅终态回填）
   if (isTerminalStatus(to)) {
