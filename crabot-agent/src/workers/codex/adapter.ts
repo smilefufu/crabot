@@ -627,9 +627,10 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   // --- Internal ---
 
   /**
-   * 三源合成状态判定:事件文件(新 turn-complete 通知 → idle) > tmux isAlive(false →
-   * exited) > 默认 running。与内存态不同则在互斥锁内原子迁移(改内存 + 写 meta)。判定与
-   * 提交整体在锁内完成,理由与 cc 完全一致(见文件头注释,避免过期快照覆盖并发落定的新结果)。
+   * 三源合成状态判定:tmux isAlive(false → exited,终态优先) > 事件文件(会话还活着时,新
+   * turn-complete 通知 → idle) > 默认 running。与内存态不同则在互斥锁内原子迁移(改内存 +
+   * 写 meta)。判定与提交整体在锁内完成,理由与 cc 完全一致(见 cc adapter.ts 文件头注释,
+   * 避免过期快照覆盖并发落定的新结果)。
    */
   private async syncState(runtime: Runtime, h: IncarnationHandle): Promise<{ state: WorkerContractState; stopCount: number }> {
     if (runtime.state === 'exited') return { state: 'exited', stopCount: runtime.stopBaseline }

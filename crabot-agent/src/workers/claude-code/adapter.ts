@@ -17,8 +17,10 @@
  * exited(crashed)(不是 killed——这不是用户发起的 kill),不放任 running;spawn 仍然 reject。
  *
  * state 三源合成,按优先级依次判定(前一源给出确定结果就不再看后一源):
- *   1. 事件文件:自上一次 sendInput(或 spawn)以来出现过新的 'stop' 事件 → idle;
- *   2. tmux isAlive() 为 false → exited(是否 killed 由本地 killed 标记区分 killed/completed);
+ *   1. tmux isAlive() 为 false → exited(终态优先,是否 killed 由本地 killed 标记区分
+ *      killed/completed)——进程可能在发过 stop 事件之后自退(崩溃/OOM/自敲 exit),必须先判
+ *      isAlive,否则 stop 计数恒大于 baseline 会一直判成 idle,永远走不到这条分支;
+ *   2. 会话还活着时,事件文件:自上一次 sendInput(或 spawn)以来出现过新的 'stop' 事件 → idle;
  *   3. 默认 running。
  * 用"自上次输入以来的 stop 计数"(stopBaseline)而非"是否曾经见过 stop"来判定,是因为
  * cc 每答完一轮都会再触发一次 Stop——sendInput 时必须把 baseline 推到当前计数,否则上一轮
@@ -495,7 +497,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // nextCursor.offset 是"实际消费到的行号",不是 start + events.length——归一化失败/不认识
     // 的 type(mode/summary/queue-operation 等)不产事件但仍然消费了一行,调用方若用
     // offset += events.length 来推进游标,会在这些被跳过的行上重复读或漏读(P2 review #4,
-    // protocol-agent-v3 §10.3 要求 next_cursor)。
+    // 契约见 protocol-agent-v3 §6.1 WorkerAdapter.readTrace;RPC 层 §8.3 GetWorkerTraceResult
+    // 的 next_cursor 由这个 offset 序列化而来)。
     let consumed = start
     for (let i = start; i < lines.length; i++) {
       const event = normalizeTraceLine(lines[i])
@@ -525,9 +528,9 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   // --- Internal ---
 
   /**
-   * 三源合成状态判定:事件文件(新 stop → idle) > tmux isAlive(false → exited) > 默认 running。
-   * 与内存态不同则在互斥锁内原子迁移(改内存 + 写 meta)。返回判定结果与本次读到的 stop 计数
-   * (供 sendInput 复用,避免重复读一遍事件文件)。
+   * 三源合成状态判定:tmux isAlive(false → exited,终态优先) > 事件文件(会话还活着时,新
+   * stop → idle) > 默认 running。与内存态不同则在互斥锁内原子迁移(改内存 + 写 meta)。
+   * 返回判定结果与本次读到的 stop 计数(供 sendInput 复用,避免重复读一遍事件文件)。
    */
   private async syncState(runtime: Runtime, h: IncarnationHandle): Promise<{ state: WorkerContractState; stopCount: number }> {
     if (runtime.state === 'exited') return { state: 'exited', stopCount: runtime.stopBaseline }
