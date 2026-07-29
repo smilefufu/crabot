@@ -24,6 +24,7 @@ import type { EngineMessage, EngineResult, ToolDefinition } from '../../engine/i
 import type { Resolvable } from '../../engine/types.js'
 import { SessionTree } from '../session-tree.js'
 import { OutputLog } from '../output-log.js'
+import { AsyncMutex } from '../async-mutex.js'
 import type {
   AdapterCapabilities,
   CapabilityBundle,
@@ -100,6 +101,13 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
   private readonly instances = new Map<string, WorkerInstance>()
   /** worker_id → spawn 时注入的 builtin 执行配置（adapter/model/tools），resume 与续 burst 复用。P1：仅内存，不跨重启持久。 */
   private readonly builtinConfigs = new Map<string, NonNullable<SpawnSpec['builtin']>>()
+  /**
+   * worker_id → 互斥锁，惰性创建。sendInput 全程、resume 全程、runBurst 的收尾段（判定
+   * pendingInputs 到状态落定）都在同一把锁内串行执行——同一化身任意时刻至多一个 burst
+   * 在跑是该 adapter 的不变量。runEngine 本身的调用留在锁外，避免并发 sendInput(running)
+   * 的入队被一整次 burst 的执行时长堵死。
+   */
+  private readonly workerMutexes = new Map<string, AsyncMutex>()
 
   constructor(
     private readonly deps: {
@@ -155,34 +163,48 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
   }
 
   async resume(prev: IncarnationRef, wakeInput: string): Promise<IncarnationHandle> {
-    await this.assertExited(prev.worker_id, prev.seq)
     const builtin = this.builtinConfigs.get(prev.worker_id)
     if (!builtin) {
       throw new Error(`BuiltinWorkerAdapter.resume: no builtin config resident in memory for worker ${prev.worker_id} (P1: worker must have been spawned in this process)`)
     }
 
-    const newSeq = prev.seq + 1
-    const dir = join(this.deps.dataDir, prev.worker_id)
-    let sessionTree = this.findSessionTreeForWorker(prev.worker_id)
-    if (!sessionTree) {
-      sessionTree = await SessionTree.load(join(dir, 'session.jsonl'))
-    }
-    const outputLog = new OutputLog(join(dir, `output-${newSeq}.log`))
-    await sessionTree.append(prev.session_ref, createUserMessage(wakeInput))
+    // assertExited + newSeq 计算 + append + 实例注册整体在锁内原子完成：两次并发 resume
+    // 同一 prev 若不串行化，会各自算出相同的 newSeq、各自往 prev.session_ref 上挂一个孩子
+    // ——树分叉。这里选择"先到先得，后来者报错"的语义：newSeq 对应的实例位一旦被占用，
+    // 后来者视为对同一 prev 的重复 resume，直接失败，而不是静默产出第二个化身。
+    const mutex = this.getMutex(prev.worker_id)
+    const { instance, handle } = await mutex.run(async () => {
+      await this.assertExited(prev.worker_id, prev.seq)
 
-    const instance: WorkerInstance = {
-      worker_id: prev.worker_id,
-      seq: newSeq,
-      dir,
-      sessionTree,
-      outputLog,
-      state: 'running',
-      pendingInputs: [],
-    }
-    this.instances.set(instanceKey(prev.worker_id, newSeq), instance)
+      const newSeq = prev.seq + 1
+      const newKey = instanceKey(prev.worker_id, newSeq)
+      if (this.instances.has(newKey)) {
+        throw new Error(`BuiltinWorkerAdapter.resume: incarnation ${newKey} already exists (concurrent resume of the same prev incarnation?)`)
+      }
 
-    const handle: IncarnationHandle = { worker_id: prev.worker_id, seq: newSeq, impl: 'builtin' }
-    await this.writeMeta(instance)
+      const dir = join(this.deps.dataDir, prev.worker_id)
+      let sessionTree = this.findSessionTreeForWorker(prev.worker_id)
+      if (!sessionTree) {
+        sessionTree = await SessionTree.load(join(dir, 'session.jsonl'))
+      }
+      const outputLog = new OutputLog(join(dir, `output-${newSeq}.log`))
+      await sessionTree.append(prev.session_ref, createUserMessage(wakeInput))
+
+      const newInstance: WorkerInstance = {
+        worker_id: prev.worker_id,
+        seq: newSeq,
+        dir,
+        sessionTree,
+        outputLog,
+        state: 'running',
+        pendingInputs: [],
+      }
+      this.instances.set(newKey, newInstance)
+
+      const newHandle: IncarnationHandle = { worker_id: prev.worker_id, seq: newSeq, impl: 'builtin' }
+      await this.writeMeta(newInstance)
+      return { instance: newInstance, handle: newHandle }
+    })
 
     this.runBurst(instance, handle, builtin).catch(async (err) => {
       console.error('[builtin-adapter] runBurst threw unexpectedly (resume):', err)
@@ -197,30 +219,42 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
   }
 
   async sendInput(h: IncarnationHandle, text: string, _opts?: { raw?: boolean }): Promise<void> {
-    const instance = this.instances.get(instanceKey(h.worker_id, h.seq))
-    if (!instance) {
-      throw new Error(`BuiltinWorkerAdapter.sendInput: no such incarnation ${h.worker_id}#${h.seq} resident in this process`)
-    }
+    // 状态检查 + 相应动作（入队 / append+转running）整体在该 worker 的互斥锁内完成，消除
+    // "两次背靠背 sendInput 都读到 idle、拿同一 tip"的 check-then-act 竞态（跨 await 边界）。
+    const mutex = this.getMutex(h.worker_id)
+    const startBurst = await mutex.run(async () => {
+      const instance = this.instances.get(instanceKey(h.worker_id, h.seq))
+      if (!instance) {
+        throw new Error(`BuiltinWorkerAdapter.sendInput: no such incarnation ${h.worker_id}#${h.seq} resident in this process`)
+      }
 
-    if (instance.state === 'exited') {
-      throw new WorkerExitedError(h.worker_id, h.seq)
-    }
+      if (instance.state === 'exited') {
+        throw new WorkerExitedError(h.worker_id, h.seq)
+      }
 
-    if (instance.state === 'running') {
-      instance.pendingInputs.push(text)
-      return
-    }
+      if (instance.state === 'running') {
+        instance.pendingInputs.push(text)
+        return false
+      }
 
-    // idle → 追加新一轮用户消息，续 burst，转 running。
-    const builtin = this.builtinConfigs.get(h.worker_id)
-    if (!builtin) {
-      throw new Error(`BuiltinWorkerAdapter.sendInput: no builtin config resident in memory for worker ${h.worker_id}`)
-    }
-    const tip = instance.sessionTree.latestTip()
-    if (tip === null) throw new Error(`BuiltinWorkerAdapter: worker ${instance.worker_id} has empty session tree`)
-    await instance.sessionTree.append(tip, createUserMessage(text))
-    await this.transitionState(instance, h, 'running')
+      // idle → 追加新一轮用户消息，转 running。起 burst 留到锁外（见下）。
+      const builtin = this.builtinConfigs.get(h.worker_id)
+      if (!builtin) {
+        throw new Error(`BuiltinWorkerAdapter.sendInput: no builtin config resident in memory for worker ${h.worker_id}`)
+      }
+      const tip = instance.sessionTree.latestTip()
+      if (tip === null) throw new Error(`BuiltinWorkerAdapter: worker ${instance.worker_id} has empty session tree`)
+      await instance.sessionTree.append(tip, createUserMessage(text))
+      await this.transitionState(instance, h, 'running')
+      return true
+    })
 
+    if (!startBurst) return
+
+    // burst 的 runEngine 调用本身在锁外：否则并发 sendInput(running) 的入队会被这次
+    // burst 的整个执行时长堵死。
+    const instance = this.instances.get(instanceKey(h.worker_id, h.seq))!
+    const builtin = this.builtinConfigs.get(h.worker_id)!
     this.runBurst(instance, h, builtin).catch(async (err) => {
       console.error('[builtin-adapter] runBurst threw unexpectedly (sendInput continuation):', err)
       await this.transitionExited(instance, h, 'crashed')
@@ -282,50 +316,71 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     })
     await Promise.all(pendingWrites)
 
-    // burst 结束：把新增消息（finalMessages 相对 initialMessages 的后缀）逐条 append 进 session 树。
-    // 防御断言：若压缩被意外启用，finalMessages.length 会小于 initialMessages.length，
-    // 此时不回写新消息，标化身为 exited(crashed) 并记日志。
-    if (result.finalMessages.length < initialMessages.length) {
-      console.error(
-        `[builtin-adapter] runBurst compaction guard triggered for worker ${instance.worker_id}: ` +
-        `finalMessages.length (${result.finalMessages.length}) < initialMessages.length (${initialMessages.length}). ` +
-        `Compaction was unexpectedly enabled; marking incarnation as crashed.`,
-      )
-      await this.transitionExited(instance, handle, 'crashed')
-      return
-    }
-    const newMessages = result.finalMessages.slice(initialMessages.length)
-    let parent = tip
-    for (const msg of newMessages as EngineMessage[]) {
-      parent = await instance.sessionTree.append(parent, msg)
-    }
-
-    if (result.outcome === 'failed' || result.outcome === 'aborted') {
-      await this.transitionExited(instance, handle, result.outcome === 'aborted' ? 'killed' : 'crashed')
-      return
-    }
-
-    if (result.exitToolCall?.name === 'finish_task') {
-      const rawOutcome = result.exitToolCall.input.outcome
-      const outcome: 'completed' | 'failed' = rawOutcome === 'failed' ? 'failed' : 'completed'
-      await this.transitionExited(instance, handle, outcome, outcome)
-      return
-    }
-
-    // end_turn（或 max_turns 耗尽）→ 若 sendInput 排了队，逐条 append 后原地续 burst
-    // （不经过可见的 idle 态）；否则转 idle，等待下一次 resume/sendInput 唤醒。
-    if (instance.pendingInputs.length > 0) {
-      const queued = instance.pendingInputs.splice(0, instance.pendingInputs.length)
-      let queueParent = instance.sessionTree.latestTip()
-      if (queueParent === null) throw new Error(`BuiltinWorkerAdapter: worker ${instance.worker_id} has empty session tree`)
-      for (const text of queued) {
-        queueParent = await instance.sessionTree.append(queueParent, createUserMessage(text))
+    // 收尾段（压缩防御 → append 新消息 → 判 outcome → 判队列 → 落 idle/续 burst）整体在该
+    // worker 的互斥锁内原子完成：消除"同步判定 pendingInputs 为空后 await transitionState
+    // 期间新 sendInput 插队"的窗口——判定与状态落定必须是同一个不可分割的临界区。
+    // 续 burst 的递归调用放在锁外触发（见下），不然会把 runEngine 的执行时长堵在锁里。
+    const mutex = this.getMutex(instance.worker_id)
+    const continueBurst = await mutex.run(async () => {
+      // burst 结束：把新增消息（finalMessages 相对 initialMessages 的后缀）逐条 append 进 session 树。
+      // 防御断言：若压缩被意外启用，finalMessages.length 会小于 initialMessages.length，
+      // 此时不回写新消息，标化身为 exited(crashed) 并记日志。
+      if (result.finalMessages.length < initialMessages.length) {
+        console.error(
+          `[builtin-adapter] runBurst compaction guard triggered for worker ${instance.worker_id}: ` +
+          `finalMessages.length (${result.finalMessages.length}) < initialMessages.length (${initialMessages.length}). ` +
+          `Compaction was unexpectedly enabled; marking incarnation as crashed.`,
+        )
+        await this.transitionExited(instance, handle, 'crashed')
+        return false
       }
-      await this.runBurst(instance, handle, builtin)
-      return
-    }
+      const newMessages = result.finalMessages.slice(initialMessages.length)
+      let parent = tip
+      for (const msg of newMessages as EngineMessage[]) {
+        parent = await instance.sessionTree.append(parent, msg)
+      }
 
-    await this.transitionState(instance, handle, 'idle')
+      if (result.outcome === 'failed' || result.outcome === 'aborted') {
+        await this.transitionExited(instance, handle, result.outcome === 'aborted' ? 'killed' : 'crashed')
+        return false
+      }
+
+      if (result.exitToolCall?.name === 'finish_task') {
+        const rawOutcome = result.exitToolCall.input.outcome
+        const outcome: 'completed' | 'failed' = rawOutcome === 'failed' ? 'failed' : 'completed'
+        await this.transitionExited(instance, handle, outcome, outcome)
+        return false
+      }
+
+      // end_turn（或 max_turns 耗尽）→ 若 sendInput 排了队，逐条 append 后原地续 burst
+      // （不经过可见的 idle 态）；否则转 idle，等待下一次 resume/sendInput 唤醒。
+      if (instance.pendingInputs.length > 0) {
+        const queued = instance.pendingInputs.splice(0, instance.pendingInputs.length)
+        let queueParent = instance.sessionTree.latestTip()
+        if (queueParent === null) throw new Error(`BuiltinWorkerAdapter: worker ${instance.worker_id} has empty session tree`)
+        for (const text of queued) {
+          queueParent = await instance.sessionTree.append(queueParent, createUserMessage(text))
+        }
+        return true
+      }
+
+      await this.transitionState(instance, handle, 'idle')
+      return false
+    })
+
+    if (continueBurst) {
+      await this.runBurst(instance, handle, builtin)
+    }
+  }
+
+  /** worker_id 对应的互斥锁，惰性创建（见 workerMutexes 字段注释）。 */
+  private getMutex(worker_id: string): AsyncMutex {
+    let mutex = this.workerMutexes.get(worker_id)
+    if (!mutex) {
+      mutex = new AsyncMutex()
+      this.workerMutexes.set(worker_id, mutex)
+    }
+    return mutex
   }
 
   private findSessionTreeForWorker(worker_id: string): SessionTree | undefined {

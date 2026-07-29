@@ -299,4 +299,138 @@ describe('BuiltinWorkerAdapter', () => {
     const meta2 = JSON.parse(meta2Raw)
     expect(meta2.state).toBe('idle')
   })
+
+  // --- 并发竞态回归（per-worker 互斥）---
+
+  /** 从 session.jsonl 读出全部节点，用于检测树是否分叉（同一 parent_id 出现多个孩子）。 */
+  async function loadRawNodes(worker_id: string): Promise<Array<{ node_id: string; parent_id: string | null; message: unknown }>> {
+    const raw = await fs.readFile(join(tmp, worker_id, 'session.jsonl'), 'utf-8')
+    return raw
+      .split('\n')
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l))
+  }
+
+  function assertNoFork(nodes: Array<{ node_id: string; parent_id: string | null }>): void {
+    const childCount = new Map<string, number>()
+    for (const n of nodes) {
+      if (n.parent_id === null) continue
+      childCount.set(n.parent_id, (childCount.get(n.parent_id) ?? 0) + 1)
+    }
+    for (const [parent, count] of childCount) {
+      expect(count, `node ${parent} 有 ${count} 个孩子——树分叉了`).toBe(1)
+    }
+  }
+
+  it('sendInput(idle) 背靠背并发不 await：两条消息都不丢且树无分叉', async () => {
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({
+      adapter: makeAdapter([
+        { text: '首轮回复', stopReason: 'end_turn' },
+        { text: '第二轮回复', stopReason: 'end_turn' },
+        { text: '第三轮回复', stopReason: 'end_turn' },
+      ]),
+    })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'idle')
+
+    // 关键：两次调用之间不 await——复现"都读到 idle、拿同一 tip"的竞态场景。
+    const p1 = adapter.sendInput(h, '并发消息A')
+    const p2 = adapter.sendInput(h, '并发消息B')
+    await Promise.all([p1, p2])
+
+    await waitState(adapter, h, 'idle')
+
+    const nodes = await loadRawNodes(s.worker_id)
+    assertNoFork(nodes)
+
+    const serialized = nodes.map((n) => JSON.stringify(n.message))
+    expect(serialized.some((c) => c.includes('并发消息A'))).toBe(true)
+    expect(serialized.some((c) => c.includes('并发消息B'))).toBe(true)
+  })
+
+  it('burst 收尾"判定队列为空→落 idle"窗口期注入的 sendInput 不丢', async () => {
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const gate = deferred<void>()
+    const s = spec({
+      adapter: makeGatedAdapter(gate.promise, [
+        { text: '首轮回复', stopReason: 'end_turn' },
+        { text: '窗口期消息的回复', stopReason: 'end_turn' },
+      ]),
+    })
+
+    const h = await adapter.spawn(s)
+    expect(await adapter.state(h)).toBe('running')
+
+    // burst 被 gate 卡住时装好拦截：一旦收尾段判定要落 idle，就在"判定完成、状态还没
+    // 真正落定"这个当口抢发 sendInput，复现窗口期竞态（transitionState 是私有方法，
+    // 用实例属性覆盖原型方法来精确命中这个窗口——比纯靠时序凑巧命中更可靠）。
+    // 用 deferred 而非轮询 state() 等收敛：instance.state 在 transitionState 内部落 idle
+    // 后、mutex 真正释放前就已可见，轮询可能逮到这个转瞬即逝的中间态就提前判定"已收敛"，
+    // 而注入的续 burst 其实还没跑完——那样断言会读到写了一半的树，是测试自身的假竞态，
+    // 不是被测代码的问题；等第二次 transitionState('idle') 真正落盘完成才是可靠的收敛信号。
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const adapterAny = adapter as any
+    const originalTransitionState = adapterAny.transitionState.bind(adapter)
+    let idleCount = 0
+    const secondIdle = deferred<void>()
+    adapterAny.transitionState = async (instanceArg: unknown, handleArg: unknown, state: string) => {
+      const result = await originalTransitionState(instanceArg, handleArg, state)
+      if (state === 'idle') {
+        idleCount++
+        if (idleCount === 1) {
+          void adapter.sendInput(h, '窗口期消息')
+        } else {
+          secondIdle.resolve()
+        }
+      }
+      return result
+    }
+
+    gate.resolve()
+    await secondIdle.promise
+
+    const nodes = await loadRawNodes(s.worker_id)
+    assertNoFork(nodes)
+    const serialized = nodes.map((n) => JSON.stringify(n.message))
+    expect(serialized.some((c) => c.includes('窗口期消息'))).toBe(true)
+  })
+
+  it('并发 resume 同一 prev：仅一次成功，无树分叉', async () => {
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({
+      adapter: makeAdapter([
+        { toolCalls: [{ name: 'finish_task', id: 'call_1', input: { outcome: 'completed', summary: '第一段完成' } }], stopReason: 'tool_use' },
+        { text: '欢迎回来A', stopReason: 'end_turn' },
+        { text: '欢迎回来B', stopReason: 'end_turn' },
+      ]),
+    })
+
+    const h1 = await adapter.spawn(s)
+    await waitState(adapter, h1, 'exited')
+
+    const metaRaw = await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')
+    const meta = JSON.parse(metaRaw) as { tip_node_id: string }
+    const prevRef: IncarnationRef = { worker_id: s.worker_id, seq: 1, session_ref: meta.tip_node_id }
+
+    const results = await Promise.allSettled([
+      adapter.resume(prevRef, '我回来了-A'),
+      adapter.resume(prevRef, '我回来了-B'),
+    ])
+
+    const fulfilled = results.filter((r): r is PromiseFulfilledResult<IncarnationHandle> => r.status === 'fulfilled')
+    const rejected = results.filter((r) => r.status === 'rejected')
+    expect(fulfilled.length).toBe(1)
+    expect(rejected.length).toBe(1)
+
+    const nodes = await loadRawNodes(s.worker_id)
+    assertNoFork(nodes)
+    const childrenOfPrevTip = nodes.filter((n) => n.parent_id === prevRef.session_ref)
+    expect(childrenOfPrevTip.length).toBe(1)
+
+    const winner = fulfilled[0]!.value
+    expect(winner.seq).toBe(2)
+    await waitState(adapter, winner, 'idle')
+  })
 })
