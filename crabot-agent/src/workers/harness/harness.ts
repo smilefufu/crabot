@@ -294,7 +294,7 @@ export class WorkerHarness {
       // 台账已经把主线化身记为终态(如异步状态回调已经追上)——不必再尝试一次注定失败的
       // sendInput,直接进入 §5.3 透明接续。
       if (incarnation.state === 'exited') {
-        await this.continueTerminalWorker(workerId, item.text, incarnation.seq)
+        await this.continueTerminalWorker(workerId, item.text, incarnation.impl as WorkerImplId, incarnation.seq, item.raw)
         return
       }
 
@@ -315,7 +315,7 @@ export class WorkerHarness {
         // continueTerminalWorker 的 sourceSeq 核对注释)——同样转入透明接续,对
         // sendToWorker 的调用方完全无感(不重新抛出)。
         if (err instanceof WorkerExitedError) {
-          await this.continueTerminalWorker(workerId, item.text, incarnation.seq)
+          await this.continueTerminalWorker(workerId, item.text, incarnation.impl as WorkerImplId, incarnation.seq, item.raw)
           return
         }
         throw err
@@ -335,6 +335,12 @@ export class WorkerHarness {
       const found = await this.deps.ledger.findWorker(workerId)
       if (!found) throw new WorkerNotFoundError(workerId)
       const { worker, dialogObjectId } = found
+      // cancelled 是唯一硬拒绝(protocol-agent-v3 §5.5,与 sendToWorker/continueTerminalWorker
+      // 的 cancelled 短路对齐)。若主线化身已因 killWorker 落 exited,不加这道校验会让
+      // handoffIncarnation 跳过 kill 段直接 provision+spawn 新化身,reopenTaskForContinuation
+      // 命中终态走 reviveTask——用户明确要求终止的任务被无声复活成 running。completed/failed
+      // 允许切换(等价于"在办任务换实现"续办的合理场景,§5.3),只有 cancelled 硬拒绝。
+      if (worker.task.status === 'cancelled') throw new TaskCancelledError(workerId)
       const mainline = mainlineIncarnation(worker)
       await this.handoffIncarnation(dialogObjectId, worker, mainline, impl, note ?? '')
     })
@@ -346,15 +352,33 @@ export class WorkerHarness {
    * sendToWorker/kill 交错"),调用方(inbox.flush 的 deliver 回调)本身跑在锁外,这里
    * 重新拿锁。
    *
-   * sourceSeq 是调用方在锁外观察到的"疑似已终态"的化身 seq(来自台账 incarnation.state
-   * ==='exited' 的读,或 adapter.sendInput 抛出的 WorkerExitedError 所对应的化身)。拿到
-   * 锁之后必须用 sourceSeq(而非再次读到的台账 state 字段)判断"这次接续还要不要做"——
-   * 台账的 state 字段可能滞后于 adapter 的真实状态(handleStateChange 是 fire-and-forget
-   * 异步写台账,sendInput 抛错时台账不一定已经写完),但 sourceSeq 对应的化身"已经不是
-   * 当前主线"这件事(mainline.seq !== sourceSeq)只有在真的发生过一次接续之后才可能为真
-   * ——这是判断"是否已被并发接续抢先完成"唯一可靠的信号,不能用可能滞后的 state 字段替代。
+   * sourceImpl/sourceSeq 是调用方在锁外观察到的"疑似已终态"的化身 (impl, seq)(来自台账
+   * incarnation.state==='exited' 的读,或 adapter.sendInput 抛出的 WorkerExitedError 所对应
+   * 的化身)。拿到锁之后必须用这对 (sourceImpl, sourceSeq)(而非再次读到的台账 state 字段)
+   * 判断"这次接续还要不要做"——台账的 state 字段可能滞后于 adapter 的真实状态
+   * (handleStateChange 是 fire-and-forget 异步写台账,sendInput 抛错时台账不一定已经写完),
+   * 但 (sourceImpl, sourceSeq) 对应的化身"已经不是当前主线"这件事(mainline.impl !== sourceImpl
+   * || mainline.seq !== sourceSeq)只有在真的发生过一次接续/切换之后才可能为真——这是判断
+   * "是否已被并发接续抢先完成"唯一可靠的信号,不能用可能滞后的 state 字段替代。
+   *
+   * 只比 seq 不比 impl 是不够的(与 processStateChange 约 942 行的 M1 收口同一原则):等锁
+   * 期间若发生的是跨实现接续/切换(如 codex#1 顶替 claude-code#1,两个 adapter 实例各自
+   * nextSeq 从 1 计数,撞号是常态),新旧化身可能撞上同一个 seq——只比 seq 会把这次已经
+   * 发生过的接续误判成"没发生",转而把当前存活的新主线当成终态源再接续一次(对活着的化身
+   * 调 adapter.resume,adapter 侧会因"未终态"拒绝并抛错,错误经 inbox.flush 穿透给
+   * sendToWorker 的调用方,打破"透明接续对调用方无感"的契约)。
+   *
+   * raw 透传:"补送到当前主线"分支和 sendToWorker 正常路径(见上面的 adapter.sendInput 调用)
+   * 必须保持同一投递语义——`raw: true` 的原始敲键消息若在补送时丢了这个标志,会被当成普通
+   * 消息投递,行为对调用方不再透明。
    */
-  private async continueTerminalWorker(workerId: string, text: string, sourceSeq: number): Promise<void> {
+  private async continueTerminalWorker(
+    workerId: string,
+    text: string,
+    sourceImpl: WorkerImplId,
+    sourceSeq: number,
+    raw: boolean
+  ): Promise<void> {
     await this.withLock(workerId, async () => {
       const found = await this.deps.ledger.findWorker(workerId)
       if (!found) throw new WorkerNotFoundError(workerId)
@@ -379,9 +403,10 @@ export class WorkerHarness {
 
       const mainline = mainlineIncarnation(worker)
 
-      if (mainline.seq !== sourceSeq) {
-        // 并发窗口:拿锁之前,该 worker 已经被另一次并发触发的接续抢先完成——主线已经
-        // 前进到更新的化身。按普通投递语义把这条消息补送到当前(存活)主线,不重复接续。
+      if (mainline.seq !== sourceSeq || mainline.impl !== sourceImpl) {
+        // 并发窗口:拿锁之前,该 worker 已经被另一次并发触发的接续/切换抢先完成——主线已经
+        // 前进到更新的化身(按 (impl, seq) 判定,不能只比 seq,见上面方法注释)。按普通投递
+        // 语义把这条消息补送到当前(存活)主线,不重复接续,并保留原条目的 raw 标志。
         const adapter = this.deps.adapters.get(mainline.impl as WorkerImplId)
         if (!adapter) {
           throw new Error(`WorkerHarness.sendToWorker: no adapter registered for impl '${mainline.impl}'`)
@@ -392,7 +417,7 @@ export class WorkerHarness {
           impl: mainline.impl as WorkerImplId,
           session_ref: mainline.session_ref,
         }
-        await adapter.sendInput(handle, text)
+        await adapter.sendInput(handle, text, { raw })
         await this.appendEvent(workerId, handle.seq, 'input_sent', { text_len: text.length })
         return
       }

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { WorkerHarness, WorkerNotFoundError, type HarnessDeps, type SpawnWorkerParams } from '../../../src/workers/harness/harness'
+import { WorkerHarness, WorkerNotFoundError, TaskCancelledError, type HarnessDeps, type SpawnWorkerParams } from '../../../src/workers/harness/harness'
 import { LedgerStore } from '../../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../../src/workers/harness/workspace-manager'
 import { dialogObjectIdForPrivate } from '../../../src/workers/harness/ledger-types'
@@ -1020,5 +1020,117 @@ describe('WorkerHarness — 终审 PoC 回归：M2 kill 与 in-flight flush 竞�
 
     const deadLetterEvents = events.filter((e) => e.kind === 'state_changed' && (e.detail as Record<string, unknown> | undefined)?.kind === 'dead_letter')
     expect(deadLetterEvents.length).toBeGreaterThan(0)
+  })
+})
+
+describe('WorkerHarness — 终审 PoC 回归：M3 continueTerminalWorker 守卫按 (impl,seq) 收口 + raw 透传', () => {
+  it('deliver 卡在 sendInput 期间发生跨实现 switchWorkerImpl（seq 撞号）：不误把存活新主线当终态接续，补送到新主线且保留 raw', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    let releaseGate!: (err: Error) => void
+    const gate = new Promise<void>((_resolve, reject) => {
+      releaseGate = (err) => reject(err)
+    })
+    const source = new FakeAdapter({
+      implId: 'claude-code',
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      sendInputBehavior: async () => {
+        await gate
+      },
+    })
+    // target 的 resume 复刻真实 adapter（claude-code/codex）对"未终态就 resume"的拒绝
+    // 语义（"has not exited yet"）——修复前的 bug 正是把这个存活化身误当终态源去 resume。
+    let target!: FakeAdapter
+    target = new FakeAdapter({
+      implId: 'codex',
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      resumeBehavior: async (prev) => {
+        const st = await target.state({ worker_id: prev.worker_id, seq: prev.seq, impl: 'codex', session_ref: prev.session_ref })
+        if (st !== 'exited') {
+          throw new Error(`FakeAdapter(codex).resume: incarnation ${prev.worker_id}#${prev.seq} has not exited yet (state=${st})`)
+        }
+        return { worker_id: prev.worker_id, seq: prev.seq + 1, impl: 'codex', session_ref: `resumed-${prev.worker_id}` }
+      },
+    })
+    adaptersMap.set('claude-code', source)
+    adaptersMap.set('codex', target)
+
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    events.length = 0
+
+    // 第一条投递卡在 claude-code 的 sendInput 里（模拟"读到还未终态、真正在投递中"）——
+    // adapter.sendInput 不占用 harness 的 per-worker 锁（见文件头锁纪律注释），此刻锁空闲。
+    const send = harness.sendToWorker(worker.worker_id, '带 raw 的敲键', { raw: true })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(source.sendInputCalls).toHaveLength(1)
+
+    // 等投递期间发生跨实现切换：codex#1 顶替 claude-code#1——两个 FakeAdapter 各自 nextSeq
+    // 从 1 计数，与旧主线（claude-code#1）seq 撞号，这正是本条 PoC 的复现前提（M1 回归
+    // 测试已确认这种撞号是跨实现切换的常态）。
+    await harness.switchWorkerImpl(worker.worker_id, 'codex', '并发切换')
+    const afterSwitch = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    const newMainline = afterSwitch.incarnations[afterSwitch.incarnations.length - 1]
+    expect(newMainline.impl).toBe('codex')
+    expect(newMainline.seq).toBe(1) // 撞号
+    expect(newMainline.state).toBe('running') // 存活
+
+    // 放行卡住的 sendInput，抛出 WorkerExitedError——deliver 的 catch 分支据此转入
+    // continueTerminalWorker(sourceImpl='claude-code', sourceSeq=1)，此时它已经不再是主线。
+    releaseGate(new WorkerExitedError(worker.worker_id, 1))
+
+    // 核心断言：只比 seq 不比 impl 会把撞号的存活新主线（codex#1）误当终态源，对它调用
+    // adapter.resume（其状态仍 running，会抛 "has not exited yet"），该错误穿透 inbox.flush
+    // 一路砸给 sendToWorker 的调用方——修复前这里应当 reject。
+    await expect(send).resolves.toBeUndefined()
+
+    // 没有把存活的 codex#1 误当终态化身去 revive。
+    expect(target.resumeCalls).toHaveLength(0)
+
+    // 消息按"普通投递"语义补送到当前（存活）新主线 codex#1，且原样保留 raw 标志。
+    expect(target.sendInputCalls).toHaveLength(1)
+    expect(target.sendInputCalls[0].text).toBe('带 raw 的敲键')
+    expect(target.sendInputCalls[0].opts).toEqual({ raw: true })
+
+    // 没有产生第三个化身（没有误触发一次多余的 revive/handoff）。
+    const after = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    expect(after.incarnations).toHaveLength(2)
+  })
+})
+
+describe('WorkerHarness.switchWorkerImpl — 终审 PoC 回归：M3 cancelled 是唯一硬拒绝，不得复活', () => {
+  it('对已 cancelled 的 worker 调 switchWorkerImpl → 抛 TaskCancelledError，不 provision/不 spawn，task 仍是 cancelled', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    const source = new FakeAdapter({ implId: 'claude-code', caps: { revive: false } })
+    const target = new FakeAdapter({ implId: 'codex', caps: { revive: false } })
+    adaptersMap.set('claude-code', source)
+    adaptersMap.set('codex', target)
+
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    await harness.killWorker(worker.worker_id, '用户明确终止')
+
+    const beforeSwitch = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    expect(beforeSwitch.task.status).toBe('cancelled')
+    events.length = 0
+
+    // 主线化身已 exited（killed）→ handoffIncarnation 会跳过 kill 段，直接 provision+spawn
+    // 新化身，reopenTaskForContinuation 命中终态走 reviveTask——task 会被无声复活成
+    // running。这与 sendToWorker/continueTerminalWorker 已有的 cancelled 短路（§5.5"唯一
+    // 硬拒绝"）不一致：用户明确要求终止的任务不应该被跨实现切换复活。
+    await expect(harness.switchWorkerImpl(worker.worker_id, 'codex', '试图复活')).rejects.toThrow(TaskCancelledError)
+
+    // 没有触碰目标实现：不 provision、不 spawn。
+    expect(target.provisionCalls).toHaveLength(0)
+    expect(target.spawnCalls).toHaveLength(0)
+
+    // 台账原样：task 仍 cancelled，没有多出新化身。
+    const after = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    expect(after.task.status).toBe('cancelled')
+    expect(after.incarnations).toHaveLength(1)
+
+    // 没有产生 handoff_started / superseded / spawned 事件——pre-flight 在写 HANDOFF.md 和
+    // kill 旧化身之前就已经拒绝。
+    expect(events.filter((e) => e.kind === 'handoff_started')).toHaveLength(0)
+    expect(events.filter((e) => e.kind === 'spawned')).toHaveLength(0)
   })
 })
