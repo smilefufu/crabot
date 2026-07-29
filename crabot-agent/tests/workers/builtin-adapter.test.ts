@@ -49,8 +49,13 @@ function deferred<T = void>(): { promise: Promise<T>; resolve: (v: T) => void } 
   return { promise, resolve }
 }
 
-/** 第一个 stream 调用返回给定响应，第二个及后续调用抛错——用于测试续 burst 崩溃场景。 */
+/**
+ * 第一个 stream 调用返回给定响应，第二个及后续调用先 await gate 再抛错——用于测试续 burst
+ * 崩溃场景。gate 让调用方能精确控制"第二个 burst 已经进入 running、但还没抛错"这个窗口，
+ * 便于在其间 sendInput 制造待处理消息。
+ */
 function makeAdapterWithSecondBurstError(
+  gate: Promise<void>,
   firstBurstResponse: {
     text?: string
     toolCalls?: Array<{ name: string; id: string; input: Record<string, unknown> }>
@@ -61,6 +66,7 @@ function makeAdapterWithSecondBurstError(
   return {
     stream: vi.fn(async function* () {
       if (callCount > 0) {
+        await gate
         throw new Error('second burst error')
       }
       callCount++
@@ -424,30 +430,35 @@ describe('BuiltinWorkerAdapter', () => {
     expect(serialized.some((c) => c.includes('窗口期消息'))).toBe(true)
   })
 
-  it('transitionExited 时 pendingInputs 非空 → readOutput 能读到 dead-letter 消息', async () => {
+  it('续 burst 途中崩溃且 pendingInputs 非空 → readOutput 能读到 dead-letter 消息（真实调用链）', async () => {
     const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const gate = deferred<void>()
     const s = spec({
-      adapter: makeAdapter([{ text: '测试', stopReason: 'end_turn' }]),
+      adapter: makeAdapterWithSecondBurstError(gate.promise, { text: '首轮回复', stopReason: 'end_turn' }),
     })
 
     const h = await adapter.spawn(s)
     await waitState(adapter, h, 'idle')
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const instance = (adapter as any).instances.get(`${s.worker_id}#1`)
-    expect(instance).toBeTruthy()
+    // sendInput(idle) 起第二个 burst：mutex.run 内先把消息 append 进树、转 running，
+    // 返回时 state 已经是 running——第二个 burst 的 stream() 此刻正卡在 gate 里。
+    await adapter.sendInput(h, '触发续 burst')
+    expect(await adapter.state(h)).toBe('running')
 
-    // 手动向 pendingInputs 添加消息，模拟"化身被外部中止前有待处理消息"的场景
-    instance.pendingInputs.push('待处理消息1', '待处理消息2')
+    // 第二个 burst 仍在跑（未抛错），此刻 sendInput 走的是 running 分支：入队而不起新 burst。
+    await adapter.sendInput(h, '待处理消息1')
+    await adapter.sendInput(h, '待处理消息2')
+    expect(await adapter.state(h)).toBe('running')
 
-    // 调用 transitionExited，应该记录 dead-letter
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await (adapter as any).transitionExited(instance, h, 'crashed')
+    // 放行 gate：第二个 burst 的 stream() 抛错 → runEngine 内部 catch 收敛为
+    // outcome='failed'（finalMessages 未变短，不会误触发压缩防御）→ runBurst 收尾段
+    // 判定 failed → transitionExited('crashed')，此时 pendingInputs 仍是那两条排队消息。
+    gate.resolve()
+    await waitState(adapter, h, 'exited')
 
-    // 验证 readOutput 包含 dead-letter 消息
     const { chunk } = await adapter.readOutput(h, { offset: 0 })
     expect(chunk).toContain('[dead-letter]')
-    expect(chunk).toContain('2')  // 未发送消息数
+    expect(chunk).toContain('2 unsent message(s)')
     expect(chunk).toContain('待处理消息1')
     expect(chunk).toContain('待处理消息2')
   })
