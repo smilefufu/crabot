@@ -81,4 +81,56 @@ describe('OutputLog', () => {
     expect(result.chunk).toBe('')
     expect(result.nextCursor.offset).toBe(0)
   })
+
+  it('should not split a multi-byte UTF-8 character when cap boundary falls mid-character', async () => {
+    const log = new OutputLog(logPath)
+
+    // 49 'A' + '中' (3-byte UTF-8) + 'BBBB'; cap=50 lands right in the middle of '中'
+    const original = 'A'.repeat(49) + '中' + 'BBBB'
+    await log.append(original)
+
+    const cap = 50
+    let cursor = { offset: 0 }
+    let assembled = ''
+    let guard = 0
+    while (true) {
+      const { chunk, nextCursor } = await log.read(cursor, cap)
+      const contentBeforeTruncation = chunk.split('\n[output truncated')[0]
+      assembled += contentBeforeTruncation
+      if (nextCursor.offset === cursor.offset) break // no progress => done
+      cursor = nextCursor
+      guard += 1
+      if (guard > 20) throw new Error('read loop did not terminate')
+    }
+
+    expect(assembled).toBe(original)
+    expect(assembled).not.toContain('�')
+    expect(cursor.offset).toBe(Buffer.byteLength(original, 'utf-8'))
+  })
+
+  it('should not split a 4-byte emoji when cap boundary falls mid-character', async () => {
+    const log = new OutputLog(logPath)
+
+    // emoji '🎉' is 4 bytes in UTF-8; place cap boundary inside it
+    const original = 'A'.repeat(48) + '🎉' + 'BBBB'
+    await log.append(original)
+
+    const cap = 50 // 48 'A' bytes + 2 of the 4 emoji bytes = boundary mid-character
+    let cursor = { offset: 0 }
+    let assembled = ''
+    let guard = 0
+    while (true) {
+      const { chunk, nextCursor } = await log.read(cursor, cap)
+      const contentBeforeTruncation = chunk.split('\n[output truncated')[0]
+      assembled += contentBeforeTruncation
+      if (nextCursor.offset === cursor.offset) break
+      cursor = nextCursor
+      guard += 1
+      if (guard > 20) throw new Error('read loop did not terminate')
+    }
+
+    expect(assembled).toBe(original)
+    expect(assembled).not.toContain('�')
+    expect(cursor.offset).toBe(Buffer.byteLength(original, 'utf-8'))
+  })
 })

@@ -2,6 +2,32 @@ import * as fs from 'fs/promises'
 import { AsyncMutex } from './async-mutex'
 import type { OutputCursor } from './types'
 
+// A cap-truncated read can land in the middle of a multi-byte UTF-8 character.
+// Given the number of valid bytes in `buffer[0, len)`, return the largest prefix
+// length that does not split a UTF-8 character, by dropping an incomplete
+// trailing sequence (if any). Only relevant when the read was cut off by `cap`;
+// a read that reaches EOF is already a complete, valid UTF-8 file and needs no trimming.
+function trimIncompleteUtf8Tail(buffer: Buffer, len: number): number {
+  const maxLookback = Math.min(3, len)
+  for (let i = 1; i <= maxLookback; i++) {
+    const byte = buffer[len - i]
+    if ((byte & 0xc0) !== 0x80) {
+      // Found the lead byte of the last character in the buffer.
+      let seqLen: number
+      if ((byte & 0x80) === 0x00) seqLen = 1
+      else if ((byte & 0xe0) === 0xc0) seqLen = 2
+      else if ((byte & 0xf0) === 0xe0) seqLen = 3
+      else if ((byte & 0xf8) === 0xf0) seqLen = 4
+      else seqLen = 1 // not a valid lead byte; treat as standalone
+
+      return i < seqLen ? len - i : len
+    }
+  }
+  // Last `maxLookback` bytes are all continuation bytes with no lead byte found
+  // in range: the lead byte is further back, meaning the sequence is complete.
+  return len
+}
+
 export class OutputLog {
   private mutex = new AsyncMutex()
 
@@ -31,19 +57,27 @@ export class OutputLog {
         const fd = await fs.open(this.filePath, 'r')
         try {
           await fd.read(buffer, 0, bytesToRead, cursor.offset)
-          let chunk = buffer.toString('utf-8')
 
           // Truncation occurs only if we hit the cap limit and there's more content
           const isTruncated = bytesToRead === cap && cursor.offset + bytesToRead < fileSize
 
+          // Only cap-truncated reads risk splitting a multi-byte UTF-8 character
+          // mid-sequence; a read that reaches EOF is complete and needs no trimming.
+          let usedBytes = bytesToRead
+          if (isTruncated) {
+            usedBytes = trimIncompleteUtf8Tail(buffer, bytesToRead)
+          }
+
+          let chunk = buffer.toString('utf-8', 0, usedBytes)
+
           if (isTruncated) {
             // Add truncation marker
-            chunk += `\n[output truncated at ${bytesToRead} bytes, continue reading from cursor]`
+            chunk += `\n[output truncated at ${usedBytes} bytes, continue reading from cursor]`
           }
 
           return {
             chunk,
-            nextCursor: { offset: cursor.offset + bytesToRead },
+            nextCursor: { offset: cursor.offset + usedBytes },
           }
         } finally {
           await fd.close()
