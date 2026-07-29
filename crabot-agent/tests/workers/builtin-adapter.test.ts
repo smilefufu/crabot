@@ -6,6 +6,7 @@ import { randomUUID } from 'crypto'
 import { BuiltinWorkerAdapter } from '../../src/workers/builtin/adapter.js'
 import type { SpawnSpec, IncarnationHandle, WorkerContractState } from '../../src/workers/types.js'
 import type { LLMAdapter } from '../../src/engine/llm-adapter-types.js'
+import * as engineModule from '../../src/engine/query-loop.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 
 function makeAdapter(
@@ -124,5 +125,20 @@ describe('BuiltinWorkerAdapter', () => {
     const meta = JSON.parse(metaRaw)
     expect(meta.state).toBe('exited')
     expect(meta.ended_reason).toBe('crashed')
+  })
+
+  it('runBurst 传递 disableCompaction: true 到 runEngine', async () => {
+    const runEngineSpy = vi.spyOn(engineModule, 'runEngine')
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({
+      adapter: makeAdapter([{ text: '测试输出', stopReason: 'end_turn' }]),
+    })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'idle')
+
+    expect(runEngineSpy).toHaveBeenCalled()
+    const callArgs = runEngineSpy.mock.calls[0]?.[0]
+    expect(callArgs?.options?.disableCompaction).toBe(true)
   })
 })

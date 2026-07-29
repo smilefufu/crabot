@@ -182,6 +182,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         tools: this.combineTools(builtin.tools),
         model: builtin.model,
         ...(builtin.maxTurnsPerBurst !== undefined ? { maxTurns: builtin.maxTurnsPerBurst } : {}),
+        // session 树以原始消息为真相源，burst 内禁用压缩。压缩与树的协同（折叠节点）是 P7 集成议题。
+        disableCompaction: true,
         onTurn: (event) => {
           if (event.assistantText) {
             pendingWrites.push(instance.outputLog.append(event.assistantText + '\n'))
@@ -192,6 +194,17 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     await Promise.all(pendingWrites)
 
     // burst 结束：把新增消息（finalMessages 相对 initialMessages 的后缀）逐条 append 进 session 树。
+    // 防御断言：若压缩被意外启用，finalMessages.length 会小于 initialMessages.length，
+    // 此时不回写新消息，标化身为 exited(crashed) 并记日志。
+    if (result.finalMessages.length < initialMessages.length) {
+      console.error(
+        `[builtin-adapter] runBurst compaction guard triggered for worker ${instance.worker_id}: ` +
+        `finalMessages.length (${result.finalMessages.length}) < initialMessages.length (${initialMessages.length}). ` +
+        `Compaction was unexpectedly enabled; marking incarnation as crashed.`,
+      )
+      await this.transitionExited(instance, handle, 'crashed')
+      return
+    }
     const newMessages = result.finalMessages.slice(initialMessages.length)
     let parent = tip
     for (const msg of newMessages as EngineMessage[]) {
