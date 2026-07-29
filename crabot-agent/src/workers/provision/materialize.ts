@@ -39,14 +39,34 @@ export function renderMcpJson(servers: ProvisionSources['mcpServers']): string {
   return JSON.stringify({ mcpServers }, null, 2) + '\n'
 }
 
+function escapeTomlBasicString(value: string): string {
+  let result = ''
+  for (const ch of value) {
+    if (ch === '\\') {
+      result += '\\\\'
+    } else if (ch === '"') {
+      result += '\\"'
+    } else {
+      const code = ch.charCodeAt(0)
+      if (code < 0x20 || code === 0x7f) {
+        result += '\\u' + code.toString(16).padStart(4, '0')
+      } else {
+        result += ch
+      }
+    }
+  }
+  return result
+}
+
 function tomlString(value: string): string {
-  return '"' + value.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
+  return '"' + escapeTomlBasicString(value) + '"'
 }
 
 /** codex config.toml 的 mcp_servers 段:stdio 用 command/args,http/sse 用 url。 */
 export function renderCodexMcpToml(servers: ProvisionSources['mcpServers']): string {
   const blocks = servers.map((s) => {
-    const lines = [`[mcp_servers.${s.name}]`]
+    const escapedName = escapeTomlBasicString(s.name)
+    const lines = [`[mcp_servers."${escapedName}"]`]
     if (s.url !== undefined) {
       lines.push(`url = ${tomlString(s.url)}`)
     } else {

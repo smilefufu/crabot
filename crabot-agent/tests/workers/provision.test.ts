@@ -121,11 +121,11 @@ describe('renderCodexMcpToml', () => {
       { name: 'remote', transport: 'http', url: 'https://example.com/mcp' },
     ]
 
-    expect(renderCodexMcpToml(servers)).toBe(`[mcp_servers.crabot]
+    expect(renderCodexMcpToml(servers)).toBe(`[mcp_servers."crabot"]
 command = "node"
 args = ["mcp-server.js", "--flag"]
 
-[mcp_servers.remote]
+[mcp_servers."remote"]
 url = "https://example.com/mcp"
 `)
   })
@@ -135,9 +135,69 @@ url = "https://example.com/mcp"
       { name: 'weird', transport: 'stdio', command: 'C:\\bin\\"crabot".exe' },
     ]
 
-    expect(renderCodexMcpToml(servers)).toBe(`[mcp_servers.weird]
+    expect(renderCodexMcpToml(servers)).toBe(`[mcp_servers."weird"]
 command = "C:\\\\bin\\\\\\"crabot\\".exe"
 `)
+  })
+
+  it('server name 含点号时用 quoted key 正确表示', () => {
+    const servers: ProvisionSources['mcpServers'] = [
+      { name: 'my.server', transport: 'stdio', command: 'cmd' },
+    ]
+
+    const output = renderCodexMcpToml(servers)
+    expect(output).toContain('[mcp_servers."my.server"]')
+    expect(output).toContain('command = "cmd"')
+  })
+
+  it('server name 含空格时用 quoted key 正确表示', () => {
+    const servers: ProvisionSources['mcpServers'] = [
+      { name: 'my server', transport: 'stdio', command: 'cmd' },
+    ]
+
+    const output = renderCodexMcpToml(servers)
+    expect(output).toContain('[mcp_servers."my server"]')
+    expect(output).toContain('command = "cmd"')
+  })
+
+  it('server name 含双引号时正确转义', () => {
+    const servers: ProvisionSources['mcpServers'] = [
+      { name: 'server"test', transport: 'stdio', command: 'cmd' },
+    ]
+
+    const output = renderCodexMcpToml(servers)
+    expect(output).toContain('[mcp_servers."server\\"test"]')
+    expect(output).toContain('command = "cmd"')
+  })
+
+  it('server name 含反斜杠时正确转义', () => {
+    const servers: ProvisionSources['mcpServers'] = [
+      { name: 'server\\test', transport: 'stdio', command: 'cmd' },
+    ]
+
+    const output = renderCodexMcpToml(servers)
+    expect(output).toContain('[mcp_servers."server\\\\test"]')
+    expect(output).toContain('command = "cmd"')
+  })
+
+  it('server name 含中文时用 quoted key 正确表示', () => {
+    const servers: ProvisionSources['mcpServers'] = [
+      { name: '服务器', transport: 'stdio', command: 'cmd' },
+    ]
+
+    const output = renderCodexMcpToml(servers)
+    expect(output).toContain('[mcp_servers."服务器"]')
+    expect(output).toContain('command = "cmd"')
+  })
+
+  it('server name 仅含允许的字符时也统一使用 quoted key 形式', () => {
+    const servers: ProvisionSources['mcpServers'] = [
+      { name: 'simple_name-v2', transport: 'stdio', command: 'cmd' },
+    ]
+
+    const output = renderCodexMcpToml(servers)
+    expect(output).toContain('[mcp_servers."simple_name-v2"]')
+    expect(output).toContain('command = "cmd"')
   })
 
   it('空 server 列表渲染为空字符串', () => {
