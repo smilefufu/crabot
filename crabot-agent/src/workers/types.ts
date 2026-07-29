@@ -42,6 +42,10 @@ export interface IncarnationHandle {
   readonly worker_id: string
   readonly seq: number
   readonly impl: WorkerImplId
+  /** 本化身自己的会话引用,创建时(spawn/resume/fork 返回前)即由 adapter 填入真值——
+   * builtin: 本化身当前 tip node_id;CLI: 原生 session id(resume 沿用 prev 不变;fork 化身
+   * 填 fork 自己的引用,不是父化身的)。handle 自描述,调用方无需事后反查(protocol-agent-v3 §6.1)。 */
+  readonly session_ref: string
 }
 export interface IncarnationRef {
   readonly worker_id: string

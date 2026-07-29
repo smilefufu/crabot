@@ -183,6 +183,16 @@ describe('BuiltinWorkerAdapter', () => {
     })
 
     const h = await adapter.spawn(s)
+
+    // IncarnationHandle.session_ref 由 adapter 在 spawn 返回前即填入真值(protocol-agent-v3
+    // §6.1),builtin 的真值是本化身创建那一刻的 tip node_id——与彼时磁盘 meta 记录一致。
+    // 必须在 burst(fire-and-forget)推进 tip 之前读,burst 结束后 tip 会前进到会话末尾,
+    // 不再等于 handle 创建时刻的快照(这本身是符合预期的:handle.session_ref 是创建时的
+    // 引用,不是持续跟随的实时游标)。
+    expect(h.session_ref).toBeTruthy()
+    const metaAtSpawn = JSON.parse(await fs.readFile(join(tmp, h.worker_id, 'meta-1.json'), 'utf-8'))
+    expect(h.session_ref).toBe(metaAtSpawn.tip_node_id)
+
     await waitState(adapter, h, 'idle')
 
     const { chunk } = await adapter.readOutput(h, { offset: 0 })
@@ -343,6 +353,15 @@ describe('BuiltinWorkerAdapter', () => {
 
     const h2 = await adapter.resume(prevRef, '我回来了')
     expect(h2.seq).toBe(2)
+
+    // h2.session_ref 是 resume 返回时刻新化身自己的引用，与彼时磁盘 meta-2.json 记录一致，
+    // 且不是 prevRef 那个已经结束的旧化身的引用（protocol-agent-v3 §6.1）。必须在续 burst
+    // （fire-and-forget）推进 tip 之前读，理由同 spawn 测试里的同款断言。
+    expect(h2.session_ref).toBeTruthy()
+    const meta2AtResume = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-2.json'), 'utf-8'))
+    expect(h2.session_ref).toBe(meta2AtResume.tip_node_id)
+    expect(h2.session_ref).not.toBe(prevRef.session_ref)
+
     await waitState(adapter, h2, 'idle')
 
     const tree = await SessionTree.load(join(tmp, s.worker_id, 'session.jsonl'))
@@ -385,6 +404,15 @@ describe('BuiltinWorkerAdapter', () => {
     const prevRef: IncarnationRef = { worker_id: s.worker_id, seq: 1, session_ref: mainTip! }
     const forkHandle = await adapter.fork(prevRef, '侧问问题')
     expect(forkHandle.seq).toBe(2)
+
+    // forkHandle.session_ref 是 fork 自己的引用(fork 分支节点自己的 tip node_id)，不是主线
+    // mainTip 的照抄(protocol-agent-v3 §6.1:"fork 化身填 fork 自己的引用，不是父化身的")。
+    // 必须在 gate.resolve() 放行 fork 的 burst、推进 fork 自己的 tip 之前读，理由同
+    // spawn/resume 测试里的同款断言。
+    expect(forkHandle.session_ref).toBeTruthy()
+    expect(forkHandle.session_ref).not.toBe(mainTip)
+    const forkMetaAtFork = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-2.json'), 'utf-8'))
+    expect(forkHandle.session_ref).toBe(forkMetaAtFork.tip_node_id)
 
     // fork 的 burst 还卡在 gate 里没跑完：此时主线状态/tip 必须完全不受影响。注意：不能
     // 用 SessionTree.load(...).latestTip() 判断——那是整个共享文件"最后一次 append"的
@@ -977,7 +1005,7 @@ describe('BuiltinWorkerAdapter', () => {
 
       const orphans = await BuiltinWorkerAdapter.scanOrphans(tmp)
 
-      expect(orphans).toEqual([{ worker_id: 'worker-running', seq: 1, impl: 'builtin' }])
+      expect(orphans).toEqual([{ worker_id: 'worker-running', seq: 1, impl: 'builtin', session_ref: 'node-1' }])
 
       const runningMeta = JSON.parse(await fs.readFile(join(runningDir, 'meta-1.json'), 'utf-8'))
       expect(runningMeta.state).toBe('exited')

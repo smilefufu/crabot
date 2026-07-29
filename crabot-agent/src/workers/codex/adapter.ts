@@ -364,8 +364,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
   async spawn(spec: SpawnSpec): Promise<IncarnationHandle> {
     const seq = 1
-    const handle: IncarnationHandle = { worker_id: spec.worker_id, seq, impl: 'codex' }
-    if (this.runtimes.has(instanceKey(handle))) {
+    if (this.runtimes.has(instanceKey({ worker_id: spec.worker_id, seq }))) {
       throw new Error(`CodexWorkerAdapter.spawn: worker_id ${spec.worker_id} already spawned in this process`)
     }
 
@@ -394,6 +393,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         `[codex-adapter] session discovery timed out for ${spec.worker_id}, using placeholder uuid; resume/readTrace will degrade`,
       )
     }
+
+    const handle: IncarnationHandle = { worker_id: spec.worker_id, seq, impl: 'codex', session_ref: sessionId }
 
     const runtime: Runtime = {
       worker_id: spec.worker_id,
@@ -438,7 +439,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     if (!prevRuntime) {
       throw new Error(`CodexWorkerAdapter.resume: no such incarnation ${prev.worker_id}#${prev.seq} resident in this process`)
     }
-    const prevHandle: IncarnationHandle = { worker_id: prev.worker_id, seq: prev.seq, impl: 'codex' }
+    const prevHandle: IncarnationHandle = { worker_id: prev.worker_id, seq: prev.seq, impl: 'codex', session_ref: prev.session_ref }
     const { state: prevState } = await this.syncState(prevRuntime, prevHandle)
     if (prevState !== 'exited') {
       throw new Error(`CodexWorkerAdapter.resume: incarnation ${prev.worker_id}#${prev.seq} has not exited yet (state=${prevState})`)
@@ -459,7 +460,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         throw new Error(`CodexWorkerAdapter.resume: incarnation ${prev.worker_id}#${prev.seq} already resumed (concurrent resume of the same prev incarnation?)`)
       }
       const seq = this.nextSeq(prev.worker_id)
-      handle = { worker_id: prev.worker_id, seq, impl: 'codex' }
+      handle = { worker_id: prev.worker_id, seq, impl: 'codex', session_ref: prev.session_ref }
       const sessionName = `crabot-w-${prev.worker_id}-${seq}`
       const outputFile = join(dir, `output-${seq}.log`)
       // codex-docs: `codex resume <SESSION_ID>` 是独立子命令(不是 --resume flag)。

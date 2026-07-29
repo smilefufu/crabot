@@ -211,7 +211,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         pendingInputs: [],
       }
 
-      const newHandle: IncarnationHandle = { worker_id: spec.worker_id, seq, impl: 'builtin' }
+      const newHandle: IncarnationHandle = { worker_id: spec.worker_id, seq, impl: 'builtin', session_ref: rootId }
       // writeMeta 成功之后才注册到 instances/builtinConfigs，跟 resume 保持一致的提交次序：
       // 磁盘失败时不留孤儿实例。注意此时上面的"已 spawn"三重守卫（builtinConfigs 命中 /
       // instances 命中 / 磁盘 meta-${seq}.json 存在）全部落空——writeMeta 还没成功过，没有
@@ -274,7 +274,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         pendingInputs: [],
       }
 
-      const newHandle: IncarnationHandle = { worker_id: prev.worker_id, seq: newSeq, impl: 'builtin' }
+      const newHandle: IncarnationHandle = { worker_id: prev.worker_id, seq: newSeq, impl: 'builtin', session_ref: wakeId }
       // writeMeta 成功之后才注册到 instances 并标记 resumed，确保磁盘失败时不留孤儿实例。
       await this.writeMeta(newInstance)
       this.instances.set(instanceKey(prev.worker_id, newSeq), newInstance)
@@ -321,7 +321,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         pendingInputs: [],
       }
 
-      const newHandle: IncarnationHandle = { worker_id: prev.worker_id, seq: newSeq, impl: 'builtin' }
+      const newHandle: IncarnationHandle = { worker_id: prev.worker_id, seq: newSeq, impl: 'builtin', session_ref: forkId }
       // writeMeta 成功之后才注册到 instances，和 resume 保持一致的提交次序：磁盘失败时
       // 不留孤儿实例。
       await this.writeMeta(newInstance)
@@ -458,7 +458,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         const tmpPath = join(dir, `.meta-${seq}.json.tmp-${randomUUID()}`)
         await fs.writeFile(tmpPath, JSON.stringify(updated), 'utf-8')
         await fs.rename(tmpPath, metaPath)
-        orphans.push({ worker_id, seq, impl: 'builtin' })
+        const tipNodeId = typeof meta.tip_node_id === 'string' ? meta.tip_node_id : ''
+        orphans.push({ worker_id, seq, impl: 'builtin', session_ref: tipNodeId })
       }
     }
 

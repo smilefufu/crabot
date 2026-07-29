@@ -232,7 +232,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
   async spawn(spec: SpawnSpec): Promise<IncarnationHandle> {
     const seq = 1
-    const handle: IncarnationHandle = { worker_id: spec.worker_id, seq, impl: 'claude-code' }
+    const sessionId = randomUUID()
+    const handle: IncarnationHandle = { worker_id: spec.worker_id, seq, impl: 'claude-code', session_ref: sessionId }
     if (this.runtimes.has(instanceKey(handle))) {
       throw new Error(`ClaudeCodeAdapter.spawn: worker_id ${spec.worker_id} already spawned in this process`)
     }
@@ -240,7 +241,6 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     const dir = join(this.deps.dataDir, spec.worker_id)
     await fs.mkdir(dir, { recursive: true })
 
-    const sessionId = randomUUID()
     const sessionName = `crabot-w-${spec.worker_id}-${seq}`
     const outputFile = join(dir, `output-${seq}.log`)
     const command = `${this.claudeBin} --session-id ${sessionId} --permission-mode acceptEdits`
@@ -291,7 +291,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     if (!prevRuntime) {
       throw new Error(`ClaudeCodeAdapter.resume: no such incarnation ${prev.worker_id}#${prev.seq} resident in this process`)
     }
-    const prevHandle: IncarnationHandle = { worker_id: prev.worker_id, seq: prev.seq, impl: 'claude-code' }
+    const prevHandle: IncarnationHandle = { worker_id: prev.worker_id, seq: prev.seq, impl: 'claude-code', session_ref: prev.session_ref }
     const { state: prevState } = await this.syncState(prevRuntime, prevHandle)
     if (prevState !== 'exited') {
       throw new Error(`ClaudeCodeAdapter.resume: incarnation ${prev.worker_id}#${prev.seq} has not exited yet (state=${prevState})`)
@@ -319,7 +319,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         throw new Error(`ClaudeCodeAdapter.resume: incarnation ${prev.worker_id}#${prev.seq} already resumed (concurrent resume of the same prev incarnation?)`)
       }
       const seq = this.nextSeq(prev.worker_id)
-      handle = { worker_id: prev.worker_id, seq, impl: 'claude-code' }
+      handle = { worker_id: prev.worker_id, seq, impl: 'claude-code', session_ref: prev.session_ref }
       const sessionName = `crabot-w-${prev.worker_id}-${seq}`
       const outputFile = join(dir, `output-${seq}.log`)
       // 不重复传 --permission-mode:provision 阶段已把 acceptEdits 写进 settings.json,覆盖
@@ -390,7 +390,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     let runtime!: Runtime
     await this.getMutex(prev.worker_id).run(async () => {
       const seq = this.nextSeq(prev.worker_id)
-      handle = { worker_id: prev.worker_id, seq, impl: 'claude-code' }
+      handle = { worker_id: prev.worker_id, seq, impl: 'claude-code', session_ref: sessionId }
       const outputFile = join(dir, `output-${seq}.log`)
       runtime = {
         worker_id: prev.worker_id,
