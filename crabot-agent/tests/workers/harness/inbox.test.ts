@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { WorkerInbox, type InboxItem } from '../../../src/workers/harness/inbox'
 
 function makeItem(text: string, overrides: Partial<InboxItem> = {}): InboxItem {
@@ -146,6 +146,76 @@ describe('WorkerInbox', () => {
     expect(inbox.held).toBe(true)
     expect(inbox.pending).toBe(2)
     expect(inbox.drain().map((i) => i.text)).toEqual(['b', 'c'])
+  })
+
+  it('drain 在 flush 卡在 deliver 期间调用,不把 in-flight 条目重复计入 dead-letter', async () => {
+    // PoC(评审复现):flush 卡在 deliver('a') 时若 drain 直接 this.queue = [] 重新赋值,
+    // 会把正在被投递的 'a' 也当作"未投递"一并 drain 出去;'a' 随后投递成功,导致它
+    // 既被真正投递、又混进 dead-letter 批次 —— 调用方按注释重投 dead-letter 时 'a' 被投两次。
+    const inbox = new WorkerInbox('worker-1')
+    inbox.enqueue(makeItem('a'))
+    inbox.enqueue(makeItem('b'))
+    inbox.enqueue(makeItem('c'))
+
+    let releaseDeliverA!: () => void
+    const deliverAGate = new Promise<void>((resolve) => {
+      releaseDeliverA = resolve
+    })
+    const delivered: string[] = []
+
+    const flushPromise = inbox.flush(async (item) => {
+      if (item.text === 'a') {
+        await deliverAGate // 卡住,模拟 deliver('a') 长时间不返回(如 tmux 命令挂起)
+      }
+      delivered.push(item.text)
+    })
+
+    // 让出事件循环,确保 flush 已经进入 deliver('a') 并卡住
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    const drained = inbox.drain()
+    // 'a' 正在被投递中,不应出现在 drain 结果里;其成败由 flush 自己结算
+    expect(drained.map((i) => i.text)).toEqual(['b', 'c'])
+    expect(inbox.pending).toBe(0)
+
+    releaseDeliverA()
+    const count = await flushPromise
+
+    // deliver('a') 最终成功,flush 的簿记应准确反映:只投了 'a' 一条,不重复、不丢
+    expect(delivered).toEqual(['a'])
+    expect(count).toBe(1)
+  })
+
+  it('drain 之后 in-flight 条目投递失败:不放回队列、不向上抛未捕获,仅告警', async () => {
+    const inbox = new WorkerInbox('worker-1')
+    inbox.enqueue(makeItem('a'))
+
+    let rejectDeliverA!: (err: Error) => void
+    const deliverAGate = new Promise<void>((_resolve, reject) => {
+      rejectDeliverA = reject
+    })
+    const boom = new Error('deliver failed on a after drain')
+
+    const flushPromise = inbox.flush(async (item) => {
+      if (item.text === 'a') {
+        await deliverAGate
+      }
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    const drained = inbox.drain()
+    expect(drained).toEqual([])
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    rejectDeliverA(boom)
+
+    // 化身已终结(已 drain),该条已无投递目标:flush 不应把此失败向上抛出
+    await expect(flushPromise).resolves.toBe(0)
+    expect(warnSpy).toHaveBeenCalledTimes(1)
+    expect(inbox.pending).toBe(0)
+
+    warnSpy.mockRestore()
   })
 
   it('drain 取出全部并清空队列', () => {
