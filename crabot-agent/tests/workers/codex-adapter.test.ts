@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs/promises'
@@ -123,6 +123,25 @@ describe('CodexWorkerAdapter.provision', () => {
 
     const auth = await fs.readFile(path.join(ws, '.codex/auth.json'), 'utf-8')
     expect(auth).toBe('{"token":"fake"}')
+  })
+
+  it('provision auth.json 权限为 0o600,防止凭据泄露', async () => {
+    await fs.writeFile(path.join(codexHomeSource, 'auth.json'), '{"token":"fake"}', 'utf-8')
+    const adapter = new CodexWorkerAdapter({ dataDir: ws, codexHomeSource })
+    await adapter.provision({ root: ws }, { skills: [], mcp_servers: [] })
+
+    const authPath = path.join(ws, '.codex/auth.json')
+    const stat = await fs.stat(authPath)
+    expect((stat.mode & 0o777)).toBe(0o600)
+  })
+
+  it('provision 在 .codex/ 目录下写入 .gitignore 防止整个隔离 HOME 入库', async () => {
+    const adapter = new CodexWorkerAdapter({ dataDir: ws, codexHomeSource })
+    await adapter.provision({ root: ws }, { skills: [], mcp_servers: [] })
+
+    const gitignorePath = path.join(ws, '.codex/.gitignore')
+    const content = await fs.readFile(gitignorePath, 'utf-8')
+    expect(content).toBe('*\n')
   })
 
   it('codexHomeSource 下没有 auth.json 时不阻塞 provision', async () => {
@@ -264,14 +283,16 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
   )
 
   it(
-    'session 发现:mock CLI 落 rollout 文件时,meta.session_id 等于文件名里的 uuid',
+    'session 发现:mock CLI 落 rollout 文件时,meta.session_id 等于文件名里的 uuid,标记 session_discovery:discovered',
     async () => {
       const { adapter, workerId, rolloutUuid } = await provisionedAdapter([{ output: '第一段输出', emitStop: true }], { withRollout: true })
       const h = await adapter.spawn(makeSpec(workerId, '你好'))
       await waitForState(adapter, h, 'idle')
 
-      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string }
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string; session_discovery?: string }
       expect(meta.session_id).toBe(rolloutUuid)
+      // 发现成功应该标记为 'discovered'
+      expect(meta.session_discovery).toBe('discovered')
     },
     15000,
   )
@@ -283,8 +304,31 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
       const h = await adapter.spawn(makeSpec(workerId, '你好'))
       await waitForState(adapter, h, 'idle')
 
-      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string }
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string; session_discovery?: string }
       expect(meta.session_id).toMatch(/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/)
+      // 降级路径应该标记 session_discovery: 'placeholder'
+      expect(meta.session_discovery).toBe('placeholder')
+    },
+    15000,
+  )
+
+  it(
+    'session 发现:轮询超时降级时输出 console.warn 日志',
+    async () => {
+      const { adapter, workerId } = await provisionedAdapter([{ output: '第一段输出', emitStop: true }])
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+      const h = await adapter.spawn(makeSpec(workerId, '你好'))
+      await waitForState(adapter, h, 'idle')
+
+      // 检查 console.warn 被调用且消息包含关键字
+      expect(warnSpy).toHaveBeenCalled()
+      const calls = warnSpy.mock.calls
+      const warnMessage = calls[0]?.[0] ?? ''
+      expect(String(warnMessage)).toContain('[codex-adapter]')
+      expect(String(warnMessage)).toContain('session discovery')
+
+      warnSpy.mockRestore()
     },
     15000,
   )

@@ -198,6 +198,9 @@ interface Runtime {
   readonly rolloutPath?: string
   readonly outputLog: OutputLog
   readonly eventChannel: CliEventChannel
+  /** spawn 时 session 发现的结果:'discovered' 表示发现了真实 rollout 文件,'placeholder' 表示超时降级。
+   * 内部状态机用,会透传到 meta 文件。 */
+  readonly sessionDiscoveryStatus: 'discovered' | 'placeholder'
   state: WorkerContractState
   ended_reason?: IncarnationEndReason
   /** 自上一次 sendInput(或 spawn)以来"已计入"的 turn-complete 通知数;新计数超过它才判定
@@ -348,10 +351,16 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // provision 的职责。
     try {
       const authRaw = await fs.readFile(join(this.codexHomeSource, 'auth.json'), 'utf-8')
-      await fs.writeFile(join(codexDir, 'auth.json'), authRaw, 'utf-8')
+      const authPath = join(codexDir, 'auth.json')
+      await fs.writeFile(authPath, authRaw, 'utf-8')
+      // auth.json 包含凭据,设置严格权限防止泄露
+      await fs.chmod(authPath, 0o600)
     } catch {
       // 忽略:本机未登录/测试环境本就没有 auth.json
     }
+
+    // .codex/ 整个隔离 HOME 都不应入库(凭据、临时缓存等),写入 .gitignore
+    await fs.writeFile(join(codexDir, '.gitignore'), '*\n', 'utf-8')
 
     // codex-docs: skills 支持 .codex/skills/(项目级)或 ~/.codex/skills/(个人级);本方案下
     // .codex/ 本身就是 CODEX_HOME,两个语义重合到同一目录。
@@ -395,6 +404,12 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // session 发现:见文件头注释"session 发现"节。找不到就退化为本地占位 uuid(已知限制)。
     const discovered = await pollForNewRollout(join(codexHome, 'sessions'), spawnStartedAt, this.sessionDiscoveryTimeoutMs)
     const sessionId = discovered?.sessionId ?? randomUUID()
+    const sessionDiscoveryStatus = discovered ? 'discovered' : 'placeholder'
+    if (sessionDiscoveryStatus === 'placeholder') {
+      console.warn(
+        `[codex-adapter] session discovery timed out for ${spec.worker_id}, using placeholder uuid; resume/readTrace will degrade`,
+      )
+    }
 
     const runtime: Runtime = {
       worker_id: spec.worker_id,
@@ -407,12 +422,13 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       rolloutPath: discovered?.path,
       outputLog: new OutputLog(outputFile),
       eventChannel: new CliEventChannel(eventsFilePath(spec.workspace)),
+      sessionDiscoveryStatus,
       state: 'running',
       stopBaseline: 0,
       killed: false,
     }
 
-    await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: sessionId })
+    await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: sessionId, session_discovery: sessionDiscoveryStatus })
     this.runtimes.set(instanceKey(handle), runtime)
 
     // 首条任务输入注入失败:不能放任 running——按 kill 路径清理 tmux 会话后落
@@ -474,12 +490,13 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       rolloutPath: prevRuntime.rolloutPath,
       outputLog: new OutputLog(outputFile),
       eventChannel: new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot })),
+      sessionDiscoveryStatus: prevRuntime.sessionDiscoveryStatus,
       state: 'running',
       stopBaseline: 0,
       killed: false,
     }
 
-    await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: prev.session_ref })
+    await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: prev.session_ref, session_discovery: prevRuntime.sessionDiscoveryStatus })
     this.runtimes.set(instanceKey(handle), runtime)
 
     // 首条 wakeInput 注入失败:按 spawn 同款纪律处理——已注册的化身清理 tmux 会话后落
@@ -642,7 +659,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   private async transitionState(runtime: Runtime, h: IncarnationHandle, state: WorkerContractState): Promise<void> {
-    await writeMetaAtomic(runtime.dir, runtime.seq, { seq: runtime.seq, state, session_id: runtime.sessionId })
+    await writeMetaAtomic(runtime.dir, runtime.seq, { seq: runtime.seq, state, session_id: runtime.sessionId, session_discovery: runtime.sessionDiscoveryStatus })
     runtime.state = state
     try {
       this.deps.onStateChange?.(h, state)
@@ -657,6 +674,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       state: 'exited',
       session_id: runtime.sessionId,
       ended_reason,
+      session_discovery: runtime.sessionDiscoveryStatus,
     })
     runtime.state = 'exited'
     runtime.ended_reason = ended_reason
