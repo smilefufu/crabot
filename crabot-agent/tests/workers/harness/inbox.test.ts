@@ -218,6 +218,62 @@ describe('WorkerInbox', () => {
     warnSpy.mockRestore()
   })
 
+  it('drain → enqueue → flush 且 deliver 失败:新条目应当抛出、留队首(仅吞 drain 当刻的 in-flight)', async () => {
+    // 复审 Minor:drain 之后的 enqueue('z') 若投递失败,本应抛出且保留队首,
+    // 但当前实现因为 _drained 永久粘性,会错误地吞掉错误。
+    // 修复:只吞 drain 当刻的那个 in-flight 条目,post-drain enqueue 走正常语义。
+    const inbox = new WorkerInbox('worker-1')
+    inbox.enqueue(makeItem('a'))
+
+    let rejectDeliverA!: (err: Error) => void
+    const deliverAGate = new Promise<void>((_resolve, reject) => {
+      rejectDeliverA = reject
+    })
+    const boom = new Error('deliver failed on a after drain')
+
+    const flushPromise = inbox.flush(async (item) => {
+      if (item.text === 'a') {
+        await deliverAGate
+      }
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    // drain 当刻 'a' 在 in-flight 中
+    inbox.drain()
+
+    // post-drain 新入队
+    inbox.enqueue(makeItem('z'))
+    expect(inbox.pending).toBe(1) // drain 后队列是空的,'z' 是新的第一条
+
+    // 让 'a' 的投递失败(drain 当刻的 in-flight)
+    rejectDeliverA(boom)
+    await expect(flushPromise).resolves.toBe(0) // 'a' 是 drain 当刻的 in-flight,吞掉错误
+
+    // 现在尝试投递 'z'(post-drain 新条目)
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const boomZ = new Error('deliver failed on z')
+
+    const delivered: string[] = []
+    let thrown: unknown
+    try {
+      await inbox.flush(async (item) => {
+        if (item.text === 'z') throw boomZ
+        delivered.push(item.text)
+      })
+    } catch (err) {
+      thrown = err
+    }
+
+    // 'z' 是 post-drain 新条目,失败应当抛出(不被 _drained 吞掉)
+    expect(thrown).toBe(boomZ)
+    expect(delivered).toEqual([])
+    expect(inbox.pending).toBe(1) // 'z' 应放回队首
+    expect(warnSpy).not.toHaveBeenCalled() // 不应告警(仅 drain 当刻的 in-flight 才告警)
+
+    warnSpy.mockRestore()
+  })
+
   it('drain 取出全部并清空队列', () => {
     const inbox = new WorkerInbox('worker-1')
     inbox.enqueue(makeItem('a'))

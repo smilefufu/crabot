@@ -30,7 +30,8 @@ export interface InboxItem {
 export class WorkerInbox {
   private queue: InboxItem[] = []
   private _held = false
-  private _drained = false
+  /** drain 当刻正在投递的 in-flight 条目;该条目投递失败时仅告警丢弃,post-drain 的条目失败走正常语义。 */
+  private drainedInFlight: InboxItem | null = null
   /** flush 正在投递、已从 queue 取出但尚未结算成败的条目;drain 不把它计入结果。 */
   private inFlight: InboxItem | null = null
   private readonly mutex = new AsyncMutex()
@@ -64,12 +65,15 @@ export class WorkerInbox {
    * 按序投递直到队空或再次被 hold。同一信箱上的并发 flush 调用经 mutex 串行化,
    * 保证同一时刻只有一轮在投递,不会重复投递同一 item。
    * deliver 抛错时该条放回队首、停止本轮、原样向上抛出——除非投递期间已被 drain
-   * (见下方 catch 分支)。
+   * 且该条正好是 drain 当刻的 in-flight 条目(见下方 catch 分支)。
    *
    * 投递中的条目在 await deliver() 之前就从 queue 取出、记到 inFlight,而不是等
    * deliver 返回后再 shift:这样 drain() 才能在 deliver 卡住期间安全地把 queue
    * 视为"确定未投递"的快照,不会把正在投递、随后可能投递成功的条目也一并当作
    * dead-letter 带走,避免同一条目既真正投递、又混进 dead-letter 批次重复投递。
+   *
+   * pending:返回队列中的待投条数。注意:在 await deliver() 期间,该条已从 queue
+   * 取出(shift),所以 pending 不计入 in-flight 条目。
    */
   async flush(deliver: (item: InboxItem) => Promise<void>): Promise<number> {
     return this.mutex.run(async () => {
@@ -83,11 +87,11 @@ export class WorkerInbox {
           delivered++
         } catch (err) {
           this.inFlight = null
-          if (this._drained) {
-            // 化身已终结:drain 早已把 queue 清空并作为 dead-letter 交给调用方,
-            // 这条已经没有队列可放回、也没有人再等这次 flush 的结果——放回会造成
-            // "凭空复活"的幽灵条目,原样向上抛则可能砸向已不再等待的调用方,
-            // 变成未处理的 promise rejection。因此仅告警丢弃。
+          if (this.drainedInFlight === item) {
+            // 该条正好是 drain 当刻的 in-flight:化身已终结,drain 早已把 queue 清空并
+            // 作为 dead-letter 交给调用方。这条已经没有队列可放回、也没有人再等这次
+            // flush 的结果——放回会造成"凭空复活"的幽灵条目,原样向上抛则可能砸向已不再
+            // 等待的调用方,变成未处理的 promise rejection。因此仅告警丢弃。
             console.warn(
               `[WorkerInbox:${this.workerId}] deliver failed after drain, dropping in-flight item: ${
                 err instanceof Error ? err.message : String(err)
@@ -95,6 +99,7 @@ export class WorkerInbox {
             )
             return delivered
           }
+          // post-drain enqueue 的条目或其他情况:走正常语义(放回、抛出)
           this.queue.unshift(item)
           throw err
         }
@@ -110,7 +115,8 @@ export class WorkerInbox {
    * (成功计入投递、失败见 flush 的 catch 分支),避免同一条目既投递又进 dead-letter。
    */
   drain(): InboxItem[] {
-    this._drained = true
+    // 记录 drain 当刻的 in-flight 条目,以便 flush 的 catch 分支判断是否需要吞掉错误
+    this.drainedInFlight = this.inFlight
     const items = this.queue
     this.queue = []
     return items
