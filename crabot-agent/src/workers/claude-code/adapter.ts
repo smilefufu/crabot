@@ -299,49 +299,56 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       throw new Error(`ClaudeCodeAdapter.resume: incarnation ${prev.worker_id}#${prev.seq} has not exited yet (state=${prevState})`)
     }
 
-    const seq = prev.seq + 1
-    const handle: IncarnationHandle = { worker_id: prev.worker_id, seq, impl: 'claude-code' }
-    if (this.runtimes.has(instanceKey(handle))) {
-      throw new Error(`ClaudeCodeAdapter.resume: worker_id ${prev.worker_id} seq ${seq} already exists in this process`)
-    }
-
     const dir = prevRuntime.dir
-    const sessionName = `crabot-w-${prev.worker_id}-${seq}`
-    const outputFile = join(dir, `output-${seq}.log`)
-    // 不重复传 --permission-mode:provision 阶段已把 acceptEdits 写进 settings.json,覆盖
-    // 命令行没有重复声明的场景(resume 正是这样的场景)。session_ref 是 cc 侧的会话 uuid,
-    // 沿用不变。拼接时用 shQuote 转义 session_ref,防止 shell 注入(双层防御:
-    // 入口已校验 UUID 格式,拼接时再加引号转义,提高防御深度)。
-    const command = `${this.claudeBin} --resume ${shQuote(prev.session_ref)}`
 
-    // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime。
-    await this.tmux.newSession({ name: sessionName, cwd: prevRuntime.workspaceRoot, command, outputFile })
+    // seq 分配(nextSeq(),该 worker 现存所有化身 max seq + 1)+ tmux newSession + 提交
+    // (meta+runtime)整体在该 worker 的互斥锁内原子完成——不能再用 prev.seq+1 这种固定公式:
+    // fork 化身常驻 runtimes 不删,prev.seq+1 可能早被更早一次 fork/resume 占用,继续用它会
+    // 在"已存在"检查上假死(见文件头注释、P2 review #1)。newSession 只是起一个 tmux pane
+    // (不等待 CLI 完整应答),放进锁内不违反"耗时较长操作留在锁外"的纪律——那条纪律是专门
+    // 针对 fork() 的无头子进程调用(等一整轮 CLI 应答,可能耗时较长)定的,见 fork() 注释。
+    let handle!: IncarnationHandle
+    let runtime!: Runtime
+    await this.getMutex(prev.worker_id).run(async () => {
+      const seq = this.nextSeq(prev.worker_id)
+      handle = { worker_id: prev.worker_id, seq, impl: 'claude-code' }
+      const sessionName = `crabot-w-${prev.worker_id}-${seq}`
+      const outputFile = join(dir, `output-${seq}.log`)
+      // 不重复传 --permission-mode:provision 阶段已把 acceptEdits 写进 settings.json,覆盖
+      // 命令行没有重复声明的场景(resume 正是这样的场景)。session_ref 是 cc 侧的会话 uuid,
+      // 沿用不变。拼接时用 shQuote 转义 session_ref,防止 shell 注入(双层防御:
+      // 入口已校验 UUID 格式,拼接时再加引号转义,提高防御深度)。
+      const command = `${this.claudeBin} --resume ${shQuote(prev.session_ref)}`
 
-    const runtime: Runtime = {
-      worker_id: prev.worker_id,
-      seq,
-      dir,
-      workspaceRoot: prevRuntime.workspaceRoot,
-      sessionName,
-      sessionId: prev.session_ref,
-      outputLog: new OutputLog(outputFile),
-      eventChannel: new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot })),
-      state: 'running',
-      stopBaseline: 0,
-      killed: false,
-    }
+      // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime。
+      await this.tmux.newSession({ name: sessionName, cwd: prevRuntime.workspaceRoot, command, outputFile })
 
-    await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: prev.session_ref })
-    this.runtimes.set(instanceKey(handle), runtime)
+      runtime = {
+        worker_id: prev.worker_id,
+        seq,
+        dir,
+        workspaceRoot: prevRuntime.workspaceRoot,
+        sessionName,
+        sessionId: prev.session_ref,
+        outputLog: new OutputLog(outputFile),
+        eventChannel: new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot })),
+        state: 'running',
+        stopBaseline: 0,
+        killed: false,
+      }
+
+      await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: prev.session_ref })
+      this.runtimes.set(instanceKey(handle), runtime)
+    })
 
     // 首条 wakeInput 注入失败:按 spawn 同款纪律处理——已注册的化身清理 tmux 会话后落
     // exited(crashed)(不是 killed,不是用户发起的 kill),resume 仍然 reject。
     try {
-      await this.tmux.sendText(sessionName, wakeInput)
+      await this.tmux.sendText(runtime.sessionName, wakeInput)
     } catch (err) {
       await this.getMutex(handle.worker_id).run(async () => {
         if (runtime.state === 'exited') return
-        await this.tmux.killSession(sessionName)
+        await this.tmux.killSession(runtime.sessionName)
         await this.transitionExited(runtime, handle, 'crashed')
       })
       throw err
@@ -359,38 +366,35 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       throw new Error(`ClaudeCodeAdapter.fork: no such incarnation ${prev.worker_id}#${prev.seq} resident in this process`)
     }
 
-    const seq = prev.seq + 1
-    const handle: IncarnationHandle = { worker_id: prev.worker_id, seq, impl: 'claude-code' }
-    if (this.runtimes.has(instanceKey(handle))) {
-      throw new Error(`ClaudeCodeAdapter.fork: worker_id ${prev.worker_id} seq ${seq} already exists in this process`)
-    }
-
     const dir = prevRuntime.dir
-    const outputFile = join(dir, `output-${seq}.log`)
     // cc 的 --fork-session 在其内部生成一个新会话 id,--output-format text 的 stdout 不
     // 携带它,拿不到就拿不到:这里落一个本地占位 uuid,不对应真实 cc 会话文件(已知限制)。
     const sessionId = randomUUID()
 
-    const runtime: Runtime = {
-      worker_id: prev.worker_id,
-      seq,
-      dir,
-      workspaceRoot: prevRuntime.workspaceRoot,
-      sessionName: '',
-      sessionId,
-      outputLog: new OutputLog(outputFile),
-      eventChannel: new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot })),
-      state: 'running',
-      stopBaseline: 0,
-      killed: false,
-    }
-
-    // 为可观测起见,先提交一段 meta(running)+注册 runtime——与最终提交 exited 一样,都在
-    // per-worker 互斥锁内完成(两次并发 fork 同一 prev 时,后到者会在锁内重新撞见"已存在"
-    // 而拒绝,不会双写同一个 seq)。
+    // seq 分配(nextSeq(),该 worker 现存所有化身 max seq + 1)+ 提交一段 meta(running)+
+    // 注册 runtime 整体在 per-worker 互斥锁内完成——不能再用 prev.seq+1 这种固定公式:fork
+    // 化身常驻 runtimes 不删,对同一个 prev 连续 fork 两次,prev.seq+1 算出来的号位第二次会
+    // 撞上第一次已经占用的那个,而不是真正分配到空位(见文件头注释、P2 review #1)。nextSeq()
+    // 与锁内的注册在同一次 mutex.run 内完成,保证分配即生效,不会被并发的另一次
+    // fork/resume 抢到同一个号位。
+    let handle!: IncarnationHandle
+    let runtime!: Runtime
     await this.getMutex(prev.worker_id).run(async () => {
-      if (this.runtimes.has(instanceKey(handle))) {
-        throw new Error(`ClaudeCodeAdapter.fork: worker_id ${prev.worker_id} seq ${seq} already exists in this process`)
+      const seq = this.nextSeq(prev.worker_id)
+      handle = { worker_id: prev.worker_id, seq, impl: 'claude-code' }
+      const outputFile = join(dir, `output-${seq}.log`)
+      runtime = {
+        worker_id: prev.worker_id,
+        seq,
+        dir,
+        workspaceRoot: prevRuntime.workspaceRoot,
+        sessionName: '',
+        sessionId,
+        outputLog: new OutputLog(outputFile),
+        eventChannel: new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot })),
+        state: 'running',
+        stopBaseline: 0,
+        killed: false,
       }
       await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: sessionId })
       this.runtimes.set(instanceKey(handle), runtime)
@@ -559,6 +563,20 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       this.mutexes.set(worker_id, mutex)
     }
     return mutex
+  }
+
+  /**
+   * worker_id 对应下一个可用的化身序号:该 worker 现存所有化身(主线 + fork 分支 + resume
+   * 链)里最大 seq + 1。resume() 和 fork() 共用这一个分配逻辑,且都在各自的 mutex.run 内
+   * 调用,保证互不撞号(fork 化身常驻不删,不能用 prev.seq+1 这种固定公式——见 fork()/
+   * resume() 注释)。与 builtin adapter 的同名方法同一思路。
+   */
+  private nextSeq(worker_id: string): number {
+    let max = 0
+    for (const runtime of this.runtimes.values()) {
+      if (runtime.worker_id === worker_id && runtime.seq > max) max = runtime.seq
+    }
+    return max + 1
   }
 
   private async transitionState(runtime: Runtime, h: IncarnationHandle, state: WorkerContractState): Promise<void> {

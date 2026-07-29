@@ -332,6 +332,30 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
     },
     15000,
   )
+
+  it(
+    '对同一个已 exited 的 prev 连续 resume 两次,seq 用 nextSeq() 递增分配,不撞号(P2 review #1)',
+    async () => {
+      const { adapter, workerId } = await provisionedAdapter([{ output: '主线输出', exit: true }])
+      const h1 = await adapter.spawn(makeSpec(workerId, '你好'))
+      await waitForState(adapter, h1, 'exited')
+
+      const meta1 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string }
+
+      const h2 = await adapter.resume({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '继续 1')
+      expect(h2.seq).toBe(2)
+
+      // 对同一个 prev(h1,仍是 exited 终态)再 resume 一次:旧实现用固定公式 prev.seq+1
+      // 算出 seq=2,与 h2 撞号,抛"already exists"。新实现用 nextSeq()(该 worker 现存所有
+      // 化身 max seq + 1)分配到 3。
+      const h3 = await adapter.resume({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '继续 2')
+      expect(h3.seq).toBe(3)
+
+      await adapter.kill(h2)
+      await adapter.kill(h3)
+    },
+    15000,
+  )
 })
 
 /** 转发到可替换的底层 TmuxDriver——用于"先用坏 bin 失败一次,再换成好 bin 重试"的测试场景。 */

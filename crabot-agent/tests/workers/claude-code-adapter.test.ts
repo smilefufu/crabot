@@ -797,6 +797,65 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
     },
     15000,
   )
+
+  it(
+    '连续两次 fork 同一个 prev,seq 用 nextSeq() 递增分配,不撞号(P2 review #1)',
+    async () => {
+      const tmux = new CountingTmux()
+      const argvFile = path.join(dataDir, 'fork-argv-seq.jsonl')
+      const claudeBin = forkClaudeBin(argvFile, '侧问回复')
+      const adapter = new ClaudeCodeAdapter({ dataDir, tmux, claudeBin })
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `cctest-${randomUUID().slice(0, 8)}`
+
+      const h1 = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+      const meta1 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string }
+
+      const h2 = await adapter.fork({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '第一次侧问')
+      expect(h2.seq).toBe(2)
+
+      // 对同一个 prev(h1)再 fork 一次:fork 化身常驻不删,旧实现用固定公式 prev.seq+1 算出
+      // seq=2,与 h2 撞号,抛"already exists"。新实现用 nextSeq()(该 worker 现存所有化身
+      // max seq + 1)分配到 3。
+      const h3 = await adapter.fork({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '第二次侧问')
+      expect(h3.seq).toBe(3)
+
+      const meta3 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-3.json'), 'utf-8')) as { state: WorkerContractState }
+      expect(meta3.state).toBe('exited')
+
+      await adapter.kill(h1)
+    },
+    15000,
+  )
+
+  it(
+    'fork 之后 resume 主线,seq 用 nextSeq() 分配,不与 fork 化身撞号(P2 review #1)',
+    async () => {
+      const tmux = new CountingTmux()
+      const argvFile = path.join(dataDir, 'fork-then-resume-argv.jsonl')
+      const claudeBin = forkClaudeBin(argvFile, '侧问回复')
+      const adapter = new ClaudeCodeAdapter({ dataDir, tmux, claudeBin })
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `cctest-${randomUUID().slice(0, 8)}`
+
+      const h1 = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+      const meta1 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string }
+
+      const h2 = await adapter.fork({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '侧问')
+      expect(h2.seq).toBe(2)
+
+      // 主线还在跑,先 kill 让它落 exited,满足 resume 的前置条件。
+      await adapter.kill(h1)
+
+      // resume 主线:fork 化身 h2(seq=2)常驻不删,旧实现用固定公式 prev.seq+1=2 会与它撞号,
+      // 抛"already exists"。新实现用 nextSeq() 分配到 3。
+      const h3 = await adapter.resume({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '继续')
+      expect(h3.seq).toBe(3)
+
+      await adapter.kill(h3)
+    },
+    15000,
+  )
 })
 
 /** 全程无操作的假 TmuxDriver——readTrace 测试只需要一个"常驻 runtime"的化身,不关心 tmux 行为本身。 */

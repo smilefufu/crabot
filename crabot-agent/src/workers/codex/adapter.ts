@@ -460,53 +460,59 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       throw new Error(`CodexWorkerAdapter.resume: incarnation ${prev.worker_id}#${prev.seq} has not exited yet (state=${prevState})`)
     }
 
-    const seq = prev.seq + 1
-    const handle: IncarnationHandle = { worker_id: prev.worker_id, seq, impl: 'codex' }
-    if (this.runtimes.has(instanceKey(handle))) {
-      throw new Error(`CodexWorkerAdapter.resume: worker_id ${prev.worker_id} seq ${seq} already exists in this process`)
-    }
-
     const dir = prevRuntime.dir
-    const sessionName = `crabot-w-${prev.worker_id}-${seq}`
-    const outputFile = join(dir, `output-${seq}.log`)
-    // codex-docs: `codex resume <SESSION_ID>` 是独立子命令(不是 --resume flag)。
-    // --ask-for-approval/--sandbox 是否对 resume 子命令同样生效未逐条确认,按同一 CLI 顶层
-    // flag 惯例沿用,真机校准时需要核实(见 Task 6 报告)。
-    const command = `${this.codexBin} resume ${shQuote(prev.session_ref)} --ask-for-approval never --sandbox workspace-write`
 
-    // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime。
-    await this.tmux.newSession({ name: sessionName, cwd: prevRuntime.workspaceRoot, command, outputFile, env: { CODEX_HOME: prevRuntime.codexHome } })
+    // seq 分配(nextSeq(),该 worker 现存所有化身 max seq + 1)+ tmux newSession + 提交
+    // (meta+runtime)整体在该 worker 的互斥锁内原子完成——不能再用 prev.seq+1 这种固定公式:
+    // codex 的 resume 链条与 cc 同款语义,继续用 prev.seq+1 会在被更早一次操作占用同一号位
+    // 时假死(见 cc adapter.ts 同款修复、P2 review #1)。newSession 只是起一个 tmux pane
+    // (不等待 CLI 完整应答),放进锁内不违反"耗时较长操作留在锁外"的纪律。
+    let handle!: IncarnationHandle
+    let runtime!: Runtime
+    await this.getMutex(prev.worker_id).run(async () => {
+      const seq = this.nextSeq(prev.worker_id)
+      handle = { worker_id: prev.worker_id, seq, impl: 'codex' }
+      const sessionName = `crabot-w-${prev.worker_id}-${seq}`
+      const outputFile = join(dir, `output-${seq}.log`)
+      // codex-docs: `codex resume <SESSION_ID>` 是独立子命令(不是 --resume flag)。
+      // --ask-for-approval/--sandbox 是否对 resume 子命令同样生效未逐条确认,按同一 CLI 顶层
+      // flag 惯例沿用,真机校准时需要核实(见 Task 6 报告)。
+      const command = `${this.codexBin} resume ${shQuote(prev.session_ref)} --ask-for-approval never --sandbox workspace-write`
 
-    const runtime: Runtime = {
-      worker_id: prev.worker_id,
-      seq,
-      dir,
-      workspaceRoot: prevRuntime.workspaceRoot,
-      codexHome: prevRuntime.codexHome,
-      sessionName,
-      sessionId: prev.session_ref,
-      // resume 续写的是同一个 rollout 文件(session id 不变),不需要重新发现——直接沿用上一
-      // 化身已发现的路径;上一化身当时若发现失败(占位 uuid),这里同样拿不到,保持未知。
-      rolloutPath: prevRuntime.rolloutPath,
-      outputLog: new OutputLog(outputFile),
-      eventChannel: new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot })),
-      sessionDiscoveryStatus: prevRuntime.sessionDiscoveryStatus,
-      state: 'running',
-      stopBaseline: 0,
-      killed: false,
-    }
+      // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime。
+      await this.tmux.newSession({ name: sessionName, cwd: prevRuntime.workspaceRoot, command, outputFile, env: { CODEX_HOME: prevRuntime.codexHome } })
 
-    await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: prev.session_ref, session_discovery: prevRuntime.sessionDiscoveryStatus })
-    this.runtimes.set(instanceKey(handle), runtime)
+      runtime = {
+        worker_id: prev.worker_id,
+        seq,
+        dir,
+        workspaceRoot: prevRuntime.workspaceRoot,
+        codexHome: prevRuntime.codexHome,
+        sessionName,
+        sessionId: prev.session_ref,
+        // resume 续写的是同一个 rollout 文件(session id 不变),不需要重新发现——直接沿用上一
+        // 化身已发现的路径;上一化身当时若发现失败(占位 uuid),这里同样拿不到,保持未知。
+        rolloutPath: prevRuntime.rolloutPath,
+        outputLog: new OutputLog(outputFile),
+        eventChannel: new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot })),
+        sessionDiscoveryStatus: prevRuntime.sessionDiscoveryStatus,
+        state: 'running',
+        stopBaseline: 0,
+        killed: false,
+      }
+
+      await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: prev.session_ref, session_discovery: prevRuntime.sessionDiscoveryStatus })
+      this.runtimes.set(instanceKey(handle), runtime)
+    })
 
     // 首条 wakeInput 注入失败:按 spawn 同款纪律处理——已注册的化身清理 tmux 会话后落
     // exited(crashed),resume 仍然 reject。
     try {
-      await this.tmux.sendText(sessionName, wakeInput)
+      await this.tmux.sendText(runtime.sessionName, wakeInput)
     } catch (err) {
       await this.getMutex(handle.worker_id).run(async () => {
         if (runtime.state === 'exited') return
-        await this.tmux.killSession(sessionName)
+        await this.tmux.killSession(runtime.sessionName)
         await this.transitionExited(runtime, handle, 'crashed')
       })
       throw err
@@ -656,6 +662,19 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       this.mutexes.set(worker_id, mutex)
     }
     return mutex
+  }
+
+  /**
+   * worker_id 对应下一个可用的化身序号:该 worker 现存所有化身里最大 seq + 1。resume() 在
+   * mutex.run 内调用,保证不与并发的另一次 resume 撞号。与 cc adapter 的同名方法同一思路
+   * (codex 的 fork() 不支持,不参与这个分配)。
+   */
+  private nextSeq(worker_id: string): number {
+    let max = 0
+    for (const runtime of this.runtimes.values()) {
+      if (runtime.worker_id === worker_id && runtime.seq > max) max = runtime.seq
+    }
+    return max + 1
   }
 
   private async transitionState(runtime: Runtime, h: IncarnationHandle, state: WorkerContractState): Promise<void> {
