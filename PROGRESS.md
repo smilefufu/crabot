@@ -1,6 +1,13 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-27 — 任务终态与 worker 生命周期对齐（issue #43 下半）
+> 最后更新：2026-07-29 — Manager/Worker 拆分 P1：worker 契约与内置 adapter（PR 待合并）
+
+## 2026-07-29 — Manager/Worker 拆分 P1：worker 契约与内置 adapter
+
+- 背景：manager/worker 双 agent 拆分立项。总体架构 spec `crabot-docs/superpowers/specs/2026-07-28-manager-worker-agent-split-design.md` 已确认；协议落地 protocol-agent-v3（v2 标记 Superseded，admin task 域退役为读模型，TaskStatus 精简，crab-messaging 收窄为 manager 持有）；实施路线图 P1–P8 见 `crabot-docs/superpowers/plans/2026-07-28-manager-worker-split-roadmap.md`。
+- P1 交付（本 PR，纯新增未激活，现网零影响）：`crabot-agent/src/workers/` —— 契约类型（与 protocol-agent-v3 §3/§6.1 逐字对齐）、append-only session 树（任意节点分支，取代 ResumeCheckpoint 的方向）、OutputLog 游标增量读（UTF-8 边界安全）、builtin adapter（burst 状态机：spawn/sendInput/resume/fork/kill/scanOrphans，per-worker 互斥）、可复用契约一致性套件（P2 的 claude-code/codex adapter 直接复跑）。tests/workers 47 用例。
+- 评审沉淀：四轮并发竞态修复（sendInput 双发、收尾窗口、catch 锁外判死、kill 交接窗口 killRequested 闭环）；burst 显式 disableCompaction（压缩与 session 树协同留 P7）；resume 幂等提交次序（append→writeMeta→注册+标记）。
+- 待办：P2（tmux 驱动 + claude-code/codex adapter）起手前先写细化 plan；终审裁决"留"的 Minor 清单见 roadmap 同目录执行记录。
 
 ## 2026-07-27 — 任务终态与 worker 生命周期对齐（issue #43 下半）
 
