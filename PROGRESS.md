@@ -1,6 +1,12 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-29 — Manager/Worker 拆分 P1：worker 契约与内置 adapter（PR 待合并）
+> 最后更新：2026-07-29 — Manager/Worker 拆分 P2：tmux 驱动与外部 CLI adapter（PR 待合并）
+
+## 2026-07-29 — Manager/Worker 拆分 P2：tmux 驱动与外部 CLI adapter
+
+- P1（PR #47）当日四轮 auto review 后合并。P2 交付（纯新增未激活）：tmux 驱动层（new-session+pipe-pane 批处理防首输出竞态、send-keys -l 防键名解释）、CLI hook 事件文件通道（纯 POSIX printf 追加 + fs.watch/轮询,无 HTTP 端点）、provision 物化基建（skill 复制/mcp 双格式渲染含 TOML quoted-key/自述文件）、claude-code adapter（--session-id 预知 session_ref、Stop hook 通知、无头 -p --fork-session 侧问、readTrace 解析 projects JSONL）、codex adapter（文档语义实现：CODEX_HOME 隔离、rollout 文件名 session 发现、fork 定案不支持 [openai/codex#11750/#17568]）、契约套件复跑（cc/codex 各 10 例,mock CLI 走真实 tmux）。tests/workers 163 用例。
+- 评审沉淀：P1 锁纪律在 cc adapter 的两处回归被抓（syncState 全段入锁、spawn 提交后置）；安全审查修 session_ref 注入（UUID 边界校验+shQuote 双层）；codex auth.json 0600+gitignore。
+- 已知限制：本机无 codex,其 adapter 待真机校准（8 项清单见执行记录）；协议已同步修正（codex fork=false、通知为事件文件通道,crabot-docs 5e95b20）。
 
 ## 2026-07-29 — Manager/Worker 拆分 P1：worker 契约与内置 adapter
 
