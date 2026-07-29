@@ -1,12 +1,20 @@
 /**
- * BuiltinWorkerAdapter — worker 契约的 builtin 实现（P1：spawn + burst 状态机）。
+ * BuiltinWorkerAdapter — worker 契约的 builtin 实现（P1：spawn + burst 状态机 + sendInput/resume）。
  *
- * 每个 worker 落 <dataDir>/<worker_id>/{session.jsonl,output.log,meta.json}。
- * spawn 建目录、把 prompt 作为根节点 append 进 session 树、fire-and-forget 起一个
- * "burst"（一次 runEngine 调用），随即以 running 态返回。burst 结束后按 engine
- * outcome / exitToolCall 迁移到 idle 或 exited，meta.json 原子写。
+ * 每个 worker 落 <dataDir>/<worker_id>/session.jsonl（跨化身共享的 session 树）+
+ * 每个化身独立的 output-<seq>.log / meta-<seq>.json。spawn 建目录、把 prompt 作为根
+ * 节点 append 进 session 树、fire-and-forget 起一个 "burst"（一次 runEngine 调用），
+ * 随即以 running 态返回。burst 结束后按 engine outcome / exitToolCall 迁移到 idle 或
+ * exited，meta-<seq>.json 原子写。
  *
- * resume/fork/sendInput/kill 留给后续 task（Task 6-8）。
+ * sendInput：idle 态追加新一轮用户消息并续 burst；running 态进入本化身的待注入队列，
+ * 当前 burst 结束若判定为 idle 且队列非空则原地续 burst（不经过可见的 idle 态）；
+ * exited 态抛 WorkerExitedError，交给上层 harness 做透明接续（P3）。
+ *
+ * resume：从已 exited 的化身的 session_ref（tip node_id）派生 seq+1 新化身，
+ * append wakeInput 后起新 burst。
+ *
+ * fork/kill 留给后续 task（Task 7-8）。
  */
 import { promises as fs } from 'fs'
 import { join } from 'path'
@@ -30,7 +38,21 @@ import type {
   Workspace,
 } from '../types.js'
 
-const NOT_IMPLEMENTED = 'not implemented until Task 6-8'
+const NOT_IMPLEMENTED = 'not implemented until Task 7-8'
+
+/**
+ * sendInput 打到已 exited 的化身时抛出。透明接续（自动 resume 并重投）是 harness（P3）
+ * 的职责，adapter 层保持窄语义，只负责如实报告"这个化身已经结束了"。
+ */
+export class WorkerExitedError extends Error {
+  constructor(
+    readonly worker_id: string,
+    readonly seq: number,
+  ) {
+    super(`BuiltinWorkerAdapter: incarnation ${worker_id}#${seq} has exited`)
+    this.name = 'WorkerExitedError'
+  }
+}
 
 const FINISH_TASK_TOOL: ToolDefinition = {
   ...defineTool({
@@ -60,6 +82,8 @@ interface WorkerInstance {
   state: WorkerContractState
   ended_reason?: IncarnationEndReason
   outcome?: 'completed' | 'failed'
+  /** running 态下经 sendInput 排队、等下一次 burst 间隙统一 append 的用户消息（P1：内存，不跨重启持久）。 */
+  pendingInputs: string[]
 }
 
 function instanceKey(worker_id: string, seq: number): string {
@@ -74,6 +98,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
   readonly implId = 'builtin' as const
 
   private readonly instances = new Map<string, WorkerInstance>()
+  /** worker_id → spawn 时注入的 builtin 执行配置（adapter/model/tools），resume 与续 burst 复用。P1：仅内存，不跨重启持久。 */
+  private readonly builtinConfigs = new Map<string, NonNullable<SpawnSpec['builtin']>>()
 
   constructor(
     private readonly deps: {
@@ -99,7 +125,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     await fs.mkdir(dir, { recursive: true })
 
     const sessionTree = new SessionTree(join(dir, 'session.jsonl'))
-    const outputLog = new OutputLog(join(dir, 'output.log'))
+    const outputLog = new OutputLog(join(dir, `output-${seq}.log`))
     await sessionTree.append(null, createUserMessage(spec.prompt))
 
     const instance: WorkerInstance = {
@@ -109,8 +135,10 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       sessionTree,
       outputLog,
       state: 'running',
+      pendingInputs: [],
     }
     this.instances.set(instanceKey(spec.worker_id, seq), instance)
+    this.builtinConfigs.set(spec.worker_id, spec.builtin)
 
     const handle: IncarnationHandle = { worker_id: spec.worker_id, seq, impl: 'builtin' }
     await this.writeMeta(instance)
@@ -126,28 +154,89 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     return handle
   }
 
-  async resume(_prev: IncarnationRef, _wakeInput: string): Promise<IncarnationHandle> {
-    throw new Error(NOT_IMPLEMENTED)
+  async resume(prev: IncarnationRef, wakeInput: string): Promise<IncarnationHandle> {
+    await this.assertExited(prev.worker_id, prev.seq)
+    const builtin = this.builtinConfigs.get(prev.worker_id)
+    if (!builtin) {
+      throw new Error(`BuiltinWorkerAdapter.resume: no builtin config resident in memory for worker ${prev.worker_id} (P1: worker must have been spawned in this process)`)
+    }
+
+    const newSeq = prev.seq + 1
+    const dir = join(this.deps.dataDir, prev.worker_id)
+    let sessionTree = this.findSessionTreeForWorker(prev.worker_id)
+    if (!sessionTree) {
+      sessionTree = await SessionTree.load(join(dir, 'session.jsonl'))
+    }
+    const outputLog = new OutputLog(join(dir, `output-${newSeq}.log`))
+    await sessionTree.append(prev.session_ref, createUserMessage(wakeInput))
+
+    const instance: WorkerInstance = {
+      worker_id: prev.worker_id,
+      seq: newSeq,
+      dir,
+      sessionTree,
+      outputLog,
+      state: 'running',
+      pendingInputs: [],
+    }
+    this.instances.set(instanceKey(prev.worker_id, newSeq), instance)
+
+    const handle: IncarnationHandle = { worker_id: prev.worker_id, seq: newSeq, impl: 'builtin' }
+    await this.writeMeta(instance)
+
+    this.runBurst(instance, handle, builtin).catch(async (err) => {
+      console.error('[builtin-adapter] runBurst threw unexpectedly (resume):', err)
+      await this.transitionExited(instance, handle, 'crashed')
+    })
+
+    return handle
   }
 
   async fork(_prev: IncarnationRef, _forkInput: string): Promise<IncarnationHandle> {
     throw new Error(NOT_IMPLEMENTED)
   }
 
-  async sendInput(_h: IncarnationHandle, _text: string, _opts?: { raw?: boolean }): Promise<void> {
-    throw new Error(NOT_IMPLEMENTED)
+  async sendInput(h: IncarnationHandle, text: string, _opts?: { raw?: boolean }): Promise<void> {
+    const instance = this.instances.get(instanceKey(h.worker_id, h.seq))
+    if (!instance) {
+      throw new Error(`BuiltinWorkerAdapter.sendInput: no such incarnation ${h.worker_id}#${h.seq} resident in this process`)
+    }
+
+    if (instance.state === 'exited') {
+      throw new WorkerExitedError(h.worker_id, h.seq)
+    }
+
+    if (instance.state === 'running') {
+      instance.pendingInputs.push(text)
+      return
+    }
+
+    // idle → 追加新一轮用户消息，续 burst，转 running。
+    const builtin = this.builtinConfigs.get(h.worker_id)
+    if (!builtin) {
+      throw new Error(`BuiltinWorkerAdapter.sendInput: no builtin config resident in memory for worker ${h.worker_id}`)
+    }
+    const tip = instance.sessionTree.latestTip()
+    if (tip === null) throw new Error(`BuiltinWorkerAdapter: worker ${instance.worker_id} has empty session tree`)
+    await instance.sessionTree.append(tip, createUserMessage(text))
+    await this.transitionState(instance, h, 'running')
+
+    this.runBurst(instance, h, builtin).catch(async (err) => {
+      console.error('[builtin-adapter] runBurst threw unexpectedly (sendInput continuation):', err)
+      await this.transitionExited(instance, h, 'crashed')
+    })
   }
 
   async readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
     const instance = this.instances.get(instanceKey(h.worker_id, h.seq))
-    const outputLog = instance ? instance.outputLog : new OutputLog(join(this.deps.dataDir, h.worker_id, 'output.log'))
+    const outputLog = instance ? instance.outputLog : new OutputLog(join(this.deps.dataDir, h.worker_id, `output-${h.seq}.log`))
     return outputLog.read(cursor)
   }
 
   async state(h: IncarnationHandle): Promise<WorkerContractState> {
     const instance = this.instances.get(instanceKey(h.worker_id, h.seq))
     if (instance) return instance.state
-    const metaPath = join(this.deps.dataDir, h.worker_id, 'meta.json')
+    const metaPath = join(this.deps.dataDir, h.worker_id, `meta-${h.seq}.json`)
     const raw = await fs.readFile(metaPath, 'utf-8')
     const meta = JSON.parse(raw) as { state: WorkerContractState }
     return meta.state
@@ -223,8 +312,48 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       return
     }
 
-    // end_turn（或 max_turns 耗尽）→ idle，等待下一次 resume/sendInput 唤醒。
+    // end_turn（或 max_turns 耗尽）→ 若 sendInput 排了队，逐条 append 后原地续 burst
+    // （不经过可见的 idle 态）；否则转 idle，等待下一次 resume/sendInput 唤醒。
+    if (instance.pendingInputs.length > 0) {
+      const queued = instance.pendingInputs.splice(0, instance.pendingInputs.length)
+      let queueParent = instance.sessionTree.latestTip()
+      if (queueParent === null) throw new Error(`BuiltinWorkerAdapter: worker ${instance.worker_id} has empty session tree`)
+      for (const text of queued) {
+        queueParent = await instance.sessionTree.append(queueParent, createUserMessage(text))
+      }
+      await this.runBurst(instance, handle, builtin)
+      return
+    }
+
     await this.transitionState(instance, handle, 'idle')
+  }
+
+  private findSessionTreeForWorker(worker_id: string): SessionTree | undefined {
+    for (const instance of this.instances.values()) {
+      if (instance.worker_id === worker_id) return instance.sessionTree
+    }
+    return undefined
+  }
+
+  private async assertExited(worker_id: string, seq: number): Promise<void> {
+    const existing = this.instances.get(instanceKey(worker_id, seq))
+    if (existing) {
+      if (existing.state !== 'exited') {
+        throw new Error(`BuiltinWorkerAdapter.resume: incarnation ${worker_id}#${seq} is not exited (state=${existing.state})`)
+      }
+      return
+    }
+    const metaPath = join(this.deps.dataDir, worker_id, `meta-${seq}.json`)
+    let raw: string
+    try {
+      raw = await fs.readFile(metaPath, 'utf-8')
+    } catch {
+      throw new Error(`BuiltinWorkerAdapter.resume: no such incarnation ${worker_id}#${seq}`)
+    }
+    const meta = JSON.parse(raw) as { state: WorkerContractState }
+    if (meta.state !== 'exited') {
+      throw new Error(`BuiltinWorkerAdapter.resume: incarnation ${worker_id}#${seq} is not exited (state=${meta.state})`)
+    }
   }
 
   private combineTools(tools: Resolvable<ReadonlyArray<ToolDefinition>>): Resolvable<ReadonlyArray<ToolDefinition>> {
@@ -266,8 +395,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       ...(ended_reason !== undefined ? { ended_reason } : {}),
       ...(outcome !== undefined ? { outcome } : {}),
     }
-    const metaPath = join(instance.dir, 'meta.json')
-    const tmpPath = join(instance.dir, `.meta.json.tmp-${randomUUID()}`)
+    const metaPath = join(instance.dir, `meta-${instance.seq}.json`)
+    const tmpPath = join(instance.dir, `.meta-${instance.seq}.json.tmp-${randomUUID()}`)
     await fs.writeFile(tmpPath, JSON.stringify(meta), 'utf-8')
     await fs.rename(tmpPath, metaPath)
   }
