@@ -8,18 +8,21 @@ export interface ProvisionSources {
 }
 
 /**
- * skill.name 校验:非空、不含路径分隔符(`/`、`\`)、不是 `..`,且 resolve 后仍落在
- * targetRoot 前缀内。name 来自外部数据(skill 定义),未经校验直接拼进 fs.rm(recursive,
- * force) 的目标路径会让恶意/畸形 name(如含 `/`、`..`)逃出 targetRoot、删掉 workspace 内
- * 甚至外的任意目录(P2 review #3)。
+ * skill.name 校验:非空、不含路径分隔符(`/`、`\`)、不是 `..`、不是 `.`,且 resolve 后
+ * 必须是 targetRoot 的真子路径(不能等于 targetRoot 本身)。name 来自外部数据(skill 定义),
+ * 未经校验直接拼进 fs.rm(recursive, force) 的目标路径会让恶意/畸形 name(如含 `/`、`..`)
+ * 逃出 targetRoot、删掉 workspace 内甚至外的任意目录(P2 review #3)。`.` 是这条规则里
+ * 容易漏掉的一种:不含 `/`、不等于 `..`,resolve(targetRoot, '.') 却恰好等于 targetRoot
+ * 本身——旧校验只检查"逃出前缀",没检查"等于自身",会把 dest 算成 targetRoot,
+ * fs.rm 直接清空整个 skills 目标目录(P2 复审 #4)。
  */
 function validateSkillName(name: string, targetRoot: string): void {
-  if (!name || name.includes('/') || name.includes('\\') || name === '..') {
-    throw new Error(`materializeSkills: invalid skill.name ${JSON.stringify(name)} (must be non-empty, contain no path separators, and not be '..')`)
+  if (!name || name.includes('/') || name.includes('\\') || name === '..' || name === '.') {
+    throw new Error(`materializeSkills: invalid skill.name ${JSON.stringify(name)} (must be non-empty, contain no path separators, and not be '.' or '..')`)
   }
   const resolvedRoot = path.resolve(targetRoot)
   const resolved = path.resolve(targetRoot, name)
-  if (resolved !== resolvedRoot && !resolved.startsWith(resolvedRoot + path.sep)) {
+  if (!resolved.startsWith(resolvedRoot + path.sep)) {
     throw new Error(`materializeSkills: skill.name ${JSON.stringify(name)} escapes target directory`)
   }
 }

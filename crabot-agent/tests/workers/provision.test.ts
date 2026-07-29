@@ -73,7 +73,7 @@ describe('materializeSkills', () => {
   // 的恶意/畸形 name 能让 dest 逃出 <ws>/.claude/skills/,递归删掉 workspace 内甚至外的任意
   // 目录(P2 review #3)。这里逐一验证每种恶意 name 都被 reject,且 reject 发生在任何
   // fs.rm/fs.cp 之前——已经物化好的哨兵文件必须原封不动。
-  describe.each([['../../x'], ['a/b'], [''], ['..']])('拒绝恶意 skill.name %j', (maliciousName) => {
+  describe.each([['../../x'], ['a/b'], [''], ['..'], ['.']])('拒绝恶意 skill.name %j', (maliciousName) => {
     it(`reject 且不删除任何目录、不产生越权写入(name=${JSON.stringify(maliciousName)})`, async () => {
       const skillsDir = path.join(ws, '.claude/skills')
       await fs.mkdir(skillsDir, { recursive: true })
