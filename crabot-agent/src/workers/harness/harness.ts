@@ -662,7 +662,7 @@ export class WorkerHarness {
       if (!found) return // 未知 worker,理论不该发生;防御性丢弃,不抛给 adapter 的回调
       const { worker, dialogObjectId } = found
 
-      const target = worker.incarnations.find((inc) => inc.seq === h.seq)
+      const target = findIncarnation(worker, h.impl, h.seq)
       if (!target) return // 未知化身(理论不该发生),防御性丢弃
 
       // WorkerAdapter.onStateChange 只携带 (handle, state) 三态,没有 endReason——kill 触发的
@@ -785,6 +785,26 @@ export class WorkerHarness {
 function mainlineIncarnation(worker: LedgerWorker): Incarnation {
   const mainline = worker.incarnations.filter((inc) => inc.forked_from === undefined)
   return mainline[mainline.length - 1]
+}
+
+/**
+ * 按 (impl, seq) 精确定位一个活跃的化身条目(取最后一条匹配,代表当前活跃化身)。
+ *
+ * 只按 seq 匹配是不够的(protocol-agent-v3 §6.1"已知限制"):IncarnationHandle.seq 由各
+ * adapter 自行分配,只保证同一个 adapter 实例内递增不重复,不保证跨 adapter 实例(跨实现
+ * 切换、进程重启后新建的 adapter 实例)全局唯一——(impl, seq) 相同的记录可能因此在同一
+ * 台账里出现不止一条(旧的已归档,新的是当前活跃化身)。化身按时间顺序追加进数组,所以
+ * (impl, seq) 相同的多条记录里,数组下标最大的那条才是当前活跃的。
+ *
+ * processStateChange 的读路径和 patchIncarnationBySeq 的写路径都必须使用同一原则,
+ * 确保定位的是同一条活跃化身,避免读写分离导致的语义错位。
+ */
+function findIncarnation(worker: LedgerWorker, impl: WorkerImplId, seq: number): Incarnation | undefined {
+  let lastMatch: Incarnation | undefined
+  for (const inc of worker.incarnations) {
+    if (inc.impl === impl && inc.seq === seq) lastMatch = inc
+  }
+  return lastMatch
 }
 
 /**

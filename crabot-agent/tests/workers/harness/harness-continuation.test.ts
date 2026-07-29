@@ -718,3 +718,169 @@ describe('BuiltinWorkerAdapter → WorkerHarness — session_ref 时效性修复
     expect(afterSecondBurst.incarnations[0].session_ref).not.toBe(spawnTimeSessionRef)
   })
 })
+
+describe('WorkerHarness.processStateChange — 化身查找: 同 (impl, seq) 撞号场景下按最后一条处理', () => {
+  it('同 impl 同 seq 的两条记录（旧的已 exited、新的 running）→ 新的状态回调应该被处理而非被旧条目短路吞掉 (PoC 修复验证)', async () => {
+    const { harness, ledger, adaptersMap } = await makeHarness()
+    const fake = new FakeAdapter({ caps: { revive: true }, onStateChange: harness.handleStateChange })
+    adaptersMap.set('builtin', fake)
+
+    // 1. spawn 初始化身
+    const worker = await harness.spawnWorker(spawnParams())
+    const workerId = worker.worker_id
+    const dialogId = dialogObjectIdForPrivate('friend-1')
+
+    // 2. 让初始化身进入 exited 状态（旧的已归档化身）
+    const handle: IncarnationHandle = { worker_id: workerId, seq: 1, impl: 'builtin', session_ref: worker.incarnations[0].session_ref }
+    fake.emitStateChange(handle, 'exited')
+    await waitUntil(async () => {
+      const [w] = await harness.listWorkers(dialogId)
+      return w.incarnations[0].state === 'exited'
+    })
+
+    const afterFirstExit = (await harness.listWorkers(dialogId))[0]
+    expect(afterFirstExit.incarnations).toHaveLength(1)
+    expect(afterFirstExit.incarnations[0].state).toBe('exited')
+
+    // 3. 人工插入一条新的同 (impl, seq=1) 记录到 incarnations（模拟撞号场景）
+    // —— 新记录仍然是 running，代表真正的活跃化身。这模拟"进程重启后 adapter 又分配了 seq=1"的场景
+    // 同时把 task.status 恢复到 running（模拟新化身入链后的状态）
+    await ledger.upsertWorker(dialogId, workerId, (prev) => {
+      if (!prev) return undefined
+      const newIncarnation = {
+        seq: 1,
+        impl: 'builtin' as const,
+        state: 'running' as const,
+        workspace: prev.incarnations[0].workspace,
+        session_ref: `ref-${workerId}#1-new`,
+        started_at: prev.incarnations[0].started_at,
+      }
+      return {
+        ...prev,
+        incarnations: [...prev.incarnations, newIncarnation],
+        task: { ...prev.task, status: 'running' as const },
+        updated_at: prev.updated_at,
+      }
+    })
+
+    const beforeStateChange = (await harness.listWorkers(dialogId))[0]
+    expect(beforeStateChange.incarnations).toHaveLength(2)
+    expect(beforeStateChange.incarnations[0].state).toBe('exited') // 旧的
+    expect(beforeStateChange.incarnations[1].state).toBe('running') // 新的，真正的活跃化身
+
+    events.length = 0
+
+    // 4. 新化身自然退出，发送状态回调。注意这里用的是新化身的 session_ref
+    const newHandle: IncarnationHandle = { worker_id: workerId, seq: 1, impl: 'builtin', session_ref: `ref-${workerId}#1-new` }
+    fake.emitStateChange(newHandle, 'exited')
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    // 修复前会失败：
+    // - processStateChange 用 find(seq===1) 找到第一条（旧的 exited）
+    // - 被"if (target.state==='exited') return"短路，事件丢失、台账不更新
+    // - incarnations[1]（新的 running 化身）永远保持 running 状态，无人驾驶
+    //
+    // 修复后应该正确处理：
+    // - processStateChange 用 findIncarnation(impl, seq) 按最后一条处理，命中新的（incarnations[1]）
+    // - 新的被更新为 exited(completed)，台账更新 + 事件发出
+
+    const afterStateChange = (await harness.listWorkers(dialogId))[0]
+    // 关键断言：新化身（数组最后一条）被正确更新为 exited
+    expect(afterStateChange.incarnations[1].state).toBe('exited')
+    expect(afterStateChange.incarnations[1].ended_reason).toBe('completed')
+    // 旧化身保持不变（已经是 completed，不被新状态回调覆盖）
+    expect(afterStateChange.incarnations[0].state).toBe('exited')
+    expect(afterStateChange.incarnations[0].ended_reason).toBe('completed') // 旧的没被改动，保持原值
+
+    // 确保事件被正确记录（如果被短路吞掉就不会有事件）
+    const stateChangedEvents = events.filter((e) => e.kind === 'state_changed')
+    expect(stateChangedEvents.length).toBeGreaterThan(0)
+    expect(stateChangedEvents[0].seq).toBe(1)
+  })
+
+  it('同 seq 同 impl 两条 fork 分支化身（旧的已 exited、新的 running）→ 状态更新只影响新的那条，mainline task 不受影响', async () => {
+    const { harness, ledger, adaptersMap } = await makeHarness()
+    const fake = new FakeAdapter({ caps: { fork: false, revive: true }, onStateChange: harness.handleStateChange })
+    adaptersMap.set('builtin', fake)
+
+    // 1. spawn 主线化身 seq=1
+    const worker = await harness.spawnWorker(spawnParams())
+    const workerId = worker.worker_id
+    const dialogId = dialogObjectIdForPrivate('friend-1')
+    const mainlineHandle: IncarnationHandle = {
+      worker_id: workerId,
+      seq: 1,
+      impl: 'builtin',
+      session_ref: worker.incarnations[0].session_ref,
+    }
+
+    // 2. 模拟一个 fork 化身（手动插入，因为 FakeAdapter 不支持 fork）
+    const forkSeq = 2
+    await ledger.upsertWorker(dialogId, workerId, (prev) => {
+      if (!prev) return undefined
+      const forkIncarnation = {
+        seq: forkSeq,
+        impl: 'builtin' as const,
+        state: 'running' as const,
+        workspace: prev.incarnations[0].workspace,
+        session_ref: `fork-${forkSeq}`,
+        started_at: prev.incarnations[0].started_at,
+        forked_from: 1,
+      }
+      return { ...prev, incarnations: [...prev.incarnations, forkIncarnation], updated_at: prev.updated_at }
+    })
+
+    let current = (await harness.listWorkers(dialogId))[0]
+    expect(current.incarnations).toHaveLength(2)
+    expect(current.incarnations[1].forked_from).toBe(1)
+    expect(current.task.status).toBe('running')
+
+    // 3. fork 化身终态（旧的记录）
+    const oldForkHandle: IncarnationHandle = { worker_id: workerId, seq: forkSeq, impl: 'builtin', session_ref: `fork-${forkSeq}` }
+    fake.emitStateChange(oldForkHandle, 'exited')
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    current = (await harness.listWorkers(dialogId))[0]
+    expect(current.incarnations[1].state).toBe('exited') // fork 化身已终态
+    expect(current.task.status).toBe('running') // mainline task 不受影响
+
+    // 4. 人工插入第二个同 seq 的 fork 化身（模拟撞号）
+    await ledger.upsertWorker(dialogId, workerId, (prev) => {
+      if (!prev) return undefined
+      const newForkIncarnation = {
+        seq: forkSeq,
+        impl: 'builtin' as const,
+        state: 'running' as const,
+        workspace: prev.incarnations[0].workspace,
+        session_ref: `fork-${forkSeq}-new`,
+        started_at: prev.incarnations[1].started_at,
+        forked_from: 1,
+      }
+      return {
+        ...prev,
+        incarnations: [...prev.incarnations, newForkIncarnation],
+        task: { ...prev.task, status: 'running' as const },
+        updated_at: prev.updated_at,
+      }
+    })
+
+    current = (await harness.listWorkers(dialogId))[0]
+    expect(current.incarnations).toHaveLength(3)
+    expect(current.incarnations[1].state).toBe('exited') // 旧的 fork
+    expect(current.incarnations[2].state).toBe('running') // 新的 fork
+
+    events.length = 0
+
+    // 5. 新 fork 化身退出
+    const newForkHandle: IncarnationHandle = { worker_id: workerId, seq: forkSeq, impl: 'builtin', session_ref: `fork-${forkSeq}-new` }
+    fake.emitStateChange(newForkHandle, 'exited')
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    // 修复后应该正确更新新 fork 化身，不影响 mainline task
+    current = (await harness.listWorkers(dialogId))[0]
+    expect(current.incarnations[2].state).toBe('exited') // 新的 fork 被更新
+    expect(current.incarnations[2].ended_reason).toBe('completed')
+    expect(current.incarnations[2].forked_from).toBe(1) // 仍然是 fork
+    expect(current.task.status).toBe('running') // mainline task 不受影响
+  })
+})
