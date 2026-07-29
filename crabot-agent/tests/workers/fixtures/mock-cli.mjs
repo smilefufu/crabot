@@ -15,15 +15,41 @@
 // adapter 的 spawn() 靠轮询发现这个文件名里的 uuid 来拿到会话真实 session_id(codex 没有
 // 类似 cc `--session-id` 的入参,session id 由 codex 内部生成)。mock 在进入 stdin 循环前
 // 同步创建这个文件(内容占位,发现逻辑只认文件名),模拟这一时序。
+//
+// 契约套件专用(P2 Task 7):MOCK_CLI_SCRIPT_FILE(可选,绝对路径)——契约套件的 fixture
+// 里 adapter 只在构造时定死 claudeBin/codexBin 这一整条命令行,但脚本内容(ScriptStep[])
+// 是每个 it() 用例调用 makeSpec() 时才知道的,晚于 adapter 构造。用一个固定路径的文件间接
+// 传递脚本内容,makeSpec() 同步写文件、mock-cli 进程启动时再读,取代内联进命令行的
+// MOCK_CLI_SCRIPT。两者都设置时 SCRIPT_FILE 优先;都没设置时脚本为空数组(现有用例的默认)。
+//
+// 契约套件的 fork() 用例还需要一次"无头一击"调用(cc adapter 的 fork 把 -p <input> 拼进
+// 同一条 claudeBin 命令行,不经 tmux,直接 sh -c 执行、等子进程退出):不能沿用 stdin 驱动
+// 的交互式脚本循环(exec 不会写任何东西到子进程 stdin,会一直挂起等不到的一行)。argv 里
+// 出现 -p 就判定为这种一次性调用,原样把入参回显到 stdout 并立即 exit 0,不进入下面的
+// stdin 循环。同理,adapter.detect() 会拿同一条 claudeBin/codexBin 命令行加一个 --version
+// 单独跑一次(也是一次性调用,不写 stdin),argv 里出现 --version 同样立即打印版本号退出。
 import { exec } from 'node:child_process'
 import { promisify } from 'node:util'
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import readline from 'node:readline'
 
 const execAsync = promisify(exec)
 
-const script = JSON.parse(process.env.MOCK_CLI_SCRIPT || '[]')
+const pFlagIndex = process.argv.indexOf('-p')
+if (pFlagIndex !== -1) {
+  const forkInput = process.argv[pFlagIndex + 1] ?? ''
+  process.stdout.write(`mock headless reply: ${forkInput}\n`)
+  process.exit(0)
+}
+
+if (process.argv.includes('--version')) {
+  process.stdout.write('mock-cli 0.0.0-test\n')
+  process.exit(0)
+}
+
+const scriptFile = process.env.MOCK_CLI_SCRIPT_FILE
+const script = scriptFile ? JSON.parse(readFileSync(scriptFile, 'utf-8')) : JSON.parse(process.env.MOCK_CLI_SCRIPT || '[]')
 const stopHookCmd = process.env.MOCK_CLI_STOP_HOOK_CMD || ''
 
 const argvFile = process.env.MOCK_CLI_ARGV_FILE
