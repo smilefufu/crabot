@@ -256,6 +256,53 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     const resumedEvents = events.filter((e) => e.kind === 'resumed')
     expect(resumedEvents).toHaveLength(1)
   })
+
+  it('adapter.sendInput 抛 WorkerExitedError 时台账主线化身仍是 running（迟到状态回调没追上）→ revive 前先把旧化身回填终态，不再永久卡在 running（评审 PoC 实证的修复）', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    const fake = new FakeAdapter({
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      sendInputBehavior: (h) => {
+        throw new WorkerExitedError(h.worker_id, h.seq)
+      },
+    })
+    adaptersMap.set('builtin', fake)
+
+    const worker = await harness.spawnWorker(spawnParams())
+    // 没有触发过任何 fake.emitStateChange —— 台账里 incarnations[0].state 此刻仍是
+    // 'running'（spawnWorker 落定后就是 running），模拟"adapter 内部已经退出，但迟到的
+    // 状态回调还没追上"的竞态：这正是评审 PoC 复现的场景。
+    const before = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    expect(before.incarnations[0].state).toBe('running')
+    expect(before.incarnations[0].ended_at).toBeUndefined()
+    events.length = 0
+
+    await expect(harness.sendToWorker(worker.worker_id, '继续')).resolves.toBeUndefined()
+
+    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(w.incarnations).toHaveLength(2)
+    // 修复点：旧化身（seq=1）不再永久卡在 running —— revive 之前已经被回填了终态。
+    const oldEntry = w.incarnations[0]
+    expect(oldEntry.state).toBe('exited')
+    expect(oldEntry.ended_at).toBeTruthy()
+    expect(oldEntry.ended_reason).toBe('completed')
+
+    // 之后即便迟到的状态回调才追上来，也不应该覆盖已经回填的终态记录 —— 此时台账主线
+    // 已经换成 revive 产出的新化身（mainline.seq 已前进），processStateChange 的既有短路
+    // 规则（mainline.seq !== h.seq）会把这条迟到回调当成"非当前主线化身的迟到回调"忽略，
+    // 但这不是本测试要验证的点：本测试要证明的是旧化身在 revive 时已经同步回填，不依赖
+    // 这条本就可能永远不会到达的迟到回调。
+    const staleHandle: IncarnationHandle = {
+      worker_id: worker.worker_id,
+      seq: 1,
+      impl: 'builtin',
+      session_ref: oldEntry.session_ref,
+    }
+    fake.emitStateChange(staleHandle, 'exited')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const [w2] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(w2.incarnations[0].ended_reason).toBe('completed')
+  })
 })
 
 describe('WorkerHarness — 透明接续：handoff (capabilities().revive === false)', () => {
@@ -424,6 +471,76 @@ describe('WorkerHarness — 接续过程中的并发', () => {
     expect(fake.resumeCalls).toHaveLength(1)
     // 第二条消息通过"mainline.seq !== sourceSeq"分支，作为普通投递补送到了新主线。
     expect(fake.sendInputCalls.some((c) => c.text === '第二条')).toBe(true)
+  })
+})
+
+describe('WorkerHarness — 化身 seq 跨实例撞号（protocol-agent-v3 §6.1 已知限制）', () => {
+  it('接续产出的新化身与已归档的旧化身 seq 相同（跨 adapter 实例重新从 1 计数）→ 状态回调只改最后一条，不篡改已归档记录', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    const fake = new FakeAdapter({
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      sendInputBehavior: (h) => {
+        throw new WorkerExitedError(h.worker_id, h.seq)
+      },
+      // 模拟"跨 adapter 实例"场景：resume 产出的新化身复用 seq=1，与已经在台账里的旧化身
+      // （同样 seq=1，同 impl='builtin'）撞号——真实场景下这是"新的 adapter 实例内部
+      // nextSeq 从头计数"（进程重启 / 跨实现切换回同一实现）。
+      resumeBehavior: (prev) => ({
+        worker_id: prev.worker_id,
+        seq: 1,
+        impl: 'builtin',
+        session_ref: `resumed-collision-ref-${prev.worker_id}`,
+      }),
+    })
+    adaptersMap.set('builtin', fake)
+
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    // 触发接续：旧化身（seq=1）台账态仍是 running，WorkerExitedError 触发 revive；revive
+    // 前会先把旧化身回填终态（Task 8 修复 1），resume 产出的新化身同样是 seq=1（撞号）。
+    await harness.sendToWorker(worker.worker_id, '继续')
+
+    const [afterRevive] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(afterRevive.incarnations).toHaveLength(2)
+    const archived = afterRevive.incarnations[0]
+    const active = afterRevive.incarnations[1]
+    expect(archived.seq).toBe(1)
+    expect(active.seq).toBe(1) // 撞号：两条记录 seq 相同
+    expect(archived.state).toBe('exited') // 已归档（revive 前回填的终态）
+    expect(active.state).toBe('running')
+    const archivedSessionRefBefore = archived.session_ref
+    const archivedEndedReasonBefore = archived.ended_reason
+
+    // 新化身（active，seq=1）自然结束（非 kill）→ processStateChange 状态回调命中 seq=1。
+    // 撞号意味着"按 seq 匹配"会同时命中 archived 和 active 两条记录——修复前
+    // patchIncarnationBySeq 用 .map 逐条匹配 seq，会把 archived 也一起改写；修复后按
+    // (impl, seq) 只改最后一条（active），archived 保持原样。
+    const activeHandle: IncarnationHandle = {
+      worker_id: worker.worker_id,
+      seq: 1,
+      impl: 'builtin',
+      session_ref: active.session_ref,
+    }
+    fake.emitStateChange(activeHandle, 'exited')
+    await waitUntil(async () => {
+      const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      return w.incarnations[1].state === 'exited'
+    })
+
+    const [afterStateChange] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const archivedAfter = afterStateChange.incarnations[0]
+    const activeAfter = afterStateChange.incarnations[1]
+
+    // active（最后一条同 (impl,seq) 记录）被正确更新。
+    expect(activeAfter.state).toBe('exited')
+    expect(activeAfter.ended_reason).toBe('completed')
+
+    // archived（已归档的同 (impl,seq) 旧记录）必须完全不受这次状态回调影响。
+    expect(archivedAfter.state).toBe('exited')
+    expect(archivedAfter.ended_reason).toBe(archivedEndedReasonBefore)
+    expect(archivedAfter.session_ref).toBe(archivedSessionRefBefore)
   })
 })
 

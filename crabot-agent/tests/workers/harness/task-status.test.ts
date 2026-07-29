@@ -6,6 +6,7 @@ import {
   applyStatusTransition,
   InvalidTaskTransitionError,
   taskStatusFromIncarnation,
+  reviveTask,
 } from '../../../src/workers/harness/task-status'
 import type { TaskStatus } from '../../../src/workers/harness/ledger-types'
 import type { WorkerContractState, IncarnationEndReason } from '../../../src/workers/types'
@@ -253,6 +254,70 @@ describe('v3 task 状态机', () => {
           expect(canTransition(s, to)).toBe(false, `${s} 不能转换至 ${to}`)
         })
       })
+    })
+  })
+
+  describe('reviveTask（protocol-agent-v3 §5.2 接续例外的受控出口）', () => {
+    const now = '2026-07-28T12:00:00Z'
+
+    it('终态 task 经 reviveTask 重新置回 running，清空 completed_at/error', () => {
+      const failedTask = {
+        id: 'task-1',
+        title: 'Test Task',
+        status: 'failed' as TaskStatus,
+        created_at: '2026-07-28T00:00:00Z',
+        completed_at: '2026-07-28T01:00:00Z',
+        error: 'boom',
+      }
+      const task = reviveTask(failedTask, { now })
+      expect(task.status).toBe('running')
+      expect(task.completed_at).toBeUndefined()
+      expect(task.error).toBeUndefined()
+    })
+
+    it('completed / cancelled 终态同样可被 reviveTask 重新置回 running', () => {
+      const completedTask = {
+        id: 'task-2',
+        title: 'Test Task',
+        status: 'completed' as TaskStatus,
+        created_at: '2026-07-28T00:00:00Z',
+        completed_at: '2026-07-28T01:00:00Z',
+      }
+      expect(reviveTask(completedTask, { now }).status).toBe('running')
+
+      const cancelledTask = { ...completedTask, status: 'cancelled' as TaskStatus }
+      expect(reviveTask(cancelledTask, { now }).status).toBe('running')
+    })
+
+    it('非终态 task 调用 reviveTask 应抛 InvalidTaskTransitionError（不是给状态机新增自由出边，只服务终态接续）', () => {
+      const runningTask = {
+        id: 'task-3',
+        title: 'Test Task',
+        status: 'running' as TaskStatus,
+        created_at: '2026-07-28T00:00:00Z',
+      }
+      expect(() => reviveTask(runningTask, { now })).toThrow(InvalidTaskTransitionError)
+
+      const queuedTask = { ...runningTask, status: 'queued' as TaskStatus }
+      expect(() => reviveTask(queuedTask, { now })).toThrow(InvalidTaskTransitionError)
+
+      const waitingTask = { ...runningTask, status: 'waiting_input' as TaskStatus }
+      expect(() => reviveTask(waitingTask, { now })).toThrow(InvalidTaskTransitionError)
+    })
+
+    it('返回新对象，不修改原 task', () => {
+      const failedTask = {
+        id: 'task-1',
+        title: 'Test Task',
+        status: 'failed' as TaskStatus,
+        created_at: '2026-07-28T00:00:00Z',
+        completed_at: '2026-07-28T01:00:00Z',
+        error: 'boom',
+      }
+      const original = { ...failedTask }
+      const task = reviveTask(failedTask, { now })
+      expect(failedTask).toEqual(original)
+      expect(task).not.toBe(failedTask)
     })
   })
 

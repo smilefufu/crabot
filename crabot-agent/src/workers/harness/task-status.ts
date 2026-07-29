@@ -112,6 +112,25 @@ export function applyStatusTransition(
 }
 
 /**
+ * §5.2"接续例外"的受控出口：终态 task 经 §5.3 透明接续（revive/handoff）触发时，重新
+ * 置回 running。这是 VALID_TRANSITIONS 里终态"无出边"规则唯一允许的出边——不是给状态机
+ * 新增一条常规迁移边，只服务于接续这一显式动作，因此不经 canTransition 校验，而是显式
+ * 校验入参确为终态（非终态调用属于用错入口，常规迁移应走 applyStatusTransition，直接
+ * 抛错防止调用方把它当成通用的"强制置 running"旁路使用）。
+ *
+ * @param task 当前 task（须为终态：completed/failed/cancelled）
+ * @param opts.now 接续发生的时间戳
+ * @returns 新的 task 对象：status='running'，completed_at/error 清空
+ * @throws InvalidTaskTransitionError 若 task 当前不是终态
+ */
+export function reviveTask(task: LedgerWorker['task'], opts: { now: string }): LedgerWorker['task'] {
+  if (!isTerminalStatus(task.status)) {
+    throw new InvalidTaskTransitionError(task.status, 'running')
+  }
+  return { ...task, status: 'running', completed_at: undefined, error: undefined }
+}
+
+/**
  * 化身契约状态 → task 状态的映射。
  *
  * 规则（protocol-agent-v3 §5.2）：

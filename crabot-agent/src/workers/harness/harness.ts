@@ -76,7 +76,7 @@ import type { LedgerStore } from './ledger-store'
 import type { WorkspaceManager } from './workspace-manager'
 import { WorkerInbox, type InboxItem } from './inbox'
 import { WorkerEventLog, type HarnessEvent, type HarnessEventKind } from './worker-events'
-import { applyStatusTransition, canTransition, isTerminalStatus, taskStatusFromIncarnation } from './task-status'
+import { applyStatusTransition, isTerminalStatus, reviveTask, taskStatusFromIncarnation } from './task-status'
 import { join } from 'path'
 
 /** 交接材料里"最近输出尾部"的上限(字符数,近似 4KB,见 protocol-agent-v3 §5.3)。 */
@@ -216,7 +216,7 @@ export class WorkerHarness {
             error: err instanceof Error ? err.message : String(err),
             now,
           })
-          const incarnations = patchIncarnationBySeq(prev.incarnations, 1, {
+          const incarnations = patchIncarnationBySeq(prev.incarnations, impl, 1, {
             state: 'exited',
             ended_at: now,
             ended_reason: 'failed',
@@ -237,7 +237,7 @@ export class WorkerHarness {
       const spawned = await this.deps.ledger.upsertWorker(p.dialogObjectId, workerId, (prev) => {
         if (!prev) return undefined
         const nextTask = applyStatusTransition(prev.task, 'running', { now })
-        const incarnations = patchIncarnationBySeq(prev.incarnations, 1, { session_ref: spawnedHandle.session_ref })
+        const incarnations = patchIncarnationBySeq(prev.incarnations, impl, 1, { session_ref: spawnedHandle.session_ref })
         return { ...prev, task: nextTask, incarnations, updated_at: now }
       })
       await this.appendEvent(workerId, 1, 'spawned', { impl })
@@ -397,8 +397,24 @@ export class WorkerHarness {
         started_at: now,
         // forked_from 不填——resume 产出的新化身入主线链(protocol-agent-v3 §5.3)。
       }
+      // 源化身(mainline)台账态若仍非 exited——sendToWorker 经 WorkerExitedError 走到这里时,
+      // 台账的异步状态回调很可能还没追上 adapter 的真实状态(见 continueTerminalWorker 顶部
+      // 注释)——必须在 revive 前把它收尾,否则新化身入链后主线就换成了新 seq,后续迟到的
+      // processStateChange 会因 mainline.seq !== h.seq 被直接丢弃,旧化身永久卡在非终态、
+      // 无终态记录。对齐 handoffIncarnation 对同一竞态的处理(§5.3):这里同样只在源化身
+      // 台账态非 exited 时才回填,不覆盖已经真实记录过的终态。WorkerExitedError 不携带
+      // end reason,拿不到 adapter 给出的精确失败原因时用 'completed' 记录——语境是"已经
+      // 在准备接续续命",不是被 kill,'completed' 是这里能给出的最贴切近似值。
+      const incarnations =
+        mainline.state !== 'exited'
+          ? patchIncarnationBySeq(prev.incarnations, mainline.impl, mainline.seq, {
+              state: 'exited',
+              ended_at: now,
+              ended_reason: 'completed',
+            })
+          : prev.incarnations
       const nextTask = reopenTaskForContinuation(prev.task, now)
-      return { ...prev, task: nextTask, incarnations: [...prev.incarnations, newIncarnation], updated_at: now }
+      return { ...prev, task: nextTask, incarnations: [...incarnations, newIncarnation], updated_at: now }
     })
     await this.appendEvent(worker.worker_id, newHandle.seq, 'resumed', { from_seq: mainline.seq })
   }
@@ -457,7 +473,7 @@ export class WorkerHarness {
       const killedAt = this.deps.now()
       await this.deps.ledger.upsertWorker(dialogObjectId, worker.worker_id, (prev) => {
         if (!prev) return undefined
-        const incarnations = patchIncarnationBySeq(prev.incarnations, source.seq, {
+        const incarnations = patchIncarnationBySeq(prev.incarnations, source.impl, source.seq, {
           state: 'exited',
           ended_at: killedAt,
           ended_reason: 'superseded',
@@ -552,8 +568,9 @@ export class WorkerHarness {
       await this.deps.ledger.upsertWorker(dialogObjectId, workerId, (prev) => {
         if (!prev) return undefined
         const nextTask = applyStatusTransition(prev.task, 'cancelled', { now })
-        // 按 seq 精确定位主线化身条目,不假设它是数组最后一个(fork 之后数组末尾是 fork 化身)。
-        const incarnations = patchIncarnationBySeq(prev.incarnations, incarnation.seq, {
+        // 按 (impl, seq) 精确定位主线化身条目,不假设它是数组最后一个(fork 之后数组末尾是
+        // fork 化身;跨实例撞号时同 seq 可能有多条记录,见 patchIncarnationBySeq 注释)。
+        const incarnations = patchIncarnationBySeq(prev.incarnations, incarnation.impl, incarnation.seq, {
           state: 'exited',
           ended_at: now,
           ended_reason: 'killed',
@@ -641,6 +658,7 @@ export class WorkerHarness {
           // 转换点"。cc/codex 的 session_ref 本就稳定,这里是等价 no-op。
           const incarnations = patchIncarnationBySeq(
             prev.incarnations,
+            h.impl,
             h.seq,
             state === 'exited'
               ? { state, ended_at: now, ended_reason: endReason, session_ref: h.session_ref }
@@ -674,6 +692,7 @@ export class WorkerHarness {
         // session_ref 现读现取,同上面 fork 分支的注释。
         const incarnations = patchIncarnationBySeq(
           prev.incarnations,
+          h.impl,
           h.seq,
           state === 'exited'
             ? { state, ended_at: now, ended_reason: endReason, session_ref: h.session_ref }
@@ -740,12 +759,30 @@ function mainlineIncarnation(worker: LedgerWorker): Incarnation {
 }
 
 /**
- * 按 seq 精确定位并 patch 一个化身条目,不假设它是数组的最后一个——fork 之后数组末尾是
- * fork 化身,继续用"改最后一个"的旧写法会把主线的落定动作(如 kill 后的 exited)误写进
- * fork 条目,或反过来让 fork 化身自己的状态变化误写进主线条目,两个方向都是错的。
+ * 按 (impl, seq) 精确定位并 patch 一个化身条目,不假设它是数组的最后一个——fork 之后数组
+ * 末尾是 fork 化身,继续用"改最后一个"的旧写法会把主线的落定动作(如 kill 后的 exited)
+ * 误写进 fork 条目,或反过来让 fork 化身自己的状态变化误写进主线条目,两个方向都是错的。
+ *
+ * 只按 seq 匹配是不够的(protocol-agent-v3 §6.1"已知限制"):`IncarnationHandle.seq` 由各
+ * adapter 自行分配,只保证同一个 adapter 实例内递增不重复,不保证跨 adapter 实例(跨实现
+ * 切换、进程重启后新建的 adapter 实例)全局唯一——`(impl, seq)` 相同的记录可能因此在同一
+ * 台账里出现不止一条(旧的已归档,新的是当前活跃化身)。化身按时间顺序追加进数组,所以
+ * `(impl, seq)` 相同的多条记录里,数组下标最大的那条才是当前活跃的;用 `.map` 对所有匹配
+ * 项一视同仁地改写,会连带篡改已经归档的旧记录。这里只精确定位并改写最后一条匹配记录,
+ * 更早的同键记录原样保留。
  */
-function patchIncarnationBySeq(incarnations: Incarnation[], seq: number, patch: Partial<Incarnation>): Incarnation[] {
-  return incarnations.map((inc) => (inc.seq === seq ? { ...inc, ...patch } : inc))
+function patchIncarnationBySeq(
+  incarnations: Incarnation[],
+  impl: Incarnation['impl'],
+  seq: number,
+  patch: Partial<Incarnation>
+): Incarnation[] {
+  let lastMatchIndex = -1
+  for (let i = 0; i < incarnations.length; i++) {
+    if (incarnations[i].impl === impl && incarnations[i].seq === seq) lastMatchIndex = i
+  }
+  if (lastMatchIndex === -1) return incarnations
+  return incarnations.map((inc, i) => (i === lastMatchIndex ? { ...inc, ...patch } : inc))
 }
 
 /**
@@ -753,16 +790,19 @@ function patchIncarnationBySeq(incarnations: Incarnation[], seq: number, patch: 
  *
  * 终态化身之上继续开一个新化身是显式的"延续"动作,不是 task-status.ts 描述的线性状态机
  * 内的一次迁移——VALID_TRANSITIONS 里终态(completed/failed/cancelled)无出边是"同一次
- * 尝试内不允许原地复活"的不变量,但接续产出的是全新的化身,因此当 task 已经终态时直接
- * 重置状态与派生字段,不经过 canTransition 校验(效果等价于 applyStatusTransition 到
- * running 分支,只是跳过其内部的非法迁移检查)。task 尚未终态(如台账的终态回调还没追上
- * adapter 的真实状态)时仍走 applyStatusTransition 的正常校验路径。
+ * 尝试内不允许原地复活"的不变量。task 已经终态时,不由 harness 自行拼接字段绕开状态机,
+ * 而是走 task-status.ts 官方暴露的受控出口 `reviveTask`(protocol-agent-v3 §5.2"接续
+ * 例外")——状态机模块自己承载这条例外,harness 只是调用方。
+ *
+ * task 尚未终态时分两种情况:已经是 running 的(如台账的终态回调还没追上 adapter 的真实
+ * 状态,接续发生前 task.status 本就还是 running)不需要任何迁移,直接原样返回(此时按
+ * task-status.ts 维护的不变量,completed_at/error 本就已经是未设置状态,无需重置);
+ * 其余非终态(queued/waiting_input)走 applyStatusTransition 的正常校验路径迁到 running。
  */
 function reopenTaskForContinuation(task: LedgerWorker['task'], now: string): LedgerWorker['task'] {
-  if (canTransition(task.status, 'running')) {
-    return applyStatusTransition(task, 'running', { now })
-  }
-  return { ...task, status: 'running', completed_at: undefined, error: undefined }
+  if (task.status === 'running') return task
+  if (isTerminalStatus(task.status)) return reviveTask(task, { now })
+  return applyStatusTransition(task, 'running', { now })
 }
 
 /** 交接续办产出的新化身 prompt:原任务描述 + 交接引用(指向 HANDOFF.md)+ 本次输入。 */
