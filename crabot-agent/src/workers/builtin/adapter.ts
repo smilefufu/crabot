@@ -254,7 +254,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         throw new Error(`BuiltinWorkerAdapter.resume: incarnation ${prev.worker_id}#${prev.seq} already resumed (concurrent resume of the same prev incarnation?)`)
       }
 
-      const newSeq = this.nextSeq(prev.worker_id)
+      const newSeq = await this.nextSeq(prev.worker_id)
       const dir = join(this.deps.dataDir, prev.worker_id)
       let sessionTree = this.findSessionTreeForWorker(prev.worker_id)
       if (!sessionTree) {
@@ -306,7 +306,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         sessionTree = await SessionTree.load(join(dir, 'session.jsonl'))
       }
 
-      const newSeq = this.nextSeq(prev.worker_id)
+      const newSeq = await this.nextSeq(prev.worker_id)
       const outputLog = new OutputLog(join(dir, `output-${newSeq}.log`))
       const forkId = await sessionTree.append(prev.session_ref, createUserMessage(forkInput))
 
@@ -752,11 +752,31 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
    * worker_id 对应下一个可用的化身序号：该 worker 现存所有化身（主线 + fork 分支）里
    * 最大 seq + 1。resume 和 fork 共用这一个分配逻辑，且都在各自的 mutex.run 内调用，
    * 保证两者不会分配出相同的 seq。
+   *
+   * 五轮 review 修复：磁盘感知，理由与 cc/codex adapter 的同名方法一致——只扫内存
+   * instances 会漏掉磁盘上未被重建到内存的旧化身（如跨进程重启后的历史化身），算出的
+   * "下一个"号位实际是别人已经占用的，静默覆盖其 meta-<seq>.json、复用其 output-<seq>.log。
+   * 改为 max(内存已知 seq, 磁盘上 <dataDir>/<worker_id>/ 下 meta-*.json 的最大 seq) + 1——
+   * builtin 的 writeMeta 是独立实现（不复用 meta-store.ts，见该方法注释），这里同样不引入
+   * 跨模块耦合，本地内联一份同款扫盘逻辑。目录不存在（还没 spawn 过）视为无历史，不报错。
    */
-  private nextSeq(worker_id: string): number {
+  private async nextSeq(worker_id: string): Promise<number> {
     let max = 0
     for (const instance of this.instances.values()) {
       if (instance.worker_id === worker_id && instance.seq > max) max = instance.seq
+    }
+    const dir = join(this.deps.dataDir, worker_id)
+    let entries: string[]
+    try {
+      entries = await fs.readdir(dir)
+    } catch {
+      entries = []
+    }
+    for (const name of entries) {
+      const m = /^meta-(\d+)\.json$/.exec(name)
+      if (!m) continue
+      const seq = Number(m[1])
+      if (Number.isFinite(seq) && seq > max) max = seq
     }
     return max + 1
   }

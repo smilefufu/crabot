@@ -84,7 +84,7 @@ import { TmuxDriver } from '../tmux/driver.js'
 import { CliEventChannel } from '../cli-events.js'
 import { OutputLog } from '../output-log.js'
 import { AsyncMutex } from '../async-mutex.js'
-import { writeMetaAtomic } from '../meta-store.js'
+import { writeMetaAtomic, maxSeqOnDisk } from '../meta-store.js'
 import { WorkerExitedError } from '../errors.js'
 import { materializeSkills, renderMcpJson, renderContextMd, type ProvisionSources } from '../provision/materialize.js'
 import type {
@@ -332,7 +332,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       if (prevRuntime.resumed) {
         throw new Error(`ClaudeCodeAdapter.resume: incarnation ${prev.worker_id}#${prev.seq} already resumed (concurrent resume of the same prev incarnation?)`)
       }
-      const seq = this.nextSeq(prev.worker_id)
+      const seq = await this.nextSeq(prev.worker_id)
       handle = { worker_id: prev.worker_id, seq, impl: 'claude-code', session_ref: prev.session_ref }
       const sessionName = `crabot-w-${prev.worker_id}-${seq}`
       const outputFile = join(dir, `output-${seq}.log`)
@@ -414,7 +414,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     let handle!: IncarnationHandle
     let runtime!: Runtime
     await this.getMutex(prev.worker_id).run(async () => {
-      const seq = this.nextSeq(prev.worker_id)
+      const seq = await this.nextSeq(prev.worker_id)
       handle = { worker_id: prev.worker_id, seq, impl: 'claude-code', session_ref: sessionId }
       const outputFile = join(dir, `output-${seq}.log`)
       runtime = {
@@ -732,12 +732,21 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
    * 链)里最大 seq + 1。resume() 和 fork() 共用这一个分配逻辑,且都在各自的 mutex.run 内
    * 调用,保证互不撞号(fork 化身常驻不删,不能用 prev.seq+1 这种固定公式——见 fork()/
    * resume() 注释)。与 builtin adapter 的同名方法同一思路。
+   *
+   * 五轮 review 修复:磁盘感知——重启后新 adapter 实例的 runtimes 只含 ensureRuntime 按需
+   * 重建过的那几条(见 ensureRuntime 注释),不是该 worker 的全部历史化身;只扫内存会漏掉
+   * 磁盘上未被重建的旧化身,算出的"下一个"号位实际是别人已经占用的,resume/fork 静默覆盖
+   * 其 meta-<seq>.json、复用其 output-<seq>.log。改为 max(内存已知 seq, 磁盘上
+   * <dataDir>/<worker_id>/ 下 meta-*.json 的最大 seq) + 1——扫盘用文件名解析 seq,坏名/
+   * 目录不存在都当作没有历史处理,不因此报错。
    */
-  private nextSeq(worker_id: string): number {
+  private async nextSeq(worker_id: string): Promise<number> {
     let max = 0
     for (const runtime of this.runtimes.values()) {
       if (runtime.worker_id === worker_id && runtime.seq > max) max = runtime.seq
     }
+    const diskMax = await maxSeqOnDisk(join(this.deps.dataDir, worker_id))
+    if (diskMax > max) max = diskMax
     return max + 1
   }
 

@@ -352,6 +352,53 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 四轮 review PoC 回归:
     },
     15000,
   )
+
+  it(
+    'PoC③(五轮 review):重启前有主线#1 + fork侧问#2(两份 meta 落盘)——重启后新 adapter 实例对#1 resume,nextSeq 必须磁盘感知,' +
+      '不能只看内存(只重建了#1)算出 2 而撞上#2 的 meta/output(修复前:seq=2,meta-2.json 被覆盖,output-2.log 被复用)',
+    async () => {
+      const argvFile = path.join(dataDir, 'poc3-fork-argv.jsonl')
+      const claudeBin = `env FAKE_ARGV_FILE=${shQuote(argvFile)} FAKE_FORK_STDOUT=${shQuote('侧问回复内容')} node ${shQuote(FAKE_CLAUDE_FORK)}`
+
+      const adapterA = new ClaudeCodeAdapter({ dataDir, tmux, claudeBin })
+      await adapterA.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `cctest-${randomUUID().slice(0, 8)}`
+
+      // 重启前:主线 #1(交互态,fake-claude-fork.mjs 无 -p 时空转不退出)。
+      const h1 = await adapterA.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+      const meta1 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string }
+
+      // 重启前:fork 侧问 #2(无头一击,落自己的 meta-2.json/output-2.log)。
+      const h2 = await adapterA.fork({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '侧问一下')
+      expect(h2.seq).toBe(2)
+      await waitForState(adapterA, h2, 'exited')
+      const meta2Before = await fs.readFile(path.join(dataDir, workerId, 'meta-2.json'), 'utf-8')
+      const output2Before = await fs.readFile(path.join(dataDir, workerId, 'output-2.log'), 'utf-8')
+      expect(output2Before).toContain('侧问回复内容')
+
+      // 重启前:主线 #1 落 exited,满足 resume 前置条件。
+      await adapterA.kill(h1)
+
+      // "重启":全新 adapter 实例,同一 dataDir,内存 runtimes 为空——只有磁盘还记得 #1、#2
+      // 两份历史。resume(#1) 会先经 ensureRuntime 只重建出 #1 这一条 runtime(#2 从未被
+      // 提及,不会被重建),旧版 nextSeq 只扫内存 runtimes(此时仅 #1)算出 2,与磁盘上的
+      // #2 撞号。
+      const adapterB = new ClaudeCodeAdapter({ dataDir, tmux, claudeBin })
+      const h3 = await adapterB.resume({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '继续')
+
+      // 磁盘感知修复后:新化身分配到 3(不是 2),不撞上 #2 的号位。
+      expect(h3.seq).toBe(3)
+
+      // #2 的 meta/output 原封不动,没有被 resume 静默覆盖/复用。
+      const meta2After = await fs.readFile(path.join(dataDir, workerId, 'meta-2.json'), 'utf-8')
+      const output2After = await fs.readFile(path.join(dataDir, workerId, 'output-2.log'), 'utf-8')
+      expect(meta2After).toBe(meta2Before.toString())
+      expect(output2After).toBe(output2Before.toString())
+
+      await adapterB.kill(h3)
+    },
+    15000,
+  )
 })
 
 /** isAlive 可手动挂起/放行的假 TmuxDriver——不起真实 tmux 进程,专供锁纪律竞态测试控制时序。 */

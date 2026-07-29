@@ -105,7 +105,7 @@ import { TmuxDriver } from '../tmux/driver.js'
 import { CliEventChannel } from '../cli-events.js'
 import { OutputLog } from '../output-log.js'
 import { AsyncMutex } from '../async-mutex.js'
-import { writeMetaAtomic } from '../meta-store.js'
+import { writeMetaAtomic, maxSeqOnDisk } from '../meta-store.js'
 import { WorkerExitedError, CapabilityNotSupportedError } from '../errors.js'
 import { materializeSkills, renderCodexMcpToml, renderContextMd, type ProvisionSources } from '../provision/materialize.js'
 import type {
@@ -509,7 +509,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       if (prevRuntime.resumed) {
         throw new Error(`CodexWorkerAdapter.resume: incarnation ${prev.worker_id}#${prev.seq} already resumed (concurrent resume of the same prev incarnation?)`)
       }
-      const seq = this.nextSeq(prev.worker_id)
+      const seq = await this.nextSeq(prev.worker_id)
       handle = { worker_id: prev.worker_id, seq, impl: 'codex', session_ref: prev.session_ref }
       const sessionName = `crabot-w-${prev.worker_id}-${seq}`
       const outputFile = join(dir, `output-${seq}.log`)
@@ -820,12 +820,18 @@ export class CodexWorkerAdapter implements WorkerAdapter {
    * worker_id 对应下一个可用的化身序号:该 worker 现存所有化身里最大 seq + 1。resume() 在
    * mutex.run 内调用,保证不与并发的另一次 resume 撞号。与 cc adapter 的同名方法同一思路
    * (codex 的 fork() 不支持,不参与这个分配)。
+   *
+   * 五轮 review 修复:磁盘感知,理由与 cc adapter 的同名方法一致——重启后新 adapter 实例
+   * 的 runtimes 只含 ensureRuntime 按需重建过的那几条,只扫内存会把磁盘上未被重建的旧化身
+   * 的号位当成"下一个"分配出去,静默覆盖其 meta/output。
    */
-  private nextSeq(worker_id: string): number {
+  private async nextSeq(worker_id: string): Promise<number> {
     let max = 0
     for (const runtime of this.runtimes.values()) {
       if (runtime.worker_id === worker_id && runtime.seq > max) max = runtime.seq
     }
+    const diskMax = await maxSeqOnDisk(join(this.deps.dataDir, worker_id))
+    if (diskMax > max) max = diskMax
     return max + 1
   }
 

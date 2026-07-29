@@ -472,6 +472,53 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 四轮 review PoC 回归
     },
     15000,
   )
+
+  it(
+    'PoC③(五轮 review):重启前有主线#1 与 resume 链 #2(两份 meta 落盘)——重启后新 adapter 实例再对#1 resume,' +
+      'nextSeq 必须磁盘感知,不能只看内存(只重建了#1)算出 2 而撞上#2 的 meta/output(修复前:seq=2,meta-2.json 被覆盖,output-2.log 被复用)',
+    async () => {
+      const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+      const stopHookCmd = channel.hookCommand('stop')
+      // 每次新起的进程(spawn/resume)都从脚本第 0 步重新跑——mock CLI 每次调用都是全新进程,
+      // 不记跨调用状态。这里让脚本第一步就 exit,主线与每一次 resume 都会立刻落 exited,
+      // 不需要真的等 notify。
+      const codexBin = codexBinFor([{ output: '输出', exit: true }], stopHookCmd)
+
+      const adapterA = new CodexWorkerAdapter({ dataDir, tmux, codexBin, sessionDiscoveryTimeoutMs: 500 })
+      await adapterA.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `codextest-${randomUUID().slice(0, 8)}`
+
+      // 重启前:主线 #1。
+      const h1 = await adapterA.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+      await waitForState(adapterA, h1, 'exited')
+      const meta1 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string }
+
+      // 重启前:resume 链 #2(同一进程内,落自己的 meta-2.json/output-2.log)。
+      const h2 = await adapterA.resume({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '继续 1')
+      expect(h2.seq).toBe(2)
+      await waitForState(adapterA, h2, 'exited')
+      const meta2Before = await fs.readFile(path.join(dataDir, workerId, 'meta-2.json'), 'utf-8')
+      const output2Before = await fs.readFile(path.join(dataDir, workerId, 'output-2.log'), 'utf-8')
+
+      // "重启":全新 adapter 实例,同一 dataDir,内存 runtimes 为空——只有磁盘还记得 #1、#2
+      // 两份历史。对 #1 再 resume 一次:ensureRuntime 只重建出 #1 这一条 runtime(#2 从未被
+      // 提及,不会被重建),旧版 nextSeq 只扫内存 runtimes(此时仅 #1)算出 2,与磁盘上的
+      // #2 撞号。
+      const adapterB = new CodexWorkerAdapter({ dataDir, tmux, codexBin, sessionDiscoveryTimeoutMs: 500 })
+      const h3 = await adapterB.resume({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '重启后继续')
+      await waitForState(adapterB, h3, 'exited')
+
+      // 磁盘感知修复后:新化身分配到 3(不是 2),不撞上 #2 的号位。
+      expect(h3.seq).toBe(3)
+
+      // #2 的 meta/output 原封不动,没有被 resume 静默覆盖/复用。
+      const meta2After = await fs.readFile(path.join(dataDir, workerId, 'meta-2.json'), 'utf-8')
+      const output2After = await fs.readFile(path.join(dataDir, workerId, 'output-2.log'), 'utf-8')
+      expect(meta2After).toBe(meta2Before.toString())
+      expect(output2After).toBe(output2Before.toString())
+    },
+    15000,
+  )
 })
 
 /** 转发到可替换的底层 TmuxDriver——用于"先用坏 bin 失败一次,再换成好 bin 重试"的测试场景。 */
