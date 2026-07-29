@@ -503,6 +503,54 @@ describe('BuiltinWorkerAdapter', () => {
     await waitState(adapter, resumedHandle, 'idle')
   })
 
+  it('kill running fork 化身：fork burst 的 abortSignal 被触发，终态 exited(killed) 而不是 crashed', async () => {
+    const runEngineSpy = vi.spyOn(engineModule, 'runEngine')
+    const gate = deferred<void>()
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({
+      adapter: makeAdapterGatedFromSecondCall(gate.promise, [
+        { text: '首轮回复', stopReason: 'end_turn' },
+        { text: '侧问回复', stopReason: 'end_turn' },
+      ]),
+    })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'idle')
+
+    const tree = await SessionTree.load(join(tmp, s.worker_id, 'session.jsonl'))
+    const mainTip = tree.latestTip()!
+    const prevRef: IncarnationRef = { worker_id: s.worker_id, seq: 1, session_ref: mainTip }
+
+    // fork 调用会触发 fork burst，其中会卡在 gate（因为是第二次调用）
+    const forkHandle = await adapter.fork(prevRef, '侧问问题')
+    expect(forkHandle.seq).toBe(2)
+
+    // 等待足够长的时间让 fork burst 进入卡在 gate 的状态
+    await new Promise((r) => setTimeout(r, 100))
+
+    // 确认 fork burst 的 abortSignal 已被创建（第二次 runEngine 调用是 fork 的）
+    expect(runEngineSpy.mock.calls.length).toBeGreaterThanOrEqual(2)
+    const forkCallArgs = runEngineSpy.mock.calls[1]?.[0]
+    expect(forkCallArgs?.options?.abortSignal).toBeDefined()
+    expect(forkCallArgs?.options?.abortSignal?.aborted).toBe(false) // 还没被 abort
+
+    // kill fork 化身
+    await adapter.kill(forkHandle)
+
+    // 确认 kill 后 abortSignal 被触发
+    expect(forkCallArgs?.options?.abortSignal?.aborted).toBe(true)
+
+    // 放行 gate 让 fork burst 继续，会检测到 abortSignal 被触发
+    gate.resolve()
+    await waitState(adapter, forkHandle, 'exited')
+
+    // 验证 fork 化身的终态：应该是 exited(killed)，不能是 crashed
+    const forkMetaRaw = await fs.readFile(join(tmp, s.worker_id, 'meta-2.json'), 'utf-8')
+    const forkMeta = JSON.parse(forkMetaRaw)
+    expect(forkMeta.state).toBe('exited')
+    expect(forkMeta.ended_reason).toBe('killed') // 这是关键断言，当前代码会返回 'crashed'
+  })
+
   // --- 并发竞态回归（per-worker 互斥）---
 
   /** 从 session.jsonl 读出全部节点，用于检测树是否分叉（同一 parent_id 出现多个孩子）。 */

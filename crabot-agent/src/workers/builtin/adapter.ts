@@ -597,7 +597,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       instance.tip = parent
 
       if (result.outcome === 'failed' || result.outcome === 'aborted') {
-        await this.transitionExited(instance, handle, 'crashed')
+        await this.transitionExited(instance, handle, result.outcome === 'aborted' ? 'killed' : 'crashed')
         return
       }
 
