@@ -76,7 +76,7 @@ import type { LedgerStore } from './ledger-store'
 import type { WorkspaceManager } from './workspace-manager'
 import { WorkerInbox, type InboxItem } from './inbox'
 import { WorkerEventLog, type HarnessEvent, type HarnessEventKind } from './worker-events'
-import { applyStatusTransition, isTerminalStatus, reviveTask, taskStatusFromIncarnation } from './task-status'
+import { applyStatusTransition, canTransition, isTerminalStatus, reviveTask, taskStatusFromIncarnation } from './task-status'
 import { join } from 'path'
 
 /** 交接材料里"最近输出尾部"的上限(字符数,近似 4KB,见 protocol-agent-v3 §5.3)。 */
@@ -134,6 +134,22 @@ export interface SpawnWorkerParams {
   readonly goal?: string
   /** builtin 实现所需的 LLM 注入(P4 提供) */
   readonly builtin?: SpawnSpec['builtin']
+}
+
+/**
+ * reconcileOnStartup 的巡检结果(protocol-agent-v3 §12,替代 admin 的一刀切自愈)。三个
+ * 桶各装 worker_id,供 P4 manager 决定唤醒哪些 monitor:
+ * - revived:本轮确认化身仍活着(running/idle),台账非终态状态得到确认或对齐,需要
+ *   P4 接管后续监护;
+ * - failed:本轮判死(adapter 报 exited、adapter 未注册、或 adapter.state() 抛错三种
+ *   "无法证明还活着"的情形之一),台账已落 failed(ended_reason='crashed');
+ * - unchanged:进入本轮巡检前就已是终态(含上一轮已经判死/前一次调用已经处理过的),
+ *   本轮不做任何动作。
+ */
+export interface ReconcileReport {
+  readonly revived: string[]
+  readonly failed: string[]
+  readonly unchanged: string[]
 }
 
 const EMPTY_CAPABILITY_BUNDLE: CapabilityBundle = { skills: [], mcp_servers: [] }
@@ -570,6 +586,185 @@ export class WorkerHarness {
     return this.deps.ledger.listWorkers(dialogObjectId)
   }
 
+  /**
+   * 崩溃恢复对账(protocol-agent-v3 §12,替代 admin 的一刀切自愈)。agent 进程重启后调用
+   * 一次:巡检台账里所有非终态 worker 的主线化身,凭 adapter.state() 判定它到底是"进程
+   * 没了、化身也没了"(判死)还是"化身独立于 agent 进程,可能还活着"(如 tmux worker),
+   * 而不是像旧 admin 那样把所有非终态任务一律判死。
+   *
+   * 与 BuiltinWorkerAdapter.scanOrphans(P1)的关系——互补而非替代:scanOrphans 是
+   * builtin 自己的 adapter 内部动作,修的是它自己 dataDir 下 meta-<seq>.json 这份"进程内
+   * 存活状态由本进程独占计算"的私有真相(builtin 的执行就是本进程内的 runEngine burst,
+   * 进程重启即等价于 burst 消失,重启前仍是 running 的 meta 就是孤儿,必须先纠正);本方法
+   * 修的是台账(跨三种 impl 的公共真相源)。两者都要跑,顺序上 scanOrphans 必须先于本方法:
+   * 本方法调用 adapter.state() 时,builtin 的 state() 在无常驻内存 instance 时直接回落读
+   * meta-<seq>.json(见 BuiltinWorkerAdapter.state 实现),若 scanOrphans 没有先跑,孤儿
+   * meta 仍标着 'running',本方法会把它误判进"revived"分支。scanOrphans 的调用时机是
+   * "本进程任何 adapter 实例开始活动前"(其自身文档要求),比 harness 构造还早——harness
+   * 拿不到、也不该拿到某个具体 adapter(如 builtin)的私有 dataDir(HarnessDeps 只有
+   * workersDir,是 harness 自己的 events/output 目录,与各 adapter 的私有 dataDir 是两个
+   * 目录),因此不在本方法内部调用 scanOrphans,调用顺序由 P4/bootstrap 层保证(先
+   * `BuiltinWorkerAdapter.scanOrphans(dataDir)`,adapter 塞进 `adapters` Map 之后,再调
+   * `harness.reconcileOnStartup()`)。claude-code/codex 目前没有等价的孤儿扫描——它们的
+   * `state()` 在无常驻 runtime 时同样回落读 meta 文件而不做真实 tmux 存活探测,这是现有
+   * adapter 实现的已知限制(§6.3 描述的"低频巡扫 tmux pane"兜底另有周期机制,不在本方法
+   * 范围内),不是本方法引入的新问题。
+   *
+   * 判定规则(逐 worker 独立判定,整轮不持有任何全局锁——只在每个 worker 自己的
+   * per-worker 临界区内完成"读台账→判adapter.state()→提交"):
+   * - 台账已是终态:跳过,归 unchanged(幂等:重复调用不会把上一轮已经判死的 worker 再判一次)。
+   * - 主线化身的 impl 没有对应 adapter 注册(实现被禁用/未安装):判死。
+   * - `adapter.state(handle)` 抛错:视为不可判定,判死;错误信息记进事件 detail,不让
+   *   这次异常中断整轮对账(逐 worker try/catch,配合 Promise.allSettled 兜底任何未预料
+   *   到的同步/异步异常,一个 worker 出问题不影响其它 worker 被处理)。
+   * - 返回 `exited`:台账仍非终态却已经不在跑了,判死,ended_reason='crashed'。
+   * - 返回 `running`/`idle`:台账保持(不判死)——tmux worker 独立于 agent 进程,重启后
+   *   往往仍活着;按这次实际观察到的 contractState 用 taskStatusFromIncarnation 把
+   *   task.status 对齐到真实值(可能一步都不用走,也可能需要更新化身的 state 字段),
+   *   发 state_changed 事件(detail.source='reconcile',与被动回调路径区分)通知 P4 manager
+   *   接管这个 worker 的后续监护;归 revived。
+   */
+  async reconcileOnStartup(): Promise<ReconcileReport> {
+    const revived: string[] = []
+    const failed: string[] = []
+    const unchanged: string[] = []
+
+    const all = await this.deps.ledger.listAllWorkers()
+    const targets = all.filter(({ worker }) => !isTerminalStatus(worker.task.status))
+    // 报告的 unchanged 桶按 brief 定义包含"终态"(不只是"无需动作但仍被判定过的非终态
+    // worker")——已终态的 worker 在这里直接归档,不进 Promise.allSettled 那批,不占用
+    // per-worker 锁、不调用 adapter.state()(即使重复调用 reconcileOnStartup,已判死过的
+    // worker 从第二次起也是在这一步就被截住,不会再走到 reconcileOneWorker)。
+    unchanged.push(...all.filter(({ worker }) => isTerminalStatus(worker.task.status)).map(({ worker }) => worker.worker_id))
+
+    const settled = await Promise.allSettled(
+      targets.map(({ dialogObjectId, worker }) => this.reconcileOneWorker(dialogObjectId, worker.worker_id))
+    )
+
+    settled.forEach((result, i) => {
+      const workerId = targets[i].worker.worker_id
+      if (result.status === 'fulfilled') {
+        ;(result.value === 'revived' ? revived : result.value === 'failed' ? failed : unchanged).push(workerId)
+      } else {
+        // reconcileOneWorker 内部已经把 adapter.state() 的异常兜底成 'failed' 分类并落盘,
+        // 这里兜的是更意外的情形(如 ledger 写盘失败)——记日志,报告里仍归 failed,不让
+        // 一个 worker 的意外异常掐断整轮 Promise.allSettled 之外的收尾逻辑。
+        console.error(`[WorkerHarness] reconcileOnStartup: unexpected error reconciling ${workerId}:`, result.reason)
+        failed.push(workerId)
+      }
+    })
+
+    return { revived, failed, unchanged }
+  }
+
+  /** reconcileOnStartup 单个 worker 的判定+提交,整体在该 worker 的 per-worker 锁临界区内完成。 */
+  private async reconcileOneWorker(
+    dialogObjectId: DialogObjectId,
+    workerId: string
+  ): Promise<'revived' | 'failed' | 'unchanged'> {
+    return this.withLock(workerId, async () => {
+      const found = await this.deps.ledger.findWorker(workerId)
+      if (!found) return 'unchanged' // 理论不该发生(枚举时刚读到过),防御性处理
+      const { worker } = found
+      // 幂等短路:进锁后重读仍可能已是终态(上一轮已判死,或本轮内已被并发触发的其它
+      // harness 动作收尾)——不重复判定。
+      if (isTerminalStatus(worker.task.status)) return 'unchanged'
+
+      const mainline = mainlineIncarnation(worker)
+      const adapter = this.deps.adapters.get(mainline.impl as WorkerImplId)
+      if (!adapter) {
+        await this.markCrashed(dialogObjectId, worker, mainline, `no adapter registered for impl '${mainline.impl}'`)
+        return 'failed'
+      }
+
+      const handle: IncarnationHandle = {
+        worker_id: worker.worker_id,
+        seq: mainline.seq,
+        impl: mainline.impl as WorkerImplId,
+        session_ref: mainline.session_ref,
+      }
+
+      let observed: WorkerContractState
+      try {
+        observed = await adapter.state(handle)
+      } catch (err) {
+        await this.markCrashed(
+          dialogObjectId,
+          worker,
+          mainline,
+          `adapter.state() threw: ${err instanceof Error ? err.message : String(err)}`
+        )
+        return 'failed'
+      }
+
+      if (observed === 'exited') {
+        await this.markCrashed(dialogObjectId, worker, mainline, 'adapter reports incarnation exited while ledger was non-terminal')
+        return 'failed'
+      }
+
+      await this.realignAliveIncarnation(dialogObjectId, worker, mainline, observed)
+      return 'revived'
+    })
+  }
+
+  /**
+   * reconcileOnStartup 判死分支:落 failed(ended_reason='crashed')+ exited 事件。三种判死
+   * 场景(adapter 报 exited / adapter 未注册 / adapter.state() 抛错)共用同一段收尾——三者
+   * 语义上都是"至此已经没有任何证据证明这个非终态 worker 还活着"。
+   */
+  private async markCrashed(
+    dialogObjectId: DialogObjectId,
+    worker: LedgerWorker,
+    mainline: Incarnation,
+    detailReason: string
+  ): Promise<void> {
+    const now = this.deps.now()
+    await this.deps.ledger.upsertWorker(dialogObjectId, worker.worker_id, (prev) => {
+      if (!prev) return undefined
+      const nextTask = transitionTaskTo(prev.task, 'failed', { error: detailReason, now })
+      const incarnations = patchIncarnationBySeq(prev.incarnations, mainline.impl, mainline.seq, {
+        state: 'exited',
+        ended_at: now,
+        ended_reason: 'crashed',
+      })
+      return { ...prev, task: nextTask, incarnations, updated_at: now }
+    })
+    await this.appendEvent(worker.worker_id, mainline.seq, 'exited', { reason: 'crashed', message: detailReason })
+  }
+
+  /**
+   * reconcileOnStartup 存活分支:台账不判死,只按这次实际观察到的 contractState 对齐
+   * incarnation.state 与 task.status(taskStatusFromIncarnation 同一套映射,与
+   * processStateChange 的被动回调路径共用规则)。若观察结果与台账现状完全一致(既没有
+   * 化身 state 差异也没有 task 状态差异),不做任何写入、不发事件——避免每次巡检都产生
+   * 噪声写盘/事件。
+   */
+  private async realignAliveIncarnation(
+    dialogObjectId: DialogObjectId,
+    worker: LedgerWorker,
+    mainline: Incarnation,
+    observed: WorkerContractState
+  ): Promise<void> {
+    // idle 是否算"等输入"本属 manager 判断职责(protocol-agent-v3 §5.2),这里与
+    // processStateChange 保持同一条保守默认:P4 接线后可按需要覆盖。
+    const waitingInput = observed === 'idle' ? true : undefined
+    const nextStatus = taskStatusFromIncarnation(observed, undefined, waitingInput)
+    const stateChanged = mainline.state !== observed
+    const statusChanged = worker.task.status !== nextStatus
+    if (!stateChanged && !statusChanged) return
+
+    const now = this.deps.now()
+    await this.deps.ledger.upsertWorker(dialogObjectId, worker.worker_id, (prev) => {
+      if (!prev) return undefined
+      const nextTask = statusChanged ? transitionTaskTo(prev.task, nextStatus, { now }) : prev.task
+      const incarnations = stateChanged
+        ? patchIncarnationBySeq(prev.incarnations, mainline.impl, mainline.seq, { state: observed })
+        : prev.incarnations
+      return { ...prev, task: nextTask, incarnations, updated_at: now }
+    })
+    await this.appendEvent(worker.worker_id, mainline.seq, 'state_changed', { to: observed, source: 'reconcile' })
+  }
+
   async killWorker(workerId: string, reason?: string): Promise<void> {
     await this.withLock(workerId, async () => {
       const found = await this.deps.ledger.findWorker(workerId)
@@ -852,6 +1047,28 @@ function reopenTaskForContinuation(task: LedgerWorker['task'], now: string): Led
   if (task.status === 'running') return task
   if (isTerminalStatus(task.status)) return reviveTask(task, { now })
   return applyStatusTransition(task, 'running', { now })
+}
+
+/**
+ * reconcileOnStartup 专用:把 task 状态迁移到目标状态,目标不可从当前状态一步直达时先跳一步
+ * running。VALID_TRANSITIONS 里 `queued` 只有到 `running`/`cancelled` 的边,没有到
+ * `waiting_input`/`failed` 的直达边——但巡检可能在极窄的竞态窗口里撞见"task.status 仍是
+ * queued、主线化身却已经真实 running/idle/判死"的台账(spawnWorker 落初始记录与落
+ * spawn 成功后的第二次提交之间若进程崩溃,见 harness.ts 顶部锁纪律注释),此时直接
+ * applyStatusTransition 会抛 InvalidTaskTransitionError。这里镜像 spawnWorker 失败路径
+ * 已经用过的"queued→running→失败/目标状态"两跳写法,不新增状态机边、不绕开 canTransition
+ * 校验(仍然全程只用 applyStatusTransition,只是必要时多套一层)。
+ */
+function transitionTaskTo(
+  task: LedgerWorker['task'],
+  to: TaskStatus,
+  opts: { error?: string; now: string }
+): LedgerWorker['task'] {
+  if (canTransition(task.status, to)) {
+    return applyStatusTransition(task, to, opts)
+  }
+  const hopped = applyStatusTransition(task, 'running', { now: opts.now })
+  return applyStatusTransition(hopped, to, opts)
 }
 
 /** 交接续办产出的新化身 prompt:原任务描述 + 交接引用(指向 HANDOFF.md)+ 本次输入。 */

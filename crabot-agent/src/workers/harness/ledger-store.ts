@@ -124,6 +124,26 @@ export class LedgerStore {
     })
   }
 
+  /**
+   * 全量枚举所有对话对象下的 worker(跨 dialog_object_id)。listWorkers/findWorker 都是
+   * 针对单个已知对话对象或已知 worker_id 的查找,不满足"扫描整个台账存储"的场景(如
+   * Task 9 崩溃恢复对账 reconcileOnStartup 需要巡检所有对话对象下的非终态 worker)——
+   * 复用 init() 建好的 worker_id → dialog_object_id 索引拿到全部 dialog_object_id,
+   * 再逐个对话对象读一次台账文件拼起来。只读,不新增任何写路径。
+   */
+  async listAllWorkers(): Promise<Array<{ dialogObjectId: DialogObjectId; worker: LedgerWorker }>> {
+    await this.init()
+    const dialogIds = new Set(this.workerIndex.values())
+    const result: Array<{ dialogObjectId: DialogObjectId; worker: LedgerWorker }> = []
+    for (const dialogObjectId of dialogIds) {
+      const ledger = await this.readLedgerFileStrict(dialogObjectId)
+      for (const worker of ledger.workers) {
+        result.push({ dialogObjectId, worker })
+      }
+    }
+    return result
+  }
+
   private getMutex(id: DialogObjectId): AsyncMutex {
     let mutex = this.mutexes.get(id)
     if (!mutex) {
