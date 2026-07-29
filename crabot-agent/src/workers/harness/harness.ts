@@ -106,6 +106,29 @@ export class TaskCancelledError extends Error {
   }
 }
 
+/**
+ * handoff(switchWorkerImpl,或透明接续 revive:false 分支的自动交接)的目标 impl 在这个
+ * worker 名下已经有过化身(含已终态、含 fork 分支)——三个 adapter(builtin/claude-code/
+ * codex)的 spawn 都硬编码 seq=1 且带"already spawned"守卫,不支持对同一 worker_id 二次
+ * spawn,即使旧化身已经被 kill(kill 不清除这个守卫记忆:cc/codex 的内存 runtimes 表不删除
+ * 条目,builtin 的 builtinConfigs + 磁盘 meta-1.json 更是连跨进程都拦)。若不在
+ * handoffIncarnation 的 pre-flight 拦下,step 3 的 newAdapter.spawn 必然抛错,而此时旧
+ * 化身已在 step 1/2 被写过 HANDOFF.md、kill 并标 superseded——重蹈 pre-flight 本该防住的
+ * "旧的没了、新的没建成"死结。根治需要 harness 自己分配 seq(不依赖各 adapter 内部
+ * nextSeq/硬编码 1),这是协议级改动,留待后续(protocol-agent-v3 §6.1 已知限制);这里先
+ * fail-fast,把死结换成一个清晰、可重试、可诊断的错误。
+ */
+export class ImplAlreadyUsedError extends Error {
+  constructor(readonly worker_id: string, readonly impl: WorkerImplId) {
+    super(
+      `worker ${worker_id} already has an incarnation on impl '${impl}'; adapter.spawn is hardcoded to seq=1 and ` +
+        `does not support re-spawning the same worker_id on the same impl (even after kill) — root fix requires ` +
+        `harness-managed seq allocation (protocol-agent-v3 §6.1 known limitation)`
+    )
+    this.name = 'ImplAlreadyUsedError'
+  }
+}
+
 export interface HarnessDeps {
   /** 已 detect 过的可用实现。见文件头"onStateChange 接线契约"——底层 Map 引用可在构造后继续填充。 */
   readonly adapters: ReadonlyMap<WorkerImplId, WorkerAdapter>
@@ -337,6 +360,14 @@ export class WorkerHarness {
    * 相同的交接路径(见 handoffIncarnation),区别只是:目标实现由调用方显式指定(不做
    * "原 impl 若仍可用则沿用"的自动选择),且源化身可能仍然存活(由 handoffIncarnation
    * 内部负责在这种情况下先 kill 再标 superseded)。
+   *
+   * 已知约束(三轮 review 修复,见 ImplAlreadyUsedError 类注释):不支持"切到该 worker
+   * 曾经用过的实现"——含切回原实现(如 cc → codex → cc)、含切到当前正在用的同一实现。
+   * 三个 adapter 的 spawn 都硬编码 seq=1 且带"already spawned"守卫,kill 不清除这道守卫
+   * 记忆,对同一 worker_id 二次 spawn 必然失败。handoffIncarnation 的 pre-flight 会在写
+   * HANDOFF.md、kill 源化身之前用 (worker.incarnations 是否已有 impl 匹配的记录) 判定并
+   * fail-fast 抛 ImplAlreadyUsedError,不留半成品。根治需要 harness 自己分配 seq,是协议
+   * 级改动,留待后续(protocol-agent-v3 §6.1 已知限制)。
    */
   async switchWorkerImpl(workerId: string, impl: WorkerImplId, note?: string): Promise<void> {
     await this.withLock(workerId, async () => {
@@ -483,11 +514,15 @@ export class WorkerHarness {
         if (adapter.capabilities().revive) {
           await this.reviveIncarnation(dialogObjectId, worker, mainline, adapter, text)
         } else {
-          // "原 impl 若仍可用则沿用,否则 defaultImpl"(brief)。三个既有实现目前都是
-          // revive:true,这条分支走不到真实 adapter;为将来的不可复活实现(如 legacy)保留。
-          const targetImpl = this.deps.adapters.has(mainline.impl as WorkerImplId)
-            ? (mainline.impl as WorkerImplId)
-            : this.deps.defaultImpl
+          // "原 impl 若仍可用则沿用,否则 defaultImpl"(brief)是加 ImplAlreadyUsedError 守卫
+          // 之前的选择逻辑,现在必然自绝:mainline.impl 就是正在办理接续的这条化身所在的
+          // impl,它在 worker.incarnations 里必然已经"用过",沿用它会被 handoffIncarnation
+          // 的 pre-flight 直接拒绝。改选一个这个 worker 尚未用过的可用实现(pickUnusedImpl:
+          // defaultImpl 优先,否则从 deps.adapters 里挑第一个未用过的);全都用过时原样交给
+          // handoffIncarnation 的 pre-flight 统一抛 ImplAlreadyUsedError,不在这里重复判断。
+          // 三个既有实现目前都是 revive:true,这条分支走不到真实 adapter;为将来的不可复活
+          // 实现(如 legacy)保留。
+          const targetImpl = pickUnusedImpl(worker, this.deps.adapters, this.deps.defaultImpl)
           await this.handoffIncarnation(dialogObjectId, worker, mainline, targetImpl, text)
         }
         return
@@ -575,7 +610,18 @@ export class WorkerHarness {
       session_ref: source.session_ref,
     }
 
-    // 0. Pre-flight(裁决 B 修复):目标 adapter 必须存在;若目标是 'builtin',调用方必须
+    // 0. Pre-flight(三轮 review 修复):目标 impl 若在这个 worker 名下已经有过任何化身
+    // (含已终态、含 fork 分支,见 ImplAlreadyUsedError 类注释)——即"切到该 worker 曾经用过
+    // 的实现"(含切回原实现、同实现切换)——必然会在下面 step 3 的 newAdapter.spawn 里抛错:
+    // 三个 adapter 的 spawn 都硬编码 seq=1 且带"already spawned"守卫,kill 不清除这道守卫
+    // 记忆。若这里不拦,失败会发生在 step 2(kill 源化身、标 superseded)之后,重蹈本方法
+    // pre-flight 本该防住的"旧的没了、新的没建成"死结。放在最前面、比下面 targetImpl 是否
+    // 有 adapter 注册的检查还早,因为它不需要先查 adapter 就能判定。
+    if (implAlreadyUsed(worker, targetImpl)) {
+      throw new ImplAlreadyUsedError(worker.worker_id, targetImpl)
+    }
+
+    // 0b. Pre-flight(裁决 B 修复):目标 adapter 必须存在;若目标是 'builtin',调用方必须
     // 通过 HarnessDeps.builtinSpawnDefaults 提供了 LLM 注入,否则 step 3 的 newAdapter.spawn
     // 必然因 spec.builtin 缺失而抛错(BuiltinWorkerAdapter.spawn 本就 fail-loud)。修复前这
     // 个抛错发生在 step 3——此时旧化身已经在 step 2 被 kill 并标 superseded,worker 卡进
@@ -1116,6 +1162,35 @@ export class WorkerHarness {
 function mainlineIncarnation(worker: LedgerWorker): Incarnation {
   const mainline = worker.incarnations.filter((inc) => inc.forked_from === undefined)
   return mainline[mainline.length - 1]
+}
+
+/**
+ * 该 worker 名下是否已经存在过某个 impl 的化身——不限主线/fork、不限存活/终态,只要
+ * `worker.incarnations` 里出现过一条 `impl` 匹配的记录就算"用过"。供 handoffIncarnation
+ * 的 pre-flight(ImplAlreadyUsedError)与 pickUnusedImpl 共用同一判定。
+ */
+function implAlreadyUsed(worker: LedgerWorker, impl: WorkerImplId): boolean {
+  return worker.incarnations.some((inc) => inc.impl === impl)
+}
+
+/**
+ * continueTerminalWorker 的 revive:false 分支(自动 handoff)选目标 impl:旧逻辑"原 impl
+ * 若仍可用则沿用"在加了 ImplAlreadyUsedError 守卫之后必然自绝——mainline.impl 本身必然
+ * 已经用过(它就是正在办理接续的这条化身所在的 impl)。改为挑一个这个 worker 尚未用过的
+ * 已注册实现:defaultImpl 优先(未用过就直接用),否则按 `deps.adapters` 的插入顺序取第一个
+ * 未用过的。若全都用过,原样返回 defaultImpl——不在这里重复判断/提前抛错,交给
+ * handoffIncarnation 唯一的 pre-flight 把关点统一抛 ImplAlreadyUsedError。
+ */
+function pickUnusedImpl(
+  worker: LedgerWorker,
+  adapters: ReadonlyMap<WorkerImplId, WorkerAdapter>,
+  defaultImpl: WorkerImplId
+): WorkerImplId {
+  if (!implAlreadyUsed(worker, defaultImpl)) return defaultImpl
+  for (const impl of adapters.keys()) {
+    if (!implAlreadyUsed(worker, impl)) return impl
+  }
+  return defaultImpl
 }
 
 /**

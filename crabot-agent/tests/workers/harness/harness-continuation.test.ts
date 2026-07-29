@@ -2,7 +2,14 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { WorkerHarness, WorkerNotFoundError, TaskCancelledError, type HarnessDeps, type SpawnWorkerParams } from '../../../src/workers/harness/harness'
+import {
+  WorkerHarness,
+  WorkerNotFoundError,
+  TaskCancelledError,
+  ImplAlreadyUsedError,
+  type HarnessDeps,
+  type SpawnWorkerParams,
+} from '../../../src/workers/harness/harness'
 import { LedgerStore } from '../../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../../src/workers/harness/workspace-manager'
 import { dialogObjectIdForPrivate } from '../../../src/workers/harness/ledger-types'
@@ -323,6 +330,13 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
       },
     })
     adaptersMap.set('builtin', fake)
+    // 三轮 review 修复后，revive:false 的自动 handoff 不再"原 impl 沿用"（mainline.impl 在
+    // worker.incarnations 里必然已经用过，沿用会被 ImplAlreadyUsedError pre-flight 拒绝），
+    // 而是改选一个该 worker 尚未用过的实现（pickUnusedImpl）——必须再注册一个未用过的
+    // adapter，否则 handoff 会因为"全都用过"而抛 ImplAlreadyUsedError，无法测到 handoff 本体
+    // 逻辑（HANDOFF.md 内容/superseded/spawned 事件）。
+    const target = new FakeAdapter({ implId: 'claude-code', onStateChange: harness.handleStateChange })
+    adaptersMap.set('claude-code', target)
 
     const worker = await harness.spawnWorker(spawnParams())
     const workspaceRoot = worker.incarnations[0].workspace
@@ -330,10 +344,12 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
 
     await expect(harness.sendToWorker(worker.worker_id, '接着把剩下的做完')).resolves.toBeUndefined()
 
-    // resume 完全没被调用（revive:false 分支）；handoff 走的是 spawn。
+    // resume 完全没被调用（revive:false 分支）；handoff 走的是 spawn，且目标是未用过的
+    // 'claude-code'（不是原 impl 'builtin'）。
     expect(fake.resumeCalls).toHaveLength(0)
-    expect(fake.spawnCalls.length).toBeGreaterThanOrEqual(1)
-    const handoffSpawn = fake.spawnCalls[fake.spawnCalls.length - 1]
+    expect(target.resumeCalls).toHaveLength(0)
+    expect(target.spawnCalls).toHaveLength(1)
+    const handoffSpawn = target.spawnCalls[0]
     expect(handoffSpawn.prompt).toContain('HANDOFF.md')
     expect(handoffSpawn.prompt).toContain('接着把剩下的做完')
 
@@ -344,7 +360,8 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
     expect(handoffContent).toContain('这是执行到一半的输出') // 输出尾
     expect(handoffContent).toMatch(/Previous outcome:/)
 
-    // 旧化身（seq=1）标 superseded：源化身在台账里还非终态时，先 kill 再落 exited(superseded)。
+    // 旧化身（seq=1，impl='builtin'）标 superseded：源化身在台账里还非终态时，先 kill 再落
+    // exited(superseded)。
     expect(fake.killCalls).toHaveLength(1)
     expect(fake.killCalls[0].seq).toBe(1)
     const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
@@ -352,8 +369,9 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
     expect(oldEntry.state).toBe('exited')
     expect(oldEntry.ended_reason).toBe('superseded')
 
-    // 新化身入主线链。
+    // 新化身入主线链，impl 是改选出来的 'claude-code'。
     const newEntry = w.incarnations[w.incarnations.length - 1]
+    expect(newEntry.impl).toBe('claude-code')
     expect(newEntry.forked_from).toBeUndefined()
     expect(newEntry.state).toBe('running')
     expect(w.task.status).toBe('running')
@@ -375,6 +393,9 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
       },
     })
     adaptersMap.set('builtin', fake)
+    // 同上：需要一个未用过的目标 impl，否则 pickUnusedImpl 找不到可用目标，handoff 会被
+    // ImplAlreadyUsedError pre-flight 拒绝。
+    adaptersMap.set('claude-code', new FakeAdapter({ implId: 'claude-code', onStateChange: harness.handleStateChange }))
 
     const worker = await harness.spawnWorker(spawnParams())
     const workspaceRoot = worker.incarnations[0].workspace
@@ -1302,5 +1323,201 @@ describe('WorkerHarness.switchWorkerImpl — 终审 PoC 回归：M3 cancelled �
     // kill 旧化身之前就已经拒绝。
     expect(events.filter((e) => e.kind === 'handoff_started')).toHaveLength(0)
     expect(events.filter((e) => e.kind === 'spawned')).toHaveLength(0)
+  })
+})
+
+// ---- 三轮 review PoC 回归：handoff 目标是该 worker 已用过的 impl（含切回原实现、同实现
+// 切换）必然在真实 adapter 上撞上"already spawned"守卫（三个 adapter 的 spawn 都硬编码
+// seq=1，kill 不清除这道守卫记忆），重蹈 pre-flight 本该防住的"旧的没了、新的没建成"死结。
+// FakeAdapter 默认没有这道守卫（spawnCalls 可以无限次成功），必须显式配 spawnBehavior 复刻
+// 真实 adapter 的行为，测试才能真实复现死结，而不是被 FakeAdapter 的宽松行为掩盖。----
+
+/**
+ * 复刻真实 adapter（cc/codex/builtin）spawn 硬编码 seq=1 + "already spawned" 守卫的
+ * spawnBehavior：同一 (impl, worker_id) 第二次调用 spawn 必然抛错，且 kill 不会清除这道
+ * 记忆（`spawnedOnce` 是模块外部传入、跨越 kill 持续存在的状态，对齐真实 adapter 里
+ * runtimes/builtinConfigs 不因 kill 被删除条目的事实）。
+ */
+function guardedSpawnBehavior(implLabel: string, spawnedOnce: Set<string>, impl: WorkerImplId) {
+  return (spec: SpawnSpec): IncarnationHandle => {
+    const key = `${impl}:${spec.worker_id}`
+    if (spawnedOnce.has(key)) {
+      throw new Error(`FakeAdapter(${implLabel}).spawn: worker_id ${spec.worker_id} already spawned in this process`)
+    }
+    spawnedOnce.add(key)
+    return { worker_id: spec.worker_id, seq: 1, impl, session_ref: `ref-${spec.worker_id}#1` }
+  }
+}
+
+describe('WorkerHarness — 三轮 review PoC 回归：handoff 目标是该 worker 已用过的 impl（含切回原实现、同实现切换）', () => {
+  it('switchWorkerImpl 切回曾经用过的实现（cc → codex → cc）→ 抛 ImplAlreadyUsedError；源化身（当前主线 codex#1）状态未变、HANDOFF.md 未被再次追加、目标（cc）adapter 无新增 provision/spawn 调用', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    const spawnedOnce = new Set<string>()
+    const cc = new FakeAdapter({
+      implId: 'claude-code',
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      spawnBehavior: guardedSpawnBehavior('claude-code', spawnedOnce, 'claude-code'),
+    })
+    const codex = new FakeAdapter({
+      implId: 'codex',
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      spawnBehavior: guardedSpawnBehavior('codex', spawnedOnce, 'codex'),
+    })
+    adaptersMap.set('claude-code', cc)
+    adaptersMap.set('codex', codex)
+
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    const workspaceRoot = worker.incarnations[0].workspace
+
+    // 第一次切换：cc → codex，单向切换不撞上这个守卫，正常完成。
+    await harness.switchWorkerImpl(worker.worker_id, 'codex', '切到 codex')
+    expect(codex.spawnCalls).toHaveLength(1)
+    expect(cc.spawnCalls).toHaveLength(1) // 只有最初 spawnWorker 那一次
+
+    const handoffBefore = await fs.readFile(join(workspaceRoot, 'HANDOFF.md'), 'utf-8')
+    events.length = 0
+
+    // 第二次切换：切回 claude-code（曾经用过的实现）。修复前会走到 handoffIncarnation
+    // step 2（kill 当前主线 codex#1、标 superseded）之后，step 3 的 cc.spawn 撞上
+    // guardedSpawnBehavior 的"already spawned"守卫抛错——此时 codex#1 已经被 kill，
+    // 新化身建不成，worker 卡进死结。修复后 pre-flight 在 kill 之前就已经拒绝。
+    await expect(harness.switchWorkerImpl(worker.worker_id, 'claude-code', '切回 cc')).rejects.toThrow(
+      ImplAlreadyUsedError
+    )
+
+    // 目标（claude-code）没有新增 provision/spawn 调用——仍然只有最初 spawnWorker 那一次。
+    expect(cc.spawnCalls).toHaveLength(1)
+    expect(cc.provisionCalls).toHaveLength(1)
+
+    // 源化身（当前主线 codex#1）状态未变：没有被 kill，没有被标 superseded——这正是死结
+    // 场景里会被破坏的不变量。
+    expect(codex.killCalls).toHaveLength(0)
+    const [after] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const mainlineAfter = after.incarnations[after.incarnations.length - 1]
+    expect(mainlineAfter.impl).toBe('codex')
+    expect(mainlineAfter.seq).toBe(1)
+    expect(mainlineAfter.state).toBe('running')
+    expect(mainlineAfter.ended_reason).toBeUndefined()
+    expect(after.incarnations).toHaveLength(2) // 没有多出第三条化身
+
+    // HANDOFF.md 未被再次追加。
+    const handoffAfter = await fs.readFile(join(workspaceRoot, 'HANDOFF.md'), 'utf-8')
+    expect(handoffAfter).toBe(handoffBefore)
+
+    // 没有产生新的 handoff_started / superseded 事件——pre-flight 在写 HANDOFF.md 和 kill
+    // 源化身之前就已经拒绝。
+    expect(events.filter((e) => e.kind === 'handoff_started')).toHaveLength(0)
+    expect(events.filter((e) => e.kind === 'superseded')).toHaveLength(0)
+  })
+
+  it('switchWorkerImpl 切到当前正在用的同一个 impl（未曾切换过）→ 同样被 ImplAlreadyUsedError 拒绝，源化身原样存活', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    const spawnedOnce = new Set<string>()
+    const cc = new FakeAdapter({
+      implId: 'claude-code',
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      spawnBehavior: guardedSpawnBehavior('claude-code', spawnedOnce, 'claude-code'),
+    })
+    adaptersMap.set('claude-code', cc)
+
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    const workspaceRoot = worker.incarnations[0].workspace
+    events.length = 0
+
+    await expect(harness.switchWorkerImpl(worker.worker_id, 'claude-code', '切到同一个 impl')).rejects.toThrow(
+      ImplAlreadyUsedError
+    )
+
+    expect(cc.killCalls).toHaveLength(0)
+    expect(cc.spawnCalls).toHaveLength(1) // 仍然只有最初 spawnWorker 那一次
+
+    const [after] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(after.incarnations).toHaveLength(1)
+    expect(after.incarnations[0].state).toBe('running')
+    expect(after.incarnations[0].ended_reason).toBeUndefined()
+
+    await expect(fs.readFile(join(workspaceRoot, 'HANDOFF.md'), 'utf-8')).rejects.toThrow() // 文件未被创建
+    expect(events.filter((e) => e.kind === 'handoff_started')).toHaveLength(0)
+  })
+
+  it('sendToWorker 触发的自动 handoff（revive:false）在"原 impl 已用过"时改选一个未用过的 impl 并成功', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    const spawnedOnce = new Set<string>()
+    // mainline 用的实现（revive:false，触发自动 handoff）——它本身就是"已用过"的那个 impl，
+    // handoffIncarnation 若沿用它会必然撞上 spawn 守卫。
+    const mainlineAdapter = new FakeAdapter({
+      implId: 'claude-code',
+      caps: { revive: false },
+      onStateChange: harness.handleStateChange,
+      sendInputBehavior: (h) => {
+        throw new WorkerExitedError(h.worker_id, h.seq)
+      },
+      spawnBehavior: guardedSpawnBehavior('claude-code', spawnedOnce, 'claude-code'),
+    })
+    // 未用过的目标：defaultImpl（'builtin'，见 makeHarness）本身就还没被这个 worker 用过，
+    // pickUnusedImpl 应该直接选中它。
+    const builtinTarget = new FakeAdapter({
+      implId: 'builtin',
+      onStateChange: harness.handleStateChange,
+      spawnBehavior: guardedSpawnBehavior('builtin', spawnedOnce, 'builtin'),
+    })
+    adaptersMap.set('claude-code', mainlineAdapter)
+    adaptersMap.set('builtin', builtinTarget)
+
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    events.length = 0
+
+    await expect(harness.sendToWorker(worker.worker_id, '接着做完')).resolves.toBeUndefined()
+
+    // 改选到了未用过的 'builtin'，不是原 impl 'claude-code'。
+    expect(builtinTarget.spawnCalls).toHaveLength(1)
+    expect(mainlineAdapter.killCalls).toHaveLength(1) // 源化身（claude-code#1）被 kill 标 superseded
+
+    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const newEntry = w.incarnations[w.incarnations.length - 1]
+    expect(newEntry.impl).toBe('builtin')
+    expect(newEntry.state).toBe('running')
+    expect(w.task.status).toBe('running')
+    expect(events.filter((e) => e.kind === 'handoff_started')).toHaveLength(1)
+  })
+
+  it('sendToWorker 触发的自动 handoff（revive:false）在所有已注册 impl 都用过时 → 抛 ImplAlreadyUsedError，不动源化身', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    const spawnedOnce = new Set<string>()
+    // 只注册一个实现（'builtin'，恰好也是 makeHarness 的 defaultImpl），且它就是 mainline
+    // 正在用的 impl——除它之外没有任何"未用过"的可选目标，pickUnusedImpl 只能落回
+    // defaultImpl（同样已用过），handoffIncarnation 的 pre-flight 统一抛错。
+    const mainlineAdapter = new FakeAdapter({
+      implId: 'builtin',
+      caps: { revive: false },
+      onStateChange: harness.handleStateChange,
+      sendInputBehavior: (h) => {
+        throw new WorkerExitedError(h.worker_id, h.seq)
+      },
+      spawnBehavior: guardedSpawnBehavior('builtin', spawnedOnce, 'builtin'),
+    })
+    adaptersMap.set('builtin', mainlineAdapter)
+
+    const worker = await harness.spawnWorker(spawnParams())
+    const workspaceRoot = worker.incarnations[0].workspace
+    events.length = 0
+
+    // sendToWorker 的契约是"投递永不因状态失败"——continueTerminalWorker 的 cancelled 短路
+    // 走 dead-letter 不重新抛出，但 ImplAlreadyUsedError 不是那种"消息可以留到下次重试"的
+    // 场景（不是并发窗口、也不是 cancelled），是配置/能力层面的硬失败，原样向上抛给调用方。
+    await expect(harness.sendToWorker(worker.worker_id, '接着做完')).rejects.toThrow(ImplAlreadyUsedError)
+
+    // 源化身没有被 kill、没有被标 superseded——pre-flight 在 kill 之前就已经拒绝。
+    expect(mainlineAdapter.killCalls).toHaveLength(0)
+    const [after] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(after.incarnations).toHaveLength(1)
+    expect(after.incarnations[0].state).toBe('running')
+    expect(after.incarnations[0].ended_reason).toBeUndefined()
+
+    await expect(fs.readFile(join(workspaceRoot, 'HANDOFF.md'), 'utf-8')).rejects.toThrow() // 文件未被创建
+    expect(events.filter((e) => e.kind === 'handoff_started')).toHaveLength(0)
   })
 })
