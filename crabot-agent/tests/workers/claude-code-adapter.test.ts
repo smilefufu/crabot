@@ -1006,7 +1006,7 @@ describe('ClaudeCodeAdapter.readTrace', () => {
     await fs.mkdir(slugDir, { recursive: true })
     await fs.writeFile(path.join(slugDir, `${sessionId}.jsonl`), sampleJsonl(sessionId), 'utf-8')
 
-    const events = await adapter.readTrace(h)
+    const { events, nextCursor } = await adapter.readTrace(h)
     expect(events).toHaveLength(5)
 
     expect(events[0]).toMatchObject({ kind: 'message', role: 'user' })
@@ -1023,6 +1023,10 @@ describe('ClaudeCodeAdapter.readTrace', () => {
 
     expect(events[4]).toMatchObject({ kind: 'lifecycle', role: 'system', summary: 'turn_duration' })
 
+    // 原始行数是 7(5 条产生事件 + 1 条 queue-operation 跳过 + 1 条坏 JSON 跳过),
+    // nextCursor 必须计入被跳过的行,不能等于 events.length。
+    expect(nextCursor.offset).toBe(7)
+
     await adapter.kill(h)
   })
 
@@ -1036,24 +1040,69 @@ describe('ClaudeCodeAdapter.readTrace', () => {
     await fs.mkdir(slugDir, { recursive: true })
     await fs.writeFile(path.join(slugDir, `${sessionId}.jsonl`), sampleJsonl(sessionId), 'utf-8')
 
-    const events = await adapter.readTrace(h, { offset: 2 })
+    const { events, nextCursor } = await adapter.readTrace(h, { offset: 2 })
     expect(events).toHaveLength(3)
     expect(events[0].kind).toBe('tool_result')
     expect(events[1].kind).toBe('message')
     expect(events[2].kind).toBe('lifecycle')
+    expect(nextCursor.offset).toBe(7)
 
     await adapter.kill(h)
   })
 
-  it('trace 文件不存在 → 返回空数组,不抛错', async () => {
+  it('nextCursor 计入跳过的坏行/未知类型行,两次 readTrace 按 nextCursor 续读不重不漏', async () => {
+    const tmux = new NoopTmux()
+    const adapter = new ClaudeCodeAdapter({ dataDir, tmux, claudeBin: 'unused', claudeProjectsDir })
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const { h, sessionId } = await spawnedHandle(adapter, workerId)
+
+    const slugDir = path.join(claudeProjectsDir, projectSlug(workspaceRoot))
+    await fs.mkdir(slugDir, { recursive: true })
+    const filePath = path.join(slugDir, `${sessionId}.jsonl`)
+    await fs.writeFile(filePath, sampleJsonl(sessionId), 'utf-8')
+
+    const first = await adapter.readTrace(h)
+    expect(first.events).toHaveLength(5)
+    // 若调用方错误地用 offset += events.length(5)推进游标,会漏掉被跳过的 queue-operation
+    // 行和坏 JSON 行(原始 7 行)——nextCursor 必须落在 7,不是 5。
+    expect(first.nextCursor.offset).toBe(7)
+
+    // 追加新一批(1 条有效消息 + 1 条坏 JSON),用上一次的 nextCursor 续读。
+    const newLine = {
+      parentUuid: '55555555-5555-5555-5555-555555555555',
+      isSidechain: false,
+      type: 'user',
+      message: { role: 'user', content: '还有一个问题' },
+      uuid: '66666666-6666-6666-6666-666666666666',
+      timestamp: '2026-07-29T01:00:05.000Z',
+      sessionId,
+    }
+    await fs.appendFile(filePath, '\n' + JSON.stringify(newLine) + '\nanother bad line{{{\n', 'utf-8')
+
+    const second = await adapter.readTrace(h, first.nextCursor)
+    expect(second.events).toHaveLength(1)
+    expect(second.events[0].summary).toContain('还有一个问题')
+    // 没有重复读到第一批的任何事件。
+    expect(second.events.map((e) => e.summary)).not.toContain('这个函数为什么会抛 TypeError?')
+    expect(second.nextCursor.offset).toBe(9)
+
+    await adapter.kill(h)
+  })
+
+  it('trace 文件不存在 → 返回空事件数组,不抛错,cursor 原样透传', async () => {
     const tmux = new NoopTmux()
     const adapter = new ClaudeCodeAdapter({ dataDir, tmux, claudeBin: 'unused', claudeProjectsDir })
     const workerId = `cctest-${randomUUID().slice(0, 8)}`
     const { h } = await spawnedHandle(adapter, workerId)
     // 不写任何 fixture 文件。
 
-    const events = await adapter.readTrace(h)
+    const { events, nextCursor } = await adapter.readTrace(h)
     expect(events).toEqual([])
+    expect(nextCursor).toEqual({ offset: 0 })
+
+    const { events: events2, nextCursor: nextCursor2 } = await adapter.readTrace(h, { offset: 3 })
+    expect(events2).toEqual([])
+    expect(nextCursor2).toEqual({ offset: 3 })
 
     await adapter.kill(h)
   })

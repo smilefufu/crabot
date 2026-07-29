@@ -66,7 +66,7 @@ export interface WorkerAdapter {
   sendInput(h: IncarnationHandle, text: string, opts?: { raw?: boolean }): Promise<void>
   readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }>
   state(h: IncarnationHandle): Promise<WorkerContractState>
-  readTrace?(h: IncarnationHandle, cursor?: TraceCursor): Promise<NormalizedTraceEvent[]>
+  readTrace?(h: IncarnationHandle, cursor?: TraceCursor): Promise<{ events: NormalizedTraceEvent[]; nextCursor: TraceCursor }>
   kill(h: IncarnationHandle): Promise<void>
   capabilities(): AdapterCapabilities
 }

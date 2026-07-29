@@ -572,33 +572,39 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     return (await this.syncState(runtime, h)).state
   }
 
-  async readTrace(h: IncarnationHandle, cursor?: TraceCursor): Promise<NormalizedTraceEvent[]> {
+  async readTrace(h: IncarnationHandle, cursor?: TraceCursor): Promise<{ events: NormalizedTraceEvent[]; nextCursor: TraceCursor }> {
     const runtime = this.runtimes.get(instanceKey(h))
     if (!runtime) {
       throw new Error(`CodexWorkerAdapter.readTrace: no such incarnation ${h.worker_id}#${h.seq} resident in this process`)
     }
 
     if (!runtime.rolloutPath) {
-      // spawn 时没能发现 rollout 文件(占位 session_id,已知限制)——没有路径可读,退化为空数组。
-      return []
+      // spawn 时没能发现 rollout 文件(占位 session_id,已知限制)——没有路径可读,退化为空
+      // 数组,cursor 原样透传。
+      return { events: [], nextCursor: cursor ?? { offset: 0 } }
     }
 
     let raw: string
     try {
       raw = await fs.readFile(runtime.rolloutPath, 'utf-8')
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { events: [], nextCursor: cursor ?? { offset: 0 } }
       throw err
     }
 
     const lines = raw.split('\n').filter((line) => line.length > 0)
     const start = cursor?.offset ?? 0
     const events: NormalizedTraceEvent[] = []
+    // nextCursor.offset 是"实际消费到的行号",不是 start + events.length——未识别的顶层
+    // type/子类型、坏 JSON 都不产事件但仍然消费了一行,调用方用 offset += events.length 推进
+    // 游标会在这些被跳过的行上重复读或漏读(P2 review #4,同 cc adapter 修复)。
+    let consumed = start
     for (let i = start; i < lines.length; i++) {
       const event = normalizeRolloutLine(lines[i])
       if (event) events.push(event)
+      consumed = i + 1
     }
-    return events
+    return { events, nextCursor: { offset: consumed } }
   }
 
   async kill(h: IncarnationHandle): Promise<void> {

@@ -468,7 +468,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return (await this.syncState(runtime, h)).state
   }
 
-  async readTrace(h: IncarnationHandle, cursor?: TraceCursor): Promise<NormalizedTraceEvent[]> {
+  async readTrace(h: IncarnationHandle, cursor?: TraceCursor): Promise<{ events: NormalizedTraceEvent[]; nextCursor: TraceCursor }> {
     const runtime = this.runtimes.get(instanceKey(h))
     if (!runtime) {
       // trace 文件路径依赖 workspace root,这个信息只存在于内存 runtime 里(meta.json 不落
@@ -483,21 +483,26 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     try {
       raw = await fs.readFile(filePath, 'utf-8')
     } catch (err) {
-      // 契约(types.ts)里 readTrace 只返回 NormalizedTraceEvent[],没有 unavailable_reason
-      // 的位置——文件缺失(化身还没写过 trace,或 fork 化身的占位 session_id 本就对不上真实
-      // 文件)退化为空数组。
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []
+      // 文件缺失(化身还没写过 trace,或 fork 化身的占位 session_id 本就对不上真实文件)
+      // 退化为空数组,cursor 原样透传——没有新内容可消费,调用方下次仍从原位置续读。
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { events: [], nextCursor: cursor ?? { offset: 0 } }
       throw err
     }
 
     const lines = raw.split('\n').filter((line) => line.length > 0)
     const start = cursor?.offset ?? 0
     const events: NormalizedTraceEvent[] = []
+    // nextCursor.offset 是"实际消费到的行号",不是 start + events.length——归一化失败/不认识
+    // 的 type(mode/summary/queue-operation 等)不产事件但仍然消费了一行,调用方若用
+    // offset += events.length 来推进游标,会在这些被跳过的行上重复读或漏读(P2 review #4,
+    // protocol-agent-v3 §10.3 要求 next_cursor)。
+    let consumed = start
     for (let i = start; i < lines.length; i++) {
       const event = normalizeTraceLine(lines[i])
       if (event) events.push(event)
+      consumed = i + 1
     }
-    return events
+    return { events, nextCursor: { offset: consumed } }
   }
 
   async kill(h: IncarnationHandle): Promise<void> {

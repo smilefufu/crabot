@@ -664,14 +664,19 @@ describe('CodexWorkerAdapter.readTrace', () => {
   // 的字段映射)在下面 tmux+mock 的 describe 块里端到端验证(spawn 真的发现 rollout 路径后
   // 再读)。这里只验证"没有可读路径时的降级行为",不需要真实 tmux 进程。
 
-  it('trace 文件不存在(rolloutPath 未知,占位 session_id)→ 返回空数组,不抛错', async () => {
+  it('trace 文件不存在(rolloutPath 未知,占位 session_id)→ 返回空事件数组,不抛错,cursor 原样透传', async () => {
     const tmux = new NoopTmux()
     const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin: 'unused', sessionDiscoveryTimeoutMs: 50 })
     const workerId = `codextest-${randomUUID().slice(0, 8)}`
     const h = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
 
-    const events = await adapter.readTrace(h)
+    const { events, nextCursor } = await adapter.readTrace(h)
     expect(events).toEqual([])
+    expect(nextCursor).toEqual({ offset: 0 })
+
+    const { events: events2, nextCursor: nextCursor2 } = await adapter.readTrace(h, { offset: 3 })
+    expect(events2).toEqual([])
+    expect(nextCursor2).toEqual({ offset: 3 })
 
     await adapter.kill(h)
   })
@@ -743,7 +748,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter.readTrace(已发现 rollout 
     // mock CLI 只写了个占位 session_meta 行(供发现用),这里覆写成完整样例内容再读。
     await fs.writeFile(rolloutFile, sampleRolloutJsonl(rolloutUuid), 'utf-8')
 
-    const events = await adapter.readTrace(h)
+    const { events, nextCursor } = await adapter.readTrace(h)
     expect(events).toHaveLength(7)
     expect(events[0]).toMatchObject({ kind: 'lifecycle', role: 'system' })
     expect(events[1]).toMatchObject({ kind: 'message', role: 'user' })
@@ -758,12 +763,62 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter.readTrace(已发现 rollout 
     expect(events[5]).toMatchObject({ kind: 'message', role: 'assistant' })
     expect(events[5].summary).toContain('问题在于第 12 行没有判空。')
     expect(events[6]).toMatchObject({ kind: 'lifecycle', role: 'system', summary: 'turn_complete' })
+    // 原始行数是 10(7 条产生事件 + turn_context/web_search_call 两条未识别子类型跳过 +
+    // 1 条坏 JSON 跳过),nextCursor 必须计入被跳过的行,不能等于 events.length。
+    expect(nextCursor.offset).toBe(10)
 
     const partial = await adapter.readTrace(h, { offset: 4 })
-    expect(partial).toHaveLength(3)
-    expect(partial[0].kind).toBe('thinking')
-    expect(partial[1].kind).toBe('message')
-    expect(partial[2].kind).toBe('lifecycle')
+    expect(partial.events).toHaveLength(3)
+    expect(partial.events[0].kind).toBe('thinking')
+    expect(partial.events[1].kind).toBe('message')
+    expect(partial.events[2].kind).toBe('lifecycle')
+    expect(partial.nextCursor.offset).toBe(10)
+
+    await adapter.kill(h)
+  }, 15000)
+
+  it('nextCursor 计入跳过的行(未识别 type/坏 JSON),两次 readTrace 按 nextCursor 续读不重不漏', async () => {
+    const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+    const stopHookCmd = channel.hookCommand('stop')
+    const codexHome = path.join(workspaceRoot, '.codex')
+    const rolloutUuid = randomUUID()
+    const now = new Date()
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const datePath = path.join(String(now.getFullYear()), pad(now.getMonth() + 1), pad(now.getDate()))
+    const rolloutFile = path.join(codexHome, 'sessions', datePath, rolloutFileNameFor(rolloutUuid))
+
+    const codexBin = codexBinFor([{ output: '第一段输出', emitStop: true }], stopHookCmd, { rolloutFile })
+    const adapter = new CodexWorkerAdapter({ dataDir, tmux: new TmuxDriver(), codexBin, sessionDiscoveryTimeoutMs: 1500 })
+    await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+    const workerId = `codextest-${randomUUID().slice(0, 8)}`
+
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+    await waitForState(adapter, h, 'idle')
+
+    // 覆写成:1 条有效 event_msg + 1 条未识别顶层 type(跳过) + 1 条坏 JSON(跳过)。
+    const initialLines = [
+      { type: 'event_msg', payload: { type: 'task_started' } },
+      { type: 'turn_context', payload: { model: 'gpt-5.5' } },
+    ]
+    await fs.writeFile(rolloutFile, initialLines.map((l) => JSON.stringify(l)).join('\n') + '\nnot valid json{{{\n', 'utf-8')
+
+    const first = await adapter.readTrace(h)
+    expect(first.events).toHaveLength(1)
+    // 3 行原始数据(1 条有效 + 2 条被跳过),offset += events.length(1)会漏掉后面 2 行——
+    // nextCursor 必须落在 3,不是 1。
+    expect(first.nextCursor.offset).toBe(3)
+
+    // 追加新一批(1 条有效 + 1 条坏 JSON),用上一次的 nextCursor 续读。
+    await fs.appendFile(
+      rolloutFile,
+      '\n' + JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete' } }) + '\nmore bad json{{{\n',
+      'utf-8',
+    )
+
+    const second = await adapter.readTrace(h, first.nextCursor)
+    expect(second.events).toHaveLength(1)
+    expect(second.events[0].summary).toBe('task_complete')
+    expect(second.nextCursor.offset).toBe(5)
 
     await adapter.kill(h)
   }, 15000)
