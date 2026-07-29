@@ -83,6 +83,7 @@ import { CliEventChannel } from '../cli-events.js'
 import { OutputLog } from '../output-log.js'
 import { AsyncMutex } from '../async-mutex.js'
 import { writeMetaAtomic } from '../meta-store.js'
+import { WorkerExitedError } from '../errors.js'
 import { materializeSkills, renderMcpJson, renderContextMd, type ProvisionSources } from '../provision/materialize.js'
 import type {
   AdapterCapabilities,
@@ -118,16 +119,8 @@ function validateSessionRef(sessionRef: string): void {
   }
 }
 
-/** sendInput 打到已 exited 的化身时抛出。与 builtin 的同名类语义一致,各自独立定义(不共享 import)。 */
-export class WorkerExitedError extends Error {
-  constructor(
-    readonly worker_id: string,
-    readonly seq: number,
-  ) {
-    super(`ClaudeCodeAdapter: incarnation ${worker_id}#${seq} has exited`)
-    this.name = 'WorkerExitedError'
-  }
-}
+/** Re-export for backward compatibility and convenience. */
+export { WorkerExitedError }
 
 /** hook 事件文件路径约定:workspace 内 .claude/events-cli.jsonl。provision 与 spawn 都按此约定定位,保持一致。 */
 export function eventsFilePath(ws: Workspace): string {

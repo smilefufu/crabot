@@ -45,6 +45,7 @@ import type { Resolvable } from '../../engine/types.js'
 import { SessionTree } from '../session-tree.js'
 import { OutputLog } from '../output-log.js'
 import { AsyncMutex } from '../async-mutex.js'
+import { WorkerExitedError } from '../errors.js'
 import type {
   AdapterCapabilities,
   CapabilityBundle,
@@ -62,19 +63,8 @@ import type {
 /** fork 是一次性侧问，maxTurns 取小值，避免侧问跑成一次完整任务。 */
 const FORK_MAX_TURNS = 8
 
-/**
- * sendInput 打到已 exited 的化身时抛出。透明接续（自动 resume 并重投）是 harness（P3）
- * 的职责，adapter 层保持窄语义，只负责如实报告"这个化身已经结束了"。
- */
-export class WorkerExitedError extends Error {
-  constructor(
-    readonly worker_id: string,
-    readonly seq: number,
-  ) {
-    super(`BuiltinWorkerAdapter: incarnation ${worker_id}#${seq} has exited`)
-    this.name = 'WorkerExitedError'
-  }
-}
+/** Re-export for backward compatibility and convenience. */
+export { WorkerExitedError }
 
 const FINISH_TASK_TOOL: ToolDefinition = {
   ...defineTool({

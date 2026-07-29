@@ -105,6 +105,7 @@ import { CliEventChannel } from '../cli-events.js'
 import { OutputLog } from '../output-log.js'
 import { AsyncMutex } from '../async-mutex.js'
 import { writeMetaAtomic } from '../meta-store.js'
+import { WorkerExitedError, CapabilityNotSupportedError } from '../errors.js'
 import { materializeSkills, renderCodexMcpToml, renderContextMd, type ProvisionSources } from '../provision/materialize.js'
 import type {
   AdapterCapabilities,
@@ -156,28 +157,8 @@ function validateSessionRef(sessionRef: string): void {
   }
 }
 
-/** sendInput 打到已 exited 的化身时抛出。与 cc/builtin 的同名类语义一致,各自独立定义。 */
-export class WorkerExitedError extends Error {
-  constructor(
-    readonly worker_id: string,
-    readonly seq: number,
-  ) {
-    super(`CodexWorkerAdapter: incarnation ${worker_id}#${seq} has exited`)
-    this.name = 'WorkerExitedError'
-  }
-}
-
-/** capabilities() 声明为 false 的能力被调用时抛出的错误(如 fork)。携带 impl/capability
- * 便于调用方判断这是"能力缺失"而非其它运行时错误。 */
-export class CapabilityNotSupportedError extends Error {
-  constructor(
-    readonly impl: string,
-    readonly capability: string,
-  ) {
-    super(`${impl} adapter does not support capability '${capability}'`)
-    this.name = 'CapabilityNotSupportedError'
-  }
-}
+/** Re-export for backward compatibility and convenience. */
+export { WorkerExitedError, CapabilityNotSupportedError }
 
 /** hook/notify 事件文件路径约定:workspace 内 .codex/events-cli.jsonl,与 cc 的
  * .claude/events-cli.jsonl 同构。provision 与 spawn 都按此约定定位,保持一致。 */
