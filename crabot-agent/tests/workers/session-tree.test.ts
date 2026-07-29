@@ -89,4 +89,22 @@ describe('SessionTree', () => {
     const lines = raw.split('\n').filter((l) => l.trim().length > 0)
     expect(lines).toHaveLength(11)
   })
+
+  it('append 非法 parentId(树中不存在的节点) 在锁内同步抛错,不落脏数据', async () => {
+    const filePath = join(tmp, 's.jsonl')
+    const tree = new SessionTree(filePath)
+    await tree.append(null, u('root'))
+
+    await expect(tree.append('不存在的node-id', asst('侧问'))).rejects.toThrow(/unknown parent_id/)
+
+    // 非法 append 没有落盘：文件里仍然只有 root 这一行。
+    const raw = await fs.readFile(filePath, 'utf-8')
+    const lines = raw.split('\n').filter((l) => l.trim().length > 0)
+    expect(lines).toHaveLength(1)
+
+    // 校验没有把 mutex 卡死：后续合法 append 仍然可用。
+    const rootId = tree.latestTip()!
+    const childId = await tree.append(rootId, asst('合法子节点'))
+    expect(tree.pathTo(childId)).toHaveLength(2)
+  })
 })

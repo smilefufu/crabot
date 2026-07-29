@@ -47,6 +47,11 @@ export class SessionTree {
   /** 追加一条消息为 parentId 的子节点,返回新 node_id;写盘为 append+fsync */
   async append(parentId: string | null, message: EngineMessage): Promise<string> {
     return this.mutex.run(async () => {
+      // parentId 校验必须在锁内、写盘之前完成：fork/resume 传入的 session_ref 若是非法
+      // 节点(不存在于树中),必须同步抛错直达调用方,不能先落一行脏数据再让上层发现不一致。
+      if (parentId !== null && !this.nodes.has(parentId)) {
+        throw new Error(`SessionTree: unknown parent_id ${parentId}`)
+      }
       const node: SessionNode = { node_id: randomUUID(), parent_id: parentId, message }
       const line = JSON.stringify(node) + '\n'
       const handle = await fs.open(this.filePath, 'a')
