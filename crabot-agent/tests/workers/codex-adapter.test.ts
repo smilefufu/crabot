@@ -149,6 +149,18 @@ describe('CodexWorkerAdapter.provision', () => {
     await expect(adapter.provision({ root: ws }, { skills: [], mcp_servers: [] })).resolves.toBeUndefined()
     await expect(fs.access(path.join(ws, '.codex/auth.json'))).rejects.toThrow()
   })
+
+  it('provision 把 workspace 写成受信任目录(config.toml 的 [projects."<realpath>"] trust_level = "trusted",替代不存在的 --skip-git-repo-check flag)', async () => {
+    const adapter = new CodexWorkerAdapter({ dataDir: ws, codexHomeSource })
+    await adapter.provision({ root: ws }, { skills: [], mcp_servers: [] })
+
+    const realRoot = await fs.realpath(ws)
+    const configToml = await fs.readFile(path.join(ws, '.codex/config.toml'), 'utf-8')
+    expect(configToml).toContain(`[projects."${realRoot}"]`)
+    expect(configToml).toContain('trust_level = "trusted"')
+    // TOML 根级 key(notify)必须出现在 [projects...] 表头之前。
+    expect(configToml.indexOf('notify =')).toBeLessThan(configToml.indexOf('[projects.'))
+  })
 })
 
 describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
@@ -346,6 +358,82 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
   )
 
   it(
+    'session 发现:rollout 文件内容里的 session_meta.payload.session_id 优先于文件名解析出的 uuid(实测更权威,见 adapter.ts 头注释)',
+    async () => {
+      // 不用 provisionedAdapter 的 withRollout(mock CLI 自己落的 rollout 文件内容里没有
+      // session_id 字段,只用来验证文件名兜底路径)——这里手动在发现窗口内把一个"文件名嵌
+      // uuidA、内容 session_meta.payload.session_id 却是 uuidB"的 rollout 文件放进
+      // sessions 目录,模拟真实 codex 落盘的权威内容,验证 adapter 采信内容而不是文件名。
+      const { adapter, workerId } = await provisionedAdapter([{ output: '第一段输出', emitStop: true }])
+      const uuidFromFilename = randomUUID()
+      const uuidFromContent = randomUUID()
+
+      const spawnPromise = adapter.spawn(makeSpec(workerId, '你好'))
+
+      const now = new Date()
+      const pad = (n: number) => String(n).padStart(2, '0')
+      const datePath = path.join(String(now.getFullYear()), pad(now.getMonth() + 1), pad(now.getDate()))
+      const sessionsDir = path.join(workspaceRoot, '.codex', 'sessions', datePath)
+      await fs.mkdir(sessionsDir, { recursive: true })
+      await fs.writeFile(
+        path.join(sessionsDir, rolloutFileNameFor(uuidFromFilename)),
+        JSON.stringify({ type: 'session_meta', payload: { session_id: uuidFromContent, timestamp: new Date().toISOString(), cwd: workspaceRoot } }) + '\n',
+        'utf-8',
+      )
+
+      const h = await spawnPromise
+      await waitForState(adapter, h, 'idle')
+
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string; session_discovery?: string }
+      expect(meta.session_id).toBe(uuidFromContent)
+      expect(meta.session_id).not.toBe(uuidFromFilename)
+      expect(meta.session_discovery).toBe('discovered')
+      expect(h.session_ref).toBe(uuidFromContent)
+    },
+    15000,
+  )
+
+  it(
+    '五轮 review PoC②:rollout 内容里的 session_id 不是合法 UUID(畸形值)时退回文件名解析出的 uuid,并打 warn' +
+      '(修复前:内容里的 id 未经格式校验就直接采信,畸形 id 会写进 meta.session_id/handle.session_ref,spawn 静默成功但 resume 必然失败)',
+    async () => {
+      const { adapter, workerId } = await provisionedAdapter([{ output: '第一段输出', emitStop: true }])
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const uuidFromFilename = randomUUID()
+      const malformedContentId = 'not-a-valid-uuid; rm -rf /'
+
+      const spawnPromise = adapter.spawn(makeSpec(workerId, '你好'))
+
+      const now = new Date()
+      const pad = (n: number) => String(n).padStart(2, '0')
+      const datePath = path.join(String(now.getFullYear()), pad(now.getMonth() + 1), pad(now.getDate()))
+      const sessionsDir = path.join(workspaceRoot, '.codex', 'sessions', datePath)
+      await fs.mkdir(sessionsDir, { recursive: true })
+      await fs.writeFile(
+        path.join(sessionsDir, rolloutFileNameFor(uuidFromFilename)),
+        JSON.stringify({ type: 'session_meta', payload: { session_id: malformedContentId, timestamp: new Date().toISOString(), cwd: workspaceRoot } }) + '\n',
+        'utf-8',
+      )
+
+      const h = await spawnPromise
+      await waitForState(adapter, h, 'idle')
+
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string; session_discovery?: string }
+      // 退回文件名解析出的 uuid,不是畸形内容值。
+      expect(meta.session_id).toBe(uuidFromFilename)
+      expect(meta.session_id).not.toBe(malformedContentId)
+      expect(meta.session_discovery).toBe('discovered')
+      expect(h.session_ref).toBe(uuidFromFilename)
+
+      const warned = warnSpy.mock.calls.some((call) => String(call[0] ?? '').includes('not a valid UUID'))
+      expect(warned).toBe(true)
+
+      warnSpy.mockRestore()
+    },
+    15000,
+  )
+
+  it(
     'session 发现:轮询超时降级时输出 console.warn 日志',
     async () => {
       const { adapter, workerId } = await provisionedAdapter([{ output: '第一段输出', emitStop: true }])
@@ -386,6 +474,65 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
       ).rejects.toThrow(/already resumed/)
 
       await adapter.kill(h2)
+    },
+    15000,
+  )
+
+  it(
+    'spawn 命令行不携带 --skip-git-repo-check(该 flag 只注册在 codex exec 子解析器上,m2 实测顶层交互式 codex 没有这个 Option,传了会被 clap usage 错误拒绝),--ask-for-approval/--sandbox 取值合法',
+    async () => {
+      const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+      const stopHookCmd = channel.hookCommand('stop')
+      const argvFile = path.join(dataDir, 'spawn-argv.jsonl')
+      const codexBin = codexBinFor([{ output: '第一段输出', emitStop: true }], stopHookCmd, { argvFile })
+      const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin, sessionDiscoveryTimeoutMs: 500 })
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `codextest-${randomUUID().slice(0, 8)}`
+      const h = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+      await waitForState(adapter, h, 'idle')
+
+      const argv: string[] = JSON.parse((await fs.readFile(argvFile, 'utf-8')).trim().split('\n')[0])
+      expect(argv).not.toContain('--skip-git-repo-check')
+      const approvalIdx = argv.indexOf('--ask-for-approval')
+      expect(approvalIdx).toBeGreaterThan(-1)
+      expect(argv[approvalIdx + 1]).toBe('never')
+      const sandboxIdx = argv.indexOf('--sandbox')
+      expect(sandboxIdx).toBeGreaterThan(-1)
+      expect(['read-only', 'workspace-write', 'danger-full-access']).toContain(argv[sandboxIdx + 1])
+
+      await adapter.kill(h)
+    },
+    15000,
+  )
+
+  it(
+    'resume 命令行不携带 --skip-git-repo-check,--ask-for-approval/--sandbox 放在 resume 子命令之前(放后面 codex 报 usage 错、exit=2,m2 实测)',
+    async () => {
+      const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+      const stopHookCmd = channel.hookCommand('stop')
+      const argvFile = path.join(dataDir, 'resume-argv.jsonl')
+      const codexBin = codexBinFor([{ output: '主线输出', exit: true }], stopHookCmd, { argvFile })
+      const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin, sessionDiscoveryTimeoutMs: 500 })
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `codextest-${randomUUID().slice(0, 8)}`
+      const h1 = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+      await waitForState(adapter, h1, 'exited')
+
+      const meta1 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string }
+      const h2 = await adapter.resume({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '继续')
+      await waitForState(adapter, h2, 'exited')
+
+      const lines = (await fs.readFile(argvFile, 'utf-8')).trim().split('\n')
+      // 第一行是 spawn 主线的 argv,第二行才是 resume 触发的调用。
+      const argv: string[] = JSON.parse(lines[1])
+      expect(argv).not.toContain('--skip-git-repo-check')
+      const resumeIdx = argv.indexOf('resume')
+      expect(resumeIdx).toBeGreaterThan(-1)
+      for (const flag of ['--ask-for-approval', '--sandbox']) {
+        const idx = argv.indexOf(flag)
+        expect(idx).toBeGreaterThan(-1)
+        expect(idx).toBeLessThan(resumeIdx)
+      }
     },
     15000,
   )
@@ -624,6 +771,91 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — spawn 提交纪律', () 
     },
     15000,
   )
+
+  it(
+    'spawn/resume 经 tmux 拉起子进程时,PATH 前置了 codexBin 解析出的真实目录(nvm 部署陷阱:tmux server 自身环境可能解析不到 codex 的 node,m2 实测踩到 "env: node: No such file or directory")',
+    async () => {
+      class RecordingTmuxDriver extends TmuxDriver {
+        lastEnv?: Record<string, string>
+        async newSession(spec: TmuxSessionSpec): Promise<void> {
+          this.lastEnv = spec.env
+          return super.newSession(spec)
+        }
+      }
+      const toolDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-adapter-pathcheck-'))
+      const codexPath = path.join(toolDir, 'codex')
+      // 内容不重要——tmux new-session 本身不校验命令是否存在/能跑,只要 resolveBinDir 能
+      // fs.realpath 出这个文件即可,这里放个立即退出的 sh 脚本。
+      await fs.writeFile(codexPath, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+
+      const tmux = new RecordingTmuxDriver()
+      const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin: codexPath, sessionDiscoveryTimeoutMs: 200 })
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `codextest-${randomUUID().slice(0, 8)}`
+      const spec: SpawnSpec = { worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } }
+
+      // 会话内的假 codex 立即退出,首条 sendText 大概率落空(会话已死)——只关心 newSession
+      // 拿到的 env,spawn 本身是否 reject 不是这条用例的断言点。
+      await adapter.spawn(spec).catch(() => {})
+
+      expect(tmux.lastEnv).toBeDefined()
+      expect(tmux.lastEnv!.PATH).toBe(`${toolDir}:${process.env.PATH ?? ''}`)
+      expect(tmux.lastEnv!.CODEX_HOME).toBe(path.join(workspaceRoot, '.codex'))
+
+      await fs.rm(toolDir, { recursive: true, force: true }).catch(() => {})
+    },
+    15000,
+  )
+
+  it(
+    '五轮 review PoC③:resolveBinDir 首次解析失败(codex 还没装好/PATH 未生效)不永久缓存 undefined——用户随后装好后,同一 adapter 实例下一次 spawn 应重新解析并前置 PATH' +
+      '(修复前:cachedBinDir 固化第一次的 undefined,后续 spawn/resume 永远拿不到前置 PATH,直到 agent 重启才自愈)',
+    async () => {
+      class RecordingTmuxDriver extends TmuxDriver {
+        envs: Array<Record<string, string> | undefined> = []
+        async newSession(spec: TmuxSessionSpec): Promise<void> {
+          this.envs.push(spec.env)
+          return super.newSession(spec)
+        }
+      }
+      const toolDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-adapter-bindir-retry-'))
+      const fakeBinName = `crabot-test-fake-codex-${randomUUID().slice(0, 8)}`
+      await fs.writeFile(path.join(toolDir, fakeBinName), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+
+      const originalPath = process.env.PATH ?? ''
+      const tmux = new RecordingTmuxDriver()
+      // 裸命令名(不含 '/'),命中 resolveBinDir 的 `command -v` 分支——对应真实 nvm 场景
+      // (codex 是 PATH 上的一个命令名,不是绝对路径)。
+      const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin: fakeBinName, sessionDiscoveryTimeoutMs: 200 })
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+
+      try {
+        // 第一次 spawn:toolDir 还不在 PATH 上,`command -v` 找不到,resolveBinDir 解析失败
+        // → 回退到继承的 PATH(不前置任何目录)。
+        const workerId1 = `codextest-${randomUUID().slice(0, 8)}`
+        await adapter.spawn({ worker_id: workerId1, prompt: '你好', workspace: { root: workspaceRoot } }).catch(() => {})
+        expect(tmux.envs[0]).toBeDefined()
+        expect(tmux.envs[0]!.PATH).toBe(originalPath)
+
+        // "用户随后装好了 codex"(如 nvm use / 重新 source shell rc)——把 toolDir 加进 PATH。
+        process.env.PATH = `${toolDir}:${originalPath}`
+
+        // 第二次 spawn,同一个 adapter 实例(不重启进程):resolveBinDir 应重新解析成功并
+        // 前置 toolDir——PATH 里会出现两份 toolDir(一份是本次显式前置,一份已经在继承的
+        // process.env.PATH 里)。修复前:cachedBinDir 固化了第一次的 undefined,PATH 只回退
+        // 到(此时已含 toolDir 的)继承值,只有一份 toolDir,不会再前置——本用例正是靠"一份
+        // 还是两份 toolDir"区分修复前后。
+        const workerId2 = `codextest-${randomUUID().slice(0, 8)}`
+        await adapter.spawn({ worker_id: workerId2, prompt: '你好', workspace: { root: workspaceRoot } }).catch(() => {})
+        expect(tmux.envs[1]).toBeDefined()
+        expect(tmux.envs[1]!.PATH).toBe(`${toolDir}:${process.env.PATH}`)
+      } finally {
+        process.env.PATH = originalPath
+        await fs.rm(toolDir, { recursive: true, force: true }).catch(() => {})
+      }
+    },
+    15000,
+  )
 })
 
 describe('CodexWorkerAdapter.detect', () => {
@@ -644,7 +876,7 @@ describe('CodexWorkerAdapter.detect', () => {
     return `env FAKE_CODEX_VERSION=${shQuote(version)} node ${shQuote(FAKE_CODEX_VERSION)}`
   }
 
-  it('codex 二进制不存在/不可执行 → installed:false, activated:false', async () => {
+  it('codex 二进制不存在/不可执行 → installed:false, activated:false, detail 说"没装"', async () => {
     const adapter = new CodexWorkerAdapter({
       dataDir,
       codexBin: '/nonexistent/codex-bin-does-not-exist-crabot-test',
@@ -652,7 +884,29 @@ describe('CodexWorkerAdapter.detect', () => {
     const result = await adapter.detect()
     expect(result.installed).toBe(false)
     expect(result.activated).toBe(false)
+    expect(result.detail).toContain('not found')
   })
+
+  it(
+    'codex 二进制存在但执行失败(如 shebang 解释器不可解析,nvm 部署形态的常见故障)→ detail 区分"装了但跑不起来",不是"没装"',
+    async () => {
+      const brokenBinDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-adapter-broken-bin-'))
+      const brokenBin = path.join(brokenBinDir, 'codex')
+      await fs.writeFile(brokenBin, '#!/nonexistent-interpreter-xyz-crabot-test\necho hi\n', { mode: 0o755 })
+
+      const adapter = new CodexWorkerAdapter({ dataDir, codexBin: brokenBin })
+      const result = await adapter.detect()
+      expect(result.installed).toBe(false)
+      expect(result.activated).toBe(false)
+      // 区分点在消息前缀,不是"是否含 not found"——底层 shell 报错本身可能也含这个短语
+      // (如 dash 对坏 shebang 报 "not found" 而不是 bash 的 "bad interpreter"),不能拿它
+      // 当区分依据。
+      expect(result.detail).toMatch(/^codex binary found at .+ but failed to execute/)
+      expect(result.detail).toMatch(/node interpreter|unresolved/i)
+
+      await fs.rm(brokenBinDir, { recursive: true, force: true }).catch(() => {})
+    },
+  )
 
   it('codex 已安装且 codexHomeSource 下有 auth.json → installed:true, activated:true', async () => {
     await fs.writeFile(path.join(home, 'auth.json'), '{}', 'utf-8')
@@ -816,6 +1070,48 @@ describe('CodexWorkerAdapter.readTrace', () => {
     const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin: 'unused' })
     await expect(adapter.readTrace({ worker_id: 'nope', seq: 1, impl: 'codex' })).rejects.toThrow()
   })
+
+  it(
+    '五轮 review PoC①:内容 session_id 与文件名 uuid 分歧、重启后新 adapter 实例——findRolloutFileBySessionId 应退一步按内容匹配到同一文件,readTrace 能读到事件' +
+      '(修复前:只按文件名精确匹配,分歧时 rolloutPath 变 undefined,尽管 session_discovery===discovered 且文件明明还在,仍静默返回空数组)',
+    async () => {
+      const tmux = new NoopTmux()
+      const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin: 'unused' })
+      const workerId = `codextest-${randomUUID().slice(0, 8)}`
+
+      // 模拟 spawn 时"内容优先"加固已经生效:meta.session_id 落的是内容里的 uuidFromContent,
+      // 但 rollout 文件名内嵌的仍是 uuidFromFilename(两者分歧,同 adapter.ts 头注释描述的
+      // 竞态/沿用场景)。
+      const uuidFromFilename = randomUUID()
+      const uuidFromContent = randomUUID()
+
+      const now = new Date()
+      const pad = (n: number) => String(n).padStart(2, '0')
+      const datePath = path.join(String(now.getFullYear()), pad(now.getMonth() + 1), pad(now.getDate()))
+      const sessionsDir = path.join(workspaceRoot, '.codex', 'sessions', datePath)
+      await fs.mkdir(sessionsDir, { recursive: true })
+      await fs.writeFile(
+        path.join(sessionsDir, rolloutFileNameFor(uuidFromFilename)),
+        JSON.stringify({ type: 'session_meta', timestamp: '2026-07-30T00:00:00Z', payload: { session_id: uuidFromContent, cli_version: '0.144.1', cwd: workspaceRoot } }) + '\n',
+        'utf-8',
+      )
+
+      // "重启后重建的 meta":session_discovery: 'discovered',session_id 是内容里的权威值。
+      const workerDir = path.join(dataDir, workerId)
+      await fs.mkdir(workerDir, { recursive: true })
+      await fs.writeFile(
+        path.join(workerDir, 'meta-1.json'),
+        JSON.stringify({ seq: 1, state: 'idle', session_id: uuidFromContent, session_discovery: 'discovered', workspace_root: workspaceRoot }),
+        'utf-8',
+      )
+
+      // 新 adapter 实例的 runtimes 为空(模拟重启),ensureRuntime 只能从 meta 重建。
+      const { events } = await adapter.readTrace({ worker_id: workerId, seq: 1, impl: 'codex', session_ref: uuidFromContent })
+      expect(events).toHaveLength(1)
+      expect(events[0]).toMatchObject({ kind: 'lifecycle', role: 'system' })
+      expect(events[0].summary).toContain(uuidFromContent)
+    },
+  )
 })
 
 describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter.readTrace(已发现 rollout 路径)', () => {
@@ -833,23 +1129,47 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter.readTrace(已发现 rollout 
     await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
   })
 
+  // 按 m2 真机实测(codex-cli 0.144.1)的 rollout 信封结构手写:每行 {type, timestamp,
+  // payload},timestamp 在信封顶层(不是嵌进 payload 里)。覆盖五种顶层 type 中的
+  // session_meta/event_msg/response_item/world_state/turn_context,其中后两种应被
+  // readTrace 跳过(不产生事件,但仍计入 nextCursor)。
   function sampleRolloutJsonl(sessionId: string): string {
     const lines = [
-      { type: 'session_meta', payload: { timestamp: '2026-07-29T01:00:00Z', cwd: workspaceRoot, id: sessionId } },
+      {
+        type: 'session_meta',
+        timestamp: '2026-07-30T01:00:00Z',
+        payload: { session_id: sessionId, cli_version: '0.144.1', cwd: workspaceRoot, model_provider: 'openai', context_window: 200000, originator: 'cli' },
+      },
+      { type: 'turn_context', timestamp: '2026-07-30T01:00:01Z', payload: { model: 'gpt-5.5', effort: 'medium', cwd: workspaceRoot, approval_policy: 'never' } },
       {
         type: 'response_item',
+        timestamp: '2026-07-30T01:00:02Z',
+        payload: { type: 'message', role: 'developer', content: [{ type: 'input_text', text: '你是 crabot 的 worker。' }] },
+      },
+      {
+        type: 'response_item',
+        timestamp: '2026-07-30T01:00:03Z',
         payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '这个函数为什么会抛 TypeError?' }] },
       },
-      { type: 'response_item', payload: { type: 'function_call', name: 'shell', call_id: 'call_1', arguments: '{"command":["cat","x.ts"]}' } },
-      { type: 'response_item', payload: { type: 'function_call_output', call_id: 'call_1', output: '文件内容摘要' } },
-      { type: 'response_item', payload: { type: 'reasoning', summary: [{ text: '先看文件再判断' }] } },
       {
         type: 'response_item',
+        timestamp: '2026-07-30T01:00:04Z',
+        payload: { type: 'function_call', name: 'shell', call_id: 'call_1', arguments: '{"command":["cat","x.ts"]}' },
+      },
+      { type: 'response_item', timestamp: '2026-07-30T01:00:05Z', payload: { type: 'function_call_output', call_id: 'call_1', output: '文件内容摘要' } },
+      { type: 'response_item', timestamp: '2026-07-30T01:00:06Z', payload: { type: 'reasoning', summary: [{ text: '先看文件再判断' }] } },
+      {
+        type: 'response_item',
+        timestamp: '2026-07-30T01:00:07Z',
         payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '问题在于第 12 行没有判空。' }] },
       },
-      { type: 'event_msg', payload: { type: 'turn_complete' } },
-      { type: 'turn_context', payload: { model: 'gpt-5.5' } },
-      { type: 'response_item', payload: { type: 'web_search_call', query: 'typescript typeerror' } },
+      {
+        type: 'event_msg',
+        timestamp: '2026-07-30T01:00:08Z',
+        payload: { type: 'turn_complete', turn_id: 'turn_1', started_at: '2026-07-30T01:00:00Z', model_context_window: 200000 },
+      },
+      { type: 'world_state', timestamp: '2026-07-30T01:00:09Z', payload: { full: true, state: {} } },
+      { type: 'response_item', timestamp: '2026-07-30T01:00:10Z', payload: { type: 'web_search_call', query: 'typescript typeerror' } },
     ]
     return lines.map((l) => JSON.stringify(l)).join('\n') + '\nnot valid json{{{\n'
   }
@@ -879,30 +1199,37 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter.readTrace(已发现 rollout 
     await fs.writeFile(rolloutFile, sampleRolloutJsonl(rolloutUuid), 'utf-8')
 
     const { events, nextCursor } = await adapter.readTrace(h)
-    expect(events).toHaveLength(7)
-    expect(events[0]).toMatchObject({ kind: 'lifecycle', role: 'system' })
-    expect(events[1]).toMatchObject({ kind: 'message', role: 'user' })
-    expect(events[1].summary).toContain('这个函数为什么会抛 TypeError?')
-    expect(events[2]).toMatchObject({ kind: 'tool_call', role: 'assistant' })
-    expect(events[2].summary).toContain('shell')
-    expect(events[3]).toMatchObject({ kind: 'tool_result' })
-    expect(events[3].summary).toContain('文件内容摘要')
-    expect(events[3].role).toBeUndefined()
-    expect(events[4]).toMatchObject({ kind: 'thinking', role: 'assistant' })
-    expect(events[4].summary).toContain('先看文件再判断')
-    expect(events[5]).toMatchObject({ kind: 'message', role: 'assistant' })
-    expect(events[5].summary).toContain('问题在于第 12 行没有判空。')
-    expect(events[6]).toMatchObject({ kind: 'lifecycle', role: 'system', summary: 'turn_complete' })
-    // 原始行数是 10(7 条产生事件 + turn_context/web_search_call 两条未识别子类型跳过 +
-    // 1 条坏 JSON 跳过),nextCursor 必须计入被跳过的行,不能等于 events.length。
-    expect(nextCursor.offset).toBe(10)
+    // 11 行原始数据(session_meta/turn_context/developer msg/user msg/function_call/
+    // function_call_output/reasoning/assistant msg/event_msg/world_state/web_search_call)
+    // + 1 条坏 JSON = 12 行;turn_context/world_state/web_search_call(未识别子类型)/坏
+    // JSON 四条跳过,产生 8 条事件。
+    expect(events).toHaveLength(8)
+    expect(events[0]).toMatchObject({ kind: 'lifecycle', role: 'system', ts: '2026-07-30T01:00:00Z' })
+    expect(events[0].summary).toContain(rolloutUuid)
+    expect(events[0].summary).toContain('0.144.1')
+    // developer role 映射为协议允许的 'system'(NormalizedTraceEvent.role 不含 'developer')。
+    expect(events[1]).toMatchObject({ kind: 'message', role: 'system', ts: '2026-07-30T01:00:02Z' })
+    expect(events[1].summary).toBe('你是 crabot 的 worker。')
+    expect(events[2]).toMatchObject({ kind: 'message', role: 'user' })
+    expect(events[2].summary).toContain('这个函数为什么会抛 TypeError?')
+    expect(events[3]).toMatchObject({ kind: 'tool_call', role: 'assistant' })
+    expect(events[3].summary).toContain('shell')
+    expect(events[4]).toMatchObject({ kind: 'tool_result' })
+    expect(events[4].summary).toContain('文件内容摘要')
+    expect(events[4].role).toBeUndefined()
+    expect(events[5]).toMatchObject({ kind: 'thinking', role: 'assistant' })
+    expect(events[5].summary).toContain('先看文件再判断')
+    expect(events[6]).toMatchObject({ kind: 'message', role: 'assistant' })
+    expect(events[6].summary).toContain('问题在于第 12 行没有判空。')
+    expect(events[7]).toMatchObject({ kind: 'lifecycle', role: 'system', summary: 'turn_complete', ts: '2026-07-30T01:00:08Z' })
+    expect(nextCursor.offset).toBe(12)
 
-    const partial = await adapter.readTrace(h, { offset: 4 })
+    const partial = await adapter.readTrace(h, { offset: 6 })
     expect(partial.events).toHaveLength(3)
     expect(partial.events[0].kind).toBe('thinking')
     expect(partial.events[1].kind).toBe('message')
     expect(partial.events[2].kind).toBe('lifecycle')
-    expect(partial.nextCursor.offset).toBe(10)
+    expect(partial.nextCursor.offset).toBe(12)
 
     await adapter.kill(h)
   }, 15000)

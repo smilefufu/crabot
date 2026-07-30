@@ -1,6 +1,15 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-29 — Manager/Worker 拆分 P3：台账与 harness（PR 待合并）
+> 最后更新：2026-07-30 — codex adapter 真机校准（PR 待合并）
+
+## 2026-07-30 — codex adapter 真机校准（部署机 m2，codex-cli 0.144.1）
+
+- 背景：P2 的 codex adapter 是"照文档/源码实现"，8 项待真机校准。本次在部署机 m2 上用隔离 `CODEX_HOME` 探针实测（不动生产实例与用户 `~/.codex`，探针目录已清理）。
+- 修复四项：① session 发现优先读 rollout 首行的 `session_meta.payload.session_id`（权威）而非文件名解析；② nvm 部署陷阱——codex 常是 nvm 装的 node 脚本，adapter 经 tmux 拉起时须把 codex 二进制所在目录前置进 PATH，否则必报 `env: node: No such file or directory`（实测踩到），`detect()` 也区分"没装"与"装了但 node 不可解析"；③ 交互态命令参数校正（见下）；④ `readTrace` 按真实 rollout 结构校准（统一信封 `{type,timestamp,payload}`，五类 type，消息在 `response_item` 按 `payload.role` 分、assistant 用 `output_text`）。
+- **一次自我纠错**：中途误把 `codex exec` 路径的实测结论（`--skip-git-repo-check`、选项顺序）套用到 adapter 实际驱动的交互式顶层命令，给 spawn/resume 加了顶层不存在的 flag——那会让真机 100% usage 错误退出，比修之前更糟。评审拦下后回 m2 用 `--help` 确证顶层选项清单，改为不传该 flag、并用 config.toml 的 `[projects."<path>"] trust_level = "trusted"` 授信 workspace。
+- 另一次纠错：曾据 `codex fork` 子命令存在而宣称"P2 判错了"，实测证明 `exec resume` 无论加不加 `--ephemeral` 都是续写原会话（rollout 持续增长、总数不变），codex 确无 headless fork——`capabilities().fork = false` 与协议表述原本就正确。
+- 协议同步：§6.1 新增"codex 的 session 发现是限时轮询"已知限制（超时退化占位 id 会使该化身 resume/readTrace 不可用）。
+- 验证：tests/workers 349 用例全绿、tsc 干净。
 
 ## 2026-07-29 — Manager/Worker 拆分 P3：台账与 harness
 
