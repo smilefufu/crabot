@@ -109,9 +109,9 @@
  *
  * ## readTrace
  *
- * 解析 `<CODEX_HOME>/sessions/.../rollout-*.jsonl`,字段依据 codex-rs 源码抓取确认(见各
- * 归一化函数内的 codex-docs 注释),fixture 手工构造,真机校准留待安装。rolloutPath 经
- * ensureRuntime 从 meta 的 workspace_root + session_discovery 字段(四轮 review 新增持久化)
+ * 解析 `<CODEX_HOME>/sessions/.../rollout-*.jsonl`,信封结构与五种顶层 type 的字段形状已按
+ * m2 真机实测校准(见 normalizeRolloutLine 注释),测试 fixture 按实测字段手写。rolloutPath
+ * 经 ensureRuntime 从 meta 的 workspace_root + session_discovery 字段(四轮 review 新增持久化)
  * 重新按 session_id 精确查找重建,不再要求"只能对本进程内常驻 runtime 的化身调用"(同 cc)。
  */
 import { promises as fs, type Dirent } from 'fs'
@@ -1010,94 +1010,107 @@ function truncate(text: string, max: number): string {
 /**
  * 归一化单行 codex rollout JSONL 为 NormalizedTraceEvent。
  *
- * codex-docs: 每行外层是 `{"type": ..., "payload": ...}`(codex-rs/protocol/src/protocol.rs
- * 的 `RolloutItem` 枚举 `#[serde(tag = "type", content = "payload", rename_all =
- * "snake_case")]` 确认),顶层 type 取值 session_meta / response_item / event_msg /
- * turn_context / world_state / compacted / inter_agent_communication /
- * inter_agent_communication_metadata——只有前三种映射为 trace 事件,其余跳过,同 cc 对
- * mode/summary/queue-operation 的处理方式(不认识的行归一化为 null,readTrace 跳过)。
+ * m2 真机实测(codex-cli 0.144.1)校准的信封结构:每行是 `{type, timestamp, payload}`
+ * (`timestamp` 挂在信封顶层,不是嵌在 payload 里——之前按 codex-docs 猜测的字段位置是错的,
+ * 这里已按实测改正),顶层 type 取值 session_meta / event_msg / response_item / world_state /
+ * turn_context 五种(未见 compacted/inter_agent_communication* 之类的推测类型):
+ *
+ * - `session_meta`:payload 有 `session_id`(权威,比文件名解析出的 uuid 更可靠,见 spawn()
+ *   的"session 发现"节)、`cli_version`、`cwd`、`model_provider`、`context_window`、
+ *   `originator`——映射为 lifecycle。
+ * - `event_msg`:payload 有 `type`(如 `task_started`)、`turn_id`、`started_at`、
+ *   `model_context_window`——映射为 lifecycle,摘要取 payload.type。
+ * - `response_item`:见 normalizeResponseItem()。
+ * - `world_state`:payload 是全量状态快照(`full`/`state`),对"发生了什么"的摘要时间线没有
+ *   直接信息量(它是状态,不是事件),跳过——需要全量状态可以直接读原始 rollout 文件
+ *   (detail 只保留 response_item/event_msg/session_meta 各自的 payload,不代表 world_state
+ *   不存在,只是不进这条摘要时间线)。
+ * - `turn_context`:payload 是回合配置(`model`/`effort`/`cwd`/`approval_policy`/`summary`
+ *   等),同样不是"发生的事",跳过。
  */
 function normalizeRolloutLine(line: string): NormalizedTraceEvent | null {
-  let parsed: { type?: unknown; payload?: unknown }
+  let parsed: { type?: unknown; timestamp?: unknown; payload?: unknown }
   try {
     parsed = JSON.parse(line)
   } catch {
     return null
   }
   if (!parsed || typeof parsed !== 'object') return null
+  const ts = typeof parsed.timestamp === 'string' ? parsed.timestamp : ''
   const payload = parsed.payload as Record<string, unknown> | undefined
 
   if (parsed.type === 'session_meta') {
-    const meta = payload as { timestamp?: string; cwd?: string } | undefined
-    const ts = typeof meta?.timestamp === 'string' ? meta.timestamp : ''
-    return { ts, kind: 'lifecycle', role: 'system', summary: truncate(`session_meta cwd=${meta?.cwd ?? ''}`, 200), detail: payload }
+    const meta = payload as { session_id?: string; cli_version?: string; cwd?: string } | undefined
+    const summary = `session_meta session_id=${meta?.session_id ?? ''} cli_version=${meta?.cli_version ?? ''} cwd=${meta?.cwd ?? ''}`
+    return { ts, kind: 'lifecycle', role: 'system', summary: truncate(summary, 200), detail: payload }
   }
 
   if (parsed.type === 'event_msg') {
-    // codex-docs: EventMsg 是内部 tag(`#[serde(tag = "type", rename_all = "snake_case")]`,
-    // 字段直接铺在 payload 里,不像 RolloutItem 那样外套一层 content),取 payload.type 当摘要。
     const eventType = typeof payload?.type === 'string' ? payload.type : 'event_msg'
-    return { ts: '', kind: 'lifecycle', role: 'system', summary: eventType, detail: payload }
+    return { ts, kind: 'lifecycle', role: 'system', summary: eventType, detail: payload }
   }
 
   if (parsed.type === 'response_item') {
-    return normalizeResponseItem(payload)
+    return normalizeResponseItem(payload, ts)
   }
 
+  // world_state/turn_context(以及其它未在真机实测里见过的顶层 type)跳过,见函数头注释。
   return null
 }
 
 /**
- * response_item 的 payload 同样是内部 tag(codex-rs/protocol/src/models.rs 的 `ResponseItem`
- * 枚举 `#[serde(tag = "type", rename_all = "snake_case")]`)。这里只认领已从源码确认字段形状
- * 的四种子类型(message/function_call/function_call_output/reasoning);其余子类型
- * (agent_message/local_shell_call/web_search_call/custom_tool_call/...)未逐一核实字段,
- * 跳过而非猜测映射。
+ * response_item 的 payload 同样是内部 tag(`type` 字段区分子类型)。这里只认领已从 m2 真机
+ * 实测或源码确认字段形状的四种子类型(message/function_call/function_call_output/
+ * reasoning);其余子类型(local_shell_call/web_search_call/custom_tool_call/...)未逐一
+ * 核实字段,跳过而非猜测映射。
  */
-function normalizeResponseItem(payload: Record<string, unknown> | undefined): NormalizedTraceEvent | null {
+function normalizeResponseItem(payload: Record<string, unknown> | undefined, ts: string): NormalizedTraceEvent | null {
   if (!payload || typeof payload.type !== 'string') return null
 
   if (payload.type === 'message') {
+    // m2 实测:role 取值 developer/user/assistant(developer 是 codex 侧的系统级指令角色,
+    // 语义上对应我们协议里的 'system',见 types.ts 的 NormalizedTraceEvent.role 只允许
+    // assistant/user/system 三种,不新增 'developer' 这个协议外的值)。summary 只取 content
+    // 里第一个 input_text/output_text 块的 text(不是拼接全部块),截断。
     const role = payload.role
-    const text = extractContentItemsText(payload.content)
-    return {
-      ts: '',
-      kind: 'message',
-      role: role === 'user' || role === 'assistant' || role === 'system' ? role : undefined,
-      summary: truncate(text, 200),
-      detail: payload,
-    }
+    const mappedRole = role === 'developer' ? 'system' : role === 'user' || role === 'assistant' || role === 'system' ? role : undefined
+    const text = extractFirstContentText(payload.content)
+    return { ts, kind: 'message', role: mappedRole, summary: truncate(text, 200), detail: payload }
   }
 
   if (payload.type === 'function_call') {
     const name = typeof payload.name === 'string' ? payload.name : ''
     const args = typeof payload.arguments === 'string' ? payload.arguments : ''
-    return { ts: '', kind: 'tool_call', role: 'assistant', summary: truncate(`${name}(${args})`, 200), detail: payload }
+    return { ts, kind: 'tool_call', role: 'assistant', summary: truncate(`${name}(${args})`, 200), detail: payload }
   }
 
   if (payload.type === 'function_call_output') {
-    // codex-docs: FunctionCallOutput 在 ResponseItem 枚举里没有 role 字段(models.rs),不像
-    // cc 的 tool_result 挂在 role=user 的消息体里——role 留空(undefined)。
+    // codex-docs: FunctionCallOutput 在 ResponseItem 枚举里没有 role 字段,不像 cc 的
+    // tool_result 挂在 role=user 的消息体里——role 留空(undefined)。
     const output = payload.output
-    return { ts: '', kind: 'tool_result', summary: truncate(typeof output === 'string' ? output : JSON.stringify(output ?? {}), 200), detail: payload }
+    return { ts, kind: 'tool_result', summary: truncate(typeof output === 'string' ? output : JSON.stringify(output ?? {}), 200), detail: payload }
   }
 
   if (payload.type === 'reasoning') {
     const text = extractReasoningSummaryText(payload.summary)
-    return { ts: '', kind: 'thinking', role: 'assistant', summary: truncate(text, 200), detail: payload }
+    return { ts, kind: 'thinking', role: 'assistant', summary: truncate(text, 200), detail: payload }
   }
 
   return null
 }
 
-/** ContentItem 数组:只取 input_text/output_text 块的 text 拼接,跳过 input_image/input_audio。 */
-function extractContentItemsText(content: unknown): string {
+/** ContentItem 数组:取第一个 input_text/output_text 块的 text(m2 实测口径:summary 只要
+ * "第一个",不是拼接全部块;跳过 input_image/input_audio 等非文本块)。 */
+function extractFirstContentText(content: unknown): string {
   if (!Array.isArray(content)) return ''
-  return content
-    .filter((item): item is { type: string; text?: string } => !!item && typeof item === 'object' && typeof (item as { type?: unknown }).type === 'string')
-    .filter((item) => item.type === 'input_text' || item.type === 'output_text')
-    .map((item) => item.text ?? '')
-    .join('\n')
+  const item = content.find(
+    (it): it is { type: string; text?: string } =>
+      !!it &&
+      typeof it === 'object' &&
+      typeof (it as { type?: unknown }).type === 'string' &&
+      ((it as { type: string }).type === 'input_text' || (it as { type: string }).type === 'output_text'),
+  )
+  return item?.text ?? ''
 }
 
 // codex-docs: ReasoningItemReasoningSummary 的具体字段未在本次源码抓取范围内逐一核实,这里

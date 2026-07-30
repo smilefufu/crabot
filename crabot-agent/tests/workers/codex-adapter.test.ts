@@ -982,23 +982,47 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter.readTrace(已发现 rollout 
   // payload},timestamp 在信封顶层(不是嵌进 payload 里)。覆盖五种顶层 type 中的
   // session_meta/event_msg/response_item/world_state/turn_context,其中后两种应被
   // readTrace 跳过(不产生事件,但仍计入 nextCursor)。
+  // 按 m2 真机实测(codex-cli 0.144.1)的 rollout 信封结构手写:每行 {type, timestamp,
+  // payload},timestamp 在信封顶层(不是嵌进 payload 里)。覆盖五种顶层 type 中的
+  // session_meta/event_msg/response_item/world_state/turn_context,其中后两种应被
+  // readTrace 跳过(不产生事件,但仍计入 nextCursor)。
   function sampleRolloutJsonl(sessionId: string): string {
     const lines = [
-      { type: 'session_meta', payload: { timestamp: '2026-07-29T01:00:00Z', cwd: workspaceRoot, id: sessionId } },
+      {
+        type: 'session_meta',
+        timestamp: '2026-07-30T01:00:00Z',
+        payload: { session_id: sessionId, cli_version: '0.144.1', cwd: workspaceRoot, model_provider: 'openai', context_window: 200000, originator: 'cli' },
+      },
+      { type: 'turn_context', timestamp: '2026-07-30T01:00:01Z', payload: { model: 'gpt-5.5', effort: 'medium', cwd: workspaceRoot, approval_policy: 'never' } },
       {
         type: 'response_item',
+        timestamp: '2026-07-30T01:00:02Z',
+        payload: { type: 'message', role: 'developer', content: [{ type: 'input_text', text: '你是 crabot 的 worker。' }] },
+      },
+      {
+        type: 'response_item',
+        timestamp: '2026-07-30T01:00:03Z',
         payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '这个函数为什么会抛 TypeError?' }] },
       },
-      { type: 'response_item', payload: { type: 'function_call', name: 'shell', call_id: 'call_1', arguments: '{"command":["cat","x.ts"]}' } },
-      { type: 'response_item', payload: { type: 'function_call_output', call_id: 'call_1', output: '文件内容摘要' } },
-      { type: 'response_item', payload: { type: 'reasoning', summary: [{ text: '先看文件再判断' }] } },
       {
         type: 'response_item',
+        timestamp: '2026-07-30T01:00:04Z',
+        payload: { type: 'function_call', name: 'shell', call_id: 'call_1', arguments: '{"command":["cat","x.ts"]}' },
+      },
+      { type: 'response_item', timestamp: '2026-07-30T01:00:05Z', payload: { type: 'function_call_output', call_id: 'call_1', output: '文件内容摘要' } },
+      { type: 'response_item', timestamp: '2026-07-30T01:00:06Z', payload: { type: 'reasoning', summary: [{ text: '先看文件再判断' }] } },
+      {
+        type: 'response_item',
+        timestamp: '2026-07-30T01:00:07Z',
         payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '问题在于第 12 行没有判空。' }] },
       },
-      { type: 'event_msg', payload: { type: 'turn_complete' } },
-      { type: 'turn_context', payload: { model: 'gpt-5.5' } },
-      { type: 'response_item', payload: { type: 'web_search_call', query: 'typescript typeerror' } },
+      {
+        type: 'event_msg',
+        timestamp: '2026-07-30T01:00:08Z',
+        payload: { type: 'turn_complete', turn_id: 'turn_1', started_at: '2026-07-30T01:00:00Z', model_context_window: 200000 },
+      },
+      { type: 'world_state', timestamp: '2026-07-30T01:00:09Z', payload: { full: true, state: {} } },
+      { type: 'response_item', timestamp: '2026-07-30T01:00:10Z', payload: { type: 'web_search_call', query: 'typescript typeerror' } },
     ]
     return lines.map((l) => JSON.stringify(l)).join('\n') + '\nnot valid json{{{\n'
   }
@@ -1028,30 +1052,37 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter.readTrace(已发现 rollout 
     await fs.writeFile(rolloutFile, sampleRolloutJsonl(rolloutUuid), 'utf-8')
 
     const { events, nextCursor } = await adapter.readTrace(h)
-    expect(events).toHaveLength(7)
-    expect(events[0]).toMatchObject({ kind: 'lifecycle', role: 'system' })
-    expect(events[1]).toMatchObject({ kind: 'message', role: 'user' })
-    expect(events[1].summary).toContain('这个函数为什么会抛 TypeError?')
-    expect(events[2]).toMatchObject({ kind: 'tool_call', role: 'assistant' })
-    expect(events[2].summary).toContain('shell')
-    expect(events[3]).toMatchObject({ kind: 'tool_result' })
-    expect(events[3].summary).toContain('文件内容摘要')
-    expect(events[3].role).toBeUndefined()
-    expect(events[4]).toMatchObject({ kind: 'thinking', role: 'assistant' })
-    expect(events[4].summary).toContain('先看文件再判断')
-    expect(events[5]).toMatchObject({ kind: 'message', role: 'assistant' })
-    expect(events[5].summary).toContain('问题在于第 12 行没有判空。')
-    expect(events[6]).toMatchObject({ kind: 'lifecycle', role: 'system', summary: 'turn_complete' })
-    // 原始行数是 10(7 条产生事件 + turn_context/web_search_call 两条未识别子类型跳过 +
-    // 1 条坏 JSON 跳过),nextCursor 必须计入被跳过的行,不能等于 events.length。
-    expect(nextCursor.offset).toBe(10)
+    // 11 行原始数据(session_meta/turn_context/developer msg/user msg/function_call/
+    // function_call_output/reasoning/assistant msg/event_msg/world_state/web_search_call)
+    // + 1 条坏 JSON = 12 行;turn_context/world_state/web_search_call(未识别子类型)/坏
+    // JSON 四条跳过,产生 8 条事件。
+    expect(events).toHaveLength(8)
+    expect(events[0]).toMatchObject({ kind: 'lifecycle', role: 'system', ts: '2026-07-30T01:00:00Z' })
+    expect(events[0].summary).toContain(rolloutUuid)
+    expect(events[0].summary).toContain('0.144.1')
+    // developer role 映射为协议允许的 'system'(NormalizedTraceEvent.role 不含 'developer')。
+    expect(events[1]).toMatchObject({ kind: 'message', role: 'system', ts: '2026-07-30T01:00:02Z' })
+    expect(events[1].summary).toBe('你是 crabot 的 worker。')
+    expect(events[2]).toMatchObject({ kind: 'message', role: 'user' })
+    expect(events[2].summary).toContain('这个函数为什么会抛 TypeError?')
+    expect(events[3]).toMatchObject({ kind: 'tool_call', role: 'assistant' })
+    expect(events[3].summary).toContain('shell')
+    expect(events[4]).toMatchObject({ kind: 'tool_result' })
+    expect(events[4].summary).toContain('文件内容摘要')
+    expect(events[4].role).toBeUndefined()
+    expect(events[5]).toMatchObject({ kind: 'thinking', role: 'assistant' })
+    expect(events[5].summary).toContain('先看文件再判断')
+    expect(events[6]).toMatchObject({ kind: 'message', role: 'assistant' })
+    expect(events[6].summary).toContain('问题在于第 12 行没有判空。')
+    expect(events[7]).toMatchObject({ kind: 'lifecycle', role: 'system', summary: 'turn_complete', ts: '2026-07-30T01:00:08Z' })
+    expect(nextCursor.offset).toBe(12)
 
-    const partial = await adapter.readTrace(h, { offset: 4 })
+    const partial = await adapter.readTrace(h, { offset: 6 })
     expect(partial.events).toHaveLength(3)
     expect(partial.events[0].kind).toBe('thinking')
     expect(partial.events[1].kind).toBe('message')
     expect(partial.events[2].kind).toBe('lifecycle')
-    expect(partial.nextCursor.offset).toBe(10)
+    expect(partial.nextCursor.offset).toBe(12)
 
     await adapter.kill(h)
   }, 15000)
