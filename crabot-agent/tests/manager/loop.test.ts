@@ -201,6 +201,117 @@ describe('ManagerLoop', () => {
     expect(serialized).toContain('新的话') // 本次新事件
   })
 
+  it('episode 失败:mid-episode 注入且已被 engine drain 消费的内容不丢失,下次唤醒仍被投递', async () => {
+    const { adapter, queue } = makeAdapter()
+    // turn1:调用工具(工具执行期间 enqueueDuringEpisode 注入一条新事件,强制进入第二轮)
+    queue.push({ toolCalls: [{ name: 'noop_tool', id: 'call_1', input: {} }], stopReason: 'tool_use' })
+
+    let loop!: ManagerLoop
+    let nonFoldCallCount = 0
+    let turn2Messages: EngineMessage[] | undefined
+    // turn2 起飞前 engine 已经把 mid-episode 注入的内容 drainPending() 进了 messages——
+    // 这里先记录下 turn2 实际看到的 messages(证明"确实被消费过"),再让这次 LLM 调用抛错,
+    // 模拟"消费之后才失败"这个组合场景(evidence:turn1 不抛错,turn2 抛错)。
+    const throwOnTurn2: LLMAdapter = {
+      async *stream(params) {
+        if (params.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER)) {
+          yield* adapter.stream(params)
+          return
+        }
+        nonFoldCallCount++
+        if (nonFoldCallCount === 2) {
+          turn2Messages = [...params.messages]
+          throw new Error('boom: simulated failure after drain')
+        }
+        yield* adapter.stream(params)
+      },
+      updateConfig: () => {},
+    }
+
+    const deps = baseDeps({
+      store,
+      adapter: throwOnTurn2,
+      toolFace: () => [
+        {
+          name: 'noop_tool',
+          description: 'noop',
+          inputSchema: { type: 'object', properties: {} },
+          isReadOnly: false,
+          call: async () => {
+            loop.enqueueDuringEpisode({ kind: 'schedule', scheduleId: 'sched-fail', title: '巡检', description: '失败前注入的事件' })
+            return { output: 'ok', isError: false }
+          },
+        },
+      ],
+    })
+    loop = new ManagerLoop(deps)
+
+    const first = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('开始任务')] })
+    expect(first.outcome).toBe('failed')
+    expect(first.consumedEvents).toBe(false)
+
+    // 证明确实被消费过(不是"从未被消费"这种平凡情形):turn2 的请求里能看到注入内容
+    expect(turn2Messages).toBeDefined()
+    expect(JSON.stringify(turn2Messages)).toContain('sched-fail')
+
+    // session 不应该把这次失败的内容当成"已处理"落盘
+    const stateAfterFailure = await store.load(KEY)
+    expect(stateAfterFailure.recent.length).toBe(0)
+
+    // 下次唤醒(不同的新事件):mid-episode 注入的内容应随邮箱一起重投,被 LLM 看到并落盘
+    queue.push({ text: '正常处理', stopReason: 'end_turn' })
+    const second = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('新的话')] })
+    expect(second.outcome).toBe('completed')
+    expect(second.consumedEvents).toBe(true)
+
+    const finalState = await store.load(KEY)
+    const serialized = JSON.stringify(finalState.recent)
+    expect(serialized).toContain('sched-fail')
+    expect(serialized).toContain('失败前注入的事件')
+    expect(serialized).toContain('新的话')
+  })
+
+  it('episode 成功:mid-episode 注入的内容已被消费进历史,下次唤醒不会重复投递', async () => {
+    const { adapter, queue, calls } = makeAdapter()
+    // turn1:调用工具(工具执行期间注入一条新事件,强制进入第二轮);turn2:正常结束
+    queue.push({ toolCalls: [{ name: 'noop_tool', id: 'call_1', input: {} }], stopReason: 'tool_use' })
+    queue.push({ text: '已处理完毕', stopReason: 'end_turn' })
+    queue.push({ text: '第二次唤醒的回复', stopReason: 'end_turn' })
+
+    let loop!: ManagerLoop
+    const deps = baseDeps({
+      store,
+      adapter,
+      toolFace: () => [
+        {
+          name: 'noop_tool',
+          description: 'noop',
+          inputSchema: { type: 'object', properties: {} },
+          isReadOnly: false,
+          call: async () => {
+            loop.enqueueDuringEpisode({ kind: 'schedule', scheduleId: 'sched-ok', title: '巡检', description: '成功路径注入' })
+            return { output: 'ok', isError: false }
+          },
+        },
+      ],
+    })
+    loop = new ManagerLoop(deps)
+
+    const first = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('开始任务')] })
+    expect(first.outcome).toBe('completed')
+    expect(first.consumedEvents).toBe(true)
+
+    const second = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('新的话')] })
+    expect(second.outcome).toBe('completed')
+
+    // 第二次唤醒发给 LLM 的 messages 里,'sched-ok' 只应该出现一次(第一次 episode 成功时
+    // 已经消费进 state.recent、作为历史的一部分带入;不应该被再重投一遍变成两次)。
+    const nonFoldCalls = calls.filter((c) => !c.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER))
+    const secondWakeCall = nonFoldCalls[nonFoldCalls.length - 1]
+    const occurrences = (JSON.stringify(secondWakeCall.messages).match(/sched-ok/g) ?? []).length
+    expect(occurrences).toBe(1)
+  })
+
   it('episode 进行中 enqueueDuringEpisode 的事件经 humanMessageQueue 在 turn 间隙注入,第二轮 LLM 可见', async () => {
     const { adapter, queue, calls } = makeAdapter()
     // turn1:调用一个工具(强制进入第二轮);turn2:正常结束

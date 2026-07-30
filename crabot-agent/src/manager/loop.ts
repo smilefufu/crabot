@@ -108,6 +108,16 @@ export class ManagerLoop {
    *   "至少一次投递"对两种时机是同一套代码路径,不需要再维护一份独立的 pending 队列。
    */
   private readonly mailbox = new HumanMessageQueue()
+  /**
+   * 非 null 期间表示"当前正有一个 episode 在跑",记录本次 episode 期间所有经
+   * `enqueueDuringEpisode` 推进 mailbox 的原始文本(按到达顺序)。episode 失败时,
+   * 其中已被 engine `drainPending()` 消费进(随失败一起被丢弃的)`finalMessages` 的那部分
+   * 内容不会再留在 mailbox 里——必须靠这份记录才能连同 carriedTexts/eventText 一起重投,
+   * 否则永久丢失(见 runEpisode 失败分支)。episode 成功时整份丢弃,不重投(已被消费进
+   * 保存的 state.recent,重投会变成重复投递)。episode 未在跑时为 null,enqueueDuringEpisode
+   * 不记录——那时 mailbox 只是普通 pending 队列,靠下次 wakeUp 顶部的 drainPending 自然带走。
+   */
+  private currentEpisodeInjected: string[] | null = null
 
   constructor(deps: ManagerLoopDeps) {
     this.deps = deps
@@ -121,14 +131,29 @@ export class ManagerLoop {
   /** episode 进行中到达的新事件:渲染成文本推进内部邮箱,由 engine 的 humanMessageQueue
    *  在 turn 间隙注入;episode 不在跑时同样入队,行为见 `mailbox` 字段注释。 */
   enqueueDuringEpisode(event: WakeEvent): void {
-    this.mailbox.push(renderWakeEvent(event))
+    const text = renderWakeEvent(event)
+    this.mailbox.push(text)
+    this.currentEpisodeInjected?.push(text)
   }
 
   private async runEpisode(event: WakeEvent): Promise<EpisodeResult> {
     const episodeId = randomUUID()
     const carriedTexts = this.mailbox.drainPending().map(toText)
     const eventText = renderWakeEvent(event)
+    this.currentEpisodeInjected = []
 
+    try {
+      return await this.runEpisodeBody(episodeId, carriedTexts, eventText)
+    } finally {
+      this.currentEpisodeInjected = null
+    }
+  }
+
+  private async runEpisodeBody(
+    episodeId: string,
+    carriedTexts: ReadonlyArray<string>,
+    eventText: string,
+  ): Promise<EpisodeResult> {
     let state = await this.deps.store.load(this.deps.key)
     const nowMs = this.deps.now().getTime()
 
@@ -153,6 +178,17 @@ export class ManagerLoop {
 
     // max_tokens 兜底(§4.2):disableCompaction 关掉了 engine 自己的强压重试路径,
     // 这里识别到"上下文超限收场"时强制 force_hot 折叠一次并重试一次,仍失败就放弃。
+    //
+    // mid-episode 注入与这条重试路径的交互(想清楚过,记录结论):重试用的 initialMessages
+    // 是 `state.recent`(源自对 tailMessages 的折叠),不是首次尝试 attempt 的
+    // finalMessages——首次尝试期间跑过的轮次(包括它期间被 engine drainPending() 消费掉的
+    // mid-episode 注入内容)整体被丢弃,不参与折叠、也不会出现在重试的 initialMessages 里。
+    // 若那部分内容在首次尝试结束时仍原样躺在 mailbox.pending 里(未被消费),它会像
+    // 普通 pending 内容一样自然流入重试(同一个 `this.mailbox` 实例),不丢不重复;若已被
+    // 首次尝试消费掉,则只有在整个 episode 最终仍以失败收场时,才会经由
+    // `currentEpisodeInjected` 被下方失败分支追回重投——如果重试反而成功了,这部分"首次
+    // 尝试期间被消费掉"的内容目前没有路径找回,是本设计已知的残留缺口(概率很低:要求首次
+    // 尝试在触发 max_tokens 前已经跑过多轮且期间发生过 mid-episode 注入),不在本次修复范围。
     if (isContextOverflow(attempt.result)) {
       const forceDecision = forceHotFold({ ...state, recent: tailMessages }, this.deps.policy, this.deps.estimateTokens, nowMs)
       if (forceDecision.kind !== 'none') {
@@ -177,10 +213,22 @@ export class ManagerLoop {
       state = { ...state, recent: newRecent, lastActiveAt: this.deps.now().toISOString() }
       await this.deps.store.save(state)
     } else {
-      // 放弃 episode:已落盘的折叠不回滚(见文件头),只把"这次没处理完的输入"按原顺序
-      // 推回邮箱,下次唤醒会连同新事件一起重投,保证至少一次投递。
+      // 放弃 episode:已落盘的折叠不回滚(见文件头)——若本次途中发生过 force_hot 折叠
+      // (上面 max_tokens 兜底重试路径),carriedTexts/eventText 有可能已经作为
+      // tailMessages 的一部分被折进了 rollingSummary(见 forceHotFold),这里仍会原样
+      // 重投它们,导致同一份内容同时以"摘要"与"原始文本"两种形式留存——已知取舍,不在此修复。
+      //
+      // 把"这次没处理完的输入"按原始到达顺序整体推回邮箱:carriedTexts → eventText →
+      // episode 期间经 enqueueDuringEpisode 注入的内容(currentEpisodeInjected,顺序即
+      // 到达顺序)。后者无论当时是否已被 engine drainPending() 消费——消费掉的已经进了
+      // 随失败一起丢弃的 finalMessages,不消费的还原样躺在 mailbox.pending 里——
+      // currentEpisodeInjected 都完整记录了原始文本,是唯一权威来源;先 drainPending()
+      // 清空 mailbox 里可能残留的"尚未被消费"那一段(它是 currentEpisodeInjected 的后缀,
+      // 不清空会和下面的整体重投重复),再按到达顺序整体重投,保证至少一次投递、不丢失、不重复。
+      this.mailbox.drainPending()
       for (const t of carriedTexts) this.mailbox.push(t)
       this.mailbox.push(eventText)
+      for (const t of this.currentEpisodeInjected ?? []) this.mailbox.push(t)
     }
 
     const result: EpisodeResult = {
