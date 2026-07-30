@@ -296,6 +296,15 @@ export class ManagerLoop {
       prevSummary: state.rollingSummary,
       foldMessages: decision.foldMessages,
     })
+    // 落盘前的最后一道防线:decision.keep 首条按 compaction.ts findSafeSplitIndex 的约定
+    // 不应是孤儿 tool_result(其匹配的 tool_use 已被折进 rollingSummary)——一旦真的落盘,
+    // 下一个 episode 必然把它原样发给 LLM 触发 API 400,且无自愈路径(见 findSafeSplitIndex
+    // 注释)。这里只是复核 decideCompaction 的既有保证,不引入新语义;命中即说明调用方绕过了
+    // findSafeSplitIndex 构造了 decision,直接拒绝落盘、把损坏状态挡在这一步,好过让它随
+    // runEpisode 外层 catch 重投后在下次唤醒继续复现。
+    if (decision.keep.length > 0 && 'toolResults' in decision.keep[0]) {
+      throw new Error('[applyFold] decision.keep 首条是孤儿 tool_result,拒绝落盘(见 compaction.ts findSafeSplitIndex)')
+    }
     const next: ManagerSessionState = {
       ...state,
       rollingSummary: newSummary,

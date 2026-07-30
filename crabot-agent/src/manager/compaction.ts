@@ -57,6 +57,12 @@ export type CompactionDecision =
  * keepRecent(已被上面的"历史不足"分支拦截),这里只是语义上的显式选择;若出现防御性
  * 场景(异常累积且从未落过 lastActiveAt),仍会走 hardCapTokens 兜底为 force_hot,不会
  * 因为"未冷"就放任 token 无限增长。
+ *
+ * foldMessages/keep 的切分点不是裸下标 history.length - keepRecent,而是走
+ * findSafeSplitIndex(见下方定义)避开 tool_use/tool_result 配对中间——history 里大量
+ * assistant(tool_use) → toolResults 相邻对(worker 六件套/messaging 全是工具调用),裸切分
+ * 会把孤儿 toolResults 消息留在 keep 头部,发给 LLM 时其 tool_use_id 找不到匹配的前置
+ * tool_use,触发 API 400 且无自愈路径(永久卡死,详见 findSafeSplitIndex 注释)。
  */
 export function decideCompaction(args: {
   readonly state: ManagerSessionState
@@ -71,7 +77,7 @@ export function decideCompaction(args: {
     return { kind: 'none' }
   }
 
-  const splitAt = history.length - policy.keepRecent
+  const splitAt = findSafeSplitIndex(history, policy.keepRecent)
   const foldMessages = history.slice(0, splitAt)
   const keep = history.slice(splitAt)
 
@@ -143,6 +149,25 @@ export async function foldIntoSummary(args: {
     throw new Error('[foldIntoSummary] LLM 返回空摘要')
   }
   return text
+}
+
+/**
+ * 找一个安全的切分点:保证 keep 段第一条消息不是孤儿 tool_result(其匹配的 tool_use 若被
+ * 划进 foldMessages 折叠段,该 tool_result 引用的 tool_use_id 在发给 LLM 的消息里找不到
+ * 对应的前置 tool_use,Anthropic 等 API 会直接 400——manager 每个后续 episode 都会命中,
+ * 且 400 的错误文案不匹配 isContextOverflow,没有自愈路径,是永久卡死。
+ *
+ * 与 engine/context-manager.ts 的 findSafeSplitIndex 同一语义、同一写法(那边服务于
+ * engine 内建压缩,这边服务于 manager 自管压缩),两处保持一致,改一处需同步检查另一处。
+ * assistant(tool_use) 与其 toolResults 消息严格相邻,回退时只要落在 toolResults 消息上
+ * 就继续回退,直到落在非 toolResults 消息(或到 0)。回退后 keep 可能比 keepRecent 多几条——
+ * 这是有意为之的取舍:宁可多留几条历史吃不满 keepRecent 的折叠效率,也不能把孤儿
+ * tool_result 放进 keep 头部。
+ */
+function findSafeSplitIndex(history: ReadonlyArray<EngineMessage>, keepRecent: number): number {
+  let splitAt = history.length - keepRecent
+  while (splitAt > 0 && 'toolResults' in history[splitAt]) splitAt--
+  return splitAt
 }
 
 /** 把一条 EngineMessage 渲染成折叠 prompt 里的一段文本(只取语义内容,不含 id/timestamp)。 */

@@ -5,7 +5,7 @@ import {
   type CompactionPolicy,
 } from '../../src/manager/compaction'
 import type { ManagerSessionState, ManagerKey } from '../../src/manager/types'
-import { createUserMessage, createAssistantMessage } from '../../src/engine/index.js'
+import { createUserMessage, createAssistantMessage, createToolResultMessage } from '../../src/engine/index.js'
 import type { EngineMessage, LLMAdapter, LLMStreamParams, StreamChunk } from '../../src/engine/index.js'
 
 const KEY: ManagerKey = 'wechat::sess-compaction'
@@ -162,6 +162,60 @@ describe('decideCompaction', () => {
 
     expect(prefix2.startsWith(prefix1)).toBe(true)
     expect(prefix2.slice(0, prefix1.length)).toBe(prefix1)
+  })
+
+  it('裸下标切点恰好落在 assistant(tool_use)与其 toolResults 之间时,应回退切点避免孤儿 tool_result 进 keep 头部', () => {
+    // keepRecent=2、history 长度 4 → 裸切点 splitAt = 4-2 = 2,history[2] 正是 toolResults——
+    // 若不回退,keep=[toolResults2, user3] 会把孤儿 tool_result(其配对的 tool_use 已被折进
+    // foldMessages)放在 keep[0],发给 LLM 会触发 API 400。
+    const policy: CompactionPolicy = { keepRecent: 2, cacheTtlMs: 1000, foldTokenThreshold: 100, hardCapTokens: 100 }
+    const history: EngineMessage[] = [
+      createUserMessage('user-0'),
+      createAssistantMessage([{ type: 'tool_use', id: 'tu_X', name: 'search', input: { q: 'foo' } }], 'tool_use'),
+      createToolResultMessage('tu_X', 'Found something', false),
+      createUserMessage('user-3'),
+    ]
+    const nowMs = 10_000
+    // 热(未超 TTL)但 4*50=200 > hardCapTokens(100) → force_hot 分支,走同一份 findSafeSplitIndex
+    const state = baseState({ recent: history, lastActiveAt: new Date(nowMs - 500).toISOString() })
+
+    const decision = decideCompaction({ state, nowMs, policy, estimateTokens })
+
+    expect(decision.kind).toBe('force_hot')
+    if (decision.kind !== 'force_hot') throw new Error('unreachable')
+    // keep[0] 不是孤儿 tool_result
+    expect('toolResults' in decision.keep[0]).toBe(false)
+    expect(decision.keep[0]).toBe(history[1]) // assistant(tool_use) 被拉回 keep
+    expect(decision.keep[1]).toBe(history[2]) // 紧跟着它匹配的 toolResults
+    expect(decision.keep.length).toBe(3) // 比 keepRecent(2) 多——有意的取舍(注释已说明)
+    // 不重不漏
+    expect([...decision.foldMessages, ...decision.keep]).toEqual(history)
+  })
+
+  it('多条连续 toolResults 消息时,切点应持续回退直到落在非 toolResults 消息(或 0),不留孤儿', () => {
+    // 人为构造两条连续 toolResults(真实 episode 里不会自然出现,但 findSafeSplitIndex 的
+    // while 循环需要正确处理这一防御性场景,与 context-manager.ts 的 findSafeSplitIndex 同款写法)。
+    const policy: CompactionPolicy = { keepRecent: 2, cacheTtlMs: 1000, foldTokenThreshold: 100, hardCapTokens: 100 }
+    const history: EngineMessage[] = [
+      createUserMessage('user-0'),
+      createAssistantMessage([{ type: 'tool_use', id: 'tu_A', name: 'search', input: {} }], 'tool_use'),
+      createToolResultMessage('tu_A', 'result-A', false),
+      createToolResultMessage('tu_A_extra', 'result-A-extra', false),
+      createUserMessage('user-4'),
+    ]
+    const nowMs = 10_000
+    // 裸切点 splitAt = 5-2 = 3 → history[3] 是 toolResults,回退到 2 仍是 toolResults,
+    // 再回退到 1(assistant)才停下。
+    const state = baseState({ recent: history, lastActiveAt: new Date(nowMs - 500).toISOString() })
+
+    const decision = decideCompaction({ state, nowMs, policy, estimateTokens })
+
+    expect(decision.kind).toBe('force_hot')
+    if (decision.kind !== 'force_hot') throw new Error('unreachable')
+    expect('toolResults' in decision.keep[0]).toBe(false)
+    expect(decision.keep[0]).toBe(history[1])
+    expect(decision.keep.length).toBe(4)
+    expect([...decision.foldMessages, ...decision.keep]).toEqual(history)
   })
 })
 
