@@ -384,6 +384,71 @@ describe('ManagerLoop', () => {
     expect(state.foldedCount).toBeGreaterThan(0)
   })
 
+  it('max_tokens 重试时 mid-episode 注入内容被追进 initialMessages,重试成功后不重复投递', async () => {
+    const { adapter, queue, calls } = makeAdapter()
+    // turn1:调用工具(期间 enqueueDuringEpisode 注入内容,被 drain 消费);turn2 触发 max_tokens
+    queue.push({ toolCalls: [{ name: 'noop_tool', id: 'call_1', input: {} }], stopReason: 'tool_use' })
+    // 首次尝试的 turn2:静默 max_tokens(text='' + stopReason='max_tokens')
+    queue.push({ stopReason: 'max_tokens' })
+    // 强制折叠后的重试:正常结束
+    queue.push({ text: '强制折叠并重试成功', stopReason: 'end_turn' })
+    // 第二次唤醒:确认 mid-episode 内容不被重复投递
+    queue.push({ text: '第二次唤醒回复', stopReason: 'end_turn' })
+
+    let loop!: ManagerLoop
+    const policy: CompactionPolicy = { keepRecent: 2, cacheTtlMs: 1000, foldTokenThreshold: 1_000_000, hardCapTokens: 1_000_000 }
+    const deps = baseDeps({
+      store,
+      adapter,
+      policy,
+      toolFace: () => [
+        {
+          name: 'noop_tool',
+          description: 'noop',
+          inputSchema: { type: 'object', properties: {} },
+          isReadOnly: false,
+          call: async () => {
+            // turn1 与 turn2 之间注入内容,保证被 turn2 的 drainPending() 消费
+            loop.enqueueDuringEpisode({ kind: 'schedule', scheduleId: 'sched-max-tokens', title: '巡检', description: '首次尝试期间注入' })
+            return { output: 'ok', isError: false }
+          },
+        },
+      ],
+    })
+    loop = new ManagerLoop(deps)
+
+    // 预置 3 条历史(同 'max_tokens 收场' 测试),让 force_hot 真正折掉点东西
+    const seedMessages: EngineMessage[] = [
+      createUserMessage('旧消息1'),
+      createUserMessage('旧消息2'),
+      createUserMessage('旧消息3'),
+    ]
+    await store.save({ key: KEY, recent: seedMessages, foldedCount: 0 })
+
+    // 首次唤醒:首次尝试 turn1 成功 + turn2 max_tokens → 强制折叠 + 重试成功
+    const first = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('触发 max_tokens 的一句话')] })
+    expect(first.outcome).toBe('completed')
+    expect(first.turns).toBe(3) // turn1 + turn2(max_tokens) + 重试的 turn1
+    expect(first.consumedEvents).toBe(true)
+
+    // 重试(第三次 LLM 调用)的 messages 里应该含有 mid-episode 注入内容
+    const nonFoldCalls = calls.filter((c) => !c.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER))
+    expect(nonFoldCalls.length).toBe(3) // turn1 + turn2(max_tokens) + 重试
+    const retryCallMessages = JSON.stringify(nonFoldCalls[2].messages)
+    expect(retryCallMessages).toContain('sched-max-tokens')
+    expect(retryCallMessages).toContain('首次尝试期间注入')
+
+    // 第二次唤醒:验证 mid-episode 内容已被首次 episode 的重试消费进 state.recent,不会重复投递
+    const second = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('新话题')] })
+    expect(second.outcome).toBe('completed')
+
+    const nonFoldCalls2 = calls.filter((c) => !c.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER))
+    const secondWakeCall = nonFoldCalls2[nonFoldCalls2.length - 1]
+    const midEpisodeOccurrences = (JSON.stringify(secondWakeCall.messages).match(/sched-max-tokens/g) ?? []).length
+    // 确认 sched-max-tokens 只出现一次(作为历史的一部分),不是两次(不被重复投递)
+    expect(midEpisodeOccurrences).toBe(1)
+  })
+
   it('session 永不 finalize:连续 5 次 wakeUp 后仍能正常继续工作', async () => {
     const { adapter, queue } = makeAdapter()
     for (let i = 0; i < 5; i++) queue.push({ text: `回复${i}`, stopReason: 'end_turn' })

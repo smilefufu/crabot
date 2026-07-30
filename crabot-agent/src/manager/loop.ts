@@ -179,21 +179,24 @@ export class ManagerLoop {
     // max_tokens 兜底(§4.2):disableCompaction 关掉了 engine 自己的强压重试路径,
     // 这里识别到"上下文超限收场"时强制 force_hot 折叠一次并重试一次,仍失败就放弃。
     //
-    // mid-episode 注入与这条重试路径的交互(想清楚过,记录结论):重试用的 initialMessages
-    // 是 `state.recent`(源自对 tailMessages 的折叠),不是首次尝试 attempt 的
-    // finalMessages——首次尝试期间跑过的轮次(包括它期间被 engine drainPending() 消费掉的
-    // mid-episode 注入内容)整体被丢弃,不参与折叠、也不会出现在重试的 initialMessages 里。
+    // mid-episode 注入与这条重试路径的交互(想清楚过,记录结论):
+    // 首次尝试期间通过 enqueueDuringEpisode 到达的 mid-episode 注入内容若被 engine
+    // drainPending() 消费进 finalMessages,而首次尝试随后以 max_tokens 结束,这些内容会被
+    // currentEpisodeInjected 记录。重试时明确把这些内容追加进 retryTailMessages,确保
+    // 重试的 initialMessages 包含它们——首次尝试的所有轮次连同其中的消费行为都被丢弃,
+    // 这些内容等于没被处理过,重投是准确的(既无丢失、也无重复)。
     // 若那部分内容在首次尝试结束时仍原样躺在 mailbox.pending 里(未被消费),它会像
-    // 普通 pending 内容一样自然流入重试(同一个 `this.mailbox` 实例),不丢不重复;若已被
-    // 首次尝试消费掉,则只有在整个 episode 最终仍以失败收场时,才会经由
-    // `currentEpisodeInjected` 被下方失败分支追回重投——如果重试反而成功了,这部分"首次
-    // 尝试期间被消费掉"的内容目前没有路径找回,是本设计已知的残留缺口(概率很低:要求首次
-    // 尝试在触发 max_tokens 前已经跑过多轮且期间发生过 mid-episode 注入),不在本次修复范围。
+    // 普通 pending 内容一样自然流入重试(同一个 `this.mailbox` 实例),不丢不重复。
     if (isContextOverflow(attempt.result)) {
       const forceDecision = forceHotFold({ ...state, recent: tailMessages }, this.deps.policy, this.deps.estimateTokens, nowMs)
       if (forceDecision.kind !== 'none') {
         state = await this.applyFold(state, forceDecision)
-        const retryAttempt = await this.runAttempt(state, state.recent)
+        // 重试时把 mid-episode 注入内容一并追加(保持到达顺序)
+        const retryTailMessages: EngineMessage[] = [
+          ...state.recent,
+          ...(this.currentEpisodeInjected?.map((t) => createUserMessage(t)) ?? []),
+        ]
+        const retryAttempt = await this.runAttempt(state, retryTailMessages)
         totalTurnsUsed += retryAttempt.result.totalTurns
         attempt = retryAttempt
       }
