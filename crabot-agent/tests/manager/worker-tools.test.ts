@@ -434,6 +434,50 @@ describe('query_worker', () => {
       errorSpy.mockRestore()
     }
   })
+
+  // ---- P4 Task 4 additive:deps.onAsyncError 扩展点 ----
+  //
+  // query_worker 的失败发生在锁外的游离 promise 里，调用本身早已返回，manager 这次 turn
+  // 已经拿不到失败原因（见上面两个用例）。onAsyncError 是留给 Task 7/8"把这条错误接成唤醒
+  // 本 manager 的信号"的扩展点——本任务只提供出口、验证它确实带着正确的 { tool, worker_id,
+  // error } 被调用，不接线到任何真实唤醒机制。
+  it('deps.onAsyncError 存在时，游离 promise reject（worker 不存在）除 console.error 外还携带 {tool, worker_id, error} 调用它', async () => {
+    const { harness } = await makeHarness({ caps: { fork: true } })
+    const onAsyncError = vi.fn()
+    const tools = buildWorkerTools({ harness, context: () => CTX, onAsyncError })
+    const queryWorker = tools.find((t) => t.name === 'query_worker')!
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await queryWorker.call({ worker_id: 'w-nope', question: '？' }, {})
+      await new Promise((resolve) => setTimeout(resolve, 20))
+
+      expect(onAsyncError).toHaveBeenCalledTimes(1)
+      expect(onAsyncError).toHaveBeenCalledWith({
+        tool: 'query_worker',
+        worker_id: 'w-nope',
+        error: expect.stringMatching(/worker not found/),
+      })
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('未传 deps.onAsyncError 时行为与之前完全一致：游离 promise reject 只 console.error，不因缺省回调而抛错', async () => {
+    const { harness } = await makeHarness({ caps: { fork: true } })
+    const tools = buildWorkerTools({ harness, context: () => CTX }) // 不传 onAsyncError
+    const queryWorker = tools.find((t) => t.name === 'query_worker')!
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const result = await queryWorker.call({ worker_id: 'w-nope', question: '？' }, {})
+      expect(result.isError).toBe(false)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(errorSpy).toHaveBeenCalled()
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
 })
 
 // ---- read_worker_output（同步，真实数据） ----

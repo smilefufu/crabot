@@ -80,6 +80,16 @@ export interface WorkerToolsDeps {
   readonly harness: WorkerHarness
   /** 当前 manager 的归属:决定 spawn 的 dialogObjectId / origin / report_to。 */
   readonly context: () => WorkerToolsContext
+  /**
+   * P4 Task 4 additive 扩展点:`query_worker` 的游离 promise reject 时,除了
+   * `console.error` 诊断日志外还调用这个可选回调。本任务只提供出口、不接线——`harness.
+   * queryWorker` 本身已经把同一失败 appendEvent('query_failed')(见 harness.ts 注释),
+   * 这里的 `onAsyncError` 面向的是"当前这个 manager 实例要不要因为这次失败立刻醒来"这层
+   * 决策,不是失败留痕本身。Task 7/8 的契约:接上后用它"把这条错误接成唤醒本 manager 的
+   * 信号"(如推一条系统消息触发下一轮 loop),不在这里预判具体唤醒机制。缺省不传时行为
+   * 与之前完全一致(仅 console.error)。
+   */
+  readonly onAsyncError?: (info: { tool: string; worker_id: string; error: string }) => void
 }
 
 // --- tool_result 构造辅助 ---
@@ -113,7 +123,7 @@ function isWorkerImplId(value: unknown): value is WorkerImplId {
 }
 
 export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
-  const { harness, context } = deps
+  const { harness, context, onAsyncError } = deps
 
   // --- spawn_worker(异步:发起即返回,任务进展由事件唤醒) ---
   const spawnWorker = defineTool({
@@ -217,6 +227,9 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   // 已知错误不再能在这次调用内回传给 LLM(相对其余五个工具"异常永不穿透,统一转 isError"
   // 这条约定的一处刻意偏离,controller 决定,见 task-4-report.md 追加记录)。forkSeq 同理
   // 拿不到(它在 adapter.fork 落地之后才由 harness 生成),不写进返回文本。
+  // P4 Task 4 additive:失败除 console.error 外还调 deps.onAsyncError?.(见 WorkerToolsDeps
+  // 注释)——本任务只开这个口子,不接线;harness.queryWorker 自己也会把同一失败
+  // appendEvent('query_failed'),二者互补(留痕 vs. 是否要唤醒当前 manager 两层决策)。
   const queryWorker = defineTool({
     name: 'query_worker',
     description:
@@ -240,6 +253,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
 
       harness.queryWorker(worker_id, question).catch((error) => {
         console.error(`[worker-tools] query_worker(${worker_id}) 后台发起失败(fire-and-forget):`, error)
+        onAsyncError?.({ tool: 'query_worker', worker_id, error: error instanceof Error ? error.message : String(error) })
       })
       return ok({ status: 'queried', worker_id })
     },
