@@ -23,6 +23,16 @@ export type HarnessEventKind =
   | 'superseded'
   | 'handoff_started'
   | 'resumed'
+  /**
+   * P4 Task 4 additive:`queryWorker`(侧问 fork)自己的失败路径——worker 不存在、目标 impl
+   * 未注册 adapter、`capabilities().fork` 为 false、`adapter.fork` 抛错——都落这个 kind。
+   * `query_worker` 工具是字面 fire-and-forget(见 manager/tools/worker-tools.ts 文件头),
+   * 失败不再能在那次调用内回传给 LLM,这是失败留痕的唯一出口(protocol-agent-v3 §10 可观测
+   * 性预期),供 `debug-agent.mjs trace`/`onEvent` 订阅方排查。`detail.reason` 取值:
+   * 'worker_not_found' | 'no_adapter' | 'capability_not_supported' | 'fork_failed' |
+   * 'worker_disappeared'(见 harness.ts queryWorker 注释,理论上不会发生的防御性分支)。
+   */
+  | 'query_failed'
 
 export interface HarnessEvent {
   readonly ts: string

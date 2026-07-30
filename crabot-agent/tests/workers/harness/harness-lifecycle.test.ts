@@ -6,7 +6,7 @@ import { WorkerHarness, WorkerNotFoundError, TaskCancelledError, type HarnessDep
 import { LedgerStore } from '../../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../../src/workers/harness/workspace-manager'
 import { dialogObjectIdForPrivate } from '../../../src/workers/harness/ledger-types'
-import type { HarnessEvent } from '../../../src/workers/harness/worker-events'
+import { WorkerEventLog, type HarnessEvent } from '../../../src/workers/harness/worker-events'
 import { CapabilityNotSupportedError } from '../../../src/workers/errors'
 import type {
   WorkerAdapter,
@@ -124,7 +124,7 @@ function now(): string {
   return new Date(nowValue).toISOString()
 }
 
-async function makeHarness(fakeOpts: FakeAdapterOpts = {}): Promise<{ harness: WorkerHarness; fake: FakeAdapter; adaptersMap: Map<WorkerImplId, WorkerAdapter> }> {
+async function makeHarness(fakeOpts: FakeAdapterOpts = {}): Promise<{ harness: WorkerHarness; fake: FakeAdapter; adaptersMap: Map<WorkerImplId, WorkerAdapter>; workersDir: string }> {
   const ledgersDir = join(dataDir, 'ledgers')
   const workspacesRoot = join(dataDir, 'workspaces')
   const workersDir = join(dataDir, 'workers')
@@ -150,7 +150,7 @@ async function makeHarness(fakeOpts: FakeAdapterOpts = {}): Promise<{ harness: W
   const fake = new FakeAdapter({ ...fakeOpts, onStateChange: harness.handleStateChange })
   adaptersMap.set(fake.implId, fake)
 
-  return { harness, fake, adaptersMap }
+  return { harness, fake, adaptersMap, workersDir }
 }
 
 function spawnParams(overrides: Partial<SpawnWorkerParams> = {}): SpawnWorkerParams {
@@ -361,12 +361,68 @@ describe('WorkerHarness.killWorker', () => {
 })
 
 describe('WorkerHarness.queryWorker', () => {
-  it('capabilities().fork 为 false → 抛 CapabilityNotSupportedError,不调用 adapter.fork', async () => {
-    const { harness, fake } = await makeHarness({ caps: { fork: false } })
+  it('capabilities().fork 为 false → 抛 CapabilityNotSupportedError,不调用 adapter.fork,失败落 query_failed 事件(读 events.jsonl 核实)', async () => {
+    const { harness, fake, workersDir } = await makeHarness({ caps: { fork: false } })
     const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
 
     await expect(harness.queryWorker(worker.worker_id, '侧问一下')).rejects.toThrow(CapabilityNotSupportedError)
     expect(fake.forkCalls).toHaveLength(0)
+
+    // P4 Task 4:失败路径必须留痕(protocol-agent-v3 §10 可观测性),query_worker 是
+    // fire-and-forget,appendEvent 是排查失败的唯一出口——直接读 events.jsonl(而不只是
+    // 内存里的 onEvent 回调数组)核实真的落了盘。
+    const log = new WorkerEventLog(join(workersDir, worker.worker_id))
+    const onDisk = await log.readAll()
+    const failedOnDisk = onDisk.filter((e) => e.kind === 'query_failed')
+    expect(failedOnDisk).toHaveLength(1)
+    expect(failedOnDisk[0]).toMatchObject({ seq: 1, detail: { reason: 'capability_not_supported', impl: 'builtin' } })
+
+    const failedEvents = events.filter((e) => e.kind === 'query_failed')
+    expect(failedEvents).toHaveLength(1)
+    expect(failedEvents[0]).toMatchObject({ seq: 1, detail: { reason: 'capability_not_supported', impl: 'builtin' } })
+  })
+
+  it('目标 impl 未注册 adapter → 抛错,失败落 query_failed 事件(reason: no_adapter)', async () => {
+    const { harness, fake, adaptersMap } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    adaptersMap.delete(fake.implId)
+    events.length = 0
+
+    await expect(harness.queryWorker(worker.worker_id, '侧问一下')).rejects.toThrow(/no adapter registered/)
+
+    const failedEvents = events.filter((e) => e.kind === 'query_failed')
+    expect(failedEvents).toHaveLength(1)
+    expect(failedEvents[0]).toMatchObject({ seq: 1, detail: { reason: 'no_adapter', impl: 'builtin' } })
+  })
+
+  it('worker_id 不存在 → WorkerNotFoundError,失败落 query_failed 事件(没有已知 seq,用 sentinel 0)', async () => {
+    const { harness } = await makeHarness({ caps: { fork: true } })
+    events.length = 0
+
+    await expect(harness.queryWorker('w-does-not-exist', '侧问一下')).rejects.toThrow(WorkerNotFoundError)
+
+    const failedEvents = events.filter((e) => e.kind === 'query_failed')
+    expect(failedEvents).toHaveLength(1)
+    expect(failedEvents[0]).toMatchObject({ seq: 0, worker_id: 'w-does-not-exist', detail: { reason: 'worker_not_found' } })
+  })
+
+  it('adapter.fork 抛错 → 原样把错误抛给调用方,且失败落 query_failed 事件(reason: fork_failed,带 message)', async () => {
+    const boom = new Error('fork 侧的 claude -p 炸了')
+    const { harness } = await makeHarness({ caps: { fork: true }, forkShouldFail: boom })
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    await expect(harness.queryWorker(worker.worker_id, '侧问一下')).rejects.toThrow('fork 侧的 claude -p 炸了')
+
+    const failedEvents = events.filter((e) => e.kind === 'query_failed')
+    expect(failedEvents).toHaveLength(1)
+    expect(failedEvents[0]).toMatchObject({ seq: 1, detail: { reason: 'fork_failed', message: 'fork 侧的 claude -p 炸了' } })
+
+    // 主线台账完全不受 fork 失败影响(fork 从未落账,不该有半成品化身)。
+    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(w.incarnations).toHaveLength(1)
+    expect(w.task.status).toBe('running')
   })
 
   it('capabilities().fork 为 true → adapter.fork 被调用,新化身入化身链,事件外发,主线 task.status 不受影响', async () => {
@@ -389,6 +445,115 @@ describe('WorkerHarness.queryWorker', () => {
     // adapter.fork 返回的 handle 自己的引用,不是从主线(seq=1)照抄的(§6.1)。
     expect(w.incarnations[1].forked_from).toBe(1)
     expect(w.incarnations[1].session_ref).not.toBe(w.incarnations[0].session_ref)
+
+    const stateEvents = events.filter((e) => e.kind === 'state_changed')
+    expect(stateEvents).toHaveLength(1)
+    expect(stateEvents[0].seq).toBe(2)
+    expect(stateEvents[0].detail).toEqual({ kind: 'fork', from_seq: 1 })
+  })
+})
+
+// ---- P4 Task 4:adapter.fork 挪出 per-worker 锁(review 实证 A)----
+//
+// 修复前:queryWorker 在 `await adapter.fork()` 期间一直持有该 worker 的 per-worker
+// AsyncMutex(fork 落在锁内)。cc 的 fork() 是 `await execFileAsync` 整个无头 `claude -p`
+// 子进程跑完(几十秒到数分钟),期间对同一 worker_id 的 kill_worker/send_to_worker/再次
+// query_worker 全部在这把锁上排队——人类说"停下"要卡几分钟才生效,违反
+// protocol-agent-v3 §4.1"manager 的 loop 内不存在阻塞等待原语"的精神。下面两个用例用一个
+// fork 永不 resolve 的 FakeAdapter 复现并验证修复:发起 query_worker 后立即对同一 worker
+// 调 kill_worker / send_to_worker,断言它们毫秒级完成(修复前会挂住,直到手动 releaseFork
+// 或测试超时)。
+describe('WorkerHarness.queryWorker — adapter.fork 挪出锁(P4 Task 4 review 实证 A)', () => {
+  /** 用一个"进入后先报告、再等外部 gate 放行"的 fork 替身包住 fake.fork,保证断言发生在
+   * adapter.fork 真正开始执行(即第一段判定锁已经释放)之后,不靠 setTimeout 猜时序。 */
+  function gateFork(fake: FakeAdapter): { forkEnteredPromise: Promise<void>; release: () => void } {
+    let resolveEntered!: () => void
+    const forkEnteredPromise = new Promise<void>((resolve) => {
+      resolveEntered = resolve
+    })
+    let release!: () => void
+    const forkGate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const originalFork = fake.fork.bind(fake)
+    fake.fork = async (prev, forkInput) => {
+      resolveEntered()
+      await forkGate
+      return originalFork(prev, forkInput)
+    }
+    return { forkEnteredPromise, release }
+  }
+
+  it('adapter.fork 卡住未落地期间,同一 worker 上的 send_to_worker 毫秒级完成,不排队等待 fork', async () => {
+    const { harness, fake } = await makeHarness({ caps: { fork: true } })
+    const worker = await harness.spawnWorker(spawnParams())
+    const { forkEnteredPromise, release } = gateFork(fake)
+
+    const queryPromise = harness.queryWorker(worker.worker_id, '侧问一下')
+    await forkEnteredPromise // 确认已经进了 adapter.fork——第一段判定锁必然已经释放
+
+    const start = Date.now()
+    await harness.sendToWorker(worker.worker_id, '继续干活')
+    const elapsed = Date.now() - start
+
+    expect(elapsed).toBeLessThan(200)
+    expect(fake.sendInputCalls).toHaveLength(1)
+    expect(fake.sendInputCalls[0].h.seq).toBe(1) // 打在主线,不受进行中的 fork 影响
+
+    release()
+    await queryPromise
+  })
+
+  it('adapter.fork 卡住未落地期间,同一 worker 上的 kill_worker 毫秒级完成,不排队等待 fork', async () => {
+    const { harness, fake } = await makeHarness({ caps: { fork: true } })
+    const worker = await harness.spawnWorker(spawnParams())
+    const { forkEnteredPromise, release } = gateFork(fake)
+
+    const queryPromise = harness.queryWorker(worker.worker_id, '侧问一下')
+    await forkEnteredPromise
+
+    const start = Date.now()
+    await harness.killWorker(worker.worker_id, '人类紧急叫停')
+    const elapsed = Date.now() - start
+
+    expect(elapsed).toBeLessThan(200)
+    expect(fake.killCalls).toHaveLength(1)
+    expect(fake.killCalls[0].seq).toBe(1)
+
+    release()
+    await queryPromise.catch(() => {}) // 见下一个 describe:worker 已终态后 fork 落地的语义
+  })
+
+  it('锁释放期间 worker 被 kill(task 已 cancelled)→ fork 落地后仍记录该 fork 化身(它确实跑过、有输出),但不改主线已终态的记录', async () => {
+    const { harness, fake } = await makeHarness({ caps: { fork: true } })
+    const worker = await harness.spawnWorker(spawnParams())
+    const { forkEnteredPromise, release } = gateFork(fake)
+
+    const queryPromise = harness.queryWorker(worker.worker_id, '侧问一下')
+    await forkEnteredPromise
+
+    await harness.killWorker(worker.worker_id, '在侧问落地前叫停')
+    events.length = 0
+    release()
+
+    // 选定语义:worker 已终态时仍记录 fork 化身,queryWorker 本身正常 resolve(fork 是一次
+    // 真实执行完的动作,不因主线在它进行期间被 kill 而凭空丢弃——见 harness.ts queryWorker
+    // 方法注释"锁释放期间世界会变"一节)。
+    const result = await queryPromise
+    expect(result.forkSeq).toBe(2)
+
+    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    // 主线(seq=1)保持 killWorker 落定的记录,完全不被这次迟到的 fork 落账污染。
+    expect(w.task.status).toBe('cancelled')
+    const mainEntry = w.incarnations.find((i) => i.seq === 1)!
+    expect(mainEntry.state).toBe('exited')
+    expect(mainEntry.ended_reason).toBe('killed')
+
+    // fork 化身仍然被追加进化身链,forked_from 指向发起侧问那一刻的源 seq(1),不受主线
+    // 后续变化影响。
+    const forkEntry = w.incarnations.find((i) => i.seq === 2)!
+    expect(forkEntry.forked_from).toBe(1)
+    expect(forkEntry.state).toBe('running')
 
     const stateEvents = events.filter((e) => e.kind === 'state_changed')
     expect(stateEvents).toHaveLength(1)
