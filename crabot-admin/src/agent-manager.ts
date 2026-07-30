@@ -58,6 +58,19 @@ const DEFAULT_IMPLEMENTATION: AgentImplementation = {
       used_by: ['worker'],
       fallback: 'none',
     },
+    {
+      // protocol-agent-v3.md §11：manager loop 的对话与工具调用决策用模型。
+      // fallback 特意选 'none'（而不是 'global_default'）：未配置时不由 Admin 自动填全局默认，
+      // 而是把"未配置"这个事实原样透传给 agent 侧——agent 按 model_config.manager ?? model_config.powerful
+      // 解析（见 crabot-agent/src/manager/model-slot.ts），这样当用户已显式给 powerful 配了非默认
+      // provider/model 时，manager 会跟着用 powerful 的实际值，而不是被 Admin 全局默认覆盖掉。
+      key: 'manager',
+      description: 'Manager loop 用模型，负责对话与决策；未配置时回退到 powerful',
+      required: false,
+      recommended_capabilities: ['tool_use', 'long_context'],
+      used_by: ['front'],
+      fallback: 'none',
+    },
   ],
   extra_schema: [
     {
@@ -712,7 +725,7 @@ const LEGACY_ROLE_MIGRATION: Record<string, ModelRole> = {
   // 各自走 powerful / cost_effective role；现有 coding_expert 配置丢弃即可。
 }
 
-const KNOWN_NEW_KEYS: ReadonlySet<string> = new Set(['powerful', 'cost_effective', 'vision'])
+const KNOWN_NEW_KEYS: ReadonlySet<string> = new Set(['powerful', 'cost_effective', 'vision', 'manager'])
 
 /**
  * 迁移 model_config 旧 keys 到新 ModelRole。

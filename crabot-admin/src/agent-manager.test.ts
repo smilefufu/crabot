@@ -412,6 +412,44 @@ describe('AgentManager', () => {
     })
   })
 
+  describe('manager model slot（additive，protocol-agent-v3 §11）', () => {
+    it('builtin model_roles 含 manager，required=false', () => {
+      const impl = agentManager.getImplementation('default')
+      const managerRole = impl?.model_roles.find((r) => r.key === 'manager')
+      expect(managerRole).toBeDefined()
+      expect(managerRole?.required).toBe(false)
+    })
+
+    it('既有配置（无 manager 键）启动迁移后仍有效，不报错、不被强行补 manager 键', async () => {
+      // 模拟一份"迁移前"就已经存在于磁盘的实例配置：只有 powerful，没有 manager。
+      const preExistingDataDir = path.join(process.cwd(), 'test-data', `agent-manager-legacy-${Date.now()}`)
+      await fs.mkdir(path.join(preExistingDataDir, 'agent-configs'), { recursive: true })
+      const legacyConfig = {
+        instance_id: 'crabot-agent',
+        system_prompt: '',
+        model_config: { powerful: { provider_id: 'p1', model_id: 'm1' } },
+        max_iterations: 10,
+        tools_readonly: false,
+      }
+      await fs.writeFile(
+        path.join(preExistingDataDir, 'agent-configs', 'crabot-agent.json'),
+        JSON.stringify(legacyConfig, null, 2)
+      )
+
+      try {
+        const legacyManager = new AgentManager(preExistingDataDir)
+        await expect(legacyManager.initialize()).resolves.not.toThrow()
+
+        const config = legacyManager.getConfig('crabot-agent')
+        expect(config).toBeDefined()
+        expect(config?.model_config).toEqual({ powerful: { provider_id: 'p1', model_id: 'm1' } })
+        expect(config?.model_config?.manager).toBeUndefined()
+      } finally {
+        await fs.rm(preExistingDataDir, { recursive: true, force: true })
+      }
+    })
+  })
+
   describe('Auto-start instances', () => {
     it('should get auto-start instances sorted by priority', () => {
       const instances = agentManager.getAutoStartInstances()
