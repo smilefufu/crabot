@@ -217,10 +217,14 @@ async function resolveBinDir(bin: string): Promise<string | undefined> {
   }
 }
 
+/** 标准 UUID 格式(8-4-4-4-12 十六进制段,由连字符分隔)——session_ref 前置校验与"从 rollout
+ * 内容里读出的 session_id"校验共用同一条正则(五轮 review 修复:后者此前没做格式校验,畸形
+ * id 会静默写进 meta/handle.session_ref)。 */
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+
 /** UUID 格式校验:标准 UUID 格式(8-4-4-4-12 十六进制段,由连字符分隔)。*/
 function validateSessionRef(sessionRef: string): void {
-  const uuidPattern = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
-  if (!uuidPattern.test(sessionRef)) {
+  if (!UUID_RE.test(sessionRef)) {
     throw new Error(
       `CodexWorkerAdapter: invalid session_ref format (expected UUID, got '${sessionRef.slice(0, 50)}'). ` +
         `session_ref must be a valid UUID and cannot contain shell metacharacters.`,
@@ -335,7 +339,10 @@ async function pollForNewRollout(sessionsDir: string, cutoffMs: number, timeoutM
 /** 读 rollout 文件首行的 session_meta.payload.session_id(m2 真机实测的权威字段)。首行还
  * 不是完整/合法的 session_meta(文件刚创建、还没来得及写完)一律返回 undefined,调用方退回
  * 文件名解析,不抛错、不重试——真机实测文件名与内容里的 id 完全一致,这里只是"能拿到内容
- * 就优先信内容"的加固,拿不到不算失败。 */
+ * 就优先信内容"的加固,拿不到不算失败。五轮 review 修复:读出的 id 额外按 UUID_RE 校验格式,
+ * 不合法(畸形值)一律当成"拿不到",打 warn 并退回文件名解析——避免畸形 id 未经校验就被
+ * 写进 meta.session_id 与 handle.session_ref(会让 spawn 静默成功、resume/readTrace 必然
+ * 失效)。 */
 async function readSessionIdFromRolloutContent(path: string): Promise<string | undefined> {
   let raw: string
   try {
@@ -352,7 +359,12 @@ async function readSessionIdFromRolloutContent(path: string): Promise<string | u
     return undefined
   }
   if (parsed?.type === 'session_meta' && typeof parsed.payload?.session_id === 'string') {
-    return parsed.payload.session_id
+    const id = parsed.payload.session_id
+    if (!UUID_RE.test(id)) {
+      console.warn(`[codex-adapter] rollout content session_id is not a valid UUID, falling back to filename parse: ${path} id='${id.slice(0, 50)}'`)
+      return undefined
+    }
+    return id
   }
   return undefined
 }
@@ -364,8 +376,18 @@ async function readSessionIdFromRolloutContent(path: string): Promise<string | u
  * 一个字段不如直接按已知的确定性文件名规则重新找一遍,与 sessionName/outputFile 等其它
  * 重建字段的思路一致——见 ensureRuntime 注释)。同一遍历约定(深度不超过 4 层,目录不存在
  * 按"没找到"处理)复用自 findNewestRolloutFile。
+ *
+ * 五轮 review 修复:spawn 时的 session 发现优先信 rollout 内容里的 session_id(见
+ * pollForNewRollout),与文件名内嵌的 uuid 分歧时,meta.session_id 落的是内容里的值——
+ * 这里若仍然只按文件名精确匹配,分歧场景下重启后会精确匹配不到、rolloutPath 变 undefined、
+ * readTrace 静默降级为空数组(尽管文件明明还在)。文件名不中时退一步遍历候选 rollout 文件
+ * (同一趟遍历顺带收集,不重复扫盘),逐个读取其内容首行的 session_id 兜底匹配;命中打一条
+ * warn(便于诊断"为什么按文件名找不到,但按内容能找到"),仍然找不到才返回 undefined(与
+ * 原语义一致,readTrace 优雅降级)。
  */
 async function findRolloutFileBySessionId(sessionsDir: string, sessionId: string): Promise<string | undefined> {
+  const candidates: string[] = []
+
   async function walk(dir: string, depth: number): Promise<string | undefined> {
     if (depth > 4) return undefined
     let entries: Dirent[]
@@ -382,11 +404,24 @@ async function findRolloutFileBySessionId(sessionsDir: string, sessionId: string
         continue
       }
       const match = ROLLOUT_FILENAME_RE.exec(entry.name)
-      if (match && match[1] === sessionId) return full
+      if (!match) continue
+      if (match[1] === sessionId) return full
+      candidates.push(full)
     }
     return undefined
   }
-  return walk(sessionsDir, 0)
+
+  const exact = await walk(sessionsDir, 0)
+  if (exact) return exact
+
+  for (const candidate of candidates) {
+    const contentSessionId = await readSessionIdFromRolloutContent(candidate)
+    if (contentSessionId === sessionId) {
+      console.warn(`[codex-adapter] rollout file located via content session_id fallback (filename uuid did not match): ${candidate}`)
+      return candidate
+    }
+  }
+  return undefined
 }
 
 export class CodexWorkerAdapter implements WorkerAdapter {
@@ -399,7 +434,11 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   private readonly runtimes = new Map<string, Runtime>()
   private readonly mutexes = new Map<string, AsyncMutex>()
   /** resolveBinDir(codexBin) 的缓存 promise——codexBin 构造后不变,没必要每次 detect/spawn/
-   * resume 都重新 `command -v` + `realpath` 一遍。 */
+   * resume 都重新 `command -v` + `realpath` 一遍。五轮 review 修复:只缓存*成功*的解析结果。
+   * 解析失败(undefined)不固化——启动时 codex 还没装好/PATH 未生效是常见时序,若把失败也
+   * 缓存住,用户随后装好 codex 后所有后续 spawn/resume 仍会拿到永久 undefined,PATH 不再
+   * 前置,直接复现本文件要修的 nvm `env: node: No such file or directory` 陷阱,且要等
+   * agent 重启才能自愈。见 resolveBinDirCached()。 */
   private cachedBinDir?: Promise<string | undefined>
 
   constructor(
@@ -422,9 +461,17 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     this.sessionDiscoveryTimeoutMs = deps.sessionDiscoveryTimeoutMs ?? 3000
   }
 
-  /** codexBin 所在真实目录(nvm 部署陷阱修复,见 resolveBinDir 注释),懒解析并缓存。 */
+  /** codexBin 所在真实目录(nvm 部署陷阱修复,见 resolveBinDir 注释),懒解析并缓存——但只
+   * 缓存成功结果(见 cachedBinDir 字段注释)。解析中的 promise 仍然去重(并发调用不会打出
+   * 一阵 `command -v` 风暴),解析出 undefined 时把缓存清空,让下一次调用重新解析;resolveBinDir
+   * 内部已经 try/catch 过,这里的 promise 不会 reject,不产生 unhandled rejection。 */
   private resolveBinDirCached(): Promise<string | undefined> {
-    if (!this.cachedBinDir) this.cachedBinDir = resolveBinDir(this.codexBin)
+    if (!this.cachedBinDir) {
+      this.cachedBinDir = resolveBinDir(this.codexBin).then((dir) => {
+        if (!dir) this.cachedBinDir = undefined
+        return dir
+      })
+    }
     return this.cachedBinDir
   }
 

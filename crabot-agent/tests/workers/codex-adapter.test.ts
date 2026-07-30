@@ -394,6 +394,46 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
   )
 
   it(
+    '五轮 review PoC②:rollout 内容里的 session_id 不是合法 UUID(畸形值)时退回文件名解析出的 uuid,并打 warn' +
+      '(修复前:内容里的 id 未经格式校验就直接采信,畸形 id 会写进 meta.session_id/handle.session_ref,spawn 静默成功但 resume 必然失败)',
+    async () => {
+      const { adapter, workerId } = await provisionedAdapter([{ output: '第一段输出', emitStop: true }])
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const uuidFromFilename = randomUUID()
+      const malformedContentId = 'not-a-valid-uuid; rm -rf /'
+
+      const spawnPromise = adapter.spawn(makeSpec(workerId, '你好'))
+
+      const now = new Date()
+      const pad = (n: number) => String(n).padStart(2, '0')
+      const datePath = path.join(String(now.getFullYear()), pad(now.getMonth() + 1), pad(now.getDate()))
+      const sessionsDir = path.join(workspaceRoot, '.codex', 'sessions', datePath)
+      await fs.mkdir(sessionsDir, { recursive: true })
+      await fs.writeFile(
+        path.join(sessionsDir, rolloutFileNameFor(uuidFromFilename)),
+        JSON.stringify({ type: 'session_meta', payload: { session_id: malformedContentId, timestamp: new Date().toISOString(), cwd: workspaceRoot } }) + '\n',
+        'utf-8',
+      )
+
+      const h = await spawnPromise
+      await waitForState(adapter, h, 'idle')
+
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string; session_discovery?: string }
+      // 退回文件名解析出的 uuid,不是畸形内容值。
+      expect(meta.session_id).toBe(uuidFromFilename)
+      expect(meta.session_id).not.toBe(malformedContentId)
+      expect(meta.session_discovery).toBe('discovered')
+      expect(h.session_ref).toBe(uuidFromFilename)
+
+      const warned = warnSpy.mock.calls.some((call) => String(call[0] ?? '').includes('not a valid UUID'))
+      expect(warned).toBe(true)
+
+      warnSpy.mockRestore()
+    },
+    15000,
+  )
+
+  it(
     'session 发现:轮询超时降级时输出 console.warn 日志',
     async () => {
       const { adapter, workerId } = await provisionedAdapter([{ output: '第一段输出', emitStop: true }])
@@ -766,6 +806,56 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — spawn 提交纪律', () 
     },
     15000,
   )
+
+  it(
+    '五轮 review PoC③:resolveBinDir 首次解析失败(codex 还没装好/PATH 未生效)不永久缓存 undefined——用户随后装好后,同一 adapter 实例下一次 spawn 应重新解析并前置 PATH' +
+      '(修复前:cachedBinDir 固化第一次的 undefined,后续 spawn/resume 永远拿不到前置 PATH,直到 agent 重启才自愈)',
+    async () => {
+      class RecordingTmuxDriver extends TmuxDriver {
+        envs: Array<Record<string, string> | undefined> = []
+        async newSession(spec: TmuxSessionSpec): Promise<void> {
+          this.envs.push(spec.env)
+          return super.newSession(spec)
+        }
+      }
+      const toolDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-adapter-bindir-retry-'))
+      const fakeBinName = `crabot-test-fake-codex-${randomUUID().slice(0, 8)}`
+      await fs.writeFile(path.join(toolDir, fakeBinName), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+
+      const originalPath = process.env.PATH ?? ''
+      const tmux = new RecordingTmuxDriver()
+      // 裸命令名(不含 '/'),命中 resolveBinDir 的 `command -v` 分支——对应真实 nvm 场景
+      // (codex 是 PATH 上的一个命令名,不是绝对路径)。
+      const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin: fakeBinName, sessionDiscoveryTimeoutMs: 200 })
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+
+      try {
+        // 第一次 spawn:toolDir 还不在 PATH 上,`command -v` 找不到,resolveBinDir 解析失败
+        // → 回退到继承的 PATH(不前置任何目录)。
+        const workerId1 = `codextest-${randomUUID().slice(0, 8)}`
+        await adapter.spawn({ worker_id: workerId1, prompt: '你好', workspace: { root: workspaceRoot } }).catch(() => {})
+        expect(tmux.envs[0]).toBeDefined()
+        expect(tmux.envs[0]!.PATH).toBe(originalPath)
+
+        // "用户随后装好了 codex"(如 nvm use / 重新 source shell rc)——把 toolDir 加进 PATH。
+        process.env.PATH = `${toolDir}:${originalPath}`
+
+        // 第二次 spawn,同一个 adapter 实例(不重启进程):resolveBinDir 应重新解析成功并
+        // 前置 toolDir——PATH 里会出现两份 toolDir(一份是本次显式前置,一份已经在继承的
+        // process.env.PATH 里)。修复前:cachedBinDir 固化了第一次的 undefined,PATH 只回退
+        // 到(此时已含 toolDir 的)继承值,只有一份 toolDir,不会再前置——本用例正是靠"一份
+        // 还是两份 toolDir"区分修复前后。
+        const workerId2 = `codextest-${randomUUID().slice(0, 8)}`
+        await adapter.spawn({ worker_id: workerId2, prompt: '你好', workspace: { root: workspaceRoot } }).catch(() => {})
+        expect(tmux.envs[1]).toBeDefined()
+        expect(tmux.envs[1]!.PATH).toBe(`${toolDir}:${process.env.PATH}`)
+      } finally {
+        process.env.PATH = originalPath
+        await fs.rm(toolDir, { recursive: true, force: true }).catch(() => {})
+      }
+    },
+    15000,
+  )
 })
 
 describe('CodexWorkerAdapter.detect', () => {
@@ -980,6 +1070,48 @@ describe('CodexWorkerAdapter.readTrace', () => {
     const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin: 'unused' })
     await expect(adapter.readTrace({ worker_id: 'nope', seq: 1, impl: 'codex' })).rejects.toThrow()
   })
+
+  it(
+    '五轮 review PoC①:内容 session_id 与文件名 uuid 分歧、重启后新 adapter 实例——findRolloutFileBySessionId 应退一步按内容匹配到同一文件,readTrace 能读到事件' +
+      '(修复前:只按文件名精确匹配,分歧时 rolloutPath 变 undefined,尽管 session_discovery===discovered 且文件明明还在,仍静默返回空数组)',
+    async () => {
+      const tmux = new NoopTmux()
+      const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin: 'unused' })
+      const workerId = `codextest-${randomUUID().slice(0, 8)}`
+
+      // 模拟 spawn 时"内容优先"加固已经生效:meta.session_id 落的是内容里的 uuidFromContent,
+      // 但 rollout 文件名内嵌的仍是 uuidFromFilename(两者分歧,同 adapter.ts 头注释描述的
+      // 竞态/沿用场景)。
+      const uuidFromFilename = randomUUID()
+      const uuidFromContent = randomUUID()
+
+      const now = new Date()
+      const pad = (n: number) => String(n).padStart(2, '0')
+      const datePath = path.join(String(now.getFullYear()), pad(now.getMonth() + 1), pad(now.getDate()))
+      const sessionsDir = path.join(workspaceRoot, '.codex', 'sessions', datePath)
+      await fs.mkdir(sessionsDir, { recursive: true })
+      await fs.writeFile(
+        path.join(sessionsDir, rolloutFileNameFor(uuidFromFilename)),
+        JSON.stringify({ type: 'session_meta', timestamp: '2026-07-30T00:00:00Z', payload: { session_id: uuidFromContent, cli_version: '0.144.1', cwd: workspaceRoot } }) + '\n',
+        'utf-8',
+      )
+
+      // "重启后重建的 meta":session_discovery: 'discovered',session_id 是内容里的权威值。
+      const workerDir = path.join(dataDir, workerId)
+      await fs.mkdir(workerDir, { recursive: true })
+      await fs.writeFile(
+        path.join(workerDir, 'meta-1.json'),
+        JSON.stringify({ seq: 1, state: 'idle', session_id: uuidFromContent, session_discovery: 'discovered', workspace_root: workspaceRoot }),
+        'utf-8',
+      )
+
+      // 新 adapter 实例的 runtimes 为空(模拟重启),ensureRuntime 只能从 meta 重建。
+      const { events } = await adapter.readTrace({ worker_id: workerId, seq: 1, impl: 'codex', session_ref: uuidFromContent })
+      expect(events).toHaveLength(1)
+      expect(events[0]).toMatchObject({ kind: 'lifecycle', role: 'system' })
+      expect(events[0].summary).toContain(uuidFromContent)
+    },
+  )
 })
 
 describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter.readTrace(已发现 rollout 路径)', () => {
