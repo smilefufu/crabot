@@ -79,8 +79,17 @@ export interface ManagerLoopDeps {
   readonly policy: CompactionPolicy
   /** decideCompaction 的 token 估算器,调用方注入(与 compaction.ts 的既定依赖注入方式一致)。 */
   readonly estimateTokens: (msgs: ReadonlyArray<EngineMessage>) => number
-  readonly adapter: LLMAdapter
-  readonly model: string
+  /**
+   * LLM adapter / model 解析器(protocol-agent-v3.md §11:"manager 的 prompt / model 热更于
+   * 下一个 episode 生效")。刻意做成 thunk 而不是字面量:`ManagerLoop` 实例按 key 常驻
+   * 在 `ManagerRegistry` 里跨多个 episode 复用(见 registry.ts),若 adapter/model 是构造时
+   * 就固定的字面量,admin 侧改了 model_config 也无法在不销毁重建 loop 的前提下生效。
+   * `runEpisodeBody` 只在每个 episode 开始时调用一次并整段复用同一份快照(包括 max_tokens
+   * 兜底重试)——同一 episode 内绝不重复解析,下一次 `wakeUp` 才会拿到最新值,与 toolFace/
+   * promptInputs "每轮重算"的更细粒度热更不同(那两个是 per-turn,这两个是 per-episode)。
+   */
+  readonly adapter: () => LLMAdapter
+  readonly model: () => string
   readonly maxTurns?: number
   readonly contextWindowTokens?: number
   /** 工具面提供者(thunk):每轮重算,由调用方决定要不要按最新状态重建。 */
@@ -154,6 +163,11 @@ export class ManagerLoop {
     carriedTexts: ReadonlyArray<string>,
     eventText: string,
   ): Promise<EpisodeResult> {
+    // §11 热更语义:整个 episode(含下面的 max_tokens 兜底重试)只在这里解析一次 adapter/
+    // model,固定用这份快照——即使两次解析之间 admin config 已经变了,当前 episode 也不换。
+    const adapter = this.deps.adapter()
+    const model = this.deps.model()
+
     let state = await this.deps.store.load(this.deps.key)
     const nowMs = this.deps.now().getTime()
 
@@ -164,7 +178,7 @@ export class ManagerLoop {
       estimateTokens: this.deps.estimateTokens,
     })
     if (wakeDecision.kind !== 'none') {
-      state = await this.applyFold(state, wakeDecision)
+      state = await this.applyFold(state, wakeDecision, adapter, model)
     }
 
     const tailMessages: EngineMessage[] = [
@@ -173,7 +187,7 @@ export class ManagerLoop {
       createUserMessage(eventText),
     ]
 
-    let attempt = await this.runAttempt(state, tailMessages)
+    let attempt = await this.runAttempt(state, tailMessages, adapter, model)
     let totalTurnsUsed = attempt.result.totalTurns
 
     // max_tokens 兜底(§4.2):disableCompaction 关掉了 engine 自己的强压重试路径,
@@ -190,13 +204,13 @@ export class ManagerLoop {
     if (isContextOverflow(attempt.result)) {
       const forceDecision = forceHotFold({ ...state, recent: tailMessages }, this.deps.policy, this.deps.estimateTokens, nowMs)
       if (forceDecision.kind !== 'none') {
-        state = await this.applyFold(state, forceDecision)
+        state = await this.applyFold(state, forceDecision, adapter, model)
         // 重试时把 mid-episode 注入内容一并追加(保持到达顺序)
         const retryTailMessages: EngineMessage[] = [
           ...state.recent,
           ...(this.currentEpisodeInjected?.map((t) => createUserMessage(t)) ?? []),
         ]
-        const retryAttempt = await this.runAttempt(state, retryTailMessages)
+        const retryAttempt = await this.runAttempt(state, retryTailMessages, adapter, model)
         totalTurnsUsed += retryAttempt.result.totalTurns
         attempt = retryAttempt
       }
@@ -244,14 +258,17 @@ export class ManagerLoop {
     return result
   }
 
-  /** 按 decision 折叠并立即落盘(唤醒边界折叠 / 强制 force_hot 折叠共用同一落盘逻辑)。 */
+  /** 按 decision 折叠并立即落盘(唤醒边界折叠 / 强制 force_hot 折叠共用同一落盘逻辑)。
+   *  adapter/model 由调用方(runEpisodeBody)按本次 episode 的快照传入,不在此处重新解析。 */
   private async applyFold(
     state: ManagerSessionState,
     decision: Extract<CompactionDecision, { kind: 'fold_at_wake' | 'force_hot' }>,
+    adapter: LLMAdapter,
+    model: string,
   ): Promise<ManagerSessionState> {
     const newSummary = await foldIntoSummary({
-      adapter: this.deps.adapter,
-      model: this.deps.model,
+      adapter,
+      model,
       prevSummary: state.rollingSummary,
       foldMessages: decision.foldMessages,
     })
@@ -265,10 +282,13 @@ export class ManagerLoop {
     return next
   }
 
-  /** 跑一次 runEngine(可能是首次尝试,也可能是 max_tokens 兜底的重试)。 */
+  /** 跑一次 runEngine(可能是首次尝试,也可能是 max_tokens 兜底的重试)。
+   *  adapter/model 由调用方(runEpisodeBody)按本次 episode 的快照传入,不在此处重新解析。 */
   private async runAttempt(
     state: ManagerSessionState,
     tailMessages: ReadonlyArray<EngineMessage>,
+    adapter: LLMAdapter,
+    model: string,
   ): Promise<{ readonly result: EngineResult; readonly hasSummaryMarker: boolean }> {
     const hasSummaryMarker = state.rollingSummary !== undefined
     const initialMessages: EngineMessage[] = hasSummaryMarker
@@ -306,7 +326,7 @@ export class ManagerLoop {
     const options: EngineOptions = {
       systemPrompt,
       tools,
-      model: this.deps.model,
+      model,
       maxTurns: this.deps.maxTurns,
       contextWindowTokens: this.deps.contextWindowTokens,
       disableCompaction: true,
@@ -316,7 +336,7 @@ export class ManagerLoop {
 
     const result = await runEngine({
       prompt: '', // 被忽略:initialMessages 非空时 runEngine 不使用 prompt(见 query-loop.ts)
-      adapter: this.deps.adapter,
+      adapter,
       options,
       initialMessages,
     })

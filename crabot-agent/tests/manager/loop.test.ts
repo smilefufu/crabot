@@ -82,21 +82,30 @@ const estimateTokens = (msgs: ReadonlyArray<EngineMessage>): number => msgs.leng
 
 const FAKE_HARNESS = { listWorkers: async (): Promise<LedgerWorker[]> => [] } as unknown as WorkerHarness
 
-function baseDeps(overrides: Partial<ManagerLoopDeps> & { readonly store: ManagerSessionStore; readonly adapter: LLMAdapter }): ManagerLoopDeps {
+/** adapter/model 的测试入参既接受字面量（绝大多数用例）也接受 thunk（专测热更语义的用例）。 */
+function baseDeps(
+  overrides: Partial<Omit<ManagerLoopDeps, 'adapter' | 'model'>> & {
+    readonly store: ManagerSessionStore
+    readonly adapter: LLMAdapter | (() => LLMAdapter)
+    readonly model?: string | (() => string)
+  }
+): ManagerLoopDeps {
   let nowMs = Date.parse('2026-01-01T00:00:00.000Z')
   const policy: CompactionPolicy = { keepRecent: 3, cacheTtlMs: 1000, foldTokenThreshold: 1_000_000, hardCapTokens: 1_000_000 }
+  const { adapter, model, ...rest } = overrides
   return {
     key: KEY,
     isSystemThread: false,
     dialogObjectId: DIALOG_OBJECT_ID,
     policy,
     estimateTokens,
-    model: 'test-model',
     toolFace: () => [],
     promptInputs: () => ({}),
     harness: FAKE_HARNESS,
     now: () => new Date(nowMs),
-    ...overrides,
+    adapter: typeof adapter === 'function' ? adapter : () => adapter,
+    model: typeof model === 'function' ? model : () => model ?? 'test-model',
+    ...rest,
   }
 }
 
@@ -131,6 +140,38 @@ describe('ManagerLoop', () => {
     expect(state.recent.length).toBe(2) // 渲染的事件 user msg + assistant 回复
     expect(JSON.stringify(state.recent)).toContain('你好')
     expect(state.lastActiveAt).toBeTruthy()
+  })
+
+  it('model 热更于下一个 episode 生效:adapter/model 解析器每个 episode 只调用一次，不在 episode 内重复读取', async () => {
+    const { adapter, queue } = makeAdapter()
+    queue.push({ text: '回复1', stopReason: 'end_turn' })
+    queue.push({ text: '回复2', stopReason: 'end_turn' })
+
+    let adapterResolveCalls = 0
+    let modelResolveCalls = 0
+    const deps = baseDeps({
+      store,
+      adapter: () => {
+        adapterResolveCalls++
+        return adapter
+      },
+      model: () => {
+        modelResolveCalls++
+        return 'test-model'
+      },
+    })
+    const loop = new ManagerLoop(deps)
+
+    await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('第一条')] })
+    expect(adapterResolveCalls).toBe(1)
+    expect(modelResolveCalls).toBe(1)
+
+    // 模拟"config 热更"发生在两次唤醒之间：deps.adapter/model 这两个 thunk 本身不变
+    // （生产环境由调用方在 thunk 内部读取最新 admin config），但 loop 只应在 episode 边界
+    // （每次 wakeUp）重新调用一次——同一 episode 内（包括其内部可能的重试）绝不重复调用。
+    await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('第二条')] })
+    expect(adapterResolveCalls).toBe(2)
+    expect(modelResolveCalls).toBe(2)
   })
 
   it('burst 内(未超 TTL)不压缩;跨 TTL 唤醒时折叠恰好一次', async () => {

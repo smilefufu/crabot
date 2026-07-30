@@ -75,8 +75,16 @@ export interface ManagerRegistryDeps {
   readonly harness: WorkerHarness
   /** routeWorkerEvent 的 origin 归属查找用(harness 未公开 findWorker,直接持有台账存储)。 */
   readonly ledger: LedgerStore
-  readonly adapter: LLMAdapter
-  readonly model: string
+  /**
+   * manager model slot 解析器(protocol-agent-v3.md §11):调用方在此按最新 admin config
+   * 解析 `model_config.manager ?? model_config.powerful`(见 `model-slot.ts`
+   * `resolveManagerModelConfig`)、用 `createAdapter` 建出 `LLMAdapter`。做成 thunk 而非
+   * 字面量是为了让"下一个 episode 生效"的热更语义成立——`getOrCreate` 只在 key 首次建
+   * `ManagerLoop` 时把这两个 thunk 原样转给 `ManagerLoopDeps`(见下),`ManagerLoop` 自己
+   * 按 episode 边界调用,本 registry 不缓存解析结果。
+   */
+  readonly adapter: () => LLMAdapter
+  readonly model: () => string
   readonly maxTurns?: number
   readonly contextWindowTokens?: number
   readonly now: () => Date

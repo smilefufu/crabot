@@ -123,22 +123,28 @@ describe('ManagerRegistry', () => {
     await fs.rm(dataDir, { recursive: true, force: true })
   })
 
+  /** adapter/model 的测试入参既接受字面量（绝大多数用例）也接受 thunk（专测热更语义的用例）。 */
   function baseRegistryDeps(
-    overrides: Partial<ManagerRegistryDeps> & { readonly adapter: LLMAdapter }
+    overrides: Partial<Omit<ManagerRegistryDeps, 'adapter' | 'model'>> & {
+      readonly adapter: LLMAdapter | (() => LLMAdapter)
+      readonly model?: string | (() => string)
+    }
   ): ManagerRegistryDeps {
     const policy: CompactionPolicy = { keepRecent: 100, cacheTtlMs: 1_000_000, foldTokenThreshold: 1_000_000, hardCapTokens: 1_000_000 }
+    const { adapter, model, ...rest } = overrides
     return {
       store,
       policy,
       estimateTokens,
       harness: FAKE_HARNESS,
       ledger: fakeLedger({}),
-      model: 'test-model',
       now: () => new Date(Date.parse('2026-01-01T00:00:00.000Z')),
       dialogObjectIdFor: () => dialogObjectIdForPrivate('friend-x'),
       toolFace: () => [],
       promptInputs: () => ({}),
-      ...overrides,
+      adapter: typeof adapter === 'function' ? adapter : () => adapter,
+      model: typeof model === 'function' ? model : () => model ?? 'test-model',
+      ...rest,
     }
   }
 
@@ -165,6 +171,29 @@ describe('ManagerRegistry', () => {
     registry.getOrCreate('wechat::s1' as ManagerKey)
     expect(dialogObjectIdFor).toHaveBeenCalledTimes(1)
     expect(dialogObjectIdFor).toHaveBeenCalledWith('wechat::s1')
+  })
+
+  it('getOrCreate: adapter/model 是 thunk，原样透传给 ManagerLoop，不在 registry 侧缓存解析结果（§11 热更链路）', async () => {
+    const { adapter, queue } = makeAdapter()
+    queue.push({ text: '第一次', stopReason: 'end_turn' })
+    queue.push({ text: '第二次', stopReason: 'end_turn' })
+
+    let resolveCalls = 0
+    const registry = new ManagerRegistry(
+      baseRegistryDeps({
+        adapter: () => {
+          resolveCalls++
+          return adapter
+        },
+      })
+    )
+
+    expect(resolveCalls).toBe(0) // getOrCreate 本身不触发解析
+    await registry.routeHumanMessages('wechat', 'sess-hot', [makeChannelMessage('你好')])
+    expect(resolveCalls).toBe(1) // 第一个 episode 解析一次
+
+    await registry.routeHumanMessages('wechat', 'sess-hot', [makeChannelMessage('再说一次')])
+    expect(resolveCalls).toBe(2) // 同一 key 复用同一 ManagerLoop 实例，下一个 episode 重新解析一次
   })
 
   it('getOrCreate: isSystemThread 按 key 是否等于保留名判定（体现在 system prompt 的系统线程纪律段）', async () => {
