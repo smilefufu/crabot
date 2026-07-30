@@ -193,5 +193,95 @@ describe('assembleManagerSystemPrompt 装配顺序', () => {
 
       expect(withNotes.slice(0, cutWith)).toBe(withoutNotes.slice(0, cutWithout))
     })
+
+    it('添加 managerKey 后，仅改 dynamic 时前缀仍逐字节不变', () => {
+      const inputsA = baseInputs()
+      const inputsB = baseInputs({
+        dynamic: {
+          ledgerRender: '- worker w2: running',
+          nowIso: '2026-07-30T09:30:00.000Z',
+        },
+      })
+
+      const outputA = assembleManagerSystemPrompt(inputsA)
+      const outputB = assembleManagerSystemPrompt(inputsB)
+
+      const dynamicMarker = '当前状态（动态，不进缓存前缀）'
+      const cutA = outputA.indexOf(dynamicMarker)
+      const cutB = outputB.indexOf(dynamicMarker)
+
+      const prefixA = outputA.slice(0, cutA)
+      const prefixB = outputB.slice(0, cutB)
+
+      expect(prefixA).toBe(prefixB)
+    })
+  })
+
+  describe('工具名验证', () => {
+    it('prompt 中提及的所有反引号包裹的工具名都在实际工具集中', () => {
+      // 实际工具名集合（来自 tool-face.ts 的白名单）
+      const actualToolNames = new Set([
+        // messaging 工具
+        'send_message',
+        'get_history',
+        'get_message',
+        'lookup_friend',
+        'list_sessions',
+        'list_contacts',
+        'list_groups',
+        'list_group_members',
+        'fetch_media',
+        // 系统线程额外
+        'send_master_private',
+        'send_private_message',
+        // worker 工具
+        'spawn_worker',
+        'send_to_worker',
+        'query_worker',
+        'read_worker_output',
+        'list_workers',
+        'kill_worker',
+        // crabot-info 工具
+        'get_system_status',
+        'get_deployment_info',
+        'list_schedules',
+        'get_config_summary',
+        'list_capabilities',
+        'get_friend_permissions',
+        // memory 工具前缀（具体工具由 MCP server 提供）
+        'mcp__crab-memory__',
+      ])
+
+      const prompt = MANAGER_IDENTITY
+
+      // 提取反引号包裹的内容
+      const backtickPattern = /`(\w[\w_]*(?:__\w[\w_]*)?)`/g
+      const matches = [...prompt.matchAll(backtickPattern)]
+      const mentionedNames = matches.map((m) => m[1])
+
+      // 过滤掉不是工具名的（如变量名等）
+      const toolReferences = mentionedNames.filter((name) => {
+        // 工具名要么是 actualToolNames 中的，要么是 mcp__ 前缀
+        return (
+          actualToolNames.has(name) ||
+          (name.startsWith('mcp__') && actualToolNames.has('mcp__crab-memory__'))
+        )
+      })
+
+      // 验证所有工具引用都在实际工具集中
+      for (const toolName of toolReferences) {
+        if (toolName.startsWith('mcp__')) {
+          expect(toolName.startsWith('mcp__crab-memory__')).toBe(true)
+        } else {
+          expect(actualToolNames.has(toolName)).toBe(
+            true,
+            `工具 '${toolName}' 在 prompt 中提及但不在实际工具集中`,
+          )
+        }
+      }
+
+      // 特别检查：不应该出现 ask_human
+      expect(prompt).not.toContain('ask_human')
+    })
   })
 })
