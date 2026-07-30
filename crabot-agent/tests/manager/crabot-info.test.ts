@@ -195,6 +195,117 @@ describe('buildCrabotInfoTools', () => {
       expect(parsed.config.non_sensitive_field).toBe('keep-me')
     })
 
+    it('掩码 mcp_servers[].headers.Authorization 等凭证键(PoC 场景)', async () => {
+      const callAdmin = makeCallAdmin({
+        get_agent_config: () => ({
+          config: {
+            mcp_servers: [
+              {
+                name: 'notion',
+                headers: {
+                  Authorization: 'Bearer ntn_secret_abc123_real',
+                  'X-Custom': 'plain-value',
+                },
+              },
+            ],
+          },
+        }),
+      })
+      const tools = buildCrabotInfoTools({ callAdmin })
+      const tool = tools.find((t) => t.name === 'get_config_summary')!
+      const result = await tool.call({}, {})
+      expect(result.isError).toBe(false)
+      const parsed = JSON.parse(result.output)
+      const output_str = JSON.stringify(parsed)
+
+      // Authorization 值必须被掩码，原文不能出现
+      expect(output_str).not.toContain('ntn_secret_abc123_real')
+      expect(output_str).not.toContain('Bearer ntn_secret_abc123_real')
+      // X-Custom 也在 headers 容器里，值也应该被掩
+      expect(parsed.config.mcp_servers[0].headers.Authorization).toBe('***')
+      expect(parsed.config.mcp_servers[0].headers['X-Custom']).toBe('***')
+    })
+
+    it('对 env/environment 容器内所有字符串值掩码(不论键名)', async () => {
+      const callAdmin = makeCallAdmin({
+        get_agent_config: () => ({
+          config: {
+            env: {
+              OPENAI_API_KEY: 'sk-real-openai-key-abc',
+              PATH: '/usr/bin:/usr/local/bin',
+              DEBUG: 'false',
+            },
+            environment: {
+              AWS_SECRET_ACCESS_KEY: 'aws-secret-xyz',
+              HOME: '/home/user',
+            },
+          },
+        }),
+      })
+      const tools = buildCrabotInfoTools({ callAdmin })
+      const tool = tools.find((t) => t.name === 'get_config_summary')!
+      const result = await tool.call({}, {})
+      expect(result.isError).toBe(false)
+      const parsed = JSON.parse(result.output)
+      const output_str = JSON.stringify(parsed)
+
+      // 原文不能出现
+      expect(output_str).not.toContain('sk-real-openai-key-abc')
+      expect(output_str).not.toContain('aws-secret-xyz')
+      expect(output_str).not.toContain('/usr/bin:/usr/local/bin')
+      expect(output_str).not.toContain('/home/user')
+
+      // 所有值都应该被掩
+      expect(parsed.config.env.OPENAI_API_KEY).toBe('***')
+      expect(parsed.config.env.PATH).toBe('***')
+      expect(parsed.config.env.DEBUG).toBe('***')
+      expect(parsed.config.environment.AWS_SECRET_ACCESS_KEY).toBe('***')
+      expect(parsed.config.environment.HOME).toBe('***')
+    })
+
+    it('对常见凭证键名掩码(authorization/auth/bearer/cookie 等)', async () => {
+      const callAdmin = makeCallAdmin({
+        get_agent_config: () => ({
+          config: {
+            auth_config: {
+              authorization: 'Bearer token123',
+              auth: 'basic-cred',
+              bearer: 'jwt-token-xyz',
+              cookie: 'session=abc123',
+              api_key: 'key-secret',
+              access_token: 'access-xyz',
+              refresh_token: 'refresh-abc',
+              private_key: '-----BEGIN PRIVATE KEY-----',
+              passwd: 'p@ssw0rd',
+              // 非敏感的对比
+              endpoint: 'https://example.com',
+              timeout: 30000,
+            },
+          },
+        }),
+      })
+      const tools = buildCrabotInfoTools({ callAdmin })
+      const tool = tools.find((t) => t.name === 'get_config_summary')!
+      const result = await tool.call({}, {})
+      expect(result.isError).toBe(false)
+      const parsed = JSON.parse(result.output)
+
+      // 所有凭证键都应该掩码
+      expect(parsed.config.auth_config.authorization).toBe('***')
+      expect(parsed.config.auth_config.auth).toBe('***')
+      expect(parsed.config.auth_config.bearer).toBe('***')
+      expect(parsed.config.auth_config.cookie).toBe('***')
+      expect(parsed.config.auth_config.api_key).toBe('***')
+      expect(parsed.config.auth_config.access_token).toBe('***')
+      expect(parsed.config.auth_config.refresh_token).toBe('***')
+      expect(parsed.config.auth_config.private_key).toBe('***')
+      expect(parsed.config.auth_config.passwd).toBe('***')
+
+      // 非敏感的保持原值
+      expect(parsed.config.auth_config.endpoint).toBe('https://example.com')
+      expect(parsed.config.auth_config.timeout).toBe(30000)
+    })
+
     it('支持传入 instance_id 覆盖默认值', async () => {
       const callAdmin = makeCallAdmin({
         get_agent_config: (params) => {

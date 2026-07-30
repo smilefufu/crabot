@@ -25,9 +25,18 @@ export interface CrabotInfoToolsDeps {
 
 // --- 掩码:get_config_summary 的责任,防御性做,不依赖 admin 端已掩码 ---
 
-const SENSITIVE_KEY_PATTERN = /key|token|secret|password|credential/i
+const SENSITIVE_KEY_PATTERN =
+  /key|token|secret|password|credential|authorization|auth|bearer|cookie|api[-_]?key|access[-_]?token|refresh[-_]?token|private[-_]?key|passwd/i
 
-/** 递归掩码:键名命中敏感模式的字段整体替换为 '***'(不再递归其内部);其余值递归处理。 */
+/** 容器类键名：其内部所有字符串值一律掩码(不论值的键名) */
+const CONTAINER_KEY_PATTERN = /^(headers|env|environment)$/i
+
+/**
+ * 递归掩码:
+ * 1. 键名命中 SENSITIVE_KEY_PATTERN 的字段：若值是字符串则替换为 '***'，若是对象/数组则递归
+ * 2. 键名命中 CONTAINER_KEY_PATTERN 的容器内，所有字符串值替换为 '***'(非字符串值递归)
+ * 3. 其余值递归处理
+ */
 function maskSensitive(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map(maskSensitive)
@@ -35,9 +44,48 @@ function maskSensitive(value: unknown): unknown {
   if (value !== null && typeof value === 'object') {
     const result: Record<string, unknown> = {}
     for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
-      result[key] = SENSITIVE_KEY_PATTERN.test(key) ? '***' : maskSensitive(v)
+      // 如果键名命中敏感模式：字符串值掩码，对象/数组递归
+      if (SENSITIVE_KEY_PATTERN.test(key)) {
+        if (typeof v === 'string') {
+          result[key] = '***'
+        } else {
+          result[key] = maskSensitive(v)
+        }
+      }
+      // 如果键名是容器类，内部所有字符串值掩码
+      else if (CONTAINER_KEY_PATTERN.test(key)) {
+        result[key] = maskContainer(v)
+      }
+      // 其余递归
+      else {
+        result[key] = maskSensitive(v)
+      }
     }
     return result
+  }
+  return value
+}
+
+/** 对容器内所有字符串值掩码，非字符串值递归 */
+function maskContainer(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(maskContainer)
+  }
+  if (value !== null && typeof value === 'object') {
+    const result: Record<string, unknown> = {}
+    for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+      // 容器内：字符串值全掩，非字符串值递归
+      if (typeof v === 'string') {
+        result[key] = '***'
+      } else {
+        result[key] = maskContainer(v)
+      }
+    }
+    return result
+  }
+  // 字符串值掩码
+  if (typeof value === 'string') {
+    return '***'
   }
   return value
 }
