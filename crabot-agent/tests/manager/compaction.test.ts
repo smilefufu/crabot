@@ -123,6 +123,17 @@ describe('decideCompaction', () => {
     expect(decision.kind).toBe('force_hot')
   })
 
+  it('history.length === keepRecent 且超 hardCap 时 force_hot 应返回 none(splitAt=0 无东西可折,避免零进展空折叠)', () => {
+    const policy: CompactionPolicy = { keepRecent: 3, cacheTtlMs: 1000, foldTokenThreshold: 100, hardCapTokens: 100 }
+    const history = makeHistory(3) // === keepRecent(3) → splitAt=0,foldMessages=[];3*50=150 > hardCapTokens(100)
+    const nowMs = 10_000
+    const state = baseState({ recent: history, lastActiveAt: new Date(nowMs - 500).toISOString() }) // 热,走 force_hot 分支
+
+    const decision = decideCompaction({ state, nowMs, policy, estimateTokens })
+
+    expect(decision).toEqual({ kind: 'none' })
+  })
+
   it('前缀稳定性:同一 state 追加一条消息后,序列化的"静态段(摘要+历史)"前缀逐字节不变', () => {
     // 模拟真实用法:rollingSummary + recent 拼接成发给 LLM 的静态前缀。
     // 只要 decideCompaction 在同一 regime(此处均为 none)下不改写/不重建已有消息,

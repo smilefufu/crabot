@@ -86,6 +86,14 @@ export function decideCompaction(args: {
   }
 
   if (estimateTokens(history) > policy.hardCapTokens) {
+    if (foldMessages.length === 0) {
+      // history.length === keepRecent:splitAt=0,没有任何可折叠的历史(keep=全部历史)。
+      // 强行对空 transcript 调一次折叠 LLM 是零进展的空折叠——白烧一次调用,recent 原样不变,
+      // 还可能让已有 rollingSummary 被"无新增输入"的合并重写而漂移;热态 burst 下每次唤醒都会
+      // 重复这笔开销。fold_at_wake 分支已经被 estimateTokens([]) > foldTokenThreshold 自然
+      // 拦住(0 不可能 > 正数阈值),这里是 force_hot 分支唯一需要显式补的漏。
+      return { kind: 'none' }
+    }
     return { kind: 'force_hot', foldMessages, keep }
   }
   return { kind: 'none' }
