@@ -1106,6 +1106,21 @@ export class WorkerHarness {
       const { dialogObjectId } = found
 
       const now = this.deps.now()
+      // P4 Task 4 第四轮收口(复审 PoC 实证):不能再硬编码 'running' 落账——
+      // ClaudeCodeAdapter.fork()(adapter.ts:452-460)在 `return handle` 之前就
+      // `await transitionExited(...)`,后者同步调用 `onStateChange` → handleStateChange →
+      // processStateChange → `await withLock(...)`。AsyncMutex.run 的入队在第一个 await 之前
+      // 就同步完成(见 async-mutex.ts),这次入队必然发生在 fork() 返回、这里重新取锁之前,
+      // 所以 processStateChange 100% 先于这段执行——此时台账里还没有这条 fork 化身,
+      // `findIncarnation` 落空,命中 processStateChange 的 `if (!target) return` 被永久
+      // 丢弃(cc 场景下 fork 是同步跑完的一次性 `claude -p` 调用,落地时几乎总已经是
+      // exited)。以 `adapter.state(forkHandle)` 现读现取为准,而不是假设为 running——
+      // cc 这类"fork 返回时已经跑完"的实现落账即是终态;builtin 的 fork() 把
+      // runForkBurst 做成 fire-and-forget(未 await 就返回 handle),这里读到的仍是
+      // running,后续真正的 onStateChange 回调到时台账里已经有这条化身,能正常找到并
+      // 修正,不会重演同一个丢弃。
+      const observedState = await prep.adapter.state(forkHandle)
+      const exitedOnCommit = observedState === 'exited'
       await this.deps.ledger.upsertWorker(dialogObjectId, workerId, (prevWorker) => {
         if (!prevWorker) return undefined
         // fork 是一次性侧问,不影响主线 task.status(protocol-agent-v3 §5.3:"不影响主线")——
@@ -1116,17 +1131,31 @@ export class WorkerHarness {
         const forkIncarnation: Incarnation = {
           seq: forkHandle.seq,
           impl: prep.implId,
-          state: 'running',
+          state: observedState,
           workspace: prep.workspace,
           session_ref: forkHandle.session_ref,
           started_at: now,
           forked_from: prep.ref.seq,
+          // adapter.state() 只回答 running/idle/exited 三态,不携带 endReason;fork 是
+          // 一次性侧问,正常跑完(cc 场景下是 `claude -p` 子进程退出)就是 completed——
+          // 真正的崩溃辨别依赖 adapter 主动上报的回调,但那次回调已经被上面的竞态吞掉、
+          // 不会再发生第二次,这里只能取这个合理缺省(与 processStateChange 对非 kill
+          // 触发的 exited 取 'completed' 同一缺省,见该方法注释)。
+          ...(exitedOnCommit ? { ended_at: now, ended_reason: 'completed' as IncarnationEndReason } : {}),
         }
         return { ...prevWorker, incarnations: [...prevWorker.incarnations, forkIncarnation], updated_at: now }
       })
       // HarnessEventKind 没有专门的"fork/query"档位(worker-events.ts 是既定契约,Task 7
       // 不新增枚举值),用 state_changed 承载,detail 里标明是 fork 产生的新化身。
       await this.appendEvent(workerId, forkHandle.seq, 'state_changed', { kind: 'fork', from_seq: prep.ref.seq })
+      if (exitedOnCommit) {
+        // 补发被 processStateChange 丢弃的那次回调本该产生的"侧问已结束"事件——否则
+        // manager 收不到唤醒,query_worker 形同虚设(protocol-agent-v3 §4.1)。用 'exited'
+        // 这个既有 kind(而不是 processStateChange 正常路径用的 'state_changed')区分两条
+        // 路径,天然不会重复:这次回调已经在竞态里被 `!target` 吞掉,不会再触发第二次
+        // 'state_changed' 事件,所以这里补发的 'exited' 永远只会发生一次。
+        await this.appendEvent(workerId, forkHandle.seq, 'exited', { reason: 'completed', kind: 'fork' })
+      }
       return { forkSeq: forkHandle.seq }
     })
   }

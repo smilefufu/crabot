@@ -35,6 +35,10 @@ interface FakeAdapterOpts {
   readonly spawnShouldFail?: Error
   readonly forkShouldFail?: Error
   readonly sendInputBehavior?: (h: IncarnationHandle, text: string, opts?: { raw?: boolean }) => Promise<void> | void
+  /** P4 Task 4 第四轮:严格复刻 ClaudeCodeAdapter.fork()(adapter.ts:452-460)的调用顺序——
+   * 在 `return handle` 之前就把化身转到 exited 并**同步**调用 onStateChange。用于回归
+   * "fork 落地即已终态"这条竞态(见下面 describe 块)。 */
+  readonly forkSyncExitBeforeReturn?: boolean
 }
 
 class FakeAdapter implements WorkerAdapter {
@@ -79,6 +83,15 @@ class FakeAdapter implements WorkerAdapter {
     // fork 自己的 session_ref，刻意与 prev.session_ref(父化身/主线的引用)不同，好让
     // 回归测试能验证 harness 没有把父化身的引用错抄给 fork 化身(protocol-agent-v3 §6.1)。
     const handle: IncarnationHandle = { worker_id: prev.worker_id, seq, impl: this.implId, session_ref: `fork-ref-${prev.worker_id}#${seq}` }
+    if (this.opts.forkSyncExitBeforeReturn) {
+      // 严格复刻 cc adapter 的 fork():在这个同步语句执行到 `return handle` 之前，就已经
+      // 把化身状态转到 exited 并调用 onStateChange——AsyncMutex.run 的入队是同步的
+      // (harness.ts withLock 注释)，所以 harness.handleStateChange 派生的 processStateChange
+      // 对这个 worker_id 的锁请求，必然排在 queryWorker 落账段(第二次 withLock)前面。
+      this.states.set(handleKey(handle), 'exited')
+      this.opts.onStateChange?.(handle, 'exited')
+      return handle
+    }
     this.states.set(handleKey(handle), 'running')
     return handle
   }
@@ -450,6 +463,55 @@ describe('WorkerHarness.queryWorker', () => {
     expect(stateEvents).toHaveLength(1)
     expect(stateEvents[0].seq).toBe(2)
     expect(stateEvents[0].detail).toEqual({ kind: 'fork', from_seq: 1 })
+  })
+
+  // ---- P4 Task 4 第四轮:fork 落地即已终态的回调竞态(复审 PoC)----
+  //
+  // ClaudeCodeAdapter.fork()(adapter.ts:452-460)在 `return handle` 之前就
+  // `await this.transitionExited(...)`，后者同步调用 `onStateChange` → harness.handleStateChange
+  // → processStateChange → `await withLock(...)`。AsyncMutex.run 的入队在第一次 await 之前就
+  // 同步完成(async-mutex.ts)，所以这次入队必然发生在 fork() 返回、queryWorker 才去拿"落账段"
+  // 那把锁(lock2)之前——processStateChange 100% 先于 lock2 执行。此时台账里还没有这条 fork
+  // 化身，`findIncarnation` 返回 undefined，命中 harness.ts `if (!target) return` 被永久丢弃：
+  // ①fork 化身在台账里被硬编码成 'running'，永远等不到第二次回调来修正；②manager 收不到
+  // "侧问答案就绪"的唤醒事件，query_worker 这个工具形同虚设(protocol-agent-v3 §4.1)。
+  //
+  // 用 forkSyncExitBeforeReturn 严格复刻这个调用顺序，断言修复后：①fork 化身落账即是
+  // 'exited' 终态，不是卡死的 'running'；②有一条"侧问已结束"的事件被补发；③主线台账不受
+  // 污染。
+  it('fork 化身在 adapter.fork() 返回前就已经同步转 exited(cc 真机顺序)→ 落账即终态,且补发结束事件', async () => {
+    const { harness, fake, workersDir } = await makeHarness({ caps: { fork: true }, forkSyncExitBeforeReturn: true })
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    const result = await harness.queryWorker(worker.worker_id, '侧问一下')
+    expect(result.forkSeq).toBe(2)
+
+    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const forkEntry = w.incarnations.find((i) => i.seq === 2)!
+    // 断言①:fork 化身不是硬编码的 'running'，而是 adapter 的真实状态(exited)。
+    expect(forkEntry.state).toBe('exited')
+    expect(forkEntry.ended_reason).toBeDefined()
+    expect(forkEntry.ended_at).toBeDefined()
+
+    // 断言②:processStateChange 因 `!target` 丢弃的那次回调，其"侧问已结束"的语义必须被
+    // lock2 补发出来——不能因为落账段没有专门的唤醒事件就让 manager 永远收不到通知。读盘
+    // 而不只读内存 onEvent 数组，与本文件其它"失败留痕"用例同一纪律。
+    const log = new WorkerEventLog(join(workersDir, worker.worker_id))
+    const onDisk = await log.readAll()
+    const forkSeqEvents = onDisk.filter((e) => e.seq === 2)
+    expect(forkSeqEvents.some((e) => e.kind === 'exited')).toBe(true)
+    // 不能重复:processStateChange 正常路径本该发的是 kind:'state_changed'、detail:{to:'exited'}——
+    // 那次回调已经被 `!target` 吞掉，不会再触发第二次 appendEvent，所以不应该出现这个形状的
+    // 事件(与 lock2 无条件都会发的 `state_changed{kind:'fork', from_seq}` 落账事件是两码事，
+    // 那条不受本次竞态影响，始终存在)。
+    expect(forkSeqEvents.some((e) => e.kind === 'state_changed' && (e.detail as { to?: string } | undefined)?.to === 'exited')).toBe(false)
+
+    // 断言③:主线(seq=1)台账完全不受这条竞态影响。
+    const mainEntry = w.incarnations.find((i) => i.seq === 1)!
+    expect(mainEntry.state).toBe('running')
+    expect(w.task.status).toBe('running')
+    expect(fake.forkCalls).toHaveLength(1)
   })
 })
 
