@@ -536,6 +536,43 @@ describe('WorkerHarness.readWorkerOutput', () => {
 
     await expect(harness.readWorkerOutput(worker.worker_id, { offset: 0 })).rejects.toThrow(/no adapter registered/)
   })
+
+  // ---- P4 Task 4:opts.seq 读指定化身(query_worker fork 分支的答案) ----
+
+  it('给 opts.seq → 读取该 seq 对应化身(如 fork 分支)的输出,不是主线', async () => {
+    const { harness, fake } = await makeHarness({ caps: { fork: true } })
+    const worker = await harness.spawnWorker(spawnParams())
+    const { forkSeq } = await harness.queryWorker(worker.worker_id, '侧问一下')
+
+    const result = await harness.readWorkerOutput(worker.worker_id, { offset: 0 }, { seq: forkSeq })
+
+    expect(result).toEqual({ chunk: '', nextCursor: { offset: 0 } })
+    expect(fake.readOutputCalls).toHaveLength(1)
+    expect(fake.readOutputCalls[0]).toEqual({
+      worker_id: worker.worker_id,
+      seq: forkSeq,
+      impl: 'builtin',
+      session_ref: `fork-ref-${worker.worker_id}#${forkSeq}`,
+    })
+  })
+
+  it('省略 opts(或不传 seq)→ 逐字沿用既有行为,读主线化身,fork 之后也不被顶替', async () => {
+    const { harness, fake } = await makeHarness({ caps: { fork: true } })
+    const worker = await harness.spawnWorker(spawnParams())
+    await harness.queryWorker(worker.worker_id, '侧问一下')
+
+    await harness.readWorkerOutput(worker.worker_id, { offset: 0 })
+
+    expect(fake.readOutputCalls).toHaveLength(1)
+    expect(fake.readOutputCalls[0].seq).toBe(1)
+  })
+
+  it('opts.seq 在台账中不存在 → 抛出明确错误,不静默返回空 chunk', async () => {
+    const { harness } = await makeHarness({ caps: { fork: true } })
+    const worker = await harness.spawnWorker(spawnParams())
+
+    await expect(harness.readWorkerOutput(worker.worker_id, { offset: 0 }, { seq: 99 })).rejects.toThrow(/seq/)
+  })
 })
 
 describe('WorkerHarness.handleStateChange — 同状态重复回调', () => {

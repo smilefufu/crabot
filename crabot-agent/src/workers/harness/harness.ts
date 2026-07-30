@@ -721,14 +721,26 @@ export class WorkerHarness {
     await this.appendEvent(worker.worker_id, newHandle.seq, 'spawned', { impl: targetImpl, from_seq: source.seq })
   }
 
+  /**
+   * P4 Task 4 additive:`opts.seq` 缺省时逐字沿用既有行为(读主线化身,同 sendToWorker——
+   * 不被 fork 出的侧问分支顶替)。给了 `opts.seq` 则改读该 seq 对应的化身——供 query_worker
+   * 的侧问答案就绪后按事件里给出的 seq 读取(P3 终审已预留:"queryWorker 的 fork 答案无法
+   * 经 harness 读 → P4 接线时加按 seq 读输出的入口")。查找按 findIncarnationBySeq 的
+   * "取最后一条匹配"原则,与 findIncarnation/patchIncarnationBySeq 的 (impl,seq) 判定同一
+   * 纪律(见该函数注释)。seq 不存在时抛明确错误,不静默返回空 chunk。
+   */
   async readWorkerOutput(
     workerId: string,
-    cursor: OutputCursor
+    cursor: OutputCursor,
+    opts?: { seq?: number }
   ): Promise<{ chunk: string; nextCursor: OutputCursor }> {
     const found = await this.deps.ledger.findWorker(workerId)
     if (!found) throw new WorkerNotFoundError(workerId)
-    // 主线化身,同 sendToWorker——读输出默认读主线,不被 fork 出的侧问分支顶替。
-    const incarnation = mainlineIncarnation(found.worker)
+    const incarnation =
+      opts?.seq === undefined ? mainlineIncarnation(found.worker) : findIncarnationBySeq(found.worker, opts.seq)
+    if (!incarnation) {
+      throw new Error(`WorkerHarness.readWorkerOutput: no incarnation with seq=${opts?.seq} found for worker ${workerId}`)
+    }
     const adapter = this.deps.adapters.get(incarnation.impl as WorkerImplId)
     if (!adapter) {
       throw new Error(`WorkerHarness.readWorkerOutput: no adapter registered for impl '${incarnation.impl}'`)
@@ -1208,6 +1220,23 @@ function findIncarnation(worker: LedgerWorker, impl: WorkerImplId, seq: number):
   let lastMatch: Incarnation | undefined
   for (const inc of worker.incarnations) {
     if (inc.impl === impl && inc.seq === seq) lastMatch = inc
+  }
+  return lastMatch
+}
+
+/**
+ * `readWorkerOutput(workerId, cursor, { seq })` 专用:按 seq 精确定位一个化身条目(不限
+ * 主线/fork,取最后一条匹配——与 findIncarnation 的 (impl,seq) 判定同一"取最后一条"原则)。
+ * 调用方(query_worker 触发的事件只给出 seq,不携带 impl)拿不到 impl 参与判定,因此只按
+ * seq 匹配;实践中 fork 化身的 impl 恒等于其父化身(adapter.fork 与父化身共用同一个
+ * adapter 实例),不会产生跨 impl 撞号的歧义——唯一的例外是该 worker 曾经历跨实现切换
+ * 且新旧 adapter 实例恰好在 seq 计数上撞号(protocol-agent-v3 §6.1 已知限制),这种边缘
+ * 情况下"取最后一条"与本文件其它同类查找函数保持一致的降级行为,不单独处理。
+ */
+function findIncarnationBySeq(worker: LedgerWorker, seq: number): Incarnation | undefined {
+  let lastMatch: Incarnation | undefined
+  for (const inc of worker.incarnations) {
+    if (inc.seq === seq) lastMatch = inc
   }
   return lastMatch
 }
