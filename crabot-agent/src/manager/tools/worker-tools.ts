@@ -1,45 +1,48 @@
 /**
  * worker 工具集 —— manager 唯一的 worker 编排入口(protocol-agent-v3 §4.1/§4.3/§5.5)。
  *
- * 六个工具全部是 `WorkerHarness`(P3 已合并,本模块只调用、不修改)既有方法的薄封装:只负责
+ * 六个工具全部是 `WorkerHarness`(P3 已合并,本模块只调用、不修改,唯一的 additive 例外见
+ * `harness.readWorkerOutput` 的 `opts.seq` 参数)既有方法的薄封装:只负责
  * 1) 组装 harness 方法的入参(`spawn_worker` 据 `deps.context()` 填 `origin`/`report_to`);
- * 2) 把 harness 的返回值/异常转成 engine `ToolCallResult`——**异常永不穿透**成 engine 层错误,
- *    统一转成 `isError: true` 的可读文本,manager 能读到失败原因并自行决策(如 worker 不存在
- *    就换个 id 或重新 spawn,protocol-agent-v3 §4.3)。
+ * 2) 把 harness 的返回值/异常转成 engine `ToolCallResult`——除 `query_worker`(见下)外,
+ *    异常永不穿透成 engine 层错误,统一转成 `isError: true` 的可读文本,manager 能读到失败
+ *    原因并自行决策(如 worker 不存在就换个 id 或重新 spawn,protocol-agent-v3 §4.3)。
  *
  * ---
  *
  * ## 同步性语义的实现取舍(protocol §4.1"等待 = end_turn")
  *
  * 协议表(§4.3)把 `spawn_worker`/`send_to_worker`/`query_worker` 标"异步",
- * `read_worker_output`/`list_workers`/`kill_worker` 标"同步"。但 `WorkerHarness` 对应的六个
- * 方法都各自返回一个不可拆分的 Promise——`spawnWorker` 内部顺序 await 了 workspace 解析、
- * 台账初始写入、`adapter.provision`、`adapter.spawn`;`sendToWorker` 顺序 await 了入信箱与
- * `inbox.flush`(经 `adapter.sendInput`,命中终态化身时还会走一整套 kill+provision+spawn 的
- * 透明接续);`queryWorker` 顺序 await 了 `adapter.fork` 与台账写入——三者都不是"发个信号就
- * 立刻返回"的轻量调用,而是"编排动作完整落地"才 resolve。
- *
- * 若把这三个工具做成字面意义的 JS fire-and-forget(调用后不 await、立即返回,类似
- * `harness.spawnWorker(p).catch(...)`),会丢失两样东西:
- * 1. `spawn_worker`/`query_worker` 依赖 harness 内部生成的标识符(`worker_id`/`forkSeq`)
- *    供 LLM 后续引用这次操作的产物——不 await 就拿不到这两个值,工具形同废掉;
+ * `read_worker_output`/`list_workers`/`kill_worker` 标"同步"。`spawn_worker`/`send_to_worker`
+ * 与 `read_worker_output`/`list_workers`/`kill_worker` 这五个工具都完整 `await` 对应的
+ * harness 方法——`spawnWorker` 顺序 await workspace 解析、台账初始写入、`adapter.provision`、
+ * `adapter.spawn`;`sendToWorker` 顺序 await 入信箱与 `inbox.flush`(经 `adapter.sendInput`,
+ * 命中终态化身时还会走一整套 kill+provision+spawn 的透明接续)——这些都是"编排动作完整
+ * 落地"才 resolve 的有限时长调用,不会进一步阻塞等待 worker 自己执行任务、产出真正的回复
+ * (那部分永远经由 harness 的 `onEvent`/`onStateChange` 异步发生),完整 await 并不违反
+ * "manager 的 loop 内不存在阻塞等待原语"这条约束。这五个工具若不 await,会丢失两样东西:
+ * 1. `spawn_worker` 依赖 harness 内部生成的 `worker_id` 供 LLM 后续引用——不 await 就拿不到;
  * 2. `WorkerNotFoundError`/`TaskCancelledError`/`ImplAlreadyUsedError` 一类的失败原因就没有
- *    办法在这次调用内回传给 LLM,直接违反"manager 应能读到失败原因并自行决策"这条明确要求
- *    (task-4-brief.md)。
+ *    办法在这次调用内回传给 LLM,违反"manager 应能读到失败原因并自行决策"这条要求。
  *
- * 因此六个工具在实现上都完整 `await` 对应的 harness 方法,把结果/异常同步转成 tool_result。
- * 这与协议"异步"的语义并不冲突:harness 这些方法本身只等到"这次编排动作完成"为止(spawn
- * 命令已发出且化身已 running、消息已经送进 worker 的信箱/tmux、侧问已经 fork 出新化身),
- * **不会**进一步阻塞等待 worker 自己执行任务、产出真正的回复——那部分永远经由 harness 的
- * `onEvent`/`onStateChange` 在这次调用之外异步发生(idle/exited/query 结果作为事件唤醒
- * manager,是 P4 唤醒机制的职责,不在本工具集范围内)。换句话说:我们等的是一次有限时长的
- * "发起"动作,不是等 worker 把活干完,因此完整 await 并不违反"manager 的 loop 内不存在阻塞
- * 等待原语"这条约束。三个"异步"工具的输出因此刻意写得简短(确认式:status + 关键标识符),
- * 提示 LLM 后续进展会由事件唤醒——这是协议"异步"语义在响应内容上的体现,不代表调用本身没有
- * 等待 harness 落地。
+ * `query_worker` 是唯一的例外,采用字面意义的 JS fire-and-forget(调用 `harness.queryWorker`
+ * 后不 `await`、立即返回,游离 promise 用 `.catch()` 兜住)。原因:`harness.queryWorker` 顺序
+ * await `adapter.fork`,而 `claude-code/adapter.ts` 的 `fork()` 实现是
+ * `await execFileAsync('/bin/sh', ['-c', shellCommand], ...)`——等的是整个无头 `claude -p`
+ * 子进程跑完(一次完整 LLM 调用,几十秒到数分钟),不是"发起"这一有限时长的编排动作。完整
+ * await 会把 manager 的这一整个 turn 阻塞住,违反 protocol-agent-v3 §4.1/§4.3"慢工具异步
+ * 发起即返回,结果作为事件唤醒"。代价:`forkSeq` 拿不到(它在 `adapter.fork` 落地之后才由
+ * harness 生成),`WorkerNotFoundError`/`CapabilityNotSupportedError` 等失败原因也不再能在
+ * 这次调用内回传给 LLM,只记诊断日志——不打破"manager 应能读到失败原因"这条要求的字面表述
+ * 的场景是:manager 观察不到进展(既无 fork 化身出现,也没有对应事件)时,应主动用
+ * `list_workers` 核实,不是假定这条要求覆盖 `query_worker` 这一条异步发起路径(controller
+ * 决定,理由见上,记录于 task-4-report.md 追加内容)。
  *
- * 这是一处偏离最初"是否该用字面 fire-and-forget"设想的实现取舍,原因见上;若未来 harness
- * 提供了"仅等发起、不等落地"的拆分入口,应优先切换过去。
+ * 三个"异步"工具的输出因此刻意写得简短(确认式:status + 关键标识符,`query_worker` 甚至
+ * 只有 status + worker_id),提示 LLM 后续进展会由事件唤醒。
+ *
+ * 若未来 harness 提供了"仅等 fork 发起、不等 `claude -p` 子进程落地"的拆分入口,`query_worker`
+ * 应优先切换回完整 await 的实现,与其余五个工具的语义保持一致。
  *
  * ## isReadOnly
  *
@@ -66,6 +69,11 @@ export interface WorkerToolsContext {
   readonly creatorFriendId?: string
   /** 结果回报目标,默认 = 当前 session(protocol-agent-v3 §3)。 */
   readonly reportTo: { channel_id: string; session_id: string }
+  /**
+   * 本次唤醒的触发来源,填入 `origin.trigger_type`;缺省 'message'。给 scheduled 路由
+   * (Task 8)/system 场景预留——本任务只加这个可选出口,不在这里做路由判断。
+   */
+  readonly triggerType?: LedgerWorker['origin']['trigger_type']
 }
 
 export interface WorkerToolsDeps {
@@ -151,9 +159,9 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
             spawned_by_session: ctx.managerKey,
             spawned_by_episode: ctx.episodeId,
             creator_friend_id: ctx.creatorFriendId,
-            // 协议未给出更细的来源信号(deps.context() 不携带),这里按最常见场景填 'message';
-            // 'scheduled'/'system' 场景需要 context() 补充触发来源才能精确区分,超出本任务范围。
-            trigger_type: 'message',
+            // 缺省按最常见场景填 'message';scheduled/system 场景由 context() 提供
+            // triggerType 覆盖(如 Task 8 的 scheduled 路由)。
+            trigger_type: ctx.triggerType ?? 'message',
           },
           report_to: ctx.reportTo,
           impl,
@@ -198,13 +206,24 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     },
   })
 
-  // --- query_worker(异步:侧问发起即返回,答案由事件唤醒) ---
+  // --- query_worker(字面 fire-and-forget:发起后不 await,立即返回;答案由事件唤醒) ---
+  //
+  // 与其余五个工具不同的实现取舍:cc worker 的 harness.queryWorker → adapter.fork 会 await
+  // 一整个无头 `claude -p` 子进程跑完(一次完整 LLM 调用,几十秒到数分钟)——完整 await 会把
+  // manager 的这一整个 turn 阻塞住,违反 protocol-agent-v3 §4.1/§4.3"慢工具异步发起即返回,
+  // 结果作为事件唤醒"。因此本工具字面意义地不等 harness.queryWorker 落地:调用后立即返回
+  // 简短确认,游离 promise 用 .catch() 兜住(不得产生 unhandledRejection,P1/P3 反复踩过的
+  // 坑),失败只记诊断日志——这意味着 WorkerNotFoundError/CapabilityNotSupportedError 等
+  // 已知错误不再能在这次调用内回传给 LLM(相对其余五个工具"异常永不穿透,统一转 isError"
+  // 这条约定的一处刻意偏离,controller 决定,见 task-4-report.md 追加记录)。forkSeq 同理
+  // 拿不到(它在 adapter.fork 落地之后才由 harness 生成),不写进返回文本。
   const queryWorker = defineTool({
     name: 'query_worker',
     description:
-      '对正在跑的 worker 发起一次侧问(fork 语义),不打扰主线执行。异步语义:本工具在侧问' +
-      '化身创建完成后即返回,不等答案;答案就绪会作为事件唤醒你,届时用 read_worker_output' +
-      '(带返回的 fork_seq 所在化身)读取。目标实现需支持 fork 能力,否则会失败。',
+      '对正在跑的 worker 发起一次侧问(fork 语义),不打扰主线执行。fire-and-forget:本工具' +
+      '发起侧问后立即返回,不等侧问化身创建完成,拿不到 fork_seq;答案就绪(或发起失败)只' +
+      '会作为事件唤醒你,届时事件会带上该侧问化身的 seq,用 read_worker_output 传入该 seq ' +
+      '读取答案。目标实现需支持 fork 能力,不支持时的失败不会体现在这次调用的返回里。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -219,12 +238,10 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       if (!worker_id || typeof worker_id !== 'string') return invalid('query_worker: worker_id 必填且为字符串')
       if (!question || typeof question !== 'string') return invalid('query_worker: question 必填且为字符串')
 
-      try {
-        const { forkSeq } = await harness.queryWorker(worker_id, question)
-        return ok({ status: 'queried', worker_id, fork_seq: forkSeq })
-      } catch (error) {
-        return mapError(`query_worker(${worker_id})`, error)
-      }
+      harness.queryWorker(worker_id, question).catch((error) => {
+        console.error(`[worker-tools] query_worker(${worker_id}) 后台发起失败(fire-and-forget):`, error)
+      })
+      return ok({ status: 'queried', worker_id })
     },
   })
 
@@ -232,23 +249,29 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   const readWorkerOutput = defineTool({
     name: 'read_worker_output',
     description:
-      '同步读取 worker 主线化身的增量输出(从 offset 开始,byte-cap 截断,全文另落盘留路径)。' +
-      '首次调用 offset 传 0,之后用上次返回的 next_offset 续读。',
+      '同步读取 worker 化身的增量输出(从 offset 开始,byte-cap 截断,全文另落盘留路径)。' +
+      '首次调用 offset 传 0,之后用上次返回的 next_offset 续读。缺省读主线化身;读侧问' +
+      '分支(query_worker 触发)的答案时传 seq——事件里会给出该侧问化身的 seq。',
     inputSchema: {
       type: 'object',
       properties: {
         worker_id: { type: 'string', description: '目标 worker id' },
         offset: { type: 'number', description: '读取起点(上次返回的 next_offset),缺省 0' },
+        seq: { type: 'number', description: '读侧问分支的答案时传 query 事件里给出的 seq;缺省读主线化身' },
       },
       required: ['worker_id'],
     },
     isReadOnly: true,
     call: async (input): Promise<ToolCallResult> => {
-      const { worker_id, offset } = input as { worker_id?: string; offset?: number }
+      const { worker_id, offset, seq } = input as { worker_id?: string; offset?: number; seq?: number }
       if (!worker_id || typeof worker_id !== 'string') return invalid('read_worker_output: worker_id 必填且为字符串')
 
       try {
-        const { chunk, nextCursor } = await harness.readWorkerOutput(worker_id, { offset: offset ?? 0 })
+        const { chunk, nextCursor } = await harness.readWorkerOutput(
+          worker_id,
+          { offset: offset ?? 0 },
+          seq !== undefined ? { seq } : undefined
+        )
         return ok({ worker_id, chunk, next_offset: nextCursor.offset })
       } catch (error) {
         return mapError(`read_worker_output(${worker_id})`, error)

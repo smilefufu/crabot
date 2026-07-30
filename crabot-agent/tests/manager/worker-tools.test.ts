@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -163,6 +163,16 @@ function parseOutput(output: string): Record<string, unknown> {
   return JSON.parse(output) as Record<string, unknown>
 }
 
+/** 有界轮询：等待游离 promise（fire-and-forget）在后台落地，而不是猜测完成时机。 */
+async function waitUntil(cond: () => Promise<boolean>, timeoutMs = 2000, intervalMs = 10): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await cond()) return
+    await new Promise((resolve) => setTimeout(resolve, intervalMs))
+  }
+  throw new Error(`waitUntil: condition not met within ${timeoutMs}ms`)
+}
+
 beforeEach(async () => {
   dataDir = await fs.mkdtemp(join(tmpdir(), 'worker-tools-test-'))
   nowValue = Date.parse('2026-01-01T00:00:00.000Z')
@@ -219,6 +229,19 @@ describe('spawn_worker', () => {
       trigger_type: 'message',
     })
     expect(worker!.report_to).toEqual(CTX.reportTo)
+  })
+
+  it('context() 提供 triggerType 时透传到 origin.trigger_type，缺省仍是 message', async () => {
+    const { harness } = await makeHarness()
+    const scheduledCtx: WorkerToolsContext = { ...CTX, triggerType: 'scheduled' }
+    const tools = buildWorkerTools({ harness, context: () => scheduledCtx })
+    const spawnWorker = tools.find((t) => t.name === 'spawn_worker')!
+
+    const result = await spawnWorker.call({ title: '定时任务', prompt: '按计划执行' }, {})
+    const parsed = parseOutput(result.output)
+    const listed = await harness.listWorkers(CTX.dialogObjectId)
+    const worker = listed.find((w) => w.worker_id === parsed.worker_id)
+    expect(worker!.origin.trigger_type).toBe('scheduled')
   })
 
   it('title/prompt 缺失或 impl 非法 → isError:true，且不触碰 harness', async () => {
@@ -297,40 +320,119 @@ describe('send_to_worker', () => {
   })
 })
 
-// ---- query_worker ----
-
+// ---- query_worker（fire-and-forget：不等 harness.queryWorker 落地，立即返回） ----
+//
+// 与其它五个工具不同：cc worker 的 harness.queryWorker → adapter.fork 会 await 一整个无头
+// `claude -p` 子进程跑完（几十秒到数分钟），完整 await 会把 manager 的整个 turn 阻塞住，
+// 违反 protocol-agent-v3 §4.1/§4.3"慢工具异步发起即返回，结果作为事件唤醒"。因此本工具
+// 改为字面 JS fire-and-forget：调用 harness.queryWorker 后不 await，立即返回简短确认；
+// 游离 promise 用 .catch() 兜住，任何失败（含 WorkerNotFoundError/CapabilityNotSupportedError）
+// 只记诊断日志，不再能在这次调用内回传给 LLM——这是相对其余五个工具的一处刻意语义偏离，
+// 见 controller 决定（task-4-report.md 追加记录）。forkSeq 因此在返回时还不存在，不写进
+// 输出；answer/fork 化身就绪由事件唤醒，届时用 read_worker_output 传 seq 读取。
 describe('query_worker', () => {
-  it('fork 能力开启时异步返回简短确认（status + fork_seq）', async () => {
+  it('harness.queryWorker 迟迟不 resolve（卡在 adapter.fork）时，工具仍在毫秒级返回，不等它落地', async () => {
+    let releaseFork!: () => void
+    const forkGate = new Promise<void>((resolve) => {
+      releaseFork = resolve
+    })
+    const { harness, fake } = await makeHarness({ caps: { fork: true } })
+    const worker = await harness.spawnWorker(directSpawnParams())
+    const originalFork = fake.fork.bind(fake)
+    fake.fork = async (prev, forkInput) => {
+      await forkGate
+      return originalFork(prev, forkInput)
+    }
+    const tools = buildWorkerTools({ harness, context: () => CTX })
+    const queryWorker = tools.find((t) => t.name === 'query_worker')!
+
+    const start = Date.now()
+    const result = await queryWorker.call({ worker_id: worker.worker_id, question: '现在进展如何？' }, {})
+    const elapsed = Date.now() - start
+
+    // adapter.fork 卡在 forkGate 上，永不在测试超时内自行 resolve；工具在毫秒级返回证明
+    // 它没有 await harness.queryWorker 的落地。
+    expect(elapsed).toBeLessThan(200)
+    expect(result.isError).toBe(false)
+    const parsed = parseOutput(result.output)
+    // 拿不到 fork_seq（它在 adapter.fork 落地之后才由 harness 生成）——只回确认式简短输出。
+    expect(parsed).toEqual({ status: 'queried', worker_id: worker.worker_id })
+
+    // 收尾：放开卡住的 fork，避免遗留 pending promise 影响其它用例。
+    releaseFork()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  })
+
+  it('游离 promise 落地后（fork 能力开启），侧问化身确实在后台异步建成——不是彻底扔掉不管', async () => {
     const { harness } = await makeHarness({ caps: { fork: true } })
     const worker = await harness.spawnWorker(directSpawnParams())
     const tools = buildWorkerTools({ harness, context: () => CTX })
     const queryWorker = tools.find((t) => t.name === 'query_worker')!
 
     const result = await queryWorker.call({ worker_id: worker.worker_id, question: '现在进展如何？' }, {})
-    expect(result.isError).toBe(false)
-    const parsed = parseOutput(result.output)
-    expect(parsed).toEqual({ status: 'queried', worker_id: worker.worker_id, fork_seq: 2 })
+    expect(parseOutput(result.output)).toEqual({ status: 'queried', worker_id: worker.worker_id })
+
+    await waitUntil(async () => {
+      const [w] = await harness.listWorkers(CTX.dialogObjectId)
+      return w.incarnations.length === 2
+    })
+    const [w] = await harness.listWorkers(CTX.dialogObjectId)
+    expect(w.incarnations[1]).toMatchObject({ seq: 2, forked_from: 1 })
   })
 
-  it('worker 不存在 → WorkerNotFoundError 转成可读 tool_result', async () => {
+  it('游离 promise reject（worker 不存在）时不产生 unhandledRejection，只记诊断日志；调用本身仍立即返回确认', async () => {
     const { harness } = await makeHarness({ caps: { fork: true } })
     const tools = buildWorkerTools({ harness, context: () => CTX })
     const queryWorker = tools.find((t) => t.name === 'query_worker')!
 
-    const result = await queryWorker.call({ worker_id: 'w-nope', question: '？' }, {})
-    expect(result.isError).toBe(true)
-    expect(result.output).toMatch(/worker not found/)
+    const unhandled: unknown[] = []
+    const onUnhandledRejection = (reason: unknown) => unhandled.push(reason)
+    process.on('unhandledRejection', onUnhandledRejection)
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    try {
+      const result = await queryWorker.call({ worker_id: 'w-nope', question: '？' }, {})
+      // 不再是 isError:true——失败发生在锁外的游离 promise 里，这次调用本身不知道。
+      expect(result.isError).toBe(false)
+      expect(parseOutput(result.output)).toEqual({ status: 'queried', worker_id: 'w-nope' })
+
+      // 给游离 promise 一个宏任务窗口 reject 并被 .catch() 兜住。
+      await new Promise((resolve) => setTimeout(resolve, 20))
+
+      expect(unhandled).toHaveLength(0)
+      expect(errorSpy).toHaveBeenCalled()
+      const loggedArgs = errorSpy.mock.calls.map((args) => args.join(' ')).join('\n')
+      expect(loggedArgs).toMatch(/query_worker/)
+      expect(loggedArgs).toMatch(/worker not found/)
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection)
+      errorSpy.mockRestore()
+    }
   })
 
-  it('目标实现不支持 fork → CapabilityNotSupportedError 同样转成可读 tool_result（覆盖"其它异常"）', async () => {
+  it('目标实现不支持 fork（CapabilityNotSupportedError）同样只是游离 reject，不产生 unhandledRejection', async () => {
     const { harness } = await makeHarness({ caps: { fork: false } })
     const worker = await harness.spawnWorker(directSpawnParams())
     const tools = buildWorkerTools({ harness, context: () => CTX })
     const queryWorker = tools.find((t) => t.name === 'query_worker')!
 
-    const result = await queryWorker.call({ worker_id: worker.worker_id, question: '？' }, {})
-    expect(result.isError).toBe(true)
-    expect(result.output).toMatch(/fork/)
+    const unhandled: unknown[] = []
+    const onUnhandledRejection = (reason: unknown) => unhandled.push(reason)
+    process.on('unhandledRejection', onUnhandledRejection)
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    try {
+      const result = await queryWorker.call({ worker_id: worker.worker_id, question: '？' }, {})
+      expect(result.isError).toBe(false)
+
+      await new Promise((resolve) => setTimeout(resolve, 20))
+
+      expect(unhandled).toHaveLength(0)
+      expect(errorSpy).toHaveBeenCalled()
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection)
+      errorSpy.mockRestore()
+    }
   })
 })
 
@@ -358,6 +460,26 @@ describe('read_worker_output', () => {
     const result = await readWorkerOutput.call({ worker_id: 'w-nope' }, {})
     expect(result.isError).toBe(true)
     expect(result.output).toMatch(/worker not found/)
+  })
+
+  it('传 seq → 透传给 harness.readWorkerOutput，读到 query_worker 侧问化身的输出（不是主线）', async () => {
+    const { harness, fake } = await makeHarness({ caps: { fork: true }, outputChunk: '侧问答案' })
+    const worker = await harness.spawnWorker(directSpawnParams())
+    const tools = buildWorkerTools({ harness, context: () => CTX })
+    const queryWorker = tools.find((t) => t.name === 'query_worker')!
+    const readWorkerOutput = tools.find((t) => t.name === 'read_worker_output')!
+
+    await queryWorker.call({ worker_id: worker.worker_id, question: '现在进展如何？' }, {})
+    await waitUntil(async () => {
+      const [w] = await harness.listWorkers(CTX.dialogObjectId)
+      return w.incarnations.length === 2
+    })
+
+    const result = await readWorkerOutput.call({ worker_id: worker.worker_id, seq: 2 }, {})
+    expect(result.isError).toBe(false)
+    const parsed = parseOutput(result.output)
+    expect(parsed.chunk).toBe('侧问答案')
+    expect(fake.readOutputCalls.at(-1)?.h.seq).toBe(2)
   })
 })
 
