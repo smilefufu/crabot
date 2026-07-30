@@ -98,8 +98,19 @@ export interface ManagerRegistryDeps {
 
 export class ManagerRegistry {
   private readonly loops = new Map<ManagerKey, ManagerLoop>()
-  /** 当前正有 episode 在跑的 key 集合——决定 evictIdle 是否可回收、onAsyncError 走 wakeUp 还是 enqueueDuringEpisode。 */
-  private readonly activeEpisodes = new Set<ManagerKey>()
+  /**
+   * 每个 key 当前"在途" episode 的引用计数——决定 evictIdle 是否可回收、onAsyncError 走
+   * wakeUp 还是 enqueueDuringEpisode。**必须是计数,不能是布尔/Set 的有无标记**:同一 key 可能
+   * 有多个并发唤醒同时在途(人类消息与该 session 监护的 worker 事件几乎必然撞上)——第二个
+   * 已经进了 `runWake`,可能仍在 `ManagerLoop` 内部 mutex 排队或执行,第一个却先 resolve。
+   * 若只用 Set,第一个 resolve 时 `finally` 会直接 `delete(key)`,把仍在途的第二个也一并
+   * 抹掉("有 episode 在跑"的标记被错误清空)——`evictIdle` 会在这个窗口误判该 key 空闲、
+   * 回收 `this.loops` 的引用;之后任何新事件经 `getOrCreate` 会在仍有旧 episode 运行的情况
+   * 下新建一个持有独立 mutex 的 `ManagerLoop`,与旧实例并发读写同一份 `ManagerSessionStore`
+   * 记录,造成 split-brain 覆盖/丢写。引用计数(进入 runWake +1、episode 结束 -1、归零才删)
+   * 能正确表达"还有几个在途",避免这个问题。
+   */
+  private readonly activeEpisodes = new Map<ManagerKey, number>()
   /** 每个 key 最近一次"活跃"的时间戳(创建时 / 每次 episode 结束时刷新),evictIdle 的判据。 */
   private readonly lastActiveAtMs = new Map<ManagerKey, number>()
 
@@ -179,7 +190,7 @@ export class ManagerRegistry {
   evictIdle(idleMs: number, nowMs: number): number {
     let evicted = 0
     for (const key of this.loops.keys()) {
-      if (this.activeEpisodes.has(key)) continue
+      if (this.isEpisodeActive(key)) continue
       const lastActive = this.lastActiveAtMs.get(key) ?? 0
       if (nowMs - lastActive <= idleMs) continue
       this.loops.delete(key)
@@ -192,7 +203,7 @@ export class ManagerRegistry {
   /** query_worker 异步失败 → 唤醒信号(见文件头"onAsyncError 出口"一节)。 */
   private handleAsyncToolError(key: ManagerKey, info: AsyncToolErrorInfo): void {
     const event = buildAsyncErrorWakeEvent(info, this.deps.now())
-    if (this.activeEpisodes.has(key)) {
+    if (this.isEpisodeActive(key)) {
       this.getOrCreate(key).enqueueDuringEpisode(event)
       return
     }
@@ -201,14 +212,21 @@ export class ManagerRegistry {
     })
   }
 
-  /** getOrCreate + 维护 activeEpisodes 的公共路径,所有 routeXxx / onAsyncError 都走这里。 */
+  /** 该 key 是否还有至少一个在途 episode(引用计数 > 0)。 */
+  private isEpisodeActive(key: ManagerKey): boolean {
+    return (this.activeEpisodes.get(key) ?? 0) > 0
+  }
+
+  /** getOrCreate + 维护 activeEpisodes 引用计数的公共路径,所有 routeXxx / onAsyncError 都走这里。 */
   private async runWake(key: ManagerKey, event: WakeEvent): Promise<EpisodeResult> {
     const loop = this.getOrCreate(key)
-    this.activeEpisodes.add(key)
+    this.activeEpisodes.set(key, (this.activeEpisodes.get(key) ?? 0) + 1)
     try {
       return await loop.wakeUp(event)
     } finally {
-      this.activeEpisodes.delete(key)
+      const remaining = (this.activeEpisodes.get(key) ?? 1) - 1
+      if (remaining <= 0) this.activeEpisodes.delete(key)
+      else this.activeEpisodes.set(key, remaining)
     }
   }
 }

@@ -35,6 +35,13 @@ export interface ToolFaceDeps {
   readonly callAdmin: <P, R>(m: string, p: P) => Promise<R>
   /** 该 manager 是否为保留的"系统任务"线程（决定 send_master_private / send_private_message 可见性）。 */
   readonly isSystemThread: boolean
+  /**
+   * query_worker 异步失败出口（Task 4 留口、Task 8 接线）：原样透传给 `buildWorkerTools` 的
+   * `WorkerToolsDeps.onAsyncError`——真正的绑定逻辑（按 key 决定 enqueueDuringEpisode 还是
+   * 重新 wakeUp）在 `ManagerRegistry.handleAsyncToolError`，本层只负责不掉链子地转发。
+   * 缺省不传时行为与之前完全一致（query_worker 失败仅 console.error）。
+   */
+  readonly onAsyncError?: Parameters<typeof buildWorkerTools>[0]['onAsyncError']
 }
 
 // ============================================================================
@@ -200,7 +207,7 @@ export function assertClosedToolFace(tools: readonly ToolDefinition[]): void {
 export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
   const messagingTools = buildMessagingFace(deps)
   const memoryTools = mcpServerToToolDefinitions(deps.memoryServer, 'crab-memory')
-  const workerTools = buildWorkerTools({ harness: deps.harness, context: deps.workerContext })
+  const workerTools = buildWorkerTools({ harness: deps.harness, context: deps.workerContext, onAsyncError: deps.onAsyncError })
   const infoTools = buildCrabotInfoTools({ callAdmin: deps.callAdmin })
 
   const tools = [...messagingTools, ...memoryTools, ...workerTools, ...infoTools]

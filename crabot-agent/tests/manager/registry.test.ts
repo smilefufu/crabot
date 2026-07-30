@@ -25,6 +25,9 @@ import type { WorkerHarness } from '../../src/workers/harness/harness.js'
 import type { HarnessEvent, HarnessEventKind } from '../../src/workers/harness/worker-events.js'
 import type { LLMAdapter, LLMStreamParams, EngineMessage } from '../../src/engine/index.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
+import { buildManagerToolFace } from '../../src/manager/tools/tool-face.js'
+import { createCrabMemoryServer } from '../../src/mcp/crab-memory.js'
+import { CapabilityNotSupportedError } from '../../src/workers/errors.js'
 
 // --- Fixtures / helpers（与 tests/manager/loop.test.ts 同一套约定） ---
 
@@ -83,6 +86,28 @@ function fakeLedger(workers: Record<string, LedgerWorker>): LedgerStore {
       return { dialogObjectId: dialogObjectIdForPrivate('friend-x'), worker }
     },
   } as unknown as LedgerStore
+}
+
+/** 最小 crab-memory server，供 buildManagerToolFace 装配用（照抄 tests/manager/tool-face.test.ts）。 */
+function makeMemoryServer() {
+  return createCrabMemoryServer(
+    {
+      rpcClient: { call: vi.fn() } as never,
+      moduleId: 'manager-registry-test',
+      getMemoryPort: async () => 19100,
+    },
+    { visibility: 'internal', scopes: [], isMasterPrivate: false },
+  )
+}
+
+/** 最小 crab-messaging 依赖桩，供 buildManagerToolFace 装配用（照抄 tests/manager/tool-face.test.ts）。 */
+function makeMessagingDeps() {
+  return {
+    rpcClient: { call: vi.fn() } as never,
+    moduleId: 'manager-registry-test',
+    getAdminPort: async () => 19001,
+    resolveChannelPort: async () => 19009,
+  }
 }
 
 describe('ManagerRegistry', () => {
@@ -282,6 +307,66 @@ describe('ManagerRegistry', () => {
     expect(evictedDuringEpisode).toBe(0)
   })
 
+  it('evictIdle: 同 key 两个并发 wakeUp 重叠在途——第一个 resolve 但第二个仍在 ManagerLoop 内跑时不得回收（activeEpisodes 必须是引用计数，不是布尔/Set 的有无标记）', async () => {
+    const key = 'wechat::sess-concurrent' as ManagerKey
+    let bEnteredResolve!: () => void
+    const bEntered = new Promise<void>((resolve) => {
+      bEnteredResolve = resolve
+    })
+    let releaseB!: () => void
+    const bGate = new Promise<void>((resolve) => {
+      releaseB = resolve
+    })
+
+    let callCount = 0
+    // mutex 保证严格串行：第一次 adapter.stream 调用必然对应第一个唤醒（A），第二次对应
+    // 第二个唤醒（B）——不依赖猜测的微任务计数，只依赖 ManagerLoop 内部 mutex 的既有语义。
+    const adapter: LLMAdapter = {
+      async *stream() {
+        callCount++
+        if (callCount === 1) {
+          yield* chunksFromContent([{ type: 'text', text: 'A 完成' }], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+          return
+        }
+        // B：先宣布"已经真正进入自己的 episode"，再卡住等测试放行——用真实 Promise 信号
+        // 证明 B 在 A resolve 之后仍然处于"在跑"状态，不靠固定延时猜测时间窗口。
+        bEnteredResolve()
+        await bGate
+        yield* chunksFromContent([{ type: 'text', text: 'B 完成' }], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+      },
+      updateConfig: () => {},
+    }
+
+    const registry = new ManagerRegistry(baseRegistryDeps({ adapter }))
+    const loopBefore = registry.getOrCreate(key)
+
+    // 同 key 连续发起两次唤醒、不等第一次完成——B 在 ManagerLoop 内部 mutex 上排队等 A。
+    // routeHumanMessages 内部在第一个 await 之前就已经同步完成 activeEpisodes 计数 +1，
+    // 因此这里不需要额外同步手段就能保证两次唤醒都已经"在途"。
+    const pA = registry.routeHumanMessages('wechat', 'sess-concurrent', [makeChannelMessage('A')])
+    const pB = registry.routeHumanMessages('wechat', 'sess-concurrent', [makeChannelMessage('B')])
+
+    const resultA = await pA // A 的 episode 已经 resolve：引用计数应从 2 降到 1，而不是被误删到 0
+    expect(resultA.outcome).toBe('completed')
+    await bEntered // B 已经真正进入自己的 episode（轮到它拿到 mutex、adapter.stream 已被调用）
+
+    // 复现点：A resolve 之后 B 仍在跑。旧实现（Set）在 A 的 finally 里无条件 delete(key)，
+    // 会把 B 仍然占用的标记一起抹掉——evictIdle 会误判该 key 空闲并回收 this.loops 的引用，
+    // 之后新事件经 getOrCreate 会新建一个持有独立 mutex 的 ManagerLoop，与仍在跑的 B 并发
+    // 读写同一份 ManagerSessionStore 记录（split-brain）。
+    const evictedWhileBRunning = registry.evictIdle(-1, Date.parse('2026-01-01T00:00:00.000Z'))
+    expect(evictedWhileBRunning).toBe(0)
+    expect(registry.getOrCreate(key)).toBe(loopBefore)
+
+    releaseB()
+    const resultB = await pB
+    expect(resultB.outcome).toBe('completed')
+
+    // 两个都结束后引用计数应归零——此时才真正允许回收。
+    const evictedAfterBothDone = registry.evictIdle(-1, Date.parse('2026-01-01T00:00:00.000Z'))
+    expect(evictedAfterBothDone).toBe(1)
+  })
+
   // --- onAsyncError 接线（Task 4 遗留出口） ---
 
   it('onAsyncError: episode 运行中收到异步错误 → enqueueDuringEpisode，不额外开新 episode', async () => {
@@ -358,6 +443,74 @@ describe('ManagerRegistry', () => {
     const state = await store.load(key)
     // 两次唤醒（人类消息 + 异步错误）都在历史里
     expect(JSON.stringify(state.recent)).toContain('query_failed')
+  })
+
+  it('onAsyncError 全链路打通（不只是类型上通）：经 registry 装配的真实工具面调用 query_worker，fork 恒失败 → onAsyncError 触发 → episode 内 enqueueDuringEpisode', async () => {
+    // 与上面两个用例的关键区别：这里不手工伪造 onAsyncError 回调，而是走
+    // buildManagerToolFace（真实生产代码，装配四个来源的完整工具面）产出的 query_worker
+    // 工具——验证 ToolFaceDeps.onAsyncError → buildWorkerTools 这条转发链真的接上了，不是
+    // 只在类型层面通过。fake harness.queryWorker 恒拒绝，模拟 codex worker 上 fork 恒
+    // CapabilityNotSupportedError 的真机场景（见 codex adapter：fork capability 恒 false）。
+    const key = 'wechat::sess-e2e-toolface' as ManagerKey
+    const fakeHarness = {
+      listWorkers: async (): Promise<LedgerWorker[]> => [],
+      queryWorker: async (): Promise<never> => {
+        throw new CapabilityNotSupportedError('codex', 'fork')
+      },
+    } as unknown as WorkerHarness
+
+    let triggered = false
+    const adapter: LLMAdapter = {
+      async *stream(params: LLMStreamParams) {
+        if (!triggered) {
+          triggered = true
+          // 从真实 LLMStreamParams.tools 里取出 registry 装配出的 query_worker 工具本身
+          // （而不是自己手搓一个），证明调用的是生产链路上真正会喂给 LLM 的那个工具定义。
+          const queryWorkerTool = params.tools.find((t) => t.name === 'query_worker')
+          expect(queryWorkerTool).toBeDefined()
+          const result = await queryWorkerTool!.call({ worker_id: 'w-codex-1', question: '现在进展如何？' }, {} as never)
+          // query_worker 本身是 fire-and-forget：调用不因后台失败而报错。
+          expect(result.isError).toBe(false)
+          // 给游离 promise 一个宏任务窗口 reject 并被 .catch() 触发 onAsyncError（同一 turn
+          // 内、episode 尚未收口，仍处于 activeEpisodes 计数 > 0 的窗口）。
+          await new Promise((resolve) => setTimeout(resolve, 20))
+        }
+        yield* chunksFromContent([{ type: 'text', text: '收到' }], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+      },
+      updateConfig: () => {},
+    }
+
+    const registry = new ManagerRegistry(
+      baseRegistryDeps({
+        adapter,
+        harness: fakeHarness,
+        toolFace: (k, isSystemThread, onAsyncError) =>
+          buildManagerToolFace({
+            harness: fakeHarness,
+            workerContext: () => ({
+              dialogObjectId: dialogObjectIdForPrivate('friend-e2e'),
+              managerKey: k,
+              reportTo: { channel_id: 'wechat', session_id: 'sess-e2e-toolface' },
+            }),
+            messagingDeps: makeMessagingDeps(),
+            memoryServer: makeMemoryServer(),
+            callAdmin: async () => ({}),
+            isSystemThread,
+            onAsyncError,
+          }),
+      })
+    )
+    const loop = registry.getOrCreate(key)
+    const enqueueSpy = vi.spyOn(loop, 'enqueueDuringEpisode')
+
+    const result = await registry.routeHumanMessages('wechat', 'sess-e2e-toolface', [makeChannelMessage('侧问一下 worker')])
+
+    expect(result.outcome).toBe('completed')
+    // 链路真的通了：registry 按 key 绑定的 onAsyncError 被触发，且因为此刻 episode 仍在跑
+    // （query_worker.call 是在 adapter.stream 内部同步发起的，尚未收口），走的是
+    // enqueueDuringEpisode 分支，不是额外开一个新 episode。
+    expect(enqueueSpy).toHaveBeenCalledTimes(1)
+    expect(JSON.stringify(enqueueSpy.mock.calls[0][0])).toContain('query_failed')
   })
 })
 
