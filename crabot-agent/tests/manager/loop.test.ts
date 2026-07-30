@@ -312,6 +312,81 @@ describe('ManagerLoop', () => {
     expect(serialized).toContain('新的话')
   })
 
+  it('runEpisodeBody 直接 throw(不是内部按 outcome 判定的失败分支)时,已 drain 的邮箱内容不丢失,下次唤醒仍能拿到', async () => {
+    const { adapter, queue } = makeAdapter()
+    // turn1:调用工具(期间 enqueueDuringEpisode 注入内容);turn2 触发 max_tokens(上下文超限)
+    // → 触发 force_hot 强制折叠 → 折叠 LLM 调用直接抛出不可重试错误(模拟 callNonStreaming
+    // 重试耗尽后抛出),异常从 applyFold 直接冒出 runEpisodeBody,不经过内部 outcome 判定。
+    queue.push({ toolCalls: [{ name: 'noop_tool', id: 'call_1', input: {} }], stopReason: 'tool_use' })
+    queue.push({ stopReason: 'max_tokens' })
+
+    let loop!: ManagerLoop
+    const throwOnFold: LLMAdapter = {
+      async *stream(params) {
+        if (params.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER)) {
+          throw new Error('boom: fold llm exhausted retries')
+        }
+        yield* adapter.stream(params)
+      },
+      updateConfig: () => {},
+    }
+
+    const policy: CompactionPolicy = { keepRecent: 2, cacheTtlMs: 1000, foldTokenThreshold: 1_000_000, hardCapTokens: 1_000_000 }
+    const deps = baseDeps({
+      store,
+      adapter: throwOnFold,
+      policy,
+      toolFace: () => [
+        {
+          name: 'noop_tool',
+          description: 'noop',
+          inputSchema: { type: 'object', properties: {} },
+          isReadOnly: false,
+          call: async () => {
+            loop.enqueueDuringEpisode({ kind: 'schedule', scheduleId: 'sched-throw', title: '巡检', description: '直接抛错前注入的事件' })
+            return { output: 'ok', isError: false }
+          },
+        },
+      ],
+    })
+    loop = new ManagerLoop(deps)
+
+    // 预置 3 条历史,让 force_hot 真正折掉点东西(否则 forceHotFold 直接返回 none,走不到
+    // foldIntoSummary,测不到这条抛错路径)。
+    const seedMessages: EngineMessage[] = [
+      createUserMessage('旧消息1'),
+      createUserMessage('旧消息2'),
+      createUserMessage('旧消息3'),
+    ]
+    await store.save({ key: KEY, recent: seedMessages, foldedCount: 0 })
+
+    // 唤醒前先在邮箱里塞一条"上一次遗留"的内容(episode 未在跑,直接进 mailbox.pending,
+    // 是本次唤醒 carriedTexts 的来源)
+    loop.enqueueDuringEpisode({ kind: 'schedule', scheduleId: 'sched-carried', title: '巡检', description: '唤醒前已经在邮箱里的内容' })
+
+    await expect(
+      loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('触发超限并在折叠时抛错')] })
+    ).rejects.toThrow('boom: fold llm exhausted retries')
+
+    // 落盘不应发生(异常发生在 store.save 之前)
+    const stateAfterThrow = await store.load(KEY)
+    expect(stateAfterThrow.recent).toEqual(seedMessages)
+
+    // 下次唤醒:carriedTexts(唤醒前邮箱里的内容)、eventText(本次唤醒事件)、
+    // currentEpisodeInjected(mid-episode 注入)应该都被重投,一个不丢
+    queue.push({ text: '正常处理', stopReason: 'end_turn' })
+    const second = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('新的话')] })
+    expect(second.outcome).toBe('completed')
+    expect(second.consumedEvents).toBe(true)
+
+    const finalState = await store.load(KEY)
+    const serialized = JSON.stringify(finalState.recent)
+    expect(serialized).toContain('sched-carried') // 唤醒前已在邮箱的内容(carriedTexts)
+    expect(serialized).toContain('sched-throw') // mid-episode 注入(currentEpisodeInjected)
+    expect(serialized).toContain('触发超限并在折叠时抛错') // 本次唤醒事件(eventText)
+    expect(serialized).toContain('新的话') // 第二次唤醒的新事件
+  })
+
   it('episode 成功:mid-episode 注入的内容已被消费进历史,下次唤醒不会重复投递', async () => {
     const { adapter, queue, calls } = makeAdapter()
     // turn1:调用工具(工具执行期间注入一条新事件,强制进入第二轮);turn2:正常结束
@@ -488,6 +563,79 @@ describe('ManagerLoop', () => {
     const midEpisodeOccurrences = (JSON.stringify(secondWakeCall.messages).match(/sched-max-tokens/g) ?? []).length
     // 确认 sched-max-tokens 只出现一次(作为历史的一部分),不是两次(不被重复投递)
     expect(midEpisodeOccurrences).toBe(1)
+  })
+
+  it('max_tokens 重试:折叠 LLM 调用期间到达的内容(必然未被 engine drain 消费)不会在 retry 里重复投递', async () => {
+    const { adapter, queue } = makeAdapter()
+    queue.push({ stopReason: 'max_tokens' }) // 首次尝试:静默 max_tokens
+    queue.push({ text: '折叠后重试成功', stopReason: 'end_turn' }) // 强制折叠后的重试
+
+    let loop!: ManagerLoop
+    // 在折叠 LLM 调用期间(applyFold → foldIntoSummary 调 adapter.stream 时)注入一条
+    // mid-episode 事件,模拟"事件恰好在两次尝试之间(折叠调用期间)到达"——此时它必然还没被
+    // 任何 engine drainPending() 消费过,原样躺在 mailbox.pending 里,同时也被
+    // currentEpisodeInjected 记录(两份来源同时存在,正是 review 指出的重复投递触发条件)。
+    const injectDuringFold: LLMAdapter = {
+      async *stream(params) {
+        if (params.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER)) {
+          loop.enqueueDuringEpisode({ kind: 'schedule', scheduleId: 'sched-during-fold', title: '巡检', description: '折叠调用期间到达' })
+        }
+        yield* adapter.stream(params)
+      },
+      updateConfig: () => {},
+    }
+
+    const policy: CompactionPolicy = { keepRecent: 2, cacheTtlMs: 1000, foldTokenThreshold: 1_000_000, hardCapTokens: 1_000_000 }
+    const deps = baseDeps({ store, adapter: injectDuringFold, policy })
+    loop = new ManagerLoop(deps)
+
+    // 预置 3 条历史,让 force_hot 真正折掉点东西
+    const seedMessages: EngineMessage[] = [
+      createUserMessage('旧消息1'),
+      createUserMessage('旧消息2'),
+      createUserMessage('旧消息3'),
+    ]
+    await store.save({ key: KEY, recent: seedMessages, foldedCount: 0 })
+
+    const result = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('触发超限')] })
+
+    expect(result.outcome).toBe('completed')
+    expect(result.consumedEvents).toBe(true)
+    // retry 只应该是"折叠后重试成功"这一个 turn——若重复触发了 drain→continue,会多烧一轮
+    // LLM 调用(默认回复)才收尾,turns 会变成 3。
+    expect(result.turns).toBe(2) // 首次尝试 1 turn(max_tokens)+ 重试 1 turn
+
+    const finalState = await store.load(KEY)
+    const occurrences = (JSON.stringify(finalState.recent).match(/sched-during-fold/g) ?? []).length
+    expect(occurrences).toBe(1) // 折叠期间到达的内容只应出现一次,不应因 retry 的 turn 边界
+    // drain 与显式追加的 currentEpisodeInjected 重复计入
+  })
+
+  it('force_hot 因 history.length===keepRecent(无可折叠内容)返回 none 时不产生零进展的折叠 LLM 调用', async () => {
+    const { adapter, queue, foldCalls } = makeAdapter()
+    queue.push({ text: '正常处理', stopReason: 'end_turn' })
+
+    // hardCapTokens 故意压得极低,确保 wakeDecision 会走进 force_hot 的 token 超限判断——
+    // 唯一能拦住它的只有本次要验证的"foldMessages 为空则 none"这条修复。
+    const policy: CompactionPolicy = { keepRecent: 3, cacheTtlMs: 1000, foldTokenThreshold: 1_000_000, hardCapTokens: 1 }
+    const loop = new ManagerLoop(baseDeps({ store, adapter, policy }))
+
+    // 预置恰好 keepRecent(3)条历史:splitAt=0,没有可折叠的内容
+    const seedMessages: EngineMessage[] = [
+      createUserMessage('旧消息1'),
+      createUserMessage('旧消息2'),
+      createUserMessage('旧消息3'),
+    ]
+    await store.save({ key: KEY, recent: seedMessages, foldedCount: 0 })
+
+    const result = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('触发')] })
+
+    expect(foldCalls.length).toBe(0) // 没有可折叠内容(splitAt=0),不该调折叠 LLM
+    expect(result.outcome).toBe('completed')
+    expect(result.turns).toBe(1) // 未经过任何强制折叠重试
+
+    const state = await store.load(KEY)
+    expect(state.rollingSummary).toBeUndefined() // 没发生过折叠
   })
 
   it('session 永不 finalize:连续 5 次 wakeUp 后仍能正常继续工作', async () => {

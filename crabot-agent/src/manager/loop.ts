@@ -153,6 +153,21 @@ export class ManagerLoop {
 
     try {
       return await this.runEpisodeBody(episodeId, carriedTexts, eventText)
+    } catch (err) {
+      // runEpisodeBody 内部按 outcome 判定的失败分支(约 L232-249,LLM 报错被 engine 捕获为
+      // outcome='failed'/'aborted' 后正常 return 的路径)已经在返回前自行完成了重投——那条路径
+      // 不会走到这里。这里的 catch 专门兜"直接 throw、根本没走到 outcome 判定"的路径:
+      // applyFold → foldIntoSummary(折叠 LLM 持续故障、callNonStreaming 重试耗尽抛出)、
+      // runAttempt 顶部首次 fetchLedgerRender(台账读盘瞬时失败,onTurn 的 refresh 路径才有
+      // .catch,这个首次 await 没有)、store.load/store.save/appendEpisodeLog 的 IO 失败等。
+      // 两条路径互斥(runEpisodeBody 要么正常 return、要么中途 throw,不会同时触发两次重投),
+      // 否则已 drain 的 carriedTexts/eventText/currentEpisodeInjected 会随栈展开永久丢失,
+      // 绕过"至少一次投递"(见文件头)。
+      this.mailbox.drainPending()
+      for (const t of carriedTexts) this.mailbox.push(t)
+      this.mailbox.push(eventText)
+      for (const t of this.currentEpisodeInjected ?? []) this.mailbox.push(t)
+      throw err
     } finally {
       this.currentEpisodeInjected = null
     }
@@ -194,18 +209,22 @@ export class ManagerLoop {
     // 这里识别到"上下文超限收场"时强制 force_hot 折叠一次并重试一次,仍失败就放弃。
     //
     // mid-episode 注入与这条重试路径的交互(想清楚过,记录结论):
-    // 首次尝试期间通过 enqueueDuringEpisode 到达的 mid-episode 注入内容若被 engine
-    // drainPending() 消费进 finalMessages,而首次尝试随后以 max_tokens 结束,这些内容会被
-    // currentEpisodeInjected 记录。重试时明确把这些内容追加进 retryTailMessages,确保
-    // 重试的 initialMessages 包含它们——首次尝试的所有轮次连同其中的消费行为都被丢弃,
-    // 这些内容等于没被处理过,重投是准确的(既无丢失、也无重复)。
-    // 若那部分内容在首次尝试结束时仍原样躺在 mailbox.pending 里(未被消费),它会像
-    // 普通 pending 内容一样自然流入重试(同一个 `this.mailbox` 实例),不丢不重复。
+    // 首次尝试期间通过 enqueueDuringEpisode 到达的 mid-episode 注入内容,无论当时是否已被
+    // engine drainPending() 消费(消费掉的已经进了随首次尝试一起丢弃的 finalMessages;未消费
+    // 的——例如恰好在首次尝试最后一次 LLM 调用期间到达,或在两次尝试之间 applyFold 的折叠
+    // LLM 调用期间到达——仍原样躺在 mailbox.pending 里),currentEpisodeInjected 都完整记录了
+    // 原始文本,是唯一权威来源。首次尝试的所有轮次连同其中的消费行为都被丢弃,这些内容等于
+    // 没被处理过,重试时显式把它们追加进 retryTailMessages 才是准确的重投。
+    // 若 mailbox.pending 里还残留"未被消费"那一段不清空,它是 currentEpisodeInjected 的
+    // 后缀——retry 复用同一个 `this.mailbox` 实例作为 humanMessageQueue,engine 会在 retry
+    // 的 turn 边界自然把它再 drain 一次,与下面显式追加的 currentEpisodeInjected 重复投递
+    // (同一条内容在 retry 上下文出现两份)。因此显式追加前必须先 drainPending() 清空残留。
     if (isContextOverflow(attempt.result)) {
       const forceDecision = forceHotFold({ ...state, recent: tailMessages }, this.deps.policy, this.deps.estimateTokens, nowMs)
       if (forceDecision.kind !== 'none') {
         state = await this.applyFold(state, forceDecision, adapter, model)
-        // 重试时把 mid-episode 注入内容一并追加(保持到达顺序)
+        // 清空 mailbox 残留后缀(见上方注释),再按 currentEpisodeInjected 的到达顺序整体追加
+        this.mailbox.drainPending()
         const retryTailMessages: EngineMessage[] = [
           ...state.recent,
           ...(this.currentEpisodeInjected?.map((t) => createUserMessage(t)) ?? []),
@@ -214,9 +233,14 @@ export class ManagerLoop {
         totalTurnsUsed += retryAttempt.result.totalTurns
         attempt = retryAttempt
       }
-      // forceDecision.kind === 'none'(历史短到连一条都折不动):无法进一步压缩,
-      // 只能接受第一次尝试的结果——大概率仍是 outcome='completed' 空 finalText,
-      // 不强行判 failed(engine 本身没有报错,只是这条上下文天生就大)。
+      // forceDecision.kind === 'none':无法进一步压缩,直接接受第一次尝试的结果,不重试
+      // (大概率仍是 outcome='completed' 空 finalText,不强行判 failed——engine 本身没有报错,
+      // 只是这条上下文天生就大)。触发场景有两类:①历史短到连一条都折不动(< keepRecent);
+      // ②历史恰好等于 keepRecent 条(decideCompaction 的 force_hot 分支已对 foldMessages
+      // 为空这一情形短路返回 none,见 compaction.ts)——这两类都意味着"折叠"这条缓解手段已经
+      // 榨不出任何进展,再重试一次只会拿同样大小的上下文重新问一遍 LLM,注定再次超限,纯烧钱,
+      // 因此这里不为它们单独加重试:维持"forceDecision.kind==='none' 就不重试"这一既有分支
+      // 覆盖两类触发场景,不需要额外判断。
     }
 
     await this.deps.store.appendEpisodeLog(this.deps.key, episodeId, attempt.result.finalMessages)
