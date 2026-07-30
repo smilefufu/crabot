@@ -4,11 +4,14 @@
  * 2026-07-30 在部署机 m2(codex-cli 0.144.1)上做了一轮真机校准,修正了四处此前只能靠文档/
  * 源码推断的行为:session 发现(优先信 rollout 内容里的权威 session_id,见下方"session 发现"
  * 节)、nvm 部署形态下 tmux 拉起子进程解析不到 codex 自身 node 的陷阱(见 resolveBinDir/
- * buildEnv)、spawn/resume 命令行参数顺序与 --skip-git-repo-check(见"spawn/resume 启动参数"
- * 节)、readTrace 的 rollout 行结构(见 normalizeRolloutLine)。未被这轮校准覆盖的细节仍按
- * 公开文档/codex 源码(github.com/openai/codex,developers.openai.com/codex 系列页面,已
- * 跳转到 learn.chatgpt.com/docs/*)推断实现,标注为 `codex-docs:` 的引用点维持原样,后续如
- * 有出入以真机行为为准。
+ * buildEnv)、spawn/resume 命令行参数顺序(见"spawn/resume 启动参数"节)、readTrace 的
+ * rollout 行结构(见 normalizeRolloutLine)。同日的后续一轮校准修正了上一轮引入的一个回归:
+ * 曾误把 `codex exec` 专属的 `--skip-git-repo-check` 当成交互式顶层命令也支持的参数加了
+ * 上去,m2 实测顶层 `codex`/`codex resume` 的 Options 全清单里都没有这个 flag,传了会被 clap
+ * 拒绝——已改为 provision 时把 workspace 写成 config.toml 里的受信任目录(见"provision"节的
+ * trust_level 段)。未被这两轮校准覆盖的细节仍按公开文档/codex 源码(github.com/openai/codex,
+ * developers.openai.com/codex 系列页面,已跳转到 learn.chatgpt.com/docs/*)推断实现,标注为
+ * `codex-docs:` 的引用点维持原样,后续如有出入以真机行为为准。
  *
  * ## 与 cc adapter 的关键差异(决定了本文件的整体形状)
  *
@@ -57,10 +60,14 @@
  * 概念上等价的 'stop')`,用 `/bin/sh -c` 包一层,因为 codex-docs 确认 notify 是"程序+固定参数
  * 数组,codex 会在末尾追加一个 JSON payload 作为额外参数"——见
  * learn.chatgpt.com/docs/config-file/config-advanced;固定参数脚本本身不读那个额外参数,
- * 效果上只是"turn 结束就打一个标记",与 cc 的 Stop hook 语义等价) + mcp_servers 段
- * (复用 Task 3 的 `renderCodexMcpToml`)。TOML 要求根级 key 必须出现在第一个 table 之前
- * (codex-docs: config.md 曾用这条规则解释"notify 放最后不生效"的排查案例),所以 notify
- * 行必须排在 mcp_servers 的 `[mcp_servers."x"]` 表头之前。
+ * 效果上只是"turn 结束就打一个标记",与 cc 的 Stop hook 语义等价) + `[projects."<realpath>"]`
+ * 段(`trust_level = "trusted"`,把 workspace 声明成受信任目录——codex 源码里交互式 TUI 判断
+ * "是否受信目录"的真实机制,取代不存在的 `--skip-git-repo-check` flag,见"spawn/resume 启动
+ * 参数"节;path 用 `fs.realpath(ws.root)` 解析符号链接后按本文件的 `tomlString` 转义) +
+ * mcp_servers 段(复用 Task 3 的 `renderCodexMcpToml`)。TOML 要求根级 key 必须出现在第一个
+ * table 之前(codex-docs: config.md 曾用这条规则解释"notify 放最后不生效"的排查案例),所以
+ * notify 行必须排在 `[projects...]`/`[mcp_servers."x"]` 表头之前(这两个表之间的先后顺序不
+ * 影响解析,各自表头下只跟自己的键)。
  *
  * `<ws.root>/.codex/auth.json`:既然 `.codex/` 在这里被当成独立 `CODEX_HOME`,真实登录态
  * (`codexHomeSource`,默认 `~/.codex`)里的 `auth.json`(codex-docs:
@@ -89,9 +96,13 @@
  *    never --sandbox workspace-write`(选项跟在 `resume <id>` 后面)会被 codex 当成 usage
  *    错误、exit=2 拒绝——本 adapter 曾经就是这么拼的(未验证的猜测),已按实测改成
  *    `codex --ask-for-approval never --sandbox workspace-write resume <id>`(选项在前)。
- * 2. **非受信目录下必须带 `--skip-git-repo-check`**:worker workspace 不是用户显式
- *    `git init`/信任过的仓库,不带这个 flag 会报 "Not inside a trusted directory" 直接
- *    卡住——spawn 与 resume 的命令行都固定加上。
+ * 2. **不传 `--skip-git-repo-check`,改用 config.toml 的 `[projects."<path>"] trust_level`**:
+ *    上一轮曾给 spawn/resume 加过 `--skip-git-repo-check`,诊断("worker workspace 不是受信
+ *    目录,不处理会卡住")是对的,但这个 flag **只注册在 `codex exec` 子解析器上**——m2 实测
+ *    `codex --help`/`codex resume --help` 的顶层交互式 Options 全清单里都没有它,传给交互式
+ *    `codex`/`codex resume` 会被 clap 当 usage 错误直接拒绝(exit=2),是把 `codex exec` 路径
+ *    下的真机结论错误套用到了交互式路径(exec 路径实测,交互态未单独验证)。已改为 provision
+ *    时把 workspace 写成 config.toml 里的受信任目录,见"provision"节。
  *
  * 另外 PATH 显式经 `buildEnv()`/`resolveBinDir()` 前置了 codexBin 解析出的真实目录(nvm
  * 部署陷阱,见该函数注释):tmux server 是常驻进程,其环境不一定等于当前 agent 进程的环境
@@ -476,11 +487,19 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 标记"——与 cc 的 Stop hook(丢弃 stdin payload,同一设计取舍,见 CliEventChannel 头
     // 注释)语义一致。
     const notifyLine = `notify = [${tomlString('/bin/sh')}, ${tomlString('-c')}, ${tomlString(channel.hookCommand('stop'))}]\n`
+
+    // codex 源码里交互式 TUI 判断"是否受信目录"的真实机制是 config.toml 的
+    // [projects."<绝对路径>"] 表 + trust_level = "trusted"(取代不存在的 --skip-git-repo-check
+    // flag,见文件头"spawn/resume 启动参数"节)。path 用 ws.root 的 realpath(worker workspace
+    // 可能经符号链接到达,codex 内部按规范化后的路径比较)。
+    const realRoot = await fs.realpath(ws.root)
+    const trustLine = `[projects.${tomlString(realRoot)}]\ntrust_level = "trusted"\n`
+
     const mcpServers = caps.mcp_servers as unknown as ProvisionSources['mcpServers']
     const mcpToml = renderCodexMcpToml(mcpServers)
     // TOML 要求根级 key 必须出现在第一个 table 之前,否则会被解析成前一个 table 的子字段——
-    // notify 必须排在 mcp_servers 的 [mcp_servers."x"] 表头之前。
-    await fs.writeFile(join(codexDir, 'config.toml'), notifyLine + '\n' + mcpToml, 'utf-8')
+    // notify 必须排在 [projects...]/[mcp_servers."x"] 表头之前。
+    await fs.writeFile(join(codexDir, 'config.toml'), notifyLine + '\n' + trustLine + '\n' + mcpToml, 'utf-8')
 
     // codex-docs: 既然 .codex/ 在这里被当成独立 CODEX_HOME,真实登录态里的 auth.json 要搬
     // 一份过来,否则隔离出来的 CODEX_HOME 过不了鉴权。找不到就跳过(本机/CI 未 `codex
@@ -529,9 +548,10 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     const outputFile = join(dir, `output-${seq}.log`)
     // codex-docs + m2 实测:交互态无 --session-id 等价参数;--ask-for-approval never
     // --sandbox workspace-write 与 cc 用 --permission-mode acceptEdits 同样的自动化意图。
-    // --skip-git-repo-check 是 m2 实测新增:worker workspace 不是用户显式信任过的 git
-    // 仓库,不带这个 flag 会报 "Not inside a trusted directory" 直接卡住。
-    const command = `${this.codexBin} --skip-git-repo-check --ask-for-approval never --sandbox workspace-write`
+    // 不传 --skip-git-repo-check(m2 实测顶层交互式 codex 不支持这个 flag,只有 codex exec
+    // 才有——见文件头"spawn/resume 启动参数"节);受信目录改由 provision 写进 config.toml 的
+    // [projects."<realpath>"] trust_level = "trusted" 解决。
+    const command = `${this.codexBin} --ask-for-approval never --sandbox workspace-write`
     const spawnStartedAt = Date.now()
 
     // newSession 成功之后才落 meta(running)+注册 runtime,同 cc 纪律:tmux 失败时不留任何
@@ -637,10 +657,11 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       const sessionName = `crabot-w-${prev.worker_id}-${seq}`
       const outputFile = join(dir, `output-${seq}.log`)
       // codex-docs: `codex resume <SESSION_ID>` 是独立子命令(不是 --resume flag)。
-      // m2 实测:--skip-git-repo-check/--ask-for-approval/--sandbox 这类主命令级选项必须
-      // 排在 `resume` 子命令**之前**——放在 `resume <id>` 后面 codex 会报 usage 错、exit=2
-      // (原实现把它们放在 `resume <id>` 之后,是未经真机验证的错误猜测,这里按实测结果改正)。
-      const command = `${this.codexBin} --skip-git-repo-check --ask-for-approval never --sandbox workspace-write resume ${shQuote(prev.session_ref)}`
+      // m2 实测:--ask-for-approval/--sandbox 这类主命令级选项必须排在 `resume` 子命令**之前**
+      // ——放在 `resume <id>` 后面 codex 会报 usage 错、exit=2(原实现把它们放在 `resume <id>`
+      // 之后,是未经真机验证的错误猜测,这里按实测结果改正)。不传 --skip-git-repo-check,
+      // 理由同 spawn(见文件头"spawn/resume 启动参数"节)。
+      const command = `${this.codexBin} --ask-for-approval never --sandbox workspace-write resume ${shQuote(prev.session_ref)}`
 
       // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime;
       // PATH 前置同 spawn(nvm 部署陷阱)。

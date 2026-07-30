@@ -149,6 +149,18 @@ describe('CodexWorkerAdapter.provision', () => {
     await expect(adapter.provision({ root: ws }, { skills: [], mcp_servers: [] })).resolves.toBeUndefined()
     await expect(fs.access(path.join(ws, '.codex/auth.json'))).rejects.toThrow()
   })
+
+  it('provision 把 workspace 写成受信任目录(config.toml 的 [projects."<realpath>"] trust_level = "trusted",替代不存在的 --skip-git-repo-check flag)', async () => {
+    const adapter = new CodexWorkerAdapter({ dataDir: ws, codexHomeSource })
+    await adapter.provision({ root: ws }, { skills: [], mcp_servers: [] })
+
+    const realRoot = await fs.realpath(ws)
+    const configToml = await fs.readFile(path.join(ws, '.codex/config.toml'), 'utf-8')
+    expect(configToml).toContain(`[projects."${realRoot}"]`)
+    expect(configToml).toContain('trust_level = "trusted"')
+    // TOML 根级 key(notify)必须出现在 [projects...] 表头之前。
+    expect(configToml.indexOf('notify =')).toBeLessThan(configToml.indexOf('[projects.'))
+  })
 })
 
 describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
@@ -427,7 +439,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
   )
 
   it(
-    'spawn 命令行携带 --skip-git-repo-check(m2 实测:worker workspace 非受信目录会报 "Not inside a trusted directory")',
+    'spawn 命令行不携带 --skip-git-repo-check(该 flag 只注册在 codex exec 子解析器上,m2 实测顶层交互式 codex 没有这个 Option,传了会被 clap usage 错误拒绝),--ask-for-approval/--sandbox 取值合法',
     async () => {
       const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
       const stopHookCmd = channel.hookCommand('stop')
@@ -440,7 +452,13 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
       await waitForState(adapter, h, 'idle')
 
       const argv: string[] = JSON.parse((await fs.readFile(argvFile, 'utf-8')).trim().split('\n')[0])
-      expect(argv).toContain('--skip-git-repo-check')
+      expect(argv).not.toContain('--skip-git-repo-check')
+      const approvalIdx = argv.indexOf('--ask-for-approval')
+      expect(approvalIdx).toBeGreaterThan(-1)
+      expect(argv[approvalIdx + 1]).toBe('never')
+      const sandboxIdx = argv.indexOf('--sandbox')
+      expect(sandboxIdx).toBeGreaterThan(-1)
+      expect(['read-only', 'workspace-write', 'danger-full-access']).toContain(argv[sandboxIdx + 1])
 
       await adapter.kill(h)
     },
@@ -448,7 +466,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
   )
 
   it(
-    'resume 命令行把 --skip-git-repo-check/--ask-for-approval/--sandbox 放在 resume 子命令之前(放后面 codex 报 usage 错、exit=2,m2 实测)',
+    'resume 命令行不携带 --skip-git-repo-check,--ask-for-approval/--sandbox 放在 resume 子命令之前(放后面 codex 报 usage 错、exit=2,m2 实测)',
     async () => {
       const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
       const stopHookCmd = channel.hookCommand('stop')
@@ -467,9 +485,10 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
       const lines = (await fs.readFile(argvFile, 'utf-8')).trim().split('\n')
       // 第一行是 spawn 主线的 argv,第二行才是 resume 触发的调用。
       const argv: string[] = JSON.parse(lines[1])
+      expect(argv).not.toContain('--skip-git-repo-check')
       const resumeIdx = argv.indexOf('resume')
       expect(resumeIdx).toBeGreaterThan(-1)
-      for (const flag of ['--skip-git-repo-check', '--ask-for-approval', '--sandbox']) {
+      for (const flag of ['--ask-for-approval', '--sandbox']) {
         const idx = argv.indexOf(flag)
         expect(idx).toBeGreaterThan(-1)
         expect(idx).toBeLessThan(resumeIdx)
@@ -978,10 +997,6 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter.readTrace(已发现 rollout 
     await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
   })
 
-  // 按 m2 真机实测(codex-cli 0.144.1)的 rollout 信封结构手写:每行 {type, timestamp,
-  // payload},timestamp 在信封顶层(不是嵌进 payload 里)。覆盖五种顶层 type 中的
-  // session_meta/event_msg/response_item/world_state/turn_context,其中后两种应被
-  // readTrace 跳过(不产生事件,但仍计入 nextCursor)。
   // 按 m2 真机实测(codex-cli 0.144.1)的 rollout 信封结构手写:每行 {type, timestamp,
   // payload},timestamp 在信封顶层(不是嵌进 payload 里)。覆盖五种顶层 type 中的
   // session_meta/event_msg/response_item/world_state/turn_context,其中后两种应被
