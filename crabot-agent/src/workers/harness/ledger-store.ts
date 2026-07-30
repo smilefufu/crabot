@@ -14,15 +14,19 @@ import type { DialogObjectId, LedgerWorker, WorkerLedger } from './ledger-types'
 
 const FILE_SUFFIX = '.json'
 
-/** 段编码:把 [A-Za-z0-9_-] 之外的字符转成 %XX(UTF-8 字节),确保无歧义且可逆 */
-function encodeSegment(s: string): string {
+/**
+ * 段编码:把 [A-Za-z0-9_-] 之外的字符转成 %XX(UTF-8 字节),确保无歧义且可逆。
+ * 导出以供其它需要"任意字符串 → 合法文件/目录名"的存储复用(如 manager/session-store.ts
+ * 编码 ManagerKey),避免各处重复实现同一方案。
+ */
+export function encodeSegment(s: string): string {
   return encodeURIComponent(s).replace(
     /[.!~*'()]/g,
     (ch) => '%' + ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')
   )
 }
 
-function decodeSegment(s: string): string {
+export function decodeSegment(s: string): string {
   return decodeURIComponent(s)
 }
 
