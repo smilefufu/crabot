@@ -168,7 +168,7 @@ describe('buildManagerToolFace', () => {
     expect(() => assertClosedToolFace([foreignMcp])).toThrow()
 
     const memoryTool: ToolDefinition = {
-      name: 'mcp__crab-memory__store_memory',
+      name: 'mcp__crab-memory__search_memory',
       description: 'x',
       inputSchema: { type: 'object', properties: {} },
       isReadOnly: false,
