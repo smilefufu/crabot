@@ -1,10 +1,14 @@
 /**
  * CodexWorkerAdapter — WorkerAdapter 契约的 OpenAI codex CLI 实现。
  *
- * 本机没有安装 codex,以下行为全部依据公开文档/codex 源码(github.com/openai/codex,
- * developers.openai.com/codex 系列页面,已跳转到 learn.chatgpt.com/docs/*)推断实现,每个
- * 引用点在下面用 `codex-docs:` 标注出处;真机行为需要在真正装上 codex 之后校准(见 Task 6
- * 报告"未经确认待真机校准清单")。
+ * 2026-07-30 在部署机 m2(codex-cli 0.144.1)上做了一轮真机校准,修正了四处此前只能靠文档/
+ * 源码推断的行为:session 发现(优先信 rollout 内容里的权威 session_id,见下方"session 发现"
+ * 节)、nvm 部署形态下 tmux 拉起子进程解析不到 codex 自身 node 的陷阱(见 resolveBinDir/
+ * buildEnv)、spawn/resume 命令行参数顺序与 --skip-git-repo-check(见"spawn/resume 启动参数"
+ * 节)、readTrace 的 rollout 行结构(见 normalizeRolloutLine)。未被这轮校准覆盖的细节仍按
+ * 公开文档/codex 源码(github.com/openai/codex,developers.openai.com/codex 系列页面,已
+ * 跳转到 learn.chatgpt.com/docs/*)推断实现,标注为 `codex-docs:` 的引用点维持原样,后续如
+ * 有出入以真机行为为准。
  *
  * ## 与 cc adapter 的关键差异(决定了本文件的整体形状)
  *
@@ -33,16 +37,19 @@
  *
  * ## session 发现(spawn 专用)
  *
- * codex-docs: rollout 文件路径 `<CODEX_HOME>/sessions/YYYY/MM/DD/
- * rollout-YYYY-MM-DDThh-mm-ss-<uuid>.jsonl`,来自 codex-rs/rollout/src/list.rs 注释原文
- * "Directory layout: `~/.codex/sessions/YYYY/MM/DD/rollout-YYYY-MM-DDThh-mm-ss-<uuid>.jsonl`"
- * 与 codex-rs/rollout/src/lib.rs 的 `SESSIONS_SUBDIR = "sessions"` 常量。spawn() 在 tmux
- * newSession 成功后、注入首条 prompt 之前,有限时间(`sessionDiscoveryTimeoutMs`,默认
- * 3000ms)轮询这个目录树,取文件名里的 uuid 作为该化身的真实 session_id;轮询超时(codex
- * 还没来得及落盘,或本次跑的是不写 rollout 文件的 mock)就退化为本地生成的占位 uuid——
- * 这个占位 uuid 不对应任何真实 codex 会话文件,该化身自己的 resume()/readTrace() 会因此
- * 失效(resume 传给 codex 的 session id 是假的;readTrace 因为 `rolloutPath` 是 undefined
- * 直接退化为空数组),是已知限制,不是本 task 能在没有真机的前提下解决的缺口。
+ * codex 走的是交互式 TUI(本 adapter 用 tmux 拉起 `codex ...`,不是 `codex exec`),拿不到
+ * `codex exec --json` 的 `thread.started` 事件流,只能靠事后发现——codex-docs: rollout 文件
+ * 路径 `<CODEX_HOME>/sessions/YYYY/MM/DD/rollout-YYYY-MM-DDThh-mm-ss-<uuid>.jsonl`(来自
+ * codex-rs/rollout/src/list.rs 注释)。spawn() 在 tmux newSession 成功后、注入首条 prompt
+ * 之前,有限时间(`sessionDiscoveryTimeoutMs`,默认 3000ms)轮询这个目录树找新出现的
+ * rollout 文件;m2 真机实测:文件一旦被发现,优先读它首行 `session_meta.payload.session_id`
+ * 作为权威 session_id(比文件名解析更可靠,是 codex 自己声明的值),内容还没写完整(文件刚
+ * 创建的竞态、或老版本 codex 不写这个字段)才退回文件名里嵌的 uuid(实测两者完全一致,退回
+ * 不算精度损失)。轮询超时(codex 还没来得及落盘,或本次跑的是不写 rollout 文件的 mock)
+ * 就退化为本地生成的占位 uuid——这个占位 uuid 不对应任何真实 codex 会话文件,该化身自己的
+ * resume()/readTrace() 会因此失效(resume 传给 codex 的 session id 是假的;readTrace 因为
+ * `rolloutPath` 是 undefined 直接退化为空数组),是已知限制,真机环境下正常运行基本不会
+ * 触发(轮询窗口内文件必现)。
  *
  * ## provision:workspace 级配置
  *
@@ -75,9 +82,21 @@
  * (`read-only|workspace-write|danger-full-access`)。本 adapter 固定传
  * `--ask-for-approval never --sandbox workspace-write`,与 cc 用
  * `--permission-mode acceptEdits` 同样的自动化意图——不能让审批弹窗卡住 tmux pane。
- * `codex resume <SESSION_ID>` 是独立子命令(不是 `--resume` flag),同一文档页确认;
- * resume 子命令是否接受与主命令相同的 `--ask-for-approval`/`--sandbox` 未逐条确认,按
- * 同一 CLI 顶层 flag 的一般惯例沿用,真机校准时需要核实。
+ * `codex resume <SESSION_ID>` 是独立子命令(不是 `--resume` flag),同一文档页确认。
+ *
+ * m2 真机实测校准了两点原先靠猜测沿用、未经验证的行为:
+ * 1. **主命令级选项必须排在 `resume` 子命令之前**:`codex resume <id> --ask-for-approval
+ *    never --sandbox workspace-write`(选项跟在 `resume <id>` 后面)会被 codex 当成 usage
+ *    错误、exit=2 拒绝——本 adapter 曾经就是这么拼的(未验证的猜测),已按实测改成
+ *    `codex --ask-for-approval never --sandbox workspace-write resume <id>`(选项在前)。
+ * 2. **非受信目录下必须带 `--skip-git-repo-check`**:worker workspace 不是用户显式
+ *    `git init`/信任过的仓库,不带这个 flag 会报 "Not inside a trusted directory" 直接
+ *    卡住——spawn 与 resume 的命令行都固定加上。
+ *
+ * 另外 PATH 显式经 `buildEnv()`/`resolveBinDir()` 前置了 codexBin 解析出的真实目录(nvm
+ * 部署陷阱,见该函数注释):tmux server 是常驻进程,其环境不一定等于当前 agent 进程的环境
+ * (m2 上 codex 是 nvm 装的 node 脚本,tmux server 环境不含对应 node 的 bin 目录时,子进程
+ * 直接报 `env: node: No such file or directory`)。
  *
  * ## 提交纪律与状态判定
  *
@@ -96,7 +115,7 @@
  * 重新按 session_id 精确查找重建,不再要求"只能对本进程内常驻 runtime 的化身调用"(同 cc)。
  */
 import { promises as fs, type Dirent } from 'fs'
-import { join } from 'path'
+import { join, dirname } from 'path'
 import { randomUUID } from 'crypto'
 import { homedir } from 'os'
 import { execFile } from 'child_process'
@@ -145,6 +164,46 @@ function tomlString(value: string): string {
     }
   }
   return `"${out}"`
+}
+
+/** 从 codexBin 配置里摘出"实际会被 exec 的可执行文件"这一个 token。生产配置通常就是单个
+ * 命令名(如 'codex')或绝对路径;测试注入的 mock codexBin 是复合 shell 命令行
+ * (`env VAR=... node fixture.mjs`),这里跳过 `env` 与它后面的 `KEY=VALUE` 前缀,取到真正
+ * 的可执行文件 token(如 `node`)。 */
+function firstExecutableToken(bin: string): string | undefined {
+  const tokens = bin.trim().split(/\s+/).filter((t) => t.length > 0)
+  let i = 0
+  if (tokens[i] === 'env') {
+    i += 1
+    while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i])) i += 1
+  }
+  return tokens[i]
+}
+
+/** nvm 部署陷阱(m2 实测):codex 常是 nvm 装的 node 脚本(shebang `#!/usr/bin/env node`),
+ * 经 tmux 拉起时若 tmux server 自身的环境不含这个 node 的 bin 目录,必现
+ * `env: node: No such file or directory`——tmux server 是常驻进程,其环境不一定等于当前
+ * agent 进程的环境(可能在 nvm 生效之前就已启动)。用 `command -v`(POSIX shell 内置,不
+ * 依赖是否装了独立的 `which` 二进制)+ `fs.realpath` 解析出 codexBin 真实所在目录,调用方
+ * 把它前置进传给 tmux/子进程的 PATH——不硬编码任何 nvm 路径,覆盖"CLI 与其 node 同目录"
+ * 的任意安装形态(nvm/fnm/asdf/系统包管理器等)。解析不出来(codex 压根不在 PATH 上,或
+ * 传入的就是一段无法定位可执行文件的复合命令)返回 undefined,调用方退回继承的 PATH,
+ * 不阻塞。 */
+async function resolveBinDir(bin: string): Promise<string | undefined> {
+  const token = firstExecutableToken(bin)
+  if (!token) return undefined
+  try {
+    let resolved: string
+    if (token.includes('/')) {
+      resolved = await fs.realpath(token)
+    } else {
+      const { stdout } = await execFileAsync('/bin/sh', ['-c', `command -v ${shQuote(token)}`])
+      resolved = await fs.realpath(stdout.trim())
+    }
+    return dirname(resolved)
+  } catch {
+    return undefined
+  }
 }
 
 /** UUID 格式校验:标准 UUID 格式(8-4-4-4-12 十六进制段,由连字符分隔)。*/
@@ -243,16 +302,48 @@ async function findNewestRolloutFile(sessionsDir: string, cutoffMs: number): Pro
   return { path: best.path, sessionId: best.sessionId }
 }
 
-/** 有限时间轮询 findNewestRolloutFile,50ms 间隔;超时返回 null(调用方退化为占位 uuid)。 */
+/** 有限时间轮询 findNewestRolloutFile,50ms 间隔;超时返回 null(调用方退化为占位 uuid)。
+ * 找到候选文件后,优先读文件内容里的 session_meta.payload.session_id(m2 真机实测:与
+ * 文件名内嵌的 uuid 完全一致,但内容字段是 codex 自己声明的权威值,文件名只是我们这边按
+ * 命名约定反解——见文件头"session 发现"节);内容还没写完整/字段缺失(老版本 codex、写入
+ * 竞态)就退回文件名解析出的 uuid,不因此判超时。 */
 async function pollForNewRollout(sessionsDir: string, cutoffMs: number, timeoutMs: number): Promise<{ path: string; sessionId: string } | null> {
   const intervalMs = 50
   const deadline = Date.now() + timeoutMs
   for (;;) {
     const found = await findNewestRolloutFile(sessionsDir, cutoffMs)
-    if (found) return found
+    if (found) {
+      const contentSessionId = await readSessionIdFromRolloutContent(found.path)
+      return { path: found.path, sessionId: contentSessionId ?? found.sessionId }
+    }
     if (Date.now() >= deadline) return null
     await new Promise((r) => setTimeout(r, intervalMs))
   }
+}
+
+/** 读 rollout 文件首行的 session_meta.payload.session_id(m2 真机实测的权威字段)。首行还
+ * 不是完整/合法的 session_meta(文件刚创建、还没来得及写完)一律返回 undefined,调用方退回
+ * 文件名解析,不抛错、不重试——真机实测文件名与内容里的 id 完全一致,这里只是"能拿到内容
+ * 就优先信内容"的加固,拿不到不算失败。 */
+async function readSessionIdFromRolloutContent(path: string): Promise<string | undefined> {
+  let raw: string
+  try {
+    raw = await fs.readFile(path, 'utf-8')
+  } catch {
+    return undefined
+  }
+  const firstLine = raw.split('\n', 1)[0]
+  if (!firstLine) return undefined
+  let parsed: { type?: unknown; payload?: { session_id?: unknown } }
+  try {
+    parsed = JSON.parse(firstLine)
+  } catch {
+    return undefined
+  }
+  if (parsed?.type === 'session_meta' && typeof parsed.payload?.session_id === 'string') {
+    return parsed.payload.session_id
+  }
+  return undefined
 }
 
 /**
@@ -296,6 +387,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   private readonly sessionDiscoveryTimeoutMs: number
   private readonly runtimes = new Map<string, Runtime>()
   private readonly mutexes = new Map<string, AsyncMutex>()
+  /** resolveBinDir(codexBin) 的缓存 promise——codexBin 构造后不变,没必要每次 detect/spawn/
+   * resume 都重新 `command -v` + `realpath` 一遍。 */
+  private cachedBinDir?: Promise<string | undefined>
 
   constructor(
     private readonly deps: {
@@ -317,12 +411,38 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     this.sessionDiscoveryTimeoutMs = deps.sessionDiscoveryTimeoutMs ?? 3000
   }
 
+  /** codexBin 所在真实目录(nvm 部署陷阱修复,见 resolveBinDir 注释),懒解析并缓存。 */
+  private resolveBinDirCached(): Promise<string | undefined> {
+    if (!this.cachedBinDir) this.cachedBinDir = resolveBinDir(this.codexBin)
+    return this.cachedBinDir
+  }
+
+  /** 传给 tmux newSession 的 env:PATH 前置 codexBin 所在真实目录(解析不出来就用继承的
+   * PATH,不阻塞),外加调用方传入的额外变量(如 CODEX_HOME)。 */
+  private async buildEnv(extra: Record<string, string>): Promise<Record<string, string>> {
+    const dir = await this.resolveBinDirCached()
+    const path = dir ? `${dir}:${process.env.PATH ?? ''}` : (process.env.PATH ?? '')
+    return { PATH: path, ...extra }
+  }
+
   async detect(): Promise<DetectResult> {
+    const binDir = await this.resolveBinDirCached()
+    const versionEnv = { ...process.env, PATH: binDir ? `${binDir}:${process.env.PATH ?? ''}` : (process.env.PATH ?? '') }
     let versionOutput: string
     try {
-      const { stdout } = await execFileAsync('/bin/sh', ['-c', `${this.codexBin} --version`])
+      const { stdout } = await execFileAsync('/bin/sh', ['-c', `${this.codexBin} --version`], { env: versionEnv })
       versionOutput = stdout.trim()
     } catch (err) {
+      if (binDir) {
+        // codexBin 本身能被 `command -v` 定位到(装了),但跑起来仍然失败——大概率是它的
+        // node 解释器解析不到(nvm 之类的部署形态、或安装本身损坏),不是"没装",错误信息
+        // 需要能区分这两种情形,不能都归成一句"not found"。
+        return {
+          installed: false,
+          activated: false,
+          detail: `codex binary found at ${binDir} but failed to execute (its node interpreter may be unresolved, e.g. nvm-style install with a stale PATH): ${(err as Error).message}`,
+        }
+      }
       return { installed: false, activated: false, detail: `codex binary not found or failed to run: ${(err as Error).message}` }
     }
 
@@ -407,15 +527,18 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     const codexHome = join(spec.workspace.root, '.codex')
     const sessionName = `crabot-w-${spec.worker_id}-${seq}`
     const outputFile = join(dir, `output-${seq}.log`)
-    // codex-docs: 交互态无 --session-id 等价参数;--ask-for-approval never --sandbox
-    // workspace-write 与 cc 用 --permission-mode acceptEdits 同样的自动化意图。
-    const command = `${this.codexBin} --ask-for-approval never --sandbox workspace-write`
+    // codex-docs + m2 实测:交互态无 --session-id 等价参数;--ask-for-approval never
+    // --sandbox workspace-write 与 cc 用 --permission-mode acceptEdits 同样的自动化意图。
+    // --skip-git-repo-check 是 m2 实测新增:worker workspace 不是用户显式信任过的 git
+    // 仓库,不带这个 flag 会报 "Not inside a trusted directory" 直接卡住。
+    const command = `${this.codexBin} --skip-git-repo-check --ask-for-approval never --sandbox workspace-write`
     const spawnStartedAt = Date.now()
 
     // newSession 成功之后才落 meta(running)+注册 runtime,同 cc 纪律:tmux 失败时不留任何
     // 持久痕迹,同 worker_id 可安全重试。CODEX_HOME 经 tmux -e 传给会话进程(execFile 直传
-    // argv,不经过 shell 插值,不需要额外转义)。
-    await this.tmux.newSession({ name: sessionName, cwd: spec.workspace.root, command, outputFile, env: { CODEX_HOME: codexHome } })
+    // argv,不经过 shell 插值,不需要额外转义);PATH 同样经 -e 显式前置 codexBin 所在真实
+    // 目录(nvm 部署陷阱,见 buildEnv/resolveBinDir 注释),不依赖 tmux server 自身环境。
+    await this.tmux.newSession({ name: sessionName, cwd: spec.workspace.root, command, outputFile, env: await this.buildEnv({ CODEX_HOME: codexHome }) })
 
     // session 发现:见文件头注释"session 发现"节。找不到就退化为本地占位 uuid(已知限制)。
     const discovered = await pollForNewRollout(join(codexHome, 'sessions'), spawnStartedAt, this.sessionDiscoveryTimeoutMs)
@@ -514,12 +637,14 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       const sessionName = `crabot-w-${prev.worker_id}-${seq}`
       const outputFile = join(dir, `output-${seq}.log`)
       // codex-docs: `codex resume <SESSION_ID>` 是独立子命令(不是 --resume flag)。
-      // --ask-for-approval/--sandbox 是否对 resume 子命令同样生效未逐条确认,按同一 CLI 顶层
-      // flag 惯例沿用,真机校准时需要核实(见 Task 6 报告)。
-      const command = `${this.codexBin} resume ${shQuote(prev.session_ref)} --ask-for-approval never --sandbox workspace-write`
+      // m2 实测:--skip-git-repo-check/--ask-for-approval/--sandbox 这类主命令级选项必须
+      // 排在 `resume` 子命令**之前**——放在 `resume <id>` 后面 codex 会报 usage 错、exit=2
+      // (原实现把它们放在 `resume <id>` 之后,是未经真机验证的错误猜测,这里按实测结果改正)。
+      const command = `${this.codexBin} --skip-git-repo-check --ask-for-approval never --sandbox workspace-write resume ${shQuote(prev.session_ref)}`
 
-      // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime。
-      await this.tmux.newSession({ name: sessionName, cwd: prevRuntime.workspaceRoot, command, outputFile, env: { CODEX_HOME: prevRuntime.codexHome } })
+      // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime;
+      // PATH 前置同 spawn(nvm 部署陷阱)。
+      await this.tmux.newSession({ name: sessionName, cwd: prevRuntime.workspaceRoot, command, outputFile, env: await this.buildEnv({ CODEX_HOME: prevRuntime.codexHome }) })
 
       runtime = {
         worker_id: prev.worker_id,

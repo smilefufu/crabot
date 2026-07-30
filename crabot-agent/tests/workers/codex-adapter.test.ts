@@ -346,6 +346,42 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
   )
 
   it(
+    'session 发现:rollout 文件内容里的 session_meta.payload.session_id 优先于文件名解析出的 uuid(实测更权威,见 adapter.ts 头注释)',
+    async () => {
+      // 不用 provisionedAdapter 的 withRollout(mock CLI 自己落的 rollout 文件内容里没有
+      // session_id 字段,只用来验证文件名兜底路径)——这里手动在发现窗口内把一个"文件名嵌
+      // uuidA、内容 session_meta.payload.session_id 却是 uuidB"的 rollout 文件放进
+      // sessions 目录,模拟真实 codex 落盘的权威内容,验证 adapter 采信内容而不是文件名。
+      const { adapter, workerId } = await provisionedAdapter([{ output: '第一段输出', emitStop: true }])
+      const uuidFromFilename = randomUUID()
+      const uuidFromContent = randomUUID()
+
+      const spawnPromise = adapter.spawn(makeSpec(workerId, '你好'))
+
+      const now = new Date()
+      const pad = (n: number) => String(n).padStart(2, '0')
+      const datePath = path.join(String(now.getFullYear()), pad(now.getMonth() + 1), pad(now.getDate()))
+      const sessionsDir = path.join(workspaceRoot, '.codex', 'sessions', datePath)
+      await fs.mkdir(sessionsDir, { recursive: true })
+      await fs.writeFile(
+        path.join(sessionsDir, rolloutFileNameFor(uuidFromFilename)),
+        JSON.stringify({ type: 'session_meta', payload: { session_id: uuidFromContent, timestamp: new Date().toISOString(), cwd: workspaceRoot } }) + '\n',
+        'utf-8',
+      )
+
+      const h = await spawnPromise
+      await waitForState(adapter, h, 'idle')
+
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string; session_discovery?: string }
+      expect(meta.session_id).toBe(uuidFromContent)
+      expect(meta.session_id).not.toBe(uuidFromFilename)
+      expect(meta.session_discovery).toBe('discovered')
+      expect(h.session_ref).toBe(uuidFromContent)
+    },
+    15000,
+  )
+
+  it(
     'session 发现:轮询超时降级时输出 console.warn 日志',
     async () => {
       const { adapter, workerId } = await provisionedAdapter([{ output: '第一段输出', emitStop: true }])
@@ -386,6 +422,58 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
       ).rejects.toThrow(/already resumed/)
 
       await adapter.kill(h2)
+    },
+    15000,
+  )
+
+  it(
+    'spawn 命令行携带 --skip-git-repo-check(m2 实测:worker workspace 非受信目录会报 "Not inside a trusted directory")',
+    async () => {
+      const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+      const stopHookCmd = channel.hookCommand('stop')
+      const argvFile = path.join(dataDir, 'spawn-argv.jsonl')
+      const codexBin = codexBinFor([{ output: '第一段输出', emitStop: true }], stopHookCmd, { argvFile })
+      const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin, sessionDiscoveryTimeoutMs: 500 })
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `codextest-${randomUUID().slice(0, 8)}`
+      const h = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+      await waitForState(adapter, h, 'idle')
+
+      const argv: string[] = JSON.parse((await fs.readFile(argvFile, 'utf-8')).trim().split('\n')[0])
+      expect(argv).toContain('--skip-git-repo-check')
+
+      await adapter.kill(h)
+    },
+    15000,
+  )
+
+  it(
+    'resume 命令行把 --skip-git-repo-check/--ask-for-approval/--sandbox 放在 resume 子命令之前(放后面 codex 报 usage 错、exit=2,m2 实测)',
+    async () => {
+      const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+      const stopHookCmd = channel.hookCommand('stop')
+      const argvFile = path.join(dataDir, 'resume-argv.jsonl')
+      const codexBin = codexBinFor([{ output: '主线输出', exit: true }], stopHookCmd, { argvFile })
+      const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin, sessionDiscoveryTimeoutMs: 500 })
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `codextest-${randomUUID().slice(0, 8)}`
+      const h1 = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+      await waitForState(adapter, h1, 'exited')
+
+      const meta1 = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string }
+      const h2 = await adapter.resume({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '继续')
+      await waitForState(adapter, h2, 'exited')
+
+      const lines = (await fs.readFile(argvFile, 'utf-8')).trim().split('\n')
+      // 第一行是 spawn 主线的 argv,第二行才是 resume 触发的调用。
+      const argv: string[] = JSON.parse(lines[1])
+      const resumeIdx = argv.indexOf('resume')
+      expect(resumeIdx).toBeGreaterThan(-1)
+      for (const flag of ['--skip-git-repo-check', '--ask-for-approval', '--sandbox']) {
+        const idx = argv.indexOf(flag)
+        expect(idx).toBeGreaterThan(-1)
+        expect(idx).toBeLessThan(resumeIdx)
+      }
     },
     15000,
   )
@@ -624,6 +712,41 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — spawn 提交纪律', () 
     },
     15000,
   )
+
+  it(
+    'spawn/resume 经 tmux 拉起子进程时,PATH 前置了 codexBin 解析出的真实目录(nvm 部署陷阱:tmux server 自身环境可能解析不到 codex 的 node,m2 实测踩到 "env: node: No such file or directory")',
+    async () => {
+      class RecordingTmuxDriver extends TmuxDriver {
+        lastEnv?: Record<string, string>
+        async newSession(spec: TmuxSessionSpec): Promise<void> {
+          this.lastEnv = spec.env
+          return super.newSession(spec)
+        }
+      }
+      const toolDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-adapter-pathcheck-'))
+      const codexPath = path.join(toolDir, 'codex')
+      // 内容不重要——tmux new-session 本身不校验命令是否存在/能跑,只要 resolveBinDir 能
+      // fs.realpath 出这个文件即可,这里放个立即退出的 sh 脚本。
+      await fs.writeFile(codexPath, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+
+      const tmux = new RecordingTmuxDriver()
+      const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin: codexPath, sessionDiscoveryTimeoutMs: 200 })
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `codextest-${randomUUID().slice(0, 8)}`
+      const spec: SpawnSpec = { worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } }
+
+      // 会话内的假 codex 立即退出,首条 sendText 大概率落空(会话已死)——只关心 newSession
+      // 拿到的 env,spawn 本身是否 reject 不是这条用例的断言点。
+      await adapter.spawn(spec).catch(() => {})
+
+      expect(tmux.lastEnv).toBeDefined()
+      expect(tmux.lastEnv!.PATH).toBe(`${toolDir}:${process.env.PATH ?? ''}`)
+      expect(tmux.lastEnv!.CODEX_HOME).toBe(path.join(workspaceRoot, '.codex'))
+
+      await fs.rm(toolDir, { recursive: true, force: true }).catch(() => {})
+    },
+    15000,
+  )
 })
 
 describe('CodexWorkerAdapter.detect', () => {
@@ -644,7 +767,7 @@ describe('CodexWorkerAdapter.detect', () => {
     return `env FAKE_CODEX_VERSION=${shQuote(version)} node ${shQuote(FAKE_CODEX_VERSION)}`
   }
 
-  it('codex 二进制不存在/不可执行 → installed:false, activated:false', async () => {
+  it('codex 二进制不存在/不可执行 → installed:false, activated:false, detail 说"没装"', async () => {
     const adapter = new CodexWorkerAdapter({
       dataDir,
       codexBin: '/nonexistent/codex-bin-does-not-exist-crabot-test',
@@ -652,7 +775,29 @@ describe('CodexWorkerAdapter.detect', () => {
     const result = await adapter.detect()
     expect(result.installed).toBe(false)
     expect(result.activated).toBe(false)
+    expect(result.detail).toContain('not found')
   })
+
+  it(
+    'codex 二进制存在但执行失败(如 shebang 解释器不可解析,nvm 部署形态的常见故障)→ detail 区分"装了但跑不起来",不是"没装"',
+    async () => {
+      const brokenBinDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-adapter-broken-bin-'))
+      const brokenBin = path.join(brokenBinDir, 'codex')
+      await fs.writeFile(brokenBin, '#!/nonexistent-interpreter-xyz-crabot-test\necho hi\n', { mode: 0o755 })
+
+      const adapter = new CodexWorkerAdapter({ dataDir, codexBin: brokenBin })
+      const result = await adapter.detect()
+      expect(result.installed).toBe(false)
+      expect(result.activated).toBe(false)
+      // 区分点在消息前缀,不是"是否含 not found"——底层 shell 报错本身可能也含这个短语
+      // (如 dash 对坏 shebang 报 "not found" 而不是 bash 的 "bad interpreter"),不能拿它
+      // 当区分依据。
+      expect(result.detail).toMatch(/^codex binary found at .+ but failed to execute/)
+      expect(result.detail).toMatch(/node interpreter|unresolved/i)
+
+      await fs.rm(brokenBinDir, { recursive: true, force: true }).catch(() => {})
+    },
+  )
 
   it('codex 已安装且 codexHomeSource 下有 auth.json → installed:true, activated:true', async () => {
     await fs.writeFile(path.join(home, 'auth.json'), '{}', 'utf-8')
@@ -833,6 +978,10 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter.readTrace(已发现 rollout 
     await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
   })
 
+  // 按 m2 真机实测(codex-cli 0.144.1)的 rollout 信封结构手写:每行 {type, timestamp,
+  // payload},timestamp 在信封顶层(不是嵌进 payload 里)。覆盖五种顶层 type 中的
+  // session_meta/event_msg/response_item/world_state/turn_context,其中后两种应被
+  // readTrace 跳过(不产生事件,但仍计入 nextCursor)。
   function sampleRolloutJsonl(sessionId: string): string {
     const lines = [
       { type: 'session_meta', payload: { timestamp: '2026-07-29T01:00:00Z', cwd: workspaceRoot, id: sessionId } },
