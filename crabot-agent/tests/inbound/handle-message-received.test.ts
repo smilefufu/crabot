@@ -1,0 +1,465 @@
+/**
+ * 入站链路测试网 ①：`handleMessageReceived`（P7 / PR A Task 1）。
+ *
+ * 计划：`crabot-docs/superpowers/plans/2026-07-31-mw-p7-a-inbound-test-net.md`
+ * 侦察：`.superpowers/sdd/p7-recon.md` §A.1 / §A.2
+ *
+ * ## 为什么走真实构造函数而不是 `Object.create(prototype)`
+ *
+ * `rpc-handlers.test.ts` 的造壳手法适合"handler 自身语义"——被测函数的依赖是它自己读的字段。
+ * 但本文件要钉的是**分流**：群消息必须最终落到 `processGroupLaneBatch`、私聊必须落到
+ * `processDirectBatch`。这条路径的一半在**构造函数的接线**里
+ * （`unified-agent.ts:375-389`：attentionScheduler.flushCallback → groupLaneRegistry；
+ * directLaneRegistry → processDirectBatch）。造壳就得在测试里把这段接线抄一遍，
+ * 抄出来的接线永远是对的，M1 那类变异就只能靠"某个函数被调用了"这种参数透传断言去抓——
+ * 恰恰是 CLAUDE.md 明令禁止的。
+ *
+ * 所以这里照 `tests/manager/p5-integration.test.ts` 走**真实构造函数**（`roles: []`，
+ * 不建 AgentHandler / 不起 LSP），只把两个 lane handler 换成录制器：
+ * 从事件入口到"落到哪条处理路径"整条链全是生产装配。
+ *
+ * ## 确定性
+ *
+ * 全链路无 `setTimeout`：
+ * - `@mention` 群消息 → `AttentionScheduler.flushNow` 同步触发；
+ * - 非 `@mention` 群消息 → 用 `group_attention_min_ms: 0` 让 `scheduleCheck` 算出
+ *   `remaining <= 0`，同样走 `flushNow`；
+ * - `SessionLane.enqueue` → `kick()` 在第一个 `await` 之前就同步调 handler。
+ *
+ * 因此断言不依赖任何真实定时器，也不需要轮询等待。
+ */
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { promises as fs } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
+
+import { UnifiedAgent } from '../../src/unified-agent.js'
+import type {
+  ChannelMessage,
+  Friend,
+  LLMConnectionInfo,
+  ModuleId,
+  OrchestrationConfig,
+  UnifiedAgentConfig,
+} from '../../src/types.js'
+import type { BufferedMessage } from '../../src/orchestration/attention-scheduler.js'
+import type { Event } from 'crabot-shared'
+
+// ============================================================================
+// fixtures
+// ============================================================================
+
+const ORCHESTRATION: OrchestrationConfig = {
+  front_context_recent_messages_window_hours: 24,
+  front_context_recent_messages_max_cap: 50,
+  front_context_short_term_memory_window_hours: 24,
+  front_context_short_term_memory_max_cap: 20,
+  worker_recent_messages_window_hours: 24,
+  worker_recent_messages_max_cap: 50,
+  worker_short_term_memory_window_hours: 24,
+  worker_short_term_memory_max_cap: 20,
+  worker_long_term_memory_limit: 10,
+  front_agent_timeout: 60,
+  session_state_ttl: 3600,
+  worker_config_refresh_interval: 300,
+  front_agent_queue_max_length: 10,
+  front_agent_queue_timeout: 60,
+}
+
+const CONFIGURED_MODELS: Record<string, LLMConnectionInfo> = {
+  powerful: { endpoint: 'https://example.invalid', apikey: 'k', model_id: 'm-x', format: 'anthropic' },
+}
+
+function makeFriend(id: string): Friend {
+  return {
+    id,
+    display_name: `好友 ${id}`,
+    permission: 'normal',
+    channel_identities: [],
+    created_at: '2026-01-01T00:00:00.000Z',
+    updated_at: '2026-01-01T00:00:00.000Z',
+  }
+}
+
+function makeMessage(p: {
+  id: string
+  channelId?: string
+  sessionId?: string
+  type: 'private' | 'group'
+  text?: string
+  mention?: boolean
+}): ChannelMessage {
+  return {
+    platform_message_id: p.id,
+    session: {
+      session_id: (p.sessionId ?? 'sess-1') as string,
+      channel_id: (p.channelId ?? 'wechat') as ModuleId,
+      type: p.type,
+    },
+    sender: { friend_id: 'f-1', platform_user_id: 'u-1', platform_display_name: '张三' },
+    content: { type: 'text', text: p.text ?? '你好' },
+    features: { is_mention_crab: p.mention ?? false },
+    platform_timestamp: '2026-07-31T00:00:00.000Z',
+  }
+}
+
+/** 与 `crabot-admin/src/index.ts:4114-4130` 的 payload 逐字段对齐。 */
+function authorizedEvent(payload: {
+  message: ChannelMessage
+  friend: Friend
+  crab_display_name?: string
+  crab_self_handle?: string
+}): Event {
+  return {
+    id: 'evt-1',
+    type: 'channel.message_authorized',
+    source: 'admin' as ModuleId,
+    payload: { channel_id: payload.message.session.channel_id, ...payload },
+    timestamp: '2026-07-31T00:00:00.000Z',
+  }
+}
+
+// ============================================================================
+// harness
+// ============================================================================
+
+/** 一次"落到某条处理路径"的记录。 */
+type Landing =
+  | { path: 'direct'; batch: ReadonlyArray<{ message: ChannelMessage; friend: Friend }> }
+  | { path: 'group'; batch: ReadonlyArray<{ messages: BufferedMessage[]; sessionId: string }> }
+
+interface AgentInternals {
+  onEvent(event: Event): Promise<void>
+  processDirectBatch(batch: ReadonlyArray<{ message: ChannelMessage; friend: Friend }>): Promise<void>
+  processGroupLaneBatch(batch: ReadonlyArray<{ messages: BufferedMessage[]; sessionId: string }>): Promise<void>
+  attentionScheduler: { getBufferSize(sessionId: string): number; stopAll(): void }
+  channelPorts: Map<string, number>
+  crabDisplayNames: Map<string, string>
+  crabSelfHandles: Map<string, string>
+  rpcClient: { call: (...args: unknown[]) => Promise<unknown> }
+  config: { subscriptions?: string[] }
+}
+
+describe('handleMessageReceived —— 入站分流（P7/PR A 测试网 ①）', () => {
+  let tmpRoot: string
+  let prevDataDir: string | undefined
+  let prevAgentDataDir: string | undefined
+  let agent: UnifiedAgent
+  let internals: AgentInternals
+  /** 落点序列：断言"最终进了哪条处理路径"用的唯一事实来源。 */
+  let landings: Landing[]
+  /** 出站 RPC 序列（未配置提示语走这里）。 */
+  let rpcCalls: Array<{ port: number; method: string; params: unknown }>
+  /** lane handler 的放行闸：默认立即放行；需要观察串行/合并时挂起它。 */
+  let gate: Promise<void> | undefined
+
+  function boot(opts: { configured: boolean; attentionMinMs?: number }): void {
+    const config: UnifiedAgentConfig = {
+      module_id: 'inbound-test-agent' as ModuleId,
+      module_type: 'agent',
+      version: '0.0.0-test',
+      protocol_version: '1.0',
+      port: 19998,
+      orchestration: ORCHESTRATION,
+      // roles: [] —— 不建 AgentHandler、不起 LSP 子进程；分流不看 roles。
+      agent_config: {
+        instance_id: 'inbound-test',
+        roles: [],
+        system_prompt: '你是测试用 Crabot',
+        model_config: opts.configured ? CONFIGURED_MODELS : {},
+      },
+      ...(opts.attentionMinMs !== undefined
+        ? { extra: { group_attention_min_ms: opts.attentionMinMs } }
+        : {}),
+    }
+    agent = new UnifiedAgent(config)
+    internals = agent as unknown as AgentInternals
+
+    // 两个 lane handler 换成录制器。构造函数把它们接成
+    // `(batch) => this.processDirectBatch(batch)` 的闭包（读取时才解引用），
+    // 因此实例上覆盖同名方法不破坏任何生产接线。
+    internals.processDirectBatch = async (batch) => {
+      landings.push({ path: 'direct', batch })
+      if (gate) await gate
+    }
+    internals.processGroupLaneBatch = async (batch) => {
+      landings.push({ path: 'group', batch })
+      if (gate) await gate
+    }
+
+    // 出站：预置 channel 端口，绕开 MM resolve；rpcClient.call 只记录。
+    internals.channelPorts.set('wechat', 18001)
+    internals.channelPorts.set('telegram', 18002)
+    internals.rpcClient.call = async (port, method, params) => {
+      rpcCalls.push({ port: port as number, method: method as string, params })
+      return {}
+    }
+  }
+
+  beforeEach(async () => {
+    landings = []
+    rpcCalls = []
+    gate = undefined
+    tmpRoot = await fs.mkdtemp(join(tmpdir(), 'inbound-hmr-'))
+    prevDataDir = process.env.DATA_DIR
+    prevAgentDataDir = process.env.CRABOT_AGENT_DATA_DIR
+    delete process.env.CRABOT_AGENT_DATA_DIR
+    process.env.DATA_DIR = join(tmpRoot, 'data')
+  })
+
+  afterEach(async () => {
+    internals?.attentionScheduler.stopAll()
+    vi.restoreAllMocks()
+    if (prevDataDir === undefined) delete process.env.DATA_DIR
+    else process.env.DATA_DIR = prevDataDir
+    if (prevAgentDataDir === undefined) delete process.env.CRABOT_AGENT_DATA_DIR
+    else process.env.CRABOT_AGENT_DATA_DIR = prevAgentDataDir
+    await fs.rm(tmpRoot, { recursive: true, force: true })
+  })
+
+  // --- 入口 ---
+
+  describe('事件入口', () => {
+    it('agent 订阅的是 admin 鉴权后的 channel.message_authorized，而不是 channel 原始事件', () => {
+      boot({ configured: true })
+      expect(internals.config.subscriptions).toContain('channel.message_authorized')
+      expect(internals.config.subscriptions).not.toContain('channel.message_received')
+    })
+
+    it('非入站事件不会误入分流（走错 case 会把无关事件当消息处理）', async () => {
+      boot({ configured: true })
+      await internals.onEvent({
+        id: 'evt-x',
+        type: 'admin.friend_updated',
+        source: 'admin' as ModuleId,
+        payload: { friend_id: 'f-1' },
+        timestamp: '2026-07-31T00:00:00.000Z',
+      })
+      expect(landings).toEqual([])
+    })
+  })
+
+  // --- M1：群/私分流 ---
+
+  describe('群/私分流（变异靶 M1）', () => {
+    it('私聊消息最终落到私聊处理路径，且完全不经过群聊注意力调度', async () => {
+      boot({ configured: true })
+      const message = makeMessage({ id: 'pm-1', type: 'private' })
+
+      await internals.onEvent(authorizedEvent({ message, friend: makeFriend('f-1') }))
+
+      expect(landings).toHaveLength(1)
+      const landing = landings[0]
+      expect(landing.path).toBe('direct')
+      if (landing.path !== 'direct') throw new Error('unreachable')
+      // 落到私聊路径的是**这条消息本身**（不是空批、不是别的消息）
+      expect(landing.batch.map((b) => b.message.platform_message_id)).toEqual(['pm-1'])
+      expect(landing.batch[0].friend.id).toBe('f-1')
+      // 私聊绕开注意力调度：调度器里不该留下任何缓冲
+      expect(internals.attentionScheduler.getBufferSize('sess-1')).toBe(0)
+    })
+
+    it('群聊 @ 消息最终落到群聊处理路径，私聊路径零命中', async () => {
+      boot({ configured: true })
+      const message = makeMessage({ id: 'gm-1', type: 'group', sessionId: 'group-1', mention: true })
+
+      await internals.onEvent(authorizedEvent({ message, friend: makeFriend('f-1') }))
+
+      expect(landings).toHaveLength(1)
+      const landing = landings[0]
+      expect(landing.path).toBe('group')
+      if (landing.path !== 'group') throw new Error('unreachable')
+      expect(landing.batch).toHaveLength(1)
+      expect(landing.batch[0].sessionId).toBe('group-1')
+      expect(landing.batch[0].messages.map((m) => m.message.platform_message_id)).toEqual(['gm-1'])
+      expect(landing.batch[0].messages[0].friend.id).toBe('f-1')
+      // 已被取走：调度器缓冲清空
+      expect(internals.attentionScheduler.getBufferSize('group-1')).toBe(0)
+    })
+
+    it('群聊非 @ 消息同样只走群聊路径（巡检到点即 flush）', async () => {
+      boot({ configured: true, attentionMinMs: 0 })
+      const message = makeMessage({ id: 'gm-2', type: 'group', sessionId: 'group-2', mention: false })
+
+      await internals.onEvent(authorizedEvent({ message, friend: makeFriend('f-1') }))
+
+      expect(landings.map((l) => l.path)).toEqual(['group'])
+    })
+
+    it('群、私两条消息交错到达时各走各的路，互不串台', async () => {
+      boot({ configured: true })
+      const priv = makeMessage({ id: 'pm-2', type: 'private', sessionId: 'sess-a' })
+      const grp = makeMessage({ id: 'gm-3', type: 'group', sessionId: 'group-a', mention: true })
+
+      await internals.onEvent(authorizedEvent({ message: priv, friend: makeFriend('f-1') }))
+      await internals.onEvent(authorizedEvent({ message: grp, friend: makeFriend('f-2') }))
+
+      expect(landings.map((l) => l.path)).toEqual(['direct', 'group'])
+      const first = landings[0]
+      const second = landings[1]
+      if (first.path !== 'direct' || second.path !== 'group') throw new Error('unreachable')
+      expect(first.batch[0].message.platform_message_id).toBe('pm-2')
+      expect(second.batch[0].messages[0].message.platform_message_id).toBe('gm-3')
+    })
+  })
+
+  // --- M3：未配置早退 ---
+
+  describe('未配置早退（变异靶 M3）', () => {
+    it('未配置 LLM 时私聊消息不进任何处理路径，只回一条提示', async () => {
+      boot({ configured: false })
+      const message = makeMessage({ id: 'pm-3', type: 'private' })
+
+      await internals.onEvent(authorizedEvent({ message, friend: makeFriend('f-1') }))
+
+      expect(landings).toEqual([])
+      const sends = rpcCalls.filter((c) => c.method === 'send_message')
+      expect(sends).toHaveLength(1)
+      expect(sends[0].port).toBe(18001)
+      const reply = (sends[0].params as { message: ChannelMessage }).message
+      expect(reply.content.text).toContain('尚未配置')
+      // 提示必须回到原会话，不能串到别的会话
+      expect(reply.session.session_id).toBe('sess-1')
+      expect(reply.session.channel_id).toBe('wechat')
+    })
+
+    it('未配置 LLM 时群聊消息既不进群聊路径，也不留在注意力调度里', async () => {
+      boot({ configured: false })
+      const message = makeMessage({ id: 'gm-4', type: 'group', sessionId: 'group-3', mention: true })
+
+      await internals.onEvent(authorizedEvent({ message, friend: makeFriend('f-1') }))
+
+      expect(landings).toEqual([])
+      expect(internals.attentionScheduler.getBufferSize('group-3')).toBe(0)
+      expect(rpcCalls.filter((c) => c.method === 'send_message')).toHaveLength(1)
+    })
+
+    it('配置齐备时不发"未配置"提示（早退不能反过来误伤正常消息）', async () => {
+      boot({ configured: true })
+      await internals.onEvent(
+        authorizedEvent({ message: makeMessage({ id: 'pm-4', type: 'private' }), friend: makeFriend('f-1') }),
+      )
+      expect(rpcCalls.filter((c) => c.method === 'send_message')).toHaveLength(0)
+      expect(landings.map((l) => l.path)).toEqual(['direct'])
+    })
+  })
+
+  // --- lane key：串行化边界 ---
+
+  describe('私聊 lane key = channel + session', () => {
+    it('同一会话连发：第二条不与第一条并发，等第一批处理完后合并成新一批', async () => {
+      boot({ configured: true })
+      let release: () => void = () => {}
+      gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+
+      const friend = makeFriend('f-1')
+      await internals.onEvent(authorizedEvent({ message: makeMessage({ id: 'a1', type: 'private' }), friend }))
+      // 第一批还卡在 gate 上
+      expect(landings).toHaveLength(1)
+
+      await internals.onEvent(authorizedEvent({ message: makeMessage({ id: 'a2', type: 'private' }), friend }))
+      await internals.onEvent(authorizedEvent({ message: makeMessage({ id: 'a3', type: 'private' }), friend }))
+      // 串行化：处理中不得再起第二次 handler
+      expect(landings).toHaveLength(1)
+
+      gate = undefined
+      release()
+      await new Promise((resolve) => process.nextTick(resolve))
+
+      expect(landings).toHaveLength(2)
+      const second = landings[1]
+      if (second.path !== 'direct') throw new Error('unreachable')
+      // a2/a3 合并进同一批（合并语义本身的完整覆盖在 processDirectBatch 测试里）
+      expect(second.batch.map((b) => b.message.platform_message_id)).toEqual(['a2', 'a3'])
+    })
+
+    it('session_id 相同但 channel_id 不同 → 两条独立 lane，不互相阻塞', async () => {
+      boot({ configured: true })
+      let release: () => void = () => {}
+      gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+
+      const friend = makeFriend('f-1')
+      await internals.onEvent(
+        authorizedEvent({ message: makeMessage({ id: 'w1', type: 'private', channelId: 'wechat' }), friend }),
+      )
+      await internals.onEvent(
+        authorizedEvent({ message: makeMessage({ id: 't1', type: 'private', channelId: 'telegram' }), friend }),
+      )
+
+      // 若 lane key 只用 session_id，t1 会被 w1 的 lane 挡住，这里只有 1 条落点
+      expect(landings).toHaveLength(2)
+      expect(
+        landings.map((l) => (l.path === 'direct' ? l.batch[0].message.session.channel_id : '?')),
+      ).toEqual(['wechat', 'telegram'])
+
+      gate = undefined
+      release()
+      await new Promise((resolve) => process.nextTick(resolve))
+    })
+  })
+
+  // --- 昵称 / self-handle 缓存 ---
+
+  describe('crab 昵称与 self-handle 缓存', () => {
+    it('按 channel 分桶缓存，多渠道互不覆盖', async () => {
+      boot({ configured: true })
+      const friend = makeFriend('f-1')
+      await internals.onEvent(
+        authorizedEvent({
+          message: makeMessage({ id: 'c1', type: 'private', channelId: 'wechat' }),
+          friend,
+          crab_display_name: '小蟹',
+          crab_self_handle: '@crabot_wx',
+        }),
+      )
+      await internals.onEvent(
+        authorizedEvent({
+          message: makeMessage({ id: 'c2', type: 'private', channelId: 'telegram' }),
+          friend,
+          crab_display_name: 'Crabot',
+          crab_self_handle: '@crabot_tg',
+        }),
+      )
+
+      expect(internals.crabDisplayNames.get('wechat')).toBe('小蟹')
+      expect(internals.crabDisplayNames.get('telegram')).toBe('Crabot')
+      expect(internals.crabSelfHandles.get('wechat')).toBe('@crabot_wx')
+      expect(internals.crabSelfHandles.get('telegram')).toBe('@crabot_tg')
+    })
+
+    it('后续消息不带这两个字段时保留已缓存值（不能被 undefined 抹掉）', async () => {
+      boot({ configured: true })
+      const friend = makeFriend('f-1')
+      await internals.onEvent(
+        authorizedEvent({
+          message: makeMessage({ id: 'c3', type: 'private' }),
+          friend,
+          crab_display_name: '小蟹',
+          crab_self_handle: '@crabot_wx',
+        }),
+      )
+      await internals.onEvent(
+        authorizedEvent({ message: makeMessage({ id: 'c4', type: 'private' }), friend }),
+      )
+
+      expect(internals.crabDisplayNames.get('wechat')).toBe('小蟹')
+      expect(internals.crabSelfHandles.get('wechat')).toBe('@crabot_wx')
+    })
+
+    it('未配置早退发生在缓存之后：提示消息不影响昵称缓存被写入', async () => {
+      boot({ configured: false })
+      await internals.onEvent(
+        authorizedEvent({
+          message: makeMessage({ id: 'c5', type: 'private' }),
+          friend: makeFriend('f-1'),
+          crab_self_handle: '@crabot_wx',
+        }),
+      )
+      expect(internals.crabSelfHandles.get('wechat')).toBe('@crabot_wx')
+    })
+  })
+})
