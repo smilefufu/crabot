@@ -25,17 +25,77 @@ export interface CrabotInfoToolsDeps {
 
 // --- 掩码:get_config_summary 的责任,防御性做,不依赖 admin 端已掩码 ---
 
+// `auth` 单独加 \b：不加边界会把 `auth_config` 这类"字段名里带 auth 但其实是个混合
+// 容器(既有 authorization 也有 endpoint/timeout 等中性字段)"的键也当成整体敏感键，
+// 触发下面「整体掩掉不再递归」的兜底逻辑，误伤 auth_config.endpoint 这类中性字段
+// (会破坏既有掩码用例的选择性掩码预期)。加 \b 后 `auth`/`Auth` 精确匹配，
+// `auth_config` 不再在外层被整体掩码，内部的 authorization/auth/bearer/... 仍会被各自的
+// 键名命中掩掉——不依赖外层是否命中。
 const SENSITIVE_KEY_PATTERN =
-  /key|token|secret|password|credential|authorization|auth|bearer|cookie|api[-_]?key|access[-_]?token|refresh[-_]?token|private[-_]?key|passwd/i
+  /key|token|secret|password|credential|authorization|\bauth\b|bearer|cookie|api[-_]?key|access[-_]?token|refresh[-_]?token|private[-_]?key|passwd/i
 
-/** 容器类键名：其内部所有字符串值一律掩码(不论值的键名) */
-const CONTAINER_KEY_PATTERN = /^(headers|env|environment)$/i
+/** 容器类键名：其内部所有字符串值一律掩码(不论值的键名)。`args` 是 stdio MCP server 的命令行
+ *  参数数组，`--api-key sk-xxx` 这类形态常见，元素一律掩(兜底；mcp_servers 主要靠下面的白名单
+ *  投影丢弃，这里是即使投影漏了某个来源也不至于原样泄露)。 */
+const CONTAINER_KEY_PATTERN = /^(headers|env|environment|args)$/i
+
+/** url 类键名：兜底剥离 query string 与 userinfo 后再输出(见 sanitizeUrlValue)。 */
+const URL_KEY_PATTERN = /^url$/i
+
+/** mcp_servers 数组键名(admin `handleGetAgentConfig` / MCPServerConfig 的顶层字段)。 */
+const MCP_SERVERS_KEY_PATTERN = /^mcp_servers$/i
+
+/**
+ * mcp_servers 白名单投影：只保留 manager 回答"配了哪些 MCP"用得到的展示字段，
+ * 显式丢弃 command/args/env/url/headers 等启动参数/凭证原文。
+ *
+ * 设计取舍：选白名单而不是给 command/args/env/url/headers 逐个字段打掩码补丁——
+ * stdio server 常见 `--api-key sk-xxx` 这类凭证直接拼进 args，url 常见
+ * `?api_key=...` 查询参数或 `user:pass@host` userinfo，黑名单式掩码总要猜"这个字段
+ * 会不会装凭证"，猜漏一个就多一个泄露口子；白名单则是"默认丢弃，明确需要才留"，
+ * 上游 MCPServerConfig 以后新增字段，默认就是丢弃，不会重新开口子。
+ */
+const MCP_SERVER_ALLOWED_KEYS = ['id', 'name', 'transport', 'description'] as const
+
+function projectMcpServer(entry: unknown): unknown {
+  if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+    // 非预期形状，防御性兜底：不是对象就没有白名单字段可投影，交给上层继续走通用掩码
+    return maskSensitive(entry)
+  }
+  const src = entry as Record<string, unknown>
+  const projected: Record<string, unknown> = {}
+  for (const key of MCP_SERVER_ALLOWED_KEYS) {
+    if (key in src) projected[key] = src[key]
+  }
+  return projected
+}
+
+/**
+ * url 类字段兜底掩码：剥掉 query string(`?api_key=...`)与 userinfo(`user:pass@host`)，
+ * 保留 scheme+host+path 便于诊断。不是合法 URL 时无法安全界定边界，整体掩掉更保守。
+ */
+function sanitizeUrlValue(raw: string): string {
+  try {
+    const u = new URL(raw)
+    u.search = ''
+    u.hash = ''
+    u.username = ''
+    u.password = ''
+    return u.toString()
+  } catch {
+    return '***'
+  }
+}
 
 /**
  * 递归掩码:
- * 1. 键名命中 SENSITIVE_KEY_PATTERN 的字段：若值是字符串则替换为 '***'，若是对象/数组则递归
- * 2. 键名命中 CONTAINER_KEY_PATTERN 的容器内，所有字符串值替换为 '***'(非字符串值递归)
- * 3. 其余值递归处理
+ * 1. 键名命中 MCP_SERVERS_KEY_PATTERN 且值是数组：逐项走白名单投影(见 projectMcpServer)
+ * 2. 键名命中 SENSITIVE_KEY_PATTERN 的字段：整体掩掉——字符串直接替换为 '***'，对象/数组
+ *    走容器整体掩码(不再递归下去逐键判断，避免"外层键敏感、内层键中性"漏网，例如
+ *    `auth: { value: 'Bearer real' }`)
+ * 3. 键名命中 CONTAINER_KEY_PATTERN 的容器内，所有字符串值替换为 '***'(非字符串值递归)
+ * 4. 键名命中 URL_KEY_PATTERN 的字符串值：剥 query string 与 userinfo
+ * 5. 其余值递归处理
  */
 function maskSensitive(value: unknown): unknown {
   if (Array.isArray(value)) {
@@ -44,17 +104,26 @@ function maskSensitive(value: unknown): unknown {
   if (value !== null && typeof value === 'object') {
     const result: Record<string, unknown> = {}
     for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
-      // 如果键名命中敏感模式：字符串值掩码，对象/数组递归
-      if (SENSITIVE_KEY_PATTERN.test(key)) {
+      if (MCP_SERVERS_KEY_PATTERN.test(key) && Array.isArray(v)) {
+        result[key] = v.map(projectMcpServer)
+      }
+      // 如果键名命中敏感模式：整体掩掉，不论值是标量还是对象/数组
+      else if (SENSITIVE_KEY_PATTERN.test(key)) {
         if (typeof v === 'string') {
           result[key] = '***'
+        } else if (v !== null && typeof v === 'object') {
+          result[key] = maskContainer(v)
         } else {
-          result[key] = maskSensitive(v)
+          result[key] = '***'
         }
       }
       // 如果键名是容器类，内部所有字符串值掩码
       else if (CONTAINER_KEY_PATTERN.test(key)) {
         result[key] = maskContainer(v)
+      }
+      // url 类字段：剥 query string 与 userinfo
+      else if (URL_KEY_PATTERN.test(key) && typeof v === 'string') {
+        result[key] = sanitizeUrlValue(v)
       }
       // 其余递归
       else {

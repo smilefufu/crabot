@@ -195,13 +195,16 @@ describe('buildCrabotInfoTools', () => {
       expect(parsed.config.non_sensitive_field).toBe('keep-me')
     })
 
-    it('掩码 mcp_servers[].headers.Authorization 等凭证键(PoC 场景)', async () => {
+    it('mcp_servers 走白名单投影：headers.Authorization 等凭证键(PoC 场景)整个字段消失而非掩码', async () => {
       const callAdmin = makeCallAdmin({
         get_agent_config: () => ({
           config: {
             mcp_servers: [
               {
+                id: 'mcp-notion',
                 name: 'notion',
+                transport: 'streamable-http',
+                description: 'Notion MCP server',
                 headers: {
                   Authorization: 'Bearer ntn_secret_abc123_real',
                   'X-Custom': 'plain-value',
@@ -218,12 +221,119 @@ describe('buildCrabotInfoTools', () => {
       const parsed = JSON.parse(result.output)
       const output_str = JSON.stringify(parsed)
 
-      // Authorization 值必须被掩码，原文不能出现
+      // Authorization 原文不能出现
       expect(output_str).not.toContain('ntn_secret_abc123_real')
       expect(output_str).not.toContain('Bearer ntn_secret_abc123_real')
-      // X-Custom 也在 headers 容器里，值也应该被掩
-      expect(parsed.config.mcp_servers[0].headers.Authorization).toBe('***')
-      expect(parsed.config.mcp_servers[0].headers['X-Custom']).toBe('***')
+      // 白名单投影：headers 字段整个消失，不是被掩码成 '***'
+      expect(parsed.config.mcp_servers[0].headers).toBeUndefined()
+      // 保留字段原样透出
+      expect(parsed.config.mcp_servers[0]).toEqual({
+        id: 'mcp-notion',
+        name: 'notion',
+        transport: 'streamable-http',
+        description: 'Notion MCP server',
+      })
+    })
+
+    it('mcp_servers 白名单投影：丢弃 command/args/env/url/headers，只留 id/name/transport/description', async () => {
+      const callAdmin = makeCallAdmin({
+        get_agent_config: () => ({
+          config: {
+            mcp_servers: [
+              {
+                id: 'mcp-stdio',
+                name: 'some-stdio-server',
+                transport: 'stdio',
+                description: 'stdio MCP server',
+                command: '/usr/bin/some-mcp',
+                args: ['--api-key', 'sk-real-secret'],
+                env: { TOKEN: 'env-secret' },
+              },
+              {
+                id: 'mcp-http',
+                name: 'some-http-server',
+                transport: 'streamable-http',
+                url: 'https://u:p@h/x?api_key=secret',
+              },
+            ],
+          },
+        }),
+      })
+      const tools = buildCrabotInfoTools({ callAdmin })
+      const tool = tools.find((t) => t.name === 'get_config_summary')!
+      const result = await tool.call({}, {})
+      expect(result.isError).toBe(false)
+      const parsed = JSON.parse(result.output)
+      const output_str = JSON.stringify(parsed)
+
+      // 凭证原文不能出现在返回的任何位置
+      expect(output_str).not.toContain('sk-real-secret')
+      expect(output_str).not.toContain('env-secret')
+      expect(output_str).not.toContain('secret')
+      expect(output_str).not.toContain('u:p@')
+
+      // 保留字段
+      expect(parsed.config.mcp_servers[0]).toEqual({
+        id: 'mcp-stdio',
+        name: 'some-stdio-server',
+        transport: 'stdio',
+        description: 'stdio MCP server',
+      })
+      expect(parsed.config.mcp_servers[1]).toEqual({
+        id: 'mcp-http',
+        name: 'some-http-server',
+        transport: 'streamable-http',
+      })
+      // command/args/env/url/headers 全部丢弃，不只是掩码
+      expect('command' in parsed.config.mcp_servers[0]).toBe(false)
+      expect('args' in parsed.config.mcp_servers[0]).toBe(false)
+      expect('env' in parsed.config.mcp_servers[0]).toBe(false)
+      expect('url' in parsed.config.mcp_servers[1]).toBe(false)
+      expect('headers' in parsed.config.mcp_servers[1]).toBe(false)
+    })
+
+    it('兜底加固：非 mcp_servers 场景下,url 类字段剥掉 query string 与 userinfo,保留 host/path', async () => {
+      const callAdmin = makeCallAdmin({
+        get_agent_config: () => ({
+          config: {
+            some_upstream: {
+              url: 'https://u:p@h/x?api_key=secret',
+            },
+          },
+        }),
+      })
+      const tools = buildCrabotInfoTools({ callAdmin })
+      const tool = tools.find((t) => t.name === 'get_config_summary')!
+      const result = await tool.call({}, {})
+      expect(result.isError).toBe(false)
+      const parsed = JSON.parse(result.output)
+      const output_str = JSON.stringify(parsed)
+
+      // 凭证原文不能出现
+      expect(output_str).not.toContain('secret')
+      expect(output_str).not.toContain('u:p@')
+      // host/path 仍在，便于诊断
+      expect(parsed.config.some_upstream.url).toContain('h')
+      expect(parsed.config.some_upstream.url).toContain('/x')
+    })
+
+    it('兜底加固：外层键敏感、内层键中性(如 auth: { value: "Bearer ..." })不再从内层缝隙漏出', async () => {
+      const callAdmin = makeCallAdmin({
+        get_agent_config: () => ({
+          config: {
+            auth: { value: 'Bearer real-secret-token' },
+          },
+        }),
+      })
+      const tools = buildCrabotInfoTools({ callAdmin })
+      const tool = tools.find((t) => t.name === 'get_config_summary')!
+      const result = await tool.call({}, {})
+      expect(result.isError).toBe(false)
+      const parsed = JSON.parse(result.output)
+      const output_str = JSON.stringify(parsed)
+
+      expect(output_str).not.toContain('Bearer real-secret-token')
+      expect(parsed.config.auth.value).toBe('***')
     })
 
     it('对 env/environment 容器内所有字符串值掩码(不论键名)', async () => {
