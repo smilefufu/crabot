@@ -529,15 +529,25 @@ export class UnifiedAgent extends ModuleBase {
   /**
    * `ManagerKey`（`channel_id::session_id`）→ 台账聚合键 `DialogObjectId`（§3）。
    *
-   * ⚠️ **P7 cutover 前必须修**：协议要求私聊聚合成 `friend:<friend_id>`（同一 friend 跨 channel
-   * 共享一份台账），但那需要 admin 的 friend 解析，而 `ManagerRegistryDeps.dialogObjectIdFor`
-   * 是**同步**签名，这里没有任何可同步查到 session 类型/friend 的入口——agent 侧唯一知道
-   * "这个 session 是私聊且对端是谁"的地方是入站消息链路，而 P5 明令该链路零改动。
-   * 因此本阶段一律派生成 `group:<channel_id>:<session_id>`。
+   * ⚠️ **P7 cutover 前必须修**。本阶段一律派生成 `group:<channel_id>:<session_id>`，
+   * 有**两处**归档错误：
+   *
+   * 1. **私聊**：协议要求聚合成 `friend:<friend_id>`（同一 friend 跨 channel 共享一份台账），
+   *    但那需要 admin 的 friend 解析，而 `ManagerRegistryDeps.dialogObjectIdFor` 是**同步**签名，
+   *    这里没有任何可同步查到 session 类型/friend 的入口——agent 侧唯一知道"这个 session 是
+   *    私聊且对端是谁"的地方是入站消息链路，而 P5 明令该链路零改动。
+   * 2. **系统任务线程**：§4.4 要求未配置 `target_session` 的 scheduled 触发**台账归 master
+   *    对话对象**（`friend:<master_id>`），但 `SYSTEM_TASKS_MANAGER_KEY`（`admin-web::system-tasks`）
+   *    在这里会派生成 `group:admin-web:system-tasks`。后果不只是归档键难看：master 在私聊里
+   *    问进度时，其 manager 按 `friend:<master_id>` 查台账**看不到**系统线程派出的 worker，
+   *    §4.4 "人类在哪个 session 回话、该 session 的 manager 凭共享台账接办"就断了。
    *
    * 现阶段无害：P5 没有任何生产调用方经这套栈 spawn worker（admin 的 scheduler 调用点未切换），
-   * 台账上不会出现被归错档的条目。切换调用点之前必须先解决它，二选一：把签名改成异步，
-   * 或在入站链路上维护一份 `ManagerKey → DialogObjectId` 缓存。
+   * 台账上不会出现被归错档的条目。
+   *
+   * 切换调用点之前必须先解决。**只有"把签名改成异步"这一条路能同时覆盖两种情况**——
+   * "在入站链路上维护 `ManagerKey → DialogObjectId` 缓存"对系统线程**天然无效**：它根本
+   * 没有入站消息，缓存永远不会被填充。
    */
   private dialogObjectIdForManagerKey(key: ManagerKey): DialogObjectId {
     const sep = key.indexOf('::')
