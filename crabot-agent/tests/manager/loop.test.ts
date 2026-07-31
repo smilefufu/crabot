@@ -699,6 +699,49 @@ describe('ManagerLoop', () => {
     expect(state.rollingSummary).toBeUndefined() // 没发生过折叠
   })
 
+  // --- drainMailbox(自唤醒入口,P7 阻塞项 #5) ---
+
+  it('drainMailbox: mailbox 为空时是 no-op——不调 LLM、不写盘(否则会拿没有新内容的上下文凭空多问一次)', async () => {
+    const { adapter, calls } = makeAdapter()
+    const loop = new ManagerLoop(baseDeps({ store, adapter }))
+
+    expect(loop.hasPendingMailbox).toBe(false)
+    const result = await loop.drainMailbox()
+
+    expect(result.turns).toBe(0)
+    expect(result.consumedEvents).toBe(true)
+    expect(calls.length).toBe(0)
+    const state = await store.load(KEY)
+    expect(state.recent.length).toBe(0)
+  })
+
+  it('drainMailbox: 只投递 mailbox 残留,不额外渲染唤醒事件;投递后 mailbox 清空、内容进历史(至少一次且不重复)', async () => {
+    const { adapter, queue, calls } = makeAdapter()
+    queue.push({ text: '处理完残留', stopReason: 'end_turn' })
+    queue.push({ text: '下一次唤醒的回复', stopReason: 'end_turn' })
+
+    const loop = new ManagerLoop(baseDeps({ store, adapter }))
+    loop.enqueueDuringEpisode({ kind: 'schedule', scheduleId: 'sched-residue', title: '巡检', description: '收口后才到达的残留' })
+    expect(loop.hasPendingMailbox).toBe(true)
+
+    const result = await loop.drainMailbox()
+    expect(result.outcome).toBe('completed')
+    expect(result.consumedEvents).toBe(true)
+    expect(loop.hasPendingMailbox).toBe(false)
+
+    // 喂给 LLM 的只有残留本身,没有为"自唤醒"这件事凭空造出一条唤醒事件文本。
+    const firstCallMessages = JSON.stringify(calls[0].messages)
+    expect(firstCallMessages).toContain('收口后才到达的残留')
+    expect(firstCallMessages).not.toContain('[人类消息]')
+
+    // 已消费进持久历史,下次真实唤醒不会重复投递。
+    const afterDrain = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('新的话')] })
+    expect(afterDrain.outcome).toBe('completed')
+    const state = await store.load(KEY)
+    const occurrences = (JSON.stringify(state.recent).match(/sched-residue/g) ?? []).length
+    expect(occurrences).toBe(1)
+  })
+
   it('session 永不 finalize:连续 5 次 wakeUp 后仍能正常继续工作', async () => {
     const { adapter, queue } = makeAdapter()
     for (let i = 0; i < 5; i++) queue.push({ text: `回复${i}`, stopReason: 'end_turn' })

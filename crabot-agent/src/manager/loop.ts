@@ -135,6 +135,11 @@ export class ManagerLoop {
    *   `pending`(见 human-message-queue.ts push() 实现),下次 wakeUp() 顶部的
    *   drainPending() 会把它们和本次唤醒事件一起拼进新 episode 的 initialMessages——
    *   "至少一次投递"对两种时机是同一套代码路径,不需要再维护一份独立的 pending 队列。
+   *
+   * 但"下次唤醒"未必会到来:注入若落在 engine 最后一次 drain 之后(query-loop 在 end_turn
+   * 收口前的那次 drainPending),内容就会一直躺在这里。这个停滞窗口由 `ManagerRegistry`
+   * 在 episode 收口时按 `hasPendingMailbox` 自唤醒(`drainMailbox`)兜底,并由 `evictIdle`
+   * 拒绝回收 mailbox 非空的实例保证它不会先被回收掉(P7 阻塞项 #5)。
    */
   private readonly mailbox = new HumanMessageQueue()
   /**
@@ -165,6 +170,28 @@ export class ManagerLoop {
     return this.mutex.run(() => this.runEpisode(event))
   }
 
+  /**
+   * 自唤醒入口(`ManagerRegistry` 专用):不带新唤醒事件,只把 mailbox 里的残留跑一个 episode
+   * 处理掉。用途见 registry.ts `maybeSelfWake`——engine 在 end_turn 收口前做最后一次
+   * `drainPending`,落在那之后的 `enqueueDuringEpisode` 内容没有任何消费者在等,若不自唤醒
+   * 就会一直躺在内存 mailbox 里。
+   *
+   * mailbox 为空(残留已被别的 episode 顺带 drain 走)时是 no-op:不调 LLM、不写盘、不记
+   * episode 日志——否则会拿一份没有任何新内容的上下文再问一次 LLM,凭空多出一次回复。
+   */
+  async drainMailbox(): Promise<EpisodeResult> {
+    return this.mutex.run(() => this.runEpisode(undefined))
+  }
+
+  /**
+   * mailbox 里是否还有尚未投递给 LLM 的内容。`ManagerRegistry` 用它做两件事:
+   * ① episode 收口后判断要不要自唤醒;② `evictIdle` 判断该实例能不能回收——mailbox 是这些
+   * 内容**唯一**的存放处(盘上 state 没有它们,正因为还没被消费),回收即永久丢失。
+   */
+  get hasPendingMailbox(): boolean {
+    return this.mailbox.hasPending
+  }
+
   /** episode 进行中到达的新事件:渲染成文本推进内部邮箱,由 engine 的 humanMessageQueue
    *  在 turn 间隙注入;episode 不在跑时同样入队,行为见 `mailbox` 字段注释。 */
   enqueueDuringEpisode(event: WakeEvent): void {
@@ -173,12 +200,18 @@ export class ManagerLoop {
     this.currentEpisodeInjected?.push(text)
   }
 
-  private async runEpisode(event: WakeEvent): Promise<EpisodeResult> {
+  /** `event === undefined` ⇒ 自唤醒(见 `drainMailbox`):只处理 mailbox 残留,不渲染唤醒事件。 */
+  private async runEpisode(event: WakeEvent | undefined): Promise<EpisodeResult> {
     const episodeId = randomUUID()
     const carriedTexts = this.mailbox.drainPending().map(toText)
-    const eventText = renderWakeEvent(event)
+    if (event === undefined && carriedTexts.length === 0) {
+      // 自唤醒但 mailbox 已空(残留被排在前面的另一个 episode 顺带 drain 走了)——
+      // 没有任何新内容,直接空转返回,不开 episode(见 drainMailbox 注释)。
+      return { episodeId, outcome: 'completed', turns: 0, consumedEvents: true }
+    }
+    const eventText = event === undefined ? undefined : renderWakeEvent(event)
     this.currentEpisodeInjected = []
-    this.currentWakeEvent = event
+    this.currentWakeEvent = event ?? null
 
     try {
       return await this.runEpisodeBody(episodeId, carriedTexts, eventText)
@@ -194,7 +227,7 @@ export class ManagerLoop {
       // 绕过"至少一次投递"(见文件头)。
       this.mailbox.drainPending()
       for (const t of carriedTexts) this.mailbox.push(t)
-      this.mailbox.push(eventText)
+      if (eventText !== undefined) this.mailbox.push(eventText)
       for (const t of this.currentEpisodeInjected ?? []) this.mailbox.push(t)
       throw err
     } finally {
@@ -206,7 +239,7 @@ export class ManagerLoop {
   private async runEpisodeBody(
     episodeId: string,
     carriedTexts: ReadonlyArray<string>,
-    eventText: string,
+    eventText: string | undefined,
   ): Promise<EpisodeResult> {
     // §11 热更语义:整个 episode(含下面的 max_tokens 兜底重试)只在这里解析一次 adapter/
     // model,固定用这份快照——即使两次解析之间 admin config 已经变了,当前 episode 也不换。
@@ -229,7 +262,7 @@ export class ManagerLoop {
     const tailMessages: EngineMessage[] = [
       ...state.recent,
       ...carriedTexts.map((t) => createUserMessage(t)),
-      createUserMessage(eventText),
+      ...(eventText === undefined ? [] : [createUserMessage(eventText)]),
     ]
 
     let attempt = await this.runAttempt(state, tailMessages, adapter, model)
@@ -298,7 +331,7 @@ export class ManagerLoop {
       // 不清空会和下面的整体重投重复),再按到达顺序整体重投,保证至少一次投递、不丢失、不重复。
       this.mailbox.drainPending()
       for (const t of carriedTexts) this.mailbox.push(t)
-      this.mailbox.push(eventText)
+      if (eventText !== undefined) this.mailbox.push(eventText)
       for (const t of this.currentEpisodeInjected ?? []) this.mailbox.push(t)
     }
 
