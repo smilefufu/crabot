@@ -14,6 +14,10 @@
  * `getOrCreate` 重新建一个新的 `ManagerLoop` 实例,而它构造时 `ManagerLoop.runEpisodeBody`
  * 顶部的 `store.load(key)` 会原样读回历史——对调用方完全透明。
  *
+ * **例外:mailbox 非空的实例不可回收**——那些内容只存在于内存 mailbox,盘上没有(见
+ * `evictIdle`);与之配套的是 episode 收口时的自唤醒兜底(见 `maybeSelfWake`)。两者合起来
+ * 关掉 P7 阻塞项 #5 的"停滞 + 回收丢失"窗口。
+ *
  * ## 系统线程(§4.4)
  *
  * `SYSTEM_TASKS_MANAGER_KEY` 是协议保留的"系统任务"线程:未指定目标 session 的 scheduled
@@ -58,6 +62,18 @@ import type { ChannelMessage } from '../types'
 
 /** §4.4 保留线程:未配置目标 session 的 scheduled 触发 / 台账查不到监护 session 的 worker 事件落此。 */
 export const SYSTEM_TASKS_MANAGER_KEY = 'admin-web::system-tasks' as ManagerKey
+
+/**
+ * 连锁自唤醒的上限(见 `ManagerRegistry.maybeSelfWake`)。
+ *
+ * 自唤醒本身可能再产生新的 mailbox 内容(自唤醒 episode 期间又有注入到达),不设上限就是
+ * 一条"episode → 注入 → episode"的无限链:注入源若是稳定复发的故障(如某 worker 上
+ * `query_worker` 恒失败,每个 episode 都触发一次 onAsyncError),链条永不收敛,烧的是真钱。
+ * 取 3:够把"收口瞬间才到达"这类一次性尾巴处理干净,又不至于替一个稳定故障源无限重开
+ * episode。到顶后残留**不丢**——它留在 mailbox 里,受 `evictIdle` 的非空保护,由下一次
+ * 真实唤醒(人类消息 / worker 事件 / schedule)顺带 drain 走,仍满足 §4.1 至少一次投递。
+ */
+export const MAX_SELF_WAKE_CHAIN = 3
 
 /** `query_worker` 异步失败(Task 4 `WorkerToolsDeps.onAsyncError`)的信息形状,逐字对齐该接口。 */
 export interface AsyncToolErrorInfo {
@@ -233,14 +249,27 @@ export class ManagerRegistry {
   }
 
   /**
-   * 空闲实例回收:回收 `nowMs - 最后活跃时间 > idleMs` 且当前无 episode 在跑的实例。
-   * 只删内存里的 `ManagerLoop` 引用,不碰 `ManagerSessionStore` 的盘上状态——回收后同一 key
-   * 再次唤醒会经 `getOrCreate` 重建实例并从盘上恢复历史(见文件头说明)。返回本次回收数量。
+   * 空闲实例回收:回收 `nowMs - 最后活跃时间 > idleMs`、当前无 episode 在跑、且 **mailbox 为空**
+   * 的实例。只删内存里的 `ManagerLoop` 引用,不碰 `ManagerSessionStore` 的盘上状态——回收后
+   * 同一 key 再次唤醒会经 `getOrCreate` 重建实例并从盘上恢复历史(见文件头说明)。
+   * 返回本次回收数量。
+   *
+   * **mailbox 非空必须跳过**(P7 阻塞项 #5):mailbox 里的内容是"已经收到、但还没被投递给
+   * LLM"的事件——盘上 state 里没有它们(正因为还没消费),`ManagerLoop` 实例是它们唯一的
+   * 存放处。回收即永久丢失,直接违反 §4.1"至少一次投递";cutover 之后这条路径上跑的是**人类
+   * 消息**(episode 失败会把整批人类消息推回 mailbox 等下次唤醒重投),丢的就是人类消息。
+   *
+   * 代价是这类实例可能长期不被回收(极端情况:一个 key 的 mailbox 一直非空 → 永不回收)。
+   * 这是有意的取舍,且边界可控:①内存占用是一个 `ManagerLoop` 外壳 + 若干条待投递文本,
+   * 会话历史本来就在盘上;②mailbox 非空只有两种来路——episode 失败推回(下次唤醒即消费)、
+   * 收口后到达的注入(episode 收口时自唤醒消费,见 `maybeSelfWake`),两条都自带收敛路径,
+   * "永不回收"意味着"这个 key 确实还欠着一条没投递的消息",此时保住实例正是我们要的。
    */
   evictIdle(idleMs: number, nowMs: number): number {
     let evicted = 0
-    for (const key of this.loops.keys()) {
+    for (const [key, loop] of this.loops) {
       if (this.isEpisodeActive(key)) continue
+      if (loop.hasPendingMailbox) continue
       const lastActive = this.lastActiveAtMs.get(key) ?? 0
       if (nowMs - lastActive <= idleMs) continue
       this.loops.delete(key)
@@ -267,17 +296,65 @@ export class ManagerRegistry {
     return (this.activeEpisodes.get(key) ?? 0) > 0
   }
 
-  /** getOrCreate + 维护 activeEpisodes 引用计数的公共路径,所有 routeXxx / onAsyncError 都走这里。 */
-  private async runWake(key: ManagerKey, event: WakeEvent): Promise<EpisodeResult> {
+  /**
+   * getOrCreate + 维护 activeEpisodes 引用计数的公共路径,所有 routeXxx / onAsyncError /
+   * 自唤醒都走这里。`event === undefined` ⇒ 自唤醒(只处理 mailbox 残留,见
+   * `ManagerLoop.drainMailbox`);`selfWakeChain` 是当前连锁自唤醒的深度,真实唤醒恒为 0。
+   */
+  private async runWake(key: ManagerKey, event: WakeEvent | undefined, selfWakeChain = 0): Promise<EpisodeResult> {
     const loop = this.getOrCreate(key)
     this.activeEpisodes.set(key, (this.activeEpisodes.get(key) ?? 0) + 1)
+    let result: EpisodeResult | undefined
     try {
-      return await loop.wakeUp(event)
+      result = await (event === undefined ? loop.drainMailbox() : loop.wakeUp(event))
+      return result
     } finally {
       const remaining = (this.activeEpisodes.get(key) ?? 1) - 1
       if (remaining <= 0) this.activeEpisodes.delete(key)
       else this.activeEpisodes.set(key, remaining)
+      // 必须与上面的引用计数递减处在**同一个同步块**里(中间不 await):否则会出现
+      // "计数已归零、自唤醒尚未登记"的窗口,`evictIdle` 恰在此时跑就会把实例连同 mailbox
+      // 一起回收掉。`maybeSelfWake` 内部的 `runWake` 在第一个 await 之前就完成了 +1。
+      this.maybeSelfWake(key, loop, result, selfWakeChain)
     }
+  }
+
+  /**
+   * episode 收口后的 mailbox 兜底(P7 阻塞项 #5):engine 在 end_turn 收口前做最后一次
+   * `drainPending`,落在那之后的 `enqueueDuringEpisode` 内容没有任何消费者在等,不自唤醒
+   * 就会一直停滞在内存 mailbox 里(cutover 后这条路径上会跑人类消息 → 表现为"机器人收到了
+   * 但永远不回")。这里在 episode 刚收口、引用计数刚归零的同步窗口里补一次自唤醒。
+   *
+   * 四道门,缺一不可:
+   * 1. `result?.consumedEvents === true` —— **只在成功收口后自唤醒**。episode 失败
+   *    (含直接抛错,此时 `result` 是 undefined)会把整批输入原样推回 mailbox,那是 §4.1
+   *    "下次唤醒重投"的既有语义;若在这里自唤醒,LLM 持续故障时就变成"失败→立刻重试→再
+   *    失败"的热循环,把重投语义变成无限重试。失败留下的残留由 `evictIdle` 的非空保护守住,
+   *    等下一次真实唤醒重投。
+   * 2. `loop.hasPendingMailbox` —— 没有残留就没有要处理的东西(绝大多数 episode 走这条)。
+   * 3. `!isEpisodeActive(key)` —— 同 key 还有别的在途 episode 时不插队:它要么已经在
+   *    turn 间隙 drain 掉这批残留,要么在自己收口时走这同一段逻辑。
+   * 4. `selfWakeChain < MAX_SELF_WAKE_CHAIN` —— 防无限自唤醒(见该常量注释)。
+   */
+  private maybeSelfWake(
+    key: ManagerKey,
+    loop: ManagerLoop,
+    result: EpisodeResult | undefined,
+    selfWakeChain: number
+  ): void {
+    if (result?.consumedEvents !== true) return
+    if (!loop.hasPendingMailbox) return
+    if (this.isEpisodeActive(key)) return
+    if (selfWakeChain >= MAX_SELF_WAKE_CHAIN) {
+      console.warn(
+        `[ManagerRegistry] manager '${key}' 连锁自唤醒达到上限 ${MAX_SELF_WAKE_CHAIN},` +
+          `剩余 mailbox 内容留待下次唤醒投递(实例不会被 evictIdle 回收)`
+      )
+      return
+    }
+    void this.runWake(key, undefined, selfWakeChain + 1).catch((err) => {
+      console.error(`[ManagerRegistry] manager '${key}' 自唤醒失败:`, err)
+    })
   }
 }
 

@@ -6,6 +6,7 @@ import { join } from 'path'
 import {
   ManagerRegistry,
   SYSTEM_TASKS_MANAGER_KEY,
+  MAX_SELF_WAKE_CHAIN,
   type ManagerRegistryDeps,
   type OnAsyncError,
 } from '../../src/manager/registry.js'
@@ -394,6 +395,164 @@ describe('ManagerRegistry', () => {
     // 两个都结束后引用计数应归零——此时才真正允许回收。
     const evictedAfterBothDone = registry.evictIdle(-1, Date.parse('2026-01-01T00:00:00.000Z'))
     expect(evictedAfterBothDone).toBe(1)
+  })
+
+  // --- mailbox 停滞窗口 / 回收丢失窗口（P7 阻塞项 #5） ---
+
+  it('mailbox 停滞：注入落在 engine 最后一次 drain 之后（episode 仍在途）→ episode 收口时必须自唤醒把它处理掉，不得躺在 mailbox 无人问津', async () => {
+    const key = 'wechat::sess-stall' as ManagerKey
+    const { adapter, queue } = makeAdapter()
+    queue.push({ text: '第一个 episode 收口', stopReason: 'end_turn' })
+    queue.push({ text: '自唤醒 episode 的回复', stopReason: 'end_turn' })
+
+    let capturedOnAsyncError: OnAsyncError | undefined
+    const registry = new ManagerRegistry(
+      baseRegistryDeps({
+        adapter,
+        toolFace: (_key, _isSystemThread, onAsyncError) => {
+          capturedOnAsyncError = onAsyncError
+          return []
+        },
+      })
+    )
+
+    // 复现窗口：query-loop 在 end_turn 收口前做**最后一次** drainPending（query-loop.ts:551），
+    // 此后到达的注入没有任何消费者在等。这里用 store.appendEpisodeLog 作确定性锚点——它在
+    // runEngine 已经返回之后、wakeUp 尚未 resolve 之前被调用（loop.ts runEpisodeBody），
+    // 此刻 registry 仍把该 key 计为在途（activeEpisodes > 0），因此走的正是生产路径
+    // handleAsyncToolError 的 enqueueDuringEpisode 分支（真实触发者是 query_worker 那条
+    // 游离 promise 恰好在最后一次 drain 之后才 reject）。不靠定时器猜时间窗口。
+    const origAppend = store.appendEpisodeLog.bind(store)
+    let injected = false
+    vi.spyOn(store, 'appendEpisodeLog').mockImplementation(async (k, episodeId, messages) => {
+      await origAppend(k, episodeId, messages)
+      if (!injected) {
+        injected = true
+        capturedOnAsyncError?.({ tool: 'query_worker', worker_id: 'w-late', error: 'fork failed' })
+      }
+    })
+
+    await registry.routeHumanMessages('wechat', 'sess-stall', [makeChannelMessage('侧问一下 worker')])
+    expect(injected).toBe(true)
+
+    // 语义不变量（§4.1 至少一次投递）：这条注入必须最终被投递给 LLM 并落进持久历史，
+    // 且只投递一次。旧实现里它永远停在 mailbox 里等一个不会到来的下次唤醒。
+    await vi.waitFor(
+      async () => {
+        const state = await store.load(key)
+        expect(JSON.stringify(state.recent)).toContain('query_failed')
+      },
+      { timeout: 2000, interval: 10 }
+    )
+    const occurrences = (JSON.stringify((await store.load(key)).recent).match(/query_failed/g) ?? []).length
+    expect(occurrences).toBe(1)
+  })
+
+  it('回收丢失：episode 失败把人类消息推回 mailbox 后，evictIdle 不得回收该实例——回收即永久丢失（§4.1 至少一次投递）', async () => {
+    const key = 'wechat::sess-evict-loss' as ManagerKey
+    let failNext = true
+    const adapter: LLMAdapter = {
+      async *stream() {
+        if (failNext) throw new Error('boom: simulated non-retryable failure')
+        yield* chunksFromContent([{ type: 'text', text: '收到' }], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+      },
+      updateConfig: () => {},
+    }
+    let nowMs = Date.parse('2026-01-01T00:00:00.000Z')
+    const registry = new ManagerRegistry(baseRegistryDeps({ adapter, now: () => new Date(nowMs) }))
+
+    // episode 失败 → consumedEvents=false → 这条人类消息被推回 mailbox 等下次唤醒重投。
+    const first = await registry.routeHumanMessages('wechat', 'sess-evict-loss', [makeChannelMessage('救命，这条不能丢')])
+    expect(first.consumedEvents).toBe(false)
+    const loopBefore = registry.getOrCreate(key)
+
+    // 此时实例空闲（无 episode 在跑）且已超过 idleMs：旧实现会连同 mailbox 一起丢掉，
+    // 而 mailbox 是这条人类消息**唯一**的存放处（盘上 state 没有它——正因为没消费）。
+    nowMs += 10 * 60 * 1000
+    const evicted = registry.evictIdle(5 * 60 * 1000, nowMs)
+
+    // 先断"内容还在"这条语义不变量（而不是先断计数）：修复被移除时最先挂的是这一条，
+    // 它证明的是**人类消息永久丢失**，而不只是"回收计数不对"。
+    failNext = false
+    const second = await registry.routeHumanMessages('wechat', 'sess-evict-loss', [makeChannelMessage('还在吗')])
+    expect(second.consumedEvents).toBe(true)
+    const serialized = JSON.stringify((await store.load(key)).recent)
+    expect(serialized).toContain('救命，这条不能丢')
+    expect(serialized).toContain('还在吗')
+
+    // 机制层面：没被回收，仍是同一个实例（mailbox 就在它身上）。
+    expect(evicted).toBe(0)
+    expect(registry.getOrCreate(key)).toBe(loopBefore)
+  })
+
+  it('自唤醒不覆盖失败路径：episode 失败把内容推回 mailbox 后不得立即重开 episode（否则 LLM 持续故障时变成热循环重试）', async () => {
+    let streamCalls = 0
+    const adapter: LLMAdapter = {
+      async *stream() {
+        streamCalls++
+        if (streamCalls > 0) throw new Error('boom: LLM 持续故障') // 恒真;写成条件只为让它仍是合法 generator
+        yield* chunksFromContent([{ type: 'text', text: '不可达' }], 'end_turn')
+      },
+      updateConfig: () => {},
+    }
+    const registry = new ManagerRegistry(baseRegistryDeps({ adapter }))
+
+    const result = await registry.routeHumanMessages('wechat', 'sess-no-hot-retry', [makeChannelMessage('你好')])
+    expect(result.consumedEvents).toBe(false)
+
+    // 给自唤醒足够的宏任务窗口去发生（如果它错误地覆盖了失败路径的话）。
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(streamCalls).toBe(1) // 只有那一次失败的 episode，没有自动重试
+
+    // 内容仍在 mailbox 里等下次唤醒重投（§4.1），因此实例也不允许被回收。
+    expect(registry.evictIdle(-1, Date.parse('2026-01-01T00:00:00.000Z'))).toBe(0)
+  })
+
+  it('自唤醒有上限：每个 episode 都产生新残留时，连锁自唤醒最多 MAX_SELF_WAKE_CHAIN 次；到顶后残留不丢（不被回收 + 下次真实唤醒投递）', async () => {
+    const key = 'wechat::sess-chain' as ManagerKey
+    const { adapter, calls } = makeAdapter()
+
+    let capturedOnAsyncError: OnAsyncError | undefined
+    const registry = new ManagerRegistry(
+      baseRegistryDeps({
+        adapter,
+        toolFace: (_key, _isSystemThread, onAsyncError) => {
+          capturedOnAsyncError = onAsyncError
+          return []
+        },
+      })
+    )
+
+    // 病态注入源：**每个** episode 收口后都再产生一条注入（模拟某 worker 上 query_worker
+    // 恒失败这类稳定复发故障）。没有上限的话这就是一条无限的 episode 链。
+    let keepInjecting = true
+    let injections = 0
+    const origAppend = store.appendEpisodeLog.bind(store)
+    vi.spyOn(store, 'appendEpisodeLog').mockImplementation(async (k, episodeId, messages) => {
+      await origAppend(k, episodeId, messages)
+      if (keepInjecting) {
+        injections++
+        capturedOnAsyncError?.({ tool: 'query_worker', worker_id: `w-${injections}`, error: 'fork failed' })
+      }
+    })
+
+    await registry.routeHumanMessages('wechat', 'sess-chain', [makeChannelMessage('开始')])
+
+    // 1 次真实唤醒 + 至多 MAX_SELF_WAKE_CHAIN 次连锁自唤醒，然后必须停下。
+    await vi.waitFor(() => expect(calls.length).toBe(1 + MAX_SELF_WAKE_CHAIN), { timeout: 2000, interval: 10 })
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    expect(calls.length).toBe(1 + MAX_SELF_WAKE_CHAIN) // 停住了，没有继续滚
+    expect(injections).toBe(1 + MAX_SELF_WAKE_CHAIN)
+
+    // 到顶时最后一条注入仍留在 mailbox：不丢、不被回收，由下一次真实唤醒顺带投递。
+    const loopBefore = registry.getOrCreate(key)
+    expect(registry.evictIdle(-1, Date.parse('2026-01-01T00:00:00.000Z'))).toBe(0)
+    expect(registry.getOrCreate(key)).toBe(loopBefore)
+
+    keepInjecting = false
+    await registry.routeHumanMessages('wechat', 'sess-chain', [makeChannelMessage('还在吗')])
+    const lastCall = calls[calls.length - 1]
+    expect(JSON.stringify(lastCall.messages)).toContain(`w-${1 + MAX_SELF_WAKE_CHAIN}`)
   })
 
   // --- onAsyncError 接线（Task 4 遗留出口） ---
