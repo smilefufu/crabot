@@ -376,6 +376,17 @@ function normalizeSceneProfileTextField(
  */
 const CRABOT_HOME = process.env.CRABOT_HOME ?? path.resolve(__dirname, '../..')
 
+/**
+ * query string 里的整数参数。缺省或非法（`?page=abc` / `?page_size=`）一律回落到 fallback。
+ *
+ * 与既有端点惯用的裸 `parseInt(x ?? '20', 10)` 的差别只在于挡住了 NaN——`/api/agent/workers*`
+ * 的 page/page_size/seq 会原样进入 agent 侧的 slice/filter，NaN 会静默返回空结果而不报错。
+ */
+function parseIntParam(raw: string | null, fallback: number): number {
+  const parsed = Number.parseInt(raw ?? '', 10)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json' })
   res.end(JSON.stringify(body))
@@ -2175,6 +2186,27 @@ export class AdminModule extends ModuleBase {
       const agentTraceDetailMatch = pathname.match(/^\/api\/agent\/traces\/([^/]+)$/)
       if (agentTraceDetailMatch && req.method === 'GET') {
         await this.handleGetAgentTraceApi(req, res, agentTraceDetailMatch[1])
+        return
+      }
+
+      // Worker 只读代理（protocol-agent-v3 §10.3）。子路径先于 :id 匹配。
+      if (pathname === '/api/agent/workers' && req.method === 'GET') {
+        await this.handleListWorkersApi(req, res, url)
+        return
+      }
+      const workerOutputMatch = pathname.match(/^\/api\/agent\/workers\/([^/]+)\/output$/)
+      if (workerOutputMatch && req.method === 'GET') {
+        await this.handleReadWorkerOutputApi(req, res, workerOutputMatch[1], url)
+        return
+      }
+      const workerTraceMatch = pathname.match(/^\/api\/agent\/workers\/([^/]+)\/trace$/)
+      if (workerTraceMatch && req.method === 'GET') {
+        await this.handleGetWorkerTraceApi(req, res, workerTraceMatch[1], url)
+        return
+      }
+      const workerDetailMatch = pathname.match(/^\/api\/agent\/workers\/([^/]+)$/)
+      if (workerDetailMatch && req.method === 'GET') {
+        await this.handleGetWorkerDetailApi(req, res, workerDetailMatch[1])
         return
       }
 
@@ -4424,6 +4456,11 @@ export class AdminModule extends ModuleBase {
   /**
    * 写入 task 的统一入口：set + 落盘原子绑定，杜绝"改了内存忘了落盘"。
    * 所有 handler*Task / handle*TaskGoal / handleCancelTask 都走这里。
+   *
+   * @deprecated **P7 cutover 时删除**（protocol-agent-v3 §7）。v3 把 task 的真相源从 admin 的
+   * `tasks.json` 迁到 agent 的台账（`LedgerStore`），admin 退化成只读代理，不再有 task 写路径。
+   * 替代者：agent 侧 `LedgerStore` 的写入（由 `WorkerHarness` 的状态迁移驱动）。
+   * P5 只加注记、**行为不变**——本阶段 admin 仍是 task 的写真相源。
    */
   private async upsertTask(task: Task): Promise<void> {
     this.tasks.set(task.id, task)
@@ -5086,6 +5123,12 @@ export class AdminModule extends ModuleBase {
     return { items }
   }
 
+  /**
+   * P7 cutover 注记（本次不改行为）：本方法体内的 `admin.task_status_changed` 发布点是
+   * v3 要退役的两处 task 事件发布点之一——替代者是 agent 侧的 `agent.task_status_changed`
+   * （protocol-agent-v3 §9.2，发布方从 admin 变为 agent）。cutover 时随 admin 侧 task
+   * 写路径一并删除。
+   */
   private async handleReviveTaskForSupplement(
     params: ReviveTaskForSupplementParams,
   ): Promise<ReviveTaskForSupplementResult> {
@@ -5179,6 +5222,13 @@ export class AdminModule extends ModuleBase {
     }
   }
 
+  /**
+   * @deprecated **P7 cutover 时删除**（protocol-agent-v3 §5.2 / §9.2）。task 状态机在 v3 里
+   * 属于 agent 台账，替代者是 `WorkerHarness` 的状态迁移（写台账 + 由 agent 发
+   * `agent.task_status_changed`）。本方法体内的 `admin.task_status_changed` 发布点即 v3 要
+   * 退役的两处 task 事件发布点之二（另一处在 `handleReviveTaskForSupplement`）。
+   * P5 只加注记、**行为不变**。
+   */
   private applyStatusTransition(
     task: Task,
     newStatus: TaskStatus,
@@ -5636,6 +5686,11 @@ export class AdminModule extends ModuleBase {
    * applyStatusTransition 路径，保留派生字段维护和事件发布。
    *
    * 失败容忍：单条 patch apply 失败只 log + 跳过，不影响其他 patch；下轮 reconciliation 继续重试。
+   *
+   * @deprecated **P7 cutover 时删除**（protocol-agent-v3 §7）。这层兜底的存在前提是"admin 的
+   * task 状态与 agent 的 trace 是两份可能 drift 的数据"；v3 把真相源收敛到 agent 台账后该前提
+   * 消失，且它依赖的 `get_trace_tree` 已随 §10.1 退役。替代者：agent 侧的启动对账
+   * `reconcileManagerStack`（台账 vs 实际存活化身）。P5 只加注记、**行为不变**。
    */
   async runReconciliation(): Promise<void> {
     if (!this.dataLoaded) return  // 启动早期 loadData 未完不跑
@@ -5734,6 +5789,11 @@ export class AdminModule extends ModuleBase {
     }
   }
 
+  /**
+   * @deprecated **P7 cutover 时删除**（protocol-agent-v3 §8.5：`cancel_task` 与 `abort_worker`
+   * 均已列入退役接口）。v3 里 admin 不再单方面判死任务，取消由 manager 的 `kill_worker` 执行。
+   * 替代者：manager 工具面的 `kill_worker`（§4.3）。P5 只加注记、**行为不变**。
+   */
   private async handleCancelTask(params: CancelTaskParams): Promise<{ task: Task; cancelled: boolean }> {
     const task = this.tasks.get(params.task_id)
     if (!task) {
@@ -9709,6 +9769,110 @@ export class AdminModule extends ModuleBase {
       Record<string, unknown>,
       { traces: unknown[]; total: number }
     >(res, 'search_traces', params)
+  }
+
+  // ============================================================================
+  // Worker 只读 REST 代理（protocol-agent-v3 §10.3，转发 §8.3 的读模型 RPC）
+  //
+  // 纯转发：鉴权由 `/api/*` 的统一中间件负责，错误映射由 proxyAgentRpc 负责，本段只做
+  // query string → RPC 参数的翻译。**本阶段生产链路无人调用**（web 切到 worker 视图在 P6、
+  // 真相源 cutover 在 P7），先落端点是为了让 P6 只改前端。
+  //
+  // 台账 status 目前被 P7 阻塞项 #1（harness.processStateChange 硬编码 completed）污染，
+  // 这里原样透传、不做任何补偿——修复在 agent 侧的 harness，不在代理层。
+  // ============================================================================
+
+  /** §10.3 `GET /api/agent/workers` → `list_workers_admin`（§8.3）。 */
+  private async handleListWorkersApi(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    url: URL,
+  ): Promise<void> {
+    // §8.3 的 status 是 `TaskStatus | TaskStatus[]`：重复出现 `?status=a&status=b` 即数组，
+    // 单个即单值（沿用 parseAccessibleScopes 的 getAll 惯例，不另发明逗号分隔语法）。
+    const statuses = url.searchParams.getAll('status').filter(Boolean)
+    const dialogObjectId = url.searchParams.get('dialog_object_id') || undefined
+    // base-protocol §5.7 的 TimeRange 两端各自可选（start 闭、end 开），故任一存在即下发；
+    // 这点与 search_traces 端点"start+end 必须同时给"的旧写法不同——那是它自己的历史约定。
+    const start = url.searchParams.get('start') || undefined
+    const end = url.searchParams.get('end') || undefined
+
+    await this.proxyAgentRpc<
+      {
+        status?: string | string[]
+        dialog_object_id?: string
+        time_range?: { start?: string; end?: string }
+        pagination?: { page: number; page_size: number }
+      },
+      { items: unknown[]; pagination: { page: number; page_size: number; total_items: number; total_pages: number } }
+    >(res, 'list_workers_admin', {
+      ...(statuses.length === 1 ? { status: statuses[0] } : {}),
+      ...(statuses.length > 1 ? { status: statuses } : {}),
+      ...(dialogObjectId ? { dialog_object_id: dialogObjectId } : {}),
+      ...(start || end ? { time_range: { ...(start ? { start } : {}), ...(end ? { end } : {}) } } : {}),
+      pagination: {
+        page: parseIntParam(url.searchParams.get('page'), 1),
+        page_size: parseIntParam(url.searchParams.get('page_size'), 20),
+      },
+    })
+  }
+
+  /** §10.3 `GET /api/agent/workers/:id` → `get_worker_detail`（§8.3）。 */
+  private async handleGetWorkerDetailApi(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    workerId: string,
+  ): Promise<void> {
+    await this.proxyAgentRpc<{ worker_id: string }, { worker: unknown }>(
+      res,
+      'get_worker_detail',
+      { worker_id: workerId },
+      // agent 侧对不存在的 worker 抛 `Worker not found: <id>`（unified-agent.ts）；映射成 404
+      // 与相邻的 `/api/agent/traces/:traceId` 一致。
+      (msg) => msg.includes('Worker not found'),
+    )
+  }
+
+  /** §10.3 `GET /api/agent/workers/:id/output` → `read_worker_output_admin`（§8.3）。 */
+  private async handleReadWorkerOutputApi(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    workerId: string,
+    url: URL,
+  ): Promise<void> {
+    const cursor = url.searchParams.get('cursor') || undefined
+    await this.proxyAgentRpc<
+      { worker_id: string; seq: number; cursor?: string },
+      { chunk: string; next_cursor: string; eof: boolean }
+    >(res, 'read_worker_output_admin', {
+      worker_id: workerId,
+      // seq = 化身序号；§8.3 里必填，缺省取第一个化身。
+      seq: parseIntParam(url.searchParams.get('seq'), 0),
+      ...(cursor ? { cursor } : {}),
+    })
+  }
+
+  /** §10.3 `GET /api/agent/workers/:id/trace` → `get_worker_trace`（§8.3）。 */
+  private async handleGetWorkerTraceApi(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    workerId: string,
+    url: URL,
+  ): Promise<void> {
+    const cursor = url.searchParams.get('cursor') || undefined
+    await this.proxyAgentRpc<
+      { worker_id: string; seq: number; cursor?: string },
+      { events: unknown[]; next_cursor?: string; unavailable_reason?: string }
+    >(
+      res,
+      'get_worker_trace',
+      {
+        worker_id: workerId,
+        seq: parseIntParam(url.searchParams.get('seq'), 0),
+        ...(cursor ? { cursor } : {}),
+      },
+      (msg) => msg.includes('Worker not found'),
+    )
   }
 
   private async handleDeleteTaskApi(

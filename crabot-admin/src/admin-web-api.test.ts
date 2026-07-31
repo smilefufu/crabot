@@ -1628,6 +1628,205 @@ describe('Admin Web API', () => {
       expect(response.body.error).toBe('Agent not available')
     })
   })
+
+  // ==========================================================================
+  // Worker 只读 REST 代理（protocol-agent-v3 §10.3 / §8.3，P5 Task 5 第二步）
+  //
+  // 本阶段生产链路无人调用这四个端点（web 切换在 P6、cutover 在 P7），所以用例只钉两件事：
+  // 鉴权走既有 /api/* 中间件、query → RPC 参数按 §8.3 逐字段映射。
+  // **不写**"worker 失败 → 返回 failed"这类断言：台账 status 目前被 P7 阻塞项 #1 污染。
+  // ==========================================================================
+  describe('GET /api/agent/workers*（§10.3 只读代理）', () => {
+    const spyAgentRpc = () =>
+      vi.spyOn(
+        admin as unknown as { callAgentRpc: (...args: unknown[]) => Promise<unknown> },
+        'callAgentRpc',
+      )
+
+    it.each([
+      '/api/agent/workers',
+      '/api/agent/workers/w-1',
+      '/api/agent/workers/w-1/output',
+      '/api/agent/workers/w-1/trace',
+    ])('%s 未带 token → 401', async (path) => {
+      const response = await makeWebRequest(TEST_WEB_PORT, path, 'GET', null, null)
+      expect(response.statusCode).toBe(401)
+    })
+
+    it('GET /api/agent/workers 无 query → list_workers_admin 只带默认分页', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({
+        items: [],
+        pagination: { page: 1, page_size: 20, total_items: 0, total_pages: 0 },
+      })
+
+      const response = await makeWebRequest(TEST_WEB_PORT, '/api/agent/workers', 'GET', null, token)
+
+      expect(response.statusCode).toBe(200)
+      expect(spy).toHaveBeenCalledWith('list_workers_admin', { pagination: { page: 1, page_size: 20 } })
+    })
+
+    it('GET /api/agent/workers 全量 query → 逐字段映射（status 重复出现即数组）', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({
+        items: [],
+        pagination: { page: 2, page_size: 5, total_items: 0, total_pages: 0 },
+      })
+
+      await makeWebRequest(
+        TEST_WEB_PORT,
+        '/api/agent/workers?status=executing&status=waiting&dialog_object_id=telegram-001%3Aprivate-42'
+          + '&start=2026-07-01T00%3A00%3A00.000Z&end=2026-07-31T00%3A00%3A00.000Z&page=2&page_size=5',
+        'GET',
+        null,
+        token,
+      )
+
+      expect(spy).toHaveBeenCalledWith('list_workers_admin', {
+        status: ['executing', 'waiting'],
+        dialog_object_id: 'telegram-001:private-42',
+        time_range: { start: '2026-07-01T00:00:00.000Z', end: '2026-07-31T00:00:00.000Z' },
+        pagination: { page: 2, page_size: 5 },
+      })
+    })
+
+    it('GET /api/agent/workers 单个 status → 单值而非数组（§8.3 是联合类型）', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({
+        items: [],
+        pagination: { page: 1, page_size: 20, total_items: 0, total_pages: 0 },
+      })
+
+      await makeWebRequest(TEST_WEB_PORT, '/api/agent/workers?status=completed', 'GET', null, token)
+
+      expect(spy).toHaveBeenCalledWith('list_workers_admin', {
+        status: 'completed',
+        pagination: { page: 1, page_size: 20 },
+      })
+    })
+
+    it('GET /api/agent/workers 只给 start → time_range 只带 start（TimeRange 两端各自可选）', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({
+        items: [],
+        pagination: { page: 1, page_size: 20, total_items: 0, total_pages: 0 },
+      })
+
+      await makeWebRequest(TEST_WEB_PORT, '/api/agent/workers?start=2026-07-01T00%3A00%3A00.000Z', 'GET', null, token)
+
+      expect(spy).toHaveBeenCalledWith('list_workers_admin', {
+        time_range: { start: '2026-07-01T00:00:00.000Z' },
+        pagination: { page: 1, page_size: 20 },
+      })
+    })
+
+    it('GET /api/agent/workers 脏分页参数 → 回落默认值', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({
+        items: [],
+        pagination: { page: 1, page_size: 20, total_items: 0, total_pages: 0 },
+      })
+
+      await makeWebRequest(TEST_WEB_PORT, '/api/agent/workers?page=abc&page_size=', 'GET', null, token)
+
+      expect(spy).toHaveBeenCalledWith('list_workers_admin', { pagination: { page: 1, page_size: 20 } })
+    })
+
+    it('GET /api/agent/workers：agent 不可达 → 503', async () => {
+      const token = await loginAndGetToken()
+      spyAgentRpc().mockRejectedValue(new Error('Agent not available'))
+
+      const response = await makeWebRequest<{ error: string }>(TEST_WEB_PORT, '/api/agent/workers', 'GET', null, token)
+
+      expect(response.statusCode).toBe(503)
+      expect(response.body.error).toBe('Agent not available')
+    })
+
+    it('GET /api/agent/workers/:id → get_worker_detail', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({ worker: { worker_id: 'w-1' } })
+
+      const response = await makeWebRequest<{ worker: { worker_id: string } }>(
+        TEST_WEB_PORT,
+        '/api/agent/workers/w-1',
+        'GET',
+        null,
+        token,
+      )
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body.worker.worker_id).toBe('w-1')
+      expect(spy).toHaveBeenCalledWith('get_worker_detail', { worker_id: 'w-1' })
+    })
+
+    it('GET /api/agent/workers/:id：worker 不存在 → 404', async () => {
+      const token = await loginAndGetToken()
+      spyAgentRpc().mockRejectedValue(new Error('Worker not found: w-404'))
+
+      const response = await makeWebRequest<{ error: string }>(
+        TEST_WEB_PORT,
+        '/api/agent/workers/w-404',
+        'GET',
+        null,
+        token,
+      )
+
+      expect(response.statusCode).toBe(404)
+      expect(response.body.error).toBe('Worker not found: w-404')
+    })
+
+    it('GET /api/agent/workers/:id/output → read_worker_output_admin（seq 必填、cursor 可选）', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({ chunk: 'hello', next_cursor: '133', eof: false })
+
+      const response = await makeWebRequest(
+        TEST_WEB_PORT,
+        '/api/agent/workers/w-1/output?seq=2&cursor=128',
+        'GET',
+        null,
+        token,
+      )
+      expect(response.statusCode).toBe(200)
+      expect(spy).toHaveBeenCalledWith('read_worker_output_admin', { worker_id: 'w-1', seq: 2, cursor: '128' })
+
+      await makeWebRequest(TEST_WEB_PORT, '/api/agent/workers/w-1/output', 'GET', null, token)
+      expect(spy).toHaveBeenLastCalledWith('read_worker_output_admin', { worker_id: 'w-1', seq: 0 })
+    })
+
+    it('GET /api/agent/workers/:id/trace → get_worker_trace（seq 必填、cursor 可选）', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({ events: [], next_cursor: '0' })
+
+      const response = await makeWebRequest(
+        TEST_WEB_PORT,
+        '/api/agent/workers/w-1/trace?seq=1&cursor=3',
+        'GET',
+        null,
+        token,
+      )
+      expect(response.statusCode).toBe(200)
+      expect(spy).toHaveBeenCalledWith('get_worker_trace', { worker_id: 'w-1', seq: 1, cursor: '3' })
+
+      await makeWebRequest(TEST_WEB_PORT, '/api/agent/workers/w-1/trace', 'GET', null, token)
+      expect(spy).toHaveBeenLastCalledWith('get_worker_trace', { worker_id: 'w-1', seq: 0 })
+    })
+
+    it('GET /api/agent/workers/:id/trace：worker 不存在 → 404', async () => {
+      const token = await loginAndGetToken()
+      spyAgentRpc().mockRejectedValue(new Error('Worker not found: w-404'))
+
+      const response = await makeWebRequest<{ error: string }>(
+        TEST_WEB_PORT,
+        '/api/agent/workers/w-404/trace',
+        'GET',
+        null,
+        token,
+      )
+
+      expect(response.statusCode).toBe(404)
+      expect(response.body.error).toBe('Worker not found: w-404')
+    })
+  })
 })
 
 // Helper functions
