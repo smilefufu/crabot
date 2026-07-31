@@ -1352,8 +1352,13 @@ export class WorkerHarness {
  * sendToWorker/killWorker 都 target 到 fork 的 seq,而不是主线 seq)。
  *
  * 前提:worker.incarnations 非空(每个已注册的 worker 至少有 spawn 落下的 seq=1 主线化身)。
+ *
+ * P5 review 修复 additive:导出给 `get_worker_trace` 的 handler 复用——§8.3 两个按化身读的
+ * 端点(output/trace)在调用方没给 seq 时必须落在**同一个**化身上,而 output 那条路
+ * (`readWorkerOutput`)本来就是用本函数取缺省。trace 侧若自己再写一遍"排除 forked_from
+ * 取最后一条",就会让"主线是哪个化身"出现第二处真相。
  */
-function mainlineIncarnation(worker: LedgerWorker): Incarnation {
+export function mainlineIncarnation(worker: LedgerWorker): Incarnation {
   const mainline = worker.incarnations.filter((inc) => inc.forked_from === undefined)
   return mainline[mainline.length - 1]
 }

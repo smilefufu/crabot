@@ -372,6 +372,111 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     expect(tail.eof).toBe(true)
   })
 
+  /**
+   * P5 review 修复的端到端回归：admin 的 `/output`、`/trace` 在 `?seq=` 缺省时**不下发 seq**
+   * （载荷形状由 crabot-admin `admin-web-api.test.ts` 钉住），本用例把**那个载荷原样**打进真实
+   * RPC + 真实台账，验它确实落在主线化身上。
+   *
+   * 为什么非得端到端验一遍：原实现两端各自"看着对"——admin 填了个 seq、agent 按 seq 过滤，
+   * 只断言参数透传的测试全绿，但缺省值 0 在台账里恒不存在，output 抛错落 500、trace 静默返回
+   * 空 events。缺省语义的正确性只在"真实台账 + 真实化身链"上才可判定。
+   *
+   * 台账形状取自真实演化路径：builtin#1 自然结束 → send_to_worker 触发 revive 产出 builtin#2
+   * 入主线链（`reviveIncarnation` 不填 forked_from）；期间 query_worker 从主线 fork 出 #3
+   * （forked_from=2）。于是三个候选缺省互不相同：主线=#2、"第一个化身"=#1、"数组最后一条"=#3。
+   */
+  it('admin 缺 seq 的转发载荷经真实 RPC → output/trace 都落在主线化身（不是 #1、不是 fork）', async () => {
+    boot()
+    const stack = internals.managerStack!
+    // appendEvent 的 onEvent 支路会去唤醒监护 manager（要跑 LLM）并发事件，与本用例无关，挡掉。
+    vi.spyOn(stack.registry, 'routeWorkerEvent').mockResolvedValue(undefined)
+    vi.spyOn(internals.rpcClient, 'publishEvent').mockResolvedValue(1)
+
+    const dialogObjectId = dialogObjectIdForPrivate('friend-mainline')
+    const base = makeLedgerWorker({ workerId: 'w-main' })
+    await stack.ledger.upsertWorker(dialogObjectId, 'w-main', () => ({
+      ...base,
+      incarnations: [
+        {
+          seq: 1,
+          impl: 'builtin',
+          state: 'exited',
+          workspace: '/tmp/ws-not-used',
+          session_ref: 'ref-1',
+          started_at: '2026-03-01T00:00:00.000Z',
+          ended_at: '2026-03-01T00:01:00.000Z',
+          ended_reason: 'completed',
+        },
+        {
+          seq: 2,
+          impl: 'builtin',
+          state: 'running',
+          workspace: '/tmp/ws-not-used',
+          session_ref: 'ref-2',
+          started_at: '2026-03-01T00:02:00.000Z',
+        },
+        {
+          seq: 3,
+          impl: 'builtin',
+          state: 'exited',
+          workspace: '/tmp/ws-not-used',
+          session_ref: 'ref-3',
+          started_at: '2026-03-01T00:03:00.000Z',
+          forked_from: 2,
+        },
+      ],
+    }))
+
+    // 真实 builtin adapter 的 output-<seq>.log，三个化身各一份
+    const outDir = join(stack.builtinDataDir, 'w-main')
+    await fs.mkdir(outDir, { recursive: true })
+    await fs.writeFile(join(outDir, 'output-1.log'), '旧主线 #1 的输出\n', 'utf-8')
+    await fs.writeFile(join(outDir, 'output-2.log'), '当前主线 #2 的输出\n', 'utf-8')
+    await fs.writeFile(join(outDir, 'output-3.log'), '侧问 fork #3 的输出\n', 'utf-8')
+
+    // ① output：不带 seq == 主线 #2
+    const defaultOut = await rpc<{ chunk: string }>('read_worker_output_admin', { worker_id: 'w-main' })
+    expect(defaultOut.chunk).toBe('当前主线 #2 的输出\n')
+    // 显式 seq 仍按 seq 走（也证明缺省确实不等于 1、不等于"最后一条"）
+    expect((await rpc<{ chunk: string }>('read_worker_output_admin', { worker_id: 'w-main', seq: 1 })).chunk).toBe(
+      '旧主线 #1 的输出\n',
+    )
+    expect((await rpc<{ chunk: string }>('read_worker_output_admin', { worker_id: 'w-main', seq: 3 })).chunk).toBe(
+      '侧问 fork #3 的输出\n',
+    )
+    // 修复前 admin 下发的就是 seq=0：台账里恒不存在 → 抛错 → proxyAgentRpc 落 500
+    await expect(rpc('read_worker_output_admin', { worker_id: 'w-main', seq: 0 })).rejects.toThrow(
+      /no incarnation with seq=0/,
+    )
+
+    // ② trace：经 harness 自己的事件写入口落真实 events.jsonl（private，穿透手法同本文件其它用例）
+    const appendEvent = (
+      stack.harness as unknown as {
+        appendEvent: (w: string, seq: number, kind: string, detail?: Record<string, unknown>) => Promise<void>
+      }
+    ).appendEvent.bind(stack.harness)
+    await appendEvent('w-main', 1, 'spawned', { impl: 'builtin' })
+    await appendEvent('w-main', 2, 'resumed', { from_seq: 1 })
+    await appendEvent('w-main', 2, 'input_sent')
+    await appendEvent('w-main', 3, 'state_changed', { to: 'exited' })
+
+    const defaultTrace = await rpc<{ events: Array<{ detail?: unknown }>; next_cursor?: string }>('get_worker_trace', {
+      worker_id: 'w-main',
+    })
+    const mainlineTrace = await rpc<{ events: Array<{ detail?: unknown }> }>('get_worker_trace', {
+      worker_id: 'w-main',
+      seq: 2,
+    })
+    expect(defaultTrace.events).toEqual(mainlineTrace.events)
+    expect(defaultTrace.events).toHaveLength(2)
+    expect(defaultTrace.events[0].detail).toEqual({ from_seq: 1 })
+    expect(defaultTrace.next_cursor).toBe('2')
+    // 不是 #1 的那条、也不是 fork #3 的那条
+    expect((await rpc<{ events: unknown[] }>('get_worker_trace', { worker_id: 'w-main', seq: 1 })).events).toHaveLength(1)
+    // 修复前 admin 下发的 seq=0：静默返回空 events，与"该化身还没有事件"无法区分
+    expect((await rpc<{ events: unknown[] }>('get_worker_trace', { worker_id: 'w-main', seq: 0 })).events).toEqual([])
+  })
+
   // --- ④ agent.task_status_changed ---
 
   it('真实状态迁移 → 经生产事件出口发出 agent.task_status_changed，载荷逐字对齐 §9.2', async () => {

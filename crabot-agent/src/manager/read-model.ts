@@ -76,7 +76,13 @@ export interface GetWorkerDetailResult {
  */
 export interface ReadWorkerOutputAdminParams {
   worker_id: string
-  seq: number
+  /**
+   * 化身序号(从 1 起)。**可选**:缺省 = 主线化身(`mainlineIncarnation`,即排除侧问 fork
+   * 之后的最新化身),沿用 `WorkerHarness.readWorkerOutput` 的既有缺省语义。调用方(admin
+   * REST `?seq=` 缺省时)拿不到台账,算不出主线是哪个化身,只有不下发这个字段才落在正确的
+   * 化身上——填 0 台账里恒不存在,填 1 则锁死在最早那个化身上。
+   */
+  seq?: number
   cursor?: string
 }
 
@@ -89,7 +95,8 @@ export interface ReadWorkerOutputAdminResult {
 /** §8.3 get_worker_trace:结构化时间线(两层信息源见 §10.2) */
 export interface GetWorkerTraceParams {
   worker_id: string
-  seq: number
+  /** 化身序号(从 1 起)。**可选**:缺省 = 主线化身,与 `ReadWorkerOutputAdminParams.seq` 同一缺省。 */
+  seq?: number
   cursor?: string
 }
 

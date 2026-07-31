@@ -84,6 +84,7 @@ import {
 } from './manager/read-model.js'
 import type { NormalizedTraceEvent } from './workers/types.js'
 import type { HarnessEvent } from './workers/harness/worker-events.js'
+import { mainlineIncarnation } from './workers/harness/harness.js'
 
 const BARRIER_TIMEOUT_MS = 8_000
 
@@ -3268,6 +3269,12 @@ export class UnifiedAgent extends ModuleBase {
    * `unavailable_reason` 明示。
    *
    * 游标是"该化身已返回的事件条数"：事件流 append-only，条数即稳定位点。
+   *
+   * `params.seq` 缺省（admin REST 的 `?seq=` 没给）时取**主线化身**——与
+   * `read_worker_output_admin` 走的 `harness.readWorkerOutput` 缺省逐字同源（共用
+   * `mainlineIncarnation`），保证两个端点在同一次"不带 seq"的调用下描述的是同一个化身。
+   * 缺这个分支时 `event.seq === undefined` 恒为 false，会静默返回空 events，与"该化身确实
+   * 还没有事件"无法区分（P5 review 修复）。
    */
   private async handleGetWorkerTrace(params: GetWorkerTraceParams): Promise<GetWorkerTraceResult> {
     const stack = this.requireManagerStack()
@@ -3277,8 +3284,9 @@ export class UnifiedAgent extends ModuleBase {
     if (!found) {
       throw new Error(`Worker not found: ${params.worker_id}`)
     }
+    const seq = params.seq ?? mainlineIncarnation(found.worker).seq
     const ofIncarnation = (await stack.harness.readWorkerEvents(params.worker_id)).filter(
-      (event) => event.seq === params.seq
+      (event) => event.seq === seq
     )
     const offset = parseOffsetCursor(params.cursor)
     return {

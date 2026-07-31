@@ -387,6 +387,20 @@ function parseIntParam(raw: string | null, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
+/**
+ * 没有合理 fallback 的整数参数（`?seq=`）：缺省或非法一律返回 undefined，由调用方**不下发
+ * 该字段**，让 agent 侧走它自己的缺省语义。
+ *
+ * 不能像 page/page_size 那样回落到一个具体数字：化身 seq 从 1 开始编号，回落 0 在台账里
+ * 永远不存在（output 端点因此 500、trace 端点静默返回空），回落 1 则锁死在**最早**那个
+ * 化身上——worker 经历 revive/handoff 后主线早已不是 seq=1。唯一正确的缺省是"主线化身"，
+ * 而那只有 agent 侧（持台账）算得出来。
+ */
+function parseOptionalIntParam(raw: string | null): number | undefined {
+  const parsed = Number.parseInt(raw ?? '', 10)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json' })
   res.end(JSON.stringify(body))
@@ -9841,13 +9855,15 @@ export class AdminModule extends ModuleBase {
     url: URL,
   ): Promise<void> {
     const cursor = url.searchParams.get('cursor') || undefined
+    // seq = 化身序号（从 1 起）。没给就**不下发该字段**，由 agent 侧取主线化身
+    // （harness.readWorkerOutput 的既有缺省，见 parseOptionalIntParam 注释）——与 cursor 同一纪律。
+    const seq = parseOptionalIntParam(url.searchParams.get('seq'))
     await this.proxyAgentRpc<
-      { worker_id: string; seq: number; cursor?: string },
+      { worker_id: string; seq?: number; cursor?: string },
       { chunk: string; next_cursor: string; eof: boolean }
     >(res, 'read_worker_output_admin', {
       worker_id: workerId,
-      // seq = 化身序号；§8.3 里必填，缺省取第一个化身。
-      seq: parseIntParam(url.searchParams.get('seq'), 0),
+      ...(seq !== undefined ? { seq } : {}),
       ...(cursor ? { cursor } : {}),
     })
   }
@@ -9860,15 +9876,17 @@ export class AdminModule extends ModuleBase {
     url: URL,
   ): Promise<void> {
     const cursor = url.searchParams.get('cursor') || undefined
+    // 同 output 端点：没给 seq 就不下发，agent 侧取主线化身，两个端点缺省落在同一个化身上。
+    const seq = parseOptionalIntParam(url.searchParams.get('seq'))
     await this.proxyAgentRpc<
-      { worker_id: string; seq: number; cursor?: string },
+      { worker_id: string; seq?: number; cursor?: string },
       { events: unknown[]; next_cursor?: string; unavailable_reason?: string }
     >(
       res,
       'get_worker_trace',
       {
         worker_id: workerId,
-        seq: parseIntParam(url.searchParams.get('seq'), 0),
+        ...(seq !== undefined ? { seq } : {}),
         ...(cursor ? { cursor } : {}),
       },
       (msg) => msg.includes('Worker not found'),

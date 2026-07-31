@@ -1775,7 +1775,16 @@ describe('Admin Web API', () => {
       expect(response.body.error).toBe('Worker not found: w-404')
     })
 
-    it('GET /api/agent/workers/:id/output → read_worker_output_admin（seq 必填、cursor 可选）', async () => {
+    /**
+     * `?seq=` 缺省时**不下发该字段**（与 cursor 同一纪律）：化身 seq 从 1 起编号，admin 侧
+     * 任何硬编码缺省都是错的——0 在台账里恒不存在（agent 侧 findIncarnationBySeq 抛错 → 500），
+     * 1 则锁死在最早那个化身上（worker 经 revive/handoff 后主线早已不是它）。唯一正确的缺省
+     * 是"主线化身"，只有持台账的 agent 侧算得出来。
+     *
+     * 这两条只钉住"admin 转发的载荷长什么样"；"这个载荷打到真实 agent 上确实读到主线化身"
+     * 由 crabot-agent `tests/manager/p5-integration.test.ts` 经真实 RPC + 真实台账验证。
+     */
+    it('GET /api/agent/workers/:id/output → read_worker_output_admin（seq 缺省不下发，由 agent 取主线化身）', async () => {
       const token = await loginAndGetToken()
       const spy = spyAgentRpc().mockResolvedValue({ chunk: 'hello', next_cursor: '133', eof: false })
 
@@ -1790,10 +1799,17 @@ describe('Admin Web API', () => {
       expect(spy).toHaveBeenCalledWith('read_worker_output_admin', { worker_id: 'w-1', seq: 2, cursor: '128' })
 
       await makeWebRequest(TEST_WEB_PORT, '/api/agent/workers/w-1/output', 'GET', null, token)
-      expect(spy).toHaveBeenLastCalledWith('read_worker_output_admin', { worker_id: 'w-1', seq: 0 })
+      expect(spy).toHaveBeenLastCalledWith('read_worker_output_admin', { worker_id: 'w-1' })
+      // toHaveBeenCalledWith 把 `{ seq: undefined }` 视同缺席，这里显式钉住 key 真的不在载荷里。
+      expect('seq' in (spy.mock.lastCall![1] as object)).toBe(false)
+
+      // 脏值同样不下发（不回落成某个具体化身），与 list 端点"脏分页 → 回落默认值"的区别在于
+      // seq 根本没有安全的默认值可回落。
+      await makeWebRequest(TEST_WEB_PORT, '/api/agent/workers/w-1/output?seq=abc', 'GET', null, token)
+      expect(spy).toHaveBeenLastCalledWith('read_worker_output_admin', { worker_id: 'w-1' })
     })
 
-    it('GET /api/agent/workers/:id/trace → get_worker_trace（seq 必填、cursor 可选）', async () => {
+    it('GET /api/agent/workers/:id/trace → get_worker_trace（seq 缺省不下发，由 agent 取主线化身）', async () => {
       const token = await loginAndGetToken()
       const spy = spyAgentRpc().mockResolvedValue({ events: [], next_cursor: '0' })
 
@@ -1808,7 +1824,8 @@ describe('Admin Web API', () => {
       expect(spy).toHaveBeenCalledWith('get_worker_trace', { worker_id: 'w-1', seq: 1, cursor: '3' })
 
       await makeWebRequest(TEST_WEB_PORT, '/api/agent/workers/w-1/trace', 'GET', null, token)
-      expect(spy).toHaveBeenLastCalledWith('get_worker_trace', { worker_id: 'w-1', seq: 0 })
+      expect(spy).toHaveBeenLastCalledWith('get_worker_trace', { worker_id: 'w-1' })
+      expect('seq' in (spy.mock.lastCall![1] as object)).toBe(false)
     })
 
     it('GET /api/agent/workers/:id/trace：worker 不存在 → 404', async () => {
