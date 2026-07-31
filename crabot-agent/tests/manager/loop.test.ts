@@ -27,6 +27,8 @@ const FOLD_SYSTEM_PROMPT_MARKER = '对话历史压缩助手'
 interface TurnScript {
   readonly text?: string
   readonly toolCalls?: ReadonlyArray<{ readonly name: string; readonly id: string; readonly input: Record<string, unknown> }>
+  /** raw_reasoning 块(不算 text,验证 isContextOverflow 提取文本时不被它干扰)。 */
+  readonly reasoning?: Record<string, unknown>
   readonly stopReason: 'end_turn' | 'tool_use' | 'max_tokens'
 }
 
@@ -56,6 +58,7 @@ function makeAdapter(): {
       }
       const r = queue.shift() ?? { text: '(默认回复)', stopReason: 'end_turn' as const }
       const content: unknown[] = []
+      if (r.reasoning) content.push({ type: 'raw_reasoning', data: r.reasoning })
       if (r.text) content.push({ type: 'text', text: r.text })
       for (const tc of r.toolCalls ?? []) content.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
       yield* chunksFromContent(content, r.stopReason, { inputTokens: 10, outputTokens: 5 })
@@ -498,6 +501,64 @@ describe('ManagerLoop', () => {
     const state = await store.load(KEY)
     expect(state.rollingSummary).toBeTruthy()
     expect(state.foldedCount).toBeGreaterThan(0)
+  })
+
+  it('max_tokens 但非静默(text 非空,只是被截断)——不误判为上下文超限,不触发强制折叠与重试', async () => {
+    const { adapter, queue, calls, foldCalls } = makeAdapter()
+    // 输出被 max output tokens 截断,但已经写出了实际文字——这与"上下文超限"无关。
+    // query-loop.ts 的 isSilentText 只看 text 是否为空,不看 stopReason 是否是 max_tokens,
+    // 这种情形走的是"有文字的 end_turn"分支,outcome='completed'、finalText 非空,
+    // 末条 assistant 消息的 stopReason 仍留着 'max_tokens' 这个痕迹。isContextOverflow
+    // 若只看 stopReason 会误判为超限,对已经正常收场的 episode 强制折叠 + 重试一遍,
+    // 重复触发首次尝试里已执行的副作用(如已发送的 send_message、已拉起的 spawn_worker)。
+    queue.push({ text: '这是一段被截断的长回复,但确实已经写出了实际内容', stopReason: 'max_tokens' })
+
+    const policy: CompactionPolicy = { keepRecent: 2, cacheTtlMs: 1000, foldTokenThreshold: 1_000_000, hardCapTokens: 1_000_000 }
+    const loop = new ManagerLoop(baseDeps({ store, adapter, policy }))
+
+    // 预置 3 条历史(同上一个 max_tokens 用例),让 force_hot 若被误触发也真能折出东西——
+    // 避免"误判但恰好 forceDecision=none 侥幸不重试"的假阳性掩盖 bug。
+    const seedMessages: EngineMessage[] = [
+      createUserMessage('旧消息1'),
+      createUserMessage('旧消息2'),
+      createUserMessage('旧消息3'),
+    ]
+    await store.save({ key: KEY, recent: seedMessages, foldedCount: 0 })
+
+    const result = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('会被截断的长问题')] })
+
+    expect(foldCalls.length).toBe(0) // 未触发强制折叠
+    expect(calls.length).toBe(1) // 只跑了一次 runEngine,没有重试
+    expect(result.outcome).toBe('completed')
+    expect(result.turns).toBe(1)
+    expect(result.consumedEvents).toBe(true)
+  })
+
+  it('max_tokens 且末条消息只有 raw_reasoning 块、text 为空——仍判定为静默超限,照常强制折叠重试', async () => {
+    const { adapter, queue, foldCalls } = makeAdapter()
+    // engine 的 isSilentText(query-loop.ts partitionResponseContent)只统计 text 块,
+    // raw_reasoning 块不计入"是否有可见文字"。这里模拟"只有推理块、没有实际文字"+
+    // max_tokens 的组合,确认 isContextOverflow 提取文本时同样只看 text 块,
+    // 不会因为 content 数组非空(混了 reasoning 块)而误判为"非静默"从而漏掉真正的超限。
+    queue.push({ reasoning: { summary: '在思考要不要超限' }, stopReason: 'max_tokens' })
+    queue.push({ text: '折叠后重试成功', stopReason: 'end_turn' })
+
+    const policy: CompactionPolicy = { keepRecent: 2, cacheTtlMs: 1000, foldTokenThreshold: 1_000_000, hardCapTokens: 1_000_000 }
+    const loop = new ManagerLoop(baseDeps({ store, adapter, policy }))
+
+    const seedMessages: EngineMessage[] = [
+      createUserMessage('旧消息1'),
+      createUserMessage('旧消息2'),
+      createUserMessage('旧消息3'),
+    ]
+    await store.save({ key: KEY, recent: seedMessages, foldedCount: 0 })
+
+    const result = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('触发超限的一句话(仅推理块)')] })
+
+    expect(foldCalls.length).toBe(1) // 强制折叠恰好发生一次
+    expect(result.outcome).toBe('completed')
+    expect(result.turns).toBe(2) // 首次尝试 1 turn(max_tokens)+ 重试 1 turn
+    expect(result.consumedEvents).toBe(true)
   })
 
   it('max_tokens 重试时 mid-episode 注入内容被追进 initialMessages,重试成功后不重复投递', async () => {

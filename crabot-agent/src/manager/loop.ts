@@ -42,6 +42,7 @@ import {
   type ToolDefinition,
   type LLMAdapter,
   type QueueContent,
+  type TextBlock,
 } from '../engine/index.js'
 import { AsyncMutex } from '../workers/async-mutex'
 import { decideCompaction, foldIntoSummary, type CompactionPolicy, type CompactionDecision } from './compaction.js'
@@ -455,6 +456,15 @@ function forceHotFold(
  *    'completed'(不是 'failed'/'max_tokens'!),finalText=''，唯一留下的痕迹是
  *    finalMessages 最后一条 assistant 消息的 stopReason==='max_tokens'。这是结构化信号,
  *    比在 EngineResult.error 里找文案更可靠(这条路径下 error 根本不会被设置)。
+ *    "静默"这个前提本身必须校验,不能只看 stopReason:LLM 输出被 max output tokens
+ *    截断(有实际文字,只是没写完)时 stopReason 同样是 'max_tokens',但 query-loop.ts
+ *    的 isSilentText(见 partitionResponseContent + `isSilentText = processed.text.trim()
+ *    .length === 0`,query-loop.ts:614)判它为非静默,直接走"有文字的 end_turn"分支正常
+ *    completed 收场——与上下文超限无关。这里必须对齐同一判定,只统计末条 assistant 消息里
+ *    的 text 块(忽略 tool_use/raw_reasoning,与 partitionResponseContent 一致),trim 后
+ *    为空才算静默。否则会把"回复被截断但已完成"误判为"超限",对已经跑完的 episode 强制
+ *    折叠重试一遍——重复触发首次尝试里已执行的副作用(如 send_message 已发送、
+ *    spawn_worker 已拉起 worker)。
  * 2. adapter.stream 真的抛出"上下文/超限"相关错误时(如 provider 直接拒绝过长请求),
  *    走的是 query-loop 顶层 try/catch → outcome='failed'、error=formatError(err)——
  *    这种情形只能靠错误文案关键字识别,兜底覆盖 max_tokens/context/token limit 等常见表述。
@@ -462,7 +472,13 @@ function forceHotFold(
 function isContextOverflow(result: EngineResult): boolean {
   const last = result.finalMessages[result.finalMessages.length - 1]
   if (last?.role === 'assistant' && last.stopReason === 'max_tokens') {
-    return true
+    const text = last.content
+      .filter((b): b is TextBlock => b.type === 'text')
+      .map((b) => b.text)
+      .join('')
+    if (text.trim().length === 0) {
+      return true
+    }
   }
   if (result.outcome === 'failed' && result.error && /max_tokens|context[^a-z]{0,10}(length|window)|token[^a-z]{0,10}limit|too (long|large)/i.test(result.error)) {
     return true
