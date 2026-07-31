@@ -29,95 +29,19 @@
  * 因此断言不依赖任何真实定时器，也不需要轮询等待。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { promises as fs } from 'fs'
-import { tmpdir } from 'os'
-import { join } from 'path'
 
 import { UnifiedAgent } from '../../src/unified-agent.js'
-import type {
-  ChannelMessage,
-  Friend,
-  LLMConnectionInfo,
-  ModuleId,
-  OrchestrationConfig,
-  UnifiedAgentConfig,
-} from '../../src/types.js'
+import type { ChannelMessage, Friend, ModuleId } from '../../src/types.js'
 import type { BufferedMessage } from '../../src/orchestration/attention-scheduler.js'
 import type { Event } from 'crabot-shared'
-
-// ============================================================================
-// fixtures
-// ============================================================================
-
-const ORCHESTRATION: OrchestrationConfig = {
-  front_context_recent_messages_window_hours: 24,
-  front_context_recent_messages_max_cap: 50,
-  front_context_short_term_memory_window_hours: 24,
-  front_context_short_term_memory_max_cap: 20,
-  worker_recent_messages_window_hours: 24,
-  worker_recent_messages_max_cap: 50,
-  worker_short_term_memory_window_hours: 24,
-  worker_short_term_memory_max_cap: 20,
-  worker_long_term_memory_limit: 10,
-  front_agent_timeout: 60,
-  session_state_ttl: 3600,
-  worker_config_refresh_interval: 300,
-  front_agent_queue_max_length: 10,
-  front_agent_queue_timeout: 60,
-}
-
-const CONFIGURED_MODELS: Record<string, LLMConnectionInfo> = {
-  powerful: { endpoint: 'https://example.invalid', apikey: 'k', model_id: 'm-x', format: 'anthropic' },
-}
-
-function makeFriend(id: string): Friend {
-  return {
-    id,
-    display_name: `好友 ${id}`,
-    permission: 'normal',
-    channel_identities: [],
-    created_at: '2026-01-01T00:00:00.000Z',
-    updated_at: '2026-01-01T00:00:00.000Z',
-  }
-}
-
-function makeMessage(p: {
-  id: string
-  channelId?: string
-  sessionId?: string
-  type: 'private' | 'group'
-  text?: string
-  mention?: boolean
-}): ChannelMessage {
-  return {
-    platform_message_id: p.id,
-    session: {
-      session_id: (p.sessionId ?? 'sess-1') as string,
-      channel_id: (p.channelId ?? 'wechat') as ModuleId,
-      type: p.type,
-    },
-    sender: { friend_id: 'f-1', platform_user_id: 'u-1', platform_display_name: '张三' },
-    content: { type: 'text', text: p.text ?? '你好' },
-    features: { is_mention_crab: p.mention ?? false },
-    platform_timestamp: '2026-07-31T00:00:00.000Z',
-  }
-}
-
-/** 与 `crabot-admin/src/index.ts:4114-4130` 的 payload 逐字段对齐。 */
-function authorizedEvent(payload: {
-  message: ChannelMessage
-  friend: Friend
-  crab_display_name?: string
-  crab_self_handle?: string
-}): Event {
-  return {
-    id: 'evt-1',
-    type: 'channel.message_authorized',
-    source: 'admin' as ModuleId,
-    payload: { channel_id: payload.message.session.channel_id, ...payload },
-    timestamp: '2026-07-31T00:00:00.000Z',
-  }
-}
+import {
+  authorizedEvent,
+  makeAgentConfig,
+  makeFriend,
+  makeMessage,
+  useTmpDataDir,
+  type DataDirGuard,
+} from './harness.js'
 
 // ============================================================================
 // harness
@@ -141,9 +65,7 @@ interface AgentInternals {
 }
 
 describe('handleMessageReceived —— 入站分流（P7/PR A 测试网 ①）', () => {
-  let tmpRoot: string
-  let prevDataDir: string | undefined
-  let prevAgentDataDir: string | undefined
+  let dataDir: DataDirGuard
   let agent: UnifiedAgent
   let internals: AgentInternals
   /** 落点序列：断言"最终进了哪条处理路径"用的唯一事实来源。 */
@@ -154,25 +76,10 @@ describe('handleMessageReceived —— 入站分流（P7/PR A 测试网 ①）',
   let gate: Promise<void> | undefined
 
   function boot(opts: { configured: boolean; attentionMinMs?: number }): void {
-    const config: UnifiedAgentConfig = {
-      module_id: 'inbound-test-agent' as ModuleId,
-      module_type: 'agent',
-      version: '0.0.0-test',
-      protocol_version: '1.0',
-      port: 19998,
-      orchestration: ORCHESTRATION,
-      // roles: [] —— 不建 AgentHandler、不起 LSP 子进程；分流不看 roles。
-      agent_config: {
-        instance_id: 'inbound-test',
-        roles: [],
-        system_prompt: '你是测试用 Crabot',
-        model_config: opts.configured ? CONFIGURED_MODELS : {},
-      },
-      ...(opts.attentionMinMs !== undefined
-        ? { extra: { group_attention_min_ms: opts.attentionMinMs } }
-        : {}),
-    }
-    agent = new UnifiedAgent(config)
+    // roles: [] —— 不建 AgentHandler、不起 LSP 子进程；分流不看 roles。
+    agent = new UnifiedAgent(
+      makeAgentConfig({ ...opts, moduleId: 'inbound-test-agent', port: 19998 }),
+    )
     internals = agent as unknown as AgentInternals
 
     // 两个 lane handler 换成录制器。构造函数把它们接成
@@ -200,21 +107,13 @@ describe('handleMessageReceived —— 入站分流（P7/PR A 测试网 ①）',
     landings = []
     rpcCalls = []
     gate = undefined
-    tmpRoot = await fs.mkdtemp(join(tmpdir(), 'inbound-hmr-'))
-    prevDataDir = process.env.DATA_DIR
-    prevAgentDataDir = process.env.CRABOT_AGENT_DATA_DIR
-    delete process.env.CRABOT_AGENT_DATA_DIR
-    process.env.DATA_DIR = join(tmpRoot, 'data')
+    dataDir = await useTmpDataDir('inbound-hmr-')
   })
 
   afterEach(async () => {
     internals?.attentionScheduler.stopAll()
     vi.restoreAllMocks()
-    if (prevDataDir === undefined) delete process.env.DATA_DIR
-    else process.env.DATA_DIR = prevDataDir
-    if (prevAgentDataDir === undefined) delete process.env.CRABOT_AGENT_DATA_DIR
-    else process.env.CRABOT_AGENT_DATA_DIR = prevAgentDataDir
-    await fs.rm(tmpRoot, { recursive: true, force: true })
+    await dataDir.restore()
   })
 
   // --- 入口 ---
