@@ -457,12 +457,27 @@ describe('get_worker_trace(§8.3 + §10.2)', () => {
     { ts: '2026-01-01T00:00:02.000Z', kind: 'spawned', worker_id: 'w-1', seq: 2 },
   ]
 
+  /**
+   * 台账里必须真有 seq=1/2 两个化身：handler 现在先按台账校验显式给的 seq 存不存在
+   * （P5 review 修复第二轮），"化身不存在"与"化身没事件"要可区分。makeLedgerWorker 的
+   * `incarnations: []` 缺省对本组用例不成立——有事件却没有对应化身的 worker 在真实台账里
+   * 不存在（每个化身至少由 spawn 落一条）。
+   */
+  const incarnation = (seq: number) => ({
+    seq,
+    impl: 'builtin' as const,
+    state: 'exited' as const,
+    workspace: '/tmp/ws-not-used',
+    session_ref: `ref-${seq}`,
+    started_at: '2026-01-01T00:00:00.000Z',
+  })
+
   function agentWithEvents() {
     return buildAgent({
       ledger: {
         findWorker: async () => ({
           dialogObjectId: dialogObjectIdForPrivate('f1'),
-          worker: makeLedgerWorker({ workerId: 'w-1' }),
+          worker: { ...makeLedgerWorker({ workerId: 'w-1' }), incarnations: [incarnation(1), incarnation(2)] },
         }),
       },
       harness: { readWorkerEvents: async () => events },
@@ -493,6 +508,15 @@ describe('get_worker_trace(§8.3 + §10.2)', () => {
     const second = await agent.handleGetWorkerTrace({ worker_id: 'w-1', seq: 1, cursor: first.next_cursor })
     expect(second.events).toEqual([])
     expect(second.next_cursor).toBe('2')
+  })
+
+  /**
+   * 与 read_worker_output_admin 的 `seq=9 → rejects(/seq=9/)` 对称（见上一个 describe）：
+   * 显式给的化身不存在时报错，而不是与"该化身还没有事件"（seq=2 只有 1 条、cursor 读完
+   * 返回空——上面两条用例）在返回值上混同。
+   */
+  it('显式 seq 在化身链里不存在 → 抛错,而不是静默返回空 events', async () => {
+    await expect(agentWithEvents().handleGetWorkerTrace({ worker_id: 'w-1', seq: 9 })).rejects.toThrow(/seq=9/)
   })
 
   it('worker 不存在 → 抛明确错误,而不是返回空时间线', async () => {

@@ -401,6 +401,23 @@ function parseOptionalIntParam(raw: string | null): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined
 }
 
+/**
+ * `/api/agent/workers*` 三个按 worker_id 读的端点统一的"worker 不存在 → 404"判定。
+ *
+ * agent 侧同一件事有两处文案，大小写不同：`unified-agent.ts` 的 handler 显式抛
+ * `Worker not found: <id>`（detail / trace），`harness.ts` 的 `WorkerNotFoundError` 抛
+ * `worker not found: <id>`（output 走 `harness.readWorkerOutput`）。各端点各写各的匹配串时，
+ * output 端点对同一个不存在的 id 落 500 而另外两个落 404（P5 review 修复第二轮）。
+ * 抽成一个谓词共用，是为了不让这种不对称再次悄悄漂移出来。
+ *
+ * 只做大小写归一、不放宽到 `includes('not found')`：agent 侧其它真错（如
+ * `no incarnation with seq=N found for worker <id>` —— 化身不存在而非 worker 不存在）必须
+ * 继续落 500，否则前端分不清"这个 worker 没了"和"这个化身没了"。
+ */
+function isWorkerNotFoundError(message: string): boolean {
+  return message.toLowerCase().includes('worker not found')
+}
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json' })
   res.end(JSON.stringify(body))
@@ -9841,9 +9858,8 @@ export class AdminModule extends ModuleBase {
       res,
       'get_worker_detail',
       { worker_id: workerId },
-      // agent 侧对不存在的 worker 抛 `Worker not found: <id>`（unified-agent.ts）；映射成 404
-      // 与相邻的 `/api/agent/traces/:traceId` 一致。
-      (msg) => msg.includes('Worker not found'),
+      // 404 与相邻的 `/api/agent/traces/:traceId` 一致；判定见 isWorkerNotFoundError。
+      isWorkerNotFoundError,
     )
   }
 
@@ -9861,11 +9877,16 @@ export class AdminModule extends ModuleBase {
     await this.proxyAgentRpc<
       { worker_id: string; seq?: number; cursor?: string },
       { chunk: string; next_cursor: string; eof: boolean }
-    >(res, 'read_worker_output_admin', {
-      worker_id: workerId,
-      ...(seq !== undefined ? { seq } : {}),
-      ...(cursor ? { cursor } : {}),
-    })
+    >(
+      res,
+      'read_worker_output_admin',
+      {
+        worker_id: workerId,
+        ...(seq !== undefined ? { seq } : {}),
+        ...(cursor ? { cursor } : {}),
+      },
+      isWorkerNotFoundError,
+    )
   }
 
   /** §10.3 `GET /api/agent/workers/:id/trace` → `get_worker_trace`（§8.3）。 */
@@ -9889,7 +9910,7 @@ export class AdminModule extends ModuleBase {
         ...(seq !== undefined ? { seq } : {}),
         ...(cursor ? { cursor } : {}),
       },
-      (msg) => msg.includes('Worker not found'),
+      isWorkerNotFoundError,
     )
   }
 

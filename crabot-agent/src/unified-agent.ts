@@ -84,7 +84,7 @@ import {
 } from './manager/read-model.js'
 import type { NormalizedTraceEvent } from './workers/types.js'
 import type { HarnessEvent } from './workers/harness/worker-events.js'
-import { mainlineIncarnation } from './workers/harness/harness.js'
+import { findIncarnationBySeq, mainlineIncarnation } from './workers/harness/harness.js'
 
 const BARRIER_TIMEOUT_MS = 8_000
 
@@ -3275,6 +3275,11 @@ export class UnifiedAgent extends ModuleBase {
    * `mainlineIncarnation`），保证两个端点在同一次"不带 seq"的调用下描述的是同一个化身。
    * 缺这个分支时 `event.seq === undefined` 恒为 false，会静默返回空 events，与"该化身确实
    * 还没有事件"无法区分（P5 review 修复）。
+   *
+   * 同理，**显式**给的 seq 在化身链里不存在时抛错而非返回空 events（P5 review 修复第二轮）：
+   * 化身链的存在性只能问台账，不能问事件流——"这个化身不存在"与"这个化身确实还没产生
+   * 事件"在 events.jsonl 上是同一个结果（都是空），只有先查台账才分得开。判定与错误文案
+   * 与 `harness.readWorkerOutput` 同形状（共用 `findIncarnationBySeq`），让 admin 侧统一映射。
    */
   private async handleGetWorkerTrace(params: GetWorkerTraceParams): Promise<GetWorkerTraceResult> {
     const stack = this.requireManagerStack()
@@ -3284,9 +3289,13 @@ export class UnifiedAgent extends ModuleBase {
     if (!found) {
       throw new Error(`Worker not found: ${params.worker_id}`)
     }
-    const seq = params.seq ?? mainlineIncarnation(found.worker).seq
+    const incarnation =
+      params.seq === undefined ? mainlineIncarnation(found.worker) : findIncarnationBySeq(found.worker, params.seq)
+    if (!incarnation) {
+      throw new Error(`get_worker_trace: no incarnation with seq=${params.seq} found for worker ${params.worker_id}`)
+    }
     const ofIncarnation = (await stack.harness.readWorkerEvents(params.worker_id)).filter(
-      (event) => event.seq === seq
+      (event) => event.seq === incarnation.seq
     )
     const offset = parseOffsetCursor(params.cursor)
     return {

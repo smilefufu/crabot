@@ -1759,20 +1759,49 @@ describe('Admin Web API', () => {
       expect(spy).toHaveBeenCalledWith('get_worker_detail', { worker_id: 'w-1' })
     })
 
-    it('GET /api/agent/workers/:id：worker 不存在 → 404', async () => {
+    /**
+     * 三个按 worker_id 读的端点对**同一个**不存在的 id 必须给同一个状态码——P6 前端要靠状态码
+     * 区分"worker 不存在"与"agent 侧真错"。
+     *
+     * agent 侧两条路径的文案大小写**不一致**（下表 message 列逐字取自 agent 源码）：
+     * detail/trace 由 `unified-agent.ts` 的 handler 显式抛（大写 W），output 由
+     * `harness.ts` 的 `WorkerNotFoundError` 抛（小写 w）。修复前 output 端点匹配不上
+     * `'Worker not found'` → 落 500。故三处共用同一个大小写无关的谓词。
+     */
+    it.each([
+      ['/api/agent/workers/w-404', 'Worker not found: w-404'],
+      ['/api/agent/workers/w-404/trace', 'Worker not found: w-404'],
+      ['/api/agent/workers/w-404/output', 'worker not found: w-404'],
+    ])('GET %s：worker 不存在 → 404（agent 侧文案 %s）', async (path, agentMessage) => {
       const token = await loginAndGetToken()
-      spyAgentRpc().mockRejectedValue(new Error('Worker not found: w-404'))
+      spyAgentRpc().mockRejectedValue(new Error(agentMessage))
 
-      const response = await makeWebRequest<{ error: string }>(
-        TEST_WEB_PORT,
-        '/api/agent/workers/w-404',
-        'GET',
-        null,
-        token,
-      )
+      const response = await makeWebRequest<{ error: string }>(TEST_WEB_PORT, path, 'GET', null, token)
 
       expect(response.statusCode).toBe(404)
-      expect(response.body.error).toBe('Worker not found: w-404')
+      expect(response.body.error).toBe(agentMessage)
+    })
+
+    /**
+     * 谓词只认"worker 不存在"，agent 侧其它真错仍是 500——否则前端会把"这个化身不存在"
+     * 或"这个 agent build 还没有这个方法"当成"这个 worker 不存在"。三条 message 都逐字取自
+     * 源码：前两条来自 `harness.readWorkerOutput` / `handleGetWorkerTrace` 的 seq 校验，
+     * 第三条来自 crabot-core 的 JSON-RPC 分发（未注册方法，滚动升级期真实可达；由
+     * `reject(new Error(response.error.message))` 原样送到这里）。
+     * 它们都含 "not found" 却不含 "worker not found"——谓词故意不放宽到前者。
+     */
+    it.each([
+      ['/api/agent/workers/w-1/output?seq=9', 'WorkerHarness.readWorkerOutput: no incarnation with seq=9 found for worker w-1'],
+      ['/api/agent/workers/w-1/trace?seq=9', 'get_worker_trace: no incarnation with seq=9 found for worker w-1'],
+      ['/api/agent/workers/w-1/output', 'Method "read_worker_output_admin" not found'],
+    ])('GET %s：不是 worker 不存在 → 500', async (path, agentMessage) => {
+      const token = await loginAndGetToken()
+      spyAgentRpc().mockRejectedValue(new Error(agentMessage))
+
+      const response = await makeWebRequest<{ error: string }>(TEST_WEB_PORT, path, 'GET', null, token)
+
+      expect(response.statusCode).toBe(500)
+      expect(response.body.error).toBe(agentMessage)
     })
 
     /**
@@ -1826,22 +1855,6 @@ describe('Admin Web API', () => {
       await makeWebRequest(TEST_WEB_PORT, '/api/agent/workers/w-1/trace', 'GET', null, token)
       expect(spy).toHaveBeenLastCalledWith('get_worker_trace', { worker_id: 'w-1' })
       expect('seq' in (spy.mock.lastCall![1] as object)).toBe(false)
-    })
-
-    it('GET /api/agent/workers/:id/trace：worker 不存在 → 404', async () => {
-      const token = await loginAndGetToken()
-      spyAgentRpc().mockRejectedValue(new Error('Worker not found: w-404'))
-
-      const response = await makeWebRequest<{ error: string }>(
-        TEST_WEB_PORT,
-        '/api/agent/workers/w-404/trace',
-        'GET',
-        null,
-        token,
-      )
-
-      expect(response.statusCode).toBe(404)
-      expect(response.body.error).toBe('Worker not found: w-404')
     })
   })
 })

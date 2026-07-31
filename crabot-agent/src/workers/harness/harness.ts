@@ -1420,8 +1420,12 @@ function findIncarnation(worker: LedgerWorker, impl: WorkerImplId, seq: number):
  * adapter 实例),不会产生跨 impl 撞号的歧义——唯一的例外是该 worker 曾经历跨实现切换
  * 且新旧 adapter 实例恰好在 seq 计数上撞号(protocol-agent-v3 §6.1 已知限制),这种边缘
  * 情况下"取最后一条"与本文件其它同类查找函数保持一致的降级行为,不单独处理。
+ *
+ * P5 review 修复(第二轮)additive:导出给 `get_worker_trace` 的 handler 复用——两个按化身读的
+ * 端点(output/trace)对"显式给的 seq 存不存在"必须用同一份判定,否则 trace 侧自己写一遍
+ * 就会与 readWorkerOutput 的"取最后一条匹配"原则漂移。纯可见性变更,零行为改动。
  */
-function findIncarnationBySeq(worker: LedgerWorker, seq: number): Incarnation | undefined {
+export function findIncarnationBySeq(worker: LedgerWorker, seq: number): Incarnation | undefined {
   let lastMatch: Incarnation | undefined
   for (const inc of worker.incarnations) {
     if (inc.seq === seq) lastMatch = inc

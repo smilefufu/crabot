@@ -473,8 +473,78 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     expect(defaultTrace.next_cursor).toBe('2')
     // 不是 #1 的那条、也不是 fork #3 的那条
     expect((await rpc<{ events: unknown[] }>('get_worker_trace', { worker_id: 'w-main', seq: 1 })).events).toHaveLength(1)
-    // 修复前 admin 下发的 seq=0：静默返回空 events，与"该化身还没有事件"无法区分
-    expect((await rpc<{ events: unknown[] }>('get_worker_trace', { worker_id: 'w-main', seq: 0 })).events).toEqual([])
+    // 修复前 admin 下发的 seq=0：静默返回空 events，与"该化身还没有事件"无法区分；
+    // 现在与 output 路径同形状抛错（见下一条用例）。
+    await expect(rpc('get_worker_trace', { worker_id: 'w-main', seq: 0 })).rejects.toThrow(
+      /no incarnation with seq=0/,
+    )
+  })
+
+  /**
+   * get_worker_trace 显式给了 seq 时的两种"空"必须可区分（P5 review 修复第二轮）：
+   *
+   * - 化身**不存在** → 抛错（文案与 `read_worker_output_admin` 同形状，admin 侧统一映射 500）；
+   * - 化身**存在但还没产生事件** → 照常 200 + 空 events，**不能**误判成错误。
+   *
+   * 前者修复前是静默返回空 events，与后者在返回值上完全一样——正是上一轮已修的
+   * "静默返空"同一形状的第二个入口。
+   */
+  it('get_worker_trace 显式 seq：化身不存在 → 抛错；化身存在但无事件 → 200 空 events', async () => {
+    boot()
+    const stack = internals.managerStack!
+    vi.spyOn(stack.registry, 'routeWorkerEvent').mockResolvedValue(undefined)
+    vi.spyOn(internals.rpcClient, 'publishEvent').mockResolvedValue(1)
+
+    const dialogObjectId = dialogObjectIdForPrivate('friend-seq-probe')
+    const base = makeLedgerWorker({ workerId: 'w-seq' })
+    await stack.ledger.upsertWorker(dialogObjectId, 'w-seq', () => ({
+      ...base,
+      incarnations: [
+        {
+          seq: 1,
+          impl: 'builtin',
+          state: 'exited',
+          workspace: '/tmp/ws-not-used',
+          session_ref: 'ref-1',
+          started_at: '2026-03-01T00:00:00.000Z',
+          ended_at: '2026-03-01T00:01:00.000Z',
+          ended_reason: 'completed',
+        },
+        // 主线的当前化身：确实存在于台账，但一条事件都还没落盘
+        {
+          seq: 2,
+          impl: 'builtin',
+          state: 'running',
+          workspace: '/tmp/ws-not-used',
+          session_ref: 'ref-2',
+          started_at: '2026-03-01T00:02:00.000Z',
+        },
+      ],
+    }))
+
+    const appendEvent = (
+      stack.harness as unknown as {
+        appendEvent: (w: string, seq: number, kind: string, detail?: Record<string, unknown>) => Promise<void>
+      }
+    ).appendEvent.bind(stack.harness)
+    await appendEvent('w-seq', 1, 'spawned', { impl: 'builtin' })
+
+    // ① 化身存在但无事件：200 + 空 events（显式 seq 与缺省取主线两条路都要成立）
+    const explicitEmpty = await rpc<{ events: unknown[]; next_cursor?: string }>('get_worker_trace', {
+      worker_id: 'w-seq',
+      seq: 2,
+    })
+    expect(explicitEmpty.events).toEqual([])
+    expect(explicitEmpty.next_cursor).toBe('0')
+    expect((await rpc<{ events: unknown[] }>('get_worker_trace', { worker_id: 'w-seq' })).events).toEqual([])
+
+    // ② 化身不存在：抛错，不再与①的返回值混同
+    await expect(rpc('get_worker_trace', { worker_id: 'w-seq', seq: 99 })).rejects.toThrow(
+      /no incarnation with seq=99 found for worker w-seq/,
+    )
+
+    // ③ 有事件的化身照常返回（防止校验写成"一律抛错"）
+    expect((await rpc<{ events: unknown[] }>('get_worker_trace', { worker_id: 'w-seq', seq: 1 })).events).toHaveLength(1)
   })
 
   // --- ④ agent.task_status_changed ---
