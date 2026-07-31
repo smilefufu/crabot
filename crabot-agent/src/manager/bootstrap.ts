@@ -43,6 +43,7 @@ import type { SpawnSpec, WorkerAdapter, WorkerImplId } from '../workers/types.js
 
 import { ManagerRegistry } from './registry.js'
 import { ManagerSessionStore } from './session-store.js'
+import { makeTaskStatusEventBridge, type AgentEventPublisher } from './events.js'
 import { shouldWakeOnHarnessEvent } from './inbound-adapters.js'
 import { buildManagerToolFace } from './tools/tool-face.js'
 import type { CompactionPolicy } from './compaction.js'
@@ -112,6 +113,12 @@ export interface BootstrapDeps {
   readonly dialogObjectIdFor: (key: ManagerKey) => DialogObjectId
   /** handoff 目标为 builtin 时的 LLM 注入缺省值,原样透传给 `HarnessDeps.builtinSpawnDefaults`。 */
   readonly builtinSpawnDefaults?: () => SpawnSpec['builtin']
+  /**
+   * 对外事件发布口(§9.2 `agent.task_status_changed`),由 `makeAgentEventPublisher` 构造。
+   * 可选:P5 阶段这套栈没有生产调用方,注入真实 rpcClient 是 P5 Task 6 的事;不注入则本栈
+   * 只维护台账、不对外发事件。
+   */
+  readonly publishEvent?: AgentEventPublisher
 }
 
 /** `ManagerKey` → `{channel_id, session_id}`。按**第一个** `::` 切,session_id 里再含 `::` 也不会被截断。 */
@@ -147,6 +154,12 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   // 见文件头"与 registry 的环形依赖"。
   let registry: ManagerRegistry | undefined
 
+  // harness 事件 → 对外的 `agent.task_status_changed`(§9.2)。翻译与去重都在 events.ts 里,
+  // 这里只负责把口子接上。
+  const publishTaskStatusChanged = deps.publishEvent
+    ? makeTaskStatusEventBridge({ ledger, publish: deps.publishEvent })
+    : undefined
+
   // --- 四步接线契约 step 1:先建空壳 Map ---
   const adapters = new Map<WorkerImplId, WorkerAdapter>()
 
@@ -162,6 +175,12 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     // 工具调用里同步拿到结果)。fire-and-forget,必须 .catch():路由失败绝不能反噬 harness 的
     // 状态机推进,更不能变成 unhandledRejection 打崩 agent 进程。
     onEvent: (event) => {
+      // 对外事件走在唤醒过滤之前,且不共用下面那个门:`shouldWakeOnHarnessEvent` 答的是"要不
+      // 要唤醒 manager"(input_sent 不唤醒),`!registry` 答的是"manager 侧接线好了没"——两者
+      // 都与"task 状态有没有变"无关,拿它们当对外事件的门,等于把 §9.2 的正确性挂在别的模块
+      // 的过滤规则上。对外事件自己的去重按 task.status 做,在 events.ts 里。
+      publishTaskStatusChanged?.(event)
+
       if (!registry || !shouldWakeOnHarnessEvent(event)) return
       void registry.routeWorkerEvent(event).catch((err) => {
         console.error(`[manager-bootstrap] routeWorkerEvent 失败 (worker=${event.worker_id}, kind=${event.kind}):`, err)

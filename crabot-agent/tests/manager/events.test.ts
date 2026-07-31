@@ -1,0 +1,469 @@
+/**
+ * agent 对外事件(P5 Task 2)—— `src/manager/events.ts` + bootstrap 的 onEvent 接线。
+ *
+ * 五条不变量:
+ * ① `agent.task_status_changed` 载荷与 protocol-agent-v3 §9.2 逐字一致(字段名/字段集);
+ * ② 事件信封形状与既有模块(admin `publishAdminEvent`)一致:id/type/source/payload/timestamp;
+ * ③ 发布失败(reject 与同步抛)都被 catch,不抛给调用方、不产生 unhandledRejection;
+ * ④ 化身级事件(task.status 没动)不触发 task 级事件;
+ * ⑤ 同状态重复事件静默;并发事件按 worker 串行,old/new 不会错位。
+ */
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { promises as fs } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
+
+import {
+  makeAgentEventPublisher,
+  makeTaskStatusEventBridge,
+  type AgentTaskStatusChangedPayload,
+} from '../../src/manager/events.js'
+import { buildManagerStack, type BootstrapDeps } from '../../src/manager/bootstrap.js'
+import {
+  dialogObjectIdForPrivate,
+  type DialogObjectId,
+  type LedgerWorker,
+  type TaskStatus,
+} from '../../src/workers/harness/ledger-types.js'
+import type { HarnessEvent } from '../../src/workers/harness/harness.js'
+import type { LedgerStore } from '../../src/workers/harness/ledger-store.js'
+import type { WorkerAdapter, WorkerImplId, IncarnationHandle, WorkerContractState } from '../../src/workers/types.js'
+import type { ManagerKey } from '../../src/manager/types.js'
+import type { LLMAdapter } from '../../src/engine/index.js'
+import type { Event, ModuleId, RpcClient } from 'crabot-shared'
+import { createCrabMemoryServer } from '../../src/mcp/crab-memory.js'
+import { chunksFromContent } from '../engine/helpers/mock-stream.js'
+
+// ============================================================================
+// helpers
+// ============================================================================
+
+const DIALOG_OBJECT_ID = dialogObjectIdForPrivate('friend-evt')
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function makeLedgerWorker(p: {
+  workerId: string
+  status: TaskStatus
+  taskId?: string
+  impl?: WorkerImplId
+}): LedgerWorker {
+  return {
+    worker_id: p.workerId,
+    task: { id: p.taskId ?? `task-of-${p.workerId}`, title: 't', status: p.status, created_at: '2026-01-01T00:00:00.000Z' },
+    origin: { spawned_by_session: 'wechat::sess-evt' as ManagerKey, trigger_type: 'message' },
+    report_to: { channel_id: 'wechat', session_id: 'sess-evt' },
+    incarnations: [
+      {
+        seq: 1,
+        impl: p.impl ?? 'builtin',
+        state: 'running',
+        workspace: '/tmp/ws-not-used',
+        session_ref: `${p.workerId}-ref`,
+        started_at: '2026-01-01T00:00:00.000Z',
+      },
+    ],
+    updated_at: '2026-01-01T00:00:00.000Z',
+  }
+}
+
+/** 台账桩:按调用序返回状态(模拟 harness 落账后的真实读)。 */
+function makeLedgerStub(
+  script: Array<{ status: TaskStatus; delayMs?: number } | undefined>,
+  opts: { taskId?: string; workerId?: string } = {},
+): { ledger: Pick<LedgerStore, 'findWorker'>; calls: () => number } {
+  let n = 0
+  const ledger = {
+    findWorker: async (workerId: string) => {
+      const step = script[Math.min(n, script.length - 1)]
+      n += 1
+      if (!step) return undefined
+      if (step.delayMs) await new Promise((resolve) => setTimeout(resolve, step.delayMs))
+      return {
+        dialogObjectId: DIALOG_OBJECT_ID,
+        worker: makeLedgerWorker({ workerId: opts.workerId ?? workerId, status: step.status, taskId: opts.taskId }),
+      }
+    },
+  } as Pick<LedgerStore, 'findWorker'>
+  return { ledger, calls: () => n }
+}
+
+function harnessEvent(overrides: Partial<HarnessEvent> = {}): HarnessEvent {
+  return {
+    ts: '2026-07-31T00:00:00.000Z',
+    kind: 'state_changed',
+    worker_id: 'w-1',
+    seq: 1,
+    ...overrides,
+  }
+}
+
+/** 等待 bridge 内部的 fire-and-forget 链跑完(宏任务窗口足够,链上只有内存桩)。 */
+async function flush(times = 6): Promise<void> {
+  for (let i = 0; i < times; i += 1) await new Promise((resolve) => setTimeout(resolve, 5))
+}
+
+async function waitUntil(cond: () => Promise<boolean> | boolean, timeoutMs = 4000, intervalMs = 20): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await cond()) return
+    await new Promise((resolve) => setTimeout(resolve, intervalMs))
+  }
+  throw new Error('waitUntil timed out')
+}
+
+// --- bootstrap 接线用(最小依赖桩,与 tests/manager/bootstrap.test.ts 同款) ---
+
+function makeMemoryServer() {
+  return createCrabMemoryServer(
+    { rpcClient: { call: vi.fn() } as never, moduleId: 'manager-events-test', getMemoryPort: async () => 19100 },
+    { visibility: 'internal', scopes: [], isMasterPrivate: false },
+  )
+}
+
+function makeMessagingDeps() {
+  return {
+    rpcClient: { call: vi.fn() } as never,
+    moduleId: 'manager-events-test',
+    getAdminPort: async () => 19001,
+    resolveChannelPort: async () => 19009,
+  }
+}
+
+function silentAdapter(): LLMAdapter {
+  return {
+    async *stream() {
+      yield* chunksFromContent([{ type: 'text', text: '(默认回复)' }], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+    },
+    updateConfig: () => {},
+  }
+}
+
+function capturedOnStateChange(
+  adapter: WorkerAdapter | undefined,
+): ((h: IncarnationHandle, s: WorkerContractState) => void) | undefined {
+  return (adapter as unknown as { deps?: { onStateChange?: (h: IncarnationHandle, s: WorkerContractState) => void } })
+    ?.deps?.onStateChange
+}
+
+// ============================================================================
+
+describe('agent 对外事件（P5 Task 2）', () => {
+  let unhandled: unknown[]
+  const onUnhandled = (err: unknown): void => {
+    unhandled.push(err)
+  }
+
+  beforeEach(() => {
+    unhandled = []
+    process.on('unhandledRejection', onUnhandled)
+  })
+
+  afterEach(() => {
+    process.off('unhandledRejection', onUnhandled)
+    vi.restoreAllMocks()
+  })
+
+  // --- ② 事件信封 ---
+
+  describe('makeAgentEventPublisher', () => {
+    it('信封形状与既有模块一致：自动补 id(uuid) / source / timestamp，payload 原样透传', () => {
+      const publishEvent = vi.fn(async () => 1)
+      const publish = makeAgentEventPublisher({
+        rpcClient: { publishEvent } as Pick<RpcClient, 'publishEvent'>,
+        moduleId: 'agent-1' as ModuleId,
+        now: () => '2026-07-31T12:00:00.000Z',
+      })
+
+      const payload: AgentTaskStatusChangedPayload = {
+        worker_id: 'w-1',
+        task_id: 'task-1',
+        old_status: 'running',
+        new_status: 'completed',
+        dialog_object_id: DIALOG_OBJECT_ID,
+      }
+      publish('agent.task_status_changed', payload)
+
+      expect(publishEvent).toHaveBeenCalledTimes(1)
+      const [event, source] = publishEvent.mock.calls[0] as unknown as [Event, ModuleId]
+      expect(source).toBe('agent-1')
+      expect(Object.keys(event).sort()).toEqual(['id', 'payload', 'source', 'timestamp', 'type'])
+      expect(event.type).toBe('agent.task_status_changed')
+      expect(event.source).toBe('agent-1')
+      expect(event.timestamp).toBe('2026-07-31T12:00:00.000Z')
+      expect(event.id).toMatch(UUID_RE)
+      expect(event.payload).toEqual(payload)
+    })
+
+    // --- ③ 发布失败不反噬调用方 ---
+
+    it('rpcClient reject 被 catch：调用方不抛、无 unhandledRejection', async () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const publish = makeAgentEventPublisher({
+        rpcClient: { publishEvent: async () => Promise.reject(new Error('module manager 不可达')) } as Pick<
+          RpcClient,
+          'publishEvent'
+        >,
+        moduleId: 'agent-1' as ModuleId,
+        now: () => '2026-07-31T12:00:00.000Z',
+      })
+
+      expect(() =>
+        publish('agent.task_status_changed', {
+          worker_id: 'w-1',
+          task_id: 'task-1',
+          old_status: 'running',
+          new_status: 'failed',
+          dialog_object_id: DIALOG_OBJECT_ID,
+        }),
+      ).not.toThrow()
+
+      await flush()
+      expect(unhandled).toEqual([])
+      expect(consoleSpy).toHaveBeenCalled()
+    })
+
+    it('rpcClient 同步抛错也被 catch：调用方不抛', () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const publish = makeAgentEventPublisher({
+        rpcClient: {
+          publishEvent: () => {
+            throw new Error('rpcClient 未初始化')
+          },
+        } as unknown as Pick<RpcClient, 'publishEvent'>,
+        moduleId: 'agent-1' as ModuleId,
+        now: () => '2026-07-31T12:00:00.000Z',
+      })
+
+      expect(() =>
+        publish('agent.task_status_changed', {
+          worker_id: 'w-1',
+          task_id: 'task-1',
+          old_status: 'queued',
+          new_status: 'running',
+          dialog_object_id: DIALOG_OBJECT_ID,
+        }),
+      ).not.toThrow()
+      expect(consoleSpy).toHaveBeenCalled()
+    })
+  })
+
+  // --- ①④⑤ harness 事件 → task 状态事件的翻译与去重 ---
+
+  describe('makeTaskStatusEventBridge', () => {
+    it('①载荷与 §9.2 逐字：worker_id / task_id / old_status / new_status / dialog_object_id，无多余字段', async () => {
+      const publish = vi.fn()
+      const { ledger } = makeLedgerStub([{ status: 'running' }], { taskId: 'task-42' })
+      const bridge = makeTaskStatusEventBridge({ ledger, publish })
+
+      bridge(harnessEvent({ kind: 'spawned', worker_id: 'w-42' }))
+      await flush()
+
+      expect(publish).toHaveBeenCalledTimes(1)
+      const [type, payload] = publish.mock.calls[0] as [string, AgentTaskStatusChangedPayload]
+      expect(type).toBe('agent.task_status_changed')
+      expect(Object.keys(payload).sort()).toEqual([
+        'dialog_object_id',
+        'new_status',
+        'old_status',
+        'task_id',
+        'worker_id',
+      ])
+      expect(payload).toEqual({
+        worker_id: 'w-42',
+        task_id: 'task-42',
+        // 台账里的 task 初始状态是 queued（harness.spawnWorker 先建 queued 再迁 running）
+        old_status: 'queued',
+        new_status: 'running',
+        dialog_object_id: DIALOG_OBJECT_ID,
+      })
+    })
+
+    it('④化身级事件不触发 task 事件：task.status 一直是 running 时，state_changed / input_sent 一条都不发', async () => {
+      const publish = vi.fn()
+      const { ledger } = makeLedgerStub([{ status: 'running' }])
+      const bridge = makeTaskStatusEventBridge({ ledger, publish })
+
+      // 第一条把 task 从初始 queued 带到 running（这是真实迁移，应发）
+      bridge(harnessEvent({ kind: 'spawned' }))
+      await flush()
+      expect(publish).toHaveBeenCalledTimes(1)
+
+      // 后续全是化身级跳动：input_sent / state_changed(fork) / state_changed(dead_letter)
+      bridge(harnessEvent({ kind: 'input_sent', detail: { text_len: 3 } }))
+      bridge(harnessEvent({ kind: 'state_changed', seq: 2, detail: { kind: 'fork', from_seq: 1 } }))
+      bridge(harnessEvent({ kind: 'state_changed', detail: { kind: 'dead_letter', reason: 'task_cancelled' } }))
+      bridge(harnessEvent({ kind: 'query_failed', detail: { reason: 'capability_not_supported' } }))
+      await flush()
+
+      expect(publish).toHaveBeenCalledTimes(1)
+    })
+
+    it('⑤同状态重复事件静默；状态真的变了才发，且 old_status 取上一次已知值', async () => {
+      const publish = vi.fn()
+      const { ledger } = makeLedgerStub([
+        { status: 'running' },
+        { status: 'running' },
+        { status: 'waiting_input' },
+        { status: 'waiting_input' },
+        { status: 'completed' },
+      ])
+      const bridge = makeTaskStatusEventBridge({ ledger, publish })
+
+      for (let i = 0; i < 5; i += 1) {
+        bridge(harnessEvent({ kind: 'state_changed' }))
+        await flush(2)
+      }
+      await flush()
+
+      expect(publish.mock.calls.map(([, p]) => [p.old_status, p.new_status])).toEqual([
+        ['queued', 'running'],
+        ['running', 'waiting_input'],
+        ['waiting_input', 'completed'],
+      ])
+    })
+
+    it('同一 worker 的并发事件按序处理：先到的台账读慢一拍也不会让 old/new 错位', async () => {
+      const publish = vi.fn()
+      const { ledger } = makeLedgerStub([
+        { status: 'running', delayMs: 40 }, // 第一条读得慢
+        { status: 'completed' }, // 第二条读得快
+      ])
+      const bridge = makeTaskStatusEventBridge({ ledger, publish })
+
+      bridge(harnessEvent({ kind: 'spawned' }))
+      bridge(harnessEvent({ kind: 'exited' }))
+      await flush(20)
+
+      expect(publish.mock.calls.map(([, p]) => [p.old_status, p.new_status])).toEqual([
+        ['queued', 'running'],
+        ['running', 'completed'],
+      ])
+    })
+
+    it('worker 不在台账（如 query_failed:worker_not_found）→ 不发事件、不抛', async () => {
+      const publish = vi.fn()
+      const { ledger } = makeLedgerStub([undefined])
+      const bridge = makeTaskStatusEventBridge({ ledger, publish })
+
+      expect(() => bridge(harnessEvent({ kind: 'query_failed', detail: { reason: 'worker_not_found' } }))).not.toThrow()
+      await flush()
+
+      expect(publish).not.toHaveBeenCalled()
+      expect(unhandled).toEqual([])
+    })
+
+    it('台账读失败 → 记日志、不发事件、不抛、无 unhandledRejection', async () => {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const publish = vi.fn()
+      const ledger = {
+        findWorker: async () => {
+          throw new Error('台账文件损坏')
+        },
+      } as unknown as Pick<LedgerStore, 'findWorker'>
+      const bridge = makeTaskStatusEventBridge({ ledger, publish })
+
+      expect(() => bridge(harnessEvent())).not.toThrow()
+      await flush()
+
+      expect(publish).not.toHaveBeenCalled()
+      expect(unhandled).toEqual([])
+      expect(consoleSpy).toHaveBeenCalled()
+    })
+  })
+
+  // --- 接线:bootstrap 的 onEvent 出口 ---
+
+  describe('bootstrap onEvent 接线', () => {
+    let tmpRoot: string
+
+    beforeEach(async () => {
+      tmpRoot = await fs.mkdtemp(join(tmpdir(), 'manager-events-'))
+    })
+
+    afterEach(async () => {
+      await fs.rm(tmpRoot, { recursive: true, force: true })
+    })
+
+    function makeDeps(overrides: Partial<BootstrapDeps> = {}): BootstrapDeps {
+      return {
+        dataRoot: join(tmpRoot, 'data'),
+        now: () => new Date().toISOString(),
+        managerAdapter: () => silentAdapter(),
+        managerModel: () => 'test-manager-model',
+        messagingDeps: makeMessagingDeps(),
+        memoryServer: makeMemoryServer(),
+        callAdmin: async () => ({}) as never,
+        dialogObjectIdFor: (): DialogObjectId => DIALOG_OBJECT_ID,
+        ...overrides,
+      }
+    }
+
+    it('真实 harness 状态迁移（adapter 回调 → 落账 → onEvent）会发出 agent.task_status_changed', async () => {
+      const published: Array<[string, AgentTaskStatusChangedPayload]> = []
+      const stack = buildManagerStack(
+        makeDeps({
+          publishEvent: (type, payload) => {
+            published.push([type, payload])
+          },
+        }),
+      )
+
+      await stack.ledger.upsertWorker(DIALOG_OBJECT_ID, 'w-wired', () =>
+        makeLedgerWorker({ workerId: 'w-wired', status: 'running', taskId: 'task-wired' }),
+      )
+
+      const onStateChange = capturedOnStateChange(stack.adapters.get('builtin'))
+      expect(onStateChange).toBeDefined()
+      // 注：这里 exited 落成 completed 是 P7 阻塞项 #1（processStateChange 硬编码
+      // endReason='completed'）的直接后果，本用例只验证"事件发得出来"，不验证 completed 的正确性。
+      onStateChange!({ worker_id: 'w-wired', seq: 1, impl: 'builtin', session_ref: 'w-wired-ref' }, 'exited')
+
+      await waitUntil(() => published.length >= 1)
+      expect(published[0][0]).toBe('agent.task_status_changed')
+      expect(published[0][1]).toEqual({
+        worker_id: 'w-wired',
+        task_id: 'task-wired',
+        old_status: 'queued',
+        new_status: 'completed',
+        dialog_object_id: DIALOG_OBJECT_ID,
+      })
+    })
+
+    it('对外事件不受 manager 唤醒过滤（shouldWakeOnHarnessEvent）与 registry 就绪与否影响：input_sent 也要能翻译出状态迁移', async () => {
+      const published: Array<[string, AgentTaskStatusChangedPayload]> = []
+      const stack = buildManagerStack(
+        makeDeps({
+          publishEvent: (type, payload) => {
+            published.push([type, payload])
+          },
+        }),
+      )
+
+      await stack.ledger.upsertWorker(DIALOG_OBJECT_ID, 'w-filtered', () =>
+        makeLedgerWorker({ workerId: 'w-filtered', status: 'running', taskId: 'task-filtered' }),
+      )
+
+      // 直取 harness 拿到的那个 onEvent：这是 bootstrap 开的唯一出口，也是本用例要验证的对象
+      // （input_sent 在 NO_WAKE_KINDS 里，真实 harness 只有在活 worker 上投递才会落，
+      // 这里用同一个回调直接喂，验证的是接线顺序本身）。
+      const onEvent = (stack.harness as unknown as { deps: { onEvent?: (e: HarnessEvent) => void } }).deps.onEvent
+      expect(onEvent).toBeDefined()
+      onEvent!(harnessEvent({ kind: 'input_sent', worker_id: 'w-filtered', detail: { text_len: 3 } }))
+
+      await waitUntil(() => published.length >= 1)
+      expect(published[0][1].new_status).toBe('running')
+      expect(published[0][1].worker_id).toBe('w-filtered')
+    })
+
+    it('未注入 publishEvent 时装配照常工作（P5 阶段无生产调用方）', async () => {
+      const stack = buildManagerStack(makeDeps())
+      await stack.ledger.upsertWorker(DIALOG_OBJECT_ID, 'w-nopub', () =>
+        makeLedgerWorker({ workerId: 'w-nopub', status: 'running' }),
+      )
+      const onStateChange = capturedOnStateChange(stack.adapters.get('builtin'))
+      onStateChange!({ worker_id: 'w-nopub', seq: 1, impl: 'builtin', session_ref: 'w-nopub-ref' }, 'exited')
+      await waitUntil(async () => (await stack.ledger.findWorker('w-nopub'))?.worker.task.status === 'completed')
+      expect(unhandled).toEqual([])
+    })
+  })
+})
