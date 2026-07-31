@@ -362,3 +362,39 @@ describe('WorkerHarness.reconcileOnStartup — 幂等', () => {
     expect(afterSecond).toEqual(afterFirst) // 台账没有被第二次改写
   })
 })
+
+/**
+ * P5 修复:`HarnessEvent.task_status` —— 对账路径上的两个 task 级迁移点
+ * (markCrashed 的 `exited`、realignAliveIncarnation 的 `state_changed`)必须自带落账后的
+ * 状态,订阅方不再现读台账。分类总表见 harness.ts `appendEvent` 注释。
+ */
+describe('HarnessEvent.task_status —— reconcileOnStartup 的迁移点', () => {
+  it('判死(markCrashed)的 exited 事件带 failed', async () => {
+    const { harness, ledger, adaptersMap } = await makeHarness()
+    const fake = new FakeAdapter('builtin')
+    adaptersMap.set('builtin', fake)
+    await seed(ledger, DIALOG, makeWorker('w-crash'))
+    fake.setState({ worker_id: 'w-crash', seq: 1 }, 'exited')
+
+    await harness.reconcileOnStartup()
+
+    const exited = events.filter((e) => e.kind === 'exited' && e.worker_id === 'w-crash')
+    expect(exited).toHaveLength(1)
+    expect(exited[0].task_status).toBe('failed')
+    expect(exited[0].task_status).toBe((await getWorker(ledger, 'w-crash')).task.status)
+  })
+
+  it('存活对齐(realignAliveIncarnation)的 state_changed 事件带 waiting_input', async () => {
+    const { harness, ledger, adaptersMap } = await makeHarness()
+    const fake = new FakeAdapter('builtin')
+    adaptersMap.set('builtin', fake)
+    await seed(ledger, DIALOG, makeWorker('w-realign'))
+    fake.setState({ worker_id: 'w-realign', seq: 1 }, 'idle')
+
+    await harness.reconcileOnStartup()
+
+    const stateEvents = events.filter((e) => e.kind === 'state_changed' && e.worker_id === 'w-realign')
+    expect(stateEvents).toHaveLength(1)
+    expect(stateEvents[0].task_status).toBe('waiting_input')
+  })
+})

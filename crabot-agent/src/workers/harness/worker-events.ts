@@ -12,6 +12,7 @@
 import { promises as fs } from 'fs'
 import { join, basename } from 'path'
 import { AsyncMutex } from '../async-mutex'
+import type { TaskStatus } from './ledger-types'
 
 export type HarnessEventKind =
   | 'spawned'
@@ -40,6 +41,25 @@ export interface HarnessEvent {
   readonly worker_id: string
   readonly seq: number
   readonly detail?: Record<string, unknown>
+  /**
+   * 本条事件**所伴随的那次 task 状态迁移落账后**的 task.status。
+   *
+   * 为什么必须由事件自带(P5 修复):`HarnessEvent` 本身是**化身级**的,订阅方(见
+   * manager/events.ts 的 `makeTaskStatusEventBridge`)要把它翻译成任务级的
+   * `agent.task_status_changed`,就得知道"这次迁移之后 task 是什么状态"。此前订阅方是拿
+   * `worker_id` **现读台账**取这个值——而 `LedgerStore.findWorker` 不进互斥锁、读的永远是
+   * 最新已提交文件,只要这次读发生在**下一次落账之后**,中间那个状态(含 `completed` 这类
+   * 终态)就被整条吞掉,订阅方一次都收不到。把值钉在事件上,读取时刻就与落账时刻解耦。
+   *
+   * 取值来源:`LedgerStore.upsertWorker` 的返回值(即真正写进台账的那份 worker)的
+   * `task.status`,不是 harness 自己另算一遍——保证事件里的值与盘上的值同源。
+   *
+   * **可选**,只有真正发生 task 状态迁移的事件点才带(见 harness.ts `appendEvent` 的调用点
+   * 分类):化身级事件(`input_sent`、fork 分支的 `state_changed`、`query_failed`、
+   * dead-letter 等)与纯记录事件不带。缺席时订阅方退回现读台账(即修复前的行为),
+   * 不当作"无迁移"静默丢弃。
+   */
+  readonly task_status?: TaskStatus
 }
 
 function parseLine(line: string): HarnessEvent | null {
@@ -55,12 +75,16 @@ function parseLine(line: string): HarnessEvent | null {
       typeof parsed.worker_id === 'string' &&
       typeof parsed.seq === 'number'
     ) {
-      const event: HarnessEvent = {
+      // task_status 是 P5 additive 字段:老日志文件里没有,读回来就是没有(与在线事件缺席
+      // 时同一含义,见字段注释)。按字符串校验后原样带回,不让往返读丢字段。
+      const base: HarnessEvent = {
         ts: parsed.ts,
         kind: parsed.kind,
         worker_id: parsed.worker_id,
         seq: parsed.seq,
       }
+      const event: HarnessEvent =
+        typeof parsed.task_status === 'string' ? { ...base, task_status: parsed.task_status } : base
       return 'detail' in parsed ? { ...event, detail: parsed.detail } : event
     }
     return null

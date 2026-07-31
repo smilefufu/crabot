@@ -340,6 +340,79 @@ describe('agent 对外事件（P5 Task 2）', () => {
       ])
     })
 
+    // --- ⑥ 终态不得被"读晚一步"吞掉（评审 PoC (B) 的复现 + 修复）---
+
+    it('⑥读晚于下一次落账时，终态 completed 仍必须发出（事件自带 task_status）', async () => {
+      const publish = vi.fn()
+      // 真实 LedgerStore.findWorker 的语义：不进互斥锁、读到的永远是**最新已提交**的那份。
+      // 这里用一个可变量模拟"盘上现状"，在事件之间推进它，就能精确制造"bridge 的台账读
+      // 晚于下一次落账"的时序——评审 PoC (B) 的构造手法。
+      let onDisk: TaskStatus = 'running'
+      const ledger = {
+        findWorker: async (workerId: string) => ({
+          dialogObjectId: DIALOG_OBJECT_ID,
+          worker: makeLedgerWorker({ workerId, status: onDisk, taskId: 'task-swallow' }),
+        }),
+      } as unknown as Pick<LedgerStore, 'findWorker'>
+      const bridge = makeTaskStatusEventBridge({ ledger, publish })
+
+      // ① spawn：台账落 running，事件带 running
+      bridge(harnessEvent({ kind: 'spawned', worker_id: 'w-swallow', task_status: 'running' }))
+      await flush()
+
+      // ② 化身自然结束：台账落 completed、harness 发 exited……
+      onDisk = 'completed'
+      const exited = harnessEvent({ kind: 'exited', worker_id: 'w-swallow', task_status: 'completed' })
+      // ……但在 bridge 真正去读台账之前，§5.3 透明接续已经把 task 拉回 running 并落了账。
+      // 修复前：bridge 现读台账只看得到 running，old===new，completed 被整条吞掉，一次都不发。
+      onDisk = 'running'
+      bridge(exited)
+      await flush()
+
+      // ③ 接续产出新化身
+      bridge(harnessEvent({ kind: 'resumed', worker_id: 'w-swallow', task_status: 'running' }))
+      await flush()
+
+      expect(publish.mock.calls.map(([, p]) => [p.old_status, p.new_status])).toEqual([
+        ['queued', 'running'],
+        ['running', 'completed'],
+        ['completed', 'running'],
+      ])
+      // 身份字段仍取自台账（它们在 worker 生命周期内不变，读晚了也读不出别的值）
+      expect(publish.mock.calls[1][1]).toMatchObject({ worker_id: 'w-swallow', task_id: 'task-swallow', dialog_object_id: DIALOG_OBJECT_ID })
+    })
+
+    it('⑥事件带 task_status 时，new_status 一律以事件为准，不再受台账现状影响', async () => {
+      const publish = vi.fn()
+      // 台账故意一直报 running（模拟读永远晚一步）
+      const { ledger } = makeLedgerStub([{ status: 'running' }])
+      const bridge = makeTaskStatusEventBridge({ ledger, publish })
+
+      bridge(harnessEvent({ kind: 'killed', worker_id: 'w-evt', task_status: 'cancelled' }))
+      await flush()
+
+      expect(publish.mock.calls.map(([, p]) => [p.old_status, p.new_status])).toEqual([['queued', 'cancelled']])
+    })
+
+    it('⑥向后兼容：事件没带 task_status（老事件日志 / 化身级事件点）时退回现读台账，不静默丢弃', async () => {
+      const publish = vi.fn()
+      const { ledger, calls } = makeLedgerStub([{ status: 'running' }, { status: 'completed' }])
+      const bridge = makeTaskStatusEventBridge({ ledger, publish })
+
+      // 两条都不带 task_status —— 必须仍能翻译出迁移（这正是修复前的行为，缺字段不得变成
+      // 一条新的静默丢事件路径）。
+      bridge(harnessEvent({ kind: 'state_changed', worker_id: 'w-legacy' }))
+      await flush(2)
+      bridge(harnessEvent({ kind: 'state_changed', worker_id: 'w-legacy' }))
+      await flush()
+
+      expect(publish.mock.calls.map(([, p]) => [p.old_status, p.new_status])).toEqual([
+        ['queued', 'running'],
+        ['running', 'completed'],
+      ])
+      expect(calls()).toBe(2) // 确实是靠现读台账兜底的
+    })
+
     it('worker 不在台账（如 query_failed:worker_not_found）→ 不发事件、不抛', async () => {
       const publish = vi.fn()
       const { ledger } = makeLedgerStub([undefined])
