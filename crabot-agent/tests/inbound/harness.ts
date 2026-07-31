@@ -115,7 +115,12 @@ export function makeAgentConfig(opts: {
   moduleId: string
   port: number
   attentionMinMs?: number
+  attentionMaxMs?: number
 }): UnifiedAgentConfig {
+  const attentionExtra = {
+    ...(opts.attentionMinMs !== undefined ? { group_attention_min_ms: opts.attentionMinMs } : {}),
+    ...(opts.attentionMaxMs !== undefined ? { group_attention_max_ms: opts.attentionMaxMs } : {}),
+  }
   return {
     module_id: opts.moduleId as ModuleId,
     module_type: 'agent',
@@ -129,9 +134,7 @@ export function makeAgentConfig(opts: {
       system_prompt: '你是测试用 Crabot',
       model_config: opts.configured ? CONFIGURED_MODELS : {},
     },
-    ...(opts.attentionMinMs !== undefined
-      ? { extra: { group_attention_min_ms: opts.attentionMinMs } }
-      : {}),
+    ...(Object.keys(attentionExtra).length > 0 ? { extra: attentionExtra } : {}),
   }
 }
 
