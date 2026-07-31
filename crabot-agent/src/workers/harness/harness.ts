@@ -767,6 +767,16 @@ export class WorkerHarness {
   }
 
   /**
+   * P5 Task 4 additive:harness 亲历事件流全量读——protocol-agent-v3 §10.2 worker trace 的
+   * **第一层**信息源(`events.jsonl`),供 §8.3 `get_worker_trace` 使用。事件流本来就只经
+   * `getEventLog` 这一个入口访问(带实例缓存),对外只补一个只读出口,不让调用方自己按
+   * `workersDir` 拼路径另建 `WorkerEventLog`——那会让"事件流文件在哪"出现第二处真相。
+   */
+  async readWorkerEvents(workerId: string): Promise<HarnessEvent[]> {
+    return this.getEventLog(workerId).readAll()
+  }
+
+  /**
    * 崩溃恢复对账(protocol-agent-v3 §12,替代 admin 的一刀切自愈)。agent 进程重启后调用
    * 一次:巡检台账里所有非终态 worker 的主线化身,凭 adapter.state() 判定它到底是"进程
    * 没了、化身也没了"(判死)还是"化身独立于 agent 进程,可能还活着"(如 tmux worker),

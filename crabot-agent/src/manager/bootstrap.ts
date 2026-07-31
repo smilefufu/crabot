@@ -221,18 +221,21 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     model: deps.managerModel,
     now: () => new Date(deps.now()),
     dialogObjectIdFor: deps.dialogObjectIdFor,
-    toolFace: (key, isSystemThread, onAsyncError) =>
+    toolFace: (key, isSystemThread, onAsyncError, scheduleIdentity) =>
       buildManagerToolFace({
         harness,
         workerContext: () => ({
           dialogObjectId: deps.dialogObjectIdFor(key),
           managerKey: key,
           reportTo: channelSessionFromManagerKey(key),
-          // 系统线程(未指定目标 session 的 scheduled 触发 / 查不到监护 session 的 worker
-          // 事件)派出去的 worker 记 'system';其余按人类消息触发记 'message'。
-          // 'scheduled'(有目标 session 的定时触发)由 P5 Task 4 的 trigger_schedule 路径
-          // 补,那时才有"本次唤醒是不是 schedule"这个信息。
-          triggerType: isSystemThread ? 'system' : 'message',
+          // 权限身份(§4.4"权限按 Schedule.creator_friend_id 解析(is_builtin 按 master
+          // 等价)"):内置 schedule 不以任何 friend 的名义执行,显式留空——空 creator 正是
+          // admin 侧既有的 master 等价规则(protocol-admin §"is_builtin=true 或
+          // creator_friend_id 为空 → master_private"),所以这里丢弃而不是改写成某个 id。
+          creatorFriendId: scheduleIdentity?.isBuiltin ? undefined : scheduleIdentity?.creatorFriendId,
+          // scheduled 触发(不论有无目标 session)记 'scheduled';系统线程的其余唤醒
+          // (查不到监护 session 的 worker 事件)记 'system';人类消息记 'message'。
+          triggerType: scheduleIdentity ? 'scheduled' : isSystemThread ? 'system' : 'message',
         }),
         messagingDeps: deps.messagingDeps,
         memoryServer: deps.memoryServer,

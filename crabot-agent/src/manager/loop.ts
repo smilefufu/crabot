@@ -59,7 +59,20 @@ import type { ChannelMessage } from '../types'
 export type WakeEvent =
   | { readonly kind: 'human_messages'; readonly messages: ReadonlyArray<ChannelMessage> }
   | { readonly kind: 'worker_event'; readonly event: HarnessEvent }
-  | { readonly kind: 'schedule'; readonly scheduleId: string; readonly title: string; readonly description: string }
+  | {
+      readonly kind: 'schedule'
+      readonly scheduleId: string
+      readonly title: string
+      readonly description: string
+      /**
+       * P5 Task 4 additive:本次调度触发的**权限身份**(protocol-agent-v3 §8.2
+       * `creator_friend_id` / `is_builtin`,§4.4"权限按 Schedule.creator_friend_id 解析")。
+       * 只在唤醒事件上随行,不进 manager 的对话上下文(`renderWakeEvent` 不渲染它):它的
+       * 用途是让本 episode 派出去的 worker 记对 `origin.creator_friend_id`,不是给 LLM 看的。
+       */
+      readonly creatorFriendId?: string
+      readonly isBuiltin?: boolean
+    }
   | { readonly kind: 'attention_flush'; readonly messages: ReadonlyArray<ChannelMessage> }
 
 export interface EpisodeResult {
@@ -93,8 +106,14 @@ export interface ManagerLoopDeps {
   readonly model: () => string
   readonly maxTurns?: number
   readonly contextWindowTokens?: number
-  /** 工具面提供者(thunk):每轮重算,由调用方决定要不要按最新状态重建。 */
-  readonly toolFace: () => ReadonlyArray<ToolDefinition>
+  /**
+   * 工具面提供者(thunk):每轮重算,由调用方决定要不要按最新状态重建。
+   *
+   * P5 Task 4 additive:入参是**本 episode 的唤醒事件**,让调用方能按"这次是被什么唤醒的"
+   * 装配工具面(当前唯一用途:scheduled 触发的权限身份 → `spawn_worker` 的
+   * `origin.creator_friend_id`)。可选参数,既有调用方 `() => [...]` 无需改动。
+   */
+  readonly toolFace: (wakeEvent?: WakeEvent) => ReadonlyArray<ToolDefinition>
   /** system prompt 里除动态台账/时间外的其余输入(档案、待处理通知),每轮重算。 */
   readonly promptInputs: () => { readonly dialogProfile?: string; readonly pendingNotes?: ReadonlyArray<string> }
   readonly harness: WorkerHarness
@@ -128,6 +147,14 @@ export class ManagerLoop {
    * 不记录——那时 mailbox 只是普通 pending 队列,靠下次 wakeUp 顶部的 drainPending 自然带走。
    */
   private currentEpisodeInjected: string[] | null = null
+  /**
+   * P5 Task 4 additive:本 episode 的唤醒事件,供 `deps.toolFace(wakeEvent)` 按"这次是被
+   * 什么唤醒的"装配工具面(见 `ManagerLoopDeps.toolFace`)。与 `currentEpisodeInjected`
+   * 同一套生命周期纪律(runEpisode 进入时置、finally 清),因此天然是**每 episode 精确**的
+   * ——同一 loop 的 episode 由 `wakeUp` 的 mutex 串行,不会有两个 episode 的唤醒事件交叠;
+   * 这正是不把它做成 registry 侧 `Map<ManagerKey, …>` 的原因(那样并发唤醒会串身份)。
+   */
+  private currentWakeEvent: WakeEvent | null = null
 
   constructor(deps: ManagerLoopDeps) {
     this.deps = deps
@@ -151,6 +178,7 @@ export class ManagerLoop {
     const carriedTexts = this.mailbox.drainPending().map(toText)
     const eventText = renderWakeEvent(event)
     this.currentEpisodeInjected = []
+    this.currentWakeEvent = event
 
     try {
       return await this.runEpisodeBody(episodeId, carriedTexts, eventText)
@@ -171,6 +199,7 @@ export class ManagerLoop {
       throw err
     } finally {
       this.currentEpisodeInjected = null
+      this.currentWakeEvent = null
     }
   }
 
@@ -355,7 +384,7 @@ export class ManagerLoop {
         },
       })
     }
-    const tools = (): ReadonlyArray<ToolDefinition> => this.deps.toolFace()
+    const tools = (): ReadonlyArray<ToolDefinition> => this.deps.toolFace(this.currentWakeEvent ?? undefined)
 
     const options: EngineOptions = {
       systemPrompt,

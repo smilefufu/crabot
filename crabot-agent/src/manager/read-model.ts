@@ -30,6 +30,7 @@
 
 import type { PaginationParams, PaginatedResult } from 'crabot-shared'
 import type { DialogObjectId, LedgerWorker, TaskStatus } from '../workers/harness/ledger-types.js'
+import type { NormalizedTraceEvent } from '../workers/types.js'
 
 /**
  * base-protocol §5.7 TimeRange。`crabot-shared` 目前没有导出它(只在协议文档和各 channel
@@ -63,6 +64,39 @@ export interface GetWorkerDetailParams {
 
 export interface GetWorkerDetailResult {
   worker: LedgerWorker
+}
+
+/**
+ * §8.3 read_worker_output_admin:按化身增量读终端输出。
+ *
+ * 实现是 harness 直读(`WorkerHarness.readWorkerOutput`),没有可抽出的纯逻辑,所以本文件
+ * 只放类型——让 §8.3 四组 Params/Result 集中在一处便于逐字核对协议(P5 Task 3 报告的交接项)。
+ * 注意协议这里的 `cursor` / `next_cursor` 是**字符串**,而 harness/adapter 侧是
+ * `OutputCursor { offset: number }`,两者的互转在 RPC 壳里(unified-agent.ts)。
+ */
+export interface ReadWorkerOutputAdminParams {
+  worker_id: string
+  seq: number
+  cursor?: string
+}
+
+export interface ReadWorkerOutputAdminResult {
+  chunk: string
+  next_cursor: string
+  eof: boolean
+}
+
+/** §8.3 get_worker_trace:结构化时间线(两层信息源见 §10.2) */
+export interface GetWorkerTraceParams {
+  worker_id: string
+  seq: number
+  cursor?: string
+}
+
+export interface GetWorkerTraceResult {
+  events: NormalizedTraceEvent[]
+  next_cursor?: string
+  unavailable_reason?: string
 }
 
 /**

@@ -68,6 +68,22 @@ export interface AsyncToolErrorInfo {
 
 export type OnAsyncError = (info: AsyncToolErrorInfo) => void
 
+/**
+ * scheduled 唤醒随行的**权限身份**(protocol-agent-v3 §8.2 的 `creator_friend_id` /
+ * `is_builtin`;§4.4"scheduled 任务约束……权限按 `Schedule.creator_friend_id` 解析
+ * (`is_builtin` 按 master 等价)")。
+ *
+ * **过渡形态,P7 收敛**:v2 的 admin 在自己那侧把 schedule 解析成 `resolved_permissions`
+ * 再下发;v3 改成 agent 侧按 `origin.creator_friend_id` 解析。P5 的 `trigger_schedule`
+ * 已按 v3 协议接收身份并一路透到 `SpawnWorkerParams.origin.creator_friend_id`,但 admin
+ * 调用点尚未切换(P5 Global Constraints:不激活生产链路),真正的"以此身份解析工具权限"
+ * 在 P7 cutover 时才接上。
+ */
+export interface ScheduleIdentity {
+  readonly creatorFriendId?: string
+  readonly isBuiltin?: boolean
+}
+
 export interface ManagerRegistryDeps {
   readonly store: ManagerSessionStore
   readonly policy: CompactionPolicy
@@ -98,8 +114,17 @@ export interface ManagerRegistryDeps {
    * 工具面工厂:调用方据 key/isSystemThread 装配 `buildManagerToolFace` 的完整依赖并返回
    * 工具面数组;`onAsyncError` 由本 registry 按 key 绑定好传入,调用方负责把它接进
    * `WorkerToolsDeps.onAsyncError`(见文件头说明)。
+   *
+   * P5 Task 4 additive:第四个参数是**本 episode 若由 scheduled 触发**时随行的权限身份
+   * (非 schedule 唤醒为 undefined),调用方据它填 `WorkerToolsContext.creatorFriendId` /
+   * `triggerType`。可选参数,既有三参调用点无需改动。
    */
-  readonly toolFace: (key: ManagerKey, isSystemThread: boolean, onAsyncError: OnAsyncError) => ReadonlyArray<ToolDefinition>
+  readonly toolFace: (
+    key: ManagerKey,
+    isSystemThread: boolean,
+    onAsyncError: OnAsyncError,
+    scheduleIdentity?: ScheduleIdentity
+  ) => ReadonlyArray<ToolDefinition>
   /** system prompt 动态段素材(档案/待处理通知),每轮重算,由调用方决定要不要按最新状态重建。 */
   readonly promptInputs: (key: ManagerKey) => { readonly dialogProfile?: string; readonly pendingNotes?: ReadonlyArray<string> }
 }
@@ -143,7 +168,9 @@ export class ManagerRegistry {
       model: this.deps.model,
       maxTurns: this.deps.maxTurns,
       contextWindowTokens: this.deps.contextWindowTokens,
-      toolFace: () => this.deps.toolFace(key, isSystemThread, onAsyncError),
+      // 唤醒事件由 ManagerLoop 按 episode 传入(见 ManagerLoopDeps.toolFace);schedule 之外
+      // 的唤醒不带身份,工具面照旧。
+      toolFace: (wakeEvent) => this.deps.toolFace(key, isSystemThread, onAsyncError, scheduleIdentityOf(wakeEvent)),
       promptInputs: () => this.deps.promptInputs(key),
       harness: this.deps.harness,
       now: this.deps.now,
@@ -177,17 +204,32 @@ export class ManagerRegistry {
     return this.runWake(key, { kind: 'worker_event', event })
   }
 
-  /** scheduled 触发(§4.4):有 target_session → 该 manager;无 → 系统线程 manager。 */
+  /**
+   * scheduled 触发(§4.4):有 target_session → 该 manager;无 → 系统线程 manager。
+   *
+   * P5 Task 4 additive:`creatorFriendId` / `isBuiltin`(§8.2 权限身份)随唤醒事件下传,
+   * 供本 episode 的工具面把它填进 `SpawnWorkerParams.origin.creator_friend_id`;两者都不传
+   * 时行为与之前逐字相同(既有调用点无需改动)。
+   */
   async routeSchedule(p: {
     scheduleId: string
     title: string
     description: string
     targetSession?: { channel_id: string; session_id: string }
+    creatorFriendId?: string
+    isBuiltin?: boolean
   }): Promise<EpisodeResult> {
     const key = p.targetSession
       ? (`${p.targetSession.channel_id}::${p.targetSession.session_id}` as ManagerKey)
       : SYSTEM_TASKS_MANAGER_KEY
-    return this.runWake(key, { kind: 'schedule', scheduleId: p.scheduleId, title: p.title, description: p.description })
+    return this.runWake(key, {
+      kind: 'schedule',
+      scheduleId: p.scheduleId,
+      title: p.title,
+      description: p.description,
+      creatorFriendId: p.creatorFriendId,
+      isBuiltin: p.isBuiltin,
+    })
   }
 
   /**
@@ -237,6 +279,12 @@ export class ManagerRegistry {
       else this.activeEpisodes.set(key, remaining)
     }
   }
+}
+
+/** 唤醒事件 → 随行的 scheduled 权限身份;非 schedule 唤醒没有身份(undefined)。 */
+function scheduleIdentityOf(wakeEvent: WakeEvent | undefined): ScheduleIdentity | undefined {
+  if (wakeEvent?.kind !== 'schedule') return undefined
+  return { creatorFriendId: wakeEvent.creatorFriendId, isBuiltin: wakeEvent.isBuiltin }
 }
 
 /** query_worker 异步失败 → 借用既有 `worker_event`/`query_failed` kind 包装成 WakeEvent(见文件头)。 */
