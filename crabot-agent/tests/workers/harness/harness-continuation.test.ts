@@ -1521,3 +1521,62 @@ describe('WorkerHarness — 三轮 review PoC 回归：handoff 目标是该 work
     expect(events.filter((e) => e.kind === 'handoff_started')).toHaveLength(0)
   })
 })
+
+/**
+ * P5 修复:`HarnessEvent.task_status` —— §5.3 接续路径上的两个 task 级迁移点
+ * (reviveIncarnation 的 `resumed`、handoffIncarnation 第 4 步的 `spawned`)。这两处是把
+ * **终态 task 拉回 running** 的唯一合法出边(§5.2 接续例外),也正是评审 PoC 里让"读晚一步"
+ * 吞掉终态 `completed` 的那次落账;事件自带状态之后,终态与这次复活各发各的,不再互相覆盖。
+ * 同一条路径上的纯记录事件(handoff_started / superseded)不动 task.status,一律不带。
+ */
+describe('HarnessEvent.task_status —— 透明接续的迁移点', () => {
+  it('revive:终态化身之上接续 → resumed 带 running(与台账落账值一致)', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    const fake = new FakeAdapter({ caps: { revive: true }, onStateChange: harness.handleStateChange })
+    adaptersMap.set('builtin', fake)
+
+    const worker = await harness.spawnWorker(spawnParams())
+    fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }, 'exited')
+    await waitUntil(async () => {
+      const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      return w.task.status === 'completed'
+    })
+    // 终态那一跳自己也带了状态(processStateChange 主线分支)
+    const exitedStateEvent = events.filter((e) => e.kind === 'state_changed').pop()!
+    expect(exitedStateEvent.task_status).toBe('completed')
+    events.length = 0
+
+    await harness.sendToWorker(worker.worker_id, '还有件事要办')
+
+    const resumed = events.filter((e) => e.kind === 'resumed')
+    expect(resumed).toHaveLength(1)
+    expect(resumed[0].task_status).toBe('running')
+    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(w.task.status).toBe('running')
+  })
+
+  it('handoff:交接产出新化身 → spawned 带 running;handoff_started / superseded 不带', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    const fake = new FakeAdapter({
+      caps: { revive: false },
+      onStateChange: harness.handleStateChange,
+      sendInputBehavior: (h) => {
+        throw new WorkerExitedError(h.worker_id, h.seq)
+      },
+    })
+    adaptersMap.set('builtin', fake)
+    adaptersMap.set('claude-code', new FakeAdapter({ implId: 'claude-code', onStateChange: harness.handleStateChange }))
+
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    await harness.sendToWorker(worker.worker_id, '接着把剩下的做完')
+
+    const spawned = events.filter((e) => e.kind === 'spawned')
+    expect(spawned).toHaveLength(1)
+    expect(spawned[0].task_status).toBe('running')
+
+    expect(events.filter((e) => e.kind === 'handoff_started')[0].task_status).toBeUndefined()
+    expect(events.filter((e) => e.kind === 'superseded')[0].task_status).toBeUndefined()
+  })
+})

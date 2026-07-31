@@ -270,7 +270,7 @@ export class WorkerHarness {
         spawnedHandle = await adapter.spawn(spec)
       } catch (err) {
         const now = this.deps.now()
-        await this.deps.ledger.upsertWorker(p.dialogObjectId, workerId, (prev) => {
+        const failed = await this.deps.ledger.upsertWorker(p.dialogObjectId, workerId, (prev) => {
           if (!prev) return undefined
           // VALID_TRANSITIONS 里 queued 没有直达 failed 的边(只能到 running/cancelled)。
           // spawn 尝试确实发生过(我们已经调用了 provision/spawn),用 queued→running→failed
@@ -287,10 +287,17 @@ export class WorkerHarness {
           })
           return { ...prev, task: nextTask, incarnations, updated_at: now }
         })
-        await this.appendEvent(workerId, 1, 'exited', {
-          reason: 'spawn_failed',
-          message: err instanceof Error ? err.message : String(err),
-        })
+        // 台账上是 queued→running→failed 两跳,但这里只落一条事件,事件带的是**落账后的
+        // 终点** failed;中间的 running 没有对应事件,订阅方看到的仍是 queued→failed(不是
+        // 状态机合法边)。这属于"两次迁移之间没有事件 → 中间态折叠",不是订阅方读晚了造成
+        // 的——后者已由 task_status 修掉。见 manager/events.ts 文件头的边界说明。
+        await this.appendEvent(
+          workerId,
+          1,
+          'exited',
+          { reason: 'spawn_failed', message: err instanceof Error ? err.message : String(err) },
+          failed?.task.status
+        )
         throw err
       }
 
@@ -304,7 +311,7 @@ export class WorkerHarness {
         const incarnations = patchIncarnationBySeq(prev.incarnations, impl, 1, { session_ref: spawnedHandle.session_ref })
         return { ...prev, task: nextTask, incarnations, updated_at: now }
       })
-      await this.appendEvent(workerId, 1, 'spawned', { impl })
+      await this.appendEvent(workerId, 1, 'spawned', { impl }, spawned?.task.status)
       return spawned as LedgerWorker
     })
   }
@@ -565,7 +572,7 @@ export class WorkerHarness {
     const newHandle = await adapter.resume(prevRef, text)
 
     const now = this.deps.now()
-    await this.deps.ledger.upsertWorker(dialogObjectId, worker.worker_id, (prev) => {
+    const revived = await this.deps.ledger.upsertWorker(dialogObjectId, worker.worker_id, (prev) => {
       if (!prev) return undefined
       const newIncarnation: Incarnation = {
         seq: newHandle.seq,
@@ -595,7 +602,7 @@ export class WorkerHarness {
       const nextTask = reopenTaskForContinuation(prev.task, now)
       return { ...prev, task: nextTask, incarnations: [...incarnations, newIncarnation], updated_at: now }
     })
-    await this.appendEvent(worker.worker_id, newHandle.seq, 'resumed', { from_seq: mainline.seq })
+    await this.appendEvent(worker.worker_id, newHandle.seq, 'resumed', { from_seq: mainline.seq }, revived?.task.status)
   }
 
   /**
@@ -711,7 +718,7 @@ export class WorkerHarness {
 
     // 4. 化身链 +1,task 重新回到 running(见 reopenTaskForContinuation 注释)。
     const now = this.deps.now()
-    await this.deps.ledger.upsertWorker(dialogObjectId, worker.worker_id, (prev) => {
+    const handedOff = await this.deps.ledger.upsertWorker(dialogObjectId, worker.worker_id, (prev) => {
       if (!prev) return undefined
       const newIncarnation: Incarnation = {
         seq: newHandle.seq,
@@ -726,7 +733,13 @@ export class WorkerHarness {
     })
     // 与 reviveIncarnation 收尾时发 'resumed' 事件对称——交接产出的新化身同样是一次"开工",
     // 缺了这个事件会让事件流看不到 handoff 之后新主线是何时、以何种 impl 建起来的。
-    await this.appendEvent(worker.worker_id, newHandle.seq, 'spawned', { impl: targetImpl, from_seq: source.seq })
+    await this.appendEvent(
+      worker.worker_id,
+      newHandle.seq,
+      'spawned',
+      { impl: targetImpl, from_seq: source.seq },
+      handedOff?.task.status
+    )
   }
 
   /**
@@ -764,6 +777,16 @@ export class WorkerHarness {
 
   async listWorkers(dialogObjectId: DialogObjectId): Promise<LedgerWorker[]> {
     return this.deps.ledger.listWorkers(dialogObjectId)
+  }
+
+  /**
+   * P5 Task 4 additive:harness 亲历事件流全量读——protocol-agent-v3 §10.2 worker trace 的
+   * **第一层**信息源(`events.jsonl`),供 §8.3 `get_worker_trace` 使用。事件流本来就只经
+   * `getEventLog` 这一个入口访问(带实例缓存),对外只补一个只读出口,不让调用方自己按
+   * `workersDir` 拼路径另建 `WorkerEventLog`——那会让"事件流文件在哪"出现第二处真相。
+   */
+  async readWorkerEvents(workerId: string): Promise<HarnessEvent[]> {
+    return this.getEventLog(workerId).readAll()
   }
 
   /**
@@ -898,7 +921,7 @@ export class WorkerHarness {
     detailReason: string
   ): Promise<void> {
     const now = this.deps.now()
-    await this.deps.ledger.upsertWorker(dialogObjectId, worker.worker_id, (prev) => {
+    const crashed = await this.deps.ledger.upsertWorker(dialogObjectId, worker.worker_id, (prev) => {
       if (!prev) return undefined
       const nextTask = transitionTaskTo(prev.task, 'failed', { error: detailReason, now })
       const incarnations = patchIncarnationBySeq(prev.incarnations, mainline.impl, mainline.seq, {
@@ -908,7 +931,13 @@ export class WorkerHarness {
       })
       return { ...prev, task: nextTask, incarnations, updated_at: now }
     })
-    await this.appendEvent(worker.worker_id, mainline.seq, 'exited', { reason: 'crashed', message: detailReason })
+    await this.appendEvent(
+      worker.worker_id,
+      mainline.seq,
+      'exited',
+      { reason: 'crashed', message: detailReason },
+      crashed?.task.status
+    )
   }
 
   /**
@@ -933,7 +962,7 @@ export class WorkerHarness {
     if (!stateChanged && !statusChanged) return
 
     const now = this.deps.now()
-    await this.deps.ledger.upsertWorker(dialogObjectId, worker.worker_id, (prev) => {
+    const realigned = await this.deps.ledger.upsertWorker(dialogObjectId, worker.worker_id, (prev) => {
       if (!prev) return undefined
       const nextTask = statusChanged ? transitionTaskTo(prev.task, nextStatus, { now }) : prev.task
       const incarnations = stateChanged
@@ -941,7 +970,15 @@ export class WorkerHarness {
         : prev.incarnations
       return { ...prev, task: nextTask, incarnations, updated_at: now }
     })
-    await this.appendEvent(worker.worker_id, mainline.seq, 'state_changed', { to: observed, source: 'reconcile' })
+    // 这条事件可能只改了化身 state 而没动 task.status(stateChanged 单独成立);带上落账后的
+    // 状态是无害的——订阅方拿它与上次已知状态比对,相同即静默。
+    await this.appendEvent(
+      worker.worker_id,
+      mainline.seq,
+      'state_changed',
+      { to: observed, source: 'reconcile' },
+      realigned?.task.status
+    )
   }
 
   async killWorker(workerId: string, reason?: string): Promise<void> {
@@ -968,7 +1005,7 @@ export class WorkerHarness {
       }
 
       const now = this.deps.now()
-      await this.deps.ledger.upsertWorker(dialogObjectId, workerId, (prev) => {
+      const cancelled = await this.deps.ledger.upsertWorker(dialogObjectId, workerId, (prev) => {
         if (!prev) return undefined
         const nextTask = applyStatusTransition(prev.task, 'cancelled', { now })
         // 按 (impl, seq) 精确定位主线化身条目,不假设它是数组最后一个(fork 之后数组末尾是
@@ -980,7 +1017,7 @@ export class WorkerHarness {
         })
         return { ...prev, task: nextTask, incarnations, updated_at: now }
       })
-      await this.appendEvent(workerId, incarnation.seq, 'killed', reason ? { reason } : undefined)
+      await this.appendEvent(workerId, incarnation.seq, 'killed', reason ? { reason } : undefined, cancelled?.task.status)
 
       // 清空信箱残留:此刻队列里的条目是 kill 之前已入队、deliver 还没轮到的消息(kill 之后
       // 的 sendToWorker 会命中上面已落定的 cancelled 直接拒绝,不会再有新条目挤进来——入队
@@ -1222,7 +1259,7 @@ export class WorkerHarness {
       const waitingInput = state === 'idle' ? true : undefined
       const nextStatus: TaskStatus = taskStatusFromIncarnation(state, endReason, waitingInput)
 
-      await this.deps.ledger.upsertWorker(dialogObjectId, h.worker_id, (prev) => {
+      const committed = await this.deps.ledger.upsertWorker(dialogObjectId, h.worker_id, (prev) => {
         if (!prev) return undefined
         // 同状态重复回调(如 adapter 偶发对同一次转变重复通知)不是合法状态机边(VALID_TRANSITIONS
         // 没有自环),会被 applyStatusTransition 当非法转换抛错——那样 upsertWorker 直接
@@ -1241,7 +1278,10 @@ export class WorkerHarness {
         )
         return { ...prev, task: nextTask, incarnations, updated_at: now }
       })
-      await this.appendEvent(h.worker_id, h.seq, 'state_changed', { to: state })
+      // 主线分支是 task 状态机的主要推进点——事件必须自带落账后的状态,否则订阅方现读台账
+      // 时若已经有下一次落账(如 §5.3 透明接续把终态拉回 running),这次迁移(含 completed
+      // 这类终态)会被整条吞掉。见 worker-events.ts `HarnessEvent.task_status`。
+      await this.appendEvent(h.worker_id, h.seq, 'state_changed', { to: state }, committed?.task.status)
     })
   }
 
@@ -1272,14 +1312,33 @@ export class WorkerHarness {
     return log
   }
 
+  /**
+   * `taskStatus`:只有**真正伴随一次 task 状态迁移**的调用点才传,值取自那次
+   * `ledger.upsertWorker` 的返回值(`committed?.task.status`)——即真正写进台账的那份
+   * worker,不是 harness 另算一遍,保证事件里的值与盘上的值同源。见 worker-events.ts
+   * `HarnessEvent.task_status` 的字段注释(为什么必须由事件自带,以及缺席时的语义)。
+   *
+   * 本文件里带这个参数的调用点(8 处,均为 task 级迁移):spawnWorker 的失败/成功收尾、
+   * reviveIncarnation 的 `resumed`、handoffIncarnation 第 4 步的 `spawned`、markCrashed 的
+   * `exited`、realignAliveIncarnation 的 `state_changed`、killWorker 的 `killed`、
+   * processStateChange 主线分支的 `state_changed`。其余调用点(化身级事件:input_sent /
+   * fork 分支 state_changed / query_failed / dead-letter / superseded / handoff_started …)
+   * 都不动 task.status,一律不传。
+   *
+   * upsert 的 mutator 返回 undefined(worker 已不在台账)时 `committed` 是 undefined,这里
+   * 原样落成"不带该字段",订阅方退回现读台账兜底,不构造假状态。
+   */
   private async appendEvent(
     workerId: string,
     seq: number,
     kind: HarnessEventKind,
-    detail?: Record<string, unknown>
+    detail?: Record<string, unknown>,
+    taskStatus?: TaskStatus
   ): Promise<void> {
     const ts = this.deps.now()
-    const event: HarnessEvent = detail !== undefined ? { ts, kind, worker_id: workerId, seq, detail } : { ts, kind, worker_id: workerId, seq }
+    const base: HarnessEvent = { ts, kind, worker_id: workerId, seq }
+    const withDetail: HarnessEvent = detail !== undefined ? { ...base, detail } : base
+    const event: HarnessEvent = taskStatus !== undefined ? { ...withDetail, task_status: taskStatus } : withDetail
     await this.getEventLog(workerId).append(event)
     this.deps.onEvent?.(event)
   }
@@ -1293,8 +1352,13 @@ export class WorkerHarness {
  * sendToWorker/killWorker 都 target 到 fork 的 seq,而不是主线 seq)。
  *
  * 前提:worker.incarnations 非空(每个已注册的 worker 至少有 spawn 落下的 seq=1 主线化身)。
+ *
+ * P5 review 修复 additive:导出给 `get_worker_trace` 的 handler 复用——§8.3 两个按化身读的
+ * 端点(output/trace)在调用方没给 seq 时必须落在**同一个**化身上,而 output 那条路
+ * (`readWorkerOutput`)本来就是用本函数取缺省。trace 侧若自己再写一遍"排除 forked_from
+ * 取最后一条",就会让"主线是哪个化身"出现第二处真相。
  */
-function mainlineIncarnation(worker: LedgerWorker): Incarnation {
+export function mainlineIncarnation(worker: LedgerWorker): Incarnation {
   const mainline = worker.incarnations.filter((inc) => inc.forked_from === undefined)
   return mainline[mainline.length - 1]
 }
@@ -1356,8 +1420,12 @@ function findIncarnation(worker: LedgerWorker, impl: WorkerImplId, seq: number):
  * adapter 实例),不会产生跨 impl 撞号的歧义——唯一的例外是该 worker 曾经历跨实现切换
  * 且新旧 adapter 实例恰好在 seq 计数上撞号(protocol-agent-v3 §6.1 已知限制),这种边缘
  * 情况下"取最后一条"与本文件其它同类查找函数保持一致的降级行为,不单独处理。
+ *
+ * P5 review 修复(第二轮)additive:导出给 `get_worker_trace` 的 handler 复用——两个按化身读的
+ * 端点(output/trace)对"显式给的 seq 存不存在"必须用同一份判定,否则 trace 侧自己写一遍
+ * 就会与 readWorkerOutput 的"取最后一条匹配"原则漂移。纯可见性变更,零行为改动。
  */
-function findIncarnationBySeq(worker: LedgerWorker, seq: number): Incarnation | undefined {
+export function findIncarnationBySeq(worker: LedgerWorker, seq: number): Incarnation | undefined {
   let lastMatch: Incarnation | undefined
   for (const inc of worker.incarnations) {
     if (inc.seq === seq) lastMatch = inc

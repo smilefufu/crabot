@@ -828,6 +828,122 @@ describe('WorkerHarness.handleStateChange — 同状态重复回调', () => {
   })
 })
 
+/**
+ * P5 修复:`HarnessEvent.task_status` —— 事件自带"这次迁移落账后的 task 状态"。
+ *
+ * 分类不变量(见 harness.ts `appendEvent` 注释):**只有真正发生 task 状态迁移的事件点**带这
+ * 个字段,化身级/纯记录事件一律不带。下面按分类逐点钉住;剩余的迁移点(resumed / handoff 的
+ * spawned / markCrashed 的 exited / reconcile 的 state_changed)在 harness-continuation /
+ * harness-recovery 两个文件里由各自的夹具覆盖。
+ */
+describe('HarnessEvent.task_status —— 事件自带落账后的 task 状态', () => {
+  it('迁移点:spawn 成功 → spawned 带 running(与台账落账值一致)', async () => {
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+
+    const spawned = events.filter((e) => e.kind === 'spawned')
+    expect(spawned).toHaveLength(1)
+    expect(spawned[0].task_status).toBe('running')
+    expect(spawned[0].task_status).toBe(worker.task.status)
+  })
+
+  it('迁移点:spawn 失败 → exited 带 failed(端点正确;中间的 running 无事件,仍折叠)', async () => {
+    const { harness } = await makeHarness({ spawnShouldFail: new Error('spawn 炸了') })
+    await expect(harness.spawnWorker(spawnParams())).rejects.toThrow('spawn 炸了')
+
+    const exited = events.filter((e) => e.kind === 'exited')
+    expect(exited).toHaveLength(1)
+    expect(exited[0].task_status).toBe('failed')
+  })
+
+  it('迁移点:主线状态回调 → state_changed 带落账后的 waiting_input / completed', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    const handle = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as WorkerImplId, session_ref: `ref-${worker.worker_id}#1` }
+    events.length = 0
+
+    fake.emitStateChange(handle, 'idle')
+    await waitUntil(async () => events.some((e) => e.kind === 'state_changed'))
+    expect(events.filter((e) => e.kind === 'state_changed')[0].task_status).toBe('waiting_input')
+
+    fake.emitStateChange(handle, 'exited')
+    await waitUntil(async () => events.filter((e) => e.kind === 'state_changed').length >= 2)
+    expect(events.filter((e) => e.kind === 'state_changed')[1].task_status).toBe('completed')
+  })
+
+  it('迁移点:killWorker → killed 带 cancelled', async () => {
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    await harness.killWorker(worker.worker_id, '用户要求终止')
+
+    const killed = events.filter((e) => e.kind === 'killed')
+    expect(killed).toHaveLength(1)
+    expect(killed[0].task_status).toBe('cancelled')
+  })
+
+  it('非迁移点:input_sent 不带 task_status(投递不动 task 状态)', async () => {
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    await harness.sendToWorker(worker.worker_id, '继续干活')
+
+    const inputSent = events.filter((e) => e.kind === 'input_sent')
+    expect(inputSent).toHaveLength(1)
+    expect(inputSent[0].task_status).toBeUndefined()
+  })
+
+  it('非迁移点:kill 后 drain 出的 dead_letter 不带 task_status(kill 的迁移由 killed 事件承载)', async () => {
+    const { harness } = await makeHarness({
+      // 让第一条卡在投递里,第二条就会留在队列上等 killWorker 去 drain
+      sendInputBehavior: () => new Promise((resolve) => setTimeout(resolve, 30)),
+    })
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    const inFlight = harness.sendToWorker(worker.worker_id, '第一条')
+    const queued = harness.sendToWorker(worker.worker_id, '第二条').catch(() => undefined)
+    await harness.killWorker(worker.worker_id)
+    await inFlight.catch(() => undefined)
+    await queued
+
+    const deadLetters = events.filter((e) => e.kind === 'state_changed' && e.detail?.kind === 'dead_letter')
+    expect(deadLetters.length).toBeGreaterThan(0)
+    for (const e of deadLetters) expect(e.task_status).toBeUndefined()
+    // 同一次 kill 落的 killed 事件才是那次迁移的载体
+    expect(events.filter((e) => e.kind === 'killed')[0].task_status).toBe('cancelled')
+  })
+
+  it('非迁移点:query_failed 不带 task_status', async () => {
+    const { harness } = await makeHarness({ caps: { fork: false } })
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    await expect(harness.queryWorker(worker.worker_id, '侧问')).rejects.toThrow(CapabilityNotSupportedError)
+
+    const queryFailed = events.filter((e) => e.kind === 'query_failed')
+    expect(queryFailed).toHaveLength(1)
+    expect(queryFailed[0].task_status).toBeUndefined()
+  })
+
+  it('非迁移点:fork 化身的落账事件不带 task_status(§5.3 fork 不影响主线)', async () => {
+    const { harness } = await makeHarness({ caps: { fork: true } })
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    await harness.queryWorker(worker.worker_id, '侧问')
+
+    const forkEvents = events.filter((e) => e.seq === 2)
+    expect(forkEvents.length).toBeGreaterThan(0)
+    for (const e of forkEvents) expect(e.task_status).toBeUndefined()
+    // 台账确实没动主线 task.status——事件不带这个字段与台账事实一致
+    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(w.task.status).toBe('running')
+  })
+})
+
 async function waitUntil(cond: () => Promise<boolean>, timeoutMs = 2000, intervalMs = 10): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {

@@ -23,6 +23,8 @@ import type {
   ToolAccessConfig,
   TaskId,
   FriendId,
+  ScheduleId,
+  SessionId,
   Friend,
   LLMRoleRequirement,
   GetConfigResult,
@@ -54,7 +56,7 @@ import { McpConnector } from './agent/mcp-connector.js'
 import { createCrabMessagingServer, type PathMapping, type TaskContext } from './mcp/crab-messaging.js'
 import { toImageConnInfo, type ImageConnInfo } from './mcp/crab-image.js'
 import { TraceStore } from './core/trace-store.js'
-import { getAgentTraceDir, getAgentLogsDir, getWorkspaceDir } from './core/data-paths.js'
+import { getAgentTraceDir, getAgentLogsDir, getWorkspaceDir, getDataRootDir } from './core/data-paths.js'
 import { PromptManager } from './prompt-manager.js'
 import { createLSPManager, type LSPManager } from './lsp/lsp-manager.js'
 import type { BgEntityRecord, BgEntityStatus, BgEntityType } from './engine/bg-entities/types.js'
@@ -63,6 +65,26 @@ import { isResumable, redactCheckpoint } from './core/resume-checkpoint.js'
 import { AGENT_VERSION } from './constants.js'
 import { ContextManager, DEFAULT_COMPACT_THRESHOLD } from './engine/context-manager.js'
 import { DEFAULT_MAX_CONTEXT_TOKENS } from './engine/query-loop.js'
+import { buildManagerStack, reconcileManagerStack, type ManagerStack } from './manager/bootstrap.js'
+import { makeAgentEventPublisher } from './manager/events.js'
+import { resolveManagerModelConfig } from './manager/model-slot.js'
+import { createCrabMemoryServer } from './mcp/crab-memory.js'
+import { dialogObjectIdForGroup, type DialogObjectId, type ManagerKey } from './workers/harness/ledger-types.js'
+import {
+  filterAndPageWorkers,
+  buildWorkerDetail,
+  type ListWorkersAdminParams,
+  type ListWorkersAdminResult,
+  type GetWorkerDetailParams,
+  type GetWorkerDetailResult,
+  type ReadWorkerOutputAdminParams,
+  type ReadWorkerOutputAdminResult,
+  type GetWorkerTraceParams,
+  type GetWorkerTraceResult,
+} from './manager/read-model.js'
+import type { NormalizedTraceEvent } from './workers/types.js'
+import type { HarnessEvent } from './workers/harness/worker-events.js'
+import { findIncarnationBySeq, mainlineIncarnation } from './workers/harness/harness.js'
 
 const BARRIER_TIMEOUT_MS = 8_000
 
@@ -128,6 +150,68 @@ export function resolveTimeoutSeconds(value: number | undefined): number {
 export function resolveOverdueReminder(value: boolean | undefined): boolean {
   return value ?? true
 }
+
+/**
+ * protocol-agent-v3 §8.2 trigger_schedule —— 调度触发（替代 create_task_from_schedule）。
+ * 字段与协议逐字一致；`resolved_permissions` 是**唯一的额外字段**，见下方注释。
+ */
+export interface TriggerScheduleParams {
+  schedule_id: ScheduleId
+  title: string
+  description: string
+  target_session?: { channel_id: ModuleId; session_id: SessionId }
+  creator_friend_id?: FriendId
+  is_builtin?: boolean
+  /**
+   * 过渡期兼容字段（**不在 §8.2 里**，P7 cutover 后删）：v2 的 admin 在自己那侧把 schedule
+   * 的权限解析成 `resolved_permissions` 再下发（见 handleCreateTaskFromSchedule / protocol-admin
+   * §"is_builtin=true 或 creator_friend_id 为空 → master_private"）。v3 改为 agent 侧按
+   * `origin.creator_friend_id` 解析，因此本 handler **不消费**它——声明在这里只是为了让过渡期
+   * 里仍在下发该字段的调用方不至于类型不匹配，避免 admin 侧被迫与 agent 同步切换。
+   */
+  resolved_permissions?: ResolvedPermissions
+}
+
+/** §8.2：同步受理即返回（是否派 worker、如何执行由被唤醒的 manager 决定）。 */
+export interface TriggerScheduleResult {
+  accepted: true
+}
+
+/**
+ * §8.3 的 `cursor` / `next_cursor` 是字符串（REST 友好的不透明游标），harness/adapter 侧是
+ * `{ offset: number }`。这里做两侧互转：脏值 / 缺省一律从头读（读端点不因参数脏就报错）。
+ */
+function parseOffsetCursor(cursor: string | undefined): number {
+  if (cursor === undefined) return 0
+  const parsed = Number(cursor)
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 0
+}
+
+/** trace summary 的截断长度（§10.2：summary 是"截断摘要"，原始结构留在 detail 里）。 */
+const TRACE_SUMMARY_MAX_CHARS = 200
+
+/**
+ * harness 亲历事件（§10.2 第一层）→ `NormalizedTraceEvent`。
+ * 生命周期事件没有会话角色，故一律 `kind: 'lifecycle'` 且不填 `role`；`detail` 原样透传。
+ */
+function normalizeHarnessEvent(event: HarnessEvent): NormalizedTraceEvent {
+  const detailText = event.detail === undefined ? '' : ` ${JSON.stringify(event.detail)}`
+  const summary = `${event.kind}${detailText}`
+  return {
+    ts: event.ts,
+    kind: 'lifecycle',
+    summary: summary.length > TRACE_SUMMARY_MAX_CHARS ? `${summary.slice(0, TRACE_SUMMARY_MAX_CHARS)}…` : summary,
+    detail: event.detail,
+  }
+}
+
+/**
+ * §8.3 `get_worker_trace` 的第二层（adapter `readTrace()` 懒解析，§10.2）在本阶段未接线，
+ * 用协议规定的 `unavailable_reason` 明说，而不是静默只给第一层。
+ */
+const WORKER_TRACE_LAYER2_UNAVAILABLE =
+  '实现原生 trace（adapter readTrace 懒解析，protocol-agent-v3 §10.2 第二层）尚未接入本端点，' +
+  '当前仅返回 harness 亲历的生命周期事件（第一层）'
 
 export class UnifiedAgent extends ModuleBase {
   // 编排层组件
@@ -197,6 +281,14 @@ export class UnifiedAgent extends ModuleBase {
    * 用于 dispatcher / worker prompt 区分多 bot 群里"哪个 @ 是我"。
    */
   private crabSelfHandles: Map<ModuleId, string> = new Map()
+
+  /**
+   * Manager/Worker 栈（protocol-agent-v3 §4-§7）。构造函数里由 `initializeManagerStack()`
+   * 装配（P5 Task 6），启动对账在 `onStart()` 里异步跑。
+   * 仍是可选字段：既有测试用 `Object.create(prototype)` 造壳、只塞 handler 用到的字段，
+   * 未装配时读端点 fail-fast 报错，不返回空结果——空结果会被 admin 误读成"没有 worker"。
+   */
+  private managerStack?: ManagerStack
 
   // Trace 存储
   private traceStore: TraceStore
@@ -301,6 +393,9 @@ export class UnifiedAgent extends ModuleBase {
       this.initializeAgentLayer(this.agentConfig)
     }
 
+    // 装配 Manager/Worker 栈（见方法注释：为什么在构造函数里、为什么不依赖 agentConfig）
+    this.initializeManagerStack()
+
     // 注册 RPC 方法
     this.registerMethods()
   }
@@ -369,6 +464,96 @@ export class UnifiedAgent extends ModuleBase {
         )
       }
     }
+  }
+
+  /**
+   * 装配 Manager/Worker 栈（protocol-agent-v3 §4-§7，P5 Task 6）。
+   *
+   * **为什么在构造函数里而不是 `onStart()`**：`buildManagerStack` 是 O(1) 的纯构造——不探测
+   * 子进程、不扫盘、不建目录（bootstrap.ts 文件头的第一条硬边界，有专门用例钉住）；而
+   * §8.2/§8.3 的五个 RPC 在 `registerMethods()` 里无条件注册，方法一旦可被调用，取件口就必须
+   * 已经就绪，否则 admin 的只读 REST 会在"进程已起、onStart 未跑完"这段窗口里返回 500。
+   *
+   * **为什么不挂在 `agentConfig` 的有无上**：LLM 只在 manager episode 真的要跑时才解析（下面
+   * 两个 thunk，§11 的 `manager` slot → 回退 `powerful`）。现网此刻并没有配 `manager` slot，
+   * 把解析放在装配期会让 agent 直接起不来；放在 thunk 里则最坏只是某次 `trigger_schedule`
+   * 的路由在 episode 内抛错，被 handler 的 `.catch()` 记成一行日志，而**读模型四件套照常可用**
+   * （它们只读台账，与 LLM 无关）。thunk 同时顺带满足 §11 的热更语义：manager 的 model 于
+   * 下一个 episode 生效。
+   *
+   * **本阶段刻意不提供 `builtinSpawnDefaults`**：它要的是 builtin worker 的完整 LLM + 工具面
+   * 注入，而 `spawnWorker` 目前压根不读它（只有 `handoffIncarnation` 消费），补上去也补不掉
+   * "manager 走缺省 `spawn_worker` 必挂"这个缺口——那是 P7 cutover 前必须修的一项（见
+   * `.superpowers/sdd/progress.md` Task 1 条目）。这里给一个半成品反而会掩盖它。
+   */
+  private initializeManagerStack(): void {
+    this.managerStack = buildManagerStack({
+      dataRoot: getDataRootDir(),
+      now: () => new Date().toISOString(),
+      // §11：manager slot → 回退 powerful。两个 thunk 每个 episode 各解析一次，
+      // 未配置时抛出的错误信息由 model-slot.ts 给出（明确指出缺哪两个 slot）。
+      managerAdapter: () => adapterFromSdkEnv(this.buildSdkEnv(resolveManagerModelConfig(this.agentConfig?.model_config))),
+      managerModel: () => resolveManagerModelConfig(this.agentConfig?.model_config).model_id,
+      // crab-messaging：与 `createMcpConfigs` 同款依赖，但不传 `getTaskContext`——manager 不是
+      // task，且 tool-face 已把 `send_message` 的 intent 去掉，ask_human 路径对 manager 不存在。
+      messagingDeps: {
+        rpcClient: this.rpcClient,
+        moduleId: this.config.moduleId,
+        getAdminPort: () => this.getAdminPort(),
+        resolveChannelPort: (channelId) => this.getChannelPort(channelId),
+      },
+      // crab-memory：manager 没有 task 上下文，visibility/scopes 取 agent-handler 在缺配置时
+      // 用的同一组缺省值（'public' / []），sourceType 记 'system'（不是某次对话的产物）。
+      // manager 的记忆权限档位目前没有解析入口，P6/P7 接 §4.3 权限时再收敛。
+      memoryServer: createCrabMemoryServer(
+        {
+          rpcClient: this.rpcClient,
+          moduleId: this.config.moduleId,
+          getMemoryPort: () => this.getMemoryPort(),
+        },
+        { visibility: 'public', scopes: [], sourceType: 'system', isMasterPrivate: false },
+      ),
+      callAdmin: async <P, R>(method: string, params: P): Promise<R> =>
+        this.rpcClient.call<P, R>(await this.getAdminPort(), method, params, this.config.moduleId),
+      dialogObjectIdFor: (key) => this.dialogObjectIdForManagerKey(key),
+      // 对外事件出口（§9.2 `agent.task_status_changed`）：真实 rpcClient 注入。
+      // 翻译与去重在 manager/events.ts，这里只负责把口子接上。
+      publishEvent: makeAgentEventPublisher({
+        rpcClient: this.rpcClient,
+        moduleId: this.config.moduleId,
+        now: () => new Date().toISOString(),
+      }),
+    })
+  }
+
+  /**
+   * `ManagerKey`（`channel_id::session_id`）→ 台账聚合键 `DialogObjectId`（§3）。
+   *
+   * ⚠️ **P7 cutover 前必须修**。本阶段一律派生成 `group:<channel_id>:<session_id>`，
+   * 有**两处**归档错误：
+   *
+   * 1. **私聊**：协议要求聚合成 `friend:<friend_id>`（同一 friend 跨 channel 共享一份台账），
+   *    但那需要 admin 的 friend 解析，而 `ManagerRegistryDeps.dialogObjectIdFor` 是**同步**签名，
+   *    这里没有任何可同步查到 session 类型/friend 的入口——agent 侧唯一知道"这个 session 是
+   *    私聊且对端是谁"的地方是入站消息链路，而 P5 明令该链路零改动。
+   * 2. **系统任务线程**：§4.4 要求未配置 `target_session` 的 scheduled 触发**台账归 master
+   *    对话对象**（`friend:<master_id>`），但 `SYSTEM_TASKS_MANAGER_KEY`（`admin-web::system-tasks`）
+   *    在这里会派生成 `group:admin-web:system-tasks`。后果不只是归档键难看：master 在私聊里
+   *    问进度时，其 manager 按 `friend:<master_id>` 查台账**看不到**系统线程派出的 worker，
+   *    §4.4 "人类在哪个 session 回话、该 session 的 manager 凭共享台账接办"就断了。
+   *
+   * 现阶段无害：P5 没有任何生产调用方经这套栈 spawn worker（admin 的 scheduler 调用点未切换），
+   * 台账上不会出现被归错档的条目。
+   *
+   * 切换调用点之前必须先解决。**只有"把签名改成异步"这一条路能同时覆盖两种情况**——
+   * "在入站链路上维护 `ManagerKey → DialogObjectId` 缓存"对系统线程**天然无效**：它根本
+   * 没有入站消息，缓存永远不会被填充。
+   */
+  private dialogObjectIdForManagerKey(key: ManagerKey): DialogObjectId {
+    const sep = key.indexOf('::')
+    return sep < 0
+      ? dialogObjectIdForGroup(key, '')
+      : dialogObjectIdForGroup(key.slice(0, sep), key.slice(sep + 2))
   }
 
   /**
@@ -492,6 +677,15 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('list_bg_entities', this.handleListBgEntities.bind(this))
     this.registerMethod('kill_bg_entity', this.handleKillBgEntity.bind(this))
     this.registerMethod('get_bg_entity_log', this.handleGetBgEntityLog.bind(this))
+
+    // Manager/Worker（v3）接口：§8.2 调度触发 + §8.3 task 读模型四件套。
+    // P5 阶段没有任何生产调用方（admin 的 scheduler 仍走 create_task_from_schedule，
+    // 只读 REST 代理是 P5 Task 5、启动接线是 Task 6），注册本身不改变现网行为。
+    this.registerMethod('trigger_schedule', this.handleTriggerSchedule.bind(this))
+    this.registerMethod('list_workers_admin', this.handleListWorkersAdmin.bind(this))
+    this.registerMethod('get_worker_detail', this.handleGetWorkerDetail.bind(this))
+    this.registerMethod('read_worker_output_admin', this.handleReadWorkerOutputAdmin.bind(this))
+    this.registerMethod('get_worker_trace', this.handleGetWorkerTrace.bind(this))
   }
 
   // ============================================================================
@@ -2999,6 +3193,129 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   // ============================================================================
+  // Manager/Worker RPC 方法（protocol-agent-v3 §8.2 / §8.3，P5 Task 4）
+  //
+  // 已知读模型污染源：harness 的 processStateChange 目前把化身退出一律记成 completed
+  // （P7 阻塞项 #1），因此台账里失败 worker 的 task.status 是失真的。这几个读端点只忠实
+  // 反映台账、不做补偿，修复在 harness 侧。
+  // ============================================================================
+
+  /** manager 栈取件口：未装配即 fail-fast（P5 阶段启动路径尚未接线，见字段注释）。 */
+  private requireManagerStack(): ManagerStack {
+    if (!this.managerStack) throw new Error('Manager stack not initialized')
+    return this.managerStack
+  }
+
+  /**
+   * §8.2：按 §4.4 路由唤醒对应 manager（有 target_session → 该会话的 manager；无 → 系统
+   * 线程 manager），**受理即返回**。
+   *
+   * 路由是 fire-and-forget：`routeSchedule` 要跑完整个 manager episode（LLM 往返 + 工具
+   * 调用），await 它等于把调用方（admin 的 scheduler tick）阻塞在一整个 episode 上，与
+   * §8.2 的"同步（受理即返回）"直接冲突。游离 promise 必须 `.catch()`——路由失败不能变成
+   * unhandledRejection 打崩 agent 进程。
+   *
+   * 权限身份（`creator_friend_id` / `is_builtin`）随唤醒事件下传，最终落到本次 episode 派出
+   * 的 worker 的 `origin.creator_friend_id`（§4.4）。这是过渡形态：admin 调用点仍走
+   * `create_task_from_schedule` 并自行下发 `resolved_permissions`，P7 cutover 时收敛。
+   */
+  private handleTriggerSchedule(params: TriggerScheduleParams): TriggerScheduleResult {
+    const { registry } = this.requireManagerStack()
+    void registry
+      .routeSchedule({
+        scheduleId: params.schedule_id,
+        title: params.title,
+        description: params.description,
+        targetSession: params.target_session,
+        creatorFriendId: params.creator_friend_id,
+        isBuiltin: params.is_builtin,
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error)
+        console.error(
+          `[${this.config.moduleId}] trigger_schedule 路由失败 (schedule=${params.schedule_id}):`,
+          message
+        )
+      })
+    return { accepted: true }
+  }
+
+  /** §8.3 list_workers_admin：跨对话对象扁平查询（过滤/排序/分页语义见 manager/read-model.ts）。 */
+  private async handleListWorkersAdmin(params: ListWorkersAdminParams): Promise<ListWorkersAdminResult> {
+    const all = await this.requireManagerStack().ledger.listAllWorkers()
+    return filterAndPageWorkers(all, params ?? {})
+  }
+
+  /** §8.3 get_worker_detail：单 worker 全量（台账条目 + 化身链）；不存在抛错，不返回空对象。 */
+  private async handleGetWorkerDetail(params: GetWorkerDetailParams): Promise<GetWorkerDetailResult> {
+    const found = await this.requireManagerStack().ledger.findWorker(params.worker_id)
+    if (!found) {
+      throw new Error(`Worker not found: ${params.worker_id}`)
+    }
+    return buildWorkerDetail(found)
+  }
+
+  /**
+   * §8.3 read_worker_output_admin：按化身增量读终端输出。
+   *
+   * `eof` 的口径：本次已读到**当前**输出末尾（chunk 为空）。它**不**表示化身已经终结——
+   * worker 仍在跑时会继续追加，调用方据 `next_cursor` 继续轮询即可；要判断"再也不会有
+   * 新输出"应看 `get_worker_detail` 里该化身的 state/ended_reason。
+   */
+  private async handleReadWorkerOutputAdmin(
+    params: ReadWorkerOutputAdminParams
+  ): Promise<ReadWorkerOutputAdminResult> {
+    const { chunk, nextCursor } = await this.requireManagerStack().harness.readWorkerOutput(
+      params.worker_id,
+      { offset: parseOffsetCursor(params.cursor) },
+      { seq: params.seq }
+    )
+    return { chunk, next_cursor: String(nextCursor.offset), eof: chunk.length === 0 }
+  }
+
+  /**
+   * §8.3 get_worker_trace：结构化时间线。本阶段只有 §10.2 的**第一层**（harness 亲历的
+   * `events.jsonl`），第二层（adapter `readTrace()` 懒解析）留给 P6，缺席以
+   * `unavailable_reason` 明示。
+   *
+   * 游标是"该化身已返回的事件条数"：事件流 append-only，条数即稳定位点。
+   *
+   * `params.seq` 缺省（admin REST 的 `?seq=` 没给）时取**主线化身**——与
+   * `read_worker_output_admin` 走的 `harness.readWorkerOutput` 缺省逐字同源（共用
+   * `mainlineIncarnation`），保证两个端点在同一次"不带 seq"的调用下描述的是同一个化身。
+   * 缺这个分支时 `event.seq === undefined` 恒为 false，会静默返回空 events，与"该化身确实
+   * 还没有事件"无法区分（P5 review 修复）。
+   *
+   * 同理，**显式**给的 seq 在化身链里不存在时抛错而非返回空 events（P5 review 修复第二轮）：
+   * 化身链的存在性只能问台账，不能问事件流——"这个化身不存在"与"这个化身确实还没产生
+   * 事件"在 events.jsonl 上是同一个结果（都是空），只有先查台账才分得开。判定与错误文案
+   * 与 `harness.readWorkerOutput` 同形状（共用 `findIncarnationBySeq`），让 admin 侧统一映射。
+   */
+  private async handleGetWorkerTrace(params: GetWorkerTraceParams): Promise<GetWorkerTraceResult> {
+    const stack = this.requireManagerStack()
+    // 先确认 worker 存在：否则事件流缺席（目录不存在）会被 readAll 归一成空数组，
+    // 让"worker 不存在"与"这个化身还没产生任何事件"在返回值上无法区分。
+    const found = await stack.ledger.findWorker(params.worker_id)
+    if (!found) {
+      throw new Error(`Worker not found: ${params.worker_id}`)
+    }
+    const incarnation =
+      params.seq === undefined ? mainlineIncarnation(found.worker) : findIncarnationBySeq(found.worker, params.seq)
+    if (!incarnation) {
+      throw new Error(`get_worker_trace: no incarnation with seq=${params.seq} found for worker ${params.worker_id}`)
+    }
+    const ofIncarnation = (await stack.harness.readWorkerEvents(params.worker_id)).filter(
+      (event) => event.seq === incarnation.seq
+    )
+    const offset = parseOffsetCursor(params.cursor)
+    return {
+      events: ofIncarnation.slice(offset).map(normalizeHarnessEvent),
+      next_cursor: String(ofIncarnation.length),
+      unavailable_reason: WORKER_TRACE_LAYER2_UNAVAILABLE,
+    }
+  }
+
+  // ============================================================================
   // 健康检查
   // ============================================================================
 
@@ -3118,6 +3435,7 @@ export class UnifiedAgent extends ModuleBase {
     // 探測是否有飛書 channel，決定是否注入 read_feishu_document 工具
     this.detectFeishuChannel().catch(() => {/* 探测失败不影响启动 */})
     this.sessionManager.startCleanup()
+    this.startManagerStackReconciliation()
 
     // Connect to external MCP servers (Admin-configured)
     if (this.agentConfig?.mcp_servers && this.agentConfig.mcp_servers.length > 0) {
@@ -3149,6 +3467,36 @@ export class UnifiedAgent extends ModuleBase {
         }
       } catch { /* best effort */ }
     }, ONE_DAY_MS)
+  }
+
+  /**
+   * manager 栈的启动对账（§12），`onStart()` 里发一次，**不 await**。
+   *
+   * **为什么不 await**：对账要向三个 adapter 逐个问在途化身的死活（CLI 实现会起子进程），
+   * 台账非空时耗时不可控；agent 的启动不能挂在它上面——`start()` 返回晚了，MM 的健康探测
+   * 会把 agent 当成起不来。失败只 warn：对账修的是"进程重启后台账里残留的 running 化身"，
+   * 修不成最坏是这些条目继续显示为 running，不影响任何新任务。
+   *
+   * **台账为空时（现网此刻的真实状态）的开销**：`scanOrphans` 一次 readdir 撞 ENOENT 直接返回，
+   * `reconcileOnStartup` 走 `LedgerStore.init()` → 一次 `mkdir -p <dataRoot>/agent/ledgers`
+   * 加一次空目录 readdir，随后零 worker 可对账。唯一的可观测副作用就是那个空目录被建出来。
+   */
+  private startManagerStackReconciliation(): void {
+    const stack = this.managerStack
+    if (!stack) return
+    void reconcileManagerStack(stack)
+      .then((report) => {
+        // 空台账（现网常态）不打日志，避免每次启动都刷一行没有信息量的 0/0/0。
+        if (report.revived.length === 0 && report.failed.length === 0) return
+        console.log(
+          `[${this.config.moduleId}] manager 栈启动对账完成：` +
+          `revived=${report.revived.length} failed=${report.failed.length} unchanged=${report.unchanged.length}`
+        )
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error)
+        console.warn(`[${this.config.moduleId}] manager 栈启动对账失败（不影响启动）:`, message)
+      })
   }
 
   protected override async onStop(): Promise<void> {

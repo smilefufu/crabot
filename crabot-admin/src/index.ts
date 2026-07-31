@@ -376,6 +376,48 @@ function normalizeSceneProfileTextField(
  */
 const CRABOT_HOME = process.env.CRABOT_HOME ?? path.resolve(__dirname, '../..')
 
+/**
+ * query string 里的整数参数。缺省或非法（`?page=abc` / `?page_size=`）一律回落到 fallback。
+ *
+ * 与既有端点惯用的裸 `parseInt(x ?? '20', 10)` 的差别只在于挡住了 NaN——`/api/agent/workers*`
+ * 的 page/page_size/seq 会原样进入 agent 侧的 slice/filter，NaN 会静默返回空结果而不报错。
+ */
+function parseIntParam(raw: string | null, fallback: number): number {
+  const parsed = Number.parseInt(raw ?? '', 10)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
+/**
+ * 没有合理 fallback 的整数参数（`?seq=`）：缺省或非法一律返回 undefined，由调用方**不下发
+ * 该字段**，让 agent 侧走它自己的缺省语义。
+ *
+ * 不能像 page/page_size 那样回落到一个具体数字：化身 seq 从 1 开始编号，回落 0 在台账里
+ * 永远不存在（output 端点因此 500、trace 端点静默返回空），回落 1 则锁死在**最早**那个
+ * 化身上——worker 经历 revive/handoff 后主线早已不是 seq=1。唯一正确的缺省是"主线化身"，
+ * 而那只有 agent 侧（持台账）算得出来。
+ */
+function parseOptionalIntParam(raw: string | null): number | undefined {
+  const parsed = Number.parseInt(raw ?? '', 10)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+/**
+ * `/api/agent/workers*` 三个按 worker_id 读的端点统一的"worker 不存在 → 404"判定。
+ *
+ * agent 侧同一件事有两处文案，大小写不同：`unified-agent.ts` 的 handler 显式抛
+ * `Worker not found: <id>`（detail / trace），`harness.ts` 的 `WorkerNotFoundError` 抛
+ * `worker not found: <id>`（output 走 `harness.readWorkerOutput`）。各端点各写各的匹配串时，
+ * output 端点对同一个不存在的 id 落 500 而另外两个落 404（P5 review 修复第二轮）。
+ * 抽成一个谓词共用，是为了不让这种不对称再次悄悄漂移出来。
+ *
+ * 只做大小写归一、不放宽到 `includes('not found')`：agent 侧其它真错（如
+ * `no incarnation with seq=N found for worker <id>` —— 化身不存在而非 worker 不存在）必须
+ * 继续落 500，否则前端分不清"这个 worker 没了"和"这个化身没了"。
+ */
+function isWorkerNotFoundError(message: string): boolean {
+  return message.toLowerCase().includes('worker not found')
+}
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json' })
   res.end(JSON.stringify(body))
@@ -2175,6 +2217,27 @@ export class AdminModule extends ModuleBase {
       const agentTraceDetailMatch = pathname.match(/^\/api\/agent\/traces\/([^/]+)$/)
       if (agentTraceDetailMatch && req.method === 'GET') {
         await this.handleGetAgentTraceApi(req, res, agentTraceDetailMatch[1])
+        return
+      }
+
+      // Worker 只读代理（protocol-agent-v3 §10.3）。子路径先于 :id 匹配。
+      if (pathname === '/api/agent/workers' && req.method === 'GET') {
+        await this.handleListWorkersApi(req, res, url)
+        return
+      }
+      const workerOutputMatch = pathname.match(/^\/api\/agent\/workers\/([^/]+)\/output$/)
+      if (workerOutputMatch && req.method === 'GET') {
+        await this.handleReadWorkerOutputApi(req, res, workerOutputMatch[1], url)
+        return
+      }
+      const workerTraceMatch = pathname.match(/^\/api\/agent\/workers\/([^/]+)\/trace$/)
+      if (workerTraceMatch && req.method === 'GET') {
+        await this.handleGetWorkerTraceApi(req, res, workerTraceMatch[1], url)
+        return
+      }
+      const workerDetailMatch = pathname.match(/^\/api\/agent\/workers\/([^/]+)$/)
+      if (workerDetailMatch && req.method === 'GET') {
+        await this.handleGetWorkerDetailApi(req, res, workerDetailMatch[1])
         return
       }
 
@@ -4424,6 +4487,11 @@ export class AdminModule extends ModuleBase {
   /**
    * 写入 task 的统一入口：set + 落盘原子绑定，杜绝"改了内存忘了落盘"。
    * 所有 handler*Task / handle*TaskGoal / handleCancelTask 都走这里。
+   *
+   * @deprecated **P7 cutover 时删除**（protocol-agent-v3 §7）。v3 把 task 的真相源从 admin 的
+   * `tasks.json` 迁到 agent 的台账（`LedgerStore`），admin 退化成只读代理，不再有 task 写路径。
+   * 替代者：agent 侧 `LedgerStore` 的写入（由 `WorkerHarness` 的状态迁移驱动）。
+   * P5 只加注记、**行为不变**——本阶段 admin 仍是 task 的写真相源。
    */
   private async upsertTask(task: Task): Promise<void> {
     this.tasks.set(task.id, task)
@@ -5086,6 +5154,12 @@ export class AdminModule extends ModuleBase {
     return { items }
   }
 
+  /**
+   * P7 cutover 注记（本次不改行为）：本方法体内的 `admin.task_status_changed` 发布点是
+   * v3 要退役的两处 task 事件发布点之一——替代者是 agent 侧的 `agent.task_status_changed`
+   * （protocol-agent-v3 §9.2，发布方从 admin 变为 agent）。cutover 时随 admin 侧 task
+   * 写路径一并删除。
+   */
   private async handleReviveTaskForSupplement(
     params: ReviveTaskForSupplementParams,
   ): Promise<ReviveTaskForSupplementResult> {
@@ -5179,6 +5253,13 @@ export class AdminModule extends ModuleBase {
     }
   }
 
+  /**
+   * @deprecated **P7 cutover 时删除**（protocol-agent-v3 §5.2 / §9.2）。task 状态机在 v3 里
+   * 属于 agent 台账，替代者是 `WorkerHarness` 的状态迁移（写台账 + 由 agent 发
+   * `agent.task_status_changed`）。本方法体内的 `admin.task_status_changed` 发布点即 v3 要
+   * 退役的两处 task 事件发布点之二（另一处在 `handleReviveTaskForSupplement`）。
+   * P5 只加注记、**行为不变**。
+   */
   private applyStatusTransition(
     task: Task,
     newStatus: TaskStatus,
@@ -5636,6 +5717,11 @@ export class AdminModule extends ModuleBase {
    * applyStatusTransition 路径，保留派生字段维护和事件发布。
    *
    * 失败容忍：单条 patch apply 失败只 log + 跳过，不影响其他 patch；下轮 reconciliation 继续重试。
+   *
+   * @deprecated **P7 cutover 时删除**（protocol-agent-v3 §7）。这层兜底的存在前提是"admin 的
+   * task 状态与 agent 的 trace 是两份可能 drift 的数据"；v3 把真相源收敛到 agent 台账后该前提
+   * 消失，且它依赖的 `get_trace_tree` 已随 §10.1 退役。替代者：agent 侧的启动对账
+   * `reconcileManagerStack`（台账 vs 实际存活化身）。P5 只加注记、**行为不变**。
    */
   async runReconciliation(): Promise<void> {
     if (!this.dataLoaded) return  // 启动早期 loadData 未完不跑
@@ -5734,6 +5820,11 @@ export class AdminModule extends ModuleBase {
     }
   }
 
+  /**
+   * @deprecated **P7 cutover 时删除**（protocol-agent-v3 §8.5：`cancel_task` 与 `abort_worker`
+   * 均已列入退役接口）。v3 里 admin 不再单方面判死任务，取消由 manager 的 `kill_worker` 执行。
+   * 替代者：manager 工具面的 `kill_worker`（§4.3）。P5 只加注记、**行为不变**。
+   */
   private async handleCancelTask(params: CancelTaskParams): Promise<{ task: Task; cancelled: boolean }> {
     const task = this.tasks.get(params.task_id)
     if (!task) {
@@ -9564,6 +9655,38 @@ export class AdminModule extends ModuleBase {
     }
   }
 
+  /**
+   * `/api/agent/*` 转发端点的统一样板：调 agent RPC → 200 回传结果；失败按 agent 可达性
+   * 映射 503（agent 不可达，固定文案）/ 500（其余，回传原始 message）。
+   *
+   * 抽自 handleGetAgentTracesApi / handleGetAgentTraceApi / handleClearAgentTracesApi /
+   * handleSearchAgentTracesApi 四处**逐字相同**的 catch 块（P5 Task 5，纯重构）。
+   * `notFoundWhen` 只为保留 handleGetAgentTraceApi 独有的 404 分支——不传时行为与抽取前
+   * 完全一致；该分支优先于 503/500 判定，与原实现的判定顺序相同。
+   */
+  private async proxyAgentRpc<P, R>(
+    res: ServerResponse,
+    method: string,
+    params: P,
+    notFoundWhen?: (message: string) => boolean,
+  ): Promise<void> {
+    try {
+      const result = await this.callAgentRpc<P, R>(method, params)
+      sendJson(res, 200, result)
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      if (notFoundWhen?.(msg)) {
+        sendJson(res, 404, { error: msg })
+        return
+      }
+      const isUnreachable =
+        msg.includes('Agent not available') ||
+        msg.includes('ECONNREFUSED') ||
+        msg.includes('connect failed')
+      sendJson(res, isUnreachable ? 503 : 500, { error: isUnreachable ? 'Agent not available' : msg })
+    }
+  }
+
   private memoryModules: Array<{ module_id: string; port: number; name: string }> = []
 
   /**
@@ -9609,25 +9732,13 @@ export class AdminModule extends ModuleBase {
     res: ServerResponse,
     url: URL
   ): Promise<void> {
-    try {
-      const limit = parseInt(url.searchParams.get('limit') ?? '20', 10)
-      const offset = parseInt(url.searchParams.get('offset') ?? '0', 10)
-      const status = url.searchParams.get('status') ?? undefined
-      const result = await this.callAgentRpc<
-        { limit?: number; offset?: number; status?: string },
-        { traces: unknown[]; total: number }
-      >('get_traces', { limit, offset, status })
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify(result))
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error)
-      const isUnreachable =
-        msg.includes('Agent not available') ||
-        msg.includes('ECONNREFUSED') ||
-        msg.includes('connect failed')
-      res.writeHead(isUnreachable ? 503 : 500, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: isUnreachable ? 'Agent not available' : msg }))
-    }
+    const limit = parseInt(url.searchParams.get('limit') ?? '20', 10)
+    const offset = parseInt(url.searchParams.get('offset') ?? '0', 10)
+    const status = url.searchParams.get('status') ?? undefined
+    await this.proxyAgentRpc<
+      { limit?: number; offset?: number; status?: string },
+      { traces: unknown[]; total: number }
+    >(res, 'get_traces', { limit, offset, status })
   }
 
   private async handleGetAgentTraceApi(
@@ -9635,55 +9746,36 @@ export class AdminModule extends ModuleBase {
     res: ServerResponse,
     traceId: string
   ): Promise<void> {
-    try {
-      const result = await this.callAgentRpc<
-        { trace_id: string },
-        { trace: unknown }
-      >('get_trace', { trace_id: traceId })
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify(result))
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error)
-      if (msg.includes('not found') || msg.includes('Trace not found')) {
-        res.writeHead(404, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: msg }))
-      } else {
-        const isUnreachable =
-          msg.includes('Agent not available') ||
-          msg.includes('ECONNREFUSED') ||
-          msg.includes('connect failed')
-        res.writeHead(isUnreachable ? 503 : 500, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: isUnreachable ? 'Agent not available' : msg }))
-      }
-    }
+    await this.proxyAgentRpc<{ trace_id: string }, { trace: unknown }>(
+      res,
+      'get_trace',
+      { trace_id: traceId },
+      (msg) => msg.includes('not found') || msg.includes('Trace not found'),
+    )
   }
 
   private async handleClearAgentTracesApi(
     req: IncomingMessage,
     res: ServerResponse
   ): Promise<void> {
+    let params: { before?: string; trace_ids?: string[] }
     try {
       const body = await new Promise<string>((resolve) => {
         let data = ''
         req.on('data', (chunk) => { data += chunk })
         req.on('end', () => resolve(data))
       })
-      const params = body ? (JSON.parse(body) as { before?: string; trace_ids?: string[] }) : {}
-      const result = await this.callAgentRpc<
-        { before?: string; trace_ids?: string[] },
-        { cleared_count: number }
-      >('clear_traces', params)
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify(result))
+      params = body ? (JSON.parse(body) as { before?: string; trace_ids?: string[] }) : {}
     } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error)
-      const isUnreachable =
-        msg.includes('Agent not available') ||
-        msg.includes('ECONNREFUSED') ||
-        msg.includes('connect failed')
-      res.writeHead(isUnreachable ? 503 : 500, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: isUnreachable ? 'Agent not available' : msg }))
+      // body 不是合法 JSON：抽 proxyAgentRpc 之前 JSON.parse 的异常落在同一个 catch 里，
+      // 走的是"非不可达 → 500 + 原始 message"分支。这里显式保留该分支，避免重构改行为。
+      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+      return
     }
+    await this.proxyAgentRpc<
+      { before?: string; trace_ids?: string[] },
+      { cleared_count: number }
+    >(res, 'clear_traces', params)
   }
 
   private async handleSearchAgentTracesApi(
@@ -9691,35 +9783,135 @@ export class AdminModule extends ModuleBase {
     res: ServerResponse,
     url: URL
   ): Promise<void> {
-    try {
-      const params: Record<string, unknown> = {}
-      const taskId = url.searchParams.get('task_id')
-      if (taskId) params.task_id = taskId
-      const keyword = url.searchParams.get('keyword')
-      if (keyword) params.keyword = keyword
-      const status = url.searchParams.get('status')
-      if (status) params.status = status
-      const start = url.searchParams.get('start')
-      const end = url.searchParams.get('end')
-      if (start && end) params.time_range = { start, end }
-      params.limit = parseInt(url.searchParams.get('limit') ?? '20', 10)
-      params.offset = parseInt(url.searchParams.get('offset') ?? '0', 10)
+    const params: Record<string, unknown> = {}
+    const taskId = url.searchParams.get('task_id')
+    if (taskId) params.task_id = taskId
+    const keyword = url.searchParams.get('keyword')
+    if (keyword) params.keyword = keyword
+    const status = url.searchParams.get('status')
+    if (status) params.status = status
+    const start = url.searchParams.get('start')
+    const end = url.searchParams.get('end')
+    if (start && end) params.time_range = { start, end }
+    params.limit = parseInt(url.searchParams.get('limit') ?? '20', 10)
+    params.offset = parseInt(url.searchParams.get('offset') ?? '0', 10)
 
-      const result = await this.callAgentRpc<
-        Record<string, unknown>,
-        { traces: unknown[]; total: number }
-      >('search_traces', params)
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify(result))
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error)
-      const isUnreachable =
-        msg.includes('Agent not available') ||
-        msg.includes('ECONNREFUSED') ||
-        msg.includes('connect failed')
-      res.writeHead(isUnreachable ? 503 : 500, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: isUnreachable ? 'Agent not available' : msg }))
-    }
+    await this.proxyAgentRpc<
+      Record<string, unknown>,
+      { traces: unknown[]; total: number }
+    >(res, 'search_traces', params)
+  }
+
+  // ============================================================================
+  // Worker 只读 REST 代理（protocol-agent-v3 §10.3，转发 §8.3 的读模型 RPC）
+  //
+  // 纯转发：鉴权由 `/api/*` 的统一中间件负责，错误映射由 proxyAgentRpc 负责，本段只做
+  // query string → RPC 参数的翻译。**本阶段生产链路无人调用**（web 切到 worker 视图在 P6、
+  // 真相源 cutover 在 P7），先落端点是为了让 P6 只改前端。
+  //
+  // 台账 status 目前被 P7 阻塞项 #1（harness.processStateChange 硬编码 completed）污染，
+  // 这里原样透传、不做任何补偿——修复在 agent 侧的 harness，不在代理层。
+  // ============================================================================
+
+  /** §10.3 `GET /api/agent/workers` → `list_workers_admin`（§8.3）。 */
+  private async handleListWorkersApi(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    url: URL,
+  ): Promise<void> {
+    // §8.3 的 status 是 `TaskStatus | TaskStatus[]`：重复出现 `?status=a&status=b` 即数组，
+    // 单个即单值（沿用 parseAccessibleScopes 的 getAll 惯例，不另发明逗号分隔语法）。
+    const statuses = url.searchParams.getAll('status').filter(Boolean)
+    const dialogObjectId = url.searchParams.get('dialog_object_id') || undefined
+    // base-protocol §5.7 的 TimeRange 两端各自可选（start 闭、end 开），故任一存在即下发；
+    // 这点与 search_traces 端点"start+end 必须同时给"的旧写法不同——那是它自己的历史约定。
+    const start = url.searchParams.get('start') || undefined
+    const end = url.searchParams.get('end') || undefined
+
+    await this.proxyAgentRpc<
+      {
+        status?: string | string[]
+        dialog_object_id?: string
+        time_range?: { start?: string; end?: string }
+        pagination?: { page: number; page_size: number }
+      },
+      { items: unknown[]; pagination: { page: number; page_size: number; total_items: number; total_pages: number } }
+    >(res, 'list_workers_admin', {
+      ...(statuses.length === 1 ? { status: statuses[0] } : {}),
+      ...(statuses.length > 1 ? { status: statuses } : {}),
+      ...(dialogObjectId ? { dialog_object_id: dialogObjectId } : {}),
+      ...(start || end ? { time_range: { ...(start ? { start } : {}), ...(end ? { end } : {}) } } : {}),
+      pagination: {
+        page: parseIntParam(url.searchParams.get('page'), 1),
+        page_size: parseIntParam(url.searchParams.get('page_size'), 20),
+      },
+    })
+  }
+
+  /** §10.3 `GET /api/agent/workers/:id` → `get_worker_detail`（§8.3）。 */
+  private async handleGetWorkerDetailApi(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    workerId: string,
+  ): Promise<void> {
+    await this.proxyAgentRpc<{ worker_id: string }, { worker: unknown }>(
+      res,
+      'get_worker_detail',
+      { worker_id: workerId },
+      // 404 与相邻的 `/api/agent/traces/:traceId` 一致；判定见 isWorkerNotFoundError。
+      isWorkerNotFoundError,
+    )
+  }
+
+  /** §10.3 `GET /api/agent/workers/:id/output` → `read_worker_output_admin`（§8.3）。 */
+  private async handleReadWorkerOutputApi(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    workerId: string,
+    url: URL,
+  ): Promise<void> {
+    const cursor = url.searchParams.get('cursor') || undefined
+    // seq = 化身序号（从 1 起）。没给就**不下发该字段**，由 agent 侧取主线化身
+    // （harness.readWorkerOutput 的既有缺省，见 parseOptionalIntParam 注释）——与 cursor 同一纪律。
+    const seq = parseOptionalIntParam(url.searchParams.get('seq'))
+    await this.proxyAgentRpc<
+      { worker_id: string; seq?: number; cursor?: string },
+      { chunk: string; next_cursor: string; eof: boolean }
+    >(
+      res,
+      'read_worker_output_admin',
+      {
+        worker_id: workerId,
+        ...(seq !== undefined ? { seq } : {}),
+        ...(cursor ? { cursor } : {}),
+      },
+      isWorkerNotFoundError,
+    )
+  }
+
+  /** §10.3 `GET /api/agent/workers/:id/trace` → `get_worker_trace`（§8.3）。 */
+  private async handleGetWorkerTraceApi(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    workerId: string,
+    url: URL,
+  ): Promise<void> {
+    const cursor = url.searchParams.get('cursor') || undefined
+    // 同 output 端点：没给 seq 就不下发，agent 侧取主线化身，两个端点缺省落在同一个化身上。
+    const seq = parseOptionalIntParam(url.searchParams.get('seq'))
+    await this.proxyAgentRpc<
+      { worker_id: string; seq?: number; cursor?: string },
+      { events: unknown[]; next_cursor?: string; unavailable_reason?: string }
+    >(
+      res,
+      'get_worker_trace',
+      {
+        worker_id: workerId,
+        ...(seq !== undefined ? { seq } : {}),
+        ...(cursor ? { cursor } : {}),
+      },
+      isWorkerNotFoundError,
+    )
   }
 
   private async handleDeleteTaskApi(

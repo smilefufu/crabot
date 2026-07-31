@@ -1476,6 +1476,387 @@ describe('Admin Web API', () => {
       expect(response.body.sources.session_template_id).toBe('group_default')
     })
   })
+
+  // ==========================================================================
+  // 既有 /api/agent/* 转发端点的特征化测试（P5 Task 5 第一步）
+  //
+  // 这四个 handler 各自重复同一段 503/500 样板，本组用例在抽 proxyAgentRpc **之前**
+  // 就写下它们当前的行为（method / params / 状态码 / body），抽完之后必须逐条照旧通过——
+  // 这是"纯重构、行为一字不变"的证据，而不是靠肉眼比对。
+  // ==========================================================================
+  describe('既有 /api/agent/* 转发端点（重构护栏）', () => {
+    const spyAgentRpc = () =>
+      vi.spyOn(
+        admin as unknown as { callAgentRpc: (...args: unknown[]) => Promise<unknown> },
+        'callAgentRpc',
+      )
+
+    it('GET /api/agent/traces 转发 get_traces（默认 limit/offset，status 缺省为 undefined）', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({ traces: [], total: 0 })
+
+      const response = await makeWebRequest(TEST_WEB_PORT, '/api/agent/traces', 'GET', null, token)
+
+      expect(response.statusCode).toBe(200)
+      expect(spy).toHaveBeenCalledWith('get_traces', { limit: 20, offset: 0, status: undefined })
+    })
+
+    it('GET /api/agent/traces 透传 limit/offset/status', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({ traces: [], total: 0 })
+
+      await makeWebRequest(TEST_WEB_PORT, '/api/agent/traces?limit=5&offset=10&status=completed', 'GET', null, token)
+
+      expect(spy).toHaveBeenCalledWith('get_traces', { limit: 5, offset: 10, status: 'completed' })
+    })
+
+    it('GET /api/agent/traces：agent 不可达 → 503 + 固定文案', async () => {
+      const token = await loginAndGetToken()
+      spyAgentRpc().mockRejectedValue(new Error('Agent not available'))
+
+      const response = await makeWebRequest<{ error: string }>(TEST_WEB_PORT, '/api/agent/traces', 'GET', null, token)
+
+      expect(response.statusCode).toBe(503)
+      expect(response.body.error).toBe('Agent not available')
+    })
+
+    it('GET /api/agent/traces：其他错误 → 500 + 原始 message', async () => {
+      const token = await loginAndGetToken()
+      spyAgentRpc().mockRejectedValue(new Error('boom'))
+
+      const response = await makeWebRequest<{ error: string }>(TEST_WEB_PORT, '/api/agent/traces', 'GET', null, token)
+
+      expect(response.statusCode).toBe(500)
+      expect(response.body.error).toBe('boom')
+    })
+
+    it('GET /api/agent/traces/:traceId 转发 get_trace', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({ trace: { trace_id: 't-1' } })
+
+      const response = await makeWebRequest(TEST_WEB_PORT, '/api/agent/traces/t-1', 'GET', null, token)
+
+      expect(response.statusCode).toBe(200)
+      expect(spy).toHaveBeenCalledWith('get_trace', { trace_id: 't-1' })
+    })
+
+    it('GET /api/agent/traces/:traceId：not found → 404 + 原始 message（该端点独有分支）', async () => {
+      const token = await loginAndGetToken()
+      spyAgentRpc().mockRejectedValue(new Error('Trace not found: t-404'))
+
+      const response = await makeWebRequest<{ error: string }>(TEST_WEB_PORT, '/api/agent/traces/t-404', 'GET', null, token)
+
+      expect(response.statusCode).toBe(404)
+      expect(response.body.error).toBe('Trace not found: t-404')
+    })
+
+    it('GET /api/agent/traces/:traceId：ECONNREFUSED → 503', async () => {
+      const token = await loginAndGetToken()
+      spyAgentRpc().mockRejectedValue(new Error('connect ECONNREFUSED 127.0.0.1:19000'))
+
+      const response = await makeWebRequest<{ error: string }>(TEST_WEB_PORT, '/api/agent/traces/t-1', 'GET', null, token)
+
+      expect(response.statusCode).toBe(503)
+      expect(response.body.error).toBe('Agent not available')
+    })
+
+    it('DELETE /api/agent/traces 转发 clear_traces（带 body / 空 body）', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({ cleared_count: 3 })
+
+      const withBody = await makeWebRequest(
+        TEST_WEB_PORT,
+        '/api/agent/traces',
+        'DELETE',
+        { before: '2026-01-01T00:00:00.000Z' },
+        token,
+      )
+      expect(withBody.statusCode).toBe(200)
+      expect(spy).toHaveBeenCalledWith('clear_traces', { before: '2026-01-01T00:00:00.000Z' })
+
+      await makeWebRequest(TEST_WEB_PORT, '/api/agent/traces', 'DELETE', null, token)
+      expect(spy).toHaveBeenLastCalledWith('clear_traces', {})
+    })
+
+    it('DELETE /api/agent/traces：agent 不可达 → 503', async () => {
+      const token = await loginAndGetToken()
+      spyAgentRpc().mockRejectedValue(new Error('connect failed'))
+
+      const response = await makeWebRequest<{ error: string }>(TEST_WEB_PORT, '/api/agent/traces', 'DELETE', null, token)
+
+      expect(response.statusCode).toBe(503)
+      expect(response.body.error).toBe('Agent not available')
+    })
+
+    it('GET /api/agent/traces/search 转发 search_traces（time_range 需 start+end 同时存在）', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({ traces: [], total: 0 })
+
+      await makeWebRequest(
+        TEST_WEB_PORT,
+        '/api/agent/traces/search?task_id=task-1&keyword=needle&status=completed&start=2026-01-01&end=2026-02-01&limit=3&offset=1',
+        'GET',
+        null,
+        token,
+      )
+      expect(spy).toHaveBeenCalledWith('search_traces', {
+        task_id: 'task-1',
+        keyword: 'needle',
+        status: 'completed',
+        time_range: { start: '2026-01-01', end: '2026-02-01' },
+        limit: 3,
+        offset: 1,
+      })
+
+      await makeWebRequest(TEST_WEB_PORT, '/api/agent/traces/search?start=2026-01-01', 'GET', null, token)
+      expect(spy).toHaveBeenLastCalledWith('search_traces', { limit: 20, offset: 0 })
+    })
+
+    it('GET /api/agent/traces/search：agent 不可达 → 503', async () => {
+      const token = await loginAndGetToken()
+      spyAgentRpc().mockRejectedValue(new Error('Agent not available'))
+
+      const response = await makeWebRequest<{ error: string }>(
+        TEST_WEB_PORT,
+        '/api/agent/traces/search',
+        'GET',
+        null,
+        token,
+      )
+
+      expect(response.statusCode).toBe(503)
+      expect(response.body.error).toBe('Agent not available')
+    })
+  })
+
+  // ==========================================================================
+  // Worker 只读 REST 代理（protocol-agent-v3 §10.3 / §8.3，P5 Task 5 第二步）
+  //
+  // 本阶段生产链路无人调用这四个端点（web 切换在 P6、cutover 在 P7），所以用例只钉两件事：
+  // 鉴权走既有 /api/* 中间件、query → RPC 参数按 §8.3 逐字段映射。
+  // **不写**"worker 失败 → 返回 failed"这类断言：台账 status 目前被 P7 阻塞项 #1 污染。
+  // ==========================================================================
+  describe('GET /api/agent/workers*（§10.3 只读代理）', () => {
+    const spyAgentRpc = () =>
+      vi.spyOn(
+        admin as unknown as { callAgentRpc: (...args: unknown[]) => Promise<unknown> },
+        'callAgentRpc',
+      )
+
+    it.each([
+      '/api/agent/workers',
+      '/api/agent/workers/w-1',
+      '/api/agent/workers/w-1/output',
+      '/api/agent/workers/w-1/trace',
+    ])('%s 未带 token → 401', async (path) => {
+      const response = await makeWebRequest(TEST_WEB_PORT, path, 'GET', null, null)
+      expect(response.statusCode).toBe(401)
+    })
+
+    it('GET /api/agent/workers 无 query → list_workers_admin 只带默认分页', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({
+        items: [],
+        pagination: { page: 1, page_size: 20, total_items: 0, total_pages: 0 },
+      })
+
+      const response = await makeWebRequest(TEST_WEB_PORT, '/api/agent/workers', 'GET', null, token)
+
+      expect(response.statusCode).toBe(200)
+      expect(spy).toHaveBeenCalledWith('list_workers_admin', { pagination: { page: 1, page_size: 20 } })
+    })
+
+    it('GET /api/agent/workers 全量 query → 逐字段映射（status 重复出现即数组）', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({
+        items: [],
+        pagination: { page: 2, page_size: 5, total_items: 0, total_pages: 0 },
+      })
+
+      await makeWebRequest(
+        TEST_WEB_PORT,
+        '/api/agent/workers?status=executing&status=waiting&dialog_object_id=telegram-001%3Aprivate-42'
+          + '&start=2026-07-01T00%3A00%3A00.000Z&end=2026-07-31T00%3A00%3A00.000Z&page=2&page_size=5',
+        'GET',
+        null,
+        token,
+      )
+
+      expect(spy).toHaveBeenCalledWith('list_workers_admin', {
+        status: ['executing', 'waiting'],
+        dialog_object_id: 'telegram-001:private-42',
+        time_range: { start: '2026-07-01T00:00:00.000Z', end: '2026-07-31T00:00:00.000Z' },
+        pagination: { page: 2, page_size: 5 },
+      })
+    })
+
+    it('GET /api/agent/workers 单个 status → 单值而非数组（§8.3 是联合类型）', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({
+        items: [],
+        pagination: { page: 1, page_size: 20, total_items: 0, total_pages: 0 },
+      })
+
+      await makeWebRequest(TEST_WEB_PORT, '/api/agent/workers?status=completed', 'GET', null, token)
+
+      expect(spy).toHaveBeenCalledWith('list_workers_admin', {
+        status: 'completed',
+        pagination: { page: 1, page_size: 20 },
+      })
+    })
+
+    it('GET /api/agent/workers 只给 start → time_range 只带 start（TimeRange 两端各自可选）', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({
+        items: [],
+        pagination: { page: 1, page_size: 20, total_items: 0, total_pages: 0 },
+      })
+
+      await makeWebRequest(TEST_WEB_PORT, '/api/agent/workers?start=2026-07-01T00%3A00%3A00.000Z', 'GET', null, token)
+
+      expect(spy).toHaveBeenCalledWith('list_workers_admin', {
+        time_range: { start: '2026-07-01T00:00:00.000Z' },
+        pagination: { page: 1, page_size: 20 },
+      })
+    })
+
+    it('GET /api/agent/workers 脏分页参数 → 回落默认值', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({
+        items: [],
+        pagination: { page: 1, page_size: 20, total_items: 0, total_pages: 0 },
+      })
+
+      await makeWebRequest(TEST_WEB_PORT, '/api/agent/workers?page=abc&page_size=', 'GET', null, token)
+
+      expect(spy).toHaveBeenCalledWith('list_workers_admin', { pagination: { page: 1, page_size: 20 } })
+    })
+
+    it('GET /api/agent/workers：agent 不可达 → 503', async () => {
+      const token = await loginAndGetToken()
+      spyAgentRpc().mockRejectedValue(new Error('Agent not available'))
+
+      const response = await makeWebRequest<{ error: string }>(TEST_WEB_PORT, '/api/agent/workers', 'GET', null, token)
+
+      expect(response.statusCode).toBe(503)
+      expect(response.body.error).toBe('Agent not available')
+    })
+
+    it('GET /api/agent/workers/:id → get_worker_detail', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({ worker: { worker_id: 'w-1' } })
+
+      const response = await makeWebRequest<{ worker: { worker_id: string } }>(
+        TEST_WEB_PORT,
+        '/api/agent/workers/w-1',
+        'GET',
+        null,
+        token,
+      )
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body.worker.worker_id).toBe('w-1')
+      expect(spy).toHaveBeenCalledWith('get_worker_detail', { worker_id: 'w-1' })
+    })
+
+    /**
+     * 三个按 worker_id 读的端点对**同一个**不存在的 id 必须给同一个状态码——P6 前端要靠状态码
+     * 区分"worker 不存在"与"agent 侧真错"。
+     *
+     * agent 侧两条路径的文案大小写**不一致**（下表 message 列逐字取自 agent 源码）：
+     * detail/trace 由 `unified-agent.ts` 的 handler 显式抛（大写 W），output 由
+     * `harness.ts` 的 `WorkerNotFoundError` 抛（小写 w）。修复前 output 端点匹配不上
+     * `'Worker not found'` → 落 500。故三处共用同一个大小写无关的谓词。
+     */
+    it.each([
+      ['/api/agent/workers/w-404', 'Worker not found: w-404'],
+      ['/api/agent/workers/w-404/trace', 'Worker not found: w-404'],
+      ['/api/agent/workers/w-404/output', 'worker not found: w-404'],
+    ])('GET %s：worker 不存在 → 404（agent 侧文案 %s）', async (path, agentMessage) => {
+      const token = await loginAndGetToken()
+      spyAgentRpc().mockRejectedValue(new Error(agentMessage))
+
+      const response = await makeWebRequest<{ error: string }>(TEST_WEB_PORT, path, 'GET', null, token)
+
+      expect(response.statusCode).toBe(404)
+      expect(response.body.error).toBe(agentMessage)
+    })
+
+    /**
+     * 谓词只认"worker 不存在"，agent 侧其它真错仍是 500——否则前端会把"这个化身不存在"
+     * 或"这个 agent build 还没有这个方法"当成"这个 worker 不存在"。三条 message 都逐字取自
+     * 源码：前两条来自 `harness.readWorkerOutput` / `handleGetWorkerTrace` 的 seq 校验，
+     * 第三条来自 crabot-core 的 JSON-RPC 分发（未注册方法，滚动升级期真实可达；由
+     * `reject(new Error(response.error.message))` 原样送到这里）。
+     * 它们都含 "not found" 却不含 "worker not found"——谓词故意不放宽到前者。
+     */
+    it.each([
+      ['/api/agent/workers/w-1/output?seq=9', 'WorkerHarness.readWorkerOutput: no incarnation with seq=9 found for worker w-1'],
+      ['/api/agent/workers/w-1/trace?seq=9', 'get_worker_trace: no incarnation with seq=9 found for worker w-1'],
+      ['/api/agent/workers/w-1/output', 'Method "read_worker_output_admin" not found'],
+    ])('GET %s：不是 worker 不存在 → 500', async (path, agentMessage) => {
+      const token = await loginAndGetToken()
+      spyAgentRpc().mockRejectedValue(new Error(agentMessage))
+
+      const response = await makeWebRequest<{ error: string }>(TEST_WEB_PORT, path, 'GET', null, token)
+
+      expect(response.statusCode).toBe(500)
+      expect(response.body.error).toBe(agentMessage)
+    })
+
+    /**
+     * `?seq=` 缺省时**不下发该字段**（与 cursor 同一纪律）：化身 seq 从 1 起编号，admin 侧
+     * 任何硬编码缺省都是错的——0 在台账里恒不存在（agent 侧 findIncarnationBySeq 抛错 → 500），
+     * 1 则锁死在最早那个化身上（worker 经 revive/handoff 后主线早已不是它）。唯一正确的缺省
+     * 是"主线化身"，只有持台账的 agent 侧算得出来。
+     *
+     * 这两条只钉住"admin 转发的载荷长什么样"；"这个载荷打到真实 agent 上确实读到主线化身"
+     * 由 crabot-agent `tests/manager/p5-integration.test.ts` 经真实 RPC + 真实台账验证。
+     */
+    it('GET /api/agent/workers/:id/output → read_worker_output_admin（seq 缺省不下发，由 agent 取主线化身）', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({ chunk: 'hello', next_cursor: '133', eof: false })
+
+      const response = await makeWebRequest(
+        TEST_WEB_PORT,
+        '/api/agent/workers/w-1/output?seq=2&cursor=128',
+        'GET',
+        null,
+        token,
+      )
+      expect(response.statusCode).toBe(200)
+      expect(spy).toHaveBeenCalledWith('read_worker_output_admin', { worker_id: 'w-1', seq: 2, cursor: '128' })
+
+      await makeWebRequest(TEST_WEB_PORT, '/api/agent/workers/w-1/output', 'GET', null, token)
+      expect(spy).toHaveBeenLastCalledWith('read_worker_output_admin', { worker_id: 'w-1' })
+      // toHaveBeenCalledWith 把 `{ seq: undefined }` 视同缺席，这里显式钉住 key 真的不在载荷里。
+      expect('seq' in (spy.mock.lastCall![1] as object)).toBe(false)
+
+      // 脏值同样不下发（不回落成某个具体化身），与 list 端点"脏分页 → 回落默认值"的区别在于
+      // seq 根本没有安全的默认值可回落。
+      await makeWebRequest(TEST_WEB_PORT, '/api/agent/workers/w-1/output?seq=abc', 'GET', null, token)
+      expect(spy).toHaveBeenLastCalledWith('read_worker_output_admin', { worker_id: 'w-1' })
+    })
+
+    it('GET /api/agent/workers/:id/trace → get_worker_trace（seq 缺省不下发，由 agent 取主线化身）', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({ events: [], next_cursor: '0' })
+
+      const response = await makeWebRequest(
+        TEST_WEB_PORT,
+        '/api/agent/workers/w-1/trace?seq=1&cursor=3',
+        'GET',
+        null,
+        token,
+      )
+      expect(response.statusCode).toBe(200)
+      expect(spy).toHaveBeenCalledWith('get_worker_trace', { worker_id: 'w-1', seq: 1, cursor: '3' })
+
+      await makeWebRequest(TEST_WEB_PORT, '/api/agent/workers/w-1/trace', 'GET', null, token)
+      expect(spy).toHaveBeenLastCalledWith('get_worker_trace', { worker_id: 'w-1' })
+      expect('seq' in (spy.mock.lastCall![1] as object)).toBe(false)
+    })
+  })
 })
 
 // Helper functions
