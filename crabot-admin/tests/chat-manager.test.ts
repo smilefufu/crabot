@@ -187,4 +187,31 @@ describe('ChatManager', () => {
       expect(messages[0].content.text).toBe('任务失败')
     })
   })
+
+  describe('handleSendMessage session_id 白名单（P4 manager task-8-brief additive）', () => {
+    it('应该接受 admin-chat（默认行为不变）', async () => {
+      const result = await chatManager.handleSendMessage({
+        session_id: 'admin-chat',
+        content: { type: 'text', text: '你好' },
+      })
+      expect(result.platform_message_id).toBeTruthy()
+    })
+
+    it('应该接受新放开的 system-tasks（protocol-agent-v3 §4.4 保留系统任务线程）', async () => {
+      const result = await chatManager.handleSendMessage({
+        session_id: 'system-tasks',
+        content: { type: 'text', text: '系统任务消息' },
+      })
+      expect(result.platform_message_id).toBeTruthy()
+    })
+
+    it('应该拒绝其它未知 session_id', async () => {
+      await expect(
+        chatManager.handleSendMessage({
+          session_id: 'some-other-session',
+          content: { type: 'text', text: '你好' },
+        })
+      ).rejects.toThrow('Unknown chat session: some-other-session')
+    })
+  })
 })

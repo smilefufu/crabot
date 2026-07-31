@@ -356,7 +356,10 @@ export class ChatManager {
   // ==========================================================================
 
   async handleSendMessage(params: ChatSendMessageParams): Promise<ChatSendMessageResult> {
-    if (params.session_id !== 'admin-chat') {
+    // P4 manager additive（task-8-brief.md）：放开 'system-tasks'（protocol-agent-v3 §4.4
+    // 保留的系统任务线程 key）以外的白名单不变——本分支 cutover 前没有任何调用方会传
+    // session_id='system-tasks'，默认行为（只认 'admin-chat'）不受影响。
+    if (params.session_id !== 'admin-chat' && params.session_id !== 'system-tasks') {
       throw new Error(`Unknown chat session: ${params.session_id}`)
     }
     const c = params.content

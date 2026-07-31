@@ -14,7 +14,7 @@
  * per-worker 锁——每次 upsertWorker 调用都是一次独立的、有限时长的原子读改写,不会在其
  * 内部触发对 harness per-worker 锁的等待。因此两把锁只可能是“外层→内层”单向嵌套,不存在
  * ABBA。同一 worker_id 的所有编排动作(spawnWorker 的注册段、handleStateChange、killWorker、
- * queryWorker 的判定+fork 段)都在同一把 per-worker 锁的临界区内完成“读台账 → 判断 → 写台账”,
+ * queryWorker 的判定段/落账段)都在同一把 per-worker 锁的临界区内完成“读台账 → 判断 → 写台账”,
  * 不允许 check-then-act 跨 await。
  *
  * 慢调用是否在锁内:
@@ -22,11 +22,11 @@
  *     唯一时机,必须与"台账已存在该 worker_id"这件事保持原子;锁内持有的时长等于一次
  *     spawn 编排,不是高频路径,换来的正确性(不会有第二个并发操作在半注册状态下观察到
  *     这个 worker)值得。
- *   - adapter.kill / adapter.fork:同样在锁内。二者都是"一次性、有限时长"的编排动作
- *     (不是像 sendInput 那样可能被连续高频调用的路径),放锁内换来"整个 kill/fork 序列
- *     原子完成,不会被并发的状态回调或另一次 kill/fork 打断"的简单正确性论证,没有值得
- *     牺牲这份简单性去换取的并发收益。
- *   - adapter.sendInput:不在 harness 的 per-worker 锁内。sendToWorker 只把"查台账 + 校验
+ *   - adapter.kill:在锁内。是"一次性、有限时长"的编排动作(不是像 sendInput 那样可能被
+ *     连续高频调用的路径),放锁内换来"整个 kill 序列原子完成,不会被并发的状态回调或
+ *     另一次 kill/fork 打断"的简单正确性论证,没有值得牺牲这份简单性去换取的并发收益。
+ *   - adapter.sendInput / adapter.fork:都不在 harness 的 per-worker 锁内(P4 Task 4 收口,
+ *     fork 从锁内挪出——见下方 queryWorker 注释)。sendToWorker 只把"查台账 + 校验
  *     cancelled + 入信箱"这段放进锁的临界区(这段不含 slow adapter 调用),真正的投递
  *     经 `WorkerInbox.flush()` 在锁外进行——inbox 自己的内部 AsyncMutex 已经保证同一信箱
  *     的并发 flush 不会重复投递。这样长时间的 tmux/CLI 调用不会长期占住 harness 的
@@ -36,6 +36,14 @@
  *     即便如此,`flush()` 与其它编排动作之间仍存在"投递到已失效化身"的极小窗口——
  *     这属于 §5.3 透明接续要处理的场景(Task 8 范围),Task 7 只保证 WorkerExitedError
  *     会原样从 sendInput → inbox.flush → sendToWorker 向上抛出,不做拦截或伪装。
+ *     queryWorker 的 adapter.fork 同理:cc 的 fork() 是 `await execFileAsync` 整个无头
+ *     `claude -p` 子进程跑完(几十秒到数分钟),放锁内会让同一 worker 上并发的
+ *     kill_worker/send_to_worker/再次 query_worker 全部在这把锁上排队等到 fork 落地——
+ *     manager 层面表现为"人类说停,卡几分钟才生效",违反 protocol-agent-v3 §4.1"manager
+ *     的 loop 内不存在阻塞等待原语"的精神(P4 Task 4 review 实测复现)。修法与 sendInput
+ *     同一范式:第一段锁只做"判定 + 构造 fork 请求所需的引用"(不含 adapter.fork 调用),
+ *     fork 本身在锁外执行,落地后重新取锁把 fork 化身写进台账。见 queryWorker 方法注释
+ *     "锁释放期间世界会变"一节。
  *
  * onStateChange 接线契约(P4 负责实际接线,P3 只提供出口):
  *   三个 adapter(builtin/claude-code/codex)都在各自构造函数的 deps 里接受一个可选的
@@ -721,14 +729,26 @@ export class WorkerHarness {
     await this.appendEvent(worker.worker_id, newHandle.seq, 'spawned', { impl: targetImpl, from_seq: source.seq })
   }
 
+  /**
+   * P4 Task 4 additive:`opts.seq` 缺省时逐字沿用既有行为(读主线化身,同 sendToWorker——
+   * 不被 fork 出的侧问分支顶替)。给了 `opts.seq` 则改读该 seq 对应的化身——供 query_worker
+   * 的侧问答案就绪后按事件里给出的 seq 读取(P3 终审已预留:"queryWorker 的 fork 答案无法
+   * 经 harness 读 → P4 接线时加按 seq 读输出的入口")。查找按 findIncarnationBySeq 的
+   * "取最后一条匹配"原则,与 findIncarnation/patchIncarnationBySeq 的 (impl,seq) 判定同一
+   * 纪律(见该函数注释)。seq 不存在时抛明确错误,不静默返回空 chunk。
+   */
   async readWorkerOutput(
     workerId: string,
-    cursor: OutputCursor
+    cursor: OutputCursor,
+    opts?: { seq?: number }
   ): Promise<{ chunk: string; nextCursor: OutputCursor }> {
     const found = await this.deps.ledger.findWorker(workerId)
     if (!found) throw new WorkerNotFoundError(workerId)
-    // 主线化身,同 sendToWorker——读输出默认读主线,不被 fork 出的侧问分支顶替。
-    const incarnation = mainlineIncarnation(found.worker)
+    const incarnation =
+      opts?.seq === undefined ? mainlineIncarnation(found.worker) : findIncarnationBySeq(found.worker, opts.seq)
+    if (!incarnation) {
+      throw new Error(`WorkerHarness.readWorkerOutput: no incarnation with seq=${opts?.seq} found for worker ${workerId}`)
+    }
     const adapter = this.deps.adapters.get(incarnation.impl as WorkerImplId)
     if (!adapter) {
       throw new Error(`WorkerHarness.readWorkerOutput: no adapter registered for impl '${incarnation.impl}'`)
@@ -980,46 +1000,162 @@ export class WorkerHarness {
     })
   }
 
+  /**
+   * P4 Task 4 收口(review 实证 A):adapter.fork 挪出 per-worker 锁,范式对齐 sendToWorker
+   * 的 adapter.sendInput(见文件头"慢调用是否在锁内")。三段式:
+   *
+   *   1. 锁内"判定段":读台账、定位主线化身、校验 adapter 存在 + capabilities().fork、
+   *      构造 fork 请求所需的 IncarnationRef——不含 adapter.fork 调用,失败(worker 不存在/
+   *      无 adapter/不支持 fork)在这段原地 appendEvent('query_failed') 后 rethrow(见下方
+   *      "失败留痕"一节)。
+   *   2. 锁外"慢调用段":`await adapter.fork(ref, question)`。cc 的 fork() 是
+   *      `execFileAsync` 整个无头 `claude -p` 子进程跑完,几十秒到数分钟——锁外执行意味着
+   *      这段时间内同一 worker 上的 kill_worker/send_to_worker/再次 query_worker 都不会
+   *      被这次侧问卡住。
+   *   3. 重新取锁的"落账段":把 fork 化身追加进台账 + appendEvent('state_changed', {kind:
+   *      'fork'})。
+   *
+   * "锁释放期间世界会变"怎么处理(brief 明确要求的收口点):第 2 步执行期间,这个 worker
+   * 完全有可能被并发的 killWorker/handoff 改变——task 转 cancelled、主线化身换了新的
+   * (impl, seq)。第 3 步重新取锁后不假设世界还是第 1 步看到的样子,只做两件事:
+   *   - `!found`(worker 记录本身从台账消失):理论上不会发生(harness 没有删除 worker
+   *     记录的路径,防御性分支),warn + appendEvent('query_failed', {reason:
+   *     'worker_disappeared'}) + 原样抛 WorkerNotFoundError——fork 已经真实跑过但没有
+   *     台账可挂,只能弃掉,不静默吞掉这次失败(避免"侧问其实成功了但完全查不到"这种比
+   *     "失败"更差的沉默状态)。
+   *   - `found` 存在(worker 还在,不论 task.status 是否已经变成终态,不论主线是否已经
+   *     被 handoff 换成别的 impl/seq):无条件追加 fork 化身。选择"始终追加、不因主线
+   *     终态/切换而放弃"的理由——fork 已经真实执行完并产出了结果(cc 的场景下是一次真实
+   *     的 `claude -p` 调用,有真实输出),协议不变量是"fork 不影响主线"(§5.3),不是
+   *     "主线状态决定 fork 结果是否有效";这两件事本就正交,没有理由因为主线在 fork
+   *     进行期间被 kill/交接就把这个已经跑完、已经产出答案的化身凭空丢弃——那样人类此前
+   *     发起的侧问会人间蒸发,查无此 fork,比"记录一个挂在已终止主线下的侧问"更违反
+   *     "不得既投递又丢失"这条要求。`forked_from` 固定为第 1 步捕获的源 seq(发起侧问那一刻
+   *     的主线),不是落账时重新读到的主线——fork 语义上永远从"发起时刻的那个主线化身"
+   *     分叉,与它之后是否还是主线无关(和 processStateChange/sendToWorker 各处"按
+   *     (impl,seq) 精确定位,不用运行时才知道的最新主线回填"是同一纪律)。
+   *
+   * 失败留痕(review 实证 B):`query_worker` 工具是字面 fire-and-forget(见
+   * manager/tools/worker-tools.ts 文件头),调用方那次 tool_result 里已经拿不到失败原因,
+   * `appendEvent('query_failed', ...)` 是 protocol-agent-v3 §10 要求的可观测性的唯一出口——
+   * 没有它,`debug-agent.mjs trace` 排查不到任何侧问失败的痕迹。四种失败原因(worker 不存在/
+   * 无 adapter/不支持 fork/fork 抛错)detail.reason 分别是 'worker_not_found' /
+   * 'no_adapter' / 'capability_not_supported' / 'fork_failed'(+ 防御性的
+   * 'worker_disappeared',见上)。worker 不存在时没有任何已知 seq 可挂,用 0 作 sentinel——
+   * 全系统真实 seq 从 1 起分配,0 不会和任何真实化身撞号,读者据此就能识别"这条事件不对应
+   * 任何具体化身"。
+   */
   async queryWorker(workerId: string, question: string): Promise<{ forkSeq: number }> {
-    return this.withLock(workerId, async () => {
+    interface QueryPrep {
+      readonly adapter: WorkerAdapter
+      readonly implId: WorkerImplId
+      readonly ref: IncarnationRef
+      readonly workspace: string
+    }
+
+    const prep = await this.withLock(workerId, async (): Promise<QueryPrep> => {
       const found = await this.deps.ledger.findWorker(workerId)
-      if (!found) throw new WorkerNotFoundError(workerId)
-      const { worker, dialogObjectId } = found
+      if (!found) {
+        await this.appendEvent(workerId, 0, 'query_failed', { reason: 'worker_not_found' })
+        throw new WorkerNotFoundError(workerId)
+      }
+      const { worker } = found
       // 侧问永远从当前主线化身分叉,不是"数组最后一个"——否则连续两次 query_worker 会让
       // 第二次 fork 挂在第一次 fork 的分支下面,而不是都从主线分叉(protocol-agent-v3 §5.3)。
       const incarnation = mainlineIncarnation(worker)
       const implId = incarnation.impl as WorkerImplId
       const adapter = this.deps.adapters.get(implId)
       if (!adapter) {
+        await this.appendEvent(workerId, incarnation.seq, 'query_failed', { reason: 'no_adapter', impl: implId })
         throw new Error(`WorkerHarness.queryWorker: no adapter registered for impl '${implId}'`)
       }
       if (!adapter.capabilities().fork) {
+        await this.appendEvent(workerId, incarnation.seq, 'query_failed', {
+          reason: 'capability_not_supported',
+          impl: implId,
+        })
         throw new CapabilityNotSupportedError(implId, 'fork')
       }
-
       const ref: IncarnationRef = { worker_id: workerId, seq: incarnation.seq, session_ref: incarnation.session_ref }
-      const forkHandle = await adapter.fork(ref, question)
+      return { adapter, implId, ref, workspace: incarnation.workspace }
+    })
+
+    // 锁外:见方法注释"锁外慢调用段"。
+    let forkHandle: IncarnationHandle
+    try {
+      forkHandle = await prep.adapter.fork(prep.ref, question)
+    } catch (err) {
+      await this.appendEvent(workerId, prep.ref.seq, 'query_failed', {
+        reason: 'fork_failed',
+        message: err instanceof Error ? err.message : String(err),
+      })
+      throw err
+    }
+
+    // 重新取锁:见方法注释"锁释放期间世界会变"一节。
+    return this.withLock(workerId, async () => {
+      const found = await this.deps.ledger.findWorker(workerId)
+      if (!found) {
+        console.warn(
+          `[WorkerHarness] queryWorker: worker ${workerId} disappeared from ledger while adapter.fork was in ` +
+            `flight; fork result (seq=${forkHandle.seq}) discarded`
+        )
+        await this.appendEvent(workerId, forkHandle.seq, 'query_failed', { reason: 'worker_disappeared' })
+        throw new WorkerNotFoundError(workerId)
+      }
+      const { dialogObjectId } = found
 
       const now = this.deps.now()
-      await this.deps.ledger.upsertWorker(dialogObjectId, workerId, (prev) => {
-        if (!prev) return undefined
-        // fork 是一次性侧问,不影响主线 task.status(protocol-agent-v3 §5.3:"不影响主线")。
-        // forked_from 标记它不在主线化身链上(§3);session_ref 取 forkHandle 自己的引用,
-        // 不是父化身的(§6.1 IncarnationHandle 自描述,handle.session_ref 就是 fork 化身真值)。
+      // P4 Task 4 第四轮收口(复审 PoC 实证):不能再硬编码 'running' 落账——
+      // ClaudeCodeAdapter.fork()(adapter.ts:452-460)在 `return handle` 之前就
+      // `await transitionExited(...)`,后者同步调用 `onStateChange` → handleStateChange →
+      // processStateChange → `await withLock(...)`。AsyncMutex.run 的入队在第一个 await 之前
+      // 就同步完成(见 async-mutex.ts),这次入队必然发生在 fork() 返回、这里重新取锁之前,
+      // 所以 processStateChange 100% 先于这段执行——此时台账里还没有这条 fork 化身,
+      // `findIncarnation` 落空,命中 processStateChange 的 `if (!target) return` 被永久
+      // 丢弃(cc 场景下 fork 是同步跑完的一次性 `claude -p` 调用,落地时几乎总已经是
+      // exited)。以 `adapter.state(forkHandle)` 现读现取为准,而不是假设为 running——
+      // cc 这类"fork 返回时已经跑完"的实现落账即是终态;builtin 的 fork() 把
+      // runForkBurst 做成 fire-and-forget(未 await 就返回 handle),这里读到的仍是
+      // running,后续真正的 onStateChange 回调到时台账里已经有这条化身,能正常找到并
+      // 修正,不会重演同一个丢弃。
+      const observedState = await prep.adapter.state(forkHandle)
+      const exitedOnCommit = observedState === 'exited'
+      await this.deps.ledger.upsertWorker(dialogObjectId, workerId, (prevWorker) => {
+        if (!prevWorker) return undefined
+        // fork 是一次性侧问,不影响主线 task.status(protocol-agent-v3 §5.3:"不影响主线")——
+        // 无条件追加,不因这段时间里主线是否已转终态/被 handoff 换掉而改变这个决定(理由见
+        // 方法注释)。forked_from 固定为发起侧问那一刻捕获的源 seq(prep.ref.seq),不是这里
+        // 重新读到的、可能已经不同的主线;session_ref 取 forkHandle 自己的引用,不是父化身的
+        // (§6.1 IncarnationHandle 自描述,handle.session_ref 就是 fork 化身真值)。
         const forkIncarnation: Incarnation = {
           seq: forkHandle.seq,
-          impl: implId,
-          state: 'running',
-          workspace: incarnation.workspace,
+          impl: prep.implId,
+          state: observedState,
+          workspace: prep.workspace,
           session_ref: forkHandle.session_ref,
           started_at: now,
-          forked_from: incarnation.seq,
+          forked_from: prep.ref.seq,
+          // adapter.state() 只回答 running/idle/exited 三态,不携带 endReason;fork 是
+          // 一次性侧问,正常跑完(cc 场景下是 `claude -p` 子进程退出)就是 completed——
+          // 真正的崩溃辨别依赖 adapter 主动上报的回调,但那次回调已经被上面的竞态吞掉、
+          // 不会再发生第二次,这里只能取这个合理缺省(与 processStateChange 对非 kill
+          // 触发的 exited 取 'completed' 同一缺省,见该方法注释)。
+          ...(exitedOnCommit ? { ended_at: now, ended_reason: 'completed' as IncarnationEndReason } : {}),
         }
-        return { ...prev, incarnations: [...prev.incarnations, forkIncarnation], updated_at: now }
+        return { ...prevWorker, incarnations: [...prevWorker.incarnations, forkIncarnation], updated_at: now }
       })
       // HarnessEventKind 没有专门的"fork/query"档位(worker-events.ts 是既定契约,Task 7
       // 不新增枚举值),用 state_changed 承载,detail 里标明是 fork 产生的新化身。
-      await this.appendEvent(workerId, forkHandle.seq, 'state_changed', { kind: 'fork', from_seq: incarnation.seq })
+      await this.appendEvent(workerId, forkHandle.seq, 'state_changed', { kind: 'fork', from_seq: prep.ref.seq })
+      if (exitedOnCommit) {
+        // 补发被 processStateChange 丢弃的那次回调本该产生的"侧问已结束"事件——否则
+        // manager 收不到唤醒,query_worker 形同虚设(protocol-agent-v3 §4.1)。用 'exited'
+        // 这个既有 kind(而不是 processStateChange 正常路径用的 'state_changed')区分两条
+        // 路径,天然不会重复:这次回调已经在竞态里被 `!target` 吞掉,不会再触发第二次
+        // 'state_changed' 事件,所以这里补发的 'exited' 永远只会发生一次。
+        await this.appendEvent(workerId, forkHandle.seq, 'exited', { reason: 'completed', kind: 'fork' })
+      }
       return { forkSeq: forkHandle.seq }
     })
   }
@@ -1208,6 +1344,23 @@ function findIncarnation(worker: LedgerWorker, impl: WorkerImplId, seq: number):
   let lastMatch: Incarnation | undefined
   for (const inc of worker.incarnations) {
     if (inc.impl === impl && inc.seq === seq) lastMatch = inc
+  }
+  return lastMatch
+}
+
+/**
+ * `readWorkerOutput(workerId, cursor, { seq })` 专用:按 seq 精确定位一个化身条目(不限
+ * 主线/fork,取最后一条匹配——与 findIncarnation 的 (impl,seq) 判定同一"取最后一条"原则)。
+ * 调用方(query_worker 触发的事件只给出 seq,不携带 impl)拿不到 impl 参与判定,因此只按
+ * seq 匹配;实践中 fork 化身的 impl 恒等于其父化身(adapter.fork 与父化身共用同一个
+ * adapter 实例),不会产生跨 impl 撞号的歧义——唯一的例外是该 worker 曾经历跨实现切换
+ * 且新旧 adapter 实例恰好在 seq 计数上撞号(protocol-agent-v3 §6.1 已知限制),这种边缘
+ * 情况下"取最后一条"与本文件其它同类查找函数保持一致的降级行为,不单独处理。
+ */
+function findIncarnationBySeq(worker: LedgerWorker, seq: number): Incarnation | undefined {
+  let lastMatch: Incarnation | undefined
+  for (const inc of worker.incarnations) {
+    if (inc.seq === seq) lastMatch = inc
   }
   return lastMatch
 }

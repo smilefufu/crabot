@@ -67,3 +67,15 @@ export function getWorkspacesRootDir(): string {
   }
   return path.resolve(getDataRootDir(), 'workspaces')
 }
+
+/**
+ * Manager session 持久化根目录:`<dataRoot>/agent/managers`。
+ * 与另外两个目录函数的语义区分:
+ * - getWorkspaceDir()：Agent 的全局工作目录（用户文件所在处，与存储无关）
+ * - getWorkspacesRootDir()：Per-task worker 的工作区根（每个 worker 一份隔离工作区）
+ * - getManagerSessionsDir()：manager loop 的会话状态存储根（每个 ManagerKey 一份持久化状态，
+ *   与上面两者都不同——这里存的是 loop 自身的对话历史/摘要，不是任务执行产物）
+ */
+export function getManagerSessionsDir(): string {
+  return path.join(getAgentDataDir(), 'managers')
+}

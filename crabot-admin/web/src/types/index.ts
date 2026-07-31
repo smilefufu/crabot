@@ -694,7 +694,7 @@ export interface Schedule {
 // SubAgent（与 crabot-admin/src/types.ts 镜像；保持字段名 100% 一致）
 // ============================================================================
 
-export type ModelRole = 'powerful' | 'cost_effective' | 'vision'
+export type ModelRole = 'powerful' | 'cost_effective' | 'vision' | 'manager'
 
 export interface BuiltinCapabilities {
   file_system: boolean

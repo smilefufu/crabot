@@ -2128,7 +2128,7 @@ export interface MemoryStats {
  *  - powerful: 主 worker / 复杂推理 / planning（如 Claude Sonnet, GPT-5）
  *  - cost_effective: 简单执行 / 摘要 / 高频低成本调用（如 DeepSeek, Haiku）
  *  - vision: 截图 / UI 识别 / 多模态图像理解 */
-export type ModelRole = 'powerful' | 'cost_effective' | 'vision'
+export type ModelRole = 'powerful' | 'cost_effective' | 'vision' | 'manager'
 
 /** Subagent 内置能力组开关。每组 5 个 boolean 控制对应工具集是否注入 subagent 工具表。
  *  详见 subagent-tool-filter.ts 的 classifyTool 映射。
