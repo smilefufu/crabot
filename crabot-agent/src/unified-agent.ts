@@ -56,7 +56,7 @@ import { McpConnector } from './agent/mcp-connector.js'
 import { createCrabMessagingServer, type PathMapping, type TaskContext } from './mcp/crab-messaging.js'
 import { toImageConnInfo, type ImageConnInfo } from './mcp/crab-image.js'
 import { TraceStore } from './core/trace-store.js'
-import { getAgentTraceDir, getAgentLogsDir, getWorkspaceDir } from './core/data-paths.js'
+import { getAgentTraceDir, getAgentLogsDir, getWorkspaceDir, getDataRootDir } from './core/data-paths.js'
 import { PromptManager } from './prompt-manager.js'
 import { createLSPManager, type LSPManager } from './lsp/lsp-manager.js'
 import type { BgEntityRecord, BgEntityStatus, BgEntityType } from './engine/bg-entities/types.js'
@@ -65,7 +65,11 @@ import { isResumable, redactCheckpoint } from './core/resume-checkpoint.js'
 import { AGENT_VERSION } from './constants.js'
 import { ContextManager, DEFAULT_COMPACT_THRESHOLD } from './engine/context-manager.js'
 import { DEFAULT_MAX_CONTEXT_TOKENS } from './engine/query-loop.js'
-import type { ManagerStack } from './manager/bootstrap.js'
+import { buildManagerStack, reconcileManagerStack, type ManagerStack } from './manager/bootstrap.js'
+import { makeAgentEventPublisher } from './manager/events.js'
+import { resolveManagerModelConfig } from './manager/model-slot.js'
+import { createCrabMemoryServer } from './mcp/crab-memory.js'
+import { dialogObjectIdForGroup, type DialogObjectId, type ManagerKey } from './workers/harness/ledger-types.js'
 import {
   filterAndPageWorkers,
   buildWorkerDetail,
@@ -278,9 +282,9 @@ export class UnifiedAgent extends ModuleBase {
   private crabSelfHandles: Map<ModuleId, string> = new Map()
 
   /**
-   * Manager/Worker 栈（protocol-agent-v3 §4-§7）。**P5 Task 4 阶段没有生产注入点**：
-   * 启动路径上的构造与接线（`buildManagerStack` + 事件出口 + 启动对账）是 P5 Task 6 的事，
-   * 本 task 只留字段与取件口，让 §8.2/§8.3 的 RPC handler 能被测试注入。
+   * Manager/Worker 栈（protocol-agent-v3 §4-§7）。构造函数里由 `initializeManagerStack()`
+   * 装配（P5 Task 6），启动对账在 `onStart()` 里异步跑。
+   * 仍是可选字段：既有测试用 `Object.create(prototype)` 造壳、只塞 handler 用到的字段，
    * 未装配时读端点 fail-fast 报错，不返回空结果——空结果会被 admin 误读成"没有 worker"。
    */
   private managerStack?: ManagerStack
@@ -388,6 +392,9 @@ export class UnifiedAgent extends ModuleBase {
       this.initializeAgentLayer(this.agentConfig)
     }
 
+    // 装配 Manager/Worker 栈（见方法注释：为什么在构造函数里、为什么不依赖 agentConfig）
+    this.initializeManagerStack()
+
     // 注册 RPC 方法
     this.registerMethods()
   }
@@ -456,6 +463,86 @@ export class UnifiedAgent extends ModuleBase {
         )
       }
     }
+  }
+
+  /**
+   * 装配 Manager/Worker 栈（protocol-agent-v3 §4-§7，P5 Task 6）。
+   *
+   * **为什么在构造函数里而不是 `onStart()`**：`buildManagerStack` 是 O(1) 的纯构造——不探测
+   * 子进程、不扫盘、不建目录（bootstrap.ts 文件头的第一条硬边界，有专门用例钉住）；而
+   * §8.2/§8.3 的五个 RPC 在 `registerMethods()` 里无条件注册，方法一旦可被调用，取件口就必须
+   * 已经就绪，否则 admin 的只读 REST 会在"进程已起、onStart 未跑完"这段窗口里返回 500。
+   *
+   * **为什么不挂在 `agentConfig` 的有无上**：LLM 只在 manager episode 真的要跑时才解析（下面
+   * 两个 thunk，§11 的 `manager` slot → 回退 `powerful`）。现网此刻并没有配 `manager` slot，
+   * 把解析放在装配期会让 agent 直接起不来；放在 thunk 里则最坏只是某次 `trigger_schedule`
+   * 的路由在 episode 内抛错，被 handler 的 `.catch()` 记成一行日志，而**读模型四件套照常可用**
+   * （它们只读台账，与 LLM 无关）。thunk 同时顺带满足 §11 的热更语义：manager 的 model 于
+   * 下一个 episode 生效。
+   *
+   * **本阶段刻意不提供 `builtinSpawnDefaults`**：它要的是 builtin worker 的完整 LLM + 工具面
+   * 注入，而 `spawnWorker` 目前压根不读它（只有 `handoffIncarnation` 消费），补上去也补不掉
+   * "manager 走缺省 `spawn_worker` 必挂"这个缺口——那是 P7 cutover 前必须修的一项（见
+   * `.superpowers/sdd/progress.md` Task 1 条目）。这里给一个半成品反而会掩盖它。
+   */
+  private initializeManagerStack(): void {
+    this.managerStack = buildManagerStack({
+      dataRoot: getDataRootDir(),
+      now: () => new Date().toISOString(),
+      // §11：manager slot → 回退 powerful。两个 thunk 每个 episode 各解析一次，
+      // 未配置时抛出的错误信息由 model-slot.ts 给出（明确指出缺哪两个 slot）。
+      managerAdapter: () => adapterFromSdkEnv(this.buildSdkEnv(resolveManagerModelConfig(this.agentConfig?.model_config))),
+      managerModel: () => resolveManagerModelConfig(this.agentConfig?.model_config).model_id,
+      // crab-messaging：与 `createMcpConfigs` 同款依赖，但不传 `getTaskContext`——manager 不是
+      // task，且 tool-face 已把 `send_message` 的 intent 去掉，ask_human 路径对 manager 不存在。
+      messagingDeps: {
+        rpcClient: this.rpcClient,
+        moduleId: this.config.moduleId,
+        getAdminPort: () => this.getAdminPort(),
+        resolveChannelPort: (channelId) => this.getChannelPort(channelId),
+      },
+      // crab-memory：manager 没有 task 上下文，visibility/scopes 取 agent-handler 在缺配置时
+      // 用的同一组缺省值（'public' / []），sourceType 记 'system'（不是某次对话的产物）。
+      // manager 的记忆权限档位目前没有解析入口，P6/P7 接 §4.3 权限时再收敛。
+      memoryServer: createCrabMemoryServer(
+        {
+          rpcClient: this.rpcClient,
+          moduleId: this.config.moduleId,
+          getMemoryPort: () => this.getMemoryPort(),
+        },
+        { visibility: 'public', scopes: [], sourceType: 'system', isMasterPrivate: false },
+      ),
+      callAdmin: async <P, R>(method: string, params: P): Promise<R> =>
+        this.rpcClient.call<P, R>(await this.getAdminPort(), method, params, this.config.moduleId),
+      dialogObjectIdFor: (key) => this.dialogObjectIdForManagerKey(key),
+      // 对外事件出口（§9.2 `agent.task_status_changed`）：真实 rpcClient 注入。
+      // 翻译与去重在 manager/events.ts，这里只负责把口子接上。
+      publishEvent: makeAgentEventPublisher({
+        rpcClient: this.rpcClient,
+        moduleId: this.config.moduleId,
+        now: () => new Date().toISOString(),
+      }),
+    })
+  }
+
+  /**
+   * `ManagerKey`（`channel_id::session_id`）→ 台账聚合键 `DialogObjectId`（§3）。
+   *
+   * ⚠️ **P7 cutover 前必须修**：协议要求私聊聚合成 `friend:<friend_id>`（同一 friend 跨 channel
+   * 共享一份台账），但那需要 admin 的 friend 解析，而 `ManagerRegistryDeps.dialogObjectIdFor`
+   * 是**同步**签名，这里没有任何可同步查到 session 类型/friend 的入口——agent 侧唯一知道
+   * "这个 session 是私聊且对端是谁"的地方是入站消息链路，而 P5 明令该链路零改动。
+   * 因此本阶段一律派生成 `group:<channel_id>:<session_id>`。
+   *
+   * 现阶段无害：P5 没有任何生产调用方经这套栈 spawn worker（admin 的 scheduler 调用点未切换），
+   * 台账上不会出现被归错档的条目。切换调用点之前必须先解决它，二选一：把签名改成异步，
+   * 或在入站链路上维护一份 `ManagerKey → DialogObjectId` 缓存。
+   */
+  private dialogObjectIdForManagerKey(key: ManagerKey): DialogObjectId {
+    const sep = key.indexOf('::')
+    return sep < 0
+      ? dialogObjectIdForGroup(key, '')
+      : dialogObjectIdForGroup(key.slice(0, sep), key.slice(sep + 2))
   }
 
   /**
@@ -3321,6 +3408,7 @@ export class UnifiedAgent extends ModuleBase {
     // 探測是否有飛書 channel，決定是否注入 read_feishu_document 工具
     this.detectFeishuChannel().catch(() => {/* 探测失败不影响启动 */})
     this.sessionManager.startCleanup()
+    this.startManagerStackReconciliation()
 
     // Connect to external MCP servers (Admin-configured)
     if (this.agentConfig?.mcp_servers && this.agentConfig.mcp_servers.length > 0) {
@@ -3352,6 +3440,36 @@ export class UnifiedAgent extends ModuleBase {
         }
       } catch { /* best effort */ }
     }, ONE_DAY_MS)
+  }
+
+  /**
+   * manager 栈的启动对账（§12），`onStart()` 里发一次，**不 await**。
+   *
+   * **为什么不 await**：对账要向三个 adapter 逐个问在途化身的死活（CLI 实现会起子进程），
+   * 台账非空时耗时不可控；agent 的启动不能挂在它上面——`start()` 返回晚了，MM 的健康探测
+   * 会把 agent 当成起不来。失败只 warn：对账修的是"进程重启后台账里残留的 running 化身"，
+   * 修不成最坏是这些条目继续显示为 running，不影响任何新任务。
+   *
+   * **台账为空时（现网此刻的真实状态）的开销**：`scanOrphans` 一次 readdir 撞 ENOENT 直接返回，
+   * `reconcileOnStartup` 走 `LedgerStore.init()` → 一次 `mkdir -p <dataRoot>/agent/ledgers`
+   * 加一次空目录 readdir，随后零 worker 可对账。唯一的可观测副作用就是那个空目录被建出来。
+   */
+  private startManagerStackReconciliation(): void {
+    const stack = this.managerStack
+    if (!stack) return
+    void reconcileManagerStack(stack)
+      .then((report) => {
+        // 空台账（现网常态）不打日志，避免每次启动都刷一行没有信息量的 0/0/0。
+        if (report.revived.length === 0 && report.failed.length === 0) return
+        console.log(
+          `[${this.config.moduleId}] manager 栈启动对账完成：` +
+          `revived=${report.revived.length} failed=${report.failed.length} unchanged=${report.unchanged.length}`
+        )
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error)
+        console.warn(`[${this.config.moduleId}] manager 栈启动对账失败（不影响启动）:`, message)
+      })
   }
 
   protected override async onStop(): Promise<void> {

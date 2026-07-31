@@ -2,7 +2,8 @@
  * manager 栈装配(P5 Task 1)—— `src/manager/bootstrap.ts`。
  *
  * 四条不变量:
- * ① `buildManagerStack` 无 I/O 副作用(不探测子进程、不扫盘、不建目录);
+ * ① `buildManagerStack` 无 I/O 副作用(不探测子进程、不扫盘、不建目录)——证据强度与残留缺口
+ *    见该用例内的注释;
  * ② harness.ts 文件头的四步接线契约成立(空 Map → harness → adapter 拿 handleStateChange →
  *    set 回同一 Map),且 adapter 的状态回调真的能被 harness 收到并落账;
  * ③ `onAsyncError` 经 registry 的 toolFace 工厂端到端接到 worker-tools 的 `query_worker`;
@@ -114,9 +115,6 @@ async function waitUntil(cond: () => Promise<boolean> | boolean, timeoutMs = 400
   throw new Error('waitUntil timed out')
 }
 
-const FS_MUTATING_OR_SCANNING: ReadonlyArray<'mkdir' | 'readdir' | 'readFile' | 'writeFile' | 'access' | 'stat' | 'rename' | 'rm'> =
-  ['mkdir', 'readdir', 'readFile', 'writeFile', 'access', 'stat', 'rename', 'rm']
-
 describe('manager bootstrap（P5 Task 1）', () => {
   let tmpRoot: string
   /** 刻意指向一个不存在的子目录:任何"顺手建目录"的 I/O 都会在盘上留下痕迹被用例抓住。 */
@@ -161,15 +159,25 @@ describe('manager bootstrap（P5 Task 1）', () => {
       vi.spyOn(LedgerStore.prototype, 'listAllWorkers'),
       vi.spyOn(LedgerStore.prototype, 'findWorker'),
     ]
-    // 直接盯住 fs.promises 本身:比"没报错"强得多——任何一次真实的建目录/扫目录/读写都会被记到。
-    const fsSpies = FS_MUTATING_OR_SCANNING.map((name) => vi.spyOn(fs, name))
+    // 这里曾经还有一组 `vi.spyOn(fs, 'mkdir' | 'readdir' | …)`(fs.promises 上的八个方法),
+    // **已删**:它拦不住被测代码。生产侧一律 `import * as fs from 'node:fs/promises'`——ESM
+    // 命名空间导入的绑定在模块求值时就固化了,事后 patch `require('fs').promises` 的属性对它
+    // 无效;而且那组 spy 也没覆盖 `appendFile` / `fs.watch` / `child_process`,即使拦得住也不
+    // 是"零 I/O"的充分条件。留着只会给人虚假安全感。
+    //
+    // **真正兜住"零 I/O"结论的是下面两条**:
+    // (a) 行为口的 spy —— detect / scanOrphans / LedgerStore.{init,listAllWorkers,findWorker}
+    //     是这套栈里所有子进程探测与扫盘的**入口**,零调用即没有从这几个口子出去过;
+    // (b) 盘上自证 —— `dataRoot` 整棵子树在装配后仍是 ENOENT,任何一次顺手的建目录/写文件
+    //     都会留下痕迹。
+    // 残留缺口(如实记):对 `dataRoot` **之外**已存在文件的纯读取,这两条都看不见。评审
+    // (review-p5-task12.md)按逐个通读 9 个构造函数补上了这一段。
 
     const stack = buildManagerStack(makeDeps())
 
     for (const spy of detectSpies) expect(spy).not.toHaveBeenCalled()
     expect(scanOrphansSpy).not.toHaveBeenCalled()
     for (const spy of ledgerSpies) expect(spy).not.toHaveBeenCalled()
-    for (const spy of fsSpies) expect(spy, `fs.${spy.getMockName()} 不应在装配期被调用`).not.toHaveBeenCalled()
 
     vi.restoreAllMocks()
 

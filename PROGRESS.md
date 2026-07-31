@@ -1,6 +1,18 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-30 — Manager/Worker 拆分 P4：manager loop（分支 feat/mw-p4-manager-loop，未合并 main）
+> 最后更新：2026-07-31 — Manager/Worker 拆分 P5：scheduler 路由与 Admin 读代理（分支 feat/mw-p5-scheduler-readmodel，未合并 main）
+
+## 2026-07-31 — Manager/Worker 拆分 P5：scheduler 路由与 Admin 只读代理（生产链路仍未切换）
+
+- 计划：`crabot-docs/superpowers/plans/2026-07-31-mw-p5-scheduler-readmodel.md`。交付 protocol-agent-v3 §8.2/§8.3/§9.2/§10.3：agent 侧 `trigger_schedule` + 读模型四件套 RPC、`agent.task_status_changed` 事件、manager 栈的**生产装配点**；admin 侧只**新增** `/api/agent/workers*` 四个只读 REST 端点。
+- **与 roadmap 的一处有意偏离**：roadmap P5 原写"admin 侧改调用点"，本阶段**不改**——切过去会让 scheduled 任务走 manager 而人类消息仍走 dispatcher，构成 spec 明确排除的混合运行态，且 P7 两个阻塞项会在这条路上产生用户可见错误。调用点切换与 SYSTEM_SESSION 哨兵退役一并移入 P7 cutover。
+- 六个 task：① `manager/bootstrap.ts` 栈装配（严格照 harness 四步接线契约，O(1) 纯构造、启动路径不探测子进程/不扫盘）；② `manager/events.ts` 对外事件（harness 化身级事件 → 任务级事件的翻译与去重）；③ `manager/read-model.ts` 读模型纯逻辑（过滤/排序/分页，`updated_at desc` + `worker_id asc` 兜底，越界返空不报错）；④ `unified-agent.ts` 五个 RPC handler（`trigger_schedule` 写成同步方法，"受理即返回"体现在签名上；权限身份经 WakeEvent 下传到 `origin.creator_friend_id`）；⑤ admin 先抽 `proxyAgentRpc` 样板再加四个端点（抽之前先写 11 条特征化用例钉住既有 4 个 `/api/agent/*`）；⑥ 启动接线 + 集成测试 + 零现网影响自证。
+- **评审拦下并根治的一个缺陷**：事件发布方原来现读台账取 `new_status`，而 `LedgerStore.findWorker` 不进互斥锁——读晚于下一次落账就把中间状态整条吞掉，PoC 里终态 `completed` 一次都没发出去（cutover 后表现为"任务永远显示 running"）。根治 = `HarnessEvent` 自带落账后的 `task_status`（23 个调用点逐个分类：8 个 task 级迁移点带、15 个化身级/纯记录点不带），缺字段退回现读台账而不是跳过（跳过会把"缺字段"变成新的静默丢事件路径）。
+- 启动接线的三个决定（Task 6）：装配放**构造函数**（RPC 一旦注册，取件口就必须就绪）；启动对账放 `onStart()` 里**不 await**、失败仅 warn（对账要逐个问 adapter 化身死活，会起子进程，启动不能挂在它上面；空台账开销 = 一次 ENOENT readdir + 一次 `mkdir -p ledgers` + 一次空 readdir）；LLM 解析放 thunk 里（§11 `manager ?? powerful`）——**现网此刻并没有配 manager slot，放装配期解析会让 agent 直接起不来**，放 thunk 最坏只是某次路由在 episode 内抛错被 catch，读模型四件套照常可用。
+- **P7 cutover 前必须补的四项**（前两项 P4 已记，后两项 P5 新增）：① `processStateChange` 对自然结束硬编码 `endReason='completed'`，失败 worker 的 `task.status` 失真，读模型的 status 在修掉前不可信；② `spawn_worker` 不传 `SpawnSpec.builtin`，而 bootstrap 的 `defaultImpl='builtin'`，manager 第一次走缺省派工必挂；③ `dialogObjectIdFor` 目前一律派生成 `group:<channel>:<session>`——私聊按 `friend:<id>` 跨 channel 聚合需要 admin 的 friend 解析，而该依赖是同步签名、agent 侧唯一知情处是入站链路（P5 明令零改动）；④ admin 调用点切到 `trigger_schedule` 时，`last_task_id` 与 `admin.schedule_triggered` 载荷需改造（`{accepted:true}` 不回 task_id）。
+- **零现网影响自证**（逐条实证，非"看起来干净"）：`unified-agent.ts` 相对 base 只有一行删除（`data-paths` 那行 import 加了个 `getDataRootDir`），`handleMessageReceived`/`processDirectBatch`/`processGroupLaneBatch`/`handleProcessMessage` 四个入站函数体与 base **逐字节相同**；`crab-messaging.ts`/`agent-handler.ts`/`engine/**`/`orchestration/**`/`dispatcher/**` 零改动；admin 的 `upsertTask`/`applyStatusTransition`/`runReconciliation`/`handleCancelTask` 函数体逐字节相同（只多了 JSDoc 弃用注记）；admin scheduler 调用点仍是 `create_task_from_schedule`，全仓无任何生产调用方引用 `trigger_schedule`。
+- **一条不能回避的坦白**：对入站链路做的变异（改坏群聊分流、改坏 batch 合并）**全量测试一条都没抓到**——`unified-agent.ts` 的入站链路目前几乎没有直接单测（`tests/agent/unified-loop-private.test.ts` 只断言方法存在）。所以"入站链路未受影响"这个结论**只由 diff 证据支撑，不由测试支撑**；P7 cutover 真要改这条链路时，必须先补覆盖。
+- 验证：`crabot-agent` 196 files / 2216 passed | 2 skipped（基线 2209 + 本次集成 8 - 1 已知 flaky `bg-entities/trace.test.ts`，单跑 50 全绿）；`crabot-admin` 122 files / 1068 tests 全绿；两侧 `tsc --noEmit` 干净；`tmux ls` 无新增会话、`/tmp` 无残留。
 
 ## 2026-07-30 — Manager/Worker 拆分 P4：manager loop（纯新增未激活）
 
@@ -29,18 +41,13 @@
 - 评审沉淀（10 个 task + 全分支终审，多轮 PoC 实证）：fork 化身劫持主线、drain 与 in-flight 双投、workspace 软链绕过、revive 不回填旧化身终态、handoff 死结、主线守卫漏 impl、kill 与 in-flight 竞态复活 cancelled——均已修复并有回归测试；顺带修掉 cc/codex `state()` 无 runtime 时不探活（曾使"tmux worker 存活→重连接管"对 CLI worker 失效）。
 - 已知限制（入协议或执行记录）：化身 seq 非跨实例全局唯一（(impl,seq) 末条匹配已缓解）、`isAlive=true` 时 state 精度限于 meta 快照、tsconfig 排除 tests 致测试从未被类型检查（另开小 PR）。
 
-## 2026-07-29 — Manager/Worker 拆分 P2：tmux 驱动与外部 CLI adapter
+## 2026-07-29 — Manager/Worker 拆分 P1 + P2（均已合并，PR #47 / #48）
 
-- P1（PR #47）当日四轮 auto review 后合并。P2 交付（纯新增未激活）：tmux 驱动层（new-session+pipe-pane 批处理防首输出竞态、send-keys -l 防键名解释）、CLI hook 事件文件通道（纯 POSIX printf 追加 + fs.watch/轮询,无 HTTP 端点）、provision 物化基建（skill 复制/mcp 双格式渲染含 TOML quoted-key/自述文件）、claude-code adapter（--session-id 预知 session_ref、Stop hook 通知、无头 -p --fork-session 侧问、readTrace 解析 projects JSONL）、codex adapter（文档语义实现：CODEX_HOME 隔离、rollout 文件名 session 发现、fork 定案不支持 [openai/codex#11750/#17568]）、契约套件复跑（cc/codex 各 10 例,mock CLI 走真实 tmux）。tests/workers 163 用例。
-- 评审沉淀：P1 锁纪律在 cc adapter 的两处回归被抓（syncState 全段入锁、spawn 提交后置）；安全审查修 session_ref 注入（UUID 边界校验+shQuote 双层）；codex auth.json 0600+gitignore。
-- 已知限制：本机无 codex,其 adapter 待真机校准（8 项清单见执行记录）；协议已同步修正（codex fork=false、通知为事件文件通道,crabot-docs 5e95b20）。
+> 已被 P3–P5 覆盖，压缩保留；细节见 `crabot-docs/superpowers/plans/2026-07-28-manager-worker-split-roadmap.md` 与同目录执行记录。
 
-## 2026-07-29 — Manager/Worker 拆分 P1：worker 契约与内置 adapter
-
-- 背景：manager/worker 双 agent 拆分立项。总体架构 spec `crabot-docs/superpowers/specs/2026-07-28-manager-worker-agent-split-design.md` 已确认；协议落地 protocol-agent-v3（v2 标记 Superseded，admin task 域退役为读模型，TaskStatus 精简，crab-messaging 收窄为 manager 持有）；实施路线图 P1–P8 见 `crabot-docs/superpowers/plans/2026-07-28-manager-worker-split-roadmap.md`。
-- P1 交付（本 PR，纯新增未激活，现网零影响）：`crabot-agent/src/workers/` —— 契约类型（与 protocol-agent-v3 §3/§6.1 逐字对齐）、append-only session 树（任意节点分支，取代 ResumeCheckpoint 的方向）、OutputLog 游标增量读（UTF-8 边界安全）、builtin adapter（burst 状态机：spawn/sendInput/resume/fork/kill/scanOrphans，per-worker 互斥）、可复用契约一致性套件（P2 的 claude-code/codex adapter 直接复跑）。tests/workers 47 用例。
-- 评审沉淀：四轮并发竞态修复（sendInput 双发、收尾窗口、catch 锁外判死、kill 交接窗口 killRequested 闭环）；burst 显式 disableCompaction（压缩与 session 树协同留 P7）；resume 幂等提交次序（append→writeMeta→注册+标记）。
-- 待办：P2（tmux 驱动 + claude-code/codex adapter）起手前先写细化 plan；终审裁决"留"的 Minor 清单见 roadmap 同目录执行记录。
+- 立项背景：架构 spec `crabot-docs/superpowers/specs/2026-07-28-manager-worker-agent-split-design.md`；协议落地 protocol-agent-v3（v2 标记 Superseded，admin task 域退役为读模型，TaskStatus 精简，crab-messaging 收窄为 manager 持有）。
+- P1（纯新增未激活，47 用例）：`crabot-agent/src/workers/` worker 契约类型、append-only session 树（取代 ResumeCheckpoint 方向）、OutputLog 游标增量读、builtin adapter burst 状态机、可复用契约一致性套件。评审沉淀：四轮并发竞态修复 + resume 幂等提交次序。
+- P2（纯新增未激活，163 用例）：tmux 驱动层、CLI hook 事件文件通道（纯 POSIX printf + fs.watch，无 HTTP 端点）、provision 物化基建、claude-code adapter、codex adapter。评审沉淀：cc adapter 两处锁纪律回归、session_ref 注入（UUID 校验 + shQuote 双层）、codex auth.json 0600。codex adapter 的真机校准见 2026-07-30 条目。
 
 ## 2026-07-27 — 任务终态与 worker 生命周期对齐（issue #43 下半）
 
