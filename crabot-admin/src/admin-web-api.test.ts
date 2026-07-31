@@ -1476,6 +1476,158 @@ describe('Admin Web API', () => {
       expect(response.body.sources.session_template_id).toBe('group_default')
     })
   })
+
+  // ==========================================================================
+  // 既有 /api/agent/* 转发端点的特征化测试（P5 Task 5 第一步）
+  //
+  // 这四个 handler 各自重复同一段 503/500 样板，本组用例在抽 proxyAgentRpc **之前**
+  // 就写下它们当前的行为（method / params / 状态码 / body），抽完之后必须逐条照旧通过——
+  // 这是"纯重构、行为一字不变"的证据，而不是靠肉眼比对。
+  // ==========================================================================
+  describe('既有 /api/agent/* 转发端点（重构护栏）', () => {
+    const spyAgentRpc = () =>
+      vi.spyOn(
+        admin as unknown as { callAgentRpc: (...args: unknown[]) => Promise<unknown> },
+        'callAgentRpc',
+      )
+
+    it('GET /api/agent/traces 转发 get_traces（默认 limit/offset，status 缺省为 undefined）', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({ traces: [], total: 0 })
+
+      const response = await makeWebRequest(TEST_WEB_PORT, '/api/agent/traces', 'GET', null, token)
+
+      expect(response.statusCode).toBe(200)
+      expect(spy).toHaveBeenCalledWith('get_traces', { limit: 20, offset: 0, status: undefined })
+    })
+
+    it('GET /api/agent/traces 透传 limit/offset/status', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({ traces: [], total: 0 })
+
+      await makeWebRequest(TEST_WEB_PORT, '/api/agent/traces?limit=5&offset=10&status=completed', 'GET', null, token)
+
+      expect(spy).toHaveBeenCalledWith('get_traces', { limit: 5, offset: 10, status: 'completed' })
+    })
+
+    it('GET /api/agent/traces：agent 不可达 → 503 + 固定文案', async () => {
+      const token = await loginAndGetToken()
+      spyAgentRpc().mockRejectedValue(new Error('Agent not available'))
+
+      const response = await makeWebRequest<{ error: string }>(TEST_WEB_PORT, '/api/agent/traces', 'GET', null, token)
+
+      expect(response.statusCode).toBe(503)
+      expect(response.body.error).toBe('Agent not available')
+    })
+
+    it('GET /api/agent/traces：其他错误 → 500 + 原始 message', async () => {
+      const token = await loginAndGetToken()
+      spyAgentRpc().mockRejectedValue(new Error('boom'))
+
+      const response = await makeWebRequest<{ error: string }>(TEST_WEB_PORT, '/api/agent/traces', 'GET', null, token)
+
+      expect(response.statusCode).toBe(500)
+      expect(response.body.error).toBe('boom')
+    })
+
+    it('GET /api/agent/traces/:traceId 转发 get_trace', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({ trace: { trace_id: 't-1' } })
+
+      const response = await makeWebRequest(TEST_WEB_PORT, '/api/agent/traces/t-1', 'GET', null, token)
+
+      expect(response.statusCode).toBe(200)
+      expect(spy).toHaveBeenCalledWith('get_trace', { trace_id: 't-1' })
+    })
+
+    it('GET /api/agent/traces/:traceId：not found → 404 + 原始 message（该端点独有分支）', async () => {
+      const token = await loginAndGetToken()
+      spyAgentRpc().mockRejectedValue(new Error('Trace not found: t-404'))
+
+      const response = await makeWebRequest<{ error: string }>(TEST_WEB_PORT, '/api/agent/traces/t-404', 'GET', null, token)
+
+      expect(response.statusCode).toBe(404)
+      expect(response.body.error).toBe('Trace not found: t-404')
+    })
+
+    it('GET /api/agent/traces/:traceId：ECONNREFUSED → 503', async () => {
+      const token = await loginAndGetToken()
+      spyAgentRpc().mockRejectedValue(new Error('connect ECONNREFUSED 127.0.0.1:19000'))
+
+      const response = await makeWebRequest<{ error: string }>(TEST_WEB_PORT, '/api/agent/traces/t-1', 'GET', null, token)
+
+      expect(response.statusCode).toBe(503)
+      expect(response.body.error).toBe('Agent not available')
+    })
+
+    it('DELETE /api/agent/traces 转发 clear_traces（带 body / 空 body）', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({ cleared_count: 3 })
+
+      const withBody = await makeWebRequest(
+        TEST_WEB_PORT,
+        '/api/agent/traces',
+        'DELETE',
+        { before: '2026-01-01T00:00:00.000Z' },
+        token,
+      )
+      expect(withBody.statusCode).toBe(200)
+      expect(spy).toHaveBeenCalledWith('clear_traces', { before: '2026-01-01T00:00:00.000Z' })
+
+      await makeWebRequest(TEST_WEB_PORT, '/api/agent/traces', 'DELETE', null, token)
+      expect(spy).toHaveBeenLastCalledWith('clear_traces', {})
+    })
+
+    it('DELETE /api/agent/traces：agent 不可达 → 503', async () => {
+      const token = await loginAndGetToken()
+      spyAgentRpc().mockRejectedValue(new Error('connect failed'))
+
+      const response = await makeWebRequest<{ error: string }>(TEST_WEB_PORT, '/api/agent/traces', 'DELETE', null, token)
+
+      expect(response.statusCode).toBe(503)
+      expect(response.body.error).toBe('Agent not available')
+    })
+
+    it('GET /api/agent/traces/search 转发 search_traces（time_range 需 start+end 同时存在）', async () => {
+      const token = await loginAndGetToken()
+      const spy = spyAgentRpc().mockResolvedValue({ traces: [], total: 0 })
+
+      await makeWebRequest(
+        TEST_WEB_PORT,
+        '/api/agent/traces/search?task_id=task-1&keyword=needle&status=completed&start=2026-01-01&end=2026-02-01&limit=3&offset=1',
+        'GET',
+        null,
+        token,
+      )
+      expect(spy).toHaveBeenCalledWith('search_traces', {
+        task_id: 'task-1',
+        keyword: 'needle',
+        status: 'completed',
+        time_range: { start: '2026-01-01', end: '2026-02-01' },
+        limit: 3,
+        offset: 1,
+      })
+
+      await makeWebRequest(TEST_WEB_PORT, '/api/agent/traces/search?start=2026-01-01', 'GET', null, token)
+      expect(spy).toHaveBeenLastCalledWith('search_traces', { limit: 20, offset: 0 })
+    })
+
+    it('GET /api/agent/traces/search：agent 不可达 → 503', async () => {
+      const token = await loginAndGetToken()
+      spyAgentRpc().mockRejectedValue(new Error('Agent not available'))
+
+      const response = await makeWebRequest<{ error: string }>(
+        TEST_WEB_PORT,
+        '/api/agent/traces/search',
+        'GET',
+        null,
+        token,
+      )
+
+      expect(response.statusCode).toBe(503)
+      expect(response.body.error).toBe('Agent not available')
+    })
+  })
 })
 
 // Helper functions

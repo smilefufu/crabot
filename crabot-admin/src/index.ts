@@ -9564,6 +9564,38 @@ export class AdminModule extends ModuleBase {
     }
   }
 
+  /**
+   * `/api/agent/*` 转发端点的统一样板：调 agent RPC → 200 回传结果；失败按 agent 可达性
+   * 映射 503（agent 不可达，固定文案）/ 500（其余，回传原始 message）。
+   *
+   * 抽自 handleGetAgentTracesApi / handleGetAgentTraceApi / handleClearAgentTracesApi /
+   * handleSearchAgentTracesApi 四处**逐字相同**的 catch 块（P5 Task 5，纯重构）。
+   * `notFoundWhen` 只为保留 handleGetAgentTraceApi 独有的 404 分支——不传时行为与抽取前
+   * 完全一致；该分支优先于 503/500 判定，与原实现的判定顺序相同。
+   */
+  private async proxyAgentRpc<P, R>(
+    res: ServerResponse,
+    method: string,
+    params: P,
+    notFoundWhen?: (message: string) => boolean,
+  ): Promise<void> {
+    try {
+      const result = await this.callAgentRpc<P, R>(method, params)
+      sendJson(res, 200, result)
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      if (notFoundWhen?.(msg)) {
+        sendJson(res, 404, { error: msg })
+        return
+      }
+      const isUnreachable =
+        msg.includes('Agent not available') ||
+        msg.includes('ECONNREFUSED') ||
+        msg.includes('connect failed')
+      sendJson(res, isUnreachable ? 503 : 500, { error: isUnreachable ? 'Agent not available' : msg })
+    }
+  }
+
   private memoryModules: Array<{ module_id: string; port: number; name: string }> = []
 
   /**
@@ -9609,25 +9641,13 @@ export class AdminModule extends ModuleBase {
     res: ServerResponse,
     url: URL
   ): Promise<void> {
-    try {
-      const limit = parseInt(url.searchParams.get('limit') ?? '20', 10)
-      const offset = parseInt(url.searchParams.get('offset') ?? '0', 10)
-      const status = url.searchParams.get('status') ?? undefined
-      const result = await this.callAgentRpc<
-        { limit?: number; offset?: number; status?: string },
-        { traces: unknown[]; total: number }
-      >('get_traces', { limit, offset, status })
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify(result))
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error)
-      const isUnreachable =
-        msg.includes('Agent not available') ||
-        msg.includes('ECONNREFUSED') ||
-        msg.includes('connect failed')
-      res.writeHead(isUnreachable ? 503 : 500, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: isUnreachable ? 'Agent not available' : msg }))
-    }
+    const limit = parseInt(url.searchParams.get('limit') ?? '20', 10)
+    const offset = parseInt(url.searchParams.get('offset') ?? '0', 10)
+    const status = url.searchParams.get('status') ?? undefined
+    await this.proxyAgentRpc<
+      { limit?: number; offset?: number; status?: string },
+      { traces: unknown[]; total: number }
+    >(res, 'get_traces', { limit, offset, status })
   }
 
   private async handleGetAgentTraceApi(
@@ -9635,55 +9655,36 @@ export class AdminModule extends ModuleBase {
     res: ServerResponse,
     traceId: string
   ): Promise<void> {
-    try {
-      const result = await this.callAgentRpc<
-        { trace_id: string },
-        { trace: unknown }
-      >('get_trace', { trace_id: traceId })
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify(result))
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error)
-      if (msg.includes('not found') || msg.includes('Trace not found')) {
-        res.writeHead(404, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: msg }))
-      } else {
-        const isUnreachable =
-          msg.includes('Agent not available') ||
-          msg.includes('ECONNREFUSED') ||
-          msg.includes('connect failed')
-        res.writeHead(isUnreachable ? 503 : 500, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: isUnreachable ? 'Agent not available' : msg }))
-      }
-    }
+    await this.proxyAgentRpc<{ trace_id: string }, { trace: unknown }>(
+      res,
+      'get_trace',
+      { trace_id: traceId },
+      (msg) => msg.includes('not found') || msg.includes('Trace not found'),
+    )
   }
 
   private async handleClearAgentTracesApi(
     req: IncomingMessage,
     res: ServerResponse
   ): Promise<void> {
+    let params: { before?: string; trace_ids?: string[] }
     try {
       const body = await new Promise<string>((resolve) => {
         let data = ''
         req.on('data', (chunk) => { data += chunk })
         req.on('end', () => resolve(data))
       })
-      const params = body ? (JSON.parse(body) as { before?: string; trace_ids?: string[] }) : {}
-      const result = await this.callAgentRpc<
-        { before?: string; trace_ids?: string[] },
-        { cleared_count: number }
-      >('clear_traces', params)
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify(result))
+      params = body ? (JSON.parse(body) as { before?: string; trace_ids?: string[] }) : {}
     } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error)
-      const isUnreachable =
-        msg.includes('Agent not available') ||
-        msg.includes('ECONNREFUSED') ||
-        msg.includes('connect failed')
-      res.writeHead(isUnreachable ? 503 : 500, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: isUnreachable ? 'Agent not available' : msg }))
+      // body 不是合法 JSON：抽 proxyAgentRpc 之前 JSON.parse 的异常落在同一个 catch 里，
+      // 走的是"非不可达 → 500 + 原始 message"分支。这里显式保留该分支，避免重构改行为。
+      sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+      return
     }
+    await this.proxyAgentRpc<
+      { before?: string; trace_ids?: string[] },
+      { cleared_count: number }
+    >(res, 'clear_traces', params)
   }
 
   private async handleSearchAgentTracesApi(
@@ -9691,35 +9692,23 @@ export class AdminModule extends ModuleBase {
     res: ServerResponse,
     url: URL
   ): Promise<void> {
-    try {
-      const params: Record<string, unknown> = {}
-      const taskId = url.searchParams.get('task_id')
-      if (taskId) params.task_id = taskId
-      const keyword = url.searchParams.get('keyword')
-      if (keyword) params.keyword = keyword
-      const status = url.searchParams.get('status')
-      if (status) params.status = status
-      const start = url.searchParams.get('start')
-      const end = url.searchParams.get('end')
-      if (start && end) params.time_range = { start, end }
-      params.limit = parseInt(url.searchParams.get('limit') ?? '20', 10)
-      params.offset = parseInt(url.searchParams.get('offset') ?? '0', 10)
+    const params: Record<string, unknown> = {}
+    const taskId = url.searchParams.get('task_id')
+    if (taskId) params.task_id = taskId
+    const keyword = url.searchParams.get('keyword')
+    if (keyword) params.keyword = keyword
+    const status = url.searchParams.get('status')
+    if (status) params.status = status
+    const start = url.searchParams.get('start')
+    const end = url.searchParams.get('end')
+    if (start && end) params.time_range = { start, end }
+    params.limit = parseInt(url.searchParams.get('limit') ?? '20', 10)
+    params.offset = parseInt(url.searchParams.get('offset') ?? '0', 10)
 
-      const result = await this.callAgentRpc<
-        Record<string, unknown>,
-        { traces: unknown[]; total: number }
-      >('search_traces', params)
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify(result))
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error)
-      const isUnreachable =
-        msg.includes('Agent not available') ||
-        msg.includes('ECONNREFUSED') ||
-        msg.includes('connect failed')
-      res.writeHead(isUnreachable ? 503 : 500, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: isUnreachable ? 'Agent not available' : msg }))
-    }
+    await this.proxyAgentRpc<
+      Record<string, unknown>,
+      { traces: unknown[]; total: number }
+    >(res, 'search_traces', params)
   }
 
   private async handleDeleteTaskApi(
