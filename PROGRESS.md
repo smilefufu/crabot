@@ -1,6 +1,18 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-31 — Manager/Worker 拆分 P5：scheduler 路由与 Admin 读代理（分支 feat/mw-p5-scheduler-readmodel，未合并 main）
+> 最后更新：2026-07-31 — Manager/Worker 拆分 P7 / PR A：入站链路测试网（分支 feat/mw-p7a-inbound-test-net，未合并 main）
+
+## 2026-07-31 — Manager/Worker 拆分 P7 / PR A：入站链路测试网（只加测试，生产代码零改动）
+
+- 计划：`crabot-docs/superpowers/plans/2026-07-31-mw-p7-a-inbound-test-net.md`（roadmap Phase 0 PR A，阻塞项 #8）。**它是所有 P7 后续的前置**：上一条 P5 记录里那句"对入站链路做变异，全量 2216 个用例一条都没抓到"就是本 PR 要还的债——cutover（PR J）要重写的正是这条人类消息的唯一通路。
+- 交付 4 个测试文件 98 例（`crabot-agent/tests/inbound/`）：`handle-message-received`（14，分流/未配置早退/lane key）、`process-direct-batch`（22，侦察 §A.2 的 8 件事 + 顺序）、`process-group-lane-batch`（34，barrier + memory 两档 fallback + 退避反馈）、`process-admin-chat-message`（28，RPC 路由 + admin chat "三不"）。**生产代码零改动**（每次变异/改写后 `git status` 核空）。
+- **12 处变异逐个植入实测，全部被抓**（M12 拆成误入 lane / 误入 attention / 注入 reaction 三变体）：M1(14 挂) M2(4) M3(2) M4(4) M5(2) M6(3) M7(1) M8(2) M9(6) M10(1) M11(6) M12a(4) M12b(4) M12c(3)。**旧网基线实测：除 M11 有一条执行器层单测外，其余全部 0 命中**——群聊入站链路此前完全裸奔（删掉整条退避反馈、把 batch 合并改成只取第一条、把入站改成同步等 worker，2256 个用例一条都察觉不到）。
+- **反向验证同样做了**（防止测试写成"实现的镜像"）：三类等价改写——提取局部变量（`processDirectBatch` 的 sessionId/channelId/lastMessage）、抽出纯函数 helper（memory 档位派生，跨私聊+群聊两处、穿过 M5 变异锚点）、调换无依赖语句 + 上提纯计算（`handleMessageReceived` 的两个缓存写入互换、laneKey 提到分流之前、穿过 M1 变异锚点）——三次 `tests/inbound/` 98 例**全绿**且 `tsc` 干净。网够密，同时不是刺猬。
+- 手法定调（Task 1 结论，后三个 task 沿用）：**用真实构造函数 `new UnifiedAgent(roles: [])` 而不是 `Object.create(prototype)`**——分流语义的一半在构造函数的 lane/attention 接线里，造壳等于把接线抄进测试，变异就只能靠参数透传断言去抓。唯一打破"纯真实装配"的地方是 `vi.mock` 模块级 `dispatch`（LLM 入口，无实例注入口），**`executeDispatchActions` 保留真件**——M8/M11/supplement 三分支的语义恰恰长在执行器里。全链路零 `setTimeout`、零 fake timer。
+- 断言落在语义不变量而非参数透传：M4/M9 的落点分别是 `getToolPermissionConfig()` 的输出与 `AttentionScheduler.getCurrentIntervalMs()` 的退避档位毫秒值（×5 / 逐级累积 / 封顶 / 出声拉回 min），M10 用 promise 闸门断"本批已返回而 worker 还在跑"，M7 在 fake dispatch 里跑真实 `prefetchQuotedMessages` 断引用原文真的取得回来。
+- **`handleProcessMessage` 的 `channel` 分支证实为死代码**，按 plan **不给它写测试**：① 全仓（含 4 个 channel 仓）grep RPC `process_message`，唯一生产调用方 `crabot-admin/src/chat-manager.ts:220` 固定传 `source_type:'admin_chat'`；② `setPendingRequest` 全仓无调用方 → `:1588` 取代检查恒真 → 该分支即使被调用也永远空转返回。已连同 `SessionManager.setPendingRequest/getPendingRequest`、`assembleFrontContext` 的死形参 `_memoryPermissions` 一起记入 **PR L 退役清单**（`.superpowers/sdd/progress.md`）。
+- **发现但未修的生产问题 O1–O8**（本 PR 只加测试，不修；台账在 `.superpowers/sdd/progress.md`）：O1 群聊两条早退与 catch 都不调 `reportResult`（`!sdkEnvWorker` 早退还漏 `clearAllBarriers`）；O2 `setPendingRequest` 无调用方；O3 admin chat 的 `!sdkEnvWorker` 早退不发 `chat_callback`（Master Chat 界面静默卡住）；O4 `currentResolvedPerms` 并发 race（作者已自标）；O5 `tests/manager/events.test.ts` 是新发现的 flaky；O6 `assembleFrontContext` 第三参完全没用；O7 `AttentionScheduler.reportResult` 无条件 `scheduleCheck` 覆盖已有 timer → 泄漏的旧 timer 先触发、退避被绕过、`stopAll` 也清不掉；O8 群聊路径从不 `updateLastMessageTime` → `get_status` 的活跃会话数永不含群聊。
+- 验证：`crabot-agent` 全量 `2318 passed | 2 skipped`（203 文件），基线（新文件移出实测）`2290 | 2`（202 文件），差值 = 新增 28，**零回归**；`tsc --noEmit` 干净；`tests/inbound/` 98 例连跑 3 次全绿。已知 flaky（判定变异命中前必须单跑复核）：`tests/engine/bg-entities/*`、`tests/manager/events.test.ts`、`harness-integration` 的 tmux 用例。
 
 ## 2026-07-31 — Manager/Worker 拆分 P5：scheduler 路由与 Admin 只读代理（生产链路仍未切换）
 
