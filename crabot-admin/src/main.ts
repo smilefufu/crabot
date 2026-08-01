@@ -40,6 +40,9 @@ async function main(): Promise<void> {
         'scheduler.schedule_created',
         'scheduler.schedule_deleted',
         'channel.message_received',
+        // protocol-agent-v3 §9.2：task 真相源迁到 agent 之后，状态变更由 agent 发。
+        // 不订阅 = Master Chat 的任务状态卡永远停在创建时的那一帧。
+        'agent.task_status_changed',
       ],
     },
     {

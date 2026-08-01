@@ -6,7 +6,7 @@ type ScheduleId = string
 type TimerHandle = { type: 'cron'; cron: Cron } | { type: 'native'; id: ReturnType<typeof setInterval> }
 
 export interface ScheduleEngineOptions {
-  onTrigger: (schedule: Schedule) => Promise<{ task_id: string } | void>
+  onTrigger: (schedule: Schedule) => Promise<{ accepted: true } | void>
 }
 
 export class ScheduleEngine {

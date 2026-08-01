@@ -628,8 +628,8 @@ describe('AdminModule - Schedule Management', () => {
       )
       triggerCallSpy = vi.spyOn(RpcClient.prototype, 'call').mockImplementation(
         (_port: unknown, method: string, params: unknown) => {
-          if (method === 'create_task_from_schedule') {
-            return Promise.resolve({ task_id: 'mock-task-id', assigned_worker: 'mock-worker' })
+          if (method === 'trigger_schedule') {
+            return Promise.resolve({ accepted: true })
           }
           if (method === 'get_session') {
             return Promise.reject(new Error(`Session not found: ${(params as { session_id?: string }).session_id}`))
@@ -700,7 +700,13 @@ describe('AdminModule - Schedule Management', () => {
       expect(response.data.schedule.execution_count).toBeGreaterThanOrEqual(1)
     })
 
-    it('passes rendered task_template.input to create_task_from_schedule', async () => {
+    /**
+     * P7/J：调用点切到 `trigger_schedule`（protocol-agent-v3 §8.2）。
+     * §8.2 的入参里没有 `task_type` / `input` / `resolved_permissions`——
+     * 模板变量仍在 title/description 上渲染，权限改由 agent 按 `creator_friend_id` 解析，
+     * 所以 admin 传的是**事实**（谁建的、是不是内置），不是解析结果。
+     */
+    it('切到 trigger_schedule：渲染 title/description，不再下发 task_type/input/resolved_permissions', async () => {
       const schedResult = await makeProtocolRequest<{ schedule: Schedule }>(
         TEST_PROTOCOL_PORT,
         'create_schedule',
@@ -717,8 +723,6 @@ describe('AdminModule - Schedule Management', () => {
               target_channel_id: 'feishu-fengyan',
               target_session_id: 'e283b6c6-373a-4568-ab6f-db134fa71790',
               target_session_type: 'group',
-              rendered_marker: 'watermark={{watermark}}',
-              nested: { date: '{{date}}' },
             },
           },
         }
@@ -729,18 +733,81 @@ describe('AdminModule - Schedule Management', () => {
 
       await makeProtocolRequest(TEST_PROTOCOL_PORT, 'trigger_now', { schedule_id: scheduleId })
 
-      // 用 findLast 取最近一次 create_task_from_schedule 调用（前一个 test 同样 trigger_now 了一条无 input 的 schedule）
-      const agentCall = triggerCallSpy.mock.calls.findLast((call) => call[1] === 'create_task_from_schedule')
+      // 旧 RPC 一次都不该再被调到
+      expect(
+        triggerCallSpy.mock.calls.some((call) => call[1] === 'create_task_from_schedule'),
+      ).toBe(false)
+
+      const agentCall = triggerCallSpy.mock.calls.findLast((call) => call[1] === 'trigger_schedule')
       expect(agentCall).toBeTruthy()
       const payload = agentCall![2] as Record<string, unknown>
-      expect(payload.input).toMatchObject({
-        target_channel_id: 'feishu-fengyan',
-        target_session_id: 'e283b6c6-373a-4568-ab6f-db134fa71790',
-        target_session_type: 'group',
+      expect(payload.schedule_id).toBe(scheduleId)
+      expect(payload.title).toMatch(/^Targeted Task \d{4}-\d{2}-\d{2}$/)
+      expect(String(payload.description)).toContain('Send update at 20')
+      expect(payload.task_type).toBeUndefined()
+      expect(payload.input).toBeUndefined()
+      expect(payload.resolved_permissions).toBeUndefined()
+    })
+
+    it('trigger_schedule 带上 creator_friend_id（权限改由 agent 侧按它解析）', async () => {
+      const friendResult = await makeProtocolRequest<{ friend: Friend }>(
+        TEST_PROTOCOL_PORT,
+        'create_friend',
+        {
+          display_name: 'Schedule Creator',
+          permission: 'normal',
+          channel_identities: [
+            { channel_id: 'wechat-棉花糖', platform_user_id: 'creator-user', platform_display_name: 'Creator' },
+          ],
+        }
+      )
+      expect(friendResult.success).toBe(true)
+      const creatorId = friendResult.data!.friend.id
+
+      const schedResult = await makeProtocolRequest<{ schedule: Schedule }>(
+        TEST_PROTOCOL_PORT,
+        'create_schedule',
+        {
+          name: 'Creator Fact Passthrough',
+          trigger: { type: 'cron', expression: '0 0 * * *' },
+          task_template: { type: 'routine', title: 'T', description: 'D', priority: 'normal', tags: [] },
+          creator_friend_id: creatorId,
+        }
+      )
+      expect(schedResult.success).toBe(true)
+
+      await makeProtocolRequest(TEST_PROTOCOL_PORT, 'trigger_now', {
+        schedule_id: schedResult.data!.schedule.id,
       })
-      expect((payload.input as Record<string, unknown>).rendered_marker).toContain('watermark=')
-      const nested = (payload.input as Record<string, unknown>).nested as Record<string, unknown>
-      expect((nested as { date: string }).date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+
+      const payload = triggerCallSpy.mock.calls.findLast(
+        (call) => call[1] === 'trigger_schedule',
+      )![2] as Record<string, unknown>
+      expect(payload.creator_friend_id).toBe(creatorId)
+    })
+
+    it('受理即返回：trigger_now 不再回 task_id，schedule 也不再写 last_task_id', async () => {
+      const schedResult = await makeProtocolRequest<{ schedule: Schedule }>(
+        TEST_PROTOCOL_PORT,
+        'create_schedule',
+        {
+          name: 'Accepted Only Schedule',
+          trigger: { type: 'cron', expression: '0 0 * * *' },
+          task_template: { type: 'routine', title: 'T', description: 'D', priority: 'normal', tags: [] },
+        }
+      )
+
+      const response = await makeProtocolRequest<{ accepted: true; schedule: Schedule; task_id?: string }>(
+        TEST_PROTOCOL_PORT,
+        'trigger_now',
+        { schedule_id: schedResult.data!.schedule.id }
+      )
+
+      expect(response.success).toBe(true)
+      expect(response.data.accepted).toBe(true)
+      expect(response.data.task_id).toBeUndefined()
+      expect(response.data.schedule.last_task_id).toBeUndefined()
+      expect(response.data.schedule.execution_count).toBeGreaterThanOrEqual(1)
     })
 
     it('does not fuzzy-repair stale group target_session without platform_session_id', async () => {
@@ -770,7 +837,7 @@ describe('AdminModule - Schedule Management', () => {
 
       await makeProtocolRequest(TEST_PROTOCOL_PORT, 'trigger_now', { schedule_id: schedResult.data!.schedule.id })
 
-      const agentCall = triggerCallSpy.mock.calls.findLast((call) => call[1] === 'create_task_from_schedule')
+      const agentCall = triggerCallSpy.mock.calls.findLast((call) => call[1] === 'trigger_schedule')
       expect(agentCall).toBeTruthy()
       const payload = agentCall![2] as { target_session?: Record<string, unknown> }
       expect(payload.target_session).toEqual({
@@ -822,7 +889,7 @@ describe('AdminModule - Schedule Management', () => {
 
       await makeProtocolRequest(TEST_PROTOCOL_PORT, 'trigger_now', { schedule_id: schedResult.data!.schedule.id })
 
-      const agentCall = triggerCallSpy.mock.calls.findLast((call) => call[1] === 'create_task_from_schedule')
+      const agentCall = triggerCallSpy.mock.calls.findLast((call) => call[1] === 'trigger_schedule')
       expect(agentCall).toBeTruthy()
       const payload = agentCall![2] as { target_session?: Record<string, unknown> }
       expect(payload.target_session).toEqual({
@@ -858,7 +925,7 @@ describe('AdminModule - Schedule Management', () => {
 
       await makeProtocolRequest(TEST_PROTOCOL_PORT, 'trigger_now', { schedule_id: schedResult.data!.schedule.id })
 
-      const agentCall = triggerCallSpy.mock.calls.findLast((call) => call[1] === 'create_task_from_schedule')
+      const agentCall = triggerCallSpy.mock.calls.findLast((call) => call[1] === 'trigger_schedule')
       expect(agentCall).toBeTruthy()
       const payload = agentCall![2] as { target_session?: Record<string, unknown> }
       expect(payload.target_session).toEqual({
@@ -873,8 +940,8 @@ describe('AdminModule - Schedule Management', () => {
       const defaultCallImplementation = triggerCallSpy.getMockImplementation()
       triggerCallSpy.mockImplementation(
         (_port: unknown, method: string, params: unknown) => {
-          if (method === 'create_task_from_schedule') {
-            return Promise.resolve({ task_id: 'mock-task-id', assigned_worker: 'mock-worker' })
+          if (method === 'trigger_schedule') {
+            return Promise.resolve({ accepted: true })
           }
           if (method === 'get_session') {
             return Promise.resolve({
@@ -928,7 +995,7 @@ describe('AdminModule - Schedule Management', () => {
         expect(schedResult.success).toBe(true)
         await makeProtocolRequest(TEST_PROTOCOL_PORT, 'trigger_now', { schedule_id: schedResult.data!.schedule.id })
 
-        const agentCall = triggerCallSpy.mock.calls.findLast((call) => call[1] === 'create_task_from_schedule')
+        const agentCall = triggerCallSpy.mock.calls.findLast((call) => call[1] === 'trigger_schedule')
         expect(agentCall).toBeTruthy()
         const payload = agentCall![2] as { target_session?: Record<string, unknown> }
         expect(payload.target_session).toEqual({
@@ -946,8 +1013,8 @@ describe('AdminModule - Schedule Management', () => {
       const defaultCallImplementation = triggerCallSpy.getMockImplementation()
       triggerCallSpy.mockImplementation(
         (_port: unknown, method: string, params: unknown) => {
-          if (method === 'create_task_from_schedule') {
-            return Promise.resolve({ task_id: 'mock-task-id', assigned_worker: 'mock-worker' })
+          if (method === 'trigger_schedule') {
+            return Promise.resolve({ accepted: true })
           }
           if (method === 'get_session') {
             return Promise.reject(new Error(`Session not found: ${(params as { session_id?: string }).session_id}`))
@@ -995,7 +1062,7 @@ describe('AdminModule - Schedule Management', () => {
         expect(schedResult.success).toBe(true)
         await makeProtocolRequest(TEST_PROTOCOL_PORT, 'trigger_now', { schedule_id: schedResult.data!.schedule.id })
 
-        const agentCall = triggerCallSpy.mock.calls.findLast((call) => call[1] === 'create_task_from_schedule')
+        const agentCall = triggerCallSpy.mock.calls.findLast((call) => call[1] === 'trigger_schedule')
         expect(agentCall).toBeTruthy()
         const payload = agentCall![2] as { target_session?: Record<string, unknown> }
         expect(payload.target_session).toEqual({
