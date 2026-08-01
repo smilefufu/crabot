@@ -456,9 +456,23 @@ export const Chat: React.FC = () => {
         )
       }
     } else if (message.type === 'chat_push') {
-      // worker 经 send_message 伪 channel 回流的新消息，直接追加
-      // message.message 已是新结构 ChatMessage，无需转换
-      setMessages((prev) => [...prev, { ...message.message, status: 'completed' as const }])
+      // manager 经 send_message 伪 channel 回流的新消息（完整 ChatMessage，含 media）。
+      // admin 落库时会把当时 in-flight 的 request_id 盖上（chat-manager.storeAssistantMessage），
+      // 命中同 request_id 的 processing 占位就原地替换——正常回复的转圈气泡靠这一步收口。
+      // 没有 request_id（manager 主动推送）或占位已被别的路径收口过 → 维持原来的追加行为。
+      const incoming = message.message
+      setMessages((prev) => {
+        const next: MessageState = { ...incoming, status: 'completed' as const }
+        const idx = incoming.request_id
+          ? prev.findIndex(
+              (m) => m.request_id === incoming.request_id && m.role === 'assistant' && m.status === 'processing'
+            )
+          : -1
+        if (idx < 0) return [...prev, next]
+        const updated = [...prev]
+        updated[idx] = next
+        return updated
+      })
     } else if (message.type === 'chat_task_update') {
       // 任务状态/计划变更：upsert 进 taskStatuses（终态也保留供图标显示 ✓/✗）
       upsertTaskStatus(message.task)

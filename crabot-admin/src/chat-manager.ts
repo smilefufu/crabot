@@ -365,7 +365,7 @@ export class ChatManager {
     const c = params.content
     if (c.type === 'system_event') {
       // system_event：text 是协议规定的人类可读 fallback，按纯文本落库
-      return this.storeAssistantMessage({ type: 'text', text: c.text ?? '' })
+      return this.storeAssistantMessage({ type: 'text', text: c.text ?? '' }, params.session_id)
     }
     // 归一：media[] 权威；否则单 media_url / file_path 包装成单元素列表
     const incoming: Array<Pick<MessageContent, 'media_url' | 'file_path' | 'filename' | 'mime_type'>> =
@@ -414,14 +414,36 @@ export class ChatManager {
       type,
       ...(text ? { text } : {}),
       ...(media.length > 0 ? { media, media_url: media[0].media_url } : {}),
-    })
+    }, params.session_id)
   }
 
-  private async storeAssistantMessage(content: MessageContent): Promise<ChatSendMessageResult> {
+  /**
+   * 认领当前 in-flight 的 request_id 并消费掉（Map 保插入序，取最早那条——它最先被回答）。
+   * manager 正常回话走 send_message → chat_push，前端要靠这个 id 才能把「处理中」占位气泡
+   * 原地收口（失败兜底走 chat_reply，用的是同一把钥匙）。
+   *
+   * 「认领即消费」定死了一轮多条回复的语义：第一条替换占位，后续几条按新消息追加。
+   * 没有 in-flight（manager 主动推送，不是在回应某条请求）时返回 undefined，前端纯追加。
+   */
+  private claimPendingRequestId(): string | undefined {
+    const first = this.pendingRequests.keys().next()
+    if (first.done) return undefined
+    this.pendingRequests.delete(first.value)
+    return first.value
+  }
+
+  private async storeAssistantMessage(
+    content: MessageContent,
+    sessionId: string,
+  ): Promise<ChatSendMessageResult> {
+    // 占位气泡只在 Master Chat（admin-chat）会话里存在；'system-tasks' 是另一条线程，
+    // 不能吃掉 Master Chat 的 in-flight request
+    const requestId = sessionId === 'admin-chat' ? this.claimPendingRequestId() : undefined
     const message: ChatMessage = {
       message_id: generateId(),
       role: 'assistant',
       content,
+      ...(requestId !== undefined ? { request_id: requestId } : {}),
       timestamp: generateTimestamp(),
     }
     this.messages.set(message.message_id, message)

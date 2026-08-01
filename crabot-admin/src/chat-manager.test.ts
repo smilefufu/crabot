@@ -402,6 +402,133 @@ describe('tagMessageTask / tagUserMessageByRequestId', () => {
   })
 })
 
+/**
+ * PR J：manager 正常回复走 send_message → chat_push，前端要靠 request_id 才能把
+ * 「处理中」占位气泡收口。admin 侧的职责是给落库消息盖上当时 in-flight 的 request_id。
+ */
+describe('chat_push 收口占位：storeAssistantMessage 认领 in-flight request_id', () => {
+  beforeEach(async () => {
+    await fs.rm(TEST_DATA_DIR, { recursive: true, force: true }).catch(() => {})
+    await fs.mkdir(TEST_DATA_DIR, { recursive: true })
+  })
+
+  afterEach(async () => {
+    await fs.rm(TEST_DATA_DIR, { recursive: true, force: true }).catch(() => {})
+  })
+
+  function attachClientStub(mgr: ChatManager): Array<{ type: string; [k: string]: unknown }> {
+    const pushed: Array<{ type: string; [k: string]: unknown }> = []
+    ;(mgr as unknown as { activeClient: unknown }).activeClient = {
+      readyState: 1, // WebSocket.OPEN
+      send: (data: string) => { pushed.push(JSON.parse(data)) },
+    }
+    return pushed
+  }
+
+  /** 造出一条 in-flight 请求（pendingRequests 有条目、占位气泡已生出） */
+  async function makeInFlight(requestId: string): Promise<{
+    mgr: ChatManager
+    pushed: Array<{ type: string; [k: string]: unknown }>
+  }> {
+    const mgr = await makeManagerWithRpc(async () => ({}))
+    const pushed = attachClientStub(mgr)
+    await mgr.handleInboundMessage({ request_id: requestId, text: '帮我看下这个', files: [] })
+    expect(pushed.some((p) => p.type === 'chat_status' && p.request_id === requestId)).toBe(true)
+    pushed.length = 0
+    return { mgr, pushed }
+  }
+
+  it('正常回复：落库消息与 chat_push 载荷都盖上 in-flight 的 request_id', async () => {
+    const { mgr, pushed } = await makeInFlight('req-inflight-1')
+    await mgr.handleSendMessage({
+      session_id: 'admin-chat',
+      content: { type: 'text', text: '看完了，结论是……' },
+    })
+    const stored = mgr.getMessages(10).find((m) => m.role === 'assistant')
+    expect(stored?.request_id).toBe('req-inflight-1')
+    const push = pushed.find((p) => p.type === 'chat_push')
+    expect(push).toBeTruthy()
+    expect((push as { message: { request_id?: string } }).message.request_id).toBe('req-inflight-1')
+  })
+
+  it('带 media 的正常回复：chat_push 仍是完整 ChatMessage（media 不丢）且带 request_id', async () => {
+    const { mgr, pushed } = await makeInFlight('req-inflight-media')
+    await mgr.handleSendMessage({
+      session_id: 'admin-chat',
+      content: {
+        type: 'image',
+        text: '图在这',
+        media: [{ media_url: 'https://example.com/a.png', mime_type: 'image/png' }],
+      },
+    })
+    const push = pushed.find((p) => p.type === 'chat_push') as
+      { message: { request_id?: string; content: { media?: unknown[] } } }
+    expect(push.message.request_id).toBe('req-inflight-media')
+    expect(push.message.content.media).toHaveLength(1)
+  })
+
+  it('无 in-flight（manager 主动推送）：不盖 request_id，前端据此纯追加', async () => {
+    const mgr = await makeManager()
+    const pushed = attachClientStub(mgr)
+    await mgr.handleSendMessage({
+      session_id: 'admin-chat',
+      content: { type: 'text', text: '顺嘴提醒你一句' },
+    })
+    expect(mgr.getMessages(10)[0].request_id).toBeUndefined()
+    const push = pushed.find((p) => p.type === 'chat_push') as { message: { request_id?: string } }
+    expect(push.message.request_id).toBeUndefined()
+  })
+
+  it('一轮多条回复：认领即消费——只有第一条带 request_id，后续几条不带', async () => {
+    const { mgr, pushed } = await makeInFlight('req-inflight-2')
+    await mgr.handleSendMessage({ session_id: 'admin-chat', content: { type: 'text', text: '收到，我去办' } })
+    await mgr.handleSendMessage({ session_id: 'admin-chat', content: { type: 'text', text: '办好了' } })
+    const pushes = pushed.filter((p) => p.type === 'chat_push') as Array<{ message: { request_id?: string } }>
+    expect(pushes).toHaveLength(2)
+    expect(pushes[0].message.request_id).toBe('req-inflight-2')
+    expect(pushes[1].message.request_id).toBeUndefined()
+  })
+
+  it('两条 in-flight：按 FIFO 认领（最早那条最先被回答）', async () => {
+    const mgr = await makeManagerWithRpc(async () => ({}))
+    await mgr.handleInboundMessage({ request_id: 'req-a', text: '第一问', files: [] })
+    await mgr.handleInboundMessage({ request_id: 'req-b', text: '第二问', files: [] })
+    const pushed = attachClientStub(mgr)
+    await mgr.handleSendMessage({ session_id: 'admin-chat', content: { type: 'text', text: '答第一问' } })
+    await mgr.handleSendMessage({ session_id: 'admin-chat', content: { type: 'text', text: '答第二问' } })
+    const pushes = pushed.filter((p) => p.type === 'chat_push') as Array<{ message: { request_id?: string } }>
+    expect(pushes.map((p) => p.message.request_id)).toEqual(['req-a', 'req-b'])
+  })
+
+  it('session_id=system-tasks：不认领 Master Chat 的 in-flight request', async () => {
+    const { mgr, pushed } = await makeInFlight('req-inflight-3')
+    await mgr.handleSendMessage({ session_id: 'system-tasks', content: { type: 'text', text: '系统线程的消息' } })
+    const push = pushed.find((p) => p.type === 'chat_push') as { message: { request_id?: string } }
+    expect(push.message.request_id).toBeUndefined()
+    // in-flight 没被吃掉：随后 admin-chat 的回复照样能认领到
+    pushed.length = 0
+    await mgr.handleSendMessage({ session_id: 'admin-chat', content: { type: 'text', text: '给人类的回复' } })
+    const push2 = pushed.find((p) => p.type === 'chat_push') as { message: { request_id?: string } }
+    expect(push2.message.request_id).toBe('req-inflight-3')
+  })
+
+  it('失败兜底路径不受影响：chat_callback 仍按 request_id 推 chat_reply', async () => {
+    const { mgr, pushed } = await makeInFlight('req-inflight-4')
+    await mgr.handleChatCallback({
+      request_id: 'req-inflight-4',
+      reply_type: 'direct_reply',
+      content: '我这条消息没处理完，暂时回不了你。',
+    })
+    const reply = pushed.find((p) => p.type === 'chat_reply')
+    expect(reply).toBeTruthy()
+    expect(reply!.request_id).toBe('req-inflight-4')
+    expect(reply!.status).toBe('completed')
+    // 兜底消息落库也带 request_id（前端 15 秒兜底轮询按它匹配）
+    const stored = mgr.getMessages(10).find((m) => m.role === 'assistant')
+    expect(stored?.request_id).toBe('req-inflight-4')
+  })
+})
+
 describe('deleteMessage', () => {
   beforeEach(async () => {
     await fs.rm(TEST_DATA_DIR, { recursive: true, force: true }).catch(() => {})
