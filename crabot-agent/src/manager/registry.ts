@@ -229,7 +229,7 @@ export class ManagerRegistry {
   }
 
   /**
-   * 人类消息 → 对应 session 的 manager。
+   * 人类消息 → 对应 session 的 manager(私聊 lane 批 / 群聊即时放行都走这条)。
    *
    * `friend` 是**本批消息的发言者**(私聊即对端;群聊取批内最后一条的发言者,与 v2
    * `processGroupLaneBatch` 的 `lastEntry.friend` 同义)。它一路带到两个地方:
@@ -239,6 +239,38 @@ export class ManagerRegistry {
    * 不传 friend 时(陌生人、或调用方尚未接线)行为与之前逐字相同。
    */
   async routeHumanMessages(
+    channelId: string,
+    sessionId: string,
+    messages: ReadonlyArray<ChannelMessage>,
+    friend?: Friend
+  ): Promise<EpisodeResult> {
+    return this.routeHumanWake('human_messages', channelId, sessionId, messages, friend)
+  }
+
+  /**
+   * 群聊注意力放行(`AttentionScheduler` 的 flush 回调)→ 对应 session 的 manager。
+   *
+   * 与 `routeHumanMessages` 共用同一条唤醒边界(同样解析发起人身份、同样把 friend 带进
+   * `WakeEvent`),**唯一的区别是 `WakeEvent.kind`**——`attention_flush` 在 `loop.ts`
+   * `renderWakeEvent` 里渲染成"补齐:群聊注意力放行期间累积的人类消息",告诉 LLM 这批话
+   * 是攒了一会儿才递过来的、不是刚说的。两个 kind 的文案不同,**不能拿
+   * `routeHumanMessages` 顶替**:那样 manager 会把一批陈旧消息当成刚发生的对话。
+   *
+   * 在此之前 registry 没有任何 `attention_flush` 的公开入口(`runWake` 是 private,
+   * `attentionFlushToWakeEvent` 零生产调用方),群聊放行路径因此**无路可走**。
+   */
+  async routeAttentionFlush(
+    channelId: string,
+    sessionId: string,
+    messages: ReadonlyArray<ChannelMessage>,
+    friend?: Friend
+  ): Promise<EpisodeResult> {
+    return this.routeHumanWake('attention_flush', channelId, sessionId, messages, friend)
+  }
+
+  /** 两个人类消息入口的公共路径:解析发起人身份(唤醒边界的唯一一次异步)→ 按 kind 造事件唤醒。 */
+  private async routeHumanWake(
+    kind: 'human_messages' | 'attention_flush',
     channelId: string,
     sessionId: string,
     messages: ReadonlyArray<ChannelMessage>,
@@ -260,7 +292,12 @@ export class ManagerRegistry {
       }
     }
 
-    return this.runWake(key, { kind: 'human_messages', messages, ...(friend ? { friend } : {}) })
+    const withFriend = friend ? { friend } : {}
+    const event: WakeEvent =
+      kind === 'human_messages'
+        ? { kind: 'human_messages', messages, ...withFriend }
+        : { kind: 'attention_flush', messages, ...withFriend }
+    return this.runWake(key, event)
   }
 
   /**
@@ -421,11 +458,15 @@ function scheduleIdentityOf(wakeEvent: WakeEvent | undefined): ScheduleIdentity 
 /**
  * 唤醒事件 → 随行的人类发起人身份;非人类消息唤醒没有身份(undefined)。
  *
- * 只认 `human_messages`:worker 事件与自唤醒虽然也发生在同一个会话里,但它们不是"某个人
- * 在说话",拿上一次的发言者冒充会让 worker 的 `origin.creator_friend_id` 记错人。
+ * 认 `human_messages` 与 `attention_flush` 两个 kind:它们都是"某个人在说话",只是递过来
+ * 的时机不同(即时 vs 注意力放行后补齐)。**漏掉 attention_flush 就等于群聊放行路径永远
+ * 拿不到发起人身份**——那条路上派出去的 worker 会记成"没有 creator"。
+ *
+ * 反过来,worker 事件与自唤醒虽然也发生在同一个会话里,但它们不是"某个人在说话",拿上一次
+ * 的发言者冒充会让 worker 的 `origin.creator_friend_id` 记错人。
  */
 function humanPrincipalOf(wakeEvent: WakeEvent | undefined): HumanPrincipal | undefined {
-  if (wakeEvent?.kind !== 'human_messages') return undefined
+  if (wakeEvent?.kind !== 'human_messages' && wakeEvent?.kind !== 'attention_flush') return undefined
   const sessionType = wakeEvent.messages[0]?.session.type === 'group' ? 'group' : 'private'
   return { ...(wakeEvent.friend ? { friend: wakeEvent.friend } : {}), sessionType }
 }

@@ -11,8 +11,8 @@ import type { ChannelMessage } from '../../src/types.js'
 import { dialogObjectIdForPrivate } from '../../src/workers/harness/ledger-types.js'
 import type { WorkerHarness } from '../../src/workers/harness/harness.js'
 import type { LedgerWorker } from '../../src/workers/harness/ledger-types.js'
-import { createUserMessage } from '../../src/engine/index.js'
-import type { LLMAdapter, LLMStreamParams, EngineMessage } from '../../src/engine/index.js'
+import { createUserMessage, defineTool } from '../../src/engine/index.js'
+import type { LLMAdapter, LLMStreamParams, EngineMessage, ToolDefinition } from '../../src/engine/index.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 
 // --- Fixtures / helpers ---
@@ -758,5 +758,90 @@ describe('ManagerLoop', () => {
     // ManagerSessionState 没有任何"终态"字段——不做断言即是断言;这里只确认状态仍可继续读写。
     expect(state.key).toBe(KEY)
     expect(state.recent.length).toBeGreaterThan(0)
+  })
+
+  // --- EpisodeResult.repliedToHuman(P7 J Task 3.1:群聊注意力退避的 `replied` 信号) ---
+
+  describe('EpisodeResult.repliedToHuman', () => {
+    /** 让 engine 有真工具可执行,避免 tool_use 落到"工具不存在"的错误分支上。 */
+    function replyToolFace(): ReadonlyArray<ToolDefinition> {
+      return ['send_message', 'send_private_message', 'send_master_private', 'spawn_worker', 'get_history'].map((name) =>
+        defineTool({
+          name,
+          description: `stub ${name}`,
+          inputSchema: { type: 'object', properties: {} },
+          call: async () => ({ output: 'ok' }),
+        })
+      )
+    }
+
+    it('manager 沉默(一个字都没跟人说)→ repliedToHuman === false,即使 episode 正常完成', async () => {
+      const { adapter, queue } = makeAdapter()
+      queue.push({ text: '(内部判断:这条不需要我回)', stopReason: 'end_turn' })
+
+      const loop = new ManagerLoop(baseDeps({ store, adapter, toolFace: replyToolFace }))
+      const result = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('群里有人闲聊')] })
+
+      // outcome 答不了这个问题——沉默和回话都是 completed,这正是需要单独一个字段的理由。
+      expect(result.outcome).toBe('completed')
+      expect(result.repliedToHuman).toBe(false)
+    })
+
+    it('manager 说话(调 send_message)→ repliedToHuman === true', async () => {
+      const { adapter, queue } = makeAdapter()
+      queue.push({ toolCalls: [{ name: 'send_message', id: 't1', input: { content: '好的' } }], stopReason: 'tool_use' })
+      queue.push({ text: '已回复', stopReason: 'end_turn' })
+
+      const loop = new ManagerLoop(baseDeps({ store, adapter, toolFace: replyToolFace }))
+      const result = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('在吗')] })
+
+      expect(result.outcome).toBe('completed')
+      expect(result.repliedToHuman).toBe(true)
+    })
+
+    it('send_private_message / send_master_private 同样算"跟人说话"(投递到人 = 有人被打扰)', async () => {
+      for (const toolName of ['send_private_message', 'send_master_private']) {
+        const { adapter, queue } = makeAdapter()
+        queue.push({ toolCalls: [{ name: toolName, id: 't1', input: {} }], stopReason: 'tool_use' })
+        queue.push({ text: '已私下回复', stopReason: 'end_turn' })
+
+        const isolatedStore = new ManagerSessionStore(join(dataDir, `store-${toolName}`))
+        const loop = new ManagerLoop(baseDeps({ store: isolatedStore, adapter, toolFace: replyToolFace }))
+        const result = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('私下问一句')] })
+
+        expect(result.repliedToHuman).toBe(true)
+      }
+    })
+
+    it('只派活不说话(spawn_worker)→ repliedToHuman === false(worker 不直接跟人类说话)', async () => {
+      const { adapter, queue } = makeAdapter()
+      queue.push({ toolCalls: [{ name: 'spawn_worker', id: 't1', input: {} }], stopReason: 'tool_use' })
+      queue.push({ text: '已派活', stopReason: 'end_turn' })
+
+      const loop = new ManagerLoop(baseDeps({ store, adapter, toolFace: replyToolFace }))
+      const result = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('帮我查个东西')] })
+
+      expect(result.repliedToHuman).toBe(false)
+    })
+
+    it('只读工具(get_history)不算说话', async () => {
+      const { adapter, queue } = makeAdapter()
+      queue.push({ toolCalls: [{ name: 'get_history', id: 't1', input: {} }], stopReason: 'tool_use' })
+      queue.push({ text: '看完了,不回', stopReason: 'end_turn' })
+
+      const loop = new ManagerLoop(baseDeps({ store, adapter, toolFace: replyToolFace }))
+      const result = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('之前说到哪了')] })
+
+      expect(result.repliedToHuman).toBe(false)
+    })
+
+    it('drainMailbox 的空转返回也带 repliedToHuman(=false),不是 undefined', async () => {
+      const { adapter } = makeAdapter()
+      const loop = new ManagerLoop(baseDeps({ store, adapter }))
+
+      const result = await loop.drainMailbox()
+      expect(result.turns).toBe(0)
+      expect(result.repliedToHuman).toBe(false)
+    })
   })
 })

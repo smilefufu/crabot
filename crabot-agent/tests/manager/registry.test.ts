@@ -18,7 +18,7 @@ import {
 import { ManagerSessionStore } from '../../src/manager/session-store.js'
 import type { CompactionPolicy } from '../../src/manager/compaction.js'
 import type { ManagerKey } from '../../src/manager/types.js'
-import type { ChannelMessage } from '../../src/types.js'
+import type { ChannelMessage, Friend } from '../../src/types.js'
 import { dialogObjectIdForPrivate, dialogObjectIdForGroup } from '../../src/workers/harness/ledger-types.js'
 import type { LedgerStore } from '../../src/workers/harness/ledger-store.js'
 import type { LedgerWorker } from '../../src/workers/harness/ledger-types.js'
@@ -239,6 +239,107 @@ describe('ManagerRegistry', () => {
     expect(JSON.stringify(state.recent)).toContain('你好')
     const otherState = await store.load('wechat::sess-b' as ManagerKey)
     expect(otherState.recent.length).toBe(0)
+  })
+
+  // --- routeAttentionFlush(P7 J Task 3.2:群聊注意力放行的公开入口) ---
+
+  describe('routeAttentionFlush', () => {
+    function groupMessage(text: string): ChannelMessage {
+      const m = makeChannelMessage(text)
+      return { ...m, session: { ...m.session, session_id: 'grp-1', type: 'group' } }
+    }
+
+    const FRIEND_G: Friend = {
+      id: 'f-g',
+      name: '群里的人',
+      permission: 'friend',
+      channel_identities: [{ channel_id: 'wechat', platform_user_id: 'u1' }],
+    } as Friend
+
+    it('打到 `${channelId}::${sessionId}` 对应的 manager,消息进入该 manager 的历史', async () => {
+      const { adapter, queue } = makeAdapter()
+      queue.push({ text: '收到', stopReason: 'end_turn' })
+      const registry = new ManagerRegistry(baseRegistryDeps({ adapter }))
+
+      const result = await registry.routeAttentionFlush('wechat', 'grp-1', [groupMessage('攒了一会儿的话')])
+
+      expect(result.outcome).toBe('completed')
+      const state = await store.load('wechat::grp-1' as ManagerKey)
+      expect(JSON.stringify(state.recent)).toContain('攒了一会儿的话')
+    })
+
+    it('两个 kind 的渲染文案不同:attention_flush 明确告诉 LLM 这批话是"放行期间累积的",不能与即时消息混用', async () => {
+      const { adapter, queue, calls } = makeAdapter()
+      queue.push({ text: 'ok', stopReason: 'end_turn' })
+      queue.push({ text: 'ok', stopReason: 'end_turn' })
+      const registry = new ManagerRegistry(baseRegistryDeps({ adapter }))
+
+      await registry.routeAttentionFlush('wechat', 'grp-flush', [groupMessage('补齐的这批')])
+      await registry.routeHumanMessages('wechat', 'grp-live', [groupMessage('刚说的这句')])
+
+      const flushPrompt = JSON.stringify(calls[0].messages)
+      const livePrompt = JSON.stringify(calls[1].messages)
+
+      expect(flushPrompt).toContain('[补齐:群聊注意力放行期间累积的人类消息]')
+      expect(flushPrompt).not.toContain('[人类消息]')
+      expect(livePrompt).toContain('[人类消息]')
+      expect(livePrompt).not.toContain('[补齐:群聊注意力放行期间累积的人类消息]')
+    })
+
+    it('friend 在两个 kind 上都通到唤醒边界与工具面:onHumanWake 收到发起人、toolFace 拿到同一个 humanPrincipal', async () => {
+      const { adapter, queue } = makeAdapter()
+      queue.push({ text: 'ok', stopReason: 'end_turn' })
+      queue.push({ text: 'ok', stopReason: 'end_turn' })
+
+      const wakeCalls: Array<{ key: string; friendId?: string; sessionType: string }> = []
+      const toolFaceCalls: Array<{ friendId?: string; sessionType?: string }> = []
+      const registry = new ManagerRegistry(
+        baseRegistryDeps({
+          adapter,
+          onHumanWake: async (key, principal) => {
+            wakeCalls.push({ key, friendId: principal.friend?.id, sessionType: principal.sessionType })
+          },
+          toolFace: (_k, _s, _e, _sched, humanPrincipal) => {
+            toolFaceCalls.push({ friendId: humanPrincipal?.friend?.id, sessionType: humanPrincipal?.sessionType })
+            return []
+          },
+        })
+      )
+
+      await registry.routeAttentionFlush('wechat', 'grp-1', [groupMessage('放行后补齐')], FRIEND_G)
+      await registry.routeHumanMessages('wechat', 'grp-1', [groupMessage('即时消息')], FRIEND_G)
+
+      // ① 唤醒边界:两条路都解析了发起人身份(漏了 = 群聊放行路径的权限/记忆档位退回未解析)
+      expect(wakeCalls).toEqual([
+        { key: 'wechat::grp-1', friendId: 'f-g', sessionType: 'group' },
+        { key: 'wechat::grp-1', friendId: 'f-g', sessionType: 'group' },
+      ])
+      // ② 工具面:两条路的 episode 都拿到了发起人身份(漏了 = 派出去的 worker 记不到 creator)
+      expect(toolFaceCalls.length).toBeGreaterThanOrEqual(2)
+      for (const call of toolFaceCalls) {
+        expect(call).toEqual({ friendId: 'f-g', sessionType: 'group' })
+      }
+    })
+
+    it('不传 friend 时不阻断:仍然唤醒、仍然投递,只是身份为空', async () => {
+      const { adapter, queue } = makeAdapter()
+      queue.push({ text: 'ok', stopReason: 'end_turn' })
+      const toolFaceCalls: Array<{ friendId?: string; sessionType?: string }> = []
+      const registry = new ManagerRegistry(
+        baseRegistryDeps({
+          adapter,
+          toolFace: (_k, _s, _e, _sched, humanPrincipal) => {
+            toolFaceCalls.push({ friendId: humanPrincipal?.friend?.id, sessionType: humanPrincipal?.sessionType })
+            return []
+          },
+        })
+      )
+
+      const result = await registry.routeAttentionFlush('wechat', 'grp-anon', [groupMessage('陌生人说话')])
+
+      expect(result.outcome).toBe('completed')
+      expect(toolFaceCalls[0]).toEqual({ friendId: undefined, sessionType: 'group' })
+    })
   })
 
   // --- routeWorkerEvent ---

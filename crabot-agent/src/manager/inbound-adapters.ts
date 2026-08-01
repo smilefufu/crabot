@@ -30,6 +30,9 @@ export function laneBatchToWakeEvent(batch: ReadonlyArray<{ message: ChannelMess
  * 注意力退避语义不在这里:`AttentionScheduler` 的 `reportResult(sessionId, replied)` 用于
  * 调整下次巡检间隔,调用方接线时仍须在 flush 回调里显式调用它——本函数只负责把这批消息
  * 翻译成 `WakeEvent` 本身,不吞掉、也不模拟这个退避回调。
+ *
+ * **接线请走 `ManagerRegistry.routeAttentionFlush`**(P7 J):那条路会一并解析发起人身份
+ * 并把 `friend` 带进 `WakeEvent`,而本函数只做形状翻译、不带身份。
  */
 export function attentionFlushToWakeEvent(msgs: ReadonlyArray<ChannelMessage>): WakeEvent {
   return { kind: 'attention_flush', messages: msgs }

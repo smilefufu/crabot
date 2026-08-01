@@ -62,9 +62,12 @@ export type WakeEvent =
       readonly messages: ReadonlyArray<ChannelMessage>
       /**
        * P7 J additive:本批消息的**发言者**(§4.3 权限身份、§8.2 `creator_friend_id`)。
-       * 与 schedule 的 `creatorFriendId` 同样只在唤醒事件上随行、**不进对话上下文**
-       * (`renderWakeEvent` 不渲染它):它的用途是让本 episode 的工具面按发起人身份装配、
-       * 让派出去的 worker 记对 `origin.creator_friend_id`,不是给 LLM 看的。
+       * 与 schedule 的 `creatorFriendId` 同样只在唤醒事件上随行、**不作为独立字段进对话
+       * 上下文**:它的用途是让本 episode 的工具面按发起人身份装配、让派出去的 worker 记对
+       * `origin.creator_friend_id`,不是给 LLM 看的。
+       *
+       * (渲染层只把它当作 `resolveSenderIdentity` 的判据——决定每条消息渲染成
+       * `identity="master|friend|stranger"`,friend 对象本身不进正文。)
        */
       readonly friend?: Friend
     }
@@ -83,7 +86,16 @@ export type WakeEvent =
       readonly creatorFriendId?: string
       readonly isBuiltin?: boolean
     }
-  | { readonly kind: 'attention_flush'; readonly messages: ReadonlyArray<ChannelMessage> }
+  | {
+      readonly kind: 'attention_flush'
+      readonly messages: ReadonlyArray<ChannelMessage>
+      /**
+       * P7 J additive:与 `human_messages` 的同名字段逐字同义(见上)。
+       * **群聊注意力放行走的是这一条**,漏带 friend 就等于群聊路径拿不到发起人身份
+       * ——权限档位 / 记忆 scopes / 台账归档键全部退回未解析那一档。
+       */
+      readonly friend?: Friend
+    }
 
 export interface EpisodeResult {
   readonly episodeId: string
@@ -91,6 +103,18 @@ export interface EpisodeResult {
   readonly turns: number
   /** false ⇒ 邮箱事件不消费,已推回内部邮箱,下次唤醒重投 */
   readonly consumedEvents: boolean
+  /**
+   * 本 episode 里 manager 有没有**跟人说话**(调过 `HUMAN_REPLY_TOOL_NAMES` 里的任一工具)。
+   *
+   * 存在的理由只有一个:群聊注意力退避(`AttentionScheduler.reportResult(sessionId, replied)`)
+   * 需要这个信号,而 `outcome` 答不了——`completed` 既可能是"回了话"也可能是"决定沉默",
+   * 语义上无法区分。漏了它 = 群聊巡检间隔永久停在当前值,群聊逐渐停止响应。
+   *
+   * **判据是"发起了发送动作",不是"人类真的收到了"**:与 v2 的
+   * `hasReply = actions.some(a => a.kind !== 'stay_silent')` 同一层语义(决策层,不是投递层)
+   * ——工具执行结果是否 is_error 不参与判定。
+   */
+  readonly repliedToHuman: boolean
 }
 
 export interface ManagerLoopDeps {
@@ -221,7 +245,7 @@ export class ManagerLoop {
     if (event === undefined && carriedTexts.length === 0) {
       // 自唤醒但 mailbox 已空(残留被排在前面的另一个 episode 顺带 drain 走了)——
       // 没有任何新内容,直接空转返回,不开 episode(见 drainMailbox 注释)。
-      return { episodeId, outcome: 'completed', turns: 0, consumedEvents: true }
+      return { episodeId, outcome: 'completed', turns: 0, consumedEvents: true, repliedToHuman: false }
     }
     const eventText = event === undefined ? undefined : renderWakeEvent(event)
     this.currentEpisodeInjected = []
@@ -281,6 +305,9 @@ export class ManagerLoop {
 
     let attempt = await this.runAttempt(state, tailMessages, adapter, model)
     let totalTurnsUsed = attempt.result.totalTurns
+    // 与 totalTurnsUsed 同一套累加纪律:兜底重试会整体丢弃首次尝试的 finalMessages,但首次
+    // 尝试里已经发出去的话人类是真的收到了——只看重试那一份会把"说过话"错报成"没说过"。
+    let repliedToHuman = detectRepliedToHuman(attempt.result.finalMessages)
 
     // max_tokens 兜底(§4.2):disableCompaction 关掉了 engine 自己的强压重试路径,
     // 这里识别到"上下文超限收场"时强制 force_hot 折叠一次并重试一次,仍失败就放弃。
@@ -308,6 +335,7 @@ export class ManagerLoop {
         ]
         const retryAttempt = await this.runAttempt(state, retryTailMessages, adapter, model)
         totalTurnsUsed += retryAttempt.result.totalTurns
+        repliedToHuman = repliedToHuman || detectRepliedToHuman(retryAttempt.result.finalMessages)
         attempt = retryAttempt
       }
       // forceDecision.kind === 'none':无法进一步压缩,直接接受第一次尝试的结果,不重试
@@ -354,6 +382,7 @@ export class ManagerLoop {
       outcome: attempt.result.outcome,
       turns: totalTurnsUsed,
       consumedEvents,
+      repliedToHuman,
     }
     this.deps.onEpisodeEnd?.(result)
     return result
@@ -461,6 +490,39 @@ export class ManagerLoop {
 }
 
 // --- Helpers ---
+
+/**
+ * "跟人说话"的工具名集合(`EpisodeResult.repliedToHuman` 的判据)。
+ *
+ * 三个成员都是 crab-messaging 的**投递类**工具,共同点是"这次调用的直接结果是某个人类
+ * 看到一条新消息"——这正是群聊注意力退避要问的问题(`AttentionScheduler.reportResult`)。
+ *
+ * - `send_message` —— 本会话(以及跨 session)的正常回话,最主要的一条;
+ * - `send_private_message` —— 群里被问、转私聊回答是真实模式,只认 `send_message` 会把
+ *   它错报成"沉默",退避因此错误地×5;
+ * - `send_master_private` —— 系统线程的 reach_master,同样是一句人类会看到的话。
+ *
+ * **不在集合里的**:`get_history` / `get_message` / `lookup_friend` 等只读工具(没人被打扰)、
+ * `spawn_worker` / `send_to_worker` 等编排工具(v3 下 worker 不直接跟人类说话,派活本身
+ * 人类看不到)、以及记忆/info 工具。名字用**裸名**,与 manager 工具面一致
+ * (`tools/tool-face.ts` 的 messaging 工具不带 `mcp__` 前缀,只有 crab-memory 带)。
+ */
+export const HUMAN_REPLY_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'send_message',
+  'send_private_message',
+  'send_master_private',
+])
+
+/** 扫 `finalMessages` 里的 assistant tool_use 块,判断本 episode 有没有跟人说话。 */
+function detectRepliedToHuman(finalMessages: ReadonlyArray<EngineMessage>): boolean {
+  for (const msg of finalMessages) {
+    if (msg.role !== 'assistant') continue
+    for (const block of msg.content) {
+      if (block.type === 'tool_use' && HUMAN_REPLY_TOOL_NAMES.has(block.name)) return true
+    }
+  }
+  return false
+}
 
 function toText(content: QueueContent): string {
   // mailbox 唯一的写入方是 enqueueDuringEpisode(总是 push 字符串),这里的分支只是
