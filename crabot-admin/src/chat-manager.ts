@@ -245,6 +245,19 @@ export class ChatManager {
         },
         'admin-web'
       )
+      // in-flight 窗口精确等于这次 RPC 的生命周期：`process_message` resolve 意味着 agent 侧
+      // 的 episode 已经结束，不存在合法的迟到认领——manager 回话走的是 episode 内的
+      // `send_message`（`unified-agent.processAdminChatMessage` 整段 await 了 episode），
+      // 失败兜底走的是 episode 内的 `chat_callback`，两条都在这一行之前就把它删掉了，
+      // 重复 delete 幂等。
+      //
+      // 不兜这一下的后果（PR #59 review）：agent 侧还有第四种收口——F3，episode 跑完但
+      // 一句话没说（只记日志）。那条路上没有任何一方删 request_id，它会**永久**留在
+      // pendingRequests 里；`claimPendingRequestId` 又是 FIFO 取最早那条，于是下一条回复
+      // 认领的是那具残骸：回复带着旧 request_id 落库并 chat_push，前端把**旧问题**的占位
+      // 换成**新问题**的答案，新问题的占位永远转圈——且此后每多一次沉默 episode 就整体
+      // 再错一位，不自愈。
+      this.pendingRequests.delete(requestId)
     } catch (error) {
       console.error('[ChatManager] Failed to call Agent:', error)
       this.pushToClient({
