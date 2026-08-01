@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { buildMessagingTools } from '../../src/mcp/crab-messaging.js'
+import { buildWorkerMessagingTools } from '../../src/mcp/crab-messaging.js'
 import { HumanMessageQueue } from '../../src/engine/human-message-queue.js'
 import type { Friend } from '../../src/types.js'
 
@@ -18,7 +18,7 @@ function makeMaster(channels: Array<{ channel_id: string; platform_user_id: stri
   }
 }
 
-function findTool(tools: ReturnType<typeof buildMessagingTools>, name: string) {
+function findTool(tools: ReturnType<typeof buildWorkerMessagingTools>, name: string) {
   return tools.find(t => t.name === name)
 }
 
@@ -28,7 +28,7 @@ function parsePayload(result: { content: Array<{ text: string }> }): Record<stri
 
 describe('daily_reflection task messaging tool whitelist', () => {
   it('daily_reflection 任务只暴露 send_master_private + 只读分析工具', () => {
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: { call: vi.fn() } as never,
       moduleId: 'worker',
       getAdminPort: async () => 19001,
@@ -55,7 +55,7 @@ describe('daily_reflection task messaging tool whitelist', () => {
   })
 
   it('其他 scheduled 任务（如 news_briefing 群推送）不受白名单影响，保留全部工具', () => {
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: { call: vi.fn() } as never,
       moduleId: 'worker',
       getAdminPort: async () => 19001,
@@ -78,7 +78,7 @@ describe('daily_reflection task messaging tool whitelist', () => {
   })
 
   it('无 task context 时不暴露 scheduled 私聊捷径', () => {
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: { call: vi.fn() } as never,
       moduleId: 'front',
       getAdminPort: async () => 19001,
@@ -91,7 +91,7 @@ describe('daily_reflection task messaging tool whitelist', () => {
   })
 
   it('message task 只保留精确 send_message，不暴露 scheduled 私聊捷径', () => {
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: { call: vi.fn() } as never,
       moduleId: 'worker',
       getAdminPort: async () => 19001,
@@ -119,7 +119,7 @@ describe('scheduled-only shortcut runtime guard', () => {
     async (toolName) => {
       let triggerType: 'scheduled' | 'message' = 'scheduled'
       const rpcCall = vi.fn()
-      const tools = buildMessagingTools({
+      const tools = buildWorkerMessagingTools({
         rpcClient: { call: rpcCall } as never,
         moduleId: 'worker',
         getAdminPort: async () => 19001,
@@ -152,7 +152,7 @@ describe('scheduled-only shortcut runtime guard', () => {
 
 describe('send_master_private', () => {
   it('returns error when no master friend configured', async () => {
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: {
         call: vi.fn().mockImplementation(async (_port, method) => {
           if (method === 'find_master_friend') return { friend: null }
@@ -184,7 +184,7 @@ describe('send_master_private', () => {
     ])
     const calls: Array<{ port: number; method: string; params: unknown }> = []
 
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: {
         call: vi.fn().mockImplementation(async (port, method, params) => {
           calls.push({ port, method, params })
@@ -231,7 +231,7 @@ describe('send_master_private', () => {
       { channel_id: 'feishu-001', platform_user_id: 'ou_x' },
     ])
 
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: {
         call: vi.fn().mockImplementation(async (_port, method) => {
           if (method === 'find_master_friend') return { friend: master }
@@ -267,7 +267,7 @@ describe('send_master_private', () => {
     ])
     const calls: Array<{ method: string; params: Record<string, unknown> }> = []
 
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: {
         call: vi.fn().mockImplementation(async (_port, method, params) => {
           calls.push({ method, params: params as Record<string, unknown> })
