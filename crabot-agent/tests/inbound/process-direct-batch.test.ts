@@ -102,6 +102,7 @@ interface Internals {
     principals: { get(key: string): ResolvedPrincipalView | undefined }
     registry: { routeHumanMessages: (...args: unknown[]) => Promise<unknown> }
   }
+  failLoudSentAt: Map<string, number>
   rpcClient: {
     call: (port: number, method: string, params: unknown, from?: string) => Promise<unknown>
     resolve: (filter: unknown, from?: string) => Promise<unknown[]>
@@ -495,10 +496,9 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
 
     /**
      * plan §三 的 F1 形态：LLM 挂掉时 `ManagerLoop` 记 `outcome:'failed'` 并把事件推回
-     * mailbox，**不抛**——所以只靠 try/catch 抓不住最常见的那种失败。Task 6 的兜底要
-     * 双管（catch + outcome），这里先如实钉住"不抛"这一半。
+     * mailbox，**不抛**——所以只靠 try/catch 抓不住最常见的那种失败。
      */
-    it('manager episode 失败（LLM 挂）不抛错，也不会自己回一句话', async () => {
+    it('manager episode 失败（LLM 挂）不把异常抛回 lane', async () => {
       boot()
       hoisted.managerAdapter = {
         // eslint-disable-next-line require-yield
@@ -514,7 +514,213 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
       ).resolves.toBeUndefined()
 
       expect(calls).toContain('manager_llm')
+    })
+  })
+
+  // ==========================================================================
+  // fail-loud 兜底（plan §三）
+  //
+  // 风险面：manager episode 失败 → agent 活着、health 还是绿的，但它完全不回话。
+  // 三形态行为不同，判据必须双管（catch + outcome）：
+  //
+  // | 形态 | 触发 | 抛错? | 兜底? |
+  // |---|---|---|---|
+  // | F1 正常失败（LLM 挂 / key 过期 / 限流） | `outcome ∈ {failed, aborted}` | 不抛 | 发 |
+  // | F2 中途抛错（adapter thunk / store IO） | 抛 | 抛 | 发 |
+  // | F3 静默完成（manager 决定不说话） | `outcome='completed'` + 没出声 | 不抛 | **不发** |
+  // ==========================================================================
+
+  describe('fail-loud 兜底（plan §三）', () => {
+    /** 让 registry 按 F1 的样子返回：正常 resolve，只是 outcome 是 failed。 */
+    function stubOutcome(outcome: 'failed' | 'aborted' | 'completed'): void {
+      internals.managerStack.registry.routeHumanMessages = async () => {
+        calls.push('manager_llm')
+        return { episodeId: 'ep-1', outcome, turns: 1, consumedEvents: outcome === 'completed', repliedToHuman: false }
+      }
+    }
+
+    function failLoudText(): string | undefined {
+      const sent = rpcCalls.find((c) => c.method === 'send_message')
+      if (!sent) return undefined
+      return (sent.params.content as { text: string } | undefined)?.text
+    }
+
+    it('F1：真实 loop 里 LLM 挂掉（不抛错）时人类仍然收到一条明确回复', async () => {
+      boot()
+      hoisted.managerAdapter = {
+        // eslint-disable-next-line require-yield
+        async *stream() {
+          calls.push('manager_llm')
+          throw new Error('LLM boom')
+        },
+        updateConfig: () => {},
+      }
+
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+
+      const sent = rpcCalls.find((c) => c.method === 'send_message')
+      expect(sent, 'F1 下人类什么都收不到 = 本次兜底的整个存在理由落空').toBeDefined()
+      expect(sent!.port).toBe(WECHAT_PORT)
+      expect(sent!.params.session_id).toBe('sess-1')
+      expect(failLoudText()).toContain('管理员')
+    })
+
+    /**
+     * **判据里的 outcome 那一管**：这里 registry 正常 resolve、一个异常都不抛，
+     * 只有 `outcome` 是 failed。去掉 outcome 判据（只留 catch）这条必挂。
+     */
+    it('F1：episode 正常 resolve 但 outcome=failed 时也必须兜底（只 catch 抓不住）', async () => {
+      boot()
+      stubOutcome('failed')
+
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+
+      expect(failLoudText()).toContain('failed')
+      expect(failLoudText()).toContain('管理员')
+    })
+
+    it('F1：outcome=aborted 同样兜底', async () => {
+      boot()
+      stubOutcome('aborted')
+
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+
+      expect(failLoudText()).toContain('aborted')
+    })
+
+    /** F2：loop 本身起不来（`adapter()` thunk 抛、store IO 抛）——异常冒到 lane handler。 */
+    it('F2：episode 抛错时兜底回复带上原始错误信息', async () => {
+      boot()
+      internals.managerStack.registry.routeHumanMessages = async () => {
+        throw new Error('store IO boom')
+      }
+
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+
+      expect(failLoudText()).toContain('store IO boom')
+    })
+
+    /**
+     * 文案必须能指导下一步动作。model slot 没配不是故障而是配置没做完，
+     * 笼统的"我出错了"会让人类和管理员都无从下手。
+     */
+    it('F2：manager model slot 没配时，文案说清"去 Admin 配 manager 槽位"', async () => {
+      boot()
+      internals.managerStack.registry.routeHumanMessages = async () => {
+        throw new Error(
+          "[ManagerLoop] model_config 缺少 'manager' 与 'powerful' 两个 slot，manager loop 无法解析可用的 LLM 连接信息",
+        )
+      }
+
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+
+      const text = failLoudText()!
+      expect(text).toContain('Admin')
+      expect(text).toContain('manager')
+      expect(text).toContain('槽位')
+    })
+
+    /**
+     * F3 不兜：群聊里 stay_silent 合法，私聊里也分不清"故意沉默"和"prompt 坏了"。
+     * 误报（机器人无缘无故说"我出错了"）比漏报更伤。
+     */
+    it('F3：episode 正常完成但 manager 决定沉默时，一个字都不发', async () => {
+      boot([]) // 空脚本 = manager 一句话都不说
+
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+
       expect(rpcCalls.find((c) => c.method === 'send_message')).toBeUndefined()
+      // 但 react 照发（"我看到了"与"我回话了"是两件事）
+      expect(rpcCalls.find((c) => c.method === 'add_reaction')).toBeDefined()
+    })
+
+    it('F3：私聊连续静默到阈值时记一条 warn（只记日志，仍然不发消息）', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      boot([])
+
+      for (let i = 0; i < 3; i++) {
+        await internals.processDirectBatch(batchOf([makeMessage({ id: `m-${i}`, type: 'private' })]))
+      }
+
+      expect(warn.mock.calls.some((c) => String(c[0]).includes('连续 3 轮'))).toBe(true)
+      expect(rpcCalls.find((c) => c.method === 'send_message')).toBeUndefined()
+    })
+
+    /**
+     * F1 会把整批输入推回 mailbox 下次重投，同一批消息会**反复**触发失败。
+     * 没有冷却 = 故障期间往用户脸上刷屏。
+     */
+    it('冷却去重：连续三轮失败只告诉人类一次', async () => {
+      boot()
+      stubOutcome('failed')
+
+      for (let i = 0; i < 3; i++) {
+        await internals.processDirectBatch(batchOf([makeMessage({ id: `m-${i}`, type: 'private' })]))
+      }
+
+      expect(rpcCalls.filter((c) => c.method === 'send_message')).toHaveLength(1)
+    })
+
+    it('冷却按 key 隔离：另一个会话失败照样告诉那边的人', async () => {
+      boot()
+      stubOutcome('failed')
+
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+      await internals.processDirectBatch(
+        batchOf([makeMessage({ id: 'm-2', type: 'private', sessionId: 'sess-2' })]),
+      )
+
+      const sent = rpcCalls.filter((c) => c.method === 'send_message')
+      expect(sent).toHaveLength(2)
+      expect(sent.map((c) => c.params.session_id)).toEqual(['sess-1', 'sess-2'])
+    })
+
+    it('冷却窗口过去之后可以再告诉一次（不是一次性哑掉）', async () => {
+      boot()
+      stubOutcome('failed')
+
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+      // 把台账往前拨 6 分钟（窗口 5 分钟）
+      internals.failLoudSentAt.set('wechat::sess-1', Date.now() - 6 * 60 * 1000)
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-2', type: 'private' })]))
+
+      expect(rpcCalls.filter((c) => c.method === 'send_message')).toHaveLength(2)
+    })
+
+    /**
+     * 兜底路径与 manager 栈零共享：manager 已经彻底坏掉（registry 直接抛）时，
+     * 这条回复仍然要发得出去——它只依赖 rpcClient + channel 端口。
+     */
+    it('兜底走裸 send_message RPC，不经 manager 工具面', async () => {
+      boot()
+      internals.managerStack.registry.routeHumanMessages = async () => {
+        throw new Error('manager stack is dead')
+      }
+
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+
+      const sent = rpcCalls.find((c) => c.method === 'send_message')!
+      expect(sent.port).toBe(WECHAT_PORT)
+      // channel 的 SendMessageParams 形状：`{session_id, content}`（不是 `{message}`）
+      expect(sent.params).toMatchObject({ session_id: 'sess-1', content: { type: 'text' } })
+      // manager 一次 LLM 都没起来过
+      expect(calls).not.toContain('manager_llm')
+    })
+
+    it('channel 也挂了时兜底失败只记日志，不把异常抛回 lane', async () => {
+      boot()
+      internals.managerStack.registry.routeHumanMessages = async () => {
+        throw new Error('manager stack is dead')
+      }
+      const realCall = internals.rpcClient.call
+      internals.rpcClient.call = async (port, method, params, from) => {
+        if (method === 'send_message') throw new Error('channel down')
+        return realCall(port, method, params, from)
+      }
+
+      await expect(
+        internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })])),
+      ).resolves.toBeUndefined()
     })
   })
 })

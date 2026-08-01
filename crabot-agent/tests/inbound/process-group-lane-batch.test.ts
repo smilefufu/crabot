@@ -122,7 +122,10 @@ interface Internals {
   channelPorts: Map<string, number>
   crabDisplayNames: Map<string, string>
   crabSelfHandles: Map<string, string>
-  managerStack: { principals: { get(key: string): ResolvedPrincipalView | undefined } }
+  managerStack: {
+    principals: { get(key: string): ResolvedPrincipalView | undefined }
+    registry: { routeAttentionFlush: (...args: unknown[]) => Promise<unknown> }
+  }
   attentionScheduler: {
     stopAll(): void
     getCurrentIntervalMs(sessionId: string): number | undefined
@@ -592,6 +595,89 @@ describe('processGroupLaneBatch —— 群聊 lane handler（cutover 后下游�
       expect(internals.attentionScheduler.getBufferSize(GROUP_SESSION)).toBe(0)
       expect(String(script.streams[0].messages[0].content)).toContain('@小蟹 建个任务')
       expect(internals.attentionScheduler.getCurrentIntervalMs(GROUP_SESSION)).toBe(1000)
+    })
+  })
+
+  // ==========================================================================
+  // fail-loud 兜底（plan §三）
+  //
+  // 群里没人说话时"agent 死了"和"agent 决定不插嘴"从外面看是一样的，所以 F1/F2
+  // 必须出声；而 F3（正常收口、决定沉默）恰恰是群聊的常态，绝不能兜。
+  // ==========================================================================
+
+  describe('fail-loud 兜底（plan §三）', () => {
+    function stubOutcome(outcome: 'failed' | 'aborted'): void {
+      internals.managerStack.registry.routeAttentionFlush = async () => ({
+        episodeId: 'ep-g1',
+        outcome,
+        turns: 1,
+        consumedEvents: false,
+        repliedToHuman: false,
+      })
+    }
+
+    function failLoudSent() {
+      return rpcCalls.filter((c) => c.method === 'send_message')
+    }
+
+    it('F1：outcome=failed（不抛错）时群里收到一条明确回复', async () => {
+      boot({ attentionMinMs: 1000 })
+      stubOutcome('failed')
+
+      await runGroup([gmsg({ id: 'g-1', mention: true })])
+
+      const sent = failLoudSent()
+      expect(sent).toHaveLength(1)
+      expect(sent[0].port).toBe(WECHAT_PORT)
+      expect(sent[0].params.session_id).toBe(GROUP_SESSION)
+      expect((sent[0].params.content as { text: string }).text).toContain('管理员')
+    })
+
+    /**
+     * 兜底回复不是 manager 在说话：退避档位仍按"这一轮没出声"上报。
+     * 按"出声"算 = 故障期间群聊巡检间隔被冻结在最短值，反而更吵。
+     */
+    it('F1：兜底回复不算 manager 出声，退避照常拉长', async () => {
+      boot({ attentionMinMs: 1000 })
+      stubOutcome('failed')
+
+      await deliverMention(gmsg({ id: 'g-1', mention: true }))
+
+      expect(failLoudSent()).toHaveLength(1)
+      expect(internals.attentionScheduler.getCurrentIntervalMs(GROUP_SESSION)).toBe(5000)
+    })
+
+    it('F2：episode 抛错时也兜底，且异常不冒回 lane、退避仍按没出声算', async () => {
+      boot({ attentionMinMs: 1000 })
+      internals.managerStack.registry.routeAttentionFlush = async () => {
+        throw new Error('store IO boom')
+      }
+
+      await expect(deliverMention(gmsg({ id: 'g-1', mention: true }))).resolves.toBeUndefined()
+
+      expect((failLoudSent()[0].params.content as { text: string }).text).toContain('store IO boom')
+      expect(internals.attentionScheduler.getCurrentIntervalMs(GROUP_SESSION)).toBe(5000)
+    })
+
+    /** 群聊沉默合法且必要（stay_silent）——误报比漏报更伤。 */
+    it('F3：manager 决定不插嘴时群里一个字都不多说', async () => {
+      boot({ attentionMinMs: 1000, turns: [[getHistoryBlock()]] })
+
+      await runGroup([gmsg({ id: 'g-1', mention: true })])
+
+      expect(failLoudSent()).toHaveLength(0)
+      expect(calls).toContain('get_history')
+    })
+
+    it('冷却去重：连续三轮失败只在群里说一次', async () => {
+      boot({ attentionMinMs: 1000 })
+      stubOutcome('failed')
+
+      for (let i = 0; i < 3; i++) {
+        await runGroup([gmsg({ id: `g-${i}`, mention: true })])
+      }
+
+      expect(failLoudSent()).toHaveLength(1)
     })
   })
 

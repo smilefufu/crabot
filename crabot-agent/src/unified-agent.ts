@@ -263,6 +263,62 @@ const WORKER_TRACE_LAYER2_UNAVAILABLE =
   '实现原生 trace（adapter readTrace 懒解析，protocol-agent-v3 §10.2 第二层）尚未接入本端点，' +
   '当前仅返回 harness 亲历的生命周期事件（第一层）'
 
+/**
+ * fail-loud 兜底：入站 lane handler 上 manager episode 失败时的失败形态。
+ *
+ * `ManagerLoop` 只有 F2 会抛错；最常见的 F1（LLM 挂 / key 过期 / 限流耗尽重试）记
+ * `outcome:'failed'`、把整批输入推回 mailbox，然后**正常 resolve**。所以判据必须双管：
+ * `catch` 抓 F2，`outcome ∈ {failed, aborted}` 抓 F1。只写 try/catch 抓不住最常见的那种。
+ *
+ * @see crabot-docs/superpowers/plans/2026-08-01-mw-p7-j-cutover.md §三
+ */
+type ManagerEpisodeFailure =
+  | { readonly kind: 'threw'; readonly error: unknown }
+  | { readonly kind: 'outcome'; readonly outcome: 'failed' | 'aborted' }
+
+/**
+ * fail-loud 兜底回复的按 key 冷却窗口。
+ *
+ * F1 形态下整批输入被推回 mailbox 等下次唤醒重投，同一批消息因此会**反复**触发失败；
+ * 群聊里一批消息也可能连着来。没有冷却 = 故障期间往用户脸上刷屏。
+ */
+const FAIL_LOUD_COOLDOWN_MS = 5 * 60 * 1000
+
+/** F3（静默完成）只记日志计数：私聊连续这么多轮"跑完但一句话没说"才 warn。 */
+const SILENT_EPISODE_WARN_THRESHOLD = 3
+
+/** 兜底文案里回带的原始错误信息截断长度（够人转述给管理员，又不至于糊一屏）。 */
+const FAIL_LOUD_ERROR_MAX_CHARS = 200
+
+/**
+ * 兜底回复的正文。**文案必须能指导下一步动作**——"我出错了"对人类没有任何用。
+ *
+ * 唯一做特判的是 model slot 缺失（`resolveManagerModelConfig` 抛的那条）：它不是故障
+ * 而是配置没做完，人类看到"去 Admin 配 manager 槽位"就能自己解决。
+ */
+function buildFailLoudText(failure: ManagerEpisodeFailure): string {
+  if (failure.kind === 'outcome') {
+    return (
+      `我这条消息没处理完（模型这一轮 ${failure.outcome} 了），暂时回不了你。` +
+      '常见原因是 LLM 服务不可用、API key 过期或额度用尽——' +
+      '请管理员到 Admin 的全局设置里检查模型配置，之后再发一次。'
+    )
+  }
+
+  const raw = failure.error instanceof Error ? failure.error.message : String(failure.error)
+  if (raw.includes("model_config 缺少")) {
+    return (
+      'Crabot 还没配好 manager 用的模型，我现在没法处理消息。' +
+      '请管理员打开 Admin → 全局设置，给 manager（没有就给 powerful）槽位选好 provider 和模型，然后再发一次。'
+    )
+  }
+  const detail = raw.length > FAIL_LOUD_ERROR_MAX_CHARS ? `${raw.slice(0, FAIL_LOUD_ERROR_MAX_CHARS)}…` : raw
+  return (
+    `我这条消息没处理完就出错了，暂时回不了你。错误：${detail}。` +
+    '可以稍后再发一次；一直这样的话请管理员看一下 agent 日志。'
+  )
+}
+
 export class UnifiedAgent extends ModuleBase {
   // 编排层组件
   private sessionManager: SessionManager
@@ -334,6 +390,11 @@ export class UnifiedAgent extends ModuleBase {
 
   /** master 的 friend id（系统线程台账归档键，实例级常量）；见 `resolveMasterFriendId`。 */
   private masterFriendIdCache: string | undefined
+
+  /** fail-loud 兜底回复的按 key 冷却台账：`channel::session` → 上一条兜底回复发出的时刻。 */
+  private readonly failLoudSentAt: Map<string, number> = new Map()
+  /** F3 计数：`channel::session` → 连续"跑完但没跟人说话"的 episode 数（只用于 warn）。 */
+  private readonly silentEpisodeStreak: Map<string, number> = new Map()
 
   /**
    * Manager/Worker 栈（protocol-agent-v3 §4-§7）。构造函数里由 `initializeManagerStack()`
@@ -1023,8 +1084,9 @@ export class UnifiedAgent extends ModuleBase {
     // manager 之后回话还是沉默都不影响——react 表达的是"收到"，不是"我要干活了"。
     await this.reactToTriggerBatch(session.channel_id, session.session_id, messages)
 
+    let result
     try {
-      await this.requireManagerStack().registry.routeHumanMessages(
+      result = await this.requireManagerStack().registry.routeHumanMessages(
         session.channel_id,
         session.session_id,
         messages,
@@ -1035,7 +1097,22 @@ export class UnifiedAgent extends ModuleBase {
         `[${this.config.moduleId}] processDirectBatch manager episode failed:`,
         err instanceof Error ? err.message : String(err),
       )
+      await this.sendFailLoudReply(session.channel_id, session.session_id, { kind: 'threw', error: err })
+      return
     }
+
+    if (result.outcome === 'failed' || result.outcome === 'aborted') {
+      console.error(
+        `[${this.config.moduleId}] processDirectBatch manager episode outcome=${result.outcome}`,
+      )
+      await this.sendFailLoudReply(session.channel_id, session.session_id, {
+        kind: 'outcome',
+        outcome: result.outcome,
+      })
+      return
+    }
+
+    this.noteEpisodeSilence(`${session.channel_id}::${session.session_id}`, result.repliedToHuman)
   }
 
   /**
@@ -1077,13 +1154,25 @@ export class UnifiedAgent extends ModuleBase {
         lastEntry.friend,
       )
       repliedToHuman = result.repliedToHuman
+      if (result.outcome === 'failed' || result.outcome === 'aborted') {
+        console.error(
+          `[${this.config.moduleId}] processGroupLaneBatch manager episode outcome=${result.outcome}`,
+        )
+        await this.sendFailLoudReply(session.channel_id, sessionId, {
+          kind: 'outcome',
+          outcome: result.outcome,
+        })
+      }
     } catch (err) {
       console.error(
         `[${this.config.moduleId}] processGroupLaneBatch manager episode failed:`,
         err instanceof Error ? err.message : String(err),
       )
+      await this.sendFailLoudReply(session.channel_id, sessionId, { kind: 'threw', error: err })
     }
 
+    // 兜底回复不是 manager 在说话：退避档位仍按"这一轮没出声"上报，
+    // 否则故障期间群聊巡检间隔会被冻结在当前值。
     this.attentionScheduler.reportResult(sessionId, repliedToHuman)
   }
 
@@ -1158,6 +1247,79 @@ export class UnifiedAgent extends ModuleBase {
       )
     } catch (error) {
       console.error('Failed to send config missing reply:', error instanceof Error ? error.message : error)
+    }
+  }
+
+  /**
+   * fail-loud 兜底：manager episode 没能把话说出来时，**不经 manager、不经 LLM**
+   * 直接告诉人类一声。
+   *
+   * 风险面是"agent 活着、health 还是绿的，但它完全不回话"——除了直接给人一条消息，
+   * 没有别的通道能让人发现。因此这条路径与 manager 栈**零共享**：只依赖 `rpcClient`
+   * 与 channel 端口（`getChannelPort`），不碰 registry / loop / store / LLMAdapter /
+   * harness / 工具面中的任何一个。唯一还能挡住它的是 channel 模块本身也挂了——
+   * 那种情况下任何手段都送不出消息，只能落到日志。
+   *
+   * 入参形状与 `sendConfigMissingReply` 相同（`{session_id, content}`，见那里的注释）。
+   *
+   * **按 key 冷却**：F1 会把整批输入推回 mailbox 下次重投，同一批消息可能连续失败若干轮；
+   * 没有冷却就是刷屏。冷却命中时只记日志，不再发第二条。
+   *
+   * @see crabot-docs/superpowers/plans/2026-08-01-mw-p7-j-cutover.md §三
+   */
+  private async sendFailLoudReply(
+    channelId: string,
+    sessionId: string,
+    failure: ManagerEpisodeFailure,
+  ): Promise<void> {
+    const key = `${channelId}::${sessionId}`
+    const now = Date.now()
+    const lastAt = this.failLoudSentAt.get(key)
+    if (lastAt !== undefined && now - lastAt < FAIL_LOUD_COOLDOWN_MS) {
+      console.warn(`[${this.config.moduleId}] fail-loud 冷却中（${key}），本次不再重复告知人类`)
+      return
+    }
+    // 先占坑再发：发送本身失败（channel 也挂了）时同样不该退化成逐条重试轰炸。
+    this.failLoudSentAt.set(key, now)
+
+    try {
+      const channelPort = await this.getChannelPort(channelId)
+      await this.rpcClient.call(
+        channelPort,
+        'send_message',
+        {
+          session_id: sessionId,
+          content: { type: 'text', text: buildFailLoudText(failure) },
+        },
+        this.config.moduleId,
+      )
+    } catch (error) {
+      console.error(
+        `[${this.config.moduleId}] fail-loud 兜底回复也没送出去（${key}）:`,
+        error instanceof Error ? error.message : String(error),
+      )
+    }
+  }
+
+  /**
+   * F3（episode 正常收口但一句话没说）**不发兜底回复**，只记日志计数。
+   *
+   * `outcome='completed'` + 没调发送类工具在群聊里是合法且必要的（stay_silent），
+   * 私聊里才可疑；而"故意沉默"和"prompt 坏了"这两者在信号层面无法区分。
+   * 误报（机器人无缘无故说"我出错了"）的代价比漏报更伤，所以只在私聊连续静默
+   * 若干轮时 warn 一声，供排障时对照。
+   */
+  private noteEpisodeSilence(key: string, repliedToHuman: boolean): void {
+    if (repliedToHuman) {
+      this.silentEpisodeStreak.delete(key)
+      return
+    }
+    const streak = (this.silentEpisodeStreak.get(key) ?? 0) + 1
+    this.silentEpisodeStreak.set(key, streak)
+    if (streak >= SILENT_EPISODE_WARN_THRESHOLD) {
+      console.warn(
+        `[${this.config.moduleId}] manager 在 ${key} 上已连续 ${streak} 轮跑完 episode 但没跟人说话（F3，只记日志不兜底）`,
+      )
     }
   }
 
