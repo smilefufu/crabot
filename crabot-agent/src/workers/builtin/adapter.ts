@@ -521,7 +521,11 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
   }
 
   capabilities(): AdapterCapabilities {
-    return { fork: true, revive: true, goalMode: true, subagent: true, structuredTrace: true }
+    // goalMode=false：装配层不给 builtin worker 装 goal 模式，`guardTools` 更是把
+    // `set_task_goal` 列进 `FORBIDDEN_WORKER_TOOLS` 硬禁（runtime.ts）——声明 true 与这条
+    // 硬禁直接矛盾。今天还没有消费方读它，但 protocol-agent-v3 §6.5 的实现选择语义迟早会读，
+    // 届时按 true 选型会选出一个根本没有 goal 能力的载体。protocol-agent-v3 §6.4。
+    return { fork: true, revive: true, goalMode: false, subagent: true, structuredTrace: true }
   }
 
   /**

@@ -156,24 +156,23 @@ function buildWorkerSkillListing(skills: ReadonlyArray<SkillConfig> | undefined)
 }
 
 /**
- * v3 worker 契约尾巴（protocol-agent-v3 §5）。只陈述协议已经规定的事实——worker 没有
- * crab-messaging / 没有 ask_human（§5.1）、判断与转述的责任全在 manager 侧（§5.1）、
- * workspace 是跨实现交接的唯一介质且要求中间产物落盘（§5.4）、`finish_task` 是 builtin
- * 的终态信号（§5.1 "finalize 即 exited"）——不额外承诺协议里没有的东西。
+ * v3 worker 契约尾巴（protocol-agent-v3 §5）。只讲干活需要知道的事：工作目录固定且是
+ * 跨实现交接的唯一介质（§5.4）、卡住时怎么收场、`finish_task` 是终态信号
+ * （§5.1 "finalize 即 exited"）。
+ *
+ * 刻意**不写** "你没有联系人类的工具"这类否定式说明：worker 的工具列表里本来就没有
+ * crab-messaging / ask_human（§5.1），提它反而把这个念头塞进上下文；"判断与转述的责任
+ * 在 manager 侧"同理——那是 manager 的规矩，对 worker 干活没有帮助。
  */
 function buildBuiltinWorkerContractPrompt(workspaceRoot: string): string {
   return [
-    '## 你的角色：worker',
-    '',
-    '你是一个 worker：由 manager 派活、向 manager 交付，不直接面对人类。',
+    '## 你的工作方式',
     '',
     `- **你的工作目录固定为 \`${workspaceRoot}\`，并且没有切换工作目录的工具。**`
     + '所有中间产物和最终产出都要落在这个目录里——它是交接的唯一介质：'
     + '你被换成另一个实现接手时，接手方只能看到这里留下的东西。',
-    '- **你没有任何直接联系人类的工具**（没有发消息、也没有向人类提问这类原语），不要去找。'
-    + '你对外只有两个出口：workspace 里的文件，和你自己的输出流。',
-    '- 需要人类拿主意、或者有话想让人类知道时，把它在输出里写清楚然后结束本轮。'
-    + '你会停下来等待；读你的输出、判断你是干完了还是在等输入、以及要不要把话转述给人类，都是 manager 的责任。',
+    '- 缺少继续所需的信息、或者需要有人拍板时，把情况和你的判断写清楚，然后结束本轮。'
+    + '你会停下来等待下一条输入。',
     '- 任务完成或确认失败时调用 `finish_task`（`outcome` 取 `completed` 或 `failed`，`summary` 一句话）。'
     + '这是你唯一的终态信号——不调用它，你只是停下来等下一条输入。',
   ].join('\n')

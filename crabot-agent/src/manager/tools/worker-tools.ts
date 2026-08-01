@@ -126,32 +126,38 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   const { harness, context, onAsyncError } = deps
 
   // --- spawn_worker(异步:发起即返回,任务进展由事件唤醒) ---
+  //
+  // 刻意**不收** `goal`:没有任何 worker 实现装配 goal 模式(builtin 的工具集硬禁
+  // `set_task_goal`,见 `workers/builtin/runtime.ts` 的 `FORBIDDEN_WORKER_TOOLS`;
+  // cc/codex 的 `capabilities().goalMode` 本来就是 false)。再收这个参数只会让 manager
+  // 照着工具描述传、以为生效,实际静默落进台账哪儿都到不了。要 worker 目标驱动,就把目标
+  // 写进 `prompt`——protocol-agent-v3 §4.3 / §6.4。
   const spawnWorker = defineTool({
     name: 'spawn_worker',
     description:
       '派发一个新的 worker 去执行一项任务。异步语义:本工具在 worker 化身创建完成后即返回' +
       '(不等 worker 把任务做完),返回 worker_id;worker 的后续状态变化(idle/exited)会作为' +
-      '事件唤醒你,不需要主动轮询。impl 缺省按部署偏好选择;workspace 缺省新建;goal 仅对' +
-      'builtin 实现生效。',
+      '事件唤醒你,不需要主动轮询。impl 缺省按部署偏好选择;workspace 缺省新建。',
     inputSchema: {
       type: 'object',
       properties: {
         title: { type: 'string', description: '任务标题(简短)' },
-        prompt: { type: 'string', description: '交给 worker 的任务描述/初始输入' },
+        prompt: {
+          type: 'string',
+          description: '交给 worker 的任务描述/初始输入。要它目标驱动就把目标写在这里',
+        },
         impl: { type: 'string', enum: WORKER_IMPL_IDS as unknown as string[], description: 'worker 实现,缺省按部署偏好' },
         workspace: { type: 'string', description: '复用的 workspace 路径,缺省新建一个' },
-        goal: { type: 'string', description: '目标态描述,仅 builtin 实现使用' },
       },
       required: ['title', 'prompt'],
     },
     isReadOnly: false,
     call: async (input): Promise<ToolCallResult> => {
-      const { title, prompt, impl, workspace, goal } = input as {
+      const { title, prompt, impl, workspace } = input as {
         title?: string
         prompt?: string
         impl?: string
         workspace?: string
-        goal?: string
       }
       if (!title || typeof title !== 'string') return invalid('spawn_worker: title 必填且为字符串')
       if (!prompt || typeof prompt !== 'string') return invalid('spawn_worker: prompt 必填且为字符串')
@@ -176,7 +182,6 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
           report_to: ctx.reportTo,
           impl,
           workspace,
-          goal,
         })
         return ok({ status: 'spawned', worker_id: worker.worker_id, impl: worker.incarnations[0]?.impl })
       } catch (error) {

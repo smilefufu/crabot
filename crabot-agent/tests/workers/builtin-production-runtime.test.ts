@@ -97,8 +97,20 @@ interface Turn {
   readonly stopReason: 'end_turn' | 'tool_use'
 }
 
-/** v3 worker 契约尾巴的首行；mock LLM 用它区分 worker burst 与 manager episode。 */
-const WORKER_PROMPT_MARKER = '## 你的角色：worker'
+/**
+ * mock LLM 区分 worker burst 与 manager episode 的锚点。
+ *
+ * 取 `finish_task` 而不是契约尾巴的某句措辞：措辞会被反复打磨（这个常量已经因此坏过一次），
+ * 但"`finish_task` 是 builtin worker 的终态信号、必须在 system prompt 里交代给它"是
+ * protocol-agent-v3 §5.1（finalize 即 exited）规定的不变量，而 manager 没有也不该有这个
+ * 工具（§4.3 的封闭白名单）。全仓 system prompt 里唯一写出这个词的地方就是 worker 契约
+ * 尾巴（`unified-agent.ts` 的 `buildBuiltinWorkerContractPrompt`）。
+ *
+ * 下面"systemPrompt = 现网 agent prompt + v3 worker 契约尾巴"那条用例复用同一个常量断言它
+ * 确实在 prompt 里——锚点一旦从 prompt 里消失，那条用例先炸，而不是靠本文件的脚本被
+ * manager 抢走这种间接症状去发现。
+ */
+const WORKER_PROMPT_MARKER = 'finish_task'
 
 const FINISH: Turn = {
   toolCalls: [{ name: 'finish_task', id: 'fin', input: { outcome: 'completed', summary: '完事' } }],
@@ -110,8 +122,8 @@ const FINISH: Turn = {
  *
  * **按 system prompt 分流**：harness 的事件会经 `onEvent` 唤醒真实的 manager loop（生产接线，
  * 不该为了测试拆掉），而 manager 与 builtin worker 走的是同一个 `adapterFromSdkEnv` 出口。
- * 不分流的话 manager 会抢走给 worker 排的脚本——worker 契约尾巴（`WORKER_PROMPT_MARKER`）
- * 是两者 system prompt 上稳定且语义正确的分界。manager 一律一句话收工，不干扰任何断言。
+ * 不分流的话 manager 会抢走给 worker 排的脚本——`WORKER_PROMPT_MARKER`（见其注释）是两者
+ * system prompt 上稳定且语义正确的分界。manager 一律一句话收工，不干扰任何断言。
  */
 function makeScriptedLLM(): { adapter: LLMAdapter; queue: Turn[] } {
   const queue: Turn[] = []
@@ -416,11 +428,24 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     expect(prompt).toContain('demo-skill')
     // 决策 4：goal 模式关闭（GOAL_MODE_DETAILS 段不注入）。
     expect(prompt).not.toContain('## 目标模式详解')
-    // v3 worker 契约尾巴：workspace 是哪、不直接联系人类、finish_task 是终态信号。
-    expect(prompt).toContain('## 你的角色：worker')
-    expect(prompt).toContain(workspaceRoot)
-    expect(prompt).toContain('没有任何直接联系人类的工具')
-    expect(prompt).toContain('finish_task')
+
+    // v3 worker 契约尾巴接在最后，且交代了协议要求 worker 知道的两件事：
+    //   1. 它自己的 workspace 是哪（§5.4：workspace 是跨实现交接的唯一介质）；
+    //   2. `finish_task` 是它的终态信号（§5.1：finalize 即 exited）——同时也是本文件
+    //      mock LLM 的分流锚点，这里一并钉住。
+    // 刻意不断言尾巴的具体措辞（原先断 '## 你的角色：worker' / '没有任何直接联系人类的
+    // 工具'，措辞一改就整片挂掉，且断的是文案不是语义）。
+    const tailStart = prompt.indexOf(workspaceRoot)
+    expect(tailStart, '契约尾巴应点名这个 worker 的 workspace').toBeGreaterThan(-1)
+    const tail = prompt.slice(tailStart)
+    expect(tail).toContain(WORKER_PROMPT_MARKER)
+
+    // 尾巴不提"你没有联系人类的工具"这类否定式说明：worker 的工具集里本来就没有这些原语
+    // （上面"工具集逐项断言"那组用例钉的就是这一点），在 prompt 里点名它们反而把这个念头
+    // 塞进上下文。这条断言守的是这个设计决定，不是某句文案。
+    for (const forbidden of ['send_message', 'ask_human', 'crab-messaging', '人类']) {
+      expect(tail, `契约尾巴不该提 ${forbidden}`).not.toContain(forbidden)
+    }
   })
 
   // --- 缺配置时 fail-loud ---
