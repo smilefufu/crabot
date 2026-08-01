@@ -126,6 +126,8 @@ interface Internals {
     principals: { get(key: string): ResolvedPrincipalView | undefined }
     registry: { routeHumanMessages: (...args: unknown[]) => Promise<unknown> }
   }
+  /** fail-loud 的按 key 冷却台账（与私聊 / 群聊两条 lane 共用同一张表）。 */
+  failLoudSentAt: Map<string, number>
   attentionScheduler: {
     stopAll(): void
     getCurrentIntervalMs(sessionId: string): number | undefined
@@ -514,33 +516,214 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
       expectThreeNots()
     })
 
-    /**
-     * plan §三 的 F1 形态：LLM 挂掉时 `ManagerLoop` 把它记成 `outcome:'failed'` 并把事件推回
-     * mailbox，**不抛**。所以这条路径既不抛回 RPC 调用方、也不会自己回一句话——
-     * 这正是 Task 6 fail-loud 兜底要接的地方。此处只如实钉住当前契约。
-     */
-    it('manager episode 失败（LLM 挂）：不抛，回空 decision_types（兜底是 Task 6 的事）', async () => {
+  })
+
+  // ==========================================================================
+  // fail-loud 兜底（plan §三）—— Master Chat 这一条
+  //
+  // 与私聊 / 群聊两条 lane **共用同一套**判据（`ManagerEpisodeFailure`：catch + outcome
+  // 双管）、同一份文案（`buildFailLoudText`）、同一张冷却表（`failLoudSentAt`）。
+  // **只有出站那一跳不同**：
+  //
+  // - lane 走 `getChannelPort` + 裸 `send_message`；
+  // - admin chat 走 `chat_callback`。admin-web 伪 channel 的 `send_message` 落到
+  //   `chat_push`（**追加**新消息），前端那个转圈的占位气泡只认 `request_id` 匹配的
+  //   `chat_reply`（来自 `chat_callback`）。用 `send_message` 兜底 = 人类看到一条报错，
+  //   旁边还挂着一个永远转不完的圈。
+  //
+  // 冷却命中 / `chat_callback` 自身失败时**把异常抛回 RPC 调用方**：admin 的
+  // `dispatchToAgent` catch 会推 `chat_error`，占位气泡照样收口，且不会往消息库里
+  // 再落一条重复的兜底文案 —— 冷却在这条路上保住的正是"不重复落库"。
+  // ==========================================================================
+
+  describe('fail-loud 兜底（plan §三）', () => {
+    /** 让 registry 按 F1 的样子返回：正常 resolve，只是 outcome 是 failed。 */
+    function stubOutcome(outcome: 'failed' | 'aborted' | 'completed'): void {
+      internals.managerStack.registry.routeHumanMessages = async () => ({
+        episodeId: 'ep-1',
+        outcome,
+        turns: 1,
+        consumedEvents: outcome === 'completed',
+        repliedToHuman: false,
+      })
+    }
+
+    /** 兜底文案的唯一观测口：`chat_callback` 的 content（不是 `send_message`）。 */
+    function failLoudText(): string | undefined {
+      const cbs = callbacksOf('direct_reply')
+      return cbs.length > 0 ? (cbs[cbs.length - 1].content as string) : undefined
+    }
+
+    it('F1：真实 loop 里 LLM 挂掉（不抛错）时 master 仍然收到一条明确回执', async () => {
       boot()
       hoisted.managerAdapter = {
         // eslint-disable-next-line require-yield
         async *stream() {
+          calls.push('manager_llm')
           throw new Error('manager boom')
         },
         updateConfig: () => {},
       }
 
       await expect(runAdminChat()).resolves.toEqual({ decision_types: [] })
+
+      const cb = callbacksOf('direct_reply')
+      expect(cb, 'F1 下 Master Chat 什么都收不到 = 只剩一个转不完的圈').toHaveLength(1)
+      expect(cb[0]).toMatchObject({ request_id: REQUEST_ID })
+      expect(failLoudText()).toContain('管理员')
       expectThreeNots()
     })
 
-    it('唤醒本身抛错：原样抛回 RPC 调用方（admin chat 不像 channel 入站那样吞错）', async () => {
+    /**
+     * **判据里的 outcome 那一管**：registry 正常 resolve、一个异常都不抛，只有 outcome 是
+     * failed。去掉 outcome 判据（只留 catch）这条必挂。
+     */
+    it('F1：episode 正常 resolve 但 outcome=failed 时也必须兜底（只 catch 抓不住）', async () => {
+      boot()
+      stubOutcome('failed')
+
+      await expect(runAdminChat()).resolves.toEqual({ decision_types: [] })
+      expect(failLoudText()).toContain('failed')
+      expect(failLoudText()).toContain('管理员')
+    })
+
+    it('F1：outcome=aborted 同样兜底', async () => {
+      boot()
+      stubOutcome('aborted')
+
+      await runAdminChat()
+      expect(failLoudText()).toContain('aborted')
+    })
+
+    /**
+     * F2：唤醒本身抛错。cutover 前这里是"原样抛回 RPC 调用方"，admin 侧只会推一条笼统的
+     * `chat_error`（"系统暂时不可用"）。现在改成先把**带原因**的回执送到人眼前。
+     */
+    it('F2：episode 抛错时不再裸抛，改发带原始错误的兜底回执', async () => {
       boot()
       internals.managerStack.registry.routeHumanMessages = async () => {
         throw new Error('route boom')
       }
 
-      await expect(runAdminChat()).rejects.toThrow('route boom')
+      await expect(runAdminChat()).resolves.toEqual({ decision_types: [] })
+      expect(failLoudText()).toContain('route boom')
       expectThreeNots()
+    })
+
+    it('F2：manager model slot 没配时，文案说清"去 Admin 配 manager 槽位"', async () => {
+      boot()
+      internals.managerStack.registry.routeHumanMessages = async () => {
+        throw new Error(
+          "[ManagerLoop] model_config 缺少 'manager' 与 'powerful' 两个 slot，manager loop 无法解析可用的 LLM 连接信息",
+        )
+      }
+
+      await runAdminChat()
+
+      const text = failLoudText()!
+      expect(text).toContain('Admin')
+      expect(text).toContain('manager')
+      expect(text).toContain('槽位')
+    })
+
+    /**
+     * F3 不兜：与另两条路同一条纪律——"故意沉默"和"prompt 坏了"在信号层面无法区分，
+     * 误报（无缘无故说"我出错了"）比漏报更伤。
+     */
+    it('F3：episode 正常完成但 manager 决定沉默时，一个字都不发', async () => {
+      boot() // 空脚本 = manager 一句话都不说
+
+      await expect(runAdminChat()).resolves.toEqual({ decision_types: [] })
+      expect(callbacksOf('direct_reply')).toEqual([])
+      expect(rpcCalls.find((c) => c.method === 'send_message')).toBeUndefined()
+    })
+
+    it('F3：连续静默到阈值时记一条 warn（只记日志，仍然不发回执）', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      boot()
+
+      for (let i = 0; i < 3; i++) {
+        await runAdminChat(amsg({ id: `a-${i}` }))
+      }
+
+      expect(warn.mock.calls.some((c) => String(c[0]).includes('连续 3 轮'))).toBe(true)
+      expect(callbacksOf('direct_reply')).toEqual([])
+    })
+
+    /**
+     * 出站那一跳的判据：**必须是 `chat_callback`**。走 admin-web 伪 channel 的
+     * `send_message` 会落到 `chat_push`（追加），占位气泡不会被收口。
+     */
+    it('兜底走 chat_callback 而不是伪 channel 的 send_message（占位气泡才收得了口）', async () => {
+      boot()
+      stubOutcome('failed')
+
+      await runAdminChat()
+
+      const cb = rpcCalls.filter((c) => c.method === 'chat_callback')
+      expect(cb).toHaveLength(1)
+      expect(cb[0].port).toBe(ADMIN_PORT)
+      expect(cb[0].params).toMatchObject({ request_id: REQUEST_ID, reply_type: 'direct_reply' })
+      expect(rpcCalls.find((c) => c.method === 'send_message')).toBeUndefined()
+    })
+
+    it('冷却去重：连续三轮失败只往消息库里落一条兜底文案', async () => {
+      boot()
+      stubOutcome('failed')
+
+      for (let i = 0; i < 3; i++) {
+        await runAdminChat(amsg({ id: `a-${i}` })).catch(() => {/* 冷却命中会抛，见下一条 */})
+      }
+
+      expect(rpcCalls.filter((c) => c.method === 'chat_callback')).toHaveLength(1)
+    })
+
+    /**
+     * 冷却命中时**不能就这么算了**：admin chat 是请求 / 响应式的，每条 master 消息都挂着
+     * 一个转圈的占位气泡。抛回调用方让 admin 侧既有的 `chat_error` 去收口它。
+     */
+    it('冷却命中时把异常抛回 RPC 调用方（交给 admin 的 chat_error 收口占位气泡）', async () => {
+      boot()
+      stubOutcome('failed')
+
+      await runAdminChat(amsg({ id: 'a-1' }))
+      await expect(runAdminChat(amsg({ id: 'a-2' }))).rejects.toThrow(/failed/)
+    })
+
+    it('冷却窗口过去之后可以再告诉一次（不是一次性哑掉）', async () => {
+      boot()
+      stubOutcome('failed')
+
+      await runAdminChat(amsg({ id: 'a-1' }))
+      internals.failLoudSentAt.set('admin-web::admin-chat', Date.now() - 6 * 60 * 1000)
+      await runAdminChat(amsg({ id: 'a-2' }))
+
+      expect(rpcCalls.filter((c) => c.method === 'chat_callback')).toHaveLength(2)
+    })
+
+    it('冷却按 key 隔离：admin chat 的冷却不吃掉 channel 会话那边的兜底', async () => {
+      boot()
+      stubOutcome('failed')
+
+      await runAdminChat()
+      expect(internals.failLoudSentAt.has('admin-web::admin-chat')).toBe(true)
+      expect(internals.failLoudSentAt.has('wechat::sess-1')).toBe(false)
+    })
+
+    /**
+     * 兜底路径与 manager 栈零共享：manager 彻底坏掉（registry 直接抛）时这条回执仍然发得出去
+     * ——它只依赖 rpcClient + admin 端口。`chat_callback` 也失败才抛回调用方。
+     */
+    it('chat_callback 自身也失败时，把异常抛回调用方而不是静默吞掉', async () => {
+      boot()
+      stubOutcome('failed')
+      const realCall = internals.rpcClient.call
+      internals.rpcClient.call = async (port, method, params, from) => {
+        if (method === 'chat_callback') throw new Error('admin unreachable')
+        return realCall(port, method, params, from)
+      }
+
+      await expect(runAdminChat()).rejects.toThrow(/failed/)
     })
   })
 })

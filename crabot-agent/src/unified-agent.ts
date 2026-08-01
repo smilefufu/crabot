@@ -1265,39 +1265,62 @@ export class UnifiedAgent extends ModuleBase {
    * **按 key 冷却**：F1 会把整批输入推回 mailbox 下次重投，同一批消息可能连续失败若干轮；
    * 没有冷却就是刷屏。冷却命中时只记日志，不再发第二条。
    *
+   * **admin chat 走 `chat_callback` 而不是 `send_message`**（传 `adminChatRequestId` 即切换）：
+   * 判据（`ManagerEpisodeFailure`）、文案（`buildFailLoudText`）、冷却表全部共用，**只有出站
+   * 那一跳不同**。admin-web 伪 channel 的 `send_message` 落到 `chat_push`（**追加**一条新消息），
+   * 前端那个转圈的占位气泡靠 `request_id` 匹配 `chat_reply` 才会被替换掉 —— 只有
+   * `chat_callback` 能收口它。兜底文案是纯文本，`chat_reply` 的 string content 装得下，无损。
+   *
+   * 返回**这一次有没有真的把话送出去**：`false` = 冷却命中或出站 RPC 自身失败。
+   * channel 两条路忽略它（送不出去就只能落日志）；admin chat 靠它决定要不要把异常抛回
+   * RPC 调用方，让 admin 侧既有的 `chat_error` 兜住占位气泡（见 `processAdminChatMessage`）。
+   *
    * @see crabot-docs/superpowers/plans/2026-08-01-mw-p7-j-cutover.md §三
    */
   private async sendFailLoudReply(
     channelId: string,
     sessionId: string,
     failure: ManagerEpisodeFailure,
-  ): Promise<void> {
+    adminChatRequestId?: string,
+  ): Promise<boolean> {
     const key = `${channelId}::${sessionId}`
     const now = Date.now()
     const lastAt = this.failLoudSentAt.get(key)
     if (lastAt !== undefined && now - lastAt < FAIL_LOUD_COOLDOWN_MS) {
       console.warn(`[${this.config.moduleId}] fail-loud 冷却中（${key}），本次不再重复告知人类`)
-      return
+      return false
     }
     // 先占坑再发：发送本身失败（channel 也挂了）时同样不该退化成逐条重试轰炸。
     this.failLoudSentAt.set(key, now)
 
     try {
-      const channelPort = await this.getChannelPort(channelId)
-      await this.rpcClient.call(
-        channelPort,
-        'send_message',
-        {
-          session_id: sessionId,
-          content: { type: 'text', text: buildFailLoudText(failure) },
-        },
-        this.config.moduleId,
-      )
+      const text = buildFailLoudText(failure)
+      if (adminChatRequestId !== undefined) {
+        await this.rpcClient.call(
+          await this.getAdminPort(),
+          'chat_callback',
+          { request_id: adminChatRequestId, reply_type: 'direct_reply', content: text },
+          this.config.moduleId,
+        )
+      } else {
+        const channelPort = await this.getChannelPort(channelId)
+        await this.rpcClient.call(
+          channelPort,
+          'send_message',
+          {
+            session_id: sessionId,
+            content: { type: 'text', text },
+          },
+          this.config.moduleId,
+        )
+      }
+      return true
     } catch (error) {
       console.error(
         `[${this.config.moduleId}] fail-loud 兜底回复也没送出去（${key}）:`,
         error instanceof Error ? error.message : String(error),
       )
+      return false
     }
   }
 
@@ -1716,8 +1739,8 @@ export class UnifiedAgent extends ModuleBase {
    *
    * admin-web 是伪 channel（spec 2026-06-10-master-chat-redesign §4）：manager 的
    * `send_message` 经 `getChannelPort('admin-web')` 路由到 admin 模块的同签名
-   * `send_message` RPC，结果直接回流聊天界面。`chat_callback` 因此只剩"不经 LLM 的早退
-   * 提示"这一个用途。
+   * `send_message` RPC，结果直接回流聊天界面。`chat_callback` 因此只剩"不经 LLM 的
+   * 直接回执"这一类用途：未配置早退、以及下面的 fail-loud 兜底。
    *
    * 「三不」不变：不进 SessionLane（admin REST 前端 fetch 等响应才发下一条，天然单线）、
    * 不进注意力调度（master 直连每条都要处理）、不打 `add_reaction`（admin-web 没有
@@ -1746,12 +1769,48 @@ export class UnifiedAgent extends ModuleBase {
 
     // 发起人恒为 master：权限档位 / 记忆可见范围 / 对话对象档案都由唤醒边界按它解析
     // （`ManagerPrincipalStore`），不再在这里各算一份。
-    const result = await this.requireManagerStack().registry.routeHumanMessages(
-      'admin-web',
-      sessionId,
-      [message],
-      MASTER_FRIEND,
-    )
+    //
+    // fail-loud 兜底（plan §三）：Master Chat 是人类日常在用的界面，manager 挂了却一声不吭
+    // 只会留下一个永远转圈的气泡。判据 / 文案 / 冷却与私聊、群聊两条 lane **共用同一套**
+    // （`sendFailLoudReply`），只有出站那一跳换成 `chat_callback`。
+    let result
+    try {
+      result = await this.requireManagerStack().registry.routeHumanMessages(
+        'admin-web',
+        sessionId,
+        [message],
+        MASTER_FRIEND,
+      )
+    } catch (err) {
+      // F2：episode 中途抛错。
+      console.error(
+        `[${this.config.moduleId}] processAdminChatMessage manager episode failed:`,
+        err instanceof Error ? err.message : String(err),
+      )
+      // 送不出去（冷却命中 / chat_callback 也失败）就把异常原样抛回 admin —— 那边的
+      // `dispatchToAgent` catch 会推 `chat_error`，占位气泡照样收口，且不会往消息库里
+      // 再落一条重复的兜底文案。冷却在这里保住的正是"不重复落库"这一层。
+      if (!(await this.sendFailLoudReply('admin-web', sessionId, { kind: 'threw', error: err }, callbackInfo.request_id))) {
+        throw err
+      }
+      return { decision_types: [] }
+    }
+
+    if (result.outcome === 'failed' || result.outcome === 'aborted') {
+      // F1：`ManagerLoop` 记下 failed/aborted 后**正常 resolve**，不抛。只写 try/catch 抓不住。
+      console.error(
+        `[${this.config.moduleId}] processAdminChatMessage manager episode outcome=${result.outcome}`,
+      )
+      const failure: ManagerEpisodeFailure = { kind: 'outcome', outcome: result.outcome }
+      if (!(await this.sendFailLoudReply('admin-web', sessionId, failure, callbackInfo.request_id))) {
+        throw new Error(`manager episode ${result.outcome}`)
+      }
+      return { decision_types: [] }
+    }
+
+    // F3（跑完了但一句话没说）与另两条路同样只记日志计数，不发兜底回复：
+    // "故意沉默"和"prompt 坏了"在信号层面无法区分，误报代价更伤。
+    this.noteEpisodeSilence(`admin-web::${sessionId}`, result.repliedToHuman)
 
     // 返回值只回报"manager 这轮有没有跟人说话"。v2 的 `create_task` / `task_ids` 是
     // **前置决策器动作分类**的投影，v3 没有等价物：派不派活由 manager 在 episode 内自己
