@@ -487,6 +487,8 @@ export class UnifiedAgent extends ModuleBase {
    * `.superpowers/sdd/progress.md` Task 1 条目）。这里给一个半成品反而会掩盖它。
    */
   private initializeManagerStack(): void {
+    // messagingDeps 里的 getter 需要拿到本实例（getter 内的 `this` 是那个对象字面量）。
+    const self = this
     this.managerStack = buildManagerStack({
       dataRoot: getDataRootDir(),
       now: () => new Date().toISOString(),
@@ -501,6 +503,13 @@ export class UnifiedAgent extends ModuleBase {
         moduleId: this.config.moduleId,
         getAdminPort: () => this.getAdminPort(),
         resolveChannelPort: (channelId) => this.getChannelPort(channelId),
+        // channel 透传只读三件套（protocol-crab-messaging §2.10）"仅当存在飞书 channel 实例
+        // 时才注入"——取值来源与 worker 侧 `createMcpConfigs` 完全一致（同一个
+        // `feishuChannelAvailable`，由 `detectFeishuChannel()` 探测）。
+        // **必须是 getter**：本对象在构造函数里就建好了（`initializeManagerStack`），而探测跑在
+        // `onStart()` 里；写成定值就永远快照到探测前的 false。worker 侧没这个问题是因为
+        // `createMcpConfigs` 本身是每个 task 现调的工厂。
+        get enableFeishuDocTool(): boolean { return self.feishuChannelAvailable },
       },
       // crab-memory：manager 没有 task 上下文，visibility/scopes 取 agent-handler 在缺配置时
       // 用的同一组缺省值（'public' / []），sourceType 记 'system'（不是某次对话的产物）。

@@ -2,11 +2,13 @@
  * manager 封闭工具面装配测试 —— protocol-agent-v3.md §4.3。
  *
  * 覆盖：
- * - 普通 manager 工具名集合精确匹配预期清单
- * - 系统线程（isSystemThread）多出 send_master_private / send_private_message，其余不变
+ * - 普通 manager 工具名集合精确匹配预期清单（含 send_private_message，protocol-crab-messaging §1）
+ * - 系统线程（isSystemThread）多出 send_master_private，其余不变
+ * - 飞书 channel 存在时多出 §2.10 的只读三件套，且**任何情况下都不含 feishu_write**
  * - 运行时护栏对注入的违规工具（通用文件系统工具 / 外装 mcp__ 工具）抛错，crab-memory 前缀放行
  * - isReadOnly 标记正确（messaging 只读子集 / worker 六件套 / crabot-info 六件套）
  * - send_message 暴露给 LLM 的 inputSchema 不含 intent，调用底层 handler 时也不透传 intent
+ * - 可见性门与运行时门同源：可见的 send_private_message 真调一次不被 requireDeclaredShortcut 拦
  */
 import { describe, it, expect, vi } from 'vitest'
 import { buildManagerToolFace, assertClosedToolFace, type ToolFaceDeps } from '../../src/manager/tools/tool-face'
@@ -14,8 +16,13 @@ import { createCrabMemoryServer } from '../../src/mcp/crab-memory'
 import type { WorkerHarness } from '../../src/workers/harness/harness'
 import type { ToolDefinition } from '../../src/engine/index'
 
+/**
+ * 普通 manager 的 messaging 工具（无飞书 channel 实例时）。
+ * `send_private_message` 在列——protocol-crab-messaging.md §1 投递类可见性表「普通 manager = 是」。
+ */
 const MESSAGING_NORMAL = [
   'send_message',
+  'send_private_message',
   'get_history',
   'get_message',
   'lookup_friend',
@@ -25,6 +32,9 @@ const MESSAGING_NORMAL = [
   'list_group_members',
   'fetch_media',
 ]
+
+/** protocol-crab-messaging.md §2.10 的 channel 透传只读三件套（仅当存在飞书 channel 实例）。 */
+const FEISHU_READ_ONLY_TOOLS = ['read_feishu_document', 'feishu_raw_get', 'feishu_download_file']
 
 const WORKER_TOOLS = ['spawn_worker', 'send_to_worker', 'query_worker', 'read_worker_output', 'list_workers', 'kill_worker']
 
@@ -52,6 +62,16 @@ function makeMemoryServer() {
   )
 }
 
+function makeMessagingDeps(extra: Partial<ToolFaceDeps['messagingDeps']> = {}): ToolFaceDeps['messagingDeps'] {
+  return {
+    rpcClient: { call: vi.fn() } as never,
+    moduleId: 'manager-test',
+    getAdminPort: async () => 19001,
+    resolveChannelPort: async () => 19009,
+    ...extra,
+  }
+}
+
 function makeDeps(overrides: Partial<ToolFaceDeps> = {}): ToolFaceDeps {
   return {
     harness: {} as unknown as WorkerHarness,
@@ -60,12 +80,7 @@ function makeDeps(overrides: Partial<ToolFaceDeps> = {}): ToolFaceDeps {
       managerKey: 'manager-1',
       reportTo: { channel_id: 'ch-1', session_id: 'sess-1' },
     }),
-    messagingDeps: {
-      rpcClient: { call: vi.fn() } as never,
-      moduleId: 'manager-test',
-      getAdminPort: async () => 19001,
-      resolveChannelPort: async () => 19009,
-    },
+    messagingDeps: makeMessagingDeps(),
     memoryServer: makeMemoryServer(),
     callAdmin: vi.fn(async () => ({})) as unknown as ToolFaceDeps['callAdmin'],
     isSystemThread: false,
@@ -88,25 +103,53 @@ describe('buildManagerToolFace', () => {
     )
     // crab-memory 原样全给，不裁（§4.3），至少有 A 组 6 个
     expect(memoryToolNames(tools).length).toBeGreaterThanOrEqual(6)
-    // 系统线程专属工具不应出现
+    // 投递类：send_private_message 在（§1 表「普通 manager = 是」），系统线程专属的不在
+    expect(names).toContain('send_private_message')
     expect(names).not.toContain('send_master_private')
-    expect(names).not.toContain('send_private_message')
+    // 没有飞书 channel 实例（enableFeishuDocTool falsy）→ §2.10 那一组一个都不出现
+    for (const name of [...FEISHU_READ_ONLY_TOOLS, 'feishu_write']) {
+      expect(names, `无飞书实例时不应出现 ${name}`).not.toContain(name)
+    }
   })
 
-  it('系统线程多出 send_master_private / send_private_message，其余相同', () => {
+  it('系统线程只多出 send_master_private，其余相同', () => {
     const normalNames = buildManagerToolFace(makeDeps({ isSystemThread: false })).map((t) => t.name).sort()
     const systemNames = buildManagerToolFace(makeDeps({ isSystemThread: true })).map((t) => t.name).sort()
 
-    expect(systemNames).toEqual(
-      [...normalNames, 'send_master_private', 'send_private_message'].sort(),
-    )
+    expect(systemNames).toEqual([...normalNames, 'send_master_private'].sort())
+  })
+
+  it('存在飞书 channel 实例时：两类 manager 都多出 §2.10 只读三件套，都不含 feishu_write', () => {
+    for (const isSystemThread of [false, true]) {
+      const tools = buildManagerToolFace(makeDeps({
+        isSystemThread,
+        messagingDeps: makeMessagingDeps({ enableFeishuDocTool: true }),
+      }))
+      const names = tools.map((t) => t.name)
+      const nonMemoryNames = names.filter((n) => !n.startsWith('mcp__crab-memory__'))
+
+      expect(nonMemoryNames.sort(), `isSystemThread=${isSystemThread}`).toEqual(
+        [
+          ...MESSAGING_NORMAL,
+          ...FEISHU_READ_ONLY_TOOLS,
+          ...(isSystemThread ? ['send_master_private'] : []),
+          ...WORKER_TOOLS,
+          ...CRABOT_INFO_TOOLS,
+        ].sort(),
+      )
+      // 任意写 API 透传绝不进 manager 工具面（protocol-crab-messaging.md §1 note）
+      expect(names, `isSystemThread=${isSystemThread} 不得含 feishu_write`).not.toContain('feishu_write')
+    }
   })
 
   it('isReadOnly 标记正确', () => {
-    const tools = buildManagerToolFace(makeDeps({ isSystemThread: true }))
+    const tools = buildManagerToolFace(makeDeps({
+      isSystemThread: true,
+      messagingDeps: makeMessagingDeps({ enableFeishuDocTool: true }),
+    }))
     const byName = new Map(tools.map((t) => [t.name, t]))
 
-    const readOnly = ['get_history', 'get_message', 'lookup_friend', 'list_sessions', 'list_contacts', 'list_groups', 'list_group_members', 'fetch_media', 'read_worker_output', 'list_workers', ...CRABOT_INFO_TOOLS]
+    const readOnly = ['get_history', 'get_message', 'lookup_friend', 'list_sessions', 'list_contacts', 'list_groups', 'list_group_members', 'fetch_media', ...FEISHU_READ_ONLY_TOOLS, 'read_worker_output', 'list_workers', ...CRABOT_INFO_TOOLS]
     for (const name of readOnly) {
       expect(byName.get(name)?.isReadOnly, `${name} 应为 isReadOnly:true`).toBe(true)
     }
@@ -144,6 +187,35 @@ describe('buildManagerToolFace', () => {
     // manager 没有 task 上下文；若 intent 被透传，这里会因缺 taskCtx 而报错/行为异常）
     expect(result.isError).toBe(false)
     void capturedArgsByHandler
+  })
+
+  it('普通 manager 真调一次 send_private_message：不被 requireDeclaredShortcut 拦，RPC 真的打出去', async () => {
+    const call = vi.fn(async (_port: number, method: string) => {
+      switch (method) {
+        case 'get_friend':
+          return { friend: { display_name: 'Alice', channel_identities: [{ channel_id: 'ch-1', platform_user_id: 'u-1' }] } }
+        case 'find_or_create_private_session':
+          return { session: { id: 'sess-9' }, created: false }
+        case 'send_message':
+          return { platform_message_id: 'pm-1', sent_at: '2026-08-01T00:00:00.000Z' }
+        default:
+          throw new Error(`未预期的 RPC: ${method}`)
+      }
+    })
+    const tools = buildManagerToolFace(makeDeps({
+      isSystemThread: false,
+      messagingDeps: makeMessagingDeps({ rpcClient: { call } as never }),
+    }))
+    const sendPrivate = tools.find((t) => t.name === 'send_private_message')!
+
+    const result = await sendPrivate.call({ friend_id: 'f-1', content: 'hi' }, {} as never)
+
+    // 运行时门若拒绝，会返回 isError + SCHEDULED_ONLY_TOOL 且**零 RPC**——这两条一起钉住
+    // 「可见性门与运行时门同源」，而不只是「工具出现在列表里」。
+    expect(result.isError).toBe(false)
+    expect(result.output).not.toContain('SCHEDULED_ONLY_TOOL')
+    expect(JSON.parse(result.output)).toMatchObject({ channel_id: 'ch-1', session_id: 'sess-9', platform_message_id: 'pm-1' })
+    expect(call.mock.calls.map((c) => c[1])).toEqual(['get_friend', 'find_or_create_private_session', 'send_message'])
   })
 
   it('护栏拦截注入的通用文件系统工具（bash/read/write/edit/glob/grep/delegate_task）', () => {

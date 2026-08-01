@@ -48,11 +48,18 @@ export interface ToolFaceDeps {
 // ============================================================================
 
 /**
- * 普通 manager 的 messaging 白名单（9 项，完整通讯能力含跨 session 投递，
- * protocol-agent-v3.md §4.3 明确不裁）。
+ * 普通 manager 的 messaging 白名单（完整通讯能力含跨 session 投递，
+ * protocol-agent-v3.md §4.3 明确不裁）。逐行对齐 protocol-crab-messaging.md §1 的两张可见性表。
+ *
+ * 末尾三个 channel 透传只读工具（§2.10.1–§2.10.3）**仅当存在飞书 channel 实例时才真的出现**：
+ * `deps.messagingDeps.enableFeishuDocTool` 为 falsy 时 crab-messaging 压根不构造它们，
+ * 而 `MessagingToolSet.tools` 是交集语义（声明 ≠ 存在）。**`feishu_write`（§2.10.4）不在此列**
+ * ——任意写 API 透传、无逐操作确认、无 undo，而 manager 是人类原文的唯一入口，
+ * 是最容易被 prompt 注入的一环（protocol-crab-messaging.md §1 的 note）。
  */
 const MESSAGING_BASE_WHITELIST: readonly string[] = [
   'send_message',
+  'send_private_message',
   'get_history',
   'get_message',
   'lookup_friend',
@@ -61,10 +68,16 @@ const MESSAGING_BASE_WHITELIST: readonly string[] = [
   'list_groups',
   'list_group_members',
   'fetch_media',
+  'read_feishu_document',
+  'feishu_raw_get',
+  'feishu_download_file',
 ]
 
-/** 仅 isSystemThread===true 时额外暴露。 */
-const MESSAGING_SYSTEM_EXTRA: readonly string[] = ['send_master_private', 'send_private_message']
+/**
+ * 仅 isSystemThread===true 时额外暴露：`send_master_private` 的 reach_master 语义只属于
+ * 系统线程（protocol-crab-messaging.md §1 投递类可见性表）。
+ */
+const MESSAGING_SYSTEM_EXTRA: readonly string[] = ['send_master_private']
 
 /**
  * manager 交给 `buildMessagingTools` 的显式工具集声明。
@@ -93,6 +106,11 @@ const MESSAGING_READ_ONLY = new Set([
   'list_groups',
   'list_group_members',
   'fetch_media',
+  // channel 透传只读三件套：都不改飞书数据（`feishu_download_file` 只把 token 登记成
+  // media handle，落盘要再走 fetch_media），可与其它读工具并行成批。
+  'read_feishu_document',
+  'feishu_raw_get',
+  'feishu_download_file',
 ])
 
 /**

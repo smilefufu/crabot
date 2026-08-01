@@ -28,7 +28,7 @@ import { SYSTEM_TASKS_MANAGER_KEY } from '../../src/manager/registry.js'
 import { dialogObjectIdForPrivate, type DialogObjectId, type LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import type { ManagerKey } from '../../src/manager/types.js'
 import type { ManagerStack } from '../../src/manager/bootstrap.js'
-import type { LLMAdapter } from '../../src/engine/index.js'
+import type { LLMAdapter, ToolDefinition } from '../../src/engine/index.js'
 import type {
   UnifiedAgentConfig,
   OrchestrationConfig,
@@ -170,6 +170,7 @@ interface AgentInternals {
   managerStack?: ManagerStack
   rpcClient: { publishEvent: (e: Event, source: ModuleId) => Promise<number> }
   adminPort?: number
+  feishuChannelAvailable: boolean
   onStart(): Promise<void>
   onStop(): Promise<void>
 }
@@ -251,6 +252,46 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
 
     expect(detectSpy).not.toHaveBeenCalled()
     await expect(fs.access(join(tmpRoot, 'data', 'agent', 'ledgers'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  /**
+   * `enableFeishuDocTool` 的接线自证（PR C 第 2 步）。
+   *
+   * 只断言"白名单里有这三个名字"证明不了任何事——manager 的 `messagingDeps` 一度**根本没传**
+   * 这个开关，工具压根不会被构造。这里走真实构造函数装出来的真工具面：探测前后各取一次，
+   * 只有开关真的接到 `feishuChannelAvailable` 上，第二次才会多出那三个。
+   *
+   * 顺带钉住两条：① 它必须是 getter——本对象在构造函数里就建好了，而探测跑在 `onStart()` 里，
+   * 写成定值就永远是探测前的 false；② "仅当存在飞书 channel 实例时可见"（protocol-crab-messaging
+   * §2.10）的实现方式就是这个开关，没有实例时三件套不出现。
+   */
+  it('manager 工具面接 enableFeishuDocTool：无飞书实例时三件套不出现，探测到实例后出现，feishu_write 始终不出现', () => {
+    boot()
+    const registryDeps = (internals.managerStack as unknown as {
+      registry: { deps: { toolFace: (k: ManagerKey, sys: boolean, onErr: () => void) => ReadonlyArray<ToolDefinition> } }
+    }).registry.deps
+    const namesNow = (): string[] =>
+      registryDeps.toolFace('wechat::sess-1' as ManagerKey, false, () => {}).map((t) => t.name)
+
+    const feishuReadOnly = ['read_feishu_document', 'feishu_raw_get', 'feishu_download_file']
+
+    // detectFeishuChannel 还没跑（构造函数阶段）→ 一个都不该有
+    const before = namesNow()
+    for (const name of [...feishuReadOnly, 'feishu_write']) {
+      expect(before, `探测前不应出现 ${name}`).not.toContain(name)
+    }
+
+    // 模拟 detectFeishuChannel 命中 channel-feishu 实例
+    internals.feishuChannelAvailable = true
+
+    const after = namesNow()
+    for (const name of feishuReadOnly) {
+      expect(after, `探测到飞书实例后应出现 ${name}`).toContain(name)
+    }
+    expect(after, 'feishu_write 绝不进 manager 工具面').not.toContain('feishu_write')
+    // 投递类补齐同样走真实装配路径
+    expect(after).toContain('send_private_message')
+    expect(after).not.toContain('send_master_private')
   })
 
   // --- ⑤ §11 manager slot 与降级路径 ---
