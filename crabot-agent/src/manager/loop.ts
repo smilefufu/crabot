@@ -52,12 +52,22 @@ import type { ManagerSessionState, ManagerKey } from './types.js'
 import type { WorkerHarness } from '../workers/harness/harness'
 import type { DialogObjectId, LedgerWorker } from '../workers/harness/ledger-types'
 import type { HarnessEvent } from '../workers/harness/worker-events'
-import type { ChannelMessage } from '../types'
+import type { ChannelMessage, Friend } from '../types'
 
 // --- Public Interface ---
 
 export type WakeEvent =
-  | { readonly kind: 'human_messages'; readonly messages: ReadonlyArray<ChannelMessage> }
+  | {
+      readonly kind: 'human_messages'
+      readonly messages: ReadonlyArray<ChannelMessage>
+      /**
+       * P7 J additive:本批消息的**发言者**(§4.3 权限身份、§8.2 `creator_friend_id`)。
+       * 与 schedule 的 `creatorFriendId` 同样只在唤醒事件上随行、**不进对话上下文**
+       * (`renderWakeEvent` 不渲染它):它的用途是让本 episode 的工具面按发起人身份装配、
+       * 让派出去的 worker 记对 `origin.creator_friend_id`,不是给 LLM 看的。
+       */
+      readonly friend?: Friend
+    }
   | { readonly kind: 'worker_event'; readonly event: HarnessEvent }
   | {
       readonly kind: 'schedule'
@@ -87,8 +97,12 @@ export interface ManagerLoopDeps {
   readonly key: ManagerKey
   readonly isSystemThread: boolean
   /** 台账渲染用(harness.listWorkers 的入参)。manager 会话粒度(ManagerKey)与台账聚合粒度
-   *  (DialogObjectId)不同——由调用方按 protocol §3 解析好传入,本模块不做这层映射。 */
-  readonly dialogObjectId: DialogObjectId
+   *  (DialogObjectId)不同——由调用方按 protocol §3 解析好传入,本模块不做这层映射。
+   *
+   *  **thunk 而非定值**(P7 J):私聊的归档键要等第一条人类消息带来 friend 之后才能收敛成
+   *  `friend:<id>`,而 loop 实例可能先由 worker 事件建出来。定值会把那一刻的 group 形状
+   *  永久钉死在实例上,同一个人的台账因此裂成两份。 */
+  readonly dialogObjectId: () => DialogObjectId
   readonly store: ManagerSessionStore
   readonly policy: CompactionPolicy
   /** decideCompaction 的 token 估算器,调用方注入(与 compaction.ts 的既定依赖注入方式一致)。 */
@@ -441,7 +455,7 @@ export class ManagerLoop {
   }
 
   private async fetchLedgerRender(): Promise<string> {
-    const workers = await this.deps.harness.listWorkers(this.deps.dialogObjectId)
+    const workers = await this.deps.harness.listWorkers(this.deps.dialogObjectId())
     return renderLedger(workers)
   }
 }

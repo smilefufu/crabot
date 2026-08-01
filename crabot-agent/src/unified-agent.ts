@@ -75,9 +75,10 @@ import { resolveManagerModelConfig } from './manager/model-slot.js'
 import { createCrabMemoryServer, filterMemoryToolsByProfile } from './mcp/crab-memory.js'
 import {
   BUILTIN_WORKER_PERMISSIONS,
+  narrowWorkerPermissions,
   type BuiltinRuntimeContext,
 } from './workers/builtin/runtime.js'
-import { dialogObjectIdForGroup, type DialogObjectId, type ManagerKey } from './workers/harness/ledger-types.js'
+import type { DialogObjectId, ManagerKey } from './workers/harness/ledger-types.js'
 import {
   filterAndPageWorkers,
   buildWorkerDetail,
@@ -334,6 +335,9 @@ export class UnifiedAgent extends ModuleBase {
    */
   private crabSelfHandles: Map<ModuleId, string> = new Map()
 
+  /** master 的 friend id（系统线程台账归档键，实例级常量）；见 `resolveMasterFriendId`。 */
+  private masterFriendIdCache: string | undefined
+
   /**
    * Manager/Worker 栈（protocol-agent-v3 §4-§7）。构造函数里由 `initializeManagerStack()`
    * 装配（P5 Task 6），启动对账在 `onStart()` 里异步跑。
@@ -564,20 +568,36 @@ export class UnifiedAgent extends ModuleBase {
         // `createMcpConfigs` 本身是每个 task 现调的工厂。
         get enableFeishuDocTool(): boolean { return self.feishuChannelAvailable },
       },
-      // crab-memory：manager 没有 task 上下文，visibility/scopes 取 agent-handler 在缺配置时
-      // 用的同一组缺省值（'public' / []），sourceType 记 'system'（不是某次对话的产物）。
-      // manager 的记忆权限档位目前没有解析入口，P6/P7 接 §4.3 权限时再收敛。
-      memoryServer: createCrabMemoryServer(
-        {
-          rpcClient: this.rpcClient,
-          moduleId: this.config.moduleId,
-          getMemoryPort: () => this.getMemoryPort(),
-        },
-        { visibility: 'public', scopes: [], sourceType: 'system', isMasterPrivate: false },
-      ),
+      // crab-memory：档位（visibility / scopes）由 manager 装配层按**发起人身份**算好
+      // （`manager/principal.ts` + `memoryContextFor`），这里只负责按算好的档位现建 server。
+      // 身份未解析时装配层会退回 `{visibility:'public', scopes:[], sourceType:'system'}`，
+      // 即本行历史上写死的那一档。
+      memoryServerFor: (ctx) =>
+        createCrabMemoryServer(
+          {
+            rpcClient: this.rpcClient,
+            moduleId: this.config.moduleId,
+            getMemoryPort: () => this.getMemoryPort(),
+          },
+          ctx,
+        ),
       callAdmin: async <P, R>(method: string, params: P): Promise<R> =>
         this.rpcClient.call<P, R>(await this.getAdminPort(), method, params, this.config.moduleId),
-      dialogObjectIdFor: (key) => this.dialogObjectIdForManagerKey(key),
+      // 发起人身份的解析原料：全是**既有**入口，本处只做注入，不新造解析逻辑。
+      principalResolver: {
+        resolvePermissions: (p) =>
+          this.resolvePrincipalPermissions(p.senderFriend, p.sessionId, p.sessionType),
+        sessionMemoryScopes: (sessionId) => this.getSessionMemoryScopes(sessionId),
+        sceneProfile: (p) =>
+          this.contextAssembler.resolveSceneProfile(
+            p.channelId as ModuleId,
+            p.sessionId,
+            p.sessionType,
+            p.friendId,
+          ),
+        crabSelfHandle: (channelId) => this.crabSelfHandles.get(channelId),
+        masterFriendId: () => this.resolveMasterFriendId(),
+      },
       // 起化身时现取（spec 决策 2）：箭头函数只捕获 `this`，配置一律在调用那一刻读。
       builtinSpawnDefaults: (ctx) => this.buildBuiltinWorkerRuntime(ctx),
       // 对外事件出口（§9.2 `agent.task_status_changed`）：真实 rpcClient 注入。
@@ -591,33 +611,30 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   /**
-   * `ManagerKey`（`channel_id::session_id`）→ 台账聚合键 `DialogObjectId`（§3）。
+   * master 的 friend id —— 系统任务线程的台账归档键（§4.4：未配置 `target_session` 的
+   * scheduled 触发，台账归 master 对话对象；否则 master 在私聊里问进度时，其 manager 按
+   * `friend:<master_id>` 查台账看不到这些 worker）。
    *
-   * ⚠️ **P7 cutover 前必须修**。本阶段一律派生成 `group:<channel_id>:<session_id>`，
-   * 有**两处**归档错误：
-   *
-   * 1. **私聊**：协议要求聚合成 `friend:<friend_id>`（同一 friend 跨 channel 共享一份台账），
-   *    但那需要 admin 的 friend 解析，而 `ManagerRegistryDeps.dialogObjectIdFor` 是**同步**签名，
-   *    这里没有任何可同步查到 session 类型/friend 的入口——agent 侧唯一知道"这个 session 是
-   *    私聊且对端是谁"的地方是入站消息链路，而 P5 明令该链路零改动。
-   * 2. **系统任务线程**：§4.4 要求未配置 `target_session` 的 scheduled 触发**台账归 master
-   *    对话对象**（`friend:<master_id>`），但 `SYSTEM_TASKS_MANAGER_KEY`（`admin-web::system-tasks`）
-   *    在这里会派生成 `group:admin-web:system-tasks`。后果不只是归档键难看：master 在私聊里
-   *    问进度时，其 manager 按 `friend:<master_id>` 查台账**看不到**系统线程派出的 worker，
-   *    §4.4 "人类在哪个 session 回话、该 session 的 manager 凭共享台账接办"就断了。
-   *
-   * 现阶段无害：P5 没有任何生产调用方经这套栈 spawn worker（admin 的 scheduler 调用点未切换），
-   * 台账上不会出现被归错档的条目。
-   *
-   * 切换调用点之前必须先解决。**只有"把签名改成异步"这一条路能同时覆盖两种情况**——
-   * "在入站链路上维护 `ManagerKey → DialogObjectId` 缓存"对系统线程**天然无效**：它根本
-   * 没有入站消息，缓存永远不会被填充。
+   * 实例级常量：admin 侧 master 唯一（`permission==='master'` 至多一个，见
+   * `crabot-admin/src/index.ts:3525`），解析成功一次即长期缓存。解析不出来时返回
+   * undefined，由 `ManagerPrincipalStore` 退回旧的 group 形状——不猜、不阻塞唤醒。
    */
-  private dialogObjectIdForManagerKey(key: ManagerKey): DialogObjectId {
-    const sep = key.indexOf('::')
-    return sep < 0
-      ? dialogObjectIdForGroup(key, '')
-      : dialogObjectIdForGroup(key.slice(0, sep), key.slice(sep + 2))
+  private async resolveMasterFriendId(): Promise<string | undefined> {
+    if (this.masterFriendIdCache) return this.masterFriendIdCache
+    try {
+      const adminPort = await this.getAdminPort()
+      const result = await this.rpcClient.call<Record<string, never>, { friend: Friend | null }>(
+        adminPort,
+        'find_master_friend',
+        {},
+        this.config.moduleId,
+      )
+      this.masterFriendIdCache = result.friend?.id
+      return this.masterFriendIdCache
+    } catch (err) {
+      console.warn('[Agent] find_master_friend 失败，系统线程台账暂用旧归档键:', err)
+      return undefined
+    }
   }
 
   // ==========================================================================
@@ -675,6 +692,10 @@ export class UnifiedAgent extends ModuleBase {
   private buildBuiltinWorkerTools(ctx: BuiltinRuntimeContext): ReadonlyArray<EngineToolDefinition> {
     const tools: EngineToolDefinition[] = []
     const workspaceRoot = ctx.workspace.root
+    // 派活时 manager 已经按发起人身份算好的档位（§8.2）。worker 不认识 friend，也不去问
+    // admin——它只按 `origin.spawned_by_session` 取回那份算好的结果。
+    const principalPerms = this.resolveWorkerPrincipalPermissions(ctx)
+    const workerPerms = narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, principalPerms)
 
     // 内置文件 / shell 工具 + Skill。cwd 恒等于 workspace 且**不传 `setCwdCtx`**——worker 的
     // 工作目录就是它的 workspace，不可中途切换（决策 3；adapter 侧 `guardTools` 硬断言）。
@@ -686,9 +707,9 @@ export class UnifiedAgent extends ModuleBase {
       { availableSkills: this.agentConfig?.skills ?? [] },
     ))
 
-    // crab-memory：A 组（普通对话档）。worker 没有会话身份，visibility/scopes 取与 manager
-    // 侧同一组缺省值（`initializeManagerStack` 的 memoryServer），sourceType 记 'system'。
-    // 记忆权限档位随会话身份解析是 spec 未决 #2，J 接真实身份时一并收敛。
+    // crab-memory：A 组（普通对话档）。可见范围随**派活人身份**收敛（PR F 未决 #2 在此关闭）：
+    // `memory_scopes` 解析出来就用它（写 internal + 限定 scopes），解析不出来才退回原来的
+    // `public` / 空 scopes。放着不收敛的后果是群 A 的内容以 public 落记忆、群 B 读得到。
     tools.push(...filterMemoryToolsByProfile(
       mcpServerToToolDefinitions(
         createCrabMemoryServer(
@@ -699,9 +720,9 @@ export class UnifiedAgent extends ModuleBase {
           },
           {
             taskId: ctx.worker_id,
-            visibility: 'public',
-            scopes: [],
-            sourceType: 'system',
+            ...(principalPerms
+              ? { visibility: 'internal' as const, scopes: [...workerPerms.memory_scopes], sourceType: 'conversation' as const }
+              : { visibility: 'public' as const, scopes: [], sourceType: 'system' as const }),
             isMasterPrivate: false,
           },
         ),
@@ -728,13 +749,25 @@ export class UnifiedAgent extends ModuleBase {
 
     // disabled_tools 对 MCP 桥接工具的过滤（内置工具的同名过滤已在 getConfiguredBuiltinTools 内完成）。
     const configFiltered = filterMcpToolsByConfig(tools, this.agentConfig?.builtin_tool_config)
-    // F 阶段固定权限档位过滤：adapter 的 `checkPermission` 是执行期的闸，这里守的是
-    // "没权限的工具不进 prompt"——外部 MCP 里可能混进 `desktop` 类工具（computer-use），
-    // 那一面在 F 阶段的档位下是关的。J 接真实身份后档位改为按 origin 解析。
-    return filterToolsByPermission(
-      configFiltered,
-      this.getToolPermissionConfig(configFiltered, BUILTIN_WORKER_PERMISSIONS),
-    )
+    // 权限档位过滤：adapter 的 `checkPermission` 是执行期的闸，这里守的是
+    // "没权限的工具不进 prompt"——外部 MCP 里可能混进 `desktop` 类工具（computer-use）。
+    // 档位 = worker 固定档位 ∩ 派活人档位（见 `narrowWorkerPermissions`）。
+    return filterToolsByPermission(configFiltered, this.getToolPermissionConfig(configFiltered, workerPerms))
+  }
+
+  /**
+   * 派活时 manager 已经解析好的发起人权限档位（§8.2）——按 `origin.spawned_by_session`
+   * 从 `ManagerPrincipalStore` 取回。
+   *
+   * **worker 侧不做任何身份解析**：它既不知道 friend 是谁，也不调 admin。这条通路承载的
+   * 只是"manager 算好的一份结果"，所以这里是同步的一次 Map 查询，不是 RPC。
+   * 取不到（系统派工 / scheduled / 该会话从未收到过人类消息）时返回 null，
+   * `narrowWorkerPermissions` 会原样退回 worker 固定档位。
+   */
+  private resolveWorkerPrincipalPermissions(ctx: BuiltinRuntimeContext): ResolvedPermissions | null {
+    const key = ctx.origin?.spawned_by_session
+    if (!key) return null
+    return this.managerStack?.principals.get(key)?.permissions ?? null
   }
 
   /**

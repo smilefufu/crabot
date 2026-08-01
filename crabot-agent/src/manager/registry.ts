@@ -58,7 +58,8 @@ import type { WorkerHarness } from '../workers/harness/harness'
 import type { LedgerStore } from '../workers/harness/ledger-store'
 import type { DialogObjectId } from '../workers/harness/ledger-types'
 import type { HarnessEvent, HarnessEventKind } from '../workers/harness/worker-events'
-import type { ChannelMessage } from '../types'
+import type { ChannelMessage, Friend } from '../types'
+import type { HumanPrincipal } from './principal.js'
 
 /** §4.4 保留线程:未配置目标 session 的 scheduled 触发 / 台账查不到监护 session 的 worker 事件落此。 */
 export const SYSTEM_TASKS_MANAGER_KEY = 'admin-web::system-tasks' as ManagerKey
@@ -124,8 +125,20 @@ export interface ManagerRegistryDeps {
    * `ManagerKey` → 台账渲染用的 `DialogObjectId`(`ManagerLoopDeps.dialogObjectId`)。
    * 两者粒度不同(manager 按 channel::session,worker 台账按 friend 跨 channel 聚合/单群),
    * 这层映射依赖 friend 解析等本模块无法自行完成的信息,由调用方按 protocol §3 解析好注入。
+   *
+   * **每次读都要现算**:私聊的归档键要等第一条人类消息带来 friend 之后才能收敛成
+   * `friend:<id>`(见 `onHumanWake`),调用方持有的映射会随之变化。
    */
   readonly dialogObjectIdFor: (key: ManagerKey) => DialogObjectId
+  /**
+   * **人类消息唤醒边界**的异步解析钩子:`routeHumanMessages` 在 `runWake` 之前 await 它一次,
+   * 调用方据 `principal`(发起人 friend + 私/群)解析权限、记忆档位、对话对象档案并缓存,
+   * 供下面那三个**同步** thunk(`dialogObjectIdFor` / `toolFace` / `promptInputs`)读取。
+   *
+   * 这是"加参数而不是全面异步化"的落点:异步只发生在唤醒边界这一处,每轮 turn 被同步调用的
+   * 签名一个都不用改。不注入则行为与之前逐字相同(manager 拿不到发起人身份)。
+   */
+  readonly onHumanWake?: (key: ManagerKey, principal: HumanPrincipal) => Promise<void>
   /**
    * 工具面工厂:调用方据 key/isSystemThread 装配 `buildManagerToolFace` 的完整依赖并返回
    * 工具面数组;`onAsyncError` 由本 registry 按 key 绑定好传入,调用方负责把它接进
@@ -134,12 +147,18 @@ export interface ManagerRegistryDeps {
    * P5 Task 4 additive:第四个参数是**本 episode 若由 scheduled 触发**时随行的权限身份
    * (非 schedule 唤醒为 undefined),调用方据它填 `WorkerToolsContext.creatorFriendId` /
    * `triggerType`。可选参数,既有三参调用点无需改动。
+   *
+   * P7 J additive:第五个参数是**本 episode 若由人类消息唤醒**时随行的发起人身份
+   * (非人类消息唤醒为 undefined)。与 scheduleIdentity 分开两个参数而不是合成一个
+   * "身份"联合体,是因为两者的语义不同:schedule 的身份来自任务定义(§8.2),人类消息的
+   * 身份来自本批消息的发言者(§4.3),混成一个会让调用方无从判断该走哪条权限规则。
    */
   readonly toolFace: (
     key: ManagerKey,
     isSystemThread: boolean,
     onAsyncError: OnAsyncError,
-    scheduleIdentity?: ScheduleIdentity
+    scheduleIdentity?: ScheduleIdentity,
+    humanPrincipal?: HumanPrincipal
   ) => ReadonlyArray<ToolDefinition>
   /** system prompt 动态段素材(档案/待处理通知),每轮重算,由调用方决定要不要按最新状态重建。 */
   readonly promptInputs: (key: ManagerKey) => { readonly dialogProfile?: string; readonly pendingNotes?: ReadonlyArray<string> }
@@ -176,7 +195,10 @@ export class ManagerRegistry {
     const loopDeps: ManagerLoopDeps = {
       key,
       isSystemThread,
-      dialogObjectId: this.deps.dialogObjectIdFor(key),
+      // thunk 而非定值:私聊的台账归档键要等第一条人类消息带来 friend 才收敛成
+      // `friend:<id>`,而 loop 实例可能先被 worker 事件建出来。定值会把那一刻的
+      // group 形状永久钉死在实例上,同一个人的台账因此裂成两份。
+      dialogObjectId: () => this.deps.dialogObjectIdFor(key),
       store: this.deps.store,
       policy: this.deps.policy,
       estimateTokens: this.deps.estimateTokens,
@@ -186,7 +208,14 @@ export class ManagerRegistry {
       contextWindowTokens: this.deps.contextWindowTokens,
       // 唤醒事件由 ManagerLoop 按 episode 传入(见 ManagerLoopDeps.toolFace);schedule 之外
       // 的唤醒不带身份,工具面照旧。
-      toolFace: (wakeEvent) => this.deps.toolFace(key, isSystemThread, onAsyncError, scheduleIdentityOf(wakeEvent)),
+      toolFace: (wakeEvent) =>
+        this.deps.toolFace(
+          key,
+          isSystemThread,
+          onAsyncError,
+          scheduleIdentityOf(wakeEvent),
+          humanPrincipalOf(wakeEvent),
+        ),
       promptInputs: () => this.deps.promptInputs(key),
       harness: this.deps.harness,
       now: this.deps.now,
@@ -199,14 +228,39 @@ export class ManagerRegistry {
     return loop
   }
 
-  /** 人类消息 → 对应 session 的 manager。 */
+  /**
+   * 人类消息 → 对应 session 的 manager。
+   *
+   * `friend` 是**本批消息的发言者**(私聊即对端;群聊取批内最后一条的发言者,与 v2
+   * `processGroupLaneBatch` 的 `lastEntry.friend` 同义)。它一路带到两个地方:
+   * ① `onHumanWake` —— 唤醒边界解析权限 / 记忆档位 / 对话对象档案;
+   * ② `WakeEvent.friend` —— 供 `toolFace(wakeEvent)` 按 per-episode 的发起人身份装配工具面。
+   *
+   * 不传 friend 时(陌生人、或调用方尚未接线)行为与之前逐字相同。
+   */
   async routeHumanMessages(
     channelId: string,
     sessionId: string,
-    messages: ReadonlyArray<ChannelMessage>
+    messages: ReadonlyArray<ChannelMessage>,
+    friend?: Friend
   ): Promise<EpisodeResult> {
     const key = `${channelId}::${sessionId}` as ManagerKey
-    return this.runWake(key, { kind: 'human_messages', messages })
+    // 私/群不新增数据来源:它就在消息自己的 session 上。空批(理论上不该发生)按私聊算,
+    // 与 `handleMessageReceived` 的默认分流一致。
+    const sessionType = messages[0]?.session.type === 'group' ? 'group' : 'private'
+    const principal: HumanPrincipal = { ...(friend ? { friend } : {}), sessionType }
+
+    // 唤醒边界的唯一一次异步解析。失败不阻断投递——人类消息比档位重要,档位缺失
+    // 只会退回 fail-soft 兜底,而消息丢了就是丢了。
+    if (this.deps.onHumanWake) {
+      try {
+        await this.deps.onHumanWake(key, principal)
+      } catch (err) {
+        console.error(`[ManagerRegistry] manager '${key}' 的发起人身份解析失败,按未解析继续:`, err)
+      }
+    }
+
+    return this.runWake(key, { kind: 'human_messages', messages, ...(friend ? { friend } : {}) })
   }
 
   /**
@@ -362,6 +416,18 @@ export class ManagerRegistry {
 function scheduleIdentityOf(wakeEvent: WakeEvent | undefined): ScheduleIdentity | undefined {
   if (wakeEvent?.kind !== 'schedule') return undefined
   return { creatorFriendId: wakeEvent.creatorFriendId, isBuiltin: wakeEvent.isBuiltin }
+}
+
+/**
+ * 唤醒事件 → 随行的人类发起人身份;非人类消息唤醒没有身份(undefined)。
+ *
+ * 只认 `human_messages`:worker 事件与自唤醒虽然也发生在同一个会话里,但它们不是"某个人
+ * 在说话",拿上一次的发言者冒充会让 worker 的 `origin.creator_friend_id` 记错人。
+ */
+function humanPrincipalOf(wakeEvent: WakeEvent | undefined): HumanPrincipal | undefined {
+  if (wakeEvent?.kind !== 'human_messages') return undefined
+  const sessionType = wakeEvent.messages[0]?.session.type === 'group' ? 'group' : 'private'
+  return { ...(wakeEvent.friend ? { friend: wakeEvent.friend } : {}), sessionType }
 }
 
 /** query_worker 异步失败 → 借用既有 `worker_event`/`query_failed` kind 包装成 WakeEvent(见文件头)。 */

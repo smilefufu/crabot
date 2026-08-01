@@ -12,6 +12,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 
 import { UnifiedAgent } from '../../src/unified-agent.js'
+import type { PrincipalResolverDeps } from '../../src/manager/principal.js'
 import { buildManagerStack, type BootstrapDeps, type ManagerStack } from '../../src/manager/bootstrap.js'
 import { SYSTEM_TASKS_MANAGER_KEY } from '../../src/manager/registry.js'
 import { dialogObjectIdForPrivate, type DialogObjectId, type LedgerWorker } from '../../src/workers/harness/ledger-types.js'
@@ -80,6 +81,17 @@ function makeMemoryServer() {
     { rpcClient: { call: vi.fn() } as never, moduleId: 'rpc-handlers-test', getMemoryPort: async () => 19100 },
     { visibility: 'internal', scopes: [], isMasterPrivate: false },
   )
+}
+
+/** 身份解析原料的最小桩:一律"解析不出来",即 manager 退回未接线时的既有行为。 */
+function makePrincipalResolver(): PrincipalResolverDeps {
+  return {
+    resolvePermissions: async () => null,
+    sessionMemoryScopes: async (sessionId) => [sessionId],
+    sceneProfile: async () => null,
+    crabSelfHandle: () => undefined,
+    masterFriendId: async () => undefined,
+  }
 }
 
 /** 最小 crab-messaging 依赖桩(照抄 tests/manager/bootstrap.test.ts)。 */
@@ -239,9 +251,9 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
       managerAdapter: () => llm,
       managerModel: () => 'test-manager-model',
       messagingDeps: makeMessagingDeps(),
-      memoryServer: makeMemoryServer(),
+      memoryServerFor: () => makeMemoryServer(),
       callAdmin: async () => ({}) as never,
-      dialogObjectIdFor,
+      principalResolver: makePrincipalResolver(),
     }
     return buildManagerStack(deps)
   }

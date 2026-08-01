@@ -8,7 +8,7 @@
  *
  * @see crabot-docs/superpowers/specs/2026-08-01-builtin-worker-injection-design.md
  */
-import type { ResolvedPermissions, ToolAccessConfig, CliAccessConfig, CliDomain } from '../../types.js'
+import type { ResolvedPermissions, ToolAccessConfig, CliAccessConfig, CliDomain, CliPerm } from '../../types.js'
 import { CLI_DOMAINS } from '../../types.js'
 import { HookRegistry } from '../../hooks/hook-registry.js'
 import {
@@ -83,6 +83,51 @@ export const BUILTIN_WORKER_PERMISSIONS: ResolvedPermissions = {
   cli_access: cliAccess('none'),
   storage: null,
   memory_scopes: [],
+}
+
+const CLI_PERM_RANK: Record<CliPerm, number> = { none: 0, read: 1, write: 2 }
+
+/**
+ * worker 档位 ∩ 发起人档位（P7 J）—— "manager 算好结果随 spawn 下传"的合并规则。
+ *
+ * **取交集，不取替换。** 两个方向都必须守住：
+ * - 只用发起人档位 ⇒ 一个 master 发起的 worker 会拿到 `messaging: true`，违反 v3
+ *   "worker 不直接跟人类说话"（`WORKER_TOOL_ACCESS` 把 messaging/task 关死正是为此）；
+ * - 只用 worker 固定档位 ⇒ 群里任何人派出的 worker 都拿到同一套 `shell/file_io`，
+ *   这正是 PR F spec 点名要 J 修掉的越权（"群里任何人都能让 worker 干 master 的活"）。
+ *
+ * 逐项规则：
+ * - `tool_access`：按类目**与**（两边都允许才允许）；
+ * - `cli_access`：按域取**更严**的那一档（none < read < write）；
+ * - `storage`：保留 worker 侧（null）——worker 的落盘边界是 workspace，不随发起人变；
+ * - `memory_scopes`：**取发起人的**。它不是能力开关而是可见范围，正是要按发起人身份收敛的
+ *   那一项（群 A 的内容不该落成群 B 读得到的记忆）。
+ *
+ * `principal` 为 null（身份未解析）时原样返回 worker 固定档位，与 F 阶段行为逐字相同。
+ */
+export function narrowWorkerPermissions(
+  base: ResolvedPermissions,
+  principal: ResolvedPermissions | null,
+): ResolvedPermissions {
+  if (!principal) return base
+
+  const tool_access = Object.fromEntries(
+    (Object.keys(base.tool_access) as Array<keyof ToolAccessConfig>).map((k) => [
+      k,
+      base.tool_access[k] && principal.tool_access[k],
+    ]),
+  ) as unknown as ToolAccessConfig
+
+  const cli_access = Object.fromEntries(
+    CLI_DOMAINS.map((d: CliDomain) => [
+      d,
+      CLI_PERM_RANK[base.cli_access[d]] <= CLI_PERM_RANK[principal.cli_access[d]]
+        ? base.cli_access[d]
+        : principal.cli_access[d],
+    ]),
+  ) as CliAccessConfig
+
+  return { tool_access, cli_access, storage: base.storage, memory_scopes: [...principal.memory_scopes] }
 }
 
 /**

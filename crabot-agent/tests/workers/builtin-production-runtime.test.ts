@@ -34,6 +34,8 @@ import type {
   SkillConfig,
 } from '../../src/types.js'
 import { BUILTIN_WORKER_PERMISSIONS, type BuiltinRuntimeContext } from '../../src/workers/builtin/runtime.js'
+import { CLI_DOMAINS } from '../../src/types.js'
+import type { ManagerKey } from '../../src/manager/types.js'
 import type { SpawnSpec } from '../../src/workers/types.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 
@@ -162,6 +164,7 @@ async function waitUntil(cond: () => boolean | Promise<boolean>, timeoutMs = 800
 /** UnifiedAgent 私有件在测试里的视图（TS 私有性只在编译期）。 */
 interface AgentInternals {
   managerStack?: ManagerStack
+  rpcClient: { call: (...args: unknown[]) => Promise<unknown> }
   methodHandlers: Map<string, (params: unknown) => unknown>
   adminPort?: number
   buildBuiltinWorkerRuntime(ctx: BuiltinRuntimeContext): SpawnSpec['builtin']
@@ -254,6 +257,106 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
 
     const [done] = await internals.managerStack!.harness.listWorkers(dialogObjectId)
     expect(done.incarnations[0].ended_reason).toBe('completed')
+  })
+
+
+  // --- P7 J Task 2：worker 权限随派活人身份收敛（端到端，真实生产装配） ---
+
+  /**
+   * PR F spec 写死给 J 的验收项："worker 权限随发起人身份解析——否则 cutover 当天群里
+   * 任何人都能让 worker 干 master 才该能干的事。"
+   *
+   * 这里走的是**真实生产链路**：真实 `principalResolver`（unified-agent 注入的那份，只把
+   * 底下的 admin RPC 换成桩）→ 真实 `ManagerPrincipalStore` → 真实
+   * `buildBuiltinWorkerRuntime` → 真实 `buildBuiltinWorkerTools`。
+   * 断言落在"worker 到底看得到哪些工具"，不是"某个函数收到了某个参数"。
+   */
+  describe('P7 J：worker 工具面随派活人身份收敛', () => {
+    const MANAGER_KEY = 'wechat::sess-perm' as ManagerKey
+
+    function stubAdmin(internals: AgentInternals, toolAccess: Record<string, boolean>, memoryScopes: string[]): void {
+      internals.rpcClient.call = (async (_port: unknown, method: string) => {
+        if (method === 'resolve_principal_permissions') {
+          return {
+            resolved: {
+              tool_access: {
+                memory: true, messaging: true, task: true, mcp_skill: true,
+                file_io: true, browser: true, shell: true, remote_exec: true, desktop: true,
+                ...toolAccess,
+              },
+              cli_access: Object.fromEntries(CLI_DOMAINS.map((d) => [d, 'write'])),
+              storage: null,
+              memory_scopes: memoryScopes,
+            },
+            sources: {},
+          }
+        }
+        if (method === 'find_master_friend') return { friend: null }
+        return {}
+      }) as never
+    }
+
+    async function toolNamesFor(
+      internals: AgentInternals,
+      toolAccess: Record<string, boolean>,
+      memoryScopes: string[] = ['team-x'],
+    ): Promise<string[]> {
+      stubAdmin(internals, toolAccess, memoryScopes)
+      // manager 在唤醒边界算好档位（这一步就是 `routeHumanMessages` 内部做的事）
+      await internals.managerStack!.principals.resolve(MANAGER_KEY, {
+        friend: {
+          id: 'f-speaker',
+          display_name: '群里的普通成员',
+          permission: 'normal',
+          channel_identities: [],
+          created_at: '2026-01-01T00:00:00.000Z',
+          updated_at: '2026-01-01T00:00:00.000Z',
+        },
+        sessionType: 'group',
+      })
+      const builtin = internals.buildBuiltinWorkerRuntime({
+        worker_id: 'w-perm',
+        workspace: { root: tmpRoot },
+        origin: { spawned_by_session: MANAGER_KEY, trigger_type: 'message', creator_friend_id: 'f-speaker' },
+      })!
+      return resolveTools(builtin).map((t) => t.name)
+    }
+
+    it('派活人没有 shell 权限 → 派出去的 worker 工具面里真的没有 Bash（文件工具仍在）', async () => {
+      const { internals } = boot()
+      const names = await toolNamesFor(internals, { shell: false })
+
+      expect(names).not.toContain('Bash')
+      expect(names).toContain('Read')
+    })
+
+    it('派活人有 shell 权限 → worker 拿得到 Bash（收敛不是一刀切地关掉）', async () => {
+      const { internals } = boot()
+      const names = await toolNamesFor(internals, { shell: true })
+
+      expect(names).toContain('Bash')
+    })
+
+    it('派活人全开（含 messaging）→ worker 仍然拿不到任何 messaging 工具：v3 不变量不被身份放宽', async () => {
+      const { internals } = boot()
+      const names = await toolNamesFor(internals, {})
+
+      expect(names.filter((n) => n.includes('crab-messaging'))).toEqual([])
+      expect(names).not.toContain('send_message')
+    })
+
+    it('该会话从未解析过身份（系统派工）→ 退回固定档位，行为与 F 阶段逐字相同', () => {
+      const { internals } = boot()
+      const builtin = internals.buildBuiltinWorkerRuntime({
+        worker_id: 'w-sys',
+        workspace: { root: tmpRoot },
+        origin: { spawned_by_session: 'wechat::never-seen' as ManagerKey, trigger_type: 'scheduled' },
+      })!
+      const names = resolveTools(builtin).map((t) => t.name)
+      // BUILTIN_WORKER_PERMISSIONS 开着 shell/file_io
+      expect(names).toContain('Bash')
+      expect(names).toContain('Read')
+    })
   })
 
   // --- 验收 6：hookRegistry 在生产路径上确实生效 ---

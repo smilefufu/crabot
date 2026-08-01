@@ -827,8 +827,12 @@ export class ContextAssembler {
    * 解析当前会话的 RuntimeSceneProfile。
    * - 失败一律返回 null（不阻塞上下文组装）
    * - METHOD_NOT_FOUND 容忍（对接 Memory v0.1.0 旧版本）
+   *
+   * public（P7 J）：manager 侧的「对话对象档案」段要用同一份解析
+   * （同样的 SceneIdentity 构造、同样的 METHOD_NOT_FOUND 容忍）。复用而不是各写一份，
+   * 否则两条链路对"私聊要 friend_id、群聊要 channel+session"的判断会各自漂移。
    */
-  private async resolveSceneProfile(
+  async resolveSceneProfile(
     channelId: ModuleId,
     sessionId: SessionId,
     sessionType: 'private' | 'group',

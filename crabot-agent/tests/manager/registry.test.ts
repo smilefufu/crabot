@@ -19,7 +19,7 @@ import { ManagerSessionStore } from '../../src/manager/session-store.js'
 import type { CompactionPolicy } from '../../src/manager/compaction.js'
 import type { ManagerKey } from '../../src/manager/types.js'
 import type { ChannelMessage } from '../../src/types.js'
-import { dialogObjectIdForPrivate } from '../../src/workers/harness/ledger-types.js'
+import { dialogObjectIdForPrivate, dialogObjectIdForGroup } from '../../src/workers/harness/ledger-types.js'
 import type { LedgerStore } from '../../src/workers/harness/ledger-store.js'
 import type { LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import type { WorkerHarness } from '../../src/workers/harness/harness.js'
@@ -163,15 +163,30 @@ describe('ManagerRegistry', () => {
     expect(b).not.toBe(a1)
   })
 
-  it('getOrCreate: 惰性——构造 registry 本身不解析任何 key 的 dialogObjectId，仅在 getOrCreate 时才解析', () => {
-    const { adapter } = makeAdapter()
-    const dialogObjectIdFor = vi.fn(() => dialogObjectIdForPrivate('friend-x'))
-    const registry = new ManagerRegistry(baseRegistryDeps({ adapter, dialogObjectIdFor }))
+  it('dialogObjectId 是**每次现算**的：先建的 loop 也会跟上后来才解析出的台账归档键，不把旧值钉死', async () => {
+    const { adapter, queue } = makeAdapter()
+    queue.push({ text: 'ok', stopReason: 'end_turn' })
+    // 归档键一开始解析不出 friend（群形状），之后收敛成 friend 形状——模拟"loop 先被
+    // worker 事件建出来、人类消息随后才带来 friend"这条真实时序。
+    let resolvedFriend: string | undefined
+    const dialogObjectIdFor = vi.fn((key: ManagerKey) =>
+      resolvedFriend ? dialogObjectIdForPrivate(resolvedFriend) : dialogObjectIdForGroup('wechat', key)
+    )
+    const listWorkers = vi.fn(async () => [])
+    const registry = new ManagerRegistry(
+      baseRegistryDeps({ adapter, dialogObjectIdFor, harness: { ...FAKE_HARNESS, listWorkers } as never })
+    )
+    const key = 'wechat::s1' as ManagerKey
 
-    expect(dialogObjectIdFor).not.toHaveBeenCalled()
-    registry.getOrCreate('wechat::s1' as ManagerKey)
-    expect(dialogObjectIdFor).toHaveBeenCalledTimes(1)
-    expect(dialogObjectIdFor).toHaveBeenCalledWith('wechat::s1')
+    // loop 建出来时身份还没解析出来
+    registry.getOrCreate(key)
+    resolvedFriend = 'friend-late'
+
+    await registry.routeHumanMessages('wechat', 's1', [makeChannelMessage('你好')])
+
+    // 台账查询用的是**现算**的归档键，不是 loop 建出来那一刻的快照。
+    // 若 dialogObjectId 是定值，这里会是 `group:wechat:wechat::s1` —— 同一个人的台账裂成两份。
+    expect(listWorkers).toHaveBeenCalledWith(dialogObjectIdForPrivate('friend-late'))
   })
 
   it('getOrCreate: adapter/model 是 thunk，原样透传给 ManagerLoop，不在 registry 侧缓存解析结果（§11 热更链路）', async () => {

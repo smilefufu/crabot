@@ -21,9 +21,11 @@ import { WorkerHarness, type HarnessDeps } from '../../src/workers/harness/harne
 import { LedgerStore } from '../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../src/workers/harness/workspace-manager'
 import { dialogObjectIdForPrivate } from '../../src/workers/harness/ledger-types'
+import { CLI_DOMAINS, type CliAccessConfig, type ResolvedPermissions, type ToolAccessConfig } from '../../src/types.js'
 import { BuiltinWorkerAdapter } from '../../src/workers/builtin/adapter.js'
 import {
   BUILTIN_WORKER_PERMISSIONS,
+  narrowWorkerPermissions,
   type BuiltinRuntimeContext,
   type BuiltinRuntimeFactory,
 } from '../../src/workers/builtin/runtime.js'
@@ -626,5 +628,70 @@ describe('builtin worker 的安全项（hookRegistry / 权限档位）', () => {
       memory: true,
       mcp_skill: true,
     })
+  })
+})
+
+// ============================================================================
+// P7 J Task 2：worker 权限 = 固定档位 ∩ 派活人档位
+// ============================================================================
+
+/**
+ * "manager 算好结果随 spawn 下传"的合并规则（`narrowWorkerPermissions`）。
+ *
+ * 这条规则同时要挡住两个方向的越权，所以两侧都要有反向用例：
+ * 只用发起人档位 ⇒ worker 拿到 messaging（违反 v3"worker 不跟人类说话"）；
+ * 只用固定档位 ⇒ 群里任何人派出的 worker 都拿到同一套 shell/file_io（PR F spec 点名的越权）。
+ */
+describe('narrowWorkerPermissions —— worker 档位 ∩ 派活人档位', () => {
+  function perms(p: {
+    tool?: Partial<ToolAccessConfig>
+    cli?: 'none' | 'read' | 'write'
+    scopes?: string[]
+  }): ResolvedPermissions {
+    return {
+      tool_access: {
+        memory: true, messaging: true, task: true, mcp_skill: true,
+        file_io: true, browser: true, shell: true, remote_exec: true, desktop: true,
+        ...p.tool,
+      },
+      cli_access: Object.fromEntries(CLI_DOMAINS.map((d) => [d, p.cli ?? 'write'])) as CliAccessConfig,
+      storage: null,
+      memory_scopes: p.scopes ?? [],
+    }
+  }
+
+  it('派活人没有 shell → worker 也没有 shell（这正是 PR F spec 要 J 修掉的越权）', () => {
+    const out = narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, perms({ tool: { shell: false } }))
+    expect(out.tool_access.shell).toBe(false)
+    // 其余干活面不受牵连
+    expect(out.tool_access.file_io).toBe(true)
+  })
+
+  it('派活人是 master（全开）→ worker 仍然拿不到 messaging / task：v3 不变量优先于发起人档位', () => {
+    const out = narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, perms({}))
+    expect(out.tool_access.messaging).toBe(false)
+    expect(out.tool_access.task).toBe(false)
+    expect(out.tool_access.remote_exec).toBe(false)
+    expect(out.tool_access.desktop).toBe(false)
+  })
+
+  it('cli_access 取更严的一档：派活人 write、worker 固定 none → 结果 none', () => {
+    const out = narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, perms({ cli: 'write' }))
+    expect(Object.values(out.cli_access).every((v) => v === 'none')).toBe(true)
+  })
+
+  it('memory_scopes 取**派活人的**——它是可见范围而不是能力开关，正是要按身份收敛的那项', () => {
+    const out = narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, perms({ scopes: ['team-x'] }))
+    expect(out.memory_scopes).toEqual(['team-x'])
+  })
+
+  it('身份未解析（null）→ 原样退回固定档位，与 F 阶段行为逐字相同', () => {
+    expect(narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, null)).toBe(BUILTIN_WORKER_PERMISSIONS)
+  })
+
+  it('不改写入参：合并结果是新对象，固定档位常量不被污染', () => {
+    const before = JSON.stringify(BUILTIN_WORKER_PERMISSIONS)
+    narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, perms({ scopes: ['x'], cli: 'write' }))
+    expect(JSON.stringify(BUILTIN_WORKER_PERMISSIONS)).toBe(before)
   })
 })

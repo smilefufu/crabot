@@ -99,7 +99,7 @@ function baseDeps(
   return {
     key: KEY,
     isSystemThread: false,
-    dialogObjectId: DIALOG_OBJECT_ID,
+    dialogObjectId: () => DIALOG_OBJECT_ID,
     policy,
     estimateTokens,
     toolFace: () => [],
