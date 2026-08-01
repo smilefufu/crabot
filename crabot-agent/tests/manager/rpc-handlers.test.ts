@@ -366,6 +366,119 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
     expect(params.origin.trigger_type).toBe('message')
     expect(params.origin.creator_friend_id).toBeUndefined()
   })
+
+  // --- PR #59 review：scheduled 的权限档位按 Schedule.creator_friend_id 解析，
+  //     不借"该会话最近说话的人"（§4.4）---
+
+  /** 按 friend id 分档的解析桩：记录每次解析请求。 */
+  function permsByFriend(): { deps: PrincipalResolverDeps; calls: Array<{ senderFriendId?: string }> } {
+    const calls: Array<{ senderFriendId?: string }> = []
+    const deps: PrincipalResolverDeps = {
+      resolvePermissions: async (p) => {
+        calls.push({ ...(p.senderFriendId ? { senderFriendId: p.senderFriendId } : {}) })
+        return {
+          tool_access: {
+            memory: true, messaging: true, task: true, mcp_skill: true,
+            file_io: true, browser: true, shell: true, remote_exec: false, desktop: false,
+          },
+          cli_access: {} as never,
+          storage: null,
+          memory_scopes: [`scope-of-${p.senderFriendId ?? 'session'}`],
+        }
+      },
+      sessionMemoryScopes: async (sessionId) => [sessionId],
+      sceneProfile: async () => null,
+      crabSelfHandle: () => undefined,
+      masterFriendId: async () => undefined,
+    }
+    return { deps, calls }
+  }
+
+  function makeStackWith(llm: LLMAdapter, principalResolver: PrincipalResolverDeps): ManagerStack {
+    return buildManagerStack({
+      dataRoot: join(tmpRoot, 'data'),
+      now: () => new Date().toISOString(),
+      managerAdapter: () => llm,
+      managerModel: () => 'test-manager-model',
+      messagingDeps: makeMessagingDeps(),
+      memoryServerFor: () => makeMemoryServer(),
+      callAdmin: async () => ({}) as never,
+      principalResolver,
+    })
+  }
+
+  it('打进人类会话的 scheduled：档位按 Schedule.creator_friend_id 解析，不是该会话最近的发言人', async () => {
+    const { deps, calls } = permsByFriend()
+    const stack = makeStackWith(spawnScript(), deps)
+    const spawnSpy = vi
+      .spyOn(stack.harness, 'spawnWorker')
+      .mockResolvedValue(makeLedgerWorker({ workerId: 'w-spawned' }))
+    const agent = buildAgent(stack)
+
+    // 该会话最近说话的是 f-lastspeaker（唤醒边界解析过一次，写进了会话级缓存）
+    await stack.principals.resolve('wechat::sess-1' as ManagerKey, {
+      friend: {
+        id: 'f-lastspeaker',
+        display_name: '刚说过话的人',
+        permission: 'normal',
+        channel_identities: [],
+        created_at: '2026-01-01T00:00:00.000Z',
+        updated_at: '2026-01-01T00:00:00.000Z',
+      },
+      sessionType: 'private',
+    })
+
+    agent.handleTriggerSchedule({
+      schedule_id: 'sc-sess',
+      title: '会话内巡检',
+      description: '有目标会话',
+      target_session: { channel_id: 'wechat', session_id: 'sess-1' },
+      creator_friend_id: 'friend-7',
+    })
+
+    await waitUntil(() => spawnSpy.mock.calls.length > 0)
+    const params = spawnSpy.mock.calls[0][0]
+    expect(params.origin.creator_friend_id).toBe('friend-7')
+    // 解析是以调度的 creator 名义发起的，档位也是那一份
+    expect(calls.map((c) => c.senderFriendId)).toEqual(['f-lastspeaker', 'friend-7'])
+    expect(params.principal_permissions?.memory_scopes).toEqual(['scope-of-friend-7'])
+  })
+
+  it('is_builtin 的 scheduled：不以任何 friend 名义执行，档位留空（master 等价，worker 退回固定档位）', async () => {
+    const { deps, calls } = permsByFriend()
+    const stack = makeStackWith(spawnScript(), deps)
+    const spawnSpy = vi
+      .spyOn(stack.harness, 'spawnWorker')
+      .mockResolvedValue(makeLedgerWorker({ workerId: 'w-spawned' }))
+    const agent = buildAgent(stack)
+
+    await stack.principals.resolve('wechat::sess-1' as ManagerKey, {
+      friend: {
+        id: 'f-lastspeaker',
+        display_name: '刚说过话的人',
+        permission: 'normal',
+        channel_identities: [],
+        created_at: '2026-01-01T00:00:00.000Z',
+        updated_at: '2026-01-01T00:00:00.000Z',
+      },
+      sessionType: 'private',
+    })
+
+    agent.handleTriggerSchedule({
+      schedule_id: 'sc-builtin',
+      title: '内置巡检',
+      description: '系统内置',
+      target_session: { channel_id: 'wechat', session_id: 'sess-1' },
+      is_builtin: true,
+    })
+
+    await waitUntil(() => spawnSpy.mock.calls.length > 0)
+    const params = spawnSpy.mock.calls[0][0]
+    expect(params.origin.creator_friend_id).toBeUndefined()
+    expect(params.principal_permissions).toBeUndefined()
+    // 内置调度不触发第二次解析（只有那条人类消息那次）
+    expect(calls).toHaveLength(1)
+  })
 })
 
 // ============================================================================

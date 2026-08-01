@@ -33,6 +33,20 @@ export interface BuiltinRuntimeContext {
   readonly workspace: Workspace
   readonly origin?: LedgerWorker['origin']
   readonly goal?: string
+  /**
+   * **spawn 那一刻**由 manager 按 `origin.creator_friend_id` 算好、随 spawn 下传并落盘的
+   * 发起人权限档位(§8.2"manager 算好结果随 spawn 下传")。
+   *
+   * 它与本 ctx 的其余字段一样是**快照**,不是取数入口:权限是这个 worker 的**身份属性**
+   * ——"以谁的名义执行"在 spawn 那一刻就定死了,不随会话里后来谁说话而变。放在 ctx 里
+   * (而不是让工厂现去查会话级缓存)正是为了让 resume / fork / idle→running 续 burst /
+   * 进程重启后的 revive 全都从 `context.json` 读回同一份(见 `BuiltinRuntimeFactory` 与
+   * `BuiltinWorkerAdapter.runtimeFor`)。
+   *
+   * 缺省(系统派工 / 派活时身份未解析 / 本字段出现之前 spawn 的老 worker)= 无发起人档位,
+   * `narrowWorkerPermissions` 原样退回 worker 固定档位。
+   */
+  readonly principal_permissions?: ResolvedPermissions
 }
 
 /**
@@ -41,6 +55,11 @@ export interface BuiltinRuntimeContext {
  * 三个后果:(1) 工厂挂在装配层、跨进程重启仍在,builtin worker 因此能 revive;
  * (2) 改了 model slot 下次起化身生效、正在跑的 burst 用旧的,与 cc/codex 的
  * "下次起化身生效"对齐;(3) LLM 连接信息不落盘。
+ *
+ * **"现取"只管运行配置,不管权限**:model / 人格 / skills / MCP 这些是**实例配置**,用户改了
+ * 就该在下次起化身时生效;而权限是这个 worker 的**身份属性**,由入参 ctx 的
+ * `principal_permissions` 带进来——工厂对它只做读取,不重新解析(见该字段注释)。两者都经过
+ * 本工厂,别混:一个现取、一个固定。
  */
 export type BuiltinRuntimeFactory = (ctx: BuiltinRuntimeContext) => SpawnSpec['builtin']
 
@@ -74,9 +93,10 @@ const WORKER_TOOL_ACCESS: ToolAccessConfig = {
  *   - tool_access 只开"干活必需"的面,`remote_exec`/`desktop` 这类需要身份背书的一律关;
  *   - cli_access 全 `none` —— 放开等于让任何人都能借 worker 改 crabot 自身配置;
  *   - storage 为 null(agent 侧当前无消费方),memory_scopes 为空。
- * cutover(PR J)必须改成按 `origin.creator_friend_id` 实时解析权限模板,并把
- * "worker 权限随发起人身份解析"写进验收——否则群里任何人都能让 worker 干 master 才该
- * 能干的事(spec §"权限身份 → J 必须接线")。
+ * **J 已接线**:manager 在派活那一刻按 `origin.creator_friend_id` 算好档位,随 spawn 下传
+ * 并落盘(`principal_permissions`),worker 的实际档位 = 本档位 ∩ 那一份
+ * (`narrowWorkerPermissions`)。注意**不是"实时解析"**:实时解析等于让权限随"该会话最近
+ * 说话的人"漂移(PR #59 review 的越权),权限是 spawn 时定死的身份属性。
  */
 export const BUILTIN_WORKER_PERMISSIONS: ResolvedPermissions = {
   tool_access: WORKER_TOOL_ACCESS,

@@ -36,7 +36,13 @@ import type {
 } from '../../src/types.js'
 import type { Event } from 'crabot-shared'
 import { authorizedEvent, makeAgentConfig, makeFriend, makeMessage, useTmpDataDir, type DataDirGuard } from './harness.js'
-import { makeManagerScript, searchMemoryBlock, sendMessageBlock, type ManagerScript } from './manager-script.js'
+import {
+  makeManagerScript,
+  searchMemoryBlock,
+  sendMessageBlock,
+  spawnWorkerBlock,
+  type ManagerScript,
+} from './manager-script.js'
 
 const hoisted = vi.hoisted(() => ({ managerAdapter: undefined as unknown }))
 vi.mock('../../src/agent/agent-handler.js', async (importOriginal) => {
@@ -125,6 +131,7 @@ interface Internals {
   managerStack: {
     principals: { get(key: string): ResolvedPrincipalView | undefined }
     registry: { routeAttentionFlush: (...args: unknown[]) => Promise<unknown> }
+    harness: { spawnWorker: (p: Record<string, unknown>) => Promise<unknown> }
   }
   attentionScheduler: {
     stopAll(): void
@@ -278,15 +285,30 @@ describe('processGroupLaneBatch —— 群聊 lane handler（cutover 后下游�
     return internals.managerStack.principals.get(MANAGER_KEY)
   }
 
-  function workerToolNames(): string[] {
+  /**
+   * `principalPermissions` = 派活那一刻随 spawn 下传、落进 `context.json` 的那份快照
+   * （PR #59 review：worker 只认自己这份，不回头读会话级缓存）；不传 = 系统派工那一档。
+   */
+  function workerToolNames(principalPermissions?: ResolvedPermissions): string[] {
     return internals
       .buildBuiltinWorkerRuntime({
         worker_id: 'w-probe',
         workspace: { root: dataDir.root },
         origin: { spawned_by_session: MANAGER_KEY, trigger_type: 'message' },
+        ...(principalPermissions ? { principal_permissions: principalPermissions } : {}),
       })
       .tools()
       .map((t) => t.name)
+  }
+
+  /** 拦下真实 spawn（不起真 worker），只看 manager 递给 harness 的派活参数。 */
+  function spyOnSpawn(): { calls: Array<Record<string, unknown>> } {
+    const calls: Array<Record<string, unknown>> = []
+    internals.managerStack.harness.spawnWorker = async (p: Record<string, unknown>) => {
+      calls.push(p)
+      return { worker_id: 'w-spawned', incarnations: [{ seq: 1, impl: 'builtin' }] }
+    }
+    return { calls }
   }
 
   function reply(text = '我来看看'): Record<string, unknown> {
@@ -418,8 +440,9 @@ describe('processGroupLaneBatch —— 群聊 lane handler（cutover 后下游�
   // ==========================================================================
 
   describe('权限身份解析（变异靶 M4）', () => {
-    it('按群聊语义解析发起人身份，结果决定这轮 worker 能用哪些工具', async () => {
-      boot()
+    it('按群聊语义解析发起人身份，结果随 spawn 下传决定这轮 worker 能用哪些工具', async () => {
+      boot({ turns: [[spawnWorkerBlock()]] })
+      const spawn = spyOnSpawn()
       await runGroup([gmsg({ id: 'g-1', text: '帮我跑个脚本' })])
 
       const resolveCall = rpcCalls.find((c) => c.method === 'resolve_principal_permissions')
@@ -430,7 +453,16 @@ describe('processGroupLaneBatch —— 群聊 lane handler（cutover 后下游�
         session_type: 'group',
       })
 
-      const names = workerToolNames()
+      // 派活那一刻：**本批发言者**的身份与它算好的档位一起随 spawn 下传（PR #59 review）
+      expect(spawn.calls).toHaveLength(1)
+      const params = spawn.calls[0] as {
+        origin: { creator_friend_id?: string }
+        principal_permissions?: ResolvedPermissions
+      }
+      expect(params.origin.creator_friend_id).toBe('f-1')
+      expect(params.principal_permissions).toEqual(GROUP_PERMS)
+
+      const names = workerToolNames(params.principal_permissions)
       expect(names).toContain('Bash')
       expect(names).not.toContain('Write')
       // 群里任何人都不能借 worker 直接跟人类说话（v3 不变量不被身份放宽）

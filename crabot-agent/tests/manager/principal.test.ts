@@ -159,7 +159,7 @@ describe('ManagerPrincipalStore.resolve —— 档位真的由 friend 决定', (
 
     // 解析是**以这个 friend 的名义**发起的（不是拿 session 顶包）
     expect(resolvePermissions).toHaveBeenCalledWith(
-      expect.objectContaining({ senderFriend: expect.objectContaining({ id: 'f-1' }), sessionId: 'sess-1', sessionType: 'private' }),
+      expect.objectContaining({ senderFriendId: 'f-1', sessionId: 'sess-1', sessionType: 'private' }),
     )
     // 可见范围真的收敛到了这个 friend 的 scopes
     expect(entry.memory.read_accessible_scopes).toEqual(['team-x'])
@@ -170,7 +170,7 @@ describe('ManagerPrincipalStore.resolve —— 档位真的由 friend 决定', (
   it('换一个 friend 说话 → 档位整体换掉，不残留上一个人的 scopes', async () => {
     const scopesByFriend: Record<string, string[]> = { 'f-a': ['team-a'], 'f-b': ['team-b'] }
     const store = new ManagerPrincipalStore(
-      makeResolverDeps({ resolvePermissions: async (p) => makePerms(scopesByFriend[p.senderFriend!.id]) }),
+      makeResolverDeps({ resolvePermissions: async (p) => makePerms(scopesByFriend[p.senderFriendId!]) }),
       SYSTEM_TASKS_MANAGER_KEY,
     )
 

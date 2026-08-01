@@ -38,7 +38,13 @@ import type {
   ToolAccessConfig,
 } from '../../src/types.js'
 import { makeAgentConfig, makeFriend, makeMessage, useTmpDataDir, type DataDirGuard } from './harness.js'
-import { makeManagerScript, searchMemoryBlock, sendMessageBlock, type ManagerScript } from './manager-script.js'
+import {
+  makeManagerScript,
+  searchMemoryBlock,
+  sendMessageBlock,
+  spawnWorkerBlock,
+  type ManagerScript,
+} from './manager-script.js'
 
 // LLM 是这条链路上唯一被替身的东西：`adapterFromSdkEnv` 是模块级函数，没有实例注入口。
 const hoisted = vi.hoisted(() => ({ managerAdapter: undefined as unknown }))
@@ -101,6 +107,7 @@ interface Internals {
   managerStack: {
     principals: { get(key: string): ResolvedPrincipalView | undefined }
     registry: { routeHumanMessages: (...args: unknown[]) => Promise<unknown> }
+    harness: { spawnWorker: (p: Record<string, unknown>) => Promise<unknown> }
   }
   failLoudSentAt: Map<string, number>
   rpcClient: {
@@ -198,16 +205,32 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
     return internals.managerStack.principals.get(MANAGER_KEY)
   }
 
-  /** manager 派出去的 builtin worker 实际拿到的工具面（§8.2 权限身份的终点）。 */
-  function workerToolNames(): string[] {
+  /**
+   * manager 派出去的 builtin worker 实际拿到的工具面（§8.2 权限身份的终点）。
+   *
+   * `principalPermissions` 就是派活那一刻随 spawn 下传、落进 `context.json` 的那份快照
+   * （PR #59 review：worker 只认自己这份，不回头读会话级缓存）；不传 = 系统派工那一档。
+   */
+  function workerToolNames(principalPermissions?: ResolvedPermissions): string[] {
     return internals
       .buildBuiltinWorkerRuntime({
         worker_id: 'w-probe',
         workspace: { root: dataDir.root },
         origin: { spawned_by_session: MANAGER_KEY, trigger_type: 'message' },
+        ...(principalPermissions ? { principal_permissions: principalPermissions } : {}),
       })
       .tools()
       .map((t) => t.name)
+  }
+
+  /** 拦下真实 spawn（不起真 worker），只看 manager 递给 harness 的派活参数。 */
+  function spyOnSpawn(): { calls: Array<Record<string, unknown>> } {
+    const calls: Array<Record<string, unknown>> = []
+    internals.managerStack.harness.spawnWorker = async (p: Record<string, unknown>) => {
+      calls.push(p)
+      return { worker_id: 'w-spawned', incarnations: [{ seq: 1, impl: 'builtin' }] }
+    }
+    return { calls }
   }
 
   beforeEach(async () => {
@@ -335,8 +358,9 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
   // ==========================================================================
 
   describe('权限身份解析（变异靶 M4）', () => {
-    it('解析出的身份决定这轮之后 worker 能用哪些工具', async () => {
-      boot()
+    it('解析出的身份随 spawn 下传，决定这轮派出去的 worker 能用哪些工具', async () => {
+      boot([[spawnWorkerBlock()]])
+      const spawn = spyOnSpawn()
       await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
 
       // 解析请求打的是 admin，带的是这条私聊会话的身份三元组
@@ -349,9 +373,18 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
         session_type: 'private',
       })
 
-      // 语义落点：manager 从这个会话派出去的 worker 真的看得到 Bash（shell 开）、
-      // 看不到写文件工具（file_io 关）——`narrowWorkerPermissions` 取的正是这份解析结果。
-      const names = workerToolNames()
+      // 派活那一刻：身份与它算好的档位一起随 spawn 下传（PR #59 review：worker 之后只认这份）
+      expect(spawn.calls).toHaveLength(1)
+      const params = spawn.calls[0] as {
+        origin: { creator_friend_id?: string }
+        principal_permissions?: ResolvedPermissions
+      }
+      expect(params.origin.creator_friend_id).toBe('f-1')
+      expect(params.principal_permissions).toEqual(FRIEND_PERMS)
+
+      // 语义落点：这个 worker 真的看得到 Bash（shell 开）、看不到写文件工具（file_io 关）
+      // ——`narrowWorkerPermissions` 取的正是随 spawn 下传的这份。
+      const names = workerToolNames(params.principal_permissions)
       expect(names).toContain('Bash')
       expect(names).not.toContain('Write')
       expect(names).not.toContain('Edit')

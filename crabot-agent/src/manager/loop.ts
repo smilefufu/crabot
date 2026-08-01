@@ -55,7 +55,7 @@ import type { ManagerSessionState, ManagerKey } from './types.js'
 import type { WorkerHarness } from '../workers/harness/harness'
 import type { DialogObjectId, LedgerWorker } from '../workers/harness/ledger-types'
 import type { HarnessEvent } from '../workers/harness/worker-events'
-import type { ChannelMessage, Friend } from '../types'
+import type { ChannelMessage, Friend, ResolvedPermissions } from '../types'
 
 // --- Public Interface ---
 
@@ -73,6 +73,15 @@ export type WakeEvent =
        * `identity="master|friend|stranger"`,friend 对象本身不进正文。)
        */
       readonly friend?: Friend
+      /**
+       * 上面那个发言者**算好的权限档位**(§8.2),与 friend 同源同刻,由唤醒边界的异步解析
+       * (`ManagerRegistryDeps.onHumanWake`)产出。
+       *
+       * **跟着 episode 走,不从会话级缓存现取**:缓存是"该会话最近一次解析",群聊里换个人
+       * 说话就整体覆盖;本 episode 派出去的 worker 必须拿到**本批发言者**的档位,而不是
+       * 派活那一瞬间恰好最新的那个人的(PR #59 review)。同 `friend`,不进对话上下文。
+       */
+      readonly principalPermissions?: ResolvedPermissions
     }
   | { readonly kind: 'worker_event'; readonly event: HarnessEvent }
   | {
@@ -88,6 +97,15 @@ export type WakeEvent =
        */
       readonly creatorFriendId?: string
       readonly isBuiltin?: boolean
+      /**
+       * 上面那个调度身份**算好的权限档位**(§4.4"权限按 `Schedule.creator_friend_id` 解析
+       * (`is_builtin` 按 master 等价)"),由唤醒边界的异步解析
+       * (`ManagerRegistryDeps.onScheduleWake`)产出。
+       *
+       * 必须随事件走:scheduled 触发可以打进一个**人类会话**的 manager,那个会话的
+       * 发起人缓存是"最近谁在说话",与这次调度的身份毫无关系(PR #59 review)。
+       */
+      readonly principalPermissions?: ResolvedPermissions
     }
   | {
       readonly kind: 'attention_flush'
@@ -98,6 +116,8 @@ export type WakeEvent =
        * ——权限档位 / 记忆 scopes / 台账归档键全部退回未解析那一档。
        */
       readonly friend?: Friend
+      /** 与 `human_messages` 的同名字段逐字同义(见上)。 */
+      readonly principalPermissions?: ResolvedPermissions
     }
 
 export interface EpisodeResult {

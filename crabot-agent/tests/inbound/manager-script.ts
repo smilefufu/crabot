@@ -64,6 +64,19 @@ export function sendMessageBlock(p: {
   }
 }
 
+/**
+ * manager 派一个 worker（权限身份的断言口：`SpawnWorkerParams.principal_permissions` 是
+ * "manager 算好的档位随 spawn 下传"这条链的落点，PR #59 review）。
+ */
+export function spawnWorkerBlock(p: { title?: string; prompt?: string; id?: string } = {}): Record<string, unknown> {
+  return {
+    type: 'tool_use',
+    id: p.id ?? 'tu-spawn-1',
+    name: 'spawn_worker',
+    input: { title: p.title ?? '干活', prompt: p.prompt ?? '把活干完' },
+  }
+}
+
 /** manager 读一次短期记忆（记忆可见范围的断言口：落到 memory 模块的 `search_short_term`）。 */
 export function searchMemoryBlock(id = 'tu-mem-1'): Record<string, unknown> {
   return {

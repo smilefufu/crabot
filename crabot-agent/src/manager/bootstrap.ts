@@ -49,6 +49,7 @@ import { shouldWakeOnHarnessEvent } from './inbound-adapters.js'
 import { buildManagerToolFace } from './tools/tool-face.js'
 import {
   ManagerPrincipalStore,
+  applyGroupScopeFallback,
   splitManagerKey,
   type HumanPrincipal,
   type PrincipalResolverDeps,
@@ -96,10 +97,12 @@ export interface ManagerStack {
   readonly registry: ManagerRegistry
   readonly adapters: Map<WorkerImplId, WorkerAdapter>
   /**
-   * 人类消息发起人身份的解析缓存(P7 J)。放在 stack 上是因为它有**第二个消费者**:
-   * manager 派出的 worker 起化身时,要按 `origin.spawned_by_session` 取回这份
-   * "manager 已经算好的" `ResolvedPermissions`(§8.2"权限身份"),而那条路
-   * (`builtinSpawnDefaults`)不经过 registry。
+   * 人类消息发起人身份的解析缓存(P7 J)。服务于三个**同步** thunk:记忆档位、台账归档键、
+   * 对话对象档案(见 `principal.ts` 文件头)。
+   *
+   * **不是 worker 权限的取数入口**(PR #59 review):缓存是"该会话最近一次解析",worker 的
+   * 权限档位是身份属性——由本 episode 的唤醒事件带来、在 spawn 那一刻随 worker 固定并落盘
+   * (`SpawnWorkerParams.principal_permissions` → `context.json`)。
    */
   readonly principals: ManagerPrincipalStore
   /**
@@ -290,11 +293,31 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     now: () => new Date(deps.now()),
     timezone: deps.timezone,
     dialogObjectIdFor: (key) => principals.dialogObjectIdFor(key),
-    // 人类消息唤醒边界:这是整条链上**唯一**一次异步解析。
-    onHumanWake: async (key, principal) => {
-      await principals.resolve(key, principal)
+    // 人类消息唤醒边界:这是人类消息链路上**唯一**一次异步解析。返回本批发言者算好的档位,
+    // 由 registry 挂到本 episode 的唤醒事件上——缓存只服务于那三个同步 thunk(记忆档位 /
+    // 台账归档键 / 对话对象档案),派活用的档位走事件,不走缓存(PR #59 review)。
+    onHumanWake: async (key, principal) => (await principals.resolve(key, principal)).permissions,
+    // scheduled 唤醒边界(§4.4"权限按 `Schedule.creator_friend_id` 解析,`is_builtin` 按 master
+    // 等价"):按**调度自己的身份**解析,不碰该会话的发起人缓存(既不读也不写)。
+    //
+    // - `is_builtin` 或 creator 为空 → master 等价。这里返回 null 而不是去解析一份 master 档位:
+    //   worker 的固定档位(`BUILTIN_WORKER_PERMISSIONS`)本就是 master 等价情形下的上限,
+    //   `narrowWorkerPermissions(base, null)` 原样返回它,与 admin 侧"空 creator → master_private"
+    //   的既有规则同解。
+    // - 有 creator → 按该 friend 解析。`sessionType` 取该会话上一次解析出来的私/群(未知按
+    //   'private'):这一项只影响 admin 侧要不要并上 group_default,猜错只会更严,不会更宽。
+    onScheduleWake: async ({ key, creatorFriendId, isBuiltin }) => {
+      if (isBuiltin || !creatorFriendId) return null
+      const { sessionId } = splitManagerKey(key)
+      const sessionType = principals.get(key)?.principal.sessionType ?? 'private'
+      // 群聊防跨群泄漏的收敛与人类消息那条路共用同一个规则(空 scopes → 本会话)。
+      return applyGroupScopeFallback(
+        await deps.principalResolver.resolvePermissions({ senderFriendId: creatorFriendId, sessionId, sessionType }),
+        sessionType,
+        sessionId,
+      )
     },
-    toolFace: (key, isSystemThread, onAsyncError, scheduleIdentity, humanPrincipal) =>
+    toolFace: (key, isSystemThread, onAsyncError, scheduleIdentity, humanPrincipal, principalPermissions) =>
       buildManagerToolFace({
         harness,
         workerContext: () => ({
@@ -312,6 +335,15 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           creatorFriendId: scheduleIdentity
             ? (scheduleIdentity.isBuiltin ? undefined : scheduleIdentity.creatorFriendId)
             : humanPrincipal?.friend?.id,
+          // 上面那个身份**算好的档位**,随 spawn 下传给 worker 并落盘(§8.2)。与
+          // `creatorFriendId` 同源同刻:两者都来自本 episode 的唤醒事件,不来自会话级缓存。
+          //
+          // 没有身份的唤醒(worker 事件 / 自唤醒)落到 `principals.get(key)`:那类 episode 里
+          // 没人说话,但它仍发生在这个会话里,记忆可见范围是**会话属性**(与下面 memoryServer
+          // 同一条理由)。这里退回会话级档位,而不是让 worker 拿到空 scopes 把群里的内容以
+          // public 落进记忆。取数只发生在派活这一刻,取到之后就随 worker 固定下来。
+          principalPermissions:
+            principalPermissions ?? (scheduleIdentity ? undefined : principals.get(key)?.permissions ?? undefined),
           // scheduled 触发(不论有无目标 session)记 'scheduled';系统线程的其余唤醒
           // (查不到监护 session 的 worker 事件)记 'system';人类消息记 'message'。
           triggerType: scheduleIdentity ? 'scheduled' : isSystemThread ? 'system' : 'message',

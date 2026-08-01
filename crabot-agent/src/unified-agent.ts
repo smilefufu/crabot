@@ -647,7 +647,7 @@ export class UnifiedAgent extends ModuleBase {
       // 发起人身份的解析原料：全是**既有**入口，本处只做注入，不新造解析逻辑。
       principalResolver: {
         resolvePermissions: (p) =>
-          this.resolvePrincipalPermissions(p.senderFriend, p.sessionId, p.sessionType),
+          this.resolvePrincipalPermissions(p.senderFriendId, p.sessionId, p.sessionType),
         sessionMemoryScopes: (sessionId) => this.getSessionMemoryScopes(sessionId),
         sceneProfile: (p) =>
           this.contextAssembler.resolveSceneProfile(
@@ -708,10 +708,22 @@ export class UnifiedAgent extends ModuleBase {
    * （spawn / handoff）与 `BuiltinWorkerAdapter.resolveRuntime`（resume / fork /
    * idle→running 续 burst，含进程重启之后）共用的同一个入口。
    *
-   * **本方法里的每一项都必须是"现取"**：它读的是**被调用那一刻** `this` 上的配置
+   * **本方法里的每一项运行配置都必须是"现取"**：它读的是**被调用那一刻** `this` 上的配置
    * （model slot / 人格 / skills / 外部 MCP / 生图能力 / 时区）。任何一项若提到装配期
    * （`initializeManagerStack`）算好塞进闭包，"改了配置下次起化身生效"就退化成"agent
    * 重启才生效"，进程重启后的 revive 也会拿不到配置（spec 决策 2）。
+   *
+   * **但权限恰恰相反：它必须是 spawn 那一刻的快照，只能从入参 `ctx` 读**（见
+   * `resolveWorkerPrincipalPermissions`）。两者都经过这个工厂，语义却是反的，别混：
+   *
+   * | | 来源 | 变更何时生效 | 为什么 |
+   * |---|---|---|---|
+   * | LLM 运行配置（model/人格/skills/MCP） | `this.agentConfig` **现取** | 下次起化身 | 它是**实例配置**：用户在 admin 改了就该用新的（spec 决策 2） |
+   * | 发起人权限档位 | `ctx.principal_permissions` **spawn 时固定** | 永不（新 worker 才有新档位） | 它是**身份属性**：这个 worker 以谁的名义执行，在 spawn 那一刻就定死了 |
+   *
+   * 判据很简单：换了值之后，"这个 worker 还是同一个 worker 吗"——换 model 是；换成另一个
+   * 人的权限不是。把权限也做成现取，就是 PR #59 review 揪出的那条越权
+   * （worker 的档位随"该会话最近说话的人"漂移）。
    *
    * 缺 `powerful` slot 时**抛错，不降级**：harness 会把这次 spawn 如实落成一条 failed 台账
    * 加一条 `spawn_failed` 事件，manager 的 `spawn_worker` 拿到错误文本。静默降级只会让
@@ -753,8 +765,8 @@ export class UnifiedAgent extends ModuleBase {
   private buildBuiltinWorkerTools(ctx: BuiltinRuntimeContext): ReadonlyArray<EngineToolDefinition> {
     const tools: EngineToolDefinition[] = []
     const workspaceRoot = ctx.workspace.root
-    // 派活时 manager 已经按发起人身份算好的档位（§8.2）。worker 不认识 friend，也不去问
-    // admin——它只按 `origin.spawned_by_session` 取回那份算好的结果。
+    // 派活那一刻 manager 已经按发起人身份算好、随 spawn 落盘的档位（§8.2）。worker 不认识
+    // friend，也不去问 admin，更不去查"这个会话最近谁在说话"——只读它自己那份快照。
     const principalPerms = this.resolveWorkerPrincipalPermissions(ctx)
     const workerPerms = narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, principalPerms)
 
@@ -817,18 +829,31 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   /**
-   * 派活时 manager 已经解析好的发起人权限档位（§8.2）——按 `origin.spawned_by_session`
-   * 从 `ManagerPrincipalStore` 取回。
+   * 派活时 manager 已经解析好的发起人权限档位（§8.2）——**只读这个 worker 自己那份**
+   * （`spec.principal_permissions` → `context.json` → `ctx.principal_permissions`）。
    *
-   * **worker 侧不做任何身份解析**：它既不知道 friend 是谁，也不调 admin。这条通路承载的
-   * 只是"manager 算好的一份结果"，所以这里是同步的一次 Map 查询，不是 RPC。
-   * 取不到（系统派工 / scheduled / 该会话从未收到过人类消息）时返回 null，
+   * ## 为什么不查 `ManagerPrincipalStore`（这是 PR #59 review 修掉的越权）
+   *
+   * `ManagerPrincipalStore` 是**按 ManagerKey 缓存的"该会话最近一次解析出来的发起人"**，
+   * 群聊里 A 说完 B 说就会被整体覆盖。而本方法跑在两条"每次都重来"的路径上：
+   * `tools` 是 thunk（engine 每轮 turn 重新 resolve）、`resolveRuntime` 在 resume / fork /
+   * idle→running 续 burst / 重启 revive 时每次起化身现调。按会话缓存取数 ⇒ 低权限成员 S
+   * 派出的 worker，在 master 于同群发言之后的下一轮 turn 就会拿到 master 的 `Bash`/`file_io`
+   * ——以 S 的名义登记、却实际获得 master 的能力（反方向同样成立）。
+   *
+   * **权限是身份属性，不是会话属性**：谁的名义（`origin.creator_friend_id`）在 spawn 那一刻
+   * 就定死了，随之算出的档位也必须在那一刻定死并落盘。会话级缓存只在**派活那一刻**
+   * （`bootstrap.ts` 的 `workerContext()`）被读一次，之后与这个 worker 再无关系。
+   *
+   * 重启 revive 同理：档位从 `context.json` 读回，**不重新解析**——重新解析等于把"当时以谁
+   * 的名义派的"换成"现在这个会话是谁在说话"。
+   *
+   * **worker 侧不做任何身份解析**：它既不知道 friend 是谁，也不调 admin。取不到（系统派工 /
+   * 派活时身份未解析 / 本字段出现之前 spawn 的老 worker）时返回 null，
    * `narrowWorkerPermissions` 会原样退回 worker 固定档位。
    */
   private resolveWorkerPrincipalPermissions(ctx: BuiltinRuntimeContext): ResolvedPermissions | null {
-    const key = ctx.origin?.spawned_by_session
-    if (!key) return null
-    return this.managerStack?.principals.get(key)?.permissions ?? null
+    return ctx.principal_permissions ?? null
   }
 
   /**
@@ -1355,12 +1380,14 @@ export class UnifiedAgent extends ModuleBase {
    * - 私聊：senderFriend = 私聊对端 friend
    * - 群聊：senderFriend = 该批次最后一条消息的 friend（即真实发言者，享其个人 friend 模板）
    *
-   * @param senderFriend  发起人 Friend（陌生人/无 friend_id 时传 undefined）
+   * @param senderFriendId 发起人 friend id（陌生人/无 friend_id 时传 undefined）。收 id 而不是
+   *                       Friend 对象：admin 那侧本来就只用 `sender_friend_id`，而 scheduled
+   *                       路径（§4.4 按 `Schedule.creator_friend_id` 解析）手上只有一个 id。
    * @param sessionId     消息所在 session
    * @param sessionType   private | group
    */
   private async resolvePrincipalPermissions(
-    senderFriend: Friend | undefined,
+    senderFriendId: string | undefined,
     sessionId: string,
     sessionType: 'private' | 'group',
   ): Promise<ResolvedPermissions | null> {
@@ -1373,7 +1400,7 @@ export class UnifiedAgent extends ModuleBase {
         adminPort,
         'resolve_principal_permissions',
         {
-          ...(senderFriend ? { sender_friend_id: senderFriend.id } : {}),
+          ...(senderFriendId ? { sender_friend_id: senderFriendId } : {}),
           session_id: sessionId,
           session_type: sessionType,
         },
@@ -1397,7 +1424,7 @@ export class UnifiedAgent extends ModuleBase {
     const principal = this.agentHandler.getTaskPrincipal(taskId)
     if (!principal) return
     const perms = await this.resolvePrincipalPermissions(
-      principal.senderFriend,
+      principal.senderFriend?.id,
       principal.sessionId,
       principal.sessionType,
     )
@@ -2200,7 +2227,7 @@ export class UnifiedAgent extends ModuleBase {
       let resumeResolvedPerms = wc?.resolved_permissions
       if (triggerType !== 'scheduled' && wc?.task_origin?.session_id && wc.task_origin.session_type) {
         const freshPerms = await this.resolvePrincipalPermissions(
-          wc.sender_friend,
+          wc.sender_friend?.id,
           wc.task_origin.session_id,
           wc.task_origin.session_type,
         )

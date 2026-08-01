@@ -57,6 +57,7 @@ import type { ToolDefinition, ToolCallResult } from '../../engine/index.js'
 import type { WorkerHarness } from '../../workers/harness/harness'
 import type { DialogObjectId, ManagerKey, LedgerWorker } from '../../workers/harness/ledger-types'
 import type { WorkerImplId } from '../../workers/types'
+import type { ResolvedPermissions } from '../../types'
 
 export interface WorkerToolsContext {
   /** 本次唤醒所属对话对象:决定 spawn 的台账归属与 `list_workers` 的查询范围。 */
@@ -67,6 +68,15 @@ export interface WorkerToolsContext {
   readonly episodeId?: string
   /** 权限身份:以谁的名义派发这个 worker;填入 `origin.creator_friend_id`。 */
   readonly creatorFriendId?: string
+  /**
+   * 上面那个身份**算好的权限档位**(§8.2"manager 算好结果随 spawn 下传"),填入
+   * `SpawnWorkerParams.principal_permissions`。
+   *
+   * 与 `creatorFriendId` 严格同源、同一时刻取:worker 拿到的是这一份**快照**,spawn 之后
+   * 不再变(见 `BuiltinRuntimeContext.principal_permissions`)。缺省 = 无发起人档位,worker
+   * 退回自己的固定档位。
+   */
+  readonly principalPermissions?: ResolvedPermissions
   /** 结果回报目标,默认 = 当前 session(protocol-agent-v3 §3)。 */
   readonly reportTo: { channel_id: string; session_id: string }
   /**
@@ -180,6 +190,9 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
             trigger_type: ctx.triggerType ?? 'message',
           },
           report_to: ctx.reportTo,
+          // 权限档位随 spawn 下传并落盘(§8.2)——worker 之后所有化身都用这一份,
+          // 不再回头查会话级缓存。
+          principal_permissions: ctx.principalPermissions,
           impl,
           workspace,
         })

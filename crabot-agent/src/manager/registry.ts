@@ -58,7 +58,7 @@ import type { WorkerHarness } from '../workers/harness/harness'
 import type { LedgerStore } from '../workers/harness/ledger-store'
 import type { DialogObjectId } from '../workers/harness/ledger-types'
 import type { HarnessEvent, HarnessEventKind } from '../workers/harness/worker-events'
-import type { ChannelMessage, Friend } from '../types'
+import type { ChannelMessage, Friend, ResolvedPermissions } from '../types'
 import type { HumanPrincipal } from './principal.js'
 
 /** §4.4 保留线程:未配置目标 session 的 scheduled 触发 / 台账查不到监护 session 的 worker 事件落此。 */
@@ -139,8 +139,29 @@ export interface ManagerRegistryDeps {
    *
    * 这是"加参数而不是全面异步化"的落点:异步只发生在唤醒边界这一处,每轮 turn 被同步调用的
    * 签名一个都不用改。不注入则行为与之前逐字相同(manager 拿不到发起人身份)。
+   *
+   * **返回值**(PR #59 review):解析出来的权限档位,由本 registry 挂到本 episode 的唤醒事件上
+   * (`WakeEvent.principalPermissions`)。会话级缓存回答不了"本 episode 的发言者是谁"——群聊里
+   * 换个人说话就整体覆盖——而派出去的 worker 的权限身份必须是**本批消息的发言者**。
    */
-  readonly onHumanWake?: (key: ManagerKey, principal: HumanPrincipal) => Promise<void>
+  readonly onHumanWake?: (
+    key: ManagerKey,
+    principal: HumanPrincipal,
+  ) => Promise<ResolvedPermissions | null | void>
+  /**
+   * **scheduled 唤醒边界**的异步解析钩子(PR #59 review):`routeSchedule` 在 `runWake` 之前
+   * await 它一次,按 §4.4"权限按 `Schedule.creator_friend_id` 解析(`is_builtin` 按 master
+   * 等价)"算出本次调度的档位,同样挂到唤醒事件上。
+   *
+   * 单独一个钩子而不是复用 `onHumanWake`:调度身份来自任务定义,不是"某个人在这个会话里说话"
+   * ——scheduled 触发可以打进一个人类会话的 manager,那个会话的发起人缓存与本次调度无关。
+   * 不注入则本次调度没有发起人档位,worker 退回自己的固定档位。
+   */
+  readonly onScheduleWake?: (p: {
+    key: ManagerKey
+    creatorFriendId?: string
+    isBuiltin?: boolean
+  }) => Promise<ResolvedPermissions | null>
   /**
    * 工具面工厂:调用方据 key/isSystemThread 装配 `buildManagerToolFace` 的完整依赖并返回
    * 工具面数组;`onAsyncError` 由本 registry 按 key 绑定好传入,调用方负责把它接进
@@ -154,13 +175,18 @@ export interface ManagerRegistryDeps {
    * (非人类消息唤醒为 undefined)。与 scheduleIdentity 分开两个参数而不是合成一个
    * "身份"联合体,是因为两者的语义不同:schedule 的身份来自任务定义(§8.2),人类消息的
    * 身份来自本批消息的发言者(§4.3),混成一个会让调用方无从判断该走哪条权限规则。
+   *
+   * PR #59 review:第六个参数是**上面那个身份算好的权限档位**——由唤醒边界解析、随本
+   * episode 的唤醒事件而来。调用方必须用它填 `WorkerToolsContext.principalPermissions`,
+   * 不得回头去读会话级缓存(那是"最近谁在说话",不是"本 episode 是谁")。
    */
   readonly toolFace: (
     key: ManagerKey,
     isSystemThread: boolean,
     onAsyncError: OnAsyncError,
     scheduleIdentity?: ScheduleIdentity,
-    humanPrincipal?: HumanPrincipal
+    humanPrincipal?: HumanPrincipal,
+    principalPermissions?: ResolvedPermissions
   ) => ReadonlyArray<ToolDefinition>
   /** system prompt 动态段素材(档案/待处理通知),每轮重算,由调用方决定要不要按最新状态重建。 */
   readonly promptInputs: (key: ManagerKey) => { readonly dialogProfile?: string; readonly pendingNotes?: ReadonlyArray<string> }
@@ -217,6 +243,7 @@ export class ManagerRegistry {
           onAsyncError,
           scheduleIdentityOf(wakeEvent),
           humanPrincipalOf(wakeEvent),
+          principalPermissionsOf(wakeEvent),
         ),
       promptInputs: () => this.deps.promptInputs(key),
       harness: this.deps.harness,
@@ -287,19 +314,22 @@ export class ManagerRegistry {
 
     // 唤醒边界的唯一一次异步解析。失败不阻断投递——人类消息比档位重要,档位缺失
     // 只会退回 fail-soft 兜底,而消息丢了就是丢了。
+    let principalPermissions: ResolvedPermissions | undefined
     if (this.deps.onHumanWake) {
       try {
-        await this.deps.onHumanWake(key, principal)
+        principalPermissions = (await this.deps.onHumanWake(key, principal)) ?? undefined
       } catch (err) {
         console.error(`[ManagerRegistry] manager '${key}' 的发起人身份解析失败,按未解析继续:`, err)
       }
     }
 
     const withFriend = friend ? { friend } : {}
+    // 档位挂在事件上,和 friend 一样按 episode 随行(见 `principalPermissionsOf`)。
+    const withPerms = principalPermissions ? { principalPermissions } : {}
     const event: WakeEvent =
       kind === 'human_messages'
-        ? { kind: 'human_messages', messages, ...withFriend }
-        : { kind: 'attention_flush', messages, ...withFriend }
+        ? { kind: 'human_messages', messages, ...withFriend, ...withPerms }
+        : { kind: 'attention_flush', messages, ...withFriend, ...withPerms }
     return this.runWake(key, event)
   }
 
@@ -332,6 +362,24 @@ export class ManagerRegistry {
     const key = p.targetSession
       ? (`${p.targetSession.channel_id}::${p.targetSession.session_id}` as ManagerKey)
       : SYSTEM_TASKS_MANAGER_KEY
+
+    // 调度自己的权限身份在唤醒边界解析一次(§4.4),随事件走。**绝不能退回该 key 的会话级
+    // 缓存**:打进人类会话的调度会因此拿到"那个会话最近谁在说话"的档位(PR #59 review)。
+    // 失败不阻断触发:档位缺失只是让 worker 退回固定档位,调度本身照跑。
+    let principalPermissions: ResolvedPermissions | undefined
+    if (this.deps.onScheduleWake) {
+      try {
+        principalPermissions =
+          (await this.deps.onScheduleWake({
+            key,
+            creatorFriendId: p.creatorFriendId,
+            isBuiltin: p.isBuiltin,
+          })) ?? undefined
+      } catch (err) {
+        console.error(`[ManagerRegistry] schedule '${p.scheduleId}' 的权限身份解析失败,按未解析继续:`, err)
+      }
+    }
+
     return this.runWake(key, {
       kind: 'schedule',
       scheduleId: p.scheduleId,
@@ -339,6 +387,7 @@ export class ManagerRegistry {
       description: p.description,
       creatorFriendId: p.creatorFriendId,
       isBuiltin: p.isBuiltin,
+      ...(principalPermissions ? { principalPermissions } : {}),
     })
   }
 
@@ -472,6 +521,22 @@ function humanPrincipalOf(wakeEvent: WakeEvent | undefined): HumanPrincipal | un
   if (wakeEvent?.kind !== 'human_messages' && wakeEvent?.kind !== 'attention_flush') return undefined
   const sessionType = wakeEvent.messages[0]?.session.type === 'group' ? 'group' : 'private'
   return { ...(wakeEvent.friend ? { friend: wakeEvent.friend } : {}), sessionType }
+}
+
+/**
+ * 唤醒事件 → 随行的权限档位(PR #59 review)。与上面两个 `*Of` 同一条原则:身份类信息**跟着
+ * episode 走**,不从会话级缓存现取。三种带身份的唤醒(人类消息 / 注意力放行 / 调度)各自在
+ * 自己的唤醒边界解析好挂上来;worker 事件与自唤醒没有身份,返回 undefined。
+ */
+function principalPermissionsOf(wakeEvent: WakeEvent | undefined): ResolvedPermissions | undefined {
+  if (
+    wakeEvent?.kind !== 'human_messages' &&
+    wakeEvent?.kind !== 'attention_flush' &&
+    wakeEvent?.kind !== 'schedule'
+  ) {
+    return undefined
+  }
+  return wakeEvent.principalPermissions
 }
 
 /** query_worker 异步失败 → 借用既有 `worker_event`/`query_failed` kind 包装成 WakeEvent(见文件头)。 */

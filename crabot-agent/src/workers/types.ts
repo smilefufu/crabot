@@ -2,6 +2,7 @@ import type { ToolDefinition, LLMAdapter } from '../engine/index.js'
 import type { Resolvable } from '../engine/types.js'
 // 纯类型引用(两侧都是 `import type`,编译后无运行时依赖,不构成模块环)。
 import type { LedgerWorker } from './harness/ledger-types.js'
+import type { ResolvedPermissions } from '../types.js'
 
 export type WorkerImplId = 'builtin' | 'claude-code' | 'codex'
 export type WorkerContractState = 'running' | 'idle' | 'exited'
@@ -35,6 +36,13 @@ export interface SpawnSpec {
    * 起后续化身(resume/fork)时回喂给运行配置工厂——包括进程重启之后。外部 CLI adapter 忽略。
    */
   readonly origin?: LedgerWorker['origin']
+  /**
+   * spawn 那一刻 manager 按 `origin.creator_friend_id` 算好的发起人权限档位(§8.2)。
+   * builtin adapter 与 workspace/goal/origin 一起持久化,后续所有化身(resume/fork/续 burst,
+   * 含进程重启之后)都读回同一份——权限是身份属性,不随会话里后来谁说话而变
+   * (见 `BuiltinRuntimeContext.principal_permissions`)。外部 CLI adapter 忽略。
+   */
+  readonly principal_permissions?: ResolvedPermissions
   /** builtin 专用注入(外部 CLI adapter 忽略) */
   readonly builtin?: {
     readonly adapter: LLMAdapter

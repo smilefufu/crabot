@@ -126,9 +126,15 @@ export function splitManagerKey(key: ManagerKey): { channelId: string; sessionId
 
 /** 解析原料:全部是既有 RPC 的注入口,本模块不自己持有 rpcClient。 */
 export interface PrincipalResolverDeps {
-  /** admin `resolve_principal_permissions`;失败返回 null(调用方 fail-soft)。 */
+  /**
+   * admin `resolve_principal_permissions`;失败返回 null(调用方 fail-soft)。
+   *
+   * 收 friend **id** 而不是 Friend 对象:admin 那侧本来就只用 `sender_friend_id`,而
+   * scheduled 路径(§4.4 按 `Schedule.creator_friend_id` 解析)手上只有一个 id,没有 Friend
+   * 对象——收对象会逼出一个"为了调用而伪造 Friend"的假身份。
+   */
   readonly resolvePermissions: (p: {
-    senderFriend?: Friend
+    senderFriendId?: string
     sessionId: string
     sessionType: 'private' | 'group'
   }) => Promise<ResolvedPermissions | null>
@@ -179,7 +185,7 @@ export class ManagerPrincipalStore {
     try {
       permissions = applyGroupScopeFallback(
         await this.deps.resolvePermissions({
-          ...(principal.friend ? { senderFriend: principal.friend } : {}),
+          ...(principal.friend ? { senderFriendId: principal.friend.id } : {}),
           sessionId,
           sessionType: principal.sessionType,
         }),
