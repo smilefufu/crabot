@@ -115,6 +115,11 @@ export interface BootstrapDeps {
   readonly dataRoot: string
   /** ISO 时间注入(harness 用);registry 需要的 `() => Date` 由本模块从它派生,保持单一时间源。 */
   readonly now: () => string
+  /**
+   * 实例时区(人类消息渲染的 `ts` 属性,见 `ManagerLoopDeps.timezone`)。thunk:admin 改了
+   * `agent_config.timezone` 不必重建整个栈。不注入则退回 `resolveTimezone(undefined)`。
+   */
+  readonly timezone?: () => string
   /** manager 的 LLM 来源(model_config.manager ?? powerful),thunk 以支持热更 */
   readonly managerAdapter: () => LLMAdapter
   readonly managerModel: () => string
@@ -283,6 +288,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     adapter: deps.managerAdapter,
     model: deps.managerModel,
     now: () => new Date(deps.now()),
+    timezone: deps.timezone,
     dialogObjectIdFor: (key) => principals.dialogObjectIdFor(key),
     // 人类消息唤醒边界:这是整条链上**唯一**一次异步解析。
     onHumanWake: async (key, principal) => {

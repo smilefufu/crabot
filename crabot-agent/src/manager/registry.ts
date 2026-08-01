@@ -121,6 +121,8 @@ export interface ManagerRegistryDeps {
   readonly maxTurns?: number
   readonly contextWindowTokens?: number
   readonly now: () => Date
+  /** 人类消息渲染的时区(见 `ManagerLoopDeps.timezone`);不注入则退回 `resolveTimezone(undefined)`。 */
+  readonly timezone?: () => string
   /**
    * `ManagerKey` → 台账渲染用的 `DialogObjectId`(`ManagerLoopDeps.dialogObjectId`)。
    * 两者粒度不同(manager 按 channel::session,worker 台账按 friend 跨 channel 聚合/单群),
@@ -219,6 +221,7 @@ export class ManagerRegistry {
       promptInputs: () => this.deps.promptInputs(key),
       harness: this.deps.harness,
       now: this.deps.now,
+      timezone: this.deps.timezone,
       onEpisodeEnd: () => this.lastActiveAtMs.set(key, this.deps.now().getTime()),
     }
 

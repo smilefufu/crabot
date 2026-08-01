@@ -45,6 +45,9 @@ import {
   type TextBlock,
 } from '../engine/index.js'
 import { AsyncMutex } from '../workers/async-mutex'
+import { formatChannelMessageLine } from '../prompt-manager.js'
+import { resolveSenderIdentity } from '../utils/sender-identity.js'
+import { resolveTimezone } from '../utils/time.js'
 import { decideCompaction, foldIntoSummary, type CompactionPolicy, type CompactionDecision } from './compaction.js'
 import { assembleManagerSystemPrompt } from './prompt.js'
 import type { ManagerSessionStore } from './session-store.js'
@@ -156,6 +159,12 @@ export interface ManagerLoopDeps {
   readonly promptInputs: () => { readonly dialogProfile?: string; readonly pendingNotes?: ReadonlyArray<string> }
   readonly harness: WorkerHarness
   readonly now: () => Date
+  /**
+   * 人类消息渲染用的时区(`formatChannelMessageLine` 的 `ts` 属性)。thunk 而非定值:
+   * 与 adapter/model 同理,admin 改了实例时区不必销毁重建 loop。
+   * 不注入则退回 `resolveTimezone(undefined)`(env `CRABOT_DEFAULT_TIMEZONE` → Asia/Shanghai)。
+   */
+  readonly timezone?: () => string
   readonly onEpisodeEnd?: (result: EpisodeResult) => void
 }
 
@@ -233,9 +242,21 @@ export class ManagerLoop {
   /** episode 进行中到达的新事件:渲染成文本推进内部邮箱,由 engine 的 humanMessageQueue
    *  在 turn 间隙注入;episode 不在跑时同样入队,行为见 `mailbox` 字段注释。 */
   enqueueDuringEpisode(event: WakeEvent): void {
-    const text = renderWakeEvent(event)
+    const text = this.renderEvent(event)
     this.mailbox.push(text)
     this.currentEpisodeInjected?.push(text)
+  }
+
+  /**
+   * 唤醒事件 → 投喂给 LLM 的文本。**每个事件只渲染一次**(渲染结果之后作为字符串在
+   * mailbox / state.recent 里流转,失败重投也是同一份字符串),因此渲染依赖当前时钟这件事
+   * 不会让已经进上下文的内容事后改变——前缀缓存不受影响。
+   */
+  private renderEvent(event: WakeEvent): string {
+    return renderWakeEvent(event, {
+      timezone: this.deps.timezone?.() ?? resolveTimezone(undefined),
+      now: this.deps.now(),
+    })
   }
 
   /** `event === undefined` ⇒ 自唤醒(见 `drainMailbox`):只处理 mailbox 残留,不渲染唤醒事件。 */
@@ -247,7 +268,7 @@ export class ManagerLoop {
       // 没有任何新内容,直接空转返回,不开 episode(见 drainMailbox 注释)。
       return { episodeId, outcome: 'completed', turns: 0, consumedEvents: true, repliedToHuman: false }
     }
-    const eventText = event === undefined ? undefined : renderWakeEvent(event)
+    const eventText = event === undefined ? undefined : this.renderEvent(event)
     this.currentEpisodeInjected = []
     this.currentWakeEvent = event ?? null
 
@@ -537,12 +558,18 @@ function renderLedger(workers: ReadonlyArray<LedgerWorker>): string {
     .join('\n')
 }
 
-function renderWakeEvent(event: WakeEvent): string {
+/** 消息渲染的两个外部输入(时区 + 时钟),由 `ManagerLoop.renderEvent` 按 deps 解析后传入。 */
+interface MessageRenderOpts {
+  readonly timezone: string
+  readonly now: Date
+}
+
+function renderWakeEvent(event: WakeEvent, opts: MessageRenderOpts): string {
   switch (event.kind) {
     case 'human_messages':
-      return renderChannelMessages('[人类消息]', event.messages)
+      return renderChannelMessages('[人类消息]', event.messages, event.friend, opts)
     case 'attention_flush':
-      return renderChannelMessages('[补齐:群聊注意力放行期间累积的人类消息]', event.messages)
+      return renderChannelMessages('[补齐:群聊注意力放行期间累积的人类消息]', event.messages, event.friend, opts)
     case 'worker_event':
       return renderWorkerEvent(event.event)
     case 'schedule':
@@ -550,13 +577,42 @@ function renderWakeEvent(event: WakeEvent): string {
   }
 }
 
-function renderChannelMessages(label: string, messages: ReadonlyArray<ChannelMessage>): string {
+/**
+ * 人类消息渲染(P7 J Task 4)。
+ *
+ * 早先这里只出 `- 名: 文本`,丢掉了 `platform_message_id`、`platform_timestamp`、
+ * `is_mention_crab`、`mentions`、`reply_to/quote/thread`、媒体与发送者身份——manager 因此
+ * 在群里分不清 @ 的是不是自己、不知道某条在回谁、看不到图片/文件、也拿不到能喂给
+ * `get_message` 的 id。J 放弃了引用原文的入站预取(8 件事第 6 条),代价必须由渲染保真度补上:
+ * **manager 看到 `reply_to="…"` 才知道自己该不该去拉那条原文**。
+ *
+ * **复用 `prompt-manager.formatChannelMessageLine`,不另写一版**:它已经把
+ * "ChannelMessage 的全部结构化字段按存在性输出成 XML 属性"这件事做完了(含闭合标签转义、
+ * 超长截断、媒体/system_event 渲染),worker 与 dispatcher 用的都是它。manager 的上下文虽然是
+ * `EngineMessage[]` 而不是 worker 那种整块 XML prompt,但**这里要渲染的是同一种东西**——
+ * 一条 ChannelMessage 的完整结构;差别只在"渲染结果放进哪个信封"(这里是一条 user message
+ * 的正文)。另写一版必然漂移(本项目已经因为重造既有实现栽过)。
+ *
+ * `quotedMessages` 刻意不传:入站不预取引用原文,渲染只出 `reply_to` / `quote` 属性,
+ * manager 需要时自己调白名单里的 `get_message`(pull 型兜底,与 `get_history` 同款)。
+ *
+ * `friend` 是本批的发言者,只用于 `resolveSenderIdentity` 判 master/friend/stranger;
+ * 群里别人发的消息判不出来就是 `stranger`,与 dispatcher 侧 `buildUserPrompt` 同一套取舍。
+ */
+function renderChannelMessages(
+  label: string,
+  messages: ReadonlyArray<ChannelMessage>,
+  friend: Friend | undefined,
+  opts: MessageRenderOpts,
+): string {
   if (messages.length === 0) return `${label}(空)`
-  const lines = messages.map((m) => {
-    const who = m.sender.platform_display_name || m.sender.platform_user_id
-    const text = m.content.text ?? `[${m.content.type}]`
-    return `- ${who}: ${text}`
-  })
+  const lines = messages.map((m) =>
+    formatChannelMessageLine(m, {
+      timezone: opts.timezone,
+      now: opts.now,
+      identity: resolveSenderIdentity({ msg: m, ...(friend ? { senderFriend: friend } : {}) }),
+    }),
+  )
   return `${label}\n${lines.join('\n')}`
 }
 

@@ -7,7 +7,7 @@ import { ManagerLoop, type WakeEvent, type ManagerLoopDeps } from '../../src/man
 import { ManagerSessionStore } from '../../src/manager/session-store.js'
 import type { CompactionPolicy } from '../../src/manager/compaction.js'
 import type { ManagerKey } from '../../src/manager/types.js'
-import type { ChannelMessage } from '../../src/types.js'
+import type { ChannelMessage, Friend } from '../../src/types.js'
 import { dialogObjectIdForPrivate } from '../../src/workers/harness/ledger-types.js'
 import type { WorkerHarness } from '../../src/workers/harness/harness.js'
 import type { LedgerWorker } from '../../src/workers/harness/ledger-types.js'
@@ -842,6 +842,104 @@ describe('ManagerLoop', () => {
       const result = await loop.drainMailbox()
       expect(result.turns).toBe(0)
       expect(result.repliedToHuman).toBe(false)
+    })
+  })
+
+  // --- 消息渲染器(P7 J Task 4:@、引用、媒体、时间戳、message_id) ---
+
+  describe('renderChannelMessages', () => {
+    const MASTER: Friend = {
+      id: 'f-master',
+      name: '老板',
+      permission: 'master',
+      channel_identities: [{ channel_id: 'wechat', platform_user_id: 'u9' }],
+    } as Friend
+
+    /** 把 ChannelMessage 的结构化字段一次全填满,逐项验证渲染没有丢字段。 */
+    function richMessage(): ChannelMessage {
+      return {
+        platform_message_id: 'pm-rich',
+        session: { session_id: 'sess-loop', channel_id: 'wechat', type: 'group' },
+        sender: { friend_id: 'f-master', platform_user_id: 'u9', platform_display_name: '小王' },
+        content: {
+          type: 'image',
+          text: '看看这张图',
+          media_url: 'https://cdn.example.com/a.png',
+          filename: 'a.png',
+        },
+        features: {
+          is_mention_crab: true,
+          mentions: [{ user_id: 'u3', display_name: '张三' }],
+          reply_to_message_id: 'pm-parent',
+          quote_message_id: 'pm-quoted',
+          thread_id: 'th-1',
+        },
+        platform_timestamp: '2026-01-01T03:04:00.000Z',
+      }
+    }
+
+    /** 跑一个 episode,把喂给 LLM 的 messages 序列化出来。 */
+    async function renderedPrompt(event: WakeEvent): Promise<string> {
+      const { adapter, queue, calls } = makeAdapter()
+      queue.push({ text: 'ok', stopReason: 'end_turn' })
+      const loop = new ManagerLoop(baseDeps({ store, adapter, timezone: () => 'UTC' }))
+      await loop.wakeUp(event)
+      return JSON.stringify(calls[0].messages)
+    }
+
+    it('逐项渲染出 message_id / 时间戳 / @ / 提及名单 / 引用 / 媒体 / 发送者,一项都不丢', async () => {
+      const prompt = await renderedPrompt({ kind: 'human_messages', messages: [richMessage()], friend: MASTER })
+
+      // message_id —— manager 要靠它调 get_message 拉引用原文/详情
+      expect(prompt).toContain('id=\\"pm-rich\\"')
+      // 时间戳(UTC,同日 → HH:MM)
+      expect(prompt).toContain('ts=\\"03:04\\"')
+      // @ 了自己 + 提及名单
+      expect(prompt).toContain('mention=\\"@you\\"')
+      expect(prompt).toContain('mentions=\\"@张三\\"')
+      // 引用/回复(放弃预取 → 属性必须在,否则 manager 连"该去拉什么"都不知道)
+      expect(prompt).toContain('reply_to=\\"pm-parent\\"')
+      expect(prompt).toContain('quote=\\"pm-quoted\\"')
+      expect(prompt).toContain('thread=\\"th-1\\"')
+      // 媒体
+      expect(prompt).toContain('media=\\"image\\"')
+      expect(prompt).toContain('media_url=\\"https://cdn.example.com/a.png\\"')
+      expect(prompt).toContain('filename=\\"a.png\\"')
+      expect(prompt).toContain('[图片: https://cdn.example.com/a.png]')
+      // 发送者与身份(friend 随唤醒事件而来 → master 身份解析得出)
+      expect(prompt).toContain('from=\\"小王\\"')
+      expect(prompt).toContain('from_id=\\"u9\\"')
+      expect(prompt).toContain('identity=\\"master\\"')
+      // 正文仍在
+      expect(prompt).toContain('看看这张图')
+    })
+
+    it('不带 friend 时不炸:身份退回 stranger,其余字段照常渲染', async () => {
+      const prompt = await renderedPrompt({ kind: 'human_messages', messages: [richMessage()] })
+      expect(prompt).toContain('identity=\\"stranger\\"')
+      expect(prompt).toContain('id=\\"pm-rich\\"')
+    })
+
+    it('attention_flush 走同一个渲染器(标签不同、消息渲染完全一致)', async () => {
+      const prompt = await renderedPrompt({ kind: 'attention_flush', messages: [richMessage()], friend: MASTER })
+      expect(prompt).toContain('[补齐:群聊注意力放行期间累积的人类消息]')
+      expect(prompt).toContain('id=\\"pm-rich\\"')
+      expect(prompt).toContain('mention=\\"@you\\"')
+      expect(prompt).toContain('identity=\\"master\\"')
+    })
+
+    it('渲染稳定:同样的输入(同一批消息 + 同一时钟)两次渲染逐字节相同——否则破坏前缀缓存', async () => {
+      const msgs = [richMessage()]
+      const first = await renderedPrompt({ kind: 'human_messages', messages: msgs, friend: MASTER })
+      const second = await renderedPrompt({ kind: 'human_messages', messages: msgs, friend: MASTER })
+      const extract = (s: string): string => s.slice(s.indexOf('<message'), s.indexOf('</message>'))
+      expect(extract(second)).toBe(extract(first))
+    })
+
+    it('空批仍走既有的 `(空)` 短路,不渲染任何 <message> 标签', async () => {
+      const prompt = await renderedPrompt({ kind: 'human_messages', messages: [] })
+      expect(prompt).toContain('[人类消息](空)')
+      expect(prompt).not.toContain('<message')
     })
   })
 })

@@ -549,6 +549,9 @@ export class UnifiedAgent extends ModuleBase {
     this.managerStack = buildManagerStack({
       dataRoot: getDataRootDir(),
       now: () => new Date().toISOString(),
+      // 人类消息渲染的时区（`formatChannelMessageLine` 的 ts 属性）。与 worker 侧
+      // `buildBuiltinWorkerRuntime` 取同一个来源，避免 manager 与 worker 看到的时间对不上。
+      timezone: () => resolveTimezone(this.agentConfig?.timezone),
       // §11：manager slot → 回退 powerful。两个 thunk 每个 episode 各解析一次，
       // 未配置时抛出的错误信息由 model-slot.ts 给出（明确指出缺哪两个 slot）。
       managerAdapter: () => adapterFromSdkEnv(this.buildSdkEnv(resolveManagerModelConfig(this.agentConfig?.model_config))),
