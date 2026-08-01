@@ -1,6 +1,17 @@
 # Crabot 项目进度
 
-> 最后更新：2026-07-31 — Manager/Worker 拆分 P7 / PR A：入站链路测试网（分支 feat/mw-p7a-inbound-test-net，未合并 main）
+> 最后更新：2026-08-01 — Manager/Worker 拆分 P7 / PR F：builtin worker 注入通道（分支 feat/mw-p7f-builtin-injection，未合并 main）
+
+## 2026-08-01 — Manager/Worker 拆分 P7 / PR F：builtin worker 注入通道（manager 终于能派出一个能干活的 builtin worker）
+
+- spec：`crabot-docs/superpowers/specs/2026-08-01-builtin-worker-injection-design.md`。补的是 P4/P5 两次记录里都点名的那条阻塞项——`spawn_worker` 不传 `SpawnSpec.builtin`，而 `defaultImpl='builtin'`，**cutover 后 manager 第一次派活必挂**。
+- 第 1 步（管道 + adapter 侧）：`builtinSpawnDefaults` 从无参 thunk 改成带 per-worker 上下文的工厂 `(ctx:{worker_id,workspace,origin,goal}) => SpawnSpec['builtin']`（无参签名从根上装不下 workspace/权限身份这些 spawn 时才知道的维度）；`spawnWorker` 在缺 `builtin` 且目标是 builtin 时回退调它；adapter 每次起化身（spawn/resume/fork/idle→续 burst）**现取**运行配置，per-worker 上下文落 `context.json`——builtin worker 因此**跨进程重启也能 revive**，而 LLM 连接信息始终不落盘；runEngine 补齐 `hookRegistry`（CLI 权限闸 / skill 目录 fence / git 写 fence）+ 固定权限档位 `BUILTIN_WORKER_PERMISSIONS` + 模型参数；工具集守卫在每轮 resolve 时硬断言不得出现 `set_cwd` / `set_task_goal`。
+- 第 2 步（生产装配，本次）：`unified-agent.ts` 实现真实工厂 `buildBuiltinWorkerRuntime`——LLM 走与现网 worker 同一个 `model_config.powerful` slot，工具 = 内置文件/shell + skills、crab-memory（A 组）、外部 MCP、tmp-page、生图，systemPrompt = `assembleAgentPrompt`（goal 模式关）+ 一段 v3 worker 契约尾巴（工作目录固定为 workspace / 没有任何直接联系人类的工具 / `finish_task` 是唯一终态信号）。**不装**：全部 messaging、`set_cwd`、goal 相关、`delegate_task`、`todo`、`find_task`、`wait_for_signal`。
+- **"现取"是这次的核心不变量**：工厂以方法引用交给 bootstrap，配置（model slot / 人格 / skills / MCP / 生图 / 时区）一律在**被调用那一刻**读 `this`；`systemPrompt`/`tools` 再各包一层 thunk，engine 每轮 turn 重新 resolve。教训来自 PR C 的 `enableFeishuDocTool`：deps 对象被长期持有，任何在装配期就地求值的东西都会永久快照。变异实测：把 model 快照进闭包 → 验收 3 用例挂。
+- 权限身份用**显式常量档位**（所有 worker 同权限，干活面开、messaging/task/remote_exec/desktop 关、CLI 全 `none`），因为 `origin.creator_friend_id` 现网恒空。**PR J 的验收必须包含"worker 权限随发起人身份解析"**，否则 cutover 当天群里任何人都能让 worker 干 master 才该能干的事。这条写死，不得遗忘。
+- `tests/manager/manager-integration.test.ts` 的 `BuiltinAutoConfigAdapter` 垫片**退役**：它原本包一层 adapter 在 `spec.builtin` 缺失时补配置，现在改成给 `HarnessDeps.builtinSpawnDefaults` 一个按队列出配置的工厂——同样的语义，走的是生产回退路径本身（去掉该回退，这两个场景用例立刻挂）。
+- 已知能力缺口（spec 明列，不在本 PR）：**无上下文压缩**（`disableCompaction:true` 写死，长活 worker 撞窗口即 burst 失败）→ **PR F2，必须在 J 之前**；权限身份接线 → J；subagent / todo / `wait_for_signal` / `delegate_task` → 后续独立加法；builtin `readTrace` → P6。
+- 验证：`crabot-agent` 全量 `2357 passed | 2 skipped`（204 文件），基线 `2348 | 2`，差值 = 新增 9，**零回归**；`tsc --noEmit` 干净；4 类变异逐个植入实测（① 去掉工厂回退 → 9 挂，含 manager-integration 两个场景；② 去掉 `hookRegistry` → 3 挂；③ 配置改回 spawn 快照 → 4 挂；④ model 快照进闭包 → 验收 3 挂）。
 
 ## 2026-07-31 — Manager/Worker 拆分 P7 / PR A：入站链路测试网（只加测试，生产代码零改动）
 

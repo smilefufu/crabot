@@ -51,12 +51,16 @@ import { dispatch } from './dispatcher/dispatcher.js'
 import type { DispatchTraceCallback, ImmediateReplySentInfo } from './dispatcher/dispatcher-types.js'
 import { executeDispatchActions } from './dispatcher/dispatcher-executor.js'
 import type { ToolPermissionConfig, ToolDefinition as EngineToolDefinition } from './engine/types.js'
+import { filterToolsByPermission } from './engine/index.js'
+import { getConfiguredBuiltinTools, filterMcpToolsByConfig } from './engine/tools/index.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { McpConnector } from './agent/mcp-connector.js'
+import { mcpServerToToolDefinitions } from './agent/mcp-tool-bridge.js'
+import { createTmpPageTools } from './agent/tmp-page-tools.js'
 import { createCrabMessagingServer, type PathMapping, type TaskContext } from './mcp/crab-messaging.js'
-import { toImageConnInfo, type ImageConnInfo } from './mcp/crab-image.js'
+import { toImageConnInfo, imageToolsFor, type ImageConnInfo } from './mcp/crab-image.js'
 import { TraceStore } from './core/trace-store.js'
-import { getAgentTraceDir, getAgentLogsDir, getWorkspaceDir, getDataRootDir } from './core/data-paths.js'
+import { getAgentTraceDir, getAgentLogsDir, getAgentDataDir, getWorkspaceDir, getDataRootDir } from './core/data-paths.js'
 import { PromptManager } from './prompt-manager.js'
 import { createLSPManager, type LSPManager } from './lsp/lsp-manager.js'
 import type { BgEntityRecord, BgEntityStatus, BgEntityType } from './engine/bg-entities/types.js'
@@ -68,7 +72,11 @@ import { DEFAULT_MAX_CONTEXT_TOKENS } from './engine/query-loop.js'
 import { buildManagerStack, reconcileManagerStack, type ManagerStack } from './manager/bootstrap.js'
 import { makeAgentEventPublisher } from './manager/events.js'
 import { resolveManagerModelConfig } from './manager/model-slot.js'
-import { createCrabMemoryServer } from './mcp/crab-memory.js'
+import { createCrabMemoryServer, filterMemoryToolsByProfile } from './mcp/crab-memory.js'
+import {
+  BUILTIN_WORKER_PERMISSIONS,
+  type BuiltinRuntimeContext,
+} from './workers/builtin/runtime.js'
 import { dialogObjectIdForGroup, type DialogObjectId, type ManagerKey } from './workers/harness/ledger-types.js'
 import {
   filterAndPageWorkers,
@@ -82,7 +90,7 @@ import {
   type GetWorkerTraceParams,
   type GetWorkerTraceResult,
 } from './manager/read-model.js'
-import type { NormalizedTraceEvent } from './workers/types.js'
+import type { NormalizedTraceEvent, SpawnSpec } from './workers/types.js'
 import type { HarnessEvent } from './workers/harness/worker-events.js'
 import { findIncarnationBySeq, mainlineIncarnation } from './workers/harness/harness.js'
 
@@ -124,6 +132,51 @@ function toToolPermissionConfig(
 
 function normalizeResumeTriggerType(triggerType: string | undefined): 'message' | 'scheduled' {
   return triggerType === 'scheduled' ? 'scheduled' : 'message'
+}
+
+/**
+ * builtin worker 的 skill catalog（Tier 1 渐进式披露：name + description）。Skill 工具的
+ * description 明写"当任务匹配 <available_skills> 里某个技能的描述时必须先调用本工具"，
+ * 不给这段清单，装了 Skill 工具的 worker 也不知道有哪些技能可用。
+ *
+ * 与 `AgentHandler.buildSkillListingSnapshot` 是同一份格式，**刻意并存**：那一份属于现网
+ * worker loop 的组装路径，本阶段对它零改动（PR J 收编 worker loop 时随它一并删除）。
+ */
+function buildWorkerSkillListing(skills: ReadonlyArray<SkillConfig> | undefined): string | undefined {
+  if (!skills || skills.length === 0) return undefined
+  const intro =
+    '\n\n以下技能为特定任务提供专业指引。当任务匹配某个技能的描述时，'
+    + '必须先调用 Skill 工具（输入技能名称）加载完整指引，然后按指引操作。'
+    + '这是强制要求——先加载技能，再执行任务。'
+  const body = skills.map((s) => {
+    const desc = s.description || s.name
+    return `<skill>\n<name>${s.name}</name>\n<description>${desc}</description>\n</skill>`
+  }).join('\n')
+  return `${intro}\n\n<available_skills>\n${body}\n</available_skills>`
+}
+
+/**
+ * v3 worker 契约尾巴（protocol-agent-v3 §5）。只陈述协议已经规定的事实——worker 没有
+ * crab-messaging / 没有 ask_human（§5.1）、判断与转述的责任全在 manager 侧（§5.1）、
+ * workspace 是跨实现交接的唯一介质且要求中间产物落盘（§5.4）、`finish_task` 是 builtin
+ * 的终态信号（§5.1 "finalize 即 exited"）——不额外承诺协议里没有的东西。
+ */
+function buildBuiltinWorkerContractPrompt(workspaceRoot: string): string {
+  return [
+    '## 你的角色：worker',
+    '',
+    '你是一个 worker：由 manager 派活、向 manager 交付，不直接面对人类。',
+    '',
+    `- **你的工作目录固定为 \`${workspaceRoot}\`，并且没有切换工作目录的工具。**`
+    + '所有中间产物和最终产出都要落在这个目录里——它是交接的唯一介质：'
+    + '你被换成另一个实现接手时，接手方只能看到这里留下的东西。',
+    '- **你没有任何直接联系人类的工具**（没有发消息、也没有向人类提问这类原语），不要去找。'
+    + '你对外只有两个出口：workspace 里的文件，和你自己的输出流。',
+    '- 需要人类拿主意、或者有话想让人类知道时，把它在输出里写清楚然后结束本轮。'
+    + '你会停下来等待；读你的输出、判断你是干完了还是在等输入、以及要不要把话转述给人类，都是 manager 的责任。',
+    '- 任务完成或确认失败时调用 `finish_task`（`outcome` 取 `completed` 或 `failed`，`summary` 一句话）。'
+    + '这是你唯一的终态信号——不调用它，你只是停下来等下一条输入。',
+  ].join('\n')
 }
 
 /**
@@ -481,10 +534,11 @@ export class UnifiedAgent extends ModuleBase {
    * （它们只读台账，与 LLM 无关）。thunk 同时顺带满足 §11 的热更语义：manager 的 model 于
    * 下一个 episode 生效。
    *
-   * **本阶段刻意不提供 `builtinSpawnDefaults`**：它要的是 builtin worker 的完整 LLM + 工具面
-   * 注入，而 `spawnWorker` 目前压根不读它（只有 `handoffIncarnation` 消费），补上去也补不掉
-   * "manager 走缺省 `spawn_worker` 必挂"这个缺口——那是 P7 cutover 前必须修的一项（见
-   * `.superpowers/sdd/progress.md` Task 1 条目）。这里给一个半成品反而会掩盖它。
+   * **`builtinSpawnDefaults` 传的是方法引用而不是预先算好的值**（PR F 第 2 步）：deps 对象在
+   * 构造函数里建好后被 harness / adapter 长期持有，任何在这里就地求值的东西都会永久快照到
+   * 构造那一刻——`messagingDeps.enableFeishuDocTool` 写成 getter 就是同一个理由。builtin
+   * worker 的运行配置（model slot / 人格 / skills / MCP / 生图能力）全部要在**起化身那一刻**
+   * 才解析（spec 决策 2），所以这里只交出 `buildBuiltinWorkerRuntime` 的调用口。
    */
   private initializeManagerStack(): void {
     // messagingDeps 里的 getter 需要拿到本实例（getter 内的 `this` 是那个对象字面量）。
@@ -525,6 +579,8 @@ export class UnifiedAgent extends ModuleBase {
       callAdmin: async <P, R>(method: string, params: P): Promise<R> =>
         this.rpcClient.call<P, R>(await this.getAdminPort(), method, params, this.config.moduleId),
       dialogObjectIdFor: (key) => this.dialogObjectIdForManagerKey(key),
+      // 起化身时现取（spec 决策 2）：箭头函数只捕获 `this`，配置一律在调用那一刻读。
+      builtinSpawnDefaults: (ctx) => this.buildBuiltinWorkerRuntime(ctx),
       // 对外事件出口（§9.2 `agent.task_status_changed`）：真实 rpcClient 注入。
       // 翻译与去重在 manager/events.ts，这里只负责把口子接上。
       publishEvent: makeAgentEventPublisher({
@@ -563,6 +619,141 @@ export class UnifiedAgent extends ModuleBase {
     return sep < 0
       ? dialogObjectIdForGroup(key, '')
       : dialogObjectIdForGroup(key.slice(0, sep), key.slice(sep + 2))
+  }
+
+  // ==========================================================================
+  // builtin worker 的运行配置注入（PR F）
+  // spec: crabot-docs/superpowers/specs/2026-08-01-builtin-worker-injection-design.md
+  // ==========================================================================
+
+  /**
+   * builtin worker 起化身时的运行配置工厂 —— `HarnessDeps.builtinSpawnDefaults`
+   * （spawn / handoff）与 `BuiltinWorkerAdapter.resolveRuntime`（resume / fork /
+   * idle→running 续 burst，含进程重启之后）共用的同一个入口。
+   *
+   * **本方法里的每一项都必须是"现取"**：它读的是**被调用那一刻** `this` 上的配置
+   * （model slot / 人格 / skills / 外部 MCP / 生图能力 / 时区）。任何一项若提到装配期
+   * （`initializeManagerStack`）算好塞进闭包，"改了配置下次起化身生效"就退化成"agent
+   * 重启才生效"，进程重启后的 revive 也会拿不到配置（spec 决策 2）。
+   *
+   * 缺 `powerful` slot 时**抛错，不降级**：harness 会把这次 spawn 如实落成一条 failed 台账
+   * 加一条 `spawn_failed` 事件，manager 的 `spawn_worker` 拿到错误文本。静默降级只会让
+   * manager 以为派活成功。
+   */
+  private buildBuiltinWorkerRuntime(ctx: BuiltinRuntimeContext): SpawnSpec['builtin'] {
+    // 与现网 worker loop 同一个 slot（`initializeAgentLayer` 的 `model_config.powerful`），
+    // 但取值时机不同：那边在装配期解析成 `sdkEnvWorker` 字段，这里每次起化身现读现解析。
+    const connInfo = this.agentConfig?.model_config?.powerful
+    if (!connInfo) {
+      throw new Error(
+        "[builtin-worker] model_config 缺少 'powerful' slot，无法解析 builtin worker 的 LLM 连接信息",
+      )
+    }
+    const sdkEnv = this.buildSdkEnv(connInfo)
+    return {
+      adapter: adapterFromSdkEnv(sdkEnv),
+      model: sdkEnv.modelId,
+      // systemPrompt / tools 都给 thunk：engine 每轮 turn 重新 resolve，admin 中途 push 的
+      // 人格 / skills / MCP 变更因此在同一个 burst 内即时生效（与现网 worker loop 的
+      // buildSystemPromptDynamic / buildToolsDynamic 同款语义）。
+      systemPrompt: () => this.buildBuiltinWorkerSystemPrompt(ctx),
+      tools: () => this.buildBuiltinWorkerTools(ctx),
+      timezone: resolveTimezone(this.agentConfig?.timezone),
+      ...(sdkEnv.supportsVision !== undefined ? { supportsVision: sdkEnv.supportsVision } : {}),
+      ...(sdkEnv.maxTokens !== undefined ? { maxTokens: sdkEnv.maxTokens } : {}),
+      ...(sdkEnv.contextWindow !== undefined ? { contextWindowTokens: sdkEnv.contextWindow } : {}),
+    }
+  }
+
+  /**
+   * builtin worker 的工具集（spec 决策 5）。
+   *
+   * **装**：内置文件/shell 工具 + skills、crab-memory、外部 MCP、tmp-page / 生图。
+   * **不装**：全部 messaging（v3 语义：worker 不直接跟人类说话）、`set_cwd`、goal 相关、
+   * `delegate_task`、`todo`、`find_task` / `get_task_progress`、`wait_for_signal`、
+   * subagent coordinator / `request_restart`。它们不是被过滤掉的，而是根本不组装进来。
+   */
+  private buildBuiltinWorkerTools(ctx: BuiltinRuntimeContext): ReadonlyArray<EngineToolDefinition> {
+    const tools: EngineToolDefinition[] = []
+    const workspaceRoot = ctx.workspace.root
+
+    // 内置文件 / shell 工具 + Skill。cwd 恒等于 workspace 且**不传 `setCwdCtx`**——worker 的
+    // 工作目录就是它的 workspace，不可中途切换（决策 3；adapter 侧 `guardTools` 硬断言）。
+    // 也不传 bgEntityCtx / bgToolDeps：bg-shell 的退出唤醒依赖 `wait_for_signal`（本阶段不装），
+    // 且 owner 归属在多 worker 并发下尚未定义（spec 未决 #3）。
+    tools.push(...getConfiguredBuiltinTools(
+      () => workspaceRoot,
+      this.agentConfig?.builtin_tool_config,
+      { availableSkills: this.agentConfig?.skills ?? [] },
+    ))
+
+    // crab-memory：A 组（普通对话档）。worker 没有会话身份，visibility/scopes 取与 manager
+    // 侧同一组缺省值（`initializeManagerStack` 的 memoryServer），sourceType 记 'system'。
+    // 记忆权限档位随会话身份解析是 spec 未决 #2，J 接真实身份时一并收敛。
+    tools.push(...filterMemoryToolsByProfile(
+      mcpServerToToolDefinitions(
+        createCrabMemoryServer(
+          {
+            rpcClient: this.rpcClient,
+            moduleId: this.config.moduleId,
+            getMemoryPort: () => this.getMemoryPort(),
+          },
+          {
+            taskId: ctx.worker_id,
+            visibility: 'public',
+            scopes: [],
+            sourceType: 'system',
+            isMasterPrivate: false,
+          },
+        ),
+        'crab-memory',
+      ),
+      'conversation',
+    ))
+
+    // 外部 MCP（admin 托管，McpConnector 在 onStart 连接）。
+    tools.push(...this.mcpConnector.getAllTools())
+
+    // 临时页面：`taskId` 用 worker_id（页面 meta.owner_task_id 与台账里的 worker 对得上）。
+    tools.push(...createTmpPageTools({
+      dataDir: getDataRootDir(),
+      getTmpPageBaseUrl: () => this.agentConfig?.tmp_page_base_url,
+      taskId: ctx.worker_id,
+    }))
+
+    // 生图（未配置 image_config 时 imageToolsFor 返回空数组）。
+    tools.push(...imageToolsFor(this.imageConnInfo, {
+      moduleId: this.config.moduleId,
+      outputDir: path.join(getAgentDataDir(), 'generated-images'),
+    }))
+
+    // disabled_tools 对 MCP 桥接工具的过滤（内置工具的同名过滤已在 getConfiguredBuiltinTools 内完成）。
+    const configFiltered = filterMcpToolsByConfig(tools, this.agentConfig?.builtin_tool_config)
+    // F 阶段固定权限档位过滤：adapter 的 `checkPermission` 是执行期的闸，这里守的是
+    // "没权限的工具不进 prompt"——外部 MCP 里可能混进 `desktop` 类工具（computer-use），
+    // 那一面在 F 阶段的档位下是关的。J 接真实身份后档位改为按 origin 解析。
+    return filterToolsByPermission(
+      configFiltered,
+      this.getToolPermissionConfig(configFiltered, BUILTIN_WORKER_PERMISSIONS),
+    )
+  }
+
+  /**
+   * builtin worker 的 system prompt = 现网那套 agent prompt（goal 模式关闭）+ 一段 v3 worker
+   * 契约尾巴。两段都在每轮 turn 现拼，admin 改人格 / skills 后下一轮即生效。
+   */
+  private buildBuiltinWorkerSystemPrompt(ctx: BuiltinRuntimeContext): string {
+    const skillListing = buildWorkerSkillListing(this.agentConfig?.skills)
+    const base = this.promptManager.assembleAgentPrompt({
+      // 决策 4：builtin worker 不装 goal 模式（既不给 goal 工具也不给 goal 缓冲），
+      // 需要目标驱动时由 manager 在派活 prompt 里用指令表达。
+      goalModeEnabled: false,
+      ...(this.agentConfig?.system_prompt ? { adminPersonality: this.agentConfig.system_prompt } : {}),
+      ...(skillListing ? { skillListing } : {}),
+      imageCapability: { available: this.imageCapability.available },
+      // availableSubAgents 不传：worker 不装 delegate_task。
+    })
+    return `${base}\n\n${buildBuiltinWorkerContractPrompt(ctx.workspace.root)}`
   }
 
   /**

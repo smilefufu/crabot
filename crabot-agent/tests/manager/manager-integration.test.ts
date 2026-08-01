@@ -10,20 +10,18 @@
  * `harness.handleStateChange` → set 回同一 Map)+ 注入 `now()` + `events[]` 收集 +
  * `waitUntil` 轮询。
  *
- * ## 已知缺口:`spawn_worker` 工具当前不能让 impl='builtin' 的化身真正跑起来
+ * ## builtin worker 的运行配置从哪来
  *
- * `worker-tools.ts` 的 `spawn_worker` 调 `harness.spawnWorker(...)` 时不传 `builtin` 字段
- * (读代码确认,不是猜测)——`SpawnSpec.builtin`(worker 的 LLM adapter/model/systemPrompt/
- * tools 注入)在 P4 目前只有 `harness.handoffIncarnation` 经 `HarnessDeps.builtinSpawnDefaults`
- * 消费,`spawnWorker` 本身完全不读它。因此 `BuiltinWorkerAdapter.spawn` 会因
- * `spec.builtin missing` 直接抛错。这是 P4"纯新增未激活"阶段的真实缺口(manager 侧还没有
- * 拿到"builtin worker 该用哪个 LLM"的配置解析入口,大概率留给 P7 cutover 时补),不是本测试
- * 该修的东西。测试用 `BuiltinAutoConfigAdapter`(本文件私有,不改动任何生产代码)包一层
- * `BuiltinWorkerAdapter`,在 `spec.builtin` 缺失时用测试预先排好的脚本队列兜底填入
- * ——语义上等价于"外部调用方原本就该在 SpawnSpec 里带上 builtin 配置",与
- * `builtinSpawnDefaults` 给 handoff 场景做的事是同一件事,只是补在 spawn 这条路径上。
+ * `worker-tools.ts` 的 `spawn_worker` 调 `harness.spawnWorker(...)` 时**不传** `builtin` 字段
+ * ——`SpawnSpec.builtin`(worker 的 LLM adapter/model/systemPrompt/tools)是装配层注入的,
+ * 不可能来自 LLM 的工具入参。PR F 之前 `spawnWorker` 压根不读注入工厂(只有
+ * `handoffIncarnation` 消费),本文件为此包过一个私有的 `BuiltinAutoConfigAdapter` 垫片;
+ * PR F 第 1 步给 `spawnWorker` 补上了"缺 `builtin` 就回退调 `builtinSpawnDefaults(ctx)`"
+ * 的生产路径,垫片随之退役。现在测试只需给 `HarnessDeps.builtinSpawnDefaults` 一个按队列
+ * 出配置的工厂,spawn 走的就是生产回退路径本身。
  *
  * @see .superpowers/sdd/task-10-brief.md
+ * @see crabot-docs/superpowers/specs/2026-08-01-builtin-worker-injection-design.md
  * @see crabot-docs/protocols/protocol-agent-v3.md §4
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -44,8 +42,6 @@ import type {
   IncarnationHandle,
   IncarnationRef,
   SpawnSpec,
-  Workspace,
-  CapabilityBundle,
   DetectResult,
   WorkerContractState,
   OutputCursor,
@@ -172,48 +168,6 @@ function findWorkerExitedEvent(events: readonly HarnessEvent[], workerId: string
 }
 
 // ============================================================================
-// BuiltinAutoConfigAdapter —— 见文件头"已知缺口"说明
-// ============================================================================
-
-class BuiltinAutoConfigAdapter implements WorkerAdapter {
-  readonly implId: WorkerImplId = 'builtin'
-  constructor(
-    private readonly inner: BuiltinWorkerAdapter,
-    private readonly nextBuiltinConfig: () => NonNullable<SpawnSpec['builtin']>,
-  ) {}
-  detect(): Promise<DetectResult> {
-    return this.inner.detect()
-  }
-  provision(ws: Workspace, caps: CapabilityBundle): Promise<void> {
-    return this.inner.provision(ws, caps)
-  }
-  spawn(spec: SpawnSpec): Promise<IncarnationHandle> {
-    return this.inner.spawn({ ...spec, builtin: spec.builtin ?? this.nextBuiltinConfig() })
-  }
-  resume(prev: IncarnationRef, wakeInput: string): Promise<IncarnationHandle> {
-    return this.inner.resume(prev, wakeInput)
-  }
-  fork(prev: IncarnationRef, forkInput: string): Promise<IncarnationHandle> {
-    return this.inner.fork(prev, forkInput)
-  }
-  sendInput(h: IncarnationHandle, text: string, opts?: { raw?: boolean }): Promise<void> {
-    return this.inner.sendInput(h, text, opts)
-  }
-  readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
-    return this.inner.readOutput(h, cursor)
-  }
-  state(h: IncarnationHandle): Promise<WorkerContractState> {
-    return this.inner.state(h)
-  }
-  kill(h: IncarnationHandle): Promise<void> {
-    return this.inner.kill(h)
-  }
-  capabilities(): AdapterCapabilities {
-    return this.inner.capabilities()
-  }
-}
-
-// ============================================================================
 // ForklessStubAdapter —— 场景四专用:如实实现 capabilities().fork===false 的 worker 实现
 // (照 codex adapter 的真实声明,不是伪造;不驱动任何真实 CLI,provision/spawn/state 均为
 // 最小可用实现,唯一要紧的是 capabilities() 如实返回 fork:false,让 harness.queryWorker
@@ -297,6 +251,11 @@ async function setupAssembly(opts: AssemblyOptions): Promise<Assembly> {
     return new Date(harnessNowMs).toISOString()
   }
 
+  // 每次 builtin spawn 的运行配置由测试预置队列给出。PR F 之前这里包了一个私有的
+  // `BuiltinAutoConfigAdapter` 垫片在 `spec.builtin` 缺失时补配置;现在生产的 harness 自己
+  // 在缺失时回退到 `builtinSpawnDefaults`(spec 决策 1),垫片因此退役——语义完全一样
+  //(spawn_worker 工具不传 builtin,配置由装配层现取),但走的是生产回退路径。
+  const builtinConfigQueue: Array<NonNullable<SpawnSpec['builtin']>> = []
   const harnessDeps: HarnessDeps = {
     adapters: adaptersMap,
     defaultImpl: 'builtin',
@@ -305,19 +264,18 @@ async function setupAssembly(opts: AssemblyOptions): Promise<Assembly> {
     workersDir,
     now: harnessNow,
     onEvent: (e) => events.push(e),
+    builtinSpawnDefaults: () => {
+      const cfg = builtinConfigQueue.shift()
+      if (!cfg) throw new Error('测试装配缺口:没有为下一次 builtin spawn 预置 builtinConfigQueue 条目')
+      return cfg
+    },
   }
   // onStateChange 接线契约(harness.ts 文件头):先构造空 Map 传给 harness,harness 构造完成后
   // 把 handleStateChange 传给真实 adapter 的构造函数,再把 adapter 塞回同一个底层 Map——
   // 与 P4 真实接线顺序一致,不是手动模拟回调触发。
   const harness = new WorkerHarness(harnessDeps)
 
-  const builtinConfigQueue: Array<NonNullable<SpawnSpec['builtin']>> = []
-  const realBuiltinAdapter = new BuiltinWorkerAdapter({ dataDir: builtinDataDir, onStateChange: harness.handleStateChange })
-  const builtinAdapter = new BuiltinAutoConfigAdapter(realBuiltinAdapter, () => {
-    const cfg = builtinConfigQueue.shift()
-    if (!cfg) throw new Error('测试装配缺口:没有为下一次 builtin spawn 预置 builtinConfigQueue 条目')
-    return cfg
-  })
+  const builtinAdapter = new BuiltinWorkerAdapter({ dataDir: builtinDataDir, onStateChange: harness.handleStateChange })
   adaptersMap.set('builtin', builtinAdapter)
   for (const [implId, adapter] of opts.extraAdapters ?? []) adaptersMap.set(implId, adapter)
 
