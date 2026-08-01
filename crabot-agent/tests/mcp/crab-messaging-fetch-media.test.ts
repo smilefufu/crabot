@@ -1,13 +1,13 @@
 import { describe, it, expect, vi } from 'vitest'
-import { buildMessagingTools } from '../../src/mcp/crab-messaging.js'
+import { buildWorkerMessagingTools } from '../../src/mcp/crab-messaging.js'
 
-function findTool(tools: ReturnType<typeof buildMessagingTools>, name: string) {
+function findTool(tools: ReturnType<typeof buildWorkerMessagingTools>, name: string) {
   const t = tools.find((x) => x.name === name)
   if (!t) throw new Error(`tool ${name} not found`)
   return t
 }
 
-function parse(out: Awaited<ReturnType<ReturnType<typeof buildMessagingTools>[number]['handler']>>) {
+function parse(out: Awaited<ReturnType<ReturnType<typeof buildWorkerMessagingTools>[number]['handler']>>) {
   return JSON.parse((out as { content: Array<{ text: string }> }).content[0].text)
 }
 
@@ -27,7 +27,7 @@ describe('fetch_media 工具', () => {
       file_path: '/data/media/om_f.pdf',
       mime_type: 'application/pdf',
     })
-    const tools = buildMessagingTools(makeDeps(call))
+    const tools = buildWorkerMessagingTools(makeDeps(call))
     const out = await findTool(tools, 'fetch_media').handler({
       channel_id: 'feishu-1',
       handle: 'fm_abc',
@@ -39,7 +39,7 @@ describe('fetch_media 工具', () => {
   })
 
   it('channel 不可用 → 结构化错误', async () => {
-    const tools = buildMessagingTools(makeDeps(vi.fn()))
+    const tools = buildWorkerMessagingTools(makeDeps(vi.fn()))
     const out = await findTool(tools, 'fetch_media').handler({
       channel_id: 'unknown',
       handle: 'fm_x',
@@ -52,7 +52,7 @@ describe('fetch_media 工具', () => {
       status: 'failed',
       error: 'unknown media handle',
     })
-    const tools = buildMessagingTools(makeDeps(call))
+    const tools = buildWorkerMessagingTools(makeDeps(call))
     const out = await findTool(tools, 'fetch_media').handler({
       channel_id: 'feishu-1',
       handle: 'fm_bad',
@@ -64,7 +64,7 @@ describe('fetch_media 工具', () => {
 
   it('status=fetching → 结果含调用 wait_for_signal 的提示', async () => {
     const call = vi.fn().mockResolvedValue({ status: 'fetching' })
-    const tools = buildMessagingTools(makeDeps(call))
+    const tools = buildWorkerMessagingTools(makeDeps(call))
     const out = await findTool(tools, 'fetch_media').handler({ channel_id: 'feishu-1', handle: 'fm_big' })
     const parsed = parse(out)
     expect(parsed.status).toBe('fetching')

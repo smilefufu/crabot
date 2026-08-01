@@ -11,11 +11,11 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
-import { buildMessagingTools } from '../../src/mcp/crab-messaging.js'
+import { buildWorkerMessagingTools } from '../../src/mcp/crab-messaging.js'
 import { HumanMessageQueue } from '../../src/engine/human-message-queue.js'
 import type { OutboundBufferEntry } from '../../src/agent/outbound-flush.js'
 
-function findTool(tools: ReturnType<typeof buildMessagingTools>, name: string) {
+function findTool(tools: ReturnType<typeof buildWorkerMessagingTools>, name: string) {
   const t = tools.find((x) => x.name === name)
   if (!t) throw new Error(`tool ${name} not found`)
   return t
@@ -30,7 +30,7 @@ describe('send_message buffering (goal mode)', () => {
     const buffer: BufferEntry[] = []
     const rpcMethods: string[] = []
 
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: {
         call: vi.fn().mockImplementation(async (_port: number, method: string) => {
           rpcMethods.push(method)
@@ -74,7 +74,7 @@ describe('send_message buffering (goal mode)', () => {
     const buffer: BufferEntry[] = []
     const rpcMethods: string[] = []
 
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: {
         call: vi.fn().mockImplementation(async (_port: number, method: string) => {
           rpcMethods.push(method)
@@ -128,7 +128,7 @@ describe('send_message buffering (goal mode)', () => {
     const buffer: BufferEntry[] = []
     const rpcMethods: string[] = []
 
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: {
         call: vi.fn().mockImplementation(async (_port: number, method: string) => {
           rpcMethods.push(method)
@@ -172,7 +172,7 @@ describe('send_message buffering (goal mode)', () => {
     const buffer: BufferEntry[] = []
     const rpcMethods: string[] = []
 
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: {
         call: vi.fn().mockImplementation(async (_port: number, method: string) => {
           rpcMethods.push(method)
@@ -215,7 +215,7 @@ describe('send_message buffering (goal mode)', () => {
     const queue = new HumanMessageQueue()
     const buffer: BufferEntry[] = []
 
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: { call: vi.fn() } as never,
       moduleId: 'worker-test',
       getAdminPort: async () => 19001,
@@ -268,7 +268,7 @@ describe('send_message buffering (goal mode)', () => {
     const queue = new HumanMessageQueue()
     const rpcMethods: string[] = []
 
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: {
         call: vi.fn().mockImplementation(async (_port: number, method: string) => {
           rpcMethods.push(method)
@@ -304,7 +304,7 @@ describe('send_message buffering (goal mode)', () => {
     const queue = new HumanMessageQueue()
     const buffer: BufferEntry[] = []
 
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: { call: vi.fn() } as never,
       moduleId: 'worker-test',
       getAdminPort: async () => 19001,
@@ -341,7 +341,7 @@ describe('send_message buffering (goal mode)', () => {
     const queue = new HumanMessageQueue()
     const buffer: BufferEntry[] = []
 
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: { call: vi.fn() } as never,
       moduleId: 'worker-test',
       getAdminPort: async () => 19001,

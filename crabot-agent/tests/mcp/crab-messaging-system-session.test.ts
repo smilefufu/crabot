@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from 'vitest'
-import { buildMessagingTools } from '../../src/mcp/crab-messaging.js'
+import { buildWorkerMessagingTools } from '../../src/mcp/crab-messaging.js'
 import { HumanMessageQueue } from '../../src/engine/human-message-queue.js'
 
-function findTool(tools: ReturnType<typeof buildMessagingTools>, name: string) {
+function findTool(tools: ReturnType<typeof buildWorkerMessagingTools>, name: string) {
   const t = tools.find((x) => x.name === name)
   if (!t) throw new Error(`tool ${name} not found`)
   return t
@@ -11,7 +11,7 @@ function findTool(tools: ReturnType<typeof buildMessagingTools>, name: string) {
 describe('send_message rejects SYSTEM_SESSION sentinel', () => {
   it('returns error when channel_id is the system sentinel', async () => {
     const callMock = vi.fn()
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: { call: callMock } as never,
       moduleId: 'worker-test',
       getAdminPort: async () => 19001,
@@ -39,7 +39,7 @@ describe('send_message rejects SYSTEM_SESSION sentinel', () => {
 
   it('returns error when session_id is the system sentinel', async () => {
     const callMock = vi.fn()
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: { call: callMock } as never,
       moduleId: 'worker-test',
       getAdminPort: async () => 19001,
@@ -67,7 +67,7 @@ describe('send_message rejects SYSTEM_SESSION sentinel', () => {
 
   it('passes through when both channel_id and session_id are real', async () => {
     const callMock = vi.fn().mockResolvedValue({ platform_message_id: 'm1', sent_at: '2026-06-05T00:00:00Z' })
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: { call: callMock } as never,
       moduleId: 'worker-test',
       getAdminPort: async () => 19001,

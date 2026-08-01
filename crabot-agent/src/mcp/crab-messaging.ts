@@ -108,6 +108,36 @@ function resolveMessagingToolProfile(
 }
 
 // ============================================================================
+// 工具集声明 —— 由装配层显式给出，buildMessagingTools 不再自己从 TaskContext 推断
+// ============================================================================
+
+/**
+ * 一次 messaging 装配要暴露的能力声明。装配层给出（worker 侧 = `buildWorkerMessagingTools`，
+ * manager 侧 = `manager/tools/tool-face.ts`），`buildMessagingTools` 只照单执行。
+ *
+ * 它同时是**可见性**与**运行时门**的唯一来源：`tools` 决定构建哪些工具，两处旁路门
+ * （scheduled 私聊捷径 / `send_message` 的 ask_human）也读同一份声明——两边共用一个来源，
+ * 才不会出现"工具可见但调用被拦"这种极难排查的错位。
+ *
+ * `tools` 是**交集**语义：声明了但当前 deps 没构造的工具（如 `enableFeishuDocTool=false`
+ * 时的飞书工具）自然不出现。新增工具时须同时登记进 `ALL_MESSAGING_TOOL_NAMES`。
+ */
+export interface MessagingToolSet {
+  /** 要暴露的工具名集合。 */
+  readonly tools: ReadonlySet<string>
+  /** `send_message` 是否允许 `intent='ask_human'`（要求存在一个同步的人类应答方）。 */
+  readonly allowAskHuman: boolean
+}
+
+/**
+ * 声明的读取入口。取 **getter 而非定值**：worker 侧的声明由 `deps.getTaskContext()` 推出，
+ * 而 TaskContext 是活的，构建时的快照未必等于调用那一刻的上下文；运行时门要的是**调用那一刻**
+ * 的声明（回归用例：`tests/mcp/crab-messaging-send-master-private.test.ts`「构建后切到 message
+ * context 时拒绝且零 RPC」）。manager 侧声明是常量，getter 原样返回即可。
+ */
+export type MessagingToolSetProvider = () => MessagingToolSet
+
+// ============================================================================
 // 路径映射类型（实现已抽到 ../agent/outbound-flush.ts 与 flush 路径共享，本文件仅重导出）
 // ============================================================================
 
@@ -183,11 +213,17 @@ function wrapText(payload: unknown, opts?: { isError?: boolean }) {
   return opts?.isError ? { ...base, isError: true } : base
 }
 
-function requireScheduledShortcutContext(
-  deps: CrabMessagingDeps,
+/**
+ * 私聊捷径的运行时门：读装配层声明，未声明即拒绝。
+ *
+ * 与可见性同源（`buildMessagingTools` 用同一份声明过滤工具数组），因此"能看见的一定能调、
+ * 看不见的一定调不动"是构造上的不变量，而非两处规则碰巧一致。
+ */
+function requireDeclaredShortcut(
+  getToolSet: MessagingToolSetProvider,
   toolName: 'send_private_message' | 'send_master_private',
 ): ReturnType<typeof wrapText> | null {
-  if (deps.getTaskContext?.()?.triggerType === 'scheduled') return null
+  if (getToolSet().tools.has(toolName)) return null
   return wrapText({
     error_code: 'SCHEDULED_ONLY_TOOL',
     error: `${toolName} is only available in scheduled tasks`,
@@ -200,8 +236,30 @@ function clampPageSize(n: number, max = 100): number {
 }
 
 // ============================================================================
-// buildMessagingTools — 可单测的纯函数，返回 8 个工具数组
+// buildMessagingTools — 可单测的纯函数，按装配层声明返回工具数组
 // ============================================================================
+
+/**
+ * 本文件构造的全部 messaging 工具名。装配层拿它做基准裁剪，**新增工具时必须同步登记**
+ * （漏登记 = worker 侧拿不到新工具；`tests/mcp/crab-messaging-tool-set.test.ts` 有守卫用例）。
+ */
+export const ALL_MESSAGING_TOOL_NAMES: readonly string[] = [
+  'lookup_friend',
+  'list_contacts',
+  'list_groups',
+  'list_sessions',
+  'list_group_members',
+  'send_private_message',
+  'send_master_private',
+  'send_message',
+  'get_history',
+  'get_message',
+  'fetch_media',
+  'read_feishu_document',
+  'feishu_raw_get',
+  'feishu_download_file',
+  'feishu_write',
+]
 
 /**
  * daily-reflection 任务允许的 messaging 工具白名单。
@@ -219,7 +277,7 @@ function clampPageSize(n: number, max = 100): number {
  * 其他 scheduled 任务（如用户自建的 GitHub 新闻推送 / 群通报巡检）**不受此白名单影响**，
  * 走完整 messaging 工具集——它们本来就是要往群里发的合理用途。
  */
-const DAILY_REFLECTION_ALLOWED_TOOLS = new Set([
+const DAILY_REFLECTION_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
   'send_master_private',
   'get_history',
   'get_message',
@@ -227,6 +285,46 @@ const DAILY_REFLECTION_ALLOWED_TOOLS = new Set([
   'feishu_raw_get',
   'feishu_download_file',
 ])
+
+/** scheduled 任务（非 daily_reflection）：完整工具集；无同步应答方，禁 ask_human。 */
+const SCHEDULED_TOOL_SET: MessagingToolSet = {
+  tools: new Set(ALL_MESSAGING_TOOL_NAMES),
+  allowAskHuman: false,
+}
+
+/** daily_reflection：白名单封死对外通道（见上方注释）。 */
+const DAILY_REFLECTION_TOOL_SET: MessagingToolSet = {
+  tools: DAILY_REFLECTION_ALLOWED_TOOLS,
+  allowAskHuman: false,
+}
+
+/** message 触发的任务 / front：不给 scheduled 专属的两个私聊捷径；有人类在对面，可 ask_human。 */
+const HUMAN_MESSAGE_TOOL_SET: MessagingToolSet = {
+  tools: new Set(ALL_MESSAGING_TOOL_NAMES.filter(
+    name => name !== 'send_private_message' && name !== 'send_master_private',
+  )),
+  allowAskHuman: true,
+}
+
+/**
+ * worker/front 装配路径：按 TaskContext 算出工具集声明。
+ *
+ * 这是 `resolveMessagingToolProfile` 唯一的消费点——它的语义不变（仍是"按任务上下文裁剪"），
+ * 只是从 `buildMessagingTools` 内部搬到了装配路径上。PR J 摘除 worker 侧 messaging 时，
+ * 本函数与 profile 一并删除。
+ */
+export function workerMessagingToolSet(
+  taskCtx: Pick<TaskContext, 'triggerType' | 'taskType'> | null,
+): MessagingToolSet {
+  switch (resolveMessagingToolProfile(taskCtx)) {
+    case 'scheduled_daily_reflection':
+      return DAILY_REFLECTION_TOOL_SET
+    case 'scheduled':
+      return SCHEDULED_TOOL_SET
+    case 'human_message':
+      return HUMAN_MESSAGE_TOOL_SET
+  }
+}
 
 // ============================================================================
 // 工具 schema（必须是模块级常量，只构建一次）
@@ -343,13 +441,18 @@ const FETCH_MEDIA_SCHEMA = {
   handle: z.string().describe('媒体下载句柄（消息标记里的 handle=fm_xxx）'),
 }
 
+/**
+ * 按装配层给出的**显式声明**构造 messaging 工具数组。
+ *
+ * 本函数不再自己从 TaskContext 推断该给哪些工具——那是装配层的事（worker 侧
+ * `buildWorkerMessagingTools`，manager 侧 `manager/tools/tool-face.ts`）。
+ */
 export function buildMessagingTools(
   deps: CrabMessagingDeps,
+  getToolSet: MessagingToolSetProvider,
   sandboxPathMappingsRef?: { current: PathMapping[] },
 ): MessagingTool[] {
   const { rpcClient, moduleId, getAdminPort, resolveChannelPort } = deps
-  const taskCtx = deps.getTaskContext?.() ?? null
-  const toolProfile = resolveMessagingToolProfile(taskCtx)
 
   // 解析飞书 channel port 的公共 helper（供 read_feishu_document / feishu_raw_get / feishu_download_file 共用）
   async function resolveFeishuChannelPort(args: Record<string, unknown>): Promise<
@@ -616,7 +719,7 @@ export function buildMessagingTools(
       description: '给熟人发私聊消息。当你不关心使用哪个 Channel 或不知道该用哪个 Channel 时使用此工具。系统自动查找可用 Channel 并创建/复用私聊 Session。如果你已知 channel_id 和 session_id，请直接使用 send_message。',
       schema: SEND_PRIVATE_MESSAGE_SCHEMA,
       handler: async (args) => {
-        const contextError = requireScheduledShortcutContext(deps, 'send_private_message')
+        const contextError = requireDeclaredShortcut(getToolSet, 'send_private_message')
         if (contextError) return contextError
         const friend_id = args.friend_id as string
         const content = args.content as string
@@ -707,7 +810,7 @@ export function buildMessagingTools(
 注意：发出的内容会被人类看到——禁止塞 trace 数据 / Evolution Mode / case→rule / Audit 等内部黑话，必须翻译成一行人话（"今日整理 X 条经验，无重大发现"这种），多行长报告请走 task outcome 不要外发。`,
       schema: SEND_MASTER_PRIVATE_SCHEMA,
       handler: async (args) => {
-        const contextError = requireScheduledShortcutContext(deps, 'send_master_private')
+        const contextError = requireDeclaredShortcut(getToolSet, 'send_master_private')
         if (contextError) return contextError
         const content = args.content as string
         const preferredChannelId = args.channel_id as string | undefined
@@ -859,7 +962,8 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
             // 消息尚未发出，直接拒绝。ask_human 不该被 front 调用，这是 safeguard。
             return wrapText({ error: 'ask_human 仅可在 worker 任务上下文内调用' })
           }
-          if (taskCtx.triggerType === 'scheduled') {
+          // 运行时门读装配层声明（与工具可见性同源）：没声明 ask_human 就不给走。
+          if (!getToolSet().allowAskHuman) {
             return wrapText({
               error: 'ask_human is not allowed in scheduled tasks. Scheduled tasks have no synchronous '
                 + "human responder. If you are blocked or have failed, send_message with intent='info' "
@@ -1314,17 +1418,23 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
     } as MessagingTool] : []),
   ]
 
-  switch (toolProfile) {
-    case 'scheduled_daily_reflection':
-      return allTools.filter(tool => DAILY_REFLECTION_ALLOWED_TOOLS.has(tool.name))
-    case 'scheduled':
-      return allTools
-    case 'human_message':
-      return allTools.filter(tool =>
-        tool.name !== 'send_private_message'
-        && tool.name !== 'send_master_private'
-      )
-  }
+  const declared = getToolSet().tools
+  return allTools.filter(tool => declared.has(tool.name))
+}
+
+/**
+ * worker/front 装配入口：先按 TaskContext 算出工具集声明，再交给 `buildMessagingTools`。
+ * PR J 摘除 worker 侧 messaging 装配时整个函数一并删除。
+ */
+export function buildWorkerMessagingTools(
+  deps: CrabMessagingDeps,
+  sandboxPathMappingsRef?: { current: PathMapping[] },
+): MessagingTool[] {
+  return buildMessagingTools(
+    deps,
+    () => workerMessagingToolSet(deps.getTaskContext?.() ?? null),
+    sandboxPathMappingsRef,
+  )
 }
 
 // ============================================================================
@@ -1337,7 +1447,7 @@ export function createCrabMessagingServer(
 ): McpServer {
   const server = createMcpServer({ name: 'crab-messaging', version: '1.0.0' })
 
-  const tools = buildMessagingTools(deps, sandboxPathMappingsRef)
+  const tools = buildWorkerMessagingTools(deps, sandboxPathMappingsRef)
   for (const t of tools) {
     server.registerTool(t.name, { description: t.description, inputSchema: t.schema }, t.handler as never)
   }

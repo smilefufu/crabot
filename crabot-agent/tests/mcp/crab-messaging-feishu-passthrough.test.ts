@@ -1,13 +1,13 @@
 import { describe, it, expect, vi } from 'vitest'
-import { buildMessagingTools } from '../../src/mcp/crab-messaging.js'
+import { buildWorkerMessagingTools } from '../../src/mcp/crab-messaging.js'
 
-function findTool(tools: ReturnType<typeof buildMessagingTools>, name: string) {
+function findTool(tools: ReturnType<typeof buildWorkerMessagingTools>, name: string) {
   const t = tools.find((x) => x.name === name)
   if (!t) throw new Error(`tool ${name} not found`)
   return t
 }
 
-function parse(out: Awaited<ReturnType<ReturnType<typeof buildMessagingTools>[number]['handler']>>) {
+function parse(out: Awaited<ReturnType<ReturnType<typeof buildWorkerMessagingTools>[number]['handler']>>) {
   return JSON.parse((out as { content: Array<{ text: string }> }).content[0].text)
 }
 
@@ -29,21 +29,21 @@ function makeDeps(opts: {
 
 describe('feishu_raw_get / feishu_download_file 门控', () => {
   it('enableFeishuDocTool=true → feishu_raw_get 与 feishu_download_file 出现在工具列表', () => {
-    const tools = buildMessagingTools(makeDeps({ enableFeishuDocTool: true }))
+    const tools = buildWorkerMessagingTools(makeDeps({ enableFeishuDocTool: true }))
     expect(tools.find(t => t.name === 'feishu_raw_get')).toBeDefined()
     expect(tools.find(t => t.name === 'feishu_download_file')).toBeDefined()
     expect(tools.find(t => t.name === 'read_feishu_document')).toBeDefined()
   })
 
   it('enableFeishuDocTool=false → feishu_raw_get 与 feishu_download_file 都不出现', () => {
-    const tools = buildMessagingTools(makeDeps({ enableFeishuDocTool: false }))
+    const tools = buildWorkerMessagingTools(makeDeps({ enableFeishuDocTool: false }))
     expect(tools.find(t => t.name === 'feishu_raw_get')).toBeUndefined()
     expect(tools.find(t => t.name === 'feishu_download_file')).toBeUndefined()
     expect(tools.find(t => t.name === 'read_feishu_document')).toBeUndefined()
   })
 
   it('enableFeishuDocTool 未传 (undefined) → 飞书工具不出现', () => {
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: { call: vi.fn() } as never,
       moduleId: 'agent-test',
       getAdminPort: async () => 19001,
@@ -65,7 +65,7 @@ describe('feishu_raw_get handler', () => {
         return {}
       },
     )
-    const tools = buildMessagingTools(makeDeps({ rpcCall, enableFeishuDocTool: true }))
+    const tools = buildWorkerMessagingTools(makeDeps({ rpcCall, enableFeishuDocTool: true }))
     const out = await findTool(tools, 'feishu_raw_get').handler({
       path: '/open-apis/wiki/v2/spaces/get_node',
       query: { token: 'abc123' },
@@ -96,7 +96,7 @@ describe('feishu_raw_get handler', () => {
         return {}
       },
     )
-    const tools = buildMessagingTools(makeDeps({ rpcCall, enableFeishuDocTool: true }))
+    const tools = buildWorkerMessagingTools(makeDeps({ rpcCall, enableFeishuDocTool: true }))
     const out = await findTool(tools, 'feishu_raw_get').handler({
       path: '/open-apis/im/v1/messages',
       channel_id: 'feishu-1',
@@ -128,7 +128,7 @@ describe('feishu_raw_get handler', () => {
         return {}
       },
     )
-    const tools = buildMessagingTools(makeDeps({ rpcCall, enableFeishuDocTool: true }))
+    const tools = buildWorkerMessagingTools(makeDeps({ rpcCall, enableFeishuDocTool: true }))
     await findTool(tools, 'feishu_raw_get').handler({ path: '/open-apis/foo/bar' })
     // 调 feishu_get 时 params 不含 query 键
     const feishuGetCall = rpcCall.mock.calls.find((c: unknown[]) => c[1] === 'feishu_get')
@@ -148,7 +148,7 @@ describe('feishu_download_file handler', () => {
         return {}
       },
     )
-    const tools = buildMessagingTools(makeDeps({ rpcCall, enableFeishuDocTool: true }))
+    const tools = buildWorkerMessagingTools(makeDeps({ rpcCall, enableFeishuDocTool: true }))
     const out = await findTool(tools, 'feishu_download_file').handler({
       file_token: 'boxTokABC',
       filename: 'report.pdf',
@@ -174,7 +174,7 @@ describe('feishu_download_file handler', () => {
         return {}
       },
     )
-    const tools = buildMessagingTools(makeDeps({ rpcCall, enableFeishuDocTool: true }))
+    const tools = buildWorkerMessagingTools(makeDeps({ rpcCall, enableFeishuDocTool: true }))
     await findTool(tools, 'feishu_download_file').handler({ file_token: 'boxTok' })
     const downloadCall = rpcCall.mock.calls.find((c: unknown[]) => c[1] === 'feishu_download')
     expect(downloadCall).toBeDefined()
@@ -184,12 +184,12 @@ describe('feishu_download_file handler', () => {
 
 describe('feishu_write 门控', () => {
   it('enableFeishuDocTool=true → feishu_write 出现在工具列表', () => {
-    const tools = buildMessagingTools(makeDeps({ enableFeishuDocTool: true }))
+    const tools = buildWorkerMessagingTools(makeDeps({ enableFeishuDocTool: true }))
     expect(tools.find(t => t.name === 'feishu_write')).toBeDefined()
   })
 
   it('enableFeishuDocTool=false → feishu_write 不出现', () => {
-    const tools = buildMessagingTools(makeDeps({ enableFeishuDocTool: false }))
+    const tools = buildWorkerMessagingTools(makeDeps({ enableFeishuDocTool: false }))
     expect(tools.find(t => t.name === 'feishu_write')).toBeUndefined()
   })
 })
@@ -205,7 +205,7 @@ describe('feishu_write handler', () => {
         return {}
       },
     )
-    const tools = buildMessagingTools(makeDeps({ rpcCall, enableFeishuDocTool: true }))
+    const tools = buildWorkerMessagingTools(makeDeps({ rpcCall, enableFeishuDocTool: true }))
     const out = await findTool(tools, 'feishu_write').handler({
       method: 'POST',
       path: '/open-apis/im/v1/messages',
@@ -237,7 +237,7 @@ describe('feishu_write handler', () => {
         return {}
       },
     )
-    const tools = buildMessagingTools(makeDeps({ rpcCall, enableFeishuDocTool: true }))
+    const tools = buildWorkerMessagingTools(makeDeps({ rpcCall, enableFeishuDocTool: true }))
     await findTool(tools, 'feishu_write').handler({
       method: 'DELETE',
       path: '/open-apis/im/v1/messages/msg_abc',
@@ -251,7 +251,7 @@ describe('feishu_write handler', () => {
 describe('feishu_write 不在 DAILY_REFLECTION_ALLOWED_TOOLS', () => {
   it('daily_reflection 任务中 feishu_write 不出现', () => {
     const rpcCall = vi.fn()
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: { call: rpcCall } as never,
       moduleId: 'agent-test',
       getAdminPort: async () => 19001,
@@ -279,7 +279,7 @@ describe('resolveFeishuChannelPort 错误分支（通过 feishu_raw_get 触发�
         return {}
       },
     )
-    const tools = buildMessagingTools(makeDeps({ rpcCall, enableFeishuDocTool: true }))
+    const tools = buildWorkerMessagingTools(makeDeps({ rpcCall, enableFeishuDocTool: true }))
     const out = await findTool(tools, 'feishu_raw_get').handler({ path: '/open-apis/wiki/v2/spaces' })
     const result = parse(out)
     expect(result.error_code).toBe('CHANNEL_UNAVAILABLE')
@@ -293,7 +293,7 @@ describe('resolveFeishuChannelPort 错误分支（通过 feishu_raw_get 触发�
         return {}
       },
     )
-    const tools = buildMessagingTools(makeDeps({ rpcCall, enableFeishuDocTool: true }))
+    const tools = buildWorkerMessagingTools(makeDeps({ rpcCall, enableFeishuDocTool: true }))
     const out = await findTool(tools, 'feishu_raw_get').handler({ path: '/open-apis/foo' })
     const result = parse(out)
     expect(result.error_code).toBe('CHANNEL_UNAVAILABLE')
@@ -313,7 +313,7 @@ describe('resolveFeishuChannelPort 错误分支（通过 feishu_raw_get 触发�
         return {}
       },
     )
-    const tools = buildMessagingTools(makeDeps({ rpcCall, enableFeishuDocTool: true }))
+    const tools = buildWorkerMessagingTools(makeDeps({ rpcCall, enableFeishuDocTool: true }))
     const out = await findTool(tools, 'feishu_raw_get').handler({ path: '/open-apis/wiki/v2/spaces' })
     const result = parse(out)
     expect(result.error_code).toBe('AMBIGUOUS')
@@ -323,7 +323,7 @@ describe('resolveFeishuChannelPort 错误分支（通过 feishu_raw_get 触发�
   })
 
   it('channel_id 指定但 resolveChannelPort 抛错 → error_code: CHANNEL_UNAVAILABLE', async () => {
-    const tools = buildMessagingTools(makeDeps({
+    const tools = buildWorkerMessagingTools(makeDeps({
       rpcCall: vi.fn(),
       resolveChannelPort: async () => { throw new Error('port not found') },
       enableFeishuDocTool: true,

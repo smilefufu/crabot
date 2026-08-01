@@ -6,17 +6,17 @@
  * 不让 worker 带着死任务继续跑（历史上它会发出用户看不懂的进度消息，再撞状态机拒绝）。
  */
 import { describe, it, expect, vi } from 'vitest'
-import { buildMessagingTools } from '../../src/mcp/crab-messaging.js'
+import { buildWorkerMessagingTools } from '../../src/mcp/crab-messaging.js'
 import { HumanMessageQueue } from '../../src/engine/human-message-queue.js'
 
-function findTool(tools: ReturnType<typeof buildMessagingTools>, name: string) {
+function findTool(tools: ReturnType<typeof buildWorkerMessagingTools>, name: string) {
   const t = tools.find((x) => x.name === name)
   if (!t) throw new Error(`tool ${name} not found`)
   return t
 }
 
 function buildTools(queue: HumanMessageQueue, abortIfTaskTerminal: () => Promise<void>) {
-  return buildMessagingTools({
+  return buildWorkerMessagingTools({
     rpcClient: {
       call: vi.fn().mockResolvedValue({ platform_message_id: 'm', sent_at: '' }),
     } as never,

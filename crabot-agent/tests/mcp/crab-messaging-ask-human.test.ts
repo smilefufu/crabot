@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from 'vitest'
-import { buildMessagingTools } from '../../src/mcp/crab-messaging.js'
+import { buildWorkerMessagingTools } from '../../src/mcp/crab-messaging.js'
 import { HumanMessageQueue } from '../../src/engine/human-message-queue.js'
 
-function findTool(tools: ReturnType<typeof buildMessagingTools>, name: string) {
+function findTool(tools: ReturnType<typeof buildWorkerMessagingTools>, name: string) {
   const t = tools.find((x) => x.name === name)
   if (!t) throw new Error(`tool ${name} not found`)
   return t
@@ -14,7 +14,7 @@ describe('send_message intent=ask_human', () => {
     const rpcCalls: Array<{ method: string; params: unknown }> = []
     const callOrder: string[] = []
 
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: {
         call: vi.fn().mockImplementation(async (_port: number, method: string, params: unknown) => {
           rpcCalls.push({ method, params })
@@ -58,7 +58,7 @@ describe('send_message intent=ask_human', () => {
   it('sets barrier on humanQueue after ask_human', async () => {
     const queue = new HumanMessageQueue()
 
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: {
         call: vi.fn().mockResolvedValue({ platform_message_id: 'm', sent_at: '' }),
       } as never,
@@ -82,7 +82,7 @@ describe('send_message intent=ask_human', () => {
   })
 
   it('returns error when getTaskContext is null', async () => {
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: { call: vi.fn() } as never,
       moduleId: 'front',
       getAdminPort: async () => 19001,
@@ -106,7 +106,7 @@ describe('send_message intent=ask_human', () => {
     const queue = new HumanMessageQueue()
     const rpcMethods: string[] = []
 
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: {
         call: vi.fn().mockImplementation(async (_port: number, method: string) => {
           rpcMethods.push(method)
@@ -132,7 +132,7 @@ describe('send_message intent=ask_human', () => {
   it('scheduled 任务调用 ask_human 时返回拒绝错误，错误消息含明确指引', async () => {
     const queue = new HumanMessageQueue()
 
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: { call: vi.fn() } as never,
       moduleId: 'worker-test',
       getAdminPort: async () => 19001,
@@ -160,7 +160,7 @@ describe('send_message intent=ask_human', () => {
     // 其他 scheduled 任务（用户自建的群推送 / 巡检）不受此白名单影响——它们走 triggerType='scheduled' 但 taskType 不是 'daily_reflection'。
     const queue = new HumanMessageQueue()
 
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: { call: vi.fn() } as never,
       moduleId: 'worker-test',
       getAdminPort: async () => 19001,
@@ -183,7 +183,7 @@ describe('send_message intent=ask_human', () => {
   it('非 daily_reflection 的 scheduled 任务（用户自建推送等）保留完整 messaging 工具集', async () => {
     const queue = new HumanMessageQueue()
 
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: { call: vi.fn() } as never,
       moduleId: 'worker-test',
       getAdminPort: async () => 19001,
@@ -206,7 +206,7 @@ describe('send_message intent=ask_human', () => {
   it('message 任务调用 ask_human 不在 scheduled 闸门被拒（仍可走后续流程）', async () => {
     const queue = new HumanMessageQueue()
 
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: {
         call: vi.fn().mockImplementation(async (_port: number, method: string) => {
           if (method === 'update_task_status') return { task: { id: 't1', status: 'waiting_human' } }
@@ -239,7 +239,7 @@ describe('send_message intent=ask_human', () => {
   it('does NOT set barrier if update_task_status fails (transient admin failure — spec §5.3)', async () => {
     const queue = new HumanMessageQueue()
 
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: {
         call: vi.fn().mockImplementation(async (_port: number, method: string) => {
           if (method === 'update_task_status') throw new Error('admin unavailable')
@@ -279,7 +279,7 @@ describe('send_message intent=ask_human', () => {
     let simulatedStatus: 'pending' | 'planning' | 'executing' | 'waiting_human' = 'pending'
     const transitionCalls: Array<{ status: string; pending_question?: string | null }> = []
 
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: {
         call: vi.fn().mockImplementation(async (_port: number, method: string, params: Record<string, unknown>) => {
           if (method === 'send_message') return { platform_message_id: 'm1', sent_at: '' }
@@ -339,7 +339,7 @@ describe('send_message intent=ask_human', () => {
     const queue = new HumanMessageQueue()
     const transitionCalls: string[] = []
     // 仿真：task 已 completed（终结态），所有 transition 都会被拒
-    const tools = buildMessagingTools({
+    const tools = buildWorkerMessagingTools({
       rpcClient: {
         call: vi.fn().mockImplementation(async (_port: number, method: string, params: Record<string, unknown>) => {
           if (method === 'send_message') return { platform_message_id: 'm1', sent_at: '' }

@@ -19,8 +19,7 @@ import type { ToolDefinition, ToolCallResult } from '../../engine/index.js'
 import type { McpServer } from '../../mcp/mcp-helpers.js'
 import { mcpServerToToolDefinitions } from '../../agent/mcp-tool-bridge.js'
 import { buildMessagingTools } from '../../mcp/crab-messaging.js'
-import type { CrabMessagingDeps, MessagingTool, TaskContext } from '../../mcp/crab-messaging.js'
-import { HumanMessageQueue } from '../../engine/human-message-queue.js'
+import type { CrabMessagingDeps, MessagingTool, MessagingToolSet } from '../../mcp/crab-messaging.js'
 import { buildWorkerTools } from './worker-tools.js'
 import type { WorkerHarness } from '../../workers/harness/harness'
 import { buildCrabotInfoTools } from './crabot-info.js'
@@ -67,6 +66,23 @@ const MESSAGING_BASE_WHITELIST: readonly string[] = [
 /** 仅 isSystemThread===true 时额外暴露。 */
 const MESSAGING_SYSTEM_EXTRA: readonly string[] = ['send_master_private', 'send_private_message']
 
+/**
+ * manager 交给 `buildMessagingTools` 的显式工具集声明。
+ *
+ * manager 不是任务执行者——它没有 TaskContext，也不该有；这里直接声明要哪些工具，
+ * 由 crab-messaging 照单构造。`allowAskHuman:false`：ask_human 是 worker 侧概念，
+ * manager 的 `send_message` 连 `intent` 参数都被去掉了（见 `messagingToolToDefinition`）。
+ */
+function managerMessagingToolSet(isSystemThread: boolean): MessagingToolSet {
+  return {
+    tools: new Set<string>([
+      ...MESSAGING_BASE_WHITELIST,
+      ...(isSystemThread ? MESSAGING_SYSTEM_EXTRA : []),
+    ]),
+    allowAskHuman: false,
+  }
+}
+
 /** 白名单内只读的子集（其余——发送类——一律 isReadOnly:false）。 */
 const MESSAGING_READ_ONLY = new Set([
   'get_history',
@@ -78,42 +94,6 @@ const MESSAGING_READ_ONLY = new Set([
   'list_group_members',
   'fetch_media',
 ])
-
-/**
- * isSystemThread===true 时，`buildMessagingTools` 内部的 `resolveMessagingToolProfile`
- * 必须判成 'scheduled'（而非缺省的 'human_message'）——send_master_private /
- * send_private_message 的可见性完全由 `taskCtx.triggerType` 决定（crab-messaging.ts），
- * 没有第二条口子。因此这里用一个最小 stub `TaskContext` 覆盖
- * `deps.messagingDeps.getTaskContext`，仅为解锁这两个工具在 `buildMessagingTools` 返回
- * 数组里的可见性、以及它们运行时 `requireScheduledShortcutContext` 检查（读的是同一个
- * `getTaskContext`）的通过。
- *
- * 隐式语义审查（CLAUDE.md「语义边界与复用审查」）：
- * - `hasGoal` 固定 false —— 不会触发 goal-mode 的 outboundBuffer 缓冲分支（该分支要求
- *   `hasGoal()===true` 才生效），manager 的 send_message 因此总是立即发送，语义不受影响；
- * - manager 侧 `send_message` 的 `intent` 参数已被本模块整体去除（见 `messagingToolToDefinition`），
- *   唯一读 `humanQueue`/`taskId` 的 `intent==='ask_human'` 分支因此永远不会被触发，stub 的
- *   `taskId`/`humanQueue` 只用于满足 `TaskContext` 的类型要求，不承载真实语义；
- * - 不影响非系统线程 manager：`isSystemThread===false` 时 `getTaskContext` 原样透传
- *   `deps.messagingDeps`，不做任何覆盖。
- */
-function buildSystemThreadTaskContext(): TaskContext {
-  return {
-    taskId: 'manager-system-thread',
-    humanQueue: new HumanMessageQueue(),
-    triggerType: 'scheduled',
-    hasGoal: () => false,
-  }
-}
-
-function resolveEffectiveMessagingDeps(deps: ToolFaceDeps): CrabMessagingDeps {
-  if (!deps.isSystemThread) return deps.messagingDeps
-  const systemThreadContext = buildSystemThreadTaskContext()
-  return {
-    ...deps.messagingDeps,
-    getTaskContext: () => systemThreadContext,
-  }
-}
 
 /**
  * 把裸 `MessagingTool`（crab-messaging 的内部工具形状：`schema` 是 zod 原始 shape，
@@ -164,13 +144,8 @@ function messagingToolToDefinition(tool: MessagingTool): ToolDefinition {
 }
 
 function buildMessagingFace(deps: ToolFaceDeps): ToolDefinition[] {
-  const effectiveMessagingDeps = resolveEffectiveMessagingDeps(deps)
-  const rawTools = buildMessagingTools(effectiveMessagingDeps)
-  const whitelist = new Set<string>([
-    ...MESSAGING_BASE_WHITELIST,
-    ...(deps.isSystemThread ? MESSAGING_SYSTEM_EXTRA : []),
-  ])
-  return rawTools.filter((tool) => whitelist.has(tool.name)).map(messagingToolToDefinition)
+  const toolSet = managerMessagingToolSet(deps.isSystemThread)
+  return buildMessagingTools(deps.messagingDeps, () => toolSet).map(messagingToolToDefinition)
 }
 
 // ============================================================================
