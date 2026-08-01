@@ -7,6 +7,8 @@ import { BuiltinWorkerAdapter, WorkerExitedError } from '../../src/workers/built
 import { SessionTree } from '../../src/workers/session-tree.js'
 import type { SpawnSpec, IncarnationHandle, IncarnationRef, WorkerContractState } from '../../src/workers/types.js'
 import type { LLMAdapter } from '../../src/engine/llm-adapter-types.js'
+import { defineTool } from '../../src/engine/index.js'
+import type { EngineMessage, ToolDefinition } from '../../src/engine/index.js'
 import * as engineModule from '../../src/engine/query-loop.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 
@@ -136,7 +138,131 @@ function makeAdapterGatedFromSecondCall(
   } as unknown as LLMAdapter
 }
 
-function spec(opts: { adapter: LLMAdapter; worker_id?: string }): SpawnSpec {
+/** 一个无副作用的工具，用来在测试里造出 assistant(tool_use) + toolResults 的成对消息。 */
+const ECHO_TOOL: ToolDefinition = defineTool({
+  name: 'echo',
+  description: '回显',
+  isReadOnly: true,
+  inputSchema: { type: 'object', properties: { s: { type: 'string' } } },
+  call: async () => ({ output: 'ok', isError: false }),
+})
+
+interface TurnScript {
+  text?: string
+  toolCalls?: Array<{ name: string; id: string; input: Record<string, unknown> }>
+  stopReason: 'end_turn' | 'tool_use' | 'max_tokens'
+  usage?: { inputTokens: number; outputTokens: number }
+}
+
+/**
+ * 会区分"worker 的 turn 调用"与"压缩摘要调用"的 mock。
+ *
+ * 判据是 `systemPrompt`：ContextManager.compactWithLLM 用自己的 DEFAULT_COMPACT_SYSTEM_PROMPT
+ * 调 callNonStreaming，而测试里 worker 的 systemPrompt 恒为 ''。（不能用 `tools` 判——
+ * runForkBurst 的工具集不含 finish_task，工具为空时与摘要调用无从区分。）
+ * 摘要调用不消费 turn 脚本。
+ */
+function isCompactionCall(params: { systemPrompt?: string }): boolean {
+  return (params.systemPrompt ?? '').length > 0
+}
+
+function makeCompactionAwareAdapter(turns: TurnScript[]): LLMAdapter & { compactionCalls: number } {
+  let i = 0
+  const self = {
+    compactionCalls: 0,
+    stream: vi.fn(async function* (params: { systemPrompt?: string }) {
+      if (isCompactionCall(params)) {
+        self.compactionCalls++
+        yield* chunksFromContent([{ type: 'text', text: '这是被折叠段的摘要。' }], 'end_turn', {
+          inputTokens: 50,
+          outputTokens: 20,
+        })
+        return
+      }
+      const r = turns[i++] ?? turns[turns.length - 1]
+      const content: unknown[] = []
+      if (r.text) content.push({ type: 'text', text: r.text })
+      for (const tc of r.toolCalls ?? []) {
+        content.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input })
+      }
+      yield* chunksFromContent(content, r.stopReason, r.usage ?? { inputTokens: 100, outputTokens: 50 })
+    }),
+    updateConfig: () => {},
+  }
+  return self as unknown as LLMAdapter & { compactionCalls: number }
+}
+
+/**
+ * "起跑 N 条 → burst 内压缩 → 继续跑到 L>N" 的复现脚本（配 contextWindowTokens: 2000，
+ * 阈值 = 2000×0.8 = 1600）：
+ *
+ * - burst 1（spawn）：5 轮 echo + 1 轮收口 → 树里 12 条消息；
+ * - sendInput 追加 1 条 → burst 2 起跑 N = 13；
+ * - burst 2 turn 1（b1）汇报 inputTokens=1900 > 1600 → turn 2 开头 shouldCompact 命中，
+ *   15 条被整体重写成 8 条 [首条, 摘要, 最近 6 条]；
+ * - 其后 b2/b3/b4 + 收口共 7 条 → L = 15。L(15) >= N(13)，旧 length 断言不触发；
+ *   `slice(13)` 取到的是压缩后数组的 index 13（toolResults b4，**孤儿**）与 14。
+ */
+function compactionScript(): TurnScript[] {
+  const echo = (id: string, usage?: { inputTokens: number; outputTokens: number }): TurnScript => ({
+    toolCalls: [{ name: 'echo', id, input: { s: id } }],
+    stopReason: 'tool_use',
+    ...(usage ? { usage } : {}),
+  })
+  return [
+    echo('a1'), echo('a2'), echo('a3'), echo('a4'), echo('a5'),
+    { text: '第一段结束', stopReason: 'end_turn' },
+    // burst 2：第一轮汇报满窗口 usage，逼出下一轮开头的压缩。
+    echo('b1', { inputTokens: 1900, outputTokens: 50 }),
+    echo('b2'), echo('b3'), echo('b4'),
+    { text: '第二段结束', stopReason: 'end_turn' },
+  ]
+}
+
+/** 每轮都返回 text='' + stop_reason='max_tokens'（engine 眼里的"静默 max_tokens"）。 */
+function makeSilentMaxTokensAdapter(gate?: Promise<void>): LLMAdapter {
+  return {
+    stream: vi.fn(async function* (params: { systemPrompt?: string }) {
+      if (gate) await gate
+      if (isCompactionCall(params)) {
+        // 压缩摘要调用（消息太少时 ContextManager 直接返回原样，这里也照常给一段文本）
+        yield* chunksFromContent([{ type: 'text', text: '摘要' }], 'end_turn')
+        return
+      }
+      yield* chunksFromContent([], 'max_tokens', { inputTokens: 199_000, outputTokens: 0 })
+    }),
+    updateConfig: () => {},
+  } as unknown as LLMAdapter
+}
+
+/**
+ * 返回路径里所有"孤儿 tool_result"的 tool_use_id：一条 toolResults 消息，其紧邻的前一条
+ * 不是携带同名 tool_use 的 assistant 消息。孤儿 tool_result 会让 LLM API 直接 400，
+ * 且 400 文案不匹配任何自愈判定——落在 session 树里就是永久卡死。
+ */
+function orphanToolResultIds(path: ReadonlyArray<EngineMessage>): string[] {
+  const orphans: string[] = []
+  path.forEach((msg, idx) => {
+    if (!('toolResults' in msg)) return
+    const prev = idx > 0 ? path[idx - 1] : undefined
+    const available = new Set<string>(
+      prev?.role === 'assistant'
+        ? prev.content.filter((b) => b.type === 'tool_use').map((b) => (b as { id: string }).id)
+        : [],
+    )
+    for (const r of msg.toolResults) {
+      if (!available.has(r.tool_use_id)) orphans.push(r.tool_use_id)
+    }
+  })
+  return orphans
+}
+
+function spec(opts: {
+  adapter: LLMAdapter
+  worker_id?: string
+  tools?: ReadonlyArray<ToolDefinition>
+  contextWindowTokens?: number
+}): SpawnSpec {
   return {
     worker_id: opts.worker_id ?? randomUUID(),
     prompt: '测试任务',
@@ -145,7 +271,8 @@ function spec(opts: { adapter: LLMAdapter; worker_id?: string }): SpawnSpec {
       adapter: opts.adapter,
       model: 'test',
       systemPrompt: '',
-      tools: [],
+      tools: opts.tools ?? [],
+      ...(opts.contextWindowTokens !== undefined ? { contextWindowTokens: opts.contextWindowTokens } : {}),
     },
   }
 }
@@ -233,7 +360,7 @@ describe('BuiltinWorkerAdapter', () => {
     expect(meta.ended_reason).toBe('crashed')
   })
 
-  it('runBurst 传递 disableCompaction: true 到 runEngine', async () => {
+  it('runBurst 传递 disableCompaction: false 到 runEngine', async () => {
     const runEngineSpy = vi.spyOn(engineModule, 'runEngine')
     const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
     const s = spec({
@@ -245,7 +372,7 @@ describe('BuiltinWorkerAdapter', () => {
 
     expect(runEngineSpy).toHaveBeenCalled()
     const callArgs = runEngineSpy.mock.calls[0]?.[0]
-    expect(callArgs?.options?.disableCompaction).toBe(true)
+    expect(callArgs?.options?.disableCompaction).toBe(false)
   })
 
   it('sendInput(idle) → 追加新一轮用户消息并起新 burst，新 burst 可见旧上下文', async () => {
@@ -1425,5 +1552,217 @@ describe('BuiltinWorkerAdapter', () => {
     const retryHandle = await adapter.fork(prevRef, '侧问-重试')
     expect(retryHandle.seq).toBe(2)
     await waitState(adapter, retryHandle, 'exited')
+  })
+
+  // --- 上下文压缩（F2） ---
+
+  it('burst 内发生压缩 → 不得把错位后缀嫁接到老链（数据损坏复现）', async () => {
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const llm = makeCompactionAwareAdapter(compactionScript())
+    const s = spec({ adapter: llm, tools: [ECHO_TOOL], contextWindowTokens: 2000 })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'idle')
+
+    // 第一段 burst 建出 13 条消息的老链（1 prompt + 5×(assistant tool_use + toolResults) + 1 收口
+    // assistant = 12，再加下面 sendInput 的 1 条 user）。
+    const treeAfterBurst1 = await SessionTree.load(join(tmp, s.worker_id, 'session.jsonl'))
+    const tipAfterBurst1 = treeAfterBurst1.latestTip()!
+    const oldChainLen = treeAfterBurst1.pathTo(tipAfterBurst1).length
+    expect(oldChainLen).toBe(12)
+
+    await adapter.sendInput(h, '继续干活')
+    await waitState(adapter, h, 'idle')
+
+    // 第二段 burst：turn 1 汇报 1900 tokens（阈值 2000×0.8=1600）→ turn 2 开头触发压缩，
+    // 压缩把 15 条重写成 8 条，随后又跑到 15 条收口。L(15) >= N(13) —— 旧的 length 防御断言
+    // 不会触发，静默放行。
+    expect(llm.compactionCalls).toBeGreaterThan(0)
+
+    const tree = await SessionTree.load(join(tmp, s.worker_id, 'session.jsonl'))
+    const meta = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')) as { tip_node_id: string }
+    const path = tree.pathTo(meta.tip_node_id)
+    const serialized = JSON.stringify(path)
+
+    // ① 摘要节点必须在路径里（后缀 slice 会把它掐掉）。
+    expect(serialized).toContain('[Earlier conversation summary]')
+    // ② 压缩后新生成的消息一条都不能丢（后缀 slice 会掐掉 b1/b2/b3）。
+    for (const id of ['b1', 'b2', 'b3', 'b4']) {
+      expect(serialized).toContain(id)
+    }
+    // ③ 路径里不得出现孤儿 tool_result —— 它会让后续任何 resume/fork 永久 API 400。
+    expect(orphanToolResultIds(path)).toEqual([])
+  })
+
+  it('压缩后老链一个节点不删：从压缩点之前的节点仍能 fork，拿到的是未压缩全量', async () => {
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const llm = makeCompactionAwareAdapter([
+      ...compactionScript(),
+      // fork 侧问：第一轮汇报满窗口 usage，逼出第二轮开头的压缩——从压缩点之前的老节点
+      // fork 拿到的是未压缩全量，本来就可能超窗口，fork burst 必须自己也能压。
+      { toolCalls: [{ name: 'echo', id: 'f1', input: {} }], stopReason: 'tool_use', usage: { inputTokens: 1900, outputTokens: 50 } },
+      { text: 'fork 侧问回复', stopReason: 'end_turn', usage: { inputTokens: 100, outputTokens: 10 } },
+    ])
+    const s = spec({ adapter: llm, tools: [ECHO_TOOL], contextWindowTokens: 2000 })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'idle')
+    const treeAfterBurst1 = await SessionTree.load(join(tmp, s.worker_id, 'session.jsonl'))
+    const oldTip = treeAfterBurst1.latestTip()!
+
+    await adapter.sendInput(h, '继续干活')
+    await waitState(adapter, h, 'idle')
+
+    // 老链仍然完整可回溯（压缩点之前的节点）。
+    const tree = await SessionTree.load(join(tmp, s.worker_id, 'session.jsonl'))
+    const oldPath = tree.pathTo(oldTip)
+    expect(oldPath.length).toBe(12)
+    expect(JSON.stringify(oldPath)).not.toContain('[Earlier conversation summary]')
+    expect(orphanToolResultIds(oldPath)).toEqual([])
+
+    // 从这个未压缩的老节点 fork：能跑通，且 fork burst 自己也开着压缩（否则老链 fork 必撞窗口）。
+    const compactionCallsBeforeFork = llm.compactionCalls
+    const forkH = await adapter.fork({ worker_id: s.worker_id, seq: 1, session_ref: oldTip }, '侧问一句')
+    await waitState(adapter, forkH, 'exited')
+    const forkMeta = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-2.json'), 'utf-8')) as {
+      ended_reason: string
+      tip_node_id: string
+    }
+    expect(forkMeta.ended_reason).toBe('completed')
+    // fork burst 内部确实压过一次（disableCompaction 若为 true，这里恒为 0）。
+    expect(llm.compactionCalls).toBeGreaterThan(compactionCallsBeforeFork)
+
+    const treeAfterFork = await SessionTree.load(join(tmp, s.worker_id, 'session.jsonl'))
+    const forkPath = treeAfterFork.pathTo(forkMeta.tip_node_id)
+    expect(orphanToolResultIds(forkPath)).toEqual([])
+    expect(JSON.stringify(forkPath)).toContain('[Earlier conversation summary]')
+    expect(JSON.stringify(forkPath)).toContain('fork 侧问回复')
+
+    // 主线 tip 不受 fork 影响。
+    const mainMeta = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')) as { tip_node_id: string }
+    expect(mainMeta.tip_node_id).not.toBe(forkMeta.tip_node_id)
+    expect(orphanToolResultIds(treeAfterFork.pathTo(mainMeta.tip_node_id))).toEqual([])
+  })
+
+  it('压缩后 resume：新化身从压缩链续跑，路径无孤儿 tool_result', async () => {
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const llm = makeCompactionAwareAdapter([
+      ...compactionScript(),
+      { text: 'resume 后第一轮', stopReason: 'end_turn', usage: { inputTokens: 100, outputTokens: 10 } },
+    ])
+    const s = spec({ adapter: llm, tools: [ECHO_TOOL], contextWindowTokens: 2000 })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'idle')
+    await adapter.sendInput(h, '继续干活')
+    await waitState(adapter, h, 'idle')
+
+    await adapter.kill(h)
+    const meta1 = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')) as { tip_node_id: string }
+    const h2 = await adapter.resume({ worker_id: s.worker_id, seq: 1, session_ref: meta1.tip_node_id }, '醒醒')
+    await waitState(adapter, h2, 'idle')
+
+    const tree = await SessionTree.load(join(tmp, s.worker_id, 'session.jsonl'))
+    const meta2 = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-2.json'), 'utf-8')) as { tip_node_id: string }
+    const path = tree.pathTo(meta2.tip_node_id)
+    expect(orphanToolResultIds(path)).toEqual([])
+    const serialized = JSON.stringify(path)
+    expect(serialized).toContain('[Earlier conversation summary]')
+    expect(serialized).toContain('醒醒')
+    expect(serialized).toContain('resume 后第一轮')
+  })
+
+  it('未发生压缩时 write-back 仍是"后缀挂在 tip 下"：不另起新链', async () => {
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({ adapter: makeAdapter([{ text: '一轮就收工', stopReason: 'end_turn' }]) })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'idle')
+
+    // 单根：prompt 根节点 + 一条 assistant，没有第二条根。
+    const raw = await fs.readFile(join(tmp, s.worker_id, 'session.jsonl'), 'utf-8')
+    const nodes = raw.split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l) as { parent_id: string | null })
+    expect(nodes.length).toBe(2)
+    expect(nodes.filter((n) => n.parent_id === null).length).toBe(1)
+  })
+
+  it('runBurst / runForkBurst 都开压缩（disableCompaction: false）', async () => {
+    const runEngineSpy = vi.spyOn(engineModule, 'runEngine')
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({
+      adapter: makeAdapter([
+        { text: '主线首轮', stopReason: 'end_turn' },
+        { text: 'fork 回复', stopReason: 'end_turn' },
+      ]),
+    })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'idle')
+    const meta = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')) as { tip_node_id: string }
+    const forkH = await adapter.fork({ worker_id: s.worker_id, seq: 1, session_ref: meta.tip_node_id }, '侧问')
+    await waitState(adapter, forkH, 'exited')
+
+    expect(runEngineSpy.mock.calls[0]?.[0]?.options?.disableCompaction).toBe(false)
+    expect(runEngineSpy.mock.calls[1]?.[0]?.options?.disableCompaction).toBe(false)
+  })
+
+  it('静默 max_tokens（engine 压缩配额耗尽）→ exited(failed)，不是 idle', async () => {
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    // 每轮都返回 text='' + stop_reason='max_tokens'：engine 压两次仍不行 → finishTask()
+    // 收场（outcome='completed'、finalText=''），adapter 必须把它落成真实终态。
+    const s = spec({ adapter: makeSilentMaxTokensAdapter() })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'exited')
+
+    const meta = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')) as {
+      state: string
+      ended_reason: string
+      outcome: string
+    }
+    expect(meta.state).toBe('exited')
+    expect(meta.ended_reason).toBe('failed')
+    expect(meta.outcome).toBe('failed')
+
+    // manager 侧看得见原因：output 里有一条明确的错误信号，不再是"零输出零错误信号"。
+    const { chunk } = await adapter.readOutput(h, { offset: 0 })
+    expect(chunk).toContain('上下文超限')
+  })
+
+  it('静默 max_tokens 命中时不再续 burst：pendingInputs 直接进 dead-letter', async () => {
+    const gate = deferred<void>()
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({ adapter: makeSilentMaxTokensAdapter(gate.promise) })
+
+    const h = await adapter.spawn(s)
+    expect(await adapter.state(h)).toBe('running')
+    await adapter.sendInput(h, '再推一把')
+    gate.resolve()
+    await waitState(adapter, h, 'exited')
+
+    const meta = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')) as { ended_reason: string }
+    expect(meta.ended_reason).toBe('failed')
+    const { chunk } = await adapter.readOutput(h, { offset: 0 })
+    expect(chunk).toContain('[dead-letter]')
+    expect(chunk).toContain('再推一把')
+  })
+
+  it('fork burst 静默 max_tokens → exited(failed)，不是 completed', async () => {
+    const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({ adapter: makeSilentMaxTokensAdapter() })
+    // 主线用普通 adapter 先跑出一个 tip，fork 再用静默 adapter —— 这里图省事：主线也会
+    // 落 exited(failed)，但 tip 已经落定，fork 仍可从它分叉。
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'exited')
+    const meta = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-1.json'), 'utf-8')) as { tip_node_id: string }
+
+    const forkH = await adapter.fork({ worker_id: s.worker_id, seq: 1, session_ref: meta.tip_node_id }, '侧问')
+    await waitState(adapter, forkH, 'exited')
+    const forkMeta = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-2.json'), 'utf-8')) as {
+      ended_reason: string
+      outcome: string
+    }
+    expect(forkMeta.ended_reason).toBe('failed')
+    expect(forkMeta.outcome).toBe('failed')
   })
 })
