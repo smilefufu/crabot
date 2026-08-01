@@ -1389,27 +1389,31 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   /**
-   * 配置缺失时发送提示消息给用户
+   * 配置缺失时发送提示消息给用户。
+   *
+   * 入参形状必须是 channel 的 `SendMessageParams`（`{session_id, content, features?}`）——
+   * 四个 channel 的 `handleSendMessage` 一律先 `sessionManager.findById(params.session_id)`，
+   * 查不到直接抛 `NOT_FOUND`（feishu `:826` / wechat `:468` / dingtalk `:387` /
+   * telegram `:502`）。历史实现传的是 `{message: <整条 ChannelMessage>}`，`session_id`
+   * 恒 undefined ⇒ 这条"未配置"提示**从未送达过任何人**，而外层 catch 把 NOT_FOUND
+   * 吞成一行日志，所以一直没被发现。
+   *
+   * 同一形状也是 `sendErrorToUser`（`processDirectBatch` / `processGroupLaneBatch`）在用的，
+   * 即"不经 LLM 直接告诉人类"这条通路的唯一正确形状。
    */
   private async sendConfigMissingReply(message: ChannelMessage): Promise<void> {
     try {
       const channelPort = await this.getChannelPort(message.session.channel_id)
-      const reply: ChannelMessage = {
-        platform_message_id: `reply-${Date.now()}`,
-        session: message.session,
-        sender: { friend_id: 'system', platform_user_id: 'crabot', platform_display_name: 'Crabot' },
-        content: {
-          type: 'text',
-          text: 'Crabot 尚未配置 LLM 模型。请管理员在 Admin 界面完成配置后重试。',
-        },
-        features: { is_mention_crab: false },
-        platform_timestamp: new Date().toISOString(),
-      }
-
       await this.rpcClient.call(
         channelPort,
         'send_message',
-        { message: reply },
+        {
+          session_id: message.session.session_id,
+          content: {
+            type: 'text',
+            text: 'Crabot 尚未配置 LLM 模型。请管理员在 Admin 界面完成配置后重试。',
+          },
+        },
         this.config.moduleId,
       )
     } catch (error) {
