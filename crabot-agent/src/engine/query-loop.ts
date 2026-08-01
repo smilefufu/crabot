@@ -428,7 +428,15 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       systemPrompt: currentSystemPrompt,
       tools: currentTools,
     })) {
-      await compactInPlace(messages, contextManager, adapter, options)
+      const compaction = await compactInPlace(messages, contextManager, adapter, options, abortSignal)
+      if (!compaction.ok) {
+        // 压缩是唯一的下压手段（engine 无 provider 溢出恢复路径）。压不下去还继续跑，
+        // 只会每轮再烧一次注定失败的摘要调用、最终撞窗口——直接以可诊断的原因收尾。
+        if (compaction.aborted) {
+          return buildResult('aborted', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene)
+        }
+        return buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, `上下文压缩失败：${compaction.failedReason}`)
+      }
       // compaction 改写了 messages，上一轮的 usage 观测已失效，回退估算路径
       lastObservedContextTokens = undefined
     }
@@ -624,7 +632,15 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
           maxTokensCompactRetryCount++
           fireOnTurn(buildSilentTurnEvent(totalTurns, processed.text, stopReason, llmCallMs, llmStartedAtMs, undefined, response.usage))
           messages.pop()
-          await compactInPlace(messages, contextManager, adapter, options)
+          const compaction = await compactInPlace(messages, contextManager, adapter, options, abortSignal)
+          if (!compaction.ok) {
+            // max_tokens 已是 context 打满的硬信号，压缩又没压成 —— 再 continue 只是
+            // 拿同样超大的 input 重跑一次。诚实收尾，不把"没压成"当成配额耗尽。
+            if (compaction.aborted) {
+              return buildResult('aborted', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene)
+            }
+            return buildResult('failed', finalText, totalTurns, contextManager, messages, exitToolCall, toolCallCount, wroteMemoryOrScene, `上下文压缩失败：${compaction.failedReason}`)
+          }
           // compaction 改写了 messages，上一轮的 usage 观测已失效，回退估算路径
           lastObservedContextTokens = undefined
           continue
@@ -1103,17 +1119,28 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
 
 // --- Helpers ---
 
+/**
+ * compaction 结果。失败时 messages 保持原样——**绝不用"假压缩"冒充成功**
+ * （旧实现的文本回退对 tool_result 正文一字不减，等于每轮再烧一次注定失败的摘要调用）。
+ */
+type CompactionOutcome =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly aborted: true }
+  | { readonly ok: false; readonly aborted: false; readonly failedReason: string }
+
 async function compactInPlace(
   messages: EngineMessage[],
   contextManager: ContextManager,
   adapter: LLMAdapter,
   options: EngineOptions,
-): Promise<void> {
+  abortSignal?: AbortSignal,
+): Promise<CompactionOutcome> {
   const startedAtMs = Date.now()
   const beforeCount = messages.length
   options.onCompactionStart?.()
+  let failedReason: string | undefined
   try {
-    const compacted = await contextManager.compactWithLLM(messages, adapter, options.model)
+    const compacted = await contextManager.compactWithLLM(messages, adapter, options.model, abortSignal)
     const finalMessages = options.onAfterCompaction
       ? options.onAfterCompaction(compacted)
       : compacted
@@ -1121,11 +1148,22 @@ async function compactInPlace(
     for (const msg of finalMessages) {
       messages.push(msg)
     }
+    return { ok: true }
+  } catch (error) {
+    if (abortSignal?.aborted === true || (error instanceof Error && error.name === 'AbortError')) {
+      failedReason = 'aborted'
+      return { ok: false, aborted: true }
+    }
+    console.error('[query-loop] context compaction failed:', error)
+    failedReason = formatError(error)
+    return { ok: false, aborted: false, failedReason }
   } finally {
+    // 失败时 afterCount === beforeCount，且带上 failedReason——onCompactionEnd 不得谎报压缩成功
     options.onCompactionEnd?.({
       beforeCount,
       afterCount: messages.length,
       durationMs: Date.now() - startedAtMs,
+      ...(failedReason !== undefined ? { failedReason } : {}),
     })
   }
 }
