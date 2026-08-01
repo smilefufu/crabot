@@ -47,9 +47,6 @@ import { MemoryWriter } from './orchestration/memory-writer.js'
 import { AttentionScheduler, type AttentionConfig, type BufferedMessage } from './orchestration/attention-scheduler.js'
 import { SessionLaneRegistry } from './orchestration/session-lane.js'
 import { AgentHandler, type SdkEnvConfig, type ExecuteTriggerMessageParams, type ExecuteTriggerMessageResult, adapterFromSdkEnv } from './agent/agent-handler.js'
-import { dispatch } from './dispatcher/dispatcher.js'
-import type { DispatchTraceCallback, ImmediateReplySentInfo } from './dispatcher/dispatcher-types.js'
-import { executeDispatchActions } from './dispatcher/dispatcher-executor.js'
 import type { ToolPermissionConfig, ToolDefinition as EngineToolDefinition } from './engine/types.js'
 import { filterToolsByPermission } from './engine/index.js'
 import { getConfiguredBuiltinTools, filterMcpToolsByConfig } from './engine/tools/index.js'
@@ -331,7 +328,7 @@ export class UnifiedAgent extends ModuleBase {
    * Crabot 在各渠道里 @ 自己的稳定标识缓存: channel_id → "@handle"。
    * 与 crabDisplayNames 平行，但口径不同：display_name 是给人看的昵称，
    * self_handle 是消息正文里 @ 自己的字面形式（telegram username / feishu open_id 等）。
-   * 用于 dispatcher / worker prompt 区分多 bot 群里"哪个 @ 是我"。
+   * 用于 manager / worker prompt 区分多 bot 群里"哪个 @ 是我"。
    */
   private crabSelfHandles: Map<ModuleId, string> = new Map()
 
@@ -998,18 +995,21 @@ export class UnifiedAgent extends ModuleBase {
       return
     }
 
-    // 私聊：进 SessionLane（串行化同 session 连发消息，合并到一次 dispatcher）
+    // 私聊：进 SessionLane（串行化同 session 连发消息，合并成一批递给 manager）
     // Spec: 2026-05-20-session-lane-dispatcher-design.md §3.4
     const laneKey = `${session.channel_id}::${session.session_id}`
     this.directLaneRegistry.getOrCreate(laneKey).enqueue({ message, friend })
   }
 
   /**
-   * 私聊 lane handler。
-   * 同 session 连发消息合并为一个 batch；用最后一条的 friend 作为 senderFriend
+   * 私聊 lane handler —— 把整批消息递给该 session 的 manager（protocol-agent-v3 §4.4）。
+   * 同 session 连发消息合并为一个 batch；用最后一条的 friend 作为发言者
    * （私聊一般同一人；个别 friend 切换的边缘情况按最新一条处理）。
    *
-   * Spec: 2026-05-20-session-lane-dispatcher-design.md §3.4
+   * **必须 await manager episode**：lane 的串行语义靠它，兜底回复（fail-loud）也要靠它
+   * 拿到 outcome。改成 fire-and-forget 会让两者同时失效。
+   *
+   * Spec: crabot-docs/superpowers/plans/2026-08-01-mw-p7-j-cutover.md §一
    */
   private async processDirectBatch(
     batch: ReadonlyArray<{ message: ChannelMessage; friend: Friend }>,
@@ -1018,190 +1018,36 @@ export class UnifiedAgent extends ModuleBase {
     const messages = batch.map(b => b.message)
     const friend = batch[batch.length - 1].friend
     const session = messages[0].session
-    this.sessionManager.updateLastMessageTime(session.session_id)
 
-    // 创建 trace —— summary 拼接 batch 内每条消息的前缀
-    const trace = this.traceStore.startTrace({
-      module_id: this.config.moduleId,
-      trigger: {
-        type: 'message',
-        summary: `[private×${messages.length}] ` + messages
-          .map(m => (m.content.text ?? '[非文本]').slice(0, 80))
-          .join(' | ')
-          .slice(0, 200),
-        source: session.channel_id,
-      },
-    })
+    // 「我看到了」的确定性回执：不等任何 LLM，消息一递给 manager 就打（打批内最后一条）。
+    // manager 之后回话还是沉默都不影响——react 表达的是"收到"，不是"我要干活了"。
+    await this.reactToTriggerBatch(session.channel_id, session.session_id, messages)
 
     try {
-      if (!this.agentHandler) {
-        this.traceStore.endTrace(trace.trace_id, 'failed', { summary: 'No worker handler configured' })
-        return
-      }
-
-      const resolvedPerms = await this.resolvePrincipalPermissions(friend, session.session_id, 'private')
-      this.currentResolvedPerms = resolvedPerms
-      const memPerms = resolvedPerms
-        ? {
-            write_visibility: 'internal' as const,
-            write_scopes: resolvedPerms.memory_scopes,
-            read_min_visibility: 'internal' as const,
-            read_accessible_scopes: resolvedPerms.memory_scopes,
-          }
-        : await this.buildSessionMemoryPermissions(session.session_id)
-
-      const ctxSpan = this.traceStore.startSpan(trace.trace_id, {
-        type: 'context_assembly',
-        details: {
-          context_type: 'front',
-          channel_id: session.channel_id,
-          session_id: session.session_id,
-          message_batch: messages.map(m => ({
-            sender: m.sender.platform_display_name,
-            text: m.content.text ?? '',
-            is_mention_crab: m.features.is_mention_crab ?? false,
-          })),
-        },
-      })
-      const frontContext = await this.contextAssembler.assembleFrontContext(
-        {
-          channel_id: session.channel_id,
-          session_id: session.session_id,
-          sender_id: messages[messages.length - 1].sender.platform_user_id,
-          message: messages.map(m => m.content.text ?? '').filter(Boolean).join('\n'),
-          friend_id: friend.id,
-          session_type: 'private',
-          crab_self_handle: this.crabSelfHandles.get(session.channel_id),
-        },
+      await this.requireManagerStack().registry.routeHumanMessages(
+        session.channel_id,
+        session.session_id,
+        messages,
         friend,
-        memPerms,
-        { traceStore: this.traceStore as TraceStoreInterface, traceId: trace.trace_id, parentSpanId: ctxSpan.span_id },
       )
-      this.traceStore.endSpan(trace.trace_id, ctxSpan.span_id, 'completed')
-
-      if (!this.sdkEnvWorker) {
-        this.traceStore.endTrace(trace.trace_id, 'failed', { summary: 'sdkEnvWorker missing' })
-        return
-      }
-
-      const dispatchCtx = {
-        messages: messages as ReadonlyArray<ChannelMessage>,
-        recentMessages: (frontContext.recent_messages ?? []) as ReadonlyArray<ChannelMessage>,
-        activeTasks: frontContext.supplement_candidates ?? [],
-        sessionType: 'private' as const,
-        channelId: session.channel_id,
-        sessionId: session.session_id,
-        senderFriend: friend,
-        ...(frontContext.scene_profile ? { sceneProfile: frontContext.scene_profile } : {}),
-        ...(frontContext.crab_self_handle ? { crabSelfHandle: frontContext.crab_self_handle } : {}),
-        traceId: trace.trace_id,
-      }
-
-      const sendErrorToUser = async (text: string) => {
-        try {
-          const channelPort = await this.getChannelPort(session.channel_id)
-          await this.rpcClient.call(channelPort, 'send_message', {
-            session_id: session.session_id,
-            content: { type: 'text', text },
-          }, this.config.moduleId)
-        } catch (err) {
-          console.error(`[${this.config.moduleId}] processDirectBatch sendErrorToUser failed:`, err instanceof Error ? err.message : String(err))
-        }
-      }
-
-      // 预回复回调：dispatcher 判 new_task 复杂时发一条 ack 给当前 session
-      const sendImmediateReply = (text: string) =>
-        this.sendDispatcherImmediateReply(session.channel_id, session.session_id, text)
-
-      const traceCallbackPrivate = this.buildDispatchTraceCallback(trace.trace_id)
-      const { actions } = await dispatch(dispatchCtx, {
-        adapter: adapterFromSdkEnv(this.sdkEnvWorker),
-        modelId: this.sdkEnvWorker.modelId,
-        sendErrorToUser,
-        trace: traceCallbackPrivate,
-        quotedPrefetchDeps: this.buildQuotedPrefetchDeps(),
-        timezone: this.getTimezone(),
-        laneBatchSize: messages.length,
-      })
-
-      await executeDispatchActions(actions, {
-        dispatchCtx,
-        reviveTerminalSupplement: (taskId, text) =>
-          this.reviveTerminalSupplementTask(taskId, text, session.channel_id, session.session_id),
-        pushSupplement: async (taskId: string): Promise<'delivered' | 'fallback'> => {
-          if (!this.agentHandler!.hasActiveTask(taskId)) return 'fallback'
-          try {
-            // 权限热刷新：supplement 进任务前按原发起人身份重新解析（spec 2026-07-20）
-            await this.refreshTaskPermissions(taskId)
-            // 传整批 ChannelMessage（保留媒体，Task 3 已让 deliverHumanResponse 渲染媒体）
-            this.agentHandler!.deliverHumanResponse(taskId, messages)
-            return 'delivered'
-          } catch {
-            return 'fallback'
-          }
-        },
-        // 把本次 dispatch trace 关联到目标 task，"按任务聚合" 视图把多次 dispatch + task trace 合并到同一组。
-        markSupplementLinkedToTask: (taskId) => {
-          this.traceStore.updateTrace(trace.trace_id, { related_task_id: taskId })
-        },
-        sendImmediateReply,
-        reactToTriggerMessage: this.buildReactToTriggerMessage(session.channel_id, session.session_id),
-        spawnAgentInstance: async (_actionText?: string, spawnOptions?) => {
-          // params.messages 只放当前 trigger 批次；historic context（含 dispatcher
-          // immediate_reply）放 frontContext.recent_messages。buildTriggerUserPrompt
-          // 合并两者按 timestamp 单段渲染（spec 2026-06-04 §3）。
-          const triggerIds = new Set(messages.map(m => m.platform_message_id))
-          const baseHistory = (frontContext.recent_messages ?? []).filter(
-            (m) => !triggerIds.has(m.platform_message_id)
-          )
-          const ackMessage = spawnOptions?.immediateReply
-            ? this.buildDispatcherAckChannelMessage(
-                spawnOptions.immediateReply,
-                session.channel_id,
-                session.session_id,
-                'private',
-              )
-            : null
-          const recentMessagesWithAck = ackMessage ? [...baseHistory, ackMessage] : baseHistory
-          const params: ExecuteTriggerMessageParams = {
-            messages,
-            activeTasks: frontContext.active_tasks ?? [],
-            isGroup: false,
-            ...(frontContext.scene_profile ? { sceneProfile: frontContext.scene_profile } : {}),
-            senderFriend: friend,
-            memoryPermissions: memPerms,
-            resolvedPermissions: resolvedPerms as ResolvedPermissions,
-            channelId: session.channel_id,
-            sessionId: session.session_id,
-            frontContext: { ...frontContext, recent_messages: recentMessagesWithAck },
-          }
-          const taskTraceId = await this.spawnTaskTrace({
-            dispatchTraceId: trace.trace_id,
-            params,
-            source: session.channel_id,
-            awaitWorker: false,
-          })
-          return { spawnedTraceId: taskTraceId }
-        },
-        sendErrorToUser,
-        trace: traceCallbackPrivate,
-      })
-
-      this.traceStore.endTrace(trace.trace_id, 'completed', {
-        summary: actions.length === 0 ? 'silent' : `dispatched (${actions.length} actions)`,
-      })
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      this.traceStore.endTrace(trace.trace_id, 'failed', { summary: msg, error: msg })
+      console.error(
+        `[${this.config.moduleId}] processDirectBatch manager episode failed:`,
+        err instanceof Error ? err.message : String(err),
+      )
     }
   }
 
   /**
-   * 群聊 lane handler。
-   * 极罕见情况下 attention scheduler 在 lane 还在处理上一批时连续吐出多个 batch，
-   * 这里 flatMap 合并；正常情况每次只一个 attention batch。
+   * 群聊 lane handler —— 注意力调度放行的一批消息递给该 session 的 manager。
    *
-   * Spec: 2026-05-20-session-lane-dispatcher-design.md §3.4
+   * 走 `routeAttentionFlush`（不是 `routeHumanMessages`）：这批话是攒了一会儿才递过来的，
+   * 两个 kind 在 manager 侧渲染文案不同，混用会让 manager 把陈旧消息当成刚发生的对话。
+   *
+   * 收尾必须调 `attentionScheduler.reportResult`：漏调 = 群聊巡检间隔永久停在当前值，
+   * 群聊逐渐停止响应。`replied` 取 `EpisodeResult.repliedToHuman`（manager 这轮有没有
+   * 调过发送类工具），与 v2 的 `hasReply = actions.some(a => a.kind !== 'stay_silent')`
+   * 同属决策层语义。
    */
   private async processGroupLaneBatch(
     batch: ReadonlyArray<{ messages: BufferedMessage[]; sessionId: string }>,
@@ -1220,208 +1066,67 @@ export class UnifiedAgent extends ModuleBase {
     const messages = buffered.map((b) => b.message)
     const session = messages[0].session
 
-    // 创建 Trace
-    const summary = messages
-      .map((m) => `${m.sender.platform_display_name}: ${(m.content.text ?? '').slice(0, 50)}`)
-      .join(' | ')
-      .slice(0, 200)
-    const trace = this.traceStore.startTrace({
-      module_id: this.config.moduleId,
-      trigger: {
-        type: 'message',
-        summary: `[group×${messages.length}] ${summary}`,
-        source: session.channel_id,
-      },
-    })
+    await this.reactToTriggerBatch(session.channel_id, sessionId, messages)
 
-    let hasReply = false
-    let barrierTaskIds: string[] = []
-
+    let repliedToHuman = false
     try {
-      if (!this.agentHandler) {
-        this.traceStore.endTrace(trace.trace_id, 'failed', { summary: 'No worker handler configured' })
-        return
-      }
-
-      // 群聊 barrier：仅在有 @bot 消息时设置（非 @bot 群聊消息不暂停 worker）
-      const hasMention = messages.some(m => m.features.is_mention_crab)
-      if (hasMention) {
-        barrierTaskIds = this.setupBarriers(session.channel_id, sessionId)
-      }
-
-      // 群聊权限：以 lastEntry.friend 为发起人解析 friend ∪ session 并集
-      const resolvedPermsRaw = await this.resolvePrincipalPermissions(lastEntry.friend, sessionId, 'group')
-      // 群聊 memory_scopes 为空时 fallback 到 [sessionId]，避免 cross-group leakage
-      const resolvedPerms = resolvedPermsRaw && resolvedPermsRaw.memory_scopes.length === 0
-        ? { ...resolvedPermsRaw, memory_scopes: [sessionId] }
-        : resolvedPermsRaw
-      this.currentResolvedPerms = resolvedPerms
-      const memPerms = resolvedPerms
-        ? {
-            write_visibility: 'internal' as const,
-            write_scopes: resolvedPerms.memory_scopes,
-            read_min_visibility: 'internal' as const,
-            read_accessible_scopes: resolvedPerms.memory_scopes,
-          }
-        : await this.buildSessionMemoryPermissions(sessionId)
-
-      // 组装上下文
-      const ctxSpan = this.traceStore.startSpan(trace.trace_id, {
-        type: 'context_assembly',
-        details: {
-          context_type: 'front',
-          channel_id: session.channel_id,
-          session_id: sessionId,
-          message_batch: messages.map(m => ({
-            sender: m.sender.platform_display_name,
-            text: (m.content.text ?? '').slice(0, 500),
-            is_mention_crab: m.features.is_mention_crab,
-          })),
-        },
-      })
-      const lastMsg = messages[messages.length - 1]
-      const frontContext = await this.contextAssembler.assembleFrontContext(
-        {
-          channel_id: session.channel_id,
-          session_id: sessionId,
-          sender_id: lastMsg.sender.platform_user_id,
-          message: messages.map((m) => m.content.text ?? '').join('\n'),
-          friend_id: lastMsg.sender.friend_id,
-          session_type: 'group',
-          crab_display_name: this.crabDisplayNames.get(session.channel_id),
-          crab_self_handle: this.crabSelfHandles.get(session.channel_id),
-        },
-        lastEntry.friend,
-        memPerms,
-        { traceStore: this.traceStore as TraceStoreInterface, traceId: trace.trace_id, parentSpanId: ctxSpan.span_id },
-      )
-      this.traceStore.endSpan(trace.trace_id, ctxSpan.span_id, 'completed')
-
-      if (!this.sdkEnvWorker) {
-        this.traceStore.endTrace(trace.trace_id, 'failed', { summary: 'sdkEnvWorker missing' })
-        return
-      }
-
-      const dispatchCtx = {
-        messages: messages as ReadonlyArray<ChannelMessage>,
-        recentMessages: (frontContext.recent_messages ?? []) as ReadonlyArray<ChannelMessage>,
-        activeTasks: frontContext.supplement_candidates ?? [],
-        sessionType: 'group' as const,
-        channelId: session.channel_id,
+      const result = await this.requireManagerStack().registry.routeAttentionFlush(
+        session.channel_id,
         sessionId,
-        senderFriend: lastEntry.friend,
-        ...(frontContext.scene_profile ? { sceneProfile: frontContext.scene_profile } : {}),
-        ...(frontContext.crab_self_handle ? { crabSelfHandle: frontContext.crab_self_handle } : {}),
-        traceId: trace.trace_id,
-      }
-
-      const sendErrorToUser = async (text: string) => {
-        try {
-          const channelPort = await this.getChannelPort(session.channel_id)
-          await this.rpcClient.call(channelPort, 'send_message', {
-            session_id: sessionId,
-            content: { type: 'text', text },
-          }, this.config.moduleId)
-        } catch (err) {
-          console.error(`[${this.config.moduleId}] processGroupLaneBatch sendErrorToUser failed:`, err instanceof Error ? err.message : String(err))
-        }
-      }
-
-      // 预回复回调：dispatcher 判 new_task 复杂时发一条 ack 给当前群聊 session
-      const sendImmediateReply = (text: string) =>
-        this.sendDispatcherImmediateReply(session.channel_id, sessionId, text)
-
-      const traceCallbackGroup = this.buildDispatchTraceCallback(trace.trace_id)
-      const { actions } = await dispatch(dispatchCtx, {
-        adapter: adapterFromSdkEnv(this.sdkEnvWorker),
-        modelId: this.sdkEnvWorker.modelId,
-        sendErrorToUser,
-        trace: traceCallbackGroup,
-        quotedPrefetchDeps: this.buildQuotedPrefetchDeps(),
-        timezone: this.getTimezone(),
-        laneBatchSize: batch.length,
-      })
-
-      // 退避信号：actions 中是否含非 stay_silent 动作
-      hasReply = actions.some(a => a.kind !== 'stay_silent')
-
-      await executeDispatchActions(actions, {
-        dispatchCtx,
-        reviveTerminalSupplement: (taskId, text) =>
-          this.reviveTerminalSupplementTask(taskId, text, session.channel_id, sessionId),
-        pushSupplement: async (taskId: string): Promise<'delivered' | 'fallback'> => {
-          if (!this.agentHandler!.hasActiveTask(taskId)) return 'fallback'
-          try {
-            // 权限热刷新：supplement 进任务前按原发起人身份重新解析（spec 2026-07-20）
-            await this.refreshTaskPermissions(taskId)
-            // 传整批 ChannelMessage（保留媒体，Task 3 已让 deliverHumanResponse 渲染媒体）
-            this.agentHandler!.deliverHumanResponse(taskId, messages)
-            return 'delivered'
-          } catch {
-            return 'fallback'
-          }
-        },
-        // 把本次 dispatch trace 关联到目标 task，"按任务聚合" 视图把多次 dispatch + task trace 合并到同一组。
-        markSupplementLinkedToTask: (taskId) => {
-          this.traceStore.updateTrace(trace.trace_id, { related_task_id: taskId })
-        },
-        sendImmediateReply,
-        reactToTriggerMessage: this.buildReactToTriggerMessage(session.channel_id, sessionId),
-        spawnAgentInstance: async (_actionText?: string, spawnOptions?) => {
-          // 群聊：params.messages 只放当前 attention 批次（含群成员发的文件/图片）；
-          // 历史 + dispatcher immediate_reply 放 frontContext.recent_messages。
-          // buildTriggerUserPrompt 合并两者按 timestamp 单段渲染（spec 2026-06-04 §3）。
-          const currentIds = new Set(messages.map((m) => m.platform_message_id))
-          const baseHistory = (frontContext.recent_messages ?? []).filter(
-            (m) => !currentIds.has(m.platform_message_id)
-          )
-          const ackMessage = spawnOptions?.immediateReply
-            ? this.buildDispatcherAckChannelMessage(
-                spawnOptions.immediateReply,
-                session.channel_id,
-                sessionId,
-                'group',
-              )
-            : null
-          const recentMessagesWithAck = ackMessage ? [...baseHistory, ackMessage] : baseHistory
-          const params: ExecuteTriggerMessageParams = {
-            messages,
-            activeTasks: frontContext.active_tasks ?? [],
-            isGroup: true,
-            ...(frontContext.scene_profile ? { sceneProfile: frontContext.scene_profile } : {}),
-            senderFriend: lastEntry.friend,
-            memoryPermissions: memPerms,
-            resolvedPermissions: resolvedPerms as ResolvedPermissions,
-            channelId: session.channel_id,
-            sessionId,
-            frontContext: { ...frontContext, recent_messages: recentMessagesWithAck },
-          }
-          const taskTraceId = await this.spawnTaskTrace({
-            dispatchTraceId: trace.trace_id,
-            params,
-            source: session.channel_id,
-            awaitWorker: false,
-          })
-          return { spawnedTraceId: taskTraceId }
-        },
-        sendErrorToUser,
-        trace: traceCallbackGroup,
-      })
-
-      // 注：spawn 改 fire-and-forget 后 clearAllBarriers 看似时机变早（早于 worker 跑完），
-      //     但 barrier 实际被 pushSupplement(humanQueue.push) 或 8s 超时自动 clear，
-      //     这里只是兜底——语义未变。
-      this.clearAllBarriers(barrierTaskIds)
-      this.attentionScheduler.reportResult(sessionId, hasReply)
-
-      this.traceStore.endTrace(trace.trace_id, 'completed', {
-        summary: actions.length === 0 ? 'silent' : `dispatched (${actions.length} actions)`,
-      })
+        messages,
+        lastEntry.friend,
+      )
+      repliedToHuman = result.repliedToHuman
     } catch (err) {
-      this.clearAllBarriers(barrierTaskIds)
-      const msg = err instanceof Error ? err.message : String(err)
-      this.traceStore.endTrace(trace.trace_id, 'failed', { summary: msg, error: msg })
+      console.error(
+        `[${this.config.moduleId}] processGroupLaneBatch manager episode failed:`,
+        err instanceof Error ? err.message : String(err),
+      )
     }
+
+    this.attentionScheduler.reportResult(sessionId, repliedToHuman)
+  }
+
+  /**
+   * 给批内**最后一条**消息打「已接收」表情（沿用现网语义）。
+   *
+   * 落在接线层而不是 manager 工具面：`add_reaction` 不是 crab-messaging 工具，它是编排层的
+   * 机械动作，不该破坏 `assertClosedToolFace` 的封闭不变量。
+   *
+   * channel 不支持（如 wechat 未注册该 RPC）时 RPC 自身抛 method-not-found，这里 catch + warn，
+   * 主流程不受影响。
+   *
+   * Spec: 2026-06-04-channel-task-pickup-reaction-design.md §4
+   */
+  private async reactToTriggerBatch(
+    channelId: string,
+    sessionId: string,
+    messages: ReadonlyArray<ChannelMessage>,
+  ): Promise<void> {
+    const last = messages[messages.length - 1]
+    if (!last) return
+    try {
+      await this.reactToTriggerMessage(channelId, sessionId, last.platform_message_id)
+    } catch (err) {
+      console.warn(
+        `[${this.config.moduleId}] add_reaction failed (ignored):`,
+        err instanceof Error ? err.message : String(err),
+      )
+    }
+  }
+
+  /** 单条消息的 `add_reaction(kind='acknowledged')`。 */
+  private async reactToTriggerMessage(
+    channelId: string,
+    sessionId: string,
+    platformMessageId: string,
+  ): Promise<void> {
+    const channelPort = await this.getChannelPort(channelId)
+    await this.rpcClient.call(channelPort, 'add_reaction', {
+      session_id: sessionId,
+      platform_message_id: platformMessageId,
+      kind: 'acknowledged',
+    }, this.config.moduleId)
   }
 
   /**
@@ -1434,8 +1139,7 @@ export class UnifiedAgent extends ModuleBase {
    * 恒 undefined ⇒ 这条"未配置"提示**从未送达过任何人**，而外层 catch 把 NOT_FOUND
    * 吞成一行日志，所以一直没被发现。
    *
-   * 同一形状也是 `sendErrorToUser`（`processDirectBatch` / `processGroupLaneBatch`）在用的，
-   * 即"不经 LLM 直接告诉人类"这条通路的唯一正确形状。
+   * 这也是"不经 LLM 直接告诉人类"这条通路的唯一正确形状（入站兜底回复复用它）。
    */
   private async sendConfigMissingReply(message: ChannelMessage): Promise<void> {
     try {
@@ -1828,8 +1532,8 @@ export class UnifiedAgent extends ModuleBase {
         return { decision_types: [] }
       }
 
-      // 推导 decision_types。worker 端已无 supplement/silent 早退工具（dispatcher 在 spawn 前
-      // 已做完这两类决策），剩下只有 direct_reply 一种结果。
+      // 推导 decision_types。worker 端已无 supplement/silent 早退工具，剩下只有
+      // direct_reply 一种结果。
       const decisionTypes: string[] = []
       if (result.sentMessage) {
         decisionTypes.push('direct_reply')
@@ -1846,314 +1550,51 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   /**
-   * 处理 Admin Chat 消息（使用统一 loop）
+   * 处理 Admin Chat 消息 —— admin-web 也是一个 manager 会话（protocol-agent-v3 §4.4）。
    *
-   * admin-web 是伪 channel（spec 2026-06-10-master-chat-redesign §4）：
-   * worker 的 send_message 经 getChannelPort('admin-web') 路由到 admin 模块的
-   * 同签名 send_message RPC，最终结果直接回流聊天界面，与真实 channel 行为一致。
-   * chat_callback 仅用于 dispatcher 同步路径（immediate_reply / task_created / 错误兜底）。
+   * admin-web 是伪 channel（spec 2026-06-10-master-chat-redesign §4）：manager 的
+   * `send_message` 经 `getChannelPort('admin-web')` 路由到 admin 模块的同签名
+   * `send_message` RPC，结果直接回流聊天界面。`chat_callback` 因此只剩"不经 LLM 的早退
+   * 提示"这一个用途。
+   *
+   * 「三不」不变：不进 SessionLane（admin REST 前端 fetch 等响应才发下一条，天然单线）、
+   * 不进注意力调度（master 直连每条都要处理）、不打 `add_reaction`（admin-web 没有
+   * channel 侧 platform message 可回应）。
    */
   private async processAdminChatMessage(
     message: ChannelMessage,
     callbackInfo: { source_module_id: string; request_id: string }
   ): Promise<{ decision_types: string[]; task_ids?: string[] }> {
-    // Admin Chat 使用固定 session ID
+    // Admin Chat 使用固定 channel / session：不看消息自带的 session
     const sessionId = 'admin-chat'
 
-    // 更新 session 状态
-    this.sessionManager.updateLastMessageTime(sessionId)
-
-    // 创建 Trace
-    const trace = this.traceStore.startTrace({
-      module_id: this.config.moduleId,
-      trigger: {
-        type: 'message',
-        summary: (message.content.text ?? '[非文本消息]').slice(0, 200),
-        source: 'admin-web',
-      },
-    })
-
-    try {
-      // 检查是否已配置
-      if (!this.isConfigured()) {
-        await this.rpcClient.call(
-          await this.getAdminPort(),
-          'chat_callback',
-          {
-            request_id: callbackInfo.request_id,
-            reply_type: 'direct_reply',
-            content: 'Crabot 尚未配置 LLM 模型。请在全局设置中完成配置后重试。',
-          },
-          this.config.moduleId
-        )
-        this.traceStore.endTrace(trace.trace_id, 'failed', { summary: 'Agent not configured' })
-        return { decision_types: [] }
-      }
-
-      // 检查是否有 Worker Handler 能力
-      if (!this.agentHandler) {
-        await this.rpcClient.call(
-          await this.getAdminPort(),
-          'chat_callback',
-          {
-            request_id: callbackInfo.request_id,
-            reply_type: 'direct_reply',
-            content: '系统暂时不可用',
-          },
-          this.config.moduleId
-        )
-        this.traceStore.endTrace(trace.trace_id, 'failed', { summary: 'No worker handler configured' })
-        return { decision_types: [] }
-      }
-
-      // 检查 sdkEnvWorker
-      if (!this.sdkEnvWorker) {
-        this.traceStore.endTrace(trace.trace_id, 'failed', { summary: 'sdkEnvWorker missing' })
-        return { decision_types: [] }
-      }
-
-      // Admin Chat 使用 master 级权限（私有，无 scope 过滤）
-      const masterMemPerms: MemoryPermissions = {
-        write_visibility: 'private',
-        write_scopes: [],
-        read_min_visibility: 'private',
-        read_accessible_scopes: undefined,
-      }
-
-      const masterFriend: Friend = MASTER_FRIEND
-
-      // 解析 master 权限
-      const masterResolvedPerms = await this.resolvePrincipalPermissions(masterFriend, sessionId, 'private')
-      if (masterResolvedPerms) {
-        this.currentResolvedPerms = masterResolvedPerms
-      }
-
-      // 组装上下文（Admin Chat 专用，带 span 追踪耗时）
-      const ctxSpan = this.traceStore.startSpan(trace.trace_id, {
-        type: 'context_assembly',
-        details: {
-          context_type: 'front',
-          channel_id: 'admin-web',
-          session_id: sessionId,
-        },
-      })
-      const frontContext = await this.contextAssembler.assembleFrontContext(
+    if (!this.isConfigured()) {
+      await this.rpcClient.call(
+        await this.getAdminPort(),
+        'chat_callback',
         {
-          channel_id: 'admin-web',
-          session_id: sessionId,
-          sender_id: 'master',
-          message: message.content.text ?? '',
-          friend_id: message.sender.friend_id ?? 'master',
-          session_type: 'private',
+          request_id: callbackInfo.request_id,
+          reply_type: 'direct_reply',
+          content: 'Crabot 尚未配置 LLM 模型。请在全局设置中完成配置后重试。',
         },
-        masterFriend,
-        masterMemPerms,
-        { traceStore: this.traceStore as TraceStoreInterface, traceId: trace.trace_id, parentSpanId: ctxSpan.span_id },
+        this.config.moduleId,
       )
-      this.traceStore.endSpan(trace.trace_id, ctxSpan.span_id, 'completed')
-
-      // 调 dispatcher
-      const dispatchCtx = {
-        messages: [message] as ReadonlyArray<ChannelMessage>,
-        recentMessages: (frontContext.recent_messages ?? []) as ReadonlyArray<ChannelMessage>,
-        activeTasks: frontContext.supplement_candidates ?? [],
-        sessionType: 'admin_chat' as const,
-        channelId: 'admin-web',
-        sessionId,
-        senderFriend: masterFriend,
-        ...(frontContext.scene_profile ? { sceneProfile: frontContext.scene_profile } : {}),
-        traceId: trace.trace_id,
-      }
-
-      const sendErrorToUser = async (text: string) => {
-        try {
-          await this.rpcClient.call(
-            await this.getAdminPort(),
-            'chat_callback',
-            {
-              request_id: callbackInfo.request_id,
-              reply_type: 'direct_reply',
-              content: text,
-            },
-            this.config.moduleId
-          )
-        } catch (err) {
-          console.error(`[${this.config.moduleId}] processAdminChatMessage sendErrorToUser failed:`, err instanceof Error ? err.message : String(err))
-        }
-      }
-
-      // 预回复回调（admin_chat 路径）：走 chat_callback direct_reply，与 sendErrorToUser 同通道。
-      // chat_callback 返回 {received:true}，无 platform_message_id —— 这里合成 ack 元数据
-      // 让 spawnAgentInstance 能把这条 outbound 拼进 worker recent_messages。
-      const sendImmediateReply = async (text: string): Promise<ImmediateReplySentInfo> => {
-        await this.rpcClient.call(
-          await this.getAdminPort(),
-          'chat_callback',
-          {
-            request_id: callbackInfo.request_id,
-            reply_type: 'direct_reply',
-            content: text,
-          },
-          this.config.moduleId
-        )
-        return {
-          text,
-          platform_message_id: `dispatcher-ack-${crypto.randomUUID()}`,
-          sent_at: new Date().toISOString(),
-        }
-      }
-
-      const traceCallbackAdmin = this.buildDispatchTraceCallback(trace.trace_id)
-      const { actions } = await dispatch(dispatchCtx, {
-        adapter: adapterFromSdkEnv(this.sdkEnvWorker),
-        modelId: this.sdkEnvWorker.modelId,
-        sendErrorToUser,
-        trace: traceCallbackAdmin,
-        quotedPrefetchDeps: this.buildQuotedPrefetchDeps(),
-        timezone: this.getTimezone(),
-      })
-
-      // 执行动作
-      // admin_chat 不注入 reactToTriggerMessage：无 channel-side platform message，无 add_reaction RPC 通道
-      await executeDispatchActions(actions, {
-        dispatchCtx,
-        sendImmediateReply,
-        reviveTerminalSupplement: (taskId, text) =>
-          this.reviveTerminalSupplementTask(taskId, text, 'admin-web', sessionId),
-        pushSupplement: async (taskId: string): Promise<'delivered' | 'fallback'> => {
-          if (!this.agentHandler!.hasActiveTask(taskId)) return 'fallback'
-
-          // scheduled task 不接受 supplement
-          const target = (frontContext.active_tasks ?? []).find(t => t.task_id === taskId)
-          if (target?.trigger_type === 'scheduled') return 'fallback'
-
-          try {
-            const adminPort = await this.getAdminPort()
-
-            // SSOT 重整：waiting_human → executing 的 RPC 已统一收到 deliverHumanResponse 内部
-            // （走 transitionTaskStatus helper），admin_chat 不再重复执行。
-
-            // 即时回复（通过 chat_callback）。带 task_id：让前端把这条 supplement
-            // 人类消息关联到目标任务（消息旁任务状态图标的数据源）
-            const replyText = '收到，正在调整。'
-            try {
-              await this.rpcClient.call(adminPort, 'chat_callback', {
-                request_id: callbackInfo.request_id,
-                reply_type: 'direct_reply',
-                content: replyText,
-                task_id: taskId,
-              }, this.config.moduleId)
-            } catch (err) {
-              console.error(`[${this.config.moduleId}] pushSupplement admin_chat: chat_callback failed: ${err instanceof Error ? err.message : String(err)}`)
-            }
-
-            // 投递纠偏消息（deliverHumanResponse 内部会调 transitionTaskStatus('executing')）
-            // 权限热刷新：supplement 进任务前按原发起人身份重新解析（spec 2026-07-20）
-            await this.refreshTaskPermissions(taskId)
-            const syntheticMessage: ChannelMessage = {
-              platform_message_id: `supplement-${Date.now()}`,
-              session: { channel_id: 'admin-web', session_id: sessionId, type: 'private' as const },
-              sender: { friend_id: 'master', platform_user_id: 'master', platform_display_name: 'Master' },
-              content: message.content,
-              features: { is_mention_crab: false },
-              platform_timestamp: new Date().toISOString(),
-            }
-            this.agentHandler!.deliverHumanResponse(taskId, [syntheticMessage])
-            return 'delivered'
-          } catch {
-            return 'fallback'
-          }
-        },
-        // 把本次 dispatch trace 关联到目标 task；recent-terminal revive 也走这条，避免作为孤儿 dispatcher 展示。
-        markSupplementLinkedToTask: (taskId) => {
-          this.traceStore.updateTrace(trace.trace_id, { related_task_id: taskId })
-        },
-        spawnAgentInstance: async (_actionText?: string, spawnOptions?) => {
-          // admin_chat：params.messages 只放当前 trigger（单条），历史 + dispatcher
-          // immediate_reply 放 frontContext.recent_messages，buildTriggerUserPrompt
-          // 合并两者按 timestamp 单段渲染（spec 2026-06-04 §3）。
-          // 注：admin chat 由 admin REST 串行串发（前端 fetch 等响应才会发下一条），天然单线，
-          //     不走 SessionLane；trace 模型仍拆分 dispatch / task：
-          //     awaitWorker=false：worker 注册即返回，结果经 send_message 伪 channel 回流；
-          //     注册阶段错误仍同步抛出反映到 RPC 响应，运行期失败由任务状态推送呈现。
-          //     task trace 由 spawnTaskTrace 独立 endTrace。
-          const triggerIds = new Set([message.platform_message_id])
-          const baseHistory = (frontContext.recent_messages ?? []).filter(
-            (m) => !triggerIds.has(m.platform_message_id)
-          )
-          const ackMessage = spawnOptions?.immediateReply
-            ? this.buildDispatcherAckChannelMessage(
-                spawnOptions.immediateReply,
-                'admin-web',
-                sessionId,
-                'private',
-              )
-            : null
-          const recentMessagesWithAck = ackMessage ? [...baseHistory, ackMessage] : baseHistory
-          const params: ExecuteTriggerMessageParams = {
-            messages: [message],
-            activeTasks: frontContext.active_tasks ?? [],
-            isGroup: false,
-            ...(frontContext.scene_profile ? { sceneProfile: frontContext.scene_profile } : {}),
-            senderFriend: masterFriend,
-            memoryPermissions: masterMemPerms,
-            resolvedPermissions: (masterResolvedPerms ?? masterMemPerms) as unknown as ResolvedPermissions,
-            channelId: 'admin-web',
-            sessionId,
-            frontContext: { ...frontContext, recent_messages: recentMessagesWithAck },
-          }
-          const taskTraceId = await this.spawnTaskTrace({
-            dispatchTraceId: trace.trace_id,
-            params,
-            source: 'admin-web',
-            // worker 结果经 send_message 伪 channel 回流（Task 6），不再同步等待——
-            // 同步等待会让长任务撑爆 process_message RPC 超时（旧"看不到输出"主因之一）
-            awaitWorker: false,
-            onTaskRegistered: async (taskId, taskTitle) => {
-              await this.rpcClient.call(
-                await this.getAdminPort(),
-                'chat_callback',
-                {
-                  request_id: callbackInfo.request_id,
-                  reply_type: 'task_created',
-                  content: `已创建任务：${taskTitle}`,
-                  task_id: taskId,
-                },
-                this.config.moduleId
-              )
-            },
-          })
-          return { spawnedTraceId: taskTraceId }
-        },
-        sendErrorToUser,
-        trace: traceCallbackAdmin,
-      })
-
-      // 从 actions 推导 decision_types 和 task_ids（保持与旧接口的兼容）
-      // worker 端已无 supplement_task / stay_silent 工具；dispatcher 的 supplement
-      // 已在 dispatcher-executor 直接执行（pushSupplement），new_task 通过 spawnTask
-      // 落库。这里只把 dispatcher 的 new_task 动作回报为 create_task；supplement /
-      // stay_silent 走 dispatcher 侧副作用，不再在 ProcessMessageResult 里回报。
-      const decisionTypes: string[] = actions
-        .filter(a => a.kind === 'new_task')
-        .map(() => 'create_task')
-      const taskIds: TaskId[] = actions
-        .filter((a): a is Extract<typeof a, { kind: 'supplement' }> => a.kind === 'supplement')
-        .map(a => a.target_task_id)
-
-      this.traceStore.endTrace(trace.trace_id, 'completed', {
-        summary: actions.length === 0 ? 'silent' : `dispatched (${actions.length} actions)`,
-      })
-
-      return {
-        decision_types: decisionTypes,
-        task_ids: taskIds.length > 0 ? taskIds : undefined,
-      }
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error)
-      this.traceStore.endTrace(trace.trace_id, 'failed', { summary: msg, error: msg })
-      throw error
+      return { decision_types: [] }
     }
+
+    // 发起人恒为 master：权限档位 / 记忆可见范围 / 对话对象档案都由唤醒边界按它解析
+    // （`ManagerPrincipalStore`），不再在这里各算一份。
+    const result = await this.requireManagerStack().registry.routeHumanMessages(
+      'admin-web',
+      sessionId,
+      [message],
+      MASTER_FRIEND,
+    )
+
+    // 返回值只回报"manager 这轮有没有跟人说话"。v2 的 `create_task` / `task_ids` 是
+    // **前置决策器动作分类**的投影，v3 没有等价物：派不派活由 manager 在 episode 内自己
+    // 决定，任务状态改由 `agent.task_status_changed` 事件推给 admin（§9.2）。
+    return { decision_types: result.repliedToHuman ? ['direct_reply'] : [] }
   }
 
   private async handleCreateTaskFromSchedule(params: {
@@ -3022,28 +2463,12 @@ export class UnifiedAgent extends ModuleBase {
   // Trace 辅助方法
   // ============================================================================
 
-  /**
-   * 构建 DispatchTraceCallback，供 dispatcher 内部写 dispatch_call / dispatch_action span。
-   * 采用 minimal interface（DispatchTraceCallback），不暴露 TraceStore 全量 API。
-   */
-  private buildDispatchTraceCallback(traceId: string): DispatchTraceCallback {
-    const store = this.traceStore
-    return {
-      startSpan(params) {
-        return store.startSpan(traceId, params as never)
-      },
-      endSpan(spanId, status, details) {
-        store.endSpan(traceId, spanId, status, details as never)
-      },
-    }
-  }
-
-  /** UnifiedAgent 当前时区——直接用 agentConfig.timezone 解析；dispatcher 和 agent-handler 都用。 */
+  /** UnifiedAgent 当前时区——直接用 agentConfig.timezone 解析；agent-handler 也用它。 */
   private getTimezone(): string {
     return resolveTimezone(this.agentConfig?.timezone)
   }
 
-  /** 给 dispatcher / 复用模块的引用消息预拉依赖。 */
+  /** 引用消息预拉依赖（`prefetchQuotedMessages` 的注入口）。 */
   private buildQuotedPrefetchDeps(): import('./agent/quoted-message-prefetcher').PrefetchQuotedDeps {
     return {
       rpcClient: this.rpcClient,
@@ -3052,172 +2477,6 @@ export class UnifiedAgent extends ModuleBase {
     }
   }
 
-  /**
-   * 构造 dispatcher reactToTriggerMessage 闭包。
-   * dispatcher 接住消息后调 channel.add_reaction(kind='acknowledged')。
-   * channel 不支持 add_reaction（如 wechat 未注册此 RPC）时 RPC 自身会抛 method-not-found，
-   * caller（dispatcher-executor.fireReaction）内部 catch + warn，主流程不受影响。
-   *
-   * Spec: 2026-06-04-channel-task-pickup-reaction-design.md §4
-   */
-  private buildReactToTriggerMessage(
-    channelId: string,
-    sessionId: string,
-  ): (platformMessageId: string) => Promise<void> {
-    return async (platformMessageId: string) => {
-      const channelPort = await this.getChannelPort(channelId)
-      await this.rpcClient.call(channelPort, 'add_reaction', {
-        session_id: sessionId,
-        platform_message_id: platformMessageId,
-        kind: 'acknowledged',
-      }, this.config.moduleId)
-    }
-  }
-
-  /**
-   * 调 channel.send_message 发 dispatcher 预回复，返回带 platform_message_id / sent_at
-   * 的 ack 元数据，供 spawnAgentInstance 把这条 outbound 拼进 worker 的 recent_messages。
-   * Spec: 2026-06-03-dispatcher-immediate-reply-and-overdue-removal-design.md §6
-   */
-  private async sendDispatcherImmediateReply(
-    channelId: string,
-    sessionId: string,
-    text: string,
-  ): Promise<ImmediateReplySentInfo> {
-    const channelPort = await this.getChannelPort(channelId)
-    const result = await this.rpcClient.call<
-      { session_id: string; content: { type: 'text'; text: string } },
-      { platform_message_id: string; sent_at: string }
-    >(channelPort, 'send_message', {
-      session_id: sessionId,
-      content: { type: 'text', text },
-    }, this.config.moduleId)
-    return { text, platform_message_id: result.platform_message_id, sent_at: result.sent_at }
-  }
-
-  /**
-   * 把 dispatcher 已发出的预回复拼成一条 outbound ChannelMessage，由 spawnAgentInstance
-   * 注入 worker 的 recent_messages 末尾。worker prompt 渲染时，platform_user_id='self'
-   * 会被 resolveSenderIdentity 识别为 'assistant'，worker 一眼就能看出是自己刚发过。
-   */
-  private buildDispatcherAckChannelMessage(
-    info: ImmediateReplySentInfo,
-    channelId: string,
-    sessionId: string,
-    sessionType: 'private' | 'group',
-  ): ChannelMessage {
-    return {
-      platform_message_id: info.platform_message_id,
-      session: { session_id: sessionId, channel_id: channelId, type: sessionType },
-      sender: {
-        platform_user_id: 'self',
-        platform_display_name: 'Crabot',
-      },
-      content: { type: 'text', text: info.text },
-      features: { is_mention_crab: false },
-      platform_timestamp: info.sent_at,
-    }
-  }
-
-  /**
-   * 为单次 spawn 启动一条独立 task trace 并跑 worker loop。
-   *
-   * 设计要点：
-   * - dispatch（含 context_assembly + dispatcher LLM）和 task（agent loop）是两类语义不同的 trace。
-   *   SessionLane fire-and-forget 后 dispatch 可在 worker 还在跑时就完成；若复用同一 trace，
-   *   UI 列表会显示 completed 绿点但 worker 还在跑（误导）。
-   * - 这里给 worker 单独建一条 trace（trigger.type='task'），所有 worker span（agent_loop /
-   *   llm_call / tool_call）写到这条 trace；同时给 dispatch trace 反向标记 related_task_id，
-   *   让 "按任务聚合" 视图把 dispatch 和 task 两条 trace 合并到同一组。
-   * - awaitWorker=false：fire-and-forget（私聊 / 群聊 lane handler 用，以及 admin chat）；
-   *   lane 同步段拿到 pre 后即可解锁下一批；worker 完成后由 .then 写 endTrace。
-   *   admin chat 场景下 worker 结果经 send_message 伪 channel 回流，注册阶段即触发 onTaskRegistered 回调。
-   * - awaitWorker=true：同步等待（保留给需要把 worker 错误反映到 HTTP 响应的场景）。
-   *
-   * @returns task trace_id，作为 spawnedTraceId 回给 dispatcher_executor 写到 dispatch_action span
-   *          的 spawned_trace_id 字段，供 Admin UI 做 cross-trace link 跳转。
-   */
-  private async spawnTaskTrace(opts: {
-    dispatchTraceId: string
-    params: ExecuteTriggerMessageParams
-    source: string
-    awaitWorker: boolean
-    /**
-     * task 注册完成、worker loop 启动前回调（admin chat 用它发 task_created 状态卡）。
-     * 抛错只 warn 不阻断 worker——状态卡丢失不应影响任务执行。
-     */
-    onTaskRegistered?: (taskId: string, taskTitle: string) => Promise<void>
-  }): Promise<string> {
-    const pre = await this.agentHandler!.registerTriggerAndActivate(opts.params)
-    this.traceStore.updateTrace(opts.dispatchTraceId, { related_task_id: pre.taskId })
-
-    if (opts.onTaskRegistered) {
-      try {
-        await opts.onTaskRegistered(pre.taskId, pre.taskTitle)
-      } catch (err) {
-        console.warn(
-          `[${this.config.moduleId}] onTaskRegistered failed (continuing):`,
-          err instanceof Error ? err.message : String(err),
-        )
-      }
-    }
-
-    const taskTrace = this.traceStore.startTrace({
-      module_id: this.config.moduleId,
-      trigger: {
-        type: 'task',
-        // task trace 的触发摘要 = dispatch LLM 抽象出的任务意图（dfdc818 起 task_title 一致）。
-        // 不再用原始 messages 切片：caller 传进来的 messages 通常含历史，切片会取到无关的最早消息。
-        summary: pre.taskTitle,
-        source: opts.source,
-      },
-      related_task_id: pre.taskId,
-    })
-    const traceCb = this.buildTraceCallback(taskTrace.trace_id)
-    // traceContext 必须传：runWorkerLoop 用它给 delegate_task 注入 subAgentTraceConfig，
-    // subagent 实际跑时会用 traceStore.startTrace(type='sub_agent_call', parent_trace_id=taskTrace.trace_id,
-    // related_task_id=pre.taskId) 建独立 sub trace，UI 上才能看到 subagent 行 + 父子关系跳转。
-    const traceContext: import('./agent/agent-handler').WorkerTraceContext = {
-      traceStore: this.traceStore,
-      traceId: taskTrace.trace_id,
-      relatedTaskId: pre.taskId,
-    }
-
-    const finalize = (result: ExecuteTriggerMessageResult) => {
-      this.traceStore.endTrace(
-        taskTrace.trace_id,
-        result.outcome === 'completed' ? 'completed' : 'failed',
-        {
-          summary: (result.finalText || result.outcome).slice(0, 200),
-          ...(result.error ? { error: result.error } : {}),
-        },
-      )
-    }
-    const finalizeError = (err: unknown) => {
-      const msg = err instanceof Error ? err.message : String(err)
-      this.traceStore.endTrace(taskTrace.trace_id, 'failed', { summary: msg, error: msg })
-    }
-
-    if (opts.awaitWorker) {
-      try {
-        const result = await this.agentHandler!.runTriggerWorkerLoop(opts.params, pre, traceCb, traceContext)
-        finalize(result)
-      } catch (err) {
-        finalizeError(err)
-      }
-    } else {
-      void this.agentHandler!.runTriggerWorkerLoop(opts.params, pre, traceCb, traceContext)
-        .then(finalize)
-        .catch(err => {
-          finalizeError(err)
-          console.error(
-            `[${this.config.moduleId}] runTriggerWorkerLoop crashed for ${pre.taskId}:`,
-            err instanceof Error ? err.message : String(err),
-          )
-        })
-    }
-    return taskTrace.trace_id
-  }
 
   /**
    * 构建 TraceCallback，用于向 TraceStore 写入 Span
