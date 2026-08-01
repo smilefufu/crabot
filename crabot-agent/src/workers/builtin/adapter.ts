@@ -86,6 +86,45 @@ const FORK_MAX_TURNS = 8
 /** spawn 时落盘的 per-worker 上下文文件名（见 persistContext）。 */
 const CONTEXT_FILE = 'context.json'
 
+/** 上下文超限收场时写进 output.log 的信号（见 isSilentContextOverflow）。 */
+const CONTEXT_OVERFLOW_NOTICE =
+  '[builtin-worker] 上下文超限：压缩已用尽，模型仍只能返回空回复（stop_reason=max_tokens）。本化身以 failed 收场。\n'
+
+/**
+ * 识别"burst 因上下文超限静默收场"。engine 侧的真实表征（读 query-loop.ts 确认，不是猜的）：
+ * 压缩重试配额（MAX_MAX_TOKENS_COMPACT_RETRIES=2）耗尽后，engine 对静默 max_tokens 直接
+ * `finishTask()` 收场——outcome 变成 `'completed'`（不是 `'failed'`/`'max_turns'`！）、
+ * `finalText=''`，唯一留下的痕迹是 `finalMessages` 末条 assistant 消息的
+ * `stopReason === 'max_tokens'`。这是结构化信号，比在 `EngineResult.error` 里找文案更可靠
+ * （这条路径下 error 根本不会被设置）。
+ *
+ * adapter 若照常落 `idle`，worker 就变成一个"看起来在等输入"的化身：零输出、零错误信号。
+ * manager 看到 idle 会按"停下且没带问题"继续 `send_to_worker` 推它，**每推一次烧一个满窗口
+ * 调用**，且上下文只增不减 —— 死循环。所以必须落成 `exited(failed)`。
+ *
+ * "静默"这个前提本身必须校验，不能只看 stopReason：LLM 输出被 max output tokens 截断
+ * （有实际文字，只是没写完）时 stopReason 同样是 `'max_tokens'`，但 query-loop 的
+ * `isSilentText`（`processed.text.trim().length === 0`）判它为非静默，走正常 end_turn 分支
+ * completed 收场——与上下文超限无关。这里对齐同一判定：只统计末条 assistant 消息里的 text 块
+ * （忽略 tool_use/raw_reasoning，与 partitionResponseContent 一致），trim 后为空才算静默。
+ *
+ * 判定与 `manager/loop.ts` 的 `isContextOverflow` 分支 1 同源（P4 在 manager 上踩的是同一个坑，
+ * 那段注释是这条判定的原始考据）。这里没有直接 import 复用，两个原因：
+ *   1. 那是 manager loop 的模块私有函数，worker 反向依赖 manager 是跨模块方向错误；
+ *   2. 抽到 engine 公共层属于 engine 改动，超出本次"只动 builtin adapter"的修 bug 范围。
+ * manager 那份还有"分支 2：outcome==='failed' 且 error 文案含超限关键字"，这里不需要——
+ * builtin adapter 对 `outcome === 'failed'` 一律落 `exited(crashed)`，本就是 fail-loud 的终态。
+ */
+function isSilentContextOverflow(result: EngineResult): boolean {
+  const last = result.finalMessages[result.finalMessages.length - 1]
+  if (last?.role !== 'assistant' || last.stopReason !== 'max_tokens') return false
+  const text = last.content
+    .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+    .map((b) => b.text)
+    .join('')
+  return text.trim().length === 0
+}
+
 /** Re-export for backward compatibility and convenience. */
 export { WorkerExitedError }
 
@@ -592,6 +631,14 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // 和下面的收尾段互斥锁临界区重复处理。
     const pendingWrites: Promise<void>[] = []
     const writeErrors: unknown[] = []
+    // 本次 burst 内是否真的发生过一次成功的压缩。压缩是对 messages 的**整体重写**
+    // （query-loop.ts compactInPlace：messages.length = 0 后重填），一旦发生，
+    // finalMessages 就不再是 initialMessages 的后缀，下面的 write-back 必须换一条路径。
+    // 判据只看 failedReason 缺席：压缩失败 / abort 都会带上它且 messages 保持原样
+    // （engine 压缩故障链修复后的语义，见 EngineOptions.onCompactionEnd 注释），
+    // 所以"没带 failedReason" ⇒ messages 已被重写。宁可多判（压缩恰好是空操作时也走整条
+    // 重写路径，代价只是多复制一份节点），也绝不能漏判——漏判就是静默数据损坏。
+    let compactedThisBurst = false
     const result: EngineResult = await runEngine({
       prompt: '',
       adapter: builtin.adapter,
@@ -602,8 +649,14 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         model: builtin.model,
         ...(builtin.maxTurnsPerBurst !== undefined ? { maxTurns: builtin.maxTurnsPerBurst } : {}),
         ...this.safetyOptions(builtin),
-        // session 树以原始消息为真相源，burst 内禁用压缩。压缩与树的协同（折叠节点）是 P7 集成议题。
-        disableCompaction: true,
+        // 长活 worker 的窗口是在**一次 burst 内部**被跑满的（maxTurns 默认 200），
+        // burst 边界折叠够不着，只有 engine 的 per-turn 阈值压缩 + max_tokens 强压重试
+        // 才治得了。session 树仍以原始消息为真相源：老节点一个不删，压缩后的序列另起
+        // 一条新根链（见下面的 write-back）。
+        disableCompaction: false,
+        onCompactionEnd: (info) => {
+          if (info.failedReason === undefined) compactedThisBurst = true
+        },
         abortSignal: abortController.signal,
         onTurn: (event) => {
           if (event.assistantText) {
@@ -629,24 +682,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // 期间新 sendInput 插队"的窗口——判定与状态落定必须是同一个不可分割的临界区。
     // 续 burst 的递归调用放在锁外触发（见下），不然会把 runEngine 的执行时长堵在锁里。
     const continueBurst = await mutex.run(async () => {
-      // burst 结束：把新增消息（finalMessages 相对 initialMessages 的后缀）逐条 append 进 session 树。
-      // 防御断言：若压缩被意外启用，finalMessages.length 会小于 initialMessages.length，
-      // 此时不回写新消息，标化身为 exited(crashed) 并记日志。
-      if (result.finalMessages.length < initialMessages.length) {
-        console.error(
-          `[builtin-adapter] runBurst compaction guard triggered for worker ${instance.worker_id}: ` +
-          `finalMessages.length (${result.finalMessages.length}) < initialMessages.length (${initialMessages.length}). ` +
-          `Compaction was unexpectedly enabled; marking incarnation as crashed.`,
-        )
-        await this.transitionExited(instance, handle, 'crashed')
-        return false
-      }
-      const newMessages = result.finalMessages.slice(initialMessages.length)
-      let parent = tip
-      for (const msg of newMessages as EngineMessage[]) {
-        parent = await instance.sessionTree.append(parent, msg)
-      }
-      instance.tip = parent
+      await this.writeBack(instance, tip, result, initialMessages.length, compactedThisBurst)
 
       if (result.outcome === 'failed' || result.outcome === 'aborted') {
         await this.transitionExited(instance, handle, result.outcome === 'aborted' ? 'killed' : 'crashed')
@@ -666,6 +702,15 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       // 收尾段检查点）。无论如何都不能继续/续 burst，直接落 exited(killed)。
       if (instance.killRequested) {
         await this.transitionExited(instance, handle, 'killed')
+        return false
+      }
+
+      // 上下文超限静默收场：必须落成真实终态，绝不能落 idle（见 isSilentContextOverflow）。
+      // 位置在 pendingInputs 续 burst 之前——上下文已经压不下去了，再喂新输入续 burst 只是
+      // 每轮再烧一个满窗口调用；排队的消息按既有语义进 dead-letter（transitionExited 负责）。
+      if (isSilentContextOverflow(result)) {
+        await instance.outputLog.append(CONTEXT_OVERFLOW_NOTICE)
+        await this.transitionExited(instance, handle, 'failed', 'failed')
         return false
       }
 
@@ -726,6 +771,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // （crashed 收尾），与 runBurst 保持一致的错误语义。
     const pendingWrites: Promise<void>[] = []
     const writeErrors: unknown[] = []
+    // 见 runBurst 同名变量的注释。
+    let compactedThisBurst = false
     const result: EngineResult = await runEngine({
       prompt: '',
       adapter: builtin.adapter,
@@ -738,7 +785,13 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         model: builtin.model,
         maxTurns: FORK_MAX_TURNS,
         ...this.safetyOptions(builtin),
-        disableCompaction: true,
+        // fork 也必须开：从压缩点**之前**的老节点 fork 时，pathTo 回溯拿到的是完整未压缩
+        // 历史，本身就可能超窗口。不开压缩，老链 fork 必撞窗口。代价是轻量侧问也可能付一次
+        // 摘要成本——可接受（只在真的超阈值时才付）。
+        disableCompaction: false,
+        onCompactionEnd: (info) => {
+          if (info.failedReason === undefined) compactedThisBurst = true
+        },
         abortSignal: abortController.signal,
         onTurn: (event) => {
           if (event.assistantText) {
@@ -760,21 +813,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     }
 
     await mutex.run(async () => {
-      if (result.finalMessages.length < initialMessages.length) {
-        console.error(
-          `[builtin-adapter] runForkBurst compaction guard triggered for worker ${instance.worker_id}: ` +
-          `finalMessages.length (${result.finalMessages.length}) < initialMessages.length (${initialMessages.length}). ` +
-          `Compaction was unexpectedly enabled; marking incarnation as crashed.`,
-        )
-        await this.transitionExited(instance, handle, 'crashed')
-        return
-      }
-      const newMessages = result.finalMessages.slice(initialMessages.length)
-      let parent = tip
-      for (const msg of newMessages as EngineMessage[]) {
-        parent = await instance.sessionTree.append(parent, msg)
-      }
-      instance.tip = parent
+      await this.writeBack(instance, tip, result, initialMessages.length, compactedThisBurst)
 
       if (result.outcome === 'failed' || result.outcome === 'aborted') {
         await this.transitionExited(instance, handle, result.outcome === 'aborted' ? 'killed' : 'crashed')
@@ -788,9 +827,59 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         return
       }
 
+      // 侧问同样不能因为"上下文满了"就静默报 completed（见 isSilentContextOverflow）。
+      if (isSilentContextOverflow(result)) {
+        await instance.outputLog.append(CONTEXT_OVERFLOW_NOTICE)
+        await this.transitionExited(instance, handle, 'failed', 'failed')
+        return
+      }
+
       // 'completed'（end_turn）与 'max_turns' 都视为一次性侧问正常收尾。
       await this.transitionExited(instance, handle, 'completed', 'completed')
     })
+  }
+
+  /**
+   * burst 收尾把消息写回 session 树。两条互斥路径：
+   *
+   * - **未压缩**：`finalMessages` 是 `initialMessages` + 一段后缀，只回写后缀、挂在 `tip`
+   *   下（P1 起的原行为，一字不变）。
+   * - **压缩过**：`compactInPlace` 是对 messages 的整体重写（`[首条, 摘要, 最近若干条]` 再
+   *   续跑），与老链不再有"公共前缀"关系。此时按后缀 `slice(initialMessages.length)` 取到的
+   *   是**压缩后数组的错位区间**：摘要节点被掐掉、压缩后新生成的前半段消息被掐掉，而切口那
+   *   一条大概率正是一条 `tool_result`——它配对的 `assistant(tool_use)` 恰在被掐掉的那段里。
+   *   这条孤儿 `tool_result` 一旦嫁接到老 tip 下就**落盘了**，之后任何 resume/fork 把
+   *   `pathTo` 的结果发给 LLM 都是 API 400，且 400 文案不匹配任何自愈判定 = 永久卡死。
+   *   （旧的 `finalMessages.length < initialMessages.length` 防御断言挡不住这一幕：长 burst
+   *   压缩后继续跑，长度往往反而更大，断言静默放行；而它触发时又会把整个 burst 几十轮的
+   *   工作全丢掉判 crashed——既漏判又误杀，故删除，由 `compacted` 信号取代。）
+   *
+   *   修法是把整条 `finalMessages` 作为一条**新根链**写入（`append(null, …)`，SessionTree
+   *   本就允许多根，零改动）。老链一个节点不删，因此"从任意历史节点分支"仍然成立——从压缩点
+   *   之前的节点 fork 拿到的是未压缩全量（贵，但可行，且 fork burst 也开着压缩）。
+   */
+  private async writeBack(
+    instance: WorkerInstance,
+    tip: string,
+    result: EngineResult,
+    initialCount: number,
+    compacted: boolean,
+  ): Promise<void> {
+    if (compacted) {
+      let parent: string | null = null
+      for (const msg of result.finalMessages as EngineMessage[]) {
+        parent = await instance.sessionTree.append(parent, msg)
+      }
+      // finalMessages 理论上不会为空（至少含被钉住的首条），空则保持 tip 不动。
+      if (parent !== null) instance.tip = parent
+      return
+    }
+    const newMessages = result.finalMessages.slice(initialCount)
+    let parent = tip
+    for (const msg of newMessages as EngineMessage[]) {
+      parent = await instance.sessionTree.append(parent, msg)
+    }
+    instance.tip = parent
   }
 
   /** worker_id 对应的互斥锁，惰性创建（见 workerMutexes 字段注释）。 */
