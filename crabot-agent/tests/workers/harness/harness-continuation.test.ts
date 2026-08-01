@@ -16,6 +16,7 @@ import { dialogObjectIdForPrivate } from '../../../src/workers/harness/ledger-ty
 import type { HarnessEvent } from '../../../src/workers/harness/worker-events'
 import { WorkerExitedError } from '../../../src/workers/errors'
 import { BuiltinWorkerAdapter } from '../../../src/workers/builtin/adapter'
+import type { BuiltinRuntimeContext } from '../../../src/workers/builtin/runtime'
 import type { LLMAdapter } from '../../../src/engine/llm-adapter-types.js'
 import { chunksFromContent } from '../../engine/helpers/mock-stream'
 import type {
@@ -570,6 +571,7 @@ describe('WorkerHarness.handoffIncarnation — handoff 目标是 builtin 时的 
       systemPrompt: '',
       tools: [],
     }
+    const factoryCtxs: BuiltinRuntimeContext[] = []
 
     // 见 harness.ts 文件头"onStateChange 接线契约":先建空壳 Map、建 harness，再建各 adapter
     // （构造时把 harness.handleStateChange 传进去），最后把 adapter 塞进 Map。
@@ -582,7 +584,10 @@ describe('WorkerHarness.handoffIncarnation — handoff 目标是 builtin 时的 
       workersDir,
       now,
       onEvent: (e) => events.push(e),
-      builtinSpawnDefaults: () => builtinDefaults,
+      builtinSpawnDefaults: (ctx) => {
+        factoryCtxs.push(ctx)
+        return builtinDefaults
+      },
     }
     const harness = new WorkerHarness(deps)
     const source = new FakeAdapter({
@@ -602,6 +607,12 @@ describe('WorkerHarness.handoffIncarnation — handoff 目标是 builtin 时的 
 
     expect(builtinTarget.spawnCalls).toHaveLength(1)
     expect(builtinTarget.spawnCalls[0].builtin).toBe(builtinDefaults)
+    // 工厂带 per-worker 上下文（PR F）：交接沿用源化身的 workspace（§5.3 同 workspace 交接），
+    // origin 取台账上这条 worker 自己的——不是随便给一份缺省值。
+    expect(factoryCtxs).toHaveLength(1)
+    expect(factoryCtxs[0].worker_id).toBe(worker.worker_id)
+    expect(factoryCtxs[0].workspace.root).toBe(worker.incarnations[0].workspace)
+    expect(factoryCtxs[0].origin).toEqual(worker.origin)
 
     const [w] = await ledger.listWorkers(dialogObjectIdForPrivate('friend-1'))
     const newEntry = w.incarnations[w.incarnations.length - 1]

@@ -1,6 +1,17 @@
 /**
  * BuiltinWorkerAdapter — worker 契约的 builtin 实现（P1：spawn + burst 状态机 + sendInput/resume）。
  *
+ * 运行配置（LLM adapter / model / systemPrompt / tools）不是 adapter 自己造的，也不吃 spawn
+ * 那一刻的快照：**每次起化身（spawn / resume / fork / idle→running 续 burst）都调注入工厂
+ * 现取一次**（deps.resolveRuntime，spec 2026-08-01 决策 2）。per-worker 上下文（workspace /
+ * origin / goal）在 spawn 时落 <dataDir>/<worker_id>/context.json，工厂据此重建运行配置——
+ * 进程重启后 builtin worker 因此仍能 revive，而 LLM 连接信息始终不落盘。正在跑的 burst 用的
+ * 是它启动时那一份，改配置只影响下一次起化身（与 cc/codex 的语义对齐）。
+ *
+ * worker 的工作目录就是它的 workspace，不可中途切换：工具集里不给 `set_cwd`，也不给 goal
+ * 相关工具（决策 3/4），guardTools 在每轮 resolve 时硬断言。runEngine 每次都带上
+ * hookRegistry（CLI 权限闸 / skill 目录 fence / git 写 fence）与固定权限档位（决策 6）。
+ *
  * 每个 worker 落 <dataDir>/<worker_id>/session.jsonl（跨化身共享的 session 树）+
  * 每个化身独立的 output-<seq>.log / meta-<seq>.json。spawn 建目录、把 prompt 作为根
  * 节点 append 进 session 树、fire-and-forget 起一个 "burst"（一次 runEngine 调用），
@@ -46,6 +57,15 @@ import { SessionTree } from '../session-tree.js'
 import { OutputLog } from '../output-log.js'
 import { AsyncMutex } from '../async-mutex.js'
 import { WorkerExitedError } from '../errors.js'
+import {
+  BUILTIN_WORKER_PERMISSIONS,
+  FORBIDDEN_WORKER_TOOLS,
+  createBuiltinWorkerHookRegistry,
+  type BuiltinRuntimeContext,
+  type BuiltinRuntimeFactory,
+} from './runtime.js'
+import type { HookRegistry } from '../../hooks/hook-registry.js'
+import type { ToolPermissionConfig } from '../../engine/types.js'
 import type {
   AdapterCapabilities,
   CapabilityBundle,
@@ -62,6 +82,9 @@ import type {
 
 /** fork 是一次性侧问，maxTurns 取小值，避免侧问跑成一次完整任务。 */
 const FORK_MAX_TURNS = 8
+
+/** spawn 时落盘的 per-worker 上下文文件名（见 persistContext）。 */
+const CONTEXT_FILE = 'context.json'
 
 /** Re-export for backward compatibility and convenience. */
 export { WorkerExitedError }
@@ -143,8 +166,18 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
   readonly implId = 'builtin' as const
 
   private readonly instances = new Map<string, WorkerInstance>()
-  /** worker_id → spawn 时注入的 builtin 执行配置（adapter/model/tools），resume 与续 burst 复用。P1：仅内存，不跨重启持久。 */
+  /**
+   * worker_id → spawn 时注入的 builtin 执行配置（adapter/model/tools）。
+   *
+   * **仅在没有配置 `deps.resolveRuntime` 时才被当作运行配置来源**（契约套件 / 单测这类
+   * 直接把 `spec.builtin` 塞进来的调用方）。配置了工厂时，起化身一律现取（见 runtimeFor），
+   * 这张表只剩两个作用：spawn 的"已 spawn"守卫记忆，以及无工厂时的兜底。
+   */
   private readonly builtinConfigs = new Map<string, NonNullable<SpawnSpec['builtin']>>()
+  /** worker_id → spawn 时的 per-worker 上下文（workspace/origin/goal）。内存缓存，权威副本在 context.json。 */
+  private readonly spawnContexts = new Map<string, BuiltinRuntimeContext>()
+  /** 每个 adapter 实例一份 hook 注册表（无状态，可跨 worker / burst 共用）。 */
+  private readonly hookRegistry: HookRegistry = createBuiltinWorkerHookRegistry()
   /**
    * worker_id → 互斥锁，惰性创建。sendInput 全程、resume 全程、runBurst 的收尾段（判定
    * pendingInputs 到状态落定）都在同一把锁内串行执行——同一化身任意时刻至多一个 burst
@@ -157,6 +190,17 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     private readonly deps: {
       readonly dataDir: string
       readonly onStateChange?: (h: IncarnationHandle, state: WorkerContractState) => void
+      /**
+       * 运行配置工厂：**每次起化身现取一次**（spec 决策 2）。spawn 的那次由调用方
+       * （harness.spawnWorker / handoffIncarnation）调同一个工厂后放进 `spec.builtin`；
+       * resume / fork / idle→running 续 burst 没有 spec 可依，由 adapter 自己调它——
+       * 不再吃 spawn 那一刻的快照。
+       * 因此：(1) 进程重启后 builtin worker 仍能 revive（工厂挂在装配层，重启后还在；
+       * per-worker 上下文从 context.json 读回）；(2) 改了 model slot 下次起化身生效，正在跑的
+       * burst 用旧的；(3) LLM 连接信息不落盘。不配置时退化为 P1 行为（吃 spawn 时的内存快照，
+       * 跨重启不可用），供契约套件与单测使用。
+       */
+      readonly resolveRuntime?: BuiltinRuntimeFactory
     },
   ) {}
 
@@ -169,6 +213,17 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
   }
 
   async spawn(spec: SpawnSpec): Promise<IncarnationHandle> {
+    // per-worker 上下文：spawn 是它唯一的来源，后续所有化身（resume/fork/续 burst，含进程
+    // 重启之后）都从这里回喂给运行配置工厂。workspace 就是 worker 的工作目录，落盘之后
+    // 不再改变——worker 不可中途切 cwd（spec 决策 3，工具集里也不给 set_cwd，见 guardTools）。
+    const context: BuiltinRuntimeContext = {
+      worker_id: spec.worker_id,
+      workspace: spec.workspace,
+      ...(spec.origin !== undefined ? { origin: spec.origin } : {}),
+      ...(spec.goal !== undefined ? { goal: spec.goal } : {}),
+    }
+    // spawn 的注入由调用方给（harness.spawnWorker 在缺省时回退到同一个工厂）——这里不再兜
+    // 一次：两处回退会互相掩盖，缺了 harness 那条回退也看不出问题。缺失即 fail-loud，不降级。
     if (!spec.builtin) {
       throw new Error(`BuiltinWorkerAdapter.spawn: spec.builtin missing for worker ${spec.worker_id}`)
     }
@@ -217,8 +272,12 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       // instances 命中 / 磁盘 meta-${seq}.json 存在）全部落空——writeMeta 还没成功过，没有
       // 一个会命中。调用方重试 spawn 因此不会被拦住，只会在 session.jsonl 里再 append 一个
       // 孤儿根节点（不被任何化身的 tip 引用，是良性的，不影响 pathTo）。
+      // context.json 与 meta 一样在提交前落盘：resume/fork 起新化身（含跨进程重启）要靠它
+      // 重建工厂 ctx，落盘失败就不该出现一个"已注册但事后起不了化身"的 worker。
+      await this.persistContext(dir, context)
       await this.writeMeta(newInstance)
       this.instances.set(instanceKey(spec.worker_id, seq), newInstance)
+      this.spawnContexts.set(spec.worker_id, context)
       this.builtinConfigs.set(spec.worker_id, builtin)
       return { instance: newInstance, handle: newHandle }
     })
@@ -231,10 +290,9 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
   }
 
   async resume(prev: IncarnationRef, wakeInput: string): Promise<IncarnationHandle> {
-    const builtin = this.builtinConfigs.get(prev.worker_id)
-    if (!builtin) {
-      throw new Error(`BuiltinWorkerAdapter.resume: no builtin config resident in memory for worker ${prev.worker_id} (P1: worker must have been spawned in this process)`)
-    }
+    // 起化身 → 现取运行配置（spec 决策 2）。这条正是"进程重启后 builtin worker 能不能
+    // revive"的分水岭：吃 spawn 时的内存快照时，重启后这里必然拿不到配置。
+    const builtin = await this.runtimeFor(prev.worker_id, 'resume')
 
     // assertExited + 重复 resume 检测 + newSeq 计算 + append + 实例注册整体在锁内原子完成：
     // 两次并发 resume 同一 prev 若不串行化，会各自往 prev.session_ref 上挂一个孩子——树分叉。
@@ -288,10 +346,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
   }
 
   async fork(prev: IncarnationRef, forkInput: string): Promise<IncarnationHandle> {
-    const builtin = this.builtinConfigs.get(prev.worker_id)
-    if (!builtin) {
-      throw new Error(`BuiltinWorkerAdapter.fork: no builtin config resident in memory for worker ${prev.worker_id} (P1: worker must have been spawned in this process)`)
-    }
+    // 同 resume：fork 也是起一个新化身，运行配置现取。
+    const builtin = await this.runtimeFor(prev.worker_id, 'fork')
 
     // fork 不要求 prev 处于任何特定状态——这就是侧问的意义：主线跑着的时候也能问。不像
     // resume 那样校验 assertExited。newSeq 用 nextSeq()，与 resume 共用同一分配逻辑、
@@ -351,17 +407,16 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 
       if (instance.state === 'running') {
         instance.pendingInputs.push(text)
-        return false
+        return undefined
       }
 
       // idle → 追加新一轮用户消息，转 running。起 burst 留到锁外（见下）。
-      const builtin = this.builtinConfigs.get(h.worker_id)
-      if (!builtin) {
-        throw new Error(`BuiltinWorkerAdapter.sendInput: no builtin config resident in memory for worker ${h.worker_id}`)
-      }
+      // 运行配置现取：idle 态下没有 burst 在跑，重新解析一次不会干扰任何正在执行的东西，
+      // 语义与"起化身现取"一致（正在跑的 burst 用旧配置，见 runBurst 续 burst 路径）。
+      const builtin = await this.runtimeFor(h.worker_id, 'sendInput')
       instance.tip = await instance.sessionTree.append(instance.tip, createUserMessage(text))
       await this.transitionState(instance, h, 'running')
-      return true
+      return builtin
     })
 
     if (!startBurst) return
@@ -369,8 +424,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // burst 的 runEngine 调用本身在锁外：否则并发 sendInput(running) 的入队会被这次
     // burst 的整个执行时长堵死。
     const instance = this.instances.get(instanceKey(h.worker_id, h.seq))!
-    const builtin = this.builtinConfigs.get(h.worker_id)!
-    this.runBurst(instance, h, builtin).catch((err) => this.safetyNetExit(instance, h, err, 'runBurst (sendInput continuation)'))
+    this.runBurst(instance, h, startBurst).catch((err) => this.safetyNetExit(instance, h, err, 'runBurst (sendInput continuation)'))
   }
 
   async readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
@@ -543,6 +597,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         tools: this.combineTools(builtin.tools),
         model: builtin.model,
         ...(builtin.maxTurnsPerBurst !== undefined ? { maxTurns: builtin.maxTurnsPerBurst } : {}),
+        ...this.safetyOptions(builtin),
         // session 树以原始消息为真相源，burst 内禁用压缩。压缩与树的协同（折叠节点）是 P7 集成议题。
         disableCompaction: true,
         abortSignal: abortController.signal,
@@ -673,9 +728,12 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       initialMessages,
       options: {
         systemPrompt: builtin.systemPrompt,
-        tools: builtin.tools,
+        // fork 不加 finish_task（一次性侧问），但工具集守卫与安全项与主线完全一致——
+        // 侧问同样是一次真实的 LLM + 工具执行，没有理由少一道闸。
+        tools: this.guardTools(builtin.tools),
         model: builtin.model,
         maxTurns: FORK_MAX_TURNS,
+        ...this.safetyOptions(builtin),
         disableCompaction: true,
         abortSignal: abortController.signal,
         onTurn: (event) => {
@@ -803,7 +861,145 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
   }
 
   private combineTools(tools: Resolvable<ReadonlyArray<ToolDefinition>>): Resolvable<ReadonlyArray<ToolDefinition>> {
-    return () => [...resolve(tools), FINISH_TASK_TOOL]
+    const guarded = this.guardTools(tools)
+    return () => [...resolve(guarded), FINISH_TASK_TOOL]
+  }
+
+  /**
+   * 工具集守卫（spec 决策 3 / 决策 4）：`set_cwd` / `set_task_goal` 绝不许出现在 builtin
+   * worker 的工具集里。放在 resolve 路径上而不是 spawn 一次性检查——`tools` 是 Resolvable，
+   * engine 每轮 turn 都会重新 resolve，装配层中途换出一份带 set_cwd 的工具表同样要被拦下。
+   * 违规是装配层的配置错误，fail-loud 抛错（burst 因此落 exited(crashed)，错误信息指名道姓），
+   * 不静默过滤——静默过滤会让"worker 悄悄换了工作目录"这类问题拖到线上才发现。
+   */
+  private guardTools(tools: Resolvable<ReadonlyArray<ToolDefinition>>): Resolvable<ReadonlyArray<ToolDefinition>> {
+    return () => {
+      const resolved = resolve(tools)
+      const forbidden = resolved.filter((t) => FORBIDDEN_WORKER_TOOLS.has(t.name)).map((t) => t.name)
+      if (forbidden.length > 0) {
+        throw new Error(
+          `[builtin-adapter] forbidden tool(s) in builtin worker toolset: ${forbidden.join(', ')}. ` +
+          'worker 的工作目录固定为它的 workspace（不可中途切换），且不装配 goal 模式；' +
+          '这两类工具不得注入（spec 2026-08-01-builtin-worker-injection-design 决策 3/4）。',
+        )
+      }
+      return resolved
+    }
+  }
+
+  /**
+   * 每次 runEngine 都要带上的安全项与模型参数（spec 决策 6）。
+   *
+   * `hookRegistry` 是其中唯一不能省的一项：工具面过滤只保证"工具不出现在列表里"，挡不住
+   * worker 在 Bash 里直接跑 `crabot` 写命令——CLI 闸口只有 PreToolUse hook 这一处。
+   * `permissionConfig` 用 checkPermission 动态判定而不是静态 denyList：`tools` 是 Resolvable，
+   * 静态清单会在装配层换工具表之后失真。
+   * timezone / supportsVision / maxTokens / contextWindowTokens 随 model 由注入工厂给出，
+   * adapter 自己无从知道；缺省则不传，由 engine 用它自己的默认值。
+   */
+  private safetyOptions(builtin: NonNullable<SpawnSpec['builtin']>): {
+    permissionConfig: ToolPermissionConfig
+    hookRegistry: HookRegistry
+    resolvedPermissions: typeof BUILTIN_WORKER_PERMISSIONS
+    senderIsMaster: boolean
+    maxTokens?: number
+    contextWindowTokens?: number
+    supportsVision?: boolean
+    timezone?: string
+  } {
+    return {
+      permissionConfig: this.workerPermissionConfig(builtin.tools),
+      hookRegistry: this.hookRegistry,
+      resolvedPermissions: BUILTIN_WORKER_PERMISSIONS,
+      // worker 不是任何人：F 阶段没有可信发起人身份（origin.creator_friend_id 现网恒空），
+      // 不能走 CLI 闸的 master 短路。J 接线真实身份后由 origin 解析（见 runtime.ts 注释）。
+      senderIsMaster: false,
+      ...(builtin.maxTokens !== undefined ? { maxTokens: builtin.maxTokens } : {}),
+      ...(builtin.contextWindowTokens !== undefined ? { contextWindowTokens: builtin.contextWindowTokens } : {}),
+      ...(builtin.supportsVision !== undefined ? { supportsVision: builtin.supportsVision } : {}),
+      ...(builtin.timezone !== undefined ? { timezone: builtin.timezone } : {}),
+    }
+  }
+
+  /**
+   * 按固定权限档位（BUILTIN_WORKER_PERMISSIONS.tool_access）过滤工具，映射方式与现网
+   * worker loop 一致：工具的 `category` 落在被关掉的面上即拒。`finish_task` 是契约的终态
+   * 信号（不是能力面），恒放行。
+   */
+  private workerPermissionConfig(tools: Resolvable<ReadonlyArray<ToolDefinition>>): ToolPermissionConfig {
+    const toolAccess = BUILTIN_WORKER_PERMISSIONS.tool_access
+    return {
+      // checkPermission 存在时覆盖一切静态判定（engine/permission-checker.ts），
+      // mode/toolNames 在这条路径上不参与决策。
+      mode: 'denyList',
+      toolNames: [],
+      checkPermission: async (toolName: string) => {
+        if (toolName === FINISH_TASK_TOOL.name) return { allowed: true }
+        const tool = resolve(tools).find((t) => t.name === toolName)
+        const category = tool?.category ?? 'mcp_skill'
+        if (toolAccess[category]) return { allowed: true }
+        return { allowed: false, reason: `builtin worker 权限档位未开放 ${category} 类工具（tool=${toolName}）` }
+      },
+    }
+  }
+
+  /**
+   * 起化身时现取运行配置（spec 决策 2）。配置了工厂就一律现取——ctx 从内存缓存或
+   * context.json 读回，因此进程重启后仍然可用（这是 builtin worker 能 revive 的前提）。
+   * 没配工厂时退化为 P1 的内存快照，仅供契约套件与单测。
+   */
+  private async runtimeFor(worker_id: string, op: string): Promise<NonNullable<SpawnSpec['builtin']>> {
+    if (this.deps.resolveRuntime) {
+      const context = await this.loadContext(worker_id)
+      if (!context) {
+        throw new Error(
+          `BuiltinWorkerAdapter.${op}: no spawn context for worker ${worker_id} ` +
+          `(${CONTEXT_FILE} missing — worker was never spawned through this adapter?)`,
+        )
+      }
+      const builtin = this.deps.resolveRuntime(context)
+      if (!builtin) {
+        throw new Error(`BuiltinWorkerAdapter.${op}: resolveRuntime returned no runtime config for worker ${worker_id}`)
+      }
+      return builtin
+    }
+    const resident = this.builtinConfigs.get(worker_id)
+    if (!resident) {
+      throw new Error(
+        `BuiltinWorkerAdapter.${op}: no builtin config resident in memory for worker ${worker_id} ` +
+        '(no resolveRuntime factory configured; worker must have been spawned in this process)',
+      )
+    }
+    return resident
+  }
+
+  /** spawn 时把 per-worker 上下文原子落盘（tmp + rename，与 writeMeta 同款）。 */
+  private async persistContext(dir: string, context: BuiltinRuntimeContext): Promise<void> {
+    const path = join(dir, CONTEXT_FILE)
+    const tmpPath = join(dir, `.${CONTEXT_FILE}.tmp-${randomUUID()}`)
+    await fs.writeFile(tmpPath, JSON.stringify(context), 'utf-8')
+    await fs.rename(tmpPath, path)
+  }
+
+  /** 读 per-worker 上下文：内存缓存优先，缺失时回落到磁盘（进程重启后走的就是这条）。 */
+  private async loadContext(worker_id: string): Promise<BuiltinRuntimeContext | undefined> {
+    const cached = this.spawnContexts.get(worker_id)
+    if (cached) return cached
+    const path = join(this.deps.dataDir, worker_id, CONTEXT_FILE)
+    let raw: string
+    try {
+      raw = await fs.readFile(path, 'utf-8')
+    } catch {
+      return undefined
+    }
+    let parsed: BuiltinRuntimeContext
+    try {
+      parsed = JSON.parse(raw) as BuiltinRuntimeContext
+    } catch {
+      return undefined
+    }
+    this.spawnContexts.set(worker_id, parsed)
+    return parsed
   }
 
   // 先落盘、再切内存态：state() 优先读内存，若顺序反过来，外部在 writeMeta 的

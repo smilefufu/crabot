@@ -1,5 +1,7 @@
 import type { ToolDefinition, LLMAdapter } from '../engine/index.js'
 import type { Resolvable } from '../engine/types.js'
+// 纯类型引用(两侧都是 `import type`,编译后无运行时依赖,不构成模块环)。
+import type { LedgerWorker } from './harness/ledger-types.js'
 
 export type WorkerImplId = 'builtin' | 'claude-code' | 'codex'
 export type WorkerContractState = 'running' | 'idle' | 'exited'
@@ -28,6 +30,11 @@ export interface SpawnSpec {
   readonly prompt: string
   readonly workspace: Workspace
   readonly goal?: string
+  /**
+   * 台账 origin(派发来源与权限身份)。builtin adapter 把它与 workspace/goal 一起持久化,
+   * 起后续化身(resume/fork)时回喂给运行配置工厂——包括进程重启之后。外部 CLI adapter 忽略。
+   */
+  readonly origin?: LedgerWorker['origin']
   /** builtin 专用注入(外部 CLI adapter 忽略) */
   readonly builtin?: {
     readonly adapter: LLMAdapter
@@ -35,6 +42,12 @@ export interface SpawnSpec {
     readonly systemPrompt: Resolvable<string>
     readonly tools: Resolvable<ReadonlyArray<ToolDefinition>>
     readonly maxTurnsPerBurst?: number
+    /** 以下四项随 model 一起由注入工厂解析——adapter 自己无从知道模型能力/上限。 */
+    readonly maxTokens?: number
+    readonly contextWindowTokens?: number
+    readonly supportsVision?: boolean
+    /** IANA 时区名,用于 tool_result 时间戳渲染 */
+    readonly timezone?: string
   }
 }
 

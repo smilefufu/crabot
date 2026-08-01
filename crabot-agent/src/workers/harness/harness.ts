@@ -77,6 +77,7 @@ import type {
   CapabilityBundle,
   Workspace,
 } from '../types'
+import type { BuiltinRuntimeFactory } from '../builtin/runtime'
 import { CapabilityNotSupportedError, WorkerExitedError } from '../errors'
 import { AsyncMutex } from '../async-mutex'
 import type { DialogObjectId, Incarnation, LedgerWorker, TaskStatus } from './ledger-types'
@@ -158,8 +159,13 @@ export interface HarnessDeps {
    * 自动触发,调用方拿不到再传一次 builtin 注入的机会),因此在 HarnessDeps 这一级配置
    * 一份可复用的默认值。缺省时 handoffIncarnation 对 builtin 目标做 pre-flight 拒绝
    * (见该方法注释),不尝试传 `undefined` 让 `BuiltinWorkerAdapter.spawn` 自己再抛错。
+   *
+   * PR F:`spawnWorker` 在 `p.builtin` 缺失且目标实现是 builtin 时也回退调它——manager 的
+   * `spawn_worker` 工具不可能从 LLM 入参里拿到 LLMAdapter / tools 这类运行时对象,注入
+   * 只能来自装配层。工厂带 per-worker 上下文(worker_id / workspace / origin / goal),
+   * 无参签名装不下这些维度(见 `BuiltinRuntimeFactory`)。
    */
-  readonly builtinSpawnDefaults?: () => SpawnSpec['builtin']
+  readonly builtinSpawnDefaults?: BuiltinRuntimeFactory
 }
 
 export interface SpawnWorkerParams {
@@ -260,12 +266,28 @@ export class WorkerHarness {
       try {
         const caps = this.deps.capabilityBundle ? await this.deps.capabilityBundle() : EMPTY_CAPABILITY_BUNDLE
         await adapter.provision(workspace, caps)
+        // builtin 注入:调用方显式传了就用它;没传(manager 的 spawn_worker 工具就不可能传——
+        // LLMAdapter / tools 是运行时对象,不可能来自 LLM 入参)则回退到装配层注入的工厂,
+        // 与 handoffIncarnation 走同一个工厂。目标实现不是 builtin 时不调工厂:CLI adapter
+        // 忽略该字段,白解析一次 LLM 连接信息没有意义。工厂抛错走下面的 catch,如实落成一次
+        // 失败的 spawn 尝试(queued→running→failed),不静默。
+        const builtin =
+          p.builtin ??
+          (impl === 'builtin'
+            ? this.deps.builtinSpawnDefaults?.({
+                worker_id: workerId,
+                workspace,
+                origin: p.origin,
+                goal: p.goal,
+              })
+            : undefined)
         const spec: SpawnSpec = {
           worker_id: workerId,
           prompt: p.prompt,
           workspace,
           goal: p.goal,
-          builtin: p.builtin,
+          origin: p.origin,
+          builtin,
         }
         spawnedHandle = await adapter.spawn(spec)
       } catch (err) {
@@ -649,7 +671,15 @@ export class WorkerHarness {
     }
     let builtinInjection: SpawnSpec['builtin']
     if (targetImpl === 'builtin') {
-      builtinInjection = this.deps.builtinSpawnDefaults?.()
+      // 工厂签名带上了 per-worker 上下文(PR F),这里的语义不变:仍在 pre-flight 阶段调一次、
+      // 拿不到就在动源化身之前拒绝。ctx 取交接语境下的既有值——新化身沿用源化身的 workspace
+      // (§5.3 同 workspace 交接),origin/goal 取台账上这条 worker 自己的。
+      builtinInjection = this.deps.builtinSpawnDefaults?.({
+        worker_id: worker.worker_id,
+        workspace: { root: source.workspace },
+        origin: worker.origin,
+        goal: worker.task.goal,
+      })
       if (!builtinInjection) {
         throw new Error(
           `WorkerHarness.handoffIncarnation: handoff target impl is 'builtin' but no builtinSpawnDefaults ` +
@@ -713,6 +743,7 @@ export class WorkerHarness {
       prompt,
       workspace,
       goal: worker.task.goal,
+      origin: worker.origin,
       builtin: builtinInjection,
     })
 
