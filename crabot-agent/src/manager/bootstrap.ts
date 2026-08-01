@@ -39,7 +39,8 @@ import type { DialogObjectId } from '../workers/harness/ledger-types'
 import { BuiltinWorkerAdapter } from '../workers/builtin/adapter.js'
 import { ClaudeCodeAdapter } from '../workers/claude-code/adapter.js'
 import { CodexWorkerAdapter } from '../workers/codex/adapter.js'
-import type { SpawnSpec, WorkerAdapter, WorkerImplId } from '../workers/types.js'
+import type { WorkerAdapter, WorkerImplId } from '../workers/types.js'
+import type { BuiltinRuntimeFactory } from '../workers/builtin/runtime.js'
 
 import { ManagerRegistry } from './registry.js'
 import { ManagerSessionStore } from './session-store.js'
@@ -111,8 +112,13 @@ export interface BootstrapDeps {
    * 本模块拿不到,而 `ManagerRegistryDeps.dialogObjectIdFor` 又是同步签名,不能在这里现查。
    */
   readonly dialogObjectIdFor: (key: ManagerKey) => DialogObjectId
-  /** handoff 目标为 builtin 时的 LLM 注入缺省值,原样透传给 `HarnessDeps.builtinSpawnDefaults`。 */
-  readonly builtinSpawnDefaults?: () => SpawnSpec['builtin']
+  /**
+   * builtin worker 的运行配置工厂(spawn 缺省注入 / handoff 目标为 builtin 时的注入)。
+   * 同一个工厂同时喂给 `HarnessDeps.builtinSpawnDefaults`(spawn/handoff 起化身)与
+   * `BuiltinWorkerAdapter.resolveRuntime`(resume/fork/续 burst 起化身)——两条路都要
+   * "起化身时现取",不能各持一份(spec 决策 2)。
+   */
+  readonly builtinSpawnDefaults?: BuiltinRuntimeFactory
   /**
    * 对外事件发布口(§9.2 `agent.task_status_changed`),由 `makeAgentEventPublisher` 构造。
    * 可选:P5 阶段这套栈没有生产调用方,注入真实 rpcClient 是 P5 Task 6 的事;不注入则本栈
@@ -195,7 +201,11 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   // --- step 3 + 4:构造三个 adapter 时传 harness.handleStateChange,再 set 回同一个 Map ---
   adapters.set(
     'builtin',
-    new BuiltinWorkerAdapter({ dataDir: builtinDataDir, onStateChange: harness.handleStateChange }),
+    new BuiltinWorkerAdapter({
+      dataDir: builtinDataDir,
+      onStateChange: harness.handleStateChange,
+      resolveRuntime: deps.builtinSpawnDefaults,
+    }),
   )
   adapters.set(
     'claude-code',
