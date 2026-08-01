@@ -424,9 +424,17 @@ export interface EngineOptions {
    */
   readonly onCompactionStart?: () => void
   /**
-   * 上下文压缩完成时触发。`info` 含压缩前后消息数与耗时。
+   * 上下文压缩结束时触发（成功与失败都触发，失败路径也要关掉 trace span）。
+   * `info` 含压缩前后消息数与耗时；`failedReason` 存在表示这次**没压成**
+   * （messages 保持原样，afterCount === beforeCount）——不得当成压缩成功汇报。
+   * 值为 'aborted' 时表示任务被中止，非压缩本身故障。
    */
-  readonly onCompactionEnd?: (info: { readonly beforeCount: number; readonly afterCount: number; readonly durationMs: number }) => void
+  readonly onCompactionEnd?: (info: {
+    readonly beforeCount: number
+    readonly afterCount: number
+    readonly durationMs: number
+    readonly failedReason?: string
+  }) => void
   /**
    * 禁用所有 compaction 触发路径（既不自动压缩，也不在 max_tokens 静默响应时压缩重试）。
    *

@@ -7,7 +7,7 @@ import {
   type ContentBlock,
   type StreamChunk,
 } from '../../src/engine/types'
-import { ContextManager } from '../../src/engine/context-manager'
+import { ContextManager, CompactionFailedError } from '../../src/engine/context-manager'
 import type { LLMAdapter } from '../../src/engine/llm-adapter'
 
 function mockAdapter(responseText: string): LLMAdapter {
@@ -30,9 +30,21 @@ function mockFailingAdapter(errorMessage: string): LLMAdapter {
   }
 }
 
+/** 摘要调用中途被取消：adapter 直接抛 AbortError（callNonStreaming 不重试、原样上抛）。 */
+function mockAbortingAdapter(): LLMAdapter {
+  return {
+    // eslint-disable-next-line require-yield
+    async *stream() {
+      throw new DOMException('Aborted', 'AbortError')
+    },
+    updateConfig() {},
+  }
+}
+
 interface CapturedCall {
   messages: EngineMessage[]
   systemPrompt: string
+  signal?: AbortSignal
 }
 
 function capturingAdapter(responseText: string): { adapter: LLMAdapter; captured: CapturedCall } {
@@ -41,6 +53,7 @@ function capturingAdapter(responseText: string): { adapter: LLMAdapter; captured
     async *stream(params) {
       captured.messages = [...params.messages]
       captured.systemPrompt = params.systemPrompt
+      captured.signal = params.signal
       yield { type: 'message_start', messageId: 'msg_1' } as StreamChunk
       yield { type: 'text_delta', text: responseText } as StreamChunk
       yield { type: 'message_end', stopReason: 'end_turn' } as StreamChunk
@@ -472,7 +485,9 @@ describe('ContextManager', () => {
       expect(compacted[4]).toBe(messages[4])
     })
 
-    it('should fall back to text-based compact on LLM error', async () => {
+    // 坑 1：摘要失败静默降级成"假压缩"。旧实现 catch 后回退 compactMessages，
+    // 而后者对 tool_result 返回全量正文——上层看到"压缩成功"，token 却几乎没降。
+    it('rejects with CompactionFailedError instead of a fake compaction when the summary LLM fails', async () => {
       const cm = new ContextManager({
         maxContextTokens: 10000,
         keepRecentMessages: 2,
@@ -486,16 +501,215 @@ describe('ContextManager', () => {
       ]
 
       const adapter = mockFailingAdapter('LLM service unavailable')
+
+      await expect(cm.compactWithLLM(messages, adapter, 'test-model')).rejects.toBeInstanceOf(
+        CompactionFailedError,
+      )
+      // 原始 messages 不被改写
+      expect(messages).toHaveLength(4)
+    })
+
+    it('never returns a "compacted" result whose tokens did not actually drop (summary LLM failure)', async () => {
+      // 复现坑 1 的可观测后果：worker 场景的 token 由 tool_result 正文主导，
+      // 文本回退只丢掉 tool_use 入参/图片/消息开销，正文一字不减。
+      const cm = new ContextManager({
+        maxContextTokens: 100000,
+        keepRecentMessages: 2,
+      })
+
+      const bashOutput = 'x'.repeat(40000)
+      const messages: EngineMessage[] = [
+        createUserMessage('任务来源：跑一遍测试'),
+        createAssistantMessage(
+          [{ type: 'tool_use', id: 'tu_1', name: 'Bash', input: { command: 'pnpm test' } }],
+          'tool_use',
+        ),
+        createToolResultMessage('tu_1', bashOutput, false),
+        createAssistantMessage(
+          [{ type: 'tool_use', id: 'tu_2', name: 'Bash', input: { command: 'pnpm test again' } }],
+          'tool_use',
+        ),
+        createToolResultMessage('tu_2', bashOutput, false),
+        createUserMessage('继续'),
+        createAssistantMessage([{ type: 'text', text: '好的' }], 'end_turn'),
+      ]
+      const beforeTokens = cm.estimateTotalTokens(messages)
+
+      const adapter = mockFailingAdapter('429 rate limited (retries exhausted)')
+      const outcome = await cm
+        .compactWithLLM(messages, adapter, 'test-model')
+        .then((compacted) => ({ resolved: true as const, compacted }))
+        .catch((error: unknown) => ({ resolved: false as const, error }))
+
+      if (outcome.resolved) {
+        // 若实现选择返回而不是抛错，那也必须是"真的压下来了"，不许假装成功
+        expect(cm.estimateTotalTokens(outcome.compacted)).toBeLessThan(beforeTokens / 2)
+      } else {
+        expect(outcome.error).toBeInstanceOf(CompactionFailedError)
+      }
+    })
+
+    it('rejects when the summary LLM returns empty text', async () => {
+      // 空摘要 = 整段被折叠内容凭空消失，同样属于"假装压缩成功"
+      const cm = new ContextManager({ maxContextTokens: 10000, keepRecentMessages: 2 })
+      const messages: EngineMessage[] = [
+        createUserMessage('First question'),
+        createAssistantMessage([{ type: 'text', text: 'First answer' }], 'end_turn'),
+        createUserMessage('Second question'),
+        createAssistantMessage([{ type: 'text', text: 'Second answer' }], 'end_turn'),
+      ]
+
+      const adapter = mockAdapter('   ')
+      await expect(cm.compactWithLLM(messages, adapter, 'test-model')).rejects.toBeInstanceOf(
+        CompactionFailedError,
+      )
+    })
+
+    // 坑 2：同一个 catch 吞掉 abort——中止途中还多改一次 messages
+    it('propagates abort errors instead of swallowing them into a text fallback', async () => {
+      const cm = new ContextManager({
+        maxContextTokens: 10000,
+        keepRecentMessages: 2,
+      })
+
+      const messages: EngineMessage[] = [
+        createUserMessage('First question'),
+        createAssistantMessage([{ type: 'text', text: 'First answer' }], 'end_turn'),
+        createUserMessage('Second question'),
+        createAssistantMessage([{ type: 'text', text: 'Second answer' }], 'end_turn'),
+      ]
+
+      const adapter = mockAbortingAdapter()
+      const error = await cm
+        .compactWithLLM(messages, adapter, 'test-model')
+        .then(() => undefined, (e: unknown) => e)
+
+      expect(error).toBeInstanceOf(Error)
+      expect((error as Error).name).toBe('AbortError')
+      // 不许被包装成压缩失败——调用方要能区分"中止"与"压缩挂了"
+      expect(error).not.toBeInstanceOf(CompactionFailedError)
+    })
+
+    it('forwards the abort signal to the summarization call', async () => {
+      const cm = new ContextManager({
+        maxContextTokens: 10000,
+        keepRecentMessages: 2,
+      })
+      const messages: EngineMessage[] = [
+        createUserMessage('First question'),
+        createAssistantMessage([{ type: 'text', text: 'First answer' }], 'end_turn'),
+        createUserMessage('Second question'),
+        createAssistantMessage([{ type: 'text', text: 'Second answer' }], 'end_turn'),
+      ]
+
+      const controller = new AbortController()
+      const { adapter, captured } = capturingAdapter('摘要')
+      await cm.compactWithLLM(messages, adapter, 'test-model', controller.signal)
+
+      expect(captured.signal).toBe(controller.signal)
+    })
+
+    // 坑 3：摘要输入自己会超窗——待折叠段全量（含全量 tool_result）拼一条消息喂给摘要模型
+    it('truncates each tool_result in the summary prompt', async () => {
+      const cm = new ContextManager({
+        maxContextTokens: 100000,
+        keepRecentMessages: 2,
+      })
+
+      const huge = 'y'.repeat(50000)
+      const messages: EngineMessage[] = [
+        createUserMessage('任务'),
+        createAssistantMessage(
+          [{ type: 'tool_use', id: 'tu_1', name: 'Bash', input: { command: 'cat big.log' } }],
+          'tool_use',
+        ),
+        createToolResultMessage('tu_1', huge, false),
+        createUserMessage('继续'),
+        createAssistantMessage([{ type: 'text', text: '好的' }], 'end_turn'),
+      ]
+
+      const { adapter, captured } = capturingAdapter('摘要')
+      await cm.compactWithLLM(messages, adapter, 'test-model')
+
+      const prompt = (captured.messages[0] as { content: string }).content
+      expect(prompt).toContain('已截断')
+      expect(prompt.length).toBeLessThan(10000)
+    })
+
+    it('caps the total summary prompt by a budget derived from the context window', async () => {
+      // maxContextTokens=1000 → 预算 1000 * 4 * 0.5 = 2000 字符。
+      // 30 条 2000 字符的 tool_result（逐条截断后仍有 6 万字符）必须被整体裁到预算内。
+      const cm = new ContextManager({
+        maxContextTokens: 1000,
+        keepRecentMessages: 2,
+      })
+
+      const messages: EngineMessage[] = [createUserMessage('任务')]
+      for (let i = 0; i < 30; i++) {
+        messages.push(
+          createAssistantMessage(
+            [{ type: 'tool_use', id: `tu_${i}`, name: 'Bash', input: { command: `run ${i}` } }],
+            'tool_use',
+          ),
+        )
+        messages.push(createToolResultMessage(`tu_${i}`, `result ${i} ${'z'.repeat(2000)}`, false))
+      }
+      messages.push(createUserMessage('继续'))
+      messages.push(createAssistantMessage([{ type: 'text', text: '好的' }], 'end_turn'))
+
+      const { adapter, captured } = capturingAdapter('摘要')
+      await cm.compactWithLLM(messages, adapter, 'test-model')
+
+      const prompt = (captured.messages[0] as { content: string }).content
+      expect(prompt.length).toBeLessThan(3000)
+      expect(prompt).toContain('已省略更早')
+      // 保留的是最近的那一段（最旧的被丢）
+      expect(prompt).toContain('result 29')
+      expect(prompt).not.toContain('result 0 ')
+    })
+
+    // 坑 4：findSafeSplitIndex 的回退无界——外部来源（resume checkpoint / session 树回灌）
+    // 出现连续 tool_result 时会一路退到 <=1，压缩静默变 no-op
+    it('still compacts when the folded range is a run of consecutive tool_results', async () => {
+      const cm = new ContextManager({
+        maxContextTokens: 10000,
+        keepRecentMessages: 3,
+      })
+
+      // index 1..8 全是 tool_result（外部回灌的病态形态），index 9 是普通 user message
+      const messages: EngineMessage[] = [createUserMessage('任务来源')]
+      for (let i = 1; i <= 8; i++) {
+        messages.push(createToolResultMessage(`tu_${i}`, `result ${i}`, false))
+      }
+      messages.push(createUserMessage('最新一条'))
+
+      const { adapter } = capturingAdapter('摘要')
       const compacted = await cm.compactWithLLM(messages, adapter, 'test-model')
 
-      // Should still produce a valid result via text-based fallback
-      expect(compacted).toHaveLength(4) // 1 first + 1 summary + 2 recent
-      expect(compacted[0]).toBe(messages[0]) // 首条钉住
-      expect(compacted[1].role).toBe('user')
-      const summaryContent = (compacted[1] as { content: string | ContentBlock[] }).content
-      expect(typeof summaryContent).toBe('string')
-      // Text-based fallback uses [Summary of earlier conversation]
-      expect(summaryContent).toContain('[Summary')
+      // 不许静默 no-op：首条钉住 + 摘要 + recent 段
+      expect(compacted.length).toBeLessThan(messages.length)
+      expect(compacted[0]).toBe(messages[0])
+      // recent 段第一条不能是孤儿 tool_result（其 tool_use 已被折叠进摘要）
+      const firstRecent = compacted[2]
+      expect('toolResults' in firstRecent).toBe(false)
+      expect(firstRecent).toBe(messages[9])
+    })
+
+    it('rejects when no safe split point exists at all', async () => {
+      const cm = new ContextManager({
+        maxContextTokens: 10000,
+        keepRecentMessages: 3,
+      })
+
+      const messages: EngineMessage[] = [createUserMessage('任务来源')]
+      for (let i = 1; i <= 9; i++) {
+        messages.push(createToolResultMessage(`tu_${i}`, `result ${i}`, false))
+      }
+
+      const { adapter } = capturingAdapter('摘要')
+      await expect(cm.compactWithLLM(messages, adapter, 'test-model')).rejects.toBeInstanceOf(
+        CompactionFailedError,
+      )
     })
 
     it('should not compact if messages count is at or below keepRecentMessages', async () => {

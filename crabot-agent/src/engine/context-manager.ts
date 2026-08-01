@@ -41,11 +41,50 @@ interface CumulativeUsage {
   readonly outputTokens: number
 }
 
+/**
+ * 上下文压缩失败（摘要 LLM 调用失败 / 摘要为空 / 找不到合法切点）。
+ *
+ * 压缩失败**不再**静默回退到纯文本折叠——那条回退对 tool_result 正文一字不减，
+ * 等于"假压缩"：上层看到压缩成功、下一轮仍超阈值，于是每轮再烧一次注定失败的摘要调用。
+ * 调用方（query-loop）据此走与"主 LLM 调用失败"同一条 failed 路径。
+ *
+ * 注意：abort 不包在这里——AbortError 原样穿透，让调用方以 aborted 收尾。
+ */
+export class CompactionFailedError extends Error {
+  constructor(message: string, cause?: unknown) {
+    super(message)
+    this.name = 'CompactionFailedError'
+    if (cause !== undefined) {
+      ;(this as Error & { cause?: unknown }).cause = cause
+    }
+  }
+}
+
 export const DEFAULT_COMPACT_THRESHOLD = 0.8
 const DEFAULT_KEEP_RECENT = 6
 const CHARS_PER_TOKEN = 4
 const MESSAGE_OVERHEAD_TOKENS = 4
 const IMAGE_TOKENS = 1000
+
+/**
+ * 摘要输入里单条 tool_result 的字符上限。
+ * 依据：pi 的 `TOOL_RESULT_MAX_CHARS = 2000`（coding-agent/src/core/compaction/utils.ts:89）。
+ * 摘要要的是"这条命令跑成/跑挂了、关键结论是什么"，不是逐字节日志；
+ * 2000 字符（≈500 token）足够覆盖一条命令的头尾结论，又不会让单条 Bash 输出吃掉整个预算。
+ */
+const SUMMARY_TOOL_RESULT_MAX_CHARS = 2000
+
+/**
+ * 摘要输入的总预算比例（相对 maxContextTokens）。
+ * 依据：摘要调用与主循环共用同一个上下文窗口，而它恰恰发生在上下文已过 80% 阈值时——
+ * 逐条截断不设总量上限时，待折叠段的条数仍然无界（几百条 × 2000 字符照样超窗）。
+ * 取窗口的一半：留出 compact system prompt（约 1k token）与摘要输出空间，
+ * 且不引入新的可配置项（保留条数/触发阈值/prompt 内容一律不动）。
+ */
+const SUMMARY_INPUT_BUDGET_RATIO = 0.5
+
+/** findSafeSplitIndex 的哨兵：整段没有任何合法切点（recent 段必然以孤儿 tool_result 打头）。 */
+const NO_SAFE_SPLIT = -1
 
 const DEFAULT_COMPACT_SYSTEM_PROMPT = `你正在为一个长任务压缩上下文。你的目标不是复述聊天记录，而是保留后续继续执行任务所必需的、当前有效的上下文状态。
 
@@ -107,6 +146,12 @@ const DEFAULT_COMPACT_SYSTEM_PROMPT = `你正在为一个长任务压缩上下�
 - 不要省略“已经作废但后续容易误用”的信息。
 - 不要编造原对话中没有的信息；不确定就写成未解决问题或风险。
 - 保持简洁，但不能为了简洁丢掉会改变后续行为的信息。`
+
+/** 超长文本按字符上限截断并标注原长度（摘要输入用）。 */
+function truncate(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text
+  return `${text.slice(0, maxChars)}…[已截断，原长 ${text.length} 字符]`
+}
 
 export class ContextManager {
   private readonly maxContextTokens: number
@@ -190,7 +235,7 @@ export class ContextManager {
     }
 
     const split = this.partitionForCompaction(messages)
-    if (!split) {
+    if (split.kind !== 'ok') {
       return [...messages]
     }
 
@@ -200,45 +245,70 @@ export class ContextManager {
     return [split.firstMessage, summaryMessage, ...split.recentMessages]
   }
 
+  /**
+   * LLM 摘要压缩。失败**不再**静默回退到 compactMessages（那条回退对 tool_result
+   * 正文一字不减，等于假压缩）：
+   * - 摘要调用失败 / 摘要为空 / 无合法切点 → 抛 CompactionFailedError，由调用方决定收尾；
+   * - abort → 原样抛出 AbortError（不包装、不吞掉），调用方以 aborted 收尾。
+   *
+   * @param signal 任务级取消信号，透传给摘要调用——否则中止后摘要仍会跑完重试链。
+   */
   async compactWithLLM(
     messages: ReadonlyArray<EngineMessage>,
     adapter: LLMAdapter,
     model: string,
+    signal?: AbortSignal,
   ): Promise<ReadonlyArray<EngineMessage>> {
     if (messages.length <= this.keepRecentMessages) {
       return [...messages]
     }
 
     const split = this.partitionForCompaction(messages)
-    if (!split) {
+    if (split.kind === 'no-safe-split') {
+      throw new CompactionFailedError(
+        `找不到合法的压缩切点：消息序列中 [1, ${messages.length}) 全是 tool_result，` +
+        '任何切点都会让 recent 段以孤儿 tool_result 打头',
+      )
+    }
+    if (split.kind === 'nothing-to-compact') {
       return [...messages]
     }
 
-    try {
-      const summaryPrompt = this.buildSummaryPrompt(split.oldMessages)
-      const promptMessage = createUserMessage(summaryPrompt)
+    const summaryPrompt = this.buildSummaryPrompt(split.oldMessages)
+    const promptMessage = createUserMessage(summaryPrompt)
 
-      const response = await callNonStreaming(adapter, {
+    let response
+    try {
+      response = await callNonStreaming(adapter, {
         messages: [promptMessage],
         systemPrompt: this.compactSystemPrompt,
         tools: [],
         model,
+        ...(signal !== undefined ? { signal } : {}),
       })
-
-      const summaryText = response.content
-        .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
-        .map((b) => b.text)
-        .join('')
-
-      const summaryMessage = createUserMessage(
-        `[Earlier conversation summary]\n${summaryText}`
-      )
-
-      return [split.firstMessage, summaryMessage, ...split.recentMessages]
-    } catch {
-      // Fall back to text-based compaction
-      return this.compactMessages(messages)
+    } catch (error) {
+      // abort 穿透：任务已在中止路上，不再改写上下文
+      if (signal?.aborted === true || (error instanceof Error && error.name === 'AbortError')) {
+        throw error
+      }
+      throw new CompactionFailedError(`摘要 LLM 调用失败: ${String(error)}`, error)
     }
+
+    const summaryText = response.content
+      .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+      .map((b) => b.text)
+      .join('')
+
+    if (summaryText.trim().length === 0) {
+      // 空摘要 = 被折叠的一整段凭空消失，同样是"假装压缩成功"
+      throw new CompactionFailedError('摘要 LLM 返回空摘要')
+    }
+
+    const summaryMessage = createUserMessage(
+      `[Earlier conversation summary]\n${summaryText}`
+    )
+
+    return [split.firstMessage, summaryMessage, ...split.recentMessages]
   }
 
   updateFromUsage(usage: { readonly inputTokens: number; readonly outputTokens: number }): void {
@@ -255,18 +325,28 @@ export class ContextManager {
   /**
    * 切出三段：首条 user message（钉住不压，含 task_origin 等任务级 immortal facts，
    * 被摘要 LLM 丢字段会导致回复发错 channel）、待压缩段、recent 段。
-   * 返回 null 表示无可压缩内容（首条之后没有更多 old 消息）。
+   *
+   * - `nothing-to-compact`：首条之后没有更多 old 消息（对话本来就短），正常 no-op；
+   * - `no-safe-split`：存在可折叠内容，但整段找不到合法切点——**故障**，不再静默 no-op。
    */
-  private partitionForCompaction(messages: ReadonlyArray<EngineMessage>): {
-    firstMessage: EngineMessage
-    oldMessages: ReadonlyArray<EngineMessage>
-    recentMessages: ReadonlyArray<EngineMessage>
-  } | null {
+  private partitionForCompaction(messages: ReadonlyArray<EngineMessage>):
+    | {
+        kind: 'ok'
+        firstMessage: EngineMessage
+        oldMessages: ReadonlyArray<EngineMessage>
+        recentMessages: ReadonlyArray<EngineMessage>
+      }
+    | { kind: 'nothing-to-compact' }
+    | { kind: 'no-safe-split' } {
     const splitIndex = this.findSafeSplitIndex(messages)
+    if (splitIndex === NO_SAFE_SPLIT) {
+      return { kind: 'no-safe-split' }
+    }
     if (splitIndex <= 1) {
-      return null
+      return { kind: 'nothing-to-compact' }
     }
     return {
+      kind: 'ok',
       firstMessage: messages[0],
       oldMessages: messages.slice(1, splitIndex),
       recentMessages: messages.slice(splitIndex),
@@ -278,15 +358,36 @@ export class ContextManager {
    * （其匹配的 tool_use 在被压缩段，会触发 LLM API 400）。
    *
    * 默认切点 = messages.length - keepRecentMessages。如果该位置是 tool_result，
-   * 向前回退把对应的 assistant_with_tool_use 一起拉进 recent。assistant 与 tool_result
-   * 严格相邻，所以最多回退一步即可。
+   * 向前回退把对应的 assistant_with_tool_use 一起拉进 recent。engine 自造消息时
+   * assistant 与 tool_result 严格相邻，最多回退一步。
+   *
+   * 但 initialMessages 是外部来源（resume checkpoint / session 树回灌），可能出现
+   * 连续 tool_result——旧实现会一路回退到 <=1，让压缩静默变 no-op。因此回退触底后
+   * 改为**向后**找第一个非 tool_result 位置（recent 段变短，但配对安全）；
+   * 整段都没有合法切点时返回 NO_SAFE_SPLIT，由调用方明确报错，不静默吞掉。
    */
   private findSafeSplitIndex(messages: ReadonlyArray<EngineMessage>): number {
-    let splitIndex = messages.length - this.keepRecentMessages
-    while (splitIndex > 0 && this.isToolResultMessage(messages[splitIndex])) {
+    const defaultIndex = messages.length - this.keepRecentMessages
+    if (defaultIndex <= 1) {
+      // 对话本来就短：无可折叠内容，交由 partitionForCompaction 判 nothing-to-compact
+      return defaultIndex
+    }
+
+    let splitIndex = defaultIndex
+    while (splitIndex > 1 && this.isToolResultMessage(messages[splitIndex])) {
       splitIndex--
     }
-    return splitIndex
+    if (splitIndex > 1 && !this.isToolResultMessage(messages[splitIndex])) {
+      return splitIndex
+    }
+
+    // 回退触底（连续 tool_result）：向后找第一个合法切点
+    for (let forward = defaultIndex + 1; forward < messages.length; forward++) {
+      if (!this.isToolResultMessage(messages[forward])) {
+        return forward
+      }
+    }
+    return NO_SAFE_SPLIT
   }
 
   private isToolResultMessage(msg: EngineMessage): boolean {
@@ -345,7 +446,7 @@ export class ContextManager {
       }
 
       const role = msg.role === 'assistant' ? 'Assistant' : 'User'
-      const text = this.extractText(msg)
+      const text = this.extractText(msg, SUMMARY_TOOL_RESULT_MAX_CHARS)
       if (text) {
         parts.push(`${role}: ${text}`)
       }
@@ -354,7 +455,7 @@ export class ContextManager {
     const lines: string[] = [
       '以下是需要压缩的历史上下文。请生成后续继续执行任务所需的结构化摘要：',
       '',
-      ...parts,
+      ...this.applySummaryInputBudget(parts),
     ]
 
     if (toolNames.size > 0) {
@@ -365,7 +466,44 @@ export class ContextManager {
     return lines.join('\n')
   }
 
-  private extractText(msg: EngineMessage): string {
+  /**
+   * 摘要输入的总量上界：逐条截断之后条数仍然无界，所以再按总字符预算从**最旧**开始丢弃。
+   * 丢最旧是安全的——首条 user message（task_origin / 原始请求）本就被钉住不进摘要输入。
+   */
+  private applySummaryInputBudget(parts: ReadonlyArray<string>): ReadonlyArray<string> {
+    const budgetChars = Math.floor(
+      this.maxContextTokens * SUMMARY_INPUT_BUDGET_RATIO * CHARS_PER_TOKEN,
+    )
+    let used = 0
+    let firstKept = parts.length
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const cost = parts[i].length + 1  // +1: join 的换行
+      if (used + cost > budgetChars) break
+      used += cost
+      firstKept = i
+    }
+    if (firstKept === 0) {
+      return parts
+    }
+    if (firstKept === parts.length) {
+      // 连最后一条都塞不下：保留它的头部，绝不把摘要输入清空
+      firstKept = parts.length - 1
+      return [
+        `[已省略更早的 ${firstKept} 条消息：摘要输入超出 ${budgetChars} 字符预算]`,
+        truncate(parts[firstKept], budgetChars),
+      ]
+    }
+    return [
+      `[已省略更早的 ${firstKept} 条消息：摘要输入超出 ${budgetChars} 字符预算]`,
+      ...parts.slice(firstKept),
+    ]
+  }
+
+  /**
+   * @param maxToolResultChars 单条 tool_result 的字符上限（仅摘要输入路径传，
+   *   纯文本折叠路径不传以保持原行为）
+   */
+  private extractText(msg: EngineMessage, maxToolResultChars?: number): string {
     if (msg.role === 'assistant') {
       const assistantMsg = msg as EngineAssistantMessage
       return assistantMsg.content
@@ -376,7 +514,9 @@ export class ContextManager {
 
     if ('toolResults' in msg) {
       const toolMsg = msg as EngineToolResultMessage
-      return toolMsg.toolResults.map((r) => r.content).join(' ')
+      return toolMsg.toolResults
+        .map((r) => (maxToolResultChars === undefined ? r.content : truncate(r.content, maxToolResultChars)))
+        .join(' ')
     }
 
     const userMsg = msg as EngineUserMessage
