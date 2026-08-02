@@ -42,11 +42,19 @@ import { CodexWorkerAdapter } from '../workers/codex/adapter.js'
 import type { WorkerAdapter, WorkerImplId } from '../workers/types.js'
 import type { BuiltinRuntimeFactory } from '../workers/builtin/runtime.js'
 
-import { ManagerRegistry } from './registry.js'
+import { ManagerRegistry, SYSTEM_TASKS_MANAGER_KEY } from './registry.js'
 import { ManagerSessionStore } from './session-store.js'
 import { makeTaskStatusEventBridge, type AgentEventPublisher } from './events.js'
 import { shouldWakeOnHarnessEvent } from './inbound-adapters.js'
 import { buildManagerToolFace } from './tools/tool-face.js'
+import {
+  ManagerPrincipalStore,
+  applyGroupScopeFallback,
+  splitManagerKey,
+  type HumanPrincipal,
+  type PrincipalResolverDeps,
+  type ResolvedPrincipal,
+} from './principal.js'
 import type { CompactionPolicy } from './compaction.js'
 import type { ManagerKey } from './types.js'
 
@@ -56,6 +64,7 @@ import { ContextManager, DEFAULT_COMPACT_THRESHOLD } from '../engine/context-man
 import { DEFAULT_MAX_CONTEXT_TOKENS } from '../engine/query-loop.js'
 import type { LLMAdapter } from '../engine/index.js'
 import type { CrabMessagingDeps } from '../mcp/crab-messaging.js'
+import type { MemoryTaskContext } from '../mcp/crab-memory.js'
 import type { McpServer } from '../mcp/mcp-helpers.js'
 
 /**
@@ -88,6 +97,15 @@ export interface ManagerStack {
   readonly registry: ManagerRegistry
   readonly adapters: Map<WorkerImplId, WorkerAdapter>
   /**
+   * 人类消息发起人身份的解析缓存(P7 J)。服务于三个**同步** thunk:记忆档位、台账归档键、
+   * 对话对象档案(见 `principal.ts` 文件头)。
+   *
+   * **不是 worker 权限的取数入口**(PR #59 review):缓存是"该会话最近一次解析",worker 的
+   * 权限档位是身份属性——由本 episode 的唤醒事件带来、在 spawn 那一刻随 worker 固定并落盘
+   * (`SpawnWorkerParams.principal_permissions` → `context.json`)。
+   */
+  readonly principals: ManagerPrincipalStore
+  /**
    * builtin adapter 的私有 dataDir。`reconcileManagerStack` 需要它跑
    * `BuiltinWorkerAdapter.scanOrphans`——见该函数注释里的顺序契约。放在 stack 上而不是
    * 让调用方自己推,是为了让"路径怎么派生"这件事只有 `buildManagerStack` 一处真相。
@@ -100,18 +118,32 @@ export interface BootstrapDeps {
   readonly dataRoot: string
   /** ISO 时间注入(harness 用);registry 需要的 `() => Date` 由本模块从它派生,保持单一时间源。 */
   readonly now: () => string
+  /**
+   * 实例时区(人类消息渲染的 `ts` 属性,见 `ManagerLoopDeps.timezone`)。thunk:admin 改了
+   * `agent_config.timezone` 不必重建整个栈。不注入则退回 `resolveTimezone(undefined)`。
+   */
+  readonly timezone?: () => string
   /** manager 的 LLM 来源(model_config.manager ?? powerful),thunk 以支持热更 */
   readonly managerAdapter: () => LLMAdapter
   readonly managerModel: () => string
   readonly messagingDeps: CrabMessagingDeps
-  readonly memoryServer: McpServer
+  /**
+   * crab-memory server **工厂**(P7 J:原本是一个建好的 `McpServer` 定值)。
+   *
+   * 改成工厂的理由是语义而非形式:记忆的 visibility / scopes 随**发起人身份**变
+   * (§4.3),定值意味着全实例共用一档。现网那一档是 `{visibility:'public', scopes:[]}`
+   * ——群 A 的对话会以 public 落进记忆、群 B 的 manager 读得到,是跨会话信息泄漏。
+   * 工具面本来就每轮 turn 重建(`ToolFaceDeps` 全是 thunk),这里跟着现建即可。
+   */
+  readonly memoryServerFor: (ctx: MemoryTaskContext) => McpServer
   readonly callAdmin: <P, R>(m: string, p: P) => Promise<R>
   /**
-   * `ManagerKey`(channel::session)→ 台账聚合键 `DialogObjectId`。必须由调用方注入:
-   * 私聊要解析成 `friend:<friend_id>`(跨 channel 聚合),这一步依赖 admin 的 friend 解析,
-   * 本模块拿不到,而 `ManagerRegistryDeps.dialogObjectIdFor` 又是同步签名,不能在这里现查。
+   * 发起人身份的解析原料(admin 权限解析 / session memory_scopes / 场景画像 /
+   * crab self handle / master friend id)。本模块据它在**唤醒边界**解析一次并缓存,
+   * 让 `dialogObjectIdFor` / `toolFace` / `promptInputs` 这三个同步 thunk 只读缓存
+   * ——签名一个都不用改成异步(见 `principal.ts` 文件头)。
    */
-  readonly dialogObjectIdFor: (key: ManagerKey) => DialogObjectId
+  readonly principalResolver: PrincipalResolverDeps
   /**
    * builtin worker 的运行配置工厂(spawn 缺省注入 / handoff 目标为 builtin 时的注入)。
    * 同一个工厂同时喂给 `HarnessDeps.builtinSpawnDefaults`(spawn/handoff 起化身)与
@@ -129,10 +161,36 @@ export interface BootstrapDeps {
 
 /** `ManagerKey` → `{channel_id, session_id}`。按**第一个** `::` 切,session_id 里再含 `::` 也不会被截断。 */
 function channelSessionFromManagerKey(key: ManagerKey): { channel_id: string; session_id: string } {
-  const sep = key.indexOf('::')
-  return sep < 0
-    ? { channel_id: key, session_id: '' }
-    : { channel_id: key.slice(0, sep), session_id: key.slice(sep + 2) }
+  const { channelId, sessionId } = splitManagerKey(key)
+  return { channel_id: channelId, session_id: sessionId }
+}
+
+/**
+ * 解析出来的身份档位 → crab-memory 的 `MemoryTaskContext`。
+ *
+ * 与 worker 侧 `agent-handler.ts:1261-1274` 的同名映射逐字段对齐(同一份语义,别处已经
+ * 落地过一遍,这里不另发明):`visibility`/`scopes` 取写入档位、`isMasterPrivate` 决定
+ * `scene_profile` 工具要不要暴露 scene 参数。
+ *
+ * **身份未解析时退回现网那一档**(`public` / 空 scopes / `system`)——这是 manager 在
+ * 没有人类会话身份时的既有行为(系统线程、纯 worker 事件唤醒),不做静默收紧。
+ */
+function memoryContextFor(key: ManagerKey, resolved: ResolvedPrincipal | undefined): MemoryTaskContext {
+  const { channelId, sessionId } = splitManagerKey(key)
+  if (!resolved) {
+    return { channelId, sessionId, visibility: 'public', scopes: [], sourceType: 'system', isMasterPrivate: false }
+  }
+  const { principal, memory } = resolved
+  return {
+    channelId,
+    sessionId,
+    visibility: memory.write_visibility,
+    scopes: [...memory.write_scopes],
+    sourceType: 'conversation',
+    sessionType: principal.sessionType,
+    ...(principal.friend ? { senderFriendId: principal.friend.id } : {}),
+    isMasterPrivate: principal.friend?.permission === 'master' && principal.sessionType === 'private',
+  }
 }
 
 /**
@@ -221,6 +279,9 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   // 估算器,避免"重造版本漏掉原版有的条件"。
   const tokenEstimator = new ContextManager({ maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS })
 
+  // 发起人身份:唤醒边界异步解析一次,三个同步 thunk 读缓存(见 principal.ts 文件头)。
+  const principals = new ManagerPrincipalStore(deps.principalResolver, SYSTEM_TASKS_MANAGER_KEY)
+
   registry = new ManagerRegistry({
     store: new ManagerSessionStore(join(agentDir, 'managers')),
     policy: DEFAULT_MANAGER_COMPACTION_POLICY,
@@ -230,25 +291,68 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     adapter: deps.managerAdapter,
     model: deps.managerModel,
     now: () => new Date(deps.now()),
-    dialogObjectIdFor: deps.dialogObjectIdFor,
-    toolFace: (key, isSystemThread, onAsyncError, scheduleIdentity) =>
+    timezone: deps.timezone,
+    dialogObjectIdFor: (key) => principals.dialogObjectIdFor(key),
+    // 人类消息唤醒边界:这是人类消息链路上**唯一**一次异步解析。返回本批发言者算好的档位,
+    // 由 registry 挂到本 episode 的唤醒事件上——缓存只服务于那三个同步 thunk(记忆档位 /
+    // 台账归档键 / 对话对象档案),派活用的档位走事件,不走缓存(PR #59 review)。
+    onHumanWake: async (key, principal) => (await principals.resolve(key, principal)).permissions,
+    // scheduled 唤醒边界(§4.4"权限按 `Schedule.creator_friend_id` 解析,`is_builtin` 按 master
+    // 等价"):按**调度自己的身份**解析,不碰该会话的发起人缓存(既不读也不写)。
+    //
+    // - `is_builtin` 或 creator 为空 → master 等价。这里返回 null 而不是去解析一份 master 档位:
+    //   worker 的固定档位(`BUILTIN_WORKER_PERMISSIONS`)本就是 master 等价情形下的上限,
+    //   `narrowWorkerPermissions(base, null)` 原样返回它,与 admin 侧"空 creator → master_private"
+    //   的既有规则同解。
+    // - 有 creator → 按该 friend 解析。`sessionType` 取该会话上一次解析出来的私/群(未知按
+    //   'private'):这一项只影响 admin 侧要不要并上 group_default,猜错只会更严,不会更宽。
+    onScheduleWake: async ({ key, creatorFriendId, isBuiltin }) => {
+      if (isBuiltin || !creatorFriendId) return null
+      const { sessionId } = splitManagerKey(key)
+      const sessionType = principals.get(key)?.principal.sessionType ?? 'private'
+      // 群聊防跨群泄漏的收敛与人类消息那条路共用同一个规则(空 scopes → 本会话)。
+      return applyGroupScopeFallback(
+        await deps.principalResolver.resolvePermissions({ senderFriendId: creatorFriendId, sessionId, sessionType }),
+        sessionType,
+        sessionId,
+      )
+    },
+    toolFace: (key, isSystemThread, onAsyncError, scheduleIdentity, humanPrincipal, principalPermissions) =>
       buildManagerToolFace({
         harness,
         workerContext: () => ({
-          dialogObjectId: deps.dialogObjectIdFor(key),
+          dialogObjectId: principals.dialogObjectIdFor(key),
           managerKey: key,
           reportTo: channelSessionFromManagerKey(key),
           // 权限身份(§4.4"权限按 Schedule.creator_friend_id 解析(is_builtin 按 master
           // 等价)"):内置 schedule 不以任何 friend 的名义执行,显式留空——空 creator 正是
           // admin 侧既有的 master 等价规则(protocol-admin §"is_builtin=true 或
           // creator_friend_id 为空 → master_private"),所以这里丢弃而不是改写成某个 id。
-          creatorFriendId: scheduleIdentity?.isBuiltin ? undefined : scheduleIdentity?.creatorFriendId,
+          //
+          // P7 J:人类消息唤醒时改记**本批消息的发言者**(§8.2)。取 `humanPrincipal`
+          // (随本 episode 的唤醒事件而来)而不是缓存里的"最近一次"——worker 事件唤醒的
+          // episode 里没有人在说话,拿上一次的发言者冒充会把 worker 记到错的人名下。
+          creatorFriendId: scheduleIdentity
+            ? (scheduleIdentity.isBuiltin ? undefined : scheduleIdentity.creatorFriendId)
+            : humanPrincipal?.friend?.id,
+          // 上面那个身份**算好的档位**,随 spawn 下传给 worker 并落盘(§8.2)。与
+          // `creatorFriendId` 同源同刻:两者都来自本 episode 的唤醒事件,不来自会话级缓存。
+          //
+          // 没有身份的唤醒(worker 事件 / 自唤醒)落到 `principals.get(key)`:那类 episode 里
+          // 没人说话,但它仍发生在这个会话里,记忆可见范围是**会话属性**(与下面 memoryServer
+          // 同一条理由)。这里退回会话级档位,而不是让 worker 拿到空 scopes 把群里的内容以
+          // public 落进记忆。取数只发生在派活这一刻,取到之后就随 worker 固定下来。
+          principalPermissions:
+            principalPermissions ?? (scheduleIdentity ? undefined : principals.get(key)?.permissions ?? undefined),
           // scheduled 触发(不论有无目标 session)记 'scheduled';系统线程的其余唤醒
           // (查不到监护 session 的 worker 事件)记 'system';人类消息记 'message'。
           triggerType: scheduleIdentity ? 'scheduled' : isSystemThread ? 'system' : 'message',
         }),
         messagingDeps: deps.messagingDeps,
-        memoryServer: deps.memoryServer,
+        // 记忆档位按**这个会话最近一次解析出来的发起人身份**现建。这里刻意不用
+        // `humanPrincipal`:worker 事件唤醒的 episode 里没人说话,但该会话的记忆可见范围
+        // 并不因此改变——它是会话属性,不是本轮属性。
+        memoryServer: deps.memoryServerFor(memoryContextFor(key, principals.get(key))),
         callAdmin: deps.callAdmin,
         isSystemThread,
         // 这一行是本文件存在的理由之一:registry 按 key 绑定好的 onAsyncError 必须一路传到
@@ -256,12 +360,16 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         // 只会 console.error,manager 永远等不到回音(P4 Task 8 留给本 task 的验证点)。
         onAsyncError,
       }),
-    // system prompt 的动态段素材(对话对象档案 / 待处理通知)目前没有解析入口,给空对象;
-    // prompt.ts 对两者缺省都有处理,不会因此少渲染任何必需段落。
-    promptInputs: () => ({}),
+    // system prompt 的「对话对象档案」段(§4.2 5b/5d):场景画像 + crab 在该渠道的
+    // @handle,由唤醒边界解析好放在缓存里(见 principal.ts `renderDialogProfile`)。
+    // 「待处理通知」仍无解析入口,继续留空——prompt.ts 对缺省有处理。
+    promptInputs: (key) => {
+      const dialogProfile = principals.get(key)?.dialogProfile
+      return dialogProfile ? { dialogProfile } : {}
+    },
   })
 
-  return { ledger, harness, registry, adapters, builtinDataDir }
+  return { ledger, harness, registry, adapters, principals, builtinDataDir }
 }
 
 /**

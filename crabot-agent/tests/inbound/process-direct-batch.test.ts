@@ -1,57 +1,59 @@
 /**
- * 入站链路测试网 ②：`processDirectBatch`（P7 / PR A Task 2）。
+ * 入站链路测试网 ②：`processDirectBatch`（私聊 lane handler）。
  *
- * 计划：`crabot-docs/superpowers/plans/2026-07-31-mw-p7-a-inbound-test-net.md`
- * 侦察：`.superpowers/sdd/p7-recon.md` §A.2 —— "processDirectBatch 在 dispatcher 之前做的 8 件事"
+ * 计划：`crabot-docs/superpowers/plans/2026-08-01-mw-p7-j-cutover.md`
+ * 前身：P7 / PR A Task 2（下游是 dispatcher）。**P7 / PR J Task 5 起下游是 manager。**
  *
- * ## 覆盖的 8 个动作（含顺序）
+ * ## cutover 之后这条路径还剩什么
  *
- * | 动作 | 生产位置 |
+ * plan §一 的 8 件事里，私聊 lane handler 只保留两件：
+ *
+ * | 保留 | 落点 |
  * |---|---|
- * | `sessionManager.updateLastMessageTime` | `unified-agent.ts:786` |
- * | `traceStore.startTrace(trigger.type='message')` | `:789-799` |
- * | `resolvePrincipalPermissions` → `ResolvedPermissions` | `:807` |
- * | memory 权限档位（按 friend 的 memory_scopes） | `:809-816` |
- * | `contextAssembler.assembleFrontContext` | `:831-845` |
- * | `buildQuotedPrefetchDeps()`（引用预取） | `:887` |
- * | `sendErrorToUser` / `sendImmediateReply` | `:865-882` |
- * | `reactToTriggerMessage` | `:913` |
+ * | `reactToTriggerMessage`（且**时机提前**到"消息递给 manager 时"） | 接线层，本文件 |
+ * | 整批消息 + 发言者 friend 递给 manager | `ManagerRegistry.routeHumanMessages` |
  *
- * ## 手法（沿用 Task 1 的结论）
+ * 其余六件（`updateLastMessageTime` / `startTrace` / `recent_messages` /
+ * `active_tasks` / `sendImmediateReply` / 引用预取）**明确放弃**；
+ * 权限身份、memory 档位、场景画像、`crab_self_handle` 三件**迁进 manager 的唤醒边界**
+ * （`ManagerPrincipalStore`），所以本文件对它们的断言全部改从 manager 侧的真实出口读。
  *
- * - **真实构造函数**（`roles: []`，不建 AgentHandler / 不起 LSP），只在实例上换掉
- *   `agentHandler` / `contextAssembler` / `sdkEnvWorker` / `rpcClient` 这几个外部边界；
- * - **只 mock 模块级 `dispatch`**（LLM 入口，无实例注入口），
- *   **`executeDispatchActions` 用真件**——M8（reaction）/ M11（预回复 vs spawn 顺序）/
- *   supplement 三分支的语义恰恰长在执行器里，把执行器也 mock 掉就只剩参数透传可断言；
- * - **`traceStore` 用真实的**（tmp `DATA_DIR`）：trace/span 是这条链路的可观测事实来源，
- *   顺序、早退分支、supplement 走的哪条路都从 span 上读；
- * - **顺序断言只用一条 `calls: string[]` 序列**，不用各自的 `toHaveBeenCalled`；
- * - 全链路无 `setTimeout`，不引 fake timer（会和 TraceStore / manager 栈的内部 timer 打架）。
+ * ## 手法
+ *
+ * - **真实构造函数**（`roles: []`）+ 真实 `buildManagerStack`（构造函数里就装配好）；
+ * - **唯一被替身的是 LLM**：`adapterFromSdkEnv` 是模块级函数、没有实例注入口，
+ *   用 `vi.mock` 换成脚本 adapter（与 PR A 时期 mock `dispatch()` 同一手法）。
+ *   manager 的工具面、`ManagerPrincipalStore`、harness、记忆 server 全是真件；
+ * - **顺序断言只用一条 `calls: string[]` 序列**；
+ * - 零 fake timer。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
-import { UnifiedAgent } from '../../src/unified-agent.js'
-import { prefetchQuotedMessages } from '../../src/agent/quoted-message-prefetcher.js'
-import type { QuotedMessageEntry } from '../../src/prompt-manager.js'
 import type {
-  AgentTrace,
   ChannelMessage,
   Friend,
   MemoryPermissions,
   ResolvedPermissions,
-  TaskSummary,
+  RuntimeSceneProfile,
   ToolAccessConfig,
 } from '../../src/types.js'
-import type { DispatchAction, DispatchContext } from '../../src/dispatcher/dispatcher-types.js'
-import type { DispatchDeps } from '../../src/dispatcher/dispatcher.js'
 import { makeAgentConfig, makeFriend, makeMessage, useTmpDataDir, type DataDirGuard } from './harness.js'
+import {
+  makeManagerScript,
+  searchMemoryBlock,
+  sendMessageBlock,
+  spawnWorkerBlock,
+  type ManagerScript,
+} from './manager-script.js'
 
-// dispatch 是模块级 import，没有实例注入口——这是本文件唯一 mock 掉的生产模块。
-vi.mock('../../src/dispatcher/dispatcher.js', () => ({ dispatch: vi.fn() }))
-import { dispatch } from '../../src/dispatcher/dispatcher.js'
+// LLM 是这条链路上唯一被替身的东西：`adapterFromSdkEnv` 是模块级函数，没有实例注入口。
+const hoisted = vi.hoisted(() => ({ managerAdapter: undefined as unknown }))
+vi.mock('../../src/agent/agent-handler.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/agent/agent-handler.js')>()
+  return { ...actual, adapterFromSdkEnv: () => hoisted.managerAdapter }
+})
 
-const dispatchMock = vi.mocked(dispatch)
+const { UnifiedAgent } = await import('../../src/unified-agent.js')
 
 // ============================================================================
 // fixtures
@@ -59,6 +61,8 @@ const dispatchMock = vi.mocked(dispatch)
 
 const ADMIN_PORT = 18000
 const WECHAT_PORT = 18001
+const MEMORY_PORT = 18002
+const MANAGER_KEY = 'wechat::sess-1'
 
 /** 该 friend 解析出的权限身份：shell 开、file_io 关，memory_scopes 是两个私聊专属 scope。 */
 const FRIEND_TOOL_ACCESS: ToolAccessConfig = {
@@ -80,121 +84,77 @@ const FRIEND_PERMS: ResolvedPermissions = {
   memory_scopes: ['friend-scope-a', 'friend-scope-b'],
 }
 
-/** 上下文装配吐出的历史消息（不属于当前触发批次）。 */
-const HISTORY_MESSAGE = makeMessage({
-  id: 'hist-1',
-  type: 'private',
-  text: '昨天说的那个 PDF',
-  timestamp: '2026-07-30T10:00:00.000Z',
-})
-
-const SCENE_PROFILE = {
+const SCENE_PROFILE: RuntimeSceneProfile = {
   label: '私聊场景',
   content: '这个人喜欢直接给结论',
   source: { scene: { type: 'friend' as const, friend_id: 'f-1' } },
 }
 
-const ACTIVE_TASK: TaskSummary = {
-  task_id: 'task-active-1',
-  title: '在跑的任务',
-  status: 'executing',
-  priority: 'normal',
-}
-
-/** 已终止的 supplement 候选——只可能来自 assembleFrontContext.supplement_candidates。 */
-const TERMINAL_CANDIDATE: TaskSummary = {
-  task_id: 'task-terminal-1',
-  title: '刚做完的任务',
-  status: 'completed',
-  priority: 'normal',
-  candidate_kind: 'recent_terminal',
-  completed_at: '2026-07-31T00:00:00.000Z',
-}
-
-interface AssembleCall {
-  params: {
-    channel_id: string
-    session_id: string
-    sender_id: string
-    message: string
-    friend_id: string
-    session_type: string
-    crab_self_handle?: string
-  }
-  friend: Friend | undefined
-  memPerms: MemoryPermissions
-}
-
-interface SpawnCall {
-  messages: ReadonlyArray<ChannelMessage>
-  activeTasks: ReadonlyArray<TaskSummary>
-  isGroup: boolean
-  senderFriend: Friend
-  memoryPermissions: MemoryPermissions
-  resolvedPermissions: ResolvedPermissions
-  channelId: string
-  sessionId: string
-  frontContext: { recent_messages: ChannelMessage[]; scene_profile?: unknown }
-  sceneProfile?: unknown
+interface ResolvedPrincipalView {
+  permissions: ResolvedPermissions | null
+  memory: MemoryPermissions
+  dialogProfile?: string
+  principal: { friend?: Friend; sessionType: 'private' | 'group' }
 }
 
 interface Internals {
   processDirectBatch(batch: ReadonlyArray<{ message: ChannelMessage; friend: Friend }>): Promise<void>
-  sessionManager: {
-    updateLastMessageTime(sessionId: string): void
-    getSession(sessionId: string): { message_count: number; last_message_time: number } | undefined
-  }
-  traceStore: {
-    getTraces(limit?: number): { traces: AgentTrace[] }
-    startTrace(params: { trigger: { type: string } }): { trace_id: string }
-  }
+  buildBuiltinWorkerRuntime(ctx: unknown): { tools: () => ReadonlyArray<{ name: string }> }
   contextAssembler: unknown
-  agentHandler: unknown
-  sdkEnvWorker: unknown
   channelPorts: Map<string, number>
   crabSelfHandles: Map<string, string>
-  attentionScheduler: { stopAll(): void }
+  attentionScheduler: { stopAll(): void; getCurrentIntervalMs(sessionId: string): number | undefined }
+  managerStack: {
+    principals: { get(key: string): ResolvedPrincipalView | undefined }
+    registry: { routeHumanMessages: (...args: unknown[]) => Promise<unknown> }
+    harness: { spawnWorker: (p: Record<string, unknown>) => Promise<unknown> }
+  }
+  failLoudSentAt: Map<string, number>
   rpcClient: {
     call: (port: number, method: string, params: unknown, from?: string) => Promise<unknown>
     resolve: (filter: unknown, from?: string) => Promise<unknown[]>
   }
 }
 
-describe('processDirectBatch —— 私聊 lane handler（P7/PR A 测试网 ②）', () => {
+describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 manager）', () => {
   let dataDir: DataDirGuard
-  let agent: UnifiedAgent
+  let agent: InstanceType<typeof UnifiedAgent>
   let internals: Internals
+  let script: ManagerScript
 
   /** 唯一的顺序事实来源。 */
   let calls: string[]
   let rpcCalls: Array<{ port: number; method: string; params: Record<string, unknown> }>
-  let assembleCalls: AssembleCall[]
-  let spawnCalls: SpawnCall[]
-  let deliverCalls: Array<{ taskId: string; messages: ReadonlyArray<ChannelMessage> }>
-  let capturedCtx: DispatchContext | undefined
-  let capturedDeps: DispatchDeps | undefined
+  let sceneCalls: Array<{ channelId: string; sessionId: string; sessionType: string; friendId?: string }>
 
   // 可按测试改写的响应
-  let permsResponse: ResolvedPermissions | 'throw'
+  let permsResponse: ResolvedPermissions | null | 'throw'
   let sessionScopes: string[]
-  let supplementCandidates: TaskSummary[]
-  let activeTasks: TaskSummary[]
-  let recentMessages: ChannelMessage[]
-  let hasActiveTaskResult: boolean
-  /** worker loop 的放行闸：默认立即完成；M10 用它把 worker 挂住。 */
-  let workerGate: Promise<void> | undefined
-  let workerSettled: boolean
+  let reactionFails: boolean
 
-  function boot(opts: { withHandler?: boolean; withSdkEnv?: boolean } = {}): void {
+  function boot(turns: ReadonlyArray<ReadonlyArray<Record<string, unknown>>> = []): void {
+    script = makeManagerScript(turns.map((t) => t))
+    hoisted.managerAdapter = {
+      async *stream(params: unknown) {
+        calls.push('manager_llm')
+        yield* script.adapter.stream(params as never)
+      },
+      updateConfig: () => {},
+    }
+
     agent = new UnifiedAgent(makeAgentConfig({ configured: true, moduleId: 'direct-batch-agent', port: 19997 }))
     internals = agent as unknown as Internals
 
     internals.channelPorts.set('wechat', WECHAT_PORT)
     internals.crabSelfHandles.set('wechat', '@crabot_wx')
 
-    internals.rpcClient.resolve = async () => [
-      { module_id: 'admin', module_type: 'admin', host: 'localhost', port: ADMIN_PORT, status: 'running' },
-    ]
+    internals.rpcClient.resolve = async (filter) => {
+      const f = filter as { module_type?: string; module_id?: string }
+      if (f.module_type === 'memory') {
+        return [{ module_id: 'memory', module_type: 'memory', host: 'localhost', port: MEMORY_PORT, status: 'running' }]
+      }
+      return [{ module_id: 'admin', module_type: 'admin', host: 'localhost', port: ADMIN_PORT, status: 'running' }]
+    }
     internals.rpcClient.call = async (port, method, params) => {
       rpcCalls.push({ port, method, params: params as Record<string, unknown> })
       switch (method) {
@@ -205,147 +165,81 @@ describe('processDirectBatch —— 私聊 lane handler（P7/PR A 测试网 ②�
         case 'get_session_config':
           calls.push('get_session_config')
           return { config: { memory_scopes: sessionScopes } }
+        case 'find_master_friend':
+          return { friend: null }
         case 'send_message':
           calls.push('send_message')
-          return { platform_message_id: 'ack-1', sent_at: '2026-07-31T00:00:05.000Z' }
+          return { platform_message_id: 'sent-1', sent_at: '2026-07-31T00:00:05.000Z' }
         case 'add_reaction':
           calls.push('add_reaction')
+          if (reactionFails) throw new Error('channel 不支持 add_reaction')
           return {}
-        case 'get_message':
-          calls.push('get_message')
-          return {
-            platform_message_id: (params as { platform_message_id: string }).platform_message_id,
-            sender: { platform_user_id: 'u-1', platform_display_name: '张三' },
-            content: { type: 'text', text: '这是跨窗口引用的原文' },
-            features: {},
-            platform_timestamp: '2026-07-20T00:00:00.000Z',
-          }
-        case 'revive_task_for_supplement':
-          calls.push('revive_task_for_supplement')
-          return {}
+        case 'search_short_term':
+          calls.push('search_short_term')
+          return { results: [] }
         default:
           return {}
       }
     }
 
-    // trace 起点：按 trigger 类型区分 dispatch trace 与 task trace。
-    const realStartTrace = internals.traceStore.startTrace.bind(internals.traceStore)
-    internals.traceStore.startTrace = (params) => {
-      calls.push(`start_trace:${params.trigger.type}`)
-      return realStartTrace(params)
-    }
-
-    const realUpdate = internals.sessionManager.updateLastMessageTime.bind(internals.sessionManager)
-    internals.sessionManager.updateLastMessageTime = (sessionId: string) => {
-      calls.push('update_last_message_time')
-      realUpdate(sessionId)
-    }
-
+    // 场景画像：cutover 后由 `ManagerPrincipalStore` 在唤醒边界解析（不再走 assembleFrontContext）。
     internals.contextAssembler = {
-      assembleFrontContext: async (
-        params: AssembleCall['params'],
-        friend: Friend | undefined,
-        memPerms: MemoryPermissions,
-      ) => {
-        calls.push('assemble_front_context')
-        assembleCalls.push({ params, friend, memPerms })
-        return {
-          sender_friend: friend,
-          recent_messages: recentMessages,
-          short_term_memories: [],
-          active_tasks: activeTasks,
-          available_tools: [],
-          scene_profile: SCENE_PROFILE,
-          crab_self_handle: '@crabot_wx',
-          time_windows: { recent_messages_window_hours: 24, short_term_memory_window_hours: 24 },
-          supplement_candidates: supplementCandidates,
-        }
+      resolveSceneProfile: async (
+        channelId: string,
+        sessionId: string,
+        sessionType: string,
+        friendId?: string,
+      ): Promise<RuntimeSceneProfile | null> => {
+        calls.push('resolve_scene_profile')
+        sceneCalls.push({ channelId, sessionId, sessionType, ...(friendId ? { friendId } : {}) })
+        return SCENE_PROFILE
       },
     }
-
-    if (opts.withHandler !== false) {
-      internals.agentHandler = {
-        hasActiveTask: () => hasActiveTaskResult,
-        deliverHumanResponse: (taskId: string, messages: ReadonlyArray<ChannelMessage>) => {
-          calls.push('deliver_human_response')
-          deliverCalls.push({ taskId, messages })
-        },
-        getTaskPrincipal: () => undefined,
-        updateTaskPermissions: () => {},
-        getInflightSnapshot: () => [],
-        registerTriggerAndActivate: async (params: SpawnCall) => {
-          calls.push('register_trigger')
-          spawnCalls.push(params)
-          return {
-            taskId: 'task-new-1',
-            registered: true,
-            task: {},
-            context: {},
-            taskTitle: '新任务标题',
-          }
-        },
-        runTriggerWorkerLoop: async () => {
-          calls.push('worker_loop')
-          if (workerGate) await workerGate
-          workerSettled = true
-          return { outcome: 'completed', finalText: '搞定', sentMessage: true }
-        },
-      }
-    }
-
-    if (opts.withSdkEnv !== false) {
-      internals.sdkEnvWorker = {
-        modelId: 'worker-model',
-        format: 'anthropic',
-        env: { LLM_BASE_URL: 'https://example.invalid', LLM_API_KEY: 'k' },
-      }
-    }
-  }
-
-  /** 设定 dispatcher 的输出；同时录 ctx/deps 供引用预取等断言使用。 */
-  function setDispatchActions(actions: DispatchAction[]): void {
-    dispatchMock.mockImplementation(async (ctx, deps) => {
-      calls.push('dispatch')
-      capturedCtx = ctx
-      capturedDeps = deps
-      return { actions }
-    })
   }
 
   function batchOf(messages: ChannelMessage[], friend = makeFriend('f-1')) {
     return messages.map((message) => ({ message, friend }))
   }
 
-  function dispatchTrace(): AgentTrace {
-    const t = internals.traceStore.getTraces(50).traces.find((x) => x.trigger.type === 'message')
-    if (!t) throw new Error('dispatch trace not found')
-    return t
+  function principal(): ResolvedPrincipalView | undefined {
+    return internals.managerStack.principals.get(MANAGER_KEY)
   }
 
-  function actionSpanDetails(): Record<string, unknown> {
-    const span = dispatchTrace().spans.find((s) => s.type === 'dispatch_action')
-    if (!span) throw new Error('dispatch_action span not found')
-    return (span.details ?? {}) as Record<string, unknown>
+  /**
+   * manager 派出去的 builtin worker 实际拿到的工具面（§8.2 权限身份的终点）。
+   *
+   * `principalPermissions` 就是派活那一刻随 spawn 下传、落进 `context.json` 的那份快照
+   * （PR #59 review：worker 只认自己这份，不回头读会话级缓存）；不传 = 系统派工那一档。
+   */
+  function workerToolNames(principalPermissions?: ResolvedPermissions): string[] {
+    return internals
+      .buildBuiltinWorkerRuntime({
+        worker_id: 'w-probe',
+        workspace: { root: dataDir.root },
+        origin: { spawned_by_session: MANAGER_KEY, trigger_type: 'message' },
+        ...(principalPermissions ? { principal_permissions: principalPermissions } : {}),
+      })
+      .tools()
+      .map((t) => t.name)
+  }
+
+  /** 拦下真实 spawn（不起真 worker），只看 manager 递给 harness 的派活参数。 */
+  function spyOnSpawn(): { calls: Array<Record<string, unknown>> } {
+    const calls: Array<Record<string, unknown>> = []
+    internals.managerStack.harness.spawnWorker = async (p: Record<string, unknown>) => {
+      calls.push(p)
+      return { worker_id: 'w-spawned', incarnations: [{ seq: 1, impl: 'builtin' }] }
+    }
+    return { calls }
   }
 
   beforeEach(async () => {
     calls = []
     rpcCalls = []
-    assembleCalls = []
-    spawnCalls = []
-    deliverCalls = []
-    capturedCtx = undefined
-    capturedDeps = undefined
+    sceneCalls = []
     permsResponse = FRIEND_PERMS
     sessionScopes = ['session-scope-1']
-    supplementCandidates = [ACTIVE_TASK]
-    activeTasks = [ACTIVE_TASK]
-    recentMessages = [HISTORY_MESSAGE]
-    hasActiveTaskResult = true
-    workerGate = undefined
-    workerSettled = false
-    dispatchMock.mockReset()
-    setDispatchActions([{ kind: 'new_task' }])
+    reactionFails = false
     dataDir = await useTmpDataDir('inbound-pdb-')
   })
 
@@ -356,11 +250,11 @@ describe('processDirectBatch —— 私聊 lane handler（P7/PR A 测试网 ②�
   })
 
   // ==========================================================================
-  // 动作 1 / 2：会话状态与 trace 起点
+  // 批合并：整批一次性递给 manager
   // ==========================================================================
 
-  describe('会话状态与 trace 起点', () => {
-    it('整批只推进一次会话活跃时间（每条消息各推一次会把 TTL 语义算错）', async () => {
+  describe('整批递给 manager（变异靶 M2）', () => {
+    it('批内每条消息都进 manager 的这一轮上下文，只跑一个 episode', async () => {
       boot()
       await internals.processDirectBatch(
         batchOf([
@@ -369,273 +263,47 @@ describe('processDirectBatch —— 私聊 lane handler（P7/PR A 测试网 ②�
         ]),
       )
 
-      const session = internals.sessionManager.getSession('sess-1')
-      expect(session).toBeDefined()
-      expect(session!.message_count).toBe(1)
-      expect(calls.filter((c) => c === 'update_last_message_time')).toHaveLength(1)
+      expect(script.streams).toHaveLength(1)
+      const rendered = String(script.streams[0].messages[0].content)
+      expect(rendered).toContain('第一条')
+      expect(rendered).toContain('第二条')
+      // Task 4 的渲染器：message_id 必须在，manager 才能 get_message / reply
+      expect(rendered).toContain('id="m-1"')
+      expect(rendered).toContain('id="m-2"')
+      // 私聊走 human_messages（不是 attention_flush）——文案不同，混用会让 manager 把
+      // 刚说的话当成"攒了一会儿才递过来的"
+      expect(rendered).toContain('[人类消息]')
+      expect(rendered).not.toContain('补齐')
     })
 
-    it('trace 记的是 message 触发、批内每条消息都进 summary、source 是来源 channel（变异靶 M2）', async () => {
+    it('发言者取批内最后一条：权限、场景画像、台账归档键都按他解析', async () => {
       boot()
-      await internals.processDirectBatch(
-        batchOf([
-          makeMessage({ id: 'm-1', type: 'private', text: '第一条' }),
-          makeMessage({ id: 'm-2', type: 'private', text: '第二条' }),
-        ]),
-      )
+      await internals.processDirectBatch([
+        { message: makeMessage({ id: 'm-1', type: 'private', text: '第一条' }), friend: makeFriend('f-1') },
+        { message: makeMessage({ id: 'm-2', type: 'private', text: '第二条' }), friend: makeFriend('f-2') },
+      ])
 
-      const trace = dispatchTrace()
-      expect(trace.trigger.type).toBe('message')
-      expect(trace.trigger.source).toBe('wechat')
-      expect(trace.trigger.summary).toBe('[private×2] 第一条 | 第二条')
-      expect(trace.module_id).toBe('direct-batch-agent')
+      expect(principal()!.principal.friend?.id).toBe('f-2')
+      const resolveCall = rpcCalls.find((c) => c.method === 'resolve_principal_permissions')
+      expect(resolveCall!.params).toMatchObject({ sender_friend_id: 'f-2', session_id: 'sess-1', session_type: 'private' })
+      expect(sceneCalls[0]).toMatchObject({ channelId: 'wechat', sessionId: 'sess-1', sessionType: 'private', friendId: 'f-2' })
     })
 
-    it('空 batch 直接返回：不动会话、不建 trace', async () => {
+    it('空 batch 直接返回：既不打已读也不唤醒 manager', async () => {
       boot()
       await internals.processDirectBatch([])
 
       expect(calls).toEqual([])
-      expect(internals.traceStore.getTraces(50).traces).toHaveLength(0)
+      expect(script.streams).toHaveLength(0)
     })
   })
 
   // ==========================================================================
-  // 动作 3：权限身份解析（M4）
+  // reaction：打批内最后一条 + 时机提前到"递给 manager 之前"（变异靶 M8 / M2）
   // ==========================================================================
 
-  describe('权限身份解析（变异靶 M4）', () => {
-    it('解析出的身份决定这轮之后 worker 能用哪些工具', async () => {
-      boot()
-      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
-
-      // 语义落点①：worker 拿到的执行身份
-      expect(spawnCalls).toHaveLength(1)
-      expect(spawnCalls[0].resolvedPermissions?.tool_access.shell).toBe(true)
-      expect(spawnCalls[0].resolvedPermissions?.tool_access.file_io).toBe(false)
-
-      // 语义落点②：会话级权限被记住——后续按此身份授权工具（shell 放行、file_io 拦）
-      expect(
-        agent.getToolPermissionConfig([
-          { name: 'bash', description: '', inputSchema: {}, category: 'shell' },
-        ]),
-      ).toEqual({ mode: 'bypass' })
-      expect(
-        agent.getToolPermissionConfig([
-          { name: 'write_file', description: '', inputSchema: {}, category: 'file_io' },
-        ]),
-      ).toEqual({ mode: 'denyList', toolNames: ['write_file'] })
-
-      // 解析请求打的是 admin，带的是这条私聊会话的身份三元组
-      const resolveCall = rpcCalls.find((c) => c.method === 'resolve_principal_permissions')
-      expect(resolveCall).toBeDefined()
-      expect(resolveCall!.port).toBe(ADMIN_PORT)
-      expect(resolveCall!.params).toMatchObject({
-        sender_friend_id: 'f-1',
-        session_id: 'sess-1',
-        session_type: 'private',
-      })
-    })
-
-    it('解析失败时 fail-closed（只剩 messaging），不是放开也不是沿用上一轮', async () => {
-      boot()
-      permsResponse = 'throw'
-      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
-
-      expect(
-        agent.getToolPermissionConfig([
-          { name: 'bash', description: '', inputSchema: {}, category: 'shell' },
-          { name: 'send_message', description: '', inputSchema: {}, category: 'messaging' },
-        ]),
-      ).toEqual({ mode: 'denyList', toolNames: ['bash'] })
-    })
-  })
-
-  // ==========================================================================
-  // 动作 4：memory 权限档位（M5）
-  // ==========================================================================
-
-  describe('memory 权限档位（变异靶 M5）', () => {
-    it('按该 friend 解析出的 memory_scopes 授权读写，不是 public/全局', async () => {
-      boot()
-      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
-
-      const expected: MemoryPermissions = {
-        write_visibility: 'internal',
-        write_scopes: ['friend-scope-a', 'friend-scope-b'],
-        read_min_visibility: 'internal',
-        read_accessible_scopes: ['friend-scope-a', 'friend-scope-b'],
-      }
-      // 语义落点：worker 这轮能读到 / 写进的记忆范围
-      expect(spawnCalls[0].memoryPermissions).toEqual(expected)
-      // 上下文装配用的是同一档位（读侧不得比写侧宽）
-      expect(assembleCalls[0].memPerms).toEqual(expected)
-      // 反向钉死：不能退化成"公开可见 + 无 scope 限制"
-      expect(spawnCalls[0].memoryPermissions.write_visibility).not.toBe('public')
-      expect(spawnCalls[0].memoryPermissions.write_scopes).not.toEqual([])
-    })
-
-    it('身份解析失败时档位回落到该 session 配置的 scopes（仍不是公开）', async () => {
-      boot()
-      permsResponse = 'throw'
-      sessionScopes = ['session-scope-1']
-      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
-
-      expect(spawnCalls[0].memoryPermissions).toEqual({
-        write_visibility: 'internal',
-        write_scopes: ['session-scope-1'],
-        read_min_visibility: 'internal',
-        read_accessible_scopes: ['session-scope-1'],
-      })
-      expect(calls).toContain('get_session_config')
-    })
-  })
-
-  // ==========================================================================
-  // 动作 5：前置上下文装配（M6）
-  // ==========================================================================
-
-  describe('前置上下文装配（变异靶 M6）', () => {
-    it('装配结果进入 dispatcher 的决策上下文（历史消息 / 场景画像 / 候选任务）', async () => {
-      boot()
-      setDispatchActions([{ kind: 'stay_silent' }])
-      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private', text: '继续弄那个' })]))
-
-      expect(capturedCtx).toBeDefined()
-      expect(capturedCtx!.recentMessages.map((m) => m.platform_message_id)).toEqual(['hist-1'])
-      expect(capturedCtx!.activeTasks.map((t) => t.task_id)).toEqual(['task-active-1'])
-      expect(capturedCtx!.sceneProfile).toEqual(SCENE_PROFILE)
-      expect(capturedCtx!.crabSelfHandle).toBe('@crabot_wx')
-      expect(capturedCtx!.sessionType).toBe('private')
-      // 装配请求描述的是这次的会话与发言人
-      expect(assembleCalls[0].params).toMatchObject({
-        channel_id: 'wechat',
-        session_id: 'sess-1',
-        sender_id: 'u-1',
-        friend_id: 'f-1',
-        session_type: 'private',
-        message: '继续弄那个',
-        crab_self_handle: '@crabot_wx',
-      })
-    })
-
-    it('装配出的历史进 worker，且触发批次不被重复渲染成历史', async () => {
-      boot()
-      const trigger = makeMessage({ id: 'm-1', type: 'private' })
-      // 上下文里同时含有历史消息和这条触发消息的副本（真实 message-store 就是这样）
-      recentMessages = [HISTORY_MESSAGE, trigger]
-      await internals.processDirectBatch(batchOf([trigger]))
-
-      expect(spawnCalls[0].frontContext.recent_messages.map((m) => m.platform_message_id)).toEqual(['hist-1'])
-      expect(spawnCalls[0].activeTasks.map((t) => t.task_id)).toEqual(['task-active-1'])
-      expect(spawnCalls[0].sceneProfile).toEqual(SCENE_PROFILE)
-    })
-
-    it('只有装配结果里的候选任务才认得出"已终止任务"，从而走复活而不是往活任务里投递', async () => {
-      boot()
-      supplementCandidates = [TERMINAL_CANDIDATE]
-      setDispatchActions([{ kind: 'supplement', target_task_id: 'task-terminal-1' }])
-
-      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private', text: '补一句' })]))
-
-      // 走的是终止任务复活路径
-      expect(calls).toContain('revive_task_for_supplement')
-      expect(actionSpanDetails().outcome).toBe('terminal_task_revived')
-      expect(actionSpanDetails().target_task_status).toBe('completed')
-      // 而不是把补充消息塞进某个"活着的"任务
-      expect(deliverCalls).toHaveLength(0)
-      // dispatch trace 归到目标任务名下（UI 按任务聚合靠它）
-      expect(dispatchTrace().related_task_id).toBe('task-terminal-1')
-    })
-  })
-
-  // ==========================================================================
-  // 动作 6：引用消息预取（M7）
-  // ==========================================================================
-
-  describe('引用消息预取（变异靶 M7）', () => {
-    it('dispatcher 拿到的预取依赖真的能把跨窗口引用的原文取回来', async () => {
-      boot()
-      let prefetched: ReadonlyMap<string, QuotedMessageEntry> | undefined
-      dispatchMock.mockImplementation(async (ctx, deps) => {
-        calls.push('dispatch')
-        capturedDeps = deps
-        // 用真实 prefetcher 跑一遍：验证的是"这组依赖可用"，不是"某个字段被传进来了"
-        if (deps.quotedPrefetchDeps) {
-          prefetched = await prefetchQuotedMessages(
-            ctx.messages,
-            ctx.recentMessages,
-            ctx.channelId,
-            ctx.sessionId,
-            'private',
-            deps.quotedPrefetchDeps,
-            () => 'friend',
-          )
-        }
-        return { actions: [{ kind: 'stay_silent' }] }
-      })
-
-      await internals.processDirectBatch(
-        batchOf([makeMessage({ id: 'm-1', type: 'private', text: '这个怎么办', replyTo: 'quoted-origin-1' })]),
-      )
-
-      expect(prefetched?.get('quoted-origin-1')?.msg.content.text).toBe('这是跨窗口引用的原文')
-      const fetch = rpcCalls.find((c) => c.method === 'get_message')
-      expect(fetch).toBeDefined()
-      expect(fetch!.port).toBe(WECHAT_PORT)
-      expect(fetch!.params).toMatchObject({ session_id: 'sess-1', platform_message_id: 'quoted-origin-1' })
-      // 时区也一并传给 dispatcher（消息时间戳本地化）
-      expect(capturedDeps!.timezone).toBeTruthy()
-    })
-  })
-
-  // ==========================================================================
-  // 动作 7 / 8：预回复、spawn 顺序与 reaction（M11 / M8 / M2）
-  // ==========================================================================
-
-  describe('预回复 / spawn / reaction 的顺序（变异靶 M11、M8）', () => {
-    it('8 件事按固定顺序发生：预回复必须在 worker 起来之前发出去', async () => {
-      boot()
-      setDispatchActions([{ kind: 'new_task', immediate_reply: '收到，我看一下' }])
-
-      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
-
-      expect(calls).toEqual([
-        'update_last_message_time',
-        'start_trace:message',
-        'resolve_permissions',
-        'assemble_front_context',
-        'dispatch',
-        'send_message',
-        'register_trigger',
-        'start_trace:task',
-        'worker_loop',
-        'add_reaction',
-      ])
-    })
-
-    it('预回复的落地元数据进 worker 的上下文（worker 因此知道自己已经 ack 过）', async () => {
-      boot()
-      setDispatchActions([{ kind: 'new_task', immediate_reply: '收到，我看一下' }])
-
-      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
-
-      const sent = rpcCalls.find((c) => c.method === 'send_message')
-      expect(sent!.port).toBe(WECHAT_PORT)
-      expect(sent!.params).toMatchObject({
-        session_id: 'sess-1',
-        content: { type: 'text', text: '收到，我看一下' },
-      })
-
-      const history = spawnCalls[0].frontContext.recent_messages
-      const ack = history[history.length - 1]
-      expect(ack.platform_message_id).toBe('ack-1')
-      expect(ack.content.text).toBe('收到，我看一下')
-      // sender=self → prompt 渲染时会被认成 assistant 自己发的
-      expect(ack.sender.platform_user_id).toBe('self')
-    })
-
-    it('接住消息后给批内最后一条打"已读"回应（变异靶 M2 / M8）', async () => {
+  describe('已读回应（变异靶 M8 / M2）', () => {
+    it('给批内最后一条打"已读"回应，kind=acknowledged、落在本会话', async () => {
       boot()
       await internals.processDirectBatch(
         batchOf([
@@ -654,143 +322,438 @@ describe('processDirectBatch —— 私聊 lane handler（P7/PR A 测试网 ②�
       })
     })
 
-    it('决定不回应时不打"已读"、不起 worker（reaction 不是无条件发的）', async () => {
-      boot()
-      setDispatchActions([{ kind: 'stay_silent', reason: '闲聊' }])
+    it('reaction 发生在 manager episode 开始之前（不等任何 LLM）', async () => {
+      boot([[sendMessageBlock({ channelId: 'wechat', sessionId: 'sess-1', text: '在的' })]])
 
       await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
 
-      expect(rpcCalls.find((c) => c.method === 'add_reaction')).toBeUndefined()
-      expect(spawnCalls).toHaveLength(0)
-      expect(deliverCalls).toHaveLength(0)
-      expect(actionSpanDetails().outcome).toBe('silent_discard')
-      expect(dispatchTrace().status).toBe('completed')
+      // 唤醒边界的第一次异步解析（resolve_permissions）即 episode 起点
+      expect(calls.indexOf('add_reaction')).toBe(0)
+      expect(calls.indexOf('add_reaction')).toBeLessThan(calls.indexOf('resolve_permissions'))
+      expect(calls.indexOf('add_reaction')).toBeLessThan(calls.indexOf('manager_llm'))
     })
 
-    it('dispatcher 一个动作都没给时 trace 记 silent', async () => {
-      boot()
-      setDispatchActions([])
+    it('manager 决定沉默时 reaction 仍然发过（"我看到了"不依赖决策结果）', async () => {
+      boot([]) // 空脚本 = manager 一句话都不说
 
       await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
 
-      expect(dispatchTrace().outcome?.summary).toBe('silent')
-      expect(rpcCalls.find((c) => c.method === 'add_reaction')).toBeUndefined()
+      expect(rpcCalls.find((c) => c.method === 'add_reaction')).toBeDefined()
+      expect(rpcCalls.find((c) => c.method === 'send_message')).toBeUndefined()
     })
 
-    it('整批消息都交给 dispatcher 和 worker，发起人取批内最后一条（变异靶 M2）', async () => {
-      boot()
-      const older = makeFriend('f-1')
-      const newer = makeFriend('f-2')
-      const batch = [
-        { message: makeMessage({ id: 'm-1', type: 'private', text: '第一条' }), friend: older },
-        { message: makeMessage({ id: 'm-2', type: 'private', text: '第二条' }), friend: newer },
-      ]
+    it('channel 不支持 add_reaction 时不阻断 manager（RPC 抛错只 warn）', async () => {
+      reactionFails = true
+      boot([[sendMessageBlock({ channelId: 'wechat', sessionId: 'sess-1', text: '在的' })]])
 
-      await internals.processDirectBatch(batch)
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
 
-      expect(capturedCtx!.messages.map((m) => m.platform_message_id)).toEqual(['m-1', 'm-2'])
-      expect(capturedCtx!.senderFriend.id).toBe('f-2')
-      expect(capturedDeps!.laneBatchSize).toBe(2)
-      expect(spawnCalls[0].messages.map((m) => m.platform_message_id)).toEqual(['m-1', 'm-2'])
-      expect(spawnCalls[0].senderFriend.id).toBe('f-2')
-      // 上下文装配按最后一条发言人的视角取
-      expect(assembleCalls[0].params.friend_id).toBe('f-2')
-      expect(assembleCalls[0].params.message).toBe('第一条\n第二条')
-    })
-
-    it('supplement 投递把整批消息交给目标任务（变异靶 M2）', async () => {
-      boot()
-      setDispatchActions([{ kind: 'supplement', target_task_id: 'task-active-1' }])
-
-      await internals.processDirectBatch(
-        batchOf([
-          makeMessage({ id: 'm-1', type: 'private', text: '第一条' }),
-          makeMessage({ id: 'm-2', type: 'private', text: '第二条' }),
-        ]),
-      )
-
-      expect(deliverCalls).toHaveLength(1)
-      expect(deliverCalls[0].taskId).toBe('task-active-1')
-      expect(deliverCalls[0].messages.map((m) => m.platform_message_id)).toEqual(['m-1', 'm-2'])
-      expect(spawnCalls).toHaveLength(0)
+      expect(script.streams.length).toBeGreaterThan(0)
+      expect(rpcCalls.find((c) => c.method === 'send_message')).toBeDefined()
     })
   })
 
   // ==========================================================================
-  // worker 不阻塞入站（M10）
+  // 权限身份解析（变异靶 M4）—— 数据源从 dispatcher-executor 换成 ManagerPrincipalStore
   // ==========================================================================
 
-  describe('worker 不阻塞入站 lane（变异靶 M10）', () => {
-    it('worker 还在跑时本批就已处理完，lane 可以接下一批', async () => {
+  describe('权限身份解析（变异靶 M4）', () => {
+    it('解析出的身份随 spawn 下传，决定这轮派出去的 worker 能用哪些工具', async () => {
+      boot([[spawnWorkerBlock()]])
+      const spawn = spyOnSpawn()
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+
+      // 解析请求打的是 admin，带的是这条私聊会话的身份三元组
+      const resolveCall = rpcCalls.find((c) => c.method === 'resolve_principal_permissions')
+      expect(resolveCall).toBeDefined()
+      expect(resolveCall!.port).toBe(ADMIN_PORT)
+      expect(resolveCall!.params).toMatchObject({
+        sender_friend_id: 'f-1',
+        session_id: 'sess-1',
+        session_type: 'private',
+      })
+
+      // 派活那一刻：身份与它算好的档位一起随 spawn 下传（PR #59 review：worker 之后只认这份）
+      expect(spawn.calls).toHaveLength(1)
+      const params = spawn.calls[0] as {
+        origin: { creator_friend_id?: string }
+        principal_permissions?: ResolvedPermissions
+      }
+      expect(params.origin.creator_friend_id).toBe('f-1')
+      expect(params.principal_permissions).toEqual(FRIEND_PERMS)
+
+      // 语义落点：这个 worker 真的看得到 Bash（shell 开）、看不到写文件工具（file_io 关）
+      // ——`narrowWorkerPermissions` 取的正是随 spawn 下传的这份。
+      const names = workerToolNames(params.principal_permissions)
+      expect(names).toContain('Bash')
+      expect(names).not.toContain('Write')
+      expect(names).not.toContain('Edit')
+    })
+
+    it('解析失败时不写入身份，worker 退回固定档位（不是放开也不是沿用上一轮）', async () => {
       boot()
+      permsResponse = 'throw'
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+
+      expect(principal()!.permissions).toBeNull()
+      // 退回 F 阶段固定档位：file_io 开着（BUILTIN_WORKER_PERMISSIONS），不因解析失败而放宽到
+      // messaging / remote_exec
+      const names = workerToolNames()
+      expect(names).toContain('Write')
+      expect(names).not.toContain('send_message')
+    })
+  })
+
+  // ==========================================================================
+  // memory 权限档位（变异靶 M5）—— 断言落到 memory 模块真的收到的可见范围
+  // ==========================================================================
+
+  describe('memory 权限档位（变异靶 M5）', () => {
+    it('按该 friend 解析出的 memory_scopes 授权读写，不是 public/全局', async () => {
+      boot([[searchMemoryBlock()]])
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+
+      const search = rpcCalls.find((c) => c.method === 'search_short_term')
+      expect(search, 'manager 真实工具面上的 search_memory 应当打到 memory 模块').toBeDefined()
+      expect(search!.port).toBe(MEMORY_PORT)
+      expect(search!.params.accessible_scopes).toEqual(['friend-scope-a', 'friend-scope-b'])
+      expect(search!.params.min_visibility).toBe('internal')
+      // 反向钉死：不能退化成"公开可见 + 无 scope 限制"
+      expect(search!.params.min_visibility).not.toBe('public')
+
+      // 同一份档位随 spawn 下传给 worker
+      expect(principal()!.memory).toEqual({
+        write_visibility: 'internal',
+        write_scopes: ['friend-scope-a', 'friend-scope-b'],
+        read_min_visibility: 'internal',
+        read_accessible_scopes: ['friend-scope-a', 'friend-scope-b'],
+      })
+    })
+
+    it('身份解析失败时档位回落到该 session 配置的 scopes（仍不是公开）', async () => {
+      boot([[searchMemoryBlock()]])
+      permsResponse = 'throw'
+      sessionScopes = ['session-scope-1']
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+
+      expect(calls).toContain('get_session_config')
+      const search = rpcCalls.find((c) => c.method === 'search_short_term')
+      expect(search!.params.accessible_scopes).toEqual(['session-scope-1'])
+      expect(search!.params.min_visibility).toBe('internal')
+    })
+  })
+
+  // ==========================================================================
+  // 场景画像 + crab_self_handle（plan §一 5b / 5d）
+  // ==========================================================================
+
+  describe('对话对象档案（plan §一 5b / 5d）', () => {
+    it('场景画像与本渠道 @handle 真的进了 manager 的 system prompt', async () => {
+      boot()
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+
+      const sys = script.streams[0].systemPrompt as string
+      expect(sys).toContain('## 对话对象档案')
+      expect(sys).toContain('这个人喜欢直接给结论')
+      // 多 bot 群里"哪个 @ 是发给我的"的唯一依据（缓存在 handleMessageReceived 里填）
+      expect(sys).toContain('@crabot_wx')
+    })
+  })
+
+  // ==========================================================================
+  // 顺序与阻塞语义
+  // ==========================================================================
+
+  describe('顺序与阻塞语义', () => {
+    it('一轮的固定顺序：已读 → 唤醒边界解析身份 → manager LLM → 说话', async () => {
+      boot([[sendMessageBlock({ channelId: 'wechat', sessionId: 'sess-1', text: '收到，我看一下' })]])
+
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+
+      expect(calls.filter((c) => c !== 'manager_llm' || true)).toEqual([
+        'add_reaction',
+        'resolve_permissions',
+        'resolve_scene_profile',
+        'manager_llm',
+        'send_message',
+        'manager_llm',
+      ])
+      const sent = rpcCalls.find((c) => c.method === 'send_message')
+      expect(sent!.port).toBe(WECHAT_PORT)
+      expect(sent!.params).toMatchObject({ session_id: 'sess-1', content: { type: 'text', text: '收到，我看一下' } })
+    })
+
+    it('lane handler 必须等 manager episode 结束才返回（fire-and-forget 会让兜底没有落点）', async () => {
       let release: () => void = () => {}
-      workerGate = new Promise<void>((resolve) => {
+      const gate = new Promise<void>((resolve) => {
         release = resolve
       })
+      boot()
+      const inner = hoisted.managerAdapter as { stream: (p: unknown) => AsyncGenerator<unknown> }
+      hoisted.managerAdapter = {
+        async *stream(params: unknown) {
+          await gate
+          yield* inner.stream(params)
+        },
+        updateConfig: () => {},
+      }
 
-      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+      let returned = false
+      const p = internals
+        .processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+        .then(() => {
+          returned = true
+        })
 
-      // 到这里 processDirectBatch 已经返回——若改成同步等 worker，这一行永远到不了
-      expect(calls).toContain('worker_loop')
-      expect(workerSettled).toBe(false)
-      expect(dispatchTrace().status).toBe('completed')
-      expect(dispatchTrace().outcome?.summary).toBe('dispatched (1 actions)')
+      await new Promise((resolve) => setImmediate(resolve))
+      expect(returned, 'manager 还没跑完 lane handler 就返回了 = fire-and-forget').toBe(false)
 
       release()
-      await new Promise((resolve) => process.nextTick(resolve))
-      expect(workerSettled).toBe(true)
-    }, 5000)
+      await p
+      expect(returned).toBe(true)
+      expect(script.streams.length).toBeGreaterThan(0)
+    })
+
+    it('唤醒抛错：lane 不炸（异常不会顺着 lane 冒到 SessionLane 上），且已读已经发出去了', async () => {
+      boot()
+      internals.managerStack.registry.routeHumanMessages = async () => {
+        throw new Error('route boom')
+      }
+
+      await expect(
+        internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })])),
+      ).resolves.toBeUndefined()
+
+      expect(rpcCalls.find((c) => c.method === 'add_reaction')).toBeDefined()
+    })
+
+    /**
+     * plan §三 的 F1 形态：LLM 挂掉时 `ManagerLoop` 记 `outcome:'failed'` 并把事件推回
+     * mailbox，**不抛**——所以只靠 try/catch 抓不住最常见的那种失败。
+     */
+    it('manager episode 失败（LLM 挂）不把异常抛回 lane', async () => {
+      boot()
+      hoisted.managerAdapter = {
+        // eslint-disable-next-line require-yield
+        async *stream() {
+          calls.push('manager_llm')
+          throw new Error('LLM boom')
+        },
+        updateConfig: () => {},
+      }
+
+      await expect(
+        internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })])),
+      ).resolves.toBeUndefined()
+
+      expect(calls).toContain('manager_llm')
+    })
   })
 
   // ==========================================================================
-  // 早退分支
+  // fail-loud 兜底（plan §三）
+  //
+  // 风险面：manager episode 失败 → agent 活着、health 还是绿的，但它完全不回话。
+  // 三形态行为不同，判据必须双管（catch + outcome）：
+  //
+  // | 形态 | 触发 | 抛错? | 兜底? |
+  // |---|---|---|---|
+  // | F1 正常失败（LLM 挂 / key 过期 / 限流） | `outcome ∈ {failed, aborted}` | 不抛 | 发 |
+  // | F2 中途抛错（adapter thunk / store IO） | 抛 | 抛 | 发 |
+  // | F3 静默完成（manager 决定不说话） | `outcome='completed'` + 没出声 | 不抛 | **不发** |
   // ==========================================================================
 
-  describe('早退分支', () => {
-    it('没有 worker handler：trace 记失败，后续 7 件事一件都不做', async () => {
-      boot({ withHandler: false })
-      internals.agentHandler = undefined
+  describe('fail-loud 兜底（plan §三）', () => {
+    /** 让 registry 按 F1 的样子返回：正常 resolve，只是 outcome 是 failed。 */
+    function stubOutcome(outcome: 'failed' | 'aborted' | 'completed'): void {
+      internals.managerStack.registry.routeHumanMessages = async () => {
+        calls.push('manager_llm')
+        return { episodeId: 'ep-1', outcome, turns: 1, consumedEvents: outcome === 'completed', repliedToHuman: false }
+      }
+    }
 
-      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+    function failLoudText(): string | undefined {
+      const sent = rpcCalls.find((c) => c.method === 'send_message')
+      if (!sent) return undefined
+      return (sent.params.content as { text: string } | undefined)?.text
+    }
 
-      const trace = dispatchTrace()
-      expect(trace.status).toBe('failed')
-      expect(trace.outcome?.summary).toBe('No worker handler configured')
-      expect(calls).toEqual(['update_last_message_time', 'start_trace:message'])
-      expect(dispatchMock).not.toHaveBeenCalled()
-    })
-
-    it('没有 worker LLM 环境：早退发生在上下文装配之后（顺序敏感）', async () => {
-      boot({ withSdkEnv: false })
-      internals.sdkEnvWorker = undefined
-
-      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
-
-      const trace = dispatchTrace()
-      expect(trace.status).toBe('failed')
-      expect(trace.outcome?.summary).toBe('sdkEnvWorker missing')
-      expect(calls).toEqual([
-        'update_last_message_time',
-        'start_trace:message',
-        'resolve_permissions',
-        'assemble_front_context',
-      ])
-      expect(dispatchMock).not.toHaveBeenCalled()
-    })
-
-    it('dispatcher 抛错：trace 记 failed，不起 worker', async () => {
+    it('F1：真实 loop 里 LLM 挂掉（不抛错）时人类仍然收到一条明确回复', async () => {
       boot()
-      dispatchMock.mockImplementation(async () => {
-        calls.push('dispatch')
-        throw new Error('dispatch boom')
-      })
+      hoisted.managerAdapter = {
+        // eslint-disable-next-line require-yield
+        async *stream() {
+          calls.push('manager_llm')
+          throw new Error('LLM boom')
+        },
+        updateConfig: () => {},
+      }
 
       await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
 
-      const trace = dispatchTrace()
-      expect(trace.status).toBe('failed')
-      expect(trace.outcome?.error).toBe('dispatch boom')
-      expect(spawnCalls).toHaveLength(0)
+      const sent = rpcCalls.find((c) => c.method === 'send_message')
+      expect(sent, 'F1 下人类什么都收不到 = 本次兜底的整个存在理由落空').toBeDefined()
+      expect(sent!.port).toBe(WECHAT_PORT)
+      expect(sent!.params.session_id).toBe('sess-1')
+      expect(failLoudText()).toContain('管理员')
+    })
+
+    /**
+     * **判据里的 outcome 那一管**：这里 registry 正常 resolve、一个异常都不抛，
+     * 只有 `outcome` 是 failed。去掉 outcome 判据（只留 catch）这条必挂。
+     */
+    it('F1：episode 正常 resolve 但 outcome=failed 时也必须兜底（只 catch 抓不住）', async () => {
+      boot()
+      stubOutcome('failed')
+
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+
+      expect(failLoudText()).toContain('failed')
+      expect(failLoudText()).toContain('管理员')
+    })
+
+    it('F1：outcome=aborted 同样兜底', async () => {
+      boot()
+      stubOutcome('aborted')
+
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+
+      expect(failLoudText()).toContain('aborted')
+    })
+
+    /** F2：loop 本身起不来（`adapter()` thunk 抛、store IO 抛）——异常冒到 lane handler。 */
+    it('F2：episode 抛错时兜底回复带上原始错误信息', async () => {
+      boot()
+      internals.managerStack.registry.routeHumanMessages = async () => {
+        throw new Error('store IO boom')
+      }
+
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+
+      expect(failLoudText()).toContain('store IO boom')
+    })
+
+    /**
+     * 文案必须能指导下一步动作。model slot 没配不是故障而是配置没做完，
+     * 笼统的"我出错了"会让人类和管理员都无从下手。
+     */
+    it('F2：manager model slot 没配时，文案说清"去 Admin 配 manager 槽位"', async () => {
+      boot()
+      internals.managerStack.registry.routeHumanMessages = async () => {
+        throw new Error(
+          "[ManagerLoop] model_config 缺少 'manager' 与 'powerful' 两个 slot，manager loop 无法解析可用的 LLM 连接信息",
+        )
+      }
+
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+
+      const text = failLoudText()!
+      expect(text).toContain('Admin')
+      expect(text).toContain('manager')
+      expect(text).toContain('槽位')
+    })
+
+    /**
+     * F3 不兜：群聊里 stay_silent 合法，私聊里也分不清"故意沉默"和"prompt 坏了"。
+     * 误报（机器人无缘无故说"我出错了"）比漏报更伤。
+     */
+    it('F3：episode 正常完成但 manager 决定沉默时，一个字都不发', async () => {
+      boot([]) // 空脚本 = manager 一句话都不说
+
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+
+      expect(rpcCalls.find((c) => c.method === 'send_message')).toBeUndefined()
+      // 但 react 照发（"我看到了"与"我回话了"是两件事）
+      expect(rpcCalls.find((c) => c.method === 'add_reaction')).toBeDefined()
+    })
+
+    it('F3：私聊连续静默到阈值时记一条 warn（只记日志，仍然不发消息）', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      boot([])
+
+      for (let i = 0; i < 3; i++) {
+        await internals.processDirectBatch(batchOf([makeMessage({ id: `m-${i}`, type: 'private' })]))
+      }
+
+      expect(warn.mock.calls.some((c) => String(c[0]).includes('连续 3 轮'))).toBe(true)
+      expect(rpcCalls.find((c) => c.method === 'send_message')).toBeUndefined()
+    })
+
+    /**
+     * F1 会把整批输入推回 mailbox 下次重投，同一批消息会**反复**触发失败。
+     * 没有冷却 = 故障期间往用户脸上刷屏。
+     */
+    it('冷却去重：连续三轮失败只告诉人类一次', async () => {
+      boot()
+      stubOutcome('failed')
+
+      for (let i = 0; i < 3; i++) {
+        await internals.processDirectBatch(batchOf([makeMessage({ id: `m-${i}`, type: 'private' })]))
+      }
+
+      expect(rpcCalls.filter((c) => c.method === 'send_message')).toHaveLength(1)
+    })
+
+    it('冷却按 key 隔离：另一个会话失败照样告诉那边的人', async () => {
+      boot()
+      stubOutcome('failed')
+
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+      await internals.processDirectBatch(
+        batchOf([makeMessage({ id: 'm-2', type: 'private', sessionId: 'sess-2' })]),
+      )
+
+      const sent = rpcCalls.filter((c) => c.method === 'send_message')
+      expect(sent).toHaveLength(2)
+      expect(sent.map((c) => c.params.session_id)).toEqual(['sess-1', 'sess-2'])
+    })
+
+    it('冷却窗口过去之后可以再告诉一次（不是一次性哑掉）', async () => {
+      boot()
+      stubOutcome('failed')
+
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+      // 把台账往前拨 6 分钟（窗口 5 分钟）
+      internals.failLoudSentAt.set('wechat::sess-1', Date.now() - 6 * 60 * 1000)
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-2', type: 'private' })]))
+
+      expect(rpcCalls.filter((c) => c.method === 'send_message')).toHaveLength(2)
+    })
+
+    /**
+     * 兜底路径与 manager 栈零共享：manager 已经彻底坏掉（registry 直接抛）时，
+     * 这条回复仍然要发得出去——它只依赖 rpcClient + channel 端口。
+     */
+    it('兜底走裸 send_message RPC，不经 manager 工具面', async () => {
+      boot()
+      internals.managerStack.registry.routeHumanMessages = async () => {
+        throw new Error('manager stack is dead')
+      }
+
+      await internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })]))
+
+      const sent = rpcCalls.find((c) => c.method === 'send_message')!
+      expect(sent.port).toBe(WECHAT_PORT)
+      // channel 的 SendMessageParams 形状：`{session_id, content}`（不是 `{message}`）
+      expect(sent.params).toMatchObject({ session_id: 'sess-1', content: { type: 'text' } })
+      // manager 一次 LLM 都没起来过
+      expect(calls).not.toContain('manager_llm')
+    })
+
+    it('channel 也挂了时兜底失败只记日志，不把异常抛回 lane', async () => {
+      boot()
+      internals.managerStack.registry.routeHumanMessages = async () => {
+        throw new Error('manager stack is dead')
+      }
+      const realCall = internals.rpcClient.call
+      internals.rpcClient.call = async (port, method, params, from) => {
+        if (method === 'send_message') throw new Error('channel down')
+        return realCall(port, method, params, from)
+      }
+
+      await expect(
+        internals.processDirectBatch(batchOf([makeMessage({ id: 'm-1', type: 'private' })])),
+      ).resolves.toBeUndefined()
     })
   })
 })

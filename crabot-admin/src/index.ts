@@ -145,6 +145,8 @@ import {
   type ChatSendMessageParams,
   type ChatSendMessageResult,
   type ChatTaskSnapshot,
+  type AgentTaskStatus,
+  type LedgerWorkerBrief,
   type ChannelMessageRef,
   type FriendPermissionConfig,
   type GetFriendPermissionResult,
@@ -375,6 +377,12 @@ function normalizeSceneProfileTextField(
  * （全局 crabot start 用 ~/.crabot/data 但代码在 repo），反推会把 data 的家误当代码的家。
  */
 const CRABOT_HOME = process.env.CRABOT_HOME ?? path.resolve(__dirname, '../..')
+
+/**
+ * admin-web 伪 channel 的 id（spec 2026-06-10-master-chat-redesign §4）：manager 的
+ * `send_message` 与 worker 的结果回报都经它路由回聊天界面。任务状态卡的归属判据。
+ */
+const ADMIN_CHAT_CHANNEL_ID = 'admin-web'
 
 /**
  * query string 里的整数参数。缺省或非法（`?page=abc` / `?page_size=`）一律回落到 fallback。
@@ -1024,8 +1032,56 @@ export class AdminModule extends ModuleBase {
         await this.handleChannelMessage(channel_id, message, crab_display_name, crab_self_handle)
         break
       }
+      case 'agent.task_status_changed': {
+        await this.handleAgentTaskStatusChanged(
+          event.payload as { worker_id: string; task_id: TaskId; new_status: AgentTaskStatus }
+        )
+        break
+      }
       // 其他事件处理...
     }
+  }
+
+  /**
+   * protocol-agent-v3 §9.2：task 真相源迁到 agent 之后，状态变更由 agent 发事件。
+   *
+   * Master Chat 的任务状态卡在 v2 是由 admin 自己的 `applyStatusTransition` 顺手推的；
+   * cutover 之后 admin 不再是那条状态机的执行者，**不订阅这个事件，卡片就永远停在
+   * 创建时的那一帧**（既不会转完成也不会转失败，且没有任何报错）。
+   *
+   * 事件载荷里没有 title，也没有"这条 task 属不属于 admin chat"的信息，所以要回查一次
+   * §8.3 的只读端点 `get_worker_detail`：拿 `task.title` 填卡片，拿 `report_to` 判定
+   * 归属（v2 的判据是 `task.source.channel_id === 'admin-web'`，v3 的等价物是
+   * "结果回报目标是不是 admin chat"）。回查失败只 warn——状态卡不是关键路径。
+   */
+  private async handleAgentTaskStatusChanged(payload: {
+    worker_id: string
+    task_id: TaskId
+    new_status: AgentTaskStatus
+  }): Promise<void> {
+    if (!this.chatManager) return
+
+    let worker: LedgerWorkerBrief
+    try {
+      const result = await this.callAgentRpc<{ worker_id: string }, { worker: LedgerWorkerBrief }>(
+        'get_worker_detail',
+        { worker_id: payload.worker_id }
+      )
+      worker = result.worker
+    } catch (err) {
+      console.warn(
+        `[Admin] agent.task_status_changed: get_worker_detail(${payload.worker_id}) failed: ${err instanceof Error ? err.message : String(err)}`
+      )
+      return
+    }
+
+    if (worker?.report_to?.channel_id !== ADMIN_CHAT_CHANNEL_ID) return
+
+    this.chatManager.pushTaskUpdate({
+      task_id: payload.task_id,
+      status: payload.new_status,
+      title: worker.task?.title ?? payload.task_id,
+    })
   }
 
   // ============================================================================
@@ -6093,13 +6149,18 @@ export class AdminModule extends ModuleBase {
     return { deleted: true }
   }
 
-  private async handleTriggerNow(params: TriggerNowParams): Promise<{ task_id: string; schedule: Schedule }> {
+  /**
+   * 立即触发。**不再回 task_id**：v3 的 `trigger_schedule` 是"同步受理即返回"
+   * （protocol-agent-v3 §8.2），派不派 worker、派几个由被唤醒的 manager 在 episode
+   * 内自己决定，受理的那一刻还不存在任何 task。
+   */
+  private async handleTriggerNow(params: TriggerNowParams): Promise<{ accepted: true; schedule: Schedule }> {
     const schedule = this.schedules.get(params.schedule_id)
     if (!schedule) {
       throw new Error(AdminErrorCode.SCHEDULE_NOT_FOUND)
     }
 
-    // 走统一触发链路（RPC → Agent create_task_from_schedule）
+    // 走统一触发链路（RPC → Agent trigger_schedule）
     const result = await this.handleScheduleTrigger(schedule)
     if (!result) {
       throw new Error('Schedule trigger failed: Agent not available or RPC error')
@@ -6108,7 +6169,7 @@ export class AdminModule extends ModuleBase {
     // 从 Map 中取最新状态（handleScheduleTrigger 已更新）
     const updatedSchedule = this.schedules.get(params.schedule_id) ?? schedule
 
-    return { task_id: result.task_id, schedule: updatedSchedule }
+    return { accepted: true, schedule: updatedSchedule }
   }
 
   // ============================================================================
@@ -6117,9 +6178,20 @@ export class AdminModule extends ModuleBase {
 
   /**
    * ScheduleEngine 到点时调用的回调
-   * 替换模板变量 → RPC 调 Agent create_task_from_schedule → 更新 Schedule 状态
+   * 替换模板变量 → RPC 调 Agent `trigger_schedule` → 更新 Schedule 状态
+   *
+   * **P7/J cutover**：从 `create_task_from_schedule` 切到 `trigger_schedule`
+   * （protocol-agent-v3 §8.2，前者已列入 §8.5 退役接口）。三点语义变化：
+   *
+   * 1. **不再回 task_id** —— 受理即返回，派不派 worker 由被唤醒的 manager 自己决定。
+   *    因此 `last_task_id` 不再写、`admin.schedule_triggered` 不再带 task_id；
+   * 2. **不再由 admin 解析权限** —— v2 是 admin 把 schedule 解析成 `resolved_permissions`
+   *    再下发；v3 改由 agent 按 `origin.creator_friend_id` 解析，所以这里改传
+   *    `creator_friend_id` + `is_builtin` 这两个**事实**，而不是解析结果；
+   * 3. **不再下发 task_type / input** —— §8.2 的入参里没有它们；worker 的选型与
+   *    执行细节都在 manager 那一侧决定。模板变量仍然在 title/description 上渲染。
    */
-  private async handleScheduleTrigger(schedule: Schedule): Promise<{ task_id: string } | void> {
+  private async handleScheduleTrigger(schedule: Schedule): Promise<{ accepted: true } | void> {
     const repairedSchedule = await this.repairScheduleTargetSessionReference(schedule)
     if (repairedSchedule !== schedule) {
       this.schedules.set(repairedSchedule.id, repairedSchedule)
@@ -6154,18 +6226,7 @@ export class AdminModule extends ModuleBase {
     const title = replaceVars(schedule.task_template.title)
     const description = replaceVars(schedule.task_template.description ?? '')
 
-    const input = schedule.task_template.input
-      ? renderTemplateValue(schedule.task_template.input) as Record<string, unknown>
-      : undefined
-
-    // 解析触发后任务的执行权限：
-    //   - 系统内置 / 没填 creator：按 master_private 系统模板（最高权限）跑；
-    //   - 用户创建：按 creator 当前 friend 的权限模板（含 session 覆盖）；
-    //   - creator 已删除：回退最高权限并 warn（避免历史 schedule 因 friend 缺失静默失败）。
-    const resolvedPermissions = this.resolveScheduleExecutionPermissions(schedule)
-
     // 找到 Agent 模块并 RPC 调用
-    let result: { task_id: string; assigned_worker: string }
     try {
       const port = await this.ensureAgentPort()
       if (!port) {
@@ -6173,31 +6234,27 @@ export class AdminModule extends ModuleBase {
         return
       }
 
-      result = await this.rpcClient.call<
+      await this.rpcClient.call<
         {
           schedule_id: string
-          task_type?: string
           title: string
           description: string
-          input?: Record<string, unknown>
-          /** Schedule 的目标会话（一等字段，Task 10 引入）。
-           *  Agent 用它填 task_origin + ScheduledTaskRunner 构造 trigger_message.session。
-           *  无值时 ScheduledTaskRunner 走 SYSTEM_SESSION 哨兵分支。 */
+          /** Schedule 的目标会话（可选）。无值时 agent 路由到系统任务线程 manager。 */
           target_session?: ScheduleTargetSession
-          resolved_permissions?: ResolvedPermissions
+          creator_friend_id?: FriendId
+          is_builtin?: boolean
         },
-        { task_id: string; assigned_worker: string }
+        { accepted: true }
       >(
         port,
-        'create_task_from_schedule',
+        'trigger_schedule',
         {
           schedule_id: schedule.id,
-          task_type: schedule.task_template.type,
           title,
           description,
-          ...(input ? { input } : {}),
           ...(schedule.target_session ? { target_session: schedule.target_session } : {}),
-          ...(resolvedPermissions ? { resolved_permissions: resolvedPermissions } : {}),
+          ...(schedule.creator_friend_id ? { creator_friend_id: schedule.creator_friend_id } : {}),
+          ...(schedule.is_builtin ? { is_builtin: schedule.is_builtin } : {}),
         },
         this.config.moduleId
       )
@@ -6214,7 +6271,6 @@ export class AdminModule extends ModuleBase {
       last_triggered_at: nowIso,
       execution_count: schedule.execution_count + 1,
       next_trigger_at: this.calculateNextTriggerTime(schedule.trigger),
-      last_task_id: result.task_id,
       updated_at: nowIso,
     }
     this.schedules.set(schedule.id, updated)
@@ -6230,9 +6286,9 @@ export class AdminModule extends ModuleBase {
     this.saveData().catch(() => {})
 
     // 发布事件
-    this.publishAdminEvent('admin.schedule_triggered', { schedule: updated, task_id: result.task_id })
+    this.publishAdminEvent('admin.schedule_triggered', { schedule: updated })
 
-    return { task_id: result.task_id }
+    return { accepted: true }
   }
 
   // ============================================================================
@@ -9052,37 +9108,6 @@ export class AdminModule extends ModuleBase {
       return 'master_private'
     }
     return friend.permission_template_id ?? 'standard'
-  }
-
-  /**
-   * 计算 schedule 触发后任务执行的权限：
-   * - 系统内置 / 无 creator → master_private 模板（最高权限，含 desktop / shell / file_io）
-   * - 有 creator 且 friend 存在 → 沿用 creator 的解析结果
-   * - 有 creator 但 friend 已删除 → 退回 master_private 并 warn（防止 schedule 静默失活）
-   */
-  private resolveScheduleExecutionPermissions(schedule: Schedule): ResolvedPermissions | null {
-    const fallbackToMaster = (): ResolvedPermissions | null => {
-      try {
-        return this.permissionTemplateManager.resolvePermissions('master_private', null)
-      } catch (err) {
-        console.error(`[Admin] master_private template missing while resolving schedule ${schedule.id}:`, err)
-        return null
-      }
-    }
-
-    if (schedule.is_builtin || !schedule.creator_friend_id) {
-      return fallbackToMaster()
-    }
-
-    const friend = this.friends.get(schedule.creator_friend_id)
-    if (!friend) {
-      console.warn(
-        `[Admin] Schedule ${schedule.id} (${schedule.name}) creator_friend_id ${schedule.creator_friend_id} not found, falling back to master_private`
-      )
-      return fallbackToMaster()
-    }
-
-    return this.buildResolvedFriendPermissions(friend)
   }
 
   /**

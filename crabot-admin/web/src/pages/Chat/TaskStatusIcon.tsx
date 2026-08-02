@@ -8,7 +8,10 @@ import { useNavigate } from 'react-router-dom'
 import { Tooltip } from '../../components/Common/Tooltip'
 import type { ChatTaskSnapshot } from '../../types/chat'
 
-/** 状态中文映射 */
+/**
+ * 状态中文映射。上半段是 v2 存量任务的状态，下半段是 protocol-agent-v3 §5.2 的精简状态机
+ * （cutover 之后 agent 事件推过来的就是这几个值）。两套并存：历史卡片仍要看得懂。
+ */
 const STATUS_LABELS: Record<string, string> = {
   pending: '排队中',
   planning: '规划中',
@@ -18,13 +21,17 @@ const STATUS_LABELS: Record<string, string> = {
   completed: '已完成',
   failed: '失败',
   cancelled: '已取消',
+  // protocol-agent-v3 §5.2
+  queued: '排队中',
+  running: '执行中',
+  waiting_input: '等回复',
 }
 
 /** 运行中状态（显示 spinner） */
-const SPINNING_STATUSES = new Set(['pending', 'planning', 'executing'])
+const SPINNING_STATUSES = new Set(['pending', 'planning', 'executing', 'queued', 'running'])
 
 /** 等待状态（显示 ⏸） */
-const WAITING_STATUSES = new Set(['waiting', 'waiting_human'])
+const WAITING_STATUSES = new Set(['waiting', 'waiting_human', 'waiting_input'])
 
 interface TaskStatusIconProps {
   taskId: string

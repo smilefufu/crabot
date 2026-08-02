@@ -260,6 +260,10 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       workspace: spec.workspace,
       ...(spec.origin !== undefined ? { origin: spec.origin } : {}),
       ...(spec.goal !== undefined ? { goal: spec.goal } : {}),
+      // 权限档位跟着一起落盘:它是这个 worker 的身份属性,spawn 时定死。后续所有化身
+      // (resume/fork/续 burst/重启 revive)经 runtimeFor 从这里读回同一份,绝不重新解析
+      // ——重新解析就会随"该会话最近说话的人"漂移(见该字段注释)。
+      ...(spec.principal_permissions !== undefined ? { principal_permissions: spec.principal_permissions } : {}),
     }
     // spawn 的注入由调用方给（harness.spawnWorker 在缺省时回退到同一个工厂）——这里不再兜
     // 一次：两处回退会互相掩盖，缺了 harness 那条回退也看不出问题。缺失即 fail-loud，不降级。

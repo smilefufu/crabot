@@ -45,6 +45,9 @@ import {
   type TextBlock,
 } from '../engine/index.js'
 import { AsyncMutex } from '../workers/async-mutex'
+import { formatChannelMessageLine } from '../prompt-manager.js'
+import { resolveSenderIdentity } from '../utils/sender-identity.js'
+import { resolveTimezone } from '../utils/time.js'
 import { decideCompaction, foldIntoSummary, type CompactionPolicy, type CompactionDecision } from './compaction.js'
 import { assembleManagerSystemPrompt } from './prompt.js'
 import type { ManagerSessionStore } from './session-store.js'
@@ -52,12 +55,34 @@ import type { ManagerSessionState, ManagerKey } from './types.js'
 import type { WorkerHarness } from '../workers/harness/harness'
 import type { DialogObjectId, LedgerWorker } from '../workers/harness/ledger-types'
 import type { HarnessEvent } from '../workers/harness/worker-events'
-import type { ChannelMessage } from '../types'
+import type { ChannelMessage, Friend, ResolvedPermissions } from '../types'
 
 // --- Public Interface ---
 
 export type WakeEvent =
-  | { readonly kind: 'human_messages'; readonly messages: ReadonlyArray<ChannelMessage> }
+  | {
+      readonly kind: 'human_messages'
+      readonly messages: ReadonlyArray<ChannelMessage>
+      /**
+       * P7 J additive:本批消息的**发言者**(§4.3 权限身份、§8.2 `creator_friend_id`)。
+       * 与 schedule 的 `creatorFriendId` 同样只在唤醒事件上随行、**不作为独立字段进对话
+       * 上下文**:它的用途是让本 episode 的工具面按发起人身份装配、让派出去的 worker 记对
+       * `origin.creator_friend_id`,不是给 LLM 看的。
+       *
+       * (渲染层只把它当作 `resolveSenderIdentity` 的判据——决定每条消息渲染成
+       * `identity="master|friend|stranger"`,friend 对象本身不进正文。)
+       */
+      readonly friend?: Friend
+      /**
+       * 上面那个发言者**算好的权限档位**(§8.2),与 friend 同源同刻,由唤醒边界的异步解析
+       * (`ManagerRegistryDeps.onHumanWake`)产出。
+       *
+       * **跟着 episode 走,不从会话级缓存现取**:缓存是"该会话最近一次解析",群聊里换个人
+       * 说话就整体覆盖;本 episode 派出去的 worker 必须拿到**本批发言者**的档位,而不是
+       * 派活那一瞬间恰好最新的那个人的(PR #59 review)。同 `friend`,不进对话上下文。
+       */
+      readonly principalPermissions?: ResolvedPermissions
+    }
   | { readonly kind: 'worker_event'; readonly event: HarnessEvent }
   | {
       readonly kind: 'schedule'
@@ -72,8 +97,28 @@ export type WakeEvent =
        */
       readonly creatorFriendId?: string
       readonly isBuiltin?: boolean
+      /**
+       * 上面那个调度身份**算好的权限档位**(§4.4"权限按 `Schedule.creator_friend_id` 解析
+       * (`is_builtin` 按 master 等价)"),由唤醒边界的异步解析
+       * (`ManagerRegistryDeps.onScheduleWake`)产出。
+       *
+       * 必须随事件走:scheduled 触发可以打进一个**人类会话**的 manager,那个会话的
+       * 发起人缓存是"最近谁在说话",与这次调度的身份毫无关系(PR #59 review)。
+       */
+      readonly principalPermissions?: ResolvedPermissions
     }
-  | { readonly kind: 'attention_flush'; readonly messages: ReadonlyArray<ChannelMessage> }
+  | {
+      readonly kind: 'attention_flush'
+      readonly messages: ReadonlyArray<ChannelMessage>
+      /**
+       * P7 J additive:与 `human_messages` 的同名字段逐字同义(见上)。
+       * **群聊注意力放行走的是这一条**,漏带 friend 就等于群聊路径拿不到发起人身份
+       * ——权限档位 / 记忆 scopes / 台账归档键全部退回未解析那一档。
+       */
+      readonly friend?: Friend
+      /** 与 `human_messages` 的同名字段逐字同义(见上)。 */
+      readonly principalPermissions?: ResolvedPermissions
+    }
 
 export interface EpisodeResult {
   readonly episodeId: string
@@ -81,14 +126,30 @@ export interface EpisodeResult {
   readonly turns: number
   /** false ⇒ 邮箱事件不消费,已推回内部邮箱,下次唤醒重投 */
   readonly consumedEvents: boolean
+  /**
+   * 本 episode 里 manager 有没有**跟人说话**(调过 `HUMAN_REPLY_TOOL_NAMES` 里的任一工具)。
+   *
+   * 存在的理由只有一个:群聊注意力退避(`AttentionScheduler.reportResult(sessionId, replied)`)
+   * 需要这个信号,而 `outcome` 答不了——`completed` 既可能是"回了话"也可能是"决定沉默",
+   * 语义上无法区分。漏了它 = 群聊巡检间隔永久停在当前值,群聊逐渐停止响应。
+   *
+   * **判据是"发起了发送动作",不是"人类真的收到了"**:与 v2 的
+   * `hasReply = actions.some(a => a.kind !== 'stay_silent')` 同一层语义(决策层,不是投递层)
+   * ——工具执行结果是否 is_error 不参与判定。
+   */
+  readonly repliedToHuman: boolean
 }
 
 export interface ManagerLoopDeps {
   readonly key: ManagerKey
   readonly isSystemThread: boolean
   /** 台账渲染用(harness.listWorkers 的入参)。manager 会话粒度(ManagerKey)与台账聚合粒度
-   *  (DialogObjectId)不同——由调用方按 protocol §3 解析好传入,本模块不做这层映射。 */
-  readonly dialogObjectId: DialogObjectId
+   *  (DialogObjectId)不同——由调用方按 protocol §3 解析好传入,本模块不做这层映射。
+   *
+   *  **thunk 而非定值**(P7 J):私聊的归档键要等第一条人类消息带来 friend 之后才能收敛成
+   *  `friend:<id>`,而 loop 实例可能先由 worker 事件建出来。定值会把那一刻的 group 形状
+   *  永久钉死在实例上,同一个人的台账因此裂成两份。 */
+  readonly dialogObjectId: () => DialogObjectId
   readonly store: ManagerSessionStore
   readonly policy: CompactionPolicy
   /** decideCompaction 的 token 估算器,调用方注入(与 compaction.ts 的既定依赖注入方式一致)。 */
@@ -118,6 +179,12 @@ export interface ManagerLoopDeps {
   readonly promptInputs: () => { readonly dialogProfile?: string; readonly pendingNotes?: ReadonlyArray<string> }
   readonly harness: WorkerHarness
   readonly now: () => Date
+  /**
+   * 人类消息渲染用的时区(`formatChannelMessageLine` 的 `ts` 属性)。thunk 而非定值:
+   * 与 adapter/model 同理,admin 改了实例时区不必销毁重建 loop。
+   * 不注入则退回 `resolveTimezone(undefined)`(env `CRABOT_DEFAULT_TIMEZONE` → Asia/Shanghai)。
+   */
+  readonly timezone?: () => string
   readonly onEpisodeEnd?: (result: EpisodeResult) => void
 }
 
@@ -195,9 +262,21 @@ export class ManagerLoop {
   /** episode 进行中到达的新事件:渲染成文本推进内部邮箱,由 engine 的 humanMessageQueue
    *  在 turn 间隙注入;episode 不在跑时同样入队,行为见 `mailbox` 字段注释。 */
   enqueueDuringEpisode(event: WakeEvent): void {
-    const text = renderWakeEvent(event)
+    const text = this.renderEvent(event)
     this.mailbox.push(text)
     this.currentEpisodeInjected?.push(text)
+  }
+
+  /**
+   * 唤醒事件 → 投喂给 LLM 的文本。**每个事件只渲染一次**(渲染结果之后作为字符串在
+   * mailbox / state.recent 里流转,失败重投也是同一份字符串),因此渲染依赖当前时钟这件事
+   * 不会让已经进上下文的内容事后改变——前缀缓存不受影响。
+   */
+  private renderEvent(event: WakeEvent): string {
+    return renderWakeEvent(event, {
+      timezone: this.deps.timezone?.() ?? resolveTimezone(undefined),
+      now: this.deps.now(),
+    })
   }
 
   /** `event === undefined` ⇒ 自唤醒(见 `drainMailbox`):只处理 mailbox 残留,不渲染唤醒事件。 */
@@ -207,9 +286,9 @@ export class ManagerLoop {
     if (event === undefined && carriedTexts.length === 0) {
       // 自唤醒但 mailbox 已空(残留被排在前面的另一个 episode 顺带 drain 走了)——
       // 没有任何新内容,直接空转返回,不开 episode(见 drainMailbox 注释)。
-      return { episodeId, outcome: 'completed', turns: 0, consumedEvents: true }
+      return { episodeId, outcome: 'completed', turns: 0, consumedEvents: true, repliedToHuman: false }
     }
-    const eventText = event === undefined ? undefined : renderWakeEvent(event)
+    const eventText = event === undefined ? undefined : this.renderEvent(event)
     this.currentEpisodeInjected = []
     this.currentWakeEvent = event ?? null
 
@@ -267,6 +346,9 @@ export class ManagerLoop {
 
     let attempt = await this.runAttempt(state, tailMessages, adapter, model)
     let totalTurnsUsed = attempt.result.totalTurns
+    // 与 totalTurnsUsed 同一套累加纪律:兜底重试会整体丢弃首次尝试的 finalMessages,但首次
+    // 尝试里已经发出去的话人类是真的收到了——只看重试那一份会把"说过话"错报成"没说过"。
+    let repliedToHuman = detectRepliedToHuman(attempt.result.finalMessages)
 
     // max_tokens 兜底(§4.2):disableCompaction 关掉了 engine 自己的强压重试路径,
     // 这里识别到"上下文超限收场"时强制 force_hot 折叠一次并重试一次,仍失败就放弃。
@@ -294,6 +376,7 @@ export class ManagerLoop {
         ]
         const retryAttempt = await this.runAttempt(state, retryTailMessages, adapter, model)
         totalTurnsUsed += retryAttempt.result.totalTurns
+        repliedToHuman = repliedToHuman || detectRepliedToHuman(retryAttempt.result.finalMessages)
         attempt = retryAttempt
       }
       // forceDecision.kind === 'none':无法进一步压缩,直接接受第一次尝试的结果,不重试
@@ -340,6 +423,7 @@ export class ManagerLoop {
       outcome: attempt.result.outcome,
       turns: totalTurnsUsed,
       consumedEvents,
+      repliedToHuman,
     }
     this.deps.onEpisodeEnd?.(result)
     return result
@@ -441,12 +525,45 @@ export class ManagerLoop {
   }
 
   private async fetchLedgerRender(): Promise<string> {
-    const workers = await this.deps.harness.listWorkers(this.deps.dialogObjectId)
+    const workers = await this.deps.harness.listWorkers(this.deps.dialogObjectId())
     return renderLedger(workers)
   }
 }
 
 // --- Helpers ---
+
+/**
+ * "跟人说话"的工具名集合(`EpisodeResult.repliedToHuman` 的判据)。
+ *
+ * 三个成员都是 crab-messaging 的**投递类**工具,共同点是"这次调用的直接结果是某个人类
+ * 看到一条新消息"——这正是群聊注意力退避要问的问题(`AttentionScheduler.reportResult`)。
+ *
+ * - `send_message` —— 本会话(以及跨 session)的正常回话,最主要的一条;
+ * - `send_private_message` —— 群里被问、转私聊回答是真实模式,只认 `send_message` 会把
+ *   它错报成"沉默",退避因此错误地×5;
+ * - `send_master_private` —— 系统线程的 reach_master,同样是一句人类会看到的话。
+ *
+ * **不在集合里的**:`get_history` / `get_message` / `lookup_friend` 等只读工具(没人被打扰)、
+ * `spawn_worker` / `send_to_worker` 等编排工具(v3 下 worker 不直接跟人类说话,派活本身
+ * 人类看不到)、以及记忆/info 工具。名字用**裸名**,与 manager 工具面一致
+ * (`tools/tool-face.ts` 的 messaging 工具不带 `mcp__` 前缀,只有 crab-memory 带)。
+ */
+export const HUMAN_REPLY_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'send_message',
+  'send_private_message',
+  'send_master_private',
+])
+
+/** 扫 `finalMessages` 里的 assistant tool_use 块,判断本 episode 有没有跟人说话。 */
+function detectRepliedToHuman(finalMessages: ReadonlyArray<EngineMessage>): boolean {
+  for (const msg of finalMessages) {
+    if (msg.role !== 'assistant') continue
+    for (const block of msg.content) {
+      if (block.type === 'tool_use' && HUMAN_REPLY_TOOL_NAMES.has(block.name)) return true
+    }
+  }
+  return false
+}
 
 function toText(content: QueueContent): string {
   // mailbox 唯一的写入方是 enqueueDuringEpisode(总是 push 字符串),这里的分支只是
@@ -461,12 +578,18 @@ function renderLedger(workers: ReadonlyArray<LedgerWorker>): string {
     .join('\n')
 }
 
-function renderWakeEvent(event: WakeEvent): string {
+/** 消息渲染的两个外部输入(时区 + 时钟),由 `ManagerLoop.renderEvent` 按 deps 解析后传入。 */
+interface MessageRenderOpts {
+  readonly timezone: string
+  readonly now: Date
+}
+
+function renderWakeEvent(event: WakeEvent, opts: MessageRenderOpts): string {
   switch (event.kind) {
     case 'human_messages':
-      return renderChannelMessages('[人类消息]', event.messages)
+      return renderChannelMessages('[人类消息]', event.messages, event.friend, opts)
     case 'attention_flush':
-      return renderChannelMessages('[补齐:群聊注意力放行期间累积的人类消息]', event.messages)
+      return renderChannelMessages('[补齐:群聊注意力放行期间累积的人类消息]', event.messages, event.friend, opts)
     case 'worker_event':
       return renderWorkerEvent(event.event)
     case 'schedule':
@@ -474,13 +597,42 @@ function renderWakeEvent(event: WakeEvent): string {
   }
 }
 
-function renderChannelMessages(label: string, messages: ReadonlyArray<ChannelMessage>): string {
+/**
+ * 人类消息渲染(P7 J Task 4)。
+ *
+ * 早先这里只出 `- 名: 文本`,丢掉了 `platform_message_id`、`platform_timestamp`、
+ * `is_mention_crab`、`mentions`、`reply_to/quote/thread`、媒体与发送者身份——manager 因此
+ * 在群里分不清 @ 的是不是自己、不知道某条在回谁、看不到图片/文件、也拿不到能喂给
+ * `get_message` 的 id。J 放弃了引用原文的入站预取(8 件事第 6 条),代价必须由渲染保真度补上:
+ * **manager 看到 `reply_to="…"` 才知道自己该不该去拉那条原文**。
+ *
+ * **复用 `prompt-manager.formatChannelMessageLine`,不另写一版**:它已经把
+ * "ChannelMessage 的全部结构化字段按存在性输出成 XML 属性"这件事做完了(含闭合标签转义、
+ * 超长截断、媒体/system_event 渲染),worker 与 dispatcher 用的都是它。manager 的上下文虽然是
+ * `EngineMessage[]` 而不是 worker 那种整块 XML prompt,但**这里要渲染的是同一种东西**——
+ * 一条 ChannelMessage 的完整结构;差别只在"渲染结果放进哪个信封"(这里是一条 user message
+ * 的正文)。另写一版必然漂移(本项目已经因为重造既有实现栽过)。
+ *
+ * `quotedMessages` 刻意不传:入站不预取引用原文,渲染只出 `reply_to` / `quote` 属性,
+ * manager 需要时自己调白名单里的 `get_message`(pull 型兜底,与 `get_history` 同款)。
+ *
+ * `friend` 是本批的发言者,只用于 `resolveSenderIdentity` 判 master/friend/stranger;
+ * 群里别人发的消息判不出来就是 `stranger`,与 dispatcher 侧 `buildUserPrompt` 同一套取舍。
+ */
+function renderChannelMessages(
+  label: string,
+  messages: ReadonlyArray<ChannelMessage>,
+  friend: Friend | undefined,
+  opts: MessageRenderOpts,
+): string {
   if (messages.length === 0) return `${label}(空)`
-  const lines = messages.map((m) => {
-    const who = m.sender.platform_display_name || m.sender.platform_user_id
-    const text = m.content.text ?? `[${m.content.type}]`
-    return `- ${who}: ${text}`
-  })
+  const lines = messages.map((m) =>
+    formatChannelMessageLine(m, {
+      timezone: opts.timezone,
+      now: opts.now,
+      identity: resolveSenderIdentity({ msg: m, ...(friend ? { senderFriend: friend } : {}) }),
+    }),
+  )
   return `${label}\n${lines.join('\n')}`
 }
 

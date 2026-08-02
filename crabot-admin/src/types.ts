@@ -821,7 +821,11 @@ export interface Schedule {
   next_trigger_at?: string
   /** 执行次数 */
   execution_count: number
-  /** 最后创建的任务 ID */
+  /**
+   * 最后创建的任务 ID。
+   * @deprecated P7/J 起不再写入：`trigger_schedule` 受理即返回，触发时还不存在 task。
+   *   字段保留只为读得懂 cutover 之前的存量 schedule 数据。
+   */
   last_task_id?: TaskId
   /** 是否为系统内置（不可删除） */
   is_builtin?: boolean
@@ -1786,7 +1790,8 @@ export interface AdminEventPayloads {
   'admin.schedule_created': { schedule: Schedule }
   'admin.schedule_updated': { schedule: Schedule }
   'admin.schedule_deleted': { schedule_id: ScheduleId }
-  'admin.schedule_triggered': { schedule: Schedule; task_id: string }
+  /** P7/J：`trigger_schedule` 受理即返回，触发的那一刻还不存在 task，故不再带 task_id。 */
+  'admin.schedule_triggered': { schedule: Schedule }
   'admin.model_provider_created': { provider: ModelProvider }
   'admin.model_provider_updated': { provider: ModelProvider }
   'admin.model_provider_deleted': { provider_id: string }
@@ -1872,10 +1877,30 @@ export interface ChatSendMessageResult {
   sent_at: string
 }
 
+/**
+ * protocol-agent-v3 §5.2 的精简 task 状态机。agent 是 v3 的 task 真相源，
+ * admin 只做只读透传（`agent.task_status_changed` 载荷 / §8.3 读模型），不产生这些值。
+ */
+export type AgentTaskStatus =
+  | 'queued'
+  | 'running'
+  | 'waiting_input'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+
+/** §8.3 `get_worker_detail` 回来的台账条目里，admin 状态卡实际用到的那几个字段。 */
+export interface LedgerWorkerBrief {
+  worker_id: string
+  task?: { id: TaskId; title: string; status: AgentTaskStatus }
+  report_to?: { channel_id: string; session_id: string }
+}
+
 /** 任务状态快照（chat_task_update 推送与 GET /api/chat/tasks/:id 共用） */
 export interface ChatTaskSnapshot {
   task_id: TaskId
-  status: TaskStatus
+  /** v2 存量任务是 admin 的 `TaskStatus`；v3 起由 agent 事件透传 `AgentTaskStatus`。 */
+  status: TaskStatus | AgentTaskStatus
   title: string
   /** 当前计划步骤（task.plan 存在时） */
   step?: { index: number; total: number; description: string }

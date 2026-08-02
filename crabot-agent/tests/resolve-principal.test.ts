@@ -52,7 +52,7 @@ function buildAgent(rpcCall: ReturnType<typeof vi.fn>): unknown {
 }
 
 type ResolveFn = (
-  senderFriend: Friend | undefined,
+  senderFriendId: string | undefined,
   sessionId: string,
   sessionType: 'private' | 'group',
 ) => Promise<ResolvedPermissions | null>
@@ -64,7 +64,7 @@ describe('UnifiedAgent.resolvePrincipalPermissions', () => {
     const friend = makeFriend('friend-1')
 
     const result = await (agent as { resolvePrincipalPermissions: ResolveFn })
-      .resolvePrincipalPermissions(friend, 'session-private-1', 'private')
+      .resolvePrincipalPermissions(friend.id, 'session-private-1', 'private')
 
     expect(rpcCall).toHaveBeenCalledTimes(1)
     expect(rpcCall).toHaveBeenCalledWith(
@@ -86,7 +86,7 @@ describe('UnifiedAgent.resolvePrincipalPermissions', () => {
     const friend = makeFriend('friend-group-speaker')
 
     await (agent as { resolvePrincipalPermissions: ResolveFn })
-      .resolvePrincipalPermissions(friend, 'session-group-1', 'group')
+      .resolvePrincipalPermissions(friend.id, 'session-group-1', 'group')
 
     expect(rpcCall).toHaveBeenCalledWith(
       ADMIN_PORT,

@@ -514,7 +514,7 @@ export interface FrontAgentContext {
   crab_display_name?: string
   /**
    * Crabot 在该渠道里 @ 自己时的稳定标识（含 `@` 前缀）。
-   * 用于让 dispatcher / worker 在消息正文出现多个 @bot 时区分哪一个是自己。
+   * 用于让 manager / worker 在消息正文出现多个 @bot 时区分哪一个是自己。
    * - telegram: `@<username>`
    * - feishu: `@<bot_open_id>`
    * - wechat: `@<puppet_wxid>`
@@ -613,8 +613,8 @@ export interface ProcessMessageParams {
 }
 
 export interface ProcessMessageResult {
-  // worker 端只能产出 direct_reply / create_task；supplement / stay_silent 由 dispatcher
-  // 在 worker spawn 前直接处理，不会出现在 worker 返回里
+  // P7/J 起 admin chat 只回报 direct_reply（manager 这轮有没有跟人说话）；
+  // create_task 是 v2 前置决策器的动作投影，保留枚举值仅为兼容旧调用方
   decision_types: Array<'direct_reply' | 'create_task'>
   task_ids?: TaskId[]
 }
@@ -738,7 +738,7 @@ export interface ExecuteTaskResult {
   task_id: TaskId
   outcome: 'completed' | 'failed'
   /** 失败时填错误描述；成功路径不填。worker 完成内容已通过 send_message 发出 +
-   *  通过 admin update_task_outcome 写入 task.result.outcome_brief，dispatcher 不再消费 */
+   *  通过 admin update_task_outcome 写入 task.result.outcome_brief */
   error?: string
 }
 
@@ -1008,7 +1008,9 @@ export type AgentSpanType =
   | 'bg_entity_output'
   | 'bg_entity_kill'
   | 'bg_entity_exit'
-  // Dispatcher span types（2026-05-19 引入）
+  // 前置决策器 span types（2026-05-19 引入，P7/J cutover 后不再产生）。
+  // **保留枚举值**：盘上存量 trace 还带这两种 span，且前端 `Record<AgentSpanType,string>`
+  // 是穷举映射——删了历史 trace 页面直接炸。
   | 'dispatch_call'
   | 'dispatch_action'
 
@@ -1104,15 +1106,15 @@ export interface RpcCallDetails {
   error?: string
 }
 
-/** dispatch_call span details（对齐 dispatcher.ts emit 字段） */
+/** dispatch_call span details（P7/J 之后只用于渲染存量历史 trace，不再产生新数据） */
 export interface DispatchCallDetails {
-  /** Dispatcher 使用的 LLM 模型 ID */
+  /** 前置决策器使用的 LLM 模型 ID */
   model?: string
   /** 触发本次 dispatch 的会话类型（master/regular 等） */
   session_type?: string
   /** 本轮处理的消息批次大小 */
   message_count?: number
-  /** dispatcher 看到的活跃任务数（fetchActiveTasks 结果，已过滤 scheduled） */
+  /** 前置决策器看到的活跃任务数（已过滤 scheduled） */
   active_task_count?: number
   /** SessionLane take 整批的大小；> 1 表示有合并发生（私聊 = 消息条数；群聊 = attention batch 数） */
   lane_batch_size?: number
@@ -1124,7 +1126,7 @@ export interface DispatchCallDetails {
   error?: string
 }
 
-/** dispatch_action span details（对齐 dispatcher-executor.ts buildActionSpanDetails + endSpan 字段） */
+/** dispatch_action span details（P7/J 之后只用于渲染存量历史 trace，不再产生新数据） */
 export interface DispatchActionDetails {
   /** 动作类型 */
   kind: 'supplement' | 'new_task' | 'stay_silent'
@@ -1152,7 +1154,7 @@ export interface DispatchActionDetails {
   attempted_target_task_id?: string
   /** supplement_fallback_recovered 专用：降级路径标记。 */
   recovered_via?: 'new_task'
-  /** terminal_task_revived / supplement_fallback_recovered 专用：目标任务在 dispatcher 决策时的状态。 */
+  /** terminal_task_revived / supplement_fallback_recovered 专用：目标任务在决策时的状态。 */
   target_task_status?: string
   /** terminal_task_revived / supplement_fallback_recovered 专用：目标任务原完成时间，用于 trace epoch 边界。 */
   target_task_completed_at?: string

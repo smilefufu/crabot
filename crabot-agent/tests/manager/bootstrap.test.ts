@@ -14,6 +14,7 @@ import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
+import type { PrincipalResolverDeps } from '../../src/manager/principal.js'
 import { buildManagerStack, reconcileManagerStack, type BootstrapDeps } from '../../src/manager/bootstrap.js'
 import { LedgerStore } from '../../src/workers/harness/ledger-store.js'
 import { BuiltinWorkerAdapter } from '../../src/workers/builtin/adapter.js'
@@ -25,6 +26,7 @@ import type { WorkerAdapter, WorkerImplId, IncarnationHandle, WorkerContractStat
 import type { ManagerKey } from '../../src/manager/types.js'
 import type { LLMAdapter, LLMStreamParams } from '../../src/engine/index.js'
 import type { ChannelMessage } from '../../src/types.js'
+import { CLI_DOMAINS } from '../../src/types.js'
 import { createCrabMemoryServer } from '../../src/mcp/crab-memory.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 
@@ -38,6 +40,17 @@ function makeMemoryServer() {
     { rpcClient: { call: vi.fn() } as never, moduleId: 'manager-bootstrap-test', getMemoryPort: async () => 19100 },
     { visibility: 'internal', scopes: [], isMasterPrivate: false },
   )
+}
+
+/** 身份解析原料的最小桩:一律"解析不出来",即 manager 退回未接线时的既有行为。 */
+function makePrincipalResolver(): PrincipalResolverDeps {
+  return {
+    resolvePermissions: async () => null,
+    sessionMemoryScopes: async (sessionId) => [sessionId],
+    sceneProfile: async () => null,
+    crabSelfHandle: () => undefined,
+    masterFriendId: async () => undefined,
+  }
 }
 
 /** 最小 crab-messaging 依赖桩(照抄 tests/manager/registry.test.ts)。 */
@@ -59,6 +72,21 @@ function makeChannelMessage(text: string): ChannelMessage {
     features: { is_mention_crab: false },
     platform_timestamp: new Date().toISOString(),
   }
+}
+
+/** 私聊里的发言者(P7 J:friend 从入站一路带到装配层)。 */
+const FRIEND_A = {
+  id: 'f-a',
+  display_name: '好友 A',
+  permission: 'normal' as const,
+  channel_identities: [],
+  created_at: '2026-01-01T00:00:00.000Z',
+  updated_at: '2026-01-01T00:00:00.000Z',
+}
+
+function groupMessage(text: string): ChannelMessage {
+  const m = makeChannelMessage(text)
+  return { ...m, session: { ...m.session, type: 'group' } }
 }
 
 function silentAdapter(): LLMAdapter {
@@ -138,9 +166,9 @@ describe('manager bootstrap（P5 Task 1）', () => {
       managerAdapter: () => silentAdapter(),
       managerModel: () => 'test-manager-model',
       messagingDeps: makeMessagingDeps(),
-      memoryServer: makeMemoryServer(),
+      memoryServerFor: () => makeMemoryServer(),
       callAdmin: async () => ({}) as never,
-      dialogObjectIdFor,
+      principalResolver: makePrincipalResolver(),
       ...overrides,
     }
   }
@@ -269,6 +297,235 @@ describe('manager bootstrap（P5 Task 1）', () => {
   })
 
   // --- ④ 空台账对账 ---
+
+
+  // --- ⑤ 发起人身份 → 记忆可见范围（P7 J Task 2） ---
+
+  /**
+   * 这一组钉的是**语义**，不是接线：让真实 manager 工具面上的 `search_memory` 真的跑一次，
+   * 看落到 memory 模块的那次 RPC 里，可见范围到底是谁的。
+   *
+   * 变异验证（已实跑）：
+   *   - `memoryContextFor` 忽略解析结果、恒返回 `{visibility:'public', scopes:[]}`
+   *     → 两条用例都挂（`min_visibility` 变 public、`accessible_scopes` 消失）；
+   *   - `applyGroupScopeFallback` 去掉群聊空 scopes 收敛 → 第二条挂（群聊读得到全部内容）。
+   */
+  /** 只调一次 search_memory 就收工的 manager 脚本。 */
+  function searchMemoryScript(): LLMAdapter {
+    let done = false
+    return {
+      async *stream(params: LLMStreamParams) {
+        if (!done) {
+          done = true
+          const tool = params.tools.find((t) => t.name === 'mcp__crab-memory__search_memory')
+          expect(tool, 'manager 工具面里应当有 crab-memory 的 search_memory').toBeDefined()
+          await tool!.call({ query: '上次说的那件事', level: 'short_term', limit: 5 }, {} as never)
+        }
+        yield* chunksFromContent([{ type: 'text', text: '好的' }], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+      },
+      updateConfig: () => {},
+    }
+  }
+
+  function makeStackWithPrincipal(p: {
+    memoryScopes: string[]
+    sessionType: 'private' | 'group'
+  }): { stack: ReturnType<typeof buildManagerStack>; memoryCalls: Array<{ method: string; params: Record<string, unknown> }> } {
+    const memoryCalls: Array<{ method: string; params: Record<string, unknown> }> = []
+    const stack = buildManagerStack(
+      makeDeps({
+        managerAdapter: () => searchMemoryScript(),
+        principalResolver: {
+          ...makePrincipalResolver(),
+          resolvePermissions: async () => ({
+            tool_access: {
+              memory: true, messaging: true, task: true, mcp_skill: true,
+              file_io: true, browser: true, shell: true, remote_exec: false, desktop: false,
+            },
+            cli_access: Object.fromEntries(CLI_DOMAINS.map((d) => [d, 'none'])) as never,
+            storage: null,
+            memory_scopes: p.memoryScopes,
+          }),
+        },
+        memoryServerFor: (ctx) =>
+          createCrabMemoryServer(
+            {
+              rpcClient: {
+                call: async (_port: number, method: string, params: Record<string, unknown>) => {
+                  memoryCalls.push({ method, params })
+                  return { results: [] }
+                },
+              } as never,
+              moduleId: 'manager-bootstrap-test',
+              getMemoryPort: async () => 19100,
+            },
+            ctx,
+          ),
+      }),
+    )
+    return { stack, memoryCalls }
+  }
+
+  it('这个 friend 的 memory_scopes 真的决定了 manager 读记忆时看得到什么', async () => {
+    const { stack, memoryCalls } = makeStackWithPrincipal({ memoryScopes: ['team-x'], sessionType: 'private' })
+
+    await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('查一下上次那件事')], FRIEND_A)
+
+    const search = memoryCalls.find((c) => c.method === 'search_short_term')
+    expect(search, '真实工具面上的 search_memory 应当打到 memory 模块').toBeDefined()
+    // 可见范围就是这个 friend 的 scopes，不是"全公开"
+    expect(search!.params.accessible_scopes).toEqual(['team-x'])
+    expect(search!.params.min_visibility).toBe('internal')
+  })
+
+  it('群聊里 friend 没配 scopes → 可见范围收敛到本群，读不到别的群的内容', async () => {
+    const { stack, memoryCalls } = makeStackWithPrincipal({ memoryScopes: [], sessionType: 'group' })
+
+    await stack.registry.routeHumanMessages('wechat', 'sess-boot', [groupMessage('查一下')], FRIEND_A)
+
+    const search = memoryCalls.find((c) => c.method === 'search_short_term')
+    expect(search!.params.accessible_scopes).toEqual(['sess-boot'])
+  })
+
+  it('身份解析不出来时退回既有那一档（public / 无 scope 过滤），不静默收紧也不静默放宽', async () => {
+    const memoryCalls: Array<{ method: string; params: Record<string, unknown> }> = []
+    const stack = buildManagerStack(
+      makeDeps({
+        managerAdapter: () => searchMemoryScript(),
+        memoryServerFor: (ctx) =>
+          createCrabMemoryServer(
+            {
+              rpcClient: {
+                call: async (_p: number, method: string, params: Record<string, unknown>) => {
+                  memoryCalls.push({ method, params })
+                  return { results: [] }
+                },
+              } as never,
+              moduleId: 'manager-bootstrap-test',
+              getMemoryPort: async () => 19100,
+            },
+            ctx,
+          ),
+      }),
+    )
+
+    // 没有人类消息 → 身份从未解析过（worker 事件唤醒同理）
+    await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('hi')])
+
+    const search = memoryCalls.find((c) => c.method === 'search_short_term')
+    // 解析不出 friend 时会退到 session 级 scopes（[sessionId]），仍然是 internal，
+    // 不会退回 public——"未接线"与"解析失败"的兜底档在这里是同一档。
+    expect(search!.params.min_visibility).toBe('internal')
+    expect(search!.params.accessible_scopes).toEqual(['sess-boot'])
+  })
+
+
+  // --- ⑥ 发起人身份 → origin.creator_friend_id（P7 J Task 2） ---
+
+  /** 只在第一次 stream 时调一次 spawn_worker，之后一律沉默（后续唤醒不会再派活）。 */
+  function spawnOnce(): LLMAdapter {
+    let done = false
+    return {
+      async *stream(params: LLMStreamParams) {
+        if (!done) {
+          done = true
+          const tool = params.tools.find((t) => t.name === 'spawn_worker')
+          expect(tool).toBeDefined()
+          await tool!.call({ title: '去查一下', prompt: '查资料' }, {} as never)
+        }
+        yield* chunksFromContent([{ type: 'text', text: '好' }], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+      },
+      updateConfig: () => {},
+    }
+  }
+
+  function silentManager(): LLMAdapter {
+    return {
+      async *stream() {
+        yield* chunksFromContent([{ type: 'text', text: '好' }], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+      },
+      updateConfig: () => {},
+    }
+  }
+
+  /** 让 spawn 失败后的 fire-and-forget 台账写入落定，避免与 afterEach 的 rm 抢。 */
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 80))
+
+  it('人类消息派出的 worker，origin.creator_friend_id 记的是**本批消息的发言者**', async () => {
+    const script: LLMAdapter = spawnOnce()
+    const stack = buildManagerStack(makeDeps({ managerAdapter: () => script }))
+
+    await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('帮我查个东西')], FRIEND_A)
+    await settle()
+
+    const all = await stack.ledger.listAllWorkers()
+    expect(all).toHaveLength(1)
+    // J 的硬验收：worker 以谁的名义执行，决定它的权限模板（§8.2）。
+    expect(all[0].worker.origin.creator_friend_id).toBe('f-a')
+    expect(all[0].worker.origin.trigger_type).toBe('message')
+    expect(all[0].worker.origin.spawned_by_session).toBe('wechat::sess-boot')
+    // 私聊台账按 friend 聚合（跨 channel 共享），不是 group 形状
+    expect(all[0].dialogObjectId).toBe('friend:f-a')
+  })
+
+  it('worker 事件唤醒的 episode 里没人在说话 → 不拿缓存里上一次的发言者冒充', async () => {
+    let script: LLMAdapter = silentManager()
+    const stack = buildManagerStack(makeDeps({ managerAdapter: () => script }))
+    const key = 'wechat::sess-boot' as ManagerKey
+
+    // ① f-a 先说一句（manager 沉默，不派活）——缓存里因此留着 f-a 的身份
+    await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('只是聊聊')], FRIEND_A)
+    expect(await stack.ledger.listAllWorkers()).toHaveLength(0)
+
+    // ② 手工种一条 worker，模拟"更早派出去的活"
+    await stack.ledger.upsertWorker(dialogObjectIdForPrivate('f-a'), 'w-seeded', () =>
+      makeLedgerWorker({ workerId: 'w-seeded', impl: 'builtin', spawnedBySession: key }),
+    )
+
+    // ③ 这条 worker 的事件唤醒同一个 manager，它在这一轮派了个新 worker
+    script = spawnOnce()
+    await stack.registry.routeWorkerEvent({ ts: '2026-01-01T00:00:00.000Z', kind: 'state_changed', worker_id: 'w-seeded', seq: 1 })
+    await settle()
+
+    const spawnedByEvent = (await stack.ledger.listAllWorkers()).filter((w) => w.worker.worker_id !== 'w-seeded')
+    expect(spawnedByEvent).toHaveLength(1)
+    // 缓存里还留着 f-a，但这一轮不是 f-a 在说话——记成 f-a 就是把 worker 挂到错的人名下。
+    expect(spawnedByEvent[0].worker.origin.creator_friend_id).toBeUndefined()
+    // 台账归档键仍按**会话身份**（f-a 的私聊）——它是会话属性，与"这轮谁在说话"无关。
+    expect(spawnedByEvent[0].dialogObjectId).toBe('friend:f-a')
+  })
+
+  it('场景画像与该渠道的 @handle 真的出现在 manager 的 system prompt 里（5b + 5d）', async () => {
+    const systemPrompts: string[] = []
+    const stack = buildManagerStack(
+      makeDeps({
+        managerAdapter: () => ({
+          async *stream(params: LLMStreamParams) {
+            systemPrompts.push(params.systemPrompt)
+            yield* chunksFromContent([{ type: 'text', text: '好' }], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+          },
+          updateConfig: () => {},
+        }),
+        principalResolver: {
+          ...makePrincipalResolver(),
+          sceneProfile: async () => ({
+            label: 'friend:f-a',
+            content: '喜欢简短回答，讨厌寒暄',
+            source: { scene: { type: 'friend', friend_id: 'f-a' } },
+          }),
+          crabSelfHandle: (channelId) => (channelId === 'wechat' ? '@crabot_wx' : undefined),
+        },
+      }),
+    )
+
+    await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('在吗')], FRIEND_A)
+
+    expect(systemPrompts).toHaveLength(1)
+    // 档案段真的进了 prompt —— 不是"某个 thunk 返回了一个字符串"
+    expect(systemPrompts[0]).toContain('## 对话对象档案')
+    expect(systemPrompts[0]).toContain('喜欢简短回答，讨厌寒暄')
+    expect(systemPrompts[0]).toContain('@crabot_wx')
+  })
 
   it('reconcileManagerStack 对空台账快速返回空三桶，且不探测任何 adapter', async () => {
     const stack = buildManagerStack(makeDeps())

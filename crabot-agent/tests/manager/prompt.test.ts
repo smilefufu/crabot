@@ -46,6 +46,20 @@ describe('MANAGER_IDENTITY 静态段内容', () => {
     expect(MANAGER_IDENTITY).toContain('worker 停下来问的问题')
   })
 
+  it('含管家纪律：更早的对话用 get_history 拉', () => {
+    // cutover 后 manager 的 state.json 是空的，眼前 messages 只有最近一段；
+    // 不写这一行，LLM 不会自发想到去拉历史（plan §一 5a）。
+    expect(MANAGER_IDENTITY).toContain('get_history')
+    expect(MANAGER_IDENTITY).toContain('只是最近一段')
+    expect(MANAGER_IDENTITY).toContain('更早')
+  })
+
+  it('含管家纪律：要花时间的事先回一句收到（sendImmediateReply 放弃后的替代）', () => {
+    expect(MANAGER_IDENTITY).toContain('先回一句')
+    expect(MANAGER_IDENTITY).toContain('收到')
+    expect(MANAGER_IDENTITY).toContain('再动手')
+  })
+
   it('含管家纪律：何时派活', () => {
     expect(MANAGER_IDENTITY).toContain('写代码、查资料、操作系统')
     expect(MANAGER_IDENTITY).toContain('不要自己在对话里假装做了')

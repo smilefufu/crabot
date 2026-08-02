@@ -60,8 +60,9 @@ export const scheduleService = {
     await api.delete(`/schedules/${encodeURIComponent(id)}`)
   },
 
-  async triggerNow(id: string): Promise<{ task_id: string; schedule: Schedule }> {
-    return api.post<{ task_id: string; schedule: Schedule }>(
+  /** P7/J：受理即返回，触发的那一刻还不存在 task，故不再回 task_id。 */
+  async triggerNow(id: string): Promise<{ accepted: true; schedule: Schedule }> {
+    return api.post<{ accepted: true; schedule: Schedule }>(
       `/schedules/${encodeURIComponent(id)}/trigger`
     )
   },

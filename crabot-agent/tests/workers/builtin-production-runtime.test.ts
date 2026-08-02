@@ -32,8 +32,12 @@ import type {
   LLMConnectionInfo,
   ModuleId,
   SkillConfig,
+  Friend,
+  ResolvedPermissions,
 } from '../../src/types.js'
 import { BUILTIN_WORKER_PERMISSIONS, type BuiltinRuntimeContext } from '../../src/workers/builtin/runtime.js'
+import { CLI_DOMAINS } from '../../src/types.js'
+import type { ManagerKey } from '../../src/manager/types.js'
 import type { SpawnSpec } from '../../src/workers/types.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 
@@ -162,6 +166,7 @@ async function waitUntil(cond: () => boolean | Promise<boolean>, timeoutMs = 800
 /** UnifiedAgent 私有件在测试里的视图（TS 私有性只在编译期）。 */
 interface AgentInternals {
   managerStack?: ManagerStack
+  rpcClient: { call: (...args: unknown[]) => Promise<unknown> }
   methodHandlers: Map<string, (params: unknown) => unknown>
   adminPort?: number
   buildBuiltinWorkerRuntime(ctx: BuiltinRuntimeContext): SpawnSpec['builtin']
@@ -254,6 +259,260 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
 
     const [done] = await internals.managerStack!.harness.listWorkers(dialogObjectId)
     expect(done.incarnations[0].ended_reason).toBe('completed')
+  })
+
+
+  // --- P7 J Task 2：worker 权限随派活人身份收敛（端到端，真实生产装配） ---
+
+  /**
+   * PR F spec 写死给 J 的验收项："worker 权限随发起人身份解析——否则 cutover 当天群里
+   * 任何人都能让 worker 干 master 才该能干的事。"
+   *
+   * 这里走的是**真实生产链路**：真实 `principalResolver`（unified-agent 注入的那份，只把
+   * 底下的 admin RPC 换成桩）→ 真实 `ManagerPrincipalStore` → 真实
+   * `buildBuiltinWorkerRuntime` → 真实 `buildBuiltinWorkerTools`。
+   * 断言落在"worker 到底看得到哪些工具"，不是"某个函数收到了某个参数"。
+   */
+  describe('P7 J：worker 工具面随派活人身份收敛', () => {
+    const MANAGER_KEY = 'wechat::sess-perm' as ManagerKey
+
+    function stubAdmin(internals: AgentInternals, toolAccess: Record<string, boolean>, memoryScopes: string[]): void {
+      internals.rpcClient.call = (async (_port: unknown, method: string) => {
+        if (method === 'resolve_principal_permissions') {
+          return {
+            resolved: {
+              tool_access: {
+                memory: true, messaging: true, task: true, mcp_skill: true,
+                file_io: true, browser: true, shell: true, remote_exec: true, desktop: true,
+                ...toolAccess,
+              },
+              cli_access: Object.fromEntries(CLI_DOMAINS.map((d) => [d, 'write'])),
+              storage: null,
+              memory_scopes: memoryScopes,
+            },
+            sources: {},
+          }
+        }
+        if (method === 'find_master_friend') return { friend: null }
+        return {}
+      }) as never
+    }
+
+    /** 群里的普通成员（低权限）与 master——两个人在**同一个群**里先后说话。 */
+    function friendOf(id: string, permission: 'normal' | 'master'): Friend {
+      return {
+        id,
+        display_name: id,
+        permission,
+        channel_identities: [],
+        created_at: '2026-01-01T00:00:00.000Z',
+        updated_at: '2026-01-01T00:00:00.000Z',
+      }
+    }
+
+    /** 唤醒边界解析（= `routeHumanMessages` 内部做的事），返回 manager 算好的那份档位。 */
+    async function speak(internals: AgentInternals, friend: Friend): Promise<ResolvedPermissions | null> {
+      const entry = await internals.managerStack!.principals.resolve(MANAGER_KEY, { friend, sessionType: 'group' })
+      return entry.permissions
+    }
+
+    async function toolNamesFor(
+      internals: AgentInternals,
+      toolAccess: Record<string, boolean>,
+      memoryScopes: string[] = ['team-x'],
+    ): Promise<string[]> {
+      stubAdmin(internals, toolAccess, memoryScopes)
+      const principalPermissions = await speak(internals, friendOf('f-speaker', 'normal'))
+      // 派活那一刻 manager 把算好的档位随 spawn 下传（`WorkerToolsContext.principalPermissions`
+      // → `SpawnWorkerParams.principal_permissions` → 落 `context.json`）。
+      const builtin = internals.buildBuiltinWorkerRuntime({
+        worker_id: 'w-perm',
+        workspace: { root: tmpRoot },
+        origin: { spawned_by_session: MANAGER_KEY, trigger_type: 'message', creator_friend_id: 'f-speaker' },
+        ...(principalPermissions ? { principal_permissions: principalPermissions } : {}),
+      })!
+      return resolveTools(builtin).map((t) => t.name)
+    }
+
+    it('派活人没有 shell 权限 → 派出去的 worker 工具面里真的没有 Bash（文件工具仍在）', async () => {
+      const { internals } = boot()
+      const names = await toolNamesFor(internals, { shell: false })
+
+      expect(names).not.toContain('Bash')
+      expect(names).toContain('Read')
+    })
+
+    it('派活人有 shell 权限 → worker 拿得到 Bash（收敛不是一刀切地关掉）', async () => {
+      const { internals } = boot()
+      const names = await toolNamesFor(internals, { shell: true })
+
+      expect(names).toContain('Bash')
+    })
+
+    it('派活人全开（含 messaging）→ worker 仍然拿不到任何 messaging 工具：v3 不变量不被身份放宽', async () => {
+      const { internals } = boot()
+      const names = await toolNamesFor(internals, {})
+
+      expect(names.filter((n) => n.includes('crab-messaging'))).toEqual([])
+      expect(names).not.toContain('send_message')
+    })
+
+    it('该会话从未解析过身份（系统派工）→ 退回固定档位，行为与 F 阶段逐字相同', () => {
+      const { internals } = boot()
+      const builtin = internals.buildBuiltinWorkerRuntime({
+        worker_id: 'w-sys',
+        workspace: { root: tmpRoot },
+        origin: { spawned_by_session: 'wechat::never-seen' as ManagerKey, trigger_type: 'scheduled' },
+      })!
+      const names = resolveTools(builtin).map((t) => t.name)
+      // BUILTIN_WORKER_PERMISSIONS 开着 shell/file_io
+      expect(names).toContain('Bash')
+      expect(names).toContain('Read')
+    })
+
+    // --- PR #59 review 第一条（安全）：权限是身份属性，spawn 时固定，不随会话里谁说话漂移 ---
+
+    /**
+     * 等这批 worker 事件唤醒的 manager episode 落完盘再收尾——真实 harness 的 `onEvent` 是
+     * 生产接线，worker 一进 idle 就会唤醒 manager 写会话状态，和 afterEach 的 rm 抢目录。
+     */
+    async function settle(internals: AgentInternals, dialogObjectId: DialogObjectId): Promise<void> {
+      await waitUntil(async () => {
+        const [w] = await internals.managerStack!.harness.listWorkers(dialogObjectId)
+        return w.incarnations[0].state !== 'running'
+      })
+      await waitUntil(async () => {
+        const dir = join(process.env.DATA_DIR!, 'agent', 'managers', encodeURIComponent(MANAGER_KEY))
+        try {
+          return (await fs.readdir(dir)).includes('state.json')
+        } catch {
+          return false
+        }
+      })
+    }
+
+    /** adapter 落盘的那份 per-worker 上下文（resume/fork/续 burst/重启 revive 都从它重建）。 */
+    async function readSpawnContext(internals: AgentInternals, workerId: string): Promise<BuiltinRuntimeContext> {
+      const raw = await fs.readFile(join(internals.managerStack!.builtinDataDir, workerId, 'context.json'), 'utf-8')
+      return JSON.parse(raw) as BuiltinRuntimeContext
+    }
+
+    /** 按发言人分档的 admin 桩：低权限成员没有 shell，master 全开。 */
+    function stubAdminPerSpeaker(internals: AgentInternals): void {
+      internals.rpcClient.call = (async (_port: unknown, method: string, params: { sender_friend_id?: string }) => {
+        if (method === 'resolve_principal_permissions') {
+          const isMaster = params.sender_friend_id === 'f-master'
+          return {
+            resolved: {
+              tool_access: {
+                memory: true, messaging: true, task: true, mcp_skill: true,
+                file_io: true, browser: true, shell: isMaster, remote_exec: isMaster, desktop: isMaster,
+              },
+              cli_access: Object.fromEntries(CLI_DOMAINS.map((d) => [d, isMaster ? 'write' : 'none'])),
+              storage: null,
+              memory_scopes: ['group-g'],
+            },
+            sources: {},
+          }
+        }
+        if (method === 'find_master_friend') return { friend: null }
+        return {}
+      }) as never
+    }
+
+    it('越权复现：低权限成员派出 worker 后 master 在同群发言 → W 的下一轮 / 续 burst / revive 都不得跟着升权', async () => {
+      const { internals } = boot()
+      stubAdminPerSpeaker(internals)
+
+      // 1. 低权限成员 S 在群里发言 → manager 在唤醒边界算好 S 的档位（没有 shell）。
+      const sPerms = await speak(internals, friendOf('f-lowpriv', 'normal'))
+      expect(sPerms!.tool_access.shell).toBe(false)
+
+      // 2. manager 以 S 的名义派活：真实 `harness.spawnWorker`，档位随 spawn 下传。
+      llm.queue.push({ text: '先歇着', stopReason: 'end_turn' })
+      const dialogObjectId = dialogObjectIdForPrivate('f-lowpriv')
+      const worker = await internals.managerStack!.harness.spawnWorker({
+        dialogObjectId,
+        title: '干活',
+        prompt: '把活干完',
+        origin: { spawned_by_session: MANAGER_KEY, trigger_type: 'message', creator_friend_id: 'f-lowpriv' },
+        report_to: { channel_id: 'wechat' as ModuleId, session_id: 'sess-perm' },
+        impl: 'builtin',
+        principal_permissions: sPerms ?? undefined,
+      })
+      const atSpawn = internals.buildBuiltinWorkerRuntime(await readSpawnContext(internals, worker.worker_id))!
+      expect(resolveTools(atSpawn).map((t) => t.name)).not.toContain('Bash')
+
+      // 3. master 随后在**同一个群**里发言 → session 级缓存被整体覆盖成 master 档位。
+      const masterPerms = await speak(internals, friendOf('f-master', 'master'))
+      expect(masterPerms!.tool_access.shell).toBe(true)
+
+      // 4. W 的下一轮 turn：`tools` 是 thunk，engine 每轮重新 resolve —— 不得跟着升权。
+      expect(resolveTools(atSpawn).map((t) => t.name)).not.toContain('Bash')
+
+      // 5. resume / fork / idle→running 续 burst / 进程重启后的 revive：adapter 从 context.json
+      //    重建 ctx 再调工厂（`runtimeFor`）——这条路只认 spawn 那一刻固定下来的那份。
+      const onResume = internals.buildBuiltinWorkerRuntime(await readSpawnContext(internals, worker.worker_id))!
+      expect(resolveTools(onResume).map((t) => t.name)).not.toContain('Bash')
+
+      await settle(internals, dialogObjectId)
+    })
+
+    it('反方向同样成立：master 派出的 worker 不会因为低权限成员随后发言而被降权', async () => {
+      const { internals } = boot()
+      stubAdminPerSpeaker(internals)
+
+      const masterPerms = await speak(internals, friendOf('f-master', 'master'))
+      llm.queue.push({ text: '先歇着', stopReason: 'end_turn' })
+      const dialogObjectId = dialogObjectIdForPrivate('f-master')
+      const worker = await internals.managerStack!.harness.spawnWorker({
+        dialogObjectId,
+        title: '干活',
+        prompt: '把活干完',
+        origin: { spawned_by_session: MANAGER_KEY, trigger_type: 'message', creator_friend_id: 'f-master' },
+        report_to: { channel_id: 'wechat' as ModuleId, session_id: 'sess-perm' },
+        impl: 'builtin',
+        principal_permissions: masterPerms ?? undefined,
+      })
+
+      await speak(internals, friendOf('f-lowpriv', 'normal'))
+
+      const onResume = internals.buildBuiltinWorkerRuntime(await readSpawnContext(internals, worker.worker_id))!
+      expect(resolveTools(onResume).map((t) => t.name)).toContain('Bash')
+
+      await settle(internals, dialogObjectId)
+    })
+
+    it('权限固定不等于配置也固定：改了 model slot，同一个 worker 下次起化身用新 model，档位仍是 spawn 那一份', async () => {
+      const { internals } = boot()
+      stubAdminPerSpeaker(internals)
+
+      const sPerms = await speak(internals, friendOf('f-lowpriv', 'normal'))
+      llm.queue.push({ text: '先歇着', stopReason: 'end_turn' })
+      const dialogObjectId = dialogObjectIdForPrivate('f-lowpriv-cfg')
+      const worker = await internals.managerStack!.harness.spawnWorker({
+        dialogObjectId,
+        title: '干活',
+        prompt: '把活干完',
+        origin: { spawned_by_session: MANAGER_KEY, trigger_type: 'message', creator_friend_id: 'f-lowpriv' },
+        report_to: { channel_id: 'wechat' as ModuleId, session_id: 'sess-perm' },
+        impl: 'builtin',
+        principal_permissions: sPerms ?? undefined,
+      })
+
+      // admin 改 model slot（运行配置）＋ master 在同群发言（会话缓存被覆盖）
+      const updateConfig = internals.methodHandlers.get('update_config')!
+      await updateConfig({ model_config: { powerful: connInfo('model-B') } })
+      await speak(internals, friendOf('f-master', 'master'))
+
+      const next = internals.buildBuiltinWorkerRuntime(await readSpawnContext(internals, worker.worker_id))!
+      // 运行配置现取：新化身用新 model。
+      expect(next.model).toBe('model-B')
+      // 权限固定：仍是 spawn 那一刻 S 的档位。
+      expect(resolveTools(next).map((t) => t.name)).not.toContain('Bash')
+
+      await settle(internals, dialogObjectId)
+    })
   })
 
   // --- 验收 6：hookRegistry 在生产路径上确实生效 ---

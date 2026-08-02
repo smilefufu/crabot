@@ -245,6 +245,19 @@ export class ChatManager {
         },
         'admin-web'
       )
+      // in-flight 窗口精确等于这次 RPC 的生命周期：`process_message` resolve 意味着 agent 侧
+      // 的 episode 已经结束，不存在合法的迟到认领——manager 回话走的是 episode 内的
+      // `send_message`（`unified-agent.processAdminChatMessage` 整段 await 了 episode），
+      // 失败兜底走的是 episode 内的 `chat_callback`，两条都在这一行之前就把它删掉了，
+      // 重复 delete 幂等。
+      //
+      // 不兜这一下的后果（PR #59 review）：agent 侧还有第四种收口——F3，episode 跑完但
+      // 一句话没说（只记日志）。那条路上没有任何一方删 request_id，它会**永久**留在
+      // pendingRequests 里；`claimPendingRequestId` 又是 FIFO 取最早那条，于是下一条回复
+      // 认领的是那具残骸：回复带着旧 request_id 落库并 chat_push，前端把**旧问题**的占位
+      // 换成**新问题**的答案，新问题的占位永远转圈——且此后每多一次沉默 episode 就整体
+      // 再错一位，不自愈。
+      this.pendingRequests.delete(requestId)
     } catch (error) {
       console.error('[ChatManager] Failed to call Agent:', error)
       this.pushToClient({
@@ -365,7 +378,7 @@ export class ChatManager {
     const c = params.content
     if (c.type === 'system_event') {
       // system_event：text 是协议规定的人类可读 fallback，按纯文本落库
-      return this.storeAssistantMessage({ type: 'text', text: c.text ?? '' })
+      return this.storeAssistantMessage({ type: 'text', text: c.text ?? '' }, params.session_id)
     }
     // 归一：media[] 权威；否则单 media_url / file_path 包装成单元素列表
     const incoming: Array<Pick<MessageContent, 'media_url' | 'file_path' | 'filename' | 'mime_type'>> =
@@ -414,14 +427,36 @@ export class ChatManager {
       type,
       ...(text ? { text } : {}),
       ...(media.length > 0 ? { media, media_url: media[0].media_url } : {}),
-    })
+    }, params.session_id)
   }
 
-  private async storeAssistantMessage(content: MessageContent): Promise<ChatSendMessageResult> {
+  /**
+   * 认领当前 in-flight 的 request_id 并消费掉（Map 保插入序，取最早那条——它最先被回答）。
+   * manager 正常回话走 send_message → chat_push，前端要靠这个 id 才能把「处理中」占位气泡
+   * 原地收口（失败兜底走 chat_reply，用的是同一把钥匙）。
+   *
+   * 「认领即消费」定死了一轮多条回复的语义：第一条替换占位，后续几条按新消息追加。
+   * 没有 in-flight（manager 主动推送，不是在回应某条请求）时返回 undefined，前端纯追加。
+   */
+  private claimPendingRequestId(): string | undefined {
+    const first = this.pendingRequests.keys().next()
+    if (first.done) return undefined
+    this.pendingRequests.delete(first.value)
+    return first.value
+  }
+
+  private async storeAssistantMessage(
+    content: MessageContent,
+    sessionId: string,
+  ): Promise<ChatSendMessageResult> {
+    // 占位气泡只在 Master Chat（admin-chat）会话里存在；'system-tasks' 是另一条线程，
+    // 不能吃掉 Master Chat 的 in-flight request
+    const requestId = sessionId === 'admin-chat' ? this.claimPendingRequestId() : undefined
     const message: ChatMessage = {
       message_id: generateId(),
       role: 'assistant',
       content,
+      ...(requestId !== undefined ? { request_id: requestId } : {}),
       timestamp: generateTimestamp(),
     }
     this.messages.set(message.message_id, message)

@@ -78,6 +78,7 @@ import type {
   Workspace,
 } from '../types'
 import type { BuiltinRuntimeFactory } from '../builtin/runtime'
+import type { ResolvedPermissions } from '../../types'
 import { CapabilityNotSupportedError, WorkerExitedError } from '../errors'
 import { AsyncMutex } from '../async-mutex'
 import type { DialogObjectId, Incarnation, LedgerWorker, TaskStatus } from './ledger-types'
@@ -177,6 +178,13 @@ export interface SpawnWorkerParams {
   readonly impl?: WorkerImplId
   readonly workspace?: string
   readonly goal?: string
+  /**
+   * 派活时 manager 按 `origin.creator_friend_id` 算好的发起人权限档位(§8.2"manager 算好
+   * 结果随 spawn 下传")。builtin adapter 把它随 workspace/origin 一起落盘,该 worker 之后
+   * 所有化身都用这一份——权限是身份属性,在 spawn 时固定,不随会话里后来谁说话而变。
+   * 缺省 = 无发起人档位(系统派工 / 身份未解析),worker 退回自己的固定档位。
+   */
+  readonly principal_permissions?: ResolvedPermissions
   /** builtin 实现所需的 LLM 注入(P4 提供) */
   readonly builtin?: SpawnSpec['builtin']
 }
@@ -279,6 +287,7 @@ export class WorkerHarness {
                 workspace,
                 origin: p.origin,
                 goal: p.goal,
+                principal_permissions: p.principal_permissions,
               })
             : undefined)
         const spec: SpawnSpec = {
@@ -287,6 +296,7 @@ export class WorkerHarness {
           workspace,
           goal: p.goal,
           origin: p.origin,
+          principal_permissions: p.principal_permissions,
           builtin,
         }
         spawnedHandle = await adapter.spawn(spec)
@@ -674,6 +684,15 @@ export class WorkerHarness {
       // 工厂签名带上了 per-worker 上下文(PR F),这里的语义不变:仍在 pre-flight 阶段调一次、
       // 拿不到就在动源化身之前拒绝。ctx 取交接语境下的既有值——新化身沿用源化身的 workspace
       // (§5.3 同 workspace 交接),origin/goal 取台账上这条 worker 自己的。
+      //
+      // `principal_permissions` 这里给不出来:它只落在 builtin adapter 自己的 `context.json`
+      // 里(台账 §3 的 `origin` 是协议结构,不放解析后的档位),而 handoff 的目标 impl 按
+      // `implAlreadyUsed` 的 pre-flight 必然是这个 worker **没用过**的实现——目标是 builtin
+      // 就意味着它此前没有 builtin 化身、没有那份 context.json。缺省即"无发起人档位",worker
+      // 退回自己的固定档位(`BUILTIN_WORKER_PERMISSIONS`,已是干活必需的最小面)。
+      // 现网走不到这里:三个 adapter 的 `capabilities().revive` 都是 true(自动交接分支不触发),
+      // `switchWorkerImpl` 也还没有任何生产调用方。接线时必须先给台账/harness 一个跨 impl 的
+      // 档位存放处,再把它接到这里,否则 cc/codex → builtin 的交接会丢掉发起人收敛。
       builtinInjection = this.deps.builtinSpawnDefaults?.({
         worker_id: worker.worker_id,
         workspace: { root: source.workspace },

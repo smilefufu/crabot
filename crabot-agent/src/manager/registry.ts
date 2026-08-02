@@ -58,7 +58,8 @@ import type { WorkerHarness } from '../workers/harness/harness'
 import type { LedgerStore } from '../workers/harness/ledger-store'
 import type { DialogObjectId } from '../workers/harness/ledger-types'
 import type { HarnessEvent, HarnessEventKind } from '../workers/harness/worker-events'
-import type { ChannelMessage } from '../types'
+import type { ChannelMessage, Friend, ResolvedPermissions } from '../types'
+import type { HumanPrincipal } from './principal.js'
 
 /** §4.4 保留线程:未配置目标 session 的 scheduled 触发 / 台账查不到监护 session 的 worker 事件落此。 */
 export const SYSTEM_TASKS_MANAGER_KEY = 'admin-web::system-tasks' as ManagerKey
@@ -120,12 +121,47 @@ export interface ManagerRegistryDeps {
   readonly maxTurns?: number
   readonly contextWindowTokens?: number
   readonly now: () => Date
+  /** 人类消息渲染的时区(见 `ManagerLoopDeps.timezone`);不注入则退回 `resolveTimezone(undefined)`。 */
+  readonly timezone?: () => string
   /**
    * `ManagerKey` → 台账渲染用的 `DialogObjectId`(`ManagerLoopDeps.dialogObjectId`)。
    * 两者粒度不同(manager 按 channel::session,worker 台账按 friend 跨 channel 聚合/单群),
    * 这层映射依赖 friend 解析等本模块无法自行完成的信息,由调用方按 protocol §3 解析好注入。
+   *
+   * **每次读都要现算**:私聊的归档键要等第一条人类消息带来 friend 之后才能收敛成
+   * `friend:<id>`(见 `onHumanWake`),调用方持有的映射会随之变化。
    */
   readonly dialogObjectIdFor: (key: ManagerKey) => DialogObjectId
+  /**
+   * **人类消息唤醒边界**的异步解析钩子:`routeHumanMessages` 在 `runWake` 之前 await 它一次,
+   * 调用方据 `principal`(发起人 friend + 私/群)解析权限、记忆档位、对话对象档案并缓存,
+   * 供下面那三个**同步** thunk(`dialogObjectIdFor` / `toolFace` / `promptInputs`)读取。
+   *
+   * 这是"加参数而不是全面异步化"的落点:异步只发生在唤醒边界这一处,每轮 turn 被同步调用的
+   * 签名一个都不用改。不注入则行为与之前逐字相同(manager 拿不到发起人身份)。
+   *
+   * **返回值**(PR #59 review):解析出来的权限档位,由本 registry 挂到本 episode 的唤醒事件上
+   * (`WakeEvent.principalPermissions`)。会话级缓存回答不了"本 episode 的发言者是谁"——群聊里
+   * 换个人说话就整体覆盖——而派出去的 worker 的权限身份必须是**本批消息的发言者**。
+   */
+  readonly onHumanWake?: (
+    key: ManagerKey,
+    principal: HumanPrincipal,
+  ) => Promise<ResolvedPermissions | null | void>
+  /**
+   * **scheduled 唤醒边界**的异步解析钩子(PR #59 review):`routeSchedule` 在 `runWake` 之前
+   * await 它一次,按 §4.4"权限按 `Schedule.creator_friend_id` 解析(`is_builtin` 按 master
+   * 等价)"算出本次调度的档位,同样挂到唤醒事件上。
+   *
+   * 单独一个钩子而不是复用 `onHumanWake`:调度身份来自任务定义,不是"某个人在这个会话里说话"
+   * ——scheduled 触发可以打进一个人类会话的 manager,那个会话的发起人缓存与本次调度无关。
+   * 不注入则本次调度没有发起人档位,worker 退回自己的固定档位。
+   */
+  readonly onScheduleWake?: (p: {
+    key: ManagerKey
+    creatorFriendId?: string
+    isBuiltin?: boolean
+  }) => Promise<ResolvedPermissions | null>
   /**
    * 工具面工厂:调用方据 key/isSystemThread 装配 `buildManagerToolFace` 的完整依赖并返回
    * 工具面数组;`onAsyncError` 由本 registry 按 key 绑定好传入,调用方负责把它接进
@@ -134,12 +170,23 @@ export interface ManagerRegistryDeps {
    * P5 Task 4 additive:第四个参数是**本 episode 若由 scheduled 触发**时随行的权限身份
    * (非 schedule 唤醒为 undefined),调用方据它填 `WorkerToolsContext.creatorFriendId` /
    * `triggerType`。可选参数,既有三参调用点无需改动。
+   *
+   * P7 J additive:第五个参数是**本 episode 若由人类消息唤醒**时随行的发起人身份
+   * (非人类消息唤醒为 undefined)。与 scheduleIdentity 分开两个参数而不是合成一个
+   * "身份"联合体,是因为两者的语义不同:schedule 的身份来自任务定义(§8.2),人类消息的
+   * 身份来自本批消息的发言者(§4.3),混成一个会让调用方无从判断该走哪条权限规则。
+   *
+   * PR #59 review:第六个参数是**上面那个身份算好的权限档位**——由唤醒边界解析、随本
+   * episode 的唤醒事件而来。调用方必须用它填 `WorkerToolsContext.principalPermissions`,
+   * 不得回头去读会话级缓存(那是"最近谁在说话",不是"本 episode 是谁")。
    */
   readonly toolFace: (
     key: ManagerKey,
     isSystemThread: boolean,
     onAsyncError: OnAsyncError,
-    scheduleIdentity?: ScheduleIdentity
+    scheduleIdentity?: ScheduleIdentity,
+    humanPrincipal?: HumanPrincipal,
+    principalPermissions?: ResolvedPermissions
   ) => ReadonlyArray<ToolDefinition>
   /** system prompt 动态段素材(档案/待处理通知),每轮重算,由调用方决定要不要按最新状态重建。 */
   readonly promptInputs: (key: ManagerKey) => { readonly dialogProfile?: string; readonly pendingNotes?: ReadonlyArray<string> }
@@ -176,7 +223,10 @@ export class ManagerRegistry {
     const loopDeps: ManagerLoopDeps = {
       key,
       isSystemThread,
-      dialogObjectId: this.deps.dialogObjectIdFor(key),
+      // thunk 而非定值:私聊的台账归档键要等第一条人类消息带来 friend 才收敛成
+      // `friend:<id>`,而 loop 实例可能先被 worker 事件建出来。定值会把那一刻的
+      // group 形状永久钉死在实例上,同一个人的台账因此裂成两份。
+      dialogObjectId: () => this.deps.dialogObjectIdFor(key),
       store: this.deps.store,
       policy: this.deps.policy,
       estimateTokens: this.deps.estimateTokens,
@@ -186,10 +236,19 @@ export class ManagerRegistry {
       contextWindowTokens: this.deps.contextWindowTokens,
       // 唤醒事件由 ManagerLoop 按 episode 传入(见 ManagerLoopDeps.toolFace);schedule 之外
       // 的唤醒不带身份,工具面照旧。
-      toolFace: (wakeEvent) => this.deps.toolFace(key, isSystemThread, onAsyncError, scheduleIdentityOf(wakeEvent)),
+      toolFace: (wakeEvent) =>
+        this.deps.toolFace(
+          key,
+          isSystemThread,
+          onAsyncError,
+          scheduleIdentityOf(wakeEvent),
+          humanPrincipalOf(wakeEvent),
+          principalPermissionsOf(wakeEvent),
+        ),
       promptInputs: () => this.deps.promptInputs(key),
       harness: this.deps.harness,
       now: this.deps.now,
+      timezone: this.deps.timezone,
       onEpisodeEnd: () => this.lastActiveAtMs.set(key, this.deps.now().getTime()),
     }
 
@@ -199,14 +258,79 @@ export class ManagerRegistry {
     return loop
   }
 
-  /** 人类消息 → 对应 session 的 manager。 */
+  /**
+   * 人类消息 → 对应 session 的 manager(私聊 lane 批 / 群聊即时放行都走这条)。
+   *
+   * `friend` 是**本批消息的发言者**(私聊即对端;群聊取批内最后一条的发言者,与 v2
+   * `processGroupLaneBatch` 的 `lastEntry.friend` 同义)。它一路带到两个地方:
+   * ① `onHumanWake` —— 唤醒边界解析权限 / 记忆档位 / 对话对象档案;
+   * ② `WakeEvent.friend` —— 供 `toolFace(wakeEvent)` 按 per-episode 的发起人身份装配工具面。
+   *
+   * 不传 friend 时(陌生人、或调用方尚未接线)行为与之前逐字相同。
+   */
   async routeHumanMessages(
     channelId: string,
     sessionId: string,
-    messages: ReadonlyArray<ChannelMessage>
+    messages: ReadonlyArray<ChannelMessage>,
+    friend?: Friend
+  ): Promise<EpisodeResult> {
+    return this.routeHumanWake('human_messages', channelId, sessionId, messages, friend)
+  }
+
+  /**
+   * 群聊注意力放行(`AttentionScheduler` 的 flush 回调)→ 对应 session 的 manager。
+   *
+   * 与 `routeHumanMessages` 共用同一条唤醒边界(同样解析发起人身份、同样把 friend 带进
+   * `WakeEvent`),**唯一的区别是 `WakeEvent.kind`**——`attention_flush` 在 `loop.ts`
+   * `renderWakeEvent` 里渲染成"补齐:群聊注意力放行期间累积的人类消息",告诉 LLM 这批话
+   * 是攒了一会儿才递过来的、不是刚说的。两个 kind 的文案不同,**不能拿
+   * `routeHumanMessages` 顶替**:那样 manager 会把一批陈旧消息当成刚发生的对话。
+   *
+   * 在此之前 registry 没有任何 `attention_flush` 的公开入口(`runWake` 是 private,
+   * `attentionFlushToWakeEvent` 零生产调用方),群聊放行路径因此**无路可走**。
+   */
+  async routeAttentionFlush(
+    channelId: string,
+    sessionId: string,
+    messages: ReadonlyArray<ChannelMessage>,
+    friend?: Friend
+  ): Promise<EpisodeResult> {
+    return this.routeHumanWake('attention_flush', channelId, sessionId, messages, friend)
+  }
+
+  /** 两个人类消息入口的公共路径:解析发起人身份(唤醒边界的唯一一次异步)→ 按 kind 造事件唤醒。 */
+  private async routeHumanWake(
+    kind: 'human_messages' | 'attention_flush',
+    channelId: string,
+    sessionId: string,
+    messages: ReadonlyArray<ChannelMessage>,
+    friend?: Friend
   ): Promise<EpisodeResult> {
     const key = `${channelId}::${sessionId}` as ManagerKey
-    return this.runWake(key, { kind: 'human_messages', messages })
+    // 私/群不新增数据来源:它就在消息自己的 session 上。空批(理论上不该发生)按私聊算,
+    // 与 `handleMessageReceived` 的默认分流一致。
+    const sessionType = messages[0]?.session.type === 'group' ? 'group' : 'private'
+    const principal: HumanPrincipal = { ...(friend ? { friend } : {}), sessionType }
+
+    // 唤醒边界的唯一一次异步解析。失败不阻断投递——人类消息比档位重要,档位缺失
+    // 只会退回 fail-soft 兜底,而消息丢了就是丢了。
+    let principalPermissions: ResolvedPermissions | undefined
+    if (this.deps.onHumanWake) {
+      try {
+        principalPermissions = (await this.deps.onHumanWake(key, principal)) ?? undefined
+      } catch (err) {
+        console.error(`[ManagerRegistry] manager '${key}' 的发起人身份解析失败,按未解析继续:`, err)
+      }
+    }
+
+    const withFriend = friend ? { friend } : {}
+    // 档位挂在事件上,和 friend 一样按 episode 随行(见 `principalPermissionsOf`)。
+    const withPerms = principalPermissions ? { principalPermissions } : {}
+    const event: WakeEvent =
+      kind === 'human_messages'
+        ? { kind: 'human_messages', messages, ...withFriend, ...withPerms }
+        : { kind: 'attention_flush', messages, ...withFriend, ...withPerms }
+    return this.runWake(key, event)
   }
 
   /**
@@ -238,6 +362,24 @@ export class ManagerRegistry {
     const key = p.targetSession
       ? (`${p.targetSession.channel_id}::${p.targetSession.session_id}` as ManagerKey)
       : SYSTEM_TASKS_MANAGER_KEY
+
+    // 调度自己的权限身份在唤醒边界解析一次(§4.4),随事件走。**绝不能退回该 key 的会话级
+    // 缓存**:打进人类会话的调度会因此拿到"那个会话最近谁在说话"的档位(PR #59 review)。
+    // 失败不阻断触发:档位缺失只是让 worker 退回固定档位,调度本身照跑。
+    let principalPermissions: ResolvedPermissions | undefined
+    if (this.deps.onScheduleWake) {
+      try {
+        principalPermissions =
+          (await this.deps.onScheduleWake({
+            key,
+            creatorFriendId: p.creatorFriendId,
+            isBuiltin: p.isBuiltin,
+          })) ?? undefined
+      } catch (err) {
+        console.error(`[ManagerRegistry] schedule '${p.scheduleId}' 的权限身份解析失败,按未解析继续:`, err)
+      }
+    }
+
     return this.runWake(key, {
       kind: 'schedule',
       scheduleId: p.scheduleId,
@@ -245,6 +387,7 @@ export class ManagerRegistry {
       description: p.description,
       creatorFriendId: p.creatorFriendId,
       isBuiltin: p.isBuiltin,
+      ...(principalPermissions ? { principalPermissions } : {}),
     })
   }
 
@@ -362,6 +505,38 @@ export class ManagerRegistry {
 function scheduleIdentityOf(wakeEvent: WakeEvent | undefined): ScheduleIdentity | undefined {
   if (wakeEvent?.kind !== 'schedule') return undefined
   return { creatorFriendId: wakeEvent.creatorFriendId, isBuiltin: wakeEvent.isBuiltin }
+}
+
+/**
+ * 唤醒事件 → 随行的人类发起人身份;非人类消息唤醒没有身份(undefined)。
+ *
+ * 认 `human_messages` 与 `attention_flush` 两个 kind:它们都是"某个人在说话",只是递过来
+ * 的时机不同(即时 vs 注意力放行后补齐)。**漏掉 attention_flush 就等于群聊放行路径永远
+ * 拿不到发起人身份**——那条路上派出去的 worker 会记成"没有 creator"。
+ *
+ * 反过来,worker 事件与自唤醒虽然也发生在同一个会话里,但它们不是"某个人在说话",拿上一次
+ * 的发言者冒充会让 worker 的 `origin.creator_friend_id` 记错人。
+ */
+function humanPrincipalOf(wakeEvent: WakeEvent | undefined): HumanPrincipal | undefined {
+  if (wakeEvent?.kind !== 'human_messages' && wakeEvent?.kind !== 'attention_flush') return undefined
+  const sessionType = wakeEvent.messages[0]?.session.type === 'group' ? 'group' : 'private'
+  return { ...(wakeEvent.friend ? { friend: wakeEvent.friend } : {}), sessionType }
+}
+
+/**
+ * 唤醒事件 → 随行的权限档位(PR #59 review)。与上面两个 `*Of` 同一条原则:身份类信息**跟着
+ * episode 走**,不从会话级缓存现取。三种带身份的唤醒(人类消息 / 注意力放行 / 调度)各自在
+ * 自己的唤醒边界解析好挂上来;worker 事件与自唤醒没有身份,返回 undefined。
+ */
+function principalPermissionsOf(wakeEvent: WakeEvent | undefined): ResolvedPermissions | undefined {
+  if (
+    wakeEvent?.kind !== 'human_messages' &&
+    wakeEvent?.kind !== 'attention_flush' &&
+    wakeEvent?.kind !== 'schedule'
+  ) {
+    return undefined
+  }
+  return wakeEvent.principalPermissions
 }
 
 /** query_worker 异步失败 → 借用既有 `worker_event`/`query_failed` kind 包装成 WakeEvent(见文件头)。 */

@@ -52,6 +52,43 @@ type Landing =
   | { path: 'direct'; batch: ReadonlyArray<{ message: ChannelMessage; friend: Friend }> }
   | { path: 'group'; batch: ReadonlyArray<{ messages: BufferedMessage[]; sessionId: string }> }
 
+/**
+ * 四个 channel 的 `send_message` 接收端契约（**已逐一核对源码**，四份一字不差地共用同一形状）：
+ *
+ * - `crabot-channel-feishu/src/feishu-channel.ts:826`
+ * - `crabot-channel-wechat/src/wechat-channel.ts:468`
+ * - `crabot-channel-dingtalk/src/dingtalk-channel.ts:387`
+ * - `crabot-channel-telegram/src/telegram-channel.ts:502`
+ *
+ * 四者的第一行都是 `this.sessionManager.findById(params.session_id)`，找不到即
+ * `NOT_FOUND` 抛出；正文一律取自 `params.content`（`SendMessageParams = {session_id,
+ * content, features?}`，见四个仓的 `src/types.ts`）。
+ *
+ * 本函数把这条契约做成测试里的**真实接收端**：只有入参形状正确、`session_id` 指向一个
+ * 存在的会话，文本才会被"送达"。断言落在"人类收到了什么"，而不是"某个 RPC 被调过"——
+ * 这正是历史上那条 bug（`{message: reply}`）能长期存活的原因：调用发生了，送达从未发生。
+ */
+/** 接收端"认识"的会话（= 本文件里 `makeMessage` 会用到的全部 session_id）。 */
+const KNOWN_SESSION_IDS: ReadonlySet<string> = new Set([
+  'sess-1',
+  'sess-a',
+  'group-1',
+  'group-2',
+  'group-3',
+  'group-a',
+])
+
+function deliverLikeChannel(
+  params: unknown,
+  knownSessionIds: ReadonlySet<string>,
+): { sessionId: string; text: string } {
+  const p = params as { session_id?: string; content?: { type?: string; text?: string } }
+  if (!p.session_id || !knownSessionIds.has(p.session_id)) {
+    throw new Error(`NOT_FOUND: Session not found: ${String(p.session_id)}`)
+  }
+  return { sessionId: p.session_id, text: p.content?.text ?? '' }
+}
+
 interface AgentInternals {
   onEvent(event: Event): Promise<void>
   processDirectBatch(batch: ReadonlyArray<{ message: ChannelMessage; friend: Friend }>): Promise<void>
@@ -72,6 +109,10 @@ describe('handleMessageReceived —— 入站分流（P7/PR A 测试网 ①）',
   let landings: Landing[]
   /** 出站 RPC 序列（未配置提示语走这里）。 */
   let rpcCalls: Array<{ port: number; method: string; params: unknown }>
+  /** **真正送达人类**的消息（经 `deliverLikeChannel` 这个 channel 契约接收端）。 */
+  let delivered: Array<{ sessionId: string; text: string }>
+  /** channel 契约接收端拒收的原因（入参形状错 / session 不存在）。 */
+  let rejected: string[]
   /** lane handler 的放行闸：默认立即放行；需要观察串行/合并时挂起它。 */
   let gate: Promise<void> | undefined
 
@@ -99,6 +140,15 @@ describe('handleMessageReceived —— 入站分流（P7/PR A 测试网 ①）',
     internals.channelPorts.set('telegram', 18002)
     internals.rpcClient.call = async (port, method, params) => {
       rpcCalls.push({ port: port as number, method: method as string, params })
+      // send_message 交给 channel 契约接收端处理：只有形状对了才算送达。
+      if (method === 'send_message') {
+        try {
+          delivered.push(deliverLikeChannel(params, KNOWN_SESSION_IDS))
+        } catch (err) {
+          rejected.push(err instanceof Error ? err.message : String(err))
+          throw err
+        }
+      }
       return {}
     }
   }
@@ -106,6 +156,8 @@ describe('handleMessageReceived —— 入站分流（P7/PR A 测试网 ①）',
   beforeEach(async () => {
     landings = []
     rpcCalls = []
+    delivered = []
+    rejected = []
     gate = undefined
     dataDir = await useTmpDataDir('inbound-hmr-')
   })
@@ -215,11 +267,28 @@ describe('handleMessageReceived —— 入站分流（P7/PR A 测试网 ①）',
       const sends = rpcCalls.filter((c) => c.method === 'send_message')
       expect(sends).toHaveLength(1)
       expect(sends[0].port).toBe(18001)
-      const reply = (sends[0].params as { message: ChannelMessage }).message
-      expect(reply.content.text).toContain('尚未配置')
-      // 提示必须回到原会话，不能串到别的会话
-      expect(reply.session.session_id).toBe('sess-1')
-      expect(reply.session.channel_id).toBe('wechat')
+      // 入参形状必须是 channel 契约的 `{session_id, content}`（四个 channel 的
+      // `handleSendMessage` 都从 `params.session_id` 取会话、从 `params.content` 取正文）。
+      // 历史上这里是 `{message: <整条 ChannelMessage>}` —— 调用发生、送达从未发生。
+      const params = sends[0].params as { session_id: string; content: { type: string; text: string } }
+      expect(params.session_id).toBe('sess-1')
+      expect(params.content.type).toBe('text')
+      expect(params.content.text).toContain('尚未配置')
+    })
+
+    it('"未配置"提示真的被 channel 接收端送达到原会话（不是只发出了一次 RPC）', async () => {
+      boot({ configured: false })
+      const message = makeMessage({ id: 'pm-3b', type: 'private' })
+
+      await internals.onEvent(authorizedEvent({ message, friend: makeFriend('f-1') }))
+
+      // 语义断言：人类那侧确确实实收到了一条文本，且落在**原会话**里。
+      // 入参形状一旦退回 `{message: reply}`，`params.session_id` 为 undefined，
+      // 接收端按四个 channel 的真实契约抛 NOT_FOUND —— delivered 为空、rejected 非空。
+      expect(rejected).toEqual([])
+      expect(delivered).toEqual([
+        { sessionId: 'sess-1', text: expect.stringContaining('尚未配置') as unknown as string },
+      ])
     })
 
     it('未配置 LLM 时群聊消息既不进群聊路径，也不留在注意力调度里', async () => {
@@ -231,6 +300,10 @@ describe('handleMessageReceived —— 入站分流（P7/PR A 测试网 ①）',
       expect(landings).toEqual([])
       expect(internals.attentionScheduler.getBufferSize('group-3')).toBe(0)
       expect(rpcCalls.filter((c) => c.method === 'send_message')).toHaveLength(1)
+      // 群聊同样要真的送达，且落在**这个群**的会话里（不能串到私聊或别的群）
+      expect(delivered).toEqual([
+        { sessionId: 'group-3', text: expect.stringContaining('尚未配置') as unknown as string },
+      ])
     })
 
     it('配置齐备时不发"未配置"提示（早退不能反过来误伤正常消息）', async () => {

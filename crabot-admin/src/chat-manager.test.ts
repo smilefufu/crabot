@@ -1,7 +1,7 @@
 /**
  * ChatManager.handleSendMessage（admin-web 伪 channel 入口）单元测试
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { ChatManager, buildChatTaskSnapshot } from './chat-manager.js'
@@ -399,6 +399,200 @@ describe('tagMessageTask / tagUserMessageByRequestId', () => {
     expect(u?.task_id).toBe('task-cb-1')
     // 应有 chat_message_tagged 推送
     expect(pushed.some((p) => p.type === 'chat_message_tagged' && p.task_id === 'task-cb-1')).toBe(true)
+  })
+})
+
+/**
+ * PR J：manager 正常回复走 send_message → chat_push，前端要靠 request_id 才能把
+ * 「处理中」占位气泡收口。admin 侧的职责是给落库消息盖上当时 in-flight 的 request_id。
+ */
+describe('chat_push 收口占位：storeAssistantMessage 认领 in-flight request_id', () => {
+  beforeEach(async () => {
+    await fs.rm(TEST_DATA_DIR, { recursive: true, force: true }).catch(() => {})
+    await fs.mkdir(TEST_DATA_DIR, { recursive: true })
+  })
+
+  afterEach(async () => {
+    await fs.rm(TEST_DATA_DIR, { recursive: true, force: true }).catch(() => {})
+  })
+
+  function attachClientStub(mgr: ChatManager): Array<{ type: string; [k: string]: unknown }> {
+    const pushed: Array<{ type: string; [k: string]: unknown }> = []
+    ;(mgr as unknown as { activeClient: unknown }).activeClient = {
+      readyState: 1, // WebSocket.OPEN
+      send: (data: string) => { pushed.push(JSON.parse(data)) },
+    }
+    return pushed
+  }
+
+  /**
+   * 造出一条 in-flight 请求（pendingRequests 有条目、占位气泡已生出）。
+   *
+   * **`process_message` 停在飞行中不 resolve** —— 生产上就是这个形状：manager 的
+   * `send_message` 发生在 episode 内部，也就是 `process_message` 返回**之前**
+   * （`unified-agent.processAdminChatMessage` 整段 await 了 episode）。in-flight 窗口精确
+   * 等于这次 RPC 的生命周期，测试必须在窗口内发回复，否则测的是一个生产上不存在的时序。
+   * 收尾用 `finish()` 让 RPC 落地（= episode 结束）。
+   */
+  async function makeInFlight(requestId: string): Promise<{
+    mgr: ChatManager
+    pushed: Array<{ type: string; [k: string]: unknown }>
+    finish: () => Promise<void>
+  }> {
+    let release!: () => void
+    const rpcDone = new Promise<void>((resolve) => { release = resolve })
+    const mgr = await makeManagerWithRpc(async () => { await rpcDone; return {} })
+    const pushed = attachClientStub(mgr)
+    const inbound = mgr.handleInboundMessage({ request_id: requestId, text: '帮我看下这个', files: [] })
+    await vi.waitFor(() => expect(pushed.some((p) => p.type === 'chat_status' && p.request_id === requestId)).toBe(true))
+    pushed.length = 0
+    return {
+      mgr,
+      pushed,
+      finish: async () => { release(); await inbound },
+    }
+  }
+
+  it('正常回复：落库消息与 chat_push 载荷都盖上 in-flight 的 request_id', async () => {
+    const { mgr, pushed, finish } = await makeInFlight('req-inflight-1')
+    await mgr.handleSendMessage({
+      session_id: 'admin-chat',
+      content: { type: 'text', text: '看完了，结论是……' },
+    })
+    const stored = mgr.getMessages(10).find((m) => m.role === 'assistant')
+    expect(stored?.request_id).toBe('req-inflight-1')
+    const push = pushed.find((p) => p.type === 'chat_push')
+    expect(push).toBeTruthy()
+    expect((push as { message: { request_id?: string } }).message.request_id).toBe('req-inflight-1')
+    await finish()
+  })
+
+  it('带 media 的正常回复：chat_push 仍是完整 ChatMessage（media 不丢）且带 request_id', async () => {
+    const { mgr, pushed, finish } = await makeInFlight('req-inflight-media')
+    await mgr.handleSendMessage({
+      session_id: 'admin-chat',
+      content: {
+        type: 'image',
+        text: '图在这',
+        media: [{ media_url: 'https://example.com/a.png', mime_type: 'image/png' }],
+      },
+    })
+    const push = pushed.find((p) => p.type === 'chat_push') as
+      { message: { request_id?: string; content: { media?: unknown[] } } }
+    expect(push.message.request_id).toBe('req-inflight-media')
+    expect(push.message.content.media).toHaveLength(1)
+    await finish()
+  })
+
+  it('无 in-flight（manager 主动推送）：不盖 request_id，前端据此纯追加', async () => {
+    const mgr = await makeManager()
+    const pushed = attachClientStub(mgr)
+    await mgr.handleSendMessage({
+      session_id: 'admin-chat',
+      content: { type: 'text', text: '顺嘴提醒你一句' },
+    })
+    expect(mgr.getMessages(10)[0].request_id).toBeUndefined()
+    const push = pushed.find((p) => p.type === 'chat_push') as { message: { request_id?: string } }
+    expect(push.message.request_id).toBeUndefined()
+  })
+
+  it('一轮多条回复：认领即消费——只有第一条带 request_id，后续几条不带', async () => {
+    const { mgr, pushed, finish } = await makeInFlight('req-inflight-2')
+    await mgr.handleSendMessage({ session_id: 'admin-chat', content: { type: 'text', text: '收到，我去办' } })
+    await mgr.handleSendMessage({ session_id: 'admin-chat', content: { type: 'text', text: '办好了' } })
+    const pushes = pushed.filter((p) => p.type === 'chat_push') as Array<{ message: { request_id?: string } }>
+    expect(pushes).toHaveLength(2)
+    expect(pushes[0].message.request_id).toBe('req-inflight-2')
+    expect(pushes[1].message.request_id).toBeUndefined()
+    await finish()
+  })
+
+  it('两条 in-flight：按 FIFO 认领（最早那条最先被回答）', async () => {
+    // 两条都停在飞行中（生产上就是两个 episode 同时在跑），回复在窗口内发出
+    let release!: () => void
+    const rpcDone = new Promise<void>((resolve) => { release = resolve })
+    const mgr = await makeManagerWithRpc(async () => { await rpcDone; return {} })
+    const pushed = attachClientStub(mgr)
+    const a = mgr.handleInboundMessage({ request_id: 'req-a', text: '第一问', files: [] })
+    await vi.waitFor(() => expect(pushed.filter((p) => p.type === 'chat_status')).toHaveLength(1))
+    const b = mgr.handleInboundMessage({ request_id: 'req-b', text: '第二问', files: [] })
+    await vi.waitFor(() => expect(pushed.filter((p) => p.type === 'chat_status')).toHaveLength(2))
+    pushed.length = 0
+    await mgr.handleSendMessage({ session_id: 'admin-chat', content: { type: 'text', text: '答第一问' } })
+    await mgr.handleSendMessage({ session_id: 'admin-chat', content: { type: 'text', text: '答第二问' } })
+    const pushes = pushed.filter((p) => p.type === 'chat_push') as Array<{ message: { request_id?: string } }>
+    expect(pushes.map((p) => p.message.request_id)).toEqual(['req-a', 'req-b'])
+    release()
+    await Promise.all([a, b])
+  })
+
+  it('session_id=system-tasks：不认领 Master Chat 的 in-flight request', async () => {
+    const { mgr, pushed, finish } = await makeInFlight('req-inflight-3')
+    await mgr.handleSendMessage({ session_id: 'system-tasks', content: { type: 'text', text: '系统线程的消息' } })
+    const push = pushed.find((p) => p.type === 'chat_push') as { message: { request_id?: string } }
+    expect(push.message.request_id).toBeUndefined()
+    // in-flight 没被吃掉：随后 admin-chat 的回复照样能认领到
+    pushed.length = 0
+    await mgr.handleSendMessage({ session_id: 'admin-chat', content: { type: 'text', text: '给人类的回复' } })
+    const push2 = pushed.find((p) => p.type === 'chat_push') as { message: { request_id?: string } }
+    expect(push2.message.request_id).toBe('req-inflight-3')
+    await finish()
+  })
+
+  // --- PR #59 review 第二条：F3（episode 跑完但一句话没说）不得留下永久残骸 ---
+
+  it('沉默 episode（F3）之后再发一条：回复认领的是新请求，旧的不残留、不错位', async () => {
+    // 第一问：agent 侧 F3——`process_message` 正常返回，没有 chat_callback、也没有 send_message。
+    const mgr = await makeManagerWithRpc(async () => ({ decision_types: [] }))
+    const pushed = attachClientStub(mgr)
+    await mgr.handleInboundMessage({ request_id: 'req-silent', text: '第一问（会被沉默）', files: [] })
+
+    // 第二问：这一轮 manager 在 episode 内（= RPC 返回之前）回了话。
+    let release!: () => void
+    const rpcDone = new Promise<void>((resolve) => { release = resolve })
+    ;(mgr as unknown as { rpcClient: { call: unknown } }).rpcClient = {
+      call: async () => { await rpcDone; return {} },
+    }
+    const second = mgr.handleInboundMessage({ request_id: 'req-2', text: '第二问', files: [] })
+    await vi.waitFor(() => expect(pushed.some((p) => p.type === 'chat_status' && p.request_id === 'req-2')).toBe(true))
+    await mgr.handleSendMessage({ session_id: 'admin-chat', content: { type: 'text', text: '答第二问' } })
+    release()
+    await second
+
+    // 认领的是第二问：占位气泡按 req-2 收口。修复前这里会认领早已收口无望的 req-silent，
+    // 于是第一问的占位被换成第二问的答案、第二问的占位永远转圈（且此后整体错位一位）。
+    const push = pushed.find((p) => p.type === 'chat_push') as { message: { request_id?: string } }
+    expect(push.message.request_id).toBe('req-2')
+    const stored = mgr.getMessages(10).find((m) => m.role === 'assistant')
+    expect(stored?.request_id).toBe('req-2')
+  })
+
+  it('沉默 episode（F3）之后 manager 主动推送：没有可认领的 in-flight，纯追加', async () => {
+    const mgr = await makeManagerWithRpc(async () => ({ decision_types: [] }))
+    await mgr.handleInboundMessage({ request_id: 'req-silent-2', text: '会被沉默的一问', files: [] })
+    const pushed = attachClientStub(mgr)
+
+    await mgr.handleSendMessage({ session_id: 'admin-chat', content: { type: 'text', text: '顺嘴提醒你一句' } })
+
+    const push = pushed.find((p) => p.type === 'chat_push') as { message: { request_id?: string } }
+    expect(push.message.request_id).toBeUndefined()
+  })
+
+  it('失败兜底路径不受影响：chat_callback 仍按 request_id 推 chat_reply', async () => {
+    const { mgr, pushed, finish } = await makeInFlight('req-inflight-4')
+    await mgr.handleChatCallback({
+      request_id: 'req-inflight-4',
+      reply_type: 'direct_reply',
+      content: '我这条消息没处理完，暂时回不了你。',
+    })
+    const reply = pushed.find((p) => p.type === 'chat_reply')
+    expect(reply).toBeTruthy()
+    expect(reply!.request_id).toBe('req-inflight-4')
+    expect(reply!.status).toBe('completed')
+    // 兜底消息落库也带 request_id（前端 15 秒兜底轮询按它匹配）
+    const stored = mgr.getMessages(10).find((m) => m.role === 'assistant')
+    expect(stored?.request_id).toBe('req-inflight-4')
+    await finish()
   })
 })
 
