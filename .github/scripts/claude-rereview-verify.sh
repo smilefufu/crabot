@@ -51,13 +51,23 @@ fi
 
 echo "::warning::re-review 运行期间 head 从 ${EXPECTED_HEAD} 变为 ${current_head}"
 
-# 只有 APPROVED / CHANGES_REQUESTED 可被 dismiss；COMMENTED 即使错位也不会让 merge-gate 放行
-if [ "$new_state" = "APPROVED" ]; then
-  gh api --method PUT "repos/$repo/pulls/$pr/reviews/${new_id}/dismissals" \
+# dismiss 本轮新增的**全部** APPROVED，而不只是最后一条：模型可能在一次运行里提交多条
+# （典型诱因是 gh pr review --approve 超时报错但实际已落地，模型据此重试——allowedTools
+# 不限制提交次数）。只清最后一条会让更早那条错位的 APPROVED 存活成为最新有效 review，
+# 下一条 @claude 便会因 need 判「已是 APPROVED@head」跳过重裁，merge-gate 随即放行两个
+# head 之间无人看过的 diff——正是本文件头部注释要防的那条持久毒化链。
+# 只有 APPROVED / CHANGES_REQUESTED 可被 dismiss；COMMENTED 即使错位也不会让 merge-gate 放行。
+dismissed=0
+while read -r rid; do
+  [ -n "$rid" ] || continue
+  gh api --method PUT "repos/$repo/pulls/$pr/reviews/${rid}/dismissals" \
     -f message="re-review 运行期间出现新提交（${EXPECTED_HEAD:0:8} → ${current_head:0:8}），本次 APPROVED 针对的不是被审查的代码，自动撤销。新提交会触发一轮全新 review。" \
     -f event=DISMISS >/dev/null
-  echo "已 dismiss 错位的 APPROVED（id=${new_id}）"
-fi
+  echo "已 dismiss 错位的 APPROVED（id=${rid}）"
+  dismissed=$((dismissed + 1))
+done < <(jq -r --argjson prev "${PREV_REVIEW_ID:-0}" \
+           '.[] | select(.id > $prev and .state == "APPROVED") | .id' <<<"$reviews")
+echo "本轮 dismiss 的错位 APPROVED 数：${dismissed}"
 
 echo "::error::head 在 re-review 期间发生漂移，本次裁决作废；新提交将由 Claude PR Review 重新审查"
 exit 1
