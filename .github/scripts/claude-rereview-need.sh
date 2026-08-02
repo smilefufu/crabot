@@ -49,11 +49,18 @@ last_review=$(gh api "repos/$repo/pulls/$pr/reviews" --paginate \
   | jq -s 'last // empty') || no "无法获取 review 列表"
 [ -n "$last_review" ] || no "claude[bot] 尚无首轮 review（重裁只适用于首轮已完成的 PR）"
 
-# 4. 已经是针对当前 head 的 APPROVED 就不必重跑（避免每条评论都触发一次）
-if [ "$(jq -r '.state' <<<"$last_review")" = "APPROVED" ] \
-   && [ "$(jq -r '.commit_id' <<<"$last_review")" = "$head_sha" ]; then
-  no "最新 review 已是针对当前 head 的 APPROVED"
-fi
+# 4. 首轮 review 必须针对当前 head。指向旧 head 说明此后有过 push，而那次 push 的完整
+#    review 要么还在跑、要么已置红——此时重裁的前提（「没有新提交」「代码未变」）为假：
+#    prompt 会让模型只复核既有线程范围就 approve，两个 head 之间线程范围之外的改动
+#    等于没被任何人看过，而 merge-gate 第 5 条的 checks 等待又排除了 Claude PR Review
+#    workflow，in-flight 或置红的首轮 review 都拦不住。新提交一律交给 push 触发的完整
+#    review 处理，不归重裁管。
+[ "$(jq -r '.commit_id' <<<"$last_review")" = "$head_sha" ] \
+  || no "最新 review 针对的不是当前 head（新提交应由 push 触发的完整 review 处理）"
+
+# 5. 已经是 APPROVED 就不必重跑（避免每条评论都触发一次）
+[ "$(jq -r '.state' <<<"$last_review")" != "APPROVED" ] \
+  || no "最新 review 已是针对当前 head 的 APPROVED"
 
 # head_sha 与 last_review_id 交给收尾校验（claude-rereview-verify.sh）：
 # 前者用于检测 claude 运行期间 head 是否漂移，后者用于判定本次是否真的产出了新 review。
