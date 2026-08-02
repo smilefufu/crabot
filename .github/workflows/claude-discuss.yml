@@ -63,7 +63,12 @@ jobs:
   # 是请求重新裁决一次，裁决内容不受其左右，结果仍要过 merge-gate 五条硬检查。
   re-review:
     needs: discuss
-    if: ${{ success() }}
+    # 只在 issue_comment 路径重裁。该事件的 workflow 定义取自默认分支，PR 改不了本 job；
+    # 而 pull_request_review_comment 事件的定义取自 PR head——实测 run 30742525811
+    # （head_sha=4fe483a2）里 main 上并不存在的 re-review job 照样被执行，意味着 PR 能在
+    # 自身内改写这段持有 approve 权的配置（allowedTools、prompt、乃至删掉收尾校验），
+    # 把 base 版本的脚本钉死也拦不住。discuss job 无 approve 权，维持两种事件都响应。
+    if: ${{ success() && github.event_name == 'issue_comment' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # 与 review job 对齐的最小权限：无 contents:write，即使被提示注入也无法合并或 push
@@ -86,6 +91,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
         run: bash .github/scripts/claude-rereview-need.sh
+
+      # 先把 base 版本的收尾校验脚本存到工作树外：下一步 checkout 会把整个工作树（含
+      # .github/scripts/）切到 PR head，而校验脚本与 need 脚本同属重裁条件的承载件——
+      # 它守的 dismiss 是 head 漂移场景下的唯一防线（merge-gate 第 4/5/6 条都拦不住），
+      # 被 PR 改成空操作即告失守，必须取自 base
+      - name: Stash verify script from base
+        if: steps.need.outputs.needed == 'true'
+        run: cp .github/scripts/claude-rereview-verify.sh "$RUNNER_TEMP/"
 
       # 判定脚本已执行完，此后切到 PR 代码供复核（--detach 理由同 discuss job）
       - name: Checkout PR head
@@ -150,11 +163,14 @@ jobs:
           PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
           EXPECTED_HEAD: ${{ steps.need.outputs.head_sha }}
           PREV_REVIEW_ID: ${{ steps.need.outputs.last_review_id }}
-        run: bash .github/scripts/claude-rereview-verify.sh
+        run: bash "$RUNNER_TEMP/claude-rereview-verify.sh"
 
   merge-gate:
     needs: [discuss, re-review]
-    if: ${{ success() }}
+    # re-review 在 pull_request_review_comment 路径上被 skip，此时 merge-gate 仍须运行，
+    # 维持本改动之前的行为（否则线程内回复会让闸门整个失效）；只有它真正失败时才拦住合并。
+    # job id 含连字符，须用 needs['re-review'] 而非 needs.re-review（后者会被当作减法解析）。
+    if: ${{ !cancelled() && needs.discuss.result == 'success' && needs['re-review'].result != 'failure' }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     permissions:
