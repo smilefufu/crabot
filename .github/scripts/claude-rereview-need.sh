@@ -43,9 +43,14 @@ unresolved=$(jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.i
 #    而重裁的 prompt 建立在「首轮已做过」的前提上，会产出一个浅层 APPROVED，
 #    把从未经过完整 review 的 PR 直接送进 merge-gate（其 checks 等待又排除了
 #    Claude PR Review workflow，不会等首轮跑完来纠正）。
+#    空正文 COMMENTED 不算首轮 review：GitHub 会为每条行内评论/线程回复自动生成一条
+#    这样的隐式 review，commit_id 钉在生成时刻的 head。若不过滤，push 新提交后、完整
+#    review 尚未跑完的窗口里，一条 discuss 线程回复就能伪造出「首轮 review@当前 head」，
+#    把下面第 4 步的 stale-head 防线整个绕过。口径与 claude-review-verify.sh 一致。
 last_review=$(gh api "repos/$repo/pulls/$pr/reviews" --paginate \
   --jq '.[] | select(.user.login == "claude[bot]")
-            | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "COMMENTED")' \
+            | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED"
+                     or (.state == "COMMENTED" and ((.body // "") | length > 0)))' \
   | jq -s 'last // empty') || no "无法获取 review 列表"
 [ -n "$last_review" ] || no "claude[bot] 尚无首轮 review（重裁只适用于首轮已完成的 PR）"
 

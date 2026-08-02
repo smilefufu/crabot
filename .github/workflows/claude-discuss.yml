@@ -156,8 +156,11 @@ jobs:
 
       # 收尾校验：确认真的产出了新 review（零产出会无声退回卡死态），并检测 claude
       # 运行期间 head 是否漂移（approve 不带 commit_id，会记在没审过的新 commit 上）
+      # always()：claude 步骤异常退出、或 job 撞上 timeout-minutes 被取消时，本步骤仍须运行。
+      # 否则 head 漂移后已落地的 APPROVED 无人 dismiss——本轮 job 红只挡得住本轮，下一条
+      # @claude 会因 need 第 5 步判「已是 APPROVED@head」跳过重裁，闸门随即放行未审查代码。
       - name: Verify re-review
-        if: steps.need.outputs.needed == 'true'
+        if: ${{ always() && steps.need.outputs.needed == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
@@ -170,7 +173,10 @@ jobs:
     # re-review 在 pull_request_review_comment 路径上被 skip，此时 merge-gate 仍须运行，
     # 维持本改动之前的行为（否则线程内回复会让闸门整个失效）；只有它真正失败时才拦住合并。
     # job id 含连字符，须用 needs['re-review'] 而非 needs.re-review（后者会被当作减法解析）。
-    if: ${{ !cancelled() && needs.discuss.result == 'success' && needs['re-review'].result != 'failure' }}
+    # 白名单而非 != 'failure'：result 有 success/failure/cancelled/skipped 四档，job 级
+    # timeout-minutes 的语义是 GitHub 自动 cancel，而 !cancelled() 只看 run 级取消状态，
+    # 排除式写法会让超时的 re-review 放行——按仓库一贯的 fail-closed，只认 success/skipped。
+    if: ${{ !cancelled() && needs.discuss.result == 'success' && (needs['re-review'].result == 'success' || needs['re-review'].result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     permissions:

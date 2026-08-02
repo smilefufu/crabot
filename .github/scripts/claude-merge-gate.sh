@@ -46,10 +46,16 @@ unresolved=$(jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.i
 [ "$unresolved" = "0" ] || skip "还有 $unresolved 个未 resolve 的 review 线程"
 
 # 4. Claude（claude[bot]）的最新 review 必须是针对当前 head 的 APPROVED
+#    空正文 COMMENTED 不算裁决：GitHub 会为每条行内评论/线程回复自动生成一条这样的
+#    隐式 review（commit_id 钉在生成时刻的 head），口径与 claude-review-verify.sh 一致。
+#    若不过滤，APPROVED 之后任何一条讨论回复都会把 last_review 顶掉、闸门就此卡住，
+#    而 claude-rereview-need.sh 那侧过滤后会判「已是 APPROVED@head」跳过重裁，
+#    自愈路径消失——三处必须用同一有效性口径。
 head_sha=$(jq -r '.headRefOid' <<<"$pr_json")
 last_review=$(gh api "repos/$repo/pulls/$pr/reviews" --paginate \
   --jq '.[] | select(.user.login == "claude[bot]")
-            | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "COMMENTED")' \
+            | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED"
+                     or (.state == "COMMENTED" and ((.body // "") | length > 0)))' \
   | jq -s 'last // empty')
 [ -n "$last_review" ] || skip "尚无 Claude 的 review"
 [ "$(jq -r '.state' <<<"$last_review")" = "APPROVED" ] || skip "Claude 最新 review 不是 APPROVED"

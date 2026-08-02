@@ -26,7 +26,13 @@ pr="$PR_NUMBER"
 
 reviews=$(gh api "repos/$repo/pulls/$pr/reviews" --paginate \
   --jq '.[] | select(.user.login == "claude[bot]")' | jq -s '.')
-new_review=$(jq --argjson prev "${PREV_REVIEW_ID:-0}" 'map(select(.id > $prev)) | last // empty' <<<"$reviews")
+# 只认有效裁决：APPROVED，或带正文的 review。GitHub 会为行内评论/线程回复自动生成
+# 空正文的隐式 COMMENTED review，其 id 必然大于 prev——模型挂了行内评论却忘了收尾
+# （#33 那类提前收工），不过滤就会被判成「已提交」，job 绿着退回无声卡死态。
+# 这也让下面的 dismiss 目标更稳：last 取到的一定是真裁决，而不是恰好垫在最后的空 review
+# （那种情况下真正的 APPROVED 会逃过 dismiss）。
+new_review=$(jq --argjson prev "${PREV_REVIEW_ID:-0}" \
+  'map(select(.id > $prev and (.state == "APPROVED" or ((.body // "") | length > 0)))) | last // empty' <<<"$reviews")
 
 if [ -z "$new_review" ]; then
   echo "::error::re-review 未提交任何 review（零产出）。PR 仍停在未裁决状态，需再发一条 @claude 评论重新触发"
