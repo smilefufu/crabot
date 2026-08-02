@@ -141,6 +141,17 @@ jobs:
             --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr review:*),Bash(gh api graphql:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(sed -n:*),Bash(grep:*),mcp__github_inline_comment__create_inline_comment"
             --disallowedTools "Task,Agent"
 
+      # 收尾校验：确认真的产出了新 review（零产出会无声退回卡死态），并检测 claude
+      # 运行期间 head 是否漂移（approve 不带 commit_id，会记在没审过的新 commit 上）
+      - name: Verify re-review
+        if: steps.need.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+          EXPECTED_HEAD: ${{ steps.need.outputs.head_sha }}
+          PREV_REVIEW_ID: ${{ steps.need.outputs.last_review_id }}
+        run: bash .github/scripts/claude-rereview-verify.sh
+
   merge-gate:
     needs: [discuss, re-review]
     if: ${{ success() }}

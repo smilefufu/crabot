@@ -38,19 +38,26 @@ threads_json=$(gh api graphql \
 unresolved=$(jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not)] | length' <<<"$threads_json")
 [ "$unresolved" = "0" ] || no "还有 $unresolved 个未 resolve 的 review 线程"
 
-# 3. 已经是针对当前 head 的 APPROVED 就不必重跑（避免每条评论都触发一次）
+# 3. 必须已有首轮 review。为空说明首轮还在跑、或 review job 失败/被取消——
+#    此时「未解决线程数为 0」的含义是「从来没审过」，不是「问题都清完了」，
+#    而重裁的 prompt 建立在「首轮已做过」的前提上，会产出一个浅层 APPROVED，
+#    把从未经过完整 review 的 PR 直接送进 merge-gate（其 checks 等待又排除了
+#    Claude PR Review workflow，不会等首轮跑完来纠正）。
 last_review=$(gh api "repos/$repo/pulls/$pr/reviews" --paginate \
   --jq '.[] | select(.user.login == "claude[bot]")
             | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "COMMENTED")' \
   | jq -s 'last // empty') || no "无法获取 review 列表"
-if [ -n "$last_review" ] \
-   && [ "$(jq -r '.state' <<<"$last_review")" = "APPROVED" ] \
+[ -n "$last_review" ] || no "claude[bot] 尚无首轮 review（重裁只适用于首轮已完成的 PR）"
+
+# 4. 已经是针对当前 head 的 APPROVED 就不必重跑（避免每条评论都触发一次）
+if [ "$(jq -r '.state' <<<"$last_review")" = "APPROVED" ] \
    && [ "$(jq -r '.commit_id' <<<"$last_review")" = "$head_sha" ]; then
   no "最新 review 已是针对当前 head 的 APPROVED"
 fi
 
-# 已知竞态：若此刻正好有新 push 触发的 review job 在跑，两边可能同时提交 review。
-# 后果可控——双方面对的是同一个 head，且 merge-gate 仍要求最新 review 为 APPROVED@head
-# 且线程全清，不会放行未经审查的代码；因此不额外加锁。
+# head_sha 与 last_review_id 交给收尾校验（claude-rereview-verify.sh）：
+# 前者用于检测 claude 运行期间 head 是否漂移，后者用于判定本次是否真的产出了新 review。
 echo "re-review: 线程已全部 resolve，且尚无针对 head ${head_sha} 的 APPROVED，需要重新裁决"
 echo "needed=true" >> "$GITHUB_OUTPUT"
+echo "head_sha=${head_sha}" >> "$GITHUB_OUTPUT"
+echo "last_review_id=$(jq -r '.id' <<<"$last_review")" >> "$GITHUB_OUTPUT"
