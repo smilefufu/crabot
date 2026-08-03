@@ -20,6 +20,27 @@ function shQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`
 }
 
+/** POSIX shell 双引号内的转义(用于 `"${VAR:-<默认值>}"` 里的默认值部分)。 */
+function dqEscape(s: string): string {
+  return s.replace(/([\\"$`])/g, '\\$1')
+}
+
+/**
+ * hook 运行时的事件文件重定向变量。设了且非空 → 事件写它,否则写 hookCommand 生成时
+ * baked 进去的默认路径。
+ *
+ * 存在的理由:事件文件是 **workspace 级**的(`<ws>/.claude/events-cli.jsonl`),hook 配置
+ * 同样是 workspace 级的(`.claude/settings.json`),而 cc 的 hooks 在无头 print 模式
+ * (`claude -p`,即 fork 侧问的底座)同样执行——侧问收尾会往主线正在用的那份事件文件追加
+ * 一条 stop,主线的 stop 计数被污染:跑到一半被判 idle 推假唤醒,真跑完那一轮反而因为
+ * "状态没变"被整条吞掉。侧问按设计就是在主线还在跑的时候发起的,这不是罕见时序。
+ *
+ * 治本的做法是让侧问那个进程根本不写共享文件:调用方(ClaudeCodeAdapter.fork)给子进程的
+ * env 塞一个私有路径,cc 拉起 hook 子进程时原样继承下去,hook 就写到私有文件里。交互态
+ * (tmux pane)不设这个变量,照旧写共享文件。
+ */
+export const EVENTS_FILE_ENV = 'CRABOT_CLI_EVENTS_FILE'
+
 const POLL_INTERVAL_MS = 2000
 
 export class CliEventChannel {
@@ -33,6 +54,9 @@ export class CliEventChannel {
    * raw 固定为 null——把 stdin 内容原样塞进 JSON 字符串涉及运行时转义(引号、换行、
    * 反斜杠等),在纯 POSIX shell 里做这件事风险远大于收益。后续如果需要 payload,
    * 再升级为读 stdin 并转义写入 raw 字段。
+   *
+   * 追加目标是 `"${CRABOT_CLI_EVENTS_FILE:-<本 channel 的路径>}"`——运行时可被调用方经
+   * env 重定向到私有文件,见 EVENTS_FILE_ENV 注释。
    */
   hookCommand(kind: string): string {
     // kind 在生成时(而非 hook 运行时)就已知,这里直接做一次 JSON 字符串转义,
@@ -40,9 +64,10 @@ export class CliEventChannel {
     // 里出现 % 之类字符被 printf 误当格式指令解析。
     const kindJsonEscaped = JSON.stringify(kind).slice(1, -1)
     const format = '{"ts":"%s","kind":"%s","raw":null}\\n'
+    const target = `"\${${EVENTS_FILE_ENV}:-${dqEscape(this.filePath)}}"`
     return [
       'ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)',
-      `printf '${format}' "$ts" ${shQuote(kindJsonEscaped)} >> ${shQuote(this.filePath)}`,
+      `printf '${format}' "$ts" ${shQuote(kindJsonEscaped)} >> ${target}`,
     ].join('; ')
   }
 

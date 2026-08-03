@@ -93,6 +93,31 @@ import { join } from 'path'
 const HANDOFF_TAIL_MAX_CHARS = 4096
 
 /**
+ * 唤醒事件 `detail.text` 的上限(字符数)。
+ *
+ * 定值依据:
+ * 1. **这是周期性成本,不是一次性成本**。这段文字每次 worker 转 idle/终态都会进一次
+ *    manager 的上下文,并被 episode 日志持久化;handoff 那份 4096 是每次交接才付一回,
+ *    量纲不同,不能照抄。取它的一半。
+ * 2. 中文按 ~1 token/字符估,2000 字符 ≈ 2000 token,与 manager 单轮里几条最近消息同
+ *    量级,不至于把台账/档案挤出窗口。
+ * 3. worker 一轮的收尾发言(结论、进度、提问)绝大多数在几百字符内,2000 已覆盖典型情形。
+ *
+ * 截断保留**头部**并附标记:收尾发言通常开门见山给结论,且标记本身就是给 manager 的指引
+ * ——要全文就用 `read_worker_output` 按 offset 读(那条路本来就在,且不占常驻上下文)。
+ */
+const WAKE_TEXT_MAX_CHARS = 2000
+
+/** 见 WAKE_TEXT_MAX_CHARS。空白/空串一律折成 undefined(不往 detail 里塞空字段)。 */
+function truncateWakeText(text: string | undefined): string | undefined {
+  if (!text) return undefined
+  const trimmed = text.trim()
+  if (!trimmed) return undefined
+  if (trimmed.length <= WAKE_TEXT_MAX_CHARS) return trimmed
+  return trimmed.slice(0, WAKE_TEXT_MAX_CHARS) + `…[已截断,共 ${trimmed.length} 字符,全文用 read_worker_output 读]`
+}
+
+/**
  * continueTerminalWorker 锁内可重入求值循环的上限次数。每一轮代表"主线又换了一次"的
  * 重新判定,防止病态并发抖动(主线连续多次接续/切换)让这次投递在临界区内无限打转。3
  * 轮足以覆盖"补送失败一次 → 转接续一次"这种正常竞态收敛路径,仍在这个上限内打转说明
@@ -217,13 +242,17 @@ export class WorkerHarness {
   /**
    * 见文件头"onStateChange 接线契约"。箭头函数字段:构造时绑定 this,P4 可直接把它作为
    * 三个 adapter 构造 deps 里的 `onStateChange` 传入,不需要 .bind(harness)。
-   * 签名对齐三个 adapter 的 `deps.onStateChange?: (h, state) => void`(同步、无返回值)——
-   * 内部把实际的异步台账更新做成 fire-and-forget,任何失败只 console.error,不抛给 adapter
-   * (adapter 侧本身也已经用 try/catch 包裹了对这个回调的调用,这里双重防御,理由一致:
-   * 观察者的异常不能中断 adapter 自己的状态机推进)。
+   * 签名对齐三个 adapter 的 `deps.onStateChange?: (h, state, lastText?) => void`(同步、
+   * 无返回值)——内部把实际的异步台账更新做成 fire-and-forget,任何失败只 console.error,
+   * 不抛给 adapter(adapter 侧本身也已经用 try/catch 包裹了对这个回调的调用,这里双重防御,
+   * 理由一致:观察者的异常不能中断 adapter 自己的状态机推进)。
+   *
+   * `lastText`:轮次边界上 worker 最后说的那段话,由 adapter 按需提供(只有 builtin 提供,
+   * 见其构造 deps 注释)。harness 截断后放进 `state_changed` 事件的 detail,让 manager
+   * 醒来就看得到 worker 说了什么,不必先往返一次 `read_worker_output`。
    */
-  readonly handleStateChange = (h: IncarnationHandle, state: WorkerContractState): void => {
-    this.processStateChange(h, state).catch((err) => {
+  readonly handleStateChange = (h: IncarnationHandle, state: WorkerContractState, lastText?: string): void => {
+    this.processStateChange(h, state, lastText).catch((err) => {
       console.error(`[WorkerHarness] handleStateChange failed for ${h.worker_id}#${h.seq}:`, err)
     })
   }
@@ -1249,7 +1278,9 @@ export class WorkerHarness {
 
   // ---- 内部 ----
 
-  private async processStateChange(h: IncarnationHandle, state: WorkerContractState): Promise<void> {
+  private async processStateChange(h: IncarnationHandle, state: WorkerContractState, lastText?: string): Promise<void> {
+    // 唤醒事件的正文尾巴:截断在这一处收口,三个 adapter 共用同一上限(见 WAKE_TEXT_MAX_CHARS)。
+    const wakeText = truncateWakeText(lastText)
     await this.withLock(h.worker_id, async () => {
       const found = await this.deps.ledger.findWorker(h.worker_id)
       if (!found) return // 未知 worker,理论不该发生;防御性丢弃,不抛给 adapter 的回调
@@ -1288,7 +1319,7 @@ export class WorkerHarness {
           )
           return { ...prev, incarnations, updated_at: now }
         })
-        await this.appendEvent(h.worker_id, h.seq, 'state_changed', { to: state })
+        await this.appendEvent(h.worker_id, h.seq, 'state_changed', { to: state, ...(wakeText ? { text: wakeText } : {}) })
         return
       }
 
@@ -1331,7 +1362,13 @@ export class WorkerHarness {
       // 主线分支是 task 状态机的主要推进点——事件必须自带落账后的状态,否则订阅方现读台账
       // 时若已经有下一次落账(如 §5.3 透明接续把终态拉回 running),这次迁移(含 completed
       // 这类终态)会被整条吞掉。见 worker-events.ts `HarnessEvent.task_status`。
-      await this.appendEvent(h.worker_id, h.seq, 'state_changed', { to: state }, committed?.task.status)
+      await this.appendEvent(
+        h.worker_id,
+        h.seq,
+        'state_changed',
+        { to: state, ...(wakeText ? { text: wakeText } : {}) },
+        committed?.task.status
+      )
     })
   }
 

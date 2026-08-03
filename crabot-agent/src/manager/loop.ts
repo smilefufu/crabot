@@ -636,9 +636,16 @@ function renderChannelMessages(
   return `${label}\n${lines.join('\n')}`
 }
 
+/**
+ * `detail.text`(worker 在这个轮次边界上最后说的那段话,harness 已按 WAKE_TEXT_MAX_CHARS
+ * 截断)单独成段渲染,不塞进 JSON——JSON.stringify 会把换行转义成 `\n`,几百字的收尾发言
+ * 挤成一行转义串,manager 读起来费劲。其余 detail 字段仍走 JSON,形状不变。
+ */
 function renderWorkerEvent(e: HarnessEvent): string {
-  const detail = e.detail ? ` detail=${JSON.stringify(e.detail)}` : ''
-  return `[worker 事件] worker_id=${e.worker_id} seq=${e.seq} kind=${e.kind}${detail}`
+  const { text, ...rest } = (e.detail ?? {}) as { text?: unknown } & Record<string, unknown>
+  const detail = Object.keys(rest).length > 0 ? ` detail=${JSON.stringify(rest)}` : ''
+  const head = `[worker 事件] worker_id=${e.worker_id} seq=${e.seq} kind=${e.kind}${detail}`
+  return typeof text === 'string' && text.length > 0 ? `${head}\nworker 最后说:\n${text}` : head
 }
 
 /**

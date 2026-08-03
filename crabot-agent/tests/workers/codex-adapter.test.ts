@@ -1327,3 +1327,188 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter.readTrace(已发现 rollout 
     await adapter.kill(h)
   }, 15000)
 })
+
+/** 与 cc adapter 同款的接线回归,见 claude-code-adapter.test.ts 同名 describe 的注释。
+ * 关键约束:全程不调用 adapter.state()/sendInput(),否则退回 pull 路径就测不出接线。 */
+describe('CodexWorkerAdapter — CLI notify 事件文件监视(被动 push)', () => {
+  let dataDir: string
+  let workspaceRoot: string
+
+  beforeEach(async () => {
+    dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-adapter-watch-data-'))
+    workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-adapter-watch-ws-'))
+    await fs.mkdir(path.join(workspaceRoot, '.codex'), { recursive: true })
+  })
+
+  afterEach(async () => {
+    await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+  })
+
+  async function appendStopEvent(): Promise<void> {
+    await fs.appendFile(
+      eventsFilePath({ root: workspaceRoot }),
+      JSON.stringify({ ts: new Date().toISOString(), kind: 'stop', raw: null }) + '\n',
+      'utf-8',
+    )
+  }
+
+  async function waitFor(predicate: () => boolean, timeoutMs = 4000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (predicate()) return
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error('waitFor timeout')
+  }
+
+  it('spawn 之后 notify 往事件文件追加 stop → 无人调用 state()/sendInput() 也能推出 idle 状态回调', async () => {
+    const seen: Array<{ seq: number; state: WorkerContractState }> = []
+    const tmux = new NoopTmux()
+    const adapter = new CodexWorkerAdapter({
+      dataDir,
+      tmux,
+      codexBin: 'unused',
+      sessionDiscoveryTimeoutMs: 50,
+      onStateChange: (h, state) => {
+        seen.push({ seq: h.seq, state })
+      },
+    })
+    const workerId = `codextest-${randomUUID().slice(0, 8)}`
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '干活', workspace: { root: workspaceRoot } })
+
+    await appendStopEvent()
+    await waitFor(() => seen.some((e) => e.state === 'idle'))
+
+    expect(seen.filter((e) => e.state === 'idle')).toHaveLength(1)
+    expect(seen[seen.length - 1]).toEqual({ seq: h.seq, state: 'idle' })
+
+    await adapter.kill(h)
+  })
+
+  it('化身落终态后 watcher 停止:kill 之后再追加 stop 事件不再产生任何状态回调', async () => {
+    const seen: WorkerContractState[] = []
+    const tmux = new NoopTmux()
+    const adapter = new CodexWorkerAdapter({
+      dataDir,
+      tmux,
+      codexBin: 'unused',
+      sessionDiscoveryTimeoutMs: 50,
+      onStateChange: (_h, state) => {
+        seen.push(state)
+      },
+    })
+    const workerId = `codextest-${randomUUID().slice(0, 8)}`
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '干活', workspace: { root: workspaceRoot } })
+
+    await adapter.kill(h)
+    expect(seen).toEqual(['exited'])
+
+    await appendStopEvent()
+    await new Promise((r) => setTimeout(r, 500))
+    expect(seen).toEqual(['exited'])
+  })
+
+  it('spawn 时 workspace 里已有历史 stop 事件不会被误当作本化身刚完成', async () => {
+    await appendStopEvent()
+
+    const seen: WorkerContractState[] = []
+    const tmux = new NoopTmux()
+    const adapter = new CodexWorkerAdapter({
+      dataDir,
+      tmux,
+      codexBin: 'unused',
+      sessionDiscoveryTimeoutMs: 50,
+      onStateChange: (_h, state) => {
+        seen.push(state)
+      },
+    })
+    const workerId = `codextest-${randomUUID().slice(0, 8)}`
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '干活', workspace: { root: workspaceRoot } })
+
+    await new Promise((r) => setTimeout(r, 500))
+    expect(seen).toEqual([])
+
+    await appendStopEvent()
+    await waitFor(() => seen.includes('idle'))
+    expect(seen).toEqual(['idle'])
+
+    await adapter.kill(h)
+  })
+})
+
+/** 与 cc adapter 同款的并发重建回归,见 claude-code-adapter.test.ts 同名 describe 的注释。 */
+describe('CodexWorkerAdapter.ensureRuntime — 并发重建不泄漏 watcher', () => {
+  let dataDir: string
+  let workspaceRoot: string
+
+  beforeEach(async () => {
+    dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-adapter-concurrent-data-'))
+    workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-adapter-concurrent-ws-'))
+    await fs.mkdir(path.join(workspaceRoot, '.codex'), { recursive: true })
+  })
+
+  afterEach(async () => {
+    await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+  })
+
+  it('并发首次触达同一化身:每个 stop 事件只唤醒一次,化身退出后也没有残留 watcher 继续推', async () => {
+    const workerId = `codextest-${randomUUID().slice(0, 8)}`
+    const sessionId = randomUUID()
+    await fs.mkdir(path.join(dataDir, workerId), { recursive: true })
+    await fs.writeFile(
+      path.join(dataDir, workerId, 'meta-1.json'),
+      JSON.stringify({ seq: 1, state: 'running', session_id: sessionId, workspace_root: workspaceRoot, session_discovery: 'placeholder' }),
+      'utf-8',
+    )
+
+    class ToggleTmux extends NoopTmux {
+      alive = true
+      async isAlive(_name: string): Promise<boolean> {
+        return this.alive
+      }
+    }
+    const tmux = new ToggleTmux()
+    const seen: WorkerContractState[] = []
+    const adapter = new CodexWorkerAdapter({
+      dataDir,
+      tmux,
+      codexBin: 'unused',
+      sessionDiscoveryTimeoutMs: 50,
+      onStateChange: (_h, state) => {
+        seen.push(state)
+      },
+    })
+    const h: IncarnationHandle = { worker_id: workerId, seq: 1, impl: 'codex', session_ref: sessionId }
+
+    const [a, b] = await Promise.all([adapter.state(h), adapter.state(h)])
+    expect([a, b]).toEqual(['running', 'running'])
+
+    const appendStop = () =>
+      fs.appendFile(
+        eventsFilePath({ root: workspaceRoot }),
+        JSON.stringify({ ts: new Date().toISOString(), kind: 'stop', raw: null }) + '\n',
+        'utf-8',
+      )
+    const waitFor = async (predicate: () => boolean, timeoutMs = 4000): Promise<void> => {
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        if (predicate()) return
+        await new Promise((r) => setTimeout(r, 50))
+      }
+      throw new Error('waitFor timeout')
+    }
+
+    await appendStop()
+    await waitFor(() => seen.length > 0)
+    await new Promise((r) => setTimeout(r, 500))
+    expect(seen).toEqual(['idle'])
+
+    tmux.alive = false
+    await appendStop()
+    await waitFor(() => seen.includes('exited'))
+    await new Promise((r) => setTimeout(r, 500))
+    expect(seen).toEqual(['idle', 'exited'])
+  }, 15000)
+})

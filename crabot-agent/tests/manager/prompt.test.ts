@@ -83,6 +83,24 @@ describe('MANAGER_IDENTITY 静态段内容', () => {
     expect(MANAGER_IDENTITY).toContain('不代表事情做完了')
   })
 
+  it('含管家纪律：先复用已有 worker（send_to_worker 对终态自动复活，spawn_worker 留给新任务）', () => {
+    // 机制侧 harness.sendToWorker 早已透明分流（补送 / 复活），但 LLM 只能从 prompt 得知；
+    // 缺这一段，manager 面对延续性请求会一律 spawn_worker 开新的、丢掉旧上下文。
+    expect(MANAGER_IDENTITY).toContain('先复用已有 worker')
+    expect(MANAGER_IDENTITY).toContain('list_workers')
+    expect(MANAGER_IDENTITY).toContain('自动复活')
+    expect(MANAGER_IDENTITY).toContain('不用管它当前处于什么状态')
+    expect(MANAGER_IDENTITY).toContain('另起炉灶的新任务')
+  })
+
+  it('慢工具纪律不再承诺"进展会唤醒你、不需要主动轮询"，而是如实说明唤醒粒度是轮次边界', () => {
+    // 旧措辞是一句假承诺：turn 内的输出不产生任何事件，LLM 信了就会一直等一个不会来的唤醒。
+    expect(MANAGER_IDENTITY).not.toContain('不需要你主动轮询')
+    expect(MANAGER_IDENTITY).toContain('每跑完一轮')
+    expect(MANAGER_IDENTITY).toContain('最后说的那段话')
+    expect(MANAGER_IDENTITY).toContain('read_worker_output')
+  })
+
   it('含管家纪律：不滥用跨 session 投递', () => {
     expect(MANAGER_IDENTITY).toContain('send_message')
     expect(MANAGER_IDENTITY).toContain('只在人类明确要求时才这么做')

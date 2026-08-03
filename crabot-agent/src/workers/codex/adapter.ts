@@ -263,6 +263,9 @@ interface Runtime {
    * 本轮 idle。语义与 cc 的 stopBaseline 完全对应。 */
   stopBaseline: number
   killed: boolean
+  /** CliEventChannel.watch() 的停止函数(协议 §6.2.3 的文件监视)。建立 runtime 时装上、
+   * 落终态时摘掉,语义与 cc adapter 的同名字段完全一致。 */
+  stopEventWatch?: () => void
   /** 是否已经被 resume 过一次。resume() 锁内检测"对同一 prev 的重复 resume"(先到先得,
    * 后来者报错),对齐 builtin/cc 同款语义(P2 review #2)。 */
   resumed?: boolean
@@ -619,6 +622,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
     const handle: IncarnationHandle = { worker_id: spec.worker_id, seq, impl: 'codex', session_ref: sessionId }
 
+    const eventChannel = new CliEventChannel(eventsFilePath(spec.workspace))
     const runtime: Runtime = {
       worker_id: spec.worker_id,
       seq,
@@ -629,10 +633,10 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       sessionId,
       rolloutPath: discovered?.path,
       outputLog: new OutputLog(outputFile),
-      eventChannel: new CliEventChannel(eventsFilePath(spec.workspace)),
+      eventChannel,
       sessionDiscoveryStatus,
       state: 'running',
-      stopBaseline: 0,
+      stopBaseline: await this.initialStopBaseline(eventChannel),
       killed: false,
     }
 
@@ -644,6 +648,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       workspace_root: spec.workspace.root,
     })
     this.runtimes.set(instanceKey(handle), runtime)
+    this.startEventWatch(runtime, handle)
 
     // 首条任务输入注入失败:不能放任 running——按 kill 路径清理 tmux 会话后落
     // exited(crashed)(不是 killed,不是用户发起的 kill),spawn 仍然 reject。
@@ -714,6 +719,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       // PATH 前置同 spawn(nvm 部署陷阱)。
       await this.tmux.newSession({ name: sessionName, cwd: prevRuntime.workspaceRoot, command, outputFile, env: await this.buildEnv({ CODEX_HOME: prevRuntime.codexHome }) })
 
+      const eventChannel = new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot }))
       runtime = {
         worker_id: prev.worker_id,
         seq,
@@ -726,10 +732,12 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         // 化身已发现的路径;上一化身当时若发现失败(占位 uuid),这里同样拿不到,保持未知。
         rolloutPath: prevRuntime.rolloutPath,
         outputLog: new OutputLog(outputFile),
-        eventChannel: new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot })),
+        eventChannel,
         sessionDiscoveryStatus: prevRuntime.sessionDiscoveryStatus,
         state: 'running',
-        stopBaseline: 0,
+        // 复用上一化身的 workspace ⇒ 事件文件里已有它留下的通知,基线必须现读现算(见
+        // initialStopBaseline 注释)。
+        stopBaseline: await this.initialStopBaseline(eventChannel),
         killed: false,
       }
 
@@ -741,6 +749,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         workspace_root: prevRuntime.workspaceRoot,
       })
       this.runtimes.set(instanceKey(handle), runtime)
+      this.startEventWatch(runtime, handle)
       prevRuntime.resumed = true
     })
 
@@ -943,53 +952,66 @@ export class CodexWorkerAdapter implements WorkerAdapter {
    * findRolloutFileBySessionId 按已知 session_id 重新在 codexHome/sessions 下精确查找,
    * 找不到(文件被移走/清理)则退化为 undefined,readTrace 优雅降级为空数组(与 spawn 时
    * 发现失败的已知限制同一降级路径)。
+   *
+   * 重建整体在 per-worker 互斥锁内完成(锁内再查一次 map),理由与 cc adapter 完全一致:
+   * 不加锁时并发首次触达会各自重建一个 Runtime、各装一个 watcher,败者的 watcher 永不被
+   * 摘除,每个轮次边界重复唤醒 manager 一次。详见 cc adapter 的 ensureRuntime 注释。
    */
   private async ensureRuntime(ref: { worker_id: string; seq: number; session_ref?: string }): Promise<Runtime | undefined> {
     const key = instanceKey(ref)
     const existing = this.runtimes.get(key)
     if (existing) return existing
 
-    const dir = join(this.deps.dataDir, ref.worker_id)
-    const meta = await this.readMetaFile(dir, ref.seq)
-    if (!meta) return undefined
+    return this.getMutex(ref.worker_id).run(async () => {
+      // 锁内重查:排在前面的另一次 ensureRuntime 可能已经重建好了(见方法注释)。
+      const resident = this.runtimes.get(key)
+      if (resident) return resident
 
-    const sessionName = `crabot-w-${ref.worker_id}-${ref.seq}`
-    const alive = await this.tmux.isAlive(sessionName)
-    const workspaceRoot = meta.workspace_root ?? ''
-    const sessionId = meta.session_id ?? ref.session_ref ?? ''
-    const codexHome = workspaceRoot ? join(workspaceRoot, '.codex') : ''
-    const sessionDiscoveryStatus: 'discovered' | 'placeholder' = meta.session_discovery ?? 'placeholder'
-    const rolloutPath =
-      sessionDiscoveryStatus === 'discovered' && codexHome ? await findRolloutFileBySessionId(join(codexHome, 'sessions'), sessionId) : undefined
-    const outputFile = join(dir, `output-${ref.seq}.log`)
-    const eventsPath = workspaceRoot ? eventsFilePath({ root: workspaceRoot }) : join(dir, `.no-workspace-events-${ref.seq}.jsonl`)
-    const eventChannel = new CliEventChannel(eventsPath)
+      const dir = join(this.deps.dataDir, ref.worker_id)
+      const meta = await this.readMetaFile(dir, ref.seq)
+      if (!meta) return undefined
 
-    let stopBaseline = 0
-    if (workspaceRoot) {
-      const events = await eventChannel.readAll()
-      stopBaseline = events.filter((e) => e.kind === 'stop').length
-    }
+      const sessionName = `crabot-w-${ref.worker_id}-${ref.seq}`
+      const alive = await this.tmux.isAlive(sessionName)
+      const workspaceRoot = meta.workspace_root ?? ''
+      const sessionId = meta.session_id ?? ref.session_ref ?? ''
+      const codexHome = workspaceRoot ? join(workspaceRoot, '.codex') : ''
+      const sessionDiscoveryStatus: 'discovered' | 'placeholder' = meta.session_discovery ?? 'placeholder'
+      const rolloutPath =
+        sessionDiscoveryStatus === 'discovered' && codexHome ? await findRolloutFileBySessionId(join(codexHome, 'sessions'), sessionId) : undefined
+      const outputFile = join(dir, `output-${ref.seq}.log`)
+      const eventsPath = workspaceRoot ? eventsFilePath({ root: workspaceRoot }) : join(dir, `.no-workspace-events-${ref.seq}.jsonl`)
+      const eventChannel = new CliEventChannel(eventsPath)
 
-    const runtime: Runtime = {
-      worker_id: ref.worker_id,
-      seq: ref.seq,
-      dir,
-      workspaceRoot,
-      codexHome,
-      sessionName,
-      sessionId,
-      rolloutPath,
-      outputLog: new OutputLog(outputFile),
-      eventChannel,
-      sessionDiscoveryStatus,
-      state: alive ? 'running' : 'exited',
-      ended_reason: alive ? undefined : meta.ended_reason,
-      stopBaseline,
-      killed: false,
-    }
-    this.runtimes.set(key, runtime)
-    return runtime
+      let stopBaseline = 0
+      if (workspaceRoot) {
+        const events = await eventChannel.readAll()
+        stopBaseline = events.filter((e) => e.kind === 'stop').length
+      }
+
+      const runtime: Runtime = {
+        worker_id: ref.worker_id,
+        seq: ref.seq,
+        dir,
+        workspaceRoot,
+        codexHome,
+        sessionName,
+        sessionId,
+        rolloutPath,
+        outputLog: new OutputLog(outputFile),
+        eventChannel,
+        sessionDiscoveryStatus,
+        state: alive ? 'running' : 'exited',
+        ended_reason: alive ? undefined : meta.ended_reason,
+        stopBaseline,
+        killed: false,
+      }
+      this.runtimes.set(key, runtime)
+      // 重启后重连接管(§13):会话还活着的化身在这里重新装上文件监视。已终态的化身
+      // startEventWatch 自己会短路掉。
+      this.startEventWatch(runtime, { worker_id: ref.worker_id, seq: ref.seq, impl: 'codex', session_ref: sessionId })
+      return runtime
+    })
   }
 
   /** meta-<seq>.json 读取,文件不存在/内容损坏一律返回 undefined(供 ensureRuntime 判定
@@ -1028,6 +1050,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     return max + 1
   }
 
+  /** `onStateChange` 的第三参 `lastText` 在 codex 这边同样刻意不传,理由与 cc 完全一致
+   * (输出是 tmux 落的 TUI 原始字节流,无 ANSI 剥离层)——见
+   * `workers/claude-code/adapter.ts` 的 transitionState 注释。 */
   private async transitionState(runtime: Runtime, h: IncarnationHandle, state: WorkerContractState): Promise<void> {
     await writeMetaAtomic(runtime.dir, runtime.seq, {
       seq: runtime.seq,
@@ -1055,11 +1080,44 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     })
     runtime.state = 'exited'
     runtime.ended_reason = ended_reason
+    // 终态唯一入口:文件监视在这里摘掉,同 cc adapter。
+    this.stopEventWatch(runtime)
     try {
       this.deps.onStateChange?.(h, 'exited')
     } catch (err) {
       console.error(`[CodexWorkerAdapter] onStateChange callback error for ${h.worker_id}#${h.seq}:`, err)
     }
+  }
+
+  /**
+   * 协议 §6.2.3「hook 命令为向事件文件追加一行 JSON,**harness 以文件监视接收**」的接线。
+   * codex 侧写事件文件的是 config.toml 的 notify 段;在此之前它老实在写,但生产侧没人读,
+   * codex worker 连"这一轮干完了"的 push 都没有。设计与 cc adapter 的同名方法逐条一致
+   * (起于建立 runtime 处、停于 transitionExited、回调只触发 syncState 不解析内容),
+   * 详见 `workers/claude-code/adapter.ts` 的 startEventWatch 注释。
+   */
+  private startEventWatch(runtime: Runtime, h: IncarnationHandle): void {
+    if (!runtime.sessionName) return
+    if (runtime.state === 'exited') return
+    if (runtime.stopEventWatch) return // 幂等:同一 runtime 只装一个
+    runtime.stopEventWatch = runtime.eventChannel.watch(() => {
+      this.syncState(runtime, h).catch((err) => {
+        console.error(`[CodexWorkerAdapter] cli event driven syncState failed for ${h.worker_id}#${h.seq}:`, err)
+      })
+    })
+  }
+
+  private stopEventWatch(runtime: Runtime): void {
+    if (!runtime.stopEventWatch) return
+    runtime.stopEventWatch()
+    runtime.stopEventWatch = undefined
+  }
+
+  /** 新建 runtime 时的 stop 基线,见 `workers/claude-code/adapter.ts` 同名方法的注释:
+   * 事件文件是 workspace 级的,resume 复用同一 workspace,基线不能一律取 0。 */
+  private async initialStopBaseline(channel: CliEventChannel): Promise<number> {
+    const events = await channel.readAll()
+    return events.filter((e) => e.kind === 'stop').length
   }
 }
 

@@ -228,7 +228,15 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
   constructor(
     private readonly deps: {
       readonly dataDir: string
-      readonly onStateChange?: (h: IncarnationHandle, state: WorkerContractState) => void
+      /**
+       * `lastText`（可选第三参）：本次状态转换所在**轮次边界**上，worker 最后说的那段
+       * assistant 文字。harness 会把它（截断后）塞进唤醒事件的 detail，manager 因此醒来
+       * 就知道 worker 说了什么，不必先往返一次 `read_worker_output`。
+       * 只有 builtin 传：它的输出天然只有 assistant text（`partitionResponseContent` 只取
+       * `type==='text'`，工具调用/结果一个字节都不进），符合"只要 text 不要 tool use"。
+       * cc/codex 刻意不传，理由见各自 adapter 的 transitionState 注释。
+       */
+      readonly onStateChange?: (h: IncarnationHandle, state: WorkerContractState, lastText?: string) => void
       /**
        * 运行配置工厂：**每次起化身现取一次**（spec 决策 2）。spawn 的那次由调用方
        * （harness.spawnWorker / handoffIncarnation）调同一个工厂后放进 `spec.builtin`；
@@ -643,6 +651,13 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // 所以"没带 failedReason" ⇒ messages 已被重写。宁可多判（压缩恰好是空操作时也走整条
     // 重写路径，代价只是多复制一份节点），也绝不能漏判——漏判就是静默数据损坏。
     let compactedThisBurst = false
+    // 本次 burst 里 worker 最后说的那段话（末一个非空 assistantText）。收尾时随状态转换一起
+    // 交给 harness，进唤醒事件的 detail——manager 醒来即可知道 worker 说了什么。
+    // 取值与写进 output.log 的是同一个 `event.assistantText`（下面 onTurn 一处产出、两处消费），
+    // 所以天然只有 assistant text、不含任何工具调用/结果，不需要额外过滤。
+    // 用 `result.finalText` 不行：finish_task 这类早退工具收场时它可能为空串，而那恰恰是
+    // manager 最需要看到的一轮。
+    let lastAssistantText = ''
     const result: EngineResult = await runEngine({
       prompt: '',
       adapter: builtin.adapter,
@@ -664,6 +679,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         abortSignal: abortController.signal,
         onTurn: (event) => {
           if (event.assistantText) {
+            lastAssistantText = event.assistantText
             pendingWrites.push(
               instance.outputLog.append(event.assistantText + '\n').catch((err) => {
                 writeErrors.push(err)
@@ -689,14 +705,14 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       await this.writeBack(instance, tip, result, initialMessages.length, compactedThisBurst)
 
       if (result.outcome === 'failed' || result.outcome === 'aborted') {
-        await this.transitionExited(instance, handle, result.outcome === 'aborted' ? 'killed' : 'crashed')
+        await this.transitionExited(instance, handle, result.outcome === 'aborted' ? 'killed' : 'crashed', undefined, lastAssistantText)
         return false
       }
 
       if (result.exitToolCall?.name === 'finish_task') {
         const rawOutcome = result.exitToolCall.input.outcome
         const outcome: 'completed' | 'failed' = rawOutcome === 'failed' ? 'failed' : 'completed'
-        await this.transitionExited(instance, handle, outcome, outcome)
+        await this.transitionExited(instance, handle, outcome, outcome, lastAssistantText)
         return false
       }
 
@@ -705,7 +721,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       // 可能是打晚了——engine 已经决定 end_turn，abort 信号没赶上（P1 全分支终审 Important
       // 收尾段检查点）。无论如何都不能继续/续 burst，直接落 exited(killed)。
       if (instance.killRequested) {
-        await this.transitionExited(instance, handle, 'killed')
+        await this.transitionExited(instance, handle, 'killed', undefined, lastAssistantText)
         return false
       }
 
@@ -714,7 +730,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       // 每轮再烧一个满窗口调用；排队的消息按既有语义进 dead-letter（transitionExited 负责）。
       if (isSilentContextOverflow(result)) {
         await instance.outputLog.append(CONTEXT_OVERFLOW_NOTICE)
-        await this.transitionExited(instance, handle, 'failed', 'failed')
+        await this.transitionExited(instance, handle, 'failed', 'failed', lastAssistantText)
         return false
       }
 
@@ -730,7 +746,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         return true
       }
 
-      await this.transitionState(instance, handle, 'idle')
+      await this.transitionState(instance, handle, 'idle', lastAssistantText)
       return false
     })
 
@@ -1101,7 +1117,12 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 
   // 先落盘、再切内存态：state() 优先读内存，若顺序反过来，外部在 writeMeta 的
   // await 期间读 state() 会看到"内存已切但磁盘还是旧值"的窗口。
-  private async transitionState(instance: WorkerInstance, handle: IncarnationHandle, state: WorkerContractState): Promise<void> {
+  private async transitionState(
+    instance: WorkerInstance,
+    handle: IncarnationHandle,
+    state: WorkerContractState,
+    lastText?: string,
+  ): Promise<void> {
     await this.writeMeta(instance, { state })
     instance.state = state
     // 观察者（onStateChange）的异常永远不能中断状态机的推进。任何回调错误都被捕获
@@ -1111,7 +1132,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // 刷新到"最近一次完成的状态转换点"，否则活跃化身上的 fork/resume 会从旧节点分叉、
     // 丢中间上下文（cc/codex 的 session id 整个化身稳定，不受这个问题影响）。
     try {
-      this.deps.onStateChange?.({ ...handle, session_ref: instance.tip }, state)
+      this.deps.onStateChange?.({ ...handle, session_ref: instance.tip }, state, lastText)
     } catch (err) {
       console.error(`[BuiltinWorkerAdapter] onStateChange callback error for ${handle.worker_id}#${handle.seq}:`, err)
     }
@@ -1122,6 +1143,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     handle: IncarnationHandle,
     ended_reason: IncarnationEndReason,
     outcome?: 'completed' | 'failed',
+    lastText?: string,
   ): Promise<void> {
     if (instance.pendingInputs.length > 0) {
       const deadLetterMsg = `[dead-letter] incarnation ${instance.worker_id}#${instance.seq} exited with ${instance.pendingInputs.length} unsent message(s): ${instance.pendingInputs.join(' | ')}\n`
@@ -1135,7 +1157,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // 并仅作 console.error 记录，防止阻塞状态转移或导致后续 burst/sendInput 卡死。
     // session_ref 现读现取 instance.tip，同 transitionState 的注释。
     try {
-      this.deps.onStateChange?.({ ...handle, session_ref: instance.tip }, 'exited')
+      this.deps.onStateChange?.({ ...handle, session_ref: instance.tip }, 'exited', lastText)
     } catch (err) {
       console.error(`[BuiltinWorkerAdapter] onStateChange callback error for ${handle.worker_id}#${handle.seq}:`, err)
     }

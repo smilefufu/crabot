@@ -1353,3 +1353,324 @@ describe('ClaudeCodeAdapter.readTrace', () => {
     await expect(adapter.readTrace({ worker_id: 'nope', seq: 1, impl: 'claude-code' })).rejects.toThrow()
   })
 })
+
+/**
+ * 协议 §6.2.3「harness 以文件监视接收」的接线回归:hook 老实往 events-cli.jsonl 写,
+ * 但在接上 CliEventChannel.watch() 之前没人读——cc worker 连"这一轮干完了"的 push 都
+ * 没有(syncState 是纯 pull,生产侧无任何定时器轮询),派得出去收不回来。
+ *
+ * 这些用例的关键约束:**全程不调用 adapter.state()/sendInput()** —— 一旦调了就退回
+ * pull 路径,测不出接线是否存在。
+ */
+describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () => {
+  let dataDir: string
+  let workspaceRoot: string
+  let claudeProjectsDir: string
+
+  beforeEach(async () => {
+    dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-adapter-watch-data-'))
+    workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-adapter-watch-ws-'))
+    claudeProjectsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-adapter-watch-proj-'))
+    await fs.mkdir(path.join(workspaceRoot, '.claude'), { recursive: true })
+  })
+
+  afterEach(async () => {
+    await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(claudeProjectsDir, { recursive: true, force: true }).catch(() => {})
+  })
+
+  async function appendStopEvent(): Promise<void> {
+    await fs.appendFile(
+      eventsFilePath({ root: workspaceRoot }),
+      JSON.stringify({ ts: new Date().toISOString(), kind: 'stop', raw: null }) + '\n',
+      'utf-8',
+    )
+  }
+
+  async function waitFor(predicate: () => boolean, timeoutMs = 4000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (predicate()) return
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error('waitFor timeout')
+  }
+
+  it('spawn 之后 hook 往事件文件追加 stop → 无人调用 state()/sendInput() 也能推出 idle 状态回调', async () => {
+    const seen: Array<{ seq: number; state: WorkerContractState }> = []
+    const tmux = new NoopTmux()
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      tmux,
+      claudeBin: 'unused',
+      claudeProjectsDir,
+      onStateChange: (h, state) => {
+        seen.push({ seq: h.seq, state })
+      },
+    })
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '干活', workspace: { root: workspaceRoot } })
+
+    await appendStopEvent()
+    await waitFor(() => seen.some((e) => e.state === 'idle'))
+
+    expect(seen.filter((e) => e.state === 'idle')).toHaveLength(1)
+    expect(seen[seen.length - 1]).toEqual({ seq: h.seq, state: 'idle' })
+
+    await adapter.kill(h)
+  })
+
+  it('化身落终态后 watcher 停止:kill 之后再追加 stop 事件不再产生任何状态回调', async () => {
+    const seen: WorkerContractState[] = []
+    const tmux = new NoopTmux()
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      tmux,
+      claudeBin: 'unused',
+      claudeProjectsDir,
+      onStateChange: (_h, state) => {
+        seen.push(state)
+      },
+    })
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '干活', workspace: { root: workspaceRoot } })
+
+    await adapter.kill(h)
+    expect(seen).toEqual(['exited'])
+
+    await appendStopEvent()
+    await new Promise((r) => setTimeout(r, 500))
+    expect(seen).toEqual(['exited'])
+  })
+
+  it('spawn 时 workspace 里已有历史 stop 事件(同 workspace 的上一化身留下的)不会被误当作本化身刚完成', async () => {
+    // stopBaseline 必须以"建立 runtime 那一刻文件里已有的 stop 数"起算——否则 watcher 的
+    // 首次 pump 读到历史行就会立刻推一个假的 idle 出去(resume 复用同一 workspace 时必然发生)。
+    await appendStopEvent()
+    await appendStopEvent()
+
+    const seen: WorkerContractState[] = []
+    const tmux = new NoopTmux()
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      tmux,
+      claudeBin: 'unused',
+      claudeProjectsDir,
+      onStateChange: (_h, state) => {
+        seen.push(state)
+      },
+    })
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '干活', workspace: { root: workspaceRoot } })
+
+    await new Promise((r) => setTimeout(r, 500))
+    expect(seen).toEqual([])
+
+    // 本化身自己产生的那一条才算数。
+    await appendStopEvent()
+    await waitFor(() => seen.includes('idle'))
+    expect(seen).toEqual(['idle'])
+
+    await adapter.kill(h)
+  })
+})
+
+/**
+ * 侧问(fork)收尾不得污染主线的 stop 计数。
+ *
+ * fork 的无头 `claude -p` 以 `cwd: workspaceRoot` 运行,而 provision 把 Stop hook 写在
+ * **workspace 级**的 `.claude/settings.json` 里——cc 的 hooks 在 print 模式同样执行,
+ * 所以侧问收尾也会触发同一条 Stop hook。事件文件又是 workspace 级共享的,于是这条
+ * "侧问干完了"会被主线 runtime 的 watcher 当成"主线这一轮干完了"。
+ *
+ * 侧问设计上就是在主线还在跑的时候发起的(queryWorker 把 fork 放在锁外、不阻塞主线),
+ * 两个症状因此必然成对出现:
+ *   ① 主线跑到一半被判成 idle,推一条假的"这一轮干完了"去唤醒 manager;
+ *   ② 主线随后真正跑完这一轮时 computed === runtime.state === 'idle',不再产生迁移,
+ *      真正的轮次边界唤醒被整条吞掉。
+ */
+describe('ClaudeCodeAdapter.fork — 侧问收尾不污染主线 stop 计数', () => {
+  let dataDir: string
+  let workspaceRoot: string
+  let claudeProjectsDir: string
+
+  beforeEach(async () => {
+    dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-adapter-forkstop-data-'))
+    workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-adapter-forkstop-ws-'))
+    claudeProjectsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-adapter-forkstop-proj-'))
+  })
+
+  afterEach(async () => {
+    await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(claudeProjectsDir, { recursive: true, force: true }).catch(() => {})
+  })
+
+  /** 复刻"cc 在 print 模式同样执行 workspace 级 Stop hook"的假二进制。 */
+  function forkClaudeBinRunningStopHook(): string {
+    return `env FAKE_FORK_RUN_STOP_HOOK=1 FAKE_FORK_STDOUT=${shQuote('侧问回复')} node ${shQuote(FAKE_CLAUDE_FORK)}`
+  }
+
+  async function stopCountIn(file: string): Promise<number> {
+    const events = await new CliEventChannel(file).readAll()
+    return events.filter((e) => e.kind === 'stop').length
+  }
+
+  async function mainlineStopHookFires(): Promise<void> {
+    await fs.appendFile(
+      eventsFilePath({ root: workspaceRoot }),
+      JSON.stringify({ ts: new Date().toISOString(), kind: 'stop', raw: null }) + '\n',
+      'utf-8',
+    )
+  }
+
+  async function waitFor(predicate: () => boolean, timeoutMs = 4000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (predicate()) return
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error('waitFor timeout')
+  }
+
+  it('侧问收尾的 stop 事件落进 fork 化身自己的事件文件,不进 workspace 共享事件文件', async () => {
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      tmux: new NoopTmux(),
+      claudeBin: forkClaudeBinRunningStopHook(),
+      claudeProjectsDir,
+    })
+    await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const h1 = await adapter.spawn({ worker_id: workerId, prompt: '干活', workspace: { root: workspaceRoot } })
+
+    const h2 = await adapter.fork({ worker_id: workerId, seq: 1, session_ref: h1.session_ref }, '侧问一下')
+
+    // 前提:假二进制确实执行了 provision 写下的那条 Stop hook(否则本组用例是空跑)。
+    expect(await stopCountIn(path.join(dataDir, workerId, `fork-events-${h2.seq}.jsonl`))).toBe(1)
+    // 主线共享的那份事件文件必须一条都没多。
+    expect(await stopCountIn(eventsFilePath({ root: workspaceRoot }))).toBe(0)
+
+    await adapter.kill(h1)
+  })
+
+  it('主线在跑时发起侧问:① 主线不被误判 idle;② 主线真正跑完那一轮的唤醒不被吞', async () => {
+    const seen: Array<{ seq: number; state: WorkerContractState }> = []
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      tmux: new NoopTmux(),
+      claudeBin: forkClaudeBinRunningStopHook(),
+      claudeProjectsDir,
+      onStateChange: (h, state) => {
+        seen.push({ seq: h.seq, state })
+      },
+    })
+    await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    // 主线:spawn 之后一直在跑(NoopTmux.isAlive 恒 true,主线自己还没写过 stop)。
+    const h1 = await adapter.spawn({ worker_id: workerId, prompt: '干活', workspace: { root: workspaceRoot } })
+
+    // 侧问在主线还在跑的时候发起。
+    await adapter.fork({ worker_id: workerId, seq: 1, session_ref: h1.session_ref }, '侧问一下')
+
+    // ① 侧问收尾之后(留足 watcher 快路径 + 2s 轮询兜底的时间),主线不能被判成 idle。
+    await new Promise((r) => setTimeout(r, 2500))
+    expect(seen.filter((e) => e.seq === h1.seq && e.state === 'idle')).toHaveLength(0)
+
+    // ② 主线真正跑完这一轮 → 轮次边界唤醒必须如约推出来。
+    await mainlineStopHookFires()
+    await waitFor(() => seen.some((e) => e.seq === h1.seq && e.state === 'idle'))
+    expect(seen.filter((e) => e.seq === h1.seq && e.state === 'idle')).toHaveLength(1)
+
+    await adapter.kill(h1)
+  }, 15000)
+})
+
+/**
+ * ensureRuntime 并发重建:重启后同一化身被并发首次触达(如启动对账的 state() 与 recovery
+ * 触发的 sendInput() 同时到达)时,两次调用各自重建一个 Runtime、各装一个 watcher,
+ * 后 set 的胜出——败者被自己 watcher 的闭包持有,transitionExited 只摘胜者的,败者的
+ * fs.watch + 2s 轮询到进程退出为止一直活着,每个轮次边界都重复唤醒一次。
+ */
+describe('ClaudeCodeAdapter.ensureRuntime — 并发重建不泄漏 watcher', () => {
+  let dataDir: string
+  let workspaceRoot: string
+  let claudeProjectsDir: string
+
+  beforeEach(async () => {
+    dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-adapter-concurrent-data-'))
+    workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-adapter-concurrent-ws-'))
+    claudeProjectsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-adapter-concurrent-proj-'))
+    await fs.mkdir(path.join(workspaceRoot, '.claude'), { recursive: true })
+  })
+
+  afterEach(async () => {
+    await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(claudeProjectsDir, { recursive: true, force: true }).catch(() => {})
+  })
+
+  it('并发首次触达同一化身:每个 stop 事件只唤醒一次,化身退出后也没有残留 watcher 继续推', async () => {
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const sessionId = randomUUID()
+    // 模拟"重启前留下的落盘化身":新 adapter 实例的 runtimes 为空,只能从 meta 重建。
+    await fs.mkdir(path.join(dataDir, workerId), { recursive: true })
+    await fs.writeFile(
+      path.join(dataDir, workerId, 'meta-1.json'),
+      JSON.stringify({ seq: 1, state: 'running', session_id: sessionId, workspace_root: workspaceRoot }),
+      'utf-8',
+    )
+
+    class ToggleTmux extends NoopTmux {
+      alive = true
+      async isAlive(_name: string): Promise<boolean> {
+        return this.alive
+      }
+    }
+    const tmux = new ToggleTmux()
+    const seen: WorkerContractState[] = []
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      tmux,
+      claudeBin: 'unused',
+      claudeProjectsDir,
+      onStateChange: (_h, state) => {
+        seen.push(state)
+      },
+    })
+    const h: IncarnationHandle = { worker_id: workerId, seq: 1, impl: 'claude-code', session_ref: sessionId }
+
+    const [a, b] = await Promise.all([adapter.state(h), adapter.state(h)])
+    expect([a, b]).toEqual(['running', 'running'])
+
+    const appendStop = () =>
+      fs.appendFile(
+        eventsFilePath({ root: workspaceRoot }),
+        JSON.stringify({ ts: new Date().toISOString(), kind: 'stop', raw: null }) + '\n',
+        'utf-8',
+      )
+    const waitFor = async (predicate: () => boolean, timeoutMs = 4000): Promise<void> => {
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        if (predicate()) return
+        await new Promise((r) => setTimeout(r, 50))
+      }
+      throw new Error('waitFor timeout')
+    }
+
+    // 一次轮次边界只能唤醒一次。
+    await appendStop()
+    await waitFor(() => seen.length > 0)
+    await new Promise((r) => setTimeout(r, 500))
+    expect(seen).toEqual(['idle'])
+
+    // 化身退出:胜者的 watcher 在 transitionExited 里被摘掉。若并发重建留下了第二个
+    // runtime,它的 watcher 仍然活着,同一条事件会被再推一次。
+    tmux.alive = false
+    await appendStop()
+    await waitFor(() => seen.includes('exited'))
+    await new Promise((r) => setTimeout(r, 500))
+    expect(seen).toEqual(['idle', 'exited'])
+  }, 15000)
+})
