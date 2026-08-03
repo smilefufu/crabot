@@ -54,15 +54,9 @@ async function main(): Promise<void> {
   // 从 Admin 加载配置（唯一来源）
   const adminEndpoint = process.env.CRABOT_ADMIN_ENDPOINT
 
-  let config: UnifiedAgentConfig
-  try {
-    config = await ConfigLoader.load('', rpcClient, adminEndpoint)
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    console.warn(`Failed to load config from Admin: ${message}`)
-    console.warn('Starting in unconfigured mode, waiting for config push from Admin...')
-    config = ConfigLoader.createUnconfiguredConfig()
-  }
+  // admin 比 agent 只早 spawn 约 1s，但要跑完整个 onStart() 才 listen —— 首次 pull 必然扑空。
+  // 退避重试等 admin 就绪；耗尽预算仍落 unconfigured 兜底（见 ConfigLoader.loadWithRetry）。
+  const config: UnifiedAgentConfig = await ConfigLoader.loadWithRetry(rpcClient, adminEndpoint)
 
   // Module Manager 会通过环境变量分配端口，覆盖配置文件中的端口
   if (process.env.Crabot_PORT) {
@@ -98,6 +92,9 @@ async function main(): Promise<void> {
   try {
     await agent.start()
     await agent.register()
+    // 启动对账放在 register 之后发：它的 fs 扫描 + tmux 子进程会占满 libuv 默认 4 线程池，
+    // 而 register 的 getaddrinfo 排在同一个池上——并发跑会把注册拖慢。仍然不 await。
+    agent.startManagerStackReconciliation()
     console.log('Unified Agent module started successfully')
     console.log(`- Module ID: ${config.module_id}`)
     console.log(`- Port: ${config.port}`)

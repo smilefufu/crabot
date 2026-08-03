@@ -1,6 +1,18 @@
 # Crabot 项目进度
 
-> 最后更新：2026-08-01 — Manager/Worker 拆分 P7 / PR F：builtin worker 注入通道（分支 feat/mw-p7f-builtin-injection，未合并 main）
+> 最后更新：2026-08-03 — 冷启动配置竞态修复（分支 fix/agent-config-pull-retry，未合并 main）
+
+## 2026-08-03 — 冷启动配置竞态：agent 拉配置改为退避重试
+
+- 诊断：`.superpowers/sdd/startup-race-diagnosis.md`；实施报告：`.superpowers/sdd/startup-race-fix-report.md`。分级为**小改动**（局部、不碰协议/接口/状态机/权限语义，可用定向回归证明）。
+- 病灶：MM 按 `start_priority` 串行 spawn（admin=10 / agent=20），**间隔仅 1s、无依赖声明**，而 admin 要跑完整个 `onStart()` 才 listen → agent 那一下 pull 必然 ECONNREFUSED → 旧实现**一次性放弃**落 unconfigured；admin 侧 push 兜底的判据又是「agent 已 register」（MM `resolve` 只认 `status==='running'`）→ 此刻还没注册 → `Module not found` → 不再推。**双向死锁**，生产每次冷启动必现，且 `SIGTERM` 按设计不触发重启，只能 `kill -9`。
+- 主修：`ConfigLoader.loadWithRetry()`——pull 失败退避重试（500ms 起、封顶 2s、预算 60s），耗尽预算仍落 unconfigured 兜底。**封顶取 2s 是有理由的**：它等于「admin listen」到「agent register」的额外延迟上限，必须让 register 稳落在 admin 侧 `ensureResumeSweepAfterAgentReady` 那个 60s 就绪窗口内，否则 resume sweep 会被推到窗口外。`CRABOT_ADMIN_ENDPOINT` 缺失属环境问题不是竞态，直接兜底不空转。
+- **修在 pull 侧而不是 push 侧是硬要求**：`pushConfigToAgentModules` 下发的字段里**没有 `system_prompt`、没有 `mcp_servers`**，靠 push 活过来的 agent 是空 prompt + 零 MCP，只是"能跑 LLM"不是"配置完整"。这条是**独立缺陷，本次未修**（任务约束不动 admin），连同 `ensureResumeSweepAfterAgentReady` 首推必失败后 `return` 永不再试那条一起挂账。
+- "等待是安全的"逐条复核过，不是照抄诊断：MM 健康检查只扫 `status==='running'`（:939-944），而 `running` 只在 `handleRegister`（:316）里置，spawn 后是 `starting`；`startModuleProcess` 不 await 注册、全文件无 spawn 超时；`crabot start -d` 的 30s 就绪轮询只探 MM 与 Admin Web 不看 agent；重试窗口内被 stop 走 Node 默认 SIGTERM 直接退出，MM 侧 `wasRunning===false` 不发 crashed、不触发 auto_restart。
+- 附修：启动对账 `startManagerStackReconciliation()` 从 `onStart()` 挪到 `register()` 之后发起——它的 fs 扫描 + tmux 子进程占满 libuv 默认 4 线程池，而 `register()` 的 `getaddrinfo` 排在同一个池上，并发跑会把注册拖慢、放大竞态窗口（诊断 §2.3 推测的机制）。仍不 await，零语义变化；对应集成用例改成按 main.ts 真实顺序调用，钉住的语义一字未减。
+- 顺带修掉日志里那句空 message：admin 未 listen 时 Node 22 happy-eyeballs 抛的 `AggregateError` 的 `.message` 是空字符串（旧日志 `Failed to load config from Admin: ` 冒号后什么都没有就是它），现在退回 `errors[]` 显示真实原因；重试期间首次失败打一行、之后每 10s 才打一行进度，不刷屏。
+- 验证：`crabot-agent` 全量 `2393 passed | 2 skipped`（204 文件），基线（detached 到 base 实跑）`2390 | 2`，差值 = 新增 3，**零回归**；`tsc --noEmit` 干净；变异实测（把退避 break 改成无条件 break = 去掉重试）→ 两条重试用例立刻挂。
+- **不碰的边界**：`startAutoStartModules` / MM 注册契约（用户在 `feat/module-health-lifecycle` 上做那块）、admin 的 push 路径。改动全部落在 `crabot-agent/src/` 三个文件内。
 
 ## 2026-08-01 — Manager/Worker 拆分 P7 / PR F：builtin worker 注入通道（manager 终于能派出一个能干活的 builtin worker）
 
