@@ -760,6 +760,24 @@ describe('ManagerLoop', () => {
     expect(state.recent.length).toBeGreaterThan(0)
   })
 
+  it('manager 静默 end_turn(本轮没调任何发送工具)不触发 engine 的 forced_summary 追问,也不多烧 LLM 轮次', async () => {
+    const { adapter, calls, queue } = makeAdapter()
+    // 只脚本化一轮:静默 end_turn(无 text、无工具调用)。若 forced_summary gate 生效,
+    // engine 会注入追问并续 loop —— 队列已空,mock 会用默认回复应答,calls 变成 2 次以上。
+    queue.push({ stopReason: 'end_turn' })
+
+    const loop = new ManagerLoop(baseDeps({ store, adapter }))
+    const result = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('你好')] })
+
+    expect(result.outcome).toBe('completed')
+    // 语义不变量①:没有任何一轮的上下文里出现过 forced_summary 的文案。
+    const allMessages = JSON.stringify(calls.map((c) => c.messages))
+    expect(allMessages).not.toContain('你刚才以 end_turn 结束但还没有向人类发送任何内容')
+    // 语义不变量②:静默 end_turn 直接被接受为正常完成态,只跑了一轮 LLM。
+    expect(calls).toHaveLength(1)
+    expect(result.turns).toBe(1)
+  })
+
   // --- EpisodeResult.repliedToHuman(P7 J Task 3.1:群聊注意力退避的 `replied` 信号) ---
 
   describe('EpisodeResult.repliedToHuman', () => {

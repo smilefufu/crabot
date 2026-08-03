@@ -512,6 +512,15 @@ export class ManagerLoop {
       disableCompaction: true,
       humanMessageQueue: this.mailbox,
       onTurn: () => refreshLedgerRender(),
+      // engine 的 forced_summary 兜底(silent end_turn → 注入"你还没向人类发过内容"追问,
+      // 最多 3 次)是 v2 worker loop 的机制:那条路径下 caller 用一整套 outbound buffer
+      // 跟踪"这轮有没有发过",engine 只是照着它的判定兜底。manager 没有那套跟踪,不传等于
+      // 恒等于"没发过"——现网实证:manager 明明已经 send_message 回过话了,收尾时仍被连追
+      // 三次,逼出三条重复发言。
+      // 更根本的是语义:manager 本来就是"跟人类说话的那位",这一轮该不该说话由它自己判断
+      // (纪律写在 manager system prompt 的收尾责任段里),不需要 engine 在运行时替它决定。
+      // 静默 end_turn 对 manager 是完全正常的完成态(比如这次唤醒只是派活或只读检查)。
+      suppressForcedSummary: () => true,
     }
 
     const result = await runEngine({
