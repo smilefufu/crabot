@@ -673,6 +673,15 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         // 才治得了。session 树仍以原始消息为真相源：老节点一个不删，压缩后的序列另起
         // 一条新根链（见下面的 write-back）。
         disableCompaction: false,
+        // engine 的 forced_summary 兜底（silent end_turn → 注入"你还没向人类发过内容，
+        // 请调 send_message"追问，最多 3 次）是 v2 worker loop 的机制，对 v3 的 builtin
+        // worker 完全不适用：worker 不跟人类说话，工具面里根本没有 send_message，被催
+        // 也无从执行——每次 end_turn 白烧最多 3 轮 LLM。而且那段文案与 worker 的 system
+        // prompt 直接冲突（prompt 刻意不提"联系人类"，就是不想把这个念头塞进上下文），
+        // 还会污染带给 manager 的收尾 assistantText（催出来的废话）。
+        // worker 的收尾信号是 finish_task；silent end_turn 只意味着"这一 burst 说完了"，
+        // 由上面的收尾段落成 idle 等下一次唤醒，本就是正常态。
+        suppressForcedSummary: () => true,
         onCompactionEnd: (info) => {
           if (info.failedReason === undefined) compactedThisBurst = true
         },
@@ -809,6 +818,10 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         // 历史，本身就可能超窗口。不开压缩，老链 fork 必撞窗口。代价是轻量侧问也可能付一次
         // 摘要成本——可接受（只在真的超阈值时才付）。
         disableCompaction: false,
+        // 同 runBurst：v2 的 forced_summary 兜底对 v3 worker 不适用。fork 更甚——它连
+        // finish_task 都没有，end_turn 就是侧问的正常收尾信号，静默收尾（比如答案已经
+        // 通过工具写出去了）不该被追着要"发给人类"。
+        suppressForcedSummary: () => true,
         onCompactionEnd: (info) => {
           if (info.failedReason === undefined) compactedThisBurst = true
         },

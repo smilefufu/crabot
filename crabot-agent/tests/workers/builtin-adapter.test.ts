@@ -12,6 +12,10 @@ import type { EngineMessage, ToolDefinition } from '../../src/engine/index.js'
 import * as engineModule from '../../src/engine/query-loop.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 
+/** engine 的 FORCED_SUMMARY_PROMPT 首句(query-loop.ts)。worker 不跟人类说话、也没有
+ *  send_message 工具，这段文案一旦出现在它的上下文里就是 bug。 */
+const FORCED_SUMMARY_MARKER = '你刚才以 end_turn 结束但还没有向人类发送任何内容'
+
 function makeAdapter(
   responses: Array<{
     text?: string
@@ -375,6 +379,21 @@ describe('BuiltinWorkerAdapter', () => {
     expect(callArgs?.options?.disableCompaction).toBe(false)
   })
 
+  it('runBurst 静默 end_turn 不触发 engine 的 forced_summary 追问,也不多烧 LLM 轮次', async () => {
+    const llm = makeAdapter([{ stopReason: 'end_turn' }]) // 无 text、无工具调用 = 静默 end_turn
+    const workerAdapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const h = await workerAdapter.spawn(spec({ adapter: llm }))
+    await waitState(workerAdapter, h, 'idle')
+
+    const streamMock = llm.stream as unknown as { mock: { calls: Array<[{ messages: unknown }]> } }
+    // 语义不变量①:worker 的上下文里从未出现过 forced_summary 的文案(它连 send_message
+    // 工具都没有,被催也无从执行)。messages 数组是 engine 跨轮原地 push 的同一个引用,
+    // 事后 stringify 即可看到本次 burst 注入过的全部内容。
+    expect(JSON.stringify(streamMock.mock.calls)).not.toContain(FORCED_SUMMARY_MARKER)
+    // 语义不变量②:静默 end_turn 直接被接受,只跑了一轮 LLM(gate 生效时会变成 1+3 轮)。
+    expect(streamMock.mock.calls).toHaveLength(1)
+  })
+
   it('sendInput(idle) → 追加新一轮用户消息并起新 burst，新 burst 可见旧上下文', async () => {
     const runEngineSpy = vi.spyOn(engineModule, 'runEngine')
     const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
@@ -589,6 +608,30 @@ describe('BuiltinWorkerAdapter', () => {
       .map((l) => JSON.parse(l) as { node_id: string; parent_id: string | null })
     const childrenOfMainTip = rawNodes.filter((n) => n.parent_id === mainTip)
     expect(childrenOfMainTip.length).toBe(1)
+  })
+
+  it('runForkBurst 静默 end_turn 同样不触发 forced_summary 追问,也不多烧 LLM 轮次', async () => {
+    const llm = makeAdapter([
+      { text: '首轮回复', stopReason: 'end_turn' }, // 主线 burst
+      { stopReason: 'end_turn' }, // fork 的 burst:静默 end_turn(此后重复该条)
+    ])
+    const workerAdapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+    const s = spec({ adapter: llm })
+    const h = await workerAdapter.spawn(s)
+    await waitState(workerAdapter, h, 'idle')
+
+    const tree = await SessionTree.load(join(tmp, s.worker_id, 'session.jsonl'))
+    const prevRef: IncarnationRef = { worker_id: s.worker_id, seq: 1, session_ref: tree.latestTip()! }
+    const forkHandle = await workerAdapter.fork(prevRef, '侧问问题')
+    await waitState(workerAdapter, forkHandle, 'exited')
+
+    const streamMock = llm.stream as unknown as { mock: { calls: Array<[{ messages: unknown }]> } }
+    expect(JSON.stringify(streamMock.mock.calls)).not.toContain(FORCED_SUMMARY_MARKER)
+    // 主线 1 轮 + fork 1 轮 = 2 轮;gate 生效时 fork 会多烧 3 轮。
+    expect(streamMock.mock.calls).toHaveLength(2)
+
+    const forkMeta = JSON.parse(await fs.readFile(join(tmp, s.worker_id, 'meta-2.json'), 'utf-8'))
+    expect(forkMeta.ended_reason).toBe('completed')
   })
 
   it('fork 不要求 prev 处于任何特定状态：主线仍 running 时也能 fork', async () => {
