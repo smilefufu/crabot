@@ -25,6 +25,7 @@ import type {
   WorkerContractState,
   IncarnationHandle,
   IncarnationRef,
+  IncarnationEndReason,
   SpawnSpec,
   Workspace,
   OutputCursor,
@@ -43,7 +44,12 @@ function handleKey(h: IncarnationHandle): string {
 interface FakeAdapterOpts {
   readonly implId?: WorkerImplId
   readonly caps?: Partial<AdapterCapabilities>
-  readonly onStateChange?: (h: IncarnationHandle, state: WorkerContractState) => void
+  readonly onStateChange?: (
+    h: IncarnationHandle,
+    state: WorkerContractState,
+    lastText?: string,
+    endReason?: IncarnationEndReason,
+  ) => void
   readonly sendInputBehavior?: (h: IncarnationHandle, text: string, opts?: { raw?: boolean }) => Promise<void> | void
   readonly resumeBehavior?: (prev: IncarnationRef, wakeInput: string) => Promise<IncarnationHandle> | IncarnationHandle
   readonly spawnBehavior?: (spec: SpawnSpec) => Promise<IncarnationHandle> | IncarnationHandle
@@ -127,10 +133,17 @@ class FakeAdapter implements WorkerAdapter {
     return { fork: false, revive: false, goalMode: false, subagent: false, structuredTrace: false, ...this.opts.caps }
   }
 
-  /** 测试专用：模拟 adapter 自己触发一次状态回调（镜像真实 adapter 内部调用 deps.onStateChange）。 */
-  emitStateChange(h: IncarnationHandle, state: WorkerContractState): void {
+  /** 测试专用：模拟 adapter 自己触发一次状态回调（镜像真实 adapter 内部调用 deps.onStateChange）。
+   *
+   * `endReason` 对齐真实 adapter 的可选第四参。三个真实 adapter 的 `transitionExited` 形参
+   * 本就是**必填**的 `ended_reason`，不存在"退出了却说不出原因"的情况——所以这个桩在
+   * `state==='exited'` 时也必须给出一个具体值，缺省取 `'completed'`（化身自然结束、非 kill，
+   * 即本文件绝大多数接续用例的剧本：worker 自己干完一轮退出，manager 再投递新消息触发接续）。
+   * 需要复现 failed/crashed/killed 的用例显式传第三参。第三参 `lastText` 这个桩不模拟
+   * （对齐 cc/codex：它们刻意不传），所以透传时占位为 undefined。 */
+  emitStateChange(h: IncarnationHandle, state: WorkerContractState, endReason?: IncarnationEndReason): void {
     this.states.set(handleKey(h), state)
-    this.opts.onStateChange?.(h, state)
+    this.opts.onStateChange?.(h, state, undefined, state === 'exited' ? (endReason ?? 'completed') : undefined)
   }
 }
 

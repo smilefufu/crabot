@@ -27,7 +27,7 @@ import {
 } from '../../src/workers/harness/ledger-types.js'
 import type { HarnessEvent } from '../../src/workers/harness/harness.js'
 import type { LedgerStore } from '../../src/workers/harness/ledger-store.js'
-import type { WorkerAdapter, WorkerImplId, IncarnationHandle, WorkerContractState } from '../../src/workers/types.js'
+import type { WorkerAdapter, WorkerImplId, IncarnationHandle, IncarnationEndReason, WorkerContractState } from '../../src/workers/types.js'
 import type { ManagerKey } from '../../src/manager/types.js'
 import type { LLMAdapter } from '../../src/engine/index.js'
 import type { Event, ModuleId, RpcClient } from 'crabot-shared'
@@ -138,11 +138,22 @@ function silentAdapter(): LLMAdapter {
   }
 }
 
+/**
+ * 三个 adapter 的 `onStateChange` 构造 deps 的完整形参表。第四参 `endReason` 是 adapter 在
+ * `transitionExited` 时持有的 `ended_reason` 真值——它必填,所以直接调这个回调模拟 adapter
+ * 上报时,`exited` 必须一并带上它,否则模拟出的是真实 adapter 不会产生的"退出但无原因"。
+ */
+type AdapterStateCallback = (
+  h: IncarnationHandle,
+  s: WorkerContractState,
+  lastText?: string,
+  endReason?: IncarnationEndReason,
+) => void
+
 function capturedOnStateChange(
   adapter: WorkerAdapter | undefined,
-): ((h: IncarnationHandle, s: WorkerContractState) => void) | undefined {
-  return (adapter as unknown as { deps?: { onStateChange?: (h: IncarnationHandle, s: WorkerContractState) => void } })
-    ?.deps?.onStateChange
+): AdapterStateCallback | undefined {
+  return (adapter as unknown as { deps?: { onStateChange?: AdapterStateCallback } })?.deps?.onStateChange
 }
 
 // ============================================================================
@@ -487,9 +498,9 @@ describe('agent 对外事件（P5 Task 2）', () => {
 
       const onStateChange = capturedOnStateChange(stack.adapters.get('builtin'))
       expect(onStateChange).toBeDefined()
-      // 注：这里 exited 落成 completed 是 P7 阻塞项 #1（processStateChange 硬编码
-      // endReason='completed'）的直接后果，本用例只验证"事件发得出来"，不验证 completed 的正确性。
-      onStateChange!({ worker_id: 'w-wired', seq: 1, impl: 'builtin', session_ref: 'w-wired-ref' }, 'exited')
+      // 第四参 'completed' 复刻真实 adapter：transitionExited 的 ended_reason 是必填形参，
+      // 化身自然结束（非 kill）时三个实现给的都是 'completed'。本用例只验证"事件发得出来"。
+      onStateChange!({ worker_id: 'w-wired', seq: 1, impl: 'builtin', session_ref: 'w-wired-ref' }, 'exited', undefined, 'completed')
 
       await waitUntil(() => published.length >= 1)
       expect(published[0][0]).toBe('agent.task_status_changed')
@@ -534,7 +545,7 @@ describe('agent 对外事件（P5 Task 2）', () => {
         makeLedgerWorker({ workerId: 'w-nopub', status: 'running' }),
       )
       const onStateChange = capturedOnStateChange(stack.adapters.get('builtin'))
-      onStateChange!({ worker_id: 'w-nopub', seq: 1, impl: 'builtin', session_ref: 'w-nopub-ref' }, 'exited')
+      onStateChange!({ worker_id: 'w-nopub', seq: 1, impl: 'builtin', session_ref: 'w-nopub-ref' }, 'exited', undefined, 'completed')
       await waitUntil(async () => (await stack.ledger.findWorker('w-nopub'))?.worker.task.status === 'completed')
       expect(unhandled).toEqual([])
     })

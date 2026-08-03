@@ -14,6 +14,7 @@ import type {
   WorkerContractState,
   IncarnationHandle,
   IncarnationRef,
+  IncarnationEndReason,
   SpawnSpec,
   Workspace,
   OutputCursor,
@@ -31,7 +32,12 @@ function handleKey(h: IncarnationHandle): string {
 interface FakeAdapterOpts {
   readonly implId?: WorkerImplId
   readonly caps?: Partial<AdapterCapabilities>
-  readonly onStateChange?: (h: IncarnationHandle, state: WorkerContractState, lastText?: string) => void
+  readonly onStateChange?: (
+    h: IncarnationHandle,
+    state: WorkerContractState,
+    lastText?: string,
+    endReason?: IncarnationEndReason,
+  ) => void
   readonly spawnShouldFail?: Error
   readonly forkShouldFail?: Error
   readonly sendInputBehavior?: (h: IncarnationHandle, text: string, opts?: { raw?: boolean }) => Promise<void> | void
@@ -88,8 +94,10 @@ class FakeAdapter implements WorkerAdapter {
       // 把化身状态转到 exited 并调用 onStateChange——AsyncMutex.run 的入队是同步的
       // (harness.ts withLock 注释)，所以 harness.handleStateChange 派生的 processStateChange
       // 对这个 worker_id 的锁请求，必然排在 queryWorker 落账段(第二次 withLock)前面。
+      // 第四参对齐 cc adapter 的 fork():它的 transitionExited 拿到的是 `execFileAsync`
+      // 成功时的 'completed'(失败走 'crashed'),不是"没有值"。
       this.states.set(handleKey(handle), 'exited')
-      this.opts.onStateChange?.(handle, 'exited')
+      this.opts.onStateChange?.(handle, 'exited', undefined, 'completed')
       return handle
     }
     this.states.set(handleKey(handle), 'running')
@@ -120,10 +128,21 @@ class FakeAdapter implements WorkerAdapter {
   }
 
   /** 测试专用:模拟 adapter 自己触发一次状态回调(镜像真实 adapter 内部调用 deps.onStateChange)。
-   * `lastText` 对齐真实 adapter 的可选第三参(轮次边界上 worker 最后说的那段话)。 */
-  emitStateChange(h: IncarnationHandle, state: WorkerContractState, lastText?: string): void {
+   * `lastText` 对齐真实 adapter 的可选第三参(轮次边界上 worker 最后说的那段话)。
+   *
+   * `endReason` 对齐真实 adapter 的可选第四参。三个真实 adapter 的 `transitionExited` 形参
+   * 本就是**必填**的 `ended_reason`,不存在"退出了却说不出原因"的情况——所以这个桩在
+   * `state==='exited'` 时也必须给出一个具体值,缺省取 `'completed'`(化身自然结束、非 kill,
+   * 即本文件绝大多数用例的剧本)。需要复现 failed/crashed/killed 的用例显式传第四参。
+   * 非 exited 态一律不传:endReason 只在 exited 时有意义(harness 会对此断言)。 */
+  emitStateChange(
+    h: IncarnationHandle,
+    state: WorkerContractState,
+    lastText?: string,
+    endReason?: IncarnationEndReason,
+  ): void {
     this.states.set(handleKey(h), state)
-    this.opts.onStateChange?.(h, state, lastText)
+    this.opts.onStateChange?.(h, state, lastText, state === 'exited' ? (endReason ?? 'completed') : undefined)
   }
 }
 
