@@ -1436,3 +1436,79 @@ describe('CodexWorkerAdapter — CLI notify 事件文件监视(被动 push)', ()
     await adapter.kill(h)
   })
 })
+
+/** 与 cc adapter 同款的并发重建回归,见 claude-code-adapter.test.ts 同名 describe 的注释。 */
+describe('CodexWorkerAdapter.ensureRuntime — 并发重建不泄漏 watcher', () => {
+  let dataDir: string
+  let workspaceRoot: string
+
+  beforeEach(async () => {
+    dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-adapter-concurrent-data-'))
+    workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-adapter-concurrent-ws-'))
+    await fs.mkdir(path.join(workspaceRoot, '.codex'), { recursive: true })
+  })
+
+  afterEach(async () => {
+    await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+  })
+
+  it('并发首次触达同一化身:每个 stop 事件只唤醒一次,化身退出后也没有残留 watcher 继续推', async () => {
+    const workerId = `codextest-${randomUUID().slice(0, 8)}`
+    const sessionId = randomUUID()
+    await fs.mkdir(path.join(dataDir, workerId), { recursive: true })
+    await fs.writeFile(
+      path.join(dataDir, workerId, 'meta-1.json'),
+      JSON.stringify({ seq: 1, state: 'running', session_id: sessionId, workspace_root: workspaceRoot, session_discovery: 'placeholder' }),
+      'utf-8',
+    )
+
+    class ToggleTmux extends NoopTmux {
+      alive = true
+      async isAlive(_name: string): Promise<boolean> {
+        return this.alive
+      }
+    }
+    const tmux = new ToggleTmux()
+    const seen: WorkerContractState[] = []
+    const adapter = new CodexWorkerAdapter({
+      dataDir,
+      tmux,
+      codexBin: 'unused',
+      sessionDiscoveryTimeoutMs: 50,
+      onStateChange: (_h, state) => {
+        seen.push(state)
+      },
+    })
+    const h: IncarnationHandle = { worker_id: workerId, seq: 1, impl: 'codex', session_ref: sessionId }
+
+    const [a, b] = await Promise.all([adapter.state(h), adapter.state(h)])
+    expect([a, b]).toEqual(['running', 'running'])
+
+    const appendStop = () =>
+      fs.appendFile(
+        eventsFilePath({ root: workspaceRoot }),
+        JSON.stringify({ ts: new Date().toISOString(), kind: 'stop', raw: null }) + '\n',
+        'utf-8',
+      )
+    const waitFor = async (predicate: () => boolean, timeoutMs = 4000): Promise<void> => {
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        if (predicate()) return
+        await new Promise((r) => setTimeout(r, 50))
+      }
+      throw new Error('waitFor timeout')
+    }
+
+    await appendStop()
+    await waitFor(() => seen.length > 0)
+    await new Promise((r) => setTimeout(r, 500))
+    expect(seen).toEqual(['idle'])
+
+    tmux.alive = false
+    await appendStop()
+    await waitFor(() => seen.includes('exited'))
+    await new Promise((r) => setTimeout(r, 500))
+    expect(seen).toEqual(['idle', 'exited'])
+  }, 15000)
+})

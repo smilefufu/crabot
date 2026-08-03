@@ -952,56 +952,66 @@ export class CodexWorkerAdapter implements WorkerAdapter {
    * findRolloutFileBySessionId 按已知 session_id 重新在 codexHome/sessions 下精确查找,
    * 找不到(文件被移走/清理)则退化为 undefined,readTrace 优雅降级为空数组(与 spawn 时
    * 发现失败的已知限制同一降级路径)。
+   *
+   * 重建整体在 per-worker 互斥锁内完成(锁内再查一次 map),理由与 cc adapter 完全一致:
+   * 不加锁时并发首次触达会各自重建一个 Runtime、各装一个 watcher,败者的 watcher 永不被
+   * 摘除,每个轮次边界重复唤醒 manager 一次。详见 cc adapter 的 ensureRuntime 注释。
    */
   private async ensureRuntime(ref: { worker_id: string; seq: number; session_ref?: string }): Promise<Runtime | undefined> {
     const key = instanceKey(ref)
     const existing = this.runtimes.get(key)
     if (existing) return existing
 
-    const dir = join(this.deps.dataDir, ref.worker_id)
-    const meta = await this.readMetaFile(dir, ref.seq)
-    if (!meta) return undefined
+    return this.getMutex(ref.worker_id).run(async () => {
+      // 锁内重查:排在前面的另一次 ensureRuntime 可能已经重建好了(见方法注释)。
+      const resident = this.runtimes.get(key)
+      if (resident) return resident
 
-    const sessionName = `crabot-w-${ref.worker_id}-${ref.seq}`
-    const alive = await this.tmux.isAlive(sessionName)
-    const workspaceRoot = meta.workspace_root ?? ''
-    const sessionId = meta.session_id ?? ref.session_ref ?? ''
-    const codexHome = workspaceRoot ? join(workspaceRoot, '.codex') : ''
-    const sessionDiscoveryStatus: 'discovered' | 'placeholder' = meta.session_discovery ?? 'placeholder'
-    const rolloutPath =
-      sessionDiscoveryStatus === 'discovered' && codexHome ? await findRolloutFileBySessionId(join(codexHome, 'sessions'), sessionId) : undefined
-    const outputFile = join(dir, `output-${ref.seq}.log`)
-    const eventsPath = workspaceRoot ? eventsFilePath({ root: workspaceRoot }) : join(dir, `.no-workspace-events-${ref.seq}.jsonl`)
-    const eventChannel = new CliEventChannel(eventsPath)
+      const dir = join(this.deps.dataDir, ref.worker_id)
+      const meta = await this.readMetaFile(dir, ref.seq)
+      if (!meta) return undefined
 
-    let stopBaseline = 0
-    if (workspaceRoot) {
-      const events = await eventChannel.readAll()
-      stopBaseline = events.filter((e) => e.kind === 'stop').length
-    }
+      const sessionName = `crabot-w-${ref.worker_id}-${ref.seq}`
+      const alive = await this.tmux.isAlive(sessionName)
+      const workspaceRoot = meta.workspace_root ?? ''
+      const sessionId = meta.session_id ?? ref.session_ref ?? ''
+      const codexHome = workspaceRoot ? join(workspaceRoot, '.codex') : ''
+      const sessionDiscoveryStatus: 'discovered' | 'placeholder' = meta.session_discovery ?? 'placeholder'
+      const rolloutPath =
+        sessionDiscoveryStatus === 'discovered' && codexHome ? await findRolloutFileBySessionId(join(codexHome, 'sessions'), sessionId) : undefined
+      const outputFile = join(dir, `output-${ref.seq}.log`)
+      const eventsPath = workspaceRoot ? eventsFilePath({ root: workspaceRoot }) : join(dir, `.no-workspace-events-${ref.seq}.jsonl`)
+      const eventChannel = new CliEventChannel(eventsPath)
 
-    const runtime: Runtime = {
-      worker_id: ref.worker_id,
-      seq: ref.seq,
-      dir,
-      workspaceRoot,
-      codexHome,
-      sessionName,
-      sessionId,
-      rolloutPath,
-      outputLog: new OutputLog(outputFile),
-      eventChannel,
-      sessionDiscoveryStatus,
-      state: alive ? 'running' : 'exited',
-      ended_reason: alive ? undefined : meta.ended_reason,
-      stopBaseline,
-      killed: false,
-    }
-    this.runtimes.set(key, runtime)
-    // 重启后重连接管(§13):会话还活着的化身在这里重新装上文件监视。已终态的化身
-    // startEventWatch 自己会短路掉。
-    this.startEventWatch(runtime, { worker_id: ref.worker_id, seq: ref.seq, impl: 'codex', session_ref: sessionId })
-    return runtime
+      let stopBaseline = 0
+      if (workspaceRoot) {
+        const events = await eventChannel.readAll()
+        stopBaseline = events.filter((e) => e.kind === 'stop').length
+      }
+
+      const runtime: Runtime = {
+        worker_id: ref.worker_id,
+        seq: ref.seq,
+        dir,
+        workspaceRoot,
+        codexHome,
+        sessionName,
+        sessionId,
+        rolloutPath,
+        outputLog: new OutputLog(outputFile),
+        eventChannel,
+        sessionDiscoveryStatus,
+        state: alive ? 'running' : 'exited',
+        ended_reason: alive ? undefined : meta.ended_reason,
+        stopBaseline,
+        killed: false,
+      }
+      this.runtimes.set(key, runtime)
+      // 重启后重连接管(§13):会话还活着的化身在这里重新装上文件监视。已终态的化身
+      // startEventWatch 自己会短路掉。
+      this.startEventWatch(runtime, { worker_id: ref.worker_id, seq: ref.seq, impl: 'codex', session_ref: sessionId })
+      return runtime
+    })
   }
 
   /** meta-<seq>.json 读取,文件不存在/内容损坏一律返回 undefined(供 ensureRuntime 判定

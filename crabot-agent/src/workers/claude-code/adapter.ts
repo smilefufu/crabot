@@ -63,6 +63,9 @@
  * --fork-session 在其内部生成一个新会话 id,但 `--output-format text` 的 stdout 不携带它,
  * 拿不到就拿不到——fork 化身的 session_id 落一个本地生成的占位 UUID,不对应真实 cc 会话
  * 文件,该化身自己的 readTrace 会优雅退化为空数组(已知限制,见 Task 5 报告)。
+ * 无头进程的 hook 事件经 env(CliEventChannel.EVENTS_FILE_ENV)重定向到 fork 化身私有的
+ * `fork-events-<seq>.jsonl`,不写 workspace 共享的那份——否则侧问收尾会污染主线的 stop
+ * 计数(详见 fork() 内 execOpts 注释)。
  *
  * readTrace:workspace root 经 cc 的 slug 规则(`/`与`.`都替换成`-`)映射到
  * `<claudeProjectsDir>/<slug>/<session_id>.jsonl`,按行增量解析并归一化——
@@ -81,7 +84,7 @@ import { homedir } from 'os'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { TmuxDriver } from '../tmux/driver.js'
-import { CliEventChannel } from '../cli-events.js'
+import { CliEventChannel, EVENTS_FILE_ENV } from '../cli-events.js'
 import { OutputLog } from '../output-log.js'
 import { AsyncMutex } from '../async-mutex.js'
 import { writeMetaAtomic, maxSeqOnDisk } from '../meta-store.js'
@@ -421,10 +424,14 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // fork/resume 抢到同一个号位。
     let handle!: IncarnationHandle
     let runtime!: Runtime
+    // 侧问收尾的 stop 事件必须落到 fork 化身自己的事件文件,不能进 workspace 共享的那份
+    // (见下方 execFileAsync 的 env 注释)。
+    let forkEventsFile!: string
     await this.getMutex(prev.worker_id).run(async () => {
       const seq = await this.nextSeq(prev.worker_id)
       handle = { worker_id: prev.worker_id, seq, impl: 'claude-code', session_ref: sessionId }
       const outputFile = join(dir, `output-${seq}.log`)
+      forkEventsFile = join(dir, `fork-events-${seq}.jsonl`)
       runtime = {
         worker_id: prev.worker_id,
         seq,
@@ -433,7 +440,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         sessionName: '',
         sessionId,
         outputLog: new OutputLog(outputFile),
-        eventChannel: new CliEventChannel(eventsFilePath({ root: prevRuntime.workspaceRoot })),
+        eventChannel: new CliEventChannel(forkEventsFile),
         state: 'running',
         stopBaseline: 0,
         killed: false,
@@ -448,10 +455,21 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     const args = ['-p', forkInput, '--resume', prev.session_ref, '--fork-session', '--output-format', 'text']
     const shellCommand = `${this.claudeBin} ${args.map(shQuote).join(' ')}`
 
+    // 事件文件重定向:cc 的 hooks 在 print 模式同样执行,而 Stop hook 配在 **workspace 级**
+    // 的 .claude/settings.json 里、写的是 **workspace 级**共享的 events-cli.jsonl——不重定向
+    // 的话,侧问收尾会往主线正在用的那份事件文件追加一条 stop,污染主线的 stop 计数:主线
+    // 跑到一半被 watcher 判成 idle 推一条假唤醒,而它真正跑完这一轮时因为"状态没变"不再
+    // 产生迁移,真正的轮次边界唤醒被整条吞掉。侧问按设计就是在主线还在跑的时候发起的
+    // (queryWorker 把 fork 放在锁外、不阻塞主线),这不是罕见时序。
+    // 这里给子进程 env 塞一个 fork 化身私有的事件文件路径,cc 拉起 hook 子进程时原样继承
+    // 下去,hook 写私有文件(见 CliEventChannel.EVENTS_FILE_ENV)。交互态(tmux pane)不设
+    // 这个变量,照旧写共享文件,行为不变。
+    const execOpts = { cwd: prevRuntime.workspaceRoot, env: { ...process.env, [EVENTS_FILE_ENV]: forkEventsFile } }
+
     let stdout = ''
     let endedReason: IncarnationEndReason
     try {
-      const result = await execFileAsync('/bin/sh', ['-c', shellCommand], { cwd: prevRuntime.workspaceRoot })
+      const result = await execFileAsync('/bin/sh', ['-c', shellCommand], execOpts)
       stdout = result.stdout
       endedReason = 'completed'
     } catch (err) {
@@ -679,49 +697,64 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
    * (与 spawn()/sendInput() 推进 baseline 的动机一致)——代价是重建后首次 syncState 之前
    * 无法准确复原"当时到底是 running 还是 idle"这个精细区分(只影响 idle 报告精度,不影响
    * exited 判定的正确性,是可接受的已知限制)。
+   *
+   * **重建整体在 per-worker 互斥锁内完成**(锁内再查一次 map):重启后同一化身被并发首次
+   * 触达(如启动对账的 state() 与 recovery 触发的 sendInput() 同时到达)是常态,而
+   * "runtimes.get 未命中"到"runtimes.set"之间隔着 readMetaFile / isAlive / readAll 三个
+   * await。不加锁时两次调用各自重建一个 Runtime、各装一个 watcher,后 set 的胜出;败者却被
+   * 自己 watcher 的闭包持有——transitionExited 只摘胜者的,败者的 fs.watch + 2s 轮询到进程
+   * 退出为止一直活着,每个 stop 事件两边各迁移一次,harness 收到两次 onStateChange、manager
+   * 被重复唤醒,持续整个进程生命周期。锁内重查让后来者直接复用前一次的成果,不产出第二个
+   * runtime,也就没有第二个 watcher 可泄漏。
    */
   private async ensureRuntime(ref: { worker_id: string; seq: number; session_ref?: string }): Promise<Runtime | undefined> {
     const key = instanceKey(ref)
     const existing = this.runtimes.get(key)
     if (existing) return existing
 
-    const dir = join(this.deps.dataDir, ref.worker_id)
-    const meta = await this.readMetaFile(dir, ref.seq)
-    if (!meta) return undefined
+    return this.getMutex(ref.worker_id).run(async () => {
+      // 锁内重查:排在前面的另一次 ensureRuntime 可能已经重建好了(见方法注释)。
+      const resident = this.runtimes.get(key)
+      if (resident) return resident
 
-    const sessionName = `crabot-w-${ref.worker_id}-${ref.seq}`
-    const alive = await this.tmux.isAlive(sessionName)
-    const workspaceRoot = meta.workspace_root ?? ''
-    const sessionId = meta.session_id ?? ref.session_ref ?? ''
-    const outputFile = join(dir, `output-${ref.seq}.log`)
-    const eventsPath = workspaceRoot ? eventsFilePath({ root: workspaceRoot }) : join(dir, `.no-workspace-events-${ref.seq}.jsonl`)
-    const eventChannel = new CliEventChannel(eventsPath)
+      const dir = join(this.deps.dataDir, ref.worker_id)
+      const meta = await this.readMetaFile(dir, ref.seq)
+      if (!meta) return undefined
 
-    let stopBaseline = 0
-    if (workspaceRoot) {
-      const events = await eventChannel.readAll()
-      stopBaseline = events.filter((e) => e.kind === 'stop').length
-    }
+      const sessionName = `crabot-w-${ref.worker_id}-${ref.seq}`
+      const alive = await this.tmux.isAlive(sessionName)
+      const workspaceRoot = meta.workspace_root ?? ''
+      const sessionId = meta.session_id ?? ref.session_ref ?? ''
+      const outputFile = join(dir, `output-${ref.seq}.log`)
+      const eventsPath = workspaceRoot ? eventsFilePath({ root: workspaceRoot }) : join(dir, `.no-workspace-events-${ref.seq}.jsonl`)
+      const eventChannel = new CliEventChannel(eventsPath)
 
-    const runtime: Runtime = {
-      worker_id: ref.worker_id,
-      seq: ref.seq,
-      dir,
-      workspaceRoot,
-      sessionName,
-      sessionId,
-      outputLog: new OutputLog(outputFile),
-      eventChannel,
-      state: alive ? 'running' : 'exited',
-      ended_reason: alive ? undefined : meta.ended_reason,
-      stopBaseline,
-      killed: false,
-    }
-    this.runtimes.set(key, runtime)
-    // 重启后重连接管(§13):会话还活着的化身在这里重新装上文件监视,它之后每一轮 hook
-    // 都能继续推状态给 harness。已终态的化身 startEventWatch 自己会短路掉。
-    this.startEventWatch(runtime, { worker_id: ref.worker_id, seq: ref.seq, impl: 'claude-code', session_ref: sessionId })
-    return runtime
+      let stopBaseline = 0
+      if (workspaceRoot) {
+        const events = await eventChannel.readAll()
+        stopBaseline = events.filter((e) => e.kind === 'stop').length
+      }
+
+      const runtime: Runtime = {
+        worker_id: ref.worker_id,
+        seq: ref.seq,
+        dir,
+        workspaceRoot,
+        sessionName,
+        sessionId,
+        outputLog: new OutputLog(outputFile),
+        eventChannel,
+        state: alive ? 'running' : 'exited',
+        ended_reason: alive ? undefined : meta.ended_reason,
+        stopBaseline,
+        killed: false,
+      }
+      this.runtimes.set(key, runtime)
+      // 重启后重连接管(§13):会话还活着的化身在这里重新装上文件监视,它之后每一轮 hook
+      // 都能继续推状态给 harness。已终态的化身 startEventWatch 自己会短路掉。
+      this.startEventWatch(runtime, { worker_id: ref.worker_id, seq: ref.seq, impl: 'claude-code', session_ref: sessionId })
+      return runtime
+    })
   }
 
   /** meta-<seq>.json 读取,文件不存在/内容损坏一律返回 undefined(供 ensureRuntime 判定
