@@ -9,7 +9,9 @@
  * provision:与 spawn 分离的独立步骤(WorkerAdapter 契约本就是两个方法),由调用方在 spawn 前
  * 调用一次,把 workspace 布好——.claude/settings.json(Stop/Notification hook 接到
  * CliEventChannel.hookCommand,permissions 预配置 acceptEdits 降弹窗)、.claude/skills/(复用
- * Task 3 的 materializeSkills)、.mcp.json(renderMcpJson)、CLAUDE.md(renderContextMd)。
+ * Task 3 的 materializeSkills)、.mcp.json(renderMcpJson)、CLAUDE.md(renderContextMd),
+ * 外加全局 ~/.claude.json 里该 workspace 的信任记录(trustWorkspace,消掉首次进入新目录的
+ * 信任弹窗——它发生在 --permission-mode 之前,命令行拦不住)。
  *
  * spawn 提交纪律:tmux newSession 成功之后才落 meta(running)+注册 runtime——newSession 失败
  * 时不留任何持久痕迹(session_id 可重生成,workspace 内 provision 产物残留可接受),同 worker_id
@@ -127,6 +129,21 @@ function validateSessionRef(sessionRef: string): void {
 /** Re-export for backward compatibility and convenience. */
 export { WorkerExitedError }
 
+/** 全局 ~/.claude.json 的读-改-写互斥锁,按文件路径共享(module 级,跨 adapter 实例生效)。
+ * cc 的信任表是**全局单文件**(与 codex 写 workspace 内 config.toml 的天然隔离相反),多个
+ * worker 并发 provision 时若各读各写,后写的一份会整份覆盖先写的,先写的那条信任记录丢失 →
+ * 那个 worker 照样卡弹窗。跨进程侧 cc 自己也不加锁,同类竞态无法单方面消除,这里只保证
+ * 本进程内(agent 是单实例,worker provision 全在这一个进程里)串行。 */
+const claudeConfigMutexes = new Map<string, AsyncMutex>()
+function claudeConfigMutex(path: string): AsyncMutex {
+  let m = claudeConfigMutexes.get(path)
+  if (!m) {
+    m = new AsyncMutex()
+    claudeConfigMutexes.set(path, m)
+  }
+  return m
+}
+
 /** hook 事件文件路径约定:workspace 内 .claude/events-cli.jsonl。provision 与 spawn 都按此约定定位,保持一致。 */
 export function eventsFilePath(ws: Workspace): string {
   return join(ws.root, '.claude', 'events-cli.jsonl')
@@ -165,6 +182,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   private readonly tmux: TmuxDriver
   private readonly claudeBin: string
   private readonly claudeProjectsDir: string
+  private readonly claudeConfigPath: string
   private readonly runtimes = new Map<string, Runtime>()
   private readonly mutexes = new Map<string, AsyncMutex>()
 
@@ -176,12 +194,16 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       /** cc trace 文件根目录,默认 ~/.claude/projects;detect() 的 activated 检查也复用它
        *(取 dirname 得到 ~/.claude/)。测试用可注入 fixture 目录,不依赖开发机真实 home。 */
       readonly claudeProjectsDir?: string
+      /** cc 的全局配置文件(信任表所在),默认 ~/.claude.json。测试注入临时路径,
+       * 避免往开发机的真实文件里写 workspace 记录。 */
+      readonly claudeConfigPath?: string
       readonly onStateChange?: (h: IncarnationHandle, state: WorkerContractState) => void
     },
   ) {
     this.tmux = deps.tmux ?? new TmuxDriver()
     this.claudeBin = deps.claudeBin ?? 'claude'
     this.claudeProjectsDir = deps.claudeProjectsDir ?? join(homedir(), '.claude', 'projects')
+    this.claudeConfigPath = deps.claudeConfigPath ?? join(homedir(), '.claude.json')
   }
 
   async detect(): Promise<DetectResult> {
@@ -222,6 +244,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     }
     await fs.writeFile(join(claudeDir, 'settings.json'), JSON.stringify(settings, null, 2) + '\n', 'utf-8')
 
+    await this.trustWorkspace(ws.root)
+
     await materializeSkills(ws.root, caps.skills, '.claude/skills')
 
     const mcpServers = caps.mcp_servers as unknown as ProvisionSources['mcpServers']
@@ -236,6 +260,84 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       }),
       'utf-8',
     )
+  }
+
+  /** 把 workspace 预置成"已信任",消灭 cc 首次进入新目录时的信任弹窗。
+   *
+   * m2 实测(cc 2.1.220):交互式启动遇到没见过的目录会先弹
+   * `Do you trust this folder?`,这个检查发生在 `--permission-mode` **之前**,命令行没有
+   * 任何 flag 能跳过——v3 给每个 worker 都建新 workspace,不预置就每次必卡:tmux 会话在、
+   * 台账 running,但 hook 一次都不触发(生产实测 69 分钟零事件,events-cli.jsonl 都不存在)。
+   * 开关是全局 ~/.claude.json 里 `projects["<路径>"].hasTrustDialogAccepted = true`。
+   *
+   * 路径必须用 realpath:cc 自己写入这张表时用的是解析过软链的路径(如 macOS 上 /tmp →
+   * /private/tmp),用逻辑路径预写实测完全无效、弹窗照旧。与 codex 侧写
+   * `[projects."<realpath>"] trust_level = "trusted"` 同一策略(见 codex/adapter.ts 的
+   * provision),差别只在 cc 这张表是**全局共享单文件**,所以要加锁 + 原子替换 + 只补字段。
+   *
+   * 失败一律抛错(fail-loud),不吞:
+   * - 吞掉 → worker 重新静默卡回弹窗,而这个故障态在外部看来是"running 但永远没动静",
+   *   正是本次要根治的、最难诊断的那个现象;
+   * - 文件存在但解析不出来时更不能兜底重写——用户真实项目的条目和登录信息都在同一份文件里,
+   *   宁可 provision 失败(spawn 之前,不留半个 worker),也不能把它覆盖掉。
+   * 文件不存在是正常情形(全新机器),按空配置创建。 */
+  private async trustWorkspace(root: string): Promise<void> {
+    const realRoot = await fs.realpath(root)
+    const configPath = this.claudeConfigPath
+
+    await claudeConfigMutex(configPath).run(async () => {
+      let raw: string | undefined
+      let mode: number | undefined
+      try {
+        raw = await fs.readFile(configPath, 'utf-8')
+        // 只取权限位:原文件是 0644 还是 0600 都原样保留,不因为我们改一次配置就动它的权限。
+        mode = (await fs.stat(configPath)).mode & 0o777
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw new Error(`ClaudeCodeAdapter.provision: cannot read ${configPath} to pre-accept workspace trust: ${(err as Error).message}`)
+        }
+      }
+
+      let config: Record<string, unknown> = {}
+      if (raw !== undefined && raw.trim() !== '') {
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(raw)
+        } catch (err) {
+          throw new Error(
+            `ClaudeCodeAdapter.provision: ${configPath} is not valid JSON (${(err as Error).message}); ` +
+              `refusing to rewrite it — fix or remove the file, then retry`,
+          )
+        }
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+          throw new Error(`ClaudeCodeAdapter.provision: ${configPath} is not a JSON object; refusing to rewrite it`)
+        }
+        config = parsed as Record<string, unknown>
+      }
+
+      const existingProjects = config.projects
+      if (existingProjects !== undefined && (typeof existingProjects !== 'object' || existingProjects === null || Array.isArray(existingProjects))) {
+        throw new Error(`ClaudeCodeAdapter.provision: ${configPath} has a non-object "projects" field; refusing to rewrite it`)
+      }
+      const projects = { ...((existingProjects as Record<string, unknown>) ?? {}) }
+      const entry = projects[realRoot]
+      const merged = typeof entry === 'object' && entry !== null && !Array.isArray(entry) ? { ...(entry as Record<string, unknown>) } : {}
+      // 只补这一个字段:同一个 path 下可能已有 allowedTools / history 等用户数据,不能覆盖。
+      merged.hasTrustDialogAccepted = true
+      projects[realRoot] = merged
+      config.projects = projects
+
+      // 原子替换:先写同目录临时文件再 rename,避免进程/机器在写一半时挂掉留下半截 JSON——
+      // 这份文件是用户全局配置,截断的代价远大于一次 provision 失败。
+      const tmpPath = `${configPath}.crabot-${randomUUID()}.tmp`
+      try {
+        await fs.writeFile(tmpPath, JSON.stringify(config, null, 2) + '\n', { encoding: 'utf-8', mode: mode ?? 0o600 })
+        await fs.rename(tmpPath, configPath)
+      } catch (err) {
+        await fs.rm(tmpPath, { force: true }).catch(() => {})
+        throw new Error(`ClaudeCodeAdapter.provision: cannot write ${configPath} to pre-accept workspace trust: ${(err as Error).message}`)
+      }
+    })
   }
 
   async spawn(spec: SpawnSpec): Promise<IncarnationHandle> {

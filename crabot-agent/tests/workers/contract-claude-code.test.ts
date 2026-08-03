@@ -99,7 +99,15 @@ async function makeClaudeCodeFixture(): Promise<ContractFixture> {
   const claudeBin = `env MOCK_CLI_SCRIPT_FILE=${shQuote(scriptFile)} MOCK_CLI_STOP_HOOK_CMD=${shQuote(stopHookCmd)} node ${shQuote(MOCK_CLI)}`
 
   const tmux = new TmuxDriver()
-  const adapter = new ClaudeCodeAdapter({ dataDir, tmux, claudeBin, claudeProjectsDir })
+  // claudeConfigPath:provision 会往这个"全局 ~/.claude.json"写 workspace 信任记录,
+  // 契约测试一律注入临时路径,不许碰开发机上的真实文件。
+  const adapter = new ClaudeCodeAdapter({
+    dataDir,
+    tmux,
+    claudeBin,
+    claudeProjectsDir,
+    claudeConfigPath: path.join(dataDir, 'fake-claude.json'),
+  })
   // provision 建 .claude/ 目录——hook 写入目标目录必须先存在,否则 printf >> 静默失败
   // (mock-cli 直接执行 hookCmd 本身,不解析 settings.json,但事件文件所在目录仍要求先存在)。
   await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })

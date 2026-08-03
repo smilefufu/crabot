@@ -302,7 +302,7 @@ describe.skipIf(!tmuxAvailable)('WorkerHarness — 真实 claude-code adapter �
         onEvent: (e) => events.push(e),
       }
       const harness = new WorkerHarness(deps)
-      const ccAdapter = new ClaudeCodeAdapter({ dataDir: ccDataDir, claudeBin, onStateChange: harness.handleStateChange })
+      const ccAdapter = new ClaudeCodeAdapter({ dataDir: ccDataDir, claudeConfigPath: join(dataDir, 'fake-claude.json'), claudeBin, onStateChange: harness.handleStateChange })
       adaptersMap.set('claude-code', ccAdapter)
 
       const dialogObjectId = dialogObjectIdForPrivate('friend-cc-integ')
@@ -422,7 +422,7 @@ describe.skipIf(!tmuxAvailable)(
           workersDir,
           now,
         })
-        const adapterA = new ClaudeCodeAdapter({ dataDir: ccDataDir, claudeBin, onStateChange: harness1.handleStateChange })
+        const adapterA = new ClaudeCodeAdapter({ dataDir: ccDataDir, claudeConfigPath: join(dataDir, 'fake-claude.json'), claudeBin, onStateChange: harness1.handleStateChange })
         adaptersMap1.set('claude-code', adapterA)
 
         const aliveWorker = await harness1.spawnWorker({
@@ -465,7 +465,7 @@ describe.skipIf(!tmuxAvailable)(
           workersDir,
           now,
         })
-        const adapterB = new ClaudeCodeAdapter({ dataDir: ccDataDir, claudeBin, onStateChange: harness2.handleStateChange })
+        const adapterB = new ClaudeCodeAdapter({ dataDir: ccDataDir, claudeConfigPath: join(dataDir, 'fake-claude.json'), claudeBin, onStateChange: harness2.handleStateChange })
         adaptersMap2.set('claude-code', adapterB)
 
         // 修复前:adapterB.state() 无 runtime 时直接读 meta,两个 worker 的 meta 都还停留
@@ -495,7 +495,13 @@ describe.skipIf(!tmuxAvailable)(
         workspaceRoot = await fs.mkdtemp(join(tmpdir(), 'harness-integ-cc-restart-ws-'))
 
         const claudeBin = claudeBinFor([{ output: '先答一句' }], ':')
-        const adapterA = new ClaudeCodeAdapter({ dataDir: ccDataDir, claudeBin })
+        // claudeConfigPath:provision 会往这个"全局 ~/.claude.json"写 workspace 信任记录,
+        // 测试注入临时路径,不许碰开发机上的真实文件。
+        const adapterA = new ClaudeCodeAdapter({
+          dataDir: ccDataDir,
+          claudeBin,
+          claudeConfigPath: join(dataDir, 'fake-claude.json'),
+        })
         await adapterA.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
 
         const workerId = `cctest-restart-${randomUUID().slice(0, 8)}`
@@ -509,7 +515,7 @@ describe.skipIf(!tmuxAvailable)(
         })
 
         // 模拟"重启":全新 adapter 实例,同一 dataDir,内存 runtimes 为空,从未见过这个化身。
-        const adapterB = new ClaudeCodeAdapter({ dataDir: ccDataDir, claudeBin: 'unused-not-invoked-by-state' })
+        const adapterB = new ClaudeCodeAdapter({ dataDir: ccDataDir, claudeConfigPath: join(dataDir, 'fake-claude.json'), claudeBin: 'unused-not-invoked-by-state' })
 
         // tmux 会话仍存活 → 回落读 meta(running,spawn 时写的值)——精度有限但至少不是
         // 编造的 exited。
@@ -547,7 +553,7 @@ describe.skipIf(!tmuxAvailable)(
 
         const adaptersMap1 = new Map<WorkerImplId, WorkerAdapter>()
         const harness1 = new WorkerHarness({ adapters: adaptersMap1, defaultImpl: 'claude-code', ledger, workspaces, workersDir, now })
-        const adapterA = new ClaudeCodeAdapter({ dataDir: ccDataDir, claudeBin, onStateChange: harness1.handleStateChange })
+        const adapterA = new ClaudeCodeAdapter({ dataDir: ccDataDir, claudeConfigPath: join(dataDir, 'fake-claude.json'), claudeBin, onStateChange: harness1.handleStateChange })
         adaptersMap1.set('claude-code', adapterA)
 
         const worker = await harness1.spawnWorker({
@@ -568,7 +574,7 @@ describe.skipIf(!tmuxAvailable)(
         // "重启":全新 harness + adapter 实例,指向同一份台账/dataDir,内存 runtimes 为空。
         const adaptersMap2 = new Map<WorkerImplId, WorkerAdapter>()
         const harness2 = new WorkerHarness({ adapters: adaptersMap2, defaultImpl: 'claude-code', ledger, workspaces, workersDir, now })
-        const adapterB = new ClaudeCodeAdapter({ dataDir: ccDataDir, claudeBin, onStateChange: harness2.handleStateChange })
+        const adapterB = new ClaudeCodeAdapter({ dataDir: ccDataDir, claudeConfigPath: join(dataDir, 'fake-claude.json'), claudeBin, onStateChange: harness2.handleStateChange })
         adaptersMap2.set('claude-code', adapterB)
 
         const report = await harness2.reconcileOnStartup()
@@ -614,7 +620,7 @@ describe.skipIf(!tmuxAvailable)(
 
         const adaptersMap1 = new Map<WorkerImplId, WorkerAdapter>()
         const harness1 = new WorkerHarness({ adapters: adaptersMap1, defaultImpl: 'claude-code', ledger, workspaces, workersDir, now })
-        const adapterA = new ClaudeCodeAdapter({ dataDir: ccDataDir, claudeBin, onStateChange: harness1.handleStateChange })
+        const adapterA = new ClaudeCodeAdapter({ dataDir: ccDataDir, claudeConfigPath: join(dataDir, 'fake-claude.json'), claudeBin, onStateChange: harness1.handleStateChange })
         adaptersMap1.set('claude-code', adapterA)
 
         const worker = await harness1.spawnWorker({
@@ -644,7 +650,7 @@ describe.skipIf(!tmuxAvailable)(
         // continueTerminalWorker → reviveIncarnation)能不能独立兜住这种场景。
         const adaptersMap2 = new Map<WorkerImplId, WorkerAdapter>()
         const harness2 = new WorkerHarness({ adapters: adaptersMap2, defaultImpl: 'claude-code', ledger, workspaces, workersDir, now })
-        const adapterB = new ClaudeCodeAdapter({ dataDir: ccDataDir, claudeBin, onStateChange: harness2.handleStateChange })
+        const adapterB = new ClaudeCodeAdapter({ dataDir: ccDataDir, claudeConfigPath: join(dataDir, 'fake-claude.json'), claudeBin, onStateChange: harness2.handleStateChange })
         adaptersMap2.set('claude-code', adapterB)
 
         await expect(harness2.sendToWorker(worker.worker_id, '接着办')).resolves.toBeUndefined()
