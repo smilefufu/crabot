@@ -11,7 +11,7 @@
  * ③ 三个读端点对**真实台账 / 真实输出日志**返回正确数据；
  * ④ 真实状态迁移会发出 `agent.task_status_changed`，载荷逐字对齐 §9.2；
  * ⑤ §11 的 manager slot 解析与"没配 manager slot 也必须能启动"的降级路径；
- * ⑥ `onStart()` 里的启动对账真的跑了。
+ * ⑥ 启动对账真的跑了（发起点在 register 之后，见对应用例）。
  *
  * **唯一被替换的生产件是 manager 的 LLM**：`BootstrapDeps.managerAdapter` 那个 thunk 会经
  * `adapterFromSdkEnv` 建出真会发 HTTP 的 adapter，测试里换成脚本化的 mock（换法见
@@ -631,7 +631,13 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
 
   // --- ⑥ onStart 的启动对账 ---
 
-  it('onStart() 异步跑一次启动对账：台账里残留的 running 化身被对账掉，且不阻塞 onStart 返回', async () => {
+  /**
+   * 对账的**发起点在 register 之后**（`main.ts`：start → register → startManagerStackReconciliation），
+   * 不再挂在 `onStart()` 里：它的 fs 扫描 + tmux 子进程会和 `register()` 的 getaddrinfo 抢同一个
+   * libuv 线程池，并发跑会把注册拖慢、放大冷启动竞态窗口。这里按 main.ts 的真实顺序调用，
+   * 钉住的语义不变：启动时异步跑一次、且不阻塞启动返回。
+   */
+  it('启动时异步跑一次启动对账（register 之后发起）：台账里残留的 running 化身被对账掉，且不阻塞启动', async () => {
     boot()
     const stack = internals.managerStack!
     // 对账把化身判死会落 `exited` 事件，onEvent 的另一条支路会去唤醒监护 manager（要跑 LLM）。
@@ -646,6 +652,8 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     )
 
     await internals.onStart()
+    // main.ts 里这一句跑在 `await agent.register()` 之后
+    agent.startManagerStackReconciliation()
     try {
       // 进程里没有这个化身的任何痕迹（builtin adapter 的 dataDir 下无 meta）→ 对账判定它已死
       await waitUntil(async () => {

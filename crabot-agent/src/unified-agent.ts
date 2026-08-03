@@ -3181,7 +3181,6 @@ export class UnifiedAgent extends ModuleBase {
     // 探測是否有飛書 channel，決定是否注入 read_feishu_document 工具
     this.detectFeishuChannel().catch(() => {/* 探测失败不影响启动 */})
     this.sessionManager.startCleanup()
-    this.startManagerStackReconciliation()
 
     // Connect to external MCP servers (Admin-configured)
     if (this.agentConfig?.mcp_servers && this.agentConfig.mcp_servers.length > 0) {
@@ -3216,7 +3215,12 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   /**
-   * manager 栈的启动对账（§12），`onStart()` 里发一次，**不 await**。
+   * manager 栈的启动对账（§12），启动时发一次，**不 await**。
+   *
+   * **为什么在 register 之后发**（`main.ts`）：对账的 fs 扫描（`scanOrphans` 逐个 worker
+   * 目录 readdir + readFile）和 adapter 的 tmux 子进程都占 libuv 默认 4 线程池，而
+   * `register()` 的 `getaddrinfo` 排在同一个池上——与注册并发跑会把注册拖慢，放大
+   * 「agent 尚未注册 → admin 推不动配置」的冷启动窗口。对账本身什么时候跑都行。
    *
    * **为什么不 await**：对账要向三个 adapter 逐个问在途化身的死活（CLI 实现会起子进程），
    * 台账非空时耗时不可控；agent 的启动不能挂在它上面——`start()` 返回晚了，MM 的健康探测
@@ -3227,7 +3231,7 @@ export class UnifiedAgent extends ModuleBase {
    * `reconcileOnStartup` 走 `LedgerStore.init()` → 一次 `mkdir -p <dataRoot>/agent/ledgers`
    * 加一次空目录 readdir，随后零 worker 可对账。唯一的可观测副作用就是那个空目录被建出来。
    */
-  private startManagerStackReconciliation(): void {
+  startManagerStackReconciliation(): void {
     const stack = this.managerStack
     if (!stack) return
     void reconcileManagerStack(stack)
