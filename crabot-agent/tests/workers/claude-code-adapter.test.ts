@@ -1353,3 +1353,125 @@ describe('ClaudeCodeAdapter.readTrace', () => {
     await expect(adapter.readTrace({ worker_id: 'nope', seq: 1, impl: 'claude-code' })).rejects.toThrow()
   })
 })
+
+/**
+ * 协议 §6.2.3「harness 以文件监视接收」的接线回归:hook 老实往 events-cli.jsonl 写,
+ * 但在接上 CliEventChannel.watch() 之前没人读——cc worker 连"这一轮干完了"的 push 都
+ * 没有(syncState 是纯 pull,生产侧无任何定时器轮询),派得出去收不回来。
+ *
+ * 这些用例的关键约束:**全程不调用 adapter.state()/sendInput()** —— 一旦调了就退回
+ * pull 路径,测不出接线是否存在。
+ */
+describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () => {
+  let dataDir: string
+  let workspaceRoot: string
+  let claudeProjectsDir: string
+
+  beforeEach(async () => {
+    dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-adapter-watch-data-'))
+    workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-adapter-watch-ws-'))
+    claudeProjectsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-adapter-watch-proj-'))
+    await fs.mkdir(path.join(workspaceRoot, '.claude'), { recursive: true })
+  })
+
+  afterEach(async () => {
+    await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(claudeProjectsDir, { recursive: true, force: true }).catch(() => {})
+  })
+
+  async function appendStopEvent(): Promise<void> {
+    await fs.appendFile(
+      eventsFilePath({ root: workspaceRoot }),
+      JSON.stringify({ ts: new Date().toISOString(), kind: 'stop', raw: null }) + '\n',
+      'utf-8',
+    )
+  }
+
+  async function waitFor(predicate: () => boolean, timeoutMs = 4000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (predicate()) return
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    throw new Error('waitFor timeout')
+  }
+
+  it('spawn 之后 hook 往事件文件追加 stop → 无人调用 state()/sendInput() 也能推出 idle 状态回调', async () => {
+    const seen: Array<{ seq: number; state: WorkerContractState }> = []
+    const tmux = new NoopTmux()
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      tmux,
+      claudeBin: 'unused',
+      claudeProjectsDir,
+      onStateChange: (h, state) => {
+        seen.push({ seq: h.seq, state })
+      },
+    })
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '干活', workspace: { root: workspaceRoot } })
+
+    await appendStopEvent()
+    await waitFor(() => seen.some((e) => e.state === 'idle'))
+
+    expect(seen.filter((e) => e.state === 'idle')).toHaveLength(1)
+    expect(seen[seen.length - 1]).toEqual({ seq: h.seq, state: 'idle' })
+
+    await adapter.kill(h)
+  })
+
+  it('化身落终态后 watcher 停止:kill 之后再追加 stop 事件不再产生任何状态回调', async () => {
+    const seen: WorkerContractState[] = []
+    const tmux = new NoopTmux()
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      tmux,
+      claudeBin: 'unused',
+      claudeProjectsDir,
+      onStateChange: (_h, state) => {
+        seen.push(state)
+      },
+    })
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '干活', workspace: { root: workspaceRoot } })
+
+    await adapter.kill(h)
+    expect(seen).toEqual(['exited'])
+
+    await appendStopEvent()
+    await new Promise((r) => setTimeout(r, 500))
+    expect(seen).toEqual(['exited'])
+  })
+
+  it('spawn 时 workspace 里已有历史 stop 事件(同 workspace 的上一化身留下的)不会被误当作本化身刚完成', async () => {
+    // stopBaseline 必须以"建立 runtime 那一刻文件里已有的 stop 数"起算——否则 watcher 的
+    // 首次 pump 读到历史行就会立刻推一个假的 idle 出去(resume 复用同一 workspace 时必然发生)。
+    await appendStopEvent()
+    await appendStopEvent()
+
+    const seen: WorkerContractState[] = []
+    const tmux = new NoopTmux()
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      tmux,
+      claudeBin: 'unused',
+      claudeProjectsDir,
+      onStateChange: (_h, state) => {
+        seen.push(state)
+      },
+    })
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '干活', workspace: { root: workspaceRoot } })
+
+    await new Promise((r) => setTimeout(r, 500))
+    expect(seen).toEqual([])
+
+    // 本化身自己产生的那一条才算数。
+    await appendStopEvent()
+    await waitFor(() => seen.includes('idle'))
+    expect(seen).toEqual(['idle'])
+
+    await adapter.kill(h)
+  })
+})
