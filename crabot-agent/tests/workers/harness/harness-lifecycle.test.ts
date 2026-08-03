@@ -31,7 +31,7 @@ function handleKey(h: IncarnationHandle): string {
 interface FakeAdapterOpts {
   readonly implId?: WorkerImplId
   readonly caps?: Partial<AdapterCapabilities>
-  readonly onStateChange?: (h: IncarnationHandle, state: WorkerContractState) => void
+  readonly onStateChange?: (h: IncarnationHandle, state: WorkerContractState, lastText?: string) => void
   readonly spawnShouldFail?: Error
   readonly forkShouldFail?: Error
   readonly sendInputBehavior?: (h: IncarnationHandle, text: string, opts?: { raw?: boolean }) => Promise<void> | void
@@ -119,10 +119,11 @@ class FakeAdapter implements WorkerAdapter {
     return { fork: false, revive: false, goalMode: false, subagent: false, structuredTrace: false, ...this.opts.caps }
   }
 
-  /** 测试专用:模拟 adapter 自己触发一次状态回调(镜像真实 adapter 内部调用 deps.onStateChange)。 */
-  emitStateChange(h: IncarnationHandle, state: WorkerContractState): void {
+  /** 测试专用:模拟 adapter 自己触发一次状态回调(镜像真实 adapter 内部调用 deps.onStateChange)。
+   * `lastText` 对齐真实 adapter 的可选第三参(轮次边界上 worker 最后说的那段话)。 */
+  emitStateChange(h: IncarnationHandle, state: WorkerContractState, lastText?: string): void {
     this.states.set(handleKey(h), state)
-    this.opts.onStateChange?.(h, state)
+    this.opts.onStateChange?.(h, state, lastText)
   }
 }
 
@@ -269,6 +270,56 @@ describe('WorkerHarness.handleStateChange', () => {
     const [w2] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
     expect(w2.task.status).toBe('completed')
     expect(w2.incarnations[0].ended_reason).toBe('completed')
+  })
+
+  it('adapter 带上轮次末尾的 text 时,state_changed 事件的 detail 里带上它(manager 醒来即知 worker 说了什么)', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
+    fake.emitStateChange(h, 'idle', '  调研完成,结论是 X 方案可行。  ')
+
+    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
+    const [ev] = events.filter((e) => e.kind === 'state_changed')
+    expect(ev.detail).toEqual({ to: 'idle', text: '调研完成,结论是 X 方案可行。' })
+  })
+
+  it('过长的 text 被截断并附标记(周期性进 manager 上下文,必须有上限)', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    const long = '啊'.repeat(2600)
+    const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
+    fake.emitStateChange(h, 'idle', long)
+
+    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
+    const [ev] = events.filter((e) => e.kind === 'state_changed')
+    const text = (ev.detail as { text: string }).text
+    // 保留头部 2000 字符 + 一段告诉 manager"要全文去 read_worker_output"的标记。
+    expect(text.startsWith('啊'.repeat(2000))).toBe(true)
+    expect(text).toContain('已截断')
+    expect(text).toContain('2600')
+    expect(text).toContain('read_worker_output')
+    expect(text.length).toBeLessThan(2000 + 100)
+  })
+
+  it('adapter 不带 text(cc/codex 的 TUI 字节流刻意不带)时 detail 形状不变,不出现空 text 字段', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
+    fake.emitStateChange(h, 'idle')
+    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
+    expect(events.filter((e) => e.kind === 'state_changed')[0].detail).toEqual({ to: 'idle' })
+
+    // 纯空白同样折成"没有正文",不塞空字段。
+    events.length = 0
+    fake.emitStateChange(h, 'running', '   \n  ')
+    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
+    expect(events.filter((e) => e.kind === 'state_changed')[0].detail).toEqual({ to: 'running' })
   })
 
   it('已终态 worker 的迟到状态回调被忽略,不覆盖已有终局', async () => {

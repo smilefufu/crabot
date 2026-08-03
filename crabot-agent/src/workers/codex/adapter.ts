@@ -1040,6 +1040,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     return max + 1
   }
 
+  /** `onStateChange` 的第三参 `lastText` 在 codex 这边同样刻意不传,理由与 cc 完全一致
+   * (输出是 tmux 落的 TUI 原始字节流,无 ANSI 剥离层)——见
+   * `workers/claude-code/adapter.ts` 的 transitionState 注释。 */
   private async transitionState(runtime: Runtime, h: IncarnationHandle, state: WorkerContractState): Promise<void> {
     await writeMetaAtomic(runtime.dir, runtime.seq, {
       seq: runtime.seq,

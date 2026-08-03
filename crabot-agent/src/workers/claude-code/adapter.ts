@@ -761,6 +761,20 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return max + 1
   }
 
+  /**
+   * `onStateChange` 的第三参 `lastText`(轮次边界上 worker 最后说的那段话,harness 会把它
+   * 放进唤醒事件的 detail)在 cc/codex 这边**刻意不传**:
+   *
+   * 这两个实现拉起的是交互式 TUI,输出靠 `tmux pipe-pane -o ... 'cat >> <file>'` 落盘
+   * (见 workers/tmux/driver.ts),拿到的是**终端渲染态原始字节流**——ANSI 控制序列、光标
+   * 移动造成的重复重绘、边框、工具调用面板混在一起,全仓没有任何剥离/归一化层。把它塞进
+   * 唤醒事件等于把这堆字节永久写进 manager 的上下文和 episode 日志,污染远大于收益,而且
+   * 每次转 idle 都要付一遍。
+   *
+   * ANSI 归一化要单独设计(还要处理"TUI 里哪一段才算 assistant 发言"这个问题),不在本次
+   * 范围内。在那之前,cc/codex 的唤醒事件只带状态,manager 需要正文时走 `read_worker_output`
+   * ——那条路本来就通,行为与本次改动之前逐字一致。
+   */
   private async transitionState(runtime: Runtime, h: IncarnationHandle, state: WorkerContractState): Promise<void> {
     await writeMetaAtomic(runtime.dir, runtime.seq, { seq: runtime.seq, state, session_id: runtime.sessionId, workspace_root: runtime.workspaceRoot })
     runtime.state = state

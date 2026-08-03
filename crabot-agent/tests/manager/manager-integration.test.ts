@@ -703,4 +703,85 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
     },
     15000,
   )
+
+  // --- 场景五：唤醒事件自带 worker 的收尾发言 ---
+
+  it(
+    '场景五：worker end_turn 转 idle → 唤醒事件的 detail 带上它最后说的那段 text → ' +
+      'manager 醒来不调 read_worker_output 就能据此向人类汇报',
+    async () => {
+      const managerScript = makeManagerAdapter()
+      const managerNowMs = Date.parse('2026-01-01T00:00:00.000Z')
+      const assembly = await setupAssembly({
+        dataDir,
+        policy: GENEROUS_POLICY,
+        managerAdapter: managerScript.adapter,
+        managerNow: () => new Date(managerNowMs),
+      })
+
+      const WORKER_SAY =
+        '第一阶段跑完了：三个候选里 B 方案最稳，A 有兼容风险。要我接着做 B 的详细设计吗？'
+      // 不调 finish_task —— 自然 end_turn 转 idle，正是"worker 中途停下来说话"这一档。
+      const workerLLM = makeWorkerLLM([{ text: WORKER_SAY, stopReason: 'end_turn' }])
+      assembly.builtinConfigQueue.push({ adapter: workerLLM, model: 'test-worker-model', systemPrompt: '', tools: [] })
+
+      managerScript.queue.push({
+        toolCalls: [{ name: 'spawn_worker', id: 'call_spawn', input: { title: '选型', prompt: '帮我做个方案选型' } }],
+        stopReason: 'tool_use',
+      })
+      managerScript.queue.push({ text: '好的，已经安排下去了。', stopReason: 'end_turn' })
+
+      const key = 'wechat::sess-say' as ManagerKey
+      const episode1 = await assembly.registry.routeHumanMessages('wechat', 'sess-say', [makeChannelMessage('帮我做个方案选型')])
+      expect(episode1.outcome).toBe('completed')
+
+      const [worker] = await assembly.harness.listWorkers(assembly.dialogObjectIdFor(key))
+      // 等**事件**本身出现，不是等台账转 idle——processStateChange 先 upsert 台账、再 appendEvent，
+      // 盯台账会在这两步之间抢跑（实测在全量并发下偶发）。
+      const findIdleEvent = () =>
+        [...assembly.events]
+          .reverse()
+          .find((e) => e.worker_id === worker.worker_id && e.kind === 'state_changed' && e.detail?.to === 'idle')
+      await waitUntil(() => findIdleEvent() !== undefined)
+
+      // 1) harness 事件本身带上了正文（不是只有一个 {to:'idle'}）
+      const idleEvent = findIdleEvent()
+      expect(idleEvent).toBeDefined()
+      expect(idleEvent!.detail).toEqual({ to: 'idle', text: WORKER_SAY })
+
+      // 2) manager 被这条事件唤醒后，**不调 read_worker_output** 直接转述给人类
+      managerScript.queue.push({
+        toolCalls: [
+          {
+            name: 'send_message',
+            id: 'call_send',
+            input: { channel_id: 'wechat', session_id: 'sess-say', content: 'worker 说 B 方案最稳，要我让它继续做详细设计吗？' },
+          },
+        ],
+        stopReason: 'tool_use',
+      })
+      managerScript.queue.push({ text: '已转述。', stopReason: 'end_turn' })
+
+      const callsBefore = managerScript.calls.length
+      const episode2 = await assembly.registry.routeWorkerEvent(idleEvent!)
+      expect(episode2?.outcome).toBe('completed')
+
+      // 3) 语义不变量：worker 的原话真的进了 manager 这一次唤醒的上下文
+      const wakeCall = managerScript.calls[callsBefore]
+      expect(wakeCall).toBeDefined()
+      const wakeText = JSON.stringify(wakeCall.messages)
+      expect(wakeText).toContain(WORKER_SAY)
+      // 正文单独成段渲染，不是塞进 detail 的 JSON 里（否则换行会被转义成 \n 挤成一行）
+      expect(wakeText).toContain('worker 最后说:')
+      expect(wakeText).not.toContain('\\"text\\"')
+
+      // 4) 全程没有 read_worker_output —— 省掉的正是那次往返
+      expect(assembly.toolCallLog.filter((c) => c.key === key).map((c) => c.name)).toEqual(['spawn_worker', 'send_message'])
+
+      const sendCall = assembly.rpcCalls.find((c) => c.method === 'send_message')
+      expect(sendCall).toBeDefined()
+      expect(JSON.stringify(sendCall!.params)).toContain('B 方案最稳')
+    },
+    15000,
+  )
 })
