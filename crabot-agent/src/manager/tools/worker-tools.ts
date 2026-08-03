@@ -145,9 +145,11 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   const spawnWorker = defineTool({
     name: 'spawn_worker',
     description:
-      '派发一个新的 worker 去执行一项任务。异步语义:本工具在 worker 化身创建完成后即返回' +
-      '(不等 worker 把任务做完),返回 worker_id;worker 的后续状态变化(idle/exited)会作为' +
-      '事件唤醒你,不需要主动轮询。impl 缺省按部署偏好选择;workspace 缺省新建。',
+      '派发一个新的 worker 去执行一项任务。用于真正另起炉灶的新任务——是已有任务的延续/' +
+      '补充/返工时改用 send_to_worker 投给原 worker(它会自动复活已结束的会话),新 worker ' +
+      '拿不到旧 worker 积累的上下文。异步语义:本工具在 worker 化身创建完成后即返回' +
+      '(不等 worker 把任务做完),返回 worker_id;worker 每跑完一轮(转 idle)或结束时会作为' +
+      '事件唤醒你,事件里带着它这一轮最后说的那段话。impl 缺省按部署偏好选择;workspace 缺省新建。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -207,9 +209,12 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   const sendToWorker = defineTool({
     name: 'send_to_worker',
     description:
-      '向指定 worker 的信箱投递一条输入。异步语义:本工具在消息送达(或触发透明接续)后即' +
-      '返回,不等 worker 处理完这条消息;worker 后续的状态变化会作为事件唤醒你。命中已' +
-      'cancelled 的任务会被拒绝。raw=true 用于向卡住的交互式界面原样敲键,不是普通对话消息。',
+      '向指定 worker 的信箱投递一条输入,worker 处于什么状态都能投:在跑/空闲的排进信箱,' +
+      '已结束(completed/failed)的会自动复活它原来的会话接着干、上下文完整保留——所以延续、' +
+      '补充、返工一个老任务都走这里,不必先判断它死活,也不必为此新开 worker。异步语义:本工具' +
+      '在投递落地(或复活发起)后即返回,不等 worker 处理完这条消息;worker 每跑完一轮或结束时' +
+      '会作为事件唤醒你,事件里带着它这一轮最后说的那段话。命中已 cancelled 的任务会被拒绝。' +
+      'raw=true 用于向卡住的交互式界面原样敲键,不是普通对话消息。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -316,7 +321,8 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     name: 'list_workers',
     description:
       '同步列出当前对话对象名下的全部 worker(含其它 session 派发到同一对话对象的条目):' +
-      'worker_id、任务状态、化身链等台账信息。',
+      'worker_id、任务状态、化身链等台账信息。新请求进来时先用它找有没有能接着用的 worker' +
+      '(已结束的也算,send_to_worker 会复活它),再决定是复用还是 spawn_worker 开新的。',
     inputSchema: { type: 'object', properties: {} },
     isReadOnly: true,
     call: async (): Promise<ToolCallResult> => {
