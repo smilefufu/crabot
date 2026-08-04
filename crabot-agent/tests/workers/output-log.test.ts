@@ -148,6 +148,22 @@ describe('OutputLog', () => {
     expect(original.endsWith(body)).toBe(true)
   })
 
+  it('cap 边界落在代理对中间时整对一起丢,不留孤立低位代理', async () => {
+    const log = new OutputLog(logPath)
+
+    // 21 个 'A' + 3 个 emoji(每个 2 个 UTF-16 code unit),共 27 个 code unit;
+    // cap=5 时 trimmedChars=22,正好落在第 2 个 emoji 的低位代理上
+    const original = 'A'.repeat(21) + '🎉'.repeat(3)
+    await log.append(original)
+
+    const { chunk } = await log.read({ offset: 0 }, 5)
+    const body = chunk.split('\n').slice(1).join('\n')
+
+    expect(body).toBe('🎉🎉')
+    // 孤立代理经 UTF-8 序列化(JSON-RPC 投递路径)会变成替换字符,这里做一次等价的往返校验
+    expect(Buffer.from(body, 'utf-8').toString('utf-8')).toBe(body)
+  })
+
   it('日志超过原始读窗上限时,尾窗起点落在多字节字符中间也不产生半个字符', async () => {
     const log = new OutputLog(logPath)
 

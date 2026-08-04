@@ -53,6 +53,15 @@ describe('decodeTerminalOutput', () => {
     expect(decodeTerminalOutput('a   \n\n\nb')).toBe('a\nb')
   })
 
+  it('制表符按 8 列 tab stop 补空格,不把词粘在一起', () => {
+    // 落进控制字符丢弃分支的话 `foo\tbar` 会粘成 `foobar`
+    expect(decodeTerminalOutput('foo\tbar')).toBe('foo     bar')
+    // 起点列不同,但都对齐到第 9 列(索引 8)
+    expect(decodeTerminalOutput('a\tb')).toBe('a       b')
+    expect(decodeTerminalOutput('foo\tbar').indexOf('bar')).toBe(8)
+    expect(decodeTerminalOutput('a\tb').indexOf('b')).toBe(8)
+  })
+
   it('丢弃 SGR / 擦除 / OSC 标题这类不产生可见文本的序列', () => {
     const raw = '\x1b]0;window title\x07\x1b[31m\x1b[1mred bold\x1b[0m\x1b[K'
     expect(decodeTerminalOutput(raw)).toBe('red bold')

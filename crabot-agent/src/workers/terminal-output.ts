@@ -118,6 +118,14 @@ export function decodeTerminalOutput(raw: string): string {
       i += 1
       continue
     }
+    if (ch === '\t') {
+      // 制表符按 8 列 tab stop 前进。落进下面的控制字符丢弃分支会把 `foo\tbar` 粘成
+      // `foobar` —— 正是列定位补空格要避免的那类粘词。TUI 重绘阶段少见裸 tab,但透传的
+      // 命令输出(diff、`ls -l`、代码)里不罕见,按真实 tab stop 对齐才读得出列。
+      advanceTo(col + (8 - ((col - 1) % 8)))
+      i += 1
+      continue
+    }
     if (ch < ' ' || ch === '\x7f') {
       i += 1
       continue

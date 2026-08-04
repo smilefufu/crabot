@@ -90,6 +90,11 @@ export class OutputLog {
         let trimmedChars = 0
         if (text.length > cap) {
           trimmedChars = text.length - cap
+          // cap 按 UTF-16 code unit 数,边界可能落在代理对中间(emoji 这类星平面字符在
+          // worker 输出里很常见)。多丢一个 code unit 把整对丢掉,否则开头会留下孤立的
+          // 低位代理,经 UTF-8 序列化(JSON-RPC 投递)变成替换字符。
+          const boundary = text.charCodeAt(trimmedChars)
+          if (boundary >= 0xdc00 && boundary <= 0xdfff) trimmedChars += 1
           text = text.slice(trimmedChars)
         }
 
