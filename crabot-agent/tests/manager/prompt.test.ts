@@ -101,6 +101,24 @@ describe('MANAGER_IDENTITY 静态段内容', () => {
     expect(MANAGER_IDENTITY).toContain('read_worker_output')
   })
 
+  it('含管家纪律：结论拿不到先回去问 worker（这是 manager 自己能解决的事）', () => {
+    // 生产故障：每日反思 worker 全程只调工具、finish_task 收场，manager 手里拿不到交付物，
+    // 直接跟人类说"请检查执行实例的输出链路"。机制侧 send_to_worker 对终态 worker 会透明
+    // 复活、上下文完整保留 —— 缺的不是能力，是 prompt 里"先复用已有 worker"那段讲的是
+    // **新请求进来**该怎么办，"任务完成了但交付物拿不到"是另一个场景，一个字没提。
+    expect(MANAGER_IDENTITY).toContain('结论拿不到就回去问 worker')
+    expect(MANAGER_IDENTITY).toContain('send_to_worker')
+    expect(MANAGER_IDENTITY).toContain('完整上下文')
+    expect(MANAGER_IDENTITY).toContain('才轮到找人类')
+  })
+
+  it('含管家纪律：对人类只讲事情本身（系统内部细节不进给人类的回复）', () => {
+    // 同一次故障的另一半：跟人类说"执行实例的输出链路"，那是系统内部实现，用户不该关心，
+    // 更不该被指使去查。
+    expect(MANAGER_IDENTITY).toContain('对人类只讲事情本身')
+    expect(MANAGER_IDENTITY).toContain('也不让人类去查系统内部')
+  })
+
   it('含管家纪律：不滥用跨 session 投递', () => {
     expect(MANAGER_IDENTITY).toContain('send_message')
     expect(MANAGER_IDENTITY).toContain('只在人类明确要求时才这么做')
