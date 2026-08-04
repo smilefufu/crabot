@@ -1,6 +1,14 @@
 # Crabot 项目进度
 
-> 最后更新：2026-08-03 — 冷启动配置竞态修复（分支 fix/agent-config-pull-retry，未合并 main）
+> 最后更新：2026-08-04 — 模块健康与 Memory 维护最小修复（分支 `fix/module-health-maintenance-minimal`，实施中）
+
+## 2026-08-04 — 模块健康与 Memory 维护最小修复
+
+- 已确认 Spec：`crabot-docs/superpowers/specs/2026-08-03-module-health-maintenance-minimal-fix-design.md`；实施计划：`crabot-docs/superpowers/plans/2026-08-04-module-health-maintenance-minimal-fix.md`。
+- 正式协议已完成旧设计污染清理；本期只做 Memory offload/gate、Agent maintenance system task、Admin restart/错峰、MM child/tree/health recovery。
+- 已完成并分步提交：Memory maintenance worker/offload + fail-fast gate + 轻量 health（`1d0165c`）；Agent builtin maintenance system task 与错误透传（`eb164ea`）；Admin restart 单次委托、受管日任务确定性错峰/去重/更新保护、生产 Schedule 元数据透传（本分支 Step 3）。
+- 验证进度：Memory 定向回归及 Agent/Admin 定向测试、构建均通过；Memory 全量仅保留 1 个可在干净 main 复现的既有 scene-profile 失败。下一步实施 MM 按模块 lifecycle 串行化、精确 child 归属、完整进程树清理与 health recovery。
+- 排除：registration/token/lease、公开 generation/operation、strict identity、Schedule schema/UI、maintenance journal。
 
 ## 2026-08-03 — 冷启动配置竞态：agent 拉配置改为退避重试
 

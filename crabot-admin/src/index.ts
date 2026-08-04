@@ -6078,6 +6078,18 @@ export class AdminModule extends ModuleBase {
       throw new Error(AdminErrorCode.SCHEDULE_NOT_FOUND)
     }
 
+    if (this.isManagedBuiltinSchedule(existing)) {
+      const expectedTrigger = this.getManagedBuiltinTrigger(existing.task_template.type!)
+      if (params.trigger !== undefined
+        && JSON.stringify(params.trigger) !== JSON.stringify(expectedTrigger)) {
+        throw new Error('INVALID_PARAMS')
+      }
+      if (params.task_template !== undefined
+        && params.task_template.type !== existing.task_template.type) {
+        throw new Error('INVALID_PARAMS')
+      }
+    }
+
     if (params.trigger !== undefined) {
       if (params.trigger.type === 'cron' && !this.isValidCronExpression(params.trigger.expression)) {
         throw new Error(AdminErrorCode.INVALID_CRON_EXPRESSION)
@@ -6150,11 +6162,14 @@ export class AdminModule extends ModuleBase {
   }
 
   /**
-   * 立即触发。**不再回 task_id**：v3 的 `trigger_schedule` 是"同步受理即返回"
-   * （protocol-agent-v3 §8.2），派不派 worker、派几个由被唤醒的 manager 在 episode
-   * 内自己决定，受理的那一刻还不存在任何 task。
+   * 立即触发。普通 Schedule 的 `trigger_schedule` 仍是 manager fire-and-forget；
+   * builtin memory_maintenance 由 Agent 先持久化 system task，再返回 task_id。
    */
-  private async handleTriggerNow(params: TriggerNowParams): Promise<{ accepted: true; schedule: Schedule }> {
+  private async handleTriggerNow(params: TriggerNowParams): Promise<{
+    accepted: true
+    schedule: Schedule
+    task_id?: string
+  }> {
     const schedule = this.schedules.get(params.schedule_id)
     if (!schedule) {
       throw new Error(AdminErrorCode.SCHEDULE_NOT_FOUND)
@@ -6169,7 +6184,11 @@ export class AdminModule extends ModuleBase {
     // 从 Map 中取最新状态（handleScheduleTrigger 已更新）
     const updatedSchedule = this.schedules.get(params.schedule_id) ?? schedule
 
-    return { accepted: true, schedule: updatedSchedule }
+    return {
+      accepted: true,
+      schedule: updatedSchedule,
+      ...(result.task_id ? { task_id: result.task_id } : {}),
+    }
   }
 
   // ============================================================================
@@ -6180,18 +6199,15 @@ export class AdminModule extends ModuleBase {
    * ScheduleEngine 到点时调用的回调
    * 替换模板变量 → RPC 调 Agent `trigger_schedule` → 更新 Schedule 状态
    *
-   * **P7/J cutover**：从 `create_task_from_schedule` 切到 `trigger_schedule`
-   * （protocol-agent-v3 §8.2，前者已列入 §8.5 退役接口）。三点语义变化：
-   *
-   * 1. **不再回 task_id** —— 受理即返回，派不派 worker 由被唤醒的 manager 自己决定。
-   *    因此 `last_task_id` 不再写、`admin.schedule_triggered` 不再带 task_id；
-   * 2. **不再由 admin 解析权限** —— v2 是 admin 把 schedule 解析成 `resolved_permissions`
-   *    再下发；v3 改由 agent 按 `origin.creator_friend_id` 解析，所以这里改传
-   *    `creator_friend_id` + `is_builtin` 这两个**事实**，而不是解析结果；
-   * 3. **不再下发 task_type / input** —— §8.2 的入参里没有它们；worker 的选型与
-   *    执行细节都在 manager 那一侧决定。模板变量仍然在 title/description 上渲染。
+   * **P7/J cutover**：普通 Schedule 从 `create_task_from_schedule` 切到
+   * `trigger_schedule` 后仍只唤醒 manager，不产生同步 task_id。唯一例外是
+   * `is_builtin=true && task_template.type=memory_maintenance`：Admin 透传既有模板
+   * 元数据，由 Agent 先持久化 system task，再直接执行 Memory maintenance。
    */
-  private async handleScheduleTrigger(schedule: Schedule): Promise<{ accepted: true } | void> {
+  private async handleScheduleTrigger(schedule: Schedule): Promise<{
+    accepted: true
+    task_id?: string
+  } | void> {
     const repairedSchedule = await this.repairScheduleTargetSessionReference(schedule)
     if (repairedSchedule !== schedule) {
       this.schedules.set(repairedSchedule.id, repairedSchedule)
@@ -6234,7 +6250,9 @@ export class AdminModule extends ModuleBase {
         return
       }
 
-      await this.rpcClient.call<
+      const directMaintenance = schedule.is_builtin === true
+        && schedule.task_template.type === 'memory_maintenance'
+      const triggerResult = await this.rpcClient.call<
         {
           schedule_id: string
           title: string
@@ -6243,8 +6261,12 @@ export class AdminModule extends ModuleBase {
           target_session?: ScheduleTargetSession
           creator_friend_id?: FriendId
           is_builtin?: boolean
+          task_type?: string
+          priority?: TaskPriority
+          input?: Record<string, unknown>
+          tags?: string[]
         },
-        { accepted: true }
+        { accepted: true; task_id?: string }
       >(
         port,
         'trigger_schedule',
@@ -6255,40 +6277,48 @@ export class AdminModule extends ModuleBase {
           ...(schedule.target_session ? { target_session: schedule.target_session } : {}),
           ...(schedule.creator_friend_id ? { creator_friend_id: schedule.creator_friend_id } : {}),
           ...(schedule.is_builtin ? { is_builtin: schedule.is_builtin } : {}),
+          ...(directMaintenance ? {
+            task_type: schedule.task_template.type,
+            priority: schedule.task_template.priority,
+            input: renderTemplateValue(schedule.task_template.input) as Record<string, unknown> | undefined,
+            tags: schedule.task_template.tags,
+          } : {}),
         },
         this.config.moduleId
       )
+
+      // 更新 Schedule 状态（不可变模式）
+      const nowIso = generateTimestamp()
+      const updated: Schedule = {
+        ...schedule,
+        last_triggered_at: nowIso,
+        execution_count: schedule.execution_count + 1,
+        next_trigger_at: this.calculateNextTriggerTime(schedule.trigger),
+        ...(triggerResult.task_id ? { last_task_id: triggerResult.task_id } : {}),
+        updated_at: nowIso,
+      }
+      this.schedules.set(schedule.id, updated)
+
+      // Once 类型触发后自动 disable
+      if (schedule.trigger.type === 'once') {
+        const disabled: Schedule = { ...updated, enabled: false }
+        this.schedules.set(schedule.id, disabled)
+        this.scheduleEngine.disable(schedule.id)
+      }
+
+      // 持久化状态变更（fire-and-forget，不阻塞触发链路）
+      this.saveData().catch(() => {})
+
+      this.publishAdminEvent('admin.schedule_triggered', { schedule: updated })
+      return {
+        accepted: true,
+        ...(triggerResult.task_id ? { task_id: triggerResult.task_id } : {}),
+      }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
       console.error(`[Admin] Schedule trigger RPC failed for ${schedule.id} (${schedule.name}): ${msg}`)
       return
     }
-
-    // 更新 Schedule 状态（不可变模式）
-    const nowIso = generateTimestamp()
-    const updated: Schedule = {
-      ...schedule,
-      last_triggered_at: nowIso,
-      execution_count: schedule.execution_count + 1,
-      next_trigger_at: this.calculateNextTriggerTime(schedule.trigger),
-      updated_at: nowIso,
-    }
-    this.schedules.set(schedule.id, updated)
-
-    // Once 类型触发后自动 disable
-    if (schedule.trigger.type === 'once') {
-      const disabled: Schedule = { ...updated, enabled: false }
-      this.schedules.set(schedule.id, disabled)
-      this.scheduleEngine.disable(schedule.id)
-    }
-
-    // 持久化状态变更（fire-and-forget，不阻塞触发链路）
-    this.saveData().catch(() => {})
-
-    // 发布事件
-    this.publishAdminEvent('admin.schedule_triggered', { schedule: updated })
-
-    return { accepted: true }
   }
 
   // ============================================================================
@@ -6341,13 +6371,31 @@ export class AdminModule extends ModuleBase {
     }
   }
 
-  /** 确保内置 Schedule 存在。首次启动时创建，后续启动跳过已存在的。 */
+  private isManagedBuiltinSchedule(schedule: Pick<Schedule, 'is_builtin' | 'task_template'>): boolean {
+    return schedule.is_builtin === true
+      && (schedule.task_template.type === 'daily_reflection'
+        || schedule.task_template.type === 'memory_maintenance')
+  }
+
+  private getManagedBuiltinTrigger(taskType: string): ScheduleTrigger {
+    const baseHour = taskType === 'daily_reflection' ? 2 : 4
+    const rawOffset = Number(process.env.CRABOT_PORT_OFFSET ?? '0')
+    const delayMinutes = Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset / 100 : 0
+    const totalMinutes = baseHour * 60 + delayMinutes
+    return {
+      type: 'cron',
+      expression: `${totalMinutes % 60} ${Math.floor(totalMinutes / 60) % 24} * * *`,
+      timezone: 'Asia/Shanghai',
+    }
+  }
+
+  /** 确保内置 Schedule 存在。首次启动时创建，后续启动收敛受管字段。 */
   private async ensureBuiltinSchedules(): Promise<void> {
     const SEEDS: Array<Pick<Schedule, 'name' | 'description' | 'trigger' | 'task_template'>> = [
       {
         name: '每日反思',
         description: '每天凌晨 2 点自动执行反思，分析前一天任务执行情况，提炼经验写入长期记忆。',
-        trigger: { type: 'cron', expression: '0 2 * * *', timezone: 'Asia/Shanghai' },
+        trigger: this.getManagedBuiltinTrigger('daily_reflection'),
         task_template: {
           type: 'daily_reflection',
           title: '每日反思 — {{date}}',
@@ -6375,7 +6423,7 @@ export class AdminModule extends ModuleBase {
       {
         name: '记忆维护',
         description: '每天凌晨 4 点跑 memory.run_maintenance(scope=all)，做观察期到期检查 / stale 老化 / trash 清理。',
-        trigger: { type: 'cron', expression: '0 4 * * *', timezone: 'Asia/Shanghai' },
+        trigger: this.getManagedBuiltinTrigger('memory_maintenance'),
         task_template: {
           type: 'memory_maintenance',
           title: '记忆维护 — {{date}}',
@@ -6402,44 +6450,68 @@ export class AdminModule extends ModuleBase {
       }
     }
 
-    // 同名 builtin 多条时只保留 created_at 最早的，避免历史迁移 / loadData
-    // 异常 / 多次 seed 累积出的重复条目（曾出现 3 条 "记忆整理" 同时跑）。
-    const builtinByName = new Map<string, Schedule[]>()
-    for (const sched of this.schedules.values()) {
-      if (!sched.is_builtin) continue
-      const arr = builtinByName.get(sched.name) ?? []
-      arr.push(sched)
-      builtinByName.set(sched.name, arr)
+    // 两个受管日任务以 is_builtin + task_template.type 为身份；其余 builtin
+    // 延续按名称识别。重复项只保留 created_at 最早的原记录与统计。
+    const identityOf = (schedule: Schedule): string => this.isManagedBuiltinSchedule(schedule)
+      ? `type:${schedule.task_template.type}`
+      : `name:${schedule.name}`
+    const builtinByIdentity = new Map<string, Schedule[]>()
+    for (const schedule of this.schedules.values()) {
+      if (!schedule.is_builtin) continue
+      const identity = identityOf(schedule)
+      const group = builtinByIdentity.get(identity) ?? []
+      group.push(schedule)
+      builtinByIdentity.set(identity, group)
     }
-    for (const [name, group] of builtinByName) {
+    for (const [identity, group] of builtinByIdentity) {
       if (group.length <= 1) continue
-      const [keep, ...drop] = [...group].sort((a, b) => a.created_at.localeCompare(b.created_at))
-      for (const dup of drop) this.schedules.delete(dup.id)
-      console.warn(`[Admin] Collapsed ${drop.length} duplicate builtin schedule(s) named "${name}", kept ${keep.id}`)
+      const [keep, ...drop] = [...group].sort((a, b) =>
+        a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id),
+      )
+      for (const duplicate of drop) this.schedules.delete(duplicate.id)
+      console.warn(`[Admin] Collapsed ${drop.length} duplicate builtin schedule(s) for "${identity}", kept ${keep.id}`)
     }
 
-    const existingByName = new Map<string, Schedule>()
-    for (const sched of this.schedules.values()) {
-      if (sched.is_builtin) existingByName.set(sched.name, sched)
+    const findExisting = (seed: Pick<Schedule, 'name' | 'task_template'>): Schedule | undefined => {
+      const managedType = seed.task_template.type === 'daily_reflection'
+        || seed.task_template.type === 'memory_maintenance'
+      return Array.from(this.schedules.values()).find(schedule => schedule.is_builtin && (
+        managedType
+          ? schedule.task_template.type === seed.task_template.type
+          : schedule.name === seed.name
+      ))
     }
 
-    // 已存在的 builtin：把核心执行体（task_template）对齐当前 SEED，
-    // 保留用户可改字段（enabled / trigger / description / 运行统计）。
-    // 这样开发者升级 SEED 中 task_template 文案时，存量实例也会同步生效。
     for (const seed of SEEDS) {
-      const current = existingByName.get(seed.name)
+      const current = findExisting(seed)
       if (!current) continue
-      if (JSON.stringify(current.task_template) === JSON.stringify(seed.task_template)) continue
-      this.schedules.set(current.id, {
-        ...current,
-        task_template: seed.task_template,
-        updated_at: generateTimestamp(),
-      })
-      console.log(`[Admin] Resynced builtin schedule task_template for "${seed.name}"`)
+
+      if (this.isManagedBuiltinSchedule(current)) {
+        // 系统 offset 决定受管 trigger；其他字段和原记录统计保持不变。
+        if (JSON.stringify(current.trigger) !== JSON.stringify(seed.trigger)) {
+          this.schedules.set(current.id, {
+            ...current,
+            trigger: seed.trigger,
+            next_trigger_at: this.calculateNextTriggerTime(seed.trigger),
+            updated_at: generateTimestamp(),
+          })
+        }
+        continue
+      }
+
+      // memory_curate 等既有 builtin 延续原有 SEED 执行体同步语义。
+      if (JSON.stringify(current.task_template) !== JSON.stringify(seed.task_template)) {
+        this.schedules.set(current.id, {
+          ...current,
+          task_template: seed.task_template,
+          updated_at: generateTimestamp(),
+        })
+        console.log(`[Admin] Resynced builtin schedule task_template for "${seed.name}"`)
+      }
     }
 
     for (const seed of SEEDS) {
-      if (existingByName.has(seed.name)) continue
+      if (findExisting(seed)) continue
       const now = generateTimestamp()
       const id = generateId()
       const schedule: Schedule = {
@@ -8955,26 +9027,23 @@ export class AdminModule extends ModuleBase {
     return statusMap.get(moduleId) ?? 'unknown'
   }
 
+  private async resolveModuleStartEnv(moduleId: string): Promise<Record<string, string>> {
+    // Channel 模块的配置存在 channel-configs/ 目录，其他模块在 module-configs/。
+    const channelInstance = this.channelManager.getInstance(moduleId)
+    const config = channelInstance
+      ? await this.channelManager.loadLocalConfig(moduleId) ?? {}
+      : (await this.handleGetModuleConfig({ module_id: moduleId })).config
+
+    // Admin 是模型配置的唯一真相来源；实时解析结果覆盖模块文件中的旧模型字段。
+    return { ...config, ...await this.buildGlobalModelEnv() }
+  }
+
   private async handleStartModuleAdmin(params: {
     module_id: string
   }): Promise<{ status: 'accepted'; tracking_id: string }> {
-    // 1. 读取用户配置
-    //    Channel 模块的配置存在 channel-configs/ 目录，其他模块在 module-configs/
-    const channelInstance = this.channelManager.getInstance(params.module_id)
-    let config: Record<string, string>
-    if (channelInstance) {
-      config = await this.channelManager.loadLocalConfig(params.module_id) ?? {}
-    } else {
-      const result = await this.handleGetModuleConfig({ module_id: params.module_id })
-      config = result.config
-    }
+    const mergedConfig = await this.resolveModuleStartEnv(params.module_id)
 
-    // 2. 全局模型配置始终优先（Admin 是唯一真相来源），
-    //    模块文件只保留非模型的自定义配置（如 CRABOT_MEMORY_DATA_DIR 等）
-    const globalEnv = await this.buildGlobalModelEnv()
-    const mergedConfig = { ...config, ...globalEnv }
-
-    // 3. 调用 MM 的 start_module，注入配置为 env
+    // 调用 MM 的 start_module，注入配置为 env
     const mmEndpoint = process.env.CRABT_MM_ENDPOINT || process.env.CRABOT_MM_ENDPOINT || 'http://localhost:19000'
     const response = await fetch(`${mmEndpoint}/start_module`, {
       method: 'POST',
@@ -9021,13 +9090,28 @@ export class AdminModule extends ModuleBase {
 
   private async handleRestartModuleAdmin(params: {
     module_id: string
+    force?: boolean
   }): Promise<{ status: 'accepted'; tracking_id: string }> {
-    // 先停止
-    await this.handleStopModuleAdmin({ module_id: params.module_id })
-    // 等待 2 秒确保进程完全退出
-    await new Promise(resolve => setTimeout(resolve, 2000))
-    // 再启动
-    return this.handleStartModuleAdmin({ module_id: params.module_id })
+    const env = await this.resolveModuleStartEnv(params.module_id)
+    const mmEndpoint = process.env.CRABT_MM_ENDPOINT || process.env.CRABOT_MM_ENDPOINT || 'http://localhost:19000'
+    const response = await fetch(`${mmEndpoint}/restart_module`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: generateId(),
+        params: {
+          module_id: params.module_id,
+          force: params.force,
+          env,
+        },
+      }),
+    })
+
+    const result = (await response.json()) as { success: boolean; error?: { message: string }; data?: { status: 'accepted'; tracking_id: string } }
+    if (!result.success) {
+      throw new Error(result.error?.message ?? 'restart_module failed')
+    }
+    return result.data!
   }
 
   // ============================================================================
