@@ -1945,6 +1945,78 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 启动期就绪握手(\\
   )
 
   it(
+    '暂扣态置位之后进程才死 → 落 exited(crashed),不吃"非 kill ⇒ completed"的缺省推断',
+    async () => {
+      // 与 cc adapter 的同名用例同款(七轮 review):deadReason 形参只管住"握手等待期间就死了"
+      // 那一个时点,而暂扣是持续状态——idle 落定之后才死的化身,后续任何一次 syncState 判到
+      // exited 仍会吃缺省推断,把没投递过一个字符的 worker 记成"成功完成"。去掉 syncState
+      // exited 分支里的 startupStalled 判断,这条用例就挂。
+      const { adapter, seen, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+      expect(await adapter.state(h)).toBe('idle')
+
+      // 外部收走 pane:不是本进程发起的 kill(runtime.killed 仍为 false),所以走推断分支。
+      execFileSync('tmux', ['kill-session', '-t', `crabot-w-${workerId}-1`], { stdio: 'ignore' })
+
+      expect(await adapter.state(h)).toBe('exited')
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+      expect(meta.ended_reason).toBe('crashed')
+      expect(seen.filter((s) => s.state === 'exited').map((s) => s.report?.endReason)).toEqual(['crashed'])
+    },
+    30000,
+  )
+
+  it(
+    'agent 重启之后才发现死亡(reconcileOnStartup 形态)→ 仍是 crashed:暂扣标志从 meta 复原',
+    async () => {
+      // 与 cc adapter 的同名用例同款:重启后新 adapter 实例的 runtimes 必为空,暂扣态只能靠
+      // 落盘的 startup_stalled 复原,然后 reconcileOnStartup 的 state() 才判到 exited。
+      const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+      expect(await adapter.state(h)).toBe('idle')
+
+      const seen: Array<{ state: WorkerContractState; endReason?: string }> = []
+      const restarted = new CodexWorkerAdapter({
+        dataDir,
+        tmux,
+        codexBin: 'never-used-after-restart',
+        onStateChange: (_h, state, report) => void seen.push({ state, endReason: report?.endReason }),
+      })
+      expect(await restarted.state(h)).toBe('idle') // 重连接管,标志复原
+
+      execFileSync('tmux', ['kill-session', '-t', `crabot-w-${workerId}-1`], { stdio: 'ignore' })
+
+      expect(await restarted.state(h)).toBe('exited')
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+      expect(meta.ended_reason).toBe('crashed')
+      expect(seen).toContainEqual({ state: 'exited', endReason: 'crashed' })
+    },
+    30000,
+  )
+
+  it(
+    'sendInput 投递成功之后才死 → 仍走缺省推断(completed),这条修正不误伤干过活的化身',
+    async () => {
+      // 反向钉住"没干过活"与"干过活"的分界:startupStalled 在 sendInput 成功后被清除(连同
+      // 落盘的 startup_stalled),此后的自然退出照旧是 §6.3 的 completed 推断。
+      const { adapter, seen, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+      expect(await adapter.state(h)).toBe('idle')
+
+      await adapter.sendInput(h, 'Enter', { raw: true })
+      expect(await adapter.state(h)).toBe('running')
+
+      execFileSync('tmux', ['kill-session', '-t', `crabot-w-${workerId}-1`], { stdio: 'ignore' })
+
+      expect(await adapter.state(h)).toBe('exited')
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+      expect(meta.ended_reason).toBe('completed')
+      expect(seen.filter((s) => s.state === 'exited').map((s) => s.report?.endReason)).toEqual(['completed'])
+    },
+    30000,
+  )
+
+  it(
     'manager 出手(sendInput)之后暂扣解除:状态回到 running,落盘也不再带 startup_stalled',
     async () => {
       const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })

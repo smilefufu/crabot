@@ -1959,7 +1959,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
     if (opts.readyDelayMs) envParts.push(`MOCK_CLI_PASTE_READY_DELAY_MS=${opts.readyDelayMs}`)
     if (opts.banner) envParts.push(`MOCK_CLI_BANNER=${shQuote(opts.banner)}`)
 
-    const seen: Array<{ state: WorkerContractState; report?: { outputTail?: string } }> = []
+    const seen: Array<{ state: WorkerContractState; report?: { outputTail?: string; endReason?: string } }> = []
     const adapter = new ClaudeCodeAdapter({
       dataDir,
       claudeConfigPath: fakeClaudeConfig(dataDir),
@@ -2120,6 +2120,85 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
         claudeBin: 'never-used-after-restart',
       })
       expect(await restarted.state(h)).toBe('idle')
+    },
+    30000,
+  )
+
+  it(
+    '暂扣态置位之后进程才死 → 落 exited(crashed),不吃"非 kill ⇒ completed"的缺省推断',
+    async () => {
+      // 七轮 review:上一轮的 deadReason 形参只作用于 reportStartupStall 里的**那一次**
+      // syncState(握手等待期间就死了)。可暂扣是个持续状态——idle 落定之后进程才死(pane
+      // 被外部收走、TUI 自退、机器重启后残留会话消失),后续任何一次 syncState 判到 exited
+      // 仍会吃缺省推断,把一个开工输入一个字符都没投递过的 worker 记成"成功完成"终态,
+      // manager 与 recovery 从此不再过问。去掉 syncState exited 分支里的 startupStalled
+      // 判断,这条用例就挂(拿到 'completed')。
+      const { adapter, seen, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+      expect(await adapter.state(h)).toBe('idle')
+
+      // 外部收走 pane:不是本进程发起的 kill(runtime.killed 仍为 false),所以走推断分支。
+      execFileSync('tmux', ['kill-session', '-t', `crabot-w-${workerId}-1`], { stdio: 'ignore' })
+
+      expect(await adapter.state(h)).toBe('exited')
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+      expect(meta.ended_reason).toBe('crashed')
+      // 台账那一侧收到的也必须是 crashed —— harness 一律取 adapter 上报的这个真值落 task。
+      expect(seen.filter((s) => s.state === 'exited').map((s) => s.report?.endReason)).toEqual(['crashed'])
+    },
+    30000,
+  )
+
+  it(
+    'agent 重启之后才发现死亡(reconcileOnStartup 形态)→ 仍是 crashed:暂扣标志从 meta 复原',
+    async () => {
+      // 上一条覆盖的是同一个 adapter 实例内的时点;这条覆盖 reviewer 点名的那个——重启后
+      // 新 adapter 实例的 runtimes 必为空,暂扣态只能靠落盘的 startup_stalled 复原,然后
+      // reconcileOnStartup 的 state() 才判到 exited。ensureRuntime 不复原这个标志(或
+      // syncState 不看它),这条用例就挂。
+      const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+      expect(await adapter.state(h)).toBe('idle')
+
+      const seen: Array<{ state: WorkerContractState; endReason?: string }> = []
+      const restarted = new ClaudeCodeAdapter({
+        dataDir,
+        claudeConfigPath: fakeClaudeConfig(dataDir),
+        tmux,
+        claudeBin: 'never-used-after-restart',
+        onStateChange: (_h, state, report) => void seen.push({ state, endReason: report?.endReason }),
+      })
+      expect(await restarted.state(h)).toBe('idle') // 重连接管,标志复原
+
+      execFileSync('tmux', ['kill-session', '-t', `crabot-w-${workerId}-1`], { stdio: 'ignore' })
+
+      expect(await restarted.state(h)).toBe('exited')
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+      expect(meta.ended_reason).toBe('crashed')
+      expect(seen).toContainEqual({ state: 'exited', endReason: 'crashed' })
+    },
+    30000,
+  )
+
+  it(
+    'sendInput 投递成功之后才死 → 仍走缺省推断(completed),这条修正不误伤干过活的化身',
+    async () => {
+      // 反向钉住"没干过活"与"干过活"的分界:startupStalled 在 sendInput 成功后被清除(连同
+      // 落盘的 startup_stalled),此后的自然退出照旧是 §6.3 的 completed 推断。把上面那条
+      // 判断写成"历史上暂扣过就 crashed"(不清标志、或改看 meta 的历史值),这条用例就挂。
+      const { adapter, seen, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+      expect(await adapter.state(h)).toBe('idle')
+
+      await adapter.sendInput(h, 'Enter', { raw: true })
+      expect(await adapter.state(h)).toBe('running')
+
+      execFileSync('tmux', ['kill-session', '-t', `crabot-w-${workerId}-1`], { stdio: 'ignore' })
+
+      expect(await adapter.state(h)).toBe('exited')
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+      expect(meta.ended_reason).toBe('completed')
+      expect(seen.filter((s) => s.state === 'exited').map((s) => s.report?.endReason)).toEqual(['completed'])
     },
     30000,
   )

@@ -805,6 +805,18 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
    * 没投递过,completed 不可能为真,再吃这个缺省推断就会把"启动即死"记成"成功完成"
    * (harness 的 taskStatusFromIncarnation 据此把 task 记成 completed,manager 与 recovery
    * 从此不再过问),所以那条路径显式传 `'crashed'`。
+   *
+   * 七轮 review:`deadReason` 只管得住 `reportStartupStall` 里的**那一次**调用,即"握手等待
+   * 期间就死了"这一个时点。而暂扣是个**持续状态**:标志置位、idle 落盘之后进程才死(pane
+   * 被外部收走、TUI 自退、机器重启后残留会话消失),后续任何一次 syncState——事件监视回调、
+   * sendInput 的前置判定、agent 重启后 reconcileOnStartup 调的 state()——判到 exited 仍会吃
+   * 缺省推断,同一个"没干过活却记成成功完成"从另一个时点回来。所以 exited 分支直接看
+   * `runtime.startupStalled`:置位就落 `'crashed'`,覆盖暂扣之后的所有时点;标志跟着
+   * meta.startup_stalled 落盘,重启后由 ensureRuntime 复原,这条判定在新进程里同样成立。
+   *
+   * 三者优先级 `killed > startupStalled > deadReason`:本进程发起的 kill 是确证,永远优先;
+   * `sendInput` 成功投递后会清掉 `startupStalled`(连同落盘的 startup_stalled),所以"投递过
+   * 之后才死"的化身不受这条影响,照旧走缺省推断——这正是"没干过活"与"干过活"的分界。
    */
   private async syncState(
     runtime: Runtime,
@@ -840,7 +852,10 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
       if (computed !== runtime.state) {
         if (computed === 'exited') {
-          await this.transitionExited(runtime, h, runtime.killed ? 'killed' : deadReason)
+          // 暂扣态置位 ⇒ 开工输入一个字符都没投递过(sendInput 成功才清标志),缺省的
+          // "非 kill ⇒ completed"推断在这里明确不可能成立。见本方法注释里的优先级说明。
+          const reason: IncarnationEndReason = runtime.killed ? 'killed' : runtime.startupStalled ? 'crashed' : deadReason
+          await this.transitionExited(runtime, h, reason)
         } else {
           await this.transitionState(runtime, h, computed)
         }

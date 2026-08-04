@@ -1033,6 +1033,12 @@ export class CodexWorkerAdapter implements WorkerAdapter {
    * `'completed'` 是协议 §6.3 给"干过活之后自然退出"校准的推断;启动期就绪握手那条路径上
    * 这个前提不成立(开工输入一个字符都没投递过),由调用方显式传 `'crashed'`,免得"启动即
    * 死"在台账上落成"成功完成"终态。逐字同 cc adapter,见那里的注释。
+   *
+   * 七轮 review:`deadReason` 只管住"握手等待期间就死了"这一个时点,而暂扣是持续状态——
+   * 标志置位、idle 落盘之后才死的化身,后续任何一次 syncState 仍会吃缺省推断。所以 exited
+   * 分支直接看 `runtime.startupStalled`,置位就落 `'crashed'`;标志落盘,重启后由
+   * ensureRuntime 复原,判定在新进程里同样成立。优先级 `killed > startupStalled > deadReason`,
+   * `sendInput` 成功投递会清标志,"投递过之后才死"不受影响。逐字同 cc adapter。
    */
   private async syncState(
     runtime: Runtime,
@@ -1066,7 +1072,10 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
       if (computed !== runtime.state) {
         if (computed === 'exited') {
-          await this.transitionExited(runtime, h, runtime.killed ? 'killed' : deadReason)
+          // 暂扣态置位 ⇒ 开工输入一个字符都没投递过(sendInput 成功才清标志),缺省的
+          // "非 kill ⇒ completed"推断在这里明确不可能成立。见本方法注释里的优先级说明。
+          const reason: IncarnationEndReason = runtime.killed ? 'killed' : runtime.startupStalled ? 'crashed' : deadReason
+          await this.transitionExited(runtime, h, reason)
         } else {
           await this.transitionState(runtime, h, computed)
         }
