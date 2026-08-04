@@ -55,7 +55,7 @@ import type { ManagerKey } from '../../src/manager/types.js'
 import type { ChannelMessage } from '../../src/types.js'
 import { buildManagerToolFace } from '../../src/manager/tools/tool-face.js'
 import { createCrabMemoryServer } from '../../src/mcp/crab-memory.js'
-import { createUserMessage } from '../../src/engine/index.js'
+import { createUserMessage, defineTool } from '../../src/engine/index.js'
 import type { LLMAdapter, LLMStreamParams, ToolDefinition } from '../../src/engine/index.js'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 
@@ -785,6 +785,134 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       const sendCall = assembly.rpcCalls.find((c) => c.method === 'send_message')
       expect(sendCall).toBeDefined()
       expect(JSON.stringify(sendCall!.params)).toContain('B 方案最稳')
+    },
+    15000,
+  )
+
+  // --- 场景六:worker 全程只调工具,交付物只在 finish_task 的 summary 里 ---
+
+  it(
+    '场景六:worker 从头到尾一句 text 都没说、只调工具,最后 finish_task(summary) 收场 → ' +
+      'output 全空,唤醒事件的 detail 带上那段 summary,manager 据此就能向人类汇报',
+    async () => {
+      // 生产故障复现(每日反思定时任务):worker 正常完成(meta 记 ended_reason:'completed'),
+      // 但 session.jsonl 最后一条是 assistant [tool_use]——它全程只调工具,一次 text 都没产出。
+      // builtin adapter 写 output 的条件是 `if (event.assistantText)`,一次都没触发,
+      // output.log 从未被创建;#61 那条"轮次边界带 lastText"也是同一个 assistantText 来源,
+      // 同样为空。于是 manager 手里什么都没有,只好跟人类说"没有生成可读取的报告"。
+      // 而 worker 的结论明明写在 finish_task 的 summary 参数里——它停在 adapter 那一层。
+      //
+      // 定时任务(反思、早报)恰恰都是"闷头干完就交付"这个形态,所以这不是边角情形。
+      const managerScript = makeManagerAdapter()
+      const managerNowMs = Date.parse('2026-01-01T00:00:00.000Z')
+      const assembly = await setupAssembly({
+        dataDir,
+        policy: GENEROUS_POLICY,
+        managerAdapter: managerScript.adapter,
+        managerNow: () => new Date(managerNowMs),
+      })
+
+      const SUMMARY =
+        '今日反思完成:本周三次任务全部按时交付,但两次都是在截止前一天才开工;' +
+        '建议把"开工日"也写进日程,而不是只写截止日。'
+
+      // worker 手里唯一的非终态工具:一个真的会被调用、真的返回结果、且**不产生任何
+      // assistant text** 的干活工具。默认 category 落在 mcp_skill,在 worker 权限档位内。
+      const calledTools: string[] = []
+      const readNotes = defineTool({
+        name: 'read_notes',
+        description: '读取本周任务记录',
+        isReadOnly: true,
+        inputSchema: { type: 'object', properties: {}, required: [] },
+        call: async () => {
+          calledTools.push('read_notes')
+          return { output: '周一 A 任务;周三 B 任务;周五 C 任务', isError: false }
+        },
+      })
+
+      // 剧本的关键:两个 turn 的 content 里都**没有 text 块**,只有 tool_use。
+      // 第一轮调干活工具,第二轮直接 finish_task 收场——这正是那个反思 worker 的形态。
+      const workerLLM = makeWorkerLLM([
+        { toolCalls: [{ name: 'read_notes', id: 'call_notes', input: {} }], stopReason: 'tool_use' },
+        {
+          toolCalls: [{ name: 'finish_task', id: 'call_finish', input: { outcome: 'completed', summary: SUMMARY } }],
+          stopReason: 'tool_use',
+        },
+      ])
+      assembly.builtinConfigQueue.push({
+        adapter: workerLLM,
+        model: 'test-worker-model',
+        systemPrompt: '',
+        tools: [readNotes],
+      })
+
+      managerScript.queue.push({
+        toolCalls: [{ name: 'spawn_worker', id: 'call_spawn', input: { title: '每日反思', prompt: '做一下今天的反思' } }],
+        stopReason: 'tool_use',
+      })
+      managerScript.queue.push({ text: '好的,我去办。', stopReason: 'end_turn' })
+
+      const key = 'wechat::sess-reflect' as ManagerKey
+      const episode1 = await assembly.registry.routeHumanMessages('wechat', 'sess-reflect', [
+        makeChannelMessage('帮我做一下今天的反思'),
+      ])
+      expect(episode1.outcome).toBe('completed')
+
+      const [worker] = await assembly.harness.listWorkers(assembly.dialogObjectIdFor(key))
+      const findExitedEvent = () => findWorkerExitedEvent(assembly.events, worker.worker_id)
+      await waitUntil(() => findExitedEvent() !== undefined)
+
+      // 0) 前提如实成立:worker 真的调了工具、真的一句 text 都没说 → output 通道整个是空的。
+      //    这不是断言实现细节,而是钉住"summary 是这条 worker 唯一的交付物"这个前提;
+      //    前提不成立的话,后面的断言就退化成在测一条本来就有别的出口的路。
+      expect(calledTools).toEqual(['read_notes'])
+      const output = await assembly.harness.readWorkerOutput(worker.worker_id, { offset: 0 })
+      expect(output.chunk).toBe('')
+
+      const exitedEvent = findExitedEvent()!
+      // 1) 任务本身是成功的(finish_task(outcome:'completed') 的结构化确证照常落台账)
+      expect(exitedEvent.task_status).toBe('completed')
+      // 2) #61 那条 lastText 确实为空——它是 assistant text 来源,这个 worker 没有
+      expect(exitedEvent.detail?.text).toBeUndefined()
+      // 3) 核心验收:worker 写在 finish_task 里的结论到达了 manager 的唤醒事件
+      expect(exitedEvent.detail?.summary).toBe(SUMMARY)
+
+      // 4) 语义不变量:那段结论真的进了 manager 这一次唤醒的上下文,manager 不必先回头
+      //    追问、也不必跟人类说"请检查执行实例的输出链路"。
+      managerScript.queue.push({
+        toolCalls: [
+          {
+            name: 'send_message',
+            id: 'call_send',
+            input: {
+              channel_id: 'wechat',
+              session_id: 'sess-reflect',
+              content: '今天的反思出来了:三次任务都按时交付,但都拖到截止前一天才开工,建议把开工日也排进日程。',
+            },
+          },
+        ],
+        stopReason: 'tool_use',
+      })
+      managerScript.queue.push({ text: '已转述。', stopReason: 'end_turn' })
+
+      const callsBefore = managerScript.calls.length
+      const episode2 = await assembly.registry.routeWorkerEvent(exitedEvent)
+      expect(episode2?.outcome).toBe('completed')
+
+      const wakeCall = managerScript.calls[callsBefore]
+      expect(wakeCall).toBeDefined()
+      const wakeText = JSON.stringify(wakeCall.messages)
+      expect(wakeText).toContain(SUMMARY)
+      // 单独成段渲染,不塞进 detail 的 JSON(与 #61 的 text 同一处理:JSON.stringify 会把
+      // 换行转义成 \n,几百字的结论挤成一行转义串)。
+      expect(wakeText).toContain('worker 的收尾结论:')
+      expect(wakeText).not.toContain('\\"summary\\"')
+
+      // 5) 全程没有 read_worker_output —— 读了也是空的,这条路本来就走不通
+      expect(assembly.toolCallLog.filter((c) => c.key === key).map((c) => c.name)).toEqual(['spawn_worker', 'send_message'])
+      const sendCall = assembly.rpcCalls.find((c) => c.method === 'send_message')
+      expect(sendCall).toBeDefined()
+      expect(JSON.stringify(sendCall!.params)).toContain('开工日')
     },
     15000,
   )
