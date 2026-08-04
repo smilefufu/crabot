@@ -101,6 +101,16 @@ export interface StateChangeReport {
    * cc/codex 的 `completed` 是"会话消失且非本进程 kill"的推断。
    */
   readonly endReason?: IncarnationEndReason
+  /**
+   * worker 自己写的收尾结论,来自 builtin 的 `finish_task(summary)`,因此只可能在
+   * `state==='exited'` 时出现,且只有那一条终止路径有——crashed/killed/上下文超限
+   * 收场时 worker 根本没机会写。cc/codex 没有对应的结构化终态上报,不产。
+   *
+   * 它与 `lastText` 是**两样东西**,不能相互替代:`lastText` 是 assistant 说的话,一个
+   * 全程只调工具、最后用 `finish_task` 收场的 worker(定时反思/早报就是这个形态)从头到
+   * 尾一句 text 都没有,`lastText` 与 `output.log` 双双为空,`summary` 是它唯一的交付物。
+   */
+  readonly summary?: string
 }
 
 export interface DetectResult { installed: boolean; activated: boolean; detail?: string }

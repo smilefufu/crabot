@@ -728,7 +728,12 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       if (result.exitToolCall?.name === 'finish_task') {
         const rawOutcome = result.exitToolCall.input.outcome
         const outcome: 'completed' | 'failed' = rawOutcome === 'failed' ? 'failed' : 'completed'
-        await this.transitionExited(instance, handle, outcome, outcome, lastAssistantText)
+        // summary 是 finish_task 的**必填**入参（见 FINISH_TASK_TOOL 的 inputSchema.required），
+        // 但入参来自 LLM，schema 不是运行时保证：非字符串一律当没给，不把 `[object Object]`
+        // 这类东西当作 worker 的结论上报。
+        const rawSummary = result.exitToolCall.input.summary
+        const summary = typeof rawSummary === 'string' ? rawSummary : undefined
+        await this.transitionExited(instance, handle, outcome, outcome, lastAssistantText, summary)
         return false
       }
 
@@ -1164,6 +1169,12 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     ended_reason: IncarnationEndReason,
     outcome?: 'completed' | 'failed',
     lastText?: string,
+    /**
+     * worker 写在 `finish_task(summary)` 里的收尾结论,只有那一条终止路径传得出
+     * （其余路径——crashed/killed/上下文超限——worker 没机会写）。原样上抛给 harness，
+     * 见下面回调处的注释。
+     */
+    summary?: string,
   ): Promise<void> {
     if (instance.pendingInputs.length > 0) {
       const deadLetterMsg = `[dead-letter] incarnation ${instance.worker_id}#${instance.seq} exited with ${instance.pendingInputs.length} unsent message(s): ${instance.pendingInputs.join(' | ')}\n`
@@ -1179,10 +1190,16 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // report.endReason 报的就是上面刚写进 meta 的那个 ended_reason——builtin 这一档是**确证**
     // （finish_task(outcome) 结构化上报 / engine result / kill 标记），harness 据此落台账。
     // 不报的话这个真值就在回调这一跳被丢掉，harness 只能猜（协议 §6.3）。
+    //
+    // report.summary 同理：一个全程只调工具、最后 finish_task 收场的 worker（定时反思/
+    // 早报就是这个形态）从头到尾没有一句 assistant text —— outputLog 的写入条件
+    // `if (event.assistantText)` 一次都不触发，output.log 根本不会被创建，lastText 也是空。
+    // 那段 summary 就是它唯一的交付物；不报的话 manager 手里什么都没有。
     try {
       this.deps.onStateChange?.({ ...handle, session_ref: instance.tip }, 'exited', {
         ...(lastText !== undefined ? { lastText } : {}),
         endReason: ended_reason,
+        ...(summary !== undefined ? { summary } : {}),
       })
     } catch (err) {
       console.error(`[BuiltinWorkerAdapter] onStateChange callback error for ${handle.worker_id}#${handle.seq}:`, err)

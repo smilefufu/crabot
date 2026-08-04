@@ -110,15 +110,36 @@ const HANDOFF_TAIL_MAX_CHARS = 4096
 const WAKE_TEXT_MAX_CHARS = 2000
 
 /**
- * 唤醒事件 detail 里各段正文的统一截断。上限由调用方按该段的成本量纲给(见
- * WAKE_TEXT_MAX_CHARS);空白/空串一律折成 undefined(不往 detail 里塞空字段)。
+ * 唤醒事件 `detail.summary` 的上限(字符数)。比 `detail.text` 宽一倍,两条依据:
+ *
+ * 1. **这是一次性成本**。summary 只在化身落终态的那一次产生一条(`finish_task` 是唯一
+ *    出处),不像 `text` 每个轮次边界都要付一遍。量纲对齐 handoff 那份
+ *    `HANDOFF_TAIL_MAX_CHARS`(4096)——同样是"每次交接才付一回"。
+ * 2. **它常常是唯一的交付物**。一个全程只调工具、最后 `finish_task` 收场的 worker,
+ *    `output.log` 与 `text` 双双为空,截狠了就是把交付物截没;而且截掉的部分**无处可补**
+ *    ——summary 不进 output,`read_worker_output` 读不到它。这与 `text` 的处境根本不同
+ *    (text 截断后还能按 offset 去读全文),所以宁可给宽。
+ *
+ * `finish_task` 要的是"一句话总结",典型几十到几百字符,4096 事实上是个防失控上限,
+ * 不是常规裁剪线。
  */
-function truncateWakeText(text: string | undefined, maxChars: number): string | undefined {
+const WAKE_SUMMARY_MAX_CHARS = 4096
+
+/**
+ * 唤醒事件 detail 里各段正文的统一截断。上限与溢出提示由调用方按该段的处境给(见
+ * WAKE_TEXT_MAX_CHARS / WAKE_SUMMARY_MAX_CHARS);空白/空串一律折成 undefined
+ * (不往 detail 里塞空字段)。
+ *
+ * `overflowHint` 必须如实:它是给 manager 的指引,指向一条读得到全文的路。指向读不到的
+ * 地方(比如让它去 `read_worker_output` 找一份根本不进 output 的 summary)只会换来一次
+ * 白跑的往返和一个"东西丢了"的错误结论。没有这样的路时就留空。
+ */
+function truncateWakeText(text: string | undefined, maxChars: number, overflowHint: string): string | undefined {
   if (!text) return undefined
   const trimmed = text.trim()
   if (!trimmed) return undefined
   if (trimmed.length <= maxChars) return trimmed
-  return trimmed.slice(0, maxChars) + `…[已截断,共 ${trimmed.length} 字符,全文用 read_worker_output 读]`
+  return trimmed.slice(0, maxChars) + `…[已截断,共 ${trimmed.length} 字符${overflowHint}]`
 }
 
 /**
@@ -1327,8 +1348,16 @@ export class WorkerHarness {
     state: WorkerContractState,
     report?: StateChangeReport,
   ): Promise<void> {
-    // 唤醒事件的正文尾巴:截断在这一处收口,三个 adapter 共用同一上限(见 WAKE_TEXT_MAX_CHARS)。
-    const wakeText = truncateWakeText(report?.lastText, WAKE_TEXT_MAX_CHARS)
+    // 唤醒事件的两段正文:截断在这一处收口,三个 adapter 共用同一上限。text 截断后还能按
+    // offset 去 read_worker_output 读全文,summary 不进 output、没有这条后路,所以提示语
+    // 不同、上限也不同(见两个常量各自的注释)。
+    const wakeText = truncateWakeText(report?.lastText, WAKE_TEXT_MAX_CHARS, ',全文用 read_worker_output 读')
+    const wakeSummary = truncateWakeText(report?.summary, WAKE_SUMMARY_MAX_CHARS, '')
+    // detail 里两段正文的组装收口在这里,fork 分支与主线分支共用——不在两处各拼一遍。
+    const wakeDetail = {
+      ...(wakeText ? { text: wakeText } : {}),
+      ...(wakeSummary ? { summary: wakeSummary } : {}),
+    }
     await this.withLock(h.worker_id, async () => {
       const found = await this.deps.ledger.findWorker(h.worker_id)
       if (!found) return // 未知 worker,理论不该发生;防御性丢弃,不抛给 adapter 的回调
@@ -1370,7 +1399,7 @@ export class WorkerHarness {
           )
           return { ...prev, incarnations, updated_at: now }
         })
-        await this.appendEvent(h.worker_id, h.seq, 'state_changed', { to: state, ...(wakeText ? { text: wakeText } : {}) })
+        await this.appendEvent(h.worker_id, h.seq, 'state_changed', { to: state, ...wakeDetail })
         return
       }
 
@@ -1417,7 +1446,7 @@ export class WorkerHarness {
         h.worker_id,
         h.seq,
         'state_changed',
-        { to: state, ...(wakeText ? { text: wakeText } : {}) },
+        { to: state, ...wakeDetail },
         committed?.task.status
       )
     })

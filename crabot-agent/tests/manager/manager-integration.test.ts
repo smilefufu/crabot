@@ -902,7 +902,9 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       const wakeCall = managerScript.calls[callsBefore]
       expect(wakeCall).toBeDefined()
       const wakeText = JSON.stringify(wakeCall.messages)
-      expect(wakeText).toContain(SUMMARY)
+      // SUMMARY 自身含双引号,比对的是它在 JSON 里的转义形态(去掉 stringify 加的外层引号),
+      // 仍是逐字全量比对,不是挑一段子串糊弄过去。
+      expect(wakeText).toContain(JSON.stringify(SUMMARY).slice(1, -1))
       // 单独成段渲染,不塞进 detail 的 JSON(与 #61 的 text 同一处理:JSON.stringify 会把
       // 换行转义成 \n,几百字的结论挤成一行转义串)。
       expect(wakeText).toContain('worker 的收尾结论:')

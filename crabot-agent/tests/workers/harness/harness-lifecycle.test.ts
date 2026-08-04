@@ -406,6 +406,64 @@ describe('WorkerHarness.handleStateChange', () => {
     expect(text.length).toBeLessThan(2000 + 100)
   })
 
+  it('finish_task 的 summary 单独成字段进 detail,与 text 并列(两者互不替代)', async () => {
+    // 直接调 harness.handleStateChange 而不经 FakeAdapter:这里要验的是 harness 对
+    // report.summary 的处理,桩多包一层只会挡住被测面(与本文件"防守分支"那条同款做法)。
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
+    harness.handleStateChange(h, 'exited', {
+      endReason: 'completed',
+      lastText: '  已经全部跑完了。  ',
+      summary: '  盘点完成:三处配置漂移已修正,另有一处需人工确认。  ',
+    })
+
+    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
+    const [ev] = events.filter((e) => e.kind === 'state_changed')
+    expect(ev.detail).toEqual({
+      to: 'exited',
+      text: '已经全部跑完了。',
+      summary: '盘点完成:三处配置漂移已修正,另有一处需人工确认。',
+    })
+  })
+
+  it('adapter 没给 summary 时 detail 里不出现空 summary 字段(cc/codex 与非 finish_task 的终止路径)', async () => {
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
+    harness.handleStateChange(h, 'exited', { endReason: 'crashed' })
+
+    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
+    const [ev] = events.filter((e) => e.kind === 'state_changed')
+    expect(ev.detail).toEqual({ to: 'exited' })
+  })
+
+  it('过长的 summary 按更宽的一次性上限截断,且标记不指向 read_worker_output(summary 不进 output,那里读不到)', async () => {
+    // summary 是一次性成本(只在化身落终态那一次产生一条),上限比每轮都付一遍的 text 宽
+    // 一倍。更要紧的是截断标记:text 截断后还能按 offset 去 read_worker_output 读全文,
+    // summary 没有这条后路——把 manager 指过去只会换来一次白跑的往返。
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    const long = '啊'.repeat(4600)
+    const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
+    harness.handleStateChange(h, 'exited', { endReason: 'completed', summary: long })
+
+    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
+    const [ev] = events.filter((e) => e.kind === 'state_changed')
+    const summary = (ev.detail as { summary: string }).summary
+    expect(summary.startsWith('啊'.repeat(4096))).toBe(true)
+    expect(summary).toContain('已截断')
+    expect(summary).toContain('4600')
+    expect(summary).not.toContain('read_worker_output')
+    expect(summary.length).toBeLessThan(4096 + 100)
+  })
+
   it('adapter 不带 text(cc/codex 的 TUI 字节流刻意不带)时 detail 形状不变,不出现空 text 字段', async () => {
     const { harness, fake } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
