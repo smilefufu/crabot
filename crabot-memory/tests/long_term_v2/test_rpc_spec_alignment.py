@@ -82,6 +82,10 @@ def test_module_dispatcher_exposes_all_v2_rpcs():
 
     module_src = (Path(__file__).parent.parent.parent / "src" / "module.py").read_text("utf-8")
     referenced = set(re.findall(r"self\._lt_v2_rpc\.(\w+)", module_src))
+    # run_maintenance intentionally crosses a module-owned gate/thread boundary
+    # before reusing rpc.py's synchronous request/report helper.
+    if '"run_maintenance": self._run_maintenance' in module_src and "run_maintenance_sync" in module_src:
+        referenced.add("run_maintenance")
     actual = _public_async_methods(LongTermV2Rpc)
     missing = actual - referenced
     assert not missing, (

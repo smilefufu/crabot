@@ -22,7 +22,7 @@ from .core.short_term import ShortTermMemory
 from .utils.llm_client import LLMClient
 from .long_term_v2.store import MemoryStore as LongTermV2Store
 from .long_term_v2.sqlite_index import SqliteIndex as LongTermV2Index
-from .long_term_v2.rpc import LongTermV2Rpc
+from .long_term_v2.rpc import LongTermV2Rpc, run_maintenance_sync
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -40,6 +40,39 @@ except Exception as _e:  # noqa: BLE001
     logger.warning("memory file logger setup failed: %s", _e)
 
 
+class MemoryServiceUnavailableError(RuntimeError):
+    code = "SERVICE_UNAVAILABLE"
+    retryable = False
+
+
+class MaintenanceInProgressError(MemoryServiceUnavailableError):
+    """Retryable rejection while the long-term maintenance gate is held."""
+
+    code = "MEMORY_MAINTENANCE_IN_PROGRESS"
+    retryable = True
+
+    def __init__(self):
+        super().__init__("Long-term memory maintenance is in progress")
+
+
+class MemoryShuttingDownError(MemoryServiceUnavailableError):
+    code = "MEMORY_SHUTTING_DOWN"
+
+    def __init__(self):
+        super().__init__("Memory module is shutting down")
+
+
+_MAINTENANCE_ALLOW_LIST = frozenset({
+    "health",
+    "shutdown",
+    "get_status",
+    "update_config",
+    "write_short_term",
+    "search_short_term",
+    "batch_write_short_term",
+})
+
+
 class MemoryModule:
     """Memory 模块"""
 
@@ -48,6 +81,14 @@ class MemoryModule:
         self.app = FastAPI(title="Memory Module")
         self.server: Optional[uvicorn.Server] = None
         self.server_task: Optional[asyncio.Task] = None
+        self._maintenance_running = False
+        self._maintenance_task: Optional[asyncio.Task] = None
+        self._active_protected_requests = 0
+        self._protected_requests_idle = asyncio.Event()
+        self._protected_requests_idle.set()
+        self._shutdown_requested = False
+        self._shutdown_task: Optional[asyncio.Task] = None
+        self._core_initialization_error: Optional[str] = None
 
         # 初始化存储
         data_dir = Path(self.config.storage.data_dir)
@@ -81,8 +122,11 @@ class MemoryModule:
         # Long-term v2 is the only long-term backend (v1 routing removed).
         from .long_term_v2.reranker import FallbackReranker, HttpReranker
         data_root = str(data_dir / "long_term")
+        index_path = str(data_dir / "long_term_v2.db")
+        self._lt_v2_data_root = data_root
+        self._lt_v2_index_path = index_path
         self._lt_v2_store = LongTermV2Store(data_root)
-        self._lt_v2_index = LongTermV2Index(str(data_dir / "long_term_v2.db"))
+        self._lt_v2_index = LongTermV2Index(index_path)
 
         rerank_url = os.environ.get("RERANK_BASE_URL")
         rerank_key = os.environ.get("RERANK_API_KEY")
@@ -128,6 +172,17 @@ class MemoryModule:
                     "data": result,
                     "timestamp": datetime.utcnow().isoformat() + "Z",
                 })
+            except MemoryServiceUnavailableError as e:
+                return JSONResponse({
+                    "id": body.get("id") if "body" in locals() else None,
+                    "success": False,
+                    "error": {
+                        "code": e.code,
+                        "message": str(e),
+                        "details": {"retryable": e.retryable},
+                    },
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                }, status_code=503)
             except Exception as e:
                 logger.error("Request failed: %s", e, exc_info=True)
                 return JSONResponse({
@@ -142,6 +197,11 @@ class MemoryModule:
 
     async def _dispatch(self, method: str, params: Dict[str, Any]) -> Any:
         """分发请求到对应的处理方法"""
+        if self._shutdown_requested and method not in {"health", "shutdown", "get_status"}:
+            raise MemoryShuttingDownError()
+        if self._maintenance_running and method not in _MAINTENANCE_ALLOW_LIST:
+            raise MaintenanceInProgressError()
+
         handlers: Dict[str, Callable] = {
             "health": self._health,
             "shutdown": self._shutdown,
@@ -172,7 +232,7 @@ class MemoryModule:
             "get_cases_about": self._lt_v2_rpc.get_cases_about,
             "quick_capture": self._lt_v2_rpc.quick_capture,
             "update_long_term": self._lt_v2_rpc.update_long_term,
-            "run_maintenance": self._lt_v2_rpc.run_maintenance,
+            "run_maintenance": self._run_maintenance,
             "trigger_consolidation": self._lt_v2_rpc.trigger_consolidation,
             "get_evolution_mode": self._lt_v2_rpc.get_evolution_mode,
             "set_evolution_mode": self._lt_v2_rpc.set_evolution_mode,
@@ -195,28 +255,71 @@ class MemoryModule:
         if not handler:
             raise ValueError(f"Method not found: {method}")
 
-        return await handler(params)
+        if method in _MAINTENANCE_ALLOW_LIST or method == "run_maintenance":
+            return await handler(params)
+
+        self._active_protected_requests += 1
+        self._protected_requests_idle.clear()
+        try:
+            return await handler(params)
+        finally:
+            self._active_protected_requests -= 1
+            if self._active_protected_requests == 0:
+                self._protected_requests_idle.set()
 
     async def _health(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """健康检查"""
-        short_count = self.short_term_store.get_short_term_count()
-        long_count = self._lt_v2_index.count_entries()
+        """只读内存状态的健康检查。"""
+        if self._shutdown_requested or self._core_initialization_error:
+            status = "unhealthy"
+        elif self._maintenance_running:
+            status = "degraded"
+        else:
+            status = "healthy"
         return {
-            "status": "healthy",
-            "details": {
-                "short_term_count": short_count,
-                "long_term_count": long_count,
-                "total_tokens": (short_count * 100 + long_count * 500),
-                "llm_status": "ready" if self.is_llm_configured() else "not_configured",
-                "configured": self.is_configured(),
-            },
+            "status": status,
+            "details": {"maintenance_running": self._maintenance_running},
         }
 
     async def _shutdown(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """关闭模块"""
+        """受理关闭；实际 server stop 等 maintenance worker 完成。"""
         logger.info("Shutdown requested")
-        asyncio.create_task(self._stop_server())
+        self._shutdown_requested = True
+        if self._shutdown_task is None or self._shutdown_task.done():
+            self._shutdown_task = asyncio.create_task(self._stop_server())
         return {}
+
+    def _run_maintenance_worker(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        store = LongTermV2Store(self._lt_v2_data_root)
+        index = LongTermV2Index(self._lt_v2_index_path)
+        try:
+            return run_maintenance_sync(store, index, params)
+        finally:
+            index.close()
+
+    def _maintenance_finished(self, task: asyncio.Task) -> None:
+        if self._maintenance_task is not task:
+            return
+        self._maintenance_running = False
+        try:
+            task.exception()
+        except (asyncio.CancelledError, Exception):
+            # Retrieve abandoned waiter failures to avoid task warning noise.
+            pass
+
+    async def _maintenance_lifecycle(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        await self._protected_requests_idle.wait()
+        return await asyncio.to_thread(self._run_maintenance_worker, dict(params))
+
+    async def _run_maintenance(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        if self._shutdown_requested:
+            raise MemoryShuttingDownError()
+        if self._maintenance_running:
+            raise MaintenanceInProgressError()
+        self._maintenance_running = True
+        task = asyncio.create_task(self._maintenance_lifecycle(params))
+        self._maintenance_task = task
+        task.add_done_callback(self._maintenance_finished)
+        return await asyncio.shield(task)
 
     async def _get_status(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """获取配置状态"""
@@ -476,6 +579,13 @@ class MemoryModule:
     async def _stop_server(self):
         """停止服务器"""
         await asyncio.sleep(0.5)  # 等待响应返回
+        maintenance = self._maintenance_task
+        if maintenance is not None and not maintenance.done():
+            try:
+                await asyncio.shield(maintenance)
+            except Exception:
+                logger.exception("Maintenance failed while shutdown was waiting")
+        await self._protected_requests_idle.wait()
         if self.server:
             self.server.should_exit = True
         if self.server_task:
@@ -540,9 +650,18 @@ class MemoryModule:
     async def stop(self):
         """停止模块"""
         logger.info("Stopping Memory module")
+        self._shutdown_requested = True
+        maintenance = self._maintenance_task
+        if maintenance is not None and not maintenance.done():
+            try:
+                await asyncio.shield(maintenance)
+            except Exception:
+                logger.exception("Maintenance failed while module stop was waiting")
+        await self._protected_requests_idle.wait()
         self.short_term_store.close()
         self.sqlite_store.close()
         self.scene_profile_store.close()
+        self._lt_v2_index.close()
         if self.server:
             self.server.should_exit = True
         if self.server_task:
