@@ -40,7 +40,7 @@ import type { TriggerScheduleParams, TriggerScheduleResult } from '../../src/uni
 /** 被测的五个私有 handler 的公开视图(TS 私有性只在编译期,运行时照常可调)。 */
 interface AgentUnderTest {
   managerStack?: unknown
-  handleTriggerSchedule(p: TriggerScheduleParams): TriggerScheduleResult
+  handleTriggerSchedule(p: TriggerScheduleParams): Promise<TriggerScheduleResult>
   handleListWorkersAdmin(p: ListWorkersAdminParams): Promise<ListWorkersAdminResult>
   handleGetWorkerDetail(p: GetWorkerDetailParams): Promise<GetWorkerDetailResult>
   handleReadWorkerOutputAdmin(p: ReadWorkerOutputAdminParams): Promise<ReadWorkerOutputAdminResult>
@@ -149,7 +149,7 @@ describe('trigger_schedule(§8.2)', () => {
     vi.restoreAllMocks()
   })
 
-  it('受理即返回 {accepted:true}——routeSchedule 永不 resolve 也不阻塞 handler', () => {
+  it('受理即返回 {accepted:true}——routeSchedule 永不 resolve 也不阻塞 handler', async () => {
     let routeCalls = 0
     const stack = {
       registry: {
@@ -164,7 +164,7 @@ describe('trigger_schedule(§8.2)', () => {
     const agent = buildAgent(stack)
 
     // handler 是同步返回的:拿到返回值这件事本身就证明它没有等待路由完成
-    const result = agent.handleTriggerSchedule({ schedule_id: 'sc-1', title: '巡检', description: '每日巡检' })
+    const result = await agent.handleTriggerSchedule({ schedule_id: 'sc-1', title: '巡检', description: '每日巡检' })
 
     expect(result).toEqual({ accepted: true })
     expect(routeCalls).toBe(1)
@@ -182,7 +182,7 @@ describe('trigger_schedule(§8.2)', () => {
       }
       const agent = buildAgent(stack)
 
-      expect(agent.handleTriggerSchedule({ schedule_id: 'sc-1', title: 't', description: 'd' })).toEqual({
+      await expect(agent.handleTriggerSchedule({ schedule_id: 'sc-1', title: 't', description: 'd' })).resolves.toEqual({
         accepted: true,
       })
 
@@ -196,11 +196,11 @@ describe('trigger_schedule(§8.2)', () => {
     }
   })
 
-  it('参数按 §8.2 原样透传给 registry.routeSchedule(含 target_session / 权限身份)', () => {
+  it('参数按 §8.2 原样透传给 registry.routeSchedule(含 target_session / 权限身份)', async () => {
     const calls: unknown[] = []
     const agent = buildAgent({ registry: { routeSchedule: (p: unknown) => { calls.push(p); return Promise.resolve() } } })
 
-    agent.handleTriggerSchedule({
+    await agent.handleTriggerSchedule({
       schedule_id: 'sc-9',
       title: '标题',
       description: '描述',
@@ -219,9 +219,9 @@ describe('trigger_schedule(§8.2)', () => {
     })
   })
 
-  it('manager 栈未装配时抛明确错误(P5 阶段启动路径尚未接线)', () => {
+  it('manager 栈未装配时抛明确错误(P5 阶段启动路径尚未接线)', async () => {
     const agent = buildAgent()
-    expect(() => agent.handleTriggerSchedule({ schedule_id: 'sc', title: 't', description: 'd' })).toThrow(
+    await expect(agent.handleTriggerSchedule({ schedule_id: 'sc', title: 't', description: 'd' })).rejects.toThrow(
       /Manager stack not initialized/,
     )
   })
@@ -277,7 +277,7 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
     const routeSpy = vi.spyOn(stack.registry, 'routeSchedule')
     const agent = buildAgent(stack)
 
-    const result = agent.handleTriggerSchedule({
+    const result = await agent.handleTriggerSchedule({
       schedule_id: 'sc-sys',
       title: '系统巡检',
       description: '无目标会话',
@@ -305,7 +305,7 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
     const routeSpy = vi.spyOn(stack.registry, 'routeSchedule')
     const agent = buildAgent(stack)
 
-    agent.handleTriggerSchedule({
+    await agent.handleTriggerSchedule({
       schedule_id: 'sc-sess',
       title: '会话内巡检',
       description: '有目标会话',
@@ -330,7 +330,7 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
     const routeSpy = vi.spyOn(stack.registry, 'routeSchedule')
     const agent = buildAgent(stack)
 
-    agent.handleTriggerSchedule({
+    await agent.handleTriggerSchedule({
       schedule_id: 'sc-builtin',
       title: '内置巡检',
       description: '系统内置',
@@ -428,7 +428,7 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
       sessionType: 'private',
     })
 
-    agent.handleTriggerSchedule({
+    await agent.handleTriggerSchedule({
       schedule_id: 'sc-sess',
       title: '会话内巡检',
       description: '有目标会话',
@@ -464,7 +464,7 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
       sessionType: 'private',
     })
 
-    agent.handleTriggerSchedule({
+    await agent.handleTriggerSchedule({
       schedule_id: 'sc-builtin',
       title: '内置巡检',
       description: '系统内置',
