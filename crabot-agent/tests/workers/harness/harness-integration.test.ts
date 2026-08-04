@@ -164,10 +164,11 @@ describe('WorkerHarness — 真实 builtin adapter 集成冒烟(mock LLM)', () =
 
       const [finalWorker] = await harness.listWorkers(dialogObjectId)
       expect(finalWorker.task.status).toBe('completed')
-      // 注:harness 的被动状态回调路径(processStateChange)目前不回填 task.outcome(P3
-      // 范围内没有把 adapter 的 ended_reason/finish_task outcome 透传进 applyStatusTransition
-      // 的 opts.outcome——终态判定完全靠 task.status + incarnation.ended_reason,outcome 字段
-      // 留空是当前实现的既有行为,不是本次集成测试要覆盖的缺口。
+      // 注:被动状态回调路径现在会把 adapter 的 ended_reason 一路透传进
+      // incarnation.ended_reason 与 task.status,但**不**回填 task.outcome——
+      // applyStatusTransition 的 opts.outcome 至今没有任何生产调用点传值,该字段恒
+      // undefined。终态判定完全靠 task.status + incarnation.ended_reason;激活 task.outcome
+      // 是独立议题(它是宽松的 string,装什么要单独定死),不是本次集成测试要覆盖的缺口。
       expect(finalWorker.incarnations).toHaveLength(1)
       expect(finalWorker.incarnations[0].state).toBe('exited')
       expect(finalWorker.incarnations[0].ended_reason).toBe('completed')

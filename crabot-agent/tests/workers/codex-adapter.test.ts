@@ -7,7 +7,7 @@ import * as path from 'node:path'
 import { CodexWorkerAdapter, eventsFilePath, WorkerExitedError, CapabilityNotSupportedError } from '../../src/workers/codex/adapter.js'
 import { TmuxDriver, type TmuxSessionSpec } from '../../src/workers/tmux/driver.js'
 import { CliEventChannel } from '../../src/workers/cli-events.js'
-import type { IncarnationHandle, SpawnSpec, WorkerContractState } from '../../src/workers/types.js'
+import type { IncarnationEndReason, IncarnationHandle, SpawnSpec, WorkerContractState } from '../../src/workers/types.js'
 
 function detectTmux(): boolean {
   try {
@@ -182,7 +182,15 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
 
   async function provisionedAdapter(
     script: MockStep[],
-    opts?: { withRollout?: boolean },
+    opts?: {
+      withRollout?: boolean
+      onStateChange?: (
+        h: IncarnationHandle,
+        state: WorkerContractState,
+        lastText?: string,
+        endReason?: IncarnationEndReason,
+      ) => void
+    },
   ): Promise<{ adapter: CodexWorkerAdapter; workerId: string; rolloutUuid?: string; rolloutFile?: string }> {
     const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
     const stopHookCmd = channel.hookCommand('stop')
@@ -200,7 +208,13 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
 
     const codexBin = codexBinFor(script, stopHookCmd, { rolloutFile })
     // 测试用小轮询上限,避免"故意不配置 rollout 文件"的用例拖慢整个套件。
-    const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin, sessionDiscoveryTimeoutMs: 1500 })
+    const adapter = new CodexWorkerAdapter({
+      dataDir,
+      tmux,
+      codexBin,
+      sessionDiscoveryTimeoutMs: 1500,
+      onStateChange: opts?.onStateChange,
+    })
     // provision 建 .codex/ 目录——hook 写入目标目录必须先存在,否则 printf >> 静默失败。
     await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
     return { adapter, workerId: `codextest-${randomUUID().slice(0, 8)}`, rolloutUuid, rolloutFile }
@@ -311,6 +325,54 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
       await expect(adapter.kill(h)).resolves.toBeUndefined()
       const metaAfterSecondKill = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
       expect(metaAfterSecondKill.ended_reason).toBe('killed')
+    },
+    15000,
+  )
+
+  // ---- onStateChange 的第四参 endReason:codex 上报的是**推断**,不是确证 ----
+
+  it(
+    '会话消失(非本进程 kill)→ 回调第四参上报 completed;这是推断,不表示任务真的成功',
+    async () => {
+      // ⚠️ 这条断言钉住的是 codex adapter 的**能力天花板**,不是"任务成功"这件事的证据。
+      //
+      // codex 的退出判定唯一依据是 `tmux.isAlive`(三源合成状态判定不看退出码):"会话没了
+      // 且 runtime.killed 没置位" ⇒ 记 'completed'。codex 没有任何可得的任务成败信号——
+      // 退出码没捕获(tmux 未设 remain-on-exit)、notify payload 只有 turn-complete、也没有
+      // builtin 那样的 finish_task 结构化上报。所以一个失败退出的 codex worker 在这里同样
+      // 会被记成 'completed'(协议 §6.3 已写明这条可信度分级)。
+      //
+      // 本次修复保证的是"harness 不再丢弃 adapter 已知的真值",不保证"所有实现都知道真值"。
+      // 给 cc/codex 补终态上报是另一个设计任务,不在本次范围。
+      const seen: Array<{ state: WorkerContractState; endReason?: string }> = []
+      const { adapter, workerId } = await provisionedAdapter([{ output: '收尾输出', exit: true }], {
+        onStateChange: (_h, state, _lastText, endReason) => {
+          seen.push({ state, endReason })
+        },
+      })
+      const h = await adapter.spawn(makeSpec(workerId, '你好'))
+
+      await waitForState(adapter, h, 'exited')
+
+      expect(seen).toContainEqual({ state: 'exited', endReason: 'completed' })
+    },
+    15000,
+  )
+
+  it(
+    '本进程 kill → 回调第四参上报 killed(这一档是确证:只有 adapter 知道是不是自己动的手)',
+    async () => {
+      const seen: Array<{ state: WorkerContractState; endReason?: string }> = []
+      const { adapter, workerId } = await provisionedAdapter([{ output: '还在跑' }], {
+        onStateChange: (_h, state, _lastText, endReason) => {
+          seen.push({ state, endReason })
+        },
+      })
+      const h = await adapter.spawn(makeSpec(workerId, '你好'))
+
+      await adapter.kill(h)
+
+      expect(seen).toContainEqual({ state: 'exited', endReason: 'killed' })
     },
     15000,
   )

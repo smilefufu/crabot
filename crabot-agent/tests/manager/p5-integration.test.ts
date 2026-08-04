@@ -35,7 +35,7 @@ import type {
   LLMConnectionInfo,
   ModuleId,
 } from '../../src/types.js'
-import type { IncarnationHandle, WorkerAdapter, WorkerContractState } from '../../src/workers/types.js'
+import type { IncarnationHandle, IncarnationEndReason, WorkerAdapter, WorkerContractState } from '../../src/workers/types.js'
 import type { Event } from 'crabot-shared'
 import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 
@@ -117,12 +117,23 @@ function overrideManagerLLM(stack: ManagerStack, llm: LLMAdapter): void {
   ;(stack.registry as unknown as { deps: { adapter: () => LLMAdapter } }).deps.adapter = () => llm
 }
 
+/**
+ * 三个 adapter 的 `onStateChange` 构造 deps 的完整形参表。第四参 `endReason` 是 adapter 在
+ * `transitionExited` 时持有的 `ended_reason` 真值——它必填,所以直接调这个回调模拟 adapter
+ * 上报时,`exited` 必须一并带上它,否则模拟出的是真实 adapter 不会产生的"退出但无原因"。
+ */
+type AdapterStateCallback = (
+  h: IncarnationHandle,
+  s: WorkerContractState,
+  lastText?: string,
+  endReason?: IncarnationEndReason,
+) => void
+
 /** 读出 adapter 构造时收到的 `onStateChange`（同 bootstrap.test.ts）。 */
 function capturedOnStateChange(
   adapter: WorkerAdapter | undefined,
-): ((h: IncarnationHandle, s: WorkerContractState) => void) | undefined {
-  return (adapter as unknown as { deps?: { onStateChange?: (h: IncarnationHandle, s: WorkerContractState) => void } })
-    ?.deps?.onStateChange
+): AdapterStateCallback | undefined {
+  return (adapter as unknown as { deps?: { onStateChange?: AdapterStateCallback } })?.deps?.onStateChange
 }
 
 function makeLedgerWorker(p: {
@@ -606,7 +617,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     // upsertWorker（落 completed）→ appendEvent（带 task_status）→ onEvent → 事件出口
     const onStateChange = capturedOnStateChange(stack.adapters.get('builtin'))
     expect(onStateChange).toBeDefined()
-    onStateChange!({ worker_id: 'w-evt', seq: 1, impl: 'builtin', session_ref: 'w-evt-ref' }, 'exited')
+    onStateChange!({ worker_id: 'w-evt', seq: 1, impl: 'builtin', session_ref: 'w-evt-ref' }, 'exited', undefined, 'completed')
 
     await waitUntil(() => publishSpy.mock.calls.length > 0)
 

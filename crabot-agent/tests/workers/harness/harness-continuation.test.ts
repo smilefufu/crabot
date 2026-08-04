@@ -25,6 +25,7 @@ import type {
   WorkerContractState,
   IncarnationHandle,
   IncarnationRef,
+  IncarnationEndReason,
   SpawnSpec,
   Workspace,
   OutputCursor,
@@ -43,7 +44,12 @@ function handleKey(h: IncarnationHandle): string {
 interface FakeAdapterOpts {
   readonly implId?: WorkerImplId
   readonly caps?: Partial<AdapterCapabilities>
-  readonly onStateChange?: (h: IncarnationHandle, state: WorkerContractState) => void
+  readonly onStateChange?: (
+    h: IncarnationHandle,
+    state: WorkerContractState,
+    lastText?: string,
+    endReason?: IncarnationEndReason,
+  ) => void
   readonly sendInputBehavior?: (h: IncarnationHandle, text: string, opts?: { raw?: boolean }) => Promise<void> | void
   readonly resumeBehavior?: (prev: IncarnationRef, wakeInput: string) => Promise<IncarnationHandle> | IncarnationHandle
   readonly spawnBehavior?: (spec: SpawnSpec) => Promise<IncarnationHandle> | IncarnationHandle
@@ -127,10 +133,17 @@ class FakeAdapter implements WorkerAdapter {
     return { fork: false, revive: false, goalMode: false, subagent: false, structuredTrace: false, ...this.opts.caps }
   }
 
-  /** 测试专用：模拟 adapter 自己触发一次状态回调（镜像真实 adapter 内部调用 deps.onStateChange）。 */
-  emitStateChange(h: IncarnationHandle, state: WorkerContractState): void {
+  /** 测试专用：模拟 adapter 自己触发一次状态回调（镜像真实 adapter 内部调用 deps.onStateChange）。
+   *
+   * `endReason` 对齐真实 adapter 的可选第四参。三个真实 adapter 的 `transitionExited` 形参
+   * 本就是**必填**的 `ended_reason`，不存在"退出了却说不出原因"的情况——所以这个桩在
+   * `state==='exited'` 时也必须给出一个具体值，缺省取 `'completed'`（化身自然结束、非 kill，
+   * 即本文件绝大多数接续用例的剧本：worker 自己干完一轮退出，manager 再投递新消息触发接续）。
+   * 需要复现 failed/crashed/killed 的用例显式传第三参。第三参 `lastText` 这个桩不模拟
+   * （对齐 cc/codex：它们刻意不传），所以透传时占位为 undefined。 */
+  emitStateChange(h: IncarnationHandle, state: WorkerContractState, endReason?: IncarnationEndReason): void {
     this.states.set(handleKey(h), state)
-    this.opts.onStateChange?.(h, state)
+    this.opts.onStateChange?.(h, state, undefined, state === 'exited' ? (endReason ?? 'completed') : undefined)
   }
 }
 
@@ -299,6 +312,9 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     const oldEntry = w.incarnations[0]
     expect(oldEntry.state).toBe('exited')
     expect(oldEntry.ended_at).toBeTruthy()
+    // 这里的 'completed' 是**兜底缺省**：本用例的桩抛的 WorkerExitedError 不带 ended_reason，
+    // 对应真实场景是"重启后 adapter 常驻 runtime 表为空、连落盘 meta 都读不回来"，此时
+    // adapter 确实无原因可给。带得出原因的场景见下一条用例。
     expect(oldEntry.ended_reason).toBe('completed')
 
     // 之后即便迟到的状态回调才追上来，也不应该覆盖已经回填的终态记录 —— 此时台账主线
@@ -316,6 +332,61 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     await new Promise((resolve) => setTimeout(resolve, 20))
     const [w2] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
     expect(w2.incarnations[0].ended_reason).toBe('completed')
+  })
+
+  it('WorkerExitedError 带着 adapter 侧的 ended_reason=failed 时，revive 前的回填记 failed，不再记成 completed', async () => {
+    // 上一条用例的兜底缺省（'completed'）曾经是**唯一**行为：WorkerExitedError 不携带原因，
+    // reviveIncarnation 只能硬编码。真实场景里 adapter 是知道的——builtin 的 sendInput 在
+    // `instance.state === 'exited'` 时手上就有 `instance.ended_reason`（finish_task 写进去
+    // 的结构化真值），cc/codex 同理有 `runtime.ended_reason`。现在这个真值随错误上抛。
+    const { harness, adaptersMap } = await makeHarness()
+    const fake = new FakeAdapter({
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      sendInputBehavior: (h) => {
+        throw new WorkerExitedError(h.worker_id, h.seq, 'failed')
+      },
+    })
+    adaptersMap.set('builtin', fake)
+
+    const worker = await harness.spawnWorker(spawnParams())
+    // 同上一条：台账主线此刻仍是 running（迟到的状态回调没追上），所以 revive 的回填段
+    // 会真正触发——这正是原来把失败记成成功的那一处。
+    const before = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    expect(before.incarnations[0].state).toBe('running')
+
+    await expect(harness.sendToWorker(worker.worker_id, '继续')).resolves.toBeUndefined()
+
+    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(w.incarnations).toHaveLength(2)
+    expect(w.incarnations[0].state).toBe('exited')
+    expect(w.incarnations[0].ended_reason).toBe('failed')
+    // 接续本身照常发生：回填的是"上一棒怎么结束的"，不是"这次接续要不要做"。
+    expect(fake.resumeCalls).toHaveLength(1)
+    expect(w.incarnations[1].state).toBe('running')
+  })
+
+  it('台账已经记着 failed 的化身触发 revive → 回填段不动它，终态记录不被 completed 覆盖', async () => {
+    // 另一条到达 revive 的路径：状态回调已经追上（台账里就是 exited/failed），此时
+    // reviveIncarnation 的回填段按既有规则整段跳过。钉住"接续不会把已确证的失败洗成成功"。
+    const { harness, adaptersMap } = await makeHarness()
+    const fake = new FakeAdapter({ caps: { revive: true }, onStateChange: harness.handleStateChange })
+    adaptersMap.set('builtin', fake)
+
+    const worker = await harness.spawnWorker(spawnParams())
+    const h: IncarnationHandle = { worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }
+    fake.emitStateChange(h, 'exited', 'failed')
+    await waitUntil(async () => {
+      const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      return w.task.status === 'failed'
+    })
+
+    await expect(harness.sendToWorker(worker.worker_id, '再试一次')).resolves.toBeUndefined()
+
+    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(w.incarnations).toHaveLength(2)
+    expect(w.incarnations[0].ended_reason).toBe('failed') // 没被洗成 completed
+    expect(fake.resumeCalls).toHaveLength(1)
   })
 })
 
@@ -382,6 +453,39 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
     expect(handoffEvents[0].seq).toBe(1)
     const supersededEvents = events.filter((e) => e.kind === 'superseded')
     expect(supersededEvents).toHaveLength(1)
+  })
+
+  it('源化身台账已记 failed 时，HANDOFF.md 的 Previous outcome 写 failed —— 接手化身不会以为上一棒干成了', async () => {
+    // 第四个消费方（台账 / task.status / 对外事件之外）：HANDOFF.md 的 `Previous outcome:` 取
+    // `worker.task.outcome ?? source.ended_reason ?? 'unknown'`，而 task.outcome 在生产链路上
+    // 恒 undefined，所以实际总是取 ended_reason。它被硬编码成 completed 时，跨实现交接的新
+    // 化身会读到"上一化身 outcome: completed"，据此认为任务已经完成。
+    const { harness, adaptersMap } = await makeHarness()
+    const fake = new FakeAdapter({
+      caps: { revive: false },
+      onStateChange: harness.handleStateChange,
+      outputChunk: '跑到一半就失败了',
+    })
+    adaptersMap.set('builtin', fake)
+    const target = new FakeAdapter({ implId: 'claude-code', onStateChange: harness.handleStateChange })
+    adaptersMap.set('claude-code', target)
+
+    const worker = await harness.spawnWorker(spawnParams())
+    const workspaceRoot = worker.incarnations[0].workspace
+
+    // 状态回调已经追上：台账里源化身就是 exited/failed（builtin 的 finish_task(outcome:'failed')）。
+    const h: IncarnationHandle = { worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }
+    fake.emitStateChange(h, 'exited', 'failed')
+    await waitUntil(async () => {
+      const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      return w.task.status === 'failed'
+    })
+
+    await expect(harness.sendToWorker(worker.worker_id, '接着把剩下的做完')).resolves.toBeUndefined()
+
+    const handoffContent = await fs.readFile(join(workspaceRoot, 'HANDOFF.md'), 'utf-8')
+    expect(handoffContent).toContain('Previous outcome: failed')
+    expect(handoffContent).not.toContain('Previous outcome: completed')
   })
 
   it('HANDOFF.md 已存在时追加带时间戳的新段，旧内容仍在（不覆盖）', async () => {
@@ -1286,7 +1390,8 @@ describe('WorkerHarness — 二轮 review PoC 回归：continueTerminalWorker �
     const after = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
     expect(after.incarnations).toHaveLength(3)
     // codex#1 被 revive 之前的补写收尾成终态（reviveIncarnation 既有逻辑：台账态未追上
-    // adapter 真实状态时先回填）。
+    // adapter 真实状态时先回填）。这里的 'completed' 是**兜底缺省**：上面 releaseGate 抛的
+    // WorkerExitedError 不带 ended_reason，回填拿不到真值。带得出真值的场景另有专门用例。
     const codexFirst = after.incarnations.find((i) => i.impl === 'codex' && i.state === 'exited')!
     expect(codexFirst.ended_reason).toBe('completed')
     const finalMainline = after.incarnations[after.incarnations.length - 1]

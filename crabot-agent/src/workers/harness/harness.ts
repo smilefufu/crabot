@@ -242,17 +242,37 @@ export class WorkerHarness {
   /**
    * 见文件头"onStateChange 接线契约"。箭头函数字段:构造时绑定 this,P4 可直接把它作为
    * 三个 adapter 构造 deps 里的 `onStateChange` 传入,不需要 .bind(harness)。
-   * 签名对齐三个 adapter 的 `deps.onStateChange?: (h, state, lastText?) => void`(同步、
-   * 无返回值)——内部把实际的异步台账更新做成 fire-and-forget,任何失败只 console.error,
-   * 不抛给 adapter(adapter 侧本身也已经用 try/catch 包裹了对这个回调的调用,这里双重防御,
-   * 理由一致:观察者的异常不能中断 adapter 自己的状态机推进)。
+   * 签名对齐三个 adapter 的 `deps.onStateChange?: (h, state, lastText?, endReason?) => void`
+   * (同步、无返回值)——内部把实际的异步台账更新做成 fire-and-forget,任何失败只
+   * console.error,不抛给 adapter(adapter 侧本身也已经用 try/catch 包裹了对这个回调的调用,
+   * 这里双重防御,理由一致:观察者的异常不能中断 adapter 自己的状态机推进)。
    *
    * `lastText`:轮次边界上 worker 最后说的那段话,由 adapter 按需提供(只有 builtin 提供,
    * 见其构造 deps 注释)。harness 截断后放进 `state_changed` 事件的 detail,让 manager
    * 醒来就看得到 worker 说了什么,不必先往返一次 `read_worker_output`。
+   *
+   * `endReason`:化身的终止原因,由 adapter 在 `transitionExited` 时提供——那里它本就是
+   * 必填形参,三个实现在调这个回调之前都已经把它写进了自己的 meta。harness 据此落台账,
+   * 不再自己猜(修复前这里硬编码 'completed',把 builtin 经 `finish_task(outcome:'failed')`
+   * 结构化上报的失败真值整个丢掉,台账/task.status/对外事件/HANDOFF.md 四处一起记错)。
+   * 可信度分级见协议 §6.3:builtin 的是确证,cc/codex 的 `completed` 是推断。
    */
-  readonly handleStateChange = (h: IncarnationHandle, state: WorkerContractState, lastText?: string): void => {
-    this.processStateChange(h, state, lastText).catch((err) => {
+  readonly handleStateChange = (
+    h: IncarnationHandle,
+    state: WorkerContractState,
+    lastText?: string,
+    endReason?: IncarnationEndReason,
+  ): void => {
+    // 契约断言(同步抛,不进 fire-and-forget):endReason 只在 exited 时有意义。running/idle
+    // 带着终止原因进来说明调用方的状态机接错了线,静默忽略会让台账落进说不清的中间态——
+    // 抛给 adapter,由它的 try/catch 记 console.error(观察者异常不中断状态机推进)。
+    if (endReason !== undefined && state !== 'exited') {
+      throw new Error(
+        `WorkerHarness.handleStateChange: endReason '${endReason}' is only meaningful for state 'exited', got '${state}' ` +
+          `(${h.worker_id}#${h.seq})`
+      )
+    }
+    this.processStateChange(h, state, lastText, endReason).catch((err) => {
       console.error(`[WorkerHarness] handleStateChange failed for ${h.worker_id}#${h.seq}:`, err)
     })
   }
@@ -422,7 +442,14 @@ export class WorkerHarness {
         // continueTerminalWorker 的 sourceSeq 核对注释)——同样转入透明接续,对
         // sendToWorker 的调用方完全无感(不重新抛出)。
         if (err instanceof WorkerExitedError) {
-          await this.continueTerminalWorker(workerId, item.text, incarnation.impl as WorkerImplId, incarnation.seq, item.raw)
+          await this.continueTerminalWorker(
+            workerId,
+            item.text,
+            incarnation.impl as WorkerImplId,
+            incarnation.seq,
+            item.raw,
+            err.ended_reason
+          )
           return
         }
         throw err
@@ -512,11 +539,20 @@ export class WorkerHarness {
     text: string,
     sourceImpl: WorkerImplId,
     sourceSeq: number,
-    raw: boolean
+    raw: boolean,
+    /**
+     * 调用方是从 adapter 抛出的 WorkerExitedError 走到这里时,该错误携带的 adapter 侧
+     * `ended_reason` 真值;调用方是读台账 state==='exited' 走到这里的则不带(那种情形下
+     * 台账已经有终态记录,reviveIncarnation 的回填段本就不会触发)。
+     */
+    sourceEndReason?: IncarnationEndReason
   ): Promise<void> {
     await this.withLock(workerId, async () => {
       let curImpl = sourceImpl
       let curSeq = sourceSeq
+      // 与 (curImpl, curSeq) 同步前进:每次改换源化身,这个原因也要跟着换成新源的,
+      // 否则会把旧源的终止原因错记到新源头上。
+      let curEndReason = sourceEndReason
 
       for (let iteration = 0; iteration < MAX_CONTINUATION_ITERATIONS; iteration++) {
         const found = await this.deps.ledger.findWorker(workerId)
@@ -550,6 +586,8 @@ export class WorkerHarness {
             // 把它当作新的源头,回到循环顶部,以它走接续。
             curImpl = mainline.impl as WorkerImplId
             curSeq = mainline.seq
+            // 台账已有这条化身的终态记录,回填段不会触发,没有原因要携带。
+            curEndReason = undefined
             continue
           }
           // 按普通投递语义把这条消息补送到当前(存活)主线,不重复接续,并保留原条目的
@@ -573,6 +611,7 @@ export class WorkerHarness {
             if (err instanceof WorkerExitedError) {
               curImpl = mainline.impl as WorkerImplId
               curSeq = mainline.seq
+              curEndReason = err.ended_reason
               continue
             }
             throw err
@@ -588,7 +627,7 @@ export class WorkerHarness {
         }
 
         if (adapter.capabilities().revive) {
-          await this.reviveIncarnation(dialogObjectId, worker, mainline, adapter, text)
+          await this.reviveIncarnation(dialogObjectId, worker, mainline, adapter, text, curEndReason)
         } else {
           // "原 impl 若仍可用则沿用,否则 defaultImpl"(brief)是加 ImplAlreadyUsedError 守卫
           // 之前的选择逻辑,现在必然自绝:mainline.impl 就是正在办理接续的这条化身所在的
@@ -626,6 +665,8 @@ export class WorkerHarness {
     mainline: Incarnation,
     adapter: WorkerAdapter,
     text: string,
+    /** adapter 经 WorkerExitedError 报上来的源化身终止原因(见下面回填段的注释)。 */
+    sourceEndReason?: IncarnationEndReason,
   ): Promise<void> {
     const prevRef: IncarnationRef = { worker_id: worker.worker_id, seq: mainline.seq, session_ref: mainline.session_ref }
     // resume 直接把 text 作为 wakeInput 传入——接续就是这次输入的投递方式,不需要在
@@ -649,15 +690,18 @@ export class WorkerHarness {
       // 注释)——必须在 revive 前把它收尾,否则新化身入链后主线就换成了新 seq,后续迟到的
       // processStateChange 会因 mainline.seq !== h.seq 被直接丢弃,旧化身永久卡在非终态、
       // 无终态记录。对齐 handoffIncarnation 对同一竞态的处理(§5.3):这里同样只在源化身
-      // 台账态非 exited 时才回填,不覆盖已经真实记录过的终态。WorkerExitedError 不携带
-      // end reason,拿不到 adapter 给出的精确失败原因时用 'completed' 记录——语境是"已经
-      // 在准备接续续命",不是被 kill,'completed' 是这里能给出的最贴切近似值。
+      // 台账态非 exited 时才回填,不覆盖已经真实记录过的终态。回填的原因优先取
+      // `sourceEndReason`——adapter 抛 WorkerExitedError 时随错误带上来的自己那份
+      // `ended_reason` 真值(builtin 是 finish_task 的结构化确证);它缺席只有一种情形:
+      // 重启后 adapter 的常驻 runtime 表为空、连落盘 meta 都读不回来,对 adapter 而言
+      // 这条化身只是"与已终态等价",确实无原因可给。那时沿用既有近似值 'completed'
+      // ——语境是"已经在准备接续续命",不是被 kill。
       const incarnations =
         mainline.state !== 'exited'
           ? patchIncarnationBySeq(prev.incarnations, mainline.impl, mainline.seq, {
               state: 'exited',
               ended_at: now,
-              ended_reason: 'completed',
+              ended_reason: sourceEndReason ?? 'completed',
             })
           : prev.incarnations
       const nextTask = reopenTaskForContinuation(prev.task, now)
@@ -1255,8 +1299,10 @@ export class WorkerHarness {
           // adapter.state() 只回答 running/idle/exited 三态,不携带 endReason;fork 是
           // 一次性侧问,正常跑完(cc 场景下是 `claude -p` 子进程退出)就是 completed——
           // 真正的崩溃辨别依赖 adapter 主动上报的回调,但那次回调已经被上面的竞态吞掉、
-          // 不会再发生第二次,这里只能取这个合理缺省(与 processStateChange 对非 kill
-          // 触发的 exited 取 'completed' 同一缺省,见该方法注释)。
+          // 不会再发生第二次,这里只能取这个合理缺省。
+          // 注意与 processStateChange 的区别:那条路径已经改成取 adapter 上报的真值,
+          // 这里取不到——`WorkerContractState` 是三态契约、结构上不携带原因,要拿到真值
+          // 得改契约。如实留作已知限制(不影响主线 task.status,fork 只更新自己的化身条目)。
           ...(exitedOnCommit ? { ended_at: now, ended_reason: 'completed' as IncarnationEndReason } : {}),
         }
         return { ...prevWorker, incarnations: [...prevWorker.incarnations, forkIncarnation], updated_at: now }
@@ -1278,7 +1324,12 @@ export class WorkerHarness {
 
   // ---- 内部 ----
 
-  private async processStateChange(h: IncarnationHandle, state: WorkerContractState, lastText?: string): Promise<void> {
+  private async processStateChange(
+    h: IncarnationHandle,
+    state: WorkerContractState,
+    lastText?: string,
+    reportedEndReason?: IncarnationEndReason,
+  ): Promise<void> {
     // 唤醒事件的正文尾巴:截断在这一处收口,三个 adapter 共用同一上限(见 WAKE_TEXT_MAX_CHARS)。
     const wakeText = truncateWakeText(lastText)
     await this.withLock(h.worker_id, async () => {
@@ -1289,12 +1340,15 @@ export class WorkerHarness {
       const target = findIncarnation(worker, h.impl, h.seq)
       if (!target) return // 未知化身(理论不该发生),防御性丢弃
 
-      // WorkerAdapter.onStateChange 只携带 (handle, state) 三态,没有 endReason——kill 触发的
-      // exited 已经由 killWorker 自己直接落定台账(见下面两处终态短路),能走到这里、还没被
-      // 判定为终态的 exited,只可能是"化身自然结束"(非 kill),endReason 取 completed。
-      // 真正的崩溃(crashed)辨别依赖主动巡检(protocol-agent-v3 §6.3/§12),不在这条被动
-      // 回调路径的能力范围内,由 Task 9 的 reconcileOnStartup 补正。
-      const endReason: IncarnationEndReason | undefined = state === 'exited' ? 'completed' : undefined
+      // endReason 一律取 adapter 上报的真值:三个 adapter 的 transitionExited 形参本就是
+      // 必填的 ended_reason,且都在调回调之前已经把它写进自己的 meta,所以常规路径上
+      // `state==='exited'` 必然带着一个具体值(builtin 是 finish_task 的结构化确证;cc/codex
+      // 是"会话消失且非本进程 kill ⇒ completed"的推断,可信度分级见协议 §6.3)。
+      //
+      // 缺席是**防守分支,不是常规路径**:只有未接线的第四个实现或测试替身才会走到。此时
+      // 不替 adapter 编一个原因——原样把 undefined 交给 taskStatusFromIncarnation,由它既有的
+      // 防守分支(exited + 无原因 ⇒ failed)兜住,宁可记成失败也不谎报成功。
+      const endReason: IncarnationEndReason | undefined = state === 'exited' ? reportedEndReason : undefined
       const now = this.deps.now()
 
       if (target.forked_from !== undefined) {

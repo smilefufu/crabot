@@ -22,7 +22,7 @@ import { ClaudeCodeAdapter } from '../../src/workers/claude-code/adapter.js'
 import { CodexWorkerAdapter } from '../../src/workers/codex/adapter.js'
 import { CapabilityNotSupportedError } from '../../src/workers/errors.js'
 import { dialogObjectIdForPrivate, type DialogObjectId, type LedgerWorker } from '../../src/workers/harness/ledger-types.js'
-import type { WorkerAdapter, WorkerImplId, IncarnationHandle, WorkerContractState } from '../../src/workers/types.js'
+import type { WorkerAdapter, WorkerImplId, IncarnationHandle, IncarnationEndReason, WorkerContractState } from '../../src/workers/types.js'
 import type { ManagerKey } from '../../src/manager/types.js'
 import type { LLMAdapter, LLMStreamParams } from '../../src/engine/index.js'
 import type { ChannelMessage } from '../../src/types.js'
@@ -99,15 +99,26 @@ function silentAdapter(): LLMAdapter {
 }
 
 /**
+ * 三个 adapter 的 `onStateChange` 构造 deps 的完整形参表。第四参 `endReason` 是 adapter 在
+ * `transitionExited` 时持有的 `ended_reason` 真值——它必填,所以直接调这个回调模拟 adapter
+ * 上报时,`exited` 必须一并带上它,否则模拟出的是真实 adapter 不会产生的"退出但无原因"。
+ */
+type AdapterStateCallback = (
+  h: IncarnationHandle,
+  s: WorkerContractState,
+  lastText?: string,
+  endReason?: IncarnationEndReason,
+) => void
+
+/**
  * 读出 adapter 构造时收到的 `onStateChange`——三个 adapter 都把构造 deps 存成私有字段
  * `deps`,这里刻意穿透私有性:本用例要验证的正是"构造时传进去的那个引用是不是 harness 的
  * handleStateChange",没有别的观测口。
  */
 function capturedOnStateChange(
   adapter: WorkerAdapter | undefined,
-): ((h: IncarnationHandle, s: WorkerContractState) => void) | undefined {
-  return (adapter as unknown as { deps?: { onStateChange?: (h: IncarnationHandle, s: WorkerContractState) => void } })
-    ?.deps?.onStateChange
+): AdapterStateCallback | undefined {
+  return (adapter as unknown as { deps?: { onStateChange?: AdapterStateCallback } })?.deps?.onStateChange
 }
 
 function makeLedgerWorker(p: {
@@ -242,7 +253,9 @@ describe('manager bootstrap（P5 Task 1）', () => {
 
     const onStateChange = capturedOnStateChange(stack.adapters.get('builtin'))
     expect(onStateChange).toBeDefined()
-    onStateChange!({ worker_id: 'w-builtin-1', seq: 1, impl: 'builtin', session_ref: 'w-builtin-1-ref' }, 'exited')
+    // 第四参 'completed' 复刻真实 adapter:transitionExited 的 ended_reason 是必填形参,
+    // 化身自然结束(非 kill)时三个实现给的都是 'completed'。
+    onStateChange!({ worker_id: 'w-builtin-1', seq: 1, impl: 'builtin', session_ref: 'w-builtin-1-ref' }, 'exited', undefined, 'completed')
 
     await waitUntil(async () => (await stack.ledger.findWorker('w-builtin-1'))?.worker.task.status === 'completed')
     const after = await stack.ledger.findWorker('w-builtin-1')

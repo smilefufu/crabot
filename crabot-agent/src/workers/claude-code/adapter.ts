@@ -197,7 +197,22 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       /** cc 的全局配置文件(信任表所在),默认 ~/.claude.json。测试注入临时路径,
        * 避免往开发机的真实文件里写 workspace 记录。 */
       readonly claudeConfigPath?: string
-      readonly onStateChange?: (h: IncarnationHandle, state: WorkerContractState) => void
+      /**
+       * 第三参 `lastText` 本 adapter 刻意不传(理由见 transitionState 注释),但位置要占住,
+       * 因为第四参 `endReason` 是位置参数:`transitionExited` 拿到的那个**必填**的
+       * `ended_reason`。不传的话这个值会在回调这一跳被丢掉,harness 只能猜。
+       *
+       * 注意可信度(协议 §6.3):cc 的退出判定唯一依据是 `tmux.isAlive`——"会话消失且不是
+       * 我们 kill 的"一律记 `completed`,这是**推断**,不是任务真的成功。把它如实上抛的
+       * 意义在于:猜测点收敛到唯一有资格猜的这一层(只有 adapter 知道是不是自己 kill 的),
+       * 且将来接上真实终态信号时只改这里、harness 不用再动。
+       */
+      readonly onStateChange?: (
+        h: IncarnationHandle,
+        state: WorkerContractState,
+        lastText?: string,
+        endReason?: IncarnationEndReason,
+      ) => void
     },
   ) {
     this.tmux = deps.tmux ?? new TmuxDriver()
@@ -600,7 +615,9 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     if (!runtime) throw new WorkerExitedError(h.worker_id, h.seq)
 
     const { state: current, stopCount } = await this.syncState(runtime, h)
-    if (current === 'exited') throw new WorkerExitedError(h.worker_id, h.seq)
+    // 带上 ended_reason:harness 的透明接续要用它给"台账还没追上"的源化身补终态。
+    // 上面 `!runtime` 那条分支给不出原因(重启后连落盘 meta 都读不回来),如实缺省。
+    if (current === 'exited') throw new WorkerExitedError(h.worker_id, h.seq, runtime.ended_reason)
 
     // 新一轮开始:把 baseline 推到当前 stop 计数,上一轮遗留的 stop 事件不会被误算进新一轮。
     runtime.stopBaseline = stopCount
@@ -934,7 +951,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // 的化身继续持有 fs watcher + 轮询定时器,也避免终态之后还往外推状态回调。
     this.stopEventWatch(runtime)
     try {
-      this.deps.onStateChange?.(h, 'exited')
+      this.deps.onStateChange?.(h, 'exited', undefined, ended_reason)
     } catch (err) {
       console.error(`[ClaudeCodeAdapter] onStateChange callback error for ${h.worker_id}#${h.seq}:`, err)
     }

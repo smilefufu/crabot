@@ -520,18 +520,17 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
 
       // --- 失败路径：worker B 报告失败，改走 send_master_private ---
       //
-      // 发现的真实缺口(记入 task-10-report.md/PROGRESS.md,不在本任务修复范围):
-      // `WorkerHarness.processStateChange`(harness.ts,P3 既有代码)硬编码
-      // `endReason = state === 'exited' ? 'completed' : undefined`——`WorkerAdapter.onStateChange`
-      // 回调接口本身只带 `(handle, state)` 三态,没有 endReason 通道,harness 因此在"化身自然
-      // 结束"这条被动回调路径上**永远**把 task.status 判成 'completed',不论 worker 自己的
-      // `finish_task(outcome='failed')` 说了什么(worker 自身 meta.json 是对的,真值在
-      // onStateChange 这一跳丢失)。经真实 `harness.spawnWorker` + 真实 `BuiltinWorkerAdapter`
-      // 直接复现确认(非本文件测试装配引入的偏差)。因此这里按**实际观察到的行为**推进:
-      // worker B 的 task.status 最终仍是 'completed';manager 能感知到失败,靠的是读到
-      // worker 在 finish_task 之前吐出的文本结论(assistantText 经 onTurn 写进 outputLog,
-      // 不依赖 task.status/ended_reason)——这条路径本身没有缺陷,只是"结构化终态"这一路
-      // 信号目前失真。
+      // 这条剧本同时是"化身终止原因不再被丢弃"的端到端验收(核心用例):worker B 调
+      // `finish_task(outcome:'failed')`,该真值经 builtin adapter 的 `transitionExited` →
+      // `onStateChange` 第四参 → `harness.processStateChange` 一路送进台账。历史上
+      // harness 在这一跳硬编码 `endReason='completed'`,把它整个丢掉,这里曾按失真行为
+      // 如实钉住 `completed`——现已修复并翻转。
+      //
+      // 全链路真实:真实 `ManagerRegistry` + 真实 `WorkerHarness` + 真实
+      // `BuiltinWorkerAdapter`(只有 LLM 是 mock),所以断言的是生产行为,不是装配偏差。
+      //
+      // manager 侧剧本保持不变(读 worker 输出的文本结论 → `send_master_private`):那条路径
+      // 本来就没有缺陷,不依赖 task.status;本次修复补上的是**结构化终态**这一路信号。
       const workerBLLM = makeWorkerLLM([
         {
           text: '巡检过程中遇到无法恢复的错误，任务未能完成，需要人工介入排查。',
@@ -552,14 +551,19 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
 
       await waitUntil(async () => {
         const workers = await assembly.harness.listWorkers(assembly.dialogObjectIdFor(SYSTEM_TASKS_MANAGER_KEY))
-        return workers.filter((w) => w.task.status === 'completed').length >= 2
+        return workers.some((w) => w.worker_id !== workerA.worker_id && w.task.status === 'failed')
       })
       const workersAfterB = await assembly.harness.listWorkers(assembly.dialogObjectIdFor(SYSTEM_TASKS_MANAGER_KEY))
       const workerB = workersAfterB.find((w) => w.worker_id !== workerA.worker_id)!
-      // 如实钉住上面注释描述的现状(已知缺口,不是期望行为)：
-      expect(workerB.task.status).toBe('completed')
-      expect(workerB.incarnations[0].ended_reason).toBe('completed')
+      // 核心验收：worker 自己声明的 outcome:'failed' 一路落到台账，不再被记成成功。
+      expect(workerB.task.status).toBe('failed')
+      expect(workerB.incarnations[0].ended_reason).toBe('failed')
+      // 同一份真值也进了对外事件（appendEvent 带的是提交后的 task.status）——manager 的
+      // 台账块与 admin 侧读端点看到的都是这一份。
       const exitedEventB = findWorkerExitedEvent(assembly.events, workerB.worker_id)!
+      expect(exitedEventB.task_status).toBe('failed')
+      // 对照组：成功的 worker A 仍然是 completed，修复没有把所有退出一刀切判失败。
+      expect(workersAfterB.find((w) => w.worker_id === workerA.worker_id)!.task.status).toBe('completed')
 
       managerScript.queue.push({
         toolCalls: [{ name: 'read_worker_output', id: 'r2', input: { worker_id: workerB.worker_id } }],
