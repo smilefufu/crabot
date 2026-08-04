@@ -136,6 +136,9 @@ describe('describeStartupStall', () => {
     expect(text).toContain('一个字符都没有投递')
     expect(text).toContain('raw')
     expect(text).toContain('Enter to confirm')
+    // 说明句排在 tail **之后**:harness 对这段正文用保尾截断(见 harness 的 truncateWakeText),
+    // 排在头部会被恰好截掉。把两段换回来这条断言就挂。
+    expect(text.indexOf('Enter to confirm')).toBeLessThan(text.indexOf('一个字符都没有投递'))
   })
 
   it('终端一个字节都没吐出来时也如实说明,不给空正文', () => {

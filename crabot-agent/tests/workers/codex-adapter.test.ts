@@ -1879,6 +1879,42 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 启动期就绪握手(\\
   )
 
   it(
+    '等待期间进程自己死了 → 落 exited(crashed),不谎报 idle、更不能记成 completed',
+    async () => {
+      // 六轮 review,与 cc adapter 的同名用例同款:syncState 缺省推断是"非 kill ⇒ completed"
+      // (§6.3 给"干过活之后自然退出"校准的),但这条路径上开工输入一个字符都没投递过——吃下
+      // 缺省就会让 harness 把 task 记成 **completed**,manager 与 recovery 从此不再过问它
+      // (正是 #66 修的那类"失败记成成功")。把 reportStartupStall 里的 'crashed' 改回缺省,
+      // 这条用例就挂。
+      const seen: Array<{ state: WorkerContractState; endReason?: string }> = []
+      const adapter = new CodexWorkerAdapter({
+        dataDir,
+        tmux,
+        // 启动即失败:pane 里的命令立刻退出,永远不会有就绪信号。
+        codexBin: `bash -c 'exit 1'`,
+        sessionDiscoveryTimeoutMs: 200,
+        pasteReadyTimeoutMs: 30_000, // 靠 isAlive 提前收工,不该等满
+        onStateChange: (_h, state, report) => void seen.push({ state, endReason: report?.endReason }),
+      })
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `codextest-${randomUUID().slice(0, 8)}`
+
+      const startedAt = Date.now()
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+      expect(Date.now() - startedAt).toBeLessThan(15_000)
+
+      expect(tmux.sendTextCalls).toEqual([])
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+      expect(meta.state).toBe('exited')
+      expect(meta.ended_reason).toBe('crashed')
+      expect(await adapter.state(h)).toBe('exited')
+      // 台账那一侧收到的也必须是 crashed —— harness 一律取 adapter 上报的这个真值落 task。
+      expect(seen).toContainEqual({ state: 'exited', endReason: 'crashed' })
+    },
+    40000,
+  )
+
+  it(
     '这条 idle 粘得住:再调 state() 不会被三源判定翻回 running(pane 活着 + turn-complete 计数恒不涨)',
     async () => {
       // 与 cc adapter 的同名用例同款(五轮 review):去掉 syncState 里维持 startupStalled 的

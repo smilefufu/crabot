@@ -106,8 +106,9 @@ const HANDOFF_TAIL_MAX_CHARS = 4096
  *
  * **截断方向按来源分**,不是一刀切(见 truncateWakeText 的 `keep`):`lastText` 是 worker
  * 说的话,开门见山给结论 → 保头;`outputTail` 是 pane 日志的尾巴,值钱的那段(拦住启动的
- * 模态框)就在最末尾 → 保尾。两种情况都附标记:标记本身就是给 manager 的指引——要全文就用
- * `read_worker_output` 按 offset 读(那条路本来就在,且不占常驻上下文)。
+ * 模态框)就在最末尾 → 保尾。两种情况都附标记:标记本身就是给 manager 的指引——被截掉的
+ * 那部分用 `read_worker_output` 按 offset 读(那条路本来就在,且不占常驻上下文)。两句提示
+ * 的措辞不同,因为两者读得回来的东西不同,见 processStateChange 里给出提示语的那一处。
  */
 const WAKE_TEXT_MAX_CHARS = 2000
 
@@ -1370,10 +1371,16 @@ export class WorkerHarness {
     // 出现只可能来自未接线的第四个实现,那时以 `lastText` 优先——它是 worker 说的话本身,
     // 而 `outputTail` 只是屏幕内容。两者的截断方向不同(发言保头 / 日志尾巴保尾,见
     // truncateWakeText 的 `keep`),所以只能各自截完再取优先,不能先合流再截。
-    const overflowHint = ',全文用 read_worker_output 读'
+    //
+    // 两个来源的溢出提示不共用一句(`overflowHint` 必须如实,见 truncateWakeText):
+    // - `lastText` 整段都进 output 日志,截掉的部分按 offset 读得回来 → "全文用 … 读";
+    // - `outputTail` 是"pane 尾部 + 一句合成指引"(见 describeStartupStall),那句指引不在
+    //   output 日志里,读不回来。它被排在正文末尾、保尾截断永远保得住,所以这里被丢掉的
+    //   一定是更早的**屏幕内容**——那部分才是 read_worker_output 读得到的东西。提示语照实
+    //   说成"更早的屏幕内容",不承诺一个读不回来的"全文"(#67 给 summary 去掉这句同源)。
     const wakeText =
-      truncateWakeText(report?.lastText, WAKE_TEXT_MAX_CHARS, overflowHint, 'head') ??
-      truncateWakeText(report?.outputTail, WAKE_TEXT_MAX_CHARS, overflowHint, 'tail')
+      truncateWakeText(report?.lastText, WAKE_TEXT_MAX_CHARS, ',全文用 read_worker_output 读', 'head') ??
+      truncateWakeText(report?.outputTail, WAKE_TEXT_MAX_CHARS, ',更早的屏幕内容用 read_worker_output 读', 'tail')
     const wakeSummary = truncateWakeText(report?.summary, WAKE_SUMMARY_MAX_CHARS, '', 'head')
     // detail 里两段正文的组装收口在这里,fork 分支与主线分支共用——不在两处各拼一遍。
     const wakeDetail = {

@@ -798,8 +798,19 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
    * 三源合成状态判定:tmux isAlive(false → exited,终态优先) > 事件文件(会话还活着时,新
    * stop → idle) > 默认 running。与内存态不同则在互斥锁内原子迁移(改内存 + 写 meta)。
    * 返回判定结果与本次读到的 stop 计数(供 sendInput 复用,避免重复读一遍事件文件)。
+   *
+   * `deadReason`:本次判定发现会话已经不在了、且不是本进程发起的 kill 时,落哪个
+   * ended_reason。缺省 `'completed'` 是协议 §6.3 给"干过活之后自然退出"校准的推断,它成立
+   * 的前提是这个化身确实开过工。启动期就绪握手那条路径上前提不成立——开工输入一个字符都
+   * 没投递过,completed 不可能为真,再吃这个缺省推断就会把"启动即死"记成"成功完成"
+   * (harness 的 taskStatusFromIncarnation 据此把 task 记成 completed,manager 与 recovery
+   * 从此不再过问),所以那条路径显式传 `'crashed'`。
    */
-  private async syncState(runtime: Runtime, h: IncarnationHandle): Promise<{ state: WorkerContractState; stopCount: number }> {
+  private async syncState(
+    runtime: Runtime,
+    h: IncarnationHandle,
+    deadReason: IncarnationEndReason = 'completed',
+  ): Promise<{ state: WorkerContractState; stopCount: number }> {
     if (runtime.state === 'exited') return { state: 'exited', stopCount: runtime.stopBaseline }
 
     return this.getMutex(h.worker_id).run(async () => {
@@ -829,7 +840,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
       if (computed !== runtime.state) {
         if (computed === 'exited') {
-          await this.transitionExited(runtime, h, runtime.killed ? 'killed' : 'completed')
+          await this.transitionExited(runtime, h, runtime.killed ? 'killed' : deadReason)
         } else {
           await this.transitionState(runtime, h, computed)
         }
@@ -1049,7 +1060,12 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // 等待期间进程可能是**自己死了**(启动即失败:二进制缺失、PATH 不对、pane 里的命令立刻
     // 退出),那不是"停在一个界面上等人",谎报 idle 会让 manager 对着一具尸体发指令。先让既有
     // 的三源判定跑一遍,它会如实落 exited;只有确实还活着才走下面的暂扣汇报。
-    if ((await this.syncState(runtime, h)).state === 'exited') return
+    //
+    // 落 `'crashed'` 而不是 syncState 缺省的 `'completed'`:本函数被调用的前提就是"就绪信号
+    // 没等到 ⇒ 开工输入一个字符都没投递",此刻会话没了只可能是启动即失败(二进制缺失、PATH
+    // 不对、pane 命令立刻退出),completed 在这条路径上明确不可能成立。吃缺省推断会让一个
+    // 从没干过活的 worker 在台账上落成"成功完成"终态(同 #66 修的那类"失败记成成功")。
+    if ((await this.syncState(runtime, h, 'crashed')).state === 'exited') return
     await this.getMutex(h.worker_id).run(async () => {
       if (runtime.state === 'exited') return // 判定与提交之间又被并发抢先:终态不可覆盖
       // 先置标志再迁移:这一次 transitionState 的 meta 写入要带上 startup_stalled,且此后

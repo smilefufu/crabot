@@ -1995,8 +1995,14 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
   )
 
   it(
-    '等待期间进程自己死了 → 落 exited,不谎报 idle(那会让 manager 对着一具尸体发指令)',
+    '等待期间进程自己死了 → 落 exited(crashed),不谎报 idle、更不能记成 completed',
     async () => {
+      // 六轮 review:reason 才是这条路径的要害。syncState 缺省推断是"非 kill ⇒ completed"
+      // (§6.3 给"干过活之后自然退出"校准的),而这里开工输入一个字符都没投递过——吃下缺省
+      // 就会让 harness 的 taskStatusFromIncarnation 把 task 记成 **completed**,manager 与
+      // recovery 从此不再过问一个压根没开工的 worker(正是 #66 修的那类"失败记成成功")。
+      // 把 reportStartupStall 里的 'crashed' 改回缺省,这条用例就挂。
+      const seen: { state: string; endReason?: string }[] = []
       const adapter = new ClaudeCodeAdapter({
         dataDir,
         claudeConfigPath: fakeClaudeConfig(dataDir),
@@ -2004,6 +2010,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
         // 启动即失败:pane 里的命令立刻退出,永远不会有就绪信号。
         claudeBin: `bash -c 'exit 1'`,
         pasteReadyTimeoutMs: 30_000, // 靠 isAlive 提前收工,不该等满
+        onStateChange: (_h, state, report) => void seen.push({ state, endReason: report?.endReason }),
       })
       await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
       const workerId = `cctest-${randomUUID().slice(0, 8)}`
@@ -2015,7 +2022,10 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
       expect(tmux.sendTextCalls).toEqual([])
       const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
       expect(meta.state).toBe('exited')
+      expect(meta.ended_reason).toBe('crashed')
       expect(await adapter.state(h)).toBe('exited')
+      // 台账那一侧收到的也必须是 crashed —— harness 一律取 adapter 上报的这个真值落 task。
+      expect(seen).toContainEqual({ state: 'exited', endReason: 'crashed' })
     },
     40000,
   )

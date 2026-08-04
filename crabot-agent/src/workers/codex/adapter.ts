@@ -1028,8 +1028,17 @@ export class CodexWorkerAdapter implements WorkerAdapter {
    * turn-complete 通知 → idle) > 默认 running。与内存态不同则在互斥锁内原子迁移(改内存 +
    * 写 meta)。判定与提交整体在锁内完成,理由与 cc 完全一致(见 cc adapter.ts 文件头注释,
    * 避免过期快照覆盖并发落定的新结果)。
+   *
+   * `deadReason`:发现会话已经不在了、且不是本进程发起的 kill 时落哪个 ended_reason。缺省
+   * `'completed'` 是协议 §6.3 给"干过活之后自然退出"校准的推断;启动期就绪握手那条路径上
+   * 这个前提不成立(开工输入一个字符都没投递过),由调用方显式传 `'crashed'`,免得"启动即
+   * 死"在台账上落成"成功完成"终态。逐字同 cc adapter,见那里的注释。
    */
-  private async syncState(runtime: Runtime, h: IncarnationHandle): Promise<{ state: WorkerContractState; stopCount: number }> {
+  private async syncState(
+    runtime: Runtime,
+    h: IncarnationHandle,
+    deadReason: IncarnationEndReason = 'completed',
+  ): Promise<{ state: WorkerContractState; stopCount: number }> {
     if (runtime.state === 'exited') return { state: 'exited', stopCount: runtime.stopBaseline }
 
     return this.getMutex(h.worker_id).run(async () => {
@@ -1057,7 +1066,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
       if (computed !== runtime.state) {
         if (computed === 'exited') {
-          await this.transitionExited(runtime, h, runtime.killed ? 'killed' : 'completed')
+          await this.transitionExited(runtime, h, runtime.killed ? 'killed' : deadReason)
         } else {
           await this.transitionState(runtime, h, computed)
         }
@@ -1232,7 +1241,10 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 等待期间进程可能是**自己死了**(启动即失败:二进制缺失、PATH 不对、pane 里的命令立刻
     // 退出),那不是"停在一个界面上等人",谎报 idle 会让 manager 对着一具尸体发指令。先让既有
     // 的三源判定跑一遍,它会如实落 exited;只有确实还活着才走下面的暂扣汇报。
-    if ((await this.syncState(runtime, h)).state === 'exited') return
+    //
+    // 落 `'crashed'` 而不是 syncState 缺省的 `'completed'`:此刻会话没了只可能是启动即失败,
+    // 而开工输入一个字符都没投递过,completed 明确不可能成立(同 cc adapter)。
+    if ((await this.syncState(runtime, h, 'crashed')).state === 'exited') return
     await this.getMutex(h.worker_id).run(async () => {
       if (runtime.state === 'exited') return // 判定与提交之间又被并发抢先:终态不可覆盖
       // 先置标志再迁移:这次 meta 写入要带上 startup_stalled,且此后每次 syncState 都必须

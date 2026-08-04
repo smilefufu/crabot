@@ -8,6 +8,7 @@ import { WorkspaceManager } from '../../../src/workers/harness/workspace-manager
 import { dialogObjectIdForPrivate } from '../../../src/workers/harness/ledger-types'
 import { WorkerEventLog, type HarnessEvent } from '../../../src/workers/harness/worker-events'
 import { CapabilityNotSupportedError } from '../../../src/workers/errors'
+import { describeStartupStall } from '../../../src/workers/tmux/paste-ready'
 import type {
   WorkerAdapter,
   WorkerImplId,
@@ -478,6 +479,32 @@ describe('WorkerHarness.handleStateChange', () => {
     expect(text.endsWith(modal.trim())).toBe(true) // 尾部(模态框那段)一字不缺
     expect(text.startsWith('啊')).toBe(false) // 开头被截,截断标记顶到最前面
     expect(text).toContain('read_worker_output')
+  })
+
+  it('outputTail 超长时,describeStartupStall 那句指引仍然可见——它排在正文末尾,保尾截断天然保得住', async () => {
+    // 六轮 review:上一条用例被截掉的头部全是填充字符,观察不到"指引句被截没了"。这里喂真实
+    // 合成正文(一屏 pane 输出 + 那句指引)——把 describeStartupStall 改回"指引在头部",保尾
+    // 截断会把它连同 `---` 一起丢掉,manager 只剩屏幕字节,这条用例就挂。
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    // 2600 字符的屏幕内容:解码后一屏以文本为主的输出超过 2000 字符并不罕见
+    // (STARTUP_STALL_TAIL_BYTES 是 4096)。
+    const outputTail = describeStartupStall({ impl: 'claude-code', timeoutMs: 60_000, tail: '啊'.repeat(2600) })
+    const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
+    harness.handleStateChange(h, 'idle', { outputTail })
+
+    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
+    const [ev] = events.filter((e) => e.kind === 'state_changed')
+    const text = (ev.detail as { text: string }).text
+    expect(text.length).toBeLessThan(outputTail.length) // 真的截了
+    expect(text).toContain('一个字符都没有投递') // 决定 manager 行为的那一句
+    expect(text).toContain('send_to_worker 的 raw 模式') // 连同它给的那条出路
+    expect(text).toContain('---') // 分隔符也还在,指引与屏幕内容仍分得开
+    expect(text).toContain('啊') // 屏幕内容保住的是最新的那一段
+    // 被丢掉的是更早的屏幕内容——那部分确实在 output 日志里,提示语指的是一条读得到的路。
+    expect(text).toContain('更早的屏幕内容用 read_worker_output 读')
   })
 
   it('lastText 与 summary 仍然保**头部**——发言开门见山给结论,截断方向不能跟 outputTail 混成一个', async () => {

@@ -113,20 +113,31 @@ export async function waitForPasteReady(
 }
 
 /**
- * 就绪握手超时时随唤醒事件带给 manager 的那段正文:一句说明 + output 尾部。
+ * 就绪握手超时时随唤醒事件带给 manager 的那段正文:output 尾部 + 一句说明。
  *
  * 说明这一句是必须的——manager 光看一屏 TUI 字节推断不出"开工输入根本没投递出去",
  * 而这恰恰决定了它该做什么(先用 `raw` 敲键清掉挡路的界面、再把任务重新投一次),而不是
  * 按"worker 干完一轮在等下一步"处理。措辞在这里收口,cc/codex 两侧共用同一份。
+ *
+ * **说明排在尾部,不排在头部**:这段正文会经 harness 的 `truncateWakeText(..., 'tail')`
+ * 截到 WAKE_TEXT_MAX_CHARS(2000 字符)——保尾丢头,因为屏幕内容越靠后越新。而
+ * STARTUP_STALL_TAIL_BYTES 是 4096,一屏以文本为主的输出解码后超过 2000 字符并不罕见,
+ * 说明句要是排在头部,恰好会被这次截断连同 `---` 一起丢掉,manager 只剩一堆屏幕字节,
+ * 上面那句"必须的"就没了。排在尾部则保尾截断天然保住它,被丢掉的只是更早的屏幕内容
+ * ——那部分本来就在 output 日志里,manager 用 `read_worker_output` 读得回来。
+ *
+ * (另一个可选修法是在这里先把 tail 自身截到"head + tail 必然不超过 2000",但那要求本
+ * 模块知道 harness 的 WAKE_TEXT_MAX_CHARS,把截断这件事拆到两个模块里各做一半;换个顺序
+ * 不引入任何跨模块常量,截断仍然只在 harness 一处发生。)
  */
 export function describeStartupStall(opts: { impl: string; timeoutMs: number; tail: string }): string {
-  const head =
+  const note =
     `[crabot] ${opts.impl} 启动后 ${Math.round(opts.timeoutMs / 1000)}s 内未就绪` +
     `(TUI 始终没有开启 bracketed paste),开工输入**一个字符都没有投递**——` +
-    `否则它会被当成按键打进挡在前面的界面。下面是该化身终端输出的尾部(已解码成可读文本,` +
+    `否则它会被当成按键打进挡在前面的界面。上面是该化身终端输出的尾部(已解码成可读文本,` +
     `与 read_worker_output 同一形态),据此判断卡在哪:可用 send_to_worker 的 raw 模式敲键` +
     `清掉界面,再把任务内容重新投一次。`
-  return opts.tail ? `${head}\n---\n${opts.tail}` : `${head}\n---\n(终端至今没有任何输出)`
+  return `${opts.tail || '(终端至今没有任何输出)'}\n---\n${note}`
 }
 
 /**
