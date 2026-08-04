@@ -4,14 +4,18 @@
  * spawn:session_id = randomUUID() 出生即定(即 session_ref);建 <dataDir>/<worker_id>/ 目录;
  * tmux newSession 拉起 `<claudeBin> --session-id <uuid> --permission-mode acceptEdits`,交互态
  * 跑在 tmux pane 里,cwd=workspace,pane 输出经 tmux pipe-pane 落 output-<seq>.log;meta 落盘为
- * running;首条任务输入(spec.prompt)经 tmux sendText 注入(cc 把它当第一条用户消息)。
+ * running;**等 pane 输出里出现 \e[?2004h(TUI 已开启 bracketed paste)之后**,首条任务输入
+ * (spec.prompt)才经 tmux sendText 注入(cc 把它当第一条用户消息)。等不到就绪 → 不投递、
+ * 落 idle 并把 output 尾部随唤醒事件交给 manager(见 spawn 内的握手段与 reportStartupStall)。
  *
  * provision:与 spawn 分离的独立步骤(WorkerAdapter 契约本就是两个方法),由调用方在 spawn 前
  * 调用一次,把 workspace 布好——.claude/settings.json(Stop/Notification hook 接到
  * CliEventChannel.hookCommand,permissions 预配置 acceptEdits 降弹窗)、.claude/skills/(复用
  * Task 3 的 materializeSkills)、.mcp.json(renderMcpJson)、CLAUDE.md(renderContextMd),
- * 外加全局 ~/.claude.json 里该 workspace 的信任记录(trustWorkspace,消掉首次进入新目录的
- * 信任弹窗——它发生在 --permission-mode 之前,命令行拦不住)。
+ * 外加全局 ~/.claude.json 里该 workspace 的两条预授权记录(preAcceptStartupDialogs:
+ * hasTrustDialogAccepted 消掉"首次进入新目录"的信任弹窗——它发生在 --permission-mode 之前,
+ * 命令行拦不住;enabledMcpjsonServers 消掉紧随其后的 "New MCP server found" 弹窗——那个弹窗
+ * 的触发源正是我们自己写下的 .mcp.json)。
  *
  * spawn 提交纪律:tmux newSession 成功之后才落 meta(running)+注册 runtime——newSession 失败
  * 时不留任何持久痕迹(session_id 可重生成,workspace 内 provision 产物残留可接受),同 worker_id
@@ -23,7 +27,10 @@
  *      killed/completed)——进程可能在发过 stop 事件之后自退(崩溃/OOM/自敲 exit),必须先判
  *      isAlive,否则 stop 计数恒大于 baseline 会一直判成 idle,永远走不到这条分支;
  *   2. 会话还活着时,事件文件:自上一次 sendInput(或 spawn)以来出现过新的 'stop' 事件 → idle;
- *   3. 默认 running。
+ *   3. 启动期就绪握手超时的暂扣标志(Runtime.startupStalled,落盘 meta.startup_stalled)置位
+ *      → idle。这一源专治"开工输入根本没投递过、stop 计数永远不会涨"的化身,没有它,
+ *      reportStartupStall 刚落的 idle 会被下一次 syncState 翻回 running;
+ *   4. 默认 running。
  * 用"自上次输入以来的 stop 计数"(stopBaseline)而非"是否曾经见过 stop"来判定,是因为
  * cc 每答完一轮都会再触发一次 Stop——sendInput 时必须把 baseline 推到当前计数,否则上一轮
  * 遗留的 stop 事件会让新一轮还没答完就被误判成 idle。
@@ -86,6 +93,7 @@ import { homedir } from 'os'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { TmuxDriver } from '../tmux/driver.js'
+import { DEFAULT_PASTE_READY_TIMEOUT_MS, describeStartupStall, readOutputTail, waitForPasteReady } from '../tmux/paste-ready.js'
 import { CliEventChannel, EVENTS_FILE_ENV } from '../cli-events.js'
 import { OutputLog } from '../output-log.js'
 import { decodeTerminalOutput } from '../terminal-output.js'
@@ -166,6 +174,19 @@ interface Runtime {
   /** 自上一次 sendInput(或 spawn)以来"已计入"的 stop 事件数;新 stop 数超过它才判定本轮 idle。 */
   stopBaseline: number
   killed: boolean
+  /**
+   * 启动期就绪握手超时后的**暂扣态**(见 reportStartupStall)。
+   *
+   * 三源判定认不出这种 idle:pane 活着、stop 计数一个没涨(开工输入根本没投递过),
+   * `computed` 恒为 `running` —— 于是 reportStartupStall 刚落的 idle 会被下一次 syncState
+   * 原样翻回 running,连带把台账从 waiting_input 拉回"正在干活"。而 `state()` 是每次 agent
+   * 重启对账必调的,这条翻转不是偶发而是必然。所以这里给三源判定补第四个信息源:标志置位
+   * 且没有新 stop 时维持 idle,由 sendInput(manager 真的出手了)清除。
+   *
+   * 跟着 meta 落盘(`startup_stalled`),否则重启后重建的 runtime 丢掉标志,同一条翻转在
+   * 新进程里照样发生——而"重启后台账变幽灵 running"正是本次要根治的形态。
+   */
+  startupStalled?: boolean
   /** CliEventChannel.watch() 的停止函数(协议 §6.2.3 的文件监视)。tmux 化身在建立
    * runtime 时装上、落终态时摘掉;无头 fork 化身不装(见 startEventWatch)。 */
   stopEventWatch?: () => void
@@ -185,6 +206,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   private readonly claudeBin: string
   private readonly claudeProjectsDir: string
   private readonly claudeConfigPath: string
+  private readonly pasteReadyTimeoutMs: number
   private readonly runtimes = new Map<string, Runtime>()
   private readonly mutexes = new Map<string, AsyncMutex>()
 
@@ -199,6 +221,9 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       /** cc 的全局配置文件(信任表所在),默认 ~/.claude.json。测试注入临时路径,
        * 避免往开发机的真实文件里写 workspace 记录。 */
       readonly claudeConfigPath?: string
+      /** 启动期就绪握手的等待上限,默认 DEFAULT_PASTE_READY_TIMEOUT_MS(见该常量注释里的
+       * 实测取值依据)。测试注入小值,避免为了走超时分支真的等一分钟。 */
+      readonly pasteReadyTimeoutMs?: number
       /**
        * `report.lastText` 本 adapter 刻意不报(理由见 transitionState 注释),只报
        * `report.endReason`:`transitionExited` 拿到的那个**必填**的 `ended_reason`。不报的
@@ -216,6 +241,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     this.claudeBin = deps.claudeBin ?? 'claude'
     this.claudeProjectsDir = deps.claudeProjectsDir ?? join(homedir(), '.claude', 'projects')
     this.claudeConfigPath = deps.claudeConfigPath ?? join(homedir(), '.claude.json')
+    this.pasteReadyTimeoutMs = deps.pasteReadyTimeoutMs ?? DEFAULT_PASTE_READY_TIMEOUT_MS
   }
 
   async detect(): Promise<DetectResult> {
@@ -256,11 +282,11 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     }
     await fs.writeFile(join(claudeDir, 'settings.json'), JSON.stringify(settings, null, 2) + '\n', 'utf-8')
 
-    await this.trustWorkspace(ws.root)
+    const mcpServers = caps.mcp_servers as unknown as ProvisionSources['mcpServers']
+    await this.preAcceptStartupDialogs(ws.root, mcpServers.map((s) => s.name))
 
     await materializeSkills(ws.root, caps.skills, '.claude/skills')
 
-    const mcpServers = caps.mcp_servers as unknown as ProvisionSources['mcpServers']
     await fs.writeFile(join(ws.root, '.mcp.json'), renderMcpJson(mcpServers), 'utf-8')
 
     await fs.writeFile(
@@ -274,7 +300,21 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     )
   }
 
-  /** 把 workspace 预置成"已信任",消灭 cc 首次进入新目录时的信任弹窗。
+  /** 把 workspace 在全局 ~/.claude.json 里预置成"已信任 + 已授权本项目的 MCP server",
+   * 消灭 cc 首次进入新目录时那两个**阻塞式**启动弹窗。
+   *
+   * ## 弹窗②:`New MCP server found in this project: <name>`
+   *
+   * provision 每次都往一个**全新** workspace 写 `.mcp.json`(见上面 renderMcpJson),于是 cc
+   * 每次都认为"这个 project 里发现了新 MCP server"并停下来等选择。开关与信任记录同层:
+   * `projects["<realpath>"].enabledMcpjsonServers = [<.mcp.json 里的 server 名>]`(键名已在
+   * m2 的 ~/.claude.json 上实证:17 个 project entry 里 16 个带它)。
+   *
+   * 与就绪握手(见 spawn)的关系:握手是兜底,这里是消源。预写是幂等的、无时序依赖的,
+   * 优于"读屏 + 匹配 + 按键应答";但它靠枚举,必然有漏网的新弹窗——所以两者都要有,
+   * 不是二选一。
+   *
+   * ## 弹窗①:`Do you trust this folder?`
    *
    * m2 实测(cc 2.1.220):交互式启动遇到没见过的目录会先弹
    * `Do you trust this folder?`,这个检查发生在 `--permission-mode` **之前**,命令行没有
@@ -293,7 +333,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
    * - 文件存在但解析不出来时更不能兜底重写——用户真实项目的条目和登录信息都在同一份文件里,
    *   宁可 provision 失败(spawn 之前,不留半个 worker),也不能把它覆盖掉。
    * 文件不存在是正常情形(全新机器),按空配置创建。 */
-  private async trustWorkspace(root: string): Promise<void> {
+  private async preAcceptStartupDialogs(root: string, mcpServerNames: string[]): Promise<void> {
     const realRoot = await fs.realpath(root)
     const configPath = this.claudeConfigPath
 
@@ -334,8 +374,12 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       const projects = { ...((existingProjects as Record<string, unknown>) ?? {}) }
       const entry = projects[realRoot]
       const merged = typeof entry === 'object' && entry !== null && !Array.isArray(entry) ? { ...(entry as Record<string, unknown>) } : {}
-      // 只补这一个字段:同一个 path 下可能已有 allowedTools / history 等用户数据,不能覆盖。
+      // 只补这两个字段:同一个 path 下可能已有 allowedTools / history 等用户数据,不能覆盖。
       merged.hasTrustDialogAccepted = true
+      // 覆盖而非并集:这一条 project entry 描述的是 crabot 刚刚写下的那份 .mcp.json,
+      // caps 是本任务的授权边界,残留的旧名字不该继续被授权(与 codex 侧 mcp_servers
+      // 整体覆盖宿主配置同一取舍)。没有 MCP server 时落 []——cc 见到空表就不会问。
+      merged.enabledMcpjsonServers = [...mcpServerNames]
       projects[realRoot] = merged
       config.projects = projects
 
@@ -389,6 +433,22 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: sessionId, workspace_root: spec.workspace.root })
     this.runtimes.set(instanceKey(handle), runtime)
     this.startEventWatch(runtime, handle)
+
+    // 启动期就绪握手(见 tmux/paste-ready.ts):等 cc 在 pane 里发出 \e[?2004h 之后再投递,
+    // 否则 paste-buffer -p 会静默降级成裸文本注入,prompt 里每个换行都变成一次 Enter——
+    // 生产实证里前两个换行分别确认掉了信任弹窗与 MCP 弹窗,残句留在 composer 里从未提交。
+    //
+    // 等不到就**不投递**(协议 §5.5 的"不安全态暂扣"):prompt 原封不动留在 spec 里没有被
+    // 消耗,manager 处理掉障碍后经 send_to_worker 重新投递即可,内容不丢。这里绝不能退化成
+    // "超时了也照发"——那正是本次要根治的行为。
+    const pasteReady = await waitForPasteReady(outputFile, {
+      timeoutMs: this.pasteReadyTimeoutMs,
+      isAlive: () => this.tmux.isAlive(sessionName),
+    })
+    if (!pasteReady) {
+      await this.reportStartupStall(runtime, handle, outputFile)
+      return handle
+    }
 
     // 首条任务输入经 sendText 注入,cc 把它当第一条用户消息。注入失败:session 可能已经起来
     // 但没喂到任务,不能放任 running——按 kill 路径清理 tmux 会话后落 exited(crashed)(不是
@@ -627,7 +687,12 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     }
 
     await this.getMutex(h.worker_id).run(async () => {
-      if (runtime.state !== 'exited') await this.transitionState(runtime, h, 'running')
+      if (runtime.state === 'exited') return
+      // 暂扣解除:manager 已经出手(raw 敲键清界面,或重投 prompt),从这一刻起 idle/running
+      // 重新由三源判定说了算。清除与 transitionState 的 meta 写入在同一个临界区里完成,
+      // 落盘的 startup_stalled 随之消失,重启后不会再被当作暂扣态复原。
+      runtime.startupStalled = false
+      await this.transitionState(runtime, h, 'running')
     })
   }
 
@@ -733,8 +798,31 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
    * 三源合成状态判定:tmux isAlive(false → exited,终态优先) > 事件文件(会话还活着时,新
    * stop → idle) > 默认 running。与内存态不同则在互斥锁内原子迁移(改内存 + 写 meta)。
    * 返回判定结果与本次读到的 stop 计数(供 sendInput 复用,避免重复读一遍事件文件)。
+   *
+   * `deadReason`:本次判定发现会话已经不在了、且不是本进程发起的 kill 时,落哪个
+   * ended_reason。缺省 `'completed'` 是协议 §6.3 给"干过活之后自然退出"校准的推断,它成立
+   * 的前提是这个化身确实开过工。启动期就绪握手那条路径上前提不成立——开工输入一个字符都
+   * 没投递过,completed 不可能为真,再吃这个缺省推断就会把"启动即死"记成"成功完成"
+   * (harness 的 taskStatusFromIncarnation 据此把 task 记成 completed,manager 与 recovery
+   * 从此不再过问),所以那条路径显式传 `'crashed'`。
+   *
+   * 七轮 review:`deadReason` 只管得住 `reportStartupStall` 里的**那一次**调用,即"握手等待
+   * 期间就死了"这一个时点。而暂扣是个**持续状态**:标志置位、idle 落盘之后进程才死(pane
+   * 被外部收走、TUI 自退、机器重启后残留会话消失),后续任何一次 syncState——事件监视回调、
+   * sendInput 的前置判定、agent 重启后 reconcileOnStartup 调的 state()——判到 exited 仍会吃
+   * 缺省推断,同一个"没干过活却记成成功完成"从另一个时点回来。所以 exited 分支直接看
+   * `runtime.startupStalled`:置位就落 `'crashed'`,覆盖暂扣之后的所有时点;标志跟着
+   * meta.startup_stalled 落盘,重启后由 ensureRuntime 复原,这条判定在新进程里同样成立。
+   *
+   * 三者优先级 `killed > startupStalled > deadReason`:本进程发起的 kill 是确证,永远优先;
+   * `sendInput` 成功投递后会清掉 `startupStalled`(连同落盘的 startup_stalled),所以"投递过
+   * 之后才死"的化身不受这条影响,照旧走缺省推断——这正是"没干过活"与"干过活"的分界。
    */
-  private async syncState(runtime: Runtime, h: IncarnationHandle): Promise<{ state: WorkerContractState; stopCount: number }> {
+  private async syncState(
+    runtime: Runtime,
+    h: IncarnationHandle,
+    deadReason: IncarnationEndReason = 'completed',
+  ): Promise<{ state: WorkerContractState; stopCount: number }> {
     if (runtime.state === 'exited') return { state: 'exited', stopCount: runtime.stopBaseline }
 
     return this.getMutex(h.worker_id).run(async () => {
@@ -754,13 +842,20 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         computed = 'exited'
       } else if (stopCount > runtime.stopBaseline) {
         computed = 'idle'
+      } else if (runtime.startupStalled) {
+        // 启动期就绪握手超时的暂扣(见 Runtime.startupStalled):开工输入一个字符都没投递过,
+        // stop 计数永远不会涨,落回 running 就是谎报"正在干活"。维持 idle 直到 sendInput 清标志。
+        computed = 'idle'
       } else {
         computed = 'running'
       }
 
       if (computed !== runtime.state) {
         if (computed === 'exited') {
-          await this.transitionExited(runtime, h, runtime.killed ? 'killed' : 'completed')
+          // 暂扣态置位 ⇒ 开工输入一个字符都没投递过(sendInput 成功才清标志),缺省的
+          // "非 kill ⇒ completed"推断在这里明确不可能成立。见本方法注释里的优先级说明。
+          const reason: IncarnationEndReason = runtime.killed ? 'killed' : runtime.startupStalled ? 'crashed' : deadReason
+          await this.transitionExited(runtime, h, reason)
         } else {
           await this.transitionState(runtime, h, computed)
         }
@@ -843,6 +938,11 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
       const sessionName = `crabot-w-${ref.worker_id}-${ref.seq}`
       const alive = await this.tmux.isAlive(sessionName)
+      // 启动期就绪握手超时的暂扣态是上面那条"重建后无法复原 running/idle 精细区分"的**唯一
+      // 例外**:它有独立落盘的确证(startup_stalled),且判错的代价不是精度损失而是语义错误
+      // ——一个开工输入一个字符都没投递过的 worker 在台账上显示"正在干活",manager 从此不
+      // 再过问。见 Runtime.startupStalled。
+      const stalled = alive && meta.startup_stalled === true
       const workspaceRoot = meta.workspace_root ?? ''
       const sessionId = meta.session_id ?? ref.session_ref ?? ''
       const outputFile = join(dir, `output-${ref.seq}.log`)
@@ -864,10 +964,11 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         sessionId,
         outputLog: new OutputLog(outputFile),
         eventChannel,
-        state: alive ? 'running' : 'exited',
+        state: alive ? (stalled ? 'idle' : 'running') : 'exited',
         ended_reason: alive ? undefined : meta.ended_reason,
         stopBaseline,
         killed: false,
+        startupStalled: stalled,
       }
       this.runtimes.set(key, runtime)
       // 重启后重连接管(§13):会话还活着的化身在这里重新装上文件监视,它之后每一轮 hook
@@ -882,7 +983,9 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   private async readMetaFile(
     dir: string,
     seq: number,
-  ): Promise<{ session_id?: string; workspace_root?: string; ended_reason?: IncarnationEndReason } | undefined> {
+  ): Promise<
+    { session_id?: string; workspace_root?: string; ended_reason?: IncarnationEndReason; startup_stalled?: boolean } | undefined
+  > {
     try {
       const raw = await fs.readFile(join(dir, `meta-${seq}.json`), 'utf-8')
       return JSON.parse(raw)
@@ -920,22 +1023,74 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
    *
    * 这两个实现拉起的是交互式 TUI,输出靠 `tmux pipe-pane -o ... 'cat >> <file>'` 落盘
    * (见 workers/tmux/driver.ts),拿到的是**终端渲染态原始字节流**——ANSI 控制序列、光标
-   * 移动造成的重复重绘、边框、工具调用面板混在一起,全仓没有任何剥离/归一化层。把它塞进
-   * 唤醒事件等于把这堆字节永久写进 manager 的上下文和 episode 日志,污染远大于收益,而且
-   * 每次转 idle 都要付一遍。
+   * 移动造成的重复重绘、边框、工具调用面板混在一起。把它塞进唤醒事件等于把这堆字节永久
+   * 写进 manager 的上下文和 episode 日志,污染远大于收益,而且每次转 idle 都要付一遍。
    *
-   * ANSI 归一化要单独设计(还要处理"TUI 里哪一段才算 assistant 发言"这个问题),不在本次
-   * 范围内。在那之前,cc/codex 的唤醒事件只带状态,manager 需要正文时走 `read_worker_output`
-   * ——那条路本来就通,行为与本次改动之前逐字一致。
+   * `terminal-output.ts` 的解码只解决了"读得懂"这一半,另一半——"TUI 里哪一段才算 assistant
+   * 发言"——仍然无解,而那正是 `lastText` 的语义。所以 cc/codex 的唤醒事件只带状态,manager
+   * 需要正文时走 `read_worker_output`——那条路本来就通,行为与本次改动之前逐字一致。
+   *
+   * 唯一的例外是 `report.outputTail`(见 reportStartupStall):启动期就绪握手超时时,manager
+   * 手上没有任何别的线索能判断"卡在哪",而这是**每个化身至多付一次**的一次性成本,与上面
+   * "每轮都付一遍"的量纲完全不同。
    */
-  private async transitionState(runtime: Runtime, h: IncarnationHandle, state: WorkerContractState): Promise<void> {
-    await writeMetaAtomic(runtime.dir, runtime.seq, { seq: runtime.seq, state, session_id: runtime.sessionId, workspace_root: runtime.workspaceRoot })
+  private async transitionState(
+    runtime: Runtime,
+    h: IncarnationHandle,
+    state: WorkerContractState,
+    report?: StateChangeReport,
+  ): Promise<void> {
+    await writeMetaAtomic(runtime.dir, runtime.seq, {
+      seq: runtime.seq,
+      state,
+      session_id: runtime.sessionId,
+      workspace_root: runtime.workspaceRoot,
+      // 暂扣态跟着落盘:重启后 ensureRuntime 靠它把 idle 复原回来(见 Runtime.startupStalled)。
+      // 只在置位时写,不置位就不出现在 meta 里——老 meta 缺这个字段等价于"没暂扣"。
+      ...(runtime.startupStalled ? { startup_stalled: true } : {}),
+    })
     runtime.state = state
     try {
-      this.deps.onStateChange?.(h, state)
+      this.deps.onStateChange?.(h, state, report)
     } catch (err) {
       console.error(`[ClaudeCodeAdapter] onStateChange callback error for ${h.worker_id}#${h.seq}:`, err)
     }
+  }
+
+  /**
+   * 就绪握手超时的收场:落 `idle` + 把 output 尾部随唤醒事件交给 manager。**零协议改动**
+   * (protocol-agent-v3 §4.3:"worker 停下且输出尾巴带着问题"本来就是 idle 的一种情况,
+   * 判断语义与决策的责任在 manager 侧;§5.5 又明确授予它 `raw` 敲键的能力)。
+   *
+   * 不走"kill + exited(crashed)":那条路现成(见 kill()),但它把一个还能救的现场直接销毁。
+   * 保留进程交给 manager 决策严格更优,且不额外增加静默风险——化身已经落 idle,manager
+   * 必被唤醒。
+   *
+   * 尾部与 `readOutput` 走同一个解码器:manager 手上只有一个 worker 的一份日志,它没有理由
+   * 在 `read_worker_output` 里拿到可读文本、在唤醒事件里拿到同一份日志的转义序列乱码。解码
+   * 位置也与 `readOutput` 一致地留在 adapter 这一层(builtin 的输出是纯文本,不该被解码)。
+   */
+  private async reportStartupStall(runtime: Runtime, h: IncarnationHandle, outputFile: string): Promise<void> {
+    const tail = decodeTerminalOutput(await readOutputTail(outputFile))
+    // 等待期间进程可能是**自己死了**(启动即失败:二进制缺失、PATH 不对、pane 里的命令立刻
+    // 退出),那不是"停在一个界面上等人",谎报 idle 会让 manager 对着一具尸体发指令。先让既有
+    // 的三源判定跑一遍,它会如实落 exited;只有确实还活着才走下面的暂扣汇报。
+    //
+    // 落 `'crashed'` 而不是 syncState 缺省的 `'completed'`:本函数被调用的前提就是"就绪信号
+    // 没等到 ⇒ 开工输入一个字符都没投递",此刻会话没了只可能是启动即失败(二进制缺失、PATH
+    // 不对、pane 命令立刻退出),completed 在这条路径上明确不可能成立。吃缺省推断会让一个
+    // 从没干过活的 worker 在台账上落成"成功完成"终态(同 #66 修的那类"失败记成成功")。
+    if ((await this.syncState(runtime, h, 'crashed')).state === 'exited') return
+    await this.getMutex(h.worker_id).run(async () => {
+      if (runtime.state === 'exited') return // 判定与提交之间又被并发抢先:终态不可覆盖
+      // 先置标志再迁移:这一次 transitionState 的 meta 写入要带上 startup_stalled,且此后
+      // 任何一次 syncState 都必须维持 idle(见 Runtime.startupStalled)——否则这条 idle
+      // 只是"落了一下",下一次 state() 就把它连同台账一起翻回 running。
+      runtime.startupStalled = true
+      await this.transitionState(runtime, h, 'idle', {
+        outputTail: describeStartupStall({ impl: 'claude-code', timeoutMs: this.pasteReadyTimeoutMs, tail }),
+      })
+    })
   }
 
   private async transitionExited(runtime: Runtime, h: IncarnationHandle, ended_reason: IncarnationEndReason): Promise<void> {
