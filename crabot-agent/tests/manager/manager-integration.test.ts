@@ -522,7 +522,7 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       //
       // 这条剧本同时是"化身终止原因不再被丢弃"的端到端验收(核心用例):worker B 调
       // `finish_task(outcome:'failed')`,该真值经 builtin adapter 的 `transitionExited` →
-      // `onStateChange` 第四参 → `harness.processStateChange` 一路送进台账。历史上
+      // `onStateChange` 的 report.endReason → `harness.processStateChange` 一路送进台账。历史上
       // harness 在这一跳硬编码 `endReason='completed'`,把它整个丢掉,这里曾按失真行为
       // 如实钉住 `completed`——现已修复并翻转。
       //

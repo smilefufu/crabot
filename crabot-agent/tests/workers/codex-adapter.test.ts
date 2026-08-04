@@ -7,7 +7,7 @@ import * as path from 'node:path'
 import { CodexWorkerAdapter, eventsFilePath, WorkerExitedError, CapabilityNotSupportedError } from '../../src/workers/codex/adapter.js'
 import { TmuxDriver, type TmuxSessionSpec } from '../../src/workers/tmux/driver.js'
 import { CliEventChannel } from '../../src/workers/cli-events.js'
-import type { IncarnationEndReason, IncarnationHandle, SpawnSpec, WorkerContractState } from '../../src/workers/types.js'
+import type { IncarnationHandle, SpawnSpec, StateChangeReport, WorkerContractState } from '../../src/workers/types.js'
 
 function detectTmux(): boolean {
   try {
@@ -184,12 +184,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
     script: MockStep[],
     opts?: {
       withRollout?: boolean
-      onStateChange?: (
-        h: IncarnationHandle,
-        state: WorkerContractState,
-        lastText?: string,
-        endReason?: IncarnationEndReason,
-      ) => void
+      onStateChange?: (h: IncarnationHandle, state: WorkerContractState, report?: StateChangeReport) => void
     },
   ): Promise<{ adapter: CodexWorkerAdapter; workerId: string; rolloutUuid?: string; rolloutFile?: string }> {
     const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
@@ -329,10 +324,10 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
     15000,
   )
 
-  // ---- onStateChange 的第四参 endReason:codex 上报的是**推断**,不是确证 ----
+  // ---- onStateChange 上报的 report.endReason:codex 上报的是**推断**,不是确证 ----
 
   it(
-    '会话消失(非本进程 kill)→ 回调第四参上报 completed;这是推断,不表示任务真的成功',
+    '会话消失(非本进程 kill)→ 回调 report.endReason 上报 completed;这是推断,不表示任务真的成功',
     async () => {
       // ⚠️ 这条断言钉住的是 codex adapter 的**能力天花板**,不是"任务成功"这件事的证据。
       //
@@ -346,8 +341,8 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
       // 给 cc/codex 补终态上报是另一个设计任务,不在本次范围。
       const seen: Array<{ state: WorkerContractState; endReason?: string }> = []
       const { adapter, workerId } = await provisionedAdapter([{ output: '收尾输出', exit: true }], {
-        onStateChange: (_h, state, _lastText, endReason) => {
-          seen.push({ state, endReason })
+        onStateChange: (_h, state, report) => {
+          seen.push({ state, endReason: report?.endReason })
         },
       })
       const h = await adapter.spawn(makeSpec(workerId, '你好'))
@@ -360,12 +355,12 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
   )
 
   it(
-    '本进程 kill → 回调第四参上报 killed(这一档是确证:只有 adapter 知道是不是自己动的手)',
+    '本进程 kill → 回调 report.endReason 上报 killed(这一档是确证:只有 adapter 知道是不是自己动的手)',
     async () => {
       const seen: Array<{ state: WorkerContractState; endReason?: string }> = []
       const { adapter, workerId } = await provisionedAdapter([{ output: '还在跑' }], {
-        onStateChange: (_h, state, _lastText, endReason) => {
-          seen.push({ state, endReason })
+        onStateChange: (_h, state, report) => {
+          seen.push({ state, endReason: report?.endReason })
         },
       })
       const h = await adapter.spawn(makeSpec(workerId, '你好'))
