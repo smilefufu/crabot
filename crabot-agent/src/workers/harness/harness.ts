@@ -47,7 +47,7 @@
  *
  * onStateChange 接线契约(P4 负责实际接线,P3 只提供出口):
  *   三个 adapter(builtin/claude-code/codex)都在各自构造函数的 deps 里接受一个可选的
- *   `onStateChange?: (h, state) => void`,但 HarnessDeps.adapters 要求把"已经构造好的
+ *   `onStateChange?: (h, state, report?) => void`,但 HarnessDeps.adapters 要求把"已经构造好的
  *   adapter"塞进来——adapter 构造在先、harness 构造在后,没法在 adapter 构造时就拿到
  *   harness 实例的方法引用,形成先有鸡还是先有蛋的问题。
  *
@@ -72,6 +72,7 @@ import type {
   IncarnationHandle,
   IncarnationRef,
   IncarnationEndReason,
+  StateChangeReport,
   SpawnSpec,
   OutputCursor,
   CapabilityBundle,
@@ -108,13 +109,37 @@ const HANDOFF_TAIL_MAX_CHARS = 4096
  */
 const WAKE_TEXT_MAX_CHARS = 2000
 
-/** 见 WAKE_TEXT_MAX_CHARS。空白/空串一律折成 undefined(不往 detail 里塞空字段)。 */
-function truncateWakeText(text: string | undefined): string | undefined {
+/**
+ * 唤醒事件 `detail.summary` 的上限(字符数)。比 `detail.text` 宽一倍,两条依据:
+ *
+ * 1. **这是一次性成本**。summary 只在化身落终态的那一次产生一条(`finish_task` 是唯一
+ *    出处),不像 `text` 每个轮次边界都要付一遍。量纲对齐 handoff 那份
+ *    `HANDOFF_TAIL_MAX_CHARS`(4096)——同样是"每次交接才付一回"。
+ * 2. **它常常是唯一的交付物**。一个全程只调工具、最后 `finish_task` 收场的 worker,
+ *    `output.log` 与 `text` 双双为空,截狠了就是把交付物截没;而且截掉的部分**无处可补**
+ *    ——summary 不进 output,`read_worker_output` 读不到它。这与 `text` 的处境根本不同
+ *    (text 截断后还能按 offset 去读全文),所以宁可给宽。
+ *
+ * `finish_task` 要的是"一句话总结",典型几十到几百字符,4096 事实上是个防失控上限,
+ * 不是常规裁剪线。
+ */
+const WAKE_SUMMARY_MAX_CHARS = 4096
+
+/**
+ * 唤醒事件 detail 里各段正文的统一截断。上限与溢出提示由调用方按该段的处境给(见
+ * WAKE_TEXT_MAX_CHARS / WAKE_SUMMARY_MAX_CHARS);空白/空串一律折成 undefined
+ * (不往 detail 里塞空字段)。
+ *
+ * `overflowHint` 必须如实:它是给 manager 的指引,指向一条读得到全文的路。指向读不到的
+ * 地方(比如让它去 `read_worker_output` 找一份根本不进 output 的 summary)只会换来一次
+ * 白跑的往返和一个"东西丢了"的错误结论。没有这样的路时就留空。
+ */
+function truncateWakeText(text: string | undefined, maxChars: number, overflowHint: string): string | undefined {
   if (!text) return undefined
   const trimmed = text.trim()
   if (!trimmed) return undefined
-  if (trimmed.length <= WAKE_TEXT_MAX_CHARS) return trimmed
-  return trimmed.slice(0, WAKE_TEXT_MAX_CHARS) + `…[已截断,共 ${trimmed.length} 字符,全文用 read_worker_output 读]`
+  if (trimmed.length <= maxChars) return trimmed
+  return trimmed.slice(0, maxChars) + `…[已截断,共 ${trimmed.length} 字符${overflowHint}]`
 }
 
 /**
@@ -242,37 +267,31 @@ export class WorkerHarness {
   /**
    * 见文件头"onStateChange 接线契约"。箭头函数字段:构造时绑定 this,P4 可直接把它作为
    * 三个 adapter 构造 deps 里的 `onStateChange` 传入,不需要 .bind(harness)。
-   * 签名对齐三个 adapter 的 `deps.onStateChange?: (h, state, lastText?, endReason?) => void`
+   * 签名对齐三个 adapter 的 `deps.onStateChange?: (h, state, report?: StateChangeReport) => void`
    * (同步、无返回值)——内部把实际的异步台账更新做成 fire-and-forget,任何失败只
    * console.error,不抛给 adapter(adapter 侧本身也已经用 try/catch 包裹了对这个回调的调用,
    * 这里双重防御,理由一致:观察者的异常不能中断 adapter 自己的状态机推进)。
    *
-   * `lastText`:轮次边界上 worker 最后说的那段话,由 adapter 按需提供(只有 builtin 提供,
-   * 见其构造 deps 注释)。harness 截断后放进 `state_changed` 事件的 detail,让 manager
-   * 醒来就看得到 worker 说了什么,不必先往返一次 `read_worker_output`。
+   * `report` 里各字段的含义与"哪个 adapter 报得出"见 `StateChangeReport` 的字段注释;
+   * 这里只说 harness 拿它做什么:
    *
-   * `endReason`:化身的终止原因,由 adapter 在 `transitionExited` 时提供——那里它本就是
-   * 必填形参,三个实现在调这个回调之前都已经把它写进了自己的 meta。harness 据此落台账,
-   * 不再自己猜(修复前这里硬编码 'completed',把 builtin 经 `finish_task(outcome:'failed')`
-   * 结构化上报的失败真值整个丢掉,台账/task.status/对外事件/HANDOFF.md 四处一起记错)。
-   * 可信度分级见协议 §6.3:builtin 的是确证,cc/codex 的 `completed` 是推断。
+   * - `lastText`:截断后放进 `state_changed` 事件的 detail,让 manager 醒来就看得到 worker
+   *   说了什么,不必先往返一次 `read_worker_output`;
+   * - `endReason`:据此落台账,不再自己猜(修复前这里硬编码 'completed',把 builtin 经
+   *   `finish_task(outcome:'failed')` 结构化上报的失败真值整个丢掉,台账/task.status/
+   *   对外事件/HANDOFF.md 四处一起记错)。
    */
-  readonly handleStateChange = (
-    h: IncarnationHandle,
-    state: WorkerContractState,
-    lastText?: string,
-    endReason?: IncarnationEndReason,
-  ): void => {
+  readonly handleStateChange = (h: IncarnationHandle, state: WorkerContractState, report?: StateChangeReport): void => {
     // 契约断言(同步抛,不进 fire-and-forget):endReason 只在 exited 时有意义。running/idle
     // 带着终止原因进来说明调用方的状态机接错了线,静默忽略会让台账落进说不清的中间态——
     // 抛给 adapter,由它的 try/catch 记 console.error(观察者异常不中断状态机推进)。
-    if (endReason !== undefined && state !== 'exited') {
+    if (report?.endReason !== undefined && state !== 'exited') {
       throw new Error(
-        `WorkerHarness.handleStateChange: endReason '${endReason}' is only meaningful for state 'exited', got '${state}' ` +
+        `WorkerHarness.handleStateChange: endReason '${report.endReason}' is only meaningful for state 'exited', got '${state}' ` +
           `(${h.worker_id}#${h.seq})`
       )
     }
-    this.processStateChange(h, state, lastText, endReason).catch((err) => {
+    this.processStateChange(h, state, report).catch((err) => {
       console.error(`[WorkerHarness] handleStateChange failed for ${h.worker_id}#${h.seq}:`, err)
     })
   }
@@ -1327,11 +1346,18 @@ export class WorkerHarness {
   private async processStateChange(
     h: IncarnationHandle,
     state: WorkerContractState,
-    lastText?: string,
-    reportedEndReason?: IncarnationEndReason,
+    report?: StateChangeReport,
   ): Promise<void> {
-    // 唤醒事件的正文尾巴:截断在这一处收口,三个 adapter 共用同一上限(见 WAKE_TEXT_MAX_CHARS)。
-    const wakeText = truncateWakeText(lastText)
+    // 唤醒事件的两段正文:截断在这一处收口,三个 adapter 共用同一上限。text 截断后还能按
+    // offset 去 read_worker_output 读全文,summary 不进 output、没有这条后路,所以提示语
+    // 不同、上限也不同(见两个常量各自的注释)。
+    const wakeText = truncateWakeText(report?.lastText, WAKE_TEXT_MAX_CHARS, ',全文用 read_worker_output 读')
+    const wakeSummary = truncateWakeText(report?.summary, WAKE_SUMMARY_MAX_CHARS, '')
+    // detail 里两段正文的组装收口在这里,fork 分支与主线分支共用——不在两处各拼一遍。
+    const wakeDetail = {
+      ...(wakeText ? { text: wakeText } : {}),
+      ...(wakeSummary ? { summary: wakeSummary } : {}),
+    }
     await this.withLock(h.worker_id, async () => {
       const found = await this.deps.ledger.findWorker(h.worker_id)
       if (!found) return // 未知 worker,理论不该发生;防御性丢弃,不抛给 adapter 的回调
@@ -1348,7 +1374,7 @@ export class WorkerHarness {
       // 缺席是**防守分支,不是常规路径**:只有未接线的第四个实现或测试替身才会走到。此时
       // 不替 adapter 编一个原因——原样把 undefined 交给 taskStatusFromIncarnation,由它既有的
       // 防守分支(exited + 无原因 ⇒ failed)兜住,宁可记成失败也不谎报成功。
-      const endReason: IncarnationEndReason | undefined = state === 'exited' ? reportedEndReason : undefined
+      const endReason: IncarnationEndReason | undefined = state === 'exited' ? report?.endReason : undefined
       const now = this.deps.now()
 
       if (target.forked_from !== undefined) {
@@ -1373,7 +1399,7 @@ export class WorkerHarness {
           )
           return { ...prev, incarnations, updated_at: now }
         })
-        await this.appendEvent(h.worker_id, h.seq, 'state_changed', { to: state, ...(wakeText ? { text: wakeText } : {}) })
+        await this.appendEvent(h.worker_id, h.seq, 'state_changed', { to: state, ...wakeDetail })
         return
       }
 
@@ -1420,7 +1446,7 @@ export class WorkerHarness {
         h.worker_id,
         h.seq,
         'state_changed',
-        { to: state, ...(wakeText ? { text: wakeText } : {}) },
+        { to: state, ...wakeDetail },
         committed?.task.status
       )
     })

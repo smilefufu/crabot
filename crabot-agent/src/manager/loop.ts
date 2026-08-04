@@ -646,15 +646,23 @@ function renderChannelMessages(
 }
 
 /**
- * `detail.text`(worker 在这个轮次边界上最后说的那段话,harness 已按 WAKE_TEXT_MAX_CHARS
- * 截断)单独成段渲染,不塞进 JSON——JSON.stringify 会把换行转义成 `\n`,几百字的收尾发言
- * 挤成一行转义串,manager 读起来费劲。其余 detail 字段仍走 JSON,形状不变。
+ * 两段人写给人看的正文单独成段渲染,不塞进 JSON——JSON.stringify 会把换行转义成 `\n`,
+ * 几百字的内容挤成一行转义串,manager 读起来费劲。其余 detail 字段仍走 JSON,形状不变。
+ *
+ * - `detail.text`:worker 在这个轮次边界上最后说的那段话;
+ * - `detail.summary`:worker 调 `finish_task` 时自己写的收尾结论。两者都由 harness 按各自
+ *   上限截断过(见 WAKE_TEXT_MAX_CHARS / WAKE_SUMMARY_MAX_CHARS)。
+ *
+ * 一个全程只调工具的 worker 只有后者(前者与 output 一起是空的),所以两段都必须渲染,
+ * 不能只挑一段。
  */
 function renderWorkerEvent(e: HarnessEvent): string {
-  const { text, ...rest } = (e.detail ?? {}) as { text?: unknown } & Record<string, unknown>
+  const { text, summary, ...rest } = (e.detail ?? {}) as { text?: unknown; summary?: unknown } & Record<string, unknown>
   const detail = Object.keys(rest).length > 0 ? ` detail=${JSON.stringify(rest)}` : ''
-  const head = `[worker 事件] worker_id=${e.worker_id} seq=${e.seq} kind=${e.kind}${detail}`
-  return typeof text === 'string' && text.length > 0 ? `${head}\nworker 最后说:\n${text}` : head
+  const parts = [`[worker 事件] worker_id=${e.worker_id} seq=${e.seq} kind=${e.kind}${detail}`]
+  if (typeof text === 'string' && text.length > 0) parts.push(`worker 最后说:\n${text}`)
+  if (typeof summary === 'string' && summary.length > 0) parts.push(`worker 的收尾结论:\n${summary}`)
+  return parts.join('\n')
 }
 
 /**

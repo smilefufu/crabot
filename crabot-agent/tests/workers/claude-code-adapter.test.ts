@@ -1582,9 +1582,9 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
     await adapter.kill(h)
   })
 
-  // ---- onStateChange 的第四参 endReason:cc 上报的是**推断**,不是确证 ----
+  // ---- onStateChange 上报的 report.endReason:cc 上报的是**推断**,不是确证 ----
 
-  it('tmux 会话消失(非本进程 kill)→ 回调第四参上报 completed;这是推断,不表示任务真的成功', async () => {
+  it('tmux 会话消失(非本进程 kill)→ 回调 report.endReason 上报 completed;这是推断,不表示任务真的成功', async () => {
     // ⚠️ 这条断言钉住的是 cc adapter 的**能力天花板**,不是"任务成功"这件事的证据。
     //
     // cc 的退出判定唯一依据是 `tmux.isAlive`(adapter 的三源合成状态判定不看退出码):
@@ -1607,8 +1607,8 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
       tmux: new NoopTmux(),
       claudeBin: 'unused',
       claudeProjectsDir,
-      onStateChange: (_h, state, _lastText, endReason) => {
-        seen.push({ state, endReason })
+      onStateChange: (_h, state, report) => {
+        seen.push({ state, endReason: report?.endReason })
       },
     })
     const workerId = `cctest-${randomUUID().slice(0, 8)}`
@@ -1622,7 +1622,7 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
     expect(seen).toEqual([{ state: 'exited', endReason: 'completed' }])
   })
 
-  it('本进程 kill → 回调第四参上报 killed(这一档是确证:只有 adapter 知道是不是自己动的手)', async () => {
+  it('本进程 kill → 回调 report.endReason 上报 killed(这一档是确证:只有 adapter 知道是不是自己动的手)', async () => {
     const seen: Array<{ state: WorkerContractState; endReason?: string }> = []
     const adapter = new ClaudeCodeAdapter({
       dataDir,
@@ -1630,8 +1630,8 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
       tmux: new NoopTmux(),
       claudeBin: 'unused',
       claudeProjectsDir,
-      onStateChange: (_h, state, _lastText, endReason) => {
-        seen.push({ state, endReason })
+      onStateChange: (_h, state, report) => {
+        seen.push({ state, endReason: report?.endReason })
       },
     })
     const workerId = `cctest-${randomUUID().slice(0, 8)}`

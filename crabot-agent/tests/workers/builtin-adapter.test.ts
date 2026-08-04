@@ -5,7 +5,7 @@ import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { BuiltinWorkerAdapter, WorkerExitedError } from '../../src/workers/builtin/adapter.js'
 import { SessionTree } from '../../src/workers/session-tree.js'
-import type { SpawnSpec, IncarnationHandle, IncarnationRef, WorkerContractState } from '../../src/workers/types.js'
+import type { SpawnSpec, IncarnationHandle, IncarnationRef, StateChangeReport, WorkerContractState } from '../../src/workers/types.js'
 import type { LLMAdapter } from '../../src/engine/llm-adapter-types.js'
 import { defineTool } from '../../src/engine/index.js'
 import type { EngineMessage, ToolDefinition } from '../../src/engine/index.js'
@@ -349,6 +349,67 @@ describe('BuiltinWorkerAdapter', () => {
     expect(meta.state).toBe('exited')
     expect(meta.ended_reason).toBe('completed')
     expect(meta.outcome).toBe('completed')
+  })
+
+  it('finish_task 的 summary 经 onStateChange 上报(worker 全程只调工具时,这是它唯一的交付物)', async () => {
+    // 生产故障:定时反思 worker 全程只调工具,一次 assistant text 都没产出 ——
+    // outputLog 的写入条件 `if (event.assistantText)` 一次都不触发,output.log 根本
+    // 不会被创建,report.lastText 也是空。结论只在 finish_task 的 summary 参数里。
+    const seen: Array<{ state: WorkerContractState; report?: StateChangeReport }> = []
+    const adapter = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      onStateChange: (_h, state, report) => {
+        seen.push({ state, ...(report ? { report } : {}) })
+      },
+    })
+    const SUMMARY = '今日反思完成:三次任务都拖到截止前一天才开工,建议把开工日也排进日程。'
+    const s = spec({
+      adapter: makeAdapter([
+        // content 里没有 text 块,只有 tool_use —— 复刻生产上那个 worker 的形态。
+        {
+          toolCalls: [{ name: 'finish_task', id: 'call_1', input: { outcome: 'completed', summary: SUMMARY } }],
+          stopReason: 'tool_use',
+        },
+      ]),
+    })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'exited')
+
+    const exited = seen.find((e) => e.state === 'exited')
+    expect(exited).toBeDefined()
+    expect(exited!.report?.summary).toBe(SUMMARY)
+    expect(exited!.report?.endReason).toBe('completed')
+    // 前提如实成立:这条 worker 没有任何 assistant text,output 通道整个是空的。
+    expect(exited!.report?.lastText ?? '').toBe('')
+    const { chunk } = await adapter.readOutput(h, { offset: 0 })
+    expect(chunk).toBe('')
+  })
+
+  it('finish_task 的 summary 不是字符串(LLM 乱填)→ 不上报,不把非文本当作 worker 的结论', async () => {
+    const seen: Array<{ state: WorkerContractState; report?: StateChangeReport }> = []
+    const adapter = new BuiltinWorkerAdapter({
+      dataDir: tmp,
+      onStateChange: (_h, state, report) => {
+        seen.push({ state, ...(report ? { report } : {}) })
+      },
+    })
+    const s = spec({
+      adapter: makeAdapter([
+        {
+          toolCalls: [{ name: 'finish_task', id: 'call_1', input: { outcome: 'completed', summary: { a: 1 } } }],
+          stopReason: 'tool_use',
+        },
+      ]),
+    })
+
+    const h = await adapter.spawn(s)
+    await waitState(adapter, h, 'exited')
+
+    const exited = seen.find((e) => e.state === 'exited')
+    expect(exited!.report?.summary).toBeUndefined()
+    // 终态本身照常落定,不因为 summary 不合规就改判。
+    expect(exited!.report?.endReason).toBe('completed')
   })
 
   it('engine 抛错 → exited(crashed)', async () => {

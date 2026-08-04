@@ -75,6 +75,44 @@ export interface IncarnationRef {
   readonly session_ref: string
 }
 
+/**
+ * adapter 在一次状态转换上**顺带上报**的可选信息(`deps.onStateChange` 的第三个实参)。
+ *
+ * 字段都是可选的、彼此独立的、按 adapter 能力有则报之的东西,没有先后语义,也没有哪两个
+ * 必须成对出现——这是一个**载荷**,不是一串位置参数。收成对象而不是继续往回调后面追加
+ * 形参,理由:
+ *
+ * 1. cc/codex 本就不产 `lastText`,位置参数下它们得写 `(h,'exited',undefined,reason)` 这种
+ *    占位调用,每加一个字段就得重数一遍位置;
+ * 2. 同类型的可选字段一旦不止一个(都是 `string | undefined`),位置写反了类型检查一个字
+ *    都不会说,错法是静默的语义错;
+ * 3. 后续再接新信号(比如 cc 拿到真实终态、或带上本轮耗时)是加一个具名字段,所有调用点
+ *    不动。
+ */
+export interface StateChangeReport {
+  /**
+   * 本次转换发生时 worker 最后说的那段 assistant text。只有 builtin 产出(它的输出天然
+   * 只含 text);cc/codex 的输出是整屏 TUI,拆不出干净的"最后一段话",不报。
+   */
+  readonly lastText?: string
+  /**
+   * 化身的终止原因,只在 `state==='exited'` 时有意义,由 adapter 的 `transitionExited`
+   * 原样上报。可信度分级见协议 §6.3:builtin 的是确证(finish_task 结构化上报),
+   * cc/codex 的 `completed` 是"会话消失且非本进程 kill"的推断。
+   */
+  readonly endReason?: IncarnationEndReason
+  /**
+   * worker 自己写的收尾结论,来自 builtin 的 `finish_task(summary)`,因此只可能在
+   * `state==='exited'` 时出现,且只有那一条终止路径有——crashed/killed/上下文超限
+   * 收场时 worker 根本没机会写。cc/codex 没有对应的结构化终态上报,不产。
+   *
+   * 它与 `lastText` 是**两样东西**,不能相互替代:`lastText` 是 assistant 说的话,一个
+   * 全程只调工具、最后用 `finish_task` 收场的 worker(定时反思/早报就是这个形态)从头到
+   * 尾一句 text 都没有,`lastText` 与 `output.log` 双双为空,`summary` 是它唯一的交付物。
+   */
+  readonly summary?: string
+}
+
 export interface DetectResult { installed: boolean; activated: boolean; detail?: string }
 export interface AdapterCapabilities {
   readonly fork: boolean; readonly revive: boolean; readonly goalMode: boolean

@@ -15,6 +15,7 @@ import type {
   IncarnationHandle,
   IncarnationRef,
   IncarnationEndReason,
+  StateChangeReport,
   SpawnSpec,
   Workspace,
   OutputCursor,
@@ -32,12 +33,7 @@ function handleKey(h: IncarnationHandle): string {
 interface FakeAdapterOpts {
   readonly implId?: WorkerImplId
   readonly caps?: Partial<AdapterCapabilities>
-  readonly onStateChange?: (
-    h: IncarnationHandle,
-    state: WorkerContractState,
-    lastText?: string,
-    endReason?: IncarnationEndReason,
-  ) => void
+  readonly onStateChange?: (h: IncarnationHandle, state: WorkerContractState, report?: StateChangeReport) => void
   readonly spawnShouldFail?: Error
   readonly forkShouldFail?: Error
   readonly sendInputBehavior?: (h: IncarnationHandle, text: string, opts?: { raw?: boolean }) => Promise<void> | void
@@ -94,10 +90,10 @@ class FakeAdapter implements WorkerAdapter {
       // 把化身状态转到 exited 并调用 onStateChange——AsyncMutex.run 的入队是同步的
       // (harness.ts withLock 注释)，所以 harness.handleStateChange 派生的 processStateChange
       // 对这个 worker_id 的锁请求，必然排在 queryWorker 落账段(第二次 withLock)前面。
-      // 第四参对齐 cc adapter 的 fork():它的 transitionExited 拿到的是 `execFileAsync`
-      // 成功时的 'completed'(失败走 'crashed'),不是"没有值"。
+      // report.endReason 对齐 cc adapter 的 fork():它的 transitionExited 拿到的是
+      // `execFileAsync` 成功时的 'completed'(失败走 'crashed'),不是"没有值"。
       this.states.set(handleKey(handle), 'exited')
-      this.opts.onStateChange?.(handle, 'exited', undefined, 'completed')
+      this.opts.onStateChange?.(handle, 'exited', { endReason: 'completed' })
       return handle
     }
     this.states.set(handleKey(handle), 'running')
@@ -128,13 +124,13 @@ class FakeAdapter implements WorkerAdapter {
   }
 
   /** 测试专用:模拟 adapter 自己触发一次状态回调(镜像真实 adapter 内部调用 deps.onStateChange)。
-   * `lastText` 对齐真实 adapter 的可选第三参(轮次边界上 worker 最后说的那段话)。
+   * `lastText` 对齐真实 adapter 的 `report.lastText`(轮次边界上 worker 最后说的那段话)。
    *
-   * `endReason` 对齐真实 adapter 的可选第四参。三个真实 adapter 的 `transitionExited` 形参
-   * 本就是**必填**的 `ended_reason`,不存在"退出了却说不出原因"的情况——所以这个桩在
+   * `endReason` 对齐真实 adapter 的 `report.endReason`。三个真实 adapter 的 `transitionExited`
+   * 形参本就是**必填**的 `ended_reason`,不存在"退出了却说不出原因"的情况——所以这个桩在
    * `state==='exited'` 时也必须给出一个具体值,缺省取 `'completed'`(化身自然结束、非 kill,
-   * 即本文件绝大多数用例的剧本)。需要复现 failed/crashed/killed 的用例显式传第四参。
-   * 非 exited 态一律不传:endReason 只在 exited 时有意义(harness 会对此断言)。 */
+   * 即本文件绝大多数用例的剧本)。需要复现 failed/crashed/killed 的用例显式传 endReason 形参。
+   * 非 exited 态一律不报:endReason 只在 exited 时有意义(harness 会对此断言)。 */
   emitStateChange(
     h: IncarnationHandle,
     state: WorkerContractState,
@@ -142,7 +138,10 @@ class FakeAdapter implements WorkerAdapter {
     endReason?: IncarnationEndReason,
   ): void {
     this.states.set(handleKey(h), state)
-    this.opts.onStateChange?.(h, state, lastText, state === 'exited' ? (endReason ?? 'completed') : undefined)
+    this.opts.onStateChange?.(h, state, {
+      ...(lastText !== undefined ? { lastText } : {}),
+      ...(state === 'exited' ? { endReason: endReason ?? 'completed' } : {}),
+    })
   }
 }
 
@@ -365,8 +364,8 @@ describe('WorkerHarness.handleStateChange', () => {
     const worker = await harness.spawnWorker(spawnParams())
     const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
 
-    expect(() => harness.handleStateChange(h, 'idle', undefined, 'failed')).toThrow(/only meaningful for state 'exited'/)
-    expect(() => harness.handleStateChange(h, 'running', undefined, 'completed')).toThrow(/only meaningful for state 'exited'/)
+    expect(() => harness.handleStateChange(h, 'idle', { endReason: 'failed' })).toThrow(/only meaningful for state 'exited'/)
+    expect(() => harness.handleStateChange(h, 'running', { endReason: 'completed' })).toThrow(/only meaningful for state 'exited'/)
 
     // 台账没有被这次非法回调改动过。
     const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
@@ -405,6 +404,64 @@ describe('WorkerHarness.handleStateChange', () => {
     expect(text).toContain('2600')
     expect(text).toContain('read_worker_output')
     expect(text.length).toBeLessThan(2000 + 100)
+  })
+
+  it('finish_task 的 summary 单独成字段进 detail,与 text 并列(两者互不替代)', async () => {
+    // 直接调 harness.handleStateChange 而不经 FakeAdapter:这里要验的是 harness 对
+    // report.summary 的处理,桩多包一层只会挡住被测面(与本文件"防守分支"那条同款做法)。
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
+    harness.handleStateChange(h, 'exited', {
+      endReason: 'completed',
+      lastText: '  已经全部跑完了。  ',
+      summary: '  盘点完成:三处配置漂移已修正,另有一处需人工确认。  ',
+    })
+
+    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
+    const [ev] = events.filter((e) => e.kind === 'state_changed')
+    expect(ev.detail).toEqual({
+      to: 'exited',
+      text: '已经全部跑完了。',
+      summary: '盘点完成:三处配置漂移已修正,另有一处需人工确认。',
+    })
+  })
+
+  it('adapter 没给 summary 时 detail 里不出现空 summary 字段(cc/codex 与非 finish_task 的终止路径)', async () => {
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
+    harness.handleStateChange(h, 'exited', { endReason: 'crashed' })
+
+    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
+    const [ev] = events.filter((e) => e.kind === 'state_changed')
+    expect(ev.detail).toEqual({ to: 'exited' })
+  })
+
+  it('过长的 summary 按更宽的一次性上限截断,且标记不指向 read_worker_output(summary 不进 output,那里读不到)', async () => {
+    // summary 是一次性成本(只在化身落终态那一次产生一条),上限比每轮都付一遍的 text 宽
+    // 一倍。更要紧的是截断标记:text 截断后还能按 offset 去 read_worker_output 读全文,
+    // summary 没有这条后路——把 manager 指过去只会换来一次白跑的往返。
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    const long = '啊'.repeat(4600)
+    const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
+    harness.handleStateChange(h, 'exited', { endReason: 'completed', summary: long })
+
+    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
+    const [ev] = events.filter((e) => e.kind === 'state_changed')
+    const summary = (ev.detail as { summary: string }).summary
+    expect(summary.startsWith('啊'.repeat(4096))).toBe(true)
+    expect(summary).toContain('已截断')
+    expect(summary).toContain('4600')
+    expect(summary).not.toContain('read_worker_output')
+    expect(summary.length).toBeLessThan(4096 + 100)
   })
 
   it('adapter 不带 text(cc/codex 的 TUI 字节流刻意不带)时 detail 形状不变,不出现空 text 字段', async () => {

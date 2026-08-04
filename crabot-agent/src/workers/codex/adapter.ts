@@ -143,6 +143,7 @@ import type {
   CapabilityBundle,
   DetectResult,
   IncarnationEndReason,
+  StateChangeReport,
   IncarnationHandle,
   IncarnationRef,
   NormalizedTraceEvent,
@@ -455,16 +456,11 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       readonly codexHomeSource?: string
       /** spawn() 发现真实 session id 的轮询上限(ms),默认 3000;测试用可调小避免拖慢用例。 */
       readonly sessionDiscoveryTimeoutMs?: number
-      /** 第三参 `lastText` 本 adapter 刻意不传(理由同 cc),但位置要占住,因为第四参
-       * `endReason` 是位置参数:`transitionExited` 拿到的那个**必填**的 `ended_reason`。
-       * 可信度与 cc 完全同构(协议 §6.3):退出判定只认 `tmux.isAlive`,非 kill 一律记
-       * `completed`,是**推断**不是确证。详见 cc adapter 同名 deps 的注释。 */
-      readonly onStateChange?: (
-        h: IncarnationHandle,
-        state: WorkerContractState,
-        lastText?: string,
-        endReason?: IncarnationEndReason,
-      ) => void
+      /** `report.lastText` 本 adapter 刻意不报(理由同 cc),只报 `report.endReason`:
+       * `transitionExited` 拿到的那个**必填**的 `ended_reason`。可信度与 cc 完全同构
+       * (协议 §6.3):退出判定只认 `tmux.isAlive`,非 kill 一律记 `completed`,是**推断**
+       * 不是确证。详见 cc adapter 同名 deps 的注释。 */
+      readonly onStateChange?: (h: IncarnationHandle, state: WorkerContractState, report?: StateChangeReport) => void
     },
   ) {
     this.tmux = deps.tmux ?? new TmuxDriver()
@@ -1061,7 +1057,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     return max + 1
   }
 
-  /** `onStateChange` 的第三参 `lastText` 在 codex 这边同样刻意不传,理由与 cc 完全一致
+  /** `onStateChange` 的 `report.lastText` 在 codex 这边同样刻意不传,理由与 cc 完全一致
    * (输出是 tmux 落的 TUI 原始字节流,无 ANSI 剥离层)——见
    * `workers/claude-code/adapter.ts` 的 transitionState 注释。 */
   private async transitionState(runtime: Runtime, h: IncarnationHandle, state: WorkerContractState): Promise<void> {
@@ -1094,7 +1090,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 终态唯一入口:文件监视在这里摘掉,同 cc adapter。
     this.stopEventWatch(runtime)
     try {
-      this.deps.onStateChange?.(h, 'exited', undefined, ended_reason)
+      this.deps.onStateChange?.(h, 'exited', { endReason: ended_reason })
     } catch (err) {
       console.error(`[CodexWorkerAdapter] onStateChange callback error for ${h.worker_id}#${h.seq}:`, err)
     }

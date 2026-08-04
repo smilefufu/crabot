@@ -73,6 +73,7 @@ import type {
   IncarnationHandle,
   IncarnationRef,
   IncarnationEndReason,
+  StateChangeReport,
   OutputCursor,
   SpawnSpec,
   WorkerAdapter,
@@ -229,24 +230,19 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     private readonly deps: {
       readonly dataDir: string
       /**
-       * `lastText`（可选第三参）：本次状态转换所在**轮次边界**上，worker 最后说的那段
+       * `report.lastText`：本次状态转换所在**轮次边界**上，worker 最后说的那段
        * assistant 文字。harness 会把它（截断后）塞进唤醒事件的 detail，manager 因此醒来
        * 就知道 worker 说了什么，不必先往返一次 `read_worker_output`。
        * 只有 builtin 传：它的输出天然只有 assistant text（`partitionResponseContent` 只取
        * `type==='text'`，工具调用/结果一个字节都不进），符合"只要 text 不要 tool use"。
        * cc/codex 刻意不传，理由见各自 adapter 的 transitionState 注释。
        *
-       * `endReason`（可选第四参）：本次转换若是 `exited`，就是 `transitionExited` 拿到的
-       * 那个**必填**的 `ended_reason`。builtin 的它是确证（`finish_task(outcome)` 结构化
-       * 上报 / engine result / kill 标记），harness 直接据此落台账；不传这一参的话，这个
-       * 真值就在回调这一跳被丢掉，harness 只能猜（协议 §6.3）。非 exited 转换不传。
+       * `report.endReason`：本次转换若是 `exited`，就是 `transitionExited` 拿到的那个
+       * **必填**的 `ended_reason`。builtin 的它是确证（`finish_task(outcome)` 结构化上报 /
+       * engine result / kill 标记），harness 直接据此落台账；不报的话这个真值就在回调
+       * 这一跳被丢掉，harness 只能猜（协议 §6.3）。非 exited 转换不报。
        */
-      readonly onStateChange?: (
-        h: IncarnationHandle,
-        state: WorkerContractState,
-        lastText?: string,
-        endReason?: IncarnationEndReason,
-      ) => void
+      readonly onStateChange?: (h: IncarnationHandle, state: WorkerContractState, report?: StateChangeReport) => void
       /**
        * 运行配置工厂：**每次起化身现取一次**（spec 决策 2）。spawn 的那次由调用方
        * （harness.spawnWorker / handoffIncarnation）调同一个工厂后放进 `spec.builtin`；
@@ -732,7 +728,12 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       if (result.exitToolCall?.name === 'finish_task') {
         const rawOutcome = result.exitToolCall.input.outcome
         const outcome: 'completed' | 'failed' = rawOutcome === 'failed' ? 'failed' : 'completed'
-        await this.transitionExited(instance, handle, outcome, outcome, lastAssistantText)
+        // summary 是 finish_task 的**必填**入参（见 FINISH_TASK_TOOL 的 inputSchema.required），
+        // 但入参来自 LLM，schema 不是运行时保证：非字符串一律当没给，不把 `[object Object]`
+        // 这类东西当作 worker 的结论上报。
+        const rawSummary = result.exitToolCall.input.summary
+        const summary = typeof rawSummary === 'string' ? rawSummary : undefined
+        await this.transitionExited(instance, handle, outcome, outcome, lastAssistantText, summary)
         return false
       }
 
@@ -1156,7 +1157,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // 刷新到"最近一次完成的状态转换点"，否则活跃化身上的 fork/resume 会从旧节点分叉、
     // 丢中间上下文（cc/codex 的 session id 整个化身稳定，不受这个问题影响）。
     try {
-      this.deps.onStateChange?.({ ...handle, session_ref: instance.tip }, state, lastText)
+      this.deps.onStateChange?.({ ...handle, session_ref: instance.tip }, state, { ...(lastText !== undefined ? { lastText } : {}) })
     } catch (err) {
       console.error(`[BuiltinWorkerAdapter] onStateChange callback error for ${handle.worker_id}#${handle.seq}:`, err)
     }
@@ -1168,6 +1169,12 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     ended_reason: IncarnationEndReason,
     outcome?: 'completed' | 'failed',
     lastText?: string,
+    /**
+     * worker 写在 `finish_task(summary)` 里的收尾结论,只有那一条终止路径传得出
+     * （其余路径——crashed/killed/上下文超限——worker 没机会写）。原样上抛给 harness，
+     * 见下面回调处的注释。
+     */
+    summary?: string,
   ): Promise<void> {
     if (instance.pendingInputs.length > 0) {
       const deadLetterMsg = `[dead-letter] incarnation ${instance.worker_id}#${instance.seq} exited with ${instance.pendingInputs.length} unsent message(s): ${instance.pendingInputs.join(' | ')}\n`
@@ -1180,11 +1187,20 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // 观察者（onStateChange）的异常永远不能中断状态机的推进。任何回调错误都被捕获
     // 并仅作 console.error 记录，防止阻塞状态转移或导致后续 burst/sendInput 卡死。
     // session_ref 现读现取 instance.tip，同 transitionState 的注释。
-    // 第四参传的就是上面刚写进 meta 的那个 ended_reason——builtin 这一档是**确证**
+    // report.endReason 报的就是上面刚写进 meta 的那个 ended_reason——builtin 这一档是**确证**
     // （finish_task(outcome) 结构化上报 / engine result / kill 标记），harness 据此落台账。
-    // 不传的话这个真值就在回调这一跳被丢掉，harness 只能猜（协议 §6.3）。
+    // 不报的话这个真值就在回调这一跳被丢掉，harness 只能猜（协议 §6.3）。
+    //
+    // report.summary 同理：一个全程只调工具、最后 finish_task 收场的 worker（定时反思/
+    // 早报就是这个形态）从头到尾没有一句 assistant text —— outputLog 的写入条件
+    // `if (event.assistantText)` 一次都不触发，output.log 根本不会被创建，lastText 也是空。
+    // 那段 summary 就是它唯一的交付物；不报的话 manager 手里什么都没有。
     try {
-      this.deps.onStateChange?.({ ...handle, session_ref: instance.tip }, 'exited', lastText, ended_reason)
+      this.deps.onStateChange?.({ ...handle, session_ref: instance.tip }, 'exited', {
+        ...(lastText !== undefined ? { lastText } : {}),
+        endReason: ended_reason,
+        ...(summary !== undefined ? { summary } : {}),
+      })
     } catch (err) {
       console.error(`[BuiltinWorkerAdapter] onStateChange callback error for ${handle.worker_id}#${handle.seq}:`, err)
     }
