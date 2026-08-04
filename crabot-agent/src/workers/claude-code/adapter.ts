@@ -88,6 +88,7 @@ import { promisify } from 'util'
 import { TmuxDriver } from '../tmux/driver.js'
 import { CliEventChannel, EVENTS_FILE_ENV } from '../cli-events.js'
 import { OutputLog } from '../output-log.js'
+import { decodeTerminalOutput } from '../terminal-output.js'
 import { AsyncMutex } from '../async-mutex.js'
 import { writeMetaAtomic, maxSeqOnDisk } from '../meta-store.js'
 import { WorkerExitedError } from '../errors.js'
@@ -630,10 +631,14 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     })
   }
 
+  /**
+   * 落盘的是 tmux `pipe-pane` 抓的**输出流**(TUI 逐帧重绘的转义序列增量),不是纯文本。
+   * 解码只发生在这条返回路径上(见 `terminal-output.ts`),磁盘上的原文一字不动。
+   */
   async readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
     const runtime = this.runtimes.get(instanceKey(h))
     const outputLog = runtime ? runtime.outputLog : new OutputLog(join(this.deps.dataDir, h.worker_id, `output-${h.seq}.log`))
-    return outputLog.read(cursor)
+    return outputLog.read(cursor, undefined, decodeTerminalOutput)
   }
 
   /**
