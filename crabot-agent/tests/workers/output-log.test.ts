@@ -40,37 +40,76 @@ describe('OutputLog', () => {
     expect(read2.nextCursor.offset).toBe(11)
   })
 
-  it('should truncate at cap and continue reading with nextCursor', async () => {
+  it('超 cap 时返回尾部而非头部:诊断要的是"现在卡在哪"', async () => {
     const log = new OutputLog(logPath)
 
-    // Write content that exceeds cap
-    const largeContent = 'x'.repeat(100) // 100 bytes
-    await log.append(largeContent)
+    // 复刻真实事故的形状:开头是启动噪音,致命错误落在远超 cap 的位置
+    await log.append('STARTUP-NOISE-')
+    await log.append('n'.repeat(200))
+    await log.append('FATAL: 401 Unauthorized')
 
-    // First read with cap of 50 bytes
     const cap = 50
-    const read1 = await log.read({ offset: 0 }, cap)
+    const { chunk, nextCursor } = await log.read({ offset: 0 }, cap)
 
-    // Check that chunk is truncated and includes the truncation marker
-    expect(read1.chunk).toContain('[output truncated at')
-    expect(read1.chunk).toContain('continue reading from cursor]')
+    expect(chunk).toContain('FATAL: 401 Unauthorized')
+    expect(chunk).not.toContain('STARTUP-NOISE-')
+    // 游标直接落到文件末尾:被跳过的头部对这个游标而言已经消费掉了
+    expect(nextCursor.offset).toBe(237)
+  })
 
-    // Extract actual content (before the truncation marker)
-    const contentBeforeTruncation = read1.chunk.split('\n[output truncated')[0]
-    expect(contentBeforeTruncation).toBe('x'.repeat(50))
+  it('截断标记是前缀,并说明丢掉了多少', async () => {
+    const log = new OutputLog(logPath)
+    await log.append('x'.repeat(100))
 
-    // nextCursor should point to actual consumed bytes (50, not including marker)
-    expect(read1.nextCursor.offset).toBe(50)
+    const { chunk } = await log.read({ offset: 0 }, 50)
 
-    // Second read: continue from nextCursor, should get remaining content
-    const read2 = await log.read(read1.nextCursor)
-    expect(read2.chunk).toBe('x'.repeat(50))
-    expect(read2.nextCursor.offset).toBe(100)
+    expect(chunk.startsWith('[output truncated')).toBe(true)
+    expect(chunk).toContain('trimmed 50 leading chars')
+    const body = chunk.split('\n').slice(1).join('\n')
+    expect(body).toBe('x'.repeat(50))
+  })
 
-    // Third read: already at end
-    const read3 = await log.read(read2.nextCursor)
-    expect(read3.chunk).toBe('')
-    expect(read3.nextCursor.offset).toBe(100)
+  it('未超 cap 时不加任何标记', async () => {
+    const log = new OutputLog(logPath)
+    await log.append('x'.repeat(50))
+
+    const { chunk } = await log.read({ offset: 0 }, 50)
+    expect(chunk).toBe('x'.repeat(50))
+  })
+
+  it('增量游标语义不被破坏:每次只拿到新增部分,不重不漏', async () => {
+    const log = new OutputLog(logPath)
+
+    await log.append('first-')
+    const read1 = await log.read({ offset: 0 }, 1000)
+    expect(read1.chunk).toBe('first-')
+
+    await log.append('second-')
+    const read2 = await log.read(read1.nextCursor, 1000)
+    expect(read2.chunk).toBe('second-')
+
+    await log.append('third')
+    const read3 = await log.read(read2.nextCursor, 1000)
+    expect(read3.chunk).toBe('third')
+
+    const read4 = await log.read(read3.nextCursor, 1000)
+    expect(read4.chunk).toBe('')
+    expect(read4.nextCursor.offset).toBe(read3.nextCursor.offset)
+  })
+
+  it('增量读时若两次之间新增超过 cap,同样保留新增部分的尾部', async () => {
+    const log = new OutputLog(logPath)
+
+    await log.append('already-read')
+    const read1 = await log.read({ offset: 0 }, 1000)
+    expect(read1.chunk).toBe('already-read')
+
+    // 一轮之间涌出远超 cap 的输出,结尾是关键信息
+    await log.append('b'.repeat(300) + 'LATEST')
+    const read2 = await log.read(read1.nextCursor, 50)
+
+    expect(read2.chunk).toContain('LATEST')
+    expect(read2.nextCursor.offset).toBe(12 + 306)
   })
 
   it('should return empty chunk for non-existent file', async () => {
@@ -82,133 +121,72 @@ describe('OutputLog', () => {
     expect(result.nextCursor.offset).toBe(0)
   })
 
-  it('should not split a multi-byte UTF-8 character when cap boundary falls mid-character', async () => {
+  it('取尾部时不会切出半个多字节字符(3 字节)', async () => {
     const log = new OutputLog(logPath)
 
-    // 49 'A' + '中' (3-byte UTF-8) + 'BBBB'; cap=50 lands right in the middle of '中'
-    const original = 'A'.repeat(49) + '中' + 'BBBB'
+    // 尾部是多字节字符,cap 落在它们中间时不许出现替换字符
+    const original = 'A'.repeat(20) + '中'.repeat(4)
     await log.append(original)
 
-    const cap = 50
-    let cursor = { offset: 0 }
-    let assembled = ''
-    let guard = 0
-    while (true) {
-      const { chunk, nextCursor } = await log.read(cursor, cap)
-      const contentBeforeTruncation = chunk.split('\n[output truncated')[0]
-      assembled += contentBeforeTruncation
-      if (nextCursor.offset === cursor.offset) break // no progress => done
-      cursor = nextCursor
-      guard += 1
-      if (guard > 20) throw new Error('read loop did not terminate')
-    }
+    const { chunk } = await log.read({ offset: 0 }, 10)
+    const body = chunk.split('\n').slice(1).join('\n')
 
-    expect(assembled).toBe(original)
-    expect(assembled).not.toContain('�')
-    expect(cursor.offset).toBe(Buffer.byteLength(original, 'utf-8'))
+    expect(body).not.toContain('�')
+    expect(original.endsWith(body)).toBe(true)
   })
 
-  it('should not split a 4-byte emoji when cap boundary falls mid-character', async () => {
+  it('取尾部时不会切出半个多字节字符(4 字节 emoji)', async () => {
     const log = new OutputLog(logPath)
 
-    // emoji '🎉' is 4 bytes in UTF-8; place cap boundary inside it
-    const original = 'A'.repeat(48) + '🎉' + 'BBBB'
+    const original = 'A'.repeat(20) + '🎉'.repeat(3)
     await log.append(original)
 
-    const cap = 50 // 48 'A' bytes + 2 of the 4 emoji bytes = boundary mid-character
-    let cursor = { offset: 0 }
-    let assembled = ''
-    let guard = 0
-    while (true) {
-      const { chunk, nextCursor } = await log.read(cursor, cap)
-      const contentBeforeTruncation = chunk.split('\n[output truncated')[0]
-      assembled += contentBeforeTruncation
-      if (nextCursor.offset === cursor.offset) break
-      cursor = nextCursor
-      guard += 1
-      if (guard > 20) throw new Error('read loop did not terminate')
-    }
+    const { chunk } = await log.read({ offset: 0 }, 10)
+    const body = chunk.split('\n').slice(1).join('\n')
 
-    expect(assembled).toBe(original)
-    expect(assembled).not.toContain('�')
-    expect(cursor.offset).toBe(Buffer.byteLength(original, 'utf-8'))
+    expect(body).not.toContain('�')
+    expect(original.endsWith(body)).toBe(true)
   })
 
-  it('should guarantee progress with extremely small cap=1 when encountering 3-byte UTF-8 character', async () => {
+  it('日志超过原始读窗上限时,尾窗起点落在多字节字符中间也不产生半个字符', async () => {
     const log = new OutputLog(logPath)
 
-    // File: 'A' (1 byte) + '中' (3 bytes) + 'B' (1 byte) = 5 bytes total
-    const original = 'A中B'
-    await log.append(original)
+    // 原始读窗上限 1MB;开头放 20 个 3 字节的 '中'(共 60 字节),让 1MB 尾窗的起点(byte 59)
+    // 正好落在第 20 个 '中' 的最后一个字节上
+    await log.append('中'.repeat(20) + 'A'.repeat(999_999))
 
-    const cap = 1 // Extremely small cap, smaller than any multi-byte character
-    let cursor = { offset: 0 }
-    let assembled = ''
-    const offsets: number[] = []
-    let guard = 0
+    const { chunk, nextCursor } = await log.read({ offset: 0 }, 1_000_000)
 
-    while (true) {
-      offsets.push(cursor.offset)
-      const { chunk, nextCursor } = await log.read(cursor, cap)
-      const contentBeforeTruncation = chunk.split('\n[output truncated')[0]
-      assembled += contentBeforeTruncation
-
-      // Check for progress: nextCursor.offset must strictly increase or we're done
-      if (nextCursor.offset === cursor.offset) {
-        break
-      }
-      expect(nextCursor.offset).toBeGreaterThan(cursor.offset)
-      cursor = nextCursor
-      guard += 1
-      if (guard > 20) throw new Error('read loop did not terminate')
-    }
-
-    // Verify the assembled content matches original
-    expect(assembled).toBe(original)
-    expect(assembled).not.toContain('�') // No broken characters
-    expect(cursor.offset).toBe(Buffer.byteLength(original, 'utf-8'))
-
-    // Verify offsets are strictly increasing
-    for (let i = 1; i < offsets.length; i++) {
-      expect(offsets[i]).toBeGreaterThan(offsets[i - 1])
-    }
+    expect(chunk).toContain('skipped 59 earlier bytes')
+    const body = chunk.split('\n').slice(1).join('\n')
+    expect(body).not.toContain('�')
+    expect(body.startsWith('A')).toBe(true)
+    expect(nextCursor.offset).toBe(60 + 999_999)
   })
 
-  it('should guarantee progress with cap=3 when encountering 4-byte emoji', async () => {
+  it('cap 极小时游标依然前进到文件末尾,不会卡死在原地', async () => {
+    const log = new OutputLog(logPath)
+    await log.append('A中B')
+
+    const { nextCursor } = await log.read({ offset: 0 }, 1)
+    expect(nextCursor.offset).toBe(5)
+
+    const next = await log.read(nextCursor, 1)
+    expect(next.chunk).toBe('')
+    expect(next.nextCursor.offset).toBe(5)
+  })
+
+  it('decode 在返回路径上生效,且 cap 作用在解码后的文本上', async () => {
     const log = new OutputLog(logPath)
 
-    // File: 'AB' (2 bytes) + '🎉' (4 bytes) + 'C' (1 byte) = 7 bytes total
-    const original = 'AB🎉C'
-    await log.append(original)
+    // 原文 900 字节里绝大部分是控制序列,解码后只剩 30 字节 —— cap=100 不该再截它
+    const raw = '\x1b[2J'.repeat(200) + 'the only line that matters'
+    await log.append(raw)
 
-    const cap = 3 // cap < emoji's 4-byte size
-    let cursor = { offset: 0 }
-    let assembled = ''
-    const offsets: number[] = []
-    let guard = 0
+    const { chunk } = await log.read({ offset: 0 }, 100, (s) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, ''))
 
-    while (true) {
-      offsets.push(cursor.offset)
-      const { chunk, nextCursor } = await log.read(cursor, cap)
-      const contentBeforeTruncation = chunk.split('\n[output truncated')[0]
-      assembled += contentBeforeTruncation
-
-      if (nextCursor.offset === cursor.offset) {
-        break
-      }
-      expect(nextCursor.offset).toBeGreaterThan(cursor.offset)
-      cursor = nextCursor
-      guard += 1
-      if (guard > 20) throw new Error('read loop did not terminate')
-    }
-
-    expect(assembled).toBe(original)
-    expect(assembled).not.toContain('�')
-    expect(cursor.offset).toBe(Buffer.byteLength(original, 'utf-8'))
-
-    // Verify offsets are strictly increasing
-    for (let i = 1; i < offsets.length; i++) {
-      expect(offsets[i]).toBeGreaterThan(offsets[i - 1])
-    }
+    expect(chunk).toBe('the only line that matters')
+    // 原始日志一字未动
+    expect(await fs.readFile(logPath, 'utf-8')).toBe(raw)
   })
 })
