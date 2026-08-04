@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { parse as parseToml } from 'smol-toml'
 import { CodexWorkerAdapter, eventsFilePath, WorkerExitedError, CapabilityNotSupportedError } from '../../src/workers/codex/adapter.js'
 import { TmuxDriver, type TmuxSessionSpec } from '../../src/workers/tmux/driver.js'
 import { CliEventChannel } from '../../src/workers/cli-events.js'
@@ -107,8 +108,9 @@ describe('CodexWorkerAdapter.provision', () => {
     const configToml = await fs.readFile(path.join(ws, '.codex/config.toml'), 'utf-8')
     expect(configToml).toContain('notify = ')
     expect(configToml).toContain('events-cli.jsonl')
-    expect(configToml).toContain('[mcp_servers."x"]')
-    expect(configToml).toContain('command = "node"')
+    // 序列化交给 smol-toml 之后表头是否给 key 加引号属于格式细节(`[mcp_servers.x]` 与
+    // `[mcp_servers."x"]` 语义等价),这里钉语义不钉引号风格。
+    expect((parseToml(configToml) as any).mcp_servers).toEqual({ x: { command: 'node' } })
     // TOML 根级 key(notify)必须出现在第一个 table([mcp_servers...])之前。
     expect(configToml.indexOf('notify =')).toBeLessThan(configToml.indexOf('[mcp_servers'))
 
@@ -160,6 +162,143 @@ describe('CodexWorkerAdapter.provision', () => {
     expect(configToml).toContain('trust_level = "trusted"')
     // TOML 根级 key(notify)必须出现在 [projects...] 表头之前。
     expect(configToml.indexOf('notify =')).toBeLessThan(configToml.indexOf('[projects.'))
+  })
+
+  // ── provision 继承宿主 ~/.codex/config.toml ──────────────────────────────
+  // 生产事故:.codex 被重定向成隔离 CODEX_HOME 后,auth.json 搬了、config.toml 没搬,
+  // 于是 key 是给 mirror 的、endpoint 却回落到官方 api.openai.com,报 401。
+  // 隔离 home 就必须整份继承宿主登录态,不只是凭据。
+  describe('继承宿主 config.toml', () => {
+    /** 不含任何凭据的宿主配置样例——固件里绝不放真实/仿真 key。 */
+    const HOST_CONFIG = [
+      'model = "gpt-5-codex"',
+      'model_provider = "custom"',
+      'disable_response_storage = true',
+      '',
+      '[model_providers.custom]',
+      'name = "mirror"',
+      'base_url = "https://mirror.xinshu.ai"',
+      'wire_api = "responses"',
+      '',
+    ].join('\n')
+
+    async function provisionWithHost(
+      hostToml: string | null,
+      mcp: { name: string; transport: 'stdio'; command: string }[] = [],
+    ): Promise<Record<string, any>> {
+      if (hostToml !== null) {
+        await fs.writeFile(path.join(codexHomeSource, 'config.toml'), hostToml, 'utf-8')
+      }
+      const adapter = new CodexWorkerAdapter({ dataDir: ws, codexHomeSource })
+      await adapter.provision({ root: ws }, { skills: [], mcp_servers: mcp })
+      const raw = await fs.readFile(path.join(ws, '.codex/config.toml'), 'utf-8')
+      return parseToml(raw) as Record<string, any>
+    }
+
+    it('宿主的 model_provider / base_url 等被带进 workspace 配置(否则 key 搬了端点没搬)', async () => {
+      const parsed = await provisionWithHost(HOST_CONFIG)
+
+      expect(parsed.model).toBe('gpt-5-codex')
+      expect(parsed.model_provider).toBe('custom')
+      expect(parsed.disable_response_storage).toBe(true)
+      expect(parsed.model_providers.custom.base_url).toBe('https://mirror.xinshu.ai')
+      expect(parsed.model_providers.custom.wire_api).toBe('responses')
+    })
+
+    it('叠加后 crabot 自己的三块仍然正确(notify 可用 / trust_level 指向本 workspace / mcp_servers 是 crabot 的能力集)', async () => {
+      const parsed = await provisionWithHost(HOST_CONFIG, [{ name: 'crabot', transport: 'stdio', command: 'node' }])
+      const realRoot = await fs.realpath(ws)
+
+      // notify:数组形式的程序契约,且指向本 workspace 的事件文件
+      expect(Array.isArray(parsed.notify)).toBe(true)
+      expect(parsed.notify[0]).toBe('/bin/sh')
+      expect(parsed.notify.join(' ')).toContain('events-cli.jsonl')
+
+      // trust_level 必须存在且指向本 workspace 的 realpath
+      expect(parsed.projects[realRoot]).toEqual({ trust_level: 'trusted' })
+
+      // mcp_servers 是 crabot 的能力集
+      expect(parsed.mcp_servers).toEqual({ crabot: { command: 'node' } })
+    })
+
+    it('宿主的 [mcp_servers] 不与 crabot 的合并——caps 是任务授权边界,crabot 胜', async () => {
+      const hostWithMcp = HOST_CONFIG + [
+        '[mcp_servers.hostonly]',
+        'command = "host-mcp"',
+        '',
+        '[mcp_servers.crabot]',
+        'command = "host-version-of-crabot"',
+        '',
+      ].join('\n')
+
+      const parsed = await provisionWithHost(hostWithMcp, [{ name: 'crabot', transport: 'stdio', command: 'node' }])
+
+      // 宿主独有的 server 不得被带进来(否则宿主配置能扩大 worker 的授权边界)
+      expect(parsed.mcp_servers.hostonly).toBeUndefined()
+      // 同名冲突时 crabot 的定义胜出
+      expect(parsed.mcp_servers).toEqual({ crabot: { command: 'node' } })
+    })
+
+    it('宿主已有的 [projects."别的目录"] 一并带过来,但不挤掉 crabot 为本 workspace 写的那条', async () => {
+      const hostWithProjects = HOST_CONFIG + [
+        '[projects."/some/other/host/dir"]',
+        'trust_level = "trusted"',
+        '',
+      ].join('\n')
+
+      const parsed = await provisionWithHost(hostWithProjects)
+      const realRoot = await fs.realpath(ws)
+
+      expect(parsed.projects['/some/other/host/dir']).toEqual({ trust_level: 'trusted' })
+      expect(parsed.projects[realRoot]).toEqual({ trust_level: 'trusted' })
+    })
+
+    it('TOML 根级 key 排在所有 table 之前——用解析结果验证,不是字符串包含', async () => {
+      const parsed = await provisionWithHost(HOST_CONFIG, [{ name: 'crabot', transport: 'stdio', command: 'node' }])
+
+      // 根级 key 若排到 [model_providers.custom] 之后,TOML 语义上会变成那个表的子字段:
+      // 顶层读不到 notify,反而在表里冒出来。两侧都钉住才能真正抓到排序退化。
+      expect(parsed.notify).toBeDefined()
+      expect(parsed.model_provider).toBe('custom')
+      expect(parsed.model_providers.custom.notify).toBeUndefined()
+      expect(parsed.model_providers.custom.model_provider).toBeUndefined()
+      expect(parsed.projects[await fs.realpath(ws)].notify).toBeUndefined()
+      expect(parsed.mcp_servers.crabot.notify).toBeUndefined()
+    })
+
+    it('宿主没有 config.toml(全新机器)→ 干净降级成只有 crabot 三块', async () => {
+      const parsed = await provisionWithHost(null, [{ name: 'crabot', transport: 'stdio', command: 'node' }])
+      const realRoot = await fs.realpath(ws)
+
+      expect(parsed.notify).toBeDefined()
+      expect(parsed.projects[realRoot]).toEqual({ trust_level: 'trusted' })
+      expect(parsed.mcp_servers).toEqual({ crabot: { command: 'node' } })
+      expect(parsed.model_provider).toBeUndefined()
+    })
+
+    it('宿主 config.toml 损坏 → provision 显式失败,且错误消息不带文件内容', async () => {
+      // 静默降级会精确重现本次生产事故:key 在、端点错,而且无声无息。
+      await fs.writeFile(
+        path.join(codexHomeSource, 'config.toml'),
+        'model_provider = "custom"\nbroken = [[[\n',
+        'utf-8',
+      )
+      const adapter = new CodexWorkerAdapter({ dataDir: ws, codexHomeSource })
+
+      await expect(adapter.provision({ root: ws }, { skills: [], mcp_servers: [] })).rejects.toThrow(
+        /config\.toml/,
+      )
+
+      // 错误消息只能带路径 + 解析位置,不能把文件内容(可能含凭据)回显出来
+      const err = await adapter
+        .provision({ root: ws }, { skills: [], mcp_servers: [] })
+        .then(() => null, (e: Error) => e)
+      expect(err).not.toBeNull()
+      expect(err!.message).toContain(path.join(codexHomeSource, 'config.toml'))
+      expect(err!.message).not.toContain('model_provider')
+      expect(err!.message).not.toContain('broken')
+      expect(err!.message).not.toContain('[[[')
+    })
   })
 })
 

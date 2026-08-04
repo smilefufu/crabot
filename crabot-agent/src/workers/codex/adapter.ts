@@ -63,11 +63,21 @@
  * 效果上只是"turn 结束就打一个标记",与 cc 的 Stop hook 语义等价) + `[projects."<realpath>"]`
  * 段(`trust_level = "trusted"`,把 workspace 声明成受信任目录——codex 源码里交互式 TUI 判断
  * "是否受信目录"的真实机制,取代不存在的 `--skip-git-repo-check` flag,见"spawn/resume 启动
- * 参数"节;path 用 `fs.realpath(ws.root)` 解析符号链接后按本文件的 `tomlString` 转义) +
- * mcp_servers 段(复用 Task 3 的 `renderCodexMcpToml`)。TOML 要求根级 key 必须出现在第一个
- * table 之前(codex-docs: config.md 曾用这条规则解释"notify 放最后不生效"的排查案例),所以
- * notify 行必须排在 `[projects...]`/`[mcp_servers."x"]` 表头之前(这两个表之间的先后顺序不
- * 影响解析,各自表头下只跟自己的键)。
+ * 参数"节;path 用 `fs.realpath(ws.root)` 解析符号链接) + mcp_servers 段(复用 Task 3 的
+ * `renderCodexMcpToml`)。
+ *
+ * 这三块是**叠加在宿主 `<codexHomeSource>/config.toml` 之上**的,不是从零写出一份新配置:
+ * `.codex/` 在这里被当成独立 `CODEX_HOME`,codex 就完全不会去读用户真正的 `~/.codex/
+ * config.toml`,于是 `model_provider` / `[model_providers.*].base_url` 这些"请求发去哪"的
+ * 配置会全部丢失,退回 codex 的内置默认端点。生产实证:auth.json 搬过来了、端点没搬,worker
+ * 拿着自建镜像的 key 打 api.openai.com,报 401 invalid_api_key。隔离 home 就得整份继承宿主
+ * 登录态,不能只搬凭据。宿主配置不存在 → 干净降级;损坏 → 显式抛错(见 `readHostConfig`)。
+ * 其中 `[mcp_servers]` 由 crabot 的 caps **整体覆盖**宿主的,不做合并:caps 是这个任务的授权
+ * 边界,宿主配置不该有能力把它扩大。
+ *
+ * TOML 要求根级 key 必须出现在第一个 table 之前(codex-docs: config.md 曾用这条规则解释
+ * "notify 放最后不生效"的排查案例)。叠加宿主配置之后,宿主自带 table,靠字符串拼接已经保证
+ * 不了这条,所以整份文档交给 `smol-toml` 的 `stringify` 统一排布(它先出根级标量、再出 table)。
  *
  * `<ws.root>/.codex/auth.json`:既然 `.codex/` 在这里被当成独立 `CODEX_HOME`,真实登录态
  * (`codexHomeSource`,默认 `~/.codex`)里的 `auth.json`(codex-docs:
@@ -137,6 +147,7 @@ import { OutputLog } from '../output-log.js'
 import { AsyncMutex } from '../async-mutex.js'
 import { writeMetaAtomic, maxSeqOnDisk } from '../meta-store.js'
 import { WorkerExitedError, CapabilityNotSupportedError } from '../errors.js'
+import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
 import { materializeSkills, renderCodexMcpToml, renderContextMd, type ProvisionSources } from '../provision/materialize.js'
 import type {
   AdapterCapabilities,
@@ -162,20 +173,11 @@ function shQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`
 }
 
-/** TOML 双引号字符串转义 + 包裹,与 provision/materialize.ts 的私有 tomlString 同款用法
- * (独立复制一份,materialize.ts 未导出它——同 cc adapter 复制 shQuote 的先例)。 */
-function tomlString(value: string): string {
-  let out = ''
-  for (const ch of value) {
-    if (ch === '\\') out += '\\\\'
-    else if (ch === '"') out += '\\"'
-    else {
-      const code = ch.charCodeAt(0)
-      if (code < 0x20 || code === 0x7f) out += '\\u' + code.toString(16).padStart(4, '0')
-      else out += ch
-    }
-  }
-  return `"${out}"`
+/** 取一个 TOML table 值当普通对象用;不是 table(缺失/标量/数组)就当空表。 */
+function asTable(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {}
 }
 
 /** 从 codexBin 配置里摘出"实际会被 exec 的可执行文件"这一个 token。生产配置通常就是单个
@@ -526,6 +528,42 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     return { installed: true, activated, detail: versionOutput }
   }
 
+  /**
+   * 读宿主 CODEX_HOME 的 config.toml 作为 workspace 配置的基底。
+   *
+   * - 文件不存在(全新机器 / 没配过 codex)→ 返回空表,干净降级成"只有 crabot 三块"。
+   * - 其它读失败(权限等)与解析失败 → 显式抛错,**不静默降级**:降级出来的配置会精确
+   *   重现本 adapter 修掉的那个生产事故——auth.json 搬了、端点回落到官方默认,worker 拿着
+   *   自建镜像的 key 打 api.openai.com 报 401,而且无声无息。宁可 provision 失败。
+   *   (同 cc adapter 写全局 ~/.claude.json 时"宁可 provision 失败也不能覆盖掉它"的纪律。)
+   * - 错误消息只带路径与解析位置:smol-toml 的 err.message 里嵌了出错处的代码片段,宿主
+   *   配置可能含凭据,那段内容绝不能进错误消息 / 日志。
+   */
+  private async readHostConfig(): Promise<Record<string, unknown>> {
+    const hostConfigPath = join(this.codexHomeSource, 'config.toml')
+    let raw: string
+    try {
+      raw = await fs.readFile(hostConfigPath, 'utf-8')
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {}
+      throw new Error(
+        `CodexWorkerAdapter.provision: cannot read host codex config at ${hostConfigPath} ` +
+          `(${(err as NodeJS.ErrnoException).code ?? 'unknown error'})`,
+      )
+    }
+    try {
+      return asTable(parseToml(raw))
+    } catch (err) {
+      const at = err as { line?: number; column?: number }
+      const where = at.line !== undefined ? ` at line ${at.line}, column ${at.column}` : ''
+      throw new Error(
+        `CodexWorkerAdapter.provision: host codex config at ${hostConfigPath} is not valid TOML${where}. ` +
+          `Fix it (or remove it) before running codex workers — provisioning without it would silently ` +
+          `fall back to codex's built-in defaults, sending requests to the wrong endpoint.`,
+      )
+    }
+  }
+
   async provision(ws: Workspace, caps: CapabilityBundle): Promise<void> {
     const codexDir = join(ws.root, '.codex')
     await fs.mkdir(codexDir, { recursive: true })
@@ -541,20 +579,38 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 额外参数会落在 shell 的 $0 上,脚本本身不引用位置参数,效果上只是"turn 结束就打一个
     // 标记"——与 cc 的 Stop hook(丢弃 stdin payload,同一设计取舍,见 CliEventChannel 头
     // 注释)语义一致。
-    const notifyLine = `notify = [${tomlString('/bin/sh')}, ${tomlString('-c')}, ${tomlString(channel.hookCommand('stop'))}]\n`
+    const notify = ['/bin/sh', '-c', channel.hookCommand('stop')]
 
     // codex 源码里交互式 TUI 判断"是否受信目录"的真实机制是 config.toml 的
     // [projects."<绝对路径>"] 表 + trust_level = "trusted"(取代不存在的 --skip-git-repo-check
     // flag,见文件头"spawn/resume 启动参数"节)。path 用 ws.root 的 realpath(worker workspace
     // 可能经符号链接到达,codex 内部按规范化后的路径比较)。
     const realRoot = await fs.realpath(ws.root)
-    const trustLine = `[projects.${tomlString(realRoot)}]\ntrust_level = "trusted"\n`
 
+    // 隔离 CODEX_HOME 必须整份继承宿主登录态,不能只搬 auth.json:宿主 config.toml 里的
+    // model_provider / [model_providers.*].base_url 才是"请求发去哪"。只搬 key 不搬端点会
+    // 让 worker 拿着自建镜像的 key 打官方 api.openai.com,报 401 invalid_api_key(生产实证)。
+    const config = await this.readHostConfig()
+
+    config.notify = notify
+
+    // 宿主已有的 [projects."别的目录"] 一并留着(codex 只按路径匹配,带过来无害),但本
+    // workspace 这条必须由 crabot 说了算,不能被宿主的同名表挤掉。
+    const hostProjects = asTable(config.projects)
+    config.projects = { ...hostProjects, [realRoot]: { trust_level: 'trusted' } }
+
+    // mcp_servers 由 crabot 的能力集**整体覆盖**,不与宿主合并:caps 是这个任务的授权边界,
+    // 宿主配置不该有能力把它扩大。复用 renderCodexMcpToml 保持 mcp 段形状的单一真相来源,
+    // 解析回对象只是为了并进同一份文档统一序列化。
     const mcpServers = caps.mcp_servers as unknown as ProvisionSources['mcpServers']
-    const mcpToml = renderCodexMcpToml(mcpServers)
-    // TOML 要求根级 key 必须出现在第一个 table 之前,否则会被解析成前一个 table 的子字段——
-    // notify 必须排在 [projects...]/[mcp_servers."x"] 表头之前。
-    await fs.writeFile(join(codexDir, 'config.toml'), notifyLine + '\n' + trustLine + '\n' + mcpToml, 'utf-8')
+    const renderedMcp = asTable(parseToml(renderCodexMcpToml(mcpServers)).mcp_servers)
+    if (Object.keys(renderedMcp).length > 0) config.mcp_servers = renderedMcp
+    else delete config.mcp_servers
+
+    // TOML 要求根级 key 必须出现在第一个 table 之前,否则会被解析成前一个 table 的子字段。
+    // 叠加了宿主配置之后靠字符串拼接已经保证不了这条(宿主自带 table),改由序列化器统一
+    // 排布:smol-toml 的 stringify 先出根级标量、再出 table。
+    await fs.writeFile(join(codexDir, 'config.toml'), stringifyToml(config), 'utf-8')
 
     // codex-docs: 既然 .codex/ 在这里被当成独立 CODEX_HOME,真实登录态里的 auth.json 要搬
     // 一份过来,否则隔离出来的 CODEX_HOME 过不了鉴权。找不到就跳过(本机/CI 未 `codex
