@@ -27,7 +27,10 @@
  *      killed/completed)——进程可能在发过 stop 事件之后自退(崩溃/OOM/自敲 exit),必须先判
  *      isAlive,否则 stop 计数恒大于 baseline 会一直判成 idle,永远走不到这条分支;
  *   2. 会话还活着时,事件文件:自上一次 sendInput(或 spawn)以来出现过新的 'stop' 事件 → idle;
- *   3. 默认 running。
+ *   3. 启动期就绪握手超时的暂扣标志(Runtime.startupStalled,落盘 meta.startup_stalled)置位
+ *      → idle。这一源专治"开工输入根本没投递过、stop 计数永远不会涨"的化身,没有它,
+ *      reportStartupStall 刚落的 idle 会被下一次 syncState 翻回 running;
+ *   4. 默认 running。
  * 用"自上次输入以来的 stop 计数"(stopBaseline)而非"是否曾经见过 stop"来判定,是因为
  * cc 每答完一轮都会再触发一次 Stop——sendInput 时必须把 baseline 推到当前计数,否则上一轮
  * 遗留的 stop 事件会让新一轮还没答完就被误判成 idle。
@@ -171,6 +174,19 @@ interface Runtime {
   /** 自上一次 sendInput(或 spawn)以来"已计入"的 stop 事件数;新 stop 数超过它才判定本轮 idle。 */
   stopBaseline: number
   killed: boolean
+  /**
+   * 启动期就绪握手超时后的**暂扣态**(见 reportStartupStall)。
+   *
+   * 三源判定认不出这种 idle:pane 活着、stop 计数一个没涨(开工输入根本没投递过),
+   * `computed` 恒为 `running` —— 于是 reportStartupStall 刚落的 idle 会被下一次 syncState
+   * 原样翻回 running,连带把台账从 waiting_input 拉回"正在干活"。而 `state()` 是每次 agent
+   * 重启对账必调的,这条翻转不是偶发而是必然。所以这里给三源判定补第四个信息源:标志置位
+   * 且没有新 stop 时维持 idle,由 sendInput(manager 真的出手了)清除。
+   *
+   * 跟着 meta 落盘(`startup_stalled`),否则重启后重建的 runtime 丢掉标志,同一条翻转在
+   * 新进程里照样发生——而"重启后台账变幽灵 running"正是本次要根治的形态。
+   */
+  startupStalled?: boolean
   /** CliEventChannel.watch() 的停止函数(协议 §6.2.3 的文件监视)。tmux 化身在建立
    * runtime 时装上、落终态时摘掉;无头 fork 化身不装(见 startEventWatch)。 */
   stopEventWatch?: () => void
@@ -671,7 +687,12 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     }
 
     await this.getMutex(h.worker_id).run(async () => {
-      if (runtime.state !== 'exited') await this.transitionState(runtime, h, 'running')
+      if (runtime.state === 'exited') return
+      // 暂扣解除:manager 已经出手(raw 敲键清界面,或重投 prompt),从这一刻起 idle/running
+      // 重新由三源判定说了算。清除与 transitionState 的 meta 写入在同一个临界区里完成,
+      // 落盘的 startup_stalled 随之消失,重启后不会再被当作暂扣态复原。
+      runtime.startupStalled = false
+      await this.transitionState(runtime, h, 'running')
     })
   }
 
@@ -798,6 +819,10 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         computed = 'exited'
       } else if (stopCount > runtime.stopBaseline) {
         computed = 'idle'
+      } else if (runtime.startupStalled) {
+        // 启动期就绪握手超时的暂扣(见 Runtime.startupStalled):开工输入一个字符都没投递过,
+        // stop 计数永远不会涨,落回 running 就是谎报"正在干活"。维持 idle 直到 sendInput 清标志。
+        computed = 'idle'
       } else {
         computed = 'running'
       }
@@ -887,6 +912,11 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
       const sessionName = `crabot-w-${ref.worker_id}-${ref.seq}`
       const alive = await this.tmux.isAlive(sessionName)
+      // 启动期就绪握手超时的暂扣态是上面那条"重建后无法复原 running/idle 精细区分"的**唯一
+      // 例外**:它有独立落盘的确证(startup_stalled),且判错的代价不是精度损失而是语义错误
+      // ——一个开工输入一个字符都没投递过的 worker 在台账上显示"正在干活",manager 从此不
+      // 再过问。见 Runtime.startupStalled。
+      const stalled = alive && meta.startup_stalled === true
       const workspaceRoot = meta.workspace_root ?? ''
       const sessionId = meta.session_id ?? ref.session_ref ?? ''
       const outputFile = join(dir, `output-${ref.seq}.log`)
@@ -908,10 +938,11 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         sessionId,
         outputLog: new OutputLog(outputFile),
         eventChannel,
-        state: alive ? 'running' : 'exited',
+        state: alive ? (stalled ? 'idle' : 'running') : 'exited',
         ended_reason: alive ? undefined : meta.ended_reason,
         stopBaseline,
         killed: false,
+        startupStalled: stalled,
       }
       this.runtimes.set(key, runtime)
       // 重启后重连接管(§13):会话还活着的化身在这里重新装上文件监视,它之后每一轮 hook
@@ -926,7 +957,9 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   private async readMetaFile(
     dir: string,
     seq: number,
-  ): Promise<{ session_id?: string; workspace_root?: string; ended_reason?: IncarnationEndReason } | undefined> {
+  ): Promise<
+    { session_id?: string; workspace_root?: string; ended_reason?: IncarnationEndReason; startup_stalled?: boolean } | undefined
+  > {
     try {
       const raw = await fs.readFile(join(dir, `meta-${seq}.json`), 'utf-8')
       return JSON.parse(raw)
@@ -981,7 +1014,15 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     state: WorkerContractState,
     report?: StateChangeReport,
   ): Promise<void> {
-    await writeMetaAtomic(runtime.dir, runtime.seq, { seq: runtime.seq, state, session_id: runtime.sessionId, workspace_root: runtime.workspaceRoot })
+    await writeMetaAtomic(runtime.dir, runtime.seq, {
+      seq: runtime.seq,
+      state,
+      session_id: runtime.sessionId,
+      workspace_root: runtime.workspaceRoot,
+      // 暂扣态跟着落盘:重启后 ensureRuntime 靠它把 idle 复原回来(见 Runtime.startupStalled)。
+      // 只在置位时写,不置位就不出现在 meta 里——老 meta 缺这个字段等价于"没暂扣"。
+      ...(runtime.startupStalled ? { startup_stalled: true } : {}),
+    })
     runtime.state = state
     try {
       this.deps.onStateChange?.(h, state, report)
@@ -1011,6 +1052,10 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     if ((await this.syncState(runtime, h)).state === 'exited') return
     await this.getMutex(h.worker_id).run(async () => {
       if (runtime.state === 'exited') return // 判定与提交之间又被并发抢先:终态不可覆盖
+      // 先置标志再迁移:这一次 transitionState 的 meta 写入要带上 startup_stalled,且此后
+      // 任何一次 syncState 都必须维持 idle(见 Runtime.startupStalled)——否则这条 idle
+      // 只是"落了一下",下一次 state() 就把它连同台账一起翻回 running。
+      runtime.startupStalled = true
       await this.transitionState(runtime, h, 'idle', {
         outputTail: describeStartupStall({ impl: 'claude-code', timeoutMs: this.pasteReadyTimeoutMs, tail }),
       })

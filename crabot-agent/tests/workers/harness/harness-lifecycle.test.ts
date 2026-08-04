@@ -456,8 +456,47 @@ describe('WorkerHarness.handleStateChange', () => {
     await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
     const [ev] = events.filter((e) => e.kind === 'state_changed')
     const text = (ev.detail as { text: string }).text
-    expect(text.startsWith('啊'.repeat(2000))).toBe(true)
     expect(text).toContain('read_worker_output')
+    expect(text).toContain('共 2600 字符')
+    expect(text.length).toBeLessThan(2600) // 真的截了,不是原样透传
+  })
+
+  it('outputTail 超长时保**尾部**——拦住启动的模态框就在日志最末尾,保头等于把这条 detail 唯一的价值截掉', async () => {
+    // 与 #69 给 read_worker_output 改保尾同源:诊断"它现在卡在哪"永远该看最新的那一屏。
+    // 把这里改回 trimmed.slice(0, maxChars) 这条用例就挂:开头那 2000 个"啊"会顶掉模态框。
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    const modal = '\nNew MCP server found in this project: arXivPaper\n  1. Use this MCP server\n  2. No, exit'
+    const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
+    harness.handleStateChange(h, 'idle', { outputTail: '啊'.repeat(2600) + modal })
+
+    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
+    const [ev] = events.filter((e) => e.kind === 'state_changed')
+    const text = (ev.detail as { text: string }).text
+    expect(text.endsWith(modal.trim())).toBe(true) // 尾部(模态框那段)一字不缺
+    expect(text.startsWith('啊')).toBe(false) // 开头被截,截断标记顶到最前面
+    expect(text).toContain('read_worker_output')
+  })
+
+  it('lastText 与 summary 仍然保**头部**——发言开门见山给结论,截断方向不能跟 outputTail 混成一个', async () => {
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
+    harness.handleStateChange(h, 'exited', {
+      endReason: 'completed',
+      lastText: '结论在开头:' + '啊'.repeat(2600),
+      summary: '总结在开头:' + '哦'.repeat(4600),
+    })
+
+    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
+    const [ev] = events.filter((e) => e.kind === 'state_changed')
+    const detail = ev.detail as { text: string; summary: string }
+    expect(detail.text.startsWith('结论在开头:')).toBe(true)
+    expect(detail.summary.startsWith('总结在开头:')).toBe(true)
   })
 
   it('adapter 没给 summary 时 detail 里不出现空 summary 字段(cc/codex 与非 finish_task 的终止路径)', async () => {

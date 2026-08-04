@@ -2078,6 +2078,60 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
   )
 
   it(
+    '这条 idle 粘得住:再调 state() 不会被三源判定翻回 running(pane 活着 + stop 计数恒不涨)',
+    async () => {
+      // 五轮 review:去掉 syncState 里维持 startupStalled 的那一支,这条用例就挂——computed
+      // 恒为 running,刚落的 idle 连同台账一起被翻回"正在干活",而这个 worker 的开工输入
+      // 一个字符都没投递过。上一条用例只断言 not.toBe('exited'),观察不到这次翻转。
+      const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+
+      expect(await adapter.state(h)).toBe('idle')
+      expect(await adapter.state(h)).toBe('idle') // 连续两次都不翻
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+      expect(meta.state).toBe('idle')
+      expect(meta.startup_stalled).toBe(true)
+    },
+    30000,
+  )
+
+  it(
+    'agent 重启后仍然是 idle:暂扣态跟着 meta 落盘,reconcileOnStartup 的 state() 不会把台账拉回 running',
+    async () => {
+      const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+      expect(await adapter.state(h)).toBe('idle')
+
+      // 重启:新 adapter 实例,runtimes 必为空,一切从落盘 meta 重建(§13 重连接管)。
+      const restarted = new ClaudeCodeAdapter({
+        dataDir,
+        claudeConfigPath: fakeClaudeConfig(dataDir),
+        tmux,
+        claudeBin: 'never-used-after-restart',
+      })
+      expect(await restarted.state(h)).toBe('idle')
+    },
+    30000,
+  )
+
+  it(
+    'manager 出手(sendInput)之后暂扣解除:状态回到 running,落盘也不再带 startup_stalled',
+    async () => {
+      const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+      expect(await adapter.state(h)).toBe('idle')
+
+      await adapter.sendInput(h, 'Enter', { raw: true })
+
+      expect(await adapter.state(h)).toBe('running')
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+      expect(meta.state).toBe('running')
+      expect(meta.startup_stalled).toBeUndefined()
+    },
+    30000,
+  )
+
+  it(
     '带给 manager 的 output 尾部是可读文本,不是转义序列——与 read_worker_output 同一形态',
     async () => {
       // 真实模态框是 TUI 重绘出来的:清屏、逐行绝对定位、SGR 上色。去掉 reportStartupStall 里

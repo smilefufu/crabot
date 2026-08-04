@@ -134,7 +134,9 @@
  * meta(running)+ 注册 runtime;判定与提交在该 worker 的互斥锁内原子完成。三源合成里的
  * "事件文件新增" 现在对应的是 codex 的 agent-turn-complete 通知(只有这一种事件类型,
  * codex-docs 确认目前 notify 仅支持 agent-turn-complete),复用同一个 'stop' kind 字符串
- * 与 stopBaseline 机制,语义与 cc 的"自上次输入以来新的 Stop 事件"完全对应。
+ * 与 stopBaseline 机制,语义与 cc 的"自上次输入以来新的 Stop 事件"完全对应。启动期就绪握手
+ * 超时的暂扣标志(Runtime.startupStalled,落盘 meta.startup_stalled)同样是三源之外的一源,
+ * 语义与 cc 逐字一致。
  *
  * ## readTrace
  *
@@ -284,6 +286,14 @@ interface Runtime {
    * 本轮 idle。语义与 cc 的 stopBaseline 完全对应。 */
   stopBaseline: number
   killed: boolean
+  /**
+   * 启动期就绪握手超时后的**暂扣态**(见 reportStartupStall)。语义、落盘方式与清除时机
+   * 与 cc adapter 的同名字段逐字一致,见那里的注释:三源判定认不出这种 idle(pane 活着、
+   * turn-complete 计数一个没涨,因为开工输入根本没投递过),不补这一源的话
+   * reportStartupStall 刚落的 idle 会被下一次 syncState 翻回 running,台账上一个从没干过
+   * 活的 worker 显示"正在干活"。跟着 meta 落盘(`startup_stalled`)以熬过 agent 重启。
+   */
+  startupStalled?: boolean
   /** CliEventChannel.watch() 的停止函数(协议 §6.2.3 的文件监视)。建立 runtime 时装上、
    * 落终态时摘掉,语义与 cc adapter 的同名字段完全一致。 */
   stopEventWatch?: () => void
@@ -915,7 +925,11 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     }
 
     await this.getMutex(h.worker_id).run(async () => {
-      if (runtime.state !== 'exited') await this.transitionState(runtime, h, 'running')
+      if (runtime.state === 'exited') return
+      // 暂扣解除:manager 已经出手(raw 敲键清界面,或重投 prompt)。与 transitionState 的
+      // meta 写入同一临界区,落盘的 startup_stalled 随之消失(同 cc adapter)。
+      runtime.startupStalled = false
+      await this.transitionState(runtime, h, 'running')
     })
   }
 
@@ -1033,6 +1047,10 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         computed = 'exited'
       } else if (stopCount > runtime.stopBaseline) {
         computed = 'idle'
+      } else if (runtime.startupStalled) {
+        // 启动期就绪握手超时的暂扣(见 Runtime.startupStalled):开工输入一个字符都没投递过,
+        // turn-complete 计数永远不会涨,落回 running 就是谎报"正在干活"。维持 idle 到 sendInput。
+        computed = 'idle'
       } else {
         computed = 'running'
       }
@@ -1091,6 +1109,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
       const sessionName = `crabot-w-${ref.worker_id}-${ref.seq}`
       const alive = await this.tmux.isAlive(sessionName)
+      // 启动期就绪握手超时的暂扣态是"重建无法复原 running/idle 精细区分"的唯一例外:它有
+      // 独立落盘的确证,且判错的代价是语义错误而非精度损失(同 cc adapter,见那里的注释)。
+      const stalled = alive && meta.startup_stalled === true
       const workspaceRoot = meta.workspace_root ?? ''
       const sessionId = meta.session_id ?? ref.session_ref ?? ''
       const codexHome = workspaceRoot ? join(workspaceRoot, '.codex') : ''
@@ -1119,10 +1140,11 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         outputLog: new OutputLog(outputFile),
         eventChannel,
         sessionDiscoveryStatus,
-        state: alive ? 'running' : 'exited',
+        state: alive ? (stalled ? 'idle' : 'running') : 'exited',
         ended_reason: alive ? undefined : meta.ended_reason,
         stopBaseline,
         killed: false,
+        startupStalled: stalled,
       }
       this.runtimes.set(key, runtime)
       // 重启后重连接管(§13):会话还活着的化身在这里重新装上文件监视。已终态的化身
@@ -1138,7 +1160,13 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     dir: string,
     seq: number,
   ): Promise<
-    | { session_id?: string; workspace_root?: string; ended_reason?: IncarnationEndReason; session_discovery?: 'discovered' | 'placeholder' }
+    | {
+        session_id?: string
+        workspace_root?: string
+        ended_reason?: IncarnationEndReason
+        session_discovery?: 'discovered' | 'placeholder'
+        startup_stalled?: boolean
+      }
     | undefined
   > {
     try {
@@ -1184,6 +1212,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       session_id: runtime.sessionId,
       session_discovery: runtime.sessionDiscoveryStatus,
       workspace_root: runtime.workspaceRoot,
+      // 暂扣态跟着落盘,重启后 ensureRuntime 靠它复原 idle(见 Runtime.startupStalled)。
+      // 只在置位时写;老 meta 缺这个字段等价于"没暂扣"。
+      ...(runtime.startupStalled ? { startup_stalled: true } : {}),
     })
     runtime.state = state
     try {
@@ -1204,6 +1235,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     if ((await this.syncState(runtime, h)).state === 'exited') return
     await this.getMutex(h.worker_id).run(async () => {
       if (runtime.state === 'exited') return // 判定与提交之间又被并发抢先:终态不可覆盖
+      // 先置标志再迁移:这次 meta 写入要带上 startup_stalled,且此后每次 syncState 都必须
+      // 维持 idle,否则这条 idle 只是"落了一下"(同 cc adapter,见 Runtime.startupStalled)。
+      runtime.startupStalled = true
       await this.transitionState(runtime, h, 'idle', {
         outputTail: describeStartupStall({ impl: 'codex', timeoutMs: this.pasteReadyTimeoutMs, tail }),
       })

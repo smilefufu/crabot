@@ -1879,6 +1879,53 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 启动期就绪握手(\\
   )
 
   it(
+    '这条 idle 粘得住:再调 state() 不会被三源判定翻回 running(pane 活着 + turn-complete 计数恒不涨)',
+    async () => {
+      // 与 cc adapter 的同名用例同款(五轮 review):去掉 syncState 里维持 startupStalled 的
+      // 那一支,computed 恒为 running,刚落的 idle 连同台账一起被翻回"正在干活"。
+      const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+
+      expect(await adapter.state(h)).toBe('idle')
+      expect(await adapter.state(h)).toBe('idle')
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+      expect(meta.state).toBe('idle')
+      expect(meta.startup_stalled).toBe(true)
+    },
+    30000,
+  )
+
+  it(
+    'agent 重启后仍然是 idle:暂扣态跟着 meta 落盘,reconcileOnStartup 的 state() 不会把台账拉回 running',
+    async () => {
+      const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+      expect(await adapter.state(h)).toBe('idle')
+
+      const restarted = new CodexWorkerAdapter({ dataDir, tmux, codexBin: 'never-used-after-restart' })
+      expect(await restarted.state(h)).toBe('idle')
+    },
+    30000,
+  )
+
+  it(
+    'manager 出手(sendInput)之后暂扣解除:状态回到 running,落盘也不再带 startup_stalled',
+    async () => {
+      const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+      expect(await adapter.state(h)).toBe('idle')
+
+      await adapter.sendInput(h, 'Enter', { raw: true })
+
+      expect(await adapter.state(h)).toBe('running')
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+      expect(meta.state).toBe('running')
+      expect(meta.startup_stalled).toBeUndefined()
+    },
+    30000,
+  )
+
+  it(
     '带给 manager 的 output 尾部是可读文本,不是转义序列——与 read_worker_output 同一形态',
     async () => {
       // 与 cc adapter 的同名用例同款:去掉 reportStartupStall 里那次 decodeTerminalOutput,
