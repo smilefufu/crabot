@@ -153,6 +153,7 @@ import { TmuxDriver } from '../tmux/driver.js'
 import { DEFAULT_PASTE_READY_TIMEOUT_MS, describeStartupStall, readOutputTail, waitForPasteReady } from '../tmux/paste-ready.js'
 import { CliEventChannel } from '../cli-events.js'
 import { OutputLog } from '../output-log.js'
+import { decodeTerminalOutput } from '../terminal-output.js'
 import { AsyncMutex } from '../async-mutex.js'
 import { writeMetaAtomic, maxSeqOnDisk } from '../meta-store.js'
 import { WorkerExitedError, CapabilityNotSupportedError } from '../errors.js'
@@ -918,10 +919,14 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     })
   }
 
+  /**
+   * 落盘的是 tmux `pipe-pane` 抓的**输出流**(TUI 逐帧重绘的转义序列增量),不是纯文本。
+   * 解码只发生在这条返回路径上(见 `terminal-output.ts`),磁盘上的原文一字不动。
+   */
   async readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
     const runtime = this.runtimes.get(instanceKey(h))
     const outputLog = runtime ? runtime.outputLog : new OutputLog(join(this.deps.dataDir, h.worker_id, `output-${h.seq}.log`))
-    return outputLog.read(cursor)
+    return outputLog.read(cursor, undefined, decodeTerminalOutput)
   }
 
   /**
@@ -1164,7 +1169,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   /** `onStateChange` 的 `report.lastText` 在 codex 这边同样刻意不传,理由与 cc 完全一致
-   * (输出是 tmux 落的 TUI 原始字节流,无 ANSI 剥离层)——见
+   * (输出是 tmux 落的 TUI 字节流,解码后也切不出"哪一段才算 assistant 发言")——见
    * `workers/claude-code/adapter.ts` 的 transitionState 注释;唯一的例外同样是
    * `report.outputTail`(启动期就绪握手超时,每个化身至多付一次,见 reportStartupStall)。 */
   private async transitionState(
@@ -1189,9 +1194,10 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   /** 就绪握手超时的收场:落 `idle` + 把 output 尾部随唤醒事件交给 manager。语义、取舍与
-   * cc adapter 的同名方法逐字一致(零协议改动、不 kill 现场),见那里的注释。 */
+   * cc adapter 的同名方法逐字一致(零协议改动、不 kill 现场、尾部与 readOutput 共用同一个
+   * 解码器),见那里的注释。 */
   private async reportStartupStall(runtime: Runtime, h: IncarnationHandle, outputFile: string): Promise<void> {
-    const tail = await readOutputTail(outputFile)
+    const tail = decodeTerminalOutput(await readOutputTail(outputFile))
     // 等待期间进程可能是**自己死了**(启动即失败:二进制缺失、PATH 不对、pane 里的命令立刻
     // 退出),那不是"停在一个界面上等人",谎报 idle 会让 manager 对着一具尸体发指令。先让既有
     // 的三源判定跑一遍,它会如实落 exited;只有确实还活着才走下面的暂扣汇报。

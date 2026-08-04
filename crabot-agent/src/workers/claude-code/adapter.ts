@@ -93,6 +93,7 @@ import { TmuxDriver } from '../tmux/driver.js'
 import { DEFAULT_PASTE_READY_TIMEOUT_MS, describeStartupStall, readOutputTail, waitForPasteReady } from '../tmux/paste-ready.js'
 import { CliEventChannel, EVENTS_FILE_ENV } from '../cli-events.js'
 import { OutputLog } from '../output-log.js'
+import { decodeTerminalOutput } from '../terminal-output.js'
 import { AsyncMutex } from '../async-mutex.js'
 import { writeMetaAtomic, maxSeqOnDisk } from '../meta-store.js'
 import { WorkerExitedError } from '../errors.js'
@@ -674,10 +675,14 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     })
   }
 
+  /**
+   * 落盘的是 tmux `pipe-pane` 抓的**输出流**(TUI 逐帧重绘的转义序列增量),不是纯文本。
+   * 解码只发生在这条返回路径上(见 `terminal-output.ts`),磁盘上的原文一字不动。
+   */
   async readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
     const runtime = this.runtimes.get(instanceKey(h))
     const outputLog = runtime ? runtime.outputLog : new OutputLog(join(this.deps.dataDir, h.worker_id, `output-${h.seq}.log`))
-    return outputLog.read(cursor)
+    return outputLog.read(cursor, undefined, decodeTerminalOutput)
   }
 
   /**
@@ -959,13 +964,12 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
    *
    * 这两个实现拉起的是交互式 TUI,输出靠 `tmux pipe-pane -o ... 'cat >> <file>'` 落盘
    * (见 workers/tmux/driver.ts),拿到的是**终端渲染态原始字节流**——ANSI 控制序列、光标
-   * 移动造成的重复重绘、边框、工具调用面板混在一起,全仓没有任何剥离/归一化层。把它塞进
-   * 唤醒事件等于把这堆字节永久写进 manager 的上下文和 episode 日志,污染远大于收益,而且
-   * 每次转 idle 都要付一遍。
+   * 移动造成的重复重绘、边框、工具调用面板混在一起。把它塞进唤醒事件等于把这堆字节永久
+   * 写进 manager 的上下文和 episode 日志,污染远大于收益,而且每次转 idle 都要付一遍。
    *
-   * ANSI 归一化要单独设计(还要处理"TUI 里哪一段才算 assistant 发言"这个问题),不在本次
-   * 范围内。在那之前,cc/codex 的唤醒事件只带状态,manager 需要正文时走 `read_worker_output`
-   * ——那条路本来就通,行为与本次改动之前逐字一致。
+   * `terminal-output.ts` 的解码只解决了"读得懂"这一半,另一半——"TUI 里哪一段才算 assistant
+   * 发言"——仍然无解,而那正是 `lastText` 的语义。所以 cc/codex 的唤醒事件只带状态,manager
+   * 需要正文时走 `read_worker_output`——那条路本来就通,行为与本次改动之前逐字一致。
    *
    * 唯一的例外是 `report.outputTail`(见 reportStartupStall):启动期就绪握手超时时,manager
    * 手上没有任何别的线索能判断"卡在哪",而这是**每个化身至多付一次**的一次性成本,与上面
@@ -994,9 +998,13 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
    * 不走"kill + exited(crashed)":那条路现成(见 kill()),但它把一个还能救的现场直接销毁。
    * 保留进程交给 manager 决策严格更优,且不额外增加静默风险——化身已经落 idle,manager
    * 必被唤醒。
+   *
+   * 尾部与 `readOutput` 走同一个解码器:manager 手上只有一个 worker 的一份日志,它没有理由
+   * 在 `read_worker_output` 里拿到可读文本、在唤醒事件里拿到同一份日志的转义序列乱码。解码
+   * 位置也与 `readOutput` 一致地留在 adapter 这一层(builtin 的输出是纯文本,不该被解码)。
    */
   private async reportStartupStall(runtime: Runtime, h: IncarnationHandle, outputFile: string): Promise<void> {
-    const tail = await readOutputTail(outputFile)
+    const tail = decodeTerminalOutput(await readOutputTail(outputFile))
     // 等待期间进程可能是**自己死了**(启动即失败:二进制缺失、PATH 不对、pane 里的命令立刻
     // 退出),那不是"停在一个界面上等人",谎报 idle 会让 manager 对着一具尸体发指令。先让既有
     // 的三源判定跑一遍,它会如实落 exited;只有确实还活着才走下面的暂扣汇报。

@@ -2076,4 +2076,34 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
     },
     30000,
   )
+
+  it(
+    '带给 manager 的 output 尾部是可读文本,不是转义序列——与 read_worker_output 同一形态',
+    async () => {
+      // 真实模态框是 TUI 重绘出来的:清屏、逐行绝对定位、SGR 上色。去掉 reportStartupStall 里
+      // 那次 decodeTerminalOutput,manager 拿到的就是下面这串原样字节——而它同一时刻用
+      // read_worker_output 读同一份日志拿到的是解码后的文本,同一份日志两种形态。
+      const banner = [
+        '\u001b[2J\u001b[H',
+        '\u001b[3;1H\u001b[1;33mNew MCP server found in this project: arXivPaper\u001b[0m',
+        '\u001b[4;1H  1. Use this MCP server',
+        '\u001b[5;1H  2. No, exit',
+      ].join('')
+      const { adapter, seen, workerId } = await makeAdapter({
+        readyDelayMs: 600_000,
+        pasteReadyTimeoutMs: 2000,
+        banner,
+      })
+      await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+
+      const tail = seen.find((s) => s.state === 'idle')?.report?.outputTail
+      expect(tail).toBeTruthy()
+      // 一个 ESC 都不该剩:解码器丢掉所有控制序列,只留可见文本。
+      expect(tail).not.toContain('\u001b')
+      expect(tail).toContain('New MCP server found in this project: arXivPaper')
+      // 行结构由光标定位构成,不是 \n:不解码的话这两个选项会粘在同一行上。
+      expect(tail).toMatch(/1\. Use this MCP server\n\s*2\. No, exit/)
+    },
+    30000,
+  )
 })

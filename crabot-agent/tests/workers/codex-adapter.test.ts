@@ -1879,6 +1879,32 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 启动期就绪握手(\\
   )
 
   it(
+    '带给 manager 的 output 尾部是可读文本,不是转义序列——与 read_worker_output 同一形态',
+    async () => {
+      // 与 cc adapter 的同名用例同款:去掉 reportStartupStall 里那次 decodeTerminalOutput,
+      // manager 拿到的就是原样转义字节,而它读同一份日志的另一条路(read_worker_output)
+      // 拿到的是解码后的文本。
+      const banner = [
+        '\u001b[2J\u001b[H',
+        '\u001b[3;1H\u001b[1;36mSign in with ChatGPT\u001b[0m',
+        '\u001b[4;1H  1. Provide your own API key',
+      ].join('')
+      const { adapter, seen, workerId } = await makeAdapter({
+        readyDelayMs: 600_000,
+        pasteReadyTimeoutMs: 2000,
+        banner,
+      })
+      await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+
+      const tail = seen.find((s) => s.state === 'idle')?.report?.outputTail
+      expect(tail).toBeTruthy()
+      expect(tail).not.toContain('\u001b')
+      expect(tail).toMatch(/Sign in with ChatGPT\n\s*1\. Provide your own API key/)
+    },
+    30000,
+  )
+
+  it(
     '超时路径下 session_ref 不降级成占位 uuid —— 会话根本没建立,给个像真的假 id 只会让 resume/readTrace 静默失效',
     async () => {
       const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })

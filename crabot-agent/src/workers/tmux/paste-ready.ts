@@ -123,21 +123,23 @@ export function describeStartupStall(opts: { impl: string; timeoutMs: number; ta
   const head =
     `[crabot] ${opts.impl} 启动后 ${Math.round(opts.timeoutMs / 1000)}s 内未就绪` +
     `(TUI 始终没有开启 bracketed paste),开工输入**一个字符都没有投递**——` +
-    `否则它会被当成按键打进挡在前面的界面。下面是该化身终端输出的尾部(原始转义序列未解码),` +
-    `据此判断卡在哪:可用 send_to_worker 的 raw 模式敲键清掉界面,再把任务内容重新投一次。`
+    `否则它会被当成按键打进挡在前面的界面。下面是该化身终端输出的尾部(已解码成可读文本,` +
+    `与 read_worker_output 同一形态),据此判断卡在哪:可用 send_to_worker 的 raw 模式敲键` +
+    `清掉界面,再把任务内容重新投一次。`
   return opts.tail ? `${head}\n---\n${opts.tail}` : `${head}\n---\n(终端至今没有任何输出)`
 }
 
 /**
- * 读 output 日志的**尾部**(最多 maxBytes 字节),原样返回,不做 ANSI 归一化。
+ * 读 output 日志的**尾部**(最多 maxBytes 字节),原样返回。
  *
  * 用途只有一个:就绪握手超时时把"屏幕这一刻在说什么"随唤醒事件交给 manager 判断
  * (protocol-agent-v3 §5.5「检测到无法识别的交互界面:暂扣 + 唤醒 manager(附界面内容)」)。
  * 尾部而非头部:启动期日志的头部是终端能力协商,模态框在最后。
  *
- * 不解码:pipe-pane 落的是终端输出**流**不是屏幕快照,还原成可读屏幕要重放 ANSI,那是
- * `read_worker_output` 返回路径上另做的事(§5.6),不在本次范围内。截取起点可能落在一个
- * 多字节 UTF-8 字符中间,这里丢掉开头的续字节再解码,避免出现替换字符。
+ * 这里只负责取字节,ANSI 归一化由调用方做:两个 CLI adapter 在 reportStartupStall 里把结果
+ * 过一遍 `decodeTerminalOutput`,与它们 `readOutput` 的返回路径共用同一个解码器,解码边界因此
+ * 统一留在 adapter 那一层(builtin 的输出是纯文本,从不经过这里)。截取起点可能落在一个多字节
+ * UTF-8 字符中间,这里丢掉开头的续字节再解码,避免出现替换字符。
  */
 export async function readOutputTail(outputFile: string, maxBytes = STARTUP_STALL_TAIL_BYTES): Promise<string> {
   let handle: fs.FileHandle | undefined
