@@ -6,6 +6,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { ClaudeCodeAdapter, eventsFilePath, WorkerExitedError } from '../../src/workers/claude-code/adapter.js'
 import { TmuxDriver, type TmuxSessionSpec } from '../../src/workers/tmux/driver.js'
+import { BRACKETED_PASTE_ENABLE } from '../../src/workers/tmux/paste-ready.js'
 import { CliEventChannel } from '../../src/workers/cli-events.js'
 import type { IncarnationHandle, SpawnSpec, WorkerContractState } from '../../src/workers/types.js'
 
@@ -69,6 +70,16 @@ function claudeBinFor(script: MockStep[], stopHookCmd: string, argvFile?: string
   return `env MOCK_CLI_SCRIPT=${shQuote(JSON.stringify(script))} MOCK_CLI_STOP_HOOK_CMD=${shQuote(stopHookCmd)} ${argvEnv}node ${shQuote(MOCK_CLI)}`
 }
 
+/** 假 TmuxDriver 的 newSession 替身:落一份 output 日志并写入 \e[?2004h。
+ * spawn 在投递开工输入之前要等这个信号(启动期就绪握手,见 src/workers/tmux/paste-ready.ts)
+ * ——不扮演"TUI 已请求 bracketed paste"的假 driver 会让每个用例白等一次握手超时。 */
+async function fakeReadyNewSession(spec: TmuxSessionSpec): Promise<void> {
+  await fs.writeFile(spec.outputFile, BRACKETED_PASTE_ENABLE, { flag: 'a' })
+}
+
+/** 扮演"已经就绪的 TUI"的最小 pane 命令:先请求 bracketed paste 再挂住不退。理由同上。 */
+const READY_IDLE_BIN = `bash -c 'printf "\\033[?2004h"; sleep 5'`
+
 async function waitForState(
   adapter: ClaudeCodeAdapter,
   h: IncarnationHandle,
@@ -119,7 +130,7 @@ describe('ClaudeCodeAdapter.provision', () => {
   // ~/.claude.json 的 projects[<realpath>].hasTrustDialogAccepted —— cc 交互式启动的
   // "Do you trust this folder?" 弹窗开关。不预写 → 新 workspace 每次必卡在弹窗上,
   // hook 一次都不触发(生产实测:69 分钟零事件)。
-  describe('workspace 信任预写(~/.claude.json)', () => {
+  describe('workspace 启动弹窗预授权(~/.claude.json)', () => {
     async function readConfig(): Promise<Record<string, any>> {
       return JSON.parse(await fs.readFile(claudeConfigPath, 'utf-8'))
     }
@@ -136,7 +147,7 @@ describe('ClaudeCodeAdapter.provision', () => {
         await adapter.provision({ root: linkRoot }, { skills: [], mcp_servers: [] })
 
         const config = await readConfig()
-        expect(config.projects[realRoot]).toEqual({ hasTrustDialogAccepted: true })
+        expect(config.projects[realRoot]).toEqual({ hasTrustDialogAccepted: true, enabledMcpjsonServers: [] })
         expect(config.projects[linkRoot]).toBeUndefined()
       } finally {
         await fs.rm(realRoot, { recursive: true, force: true }).catch(() => {})
@@ -170,6 +181,7 @@ describe('ClaudeCodeAdapter.provision', () => {
         allowedTools: ['Bash(ls:*)'],
         history: [{ display: '之前的对话' }],
         hasTrustDialogAccepted: true,
+        enabledMcpjsonServers: [],
       })
       expect(config.projects['/home/someone/real-project']).toEqual({ hasTrustDialogAccepted: true, allowedTools: ['Read'] })
       expect(config.numStartups).toBe(42)
@@ -193,8 +205,47 @@ describe('ClaudeCodeAdapter.provision', () => {
 
       const config = await readConfig()
       for (const root of roots) {
-        expect(config.projects[root], `缺少 ${root} 的信任记录`).toEqual({ hasTrustDialogAccepted: true })
+        expect(config.projects[root], `缺少 ${root} 的预授权记录`).toEqual({ hasTrustDialogAccepted: true, enabledMcpjsonServers: [] })
       }
+    })
+
+    // provision 每次都往一个全新 workspace 写 .mcp.json,cc 于是每次都弹
+    // "New MCP server found in this project: <name>" 并停下来等选择——这是 #65 堵掉信任
+    // 弹窗之后紧接着的第二道阻塞,生产日志里两个卡死 worker 都倒在它上面。
+    it('.mcp.json 里的 server 名预写进 enabledMcpjsonServers,消掉 "New MCP server found" 弹窗', async () => {
+      const adapter = new ClaudeCodeAdapter({ dataDir: ws, claudeConfigPath })
+      await adapter.provision(
+        { root: ws },
+        {
+          skills: [],
+          mcp_servers: [
+            { name: 'arXivPaper', transport: 'stdio', command: 'node' },
+            { name: 'chrome-devtools', transport: 'stdio', command: 'node' },
+          ],
+        },
+      )
+
+      const realWs = await fs.realpath(ws)
+      const config = await readConfig()
+      // 名字必须与我们刚写下的那份 .mcp.json 逐个对上,否则 cc 仍会为对不上的那个弹框。
+      const mcpJson = JSON.parse(await fs.readFile(path.join(ws, '.mcp.json'), 'utf-8'))
+      expect(config.projects[realWs].enabledMcpjsonServers).toEqual(Object.keys(mcpJson.mcpServers))
+      expect(config.projects[realWs].enabledMcpjsonServers).toEqual(['arXivPaper', 'chrome-devtools'])
+    })
+
+    it('enabledMcpjsonServers 按本次 caps 整体覆盖,不与该 path 上残留的旧名字取并集', async () => {
+      const realWs = await fs.realpath(ws)
+      await fs.writeFile(
+        claudeConfigPath,
+        JSON.stringify({ projects: { [realWs]: { enabledMcpjsonServers: ['已经不在授权范围里的旧 server'] } } }, null, 2),
+        'utf-8',
+      )
+
+      const adapter = new ClaudeCodeAdapter({ dataDir: ws, claudeConfigPath })
+      await adapter.provision({ root: ws }, { skills: [], mcp_servers: [{ name: 'arXivPaper', transport: 'stdio', command: 'node' }] })
+
+      const config = await readConfig()
+      expect(config.projects[realWs].enabledMcpjsonServers).toEqual(['arXivPaper'])
     })
 
     it('已有文件是坏 JSON 时报错退出,不覆盖用户真实配置', async () => {
@@ -507,7 +558,9 @@ class RaceTmux extends TmuxDriver {
   get pendingCount(): number {
     return this.pending.length
   }
-  async newSession(_spec: TmuxSessionSpec): Promise<void> {}
+  async newSession(spec: TmuxSessionSpec): Promise<void> {
+    await fakeReadyNewSession(spec)
+  }
   async sendText(_name: string, _text: string): Promise<void> {}
   async sendKeys(_name: string, _keys: string[]): Promise<void> {}
   async isAlive(_name: string): Promise<boolean> {
@@ -636,7 +689,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — spawn 提交纪律(P2 Tas
       const stopHookCmd = channel.hookCommand('stop')
       // claudeBin 用一个存在的 sleep 命令(附加参数被 bash -c 脚本忽略),不依赖真实 claude 二进制,
       // 只用来验证 tmux 会话能正常起来、sendText 能正常注入。
-      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: `bash -c 'sleep 5'` })
+      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: READY_IDLE_BIN })
       await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
       const workerId = `cctest-${randomUUID().slice(0, 8)}`
       const spec: SpawnSpec = { worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } }
@@ -677,7 +730,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — spawn 提交纪律(P2 Tas
         }
       }
       const tmux = new NewSessionOkSendTextFailsTmux()
-      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: `bash -c 'sleep 5'` })
+      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: READY_IDLE_BIN })
       await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
       const workerId = `cctest-${randomUUID().slice(0, 8)}`
       const spec: SpawnSpec = { worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } }
@@ -1173,7 +1226,9 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
 
 /** 全程无操作的假 TmuxDriver——readTrace 测试只需要一个"常驻 runtime"的化身,不关心 tmux 行为本身。 */
 class NoopTmux extends TmuxDriver {
-  async newSession(_spec: TmuxSessionSpec): Promise<void> {}
+  async newSession(spec: TmuxSessionSpec): Promise<void> {
+    await fakeReadyNewSession(spec)
+  }
   async sendText(_name: string, _text: string): Promise<void> {}
   async sendKeys(_name: string, _keys: string[]): Promise<void> {}
   async isAlive(_name: string): Promise<boolean> {
@@ -1843,4 +1898,182 @@ describe('ClaudeCodeAdapter.ensureRuntime — 并发重建不泄漏 watcher', ()
     await new Promise((r) => setTimeout(r, 500))
     expect(seen).toEqual(['idle', 'exited'])
   }, 15000)
+})
+
+/**
+ * 启动期就绪握手(spec: 2026-08-04-cli-worker-readiness-design)。
+ *
+ * 生产事故:cc 要到 pane 输出的 byte 871/1043 才发 `\e[?2004h`,而 prompt 在 byte 0 就被
+ * 打进去了。tmux `paste-buffer -p` 在目标程序尚未请求 bracketed paste 时静默降级成裸文本
+ * 注入 —— prompt 里每个换行都变成一次 Enter,前两个分别确认掉信任弹窗与 MCP 弹窗,残句留在
+ * composer 里从未提交,worker 静默停在 running 8.5 小时。
+ *
+ * 这里用 MOCK_CLI_PASTE_READY_DELAY_MS 复刻那个时序:mock 从进程一起来就读 stdin,但推迟
+ * 发出 `\e[?2004h`。tmux 是否包裹 paste 标记由它自己跟踪的 pane 模式决定,所以这套复现是
+ * 真的走了同一条降级路径,不是模拟出来的。
+ */
+describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e[?2004h)', () => {
+  /** 记录 sendText 调用,其余行为完全走真实 TmuxDriver —— 超时分支要断言的是"一次都没调"。 */
+  class SpyTmux extends TmuxDriver {
+    readonly sendTextCalls: Array<{ name: string; text: string }> = []
+    async sendText(name: string, text: string): Promise<void> {
+      this.sendTextCalls.push({ name, text })
+      return super.sendText(name, text)
+    }
+  }
+
+  let dataDir: string
+  let workspaceRoot: string
+  let stdinLog: string
+  let tmux: SpyTmux
+
+  beforeEach(async () => {
+    dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-ready-data-'))
+    workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-ready-ws-'))
+    stdinLog = path.join(dataDir, 'stdin.log')
+    tmux = new SpyTmux()
+  })
+
+  afterEach(async () => {
+    await cleanupTmuxSessions()
+    await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+  })
+
+  /** mock CLI 每次"提交"往 stdinLog 追一行 JSON(消息原文,含内部换行)。 */
+  async function submissions(): Promise<string[]> {
+    const raw = await fs.readFile(stdinLog, 'utf-8').catch(() => '')
+    return raw
+      .split('\n')
+      .filter((l) => l.length > 0)
+      .map((l) => JSON.parse(l) as string)
+  }
+
+  async function makeAdapter(opts: { readyDelayMs?: number; banner?: string; pasteReadyTimeoutMs?: number }) {
+    const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+    const envParts = [
+      `MOCK_CLI_SCRIPT=${shQuote('[]')}`,
+      `MOCK_CLI_STOP_HOOK_CMD=${shQuote(channel.hookCommand('stop'))}`,
+      `MOCK_CLI_STDIN_LOG=${shQuote(stdinLog)}`,
+    ]
+    if (opts.readyDelayMs) envParts.push(`MOCK_CLI_PASTE_READY_DELAY_MS=${opts.readyDelayMs}`)
+    if (opts.banner) envParts.push(`MOCK_CLI_BANNER=${shQuote(opts.banner)}`)
+
+    const seen: Array<{ state: WorkerContractState; report?: { outputTail?: string } }> = []
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux,
+      claudeBin: `env ${envParts.join(' ')} node ${shQuote(MOCK_CLI)}`,
+      pasteReadyTimeoutMs: opts.pasteReadyTimeoutMs,
+      onStateChange: (_h, state, report) => seen.push({ state, report }),
+    })
+    await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+    return { adapter, seen, workerId: `cctest-${randomUUID().slice(0, 8)}` }
+  }
+
+  const MULTILINE_PROMPT = ['任务:整理今天的 AI 早报', '背景:数据来自 GitHub trending', '验收:产出一篇 markdown'].join('\n')
+
+  it(
+    'TUI 迟迟不开 bracketed paste 时,prompt 不被拆成按键——握手等到之后整段一次提交',
+    async () => {
+      // 去掉就绪等待(把 waitForPasteReady 的结果当成恒 true)这条用例就挂:1.2s 的延迟窗口
+      // 里 paste 不会被包裹,三行 prompt 会变成三次提交(且第一行还会先去确认掉弹窗)。
+      const { adapter, workerId } = await makeAdapter({ readyDelayMs: 1200 })
+      await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+
+      // mock 收到 paste 是异步的,给它一点时间落 stdin 日志。
+      const deadline = Date.now() + 5000
+      while (Date.now() < deadline && (await submissions()).length === 0) {
+        await new Promise((r) => setTimeout(r, 50))
+      }
+
+      expect(await submissions()).toEqual([MULTILINE_PROMPT])
+      expect(tmux.sendTextCalls).toHaveLength(1)
+    },
+    30000,
+  )
+
+  it(
+    '等待期间进程自己死了 → 落 exited,不谎报 idle(那会让 manager 对着一具尸体发指令)',
+    async () => {
+      const adapter = new ClaudeCodeAdapter({
+        dataDir,
+        claudeConfigPath: fakeClaudeConfig(dataDir),
+        tmux,
+        // 启动即失败:pane 里的命令立刻退出,永远不会有就绪信号。
+        claudeBin: `bash -c 'exit 1'`,
+        pasteReadyTimeoutMs: 30_000, // 靠 isAlive 提前收工,不该等满
+      })
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `cctest-${randomUUID().slice(0, 8)}`
+
+      const startedAt = Date.now()
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+      expect(Date.now() - startedAt).toBeLessThan(15_000)
+
+      expect(tmux.sendTextCalls).toEqual([])
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+      expect(meta.state).toBe('exited')
+      expect(await adapter.state(h)).toBe('exited')
+    },
+    40000,
+  )
+
+  it(
+    '就绪立刻到位时不引入可观察的额外延迟(默认超时是 60s,不能变成每次都等)',
+    async () => {
+      const { adapter, workerId } = await makeAdapter({}) // 默认 60s 超时
+      const startedAt = Date.now()
+      await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+      expect(Date.now() - startedAt).toBeLessThan(10_000)
+
+      const deadline = Date.now() + 5000
+      while (Date.now() < deadline && (await submissions()).length === 0) {
+        await new Promise((r) => setTimeout(r, 50))
+      }
+      expect(await submissions()).toEqual([MULTILINE_PROMPT])
+    },
+    30000,
+  )
+
+  it(
+    '等不到就绪 → 一个字符都不投递(sendText 一次都不调),prompt 完好没被消耗',
+    async () => {
+      const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+
+      expect(tmux.sendTextCalls).toEqual([])
+      // 再等一会儿,确认不是"晚一点才发"——超时分支绝不能退化成降级继续发送。
+      await new Promise((r) => setTimeout(r, 500))
+      expect(tmux.sendTextCalls).toEqual([])
+      expect(await submissions()).toEqual([])
+      expect(h.session_ref).toMatch(/^[0-9a-f-]{36}$/) // cc 的 session id 是自己定的,不受影响
+    },
+    30000,
+  )
+
+  it(
+    '等不到就绪 → 落 idle,并把 output 尾部随状态回调交给 manager(不 kill 现场)',
+    async () => {
+      const banner = 'New MCP server found in this project: arXivPaper'
+      const { adapter, seen, workerId } = await makeAdapter({
+        readyDelayMs: 600_000,
+        pasteReadyTimeoutMs: 2000,
+        banner,
+      })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+
+      const idle = seen.filter((s) => s.state === 'idle')
+      expect(idle).toHaveLength(1)
+      expect(idle[0].report?.outputTail).toContain(banner)
+      expect(idle[0].report?.outputTail).toContain('一个字符都没有投递')
+
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+      expect(meta.state).toBe('idle')
+      // 现场保留:进程还活着,manager 可以用 raw 敲键把界面清掉再重投。
+      expect(await adapter.state(h)).not.toBe('exited')
+    },
+    30000,
+  )
 })

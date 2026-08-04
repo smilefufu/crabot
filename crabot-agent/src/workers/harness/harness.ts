@@ -1351,7 +1351,11 @@ export class WorkerHarness {
     // 唤醒事件的两段正文:截断在这一处收口,三个 adapter 共用同一上限。text 截断后还能按
     // offset 去 read_worker_output 读全文,summary 不进 output、没有这条后路,所以提示语
     // 不同、上限也不同(见两个常量各自的注释)。
-    const wakeText = truncateWakeText(report?.lastText, WAKE_TEXT_MAX_CHARS, ',全文用 read_worker_output 读')
+    // `detail.text` 只有一个位置,两个来源按实现天然互斥:builtin 报 `lastText`(它的输出
+    // 天然只含 text,拆得出干净的最后一段发言);cc/codex 只在启动期就绪握手超时那一条
+    // 路径上报 `outputTail`(原始 pane 尾部,见 StateChangeReport.outputTail)。真同时出现
+    // 只可能来自未接线的第四个实现,那时以 `lastText` 优先——它是归一化过的正文。
+    const wakeText = truncateWakeText(report?.lastText ?? report?.outputTail, WAKE_TEXT_MAX_CHARS, ',全文用 read_worker_output 读')
     const wakeSummary = truncateWakeText(report?.summary, WAKE_SUMMARY_MAX_CHARS, '')
     // detail 里两段正文的组装收口在这里,fork 分支与主线分支共用——不在两处各拼一遍。
     const wakeDetail = {

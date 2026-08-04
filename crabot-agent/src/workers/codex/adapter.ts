@@ -38,6 +38,14 @@
  *    tmux 交互流程)。因此 `capabilities().fork` 如实定为 `false`,`fork()` 直接抛
  *    `CapabilityNotSupportedError`。
  *
+ * ## 启动期就绪握手(spawn 专用,排在 session 发现之前)
+ *
+ * tmux newSession 之后**先等 pane 输出里出现 `\e[?2004h`**(TUI 已开启 bracketed paste),
+ * 才谈 session 发现与投递开工输入;等不到就**不投递**,落 idle 并把 output 尾部随唤醒事件
+ * 交给 manager 决策(见 spawn 内的握手段、reportStartupStall,机制细节见 tmux/paste-ready.ts)。
+ * 这一段与 cc adapter 完全对称——两边发 prompt 走的是同一个 `TmuxDriver.sendText`,
+ * `paste-buffer -p` 的前提(目标程序已请求 bracketed paste)此前两边都没有任何代码保障。
+ *
  * ## session 发现(spawn 专用)
  *
  * codex 走的是交互式 TUI(本 adapter 用 tmux 拉起 `codex ...`,不是 `codex exec`),拿不到
@@ -142,6 +150,7 @@ import { homedir } from 'os'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { TmuxDriver } from '../tmux/driver.js'
+import { DEFAULT_PASTE_READY_TIMEOUT_MS, describeStartupStall, readOutputTail, waitForPasteReady } from '../tmux/paste-ready.js'
 import { CliEventChannel } from '../cli-events.js'
 import { OutputLog } from '../output-log.js'
 import { AsyncMutex } from '../async-mutex.js'
@@ -227,6 +236,14 @@ const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0
 
 /** UUID 格式校验:标准 UUID 格式(8-4-4-4-12 十六进制段,由连字符分隔)。*/
 function validateSessionRef(sessionRef: string): void {
+  if (sessionRef === '') {
+    // spawn 的就绪握手超时时 session_ref 如实留空(codex 那边根本没有会话可续)——把它与
+    // "格式非法"区分开,否则调用方拿到的是一句看不懂的 UUID 格式错误。
+    throw new Error(
+      `CodexWorkerAdapter: this incarnation has no codex session (startup readiness handshake timed out, ` +
+        `so no session was ever established); it cannot be resumed — kill it and spawn a new worker instead.`,
+    )
+  }
   if (!UUID_RE.test(sessionRef)) {
     throw new Error(
       `CodexWorkerAdapter: invalid session_ref format (expected UUID, got '${sessionRef.slice(0, 50)}'). ` +
@@ -437,6 +454,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   private readonly codexBin: string
   private readonly codexHomeSource: string
   private readonly sessionDiscoveryTimeoutMs: number
+  private readonly pasteReadyTimeoutMs: number
   private readonly runtimes = new Map<string, Runtime>()
   private readonly mutexes = new Map<string, AsyncMutex>()
   /** resolveBinDir(codexBin) 的缓存 promise——codexBin 构造后不变,没必要每次 detect/spawn/
@@ -458,6 +476,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       readonly codexHomeSource?: string
       /** spawn() 发现真实 session id 的轮询上限(ms),默认 3000;测试用可调小避免拖慢用例。 */
       readonly sessionDiscoveryTimeoutMs?: number
+      /** 启动期就绪握手的等待上限,默认 DEFAULT_PASTE_READY_TIMEOUT_MS(见该常量注释里的
+       * 实测取值依据)。测试注入小值,避免为了走超时分支真的等一分钟。 */
+      readonly pasteReadyTimeoutMs?: number
       /** `report.lastText` 本 adapter 刻意不报(理由同 cc),只报 `report.endReason`:
        * `transitionExited` 拿到的那个**必填**的 `ended_reason`。可信度与 cc 完全同构
        * (协议 §6.3):退出判定只认 `tmux.isAlive`,非 kill 一律记 `completed`,是**推断**
@@ -469,6 +490,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     this.codexBin = deps.codexBin ?? 'codex'
     this.codexHomeSource = deps.codexHomeSource ?? join(homedir(), '.codex')
     this.sessionDiscoveryTimeoutMs = deps.sessionDiscoveryTimeoutMs ?? 3000
+    this.pasteReadyTimeoutMs = deps.pasteReadyTimeoutMs ?? DEFAULT_PASTE_READY_TIMEOUT_MS
   }
 
   /** codexBin 所在真实目录(nvm 部署陷阱修复,见 resolveBinDir 注释),懒解析并缓存——但只
@@ -671,11 +693,31 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 目录(nvm 部署陷阱,见 buildEnv/resolveBinDir 注释),不依赖 tmux server 自身环境。
     await this.tmux.newSession({ name: sessionName, cwd: spec.workspace.root, command, outputFile, env: await this.buildEnv({ CODEX_HOME: codexHome }) })
 
-    // session 发现:见文件头注释"session 发现"节。找不到就退化为本地占位 uuid(已知限制)。
-    const discovered = await pollForNewRollout(join(codexHome, 'sessions'), spawnStartedAt, this.sessionDiscoveryTimeoutMs)
-    const sessionId = discovered?.sessionId ?? randomUUID()
+    // 启动期就绪握手(见 tmux/paste-ready.ts),排在 session 发现**之前**:
+    // - 它才是"能不能收输入"的判据。session 发现等的是 rollout 文件出现,那是"会话已建立"
+    //   的信号——启动期被模态框挡住时会话根本不会建立,那个轮询于是空转到超时,然后照样把
+    //   prompt 发出去(这正是本次要根治的"降级继续");
+    // - 顺带让 session 发现更稳:m2 实测 rollout 文件在 tmux 建会话约 3 秒后才落盘,几乎顶满
+    //   原来那个 3s 窗口;就绪握手先吸收掉启动耗时,发现窗口从"已经能收输入"那一刻才开始算。
+    const pasteReady = await waitForPasteReady(outputFile, {
+      timeoutMs: this.pasteReadyTimeoutMs,
+      isAlive: () => this.tmux.isAlive(sessionName),
+    })
+
+    // session 发现:见文件头注释"session 发现"节。
+    // 未就绪时**不做发现、也不编占位 uuid**:此刻 codex 会话确实没建立,给一个长得像真值的
+    // uuid 只会让 resume/readTrace 拿着假 id 静默失效。session_ref 留空,如实表示"没有会话"
+    // (harness 在 adapter.spawn 返回前本来就用空串占位,空串是这一层既有的"未知"表示)。
+    const discovered = pasteReady
+      ? await pollForNewRollout(join(codexHome, 'sessions'), spawnStartedAt, this.sessionDiscoveryTimeoutMs)
+      : null
+    const sessionId = discovered ? discovered.sessionId : pasteReady ? randomUUID() : ''
     const sessionDiscoveryStatus = discovered ? 'discovered' : 'placeholder'
-    if (sessionDiscoveryStatus === 'placeholder') {
+    if (!pasteReady) {
+      console.warn(
+        `[codex-adapter] startup readiness handshake timed out for ${spec.worker_id}; opening input NOT delivered, session_ref left empty`,
+      )
+    } else if (sessionDiscoveryStatus === 'placeholder') {
       console.warn(
         `[codex-adapter] session discovery timed out for ${spec.worker_id}, using placeholder uuid; resume/readTrace will degrade`,
       )
@@ -710,6 +752,14 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     })
     this.runtimes.set(instanceKey(handle), runtime)
     this.startEventWatch(runtime, handle)
+
+    // 等不到就绪就**不投递**(协议 §5.5 的"不安全态暂扣"):prompt 原封不动留在 spec 里没被
+    // 消耗,manager 处理掉障碍后经 send_to_worker 重新投递即可。这里绝不能退化成"超时了也
+    // 照发"——那正是 pollForNewRollout 现在的写法,也正是本次要根治的行为。
+    if (!pasteReady) {
+      await this.reportStartupStall(runtime, handle, outputFile)
+      return handle
+    }
 
     // 首条任务输入注入失败:不能放任 running——按 kill 路径清理 tmux 会话后落
     // exited(crashed)(不是 killed,不是用户发起的 kill),spawn 仍然 reject。
@@ -1115,8 +1165,14 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
   /** `onStateChange` 的 `report.lastText` 在 codex 这边同样刻意不传,理由与 cc 完全一致
    * (输出是 tmux 落的 TUI 原始字节流,无 ANSI 剥离层)——见
-   * `workers/claude-code/adapter.ts` 的 transitionState 注释。 */
-  private async transitionState(runtime: Runtime, h: IncarnationHandle, state: WorkerContractState): Promise<void> {
+   * `workers/claude-code/adapter.ts` 的 transitionState 注释;唯一的例外同样是
+   * `report.outputTail`(启动期就绪握手超时,每个化身至多付一次,见 reportStartupStall)。 */
+  private async transitionState(
+    runtime: Runtime,
+    h: IncarnationHandle,
+    state: WorkerContractState,
+    report?: StateChangeReport,
+  ): Promise<void> {
     await writeMetaAtomic(runtime.dir, runtime.seq, {
       seq: runtime.seq,
       state,
@@ -1126,10 +1182,26 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     })
     runtime.state = state
     try {
-      this.deps.onStateChange?.(h, state)
+      this.deps.onStateChange?.(h, state, report)
     } catch (err) {
       console.error(`[CodexWorkerAdapter] onStateChange callback error for ${h.worker_id}#${h.seq}:`, err)
     }
+  }
+
+  /** 就绪握手超时的收场:落 `idle` + 把 output 尾部随唤醒事件交给 manager。语义、取舍与
+   * cc adapter 的同名方法逐字一致(零协议改动、不 kill 现场),见那里的注释。 */
+  private async reportStartupStall(runtime: Runtime, h: IncarnationHandle, outputFile: string): Promise<void> {
+    const tail = await readOutputTail(outputFile)
+    // 等待期间进程可能是**自己死了**(启动即失败:二进制缺失、PATH 不对、pane 里的命令立刻
+    // 退出),那不是"停在一个界面上等人",谎报 idle 会让 manager 对着一具尸体发指令。先让既有
+    // 的三源判定跑一遍,它会如实落 exited;只有确实还活着才走下面的暂扣汇报。
+    if ((await this.syncState(runtime, h)).state === 'exited') return
+    await this.getMutex(h.worker_id).run(async () => {
+      if (runtime.state === 'exited') return // 判定与提交之间又被并发抢先:终态不可覆盖
+      await this.transitionState(runtime, h, 'idle', {
+        outputTail: describeStartupStall({ impl: 'codex', timeoutMs: this.pasteReadyTimeoutMs, tail }),
+      })
+    })
   }
 
   private async transitionExited(runtime: Runtime, h: IncarnationHandle, ended_reason: IncarnationEndReason): Promise<void> {

@@ -429,6 +429,37 @@ describe('WorkerHarness.handleStateChange', () => {
     })
   })
 
+  it('CLI 启动期就绪握手超时上报的 outputTail 进 detail.text —— manager 醒来就拿到现场', async () => {
+    // protocol-agent-v3 §5.5「检测到无法识别的交互界面:暂扣 + 唤醒 manager(附界面内容)」。
+    // 零协议改动:复用既有的 state_changed + detail.text 这条路,不新增事件类型也不新增状态。
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    const tail = '[crabot] claude-code 启动后 60s 内未就绪\n---\nNew MCP server found in this project: arXivPaper'
+    const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
+    harness.handleStateChange(h, 'idle', { outputTail: tail })
+
+    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
+    const [ev] = events.filter((e) => e.kind === 'state_changed')
+    expect(ev.detail).toEqual({ to: 'idle', text: tail })
+  })
+
+  it('outputTail 同样受 text 的上限约束(TUI 字节流可以很长,不能整屏灌进 manager 上下文)', async () => {
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
+    harness.handleStateChange(h, 'idle', { outputTail: '啊'.repeat(2600) })
+
+    await waitUntil(() => events.some((e) => e.kind === 'state_changed'))
+    const [ev] = events.filter((e) => e.kind === 'state_changed')
+    const text = (ev.detail as { text: string }).text
+    expect(text.startsWith('啊'.repeat(2000))).toBe(true)
+    expect(text).toContain('read_worker_output')
+  })
+
   it('adapter 没给 summary 时 detail 里不出现空 summary 字段(cc/codex 与非 finish_task 的终止路径)', async () => {
     const { harness } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())

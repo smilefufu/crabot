@@ -4,14 +4,18 @@
  * spawn:session_id = randomUUID() 出生即定(即 session_ref);建 <dataDir>/<worker_id>/ 目录;
  * tmux newSession 拉起 `<claudeBin> --session-id <uuid> --permission-mode acceptEdits`,交互态
  * 跑在 tmux pane 里,cwd=workspace,pane 输出经 tmux pipe-pane 落 output-<seq>.log;meta 落盘为
- * running;首条任务输入(spec.prompt)经 tmux sendText 注入(cc 把它当第一条用户消息)。
+ * running;**等 pane 输出里出现 \e[?2004h(TUI 已开启 bracketed paste)之后**,首条任务输入
+ * (spec.prompt)才经 tmux sendText 注入(cc 把它当第一条用户消息)。等不到就绪 → 不投递、
+ * 落 idle 并把 output 尾部随唤醒事件交给 manager(见 spawn 内的握手段与 reportStartupStall)。
  *
  * provision:与 spawn 分离的独立步骤(WorkerAdapter 契约本就是两个方法),由调用方在 spawn 前
  * 调用一次,把 workspace 布好——.claude/settings.json(Stop/Notification hook 接到
  * CliEventChannel.hookCommand,permissions 预配置 acceptEdits 降弹窗)、.claude/skills/(复用
  * Task 3 的 materializeSkills)、.mcp.json(renderMcpJson)、CLAUDE.md(renderContextMd),
- * 外加全局 ~/.claude.json 里该 workspace 的信任记录(trustWorkspace,消掉首次进入新目录的
- * 信任弹窗——它发生在 --permission-mode 之前,命令行拦不住)。
+ * 外加全局 ~/.claude.json 里该 workspace 的两条预授权记录(preAcceptStartupDialogs:
+ * hasTrustDialogAccepted 消掉"首次进入新目录"的信任弹窗——它发生在 --permission-mode 之前,
+ * 命令行拦不住;enabledMcpjsonServers 消掉紧随其后的 "New MCP server found" 弹窗——那个弹窗
+ * 的触发源正是我们自己写下的 .mcp.json)。
  *
  * spawn 提交纪律:tmux newSession 成功之后才落 meta(running)+注册 runtime——newSession 失败
  * 时不留任何持久痕迹(session_id 可重生成,workspace 内 provision 产物残留可接受),同 worker_id
@@ -86,6 +90,7 @@ import { homedir } from 'os'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { TmuxDriver } from '../tmux/driver.js'
+import { DEFAULT_PASTE_READY_TIMEOUT_MS, describeStartupStall, readOutputTail, waitForPasteReady } from '../tmux/paste-ready.js'
 import { CliEventChannel, EVENTS_FILE_ENV } from '../cli-events.js'
 import { OutputLog } from '../output-log.js'
 import { AsyncMutex } from '../async-mutex.js'
@@ -184,6 +189,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   private readonly claudeBin: string
   private readonly claudeProjectsDir: string
   private readonly claudeConfigPath: string
+  private readonly pasteReadyTimeoutMs: number
   private readonly runtimes = new Map<string, Runtime>()
   private readonly mutexes = new Map<string, AsyncMutex>()
 
@@ -198,6 +204,9 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       /** cc 的全局配置文件(信任表所在),默认 ~/.claude.json。测试注入临时路径,
        * 避免往开发机的真实文件里写 workspace 记录。 */
       readonly claudeConfigPath?: string
+      /** 启动期就绪握手的等待上限,默认 DEFAULT_PASTE_READY_TIMEOUT_MS(见该常量注释里的
+       * 实测取值依据)。测试注入小值,避免为了走超时分支真的等一分钟。 */
+      readonly pasteReadyTimeoutMs?: number
       /**
        * `report.lastText` 本 adapter 刻意不报(理由见 transitionState 注释),只报
        * `report.endReason`:`transitionExited` 拿到的那个**必填**的 `ended_reason`。不报的
@@ -215,6 +224,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     this.claudeBin = deps.claudeBin ?? 'claude'
     this.claudeProjectsDir = deps.claudeProjectsDir ?? join(homedir(), '.claude', 'projects')
     this.claudeConfigPath = deps.claudeConfigPath ?? join(homedir(), '.claude.json')
+    this.pasteReadyTimeoutMs = deps.pasteReadyTimeoutMs ?? DEFAULT_PASTE_READY_TIMEOUT_MS
   }
 
   async detect(): Promise<DetectResult> {
@@ -255,11 +265,11 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     }
     await fs.writeFile(join(claudeDir, 'settings.json'), JSON.stringify(settings, null, 2) + '\n', 'utf-8')
 
-    await this.trustWorkspace(ws.root)
+    const mcpServers = caps.mcp_servers as unknown as ProvisionSources['mcpServers']
+    await this.preAcceptStartupDialogs(ws.root, mcpServers.map((s) => s.name))
 
     await materializeSkills(ws.root, caps.skills, '.claude/skills')
 
-    const mcpServers = caps.mcp_servers as unknown as ProvisionSources['mcpServers']
     await fs.writeFile(join(ws.root, '.mcp.json'), renderMcpJson(mcpServers), 'utf-8')
 
     await fs.writeFile(
@@ -273,7 +283,21 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     )
   }
 
-  /** 把 workspace 预置成"已信任",消灭 cc 首次进入新目录时的信任弹窗。
+  /** 把 workspace 在全局 ~/.claude.json 里预置成"已信任 + 已授权本项目的 MCP server",
+   * 消灭 cc 首次进入新目录时那两个**阻塞式**启动弹窗。
+   *
+   * ## 弹窗②:`New MCP server found in this project: <name>`
+   *
+   * provision 每次都往一个**全新** workspace 写 `.mcp.json`(见上面 renderMcpJson),于是 cc
+   * 每次都认为"这个 project 里发现了新 MCP server"并停下来等选择。开关与信任记录同层:
+   * `projects["<realpath>"].enabledMcpjsonServers = [<.mcp.json 里的 server 名>]`(键名已在
+   * m2 的 ~/.claude.json 上实证:17 个 project entry 里 16 个带它)。
+   *
+   * 与就绪握手(见 spawn)的关系:握手是兜底,这里是消源。预写是幂等的、无时序依赖的,
+   * 优于"读屏 + 匹配 + 按键应答";但它靠枚举,必然有漏网的新弹窗——所以两者都要有,
+   * 不是二选一。
+   *
+   * ## 弹窗①:`Do you trust this folder?`
    *
    * m2 实测(cc 2.1.220):交互式启动遇到没见过的目录会先弹
    * `Do you trust this folder?`,这个检查发生在 `--permission-mode` **之前**,命令行没有
@@ -292,7 +316,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
    * - 文件存在但解析不出来时更不能兜底重写——用户真实项目的条目和登录信息都在同一份文件里,
    *   宁可 provision 失败(spawn 之前,不留半个 worker),也不能把它覆盖掉。
    * 文件不存在是正常情形(全新机器),按空配置创建。 */
-  private async trustWorkspace(root: string): Promise<void> {
+  private async preAcceptStartupDialogs(root: string, mcpServerNames: string[]): Promise<void> {
     const realRoot = await fs.realpath(root)
     const configPath = this.claudeConfigPath
 
@@ -333,8 +357,12 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       const projects = { ...((existingProjects as Record<string, unknown>) ?? {}) }
       const entry = projects[realRoot]
       const merged = typeof entry === 'object' && entry !== null && !Array.isArray(entry) ? { ...(entry as Record<string, unknown>) } : {}
-      // 只补这一个字段:同一个 path 下可能已有 allowedTools / history 等用户数据,不能覆盖。
+      // 只补这两个字段:同一个 path 下可能已有 allowedTools / history 等用户数据,不能覆盖。
       merged.hasTrustDialogAccepted = true
+      // 覆盖而非并集:这一条 project entry 描述的是 crabot 刚刚写下的那份 .mcp.json,
+      // caps 是本任务的授权边界,残留的旧名字不该继续被授权(与 codex 侧 mcp_servers
+      // 整体覆盖宿主配置同一取舍)。没有 MCP server 时落 []——cc 见到空表就不会问。
+      merged.enabledMcpjsonServers = [...mcpServerNames]
       projects[realRoot] = merged
       config.projects = projects
 
@@ -388,6 +416,22 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: sessionId, workspace_root: spec.workspace.root })
     this.runtimes.set(instanceKey(handle), runtime)
     this.startEventWatch(runtime, handle)
+
+    // 启动期就绪握手(见 tmux/paste-ready.ts):等 cc 在 pane 里发出 \e[?2004h 之后再投递,
+    // 否则 paste-buffer -p 会静默降级成裸文本注入,prompt 里每个换行都变成一次 Enter——
+    // 生产实证里前两个换行分别确认掉了信任弹窗与 MCP 弹窗,残句留在 composer 里从未提交。
+    //
+    // 等不到就**不投递**(协议 §5.5 的"不安全态暂扣"):prompt 原封不动留在 spec 里没有被
+    // 消耗,manager 处理掉障碍后经 send_to_worker 重新投递即可,内容不丢。这里绝不能退化成
+    // "超时了也照发"——那正是本次要根治的行为。
+    const pasteReady = await waitForPasteReady(outputFile, {
+      timeoutMs: this.pasteReadyTimeoutMs,
+      isAlive: () => this.tmux.isAlive(sessionName),
+    })
+    if (!pasteReady) {
+      await this.reportStartupStall(runtime, handle, outputFile)
+      return handle
+    }
 
     // 首条任务输入经 sendText 注入,cc 把它当第一条用户消息。注入失败:session 可能已经起来
     // 但没喂到任务,不能放任 running——按 kill 路径清理 tmux 会话后落 exited(crashed)(不是
@@ -922,15 +966,47 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
    * ANSI 归一化要单独设计(还要处理"TUI 里哪一段才算 assistant 发言"这个问题),不在本次
    * 范围内。在那之前,cc/codex 的唤醒事件只带状态,manager 需要正文时走 `read_worker_output`
    * ——那条路本来就通,行为与本次改动之前逐字一致。
+   *
+   * 唯一的例外是 `report.outputTail`(见 reportStartupStall):启动期就绪握手超时时,manager
+   * 手上没有任何别的线索能判断"卡在哪",而这是**每个化身至多付一次**的一次性成本,与上面
+   * "每轮都付一遍"的量纲完全不同。
    */
-  private async transitionState(runtime: Runtime, h: IncarnationHandle, state: WorkerContractState): Promise<void> {
+  private async transitionState(
+    runtime: Runtime,
+    h: IncarnationHandle,
+    state: WorkerContractState,
+    report?: StateChangeReport,
+  ): Promise<void> {
     await writeMetaAtomic(runtime.dir, runtime.seq, { seq: runtime.seq, state, session_id: runtime.sessionId, workspace_root: runtime.workspaceRoot })
     runtime.state = state
     try {
-      this.deps.onStateChange?.(h, state)
+      this.deps.onStateChange?.(h, state, report)
     } catch (err) {
       console.error(`[ClaudeCodeAdapter] onStateChange callback error for ${h.worker_id}#${h.seq}:`, err)
     }
+  }
+
+  /**
+   * 就绪握手超时的收场:落 `idle` + 把 output 尾部随唤醒事件交给 manager。**零协议改动**
+   * (protocol-agent-v3 §4.3:"worker 停下且输出尾巴带着问题"本来就是 idle 的一种情况,
+   * 判断语义与决策的责任在 manager 侧;§5.5 又明确授予它 `raw` 敲键的能力)。
+   *
+   * 不走"kill + exited(crashed)":那条路现成(见 kill()),但它把一个还能救的现场直接销毁。
+   * 保留进程交给 manager 决策严格更优,且不额外增加静默风险——化身已经落 idle,manager
+   * 必被唤醒。
+   */
+  private async reportStartupStall(runtime: Runtime, h: IncarnationHandle, outputFile: string): Promise<void> {
+    const tail = await readOutputTail(outputFile)
+    // 等待期间进程可能是**自己死了**(启动即失败:二进制缺失、PATH 不对、pane 里的命令立刻
+    // 退出),那不是"停在一个界面上等人",谎报 idle 会让 manager 对着一具尸体发指令。先让既有
+    // 的三源判定跑一遍,它会如实落 exited;只有确实还活着才走下面的暂扣汇报。
+    if ((await this.syncState(runtime, h)).state === 'exited') return
+    await this.getMutex(h.worker_id).run(async () => {
+      if (runtime.state === 'exited') return // 判定与提交之间又被并发抢先:终态不可覆盖
+      await this.transitionState(runtime, h, 'idle', {
+        outputTail: describeStartupStall({ impl: 'claude-code', timeoutMs: this.pasteReadyTimeoutMs, tail }),
+      })
+    })
   }
 
   private async transitionExited(runtime: Runtime, h: IncarnationHandle, ended_reason: IncarnationEndReason): Promise<void> {

@@ -7,6 +7,7 @@ import * as path from 'node:path'
 import { parse as parseToml } from 'smol-toml'
 import { CodexWorkerAdapter, eventsFilePath, WorkerExitedError, CapabilityNotSupportedError } from '../../src/workers/codex/adapter.js'
 import { TmuxDriver, type TmuxSessionSpec } from '../../src/workers/tmux/driver.js'
+import { BRACKETED_PASTE_ENABLE } from '../../src/workers/tmux/paste-ready.js'
 import { CliEventChannel } from '../../src/workers/cli-events.js'
 import type { IncarnationHandle, SpawnSpec, StateChangeReport, WorkerContractState } from '../../src/workers/types.js'
 
@@ -70,6 +71,16 @@ function codexBinFor(script: MockStep[], stopHookCmd: string, opts?: { argvFile?
   const rolloutEnv = opts?.rolloutFile ? `MOCK_CLI_ROLLOUT_FILE=${shQuote(opts.rolloutFile)} ` : ''
   return `env MOCK_CLI_SCRIPT=${shQuote(JSON.stringify(script))} MOCK_CLI_STOP_HOOK_CMD=${shQuote(stopHookCmd)} ${argvEnv}${rolloutEnv}node ${shQuote(MOCK_CLI)}`
 }
+
+/** 假 TmuxDriver 的 newSession 替身:落一份 output 日志并写入 \e[?2004h。
+ * spawn 在投递开工输入之前要等这个信号(启动期就绪握手,见 src/workers/tmux/paste-ready.ts)
+ * ——不扮演"TUI 已请求 bracketed paste"的假 driver 会让每个用例白等一次握手超时。 */
+async function fakeReadyNewSession(spec: TmuxSessionSpec): Promise<void> {
+  await fs.writeFile(spec.outputFile, BRACKETED_PASTE_ENABLE, { flag: 'a' })
+}
+
+/** 扮演"已经就绪的 TUI"的最小 pane 命令:先请求 bracketed paste 再挂住不退。理由同上。 */
+const READY_IDLE_BIN = `bash -c 'printf "\\033[?2004h"; sleep 5'`
 
 async function waitForState(
   adapter: CodexWorkerAdapter,
@@ -911,7 +922,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — spawn 提交纪律', () 
     async () => {
       const badTmux = new TmuxDriver({ tmuxBin: '/nonexistent/tmux-bin-does-not-exist-crabot-test' })
       const tmux = new SwitchableTmuxDriver(badTmux)
-      const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin: `bash -c 'sleep 5'`, sessionDiscoveryTimeoutMs: 200 })
+      const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin: READY_IDLE_BIN, sessionDiscoveryTimeoutMs: 200 })
       await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
       const workerId = `codextest-${randomUUID().slice(0, 8)}`
       const spec: SpawnSpec = { worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } }
@@ -952,7 +963,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — spawn 提交纪律', () 
         }
       }
       const tmux = new NewSessionOkSendTextFailsTmux()
-      const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin: `bash -c 'sleep 5'`, sessionDiscoveryTimeoutMs: 200 })
+      const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin: READY_IDLE_BIN, sessionDiscoveryTimeoutMs: 200 })
       await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
       const workerId = `codextest-${randomUUID().slice(0, 8)}`
       const spec: SpawnSpec = { worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } }
@@ -985,7 +996,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — spawn 提交纪律', () 
       await fs.writeFile(codexPath, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
 
       const tmux = new RecordingTmuxDriver()
-      const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin: codexPath, sessionDiscoveryTimeoutMs: 200 })
+      const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin: codexPath, sessionDiscoveryTimeoutMs: 200, pasteReadyTimeoutMs: 500 })
       await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
       const workerId = `codextest-${randomUUID().slice(0, 8)}`
       const spec: SpawnSpec = { worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } }
@@ -1022,7 +1033,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — spawn 提交纪律', () 
       const tmux = new RecordingTmuxDriver()
       // 裸命令名(不含 '/'),命中 resolveBinDir 的 `command -v` 分支——对应真实 nvm 场景
       // (codex 是 PATH 上的一个命令名,不是绝对路径)。
-      const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin: fakeBinName, sessionDiscoveryTimeoutMs: 200 })
+      const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin: fakeBinName, sessionDiscoveryTimeoutMs: 200, pasteReadyTimeoutMs: 500 })
       await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
 
       try {
@@ -1167,13 +1178,19 @@ describe('CodexWorkerAdapter — session_ref UUID 边界校验(resume)', () => {
   it('resume() 拒绝空白或特殊字符 session_ref', async () => {
     const adapter = new CodexWorkerAdapter({ dataDir, codexBin: 'unused' })
     const workerId = `codextest-${randomUUID().slice(0, 8)}`
-    const invalidRefs = ['', ' ', '$(whoami)', '`id`', '{test}', '../../../etc/passwd']
+    const invalidRefs = [' ', '$(whoami)', '`id`', '{test}', '../../../etc/passwd']
 
     for (const ref of invalidRefs) {
       await expect(
         adapter.resume({ worker_id: workerId, seq: 1, session_ref: ref }, 'payload'),
       ).rejects.toThrow(/invalid.*session_ref|UUID|session reference/i)
     }
+
+    // 空串不是"格式写错了",而是启动期就绪握手超时时如实留下的"根本没有会话"——
+    // 给它一句自己的错误,manager 才知道该 kill 重开而不是去修一个 id。
+    await expect(adapter.resume({ worker_id: workerId, seq: 1, session_ref: '' }, 'payload')).rejects.toThrow(
+      /has no codex session/,
+    )
   })
 
   it('resume() 接受有效 UUID 格式的 session_ref(至少通过前置校验)', async () => {
@@ -1217,7 +1234,9 @@ describe('CodexWorkerAdapter.fork — capabilities.fork=false', () => {
 
 /** 全程无操作的假 TmuxDriver——readTrace 测试只需要一个"常驻 runtime"的化身,不关心 tmux 行为本身。 */
 class NoopTmux extends TmuxDriver {
-  async newSession(_spec: TmuxSessionSpec): Promise<void> {}
+  async newSession(spec: TmuxSessionSpec): Promise<void> {
+    await fakeReadyNewSession(spec)
+  }
   async sendText(_name: string, _text: string): Promise<void> {}
   async sendKeys(_name: string, _keys: string[]): Promise<void> {}
   async isAlive(_name: string): Promise<boolean> {
@@ -1707,4 +1726,174 @@ describe('CodexWorkerAdapter.ensureRuntime — 并发重建不泄漏 watcher', (
     await new Promise((r) => setTimeout(r, 500))
     expect(seen).toEqual(['idle', 'exited'])
   }, 15000)
+})
+
+/**
+ * 启动期就绪握手(spec: 2026-08-04-cli-worker-readiness-design)—— 与 cc adapter 对称的一套。
+ *
+ * codex 结构上得的是同一个病:发 prompt 走的是同一个 `TmuxDriver.sendText`,
+ * `paste-buffer -p` 同样只在目标程序已请求 bracketed paste 时才包裹。生产上它只是侥幸
+ * (m2 实测 codex 在 byte 0 就发 `\e[?2004h`,且 rollout 轮询恰好挡了约 3 秒),而那两个
+ * 偶然因素在最需要它们的失败路径上会同时失效——被模态框挡住时会话不建立、rollout 不落盘,
+ * 轮询空转到超时后**照样发 prompt**,还把 session_ref 降级成占位 uuid。
+ */
+describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 启动期就绪握手(\\e[?2004h)', () => {
+  /** 记录 sendText 调用,其余行为完全走真实 TmuxDriver。 */
+  class SpyTmux extends TmuxDriver {
+    readonly sendTextCalls: Array<{ name: string; text: string }> = []
+    async sendText(name: string, text: string): Promise<void> {
+      this.sendTextCalls.push({ name, text })
+      return super.sendText(name, text)
+    }
+  }
+
+  let dataDir: string
+  let workspaceRoot: string
+  let stdinLog: string
+  let tmux: SpyTmux
+
+  beforeEach(async () => {
+    dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-ready-data-'))
+    workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-ready-ws-'))
+    stdinLog = path.join(dataDir, 'stdin.log')
+    tmux = new SpyTmux()
+  })
+
+  afterEach(async () => {
+    await cleanupTmuxSessions()
+    await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+  })
+
+  async function submissions(): Promise<string[]> {
+    const raw = await fs.readFile(stdinLog, 'utf-8').catch(() => '')
+    return raw
+      .split('\n')
+      .filter((l) => l.length > 0)
+      .map((l) => JSON.parse(l) as string)
+  }
+
+  async function makeAdapter(opts: { readyDelayMs?: number; banner?: string; pasteReadyTimeoutMs?: number }) {
+    const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+    const codexHome = path.join(workspaceRoot, '.codex')
+    const rolloutUuid = randomUUID()
+    const now = new Date()
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const datePath = path.join(String(now.getFullYear()), pad(now.getMonth() + 1), pad(now.getDate()))
+    const rolloutFile = path.join(codexHome, 'sessions', datePath, rolloutFileNameFor(rolloutUuid))
+
+    const envParts = [
+      `MOCK_CLI_SCRIPT=${shQuote('[]')}`,
+      `MOCK_CLI_STOP_HOOK_CMD=${shQuote(channel.hookCommand('stop'))}`,
+      `MOCK_CLI_STDIN_LOG=${shQuote(stdinLog)}`,
+      `MOCK_CLI_ROLLOUT_FILE=${shQuote(rolloutFile)}`,
+    ]
+    if (opts.readyDelayMs) envParts.push(`MOCK_CLI_PASTE_READY_DELAY_MS=${opts.readyDelayMs}`)
+    if (opts.banner) envParts.push(`MOCK_CLI_BANNER=${shQuote(opts.banner)}`)
+
+    const seen: Array<{ state: WorkerContractState; report?: StateChangeReport }> = []
+    const adapter = new CodexWorkerAdapter({
+      dataDir,
+      tmux,
+      codexBin: `env ${envParts.join(' ')} node ${shQuote(MOCK_CLI)}`,
+      sessionDiscoveryTimeoutMs: 1500,
+      pasteReadyTimeoutMs: opts.pasteReadyTimeoutMs,
+      onStateChange: (_h, state, report) => seen.push({ state, report }),
+    })
+    await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+    return { adapter, seen, rolloutUuid, workerId: `codextest-${randomUUID().slice(0, 8)}` }
+  }
+
+  const MULTILINE_PROMPT = ['任务:核对上游依赖', '背景:昨天的构建挂了', '验收:给出修复方案'].join('\n')
+
+  it(
+    'TUI 迟迟不开 bracketed paste 时,prompt 不被拆成按键——握手等到之后整段一次提交',
+    async () => {
+      const { adapter, workerId } = await makeAdapter({ readyDelayMs: 1200 })
+      await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+
+      const deadline = Date.now() + 5000
+      while (Date.now() < deadline && (await submissions()).length === 0) {
+        await new Promise((r) => setTimeout(r, 50))
+      }
+
+      expect(await submissions()).toEqual([MULTILINE_PROMPT])
+      expect(tmux.sendTextCalls).toHaveLength(1)
+    },
+    30000,
+  )
+
+  it(
+    '就绪立刻到位时:session 发现照常拿到真实 id,时序不回归',
+    async () => {
+      const { adapter, rolloutUuid, workerId } = await makeAdapter({})
+      const startedAt = Date.now()
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+      expect(Date.now() - startedAt).toBeLessThan(10_000)
+      expect(h.session_ref).toBe(rolloutUuid)
+
+      const deadline = Date.now() + 5000
+      while (Date.now() < deadline && (await submissions()).length === 0) {
+        await new Promise((r) => setTimeout(r, 50))
+      }
+      expect(await submissions()).toEqual([MULTILINE_PROMPT])
+    },
+    30000,
+  )
+
+  it(
+    '等不到就绪 → 一个字符都不投递(sendText 一次都不调),prompt 完好没被消耗',
+    async () => {
+      const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
+      await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+
+      expect(tmux.sendTextCalls).toEqual([])
+      await new Promise((r) => setTimeout(r, 500))
+      expect(tmux.sendTextCalls).toEqual([])
+      expect(await submissions()).toEqual([])
+    },
+    30000,
+  )
+
+  it(
+    '等不到就绪 → 落 idle,并把 output 尾部随状态回调交给 manager(不 kill 现场)',
+    async () => {
+      const banner = 'Sign in with ChatGPT / Provide your own API key'
+      const { adapter, seen, workerId } = await makeAdapter({
+        readyDelayMs: 600_000,
+        pasteReadyTimeoutMs: 2000,
+        banner,
+      })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+
+      const idle = seen.filter((s) => s.state === 'idle')
+      expect(idle).toHaveLength(1)
+      expect(idle[0].report?.outputTail).toContain(banner)
+      expect(idle[0].report?.outputTail).toContain('一个字符都没有投递')
+
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+      expect(meta.state).toBe('idle')
+      expect(await adapter.state(h)).not.toBe('exited')
+    },
+    30000,
+  )
+
+  it(
+    '超时路径下 session_ref 不降级成占位 uuid —— 会话根本没建立,给个像真的假 id 只会让 resume/readTrace 静默失效',
+    async () => {
+      const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+
+      expect(h.session_ref).toBe('')
+      expect(h.session_ref).not.toMatch(/^[0-9a-f]{8}-/)
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+      expect(meta.session_id).toBe('')
+
+      // resume 对着"没有会话"的化身必须给出说得清的错误,而不是一句看不懂的 UUID 格式错。
+      await expect(adapter.resume({ worker_id: workerId, seq: 1, session_ref: '' }, '继续')).rejects.toThrow(
+        /has no codex session/,
+      )
+    },
+    30000,
+  )
 })

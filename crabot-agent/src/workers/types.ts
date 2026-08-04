@@ -111,6 +111,17 @@ export interface StateChangeReport {
    * 尾一句 text 都没有,`lastText` 与 `output.log` 双双为空,`summary` 是它唯一的交付物。
    */
   readonly summary?: string
+  /**
+   * 化身当前 pane 输出的**原始尾部**(含 ANSI 转义序列),只有 CLI 实现在**启动期就绪握手
+   * 超时**这一条路径上产出:此时开工输入一个字符都没投递,worker 停在一个我们无法识别的
+   * 界面上(典型是模态弹窗),manager 需要现场才能决策——protocol-agent-v3 §5.5「检测到
+   * 无法识别的交互界面:暂扣 + 唤醒 manager(附界面内容);manager 可用 `raw` 直接敲键」。
+   *
+   * 与 `lastText` 是**两样东西**,不能相互替代:`lastText` 是 worker 说的话(只有 builtin
+   * 拆得出);这里是屏幕这一刻吐出的字节,没有经过任何归一化,也不代表 worker 表达了什么
+   * ——它只是给 manager 判断"卡在哪"的现场素材。
+   */
+  readonly outputTail?: string
 }
 
 export interface DetectResult { installed: boolean; activated: boolean; detail?: string }
