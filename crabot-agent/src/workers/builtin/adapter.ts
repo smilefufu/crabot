@@ -235,8 +235,18 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
        * 只有 builtin 传：它的输出天然只有 assistant text（`partitionResponseContent` 只取
        * `type==='text'`，工具调用/结果一个字节都不进），符合"只要 text 不要 tool use"。
        * cc/codex 刻意不传，理由见各自 adapter 的 transitionState 注释。
+       *
+       * `endReason`（可选第四参）：本次转换若是 `exited`，就是 `transitionExited` 拿到的
+       * 那个**必填**的 `ended_reason`。builtin 的它是确证（`finish_task(outcome)` 结构化
+       * 上报 / engine result / kill 标记），harness 直接据此落台账；不传这一参的话，这个
+       * 真值就在回调这一跳被丢掉，harness 只能猜（协议 §6.3）。非 exited 转换不传。
        */
-      readonly onStateChange?: (h: IncarnationHandle, state: WorkerContractState, lastText?: string) => void
+      readonly onStateChange?: (
+        h: IncarnationHandle,
+        state: WorkerContractState,
+        lastText?: string,
+        endReason?: IncarnationEndReason,
+      ) => void
       /**
        * 运行配置工厂：**每次起化身现取一次**（spec 决策 2）。spawn 的那次由调用方
        * （harness.spawnWorker / handoffIncarnation）调同一个工厂后放进 `spec.builtin`；
@@ -453,7 +463,8 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       }
 
       if (instance.state === 'exited') {
-        throw new WorkerExitedError(h.worker_id, h.seq)
+        // 带上 ended_reason:harness 的透明接续要用它给"台账还没追上"的源化身补终态。
+        throw new WorkerExitedError(h.worker_id, h.seq, instance.ended_reason)
       }
 
       if (instance.state === 'running') {
@@ -1169,8 +1180,11 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     // 观察者（onStateChange）的异常永远不能中断状态机的推进。任何回调错误都被捕获
     // 并仅作 console.error 记录，防止阻塞状态转移或导致后续 burst/sendInput 卡死。
     // session_ref 现读现取 instance.tip，同 transitionState 的注释。
+    // 第四参传的就是上面刚写进 meta 的那个 ended_reason——builtin 这一档是**确证**
+    // （finish_task(outcome) 结构化上报 / engine result / kill 标记），harness 据此落台账。
+    // 不传的话这个真值就在回调这一跳被丢掉，harness 只能猜（协议 §6.3）。
     try {
-      this.deps.onStateChange?.({ ...handle, session_ref: instance.tip }, 'exited', lastText)
+      this.deps.onStateChange?.({ ...handle, session_ref: instance.tip }, 'exited', lastText, ended_reason)
     } catch (err) {
       console.error(`[BuiltinWorkerAdapter] onStateChange callback error for ${handle.worker_id}#${handle.seq}:`, err)
     }

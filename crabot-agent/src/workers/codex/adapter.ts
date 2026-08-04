@@ -455,7 +455,16 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       readonly codexHomeSource?: string
       /** spawn() 发现真实 session id 的轮询上限(ms),默认 3000;测试用可调小避免拖慢用例。 */
       readonly sessionDiscoveryTimeoutMs?: number
-      readonly onStateChange?: (h: IncarnationHandle, state: WorkerContractState) => void
+      /** 第三参 `lastText` 本 adapter 刻意不传(理由同 cc),但位置要占住,因为第四参
+       * `endReason` 是位置参数:`transitionExited` 拿到的那个**必填**的 `ended_reason`。
+       * 可信度与 cc 完全同构(协议 §6.3):退出判定只认 `tmux.isAlive`,非 kill 一律记
+       * `completed`,是**推断**不是确证。详见 cc adapter 同名 deps 的注释。 */
+      readonly onStateChange?: (
+        h: IncarnationHandle,
+        state: WorkerContractState,
+        lastText?: string,
+        endReason?: IncarnationEndReason,
+      ) => void
     },
   ) {
     this.tmux = deps.tmux ?? new TmuxDriver()
@@ -788,7 +797,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     if (!runtime) throw new WorkerExitedError(h.worker_id, h.seq)
 
     const { state: current, stopCount } = await this.syncState(runtime, h)
-    if (current === 'exited') throw new WorkerExitedError(h.worker_id, h.seq)
+    // 带上 ended_reason:harness 的透明接续要用它给"台账还没追上"的源化身补终态。
+    // 上面 `!runtime` 那条分支给不出原因(重启后连落盘 meta 都读不回来),如实缺省。
+    if (current === 'exited') throw new WorkerExitedError(h.worker_id, h.seq, runtime.ended_reason)
 
     // 新一轮开始:把 baseline 推到当前计数,上一轮遗留的 turn-complete 通知不会被误算进新一轮。
     runtime.stopBaseline = stopCount
@@ -1083,7 +1094,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 终态唯一入口:文件监视在这里摘掉,同 cc adapter。
     this.stopEventWatch(runtime)
     try {
-      this.deps.onStateChange?.(h, 'exited')
+      this.deps.onStateChange?.(h, 'exited', undefined, ended_reason)
     } catch (err) {
       console.error(`[CodexWorkerAdapter] onStateChange callback error for ${h.worker_id}#${h.seq}:`, err)
     }

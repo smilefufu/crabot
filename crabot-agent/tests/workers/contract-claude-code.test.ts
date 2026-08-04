@@ -74,7 +74,10 @@ function shQuote(s: string): string {
 /** ScriptStep → mock-cli 的 MockStep:'idle' 触发 stop hook 但不退出;'exit_success'/
  * 'exit_failure' 输出后分别以 0/非 0 退出——cc adapter 的三源合成状态判定只认 tmux
  * isAlive(不看退出码),两者都收敛为 exited(ended_reason 恒 completed,除非被 kill),
- * 契约套件④本身也只断言 state==='exited',不区分退出码,见 contract-suite.ts。 */
+ * 契约套件④本身也只断言 state==='exited',不区分退出码,见 contract-suite.ts。
+ *
+ * 这条"恒 completed"是 **adapter 层的推断**(协议 §6.3 的可信度分级),不是 harness 编的:
+ * harness 现在如实采用 adapter 上报的 ended_reason,而 cc 能上报的就只有这个推断值。 */
 function toMockSteps(script: ScriptStep[]): MockStep[] {
   return script.map((step) =>
     step.then === 'idle'

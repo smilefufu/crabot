@@ -1581,6 +1581,66 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
 
     await adapter.kill(h)
   })
+
+  // ---- onStateChange 的第四参 endReason:cc 上报的是**推断**,不是确证 ----
+
+  it('tmux 会话消失(非本进程 kill)→ 回调第四参上报 completed;这是推断,不表示任务真的成功', async () => {
+    // ⚠️ 这条断言钉住的是 cc adapter 的**能力天花板**,不是"任务成功"这件事的证据。
+    //
+    // cc 的退出判定唯一依据是 `tmux.isAlive`(adapter 的三源合成状态判定不看退出码):
+    // "会话没了且 runtime.killed 没置位" ⇒ 记 'completed'。cc 没有任何可得的任务成败
+    // 信号——退出码没捕获(tmux 未设 remain-on-exit)、hook payload 被 CliEventChannel
+    // 主动丢弃、也没有 builtin 那样的 finish_task 结构化上报。所以一个失败退出的 cc
+    // worker 在这里同样会被记成 'completed'(协议 §6.3 已写明这条可信度分级)。
+    //
+    // 本次修复保证的是"harness 不再丢弃 adapter 已知的真值",不保证"所有实现都知道
+    // 真值"。给 cc/codex 补终态上报是另一个设计任务,不在本次范围。
+    const seen: Array<{ state: WorkerContractState; endReason?: string }> = []
+    class DeadTmux extends NoopTmux {
+      async isAlive(_name: string): Promise<boolean> {
+        return false
+      }
+    }
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux: new NoopTmux(),
+      claudeBin: 'unused',
+      claudeProjectsDir,
+      onStateChange: (_h, state, _lastText, endReason) => {
+        seen.push({ state, endReason })
+      },
+    })
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '干活', workspace: { root: workspaceRoot } })
+    expect(seen).toEqual([])
+
+    // 会话凭空消失(worker 自己退了 / 崩了 / 被外部杀了——adapter 分辨不出是哪一种)。
+    ;(adapter as unknown as { tmux: TmuxDriver }).tmux = new DeadTmux()
+    await expect(adapter.state(h)).resolves.toBe('exited')
+
+    expect(seen).toEqual([{ state: 'exited', endReason: 'completed' }])
+  })
+
+  it('本进程 kill → 回调第四参上报 killed(这一档是确证:只有 adapter 知道是不是自己动的手)', async () => {
+    const seen: Array<{ state: WorkerContractState; endReason?: string }> = []
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux: new NoopTmux(),
+      claudeBin: 'unused',
+      claudeProjectsDir,
+      onStateChange: (_h, state, _lastText, endReason) => {
+        seen.push({ state, endReason })
+      },
+    })
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '干活', workspace: { root: workspaceRoot } })
+
+    await adapter.kill(h)
+
+    expect(seen).toEqual([{ state: 'exited', endReason: 'killed' }])
+  })
 })
 
 /**

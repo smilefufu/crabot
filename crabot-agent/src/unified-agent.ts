@@ -2941,9 +2941,9 @@ export class UnifiedAgent extends ModuleBase {
   // ============================================================================
   // Manager/Worker RPC 方法（protocol-agent-v3 §8.2 / §8.3，P5 Task 4）
   //
-  // 已知读模型污染源：harness 的 processStateChange 目前把化身退出一律记成 completed
-  // （P7 阻塞项 #1），因此台账里失败 worker 的 task.status 是失真的。这几个读端点只忠实
-  // 反映台账、不做补偿，修复在 harness 侧。
+  // task.status 的可信度分级（协议 §6.3）：builtin 有 finish_task 结构化终态上报，其
+  // completed/failed 是确证；claude-code/codex 基于交互式 CLI，没有任何可得的任务成败
+  // 信号，其 completed 是推断。这几个读端点只忠实反映台账、不做补偿。
   // ============================================================================
 
   /** manager 栈取件口：未装配即 fail-fast（P5 阶段启动路径尚未接线，见字段注释）。 */

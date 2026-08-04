@@ -18,11 +18,12 @@
  *   `Math.min(page_size ?? 20, 100)`),admin 侧的处理器没有夹紧,这里以 base-protocol
  *   §5.6 注释("默认 20,最大 100")为准。
  *
- * ## 已知的读模型污染源(不要据此写断言)
+ * ## `task.status` 的可信度分级(不要据此假定"completed = 任务真的成功")
  *
- * harness 的 `processStateChange` 目前硬编码把化身退出记成 `completed`(P7 阻塞项 #1),
- * 也就是说**台账里的 `task.status` 对失败的 worker 是失真的**。本文件只忠实反映台账,
- * 不做任何补偿;修复在 P7 的 harness 侧,不在读模型这一层。
+ * 本文件只忠实反映台账,不做任何补偿。台账的 `task.status` 由 harness 依据 adapter 上报的
+ * `ended_reason` 落定,其可信度因实现而异(协议 §6.3):`builtin` 有 `finish_task` 结构化
+ * 终态上报,`completed`/`failed` 是确证;`claude-code`/`codex` 基于交互式 CLI,没有任何可得
+ * 的任务成败信号,其 `completed` 是**推断**(会话消失且非本进程 kill),不表示任务真的成功。
  *
  * @see crabot-docs/protocols/protocol-agent-v3.md §8.3、§7
  * @see crabot-docs/protocols/base-protocol.md §5.6(分页)、§5.7(TimeRange)

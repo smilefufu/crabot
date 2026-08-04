@@ -291,6 +291,89 @@ describe('WorkerHarness.handleStateChange', () => {
     expect(w2.incarnations[0].ended_reason).toBe('completed')
   })
 
+  // ---- endReason:harness 不再自己猜,一律取 adapter 上报的真值 ----
+
+  it('adapter 上报 endReason=failed → 台账 ended_reason 与 task.status 都落 failed(不再被记成成功)', async () => {
+    // 修复前这里硬编码 `endReason = state === 'exited' ? 'completed' : undefined`,adapter
+    // 明知的失败真值在 onStateChange 这一跳被整个丢掉。真实剧本:builtin worker 自己调
+    // `finish_task(outcome:'failed')`(见 manager-integration.test.ts 的端到端用例)。
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    events.length = 0
+
+    const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
+    fake.emitStateChange(h, 'exited', undefined, 'failed')
+
+    await waitUntil(async () => {
+      const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      return w.task.status === 'failed'
+    })
+    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(w.task.status).toBe('failed')
+    expect(w.incarnations[0].ended_reason).toBe('failed')
+
+    // 对外事件带的是提交后的 task.status——manager 的台账块、admin 侧读端点看的都是这一份。
+    const stateEvents = events.filter((e) => e.kind === 'state_changed')
+    expect(stateEvents).toHaveLength(1)
+    expect(stateEvents[0].task_status).toBe('failed')
+  })
+
+  it('adapter 上报 endReason=crashed → 台账落 crashed,task.status=failed', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+
+    const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
+    fake.emitStateChange(h, 'exited', undefined, 'crashed')
+
+    await waitUntil(async () => {
+      const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      return w.task.status === 'failed'
+    })
+    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(w.incarnations[0].ended_reason).toBe('crashed')
+  })
+
+  it('防守分支:adapter 没给 endReason 却报 exited → 落 failed,不谎报成功', async () => {
+    // ⚠️ 这是**防守分支,不是常规路径**。三个真实 adapter 的 transitionExited 形参都是必填的
+    // ended_reason,常规路径上 exited 必然带着一个具体值;走到这里只可能是未接线的第四个
+    // 实现或测试替身。此时 harness 不替 adapter 编一个原因,原样把 undefined 交给
+    // taskStatusFromIncarnation 的既有防守分支(exited + 无原因 ⇒ failed)——宁可记成失败,
+    // 也不谎报成功。所以这里直接调 harness.handleStateChange(绕过已经把缺省钉死成
+    // 'completed' 的 FakeAdapter),模拟的正是"adapter 什么都不说"。
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+
+    harness.handleStateChange(
+      { worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` },
+      'exited'
+    )
+
+    await waitUntil(async () => {
+      const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      return w.incarnations[0].state === 'exited'
+    })
+    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(w.task.status).toBe('failed')
+    expect(w.incarnations[0].ended_reason).toBeUndefined() // 不编造原因
+  })
+
+  it('契约断言:state 非 exited 却带了 endReason → handleStateChange 同步抛错,不写台账', async () => {
+    // endReason 只在 exited 时有意义。running/idle 带着终止原因进来说明调用方的状态机接错
+    // 了线,静默忽略会让台账落进说不清的中间态。抛给 adapter,由它自己的 try/catch 记
+    // console.error(观察者异常不中断状态机推进,三个 adapter 都是这么包的)。
+    const { harness } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    const h = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
+
+    expect(() => harness.handleStateChange(h, 'idle', undefined, 'failed')).toThrow(/only meaningful for state 'exited'/)
+    expect(() => harness.handleStateChange(h, 'running', undefined, 'completed')).toThrow(/only meaningful for state 'exited'/)
+
+    // 台账没有被这次非法回调改动过。
+    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(w.incarnations[0].state).toBe('running')
+    expect(w.incarnations[0].ended_reason).toBeUndefined()
+  })
+
   it('adapter 带上轮次末尾的 text 时,state_changed 事件的 detail 里带上它(manager 醒来即知 worker 说了什么)', async () => {
     const { harness, fake } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())
