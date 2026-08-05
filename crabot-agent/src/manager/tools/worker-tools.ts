@@ -286,14 +286,16 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   const readWorkerOutput = defineTool({
     name: 'read_worker_output',
     description:
-      '同步读取 worker 化身的增量输出(从 offset 开始,byte-cap 截断,全文另落盘留路径)。' +
-      '首次调用 offset 传 0,之后用上次返回的 next_offset 续读。缺省读主线化身;读侧问' +
-      '分支(query_worker 触发)的答案时传 seq——事件里会给出该侧问化身的 seq。',
+      '同步读取 worker 化身的输出(从 offset 读到当前末尾,全文另落盘留路径)。' +
+      '**超长时保留的是尾部**——你拿到的永远是最新的那一段,诊断"现在卡在哪"直接读即可,' +
+      '不必为了够到最新状态反复续读。首次调用 offset 传 0,之后用上次返回的 next_offset ' +
+      '拿增量。缺省读主线化身;读侧问分支(query_worker 触发)的答案时传 seq——事件里会' +
+      '给出该侧问化身的 seq。',
     inputSchema: {
       type: 'object',
       properties: {
         worker_id: { type: 'string', description: '目标 worker id' },
-        offset: { type: 'number', description: '读取起点(上次返回的 next_offset),缺省 0' },
+        offset: { type: 'number', description: '读取起点(上次返回的 next_offset),缺省 0 = 从头(超长则给尾部)' },
         seq: { type: 'number', description: '读侧问分支的答案时传 query 事件里给出的 seq;缺省读主线化身' },
       },
       required: ['worker_id'],

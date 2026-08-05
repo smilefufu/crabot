@@ -34,5 +34,8 @@ if (argv.includes('-p')) {
   process.exit(Number(process.env.FAKE_FORK_EXIT_CODE ?? '0'))
 }
 
-// 交互态:空转,等待测试结束后由 kill/进程回收清理。
+// 交互态:先请求 bracketed paste(真实 cc/codex TUI 启动时都会发这个 DECSET 2004 序列),
+// 再空转等测试结束后由 kill/进程回收清理。adapter 的启动期就绪握手等的正是这个信号——
+// 不发的话每次 spawn 都要白等一次握手超时(见 src/workers/tmux/paste-ready.ts)。
+process.stdout.write('\x1b[?2004h')
 setInterval(() => {}, 1_000_000)

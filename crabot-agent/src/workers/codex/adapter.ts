@@ -38,6 +38,14 @@
  *    tmux 交互流程)。因此 `capabilities().fork` 如实定为 `false`,`fork()` 直接抛
  *    `CapabilityNotSupportedError`。
  *
+ * ## 启动期就绪握手(spawn 专用,排在 session 发现之前)
+ *
+ * tmux newSession 之后**先等 pane 输出里出现 `\e[?2004h`**(TUI 已开启 bracketed paste),
+ * 才谈 session 发现与投递开工输入;等不到就**不投递**,落 idle 并把 output 尾部随唤醒事件
+ * 交给 manager 决策(见 spawn 内的握手段、reportStartupStall,机制细节见 tmux/paste-ready.ts)。
+ * 这一段与 cc adapter 完全对称——两边发 prompt 走的是同一个 `TmuxDriver.sendText`,
+ * `paste-buffer -p` 的前提(目标程序已请求 bracketed paste)此前两边都没有任何代码保障。
+ *
  * ## session 发现(spawn 专用)
  *
  * codex 走的是交互式 TUI(本 adapter 用 tmux 拉起 `codex ...`,不是 `codex exec`),拿不到
@@ -114,6 +122,15 @@
  *    下的真机结论错误套用到了交互式路径(exec 路径实测,交互态未单独验证)。已改为 provision
  *    时把 workspace 写成 config.toml 里的受信任目录,见"provision"节。
  *
+ * **网络放行**:`--sandbox workspace-write` 下 `sandbox_workspace_write.network_access`
+ * 默认 false,且沙箱(macOS seatbelt)的拒绝把 loopback 一起挡掉——worker 外网和本机端口
+ * 同时不可达(m2 实测 codex-cli 0.146.0:只给 `--sandbox workspace-write` 时
+ * `curl example.com` HTTP=000,补上 network_access=true 后 HTTP=200)。所以 spawn/resume
+ * 都固定追加 `-c sandbox_workspace_write.network_access=true`(`-c/--config key=value` 是
+ * 主命令级全局选项,值按 TOML 解析,同一文档页确认;与 `--sandbox` 同类,resume 时同样必须
+ * 排在 `resume` 子命令之前)。**保留写限制**:worker 仍不能往 workspace 之外乱写,只放开网络。
+ * 注:builtin worker 的 shell 本来就没有沙箱,单卡 codex 的网络只是把不对称当安全。
+ *
  * 另外 PATH 显式经 `buildEnv()`/`resolveBinDir()` 前置了 codexBin 解析出的真实目录(nvm
  * 部署陷阱,见该函数注释):tmux server 是常驻进程,其环境不一定等于当前 agent 进程的环境
  * (m2 上 codex 是 nvm 装的 node 脚本,tmux server 环境不含对应 node 的 bin 目录时,子进程
@@ -126,7 +143,9 @@
  * meta(running)+ 注册 runtime;判定与提交在该 worker 的互斥锁内原子完成。三源合成里的
  * "事件文件新增" 现在对应的是 codex 的 agent-turn-complete 通知(只有这一种事件类型,
  * codex-docs 确认目前 notify 仅支持 agent-turn-complete),复用同一个 'stop' kind 字符串
- * 与 stopBaseline 机制,语义与 cc 的"自上次输入以来新的 Stop 事件"完全对应。
+ * 与 stopBaseline 机制,语义与 cc 的"自上次输入以来新的 Stop 事件"完全对应。启动期就绪握手
+ * 超时的暂扣标志(Runtime.startupStalled,落盘 meta.startup_stalled)同样是三源之外的一源,
+ * 语义与 cc 逐字一致。
  *
  * ## readTrace
  *
@@ -142,8 +161,10 @@ import { homedir } from 'os'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { TmuxDriver } from '../tmux/driver.js'
+import { DEFAULT_PASTE_READY_TIMEOUT_MS, describeStartupStall, readOutputTail, waitForPasteReady } from '../tmux/paste-ready.js'
 import { CliEventChannel } from '../cli-events.js'
 import { OutputLog } from '../output-log.js'
+import { decodeTerminalOutput } from '../terminal-output.js'
 import { AsyncMutex } from '../async-mutex.js'
 import { writeMetaAtomic, maxSeqOnDisk } from '../meta-store.js'
 import { WorkerExitedError, CapabilityNotSupportedError } from '../errors.js'
@@ -167,6 +188,11 @@ import type {
 } from '../types.js'
 
 const execFileAsync = promisify(execFile)
+
+/** spawn/resume 都要带的主命令级选项:放行 workspace-write 沙箱的出网。见文件头
+ * "spawn/resume 启动参数"节。取值只含 `[A-Za-z_.=]`,不含 shell 元字符,拼进经 `sh -c`
+ * 跑的 tmux 命令行时无需额外引号(与相邻的 `--sandbox workspace-write` 写法一致)。 */
+const CODEX_NETWORK_ACCESS_OPT = '-c sandbox_workspace_write.network_access=true'
 
 /** POSIX shell 单引号转义,与 cc adapter 的私有 shQuote 同款用法(独立复制一份)。 */
 function shQuote(s: string): string {
@@ -227,6 +253,14 @@ const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0
 
 /** UUID 格式校验:标准 UUID 格式(8-4-4-4-12 十六进制段,由连字符分隔)。*/
 function validateSessionRef(sessionRef: string): void {
+  if (sessionRef === '') {
+    // spawn 的就绪握手超时时 session_ref 如实留空(codex 那边根本没有会话可续)——把它与
+    // "格式非法"区分开,否则调用方拿到的是一句看不懂的 UUID 格式错误。
+    throw new Error(
+      `CodexWorkerAdapter: this incarnation has no codex session (startup readiness handshake timed out, ` +
+        `so no session was ever established); it cannot be resumed — kill it and spawn a new worker instead.`,
+    )
+  }
   if (!UUID_RE.test(sessionRef)) {
     throw new Error(
       `CodexWorkerAdapter: invalid session_ref format (expected UUID, got '${sessionRef.slice(0, 50)}'). ` +
@@ -266,6 +300,14 @@ interface Runtime {
    * 本轮 idle。语义与 cc 的 stopBaseline 完全对应。 */
   stopBaseline: number
   killed: boolean
+  /**
+   * 启动期就绪握手超时后的**暂扣态**(见 reportStartupStall)。语义、落盘方式与清除时机
+   * 与 cc adapter 的同名字段逐字一致,见那里的注释:三源判定认不出这种 idle(pane 活着、
+   * turn-complete 计数一个没涨,因为开工输入根本没投递过),不补这一源的话
+   * reportStartupStall 刚落的 idle 会被下一次 syncState 翻回 running,台账上一个从没干过
+   * 活的 worker 显示"正在干活"。跟着 meta 落盘(`startup_stalled`)以熬过 agent 重启。
+   */
+  startupStalled?: boolean
   /** CliEventChannel.watch() 的停止函数(协议 §6.2.3 的文件监视)。建立 runtime 时装上、
    * 落终态时摘掉,语义与 cc adapter 的同名字段完全一致。 */
   stopEventWatch?: () => void
@@ -437,6 +479,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   private readonly codexBin: string
   private readonly codexHomeSource: string
   private readonly sessionDiscoveryTimeoutMs: number
+  private readonly pasteReadyTimeoutMs: number
   private readonly runtimes = new Map<string, Runtime>()
   private readonly mutexes = new Map<string, AsyncMutex>()
   /** resolveBinDir(codexBin) 的缓存 promise——codexBin 构造后不变,没必要每次 detect/spawn/
@@ -458,6 +501,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       readonly codexHomeSource?: string
       /** spawn() 发现真实 session id 的轮询上限(ms),默认 3000;测试用可调小避免拖慢用例。 */
       readonly sessionDiscoveryTimeoutMs?: number
+      /** 启动期就绪握手的等待上限,默认 DEFAULT_PASTE_READY_TIMEOUT_MS(见该常量注释里的
+       * 实测取值依据)。测试注入小值,避免为了走超时分支真的等一分钟。 */
+      readonly pasteReadyTimeoutMs?: number
       /** `report.lastText` 本 adapter 刻意不报(理由同 cc),只报 `report.endReason`:
        * `transitionExited` 拿到的那个**必填**的 `ended_reason`。可信度与 cc 完全同构
        * (协议 §6.3):退出判定只认 `tmux.isAlive`,非 kill 一律记 `completed`,是**推断**
@@ -469,6 +515,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     this.codexBin = deps.codexBin ?? 'codex'
     this.codexHomeSource = deps.codexHomeSource ?? join(homedir(), '.codex')
     this.sessionDiscoveryTimeoutMs = deps.sessionDiscoveryTimeoutMs ?? 3000
+    this.pasteReadyTimeoutMs = deps.pasteReadyTimeoutMs ?? DEFAULT_PASTE_READY_TIMEOUT_MS
   }
 
   /** codexBin 所在真实目录(nvm 部署陷阱修复,见 resolveBinDir 注释),懒解析并缓存——但只
@@ -662,7 +709,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 不传 --skip-git-repo-check(m2 实测顶层交互式 codex 不支持这个 flag,只有 codex exec
     // 才有——见文件头"spawn/resume 启动参数"节);受信目录改由 provision 写进 config.toml 的
     // [projects."<realpath>"] trust_level = "trusted" 解决。
-    const command = `${this.codexBin} --ask-for-approval never --sandbox workspace-write`
+    // 网络放行见文件头"spawn/resume 启动参数"节。
+    const command = `${this.codexBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT}`
     const spawnStartedAt = Date.now()
 
     // newSession 成功之后才落 meta(running)+注册 runtime,同 cc 纪律:tmux 失败时不留任何
@@ -671,11 +719,31 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 目录(nvm 部署陷阱,见 buildEnv/resolveBinDir 注释),不依赖 tmux server 自身环境。
     await this.tmux.newSession({ name: sessionName, cwd: spec.workspace.root, command, outputFile, env: await this.buildEnv({ CODEX_HOME: codexHome }) })
 
-    // session 发现:见文件头注释"session 发现"节。找不到就退化为本地占位 uuid(已知限制)。
-    const discovered = await pollForNewRollout(join(codexHome, 'sessions'), spawnStartedAt, this.sessionDiscoveryTimeoutMs)
-    const sessionId = discovered?.sessionId ?? randomUUID()
+    // 启动期就绪握手(见 tmux/paste-ready.ts),排在 session 发现**之前**:
+    // - 它才是"能不能收输入"的判据。session 发现等的是 rollout 文件出现,那是"会话已建立"
+    //   的信号——启动期被模态框挡住时会话根本不会建立,那个轮询于是空转到超时,然后照样把
+    //   prompt 发出去(这正是本次要根治的"降级继续");
+    // - 顺带让 session 发现更稳:m2 实测 rollout 文件在 tmux 建会话约 3 秒后才落盘,几乎顶满
+    //   原来那个 3s 窗口;就绪握手先吸收掉启动耗时,发现窗口从"已经能收输入"那一刻才开始算。
+    const pasteReady = await waitForPasteReady(outputFile, {
+      timeoutMs: this.pasteReadyTimeoutMs,
+      isAlive: () => this.tmux.isAlive(sessionName),
+    })
+
+    // session 发现:见文件头注释"session 发现"节。
+    // 未就绪时**不做发现、也不编占位 uuid**:此刻 codex 会话确实没建立,给一个长得像真值的
+    // uuid 只会让 resume/readTrace 拿着假 id 静默失效。session_ref 留空,如实表示"没有会话"
+    // (harness 在 adapter.spawn 返回前本来就用空串占位,空串是这一层既有的"未知"表示)。
+    const discovered = pasteReady
+      ? await pollForNewRollout(join(codexHome, 'sessions'), spawnStartedAt, this.sessionDiscoveryTimeoutMs)
+      : null
+    const sessionId = discovered ? discovered.sessionId : pasteReady ? randomUUID() : ''
     const sessionDiscoveryStatus = discovered ? 'discovered' : 'placeholder'
-    if (sessionDiscoveryStatus === 'placeholder') {
+    if (!pasteReady) {
+      console.warn(
+        `[codex-adapter] startup readiness handshake timed out for ${spec.worker_id}; opening input NOT delivered, session_ref left empty`,
+      )
+    } else if (sessionDiscoveryStatus === 'placeholder') {
       console.warn(
         `[codex-adapter] session discovery timed out for ${spec.worker_id}, using placeholder uuid; resume/readTrace will degrade`,
       )
@@ -710,6 +778,14 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     })
     this.runtimes.set(instanceKey(handle), runtime)
     this.startEventWatch(runtime, handle)
+
+    // 等不到就绪就**不投递**(协议 §5.5 的"不安全态暂扣"):prompt 原封不动留在 spec 里没被
+    // 消耗,manager 处理掉障碍后经 send_to_worker 重新投递即可。这里绝不能退化成"超时了也
+    // 照发"——那正是 pollForNewRollout 现在的写法,也正是本次要根治的行为。
+    if (!pasteReady) {
+      await this.reportStartupStall(runtime, handle, outputFile)
+      return handle
+    }
 
     // 首条任务输入注入失败:不能放任 running——按 kill 路径清理 tmux 会话后落
     // exited(crashed)(不是 killed,不是用户发起的 kill),spawn 仍然 reject。
@@ -773,8 +849,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       // m2 实测:--ask-for-approval/--sandbox 这类主命令级选项必须排在 `resume` 子命令**之前**
       // ——放在 `resume <id>` 后面 codex 会报 usage 错、exit=2(原实现把它们放在 `resume <id>`
       // 之后,是未经真机验证的错误猜测,这里按实测结果改正)。不传 --skip-git-repo-check,
-      // 理由同 spawn(见文件头"spawn/resume 启动参数"节)。
-      const command = `${this.codexBin} --ask-for-approval never --sandbox workspace-write resume ${shQuote(prev.session_ref)}`
+      // 理由同 spawn(见文件头"spawn/resume 启动参数"节)。-c 同属主命令级选项,同样放在
+      // `resume` 之前。
+      const command = `${this.codexBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT} resume ${shQuote(prev.session_ref)}`
 
       // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime;
       // PATH 前置同 spawn(nvm 部署陷阱)。
@@ -864,14 +941,22 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     }
 
     await this.getMutex(h.worker_id).run(async () => {
-      if (runtime.state !== 'exited') await this.transitionState(runtime, h, 'running')
+      if (runtime.state === 'exited') return
+      // 暂扣解除:manager 已经出手(raw 敲键清界面,或重投 prompt)。与 transitionState 的
+      // meta 写入同一临界区,落盘的 startup_stalled 随之消失(同 cc adapter)。
+      runtime.startupStalled = false
+      await this.transitionState(runtime, h, 'running')
     })
   }
 
+  /**
+   * 落盘的是 tmux `pipe-pane` 抓的**输出流**(TUI 逐帧重绘的转义序列增量),不是纯文本。
+   * 解码只发生在这条返回路径上(见 `terminal-output.ts`),磁盘上的原文一字不动。
+   */
   async readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
     const runtime = this.runtimes.get(instanceKey(h))
     const outputLog = runtime ? runtime.outputLog : new OutputLog(join(this.deps.dataDir, h.worker_id, `output-${h.seq}.log`))
-    return outputLog.read(cursor)
+    return outputLog.read(cursor, undefined, decodeTerminalOutput)
   }
 
   /**
@@ -959,8 +1044,23 @@ export class CodexWorkerAdapter implements WorkerAdapter {
    * turn-complete 通知 → idle) > 默认 running。与内存态不同则在互斥锁内原子迁移(改内存 +
    * 写 meta)。判定与提交整体在锁内完成,理由与 cc 完全一致(见 cc adapter.ts 文件头注释,
    * 避免过期快照覆盖并发落定的新结果)。
+   *
+   * `deadReason`:发现会话已经不在了、且不是本进程发起的 kill 时落哪个 ended_reason。缺省
+   * `'completed'` 是协议 §6.3 给"干过活之后自然退出"校准的推断;启动期就绪握手那条路径上
+   * 这个前提不成立(开工输入一个字符都没投递过),由调用方显式传 `'crashed'`,免得"启动即
+   * 死"在台账上落成"成功完成"终态。逐字同 cc adapter,见那里的注释。
+   *
+   * 七轮 review:`deadReason` 只管住"握手等待期间就死了"这一个时点,而暂扣是持续状态——
+   * 标志置位、idle 落盘之后才死的化身,后续任何一次 syncState 仍会吃缺省推断。所以 exited
+   * 分支直接看 `runtime.startupStalled`,置位就落 `'crashed'`;标志落盘,重启后由
+   * ensureRuntime 复原,判定在新进程里同样成立。优先级 `killed > startupStalled > deadReason`,
+   * `sendInput` 成功投递会清标志,"投递过之后才死"不受影响。逐字同 cc adapter。
    */
-  private async syncState(runtime: Runtime, h: IncarnationHandle): Promise<{ state: WorkerContractState; stopCount: number }> {
+  private async syncState(
+    runtime: Runtime,
+    h: IncarnationHandle,
+    deadReason: IncarnationEndReason = 'completed',
+  ): Promise<{ state: WorkerContractState; stopCount: number }> {
     if (runtime.state === 'exited') return { state: 'exited', stopCount: runtime.stopBaseline }
 
     return this.getMutex(h.worker_id).run(async () => {
@@ -978,13 +1078,20 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         computed = 'exited'
       } else if (stopCount > runtime.stopBaseline) {
         computed = 'idle'
+      } else if (runtime.startupStalled) {
+        // 启动期就绪握手超时的暂扣(见 Runtime.startupStalled):开工输入一个字符都没投递过,
+        // turn-complete 计数永远不会涨,落回 running 就是谎报"正在干活"。维持 idle 到 sendInput。
+        computed = 'idle'
       } else {
         computed = 'running'
       }
 
       if (computed !== runtime.state) {
         if (computed === 'exited') {
-          await this.transitionExited(runtime, h, runtime.killed ? 'killed' : 'completed')
+          // 暂扣态置位 ⇒ 开工输入一个字符都没投递过(sendInput 成功才清标志),缺省的
+          // "非 kill ⇒ completed"推断在这里明确不可能成立。见本方法注释里的优先级说明。
+          const reason: IncarnationEndReason = runtime.killed ? 'killed' : runtime.startupStalled ? 'crashed' : deadReason
+          await this.transitionExited(runtime, h, reason)
         } else {
           await this.transitionState(runtime, h, computed)
         }
@@ -1036,6 +1143,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
       const sessionName = `crabot-w-${ref.worker_id}-${ref.seq}`
       const alive = await this.tmux.isAlive(sessionName)
+      // 启动期就绪握手超时的暂扣态是"重建无法复原 running/idle 精细区分"的唯一例外:它有
+      // 独立落盘的确证,且判错的代价是语义错误而非精度损失(同 cc adapter,见那里的注释)。
+      const stalled = alive && meta.startup_stalled === true
       const workspaceRoot = meta.workspace_root ?? ''
       const sessionId = meta.session_id ?? ref.session_ref ?? ''
       const codexHome = workspaceRoot ? join(workspaceRoot, '.codex') : ''
@@ -1064,10 +1174,11 @@ export class CodexWorkerAdapter implements WorkerAdapter {
         outputLog: new OutputLog(outputFile),
         eventChannel,
         sessionDiscoveryStatus,
-        state: alive ? 'running' : 'exited',
+        state: alive ? (stalled ? 'idle' : 'running') : 'exited',
         ended_reason: alive ? undefined : meta.ended_reason,
         stopBaseline,
         killed: false,
+        startupStalled: stalled,
       }
       this.runtimes.set(key, runtime)
       // 重启后重连接管(§13):会话还活着的化身在这里重新装上文件监视。已终态的化身
@@ -1083,7 +1194,13 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     dir: string,
     seq: number,
   ): Promise<
-    | { session_id?: string; workspace_root?: string; ended_reason?: IncarnationEndReason; session_discovery?: 'discovered' | 'placeholder' }
+    | {
+        session_id?: string
+        workspace_root?: string
+        ended_reason?: IncarnationEndReason
+        session_discovery?: 'discovered' | 'placeholder'
+        startup_stalled?: boolean
+      }
     | undefined
   > {
     try {
@@ -1114,22 +1231,54 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   /** `onStateChange` 的 `report.lastText` 在 codex 这边同样刻意不传,理由与 cc 完全一致
-   * (输出是 tmux 落的 TUI 原始字节流,无 ANSI 剥离层)——见
-   * `workers/claude-code/adapter.ts` 的 transitionState 注释。 */
-  private async transitionState(runtime: Runtime, h: IncarnationHandle, state: WorkerContractState): Promise<void> {
+   * (输出是 tmux 落的 TUI 字节流,解码后也切不出"哪一段才算 assistant 发言")——见
+   * `workers/claude-code/adapter.ts` 的 transitionState 注释;唯一的例外同样是
+   * `report.outputTail`(启动期就绪握手超时,每个化身至多付一次,见 reportStartupStall)。 */
+  private async transitionState(
+    runtime: Runtime,
+    h: IncarnationHandle,
+    state: WorkerContractState,
+    report?: StateChangeReport,
+  ): Promise<void> {
     await writeMetaAtomic(runtime.dir, runtime.seq, {
       seq: runtime.seq,
       state,
       session_id: runtime.sessionId,
       session_discovery: runtime.sessionDiscoveryStatus,
       workspace_root: runtime.workspaceRoot,
+      // 暂扣态跟着落盘,重启后 ensureRuntime 靠它复原 idle(见 Runtime.startupStalled)。
+      // 只在置位时写;老 meta 缺这个字段等价于"没暂扣"。
+      ...(runtime.startupStalled ? { startup_stalled: true } : {}),
     })
     runtime.state = state
     try {
-      this.deps.onStateChange?.(h, state)
+      this.deps.onStateChange?.(h, state, report)
     } catch (err) {
       console.error(`[CodexWorkerAdapter] onStateChange callback error for ${h.worker_id}#${h.seq}:`, err)
     }
+  }
+
+  /** 就绪握手超时的收场:落 `idle` + 把 output 尾部随唤醒事件交给 manager。语义、取舍与
+   * cc adapter 的同名方法逐字一致(零协议改动、不 kill 现场、尾部与 readOutput 共用同一个
+   * 解码器),见那里的注释。 */
+  private async reportStartupStall(runtime: Runtime, h: IncarnationHandle, outputFile: string): Promise<void> {
+    const tail = decodeTerminalOutput(await readOutputTail(outputFile))
+    // 等待期间进程可能是**自己死了**(启动即失败:二进制缺失、PATH 不对、pane 里的命令立刻
+    // 退出),那不是"停在一个界面上等人",谎报 idle 会让 manager 对着一具尸体发指令。先让既有
+    // 的三源判定跑一遍,它会如实落 exited;只有确实还活着才走下面的暂扣汇报。
+    //
+    // 落 `'crashed'` 而不是 syncState 缺省的 `'completed'`:此刻会话没了只可能是启动即失败,
+    // 而开工输入一个字符都没投递过,completed 明确不可能成立(同 cc adapter)。
+    if ((await this.syncState(runtime, h, 'crashed')).state === 'exited') return
+    await this.getMutex(h.worker_id).run(async () => {
+      if (runtime.state === 'exited') return // 判定与提交之间又被并发抢先:终态不可覆盖
+      // 先置标志再迁移:这次 meta 写入要带上 startup_stalled,且此后每次 syncState 都必须
+      // 维持 idle,否则这条 idle 只是"落了一下"(同 cc adapter,见 Runtime.startupStalled)。
+      runtime.startupStalled = true
+      await this.transitionState(runtime, h, 'idle', {
+        outputTail: describeStartupStall({ impl: 'codex', timeoutMs: this.pasteReadyTimeoutMs, tail }),
+      })
+    })
   }
 
   private async transitionExited(runtime: Runtime, h: IncarnationHandle, ended_reason: IncarnationEndReason): Promise<void> {

@@ -40,6 +40,8 @@
 // 发送输入前等待"mock 已完成启动、已经请求过 bracketed paste",避免 tmux new-session 一
 // 返回就立刻 sendText 时与 node 进程自身的启动耗时赛跑(这个赛跑本身是测试时序问题,不是
 // sendText 机制的问题——真实 cc/codex 进程启动更慢,同样需要先起来才能谈 bracketed paste)。
+// MOCK_CLI_PASTE_READY_DELAY_MS / MOCK_CLI_BANNER(可选)——见下方声明处的注释:分别用于
+// 复刻"TUI 迟迟不请求 bracketed paste"的真实时序,和扮演挡在启动期的模态框文字。
 import { exec } from 'node:child_process'
 import { promisify } from 'node:util'
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -103,10 +105,26 @@ const PASTE_END = '\x1b[201~'
 // 观察不到"一整块"与"逐行"的区别(等价于真实 TUI 没开这个能力时的降级行为)。
 if (process.stdin.isTTY) process.stdin.setRawMode(true)
 process.stdin.resume()
-process.stdout.write('\x1b[?2004h')
 
-const readyFile = process.env.MOCK_CLI_READY_FILE
-if (readyFile) writeFileSync(readyFile, '')
+// MOCK_CLI_BANNER(可选):进入 stdin 循环之前先往 pane 打一段文字,扮演"启动期挡在前面
+// 的模态框"。就绪握手超时的用例靠它验证 output 尾部真的被带进了唤醒事件。
+if (process.env.MOCK_CLI_BANNER) process.stdout.write(process.env.MOCK_CLI_BANNER + '\n')
+
+// MOCK_CLI_PASTE_READY_DELAY_MS(可选,默认 0):把"请求 bracketed paste"这一步推迟这么多
+// 毫秒,复刻真实 cc 的时序——m2 实测 cc 要到 pane 输出的 byte 871/1043 才发 \e[?2004h,
+// 而旧实现在 byte 0 就把 prompt 打进去了,于是整段 prompt 被 tmux 裸文本注入、每个换行都
+// 变成一次 Enter。注意 stdin 从进程一起来就在读:延迟期间到达的输入**不会**被 paste 标记
+// 包裹,与真实降级行为一致。给一个极大的值即可扮演"永远不就绪"。
+const pasteReadyDelayMs = Number(process.env.MOCK_CLI_PASTE_READY_DELAY_MS || '0')
+
+function announcePasteReady() {
+  process.stdout.write('\x1b[?2004h')
+  const readyFile = process.env.MOCK_CLI_READY_FILE
+  if (readyFile) writeFileSync(readyFile, '')
+}
+
+if (pasteReadyDelayMs > 0) setTimeout(announcePasteReady, pasteReadyDelayMs)
+else announcePasteReady()
 
 let insidePaste = false
 let pending = '' // 尚未解析完的原始字节(可能横跨多个 data 事件,含被截断的半个标记)

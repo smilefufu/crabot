@@ -111,6 +111,21 @@ export interface StateChangeReport {
    * 尾一句 text 都没有,`lastText` 与 `output.log` 双双为空,`summary` 是它唯一的交付物。
    */
   readonly summary?: string
+  /**
+   * 化身当前 pane 输出的**尾部**,只有 CLI 实现在**启动期就绪握手超时**这一条路径上产出:
+   * 此时开工输入一个字符都没投递,worker 停在一个我们无法识别的界面上(典型是模态弹窗),
+   * manager 需要现场才能决策——protocol-agent-v3 §5.5「检测到无法识别的交互界面:暂扣 +
+   * 唤醒 manager(附界面内容);manager 可用 `raw` 直接敲键」。
+   *
+   * 内容已由 adapter 过一遍 `terminal-output.ts` 的解码,与同一个 adapter `readOutput` 的
+   * 返回形态一致:TUI 逐帧重绘的转义序列直接给 manager 看是乱码,而它同一时刻用
+   * `read_worker_output` 拿到的是解码后的文本——同一份日志不能有两种形态。
+   *
+   * 与 `lastText` 是**两样东西**,不能相互替代:`lastText` 是 worker 说的话(只有 builtin
+   * 拆得出);这里是屏幕这一刻吐出的内容,不代表 worker 表达了什么——它只是给 manager
+   * 判断"卡在哪"的现场素材。
+   */
+  readonly outputTail?: string
 }
 
 export interface DetectResult { installed: boolean; activated: boolean; detail?: string }
