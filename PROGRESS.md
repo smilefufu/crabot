@@ -1,7 +1,20 @@
 # Crabot 项目进度
 
-> 最后更新：2026-08-05 — 模块健康与 Memory 维护最小修复已通过 PR #72 合并
+> 最后更新：2026-08-05 — worker 活性巡检（分支 feat/worker-liveness-sweep，未合并 main）；上一条「模块健康与 Memory 维护最小修复」已通过 PR #72 合并
 
+## 2026-08-05 — worker 活性巡检：静默停摆终于有人管了
+
+- spec：`crabot-docs/superpowers/specs/2026-08-05-worker-liveness-sweep-design.md`；协议改动已直推 crabot-docs main（§6.1 增加可选方法 `lastActivityAt?`）。**这不是新设计，是协议 §6.3 第 3 条「兜底：harness 低频巡扫 tmux pane（纯 harness 行为，零 token），静默异常才唤醒 manager」从未落地**。
+- 病灶：近三天四例 worker 静默停摆（15h / 8.5h / 26min / 至今）**无一被系统自己发现**，共同点是**进程活着、tmux 活着、台账写着 running、但不再产生任何事件**。#70 的就绪握手能在源头拦住其中两例，拦不住另外两例（prompt 确实提交了，失效发生在之后）。根因是**三种 adapter 的 `state()` 返回 running 都是 else 兜底、不是正证**，在语义上分不开"卡住"与"在干活"；`isAlive`、台账 `updated_at` 同样零区分力。
+- 活性信号取**新增的可选契约方法** `lastActivityAt`（cc/codex 各实现为对自己 output 日志的一次 `fs.stat`），不借用 `readOutput` 的游标位移——后者每轮要把新增字节读出来并解码（窗口上限 1MB），是持续 CPU 成本，且把"读输出给人看"这个带业务语义的入口借来探活。**可选性是关键收益**：builtin 不实现即天然跳过，harness 里没有、也不该有 `if (impl === 'builtin')` 这类实现特判。
+- **只发事件，绝不碰台账**：harness 单方面把台账写成 idle，下一次 `syncState` 会翻回 running（adapter 才是化身状态的权威）——那正是 #70 review 抓到的"idle 不粘"。判断语义（干完了 / 等输入 / 卡住）与决策的责任完全在 manager 侧（§4.3）。通知复用 `state_changed` + `detail.text`（#70 同款形状，零新事件 kind、零新状态），正文 = 解码后的 pane 尾部 + 合成指引，**指引排在尾部之后**（排头部会被 `truncateWakeText` 的保尾截断吃掉，这是 #70 的教训）。不带 `task_status` ⇒ 对外事件桥自然去重，**人类收不到任何东西**。
+- 去重、重试与退避（**决策 4 在 PR #75 review 中被推翻重写**）：同一次停摆**只发一份现场**，之后是**带退避、不带正文**的重试投递（`1×T→2×T→4×T` 封顶 2 小时）。原方案"失败就下一轮原样重报"有两个实测成立的毛病：①正文累积（episode 失败时 `ManagerLoop` 把 `carriedTexts/eventText` 整体推回 mailbox，每轮重报都往同一个雪球再加一份 ~2000 字符，LLM 挂 8 小时 ≈ 96 份）；②温循环（`maybeSelfWake` 明确拒绝过的"失败→立刻重试"被按 5 分钟节奏搬了回来）。**但"干脆不重报、靠 mailbox"同样不成立**——mailbox 只是被动缓冲：全仓 drain 入口只有 `maybeSelfWake`（硬门 `consumedEvents === true`）和下一次真实唤醒，`evictIdle` 是回收器且零调用点，而停摆 worker 按定义不再产生事件、带不来下一次唤醒（四例事故的监护 key 全是人类会话）。**关键是重新理解"重试"是什么：它的价值不是再送一份正文，而是它本身就是那个缺失的 drain 触发器。** 为此 `HarnessDeps.onEvent` 允许回传 `HarnessEventDelivery{consumed}`，且**只有巡检 await 它**（其余调用点都在 per-worker 锁内，等一整个 manager episode 就是自锁）。mailbox 的共性缺口（所有唤醒源都有，不只巡检）记入 followups C5，治本要走自己的 spec。
+- gate 只取**主线化身**（`forked_from` 为空，与 §5.3 同源）+ 化身 state 为 running + task 非终态：cc 的 fork 是无头 `claude -p` 侧问，整个执行期可能零输出，拿它当停摆就是纯误报。
+- **T = 30 分钟、周期 = 5 分钟，去 m2 实测校准**（本设计唯一的经验参数）。健康侧噪声地板取自 38 份真实 cc/codex 原生会话记录的相邻事件间隔：codex 最大 384s、cc 最大 301s（p99 普遍 10–110s），而这已是**保守上界**——那段时间里 TUI 自旋动画一直在往 pane 写字节（健康 codex worker 实测 780 B/s 持续写入），pane 级静默远短于此。故障侧四例是 26min / 4h51m（`w-ed8453a7`，tmux 仍活着，观测时零增长仍在延长）/ 8h30m / 15h，隔着一个数量级。30min 对最坏健康样本有 4.7× 余量，最坏发现时延 = T + 周期 = 35min。方向按 spec：宁可偏宽。
+- 与 #72 的一处**真实交互**（合并 main 时发现）：#72 的 `memory_maintenance` system task 是**没有任何化身**的台账条目（`incarnations: []`，agent 自己跑不派 worker），running 期间同样会被 `listAllWorkers` 枚举到。`sweepLiveness` 里 `mainlineIncarnation` 返回 undefined 的那条守卫因此从"防御性"变成真实分支，补了回归用例钉住（cc/codex 各一）。**顺带发现、按纪律只提醒不擅自修**：`reconcileOneWorker` 对同一形态会在 `mainline.impl` 处抛 TypeError，被 `reconcileOnStartup` 的 `Promise.allSettled` 兜成 failed 桶 + console.error（不打断整轮对账，但那条 system task 会被误记一次"对账失败"）。
+- 与 #74 的交汇点（合并 main 时）：`bootstrap.ts` 的 `onEvent` 上，#74 要**副作用**（episode 失败 → `reportEpisodeFailure` 通知人类），本分支要**返回值**（"有没有被消费"交回 harness）。两者不互斥，解法是同一条链里"先上报、后返回"；`ManagerLoop` 只在 `outcome ∈ {completed, max_turns}` 时置 `consumedEvents`，所以失败分支必然返回 false，两条语义天然对齐。补了一条**交汇用例**（真装配 + 真 `ManagerLoop` + 真 `ClaudeCodeAdapter.lastActivityAt`，不需要 tmux）。
+- 验证：`tsc --noEmit` 干净；新增 30 例（`harness-liveness.test.ts` 24 = 12 × cc/codex 双实现参数化，`liveness-signal.test.ts` 5，`fail-loud-worker-event.test.ts` 交汇用例 1）；**10 处变异逐个植入实测**——①去掉阈值→8 挂 ②去掉去重→6 挂 ③消费失败仍不重试→2 挂 ④改台账→6 挂 ⑤删 codex 侧实现→2 挂 ⑥删 cc 侧实现→2 挂 ⑦去掉"无化身"守卫→2 挂 ⑧去掉停机标志位→2 挂 ⑨**去掉退避→3 挂**（温循环回来了）⑩**重试也带正文→3 挂**（累积回来了）。全量构成：起点 `dac05877` 2486 →（+#72 五条）2491 →（+#74 十六条）2507 →（+本次 30 条）本分支 2537。
+- 已知环境噪声：`tests/engine/bg-entities/*` 是已知并发 flaky（单独连跑 3 次为 通过/失败/通过），**在 `origin/main` 上同样失败**；整机负载偏高时 `tests/workers/codex-adapter.test.ts` / `claude-code-adapter.test.ts` / `harness-integration.test.ts` 的 tmux 用例会成批失败（`can't find pane`），**同一组失败在 base commit 上同样复现**（base 13 挂 vs 分支 11 挂，且每次挂的集合都不同），单独跑这些文件全绿，与本次改动无关。
 ## 2026-08-04 — 模块健康与 Memory 维护最小修复
 
 - 已确认 Spec：`crabot-docs/superpowers/specs/2026-08-03-module-health-maintenance-minimal-fix-design.md`；实施计划：`crabot-docs/superpowers/plans/2026-08-04-module-health-maintenance-minimal-fix.md`。

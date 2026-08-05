@@ -35,6 +35,24 @@ export class OutputLog {
   }
 
   /**
+   * 日志文件最后一次被写入的时刻(epoch ms);文件还不存在时返回 undefined。
+   *
+   * 只供 CLI adapter 的 `lastActivityAt` 使用(protocol-agent-v3 §6.1):活性巡检要的是
+   * "有没有新字节落盘"这一件事,一次 `fs.stat` 就够,不需要像 `read` 那样把新增内容读出来
+   * 再解码——巡检是周期性的,解码成本会持续付。不进 `mutex`:stat 不读内容,与 append/read
+   * 的原子性无关,拿到的最坏情况只是"上一次 append 之前的 mtime",对"是否长时间零增长"的
+   * 判定没有影响。
+   */
+  async lastModifiedMs(): Promise<number | undefined> {
+    try {
+      return (await fs.stat(this.filePath)).mtimeMs
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      throw error
+    }
+  }
+
+  /**
    * 从 `cursor.offset` 读到文件末尾;内容超过 `cap` 时**保留尾部,丢头部**。
    *
    * 方向是这么定的:这个入口的真实用途只有两类,而两类都要最新的那一段——

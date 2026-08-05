@@ -292,8 +292,20 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     now: deps.now,
     // harness 事件 → 该 worker 的监护 manager(§4.4)。过滤复用 P4 的
     // `shouldWakeOnHarnessEvent`(input_sent 不唤醒:manager 发起 send_to_worker 时已在同一次
-    // 工具调用里同步拿到结果)。fire-and-forget,必须 .catch():路由失败绝不能反噬 harness 的
-    // 状态机推进,更不能变成 unhandledRejection 打崩 agent 进程。
+    // 工具调用里同步拿到结果)。
+    //
+    // **这个函数上交汇着两件事,都必须在,顺序是"先上报、后返回"**:
+    // 1. **副作用**:episode 失败时经 `reportEpisodeFailure` 告诉人类一声(fail-loud,
+    //    判据双管见下方注释)——否则"worker 干完了但再也没人来汇报"完全静默;
+    // 2. **返回值**:把"这次唤醒有没有被 manager 消费"如实交回 harness,活性巡检据此决定
+    //    要不要在下一轮重报(见 `WorkerHarness.sweepLiveness` 的去重与重报规则)。
+    // 两者不是一回事,也不互斥:episode 失败时人类收到招呼,巡检同时拿到"未消费"。
+    //
+    // **返回的 Promise 永不 reject**:路由失败绝不能反噬 harness 的状态机推进,更不能变成
+    // unhandledRejection 打崩 agent 进程——绝大多数调用点根本不 await 它(见
+    // `HarnessDeps.onEvent`)。失败落成 `consumed: false`,与"episode 没消费这批事件"同义:
+    // 活性巡检据此在下一轮重报,这正是"manager 不可用时通知挂起、恢复后仍能收到"。
+    // (`reportWorkerEventFailure` 自己保证不抛,见其注释。)
     onEvent: (event) => {
       // 对外事件走在唤醒过滤之前,且不共用下面那个门:`shouldWakeOnHarnessEvent` 答的是"要不
       // 要唤醒 manager"(input_sent 不唤醒),`!registry` 答的是"manager 侧接线好了没"——两者
@@ -301,22 +313,29 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       // 的过滤规则上。对外事件自己的去重按 task.status 做,在 events.ts 里。
       publishTaskStatusChanged?.(event)
 
-      if (!registry || !shouldWakeOnHarnessEvent(event)) return
-      // fail-loud 的判据必须双管:`.catch` 只抓得到 F2(中途抛错),而最常见的 F1(LLM 挂 /
-      // key 过期 / 限流耗尽)是**正常 resolve 且 outcome='failed'**——只 catch 等于对它全瞎。
-      void registry
-        .routeWorkerEvent(event)
-        .then(async (result) => {
-          if (result?.outcome !== 'failed' && result?.outcome !== 'aborted') return
-          console.error(
-            `[manager-bootstrap] routeWorkerEvent episode outcome=${result.outcome} (worker=${event.worker_id}, kind=${event.kind})`,
-          )
-          await reportWorkerEventFailure(event.worker_id, { kind: 'outcome', outcome: result.outcome })
-        })
-        .catch(async (err) => {
+      if (!registry || !shouldWakeOnHarnessEvent(event)) return { consumed: false }
+      return registry.routeWorkerEvent(event).then(
+        async (result) => {
+          // fail-loud 的判据必须双管:`.catch` 只抓得到 F2(中途抛错),而最常见的 F1(LLM 挂 /
+          // key 过期 / 限流耗尽)是**正常 resolve 且 outcome='failed'**——只 catch 等于对它全瞎。
+          if (result?.outcome === 'failed' || result?.outcome === 'aborted') {
+            console.error(
+              `[manager-bootstrap] routeWorkerEvent episode outcome=${result.outcome} (worker=${event.worker_id}, kind=${event.kind})`,
+            )
+            await reportWorkerEventFailure(event.worker_id, { kind: 'outcome', outcome: result.outcome })
+          }
+          // 上报在先、返回在后:episode 失败时两件事都要发生——人类得到一声招呼(上面),
+          // 巡检拿到"未消费"因而下一轮还能重报(这里)。`ManagerLoop` 只在
+          // outcome ∈ {completed, max_turns} 时置 consumedEvents,所以失败分支这一句必然
+          // 返回 false,两条语义天然对齐,不需要在这里另判一次。
+          return { consumed: result?.consumedEvents === true }
+        },
+        async (err) => {
           console.error(`[manager-bootstrap] routeWorkerEvent 失败 (worker=${event.worker_id}, kind=${event.kind}):`, err)
           await reportWorkerEventFailure(event.worker_id, { kind: 'threw', error: err })
-        })
+          return { consumed: false }
+        },
+      )
     },
     builtinSpawnDefaults: deps.builtinSpawnDefaults,
   }

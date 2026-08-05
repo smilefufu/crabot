@@ -960,6 +960,20 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   /**
+   * 活性信号(protocol-agent-v3 §6.1 `lastActivityAt`):pane 输出日志的 mtime。
+   *
+   * tmux `pipe-pane` 抓的是 pane 的**整条输出流**,TUI 在模型思考期间持续重绘自旋动画 ——
+   * 所以"这份文件多久没长了"能把"想得久"和"卡死了"分开,而 `state()` 的 running 是 else
+   * 兜底、在语义上分不开(见 syncState)。路径解析与 `readOutput` 同一条(有常驻 runtime 用
+   * 它的 OutputLog,没有就按约定路径重建),保证进程重启后仍然可判。
+   */
+  async lastActivityAt(h: IncarnationHandle): Promise<number | undefined> {
+    const runtime = this.runtimes.get(instanceKey(h))
+    const outputLog = runtime ? runtime.outputLog : new OutputLog(join(this.deps.dataDir, h.worker_id, `output-${h.seq}.log`))
+    return outputLog.lastModifiedMs()
+  }
+
+  /**
    * P3 Task 9 修复"无常驻 runtime 时不做真实存活探测就照抄 meta 旧值"的假阳性(与 cc
    * adapter 同款),四轮 review 进一步把这套重建逻辑收拢进 ensureRuntime,供 sendInput/
    * kill/resume/state/readTrace 共用(见该方法注释;codex 没有 fork)。ensureRuntime 返回
