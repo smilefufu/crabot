@@ -24,3 +24,19 @@ export interface ManagerSessionState {
   /** 已折叠进摘要的消息条数(诊断用) */
   readonly foldedCount: number
 }
+
+/**
+ * fail-loud 兜底:manager episode 失败的两种形态。
+ *
+ * `ManagerLoop` 只有 F2 会抛错;最常见的 F1(LLM 挂 / key 过期 / 限流耗尽重试)记
+ * `outcome:'failed'`、把整批输入推回 mailbox,然后**正常 resolve**。所以判据必须双管:
+ * `catch` 抓 F2,`outcome ∈ {failed, aborted}` 抓 F1。只写 try/catch 抓不住最常见的那种。
+ *
+ * 住在这里而不是 `unified-agent.ts`:除了三条人类消息入口,`bootstrap.ts` 的 worker 事件
+ * 出口也要按同一套判据上报(`BootstrapDeps.reportEpisodeFailure`),两边必须是同一个类型。
+ *
+ * @see crabot-docs/superpowers/plans/2026-08-01-mw-p7-j-cutover.md §三
+ */
+export type ManagerEpisodeFailure =
+  | { readonly kind: 'threw'; readonly error: unknown }
+  | { readonly kind: 'outcome'; readonly outcome: 'failed' | 'aborted' }
