@@ -314,6 +314,26 @@ describe.each<WorkerImplId>(['claude-code', 'codex'])('WorkerHarness.sweepLivene
     expect(adapter.lastActivityAtCalls).not.toContain(`${workerId}#2`)
   })
 
+  it('停机竞态:stopLivenessSweep 之后再触发对账收尾的 startLivenessSweep → 巡检不启动', async () => {
+    const adapter = new CliLikeAdapter(impl)
+    const { harness } = await makeHarness(adapter)
+    const worker = await harness.spawnWorker(spawnParams())
+    adapter.activity.set(`${worker.worker_id}#1`, clockMs)
+    events = []
+
+    // 装配层的 `.finally(() => startLivenessSweep())` 挂在**不被 await** 的启动对账链上,
+    // onStop 可能赶在它之前跑完 —— 停机之后再补一次 start,必须是 no-op。
+    harness.stopLivenessSweep()
+    harness.startLivenessSweep(1) // 1ms:真起来了的话下面这一等必然够它跑好几轮
+
+    clockMs += STALL_MS + MINUTE
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    expect(wakeEvents(worker.worker_id)).toHaveLength(0)
+    expect(adapter.lastActivityAtCalls).toHaveLength(0)
+    harness.stopLivenessSweep() // 兜底清理(此处应已无 timer)
+  })
+
   it('没有任何化身的 system task(#72 的 memory_maintenance 形态)不进候选集,也不让整轮巡检抛错', async () => {
     const adapter = new CliLikeAdapter(impl)
     const { harness, ledger } = await makeHarness(adapter)

@@ -343,6 +343,8 @@ export class WorkerHarness {
   private readonly stallReports = new Map<string, StallReportMark>()
   private sweepInFlight = false
   private sweepTimer?: ReturnType<typeof setInterval>
+  /** `stopLivenessSweep` 置位后不再接受 `startLivenessSweep`(见该方法注释的停机竞态)。 */
+  private sweepStopped = false
 
   constructor(private readonly deps: HarnessDeps) {}
 
@@ -1088,9 +1090,16 @@ export class WorkerHarness {
    *
    * 装配层(`unified-agent.ts`)在启动对账之后开、停机时关。`unref()`:巡检是后台兜底,
    * 不该成为让进程赖着不退的理由。
+   *
+   * **`stop` 之后拒绝再 `start`**(PR #75 review):装配层是在启动对账的 `.finally` 里开的,
+   * 而那条链**不被 await**、台账非空时耗时不可控。若 `onStop` 赶在对账仍在途时执行,
+   * `stopLivenessSweep()` 会先跑(此时 timer 还没建,是个 no-op),随后对账收尾的 `.finally`
+   * 又把 timer 建起来——巡检在模块已经停止之后被启动。timer 已 `unref()`,但只要进程还活着,
+   * 就存在"停机后仍向 manager 发起唤醒(即 LLM 调用)"的窗口。一个标志位堵死它。
+   * 停机是终态,没有"停完再开"的合法场景,所以标志不提供复位。
    */
   startLivenessSweep(intervalMs: number = LIVENESS_SWEEP_INTERVAL_MS): void {
-    if (this.sweepTimer) return
+    if (this.sweepStopped || this.sweepTimer) return
     this.sweepTimer = setInterval(() => {
       void this.sweepLiveness().catch((err) => {
         console.error('[WorkerHarness] sweepLiveness failed:', err)
@@ -1100,6 +1109,7 @@ export class WorkerHarness {
   }
 
   stopLivenessSweep(): void {
+    this.sweepStopped = true
     if (!this.sweepTimer) return
     clearInterval(this.sweepTimer)
     this.sweepTimer = undefined
