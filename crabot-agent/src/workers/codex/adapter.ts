@@ -122,6 +122,15 @@
  *    下的真机结论错误套用到了交互式路径(exec 路径实测,交互态未单独验证)。已改为 provision
  *    时把 workspace 写成 config.toml 里的受信任目录,见"provision"节。
  *
+ * **网络放行**:`--sandbox workspace-write` 下 `sandbox_workspace_write.network_access`
+ * 默认 false,且沙箱(macOS seatbelt)的拒绝把 loopback 一起挡掉——worker 外网和本机端口
+ * 同时不可达(m2 实测 codex-cli 0.146.0:只给 `--sandbox workspace-write` 时
+ * `curl example.com` HTTP=000,补上 network_access=true 后 HTTP=200)。所以 spawn/resume
+ * 都固定追加 `-c sandbox_workspace_write.network_access=true`(`-c/--config key=value` 是
+ * 主命令级全局选项,值按 TOML 解析,同一文档页确认;与 `--sandbox` 同类,resume 时同样必须
+ * 排在 `resume` 子命令之前)。**保留写限制**:worker 仍不能往 workspace 之外乱写,只放开网络。
+ * 注:builtin worker 的 shell 本来就没有沙箱,单卡 codex 的网络只是把不对称当安全。
+ *
  * 另外 PATH 显式经 `buildEnv()`/`resolveBinDir()` 前置了 codexBin 解析出的真实目录(nvm
  * 部署陷阱,见该函数注释):tmux server 是常驻进程,其环境不一定等于当前 agent 进程的环境
  * (m2 上 codex 是 nvm 装的 node 脚本,tmux server 环境不含对应 node 的 bin 目录时,子进程
@@ -179,6 +188,11 @@ import type {
 } from '../types.js'
 
 const execFileAsync = promisify(execFile)
+
+/** spawn/resume 都要带的主命令级选项:放行 workspace-write 沙箱的出网。见文件头
+ * "spawn/resume 启动参数"节。取值只含 `[A-Za-z_.=]`,不含 shell 元字符,拼进经 `sh -c`
+ * 跑的 tmux 命令行时无需额外引号(与相邻的 `--sandbox workspace-write` 写法一致)。 */
+const CODEX_NETWORK_ACCESS_OPT = '-c sandbox_workspace_write.network_access=true'
 
 /** POSIX shell 单引号转义,与 cc adapter 的私有 shQuote 同款用法(独立复制一份)。 */
 function shQuote(s: string): string {
@@ -695,7 +709,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // 不传 --skip-git-repo-check(m2 实测顶层交互式 codex 不支持这个 flag,只有 codex exec
     // 才有——见文件头"spawn/resume 启动参数"节);受信目录改由 provision 写进 config.toml 的
     // [projects."<realpath>"] trust_level = "trusted" 解决。
-    const command = `${this.codexBin} --ask-for-approval never --sandbox workspace-write`
+    // 网络放行见文件头"spawn/resume 启动参数"节。
+    const command = `${this.codexBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT}`
     const spawnStartedAt = Date.now()
 
     // newSession 成功之后才落 meta(running)+注册 runtime,同 cc 纪律:tmux 失败时不留任何
@@ -834,8 +849,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       // m2 实测:--ask-for-approval/--sandbox 这类主命令级选项必须排在 `resume` 子命令**之前**
       // ——放在 `resume <id>` 后面 codex 会报 usage 错、exit=2(原实现把它们放在 `resume <id>`
       // 之后,是未经真机验证的错误猜测,这里按实测结果改正)。不传 --skip-git-repo-check,
-      // 理由同 spawn(见文件头"spawn/resume 启动参数"节)。
-      const command = `${this.codexBin} --ask-for-approval never --sandbox workspace-write resume ${shQuote(prev.session_ref)}`
+      // 理由同 spawn(见文件头"spawn/resume 启动参数"节)。-c 同属主命令级选项,同样放在
+      // `resume` 之前。
+      const command = `${this.codexBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT} resume ${shQuote(prev.session_ref)}`
 
       // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime;
       // PATH 前置同 spawn(nvm 部署陷阱)。
