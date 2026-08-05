@@ -1,6 +1,6 @@
 # Crabot 项目进度
 
-> 最后更新：2026-08-05 — worker 活性巡检（分支 feat/worker-liveness-sweep，未合并 main）
+> 最后更新：2026-08-05 — worker 活性巡检（分支 feat/worker-liveness-sweep，未合并 main）；上一条「模块健康与 Memory 维护最小修复」已通过 PR #72 合并
 
 ## 2026-08-05 — worker 活性巡检：静默停摆终于有人管了
 
@@ -13,6 +13,15 @@
 - **T = 30 分钟、周期 = 5 分钟，去 m2 实测校准**（本设计唯一的经验参数）。健康侧噪声地板取自 38 份真实 cc/codex 原生会话记录的相邻事件间隔：codex 最大 384s、cc 最大 301s（p99 普遍 10–110s），而这已是**保守上界**——那段时间里 TUI 自旋动画一直在往 pane 写字节（健康 codex worker 实测 780 B/s 持续写入），pane 级静默远短于此。故障侧四例是 26min / 4h51m（`w-ed8453a7`，tmux 仍活着，观测时零增长仍在延长）/ 8h30m / 15h，隔着一个数量级。30min 对最坏健康样本有 4.7× 余量，最坏发现时延 = T + 周期 = 35min。方向按 spec：宁可偏宽。
 - 验证：`tsc --noEmit` 干净；新增 23 例（`harness-liveness.test.ts` 18 例 = 9 × cc/codex 双实现参数化，`liveness-signal.test.ts` 5 例锁 adapter 层的 `lastActivityAt` 契约落点）；**6 处变异逐个植入实测**——①去掉阈值→8 挂 ②去掉去重→6 挂 ③消费失败仍不重报→2 挂 ④改台账→6 挂 ⑤删 codex 侧实现→2 挂 ⑥删 cc 侧实现→2 挂（⑤⑥ 是为"只给 cc 写用例、codex 删除变异全绿"那两次教训补的对称性验证）。
 - 已知环境噪声：本开发机在整机负载偏高时，`tests/workers/codex-adapter.test.ts` / `claude-code-adapter.test.ts` / `harness-integration.test.ts` 的 tmux 用例会成批失败（`can't find pane`）。**同一组失败在 base commit 上同样复现**（base 13 挂 vs 分支 11 挂，且每次挂的集合都不同），单独跑这些文件全绿，与本次改动无关。
+## 2026-08-04 — 模块健康与 Memory 维护最小修复
+
+- 已确认 Spec：`crabot-docs/superpowers/specs/2026-08-03-module-health-maintenance-minimal-fix-design.md`；实施计划：`crabot-docs/superpowers/plans/2026-08-04-module-health-maintenance-minimal-fix.md`。
+- 正式协议已完成旧设计污染清理；本期只做 Memory offload/gate、Agent maintenance system task、Admin restart/错峰、MM child/tree/health recovery。
+- 已完成并分步提交：Memory maintenance worker/offload + fail-fast gate + 轻量 health（`1d0165c`）；Agent builtin maintenance system task 与错误透传（`eb164ea`）；Admin restart 单次委托、受管日任务确定性错峰/去重/更新保护、生产 Schedule 元数据透传（`3cae8ed`）；MM 单模块串行、child-bound finalize、完整进程树清理、health recovery 与共享 restart budget（`6efdeb3`）。独立终审为 0 Blocker / 0 High / 0 material Medium。
+- 定向验证：Memory 维护/health 50 条通过（另有下述既有失败）；Agent maintenance/Schedule 40 条通过；Admin restart/builtin Schedule 72 条通过；MM lifecycle/health/process-tree 83 条通过。构建：Agent/Admin/Core `tsc`、根 CLI `tsc` 与 skill-ref 生成均通过；根 `pnpm run build` 包装命令受本机全局 pnpm v11.8.0 与仓库 devEngines 9.15.9 冲突阻断，已分别执行其等价子命令。
+- 全量验证：MM `125 passed`，根 CLI `196 passed`；Memory `382 passed / 1 failed`，唯一 `test_upsert_scene_profile_drops_legacy_abstract_overview` 已在干净 main 复现；Agent `2484 passed / 5 failed / 2 skipped`，5 条均是未改动 workspace/codex-adapter 测试对 macOS `/var` 与 `/private/var` realpath 的既有断言；Admin `1082 passed / 2 failed`，两条均来自并行测试隔离问题（`v1-cleanup` 扫到 Agent 测试夹具中的旧 RPC 字符串、`schedule-target-session` 固定端口瞬时冲突），涉及文件未改且后者单跑通过。
+- 进程边界验证：POSIX 真实 `uv → python` graceful/forced/crash/health 路径均无残留；Windows root-PID/唯一端口 fallback 有 11 条 adapter mock 测试，并在 launcher exit 被观察到（包括 ownership query 进行中发生 exit）后禁止重新信任可能复用的 root PID。当前环境无原生 Windows，真机 process-tree 行为是 PR 中需明确保留的残余验证风险。
+- 排除：registration/token/lease、公开 generation/operation、strict identity、Schedule schema/UI、maintenance journal。
 
 ## 2026-08-03 — 冷启动配置竞态：agent 拉配置改为退避重试
 

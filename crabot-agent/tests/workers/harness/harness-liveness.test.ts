@@ -314,6 +314,28 @@ describe.each<WorkerImplId>(['claude-code', 'codex'])('WorkerHarness.sweepLivene
     expect(adapter.lastActivityAtCalls).not.toContain(`${workerId}#2`)
   })
 
+  it('没有任何化身的 system task(#72 的 memory_maintenance 形态)不进候选集,也不让整轮巡检抛错', async () => {
+    const adapter = new CliLikeAdapter(impl)
+    const { harness, ledger } = await makeHarness(adapter)
+    // #72 的 maintenance system task:agent 自己跑,不派 worker,台账条目 `incarnations: []`,
+    // 但 running 期间照样会被 listAllWorkers 枚举到。
+    const dialogObjectId = dialogObjectIdForPrivate('friend-1')
+    const taskId = 'task-maintenance-1'
+    await ledger.upsertWorker(dialogObjectId, taskId, () => ({
+      worker_id: taskId,
+      task: { id: taskId, title: '记忆维护', status: 'running', created_at: now() },
+      origin: { spawned_by_session: 'system::tasks', trigger_type: 'system' },
+      report_to: { channel_id: 'system', session_id: 'tasks' },
+      incarnations: [],
+      updated_at: now(),
+    }))
+    events = []
+
+    clockMs += STALL_MS + MINUTE
+    await expect(harness.sweepLiveness()).resolves.toBeUndefined()
+    expect(wakeEvents(taskId)).toHaveLength(0)
+  })
+
   it('已终态的 task 不进候选集(巡检不去打扰已经收工的 worker)', async () => {
     const { harness, adapter, workerId } = await spawnRunning()
     await harness.killWorker(workerId, '收工')

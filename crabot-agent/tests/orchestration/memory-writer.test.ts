@@ -54,6 +54,20 @@ describe('MemoryWriter phase 3 helpers', () => {
     expect(rpcCall).toHaveBeenCalledWith(18000, 'run_maintenance', { scope: 'observation_check' }, 'agent-1')
   })
 
+  it('runMaintenance logs and rethrows RPC failure', async () => {
+    const error = new Error('maintenance RPC failed')
+    const rpcCall = vi.fn().mockRejectedValue(error)
+    const writer = new MemoryWriter({ call: rpcCall } as any, 'agent-1', () => 18000)
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    await expect(writer.runMaintenance()).rejects.toBe(error)
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[agent-1] Failed to run memory maintenance:',
+      'maintenance RPC failed',
+    )
+    errorSpy.mockRestore()
+  })
+
   it('quickCapture is fire-and-forget: caller proceeds even when memory RPC blocks 2s (spec §6.0.1)', async () => {
     // Arrange: 模拟 memory 端 RPC 卡 2 秒
     const rpcCall = vi.fn().mockImplementation(

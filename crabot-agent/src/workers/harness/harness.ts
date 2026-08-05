@@ -1146,6 +1146,9 @@ export class WorkerHarness {
       for (const { worker } of all) {
         if (isTerminalStatus(worker.task.status)) continue
         const mainline = mainlineIncarnation(worker)
+        // `!mainline` 不是纯防御:#72 的 memory_maintenance system task 是**没有任何化身**的
+        // 台账条目(`incarnations: []`,由 agent 自己跑,不派 worker),它在 running 期间同样
+        // 会被 listAllWorkers 枚举到。没有化身就没有可探的活性,直接跳过。
         if (!mainline || mainline.state !== 'running') continue
         // `'legacy'`(旧 ResumeCheckpoint 迁移来的化身)不会有 adapter 注册,下一行自然落空。
         const impl = mainline.impl as WorkerImplId

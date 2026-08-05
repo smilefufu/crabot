@@ -8,7 +8,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
-import { ModuleBase, type ModuleConfig, type Event, type ModuleId, type TraceStoreInterface } from 'crabot-shared'
+import { ModuleBase, generateId, type ModuleConfig, type Event, type ModuleId, type TraceStoreInterface } from 'crabot-shared'
 import { resolveTimezone } from './utils/time.js'
 import type {
   UnifiedAgentConfig,
@@ -67,7 +67,7 @@ import { AGENT_VERSION } from './constants.js'
 import { ContextManager, DEFAULT_COMPACT_THRESHOLD } from './engine/context-manager.js'
 import { DEFAULT_MAX_CONTEXT_TOKENS } from './engine/query-loop.js'
 import { buildManagerStack, reconcileManagerStack, type ManagerStack } from './manager/bootstrap.js'
-import { makeAgentEventPublisher } from './manager/events.js'
+import { makeAgentEventPublisher, type AgentEventPublisher } from './manager/events.js'
 import { resolveManagerModelConfig } from './manager/model-slot.js'
 import { createCrabMemoryServer, filterMemoryToolsByProfile } from './mcp/crab-memory.js'
 import {
@@ -75,7 +75,7 @@ import {
   narrowWorkerPermissions,
   type BuiltinRuntimeContext,
 } from './workers/builtin/runtime.js'
-import type { DialogObjectId, ManagerKey } from './workers/harness/ledger-types.js'
+import type { DialogObjectId, LedgerWorker, ManagerKey, TaskPriority, TaskStatus } from './workers/harness/ledger-types.js'
 import {
   filterAndPageWorkers,
   buildWorkerDetail,
@@ -91,6 +91,9 @@ import {
 import type { NormalizedTraceEvent, SpawnSpec } from './workers/types.js'
 import type { HarnessEvent } from './workers/harness/worker-events.js'
 import { findIncarnationBySeq, mainlineIncarnation } from './workers/harness/harness.js'
+import { applyStatusTransition } from './workers/harness/task-status.js'
+import { SYSTEM_TASKS_MANAGER_KEY } from './manager/registry.js'
+import { splitManagerKey } from './manager/principal.js'
 
 const BARRIER_TIMEOUT_MS = 8_000
 
@@ -207,8 +210,12 @@ export function resolveOverdueReminder(value: boolean | undefined): boolean {
  */
 export interface TriggerScheduleParams {
   schedule_id: ScheduleId
+  task_type?: string
   title: string
-  description: string
+  description?: string
+  priority?: TaskPriority
+  input?: Record<string, unknown>
+  tags?: string[]
   target_session?: { channel_id: ModuleId; session_id: SessionId }
   creator_friend_id?: FriendId
   is_builtin?: boolean
@@ -225,6 +232,7 @@ export interface TriggerScheduleParams {
 /** §8.2：同步受理即返回（是否派 worker、如何执行由被唤醒的 manager 决定）。 */
 export interface TriggerScheduleResult {
   accepted: true
+  task_id?: TaskId
 }
 
 /**
@@ -403,6 +411,7 @@ export class UnifiedAgent extends ModuleBase {
    * 未装配时读端点 fail-fast 报错，不返回空结果——空结果会被 admin 误读成"没有 worker"。
    */
   private managerStack?: ManagerStack
+  private managerEventPublisher?: AgentEventPublisher
 
   // Trace 存储
   private traceStore: TraceStore
@@ -604,6 +613,12 @@ export class UnifiedAgent extends ModuleBase {
   private initializeManagerStack(): void {
     // messagingDeps 里的 getter 需要拿到本实例（getter 内的 `this` 是那个对象字面量）。
     const self = this
+    const publishEvent = makeAgentEventPublisher({
+      rpcClient: this.rpcClient,
+      moduleId: this.config.moduleId,
+      now: () => new Date().toISOString(),
+    })
+    this.managerEventPublisher = publishEvent
     this.managerStack = buildManagerStack({
       dataRoot: getDataRootDir(),
       now: () => new Date().toISOString(),
@@ -663,11 +678,7 @@ export class UnifiedAgent extends ModuleBase {
       builtinSpawnDefaults: (ctx) => this.buildBuiltinWorkerRuntime(ctx),
       // 对外事件出口（§9.2 `agent.task_status_changed`）：真实 rpcClient 注入。
       // 翻译与去重在 manager/events.ts，这里只负责把口子接上。
-      publishEvent: makeAgentEventPublisher({
-        rpcClient: this.rpcClient,
-        moduleId: this.config.moduleId,
-        now: () => new Date().toISOString(),
-      }),
+      publishEvent,
     })
   }
 
@@ -2965,13 +2976,108 @@ export class UnifiedAgent extends ModuleBase {
    * 的 worker 的 `origin.creator_friend_id`（§4.4）。这是过渡形态：admin 调用点仍走
    * `create_task_from_schedule` 并自行下发 `resolved_permissions`，P7 cutover 时收敛。
    */
-  private handleTriggerSchedule(params: TriggerScheduleParams): TriggerScheduleResult {
+  private async transitionMaintenanceSystemTask(
+    dialogObjectId: DialogObjectId,
+    taskId: TaskId,
+    to: TaskStatus,
+    opts?: { error?: string; outcome?: string },
+  ): Promise<void> {
+    const { ledger } = this.requireManagerStack()
+    const now = new Date().toISOString()
+    let oldStatus: TaskStatus | undefined
+    const updated = await ledger.upsertWorker(dialogObjectId, taskId, (previous) => {
+      if (!previous) throw new Error(`Maintenance system task not found: ${taskId}`)
+      oldStatus = previous.task.status
+      return {
+        ...previous,
+        task: applyStatusTransition(previous.task, to, { ...opts, now }),
+        updated_at: now,
+      }
+    })
+    if (!updated || !oldStatus) throw new Error(`Failed to update maintenance system task: ${taskId}`)
+    this.managerEventPublisher?.('agent.task_status_changed', {
+      worker_id: taskId,
+      task_id: taskId,
+      old_status: oldStatus,
+      new_status: to,
+      dialog_object_id: dialogObjectId,
+    })
+  }
+
+  private async runMaintenanceSystemTask(dialogObjectId: DialogObjectId, taskId: TaskId): Promise<void> {
+    await this.transitionMaintenanceSystemTask(dialogObjectId, taskId, 'running')
+    try {
+      await this.memoryWriter.runMaintenance('all')
+      await this.transitionMaintenanceSystemTask(dialogObjectId, taskId, 'completed', {
+        outcome: '记忆维护完成',
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(`[${this.config.moduleId}] memory_maintenance system task ${taskId} failed:`, message)
+      await this.transitionMaintenanceSystemTask(dialogObjectId, taskId, 'failed', {
+        error: message,
+        outcome: `记忆维护失败：${message}`,
+      })
+    }
+  }
+
+  private async createMaintenanceSystemTask(params: TriggerScheduleParams): Promise<TriggerScheduleResult> {
+    const { ledger, principals } = this.requireManagerStack()
+    const taskId = generateId() as TaskId
+    const dialogObjectId = principals.dialogObjectIdFor(SYSTEM_TASKS_MANAGER_KEY)
+    const { channelId, sessionId } = splitManagerKey(SYSTEM_TASKS_MANAGER_KEY)
+    const now = new Date().toISOString()
+    const worker: LedgerWorker = {
+      worker_id: taskId,
+      task: {
+        id: taskId,
+        type: params.task_type,
+        title: params.title,
+        status: 'queued',
+        priority: params.priority ?? 'low',
+        input: params.input,
+        tags: params.tags,
+        created_at: now,
+      },
+      origin: {
+        spawned_by_session: SYSTEM_TASKS_MANAGER_KEY,
+        trigger_type: 'system',
+        ...(params.creator_friend_id ? { creator_friend_id: params.creator_friend_id } : {}),
+      },
+      report_to: {
+        channel_id: channelId as ModuleId,
+        session_id: sessionId as SessionId,
+      },
+      incarnations: [],
+      updated_at: now,
+    }
+    const persisted = await ledger.upsertWorker(dialogObjectId, taskId, (previous) => {
+      if (previous) throw new Error(`Duplicate maintenance system task: ${taskId}`)
+      return worker
+    })
+    if (!persisted) throw new Error(`Failed to persist maintenance system task: ${taskId}`)
+
+    void this.runMaintenanceSystemTask(dialogObjectId, taskId).catch((error) => {
+      console.error(
+        `[${this.config.moduleId}] maintenance system task handler crashed (task=${taskId}):`,
+        error instanceof Error ? error.message : String(error),
+      )
+    })
+    return { accepted: true, task_id: taskId }
+  }
+
+  /** §8.2：maintenance 走 Agent-owned system task；其他 schedule 继续唤醒 manager。 */
+  private async handleTriggerSchedule(params: TriggerScheduleParams): Promise<TriggerScheduleResult> {
+    if (params.task_type === 'memory_maintenance' && params.is_builtin === true) {
+      return this.createMaintenanceSystemTask(params)
+    }
+
     const { registry } = this.requireManagerStack()
     void registry
       .routeSchedule({
         scheduleId: params.schedule_id,
         title: params.title,
-        description: params.description,
+        description: params.description ?? '',
         targetSession: params.target_session,
         creatorFriendId: params.creator_friend_id,
         isBuiltin: params.is_builtin,

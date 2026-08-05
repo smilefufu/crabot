@@ -52,6 +52,7 @@ async def memory_module():
     module.short_term_store.close()
     module.sqlite_store.close()
     module.scene_profile_store.close()
+    module._lt_v2_index.close()
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
@@ -148,9 +149,10 @@ async def test_health(memory_module):
     """测试健康检查"""
     result = await memory_module._health({})
 
-    assert result["status"] == "healthy"
-    assert "short_term_count" in result["details"]
-    assert "long_term_count" in result["details"]
+    assert result == {
+        "status": "healthy",
+        "details": {"maintenance_running": False},
+    }
 
 
 @pytest.mark.asyncio
