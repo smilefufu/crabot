@@ -11,6 +11,11 @@ import { startHeapSampler } from './diagnostics/heap-sampler.js'
 import { checkFdaIfEnabled } from './engine/tools/fda-check.js'
 import type { UnifiedAgentConfig } from './types.js'
 import { getAgentDataDir } from './core/data-paths.js'
+import { installStdioErrorGuard } from './core/stdio-guard.js'
+
+// 必须是进程里的第一件事：它之后的任何一行日志（含下面的 heap sampler / FDA 提示）在
+// stdout/stderr 管道断开时都会以 'error' 事件打到零监听器上 → uncaughtException（见该文件头）。
+installStdioErrorGuard()
 
 startHeapSampler({ intervalMs: 30_000 })
 

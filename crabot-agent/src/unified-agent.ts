@@ -69,6 +69,7 @@ import { DEFAULT_MAX_CONTEXT_TOKENS } from './engine/query-loop.js'
 import { buildManagerStack, reconcileManagerStack, type ManagerStack } from './manager/bootstrap.js'
 import { makeAgentEventPublisher, type AgentEventPublisher } from './manager/events.js'
 import { resolveManagerModelConfig } from './manager/model-slot.js'
+import type { ManagerEpisodeFailure } from './manager/types.js'
 import { createCrabMemoryServer, filterMemoryToolsByProfile } from './mcp/crab-memory.js'
 import {
   BUILTIN_WORKER_PERMISSIONS,
@@ -272,19 +273,6 @@ const WORKER_TRACE_LAYER2_UNAVAILABLE =
   '当前仅返回 harness 亲历的生命周期事件（第一层）'
 
 /**
- * fail-loud 兜底：入站 lane handler 上 manager episode 失败时的失败形态。
- *
- * `ManagerLoop` 只有 F2 会抛错；最常见的 F1（LLM 挂 / key 过期 / 限流耗尽重试）记
- * `outcome:'failed'`、把整批输入推回 mailbox，然后**正常 resolve**。所以判据必须双管：
- * `catch` 抓 F2，`outcome ∈ {failed, aborted}` 抓 F1。只写 try/catch 抓不住最常见的那种。
- *
- * @see crabot-docs/superpowers/plans/2026-08-01-mw-p7-j-cutover.md §三
- */
-type ManagerEpisodeFailure =
-  | { readonly kind: 'threw'; readonly error: unknown }
-  | { readonly kind: 'outcome'; readonly outcome: 'failed' | 'aborted' }
-
-/**
  * fail-loud 兜底回复的按 key 冷却窗口。
  *
  * F1 形态下整批输入被推回 mailbox 等下次唤醒重投，同一批消息因此会**反复**触发失败；
@@ -324,6 +312,40 @@ function buildFailLoudText(failure: ManagerEpisodeFailure): string {
   return (
     `我这条消息没处理完就出错了，暂时回不了你。错误：${detail}。` +
     '可以稍后再发一次；一直这样的话请管理员看一下 agent 日志。'
+  )
+}
+
+/**
+ * **非人类触发**（定时任务 / worker 事件）的兜底正文。
+ *
+ * 不能复用 `buildFailLoudText`：那份全篇第二人称（"我这条消息没处理完…暂时回不了你"），
+ * 而这两条路上**没人刚说话**——照搬过去读起来是错的，人类会以为自己刚发的消息丢了。
+ * 这里必须点名是**哪件事**没跑成（`subject`），否则一句无主语的"出错了"既说不清要重跑什么，
+ * 也说不清该不该管。下一步动作也不同：人类消息可以"再发一次"，这两条只能手动重跑。
+ *
+ * `subject` 直接做句子主语，例：`定时任务「每日早报」` / `worker「w-3f2a」的状态更新`。
+ * model slot 缺失的特判与人类那份同源（同一条错误、同一个解法）。
+ */
+function buildBackgroundFailLoudText(subject: string, failure: ManagerEpisodeFailure): string {
+  if (failure.kind === 'outcome') {
+    return (
+      `${subject}没跑成（模型这一轮 ${failure.outcome} 了）。` +
+      '常见原因是 LLM 服务不可用、API key 过期或额度用尽——' +
+      '请管理员到 Admin 的全局设置里检查模型配置，之后手动重跑一次。'
+    )
+  }
+
+  const raw = failure.error instanceof Error ? failure.error.message : String(failure.error)
+  if (raw.includes("model_config 缺少")) {
+    return (
+      `Crabot 还没配好 manager 用的模型，${subject}没跑成。` +
+      '请管理员打开 Admin → 全局设置，给 manager（没有就给 powerful）槽位选好 provider 和模型，然后手动重跑一次。'
+    )
+  }
+  const detail = raw.length > FAIL_LOUD_ERROR_MAX_CHARS ? `${raw.slice(0, FAIL_LOUD_ERROR_MAX_CHARS)}…` : raw
+  return (
+    `${subject}没跑成，出错了。错误：${detail}。` +
+    '可以稍后手动重跑；一直这样的话请管理员看一下 agent 日志。'
   )
 }
 
@@ -679,6 +701,12 @@ export class UnifiedAgent extends ModuleBase {
       // 对外事件出口（§9.2 `agent.task_status_changed`）：真实 rpcClient 注入。
       // 翻译与去重在 manager/events.ts，这里只负责把口子接上。
       publishEvent,
+      // fail-loud 出口（worker 事件唤醒的 episode 失败）：装配层只负责解出"告诉谁 / 哪件事"，
+      // 出站那一跳（rpcClient + channel 端口 + 冷却）是 agent 的东西，落在这里。
+      // 游离 promise 的收尾在调用侧，`sendBackgroundFailLoud` 自己保证不抛。
+      reportEpisodeFailure: (report) => {
+        void this.sendBackgroundFailLoud(report.target, report.subject, report.failure)
+      },
     })
   }
 
@@ -1307,6 +1335,10 @@ export class UnifiedAgent extends ModuleBase {
    * 前端那个转圈的占位气泡靠 `request_id` 匹配 `chat_reply` 才会被替换掉 —— 只有
    * `chat_callback` 能收口它。兜底文案是纯文本，`chat_reply` 的 string content 装得下，无损。
    *
+   * **`subject` 切换成"非人类触发"文案**（定时任务 / worker 事件，见
+   * `sendBackgroundFailLoud`）：判据、冷却、出站那一跳全部照旧，只有正文换成第三人称的
+   * `buildBackgroundFailLoudText`。
+   *
    * 返回**这一次有没有真的把话送出去**：`false` = 冷却命中或出站 RPC 自身失败。
    * channel 两条路忽略它（送不出去就只能落日志）；admin chat 靠它决定要不要把异常抛回
    * RPC 调用方，让 admin 侧既有的 `chat_error` 兜住占位气泡（见 `processAdminChatMessage`）。
@@ -1318,6 +1350,7 @@ export class UnifiedAgent extends ModuleBase {
     sessionId: string,
     failure: ManagerEpisodeFailure,
     adminChatRequestId?: string,
+    subject?: string,
   ): Promise<boolean> {
     const key = `${channelId}::${sessionId}`
     const now = Date.now()
@@ -1330,7 +1363,7 @@ export class UnifiedAgent extends ModuleBase {
     this.failLoudSentAt.set(key, now)
 
     try {
-      const text = buildFailLoudText(failure)
+      const text = subject === undefined ? buildFailLoudText(failure) : buildBackgroundFailLoudText(subject, failure)
       if (adminChatRequestId !== undefined) {
         await this.rpcClient.call(
           await this.getAdminPort(),
@@ -1357,6 +1390,41 @@ export class UnifiedAgent extends ModuleBase {
         error instanceof Error ? error.message : String(error),
       )
       return false
+    }
+  }
+
+  /**
+   * fail-loud 的**非人类触发**入口：定时任务（`handleTriggerSchedule`）与 worker 事件
+   * （`BootstrapDeps.reportEpisodeFailure`）两条路共用。
+   *
+   * 与三条人类消息入口的差别只有两处，其余（判据、冷却表、出站 RPC、送不出去只落日志）全共用：
+   *
+   * 1. **文案换第三人称并点名 `subject`**：这两条路上没人刚说话，"暂时回不了你"是错的；
+   * 2. **admin-web 一律投 `system-tasks` 线程**：admin 的 `storeAssistantMessage` 只在
+   *    `session_id === 'admin-chat'` 时 `claimPendingRequestId()`——把当时在飞的那条人类
+   *    提问的占位气泡**机会主义地**认领掉（chat-manager.ts:454）。故障期人类消息与定时任务
+   *    常常一起失败，正是最容易撞上的时刻：撞上就等于"人类的问题被一句『定时任务没跑成』
+   *    顶替，自己的气泡永远转圈"。改投 `system-tasks` 后不认领任何 request_id，而两个
+   *    session 的消息落的是同一个 store、同一条 `chat_push`（admin 侧不按 session 分流），
+   *    人类照样在 Master Chat 里看得到——只是不再顶替别人的气泡。
+   *
+   * **绝不抛**：两个调用方都是游离 promise 的收尾（`.then`/`.catch` 内），从这里抛出去就是
+   * unhandledRejection → 打死 agent 进程，正是本轮要消灭的那类事故。
+   */
+  private async sendBackgroundFailLoud(
+    target: { channel_id: string; session_id: string },
+    subject: string,
+    failure: ManagerEpisodeFailure,
+  ): Promise<void> {
+    try {
+      const sessionId =
+        target.channel_id === 'admin-web' ? splitManagerKey(SYSTEM_TASKS_MANAGER_KEY).sessionId : target.session_id
+      await this.sendFailLoudReply(target.channel_id, sessionId, failure, undefined, subject)
+    } catch (error) {
+      console.error(
+        `[${this.config.moduleId}] fail-loud（${subject}）自身出错:`,
+        error instanceof Error ? error.message : String(error),
+      )
     }
   }
 
@@ -3066,13 +3134,33 @@ export class UnifiedAgent extends ModuleBase {
     return { accepted: true, task_id: taskId }
   }
 
-  /** §8.2：maintenance 走 Agent-owned system task；其他 schedule 继续唤醒 manager。 */
+  /**
+   * §8.2：maintenance 走 Agent-owned system task；其他 schedule 继续唤醒 manager。
+   *
+   * **manager 路由那条分支的 fail-loud（判据双管）**：fire-and-forget 只 `.catch()` 等于漏掉
+   * 最常见的那种失败——F1（LLM 挂 / key 过期 / 限流耗尽）不抛错，只在 `EpisodeResult.outcome`
+   * 上写 `failed`。定时任务本来就没人盯着，静默失败的表现是"早报没发、反思没生成"，而人类
+   * 收不到任何提示。因此这里既看 `outcome` 也 `catch`，两条都接到 `sendBackgroundFailLoud`
+   * （文案第三人称、点名是哪个定时任务）。目标会话 = `target_session`，没有则落系统任务线程
+   * （与 `routeSchedule` 的路由归属同一判据，见 `SYSTEM_TASKS_MANAGER_KEY`）。
+   *
+   * maintenance 那条分支**不走这里**：它是 Agent 自持的 system task，失败会落到台账
+   * （`status='failed'` + `agent.task_status_changed` 事件），有自己的可见性通道。
+   *
+   * 受理仍是"不等 episode"：新增的只是游离 promise 的收尾，一步都没 await。
+   */
   private async handleTriggerSchedule(params: TriggerScheduleParams): Promise<TriggerScheduleResult> {
     if (params.task_type === 'memory_maintenance' && params.is_builtin === true) {
       return this.createMaintenanceSystemTask(params)
     }
 
     const { registry } = this.requireManagerStack()
+    const systemThread = splitManagerKey(SYSTEM_TASKS_MANAGER_KEY)
+    const target = params.target_session ?? {
+      channel_id: systemThread.channelId,
+      session_id: systemThread.sessionId,
+    }
+    const subject = `定时任务「${params.title || params.schedule_id}」`
     void registry
       .routeSchedule({
         scheduleId: params.schedule_id,
@@ -3082,12 +3170,22 @@ export class UnifiedAgent extends ModuleBase {
         creatorFriendId: params.creator_friend_id,
         isBuiltin: params.is_builtin,
       })
-      .catch((error) => {
+      .then(async (result) => {
+        // `?.` 与 bootstrap 侧的同款收尾一致：拿不到 EpisodeResult 时按"没有失败信号"放过，
+        // 而不是让 TypeError 掉进下面的 catch —— 那会给人类推一条内容是内部报错的假兜底。
+        if (result?.outcome !== 'failed' && result?.outcome !== 'aborted') return
+        console.error(
+          `[${this.config.moduleId}] trigger_schedule episode outcome=${result.outcome} (schedule=${params.schedule_id})`,
+        )
+        await this.sendBackgroundFailLoud(target, subject, { kind: 'outcome', outcome: result.outcome })
+      })
+      .catch(async (error) => {
         const message = error instanceof Error ? error.message : String(error)
         console.error(
           `[${this.config.moduleId}] trigger_schedule 路由失败 (schedule=${params.schedule_id}):`,
           message
         )
+        await this.sendBackgroundFailLoud(target, subject, { kind: 'threw', error })
       })
     return { accepted: true }
   }
