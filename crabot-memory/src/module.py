@@ -88,7 +88,6 @@ class MemoryModule:
         self._protected_requests_idle.set()
         self._shutdown_requested = False
         self._shutdown_task: Optional[asyncio.Task] = None
-        self._core_initialization_error: Optional[str] = None
 
         # 初始化存储
         data_dir = Path(self.config.storage.data_dir)
@@ -269,7 +268,7 @@ class MemoryModule:
 
     async def _health(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """只读内存状态的健康检查。"""
-        if self._shutdown_requested or self._core_initialization_error:
+        if self._shutdown_requested:
             status = "unhealthy"
         elif self._maintenance_running:
             status = "degraded"

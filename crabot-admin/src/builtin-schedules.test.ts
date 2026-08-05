@@ -183,6 +183,7 @@ describe('AdminModule - ensureBuiltinSchedules', () => {
   it.each([
     ['0', 'daily_reflection', '0 2 * * *'],
     ['100', 'daily_reflection', '1 2 * * *'],
+    ['150', 'daily_reflection', '1 2 * * *'],
     ['200', 'memory_maintenance', '2 4 * * *'],
     ['9900', 'memory_maintenance', '39 5 * * *'],
   ])('derives offset %s %s trigger without instance modulo', (offset, type, expected) => {

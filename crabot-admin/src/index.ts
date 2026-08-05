@@ -6380,7 +6380,7 @@ export class AdminModule extends ModuleBase {
   private getManagedBuiltinTrigger(taskType: string): ScheduleTrigger {
     const baseHour = taskType === 'daily_reflection' ? 2 : 4
     const rawOffset = Number(process.env.CRABOT_PORT_OFFSET ?? '0')
-    const delayMinutes = Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset / 100 : 0
+    const delayMinutes = Number.isFinite(rawOffset) && rawOffset >= 0 ? Math.floor(rawOffset / 100) : 0
     const totalMinutes = baseHour * 60 + delayMinutes
     return {
       type: 'cron',
