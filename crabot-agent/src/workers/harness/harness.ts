@@ -211,6 +211,41 @@ function describeLivenessStall(opts: { impl: WorkerImplId; staleMs: number; tail
 }
 
 /**
+ * 停摆**重试**投递时的正文:一行,不带现场。
+ *
+ * 首报已经把解码后的 pane 尾部交出去了,而 episode 失败时 `ManagerLoop` 会把那份正文
+ * **整体推回 mailbox**(`loop.ts` 的 `carriedTexts`/`eventText` 重投),所以现场一直在,
+ * manager 恢复后照样看得到。重试再带一份只会让 mailbox 里堆同样的东西 —— 8 小时按 5 分钟
+ * 节奏能堆到 96 份 ~2000 字符,恢复后的第一个 episode 一次吃下(PR #75 review)。
+ *
+ * 重试的价值**不是再送一份正文,而是它本身就是一次 drain 触发器**:mailbox 只是被动缓冲,
+ * 全仓没有任何周期性投递者(`maybeSelfWake` 只在成功后自唤醒,`evictIdle` 是回收器且无调用
+ * 方),而停摆 worker 按定义不再产生任何事件、带不来下一次唤醒。所以这一行必须发,只是不必胖。
+ */
+function describeLivenessRetry(opts: { impl: WorkerImplId; staleMs: number }): string {
+  return (
+    `[crabot] 活性巡检:该 ${opts.impl} 化身仍然没有任何输出(已静默 ${Math.round(opts.staleMs / 60_000)} 分钟)。` +
+    `现场在前一条唤醒里,这条只是重试投递,不再重复正文。`
+  )
+}
+
+/**
+ * 第 n 次投递失败之后,下一次重试至少要等多久:**1×T → 2×T → 4×T 封顶**(T = `LIVENESS_STALL_MS`)。
+ *
+ * 为什么要退避:`maybeSelfWake` 明确拒绝在 episode 失败后自唤醒,理由是"LLM 持续故障时就变成
+ * 失败→立刻重试→再失败的热循环"(`registry.ts`)。巡检按固定 5 分钟重试等于把那个热循环原样
+ * 搬回来 —— LLM 挂 8 小时就是 96 个失败 episode,每个都带 engine 自己的重试(PR #75 review)。
+ * 退避之后同样 8 小时只剩 ~5 次,而 `maybeSelfWake` 防的是**立刻**重试,低频重试不在它的范畴内。
+ *
+ * **封顶取 4×T = 2 小时的依据**:四例真实停摆是 26min / 4h51m / 8h30m / 15h。上限 2 小时意味着
+ * 即便撞上最长的那例,manager 恢复后仍有 ~7 次投递机会;再往上加(比如 8×T)换来的成本节省
+ * 已经可以忽略,却会让"恢复后多久能收到"退化到半天量级。
+ */
+function retryDelayMs(attempts: number): number {
+  return LIVENESS_STALL_MS * 2 ** Math.min(Math.max(attempts - 1, 0), 2)
+}
+
+/**
  * 一次停摆上报的去重记录(见 `sweepLiveness`)。进程重启后允许丢失并重新起算:
  * 重启后重报一次可接受,远好于永久丧失判定。
  */
@@ -219,6 +254,10 @@ interface StallReportMark {
   readonly activityAt: number
   /** 这次唤醒的投递结局。`pending` 期间不重报(episode 正在跑,再唤一次就是插队重复)。 */
   delivery: 'pending' | 'consumed' | 'failed'
+  /** 这次停摆已经投递失败过几次。=0 即"还没发过",决定正文带不带现场,也决定退避倍数。 */
+  attempts: number
+  /** 下一次重试最早可以发生的时刻(epoch ms);只在 `delivery === 'failed'` 时有意义。 */
+  retryAfterMs: number
 }
 
 /** 请求的 worker_id 在台账中不存在。 */
@@ -1135,11 +1174,17 @@ export class WorkerHarness {
    *    本方法一个字都不用改;
    * 3. **只看主线化身**(`forked_from` 为空,与 §5.3 判定主线化身的规则同源)。cc 的 fork
    *    是无头 `claude -p` 侧问,整个执行期可能零输出,拿它当停摆就是纯误报;
-   * 4. **同一次停摆只报一次**,否则每轮巡检唤醒一次 manager = 烧 token 的热循环。两种情况
-   *    允许重报:①`lastActivityAt` 前进了(worker 又动过,这是新的一次停摆);②上一次唤醒
-   *    没被 manager 消费(episode 失败,`consumedEvents !== true`)——这正好落实"manager 死了
-   *    就挂起来、恢复了再通知":`maybeSelfWake` 拒绝在失败后自唤醒(防热循环,是对的),
-   *    而巡检本身就是那个"下一次唤醒",不需要任何新机制。
+   * 4. **同一次停摆只发一份现场**,之后的重试是**带退避的、不带正文的再投递**。展开说:
+   *    - 成功被消费 ⇒ 不再打扰;`lastActivityAt` 前进 ⇒ 清标记,下次停摆算新的一次;
+   *    - 上一次唤醒没被 manager 消费(episode 失败,`consumedEvents !== true`)⇒ 允许重试。
+   *      **重试是必须的**:episode 失败时 `ManagerLoop` 把正文整体推回 mailbox,而 mailbox
+   *      只是**被动缓冲**——全仓没有任何周期性投递者(`maybeSelfWake` 只在成功后自唤醒,
+   *      `evictIdle` 是回收器且无调用方),停摆 worker 按定义又不再产生事件、带不来下一次
+   *      唤醒。**重试的价值不在于再送一份正文,而在于它本身就是那个 drain 触发器。**
+   *    - 因此重试**不带现场**(见 `describeLivenessRetry`):现场已在 mailbox 里,再送只会
+   *      让它堆叠;并且**按 `retryDelayMs` 退避**(1×T → 2×T → 4×T 封顶),避免把
+   *      `maybeSelfWake` 明确拒绝过的"失败→立刻重试"热循环换个地方重演。
+   *    这三条都是 PR #75 review 的修正,推翻过程见 spec 决策 4。
    *
    * 重入保护:一次唤醒是一整个 manager episode(可能几分钟),定时器到点时上一轮可能还没走完,
    * 直接跳过这一轮——已报标记会让下一轮不重复唤醒同一个化身。
@@ -1193,12 +1238,18 @@ export class WorkerHarness {
           continue
         }
 
+        // 去重、重试与退避,见方法注释第 4 条。`activityAt` 变了就是新的一次停摆,走首报。
         const prev = this.stallReports.get(key)
-        // 去重与重报,见方法注释第 4 条。`pending` 期间不重报:那次 episode 还在跑。
-        if (prev && prev.activityAt === lastAt && prev.delivery !== 'failed') continue
-
-        this.stallReports.set(key, { activityAt: lastAt, delivery: 'pending' })
-        reports.push(this.reportLivenessStall(h, adapter, key, lastAt, staleMs))
+        const sameStall = prev !== undefined && prev.activityAt === lastAt
+        if (sameStall) {
+          // `pending`:那次 episode 还在跑,别插队;`consumed`:manager 已经知道了,不再打扰。
+          if (prev.delivery !== 'failed') continue
+          // 上次没投递成功 → 可以重试,但要等退避窗口(见 retryDelayMs)。
+          if (nowMs < prev.retryAfterMs) continue
+        }
+        const attempts = sameStall ? prev.attempts : 0
+        this.stallReports.set(key, { activityAt: lastAt, delivery: 'pending', attempts, retryAfterMs: 0 })
+        reports.push(this.reportLivenessStall(h, adapter, key, lastAt, staleMs, attempts, nowMs))
       }
 
       // 已经不在候选集里的化身(终态 / 已换主线 / 换了实现)不再需要标记,顺手回收。
@@ -1213,16 +1264,19 @@ export class WorkerHarness {
   }
 
   /**
-   * 上报一次停摆:取 pane 输出尾部 + 合成指引,走 `state_changed` + `detail.text` 这条既有
-   * 的唤醒形状(#70 同款,零新事件 kind、零新状态),并按投递结局更新已报标记。
+   * 上报一次停摆,走 `state_changed` + `detail.text` 这条既有的唤醒形状(#70 同款,零新事件
+   * kind、零新状态),并按投递结局更新已报标记(含退避)。
+   *
+   * **首报带现场、重试不带**(`attempts`):首报的正文是解码后的 pane 尾部 + 合成指引;
+   * 之后每一次重试只发一行(见 `describeLivenessRetry`)——那份现场在 episode 失败时被
+   * `ManagerLoop` 整体推回了 mailbox,一直都在,重试只是**再触发一次投递**。
    *
    * `to` 取化身**当前**的状态 `'running'`:这条事件描述的不是一次状态迁移(巡检不改状态),
    * 而是"这个还在 running 的化身有情况"。不带 `taskStatus` 形参——没有伴随的 task 迁移,
    * 对外事件桥因此在"状态没变"那一步自然被去重掉(见 manager/events.ts)。
    *
-   * `readOutput` 在这里是**按其本来用途**使用的(把输出读给人/manager 看),不是拿它当活性
-   * 信号——活性信号是 `lastActivityAt`,那条路每轮只付一次 `fs.stat`,而这条解码路径只在
-   * 真的要上报时走一次。
+   * `readOutput` 只在首报那一次走(按其本来用途:把输出读给人/manager 看),不是拿它当活性
+   * 信号——活性信号是 `lastActivityAt`,那条路每轮只付一次 `fs.stat`。
    */
   private async reportLivenessStall(
     h: IncarnationHandle,
@@ -1230,20 +1284,27 @@ export class WorkerHarness {
     key: string,
     activityAt: number,
     staleMs: number,
+    attempts: number,
+    nowMs: number,
   ): Promise<void> {
-    let tail = ''
-    try {
-      tail = (await adapter.readOutput(h, { offset: 0 })).chunk
-    } catch (err) {
-      // 读不到现场不该让唤醒本身泡汤:manager 至少要知道"这个化身静默了这么久"。
-      console.warn(`[WorkerHarness] sweepLiveness: readOutput failed for ${key}:`, err)
+    let text: string | undefined
+    if (attempts === 0) {
+      let tail = ''
+      try {
+        tail = (await adapter.readOutput(h, { offset: 0 })).chunk
+      } catch (err) {
+        // 读不到现场不该让唤醒本身泡汤:manager 至少要知道"这个化身静默了这么久"。
+        console.warn(`[WorkerHarness] sweepLiveness: readOutput failed for ${key}:`, err)
+      }
+      text = truncateWakeText(
+        describeLivenessStall({ impl: h.impl, staleMs, tail }),
+        WAKE_TEXT_MAX_CHARS,
+        ',更早的屏幕内容用 read_worker_output 读',
+        'tail',
+      )
+    } else {
+      text = describeLivenessRetry({ impl: h.impl, staleMs })
     }
-    const text = truncateWakeText(
-      describeLivenessStall({ impl: h.impl, staleMs, tail }),
-      WAKE_TEXT_MAX_CHARS,
-      ',更早的屏幕内容用 read_worker_output 读',
-      'tail',
-    )
     let delivery: HarnessEventDelivery | undefined
     try {
       delivery = await this.appendEventAwaitingDelivery(h.worker_id, h.seq, 'state_changed', {
@@ -1255,9 +1316,15 @@ export class WorkerHarness {
     }
     const mark = this.stallReports.get(key)
     // 期间可能已经被别的路径清掉(worker 落终态/又动起来了),那就别把它写回来。
-    if (mark && mark.activityAt === activityAt) {
-      mark.delivery = delivery?.consumed === true ? 'consumed' : 'failed'
+    if (mark && mark.activityAt !== activityAt) return
+    if (!mark) return
+    if (delivery?.consumed === true) {
+      mark.delivery = 'consumed'
+      return
     }
+    mark.delivery = 'failed'
+    mark.attempts = attempts + 1
+    mark.retryAfterMs = nowMs + retryDelayMs(mark.attempts)
   }
 
   /** reconcileOnStartup 单个 worker 的判定+提交,整体在该 worker 的 per-worker 锁临界区内完成。 */

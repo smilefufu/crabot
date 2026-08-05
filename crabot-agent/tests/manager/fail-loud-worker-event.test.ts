@@ -245,14 +245,19 @@ describe('worker 事件路径的 fail-loud（bootstrap.onEvent → reportEpisode
    * **两个特性在 `onEvent` 上的交汇点**（只各测各的不够）：
    *
    * - #74 要的是**副作用**：episode 失败 → `reportEpisodeFailure` 通知人类；
-   * - 活性巡检要的是**返回值**：把"这次唤醒没被消费"交回 harness，好让它下一轮重报。
+   * - 活性巡检要的是**返回值**：把"这次唤醒没被消费"交回 harness，好让它**按退避重试投递**。
    *
    * 失败时两件事必须同时发生。这里用真装配 + 真 `ClaudeCodeAdapter.lastActivityAt`
    * （对约定路径的 output 日志做一次 mtime 探测，不需要 tmux）把整条链跑通：
    * 巡检发事件 → 真 `ManagerLoop` 撞上挂掉的 LLM → 落 `outcome='failed'`。
+   *
+   * 重试的形态是 PR #75 review 的修正：**带退避、且不带正文** —— 现场在 episode 失败时被
+   * `ManagerLoop` 整体推回了 mailbox，重试只是再触发一次投递（mailbox 自己没有投递者）。
    */
-  it('交汇点：巡检发事件 → episode 失败 → ①人类收到兜底 ②harness 收到"未消费"，下一轮重报', async () => {
-    const stack = makeStack()
+  it('交汇点：巡检发事件 → episode 失败 → ①人类收到兜底 ②harness 收到"未消费"，按退避重试且不带正文', async () => {
+    const STALL_MS = 30 * 60 * 1000 // = harness 的 LIVENESS_STALL_MS
+    let clockMs = Date.now()
+    const stack = makeStack({ now: () => new Date(clockMs).toISOString() })
     const workerId = 'w-stalled'
     const dataRoot = join(tmpRoot, 'data')
 
@@ -267,8 +272,13 @@ describe('worker 事件路径的 fail-loud（bootstrap.onEvent → reportEpisode
     await fs.mkdir(logDir, { recursive: true })
     const logPath = join(logDir, 'output-1.log')
     await fs.writeFile(logPath, '⏺ 正在读取文件…', 'utf-8')
-    const stalledAt = new Date(Date.now() - 2 * 60 * 60 * 1000)
+    const stalledAt = new Date(clockMs - 2 * 60 * 60 * 1000)
     await fs.utimes(logPath, stalledAt, stalledAt)
+
+    const wakeTexts = async (): Promise<string[]> =>
+      (await stack.harness.readWorkerEvents(workerId))
+        .filter((e) => e.kind === 'state_changed' && typeof e.detail?.text === 'string')
+        .map((e) => e.detail!.text as string)
 
     await stack.harness.sweepLiveness()
 
@@ -278,16 +288,22 @@ describe('worker 事件路径的 fail-loud（bootstrap.onEvent → reportEpisode
     expect(text).toContain('worker「卡住的活」的状态更新')
     expect(text).toContain('没跑成')
 
-    const wakeEvents = async (): Promise<number> =>
-      (await stack.harness.readWorkerEvents(workerId)).filter(
-        (e) => e.kind === 'state_changed' && typeof e.detail?.text === 'string',
-      ).length
-    expect(await wakeEvents()).toBe(1)
+    // 首报带现场
+    expect(await wakeTexts()).toHaveLength(1)
+    expect((await wakeTexts())[0]).toContain('⏺ 正在读取文件…')
 
-    // ② 我这一侧：episode 失败 ⇒ harness 拿到 consumed:false ⇒ 下一轮**重报**
-    //    （若 onEvent 把失败也答成"已消费"，去重标记会粘住，这里恒为 1）
+    // ② 我这一侧：episode 失败 ⇒ harness 拿到 consumed:false ⇒ 可以重试，但**要等退避**。
+    //    紧接着再扫一轮不该有动静（若 onEvent 把失败答成"已消费"，后面那次退避到点也不会重试）。
     await stack.harness.sweepLiveness()
-    expect(await wakeEvents()).toBe(2)
+    expect(await wakeTexts()).toHaveLength(1)
+
+    // 第一个退避窗口 = 1×T 到点 → 重试投递，且**不带正文**
+    clockMs += STALL_MS
+    await stack.harness.sweepLiveness()
+    const texts = await wakeTexts()
+    expect(texts).toHaveLength(2)
+    expect(texts[1]).not.toContain('⏺ 正在读取文件…')
+    expect(texts[1]).toContain('重试投递')
   })
 
   it('不注入 reportEpisodeFailure 时保持既有行为：只记日志、不炸（可选钩子）', async () => {

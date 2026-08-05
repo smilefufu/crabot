@@ -50,6 +50,7 @@ class CliLikeAdapter implements WorkerAdapter {
   readonly activity = new Map<string, number | undefined>()
   outputTail = '(pane 尾部)'
   lastActivityAtCalls: string[] = []
+  readOutputCalls: string[] = []
   private readonly states = new Map<string, WorkerContractState>()
 
   constructor(implId: WorkerImplId) {
@@ -72,7 +73,8 @@ class CliLikeAdapter implements WorkerAdapter {
     throw new Error('CliLikeAdapter.fork: 本文件不涉及')
   }
   async sendInput(_h: IncarnationHandle, _text: string): Promise<void> {}
-  async readOutput(_h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
+  async readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
+    this.readOutputCalls.push(handleKey(h))
     return { chunk: this.outputTail, nextCursor: cursor }
   }
   /** 真实 adapter 的三源判定在这四例里全部落在 else 兜底 running——桩照此固定。 */
@@ -255,7 +257,7 @@ describe.each<WorkerImplId>(['claude-code', 'codex'])('WorkerHarness.sweepLivene
     expect(wakeEvents(workerId)).toHaveLength(2)
   })
 
-  it('⑤-② 重报:manager 没消费这次唤醒(consumedEvents !== true)→ 下一轮重报', async () => {
+  it('⑤-② 重试:manager 没消费(consumedEvents !== true)→ 按 1×T→2×T→4×T 退避重试,恢复后收敛', async () => {
     const { harness, workerId } = await spawnRunning()
     deliverConsumed = false // manager 不可用:episode 失败,整批输入被推回 mailbox
 
@@ -263,18 +265,72 @@ describe.each<WorkerImplId>(['claude-code', 'codex'])('WorkerHarness.sweepLivene
     await harness.sweepLiveness()
     expect(wakeEvents(workerId)).toHaveLength(1)
 
-    clockMs += 5 * MINUTE
+    // 退避未到:巡检照跑,但**不重试** —— 这正是原来那个 5 分钟节奏的温循环被堵掉的地方
+    for (let i = 0; i < 5; i++) {
+      clockMs += 5 * MINUTE
+      await harness.sweepLiveness()
+    }
+    expect(wakeEvents(workerId)).toHaveLength(1)
+
+    // 第 1 次退避窗口 = 1×T
+    clockMs += STALL_MS
     await harness.sweepLiveness()
     expect(wakeEvents(workerId)).toHaveLength(2)
 
-    // manager 恢复 → 消费成功后不再重复唤醒
+    // 第 2 次退避窗口 = 2×T:1×T 之后还不到点
+    clockMs += STALL_MS + MINUTE
+    await harness.sweepLiveness()
+    expect(wakeEvents(workerId)).toHaveLength(2)
+    clockMs += STALL_MS
+    await harness.sweepLiveness()
+    expect(wakeEvents(workerId)).toHaveLength(3)
+
+    // 第 3 次退避窗口 = 4×T(封顶):3×T 之后还不到点
+    clockMs += 3 * STALL_MS
+    await harness.sweepLiveness()
+    expect(wakeEvents(workerId)).toHaveLength(3)
+    clockMs += STALL_MS + MINUTE
+    await harness.sweepLiveness()
+    expect(wakeEvents(workerId)).toHaveLength(4)
+
+    // manager 恢复 → 这一次被消费 → 之后再不打扰(封顶窗口过完也不再发)
     deliverConsumed = true
-    clockMs += 5 * MINUTE
+    clockMs += 4 * STALL_MS + MINUTE
     await harness.sweepLiveness()
-    expect(wakeEvents(workerId)).toHaveLength(3)
-    clockMs += 5 * MINUTE
+    expect(wakeEvents(workerId)).toHaveLength(5)
+    clockMs += 8 * STALL_MS
     await harness.sweepLiveness()
-    expect(wakeEvents(workerId)).toHaveLength(3)
+    expect(wakeEvents(workerId)).toHaveLength(5)
+  })
+
+  it('⑤-③ 重试不带正文:只有首报带 pane 现场,后续重试是一行,mailbox 不会堆同一份现场', async () => {
+    const { harness, adapter, workerId } = await spawnRunning()
+    adapter.outputTail = '⏺ 正在读取文件…'
+    deliverConsumed = false
+
+    clockMs += STALL_MS + MINUTE
+    await harness.sweepLiveness()
+    // 连吃三次退避窗口,拿到 3 次重试
+    for (const wait of [STALL_MS, 2 * STALL_MS, 4 * STALL_MS]) {
+      clockMs += wait
+      await harness.sweepLiveness()
+    }
+
+    const woke = wakeEvents(workerId)
+    expect(woke).toHaveLength(4)
+
+    const first = woke[0].detail?.text as string
+    expect(first).toContain('⏺ 正在读取文件…') // 首报:现场在
+
+    for (const e of woke.slice(1)) {
+      const text = e.detail?.text as string
+      // 重试:不再重复现场(现场已压在 manager 的 mailbox 里),只有一行
+      expect(text).not.toContain('⏺ 正在读取文件…')
+      expect(text).toContain('重试投递')
+      expect(text.length).toBeLessThan(120)
+    }
+    // 只在首报那一次读过 pane —— 重试连 readOutput 都不调
+    expect(adapter.readOutputCalls).toHaveLength(1)
   })
 
   it('⑥ 台账一字不改:巡检前后 task.status 与化身 state 完全一致', async () => {
