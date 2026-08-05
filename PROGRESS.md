@@ -1,6 +1,6 @@
 # Crabot 项目进度
 
-> 最后更新：2026-08-05 — 模块健康与 Memory 维护最小修复（分支 `fix/module-health-maintenance-minimal`，实现与评审完成，待 PR）
+> 最后更新：2026-08-05 — 模块健康与 Memory 维护最小修复已通过 PR #72 合并
 
 ## 2026-08-04 — 模块健康与 Memory 维护最小修复
 
