@@ -54,6 +54,17 @@ function buildAgent(managerStack?: unknown): AgentUnderTest {
   return agent as unknown as AgentUnderTest
 }
 
+/** `routeSchedule` 的成功返回形状(handler 的 fail-loud 收尾要读 `outcome`)。 */
+function completedEpisode(outcome: 'completed' | 'failed' | 'aborted' = 'completed'): {
+  episodeId: string
+  outcome: string
+  turns: number
+  consumedEvents: boolean
+  repliedToHuman: boolean
+} {
+  return { episodeId: 'ep-1', outcome, turns: 1, consumedEvents: true, repliedToHuman: false }
+}
+
 function makeLedgerWorker(p: {
   workerId: string
   status?: LedgerWorker['task']['status']
@@ -198,7 +209,11 @@ describe('trigger_schedule(§8.2)', () => {
 
   it('参数按 §8.2 原样透传给 registry.routeSchedule(含 target_session / 权限身份)', () => {
     const calls: unknown[] = []
-    const agent = buildAgent({ registry: { routeSchedule: (p: unknown) => { calls.push(p); return Promise.resolve() } } })
+    // resolve 一个**成功**的 episode:handler 的收尾要读 `outcome`(fail-loud 判据双管),
+    // 裸 `Promise.resolve()` 已经不是 `routeSchedule` 的真实契约形状。
+    const agent = buildAgent({
+      registry: { routeSchedule: (p: unknown) => { calls.push(p); return Promise.resolve(completedEpisode()) } },
+    })
 
     agent.handleTriggerSchedule({
       schedule_id: 'sc-9',
@@ -224,6 +239,224 @@ describe('trigger_schedule(§8.2)', () => {
     expect(() => agent.handleTriggerSchedule({ schedule_id: 'sc', title: 't', description: 'd' })).toThrow(
       /Manager stack not initialized/,
     )
+  })
+})
+
+// ============================================================================
+// §8.2 fail-loud:定时任务失败不再静默
+//
+// 事前形态:游离 promise 只 `.catch(console.error)`,**从不看 outcome**——最常见的失败
+// (F1:LLM 挂 / key 过期 / 限流耗尽,不抛错、只把 outcome 写成 failed)因此完全静默,
+// 人类那边的表现就是"早报没发、反思没生成",而且没有任何提示。
+//
+// 这里只替身 `registry.routeSchedule` 与出站 `rpcClient`:判据、文案、冷却、目标解析
+// 全部走生产代码。
+// ============================================================================
+
+describe('trigger_schedule 的 fail-loud 兜底', () => {
+  const ADMIN_PORT = 18000
+  const WECHAT_PORT = 18001
+
+  interface RpcCall {
+    port: number
+    method: string
+    params: Record<string, unknown>
+  }
+
+  interface FailLoudAgent extends AgentUnderTest {
+    failLoudSentAt: Map<string, number>
+  }
+
+  function buildOutboundAgent(routeSchedule: () => Promise<unknown>): {
+    agent: FailLoudAgent
+    rpcCalls: RpcCall[]
+    failSend: { value: boolean }
+  } {
+    const rpcCalls: RpcCall[] = []
+    const failSend = { value: false }
+    const agent = buildAgent({ registry: { routeSchedule } }) as unknown as Record<string, unknown>
+    agent.failLoudSentAt = new Map<string, number>()
+    agent.silentEpisodeStreak = new Map<string, number>()
+    // 端口预置:出站不走 rpcClient.resolve(那是另一条链路的事)
+    agent.channelPorts = new Map([['wechat', WECHAT_PORT]])
+    agent.adminPort = ADMIN_PORT
+    agent.rpcClient = {
+      call: async (port: number, method: string, params: Record<string, unknown>) => {
+        rpcCalls.push({ port, method, params })
+        if (failSend.value) throw new Error('channel 也挂了')
+        return {}
+      },
+      resolve: async () => [],
+    }
+    return { agent: agent as unknown as FailLoudAgent, rpcCalls, failSend }
+  }
+
+  function sentText(rpcCalls: RpcCall[]): string | undefined {
+    const sent = rpcCalls.find((c) => c.method === 'send_message')
+    return (sent?.params.content as { text: string } | undefined)?.text
+  }
+
+  /** 游离 promise 的收尾跑在微任务里,handler 同步返回后要给它几个回合。 */
+  async function settle(): Promise<void> {
+    for (let i = 0; i < 10; i++) await Promise.resolve()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+
+  let errorSpy: ReturnType<typeof vi.spyOn>
+  let warnSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('F1(outcome=failed,不抛错)→ 目标会话收到兜底消息', async () => {
+    const { agent, rpcCalls } = buildOutboundAgent(async () => completedEpisode('failed'))
+
+    agent.handleTriggerSchedule({
+      schedule_id: 'sc-morning',
+      title: '每日早报',
+      description: '每天 8 点发早报',
+      target_session: { channel_id: 'wechat', session_id: 'sess-1' },
+    })
+    await settle()
+
+    const sent = rpcCalls.find((c) => c.method === 'send_message')
+    expect(sent, '只 catch 不看 outcome 时这里必然是 undefined —— 正是事前的静默形态').toBeDefined()
+    expect(sent!.port).toBe(WECHAT_PORT)
+    expect(sent!.params.session_id).toBe('sess-1')
+  })
+
+  it('文案是"非人类触发"变体:点名哪个定时任务,且不出现第二人称的"回不了你"', async () => {
+    const { agent, rpcCalls } = buildOutboundAgent(async () => completedEpisode('failed'))
+
+    agent.handleTriggerSchedule({
+      schedule_id: 'sc-morning',
+      title: '每日早报',
+      description: 'd',
+      target_session: { channel_id: 'wechat', session_id: 'sess-1' },
+    })
+    await settle()
+
+    const text = sentText(rpcCalls)
+    expect(text).toContain('定时任务「每日早报」')
+    expect(text).toContain('没跑成')
+    expect(text).toContain('failed')
+    expect(text).toContain('管理员')
+    // 人类消息那份文案照搬过来是错的:定时任务触发时没人刚说话
+    expect(text).not.toContain('回不了你')
+    expect(text).not.toContain('再发一次')
+  })
+
+  it('F2(episode 抛错)→ 兜底文案带上原始错误信息', async () => {
+    const { agent, rpcCalls } = buildOutboundAgent(async () => {
+      throw new Error('adapter thunk 炸了')
+    })
+
+    agent.handleTriggerSchedule({
+      schedule_id: 'sc-x',
+      title: '晚间反思',
+      description: 'd',
+      target_session: { channel_id: 'wechat', session_id: 'sess-1' },
+    })
+    await settle()
+
+    const text = sentText(rpcCalls)
+    expect(text).toContain('定时任务「晚间反思」')
+    expect(text).toContain('adapter thunk 炸了')
+  })
+
+  it('outcome=completed → 不发兜底(误报比漏报更伤)', async () => {
+    const { agent, rpcCalls } = buildOutboundAgent(async () => completedEpisode('completed'))
+
+    agent.handleTriggerSchedule({
+      schedule_id: 'sc-ok',
+      title: '正常任务',
+      description: 'd',
+      target_session: { channel_id: 'wechat', session_id: 'sess-1' },
+    })
+    await settle()
+
+    expect(rpcCalls).toEqual([])
+  })
+
+  it('无 target_session → 投系统任务线程(与 routeSchedule 的路由归属同一判据)', async () => {
+    const { agent, rpcCalls } = buildOutboundAgent(async () => completedEpisode('failed'))
+
+    agent.handleTriggerSchedule({ schedule_id: 'sc-sys', title: '系统巡检', description: 'd' })
+    await settle()
+
+    const sent = rpcCalls.find((c) => c.method === 'send_message')
+    expect(sent!.port).toBe(ADMIN_PORT)
+    expect(sent!.params.session_id).toBe('system-tasks')
+  })
+
+  it('target_session 指向 Master Chat 时改投 system-tasks —— 不认领人类那条在飞的占位气泡', async () => {
+    const { agent, rpcCalls } = buildOutboundAgent(async () => completedEpisode('failed'))
+
+    agent.handleTriggerSchedule({
+      schedule_id: 'sc-master',
+      title: '主人专属早报',
+      description: 'd',
+      target_session: { channel_id: 'admin-web', session_id: 'admin-chat' },
+    })
+    await settle()
+
+    const sent = rpcCalls.find((c) => c.method === 'send_message')
+    expect(sent!.port).toBe(ADMIN_PORT)
+    // admin 的 storeAssistantMessage 只在 session_id==='admin-chat' 时 claimPendingRequestId():
+    // 投 admin-chat 会把当时在飞的那条人类提问的气泡顶掉(它自己的答案就永远转圈了)。
+    // 两个 session 落的是同一个 store / 同一条 chat_push,人类照样看得到。
+    expect(sent!.params.session_id).toBe('system-tasks')
+  })
+
+  it('按 key 冷却仍然生效:连续失败只发一条', async () => {
+    const { agent, rpcCalls } = buildOutboundAgent(async () => completedEpisode('failed'))
+
+    for (let i = 0; i < 3; i++) {
+      agent.handleTriggerSchedule({
+        schedule_id: 'sc-loop',
+        title: '高频任务',
+        description: 'd',
+        target_session: { channel_id: 'wechat', session_id: 'sess-1' },
+      })
+      await settle()
+    }
+
+    expect(rpcCalls.filter((c) => c.method === 'send_message')).toHaveLength(1)
+    expect(warnSpy).toHaveBeenCalled()
+  })
+
+  it('送不出去(channel 也挂了)只落日志,不抛、不产生 unhandledRejection', async () => {
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      const { agent, failSend } = buildOutboundAgent(async () => completedEpisode('failed'))
+      failSend.value = true
+
+      expect(
+        agent.handleTriggerSchedule({
+          schedule_id: 'sc-dead',
+          title: '任务',
+          description: 'd',
+          target_session: { channel_id: 'wechat', session_id: 'sess-1' },
+        }),
+      ).toEqual({ accepted: true })
+      await settle()
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      expect(unhandled).toEqual([])
+      expect(errorSpy).toHaveBeenCalled()
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
   })
 })
 

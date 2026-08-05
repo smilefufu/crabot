@@ -56,7 +56,7 @@ import {
   type ResolvedPrincipal,
 } from './principal.js'
 import type { CompactionPolicy } from './compaction.js'
-import type { ManagerKey } from './types.js'
+import type { ManagerEpisodeFailure, ManagerKey } from './types.js'
 
 // 与 `unified-agent.ts` 同款引用路径:这两个常量没有从 `engine/index.ts` 转出,直接引子模块
 // (engine 本阶段零改动,不为此新增 barrel 导出)。
@@ -157,7 +157,34 @@ export interface BootstrapDeps {
    * 只维护台账、不对外发事件。
    */
   readonly publishEvent?: AgentEventPublisher
+  /**
+   * fail-loud 兜底出口:worker 事件唤醒的 manager episode 失败时,直接告诉人类一声。
+   * 接线范式与上面的 `publishEvent` 完全一致(可选;不注入则这条路保持"只记日志"的既有行为)。
+   *
+   * 为什么要有:`onEvent` 是 fire-and-forget,原本只 `.catch(console.error)`,且**从不看
+   * outcome**——最常见的失败(F1:LLM 挂 / key 过期 / 限流耗尽,不抛错、只把 `outcome` 写成
+   * `failed`)因此完全静默。人类那一侧的表现是"worker 干完了/挂了,但再也没人来汇报"。
+   *
+   * 实现落在 `unified-agent.ts`(`sendBackgroundFailLoud`):出站要 `rpcClient` + channel 端口,
+   * 而那是 agent 的东西,不是 manager 栈的。这里只交出口子。
+   */
+  readonly reportEpisodeFailure?: EpisodeFailureReporter
 }
+
+/**
+ * `BootstrapDeps.reportEpisodeFailure` 的形状。
+ *
+ * - `target`:告诉谁。由本模块从台账解出(见 `onEvent` 处的注释),已是 `{channel_id, session_id}`;
+ * - `subject`:哪件事没跑成,直接做兜底文案的主语;
+ * - `failure`:失败形态(判据双管,见 `ManagerEpisodeFailure`)。
+ *
+ * **返回 void 且实现方绝不能抛**:调用点在游离 promise 的收尾里,抛出去就是 unhandledRejection。
+ */
+export type EpisodeFailureReporter = (report: {
+  readonly target: { readonly channel_id: string; readonly session_id: string }
+  readonly subject: string
+  readonly failure: ManagerEpisodeFailure
+}) => void
 
 /** `ManagerKey` → `{channel_id, session_id}`。按**第一个** `::` 切,session_id 里再含 `::` 也不会被截断。 */
 function channelSessionFromManagerKey(key: ManagerKey): { channel_id: string; session_id: string } {
@@ -224,6 +251,35 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     ? makeTaskStatusEventBridge({ ledger, publish: deps.publishEvent })
     : undefined
 
+  /**
+   * worker 事件唤醒的 episode 失败 → `deps.reportEpisodeFailure`(fail-loud)。
+   *
+   * 目标会话取**该 worker 的监护 manager**(`origin.spawned_by_session`),台账查不到则落系统
+   * 线程——与 `routeWorkerEvent` 自己的路由判据逐字相同,所以"哪个 manager 挂了"和"告诉谁"
+   * 永远是同一个会话。不用 `report_to`:那是 worker **结果**的回报目标,可以与监护 session 不同
+   * (同一 friend 跨 channel 共享台账),拿它当告警目标会把话说到另一个对话里去。
+   *
+   * **绝不抛**:调用点在游离 promise 的 `.then`/`.catch` 收尾里,从这里抛出去就是
+   * unhandledRejection → 打死 agent 进程。台账读失败(findWorker)也只记日志。
+   */
+  const reportWorkerEventFailure = async (workerId: string, failure: ManagerEpisodeFailure): Promise<void> => {
+    if (!deps.reportEpisodeFailure) return
+    try {
+      const found = await ledger.findWorker(workerId)
+      const target = channelSessionFromManagerKey(
+        found?.worker.origin.spawned_by_session ?? SYSTEM_TASKS_MANAGER_KEY,
+      )
+      const title = found?.worker.task.title
+      deps.reportEpisodeFailure({
+        target,
+        subject: `worker「${title ?? workerId}」的状态更新`,
+        failure,
+      })
+    } catch (err) {
+      console.error(`[manager-bootstrap] fail-loud 上报失败 (worker=${workerId}):`, err)
+    }
+  }
+
   // --- 四步接线契约 step 1:先建空壳 Map ---
   const adapters = new Map<WorkerImplId, WorkerAdapter>()
 
@@ -246,9 +302,21 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       publishTaskStatusChanged?.(event)
 
       if (!registry || !shouldWakeOnHarnessEvent(event)) return
-      void registry.routeWorkerEvent(event).catch((err) => {
-        console.error(`[manager-bootstrap] routeWorkerEvent 失败 (worker=${event.worker_id}, kind=${event.kind}):`, err)
-      })
+      // fail-loud 的判据必须双管:`.catch` 只抓得到 F2(中途抛错),而最常见的 F1(LLM 挂 /
+      // key 过期 / 限流耗尽)是**正常 resolve 且 outcome='failed'**——只 catch 等于对它全瞎。
+      void registry
+        .routeWorkerEvent(event)
+        .then(async (result) => {
+          if (result?.outcome !== 'failed' && result?.outcome !== 'aborted') return
+          console.error(
+            `[manager-bootstrap] routeWorkerEvent episode outcome=${result.outcome} (worker=${event.worker_id}, kind=${event.kind})`,
+          )
+          await reportWorkerEventFailure(event.worker_id, { kind: 'outcome', outcome: result.outcome })
+        })
+        .catch(async (err) => {
+          console.error(`[manager-bootstrap] routeWorkerEvent 失败 (worker=${event.worker_id}, kind=${event.kind}):`, err)
+          await reportWorkerEventFailure(event.worker_id, { kind: 'threw', error: err })
+        })
     },
     builtinSpawnDefaults: deps.builtinSpawnDefaults,
   }
