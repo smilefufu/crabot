@@ -542,22 +542,4 @@ describe('Module auto_restart integration', () => {
     const r2 = scheduleRestart(r1.next_history, 2000)
     expect(r2.next_history.attempts).toHaveLength(2)
   })
-
-  it('intentional_stop flag prevents restart_history pollution', () => {
-    // 单元级断言：intentional_stop=true 的 runtime 不应该让 RestartPolicy 增长 history
-    // （这条只验证设计契约，真正 wiring 在 ModuleManager 集成测里）
-    const runtime: { intentional_stop?: boolean; restart_history?: { attempts: ReadonlyArray<number> } } = {
-      intentional_stop: true,
-      restart_history: { attempts: [] },
-    }
-    // 模拟 proc.exit 内 guard：if (intentional_stop) return
-    if (runtime.intentional_stop) {
-      runtime.intentional_stop = false
-    } else {
-      // 这里本应该走 scheduleRestart，但因为 flag 真，跳过
-      throw new Error('should not reach scheduleRestart')
-    }
-    expect(runtime.restart_history?.attempts).toHaveLength(0)
-    expect(runtime.intentional_stop).toBe(false)
-  })
 })

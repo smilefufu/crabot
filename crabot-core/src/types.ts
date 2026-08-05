@@ -65,12 +65,6 @@ export interface ModuleRuntime extends ModuleDefinition {
    * 每次 crashed 触发自动重启时 push 一个时间戳；窗口外的会被裁剪。
    */
   restart_history?: import('./restart-policy.js').RestartHistory
-  /**
-   * 主动停止标记：当用户/admin/MM 主动调 stopModuleProcess 时设为 true，
-   * proc.on('exit') 看到此标记则跳过自动重启决策（不污染 restart_history、不发自愈事件）。
-   * 标记本身在每次 startModuleProcess 进入 starting 状态时清零。
-   */
-  intentional_stop?: boolean
 }
 
 // ============================================================================
