@@ -41,6 +41,18 @@ _UPDATABLE_FIELDS = frozenset({
 _MATURITY_TERMINALS = frozenset({"rule", "confirmed", "established"})
 
 
+def run_maintenance_sync(store, index, params: dict) -> dict:
+    """Run maintenance synchronously with the existing RPC request/report shape."""
+    scope = params.get("scope", "all")
+    now_iso = params.get("now_iso") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    config = MaintenanceConfig(
+        now_iso=now_iso,
+        stale_idle_days=int(params.get("stale_idle_days", 180)),
+        trash_retention_days=int(params.get("trash_retention_days", 30)),
+    )
+    return {"report": _run_maintenance(store, index, scope=scope, config=config)}
+
+
 class LongTermV2Rpc:
     def __init__(self, store, index, llm=None, reranker=None):
         self.store = store
@@ -370,15 +382,7 @@ class LongTermV2Rpc:
                 "stats": {"node_count": len(nodes), "edge_count": len(edges)}}
 
     async def run_maintenance(self, params: dict) -> dict:
-        scope = params.get("scope", "all")
-        now_iso = params.get("now_iso") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        cfg = MaintenanceConfig(
-            now_iso=now_iso,
-            stale_idle_days=int(params.get("stale_idle_days", 180)),
-            trash_retention_days=int(params.get("trash_retention_days", 30)),
-        )
-        report = _run_maintenance(self.store, self.index, scope=scope, config=cfg)
-        return {"report": report}
+        return run_maintenance_sync(self.store, self.index, params)
 
     async def trigger_consolidation(self, params: dict) -> dict:
         """兜底接口；正常路径由 Admin schedule 触发反思 skill。"""

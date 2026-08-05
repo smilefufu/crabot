@@ -810,6 +810,85 @@ describe('AdminModule - Schedule Management', () => {
       expect(response.data.schedule.execution_count).toBeGreaterThanOrEqual(1)
     })
 
+    it('builtin memory_maintenance forwards system-task metadata and stores returned task_id', async () => {
+      const defaultImplementation = triggerCallSpy.getMockImplementation()
+      triggerCallSpy.mockImplementation(
+        (_port: unknown, method: string, params: unknown) => {
+          if (method === 'trigger_schedule') {
+            const payload = params as { task_type?: string; is_builtin?: boolean }
+            return Promise.resolve(payload.task_type === 'memory_maintenance' && payload.is_builtin
+              ? { accepted: true, task_id: 'agent-system-task-1' }
+              : { accepted: true })
+          }
+          return defaultImplementation?.(_port, method, params)
+        },
+      )
+      try {
+        const list = await makeProtocolRequest<{ items: Schedule[] }>(
+          TEST_PROTOCOL_PORT,
+          'list_schedules',
+          { page: 1, page_size: 100, filter: {} },
+        )
+        const maintenance = list.data!.items.find(
+          (schedule) => schedule.is_builtin && schedule.task_template.type === 'memory_maintenance',
+        )!
+
+        const response = await makeProtocolRequest<{
+          accepted: true
+          schedule: Schedule
+          task_id?: string
+        }>(TEST_PROTOCOL_PORT, 'trigger_now', { schedule_id: maintenance.id })
+
+        const call = triggerCallSpy.mock.calls.findLast((item) => item[1] === 'trigger_schedule')!
+        expect(call[2]).toMatchObject({
+          schedule_id: maintenance.id,
+          task_type: 'memory_maintenance',
+          priority: 'low',
+          input: undefined,
+          tags: ['memory_maintenance', 'builtin'],
+          is_builtin: true,
+        })
+        expect(response.data!.task_id).toBe('agent-system-task-1')
+        expect(response.data!.schedule.last_task_id).toBe('agent-system-task-1')
+      } finally {
+        triggerCallSpy.mockImplementation(defaultImplementation!)
+      }
+    })
+
+    it('user-created memory_maintenance type remains on the ordinary manager route', async () => {
+      const created = await makeProtocolRequest<{ schedule: Schedule }>(
+        TEST_PROTOCOL_PORT,
+        'create_schedule',
+        {
+          name: 'User maintenance lookalike',
+          trigger: { type: 'cron', expression: '0 6 * * *' },
+          task_template: {
+            type: 'memory_maintenance',
+            title: 'User-owned task',
+            priority: 'normal',
+            tags: ['user-owned'],
+            input: { scope: 'all' },
+          },
+        },
+      )
+
+      const response = await makeProtocolRequest<{ accepted: true; task_id?: string }>(
+        TEST_PROTOCOL_PORT,
+        'trigger_now',
+        { schedule_id: created.data!.schedule.id },
+      )
+
+      const call = triggerCallSpy.mock.calls.findLast((item) => item[1] === 'trigger_schedule')!
+      expect(call[2]).toMatchObject({
+        schedule_id: created.data!.schedule.id,
+      })
+      expect(call[2]).not.toHaveProperty('task_type')
+      expect(call[2]).not.toHaveProperty('priority')
+      expect(call[2]).not.toHaveProperty('input')
+      expect(call[2]).not.toHaveProperty('tags')
+      expect(response.data!.task_id).toBeUndefined()
+    })
+
     it('does not fuzzy-repair stale group target_session without platform_session_id', async () => {
       const schedResult = await makeProtocolRequest<{ schedule: Schedule }>(
         TEST_PROTOCOL_PORT,

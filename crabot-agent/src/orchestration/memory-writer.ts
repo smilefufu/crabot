@@ -144,7 +144,7 @@ export class MemoryWriter {
     }
   }
 
-  /** 触发记忆机械维护，fire-and-forget */
+  /** 触发记忆机械维护；失败必须传播给 system-task handler。 */
   async runMaintenance(scope: 'all' | 'observation_check' | 'stale_aging' | 'trash_cleanup' = 'all'): Promise<void> {
     try {
       const memoryPort = await this.getMemoryPort()
@@ -157,6 +157,7 @@ export class MemoryWriter {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       console.error(`[${this.moduleId}] Failed to run memory maintenance:`, message)
+      throw error
     }
   }
 

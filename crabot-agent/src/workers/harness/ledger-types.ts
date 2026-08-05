@@ -60,9 +60,13 @@ export interface LedgerWorker {
   worker_id: string
   task: {
     id: TaskId
+    /** Schedule/system business type; optional for ordinary worker tasks. */
+    type?: string
     title: string
     status: TaskStatus // 精简状态机,见 base-protocol §5.10
     priority?: TaskPriority
+    input?: Record<string, unknown>
+    tags?: string[]
     goal?: string
     outcome?: string
     created_at: string
