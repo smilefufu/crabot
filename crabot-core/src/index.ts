@@ -46,6 +46,7 @@ import { PortAllocator } from './port-allocator.js'
 import { scheduleRestart } from './restart-policy.js'
 import { checkDiskLow } from './disk-watcher.js'
 import { resolveExecutable } from './executable-resolver.js'
+import { terminateProcessTree, waitForProcessTreeExit } from './process-tree.js'
 
 // ============================================================================
 // 类型定义
@@ -60,6 +61,23 @@ interface EventSubscription {
   eventTypes: string[]
 }
 
+interface ManagedChildState {
+  moduleId: ModuleId
+  child: ChildProcess
+  rootPid?: number
+  reachedRunning: boolean
+  intentionalReason?: ModuleStopReason
+  finalReason?: ModuleStopReason
+  finalizeStarted: boolean
+  finalizeError?: Error
+  finalized: Promise<void>
+  resolveFinalized: () => void
+  termination?: Promise<void>
+  forceTermination?: Promise<void>
+  logStream: ReturnType<typeof fs.createWriteStream>
+  logEnded: boolean
+}
+
 // ============================================================================
 // Module Manager 类
 // ============================================================================
@@ -69,6 +87,12 @@ export class ModuleManager {
   private readonly portAllocator: PortAllocator
   private readonly modules: Map<ModuleId, ModuleRuntime> = new Map()
   private readonly processes: Map<ModuleId, ChildProcess> = new Map()
+  private readonly childStates: WeakMap<ChildProcess, ManagedChildState> = new WeakMap()
+  private readonly lifecycleQueues: Map<ModuleId, Promise<void>> = new Map()
+  private readonly restartTimers: Map<ModuleId, NodeJS.Timeout> = new Map()
+  private readonly envOverrides: Map<ModuleId, Record<string, string>> = new Map()
+  private readonly healthProbes: Set<ModuleId> = new Set()
+  private readonly healthRecoveries: Set<ModuleId> = new Set()
   private readonly subscriptions: EventSubscription[] = []
   private readonly methodHandlers: Map<string, MethodHandler> = new Map()
 
@@ -193,14 +217,27 @@ export class ModuleManager {
       this.diskWatcherTimer = null
     }
 
-    // 停止所有运行中的模块
-    const runningModules = Array.from(this.modules.values()).filter(
-      (m) => m.status === 'running' || m.status === 'starting'
-    )
+    for (const timer of this.restartTimers.values()) clearTimeout(timer)
+    this.restartTimers.clear()
 
-    await Promise.all(
-      runningModules.map((m) => this.stopModuleProcess(m.module_id, 'shutdown'))
-    )
+    // Drain operations accepted before shutdown. startModuleProcess rechecks
+    // the terminal flag immediately before spawn, so a paused start cannot
+    // escape the process snapshot below.
+    await Promise.allSettled(Array.from(this.lifecycleQueues.values()))
+
+    // 清理所有仍受管的进程树（包括 health/error 状态下尚未 finalize 的树）。
+    const managedModuleIds = Array.from(this.processes.keys())
+    try {
+      await Promise.all(
+        managedModuleIds.map((moduleId) => this.enqueueLifecycle(
+          moduleId,
+          () => this.stopModuleProcess(moduleId, 'shutdown'),
+        )),
+      )
+    } catch (error) {
+      this.isShuttingDown = false
+      throw error
+    }
 
     // 关闭 HTTP 服务器
     if (this.server) {
@@ -317,6 +354,11 @@ export class ModuleManager {
     runtime.version = params.version
     runtime.protocol_version = params.protocol_version
     runtime.registered_at = generateTimestamp()
+    const child = this.processes.get(params.module_id)
+    if (child) {
+      const state = this.childStates.get(child)
+      if (state) state.reachedRunning = true
+    }
 
     // 模块重启时订阅会重复注册，必须先清掉同 subscriber 的旧记录再写入，
     // 否则 publish_event 会把同一事件投递给同一模块多次。
@@ -369,21 +411,31 @@ export class ModuleManager {
 
   // --- 模块控制 ---
 
+  private assertLifecycleRequestsAllowed(): void {
+    if (!this.isShuttingDown) return
+    throw Object.assign(new Error('Module Manager is shutting down'), {
+      code: 'MODULE_MANAGER_SHUTTING_DOWN',
+    })
+  }
+
   private async handleStartModule(params: {
     module_id: ModuleId
     entry_override?: string
     env?: Record<string, string>
   }): Promise<{ status: 'accepted'; tracking_id: string }> {
+    this.assertLifecycleRequestsAllowed()
     const trackingId = generateId()
+    this.cancelAutoRestart(params.module_id)
 
-    // 异步启动模块
-    this.startModuleProcess(params.module_id, params.entry_override, params.env)
-      .then(() => {
-        // 通过 callback 通知成功
-      })
-      .catch((error) => {
-        console.error(`[ModuleManager] Failed to start module ${params.module_id}:`, error)
-      })
+    this.enqueueLifecycle(params.module_id, async () => {
+      this.cancelAutoRestart(params.module_id)
+      const env = { ...(params.env ?? {}) }
+      this.envOverrides.set(params.module_id, env)
+      await this.startModuleProcess(params.module_id, params.entry_override, env)
+      this.cancelAutoRestart(params.module_id)
+    }).catch((error) => {
+      console.error(`[ModuleManager] Failed to start module ${params.module_id}:`, error)
+    })
 
     return { status: 'accepted', tracking_id: trackingId }
   }
@@ -392,12 +444,17 @@ export class ModuleManager {
     module_id: ModuleId
     force?: boolean
   }): Promise<{ status: 'accepted'; tracking_id: string }> {
+    this.assertLifecycleRequestsAllowed()
     const trackingId = generateId()
+    this.cancelAutoRestart(params.module_id)
 
-    this.stopModuleProcess(params.module_id, params.force ? 'forced' : 'shutdown')
-      .catch((error) => {
-        console.error(`[ModuleManager] Failed to stop module ${params.module_id}:`, error)
-      })
+    this.enqueueLifecycle(params.module_id, async () => {
+      this.cancelAutoRestart(params.module_id)
+      await this.stopModuleProcess(params.module_id, params.force ? 'forced' : 'shutdown')
+      this.cancelAutoRestart(params.module_id)
+    }).catch((error) => {
+      console.error(`[ModuleManager] Failed to stop module ${params.module_id}:`, error)
+    })
 
     return { status: 'accepted', tracking_id: trackingId }
   }
@@ -405,15 +462,25 @@ export class ModuleManager {
   private async handleRestartModule(params: {
     module_id: ModuleId
     force?: boolean
+    env?: Record<string, string>
   }): Promise<{ status: 'accepted'; tracking_id: string }> {
+    this.assertLifecycleRequestsAllowed()
     const trackingId = generateId()
+    this.cancelAutoRestart(params.module_id)
 
-    // 停止后重新启动
-    this.stopModuleProcess(params.module_id, params.force ? 'forced' : 'shutdown')
-      .then(() => this.startModuleProcess(params.module_id))
-      .catch((error) => {
-        console.error(`[ModuleManager] Failed to restart module ${params.module_id}:`, error)
-      })
+    this.enqueueLifecycle(params.module_id, async () => {
+      this.cancelAutoRestart(params.module_id)
+      const env = params.env === undefined
+        ? { ...(this.envOverrides.get(params.module_id) ?? {}) }
+        : { ...params.env }
+      this.envOverrides.set(params.module_id, env)
+      await this.stopModuleProcess(params.module_id, params.force ? 'forced' : 'shutdown')
+      this.cancelAutoRestart(params.module_id)
+      await this.startModuleProcess(params.module_id, undefined, env)
+      this.cancelAutoRestart(params.module_id)
+    }).catch((error) => {
+      console.error(`[ModuleManager] Failed to restart module ${params.module_id}:`, error)
+    })
 
     return { status: 'accepted', tracking_id: trackingId }
   }
@@ -691,7 +758,19 @@ export class ModuleManager {
       throw new Error(`Module definition not found: ${moduleId}`)
     }
 
-    if (runtime.status === 'running') {
+    const existingChild = this.processes.get(moduleId)
+    if (existingChild) {
+      const existingState = this.childStates.get(existingChild)
+      if (!existingState?.finalizeStarted) {
+        throw new Error(`Module already running: ${moduleId}`)
+      }
+      await existingState.finalized
+      if (existingState.finalizeError || this.processes.has(moduleId)) {
+        throw existingState.finalizeError ?? new Error(`Previous process tree still exists: ${moduleId}`)
+      }
+    }
+
+    if (runtime.status === 'running' || runtime.status === 'starting') {
       throw new Error(`Module already running: ${moduleId}`)
     }
 
@@ -725,8 +804,12 @@ export class ModuleManager {
       }
     }
 
+    if (this.isShuttingDown) {
+      throw new Error(`Module Manager is shutting down; refusing to spawn ${moduleId}`)
+    }
+
     runtime.status = 'starting'
-    runtime.intentional_stop = false
+    runtime.health_check_failures = 0
 
     // 替换 entry 中的 {PORT} 模板
     const entry = (entryOverride ?? runtime.entry).replace(/{PORT}/g, String(runtime.port))
@@ -768,10 +851,26 @@ export class ModuleManager {
         ...adminEndpointOverride,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
     })
 
     this.processes.set(moduleId, proc)
     runtime.pid = proc.pid
+
+    let resolveFinalized!: () => void
+    const finalized = new Promise<void>(resolve => { resolveFinalized = resolve })
+    const childState: ManagedChildState = {
+      moduleId,
+      child: proc,
+      rootPid: proc.pid,
+      reachedRunning: false,
+      finalizeStarted: false,
+      finalized,
+      resolveFinalized,
+      logStream,
+      logEnded: false,
+    }
+    this.childStates.set(proc, childState)
 
     // 处理输出：同时落盘 + 终端转发（dev/调试可见）
     proc.stdout?.on('data', (data: Buffer) => {
@@ -784,89 +883,25 @@ export class ModuleManager {
       console.error(`[${moduleId}] ${data.toString().trim()}`)
     })
 
-    proc.once('exit', () => {
-      logStream.end(`[${generateTimestamp()}] === exit ${moduleId} ===\n`)
-    })
+    const finalize = (code: number | null, signal: NodeJS.Signals | null, processError?: Error): void => {
+      this.beginChildFinalize(childState, code, signal, processError).catch((error) => {
+        console.error(`[ModuleManager] Finalize failed for ${moduleId}:`, error)
+      })
+    }
 
-    // 处理进程退出
-    proc.on('exit', (code, signal) => {
-      this.processes.delete(moduleId)
-      runtime.pid = undefined
-
-      const wasRunning = runtime.status === 'running'
-      runtime.status = 'stopped'
-
-      // 模块进程消亡 → 同步清订阅，防止重启后 register 累加
-      this.removeSubscriptionsBySubscriber(moduleId)
-
-      if (!wasRunning || this.isShuttingDown) return
-
-      const reason: ModuleStopReason =
-        code === 0 ? 'shutdown' : signal ? 'crashed' : 'crashed'
-
-      this.publishEvent(
-        createModuleStoppedEvent('module-manager', {
-          module_id: moduleId,
-          module_type: runtime.module_type,
-          reason,
-        })
-      ).catch(console.error)
-
-      if (code === 0) return // 正常退出，到此为止
-
-      // 主动停止（哪怕被 SIGKILL）也不算 crashed，不走 RestartPolicy
-      if (runtime.intentional_stop) {
-        runtime.intentional_stop = false
-        return
+    proc.once('exit', (code, signal) => finalize(code, signal))
+    proc.once('error', (error) => {
+      if (!childState.finalizeStarted) {
+        console.error(`[ModuleManager] Process error for ${moduleId}:`, error)
       }
-
-      // 意外退出
-      runtime.status = 'error'
-
-      // 自动重启决策（仅 auto_restart=true 模块走 RestartPolicy）
-      if (runtime.auto_restart) {
-        const decision = scheduleRestart(
-          runtime.restart_history ?? { attempts: [] },
-          Date.now()
-        )
-        runtime.restart_history = decision.next_history
-
-        if (decision.should_restart) {
-          console.log(
-            `[ModuleManager] Auto-restart ${moduleId} in ${decision.delay_ms}ms (attempt ${decision.next_history.attempts.length}/3)`
-          )
-          setTimeout(() => {
-            // 已开始 shutdown 或被人工启动则跳过
-            if (this.isShuttingDown || runtime.status === 'running' || runtime.status === 'starting') return
-            this.startModuleProcess(moduleId).catch((err) => {
-              console.error(`[ModuleManager] Auto-restart failed for ${moduleId}:`, err)
-            })
-          }, decision.delay_ms)
-          return // 不发 health_changed unhealthy（仍在自愈）
-        }
-
-        console.error(`[ModuleManager] ${moduleId} restart suppressed: ${decision.reason}`)
-      }
-
-      // 不重启或重启耗尽 → 公告不健康
-      this.publishEvent(
-        createModuleHealthChangedEvent('module-manager', {
-          module_id: moduleId,
-          previous: 'healthy',
-          current: 'unhealthy',
-        })
-      ).catch(console.error)
-    })
-
-    proc.on('error', (error) => {
-      console.error(`[ModuleManager] Process error for ${moduleId}:`, error)
-      runtime.status = 'error'
+      finalize(null, null, error)
     })
 
     console.log(`[ModuleManager] Started module: ${moduleId} (PID: ${proc.pid})`)
 
     // skip_health_check 模块不走 /register 流程，直接标记 running
     if (runtime.skip_health_check) {
+      childState.reachedRunning = true
       runtime.status = 'running'
       runtime.registered_at = generateTimestamp()
       this.publishEvent(
@@ -882,42 +917,237 @@ export class ModuleManager {
 
   private async stopModuleProcess(moduleId: ModuleId, reason: ModuleStopReason): Promise<void> {
     const runtime = this.modules.get(moduleId)
-    if (runtime) runtime.intentional_stop = true
-    const proc = this.processes.get(moduleId)
+    if (!runtime) throw new Error(`Module not found: ${moduleId}`)
 
-    if (!runtime) {
-      throw new Error(`Module not found: ${moduleId}`)
-    }
-
-    if (!proc) {
-      runtime.status = 'stopped'
+    const child = this.processes.get(moduleId)
+    if (!child) {
+      runtime.status = reason === 'health_check_failed' ? 'error' : 'stopped'
       return
     }
 
-    return new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        console.warn(`[ModuleManager] Force killing module: ${moduleId}`)
-        proc.kill('SIGKILL')
-      }, this.config.shutdown_timeout * 1000)
+    const state = this.childStates.get(child)
+    if (!state) throw new Error(`Missing child state for module: ${moduleId}`)
 
-      proc.on('exit', () => {
-        clearTimeout(timeout)
-        runtime.status = 'stopped'
+    if (!state.finalizeStarted) {
+      state.intentionalReason = reason
+      try {
+        if (reason === 'shutdown' && !runtime.skip_health_check) {
+          await this.ensureGracefulChildShutdown(state, runtime)
+        } else {
+          await this.ensureChildTreeTerminated(state, reason === 'forced')
+        }
+        if (reason === 'forced') {
+          state.termination = state.forceTermination
+          state.finalizeError = undefined
+        }
+      } catch (error) {
+        runtime.status = 'error'
+        state.finalizeError = error instanceof Error ? error : new Error(String(error))
+        throw error
+      }
+      // Usually exit/error already started finalization. If Node has not emitted it
+      // yet, complete from the confirmed-empty tree instead of waiting forever.
+      await this.beginChildFinalize(state, null, null)
+    } else {
+      if (reason === 'forced') {
+        try {
+          await this.ensureChildTreeTerminated(state, true)
+        } catch (error) {
+          runtime.status = 'error'
+          state.finalizeError = error instanceof Error ? error : new Error(String(error))
+          throw error
+        }
+        await state.finalized
+        if (state.finalizeError) {
+          this.resetChildFinalizeAfterConfirmedForce(state)
+          await this.beginChildFinalize(state, null, null)
+        }
+      } else {
+        await state.finalized
+      }
+    }
 
-        this.publishEvent(
-          createModuleStoppedEvent('module-manager', {
-            module_id: moduleId,
-            module_type: runtime.module_type,
-            reason,
-          })
-        ).catch(console.error)
+    if (state.finalizeError) throw state.finalizeError
+  }
 
-        resolve()
-      })
-
-      // 发送优雅关闭信号
-      proc.kill('SIGTERM')
+  private enqueueLifecycle<T>(moduleId: ModuleId, operation: () => Promise<T>): Promise<T> {
+    const previous = this.lifecycleQueues.get(moduleId) ?? Promise.resolve()
+    const result = previous.then(operation, operation)
+    const settled = result.then(() => undefined, () => undefined)
+    this.lifecycleQueues.set(moduleId, settled)
+    settled.then(() => {
+      if (this.lifecycleQueues.get(moduleId) === settled) this.lifecycleQueues.delete(moduleId)
     })
+    return result
+  }
+
+  private cancelAutoRestart(moduleId: ModuleId): void {
+    const timer = this.restartTimers.get(moduleId)
+    if (!timer) return
+    clearTimeout(timer)
+    this.restartTimers.delete(moduleId)
+  }
+
+  private async terminateChildTree(state: ManagedChildState, forceImmediately: boolean): Promise<void> {
+    if (!state.rootPid) {
+      if (state.finalReason === 'crashed' && state.reachedRunning) {
+        throw new Error(`Cannot confirm process ownership for crashed module ${state.moduleId}`)
+      }
+      // spawn errors with no PID cannot have created an owned process tree.
+      return
+    }
+    const runtime = this.modules.get(state.moduleId)
+    await terminateProcessTree(state.rootPid, {
+      gracefulTimeoutMs: this.config.shutdown_timeout * 1000,
+      forceImmediately,
+      modulePort: runtime?.port,
+      requireOwnedProcess: state.finalReason === 'crashed',
+    })
+  }
+
+  private resetChildFinalizeAfterConfirmedForce(state: ManagedChildState): void {
+    let resolveFinalized!: () => void
+    state.finalized = new Promise<void>(resolve => { resolveFinalized = resolve })
+    state.resolveFinalized = resolveFinalized
+    state.finalizeStarted = false
+    state.finalizeError = undefined
+    state.termination = state.forceTermination ?? Promise.resolve()
+  }
+
+  private async ensureGracefulChildShutdown(
+    state: ManagedChildState,
+    runtime: ModuleRuntime,
+  ): Promise<void> {
+    state.termination ??= this.requestGracefulChildShutdown(state, runtime)
+    await state.termination
+  }
+
+  private async requestGracefulChildShutdown(
+    state: ManagedChildState,
+    runtime: ModuleRuntime,
+  ): Promise<void> {
+    const timeoutMs = this.config.shutdown_timeout * 1000
+    const deadline = Date.now() + timeoutMs
+    try {
+      await this.sendToModule<Record<string, never>>(
+        runtime.port,
+        'shutdown',
+        {},
+        timeoutMs,
+      )
+    } catch (error) {
+      console.warn(
+        `[ModuleManager] Graceful shutdown RPC failed for ${runtime.module_id}: `
+        + `${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+
+    if (!state.rootPid) return
+    const remainingMs = Math.max(0, deadline - Date.now())
+    if (await waitForProcessTreeExit(state.rootPid, remainingMs, 25, runtime.port)) return
+    await terminateProcessTree(state.rootPid, {
+      gracefulTimeoutMs: 0,
+      forceImmediately: true,
+      modulePort: runtime.port,
+    })
+  }
+
+  private async ensureChildTreeTerminated(state: ManagedChildState, forceImmediately = false): Promise<void> {
+    if (forceImmediately) {
+      state.forceTermination ??= this.terminateChildTree(state, true)
+      await state.forceTermination
+      return
+    }
+    state.termination ??= this.terminateChildTree(state, false)
+    await state.termination
+  }
+
+  private async beginChildFinalize(
+    state: ManagedChildState,
+    _code: number | null,
+    _signal: NodeJS.Signals | null,
+    processError?: Error,
+  ): Promise<void> {
+    if (state.finalizeStarted) {
+      await state.finalized
+      if (state.finalizeError) throw state.finalizeError
+      return
+    }
+
+    state.finalizeStarted = true
+    state.finalReason = state.intentionalReason ?? 'crashed'
+    const runtime = this.modules.get(state.moduleId)
+
+    try {
+      await this.ensureChildTreeTerminated(state)
+      const isCurrent = this.processes.get(state.moduleId) === state.child
+      if (!isCurrent || !runtime) return
+
+      this.processes.delete(state.moduleId)
+      runtime.pid = undefined
+      runtime.status = state.finalReason === 'shutdown' || state.finalReason === 'forced'
+        ? 'stopped'
+        : 'error'
+
+      if (!state.reachedRunning) return
+
+      this.removeSubscriptionsBySubscriber(state.moduleId)
+      this.publishEvent(
+        createModuleStoppedEvent('module-manager', {
+          module_id: state.moduleId,
+          module_type: runtime.module_type,
+          reason: state.finalReason,
+        }),
+      ).catch(console.error)
+
+      if (state.finalReason === 'crashed' || state.finalReason === 'health_check_failed') {
+        await this.scheduleAutomaticRestart(runtime)
+      }
+    } catch (error) {
+      state.finalizeError = error instanceof Error ? error : new Error(String(error))
+      if (runtime && this.processes.get(state.moduleId) === state.child) runtime.status = 'error'
+      throw state.finalizeError
+    } finally {
+      if (!state.logEnded) {
+        state.logEnded = true
+        state.logStream.end(
+          `[${generateTimestamp()}] === exit ${state.moduleId}${processError ? ` error=${processError.message}` : ''} ===\n`,
+        )
+      }
+      state.resolveFinalized()
+    }
+  }
+
+  private async scheduleAutomaticRestart(runtime: ModuleRuntime): Promise<void> {
+    if (this.isShuttingDown || !runtime.auto_restart) {
+      await this.transitionHealthStatus(runtime, 'unhealthy')
+      return
+    }
+
+    const decision = scheduleRestart(runtime.restart_history ?? { attempts: [] }, Date.now())
+    runtime.restart_history = decision.next_history
+    if (!decision.should_restart) {
+      console.error(`[ModuleManager] ${runtime.module_id} restart suppressed: ${decision.reason}`)
+      await this.transitionHealthStatus(runtime, 'unhealthy')
+      return
+    }
+
+    console.log(
+      `[ModuleManager] Auto-restart ${runtime.module_id} in ${decision.delay_ms}ms `
+      + `(attempt ${decision.next_history.attempts.length}/3)`,
+    )
+    const timer = setTimeout(() => {
+      if (this.restartTimers.get(runtime.module_id) !== timer) return
+      this.restartTimers.delete(runtime.module_id)
+      this.enqueueLifecycle(runtime.module_id, async () => {
+        if (this.isShuttingDown || this.processes.has(runtime.module_id)) return
+        const env = { ...(this.envOverrides.get(runtime.module_id) ?? {}) }
+        await this.startModuleProcess(runtime.module_id, undefined, env)
+      }).catch((error) => {
+        console.error(`[ModuleManager] Auto-restart failed for ${runtime.module_id}:`, error)
+      })
+    }, decision.delay_ms)
+    this.restartTimers.set(runtime.module_id, timer)
   }
 
   private parseEntry(entry: string): string[] {
@@ -945,51 +1175,84 @@ export class ModuleManager {
   }
 
   private async checkModuleHealth(runtime: ModuleRuntime): Promise<void> {
+    if (this.healthProbes.has(runtime.module_id) || this.healthRecoveries.has(runtime.module_id)) return
+    this.healthProbes.add(runtime.module_id)
+    const probedChild = this.processes.get(runtime.module_id)
+
     try {
       const result = await this.sendToModule<HealthResult>(runtime.port, 'health', {})
-
+      if (this.processes.get(runtime.module_id) !== probedChild) return
       runtime.last_health_check = generateTimestamp()
-      runtime.last_health_status = result.status
-      runtime.health_check_failures = 0
+      if (!result || !['healthy', 'degraded', 'unhealthy'].includes(result.status)) {
+        throw new Error(`Invalid health status: ${String(result?.status)}`)
+      }
 
-      // 更新状态
-      if (result.status !== runtime.last_health_status) {
-        const previous = runtime.last_health_status
-        await this.publishEvent(
-          createModuleHealthChangedEvent('module-manager', {
-            module_id: runtime.module_id,
-            previous: previous ?? 'healthy',
-            current: result.status,
-          })
-        )
+      if (result.status === 'unhealthy') {
+        await this.recordHealthFailure(runtime, probedChild, undefined, true)
+      } else {
+        runtime.health_check_failures = 0
+        await this.transitionHealthStatus(runtime, result.status)
       }
     } catch (error) {
-      runtime.health_check_failures = (runtime.health_check_failures ?? 0) + 1
-      console.warn(
-        `[ModuleManager] Health check failed for ${runtime.module_id} (${runtime.health_check_failures}/${this.config.health_check_failure_threshold})`
-      )
-
-      if (runtime.health_check_failures >= this.config.health_check_failure_threshold) {
-        console.error(`[ModuleManager] Module ${runtime.module_id} marked as error due to health check failures`)
-        runtime.status = 'error'
-        runtime.last_health_status = 'unhealthy'
-
-        await this.publishEvent(
-          createModuleHealthChangedEvent('module-manager', {
-            module_id: runtime.module_id,
-            previous: 'healthy',
-            current: 'unhealthy',
-          })
-        )
-
-        // 停止有问题的进程
-        const proc = this.processes.get(runtime.module_id)
-        if (proc) {
-          proc.kill('SIGKILL')
-          this.processes.delete(runtime.module_id)
-        }
-      }
+      if (this.processes.get(runtime.module_id) !== probedChild) return
+      runtime.last_health_check = generateTimestamp()
+      await this.recordHealthFailure(runtime, probedChild, error)
+    } finally {
+      this.healthProbes.delete(runtime.module_id)
     }
+  }
+
+  private async recordHealthFailure(
+    runtime: ModuleRuntime,
+    failedChild: ChildProcess | undefined,
+    error?: unknown,
+    explicitlyUnhealthy = false,
+  ): Promise<void> {
+    runtime.health_check_failures = (runtime.health_check_failures ?? 0) + 1
+    console.warn(
+      `[ModuleManager] Health check failed for ${runtime.module_id} `
+      + `(${runtime.health_check_failures}/${this.config.health_check_failure_threshold})`
+      + (error ? `: ${error instanceof Error ? error.message : String(error)}` : ''),
+    )
+
+    if (explicitlyUnhealthy) await this.transitionHealthStatus(runtime, 'unhealthy')
+    if (runtime.health_check_failures < this.config.health_check_failure_threshold) return
+
+    await this.transitionHealthStatus(runtime, 'unhealthy')
+    this.scheduleHealthRecovery(runtime, failedChild)
+  }
+
+  private async transitionHealthStatus(runtime: ModuleRuntime, current: HealthResult['status']): Promise<void> {
+    const previous = runtime.last_health_status ?? 'healthy'
+    const changed = previous !== current
+    runtime.last_health_status = current
+    if (!changed) return
+
+    await this.publishEvent(
+      createModuleHealthChangedEvent('module-manager', {
+        module_id: runtime.module_id,
+        previous,
+        current,
+      }),
+    )
+  }
+
+  private scheduleHealthRecovery(runtime: ModuleRuntime, failedChild: ChildProcess | undefined): void {
+    if (this.isShuttingDown || this.healthRecoveries.has(runtime.module_id)) return
+    this.healthRecoveries.add(runtime.module_id)
+
+    this.enqueueLifecycle(runtime.module_id, async () => {
+      if (!failedChild || this.processes.get(runtime.module_id) !== failedChild) {
+        if (!this.processes.has(runtime.module_id) && runtime.status === 'running') runtime.status = 'error'
+        return
+      }
+      await this.stopModuleProcess(runtime.module_id, 'health_check_failed')
+    }).catch((error) => {
+      runtime.status = 'error'
+      console.error(`[ModuleManager] Health recovery failed for ${runtime.module_id}:`, error)
+    }).finally(() => {
+      this.healthRecoveries.delete(runtime.module_id)
+    })
   }
 
   // ============================================================================
@@ -1032,8 +1295,32 @@ export class ModuleManager {
     return eventType === pattern
   }
 
-  private async sendToModule<R>(port: number, method: string, params: unknown): Promise<R> {
+  private async sendToModule<R>(
+    port: number,
+    method: string,
+    params: unknown,
+    timeoutMs = this.config.health_check_timeout * 1000,
+  ): Promise<R> {
     return new Promise((resolve, reject) => {
+      let settled = false
+      let absoluteTimer: NodeJS.Timeout | undefined
+      const clearAbsoluteTimer = (): void => {
+        if (absoluteTimer) clearTimeout(absoluteTimer)
+        absoluteTimer = undefined
+      }
+      const succeed = (value: R): void => {
+        if (settled) return
+        settled = true
+        clearAbsoluteTimer()
+        resolve(value)
+      }
+      const fail = (error: unknown): void => {
+        if (settled) return
+        settled = true
+        clearAbsoluteTimer()
+        reject(error instanceof Error ? error : new Error(String(error)))
+      }
+
       const request: Request = {
         id: generateId(),
         source: 'module-manager',
@@ -1053,32 +1340,38 @@ export class ModuleManager {
             'Content-Type': 'application/json',
             'Content-Length': Buffer.byteLength(body),
           },
-          timeout: this.config.health_check_timeout * 1000,
+          timeout: timeoutMs,
         },
         (res) => {
           let data = ''
-          res.on('data', (chunk: string) => {
-            data += chunk
+          res.on('data', (chunk: string) => { data += chunk })
+          res.on('aborted', () => fail(new Error('Response aborted')))
+          res.on('error', fail)
+          res.on('close', () => {
+            if (!res.complete) fail(new Error('Response closed before completion'))
           })
           res.on('end', () => {
             try {
               const response: Response<R> = JSON.parse(data) as Response<R>
-              if (response.success) {
-                resolve(response.data as R)
-              } else {
-                reject(new Error(response.error?.message ?? 'Unknown error'))
-              }
-            } catch (e) {
-              reject(new Error(`Failed to parse response: ${String(e)}`))
+              if (response.success) succeed(response.data as R)
+              else fail(new Error(response.error?.message ?? 'Unknown error'))
+            } catch (error) {
+              fail(new Error(`Failed to parse response: ${String(error)}`))
             }
           })
-        }
+        },
       )
 
-      req.on('error', reject)
+      absoluteTimer = setTimeout(() => {
+        const error = new Error('Request deadline exceeded')
+        req.destroy(error)
+        fail(error)
+      }, timeoutMs)
+      req.on('error', fail)
       req.on('timeout', () => {
-        req.destroy()
-        reject(new Error('Request timeout'))
+        const error = new Error('Request timeout')
+        req.destroy(error)
+        fail(error)
       })
       req.write(body)
       req.end()
@@ -1096,7 +1389,12 @@ export class ModuleManager {
 
     for (const module of autoStartModules) {
       try {
-        await this.startModuleProcess(module.module_id)
+        const env: Record<string, string> = {}
+        this.envOverrides.set(module.module_id, env)
+        await this.enqueueLifecycle(
+          module.module_id,
+          () => this.startModuleProcess(module.module_id, undefined, env),
+        )
         // 等待模块启动完成
         await new Promise((resolve) => setTimeout(resolve, 1000))
       } catch (error) {
