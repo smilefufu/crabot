@@ -65,6 +65,7 @@ interface ManagedChildState {
   moduleId: ModuleId
   child: ChildProcess
   rootPid?: number
+  rootExited: boolean
   reachedRunning: boolean
   intentionalReason?: ModuleStopReason
   finalReason?: ModuleStopReason
@@ -863,6 +864,7 @@ export class ModuleManager {
       moduleId,
       child: proc,
       rootPid: proc.pid,
+      rootExited: false,
       reachedRunning: false,
       finalizeStarted: false,
       finalized,
@@ -874,12 +876,12 @@ export class ModuleManager {
 
     // 处理输出：同时落盘 + 终端转发（dev/调试可见）
     proc.stdout?.on('data', (data: Buffer) => {
-      logStream.write(data)
+      if (!childState.logEnded) logStream.write(data)
       console.log(`[${moduleId}] ${data.toString().trim()}`)
     })
 
     proc.stderr?.on('data', (data: Buffer) => {
-      logStream.write(data)
+      if (!childState.logEnded) logStream.write(data)
       console.error(`[${moduleId}] ${data.toString().trim()}`)
     })
 
@@ -889,7 +891,10 @@ export class ModuleManager {
       })
     }
 
-    proc.once('exit', (code, signal) => finalize(code, signal))
+    proc.once('exit', (code, signal) => {
+      childState.rootExited = true
+      finalize(code, signal)
+    })
     proc.once('error', (error) => {
       if (!childState.finalizeStarted) {
         console.error(`[ModuleManager] Process error for ${moduleId}:`, error)
@@ -1002,6 +1007,7 @@ export class ModuleManager {
       forceImmediately,
       modulePort: runtime?.port,
       requireOwnedProcess: state.finalReason === 'crashed',
+      isRootPidExited: () => state.rootExited,
     })
   }
 
@@ -1044,11 +1050,18 @@ export class ModuleManager {
 
     if (!state.rootPid) return
     const remainingMs = Math.max(0, deadline - Date.now())
-    if (await waitForProcessTreeExit(state.rootPid, remainingMs, 25, runtime.port)) return
+    if (await waitForProcessTreeExit(
+      state.rootPid,
+      remainingMs,
+      25,
+      runtime.port,
+      () => state.rootExited,
+    )) return
     await terminateProcessTree(state.rootPid, {
       gracefulTimeoutMs: 0,
       forceImmediately: true,
       modulePort: runtime.port,
+      isRootPidExited: () => state.rootExited,
     })
   }
 

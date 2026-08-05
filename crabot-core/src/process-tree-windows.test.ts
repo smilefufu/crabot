@@ -113,6 +113,65 @@ describe('Windows process ownership fallback', () => {
     ])
   })
 
+  it('never queries a reused root PID after the managed launcher exit was observed', async () => {
+    mockCommands([
+      ownership(999, [200]),
+      ownership(999, [200]),
+      ownership(999),
+    ])
+
+    await terminateProcessTree(100, {
+      gracefulTimeoutMs: 10,
+      forceImmediately: true,
+      modulePort: 19042,
+      requireOwnedProcess: true,
+      isRootPidExited: () => true,
+    })
+
+    const powershellCalls = execFileMock.mock.calls.filter(([file]) => file === 'powershell.exe')
+    expect(powershellCalls.every(call => !call[1].join(' ').includes('Win32_Process'))).toBe(true)
+    const taskkills = execFileMock.mock.calls.filter(([file]) => file === 'taskkill')
+    expect(taskkills.map(call => call[1])).toEqual([
+      ['/PID', '200', '/T', '/F'],
+    ])
+  })
+
+  it('stops trusting the root PID when launcher exit is observed during a query', async () => {
+    let rootExited = false
+    let ownershipQueries = 0
+    execFileMock.mockImplementation(
+      (file: string, _args: string[], _options: unknown, callback: (error: Error | null, stdout: string) => void) => {
+        if (file === 'powershell.exe') {
+          ownershipQueries += 1
+          const result = ownershipQueries === 1
+            ? ownership(100)
+            : ownershipQueries <= 3 ? ownership(999, [200]) : ownership(999)
+          callback(null, result)
+          if (ownershipQueries === 1) rootExited = true
+          return
+        }
+        callback(null, '')
+      },
+    )
+
+    await terminateProcessTree(100, {
+      gracefulTimeoutMs: 10,
+      forceImmediately: true,
+      modulePort: 19042,
+      requireOwnedProcess: true,
+      isRootPidExited: () => rootExited,
+    })
+
+    const powershellCalls = execFileMock.mock.calls.filter(([file]) => file === 'powershell.exe')
+    expect(powershellCalls).toHaveLength(4)
+    expect(powershellCalls[0][1].join(' ')).toContain('Win32_Process')
+    expect(powershellCalls.slice(1).every(call => !call[1].join(' ').includes('Win32_Process'))).toBe(true)
+    const taskkills = execFileMock.mock.calls.filter(([file]) => file === 'taskkill')
+    expect(taskkills.map(call => call[1])).toEqual([
+      ['/PID', '200', '/T', '/F'],
+    ])
+  })
+
   it('fails closed after an unexpected exit when neither root nor listener is identifiable', async () => {
     mockCommands([ownership(null)])
 

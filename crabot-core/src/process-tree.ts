@@ -8,6 +8,8 @@ export interface TerminateProcessTreeOptions {
   modulePort?: number
   /** Crash cleanup fails closed when neither launcher nor listener can be identified. */
   requireOwnedProcess?: boolean
+  /** Live observer for the managed launcher; Windows must not trust its PID after exit. */
+  isRootPidExited?: () => boolean
 }
 
 interface WindowsOwnership {
@@ -83,15 +85,20 @@ function execFileText(file: string, args: string[]): Promise<string> {
 
 async function queryWindowsOwnership(
   rootPid: number,
-  modulePort?: number,
+  modulePort: number | undefined,
+  isRootPidExited: () => boolean,
 ): Promise<{ rootPid?: number; listenerPids: number[] }> {
+  const rootPidExitedBeforeQuery = isRootPidExited()
+  const rootQuery = rootPidExitedBeforeQuery
+    ? `$rootValue = $null; `
+    : `$root = Get-CimInstance Win32_Process -Filter \"ProcessId = ${rootPid}\"; `
+      + `$rootValue = if ($null -eq $root) { $null } else { [int]$root.ProcessId }; `
   const listenerQuery = modulePort === undefined
     ? ''
     : `$listeners = Get-NetTCPConnection -State Listen -LocalPort ${modulePort} -ErrorAction SilentlyContinue; `
       + `$listenerPids = @($listeners | ForEach-Object { [int]$_.OwningProcess } | Sort-Object -Unique); `
   const script = "$ErrorActionPreference='Stop'; "
-    + `$root = Get-CimInstance Win32_Process -Filter \"ProcessId = ${rootPid}\"; `
-    + `$rootValue = if ($null -eq $root) { $null } else { [int]$root.ProcessId }; `
+    + rootQuery
     + `$listenerPids = @(); `
     + listenerQuery
     + `[pscustomobject]@{ RootPid = $rootValue; ListenerPids = @($listenerPids) } `
@@ -106,8 +113,13 @@ async function queryWindowsOwnership(
   const rawListeners = decoded.ListenerPids === null
     ? []
     : Array.isArray(decoded.ListenerPids) ? decoded.ListenerPids : [decoded.ListenerPids]
+  if (!rootPidExitedBeforeQuery && isRootPidExited()) {
+    // The root observation became stale while PowerShell was running. Re-query
+    // listener ownership without the root before confirming or targeting anything.
+    return queryWindowsOwnership(rootPid, modulePort, isRootPidExited)
+  }
   return {
-    ...(decoded.RootPid === null ? {} : { rootPid: decoded.RootPid }),
+    ...(rootPidExitedBeforeQuery || decoded.RootPid === null ? {} : { rootPid: decoded.RootPid }),
     listenerPids: Array.from(new Set(rawListeners)),
   }
 }
@@ -127,13 +139,18 @@ async function waitUntilWindowsTargetGone(
   modulePort: number | undefined,
   timeoutMs: number,
   pollIntervalMs: number,
+  isRootPidExited: () => boolean,
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    if (resolveWindowsTarget(await queryWindowsOwnership(rootPid, modulePort)) === undefined) return true
+    if (resolveWindowsTarget(
+      await queryWindowsOwnership(rootPid, modulePort, isRootPidExited),
+    ) === undefined) return true
     await new Promise(resolve => setTimeout(resolve, pollIntervalMs))
   }
-  return resolveWindowsTarget(await queryWindowsOwnership(rootPid, modulePort)) === undefined
+  return resolveWindowsTarget(
+    await queryWindowsOwnership(rootPid, modulePort, isRootPidExited),
+  ) === undefined
 }
 
 async function taskkillWindowsTarget(pid: number, force: boolean): Promise<void> {
@@ -146,15 +163,20 @@ async function forceWindowsTargetGone(
   modulePort: number | undefined,
   timeoutMs: number,
   pollIntervalMs: number,
+  isRootPidExited: () => boolean,
 ): Promise<void> {
   const deadline = Date.now() + Math.max(timeoutMs, 1000)
   while (Date.now() < deadline) {
-    const target = resolveWindowsTarget(await queryWindowsOwnership(rootPid, modulePort))
+    const target = resolveWindowsTarget(
+      await queryWindowsOwnership(rootPid, modulePort, isRootPidExited),
+    )
     if (target === undefined) return
     await taskkillWindowsTarget(target, true)
     await new Promise(resolve => setTimeout(resolve, pollIntervalMs))
   }
-  if (resolveWindowsTarget(await queryWindowsOwnership(rootPid, modulePort)) !== undefined) {
+  if (resolveWindowsTarget(
+    await queryWindowsOwnership(rootPid, modulePort, isRootPidExited),
+  ) !== undefined) {
     throw new Error(`Process tree ${rootPid} did not exit`)
   }
 }
@@ -166,8 +188,11 @@ async function terminateWindowsTree(
   pollIntervalMs: number,
   forceImmediately: boolean,
   requireOwnedProcess: boolean,
+  isRootPidExited: () => boolean,
 ): Promise<void> {
-  const initialTarget = resolveWindowsTarget(await queryWindowsOwnership(rootPid, modulePort))
+  const initialTarget = resolveWindowsTarget(
+    await queryWindowsOwnership(rootPid, modulePort, isRootPidExited),
+  )
   if (initialTarget === undefined) {
     if (requireOwnedProcess) {
       throw new Error(`Cannot confirm Windows process ownership for tree ${rootPid}`)
@@ -176,13 +201,19 @@ async function terminateWindowsTree(
   }
 
   if (forceImmediately) {
-    await forceWindowsTargetGone(rootPid, modulePort, timeoutMs, pollIntervalMs)
+    await forceWindowsTargetGone(rootPid, modulePort, timeoutMs, pollIntervalMs, isRootPidExited)
     return
   }
 
   await taskkillWindowsTarget(initialTarget, false)
-  if (await waitUntilWindowsTargetGone(rootPid, modulePort, timeoutMs, pollIntervalMs)) return
-  await forceWindowsTargetGone(rootPid, modulePort, timeoutMs, pollIntervalMs)
+  if (await waitUntilWindowsTargetGone(
+    rootPid,
+    modulePort,
+    timeoutMs,
+    pollIntervalMs,
+    isRootPidExited,
+  )) return
+  await forceWindowsTargetGone(rootPid, modulePort, timeoutMs, pollIntervalMs, isRootPidExited)
 }
 
 export async function waitForProcessTreeExit(
@@ -190,6 +221,7 @@ export async function waitForProcessTreeExit(
   timeoutMs: number,
   pollIntervalMs = 25,
   modulePort?: number,
+  isRootPidExited: () => boolean = () => false,
 ): Promise<boolean> {
   if (process.platform === 'win32') {
     return waitUntilWindowsTargetGone(
@@ -197,6 +229,7 @@ export async function waitForProcessTreeExit(
       modulePort,
       timeoutMs,
       Math.max(pollIntervalMs, 100),
+      isRootPidExited,
     )
   }
   return waitUntilPosixTreeGone(rootPid, timeoutMs, pollIntervalMs)
@@ -214,6 +247,7 @@ export async function terminateProcessTree(
   const pollIntervalMs = options.pollIntervalMs ?? 25
   const timeoutMs = Math.max(0, options.gracefulTimeoutMs)
   const forceImmediately = options.forceImmediately === true
+  const isRootPidExited = options.isRootPidExited ?? (() => false)
 
   if (process.platform === 'win32') {
     await terminateWindowsTree(
@@ -223,6 +257,7 @@ export async function terminateProcessTree(
       Math.max(pollIntervalMs, 100),
       forceImmediately,
       options.requireOwnedProcess === true,
+      isRootPidExited,
     )
   } else {
     await terminatePosixTree(rootPid, timeoutMs, pollIntervalMs, forceImmediately)

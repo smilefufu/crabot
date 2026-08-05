@@ -304,6 +304,20 @@ describe.skipIf(process.platform === 'win32')('Module Manager child-bound lifecy
     expect(stoppedEvents(events, runtime.module_id).map(event => event.payload.reason)).toEqual(['forced'])
   })
 
+  it('ignores child output that arrives after its log stream is finalized', async () => {
+    const { mm, runtime } = makeManager()
+    const { child } = await start(mm, runtime)
+    const state = mm.childStates.get(child)
+
+    await mm.handleStopModule({ module_id: runtime.module_id })
+    await state.finalized
+    const write = vi.spyOn(state.logStream, 'write')
+
+    child.stdout?.emit('data', Buffer.from('late output\n'))
+
+    expect(write).not.toHaveBeenCalled()
+  })
+
   it('restart waits for the old tree, uses the new env snapshot, and ignores old late callbacks', async () => {
     const { mm, runtime, pidFile, events } = makeManager()
     const first = await start(mm, runtime, { TEST_MARKER: 'one' })
