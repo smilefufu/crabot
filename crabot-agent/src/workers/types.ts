@@ -144,6 +144,19 @@ export interface WorkerAdapter {
   sendInput(h: IncarnationHandle, text: string, opts?: { raw?: boolean }): Promise<void>
   readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }>
   state(h: IncarnationHandle): Promise<WorkerContractState>
+  /**
+   * 该化身**最近一次可观测活动**的时刻(epoch ms);无法判定时返回 undefined
+   * (protocol-agent-v3 §6.1)。供 §6.3 第 3 条的活性巡检使用——
+   * **不实现此方法的实现不参与活性巡检**(harness 侧不做实现特判,见
+   * `WorkerHarness.sweepLiveness`)。
+   *
+   * 语义是"这个化身最近一次被观察到还在动",不承诺精确到某一次模型输出:cc/codex 取
+   * 自己 pane 输出日志的 mtime(tmux pipe-pane 抓的是整条输出流,TUI 的自旋动画在模型
+   * 思考期间持续写字节,所以"长时间思考"与"卡死"在这个信号上可分)。builtin 不实现:
+   * 它的 output 只在有 assistantText 时才写,一个全程只调工具的化身根本不产生输出文件,
+   * 没有连续的活性信号。
+   */
+  lastActivityAt?(h: IncarnationHandle): Promise<number | undefined>
   readTrace?(h: IncarnationHandle, cursor?: TraceCursor): Promise<{ events: NormalizedTraceEvent[]; nextCursor: TraceCursor }>
   kill(h: IncarnationHandle): Promise<void>
   capabilities(): AdapterCapabilities

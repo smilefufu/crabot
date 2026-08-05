@@ -3247,6 +3247,10 @@ export class UnifiedAgent extends ModuleBase {
         const message = error instanceof Error ? error.message : String(error)
         console.warn(`[${this.config.moduleId}] manager 栈启动对账失败（不影响启动）:`, message)
       })
+      // 活性巡检（protocol-agent-v3 §6.3 第 3 条）接在启动对账**之后**开：对账本身就是
+      // 一次全量的"化身还活着吗"判定并会改台账，两者同时跑只会让巡检读到半程状态、
+      // 白发一次唤醒。对账成败都要开（.finally）——对账失败恰恰是更需要兜底的时候。
+      .finally(() => stack.harness.startLivenessSweep())
   }
 
   protected override async onStop(): Promise<void> {
@@ -3257,6 +3261,7 @@ export class UnifiedAgent extends ModuleBase {
     this.sessionManager.stopCleanup()
     this.attentionScheduler.stopAll()
     this.traceStore.stopFlushTimer()
+    this.managerStack?.harness.stopLivenessSweep()
 
     if (this.watchdogInterval) {
       clearInterval(this.watchdogInterval)

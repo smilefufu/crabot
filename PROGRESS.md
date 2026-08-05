@@ -1,6 +1,18 @@
 # Crabot 项目进度
 
-> 最后更新：2026-08-03 — 冷启动配置竞态修复（分支 fix/agent-config-pull-retry，未合并 main）
+> 最后更新：2026-08-05 — worker 活性巡检（分支 feat/worker-liveness-sweep，未合并 main）
+
+## 2026-08-05 — worker 活性巡检：静默停摆终于有人管了
+
+- spec：`crabot-docs/superpowers/specs/2026-08-05-worker-liveness-sweep-design.md`；协议改动已直推 crabot-docs main（§6.1 增加可选方法 `lastActivityAt?`）。**这不是新设计，是协议 §6.3 第 3 条「兜底：harness 低频巡扫 tmux pane（纯 harness 行为，零 token），静默异常才唤醒 manager」从未落地**。
+- 病灶：近三天四例 worker 静默停摆（15h / 8.5h / 26min / 至今）**无一被系统自己发现**，共同点是**进程活着、tmux 活着、台账写着 running、但不再产生任何事件**。#70 的就绪握手能在源头拦住其中两例，拦不住另外两例（prompt 确实提交了，失效发生在之后）。根因是**三种 adapter 的 `state()` 返回 running 都是 else 兜底、不是正证**，在语义上分不开"卡住"与"在干活"；`isAlive`、台账 `updated_at` 同样零区分力。
+- 活性信号取**新增的可选契约方法** `lastActivityAt`（cc/codex 各实现为对自己 output 日志的一次 `fs.stat`），不借用 `readOutput` 的游标位移——后者每轮要把新增字节读出来并解码（窗口上限 1MB），是持续 CPU 成本，且把"读输出给人看"这个带业务语义的入口借来探活。**可选性是关键收益**：builtin 不实现即天然跳过，harness 里没有、也不该有 `if (impl === 'builtin')` 这类实现特判。
+- **只发事件，绝不碰台账**：harness 单方面把台账写成 idle，下一次 `syncState` 会翻回 running（adapter 才是化身状态的权威）——那正是 #70 review 抓到的"idle 不粘"。判断语义（干完了 / 等输入 / 卡住）与决策的责任完全在 manager 侧（§4.3）。通知复用 `state_changed` + `detail.text`（#70 同款形状，零新事件 kind、零新状态），正文 = 解码后的 pane 尾部 + 合成指引，**指引排在尾部之后**（排头部会被 `truncateWakeText` 的保尾截断吃掉，这是 #70 的教训）。不带 `task_status` ⇒ 对外事件桥自然去重，**人类收不到任何东西**。
+- 去重与重报：同一次停摆只报一次（否则每轮巡检唤醒一次 manager = 烧 token 的热循环）；`lastActivityAt` 前进、或**上次唤醒没被 manager 消费**（`consumedEvents !== true`）时可重报。第二条正好落实"manager 死了就挂起来、恢复了再通知"——`maybeSelfWake` 拒绝在 episode 失败后自唤醒（防热循环，是对的），而**巡检本身就是那个"下一次唤醒"**，不需要任何新机制。为此 `HarnessDeps.onEvent` 允许回传 `HarnessEventDelivery{consumed}`，且**只有巡检 await 它**（其余调用点都在 per-worker 锁内，等一整个 manager episode 就是自锁）。
+- gate 只取**主线化身**（`forked_from` 为空，与 §5.3 同源）+ 化身 state 为 running + task 非终态：cc 的 fork 是无头 `claude -p` 侧问，整个执行期可能零输出，拿它当停摆就是纯误报。
+- **T = 30 分钟、周期 = 5 分钟，去 m2 实测校准**（本设计唯一的经验参数）。健康侧噪声地板取自 38 份真实 cc/codex 原生会话记录的相邻事件间隔：codex 最大 384s、cc 最大 301s（p99 普遍 10–110s），而这已是**保守上界**——那段时间里 TUI 自旋动画一直在往 pane 写字节（健康 codex worker 实测 780 B/s 持续写入），pane 级静默远短于此。故障侧四例是 26min / 4h51m（`w-ed8453a7`，tmux 仍活着，观测时零增长仍在延长）/ 8h30m / 15h，隔着一个数量级。30min 对最坏健康样本有 4.7× 余量，最坏发现时延 = T + 周期 = 35min。方向按 spec：宁可偏宽。
+- 验证：`tsc --noEmit` 干净；新增 23 例（`harness-liveness.test.ts` 18 例 = 9 × cc/codex 双实现参数化，`liveness-signal.test.ts` 5 例锁 adapter 层的 `lastActivityAt` 契约落点）；**6 处变异逐个植入实测**——①去掉阈值→8 挂 ②去掉去重→6 挂 ③消费失败仍不重报→2 挂 ④改台账→6 挂 ⑤删 codex 侧实现→2 挂 ⑥删 cc 侧实现→2 挂（⑤⑥ 是为"只给 cc 写用例、codex 删除变异全绿"那两次教训补的对称性验证）。
+- 已知环境噪声：本开发机在整机负载偏高时，`tests/workers/codex-adapter.test.ts` / `claude-code-adapter.test.ts` / `harness-integration.test.ts` 的 tmux 用例会成批失败（`can't find pane`）。**同一组失败在 base commit 上同样复现**（base 13 挂 vs 分支 11 挂，且每次挂的集合都不同），单独跑这些文件全绿，与本次改动无关。
 
 ## 2026-08-03 — 冷启动配置竞态：agent 拉配置改为退避重试
 

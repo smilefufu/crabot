@@ -62,6 +62,21 @@ export interface HarnessEvent {
   readonly task_status?: TaskStatus
 }
 
+/**
+ * 订阅方(P4 装配层 → `ManagerRegistry.routeWorkerEvent`)对**一条** harness 事件的投递结果。
+ *
+ * 只有活性巡检需要它(见 harness.ts `sweepLiveness` 的去重规则):同一次停摆只该报一次,
+ * 否则每轮巡检唤醒一次 manager 就是烧 token 的热循环;但 manager 侧 episode 失败时那次唤醒
+ * 等于没发生过(`consumedEvents !== true` ⇒ 整批输入被推回 mailbox),必须允许下一轮重报——
+ * 这正是"manager 死了就挂起来、恢复了再通知"的实现,不另造机制。
+ *
+ * 其余事件点一律 fire-and-forget,不看这个返回值。
+ */
+export interface HarnessEventDelivery {
+  /** manager 是否真的消费了这次唤醒(episode 成功收口)。 */
+  readonly consumed: boolean
+}
+
 function parseLine(line: string): HarnessEvent | null {
   const trimmed = line.trim()
   if (!trimmed) return null

@@ -236,8 +236,12 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     now: deps.now,
     // harness 事件 → 该 worker 的监护 manager(§4.4)。过滤复用 P4 的
     // `shouldWakeOnHarnessEvent`(input_sent 不唤醒:manager 发起 send_to_worker 时已在同一次
-    // 工具调用里同步拿到结果)。fire-and-forget,必须 .catch():路由失败绝不能反噬 harness 的
-    // 状态机推进,更不能变成 unhandledRejection 打崩 agent 进程。
+    // 工具调用里同步拿到结果)。
+    //
+    // **返回的 Promise 永不 reject**:路由失败绝不能反噬 harness 的状态机推进,更不能变成
+    // unhandledRejection 打崩 agent 进程——绝大多数调用点根本不 await 它(见
+    // `HarnessDeps.onEvent`)。失败落成 `consumed: false`,与"episode 没消费这批事件"同义:
+    // 活性巡检据此在下一轮重报,这正是"manager 不可用时通知挂起、恢复后仍能收到"。
     onEvent: (event) => {
       // 对外事件走在唤醒过滤之前,且不共用下面那个门:`shouldWakeOnHarnessEvent` 答的是"要不
       // 要唤醒 manager"(input_sent 不唤醒),`!registry` 答的是"manager 侧接线好了没"——两者
@@ -245,10 +249,14 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       // 的过滤规则上。对外事件自己的去重按 task.status 做,在 events.ts 里。
       publishTaskStatusChanged?.(event)
 
-      if (!registry || !shouldWakeOnHarnessEvent(event)) return
-      void registry.routeWorkerEvent(event).catch((err) => {
-        console.error(`[manager-bootstrap] routeWorkerEvent 失败 (worker=${event.worker_id}, kind=${event.kind}):`, err)
-      })
+      if (!registry || !shouldWakeOnHarnessEvent(event)) return { consumed: false }
+      return registry.routeWorkerEvent(event).then(
+        (result) => ({ consumed: result?.consumedEvents === true }),
+        (err) => {
+          console.error(`[manager-bootstrap] routeWorkerEvent 失败 (worker=${event.worker_id}, kind=${event.kind}):`, err)
+          return { consumed: false }
+        }
+      )
     },
     builtinSpawnDefaults: deps.builtinSpawnDefaults,
   }

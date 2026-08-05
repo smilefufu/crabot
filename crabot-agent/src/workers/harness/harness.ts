@@ -86,7 +86,7 @@ import type { DialogObjectId, Incarnation, LedgerWorker, TaskStatus } from './le
 import type { LedgerStore } from './ledger-store'
 import type { WorkspaceManager } from './workspace-manager'
 import { WorkerInbox, type InboxItem } from './inbox'
-import { WorkerEventLog, type HarnessEvent, type HarnessEventKind } from './worker-events'
+import { WorkerEventLog, type HarnessEvent, type HarnessEventDelivery, type HarnessEventKind } from './worker-events'
 import { applyStatusTransition, canTransition, isTerminalStatus, reviveTask, taskStatusFromIncarnation } from './task-status'
 import { join } from 'path'
 
@@ -164,6 +164,63 @@ function truncateWakeText(
  */
 const MAX_CONTINUATION_ITERATIONS = 3
 
+/**
+ * 活性巡检的停摆判据 T:主线化身的 `lastActivityAt` 超过这个时长没有前进,即视为
+ * protocol-agent-v3 §6.3 第 3 条说的"静默异常"。
+ *
+ * 取 30 分钟,依据是 m2 现网日志的实测(见
+ * `crabot-docs/superpowers/specs/2026-08-05-worker-liveness-sweep-design.md` 决策 5):
+ * - **健康侧的噪声地板**:38 份健康的 cc/codex 原生会话记录里,相邻两条事件的最大间隔是
+ *   codex 384s / cc 301s(p99 普遍在 10–110s)。而事件间隔已经是**保守上界** ——
+ *   那段时间里 TUI 的自旋动画一直在往 pane 写字节,pane 级的静默远短于此。30 分钟对
+ *   最坏的健康样本仍有 4.7 倍余量;
+ * - **故障侧的量级**:四例真实停摆的零增长时长是 26min / 4h51m / 8h30m / 15h,与噪声
+ *   地板之间隔着一个数量级。
+ *
+ * 方向按 spec:宁可偏宽——漏报一次的代价(晚半小时发现)远小于误报打断一个真在干活的
+ * worker(白烧一次 manager episode,还可能把它 kill 掉)。
+ */
+export const LIVENESS_STALL_MS = 30 * 60_000
+
+/**
+ * 巡检周期。协议原文是"低频巡扫",取 T 的 1/6:一轮的成本是每个在跑的 CLI 化身一次
+ * `fs.stat`,可以忽略;换来的是最坏发现时延 = T + 周期 = 35 分钟,相对上面那四例(小时
+ * 量级)可以忽略不计。
+ */
+export const LIVENESS_SWEEP_INTERVAL_MS = 5 * 60_000
+
+/**
+ * 巡检发现停摆时,随唤醒事件交给 manager 的那段正文:pane 输出尾部 + 一句合成指引。
+ *
+ * **指引排在尾部,不排在头部**:这段正文会经 `truncateWakeText(..., 'tail')` 保尾截断,
+ * 排在头部会被整句丢掉——这是 #70 review 的教训,与 `describeStartupStall` 同一处理。
+ *
+ * 指引本身是必须的:manager 光看一屏 TUI 字节看不出"这屏已经这么久没变过了",而"静默多久"
+ * 恰恰是它做判断(重投 / kill / 换实现)的全部依据。措辞不替 manager 下结论——巡检只负责
+ * 让它知道,判断权在 manager(§4.3)。
+ */
+function describeLivenessStall(opts: { impl: WorkerImplId; staleMs: number; tail: string }): string {
+  const minutes = Math.round(opts.staleMs / 60_000)
+  const note =
+    `[crabot] 活性巡检:该 ${opts.impl} 化身的终端输出已经 ${minutes} 分钟没有任何新增,` +
+    `但进程/会话仍然活着、台账仍记着 running。上面是它终端输出的尾部(已解码成可读文本,` +
+    `与 read_worker_output 同一形态)。**巡检不替你判断**它是干完了、在等输入,还是卡死了——` +
+    `请据现场决定下一步:用 read_worker_output 看更早的内容、用 send_to_worker(必要时 raw 模式敲键)` +
+    `问一句或催一下、或者 kill_worker 重来。`
+  return `${opts.tail || '(终端至今没有任何输出)'}\n---\n${note}`
+}
+
+/**
+ * 一次停摆上报的去重记录(见 `sweepLiveness`)。进程重启后允许丢失并重新起算:
+ * 重启后重报一次可接受,远好于永久丧失判定。
+ */
+interface StallReportMark {
+  /** 上报时观察到的 `lastActivityAt`。它前进了就说明 worker 又动过,是新的一次停摆。 */
+  readonly activityAt: number
+  /** 这次唤醒的投递结局。`pending` 期间不重报(episode 正在跑,再唤一次就是插队重复)。 */
+  delivery: 'pending' | 'consumed' | 'failed'
+}
+
 /** 请求的 worker_id 在台账中不存在。 */
 export class WorkerNotFoundError extends Error {
   constructor(readonly worker_id: string) {
@@ -213,8 +270,15 @@ export interface HarnessDeps {
   readonly workersDir: string
   /** ISO 时间注入,便于测试 */
   readonly now: () => string
-  /** P4 manager 的唤醒入口(P3 是可插桩的出口) */
-  readonly onEvent?: (e: HarnessEvent) => void
+  /**
+   * P4 manager 的唤醒入口(P3 是可插桩的出口)。
+   *
+   * 返回值**只有活性巡检看**(见 `sweepLiveness` 的去重规则与 `HarnessEventDelivery`):
+   * 其余调用点一律 fire-and-forget,不 await、不看结果——它们跑在 per-worker 锁内,而
+   * 一次唤醒是一整个 manager episode(可能几分钟,且 manager 的工具会反过来调 harness),
+   * 在锁内等它就是自锁。返回 `void` 的实现(P3 桩、既有测试)行为逐字不变。
+   */
+  readonly onEvent?: (e: HarnessEvent) => void | HarnessEventDelivery | Promise<HarnessEventDelivery | void>
   /** provision 素材(P3 可返回空集) */
   readonly capabilityBundle?: () => Promise<CapabilityBundle>
   /**
@@ -275,6 +339,10 @@ export class WorkerHarness {
   private readonly mutexes = new Map<string, AsyncMutex>()
   private readonly inboxes = new Map<string, WorkerInbox>()
   private readonly eventLogs = new Map<string, WorkerEventLog>()
+  /** 活性巡检的已报标记,键是 `<worker_id>#<impl>#<seq>`(见 `sweepLiveness`)。 */
+  private readonly stallReports = new Map<string, StallReportMark>()
+  private sweepInFlight = false
+  private sweepTimer?: ReturnType<typeof setInterval>
 
   constructor(private readonly deps: HarnessDeps) {}
 
@@ -1015,6 +1083,170 @@ export class WorkerHarness {
     return { revived, failed, unchanged }
   }
 
+  /**
+   * 启动 / 停止周期性的活性巡检(protocol-agent-v3 §6.3 第 3 条的兜底)。
+   *
+   * 装配层(`unified-agent.ts`)在启动对账之后开、停机时关。`unref()`:巡检是后台兜底,
+   * 不该成为让进程赖着不退的理由。
+   */
+  startLivenessSweep(intervalMs: number = LIVENESS_SWEEP_INTERVAL_MS): void {
+    if (this.sweepTimer) return
+    this.sweepTimer = setInterval(() => {
+      void this.sweepLiveness().catch((err) => {
+        console.error('[WorkerHarness] sweepLiveness failed:', err)
+      })
+    }, intervalMs)
+    this.sweepTimer.unref?.()
+  }
+
+  stopLivenessSweep(): void {
+    if (!this.sweepTimer) return
+    clearInterval(this.sweepTimer)
+    this.sweepTimer = undefined
+  }
+
+  /**
+   * 一轮活性巡检:找出"进程还活着、台账还写着 running、却已经很久不产生任何输出"的化身,
+   * 唤醒它的监护 manager 并附上现场(protocol-agent-v3 §6.3 第 3 条,
+   * spec `2026-08-05-worker-liveness-sweep-design.md`)。
+   *
+   * 之所以需要这一层:三种 adapter 的 `state()` 返回 `running` 都是 else 兜底,不是正证 ——
+   * 它在语义上区分不了"在干活"与"卡住了";`isAlive`、台账 `updated_at` 同样零区分力。
+   * 唯一有区分力的信号是**输出增长**,由可选契约方法 `lastActivityAt` 提供。
+   *
+   * 四条纪律:
+   *
+   * 1. **不写台账、不改化身状态,只发一条唤醒事件**。harness 单方面把台账写成 idle,下一次
+   *    `syncState` 会把它翻回 running(adapter 才是化身状态的权威)——那是 #70 review 抓到的
+   *    "idle 不粘"。而且判断语义(干完了 / 等输入 / 卡住)与决策的责任完全在 manager 侧(§4.3),
+   *    巡检只负责让 manager 知道;
+   * 2. **不做实现特判**。不实现 `lastActivityAt` 的 adapter(builtin)天然被跳过——它的
+   *    output 只在有 assistantText 时才写,没有连续活性信号;将来要覆盖它,实现该方法即可,
+   *    本方法一个字都不用改;
+   * 3. **只看主线化身**(`forked_from` 为空,与 §5.3 判定主线化身的规则同源)。cc 的 fork
+   *    是无头 `claude -p` 侧问,整个执行期可能零输出,拿它当停摆就是纯误报;
+   * 4. **同一次停摆只报一次**,否则每轮巡检唤醒一次 manager = 烧 token 的热循环。两种情况
+   *    允许重报:①`lastActivityAt` 前进了(worker 又动过,这是新的一次停摆);②上一次唤醒
+   *    没被 manager 消费(episode 失败,`consumedEvents !== true`)——这正好落实"manager 死了
+   *    就挂起来、恢复了再通知":`maybeSelfWake` 拒绝在失败后自唤醒(防热循环,是对的),
+   *    而巡检本身就是那个"下一次唤醒",不需要任何新机制。
+   *
+   * 重入保护:一次唤醒是一整个 manager episode(可能几分钟),定时器到点时上一轮可能还没走完,
+   * 直接跳过这一轮——已报标记会让下一轮不重复唤醒同一个化身。
+   */
+  async sweepLiveness(): Promise<void> {
+    if (this.sweepInFlight) return
+    this.sweepInFlight = true
+    try {
+      const nowMs = Date.parse(this.deps.now())
+      const all = await this.deps.ledger.listAllWorkers()
+      const reports: Array<Promise<void>> = []
+      const liveKeys = new Set<string>()
+
+      for (const { worker } of all) {
+        if (isTerminalStatus(worker.task.status)) continue
+        const mainline = mainlineIncarnation(worker)
+        if (!mainline || mainline.state !== 'running') continue
+        // `'legacy'`(旧 ResumeCheckpoint 迁移来的化身)不会有 adapter 注册,下一行自然落空。
+        const impl = mainline.impl as WorkerImplId
+        const adapter = this.deps.adapters.get(impl)
+        // 不实现 `lastActivityAt` 的实现不参与活性巡检(协议 §6.1),这里是它的**唯一**落点。
+        if (!adapter?.lastActivityAt) continue
+
+        const key = `${worker.worker_id}#${impl}#${mainline.seq}`
+        liveKeys.add(key)
+        const h: IncarnationHandle = {
+          worker_id: worker.worker_id,
+          seq: mainline.seq,
+          impl,
+          session_ref: mainline.session_ref,
+        }
+
+        let lastAt: number | undefined
+        try {
+          lastAt = await adapter.lastActivityAt(h)
+        } catch (err) {
+          // 探活本身失败(文件系统抖动等)只是这一轮判不了,不该被当成"停摆"上报,更不该
+          // 掐断整轮巡检——下一轮再看。
+          console.warn(`[WorkerHarness] sweepLiveness: lastActivityAt failed for ${key}:`, err)
+          continue
+        }
+        // 判不了(实现说它无法判定)= 不参与本轮,与"刚动过"不是一回事,不清标记。
+        if (lastAt === undefined) continue
+
+        const staleMs = nowMs - lastAt
+        if (staleMs <= LIVENESS_STALL_MS) {
+          this.stallReports.delete(key) // 又动起来了:清标记,下次再停摆算新的一次
+          continue
+        }
+
+        const prev = this.stallReports.get(key)
+        // 去重与重报,见方法注释第 4 条。`pending` 期间不重报:那次 episode 还在跑。
+        if (prev && prev.activityAt === lastAt && prev.delivery !== 'failed') continue
+
+        this.stallReports.set(key, { activityAt: lastAt, delivery: 'pending' })
+        reports.push(this.reportLivenessStall(h, adapter, key, lastAt, staleMs))
+      }
+
+      // 已经不在候选集里的化身(终态 / 已换主线 / 换了实现)不再需要标记,顺手回收。
+      for (const key of this.stallReports.keys()) {
+        if (!liveKeys.has(key)) this.stallReports.delete(key)
+      }
+
+      await Promise.allSettled(reports)
+    } finally {
+      this.sweepInFlight = false
+    }
+  }
+
+  /**
+   * 上报一次停摆:取 pane 输出尾部 + 合成指引,走 `state_changed` + `detail.text` 这条既有
+   * 的唤醒形状(#70 同款,零新事件 kind、零新状态),并按投递结局更新已报标记。
+   *
+   * `to` 取化身**当前**的状态 `'running'`:这条事件描述的不是一次状态迁移(巡检不改状态),
+   * 而是"这个还在 running 的化身有情况"。不带 `taskStatus` 形参——没有伴随的 task 迁移,
+   * 对外事件桥因此在"状态没变"那一步自然被去重掉(见 manager/events.ts)。
+   *
+   * `readOutput` 在这里是**按其本来用途**使用的(把输出读给人/manager 看),不是拿它当活性
+   * 信号——活性信号是 `lastActivityAt`,那条路每轮只付一次 `fs.stat`,而这条解码路径只在
+   * 真的要上报时走一次。
+   */
+  private async reportLivenessStall(
+    h: IncarnationHandle,
+    adapter: WorkerAdapter,
+    key: string,
+    activityAt: number,
+    staleMs: number,
+  ): Promise<void> {
+    let tail = ''
+    try {
+      tail = (await adapter.readOutput(h, { offset: 0 })).chunk
+    } catch (err) {
+      // 读不到现场不该让唤醒本身泡汤:manager 至少要知道"这个化身静默了这么久"。
+      console.warn(`[WorkerHarness] sweepLiveness: readOutput failed for ${key}:`, err)
+    }
+    const text = truncateWakeText(
+      describeLivenessStall({ impl: h.impl, staleMs, tail }),
+      WAKE_TEXT_MAX_CHARS,
+      ',更早的屏幕内容用 read_worker_output 读',
+      'tail',
+    )
+    let delivery: HarnessEventDelivery | undefined
+    try {
+      delivery = await this.appendEventAwaitingDelivery(h.worker_id, h.seq, 'state_changed', {
+        to: 'running' satisfies WorkerContractState,
+        ...(text ? { text } : {}),
+      })
+    } catch (err) {
+      console.error(`[WorkerHarness] sweepLiveness: 上报停摆失败 ${key}:`, err)
+    }
+    const mark = this.stallReports.get(key)
+    // 期间可能已经被别的路径清掉(worker 落终态/又动起来了),那就别把它写回来。
+    if (mark && mark.activityAt === activityAt) {
+      mark.delivery = delivery?.consumed === true ? 'consumed' : 'failed'
+    }
+  }
+
   /** reconcileOnStartup 单个 worker 的判定+提交,整体在该 worker 的 per-worker 锁临界区内完成。 */
   private async reconcileOneWorker(
     dialogObjectId: DialogObjectId,
@@ -1531,12 +1763,43 @@ export class WorkerHarness {
     detail?: Record<string, unknown>,
     taskStatus?: TaskStatus
   ): Promise<void> {
+    const event = this.buildEvent(workerId, seq, kind, detail, taskStatus)
+    await this.getEventLog(workerId).append(event)
+    // fire-and-forget:本方法的调用点几乎都在 per-worker 锁内,而一次唤醒是一整个 manager
+    // episode(见 HarnessDeps.onEvent)。返回值只有活性巡检看,走下面那条专用出口。
+    void this.deps.onEvent?.(event)
+  }
+
+  /**
+   * 与 `appendEvent` 唯一的区别:**等**订阅方把这条事件投递完,并把结果交回调用方。
+   *
+   * 只有活性巡检用它(见 `sweepLiveness` 的去重与重报规则),且它跑在任何 per-worker 锁
+   * 之外——在锁内等一整个 manager episode 会把同一个 worker 上的其它编排动作全部堵住,
+   * 而 manager 的工具反过来又要调 harness,那就是自锁。
+   */
+  private async appendEventAwaitingDelivery(
+    workerId: string,
+    seq: number,
+    kind: HarnessEventKind,
+    detail?: Record<string, unknown>,
+  ): Promise<HarnessEventDelivery | undefined> {
+    const event = this.buildEvent(workerId, seq, kind, detail)
+    await this.getEventLog(workerId).append(event)
+    return (await this.deps.onEvent?.(event)) ?? undefined
+  }
+
+  /** 事件对象的组装收口(两条 append 路径共用),字段语义见 `HarnessEvent`。 */
+  private buildEvent(
+    workerId: string,
+    seq: number,
+    kind: HarnessEventKind,
+    detail?: Record<string, unknown>,
+    taskStatus?: TaskStatus
+  ): HarnessEvent {
     const ts = this.deps.now()
     const base: HarnessEvent = { ts, kind, worker_id: workerId, seq }
     const withDetail: HarnessEvent = detail !== undefined ? { ...base, detail } : base
-    const event: HarnessEvent = taskStatus !== undefined ? { ...withDetail, task_status: taskStatus } : withDetail
-    await this.getEventLog(workerId).append(event)
-    this.deps.onEvent?.(event)
+    return taskStatus !== undefined ? { ...withDetail, task_status: taskStatus } : withDetail
   }
 }
 
