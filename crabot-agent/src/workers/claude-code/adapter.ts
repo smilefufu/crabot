@@ -483,7 +483,11 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     if (this.promptDeliveryTimeoutMs > 0) {
       const sessionFile = join(this.claudeProjectsDir, projectSlug(spec.workspace.root), `${sessionId}.jsonl`)
       if (!(await verifyPromptDelivered(sessionFile, this.promptDeliveryTimeoutMs))) {
-        await this.sendTextOrKill(runtime, handle, '\u001b')
+        // 取消残留弹窗必须发真正的 Escape 键(sendKeys),不能 sendText——sendText 走
+        // paste-buffer 粘贴,ESC 只会作为文本字符进 composer,真正作用于弹窗的是粘贴结尾的
+        // Enter,可能激活弹窗默认选项(对 MCP 信任窗等于静默授权信任,与 provision 的
+        // enabledMcpjsonServers 授权边界相抵)。
+        await this.sendKeysOrKill(runtime, handle, ['Escape'])
         await this.sendTextOrKill(runtime, handle, spec.prompt)
         if (!(await verifyPromptDelivered(sessionFile, this.promptDeliveryTimeoutMs))) {
           await this.reportStartupStall(runtime, handle, outputFile)
@@ -502,6 +506,20 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   private async sendTextOrKill(runtime: Runtime, h: IncarnationHandle, text: string): Promise<void> {
     try {
       await this.tmux.sendText(runtime.sessionName, text)
+    } catch (err) {
+      await this.getMutex(h.worker_id).run(async () => {
+        if (runtime.state === 'exited') return
+        await this.tmux.killSession(runtime.sessionName)
+        await this.transitionExited(runtime, h, 'crashed')
+      })
+      throw err
+    }
+  }
+
+  /** sendTextOrKill 的 sendKeys 版本(Esc 清弹窗用,见 spawn 投递验证注释)。 */
+  private async sendKeysOrKill(runtime: Runtime, h: IncarnationHandle, keys: string[]): Promise<void> {
+    try {
+      await this.tmux.sendKeys(runtime.sessionName, keys)
     } catch (err) {
       await this.getMutex(h.worker_id).run(async () => {
         if (runtime.state === 'exited') return

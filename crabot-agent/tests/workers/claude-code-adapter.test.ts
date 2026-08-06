@@ -795,14 +795,14 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — prompt 投递验证(2026-
   /** 投递验证的专用夹具:mock-cli 会往 claudeProjectsDir 写 cc 会话记录。 */
   async function deliveryAdapter(
     script: MockStep[],
-    opts?: { dropSubmitCount?: number; deliveryTimeoutMs?: number },
+    opts?: { dropSubmitCount?: number; deliveryTimeoutMs?: number; tmux?: TmuxDriver },
   ): Promise<{ adapter: ClaudeCodeAdapter; workerId: string }> {
     const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
     const stopHookCmd = channel.hookCommand('stop')
     const adapter = new ClaudeCodeAdapter({
       dataDir,
       claudeConfigPath: fakeClaudeConfig(dataDir),
-      tmux: new TmuxDriver(),
+      tmux: opts?.tmux ?? new TmuxDriver(),
       claudeBin: claudeBinFor(script, stopHookCmd, undefined, {
         dir: claudeProjectsDir,
         slug: slug(workspaceRoot),
@@ -833,12 +833,21 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — prompt 投递验证(2026-
   })
 
   it('弹窗吞掉首条 prompt 时自动 Esc 清理并重投,第二次真正落地(不落 stall)', async () => {
-    const { adapter, workerId } = await deliveryAdapter([{ output: '任务输出', emitStop: true }], { dropSubmitCount: 1 })
+    const tmux = new CountingTmux()
+    const { adapter, workerId } = await deliveryAdapter([{ output: '任务输出', emitStop: true }], {
+      dropSubmitCount: 1,
+      tmux,
+    })
     const h = await adapter.spawn({ worker_id: workerId, prompt: '完整任务', workspace: { root: workspaceRoot } })
 
     // 关键断言:验证通过,没有走 startup stall 路径;state 迁移是事件驱动的,不在此断言。
     const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
     expect(meta.startup_stalled).toBeUndefined()
+    // Esc 清弹窗必须走 sendKeys(真正发 Escape 键),不能 sendText——sendText 是 paste-buffer
+    // 粘贴文本,粘贴结尾的 Enter 会激活弹窗默认选项(对 MCP 信任窗等于静默授权,与 provision
+    // 的 enabledMcpjsonServers 授权边界相抵)。这条断言钉住实现,改回 sendText 立即挂。
+    expect(tmux.calls.sendKeys).toBe(1)
+    expect(tmux.calls.sendText).toBe(2) // 首投 + 重投
     // 会话记录里只有重投后的那一条 user 消息(被吞的首条没有落账)
     const sessionFile = path.join(claudeProjectsDir, slug(workspaceRoot), `${h.session_ref}.jsonl`)
     const raw = await fs.readFile(sessionFile, 'utf-8')
