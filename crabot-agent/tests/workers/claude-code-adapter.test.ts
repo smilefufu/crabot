@@ -128,7 +128,7 @@ describe('ClaudeCodeAdapter.provision', () => {
     const settings = JSON.parse(await fs.readFile(path.join(ws, '.claude/settings.json'), 'utf-8'))
     expect(settings.hooks.Stop[0].hooks[0].command).toContain('events-cli.jsonl')
     expect(settings.hooks.Notification[0].hooks[0].command).toContain('events-cli.jsonl')
-    expect(settings.permissions.defaultMode).toBe('acceptEdits')
+    expect(settings.permissions.defaultMode).toBe('bypassPermissions')
 
     const mcpJson = JSON.parse(await fs.readFile(path.join(ws, '.mcp.json'), 'utf-8'))
     expect(mcpJson.mcpServers.x.command).toBe('node')

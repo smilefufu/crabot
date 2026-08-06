@@ -103,17 +103,17 @@
  * ## spawn/resume 启动参数
  *
  * codex-docs(learn.chatgpt.com/docs/developer-commands):交互态 `codex` 主命令顶层支持
- * `--ask-for-approval`(`untrusted|on-request|never`)与 `--sandbox`
- * (`read-only|workspace-write|danger-full-access`)。本 adapter 固定传
- * `--ask-for-approval never --sandbox workspace-write`,与 cc 用
- * `--permission-mode acceptEdits` 同样的自动化意图——不能让审批弹窗卡住 tmux pane。
+ * `--ask-for-approval`(`untrusted|on-request|never`)、`--yolo`(等价 never,显式声明零审批)与
+ * `--sandbox`(`read-only|workspace-write|danger-full-access`)。本 adapter 固定传
+ * `--yolo --sandbox workspace-write`,与 cc 用
+ * `--permission-mode bypassPermissions` 同样的自动化意图——不能让审批弹窗卡住 tmux pane。
  * `codex resume <SESSION_ID>` 是独立子命令(不是 `--resume` flag),同一文档页确认。
  *
  * m2 真机实测校准了两点原先靠猜测沿用、未经验证的行为:
- * 1. **主命令级选项必须排在 `resume` 子命令之前**:`codex resume <id> --ask-for-approval
- *    never --sandbox workspace-write`(选项跟在 `resume <id>` 后面)会被 codex 当成 usage
+ * 1. **主命令级选项必须排在 `resume` 子命令之前**:`codex resume <id> --yolo
+ *    --sandbox workspace-write`(选项跟在 `resume <id>` 后面)会被 codex 当成 usage
  *    错误、exit=2 拒绝——本 adapter 曾经就是这么拼的(未验证的猜测),已按实测改成
- *    `codex --ask-for-approval never --sandbox workspace-write resume <id>`(选项在前)。
+ *    `codex --yolo --sandbox workspace-write resume <id>`(选项在前)。
  * 2. **不传 `--skip-git-repo-check`,改用 config.toml 的 `[projects."<path>"] trust_level`**:
  *    上一轮曾给 spawn/resume 加过 `--skip-git-repo-check`,诊断("worker workspace 不是受信
  *    目录,不处理会卡住")是对的,但这个 flag **只注册在 `codex exec` 子解析器上**——m2 实测
@@ -714,13 +714,13 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     const codexHome = join(spec.workspace.root, '.codex')
     const sessionName = `crabot-w-${spec.worker_id}-${seq}`
     const outputFile = join(dir, `output-${seq}.log`)
-    // codex-docs + m2 实测:交互态无 --session-id 等价参数;--ask-for-approval never
-    // --sandbox workspace-write 与 cc 用 --permission-mode acceptEdits 同样的自动化意图。
+    // codex-docs + m2 实测:交互态无 --session-id 等价参数;--yolo
+    // --sandbox workspace-write 与 cc 用 --permission-mode bypassPermissions 同样的自动化意图。
     // 不传 --skip-git-repo-check(m2 实测顶层交互式 codex 不支持这个 flag,只有 codex exec
     // 才有——见文件头"spawn/resume 启动参数"节);受信目录改由 provision 写进 config.toml 的
     // [projects."<realpath>"] trust_level = "trusted" 解决。
     // 网络放行见文件头"spawn/resume 启动参数"节。
-    const command = `${this.codexBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT}`
+    const command = `${this.codexBin} --yolo --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT}`
     const spawnStartedAt = Date.now()
 
     // newSession 成功之后才落 meta(running)+注册 runtime,同 cc 纪律:tmux 失败时不留任何
@@ -856,12 +856,12 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       const sessionName = `crabot-w-${prev.worker_id}-${seq}`
       const outputFile = join(dir, `output-${seq}.log`)
       // codex-docs: `codex resume <SESSION_ID>` 是独立子命令(不是 --resume flag)。
-      // m2 实测:--ask-for-approval/--sandbox 这类主命令级选项必须排在 `resume` 子命令**之前**
+      // m2 实测:--yolo/--sandbox 这类主命令级选项必须排在 `resume` 子命令**之前**
       // ——放在 `resume <id>` 后面 codex 会报 usage 错、exit=2(原实现把它们放在 `resume <id>`
       // 之后,是未经真机验证的错误猜测,这里按实测结果改正)。不传 --skip-git-repo-check,
       // 理由同 spawn(见文件头"spawn/resume 启动参数"节)。-c 同属主命令级选项,同样放在
       // `resume` 之前。
-      const command = `${this.codexBin} --ask-for-approval never --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT} resume ${shQuote(prev.session_ref)}`
+      const command = `${this.codexBin} --yolo --sandbox workspace-write ${CODEX_NETWORK_ACCESS_OPT} resume ${shQuote(prev.session_ref)}`
 
       // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime;
       // PATH 前置同 spawn(nvm 部署陷阱)。

@@ -2,7 +2,7 @@
  * ClaudeCodeAdapter — WorkerAdapter 契约的 claude-code 实现。
  *
  * spawn:session_id = randomUUID() 出生即定(即 session_ref);建 <dataDir>/<worker_id>/ 目录;
- * tmux newSession 拉起 `<claudeBin> --session-id <uuid> --permission-mode acceptEdits`,交互态
+ * tmux newSession 拉起 `<claudeBin> --session-id <uuid> --permission-mode bypassPermissions`,交互态
  * 跑在 tmux pane 里,cwd=workspace,pane 输出经 tmux pipe-pane 落 output-<seq>.log;meta 落盘为
  * running;**等 pane 输出里出现 \e[?2004h(TUI 已开启 bracketed paste)之后**,首条任务输入
  * (spec.prompt)才经 tmux sendText 注入(cc 把它当第一条用户消息)。等不到就绪 → 不投递、
@@ -10,7 +10,7 @@
  *
  * provision:与 spawn 分离的独立步骤(WorkerAdapter 契约本就是两个方法),由调用方在 spawn 前
  * 调用一次,把 workspace 布好——.claude/settings.json(Stop/Notification hook 接到
- * CliEventChannel.hookCommand,permissions 预配置 acceptEdits 降弹窗)、.claude/skills/(复用
+ * CliEventChannel.hookCommand,permissions 预配置 bypassPermissions 降弹窗)、.claude/skills/(复用
  * Task 3 的 materializeSkills)、.mcp.json(renderMcpJson)、CLAUDE.md(renderContextMd),
  * 外加全局 ~/.claude.json 里该 workspace 的两条预授权记录(preAcceptStartupDialogs:
  * hasTrustDialogAccepted 消掉"首次进入新目录"的信任弹窗——它发生在 --permission-mode 之前,
@@ -59,7 +59,7 @@
  * 四轮 review 修复;meta 也没有才报错——不再要求"只能 resume 本进程 spawn 过的化身"),校验
  * 其已 exited(未 exited 直接拒绝)→ 新 tmux 会话跑
  * `<claudeBin> --resume <prev.session_ref>`(不重复传 --permission-mode,provision 阶段已把
- * acceptEdits 写进 settings.json 兜底命令行之外的场景)→ seq+1 化身、独立 meta/output、
+ * bypassPermissions 写进 settings.json 兜底命令行之外的场景)→ seq+1 化身、独立 meta/output、
  * session_ref 原样透传(cc 侧同一个会话 id)。锁纪律与 spawn 一致:tmux newSession 成功后才
  * 提交 meta+runtime,首条 wakeInput(sendText)失败按 kill 路径清理并落 exited(crashed)。
  *
@@ -295,9 +295,11 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         Stop: [{ hooks: [{ type: 'command', command: channel.hookCommand('stop') }] }],
         Notification: [{ hooks: [{ type: 'command', command: channel.hookCommand('notification') }] }],
       },
-      // --permission-mode acceptEdits 已在命令行传了,这里在 settings.json 里重复声明一份,
-      // 覆盖命令行参数之外(如未来 --resume)也走同一降弹窗策略的场景。
-      permissions: { defaultMode: 'acceptEdits' },
+      // --permission-mode bypassPermissions 已在命令行传了,这里在 settings.json 里重复声明一份,
+      // 覆盖命令行参数之外(如未来 --resume)也走同一降弹窗策略的场景。bypassPermissions =
+      // 等价 auto-mode/--dangerously-skip-permissions:工具调用零审批弹窗(否则每调一次 Bash/网络
+      // 就要 manager 处理一次)。取舍见 specs/2026-08-06-worker-permission-auto-approve-design.md。
+      permissions: { defaultMode: 'bypassPermissions' },
     }
     await fs.writeFile(join(claudeDir, 'settings.json'), JSON.stringify(settings, null, 2) + '\n', 'utf-8')
 
@@ -428,7 +430,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
     const sessionName = `crabot-w-${spec.worker_id}-${seq}`
     const outputFile = join(dir, `output-${seq}.log`)
-    const command = `${this.claudeBin} --session-id ${sessionId} --permission-mode acceptEdits`
+    const command = `${this.claudeBin} --session-id ${sessionId} --permission-mode bypassPermissions`
 
     // newSession 成功之后才落 meta(running)+注册 runtime:tmux 失败时不留任何持久痕迹
     // (session_id 可重生成,workspace 内 provision 产物残留可接受),同 worker_id 可安全重试。
@@ -591,7 +593,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       handle = { worker_id: prev.worker_id, seq, impl: 'claude-code', session_ref: prev.session_ref }
       const sessionName = `crabot-w-${prev.worker_id}-${seq}`
       const outputFile = join(dir, `output-${seq}.log`)
-      // 不重复传 --permission-mode:provision 阶段已把 acceptEdits 写进 settings.json,覆盖
+      // 不重复传 --permission-mode:provision 阶段已把 bypassPermissions 写进 settings.json,覆盖
       // 命令行没有重复声明的场景(resume 正是这样的场景)。session_ref 是 cc 侧的会话 uuid,
       // 沿用不变。拼接时用 shQuote 转义 session_ref,防止 shell 注入(双层防御:
       // 入口已校验 UUID 格式,拼接时再加引号转义,提高防御深度)。
