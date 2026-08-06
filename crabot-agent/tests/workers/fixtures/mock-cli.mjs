@@ -42,10 +42,19 @@
 // sendText 机制的问题——真实 cc/codex 进程启动更慢,同样需要先起来才能谈 bracketed paste)。
 // MOCK_CLI_PASTE_READY_DELAY_MS / MOCK_CLI_BANNER(可选)——见下方声明处的注释:分别用于
 // 复刻"TUI 迟迟不请求 bracketed paste"的真实时序,和扮演挡在启动期的模态框文字。
+// MOCK_CLI_SESSION_DIR + MOCK_CLI_SESSION_SLUG(可选)——真实 cc 收到一条用户消息后会把它
+// 追加进 `<claudeProjectsDir>/<slug>/<session_id>.jsonl`(会话记录)。mock 复刻同款行为:设置
+// 后,每次 submit 都往 `<MOCK_CLI_SESSION_DIR>/<MOCK_CLI_SESSION_SLUG>/<--session-id 的
+// 值>.jsonl` 追加一行 cc 格式的 user 消息(paste 投递验证的用例靠它断言"prompt 真的进了会话",
+// 而不是只看到 paste 被包裹)。MOCK_CLI_DROP_FIRST_SUBMIT(可选,=1)——把第一次 submit 当
+// 启动期模态框吞掉(不写 session、不推进脚本),复刻 2026-08-06 生产实证:cc 在发出就绪信号
+// \e[?2004h 之后异步弹出 MCP 信任窗,首条 paste 被弹窗消费、会话记录里没有这条用户消息。
+// MOCK_CLI_DROP_SUBMIT_COUNT(可选,数字)——丢弃前 N 次 submit(不写 session、不推进脚本),
+// 模拟模态框持续吞输入;DROP_FIRST_SUBMIT 是它的 1 次特例(两者共存时取 COUNT)。
 import { exec } from 'node:child_process'
 import { promisify } from 'node:util'
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 
 const execAsync = promisify(exec)
 
@@ -123,8 +132,10 @@ function announcePasteReady() {
   if (readyFile) writeFileSync(readyFile, '')
 }
 
+// 就绪信号:必须在 stdin 监听挂好之后再宣布——否则 adapter 等到 \e[?2004h 立即 sendText,
+// paste 可能在 `process.stdin.on('data')`(见文件末尾)挂上之前到达,内容静默丢失。真实 cc
+// 启动更慢(TUI 就绪时 stdin 早已就绪),这里把立即分支推迟到监听注册之后即可消除测试竞态。
 if (pasteReadyDelayMs > 0) setTimeout(announcePasteReady, pasteReadyDelayMs)
-else announcePasteReady()
 
 let insidePaste = false
 let pending = '' // 尚未解析完的原始字节(可能横跨多个 data 事件,含被截断的半个标记)
@@ -139,8 +150,36 @@ function trailingMarkerPrefixLen(str, marker) {
   return 0
 }
 
+const sessionDir = process.env.MOCK_CLI_SESSION_DIR
+const sessionSlug = process.env.MOCK_CLI_SESSION_SLUG
+const dropSubmitCount = Number(
+  process.env.MOCK_CLI_DROP_SUBMIT_COUNT || (process.env.MOCK_CLI_DROP_FIRST_SUBMIT === '1' ? 1 : 0),
+)
+let submitCount = 0
+
+/** 真实 cc 收到用户消息后会追加进会话记录,见文件头 MOCK_CLI_SESSION_DIR 注释。 */
+function writeSessionEntry(content) {
+  // 真实 cc 只把可打印的用户消息写进会话记录;纯控制序列(Esc 清弹窗等)不产生 user 消息。
+  // 注意判定是"仅含控制字符"才跳过——中文等非 ASCII 可打印内容必须保留。
+  if (/^[\x00-\x1f\x7f]*$/.test(content)) return
+  if (!sessionDir || !sessionSlug) return
+  const sessionIdIndex = process.argv.indexOf('--session-id')
+  if (sessionIdIndex === -1) return
+  const sessionId = process.argv[sessionIdIndex + 1]
+  if (!sessionId) return
+  const file = join(sessionDir, sessionSlug, `${sessionId}.jsonl`)
+  mkdirSync(dirname(file), { recursive: true })
+  appendFileSync(
+    file,
+    JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: content }] } }) + '\n',
+  )
+}
+
 function submit(content) {
+  submitCount += 1
+  if (submitCount <= dropSubmitCount) return // 启动期模态框吞掉前 N 条输入:不写 session、不推进脚本
   if (stdinLogFile) appendFileSync(stdinLogFile, JSON.stringify(content) + '\n')
+  writeSessionEntry(content)
   void runStep()
 }
 
@@ -184,3 +223,6 @@ process.stdin.on('data', (chunk) => {
     break
   }
 })
+
+// stdin 监听已挂好,现在宣布就绪不丢输入(见上方就绪信号的注释)。
+if (pasteReadyDelayMs <= 0) announcePasteReady()

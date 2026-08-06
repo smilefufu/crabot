@@ -1,9 +1,19 @@
 # Crabot 项目进度
 
-> 最后更新：2026-08-06 — worker 活性信号纠偏与 builtin 覆盖（分支 fix/worker-liveness-signals，待 PR）
+> 最后更新：2026-08-06 — cc 首条 prompt 投递验证（分支 fix/cc-prompt-delivery-verify，待 PR）
+
+## 2026-08-06 — cc 启动弹窗吞 prompt 的投递验证闭环（MCP 弹窗事故第三次实例）
+
+- 现场：部署活性信号后，admin-chat 触发的 cc 验证任务（w-d2304bb6）启动时弹 arXivPaper MCP 信任窗，首条 prompt 被弹窗吞掉，worker 停在空 composer 直到 30 分钟巡检兜底。铁证：output 日志里 `\e[?2004h` 在 byte 507、弹窗在 byte 890——**就绪信号之后 cc 才异步弹窗**，推翻 paste-ready.ts「弹窗会挡住就绪信号」的设计假设。同类事故第三次：8/4 卡 8.5h（paste-ready 修复前）、w-ed8453a7 8/5 卡 6h33m、w-d2304bb6 8/6。
+- 修复（小改动，局限 cc adapter spawn 阶段）：sendText(prompt) 后**用结果验证投递**——轮询 cc 会话记录（`~/.claude/projects/<slug>/<sessionId>.jsonl`）直到出现 user 消息；失败 → Esc 清理残留弹窗 + 重投一次完整 prompt + 再验证；仍失败 → 走既有 `reportStartupStall` 暂扣（带现场给 manager），绝不静默留下 running。不再依赖 TUI 文案，复用 lastActivityAt 已有的 session 定位逻辑。
+- 不变量：就绪握手（60s 等 `\e[?2004h`）不动；stall 暂扣语义不变；manager 恢复路径不变（弹窗已被消费时非 raw `send_to_worker` 重发完整任务即恢复——本次就是这么恢复的）。
+- 测试：mock-cli 支持复刻 cc 写会话记录（`MOCK_CLI_SESSION_DIR/SLUG`）与「模态框吞前 N 条输入」（`DROP_SUBMIT_COUNT`）；新增 3 用例（正常落账 / 首条被吞自动重投 / 持续被吞落 stall）。现有 spawn 测试通过 `promptDeliveryTimeoutMs: 0`（跳过投递验证）保持旧行为，改动面只在构造参数。
+- 验证：`claude-code-adapter.test.ts` 65/65、相关 4 文件 88/88、合计 153/153；变异（禁用验证逻辑）→ 新用例 2 挂。
+- 已知边界：codex 的启动弹窗未做对称处理（其 spawn 靠等 rollout 文件，机制不同），记入 follow-up；全局 MCP 禁用清单同步进 workspace 暂不做（保留弹窗现场便于验证）。
 
 ## 2026-08-06 — worker 活性信号纠偏：动画不再伪装进展，builtin 不再是盲区
 
+- 已合并：PR #76（squash `96b72f6`，@claude APPROVED 自动合并），已部署 m2（`crabot stop → upgrade → start`，health 全绿、fatal.log 无新条目、dist 含新信号）。部署后首轮巡检即命中 w-ed8453a7（被 `Auto-updating…` 掩盖 17.3h 的停摆）：新信号正确告警（1039 分钟无活动），manager 29s 内 kill 闭环。w-e865d356（停摆 builtin）重启后由 recovery 正确标记 failed。
 - 已确认 Spec 与计划：`crabot-docs/superpowers/specs/2026-08-06-worker-liveness-signal-correction-design.md`、`crabot-docs/superpowers/plans/2026-08-06-worker-liveness-signal-correction-plan.md`；正式协议 `protocol-agent-v3.md` §6.1/§6.3 已先更新并推送文档仓 main（`9fa9280`）。
 - 生产复盘：#75 首版确实两次唤醒 `w-ed8453a7`，但 Claude Code 在空 composer 每约 30 分钟输出一次 `Auto-updating…`，持续刷新 `output-1.log` mtime，恰好永久压住 30 分钟阈值；manager 清掉 MCP 弹窗后也只敲了选项/Enter，没有重发原任务。`w-761654c6` 后来虽正常完成，但 builtin running 约 4 小时期间完全没有连续活性信号。
 - 契约纠偏：`lastActivityAt` 改为“最近一次可观察任务/执行进展”，进程存活、pane 动画和无条件心跳均不算。Claude Code 取 `max(meta mtime, native session JSONL mtime)`；Codex 取 `max(meta mtime, rollout mtime)`；output 只在首报告警时附诊断现场。
