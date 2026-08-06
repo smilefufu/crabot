@@ -140,7 +140,7 @@ describe('ClaudeCodeAdapter.provision', () => {
   // ~/.claude.json 的 projects[<realpath>].hasTrustDialogAccepted —— cc 交互式启动的
   // "Do you trust this folder?" 弹窗开关。不预写 → 新 workspace 每次必卡在弹窗上,
   // hook 一次都不触发(生产实测:69 分钟零事件)。
-  describe('workspace 启动弹窗预授权(~/.claude.json)', () => {
+  describe('cc 启动弹窗预授权(~/.claude.json)', () => {
     async function readConfig(): Promise<Record<string, any>> {
       return JSON.parse(await fs.readFile(claudeConfigPath, 'utf-8'))
     }
