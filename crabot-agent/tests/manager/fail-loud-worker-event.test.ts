@@ -248,7 +248,7 @@ describe('worker 事件路径的 fail-loud（bootstrap.onEvent → reportEpisode
    * - 活性巡检要的是**返回值**：把"这次唤醒没被消费"交回 harness，好让它**按退避重试投递**。
    *
    * 失败时两件事必须同时发生。这里用真装配 + 真 `ClaudeCodeAdapter.lastActivityAt`
-   * （对约定路径的 output 日志做一次 mtime 探测，不需要 tmux）把整条链跑通：
+   * （对 meta 与原生 session 记录做 mtime 探测，pane output 只作告警现场）把整条链跑通：
    * 巡检发事件 → 真 `ManagerLoop` 撞上挂掉的 LLM → 落 `outcome='failed'`。
    *
    * 重试的形态是 PR #75 review 的修正：**带退避、且不带正文** —— 现场在 episode 失败时被
@@ -261,19 +261,27 @@ describe('worker 事件路径的 fail-loud（bootstrap.onEvent → reportEpisode
     const workerId = 'w-stalled'
     const dataRoot = join(tmpRoot, 'data')
 
-    // 台账：主线化身 running、impl=claude-code（builtin 不实现 lastActivityAt，不参与巡检）
+    // 台账：主线化身 running、impl=claude-code。
+    // builtin 也有自己的 progress 信号；这里选择 CLI 是为了覆盖原生 meta 基线。
     await stack.ledger.upsertWorker(dialogObjectIdForPrivate('friend-1'), workerId, () => {
       const worker = makeLedgerWorker({ workerId, title: '卡住的活', spawnedBySession: 'wechat::sess-1' as ManagerKey })
       return { ...worker, incarnations: [{ ...worker.incarnations[0], impl: 'claude-code' }] }
     })
 
-    // pane 日志：按 cc adapter 的约定路径落盘，mtime 摆到 2 小时前 —— 这就是"很久没动"的现场
+    // pane 日志仍用于首报告警现场;停摆基线取同化身的 meta mtime,不能让 TUI output 重绘决定活性。
     const logDir = join(dataRoot, 'agent', 'worker-adapters', 'claude-code', workerId)
     await fs.mkdir(logDir, { recursive: true })
+    const stalledAt = new Date(clockMs - 2 * 60 * 60 * 1000)
+    const metaPath = join(logDir, 'meta-1.json')
+    await fs.writeFile(metaPath, JSON.stringify({
+      seq: 1,
+      state: 'running',
+      session_id: 'stalled-session',
+      workspace_root: join(tmpRoot, 'workspace'),
+    }), 'utf-8')
+    await fs.utimes(metaPath, stalledAt, stalledAt)
     const logPath = join(logDir, 'output-1.log')
     await fs.writeFile(logPath, '⏺ 正在读取文件…', 'utf-8')
-    const stalledAt = new Date(clockMs - 2 * 60 * 60 * 1000)
-    await fs.utimes(logPath, stalledAt, stalledAt)
 
     const wakeTexts = async (): Promise<string[]> =>
       (await stack.harness.readWorkerEvents(workerId))

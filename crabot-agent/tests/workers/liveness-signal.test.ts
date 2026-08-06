@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import * as os from 'os'
@@ -8,65 +8,213 @@ import { BuiltinWorkerAdapter } from '../../src/workers/builtin/adapter'
 import type { IncarnationHandle, WorkerAdapter } from '../../src/workers/types'
 
 /**
- * 可选契约方法 `lastActivityAt`(protocol-agent-v3 §6.1)在 adapter 层的落点:
- * **cc/codex 各自实现为对自己 output 日志的一次 mtime 探测,builtin 不实现**。
- *
- * 两个 CLI adapter 在内存里没有常驻 runtime 时都按约定路径
- * `<dataDir>/<worker_id>/output-<seq>.log` 重建 OutputLog(与 readOutput 同一条路径解析),
- * 所以这些用例只需把固件写到那个路径,不用真的起 tmux;这同时也锁住了"agent 重启后仍然
- * 判得了活性"这条性质。
- *
- * 两侧对称覆盖:参数化跑两遍,避免只给 cc 写用例、删掉 codex 一侧实现还能全绿。
+ * `lastActivityAt` 是任务/执行进展信号,不是 pane 的任意字节活动。
+ * CLI 的 output 可能只因 TUI 的 Auto-updating/spinner 重绘而增长;那不能掩盖停摆。
  */
 describe('lastActivityAt(活性信号,adapter 层边界)', () => {
   let dataDir: string
+  let workspaceRoot: string
 
   beforeEach(async () => {
     dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'liveness-signal-'))
+    workspaceRoot = path.join(dataDir, 'workspace')
+    await fs.mkdir(workspaceRoot, { recursive: true })
   })
 
   afterEach(async () => {
     await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
   })
 
-  function handle(workerId: string, impl: IncarnationHandle['impl']): IncarnationHandle {
-    return { worker_id: workerId, seq: 1, impl, session_ref: 'unused' }
+  function handle(workerId: string, impl: IncarnationHandle['impl'], sessionRef: string): IncarnationHandle {
+    return { worker_id: workerId, seq: 1, impl, session_ref: sessionRef }
   }
 
-  const cases: Array<[IncarnationHandle['impl'], () => WorkerAdapter]> = [
-    ['claude-code', () => new ClaudeCodeAdapter({ dataDir })],
-    ['codex', () => new CodexWorkerAdapter({ dataDir })],
+  async function writeMeta(workerId: string, meta: Record<string, unknown>, mtime: number): Promise<string> {
+    const dir = path.join(dataDir, workerId)
+    const metaPath = path.join(dir, 'meta-1.json')
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(metaPath, JSON.stringify(meta), 'utf-8')
+    await fs.utimes(metaPath, new Date(mtime), new Date(mtime))
+    return metaPath
+  }
+
+  async function replaceWithBrokenSymlink(filePath: string): Promise<void> {
+    await fs.rm(filePath)
+    await fs.symlink(filePath, filePath)
+  }
+
+  async function seedCliSignal(
+    impl: IncarnationHandle['impl'],
+    make: (workerId: string, sessionId: string) => Promise<{ adapter: WorkerAdapter; handle: IncarnationHandle; nativePath: string }>,
+    suffix: string,
+  ): Promise<{ adapter: WorkerAdapter; h: IncarnationHandle; metaPath: string; nativePath: string; metaAt: number }> {
+    const workerId = `w-${impl}-${suffix}`
+    const sessionId = '33333333-3333-4333-8333-333333333333'
+    const metaAt = Date.parse('2026-08-05T00:00:00.000Z')
+    const { adapter, handle: h, nativePath } = await make(workerId, sessionId)
+    const metaPath = await writeMeta(workerId, {
+      seq: 1,
+      state: 'running',
+      session_id: sessionId,
+      workspace_root: workspaceRoot,
+      ...(impl === 'codex' ? { session_discovery: 'discovered' } : {}),
+    }, metaAt)
+    return { adapter, h, metaPath, nativePath, metaAt }
+  }
+
+  const cases: Array<[
+    IncarnationHandle['impl'],
+    (workerId: string, sessionId: string) => Promise<{ adapter: WorkerAdapter; handle: IncarnationHandle; nativePath: string }>,
+  ]> = [
+    [
+      'claude-code',
+      async (workerId, sessionId) => {
+        const projectsDir = path.join(dataDir, 'claude-projects')
+        const slug = workspaceRoot.replace(/[/.]/g, '-')
+        const nativePath = path.join(projectsDir, slug, `${sessionId}.jsonl`)
+        await fs.mkdir(path.dirname(nativePath), { recursive: true })
+        await fs.writeFile(nativePath, '{}\n', 'utf-8')
+        return {
+          adapter: new ClaudeCodeAdapter({ dataDir, claudeProjectsDir: projectsDir }),
+          handle: handle(workerId, 'claude-code', sessionId),
+          nativePath,
+        }
+      },
+    ],
+    [
+      'codex',
+      async (workerId, sessionId) => {
+        const nativePath = path.join(workspaceRoot, '.codex', 'sessions', '2026', '08', '06', `rollout-2026-08-06T00-00-00-${sessionId}.jsonl`)
+        await fs.mkdir(path.dirname(nativePath), { recursive: true })
+        await fs.writeFile(nativePath, JSON.stringify({ type: 'session_meta', payload: { session_id: sessionId } }) + '\n', 'utf-8')
+        return {
+          adapter: new CodexWorkerAdapter({ dataDir }),
+          handle: handle(workerId, 'codex', sessionId),
+          nativePath,
+        }
+      },
+    ],
   ]
 
-  it.each(cases)('%s:返回 output 日志的 mtime,写入后随之前进', async (impl, make) => {
+  it.each(cases)('%s:取 meta 与原生记录的最新 mtime,忽略持续刷新的 pane output', async (impl, make) => {
     const workerId = `w-${impl}-activity`
-    const adapter = make()
-    const h = handle(workerId, impl)
-    const logPath = path.join(dataDir, workerId, 'output-1.log')
+    const sessionId = '11111111-1111-4111-8111-111111111111'
+    const metaAt = Date.parse('2026-08-05T00:00:00.000Z')
+    const nativeAt = metaAt + 60_000
+    const outputAt = nativeAt + 24 * 60 * 60_000
+    const { adapter, handle: h, nativePath } = await make(workerId, sessionId)
 
-    await fs.mkdir(path.join(dataDir, workerId), { recursive: true })
-    await fs.writeFile(logPath, 'first frame', 'utf-8')
-    // mtime 摆到一个确定的过去时刻:这正是"化身很久没动"的现场形态
-    const stalledAt = Date.parse('2026-08-05T00:00:00.000Z')
-    await fs.utimes(logPath, new Date(stalledAt), new Date(stalledAt))
+    await writeMeta(workerId, {
+      seq: 1,
+      state: 'running',
+      session_id: sessionId,
+      workspace_root: workspaceRoot,
+      ...(impl === 'codex' ? { session_discovery: 'discovered' } : {}),
+    }, metaAt)
+    await fs.utimes(nativePath, new Date(nativeAt), new Date(nativeAt))
 
-    expect(await adapter.lastActivityAt!(h)).toBe(stalledAt)
+    const outputPath = path.join(dataDir, workerId, 'output-1.log')
+    await fs.writeFile(outputPath, 'Auto-updating…', 'utf-8')
+    await fs.utimes(outputPath, new Date(outputAt), new Date(outputAt))
 
-    // 又吐了一帧(TUI 自旋动画持续写字节)→ 信号前进
-    const movedAt = stalledAt + 60_000
-    await fs.appendFile(logPath, ' next frame', 'utf-8')
-    await fs.utimes(logPath, new Date(movedAt), new Date(movedAt))
-    expect(await adapter.lastActivityAt!(h)).toBe(movedAt)
+    expect(await adapter.lastActivityAt!(h)).toBe(nativeAt)
   })
 
-  it.each(cases)('%s:日志文件还不存在 → undefined(判不了,不是"很久没动")', async (impl, make) => {
-    const adapter = make()
-    expect(await adapter.lastActivityAt!(handle(`w-${impl}-nolog`, impl))).toBeUndefined()
+  it.each(cases)('%s:原生记录缺失时回退 meta mtime,而非 output mtime', async (impl, make) => {
+    const workerId = `w-${impl}-fallback`
+    const sessionId = '22222222-2222-4222-8222-222222222222'
+    const metaAt = Date.parse('2026-08-05T00:00:00.000Z')
+    const outputAt = metaAt + 24 * 60 * 60_000
+    const { adapter, handle: h, nativePath } = await make(workerId, sessionId)
+
+    await writeMeta(workerId, {
+      seq: 1,
+      state: 'running',
+      session_id: sessionId,
+      workspace_root: workspaceRoot,
+      ...(impl === 'codex' ? { session_discovery: 'discovered' } : {}),
+    }, metaAt)
+    await fs.rm(nativePath)
+    const outputPath = path.join(dataDir, workerId, 'output-1.log')
+    await fs.writeFile(outputPath, 'Auto-updating…', 'utf-8')
+    await fs.utimes(outputPath, new Date(outputAt), new Date(outputAt))
+
+    expect(await adapter.lastActivityAt!(h)).toBe(metaAt)
   })
 
-  it('builtin 不实现该方法:它的 output 只在有 assistantText 时才写,没有连续活性信号', () => {
+  it.each(cases)('%s:原生记录 stat 非 ENOENT 失败时告警并回退 meta', async (impl, make) => {
+    const { adapter, h, nativePath, metaAt } = await seedCliSignal(impl, make, 'native-error')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await replaceWithBrokenSymlink(nativePath)
+
+    expect(await adapter.lastActivityAt!(h)).toBe(metaAt)
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(`worker liveness] stat failed for ${h.worker_id}#${h.seq} at ${nativePath}`),
+      expect.anything(),
+    )
+  })
+
+  it.each(cases)('%s:meta 不可读且无法定位原生记录时告警并返回 undefined', async (impl, make) => {
+    const { adapter, h, metaPath } = await seedCliSignal(impl, make, 'all-errors')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await replaceWithBrokenSymlink(metaPath)
+
+    expect(await adapter.lastActivityAt!(h)).toBeUndefined()
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(`worker liveness] stat failed for ${h.worker_id}#${h.seq} at ${metaPath}`),
+      expect.anything(),
+    )
+  })
+
+  it('codex:rollout 目录非正常不可读时告警并保留 meta 基线', async () => {
+    const impl = 'codex' as const
+    const make = cases.find(([id]) => id === impl)![1]
+    const { adapter, h, metaAt } = await seedCliSignal(impl, make, 'discovery-error')
+    const sessionsDir = path.join(workspaceRoot, '.codex', 'sessions')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await fs.rm(sessionsDir, { recursive: true })
+    await fs.symlink(sessionsDir, sessionsDir)
+
+    expect(await adapter.lastActivityAt!(h)).toBe(metaAt)
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(`worker liveness] rollout discovery failed for ${h.worker_id}#${h.seq} at ${sessionsDir}`),
+      expect.anything(),
+    )
+  })
+
+  it('codex:候选 rollout 内容非正常不可读时告警并保留 meta 基线', async () => {
+    const impl = 'codex' as const
+    const make = cases.find(([id]) => id === impl)![1]
+    const { adapter, h, nativePath, metaAt } = await seedCliSignal(impl, make, 'candidate-read-error')
+    const sessionsDir = path.join(workspaceRoot, '.codex', 'sessions')
+    const candidateId = '44444444-4444-4444-8444-444444444444'
+    const candidatePath = path.join(path.dirname(nativePath), `rollout-2026-08-06T00-00-01-${candidateId}.jsonl`)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await fs.rm(nativePath)
+    await fs.symlink(candidatePath, candidatePath)
+
+    expect(await adapter.lastActivityAt!(h)).toBe(metaAt)
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(`worker liveness] rollout discovery failed for ${h.worker_id}#${h.seq} at ${sessionsDir}`),
+      expect.anything(),
+    )
+  })
+
+  it('builtin 实现该方法:无常驻化身时回退 meta mtime,不借 output 当活性', async () => {
+    const workerId = 'w-builtin-fallback'
+    const metaAt = Date.parse('2026-08-05T00:00:00.000Z')
+    const outputAt = metaAt + 24 * 60 * 60_000
+    await writeMeta(workerId, { seq: 1, state: 'running', tip_node_id: 'tip-1' }, metaAt)
+    const outputPath = path.join(dataDir, workerId, 'output-1.log')
+    await fs.writeFile(outputPath, 'assistant text', 'utf-8')
+    await fs.utimes(outputPath, new Date(outputAt), new Date(outputAt))
+
     const adapter: WorkerAdapter = new BuiltinWorkerAdapter({ dataDir })
-    // 巡检据此天然跳过它(harness 侧没有、也不该有 `if (impl === 'builtin')` 这类特判)
-    expect(adapter.lastActivityAt).toBeUndefined()
+    expect(await adapter.lastActivityAt!(handle(workerId, 'builtin', 'tip-1'))).toBe(metaAt)
+  })
+
+  it('没有 meta 或原生进展记录时返回 undefined', async () => {
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeProjectsDir: path.join(dataDir, 'claude-projects') })
+    expect(await adapter.lastActivityAt!(handle('w-nolog', 'claude-code', 'unused'))).toBeUndefined()
   })
 })

@@ -15,6 +15,29 @@ export async function writeMetaAtomic(dir: string, seq: number, meta: unknown): 
 }
 
 /**
+ * 多来源活性时间取最新值。ENOENT 是尚未生成/已清理的正常降级,不记录;其它错误必须带
+ * 化身和路径留痕,再继续尝试其它独立来源。
+ */
+export async function latestModifiedMs(
+  paths: ReadonlyArray<string | undefined>,
+  context: string,
+): Promise<number | undefined> {
+  let latest: number | undefined
+  for (const path of paths) {
+    if (!path) continue
+    try {
+      const mtimeMs = (await fs.stat(path)).mtimeMs
+      if (latest === undefined || mtimeMs > latest) latest = mtimeMs
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        console.warn(`[worker liveness] stat failed for ${context} at ${path}:`, err)
+      }
+    }
+  }
+  return latest
+}
+
+/**
  * 扫 dir 下 meta-<seq>.json 文件名,返回其中最大的 seq(没有任何 meta 文件、或 dir 本身不
  * 存在,都返回 0)。供 nextSeq() 做磁盘感知——五轮 review 修复:重启后新 adapter 实例的
  * 内存态(runtimes/instances)只含按需重建过的化身,不是该 worker 的全部历史,nextSeq 只看

@@ -330,6 +330,51 @@ describe('BuiltinWorkerAdapter', () => {
     expect(chunk).toContain('A 还是 B')
   })
 
+  it('常驻化身只以真实 engine/input 进展更新时间，主线与 fork 回调均接线', async () => {
+    let now = 1_000
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now)
+    const runEngineSpy = vi.spyOn(engineModule, 'runEngine').mockImplementation(
+      () => new Promise(() => {}),
+    )
+    try {
+      const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+      const h = await adapter.spawn(spec({ adapter: makeAdapter([{ stopReason: 'end_turn' }]) }))
+      await vi.waitFor(() => expect(runEngineSpy).toHaveBeenCalledTimes(1))
+      expect(await adapter.lastActivityAt(h)).toBe(1_000)
+
+      // 没有任何 engine/input 回调时,时间流逝本身不能续命。
+      now = 1_500
+      expect(await adapter.lastActivityAt(h)).toBe(1_000)
+
+      now = 2_000
+      const mainOptions = runEngineSpy.mock.calls[0][0].options
+      mainOptions.onLiveProgress!({ type: 'tools_start', tools: [] })
+      expect(await adapter.lastActivityAt(h)).toBe(2_000)
+
+      now = 3_000
+      mainOptions.onTurn!({ turnNumber: 1, assistantText: '', toolCalls: [], stopReason: 'end_turn' })
+      expect(await adapter.lastActivityAt(h)).toBe(3_000)
+
+      now = 4_000
+      await adapter.sendInput(h, '运行中追加的输入')
+      expect(await adapter.lastActivityAt(h)).toBe(4_000)
+
+      const fork = await adapter.fork(h, '侧问')
+      await vi.waitFor(() => expect(runEngineSpy).toHaveBeenCalledTimes(2))
+      now = 5_000
+      const forkOptions = runEngineSpy.mock.calls[1][0].options
+      forkOptions.onLiveProgress!({ type: 'tools_end', results: [] })
+      expect(await adapter.lastActivityAt(fork)).toBe(5_000)
+
+      now = 6_000
+      await expect(adapter.sendInput({ ...h, seq: 99 }, '不存在的化身')).rejects.toThrow(/no such incarnation/)
+      expect(await adapter.lastActivityAt(h)).toBe(4_000)
+    } finally {
+      runEngineSpy.mockRestore()
+      nowSpy.mockRestore()
+    }
+  })
+
   it('finish_task → exited(completed)', async () => {
     const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
     const s = spec({
@@ -455,7 +500,37 @@ describe('BuiltinWorkerAdapter', () => {
     expect(streamMock.mock.calls).toHaveLength(1)
   })
 
-  it('sendInput(idle) → 追加新一轮用户消息并起新 burst，新 burst 可见旧上下文', async () => {
+  it('sendInput(idle) 成功转 running 才更新 activityAt，失败投递不更新', async () => {
+    let now = 1_000
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now)
+    const gate = deferred<void>()
+    try {
+      const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
+      const h = await adapter.spawn(spec({
+        adapter: makeAdapterGatedFromSecondCall(gate.promise, [
+          { text: '首轮', stopReason: 'end_turn' },
+          { text: '续轮', stopReason: 'end_turn' },
+        ]),
+      }))
+      await waitState(adapter, h, 'idle')
+
+      now = 2_000
+      await adapter.sendInput(h, 'idle 输入')
+      await vi.waitFor(async () => expect(await adapter.lastActivityAt(h)).toBe(2_000))
+
+      now = 3_000
+      const activityBeforeFailedInput = await adapter.lastActivityAt(h)
+      await expect(adapter.sendInput({ ...h, seq: 99 }, '失败输入')).rejects.toThrow(/no such incarnation/)
+      expect(await adapter.lastActivityAt(h)).toBe(activityBeforeFailedInput)
+
+      gate.resolve()
+      await waitState(adapter, h, 'idle')
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
+
+  it('sendInput(idle) → 追加新一轮用户消息并起新 burst，新 burst可见旧上下文', async () => {
     const runEngineSpy = vi.spyOn(engineModule, 'runEngine')
     const adapter = new BuiltinWorkerAdapter({ dataDir: tmp })
     const s = spec({

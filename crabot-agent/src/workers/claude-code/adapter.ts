@@ -98,7 +98,7 @@ import { CliEventChannel, EVENTS_FILE_ENV } from '../cli-events.js'
 import { OutputLog } from '../output-log.js'
 import { decodeTerminalOutput } from '../terminal-output.js'
 import { AsyncMutex } from '../async-mutex.js'
-import { writeMetaAtomic, maxSeqOnDisk } from '../meta-store.js'
+import { writeMetaAtomic, maxSeqOnDisk, latestModifiedMs } from '../meta-store.js'
 import { WorkerExitedError } from '../errors.js'
 import { materializeSkills, renderMcpJson, renderContextMd, type ProvisionSources } from '../provision/materialize.js'
 import type {
@@ -707,17 +707,23 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   /**
-   * 活性信号(protocol-agent-v3 §6.1 `lastActivityAt`):pane 输出日志的 mtime。
+   * 活性信号(protocol-agent-v3 §6.1):任务/执行进展的最近时刻。
    *
-   * tmux `pipe-pane` 抓的是 pane 的**整条输出流**,TUI 在模型思考期间持续重绘自旋动画 ——
-   * 所以"这份文件多久没长了"能把"想得久"和"卡死了"分开,而 `state()` 的 running 是 else
-   * 兜底、在语义上分不开(见 syncState)。路径解析与 `readOutput` 同一条(有常驻 runtime 用
-   * 它的 OutputLog,没有就按约定路径重建),保证进程重启后仍然可判。
+   * pane output 可能只是 TUI spinner 或 Auto-updating 重绘,不能拿它当任务活动。
+   * 原生 session JSONL 记录实际会话进展;meta 则提供 spawn/resume/input/state 转换的
+   * 控制进展基线。两者任一暂时不可读时用另一来源,都不可读才交给 harness 本轮跳过。
    */
   async lastActivityAt(h: IncarnationHandle): Promise<number | undefined> {
+    const dir = join(this.deps.dataDir, h.worker_id)
+    const metaPath = join(dir, `meta-${h.seq}.json`)
     const runtime = this.runtimes.get(instanceKey(h))
-    const outputLog = runtime ? runtime.outputLog : new OutputLog(join(this.deps.dataDir, h.worker_id, `output-${h.seq}.log`))
-    return outputLog.lastModifiedMs()
+    const meta = runtime ? undefined : await this.readMetaFile(dir, h.seq)
+    const workspaceRoot = runtime?.workspaceRoot ?? meta?.workspace_root
+    const sessionId = runtime?.sessionId ?? meta?.session_id ?? h.session_ref
+    const tracePath = workspaceRoot && sessionId
+      ? join(this.claudeProjectsDir, projectSlug(workspaceRoot), `${sessionId}.jsonl`)
+      : undefined
+    return latestModifiedMs([metaPath, tracePath], `${h.worker_id}#${h.seq}`)
   }
 
   /**
