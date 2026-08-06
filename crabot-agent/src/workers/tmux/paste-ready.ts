@@ -141,6 +141,22 @@ export function describeStartupStall(opts: { impl: string; timeoutMs: number; ta
 }
 
 /**
+ * 投递验证失败的暂扣正文(与 describeStartupStall 平行):就绪握手已通过、prompt 已投递过
+ * (可能两次)并已发过 Esc,但会话记录里始终没出现这条 user 消息——判定被启动期模态框(如
+ * MCP 信任窗)吞掉。正文必须如实反映这一现场,不能复用"未就绪/一个字符都没投递"的失实描述
+ * (2026-08-06 review 指正,否则 manager 会按错的现场做决策)。
+ */
+export function describeDeliveryStall(opts: { impl: string; timeoutMs: number; tail: string }): string {
+  const seconds = Math.round(opts.timeoutMs / 1000)
+  const note =
+    `[crabot] ${opts.impl} 启动成功(就绪握手已通过),但首条任务输入投递后 ${seconds}s 内没有出现在会话记录里——` +
+    `判定被启动期模态框(如 MCP 信任窗)吞掉,已自动按 Esc 并重投一次仍无效。进程/会话仍活着、台账仍记着 running。` +
+    `上面是该化身终端输出的尾部(已解码成可读文本,与 read_worker_output 同一形态),据此判断卡在哪:` +
+    `可用 send_to_worker 的 raw 模式敲键清掉界面,再以非 raw 重发完整任务。`
+  return `${opts.tail || '(终端至今没有任何输出)'}\n---\n${note}`
+}
+
+/**
  * 读 output 日志的**尾部**(最多 maxBytes 字节),原样返回。
  *
  * 用途只有一个:就绪握手超时时把"屏幕这一刻在说什么"随唤醒事件交给 manager 判断

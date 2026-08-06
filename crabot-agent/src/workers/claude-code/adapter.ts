@@ -93,7 +93,7 @@ import { homedir } from 'os'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { TmuxDriver } from '../tmux/driver.js'
-import { DEFAULT_PASTE_READY_TIMEOUT_MS, describeStartupStall, readOutputTail, waitForPasteReady } from '../tmux/paste-ready.js'
+import { DEFAULT_PASTE_READY_TIMEOUT_MS, describeDeliveryStall, describeStartupStall, readOutputTail, waitForPasteReady } from '../tmux/paste-ready.js'
 import { CliEventChannel, EVENTS_FILE_ENV } from '../cli-events.js'
 import { OutputLog } from '../output-log.js'
 import { decodeTerminalOutput } from '../terminal-output.js'
@@ -119,6 +119,17 @@ import type {
 } from '../types.js'
 
 const execFileAsync = promisify(execFile)
+
+/**
+ * 首条 prompt 投递验证的超时(毫秒)。
+ *
+ * 2026-08-06 生产实证(w-d2304bb6):`\e[?2004h` 只证明"paste 会被包裹",不证明"没有启动期
+ * 模态框"——cc 在就绪信号之后异步弹出 MCP 信任窗(arXivPaper),首条 paste 被弹窗消费,worker
+ * 静默停在空 composer。投递后轮询 cc 的会话记录(session jsonl)直到出现这条 user 消息,用结果
+ * 说话。cc 收到输入到落 session 是毫秒级,15s 给弹窗确认/重绘留足余量且远小于 60s 握手超时。
+ */
+const PROMPT_DELIVERY_TIMEOUT_MS = 15_000
+const PROMPT_DELIVERY_POLL_INTERVAL_MS = 250
 
 /** POSIX shell 单引号转义,与 tmux/driver.ts 的私有 shQuote 同款用法(独立复制一份)。 */
 function shQuote(s: string): string {
@@ -207,6 +218,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   private readonly claudeProjectsDir: string
   private readonly claudeConfigPath: string
   private readonly pasteReadyTimeoutMs: number
+  private readonly promptDeliveryTimeoutMs: number
   private readonly runtimes = new Map<string, Runtime>()
   private readonly mutexes = new Map<string, AsyncMutex>()
 
@@ -225,6 +237,12 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
        * 实测取值依据)。测试注入小值,避免为了走超时分支真的等一分钟。 */
       readonly pasteReadyTimeoutMs?: number
       /**
+       * 首条 prompt 投递验证的等待上限,默认 PROMPT_DELIVERY_TIMEOUT_MS(见该常量注释,2026-08-06
+       * 生产实证:就绪信号之后 cc 仍可能异步弹 MCP 信任窗把 prompt 整个吞掉)。传 0 或负数跳过
+       * 验证——测试里没有真实 cc 进程写 session jsonl 的夹具(纯 fake tmux)注入 0 保持旧行为。
+       */
+      readonly promptDeliveryTimeoutMs?: number
+      /**
        * `report.lastText` 本 adapter 刻意不报(理由见 transitionState 注释),只报
        * `report.endReason`:`transitionExited` 拿到的那个**必填**的 `ended_reason`。不报的
        * 话这个值会在回调这一跳被丢掉,harness 只能猜。
@@ -242,6 +260,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     this.claudeProjectsDir = deps.claudeProjectsDir ?? join(homedir(), '.claude', 'projects')
     this.claudeConfigPath = deps.claudeConfigPath ?? join(homedir(), '.claude.json')
     this.pasteReadyTimeoutMs = deps.pasteReadyTimeoutMs ?? DEFAULT_PASTE_READY_TIMEOUT_MS
+    this.promptDeliveryTimeoutMs = deps.promptDeliveryTimeoutMs ?? PROMPT_DELIVERY_TIMEOUT_MS
   }
 
   async detect(): Promise<DetectResult> {
@@ -453,18 +472,72 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // 首条任务输入经 sendText 注入,cc 把它当第一条用户消息。注入失败:session 可能已经起来
     // 但没喂到任务,不能放任 running——按 kill 路径清理 tmux 会话后落 exited(crashed)(不是
     // killed,这不是用户发起的 kill),spawn 仍然 reject 把失败如实报给调用方。
-    try {
-      await this.tmux.sendText(sessionName, spec.prompt)
-    } catch (err) {
-      await this.getMutex(handle.worker_id).run(async () => {
-        if (runtime.state === 'exited') return
-        await this.tmux.killSession(sessionName)
-        await this.transitionExited(runtime, handle, 'crashed')
-      })
-      throw err
+    await this.sendTextOrKill(runtime, handle, spec.prompt)
+
+    // 投递验证:就绪握手只证明"paste 会被包裹",不证明"没有启动期模态框"——2026-08-06 生产
+    // 实证 cc 在 \e[?2004h 之后异步弹出 MCP 信任窗,首条 paste 被弹窗消费,worker 静默停在空
+    // composer 直到 30 分钟巡检兜底。这里用结果说话:轮询 cc 的会话记录(session jsonl)直到
+    // 出现这条 user 消息。验证失败 → 判定被模态框吞掉:Esc 取消残留弹窗、重投一次完整任务、
+    // 再验证;仍失败 → 走与 pasteReady 超时同一收场(reportStartupStall 暂扣),绝不静默留下
+    // running。
+    if (this.promptDeliveryTimeoutMs > 0) {
+      // cc 落盘的 session 记录用 workspace 的 **realpath** slug(provision 段实证:逻辑路径
+      // "实测完全无效",~/.claude.json 的 project key 全是 realpath)——软链分量(/tmp、被软链的
+      // DATA_DIR)会导致验证读错路径、对健康会话假阴性。spawn 时 workspace 已存在,realpath 必成功。
+      const realRoot = await fs.realpath(spec.workspace.root)
+      const sessionFile = join(this.claudeProjectsDir, projectSlug(realRoot), `${sessionId}.jsonl`)
+      if (!(await verifyPromptDelivered(sessionFile, this.promptDeliveryTimeoutMs))) {
+        // 取消残留弹窗必须发真正的 Escape 键(sendKeys),不能 sendText——sendText 走
+        // paste-buffer 粘贴,ESC 只会作为文本字符进 composer,真正作用于弹窗的是粘贴结尾的
+        // Enter,可能激活弹窗默认选项(对 MCP 信任窗等于静默授权信任,与 provision 的
+        // enabledMcpjsonServers 授权边界相抵)。
+        await this.sendKeysOrKill(runtime, handle, ['Escape'])
+        await this.sendTextOrKill(runtime, handle, spec.prompt)
+        if (!(await verifyPromptDelivered(sessionFile, this.promptDeliveryTimeoutMs))) {
+          await this.reportStartupStall(runtime, handle, outputFile, {
+            note: describeDeliveryStall({
+              impl: 'claude-code',
+              timeoutMs: this.promptDeliveryTimeoutMs,
+              tail: decodeTerminalOutput(await readOutputTail(outputFile)),
+            }),
+          })
+          return handle
+        }
+      }
     }
 
     return handle
+  }
+
+  /**
+   * sendText 失败统一收场:会话可能已死,不能放任 running——按 kill 路径清理 tmux 会话后落
+   * exited(crashed)(不是 killed,这不是用户发起的 kill),异常继续上抛如实报给调用方。
+   */
+  private async sendTextOrKill(runtime: Runtime, h: IncarnationHandle, text: string): Promise<void> {
+    try {
+      await this.tmux.sendText(runtime.sessionName, text)
+    } catch (err) {
+      await this.getMutex(h.worker_id).run(async () => {
+        if (runtime.state === 'exited') return
+        await this.tmux.killSession(runtime.sessionName)
+        await this.transitionExited(runtime, h, 'crashed')
+      })
+      throw err
+    }
+  }
+
+  /** sendTextOrKill 的 sendKeys 版本(Esc 清弹窗用,见 spawn 投递验证注释)。 */
+  private async sendKeysOrKill(runtime: Runtime, h: IncarnationHandle, keys: string[]): Promise<void> {
+    try {
+      await this.tmux.sendKeys(runtime.sessionName, keys)
+    } catch (err) {
+      await this.getMutex(h.worker_id).run(async () => {
+        if (runtime.state === 'exited') return
+        await this.tmux.killSession(runtime.sessionName)
+        await this.transitionExited(runtime, h, 'crashed')
+      })
+      throw err
+    }
   }
 
   async resume(prev: IncarnationRef, wakeInput: string): Promise<IncarnationHandle> {
@@ -1090,16 +1163,21 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
    * 在 `read_worker_output` 里拿到可读文本、在唤醒事件里拿到同一份日志的转义序列乱码。解码
    * 位置也与 `readOutput` 一致地留在 adapter 这一层(builtin 的输出是纯文本,不该被解码)。
    */
-  private async reportStartupStall(runtime: Runtime, h: IncarnationHandle, outputFile: string): Promise<void> {
+  private async reportStartupStall(
+    runtime: Runtime,
+    h: IncarnationHandle,
+    outputFile: string,
+    opts?: { note?: string },
+  ): Promise<void> {
     const tail = decodeTerminalOutput(await readOutputTail(outputFile))
     // 等待期间进程可能是**自己死了**(启动即失败:二进制缺失、PATH 不对、pane 里的命令立刻
     // 退出),那不是"停在一个界面上等人",谎报 idle 会让 manager 对着一具尸体发指令。先让既有
     // 的三源判定跑一遍,它会如实落 exited;只有确实还活着才走下面的暂扣汇报。
     //
-    // 落 `'crashed'` 而不是 syncState 缺省的 `'completed'`:本函数被调用的前提就是"就绪信号
-    // 没等到 ⇒ 开工输入一个字符都没投递",此刻会话没了只可能是启动即失败(二进制缺失、PATH
-    // 不对、pane 命令立刻退出),completed 在这条路径上明确不可能成立。吃缺省推断会让一个
-    // 从没干过活的 worker 在台账上落成"成功完成"终态(同 #66 修的那类"失败记成成功")。
+    // 落 `'crashed'` 而不是 syncState 缺省的 `'completed'`:本函数被调用的前提就是"开工输入
+    // 没落地"——就绪握手超时(一个字符都没投递,completed 不可能)或投递验证失败(prompt 被
+    // 启动期模态框吞掉,任务实际没开始),completed 在这两条路径上都不成立。吃缺省推断会让
+    // 一个从没干过活的 worker 在台账上落成"成功完成"终态(同 #66 修的那类"失败记成成功")。
     if ((await this.syncState(runtime, h, 'crashed')).state === 'exited') return
     await this.getMutex(h.worker_id).run(async () => {
       if (runtime.state === 'exited') return // 判定与提交之间又被并发抢先:终态不可覆盖
@@ -1108,7 +1186,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       // 只是"落了一下",下一次 state() 就把它连同台账一起翻回 running。
       runtime.startupStalled = true
       await this.transitionState(runtime, h, 'idle', {
-        outputTail: describeStartupStall({ impl: 'claude-code', timeoutMs: this.pasteReadyTimeoutMs, tail }),
+        outputTail:
+          opts?.note ?? describeStartupStall({ impl: 'claude-code', timeoutMs: this.pasteReadyTimeoutMs, tail }),
       })
     })
   }
@@ -1190,6 +1269,44 @@ function workerIdLabelFromWorkspace(ws: Workspace): string {
 /** cc 的 project 目录 slug 规则:cwd 路径里的 `/` 与 `.` 都替换成 `-`(已用真实 ~/.claude/projects/ 核实)。 */
 function projectSlug(cwd: string): string {
   return cwd.replace(/[/.]/g, '-')
+}
+
+/**
+ * 投递验证的探针:session jsonl 里是否已出现一条 user 消息(cc 收到输入即落盘,见
+ * `verifyPromptDelivered` 的注释)。文件还不存在/半行/JSON 未完成都算"还没到",继续下一轮。
+ * 非 ENOENT 的读取错误告警后同样按"还没到"处理(保守:宁可多等一轮,不因诊断噪音误判)。
+ */
+async function sessionHasUserMessage(filePath: string): Promise<boolean> {
+  let raw: string
+  try {
+    raw = await fs.readFile(filePath, 'utf-8')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false
+    console.warn(`[claude-code-adapter] prompt delivery check: cannot read ${filePath}:`, err)
+    return false
+  }
+  for (const line of raw.split('\n')) {
+    if (line.trim() === '') continue
+    let obj: unknown
+    try {
+      obj = JSON.parse(line)
+    } catch {
+      continue // 写入中途的半行:跳过,下一轮再看
+    }
+    const m = obj as { type?: string; message?: { role?: string } }
+    if (m.type === 'user' && m.message?.role === 'user') return true
+  }
+  return false
+}
+
+/** 轮询 session jsonl 直到出现 user 消息;超时返回 false。见 PROMPT_DELIVERY_TIMEOUT_MS 注释。 */
+async function verifyPromptDelivered(filePath: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (await sessionHasUserMessage(filePath)) return true
+    if (Date.now() >= deadline) return false
+    await new Promise((r) => setTimeout(r, PROMPT_DELIVERY_POLL_INTERVAL_MS))
+  }
 }
 
 function truncate(text: string, max: number): string {

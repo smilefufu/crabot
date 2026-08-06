@@ -65,9 +65,19 @@ function shQuote(s: string): string {
  * 命令行,充当测试用的 claudeBin——mock CLI 不解析 settings.json,直接从 env 拿脚本和 stop
  * hook 命令。argvFile 可选:传了就让 mock-cli 把收到的 argv(如 resume 的 `--resume <id>`)
  * 记一行 JSON 进这个文件,供测试断言。 */
-function claudeBinFor(script: MockStep[], stopHookCmd: string, argvFile?: string): string {
+function claudeBinFor(
+  script: MockStep[],
+  stopHookCmd: string,
+  argvFile?: string,
+  session?: { dir: string; slug: string; dropSubmitCount?: number },
+): string {
   const argvEnv = argvFile ? `MOCK_CLI_ARGV_FILE=${shQuote(argvFile)} ` : ''
-  return `env MOCK_CLI_SCRIPT=${shQuote(JSON.stringify(script))} MOCK_CLI_STOP_HOOK_CMD=${shQuote(stopHookCmd)} ${argvEnv}node ${shQuote(MOCK_CLI)}`
+  // session 注入:真实 cc 收到用户消息会追加进 `<claudeProjectsDir>/<slug>/<session_id>.jsonl`,
+  // prompt 投递验证的用例需要 mock 复刻这个行为(mock-cli 的 MOCK_CLI_SESSION_DIR/SLUG)。
+  const sessionEnv = session
+    ? `MOCK_CLI_SESSION_DIR=${shQuote(session.dir)} MOCK_CLI_SESSION_SLUG=${shQuote(session.slug)}${session.dropSubmitCount ? ` MOCK_CLI_DROP_SUBMIT_COUNT=${session.dropSubmitCount}` : ''} `
+    : ''
+  return `env MOCK_CLI_SCRIPT=${shQuote(JSON.stringify(script))} MOCK_CLI_STOP_HOOK_CMD=${shQuote(stopHookCmd)} ${argvEnv}${sessionEnv}node ${shQuote(MOCK_CLI)}`
 }
 
 /** 假 TmuxDriver 的 newSession 替身:落一份 output 日志并写入 \e[?2004h。
@@ -278,7 +288,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter (tmux + mock CLI)', () => {
   async function provisionedAdapter(script: MockStep[]): Promise<{ adapter: ClaudeCodeAdapter; workerId: string }> {
     const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
     const stopHookCmd = channel.hookCommand('stop')
-    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: claudeBinFor(script, stopHookCmd) })
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: claudeBinFor(script, stopHookCmd), promptDeliveryTimeoutMs: 0 })
     // provision 建 .claude/ 目录 —— hook 写入目标目录必须先存在,否则 printf >> 静默失败。
     await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
     return { adapter, workerId: `cctest-${randomUUID().slice(0, 8)}` }
@@ -442,7 +452,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 四轮 review PoC 回归:
       // 因此持续存活,直到显式 kill,给"重连一个仍存活的会话"提供稳定的时间窗口。
       const claudeBin = claudeBinFor([{ output: '第一段输出' }, { output: '第二段输出' }], stopHookCmd)
 
-      const adapterA = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin })
+      const adapterA = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin, promptDeliveryTimeoutMs: 0 })
       await adapterA.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
       const workerId = `cctest-${randomUUID().slice(0, 8)}`
       const h = await adapterA.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
@@ -477,7 +487,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 四轮 review PoC 回归:
       const stopHookCmd = channel.hookCommand('stop')
       const claudeBin = claudeBinFor([{ output: '第一段输出' }], stopHookCmd)
 
-      const adapterA = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin })
+      const adapterA = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin, promptDeliveryTimeoutMs: 0 })
       await adapterA.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
       const workerId = `cctest-${randomUUID().slice(0, 8)}`
       const h = await adapterA.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
@@ -511,7 +521,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 四轮 review PoC 回归:
       const argvFile = path.join(dataDir, 'poc3-fork-argv.jsonl')
       const claudeBin = `env FAKE_ARGV_FILE=${shQuote(argvFile)} FAKE_FORK_STDOUT=${shQuote('侧问回复内容')} node ${shQuote(FAKE_CLAUDE_FORK)}`
 
-      const adapterA = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin })
+      const adapterA = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin, promptDeliveryTimeoutMs: 0 })
       await adapterA.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
       const workerId = `cctest-${randomUUID().slice(0, 8)}`
 
@@ -534,7 +544,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 四轮 review PoC 回归:
       // 两份历史。resume(#1) 会先经 ensureRuntime 只重建出 #1 这一条 runtime(#2 从未被
       // 提及,不会被重建),旧版 nextSeq 只扫内存 runtimes(此时仅 #1)算出 2,与磁盘上的
       // #2 撞号。
-      const adapterB = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin })
+      const adapterB = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin, promptDeliveryTimeoutMs: 0 })
       const h3 = await adapterB.resume({ worker_id: workerId, seq: 1, session_ref: meta1.session_id }, '继续')
 
       // 磁盘感知修复后:新化身分配到 3(不是 2),不撞上 #2 的号位。
@@ -631,7 +641,7 @@ describe('ClaudeCodeAdapter — syncState 锁纪律(P2 Task 4 评审 Important #
     '并发 state() 与事件到达交错后,终读 idle 不回退成 running',
     async () => {
       const tmux = new RaceTmux()
-      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: 'unused-in-this-test' })
+      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: 'unused-in-this-test', promptDeliveryTimeoutMs: 0 })
       const workerId = `cctest-${randomUUID().slice(0, 8)}`
       const h = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
 
@@ -689,7 +699,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — spawn 提交纪律(P2 Tas
       const stopHookCmd = channel.hookCommand('stop')
       // claudeBin 用一个存在的 sleep 命令(附加参数被 bash -c 脚本忽略),不依赖真实 claude 二进制,
       // 只用来验证 tmux 会话能正常起来、sendText 能正常注入。
-      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: READY_IDLE_BIN })
+      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: READY_IDLE_BIN, promptDeliveryTimeoutMs: 0 })
       await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
       const workerId = `cctest-${randomUUID().slice(0, 8)}`
       const spec: SpawnSpec = { worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } }
@@ -730,7 +740,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — spawn 提交纪律(P2 Tas
         }
       }
       const tmux = new NewSessionOkSendTextFailsTmux()
-      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: READY_IDLE_BIN })
+      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: READY_IDLE_BIN, promptDeliveryTimeoutMs: 0 })
       await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
       const workerId = `cctest-${randomUUID().slice(0, 8)}`
       const spec: SpawnSpec = { worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } }
@@ -745,6 +755,137 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — spawn 提交纪律(P2 Tas
     },
     15000,
   )
+})
+
+describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — prompt 投递验证(2026-08-06 MCP 弹窗事故修复)', () => {
+  let dataDir: string
+  let workspaceRoot: string
+  let claudeProjectsDir: string
+
+  beforeEach(async () => {
+    dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-adapter-delivery-data-'))
+    workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-adapter-delivery-ws-'))
+    claudeProjectsDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-adapter-delivery-projects-'))
+  })
+
+  afterEach(async () => {
+    await cleanupTmuxSessions()
+    await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+    await fs.rm(claudeProjectsDir, { recursive: true, force: true }).catch(() => {})
+  })
+
+  const slug = (root: string) => root.replace(/[/.]/g, '-')
+
+  /** cc 落盘用 workspace 的 realpath slug(macOS /var → /private/var 软链,见 adapter spawn 注释)。 */
+  async function wsSlug(): Promise<string> {
+    return slug(await fs.realpath(workspaceRoot))
+  }
+
+  async function waitForIdle(
+    adapter: ClaudeCodeAdapter,
+    h: IncarnationHandle,
+    timeoutMs = 8000,
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    let last: WorkerContractState | undefined
+    while (Date.now() < deadline) {
+      last = await adapter.state(h)
+      if (last === 'idle') return
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    throw new Error(`waitForIdle timeout: last '${last}'`)
+  }
+
+  /** 投递验证的专用夹具:mock-cli 会往 claudeProjectsDir 写 cc 会话记录。 */
+  async function deliveryAdapter(
+    script: MockStep[],
+    opts?: {
+      dropSubmitCount?: number
+      deliveryTimeoutMs?: number
+      tmux?: TmuxDriver
+      onStateChange?: (h: IncarnationHandle, state: WorkerContractState, report?: StateChangeReport) => void
+    },
+  ): Promise<{ adapter: ClaudeCodeAdapter; workerId: string }> {
+    const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+    const stopHookCmd = channel.hookCommand('stop')
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux: opts?.tmux ?? new TmuxDriver(),
+      onStateChange: opts?.onStateChange,
+      claudeBin: claudeBinFor(script, stopHookCmd, undefined, {
+        dir: claudeProjectsDir,
+        slug: await wsSlug(),
+        dropSubmitCount: opts?.dropSubmitCount,
+      }),
+      claudeProjectsDir,
+      promptDeliveryTimeoutMs: opts?.deliveryTimeoutMs ?? 2000,
+    })
+    await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+    return { adapter, workerId: `cctest-${randomUUID().slice(0, 8)}` }
+  }
+
+  it('正常路径:prompt 投递后 session 记录出现 user 消息,spawn 正常返回且不落 stall', async () => {
+    const { adapter, workerId } = await deliveryAdapter([{ output: '任务输出', emitStop: true }])
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
+
+    expect(h.worker_id).toBe(workerId)
+    // 关键断言:没走 startup stall 路径(startup_stalled 未被置位);state 迁移是事件驱动的,
+    // 此刻读 meta 可能是 running 或已收敛 idle,不在此断言。
+    const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+    expect(meta.startup_stalled).toBeUndefined()
+
+    const sessionFile = path.join(claudeProjectsDir, await wsSlug(), `${h.session_ref}.jsonl`)
+    const raw = await fs.readFile(sessionFile, 'utf-8')
+    expect(raw).toContain('"type":"user"')
+
+    await adapter.kill(h)
+  })
+
+  it('弹窗吞掉首条 prompt 时自动 Esc 清理并重投,第二次真正落地(不落 stall)', async () => {
+    const tmux = new CountingTmux()
+    const { adapter, workerId } = await deliveryAdapter([{ output: '任务输出', emitStop: true }], {
+      dropSubmitCount: 1,
+      tmux,
+    })
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '完整任务', workspace: { root: workspaceRoot } })
+
+    // 关键断言:验证通过,没有走 startup stall 路径;state 迁移是事件驱动的,不在此断言。
+    const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+    expect(meta.startup_stalled).toBeUndefined()
+    // Esc 清弹窗必须走 sendKeys(真正发 Escape 键),不能 sendText——sendText 是 paste-buffer
+    // 粘贴文本,粘贴结尾的 Enter 会激活弹窗默认选项(对 MCP 信任窗等于静默授权,与 provision
+    // 的 enabledMcpjsonServers 授权边界相抵)。这条断言钉住实现,改回 sendText 立即挂。
+    expect(tmux.calls.sendKeys).toBe(1)
+    expect(tmux.calls.sendText).toBe(2) // 首投 + 重投
+    // 会话记录里只有重投后的那一条 user 消息(被吞的首条没有落账)
+    const sessionFile = path.join(claudeProjectsDir, await wsSlug(), `${h.session_ref}.jsonl`)
+    const raw = await fs.readFile(sessionFile, 'utf-8')
+    const userLines = raw.split('\n').filter((l) => l.includes('"type":"user"'))
+    expect(userLines).toHaveLength(1)
+
+    await adapter.kill(h)
+  })
+
+  it('弹窗持续存在(两次投递都被吞)→ 走 startup stall 暂扣,不静默留下 running', async () => {
+    const reports: Array<{ state: string; outputTail?: string }> = []
+    const { adapter, workerId } = await deliveryAdapter([{ output: '永远不会输出' }], {
+      dropSubmitCount: 10,
+      onStateChange: (_h, state, report) => void reports.push({ state, outputTail: report?.outputTail }),
+    })
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '完整任务', workspace: { root: workspaceRoot } })
+
+    await waitForIdle(adapter, h)
+    const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+    expect(meta.state).toBe('idle')
+    expect(meta.startup_stalled).toBe(true)
+    // 暂扣正文必须如实描述投递验证失败(握手已通过、prompt 被吞),不能复用"未就绪/一个字符
+    // 都没投递"的失实描述——否则 manager 按错的现场做决策。
+    const idleReport = reports.find((r) => r.state === 'idle')
+    expect(idleReport?.outputTail).toContain('没有出现在会话记录')
+    expect(idleReport?.outputTail).toContain('自动按 Esc 并重投一次')
+  })
 })
 
 describe('ClaudeCodeAdapter.detect', () => {
@@ -836,7 +977,7 @@ describe('ClaudeCodeAdapter — session_ref UUID 边界校验', () => {
   })
 
   it('resume() 拒绝非 UUID 格式的 session_ref(含 shell 注入特征),不执行任何命令', async () => {
-    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), claudeBin: 'unused' })
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), claudeBin: 'unused', promptDeliveryTimeoutMs: 0 })
     const workerId = `cctest-${randomUUID().slice(0, 8)}`
 
     // 先 spawn 一个真实化身以供 resume 前置条件
@@ -855,7 +996,7 @@ describe('ClaudeCodeAdapter — session_ref UUID 边界校验', () => {
   })
 
   it('fork() 拒绝非 UUID 格式的 session_ref(含 shell 注入特征),不执行子进程', async () => {
-    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), claudeBin: 'unused' })
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), claudeBin: 'unused', promptDeliveryTimeoutMs: 0 })
     const workerId = `cctest-${randomUUID().slice(0, 8)}`
 
     const maliciousSessionRef = 'x; touch /tmp/pwned'
@@ -869,7 +1010,7 @@ describe('ClaudeCodeAdapter — session_ref UUID 边界校验', () => {
   })
 
   it('resume() 拒绝空白或特殊字符 session_ref', async () => {
-    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), claudeBin: 'unused' })
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), claudeBin: 'unused', promptDeliveryTimeoutMs: 0 })
     const workerId = `cctest-${randomUUID().slice(0, 8)}`
 
     const invalidRefs = ['', ' ', '$(whoami)', '`id`', '{test}', '../../../etc/passwd']
@@ -882,7 +1023,7 @@ describe('ClaudeCodeAdapter — session_ref UUID 边界校验', () => {
   })
 
   it('fork() 拒绝空白或特殊字符 session_ref', async () => {
-    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), claudeBin: 'unused' })
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), claudeBin: 'unused', promptDeliveryTimeoutMs: 0 })
     const workerId = `cctest-${randomUUID().slice(0, 8)}`
 
     const invalidRefs = ['', ' ', '$(whoami)', '`id`', '{test}', '../../../etc/passwd']
@@ -895,7 +1036,7 @@ describe('ClaudeCodeAdapter — session_ref UUID 边界校验', () => {
   })
 
   it('resume() 接受有效 UUID 格式的 session_ref(至少通过前置校验)', async () => {
-    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), claudeBin: 'unused' })
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), claudeBin: 'unused', promptDeliveryTimeoutMs: 0 })
     const workerId = `cctest-${randomUUID().slice(0, 8)}`
     const validUuid = randomUUID()
 
@@ -906,7 +1047,7 @@ describe('ClaudeCodeAdapter — session_ref UUID 边界校验', () => {
   })
 
   it('fork() 接受有效 UUID 格式的 session_ref(至少通过前置校验)', async () => {
-    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), claudeBin: 'unused' })
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), claudeBin: 'unused', promptDeliveryTimeoutMs: 0 })
     const workerId = `cctest-${randomUUID().slice(0, 8)}`
     const validUuid = randomUUID()
 
@@ -941,7 +1082,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.resume', () => {
       const stopHookCmd = channel.hookCommand('stop')
       const argvFile = path.join(dataDir, 'argv.jsonl')
       const claudeBin = claudeBinFor([{ output: '第一轮输出', exit: true }], stopHookCmd, argvFile)
-      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin })
+      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin, promptDeliveryTimeoutMs: 0 })
       await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
       const workerId = `cctest-${randomUUID().slice(0, 8)}`
 
@@ -987,7 +1128,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.resume', () => {
       const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
       const stopHookCmd = channel.hookCommand('stop')
       const claudeBin = claudeBinFor([{ output: '还在跑,不退出也不 emitStop' }], stopHookCmd)
-      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin })
+      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin, promptDeliveryTimeoutMs: 0 })
       await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
       const workerId = `cctest-${randomUUID().slice(0, 8)}`
 
@@ -1009,7 +1150,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.resume', () => {
       const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
       const stopHookCmd = channel.hookCommand('stop')
       const claudeBin = claudeBinFor([{ output: '第一轮输出', exit: true }], stopHookCmd)
-      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin })
+      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin, promptDeliveryTimeoutMs: 0 })
       await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
       const workerId = `cctest-${randomUUID().slice(0, 8)}`
 
@@ -1085,7 +1226,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
       const tmux = new CountingTmux()
       const argvFile = path.join(dataDir, 'fork-argv.jsonl')
       const claudeBin = forkClaudeBin(argvFile, '侧问回复内容')
-      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin })
+      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin, promptDeliveryTimeoutMs: 0 })
       await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
       const workerId = `cctest-${randomUUID().slice(0, 8)}`
 
@@ -1144,7 +1285,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
       const tmux = new CountingTmux()
       const argvFile = path.join(dataDir, 'fork-argv-crash.jsonl')
       const claudeBin = forkClaudeBin(argvFile, '', 1)
-      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin })
+      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin, promptDeliveryTimeoutMs: 0 })
       await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
       const workerId = `cctest-${randomUUID().slice(0, 8)}`
 
@@ -1170,7 +1311,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
       const tmux = new CountingTmux()
       const argvFile = path.join(dataDir, 'fork-argv-seq.jsonl')
       const claudeBin = forkClaudeBin(argvFile, '侧问回复')
-      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin })
+      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin, promptDeliveryTimeoutMs: 0 })
       await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
       const workerId = `cctest-${randomUUID().slice(0, 8)}`
 
@@ -1200,7 +1341,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
       const tmux = new CountingTmux()
       const argvFile = path.join(dataDir, 'fork-then-resume-argv.jsonl')
       const claudeBin = forkClaudeBin(argvFile, '侧问回复')
-      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin })
+      const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin, promptDeliveryTimeoutMs: 0 })
       await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
       const workerId = `cctest-${randomUUID().slice(0, 8)}`
 
@@ -1333,7 +1474,7 @@ describe('ClaudeCodeAdapter.readTrace', () => {
 
   it('按 ~/.claude/projects/<slug>/<session_id>.jsonl 解析并归一化', async () => {
     const tmux = new NoopTmux()
-    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: 'unused', claudeProjectsDir })
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: 'unused', promptDeliveryTimeoutMs: 0, claudeProjectsDir })
     const workerId = `cctest-${randomUUID().slice(0, 8)}`
     const { h, sessionId } = await spawnedHandle(adapter, workerId)
 
@@ -1367,7 +1508,7 @@ describe('ClaudeCodeAdapter.readTrace', () => {
 
   it('cursor.offset 按行号跳过已读部分', async () => {
     const tmux = new NoopTmux()
-    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: 'unused', claudeProjectsDir })
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: 'unused', promptDeliveryTimeoutMs: 0, claudeProjectsDir })
     const workerId = `cctest-${randomUUID().slice(0, 8)}`
     const { h, sessionId } = await spawnedHandle(adapter, workerId)
 
@@ -1387,7 +1528,7 @@ describe('ClaudeCodeAdapter.readTrace', () => {
 
   it('nextCursor 计入跳过的坏行/未知类型行,两次 readTrace 按 nextCursor 续读不重不漏', async () => {
     const tmux = new NoopTmux()
-    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: 'unused', claudeProjectsDir })
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: 'unused', promptDeliveryTimeoutMs: 0, claudeProjectsDir })
     const workerId = `cctest-${randomUUID().slice(0, 8)}`
     const { h, sessionId } = await spawnedHandle(adapter, workerId)
 
@@ -1426,7 +1567,7 @@ describe('ClaudeCodeAdapter.readTrace', () => {
 
   it('半行(CLI 写入未完成,无结尾换行符)不消费,补全后续读不丢事件', async () => {
     const tmux = new NoopTmux()
-    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: 'unused', claudeProjectsDir })
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: 'unused', promptDeliveryTimeoutMs: 0, claudeProjectsDir })
     const workerId = `cctest-${randomUUID().slice(0, 8)}`
     const { h, sessionId } = await spawnedHandle(adapter, workerId)
 
@@ -1490,7 +1631,7 @@ describe('ClaudeCodeAdapter.readTrace', () => {
 
   it('trace 文件不存在 → 返回空事件数组,不抛错,cursor 原样透传', async () => {
     const tmux = new NoopTmux()
-    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: 'unused', claudeProjectsDir })
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: 'unused', promptDeliveryTimeoutMs: 0, claudeProjectsDir })
     const workerId = `cctest-${randomUUID().slice(0, 8)}`
     const { h } = await spawnedHandle(adapter, workerId)
     // 不写任何 fixture 文件。
@@ -1508,7 +1649,7 @@ describe('ClaudeCodeAdapter.readTrace', () => {
 
   it('对本进程内不常驻的 incarnation 调用 readTrace 应拒绝', async () => {
     const tmux = new NoopTmux()
-    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: 'unused', claudeProjectsDir })
+    const adapter = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: 'unused', promptDeliveryTimeoutMs: 0, claudeProjectsDir })
     await expect(adapter.readTrace({ worker_id: 'nope', seq: 1, impl: 'claude-code' })).rejects.toThrow()
   })
 })
@@ -1563,7 +1704,7 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
       dataDir,
       claudeConfigPath: fakeClaudeConfig(dataDir),
       tmux,
-      claudeBin: 'unused',
+      claudeBin: 'unused', promptDeliveryTimeoutMs: 0,
       claudeProjectsDir,
       onStateChange: (h, state) => {
         seen.push({ seq: h.seq, state })
@@ -1588,7 +1729,7 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
       dataDir,
       claudeConfigPath: fakeClaudeConfig(dataDir),
       tmux,
-      claudeBin: 'unused',
+      claudeBin: 'unused', promptDeliveryTimeoutMs: 0,
       claudeProjectsDir,
       onStateChange: (_h, state) => {
         seen.push(state)
@@ -1617,7 +1758,7 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
       dataDir,
       claudeConfigPath: fakeClaudeConfig(dataDir),
       tmux,
-      claudeBin: 'unused',
+      claudeBin: 'unused', promptDeliveryTimeoutMs: 0,
       claudeProjectsDir,
       onStateChange: (_h, state) => {
         seen.push(state)
@@ -1660,7 +1801,7 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
       dataDir,
       claudeConfigPath: fakeClaudeConfig(dataDir),
       tmux: new NoopTmux(),
-      claudeBin: 'unused',
+      claudeBin: 'unused', promptDeliveryTimeoutMs: 0,
       claudeProjectsDir,
       onStateChange: (_h, state, report) => {
         seen.push({ state, endReason: report?.endReason })
@@ -1683,7 +1824,7 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
       dataDir,
       claudeConfigPath: fakeClaudeConfig(dataDir),
       tmux: new NoopTmux(),
-      claudeBin: 'unused',
+      claudeBin: 'unused', promptDeliveryTimeoutMs: 0,
       claudeProjectsDir,
       onStateChange: (_h, state, report) => {
         seen.push({ state, endReason: report?.endReason })
@@ -1761,7 +1902,7 @@ describe('ClaudeCodeAdapter.fork — 侧问收尾不污染主线 stop 计数', (
       dataDir,
       claudeConfigPath: fakeClaudeConfig(dataDir),
       tmux: new NoopTmux(),
-      claudeBin: forkClaudeBinRunningStopHook(),
+      claudeBin: forkClaudeBinRunningStopHook(), promptDeliveryTimeoutMs: 0,
       claudeProjectsDir,
     })
     await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
@@ -1784,7 +1925,7 @@ describe('ClaudeCodeAdapter.fork — 侧问收尾不污染主线 stop 计数', (
       dataDir,
       claudeConfigPath: fakeClaudeConfig(dataDir),
       tmux: new NoopTmux(),
-      claudeBin: forkClaudeBinRunningStopHook(),
+      claudeBin: forkClaudeBinRunningStopHook(), promptDeliveryTimeoutMs: 0,
       claudeProjectsDir,
       onStateChange: (h, state) => {
         seen.push({ seq: h.seq, state })
@@ -1858,7 +1999,7 @@ describe('ClaudeCodeAdapter.ensureRuntime — 并发重建不泄漏 watcher', ()
       dataDir,
       claudeConfigPath: fakeClaudeConfig(dataDir),
       tmux,
-      claudeBin: 'unused',
+      claudeBin: 'unused', promptDeliveryTimeoutMs: 0,
       claudeProjectsDir,
       onStateChange: (_h, state) => {
         seen.push(state)
@@ -1966,6 +2107,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
       tmux,
       claudeBin: `env ${envParts.join(' ')} node ${shQuote(MOCK_CLI)}`,
       pasteReadyTimeoutMs: opts.pasteReadyTimeoutMs,
+      promptDeliveryTimeoutMs: 0, // 这些用例验证的是握手/粘贴语义,不注入 session 记录,跳过投递验证
       onStateChange: (_h, state, report) => seen.push({ state, report }),
     })
     await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
