@@ -777,6 +777,11 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — prompt 投递验证(2026-
 
   const slug = (root: string) => root.replace(/[/.]/g, '-')
 
+  /** cc 落盘用 workspace 的 realpath slug(macOS /var → /private/var 软链,见 adapter spawn 注释)。 */
+  async function wsSlug(): Promise<string> {
+    return slug(await fs.realpath(workspaceRoot))
+  }
+
   async function waitForIdle(
     adapter: ClaudeCodeAdapter,
     h: IncarnationHandle,
@@ -795,7 +800,12 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — prompt 投递验证(2026-
   /** 投递验证的专用夹具:mock-cli 会往 claudeProjectsDir 写 cc 会话记录。 */
   async function deliveryAdapter(
     script: MockStep[],
-    opts?: { dropSubmitCount?: number; deliveryTimeoutMs?: number; tmux?: TmuxDriver },
+    opts?: {
+      dropSubmitCount?: number
+      deliveryTimeoutMs?: number
+      tmux?: TmuxDriver
+      onStateChange?: (h: IncarnationHandle, state: WorkerContractState, report?: StateChangeReport) => void
+    },
   ): Promise<{ adapter: ClaudeCodeAdapter; workerId: string }> {
     const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
     const stopHookCmd = channel.hookCommand('stop')
@@ -803,9 +813,10 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — prompt 投递验证(2026-
       dataDir,
       claudeConfigPath: fakeClaudeConfig(dataDir),
       tmux: opts?.tmux ?? new TmuxDriver(),
+      onStateChange: opts?.onStateChange,
       claudeBin: claudeBinFor(script, stopHookCmd, undefined, {
         dir: claudeProjectsDir,
-        slug: slug(workspaceRoot),
+        slug: await wsSlug(),
         dropSubmitCount: opts?.dropSubmitCount,
       }),
       claudeProjectsDir,
@@ -825,7 +836,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — prompt 投递验证(2026-
     const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
     expect(meta.startup_stalled).toBeUndefined()
 
-    const sessionFile = path.join(claudeProjectsDir, slug(workspaceRoot), `${h.session_ref}.jsonl`)
+    const sessionFile = path.join(claudeProjectsDir, await wsSlug(), `${h.session_ref}.jsonl`)
     const raw = await fs.readFile(sessionFile, 'utf-8')
     expect(raw).toContain('"type":"user"')
 
@@ -849,7 +860,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — prompt 投递验证(2026-
     expect(tmux.calls.sendKeys).toBe(1)
     expect(tmux.calls.sendText).toBe(2) // 首投 + 重投
     // 会话记录里只有重投后的那一条 user 消息(被吞的首条没有落账)
-    const sessionFile = path.join(claudeProjectsDir, slug(workspaceRoot), `${h.session_ref}.jsonl`)
+    const sessionFile = path.join(claudeProjectsDir, await wsSlug(), `${h.session_ref}.jsonl`)
     const raw = await fs.readFile(sessionFile, 'utf-8')
     const userLines = raw.split('\n').filter((l) => l.includes('"type":"user"'))
     expect(userLines).toHaveLength(1)
@@ -858,13 +869,22 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — prompt 投递验证(2026-
   })
 
   it('弹窗持续存在(两次投递都被吞)→ 走 startup stall 暂扣,不静默留下 running', async () => {
-    const { adapter, workerId } = await deliveryAdapter([{ output: '永远不会输出' }], { dropSubmitCount: 10 })
+    const reports: Array<{ state: string; outputTail?: string }> = []
+    const { adapter, workerId } = await deliveryAdapter([{ output: '永远不会输出' }], {
+      dropSubmitCount: 10,
+      onStateChange: (_h, state, report) => void reports.push({ state, outputTail: report?.outputTail }),
+    })
     const h = await adapter.spawn({ worker_id: workerId, prompt: '完整任务', workspace: { root: workspaceRoot } })
 
     await waitForIdle(adapter, h)
     const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
     expect(meta.state).toBe('idle')
     expect(meta.startup_stalled).toBe(true)
+    // 暂扣正文必须如实描述投递验证失败(握手已通过、prompt 被吞),不能复用"未就绪/一个字符
+    // 都没投递"的失实描述——否则 manager 按错的现场做决策。
+    const idleReport = reports.find((r) => r.state === 'idle')
+    expect(idleReport?.outputTail).toContain('没有出现在会话记录')
+    expect(idleReport?.outputTail).toContain('自动按 Esc 并重投一次')
   })
 })
 

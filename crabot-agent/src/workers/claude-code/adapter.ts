@@ -93,7 +93,7 @@ import { homedir } from 'os'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { TmuxDriver } from '../tmux/driver.js'
-import { DEFAULT_PASTE_READY_TIMEOUT_MS, describeStartupStall, readOutputTail, waitForPasteReady } from '../tmux/paste-ready.js'
+import { DEFAULT_PASTE_READY_TIMEOUT_MS, describeDeliveryStall, describeStartupStall, readOutputTail, waitForPasteReady } from '../tmux/paste-ready.js'
 import { CliEventChannel, EVENTS_FILE_ENV } from '../cli-events.js'
 import { OutputLog } from '../output-log.js'
 import { decodeTerminalOutput } from '../terminal-output.js'
@@ -481,7 +481,11 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // 再验证;仍失败 → 走与 pasteReady 超时同一收场(reportStartupStall 暂扣),绝不静默留下
     // running。
     if (this.promptDeliveryTimeoutMs > 0) {
-      const sessionFile = join(this.claudeProjectsDir, projectSlug(spec.workspace.root), `${sessionId}.jsonl`)
+      // cc 落盘的 session 记录用 workspace 的 **realpath** slug(provision 段实证:逻辑路径
+      // "实测完全无效",~/.claude.json 的 project key 全是 realpath)——软链分量(/tmp、被软链的
+      // DATA_DIR)会导致验证读错路径、对健康会话假阴性。spawn 时 workspace 已存在,realpath 必成功。
+      const realRoot = await fs.realpath(spec.workspace.root)
+      const sessionFile = join(this.claudeProjectsDir, projectSlug(realRoot), `${sessionId}.jsonl`)
       if (!(await verifyPromptDelivered(sessionFile, this.promptDeliveryTimeoutMs))) {
         // 取消残留弹窗必须发真正的 Escape 键(sendKeys),不能 sendText——sendText 走
         // paste-buffer 粘贴,ESC 只会作为文本字符进 composer,真正作用于弹窗的是粘贴结尾的
@@ -490,7 +494,13 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         await this.sendKeysOrKill(runtime, handle, ['Escape'])
         await this.sendTextOrKill(runtime, handle, spec.prompt)
         if (!(await verifyPromptDelivered(sessionFile, this.promptDeliveryTimeoutMs))) {
-          await this.reportStartupStall(runtime, handle, outputFile)
+          await this.reportStartupStall(runtime, handle, outputFile, {
+            note: describeDeliveryStall({
+              impl: 'claude-code',
+              timeoutMs: this.promptDeliveryTimeoutMs,
+              tail: decodeTerminalOutput(await readOutputTail(outputFile)),
+            }),
+          })
           return handle
         }
       }
@@ -1153,16 +1163,21 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
    * 在 `read_worker_output` 里拿到可读文本、在唤醒事件里拿到同一份日志的转义序列乱码。解码
    * 位置也与 `readOutput` 一致地留在 adapter 这一层(builtin 的输出是纯文本,不该被解码)。
    */
-  private async reportStartupStall(runtime: Runtime, h: IncarnationHandle, outputFile: string): Promise<void> {
+  private async reportStartupStall(
+    runtime: Runtime,
+    h: IncarnationHandle,
+    outputFile: string,
+    opts?: { note?: string },
+  ): Promise<void> {
     const tail = decodeTerminalOutput(await readOutputTail(outputFile))
     // 等待期间进程可能是**自己死了**(启动即失败:二进制缺失、PATH 不对、pane 里的命令立刻
     // 退出),那不是"停在一个界面上等人",谎报 idle 会让 manager 对着一具尸体发指令。先让既有
     // 的三源判定跑一遍,它会如实落 exited;只有确实还活着才走下面的暂扣汇报。
     //
-    // 落 `'crashed'` 而不是 syncState 缺省的 `'completed'`:本函数被调用的前提就是"就绪信号
-    // 没等到 ⇒ 开工输入一个字符都没投递",此刻会话没了只可能是启动即失败(二进制缺失、PATH
-    // 不对、pane 命令立刻退出),completed 在这条路径上明确不可能成立。吃缺省推断会让一个
-    // 从没干过活的 worker 在台账上落成"成功完成"终态(同 #66 修的那类"失败记成成功")。
+    // 落 `'crashed'` 而不是 syncState 缺省的 `'completed'`:本函数被调用的前提就是"开工输入
+    // 没落地"——就绪握手超时(一个字符都没投递,completed 不可能)或投递验证失败(prompt 被
+    // 启动期模态框吞掉,任务实际没开始),completed 在这两条路径上都不成立。吃缺省推断会让
+    // 一个从没干过活的 worker 在台账上落成"成功完成"终态(同 #66 修的那类"失败记成成功")。
     if ((await this.syncState(runtime, h, 'crashed')).state === 'exited') return
     await this.getMutex(h.worker_id).run(async () => {
       if (runtime.state === 'exited') return // 判定与提交之间又被并发抢先:终态不可覆盖
@@ -1171,7 +1186,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       // 只是"落了一下",下一次 state() 就把它连同台账一起翻回 running。
       runtime.startupStalled = true
       await this.transitionState(runtime, h, 'idle', {
-        outputTail: describeStartupStall({ impl: 'claude-code', timeoutMs: this.pasteReadyTimeoutMs, tail }),
+        outputTail:
+          opts?.note ?? describeStartupStall({ impl: 'claude-code', timeoutMs: this.pasteReadyTimeoutMs, tail }),
       })
     })
   }
