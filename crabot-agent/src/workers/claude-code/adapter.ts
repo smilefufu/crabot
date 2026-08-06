@@ -12,10 +12,10 @@
  * 调用一次,把 workspace 布好——.claude/settings.json(Stop/Notification hook 接到
  * CliEventChannel.hookCommand,permissions 预配置 bypassPermissions 降弹窗)、.claude/skills/(复用
  * Task 3 的 materializeSkills)、.mcp.json(renderMcpJson)、CLAUDE.md(renderContextMd),
- * 外加全局 ~/.claude.json 里该 workspace 的两条预授权记录(preAcceptStartupDialogs:
- * hasTrustDialogAccepted 消掉"首次进入新目录"的信任弹窗——它发生在 --permission-mode 之前,
- * 命令行拦不住;enabledMcpjsonServers 消掉紧随其后的 "New MCP server found" 弹窗——那个弹窗
- * 的触发源正是我们自己写下的 .mcp.json)。
+ * 外加全局 ~/.claude.json 里的三类预授权(preAcceptStartupDialogs):workspace project entry 的
+ * hasTrustDialogAccepted 消掉"首次进入新目录"信任弹窗(它发生在 --permission-mode 之前,
+ * 命令行拦不住);enabledMcpjsonServers 消掉紧随其后的 "New MCP server found" 弹窗;顶层
+ * bypassPermissionsModeAccepted 消掉首次进入 bypass 模式的一次性危险确认弹窗。
  *
  * spawn 提交纪律:tmux newSession 成功之后才落 meta(running)+注册 runtime——newSession 失败
  * 时不留任何持久痕迹(session_id 可重生成,workspace 内 provision 产物残留可接受),同 worker_id
@@ -321,8 +321,12 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     )
   }
 
-  /** 把 workspace 在全局 ~/.claude.json 里预置成"已信任 + 已授权本项目的 MCP server",
-   * 消灭 cc 首次进入新目录时那两个**阻塞式**启动弹窗。
+  /** 在全局 ~/.claude.json 预置三类启动授权:
+   * 1. workspace project entry 已信任;
+   * 2. 已授权本项目的 MCP server;
+   * 3. 顶层 bypassPermissionsModeAccepted 已接受。
+   *
+   * 目的都是消灭 cc 启动前/启动中会阻塞输入的模态弹窗。
    *
    * ## 弹窗②:`New MCP server found in this project: <name>`
    *
@@ -347,6 +351,14 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
    * /private/tmp),用逻辑路径预写实测完全无效、弹窗照旧。与 codex 侧写
    * `[projects."<realpath>"] trust_level = "trusted"` 同一策略(见 codex/adapter.ts 的
    * provision),差别只在 cc 这张表是**全局共享单文件**,所以要加锁 + 原子替换 + 只补字段。
+   *
+   * ## 弹窗③:`bypass permissions mode` 一次性危险确认
+   *
+   * cc 首次进入 bypassPermissions 会再弹一次确认,结果记在 ~/.claude.json 顶层
+   * `bypassPermissionsModeAccepted`；默认项是 "No, exit"。不预置就会让全新机器上的首个
+   * bypass worker 卡在启动弹窗,#77 的 Esc 兜底还可能直接退出 cc。由于本 adapter 已明确
+   * 选择 bypassPermissions,这里统一置 true 是该运行模式的必要前置,不是暗中扩大不同模式的
+   * 权限。
    *
    * 失败一律抛错(fail-loud),不吞:
    * - 吞掉 → worker 重新静默卡回弹窗,而这个故障态在外部看来是"running 但永远没动静",
@@ -403,6 +415,12 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       merged.enabledMcpjsonServers = [...mcpServerNames]
       projects[realRoot] = merged
       config.projects = projects
+
+      // bypass 模式的一次性确认弹窗(cc 首次进 bypassPermissions 时弹,确认结果记顶层
+      // bypassPermissionsModeAccepted,默认项是 "No, exit")——不预写则全新机器上首个 worker
+      // 必卡启动弹窗,且 #77 的 Esc 兜底可能直接退出 cc。由于本 adapter 已明确选择
+      // bypassPermissions,统一置 true 是运行模式前置;其它顶层字段与 project 数据仍原样保留。
+      config.bypassPermissionsModeAccepted = true
 
       // 原子替换:先写同目录临时文件再 rename,避免进程/机器在写一半时挂掉留下半截 JSON——
       // 这份文件是用户全局配置,截断的代价远大于一次 provision 失败。

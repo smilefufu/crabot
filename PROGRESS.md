@@ -1,14 +1,14 @@
 # Crabot 项目进度
 
-> 最后更新：2026-08-06 — worker 权限自动批准（cc bypassPermissions / codex yolo，分支 fix/worker-permission-auto-approve，待 PR）
+> 最后更新：2026-08-06 — worker 权限自动批准（cc bypassPermissions / codex 保持 never，分支 fix/worker-permission-auto-approve，待 PR）
 
 ## 2026-08-06 — worker 权限自动批准：工具调用零审批弹窗
 
 - 背景：投递验证（#77）治了启动期弹窗，但运行期 cc 在 `acceptEdits` 下每调一次 Bash/网络工具仍弹权限确认窗，等 manager 处理一次，成本高。codex 已是 `--ask-for-approval never` + 网络已放开，主要改动在 cc。
 - Spec：`crabot-docs/superpowers/specs/2026-08-06-worker-permission-auto-approve-design.md`（用户确认）。
-- 决策：cc spawn/resume `--permission-mode acceptEdits` → `bypassPermissions`（settings.json `defaultMode` 同步）；codex `--ask-for-approval never` → `--yolo`（语义等价显式化），`--sandbox workspace-write` 保留（写限 workspace）+ `network_access=true` 维持（网络已放开）。
+- 决策：cc spawn `--permission-mode acceptEdits` → `bypassPermissions`，settings.json `defaultMode` 同步，并预写 `~/.claude.json` 顶层 `bypassPermissionsModeAccepted=true` 消掉首次 bypass 的一次性确认弹窗；cc resume 继续依赖 settings。codex 保持 `--ask-for-approval never --sandbox workspace-write` + `network_access=true`（已经零审批、写限 workspace、网络放开）。review 核实 `--yolo` 会同时 bypass sandbox 后否决该方案，用户再次确认。
 - 取舍：审批维度全放开（治卡死）、沙箱维度能留就留（codex 写限 workspace 零便利损失）；cc 无沙箱维度，任意 Bash 破坏面接受，容器化记 follow-up。
-- 验证：cc/codex adapter 测试 132 passed / 2 failed（既有 macOS `/var` vs `/private/var` realpath 基线，stash 对比确认与本次无关）；测试断言直接钉住新值（改回即挂）。
+- 验证：cc **66 passed**；cc/codex 合计 **133 passed / 2 failed**（两条为既有 macOS `/var` vs `/private/var` realpath 基线，stash 对比确认与本次无关）；测试断言钉住 cc settings、全局 bypass 预授权、spawn argv，以及 codex 既有安全边界。
 
 ## 2026-08-06 — cc 启动弹窗吞 prompt 的投递验证闭环（已合并 PR #77，已部署）
 

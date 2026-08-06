@@ -159,12 +159,13 @@ describe('ClaudeCodeAdapter.provision', () => {
         const config = await readConfig()
         expect(config.projects[realRoot]).toEqual({ hasTrustDialogAccepted: true, enabledMcpjsonServers: [] })
         expect(config.projects[linkRoot]).toBeUndefined()
+        expect(config.bypassPermissionsModeAccepted).toBe(true)
       } finally {
         await fs.rm(realRoot, { recursive: true, force: true }).catch(() => {})
       }
     })
 
-    it('不覆盖同一 path 已有的其它字段,也不动其它项目条目与顶层字段', async () => {
+    it('不覆盖同一 path 已有字段与无关顶层字段,仅补启动预授权', async () => {
       const realWs = await fs.realpath(ws)
       await fs.writeFile(
         claudeConfigPath,
@@ -196,6 +197,7 @@ describe('ClaudeCodeAdapter.provision', () => {
       expect(config.projects['/home/someone/real-project']).toEqual({ hasTrustDialogAccepted: true, allowedTools: ['Read'] })
       expect(config.numStartups).toBe(42)
       expect(config.oauthAccount).toEqual({ accountUuid: 'u-1' })
+      expect(config.bypassPermissionsModeAccepted).toBe(true)
     })
 
     it('并发 provision 多个 worker:每条记录都在,互不覆盖', async () => {
@@ -214,6 +216,7 @@ describe('ClaudeCodeAdapter.provision', () => {
       )
 
       const config = await readConfig()
+      expect(config.bypassPermissionsModeAccepted).toBe(true)
       for (const root of roots) {
         expect(config.projects[root], `缺少 ${root} 的预授权记录`).toEqual({ hasTrustDialogAccepted: true, enabledMcpjsonServers: [] })
       }
@@ -297,6 +300,32 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter (tmux + mock CLI)', () => {
   function makeSpec(workerId: string, prompt: string): SpawnSpec {
     return { worker_id: workerId, prompt, workspace: { root: workspaceRoot } }
   }
+
+  it(
+    'spawn 命令行显式使用 --permission-mode bypassPermissions,工具调用零审批弹窗',
+    async () => {
+      const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+      const argvFile = path.join(dataDir, 'spawn-permission-argv.jsonl')
+      const adapter = new ClaudeCodeAdapter({
+        dataDir,
+        claudeConfigPath: fakeClaudeConfig(dataDir),
+        tmux,
+        claudeBin: claudeBinFor([], channel.hookCommand('stop'), argvFile),
+        promptDeliveryTimeoutMs: 0,
+      })
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `cctest-${randomUUID().slice(0, 8)}`
+      const h = await adapter.spawn(makeSpec(workerId, '你好'))
+
+      const argv: string[] = JSON.parse((await fs.readFile(argvFile, 'utf-8')).trim().split('\n')[0])
+      const modeIdx = argv.indexOf('--permission-mode')
+      expect(modeIdx).toBeGreaterThan(-1)
+      expect(argv[modeIdx + 1]).toBe('bypassPermissions')
+
+      await adapter.kill(h)
+    },
+    15000,
+  )
 
   it(
     '① spawn → mock 输出 → Stop hook → state 收敛 idle,readOutput 可读到该输出',

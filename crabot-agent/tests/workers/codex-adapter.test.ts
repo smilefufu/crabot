@@ -686,7 +686,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
   )
 
   it(
-    'spawn 命令行不携带 --skip-git-repo-check(该 flag 只注册在 codex exec 子解析器上,m2 实测顶层交互式 codex 没有这个 Option,传了会被 clap usage 错误拒绝),--yolo/--sandbox 取值合法,且带 -c sandbox_workspace_write.network_access=true(否则 worker 外网+本机端口全不可达)',
+    'spawn 命令行不携带 --skip-git-repo-check(该 flag 只注册在 codex exec 子解析器上,m2 实测顶层交互式 codex 没有这个 Option,传了会被 clap usage 错误拒绝),--ask-for-approval/--sandbox 取值合法,且带 -c sandbox_workspace_write.network_access=true(否则 worker 外网+本机端口全不可达)',
     async () => {
       const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
       const stopHookCmd = channel.hookCommand('stop')
@@ -700,7 +700,9 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
 
       const argv: string[] = JSON.parse((await fs.readFile(argvFile, 'utf-8')).trim().split('\n')[0])
       expect(argv).not.toContain('--skip-git-repo-check')
-      expect(argv).toContain('--yolo')
+      const approvalIdx = argv.indexOf('--ask-for-approval')
+      expect(approvalIdx).toBeGreaterThan(-1)
+      expect(argv[approvalIdx + 1]).toBe('never')
       const sandboxIdx = argv.indexOf('--sandbox')
       expect(sandboxIdx).toBeGreaterThan(-1)
       expect(['read-only', 'workspace-write', 'danger-full-access']).toContain(argv[sandboxIdx + 1])
@@ -714,7 +716,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
   )
 
   it(
-    'resume 命令行不携带 --skip-git-repo-check,--yolo/--sandbox/-c 放在 resume 子命令之前(放后面 codex 报 usage 错、exit=2,m2 实测),且 -c 放行了 workspace-write 沙箱的网络',
+    'resume 命令行不携带 --skip-git-repo-check,--ask-for-approval/--sandbox/-c 放在 resume 子命令之前(放后面 codex 报 usage 错、exit=2,m2 实测),且 -c 放行了 workspace-write 沙箱的网络',
     async () => {
       const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
       const stopHookCmd = channel.hookCommand('stop')
@@ -736,7 +738,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
       expect(argv).not.toContain('--skip-git-repo-check')
       const resumeIdx = argv.indexOf('resume')
       expect(resumeIdx).toBeGreaterThan(-1)
-      for (const flag of ['--yolo', '--sandbox', '-c']) {
+      for (const flag of ['--ask-for-approval', '--sandbox', '-c']) {
         const idx = argv.indexOf(flag)
         expect(idx).toBeGreaterThan(-1)
         expect(idx).toBeLessThan(resumeIdx)
