@@ -166,7 +166,7 @@ import { CliEventChannel } from '../cli-events.js'
 import { OutputLog } from '../output-log.js'
 import { decodeTerminalOutput } from '../terminal-output.js'
 import { AsyncMutex } from '../async-mutex.js'
-import { writeMetaAtomic, maxSeqOnDisk } from '../meta-store.js'
+import { writeMetaAtomic, maxSeqOnDisk, latestModifiedMs } from '../meta-store.js'
 import { WorkerExitedError, CapabilityNotSupportedError } from '../errors.js'
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
 import { materializeSkills, renderCodexMcpToml, renderContextMd, type ProvisionSources } from '../provision/materialize.js'
@@ -386,16 +386,21 @@ async function pollForNewRollout(sessionsDir: string, cutoffMs: number, timeoutM
 
 /** 读 rollout 文件首行的 session_meta.payload.session_id(m2 真机实测的权威字段)。首行还
  * 不是完整/合法的 session_meta(文件刚创建、还没来得及写完)一律返回 undefined,调用方退回
- * 文件名解析,不抛错、不重试——真机实测文件名与内容里的 id 完全一致,这里只是"能拿到内容
- * 就优先信内容"的加固,拿不到不算失败。五轮 review 修复:读出的 id 额外按 UUID_RE 校验格式,
- * 不合法(畸形值)一律当成"拿不到",打 warn 并退回文件名解析——避免畸形 id 未经校验就被
- * 写进 meta.session_id 与 handle.session_ref(会让 spawn 静默成功、resume/readTrace 必然
- * 失效)。 */
-async function readSessionIdFromRolloutContent(path: string): Promise<string | undefined> {
+ * 文件名解析,不重试——真机实测文件名与内容里的 id 完全一致,这里只是"能拿到内容就优先信
+ * 内容"的加固。`throwOnAccessError` 只供活性巡检定位路径时使用:ENOENT 仍是正常降级,
+ * 其它读错误上抛给调用方记录 worker/seq/path;既有 spawn/readTrace 调用保持静默降级。
+ * 五轮 review 修复:读出的 id 额外按 UUID_RE 校验格式,不合法(畸形值)一律当成"拿不到",
+ * 打 warn 并退回文件名解析——避免畸形 id 未经校验就被写进 meta.session_id 与
+ * handle.session_ref(会让 spawn 静默成功、resume/readTrace 必然失效)。 */
+async function readSessionIdFromRolloutContent(
+  path: string,
+  throwOnAccessError: boolean = false,
+): Promise<string | undefined> {
   let raw: string
   try {
     raw = await fs.readFile(path, 'utf-8')
-  } catch {
+  } catch (err) {
+    if (throwOnAccessError && (err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
     return undefined
   }
   const firstLine = raw.split('\n', 1)[0]
@@ -418,7 +423,7 @@ async function readSessionIdFromRolloutContent(path: string): Promise<string | u
 }
 
 /**
- * 四轮 review 修复(ensureRuntime 专用):按已知 session_id 精确查找对应的 rollout 文件——
+ * 四轮 review 修复:按已知 session_id 精确查找对应的 rollout 文件——
  * 不看 mtime,只看文件名里嵌的 uuid 是否匹配 exactly。meta 只落 session_id +
  * session_discovery 状态,不落 rolloutPath 这个绝对路径(升级前的 meta 结构就没有它,补
  * 一个字段不如直接按已知的确定性文件名规则重新找一遍,与 sessionName/outputFile 等其它
@@ -433,7 +438,11 @@ async function readSessionIdFromRolloutContent(path: string): Promise<string | u
  * warn(便于诊断"为什么按文件名找不到,但按内容能找到"),仍然找不到才返回 undefined(与
  * 原语义一致,readTrace 优雅降级)。
  */
-async function findRolloutFileBySessionId(sessionsDir: string, sessionId: string): Promise<string | undefined> {
+async function findRolloutFileBySessionId(
+  sessionsDir: string,
+  sessionId: string,
+  throwOnAccessError: boolean = false,
+): Promise<string | undefined> {
   const candidates: string[] = []
 
   async function walk(dir: string, depth: number): Promise<string | undefined> {
@@ -441,7 +450,8 @@ async function findRolloutFileBySessionId(sessionsDir: string, sessionId: string
     let entries: Dirent[]
     try {
       entries = await fs.readdir(dir, { withFileTypes: true })
-    } catch {
+    } catch (err) {
+      if (throwOnAccessError && (err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
       return undefined
     }
     for (const entry of entries) {
@@ -463,7 +473,7 @@ async function findRolloutFileBySessionId(sessionsDir: string, sessionId: string
   if (exact) return exact
 
   for (const candidate of candidates) {
-    const contentSessionId = await readSessionIdFromRolloutContent(candidate)
+    const contentSessionId = await readSessionIdFromRolloutContent(candidate, throwOnAccessError)
     if (contentSessionId === sessionId) {
       console.warn(`[codex-adapter] rollout file located via content session_id fallback (filename uuid did not match): ${candidate}`)
       return candidate
@@ -960,17 +970,26 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   }
 
   /**
-   * 活性信号(protocol-agent-v3 §6.1 `lastActivityAt`):pane 输出日志的 mtime。
+   * 活性信号(protocol-agent-v3 §6.1):任务/执行进展的最近时刻。
    *
-   * tmux `pipe-pane` 抓的是 pane 的**整条输出流**,TUI 在模型思考期间持续重绘自旋动画 ——
-   * 所以"这份文件多久没长了"能把"想得久"和"卡死了"分开,而 `state()` 的 running 是 else
-   * 兜底、在语义上分不开(见 syncState)。路径解析与 `readOutput` 同一条(有常驻 runtime 用
-   * 它的 OutputLog,没有就按约定路径重建),保证进程重启后仍然可判。
+   * pane output 的 TUI 重绘不参与判定。rollout 是 Codex 的原生会话记录;meta 为
+   * spawn/resume/input/state 转换提供控制进展基线。任一来源失败时继续使用另一来源。
    */
   async lastActivityAt(h: IncarnationHandle): Promise<number | undefined> {
+    const dir = join(this.deps.dataDir, h.worker_id)
+    const metaPath = join(dir, `meta-${h.seq}.json`)
     const runtime = this.runtimes.get(instanceKey(h))
-    const outputLog = runtime ? runtime.outputLog : new OutputLog(join(this.deps.dataDir, h.worker_id, `output-${h.seq}.log`))
-    return outputLog.lastModifiedMs()
+    const meta = runtime ? undefined : await this.readMetaFile(dir, h.seq)
+    let rolloutPath = runtime?.rolloutPath
+    if (!rolloutPath && meta?.session_discovery === 'discovered' && meta.workspace_root && meta.session_id) {
+      const sessionsDir = join(meta.workspace_root, '.codex', 'sessions')
+      try {
+        rolloutPath = await findRolloutFileBySessionId(sessionsDir, meta.session_id, true)
+      } catch (err) {
+        console.warn(`[worker liveness] rollout discovery failed for ${h.worker_id}#${h.seq} at ${sessionsDir}:`, err)
+      }
+    }
+    return latestModifiedMs([metaPath, rolloutPath], `${h.worker_id}#${h.seq}`)
   }
 
   /**

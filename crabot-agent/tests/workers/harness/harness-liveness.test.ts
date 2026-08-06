@@ -40,9 +40,8 @@ function handleKey(h: { worker_id: string; seq: number }): string {
 }
 
 /**
- * CLI 形态的 adapter 桩:实现可选契约方法 `lastActivityAt`(cc/codex 的真实实现是对自己
- * output 日志的一次 fs.stat,这里直接由用例摆布返回值),`readOutput` 返回一段可断言的
- * pane 尾部。
+ * CLI 形态的 adapter 桩:实现可选契约方法 `lastActivityAt`(真实实现从 meta 与原生会话
+ * 记录建立任务进展基线,这里直接由用例摆布返回值),`readOutput` 返回一段可断言的 pane 尾部。
  */
 class CliLikeAdapter implements WorkerAdapter {
   readonly implId: WorkerImplId
@@ -93,7 +92,7 @@ class CliLikeAdapter implements WorkerAdapter {
   }
 }
 
-/** builtin 形态:**不实现** `lastActivityAt`,按协议 §6.1 应被巡检天然跳过(不靠实现特判)。 */
+/** 任意未实现可选方法的第三方/未来 adapter 都应被巡检天然跳过,不靠实现 ID 特判。 */
 class NoSignalAdapter extends CliLikeAdapter {
   // @ts-expect-error 故意把可选契约方法抹成 undefined,复刻"adapter 没实现这个方法"的形态
   lastActivityAt = undefined
@@ -194,16 +193,19 @@ describe.each<WorkerImplId>(['claude-code', 'codex'])('WorkerHarness.sweepLivene
     const text = woke[0].detail?.text as string
     expect(text).toContain('⏺ 正在读取文件…')
     expect(text).toContain('活性巡检')
+    expect(text).toContain('没有新的可观察任务活动')
+    expect(text).toContain('非 raw 的 send_to_worker')
+    expect(text).toContain('空 composer')
     // 合成指引排在 output 尾部**之后**——否则会被 truncateWakeText 的保尾截断吃掉(#70 教训)
     expect(text.indexOf('⏺ 正在读取文件…')).toBeLessThan(text.indexOf('活性巡检'))
     // 零新事件 kind、零新状态
     expect(woke[0].kind).toBe('state_changed')
   })
 
-  it('② lastActivityAt 持续前进(思考中的 TUI)→ 零事件', async () => {
+  it('② lastActivityAt 持续前进(真实任务进展)→ 零事件', async () => {
     const { harness, adapter, workerId } = await spawnRunning()
 
-    // 每次巡检前 worker 都动过一点(自旋动画持续写字节),累计远超阈值
+    // 每次巡检前 worker 都有真实进展;累计远超阈值也不该告警。
     for (let i = 0; i < 10; i++) {
       clockMs += 10 * MINUTE
       adapter.activity.set(`${workerId}#1`, clockMs - MINUTE)
@@ -215,7 +217,7 @@ describe.each<WorkerImplId>(['claude-code', 'codex'])('WorkerHarness.sweepLivene
     expect(adapter.lastActivityAtCalls.length).toBe(10)
   })
 
-  it('③ 不实现 lastActivityAt 的 adapter(builtin 形态)被跳过:零事件、无异常', async () => {
+  it('③ 不实现 lastActivityAt 的 adapter 被跳过:零事件、无异常', async () => {
     const adapter = new NoSignalAdapter()
     const { harness } = await makeHarness(adapter)
     const worker = await harness.spawnWorker(spawnParams())

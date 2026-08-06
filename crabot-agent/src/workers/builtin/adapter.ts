@@ -56,6 +56,7 @@ import type { Resolvable } from '../../engine/types.js'
 import { SessionTree } from '../session-tree.js'
 import { OutputLog } from '../output-log.js'
 import { AsyncMutex } from '../async-mutex.js'
+import { latestModifiedMs } from '../meta-store.js'
 import { WorkerExitedError } from '../errors.js'
 import {
   BUILTIN_WORKER_PERMISSIONS,
@@ -162,6 +163,8 @@ interface WorkerInstance {
    * 分支下面。每个化身必须维护自己的 tip，只在自己 append 时更新。
    */
   tip: string
+  /** 最近一次真实 engine 进展;不使用定时心跳,避免把挂死调用伪装为健康。 */
+  activityAt: number
   state: WorkerContractState
   ended_reason?: IncarnationEndReason
   outcome?: 'completed' | 'failed'
@@ -319,6 +322,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         sessionTree,
         outputLog,
         tip: rootId,
+        activityAt: Date.now(),
         state: 'running',
         pendingInputs: [],
       }
@@ -385,6 +389,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         sessionTree,
         outputLog,
         tip: wakeId,
+        activityAt: Date.now(),
         state: 'running',
         pendingInputs: [],
       }
@@ -430,6 +435,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
         sessionTree,
         outputLog,
         tip: forkId,
+        activityAt: Date.now(),
         state: 'running',
         pendingInputs: [],
       }
@@ -465,6 +471,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
 
       if (instance.state === 'running') {
         instance.pendingInputs.push(text)
+        instance.activityAt = Date.now()
         return undefined
       }
 
@@ -474,6 +481,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       const builtin = await this.runtimeFor(h.worker_id, 'sendInput')
       instance.tip = await instance.sessionTree.append(instance.tip, createUserMessage(text))
       await this.transitionState(instance, h, 'running')
+      instance.activityAt = Date.now()
       return builtin
     })
 
@@ -489,6 +497,12 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     const instance = this.instances.get(instanceKey(h.worker_id, h.seq))
     const outputLog = instance ? instance.outputLog : new OutputLog(join(this.deps.dataDir, h.worker_id, `output-${h.seq}.log`))
     return outputLog.read(cursor)
+  }
+
+  async lastActivityAt(h: IncarnationHandle): Promise<number | undefined> {
+    const instance = this.instances.get(instanceKey(h.worker_id, h.seq))
+    if (instance) return instance.activityAt
+    return latestModifiedMs([join(this.deps.dataDir, h.worker_id, `meta-${h.seq}.json`)], `${h.worker_id}#${h.seq}`)
   }
 
   async state(h: IncarnationHandle): Promise<WorkerContractState> {
@@ -639,6 +653,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       return ac
     })
     if (!abortController) return
+    instance.activityAt = Date.now()
 
     // pendingWrites 里的 promise 必须在 push 的同一刻就挂上 catch：burst 可能跑几分钟，
     // onTurn 到下面 await Promise.all(pendingWrites) 之间跨度很长，若 append 提前 reject
@@ -693,7 +708,11 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
           if (info.failedReason === undefined) compactedThisBurst = true
         },
         abortSignal: abortController.signal,
+        onLiveProgress: () => {
+          instance.activityAt = Date.now()
+        },
         onTurn: (event) => {
+          instance.activityAt = Date.now()
           if (event.assistantText) {
             lastAssistantText = event.assistantText
             pendingWrites.push(
@@ -805,6 +824,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
       return ac
     })
     if (!abortController) return
+    instance.activityAt = Date.now()
 
     // 同 runBurst：push 时立即挂 catch，避免 append 在长时间跑的 burst 期间 reject 却
     // 没有 handler，触发 unhandledRejection 打崩进程。错误收集到 writeErrors，
@@ -838,7 +858,11 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
           if (info.failedReason === undefined) compactedThisBurst = true
         },
         abortSignal: abortController.signal,
+        onLiveProgress: () => {
+          instance.activityAt = Date.now()
+        },
         onTurn: (event) => {
+          instance.activityAt = Date.now()
           if (event.assistantText) {
             pendingWrites.push(
               instance.outputLog.append(event.assistantText + '\n').catch((err) => {

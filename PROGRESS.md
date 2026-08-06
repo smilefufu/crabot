@@ -1,8 +1,18 @@
 # Crabot 项目进度
 
-> 最后更新：2026-08-05 — worker 活性巡检（分支 feat/worker-liveness-sweep，未合并 main）；上一条「模块健康与 Memory 维护最小修复」已通过 PR #72 合并
+> 最后更新：2026-08-06 — worker 活性信号纠偏与 builtin 覆盖（分支 fix/worker-liveness-signals，待 PR）
 
-## 2026-08-05 — worker 活性巡检：静默停摆终于有人管了
+## 2026-08-06 — worker 活性信号纠偏：动画不再伪装进展，builtin 不再是盲区
+
+- 已确认 Spec 与计划：`crabot-docs/superpowers/specs/2026-08-06-worker-liveness-signal-correction-design.md`、`crabot-docs/superpowers/plans/2026-08-06-worker-liveness-signal-correction-plan.md`；正式协议 `protocol-agent-v3.md` §6.1/§6.3 已先更新并推送文档仓 main（`9fa9280`）。
+- 生产复盘：#75 首版确实两次唤醒 `w-ed8453a7`，但 Claude Code 在空 composer 每约 30 分钟输出一次 `Auto-updating…`，持续刷新 `output-1.log` mtime，恰好永久压住 30 分钟阈值；manager 清掉 MCP 弹窗后也只敲了选项/Enter，没有重发原任务。`w-761654c6` 后来虽正常完成，但 builtin running 约 4 小时期间完全没有连续活性信号。
+- 契约纠偏：`lastActivityAt` 改为“最近一次可观察任务/执行进展”，进程存活、pane 动画和无条件心跳均不算。Claude Code 取 `max(meta mtime, native session JSONL mtime)`；Codex 取 `max(meta mtime, rollout mtime)`；output 只在首报告警时附诊断现场。
+- builtin 覆盖：每化身维护进程内 `activityAt`，只在 spawn/resume/fork/burst 起点、真实 `onLiveProgress`/`onTurn`、成功 `sendInput` 时前进；无常驻实例回退 meta mtime，不加定时心跳。harness 仍不识别实现 ID、不改台账、不自动 kill，30 分钟阈值、5 分钟周期、去重与 `1T→2T→4T` 失败重投不变。
+- 错误降级：单个 activity 文件缺失/不可读时继续其它来源；`ENOENT` 视为正常尚未生成，其它 stat/rollout 定位错误带 worker/seq/path 打 warn；全部来源不可用才返回 `undefined`，本轮跳过、下轮重试。
+- 巡检指引补齐：清掉模态弹窗后若落在空 composer，不能把“弹窗消失”当恢复，必须用非 raw `send_to_worker` 重发完整任务并继续确认 output/事件进展。
+- 验证：TypeScript build 通过；定向 4 文件 **88 tests passed**；`tests/workers + tests/manager` 在 `maxWorkers=1` 下 **845 passed / 5 failed**，5 条全部是既有且未改文件中的 macOS `/var` vs `/private/var` realpath 固定断言（codex PATH 2、workspace manager 3，上一轮 main 基线已记录同样失败）；变异实测——cc/codex 任一重新纳入 output mtime 各 2 条事故用例失败，builtin 常驻信号删除 2 条失败，主线 `onLiveProgress` 更新时间删除 1 条失败。全 Agent 套件未再扩大：m2 正有一条 100% CPU 的四资产 producer pytest 长跑，已知此负载会让 tmux 并发用例成批 flaky。
+
+## 2026-08-05 — worker 活性巡检首版（PR #75，历史设计；信号已由 2026-08-06 纠偏）
 
 - spec：`crabot-docs/superpowers/specs/2026-08-05-worker-liveness-sweep-design.md`；协议改动已直推 crabot-docs main（§6.1 增加可选方法 `lastActivityAt?`）。**这不是新设计，是协议 §6.3 第 3 条「兜底：harness 低频巡扫 tmux pane（纯 harness 行为，零 token），静默异常才唤醒 manager」从未落地**。
 - 病灶：近三天四例 worker 静默停摆（15h / 8.5h / 26min / 至今）**无一被系统自己发现**，共同点是**进程活着、tmux 活着、台账写着 running、但不再产生任何事件**。#70 的就绪握手能在源头拦住其中两例，拦不住另外两例（prompt 确实提交了，失效发生在之后）。根因是**三种 adapter 的 `state()` 返回 running 都是 else 兜底、不是正证**，在语义上分不开"卡住"与"在干活"；`isAlive`、台账 `updated_at` 同样零区分力。

@@ -171,11 +171,9 @@ const MAX_CONTINUATION_ITERATIONS = 3
  * 取 30 分钟,依据是 m2 现网日志的实测(见
  * `crabot-docs/superpowers/specs/2026-08-05-worker-liveness-sweep-design.md` 决策 5):
  * - **健康侧的噪声地板**:38 份健康的 cc/codex 原生会话记录里,相邻两条事件的最大间隔是
- *   codex 384s / cc 301s(p99 普遍在 10–110s)。而事件间隔已经是**保守上界** ——
- *   那段时间里 TUI 的自旋动画一直在往 pane 写字节,pane 级的静默远短于此。30 分钟对
- *   最坏的健康样本仍有 4.7 倍余量;
- * - **故障侧的量级**:四例真实停摆的零增长时长是 26min / 4h51m / 8h30m / 15h,与噪声
- *   地板之间隔着一个数量级。
+ *   codex 384s / cc 301s(p99 普遍在 10–110s)。30 分钟对最坏健康样本仍有 4.7 倍余量;
+ * - **故障侧的量级**:四例真实停摆的任务进展零前进时长是 26min / 4h51m / 8h30m / 15h,
+ *   与噪声地板之间隔着一个数量级。终端动画不参与此判据。
  *
  * 方向按 spec:宁可偏宽——漏报一次的代价(晚半小时发现)远小于误报打断一个真在干活的
  * worker(白烧一次 manager episode,还可能把它 kill 掉)。
@@ -202,11 +200,11 @@ export const LIVENESS_SWEEP_INTERVAL_MS = 5 * 60_000
 function describeLivenessStall(opts: { impl: WorkerImplId; staleMs: number; tail: string }): string {
   const minutes = Math.round(opts.staleMs / 60_000)
   const note =
-    `[crabot] 活性巡检:该 ${opts.impl} 化身的终端输出已经 ${minutes} 分钟没有任何新增,` +
+    `[crabot] 活性巡检:该 ${opts.impl} 化身已经 ${minutes} 分钟没有新的可观察任务活动,` +
     `但进程/会话仍然活着、台账仍记着 running。上面是它终端输出的尾部(已解码成可读文本,` +
     `与 read_worker_output 同一形态)。**巡检不替你判断**它是干完了、在等输入,还是卡死了——` +
-    `请据现场决定下一步:用 read_worker_output 看更早的内容、用 send_to_worker(必要时 raw 模式敲键)` +
-    `问一句或催一下、或者 kill_worker 重来。`
+    `请据现场决定下一步:仍是模态弹窗时可用 raw 模式敲键;清障后若落在空 composer,不能把弹窗消失当作恢复,` +
+    `应以非 raw 的 send_to_worker 重发完整任务,再用 output/事件确认确实前进;必要时 read_worker_output 诊断或 kill_worker 重来。`
   return `${opts.tail || '(终端至今没有任何输出)'}\n---\n${note}`
 }
 
@@ -224,7 +222,7 @@ function describeLivenessStall(opts: { impl: WorkerImplId; staleMs: number; tail
  */
 function describeLivenessRetry(opts: { impl: WorkerImplId; staleMs: number }): string {
   return (
-    `[crabot] 活性巡检:该 ${opts.impl} 化身仍然没有任何输出(已静默 ${Math.round(opts.staleMs / 60_000)} 分钟)。` +
+    `[crabot] 活性巡检:该 ${opts.impl} 化身仍然没有新的可观察任务活动(已静默 ${Math.round(opts.staleMs / 60_000)} 分钟)。` +
     `现场在前一条唤醒里,这条只是重试投递,不再重复正文。`
   )
 }
@@ -1161,7 +1159,8 @@ export class WorkerHarness {
    *
    * 之所以需要这一层:三种 adapter 的 `state()` 返回 `running` 都是 else 兜底,不是正证 ——
    * 它在语义上区分不了"在干活"与"卡住了";`isAlive`、台账 `updated_at` 同样零区分力。
-   * 唯一有区分力的信号是**输出增长**,由可选契约方法 `lastActivityAt` 提供。
+   * 唯一有区分力的信号是**任务/执行进展**,由可选契约方法 `lastActivityAt` 提供;
+   * pane output 只用于首次告警时给 manager 看现场。
    *
    * 四条纪律:
    *
@@ -1169,9 +1168,8 @@ export class WorkerHarness {
    *    `syncState` 会把它翻回 running(adapter 才是化身状态的权威)——那是 #70 review 抓到的
    *    "idle 不粘"。而且判断语义(干完了 / 等输入 / 卡住)与决策的责任完全在 manager 侧(§4.3),
    *    巡检只负责让 manager 知道;
-   * 2. **不做实现特判**。不实现 `lastActivityAt` 的 adapter(builtin)天然被跳过——它的
-   *    output 只在有 assistantText 时才写,没有连续活性信号;将来要覆盖它,实现该方法即可,
-   *    本方法一个字都不用改;
+   * 2. **不做实现特判**。不实现 `lastActivityAt` 的 adapter 天然被跳过;三种内置实现
+   *    都已提供信号,未来实现若无法建立可靠进展基线才可选择不实现。
    * 3. **只看主线化身**(`forked_from` 为空,与 §5.3 判定主线化身的规则同源)。cc 的 fork
    *    是无头 `claude -p` 侧问,整个执行期可能零输出,拿它当停摆就是纯误报;
    * 4. **同一次停摆只发一份现场**,之后的重试是**带退避的、不带正文的再投递**。展开说:
