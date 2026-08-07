@@ -1,14 +1,22 @@
 # Crabot 项目进度
 
-> 最后更新：2026-08-06 — worker 权限自动批准（cc bypassPermissions / codex 保持 never，分支 fix/worker-permission-auto-approve，待 PR）
+> 最后更新：2026-08-07 — #78 已部署；真实 Admin Chat 发现 cc 2.1.223 bypass 危险确认字段版本失配，修复中
 
-## 2026-08-06 — worker 权限自动批准：工具调用零审批弹窗
+## 2026-08-07 — cc bypass 首次危险确认窗版本修复（进行中）
+
+- #78 已 squash 合并为 `9236e333` 并部署；MM/Admin/Agent/Memory/三渠道最终全绿，`fatal.log` 无新增。Codex 继续保持 `--ask-for-approval never --sandbox workspace-write` + `network_access=true`。
+- 真实浏览器 Admin Chat 端到端验收：cc worker `w-ca15efb2-a389-482c-a6a8-2f965961e33c` 明确出现 `WARNING: Claude Code running in Bypass Permissions mode / No, exit / Yes, I accept`，随后 pane 退出、任务 `spawn_failed`，证明 `~/.claude.json.bypassPermissionsModeAccepted=true` 对 Claude Code 2.1.223 无效；Bash 尚未执行。
+- 对照基线：Codex worker `w-292a9f0d-46fd-4880-b19c-9379b62d4cde` 无审批完成代理网络请求、workspace 写入与读取核验，输出 `CODEX_ADMIN_CHAT_VALIDATION_OK` 后已清理。
+- 真实 CLI 探针：workspace `.claude/settings.json` 写 `skipDangerousModePermissionPrompt=true` 仍无效；启动命令追加 `--settings '{"skipDangerousModePermissionPrompt":true}'` 后无弹窗完成 Bash、网络与 workspace 写入并回到 idle。修订 Spec `crabot-docs/.../2026-08-06-worker-permission-auto-approve-design.md`（`80fb6f0`）及实施计划（`d114b90`）已确认。
+- 当前实现：cc spawn/resume 对称注入启动级 `--settings`，不永久修改用户级 `~/.claude/settings.json`；停止继续写无效旧字段，但不删除用户已有值。TDD 起点 5 条失败，实施后 cc **66/66 passed**；cc+codex **133 passed / 2 个既有 `/var`→`/private/var` PATH 基线失败**；build 通过。真实当前构建的 spawn 已无弹窗完成 Bash、网络和写入；resume 同样不再出现危险确认窗，但 wakeInput 留在 composer 未提交，复现既有且明确排除的“resume prompt 投递验证”follow-up，不混入本次修复。独立本地 reviewer 结论 **APPROVED，无 blocker**；待部署后 Admin Chat spawn 复验。
+
+## 2026-08-06 — worker 权限自动批准：工具调用零审批弹窗（已合并 PR #78，已部署；cc 首次警告见上方修复）
 
 - 背景：投递验证（#77）治了启动期弹窗，但运行期 cc 在 `acceptEdits` 下每调一次 Bash/网络工具仍弹权限确认窗，等 manager 处理一次，成本高。codex 已是 `--ask-for-approval never` + 网络已放开，主要改动在 cc。
-- Spec：`crabot-docs/superpowers/specs/2026-08-06-worker-permission-auto-approve-design.md`（用户确认）。
-- 决策：cc spawn `--permission-mode acceptEdits` → `bypassPermissions`，settings.json `defaultMode` 同步，并预写 `~/.claude.json` 顶层 `bypassPermissionsModeAccepted=true` 消掉首次 bypass 的一次性确认弹窗；cc resume 继续依赖 settings。codex 保持 `--ask-for-approval never --sandbox workspace-write` + `network_access=true`（已经零审批、写限 workspace、网络放开）。review 核实 `--yolo` 会同时 bypass sandbox 后否决该方案，用户再次确认。
+- Spec：`crabot-docs/superpowers/specs/2026-08-06-worker-permission-auto-approve-design.md`。
+- #78 决策：cc spawn `--permission-mode acceptEdits` → `bypassPermissions`，workspace settings `defaultMode` 同步；codex 保持 `--ask-for-approval never --sandbox workspace-write` + `network_access=true`，明确拒绝会同时 bypass sandbox 的 `--yolo`。首次 bypass 警告的原实现基于旧字段，已由 2026-08-07 真实验收推翻并在上方修正。
 - 取舍：审批维度全放开（治卡死）、沙箱维度能留就留（codex 写限 workspace 零便利损失）；cc 无沙箱维度，任意 Bash 破坏面接受，容器化记 follow-up。
-- 验证：cc **66 passed**；cc/codex 合计 **133 passed / 2 failed**（两条为既有 macOS `/var` vs `/private/var` realpath 基线，stash 对比确认与本次无关）；测试断言钉住 cc settings、全局 bypass 预授权、spawn argv，以及 codex 既有安全边界。
+- #78 合并前验证：cc **66 passed**；cc/codex 合计 **133 passed / 2 failed**（两条为既有 macOS `/var` vs `/private/var` realpath 基线）；测试断言钉住 cc settings、spawn argv及 codex 安全边界。
 
 ## 2026-08-06 — cc 启动弹窗吞 prompt 的投递验证闭环（已合并 PR #77，已部署）
 
