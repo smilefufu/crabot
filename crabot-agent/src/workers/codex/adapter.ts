@@ -106,7 +106,7 @@
  * `--ask-for-approval`(`untrusted|on-request|never`)与 `--sandbox`
  * (`read-only|workspace-write|danger-full-access`)。本 adapter 固定传
  * `--ask-for-approval never --sandbox workspace-write`,与 cc 用
- * `--permission-mode acceptEdits` 同样的自动化意图——不能让审批弹窗卡住 tmux pane。
+ * `--permission-mode bypassPermissions` 同样的自动化意图——不能让审批弹窗卡住 tmux pane。
  * `codex resume <SESSION_ID>` 是独立子命令(不是 `--resume` flag),同一文档页确认。
  *
  * m2 真机实测校准了两点原先靠猜测沿用、未经验证的行为:
@@ -715,7 +715,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     const sessionName = `crabot-w-${spec.worker_id}-${seq}`
     const outputFile = join(dir, `output-${seq}.log`)
     // codex-docs + m2 实测:交互态无 --session-id 等价参数;--ask-for-approval never
-    // --sandbox workspace-write 与 cc 用 --permission-mode acceptEdits 同样的自动化意图。
+    // --sandbox workspace-write 与 cc 用 --permission-mode bypassPermissions 同样的自动化意图。
     // 不传 --skip-git-repo-check(m2 实测顶层交互式 codex 不支持这个 flag,只有 codex exec
     // 才有——见文件头"spawn/resume 启动参数"节);受信目录改由 provision 写进 config.toml 的
     // [projects."<realpath>"] trust_level = "trusted" 解决。

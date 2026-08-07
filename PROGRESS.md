@@ -1,8 +1,16 @@
 # Crabot 项目进度
 
-> 最后更新：2026-08-06 — cc 首条 prompt 投递验证（分支 fix/cc-prompt-delivery-verify，待 PR）
+> 最后更新：2026-08-06 — worker 权限自动批准（cc bypassPermissions / codex 保持 never，分支 fix/worker-permission-auto-approve，待 PR）
 
-## 2026-08-06 — cc 启动弹窗吞 prompt 的投递验证闭环（MCP 弹窗事故第三次实例）
+## 2026-08-06 — worker 权限自动批准：工具调用零审批弹窗
+
+- 背景：投递验证（#77）治了启动期弹窗，但运行期 cc 在 `acceptEdits` 下每调一次 Bash/网络工具仍弹权限确认窗，等 manager 处理一次，成本高。codex 已是 `--ask-for-approval never` + 网络已放开，主要改动在 cc。
+- Spec：`crabot-docs/superpowers/specs/2026-08-06-worker-permission-auto-approve-design.md`（用户确认）。
+- 决策：cc spawn `--permission-mode acceptEdits` → `bypassPermissions`，settings.json `defaultMode` 同步，并预写 `~/.claude.json` 顶层 `bypassPermissionsModeAccepted=true` 消掉首次 bypass 的一次性确认弹窗；cc resume 继续依赖 settings。codex 保持 `--ask-for-approval never --sandbox workspace-write` + `network_access=true`（已经零审批、写限 workspace、网络放开）。review 核实 `--yolo` 会同时 bypass sandbox 后否决该方案，用户再次确认。
+- 取舍：审批维度全放开（治卡死）、沙箱维度能留就留（codex 写限 workspace 零便利损失）；cc 无沙箱维度，任意 Bash 破坏面接受，容器化记 follow-up。
+- 验证：cc **66 passed**；cc/codex 合计 **133 passed / 2 failed**（两条为既有 macOS `/var` vs `/private/var` realpath 基线，stash 对比确认与本次无关）；测试断言钉住 cc settings、全局 bypass 预授权、spawn argv，以及 codex 既有安全边界。
+
+## 2026-08-06 — cc 启动弹窗吞 prompt 的投递验证闭环（已合并 PR #77，已部署）
 
 - 现场：部署活性信号后，admin-chat 触发的 cc 验证任务（w-d2304bb6）启动时弹 arXivPaper MCP 信任窗，首条 prompt 被弹窗吞掉，worker 停在空 composer 直到 30 分钟巡检兜底。铁证：output 日志里 `\e[?2004h` 在 byte 507、弹窗在 byte 890——**就绪信号之后 cc 才异步弹窗**，推翻 paste-ready.ts「弹窗会挡住就绪信号」的设计假设。同类事故第三次：8/4 卡 8.5h（paste-ready 修复前）、w-ed8453a7 8/5 卡 6h33m、w-d2304bb6 8/6。
 - 修复（小改动，局限 cc adapter spawn 阶段）：sendText(prompt) 后**用结果验证投递**——轮询 cc 会话记录（`~/.claude/projects/<slug>/<sessionId>.jsonl`）直到出现 user 消息；失败 → Esc 清理残留弹窗 + 重投一次完整 prompt + 再验证；仍失败 → 走既有 `reportStartupStall` 暂扣（带现场给 manager），绝不静默留下 running。不再依赖 TUI 文案，复用 lastActivityAt 已有的 session 定位逻辑。
