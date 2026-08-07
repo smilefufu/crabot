@@ -2,20 +2,22 @@
  * ClaudeCodeAdapter — WorkerAdapter 契约的 claude-code 实现。
  *
  * spawn:session_id = randomUUID() 出生即定(即 session_ref);建 <dataDir>/<worker_id>/ 目录;
- * tmux newSession 拉起 `<claudeBin> --session-id <uuid> --permission-mode bypassPermissions`,交互态
- * 跑在 tmux pane 里,cwd=workspace,pane 输出经 tmux pipe-pane 落 output-<seq>.log;meta 落盘为
- * running;**等 pane 输出里出现 \e[?2004h(TUI 已开启 bracketed paste)之后**,首条任务输入
- * (spec.prompt)才经 tmux sendText 注入(cc 把它当第一条用户消息)。等不到就绪 → 不投递、
- * 落 idle 并把 output 尾部随唤醒事件交给 manager(见 spawn 内的握手段与 reportStartupStall)。
+ * tmux newSession 拉起 `<claudeBin> --settings <bypass-warning-json> --session-id <uuid>
+ * --permission-mode bypassPermissions`,交互态跑在 tmux pane 里,cwd=workspace,pane 输出经 tmux
+ * pipe-pane 落 output-<seq>.log;meta 落盘为 running;**等 pane 输出里出现
+ * \e[?2004h(TUI 已开启 bracketed paste)之后**,首条任务输入(spec.prompt)才经 tmux sendText
+ * 注入(cc 把它当第一条用户消息)。等不到就绪 → 不投递、落 idle 并把 output 尾部随唤醒事件
+ * 交给 manager(见 spawn 内的握手段与 reportStartupStall)。
  *
  * provision:与 spawn 分离的独立步骤(WorkerAdapter 契约本就是两个方法),由调用方在 spawn 前
  * 调用一次,把 workspace 布好——.claude/settings.json(Stop/Notification hook 接到
  * CliEventChannel.hookCommand,permissions 预配置 bypassPermissions 降弹窗)、.claude/skills/(复用
  * Task 3 的 materializeSkills)、.mcp.json(renderMcpJson)、CLAUDE.md(renderContextMd),
- * 外加全局 ~/.claude.json 里的三类预授权(preAcceptStartupDialogs):workspace project entry 的
+ * 外加全局 ~/.claude.json 里 workspace project entry 的两类预授权(preAcceptStartupDialogs):
  * hasTrustDialogAccepted 消掉"首次进入新目录"信任弹窗(它发生在 --permission-mode 之前,
- * 命令行拦不住);enabledMcpjsonServers 消掉紧随其后的 "New MCP server found" 弹窗;顶层
- * bypassPermissionsModeAccepted 消掉首次进入 bypass 模式的一次性危险确认弹窗。
+ * 命令行拦不住);enabledMcpjsonServers 消掉紧随其后的 "New MCP server found" 弹窗。首次进入
+ * bypass 模式的危险确认不接受 project settings,由 spawn/resume 每次通过 --settings 注入当前
+ * cc 字段 skipDangerousModePermissionPrompt,不永久修改用户级 ~/.claude/settings.json。
  *
  * spawn 提交纪律:tmux newSession 成功之后才落 meta(running)+注册 runtime——newSession 失败
  * 时不留任何持久痕迹(session_id 可重生成,workspace 内 provision 产物残留可接受),同 worker_id
@@ -135,6 +137,15 @@ const PROMPT_DELIVERY_POLL_INTERVAL_MS = 250
 function shQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`
 }
+
+/**
+ * Claude Code 2.1.223 的 bypass 一次性危险确认开关。
+ *
+ * 真实 Admin Chat 验收证明旧的 ~/.claude.json.bypassPermissionsModeAccepted 已无效,project
+ * settings 里的新字段也不生效;只有启动级 --settings 能在不永久修改用户级
+ * ~/.claude/settings.json 的前提下消掉弹窗。值是 adapter 内部常量,仍经 shQuote 进入 shell。
+ */
+const BYPASS_WARNING_SETTINGS_ARG = `--settings ${shQuote(JSON.stringify({ skipDangerousModePermissionPrompt: true }))}`
 
 /** UUID 格式校验:标准 UUID 格式(8-4-4-4-12 十六进制段,由连字符分隔)。*/
 function validateSessionRef(sessionRef: string): void {
@@ -295,9 +306,9 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         Stop: [{ hooks: [{ type: 'command', command: channel.hookCommand('stop') }] }],
         Notification: [{ hooks: [{ type: 'command', command: channel.hookCommand('notification') }] }],
       },
-      // --permission-mode bypassPermissions 已在命令行传了,这里在 settings.json 里重复声明一份,
-      // 覆盖命令行参数之外(如未来 --resume)也走同一降弹窗策略的场景。bypassPermissions =
-      // 等价 auto-mode/--dangerously-skip-permissions:工具调用零审批弹窗(否则每调一次 Bash/网络
+      // --permission-mode bypassPermissions 已在 spawn 命令行传了,这里在 settings.json 里重复
+      // 声明一份,让 resume 也选择同一模式。bypassPermissions = 等价
+      // auto-mode/--dangerously-skip-permissions:工具调用零审批弹窗(否则每调一次 Bash/网络
       // 就要 manager 处理一次)。取舍见 specs/2026-08-06-worker-permission-auto-approve-design.md。
       permissions: { defaultMode: 'bypassPermissions' },
     }
@@ -321,12 +332,11 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     )
   }
 
-  /** 在全局 ~/.claude.json 预置三类启动授权:
+  /** 在全局 ~/.claude.json 预置两类 project 级启动授权:
    * 1. workspace project entry 已信任;
-   * 2. 已授权本项目的 MCP server;
-   * 3. 顶层 bypassPermissionsModeAccepted 已接受。
+   * 2. 已授权本项目的 MCP server。
    *
-   * 目的都是消灭 cc 启动前/启动中会阻塞输入的模态弹窗。
+   * bypassPermissions 的危险确认由 spawn/resume 启动参数处理,不属于本文件的全局预写。
    *
    * ## 弹窗②:`New MCP server found in this project: <name>`
    *
@@ -352,13 +362,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
    * `[projects."<realpath>"] trust_level = "trusted"` 同一策略(见 codex/adapter.ts 的
    * provision),差别只在 cc 这张表是**全局共享单文件**,所以要加锁 + 原子替换 + 只补字段。
    *
-   * ## 弹窗③:`bypass permissions mode` 一次性危险确认
-   *
-   * cc 首次进入 bypassPermissions 会再弹一次确认,结果记在 ~/.claude.json 顶层
-   * `bypassPermissionsModeAccepted`；默认项是 "No, exit"。不预置就会让全新机器上的首个
-   * bypass worker 卡在启动弹窗,#77 的 Esc 兜底还可能直接退出 cc。由于本 adapter 已明确
-   * 选择 bypassPermissions,这里统一置 true 是该运行模式的必要前置,不是暗中扩大不同模式的
-   * 权限。
+   * 当前方法只消除两类 project 级启动弹窗。bypassPermissions 的危险确认不接受这里的
+   * ~/.claude.json 或 workspace settings,由 spawn/resume 的 --settings 启动参数处理。
    *
    * 失败一律抛错(fail-loud),不吞:
    * - 吞掉 → worker 重新静默卡回弹窗,而这个故障态在外部看来是"running 但永远没动静",
@@ -416,12 +421,6 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       projects[realRoot] = merged
       config.projects = projects
 
-      // bypass 模式的一次性确认弹窗(cc 首次进 bypassPermissions 时弹,确认结果记顶层
-      // bypassPermissionsModeAccepted,默认项是 "No, exit")——不预写则全新机器上首个 worker
-      // 必卡启动弹窗,且 #77 的 Esc 兜底可能直接退出 cc。由于本 adapter 已明确选择
-      // bypassPermissions,统一置 true 是运行模式前置;其它顶层字段与 project 数据仍原样保留。
-      config.bypassPermissionsModeAccepted = true
-
       // 原子替换:先写同目录临时文件再 rename,避免进程/机器在写一半时挂掉留下半截 JSON——
       // 这份文件是用户全局配置,截断的代价远大于一次 provision 失败。
       const tmpPath = `${configPath}.crabot-${randomUUID()}.tmp`
@@ -448,7 +447,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
     const sessionName = `crabot-w-${spec.worker_id}-${seq}`
     const outputFile = join(dir, `output-${seq}.log`)
-    const command = `${this.claudeBin} --session-id ${sessionId} --permission-mode bypassPermissions`
+    const command = `${this.claudeBin} ${BYPASS_WARNING_SETTINGS_ARG} --session-id ${sessionId} --permission-mode bypassPermissions`
 
     // newSession 成功之后才落 meta(running)+注册 runtime:tmux 失败时不留任何持久痕迹
     // (session_id 可重生成,workspace 内 provision 产物残留可接受),同 worker_id 可安全重试。
@@ -612,10 +611,11 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       const sessionName = `crabot-w-${prev.worker_id}-${seq}`
       const outputFile = join(dir, `output-${seq}.log`)
       // 不重复传 --permission-mode:provision 阶段已把 bypassPermissions 写进 settings.json,覆盖
-      // 命令行没有重复声明的场景(resume 正是这样的场景)。session_ref 是 cc 侧的会话 uuid,
+      // 命令行没有重复声明的场景(resume 正是这样的场景)。危险确认开关则不接受 project
+      // settings,必须与 spawn 对称地每次通过 --settings 注入。session_ref 是 cc 侧的会话 uuid,
       // 沿用不变。拼接时用 shQuote 转义 session_ref,防止 shell 注入(双层防御:
       // 入口已校验 UUID 格式,拼接时再加引号转义,提高防御深度)。
-      const command = `${this.claudeBin} --resume ${shQuote(prev.session_ref)}`
+      const command = `${this.claudeBin} ${BYPASS_WARNING_SETTINGS_ARG} --resume ${shQuote(prev.session_ref)}`
 
       // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime。
       await this.tmux.newSession({ name: sessionName, cwd: prevRuntime.workspaceRoot, command, outputFile })
