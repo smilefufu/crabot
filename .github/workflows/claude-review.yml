@@ -66,8 +66,8 @@ jobs:
       # 大 PR 上模型会把 review 分派给异步后台 agent 然后结束回合等通知，而 CI print 模式
       # 不会因通知再唤醒主循环，run 直接退出、产出全丢——这就是"run 绿但零产出"的真正根因（#33 实锤）。
       REVIEW_CLAUDE_ARGS: |
-        --model fable
-        --fallback-model opus,sonnet
+        --model opus
+        --fallback-model sonnet
         --allowedTools "Read,Grep,Glob,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr review:*),Bash(gh api graphql:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(head:*),Bash(tail:*),Bash(wc:*),Bash(sed -n:*),Bash(grep:*),mcp__github_inline_comment__create_inline_comment"
         --disallowedTools "Task,Agent"
     steps:
