@@ -27,10 +27,17 @@ export async function commitInput(
   const timeoutMs = opts.settleTimeoutMs ?? 1_000
   const intervalMs = opts.intervalMs ?? 25
   let snapshot = await driver.capture()
-  if (snapshot.text.trim() === '' && probe(snapshot, 'before_paste') === 'unavailable') {
-    snapshot = await waitUntil(driver, timeoutMs, intervalMs, (current) => probe(current, 'before_paste') !== 'unavailable')
+  let beforePaste = probe(snapshot, 'before_paste')
+  if (beforePaste === 'unavailable') {
+    snapshot = await waitUntil(
+      driver,
+      timeoutMs,
+      intervalMs,
+      (current) => probe(current, 'before_paste') !== 'unavailable',
+    )
+    beforePaste = probe(snapshot, 'before_paste')
   }
-  if (probe(snapshot, 'before_paste') !== 'empty') return { disposition: 'not_pasted', snapshot }
+  if (beforePaste !== 'empty') return { disposition: 'not_pasted', snapshot }
 
   await driver.pasteText(text)
   snapshot = await waitUntil(driver, timeoutMs, intervalMs, (current) => probe(current, 'after_paste') !== 'empty')

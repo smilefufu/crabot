@@ -157,7 +157,8 @@ export class WorkerInbox {
             }
             this.hold(result.reason)
             if (result.action === 'hold_requeue') {
-              if (this.drainedInFlight !== item) this.queue.unshift(item)
+              if (this.drainedInFlight === item) await this.settle(item, 'dead_letter')
+              else this.queue.unshift(item)
             } else if (this.drainedInFlight === item) {
               await this.settle(item, 'dead_letter')
             } else {

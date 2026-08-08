@@ -19,6 +19,13 @@ describe('commitInput', () => {
     expect(result.disposition).toBe('accepted'); expect(pastes).toBe(1); expect(enters).toBe(1)
   })
 
+  it('waits through a non-blank transient unavailable frame before pasting', async () => {
+    const frames = [snapshot('esc to interrupt'), snapshot('empty'), snapshot('pending'), snapshot('accepted')]
+    let pastes = 0; let enters = 0
+    const result = await commitInput({ pasteText: async () => { pastes++ }, sendEnter: async () => { enters++ }, capture: async () => frames.shift()! }, frame => frame.text === 'esc to interrupt' ? 'unavailable' : frame.text as InputProbe, frame => frame.text === 'accepted', 'task', { settleTimeoutMs: 50, intervalMs: 0 })
+    expect(result.disposition).toBe('accepted'); expect(pastes).toBe(1); expect(enters).toBe(1)
+  })
+
   it('never pastes or enters when primary surface is unavailable', async () => {
     let pastes = 0; let enters = 0
     const result = await commitInput({ pasteText: async () => { pastes++ }, sendEnter: async () => { enters++ }, capture: async () => snapshot('modal') }, () => 'unavailable', () => false, 'task', { settleTimeoutMs: 0 })

@@ -969,6 +969,26 @@ describe('WorkerHarness.sendToWorker', () => {
     expect(settled.incarnations[0].session_ref).toBe(sessionRef)
   })
 
+  it('并发状态回调使running结算过期时仍保留新发现的session_ref', async () => {
+    const sessionRef = '019fe15f-cbd9-76c1-9a18-e6c2e1d2b2d8'
+    const { harness } = await makeHarness({
+      implId: 'codex',
+      updatedSessionRef: sessionRef,
+      sendInputState: 'idle',
+    })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'codex' })
+
+    await harness.sendToWorker(worker.worker_id, '首条任务')
+    await waitUntil(async () => {
+      const [current] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      return current.task.status === 'waiting_input'
+    })
+
+    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(settled.incarnations[0].session_ref).toBe(sessionRef)
+    expect(settled.incarnations[0].state).toBe('idle')
+  })
+
   it('accepted input后同步退出由harness在sendToWorker返回前单次结算', async () => {
     const report: StateChangeReport = { endReason: 'completed' }
     const { harness } = await makeHarness({ implId: 'claude-code', acceptedExitReport: report })

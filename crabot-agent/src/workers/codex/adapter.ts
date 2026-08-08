@@ -1119,16 +1119,19 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     if (runtime.controlState.kind === 'exited') return { state: 'exited', stopCount: runtime.stopBaseline }
     return this.getMutex(h.worker_id).run(async () => {
       if (runtime.controlState.kind === 'exited') return { state: 'exited', stopCount: runtime.stopBaseline }
+      // Session discovery may complete while this callback waits for the adapter mutex. Construct
+      // the callback handle only after acquiring it so an earlier empty/placeholder ref cannot win.
+      const currentHandle = { ...h, session_ref: runtime.sessionId }
       const events = await runtime.eventChannel.readAll()
       const stopCount = events.filter((event) => event.kind === 'stop').length
       if (!(await this.tmux.isAlive(runtime.sessionName))) {
         let reason = deadReason
         if (runtime.killed) reason = 'killed'
         else if (runtime.controlState.kind === 'waiting_action') reason = 'crashed'
-        await this.transitionExited(runtime, h, reason, notify)
+        await this.transitionExited(runtime, currentHandle, reason, notify)
       } else if (stopCount > runtime.stopBaseline && runtime.controlState.kind !== 'waiting_text') {
         runtime.stopBaseline = stopCount
-        await this.transitionControlState(runtime, h, { kind: 'waiting_text' }, undefined, notify)
+        await this.transitionControlState(runtime, currentHandle, { kind: 'waiting_text' }, undefined, notify)
       }
       return { state: contractState(runtime.controlState), stopCount }
     })
@@ -1327,8 +1330,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     if (runtime.controlState.kind === 'exited') return
     if (runtime.stopEventWatch) return // 幂等:同一 runtime 只装一个
     runtime.stopEventWatch = runtime.eventChannel.watch(() => {
-      const currentHandle = { ...h, session_ref: runtime.sessionId }
-      this.syncState(runtime, currentHandle).catch((err) => {
+      this.syncState(runtime, h).catch((err) => {
         console.error(`[CodexWorkerAdapter] cli event driven syncState failed for ${h.worker_id}#${h.seq}:`, err)
       })
     })

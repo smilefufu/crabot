@@ -50,6 +50,8 @@ interface FakeAdapterOpts {
   readonly resumeBehavior?: (prev: IncarnationRef, wakeInput: string) => Promise<IncarnationHandle> | IncarnationHandle
   readonly spawnBehavior?: (spec: SpawnSpec) => Promise<IncarnationHandle> | IncarnationHandle
   readonly outputChunk?: string
+  readonly acceptedExitReport?: StateChangeReport
+  readonly updatedSessionRef?: string
 }
 
 class FakeAdapter implements WorkerAdapter {
@@ -61,6 +63,8 @@ class FakeAdapter implements WorkerAdapter {
   readonly killCalls: IncarnationHandle[] = []
   readonly readOutputCalls: IncarnationHandle[] = []
   private readonly states = new Map<string, WorkerContractState>()
+  private acceptedExitReport?: StateChangeReport
+  private updatedSessionRef?: string
   private nextSeq = 1
 
   constructor(private readonly opts: FakeAdapterOpts = {}) {
@@ -109,6 +113,20 @@ class FakeAdapter implements WorkerAdapter {
   async sendInput(h: IncarnationHandle, text: string, opts?: { raw?: boolean }): Promise<void> {
     this.sendInputCalls.push({ h, text, opts })
     if (this.opts.sendInputBehavior) await this.opts.sendInputBehavior(h, text, opts)
+    if (this.opts.updatedSessionRef) this.updatedSessionRef = this.opts.updatedSessionRef
+    if (this.opts.acceptedExitReport) this.acceptedExitReport = this.opts.acceptedExitReport
+  }
+
+  takeUpdatedSessionRef(): string | undefined {
+    const value = this.updatedSessionRef
+    this.updatedSessionRef = undefined
+    return value
+  }
+
+  takeAcceptedInputExit(): StateChangeReport | undefined {
+    const value = this.acceptedExitReport
+    this.acceptedExitReport = undefined
+    return value
   }
 
   async readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
@@ -1294,6 +1312,32 @@ describe('WorkerHarness — 终审 PoC 回归：M2 kill 与 in-flight flush 竞�
 })
 
 describe('WorkerHarness — 终审 PoC 回归：M3 continueTerminalWorker 守卫按 (impl,seq) 收口 + raw 透传', () => {
+  async function sendAcrossConcurrentSwitch(targetOpts: FakeAdapterOpts, text: string) {
+    const { harness, adaptersMap } = await makeHarness()
+    let releaseGate!: (err: Error) => void
+    const gate = new Promise<void>((_resolve, reject) => { releaseGate = reject })
+    const source = new FakeAdapter({
+      implId: 'claude-code',
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      sendInputBehavior: async () => { await gate },
+    })
+    const target = new FakeAdapter({
+      implId: 'codex',
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      ...targetOpts,
+    })
+    adaptersMap.set('claude-code', source)
+    adaptersMap.set('codex', target)
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    const send = harness.sendToWorker(worker.worker_id, text)
+    await waitUntil(async () => source.sendInputCalls.length === 1)
+    await harness.switchWorkerImpl(worker.worker_id, 'codex', '并发切换')
+    releaseGate(new WorkerExitedError(worker.worker_id, 1))
+    return { harness, target, send }
+  }
+
   it('deliver 卡在 sendInput 期间发生跨实现 switchWorkerImpl（seq 撞号）：不误把存活新主线当终态接续，补送到新主线且保留 raw', async () => {
     const { harness, adaptersMap } = await makeHarness()
     let releaseGate!: (err: Error) => void
@@ -1365,6 +1409,39 @@ describe('WorkerHarness — 终审 PoC 回归：M3 continueTerminalWorker 守卫
     // 没有产生第三个化身（没有误触发一次多余的 revive/handoff）。
     const after = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
     expect(after.incarnations).toHaveLength(2)
+  })
+
+  it('补送到并发新主线时把CLI stall收敛为hold而不向调用方抛错', async () => {
+    const { send, target } = await sendAcrossConcurrentSwitch({
+      sendInputBehavior: () => {
+        throw new CliInputStallError('pending_in_ui', 'running', {
+          waitReason: 'input_pending',
+          outputTail: '❯ queued text',
+        })
+      },
+    }, '并发补送 stall')
+
+    await expect(send).resolves.toBeUndefined()
+    expect(target.sendInputCalls.filter((call) => call.text === '并发补送 stall')).toHaveLength(1)
+  })
+
+  it('补送到并发新主线时消费accepted exit和延后发现的session_ref', async () => {
+    const realSessionRef = '019fe15f-cbd9-76c1-9a18-e6c2e1d2b2d9'
+    const { harness, send } = await sendAcrossConcurrentSwitch({
+      acceptedExitReport: { endReason: 'completed' },
+      updatedSessionRef: realSessionRef,
+    }, '并发补送 accepted exit')
+
+    await expect(send).resolves.toBeUndefined()
+    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const mainline = settled.incarnations[settled.incarnations.length - 1]
+    expect(mainline).toMatchObject({
+      impl: 'codex',
+      session_ref: realSessionRef,
+      state: 'exited',
+      ended_reason: 'completed',
+    })
+    expect(settled.task.status).toBe('completed')
   })
 })
 

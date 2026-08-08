@@ -359,9 +359,10 @@ describe('WorkerInbox', () => {
     warnSpy.mockRestore()
   })
 
-  it('drain 之后 in-flight 条目返回hold_requeue：不把已终结化身的文本复活回队列', async () => {
+  it('drain 之后 in-flight durable 条目返回hold_requeue：不复活且结算 dead-letter', async () => {
     const inbox = new WorkerInbox('worker-1')
-    inbox.enqueue(makeItem('a'))
+    const settled = vi.fn()
+    inbox.enqueue(makeItem('a', { onSettled: settled }))
 
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
@@ -374,6 +375,7 @@ describe('WorkerInbox', () => {
     expect(inbox.drain()).toEqual([])
     release()
     await expect(flushPromise).resolves.toBe(0)
+    expect(settled).toHaveBeenCalledWith('dead_letter')
     expect(inbox.pending).toBe(0)
   })
 

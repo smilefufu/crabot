@@ -443,6 +443,24 @@ export interface ReconcileReport {
 
 const EMPTY_CAPABILITY_BUNDLE: CapabilityBundle = { skills: [], mcp_servers: [] }
 
+type InputAttempt =
+  | { readonly kind: 'exited'; readonly endedReason?: IncarnationEndReason }
+  | {
+      readonly kind: 'stalled'
+      readonly handle: IncarnationHandle
+      readonly controlState: NonNullable<IncarnationHandle['initial_input']>['control_state']
+      readonly report?: StateChangeReport
+      readonly delivery: InboxDeliveryResult
+    }
+  | {
+      readonly kind: 'delivered'
+      readonly handle: IncarnationHandle
+      readonly expectedStateChangeRevision?: number
+      readonly acceptedExit?: StateChangeReport
+    }
+
+type SettledInputAttempt = Exclude<InputAttempt, { readonly kind: 'exited' }>
+
 export class WorkerHarness {
   private readonly pendingBgNotifications = new Map<string, number>()
 
@@ -714,6 +732,87 @@ export class WorkerHarness {
     return queued
   }
 
+  private async attemptInput(
+    adapter: WorkerAdapter,
+    handle: IncarnationHandle,
+    text: string,
+    raw: boolean,
+  ): Promise<InputAttempt> {
+    const revisionKey = `${handle.worker_id}#${handle.impl}#${handle.seq}`
+    const stateChangeRevision = this.stateChangeRevisions.get(revisionKey) ?? 0
+    const inputOwnershipRevision = this.inputOwnershipRevision(handle.worker_id)
+    try {
+      await adapter.sendInput(handle, text, { raw })
+    } catch (error) {
+      if (error instanceof WorkerExitedError) {
+        return { kind: 'exited', endedReason: error.ended_reason }
+      }
+      if (error instanceof CliInputStallError) {
+        const isCurrent = (): boolean =>
+          this.inputOwnershipRevision(handle.worker_id) === inputOwnershipRevision
+        return {
+          kind: 'stalled',
+          handle,
+          controlState: error.control_state,
+          report: error.report,
+          delivery: {
+            action: raw || error.disposition === 'pending_in_ui' ? 'hold_consumed' : 'hold_requeue',
+            reason: error.disposition === 'pending_in_ui' ? 'input_pending' : 'waiting_action',
+            isCurrent,
+          },
+        }
+      }
+      throw error
+    }
+
+    if (handle.impl === 'builtin' || raw) return { kind: 'delivered', handle }
+    const cliAdapter = adapter as WorkerAdapter & {
+      takeAcceptedInputExit?: (h: IncarnationHandle) => StateChangeReport | undefined
+      takeUpdatedSessionRef?: (h: IncarnationHandle) => string | undefined
+    }
+    const sessionRef = cliAdapter.takeUpdatedSessionRef?.(handle)
+    const settledHandle = sessionRef ? { ...handle, session_ref: sessionRef } : handle
+    return {
+      kind: 'delivered',
+      handle: settledHandle,
+      expectedStateChangeRevision: stateChangeRevision,
+      acceptedExit: cliAdapter.takeAcceptedInputExit?.(settledHandle),
+    }
+  }
+
+  private async settleInputAttempt(
+    workerId: string,
+    text: string,
+    raw: boolean,
+    attempt: SettledInputAttempt,
+  ): Promise<InboxSettlement | InboxDeliveryResult> {
+    if (attempt.kind === 'stalled') {
+      if (attempt.delivery.isCurrent?.()) {
+        await this.recordCliInputResult(attempt.handle, attempt.controlState, attempt.report)
+      }
+      return attempt.delivery
+    }
+
+    if (attempt.acceptedExit) {
+      await this.recordCliInputResult(attempt.handle, 'exited', attempt.acceptedExit)
+    } else if (attempt.expectedStateChangeRevision !== undefined) {
+      await this.recordCliInputResult(
+        attempt.handle,
+        'running',
+        undefined,
+        attempt.expectedStateChangeRevision,
+      )
+    }
+    if (raw) {
+      const inbox = this.getInbox(workerId)
+      await inbox.settleConsumed(rawAbandonsComposer(text) ? 'dead_letter' : 'delivered')
+      inbox.release('waiting_action')
+      inbox.release('input_pending')
+    }
+    await this.appendEvent(workerId, attempt.handle.seq, 'input_sent', { text_len: text.length })
+    return 'delivered'
+  }
+
   private async flushInbox(workerId: string): Promise<void> {
     const inbox = this.getInbox(workerId)
     // 真正的投递不占用 harness 的 per-worker 锁(见文件头说明);inbox 自身的锁保证同一
@@ -743,54 +842,19 @@ export class WorkerHarness {
         impl: incarnation.impl as WorkerImplId,
         session_ref: incarnation.session_ref,
       }
-      const stateChangeRevision = this.stateChangeRevisions.get(`${handle.worker_id}#${handle.impl}#${handle.seq}`) ?? 0
-      const inputOwnershipRevision = this.inputOwnershipRevision(workerId)
-      try {
-        await adapter.sendInput(handle, item.text, { raw: item.raw })
-      } catch (err) {
-        // adapter 侧权威地判定化身已终态,即使台账的异步状态回调还没追上(见
-        // continueTerminalWorker 的 sourceSeq 核对注释)——同样转入透明接续,对
-        // sendToWorker 的调用方完全无感(不重新抛出)。
-        if (err instanceof WorkerExitedError) {
-          if (item.allow_terminal_continuation === false) return 'delivered'
-          return this.continueTerminalWorker(
-            workerId,
-            item.text,
-            incarnation.impl as WorkerImplId,
-            incarnation.seq,
-            item.raw,
-            err.ended_reason
-          )
-        }
-        if (err instanceof CliInputStallError) {
-          const isCurrent = (): boolean => this.inputOwnershipRevision(workerId) === inputOwnershipRevision
-          if (isCurrent()) await this.recordCliInputResult(handle, err.control_state, err.report)
-          return {
-            action: item.raw || err.disposition === 'pending_in_ui' ? 'hold_consumed' : 'hold_requeue',
-            reason: err.disposition === 'pending_in_ui' ? 'input_pending' : 'waiting_action',
-            isCurrent,
-          } satisfies InboxDeliveryResult
-        }
-        throw err
+      const attempt = await this.attemptInput(adapter, handle, item.text, item.raw)
+      if (attempt.kind === 'exited') {
+        if (item.allow_terminal_continuation === false) return 'delivered'
+        return this.continueTerminalWorker(
+          workerId,
+          item.text,
+          incarnation.impl as WorkerImplId,
+          incarnation.seq,
+          item.raw,
+          attempt.endedReason,
+        )
       }
-      if (handle.impl !== 'builtin' && !item.raw) {
-        const cliAdapter = adapter as WorkerAdapter & {
-          takeAcceptedInputExit?: (h: IncarnationHandle) => StateChangeReport | undefined
-          takeUpdatedSessionRef?: (h: IncarnationHandle) => string | undefined
-        }
-        const sessionRef = cliAdapter.takeUpdatedSessionRef?.(handle)
-        const settledHandle = sessionRef ? { ...handle, session_ref: sessionRef } : handle
-        const acceptedExit = cliAdapter.takeAcceptedInputExit?.(settledHandle)
-        if (acceptedExit) await this.recordCliInputResult(settledHandle, 'exited', acceptedExit)
-        else await this.recordCliInputResult(settledHandle, 'running', undefined, stateChangeRevision)
-      }
-      if (item.raw) {
-        await inbox.settleConsumed(rawAbandonsComposer(item.text) ? 'dead_letter' : 'delivered')
-        inbox.release('waiting_action')
-        inbox.release('input_pending')
-      }
-      await this.appendEvent(workerId, handle.seq, 'input_sent', { text_len: item.text.length })
-      return 'delivered'
+      return this.settleInputAttempt(workerId, item.text, item.raw, attempt)
     })
   }
 
@@ -885,8 +949,8 @@ export class WorkerHarness {
      * 台账已经有终态记录,reviveIncarnation 的回填段本就不会触发)。
      */
     sourceEndReason?: IncarnationEndReason
-  ): Promise<InboxSettlement> {
-    return this.withLock(workerId, async () => {
+  ): Promise<InboxSettlement | InboxDeliveryResult> {
+    const result = await this.withLock(workerId, async (): Promise<InboxSettlement | { attempt: SettledInputAttempt }> => {
       let curImpl = sourceImpl
       let curSeq = sourceSeq
       // 与 (curImpl, curSeq) 同步前进:每次改换源化身,这个原因也要跟着换成新源的,
@@ -941,22 +1005,18 @@ export class WorkerHarness {
             impl: mainline.impl as WorkerImplId,
             session_ref: mainline.session_ref,
           }
-          try {
-            await adapter.sendInput(handle, text, { raw })
-          } catch (err) {
+          const attempt = await this.attemptInput(adapter, handle, text, raw)
+          if (attempt.kind === 'exited') {
             // adapter 侧权威判定这个"看起来存活"的新主线其实也已经终态(台账的异步状态
-            // 回调还没追上)——同样不出锁,把它当作新的源头回到循环顶部转接续,而不是把
-            // 这个错误当成"补送失败"直接抛给调用方。
-            if (err instanceof WorkerExitedError) {
-              curImpl = mainline.impl as WorkerImplId
-              curSeq = mainline.seq
-              curEndReason = err.ended_reason
-              continue
-            }
-            throw err
+            // 回调还没追上)——同样不出锁,把它当作新的源头回到循环顶部转接续。
+            curImpl = mainline.impl as WorkerImplId
+            curSeq = mainline.seq
+            curEndReason = attempt.endedReason
+            continue
           }
-          await this.appendEvent(workerId, handle.seq, 'input_sent', { text_len: text.length })
-          return 'delivered'
+          // CLI stall / accepted-exit / 延后 session_ref 必须与普通 flush 路径共用结算；
+          // 结算可能重新获取 worker lock，所以先把 attempt 带出当前临界区。
+          return { attempt }
         }
 
         // 主线就是当前源:走接续(revive/handoff)。
@@ -995,6 +1055,8 @@ export class WorkerHarness {
           `for worker ${workerId}; mainline kept changing/exiting faster than this delivery could settle on a source`
       )
     })
+    if (typeof result === 'string') return result
+    return this.settleInputAttempt(workerId, text, raw, result.attempt)
   }
 
   /** capabilities().revive===true 分支:adapter.resume 拉起新化身,session 满保真接续。 */
@@ -1949,18 +2011,36 @@ export class WorkerHarness {
     report?: StateChangeReport,
     expectedStateChangeRevision?: number,
   ): Promise<void> {
-    if (expectedStateChangeRevision !== undefined) {
-      const revisionKey = `${h.worker_id}#${h.impl}#${h.seq}`
-      if ((this.stateChangeRevisions.get(revisionKey) ?? 0) !== expectedStateChangeRevision) return
-    }
     const external = cliContractState(controlState)
+    let stateCommitted = false
     let committedStatus: TaskStatus | undefined
     await this.withLock(h.worker_id, async () => {
       const found = await this.deps.ledger.findWorker(h.worker_id)
       if (!found) return
       const { worker, dialogObjectId } = found
       const target = findIncarnation(worker, h.impl, h.seq)
-      if (!target || target.state === 'exited' || isTerminalStatus(worker.task.status)) return
+      if (!target) return
+
+      const revisionKey = `${h.worker_id}#${h.impl}#${h.seq}`
+      const revisionMatches = expectedStateChangeRevision === undefined ||
+        (this.stateChangeRevisions.get(revisionKey) ?? 0) === expectedStateChangeRevision
+      if (!revisionMatches || target.state === 'exited' || isTerminalStatus(worker.task.status)) {
+        // A concurrent callback owns the state transition, but session discovery is an independent
+        // monotonic fact. Preserve a newly discovered non-empty ref even when synthetic running is stale.
+        if (h.session_ref && target.session_ref !== h.session_ref) {
+          await this.deps.ledger.upsertWorker(dialogObjectId, h.worker_id, (prev) => {
+            if (!prev) return undefined
+            return {
+              ...prev,
+              incarnations: patchIncarnationBySeq(prev.incarnations, h.impl, h.seq, {
+                session_ref: h.session_ref,
+              }),
+              updated_at: this.deps.now(),
+            }
+          })
+        }
+        return
+      }
 
       let desired: TaskStatus
       if (external === 'running') desired = 'running'
@@ -1979,13 +2059,15 @@ export class WorkerHarness {
         })
         const incarnations = patchIncarnationBySeq(prev.incarnations, h.impl, h.seq, {
           state: external,
-          session_ref: h.session_ref,
+          session_ref: h.session_ref || target.session_ref,
           ...(external === 'exited' ? { ended_at: now, ended_reason: report?.endReason ?? 'crashed' } : {}),
         })
         return { ...prev, task, incarnations, updated_at: now }
       })
       committedStatus = committed?.task.status
+      stateCommitted = committed !== undefined
     })
+    if (!stateCommitted) return
     if (external === 'exited') {
       this.bumpInputOwnershipRevision(h.worker_id)
       const inbox = this.getInbox(h.worker_id)
