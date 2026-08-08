@@ -7,13 +7,9 @@
  * 在 caps.fork 为假时只断言 fork() reject,不要求它是特定错误类型——实测 codex adapter
  * 的 fork() 始终抛 CapabilityNotSupportedError,符合契约(细节见报告)。
  *
- * makeSpec 的同步签名与 scriptFile 中转方案,与 contract-claude-code.test.ts 同构,注释见
- * 该文件头。session 发现(spawn 轮询 rollout 文件拿真实 session_id)与本契约套件无关——
- * 不提供 MOCK_CLI_ROLLOUT_FILE,固定走"轮询超时降级为本地占位 uuid"路径,占位 uuid
- * 本身仍是合法 UUID,不影响 resume()/fork() 的 session_ref 契约测试;sessionDiscoveryTimeoutMs
- * 调小避免拖慢每个 spawn。
- *
- * 无 tmux 的环境下整个文件 skip(与 codex-adapter.test.ts 的 skipIf 守卫同一判断)。
+ * makeSpec 的同步签名与 scriptFile 中转方案,与 contract-claude-code.test.ts 同构。fixture
+ * 提供真实 rollout 文件,因为 placeholder session 按当前契约明确不可 resume。
+ * * 无 tmux 的环境下整个文件 skip(与 codex-adapter.test.ts 的 skipIf 守卫同一判断)。
  */
 import { describe, it } from 'vitest'
 import { execFileSync } from 'node:child_process'
@@ -94,7 +90,8 @@ async function makeCodexFixture(): Promise<ContractFixture> {
 
   const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
   const stopHookCmd = channel.hookCommand('stop')
-  const codexBin = `env MOCK_CLI_SCRIPT_FILE=${shQuote(scriptFile)} MOCK_CLI_STOP_HOOK_CMD=${shQuote(stopHookCmd)} node ${shQuote(MOCK_CLI)}`
+  const rolloutFile = path.join(workspaceRoot, '.codex', 'sessions', 'rollout-2026-08-08T00-00-00-11111111-1111-4111-8111-111111111111.jsonl')
+  const codexBin = `env MOCK_CLI_SCRIPT_FILE=${shQuote(scriptFile)} MOCK_CLI_STOP_HOOK_CMD=${shQuote(stopHookCmd)} MOCK_CLI_ROLLOUT_FILE=${shQuote(rolloutFile)} node ${shQuote(MOCK_CLI)}`
 
   const tmux = new TmuxDriver()
   const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin, codexHomeSource, sessionDiscoveryTimeoutMs: 300 })

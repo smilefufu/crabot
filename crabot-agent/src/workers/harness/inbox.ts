@@ -5,9 +5,9 @@
  * 投递前把关,不属于本类职责);安全态(running / idle)即投,不安全态(provision 中、
  * 模态弹窗、化身交接间隙、僵尸态)暂扣,恢复后按序补投。
  *
- * hold 选择"布尔"而非计数:harness 侧的暂扣场景(provision / 化身交接)是互斥的单一状态,
- * 不存在"多个理由同时暂扣、需要逐个撤销"的嵌套需求;若未来出现需要嵌套暂扣的场景,再改
- * 计数并补测,不在此提前引入复杂度。
+ * hold 使用理由集合：`waiting_action` / `input_pending` 只允许显式 raw 控制键旁路；
+ * provision / handoff 等其它理由属于 exclusive hold，连 raw 也阻断。理由可独立置位和释放，
+ * 运输层 hold 不作为 CLI control state 的第二维持久化。
  *
  * flush 并发安全:用 AsyncMutex 串行化同一信箱的 flush 调用,避免两轮并发 flush 重复投递
  * 同一条(P1 builtin sendInput 双发竞态同型问题)。deliver 抛错时该条留在队首、停止本轮、
@@ -33,6 +33,11 @@ export interface InboxItem {
   readonly onSettled?: (settlement: InboxSettlement) => void | Promise<void>
   /** Prevent a producer retry from enqueueing the same durable item twice in one process. */
   readonly dedupe_key?: string
+}
+
+export interface InboxDeliveryResult {
+  readonly action: 'hold_requeue' | 'hold_consumed'
+  readonly reason: 'waiting_action' | 'input_pending'
 }
 
 export class WorkerInbox {
@@ -63,6 +68,12 @@ export class WorkerInbox {
     }
     this.queue.push(item)
     return true
+  }
+
+  /** 入队首;仅用于首投not_pasted等已经明确未进入pane的所有权恢复。 */
+  enqueueFront(item: InboxItem): number {
+    this.queue.unshift(item)
+    return this.queue.length
   }
 
   /** Mark delivery unsafe. waiting_action/input_pending permit an explicit raw control key. */
@@ -101,7 +112,9 @@ export class WorkerInbox {
    * pending:返回队列中的待投条数。注意:在 await deliver() 期间,该条已从 queue
    * 取出(shift),所以 pending 不计入 in-flight 条目。
    */
-  async flush(deliver: (item: InboxItem) => Promise<InboxSettlement | void>): Promise<number> {
+  async flush(
+    deliver: (item: InboxItem) => Promise<InboxSettlement | InboxDeliveryResult | void>,
+  ): Promise<number> {
     return this.mutex.run(async () => {
       let delivered = 0
       while (this.queue.length > 0) {
@@ -111,10 +124,17 @@ export class WorkerInbox {
         const [item] = this.queue.splice(index, 1)
         this.inFlight = item
         try {
-          const settlement = await deliver(item)
+          const result = await deliver(item)
           this.inFlight = null
+          if (typeof result === 'object') {
+            this.hold(result.reason)
+            if (result.action === 'hold_requeue') {
+              if (this.drainedInFlight !== item) this.queue.unshift(item)
+            } else delivered++
+            break
+          }
           delivered++
-          await this.settle(item, settlement ?? 'delivered')
+          await this.settle(item, typeof result === 'string' ? result : 'delivered')
         } catch (err) {
           this.inFlight = null
           if (this.drainedInFlight === item) {

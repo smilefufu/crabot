@@ -1216,3 +1216,11 @@ Module Manager (port 19000)
 - 已删除 legacy schedule RPC/recovery RPC 与等待工具；`process_message` 仅保留 admin_chat，媒体下载改为独立 manager 通知。
 - memory graph rebuild 改为 manager-native `trigger_schedule`，不再创建无法观察的 legacy pending task。
 - 当前定向构建与测试通过；全量回归及 PR review 尚待完成。
+
+## 2026-08-08 — CLI 交互输入提交（实施完成，待 PR）
+
+- Claude Code / Codex 已迁移到单层 `running / waiting_text / waiting_action / exited` 控制状态；首投所有权由 `initial_input` 明确结算。
+- 输入提交实现同一 pane 内单次 paste、证据化 Enter（最多补一次）；modal/pending 由 raw 受控清障，普通 WorkerInbox FIFO 与 bg-shell 通知语义保持不变。
+- Codex 0.146 的 rollout 改为首条普通输入接受后发现；startup stall 经 raw 恢复时不再提前固化占位 session。
+- 定向回归 286 tests 通过，TypeScript build 通过；Claude Code 2.1.226 / Codex 0.146.0 真实 tmux 黑盒验证 spawn、resume、Claude steering 和 Codex pending→raw Tab queue。
+- 全量 2555 tests 中 2535 通过；剩余 18 个失败均位于未修改的 audit / inbound / workspace path 基线范围。下一步：最终 review、提交分支并创建 PR。
