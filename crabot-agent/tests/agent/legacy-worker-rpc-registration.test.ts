@@ -14,6 +14,7 @@ describe('legacy worker lifecycle RPC compatibility', () => {
     expect(registered).toContain('abort_worker')
     expect(registered).not.toContain('execute_task')
     expect(registered).not.toContain('deliver_human_response')
+    expect(registered).not.toContain('start_task')
   })
 
   it('cancel and abort handlers delegate to the live legacy worker owner', () => {

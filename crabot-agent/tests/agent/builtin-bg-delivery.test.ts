@@ -18,6 +18,7 @@ describe('builtin background shell exit routing', () => {
     const dispatch = vi.fn().mockResolvedValue(undefined)
     const legacy = vi.fn().mockResolvedValue(undefined)
     handler.builtinShellExitDispatcher = dispatch
+    handler.workerShellExitRoutingReady = true
     handler.deliverShellExitNotification = legacy
 
     await handler.routeShellExit(shellInfo('bg-worker', 'worker-1'))
@@ -26,6 +27,23 @@ describe('builtin background shell exit routing', () => {
 
     await handler.routeShellExit(shellInfo('bg-legacy'))
     expect(legacy).toHaveBeenCalledWith(expect.objectContaining({ entity_id: 'bg-legacy' }))
+  })
+
+  it('holds recovered worker exits until reconciliation release, then dispatches without unrelated input', async () => {
+    const handler = Object.create(AgentHandler.prototype) as any
+    handler.workerShellExitRoutingReady = false
+    handler.queuedWorkerShellExits = []
+    const dispatch = vi.fn().mockResolvedValue(undefined)
+    handler.builtinShellExitDispatcher = dispatch
+    handler.deliverShellExitNotification = vi.fn()
+
+    await handler.routeShellExit(shellInfo('bg-recovered', 'worker-1'))
+    expect(dispatch).not.toHaveBeenCalled()
+    expect(handler.queuedWorkerShellExits).toHaveLength(1)
+
+    await handler.releaseRecoveredWorkerShellExits()
+    expect(dispatch).toHaveBeenCalledWith('worker-1', expect.objectContaining({ entity_id: 'bg-recovered' }))
+    expect(handler.queuedWorkerShellExits).toHaveLength(0)
   })
 
   it('marks pending synchronously, serializes same-worker delivery, and clears each mark exactly once', async () => {

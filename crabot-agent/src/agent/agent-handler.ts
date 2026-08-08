@@ -579,6 +579,22 @@ export class AgentHandler {
     exit_code: number
     runtime_ms?: number
   }) => Promise<void>
+  /**
+   * Recovered worker-owned shells must wait for harness reconciliation: before
+   * `scanOrphans()` a restarted builtin adapter has no resident incarnation and
+   * WorkerInbox would retain the notification at its head until unrelated input.
+   */
+  private workerShellExitRoutingReady = false
+  private readonly queuedWorkerShellExits: Array<{
+    entity_id: string
+    command: string
+    status: 'completed' | 'failed' | 'killed'
+    exit_code: number
+    spawned_by_task_id: string
+    owner_friend_id?: string
+    worker_id?: string
+    runtime_ms?: number
+  }> = []
   /** Interval handle for periodic 24h GC of dead entities */
   private gcIntervalHandle?: NodeJS.Timeout
 
@@ -699,6 +715,18 @@ export class AgentHandler {
     this.builtinShellExitDispatcher = dispatcher
   }
 
+  /**
+   * Called after builtin orphan scan and harness reconciliation complete. This
+   * releases recovered worker-owned shell exits without waiting on agent startup.
+   */
+  async releaseRecoveredWorkerShellExits(): Promise<void> {
+    this.workerShellExitRoutingReady = true
+    while (this.queuedWorkerShellExits.length > 0) {
+      const info = this.queuedWorkerShellExits.shift()!
+      await this.routeShellExit(info)
+    }
+  }
+
   private async routeShellExit(info: {
     entity_id: string
     command: string
@@ -709,6 +737,10 @@ export class AgentHandler {
     worker_id?: string
     runtime_ms?: number
   }): Promise<void> {
+    if (info.worker_id && !this.workerShellExitRoutingReady) {
+      this.queuedWorkerShellExits.push(info)
+      return
+    }
     if (info.worker_id && this.builtinShellExitDispatcher) {
       await this.builtinShellExitDispatcher(info.worker_id, info)
       return

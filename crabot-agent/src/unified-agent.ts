@@ -1056,7 +1056,6 @@ export class UnifiedAgent extends ModuleBase {
   private registerMethods(): void {
     // 编排接口
     this.registerMethod('process_message', this.handleProcessMessage.bind(this))
-    this.registerMethod('start_task', this.handleStartTask.bind(this))
     this.registerMethod('resume_task', this.handleResumeTask.bind(this))
     this.registerMethod('resume_task_with_supplement', this.handleResumeTaskWithSupplement.bind(this))
     this.registerMethod('finalize_orphan_checkpoints', this.handleFinalizeOrphanCheckpoints.bind(this))
@@ -1912,73 +1911,6 @@ export class UnifiedAgent extends ModuleBase {
     // **前置决策器动作分类**的投影，v3 没有等价物：派不派活由 manager 在 episode 内自己
     // 决定，任务状态改由 `agent.task_status_changed` 事件推给 admin（§9.2）。
     return { decision_types: result.repliedToHuman ? ['direct_reply'] : [] }
-  }
-
-  /**
-   * 启动 recovery 任务（admin self-healing 在 agent 重启后 RPC 推过来）。
-   *
-   * task 已由 admin 端的 runSelfHealingForAgentRestart → handleCreateTask 建好
-   * （status=pending, tags=['recovery']），这里只负责把它接进 worker loop——
-   * 复用 scheduledTaskRunner 因为 recovery 跟 scheduled 性质相同：系统派的、
-   * 无 channel/session 上下文、不接受 supplement。
-   *
-   * 历史 bug：admin 建完 recovery task 后只 publish 了 `admin.task_created` 事件，
-   * 但 agent 没订阅这个事件，task 永远停留在 pending → 自愈机制半失败。本 RPC 是
-   * schedule 路径的同款 hand-off：admin 直接 RPC push agent，跟事件总线无关。
-   */
-  /**
-   * 按 task_id 派发任意一条 admin pending 任务到后台 worker 执行。
-   * 与 recovery / 重建图谱等 admin 触发的一次性任务共用此入口——逻辑不依赖任何
-   * 「recovery」语义，只是 fetch task → 装配 scheduled 上下文 → executeScheduledTaskInBackground
-   * （与每日反思走的同一条执行引擎）。RPC 名 start_task；start_recovery_task 为兼容别名。
-   */
-  private async handleStartTask(params: { task_id: string }): Promise<{ task_id: string; assigned_worker: ModuleId }> {
-    const { task_id } = params
-
-    try {
-      const adminPort = await this.getAdminPort()
-
-      const { task } = await this.rpcClient.call<
-        { task_id: string },
-        {
-          task: {
-            id: string
-            title: string
-            priority: string
-            plan?: string
-            task_type?: string
-            tags?: string[]
-            messages?: Array<{ content: string }>
-          }
-        }
-      >(adminPort, 'get_task', { task_id }, this.config.moduleId)
-
-      console.log(
-        `[${this.config.moduleId}] Waking system task manager for ${task.id}`
-      )
-
-      // 任务指令在 messages（initial_message → messages[0]）。scheduled-task-runner 用
-      // task.description 拼 trigger 文本，故把首条消息内容透传为 description，否则 worker 只见标题。
-      const description = task.messages?.[0]?.content ?? ''
-
-      const { registry } = this.requireManagerStack()
-      void registry.routeSchedule({
-        scheduleId: task.id,
-        title: task.title,
-        description,
-      }).catch((error) => {
-        console.error(`[${this.config.moduleId}] system task manager wake failed (${task.id}):`, error)
-      })
-
-      return { task_id: task.id, assigned_worker: 'manager' as ModuleId }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      console.error(
-        `[${this.config.moduleId}] Failed to start task ${task_id}:`,
-        message
-      )
-      throw new Error(`Failed to start task: ${message}`)
-    }
   }
 
   /**
@@ -3301,7 +3233,10 @@ export class UnifiedAgent extends ModuleBase {
     const stack = this.managerStack
     if (!stack) return
     void reconcileManagerStack(stack)
-      .then((report) => {
+      .then(async (report) => {
+        // Recovered builtin shell exits must not enter WorkerInbox until scanOrphans
+        // and reconciliation have made their incarnation state authoritative.
+        await this.agentHandler?.releaseRecoveredWorkerShellExits()
         // 空台账（现网常态）不打日志，避免每次启动都刷一行没有信息量的 0/0/0。
         if (report.revived.length === 0 && report.failed.length === 0) return
         console.log(
