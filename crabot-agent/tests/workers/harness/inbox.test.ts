@@ -198,6 +198,30 @@ describe('WorkerInbox', () => {
     expect(inbox.drain().map((i) => i.text)).toEqual(['b', 'c'])
   })
 
+  it('waiting_action hold lets the earliest raw control item bypass ordinary FIFO items', async () => {
+    const inbox = new WorkerInbox('worker-1')
+    inbox.enqueue(makeItem('normal-a'))
+    inbox.enqueue(makeItem('normal-b'))
+    inbox.enqueue(makeItem('Enter', { raw: true }))
+    inbox.hold('waiting_action')
+    const delivered: string[] = []
+    await inbox.flush(async (item) => { delivered.push(item.text) })
+    expect(delivered).toEqual(['Enter'])
+    expect(inbox.pending).toBe(2)
+    inbox.release('waiting_action')
+    await inbox.flush(async (item) => { delivered.push(item.text) })
+    expect(delivered).toEqual(['Enter', 'normal-a', 'normal-b'])
+  })
+
+  it('an exclusive hold keeps raw controls out of the pane', async () => {
+    const inbox = new WorkerInbox('worker-1')
+    inbox.enqueue(makeItem('Enter', { raw: true }))
+    inbox.hold('provisioning')
+    const delivered: string[] = []
+    await inbox.flush(async (item) => { delivered.push(item.text) })
+    expect(delivered).toEqual([])
+  })
+
   it('drain 在 flush 卡在 deliver 期间调用,不把 in-flight 条目重复计入 dead-letter', async () => {
     // PoC(评审复现):flush 卡在 deliver('a') 时若 drain 直接 this.queue = [] 重新赋值,
     // 会把正在被投递的 'a' 也当作"未投递"一并 drain 出去;'a' 随后投递成功,导致它

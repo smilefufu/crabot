@@ -95,7 +95,7 @@ import { homedir } from 'os'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { TmuxDriver } from '../tmux/driver.js'
-import { DEFAULT_PASTE_READY_TIMEOUT_MS, describeDeliveryStall, describeStartupStall, readOutputTail, waitForPasteReady } from '../tmux/paste-ready.js'
+import { DEFAULT_PASTE_READY_TIMEOUT_MS, describeStartupStall, readOutputTail, waitForPasteReady } from '../tmux/paste-ready.js'
 import { CliEventChannel, EVENTS_FILE_ENV } from '../cli-events.js'
 import { OutputLog } from '../output-log.js'
 import { decodeTerminalOutput } from '../terminal-output.js'
@@ -493,37 +493,9 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // killed,这不是用户发起的 kill),spawn 仍然 reject 把失败如实报给调用方。
     await this.sendTextOrKill(runtime, handle, spec.prompt)
 
-    // 投递验证:就绪握手只证明"paste 会被包裹",不证明"没有启动期模态框"——2026-08-06 生产
-    // 实证 cc 在 \e[?2004h 之后异步弹出 MCP 信任窗,首条 paste 被弹窗消费,worker 静默停在空
-    // composer 直到 30 分钟巡检兜底。这里用结果说话:轮询 cc 的会话记录(session jsonl)直到
-    // 出现这条 user 消息。验证失败 → 判定被模态框吞掉:Esc 取消残留弹窗、重投一次完整任务、
-    // 再验证;仍失败 → 走与 pasteReady 超时同一收场(reportStartupStall 暂扣),绝不静默留下
-    // running。
-    if (this.promptDeliveryTimeoutMs > 0) {
-      // cc 落盘的 session 记录用 workspace 的 **realpath** slug(provision 段实证:逻辑路径
-      // "实测完全无效",~/.claude.json 的 project key 全是 realpath)——软链分量(/tmp、被软链的
-      // DATA_DIR)会导致验证读错路径、对健康会话假阴性。spawn 时 workspace 已存在,realpath 必成功。
-      const realRoot = await fs.realpath(spec.workspace.root)
-      const sessionFile = join(this.claudeProjectsDir, projectSlug(realRoot), `${sessionId}.jsonl`)
-      if (!(await verifyPromptDelivered(sessionFile, this.promptDeliveryTimeoutMs))) {
-        // 取消残留弹窗必须发真正的 Escape 键(sendKeys),不能 sendText——sendText 走
-        // paste-buffer 粘贴,ESC 只会作为文本字符进 composer,真正作用于弹窗的是粘贴结尾的
-        // Enter,可能激活弹窗默认选项(对 MCP 信任窗等于静默授权信任,与 provision 的
-        // enabledMcpjsonServers 授权边界相抵)。
-        await this.sendKeysOrKill(runtime, handle, ['Escape'])
-        await this.sendTextOrKill(runtime, handle, spec.prompt)
-        if (!(await verifyPromptDelivered(sessionFile, this.promptDeliveryTimeoutMs))) {
-          await this.reportStartupStall(runtime, handle, outputFile, {
-            note: describeDeliveryStall({
-              impl: 'claude-code',
-              timeoutMs: this.promptDeliveryTimeoutMs,
-              tail: decodeTerminalOutput(await readOutputTail(outputFile)),
-            }),
-          })
-          return handle
-        }
-      }
-    }
+    // 就绪握手只保证 bracketed paste；当前版本不再以 Escape+重贴猜测 modal 是否
+    // 吞了文本。重复 paste 会把仍在 composer 的任务文本直接追加，违反 at-most-once。
+    // 后续受控输入事务会以 pane probe/receipt 结算，native JSONL 仅作诊断。
 
     return handle
   }

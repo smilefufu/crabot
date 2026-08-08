@@ -877,7 +877,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — prompt 投递验证(2026-
     await adapter.kill(h)
   })
 
-  it('弹窗吞掉首条 prompt 时自动 Esc 清理并重投,第二次真正落地(不落 stall)', async () => {
+  it('首条 prompt 未落 session 时不自动 Escape 或重贴', async () => {
     const tmux = new CountingTmux()
     const { adapter, workerId } = await deliveryAdapter([{ output: '任务输出', emitStop: true }], {
       dropSubmitCount: 1,
@@ -888,21 +888,16 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — prompt 投递验证(2026-
     // 关键断言:验证通过,没有走 startup stall 路径;state 迁移是事件驱动的,不在此断言。
     const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
     expect(meta.startup_stalled).toBeUndefined()
-    // Esc 清弹窗必须走 sendKeys(真正发 Escape 键),不能 sendText——sendText 是 paste-buffer
-    // 粘贴文本,粘贴结尾的 Enter 会激活弹窗默认选项(对 MCP 信任窗等于静默授权,与 provision
-    // 的 enabledMcpjsonServers 授权边界相抵)。这条断言钉住实现,改回 sendText 立即挂。
-    expect(tmux.calls.sendKeys).toBe(1)
-    expect(tmux.calls.sendText).toBe(2) // 首投 + 重投
-    // 会话记录里只有重投后的那一条 user 消息(被吞的首条没有落账)
+    // 自动Escape/重贴会污染非空composer；本期只投一次，后续由输入surface门控接管。
+    expect(tmux.calls.sendKeys).toBe(0)
+    expect(tmux.calls.sendText).toBe(1)
     const sessionFile = path.join(claudeProjectsDir, await wsSlug(), `${h.session_ref}.jsonl`)
-    const raw = await fs.readFile(sessionFile, 'utf-8')
-    const userLines = raw.split('\n').filter((l) => l.includes('"type":"user"'))
-    expect(userLines).toHaveLength(1)
+    await expect(fs.readFile(sessionFile, 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' })
 
     await adapter.kill(h)
   })
 
-  it('弹窗持续存在(两次投递都被吞)→ 走 startup stall 暂扣,不静默留下 running', async () => {
+  it('持续未落 session 时不自动 Escape 或重贴', async () => {
     const reports: Array<{ state: string; outputTail?: string }> = []
     const { adapter, workerId } = await deliveryAdapter([{ output: '永远不会输出' }], {
       dropSubmitCount: 10,
@@ -910,15 +905,11 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — prompt 投递验证(2026-
     })
     const h = await adapter.spawn({ worker_id: workerId, prompt: '完整任务', workspace: { root: workspaceRoot } })
 
-    await waitForIdle(adapter, h)
+    // session receipt 缺失不再触发猜测性自动恢复；保持存活会话等待显式控制。
+    expect(reports.find((r) => r.state === 'idle')).toBeUndefined()
     const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
-    expect(meta.state).toBe('idle')
-    expect(meta.startup_stalled).toBe(true)
-    // 暂扣正文必须如实描述投递验证失败(握手已通过、prompt 被吞),不能复用"未就绪/一个字符
-    // 都没投递"的失实描述——否则 manager 按错的现场做决策。
-    const idleReport = reports.find((r) => r.state === 'idle')
-    expect(idleReport?.outputTail).toContain('没有出现在会话记录')
-    expect(idleReport?.outputTail).toContain('自动按 Esc 并重投一次')
+    expect(meta.state).toBe('running')
+    await adapter.kill(h)
   })
 })
 

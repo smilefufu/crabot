@@ -4,7 +4,7 @@
  * to ensure consistent error handling and instanceof checks across implementations.
  */
 
-import type { IncarnationEndReason } from './types'
+import type { IncarnationEndReason, InitialInputDisposition, CliControlState, StateChangeReport } from './types'
 
 /** Raised when sendInput is called on an incarnation that has already exited. */
 export class WorkerExitedError extends Error {
@@ -23,6 +23,19 @@ export class WorkerExitedError extends Error {
   ) {
     super(`worker ${worker_id}#${seq} has exited`)
     this.name = 'WorkerExitedError'
+  }
+}
+
+
+/** A CLI input surface prevented a safe automatic commit. The harness owns queue settlement. */
+export class CliInputStallError extends Error {
+  constructor(
+    readonly disposition: Exclude<InitialInputDisposition, 'accepted'>,
+    readonly control_state: CliControlState['kind'],
+    readonly report?: StateChangeReport,
+  ) {
+    super(`CLI input stalled (${disposition}, ${control_state})`)
+    this.name = 'CliInputStallError'
   }
 }
 

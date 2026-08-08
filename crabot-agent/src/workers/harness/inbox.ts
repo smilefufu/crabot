@@ -37,7 +37,7 @@ export interface InboxItem {
 
 export class WorkerInbox {
   private queue: InboxItem[] = []
-  private _held = false
+  private readonly holds = new Set<string>()
   /** drain 当刻正在投递的 in-flight 条目;该条目投递失败时仅告警丢弃,post-drain 的条目失败走正常语义。 */
   private drainedInFlight: InboxItem | null = null
   /** flush 正在投递、已从 queue 取出但尚未结算成败的条目;drain 不把它计入结果。 */
@@ -65,17 +65,22 @@ export class WorkerInbox {
     return true
   }
 
-  /** 标记不安全(如 provision/交接中),期间 flush 不投递 */
-  hold(_reason: string): void {
-    this._held = true
+  /** Mark delivery unsafe. waiting_action/input_pending permit an explicit raw control key. */
+  hold(reason: string): void {
+    this.holds.add(reason)
   }
 
-  release(): void {
-    this._held = false
+  release(reason?: string): void {
+    if (reason) this.holds.delete(reason)
+    else this.holds.clear()
   }
 
   get held(): boolean {
-    return this._held
+    return this.holds.size > 0
+  }
+
+  private get rawBypassOnly(): boolean {
+    return this.holds.size > 0 && [...this.holds].every((reason) => reason === 'waiting_action' || reason === 'input_pending')
   }
 
   get pending(): number {
@@ -99,8 +104,11 @@ export class WorkerInbox {
   async flush(deliver: (item: InboxItem) => Promise<InboxSettlement | void>): Promise<number> {
     return this.mutex.run(async () => {
       let delivered = 0
-      while (this.queue.length > 0 && !this._held) {
-        const item = this.queue.shift()!
+      while (this.queue.length > 0) {
+        if (this.held && !this.rawBypassOnly) break
+        const index = this.held ? this.queue.findIndex((candidate) => candidate.raw) : 0
+        if (index < 0) break
+        const [item] = this.queue.splice(index, 1)
         this.inFlight = item
         try {
           const settlement = await deliver(item)

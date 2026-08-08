@@ -25,7 +25,7 @@ describe('CliEventChannel', () => {
     const channel = new CliEventChannel(filePath)
     const cmd = channel.hookCommand('stop')
 
-    await execFileAsync('/bin/bash', ['-c', cmd])
+    await execFileAsync('/bin/bash', ['-c', `(${cmd}) </dev/null`])
 
     const events = await channel.readAll()
     expect(events).toHaveLength(1)
@@ -39,11 +39,19 @@ describe('CliEventChannel', () => {
   it('hookCommand 对不同 kind 各自产出可解析的独立事件', async () => {
     const channel = new CliEventChannel(filePath)
 
-    await execFileAsync('/bin/bash', ['-c', channel.hookCommand('notification')])
-    await execFileAsync('/bin/bash', ['-c', channel.hookCommand('session_start')])
+    await execFileAsync('/bin/bash', ['-c', `(${channel.hookCommand('notification')}) </dev/null`])
+    await execFileAsync('/bin/bash', ['-c', `(${channel.hookCommand('session_start')}) </dev/null`])
 
     const events = await channel.readAll()
     expect(events.map((e) => e.kind)).toEqual(['notification', 'session_start'])
+  })
+
+  it('hookCommand keeps a JSON stdin payload as raw', async () => {
+    const channel = new CliEventChannel(filePath)
+    const payload = '{"notification_type":"permission_prompt","message":"needs permission"}'
+    const quoted = `'${payload.replace(/'/g, `'\\''`)}'`
+    await execFileAsync('/bin/bash', ['-c', `printf '%s' ${quoted} | (${channel.hookCommand('notification')})`])
+    expect((await channel.readAll())[0].raw).toEqual(JSON.parse(payload))
   })
 
   it('readAll 对不存在的文件返回空数组', async () => {
