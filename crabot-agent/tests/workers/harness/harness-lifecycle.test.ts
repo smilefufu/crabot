@@ -657,6 +657,18 @@ describe('WorkerHarness.sendToWorker', () => {
     expect(fake.sendInputCalls[0].opts).toEqual({ raw: true })
   })
 
+  it('sendToActiveWorker 不复活 terminal task', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    await expect(harness.sendToActiveWorker(worker.worker_id, '反馈')).resolves.toBe(true)
+    expect(fake.sendInputCalls.at(-1)?.text).toBe('反馈')
+
+    await harness.killWorker(worker.worker_id)
+    fake.sendInputCalls.length = 0
+    await expect(harness.sendToActiveWorker(worker.worker_id, '迟到反馈')).resolves.toBe(false)
+    expect(fake.sendInputCalls).toHaveLength(0)
+  })
+
   it('不存在的 worker_id → WorkerNotFoundError', async () => {
     const { harness } = await makeHarness()
     await expect(harness.sendToWorker('w-does-not-exist', 'hi')).rejects.toThrow(WorkerNotFoundError)

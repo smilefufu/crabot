@@ -2358,8 +2358,7 @@ export class UnifiedAgent extends ModuleBase {
     // Manager-owned builtin pages use worker_id as owner_task_id.  Their only
     // input gate is WorkerInbox, which also handles terminal continuation.
     const harness = this.requireManagerStack().harness
-    if (await harness.hasWorker(params.task_id)) {
-      await harness.sendToWorker(params.task_id, note)
+    if (await harness.sendToActiveWorker(params.task_id, note)) {
       return { delivered: true }
     }
 
@@ -3233,10 +3232,7 @@ export class UnifiedAgent extends ModuleBase {
     const stack = this.managerStack
     if (!stack) return
     void reconcileManagerStack(stack)
-      .then(async (report) => {
-        // Recovered builtin shell exits must not enter WorkerInbox until scanOrphans
-        // and reconciliation have made their incarnation state authoritative.
-        await this.agentHandler?.releaseRecoveredWorkerShellExits()
+      .then((report) => {
         // 空台账（现网常态）不打日志，避免每次启动都刷一行没有信息量的 0/0/0。
         if (report.revived.length === 0 && report.failed.length === 0) return
         console.log(
@@ -3251,7 +3247,12 @@ export class UnifiedAgent extends ModuleBase {
       // 活性巡检（protocol-agent-v3 §6.3 第 3 条）接在启动对账**之后**开：对账本身就是
       // 一次全量的"化身还活着吗"判定并会改台账，两者同时跑只会让巡检读到半程状态、
       // 白发一次唤醒。对账成败都要开（.finally）——对账失败恰恰是更需要兜底的时候。
-      .finally(() => stack.harness.startLivenessSweep())
+      .finally(async () => {
+        // Recovered exits must wait until reconciliation settles, but a failed
+        // reconciliation must not keep the routing gate closed for this process.
+        await this.agentHandler?.releaseRecoveredWorkerShellExits()
+        stack.harness.startLivenessSweep()
+      })
   }
 
   protected override async onStop(): Promise<void> {

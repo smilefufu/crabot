@@ -721,9 +721,16 @@ export class AgentHandler {
    */
   async releaseRecoveredWorkerShellExits(): Promise<void> {
     this.workerShellExitRoutingReady = true
-    while (this.queuedWorkerShellExits.length > 0) {
-      const info = this.queuedWorkerShellExits.shift()!
-      await this.routeShellExit(info)
+    const recovered = this.queuedWorkerShellExits.splice(0)
+    for (const info of recovered) {
+      try {
+        await this.routeShellExit(info)
+      } catch (error) {
+        console.error(
+          `[AgentHandler] recovered shell notification failed (entity=${info.entity_id}, worker=${info.worker_id ?? 'legacy'}):`,
+          error,
+        )
+      }
     }
   }
 

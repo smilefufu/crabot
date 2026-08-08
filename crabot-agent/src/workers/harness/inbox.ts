@@ -25,6 +25,8 @@ export interface InboxItem {
   readonly text: string
   readonly raw: boolean
   readonly enqueued_at: string
+  /** False for untrusted wakeups that must never revive a terminal task. */
+  readonly allow_terminal_continuation?: boolean
 }
 
 export class WorkerInbox {

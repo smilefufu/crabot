@@ -566,9 +566,33 @@ export class WorkerHarness {
       const found = await this.deps.ledger.findWorker(workerId)
       if (!found) throw new WorkerNotFoundError(workerId)
       if (found.worker.task.status === 'cancelled') throw new TaskCancelledError(workerId)
-      inbox.enqueue({ text, raw: opts?.raw ?? false, enqueued_at: this.deps.now() })
+      inbox.enqueue({ text, raw: opts?.raw ?? false, enqueued_at: this.deps.now(), allow_terminal_continuation: true })
     })
 
+    await this.flushInbox(workerId)
+  }
+
+  /** Queue an untrusted wake only while the task is non-terminal; never revive it later. */
+  async sendToActiveWorker(workerId: string, text: string): Promise<boolean> {
+    const inbox = this.getInbox(workerId)
+    let queued = false
+    await this.withLock(workerId, async () => {
+      const found = await this.deps.ledger.findWorker(workerId)
+      if (!found || isTerminalStatus(found.worker.task.status)) return
+      inbox.enqueue({
+        text,
+        raw: false,
+        enqueued_at: this.deps.now(),
+        allow_terminal_continuation: false,
+      })
+      queued = true
+    })
+    if (queued) await this.flushInbox(workerId)
+    return queued
+  }
+
+  private async flushInbox(workerId: string): Promise<void> {
+    const inbox = this.getInbox(workerId)
     // 真正的投递不占用 harness 的 per-worker 锁(见文件头说明);inbox 自身的锁保证同一
     // 信箱的并发 flush 不重复投递。deliver 内部对每个 item 重新取一次当前化身,避免用
     // 入队时刻的过期 handle 投递。
@@ -582,6 +606,7 @@ export class WorkerHarness {
       // 台账已经把主线化身记为终态(如异步状态回调已经追上)——不必再尝试一次注定失败的
       // sendInput,直接进入 §5.3 透明接续。
       if (incarnation.state === 'exited') {
+        if (item.allow_terminal_continuation === false) return
         await this.continueTerminalWorker(workerId, item.text, incarnation.impl as WorkerImplId, incarnation.seq, item.raw)
         return
       }
@@ -603,6 +628,7 @@ export class WorkerHarness {
         // continueTerminalWorker 的 sourceSeq 核对注释)——同样转入透明接续,对
         // sendToWorker 的调用方完全无感(不重新抛出)。
         if (err instanceof WorkerExitedError) {
+          if (item.allow_terminal_continuation === false) return
           await this.continueTerminalWorker(
             workerId,
             item.text,

@@ -46,6 +46,28 @@ describe('builtin background shell exit routing', () => {
     expect(handler.queuedWorkerShellExits).toHaveLength(0)
   })
 
+  it('one recovered delivery failure is logged without blocking later queued exits', async () => {
+    const handler = Object.create(AgentHandler.prototype) as any
+    handler.workerShellExitRoutingReady = false
+    handler.queuedWorkerShellExits = []
+    const dispatch = vi.fn()
+      .mockRejectedValueOnce(new Error('worker cancelled'))
+      .mockResolvedValueOnce(undefined)
+    handler.builtinShellExitDispatcher = dispatch
+    handler.deliverShellExitNotification = vi.fn()
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    await handler.routeShellExit(shellInfo('bg-failed', 'worker-1'))
+    await handler.routeShellExit(shellInfo('bg-next', 'worker-2'))
+    await expect(handler.releaseRecoveredWorkerShellExits()).resolves.toBeUndefined()
+
+    expect(dispatch).toHaveBeenCalledTimes(2)
+    expect(dispatch).toHaveBeenLastCalledWith('worker-2', expect.objectContaining({ entity_id: 'bg-next' }))
+    expect(handler.queuedWorkerShellExits).toHaveLength(0)
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('bg-failed'), expect.any(Error))
+    log.mockRestore()
+  })
+
   it('marks pending synchronously, serializes same-worker delivery, and clears each mark exactly once', async () => {
     const agent = Object.create(UnifiedAgent.prototype) as any
     agent.config = { moduleId: 'agent-test' }
