@@ -462,6 +462,8 @@ export class WorkerHarness {
   private readonly eventLogs = new Map<string, WorkerEventLog>()
   /** 活性巡检的已报标记,键是 `<worker_id>#<impl>#<seq>`(见 `sweepLiveness`)。 */
   private readonly stallReports = new Map<string, StallReportMark>()
+  /** Adapter state callbacks observed per incarnation; used to order harness-owned CLI input settlement. */
+  private readonly stateChangeRevisions = new Map<string, number>()
   private sweepInFlight = false
   private sweepTimer?: ReturnType<typeof setInterval>
   /** `stopLivenessSweep` 置位后不再接受 `startLivenessSweep`(见该方法注释的停机竞态)。 */
@@ -496,6 +498,8 @@ export class WorkerHarness {
           `(${h.worker_id}#${h.seq})`
       )
     }
+    const revisionKey = `${h.worker_id}#${h.impl}#${h.seq}`
+    this.stateChangeRevisions.set(revisionKey, (this.stateChangeRevisions.get(revisionKey) ?? 0) + 1)
     this.processStateChange(h, state, report).catch((err) => {
       console.error(`[WorkerHarness] handleStateChange failed for ${h.worker_id}#${h.seq}:`, err)
     })
@@ -624,6 +628,7 @@ export class WorkerHarness {
       })
 
       const inbox = this.getInbox(workerId)
+      inbox.release()
       if (initialState !== 'exited' && initialInput?.disposition === 'not_pasted') {
         inbox.enqueueFront({ text: p.prompt, raw: false, enqueued_at: now })
         inbox.hold('waiting_action')
@@ -722,6 +727,7 @@ export class WorkerHarness {
         impl: incarnation.impl as WorkerImplId,
         session_ref: incarnation.session_ref,
       }
+      const stateChangeRevision = this.stateChangeRevisions.get(`${handle.worker_id}#${handle.impl}#${handle.seq}`) ?? 0
       try {
         await adapter.sendInput(handle, item.text, { raw: item.raw })
       } catch (err) {
@@ -757,7 +763,7 @@ export class WorkerHarness {
         const settledHandle = sessionRef ? { ...handle, session_ref: sessionRef } : handle
         const acceptedExit = cliAdapter.takeAcceptedInputExit?.(settledHandle)
         if (acceptedExit) await this.recordCliInputResult(settledHandle, 'exited', acceptedExit)
-        else await this.recordCliInputResult(settledHandle, 'running')
+        else await this.recordCliInputResult(settledHandle, 'running', undefined, stateChangeRevision)
       }
       if (item.raw) {
         inbox.release('waiting_action')
@@ -1025,6 +1031,7 @@ export class WorkerHarness {
     })
 
     const inbox = this.getInbox(worker.worker_id)
+    inbox.release()
     if (initialState !== 'exited' && initialInput?.disposition === 'not_pasted') {
       inbox.enqueueFront({ text, raw: false, enqueued_at: now })
       inbox.hold('waiting_action')
@@ -1189,6 +1196,7 @@ export class WorkerHarness {
     })
 
     const inbox = this.getInbox(worker.worker_id)
+    inbox.release()
     if (initialState !== 'exited' && initialInput?.disposition === 'not_pasted') {
       inbox.enqueueFront({ text: prompt, raw: false, enqueued_at: now })
       inbox.hold('waiting_action')
@@ -1911,7 +1919,12 @@ export class WorkerHarness {
     h: IncarnationHandle,
     controlState: NonNullable<IncarnationHandle['initial_input']>['control_state'],
     report?: StateChangeReport,
+    expectedStateChangeRevision?: number,
   ): Promise<void> {
+    if (expectedStateChangeRevision !== undefined) {
+      const revisionKey = `${h.worker_id}#${h.impl}#${h.seq}`
+      if ((this.stateChangeRevisions.get(revisionKey) ?? 0) !== expectedStateChangeRevision) return
+    }
     const external = cliContractState(controlState)
     let committedStatus: TaskStatus | undefined
     await this.withLock(h.worker_id, async () => {
@@ -1945,6 +1958,7 @@ export class WorkerHarness {
       })
       committedStatus = committed?.task.status
     })
+    if (external === 'exited') this.getInbox(h.worker_id).release()
     if (report) {
       await this.appendEvent(h.worker_id, h.seq, 'state_changed', cliReportDetail(external, report), committedStatus)
     } else if (external !== 'running') {
@@ -1957,6 +1971,7 @@ export class WorkerHarness {
     state: WorkerContractState,
     report?: StateChangeReport,
   ): Promise<void> {
+    let settledCurrentExit = false
     // 唤醒事件的两段正文:截断在这一处收口,三个 adapter 共用同一上限。text 截断后还能按
     // offset 去 read_worker_output 读全文,summary 不进 output、没有这条后路,所以提示语
     // 不同、上限也不同(见两个常量各自的注释)。
@@ -2068,6 +2083,7 @@ export class WorkerHarness {
         )
         return { ...prev, task: nextTask, incarnations, updated_at: now }
       })
+      settledCurrentExit = state === 'exited' && committed !== undefined
       // 主线分支是 task 状态机的主要推进点——事件必须自带落账后的状态,否则订阅方现读台账
       // 时若已经有下一次落账(如 §5.3 透明接续把终态拉回 running),这次迁移(含 completed
       // 这类终态)会被整条吞掉。见 worker-events.ts `HarnessEvent.task_status`。
@@ -2080,7 +2096,11 @@ export class WorkerHarness {
       )
     })
 
-    if (!report?.notification && (state === 'idle' || state === 'running')) {
+    if (!report?.notification && settledCurrentExit) {
+      const inbox = this.getInbox(h.worker_id)
+      inbox.release()
+      await this.flushInbox(h.worker_id)
+    } else if (!report?.notification && (state === 'idle' || state === 'running')) {
       const inbox = this.getInbox(h.worker_id)
       inbox.release('waiting_action')
       await this.flushInbox(h.worker_id)

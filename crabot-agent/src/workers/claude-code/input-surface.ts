@@ -17,7 +17,7 @@ export function probeClaudeInput(snapshot: PaneSnapshot, mode: InputMode, text?:
   const active = /esc to interrupt/i.test(pane)
   if (enforceMode && (mode === 'steering') !== active) return 'unavailable'
   if (text !== undefined) {
-    if (composerContains(composer, text)) return 'pending'
+    if (composerMatchesExpected(composer, text)) return 'pending'
     return composer.length === 0 ? 'empty' : 'unavailable'
   }
   return composer.length === 0 ? 'empty' : 'pending'
@@ -26,7 +26,7 @@ export function probeClaudeInput(snapshot: PaneSnapshot, mode: InputMode, text?:
 /** A submit is visually accepted only after the pasted text is no longer in the composer. */
 export function acceptedClaudeInput(snapshot: PaneSnapshot, mode: InputMode, text: string): boolean {
   const composer = claudeComposerText(snapshot)
-  if (hasClaudeInteraction(snapshot.text) || (composer !== undefined && composerContains(composer, text))) return false
+  if (hasClaudeInteraction(snapshot.text) || (composer !== undefined && composerMatchesExpected(composer, text))) return false
   // Steering keeps the active marker and normally renders a queued message.
   return mode === 'primary' ? composer === '' || /esc to interrupt/i.test(snapshot.text) : /queued|queue/i.test(snapshot.text)
 }
@@ -54,8 +54,13 @@ function claudeComposerText(snapshot: PaneSnapshot): string | undefined {
   return undefined
 }
 
-function composerContains(composer: string, text: string): boolean {
+function composerMatchesExpected(composer: string, text: string): boolean {
   const normalize = (value: string) => value.replace(/\s+/g, ' ').trim()
+  const current = normalize(composer)
   const expected = normalize(text)
-  return expected.length > 0 && normalize(composer).includes(expected)
+  if (expected.length === 0) return false
+  if (current.includes(expected)) return true
+  if (/\[Pasted text #\d+(?:[^\]]*)\]/i.test(current)) return true
+  if (expected.length < 24) return false
+  return current.includes(expected.slice(0, 24)) || current.includes(expected.slice(-24))
 }

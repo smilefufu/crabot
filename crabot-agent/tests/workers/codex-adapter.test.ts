@@ -226,6 +226,7 @@ describe('CodexWorkerAdapter.provision', () => {
       expect(Array.isArray(parsed.notify)).toBe(true)
       expect(parsed.notify[0]).toBe('/bin/sh')
       expect(parsed.notify.join(' ')).toContain('events-cli.jsonl')
+      expect(parsed.notify[2]).toContain('</dev/null')
 
       // trust_level 必须存在且指向本 workspace 的 realpath
       expect(parsed.projects[realRoot]).toEqual({ trust_level: 'trusted' })
@@ -582,8 +583,12 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
       const datePath = path.join(String(now.getFullYear()), pad(now.getMonth() + 1), pad(now.getDate()))
       const rolloutFile = path.join(workspaceRoot, '.codex', 'sessions', datePath, rolloutFileNameFor(rolloutUuid))
       const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+      const seen: Array<{ state: WorkerContractState; sessionRef?: string }> = []
       const codexBin = codexBinFor(
-        [{ output: '第一段输出', emitStop: true }],
+        [
+          { output: 'raw 清障回合', emitStop: true },
+          { output: '首条任务完成', emitStop: true },
+        ],
         channel.hookCommand('stop'),
         { rolloutFile, rolloutOnSubmit: true, pasteReadyDelayMs: 200 },
       )
@@ -593,6 +598,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
         codexBin,
         pasteReadyTimeoutMs: 50,
         sessionDiscoveryTimeoutMs: 1500,
+        onStateChange: (handle, state) => seen.push({ state, sessionRef: handle.session_ref }),
       })
       await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
       const workerId = `codextest-${randomUUID().slice(0, 8)}`
@@ -608,6 +614,11 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
       expect(adapter.takeUpdatedSessionRef(h)).toBe(rolloutUuid)
       const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string; session_discovery?: string }
       expect(meta).toMatchObject({ session_id: rolloutUuid, session_discovery: 'discovered' })
+      const deadline = Date.now() + 5000
+      while (!seen.some((event) => event.state === 'idle' && event.sessionRef === rolloutUuid) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+      expect(seen).toContainEqual({ state: 'idle', sessionRef: rolloutUuid })
     },
     15000,
   )

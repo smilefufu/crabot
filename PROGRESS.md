@@ -1217,10 +1217,11 @@ Module Manager (port 19000)
 - memory graph rebuild 改为 manager-native `trigger_schedule`，不再创建无法观察的 legacy pending task。
 - 当前定向构建与测试通过；全量回归及 PR review 尚待完成。
 
-## 2026-08-08 — CLI 交互输入提交（实施完成，待 PR）
+## 2026-08-08 — CLI 交互输入提交（stacked PR #81）
 
 - Claude Code / Codex 已迁移到单层 `running / waiting_text / waiting_action / exited` 控制状态；首投所有权由 `initial_input` 明确结算。
 - 输入提交实现同一 pane 内单次 paste、证据化 Enter（最多补一次）；modal/pending 由 raw 受控清障，普通 WorkerInbox FIFO 与 bg-shell 通知语义保持不变。
 - Codex 0.146 的 rollout 改为首条普通输入接受后发现；startup stall 经 raw 恢复时不再提前固化占位 session。
-- 定向回归 286 tests 通过，TypeScript build 通过；Claude Code 2.1.226 / Codex 0.146.0 真实 tmux 黑盒验证 spawn、resume、Claude steering 和 Codex pending→raw Tab queue。
-- 全量 2555 tests 中 2535 通过；剩余 18 个失败均位于未修改的 audit / inbound / workspace path 基线范围。下一步：最终 review、提交分支并创建 PR。
+- 已补齐 PR review 发现的长 prompt/paste chip、Codex notify stdin、Stop 并发落账、交互区误判、延后 session_ref watcher 与 exited hold 生命周期问题；独立终审 `APPROVED`。
+- TypeScript build 与 10 文件 292 个定向测试通过；Claude Code 2.1.226 / Codex 0.146.0 真实 tmux 黑盒已验证 spawn、resume、Claude steering 和 Codex pending→raw Tab queue。
+- PR #81 以 PR #80 为 base；等待两条 PR 的自动 review / merge gate 收敛后再部署与 Admin Chat 回归。

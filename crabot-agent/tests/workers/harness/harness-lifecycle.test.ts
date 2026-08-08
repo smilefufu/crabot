@@ -803,6 +803,98 @@ describe('WorkerHarness.sendToWorker', () => {
     expect(fake.sendInputCalls).toHaveLength(0)
   })
 
+  it('CLI化身exited时清除旧pane的transport hold', async () => {
+    const { harness, fake } = await makeHarness({ implId: 'claude-code' })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+    const inbox = (harness as any).getInbox(worker.worker_id)
+    inbox.hold('input_pending')
+    expect(inbox.held).toBe(true)
+
+    fake.emitStateChange({
+      worker_id: worker.worker_id,
+      seq: 1,
+      impl: 'claude-code',
+      session_ref: `ref-${worker.worker_id}#1`,
+    }, 'exited', undefined, 'completed')
+    await waitUntil(() => inbox.held === false)
+
+    expect(inbox.held).toBe(false)
+  })
+
+  it('普通CLI投递后的running结算不覆盖并发Stop回调落下的waiting_input', async () => {
+    const { harness } = await makeHarness({ implId: 'claude-code', sendInputState: 'idle' })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+
+    await harness.sendToWorker(worker.worker_id, '很快完成的输入')
+    await waitUntil(async () => {
+      const [current] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      return current.task.status === 'waiting_input'
+    })
+
+    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(settled.incarnations[0].state).toBe('idle')
+  })
+
+  it('主线CLI投递不因并发fork状态回调而丢失running结算', async () => {
+    let fakeRef!: FakeAdapter
+    let currentWorkerId = ''
+    const made = await makeHarness({
+      implId: 'claude-code',
+      caps: { fork: true },
+      sendInputBehavior: () => {
+        fakeRef.emitStateChange({
+          worker_id: currentWorkerId,
+          seq: 2,
+          impl: 'claude-code',
+          session_ref: `fork-ref-${currentWorkerId}#2`,
+        }, 'idle')
+      },
+    })
+    const { harness, fake } = made
+    fakeRef = fake
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+    currentWorkerId = worker.worker_id
+    fake.emitStateChange({
+      worker_id: worker.worker_id,
+      seq: 1,
+      impl: 'claude-code',
+      session_ref: `ref-${worker.worker_id}#1`,
+    }, 'idle')
+    await waitUntil(async () => (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0].task.status === 'waiting_input')
+    await harness.queryWorker(worker.worker_id, '侧问一下')
+
+    await harness.sendToWorker(worker.worker_id, '主线继续')
+    await waitUntil(async () => {
+      const [current] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      return current.incarnations.find((incarnation) => incarnation.seq === 2)?.state === 'idle'
+    })
+
+    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(settled.task.status).toBe('running')
+    expect(settled.incarnations.find((incarnation) => incarnation.seq === 1)?.state).toBe('running')
+  })
+
+  it('fork或旧化身的exited回调不清除当前pane的transport hold', async () => {
+    const { harness, fake } = await makeHarness({ implId: 'claude-code', caps: { fork: true } })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+    await harness.queryWorker(worker.worker_id, '侧问一下')
+    const inbox = (harness as any).getInbox(worker.worker_id)
+    inbox.hold('input_pending')
+
+    fake.emitStateChange({
+      worker_id: worker.worker_id,
+      seq: 2,
+      impl: 'claude-code',
+      session_ref: `fork-ref-${worker.worker_id}#2`,
+    }, 'exited', undefined, 'completed')
+    await waitUntil(async () => {
+      const [current] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      return current.incarnations.find((incarnation) => incarnation.seq === 2)?.state === 'exited'
+    })
+
+    expect(inbox.held).toBe(true)
+  })
+
   it('CLI raw成功后的adapter idle重判落waiting_input，不被harness硬覆盖为running', async () => {
     const { harness } = await makeHarness({ implId: 'claude-code', sendInputState: 'idle' })
     const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })

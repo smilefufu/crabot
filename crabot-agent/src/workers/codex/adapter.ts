@@ -513,11 +513,11 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // CODEX_HOME(spawn/resume 经 tmux env 传递),绕开这条项目级限制。
     //
     // notify 的程序契约是"数组:可执行文件 + 固定参数",codex 运行时会在末尾追加一个 JSON
-    // payload 作为额外参数(config-advanced 原文确认)。这里用 `/bin/sh -c <script>` 包一层,
-    // 额外参数会落在 shell 的 $0 上,脚本本身不引用位置参数,效果上只是"turn 结束就打一个
-    // 标记"——与 cc 的 Stop hook(丢弃 stdin payload,同一设计取舍,见 CliEventChannel 头
-    // 注释)语义一致。
-    const notify = ['/bin/sh', '-c', channel.hookCommand('stop')]
+    // payload 作为额外参数(config-advanced 原文确认)。这里用 `/bin/sh -c <script>` 包一层;
+    // payload 落在 shell 的 $0 上。Stop 事件只需要 turn 边界标记,不解析这个 argv payload;
+    // Claude Code hook 则由 stdin 接收并记录原始 JSON。Codex notify 的 stdin 必须显式关闭,
+    // 否则 hook 会从 pane pty 读取并与 TUI 争抢输入。
+    const notify = ['/bin/sh', '-c', `(${channel.hookCommand('stop')}) </dev/null`]
 
     // codex 源码里交互式 TUI 判断"是否受信目录"的真实机制是 config.toml 的
     // [projects."<绝对路径>"] 表 + trust_level = "trusted"(取代不存在的 --skip-git-repo-check
@@ -671,9 +671,13 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       mode === 'steering' && runtime.controlState.kind === 'running'
         ? { kind: 'running' }
         : { kind: 'waiting_action', reason: result.disposition === 'not_pasted' ? 'input_surface_unavailable' : 'input_pending' }
+    let waitReason: string
+    if (next.kind === 'waiting_action') waitReason = next.reason
+    else if (result.disposition === 'pending_in_ui') waitReason = 'input_pending'
+    else waitReason = 'input_surface_unavailable'
     const report: StateChangeReport = {
       outputTail: result.snapshot.text || baseline,
-      waitReason: next.kind === 'waiting_action' ? next.reason : result.disposition,
+      waitReason,
     }
     await this.transitionControlState(runtime, h, next, report, notify)
     return { control_state: next.kind, disposition: result.disposition, report }
@@ -1323,7 +1327,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     if (runtime.controlState.kind === 'exited') return
     if (runtime.stopEventWatch) return // 幂等:同一 runtime 只装一个
     runtime.stopEventWatch = runtime.eventChannel.watch(() => {
-      this.syncState(runtime, h).catch((err) => {
+      const currentHandle = { ...h, session_ref: runtime.sessionId }
+      this.syncState(runtime, currentHandle).catch((err) => {
         console.error(`[CodexWorkerAdapter] cli event driven syncState failed for ${h.worker_id}#${h.seq}:`, err)
       })
     })

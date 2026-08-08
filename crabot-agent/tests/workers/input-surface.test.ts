@@ -35,12 +35,20 @@ describe('CLI input surfaces', () => {
 
     const multiline = pane(`history\n❯ first line\nsecond line\n? for shortcuts`)
     expect(probeClaudeInput(multiline, 'primary', 'first line\nsecond line')).toBe('pending')
+    expect(probeClaudeInput(pane('❯ [Pasted text #1 +37 lines]\n? for shortcuts'), 'primary', 'very long prompt\n'.repeat(40))).toBe('pending')
+    expect(probeClaudeInput(pane('❯ ending-abcdefghijklmnopqrstuvwx\n? for shortcuts'), 'primary', `beginning-${'x'.repeat(200)}ending-abcdefghijklmnopqrstuvwx`)).toBe('pending')
   })
 
   it('keeps Codex Working composer in steering mode', () => {
     const working = pane('› \nWorking (esc to interrupt)')
     expect(probeCodexInput(working, 'primary')).toBe('unavailable')
     expect(probeCodexInput(working, 'steering')).toBe('empty')
+  })
+
+  it('does not let Codex transcript keywords impersonate active/modal UI', () => {
+    const idle = pane('Permission denied while reading a file\nWorking notes from history\n› \n? for shortcuts')
+    expect(probeCodexInput(idle, 'primary')).toBe('empty')
+    expect(probeCodexInput(idle, 'steering')).toBe('unavailable')
   })
 
   it('scopes Codex pending evidence to the active composer, not transcript history', () => {
@@ -55,6 +63,7 @@ describe('CLI input surfaces', () => {
 
     const multiline = pane(`history\n› first line\nsecond line\n? for shortcuts`)
     expect(probeCodexInput(multiline, 'primary', 'first line\nsecond line')).toBe('pending')
+    expect(probeCodexInput(pane('› [Pasted Content: 2048 chars]\n? for shortcuts'), 'primary', 'long codex prompt\n'.repeat(80))).toBe('pending')
   })
 
   it('does not accept an old Codex queued region as this delivery', () => {
