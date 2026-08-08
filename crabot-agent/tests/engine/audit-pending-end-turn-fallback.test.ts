@@ -2,7 +2,7 @@
  * audit 跑中 LLM 直接 end_turn → engine 直接挂起等 audit 结果（2026-07-16 重设计）.
  *
  * spec: 2026-07-16-wait-signal-targets-goal-lifecycle-design §3.2
- * （取代 2026-06-07 §4.6 的"注入拦截文案 → LLM 调 wait_for_signal"路径——
+ * （取代 2026-06-07 §4.6 的"注入拦截文案 → LLM 调 end_turn"路径——
  *   那套文案会教坏 agent 主动 wait audit，见 trace ac9676e3 空转实证）
  *
  * 新行为：

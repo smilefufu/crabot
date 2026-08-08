@@ -21,10 +21,18 @@
 
 import { AsyncMutex } from '../async-mutex'
 
+export type InboxSettlement = 'delivered' | 'dead_letter'
+
 export interface InboxItem {
   readonly text: string
   readonly raw: boolean
   readonly enqueued_at: string
+  /** False for untrusted wakeups that must never revive a terminal task. */
+  readonly allow_terminal_continuation?: boolean
+  /** Process-local receipt; durable truth remains with the producer. */
+  readonly onSettled?: (settlement: InboxSettlement) => void | Promise<void>
+  /** Prevent a producer retry from enqueueing the same durable item twice in one process. */
+  readonly dedupe_key?: string
 }
 
 export class WorkerInbox {
@@ -42,6 +50,19 @@ export class WorkerInbox {
   enqueue(item: InboxItem): number {
     this.queue.push(item)
     return this.queue.length
+  }
+
+  /** Enqueue once per process while an item with the same stable key is queued or in flight. */
+  enqueueUnique(item: InboxItem): boolean {
+    if (item.dedupe_key === undefined) throw new Error('enqueueUnique requires dedupe_key')
+    if (
+      this.inFlight?.dedupe_key === item.dedupe_key ||
+      this.queue.some((queued) => queued.dedupe_key === item.dedupe_key)
+    ) {
+      return false
+    }
+    this.queue.push(item)
+    return true
   }
 
   /** 标记不安全(如 provision/交接中),期间 flush 不投递 */
@@ -75,16 +96,17 @@ export class WorkerInbox {
    * pending:返回队列中的待投条数。注意:在 await deliver() 期间,该条已从 queue
    * 取出(shift),所以 pending 不计入 in-flight 条目。
    */
-  async flush(deliver: (item: InboxItem) => Promise<void>): Promise<number> {
+  async flush(deliver: (item: InboxItem) => Promise<InboxSettlement | void>): Promise<number> {
     return this.mutex.run(async () => {
       let delivered = 0
       while (this.queue.length > 0 && !this._held) {
         const item = this.queue.shift()!
         this.inFlight = item
         try {
-          await deliver(item)
+          const settlement = await deliver(item)
           this.inFlight = null
           delivered++
+          await this.settle(item, settlement ?? 'delivered')
         } catch (err) {
           this.inFlight = null
           if (this.drainedInFlight === item) {
@@ -97,6 +119,7 @@ export class WorkerInbox {
                 err instanceof Error ? err.message : String(err)
               }`
             )
+            await this.settle(item, 'dead_letter')
             return delivered
           }
           // post-drain enqueue 的条目或其他情况:走正常语义(放回、抛出)
@@ -106,6 +129,18 @@ export class WorkerInbox {
       }
       return delivered
     })
+  }
+
+  private async settle(item: InboxItem, settlement: InboxSettlement): Promise<void> {
+    if (!item.onSettled) return
+    try {
+      await item.onSettled(settlement)
+    } catch (error) {
+      // Delivery already happened (or was durably dead-lettered). Requeueing here
+      // would duplicate input; the producer keeps its durable pending receipt and
+      // may replay after restart.
+      console.warn(`[WorkerInbox:${this.workerId}] settlement callback failed:`, error)
+    }
   }
 
   /**

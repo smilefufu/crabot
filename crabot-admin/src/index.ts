@@ -84,15 +84,10 @@ import {
   type CleanupOldTasksByCountParams,
   type CleanupOldTasksByCountResult,
   type UpdateTaskStatusParams,
-  type ListRecentTerminalTasksParams,
-  type ListRecentTerminalTasksResult,
-  type ReviveTaskForSupplementParams,
-  type ReviveTaskForSupplementResult,
   type AssignWorkerParams,
   type UpdatePlanParams,
   type AppendMessageParams,
   type GetTaskMessagesParams,
-  type CancelTaskParams,
   type TaskStats,
   type CreateScheduleParams,
   type GetScheduleParams,
@@ -224,7 +219,6 @@ import {
 } from './onboarding-master.js'
 import type { Onboarder } from 'crabot-shared'
 import { tailLogFile } from './module-log-tail.js'
-import { buildRecoveryTask, isResumableInflightStatus, partitionResumeResults } from './recovery-handler.js'
 import {
   VALID_TRANSITIONS,
   applyDerivedFields,
@@ -631,8 +625,6 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('create_task', this.handleCreateTask.bind(this))
     this.registerMethod('get_task', this.handleGetTask.bind(this))
     this.registerMethod('list_tasks', this.handleListTasks.bind(this))
-    this.registerMethod('list_recent_terminal_tasks', this.handleListRecentTerminalTasks.bind(this))
-    this.registerMethod('revive_task_for_supplement', this.handleReviveTaskForSupplement.bind(this))
     // spec 2026-06-09-task-trace-tool-unification.md §4.3 + §4.4
     this.registerMethod('list_conversation_units', this.handleListConversationUnits.bind(this))
     this.registerMethod('cleanup_old_tasks_by_count', this.handleCleanupOldTasksByCount.bind(this))
@@ -643,7 +635,6 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('append_message', this.handleAppendMessage.bind(this))
     this.registerMethod('get_task_messages', this.handleGetTaskMessages.bind(this))
     this.registerMethod('get_task_stats', this.handleGetTaskStats.bind(this))
-    this.registerMethod('cancel_task', this.handleCancelTask.bind(this))
     this.registerMethod('delete_task', this.handleDeleteTask.bind(this))
 
     // Schedule 管理
@@ -768,13 +759,8 @@ export class AdminModule extends ModuleBase {
     this.dataLoaded = true
     await this.saveTasks()
 
-    // Resume sweep 触发可靠化：不再依赖「接住 agent 的 module_started 事件」——冷启动订阅竞态会
-    // 漏接该事件（admin 订阅晚于 agent 发事件），导致整实例重启后 in-flight 任务永远卡 executing。
-    // 这里主动轮询 MM 解析 agent 端口，确认 agent 注册后再 sweep；事件触发（onEvent module_started）
-    // 保留为快路径。sweep 幂等（worker-alive + checkpoint 守卫），与事件触发重复执行也安全。
-    this.ensureResumeSweepAfterAgentReady().catch((err: Error) => {
-      console.warn(`[Admin] Resume sweep (post-loadData) failed: ${err.message}`)
-    })
+    // Agent v3 owns worker recovery. Legacy Admin tasks were finalized during loadData;
+    // Admin must not poll for Agent readiness to revive a second task truth source.
 
     // 初始化系统权限模板
     await this.initSystemTemplates()
@@ -999,10 +985,9 @@ export class AdminModule extends ModuleBase {
           if (typeof port === 'number' && port > 0) {
             this.agentPort = port
           }
-          const restartCount = (event.payload as { restart_count?: number }).restart_count ?? 0
-          console.log(`[Admin] Agent module ${module_id} started (port=${port}, restart_count=${restartCount}), pushing config as safety net...`)
-          this.pushAgentConfigThenSweepResume(module_id, restartCount).catch((err: Error) => {
-            console.warn(`[Admin] Resume sweep for ${module_id} failed: ${err.message}`)
+          console.log(`[Admin] Agent module ${module_id} started (port=${port}), pushing config as safety net...`)
+          this.pushConfigToAgentModules().catch((err: Error) => {
+            console.warn(`[Admin] Failed to push config to ${module_id}: ${err.message}`)
           })
         }
         // 新启动的模块推送代理配置
@@ -4308,24 +4293,30 @@ export class AdminModule extends ModuleBase {
       console.log('[Admin] No existing schedules data')
     }
 
-    // Task 加载：loadData **不再即时把 in-flight 任务标 failed**。
-    // 重启恢复统一交给 resume sweep（sweepInterruptedTasksForResume，agent 一就绪即触发）：
-    // 对所有 in-flight 态尝试无损 resume，失败的才标 failed + 走 recovery 兜底。
-    // 历史：旧的「admin 重启即时标 failed」(cleanupStaleInflightTasks) 会在完整重启时
-    // 抢先把 executing 杀掉，使 resume 永远等不到自己的任务（restart_count=0 那条 bug 根因之一）。
+    // Legacy Admin tasks are no longer executable in v3. Any persisted non-terminal
+    // entry is historical state from the retired AgentHandler loop and must be
+    // finalized locally instead of being resumed through a second truth source.
     try {
       const tasksData = await fs.readFile(this.tasksFilePath, 'utf-8')
       const loaded = JSON.parse(tasksData) as Task[]
 
-      // 修正历史脏数据（旧版本绕过 applyStatusTransition 的路径留下的残留字段）
+      // 修正历史脏数据，并把已退役 legacy loop 的非终态记录本地收口为 failed。
       let repairCount = 0
+      let retiredInflightCount = 0
+      const legacyActiveStatuses: ReadonlySet<TaskStatus> = new Set([
+        'pending', 'planning', 'executing', 'waiting_human', 'waiting',
+      ])
       const repairedTasks = loaded.map((t) => {
         const { task: repaired, fixes } = repairTaskInvariants(t)
         if (fixes.length > 0) {
           repairCount++
           console.warn(`[Admin] Repaired task ${t.id} on load: fixed ${fixes.join(', ')}`)
         }
-        return repaired
+        if (!legacyActiveStatuses.has(repaired.status)) return repaired
+        retiredInflightCount++
+        return applyDerivedFields(repaired, 'failed', generateTimestamp(), {
+          error: 'legacy Admin task execution retired in Agent v3',
+        })
       })
 
       // 兜底：所有 task 必须满足不变量。修不掉的说明 repair 实现有漏洞或磁盘数据
@@ -4338,7 +4329,8 @@ export class AdminModule extends ModuleBase {
 
       console.log(
         `[Admin] Loaded ${this.tasks.size} tasks` +
-        (repairCount > 0 ? `, repaired ${repairCount} legacy dirty task(s)` : ''),
+        (repairCount > 0 ? `, repaired ${repairCount} legacy dirty task(s)` : '') +
+        (retiredInflightCount > 0 ? `, failed ${retiredInflightCount} retired in-flight task(s)` : ''),
       )
     } catch (err) {
       if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
@@ -4608,39 +4600,25 @@ export class AdminModule extends ModuleBase {
   }
 
   /**
-   * 触发"全量重建长期记忆图谱"——建一条 pending 一次性 worker 任务，指令里要求 agent
-   * 用 memory-graph-linking skill 对所有 confirmed 条目覆盖式全量建链（建链判据见该技能）。
-   *
-   * 反思（daily-reflection）已会增量建链；本端点是给人类"立刻全量重建 / 冷启动回填"用。
-   *
-   * 派发：建出 pending 任务后立即用通用 start_task RPC 派发给 agent 后台执行（与 self-healing
-   * recovery 同一条 hand-off 路径，复用 unified-agent.handleStartTask → executeScheduledTaskInBackground，
-   * 即每日反思的同一执行引擎）。await 派发以便 agent 不可用时端点显式报错，而非静默留下不跑的 pending 任务。
+   * Trigger a manager-native memory graph rebuild.  This intentionally does not
+   * create an Admin Task: the old task lifecycle cannot observe manager-owned
+   * workers and would otherwise remain pending forever.
    */
-  private async handleRebuildMemoryGraph(): Promise<{ task_id: string }> {
-    const params: CreateTaskParams = {
+  private async handleRebuildMemoryGraph(): Promise<{ accepted: true }> {
+    const description =
+      '你必须在当前 manager episode 直接完成长期记忆图谱的覆盖式重建，不要派 worker，也不要调用 Skill（本指令已经内联完整建链规则）：\n'
+      + '1) 用 mcp__crab-memory__list_entries({ status: "confirmed", limit, offset }) 翻页遍历全部 confirmed 条目；\n'
+      + '2) 对每条 N，用 mcp__crab-memory__search_long_term({ query: <N 的 brief>, filters: { status: "confirmed" }, k: 5 }) 找候选；默认不连，只有具体且有信息量的关系才连；\n'
+      + '3) relation 只能是 refines（N 细化候选）、depends_on（N 依赖候选）、part_of（N 是候选的一部分）、related（确有跨条目引用价值时的最后兜底）；严禁仅因同项目/同主题/相似就连，近重复不连，related 对称关系只保留一个方向，不重复 source_cases/invalidated_by 已表达的边；\n'
+      + '4) 对每一条 N 都调用 mcp__crab-memory__set_memory_links({ id: <N.id>, links: [...] }) 覆盖完整新列表，无有效关系时必须传 links:[] 以清掉旧边；\n'
+      + '5) 完成后报告遍历条目数、清空条目数、新建链接数和 relation 分布。'
+    await this.callAgentRpc('trigger_schedule', {
+      schedule_id: 'memory-graph-rebuild',
       title: '重建长期记忆图谱',
-      tags: ['memory_rebuild'],
-      priority: 'normal',
-      source: { origin: 'system', trigger_type: 'manual' },
-      initial_message: {
-        role: 'human',
-        content:
-          '请用 memory-graph-linking skill 全量重建长期记忆图谱（覆盖式：先清旧链接再建新）：\n'
-          + '1) 先调 Skill("memory-graph-linking") 加载建链指引——建链判定（默认不连 / relation 词表 / '
-          + 'related 对称不重复 / 严禁同主题就连）全部以该技能为准；\n'
-          + '2) 用 list_entries 翻页遍历【所有】 status=confirmed 长期记忆条目；\n'
-          + '3) 覆盖式：对【每一条】条目都调一次 set_memory_links 传入它的完整新链接列表来覆盖旧链接——'
-          + '即使按 skill 判定它没有合适链接，也要显式传 links:[] 把旧链接清掉；\n'
-          + '4) 完成后报告：遍历条目数、清空(置空)条目数、新建链接数、按 relation 类型的分布。',
-      },
-    }
-    const { task } = await this.handleCreateTask(params)
-    // 通用派发：让 agent 后台真正执行这条任务（非静默 pending）。
-    // 必须带 master 权限——否则 worker fail-closed 拿不到 memory 工具，跑一轮空转就结束。
-    const resolved_permissions = this.resolveSystemTaskPermissions()
-    await this.callAgentRpc('start_task', { task_id: task.id, resolved_permissions })
-    return { task_id: task.id }
+      description,
+      is_builtin: true,
+    })
+    return { accepted: true }
   }
 
   private async handleGetTask(params: GetTaskParams): Promise<{ task: Task }> {
@@ -4913,175 +4891,6 @@ export class AdminModule extends ModuleBase {
     }
   }
 
-  /**
-   * Agent 模块重启后扫 in-flight 任务，标 failed 并生成 recovery 任务。
-   *
-   * @param restartCount agent 此次启动是第几次（0=首次，不做 self-healing）
-   */
-  private async sweepInterruptedTasksForResume(
-    restartCount: number,
-    options: { retryDelayMs?: number } = {},
-  ): Promise<void> {
-    // dataLoaded 未完时（启动早期 module_started 抢跑）跳过——loadData 完成后还有兜底触发。
-    if (!this.dataLoaded) return
-
-    // **不再按 restart_count 门控**：完整重启（restart_count=0，admin+agent 一起重启）是用户
-    // 主场景，必须也走 resume；agent 一就绪即对所有 in-flight 态尝试无损 resume。冷启动无
-    // in-flight 任务时下面 inFlight.length===0 自然 return，安全。restartCount 仅用于日志。
-    const inFlight = Array.from(this.tasks.values()).filter((t) => isResumableInflightStatus(t.status))
-    if (inFlight.length === 0) return
-    console.log(`[Admin] Resume sweep: ${inFlight.length} in-flight task(s) to recover (restart_count=${restartCount})`)
-
-    // 1. 先尝试无损 resume（仅非 recovery task；recovery 自身不 resume，防雪崩）
-    const candidates = inFlight.filter((t) => !t.tags.includes('recovery'))
-    const results = await this.tryResumeTasks(candidates)
-    const { resumed, needRecovery, retryLater } = partitionResumeResults(results)
-    if (resumed.length > 0) {
-      console.log(
-        `[Admin] Self-healing: resumed ${resumed.length} task(s): ${resumed.map((t) => t.id).join(', ')}`,
-      )
-      // resumed 的保持 executing（agent 已接管），不动状态
-    }
-    if (retryLater.length > 0) {
-      console.log(
-        `[Admin] Self-healing: ${retryLater.length} task(s) waiting for agent configuration before resume retry: ${retryLater.map((t) => t.id).join(', ')}`,
-      )
-
-      const retryDelayMs = options.retryDelayMs ?? 1000
-      if (retryDelayMs > 0) {
-        await new Promise((r) => setTimeout(r, retryDelayMs))
-      }
-
-      const pushed = await this.pushConfigToAgentModules()
-      if (pushed) {
-        const retryResults = await this.tryResumeTasks(retryLater)
-        const retryPartition = partitionResumeResults(retryResults, { deferNotConfigured: false })
-        resumed.push(...retryPartition.resumed)
-        needRecovery.push(...retryPartition.needRecovery)
-        if (retryPartition.resumed.length > 0) {
-          console.log(
-            `[Admin] Self-healing: resumed ${retryPartition.resumed.length} task(s) after config retry: ${retryPartition.resumed.map((t) => t.id).join(', ')}`,
-          )
-        }
-      } else {
-        console.warn('[Admin] Self-healing: config retry push failed; deferred task(s) will wait for a later resume sweep')
-      }
-    }
-
-    // 2. 不能 resume 的（含 recovery 自身）→ 标 failed
-    const toFail = [...needRecovery, ...inFlight.filter((t) => t.tags.includes('recovery'))]
-    for (const t of toFail) {
-      // agent 刚重启，worker 通常已随进程消失，abort 多为 no-op；仍统一走判死入口，
-      // 覆盖"agent 没重启、只是 resume 失败"这类 worker 仍在的情形。
-      await this.abortWorkerBeforeTerminal(t.id, 'agent_restarted_during_execution')
-      this.applyStatusTransition(t, 'failed', { error: 'agent_restarted_during_execution' })
-    }
-    if (toFail.length > 0) {
-      console.log(`[Admin] Self-healing: marked ${toFail.length} task(s) as failed`)
-    }
-
-    // 3. 对 needRecovery 走旧兜底（buildRecoveryTask 内部已跳过 recovery 标签的）
-    const now = generateTimestamp()
-    const params = buildRecoveryTask(needRecovery, now)
-    if (params) {
-      const { task } = await this.handleCreateTask(params)
-      console.log(
-        `[Admin] Self-healing: created recovery task ${task.id} for ${needRecovery.length} non-resumable task(s)`,
-      )
-      this.callAgentRpc('start_recovery_task', {
-        task_id: task.id,
-        resolved_permissions: this.resolveSystemTaskPermissions(),
-      })
-        .then(() => console.log(`[Admin] Self-healing: recovery task ${task.id} dispatched`))
-        .catch((err: Error) =>
-          console.warn(`[Admin] Self-healing: start_recovery_task failed: ${(err as Error).message}`),
-        )
-    } else {
-      console.log(`[Admin] Self-healing: no recovery task needed`)
-    }
-
-    // 4. 持久化任务变更
-    await this.saveData()
-
-    // 5. 孤儿 checkpoint 对账：sweep 已对每条 in-flight 任务调过 resume_task（消费或 finalize 了
-    //    它们的 checkpoint）。让 agent 把「仍持有 checkpoint 但不在 in-flight 集」的——即停机期间
-    //    已完结、admin 不再认的——finalize 掉，杜绝 per-task 文件永驻磁盘。best-effort。
-    this.callAgentRpc('finalize_orphan_checkpoints', { keep_task_ids: inFlight.map((t) => t.id) })
-      .catch((err: Error) => console.warn(`[Admin] finalize_orphan_checkpoints failed: ${err.message}`))
-  }
-
-  private async tryResumeTasks(
-    tasks: Task[],
-  ): Promise<Array<{ task: Task; resumed: boolean; reason?: string }>> {
-    const results: Array<{ task: Task; resumed: boolean; reason?: string }> = []
-    for (const t of tasks) {
-      let resumed = false
-      let reason: string | undefined
-      try {
-        const r = await this.callAgentRpc<{ task_id: string }, { resumed?: boolean; reason?: string }>(
-          'resume_task',
-          { task_id: t.id },
-        )
-        resumed = r?.resumed === true
-        reason = typeof r?.reason === 'string' ? r.reason : undefined
-      } catch (err) {
-        console.warn(`[Admin] Self-healing: resume_task ${t.id} RPC failed: ${(err as Error).message}`)
-      }
-      results.push({ task: t, resumed, reason })
-    }
-    return results
-  }
-
-  private async pushAgentConfigThenSweepResume(moduleId: string, restartCount: number): Promise<void> {
-    const pushed = await this.pushConfigToAgentModules()
-    if (!pushed) {
-      console.warn(`[Admin] Resume sweep for ${moduleId} deferred: config push failed`)
-      return
-    }
-
-    // Resume sweep：agent 配置 push 完成后再对所有 in-flight 任务尝试无损 resume。
-    // 失败的才标 failed + 生成 recovery 兜底。**任何 restart_count 都跑**（含完整重启=0）。
-    await this.sweepInterruptedTasksForResume(restartCount)
-  }
-
-  /**
-   * 保证 resume sweep 在重启后可靠跑一次，不依赖接住 agent 的 module_started 事件。
-   *
-   * 冷启动（整实例 stop/start）时 admin 先起、agent 后起，admin 跑到 onStart 兜底时 agentPort
-   * 还没设；且冷启动订阅竞态下 admin 可能漏接 agent 的 module_started 事件——两者叠加会让 sweep
-   * 永不触发，in-flight 任务（含 restart_instance 触发的重启任务）永远卡 executing / trace running。
-   *
-   * 这里主动轮询 MM 解析 agent 端口（resolveAgentPort），确认 agent 注册后再 sweep。等到 agent
-   * 真正就绪才跑，避免 agent 没起来就 sweep → resume_task RPC 失败 → 误判 needRecovery → 标 failed。
-   * sweep 幂等，与 onEvent module_started 的快路径触发重复执行也安全。
-   *
-   * pollMs / timeoutMs 仅为可测注入，生产用默认值。
-   */
-  private async ensureResumeSweepAfterAgentReady(
-    pollMs = 1000,
-    timeoutMs = 60_000,
-  ): Promise<void> {
-    const deadline = Date.now() + timeoutMs
-    for (;;) {
-      if (!this.agentPort) {
-        try {
-          await this.resolveAgentPort()
-        } catch {
-          // MM / agent 未就绪，继续轮询
-        }
-      }
-      if (this.agentPort) {
-        await this.pushAgentConfigThenSweepResume('crabot-agent', 0)
-        return
-      }
-      if (Date.now() >= deadline) {
-        console.warn('[Admin] Resume sweep 跳过：等待 agent 就绪超时')
-        return
-      }
-      await new Promise((r) => setTimeout(r, pollMs))
-    }
-  }
-
   private async handleListTasks(params: ListTasksParams): Promise<{ items: Task[]; pagination: { page: number; page_size: number; total_items: number; total_pages: number } }> {
     let tasks = Array.from(this.tasks.values())
 
@@ -5183,90 +4992,6 @@ export class AdminModule extends ModuleBase {
     }
   }
 
-  private isRecoverableFailedTask(task: Task): boolean {
-    if (task.status !== 'failed') return false
-    const error = (task.error ?? '').toLowerCase()
-    if (!error) return true
-    return !(
-      error.includes('agent_restarted_during_execution') ||
-      error.includes('user-canceled') ||
-      error.includes('user cancelled') ||
-      error.includes('人工取消')
-    )
-  }
-
-  private async handleListRecentTerminalTasks(
-    params: ListRecentTerminalTasksParams,
-  ): Promise<ListRecentTerminalTasksResult> {
-    const limit = Math.max(0, params.limit)
-    const items = Array.from(this.tasks.values())
-      .filter((task) => task.source.channel_id === params.channel_id)
-      .filter((task) => task.source.session_id === params.session_id)
-      .filter((task) => task.status === 'completed' || this.isRecoverableFailedTask(task))
-      .filter((task) => typeof task.completed_at === 'string' && task.completed_at >= params.since)
-      .sort((a, b) => (b.completed_at ?? '').localeCompare(a.completed_at ?? ''))
-      .slice(0, limit)
-
-    return { items }
-  }
-
-  /**
-   * P7 cutover 注记（本次不改行为）：本方法体内的 `admin.task_status_changed` 发布点是
-   * v3 要退役的两处 task 事件发布点之一——替代者是 agent 侧的 `agent.task_status_changed`
-   * （protocol-agent-v3 §9.2，发布方从 admin 变为 agent）。cutover 时随 admin 侧 task
-   * 写路径一并删除。
-   */
-  private async handleReviveTaskForSupplement(
-    params: ReviveTaskForSupplementParams,
-  ): Promise<ReviveTaskForSupplementResult> {
-    const task = this.tasks.get(params.task_id)
-    if (!task) {
-      throw new Error(AdminErrorCode.TASK_NOT_FOUND)
-    }
-    if (task.source.channel_id !== params.channel_id || task.source.session_id !== params.session_id) {
-      throw new Error(AdminErrorCode.TASK_NOT_FOUND)
-    }
-    if (task.status !== 'completed' && task.status !== 'failed') {
-      throw new Error(AdminErrorCode.INVALID_STATUS_TRANSITION)
-    }
-
-    const oldStatus = task.status
-    const now = generateTimestamp()
-    task.status = 'executing'
-    task.updated_at = now
-    task.started_at = task.started_at ?? now
-    task.completed_at = undefined
-    task.error = undefined
-    task.waiting_human_at = undefined
-    task.waiting_at = undefined
-    task.pending_question = undefined
-    task.messages.push({
-      id: generateId(),
-      role: 'human',
-      content: `[系统] 此 task 已结束，但同一会话收到新的后续补充。请基于前文继续处理，不要从头重做。\n\n用户补充：\n${params.supplement_text}`,
-      timestamp: now,
-      source: {
-        channel_id: params.channel_id,
-        session_id: params.session_id,
-      },
-    })
-    assertTaskInvariants(task)
-
-    await this.upsertTask(task)
-
-    this.publishAdminEvent('admin.task_status_changed', {
-      task_id: task.id,
-      old_status: oldStatus,
-      new_status: 'executing',
-    })
-
-    if (task.source.channel_id === 'admin-web') {
-      this.chatManager?.pushTaskUpdate(buildChatTaskSnapshot(task))
-    }
-
-    return { task }
-  }
-
   /**
    * 所有 task 状态变更的统一入口。维护派生字段、校验状态机、断言不变量、发布事件。
    *
@@ -5281,34 +5006,6 @@ export class AdminModule extends ModuleBase {
    * 任何直接 mutate task.status 的新代码 = bug。如发现需要绕过本方法的场景，
    * 优先检查是不是 VALID_TRANSITIONS 缺一条；不是的话再考虑加 opt。
    */
-  /**
-   * admin 单方面把 task 判死前，先叫停对应的 worker loop。
-   *
-   * 不变量：**task 非终态 ⟺ worker 活着**。admin 是 task 状态的 SSOT，但 worker loop 的
-   * 生死在 agent 进程里——admin 改 tasks.json 不会让 agent 那边挂起的 loop 消失。三条
-   * 判死路径（waiting_human 超时 / 重启 sweep / trace 对账）+ 人类主动 cancel 都必须先
-   * 走这里，否则 worker 会带着已死的 task 继续跑（发消息、撞状态机拒绝）。
-   *
-   * **只用于 admin 主动判死**：worker 自己上报终态时不能调——那是它正常收尾，abort 会打断。
-   *
-   * 失败不阻断判死（决策 2026-07-27）：admin 不可达 agent 时若不落终态，任务会永久卡在
-   * 非终态——那正是 2026-06-05 orphan bug 的形态，比窄窗口内 worker 多说一句话更糟。
-   * abort 没送达的窄窗口由 agent 侧 barrier onTimeout 自检兜底。
-   */
-  private async abortWorkerBeforeTerminal(taskId: TaskId, reason: string): Promise<void> {
-    try {
-      await this.callAgentRpc<{ task_id: TaskId; reason: string }, { aborted: boolean }>(
-        'abort_worker',
-        { task_id: taskId, reason },
-      )
-    } catch (err) {
-      console.warn(
-        `[Admin] abort_worker failed for task ${taskId} (${reason}); ` +
-        `落终态继续，agent 侧 barrier 自检兜底: ${err instanceof Error ? err.message : String(err)}`,
-      )
-    }
-  }
-
   /**
    * @deprecated **P7 cutover 时删除**（protocol-agent-v3 §5.2 / §9.2）。task 状态机在 v3 里
    * 属于 agent 台账，替代者是 `WorkerHarness` 的状态迁移（写台账 + 由 agent 发
@@ -5818,9 +5515,8 @@ export class AdminModule extends ModuleBase {
       if (!task) continue  // race：扫描期间 task 被删了
 
       try {
-        // 判死前叫停 worker。对账的前提是"trace 已全终态"，worker 通常不在了（abort no-op），
-        // 但 trace 漏写 / worker 卡死等 drift 场景下它可能还活着，统一走判死入口。
-        await this.abortWorkerBeforeTerminal(patch.taskId, `reconciliation: ${patch.reason}`)
+        // Legacy Admin tasks have no v3 worker-id mapping; reconciliation only
+        // repairs Admin's archived state and never controls an Agent worker.
         // 智能恢复：current=waiting_human/waiting → 终态非法，需中转 executing
         if (task.status === 'waiting_human' || task.status === 'waiting') {
           this.applyStatusTransition(task, 'executing')
@@ -5858,12 +5554,8 @@ export class AdminModule extends ModuleBase {
     }
 
     for (const task of expiredTasks) {
-      // 判死前先叫停 worker（它正 park 在 ask_human barrier 上，abort 会把它叫醒并退出）。
-      // spec 2026-05-14 §3.6 原设计是"切 failed + 推 system supplement 让 worker 收尾"，
-      // 已作废（决策 2026-07-27）：收尾要写回状态，而 failed 是无出边终态，语义自相矛盾；
-      // 且人类事后回复走 revive_task_for_supplement + checkpoint resume，上下文不会丢，
-      // 不需要临终抢救一份没人读的收尾报告。
-      await this.abortWorkerBeforeTerminal(task.id, 'waiting_human timeout')
+      // Legacy Admin task 只在本地归档中落 failed；v3 没有可按该 task id 叫停的 Agent worker。
+      // 人类事后回复由 manager/ledger 新路径处理，不再复活旧 ResumeCheckpoint loop。
       try {
         await this.handleUpdateTaskStatus({
           task_id: task.id,
@@ -5877,50 +5569,10 @@ export class AdminModule extends ModuleBase {
   }
 
   /**
-   * @deprecated **P7 cutover 时删除**（protocol-agent-v3 §8.5：`cancel_task` 与 `abort_worker`
-   * 均已列入退役接口）。v3 里 admin 不再单方面判死任务，取消由 manager 的 `kill_worker` 执行。
-   * 替代者：manager 工具面的 `kill_worker`（§4.3）。P5 只加注记、**行为不变**。
-   */
-  private async handleCancelTask(params: CancelTaskParams): Promise<{ task: Task; cancelled: boolean }> {
-    const task = this.tasks.get(params.task_id)
-    if (!task) {
-      throw new Error(AdminErrorCode.TASK_NOT_FOUND)
-    }
-
-    // VALID_TRANSITIONS 覆盖全部四个 in-flight 态 → cancelled（pending / planning /
-    // executing / waiting_human / waiting）；只有终态会被 applyStatusTransition 拒。
-    // 先叫停 worker 再切状态——取消一个还在跑的 worker 本来就是 cancel 的题中之义
-    // （旧 TODO"in-flight 取消应通知 worker"在此了结）。waiting 态的 worker 也是活着的
-    // （park 在 humanQueue.waitForPush 等 subagent / bg 通知），abort 唤醒它退出后
-    // waiting → cancelled 正常落地。只有对终态任务 abort 才是 no-op。
-    await this.abortWorkerBeforeTerminal(task.id, params.reason ?? 'cancelled by human')
-    try {
-      this.applyStatusTransition(task, 'cancelled', { error: params.reason })
-    } catch (err) {
-      // 把状态机的 INVALID_STATUS_TRANSITION 翻译成 admin 域的 TASK_NOT_CANCELLABLE
-      if (err instanceof Error && err.message === AdminErrorCode.INVALID_STATUS_TRANSITION) {
-        throw new Error(AdminErrorCode.TASK_NOT_CANCELLABLE)
-      }
-      throw err
-    }
-
-    await this.upsertTask(task)
-
-    // 兼容事件：保留 admin.task_cancelled（含 reason），与 applyStatusTransition 已发的
-    // admin.task_status_changed 并行存在
-    this.publishAdminEvent('admin.task_cancelled', {
-      task_id: task.id,
-      reason: params.reason,
-    })
-
-    return { task, cancelled: true }
-  }
-
-  /**
    * 永久删除 task（spec 2026-06-09 §4.3 后续 — UI 清理"测试消息"堆积的辅助 RPC）。
    *
-   * 跟 cancel_task 的差别：cancel 只切 status，task 仍在 admin.tasks；delete 直接从持久化删。
-   * 活跃 task（pending/planning/executing/waiting_human/waiting）拒绝删 —— 防误删跑中的任务。
+   * 仅允许删除终态归档记录；活跃 task（pending/planning/executing/waiting_human/waiting）拒绝删。
+   * legacy Admin task cancellation RPC 已退役，不再通过 Admin task id 控制 Agent worker。
    *
    * agent 侧的 trace 数据不受影响（仍在 traces-*.jsonl）；要清 trace 走 cleanup_old_tasks_by_count。
    */
@@ -5932,7 +5584,7 @@ export class AdminModule extends ModuleBase {
     const isActive = task.status === 'pending' || task.status === 'planning'
       || task.status === 'executing' || task.status === 'waiting_human' || task.status === 'waiting'
     if (isActive) {
-      throw new Error('TASK_STILL_ACTIVE: 活跃 task 不能直接删除，请先 cancel 或等待完成')
+      throw new Error('TASK_STILL_ACTIVE: 活跃 task 不能直接删除，请等待其进入终态')
     }
     this.tasks.delete(params.task_id)
     await this.saveTasks()

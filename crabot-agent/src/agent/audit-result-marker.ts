@@ -37,8 +37,7 @@ export function buildAuditPendingMarker(params: { auditId: string }): string {
     '<audit_pending>',
     `<audit_id>${params.auditId}</audit_id>`,
     '<instruction>',
-    '你的最终交付正在系统自检中。请调 wait_for_signal 工具挂起等待审核结果；',
-    '期间如有用户补充指示也会唤醒你。不要直接 end_turn。',
+    '你的最终交付正在系统自检中。审核期间系统会自动挂起当前回合；期间如有用户补充指示也会唤醒你。',
     '</instruction>',
     '</audit_pending>',
   ].join('\n')

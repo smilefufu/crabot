@@ -7,13 +7,11 @@
  * 1. AgentHandler：taskState 权限持有者初始化 / updateTaskPermissions 热替换 /
  *    getTaskPrincipal 原发起人身份 / per-task 隔离 / runEngine getResolvedPermissions 接线
  * 2. UnifiedAgent.refreshTaskPermissions（supplement 触发点）：原身份重新解析 + fail-soft
- * 3. UnifiedAgent resumeTaskInternal（resume 触发点）：新解析覆盖 checkpoint 快照 + 失败回退
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { AgentHandler } from '../../src/agent/agent-handler.js'
 import type { ExecuteTriggerMessageParams } from '../../src/agent/agent-handler.js'
 import { UnifiedAgent } from '../../src/unified-agent.js'
-import { AGENT_VERSION } from '../../src/constants.js'
 import type { Friend, FrontAgentContext, ResolvedPermissions } from '../../src/types.js'
 
 // Mock the engine so tests don't actually run the worker loop
@@ -240,7 +238,6 @@ describe('AgentHandler 任务权限持有者', () => {
 // ---------------------------------------------------------------------------
 
 type RefreshFn = (taskId: string) => Promise<void>
-type ResumeFn = (params: { task_id: string }) => Promise<{ resumed: boolean; reason?: string }>
 
 function buildAgentStub(rpcCall: ReturnType<typeof vi.fn>) {
   const agent = Object.create(UnifiedAgent.prototype) as Record<string, unknown>
@@ -300,114 +297,5 @@ describe('UnifiedAgent.refreshTaskPermissions（supplement 触发点）', () => 
 
     await (agent as { refreshTaskPermissions: RefreshFn }).refreshTaskPermissions('task-1')
     expect(rpcCall).not.toHaveBeenCalled()
-  })
-})
-
-describe('UnifiedAgent resumeTaskInternal（resume 触发点）', () => {
-  function buildResumeAgent(rpcCall: ReturnType<typeof vi.fn>) {
-    const agent = buildAgentStub(rpcCall)
-    agent.agentHandler = { hasActiveTask: () => false }
-    agent.getCheckpointForResume = () => ({
-      traceId: 'trace-1',
-      checkpoint: {
-        agent_version: AGENT_VERSION,
-        system_prompt: '',
-        messages: [{ role: 'user', content: 'hi' }],
-        worker_state: {
-          todo_items: [],
-          goal_revision_unlocked: false,
-          human_input_epoch: 0,
-          last_delivered_info_epoch: 0,
-        },
-        worker_context: {
-          task_origin: { channel_id: 'c1', session_id: 's1', session_type: 'group' },
-          sender_friend: makeFriend('original-sender'),
-          resolved_permissions: OLD_PERMS,
-        },
-      },
-    })
-    agent.contextAssembler = { assembleScheduledTaskContext: async () => ({}) }
-    const executeAgentLoopInBackground = vi.fn()
-    agent.agentLoopSubstrate = { executeAgentLoopInBackground }
-    return { agent, executeAgentLoopInBackground }
-  }
-
-  const GET_TASK_RESULT = {
-    task: {
-      id: 'task-1',
-      title: 't',
-      priority: 'normal',
-      source: { trigger_type: 'message', channel_id: 'c1', session_id: 's1' },
-    },
-  }
-
-  it('resume 用原发起人身份重新解析，覆盖 checkpoint 冻结快照', async () => {
-    const rpcCall = vi.fn().mockImplementation(async (_port: unknown, method: string) => {
-      if (method === 'get_task') return GET_TASK_RESULT
-      if (method === 'resolve_principal_permissions') return { resolved: FRESH_PERMS, sources: {} }
-      return {}
-    })
-    const { agent, executeAgentLoopInBackground } = buildResumeAgent(rpcCall)
-
-    const result = await (agent as { resumeTaskInternal: ResumeFn }).resumeTaskInternal({ task_id: 'task-1' })
-
-    expect(result.resumed).toBe(true)
-    const payload = executeAgentLoopInBackground.mock.calls[0][0] as {
-      context: { resolved_permissions?: ResolvedPermissions }
-    }
-    expect(payload.context.resolved_permissions).toEqual(FRESH_PERMS)
-    // 解析用原发起人身份
-    expect(rpcCall).toHaveBeenCalledWith(
-      19001,
-      'resolve_principal_permissions',
-      { sender_friend_id: 'original-sender', session_id: 's1', session_type: 'group' },
-      'test-agent',
-    )
-  })
-
-  it('resume 时解析失败 → 回退 checkpoint 快照', async () => {
-    const rpcCall = vi.fn().mockImplementation(async (_port: unknown, method: string) => {
-      if (method === 'get_task') return GET_TASK_RESULT
-      if (method === 'resolve_principal_permissions') throw new Error('admin down')
-      return {}
-    })
-    const { agent, executeAgentLoopInBackground } = buildResumeAgent(rpcCall)
-
-    const result = await (agent as { resumeTaskInternal: ResumeFn }).resumeTaskInternal({ task_id: 'task-1' })
-
-    expect(result.resumed).toBe(true)
-    const payload = executeAgentLoopInBackground.mock.calls[0][0] as {
-      context: { resolved_permissions?: ResolvedPermissions }
-    }
-    expect(payload.context.resolved_permissions).toEqual(OLD_PERMS)
-  })
-
-  it('scheduled 任务（带 target_session）resume 不重新解析，保留 creator 下发的 checkpoint 权限（review #38 回归）', async () => {
-    const rpcCall = vi.fn().mockImplementation(async (_port: unknown, method: string) => {
-      if (method === 'get_task') {
-        return {
-          task: {
-            id: 'task-1',
-            title: 't',
-            priority: 'normal',
-            source: { trigger_type: 'scheduled', channel_id: 'c1', session_id: 's1' },
-          },
-        }
-      }
-      return {}
-    })
-    const { agent, executeAgentLoopInBackground } = buildResumeAgent(rpcCall)
-
-    const result = await (agent as { resumeTaskInternal: ResumeFn }).resumeTaskInternal({ task_id: 'task-1' })
-
-    expect(result.resumed).toBe(true)
-    const payload = executeAgentLoopInBackground.mock.calls[0][0] as {
-      context: { resolved_permissions?: ResolvedPermissions }
-    }
-    expect(payload.context.resolved_permissions).toEqual(OLD_PERMS)
-    // 不得发起匿名会话重解析
-    expect(
-      rpcCall.mock.calls.some((c) => c[1] === 'resolve_principal_permissions'),
-    ).toBe(false)
   })
 })

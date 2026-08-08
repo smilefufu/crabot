@@ -1,6 +1,15 @@
 # Crabot 项目进度
 
-> 最后更新：2026-08-07 — #78 已部署；真实 Admin Chat 发现 cc 2.1.223 bypass 危险确认字段版本失配，修复中
+> 最后更新：2026-08-08 — PR #80 最终收口已实现、推送并进入自动 review
+
+## 2026-08-08 — PR #80：legacy loop 最终退役与 builtin bg-shell durable delivery（已推送，待自动 review）
+
+- 已按 `protocol-agent-v3.md` v3.0.5 和 `2026-08-08-pr80-finalization-{design,plan}.md` 收口：`wait_for_signal` 零生产残留；`start_task` / `start_recovery_task` / `create_task_from_schedule` / `resume_task*` / `cancel_task` / `abort_worker` 不再注册生产 RPC，Admin restart resume/self-healing 与 recent-terminal revival 链路已删除。
+- builtin worker 的后台 shell owner 记录 `worker_id`；shell 终态与 `exit_notification=pending` 原子落 registry。正常 exit、startup reap、readopt reaper 均走同一 receipt，重启扫描 terminal+pending；实际 WorkerInbox 投递后落 `delivered`，取消/无 worker/无化身落 `dead_letter`，意外失败保持 pending 并做有界退避重试。
+- durable receipt 采用 at-least-once：adapter 已收输入但 settlement 未落盘的崩溃窄窗允许重放；同进程 retry 用稳定 `entity_id` 在 WorkerInbox 去重，不因暂扣提前 settlement。pending receipt 不被 task cleanup 或 7 日 GC 删除；每 worker 保持 FIFO、不同 worker 独立，startup reconciliation 先落实例级 settled gate，迟到创建的 AgentHandler 也会立即开门。
+- agent-native system task 没有 incarnation；启动对账若其仍非终态，明确标 `failed`（`execution context lost on agent restart`）并发状态事件。`sendToWorker` / `queryWorker` / `killWorker` / `switchWorkerImpl` 等 worker-only API 统一抛 domain error，不伪造 incarnation。
+- Admin 历史 task 只作归档：启动读取时把遗留非终态记录本地修复为 failed，不再尝试恢复或控制 Agent worker；memory graph rebuild 仍是 `trigger_schedule → system-thread manager → crab-memory` 的 manager-native 特例。
+- 当前验证：Shared/Agent/Admin TypeScript build 与 Admin Web production build 通过；durable registry/inbox/harness/reconciliation focused Agent 测试最终 **164 passed**，Admin focused 测试 **123 passed**。Agent 全量最终为 **2509 passed / 20 failed / 2 skipped**：20 条均为本机既有环境问题（9 条 claude-code contract + 5 条 harness integration tmux timeout、1 条 tmux pane 前台命令、2 条 `/var`→`/private/var` Codex PATH、3 条 workspace realpath），本次相关测试均通过。Admin 全量 **1069 passed / 1 failed**，唯一失败是既有 `v1-cleanup` 跨仓扫描命中 Agent 的 `store_memory` 测试字面。多轮 fresh/Claude review 发现 retry liveness、settlement-only repair、per-worker/startup FIFO、迟到 handler gate、startup pending-busy 口径与 explicit-seq domain error，均已修复并补回归；最终独立 durable 与 contract 复审均为 **no material findings**。实现已推送 PR #80，等待 latest-head 自动 review；不自行 merge。
 
 ## 2026-08-07 — cc bypass 首次危险确认窗版本修复（进行中）
 
@@ -77,11 +86,11 @@
 
 - spec：`crabot-docs/superpowers/specs/2026-08-01-builtin-worker-injection-design.md`。补的是 P4/P5 两次记录里都点名的那条阻塞项——`spawn_worker` 不传 `SpawnSpec.builtin`，而 `defaultImpl='builtin'`，**cutover 后 manager 第一次派活必挂**。
 - 第 1 步（管道 + adapter 侧）：`builtinSpawnDefaults` 从无参 thunk 改成带 per-worker 上下文的工厂 `(ctx:{worker_id,workspace,origin,goal}) => SpawnSpec['builtin']`（无参签名从根上装不下 workspace/权限身份这些 spawn 时才知道的维度）；`spawnWorker` 在缺 `builtin` 且目标是 builtin 时回退调它；adapter 每次起化身（spawn/resume/fork/idle→续 burst）**现取**运行配置，per-worker 上下文落 `context.json`——builtin worker 因此**跨进程重启也能 revive**，而 LLM 连接信息始终不落盘；runEngine 补齐 `hookRegistry`（CLI 权限闸 / skill 目录 fence / git 写 fence）+ 固定权限档位 `BUILTIN_WORKER_PERMISSIONS` + 模型参数；工具集守卫在每轮 resolve 时硬断言不得出现 `set_cwd` / `set_task_goal`。
-- 第 2 步（生产装配，本次）：`unified-agent.ts` 实现真实工厂 `buildBuiltinWorkerRuntime`——LLM 走与现网 worker 同一个 `model_config.powerful` slot，工具 = 内置文件/shell + skills、crab-memory（A 组）、外部 MCP、tmp-page、生图，systemPrompt = `assembleAgentPrompt`（goal 模式关）+ 一段 v3 worker 契约尾巴（工作目录固定为 workspace / 没有任何直接联系人类的工具 / `finish_task` 是唯一终态信号）。**不装**：全部 messaging、`set_cwd`、goal 相关、`delegate_task`、`todo`、`find_task`、`wait_for_signal`。
+- 第 2 步（生产装配，本次）：`unified-agent.ts` 实现真实工厂 `buildBuiltinWorkerRuntime`——LLM 走与现网 worker 同一个 `model_config.powerful` slot，工具 = 内置文件/shell + skills、crab-memory（A 组）、外部 MCP、tmp-page、生图，systemPrompt = `assembleAgentPrompt`（goal 模式关）+ 一段 v3 worker 契约尾巴（工作目录固定为 workspace / 没有任何直接联系人类的工具 / `finish_task` 是唯一终态信号）。**不装**：全部 messaging、`set_cwd`、goal 相关、`delegate_task`、`todo`、`find_task`、`wait_for_signal`（现已退役）。
 - **"现取"是这次的核心不变量**：工厂以方法引用交给 bootstrap，配置（model slot / 人格 / skills / MCP / 生图 / 时区）一律在**被调用那一刻**读 `this`；`systemPrompt`/`tools` 再各包一层 thunk，engine 每轮 turn 重新 resolve。教训来自 PR C 的 `enableFeishuDocTool`：deps 对象被长期持有，任何在装配期就地求值的东西都会永久快照。变异实测：把 model 快照进闭包 → 验收 3 用例挂。
 - 权限身份用**显式常量档位**（所有 worker 同权限，干活面开、messaging/task/remote_exec/desktop 关、CLI 全 `none`），因为 `origin.creator_friend_id` 现网恒空。**PR J 的验收必须包含"worker 权限随发起人身份解析"**，否则 cutover 当天群里任何人都能让 worker 干 master 才该能干的事。这条写死，不得遗忘。
 - `tests/manager/manager-integration.test.ts` 的 `BuiltinAutoConfigAdapter` 垫片**退役**：它原本包一层 adapter 在 `spec.builtin` 缺失时补配置，现在改成给 `HarnessDeps.builtinSpawnDefaults` 一个按队列出配置的工厂——同样的语义，走的是生产回退路径本身（去掉该回退，这两个场景用例立刻挂）。
-- 已知能力缺口（spec 明列，不在本 PR）：**无上下文压缩**（`disableCompaction:true` 写死，长活 worker 撞窗口即 burst 失败）→ **PR F2，必须在 J 之前**；权限身份接线 → J；subagent / todo / `wait_for_signal` / `delegate_task` → 后续独立加法；builtin `readTrace` → P6。
+- 已知能力缺口（spec 明列，不在本 PR）：**无上下文压缩**（`disableCompaction:true` 写死，长活 worker 撞窗口即 burst 失败）→ **PR F2，必须在 J 之前**；权限身份接线 → J；subagent / todo / `delegate_task` → 后续独立加法；`wait_for_signal` 已退役；builtin `readTrace` → P6。
 - 验证：`crabot-agent` 全量 `2357 passed | 2 skipped`（204 文件），基线 `2348 | 2`，差值 = 新增 9，**零回归**；`tsc --noEmit` 干净；4 类变异逐个植入实测（① 去掉工厂回退 → 9 挂，含 manager-integration 两个场景；② 去掉 `hookRegistry` → 3 挂；③ 配置改回 spawn 快照 → 4 挂；④ model 快照进闭包 → 验收 3 挂）。
 
 ## 2026-07-31 — Manager/Worker 拆分 P7 / PR A：入站链路测试网（只加测试，生产代码零改动）
@@ -292,7 +301,7 @@
 
 - 背景：trace 复盘发现 agent 曾把 `.crabot/data/tmp-pages` 等 runtime 路径写入项目脚本、summary 和 `CURRENT_CONTEXT.md`。根因是 tmp-page v1 skill 直接指导 Worker 操作 runtime 文件。
 - 修复：新增 Worker 内置 `tmp_page_create/update/read_events/delete/list` 工具，工具内部负责 `owner_task_id`、TTL、HTML/meta/events 文件和公开 URL，Worker 只接触 `page_id`、`url`、结构化 events；`read_events` 返回 `has_more`/`next_after_event_id` 以支持继续读取。
-- 等待语义：不新增 `tmp_page_wait_feedback`。发页面后等待人类操作继续走 `send_message(intent='ask_human')` 或 `wait_for_signal`；页面提交仍由 `deliver_page_feedback{task_id,page_id}` 唤醒 owner task。
+- 等待语义：不新增 `tmp_page_wait_feedback`。发页面后等待人类操作继续走 `send_message(intent='ask_human')` （等待统一为自然结束回合 + 事件唤醒）；页面提交仍由 `deliver_page_feedback{task_id,page_id}` 唤醒 owner task。
 - 边界：工具结果、唤醒文案、skill 文档均不得暴露 `$DATA_DIR/tmp-pages`、`.crabot/data/tmp-pages`、`events.jsonl` 或内部端口；`tmp_page_update` 与 create 一样拒绝空 HTML。
 - 验证：tmp-page tools / feedback wakeup / server source / skill doc focused tests，`crabot-agent` / `crabot-admin` `tsc --noEmit`。
 
@@ -1200,3 +1209,10 @@ Module Manager (port 19000)
 ./dev.sh build    # 只构建不启动
 ./dev.sh vite     # 只启动 Vite
 ```
+
+## 2026-08-06 — legacy loop retirement / builtin bg wiring（实施中）
+
+- 已接入 builtin bg entity 的 `worker_id` owner 和 WorkerInbox 退出通知；跨重启 re-adopt 也按 owner worker 路由，旧无 worker owner 保留 legacy fallback。
+- 已删除 legacy schedule RPC/recovery RPC 与等待工具；`process_message` 仅保留 admin_chat，媒体下载改为独立 manager 通知。
+- memory graph rebuild 改为 manager-native `trigger_schedule`，不再创建无法观察的 legacy pending task。
+- 当前定向构建与测试通过；全量回归及 PR review 尚待完成。

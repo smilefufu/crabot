@@ -217,7 +217,7 @@ export const memoryV2Service = {
     return api.post('/memory/v2/maintenance/run', { scope })
   },
 
-  async rebuildMemoryGraph(): Promise<{ task_id: string }> {
+  async rebuildMemoryGraph(): Promise<{ accepted: true }> {
     return api.post('/memory/v2/graph/rebuild', {})
   },
 

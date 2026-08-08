@@ -62,28 +62,7 @@ interface AssembledFrontContext extends FrontAgentContext {
   supplement_candidates: TaskSummary[]
 }
 
-const RECENT_TERMINAL_WINDOW_HOURS = 24
-const RECENT_TERMINAL_LIMIT = 3
 const ACTIVE_TASK_STATUSES = ['pending', 'planning', 'executing', 'waiting_human', 'waiting'] as const
-const RECENT_TERMINAL_STATUSES = ['completed', 'failed'] as const
-const NON_RECOVERABLE_FAILED_ERROR_PATTERNS = [
-  'agent_restarted_during_execution',
-  'user-canceled',
-  'user cancelled',
-  '人工取消',
-] as const
-
-function isRecoverableFailedCandidate(error: unknown): boolean {
-  const message = typeof error === 'string'
-    ? error
-    : error instanceof Error
-      ? error.message
-      : String(error ?? '')
-  const normalized = message.toLowerCase()
-  return !NON_RECOVERABLE_FAILED_ERROR_PATTERNS.some(pattern =>
-    normalized.includes(pattern.toLowerCase())
-  )
-}
 
 function normalizeTaskSummaryTriggerType(
   triggerType: 'manual' | 'scheduled' | 'auto' | 'event' | 'message' | undefined
@@ -519,13 +498,10 @@ export class ContextAssembler {
    * - status ∈ {pending, planning, executing, waiting_human, waiting}（admin 侧）
    * - source_channel_id + source_session_id 完全匹配当前 session（admin 侧 + in-flight 侧都过滤）
    * - 排除 trigger_type='scheduled'（最终 union 后过滤）
-   * - 来源 = admin list_tasks ∪ agent 进程内 in-flight ∪ 最近终态补充候选，按 task_id 去重（避免 admin 同步延迟 race）
+   * - 来源 = admin list_tasks ∪ agent 进程内 in-flight，按 task_id 去重（避免 admin 同步延迟 race）
    */
   private async fetchActiveTasks(channelId: string, sessionId: string): Promise<TaskSummary[]> {
-    const [adminItems, recentItems] = await Promise.all([
-      this.fetchAdminActiveTasks(channelId, sessionId),
-      this.fetchRecentTerminalTasks(channelId, sessionId),
-    ])
+    const adminItems = await this.fetchAdminActiveTasks(channelId, sessionId)
 
     const byId = new Map<string, TaskSummary>()
 
@@ -557,9 +533,6 @@ export class ContextAssembler {
       filtered.push(t)
     }
 
-    for (const t of recentItems) {
-      if (!byId.has(t.task_id)) filtered.push(t)
-    }
     return filtered
   }
 
@@ -622,79 +595,6 @@ export class ContextAssembler {
     } catch (err) {
       console.warn(
         `[context-assembler] admin list_tasks failed, falling back to agent in-flight only:`,
-        err instanceof Error ? err.message : String(err)
-      )
-      return []
-    }
-  }
-
-  private async fetchRecentTerminalTasks(channelId: string, sessionId: string): Promise<TaskSummary[]> {
-    const sinceMs = Date.now() - RECENT_TERMINAL_WINDOW_HOURS * 3600 * 1000
-    const since = new Date(sinceMs).toISOString()
-    try {
-      const adminPort = await this.getAdminPort()
-      const result = await this.rpcClient.call<
-        { channel_id: string; session_id: string; since: string; limit: number },
-        {
-          items: Array<{
-            id: string
-            title: string
-            status: string
-            priority: string
-            assigned_worker?: string
-            source: {
-              channel_id?: string
-              session_id?: string
-              trigger_type?: 'manual' | 'scheduled' | 'auto' | 'event' | 'message'
-            }
-            messages?: Array<{ content: string; timestamp: string; source?: { platform_message_id?: string } }>
-            updated_at?: string
-            created_at?: string
-            completed_at?: string
-            error?: string
-          }>
-        }
-      >(
-        adminPort,
-        'list_recent_terminal_tasks',
-        {
-          channel_id: channelId,
-          session_id: sessionId,
-          since,
-          limit: RECENT_TERMINAL_LIMIT,
-        },
-        this.moduleId
-      )
-
-      return result.items
-        .filter((t) => RECENT_TERMINAL_STATUSES.includes(t.status as typeof RECENT_TERMINAL_STATUSES[number]))
-        .filter((t) => t.source.channel_id === channelId && t.source.session_id === sessionId)
-        .filter((t) => t.source.trigger_type !== 'scheduled')
-        .filter((t) => {
-          if (!t.completed_at) return false
-          const completedMs = new Date(t.completed_at).getTime()
-          return Number.isFinite(completedMs) && completedMs >= sinceMs
-        })
-        .filter((t) => t.status !== 'failed' || isRecoverableFailedCandidate(t.error))
-        .sort((a, b) => (b.completed_at ?? '').localeCompare(a.completed_at ?? ''))
-        .slice(0, RECENT_TERMINAL_LIMIT)
-        .map(t => ({
-          task_id: t.id,
-          title: t.title,
-          status: t.status,
-          priority: t.priority,
-          message_platform_ids: this.extractTaskMessagePlatformIds(t.messages),
-          source_channel_id: t.source.channel_id,
-          source_session_id: t.source.session_id,
-          trigger_type: normalizeTaskSummaryTriggerType(t.source.trigger_type),
-          candidate_kind: 'recent_terminal',
-          created_at: t.created_at,
-          completed_at: t.completed_at,
-          error: t.error,
-        }))
-    } catch (err) {
-      console.warn(
-        `[context-assembler] admin list_recent_terminal_tasks failed, continuing without recent terminal candidates:`,
         err instanceof Error ? err.message : String(err)
       )
       return []
@@ -810,14 +710,6 @@ export class ContextAssembler {
       return taskId ? { ...message, task_id: taskId as never } : message
     })
   }
-
-  /**
-   * 抓本 session 最近结束（completed / recoverable failed）的若干个任务，
-   * 按 completed_at desc 排序。给 Front 用来识别"继续之前那个 ..."的指代。
-   *
-   * 注意：list_recent_terminal_tasks 已经有 source_channel_id / source_session_id 过滤。
-   * 本地仍保留二次过滤，避免 Admin 侧行为漂移时扩大候选范围。
-   */
 
   // ==========================================================================
   // 场景画像

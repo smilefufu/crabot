@@ -85,7 +85,7 @@ import { AsyncMutex } from '../async-mutex'
 import type { DialogObjectId, Incarnation, LedgerWorker, TaskStatus } from './ledger-types'
 import type { LedgerStore } from './ledger-store'
 import type { WorkspaceManager } from './workspace-manager'
-import { WorkerInbox, type InboxItem } from './inbox'
+import { WorkerInbox, type InboxItem, type InboxSettlement } from './inbox'
 import { WorkerEventLog, type HarnessEvent, type HarnessEventDelivery, type HarnessEventKind } from './worker-events'
 import { applyStatusTransition, canTransition, isTerminalStatus, reviveTask, taskStatusFromIncarnation } from './task-status'
 import { join } from 'path'
@@ -274,6 +274,14 @@ export class TaskCancelledError extends Error {
   }
 }
 
+/** Ledger entry exists but has no worker incarnation (agent-native system task). */
+export class WorkerHasNoIncarnationError extends Error {
+  constructor(readonly worker_id: string) {
+    super(`worker ${worker_id} has no incarnation; agent-native system tasks do not support worker operations`)
+    this.name = 'WorkerHasNoIncarnationError'
+  }
+}
+
 /**
  * handoff(switchWorkerImpl,或透明接续 revive:false 分支的自动交接)的目标 impl 在这个
  * worker 名下已经有过化身(含已终态、含 fork 分支)——三个 adapter(builtin/claude-code/
@@ -332,6 +340,8 @@ export interface HarnessDeps {
    * 无参签名装不下这些维度(见 `BuiltinRuntimeFactory`)。
    */
   readonly builtinSpawnDefaults?: BuiltinRuntimeFactory
+  /** True while this worker owns a running background entity. */
+  readonly hasRunningBg?: (workerId: string) => Promise<boolean>
 }
 
 export interface SpawnWorkerParams {
@@ -373,6 +383,25 @@ export interface ReconcileReport {
 const EMPTY_CAPABILITY_BUNDLE: CapabilityBundle = { skills: [], mcp_servers: [] }
 
 export class WorkerHarness {
+  private readonly pendingBgNotifications = new Map<string, number>()
+
+  /**
+   * Marks a shell-exit notification before its async rendering starts.  This
+   * closes the idle-state race: task status cannot become waiting_input between
+   * the registry terminal update and WorkerInbox enqueue.
+   */
+  beginBgNotification(workerId: string): () => void {
+    this.pendingBgNotifications.set(workerId, (this.pendingBgNotifications.get(workerId) ?? 0) + 1)
+    return () => {
+      const remaining = (this.pendingBgNotifications.get(workerId) ?? 1) - 1
+      if (remaining > 0) this.pendingBgNotifications.set(workerId, remaining)
+      else this.pendingBgNotifications.delete(workerId)
+    }
+  }
+
+  hasPendingBgNotification(workerId: string): boolean {
+    return (this.pendingBgNotifications.get(workerId) ?? 0) > 0
+  }
   private readonly mutexes = new Map<string, AsyncMutex>()
   private readonly inboxes = new Map<string, WorkerInbox>()
   private readonly eventLogs = new Map<string, WorkerEventLog>()
@@ -537,17 +566,62 @@ export class WorkerHarness {
     })
   }
 
-  async sendToWorker(workerId: string, text: string, opts?: { raw?: boolean }): Promise<void> {
+  async sendToWorker(
+    workerId: string,
+    text: string,
+    opts?: {
+      raw?: boolean
+      onSettled?: InboxItem['onSettled']
+      dedupeKey?: string
+      onDeduplicated?: () => void
+    },
+  ): Promise<void> {
     const inbox = this.getInbox(workerId)
+    let enqueued = true
 
-    // "读台账状态 → 判断 cancelled → 入信箱"在同一临界区完成,不允许 check-then-act 跨 await。
+    // "读台账状态 → 判断 cancelled/化身 → 入信箱"在同一临界区完成,不允许 check-then-act 跨 await。
     await this.withLock(workerId, async () => {
       const found = await this.deps.ledger.findWorker(workerId)
       if (!found) throw new WorkerNotFoundError(workerId)
       if (found.worker.task.status === 'cancelled') throw new TaskCancelledError(workerId)
-      inbox.enqueue({ text, raw: opts?.raw ?? false, enqueued_at: this.deps.now() })
+      requireMainlineIncarnation(found.worker)
+      const item: InboxItem = {
+        text,
+        raw: opts?.raw ?? false,
+        enqueued_at: this.deps.now(),
+        allow_terminal_continuation: true,
+        ...(opts?.onSettled ? { onSettled: opts.onSettled } : {}),
+        ...(opts?.dedupeKey ? { dedupe_key: opts.dedupeKey } : {}),
+      }
+      enqueued = opts?.dedupeKey ? inbox.enqueueUnique(item) : (inbox.enqueue(item), true)
     })
 
+    if (!enqueued) opts?.onDeduplicated?.()
+    await this.flushInbox(workerId)
+  }
+
+  /** Queue an untrusted wake only while the task is non-terminal; never revive it later. */
+  async sendToActiveWorker(workerId: string, text: string): Promise<boolean> {
+    const inbox = this.getInbox(workerId)
+    let queued = false
+    await this.withLock(workerId, async () => {
+      const found = await this.deps.ledger.findWorker(workerId)
+      if (!found || isTerminalStatus(found.worker.task.status)) return
+      if (!mainlineIncarnation(found.worker)) return
+      inbox.enqueue({
+        text,
+        raw: false,
+        enqueued_at: this.deps.now(),
+        allow_terminal_continuation: false,
+      })
+      queued = true
+    })
+    if (queued) await this.flushInbox(workerId)
+    return queued
+  }
+
+  private async flushInbox(workerId: string): Promise<void> {
+    const inbox = this.getInbox(workerId)
     // 真正的投递不占用 harness 的 per-worker 锁(见文件头说明);inbox 自身的锁保证同一
     // 信箱的并发 flush 不重复投递。deliver 内部对每个 item 重新取一次当前化身,避免用
     // 入队时刻的过期 handle 投递。
@@ -556,13 +630,13 @@ export class WorkerHarness {
       if (!found) throw new WorkerNotFoundError(workerId)
       // 主线化身,不能用"数组最后一个"——fork 之后数组末尾是侧问分支,投递必须仍然打到
       // 主线(protocol-agent-v3 §5.3:fork 不影响主线)。
-      const incarnation = mainlineIncarnation(found.worker)
+      const incarnation = requireMainlineIncarnation(found.worker)
 
       // 台账已经把主线化身记为终态(如异步状态回调已经追上)——不必再尝试一次注定失败的
       // sendInput,直接进入 §5.3 透明接续。
       if (incarnation.state === 'exited') {
-        await this.continueTerminalWorker(workerId, item.text, incarnation.impl as WorkerImplId, incarnation.seq, item.raw)
-        return
+        if (item.allow_terminal_continuation === false) return 'delivered'
+        return this.continueTerminalWorker(workerId, item.text, incarnation.impl as WorkerImplId, incarnation.seq, item.raw)
       }
 
       const adapter = this.deps.adapters.get(incarnation.impl as WorkerImplId)
@@ -582,7 +656,8 @@ export class WorkerHarness {
         // continueTerminalWorker 的 sourceSeq 核对注释)——同样转入透明接续,对
         // sendToWorker 的调用方完全无感(不重新抛出)。
         if (err instanceof WorkerExitedError) {
-          await this.continueTerminalWorker(
+          if (item.allow_terminal_continuation === false) return 'delivered'
+          return this.continueTerminalWorker(
             workerId,
             item.text,
             incarnation.impl as WorkerImplId,
@@ -590,11 +665,11 @@ export class WorkerHarness {
             item.raw,
             err.ended_reason
           )
-          return
         }
         throw err
       }
       await this.appendEvent(workerId, handle.seq, 'input_sent', { text_len: item.text.length })
+      return 'delivered'
     })
   }
 
@@ -623,7 +698,7 @@ export class WorkerHarness {
       // 命中终态走 reviveTask——用户明确要求终止的任务被无声复活成 running。completed/failed
       // 允许切换(等价于"在办任务换实现"续办的合理场景,§5.3),只有 cancelled 硬拒绝。
       if (worker.task.status === 'cancelled') throw new TaskCancelledError(workerId)
-      const mainline = mainlineIncarnation(worker)
+      const mainline = requireMainlineIncarnation(worker)
       await this.handoffIncarnation(dialogObjectId, worker, mainline, impl, note ?? '')
     })
   }
@@ -686,8 +761,8 @@ export class WorkerHarness {
      * 台账已经有终态记录,reviveIncarnation 的回填段本就不会触发)。
      */
     sourceEndReason?: IncarnationEndReason
-  ): Promise<void> {
-    await this.withLock(workerId, async () => {
+  ): Promise<InboxSettlement> {
+    return this.withLock(workerId, async () => {
       let curImpl = sourceImpl
       let curSeq = sourceSeq
       // 与 (curImpl, curSeq) 同步前进:每次改换源化身,这个原因也要跟着换成新源的,
@@ -713,10 +788,10 @@ export class WorkerHarness {
             reason: 'task_cancelled',
             text_len: text.length,
           })
-          return
+          return 'dead_letter'
         }
 
-        const mainline = mainlineIncarnation(worker)
+        const mainline = requireMainlineIncarnation(worker)
 
         if (mainline.seq !== curSeq || mainline.impl !== curImpl) {
           // 并发窗口:拿锁之前,该 worker 已经被另一次并发触发的接续/切换抢先完成——主线已经
@@ -757,7 +832,7 @@ export class WorkerHarness {
             throw err
           }
           await this.appendEvent(workerId, handle.seq, 'input_sent', { text_len: text.length })
-          return
+          return 'delivered'
         }
 
         // 主线就是当前源:走接续(revive/handoff)。
@@ -780,7 +855,7 @@ export class WorkerHarness {
           const targetImpl = pickUnusedImpl(worker, this.deps.adapters, this.deps.defaultImpl)
           await this.handoffIncarnation(dialogObjectId, worker, mainline, targetImpl, text)
         }
-        return
+        return 'delivered'
       }
 
       // 超出重求值上限:短时间内主线连续多次切换/自然退出,撞上了同一次投递的每一次重新
@@ -1020,8 +1095,10 @@ export class WorkerHarness {
   ): Promise<{ chunk: string; nextCursor: OutputCursor }> {
     const found = await this.deps.ledger.findWorker(workerId)
     if (!found) throw new WorkerNotFoundError(workerId)
-    const incarnation =
-      opts?.seq === undefined ? mainlineIncarnation(found.worker) : findIncarnationBySeq(found.worker, opts.seq)
+    if (found.worker.incarnations.length === 0) throw new WorkerHasNoIncarnationError(workerId)
+    const incarnation = opts?.seq === undefined
+      ? requireMainlineIncarnation(found.worker)
+      : findIncarnationBySeq(found.worker, opts.seq)
     if (!incarnation) {
       throw new Error(`WorkerHarness.readWorkerOutput: no incarnation with seq=${opts?.seq} found for worker ${workerId}`)
     }
@@ -1036,6 +1113,10 @@ export class WorkerHarness {
       session_ref: incarnation.session_ref,
     }
     return adapter.readOutput(handle, cursor)
+  }
+
+  async hasWorker(workerId: string): Promise<boolean> {
+    return (await this.deps.ledger.findWorker(workerId)) !== undefined
   }
 
   async listWorkers(dialogObjectId: DialogObjectId): Promise<LedgerWorker[]> {
@@ -1339,6 +1420,10 @@ export class WorkerHarness {
       if (isTerminalStatus(worker.task.status)) return 'unchanged'
 
       const mainline = mainlineIncarnation(worker)
+      if (!mainline) {
+        await this.markAgentNativeSystemTaskLost(dialogObjectId, worker)
+        return 'failed'
+      }
       const adapter = this.deps.adapters.get(mainline.impl as WorkerImplId)
       if (!adapter) {
         await this.markCrashed(dialogObjectId, worker, mainline, `no adapter registered for impl '${mainline.impl}'`)
@@ -1373,6 +1458,26 @@ export class WorkerHarness {
       await this.realignAliveIncarnation(dialogObjectId, worker, mainline, observed)
       return 'revived'
     })
+  }
+
+  private async markAgentNativeSystemTaskLost(
+    dialogObjectId: DialogObjectId,
+    worker: LedgerWorker,
+  ): Promise<void> {
+    const now = this.deps.now()
+    const message = 'agent restart: execution context lost for agent-native system task'
+    const failed = await this.deps.ledger.upsertWorker(dialogObjectId, worker.worker_id, (prev) => {
+      if (!prev) return undefined
+      const nextTask = transitionTaskTo(prev.task, 'failed', { error: message, now })
+      return { ...prev, task: nextTask, updated_at: now }
+    })
+    await this.appendEvent(
+      worker.worker_id,
+      0,
+      'exited',
+      { reason: 'crashed', message },
+      failed?.task.status,
+    )
   }
 
   /**
@@ -1419,10 +1524,11 @@ export class WorkerHarness {
     mainline: Incarnation,
     observed: WorkerContractState
   ): Promise<void> {
-    // idle 是否算"等输入"本属 manager 判断职责(protocol-agent-v3 §5.2),这里与
-    // processStateChange 保持同一条保守默认:P4 接线后可按需要覆盖。
     const waitingInput = observed === 'idle' ? true : undefined
-    const nextStatus = taskStatusFromIncarnation(observed, undefined, waitingInput)
+    const nextStatus =
+      observed === 'idle' && (this.hasPendingBgNotification(worker.worker_id) || await this.deps.hasRunningBg?.(worker.worker_id))
+        ? 'running'
+        : taskStatusFromIncarnation(observed, undefined, waitingInput)
     const stateChanged = mainline.state !== observed
     const statusChanged = worker.task.status !== nextStatus
     if (!stateChanged && !statusChanged) return
@@ -1457,7 +1563,7 @@ export class WorkerHarness {
       if (isTerminalStatus(worker.task.status)) return
 
       // 主线化身——kill 必须打在主线上,不能被 fork 出的侧问分支顶替(protocol-agent-v3 §5.3)。
-      const incarnation = mainlineIncarnation(worker)
+      const incarnation = requireMainlineIncarnation(worker)
       const implId = incarnation.impl as WorkerImplId
       const adapter = this.deps.adapters.get(implId)
       if (adapter) {
@@ -1499,6 +1605,11 @@ export class WorkerHarness {
           reason: 'killed',
           text_len: item.text.length,
         })
+        try {
+          await item.onSettled?.('dead_letter')
+        } catch (error) {
+          console.warn(`[WorkerHarness] dead-letter settlement failed for ${workerId}:`, error)
+        }
       }
     })
   }
@@ -1565,7 +1676,7 @@ export class WorkerHarness {
       const { worker } = found
       // 侧问永远从当前主线化身分叉,不是"数组最后一个"——否则连续两次 query_worker 会让
       // 第二次 fork 挂在第一次 fork 的分支下面,而不是都从主线分叉(protocol-agent-v3 §5.3)。
-      const incarnation = mainlineIncarnation(worker)
+      const incarnation = requireMainlineIncarnation(worker)
       const implId = incarnation.impl as WorkerImplId
       const adapter = this.deps.adapters.get(implId)
       if (!adapter) {
@@ -1745,6 +1856,7 @@ export class WorkerHarness {
       // 主线分支:只有"当前主线化身"的回调才驱动 task.status——fork 之后数组末尾是侧问
       // 分支,不能再用"数组最后一个"判定"是不是当前化身"。
       const mainline = mainlineIncarnation(worker)
+      if (!mainline) return
       // 按 (impl, seq) 判定,不能只比 seq——跨实现切换(switchWorkerImpl/handoff)后,新
       // 实现的 adapter 是全新实例,其 seq 计数从头开始,与被 kill 的旧实现化身撞号是常态
       // (如 codex#1 顶替 claude-code#1)。只比 seq 会把旧实现迟到的 exited 回调误判成
@@ -1754,19 +1866,23 @@ export class WorkerHarness {
       if (target.state === 'exited') return // 目标化身已终态,迟到回调忽略(与上面 fork 分支的短路对称,避免对已终态化身再次施加迁移)
       if (isTerminalStatus(worker.task.status)) return // 已是终态(如已被 killWorker 落定),回调迟到,忽略
 
-      // idle 是否算"等输入"本属 manager 判断职责(protocol-agent-v3 §5.2);P3 尚无 manager,
-      // 保守默认 idle 一律记 waiting_input,P4 接线后可按需要覆盖这条映射。
+      // An idle builtin incarnation with an owned shell is still executing work:
+      // end_turn is its wait primitive, not task completion.
       const waitingInput = state === 'idle' ? true : undefined
-      const nextStatus: TaskStatus = taskStatusFromIncarnation(state, endReason, waitingInput)
+      const nextStatus: TaskStatus =
+        state === 'idle' && (this.hasPendingBgNotification(h.worker_id) || await this.deps.hasRunningBg?.(h.worker_id))
+          ? 'running'
+          : taskStatusFromIncarnation(state, endReason, waitingInput)
 
       const committed = await this.deps.ledger.upsertWorker(dialogObjectId, h.worker_id, (prev) => {
         if (!prev) return undefined
-        // 同状态重复回调(如 adapter 偶发对同一次转变重复通知)不是合法状态机边(VALID_TRANSITIONS
-        // 没有自环),会被 applyStatusTransition 当非法转换抛错——那样 upsertWorker 直接
-        // reject,连下面的 appendEvent 都不会跑,回调被 handleStateChange 的外层 catch 静默
-        // 吞掉,事件跟着一起丢。提前短路成 no-op,让调用方仍能走到 appendEvent 记录这次回调。
-        if (nextStatus === prev.task.status) return prev
-        const nextTask = applyStatusTransition(prev.task, nextStatus, { now })
+        // 同状态的 task 回调仍可能携带化身状态变化（例如 idle+owned bg
+        // 应保持 task running）。只有两者都已经一致时才是无操作。
+        const current = findIncarnation(prev, h.impl, h.seq)
+        if (nextStatus === prev.task.status && current?.state === state) return prev
+        const nextTask = nextStatus === prev.task.status
+          ? prev.task
+          : applyStatusTransition(prev.task, nextStatus, { now })
         // session_ref 现读现取,同上面 fork 分支的注释。
         const incarnations = patchIncarnationBySeq(
           prev.incarnations,
@@ -1895,9 +2011,15 @@ export class WorkerHarness {
  * (`readWorkerOutput`)本来就是用本函数取缺省。trace 侧若自己再写一遍"排除 forked_from
  * 取最后一条",就会让"主线是哪个化身"出现第二处真相。
  */
-export function mainlineIncarnation(worker: LedgerWorker): Incarnation {
+export function mainlineIncarnation(worker: LedgerWorker): Incarnation | undefined {
   const mainline = worker.incarnations.filter((inc) => inc.forked_from === undefined)
   return mainline[mainline.length - 1]
+}
+
+function requireMainlineIncarnation(worker: LedgerWorker): Incarnation {
+  const mainline = mainlineIncarnation(worker)
+  if (!mainline) throw new WorkerHasNoIncarnationError(worker.worker_id)
+  return mainline
 }
 
 /**

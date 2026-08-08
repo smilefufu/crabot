@@ -13,6 +13,25 @@ describe('WorkerInbox', () => {
     expect(inbox.pending).toBe(2)
   })
 
+  it('deduplicates a durable item while it is queued or in flight', async () => {
+    const inbox = new WorkerInbox('worker-1')
+    const first = makeItem('first', { dedupe_key: 'bg-shell:1' })
+    const duplicate = makeItem('duplicate', { dedupe_key: 'bg-shell:1' })
+
+    expect(inbox.enqueueUnique(first)).toBe(true)
+    expect(inbox.enqueueUnique(duplicate)).toBe(false)
+
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const flush = inbox.flush(async () => { await gate })
+    await new Promise<void>((resolve) => setImmediate(resolve))
+
+    expect(inbox.enqueueUnique(duplicate)).toBe(false)
+    release()
+    await flush
+    expect(inbox.pending).toBe(0)
+  })
+
   it('hold 期间 flush 不投递', async () => {
     const inbox = new WorkerInbox('worker-1')
     inbox.enqueue(makeItem('a'))
@@ -28,6 +47,37 @@ describe('WorkerInbox', () => {
     expect(count).toBe(0)
     expect(delivered).toEqual([])
     expect(inbox.pending).toBe(2)
+  })
+
+  it('settles a system item only after real delivery, not while held', async () => {
+    const inbox = new WorkerInbox('worker-1')
+    const settled = vi.fn()
+    inbox.hold('provisioning')
+    inbox.enqueue(makeItem('bg', { onSettled: settled }))
+
+    await inbox.flush(async () => undefined)
+    expect(settled).not.toHaveBeenCalled()
+
+    inbox.release()
+    await inbox.flush(async () => undefined)
+    expect(settled).toHaveBeenCalledOnce()
+    expect(settled).toHaveBeenCalledWith('delivered')
+  })
+
+  it('settlement persistence failure does not requeue an already delivered item', async () => {
+    const inbox = new WorkerInbox('worker-1')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    inbox.enqueue(makeItem('bg', {
+      onSettled: vi.fn().mockRejectedValue(new Error('registry write failed')),
+    }))
+
+    const delivered: string[] = []
+    await expect(inbox.flush(async (item) => { delivered.push(item.text) })).resolves.toBe(1)
+
+    expect(delivered).toEqual(['bg'])
+    expect(inbox.pending).toBe(0)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('settlement callback failed'), expect.any(Error))
+    warn.mockRestore()
   })
 
   it('release 后按序补投', async () => {
@@ -186,9 +236,10 @@ describe('WorkerInbox', () => {
     expect(count).toBe(1)
   })
 
-  it('drain 之后 in-flight 条目投递失败:不放回队列、不向上抛未捕获,仅告警', async () => {
+  it('drain 之后 in-flight 条目投递失败:不放回队列、不向上抛未捕获,结算 dead-letter 并告警', async () => {
     const inbox = new WorkerInbox('worker-1')
-    inbox.enqueue(makeItem('a'))
+    const settled = vi.fn()
+    inbox.enqueue(makeItem('a', { onSettled: settled }))
 
     let rejectDeliverA!: (err: Error) => void
     const deliverAGate = new Promise<void>((_resolve, reject) => {
@@ -212,6 +263,7 @@ describe('WorkerInbox', () => {
 
     // 化身已终结(已 drain),该条已无投递目标:flush 不应把此失败向上抛出
     await expect(flushPromise).resolves.toBe(0)
+    expect(settled).toHaveBeenCalledWith('dead_letter')
     expect(warnSpy).toHaveBeenCalledTimes(1)
     expect(inbox.pending).toBe(0)
 

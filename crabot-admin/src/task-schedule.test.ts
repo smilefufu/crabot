@@ -371,33 +371,14 @@ describe('AdminModule - Task Management', () => {
     })
   })
 
-  describe('cancel_task', () => {
-    it('should cancel a task', async () => {
-      // 创建任务
-      const createResponse = await makeProtocolRequest<{ task: Task }>(
-        TEST_PROTOCOL_PORT,
-        'create_task',
-        {
-          type: 'generic',
-          title: 'Cancel Test',
-          source: { trigger_type: 'manual' },
-        }
-      )
-
-      const taskId = createResponse.data.task.id
-
-      const response = await makeProtocolRequest<{ task: Task; cancelled: boolean }>(
-        TEST_PROTOCOL_PORT,
-        'cancel_task',
-        {
-          task_id: taskId,
-          reason: 'Test cancellation',
-        }
-      )
-
-      expect(response.success).toBe(true)
-      expect(response.data.cancelled).toBe(true)
-      expect(response.data.task.status).toBe('cancelled')
+  describe('legacy task mutation RPC retirement', () => {
+    it.each([
+      ['cancel_task', { task_id: 'legacy-task-id', reason: 'retired' }],
+      ['list_recent_terminal_tasks', { channel_id: 'channel-1', session_id: 'session-1', since: new Date(0).toISOString(), limit: 3 }],
+      ['revive_task_for_supplement', { task_id: 'legacy-task-id', channel_id: 'channel-1', session_id: 'session-1', supplement_text: 'retired' }],
+    ])('does not expose %s', async (method, params) => {
+      const response = await makeProtocolRequest(TEST_PROTOCOL_PORT, method, params)
+      expect(response.success).toBe(false)
     })
   })
 })

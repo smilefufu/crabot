@@ -23,6 +23,7 @@ import {
   type BgEntityRecord,
   type BgEntityStatus,
   type BgEntityType,
+  type BgExitNotificationStatus,
   type BgShellRegistryRecord,
   type RegistryFile,
 } from './types'
@@ -48,6 +49,10 @@ class AsyncMutex {
       release()
     }
   }
+}
+
+function hasPendingExitNotification(record: BgEntityRecord): boolean {
+  return record.type === 'shell' && record.exit_notification?.status === 'pending'
 }
 
 // ---------------------------------------------------------------------------
@@ -82,11 +87,11 @@ export class BgEntityRegistry {
     })
   }
 
-  async update(entity_id: string, patch: Partial<BgEntityRecord>): Promise<void> {
-    await this.mutex.run(async () => {
+  async update(entity_id: string, patch: Partial<BgEntityRecord>): Promise<BgEntityRecord | null> {
+    return this.mutex.run(async () => {
       const file = await this.readFile()
       const existing = file.entities[entity_id]
-      if (!existing) return
+      if (!existing) return null
 
       // Do not allow downgrading from a terminal state that was set intentionally
       // (e.g. kill tool sets 'killed'; exit handler must not overwrite with 'failed').
@@ -96,16 +101,60 @@ export class BgEntityRegistry {
         patch.status !== undefined &&
         !TERMINAL_PRIORITY.includes(patch.status as BgEntityStatus)
       ) {
-        return
+        return existing
       }
 
-      const updated: RegistryFile = {
+      const next = { ...existing, ...patch } as BgEntityRecord
+      if (
+        next.type === 'shell' &&
+        next.owner.worker_id &&
+        next.status !== 'running' &&
+        next.exit_notification === undefined
+      ) {
+        const updatedAt = typeof next.ended_at === 'string' ? next.ended_at : new Date().toISOString()
+        next.exit_notification = { status: 'pending', updated_at: updatedAt, attempts: 0 }
+      }
+
+      await this.writeAtomic({
         entities: {
           ...file.entities,
-          [entity_id]: { ...existing, ...patch } as BgEntityRecord,
+          [entity_id]: next,
         },
+      })
+      return next
+    })
+  }
+
+  async beginExitNotificationAttempt(entityId: string): Promise<void> {
+    await this.updateExitNotification(entityId, (state, now) => {
+      if (state.status !== 'pending') return state
+      const { last_error: _lastError, ...rest } = state
+      return { ...rest, status: 'pending', attempts: state.attempts + 1, updated_at: now }
+    })
+  }
+
+  async recordExitNotificationFailure(entityId: string, error: string): Promise<void> {
+    await this.updateExitNotification(entityId, (state, now) => state.status !== 'pending' ? state : ({
+      ...state,
+      updated_at: now,
+      last_error: error,
+    }))
+  }
+
+  async settleExitNotification(
+    entityId: string,
+    status: Exclude<BgExitNotificationStatus, 'pending'>,
+    reason?: string,
+  ): Promise<void> {
+    await this.updateExitNotification(entityId, (state, now) => {
+      if (state.status !== 'pending') return state
+      const { last_error: _lastError, dead_letter_reason: _deadLetterReason, ...rest } = state
+      return {
+        ...rest,
+        status,
+        updated_at: now,
+        ...(status === 'dead_letter' && reason ? { dead_letter_reason: reason } : {}),
       }
-      await this.writeAtomic(updated)
     })
   }
 
@@ -156,14 +205,30 @@ export class BgEntityRegistry {
     const deadShells: BgShellRegistryRecord[] = []
     const stalledAgents: BgAgentRegistryRecord[] = []
 
+    const deadShellIds = new Set<string>()
+    const addDeadShell = (record: BgShellRegistryRecord): void => {
+      if (deadShellIds.has(record.entity_id)) return
+      deadShellIds.add(record.entity_id)
+      deadShells.push(record)
+    }
+
     for (const rec of Object.values(file.entities)) {
+      if (
+        rec.type === 'shell' &&
+        rec.status !== 'running' &&
+        rec.owner.worker_id &&
+        rec.exit_notification?.status === 'pending'
+      ) {
+        addDeadShell(rec)
+        continue
+      }
       if (rec.status !== 'running') continue
 
       if (rec.type === 'shell') {
         const reaped = await this.reapShellIfDead(rec)
         if (reaped) {
-          // 带上终态返回，便于调用方据此发准确的退出通知。
-          deadShells.push({ ...rec, status: reaped.status, exit_code: reaped.exit_code, ended_at: new Date().toISOString() })
+          const updated = await this.get(rec.entity_id)
+          if (updated?.type === 'shell') addDeadShell(updated)
         } else {
           alive.push(rec)
         }
@@ -189,23 +254,27 @@ export class BgEntityRegistry {
    */
   async reapShellIfDead(
     rec: BgShellRegistryRecord,
-  ): Promise<{ status: 'completed' | 'failed'; exit_code: number } | null> {
+  ): Promise<{ status: 'completed' | 'failed' | 'killed'; exit_code: number } | null> {
     if (await this.isShellAlive(rec)) return null
     const sentinelEc = await this.readSentinelExitCode(rec)
     const status: 'completed' | 'failed' = sentinelEc === 0 ? 'completed' : 'failed'
     const exit_code = sentinelEc ?? -1
-    await this.update(rec.entity_id, {
+    const updated = await this.update(rec.entity_id, {
       status,
       exit_code,
       ended_at: new Date().toISOString(),
     } as Partial<BgShellRegistryRecord>)
+    if (updated?.type === 'shell') {
+      const settledStatus = updated.status === 'killed' ? 'killed' : updated.status === 'completed' ? 'completed' : 'failed'
+      return { status: settledStatus, exit_code: updated.exit_code ?? exit_code }
+    }
     return { status, exit_code }
   }
 
   async gcDeadEntities(now: Date): Promise<{ removed: string[] }> {
     const cutoffMs = now.getTime() - BG_ENTITY_GC_AFTER_DAYS * 24 * 60 * 60 * 1000
     const removed = await this.deleteEntriesWhere((rec) => {
-      if (rec.status === 'running') return false
+      if (rec.status === 'running' || hasPendingExitNotification(rec)) return false
       const lastActivityMs = new Date(rec.last_activity_at).getTime()
       const endedMs = rec.ended_at ? new Date(rec.ended_at).getTime() : 0
       return Math.max(lastActivityMs, endedMs) < cutoffMs
@@ -220,7 +289,10 @@ export class BgEntityRegistry {
    */
   async removeTerminalShellsByTask(taskId: string): Promise<string[]> {
     return this.deleteEntriesWhere(
-      (rec) => rec.type === 'shell' && rec.spawned_by_task_id === taskId && rec.status !== 'running',
+      (rec) => rec.type === 'shell' &&
+        rec.spawned_by_task_id === taskId &&
+        rec.status !== 'running' &&
+        !hasPendingExitNotification(rec),
     )
   }
 
@@ -274,6 +346,30 @@ export class BgEntityRegistry {
   // -------------------------------------------------------------------------
   // Private helpers
   // -------------------------------------------------------------------------
+
+  private async updateExitNotification(
+    entityId: string,
+    mutate: (
+      state: NonNullable<BgShellRegistryRecord['exit_notification']>,
+      now: string,
+    ) => NonNullable<BgShellRegistryRecord['exit_notification']>,
+  ): Promise<void> {
+    await this.mutex.run(async () => {
+      const file = await this.readFile()
+      const existing = file.entities[entityId]
+      if (existing?.type !== 'shell' || existing.exit_notification === undefined) return
+      const next: BgShellRegistryRecord = {
+        ...existing,
+        exit_notification: mutate(existing.exit_notification, new Date().toISOString()),
+      }
+      await this.writeAtomic({
+        entities: {
+          ...file.entities,
+          [entityId]: next,
+        },
+      })
+    })
+  }
 
   private async readFile(): Promise<RegistryFile> {
     try {

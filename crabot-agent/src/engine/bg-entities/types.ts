@@ -5,11 +5,22 @@
 
 export type BgEntityType = 'shell' | 'agent'
 export type BgEntityStatus = 'running' | 'completed' | 'failed' | 'killed' | 'stalled'
+export type BgExitNotificationStatus = 'pending' | 'delivered' | 'dead_letter'
+
+export interface BgExitNotificationState {
+  readonly status: BgExitNotificationStatus
+  readonly updated_at: string
+  readonly attempts: number
+  readonly last_error?: string
+  readonly dead_letter_reason?: string
+}
 
 export interface BgEntityOwner {
   readonly friend_id: string
   readonly session_id?: string
   readonly channel_id?: string
+  /** Builtin worker owner; optional so persisted legacy entities remain readable. */
+  readonly worker_id?: string
 }
 
 interface BgEntityBase {
@@ -32,6 +43,8 @@ export interface BgShellRegistryRecord extends BgEntityBase {
   readonly pgid: number
   /** 进程实际启动时间（防 PID reuse） */
   readonly process_started_at: string
+  /** Worker-owned shell exit delivery receipt; absent on legacy/friend-owned records. */
+  exit_notification?: BgExitNotificationState
 }
 
 export interface BgAgentRegistryRecord extends BgEntityBase {

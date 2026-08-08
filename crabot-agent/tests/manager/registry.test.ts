@@ -671,6 +671,50 @@ describe('ManagerRegistry', () => {
     expect(JSON.stringify(lastCall.messages)).toContain(`w-${1 + MAX_SELF_WAKE_CHAIN}`)
   })
 
+  // --- media notification: 独立 manager 唤醒，不伪装 schedule/bg ---
+
+  it('media notification: 空闲 manager 走独立 wake，事件文本不是 schedule 或 bg notification', async () => {
+    const { adapter, queue } = makeAdapter()
+    queue.push({ text: '媒体已处理', stopReason: 'end_turn' })
+    const registry = new ManagerRegistry(baseRegistryDeps({ adapter }))
+    const key = 'wechat::media-idle' as ManagerKey
+    const loop = registry.getOrCreate(key)
+    const wakeUpSpy = vi.spyOn(loop, 'wakeUp')
+
+    await registry.routeMediaNotification({ channelId: 'wechat', sessionId: 'media-idle', text: 'fm-1 ready' })
+
+    expect(wakeUpSpy).toHaveBeenCalledWith({ kind: 'media_notification', text: 'fm-1 ready' })
+    const state = await store.load(key)
+    expect(JSON.stringify(state.recent)).toContain('[媒体下载完成]')
+    expect(JSON.stringify(state.recent)).not.toContain('<bg-notification>')
+    expect(JSON.stringify(state.recent)).not.toContain('[定时任务触发]')
+  })
+
+  it('media notification: episode 运行中只入 mailbox，不额外 route schedule/wake', async () => {
+    const key = 'wechat::media-active' as ManagerKey
+    let registry: ManagerRegistry
+    let injected = false
+    const adapter: LLMAdapter = {
+      async *stream() {
+        if (!injected) {
+          injected = true
+          await registry.routeMediaNotification({ channelId: 'wechat', sessionId: 'media-active', text: 'fm-2 ready' })
+        }
+        yield* chunksFromContent([{ type: 'text', text: '收到' }], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+      },
+      updateConfig: () => {},
+    }
+    registry = new ManagerRegistry(baseRegistryDeps({ adapter }))
+    const loop = registry.getOrCreate(key)
+    const enqueueSpy = vi.spyOn(loop, 'enqueueDuringEpisode')
+    const wakeUpSpy = vi.spyOn(loop, 'wakeUp')
+
+    await registry.routeHumanMessages('wechat', 'media-active', [makeChannelMessage('开始')])
+
+    expect(enqueueSpy).toHaveBeenCalledWith({ kind: 'media_notification', text: 'fm-2 ready' })
+    expect(wakeUpSpy).toHaveBeenCalledTimes(1)
+  })
+
   // --- onAsyncError 接线（Task 4 遗留出口） ---
 
   it('onAsyncError: episode 运行中收到异步错误 → enqueueDuringEpisode，不额外开新 episode', async () => {

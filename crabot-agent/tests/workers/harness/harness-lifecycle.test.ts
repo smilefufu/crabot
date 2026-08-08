@@ -157,7 +157,10 @@ function now(): string {
   return new Date(nowValue).toISOString()
 }
 
-async function makeHarness(fakeOpts: FakeAdapterOpts = {}): Promise<{ harness: WorkerHarness; fake: FakeAdapter; adaptersMap: Map<WorkerImplId, WorkerAdapter>; workersDir: string }> {
+async function makeHarness(
+  fakeOpts: FakeAdapterOpts = {},
+  depsOverrides: Partial<Pick<HarnessDeps, 'hasRunningBg'>> = {},
+): Promise<{ harness: WorkerHarness; fake: FakeAdapter; adaptersMap: Map<WorkerImplId, WorkerAdapter>; workersDir: string }> {
   const ledgersDir = join(dataDir, 'ledgers')
   const workspacesRoot = join(dataDir, 'workspaces')
   const workersDir = join(dataDir, 'workers')
@@ -178,6 +181,7 @@ async function makeHarness(fakeOpts: FakeAdapterOpts = {}): Promise<{ harness: W
     workersDir,
     now,
     onEvent: (e) => events.push(e),
+    ...depsOverrides,
   }
   const harness = new WorkerHarness(deps)
   const fake = new FakeAdapter({ ...fakeOpts, onStateChange: harness.handleStateChange })
@@ -289,6 +293,34 @@ describe('WorkerHarness.handleStateChange', () => {
     const [w2] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
     expect(w2.task.status).toBe('completed')
     expect(w2.incarnations[0].ended_reason).toBe('completed')
+  })
+
+  it('idle 且名下仍有运行中的 bg shell 时保持 running，而不是 waiting_input', async () => {
+    const { harness, fake } = await makeHarness({}, { hasRunningBg: async () => true })
+    const worker = await harness.spawnWorker(spawnParams())
+    fake.emitStateChange(
+      { worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` },
+      'idle',
+    )
+
+    await waitUntil(async () => (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]?.incarnations[0]?.state === 'idle')
+    const [stored] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(stored.task.status).toBe('running')
+  })
+
+  it('idle 且 bg 退出通知尚未入 inbox 时保持 running，通知完成后无 bg 才能 waiting_input', async () => {
+    const { harness, fake } = await makeHarness({}, { hasRunningBg: async () => false })
+    const worker = await harness.spawnWorker(spawnParams())
+    const complete = harness.beginBgNotification(worker.worker_id)
+    const handle = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
+
+    fake.emitStateChange(handle, 'idle')
+    await waitUntil(async () => (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]?.incarnations[0]?.state === 'idle')
+    expect((await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0].task.status).toBe('running')
+
+    complete()
+    fake.emitStateChange(handle, 'idle')
+    await waitUntil(async () => (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]?.task.status === 'waiting_input')
   })
 
   // ---- endReason:harness 不再自己猜,一律取 adapter 上报的真值 ----
@@ -623,6 +655,18 @@ describe('WorkerHarness.sendToWorker', () => {
     await harness.sendToWorker(worker.worker_id, '/exit', { raw: true })
 
     expect(fake.sendInputCalls[0].opts).toEqual({ raw: true })
+  })
+
+  it('sendToActiveWorker 不复活 terminal task', async () => {
+    const { harness, fake } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    await expect(harness.sendToActiveWorker(worker.worker_id, '反馈')).resolves.toBe(true)
+    expect(fake.sendInputCalls.at(-1)?.text).toBe('反馈')
+
+    await harness.killWorker(worker.worker_id)
+    fake.sendInputCalls.length = 0
+    await expect(harness.sendToActiveWorker(worker.worker_id, '迟到反馈')).resolves.toBe(false)
+    expect(fake.sendInputCalls).toHaveLength(0)
   })
 
   it('不存在的 worker_id → WorkerNotFoundError', async () => {

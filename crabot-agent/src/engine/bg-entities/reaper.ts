@@ -14,10 +14,12 @@ import type { BgShellRegistryRecord } from './types'
 export interface ReadoptedExitInfo {
   readonly entity_id: string
   readonly command: string
-  readonly status: 'completed' | 'failed'
+  readonly status: 'completed' | 'failed' | 'killed'
   readonly exit_code: number
   readonly spawned_by_task_id: string
   readonly owner_friend_id?: string
+  /** Optional so legacy persisted entities keep their legacy notification route. */
+  readonly worker_id?: string
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 5_000
@@ -60,7 +62,7 @@ export class ReadoptReaper {
 
   private async poll(): Promise<void> {
     for (const [id, rec] of [...this.watched]) {
-      let reaped: { status: 'completed' | 'failed'; exit_code: number } | null
+      let reaped: { status: 'completed' | 'failed' | 'killed'; exit_code: number } | null
       try {
         reaped = await this.registry.reapShellIfDead(rec)
       } catch {
@@ -76,6 +78,7 @@ export class ReadoptReaper {
           exit_code: reaped.exit_code,
           spawned_by_task_id: rec.spawned_by_task_id,
           ...(rec.owner.friend_id ? { owner_friend_id: rec.owner.friend_id } : {}),
+          ...(rec.owner.worker_id ? { worker_id: rec.owner.worker_id } : {}),
         })
       } catch {
         /* 通知回调抛错不影响其他实体 */

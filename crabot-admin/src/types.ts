@@ -1014,28 +1014,6 @@ export interface UpdateTaskStatusResult {
   task: Task
 }
 
-export interface ListRecentTerminalTasksParams {
-  channel_id: ModuleId
-  session_id: SessionId
-  since: string
-  limit: number
-}
-
-export interface ListRecentTerminalTasksResult {
-  items: Task[]
-}
-
-export interface ReviveTaskForSupplementParams {
-  task_id: TaskId
-  channel_id: ModuleId
-  session_id: SessionId
-  supplement_text: string
-}
-
-export interface ReviveTaskForSupplementResult {
-  task: Task
-}
-
 // 分配 Worker
 export interface AssignWorkerParams {
   task_id: TaskId
@@ -1076,17 +1054,6 @@ export interface GetTaskMessagesParams extends PaginationParams {
 }
 
 export type GetTaskMessagesResult = PaginatedResult<TaskMessage>
-
-// 取消任务
-export interface CancelTaskParams {
-  task_id: TaskId
-  reason?: string
-}
-
-export interface CancelTaskResult {
-  task: Task
-  cancelled: boolean
-}
 
 // 任务统计
 export interface TaskStats {

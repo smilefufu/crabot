@@ -66,9 +66,8 @@ export interface TaskContext {
    *
    *  spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.1 + Revision 第 1 段 */
   outboundBuffer?: Array<OutboundBufferEntry>
-  /** ask_human barrier 超时自醒时的兜底钩子：查一次 task 状态，已终态则 abort worker。
-   *  正常路径下 admin 判死会先经 abort_worker 叫停 worker，走不到这里；这条覆盖那次 RPC
-   *  失败的窄窗口。admin 不可达时 fail-open（继续跑）。 */
+  /** ask_human barrier 超时自醒时的本地兜底钩子：查一次 task 状态，已终态则 abort worker。
+   *  admin 不可达时 fail-open（继续跑）。 */
   abortIfTaskTerminal?: () => Promise<void>
   /** 当前 task 是否处于"等审态"（activeAuditId 非空）。同步 getter，工具内每次调用现读。
    *  工作态（false）= 缓冲；等审态（true）= 立即 flush 给用户（过程响应）。
@@ -185,8 +184,8 @@ const ASK_HUMAN_PENDING_QUESTION_MAX_LEN = 2000
  * 就是 worker 假醒空跑。这里取 24h+15min 留足余量。
  * 注：admin 端两个常量都在 crabot-admin/src/index.ts AdminModule 上。
  *
- * 顺序保证不只靠这个常量——admin 判死前会经 abort_worker 主动叫停 worker（维持
- * 「task 非终态 ⟺ worker 活着」），本常量与 setBarrier 的 onTimeout 兜底是第二、三道防线。
+ * barrier 超时后由 setBarrier 的 onTimeout 本地复查 Admin task 状态；确认任务已终态时
+ * 才停止旧 worker，Admin 不再通过 task lifecycle RPC 主动控制 Agent worker。
  */
 const ASK_HUMAN_BARRIER_TIMEOUT_MS = 24 * 60 * 60 * 1000 + 15 * 60 * 1000
 
@@ -1337,7 +1336,7 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
           if (result.status === 'fetching') {
             return wrapText({
               ...result,
-              note: '文件较大，正在后台下载。请调 wait_for_signal({reason:"等媒体下载", timeout_ms: 300000}) 挂起等待；' +
+              note: '文件较大，正在后台下载。请 end_turn；下载完成事件会唤醒对应会话。' +
                 '下载完成会唤醒你，届时再次调用 fetch_media 即可拿到 file_path。',
             })
           }

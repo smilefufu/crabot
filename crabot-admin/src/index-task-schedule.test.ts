@@ -240,18 +240,14 @@ describe('AdminModule - Task & Schedule', () => {
       }
     })
 
-    it('should cancel task', async () => {
-      const response = await makeProtocolRequest<{ task: Task; cancelled: boolean }>(
+    it('does not expose retired cancel_task', async () => {
+      const response = await makeProtocolRequest(
         TEST_PROTOCOL_PORT,
         'cancel_task',
-        {
-          task_id: taskId,
-          reason: 'Test cancellation',
-        }
+        { task_id: taskId, reason: 'retired' },
       )
 
-      expect(response.success).toBe(true)
-      expect(response.data.task.status).toBe('cancelled')
+      expect(response.success).toBe(false)
     })
 
     it('should return error for non-existent task', async () => {

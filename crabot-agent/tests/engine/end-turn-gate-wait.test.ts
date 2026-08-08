@@ -3,7 +3,7 @@
  *
  * Phase 4（spec 2026-06-10-audit-anchor-human-request §4.7）：
  * gate 派出 audit 后返回 wait 信号，engine 直接 setBarrier 挂起等 humanQueue push，
- * 取代旧的「注入 [audit_pending] 文本 → LLM 调 wait_for_signal」往返。
+ * 取代旧的「注入 [audit_pending] 文本 → LLM 调 end_turn」往返。
  * 核心断言：等待期间不发生额外 LLM 调用（totalTurns 不为等待 +1）。
  */
 

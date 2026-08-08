@@ -237,7 +237,7 @@ function formatAuditFailReport(result: AuditResultMarker): string {
   return lines.join('\n')
 }
 
-// endTurnGate 'wait' 路径的挂起超时兜底——与 WAIT_FOR_SIGNAL_TIMEOUT_MS 对齐（24 小时）。
+// endTurnGate 挂起路径的超时兜底（24 小时）。
 // 正常路径不依赖它：audit onExit 必然 push marker 唤醒。
 const GATE_WAIT_BARRIER_TIMEOUT_MS = 24 * 60 * 60 * 1000
 
@@ -253,7 +253,7 @@ export const AUDIT_WAIT_FALLBACK_TIMEOUT_MS = 10 * 60 * 1000
  * endTurnGate 返回 { kind: 'wait' } 后的挂起处理：audit 已异步派出，engine 直接
  * setBarrier + waitBarrier 等 humanQueue push（audit 结果 / 用户 supplement），唤醒后
  * 走 drainAndDispatchMarkers 既有分流。全程不烧 LLM 轮次——取代旧的「注入
- * [audit_pending] 文本 → LLM 读完整上下文 → 调 wait_for_signal」往返（每轮 audit
+ * [audit_pending] 文本 → LLM 读完整上下文 → 调 end_turn」往返（每轮 audit
  * 浪费一次全量 context 的 LLM 调用）。
  *
  * 返回 'exit' → caller buildResult('completed') 退出（audit pass + 无后续 pending，
@@ -600,7 +600,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
       // 顺序意义：在 drain（上方 humanMessageQueue?.hasPending 块）之后判断——
       // 让 audit_result.pass=true 优先 drained → clearActiveAuditId → 此处 hasActiveAudit=false
       // 不会误挂起已完成的 audit。
-      // 旧版（2026-06-07 §4.6 Task 13）注入"请调 wait_for_signal 等审完成"续 loop——该文案会
+      // 旧版（2026-06-07 §4.6 Task 13）注入"请调 end_turn 等审完成"续 loop——该文案会
       // 教坏 agent 在无 audit 时也主动 wait（trace ac9676e3 空转实证），且每轮拦截烧一次全量
       // context 的 LLM 调用。现直接复用 gate 'wait' 的挂起路径：零注入、零额外 LLM 轮，
       // 挂起幂等可重入（人类追问唤醒 → 处理 → 再 end_turn → 再挂起）。
@@ -795,7 +795,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
         messages.push(createBatchToolResultMessage(cancelledResults))
 
         // 防御性 marker 分流：理论上 pre-tool barrier 唤醒不会拿到 audit_result（audit 在
-        // wait_for_signal 之后唤醒，走 post-tool 路径），但为防 marker 从此路径漏过去，统一走分流。
+        // end_turn 之后唤醒，走 post-tool 路径），但为防 marker 从此路径漏过去，统一走分流。
         // 这里如果拿到 audit_result.pass=true 且无剩余内容，仍按"已完成"退出。
         const supplements = options.humanMessageQueue.drainPending()
         const dispatch = await drainAndDispatchMarkers(supplements, options, messages, totalTurns, flushAndTrackDelivery)
@@ -1057,7 +1057,7 @@ export async function runEngine(params: RunEngineParams): Promise<EngineResult> 
     //   - audit_result.pass=true + 无剩余 pending → flush buffer + 直接 buildResult('completed')
     //   - audit_result.pass=false → 丢 buffer + 注入 detailedReport 续 loop
     //   - audit_aborted → 注入"原 audit 已废"提示续 loop
-    // 这是 audit_result marker 的主要进入路径（wait_for_signal setBarrier → audit 完成 push 唤醒 → 此处 drain）。
+    // 这是 audit_result marker 的主要进入路径（end_turn setBarrier → audit 完成 push 唤醒 → 此处 drain）。
     if (options.humanMessageQueue && !bufferedSendMessageInTurn) {
       const supplements = options.humanMessageQueue.drainPending()
       const dispatch = await drainAndDispatchMarkers(supplements, options, messages, totalTurns, flushAndTrackDelivery)

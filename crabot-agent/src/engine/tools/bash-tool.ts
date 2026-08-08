@@ -23,7 +23,7 @@ export const MAX_FOREGROUND_TIMEOUT_MS = 600_000
 /**
  * 前台宽限期：命令先前台运行这么久。
  * 期内退出 → 同步内联返回（等同普通同步调用）；超过仍在跑 → 转后台（命令不中断）+
- * 按实际工具表引导 agent 用 wait_for_signal 或 blocking Output 等待。
+ * 用 end_turn 等事件唤醒，或用 blocking Output 同步等待。
  * 取代旧的「显式 timeout>60s 直接转 bg」破坏性逻辑。
  */
 export const FOREGROUND_GRACE_PERIOD_MS = 10_000
@@ -273,9 +273,8 @@ async function runForegroundWithGrace(
       return {
         output:
           `命令运行已超过 ${sec}s，转入后台继续运行（entity_id: ${result.entity_id}）——命令未中断。\n` +
-          `若你还有别的事可做，现在就去做。若工具列表中有 wait_for_signal，可调 ` +
-          `wait_for_signal(reason="等 ${command.slice(0, 40)}") 挂起，命令退出会唤醒主任务；` +
-          `若工具列表中没有 wait_for_signal，请调 Output("${result.entity_id}", block=true, timeout_ms=600000) 阻塞等待并读取输出。`,
+          `若你还有别的事可做，现在就去做；没有其他工作时自然结束当前回合，命令退出会以系统事件唤醒。\n` +
+          `需要同步等待时，请调 Output("${result.entity_id}", block=true, timeout_ms=600000) 阻塞等待并读取输出。`,
         isError: false,
       }
     }
@@ -308,7 +307,7 @@ export function createBashTool(
     description:
       'Executes a bash command and returns its output. ' +
       `命令前台运行；若运行超过 ${Math.round(FOREGROUND_GRACE_PERIOD_MS / 1000)}s 仍未结束，自动转入后台并返回 entity_id（命令**继续运行、不中断**），` +
-      '随后可继续做别的。工具列表中有 wait_for_signal 时可挂起等待主任务唤醒；没有该工具时用 Output(entity_id, block=true, timeout_ms=600000) 阻塞等待。',
+      '随后可继续做别的；没有其他工作时自然结束当前回合，退出事件会唤醒 worker。同步等待使用 Output(entity_id, block=true, timeout_ms=600000)。',
     inputSchema: {
       type: 'object',
       properties: {

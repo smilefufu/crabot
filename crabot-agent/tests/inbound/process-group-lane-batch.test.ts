@@ -201,6 +201,7 @@ describe('processGroupLaneBatch —— 群聊 lane handler（cutover 后下游�
 
     // barrier 的观测口：cutover 后这两个入站专用包装不该再被碰（v3 无此竞态）。
     internals.agentHandler = {
+      createBuiltinBgToolOptions: () => undefined,
       getActiveTasksByOrigin: () => {
         barrierCalls.push('get_active_tasks_by_origin')
         return ['task-a']

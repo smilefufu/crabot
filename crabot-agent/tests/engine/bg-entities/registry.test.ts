@@ -96,6 +96,69 @@ describe('BgEntityRegistry', () => {
     expect((updated as BgShellRegistryRecord).command).toBe('echo hello')
   })
 
+  it('worker-owned shell terminal update atomically creates a pending exit notification', async () => {
+    await registry.register(makeShellRecord({
+      entity_id: 'shell-worker-terminal',
+      owner: { friend_id: '__system_w-1', worker_id: 'w-1' },
+    }))
+
+    const endedAt = new Date().toISOString()
+    await registry.update('shell-worker-terminal', {
+      status: 'completed',
+      exit_code: 0,
+      ended_at: endedAt,
+    })
+
+    const updated = await registry.get('shell-worker-terminal') as BgShellRegistryRecord
+    expect(updated).toMatchObject({
+      status: 'completed',
+      exit_code: 0,
+      ended_at: endedAt,
+      exit_notification: { status: 'pending', attempts: 0 },
+    })
+    expect(updated.exit_notification?.updated_at).toBe(endedAt)
+  })
+
+  it('legacy/friend-owned shell terminal update does not create a replay marker', async () => {
+    await registry.register(makeShellRecord({ entity_id: 'shell-legacy-terminal' }))
+    await registry.update('shell-legacy-terminal', {
+      status: 'completed',
+      exit_code: 0,
+      ended_at: new Date().toISOString(),
+    })
+
+    const updated = await registry.get('shell-legacy-terminal') as BgShellRegistryRecord
+    expect(updated.exit_notification).toBeUndefined()
+  })
+
+  it('exit notification attempts and settlements are persisted idempotently', async () => {
+    await registry.register(makeShellRecord({
+      entity_id: 'shell-settlement',
+      owner: { friend_id: '__system_w-1', worker_id: 'w-1' },
+    }))
+    await registry.update('shell-settlement', {
+      status: 'failed',
+      exit_code: 1,
+      ended_at: new Date().toISOString(),
+    })
+
+    await registry.beginExitNotificationAttempt('shell-settlement')
+    await registry.recordExitNotificationFailure('shell-settlement', 'adapter unavailable')
+    expect((await registry.get('shell-settlement') as BgShellRegistryRecord).exit_notification).toMatchObject({
+      status: 'pending',
+      attempts: 1,
+      last_error: 'adapter unavailable',
+    })
+
+    await registry.settleExitNotification('shell-settlement', 'delivered')
+    await registry.settleExitNotification('shell-settlement', 'delivered')
+    await registry.settleExitNotification('shell-settlement', 'dead_letter', 'late competing settlement')
+    expect((await registry.get('shell-settlement') as BgShellRegistryRecord).exit_notification).toMatchObject({
+      status: 'delivered',
+      attempts: 1,
+    })
+  })
+
   it('get: returns null for unknown entity_id', async () => {
     const found = await registry.get('does-not-exist')
     expect(found).toBeNull()
@@ -195,6 +258,33 @@ describe('BgEntityRegistry', () => {
     expect(rec?.exit_code).toBe(-1)
   })
 
+  it('recoverPersistent: replays an already-terminal pending worker shell but skips historical terminal records', async () => {
+    const pending = makeShellRecord({
+      entity_id: 'shell-pending-terminal',
+      owner: { friend_id: '__system_w-1', worker_id: 'w-1' },
+      status: 'completed',
+      exit_code: 0,
+      ended_at: new Date().toISOString(),
+      exit_notification: {
+        status: 'pending',
+        updated_at: new Date().toISOString(),
+        attempts: 1,
+      },
+    })
+    const historical = makeShellRecord({
+      entity_id: 'shell-historical-terminal',
+      owner: { friend_id: '__system_w-1', worker_id: 'w-1' },
+      status: 'completed',
+      exit_code: 0,
+      ended_at: new Date().toISOString(),
+    })
+    await registry.register(pending)
+    await registry.register(historical)
+
+    const { deadShells } = await new BgEntityRegistry().recoverPersistent()
+    expect(deadShells.map((record) => record.entity_id)).toEqual(['shell-pending-terminal'])
+  })
+
   it('recoverPersistent: skips already-terminal entities', async () => {
     const completedShell = makeShellRecord({
       entity_id: 'shell-done',
@@ -240,9 +330,26 @@ describe('BgEntityRegistry', () => {
 
     const result = await registry.reapShellIfDead(rec)
     expect(result).toEqual({ status: 'completed', exit_code: 0 })
-    const updated = await registry.get('shell-reap-ok')
+    const updated = await registry.get('shell-reap-ok') as BgShellRegistryRecord
     expect(updated?.status).toBe('completed')
     expect(updated?.exit_code).toBe(0)
+  })
+
+  it('reapShellIfDead: worker-owned shell persists pending in the same terminal record', async () => {
+    const rec = makeShellRecord({
+      entity_id: 'shell-reap-worker',
+      owner: { friend_id: '__system_w-1', worker_id: 'w-1' },
+      pid: 999999,
+      pgid: 999999,
+      log_file: path.join(tmpDir, 'shell-reap-worker.log'),
+      process_started_at: new Date(Date.now() - 10000).toISOString(),
+    })
+    await registry.register(rec)
+
+    await registry.reapShellIfDead(rec)
+
+    expect((await registry.get('shell-reap-worker') as BgShellRegistryRecord).exit_notification)
+      .toMatchObject({ status: 'pending', attempts: 0 })
   })
 
   it('reapShellIfDead: 已死 + 无 sentinel（强杀/没写盘）→ failed/-1', async () => {
@@ -323,6 +430,25 @@ describe('BgEntityRegistry', () => {
     const { removed } = await registry.gcDeadEntities(new Date())
     expect(removed).not.toContain('running-old')
     expect(await registry.get('running-old')).not.toBeNull()
+  })
+
+  it('gcDeadEntities and task cleanup keep terminal shells with pending notifications', async () => {
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString()
+    const pending = makeShellRecord({
+      entity_id: 'pending-old-shell',
+      owner: { friend_id: '__system_w-1', worker_id: 'w-1' },
+      status: 'completed',
+      exit_code: 0,
+      ended_at: eightDaysAgo,
+      last_activity_at: eightDaysAgo,
+      spawned_by_task_id: 'task-pending',
+      exit_notification: { status: 'pending', updated_at: eightDaysAgo, attempts: 5 },
+    })
+    await registry.register(pending)
+
+    expect((await registry.gcDeadEntities(new Date())).removed).not.toContain('pending-old-shell')
+    expect(await registry.removeTerminalShellsByTask('task-pending')).not.toContain('pending-old-shell')
+    expect(await registry.get('pending-old-shell')).not.toBeNull()
   })
 
   it('removeTerminalShellsByTask: 清本 task 终态 shell（含日志/sentinel），保留 running 与他 task', async () => {

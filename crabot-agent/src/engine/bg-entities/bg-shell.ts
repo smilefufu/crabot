@@ -217,30 +217,32 @@ export async function spawnPersistentShell(opts: SpawnPersistentShellOpts): Prom
     const runtimeMs = exitedAt - spawnedAtMs
     void registeredPromise
       .then(async () => {
-        const status: 'completed' | 'failed' = exitCode === 0 ? 'completed' : 'failed'
+        const observedStatus: 'completed' | 'failed' = exitCode === 0 ? 'completed' : 'failed'
+        const updated = await opts.registry.update(entity_id, {
+          status: observedStatus,
+          exit_code: exitCode,
+          ended_at: new Date(exitedAt).toISOString(),
+        } as Partial<BgShellRegistryRecord>)
+        const finalStatus: 'completed' | 'failed' | 'killed' =
+          updated?.type === 'shell' && updated.status === 'killed' ? 'killed' : observedStatus
+        const finalExitCode = updated?.type === 'shell' ? updated.exit_code ?? exitCode : exitCode
         if (opts.traceContext) {
           emitInstantSpan(opts.traceContext, 'bg_entity_exit', {
             entity_id,
             type: 'shell',
-            status,
-            exit_code: exitCode,
+            status: finalStatus,
+            exit_code: finalExitCode,
             runtime_ms: runtimeMs,
-          }, status)
+          }, finalStatus === 'completed' ? 'completed' : 'failed')
         }
-        await opts.registry.update(entity_id, {
-          status,
-          exit_code: exitCode,
-          ended_at: new Date(exitedAt).toISOString(),
-        } as Partial<BgShellRegistryRecord>)
-        // 触发 push notification 给 worker（以便下一次 task 启动时通知 agent）
-        // status='killed' 由 Kill 工具直接 update，bg-shell 这里只看 exit code
+        // terminal status 与 pending receipt 已由 registry.update 原子落盘后，才触发投递。
         if (opts.onExit) {
           try {
             opts.onExit({
               entity_id,
               command: opts.command,
-              status,
-              exit_code: exitCode,
+              status: finalStatus,
+              exit_code: finalExitCode,
               runtime_ms: runtimeMs,
               spawned_at: now,
             })
@@ -435,19 +437,61 @@ export async function runShellWithGrace(opts: RunShellWithGraceOpts): Promise<Ru
     return { kind: 'spawn_error', message: err instanceof Error ? err.message : String(err) }
   }
 
+  let promotedExitHandled = false
+  const handlePromotedExit = async (exitCode: number): Promise<void> => {
+    if (promotedExitHandled) return
+    promotedExitHandled = true
+    const exitedAt = Date.now()
+    const runtimeMs = exitedAt - spawnedAtMs
+    await registeredPromise
+    try {
+      const observedStatus: 'completed' | 'failed' = exitCode === 0 ? 'completed' : 'failed'
+      const updated = await opts.registry.update(entity_id, {
+        status: observedStatus,
+        exit_code: exitCode,
+        ended_at: new Date(exitedAt).toISOString(),
+      } as Partial<BgShellRegistryRecord>)
+      const finalStatus: 'completed' | 'failed' | 'killed' =
+        updated?.type === 'shell' && updated.status === 'killed' ? 'killed' : observedStatus
+      const finalExitCode = updated?.type === 'shell' ? updated.exit_code ?? exitCode : exitCode
+      if (opts.traceContext) {
+        emitInstantSpan(opts.traceContext, 'bg_entity_exit', {
+          entity_id,
+          type: 'shell',
+          status: finalStatus,
+          exit_code: finalExitCode,
+          runtime_ms: runtimeMs,
+        }, finalStatus === 'completed' ? 'completed' : 'failed')
+      }
+      if (opts.onShellExit) {
+        try {
+          opts.onShellExit({
+            entity_id,
+            command: opts.command,
+            status: finalStatus,
+            exit_code: finalExitCode,
+            runtime_ms: runtimeMs,
+            spawned_at: now,
+          })
+        } catch (err) {
+          console.error(`[bg-shell] onShellExit callback failed for ${entity_id}:`, err)
+        }
+      }
+    } finally {
+      await unlinkQuiet(stdoutFile)
+      await unlinkQuiet(stderrFile)
+      await unlinkQuiet(stdoutFifo)
+      await unlinkQuiet(stderrFifo)
+    }
+  }
+
   // 'error' 必须在任何 await 前挂（spawn 失败异步派发，漏挂 → uncaughtException 杀进程）。
   child.on('error', (err) => {
     const message = err instanceof Error ? err.message : String(err)
     if (backgrounded) {
-      void registeredPromise
-        .then(() =>
-          opts.registry.update(entity_id, {
-            status: 'failed',
-            exit_code: -1,
-            ended_at: new Date().toISOString(),
-          } as Partial<BgShellRegistryRecord>),
-        )
-        .catch(() => {})
+      void handlePromotedExit(-1).catch((error: unknown) => {
+        console.error(`[bg-shell] promoted-error registry update failed for ${entity_id}:`, error)
+      })
     } else {
       resolveRace({ kind: 'spawnerr', message })
     }
@@ -461,51 +505,10 @@ export async function runShellWithGrace(opts: RunShellWithGraceOpts): Promise<Ru
       resolveRace({ kind: 'exit', exitCode })
       return
     }
-    // promotion 后退出：等注册完成 → 更新 registry + span + onShellExit
-    const exitedAt = Date.now()
-    const runtimeMs = exitedAt - spawnedAtMs
-    void registeredPromise
-      .then(async () => {
-        try {
-          const status: 'completed' | 'failed' = exitCode === 0 ? 'completed' : 'failed'
-          if (opts.traceContext) {
-            emitInstantSpan(opts.traceContext, 'bg_entity_exit', {
-              entity_id,
-              type: 'shell',
-              status,
-              exit_code: exitCode,
-              runtime_ms: runtimeMs,
-            }, status)
-          }
-          await opts.registry.update(entity_id, {
-            status,
-            exit_code: exitCode,
-            ended_at: new Date(exitedAt).toISOString(),
-          } as Partial<BgShellRegistryRecord>)
-          if (opts.onShellExit) {
-            try {
-              opts.onShellExit({
-                entity_id,
-                command: opts.command,
-                status,
-                exit_code: exitCode,
-                runtime_ms: runtimeMs,
-                spawned_at: now,
-              })
-            } catch (err) {
-              console.error(`[bg-shell] onShellExit callback failed for ${entity_id}:`, err)
-            }
-          }
-        } finally {
-          await unlinkQuiet(stdoutFile)
-          await unlinkQuiet(stderrFile)
-          await unlinkQuiet(stdoutFifo)
-          await unlinkQuiet(stderrFifo)
-        }
-      })
-      .catch((err: unknown) => {
-        console.error(`[bg-shell] promoted-exit registry update failed for ${entity_id}:`, err)
-      })
+    // promotion 后退出：等注册完成 → 原子更新 terminal+pending → span + onShellExit
+    void handlePromotedExit(exitCode).catch((err: unknown) => {
+      console.error(`[bg-shell] promoted-exit registry update failed for ${entity_id}:`, err)
+    })
   })
 
   child.unref()

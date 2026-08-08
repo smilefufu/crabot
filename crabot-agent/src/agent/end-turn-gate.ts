@@ -86,7 +86,7 @@ export interface AsyncAuditEndTurnGateDeps {
  * 闭包签名：`() => Promise<EndTurnGateResult>`
  *  - 返回 string：engine 把这段文本作为 user message 注入下一轮（worker 不真 end_turn）
  *  - 返回 { kind: 'wait' }：audit 已派出，engine 直接 setBarrier 挂起等结果——
- *    取代旧的「注入 [audit_pending] 文本 → LLM 调 wait_for_signal」往返，
+ *    取代旧的「注入 [audit_pending] 文本 → LLM 调 end_turn」往返，
  *    每轮 audit 省一次全量 context 的 LLM 调用（spec 2026-06-10 §4.7）
  *  - 返回 null：engine 放行 end_turn（含 flush outboundBuffer）
  */
@@ -164,7 +164,7 @@ export function createAsyncAuditEndTurnGate(
       return null
     }
 
-    // 5. 标记等审态 — send_message handler / drain / wait_for_signal 用这个判
+    // 5. 标记等审态 — send_message handler / drain / end_turn 用这个判
     deps.taskState.activeAuditId = auditId
 
     // 6. 返回 wait 信号 — engine 直接挂起等 audit 结果 push，不再经过 LLM

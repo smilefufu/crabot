@@ -116,8 +116,8 @@ export function createOutputTool(deps: BgToolDeps): ToolDefinition {
       '默认非阻塞 snapshot 读。' +
       '若 shell 还在 running 且想等下一段输出，**强烈建议**用 `block=true` 阻塞等到有新输出 / 状态变 terminal / 超时——' +
       '避免在 agent 主循环里反复短间隔 poll 污染上下文。' +
-      '工具列表中有 wait_for_signal 的主控 agent 通常可等待退出通知；' +
-      '没有 wait_for_signal 的 subagent 应用 block=true 等待，不依赖 <bg-notification>。' +
+      '主控 agent 可以自然结束当前回合，等待 <bg-notification> 唤醒；' +
+      'subagent 收不到该通知，需要结果时必须用 block=true 等待。' +
       '读 subagent 结果请用 get_subagent_output(agent_id)，不是本工具。',
     inputSchema: {
       type: 'object',

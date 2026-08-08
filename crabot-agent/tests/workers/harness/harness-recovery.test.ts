@@ -2,7 +2,12 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { WorkerHarness, type HarnessDeps, type ReconcileReport } from '../../../src/workers/harness/harness'
+import {
+  WorkerHarness,
+  WorkerHasNoIncarnationError,
+  type HarnessDeps,
+  type ReconcileReport,
+} from '../../../src/workers/harness/harness'
 import { LedgerStore } from '../../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../../src/workers/harness/workspace-manager'
 import {
@@ -211,6 +216,41 @@ describe('WorkerHarness.reconcileOnStartup — 三态判定', () => {
     expect(events.filter((e) => e.worker_id === 'w-running')).toHaveLength(0)
   })
 
+  it('无化身的 agent 自执行 system task → 不调用 adapter，重启后标 failed 并发事件', async () => {
+    const { harness, ledger, adaptersMap } = await makeHarness()
+    const fake = new FakeAdapter('builtin')
+    adaptersMap.set('builtin', fake)
+    const worker = makeWorker('w-maintenance', {
+      task: {
+        id: 'task-w-maintenance',
+        type: 'memory_maintenance',
+        title: '记忆维护',
+        status: 'running',
+        created_at: now(),
+      },
+      origin: { spawned_by_session: 'admin-web::system-tasks', trigger_type: 'system' },
+      incarnations: [],
+    })
+    await seed(ledger, DIALOG, worker)
+
+    const report = await harness.reconcileOnStartup()
+
+    expect(report).toEqual<ReconcileReport>({ revived: [], failed: ['w-maintenance'], unchanged: [] })
+    expect(fake.stateCalls).toHaveLength(0)
+    const after = await getWorker(ledger, 'w-maintenance')
+    expect(after.task.status).toBe('failed')
+    expect(after.task.error).toBe('agent restart: execution context lost for agent-native system task')
+    expect(after.incarnations).toEqual([])
+    const taskEvents = events.filter((e) => e.worker_id === 'w-maintenance')
+    expect(taskEvents).toHaveLength(1)
+    expect(taskEvents[0]).toMatchObject({
+      seq: 0,
+      kind: 'exited',
+      task_status: 'failed',
+      detail: { reason: 'crashed', message: 'agent restart: execution context lost for agent-native system task' },
+    })
+  })
+
   it('adapter 报 idle 且台账仍是 running → 对齐 incarnation.state=idle + task.status=waiting_input，发 state_changed(source=reconcile)，归 revived', async () => {
     const { harness, ledger, adaptersMap } = await makeHarness()
     const fake = new FakeAdapter('builtin')
@@ -273,6 +313,37 @@ describe('WorkerHarness.reconcileOnStartup — 三态判定', () => {
     expect(after.incarnations[0].ended_reason).toBe('crashed')
     const exitedEvents = events.filter((e) => e.kind === 'exited' && e.worker_id === 'w-throws')
     expect(exitedEvents[0].detail?.message).toContain('tmux pane 探测失败')
+  })
+})
+
+describe('WorkerHarness empty-incarnation domain errors', () => {
+  it('worker-only operations reject a system task with a stable domain error', async () => {
+    const { harness, ledger } = await makeHarness()
+    const worker = makeWorker('w-system-only', {
+      task: {
+        id: 'task-w-system-only',
+        type: 'memory_maintenance',
+        title: '记忆维护',
+        status: 'running',
+        created_at: now(),
+      },
+      origin: { spawned_by_session: 'admin-web::system-tasks', trigger_type: 'system' },
+      incarnations: [],
+    })
+    await seed(ledger, DIALOG, worker)
+
+    const operations = [
+      () => harness.sendToWorker('w-system-only', 'input'),
+      () => harness.readWorkerOutput('w-system-only', { offset: 0 }),
+      () => harness.readWorkerOutput('w-system-only', { offset: 0 }, { seq: 1 }),
+      () => harness.switchWorkerImpl('w-system-only', 'builtin'),
+      () => harness.killWorker('w-system-only'),
+      () => harness.queryWorker('w-system-only', 'status?'),
+    ]
+
+    for (const operation of operations) {
+      await expect(operation()).rejects.toBeInstanceOf(WorkerHasNoIncarnationError)
+    }
   })
 })
 

@@ -1,8 +1,8 @@
 /**
  * agent 侧五个 v3 RPC handler(P5 Task 4)—— protocol-agent-v3.md §8.2 / §8.3。
  *
- * 手法照 `tests/unified-agent-resume-task.test.ts`:`Object.create(UnifiedAgent.prototype)`
- * 绕过构造函数,只塞 handler 真正会用到的字段(这里是 `managerStack`),直接调私有 handler。
+ * 手法使用 `Object.create(UnifiedAgent.prototype)` 绕过构造函数，只塞 handler 真正会用到的
+ * 字段（这里是 `managerStack`），直接调私有 handler。
  * 需要断言"语义不变量而不只是参数透传"的两条(trigger_schedule 的路由归属、权限身份落到
  * `origin.creator_friend_id`)另外走**真实** `buildManagerStack` + mock LLM 的端到端路径。
  */
@@ -15,6 +15,7 @@ import { UnifiedAgent } from '../../src/unified-agent.js'
 import type { PrincipalResolverDeps } from '../../src/manager/principal.js'
 import { buildManagerStack, type BootstrapDeps, type ManagerStack } from '../../src/manager/bootstrap.js'
 import { SYSTEM_TASKS_MANAGER_KEY } from '../../src/manager/registry.js'
+import { WorkerHasNoIncarnationError } from '../../src/workers/harness/harness.js'
 import { dialogObjectIdForPrivate, type DialogObjectId, type LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import type { ManagerKey } from '../../src/manager/types.js'
 import type { HarnessEvent } from '../../src/workers/harness/worker-events.js'
@@ -875,6 +876,23 @@ describe('get_worker_trace(§8.3 + §10.2)', () => {
    */
   it('显式 seq 在化身链里不存在 → 抛错,而不是静默返回空 events', async () => {
     await expect(agentWithEvents().handleGetWorkerTrace({ worker_id: 'w-1', seq: 9 })).rejects.toThrow(/seq=9/)
+  })
+
+  it('zero-incarnation system task returns the stable domain error for default and explicit seq', async () => {
+    const agent = buildAgent({
+      ledger: {
+        findWorker: async () => ({
+          dialogObjectId: dialogObjectIdForPrivate('f1'),
+          worker: { ...makeLedgerWorker({ workerId: 'w-system' }), incarnations: [] },
+        }),
+      },
+      harness: { readWorkerEvents: async () => [] },
+    })
+
+    await expect(agent.handleGetWorkerTrace({ worker_id: 'w-system' }))
+      .rejects.toBeInstanceOf(WorkerHasNoIncarnationError)
+    await expect(agent.handleGetWorkerTrace({ worker_id: 'w-system', seq: 1 }))
+      .rejects.toBeInstanceOf(WorkerHasNoIncarnationError)
   })
 
   it('worker 不存在 → 抛明确错误,而不是返回空时间线', async () => {

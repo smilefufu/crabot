@@ -3,7 +3,7 @@
  *
  * 验证启动加载 tasks.json 时：
  * - 历史脏数据（status=failed 但 waiting_human_at / pending_question 残留）会被修正
- * - 干净的 waiting_human 任务保持原样
+ * - 旧 AgentHandler 的非终态 Admin task 在 v3 启动时本地收口为 failed，不尝试 resume
  * - 修正后所有 task 都通过 assertTaskInvariants 兜底
  */
 
@@ -67,7 +67,7 @@ describe('loadData repairs legacy dirty tasks', () => {
     await fs.rm(TEST_DATA_DIR, { recursive: true, force: true }).catch(() => {})
   })
 
-  it('repairs dirty failed task on load while preserving clean waiting_human task', async () => {
+  it('repairs dirty terminal data and fails retired in-flight legacy tasks on load', async () => {
     const admin = new AdminModule(
       {
         moduleId: 'admin-load-repair-test',
@@ -97,10 +97,13 @@ describe('loadData repairs legacy dirty tasks', () => {
     expect(dirty.pending_question).toBeUndefined()
     expect(() => assertTaskInvariants(dirty)).not.toThrow()
 
-    const clean = (admin as any).tasks.get('trigger-clean-1')
-    expect(clean.status).toBe('waiting_human')
-    expect(clean.waiting_human_at).toBe('2026-06-04T07:42:39.399Z')
-    expect(clean.pending_question).toBe('real q?')
+    const retired = (admin as any).tasks.get('trigger-clean-1')
+    expect(retired.status).toBe('failed')
+    expect(retired.error).toBe('legacy Admin task execution retired in Agent v3')
+    expect(retired.waiting_human_at).toBeUndefined()
+    expect(retired.pending_question).toBeUndefined()
+    expect(retired.completed_at).toBeDefined()
+    expect(() => assertTaskInvariants(retired)).not.toThrow()
 
     await admin.stop()
   })

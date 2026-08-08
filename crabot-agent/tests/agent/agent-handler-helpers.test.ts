@@ -1,11 +1,7 @@
 import { describe, it, expect } from 'vitest'
-import {
-  extractLaunchedSubagentId,
-  maybeCreateWaitForSignalTool,
-  summarizeRunningEntities,
-} from '../../src/agent/agent-handler.js'
-import { HumanMessageQueue } from '../../src/engine/human-message-queue.js'
+import { extractLaunchedSubagentId, summarizeRunningEntities } from '../../src/agent/agent-handler.js'
 import type { BgEntityRecord } from '../../src/engine/bg-entities/types.js'
+
 
 describe('extractLaunchedSubagentId', () => {
   it('从 delegate_task 异步路径 JSON 输出抓 agent_id', () => {
@@ -38,70 +34,6 @@ describe('extractLaunchedSubagentId', () => {
   it('output 是 undefined / 空串时返回 undefined', () => {
     expect(extractLaunchedSubagentId(undefined)).toBeUndefined()
     expect(extractLaunchedSubagentId('')).toBeUndefined()
-  })
-})
-
-describe('maybeCreateWaitForSignalTool', () => {
-  const stubDeps = {
-    humanQueue: new HumanMessageQueue(),
-    listActiveAsyncSubagentIds: () => [] as string[],
-    listRunningBgEntities: async () => [],
-  }
-
-  it('goalMode + async 都开 → 注入', () => {
-    const tool = maybeCreateWaitForSignalTool(
-      { goalModeEnabled: true, asyncEnabled: true },
-      stubDeps,
-    )
-    expect(tool).toBeDefined()
-    expect(tool?.name).toBe('wait_for_signal')
-  })
-
-  it('仅 goalMode 开 → 注入', () => {
-    const tool = maybeCreateWaitForSignalTool(
-      { goalModeEnabled: true, asyncEnabled: false },
-      stubDeps,
-    )
-    expect(tool).toBeDefined()
-    expect(tool?.name).toBe('wait_for_signal')
-  })
-
-  it('仅 async 开 → 注入', () => {
-    const tool = maybeCreateWaitForSignalTool(
-      { goalModeEnabled: false, asyncEnabled: true },
-      stubDeps,
-    )
-    expect(tool).toBeDefined()
-    expect(tool?.name).toBe('wait_for_signal')
-  })
-
-  it('两者都关 → 仍然注入（门槛已放开，总是注入）', () => {
-    const tool = maybeCreateWaitForSignalTool(
-      { goalModeEnabled: false, asyncEnabled: false },
-      stubDeps,
-    )
-    expect(tool).toBeDefined()
-    expect(tool?.name).toBe('wait_for_signal')
-  })
-
-  it('注入的工具透传 deps（listActiveAsyncSubagentIds 真正被调）', async () => {
-    let callCount = 0
-    const tool = maybeCreateWaitForSignalTool(
-      { goalModeEnabled: false, asyncEnabled: true },
-      {
-        ...stubDeps,
-        listActiveAsyncSubagentIds: () => {
-          callCount += 1
-          return ['agent_x']
-        },
-      },
-    )
-    expect(tool).toBeDefined()
-    // 触发 tool.call —— 应该看到 listActiveAsyncSubagentIds 被调用
-    await tool!.call({ reason: 'test', targets: [{ kind: 'subagent' }] }, {} as never)
-    expect(callCount).toBeGreaterThan(0)
-    // 清理 barrier（目标存在时 tool.call 会 setBarrier(24h)，否则会泄露 setTimeout）
-    stubDeps.humanQueue.clearBarrier()
   })
 })
 

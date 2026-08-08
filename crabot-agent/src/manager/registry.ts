@@ -344,6 +344,26 @@ export class ManagerRegistry {
     return this.runWake(key, { kind: 'worker_event', event })
   }
 
+  async routeMediaNotification(p: {
+    channelId: string
+    sessionId: string
+    text: string
+  }): Promise<EpisodeResult> {
+    const key = `${p.channelId}::${p.sessionId}` as ManagerKey
+    const event: WakeEvent = { kind: 'media_notification', text: p.text }
+    if (this.isEpisodeActive(key)) {
+      this.getOrCreate(key).enqueueDuringEpisode(event)
+      return {
+        episodeId: '',
+        outcome: 'completed',
+        turns: 0,
+        consumedEvents: true,
+        repliedToHuman: false,
+      }
+    }
+    return this.runWake(key, event)
+  }
+
   /**
    * scheduled 触发(§4.4):有 target_session → 该 manager;无 → 系统线程 manager。
    *

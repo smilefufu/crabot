@@ -643,6 +643,38 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
    * libuv 线程池，并发跑会把注册拖慢、放大冷启动竞态窗口。这里按 main.ts 的真实顺序调用，
    * 钉住的语义不变：启动时异步跑一次、且不阻塞启动返回。
    */
+  it('启动对账失败也释放 recovered bg exits 并启动活性巡检', async () => {
+    boot()
+    const stack = internals.managerStack!
+    vi.spyOn(stack.harness, 'reconcileOnStartup').mockRejectedValue(new Error('reconcile failed'))
+    const release = vi.fn().mockResolvedValue(undefined)
+    internals.agentHandler = { releaseRecoveredWorkerShellExits: release } as any
+    const sweep = vi.spyOn(stack.harness, 'startLivenessSweep').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    agent.startManagerStackReconciliation()
+    await waitUntil(async () => release.mock.calls.length === 1)
+
+    expect(sweep).toHaveBeenCalledOnce()
+  })
+
+  it('启动对账已结束后由配置 push 晚建 handler，会立即打开 recovered-exit gate', async () => {
+    boot()
+    internals.managerReconciliationSettled = true
+    const setDispatcher = vi.fn()
+    const release = vi.fn().mockResolvedValue(undefined)
+    const lateHandler = {
+      setBuiltinShellExitDispatcher: setDispatcher,
+      releaseRecoveredWorkerShellExits: release,
+    }
+
+    ;(agent as any).attachBuiltinShellExitDispatcher(lateHandler)
+    await waitUntil(async () => release.mock.calls.length === 1)
+
+    expect(setDispatcher).toHaveBeenCalledOnce()
+    expect(release).toHaveBeenCalledOnce()
+  })
+
   it('启动时异步跑一次启动对账（register 之后发起）：台账里残留的 running 化身被对账掉，且不阻塞启动', async () => {
     boot()
     const stack = internals.managerStack!

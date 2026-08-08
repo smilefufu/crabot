@@ -14,7 +14,7 @@
  *   A. iter 52 假交付 — buffer 非空 + end_turn → audit fail → buffer drop → channel 不收到
  *   B. audit pass + 无 pending → flush buffer + buildResult completed
  *   C. supplement 改 goal mid-audit → abortAudit 调 controller.abort + drop buffer + 注入 aborted 提示
- *   D. wait_for_signal yield → audit complete pass → drain pass 完整链路（含事件顺序）
+ *   D. 审计 barrier yield → audit complete pass → drain pass 完整链路（含事件顺序）
  *
  * 关键模拟：endTurnGate 闭包模拟 `createAsyncAuditEndTurnGate` 行为——
  *   buffer 空 → null；buffer 非空 → 设 activeAuditId + 返回 [audit_pending] marker。
@@ -45,7 +45,7 @@ import type { ToolDefinition } from '../../src/engine/types.js'
 
 type AdapterStep =
   | { kind: 'tool'; toolId: string; toolName: string; input?: Record<string, unknown> }
-  | { kind: 'end_turn'; text: string }
+  | { kind: 'audit_barrier'; text: string }
 
 function makeAdapter(steps: ReadonlyArray<AdapterStep>): LLMAdapter {
   let i = 0
@@ -70,10 +70,10 @@ function makeAdapter(steps: ReadonlyArray<AdapterStep>): LLMAdapter {
   } as unknown as LLMAdapter
 }
 
-/** 构造 wait_for_signal 工具——挂起 main loop 直到 queue.push 唤醒。 */
+/** 构造 end_turn 工具——挂起 main loop 直到 queue.push 唤醒。 */
 function makeWaitTool(queue: HumanMessageQueue, onCall?: () => void): ToolDefinition {
   return {
-    name: 'wait_for_signal',
+    name: 'audit_barrier',
     description: 'wait for audit or supplement',
     inputSchema: { type: 'object' as const, properties: {} },
     isReadOnly: true,
@@ -244,12 +244,12 @@ describe('E2E: goal-audit async flow', () => {
 
     // worker flow:
     //  turn 1: end_turn → endTurnGate 派 audit + 注入 [audit_pending]
-    //  turn 2: wait_for_signal → barrier wait → audit fail marker → drain fail → drop buffer + 注入 detailedReport
+    //  turn 2: 审计 barrier → wait → audit fail marker → drain fail → drop buffer + 注入 detailedReport
     //  turn 3: end_turn → endTurnGate (buffer 空)→ null → completed
     const adapter = makeAdapter([
-      { kind: 'end_turn', text: '搞定' },
-      { kind: 'tool', toolId: 't1', toolName: 'wait_for_signal' },
-      { kind: 'end_turn', text: '改完了' },
+      { kind: 'audit_barrier', text: '搞定' },
+      { kind: 'tool', toolId: 't1', toolName: 'audit_barrier' },
+      { kind: 'audit_barrier', text: '改完了' },
     ])
 
     const result = await runEngine({
@@ -313,10 +313,10 @@ describe('E2E: goal-audit async flow', () => {
 
     // worker flow:
     //  turn 1: end_turn → endTurnGate 派 audit + 注入 [audit_pending]
-    //  turn 2: wait_for_signal → barrier → audit pass → drain pass + flush + buildResult completed（无后续 LLM）
+    //  turn 2: 审计 barrier → → audit pass → drain pass + flush + buildResult completed（无后续 LLM）
     const adapter = makeAdapter([
-      { kind: 'end_turn', text: '搞定' },
-      { kind: 'tool', toolId: 't1', toolName: 'wait_for_signal' },
+      { kind: 'audit_barrier', text: '搞定' },
+      { kind: 'tool', toolId: 't1', toolName: 'audit_barrier' },
     ])
 
     const result = await runEngine({
@@ -390,15 +390,15 @@ describe('E2E: goal-audit async flow', () => {
 
     // worker flow:
     //  turn 1: end_turn → spawn audit-C → [audit_pending]
-    //  turn 2: wait_for_signal → barrier → supplement push 唤醒 → drain supplement → 续 turn
+    //  turn 2: 审计 barrier → → supplement push 唤醒 → drain supplement → 续 turn
     //  turn 3: set_task_goal → abortAudit → controller.abort + drop buffer + push aborted marker
     //  turn 4: 触发 post-tool drain → 看到 aborted marker → 注入"audit 已废"提示 + 续 turn
     //  turn 5: end_turn → buffer 空 + audit 已清 → completed
     const adapter = makeAdapter([
-      { kind: 'end_turn', text: '完毕' },
-      { kind: 'tool', toolId: 't1', toolName: 'wait_for_signal' },
+      { kind: 'audit_barrier', text: '完毕' },
+      { kind: 'tool', toolId: 't1', toolName: 'audit_barrier' },
       { kind: 'tool', toolId: 't2', toolName: 'set_task_goal', input: { goal: '讨论今天的天气' } },
-      { kind: 'end_turn', text: '收到新目标' },
+      { kind: 'audit_barrier', text: '收到新目标' },
     ])
 
     const result = await runEngine({
@@ -472,7 +472,7 @@ describe('E2E: goal-audit async flow', () => {
     //  turn 2: end_turn → 等审态 → 直接挂起等 audit 结果
     const adapter = makeAdapter([
       { kind: 'tool', toolId: 't1', toolName: 'Bash' },
-      { kind: 'end_turn', text: '完毕' },
+      { kind: 'audit_barrier', text: '完毕' },
     ])
 
     // 挂起后 audit pass 到达；push 前采样 channel 调用数——验证 pass 前零泄漏
@@ -521,10 +521,10 @@ describe('E2E: goal-audit async flow', () => {
   })
 
   // -------------------------------------------------------------------------
-  // Case D: wait_for_signal yield → audit complete → drain pass 完整链路
+  // Case D: 审计 barrier yield → audit complete → drain pass 完整链路
   // -------------------------------------------------------------------------
-  it('Case D: wait_for_signal yields + audit completes pass → drain pass + flush + complete (顺序验证)', async () => {
-    // 这个 case 细化验证 wait_for_signal → barrier → marker push → drain pass 的完整链路。
+  it('Case D: 审计 barrier yields + audit completes pass → drain pass + flush + complete (顺序验证)', async () => {
+    // 这个 case 细化验证 审计 barrier → → marker push → drain pass 的完整链路。
     // 与 Case B 的区别：明确验证事件顺序（spawn → wait → push → send）。
     const wiring = makeWiring()
     const queue = new HumanMessageQueue()
@@ -534,7 +534,7 @@ describe('E2E: goal-audit async flow', () => {
 
     // wait tool 记录被调用
     const waitTool = makeWaitTool(queue, () => {
-      events.push('wait_for_signal_called')
+      events.push('audit_barrier_called')
     })
 
     const auditId = 'audit-D'
@@ -575,8 +575,8 @@ describe('E2E: goal-audit async flow', () => {
     }
 
     const adapter = makeAdapter([
-      { kind: 'end_turn', text: '完毕' },
-      { kind: 'tool', toolId: 't1', toolName: 'wait_for_signal' },
+      { kind: 'audit_barrier', text: '完毕' },
+      { kind: 'tool', toolId: 't1', toolName: 'audit_barrier' },
     ])
 
     const result = await runEngine({
@@ -601,9 +601,9 @@ describe('E2E: goal-audit async flow', () => {
     expect(channelSpy).toHaveBeenCalledTimes(1)
     expect(channelSpy.mock.calls[0][0].content).toBe('已完成最终交付')
 
-    // 顺序验证：audit_spawn → wait_for_signal_called → audit_push_pass → channel_send
+    // 顺序验证：audit_spawn → audit_barrier_called → audit_push_pass → channel_send
     const idxSpawn = events.findIndex((e) => e.startsWith('audit_spawn'))
-    const idxWait = events.indexOf('wait_for_signal_called')
+    const idxWait = events.indexOf('audit_barrier_called')
     const idxPush = events.indexOf('audit_push_pass')
     const idxSend = events.findIndex((e) => e === 'channel_send:已完成最终交付')
     expect(idxSpawn).toBeGreaterThanOrEqual(0)
