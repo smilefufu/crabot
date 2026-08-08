@@ -94,7 +94,10 @@ async function runStep() {
 
   if (step.emitStop && stopHookCmd) {
     try {
-      await execAsync(stopHookCmd, { shell: '/bin/bash' })
+      // The real hook receives a closed JSON stdin stream. This interactive mock keeps
+      // its own stdin open for subsequent messages, so explicitly model the empty hook
+      // payload rather than letting the POSIX reader block on the TUI input pipe.
+      await execAsync(`(${stopHookCmd}) </dev/null`, { shell: '/bin/bash' })
     } catch (err) {
       process.stderr.write(`mock-cli: stop hook failed: ${err}\n`)
     }

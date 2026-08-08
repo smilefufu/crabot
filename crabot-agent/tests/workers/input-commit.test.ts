@@ -24,4 +24,18 @@ describe('commitInput', () => {
     const result = await commitInput({ pasteText: async () => { pastes++ }, sendEnter: async () => { enters++ }, capture: async () => frames.shift()! }, frame => frame.text as InputProbe, frame => frame.text === 'accepted', 'task')
     expect(result.disposition).toBe('accepted'); expect(pastes).toBe(1); expect(enters).toBe(2)
   })
+
+  it('does not press Enter when the post-paste surface becomes unavailable', async () => {
+    const frames = [snapshot('empty'), snapshot('modal')]
+    let pastes = 0; let enters = 0
+    const result = await commitInput({ pasteText: async () => { pastes++ }, sendEnter: async () => { enters++ }, capture: async () => frames.shift()! }, frame => frame.text as InputProbe, () => false, 'task')
+    expect(result.disposition).toBe('pending_in_ui'); expect(pastes).toBe(1); expect(enters).toBe(0)
+  })
+
+  it('does not paste again after two Enter attempts remain pending', async () => {
+    const frames = [snapshot('empty'), snapshot('pending'), snapshot('pending'), snapshot('pending')]
+    let pastes = 0; let enters = 0
+    const result = await commitInput({ pasteText: async () => { pastes++ }, sendEnter: async () => { enters++ }, capture: async () => frames.shift()! }, frame => frame.text as InputProbe, () => false, 'task')
+    expect(result.disposition).toBe('pending_in_ui'); expect(pastes).toBe(1); expect(enters).toBe(2)
+  })
 })

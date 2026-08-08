@@ -54,6 +54,15 @@ describe('CliEventChannel', () => {
     expect((await channel.readAll())[0].raw).toEqual(JSON.parse(payload))
   })
 
+  it('preserves a Stop payload while keeping empty Stop input as legacy raw:null', async () => {
+    const channel = new CliEventChannel(filePath)
+    const payload = '{"stop_hook_active":true}'
+    const quoted = `'${payload.replace(/'/g, `'\\''`)}'`
+    await execFileAsync('/bin/bash', ['-c', `printf '%s' ${quoted} | (${channel.hookCommand('stop')})`])
+    await execFileAsync('/bin/bash', ['-c', `(${channel.hookCommand('stop')}) </dev/null`])
+    expect((await channel.readAll()).map((event) => event.raw)).toEqual([JSON.parse(payload), null])
+  })
+
   it('readAll 对不存在的文件返回空数组', async () => {
     const channel = new CliEventChannel(path.join(tempDir, 'does-not-exist.jsonl'))
     const events = await channel.readAll()
