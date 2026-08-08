@@ -342,6 +342,55 @@ describe('WorkerHarness.spawnWorker', () => {
     ])
   })
 
+  it('durable receipt pasted into CLI composer settles only after raw submission', async () => {
+    const { harness } = await makeHarness({
+      implId: 'claude-code',
+      sendInputBehavior: async (_h, text, opts) => {
+        if (!opts?.raw && text === 'bg') {
+          throw new CliInputStallError('pending_in_ui', 'running', {
+            waitReason: 'input_pending',
+            outputTail: '❯ bg',
+          })
+        }
+      },
+    })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+    const settlements: string[] = []
+
+    await harness.sendToWorker(worker.worker_id, 'bg', {
+      dedupeKey: 'bg-shell:1',
+      onSettled: async (settlement) => { settlements.push(settlement) },
+    })
+    expect(settlements).toEqual([])
+
+    await harness.sendToWorker(worker.worker_id, 'Enter', { raw: true })
+    expect(settlements).toEqual(['delivered'])
+  })
+
+  it('kill dead-letters a durable receipt already pasted into a CLI composer', async () => {
+    const { harness } = await makeHarness({
+      implId: 'claude-code',
+      sendInputBehavior: async (_h, text, opts) => {
+        if (!opts?.raw && text === 'bg') {
+          throw new CliInputStallError('pending_in_ui', 'running', {
+            waitReason: 'input_pending',
+            outputTail: '❯ bg',
+          })
+        }
+      },
+    })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+    const settlements: string[] = []
+
+    await harness.sendToWorker(worker.worker_id, 'bg', {
+      dedupeKey: 'bg-shell:1',
+      onSettled: async (settlement) => { settlements.push(settlement) },
+    })
+    await harness.killWorker(worker.worker_id, 'test')
+
+    expect(settlements).toEqual(['dead_letter'])
+  })
+
   it('adapter.spawn 失败 → 台账落 failed(经 queued→running→failed)、化身 exited(failed)、事件外发,错误抛给调用方', async () => {
     const boom = new Error('spawn 炸了')
     const { harness } = await makeHarness({ spawnShouldFail: boom })
