@@ -14,7 +14,7 @@ import type { BgShellRegistryRecord } from './types'
 export interface ReadoptedExitInfo {
   readonly entity_id: string
   readonly command: string
-  readonly status: 'completed' | 'failed'
+  readonly status: 'completed' | 'failed' | 'killed'
   readonly exit_code: number
   readonly spawned_by_task_id: string
   readonly owner_friend_id?: string
@@ -62,7 +62,7 @@ export class ReadoptReaper {
 
   private async poll(): Promise<void> {
     for (const [id, rec] of [...this.watched]) {
-      let reaped: { status: 'completed' | 'failed'; exit_code: number } | null
+      let reaped: { status: 'completed' | 'failed' | 'killed'; exit_code: number } | null
       try {
         reaped = await this.registry.reapShellIfDead(rec)
       } catch {

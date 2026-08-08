@@ -119,55 +119,6 @@ describe('fetchActiveTasks union agent in-flight', () => {
     expect(ids).not.toContain('task-sched')
   })
 
-  it('adds long-running recent completed and failed tasks ordered by completed_at desc without created_at prefilter', async () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date('2026-06-29T09:00:00.000Z'))
-
-    const { assembler, rpcClient } = buildAssembler({
-      adminItems: [{ id: 'task-active', title: 'active', status: 'executing' }],
-      recentItems: [
-        { id: 'task-old', title: 'old', status: 'completed', completed_at: '2026-06-28T09:00:00.000Z' },
-        {
-          id: 'task-new',
-          title: 'new',
-          status: 'completed',
-          completed_at: '2026-06-29T09:00:00.000Z',
-          source: { trigger_type: 'message', channel_id: 'ch', session_id: 'sess' },
-        },
-        { id: 'task-failed', title: 'failed', status: 'failed', completed_at: '2026-06-29T08:00:00.000Z', error: 'TypeError: terminated' },
-      ],
-    })
-    const tasks = await (assembler as unknown as { fetchActiveTasks: (channelId: string, sessionId: string) => Promise<TaskSummary[]> })
-      .fetchActiveTasks('ch', 'sess')
-    expect(tasks.map(t => t.task_id)).toEqual(['task-active', 'task-new', 'task-failed', 'task-old'])
-    expect(tasks.find(t => t.task_id === 'task-new')?.candidate_kind).toBe('recent_terminal')
-    expect(tasks.find(t => t.task_id === 'task-new')?.trigger_type).toBeUndefined()
-    expect(tasks.find(t => t.task_id === 'task-failed')?.error).toBe('TypeError: terminated')
-    expect(rpcClient.call).toHaveBeenCalledWith(
-      19001,
-      'list_recent_terminal_tasks',
-      expect.objectContaining({ channel_id: 'ch', session_id: 'sess', limit: 3 }),
-      'test-agent',
-    )
-  })
-
-  it('excludes cancelled and self-healing failed tasks from recent terminal candidates', async () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date('2026-06-29T09:00:00.000Z'))
-
-    const { assembler } = buildAssembler({
-      adminItems: [],
-      recentItems: [
-        { id: 'task-cancel', title: 'cancel', status: 'cancelled', completed_at: '2026-06-29T09:00:00.000Z' },
-        { id: 'task-recovery', title: 'recovery', status: 'failed', completed_at: '2026-06-29T08:00:00.000Z', error: 'agent_restarted_during_execution' },
-        { id: 'task-ok', title: 'ok', status: 'failed', completed_at: '2026-06-29T07:00:00.000Z', error: 'UND_ERR_SOCKET' },
-      ],
-    })
-    const tasks = await (assembler as unknown as { fetchActiveTasks: (channelId: string, sessionId: string) => Promise<TaskSummary[]> })
-      .fetchActiveTasks('ch', 'sess')
-    expect(tasks.map(t => t.task_id)).toEqual(['task-ok'])
-  })
-
   it('admin 拉取失败时仍返回 agent in-flight 数据', async () => {
     const rpcClient = { call: vi.fn().mockRejectedValue(new Error('admin down')) }
     const assembler = new (ContextAssembler as never)({

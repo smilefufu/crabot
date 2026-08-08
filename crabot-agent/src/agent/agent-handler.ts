@@ -514,6 +514,23 @@ export interface ExecuteTriggerMessageResult {
   readonly traceId?: string
 }
 
+interface ShellExitInfo {
+  readonly entity_id: string
+  readonly command: string
+  readonly status: 'completed' | 'failed' | 'killed'
+  readonly exit_code: number
+  readonly spawned_by_task_id: string
+  readonly owner_friend_id?: string
+  readonly worker_id?: string
+  readonly runtime_ms?: number
+}
+
+type ShellExitSettlement =
+  | { readonly status: 'delivered' }
+  | { readonly status: 'dead_letter'; readonly reason: string }
+
+const BG_EXIT_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 10_000] as const
+
 export class AgentHandler {
   private sdkEnv: SdkEnvConfig
   private systemPrompt: string
@@ -572,29 +589,25 @@ export class AgentHandler {
    */
   private readonly pendingBgNotifications = new Map<string, string[]>()
   /** Builtin WorkerInbox exit dispatcher, attached after the harness is constructed. */
-  private builtinShellExitDispatcher?: (workerId: string, info: {
-    entity_id: string
-    command: string
-    status: 'completed' | 'failed' | 'killed'
-    exit_code: number
-    runtime_ms?: number
-  }) => Promise<void>
+  private builtinShellExitDispatcher?: (
+    workerId: string,
+    info: ShellExitInfo,
+    onSettled: (settlement: ShellExitSettlement) => Promise<void>,
+  ) => Promise<void>
   /**
    * Recovered worker-owned shells must wait for harness reconciliation: before
    * `scanOrphans()` a restarted builtin adapter has no resident incarnation and
    * WorkerInbox would retain the notification at its head until unrelated input.
    */
   private workerShellExitRoutingReady = false
-  private readonly queuedWorkerShellExits: Array<{
-    entity_id: string
-    command: string
-    status: 'completed' | 'failed' | 'killed'
-    exit_code: number
-    spawned_by_task_id: string
-    owner_friend_id?: string
-    worker_id?: string
-    runtime_ms?: number
-  }> = []
+  private readonly queuedWorkerShellExits: ShellExitInfo[] = []
+  /** Per-worker FIFO retained at the head while delivery is retrying. */
+  private readonly workerShellExitQueues = new Map<string, ShellExitInfo[]>()
+  private readonly drainingWorkerShellExitQueues = new Set<string>()
+  /** Per-process delivery retries; delay is capped while durable pending survives restart. */
+  private readonly workerShellExitRetryTimers = new Map<string, NodeJS.Timeout>()
+  /** Settlement-only retries never re-enqueue an input already accepted by WorkerInbox. */
+  private readonly workerShellExitSettlementTimers = new Map<string, NodeJS.Timeout>()
   /** Interval handle for periodic 24h GC of dead entities */
   private gcIntervalHandle?: NodeJS.Timeout
 
@@ -631,7 +644,7 @@ export class AgentHandler {
           void this.routeShellExit({
             entity_id: rec.entity_id,
             command: rec.command,
-            status: rec.status === 'completed' ? 'completed' : 'failed',
+            status: rec.status === 'completed' ? 'completed' : rec.status === 'killed' ? 'killed' : 'failed',
             exit_code: rec.exit_code ?? -1,
             spawned_by_task_id: rec.spawned_by_task_id,
             ...(rec.owner.friend_id ? { owner_friend_id: rec.owner.friend_id } : {}),
@@ -670,6 +683,13 @@ export class AgentHandler {
       clearInterval(this.gcIntervalHandle)
       this.gcIntervalHandle = undefined
     }
+    this.readoptReaper.stop()
+    this.workerShellExitQueues.clear()
+    this.drainingWorkerShellExitQueues.clear()
+    for (const timer of this.workerShellExitRetryTimers.values()) clearTimeout(timer)
+    this.workerShellExitRetryTimers.clear()
+    for (const timer of this.workerShellExitSettlementTimers.values()) clearTimeout(timer)
+    this.workerShellExitSettlementTimers.clear()
   }
 
   /**
@@ -722,48 +742,162 @@ export class AgentHandler {
   async releaseRecoveredWorkerShellExits(): Promise<void> {
     this.workerShellExitRoutingReady = true
     const recovered = this.queuedWorkerShellExits.splice(0)
+    const workerIds = new Set<string>()
     for (const info of recovered) {
-      try {
-        await this.routeShellExit(info)
-      } catch (error) {
-        console.error(
-          `[AgentHandler] recovered shell notification failed (entity=${info.entity_id}, worker=${info.worker_id ?? 'legacy'}):`,
-          error,
-        )
+      if (!info.worker_id) {
+        void this.deliverShellExitNotification(info).catch((error) => {
+          console.error(`[AgentHandler] recovered legacy shell notification failed for ${info.entity_id}:`, error)
+        })
+        continue
       }
+      this.enqueueWorkerShellExit(info.worker_id, info)
+      workerIds.add(info.worker_id)
+    }
+    // Start one independent FIFO drain per worker. Startup/liveness must not wait
+    // for adapter I/O from an unrelated worker that may remain hung indefinitely.
+    for (const workerId of workerIds) {
+      void this.drainWorkerShellExitQueue(workerId).catch((error) => {
+        console.error(`[AgentHandler] recovered worker shell queue failed for ${workerId}:`, error)
+      })
     }
   }
 
-  private async routeShellExit(info: {
-    entity_id: string
-    command: string
-    status: 'completed' | 'failed' | 'killed'
-    exit_code: number
-    spawned_by_task_id: string
-    owner_friend_id?: string
-    worker_id?: string
-    runtime_ms?: number
-  }): Promise<void> {
+  private async routeShellExit(info: ShellExitInfo): Promise<void> {
     if (info.worker_id && !this.workerShellExitRoutingReady) {
       this.queuedWorkerShellExits.push(info)
       return
     }
-    if (info.worker_id && this.builtinShellExitDispatcher) {
-      await this.builtinShellExitDispatcher(info.worker_id, info)
+    if (!info.worker_id) {
+      await this.deliverShellExitNotification(info)
       return
     }
-    await this.deliverShellExitNotification(info)
+
+    this.enqueueWorkerShellExit(info.worker_id, info)
+    await this.drainWorkerShellExitQueue(info.worker_id)
+  }
+
+  private enqueueWorkerShellExit(workerId: string, info: ShellExitInfo): void {
+    const queue = this.workerShellExitQueues.get(workerId) ?? []
+    if (!queue.some((queued) => queued.entity_id === info.entity_id)) queue.push(info)
+    this.workerShellExitQueues.set(workerId, queue)
+  }
+
+  private async drainWorkerShellExitQueue(workerId: string, retryIndex = 0): Promise<void> {
+    if (this.drainingWorkerShellExitQueues.has(workerId)) return
+    this.drainingWorkerShellExitQueues.add(workerId)
+    try {
+      const queue = this.workerShellExitQueues.get(workerId)
+      while (queue && queue.length > 0) {
+        const info = queue[0]
+        if (!await this.tryRouteWorkerShellExit(workerId, info)) {
+          this.scheduleWorkerShellExitRetry(workerId, info.entity_id, retryIndex)
+          return
+        }
+        const retryTimer = this.workerShellExitRetryTimers.get(info.entity_id)
+        if (retryTimer) clearTimeout(retryTimer)
+        this.workerShellExitRetryTimers.delete(info.entity_id)
+        queue.shift()
+      }
+      this.workerShellExitQueues.delete(workerId)
+    } finally {
+      this.drainingWorkerShellExitQueues.delete(workerId)
+    }
+  }
+
+  private async tryRouteWorkerShellExit(workerId: string, info: ShellExitInfo): Promise<boolean> {
+    try {
+      const record = await this.bgRegistry.get(info.entity_id)
+      if (record?.type !== 'shell' || record.exit_notification?.status !== 'pending') return true
+      if (!this.builtinShellExitDispatcher) {
+        throw new Error('builtin shell exit dispatcher is not attached')
+      }
+
+      await this.bgRegistry.beginExitNotificationAttempt(info.entity_id)
+      await this.builtinShellExitDispatcher(workerId, info, async (settlement) => {
+        await this.settleWorkerShellExit(info.entity_id, settlement)
+      })
+      return true
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      await this.bgRegistry.recordExitNotificationFailure(info.entity_id, message).catch((recordError) => {
+        console.error(`[AgentHandler] failed to persist bg notification error for ${info.entity_id}:`, recordError)
+      })
+      console.error(
+        `[AgentHandler] worker shell notification failed (entity=${info.entity_id}, worker=${workerId}):`,
+        error,
+      )
+      return false
+    }
+  }
+
+  private scheduleWorkerShellExitRetry(workerId: string, entityId: string, retryIndex: number): void {
+    if (this.workerShellExitRetryTimers.has(entityId)) return
+    const delayIndex = Math.min(retryIndex, BG_EXIT_RETRY_DELAYS_MS.length - 1)
+    const timer = setTimeout(() => {
+      this.workerShellExitRetryTimers.delete(entityId)
+      void this.drainWorkerShellExitQueue(
+        workerId,
+        Math.min(delayIndex + 1, BG_EXIT_RETRY_DELAYS_MS.length - 1),
+      )
+    }, BG_EXIT_RETRY_DELAYS_MS[delayIndex])
+    timer.unref?.()
+    this.workerShellExitRetryTimers.set(entityId, timer)
+  }
+
+  private async settleWorkerShellExit(
+    entityId: string,
+    settlement: ShellExitSettlement,
+    retryIndex = 0,
+  ): Promise<void> {
+    try {
+      await this.bgRegistry.settleExitNotification(
+        entityId,
+        settlement.status,
+        settlement.status === 'dead_letter' ? settlement.reason : undefined,
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      await this.bgRegistry.recordExitNotificationFailure(entityId, `settlement failed: ${message}`).catch(() => undefined)
+      this.scheduleWorkerShellExitSettlementRetry(entityId, settlement, retryIndex)
+      throw error
+    }
+  }
+
+  private scheduleWorkerShellExitSettlementRetry(
+    entityId: string,
+    settlement: ShellExitSettlement,
+    retryIndex: number,
+  ): void {
+    if (this.workerShellExitSettlementTimers.has(entityId)) return
+    const delayIndex = Math.min(retryIndex, BG_EXIT_RETRY_DELAYS_MS.length - 1)
+    const timer = setTimeout(() => {
+      this.workerShellExitSettlementTimers.delete(entityId)
+      void this.settleWorkerShellExit(
+        entityId,
+        settlement,
+        Math.min(delayIndex + 1, BG_EXIT_RETRY_DELAYS_MS.length - 1),
+      ).catch((error) => {
+        console.error(`[AgentHandler] bg notification settlement retry failed for ${entityId}:`, error)
+      })
+    }, BG_EXIT_RETRY_DELAYS_MS[delayIndex])
+    timer.unref?.()
+    this.workerShellExitSettlementTimers.set(entityId, timer)
   }
 
   /**
    * Supplies the shared persistent registry to a builtin worker. The legacy
    * handler remains its owner; a second registry would split shell ownership.
    */
-  createBuiltinBgToolOptions(
-    workerId: string,
-    onShellExit: BashBgContext['onShellExit'],
-  ): { bgEntityCtx: BashBgContext; bgToolDeps: BgToolDeps } {
+  createBuiltinBgToolOptions(workerId: string): { bgEntityCtx: BashBgContext; bgToolDeps: BgToolDeps } {
     const owner: BgEntityOwner = { friend_id: `__system_${workerId}`, worker_id: workerId }
+    const onShellExit: BashBgContext['onShellExit'] = (info) => {
+      void this.routeShellExit({
+        ...info,
+        spawned_by_task_id: workerId,
+        owner_friend_id: owner.friend_id,
+        worker_id: workerId,
+      })
+    }
     return {
       bgEntityCtx: { registry: this.bgRegistry, owner, taskId: workerId, onShellExit },
       bgToolDeps: {
@@ -1397,7 +1531,7 @@ export class AgentHandler {
           taskType: task.task_type,
           // 用 getter 形式封装本地 cache，worker 中途 set_task_goal 后下一轮工具调用立即生效。
           hasGoal: () => goalSetCache,
-          // ask_human barrier 超时自醒时的兜底：admin 判死时的 abort_worker 若没送达，
+          // ask_human barrier 超时自醒时的本地兜底：复查 Admin task 状态，
           // 这里查一次 task 状态，已终态就静默 abort，不让 worker 带着死任务继续跑。
           abortIfTaskTerminal: () => this.abortWorkerIfTaskTerminal(task.task_id),
           // Goal mode 缓冲：send_message handler 在工作态（无 activeAudit）把 info 消息推入 outboundBuffer；
@@ -3212,12 +3346,9 @@ export class AgentHandler {
   }
 
   /**
-   * 中止某个 task 的 worker loop。**无场景语义**——只负责 abort，不碰 task 状态、
-   * 不假设调用方是取消 / 超时 / 对账中的哪一种。各场景的状态语义由 admin 侧组装。
-   *
-   * 不变量：admin 把 task 落终态前必须先调本方法（经 abort_worker RPC），保证
-   * 「task 非终态 ⟺ worker 活着」。parked 在 barrier 上的 worker 也能被叫醒——
-   * humanQueue.waitBarrier 监听 abortSignal，醒来后在下一轮 LLM 前退出。
+   * 中止某个 legacy AgentHandler task 的 worker loop。仅供该 handler 的本地 barrier
+   * 终态兜底使用；不注册 Admin task lifecycle RPC，也不修改 Admin task 状态。
+   * parked 在 barrier 上的 worker 会因 abortSignal 醒来，并在下一轮 LLM 前退出。
    *
    * @returns 是否找到活着的 worker（false = 本来就没在跑，abort 是 no-op）
    */
@@ -3230,22 +3361,15 @@ export class AgentHandler {
   }
 
   cancelTask(taskId: TaskId, reason: string): void {
-    // SSOT: 不再 mutate agent 内存里的 task status —— admin 那侧的 cancel_task RPC 已经
-    // 把 tasks.json 改成 'cancelled'，本方法只负责 abort 当前 worker loop。
+    // 兼容仍在同进程持有 legacy task 的内部调用；不修改 Admin task 状态。
     this.abortWorker(taskId, reason)
   }
 
   /**
-   * 兜底：barrier 超时自醒时，先确认 task 还没被 admin 判死。
+   * 兜底：legacy barrier 超时自醒时，复查 Admin task 是否已经终态。
    *
-   * 正常路径下 admin 判死时会经 abort_worker 叫停 worker，走不到这里。但那条 RPC 可能
-   * 失败（agent 忙 / 网络抖动），此时 worker 会在 barrier 超时后自己醒来——若 task 已是
-   * 终态，它继续跑就会发出用户看不懂的消息、再撞上状态机拒绝。这里静默 abort 收口。
-   *
-   * admin 不可达时保持现状继续跑（fail-open）：查不到状态不代表任务已死。但 admin 明确
-   * 答复 task 不存在是另一回事——`delete_task` 拒删活跃任务、按量清理只删终态任务，所以
-   * "查无此 task" ⟹ 它已经终态过并被删掉，此时同样要 abort（人类在 UI 看到 failed 任务
-   * 顺手删掉是很自然的操作，不能让 worker 借这条更窄的路继续跑）。
+   * task 已终态却继续运行会越过生命周期边界，因此这里静默 abort。Admin 不可达时
+   * fail-open；只有明确读取到终态或 TASK_NOT_FOUND 时才停止本地 legacy worker。
    */
   async abortWorkerIfTaskTerminal(taskId: TaskId): Promise<void> {
     if (!this.deps?.getAdminPort || !this.deps.rpcClient) return

@@ -576,7 +576,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       const names = resolveTools(builtin).map((t) => t.name)
       expect(names).toEqual(expect.arrayContaining(['Bash', 'Output', 'Kill', 'ListEntities']))
 
-      const options = internals.agentHandler!.createBuiltinBgToolOptions('w-bg-owner', () => {})
+      const options = internals.agentHandler!.createBuiltinBgToolOptions('w-bg-owner')
       expect(options.bgEntityCtx.owner.worker_id).toBe('w-bg-owner')
       expect(options.bgEntityCtx.taskId).toBe('w-bg-owner')
       expect(options.bgToolDeps.taskId).toBe('w-bg-owner')

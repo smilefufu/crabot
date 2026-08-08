@@ -1,6 +1,15 @@
 # Crabot 项目进度
 
-> 最后更新：2026-08-07 — #78 已部署；真实 Admin Chat 发现 cc 2.1.223 bypass 危险确认字段版本失配，修复中
+> 最后更新：2026-08-08 — PR #80 最终收口实现完成，正在做全量验证与独立 review
+
+## 2026-08-08 — PR #80：legacy loop 最终退役与 builtin bg-shell durable delivery（验证中）
+
+- 已按 `protocol-agent-v3.md` v3.0.5 和 `2026-08-08-pr80-finalization-{design,plan}.md` 收口：`wait_for_signal` 零生产残留；`start_task` / `start_recovery_task` / `create_task_from_schedule` / `resume_task*` / `cancel_task` / `abort_worker` 不再注册生产 RPC，Admin restart resume/self-healing 与 recent-terminal revival 链路已删除。
+- builtin worker 的后台 shell owner 记录 `worker_id`；shell 终态与 `exit_notification=pending` 原子落 registry。正常 exit、startup reap、readopt reaper 均走同一 receipt，重启扫描 terminal+pending；实际 WorkerInbox 投递后落 `delivered`，取消/无 worker/无化身落 `dead_letter`，意外失败保持 pending 并做有界退避重试。
+- durable receipt 采用 at-least-once：adapter 已收输入但 settlement 未落盘的崩溃窄窗允许重放；同进程 retry 用稳定 `entity_id` 在 WorkerInbox 去重，不因暂扣提前 settlement。pending receipt 不被 task cleanup 或 7 日 GC 删除。
+- agent-native system task 没有 incarnation；启动对账若其仍非终态，明确标 `failed`（`execution context lost on agent restart`）并发状态事件。`sendToWorker` / `queryWorker` / `killWorker` / `switchWorkerImpl` 等 worker-only API 统一抛 domain error，不伪造 incarnation。
+- Admin 历史 task 只作归档：启动读取时把遗留非终态记录本地修复为 failed，不再尝试恢复或控制 Agent worker；memory graph rebuild 仍是 `trigger_schedule → system-thread manager → crab-memory` 的 manager-native 特例。
+- 当前验证：Shared/Agent/Admin TypeScript build 与 Admin Web production build 通过；durable registry/inbox/harness/builtin delivery 等 focused Agent 测试 **117 passed**，Admin focused 测试 **123 passed**。Agent 全量最终为 **2509 passed / 20 failed / 2 skipped**：20 条均为本机既有环境问题（9 条 claude-code contract + 5 条 harness integration tmux timeout、1 条 tmux pane 前台命令、2 条 `/var`→`/private/var` Codex PATH、3 条 workspace realpath），本次相关测试均通过。Admin 全量 **1069 passed / 1 failed**，唯一失败是既有 `v1-cleanup` 跨仓扫描命中 Agent 的 `store_memory` 测试字面。两路 fresh review 首轮发现 retry liveness、settlement-only repair、per-worker/startup FIFO 与 explicit-seq domain error，均已修复并补回归；最终 durable 与 contract 复审均为 **no material findings**。待 commit/push PR #80 与观察 CI，不自行 merge。
 
 ## 2026-08-07 — cc bypass 首次危险确认窗版本修复（进行中）
 

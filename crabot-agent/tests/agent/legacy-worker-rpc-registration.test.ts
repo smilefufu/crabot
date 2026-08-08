@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { UnifiedAgent } from '../../src/unified-agent.js'
 
-describe('legacy worker lifecycle RPC compatibility', () => {
-  it('registers cancel_task and abort_worker while worker role is enabled', () => {
+describe('legacy worker execution RPC retirement', () => {
+  it('does not register any legacy execution, recovery, or lifecycle RPC', () => {
     const agent = Object.create(UnifiedAgent.prototype) as any
     const registered: string[] = []
     agent.roles = new Set(['worker'])
@@ -10,23 +10,14 @@ describe('legacy worker lifecycle RPC compatibility', () => {
 
     agent.registerMethods()
 
-    expect(registered).toContain('cancel_task')
-    expect(registered).toContain('abort_worker')
     expect(registered).not.toContain('execute_task')
     expect(registered).not.toContain('deliver_human_response')
     expect(registered).not.toContain('start_task')
-  })
-
-  it('cancel and abort handlers delegate to the live legacy worker owner', () => {
-    const cancelTask = vi.fn()
-    const abortWorker = vi.fn().mockReturnValue(true)
-    const agent = Object.create(UnifiedAgent.prototype) as any
-    agent.agentHandler = { cancelTask, abortWorker }
-
-    expect(agent.handleCancelTask({ task_id: 'task-1', reason: 'human cancelled' })).toEqual({ cancelled: true })
-    expect(cancelTask).toHaveBeenCalledWith('task-1', 'human cancelled')
-
-    expect(agent.handleAbortWorker({ task_id: 'task-2', reason: 'terminal sweep' })).toEqual({ aborted: true })
-    expect(abortWorker).toHaveBeenCalledWith('task-2', 'terminal sweep')
+    expect(registered).not.toContain('start_recovery_task')
+    expect(registered).not.toContain('create_task_from_schedule')
+    expect(registered).not.toContain('resume_task')
+    expect(registered).not.toContain('resume_task_with_supplement')
+    expect(registered).not.toContain('cancel_task')
+    expect(registered).not.toContain('abort_worker')
   })
 })

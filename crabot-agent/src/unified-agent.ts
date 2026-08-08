@@ -91,7 +91,13 @@ import {
 } from './manager/read-model.js'
 import type { NormalizedTraceEvent, SpawnSpec } from './workers/types.js'
 import type { HarnessEvent } from './workers/harness/worker-events.js'
-import { findIncarnationBySeq, mainlineIncarnation } from './workers/harness/harness.js'
+import {
+  findIncarnationBySeq,
+  mainlineIncarnation,
+  TaskCancelledError,
+  WorkerHasNoIncarnationError,
+  WorkerNotFoundError,
+} from './workers/harness/harness.js'
 import { applyStatusTransition } from './workers/harness/task-status.js'
 import { SYSTEM_TASKS_MANAGER_KEY } from './manager/registry.js'
 import { splitManagerKey } from './manager/principal.js'
@@ -806,13 +812,32 @@ export class UnifiedAgent extends ModuleBase {
       exit_code: number
       runtime_ms?: number
     },
+    onSettled: (settlement: { status: 'delivered' } | { status: 'dead_letter'; reason: string }) => Promise<void>,
   ): Promise<void> {
     const complete = this.requireManagerStack().harness.beginBgNotification(workerId)
+    let completed = false
+    const completeOnce = (): void => {
+      if (completed) return
+      completed = true
+      complete()
+    }
+    const settle = async (
+      settlement: { status: 'delivered' } | { status: 'dead_letter'; reason: string },
+    ): Promise<void> => {
+      try {
+        await onSettled(settlement)
+      } finally {
+        completeOnce()
+      }
+    }
     const previous = this.builtinBgDeliveryTails.get(workerId) ?? Promise.resolve()
     const delivery = previous
       .catch(() => undefined)
-      .then(() => this.deliverBuiltinShellExitNow(workerId, info))
-      .finally(complete)
+      .then(() => this.deliverBuiltinShellExitNow(workerId, info, settle, completeOnce))
+      .catch((error) => {
+        completeOnce()
+        throw error
+      })
     this.builtinBgDeliveryTails.set(workerId, delivery)
     void delivery.finally(() => {
       if (this.builtinBgDeliveryTails.get(workerId) === delivery) this.builtinBgDeliveryTails.delete(workerId)
@@ -829,17 +854,36 @@ export class UnifiedAgent extends ModuleBase {
       exit_code: number
       runtime_ms?: number
     },
+    onSettled: (settlement: { status: 'delivered' } | { status: 'dead_letter'; reason: string }) => Promise<void>,
+    onDeduplicated: () => void,
   ): Promise<void> {
     const handler = this.agentHandler
     if (!handler) throw new Error('builtin shell exit cannot be delivered before AgentHandler initialization')
     const harness = this.requireManagerStack().harness
     try {
       const text = await handler.renderShellExitNotification(info)
-      await harness.sendToWorker(workerId, `<bg-notification>\n${text}\n</bg-notification>`)
+      await harness.sendToWorker(workerId, `<bg-notification>\n${text}\n</bg-notification>`, {
+        dedupeKey: `bg-shell:${info.entity_id}`,
+        onDeduplicated,
+        onSettled: async (settlement) => {
+          await onSettled(
+            settlement === 'dead_letter'
+              ? { status: 'dead_letter', reason: 'worker inbox dead-letter' }
+              : { status: 'delivered' },
+          )
+        },
+      })
     } catch (error) {
-      // Never silently drop an async system notification. The harness records
-      // terminal-worker dead letters itself; unexpected routing failures are
-      // retained in the module log for operational recovery.
+      if (
+        error instanceof TaskCancelledError ||
+        error instanceof WorkerNotFoundError ||
+        error instanceof WorkerHasNoIncarnationError
+      ) {
+        await onSettled({ status: 'dead_letter', reason: error.message })
+        return
+      }
+      // Never silently drop an async system notification. Unexpected failures
+      // remain pending in the durable shell registry and are retried by AgentHandler.
       console.error(`[${this.config.moduleId}] builtin bg notification delivery failed for ${workerId}:`, error)
       throw error
     }
@@ -868,11 +912,7 @@ export class UnifiedAgent extends ModuleBase {
     if (!handler) {
       throw new Error('[builtin-worker] AgentHandler is required to provide persistent background shell support')
     }
-    const bgOptions = handler.createBuiltinBgToolOptions(ctx.worker_id, (info) => {
-      void this.deliverBuiltinShellExit(ctx.worker_id, info).catch((error) =>
-        console.error(`[${this.config.moduleId}] builtin bg shell exit handling failed:`, error),
-      )
-    })
+    const bgOptions = handler.createBuiltinBgToolOptions(ctx.worker_id)
     tools.push(...getConfiguredBuiltinTools(
       () => workspaceRoot,
       this.agentConfig?.builtin_tool_config,
@@ -1034,7 +1074,9 @@ export class UnifiedAgent extends ModuleBase {
       ...(imageConnInfo ? { imageConnInfo } : {}),
       imageCapability,
     })
-    handler.setBuiltinShellExitDispatcher((workerId, info) => this.deliverBuiltinShellExit(workerId, info))
+    handler.setBuiltinShellExitDispatcher((workerId, info, onSettled) =>
+      this.deliverBuiltinShellExit(workerId, info, onSettled),
+    )
     return handler
   }
 
@@ -1056,9 +1098,6 @@ export class UnifiedAgent extends ModuleBase {
   private registerMethods(): void {
     // 编排接口
     this.registerMethod('process_message', this.handleProcessMessage.bind(this))
-    this.registerMethod('resume_task', this.handleResumeTask.bind(this))
-    this.registerMethod('resume_task_with_supplement', this.handleResumeTaskWithSupplement.bind(this))
-    this.registerMethod('finalize_orphan_checkpoints', this.handleFinalizeOrphanCheckpoints.bind(this))
 
     // Agent 接口
     this.registerMethod('get_role', this.handleGetRole.bind(this))
@@ -1070,10 +1109,6 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('update_config', this.handleUpdateConfig.bind(this))
 
     if (this.roles.has('worker')) {
-      // The old execution entrypoints are retired, but Admin still uses these two
-      // lifecycle controls while resume_task can revive a legacy worker loop.
-      this.registerMethod('cancel_task', this.handleCancelTask.bind(this))
-      this.registerMethod('abort_worker', this.handleAbortWorker.bind(this))
       this.registerMethod('deliver_page_feedback', this.handleDeliverPageFeedback.bind(this))
     }
 
@@ -1913,275 +1948,6 @@ export class UnifiedAgent extends ModuleBase {
     return { decision_types: result.repliedToHuman ? ['direct_reply'] : [] }
   }
 
-  /**
-   * 对账孤儿 checkpoint：admin resume sweep 跑完后调用，传入它当前所有 in-flight task_id。
-   * agent 把「持有 checkpoint 但不在该集合里」的（admin 已不认、停机期间已完结的）finalize 掉，
-   * 防止 per-task checkpoint 文件永驻磁盘（孤儿泄漏）。
-   */
-  private handleFinalizeOrphanCheckpoints(params: { keep_task_ids: string[] }): { finalized: string[] } {
-    const keep = new Set(params.keep_task_ids ?? [])
-    const finalized: string[] = []
-    for (const taskId of this.traceStore.getResumableTaskIds()) {
-      if (!keep.has(taskId)) {
-        this.traceStore.finalizeUnresumedCheckpoint(taskId)
-        finalized.push(taskId)
-      }
-    }
-    if (finalized.length > 0) {
-      console.log(`[${this.config.moduleId}] finalized ${finalized.length} orphan checkpoint(s)`)
-    }
-    return { finalized }
-  }
-
-  private async handleResumeTask(params: { task_id: string }): Promise<{ resumed: boolean; reason?: string }> {
-    return this.resumeTaskInternal({ task_id: params.task_id })
-  }
-
-  private async handleResumeTaskWithSupplement(params: { task_id: string; supplement_text: string }): Promise<{ resumed: boolean; reason?: string }> {
-    return this.resumeTaskInternal({ task_id: params.task_id, terminalSupplementText: params.supplement_text })
-  }
-
-  /**
-   * 只读预检查：这个 task 现在能不能被 resume（逻辑与 resumeTaskInternal 的前置门一致）。
-   *
-   * 关键用途：terminal supplement revive 必须在改动 admin task 状态**之前**判断能否 resume。
-   * 否则会先把一个已完成任务经 revive_task_for_supplement 翻成 executing、再发现 resume 不了、
-   * 只能兜底把它标 failed——把本已 completed 的任务写坏，且违反 recent-task-supplement spec
-   * （2026-06-29 设计 §Revive/Resume §3：checkpoint 不可用时应降级 new_task、不动原 task 状态）。
-   */
-  private getCheckpointForResume(
-    taskId: string,
-    mode: 'restart' | 'terminal_supplement',
-  ): { traceId: string; checkpoint: import('./types.js').ResumeCheckpoint } | undefined {
-    return mode === 'terminal_supplement'
-      ? this.traceStore.findLatestResumeCheckpointByTaskId(taskId)
-      : this.traceStore.getResumableCheckpoint(taskId)
-  }
-
-  private canResumeTask(taskId: string, mode: 'restart' | 'terminal_supplement' = 'restart'): { ok: true } | { ok: false; reason: string } {
-    if (this.agentHandler?.hasActiveTask(taskId)) return { ok: true }
-    const entry = this.getCheckpointForResume(taskId, mode)
-    if (!entry) return { ok: false, reason: 'no_checkpoint' }
-    const guard = isResumable(entry.checkpoint, AGENT_VERSION)
-    if (!guard.ok) {
-      if (mode === 'restart') {
-        // 版本不匹配/空 checkpoint 的死快照就地清理（与 resumeTaskInternal 一致），
-        // 免得残留文件下次启动又被当 in-flight 载入。
-        this.traceStore.finalizeUnresumedCheckpoint(taskId)
-      }
-      return { ok: false, reason: guard.reason }
-    }
-    // 体积门禁（仅 terminal supplement revive）：checkpoint 超预算时不复活、不碰 admin 状态，
-    // 返回 fallback 由 dispatcher 降级 new_task。二元判定——要么原样复活，要么 new_task，
-    // 不存在"压缩后复活"（复活的价值就是原样 checkpoint + prompt cache 前缀）。
-    // restart 模式不加：重启恢复走 loop 内 compaction，不在本期范围。
-    // Spec: 2026-07-18-revive-vs-new-task-decision-design §决策 2
-    if (mode === 'terminal_supplement') {
-      const estimator = new ContextManager({ maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS })
-      const estimated = estimator.estimateTotalTokens(entry.checkpoint.messages)
-      const budget = DEFAULT_MAX_CONTEXT_TOKENS * DEFAULT_COMPACT_THRESHOLD
-      if (estimated >= budget) {
-        return { ok: false, reason: `checkpoint_too_large(est≈${Math.round(estimated / 1000)}k tokens)` }
-      }
-    }
-    return { ok: true }
-  }
-
-  private async reviveTerminalSupplementTask(
-    taskId: string,
-    text: string,
-    channelId: string,
-    sessionId: string,
-  ): Promise<{ outcome: 'revived'; traceId?: string } | { outcome: 'fallback'; reason?: string }> {
-    // 预检查 resumability——必须在 admin 改状态之前。不可 resume 就直接降级：返回
-    // fallback 让 dispatcher-executor 走 new_task，原 task 保持原终态（不被翻成 executing、
-    // 更不会被兜底标 failed）。这是本方法此前把 completed 任务误写成 failed 的根因修复。
-    const pre = this.canResumeTask(taskId, 'terminal_supplement')
-    if (!pre.ok) return { outcome: 'fallback', reason: pre.reason }
-
-    try {
-      const adminPort = await this.getAdminPort()
-      await this.rpcClient.call(adminPort, 'revive_task_for_supplement', {
-        task_id: taskId,
-        channel_id: channelId,
-        session_id: sessionId,
-        supplement_text: text,
-      }, this.config.moduleId)
-      const r = await this.handleResumeTaskWithSupplement({ task_id: taskId, supplement_text: text })
-      if (r.resumed === true) return { outcome: 'revived' }
-
-      // 预检查通过、admin 已翻成 executing，resume 却仍失败——极窄竞态（checkpoint 在两次读
-      // 之间被并发清掉）。此时 task 已脱离终态，必须兜底回收到 failed。常态的 no_checkpoint
-      // 已被上面的预检查拦在改状态之前，不会再走到这里。
-      const reason = r.reason ?? 'resume_rejected'
-      try {
-        await this.rpcClient.call(adminPort, 'update_task_status', {
-          task_id: taskId,
-          status: 'failed',
-          error: `Revived terminal supplement task could not be resumed: ${reason}`,
-        }, this.config.moduleId)
-      } catch (cleanupErr) {
-        console.error(
-          `[${this.config.moduleId}] failed to mark rejected revived task ${taskId} failed:`,
-          cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
-        )
-      }
-      return { outcome: 'fallback', reason }
-    } catch (err) {
-      return { outcome: 'fallback', reason: err instanceof Error ? err.message : String(err) }
-    }
-  }
-
-  private async resumeTaskInternal(params: { task_id: string; terminalSupplementText?: string }): Promise<{ resumed: boolean; reason?: string }> {
-    const { task_id } = params
-    const mode = params.terminalSupplementText !== undefined ? 'terminal_supplement' : 'restart'
-
-    // worker-alive 守卫：admin 单独重启时 agent 没重启、worker loop 仍在内存里跑这条 task。
-    // 此时绝不能据 checkpoint 再起第二个 loop（会双重执行 + 双发消息）——直接当作已 resumed。
-    if (this.agentHandler?.hasActiveTask(task_id)) {
-      return { resumed: true }
-    }
-
-    if (!this.agentHandler) {
-      return { resumed: false, reason: 'not_configured' }
-    }
-
-    const entry = this.getCheckpointForResume(task_id, mode)
-    if (!entry) return { resumed: false, reason: 'no_checkpoint' }
-
-    const guard = isResumable(entry.checkpoint, AGENT_VERSION)
-    if (!guard.ok) {
-      if (mode === 'restart') {
-        this.traceStore.finalizeUnresumedCheckpoint(task_id)
-      }
-      return { resumed: false, reason: guard.reason }
-    }
-
-    try {
-      const adminPort = await this.getAdminPort()
-      const { task } = await this.rpcClient.call<
-        { task_id: string },
-        {
-          task: {
-            id: string
-            title: string
-            priority: string
-            plan?: string
-            source?: {
-              origin?: 'human' | 'system' | 'admin_chat'
-              channel_id?: string
-              session_id?: string
-              friend_id?: string
-              trigger_type?: string
-            }
-          }
-        }
-      >(adminPort, 'get_task', { task_id }, this.config.moduleId)
-
-      // 基础 context：endpoints / memories / time_windows 等可重新拉取的部分由
-      // assembleScheduledTaskContext 现装配（不存进 checkpoint，避免过期）。
-      const baseContext = await this.contextAssembler.assembleScheduledTaskContext()
-
-      // 关键：用 checkpoint 里存的「worker 执行上下文子集」覆盖回执行身份/场景，
-      // 让 resumed worker 拿回和原任务一样的工具集 + 投递目标 + report mode。
-      // 缺失（旧 checkpoint）时回退到从 task.source 重建 task_origin（仅修投递，工具仍可能受限）。
-      //
-      // 权限例外（spec 2026-07-20-task-permission-hot-refresh）：resolved_permissions 不直接
-      // 还原 checkpoint 冻结值，而是用任务原发起人身份重新解析——agent 停机期间人类改的权限
-      // 对 resume 任务即时生效。解析失败 / 无会话主体 → 回退 checkpoint 快照。
-      // scheduled 任务（含带 target_session 的）不刷新：其权限由 Admin 按 creator
-      // （含 master_private）解析下发，按匿名会话身份重解析会造成降级/抬升（review #38）。
-      const triggerType = normalizeResumeTriggerType(task.source?.trigger_type)
-      const wc = entry.checkpoint.worker_context
-      let resumeResolvedPerms = wc?.resolved_permissions
-      if (triggerType !== 'scheduled' && wc?.task_origin?.session_id && wc.task_origin.session_type) {
-        const freshPerms = await this.resolvePrincipalPermissions(
-          wc.sender_friend?.id,
-          wc.task_origin.session_id,
-          wc.task_origin.session_type,
-        )
-        if (freshPerms) resumeResolvedPerms = freshPerms
-      }
-      const fallbackOrigin: TaskOrigin | undefined =
-        task.source?.channel_id && task.source?.session_id
-          ? {
-              channel_id: task.source.channel_id as TaskOrigin['channel_id'],
-              session_id: task.source.session_id as TaskOrigin['session_id'],
-              ...(task.source.friend_id
-                ? { friend_id: task.source.friend_id as TaskOrigin['friend_id'] }
-                : {}),
-            }
-          : undefined
-
-      const resumedContext: WorkerAgentContext = {
-        ...baseContext,
-        ...(wc?.task_origin ?? fallbackOrigin ? { task_origin: wc?.task_origin ?? fallbackOrigin } : {}),
-        ...(wc?.sender_friend ? { sender_friend: wc.sender_friend } : {}),
-        ...(wc?.memory_permissions ? { memory_permissions: wc.memory_permissions } : {}),
-        ...(resumeResolvedPerms ? { resolved_permissions: resumeResolvedPerms } : {}),
-        ...(wc?.scene_profile ? { scene_profile: wc.scene_profile } : {}),
-      }
-
-      const taskSource = {
-        ...(task.source ?? {}),
-        trigger_type: triggerType,
-      }
-      const taskPayload: ExecuteTaskParams & { related_task_id?: string } = {
-        task: {
-          task_id: task.id,
-          task_title: task.title,
-          priority: task.priority,
-          plan: task.plan,
-          source: taskSource,
-        },
-        context: resumedContext,
-        related_task_id: task.id,
-        resumeFrom: {
-          initialMessages: [...entry.checkpoint.messages],
-          todoItems: entry.checkpoint.worker_state.todo_items,
-          goalRevisionUnlocked: entry.checkpoint.worker_state.goal_revision_unlocked,
-          cwd: entry.checkpoint.worker_state.cwd,
-          humanInputEpoch: entry.checkpoint.worker_state.human_input_epoch,
-          lastDeliveredInfoEpoch: entry.checkpoint.worker_state.last_delivered_info_epoch,
-          ...(mode === 'terminal_supplement' ? { resumeTraceId: entry.traceId } : {}),
-          ...(params.terminalSupplementText !== undefined ? { terminalSupplementText: params.terminalSupplementText } : {}),
-        },
-      }
-
-      this.agentLoopSubstrate.executeAgentLoopInBackground(
-        taskPayload,
-        `resume task ${task.id}`,
-        async (error) => {
-          const msg = error instanceof Error ? error.message : String(error)
-          try {
-            await this.rpcClient.call(
-              adminPort,
-              'update_task_status',
-              { task_id: task.id, status: 'failed', error: msg },
-              this.config.moduleId,
-            )
-          } catch (updateError) {
-            const updateMsg = updateError instanceof Error ? updateError.message : String(updateError)
-            console.error(`[${this.config.moduleId}] Failed to mark resumed task ${task.id} failed: ${updateMsg}`)
-          }
-        },
-      )
-      // 不再 consumeResumableCheckpoint（那会 finalize 旧 trace + 另起新 trace = 一个 task 两条
-      // trace）。改由后台 handleExecuteTask 的 reactivateResumableTrace **复用**旧 trace 续写——
-      // 它从 resumableCheckpoints 摘除该 entry，旧 trace 不 finalize、新 run 的 span 追加上去，
-      // 一个 task 跨重启就是一条连续 trace。
-      return { resumed: true }
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error)
-      console.error(`[${this.config.moduleId}] resume_task ${task_id} failed: ${msg}`)
-      if (mode === 'restart') {
-        // M2: resume_error 时清理 checkpoint，防止文件永驻磁盘被反复加载
-        this.traceStore.finalizeUnresumedCheckpoint(task_id)
-      }
-      return { resumed: false, reason: 'resume_error' }
-    }
-  }
-
   private handleGetRole(): {
     roles: string[]
     specialization: string
@@ -2368,27 +2134,6 @@ export class UnifiedAgent extends ModuleBase {
       return { delivered: true }
     }
     return { delivered: false, reason: 'not_active' }
-  }
-
-  private handleCancelTask(params: { task_id: TaskId; reason: string }): { cancelled: true } {
-    if (!this.agentHandler) {
-      throw new Error('Worker handler not configured')
-    }
-
-    this.agentHandler.cancelTask(params.task_id, params.reason)
-    return { cancelled: true }
-  }
-
-  /**
-   * 中止 worker loop，不带场景语义。admin 把 task 落终态（cancelled / failed）前调用，
-   * 维持「task 非终态 ⟺ worker 活着」。worker 本来就不在跑时返回 aborted=false（no-op）。
-   */
-  private handleAbortWorker(params: { task_id: TaskId; reason: string }): { aborted: boolean } {
-    if (!this.agentHandler) {
-      throw new Error('Worker handler not configured')
-    }
-
-    return { aborted: this.agentHandler.abortWorker(params.task_id, params.reason) }
   }
 
   // ============================================================================
@@ -3040,7 +2785,10 @@ export class UnifiedAgent extends ModuleBase {
     // 让"worker 不存在"与"这个化身还没产生任何事件"在返回值上无法区分。
     const found = await stack.ledger.findWorker(params.worker_id)
     if (!found) {
-      throw new Error(`Worker not found: ${params.worker_id}`)
+      throw new WorkerNotFoundError(params.worker_id)
+    }
+    if (found.worker.incarnations.length === 0) {
+      throw new WorkerHasNoIncarnationError(params.worker_id)
     }
     const incarnation =
       params.seq === undefined ? mainlineIncarnation(found.worker) : findIncarnationBySeq(found.worker, params.seq)
