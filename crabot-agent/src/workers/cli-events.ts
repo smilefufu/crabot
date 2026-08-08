@@ -64,7 +64,7 @@ export class CliEventChannel {
     const kindJsonEscaped = JSON.stringify(kind).slice(1, -1)
     const format = '{"ts":"%s","kind":"%s","raw":%s}\\n'
     const target = `"\${${EVENTS_FILE_ENV}:-${dqEscape(this.filePath)}}"`
-    const raw = kind === 'notification' ? "raw=$(tr -d '\\r\\n'); if [ -z \"$raw\" ]; then raw=null; fi" : 'raw=null'
+    const raw = "raw=$(tr -d '\\r\\n'); if [ -z \"$raw\" ]; then raw=null; fi"
     return [
       'ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)',
       raw,
