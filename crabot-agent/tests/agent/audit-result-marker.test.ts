@@ -11,7 +11,8 @@ describe('audit-result-marker', () => {
     const text = buildAuditPendingMarker({ auditId: 'audit-abc123' })
     expect(text).toContain('<audit_pending>')
     expect(text).toContain('audit-abc123')
-    expect(text).toContain('end_turn')
+    expect(text).toContain('自动挂起')
+    expect(text).not.toContain('timeout_ms')
   })
 
   it('builds audit_result(pass) marker', () => {

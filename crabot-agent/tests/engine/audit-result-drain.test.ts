@@ -47,7 +47,7 @@ function makeAdapter(steps: ReadonlyArray<AdapterStep>): LLMAdapter {
       }
       yield* chunksFromContent(
         [{ type: 'text' as const, text: s.text }],
-        'audit_barrier',
+        'end_turn',
         { inputTokens: 10, outputTokens: 5 },
       )
     }),

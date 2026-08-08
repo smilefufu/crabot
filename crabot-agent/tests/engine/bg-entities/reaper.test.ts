@@ -64,6 +64,19 @@ describe('ReadoptReaper', () => {
     reaper.stop()
   })
 
+  it('re-adopted shell 保留 worker_id，使退出能走 builtin inbox dispatcher', async () => {
+    const reg = stubRegistry(async () => ({ status: 'completed', exit_code: 0 }))
+    const calls: ReadoptedExitInfo[] = []
+    const reaper = new ReadoptReaper(reg, (info) => calls.push(info), 20)
+
+    reaper.watch([makeShellRecord({ owner: { friend_id: '__system_w-1', worker_id: 'w-1' } })])
+    await sleep(60)
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0].worker_id).toBe('w-1')
+    reaper.stop()
+  })
+
   it('仍存活 → 不回调，保留在监视集', async () => {
     const reg = stubRegistry(async () => null)
     const calls: ReadoptedExitInfo[] = []

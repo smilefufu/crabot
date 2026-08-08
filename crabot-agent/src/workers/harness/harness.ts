@@ -334,8 +334,6 @@ export interface HarnessDeps {
   readonly builtinSpawnDefaults?: BuiltinRuntimeFactory
   /** True while this worker owns a running background entity. */
   readonly hasRunningBg?: (workerId: string) => Promise<boolean>
-  /** True after a final bg exit and before its WorkerInbox notification is delivered. */
-  readonly hasPendingBgNotification?: (workerId: string) => boolean
 }
 
 export interface SpawnWorkerParams {
@@ -1061,6 +1059,10 @@ export class WorkerHarness {
     return adapter.readOutput(handle, cursor)
   }
 
+  async hasWorker(workerId: string): Promise<boolean> {
+    return (await this.deps.ledger.findWorker(workerId)) !== undefined
+  }
+
   async listWorkers(dialogObjectId: DialogObjectId): Promise<LedgerWorker[]> {
     return this.deps.ledger.listWorkers(dialogObjectId)
   }
@@ -1442,10 +1444,11 @@ export class WorkerHarness {
     mainline: Incarnation,
     observed: WorkerContractState
   ): Promise<void> {
-    // idle 是否算"等输入"本属 manager 判断职责(protocol-agent-v3 §5.2),这里与
-    // processStateChange 保持同一条保守默认:P4 接线后可按需要覆盖。
     const waitingInput = observed === 'idle' ? true : undefined
-    const nextStatus = taskStatusFromIncarnation(observed, undefined, waitingInput)
+    const nextStatus =
+      observed === 'idle' && (this.hasPendingBgNotification(worker.worker_id) || await this.deps.hasRunningBg?.(worker.worker_id))
+        ? 'running'
+        : taskStatusFromIncarnation(observed, undefined, waitingInput)
     const stateChanged = mainline.state !== observed
     const statusChanged = worker.task.status !== nextStatus
     if (!stateChanged && !statusChanged) return
@@ -1787,12 +1790,13 @@ export class WorkerHarness {
 
       const committed = await this.deps.ledger.upsertWorker(dialogObjectId, h.worker_id, (prev) => {
         if (!prev) return undefined
-        // 同状态重复回调(如 adapter 偶发对同一次转变重复通知)不是合法状态机边(VALID_TRANSITIONS
-        // 没有自环),会被 applyStatusTransition 当非法转换抛错——那样 upsertWorker 直接
-        // reject,连下面的 appendEvent 都不会跑,回调被 handleStateChange 的外层 catch 静默
-        // 吞掉,事件跟着一起丢。提前短路成 no-op,让调用方仍能走到 appendEvent 记录这次回调。
-        if (nextStatus === prev.task.status) return prev
-        const nextTask = applyStatusTransition(prev.task, nextStatus, { now })
+        // 同状态的 task 回调仍可能携带化身状态变化（例如 idle+owned bg
+        // 应保持 task running）。只有两者都已经一致时才是无操作。
+        const current = findIncarnation(prev, h.impl, h.seq)
+        if (nextStatus === prev.task.status && current?.state === state) return prev
+        const nextTask = nextStatus === prev.task.status
+          ? prev.task
+          : applyStatusTransition(prev.task, nextStatus, { now })
         // session_ref 现读现取,同上面 fork 分支的注释。
         const incarnations = patchIncarnationBySeq(
           prev.incarnations,

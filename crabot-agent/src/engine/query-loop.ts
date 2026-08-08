@@ -237,7 +237,7 @@ function formatAuditFailReport(result: AuditResultMarker): string {
   return lines.join('\n')
 }
 
-// endTurnGate 'wait' 路径的挂起超时兜底——与 WAIT_FOR_SIGNAL_TIMEOUT_MS 对齐（24 小时）。
+// endTurnGate 挂起路径的超时兜底（24 小时）。
 // 正常路径不依赖它：audit onExit 必然 push marker 唤醒。
 const GATE_WAIT_BARRIER_TIMEOUT_MS = 24 * 60 * 60 * 1000
 

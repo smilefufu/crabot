@@ -67,9 +67,8 @@ function connInfo(modelId: string): LLMConnectionInfo {
 }
 
 /**
- * `roles: []` 与 `p5-integration.test.ts` 同理：带 'worker' 角色会建 AgentHandler 并起 LSP
- * 子进程，与 builtin worker 的注入通道无关。builtin 的运行配置工厂**不看 roles**，它直接读
- * `model_config.powerful`——这也是本文件顺带钉住的性质。
+ * builtin worker 的后台 shell 依赖 AgentHandler 持有的持久 registry；生产实例必须声明
+ * worker role。这里也按生产装配运行，防止 runtime 在缺 registry 时静默退回 120 秒同步 Bash。
  */
 function makeConfig(p: {
   modelConfig?: Record<string, LLMConnectionInfo>
@@ -86,7 +85,7 @@ function makeConfig(p: {
     orchestration: ORCHESTRATION,
     agent_config: {
       instance_id: 'p7f',
-      roles: [],
+      roles: ['worker'],
       system_prompt: p.systemPrompt ?? '你是测试用 Crabot',
       model_config: p.modelConfig ?? { powerful: connInfo('model-A') },
       ...(p.skills ? { skills: p.skills } : {}),
@@ -567,6 +566,32 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       expect(names).toContain('tmp_page_create')
     })
 
+    it('builtin tools always include persistent bg shell support and bind ownership to the worker', () => {
+      const { internals } = boot()
+      const builtin = internals.buildBuiltinWorkerRuntime({
+        worker_id: 'w-bg-owner',
+        workspace: { root: tmpRoot },
+        origin: { spawned_by_session: 'wechat::s', trigger_type: 'message' },
+      })!
+      const names = resolveTools(builtin).map((t) => t.name)
+      expect(names).toEqual(expect.arrayContaining(['Bash', 'Output', 'Kill', 'ListEntities']))
+
+      const options = internals.agentHandler!.createBuiltinBgToolOptions('w-bg-owner', () => {})
+      expect(options.bgEntityCtx.owner.worker_id).toBe('w-bg-owner')
+      expect(options.bgEntityCtx.taskId).toBe('w-bg-owner')
+      expect(options.bgToolDeps.taskId).toBe('w-bg-owner')
+    })
+
+    it('missing AgentHandler fails loudly instead of silently falling back to synchronous Bash', () => {
+      const { internals } = boot()
+      internals.agentHandler = undefined
+      const runtime = internals.buildBuiltinWorkerRuntime({
+        worker_id: 'w-no-handler', workspace: { root: tmpRoot },
+        origin: { spawned_by_session: 'wechat::s', trigger_type: 'message' },
+      })!
+      expect(() => resolveTools(runtime)).toThrow(/AgentHandler is required/)
+    })
+
     it('不含 messaging / set_cwd / goal 相关，也不含本阶段明确排除的那几个（逐项断言）', () => {
       const { internals } = boot(makeConfig({ skills }))
       const names = toolNames(internals, tmpRoot)
@@ -587,7 +612,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       expect(names).not.toContain('set_task_goal')
       // 本阶段排除项
       for (const n of [
-        'delegate_task', 'todo', 'find_task', 'get_task_progress', 'end_turn',
+        'delegate_task', 'todo', 'find_task', 'get_task_progress',
         'list_active_subagents', 'get_subagent_output', 'stop_subagent', 'request_restart',
       ]) {
         expect(names, `不该装 ${n}`).not.toContain(n)

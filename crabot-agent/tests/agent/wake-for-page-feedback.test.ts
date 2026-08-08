@@ -34,15 +34,16 @@ describe('AgentHandler.wakeForPageFeedback', () => {
 })
 
 describe('UnifiedAgent.handleDeliverPageFeedback (deliver_page_feedback RPC)', () => {
-  it('task 活跃 → 调 wakeForPageFeedback 并返回 {delivered:true}', () => {
+  it('legacy task 活跃 → 保留 wakeForPageFeedback fallback', async () => {
     const agent = Object.create(UnifiedAgent.prototype) as any
     const wake = vi.fn()
+    agent.managerStack = { harness: { hasWorker: async () => false } }
     agent.agentHandler = {
       hasActiveTask: (id: string) => id === 't1',
       wakeForPageFeedback: wake,
     }
 
-    const result = agent.handleDeliverPageFeedback({ task_id: 't1', page_id: 'page_abcdefghijklmnop' })
+    const result = await agent.handleDeliverPageFeedback({ task_id: 't1', page_id: 'page_abcdefghijklmnop' })
 
     expect(result.delivered).toBe(true)
     expect(wake).toHaveBeenCalledOnce()
@@ -50,59 +51,56 @@ describe('UnifiedAgent.handleDeliverPageFeedback (deliver_page_feedback RPC)', (
     expect(taskId).toBe('t1')
     expect(note).toContain('[系统]')
     expect(note).toContain('page_abcdefghijklmnop')
-    expect(note).toContain('tmp_page_read_events')
-    expect(note).toContain('"page_id": "page_abcdefghijklmnop"')
+    expect(note).toContain('events.jsonl')
     expect(note).not.toContain('$DATA_DIR')
     expect(note).not.toContain('.crabot')
-    expect(note).not.toContain('events.jsonl')
     expect(note).not.toContain('CRABOT_TMP_PAGE_PORT')
   })
 
-  it('task 不活跃 → 返回 {delivered:false,reason:"not_active"}，不调 wake', () => {
+  it('task 不活跃 → 返回 {delivered:false,reason:"not_active"}，不调 wake', async () => {
     const agent = Object.create(UnifiedAgent.prototype) as any
     const wake = vi.fn()
+    agent.managerStack = { harness: { hasWorker: async () => false } }
     agent.agentHandler = {
       hasActiveTask: () => false,
       wakeForPageFeedback: wake,
     }
 
-    const result = agent.handleDeliverPageFeedback({ task_id: 'gone', page_id: 'page_abcdefghijklmnop' })
+    const result = await agent.handleDeliverPageFeedback({ task_id: 'gone', page_id: 'page_abcdefghijklmnop' })
 
     expect(result.delivered).toBe(false)
     expect(result.reason).toBe('not_active')
     expect(wake).not.toHaveBeenCalled()
   })
 
-  it('旧版 server 未携带 page_id → 唤醒文案引导先 list 再 read，不生成 undefined id', () => {
+  it('旧版 server 未携带 page_id → 不生成 undefined id', async () => {
     const agent = Object.create(UnifiedAgent.prototype) as any
     const wake = vi.fn()
+    agent.managerStack = { harness: { hasWorker: async () => false } }
     agent.agentHandler = {
       hasActiveTask: (id: string) => id === 't1',
       wakeForPageFeedback: wake,
     }
 
-    const result = agent.handleDeliverPageFeedback({ task_id: 't1' } as any)
+    const result = await agent.handleDeliverPageFeedback({ task_id: 't1' } as any)
 
     expect(result.delivered).toBe(true)
     const [taskId, note] = wake.mock.calls[0] as [string, string]
     expect(taskId).toBe('t1')
     expect(note).toContain('[系统]')
-    expect(note).toContain('tmp_page_list')
-    expect(note).toContain('tmp_page_read_events')
+    expect(note).toContain('events.jsonl')
     expect(note).not.toContain('undefined')
     expect(note).not.toContain('"page_id": "undefined"')
     expect(note).not.toContain('$DATA_DIR')
     expect(note).not.toContain('.crabot')
-    expect(note).not.toContain('events.jsonl')
     expect(note).not.toContain('CRABOT_TMP_PAGE_PORT')
   })
 
-  it('worker handler 未配置 → 抛错', () => {
+  it('worker handler 未配置且不是 manager worker → not_active', async () => {
     const agent = Object.create(UnifiedAgent.prototype) as any
     agent.agentHandler = undefined
 
-    expect(() => agent.handleDeliverPageFeedback({ task_id: 't1', page_id: 'page_abcdefghijklmnop' })).toThrow(
-      'Worker handler not configured',
-    )
+    agent.managerStack = { harness: { hasWorker: async () => false } }
+    await expect(agent.handleDeliverPageFeedback({ task_id: 't1', page_id: 'page_abcdefghijklmnop' })).resolves.toEqual({ delivered: false, reason: 'not_active' })
   })
 })
