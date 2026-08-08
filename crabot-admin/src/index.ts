@@ -4614,11 +4614,12 @@ export class AdminModule extends ModuleBase {
    */
   private async handleRebuildMemoryGraph(): Promise<{ accepted: true }> {
     const description =
-      '请用 memory-graph-linking skill 全量重建长期记忆图谱（覆盖式：先清旧链接再建新）：\n'
-      + '1) 先调 Skill("memory-graph-linking") 加载建链指引；\n'
-      + '2) 用 list_entries 翻页遍历所有 status=confirmed 长期记忆条目；\n'
-      + '3) 对每一条都调 set_memory_links 覆盖完整新链接列表（无链接时传 links:[]）；\n'
-      + '4) 完成后报告遍历条目数、清空条目数、新建链接数和 relation 分布。'
+      '你必须在当前 manager episode 直接完成长期记忆图谱的覆盖式重建，不要派 worker，也不要调用 Skill（本指令已经内联完整建链规则）：\n'
+      + '1) 用 mcp__crab-memory__list_entries({ status: "confirmed", limit, offset }) 翻页遍历全部 confirmed 条目；\n'
+      + '2) 对每条 N，用 mcp__crab-memory__search_long_term({ query: <N 的 brief>, filters: { status: "confirmed" }, k: 5 }) 找候选；默认不连，只有具体且有信息量的关系才连；\n'
+      + '3) relation 只能是 refines（N 细化候选）、depends_on（N 依赖候选）、part_of（N 是候选的一部分）、related（确有跨条目引用价值时的最后兜底）；严禁仅因同项目/同主题/相似就连，近重复不连，related 对称关系只保留一个方向，不重复 source_cases/invalidated_by 已表达的边；\n'
+      + '4) 对每一条 N 都调用 mcp__crab-memory__set_memory_links({ id: <N.id>, links: [...] }) 覆盖完整新列表，无有效关系时必须传 links:[] 以清掉旧边；\n'
+      + '5) 完成后报告遍历条目数、清空条目数、新建链接数和 relation 分布。'
     await this.callAgentRpc('trigger_schedule', {
       schedule_id: 'memory-graph-rebuild',
       title: '重建长期记忆图谱',

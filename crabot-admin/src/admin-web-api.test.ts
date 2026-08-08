@@ -386,8 +386,14 @@ describe('Admin Web API', () => {
       expect(response.body.accepted).toBe(true)
       expect(callSpy).toHaveBeenCalledWith(19002, 'trigger_schedule', expect.objectContaining({
         schedule_id: 'memory-graph-rebuild', title: '重建长期记忆图谱', is_builtin: true,
-        description: expect.stringContaining('memory-graph-linking'),
+        description: expect.stringMatching(/mcp__crab-memory__list_entries[\s\S]*mcp__crab-memory__set_memory_links/),
       }), expect.anything())
+      const rebuildCall = callSpy.mock.calls.find((call) => call[1] === 'trigger_schedule')
+      const description = String((rebuildCall?.[2] as { description?: string })?.description)
+      expect(description).toContain('默认不连')
+      expect(description).toContain('refines')
+      expect(description).toContain('related 对称关系只保留一个方向')
+      expect(description).not.toContain('Skill(')
       expect([...admin['tasks'].values()].some((task) => task.tags.includes('memory_rebuild'))).toBe(false)
     })
   })
