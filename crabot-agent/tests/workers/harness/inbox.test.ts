@@ -222,6 +222,71 @@ describe('WorkerInbox', () => {
     expect(delivered).toEqual([])
   })
 
+  it('hold_consumed retains a durable receipt until raw submission settles it', async () => {
+    const inbox = new WorkerInbox('worker-1')
+    const settled = vi.fn()
+    const item = makeItem('bg', {
+      dedupe_key: 'bg-shell:1',
+      onSettled: settled,
+    })
+    inbox.enqueueUnique(item)
+
+    await inbox.flush(async () => ({ action: 'hold_consumed', reason: 'input_pending' }))
+
+    expect(settled).not.toHaveBeenCalled()
+    expect(inbox.pending).toBe(1)
+    expect(inbox.enqueueUnique(makeItem('duplicate', { dedupe_key: 'bg-shell:1' }))).toBe(false)
+
+    await inbox.settleConsumed('delivered')
+    expect(settled).toHaveBeenCalledOnce()
+    expect(settled).toHaveBeenCalledWith('delivered')
+    expect(inbox.pending).toBe(0)
+  })
+
+  it('requeues a stale hold result against the new pane without installing the old hold', async () => {
+    const inbox = new WorkerInbox('worker-1')
+    inbox.enqueue(makeItem('bg', { onSettled: vi.fn() }))
+    let first = true
+    const delivered: string[] = []
+
+    await inbox.flush(async (item) => {
+      if (first) {
+        first = false
+        return { action: 'hold_consumed', reason: 'input_pending', isCurrent: () => false }
+      }
+      delivered.push(item.text)
+    })
+
+    expect(delivered).toEqual(['bg'])
+    expect(inbox.held).toBe(false)
+    expect(inbox.pending).toBe(0)
+  })
+
+  it('requeues a consumed durable receipt when its pane incarnation exits', async () => {
+    const inbox = new WorkerInbox('worker-1')
+    const settled = vi.fn()
+    inbox.enqueue(makeItem('bg', { onSettled: settled }))
+    await inbox.flush(async () => ({ action: 'hold_consumed', reason: 'input_pending' }))
+
+    expect(inbox.requeueConsumed()).toBe(1)
+    inbox.release()
+    const delivered: string[] = []
+    await inbox.flush(async (item) => { delivered.push(item.text) })
+
+    expect(delivered).toEqual(['bg'])
+    expect(settled).toHaveBeenCalledWith('delivered')
+  })
+
+  it('drain returns consumed durable receipts for kill dead-letter settlement', async () => {
+    const inbox = new WorkerInbox('worker-1')
+    const item = makeItem('bg', { onSettled: vi.fn() })
+    inbox.enqueue(item)
+    await inbox.flush(async () => ({ action: 'hold_consumed', reason: 'input_pending' }))
+
+    expect(inbox.drain()).toEqual([item])
+    expect(inbox.pending).toBe(0)
+  })
+
   it('drain 在 flush 卡在 deliver 期间调用,不把 in-flight 条目重复计入 dead-letter', async () => {
     // PoC(评审复现):flush 卡在 deliver('a') 时若 drain 直接 this.queue = [] 重新赋值,
     // 会把正在被投递的 'a' 也当作"未投递"一并 drain 出去;'a' 随后投递成功,导致它
@@ -309,6 +374,26 @@ describe('WorkerInbox', () => {
     expect(inbox.drain()).toEqual([])
     release()
     await expect(flushPromise).resolves.toBe(0)
+    expect(inbox.pending).toBe(0)
+  })
+
+  it('drain 之后 in-flight durable 条目返回hold_consumed：立即结算 dead-letter', async () => {
+    const inbox = new WorkerInbox('worker-1')
+    const settled = vi.fn()
+    inbox.enqueue(makeItem('bg', { onSettled: settled }))
+
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const flushPromise = inbox.flush(async () => {
+      await gate
+      return { action: 'hold_consumed', reason: 'input_pending' }
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(inbox.drain()).toEqual([])
+    release()
+    await expect(flushPromise).resolves.toBe(0)
+    expect(settled).toHaveBeenCalledWith('dead_letter')
     expect(inbox.pending).toBe(0)
   })
 

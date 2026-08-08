@@ -211,6 +211,12 @@ function cliReportDetail(state: WorkerContractState, report: StateChangeReport |
   }
 }
 
+/** Raw keys that explicitly discard the current composer instead of submitting it. */
+function rawAbandonsComposer(text: string): boolean {
+  const keys = text.toLowerCase().split(/\s+/).filter(Boolean)
+  return keys.some((key) => key === 'escape' || key === 'esc' || key === 'c-c' || key === 'c-u')
+}
+
 /**
  * continueTerminalWorker 锁内可重入求值循环的上限次数。每一轮代表"主线又换了一次"的
  * 重新判定,防止病态并发抖动(主线连续多次接续/切换)让这次投递在临界区内无限打转。3
@@ -464,12 +470,22 @@ export class WorkerHarness {
   private readonly stallReports = new Map<string, StallReportMark>()
   /** Adapter state callbacks observed per incarnation; used to order harness-owned CLI input settlement. */
   private readonly stateChangeRevisions = new Map<string, number>()
+  /** Synchronous generation of the pane that currently owns input for each logical worker. */
+  private readonly inputOwnershipRevisions = new Map<string, number>()
   private sweepInFlight = false
   private sweepTimer?: ReturnType<typeof setInterval>
   /** `stopLivenessSweep` 置位后不再接受 `startLivenessSweep`(见该方法注释的停机竞态)。 */
   private sweepStopped = false
 
   constructor(private readonly deps: HarnessDeps) {}
+
+  private inputOwnershipRevision(workerId: string): number {
+    return this.inputOwnershipRevisions.get(workerId) ?? 0
+  }
+
+  private bumpInputOwnershipRevision(workerId: string): void {
+    this.inputOwnershipRevisions.set(workerId, this.inputOwnershipRevision(workerId) + 1)
+  }
 
   /**
    * 见文件头"onStateChange 接线契约"。箭头函数字段:构造时绑定 this,P4 可直接把它作为
@@ -728,6 +744,7 @@ export class WorkerHarness {
         session_ref: incarnation.session_ref,
       }
       const stateChangeRevision = this.stateChangeRevisions.get(`${handle.worker_id}#${handle.impl}#${handle.seq}`) ?? 0
+      const inputOwnershipRevision = this.inputOwnershipRevision(workerId)
       try {
         await adapter.sendInput(handle, item.text, { raw: item.raw })
       } catch (err) {
@@ -746,10 +763,12 @@ export class WorkerHarness {
           )
         }
         if (err instanceof CliInputStallError) {
-          await this.recordCliInputResult(handle, err.control_state, err.report)
+          const isCurrent = (): boolean => this.inputOwnershipRevision(workerId) === inputOwnershipRevision
+          if (isCurrent()) await this.recordCliInputResult(handle, err.control_state, err.report)
           return {
             action: item.raw || err.disposition === 'pending_in_ui' ? 'hold_consumed' : 'hold_requeue',
             reason: err.disposition === 'pending_in_ui' ? 'input_pending' : 'waiting_action',
+            isCurrent,
           } satisfies InboxDeliveryResult
         }
         throw err
@@ -766,6 +785,7 @@ export class WorkerHarness {
         else await this.recordCliInputResult(settledHandle, 'running', undefined, stateChangeRevision)
       }
       if (item.raw) {
+        await inbox.settleConsumed(rawAbandonsComposer(item.text) ? 'dead_letter' : 'delivered')
         inbox.release('waiting_action')
         inbox.release('input_pending')
       }
@@ -789,6 +809,7 @@ export class WorkerHarness {
    * 级改动,留待后续(protocol-agent-v3 §6.1 已知限制)。
    */
   async switchWorkerImpl(workerId: string, impl: WorkerImplId, note?: string): Promise<void> {
+    let restoredDurableReceipt = false
     await this.withLock(workerId, async () => {
       const found = await this.deps.ledger.findWorker(workerId)
       if (!found) throw new WorkerNotFoundError(workerId)
@@ -800,8 +821,10 @@ export class WorkerHarness {
       // 允许切换(等价于"在办任务换实现"续办的合理场景,§5.3),只有 cancelled 硬拒绝。
       if (worker.task.status === 'cancelled') throw new TaskCancelledError(workerId)
       const mainline = requireMainlineIncarnation(worker)
-      await this.handoffIncarnation(dialogObjectId, worker, mainline, impl, note ?? '')
+      restoredDurableReceipt = await this.handoffIncarnation(dialogObjectId, worker, mainline, impl, note ?? '')
     })
+    // The old pane no longer owns a consumed durable receipt; resume its FIFO on the new incarnation.
+    if (restoredDurableReceipt) await this.flushInbox(workerId)
   }
 
   /**
@@ -1030,6 +1053,7 @@ export class WorkerHarness {
       return { ...prev, task: nextTask, incarnations: [...incarnations, newIncarnation], updated_at: now }
     })
 
+    this.bumpInputOwnershipRevision(worker.worker_id)
     const inbox = this.getInbox(worker.worker_id)
     inbox.release()
     if (initialState !== 'exited' && initialInput?.disposition === 'not_pasted') {
@@ -1038,6 +1062,7 @@ export class WorkerHarness {
     } else if (initialState !== 'exited' && initialInput?.disposition === 'pending_in_ui') {
       inbox.hold('input_pending')
     }
+    inbox.requeueConsumed()
     await this.appendEvent(worker.worker_id, newHandle.seq, 'resumed', { from_seq: mainline.seq }, revived?.task.status)
     if (initialInput && (initialInput.disposition !== 'accepted' || initialState === 'exited')) {
       await this.appendEvent(worker.worker_id, newHandle.seq, 'state_changed', cliReportDetail(initialState, initialInput.report), revived?.task.status)
@@ -1055,7 +1080,7 @@ export class WorkerHarness {
     source: Incarnation,
     targetImpl: WorkerImplId,
     input: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const sourceAdapter = this.deps.adapters.get(source.impl as WorkerImplId)
     const sourceHandle: IncarnationHandle = {
       worker_id: worker.worker_id,
@@ -1195,6 +1220,7 @@ export class WorkerHarness {
       return { ...prev, task: nextTask, incarnations: [...prev.incarnations, newIncarnation], updated_at: now }
     })
 
+    this.bumpInputOwnershipRevision(worker.worker_id)
     const inbox = this.getInbox(worker.worker_id)
     inbox.release()
     if (initialState !== 'exited' && initialInput?.disposition === 'not_pasted') {
@@ -1203,6 +1229,7 @@ export class WorkerHarness {
     } else if (initialState !== 'exited' && initialInput?.disposition === 'pending_in_ui') {
       inbox.hold('input_pending')
     }
+    const restoredDurableReceipt = inbox.requeueConsumed() > 0
     // 与 reviveIncarnation 收尾时发 'resumed' 事件对称——交接产出的新化身同样是一次"开工",
     // 缺了这个事件会让事件流看不到 handoff 之后新主线是何时、以何种 impl 建起来的。
     await this.appendEvent(
@@ -1215,6 +1242,7 @@ export class WorkerHarness {
     if (initialInput && (initialInput.disposition !== 'accepted' || initialState === 'exited')) {
       await this.appendEvent(worker.worker_id, newHandle.seq, 'state_changed', cliReportDetail(initialState, initialInput.report), handedOff?.task.status)
     }
+    return restoredDurableReceipt
   }
 
   /**
@@ -1958,7 +1986,12 @@ export class WorkerHarness {
       })
       committedStatus = committed?.task.status
     })
-    if (external === 'exited') this.getInbox(h.worker_id).release()
+    if (external === 'exited') {
+      this.bumpInputOwnershipRevision(h.worker_id)
+      const inbox = this.getInbox(h.worker_id)
+      inbox.requeueConsumed()
+      inbox.release()
+    }
     if (report) {
       await this.appendEvent(h.worker_id, h.seq, 'state_changed', cliReportDetail(external, report), committedStatus)
     } else if (external !== 'running') {
@@ -2097,7 +2130,9 @@ export class WorkerHarness {
     })
 
     if (!report?.notification && settledCurrentExit) {
+      this.bumpInputOwnershipRevision(h.worker_id)
       const inbox = this.getInbox(h.worker_id)
+      inbox.requeueConsumed()
       inbox.release()
       await this.flushInbox(h.worker_id)
     } else if (!report?.notification && (state === 'idle' || state === 'running')) {

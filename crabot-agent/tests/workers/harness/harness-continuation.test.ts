@@ -14,7 +14,7 @@ import { LedgerStore } from '../../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../../src/workers/harness/workspace-manager'
 import { dialogObjectIdForPrivate } from '../../../src/workers/harness/ledger-types'
 import type { HarnessEvent } from '../../../src/workers/harness/worker-events'
-import { WorkerExitedError } from '../../../src/workers/errors'
+import { CliInputStallError, WorkerExitedError } from '../../../src/workers/errors'
 import { BuiltinWorkerAdapter } from '../../../src/workers/builtin/adapter'
 import type { BuiltinRuntimeContext } from '../../../src/workers/builtin/runtime'
 import type { LLMAdapter } from '../../../src/engine/llm-adapter-types.js'
@@ -610,6 +610,79 @@ describe('WorkerHarness.switchWorkerImpl — 跨实现切换', () => {
 
     expect(events.filter((e) => e.kind === 'handoff_started')).toHaveLength(1)
     expect(events.filter((e) => e.kind === 'superseded')).toHaveLength(1)
+  })
+
+  it('replays and settles a consumed durable receipt on the target incarnation', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    const source = new FakeAdapter({
+      implId: 'claude-code',
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      sendInputBehavior: async (_h, text, opts) => {
+        if (!opts?.raw && text === 'bg') {
+          throw new CliInputStallError('pending_in_ui', 'running', {
+            waitReason: 'input_pending',
+            outputTail: '❯ bg',
+          })
+        }
+      },
+    })
+    const target = new FakeAdapter({ implId: 'codex', caps: { revive: true }, onStateChange: harness.handleStateChange })
+    adaptersMap.set('claude-code', source)
+    adaptersMap.set('codex', target)
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    const settlements: string[] = []
+
+    await harness.sendToWorker(worker.worker_id, 'bg', {
+      dedupeKey: 'bg-shell:1',
+      onSettled: async (settlement) => { settlements.push(settlement) },
+    })
+    expect(settlements).toEqual([])
+
+    await harness.switchWorkerImpl(worker.worker_id, 'codex', 'move durable notification')
+
+    expect(target.sendInputCalls.filter((call) => call.text === 'bg')).toHaveLength(1)
+    expect(settlements).toEqual(['delivered'])
+  })
+
+  it('replays an in-flight durable stall that resolves after the explicit switch', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    let markEntered!: () => void
+    const entered = new Promise<void>((resolve) => { markEntered = resolve })
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const source = new FakeAdapter({
+      implId: 'claude-code',
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      sendInputBehavior: async (_h, text, opts) => {
+        if (!opts?.raw && text === 'bg') {
+          markEntered()
+          await gate
+          throw new CliInputStallError('pending_in_ui', 'running', {
+            waitReason: 'input_pending',
+            outputTail: '❯ bg',
+          })
+        }
+      },
+    })
+    const target = new FakeAdapter({ implId: 'codex', caps: { revive: true }, onStateChange: harness.handleStateChange })
+    adaptersMap.set('claude-code', source)
+    adaptersMap.set('codex', target)
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    const settlements: string[] = []
+
+    const send = harness.sendToWorker(worker.worker_id, 'bg', {
+      dedupeKey: 'bg-shell:1',
+      onSettled: async (settlement) => { settlements.push(settlement) },
+    })
+    await entered
+    await harness.switchWorkerImpl(worker.worker_id, 'codex', 'switch while old send is in flight')
+    release()
+    await send
+
+    expect(target.sendInputCalls.filter((call) => call.text === 'bg')).toHaveLength(1)
+    expect(settlements).toEqual(['delivered'])
   })
 })
 
