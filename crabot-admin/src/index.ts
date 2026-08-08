@@ -224,7 +224,7 @@ import {
 } from './onboarding-master.js'
 import type { Onboarder } from 'crabot-shared'
 import { tailLogFile } from './module-log-tail.js'
-import { buildRecoveryTask, isResumableInflightStatus, partitionResumeResults } from './recovery-handler.js'
+import { isResumableInflightStatus, partitionResumeResults } from './recovery-handler.js'
 import {
   VALID_TRANSITIONS,
   applyDerivedFields,
@@ -4608,39 +4608,24 @@ export class AdminModule extends ModuleBase {
   }
 
   /**
-   * 触发"全量重建长期记忆图谱"——建一条 pending 一次性 worker 任务，指令里要求 agent
-   * 用 memory-graph-linking skill 对所有 confirmed 条目覆盖式全量建链（建链判据见该技能）。
-   *
-   * 反思（daily-reflection）已会增量建链；本端点是给人类"立刻全量重建 / 冷启动回填"用。
-   *
-   * 派发：建出 pending 任务后立即用通用 start_task RPC 派发给 agent 后台执行（与 self-healing
-   * recovery 同一条 hand-off 路径，复用 unified-agent.handleStartTask → executeScheduledTaskInBackground，
-   * 即每日反思的同一执行引擎）。await 派发以便 agent 不可用时端点显式报错，而非静默留下不跑的 pending 任务。
+   * Trigger a manager-native memory graph rebuild.  This intentionally does not
+   * create an Admin Task: the old task lifecycle cannot observe manager-owned
+   * workers and would otherwise remain pending forever.
    */
-  private async handleRebuildMemoryGraph(): Promise<{ task_id: string }> {
-    const params: CreateTaskParams = {
+  private async handleRebuildMemoryGraph(): Promise<{ accepted: true }> {
+    const description =
+      '请用 memory-graph-linking skill 全量重建长期记忆图谱（覆盖式：先清旧链接再建新）：\n'
+      + '1) 先调 Skill("memory-graph-linking") 加载建链指引；\n'
+      + '2) 用 list_entries 翻页遍历所有 status=confirmed 长期记忆条目；\n'
+      + '3) 对每一条都调 set_memory_links 覆盖完整新链接列表（无链接时传 links:[]）；\n'
+      + '4) 完成后报告遍历条目数、清空条目数、新建链接数和 relation 分布。'
+    await this.callAgentRpc('trigger_schedule', {
+      schedule_id: 'memory-graph-rebuild',
       title: '重建长期记忆图谱',
-      tags: ['memory_rebuild'],
-      priority: 'normal',
-      source: { origin: 'system', trigger_type: 'manual' },
-      initial_message: {
-        role: 'human',
-        content:
-          '请用 memory-graph-linking skill 全量重建长期记忆图谱（覆盖式：先清旧链接再建新）：\n'
-          + '1) 先调 Skill("memory-graph-linking") 加载建链指引——建链判定（默认不连 / relation 词表 / '
-          + 'related 对称不重复 / 严禁同主题就连）全部以该技能为准；\n'
-          + '2) 用 list_entries 翻页遍历【所有】 status=confirmed 长期记忆条目；\n'
-          + '3) 覆盖式：对【每一条】条目都调一次 set_memory_links 传入它的完整新链接列表来覆盖旧链接——'
-          + '即使按 skill 判定它没有合适链接，也要显式传 links:[] 把旧链接清掉；\n'
-          + '4) 完成后报告：遍历条目数、清空(置空)条目数、新建链接数、按 relation 类型的分布。',
-      },
-    }
-    const { task } = await this.handleCreateTask(params)
-    // 通用派发：让 agent 后台真正执行这条任务（非静默 pending）。
-    // 必须带 master 权限——否则 worker fail-closed 拿不到 memory 工具，跑一轮空转就结束。
-    const resolved_permissions = this.resolveSystemTaskPermissions()
-    await this.callAgentRpc('start_task', { task_id: task.id, resolved_permissions })
-    return { task_id: task.id }
+      description,
+      is_builtin: true,
+    })
+    return { accepted: true }
   }
 
   private async handleGetTask(params: GetTaskParams): Promise<{ task: Task }> {
@@ -4980,25 +4965,10 @@ export class AdminModule extends ModuleBase {
       console.log(`[Admin] Self-healing: marked ${toFail.length} task(s) as failed`)
     }
 
-    // 3. 对 needRecovery 走旧兜底（buildRecoveryTask 内部已跳过 recovery 标签的）
-    const now = generateTimestamp()
-    const params = buildRecoveryTask(needRecovery, now)
-    if (params) {
-      const { task } = await this.handleCreateTask(params)
-      console.log(
-        `[Admin] Self-healing: created recovery task ${task.id} for ${needRecovery.length} non-resumable task(s)`,
-      )
-      this.callAgentRpc('start_recovery_task', {
-        task_id: task.id,
-        resolved_permissions: this.resolveSystemTaskPermissions(),
-      })
-        .then(() => console.log(`[Admin] Self-healing: recovery task ${task.id} dispatched`))
-        .catch((err: Error) =>
-          console.warn(`[Admin] Self-healing: start_recovery_task failed: ${(err as Error).message}`),
-        )
-    } else {
-      console.log(`[Admin] Self-healing: no recovery task needed`)
-    }
+    // Recovery ownership belongs to harness reconciliation and its crashed event
+    // route. Admin only persists the terminal state above; it must not create a
+    // second legacy recovery task/loop.
+    console.log('[Admin] Self-healing: recovery delegated to harness crashed-event routing')
 
     // 4. 持久化任务变更
     await this.saveData()

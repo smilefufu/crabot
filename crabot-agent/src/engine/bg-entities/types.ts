@@ -10,6 +10,8 @@ export interface BgEntityOwner {
   readonly friend_id: string
   readonly session_id?: string
   readonly channel_id?: string
+  /** Builtin worker owner; optional so persisted legacy entities remain readable. */
+  readonly worker_id?: string
 }
 
 interface BgEntityBase {

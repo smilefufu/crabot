@@ -1200,3 +1200,10 @@ Module Manager (port 19000)
 ./dev.sh build    # 只构建不启动
 ./dev.sh vite     # 只启动 Vite
 ```
+
+## 2026-08-06 — legacy loop retirement / builtin bg wiring（实施中）
+
+- 已接入 builtin bg entity 的 `worker_id` owner 和 WorkerInbox 退出通知；跨重启 re-adopt 也按 owner worker 路由，旧无 worker owner 保留 legacy fallback。
+- 已删除 legacy schedule RPC/recovery RPC 与等待工具；`process_message` 仅保留 admin_chat，媒体下载改为独立 manager 通知。
+- memory graph rebuild 改为 manager-native `trigger_schedule`，不再创建无法观察的 legacy pending task。
+- 当前定向构建与测试通过；全量回归及 PR review 尚待完成。

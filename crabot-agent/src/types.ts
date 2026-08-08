@@ -872,7 +872,7 @@ export interface WorkerTaskState {
   activeAuditId?: string
   /**
    * 当前 task 的 async subagent ids。runWorkerLoop 跨 iteration 持久（Task 3 reviewer follow-up）。
-   * delegate_task 异步路径返回 launched 时加入；wait_for_signal 跟全局 agentAbortControllers 取交集
+   * delegate_task 异步路径返回 launched 时加入；end_turn 跟全局 agentAbortControllers 取交集
    * 判断是否还有 active subagent。spec: 2026-06-07-goal-audit-async-buffered-info-design.md Task 5
    */
   readonly activeAsyncSubagentIds: Set<string>

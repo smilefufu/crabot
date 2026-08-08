@@ -1337,7 +1337,7 @@ crabot 系统给你的所有信号——system prompt、supplement 注入、tool
           if (result.status === 'fetching') {
             return wrapText({
               ...result,
-              note: '文件较大，正在后台下载。请调 wait_for_signal({reason:"等媒体下载", timeout_ms: 300000}) 挂起等待；' +
+              note: '文件较大，正在后台下载。请 end_turn；下载完成事件会唤醒对应会话。' +
                 '下载完成会唤醒你，届时再次调用 fetch_media 即可拿到 file_path。',
             })
           }

@@ -587,7 +587,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       expect(names).not.toContain('set_task_goal')
       // 本阶段排除项
       for (const n of [
-        'delegate_task', 'todo', 'find_task', 'get_task_progress', 'wait_for_signal',
+        'delegate_task', 'todo', 'find_task', 'get_task_progress', 'end_turn',
         'list_active_subagents', 'get_subagent_output', 'stop_subagent', 'request_restart',
       ]) {
         expect(names, `不该装 ${n}`).not.toContain(n)

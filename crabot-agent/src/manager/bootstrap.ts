@@ -151,6 +151,8 @@ export interface BootstrapDeps {
    * "起化身时现取",不能各持一份(spec 决策 2)。
    */
   readonly builtinSpawnDefaults?: BuiltinRuntimeFactory
+  /** Shared bg registry ownership check for builtin end_turn state mapping. */
+  readonly hasRunningBg?: (workerId: string) => Promise<boolean>
   /**
    * 对外事件发布口(§9.2 `agent.task_status_changed`),由 `makeAgentEventPublisher` 构造。
    * 可选:P5 阶段这套栈没有生产调用方,注入真实 rpcClient 是 P5 Task 6 的事;不注入则本栈
@@ -338,6 +340,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       )
     },
     builtinSpawnDefaults: deps.builtinSpawnDefaults,
+    hasRunningBg: deps.hasRunningBg,
   }
 
   // --- step 2:把空壳 Map 交给 harness ---

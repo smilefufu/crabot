@@ -32,7 +32,7 @@ export function buildResumeWakeupMessage(): EngineMessage {
     id: `resume-wakeup-${Date.now()}`,
     role: 'user',
     content:
-      '[系统] 你（agent）刚重启过，正在恢复此 task。若你之前 spawn 过子 agent 或在 wait_for_signal 等待，' +
+      '[系统] 你（agent）刚重启过，正在恢复此 task。若你之前 spawn 过子 agent 或在 end_turn 等待，' +
       '它们已随重启中断——用 list_entities / find_task / get_task_progress / 读 result 文件自查进度后，继续把任务做完。',
     timestamp: Date.now(),
   }

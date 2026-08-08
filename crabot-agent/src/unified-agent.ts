@@ -206,7 +206,7 @@ export function resolveOverdueReminder(value: boolean | undefined): boolean {
 }
 
 /**
- * protocol-agent-v3 §8.2 trigger_schedule —— 调度触发（替代 create_task_from_schedule）。
+ * protocol-agent-v3 §8.2 trigger_schedule —— 调度触发（调度触发）。
  * 字段与协议逐字一致；`resolved_permissions` 是**唯一的额外字段**，见下方注释。
  */
 export interface TriggerScheduleParams {
@@ -698,6 +698,7 @@ export class UnifiedAgent extends ModuleBase {
       },
       // 起化身时现取（spec 决策 2）：箭头函数只捕获 `this`，配置一律在调用那一刻读。
       builtinSpawnDefaults: (ctx) => this.buildBuiltinWorkerRuntime(ctx),
+      hasRunningBg: (workerId) => this.agentHandler?.hasRunningBgForWorker(workerId) ?? Promise.resolve(false),
       // 对外事件出口（§9.2 `agent.task_status_changed`）：真实 rpcClient 注入。
       // 翻译与去重在 manager/events.ts，这里只负责把口子接上。
       publishEvent,
@@ -793,12 +794,40 @@ export class UnifiedAgent extends ModuleBase {
     }
   }
 
+  private async deliverBuiltinShellExit(
+    workerId: string,
+    info: {
+      entity_id: string
+      command: string
+      status: 'completed' | 'failed' | 'killed'
+      exit_code: number
+      runtime_ms?: number
+    },
+  ): Promise<void> {
+    const handler = this.agentHandler
+    if (!handler) throw new Error('builtin shell exit cannot be delivered before AgentHandler initialization')
+    const harness = this.requireManagerStack().harness
+    const complete = harness.beginBgNotification(workerId)
+    try {
+      const text = await handler.renderShellExitNotification(info)
+      await harness.sendToWorker(workerId, `<bg-notification>\n${text}\n</bg-notification>`)
+    } catch (error) {
+      // Never silently drop an async system notification. The harness records
+      // terminal-worker dead letters itself; unexpected routing failures are
+      // retained in the module log for operational recovery.
+      console.error(`[${this.config.moduleId}] builtin bg notification delivery failed for ${workerId}:`, error)
+      throw error
+    } finally {
+      complete()
+    }
+  }
+
   /**
    * builtin worker 的工具集（spec 决策 5）。
    *
    * **装**：内置文件/shell 工具 + skills、crab-memory、外部 MCP、tmp-page / 生图。
    * **不装**：全部 messaging（v3 语义：worker 不直接跟人类说话）、`set_cwd`、goal 相关、
-   * `delegate_task`、`todo`、`find_task` / `get_task_progress`、`wait_for_signal`、
+   * `delegate_task`、`todo`、`find_task` / `get_task_progress`、
    * subagent coordinator / `request_restart`。它们不是被过滤掉的，而是根本不组装进来。
    */
   private buildBuiltinWorkerTools(ctx: BuiltinRuntimeContext): ReadonlyArray<EngineToolDefinition> {
@@ -809,14 +838,18 @@ export class UnifiedAgent extends ModuleBase {
     const principalPerms = this.resolveWorkerPrincipalPermissions(ctx)
     const workerPerms = narrowWorkerPermissions(BUILTIN_WORKER_PERMISSIONS, principalPerms)
 
-    // 内置文件 / shell 工具 + Skill。cwd 恒等于 workspace 且**不传 `setCwdCtx`**——worker 的
-    // 工作目录就是它的 workspace，不可中途切换（决策 3；adapter 侧 `guardTools` 硬断言）。
-    // 也不传 bgEntityCtx / bgToolDeps：bg-shell 的退出唤醒依赖 `wait_for_signal`（本阶段不装），
-    // 且 owner 归属在多 worker 并发下尚未定义（spec 未决 #3）。
+    // Shared registry is owned by AgentHandler; bg exit goes through the
+    // harness inbox so idle and terminal incarnations retain their normal
+    // wake/continuation semantics.
+    const bgOptions = this.agentHandler?.createBuiltinBgToolOptions(ctx.worker_id, (info) => {
+      void this.deliverBuiltinShellExit(ctx.worker_id, info).catch((error) =>
+        console.error(`[${this.config.moduleId}] builtin bg shell exit handling failed:`, error),
+      )
+    })
     tools.push(...getConfiguredBuiltinTools(
       () => workspaceRoot,
       this.agentConfig?.builtin_tool_config,
-      { availableSkills: this.agentConfig?.skills ?? [] },
+      { availableSkills: this.agentConfig?.skills ?? [], ...(bgOptions ?? {}) },
     ))
 
     // crab-memory：A 组（普通对话档）。可见范围随**派活人身份**收敛（PR F 未决 #2 在此关闭）：
@@ -974,6 +1007,7 @@ export class UnifiedAgent extends ModuleBase {
       ...(imageConnInfo ? { imageConnInfo } : {}),
       imageCapability,
     })
+    handler.setBuiltinShellExitDispatcher((workerId, info) => this.deliverBuiltinShellExit(workerId, info))
     return handler
   }
 
@@ -995,10 +1029,7 @@ export class UnifiedAgent extends ModuleBase {
   private registerMethods(): void {
     // 编排接口
     this.registerMethod('process_message', this.handleProcessMessage.bind(this))
-    this.registerMethod('create_task_from_schedule', this.handleCreateTaskFromSchedule.bind(this))
-    // 通用「按 id 派发任意 pending 任务到后台 worker」入口；start_recovery_task 为历史兼容别名。
     this.registerMethod('start_task', this.handleStartTask.bind(this))
-    this.registerMethod('start_recovery_task', this.handleStartTask.bind(this))
     this.registerMethod('resume_task', this.handleResumeTask.bind(this))
     this.registerMethod('resume_task_with_supplement', this.handleResumeTaskWithSupplement.bind(this))
     this.registerMethod('finalize_orphan_checkpoints', this.handleFinalizeOrphanCheckpoints.bind(this))
@@ -1036,8 +1067,6 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('get_bg_entity_log', this.handleGetBgEntityLog.bind(this))
 
     // Manager/Worker（v3）接口：§8.2 调度触发 + §8.3 task 读模型四件套。
-    // P5 阶段没有任何生产调用方（admin 的 scheduler 仍走 create_task_from_schedule，
-    // 只读 REST 代理是 P5 Task 5、启动接线是 Task 6），注册本身不改变现网行为。
     this.registerMethod('trigger_schedule', this.handleTriggerSchedule.bind(this))
     this.registerMethod('list_workers_admin', this.handleListWorkersAdmin.bind(this))
     this.registerMethod('get_worker_detail', this.handleGetWorkerDetail.bind(this))
@@ -1077,13 +1106,15 @@ export class UnifiedAgent extends ModuleBase {
       case 'media.download_completed': {
         const p = event.payload as { channel_id: string; session_id?: string; handle: string; status: string; error?: string }
         if (!p.session_id) break
-        const taskIds = this.agentHandler?.getActiveTasksByOrigin(p.channel_id, p.session_id) ?? []
         const note = p.status === 'ready'
           ? `媒体 ${p.handle} 已下载完成，再次调用 fetch_media 即可拿到本地路径。`
           : `媒体 ${p.handle} 下载失败：${p.error ?? '未知错误'}。`
-        for (const taskId of taskIds) {
-          this.agentHandler?.wakeForMediaDownload(taskId, note)
-        }
+        // Media completion is a manager wake, not a legacy task humanQueue.
+        void this.requireManagerStack().registry.routeMediaNotification({
+          channelId: p.channel_id,
+          sessionId: p.session_id,
+          text: note,
+        }).catch((error) => console.error(`[${this.config.moduleId}] media manager wake failed:`, error))
         break
       }
     }
@@ -1765,76 +1796,8 @@ export class UnifiedAgent extends ModuleBase {
       return this.processAdminChatMessage(message, callback_info)
     }
 
-    // Channel 来源 - 使用统一 loop 处理
-    if (source_type === 'channel' || !source_type) {
-      // 直接触发消息处理（跳过权限检查，因为来自内部调用）
-      const sessionId = message.session.session_id
-
-      // 更新 session 状态
-      this.sessionManager.updateLastMessageTime(sessionId)
-
-      const requestId = crypto.randomUUID()
-
-      // 检查是否有 Worker Handler 能力
-      if (!this.agentHandler) {
-        return { decision_types: [] }
-      }
-
-      // 组装上下文（channel 内部调用无 permResult，从 session 配置读取 memory_scopes）
-      const channelMemPerms = await this.buildSessionMemoryPermissions(sessionId)
-      const context = await this.contextAssembler.assembleFrontContext(
-        {
-          channel_id: message.session.channel_id,
-          session_id: sessionId,
-          sender_id: message.sender.platform_user_id,
-          message: message.content.text ?? '',
-          friend_id: message.sender.friend_id,
-          session_type: message.session.type,
-          crab_display_name: this.crabDisplayNames.get(message.session.channel_id),
-          crab_self_handle: this.crabSelfHandles.get(message.session.channel_id),
-        },
-        undefined,
-        channelMemPerms
-      )
-
-      // 调用统一 loop
-      const result = await this.agentHandler.executeTriggerMessage({
-        messages: [message],
-        activeTasks: context.active_tasks ?? [],
-        isGroup: message.session.type === 'group',
-        ...(context.scene_profile ? { sceneProfile: context.scene_profile } : {}),
-        senderFriend: {
-          id: message.sender.friend_id ?? message.sender.platform_user_id,
-          display_name: message.sender.platform_display_name,
-          permission: 'normal' as const,
-          channel_identities: [],
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        },
-        memoryPermissions: channelMemPerms,
-        resolvedPermissions: FAIL_CLOSED_TOOL_ACCESS as unknown as ResolvedPermissions,
-        channelId: message.session.channel_id,
-        sessionId,
-        frontContext: context,
-      })
-
-      // 检查是否已被更新消息取代
-      if (this.sessionManager.getPendingRequest(sessionId) !== requestId) {
-        return { decision_types: [] }
-      }
-
-      // 推导 decision_types。worker 端已无 supplement/silent 早退工具，剩下只有
-      // direct_reply 一种结果。
-      const decisionTypes: string[] = []
-      if (result.sentMessage) {
-        decisionTypes.push('direct_reply')
-      } else {
-        console.warn(`[${this.config.moduleId}] handleProcessMessage unified loop ended without send_message (finalText len=${result.finalText.length}, ignored)`)
-      }
-
-      return {
-        decision_types: decisionTypes,
-      }
+    if (source_type !== 'admin_chat') {
+      throw new Error('process_message only supports source_type=admin_chat; channel messages use channel.message_authorized')
     }
 
     return { decision_types: [] }
@@ -1924,122 +1887,6 @@ export class UnifiedAgent extends ModuleBase {
     return { decision_types: result.repliedToHuman ? ['direct_reply'] : [] }
   }
 
-  private async handleCreateTaskFromSchedule(params: {
-    schedule_id: string
-    task_type?: string
-    title: string
-    description: string
-    input?: Record<string, unknown>
-    preferred_worker_specialization?: string
-    /**
-     * Schedule 的目标会话（一等字段，来自 Schedule.target_session）。
-     * Task 11 之后 legacy input.target_channel_id/_session_id 已迁移到此字段。
-     * - 有值：task_origin + trigger_message.session 都用此目标
-     * - 无值：ScheduledTaskRunner 用 SYSTEM_SESSION 哨兵填 trigger_message.session
-     */
-    target_session?: {
-      channel_id: string
-      session_id: string
-      type: 'private' | 'group'
-    }
-    /** Admin 解析后下发的执行权限（按 schedule.creator 或系统内置 master_private 计算） */
-    resolved_permissions?: ResolvedPermissions
-  }): Promise<{ task_id: string; assigned_worker: ModuleId }> {
-    const {
-      schedule_id,
-      task_type,
-      title,
-      description,
-      input,
-      preferred_worker_specialization,
-      target_session,
-      resolved_permissions,
-    } = params
-
-    try {
-      // 选择 Worker
-      const workerId = await this.workerSelector.selectWorker({
-        specialization_hint: preferred_worker_specialization,
-      })
-
-      // 创建任务
-      const adminPort = await this.getAdminPort()
-      const taskResult = await this.rpcClient.call<
-        {
-          title: string
-          description: string
-          assigned_worker: string
-          source: { origin: string; source_module_id: string; trigger_type: 'scheduled' }
-          input?: Record<string, unknown>
-        },
-        { task: { id: string } }
-      >(
-        adminPort,
-        'create_task',
-        {
-          title,
-          description,
-          assigned_worker: workerId,
-          // trigger_type='scheduled' 让 Front prompt 给任务打 [定时/巡检任务，禁止 supplement]
-          // 标签，防止 LLM 把 supplement 误投到巡检任务上覆盖本职。漏传过会导致防线失效。
-          source: {
-            origin: 'system',
-            source_module_id: this.config.moduleId,
-            trigger_type: 'scheduled',
-          },
-          input: { ...(input ?? {}), schedule_id },
-        },
-        this.config.moduleId
-      )
-
-      const taskId = taskResult.task.id
-
-      console.log(
-        `[${this.config.moduleId}] Created task ${taskId} from schedule ${schedule_id}, assigned to ${workerId}`
-      )
-
-      const workerContext = await this.contextAssembler.assembleScheduledTaskContext()
-
-      // target_session 由 Admin 从 Schedule.target_session 一等字段透传。
-      // Task 11 之前 legacy input.target_channel_id/_session_id 路径已迁移并删除。
-      const workerContextWithTarget: WorkerAgentContext = target_session
-        ? {
-            ...workerContext,
-            task_origin: {
-              channel_id: target_session.channel_id as TaskOrigin['channel_id'],
-              session_id: target_session.session_id as TaskOrigin['session_id'],
-              session_type: target_session.type,
-            },
-          }
-        : workerContext
-
-      const workerContextWithPerms: WorkerAgentContext = resolved_permissions
-        ? { ...workerContextWithTarget, resolved_permissions }
-        : workerContextWithTarget
-
-      this.scheduledTaskRunner.executeScheduledTaskInBackground(
-        {
-          id: taskId,
-          title,
-          description,
-          priority: 'normal',
-          task_type,
-          ...(target_session ? { target_session } : {}),
-        },
-        workerContextWithPerms,
-      )
-
-      return { task_id: taskId, assigned_worker: workerId }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      console.error(
-        `[${this.config.moduleId}] Failed to create task from schedule ${schedule_id}:`,
-        message
-      )
-      throw new Error(`Failed to create task from schedule: ${message}`)
-    }
-  }
-
   /**
    * 启动 recovery 任务（admin self-healing 在 agent 重启后 RPC 推过来）。
    *
@@ -2063,10 +1910,9 @@ export class UnifiedAgent extends ModuleBase {
     /** Admin 解析后下发的执行权限（系统任务用 master_private）。缺省则 worker fail-closed 拿不到工具。 */
     resolved_permissions?: ResolvedPermissions
   }): Promise<{ task_id: string; assigned_worker: ModuleId }> {
-    const { task_id, resolved_permissions } = params
+    const { task_id } = params
 
     try {
-      const workerId = await this.workerSelector.selectWorker({})
       const adminPort = await this.getAdminPort()
 
       const { task } = await this.rpcClient.call<
@@ -2085,34 +1931,24 @@ export class UnifiedAgent extends ModuleBase {
       >(adminPort, 'get_task', { task_id }, this.config.moduleId)
 
       console.log(
-        `[${this.config.moduleId}] Starting task ${task.id}, assigned to ${workerId}`
+        `[${this.config.moduleId}] Waking system task manager for ${task.id}`
       )
 
       // 任务指令在 messages（initial_message → messages[0]）。scheduled-task-runner 用
       // task.description 拼 trigger 文本，故把首条消息内容透传为 description，否则 worker 只见标题。
       const description = task.messages?.[0]?.content ?? ''
 
-      const baseContext = await this.contextAssembler.assembleScheduledTaskContext()
-      // 无 resolved_permissions 时 worker 走 FAIL_CLOSED → tools 全被 deny（tools:[]）。
-      // 系统任务必须带 Admin 算好的 master 权限，worker 才有 memory/file/shell 等工具。
-      const workerContext: WorkerAgentContext = resolved_permissions
-        ? { ...baseContext, resolved_permissions }
-        : baseContext
+      const { registry } = this.requireManagerStack()
+      void registry.routeSchedule({
+        scheduleId: task.id,
+        title: task.title,
+        description,
+        isBuiltin: true,
+      }).catch((error) => {
+        console.error(`[${this.config.moduleId}] system task manager wake failed (${task.id}):`, error)
+      })
 
-      this.scheduledTaskRunner.executeScheduledTaskInBackground(
-        {
-          id: task.id,
-          title: task.title,
-          priority: task.priority,
-          plan: task.plan,
-          task_type: task.task_type,
-          tags: task.tags,
-          description,
-        },
-        workerContext,
-      )
-
-      return { task_id: task.id, assigned_worker: workerId }
+      return { task_id: task.id, assigned_worker: 'manager' as ModuleId }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       console.error(
@@ -3042,7 +2878,7 @@ export class UnifiedAgent extends ModuleBase {
    *
    * 权限身份（`creator_friend_id` / `is_builtin`）随唤醒事件下传，最终落到本次 episode 派出
    * 的 worker 的 `origin.creator_friend_id`（§4.4）。这是过渡形态：admin 调用点仍走
-   * `create_task_from_schedule` 并自行下发 `resolved_permissions`，P7 cutover 时收敛。
+   * 由 manager 在唤醒边界解析身份。
    */
   private async transitionMaintenanceSystemTask(
     dialogObjectId: DialogObjectId,

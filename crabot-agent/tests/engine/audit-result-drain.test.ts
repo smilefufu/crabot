@@ -10,7 +10,7 @@
  *                              + 注入 detailedReport 续 turn
  *   - audit_aborted          → clearActiveAuditId + 注入"原 audit 已废"提示续 turn
  *
- * Marker 主要从 wait_for_signal setBarrier → audit subagent 完成 push → post-tool drain 路径进入；
+ * Marker 主要从 end_turn setBarrier → audit subagent 完成 push → post-tool drain 路径进入；
  * 防御性也覆盖 end_turn pre-supplement drain 路径。
  */
 
@@ -23,7 +23,7 @@ import { chunksFromContent } from './helpers/mock-stream.js'
 
 type AdapterStep =
   | { kind: 'tool'; toolId: string; toolName: string; input?: Record<string, unknown> }
-  | { kind: 'end_turn'; text: string }
+  | { kind: 'audit_barrier'; text: string }
 
 function makeAdapter(steps: ReadonlyArray<AdapterStep>): LLMAdapter {
   let i = 0
@@ -47,7 +47,7 @@ function makeAdapter(steps: ReadonlyArray<AdapterStep>): LLMAdapter {
       }
       yield* chunksFromContent(
         [{ type: 'text' as const, text: s.text }],
-        'end_turn',
+        'audit_barrier',
         { inputTokens: 10, outputTokens: 5 },
       )
     }),
@@ -55,8 +55,8 @@ function makeAdapter(steps: ReadonlyArray<AdapterStep>): LLMAdapter {
   } as unknown as LLMAdapter
 }
 
-// wait_for_signal 类工具：调用时 setBarrier；audit_result push 进 queue 后会自动 clearBarrier。
-function makeWaitTool(queue: HumanMessageQueue, name = 'wait_for_signal'): {
+// 审计 barrier 测试工具：调用时 setBarrier；audit_result push 进 queue 后会自动 clearBarrier。
+function makeWaitTool(queue: HumanMessageQueue, name = 'audit_barrier'): {
   name: string
   description: string
   inputSchema: { type: 'object'; properties: Record<string, unknown> }
@@ -83,10 +83,10 @@ describe('query-loop: audit_result marker drain dispatch', () => {
     const dropSpy = vi.fn()
     const clearAuditSpy = vi.fn()
 
-    // turn 1: wait_for_signal (setBarrier)
+    // turn 1: end_turn (setBarrier)
     // post-tool barrier wait → audit pass push 唤醒 → drain dispatcher 看到 pass + 无剩余 → 退
     const adapter = makeAdapter([
-      { kind: 'tool', toolId: 'tu1', toolName: 'wait_for_signal' },
+      { kind: 'tool', toolId: 'tu1', toolName: 'audit_barrier' },
     ])
 
     // 异步在 setBarrier 之后 push pass marker
@@ -130,8 +130,8 @@ describe('query-loop: audit_result marker drain dispatch', () => {
     const injections: Array<{ type: string; text: string; turnNumber: number }> = []
 
     const adapter = makeAdapter([
-      { kind: 'tool', toolId: 'tu1', toolName: 'wait_for_signal' },
-      { kind: 'end_turn', text: '回复完毕' }, // 续 turn 响应 supplement
+      { kind: 'tool', toolId: 'tu1', toolName: 'audit_barrier' },
+      { kind: 'audit_barrier', text: '回复完毕' }, // 续 turn 响应 supplement
     ])
 
     // pass marker + supplement 同时 push（supplement 排在 pass 之后）
@@ -181,8 +181,8 @@ describe('query-loop: audit_result marker drain dispatch', () => {
     const injections: Array<{ type: string; text: string }> = []
 
     const adapter = makeAdapter([
-      { kind: 'tool', toolId: 'tu1', toolName: 'wait_for_signal' },
-      { kind: 'end_turn', text: '改完了' },
+      { kind: 'tool', toolId: 'tu1', toolName: 'audit_barrier' },
+      { kind: 'audit_barrier', text: '改完了' },
     ])
 
     setTimeout(() => {
@@ -235,8 +235,8 @@ describe('query-loop: audit_result marker drain dispatch', () => {
     const injections: Array<{ type: string; text: string }> = []
 
     const adapter = makeAdapter([
-      { kind: 'tool', toolId: 'tu1', toolName: 'wait_for_signal' },
-      { kind: 'end_turn', text: '收到，按新目标办' },
+      { kind: 'tool', toolId: 'tu1', toolName: 'audit_barrier' },
+      { kind: 'audit_barrier', text: '收到，按新目标办' },
     ])
 
     setTimeout(() => {
@@ -286,8 +286,8 @@ describe('query-loop: audit_result marker drain dispatch', () => {
     const injections: Array<{ type: string; text: string }> = []
 
     const adapter = makeAdapter([
-      { kind: 'tool', toolId: 'tu1', toolName: 'wait_for_signal' },
-      { kind: 'end_turn', text: '收到' },
+      { kind: 'tool', toolId: 'tu1', toolName: 'audit_barrier' },
+      { kind: 'audit_barrier', text: '收到' },
     ])
 
     setTimeout(() => {
@@ -317,14 +317,14 @@ describe('query-loop: audit_result marker drain dispatch', () => {
   })
 
   it('pass marker 通过 end_turn pre-supplement drain 路径也走分流（防御性）', async () => {
-    // 场景：worker 直接 end_turn 不调 wait_for_signal，pass marker 在 end_turn 之后到达
+    // 场景：worker 直接 end_turn 不调审计 barrier，pass marker 在 end_turn 之后到达
     // L221 drain → 也应分流到 marker dispatcher
     const queue = new HumanMessageQueue()
     const flushSpy = vi.fn(async () => {})
     const clearAuditSpy = vi.fn()
 
     const adapter = makeAdapter([
-      { kind: 'end_turn', text: '我做完了' },
+      { kind: 'audit_barrier', text: '我做完了' },
     ])
 
     // 在 end_turn 处理前把 pass marker 塞进 queue
@@ -363,8 +363,8 @@ describe('query-loop: audit_result marker drain dispatch', () => {
     const injections: Array<{ type: string; text: string }> = []
 
     const adapter = makeAdapter([
-      { kind: 'end_turn', text: '我做完了' },
-      { kind: 'end_turn', text: '补做完了' },
+      { kind: 'audit_barrier', text: '我做完了' },
+      { kind: 'audit_barrier', text: '补做完了' },
     ])
 
     queue.push(
@@ -413,7 +413,7 @@ describe('query-loop: audit_result marker drain dispatch', () => {
     )
 
     const adapter = makeAdapter([
-      { kind: 'end_turn', text: '完毕' },
+      { kind: 'audit_barrier', text: '完毕' },
     ])
 
     const result = await runEngine({

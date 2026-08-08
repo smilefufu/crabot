@@ -332,6 +332,10 @@ export interface HarnessDeps {
    * 无参签名装不下这些维度(见 `BuiltinRuntimeFactory`)。
    */
   readonly builtinSpawnDefaults?: BuiltinRuntimeFactory
+  /** True while this worker owns a running background entity. */
+  readonly hasRunningBg?: (workerId: string) => Promise<boolean>
+  /** True after a final bg exit and before its WorkerInbox notification is delivered. */
+  readonly hasPendingBgNotification?: (workerId: string) => boolean
 }
 
 export interface SpawnWorkerParams {
@@ -373,6 +377,25 @@ export interface ReconcileReport {
 const EMPTY_CAPABILITY_BUNDLE: CapabilityBundle = { skills: [], mcp_servers: [] }
 
 export class WorkerHarness {
+  private readonly pendingBgNotifications = new Map<string, number>()
+
+  /**
+   * Marks a shell-exit notification before its async rendering starts.  This
+   * closes the idle-state race: task status cannot become waiting_input between
+   * the registry terminal update and WorkerInbox enqueue.
+   */
+  beginBgNotification(workerId: string): () => void {
+    this.pendingBgNotifications.set(workerId, (this.pendingBgNotifications.get(workerId) ?? 0) + 1)
+    return () => {
+      const remaining = (this.pendingBgNotifications.get(workerId) ?? 1) - 1
+      if (remaining > 0) this.pendingBgNotifications.set(workerId, remaining)
+      else this.pendingBgNotifications.delete(workerId)
+    }
+  }
+
+  hasPendingBgNotification(workerId: string): boolean {
+    return (this.pendingBgNotifications.get(workerId) ?? 0) > 0
+  }
   private readonly mutexes = new Map<string, AsyncMutex>()
   private readonly inboxes = new Map<string, WorkerInbox>()
   private readonly eventLogs = new Map<string, WorkerEventLog>()
@@ -1754,10 +1777,13 @@ export class WorkerHarness {
       if (target.state === 'exited') return // 目标化身已终态,迟到回调忽略(与上面 fork 分支的短路对称,避免对已终态化身再次施加迁移)
       if (isTerminalStatus(worker.task.status)) return // 已是终态(如已被 killWorker 落定),回调迟到,忽略
 
-      // idle 是否算"等输入"本属 manager 判断职责(protocol-agent-v3 §5.2);P3 尚无 manager,
-      // 保守默认 idle 一律记 waiting_input,P4 接线后可按需要覆盖这条映射。
+      // An idle builtin incarnation with an owned shell is still executing work:
+      // end_turn is its wait primitive, not task completion.
       const waitingInput = state === 'idle' ? true : undefined
-      const nextStatus: TaskStatus = taskStatusFromIncarnation(state, endReason, waitingInput)
+      const nextStatus: TaskStatus =
+        state === 'idle' && (this.hasPendingBgNotification(h.worker_id) || await this.deps.hasRunningBg?.(h.worker_id))
+          ? 'running'
+          : taskStatusFromIncarnation(state, endReason, waitingInput)
 
       const committed = await this.deps.ledger.upsertWorker(dialogObjectId, h.worker_id, (prev) => {
         if (!prev) return undefined

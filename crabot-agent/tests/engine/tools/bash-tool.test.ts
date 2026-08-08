@@ -174,7 +174,7 @@ describe('createBashTool — 输出截断与全文落盘', () => {
 // ---------------------------------------------------------------------------
 // createBashTool with bgCtx：统一前台/后台模型
 //   - 宽限期内结束 → inline 同步返回，不入 bgRegistry
-//   - 超期仍在跑 → 转后台（注册 bgRegistry，命令不中断）+ 引导 wait_for_signal
+//   - 超期仍在跑 → 转后台（注册 bgRegistry，命令不中断）+ 引导 end_turn
 //   - 转后台后退出 → onShellExit 触发（唤醒挂起 worker + 持久通知）
 // ---------------------------------------------------------------------------
 
@@ -246,7 +246,7 @@ describe('createBashTool with bgCtx', () => {
     expect(result.output).toContain('stderr:\nbad')
   })
 
-  it('grace 慢路径：共享文案按工具表区分 wait_for_signal 与 blocking Output', async () => {
+  it('grace 慢路径：共享文案引导自然结束当前回合与 blocking Output', async () => {
     const pushed: ExitInfo[] = []
     // 注入 50ms 短 grace，命令 sleep 0.4s 必然超期
     const tool = createBashTool(() => cwd, undefined, makeBgCtx('task-grace-slow', (info) => pushed.push(info)), 50)
@@ -257,11 +257,10 @@ describe('createBashTool with bgCtx', () => {
     )
     expect(result.isError).toBe(false)
     expect(result.output).toContain('转入后台继续运行')
-    expect(result.output).toContain('工具列表中有 wait_for_signal')
-    expect(result.output).toContain('工具列表中没有 wait_for_signal')
+    expect(result.output).toContain('自然结束当前回合')
     expect(result.output).toContain('block=true')
     expect(result.output).toContain('timeout_ms=600000')
-    expect(result.output).not.toContain('若没有，调 wait_for_signal')
+    expect(result.output).not.toContain('工具列表中')
     expect(result.output).not.toContain('exit_code:')
     const match = result.output.match(/shell_[0-9a-f]+/)
     expect(match).not.toBeNull()

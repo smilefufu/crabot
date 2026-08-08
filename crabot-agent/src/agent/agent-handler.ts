@@ -117,11 +117,9 @@ import {
 } from './goal-audit.js'
 import { createSubmitAuditResultTool } from './goal-auditor-tools.js'
 import {
-  createWaitForSignalTool,
   formatStillRunningSnapshot,
-  type WaitForSignalDeps,
   type RunningWaitTarget,
-} from '../mcp/wait-for-signal.js'
+} from '../mcp/running-entities.js'
 import { createAsyncAuditEndTurnGate } from './end-turn-gate.js'
 import { buildAuditAbortedMarker } from './audit-result-marker.js'
 import {
@@ -161,7 +159,7 @@ export function extractChildTraceIdFromOutput(output: string | undefined): strin
 /**
  * 从 delegate_task 异步路径的 JSON output 提取 `agent_id`。
  * 异步派出的 subagent 工具立即返回 `{agent_id, status:'launched', output_file: null}`，
- * caller 用 agent_id 追踪在跑的 async subagent（喂给 wait_for_signal 的 hasActiveAsyncSubagent 判断）。
+ * caller 用 agent_id 追踪在跑的 async subagent（喂给 end_turn 的 hasActiveAsyncSubagent 判断）。
  * 非 JSON / 非 launched 状态 / 无字段 → 返回 undefined。
  * @internal exported for testing
  */
@@ -180,25 +178,6 @@ export function extractLaunchedSubagentId(output: string | undefined): string | 
     // 非 JSON / 非 async-launched 结果（sync 路径直接返回文字），忽略
   }
   return undefined
-}
-
-/**
- * 构造 wait_for_signal 工具（通用挂起原语，总是注入）。
- *
- * 旧版本仅在 `goalModeEnabled || asyncEnabled` 时注入，目的是"缩小工具可见面"。
- * 但 wait_for_signal 是通用挂起原语——"等媒体下载"等新场景也需要它，与 goal/async flag 无关。
- * 因此改为总是注入；滥用（无 pending 事件且无 timeout_ms 的空挂起）由工具内部预检兜底。
- *
- * `_opts` 保留以维持调用方签名稳定，不需要改注入点。
- *
- * @internal exported for testing
- */
-export function maybeCreateWaitForSignalTool(
-  _opts: { readonly goalModeEnabled: boolean; readonly asyncEnabled: boolean },
-  deps: WaitForSignalDeps,
-): ReturnType<typeof createWaitForSignalTool> | undefined {
-  // 总是注入：wait_for_signal 是通用挂起原语，合法性由内部预检判定。
-  return createWaitForSignalTool(deps)
 }
 
 type ProgressReportMode = 'silent' | 'text_forward' | 'digest'
@@ -279,7 +258,7 @@ function log(msg: string) {
  * async subagent 与 bg shell 都是 registry 记录（type='agent'/'shell'），统一在此映射。
  * excludeEntityIds：正在退出的 entity 自身（registry 可能尚未更新为终态）+ 在跑的
  * goal-audit subagent（它也以 parentTaskId 注册，但对 worker 必须不可见——快照泄漏它
- * 会重新引入"教 agent 等 audit"污染，且与 wait_for_signal 的 targets 准入自相矛盾）。
+ * 会重新引入"教 agent 等 audit"污染，且与 end_turn 的 targets 准入自相矛盾）。
  * spec: 2026-07-16-wait-signal-targets-goal-lifecycle-design §6
  */
 export function summarizeRunningEntities(
@@ -575,7 +554,7 @@ export class AgentHandler {
   /** 监视跨重启认领回来、仍存活的 shell；退出时通知（唤醒 resumed worker + 持久通知）。 */
   private readonly readoptReaper = new ReadoptReaper(
     this.bgRegistry,
-    (info) => void this.deliverShellExitNotification(info),
+    (info) => { void this.routeShellExit(info).catch((error) => console.error('[AgentHandler] readopt shell notification failed:', error)) },
   )
   /** Per-task output cursor map: key = `${taskId}:${entityId}` → byte offset */
   private readonly bgCursorMap = new Map<string, number>()
@@ -592,6 +571,14 @@ export class AgentHandler {
    * 参 Claude Code enqueueShellNotification + LocalAgentTask.enqueueAgentNotification 设计。
    */
   private readonly pendingBgNotifications = new Map<string, string[]>()
+  /** Builtin WorkerInbox exit dispatcher, attached after the harness is constructed. */
+  private builtinShellExitDispatcher?: (workerId: string, info: {
+    entity_id: string
+    command: string
+    status: 'completed' | 'failed' | 'killed'
+    exit_code: number
+    runtime_ms?: number
+  }) => Promise<void>
   /** Interval handle for periodic 24h GC of dead entities */
   private gcIntervalHandle?: NodeJS.Timeout
 
@@ -625,14 +612,15 @@ export class AgentHandler {
     void this.bgRegistry.recoverPersistent()
       .then(({ alive, deadShells }) => {
         for (const rec of deadShells) {
-          void this.deliverShellExitNotification({
+          void this.routeShellExit({
             entity_id: rec.entity_id,
             command: rec.command,
             status: rec.status === 'completed' ? 'completed' : 'failed',
             exit_code: rec.exit_code ?? -1,
             spawned_by_task_id: rec.spawned_by_task_id,
             ...(rec.owner.friend_id ? { owner_friend_id: rec.owner.friend_id } : {}),
-          })
+            ...(rec.owner.worker_id ? { worker_id: rec.owner.worker_id } : {}),
+          }).catch((error) => console.error('[AgentHandler] recovered shell notification failed:', error))
         }
         const aliveShells = alive.filter(
           (r): r is BgShellRegistryRecord => r.type === 'shell',
@@ -704,6 +692,72 @@ export class AgentHandler {
     } finally {
       await fh.close()
     }
+  }
+
+  /** Attach the WorkerInbox route for builtin-owned persistent shells. */
+  setBuiltinShellExitDispatcher(dispatcher: NonNullable<AgentHandler['builtinShellExitDispatcher']>): void {
+    this.builtinShellExitDispatcher = dispatcher
+  }
+
+  private async routeShellExit(info: {
+    entity_id: string
+    command: string
+    status: 'completed' | 'failed' | 'killed'
+    exit_code: number
+    spawned_by_task_id: string
+    owner_friend_id?: string
+    worker_id?: string
+    runtime_ms?: number
+  }): Promise<void> {
+    if (info.worker_id && this.builtinShellExitDispatcher) {
+      await this.builtinShellExitDispatcher(info.worker_id, info)
+      return
+    }
+    await this.deliverShellExitNotification(info)
+  }
+
+  /**
+   * Supplies the shared persistent registry to a builtin worker. The legacy
+   * handler remains its owner; a second registry would split shell ownership.
+   */
+  createBuiltinBgToolOptions(
+    workerId: string,
+    onShellExit: BashBgContext['onShellExit'],
+  ): { bgEntityCtx: BashBgContext; bgToolDeps: BgToolDeps } {
+    const owner: BgEntityOwner = { friend_id: `__system_${workerId}`, worker_id: workerId }
+    return {
+      bgEntityCtx: { registry: this.bgRegistry, owner, taskId: workerId, onShellExit },
+      bgToolDeps: {
+        registry: this.bgRegistry,
+        cursorMap: this.bgCursorMap,
+        taskId: workerId,
+        ownerFriendId: owner.friend_id,
+        agentAbortControllers: this.agentAbortControllers,
+      },
+    }
+  }
+
+  async hasRunningBgForWorker(workerId: string): Promise<boolean> {
+    const entities = await this.bgRegistry.list({ status: ['running'] })
+    return entities.some((entity) => entity.owner.worker_id === workerId)
+  }
+
+  /** Render the common shell exit payload for WorkerInbox system delivery. */
+  async renderShellExitNotification(info: {
+    entity_id: string
+    command: string
+    status: 'completed' | 'failed' | 'killed'
+    exit_code: number
+    runtime_ms?: number
+  }): Promise<string> {
+    const command = `${info.command.slice(0, 200)}${info.command.length > 200 ? '...' : ''}`
+    const runtimeStr = info.runtime_ms !== undefined ? `, 运行 ${formatRuntimeMs(info.runtime_ms)}` : ''
+    const tail = await this.readShellLogTail(info.entity_id)
+    const tailBlock = tail
+      ? `\n--- 输出尾部 ---\n${tail}\n--- 更多用 Output("${info.entity_id}") ---`
+      : `\n用 Output("${info.entity_id}") 读取完整输出。`
+    return `Background shell ${info.entity_id} 已退出 (status=${info.status}, exit_code=${info.exit_code}${runtimeStr})。\n` +
+      `命令: ${command}${tailBlock}`
   }
 
   /**
@@ -955,7 +1009,7 @@ export class AgentHandler {
 
       // 检查本 task 派出的、仍在运行的异步 bg-agent（subagent）。
       // **只等 subagent，不等 bg shell**：subagent 是"派出去就该等结果"；bg shell 的 fire-and-forget
-      // 是合法用法（要等用显式 wait_for_signal，退出通知会唤醒），否则永不退出的后台命令会把 task
+      // 是合法用法（要等用显式 end_turn，退出通知会唤醒），否则永不退出的后台命令会把 task
       // 永久卡在 waiting。（shell 现在也落 bgRegistry，故这里按 type 过滤。）
       const pendingChildren = (await this.bgRegistry.list({ spawned_by_task_id: task.task_id, status: ['running'] }))
         .filter((c) => c.type === 'agent')
@@ -1107,7 +1161,7 @@ export class AgentHandler {
     // 步骤（spec 2026-06-07-goal-audit-async-buffered-info-design.md §4.7）：
     //   1. abort audit subagent 进程（agentAbortControllers.get(id)?.abort()）
     //   2. 立即清 outboundBuffer + activeAuditId（不等 drain 路径，避免 spawn 阶段 marker 尚未 push 时漏清）
-    //   3. push <audit_aborted> marker 到 humanQueue —— 唤醒等审中的 main loop（wait_for_signal）+
+    //   3. push <audit_aborted> marker 到 humanQueue —— 唤醒等审中的 main loop（end_turn）+
     //      让 Task 11 drain 路径走 aborted 分支注入"audit 已废"提示
     //
     // idempotent：clearActiveAuditId 与本处都置 undefined，drain 路径与 abort 路径任意先后均无害。
@@ -1125,7 +1179,7 @@ export class AgentHandler {
       // 2. 立即清状态（drain 路径再清也无害）
       taskState.outboundBuffer.length = 0
       taskState.activeAuditId = undefined
-      // 3. push audit_aborted marker —— 唤醒 wait_for_signal + 走 drain 注入提示
+      // 3. push audit_aborted marker —— 唤醒 end_turn + 走 drain 注入提示
       try {
         humanQueue.push(buildAuditAbortedMarker({ auditId: id, reason }))
       } catch (err) {
@@ -1241,7 +1295,7 @@ export class AgentHandler {
       const getCwd = (): string => taskState.cwd ?? getWorkspaceDir()
       const setCwd = (newCwd: string): void => { taskState.cwd = newCwd }
 
-      // wait_for_signal 用：跟踪本任务派出的 async subagent entity_ids。
+      // end_turn 用：跟踪本任务派出的 async subagent entity_ids。
       // delegate_task 异步路径返回 `{agent_id, status:'launched'}`，我们在 wrapper 里
       // 抽出 agent_id 加入 taskState.activeAsyncSubagentIds；判断"是否还有 active subagent"时
       // 跟全局 agentAbortControllers 取交集——后者在 subagent 退出（completed/failed/killed）时
@@ -1448,7 +1502,7 @@ export class AgentHandler {
             },
           })
           // wrap：异步路径返回 `{agent_id, status:'launched'}` → 抓出来加入 taskState.activeAsyncSubagentIds，
-          // 供 wait_for_signal.hasActiveAsyncSubagent 判断。同步路径不带 launched 状态，不影响。
+          // 供 end_turn.hasActiveAsyncSubagent 判断。同步路径不带 launched 状态，不影响。
           const trackingRunSubAgent: typeof baseRunSubAgent = async (subagent, input, ctx) => {
             const result = await baseRunSubAgent(subagent, input, ctx)
             if (!result.isError && typeof result.output === 'string') {
@@ -1517,28 +1571,6 @@ export class AgentHandler {
             requestRestart: (reason) => this.requestRestartForTask(task.task_id, reason),
           }))
         }
-
-        // 3k2. wait_for_signal — 通用挂起原语，总是注入
-        // 合法性由工具内部 targets 准入校验判定（命名目标不存在 → 立即拒绝）。
-        // listActiveAsyncSubagentIds：跟全局 agentAbortControllers 取交集——bg-agent.ts 在
-        // finally 清理 controller，所以 "id 还在 Map 里" 等价于 "subagent 还没退出"。
-        // spec: 2026-07-16-wait-signal-targets-goal-lifecycle-design §5
-        const waitForSignalTool = maybeCreateWaitForSignalTool(
-          { goalModeEnabled, asyncEnabled: isMasterPrivate },
-          {
-            humanQueue,
-            listActiveAsyncSubagentIds: () =>
-              [...taskState.activeAsyncSubagentIds].filter((id) => this.agentAbortControllers.has(id)),
-            // 本 task 名下 running 的（持久）bg shell——退出时 onShellExit push humanQueue 唤醒。
-            // 可能永不退出的进程（服务/监控）仍建议带 timeout_ms。
-            listRunningBgEntities: async () => {
-              const running = await this.bgRegistry.list({ status: ['running'] })
-              return summarizeRunningEntities(running, task.task_id)
-                .filter((t) => t.kind === 'bg_entity')
-            },
-          },
-        )
-        if (waitForSignalTool) tools.push(waitForSignalTool)
 
         // 3l. Extra tools from opts (e.g., exit tools for trigger flow)
         if (opts?.extraTools) {
@@ -2178,7 +2210,7 @@ export class AgentHandler {
 
   /**
    * 工具 request_restart 的落点：**复用 ask_human 的 barrier 挂起机制**（跟 send_message(ask_human)
-   * / wait_for_signal 同一套 humanQueue.setBarrier 路径）。
+   * / end_turn 同一套 humanQueue.setBarrier 路径）。
    *
    * 为什么用 barrier 而不是 abort：barrier 是「工具执行完（tool_result 已入 messages、checkpoint
    * 已完整 flush、fireOnTurn 已 record）之后，engine 的 post-tool barrier check 停住 loop、不再发起
@@ -3292,9 +3324,9 @@ export class AgentHandler {
    * spec: 2026-06-19-temp-interactive-page-design.md §5.2
    *
    * 两步（对两种挂法都成立，见 §5.2 表）：
-   *   ① humanQueue.push(note)：同一套 barrier，无论 worker 用 ask_human 还是 wait_for_signal 挂起都唤醒。
+   *   ① humanQueue.push(note)：同一套 barrier，无论 worker 用 ask_human 还是 end_turn 挂起都唤醒。
    *   ② transitionTaskStatus(taskId, 'executing')：把 ask_human 留下的 waiting_human 切回 executing；
-   *      wait_for_signal 场景本就 executing，是 no-op（transitionTaskStatus 自带幂等/智能恢复）。
+   *      end_turn 场景本就 executing，是 no-op（transitionTaskStatus 自带幂等/智能恢复）。
    * fire-and-forget：status 切换失败由 admin reconciliation 兜底，不阻塞反馈唤醒（反馈已落盘 events.jsonl）。
    */
   wakeForPageFeedback(taskId: TaskId, note: string): void {

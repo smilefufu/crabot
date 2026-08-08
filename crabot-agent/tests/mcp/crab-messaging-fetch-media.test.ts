@@ -62,12 +62,12 @@ describe('fetch_media 工具', () => {
     expect(result.error).toContain('unknown media handle')
   })
 
-  it('status=fetching → 结果含调用 wait_for_signal 的提示', async () => {
+  it('status=fetching → 结果含调用 end_turn 的提示', async () => {
     const call = vi.fn().mockResolvedValue({ status: 'fetching' })
     const tools = buildWorkerMessagingTools(makeDeps(call))
     const out = await findTool(tools, 'fetch_media').handler({ channel_id: 'feishu-1', handle: 'fm_big' })
     const parsed = parse(out)
     expect(parsed.status).toBe('fetching')
-    expect(JSON.stringify(parsed)).toContain('wait_for_signal')
+    expect(JSON.stringify(parsed)).toContain('end_turn')
   })
 })

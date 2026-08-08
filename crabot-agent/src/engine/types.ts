@@ -396,7 +396,7 @@ export interface EngineOptions {
   readonly dropOutboundBuffer?: () => void
   /**
    * 清 taskState.activeAuditId。drain 路径处理完 audit_result / audit_aborted marker 之后调，
-   * 让 task 回到 "无活跃 audit" 态——后续 wait_for_signal 调用不再因 hasActiveAudit 而通过预检。
+   * 让 task 回到 "无活跃 audit" 态——后续 end_turn 调用不再因 hasActiveAudit 而通过预检。
    * 不传时 engine 跳过（caller 自己管 activeAuditId 生命周期）。
    * spec: 2026-06-07-goal-audit-async-buffered-info-design.md §4.5 / §4.7
    */

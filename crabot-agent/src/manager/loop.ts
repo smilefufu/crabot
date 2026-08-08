@@ -84,6 +84,7 @@ export type WakeEvent =
       readonly principalPermissions?: ResolvedPermissions
     }
   | { readonly kind: 'worker_event'; readonly event: HarnessEvent }
+  | { readonly kind: 'media_notification'; readonly text: string }
   | {
       readonly kind: 'schedule'
       readonly scheduleId: string
@@ -601,6 +602,8 @@ function renderWakeEvent(event: WakeEvent, opts: MessageRenderOpts): string {
       return renderChannelMessages('[补齐:群聊注意力放行期间累积的人类消息]', event.messages, event.friend, opts)
     case 'worker_event':
       return renderWorkerEvent(event.event)
+    case 'media_notification':
+      return `[媒体下载完成]\n${event.text}`
     case 'schedule':
       return `[定时任务触发] scheduleId=${event.scheduleId}\n标题:${event.title}\n描述:${event.description}`
   }
