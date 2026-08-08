@@ -1390,6 +1390,9 @@ export class WorkerHarness {
       if (isTerminalStatus(worker.task.status)) return 'unchanged'
 
       const mainline = mainlineIncarnation(worker)
+      // `memory_maintenance` 等 agent 自执行的 system task 有台账、但没有 worker 化身。
+      // 它们不属于 adapter 对账对象，保持原状态即可。
+      if (!mainline) return 'unchanged'
       const adapter = this.deps.adapters.get(mainline.impl as WorkerImplId)
       if (!adapter) {
         await this.markCrashed(dialogObjectId, worker, mainline, `no adapter registered for impl '${mainline.impl}'`)

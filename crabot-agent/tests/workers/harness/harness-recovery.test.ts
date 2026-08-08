@@ -211,6 +211,27 @@ describe('WorkerHarness.reconcileOnStartup — 三态判定', () => {
     expect(events.filter((e) => e.worker_id === 'w-running')).toHaveLength(0)
   })
 
+  it('无化身的 agent 自执行 system task → 不调用 adapter，保持 running，归 unchanged', async () => {
+    const { harness, ledger, adaptersMap } = await makeHarness()
+    const fake = new FakeAdapter('builtin')
+    adaptersMap.set('builtin', fake)
+    const worker = makeWorker('w-maintenance', {
+      task: { id: 'task-w-maintenance', title: '记忆维护', status: 'running', created_at: now() },
+      origin: { spawned_by_session: 'admin-web::system-tasks', trigger_type: 'scheduled' },
+      incarnations: [],
+    })
+    await seed(ledger, DIALOG, worker)
+
+    const report = await harness.reconcileOnStartup()
+
+    expect(report).toEqual<ReconcileReport>({ revived: [], failed: [], unchanged: ['w-maintenance'] })
+    expect(fake.stateCalls).toHaveLength(0)
+    const after = await getWorker(ledger, 'w-maintenance')
+    expect(after.task.status).toBe('running')
+    expect(after.incarnations).toEqual([])
+    expect(events.filter((e) => e.worker_id === 'w-maintenance')).toHaveLength(0)
+  })
+
   it('adapter 报 idle 且台账仍是 running → 对齐 incarnation.state=idle + task.status=waiting_input，发 state_changed(source=reconcile)，归 revived', async () => {
     const { harness, ledger, adaptersMap } = await makeHarness()
     const fake = new FakeAdapter('builtin')
