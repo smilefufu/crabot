@@ -50,10 +50,9 @@ export class CliEventChannel {
    * 生成供 CLI hook 使用的 shell 片段(POSIX sh,不依赖 node/jq 等非必装工具)。
    * 只用 printf + date -u 拼一行 JSON 并追加到事件文件。
    *
-   * 设计取舍:hook 的 stdin(如 claude code 会喂 JSON payload)在这一版**直接丢弃**,
-   * raw 固定为 null——把 stdin 内容原样塞进 JSON 字符串涉及运行时转义(引号、换行、
-   * 反斜杠等),在纯 POSIX shell 里做这件事风险远大于收益。后续如果需要 payload,
-   * 再升级为读 stdin 并转义写入 raw 字段。
+   * hook 的 stdin 是 CLI 提供的 JSON payload。它只作为 JSON 值写进 raw，绝不执行、
+   * 解释或重编码；去掉 CR/LF 仅用于把格式化 JSON 收束为单行（JSON 字符串里的换行必为
+   * `\\n` 转义，因而不会被改变）。空 stdin 保持 legacy raw:null。
    *
    * 追加目标是 `"${CRABOT_CLI_EVENTS_FILE:-<本 channel 的路径>}"`——运行时可被调用方经
    * env 重定向到私有文件,见 EVENTS_FILE_ENV 注释。
@@ -63,11 +62,13 @@ export class CliEventChannel {
     // 再整体当作单个 shell 单引号字面量传给 printf 的 %s——避免 kind 内容
     // 里出现 % 之类字符被 printf 误当格式指令解析。
     const kindJsonEscaped = JSON.stringify(kind).slice(1, -1)
-    const format = '{"ts":"%s","kind":"%s","raw":null}\\n'
+    const format = '{"ts":"%s","kind":"%s","raw":%s}\\n'
     const target = `"\${${EVENTS_FILE_ENV}:-${dqEscape(this.filePath)}}"`
+    const raw = kind === 'notification' ? "raw=$(tr -d '\\r\\n'); if [ -z \"$raw\" ]; then raw=null; fi" : 'raw=null'
     return [
       'ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)',
-      `printf '${format}' "$ts" ${shQuote(kindJsonEscaped)} >> ${target}`,
+      raw,
+      `printf '${format}' "$ts" ${shQuote(kindJsonEscaped)} "$raw" >> ${target}`,
     ].join('; ')
   }
 

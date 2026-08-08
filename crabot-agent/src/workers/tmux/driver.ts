@@ -21,6 +21,14 @@ export interface TmuxSessionSpec {
   outputFile: string // pipe-pane 追加目标
 }
 
+export interface PaneSnapshot {
+  text: string
+  cursor_x: number
+  cursor_y: number
+  width: number
+  height: number
+}
+
 export class TmuxDriver {
   private readonly tmuxBin: string
 
@@ -77,12 +85,28 @@ export class TmuxDriver {
    * 整条消息。单行文本也走同一路径,不再区分单行/多行。
    */
   async sendText(name: string, text: string): Promise<void> {
-    if (text.length > 0) {
-      const bufferName = `crabot-sendtext-${randomUUID()}`
-      await this.loadBufferFromStdin(bufferName, text)
-      await this.run(['paste-buffer', '-p', '-r', '-d', '-b', bufferName, '-t', name])
-    }
+    await this.pasteText(name, text)
     await this.run(['send-keys', '-t', name, 'Enter'])
+  }
+
+  /** Paste exactly one buffer and deliberately do not commit it. */
+  async pasteText(name: string, text: string): Promise<void> {
+    if (text.length === 0) return
+    const bufferName = `crabot-sendtext-${randomUUID()}`
+    await this.loadBufferFromStdin(bufferName, text)
+    await this.run(['paste-buffer', '-p', '-r', '-d', '-b', bufferName, '-t', name])
+  }
+
+  /** Capture only the current viewport plus cursor/pane dimensions. */
+  async capturePane(name: string): Promise<PaneSnapshot> {
+    const [{ stdout: text }, { stdout: cursor }, { stdout: size }] = await Promise.all([
+      this.run(['capture-pane', '-p', '-e', '-J', '-t', name]),
+      this.run(['display-message', '-p', '-t', name, '#{cursor_x},#{cursor_y}']),
+      this.run(['display-message', '-p', '-t', name, '#{pane_width},#{pane_height}']),
+    ])
+    const [cursor_x, cursor_y] = parsePair(cursor, 'cursor')
+    const [width, height] = parsePair(size, 'pane size')
+    return { text, cursor_x, cursor_y, width, height }
   }
 
   async sendKeys(name: string, keys: string[]): Promise<void> {
@@ -139,6 +163,12 @@ export class TmuxDriver {
       child.stdin.end()
     })
   }
+}
+
+function parsePair(value: string, label: string): [number, number] {
+  const [left, right] = value.trim().split(',').map(Number)
+  if (!Number.isInteger(left) || !Number.isInteger(right)) throw new Error(`tmux returned invalid ${label}: ${value}`)
+  return [left, right]
 }
 
 function shQuote(value: string): string {
