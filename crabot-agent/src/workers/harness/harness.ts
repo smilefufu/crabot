@@ -80,12 +80,17 @@ import type {
 } from '../types'
 import type { BuiltinRuntimeFactory } from '../builtin/runtime'
 import type { ResolvedPermissions } from '../../types'
-import { CapabilityNotSupportedError, WorkerExitedError } from '../errors'
+import { CapabilityNotSupportedError, WorkerExitedError, CliInputStallError } from '../errors'
 import { AsyncMutex } from '../async-mutex'
 import type { DialogObjectId, Incarnation, LedgerWorker, TaskStatus } from './ledger-types'
 import type { LedgerStore } from './ledger-store'
 import type { WorkspaceManager } from './workspace-manager'
-import { WorkerInbox, type InboxItem, type InboxSettlement } from './inbox'
+import {
+  WorkerInbox,
+  type InboxItem,
+  type InboxDeliveryResult,
+  type InboxSettlement,
+} from './inbox'
 import { WorkerEventLog, type HarnessEvent, type HarnessEventDelivery, type HarnessEventKind } from './worker-events'
 import { applyStatusTransition, canTransition, isTerminalStatus, reviveTask, taskStatusFromIncarnation } from './task-status'
 import { join } from 'path'
@@ -154,6 +159,56 @@ function truncateWakeText(
   if (trimmed.length <= maxChars) return trimmed
   const mark = `[已截断,共 ${trimmed.length} 字符${overflowHint}]`
   return keep === 'head' ? `${trimmed.slice(0, maxChars)}…${mark}` : `${mark}…${trimmed.slice(-maxChars)}`
+}
+
+function cliContractState(kind: NonNullable<IncarnationHandle['initial_input']>['control_state']): WorkerContractState {
+  switch (kind) {
+    case 'running': return 'running'
+    case 'exited': return 'exited'
+    default: return 'idle'
+  }
+}
+
+function settleCliTask(
+  task: LedgerWorker['task'],
+  state: WorkerContractState,
+  report: StateChangeReport | undefined,
+  now: string,
+): LedgerWorker['task'] {
+  if (state === 'running') return task
+  if (state === 'idle') return applyStatusTransition(task, 'waiting_input', { now })
+  const target = taskStatusFromIncarnation('exited', report?.endReason)
+  if (target === 'running') return task
+  return applyStatusTransition(task, target, {
+    now,
+    ...(target === 'failed' ? { error: report?.endReason ?? 'initial CLI process exited' } : {}),
+  })
+}
+
+function cliReportDetail(state: WorkerContractState, report: StateChangeReport | undefined): Record<string, unknown> {
+  if (state === 'exited') {
+    return { to: 'exited', kind: 'initial_input_settled', ...(report?.endReason ? { reason: report.endReason } : {}) }
+  }
+  const text = report?.outputTail?.trim()
+  if (report?.notification) {
+    return {
+      to: state,
+      kind: 'interaction_required',
+      wait_mode: 'action',
+      wait_reason: report.waitReason ?? 'interaction_required',
+      notification_type: report.notification.type,
+      ...(report.notification.message ? { message: report.notification.message } : {}),
+      ...(report.notification.title ? { title: report.notification.title } : {}),
+      text: text ?? '',
+    }
+  }
+  return {
+    to: state,
+    kind: report?.waitReason === 'input_pending' ? 'input_pending' : 'input_delivery_stalled',
+    ...(state === 'idle' ? { wait_mode: 'action' } : {}),
+    ...(report?.waitReason ? { wait_reason: report.waitReason } : {}),
+    ...(text ? { text } : {}),
+  }
 }
 
 /**
@@ -552,16 +607,34 @@ export class WorkerHarness {
       }
 
       const now = this.deps.now()
-      // adapter.spawn 返回的 handle 自描述真实 session_ref(protocol-agent-v3 §6.1)——初始
-      // 化身注册时(见上面 initial.incarnations[0])这个值还不存在,只能占位;spawn 成功后
-      // 在这里补写真值,和 task 状态一起原子落盘。
+      const initialInput = spawnedHandle.initial_input
+      const initialState = cliContractState(initialInput?.control_state ?? 'running')
       const spawned = await this.deps.ledger.upsertWorker(p.dialogObjectId, workerId, (prev) => {
         if (!prev) return undefined
-        const nextTask = applyStatusTransition(prev.task, 'running', { now })
-        const incarnations = patchIncarnationBySeq(prev.incarnations, impl, 1, { session_ref: spawnedHandle.session_ref })
+        let nextTask = applyStatusTransition(prev.task, 'running', { now })
+        nextTask = settleCliTask(nextTask, initialState, initialInput?.report, now)
+        const incarnations = patchIncarnationBySeq(prev.incarnations, impl, 1, {
+          session_ref: spawnedHandle.session_ref,
+          state: initialState,
+          ...(initialState === 'exited'
+            ? { ended_at: now, ended_reason: initialInput?.report?.endReason ?? 'crashed' }
+            : {}),
+        })
         return { ...prev, task: nextTask, incarnations, updated_at: now }
       })
+
+      const inbox = this.getInbox(workerId)
+      if (initialState !== 'exited' && initialInput?.disposition === 'not_pasted') {
+        inbox.enqueueFront({ text: p.prompt, raw: false, enqueued_at: now })
+        inbox.hold('waiting_action')
+      } else if (initialState !== 'exited' && initialInput?.disposition === 'pending_in_ui') {
+        inbox.hold('input_pending')
+      }
+
       await this.appendEvent(workerId, 1, 'spawned', { impl }, spawned?.task.status)
+      if (initialInput && (initialInput.disposition !== 'accepted' || initialState === 'exited')) {
+        await this.appendEvent(workerId, 1, 'state_changed', cliReportDetail(initialState, initialInput.report), spawned?.task.status)
+      }
       return spawned as LedgerWorker
     })
   }
@@ -666,7 +739,29 @@ export class WorkerHarness {
             err.ended_reason
           )
         }
+        if (err instanceof CliInputStallError) {
+          await this.recordCliInputResult(handle, err.control_state, err.report)
+          return {
+            action: item.raw || err.disposition === 'pending_in_ui' ? 'hold_consumed' : 'hold_requeue',
+            reason: err.disposition === 'pending_in_ui' ? 'input_pending' : 'waiting_action',
+          } satisfies InboxDeliveryResult
+        }
         throw err
+      }
+      if (handle.impl !== 'builtin' && !item.raw) {
+        const cliAdapter = adapter as WorkerAdapter & {
+          takeAcceptedInputExit?: (h: IncarnationHandle) => StateChangeReport | undefined
+          takeUpdatedSessionRef?: (h: IncarnationHandle) => string | undefined
+        }
+        const sessionRef = cliAdapter.takeUpdatedSessionRef?.(handle)
+        const settledHandle = sessionRef ? { ...handle, session_ref: sessionRef } : handle
+        const acceptedExit = cliAdapter.takeAcceptedInputExit?.(settledHandle)
+        if (acceptedExit) await this.recordCliInputResult(settledHandle, 'exited', acceptedExit)
+        else await this.recordCliInputResult(settledHandle, 'running')
+      }
+      if (item.raw) {
+        inbox.release('waiting_action')
+        inbox.release('input_pending')
       }
       await this.appendEvent(workerId, handle.seq, 'input_sent', { text_len: item.text.length })
       return 'delivered'
@@ -888,16 +983,21 @@ export class WorkerHarness {
     // resume 成功之后再补一次 adapter.sendInput。
     const newHandle = await adapter.resume(prevRef, text)
 
+    const initialInput = newHandle.initial_input
+    const initialState = cliContractState(initialInput?.control_state ?? 'running')
     const now = this.deps.now()
     const revived = await this.deps.ledger.upsertWorker(dialogObjectId, worker.worker_id, (prev) => {
       if (!prev) return undefined
       const newIncarnation: Incarnation = {
         seq: newHandle.seq,
         impl: newHandle.impl,
-        state: 'running',
+        state: initialState,
         workspace: mainline.workspace,
         session_ref: newHandle.session_ref,
         started_at: now,
+        ...(initialState === 'exited'
+          ? { ended_at: now, ended_reason: initialInput?.report?.endReason ?? 'crashed' }
+          : {}),
         // forked_from 不填——resume 产出的新化身入主线链(protocol-agent-v3 §5.3)。
       }
       // 源化身(mainline)台账态若仍非 exited——sendToWorker 经 WorkerExitedError 走到这里时,
@@ -919,10 +1019,22 @@ export class WorkerHarness {
               ended_reason: sourceEndReason ?? 'completed',
             })
           : prev.incarnations
-      const nextTask = reopenTaskForContinuation(prev.task, now)
+      let nextTask = reopenTaskForContinuation(prev.task, now)
+      nextTask = settleCliTask(nextTask, initialState, initialInput?.report, now)
       return { ...prev, task: nextTask, incarnations: [...incarnations, newIncarnation], updated_at: now }
     })
+
+    const inbox = this.getInbox(worker.worker_id)
+    if (initialState !== 'exited' && initialInput?.disposition === 'not_pasted') {
+      inbox.enqueueFront({ text, raw: false, enqueued_at: now })
+      inbox.hold('waiting_action')
+    } else if (initialState !== 'exited' && initialInput?.disposition === 'pending_in_ui') {
+      inbox.hold('input_pending')
+    }
     await this.appendEvent(worker.worker_id, newHandle.seq, 'resumed', { from_seq: mainline.seq }, revived?.task.status)
+    if (initialInput && (initialInput.disposition !== 'accepted' || initialState === 'exited')) {
+      await this.appendEvent(worker.worker_id, newHandle.seq, 'state_changed', cliReportDetail(initialState, initialInput.report), revived?.task.status)
+    }
   }
 
   /**
@@ -1055,20 +1167,34 @@ export class WorkerHarness {
     })
 
     // 4. 化身链 +1,task 重新回到 running(见 reopenTaskForContinuation 注释)。
+    const initialInput = newHandle.initial_input
+    const initialState = cliContractState(initialInput?.control_state ?? 'running')
     const now = this.deps.now()
     const handedOff = await this.deps.ledger.upsertWorker(dialogObjectId, worker.worker_id, (prev) => {
       if (!prev) return undefined
       const newIncarnation: Incarnation = {
         seq: newHandle.seq,
         impl: targetImpl,
-        state: 'running',
+        state: initialState,
         workspace: source.workspace,
         session_ref: newHandle.session_ref,
         started_at: now,
+        ...(initialState === 'exited'
+          ? { ended_at: now, ended_reason: initialInput?.report?.endReason ?? 'crashed' }
+          : {}),
       }
-      const nextTask = reopenTaskForContinuation(prev.task, now)
+      let nextTask = reopenTaskForContinuation(prev.task, now)
+      nextTask = settleCliTask(nextTask, initialState, initialInput?.report, now)
       return { ...prev, task: nextTask, incarnations: [...prev.incarnations, newIncarnation], updated_at: now }
     })
+
+    const inbox = this.getInbox(worker.worker_id)
+    if (initialState !== 'exited' && initialInput?.disposition === 'not_pasted') {
+      inbox.enqueueFront({ text: prompt, raw: false, enqueued_at: now })
+      inbox.hold('waiting_action')
+    } else if (initialState !== 'exited' && initialInput?.disposition === 'pending_in_ui') {
+      inbox.hold('input_pending')
+    }
     // 与 reviveIncarnation 收尾时发 'resumed' 事件对称——交接产出的新化身同样是一次"开工",
     // 缺了这个事件会让事件流看不到 handoff 之后新主线是何时、以何种 impl 建起来的。
     await this.appendEvent(
@@ -1078,6 +1204,9 @@ export class WorkerHarness {
       { impl: targetImpl, from_seq: source.seq },
       handedOff?.task.status
     )
+    if (initialInput && (initialInput.disposition !== 'accepted' || initialState === 'exited')) {
+      await this.appendEvent(worker.worker_id, newHandle.seq, 'state_changed', cliReportDetail(initialState, initialInput.report), handedOff?.task.status)
+    }
   }
 
   /**
@@ -1778,6 +1907,51 @@ export class WorkerHarness {
 
   // ---- 内部 ----
 
+  private async recordCliInputResult(
+    h: IncarnationHandle,
+    controlState: NonNullable<IncarnationHandle['initial_input']>['control_state'],
+    report?: StateChangeReport,
+  ): Promise<void> {
+    const external = cliContractState(controlState)
+    let committedStatus: TaskStatus | undefined
+    await this.withLock(h.worker_id, async () => {
+      const found = await this.deps.ledger.findWorker(h.worker_id)
+      if (!found) return
+      const { worker, dialogObjectId } = found
+      const target = findIncarnation(worker, h.impl, h.seq)
+      if (!target || target.state === 'exited' || isTerminalStatus(worker.task.status)) return
+
+      let desired: TaskStatus
+      if (external === 'running') desired = 'running'
+      else if (external === 'idle') {
+        const bgRunning = (await this.deps.hasRunningBg?.(h.worker_id)) ?? false
+        desired = bgRunning || this.hasPendingBgNotification(h.worker_id) ? 'running' : 'waiting_input'
+      } else {
+        desired = taskStatusFromIncarnation('exited', report?.endReason)
+      }
+      const now = this.deps.now()
+      const committed = await this.deps.ledger.upsertWorker(dialogObjectId, h.worker_id, (prev) => {
+        if (!prev) return undefined
+        const task = prev.task.status === desired ? prev.task : applyStatusTransition(prev.task, desired, {
+          now,
+          ...(desired === 'failed' ? { error: report?.endReason ?? 'CLI incarnation exited' } : {}),
+        })
+        const incarnations = patchIncarnationBySeq(prev.incarnations, h.impl, h.seq, {
+          state: external,
+          session_ref: h.session_ref,
+          ...(external === 'exited' ? { ended_at: now, ended_reason: report?.endReason ?? 'crashed' } : {}),
+        })
+        return { ...prev, task, incarnations, updated_at: now }
+      })
+      committedStatus = committed?.task.status
+    })
+    if (report) {
+      await this.appendEvent(h.worker_id, h.seq, 'state_changed', cliReportDetail(external, report), committedStatus)
+    } else if (external !== 'running') {
+      await this.appendEvent(h.worker_id, h.seq, 'state_changed', { to: external }, committedStatus)
+    }
+  }
+
   private async processStateChange(
     h: IncarnationHandle,
     state: WorkerContractState,
@@ -1901,10 +2075,16 @@ export class WorkerHarness {
         h.worker_id,
         h.seq,
         'state_changed',
-        { to: state, ...wakeDetail },
+        report?.notification ? cliReportDetail(state, report) : { to: state, ...wakeDetail },
         committed?.task.status
       )
     })
+
+    if (!report?.notification && (state === 'idle' || state === 'running')) {
+      const inbox = this.getInbox(h.worker_id)
+      inbox.release('waiting_action')
+      await this.flushInbox(h.worker_id)
+    }
   }
 
   private withLock<T>(workerId: string, fn: () => Promise<T>): Promise<T> {

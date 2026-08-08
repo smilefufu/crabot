@@ -294,6 +294,24 @@ describe('WorkerInbox', () => {
     warnSpy.mockRestore()
   })
 
+  it('drain 之后 in-flight 条目返回hold_requeue：不把已终结化身的文本复活回队列', async () => {
+    const inbox = new WorkerInbox('worker-1')
+    inbox.enqueue(makeItem('a'))
+
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const flushPromise = inbox.flush(async () => {
+      await gate
+      return { action: 'hold_requeue', reason: 'waiting_action' }
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(inbox.drain()).toEqual([])
+    release()
+    await expect(flushPromise).resolves.toBe(0)
+    expect(inbox.pending).toBe(0)
+  })
+
   it('drain → enqueue → flush 且 deliver 失败:新条目应当抛出、留队首(仅吞 drain 当刻的 in-flight)', async () => {
     // 复审 Minor:drain 之后的 enqueue('z') 若投递失败,本应抛出且保留队首,
     // 但当前实现因为 _drained 永久粘性,会错误地吞掉错误。

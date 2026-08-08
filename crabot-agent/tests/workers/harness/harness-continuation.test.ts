@@ -258,6 +258,35 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     expect(resumedEvents[0].seq).toBe(w.incarnations[1].seq)
   })
 
+  it('resume首投accepted后同步completed：新化身与task按endReason落completed', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    const fake = new FakeAdapter({
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      resumeBehavior: (prev) => ({
+        worker_id: prev.worker_id,
+        seq: 2,
+        impl: 'builtin',
+        session_ref: `resumed-${prev.worker_id}`,
+        initial_input: {
+          control_state: 'exited',
+          disposition: 'accepted',
+          report: { endReason: 'completed' },
+        },
+      }),
+    })
+    adaptersMap.set('builtin', fake)
+    const worker = await harness.spawnWorker(spawnParams())
+    const h: IncarnationHandle = { worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }
+    fake.emitStateChange(h, 'exited')
+    await waitUntil(async () => (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0].task.status === 'completed')
+
+    await harness.sendToWorker(worker.worker_id, 'continue')
+    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(settled.task.status).toBe('completed')
+    expect(settled.incarnations[1]).toMatchObject({ state: 'exited', ended_reason: 'completed' })
+  })
+
   it('adapter.sendInput 抛 WorkerExitedError（台账还没追上）→ 同样透明接续，事件 resumed', async () => {
     const { harness, adaptersMap } = await makeHarness()
     const fake = new FakeAdapter({
@@ -449,6 +478,42 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
     expect(handoffEvents[0].seq).toBe(1)
     const supersededEvents = events.filter((e) => e.kind === 'superseded')
     expect(supersededEvents).toHaveLength(1)
+  })
+
+  it('handoff目标首投accepted后同步completed：新化身与task按endReason落completed', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    const source = new FakeAdapter({
+      caps: { revive: false },
+      onStateChange: harness.handleStateChange,
+      sendInputBehavior: (h) => { throw new WorkerExitedError(h.worker_id, h.seq) },
+    })
+    const target = new FakeAdapter({
+      implId: 'claude-code',
+      onStateChange: harness.handleStateChange,
+      spawnBehavior: (spec) => ({
+        worker_id: spec.worker_id,
+        seq: 1,
+        impl: 'claude-code',
+        session_ref: `target-${spec.worker_id}`,
+        initial_input: {
+          control_state: 'exited',
+          disposition: 'accepted',
+          report: { endReason: 'completed' },
+        },
+      }),
+    })
+    adaptersMap.set('builtin', source)
+    adaptersMap.set('claude-code', target)
+    const worker = await harness.spawnWorker(spawnParams())
+
+    await harness.sendToWorker(worker.worker_id, 'continue')
+    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(settled.task.status).toBe('completed')
+    expect(settled.incarnations[settled.incarnations.length - 1]).toMatchObject({
+      impl: 'claude-code',
+      state: 'exited',
+      ended_reason: 'completed',
+    })
   })
 
   it('源化身台账已记 failed 时，HANDOFF.md 的 Previous outcome 写 failed —— 接手化身不会以为上一棒干成了', async () => {
