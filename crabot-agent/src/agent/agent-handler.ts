@@ -896,6 +896,8 @@ export class AgentHandler {
         spawned_by_task_id: workerId,
         owner_friend_id: owner.friend_id,
         worker_id: workerId,
+      }).catch((error) => {
+        console.error(`[AgentHandler] worker shell exit routing failed for ${info.entity_id}:`, error)
       })
     }
     return {
@@ -911,8 +913,13 @@ export class AgentHandler {
   }
 
   async hasRunningBgForWorker(workerId: string): Promise<boolean> {
-    const entities = await this.bgRegistry.list({ status: ['running'] })
-    return entities.some((entity) => entity.owner.worker_id === workerId)
+    const entities = await this.bgRegistry.list()
+    return entities.some((entity) =>
+      entity.owner.worker_id === workerId && (
+        entity.status === 'running' ||
+        (entity.type === 'shell' && entity.exit_notification?.status === 'pending')
+      ),
+    )
   }
 
   /** Render the common shell exit payload for WorkerInbox system delivery. */

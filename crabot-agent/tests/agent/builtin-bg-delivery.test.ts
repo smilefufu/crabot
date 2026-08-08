@@ -30,6 +30,7 @@ function makeHandler(): any {
     beginExitNotificationAttempt: vi.fn().mockResolvedValue(undefined),
     recordExitNotificationFailure: vi.fn().mockResolvedValue(undefined),
     settleExitNotification: vi.fn().mockResolvedValue(undefined),
+    list: vi.fn().mockResolvedValue([]),
   }
   handler.deliverShellExitNotification = vi.fn().mockResolvedValue(undefined)
   return handler
@@ -60,6 +61,31 @@ describe('builtin background shell exit routing', () => {
     expect(handler.deliverShellExitNotification).toHaveBeenCalledWith(
       expect.objectContaining({ entity_id: 'bg-legacy' }),
     )
+  })
+
+  it('treats a terminal shell with a durable pending receipt as running background work', async () => {
+    const handler = makeHandler()
+    handler.bgRegistry.list.mockResolvedValueOnce([
+      {
+        entity_id: 'bg-pending',
+        type: 'shell',
+        status: 'completed',
+        owner: { friend_id: '__system_worker-1', worker_id: 'worker-1' },
+        exit_notification: { status: 'pending' },
+      },
+    ])
+    expect(await handler.hasRunningBgForWorker('worker-1')).toBe(true)
+
+    handler.bgRegistry.list.mockResolvedValueOnce([
+      {
+        entity_id: 'bg-delivered',
+        type: 'shell',
+        status: 'completed',
+        owner: { friend_id: '__system_worker-1', worker_id: 'worker-1' },
+        exit_notification: { status: 'delivered' },
+      },
+    ])
+    expect(await handler.hasRunningBgForWorker('worker-1')).toBe(false)
   })
 
   it('holds recovered worker exits until reconciliation release, then dispatches without unrelated input', async () => {
