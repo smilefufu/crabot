@@ -958,6 +958,45 @@ describe('WorkerHarness.sendToWorker', () => {
     expect(settled.incarnations[0].state).toBe('idle')
   })
 
+  it('steering pre-paste stall期间收到Stop时不安装过期hold，并立即按新状态重试队首', async () => {
+    let first = true
+    let markEntered!: () => void
+    const entered = new Promise<void>((resolve) => { markEntered = resolve })
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const { harness, fake } = await makeHarness({
+      implId: 'claude-code',
+      sendInputBehavior: async () => {
+        if (!first) return
+        first = false
+        markEntered()
+        await gate
+        throw new CliInputStallError('not_pasted', 'running', {
+          waitReason: 'input_surface_unavailable',
+          outputTail: 'esc to interrupt',
+        })
+      },
+    })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+    const send = harness.sendToWorker(worker.worker_id, 'queued after Stop')
+    await entered
+
+    fake.emitStateChange({
+      worker_id: worker.worker_id,
+      seq: 1,
+      impl: 'claude-code',
+      session_ref: `ref-${worker.worker_id}#1`,
+    }, 'idle')
+    release()
+    await send
+
+    expect(fake.sendInputCalls.map((call) => call.text)).toEqual([
+      'queued after Stop',
+      'queued after Stop',
+    ])
+    expect((harness as any).getInbox(worker.worker_id).held).toBe(false)
+  })
+
   it('普通输入接受后同步发现的session_ref由harness写回台账', async () => {
     const sessionRef = '019fe15f-cbd9-76c1-9a18-e6c2e1d2b2d7'
     const { harness } = await makeHarness({ implId: 'codex', updatedSessionRef: sessionRef })

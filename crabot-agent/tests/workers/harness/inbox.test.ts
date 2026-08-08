@@ -243,6 +243,31 @@ describe('WorkerInbox', () => {
     expect(inbox.pending).toBe(0)
   })
 
+  it('handoff replacement preserves the original durable receipt, dedupe key, and raw mode', async () => {
+    const inbox = new WorkerInbox('worker-1')
+    const settled = vi.fn()
+    inbox.enqueueUnique(makeItem('original', {
+      raw: true,
+      dedupe_key: 'bg-shell:handoff',
+      onSettled: settled,
+    }))
+
+    await inbox.flush(async () => ({
+      action: 'hold_requeue',
+      reason: 'waiting_action',
+      replacement: { text: 'full handoff prompt', raw: true },
+    }))
+
+    expect(settled).not.toHaveBeenCalled()
+    expect(inbox.enqueueUnique(makeItem('duplicate', { dedupe_key: 'bg-shell:handoff' }))).toBe(false)
+    expect(inbox.drain()).toMatchObject([{
+      text: 'full handoff prompt',
+      raw: true,
+      dedupe_key: 'bg-shell:handoff',
+      onSettled: settled,
+    }])
+  })
+
   it('requeues a stale hold result against the new pane without installing the old hold', async () => {
     const inbox = new WorkerInbox('worker-1')
     inbox.enqueue(makeItem('bg', { onSettled: vi.fn() }))

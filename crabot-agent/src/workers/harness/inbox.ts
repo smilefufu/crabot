@@ -38,8 +38,12 @@ export interface InboxItem {
 export interface InboxDeliveryResult {
   readonly action: 'hold_requeue' | 'hold_consumed'
   readonly reason: 'waiting_action' | 'input_pending'
-  /** Synchronous ownership check evaluated immediately before committing the hold. */
+  /** Synchronous ownership/state check evaluated immediately before committing the hold. */
   readonly isCurrent?: () => boolean
+  /** Keep older consumed receipts ahead of the current requeued item. */
+  readonly requeueAfter?: number
+  /** Handoff may paste a full generated prompt while preserving the original durable receipt. */
+  readonly replacement?: { readonly text: string; readonly raw: boolean }
 }
 
 export class WorkerInbox {
@@ -146,23 +150,26 @@ export class WorkerInbox {
           const result = await deliver(item)
           this.inFlight = null
           if (typeof result === 'object') {
+            const retainedItem = result.replacement
+              ? { ...item, text: result.replacement.text, raw: result.replacement.raw }
+              : item
             if (result.isCurrent && !result.isCurrent()) {
               if (this.drainedInFlight === item || item.raw) {
                 await this.settle(item, 'dead_letter')
                 delivered++
               } else {
-                this.queue.unshift(item)
+                this.queue.unshift(retainedItem)
               }
               continue
             }
             this.hold(result.reason)
             if (result.action === 'hold_requeue') {
               if (this.drainedInFlight === item) await this.settle(item, 'dead_letter')
-              else this.queue.unshift(item)
+              else this.queue.splice(Math.min(result.requeueAfter ?? 0, this.queue.length), 0, retainedItem)
             } else if (this.drainedInFlight === item) {
               await this.settle(item, 'dead_letter')
             } else {
-              if (item.onSettled) this.consumedPending.push(item)
+              if (retainedItem.onSettled) this.consumedPending.push(retainedItem)
               delivered++
             }
             break

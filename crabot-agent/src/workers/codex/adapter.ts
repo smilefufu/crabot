@@ -588,6 +588,47 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     return { ...snapshot, text: decodeTerminalOutput(snapshot.text) }
   }
 
+  private async sendRawInput(runtime: Runtime, h: IncarnationHandle, text: string): Promise<void> {
+    let keysSent = false
+    try {
+      const before = await this.capture(runtime)
+      const keys = text.split(/\s+/).filter((key) => key.length > 0)
+      await this.tmux.sendKeys(runtime.sessionName, keys)
+      keysSent = true
+      const snapshot = await waitForPaneChange(() => this.capture(runtime), before.text)
+      const primaryProbe = probeCodexInput(snapshot, 'primary', undefined, false)
+      if (primaryProbe === 'pending') {
+        const next: CliControlState = runtime.controlState.kind === 'running'
+          ? { kind: 'running' }
+          : { kind: 'waiting_action', reason: 'input_pending' }
+        const report: StateChangeReport = { outputTail: snapshot.text, waitReason: 'input_pending' }
+        await this.transitionControlState(runtime, h, next, report, false)
+        throw new CliInputStallError('pending_in_ui', next.kind, report)
+      }
+      if (primaryProbe === 'empty' && (runtime.controlState.kind === 'running' || /Working\b/i.test(snapshot.text))) {
+        await this.transitionControlState(runtime, h, { kind: 'running' })
+        return
+      }
+      if (primaryProbe === 'empty') {
+        await this.transitionControlState(runtime, h, { kind: 'waiting_text' })
+        return
+      }
+      const reason = runtime.controlState.kind === 'waiting_action'
+        ? runtime.controlState.reason
+        : 'input_surface_unavailable'
+      const report: StateChangeReport = { outputTail: snapshot.text, waitReason: reason }
+      await this.transitionControlState(runtime, h, { kind: 'waiting_action', reason }, report, false)
+      throw new CliInputStallError('not_pasted', 'waiting_action', report)
+    } catch (error) {
+      if (!(await this.tmux.isAlive(runtime.sessionName))) {
+        const reason: IncarnationEndReason = keysSent ? 'completed' : 'crashed'
+        await this.transitionExited(runtime, h, reason, false)
+        throw new WorkerExitedError(h.worker_id, h.seq, reason)
+      }
+      throw error
+    }
+  }
+
   private async discoverSpawnedSession(
     runtime: Runtime,
     h: IncarnationHandle,
@@ -933,35 +974,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     return this.getMutex(h.worker_id).run(async () => {
       if (runtime.controlState.kind === 'exited') throw new WorkerExitedError(h.worker_id, h.seq, runtime.ended_reason)
 
-      if (opts?.raw) {
-        const before = await this.capture(runtime)
-        const keys = text.split(/\s+/).filter((key) => key.length > 0)
-        await this.tmux.sendKeys(runtime.sessionName, keys)
-        const snapshot = await waitForPaneChange(() => this.capture(runtime), before.text)
-        const primaryProbe = probeCodexInput(snapshot, 'primary', undefined, false)
-        if (primaryProbe === 'pending') {
-          const next: CliControlState = runtime.controlState.kind === 'running'
-            ? { kind: 'running' }
-            : { kind: 'waiting_action', reason: 'input_pending' }
-          const report: StateChangeReport = { outputTail: snapshot.text, waitReason: 'input_pending' }
-          await this.transitionControlState(runtime, h, next, report, false)
-          throw new CliInputStallError('pending_in_ui', next.kind, report)
-        }
-        if (primaryProbe === 'empty' && (runtime.controlState.kind === 'running' || /Working\b/i.test(snapshot.text))) {
-          await this.transitionControlState(runtime, h, { kind: 'running' })
-          return
-        }
-        if (primaryProbe === 'empty') {
-          await this.transitionControlState(runtime, h, { kind: 'waiting_text' })
-          return
-        }
-        const reason = runtime.controlState.kind === 'waiting_action'
-          ? runtime.controlState.reason
-          : 'input_surface_unavailable'
-        const report: StateChangeReport = { outputTail: snapshot.text, waitReason: reason }
-        await this.transitionControlState(runtime, h, { kind: 'waiting_action', reason }, report, false)
-        throw new CliInputStallError('not_pasted', 'waiting_action', report)
-      }
+      if (opts?.raw) return this.sendRawInput(runtime, h, text)
 
       if (runtime.controlState.kind === 'waiting_action') {
         const snapshot = await this.capture(runtime)

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs/promises'
@@ -2512,6 +2512,27 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
       const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
       expect(meta.state).toBe('running')
       expect(meta.wait_mode).toBeUndefined()
+    },
+    30000,
+  )
+
+  it(
+    'raw键使pane退出时收敛WorkerExitedError而不是裸tmux capture错误',
+    async () => {
+      const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+      const originalSendKeys = tmux.sendKeys.bind(tmux)
+      const sendKeys = vi.spyOn(tmux, 'sendKeys').mockImplementation(async (name, keys) => {
+        await originalSendKeys(name, keys)
+        await tmux.killSession(name)
+      })
+
+      try {
+        await expect(adapter.sendInput(h, 'C-d', { raw: true })).rejects.toBeInstanceOf(WorkerExitedError)
+        expect(await adapter.state(h)).toBe('exited')
+      } finally {
+        sendKeys.mockRestore()
+      }
     },
     30000,
   )

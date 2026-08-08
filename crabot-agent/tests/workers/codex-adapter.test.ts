@@ -2150,6 +2150,27 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 启动期就绪握手(\\
   )
 
   it(
+    'raw键使pane退出时收敛WorkerExitedError而不是裸tmux capture错误',
+    async () => {
+      const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+      const originalSendKeys = tmux.sendKeys.bind(tmux)
+      const sendKeys = vi.spyOn(tmux, 'sendKeys').mockImplementation(async (name, keys) => {
+        await originalSendKeys(name, keys)
+        await tmux.killSession(name)
+      })
+
+      try {
+        await expect(adapter.sendInput(h, 'C-d', { raw: true })).rejects.toBeInstanceOf(WorkerExitedError)
+        expect(await adapter.state(h)).toBe('exited')
+      } finally {
+        sendKeys.mockRestore()
+      }
+    },
+    30000,
+  )
+
+  it(
     '带给 manager 的 output 尾部是可读文本,不是转义序列——与 read_worker_output 同一形态',
     async () => {
       // 与 cc adapter 的同名用例同款:去掉 initialStartupStall 里那次 decodeTerminalOutput,

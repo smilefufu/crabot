@@ -461,6 +461,55 @@ type InputAttempt =
 
 type SettledInputAttempt = Exclude<InputAttempt, { readonly kind: 'exited' }>
 
+type ContinuationRetry = {
+  readonly kind: 'retry_continuation'
+  readonly impl: WorkerImplId
+  readonly seq: number
+  readonly endedReason?: IncarnationEndReason
+}
+
+type ContinuationDelivery = InboxSettlement | InboxDeliveryResult | ContinuationRetry
+
+function isContinuationRetry(delivery: ContinuationDelivery): delivery is ContinuationRetry {
+  return typeof delivery === 'object' && 'kind' in delivery && delivery.kind === 'retry_continuation'
+}
+
+interface HandoffResult {
+  readonly restoredDurableReceipt: boolean
+  readonly delivery: ContinuationDelivery
+}
+
+function initialInputDelivery(
+  initialInput: IncarnationHandle['initial_input'],
+  requeueAfter = 0,
+  replacement?: InboxDeliveryResult['replacement'],
+): InboxSettlement | InboxDeliveryResult {
+  if (!initialInput || initialInput.disposition === 'accepted') {
+    return 'delivered'
+  }
+  return initialInput.disposition === 'not_pasted'
+    ? { action: 'hold_requeue', reason: 'waiting_action', requeueAfter, replacement }
+    : { action: 'hold_consumed', reason: 'input_pending', replacement }
+}
+
+function continuationDelivery(
+  initialInput: IncarnationHandle['initial_input'],
+  initialState: WorkerContractState,
+  handle: IncarnationHandle,
+  requeueAfter = 0,
+  replacement?: InboxDeliveryResult['replacement'],
+): ContinuationDelivery {
+  if (initialState === 'exited' && initialInput?.disposition !== 'accepted') {
+    return {
+      kind: 'retry_continuation',
+      impl: handle.impl,
+      seq: handle.seq,
+      endedReason: initialInput?.report?.endReason,
+    }
+  }
+  return initialInputDelivery(initialInput, requeueAfter, replacement)
+}
+
 export class WorkerHarness {
   private readonly pendingBgNotifications = new Map<string, number>()
 
@@ -749,7 +798,9 @@ export class WorkerHarness {
       }
       if (error instanceof CliInputStallError) {
         const isCurrent = (): boolean =>
-          this.inputOwnershipRevision(handle.worker_id) === inputOwnershipRevision
+          this.inputOwnershipRevision(handle.worker_id) === inputOwnershipRevision &&
+          (raw || error.disposition === 'pending_in_ui' ||
+            (this.stateChangeRevisions.get(revisionKey) ?? 0) === stateChangeRevision)
         return {
           kind: 'stalled',
           handle,
@@ -885,7 +936,8 @@ export class WorkerHarness {
       // 允许切换(等价于"在办任务换实现"续办的合理场景,§5.3),只有 cancelled 硬拒绝。
       if (worker.task.status === 'cancelled') throw new TaskCancelledError(workerId)
       const mainline = requireMainlineIncarnation(worker)
-      restoredDurableReceipt = await this.handoffIncarnation(dialogObjectId, worker, mainline, impl, note ?? '')
+      const handoff = await this.handoffIncarnation(dialogObjectId, worker, mainline, impl, note ?? '')
+      restoredDurableReceipt = handoff.restoredDurableReceipt
     })
     // The old pane no longer owns a consumed durable receipt; resume its FIFO on the new incarnation.
     if (restoredDurableReceipt) await this.flushInbox(workerId)
@@ -950,7 +1002,9 @@ export class WorkerHarness {
      */
     sourceEndReason?: IncarnationEndReason
   ): Promise<InboxSettlement | InboxDeliveryResult> {
-    const result = await this.withLock(workerId, async (): Promise<InboxSettlement | { attempt: SettledInputAttempt }> => {
+    const result = await this.withLock(
+      workerId,
+      async (): Promise<InboxSettlement | InboxDeliveryResult | { attempt: SettledInputAttempt }> => {
       let curImpl = sourceImpl
       let curSeq = sourceSeq
       // 与 (curImpl, curSeq) 同步前进:每次改换源化身,这个原因也要跟着换成新源的,
@@ -1026,7 +1080,21 @@ export class WorkerHarness {
         }
 
         if (adapter.capabilities().revive) {
-          await this.reviveIncarnation(dialogObjectId, worker, mainline, adapter, text, curEndReason)
+          const delivery = await this.reviveIncarnation(
+            dialogObjectId,
+            worker,
+            mainline,
+            adapter,
+            text,
+            curEndReason,
+          )
+          if (isContinuationRetry(delivery)) {
+            curImpl = delivery.impl
+            curSeq = delivery.seq
+            curEndReason = delivery.endedReason
+            continue
+          }
+          return delivery
         } else {
           // "原 impl 若仍可用则沿用,否则 defaultImpl"(brief)是加 ImplAlreadyUsedError 守卫
           // 之前的选择逻辑,现在必然自绝:mainline.impl 就是正在办理接续的这条化身所在的
@@ -1037,9 +1105,23 @@ export class WorkerHarness {
           // 三个既有实现目前都是 revive:true,这条分支走不到真实 adapter;为将来的不可复活
           // 实现(如 legacy)保留。
           const targetImpl = pickUnusedImpl(worker, this.deps.adapters, this.deps.defaultImpl)
-          await this.handoffIncarnation(dialogObjectId, worker, mainline, targetImpl, text)
+          const handoff = await this.handoffIncarnation(
+            dialogObjectId,
+            worker,
+            mainline,
+            targetImpl,
+            text,
+            true,
+            raw,
+          )
+          if (isContinuationRetry(handoff.delivery)) {
+            curImpl = handoff.delivery.impl
+            curSeq = handoff.delivery.seq
+            curEndReason = handoff.delivery.endedReason
+            continue
+          }
+          return handoff.delivery
         }
-        return 'delivered'
       }
 
       // 超出重求值上限:短时间内主线连续多次切换/自然退出,撞上了同一次投递的每一次重新
@@ -1055,7 +1137,7 @@ export class WorkerHarness {
           `for worker ${workerId}; mainline kept changing/exiting faster than this delivery could settle on a source`
       )
     })
-    if (typeof result === 'string') return result
+    if (typeof result === 'string' || !('attempt' in result)) return result
     return this.settleInputAttempt(workerId, text, raw, result.attempt)
   }
 
@@ -1068,7 +1150,7 @@ export class WorkerHarness {
     text: string,
     /** adapter 经 WorkerExitedError 报上来的源化身终止原因(见下面回填段的注释)。 */
     sourceEndReason?: IncarnationEndReason,
-  ): Promise<void> {
+  ): Promise<ContinuationDelivery> {
     const prevRef: IncarnationRef = { worker_id: worker.worker_id, seq: mainline.seq, session_ref: mainline.session_ref }
     // resume 直接把 text 作为 wakeInput 传入——接续就是这次输入的投递方式,不需要在
     // resume 成功之后再补一次 adapter.sendInput。
@@ -1118,17 +1200,12 @@ export class WorkerHarness {
     this.bumpInputOwnershipRevision(worker.worker_id)
     const inbox = this.getInbox(worker.worker_id)
     inbox.release()
-    if (initialState !== 'exited' && initialInput?.disposition === 'not_pasted') {
-      inbox.enqueueFront({ text, raw: false, enqueued_at: now })
-      inbox.hold('waiting_action')
-    } else if (initialState !== 'exited' && initialInput?.disposition === 'pending_in_ui') {
-      inbox.hold('input_pending')
-    }
-    inbox.requeueConsumed()
+    const replayedConsumed = inbox.requeueConsumed()
     await this.appendEvent(worker.worker_id, newHandle.seq, 'resumed', { from_seq: mainline.seq }, revived?.task.status)
     if (initialInput && (initialInput.disposition !== 'accepted' || initialState === 'exited')) {
       await this.appendEvent(worker.worker_id, newHandle.seq, 'state_changed', cliReportDetail(initialState, initialInput.report), revived?.task.status)
     }
+    return continuationDelivery(initialInput, initialState, newHandle, replayedConsumed)
   }
 
   /**
@@ -1142,7 +1219,9 @@ export class WorkerHarness {
     source: Incarnation,
     targetImpl: WorkerImplId,
     input: string,
-  ): Promise<boolean> {
+    inputOwnedByInbox = false,
+    inboxRaw = false,
+  ): Promise<HandoffResult> {
     const sourceAdapter = this.deps.adapters.get(source.impl as WorkerImplId)
     const sourceHandle: IncarnationHandle = {
       worker_id: worker.worker_id,
@@ -1285,13 +1364,14 @@ export class WorkerHarness {
     this.bumpInputOwnershipRevision(worker.worker_id)
     const inbox = this.getInbox(worker.worker_id)
     inbox.release()
-    if (initialState !== 'exited' && initialInput?.disposition === 'not_pasted') {
+    if (!inputOwnedByInbox && initialState !== 'exited' && initialInput?.disposition === 'not_pasted') {
       inbox.enqueueFront({ text: prompt, raw: false, enqueued_at: now })
       inbox.hold('waiting_action')
-    } else if (initialState !== 'exited' && initialInput?.disposition === 'pending_in_ui') {
+    } else if (!inputOwnedByInbox && initialState !== 'exited' && initialInput?.disposition === 'pending_in_ui') {
       inbox.hold('input_pending')
     }
-    const restoredDurableReceipt = inbox.requeueConsumed() > 0
+    const replayedConsumed = inbox.requeueConsumed()
+    const restoredDurableReceipt = replayedConsumed > 0
     // 与 reviveIncarnation 收尾时发 'resumed' 事件对称——交接产出的新化身同样是一次"开工",
     // 缺了这个事件会让事件流看不到 handoff 之后新主线是何时、以何种 impl 建起来的。
     await this.appendEvent(
@@ -1304,7 +1384,18 @@ export class WorkerHarness {
     if (initialInput && (initialInput.disposition !== 'accepted' || initialState === 'exited')) {
       await this.appendEvent(worker.worker_id, newHandle.seq, 'state_changed', cliReportDetail(initialState, initialInput.report), handedOff?.task.status)
     }
-    return restoredDurableReceipt
+    return {
+      restoredDurableReceipt,
+      delivery: inputOwnedByInbox
+        ? continuationDelivery(
+            initialInput,
+            initialState,
+            newHandle,
+            replayedConsumed,
+            { text: prompt, raw: inboxRaw },
+          )
+        : 'delivered',
+    }
   }
 
   /**
