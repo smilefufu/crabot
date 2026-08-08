@@ -658,6 +658,23 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     expect(sweep).toHaveBeenCalledOnce()
   })
 
+  it('启动对账已结束后由配置 push 晚建 handler，会立即打开 recovered-exit gate', async () => {
+    boot()
+    internals.managerReconciliationSettled = true
+    const setDispatcher = vi.fn()
+    const release = vi.fn().mockResolvedValue(undefined)
+    const lateHandler = {
+      setBuiltinShellExitDispatcher: setDispatcher,
+      releaseRecoveredWorkerShellExits: release,
+    }
+
+    ;(agent as any).attachBuiltinShellExitDispatcher(lateHandler)
+    await waitUntil(async () => release.mock.calls.length === 1)
+
+    expect(setDispatcher).toHaveBeenCalledOnce()
+    expect(release).toHaveBeenCalledOnce()
+  })
+
   it('启动时异步跑一次启动对账（register 之后发起）：台账里残留的 running 化身被对账掉，且不阻塞启动', async () => {
     boot()
     const stack = internals.managerStack!

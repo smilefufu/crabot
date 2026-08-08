@@ -443,6 +443,8 @@ export class UnifiedAgent extends ModuleBase {
    */
   private managerStack?: ManagerStack
   private managerEventPublisher?: AgentEventPublisher
+  /** True after startup reconciliation has settled, even when it failed. */
+  private managerReconciliationSettled = false
 
   // Trace 存储
   private traceStore: TraceStore
@@ -1074,10 +1076,22 @@ export class UnifiedAgent extends ModuleBase {
       ...(imageConnInfo ? { imageConnInfo } : {}),
       imageCapability,
     })
+    this.attachBuiltinShellExitDispatcher(handler)
+    return handler
+  }
+
+  private attachBuiltinShellExitDispatcher(handler: AgentHandler): void {
     handler.setBuiltinShellExitDispatcher((workerId, info, onSettled) =>
       this.deliverBuiltinShellExit(workerId, info, onSettled),
     )
-    return handler
+    // Startup may have completed before a late config push creates the first
+    // handler. Open that handler's routing gate immediately instead of waiting
+    // for a process restart that may never happen.
+    if (this.managerReconciliationSettled) {
+      void handler.releaseRecoveredWorkerShellExits().catch((error) => {
+        console.error(`[${this.config.moduleId}] failed to release late worker shell exits:`, error)
+      })
+    }
   }
 
   /**
@@ -2998,6 +3012,7 @@ export class UnifiedAgent extends ModuleBase {
       .finally(async () => {
         // Recovered exits must wait until reconciliation settles, but a failed
         // reconciliation must not keep the routing gate closed for this process.
+        this.managerReconciliationSettled = true
         await this.agentHandler?.releaseRecoveredWorkerShellExits()
         stack.harness.startLivenessSweep()
       })
