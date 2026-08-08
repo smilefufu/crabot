@@ -144,6 +144,7 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
 
     agent = new UnifiedAgent(makeAgentConfig({ configured: true, moduleId: 'direct-batch-agent', port: 19997 }))
     internals = agent as unknown as Internals
+    internals.agentHandler = { createBuiltinBgToolOptions: () => undefined }
 
     internals.channelPorts.set('wechat', WECHAT_PORT)
     internals.crabSelfHandles.set('wechat', '@crabot_wx')

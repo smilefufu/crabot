@@ -174,6 +174,7 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
       }),
     )
     internals = agent as unknown as Internals
+    internals.agentHandler = { createBuiltinBgToolOptions: () => undefined }
 
     internals.rpcClient.resolve = async (filter) => {
       const f = filter as { module_type?: string }

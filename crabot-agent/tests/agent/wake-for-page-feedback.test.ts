@@ -15,7 +15,7 @@ describe('AgentHandler.wakeForPageFeedback', () => {
     const orig = queue.push.bind(queue)
     queue.push = (c: any) => { pushed = typeof c === 'string' ? c : JSON.stringify(c); orig(c) }
 
-    handler.wakeForPageFeedback('t1', '[系统] 临时页面收到新反馈，读 events.jsonl')
+    handler.wakeForPageFeedback('t1', '[系统] 临时页面收到新反馈，请调用 tmp_page_read_events')
 
     expect(pushed).toContain('[系统]')
     expect(pushed).toContain('临时页面收到新反馈')
@@ -51,7 +51,8 @@ describe('UnifiedAgent.handleDeliverPageFeedback (deliver_page_feedback RPC)', (
     expect(taskId).toBe('t1')
     expect(note).toContain('[系统]')
     expect(note).toContain('page_abcdefghijklmnop')
-    expect(note).toContain('events.jsonl')
+    expect(note).toContain('tmp_page_read_events')
+    expect(note).not.toContain('events.jsonl')
     expect(note).not.toContain('$DATA_DIR')
     expect(note).not.toContain('.crabot')
     expect(note).not.toContain('CRABOT_TMP_PAGE_PORT')
@@ -88,7 +89,9 @@ describe('UnifiedAgent.handleDeliverPageFeedback (deliver_page_feedback RPC)', (
     const [taskId, note] = wake.mock.calls[0] as [string, string]
     expect(taskId).toBe('t1')
     expect(note).toContain('[系统]')
-    expect(note).toContain('events.jsonl')
+    expect(note).toContain('tmp_page_list')
+    expect(note).toContain('tmp_page_read_events')
+    expect(note).not.toContain('events.jsonl')
     expect(note).not.toContain('undefined')
     expect(note).not.toContain('"page_id": "undefined"')
     expect(note).not.toContain('$DATA_DIR')
