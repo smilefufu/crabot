@@ -3,7 +3,7 @@ import { acceptedClaudeInput, hasClaudeInteraction, probeClaudeInput } from '../
 import { acceptedCodexInput, probeCodexInput } from '../../src/workers/codex/input-surface.js'
 import type { PaneSnapshot } from '../../src/workers/tmux/driver.js'
 
-const pane = (text: string): PaneSnapshot => ({ text, cursor_x: 0, cursor_y: 0, width: 100, height: 30 })
+const pane = (text: string): PaneSnapshot => ({ text })
 
 describe('CLI input surfaces', () => {
   it('does not treat a Claude running composer as primary input', () => {
@@ -20,7 +20,18 @@ describe('CLI input surfaces', () => {
 
   it('requires a current Claude interaction surface', () => {
     expect(hasClaudeInteraction('Claude needs your permission\n1. Yes\n2. No')).toBe(true)
-    expect(probeClaudeInput(pane('Claude needs your permission\n❯ '), 'primary')).toBe('unavailable')
+    expect(hasClaudeInteraction('Choose files\n☐ package.json\nEnter to select · ↑/↓ to navigate')).toBe(true)
+    expect(hasClaudeInteraction('Bypass Permissions mode\n❯ 1. No, exit\n  2. Yes, I accept\nEnter to confirm · Esc to cancel')).toBe(true)
+  })
+
+  it('does not let Claude transcript keywords or old selectors impersonate interaction UI', () => {
+    const idle = pane('tool docs mention AskUserQuestion and use arrow keys\nfinished with no exit code\n❯ \n? for shortcuts')
+    expect(hasClaudeInteraction(idle.text)).toBe(false)
+    expect(probeClaudeInput(idle, 'primary')).toBe('empty')
+
+    const oldSelector = pane('old question\n❯ 1. Alpha\n  2. Beta\nEnter to select · ↑/↓ to navigate\nanswer recorded\n❯ \n? for shortcuts')
+    expect(hasClaudeInteraction(oldSelector.text)).toBe(false)
+    expect(probeClaudeInput(oldSelector, 'primary')).toBe('empty')
   })
 
   it('scopes Claude pending evidence to the active composer, not transcript history', () => {

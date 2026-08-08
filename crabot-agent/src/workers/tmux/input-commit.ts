@@ -35,6 +35,7 @@ export async function commitInput(
   await driver.pasteText(text)
   snapshot = await waitUntil(driver, timeoutMs, intervalMs, (current) => probe(current, 'after_paste') !== 'empty')
   let currentProbe = probe(snapshot, 'after_paste')
+  if (currentProbe === 'empty') return { disposition: 'not_pasted', snapshot }
   if (currentProbe !== 'pending') return { disposition: 'pending_in_ui', snapshot }
 
   await driver.sendEnter()

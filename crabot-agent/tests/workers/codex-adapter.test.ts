@@ -1050,7 +1050,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — spawn 提交纪律', () 
           return super.newSession(spec)
         }
         async capturePane(_name: string) {
-          return { text: '› \n? for shortcuts', cursor_x: 0, cursor_y: 0, width: 80, height: 24 }
+          return { text: '› \n? for shortcuts' }
         }
         async pasteText(_name: string, _text: string): Promise<void> {
           throw new Error('simulated pasteText failure')
@@ -1345,7 +1345,7 @@ class NoopTmux extends TmuxDriver {
     if (keys.includes('Enter')) this.paneText = '› \nWorking (esc to interrupt)'
   }
   async capturePane(_name: string) {
-    return { text: this.paneText, cursor_x: 0, cursor_y: 0, width: 80, height: 24 }
+    return { text: this.paneText }
   }
   async isAlive(_name: string): Promise<boolean> {
     return true

@@ -33,7 +33,17 @@ export function acceptedClaudeInput(snapshot: PaneSnapshot, mode: InputMode, tex
 
 /** Notification must be corroborated by a current interaction surface. */
 export function hasClaudeInteraction(pane: string): boolean {
-  return /(?:AskUserQuestion|Claude needs your permission|permission required|\b(?:yes|no),?\s*(?:I accept|exit)\b|select an option|use arrow keys)/i.test(pane)
+  // A footer-anchored ordinary composer means a previously rendered selector in
+  // the transcript is no longer the active surface.
+  if (claudeComposerText({ text: pane }) !== undefined) return false
+  const tailLines = pane.split('\n').slice(-16)
+  const tail = tailLines.join('\n')
+  const hasOption = tailLines.some((line) => /^\s*(?:❯|[○◉☐☑]|\d+[.)])\s+\S/.test(line))
+  const hasYes = /(?:^|\n)\s*(?:❯\s*)?(?:\d+[.)]\s*)?Yes\b/i.test(tail)
+  const hasNo = /(?:^|\n)\s*(?:❯\s*)?(?:\d+[.)]\s*)?No\b/i.test(tail)
+  const permissionPrompt = /(?:Claude needs your permission|permission required|Do you want to proceed)/i.test(tail)
+  const selectionFooter = /(?:Enter to (?:select|confirm)|(?:↑|↓|up|down).*to navigate|use arrow keys to navigate)/i.test(tail)
+  return (permissionPrompt && hasYes && hasNo) || (selectionFooter && hasOption)
 }
 
 function claudeComposerText(snapshot: PaneSnapshot): string | undefined {
