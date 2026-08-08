@@ -610,7 +610,7 @@ class RaceTmux extends TmuxDriver {
   async sendText(_name: string, _text: string): Promise<void> {}
   async sendKeys(_name: string, _keys: string[]): Promise<void> {}
   async capturePane(_name: string) {
-    return { text: '❯ \n? for shortcuts', cursor_x: 0, cursor_y: 0, width: 80, height: 24 }
+    return { text: '❯ \n? for shortcuts' }
   }
   async isAlive(_name: string): Promise<boolean> {
     return new Promise((resolve) => {
@@ -778,7 +778,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — spawn 提交纪律(P2 Tas
           return super.newSession(spec)
         }
         async capturePane(_name: string) {
-          return { text: '❯ \n? for shortcuts', cursor_x: 0, cursor_y: 0, width: 80, height: 24 }
+          return { text: '❯ \n? for shortcuts' }
         }
         async pasteText(_name: string, _text: string): Promise<void> {
           throw new Error('simulated pasteText failure')
@@ -1429,7 +1429,7 @@ class NoopTmux extends TmuxDriver {
     if (keys.includes('Enter')) this.paneText = '❯ \nesc to interrupt'
   }
   async capturePane(_name: string) {
-    return { text: this.paneText, cursor_x: 0, cursor_y: 0, width: 80, height: 24 }
+    return { text: this.paneText }
   }
   async isAlive(_name: string): Promise<boolean> {
     return true
@@ -1812,7 +1812,7 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
     const workerId = `cctest-${randomUUID().slice(0, 8)}`
     const h = await adapter.spawn({ worker_id: workerId, prompt: '干活', workspace: { root: workspaceRoot } })
 
-    tmux.paneText = 'AskUserQuestion\nSelect an option\n  Yes\n  No'
+    tmux.paneText = 'Claude needs your permission\n1. Yes\n2. No'
     await fs.appendFile(
       eventsFilePath({ root: workspaceRoot }),
       JSON.stringify({

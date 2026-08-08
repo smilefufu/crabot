@@ -23,10 +23,6 @@ export interface TmuxSessionSpec {
 
 export interface PaneSnapshot {
   text: string
-  cursor_x: number
-  cursor_y: number
-  width: number
-  height: number
 }
 
 export class TmuxDriver {
@@ -97,16 +93,10 @@ export class TmuxDriver {
     await this.run(['paste-buffer', '-p', '-r', '-d', '-b', bufferName, '-t', name])
   }
 
-  /** Capture only the current viewport plus cursor/pane dimensions. */
+  /** Capture only the current viewport. */
   async capturePane(name: string): Promise<PaneSnapshot> {
-    const [{ stdout: text }, { stdout: cursor }, { stdout: size }] = await Promise.all([
-      this.run(['capture-pane', '-p', '-e', '-J', '-t', name]),
-      this.run(['display-message', '-p', '-t', name, '#{cursor_x},#{cursor_y}']),
-      this.run(['display-message', '-p', '-t', name, '#{pane_width},#{pane_height}']),
-    ])
-    const [cursor_x, cursor_y] = parsePair(cursor, 'cursor')
-    const [width, height] = parsePair(size, 'pane size')
-    return { text, cursor_x, cursor_y, width, height }
+    const { stdout: text } = await this.run(['capture-pane', '-p', '-e', '-J', '-t', name])
+    return { text }
   }
 
   async sendKeys(name: string, keys: string[]): Promise<void> {
@@ -163,12 +153,6 @@ export class TmuxDriver {
       child.stdin.end()
     })
   }
-}
-
-function parsePair(value: string, label: string): [number, number] {
-  const [left, right] = value.trim().split(',').map(Number)
-  if (!Number.isInteger(left) || !Number.isInteger(right)) throw new Error(`tmux returned invalid ${label}: ${value}`)
-  return [left, right]
 }
 
 function shQuote(value: string): string {
