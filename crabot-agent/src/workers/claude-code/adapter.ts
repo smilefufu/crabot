@@ -427,9 +427,13 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       mode === 'steering' && runtime.controlState.kind === 'running'
         ? { kind: 'running' }
         : { kind: 'waiting_action', reason: result.disposition === 'not_pasted' ? 'input_surface_unavailable' : 'input_pending' }
+    let waitReason: string
+    if (next.kind === 'waiting_action') waitReason = next.reason
+    else if (result.disposition === 'pending_in_ui') waitReason = 'input_pending'
+    else waitReason = 'input_surface_unavailable'
     const report: StateChangeReport = {
       outputTail: result.snapshot.text || baseline,
-      waitReason: next.kind === 'waiting_action' ? next.reason : result.disposition,
+      waitReason,
     }
     await this.transitionControlState(runtime, h, next, report, notify)
     return { control_state: next.kind, disposition: result.disposition, report }
