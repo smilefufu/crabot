@@ -21,7 +21,7 @@ const CODEX_PLACEHOLDERS = [
 export function probeCodexInput(snapshot: PaneSnapshot, mode: InputMode, text?: string, enforceMode = true): InputProbe {
   const pane = snapshot.text
   if (hasCodexInteraction(pane)) return 'unavailable'
-  const composer = codexComposerText(snapshot)
+  const composer = codexComposerText(snapshot, text !== undefined)
   if (composer === undefined) return 'unavailable'
   const working = codexIsWorking(snapshot)
   if (enforceMode && (mode === 'steering') !== working) return 'unavailable'
@@ -53,7 +53,7 @@ function codexIsWorking(snapshot: PaneSnapshot): boolean {
   return nearby.some((line) => /^\s*(?:[•·✦]\s*)?Working\b.*esc to interrupt/i.test(line))
 }
 
-function codexComposerText(snapshot: PaneSnapshot): string | undefined {
+function codexComposerText(snapshot: PaneSnapshot, preservePlaceholderText = false): string | undefined {
   const lines = snapshot.text.split('\n')
   for (let i = findLastComposerIndex(lines); i >= 0; i--) {
     const match = lines[i].match(/^\s*›(?:\s?(.*))?$/)
@@ -66,7 +66,7 @@ function codexComposerText(snapshot: PaneSnapshot): string | undefined {
       content.push(lines[j])
     }
     const value = content.join('\n').trim()
-    return isCodexPlaceholder(value) ? '' : value
+    return !preservePlaceholderText && isCodexPlaceholder(value) ? '' : value
   }
   return undefined
 }

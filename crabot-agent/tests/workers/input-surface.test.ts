@@ -38,7 +38,10 @@ describe('CLI input surfaces', () => {
     const text = 'repeat this task'
     const historyOnly = pane(`assistant history: ${text}\n❯ \n? for shortcuts`)
     expect(probeClaudeInput(historyOnly, 'primary', text)).toBe('empty')
-    expect(probeClaudeInput(pane('❯\u00a0Try "how does <filepath> work?"\n────────────────\n  ⏵⏵ bypass permissions on (shift+tab to cycle)'), 'primary')).toBe('empty')
+    const claudePlaceholder = 'Try "how does <filepath> work?"'
+    const claudePlaceholderPane = pane(`❯\u00a0${claudePlaceholder}\n────────────────\n  ⏵⏵ bypass permissions on (shift+tab to cycle)`)
+    expect(probeClaudeInput(claudePlaceholderPane, 'primary')).toBe('empty')
+    expect(probeClaudeInput(claudePlaceholderPane, 'primary', claudePlaceholder)).toBe('pending')
     expect(acceptedClaudeInput(historyOnly, 'primary', text)).toBe(true)
     const selector = pane('transcript\n❯ historical choice\n────────────────\n⏵⏵ bypass permissions on')
     expect(probeClaudeInput(selector, 'primary', 'new')).toBe('unavailable')
@@ -67,6 +70,12 @@ describe('CLI input surfaces', () => {
     const historyOnly = pane(`user history: ${text}\n› \n? for shortcuts`)
     expect(probeCodexInput(historyOnly, 'primary', text)).toBe('empty')
     expect(probeCodexInput(pane('› Find and fix a bug in @filename\n  gpt-5.6-sol xhigh · /private/tmp/workspace'), 'primary')).toBe('empty')
+    const exactPlaceholder = 'Explain this codebase'
+    expect(probeCodexInput(
+      pane(`› ${exactPlaceholder}\n  gpt-5.6-sol xhigh · /private/tmp/workspace`),
+      'primary',
+      exactPlaceholder,
+    )).toBe('pending')
     const placeholderPrefix = 'Explain this codebase and list the module boundaries'
     expect(probeCodexInput(
       pane(`› ${placeholderPrefix}\n  gpt-5.6-sol xhigh · /private/tmp/workspace`),

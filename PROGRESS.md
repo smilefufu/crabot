@@ -1,6 +1,6 @@
 # Crabot 项目进度
 
-> 最后更新：2026-08-09 — PR #80 已合并；PR #82 pending_in_ui/Stop 状态写竞态已修复并通过回归，待推送
+> 最后更新：2026-08-09 — PR #80 已合并；PR #82 placeholder phase 误判已修复并通过回归，待推送
 
 ## 2026-08-09 — PR #80：legacy loop 最终退役与 builtin bg-shell durable delivery（已合并）
 
@@ -1223,6 +1223,6 @@ Module Manager (port 19000)
 - Claude Code / Codex 已迁移到单层 `running / waiting_text / waiting_action / exited` 控制状态；首投所有权由 `initial_input` 明确结算。
 - 输入提交实现同一 pane 内单次 paste、证据化 Enter（最多补一次）；modal/pending 由 raw 受控清障，普通 WorkerInbox FIFO 与 bg-shell 通知语义保持不变。
 - Codex 0.146 的 rollout 改为首条普通输入接受后发现；startup stall 经 raw 恢复时不再提前固化占位 session。
-- 已补齐八轮 PR review：在此前输入面、session-ref、continuation、durable receipt、raw pane-exit、Stop baseline、完成边界、CLI hook envelope、输出游标契约与 Codex placeholder 修复之外，latest-head review 发现 `pending_in_ui` 的 hold 有意忽略 state revision，但 synthetic state 写也误用了同一口径；现已拆分：hold 继续保护已 paste 文本，状态写单独受 revision 守卫，不再覆盖并发 Stop 落下的 waiting_input。最终独立限定 review `APPROVED`。
-- clean head TypeScript build、组合定向集 **16 files / 398 tests** 通过；Agent 串行全量 **2596 passed / 4 个既有 macOS 基线失败 / 2 skipped**。最新 placeholder 定向集 **3 files / 92 tests**、harness revision 定向集 **3 files / 137 tests** 通过。Claude Code 2.1.226 / Codex 0.146.0 真实 tmux 黑盒最近一次 `EXIT:0`，覆盖 spawn、resume、Claude steering、真实 AskUserQuestion interaction，以及 Codex pending→raw Tab native queue；证据目录 `/var/folders/rf/mby32wyn18788mw75fdvj4ch0000gp/T/crabot-cli-real-AVDfFe`。
-- clean PR #82 基于 `main@331fee7`；本轮 pending_in_ui revision 修复待 commit/push，随后回复并 resolve 线程，等待 Claude approval，不自行 merge。
+- 已补齐九轮 PR review：在此前输入面、session-ref、continuation、durable receipt、raw pane-exit、Stop/revision 竞态、完成边界、CLI hook envelope、输出游标契约与 Codex placeholder 前缀碰撞修复之外，latest-head review 发现真实 prompt 恰好等于 Claude/Codex placeholder 时，after-paste 仍会被折叠为空。现已按 probe phase 收口：无 expected text 的 idle/raw 探针继续折叠 placeholder，带本次 expected text 的 after-paste 探针保留真实 composer 并返回 pending。最终独立限定 review `APPROVED`。
+- clean head TypeScript build、组合定向集 **16 files / 398 tests** 通过；Agent 串行全量 **2596 passed / 4 个既有 macOS 基线失败 / 2 skipped**。最新 placeholder phase 定向集 **4 files / 164 tests**、harness revision 定向集 **3 files / 137 tests** 通过。Claude Code 2.1.226 / Codex 0.146.0 真实 tmux 黑盒最近一次 `EXIT:0`，覆盖 spawn、resume、Claude steering、真实 AskUserQuestion interaction，以及 Codex pending→raw Tab native queue；证据目录 `/var/folders/rf/mby32wyn18788mw75fdvj4ch0000gp/T/crabot-cli-real-AVDfFe`。
+- clean PR #82 基于 `main@331fee7`；本轮 placeholder phase 修复待 commit/push，随后回复并 resolve 线程，等待 Claude approval，不自行 merge。

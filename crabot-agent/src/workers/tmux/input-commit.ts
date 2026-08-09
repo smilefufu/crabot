@@ -42,6 +42,9 @@ export async function commitInput(
   await driver.pasteText(text)
   snapshot = await waitUntil(driver, timeoutMs, intervalMs, (current) => probe(current, 'after_paste') !== 'empty')
   let currentProbe = probe(snapshot, 'after_paste')
+  // Confirmed contract: a still-empty, footer-anchored composer means the target UI never exposed
+  // ownership of this text. A successful tmux paste command alone is not receipt evidence; do not
+  // invent pending_in_ui or press Enter without visible text ownership.
   if (currentProbe === 'empty') return { disposition: 'not_pasted', snapshot }
   if (currentProbe !== 'pending') return { disposition: 'pending_in_ui', snapshot }
 

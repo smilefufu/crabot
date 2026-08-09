@@ -12,7 +12,7 @@ const CLAUDE_COMPOSER_BOUNDARY = /^\s*(?:[─━-]{3,}|esc to interrupt|⏵⏵|(
 export function probeClaudeInput(snapshot: PaneSnapshot, mode: InputMode, text?: string, enforceMode = true): InputProbe {
   const pane = snapshot.text
   if (hasClaudeInteraction(pane)) return 'unavailable'
-  const composer = claudeComposerText(snapshot)
+  const composer = claudeComposerText(snapshot, text !== undefined)
   if (composer === undefined) return 'unavailable'
   const active = /esc to interrupt/i.test(pane)
   if (enforceMode && (mode === 'steering') !== active) return 'unavailable'
@@ -46,7 +46,7 @@ export function hasClaudeInteraction(pane: string): boolean {
   return (permissionPrompt && hasYes && hasNo) || (selectionFooter && hasOption)
 }
 
-function claudeComposerText(snapshot: PaneSnapshot): string | undefined {
+function claudeComposerText(snapshot: PaneSnapshot, preservePlaceholderText = false): string | undefined {
   const lines = snapshot.text.split('\n')
   for (let i = lines.length - 1; i >= 0; i--) {
     const match = lines[i].match(/^\s*❯(?:\s?(.*))?$/)
@@ -59,7 +59,7 @@ function claudeComposerText(snapshot: PaneSnapshot): string | undefined {
       content.push(lines[j])
     }
     const value = content.join('\n').trim()
-    return /^Try\s+["“].+["”]$/i.test(value) ? '' : value
+    return !preservePlaceholderText && /^Try\s+["“].+["”]$/i.test(value) ? '' : value
   }
   return undefined
 }
