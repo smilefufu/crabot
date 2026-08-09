@@ -21,6 +21,10 @@ export interface TmuxSessionSpec {
   outputFile: string // pipe-pane 追加目标
 }
 
+export interface PaneSnapshot {
+  text: string
+}
+
 export class TmuxDriver {
   private readonly tmuxBin: string
 
@@ -77,12 +81,22 @@ export class TmuxDriver {
    * 整条消息。单行文本也走同一路径,不再区分单行/多行。
    */
   async sendText(name: string, text: string): Promise<void> {
-    if (text.length > 0) {
-      const bufferName = `crabot-sendtext-${randomUUID()}`
-      await this.loadBufferFromStdin(bufferName, text)
-      await this.run(['paste-buffer', '-p', '-r', '-d', '-b', bufferName, '-t', name])
-    }
+    await this.pasteText(name, text)
     await this.run(['send-keys', '-t', name, 'Enter'])
+  }
+
+  /** Paste exactly one buffer and deliberately do not commit it. */
+  async pasteText(name: string, text: string): Promise<void> {
+    if (text.length === 0) return
+    const bufferName = `crabot-sendtext-${randomUUID()}`
+    await this.loadBufferFromStdin(bufferName, text)
+    await this.run(['paste-buffer', '-p', '-r', '-d', '-b', bufferName, '-t', name])
+  }
+
+  /** Capture only the current viewport. */
+  async capturePane(name: string): Promise<PaneSnapshot> {
+    const { stdout: text } = await this.run(['capture-pane', '-p', '-e', '-J', '-t', name])
+    return { text }
   }
 
   async sendKeys(name: string, keys: string[]): Promise<void> {

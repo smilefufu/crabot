@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs/promises'
@@ -484,7 +484,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 四轮 review PoC 回归:
       const stopHookCmd = channel.hookCommand('stop')
       // 两步都不 exit/emitStop——mock CLI 消费完第一步后挂起原地等下一条 stdin,tmux 会话
       // 因此持续存活,直到显式 kill,给"重连一个仍存活的会话"提供稳定的时间窗口。
-      const claudeBin = claudeBinFor([{ output: '第一段输出' }, { output: '第二段输出' }], stopHookCmd)
+      const claudeBin = claudeBinFor([{ output: '第一段输出', emitStop: true }, { output: '第二段输出' }], stopHookCmd)
 
       const adapterA = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin, promptDeliveryTimeoutMs: 0 })
       await adapterA.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
@@ -492,6 +492,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 四轮 review PoC 回归:
       const h = await adapterA.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
 
       await waitForOutputContains(adapterA, h, '第一段输出')
+      await waitForState(adapterA, h, 'idle')
 
       // "重启":全新 adapter 实例,同一 dataDir,内存 runtimes 为空,从未见过这个化身。
       const adapterB = new ClaudeCodeAdapter({ dataDir, claudeConfigPath: fakeClaudeConfig(dataDir), tmux, claudeBin: 'unused-not-invoked-by-sendInput' })
@@ -538,7 +539,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 四轮 review PoC 回归:
       // 修复前:sendInput 直接抛通用 Error("no such incarnation...resident in this
       // process")——harness 只对 WorkerExitedError 转透明接续,通用 Error 会原样穿透砸给
       // 调用方,消息永久卡在队首。修复后:ensureRuntime 重建出 runtime(meta 还在),真实
-      // tmux isAlive 探测发现会话已死 → runtime.state 直接是 'exited' → 既有的 syncState
+      // tmux isAlive 探测发现会话已死 → runtime.controlState 直接是 'exited' → 既有的 syncState
       // 快路径产出 WorkerExitedError。
       await expect(adapterB.sendInput(h, '还有件事')).rejects.toBeInstanceOf(WorkerExitedError)
 
@@ -605,8 +606,12 @@ class RaceTmux extends TmuxDriver {
   async newSession(spec: TmuxSessionSpec): Promise<void> {
     await fakeReadyNewSession(spec)
   }
+  async pasteText(_name: string, _text: string): Promise<void> {}
   async sendText(_name: string, _text: string): Promise<void> {}
   async sendKeys(_name: string, _keys: string[]): Promise<void> {}
+  async capturePane(_name: string) {
+    return { text: '❯ \n? for shortcuts' }
+  }
   async isAlive(_name: string): Promise<boolean> {
     return new Promise((resolve) => {
       this.pending.push(resolve)
@@ -633,11 +638,17 @@ class SwitchableTmuxDriver extends TmuxDriver {
   async newSession(spec: TmuxSessionSpec): Promise<void> {
     return this.current.newSession(spec)
   }
+  async pasteText(name: string, text: string): Promise<void> {
+    return this.current.pasteText(name, text)
+  }
   async sendText(name: string, text: string): Promise<void> {
     return this.current.sendText(name, text)
   }
   async sendKeys(name: string, keys: string[]): Promise<void> {
     return this.current.sendKeys(name, keys)
+  }
+  async capturePane(name: string) {
+    return this.current.capturePane(name)
   }
   async isAlive(name: string): Promise<boolean> {
     return this.current.isAlive(name)
@@ -750,7 +761,8 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — spawn 提交纪律(P2 Tas
 
       const metaRaw = await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')
       const meta = JSON.parse(metaRaw) as { state: WorkerContractState }
-      expect(meta.state).toBe('running')
+      expect(meta.state).toBe('idle')
+      expect(h.initial_input).toMatchObject({ control_state: 'waiting_action', disposition: 'not_pasted' })
 
       await adapter.kill(h)
     },
@@ -758,15 +770,18 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — spawn 提交纪律(P2 Tas
   )
 
   it(
-    '首条 sendText 失败时,不放任 running——按 kill 路径落 exited(crashed),spawn 仍 reject',
+    '首条 pasteText 失败时,不放任 running——按 kill 路径落 exited(crashed),spawn 仍 reject',
     async () => {
       class NewSessionOkSendTextFailsTmux extends TmuxDriver {
         killed = false
         async newSession(spec: TmuxSessionSpec): Promise<void> {
           return super.newSession(spec)
         }
-        async sendText(_name: string, _text: string): Promise<void> {
-          throw new Error('simulated sendText failure')
+        async capturePane(_name: string) {
+          return { text: '❯ \n? for shortcuts' }
+        }
+        async pasteText(_name: string, _text: string): Promise<void> {
+          throw new Error('simulated pasteText failure')
         }
         async killSession(name: string): Promise<void> {
           this.killed = true
@@ -779,7 +794,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — spawn 提交纪律(P2 Tas
       const workerId = `cctest-${randomUUID().slice(0, 8)}`
       const spec: SpawnSpec = { worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } }
 
-      await expect(adapter.spawn(spec)).rejects.toThrow('simulated sendText failure')
+      await expect(adapter.spawn(spec)).rejects.toThrow('simulated pasteText failure')
 
       const metaRaw = await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')
       const meta = JSON.parse(metaRaw) as { state: WorkerContractState; ended_reason?: string }
@@ -877,7 +892,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — prompt 投递验证(2026-
     await adapter.kill(h)
   })
 
-  it('弹窗吞掉首条 prompt 时自动 Esc 清理并重投,第二次真正落地(不落 stall)', async () => {
+  it('首条 prompt 未落 session 时不自动 Escape 或重贴', async () => {
     const tmux = new CountingTmux()
     const { adapter, workerId } = await deliveryAdapter([{ output: '任务输出', emitStop: true }], {
       dropSubmitCount: 1,
@@ -888,21 +903,17 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — prompt 投递验证(2026-
     // 关键断言:验证通过,没有走 startup stall 路径;state 迁移是事件驱动的,不在此断言。
     const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
     expect(meta.startup_stalled).toBeUndefined()
-    // Esc 清弹窗必须走 sendKeys(真正发 Escape 键),不能 sendText——sendText 是 paste-buffer
-    // 粘贴文本,粘贴结尾的 Enter 会激活弹窗默认选项(对 MCP 信任窗等于静默授权,与 provision
-    // 的 enabledMcpjsonServers 授权边界相抵)。这条断言钉住实现,改回 sendText 立即挂。
+    // 只有事务本身的一次paste与一次Enter；没有Escape，也没有第二次paste。
     expect(tmux.calls.sendKeys).toBe(1)
-    expect(tmux.calls.sendText).toBe(2) // 首投 + 重投
-    // 会话记录里只有重投后的那一条 user 消息(被吞的首条没有落账)
+    expect(tmux.calls.pasteText).toBe(1)
+    expect(tmux.calls.sendText).toBe(0)
     const sessionFile = path.join(claudeProjectsDir, await wsSlug(), `${h.session_ref}.jsonl`)
-    const raw = await fs.readFile(sessionFile, 'utf-8')
-    const userLines = raw.split('\n').filter((l) => l.includes('"type":"user"'))
-    expect(userLines).toHaveLength(1)
+    await expect(fs.readFile(sessionFile, 'utf-8')).rejects.toMatchObject({ code: 'ENOENT' })
 
     await adapter.kill(h)
   })
 
-  it('弹窗持续存在(两次投递都被吞)→ 走 startup stall 暂扣,不静默留下 running', async () => {
+  it('持续未落 session 时不自动 Escape 或重贴', async () => {
     const reports: Array<{ state: string; outputTail?: string }> = []
     const { adapter, workerId } = await deliveryAdapter([{ output: '永远不会输出' }], {
       dropSubmitCount: 10,
@@ -910,15 +921,11 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — prompt 投递验证(2026-
     })
     const h = await adapter.spawn({ worker_id: workerId, prompt: '完整任务', workspace: { root: workspaceRoot } })
 
-    await waitForIdle(adapter, h)
+    // session receipt 缺失不再触发猜测性自动恢复；保持存活会话等待显式控制。
+    expect(reports.find((r) => r.state === 'idle')).toBeUndefined()
     const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
-    expect(meta.state).toBe('idle')
-    expect(meta.startup_stalled).toBe(true)
-    // 暂扣正文必须如实描述投递验证失败(握手已通过、prompt 被吞),不能复用"未就绪/一个字符
-    // 都没投递"的失实描述——否则 manager 按错的现场做决策。
-    const idleReport = reports.find((r) => r.state === 'idle')
-    expect(idleReport?.outputTail).toContain('没有出现在会话记录')
-    expect(idleReport?.outputTail).toContain('自动按 Esc 并重投一次')
+    expect(meta.state).toBe('running')
+    await adapter.kill(h)
   })
 })
 
@@ -1135,7 +1142,8 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.resume', () => {
       }
       // session_ref(cc 会话 uuid)在 resume 前后不变。
       expect(meta2Raw.session_id).toBe(meta1.session_id)
-      expect(meta2Raw.state).toBe('running')
+      expect(meta2Raw.state).toBe('exited')
+      expect(h2.initial_input).toMatchObject({ control_state: 'exited', disposition: 'accepted' })
 
       // resume 出的 mock 进程收到 wakeInput 才会跑 step0(输出+exit);等它收敛到 exited,
       // 确保子进程真的启动过、argv 记录行已经落盘,再读 argvFile——resume() 本身返回时只保证
@@ -1214,11 +1222,15 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.resume', () => {
 
 /** 转发到内部真实 TmuxDriver 并记调用次数——用于断言 fork() 全程没碰 tmux。 */
 class CountingTmux extends TmuxDriver {
-  calls = { newSession: 0, sendText: 0, sendKeys: 0, killSession: 0 }
+  calls = { newSession: 0, pasteText: 0, sendText: 0, sendKeys: 0, killSession: 0 }
   private readonly real = new TmuxDriver()
   async newSession(spec: TmuxSessionSpec): Promise<void> {
     this.calls.newSession++
     return this.real.newSession(spec)
+  }
+  async pasteText(name: string, text: string): Promise<void> {
+    this.calls.pasteText++
+    return this.real.pasteText(name, text)
   }
   async sendText(name: string, text: string): Promise<void> {
     this.calls.sendText++
@@ -1404,16 +1416,69 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
 
 /** 全程无操作的假 TmuxDriver——readTrace 测试只需要一个"常驻 runtime"的化身,不关心 tmux 行为本身。 */
 class NoopTmux extends TmuxDriver {
+  paneText = '❯ \n? for shortcuts'
+  alive = true
+
   async newSession(spec: TmuxSessionSpec): Promise<void> {
     await fakeReadyNewSession(spec)
   }
+  async pasteText(_name: string, text: string): Promise<void> {
+    this.paneText = `❯ ${text}\n? for shortcuts`
+  }
   async sendText(_name: string, _text: string): Promise<void> {}
-  async sendKeys(_name: string, _keys: string[]): Promise<void> {}
+  async sendKeys(_name: string, keys: string[]): Promise<void> {
+    if (keys.includes('Enter')) this.paneText = '❯ \nesc to interrupt'
+  }
+  async capturePane(_name: string) {
+    return { text: this.paneText }
+  }
   async isAlive(_name: string): Promise<boolean> {
-    return true
+    return this.alive
   }
   async killSession(_name: string): Promise<void> {}
 }
+
+class ExitAfterAcceptedTmux extends NoopTmux {
+  private submissions = 0
+
+  async sendKeys(_name: string, keys: string[]): Promise<void> {
+    if (!keys.includes('Enter')) return
+    this.submissions += 1
+    this.paneText = this.submissions === 1
+      ? '❯ \nesc to interrupt'
+      : 'Queued message\n❯ \nesc to interrupt'
+  }
+
+  async isAlive(_name: string): Promise<boolean> {
+    return this.submissions < 2
+  }
+}
+
+describe('ClaudeCodeAdapter accepted-input synchronous exit settlement', () => {
+  it('sendInput返回前暴露exit report且不发异步callback', async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-accepted-exit-data-'))
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-accepted-exit-ws-'))
+    const callbacks: WorkerContractState[] = []
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      tmux: new ExitAfterAcceptedTmux(),
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      onStateChange: (_h, state) => callbacks.push(state),
+    })
+    try {
+      const h = await adapter.spawn({ worker_id: `cctest-${randomUUID().slice(0, 8)}`, prompt: '第一步', workspace: { root: workspaceRoot } })
+      expect(h.initial_input).toEqual({ control_state: 'running', disposition: 'accepted' })
+
+      await adapter.sendInput(h, '第二步')
+
+      expect(adapter.takeAcceptedInputExit(h)).toEqual({ endReason: 'completed' })
+      expect(callbacks).not.toContain('exited')
+    } finally {
+      await fs.rm(dataDir, { recursive: true, force: true }).catch(() => {})
+      await fs.rm(workspaceRoot, { recursive: true, force: true }).catch(() => {})
+    }
+  })
+})
 
 describe('ClaudeCodeAdapter.readTrace', () => {
   let dataDir: string
@@ -1734,6 +1799,51 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
     throw new Error('waitFor timeout')
   }
 
+  it('相关Notification仅在当前pane仍是交互界面时进入waiting_action，并保留payload', async () => {
+    const seen: Array<{ state: WorkerContractState; report?: StateChangeReport }> = []
+    const tmux = new NoopTmux()
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux,
+      claudeBin: 'unused', promptDeliveryTimeoutMs: 0,
+      claudeProjectsDir,
+      onStateChange: (_h, state, report) => seen.push({ state, report }),
+    })
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '干活', workspace: { root: workspaceRoot } })
+
+    tmux.paneText = 'Claude needs your permission\n1. Yes\n2. No'
+    await fs.appendFile(
+      eventsFilePath({ root: workspaceRoot }),
+      JSON.stringify({
+        ts: new Date().toISOString(),
+        kind: 'notification',
+        raw: { notification_type: 'permission_prompt', message: 'Choose', title: 'Question' },
+      }) + '\n',
+      'utf-8',
+    )
+    await waitFor(() => seen.length === 1)
+    expect(seen[0]).toEqual({
+      state: 'idle',
+      report: {
+        outputTail: tmux.paneText,
+        waitReason: 'interaction_required',
+        notification: { type: 'permission_prompt', message: 'Choose', title: 'Question' },
+      },
+    })
+
+    tmux.paneText = '❯ \nesc to interrupt'
+    await fs.appendFile(
+      eventsFilePath({ root: workspaceRoot }),
+      JSON.stringify({ ts: new Date().toISOString(), kind: 'notification', raw: { notification_type: 'permission_prompt' } }) + '\n',
+      'utf-8',
+    )
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(seen).toHaveLength(1)
+    await adapter.kill(h)
+  })
+
   it('spawn 之后 hook 往事件文件追加 stop → 无人调用 state()/sendInput() 也能推出 idle 状态回调', async () => {
     const seen: Array<{ seq: number; state: WorkerContractState }> = []
     const tmux = new NoopTmux()
@@ -1755,6 +1865,55 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
 
     expect(seen.filter((e) => e.state === 'idle')).toHaveLength(1)
     expect(seen[seen.length - 1]).toEqual({ seq: h.seq, state: 'idle' })
+
+    await adapter.kill(h)
+  })
+
+  it('waiting_action同时观察到新Stop与pane死亡时按完成边界推断，不误记crashed', async () => {
+    const tmux = new NoopTmux()
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux,
+      claudeBin: 'unused', promptDeliveryTimeoutMs: 0,
+      claudeProjectsDir,
+    })
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '干活', workspace: { root: workspaceRoot } })
+
+    await appendStopEvent()
+    expect(await adapter.state(h)).toBe('idle')
+    tmux.paneText = 'unknown modal surface'
+    await expect(adapter.sendInput(h, '暂扣输入')).rejects.toBeTruthy()
+    expect(await adapter.state(h)).toBe('idle')
+
+    tmux.alive = false
+    await appendStopEvent()
+    expect(await adapter.state(h)).toBe('exited')
+    const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+    expect(meta.ended_reason).toBe('completed')
+  })
+
+  it('waiting_text期间到达的后续stop仍推进基线，不会让下一轮刚开始就被旧stop判回idle', async () => {
+    const tmux = new NoopTmux()
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux,
+      claudeBin: 'unused', promptDeliveryTimeoutMs: 0,
+      claudeProjectsDir,
+    })
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '干活', workspace: { root: workspaceRoot } })
+
+    await appendStopEvent()
+    expect(await adapter.state(h)).toBe('idle')
+    await appendStopEvent()
+    expect(await adapter.state(h)).toBe('idle')
+
+    tmux.paneText = '❯ \n? for shortcuts'
+    await adapter.sendInput(h, '下一轮')
+    expect(await adapter.state(h)).toBe('running')
 
     await adapter.kill(h)
   })
@@ -1887,7 +2046,7 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
  * 侧问设计上就是在主线还在跑的时候发起的(queryWorker 把 fork 放在锁外、不阻塞主线),
  * 两个症状因此必然成对出现:
  *   ① 主线跑到一半被判成 idle,推一条假的"这一轮干完了"去唤醒 manager;
- *   ② 主线随后真正跑完这一轮时 computed === runtime.state === 'idle',不再产生迁移,
+ *   ② 主线随后真正跑完这一轮时 computed === runtime.controlState === 'idle',不再产生迁移,
  *      真正的轮次边界唤醒被整条吞掉。
  */
 describe('ClaudeCodeAdapter.fork — 侧问收尾不污染主线 stop 计数', () => {
@@ -2091,12 +2250,12 @@ describe('ClaudeCodeAdapter.ensureRuntime — 并发重建不泄漏 watcher', ()
  * 真的走了同一条降级路径,不是模拟出来的。
  */
 describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e[?2004h)', () => {
-  /** 记录 sendText 调用,其余行为完全走真实 TmuxDriver —— 超时分支要断言的是"一次都没调"。 */
+  /** 记录 pasteText 调用,其余行为完全走真实 TmuxDriver —— 超时分支要断言的是"一次都没调"。 */
   class SpyTmux extends TmuxDriver {
-    readonly sendTextCalls: Array<{ name: string; text: string }> = []
-    async sendText(name: string, text: string): Promise<void> {
-      this.sendTextCalls.push({ name, text })
-      return super.sendText(name, text)
+    readonly pasteTextCalls: Array<{ name: string; text: string }> = []
+    async pasteText(name: string, text: string): Promise<void> {
+      this.pasteTextCalls.push({ name, text })
+      return super.pasteText(name, text)
     }
   }
 
@@ -2168,7 +2327,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
       }
 
       expect(await submissions()).toEqual([MULTILINE_PROMPT])
-      expect(tmux.sendTextCalls).toHaveLength(1)
+      expect(tmux.pasteTextCalls).toHaveLength(1)
     },
     30000,
   )
@@ -2180,7 +2339,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
       // (§6.3 给"干过活之后自然退出"校准的),而这里开工输入一个字符都没投递过——吃下缺省
       // 就会让 harness 的 taskStatusFromIncarnation 把 task 记成 **completed**,manager 与
       // recovery 从此不再过问一个压根没开工的 worker(正是 #66 修的那类"失败记成成功")。
-      // 把 reportStartupStall 里的 'crashed' 改回缺省,这条用例就挂。
+      // 把 initialStartupStall 里的 'crashed' 改回缺省,这条用例就挂。
       const seen: { state: string; endReason?: string }[] = []
       const adapter = new ClaudeCodeAdapter({
         dataDir,
@@ -2198,13 +2357,18 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
       const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
       expect(Date.now() - startedAt).toBeLessThan(15_000)
 
-      expect(tmux.sendTextCalls).toEqual([])
+      expect(tmux.pasteTextCalls).toEqual([])
       const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
       expect(meta.state).toBe('exited')
       expect(meta.ended_reason).toBe('crashed')
       expect(await adapter.state(h)).toBe('exited')
-      // 台账那一侧收到的也必须是 crashed —— harness 一律取 adapter 上报的这个真值落 task。
-      expect(seen).toContainEqual({ state: 'exited', endReason: 'crashed' })
+      // spawn返回前的同步终态只通过initial_input结算，不重复发布onStateChange。
+      expect(h.initial_input).toMatchObject({
+        control_state: 'exited',
+        disposition: 'not_pasted',
+        report: { endReason: 'crashed' },
+      })
+      expect(seen).toEqual([])
     },
     40000,
   )
@@ -2232,10 +2396,10 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
       const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
       const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
 
-      expect(tmux.sendTextCalls).toEqual([])
+      expect(tmux.pasteTextCalls).toEqual([])
       // 再等一会儿,确认不是"晚一点才发"——超时分支绝不能退化成降级继续发送。
       await new Promise((r) => setTimeout(r, 500))
-      expect(tmux.sendTextCalls).toEqual([])
+      expect(tmux.pasteTextCalls).toEqual([])
       expect(await submissions()).toEqual([])
       expect(h.session_ref).toMatch(/^[0-9a-f-]{36}$/) // cc 的 session id 是自己定的,不受影响
     },
@@ -2253,10 +2417,15 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
       })
       const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
 
-      const idle = seen.filter((s) => s.state === 'idle')
-      expect(idle).toHaveLength(1)
-      expect(idle[0].report?.outputTail).toContain(banner)
-      expect(idle[0].report?.outputTail).toContain('一个字符都没有投递')
+      const stalled = h.initial_input
+      expect(stalled).toMatchObject({
+        control_state: 'waiting_action',
+        disposition: 'not_pasted',
+        report: { waitReason: 'startup_stall' },
+      })
+      expect(stalled?.report?.outputTail).toContain(banner)
+      expect(stalled?.report?.outputTail).toContain('一个字符都没有投递')
+      expect(seen).toEqual([])
 
       const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
       expect(meta.state).toBe('idle')
@@ -2269,7 +2438,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
   it(
     '这条 idle 粘得住:再调 state() 不会被三源判定翻回 running(pane 活着 + stop 计数恒不涨)',
     async () => {
-      // 五轮 review:去掉 syncState 里维持 startupStalled 的那一支,这条用例就挂——computed
+      // 五轮 review:去掉 syncState 里维持 waiting_action 的那一支,这条用例就挂——computed
       // 恒为 running,刚落的 idle 连同台账一起被翻回"正在干活",而这个 worker 的开工输入
       // 一个字符都没投递过。上一条用例只断言 not.toBe('exited'),观察不到这次翻转。
       const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
@@ -2279,7 +2448,9 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
       expect(await adapter.state(h)).toBe('idle') // 连续两次都不翻
       const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
       expect(meta.state).toBe('idle')
-      expect(meta.startup_stalled).toBe(true)
+      expect(meta.wait_mode).toBe('action')
+      expect(meta.wait_reason).toBe('startup_stall')
+      expect(meta.startup_stalled).toBeUndefined()
     },
     30000,
   )
@@ -2306,11 +2477,11 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
   it(
     '暂扣态置位之后进程才死 → 落 exited(crashed),不吃"非 kill ⇒ completed"的缺省推断',
     async () => {
-      // 七轮 review:上一轮的 deadReason 形参只作用于 reportStartupStall 里的**那一次**
+      // 七轮 review:上一轮的 deadReason 形参只作用于 initialStartupStall 里的**那一次**
       // syncState(握手等待期间就死了)。可暂扣是个持续状态——idle 落定之后进程才死(pane
       // 被外部收走、TUI 自退、机器重启后残留会话消失),后续任何一次 syncState 判到 exited
       // 仍会吃缺省推断,把一个开工输入一个字符都没投递过的 worker 记成"成功完成"终态,
-      // manager 与 recovery 从此不再过问。去掉 syncState exited 分支里的 startupStalled
+      // manager 与 recovery 从此不再过问。去掉 syncState exited 分支里的 waiting_action
       // 判断,这条用例就挂(拿到 'completed')。
       const { adapter, seen, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
       const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
@@ -2360,16 +2531,13 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
   )
 
   it(
-    'sendInput 投递成功之后才死 → 仍走缺省推断(completed),这条修正不误伤干过活的化身',
+    'manager显式raw Enter后出现active证据，随后进程死亡按completed推断',
     async () => {
-      // 反向钉住"没干过活"与"干过活"的分界:startupStalled 在 sendInput 成功后被清除(连同
-      // 落盘的 startup_stalled),此后的自然退出照旧是 §6.3 的 completed 推断。把上面那条
-      // 判断写成"历史上暂扣过就 crashed"(不清标志、或改看 meta 的历史值),这条用例就挂。
       const { adapter, seen, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
       const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
       expect(await adapter.state(h)).toBe('idle')
 
-      await adapter.sendInput(h, 'Enter', { raw: true })
+      await expect(adapter.sendInput(h, 'Enter', { raw: true })).resolves.toBeUndefined()
       expect(await adapter.state(h)).toBe('running')
 
       execFileSync('tmux', ['kill-session', '-t', `crabot-w-${workerId}-1`], { stdio: 'ignore' })
@@ -2383,18 +2551,62 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
   )
 
   it(
-    'manager 出手(sendInput)之后暂扣解除:状态回到 running,落盘也不再带 startup_stalled',
+    'startup stall上的raw只发指定键；出现active证据后转running',
     async () => {
       const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
       const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
       expect(await adapter.state(h)).toBe('idle')
 
-      await adapter.sendInput(h, 'Enter', { raw: true })
-
+      await expect(adapter.sendInput(h, 'Enter', { raw: true })).resolves.toBeUndefined()
       expect(await adapter.state(h)).toBe('running')
       const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
       expect(meta.state).toBe('running')
-      expect(meta.startup_stalled).toBeUndefined()
+      expect(meta.wait_mode).toBeUndefined()
+    },
+    30000,
+  )
+
+  it(
+    'raw键未送达前pane退出时仍抛WorkerExitedError，保留透明接续信号',
+    async () => {
+      const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+      const sendKeys = vi.spyOn(tmux, 'sendKeys').mockImplementation(async (name) => {
+        await tmux.killSession(name)
+        throw new Error('pane exited before keys were sent')
+      })
+
+      try {
+        await expect(adapter.sendInput(h, 'C-d', { raw: true })).rejects.toMatchObject({
+          name: 'WorkerExitedError',
+          ended_reason: 'crashed',
+        })
+      } finally {
+        sendKeys.mockRestore()
+      }
+    },
+    30000,
+  )
+
+  it(
+    'raw键已送达且导致pane退出时正常结算，不把键名当未投递正文透明接续',
+    async () => {
+      const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+      const originalSendKeys = tmux.sendKeys.bind(tmux)
+      const sendKeys = vi.spyOn(tmux, 'sendKeys').mockImplementation(async (name, keys) => {
+        await originalSendKeys(name, keys)
+        await tmux.killSession(name)
+      })
+
+      try {
+        await expect(adapter.sendInput(h, 'C-d', { raw: true })).resolves.toBeUndefined()
+        expect(await adapter.state(h)).toBe('exited')
+        const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+        expect(meta.ended_reason).toBe('completed')
+      } finally {
+        sendKeys.mockRestore()
+      }
     },
     30000,
   )
@@ -2402,7 +2614,7 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
   it(
     '带给 manager 的 output 尾部是可读文本,不是转义序列——与 read_worker_output 同一形态',
     async () => {
-      // 真实模态框是 TUI 重绘出来的:清屏、逐行绝对定位、SGR 上色。去掉 reportStartupStall 里
+      // 真实模态框是 TUI 重绘出来的:清屏、逐行绝对定位、SGR 上色。去掉 initialStartupStall 里
       // 那次 decodeTerminalOutput,manager 拿到的就是下面这串原样字节——而它同一时刻用
       // read_worker_output 读同一份日志拿到的是解码后的文本,同一份日志两种形态。
       const banner = [
@@ -2416,9 +2628,9 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
         pasteReadyTimeoutMs: 2000,
         banner,
       })
-      await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
 
-      const tail = seen.find((s) => s.state === 'idle')?.report?.outputTail
+      const tail = h.initial_input?.report?.outputTail
       expect(tail).toBeTruthy()
       // 一个 ESC 都不该剩:解码器丢掉所有控制序列,只留可见文本。
       expect(tail).not.toContain('\u001b')

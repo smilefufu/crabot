@@ -53,7 +53,7 @@
 // 模拟模态框持续吞输入;DROP_FIRST_SUBMIT 是它的 1 次特例(两者共存时取 COUNT)。
 import { exec } from 'node:child_process'
 import { promisify } from 'node:util'
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 const execAsync = promisify(exec)
@@ -78,23 +78,62 @@ const argvFile = process.env.MOCK_CLI_ARGV_FILE
 if (argvFile) appendFileSync(argvFile, JSON.stringify(process.argv.slice(2)) + '\n')
 
 const rolloutFile = process.env.MOCK_CLI_ROLLOUT_FILE
-if (rolloutFile) {
+const rolloutOnSubmit = process.env.MOCK_CLI_ROLLOUT_ON_SUBMIT === '1'
+function createRollout() {
+  if (!rolloutFile) return
   mkdirSync(dirname(rolloutFile), { recursive: true })
   writeFileSync(rolloutFile, JSON.stringify({ type: 'session_meta', payload: { timestamp: new Date().toISOString() } }) + '\n')
 }
+if (rolloutFile && !rolloutOnSubmit) createRollout()
 
 let stepIndex = 0
+let lastVisibleOutput = ''
+let active = false
+
+function renderScreen(body) {
+  process.stdout.write(`\x1b[2J\x1b[H${body}`)
+}
+
+const composerGlyph = process.env.CODEX_HOME ? '›' : '❯'
+
+function renderComposer(text = '') {
+  const marker = active ? (process.env.CODEX_HOME ? 'Working (esc to interrupt)' : 'esc to interrupt') : '? for shortcuts'
+  renderScreen(`${lastVisibleOutput ? `${lastVisibleOutput}\n` : ''}${composerGlyph} ${text}\n${marker}`)
+}
+
+function renderPrimaryComposer() {
+  active = false
+  renderComposer()
+}
+
+function renderRunning() {
+  active = true
+  const marker = process.env.CODEX_HOME ? 'Working (esc to interrupt)' : 'esc to interrupt'
+  renderScreen(`${lastVisibleOutput ? `${lastVisibleOutput}\n` : ''}${composerGlyph} \n${marker}`)
+}
+
+function renderQueued() {
+  active = true
+  const queued = process.env.CODEX_HOME ? 'Messages to be submitted after next tool call' : 'Queued message'
+  const marker = process.env.CODEX_HOME ? 'Working (esc to interrupt)' : 'esc to interrupt'
+  renderScreen(`${lastVisibleOutput ? `${lastVisibleOutput}\n` : ''}${queued}\n${composerGlyph} \n${marker}`)
+}
 
 async function runStep() {
   if (stepIndex >= script.length) return
   const step = script[stepIndex]
   stepIndex += 1
 
-  if (step.output) process.stdout.write(step.output + '\n')
+  if (step.output) lastVisibleOutput = step.output
+  renderRunning()
 
   if (step.emitStop && stopHookCmd) {
     try {
-      await execAsync(stopHookCmd, { shell: '/bin/bash' })
+      // The real hook receives a closed JSON stdin stream. This interactive mock keeps
+      // its own stdin open for subsequent messages, so explicitly model the empty hook
+      // payload rather than letting the POSIX reader block on the TUI input pipe.
+      await execAsync(`(${stopHookCmd}) </dev/null`, { shell: '/bin/bash' })
+      renderPrimaryComposer()
     } catch (err) {
       process.stderr.write(`mock-cli: stop hook failed: ${err}\n`)
     }
@@ -128,6 +167,7 @@ const pasteReadyDelayMs = Number(process.env.MOCK_CLI_PASTE_READY_DELAY_MS || '0
 
 function announcePasteReady() {
   process.stdout.write('\x1b[?2004h')
+  renderPrimaryComposer()
   const readyFile = process.env.MOCK_CLI_READY_FILE
   if (readyFile) writeFileSync(readyFile, '')
 }
@@ -176,11 +216,18 @@ function writeSessionEntry(content) {
 }
 
 function submit(content) {
+  if (content.length > 0 && rolloutOnSubmit && rolloutFile && !existsSync(rolloutFile)) createRollout()
   submitCount += 1
-  if (submitCount <= dropSubmitCount) return // 启动期模态框吞掉前 N 条输入:不写 session、不推进脚本
+  const steering = active
+  if (submitCount <= dropSubmitCount) {
+    renderRunning()
+    return
+  }
   if (stdinLogFile) appendFileSync(stdinLogFile, JSON.stringify(content) + '\n')
   writeSessionEntry(content)
-  void runStep()
+  if (steering) renderQueued()
+  else renderRunning()
+  setTimeout(() => void runStep(), 0)
 }
 
 process.stdin.on('data', (chunk) => {
@@ -222,6 +269,8 @@ process.stdin.on('data', (chunk) => {
     pending = pending.slice(pending.length - holdBack)
     break
   }
+
+  if (lineBuffer.length > 0) renderComposer(lineBuffer)
 })
 
 // stdin 监听已挂好,现在宣布就绪不丢输入(见上方就绪信号的注释)。

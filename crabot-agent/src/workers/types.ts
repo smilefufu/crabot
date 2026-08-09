@@ -6,6 +6,12 @@ import type { ResolvedPermissions } from '../types.js'
 
 export type WorkerImplId = 'builtin' | 'claude-code' | 'codex'
 export type WorkerContractState = 'running' | 'idle' | 'exited'
+export type CliControlState =
+  | { readonly kind: 'running' }
+  | { readonly kind: 'waiting_text' }
+  | { readonly kind: 'waiting_action'; readonly reason: string }
+  | { readonly kind: 'exited'; readonly reason?: IncarnationEndReason }
+export type InitialInputDisposition = 'accepted' | 'not_pasted' | 'pending_in_ui'
 export type IncarnationEndReason =
   | 'completed' | 'failed' | 'killed' | 'superseded' | 'crashed' | 'pre_migration'
 
@@ -67,6 +73,8 @@ export interface IncarnationHandle {
    * builtin: 本化身当前 tip node_id;CLI: 原生 session id(resume 沿用 prev 不变;fork 化身
    * 填 fork 自己的引用,不是父化身的)。handle 自描述,调用方无需事后反查(protocol-agent-v3 §6.1)。 */
   readonly session_ref: string
+  /** CLI spawn/resume 首投的事实；builtin/fork 省略并按既有行为处理。 */
+  readonly initial_input?: InitialInputResult
 }
 export interface IncarnationRef {
   readonly worker_id: string
@@ -89,6 +97,12 @@ export interface IncarnationRef {
  * 3. 后续再接新信号(比如 cc 拿到真实终态、或带上本轮耗时)是加一个具名字段,所有调用点
  *    不动。
  */
+export interface InitialInputResult {
+  readonly control_state: CliControlState['kind']
+  readonly disposition: InitialInputDisposition
+  readonly report?: StateChangeReport
+}
+
 export interface StateChangeReport {
   /**
    * 本次转换发生时 worker 最后说的那段 assistant text。只有 builtin 产出(它的输出天然
@@ -126,6 +140,10 @@ export interface StateChangeReport {
    * 判断"卡在哪"的现场素材。
    */
   readonly outputTail?: string
+  /** CLI waiting_action / 投递暂扣的诊断原因。 */
+  readonly waitReason?: string
+  /** cc Notification 的解析载荷；harness 映射为 manager-facing detail。 */
+  readonly notification?: { readonly type: string; readonly message?: string; readonly title?: string }
 }
 
 export interface DetectResult { installed: boolean; activated: boolean; detail?: string }

@@ -318,11 +318,16 @@ describe.skipIf(!tmuxAvailable)('WorkerHarness — 真实 claude-code adapter �
       })
       sessionsToCleanup.push(`crabot-w-${worker.worker_id}-1`)
 
-      expect(worker.task.status).toBe('running')
+      await waitUntil(async () => {
+        const [current] = await harness.listWorkers(dialogObjectId)
+        return current.task.status === 'waiting_input'
+      })
+      const [settledWorker] = await harness.listWorkers(dialogObjectId)
+      expect(settledWorker.task.status).toBe('waiting_input')
       // cc adapter 的真实 session uuid(spawn 返回前即由 adapter 填入,不是台账初始化时的
       // 占位空串),证明 harness 原子补写了 adapter.spawn 返回的真实 handle.session_ref。
-      expect(worker.incarnations[0].session_ref).toBeTruthy()
-      expect(worker.incarnations[0].session_ref).toMatch(/^[0-9a-fA-F-]{36}$/)
+      expect(settledWorker.incarnations[0].session_ref).toBeTruthy()
+      expect(settledWorker.incarnations[0].session_ref).toMatch(/^[0-9a-fA-F-]{36}$/)
 
       // 经 harness.readWorkerOutput 轮询到 mock CLI 真实写入 pipe-pane 的第一段输出——
       // 证明 tmux newSession + pipe-pane + OutputLog 这条真实链路是通的。
@@ -347,9 +352,8 @@ describe.skipIf(!tmuxAvailable)('WorkerHarness — 真实 claude-code adapter �
         return chunk.includes('第二段输出')
       })
 
-      // 真实 adapter 的状态回调(idle→running,可能不止一次)经 handleStateChange 落盘并
-      // 外发——不是 FakeAdapter.emitStateChange 手动触发的。
-      await waitUntil(() => events.filter((e) => e.kind === 'state_changed').length >= 2)
+      // 普通投递先由 harness 落 running；随后 Stop callback 单独结算 waiting_text。
+      await waitUntil(() => events.filter((e) => e.kind === 'state_changed').length >= 1)
 
       await harness.killWorker(worker.worker_id, '冒烟测试收尾')
 

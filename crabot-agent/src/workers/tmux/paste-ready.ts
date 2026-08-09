@@ -163,7 +163,7 @@ export function describeDeliveryStall(opts: { impl: string; timeoutMs: number; t
  * (protocol-agent-v3 §5.5「检测到无法识别的交互界面:暂扣 + 唤醒 manager(附界面内容)」)。
  * 尾部而非头部:启动期日志的头部是终端能力协商,模态框在最后。
  *
- * 这里只负责取字节,ANSI 归一化由调用方做:两个 CLI adapter 在 reportStartupStall 里把结果
+ * 这里只负责取字节,ANSI 归一化由调用方做:两个 CLI adapter 在 initialStartupStall 里把结果
  * 过一遍 `decodeTerminalOutput`,与它们 `readOutput` 的返回路径共用同一个解码器,解码边界因此
  * 统一留在 adapter 那一层(builtin 的输出是纯文本,从不经过这里)。截取起点可能落在一个多字节
  * UTF-8 字符中间,这里丢掉开头的续字节再解码,避免出现替换字符。

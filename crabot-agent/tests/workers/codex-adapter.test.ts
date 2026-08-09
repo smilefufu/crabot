@@ -66,10 +66,12 @@ function rolloutFileNameFor(uuid: string): string {
 
 /** 拼一条 `env MOCK_CLI_SCRIPT=... MOCK_CLI_STOP_HOOK_CMD=... [MOCK_CLI_ARGV_FILE=...]
  * [MOCK_CLI_ROLLOUT_FILE=...] node mock-cli.mjs` 命令行,充当测试用的 codexBin。 */
-function codexBinFor(script: MockStep[], stopHookCmd: string, opts?: { argvFile?: string; rolloutFile?: string }): string {
+function codexBinFor(script: MockStep[], stopHookCmd: string, opts?: { argvFile?: string; rolloutFile?: string; rolloutOnSubmit?: boolean; pasteReadyDelayMs?: number }): string {
   const argvEnv = opts?.argvFile ? `MOCK_CLI_ARGV_FILE=${shQuote(opts.argvFile)} ` : ''
   const rolloutEnv = opts?.rolloutFile ? `MOCK_CLI_ROLLOUT_FILE=${shQuote(opts.rolloutFile)} ` : ''
-  return `env MOCK_CLI_SCRIPT=${shQuote(JSON.stringify(script))} MOCK_CLI_STOP_HOOK_CMD=${shQuote(stopHookCmd)} ${argvEnv}${rolloutEnv}node ${shQuote(MOCK_CLI)}`
+  const rolloutTimingEnv = opts?.rolloutOnSubmit ? 'MOCK_CLI_ROLLOUT_ON_SUBMIT=1 ' : ''
+  const readyDelayEnv = opts?.pasteReadyDelayMs ? `MOCK_CLI_PASTE_READY_DELAY_MS=${opts.pasteReadyDelayMs} ` : ''
+  return `env MOCK_CLI_SCRIPT=${shQuote(JSON.stringify(script))} MOCK_CLI_STOP_HOOK_CMD=${shQuote(stopHookCmd)} ${argvEnv}${rolloutEnv}${rolloutTimingEnv}${readyDelayEnv}node ${shQuote(MOCK_CLI)}`
 }
 
 /** 假 TmuxDriver 的 newSession 替身:落一份 output 日志并写入 \e[?2004h。
@@ -224,6 +226,7 @@ describe('CodexWorkerAdapter.provision', () => {
       expect(Array.isArray(parsed.notify)).toBe(true)
       expect(parsed.notify[0]).toBe('/bin/sh')
       expect(parsed.notify.join(' ')).toContain('events-cli.jsonl')
+      expect(parsed.notify[2]).toContain('</dev/null')
 
       // trust_level 必须存在且指向本 workspace 的 realpath
       expect(parsed.projects[realRoot]).toEqual({ trust_level: 'trusted' })
@@ -334,6 +337,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
     script: MockStep[],
     opts?: {
       withRollout?: boolean
+      rolloutOnSubmit?: boolean
       onStateChange?: (h: IncarnationHandle, state: WorkerContractState, report?: StateChangeReport) => void
     },
   ): Promise<{ adapter: CodexWorkerAdapter; workerId: string; rolloutUuid?: string; rolloutFile?: string }> {
@@ -351,7 +355,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
       rolloutFile = path.join(codexHome, 'sessions', datePath, rolloutFileNameFor(rolloutUuid))
     }
 
-    const codexBin = codexBinFor(script, stopHookCmd, { rolloutFile })
+    const codexBin = codexBinFor(script, stopHookCmd, { rolloutFile, rolloutOnSubmit: opts?.rolloutOnSubmit })
     // 测试用小轮询上限,避免"故意不配置 rollout 文件"的用例拖慢整个套件。
     const adapter = new CodexWorkerAdapter({
       dataDir,
@@ -499,7 +503,12 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
 
       await waitForState(adapter, h, 'exited')
 
-      expect(seen).toContainEqual({ state: 'exited', endReason: 'completed' })
+      expect(h.initial_input).toMatchObject({
+        control_state: 'exited',
+        disposition: 'accepted',
+        report: { endReason: 'completed' },
+      })
+      expect(seen).toEqual([])
     },
     15000,
   )
@@ -545,6 +554,71 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
       expect(meta.session_id).toBe(rolloutUuid)
       // 发现成功应该标记为 'discovered'
       expect(meta.session_discovery).toBe('discovered')
+    },
+    15000,
+  )
+
+  it(
+    'session 发现:Codex 0.146 式 rollout 在首条 submit 后才出现，spawn 返回真实 session_ref',
+    async () => {
+      const { adapter, workerId, rolloutUuid } = await provisionedAdapter(
+        [{ output: '第一段输出', emitStop: true }],
+        { withRollout: true, rolloutOnSubmit: true },
+      )
+      const h = await adapter.spawn(makeSpec(workerId, '你好'))
+      expect(h.initial_input).toMatchObject({ disposition: 'accepted' })
+      expect(h.session_ref).toBe(rolloutUuid)
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string; session_discovery?: string }
+      expect(meta).toMatchObject({ session_id: rolloutUuid, session_discovery: 'discovered' })
+    },
+    15000,
+  )
+
+  it(
+    'session 发现:startup stall 经 raw 清障后不编占位 id，首条普通输入接受后才发现 rollout',
+    async () => {
+      const rolloutUuid = randomUUID()
+      const now = new Date()
+      const pad = (n: number) => String(n).padStart(2, '0')
+      const datePath = path.join(String(now.getFullYear()), pad(now.getMonth() + 1), pad(now.getDate()))
+      const rolloutFile = path.join(workspaceRoot, '.codex', 'sessions', datePath, rolloutFileNameFor(rolloutUuid))
+      const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
+      const seen: Array<{ state: WorkerContractState; sessionRef?: string }> = []
+      const codexBin = codexBinFor(
+        [
+          { output: 'raw 清障回合', emitStop: true },
+          { output: '首条任务完成', emitStop: true },
+        ],
+        channel.hookCommand('stop'),
+        { rolloutFile, rolloutOnSubmit: true, pasteReadyDelayMs: 200 },
+      )
+      const adapter = new CodexWorkerAdapter({
+        dataDir,
+        tmux,
+        codexBin,
+        pasteReadyTimeoutMs: 50,
+        sessionDiscoveryTimeoutMs: 1500,
+        onStateChange: (handle, state) => seen.push({ state, sessionRef: handle.session_ref }),
+      })
+      await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
+      const workerId = `codextest-${randomUUID().slice(0, 8)}`
+      const h = await adapter.spawn(makeSpec(workerId, '首条任务'))
+      expect(h).toMatchObject({ session_ref: '', initial_input: { disposition: 'not_pasted', control_state: 'waiting_action' } })
+
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      await adapter.sendInput(h, 'Enter', { raw: true })
+      await waitForState(adapter, h, 'idle')
+      expect((await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))).toContain('"session_id":""')
+
+      await adapter.sendInput(h, '首条任务')
+      expect(adapter.takeUpdatedSessionRef(h)).toBe(rolloutUuid)
+      const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')) as { session_id: string; session_discovery?: string }
+      expect(meta).toMatchObject({ session_id: rolloutUuid, session_discovery: 'discovered' })
+      const deadline = Date.now() + 5000
+      while (!seen.some((event) => event.state === 'idle' && event.sessionRef === rolloutUuid) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+      expect(seen).toContainEqual({ state: 'idle', sessionRef: rolloutUuid })
     },
     15000,
   )
@@ -664,7 +738,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
   it(
     '对同一个已 exited 的 prev 连续 resume 两次,第二次应被拒绝(先到先得,对齐 builtin,P2 review #2)',
     async () => {
-      const { adapter, workerId } = await provisionedAdapter([{ output: '主线输出', exit: true }])
+      const { adapter, workerId } = await provisionedAdapter([{ output: '主线输出', exit: true }], { withRollout: true })
       const h1 = await adapter.spawn(makeSpec(workerId, '你好'))
       await waitForState(adapter, h1, 'exited')
 
@@ -722,7 +796,8 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter (tmux + mock CLI)', () => {
       const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
       const stopHookCmd = channel.hookCommand('stop')
       const argvFile = path.join(dataDir, 'resume-argv.jsonl')
-      const codexBin = codexBinFor([{ output: '主线输出', exit: true }], stopHookCmd, { argvFile })
+      const rolloutFile = path.join(workspaceRoot, '.codex', 'sessions', rolloutFileNameFor(randomUUID()))
+      const codexBin = codexBinFor([{ output: '主线输出', exit: true }], stopHookCmd, { argvFile, rolloutFile })
       const adapter = new CodexWorkerAdapter({ dataDir, tmux, codexBin, sessionDiscoveryTimeoutMs: 500 })
       await adapter.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
       const workerId = `codextest-${randomUUID().slice(0, 8)}`
@@ -788,7 +863,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 四轮 review PoC 回归
     async () => {
       const channel = new CliEventChannel(eventsFilePath({ root: workspaceRoot }))
       const stopHookCmd = channel.hookCommand('stop')
-      const codexBin = codexBinFor([{ output: '第一段输出' }, { output: '第二段输出' }], stopHookCmd)
+      const codexBin = codexBinFor([{ output: '第一段输出', emitStop: true }, { output: '第二段输出' }], stopHookCmd)
 
       const adapterA = new CodexWorkerAdapter({ dataDir, tmux, codexBin, sessionDiscoveryTimeoutMs: 500 })
       await adapterA.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
@@ -796,6 +871,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 四轮 review PoC 回归
       const h = await adapterA.spawn({ worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } })
 
       await waitForOutputContains(adapterA, h, '第一段输出')
+      await waitForState(adapterA, h, 'idle')
 
       // "重启":全新 adapter 实例,同一 dataDir,内存 runtimes 为空,从未见过这个化身。
       const adapterB = new CodexWorkerAdapter({ dataDir, tmux, codexBin: 'unused-not-invoked-by-sendInput' })
@@ -847,7 +923,8 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 四轮 review PoC 回归
       // 每次新起的进程(spawn/resume)都从脚本第 0 步重新跑——mock CLI 每次调用都是全新进程,
       // 不记跨调用状态。这里让脚本第一步就 exit,主线与每一次 resume 都会立刻落 exited,
       // 不需要真的等 notify。
-      const codexBin = codexBinFor([{ output: '输出', exit: true }], stopHookCmd)
+      const rolloutFile = path.join(workspaceRoot, '.codex', 'sessions', rolloutFileNameFor(randomUUID()))
+      const codexBin = codexBinFor([{ output: '输出', exit: true }], stopHookCmd, { rolloutFile })
 
       const adapterA = new CodexWorkerAdapter({ dataDir, tmux, codexBin, sessionDiscoveryTimeoutMs: 500 })
       await adapterA.provision({ root: workspaceRoot }, { skills: [], mcp_servers: [] })
@@ -899,11 +976,17 @@ class SwitchableTmuxDriver extends TmuxDriver {
   async newSession(spec: TmuxSessionSpec): Promise<void> {
     return this.current.newSession(spec)
   }
+  async pasteText(name: string, text: string): Promise<void> {
+    return this.current.pasteText(name, text)
+  }
   async sendText(name: string, text: string): Promise<void> {
     return this.current.sendText(name, text)
   }
   async sendKeys(name: string, keys: string[]): Promise<void> {
     return this.current.sendKeys(name, keys)
+  }
+  async capturePane(name: string) {
+    return this.current.capturePane(name)
   }
   async isAlive(name: string): Promise<boolean> {
     return this.current.isAlive(name)
@@ -950,7 +1033,8 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — spawn 提交纪律', () 
 
       const metaRaw = await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')
       const meta = JSON.parse(metaRaw) as { state: WorkerContractState }
-      expect(meta.state).toBe('running')
+      expect(meta.state).toBe('idle')
+      expect(h.initial_input).toMatchObject({ control_state: 'waiting_action', disposition: 'not_pasted' })
 
       await adapter.kill(h)
     },
@@ -958,15 +1042,18 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — spawn 提交纪律', () 
   )
 
   it(
-    '首条 sendText 失败时,不放任 running——按 kill 路径落 exited(crashed),spawn 仍 reject',
+    '首条 pasteText 失败时,不放任 running——按 kill 路径落 exited(crashed),spawn 仍 reject',
     async () => {
       class NewSessionOkSendTextFailsTmux extends TmuxDriver {
         killed = false
         async newSession(spec: TmuxSessionSpec): Promise<void> {
           return super.newSession(spec)
         }
-        async sendText(_name: string, _text: string): Promise<void> {
-          throw new Error('simulated sendText failure')
+        async capturePane(_name: string) {
+          return { text: '› \n? for shortcuts' }
+        }
+        async pasteText(_name: string, _text: string): Promise<void> {
+          throw new Error('simulated pasteText failure')
         }
         async killSession(name: string): Promise<void> {
           this.killed = true
@@ -979,7 +1066,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — spawn 提交纪律', () 
       const workerId = `codextest-${randomUUID().slice(0, 8)}`
       const spec: SpawnSpec = { worker_id: workerId, prompt: '你好', workspace: { root: workspaceRoot } }
 
-      await expect(adapter.spawn(spec)).rejects.toThrow('simulated sendText failure')
+      await expect(adapter.spawn(spec)).rejects.toThrow('simulated pasteText failure')
 
       const metaRaw = await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8')
       const meta = JSON.parse(metaRaw) as { state: WorkerContractState; ended_reason?: string }
@@ -1017,7 +1104,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — spawn 提交纪律', () 
       await adapter.spawn(spec).catch(() => {})
 
       expect(tmux.lastEnv).toBeDefined()
-      expect(tmux.lastEnv!.PATH).toBe(`${toolDir}:${process.env.PATH ?? ''}`)
+      expect(tmux.lastEnv!.PATH).toBe(`${await fs.realpath(toolDir)}:${process.env.PATH ?? ''}`)
       expect(tmux.lastEnv!.CODEX_HOME).toBe(path.join(workspaceRoot, '.codex'))
 
       await fs.rm(toolDir, { recursive: true, force: true }).catch(() => {})
@@ -1066,7 +1153,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — spawn 提交纪律', () 
         const workerId2 = `codextest-${randomUUID().slice(0, 8)}`
         await adapter.spawn({ worker_id: workerId2, prompt: '你好', workspace: { root: workspaceRoot } }).catch(() => {})
         expect(tmux.envs[1]).toBeDefined()
-        expect(tmux.envs[1]!.PATH).toBe(`${toolDir}:${process.env.PATH}`)
+        expect(tmux.envs[1]!.PATH).toBe(`${await fs.realpath(toolDir)}:${process.env.PATH}`)
       } finally {
         process.env.PATH = originalPath
         await fs.rm(toolDir, { recursive: true, force: true }).catch(() => {})
@@ -1245,13 +1332,24 @@ describe('CodexWorkerAdapter.fork — capabilities.fork=false', () => {
 
 /** 全程无操作的假 TmuxDriver——readTrace 测试只需要一个"常驻 runtime"的化身,不关心 tmux 行为本身。 */
 class NoopTmux extends TmuxDriver {
+  paneText = '› \n? for shortcuts'
+  alive = true
+
   async newSession(spec: TmuxSessionSpec): Promise<void> {
     await fakeReadyNewSession(spec)
   }
+  async pasteText(_name: string, text: string): Promise<void> {
+    this.paneText = `› ${text}\n? for shortcuts`
+  }
   async sendText(_name: string, _text: string): Promise<void> {}
-  async sendKeys(_name: string, _keys: string[]): Promise<void> {}
+  async sendKeys(_name: string, keys: string[]): Promise<void> {
+    if (keys.includes('Enter')) this.paneText = '› \nWorking (esc to interrupt)'
+  }
+  async capturePane(_name: string) {
+    return { text: this.paneText }
+  }
   async isAlive(_name: string): Promise<boolean> {
-    return true
+    return this.alive
   }
   async killSession(_name: string): Promise<void> {}
 }
@@ -1612,6 +1710,53 @@ describe('CodexWorkerAdapter — CLI notify 事件文件监视(被动 push)', ()
     await adapter.kill(h)
   })
 
+  it('waiting_action同时观察到新turn-complete与pane死亡时按完成边界推断，不误记crashed', async () => {
+    const tmux = new NoopTmux()
+    const adapter = new CodexWorkerAdapter({
+      dataDir,
+      tmux,
+      codexBin: 'unused',
+      sessionDiscoveryTimeoutMs: 50,
+    })
+    const workerId = `codextest-${randomUUID().slice(0, 8)}`
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '干活', workspace: { root: workspaceRoot } })
+
+    await appendStopEvent()
+    expect(await adapter.state(h)).toBe('idle')
+    tmux.paneText = 'unknown modal surface'
+    await expect(adapter.sendInput(h, '暂扣输入')).rejects.toBeTruthy()
+    expect(await adapter.state(h)).toBe('idle')
+
+    tmux.alive = false
+    await appendStopEvent()
+    expect(await adapter.state(h)).toBe('exited')
+    const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+    expect(meta.ended_reason).toBe('completed')
+  })
+
+  it('waiting_text期间到达的后续stop仍推进基线，不会让下一轮刚开始就被旧stop判回idle', async () => {
+    const tmux = new NoopTmux()
+    const adapter = new CodexWorkerAdapter({
+      dataDir,
+      tmux,
+      codexBin: 'unused',
+      sessionDiscoveryTimeoutMs: 50,
+    })
+    const workerId = `codextest-${randomUUID().slice(0, 8)}`
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '干活', workspace: { root: workspaceRoot } })
+
+    await appendStopEvent()
+    expect(await adapter.state(h)).toBe('idle')
+    await appendStopEvent()
+    expect(await adapter.state(h)).toBe('idle')
+
+    tmux.paneText = '› \n? for shortcuts'
+    await adapter.sendInput(h, '下一轮')
+    expect(await adapter.state(h)).toBe('running')
+
+    await adapter.kill(h)
+  })
+
   it('化身落终态后 watcher 停止:kill 之后再追加 stop 事件不再产生任何状态回调', async () => {
     const seen: WorkerContractState[] = []
     const tmux = new NoopTmux()
@@ -1751,10 +1896,10 @@ describe('CodexWorkerAdapter.ensureRuntime — 并发重建不泄漏 watcher', (
 describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 启动期就绪握手(\\e[?2004h)', () => {
   /** 记录 sendText 调用,其余行为完全走真实 TmuxDriver。 */
   class SpyTmux extends TmuxDriver {
-    readonly sendTextCalls: Array<{ name: string; text: string }> = []
-    async sendText(name: string, text: string): Promise<void> {
-      this.sendTextCalls.push({ name, text })
-      return super.sendText(name, text)
+    readonly pasteTextCalls: Array<{ name: string; text: string }> = []
+    async pasteText(name: string, text: string): Promise<void> {
+      this.pasteTextCalls.push({ name, text })
+      return super.pasteText(name, text)
     }
   }
 
@@ -1829,7 +1974,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 启动期就绪握手(\\
       }
 
       expect(await submissions()).toEqual([MULTILINE_PROMPT])
-      expect(tmux.sendTextCalls).toHaveLength(1)
+      expect(tmux.pasteTextCalls).toHaveLength(1)
     },
     30000,
   )
@@ -1858,9 +2003,9 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 启动期就绪握手(\\
       const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
       await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
 
-      expect(tmux.sendTextCalls).toEqual([])
+      expect(tmux.pasteTextCalls).toEqual([])
       await new Promise((r) => setTimeout(r, 500))
-      expect(tmux.sendTextCalls).toEqual([])
+      expect(tmux.pasteTextCalls).toEqual([])
       expect(await submissions()).toEqual([])
     },
     30000,
@@ -1877,10 +2022,15 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 启动期就绪握手(\\
       })
       const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
 
-      const idle = seen.filter((s) => s.state === 'idle')
-      expect(idle).toHaveLength(1)
-      expect(idle[0].report?.outputTail).toContain(banner)
-      expect(idle[0].report?.outputTail).toContain('一个字符都没有投递')
+      const stalled = h.initial_input
+      expect(stalled).toMatchObject({
+        control_state: 'waiting_action',
+        disposition: 'not_pasted',
+        report: { waitReason: 'startup_stall' },
+      })
+      expect(stalled?.report?.outputTail).toContain(banner)
+      expect(stalled?.report?.outputTail).toContain('一个字符都没有投递')
+      expect(seen).toEqual([])
 
       const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
       expect(meta.state).toBe('idle')
@@ -1895,7 +2045,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 启动期就绪握手(\\
       // 六轮 review,与 cc adapter 的同名用例同款:syncState 缺省推断是"非 kill ⇒ completed"
       // (§6.3 给"干过活之后自然退出"校准的),但这条路径上开工输入一个字符都没投递过——吃下
       // 缺省就会让 harness 把 task 记成 **completed**,manager 与 recovery 从此不再过问它
-      // (正是 #66 修的那类"失败记成成功")。把 reportStartupStall 里的 'crashed' 改回缺省,
+      // (正是 #66 修的那类"失败记成成功")。把 initialStartupStall 里的 'crashed' 改回缺省,
       // 这条用例就挂。
       const seen: Array<{ state: WorkerContractState; endReason?: string }> = []
       const adapter = new CodexWorkerAdapter({
@@ -1914,13 +2064,17 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 启动期就绪握手(\\
       const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
       expect(Date.now() - startedAt).toBeLessThan(15_000)
 
-      expect(tmux.sendTextCalls).toEqual([])
+      expect(tmux.pasteTextCalls).toEqual([])
       const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
       expect(meta.state).toBe('exited')
       expect(meta.ended_reason).toBe('crashed')
       expect(await adapter.state(h)).toBe('exited')
-      // 台账那一侧收到的也必须是 crashed —— harness 一律取 adapter 上报的这个真值落 task。
-      expect(seen).toContainEqual({ state: 'exited', endReason: 'crashed' })
+      expect(h.initial_input).toMatchObject({
+        control_state: 'exited',
+        disposition: 'not_pasted',
+        report: { endReason: 'crashed' },
+      })
+      expect(seen).toEqual([])
     },
     40000,
   )
@@ -1928,7 +2082,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 启动期就绪握手(\\
   it(
     '这条 idle 粘得住:再调 state() 不会被三源判定翻回 running(pane 活着 + turn-complete 计数恒不涨)',
     async () => {
-      // 与 cc adapter 的同名用例同款(五轮 review):去掉 syncState 里维持 startupStalled 的
+      // 与 cc adapter 的同名用例同款(五轮 review):去掉 syncState 里维持 waiting_action 的
       // 那一支,computed 恒为 running,刚落的 idle 连同台账一起被翻回"正在干活"。
       const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
       const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
@@ -1937,7 +2091,9 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 启动期就绪握手(\\
       expect(await adapter.state(h)).toBe('idle')
       const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
       expect(meta.state).toBe('idle')
-      expect(meta.startup_stalled).toBe(true)
+      expect(meta.wait_mode).toBe('action')
+      expect(meta.wait_reason).toBe('startup_stall')
+      expect(meta.startup_stalled).toBeUndefined()
     },
     30000,
   )
@@ -1961,7 +2117,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 启动期就绪握手(\\
       // 与 cc adapter 的同名用例同款(七轮 review):deadReason 形参只管住"握手等待期间就死了"
       // 那一个时点,而暂扣是持续状态——idle 落定之后才死的化身,后续任何一次 syncState 判到
       // exited 仍会吃缺省推断,把没投递过一个字符的 worker 记成"成功完成"。去掉 syncState
-      // exited 分支里的 startupStalled 判断,这条用例就挂。
+      // exited 分支里的 waiting_action 判断,这条用例就挂。
       const { adapter, seen, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
       const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
       expect(await adapter.state(h)).toBe('idle')
@@ -2006,15 +2162,13 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 启动期就绪握手(\\
   )
 
   it(
-    'sendInput 投递成功之后才死 → 仍走缺省推断(completed),这条修正不误伤干过活的化身',
+    'manager显式raw Enter后出现active证据，随后进程死亡按completed推断',
     async () => {
-      // 反向钉住"没干过活"与"干过活"的分界:startupStalled 在 sendInput 成功后被清除(连同
-      // 落盘的 startup_stalled),此后的自然退出照旧是 §6.3 的 completed 推断。
       const { adapter, seen, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
       const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
       expect(await adapter.state(h)).toBe('idle')
 
-      await adapter.sendInput(h, 'Enter', { raw: true })
+      await expect(adapter.sendInput(h, 'Enter', { raw: true })).resolves.toBeUndefined()
       expect(await adapter.state(h)).toBe('running')
 
       execFileSync('tmux', ['kill-session', '-t', `crabot-w-${workerId}-1`], { stdio: 'ignore' })
@@ -2028,18 +2182,62 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 启动期就绪握手(\\
   )
 
   it(
-    'manager 出手(sendInput)之后暂扣解除:状态回到 running,落盘也不再带 startup_stalled',
+    'startup stall上的raw只发指定键；出现active证据后转running',
     async () => {
       const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
       const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
       expect(await adapter.state(h)).toBe('idle')
 
-      await adapter.sendInput(h, 'Enter', { raw: true })
-
+      await expect(adapter.sendInput(h, 'Enter', { raw: true })).resolves.toBeUndefined()
       expect(await adapter.state(h)).toBe('running')
       const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
       expect(meta.state).toBe('running')
-      expect(meta.startup_stalled).toBeUndefined()
+      expect(meta.wait_mode).toBeUndefined()
+    },
+    30000,
+  )
+
+  it(
+    'raw键未送达前pane退出时仍抛WorkerExitedError，保留透明接续信号',
+    async () => {
+      const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+      const sendKeys = vi.spyOn(tmux, 'sendKeys').mockImplementation(async (name) => {
+        await tmux.killSession(name)
+        throw new Error('pane exited before keys were sent')
+      })
+
+      try {
+        await expect(adapter.sendInput(h, 'C-d', { raw: true })).rejects.toMatchObject({
+          name: 'WorkerExitedError',
+          ended_reason: 'crashed',
+        })
+      } finally {
+        sendKeys.mockRestore()
+      }
+    },
+    30000,
+  )
+
+  it(
+    'raw键已送达且导致pane退出时正常结算，不把键名当未投递正文透明接续',
+    async () => {
+      const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+      const originalSendKeys = tmux.sendKeys.bind(tmux)
+      const sendKeys = vi.spyOn(tmux, 'sendKeys').mockImplementation(async (name, keys) => {
+        await originalSendKeys(name, keys)
+        await tmux.killSession(name)
+      })
+
+      try {
+        await expect(adapter.sendInput(h, 'C-d', { raw: true })).resolves.toBeUndefined()
+        expect(await adapter.state(h)).toBe('exited')
+        const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+        expect(meta.ended_reason).toBe('completed')
+      } finally {
+        sendKeys.mockRestore()
+      }
     },
     30000,
   )
@@ -2047,7 +2245,7 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 启动期就绪握手(\\
   it(
     '带给 manager 的 output 尾部是可读文本,不是转义序列——与 read_worker_output 同一形态',
     async () => {
-      // 与 cc adapter 的同名用例同款:去掉 reportStartupStall 里那次 decodeTerminalOutput,
+      // 与 cc adapter 的同名用例同款:去掉 initialStartupStall 里那次 decodeTerminalOutput,
       // manager 拿到的就是原样转义字节,而它读同一份日志的另一条路(read_worker_output)
       // 拿到的是解码后的文本。
       const banner = [
@@ -2060,9 +2258,9 @@ describe.skipIf(!tmuxAvailable)('CodexWorkerAdapter — 启动期就绪握手(\\
         pasteReadyTimeoutMs: 2000,
         banner,
       })
-      await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
 
-      const tail = seen.find((s) => s.state === 'idle')?.report?.outputTail
+      const tail = h.initial_input?.report?.outputTail
       expect(tail).toBeTruthy()
       expect(tail).not.toContain('\u001b')
       expect(tail).toMatch(/Sign in with ChatGPT\n\s*1\. Provide your own API key/)

@@ -14,7 +14,7 @@ import { LedgerStore } from '../../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../../src/workers/harness/workspace-manager'
 import { dialogObjectIdForPrivate } from '../../../src/workers/harness/ledger-types'
 import type { HarnessEvent } from '../../../src/workers/harness/worker-events'
-import { WorkerExitedError } from '../../../src/workers/errors'
+import { CliInputStallError, WorkerExitedError } from '../../../src/workers/errors'
 import { BuiltinWorkerAdapter } from '../../../src/workers/builtin/adapter'
 import type { BuiltinRuntimeContext } from '../../../src/workers/builtin/runtime'
 import type { LLMAdapter } from '../../../src/engine/llm-adapter-types.js'
@@ -50,6 +50,8 @@ interface FakeAdapterOpts {
   readonly resumeBehavior?: (prev: IncarnationRef, wakeInput: string) => Promise<IncarnationHandle> | IncarnationHandle
   readonly spawnBehavior?: (spec: SpawnSpec) => Promise<IncarnationHandle> | IncarnationHandle
   readonly outputChunk?: string
+  readonly acceptedExitReport?: StateChangeReport
+  readonly updatedSessionRef?: string
 }
 
 class FakeAdapter implements WorkerAdapter {
@@ -61,6 +63,8 @@ class FakeAdapter implements WorkerAdapter {
   readonly killCalls: IncarnationHandle[] = []
   readonly readOutputCalls: IncarnationHandle[] = []
   private readonly states = new Map<string, WorkerContractState>()
+  private acceptedExitReport?: StateChangeReport
+  private updatedSessionRef?: string
   private nextSeq = 1
 
   constructor(private readonly opts: FakeAdapterOpts = {}) {
@@ -109,6 +113,20 @@ class FakeAdapter implements WorkerAdapter {
   async sendInput(h: IncarnationHandle, text: string, opts?: { raw?: boolean }): Promise<void> {
     this.sendInputCalls.push({ h, text, opts })
     if (this.opts.sendInputBehavior) await this.opts.sendInputBehavior(h, text, opts)
+    if (this.opts.updatedSessionRef) this.updatedSessionRef = this.opts.updatedSessionRef
+    if (this.opts.acceptedExitReport) this.acceptedExitReport = this.opts.acceptedExitReport
+  }
+
+  takeUpdatedSessionRef(): string | undefined {
+    const value = this.updatedSessionRef
+    this.updatedSessionRef = undefined
+    return value
+  }
+
+  takeAcceptedInputExit(): StateChangeReport | undefined {
+    const value = this.acceptedExitReport
+    this.acceptedExitReport = undefined
+    return value
   }
 
   async readOutput(h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
@@ -256,6 +274,151 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     const resumedEvents = events.filter((e) => e.kind === 'resumed')
     expect(resumedEvents).toHaveLength(1)
     expect(resumedEvents[0].seq).toBe(w.incarnations[1].seq)
+  })
+
+  it('resume首投accepted后同步completed：新化身与task按endReason落completed', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    const fake = new FakeAdapter({
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      resumeBehavior: (prev) => ({
+        worker_id: prev.worker_id,
+        seq: 2,
+        impl: 'builtin',
+        session_ref: `resumed-${prev.worker_id}`,
+        initial_input: {
+          control_state: 'exited',
+          disposition: 'accepted',
+          report: { endReason: 'completed' },
+        },
+      }),
+    })
+    adaptersMap.set('builtin', fake)
+    const worker = await harness.spawnWorker(spawnParams())
+    const h: IncarnationHandle = { worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }
+    fake.emitStateChange(h, 'exited')
+    await waitUntil(async () => (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0].task.status === 'completed')
+
+    await harness.sendToWorker(worker.worker_id, 'continue')
+    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(settled.task.status).toBe('completed')
+    expect(settled.incarnations[1]).toMatchObject({ state: 'exited', ended_reason: 'completed' })
+  })
+
+  it('resume首投not_pasted保留原durable receipt，kill后结算dead-letter', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    const fake = new FakeAdapter({
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      resumeBehavior: (prev) => ({
+        worker_id: prev.worker_id,
+        seq: 2,
+        impl: 'builtin',
+        session_ref: `resumed-${prev.worker_id}`,
+        initial_input: {
+          control_state: 'waiting_action',
+          disposition: 'not_pasted',
+          report: { waitReason: 'input_surface_unavailable' },
+        },
+      }),
+    })
+    adaptersMap.set('builtin', fake)
+    const worker = await harness.spawnWorker(spawnParams())
+    fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }, 'exited')
+    await waitUntil(async () => (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0].task.status === 'completed')
+    const settlements: string[] = []
+
+    await harness.sendToWorker(worker.worker_id, 'durable bg', {
+      dedupeKey: 'bg-shell:resume-not-pasted',
+      onSettled: async (settlement) => { settlements.push(settlement) },
+    })
+    expect(settlements).toEqual([])
+
+    await harness.killWorker(worker.worker_id, 'test')
+    expect(settlements).toEqual(['dead_letter'])
+  })
+
+  it('resume首投exited+not_pasted不提前结算durable receipt，继续接续到真正accepted', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    let resumeCount = 0
+    const fake = new FakeAdapter({
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      resumeBehavior: (prev) => {
+        resumeCount++
+        if (resumeCount === 1) {
+          return {
+            worker_id: prev.worker_id,
+            seq: 2,
+            impl: 'builtin',
+            session_ref: `resumed-${prev.worker_id}-2`,
+            initial_input: {
+              control_state: 'exited',
+              disposition: 'not_pasted',
+              report: { endReason: 'crashed' },
+            },
+          }
+        }
+        return {
+          worker_id: prev.worker_id,
+          seq: 3,
+          impl: 'builtin',
+          session_ref: `resumed-${prev.worker_id}-3`,
+          initial_input: { control_state: 'running', disposition: 'accepted' },
+        }
+      },
+    })
+    adaptersMap.set('builtin', fake)
+    const worker = await harness.spawnWorker(spawnParams())
+    fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }, 'exited')
+    await waitUntil(async () => (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0].task.status === 'completed')
+    const settlements: string[] = []
+
+    await harness.sendToWorker(worker.worker_id, 'durable terminal retry', {
+      dedupeKey: 'bg-shell:resume-terminal-not-pasted',
+      onSettled: async (settlement) => { settlements.push(settlement) },
+    })
+
+    expect(fake.resumeCalls).toHaveLength(2)
+    expect(settlements).toEqual(['delivered'])
+    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(settled.incarnations[settled.incarnations.length - 1]).toMatchObject({
+      seq: 3,
+      state: 'running',
+    })
+  })
+
+  it('resume首投pending_in_ui保留原durable receipt，raw提交后才结算delivered', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    const fake = new FakeAdapter({
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      resumeBehavior: (prev) => ({
+        worker_id: prev.worker_id,
+        seq: 2,
+        impl: 'builtin',
+        session_ref: `resumed-${prev.worker_id}`,
+        initial_input: {
+          control_state: 'waiting_action',
+          disposition: 'pending_in_ui',
+          report: { waitReason: 'input_pending' },
+        },
+      }),
+    })
+    adaptersMap.set('builtin', fake)
+    const worker = await harness.spawnWorker(spawnParams())
+    fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }, 'exited')
+    await waitUntil(async () => (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0].task.status === 'completed')
+    const settlements: string[] = []
+
+    await harness.sendToWorker(worker.worker_id, 'durable bg', {
+      dedupeKey: 'bg-shell:resume-pending',
+      onSettled: async (settlement) => { settlements.push(settlement) },
+    })
+    expect(settlements).toEqual([])
+
+    await harness.sendToWorker(worker.worker_id, 'Enter', { raw: true })
+    expect(settlements).toEqual(['delivered'])
   })
 
   it('adapter.sendInput 抛 WorkerExitedError（台账还没追上）→ 同样透明接续，事件 resumed', async () => {
@@ -451,6 +614,81 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
     expect(supersededEvents).toHaveLength(1)
   })
 
+  it('handoff目标首投accepted后同步completed：新化身与task按endReason落completed', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    const source = new FakeAdapter({
+      caps: { revive: false },
+      onStateChange: harness.handleStateChange,
+      sendInputBehavior: (h) => { throw new WorkerExitedError(h.worker_id, h.seq) },
+    })
+    const target = new FakeAdapter({
+      implId: 'claude-code',
+      onStateChange: harness.handleStateChange,
+      spawnBehavior: (spec) => ({
+        worker_id: spec.worker_id,
+        seq: 1,
+        impl: 'claude-code',
+        session_ref: `target-${spec.worker_id}`,
+        initial_input: {
+          control_state: 'exited',
+          disposition: 'accepted',
+          report: { endReason: 'completed' },
+        },
+      }),
+    })
+    adaptersMap.set('builtin', source)
+    adaptersMap.set('claude-code', target)
+    const worker = await harness.spawnWorker(spawnParams())
+
+    await harness.sendToWorker(worker.worker_id, 'continue')
+    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(settled.task.status).toBe('completed')
+    expect(settled.incarnations[settled.incarnations.length - 1]).toMatchObject({
+      impl: 'claude-code',
+      state: 'exited',
+      ended_reason: 'completed',
+    })
+  })
+
+  it('handoff首投not_pasted保留原durable receipt和完整handoff prompt', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    const source = new FakeAdapter({
+      caps: { revive: false },
+      onStateChange: harness.handleStateChange,
+      sendInputBehavior: (h) => { throw new WorkerExitedError(h.worker_id, h.seq) },
+    })
+    const target = new FakeAdapter({
+      implId: 'claude-code',
+      onStateChange: harness.handleStateChange,
+      spawnBehavior: (spec) => ({
+        worker_id: spec.worker_id,
+        seq: 1,
+        impl: 'claude-code',
+        session_ref: `target-${spec.worker_id}`,
+        initial_input: {
+          control_state: 'waiting_action',
+          disposition: 'not_pasted',
+          report: { waitReason: 'input_surface_unavailable' },
+        },
+      }),
+    })
+    adaptersMap.set('builtin', source)
+    adaptersMap.set('claude-code', target)
+    const worker = await harness.spawnWorker(spawnParams())
+    const settlements: string[] = []
+
+    await harness.sendToWorker(worker.worker_id, 'durable handoff', {
+      dedupeKey: 'bg-shell:handoff-not-pasted',
+      onSettled: async (settlement) => { settlements.push(settlement) },
+    })
+    expect(settlements).toEqual([])
+    expect(target.spawnCalls[0].prompt).toContain('durable handoff')
+    expect(target.spawnCalls[0].prompt).toContain('交接续办')
+
+    await harness.killWorker(worker.worker_id, 'test')
+    expect(settlements).toEqual(['dead_letter'])
+  })
+
   it('源化身台账已记 failed 时，HANDOFF.md 的 Previous outcome 写 failed —— 接手化身不会以为上一棒干成了', async () => {
     // 第四个消费方（台账 / task.status / 对外事件之外）：HANDOFF.md 的 `Previous outcome:` 取
     // `worker.task.outcome ?? source.ended_reason ?? 'unknown'`，而 task.outcome 在生产链路上
@@ -545,6 +783,79 @@ describe('WorkerHarness.switchWorkerImpl — 跨实现切换', () => {
 
     expect(events.filter((e) => e.kind === 'handoff_started')).toHaveLength(1)
     expect(events.filter((e) => e.kind === 'superseded')).toHaveLength(1)
+  })
+
+  it('replays and settles a consumed durable receipt on the target incarnation', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    const source = new FakeAdapter({
+      implId: 'claude-code',
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      sendInputBehavior: async (_h, text, opts) => {
+        if (!opts?.raw && text === 'bg') {
+          throw new CliInputStallError('pending_in_ui', 'running', {
+            waitReason: 'input_pending',
+            outputTail: '❯ bg',
+          })
+        }
+      },
+    })
+    const target = new FakeAdapter({ implId: 'codex', caps: { revive: true }, onStateChange: harness.handleStateChange })
+    adaptersMap.set('claude-code', source)
+    adaptersMap.set('codex', target)
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    const settlements: string[] = []
+
+    await harness.sendToWorker(worker.worker_id, 'bg', {
+      dedupeKey: 'bg-shell:1',
+      onSettled: async (settlement) => { settlements.push(settlement) },
+    })
+    expect(settlements).toEqual([])
+
+    await harness.switchWorkerImpl(worker.worker_id, 'codex', 'move durable notification')
+
+    expect(target.sendInputCalls.filter((call) => call.text === 'bg')).toHaveLength(1)
+    expect(settlements).toEqual(['delivered'])
+  })
+
+  it('replays an in-flight durable stall that resolves after the explicit switch', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    let markEntered!: () => void
+    const entered = new Promise<void>((resolve) => { markEntered = resolve })
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const source = new FakeAdapter({
+      implId: 'claude-code',
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      sendInputBehavior: async (_h, text, opts) => {
+        if (!opts?.raw && text === 'bg') {
+          markEntered()
+          await gate
+          throw new CliInputStallError('pending_in_ui', 'running', {
+            waitReason: 'input_pending',
+            outputTail: '❯ bg',
+          })
+        }
+      },
+    })
+    const target = new FakeAdapter({ implId: 'codex', caps: { revive: true }, onStateChange: harness.handleStateChange })
+    adaptersMap.set('claude-code', source)
+    adaptersMap.set('codex', target)
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    const settlements: string[] = []
+
+    const send = harness.sendToWorker(worker.worker_id, 'bg', {
+      dedupeKey: 'bg-shell:1',
+      onSettled: async (settlement) => { settlements.push(settlement) },
+    })
+    await entered
+    await harness.switchWorkerImpl(worker.worker_id, 'codex', 'switch while old send is in flight')
+    release()
+    await send
+
+    expect(target.sendInputCalls.filter((call) => call.text === 'bg')).toHaveLength(1)
+    expect(settlements).toEqual(['delivered'])
   })
 })
 
@@ -1156,6 +1467,32 @@ describe('WorkerHarness — 终审 PoC 回归：M2 kill 与 in-flight flush 竞�
 })
 
 describe('WorkerHarness — 终审 PoC 回归：M3 continueTerminalWorker 守卫按 (impl,seq) 收口 + raw 透传', () => {
+  async function sendAcrossConcurrentSwitch(targetOpts: FakeAdapterOpts, text: string) {
+    const { harness, adaptersMap } = await makeHarness()
+    let releaseGate!: (err: Error) => void
+    const gate = new Promise<void>((_resolve, reject) => { releaseGate = reject })
+    const source = new FakeAdapter({
+      implId: 'claude-code',
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      sendInputBehavior: async () => { await gate },
+    })
+    const target = new FakeAdapter({
+      implId: 'codex',
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      ...targetOpts,
+    })
+    adaptersMap.set('claude-code', source)
+    adaptersMap.set('codex', target)
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    const send = harness.sendToWorker(worker.worker_id, text)
+    await waitUntil(async () => source.sendInputCalls.length === 1)
+    await harness.switchWorkerImpl(worker.worker_id, 'codex', '并发切换')
+    releaseGate(new WorkerExitedError(worker.worker_id, 1))
+    return { harness, target, send }
+  }
+
   it('deliver 卡在 sendInput 期间发生跨实现 switchWorkerImpl（seq 撞号）：不误把存活新主线当终态接续，补送到新主线且保留 raw', async () => {
     const { harness, adaptersMap } = await makeHarness()
     let releaseGate!: (err: Error) => void
@@ -1227,6 +1564,39 @@ describe('WorkerHarness — 终审 PoC 回归：M3 continueTerminalWorker 守卫
     // 没有产生第三个化身（没有误触发一次多余的 revive/handoff）。
     const after = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
     expect(after.incarnations).toHaveLength(2)
+  })
+
+  it('补送到并发新主线时把CLI stall收敛为hold而不向调用方抛错', async () => {
+    const { send, target } = await sendAcrossConcurrentSwitch({
+      sendInputBehavior: () => {
+        throw new CliInputStallError('pending_in_ui', 'running', {
+          waitReason: 'input_pending',
+          outputTail: '❯ queued text',
+        })
+      },
+    }, '并发补送 stall')
+
+    await expect(send).resolves.toBeUndefined()
+    expect(target.sendInputCalls.filter((call) => call.text === '并发补送 stall')).toHaveLength(1)
+  })
+
+  it('补送到并发新主线时消费accepted exit和延后发现的session_ref', async () => {
+    const realSessionRef = '019fe15f-cbd9-76c1-9a18-e6c2e1d2b2d9'
+    const { harness, send } = await sendAcrossConcurrentSwitch({
+      acceptedExitReport: { endReason: 'completed' },
+      updatedSessionRef: realSessionRef,
+    }, '并发补送 accepted exit')
+
+    await expect(send).resolves.toBeUndefined()
+    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const mainline = settled.incarnations[settled.incarnations.length - 1]
+    expect(mainline).toMatchObject({
+      impl: 'codex',
+      session_ref: realSessionRef,
+      state: 'exited',
+      ended_reason: 'completed',
+    })
+    expect(settled.task.status).toBe('completed')
   })
 })
 

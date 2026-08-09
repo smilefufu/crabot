@@ -1,15 +1,16 @@
 # Crabot 项目进度
 
-> 最后更新：2026-08-08 — PR #80 最终收口已实现、推送并进入自动 review
+> 最后更新：2026-08-09 — PR #80 已合并；PR #82 placeholder 落地等待回归已修复并通过回归，待推送
 
-## 2026-08-08 — PR #80：legacy loop 最终退役与 builtin bg-shell durable delivery（已推送，待自动 review）
+## 2026-08-09 — PR #80：legacy loop 最终退役与 builtin bg-shell durable delivery（已合并）
 
 - 已按 `protocol-agent-v3.md` v3.0.5 和 `2026-08-08-pr80-finalization-{design,plan}.md` 收口：`wait_for_signal` 零生产残留；`start_task` / `start_recovery_task` / `create_task_from_schedule` / `resume_task*` / `cancel_task` / `abort_worker` 不再注册生产 RPC，Admin restart resume/self-healing 与 recent-terminal revival 链路已删除。
 - builtin worker 的后台 shell owner 记录 `worker_id`；shell 终态与 `exit_notification=pending` 原子落 registry。正常 exit、startup reap、readopt reaper 均走同一 receipt，重启扫描 terminal+pending；实际 WorkerInbox 投递后落 `delivered`，取消/无 worker/无化身落 `dead_letter`，意外失败保持 pending 并做有界退避重试。
 - durable receipt 采用 at-least-once：adapter 已收输入但 settlement 未落盘的崩溃窄窗允许重放；同进程 retry 用稳定 `entity_id` 在 WorkerInbox 去重，不因暂扣提前 settlement。pending receipt 不被 task cleanup 或 7 日 GC 删除；每 worker 保持 FIFO、不同 worker 独立，startup reconciliation 先落实例级 settled gate，迟到创建的 AgentHandler 也会立即开门。
 - agent-native system task 没有 incarnation；启动对账若其仍非终态，明确标 `failed`（`execution context lost on agent restart`）并发状态事件。`sendToWorker` / `queryWorker` / `killWorker` / `switchWorkerImpl` 等 worker-only API 统一抛 domain error，不伪造 incarnation。
 - Admin 历史 task 只作归档：启动读取时把遗留非终态记录本地修复为 failed，不再尝试恢复或控制 Agent worker；memory graph rebuild 仍是 `trigger_schedule → system-thread manager → crab-memory` 的 manager-native 特例。
-- 当前验证：Shared/Agent/Admin TypeScript build 与 Admin Web production build 通过；durable registry/inbox/harness/reconciliation focused Agent 测试最终 **164 passed**，Admin focused 测试 **123 passed**。Agent 全量最终为 **2509 passed / 20 failed / 2 skipped**：20 条均为本机既有环境问题（9 条 claude-code contract + 5 条 harness integration tmux timeout、1 条 tmux pane 前台命令、2 条 `/var`→`/private/var` Codex PATH、3 条 workspace realpath），本次相关测试均通过。Admin 全量 **1069 passed / 1 failed**，唯一失败是既有 `v1-cleanup` 跨仓扫描命中 Agent 的 `store_memory` 测试字面。多轮 fresh/Claude review 发现 retry liveness、settlement-only repair、per-worker/startup FIFO、迟到 handler gate、startup pending-busy 口径与 explicit-seq domain error，均已修复并补回归；最终独立 durable 与 contract 复审均为 **no material findings**。实现已推送 PR #80，等待 latest-head 自动 review；不自行 merge。
+- PR #80 经 latest-head Claude `APPROVED` 后自动 squash merge 为 `331fee7`；未人工 merge。其后原 stacked PR #81 因 base branch 自动删除而关闭，CLI 六提交已 clean rebase 到 `origin/main@331fee7`。
+- 当前 clean CLI head 验证：Agent TypeScript build 通过；PR #80 durable/recovery + CLI/harness 组合 focused **16 files / 398 passed**。Agent 串行全量 **2596 passed / 4 failed / 2 skipped**，4 条均为既有 macOS tmux foreground-command 与 `/var`→`/private/var` workspace realpath 基线。Admin 维持上一轮 focused **70 passed**、全量 **1069 passed / 1** 个既有跨仓 fixture failure。
 
 ## 2026-08-07 — cc bypass 首次危险确认窗版本修复（进行中）
 
@@ -1216,3 +1217,12 @@ Module Manager (port 19000)
 - 已删除 legacy schedule RPC/recovery RPC 与等待工具；`process_message` 仅保留 admin_chat，媒体下载改为独立 manager 通知。
 - memory graph rebuild 改为 manager-native `trigger_schedule`，不再创建无法观察的 legacy pending task。
 - 当前定向构建与测试通过；全量回归及 PR review 尚待完成。
+
+## 2026-08-09 — CLI 交互输入提交（原 stacked PR #81 已关闭，clean PR 待开）
+
+- Claude Code / Codex 已迁移到单层 `running / waiting_text / waiting_action / exited` 控制状态；首投所有权由 `initial_input` 明确结算。
+- 输入提交实现同一 pane 内单次 paste、证据化 Enter（最多补一次）；modal/pending 由 raw 受控清障，普通 WorkerInbox FIFO 与 bg-shell 通知语义保持不变。
+- Codex 0.146 的 rollout 改为首条普通输入接受后发现；startup stall 经 raw 恢复时不再提前固化占位 session。
+- 已补齐十轮 PR review：在此前输入面、session-ref、continuation、durable receipt、raw pane-exit、Stop/revision 竞态、完成边界、CLI hook envelope、输出游标契约与 placeholder 修复之外，latest-head review 发现“所有 after-paste 都保留 placeholder”会让未落地 paste 跳过等待并误报 pending。现已收窄：折叠后的 composer 负责 empty/unavailable 分流，未折叠文本只用于匹配本次 expected；exact placeholder prompt→pending，不同 prompt + 原 placeholder→empty/not_pasted。最终独立限定 review `APPROVED`。
+- clean head TypeScript build、组合定向集 **16 files / 398 tests** 通过；Agent 串行全量 **2596 passed / 4 个既有 macOS 基线失败 / 2 skipped**。最新 placeholder 落地定向集 **4 files / 164 tests**、harness revision 定向集 **3 files / 137 tests** 通过。Claude Code 2.1.226 / Codex 0.146.0 真实 tmux 黑盒最近一次 `EXIT:0`，覆盖 spawn、resume、Claude steering、真实 AskUserQuestion interaction，以及 Codex pending→raw Tab native queue；证据目录 `/var/folders/rf/mby32wyn18788mw75fdvj4ch0000gp/T/crabot-cli-real-AVDfFe`。
+- clean PR #82 基于 `main@331fee7`；本轮 placeholder 落地等待修复待 commit/push，随后回复并 resolve 线程，等待 Claude approval，不自行 merge。

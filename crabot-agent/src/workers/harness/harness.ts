@@ -80,12 +80,17 @@ import type {
 } from '../types'
 import type { BuiltinRuntimeFactory } from '../builtin/runtime'
 import type { ResolvedPermissions } from '../../types'
-import { CapabilityNotSupportedError, WorkerExitedError } from '../errors'
+import { CapabilityNotSupportedError, WorkerExitedError, CliInputStallError } from '../errors'
 import { AsyncMutex } from '../async-mutex'
 import type { DialogObjectId, Incarnation, LedgerWorker, TaskStatus } from './ledger-types'
 import type { LedgerStore } from './ledger-store'
 import type { WorkspaceManager } from './workspace-manager'
-import { WorkerInbox, type InboxItem, type InboxSettlement } from './inbox'
+import {
+  WorkerInbox,
+  type InboxItem,
+  type InboxDeliveryResult,
+  type InboxSettlement,
+} from './inbox'
 import { WorkerEventLog, type HarnessEvent, type HarnessEventDelivery, type HarnessEventKind } from './worker-events'
 import { applyStatusTransition, canTransition, isTerminalStatus, reviveTask, taskStatusFromIncarnation } from './task-status'
 import { join } from 'path'
@@ -154,6 +159,62 @@ function truncateWakeText(
   if (trimmed.length <= maxChars) return trimmed
   const mark = `[已截断,共 ${trimmed.length} 字符${overflowHint}]`
   return keep === 'head' ? `${trimmed.slice(0, maxChars)}…${mark}` : `${mark}…${trimmed.slice(-maxChars)}`
+}
+
+function cliContractState(kind: NonNullable<IncarnationHandle['initial_input']>['control_state']): WorkerContractState {
+  switch (kind) {
+    case 'running': return 'running'
+    case 'exited': return 'exited'
+    default: return 'idle'
+  }
+}
+
+function settleCliTask(
+  task: LedgerWorker['task'],
+  state: WorkerContractState,
+  report: StateChangeReport | undefined,
+  now: string,
+): LedgerWorker['task'] {
+  if (state === 'running') return task
+  if (state === 'idle') return applyStatusTransition(task, 'waiting_input', { now })
+  const target = taskStatusFromIncarnation('exited', report?.endReason)
+  if (target === 'running') return task
+  return applyStatusTransition(task, target, {
+    now,
+    ...(target === 'failed' ? { error: report?.endReason ?? 'initial CLI process exited' } : {}),
+  })
+}
+
+function cliReportDetail(state: WorkerContractState, report: StateChangeReport | undefined): Record<string, unknown> {
+  if (state === 'exited') {
+    return { to: 'exited', kind: 'initial_input_settled', ...(report?.endReason ? { reason: report.endReason } : {}) }
+  }
+  const text = report?.outputTail?.trim()
+  if (report?.notification) {
+    return {
+      to: state,
+      kind: 'interaction_required',
+      wait_mode: 'action',
+      wait_reason: report.waitReason ?? 'interaction_required',
+      notification_type: report.notification.type,
+      ...(report.notification.message ? { message: report.notification.message } : {}),
+      ...(report.notification.title ? { title: report.notification.title } : {}),
+      text: text ?? '',
+    }
+  }
+  return {
+    to: state,
+    kind: report?.waitReason === 'input_pending' ? 'input_pending' : 'input_delivery_stalled',
+    ...(state === 'idle' ? { wait_mode: 'action' } : {}),
+    ...(report?.waitReason ? { wait_reason: report.waitReason } : {}),
+    ...(text ? { text } : {}),
+  }
+}
+
+/** Raw keys that explicitly discard the current composer instead of submitting it. */
+function rawAbandonsComposer(text: string): boolean {
+  const keys = text.toLowerCase().split(/\s+/).filter(Boolean)
+  return keys.some((key) => key === 'escape' || key === 'esc' || key === 'c-c' || key === 'c-u')
 }
 
 /**
@@ -382,6 +443,74 @@ export interface ReconcileReport {
 
 const EMPTY_CAPABILITY_BUNDLE: CapabilityBundle = { skills: [], mcp_servers: [] }
 
+type InputAttempt =
+  | { readonly kind: 'exited'; readonly endedReason?: IncarnationEndReason }
+  | {
+      readonly kind: 'stalled'
+      readonly handle: IncarnationHandle
+      readonly controlState: NonNullable<IncarnationHandle['initial_input']>['control_state']
+      readonly report?: StateChangeReport
+      readonly expectedStateChangeRevision: number
+      readonly delivery: InboxDeliveryResult
+    }
+  | {
+      readonly kind: 'delivered'
+      readonly handle: IncarnationHandle
+      readonly expectedStateChangeRevision?: number
+      readonly acceptedExit?: StateChangeReport
+    }
+
+type SettledInputAttempt = Exclude<InputAttempt, { readonly kind: 'exited' }>
+
+type ContinuationRetry = {
+  readonly kind: 'retry_continuation'
+  readonly impl: WorkerImplId
+  readonly seq: number
+  readonly endedReason?: IncarnationEndReason
+}
+
+type ContinuationDelivery = InboxSettlement | InboxDeliveryResult | ContinuationRetry
+
+function isContinuationRetry(delivery: ContinuationDelivery): delivery is ContinuationRetry {
+  return typeof delivery === 'object' && 'kind' in delivery && delivery.kind === 'retry_continuation'
+}
+
+interface HandoffResult {
+  readonly restoredDurableReceipt: boolean
+  readonly delivery: ContinuationDelivery
+}
+
+function initialInputDelivery(
+  initialInput: IncarnationHandle['initial_input'],
+  requeueAfter = 0,
+  replacement?: InboxDeliveryResult['replacement'],
+): InboxSettlement | InboxDeliveryResult {
+  if (!initialInput || initialInput.disposition === 'accepted') {
+    return 'delivered'
+  }
+  return initialInput.disposition === 'not_pasted'
+    ? { action: 'hold_requeue', reason: 'waiting_action', requeueAfter, replacement }
+    : { action: 'hold_consumed', reason: 'input_pending', replacement }
+}
+
+function continuationDelivery(
+  initialInput: IncarnationHandle['initial_input'],
+  initialState: WorkerContractState,
+  handle: IncarnationHandle,
+  requeueAfter = 0,
+  replacement?: InboxDeliveryResult['replacement'],
+): ContinuationDelivery {
+  if (initialState === 'exited' && initialInput?.disposition !== 'accepted') {
+    return {
+      kind: 'retry_continuation',
+      impl: handle.impl,
+      seq: handle.seq,
+      endedReason: initialInput?.report?.endReason,
+    }
+  }
+  return initialInputDelivery(initialInput, requeueAfter, replacement)
+}
+
 export class WorkerHarness {
   private readonly pendingBgNotifications = new Map<string, number>()
 
@@ -407,12 +536,24 @@ export class WorkerHarness {
   private readonly eventLogs = new Map<string, WorkerEventLog>()
   /** 活性巡检的已报标记,键是 `<worker_id>#<impl>#<seq>`(见 `sweepLiveness`)。 */
   private readonly stallReports = new Map<string, StallReportMark>()
+  /** Adapter state callbacks observed per incarnation; used to order harness-owned CLI input settlement. */
+  private readonly stateChangeRevisions = new Map<string, number>()
+  /** Synchronous generation of the pane that currently owns input for each logical worker. */
+  private readonly inputOwnershipRevisions = new Map<string, number>()
   private sweepInFlight = false
   private sweepTimer?: ReturnType<typeof setInterval>
   /** `stopLivenessSweep` 置位后不再接受 `startLivenessSweep`(见该方法注释的停机竞态)。 */
   private sweepStopped = false
 
   constructor(private readonly deps: HarnessDeps) {}
+
+  private inputOwnershipRevision(workerId: string): number {
+    return this.inputOwnershipRevisions.get(workerId) ?? 0
+  }
+
+  private bumpInputOwnershipRevision(workerId: string): void {
+    this.inputOwnershipRevisions.set(workerId, this.inputOwnershipRevision(workerId) + 1)
+  }
 
   /**
    * 见文件头"onStateChange 接线契约"。箭头函数字段:构造时绑定 this,P4 可直接把它作为
@@ -441,6 +582,8 @@ export class WorkerHarness {
           `(${h.worker_id}#${h.seq})`
       )
     }
+    const revisionKey = `${h.worker_id}#${h.impl}#${h.seq}`
+    this.stateChangeRevisions.set(revisionKey, (this.stateChangeRevisions.get(revisionKey) ?? 0) + 1)
     this.processStateChange(h, state, report).catch((err) => {
       console.error(`[WorkerHarness] handleStateChange failed for ${h.worker_id}#${h.seq}:`, err)
     })
@@ -552,16 +695,35 @@ export class WorkerHarness {
       }
 
       const now = this.deps.now()
-      // adapter.spawn 返回的 handle 自描述真实 session_ref(protocol-agent-v3 §6.1)——初始
-      // 化身注册时(见上面 initial.incarnations[0])这个值还不存在,只能占位;spawn 成功后
-      // 在这里补写真值,和 task 状态一起原子落盘。
+      const initialInput = spawnedHandle.initial_input
+      const initialState = cliContractState(initialInput?.control_state ?? 'running')
       const spawned = await this.deps.ledger.upsertWorker(p.dialogObjectId, workerId, (prev) => {
         if (!prev) return undefined
-        const nextTask = applyStatusTransition(prev.task, 'running', { now })
-        const incarnations = patchIncarnationBySeq(prev.incarnations, impl, 1, { session_ref: spawnedHandle.session_ref })
+        let nextTask = applyStatusTransition(prev.task, 'running', { now })
+        nextTask = settleCliTask(nextTask, initialState, initialInput?.report, now)
+        const incarnations = patchIncarnationBySeq(prev.incarnations, impl, 1, {
+          session_ref: spawnedHandle.session_ref,
+          state: initialState,
+          ...(initialState === 'exited'
+            ? { ended_at: now, ended_reason: initialInput?.report?.endReason ?? 'crashed' }
+            : {}),
+        })
         return { ...prev, task: nextTask, incarnations, updated_at: now }
       })
+
+      const inbox = this.getInbox(workerId)
+      inbox.release()
+      if (initialState !== 'exited' && initialInput?.disposition === 'not_pasted') {
+        inbox.enqueueFront({ text: p.prompt, raw: false, enqueued_at: now })
+        inbox.hold('waiting_action')
+      } else if (initialState !== 'exited' && initialInput?.disposition === 'pending_in_ui') {
+        inbox.hold('input_pending')
+      }
+
       await this.appendEvent(workerId, 1, 'spawned', { impl }, spawned?.task.status)
+      if (initialInput && (initialInput.disposition !== 'accepted' || initialState === 'exited')) {
+        await this.appendEvent(workerId, 1, 'state_changed', cliReportDetail(initialState, initialInput.report), spawned?.task.status)
+      }
       return spawned as LedgerWorker
     })
   }
@@ -620,6 +782,95 @@ export class WorkerHarness {
     return queued
   }
 
+  private async attemptInput(
+    adapter: WorkerAdapter,
+    handle: IncarnationHandle,
+    text: string,
+    raw: boolean,
+  ): Promise<InputAttempt> {
+    const revisionKey = `${handle.worker_id}#${handle.impl}#${handle.seq}`
+    const stateChangeRevision = this.stateChangeRevisions.get(revisionKey) ?? 0
+    const inputOwnershipRevision = this.inputOwnershipRevision(handle.worker_id)
+    try {
+      await adapter.sendInput(handle, text, { raw })
+    } catch (error) {
+      if (error instanceof WorkerExitedError) {
+        return { kind: 'exited', endedReason: error.ended_reason }
+      }
+      if (error instanceof CliInputStallError) {
+        const isCurrent = (): boolean =>
+          this.inputOwnershipRevision(handle.worker_id) === inputOwnershipRevision &&
+          (raw || error.disposition === 'pending_in_ui' ||
+            (this.stateChangeRevisions.get(revisionKey) ?? 0) === stateChangeRevision)
+        return {
+          kind: 'stalled',
+          handle,
+          controlState: error.control_state,
+          report: error.report,
+          expectedStateChangeRevision: stateChangeRevision,
+          delivery: {
+            action: raw || error.disposition === 'pending_in_ui' ? 'hold_consumed' : 'hold_requeue',
+            reason: error.disposition === 'pending_in_ui' ? 'input_pending' : 'waiting_action',
+            isCurrent,
+          },
+        }
+      }
+      throw error
+    }
+
+    if (handle.impl === 'builtin') return { kind: 'delivered', handle }
+    const cliAdapter = adapter as WorkerAdapter & {
+      takeAcceptedInputExit?: (h: IncarnationHandle) => StateChangeReport | undefined
+      takeUpdatedSessionRef?: (h: IncarnationHandle) => string | undefined
+    }
+    const sessionRef = cliAdapter.takeUpdatedSessionRef?.(handle)
+    const settledHandle = sessionRef ? { ...handle, session_ref: sessionRef } : handle
+    return {
+      kind: 'delivered',
+      handle: settledHandle,
+      expectedStateChangeRevision: raw ? undefined : stateChangeRevision,
+      acceptedExit: cliAdapter.takeAcceptedInputExit?.(settledHandle),
+    }
+  }
+
+  private async settleInputAttempt(
+    workerId: string,
+    text: string,
+    raw: boolean,
+    attempt: SettledInputAttempt,
+  ): Promise<InboxSettlement | InboxDeliveryResult> {
+    if (attempt.kind === 'stalled') {
+      if (attempt.delivery.isCurrent?.()) {
+        await this.recordCliInputResult(
+          attempt.handle,
+          attempt.controlState,
+          attempt.report,
+          attempt.expectedStateChangeRevision,
+        )
+      }
+      return attempt.delivery
+    }
+
+    if (raw) {
+      const inbox = this.getInbox(workerId)
+      await inbox.settleConsumed(rawAbandonsComposer(text) ? 'dead_letter' : 'delivered')
+      inbox.release('waiting_action')
+      inbox.release('input_pending')
+    }
+    if (attempt.acceptedExit) {
+      await this.recordCliInputResult(attempt.handle, 'exited', attempt.acceptedExit)
+    } else if (attempt.expectedStateChangeRevision !== undefined) {
+      await this.recordCliInputResult(
+        attempt.handle,
+        'running',
+        undefined,
+        attempt.expectedStateChangeRevision,
+      )
+    }
+    await this.appendEvent(workerId, attempt.handle.seq, 'input_sent', { text_len: text.length })
+    return 'delivered'
+  }
+
   private async flushInbox(workerId: string): Promise<void> {
     const inbox = this.getInbox(workerId)
     // 真正的投递不占用 harness 的 per-worker 锁(见文件头说明);inbox 自身的锁保证同一
@@ -649,27 +900,19 @@ export class WorkerHarness {
         impl: incarnation.impl as WorkerImplId,
         session_ref: incarnation.session_ref,
       }
-      try {
-        await adapter.sendInput(handle, item.text, { raw: item.raw })
-      } catch (err) {
-        // adapter 侧权威地判定化身已终态,即使台账的异步状态回调还没追上(见
-        // continueTerminalWorker 的 sourceSeq 核对注释)——同样转入透明接续,对
-        // sendToWorker 的调用方完全无感(不重新抛出)。
-        if (err instanceof WorkerExitedError) {
-          if (item.allow_terminal_continuation === false) return 'delivered'
-          return this.continueTerminalWorker(
-            workerId,
-            item.text,
-            incarnation.impl as WorkerImplId,
-            incarnation.seq,
-            item.raw,
-            err.ended_reason
-          )
-        }
-        throw err
+      const attempt = await this.attemptInput(adapter, handle, item.text, item.raw)
+      if (attempt.kind === 'exited') {
+        if (item.allow_terminal_continuation === false) return 'delivered'
+        return this.continueTerminalWorker(
+          workerId,
+          item.text,
+          incarnation.impl as WorkerImplId,
+          incarnation.seq,
+          item.raw,
+          attempt.endedReason,
+        )
       }
-      await this.appendEvent(workerId, handle.seq, 'input_sent', { text_len: item.text.length })
-      return 'delivered'
+      return this.settleInputAttempt(workerId, item.text, item.raw, attempt)
     })
   }
 
@@ -688,6 +931,7 @@ export class WorkerHarness {
    * 级改动,留待后续(protocol-agent-v3 §6.1 已知限制)。
    */
   async switchWorkerImpl(workerId: string, impl: WorkerImplId, note?: string): Promise<void> {
+    let restoredDurableReceipt = false
     await this.withLock(workerId, async () => {
       const found = await this.deps.ledger.findWorker(workerId)
       if (!found) throw new WorkerNotFoundError(workerId)
@@ -699,8 +943,11 @@ export class WorkerHarness {
       // 允许切换(等价于"在办任务换实现"续办的合理场景,§5.3),只有 cancelled 硬拒绝。
       if (worker.task.status === 'cancelled') throw new TaskCancelledError(workerId)
       const mainline = requireMainlineIncarnation(worker)
-      await this.handoffIncarnation(dialogObjectId, worker, mainline, impl, note ?? '')
+      const handoff = await this.handoffIncarnation(dialogObjectId, worker, mainline, impl, note ?? '')
+      restoredDurableReceipt = handoff.restoredDurableReceipt
     })
+    // The old pane no longer owns a consumed durable receipt; resume its FIFO on the new incarnation.
+    if (restoredDurableReceipt) await this.flushInbox(workerId)
   }
 
   /**
@@ -761,8 +1008,10 @@ export class WorkerHarness {
      * 台账已经有终态记录,reviveIncarnation 的回填段本就不会触发)。
      */
     sourceEndReason?: IncarnationEndReason
-  ): Promise<InboxSettlement> {
-    return this.withLock(workerId, async () => {
+  ): Promise<InboxSettlement | InboxDeliveryResult> {
+    const result = await this.withLock(
+      workerId,
+      async (): Promise<InboxSettlement | InboxDeliveryResult | { attempt: SettledInputAttempt }> => {
       let curImpl = sourceImpl
       let curSeq = sourceSeq
       // 与 (curImpl, curSeq) 同步前进:每次改换源化身,这个原因也要跟着换成新源的,
@@ -817,22 +1066,18 @@ export class WorkerHarness {
             impl: mainline.impl as WorkerImplId,
             session_ref: mainline.session_ref,
           }
-          try {
-            await adapter.sendInput(handle, text, { raw })
-          } catch (err) {
+          const attempt = await this.attemptInput(adapter, handle, text, raw)
+          if (attempt.kind === 'exited') {
             // adapter 侧权威判定这个"看起来存活"的新主线其实也已经终态(台账的异步状态
-            // 回调还没追上)——同样不出锁,把它当作新的源头回到循环顶部转接续,而不是把
-            // 这个错误当成"补送失败"直接抛给调用方。
-            if (err instanceof WorkerExitedError) {
-              curImpl = mainline.impl as WorkerImplId
-              curSeq = mainline.seq
-              curEndReason = err.ended_reason
-              continue
-            }
-            throw err
+            // 回调还没追上)——同样不出锁,把它当作新的源头回到循环顶部转接续。
+            curImpl = mainline.impl as WorkerImplId
+            curSeq = mainline.seq
+            curEndReason = attempt.endedReason
+            continue
           }
-          await this.appendEvent(workerId, handle.seq, 'input_sent', { text_len: text.length })
-          return 'delivered'
+          // CLI stall / accepted-exit / 延后 session_ref 必须与普通 flush 路径共用结算；
+          // 结算可能重新获取 worker lock，所以先把 attempt 带出当前临界区。
+          return { attempt }
         }
 
         // 主线就是当前源:走接续(revive/handoff)。
@@ -842,7 +1087,21 @@ export class WorkerHarness {
         }
 
         if (adapter.capabilities().revive) {
-          await this.reviveIncarnation(dialogObjectId, worker, mainline, adapter, text, curEndReason)
+          const delivery = await this.reviveIncarnation(
+            dialogObjectId,
+            worker,
+            mainline,
+            adapter,
+            text,
+            curEndReason,
+          )
+          if (isContinuationRetry(delivery)) {
+            curImpl = delivery.impl
+            curSeq = delivery.seq
+            curEndReason = delivery.endedReason
+            continue
+          }
+          return delivery
         } else {
           // "原 impl 若仍可用则沿用,否则 defaultImpl"(brief)是加 ImplAlreadyUsedError 守卫
           // 之前的选择逻辑,现在必然自绝:mainline.impl 就是正在办理接续的这条化身所在的
@@ -853,9 +1112,23 @@ export class WorkerHarness {
           // 三个既有实现目前都是 revive:true,这条分支走不到真实 adapter;为将来的不可复活
           // 实现(如 legacy)保留。
           const targetImpl = pickUnusedImpl(worker, this.deps.adapters, this.deps.defaultImpl)
-          await this.handoffIncarnation(dialogObjectId, worker, mainline, targetImpl, text)
+          const handoff = await this.handoffIncarnation(
+            dialogObjectId,
+            worker,
+            mainline,
+            targetImpl,
+            text,
+            true,
+            raw,
+          )
+          if (isContinuationRetry(handoff.delivery)) {
+            curImpl = handoff.delivery.impl
+            curSeq = handoff.delivery.seq
+            curEndReason = handoff.delivery.endedReason
+            continue
+          }
+          return handoff.delivery
         }
-        return 'delivered'
       }
 
       // 超出重求值上限:短时间内主线连续多次切换/自然退出,撞上了同一次投递的每一次重新
@@ -871,6 +1144,8 @@ export class WorkerHarness {
           `for worker ${workerId}; mainline kept changing/exiting faster than this delivery could settle on a source`
       )
     })
+    if (typeof result === 'string' || !('attempt' in result)) return result
+    return this.settleInputAttempt(workerId, text, raw, result.attempt)
   }
 
   /** capabilities().revive===true 分支:adapter.resume 拉起新化身,session 满保真接续。 */
@@ -882,22 +1157,27 @@ export class WorkerHarness {
     text: string,
     /** adapter 经 WorkerExitedError 报上来的源化身终止原因(见下面回填段的注释)。 */
     sourceEndReason?: IncarnationEndReason,
-  ): Promise<void> {
+  ): Promise<ContinuationDelivery> {
     const prevRef: IncarnationRef = { worker_id: worker.worker_id, seq: mainline.seq, session_ref: mainline.session_ref }
     // resume 直接把 text 作为 wakeInput 传入——接续就是这次输入的投递方式,不需要在
     // resume 成功之后再补一次 adapter.sendInput。
     const newHandle = await adapter.resume(prevRef, text)
 
+    const initialInput = newHandle.initial_input
+    const initialState = cliContractState(initialInput?.control_state ?? 'running')
     const now = this.deps.now()
     const revived = await this.deps.ledger.upsertWorker(dialogObjectId, worker.worker_id, (prev) => {
       if (!prev) return undefined
       const newIncarnation: Incarnation = {
         seq: newHandle.seq,
         impl: newHandle.impl,
-        state: 'running',
+        state: initialState,
         workspace: mainline.workspace,
         session_ref: newHandle.session_ref,
         started_at: now,
+        ...(initialState === 'exited'
+          ? { ended_at: now, ended_reason: initialInput?.report?.endReason ?? 'crashed' }
+          : {}),
         // forked_from 不填——resume 产出的新化身入主线链(protocol-agent-v3 §5.3)。
       }
       // 源化身(mainline)台账态若仍非 exited——sendToWorker 经 WorkerExitedError 走到这里时,
@@ -919,10 +1199,20 @@ export class WorkerHarness {
               ended_reason: sourceEndReason ?? 'completed',
             })
           : prev.incarnations
-      const nextTask = reopenTaskForContinuation(prev.task, now)
+      let nextTask = reopenTaskForContinuation(prev.task, now)
+      nextTask = settleCliTask(nextTask, initialState, initialInput?.report, now)
       return { ...prev, task: nextTask, incarnations: [...incarnations, newIncarnation], updated_at: now }
     })
+
+    this.bumpInputOwnershipRevision(worker.worker_id)
+    const inbox = this.getInbox(worker.worker_id)
+    inbox.release()
+    const replayedConsumed = inbox.requeueConsumed()
     await this.appendEvent(worker.worker_id, newHandle.seq, 'resumed', { from_seq: mainline.seq }, revived?.task.status)
+    if (initialInput && (initialInput.disposition !== 'accepted' || initialState === 'exited')) {
+      await this.appendEvent(worker.worker_id, newHandle.seq, 'state_changed', cliReportDetail(initialState, initialInput.report), revived?.task.status)
+    }
+    return continuationDelivery(initialInput, initialState, newHandle, replayedConsumed)
   }
 
   /**
@@ -936,7 +1226,9 @@ export class WorkerHarness {
     source: Incarnation,
     targetImpl: WorkerImplId,
     input: string,
-  ): Promise<void> {
+    inputOwnedByInbox = false,
+    inboxRaw = false,
+  ): Promise<HandoffResult> {
     const sourceAdapter = this.deps.adapters.get(source.impl as WorkerImplId)
     const sourceHandle: IncarnationHandle = {
       worker_id: worker.worker_id,
@@ -1055,20 +1347,38 @@ export class WorkerHarness {
     })
 
     // 4. 化身链 +1,task 重新回到 running(见 reopenTaskForContinuation 注释)。
+    const initialInput = newHandle.initial_input
+    const initialState = cliContractState(initialInput?.control_state ?? 'running')
     const now = this.deps.now()
     const handedOff = await this.deps.ledger.upsertWorker(dialogObjectId, worker.worker_id, (prev) => {
       if (!prev) return undefined
       const newIncarnation: Incarnation = {
         seq: newHandle.seq,
         impl: targetImpl,
-        state: 'running',
+        state: initialState,
         workspace: source.workspace,
         session_ref: newHandle.session_ref,
         started_at: now,
+        ...(initialState === 'exited'
+          ? { ended_at: now, ended_reason: initialInput?.report?.endReason ?? 'crashed' }
+          : {}),
       }
-      const nextTask = reopenTaskForContinuation(prev.task, now)
+      let nextTask = reopenTaskForContinuation(prev.task, now)
+      nextTask = settleCliTask(nextTask, initialState, initialInput?.report, now)
       return { ...prev, task: nextTask, incarnations: [...prev.incarnations, newIncarnation], updated_at: now }
     })
+
+    this.bumpInputOwnershipRevision(worker.worker_id)
+    const inbox = this.getInbox(worker.worker_id)
+    inbox.release()
+    if (!inputOwnedByInbox && initialState !== 'exited' && initialInput?.disposition === 'not_pasted') {
+      inbox.enqueueFront({ text: prompt, raw: false, enqueued_at: now })
+      inbox.hold('waiting_action')
+    } else if (!inputOwnedByInbox && initialState !== 'exited' && initialInput?.disposition === 'pending_in_ui') {
+      inbox.hold('input_pending')
+    }
+    const replayedConsumed = inbox.requeueConsumed()
+    const restoredDurableReceipt = replayedConsumed > 0
     // 与 reviveIncarnation 收尾时发 'resumed' 事件对称——交接产出的新化身同样是一次"开工",
     // 缺了这个事件会让事件流看不到 handoff 之后新主线是何时、以何种 impl 建起来的。
     await this.appendEvent(
@@ -1078,6 +1388,21 @@ export class WorkerHarness {
       { impl: targetImpl, from_seq: source.seq },
       handedOff?.task.status
     )
+    if (initialInput && (initialInput.disposition !== 'accepted' || initialState === 'exited')) {
+      await this.appendEvent(worker.worker_id, newHandle.seq, 'state_changed', cliReportDetail(initialState, initialInput.report), handedOff?.task.status)
+    }
+    return {
+      restoredDurableReceipt,
+      delivery: inputOwnedByInbox
+        ? continuationDelivery(
+            initialInput,
+            initialState,
+            newHandle,
+            replayedConsumed,
+            { text: prompt, raw: inboxRaw },
+          )
+        : 'delivered',
+    }
   }
 
   /**
@@ -1778,11 +2103,88 @@ export class WorkerHarness {
 
   // ---- 内部 ----
 
+  private async recordCliInputResult(
+    h: IncarnationHandle,
+    controlState: NonNullable<IncarnationHandle['initial_input']>['control_state'],
+    report?: StateChangeReport,
+    expectedStateChangeRevision?: number,
+  ): Promise<void> {
+    const external = cliContractState(controlState)
+    let stateCommitted = false
+    let committedStatus: TaskStatus | undefined
+    await this.withLock(h.worker_id, async () => {
+      const found = await this.deps.ledger.findWorker(h.worker_id)
+      if (!found) return
+      const { worker, dialogObjectId } = found
+      const target = findIncarnation(worker, h.impl, h.seq)
+      if (!target) return
+
+      const revisionKey = `${h.worker_id}#${h.impl}#${h.seq}`
+      const revisionMatches = expectedStateChangeRevision === undefined ||
+        (this.stateChangeRevisions.get(revisionKey) ?? 0) === expectedStateChangeRevision
+      if (!revisionMatches || target.state === 'exited' || isTerminalStatus(worker.task.status)) {
+        // A concurrent callback owns the state transition, but session discovery is an independent
+        // monotonic fact. Preserve a newly discovered non-empty ref even when synthetic running is stale.
+        if (h.session_ref && target.session_ref !== h.session_ref) {
+          await this.deps.ledger.upsertWorker(dialogObjectId, h.worker_id, (prev) => {
+            if (!prev) return undefined
+            return {
+              ...prev,
+              incarnations: patchIncarnationBySeq(prev.incarnations, h.impl, h.seq, {
+                session_ref: h.session_ref,
+              }),
+              updated_at: this.deps.now(),
+            }
+          })
+        }
+        return
+      }
+
+      let desired: TaskStatus
+      if (external === 'running') desired = 'running'
+      else if (external === 'idle') {
+        const bgRunning = (await this.deps.hasRunningBg?.(h.worker_id)) ?? false
+        desired = bgRunning || this.hasPendingBgNotification(h.worker_id) ? 'running' : 'waiting_input'
+      } else {
+        desired = taskStatusFromIncarnation('exited', report?.endReason)
+      }
+      const now = this.deps.now()
+      const committed = await this.deps.ledger.upsertWorker(dialogObjectId, h.worker_id, (prev) => {
+        if (!prev) return undefined
+        const task = prev.task.status === desired ? prev.task : applyStatusTransition(prev.task, desired, {
+          now,
+          ...(desired === 'failed' ? { error: report?.endReason ?? 'CLI incarnation exited' } : {}),
+        })
+        const incarnations = patchIncarnationBySeq(prev.incarnations, h.impl, h.seq, {
+          state: external,
+          session_ref: h.session_ref || target.session_ref,
+          ...(external === 'exited' ? { ended_at: now, ended_reason: report?.endReason ?? 'crashed' } : {}),
+        })
+        return { ...prev, task, incarnations, updated_at: now }
+      })
+      committedStatus = committed?.task.status
+      stateCommitted = committed !== undefined
+    })
+    if (!stateCommitted) return
+    if (external === 'exited') {
+      this.bumpInputOwnershipRevision(h.worker_id)
+      const inbox = this.getInbox(h.worker_id)
+      inbox.requeueConsumed()
+      inbox.release()
+    }
+    if (report) {
+      await this.appendEvent(h.worker_id, h.seq, 'state_changed', cliReportDetail(external, report), committedStatus)
+    } else if (external !== 'running') {
+      await this.appendEvent(h.worker_id, h.seq, 'state_changed', { to: external }, committedStatus)
+    }
+  }
+
   private async processStateChange(
     h: IncarnationHandle,
     state: WorkerContractState,
     report?: StateChangeReport,
   ): Promise<void> {
+    let settledCurrentExit = false
     // 唤醒事件的两段正文:截断在这一处收口,三个 adapter 共用同一上限。text 截断后还能按
     // offset 去 read_worker_output 读全文,summary 不进 output、没有这条后路,所以提示语
     // 不同、上限也不同(见两个常量各自的注释)。
@@ -1894,6 +2296,7 @@ export class WorkerHarness {
         )
         return { ...prev, task: nextTask, incarnations, updated_at: now }
       })
+      settledCurrentExit = state === 'exited' && committed !== undefined
       // 主线分支是 task 状态机的主要推进点——事件必须自带落账后的状态,否则订阅方现读台账
       // 时若已经有下一次落账(如 §5.3 透明接续把终态拉回 running),这次迁移(含 completed
       // 这类终态)会被整条吞掉。见 worker-events.ts `HarnessEvent.task_status`。
@@ -1901,10 +2304,22 @@ export class WorkerHarness {
         h.worker_id,
         h.seq,
         'state_changed',
-        { to: state, ...wakeDetail },
+        report?.notification ? cliReportDetail(state, report) : { to: state, ...wakeDetail },
         committed?.task.status
       )
     })
+
+    if (!report?.notification && settledCurrentExit) {
+      this.bumpInputOwnershipRevision(h.worker_id)
+      const inbox = this.getInbox(h.worker_id)
+      inbox.requeueConsumed()
+      inbox.release()
+      await this.flushInbox(h.worker_id)
+    } else if (!report?.notification && (state === 'idle' || state === 'running')) {
+      const inbox = this.getInbox(h.worker_id)
+      inbox.release('waiting_action')
+      await this.flushInbox(h.worker_id)
+    }
   }
 
   private withLock<T>(workerId: string, fn: () => Promise<T>): Promise<T> {

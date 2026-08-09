@@ -25,7 +25,7 @@ describe('CliEventChannel', () => {
     const channel = new CliEventChannel(filePath)
     const cmd = channel.hookCommand('stop')
 
-    await execFileAsync('/bin/bash', ['-c', cmd])
+    await execFileAsync('/bin/bash', ['-c', `(${cmd}) </dev/null`])
 
     const events = await channel.readAll()
     expect(events).toHaveLength(1)
@@ -39,11 +39,44 @@ describe('CliEventChannel', () => {
   it('hookCommand 对不同 kind 各自产出可解析的独立事件', async () => {
     const channel = new CliEventChannel(filePath)
 
-    await execFileAsync('/bin/bash', ['-c', channel.hookCommand('notification')])
-    await execFileAsync('/bin/bash', ['-c', channel.hookCommand('session_start')])
+    await execFileAsync('/bin/bash', ['-c', `(${channel.hookCommand('notification')}) </dev/null`])
+    await execFileAsync('/bin/bash', ['-c', `(${channel.hookCommand('session_start')}) </dev/null`])
 
     const events = await channel.readAll()
     expect(events.map((e) => e.kind)).toEqual(['notification', 'session_start'])
+  })
+
+  it('hookCommand keeps a JSON stdin payload as raw', async () => {
+    const channel = new CliEventChannel(filePath)
+    const payload = '{"notification_type":"permission_prompt","message":"needs permission"}'
+    const quoted = `'${payload.replace(/'/g, `'\\''`)}'`
+    await execFileAsync('/bin/bash', ['-c', `printf '%s' ${quoted} | (${channel.hookCommand('notification')})`])
+    expect((await channel.readAll())[0].raw).toEqual(JSON.parse(payload))
+  })
+
+  it('preserves a Stop payload while keeping empty Stop input as legacy raw:null', async () => {
+    const channel = new CliEventChannel(filePath)
+    const payload = '{"stop_hook_active":true}'
+    const quoted = `'${payload.replace(/'/g, `'\\''`)}'`
+    await execFileAsync('/bin/bash', ['-c', `printf '%s' ${quoted} | (${channel.hookCommand('stop')})`])
+    await execFileAsync('/bin/bash', ['-c', `(${channel.hookCommand('stop')}) </dev/null`])
+    expect((await channel.readAll()).map((event) => event.raw)).toEqual([JSON.parse(payload), null])
+  })
+
+  it('malformed或截断stdin payload降级为raw:null，不能吞掉整条Stop事件', async () => {
+    const channel = new CliEventChannel(filePath)
+    for (const payload of ['not json', '{"stop_hook_active":true', '{not-json}', '{"stop_hook_active":}']) {
+      const quoted = `'${payload.replace(/'/g, `'\\''`)}'`
+      await execFileAsync('/bin/bash', ['-c', `printf '%s' ${quoted} | (${channel.hookCommand('stop')})`])
+    }
+
+    const events = await channel.readAll()
+    expect(events.map((event) => [event.kind, event.raw])).toEqual([
+      ['stop', null],
+      ['stop', null],
+      ['stop', null],
+      ['stop', null],
+    ])
   })
 
   it('readAll 对不存在的文件返回空数组', async () => {
@@ -55,7 +88,12 @@ describe('CliEventChannel', () => {
   it('readAll 跳过坏行, 保留好行', async () => {
     await fs.writeFile(
       filePath,
-      ['not json at all', '{"ts":"2026-01-01T00:00:00Z","kind":"stop","raw":null}', '{broken json'].join('\n') + '\n',
+      [
+        'not json at all',
+        '{"ts":"not-hook","kind":"stop","raw":not-json}',
+        '{"ts":"2026-01-01T00:00:00Z","kind":"stop","raw":null}',
+        '{broken json',
+      ].join('\n') + '\n',
       'utf-8',
     )
     const channel = new CliEventChannel(filePath)

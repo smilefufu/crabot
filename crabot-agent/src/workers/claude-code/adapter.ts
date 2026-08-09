@@ -1,92 +1,28 @@
 /**
- * ClaudeCodeAdapter — WorkerAdapter 契约的 claude-code 实现。
+ * Claude Code WorkerAdapter.
  *
- * spawn:session_id = randomUUID() 出生即定(即 session_ref);建 <dataDir>/<worker_id>/ 目录;
- * tmux newSession 拉起 `<claudeBin> --settings <bypass-warning-json> --session-id <uuid>
- * --permission-mode bypassPermissions`,交互态跑在 tmux pane 里,cwd=workspace,pane 输出经 tmux
- * pipe-pane 落 output-<seq>.log;meta 落盘为 running;**等 pane 输出里出现
- * \e[?2004h(TUI 已开启 bracketed paste)之后**,首条任务输入(spec.prompt)才经 tmux sendText
- * 注入(cc 把它当第一条用户消息)。等不到就绪 → 不投递、落 idle 并把 output 尾部随唤醒事件
- * 交给 manager(见 spawn 内的握手段与 reportStartupStall)。
+ * Interactive incarnations run in tmux. spawn/resume wait for bracketed-paste readiness,
+ * then submit their opening input through the guarded transaction
+ * `empty composer -> one paste -> same composer pending -> Enter` (one Enter retry, never a
+ * second paste). The returned handle carries `initial_input`, so the harness settles both
+ * control state and text ownership only after the incarnation is addressable in the ledger.
  *
- * provision:与 spawn 分离的独立步骤(WorkerAdapter 契约本就是两个方法),由调用方在 spawn 前
- * 调用一次,把 workspace 布好——.claude/settings.json(Stop/Notification hook 接到
- * CliEventChannel.hookCommand,permissions 预配置 bypassPermissions 降弹窗)、.claude/skills/(复用
- * Task 3 的 materializeSkills)、.mcp.json(renderMcpJson)、CLAUDE.md(renderContextMd),
- * 外加全局 ~/.claude.json 里 workspace project entry 的两类预授权(preAcceptStartupDialogs):
- * hasTrustDialogAccepted 消掉"首次进入新目录"信任弹窗(它发生在 --permission-mode 之前,
- * 命令行拦不住);enabledMcpjsonServers 消掉紧随其后的 "New MCP server found" 弹窗。首次进入
- * bypass 模式的危险确认不接受 project settings,由 spawn/resume 每次通过 --settings 注入当前
- * cc 字段 skipDangerousModePermissionPrompt,不永久修改用户级 ~/.claude/settings.json。
+ * Runtime truth is one `CliControlState`: running, waiting_text, waiting_action, or exited.
+ * Stop hooks move running to waiting_text. Supported Notification payloads move to
+ * waiting_action only when the current pane still shows the matching interaction. Composer
+ * presence is used only to guard one input transaction, never as turn-complete/liveness proof.
+ * Normal input uses steering while running and primary input while waiting_text. waiting_action
+ * rejects normal text without writing to the pane. raw sends only the requested keys, then
+ * re-probes the pane before changing state.
  *
- * spawn 提交纪律:tmux newSession 成功之后才落 meta(running)+注册 runtime——newSession 失败
- * 时不留任何持久痕迹(session_id 可重生成,workspace 内 provision 产物残留可接受),同 worker_id
- * 可安全重试 spawn。首条输入(sendText)失败:此时已注册的化身按 kill 路径清理 tmux 会话后落
- * exited(crashed)(不是 killed——这不是用户发起的 kill),不放任 running;spawn 仍然 reject。
+ * provision writes workspace hooks, skills, MCP/context files, and pre-accepts workspace trust.
+ * spawn/resume retain bypassPermissions and inject the process-local dangerous-mode warning
+ * setting; they do not modify ~/.claude/settings.json. Native session JSONL is used for trace and
+ * diagnostics only: missing records never trigger an automatic re-paste.
  *
- * state 三源合成,按优先级依次判定(前一源给出确定结果就不再看后一源):
- *   1. tmux isAlive() 为 false → exited(终态优先,是否 killed 由本地 killed 标记区分
- *      killed/completed)——进程可能在发过 stop 事件之后自退(崩溃/OOM/自敲 exit),必须先判
- *      isAlive,否则 stop 计数恒大于 baseline 会一直判成 idle,永远走不到这条分支;
- *   2. 会话还活着时,事件文件:自上一次 sendInput(或 spawn)以来出现过新的 'stop' 事件 → idle;
- *   3. 启动期就绪握手超时的暂扣标志(Runtime.startupStalled,落盘 meta.startup_stalled)置位
- *      → idle。这一源专治"开工输入根本没投递过、stop 计数永远不会涨"的化身,没有它,
- *      reportStartupStall 刚落的 idle 会被下一次 syncState 翻回 running;
- *   4. 默认 running。
- * 用"自上次输入以来的 stop 计数"(stopBaseline)而非"是否曾经见过 stop"来判定,是因为
- * cc 每答完一轮都会再触发一次 Stop——sendInput 时必须把 baseline 推到当前计数,否则上一轮
- * 遗留的 stop 事件会让新一轮还没答完就被误判成 idle。
- *
- * 状态判定(读事件基线/isAlive)与提交(改内存 + 写 meta)整体在该 worker 的互斥锁内原子完成
- * (锁按 worker 粒度,不阻塞其他 worker;isAlive 是 tmux 子进程调用,锁内执行可接受)——避免
- * "判定用的是过期快照,提交时才发现已被另一次并发调用改写"的窗口:两次并发 state() 若只在
- * 提交这一步加锁,后完成判定的那次会拿着过期快照无条件覆盖先完成的那次刚落的新鲜结果。
- * 判定与提交现在是同一个不可分割的临界区,保证 exited 终态不可覆盖、也不丢并发更新。
- *
- * sendInput:活会话直接 tmux sendText(cc 自带 steering 队列,不需要我们排队);raw 选项走
- * tmux sendKeys(text 按空白切分成按键名数组,如 "y Enter" → ['y','Enter']);exited 态抛
- * WorkerExitedError(与 builtin 同名同语义的独立类,不 import builtin)。
- *
- * kill:tmux killSession → exited(killed),幂等(已 exited 直接返回,不覆盖原 ended_reason)。
- *
- * meta-<seq>.json 布局沿用 P1:{ seq, state, session_id, ended_reason? },写法抽到
- * src/workers/meta-store.ts 共享(不改 builtin 自己的 writeMeta)。
- *
- * detect:`<claudeBin> --version`(经 `sh -c` 跑,claudeBin 本就是一段 shell 命令片段——
- * 与 spawn 把它塞进 tmux pane 命令是同一语义)成功 → installed;activated 看
- * `dirname(claudeProjectsDir)`(即约定的 `~/.claude/`)下是否有 settings.json 或
- * .credentials.json,不做任何网络调用。
- *
- * resume:先经 ensureRuntime 取 prev 化身的 runtime(常驻内存直接用,否则从落盘 meta 重建,
- * 四轮 review 修复;meta 也没有才报错——不再要求"只能 resume 本进程 spawn 过的化身"),校验
- * 其已 exited(未 exited 直接拒绝)→ 新 tmux 会话跑
- * `<claudeBin> --resume <prev.session_ref>`(不重复传 --permission-mode,provision 阶段已把
- * bypassPermissions 写进 settings.json 兜底命令行之外的场景)→ seq+1 化身、独立 meta/output、
- * session_ref 原样透传(cc 侧同一个会话 id)。锁纪律与 spawn 一致:tmux newSession 成功后才
- * 提交 meta+runtime,首条 wakeInput(sendText)失败按 kill 路径清理并落 exited(crashed)。
- *
- * fork(侧问,query_worker 的底座):无头一击,不进 tmux——
- * `<claudeBin> -p <forkInput> --resume <prev.session_ref> --fork-session --output-format text`
- * (经 `sh -c` 跑,forkInput/参数逐个 shQuote 转义)子进程 stdout 落到 fork 化身自己的
- * output-<seq>.log;退出码 0 → exited(completed),非 0 → exited(crashed)。为可观测起见,
- * 先在 per-worker 互斥锁内提交一段 meta(running)+注册 runtime,子进程本身(可能耗时较长)在
- * 锁外跑不阻塞同 worker_id 上的其它操作(主线不受影响),跑完后再在锁内提交终态。cc 的
- * --fork-session 在其内部生成一个新会话 id,但 `--output-format text` 的 stdout 不携带它,
- * 拿不到就拿不到——fork 化身的 session_id 落一个本地生成的占位 UUID,不对应真实 cc 会话
- * 文件,该化身自己的 readTrace 会优雅退化为空数组(已知限制,见 Task 5 报告)。
- * 无头进程的 hook 事件经 env(CliEventChannel.EVENTS_FILE_ENV)重定向到 fork 化身私有的
- * `fork-events-<seq>.jsonl`,不写 workspace 共享的那份——否则侧问收尾会污染主线的 stop
- * 计数(详见 fork() 内 execOpts 注释)。
- *
- * readTrace:workspace root 经 cc 的 slug 规则(`/`与`.`都替换成`-`)映射到
- * `<claudeProjectsDir>/<slug>/<session_id>.jsonl`,按行增量解析并归一化——
- * type=user/assistant → kind message(role 对应,summary 取消息文本截 200);assistant 内的
- * tool_use content block → kind tool_call;user 记录带 toolUseResult 字段 → kind
- * tool_result;type=system → kind lifecycle;其余 type(mode/summary/queue-operation 等)跳过。
- * cursor.offset 是行号(非字节偏移);文件不存在时返回空数组(见下方"与 brief 的偏差")。
- * trace 文件路径依赖 workspace root——经 ensureRuntime 从 meta 的 workspace_root 字段
- * (四轮 review 新增持久化)重建,不再要求"只能对本进程内常驻 runtime 的化身调用";老化身
- * (升级前写的 meta 缺这个字段)时拒绝并给出可诊断错误,不是本次修复能补的历史缺口。
+ * Meta persists the external running/idle/exited state plus wait_mode/wait_reason for idle CLI
+ * states. ensureRuntime reconstructs a runtime from meta and deterministic tmux names after an
+ * agent restart. Headless fork remains isolated from the main interaction event file.
  */
 import { promises as fs } from 'fs'
 import { join, dirname } from 'path'
@@ -94,20 +30,24 @@ import { randomUUID } from 'crypto'
 import { homedir } from 'os'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
-import { TmuxDriver } from '../tmux/driver.js'
-import { DEFAULT_PASTE_READY_TIMEOUT_MS, describeDeliveryStall, describeStartupStall, readOutputTail, waitForPasteReady } from '../tmux/paste-ready.js'
+import { TmuxDriver, type PaneSnapshot } from '../tmux/driver.js'
+import { commitInput, waitForPaneChange, type InputMode } from '../tmux/input-commit.js'
+import { DEFAULT_PASTE_READY_TIMEOUT_MS, describeStartupStall, readOutputTail, waitForPasteReady } from '../tmux/paste-ready.js'
 import { CliEventChannel, EVENTS_FILE_ENV } from '../cli-events.js'
 import { OutputLog } from '../output-log.js'
 import { decodeTerminalOutput } from '../terminal-output.js'
 import { AsyncMutex } from '../async-mutex.js'
 import { writeMetaAtomic, maxSeqOnDisk, latestModifiedMs } from '../meta-store.js'
-import { WorkerExitedError } from '../errors.js'
+import { WorkerExitedError, CliInputStallError } from '../errors.js'
+import { probeClaudeInput, acceptedClaudeInput, hasClaudeInteraction } from './input-surface.js'
 import { materializeSkills, renderMcpJson, renderContextMd, type ProvisionSources } from '../provision/materialize.js'
 import type {
   AdapterCapabilities,
   CapabilityBundle,
+  CliControlState,
   DetectResult,
   IncarnationEndReason,
+  InitialInputResult,
   StateChangeReport,
   IncarnationHandle,
   IncarnationRef,
@@ -121,17 +61,6 @@ import type {
 } from '../types.js'
 
 const execFileAsync = promisify(execFile)
-
-/**
- * 首条 prompt 投递验证的超时(毫秒)。
- *
- * 2026-08-06 生产实证(w-d2304bb6):`\e[?2004h` 只证明"paste 会被包裹",不证明"没有启动期
- * 模态框"——cc 在就绪信号之后异步弹出 MCP 信任窗(arXivPaper),首条 paste 被弹窗消费,worker
- * 静默停在空 composer。投递后轮询 cc 的会话记录(session jsonl)直到出现这条 user 消息,用结果
- * 说话。cc 收到输入到落 session 是毫秒级,15s 给弹窗确认/重绘留足余量且远小于 60s 握手超时。
- */
-const PROMPT_DELIVERY_TIMEOUT_MS = 15_000
-const PROMPT_DELIVERY_POLL_INTERVAL_MS = 250
 
 /** POSIX shell 单引号转义,与 tmux/driver.ts 的私有 shQuote 同款用法(独立复制一份)。 */
 function shQuote(s: string): string {
@@ -191,24 +120,13 @@ interface Runtime {
   readonly sessionId: string
   readonly outputLog: OutputLog
   readonly eventChannel: CliEventChannel
-  state: WorkerContractState
+  controlState: CliControlState
   ended_reason?: IncarnationEndReason
   /** 自上一次 sendInput(或 spawn)以来"已计入"的 stop 事件数;新 stop 数超过它才判定本轮 idle。 */
   stopBaseline: number
   killed: boolean
-  /**
-   * 启动期就绪握手超时后的**暂扣态**(见 reportStartupStall)。
-   *
-   * 三源判定认不出这种 idle:pane 活着、stop 计数一个没涨(开工输入根本没投递过),
-   * `computed` 恒为 `running` —— 于是 reportStartupStall 刚落的 idle 会被下一次 syncState
-   * 原样翻回 running,连带把台账从 waiting_input 拉回"正在干活"。而 `state()` 是每次 agent
-   * 重启对账必调的,这条翻转不是偶发而是必然。所以这里给三源判定补第四个信息源:标志置位
-   * 且没有新 stop 时维持 idle,由 sendInput(manager 真的出手了)清除。
-   *
-   * 跟着 meta 落盘(`startup_stalled`),否则重启后重建的 runtime 丢掉标志,同一条翻转在
-   * 新进程里照样发生——而"重启后台账变幽灵 running"正是本次要根治的形态。
-   */
-  startupStalled?: boolean
+  /** Set only for the narrow "accepted input then pane exited before return" settlement. */
+  acceptedExitReport?: StateChangeReport
   /** CliEventChannel.watch() 的停止函数(协议 §6.2.3 的文件监视)。tmux 化身在建立
    * runtime 时装上、落终态时摘掉;无头 fork 化身不装(见 startEventWatch)。 */
   stopEventWatch?: () => void
@@ -221,6 +139,21 @@ function instanceKey(h: { worker_id: string; seq: number }): string {
   return `${h.worker_id}#${h.seq}`
 }
 
+function contractState(state: CliControlState): WorkerContractState {
+  switch (state.kind) {
+    case 'running': return 'running'
+    case 'exited': return 'exited'
+    default: return 'idle'
+  }
+}
+
+function controlFromMeta(meta: { state?: WorkerContractState; wait_mode?: 'text' | 'action'; wait_reason?: string; startup_stalled?: boolean }, alive: boolean): CliControlState {
+  if (!alive || meta.state === 'exited') return { kind: 'exited' }
+  if (meta.startup_stalled || meta.wait_mode === 'action') return { kind: 'waiting_action', reason: meta.wait_reason ?? 'startup_stall' }
+  if (meta.state === 'idle') return { kind: 'waiting_text' }
+  return { kind: 'running' }
+}
+
 export class ClaudeCodeAdapter implements WorkerAdapter {
   readonly implId = 'claude-code' as const
 
@@ -229,7 +162,6 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   private readonly claudeProjectsDir: string
   private readonly claudeConfigPath: string
   private readonly pasteReadyTimeoutMs: number
-  private readonly promptDeliveryTimeoutMs: number
   private readonly runtimes = new Map<string, Runtime>()
   private readonly mutexes = new Map<string, AsyncMutex>()
 
@@ -247,11 +179,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       /** 启动期就绪握手的等待上限,默认 DEFAULT_PASTE_READY_TIMEOUT_MS(见该常量注释里的
        * 实测取值依据)。测试注入小值,避免为了走超时分支真的等一分钟。 */
       readonly pasteReadyTimeoutMs?: number
-      /**
-       * 首条 prompt 投递验证的等待上限,默认 PROMPT_DELIVERY_TIMEOUT_MS(见该常量注释,2026-08-06
-       * 生产实证:就绪信号之后 cc 仍可能异步弹 MCP 信任窗把 prompt 整个吞掉)。传 0 或负数跳过
-       * 验证——测试里没有真实 cc 进程写 session jsonl 的夹具(纯 fake tmux)注入 0 保持旧行为。
-       */
+      /** @deprecated 原生 session 记录只作诊断；缺回执不得触发自动重贴。 */
       readonly promptDeliveryTimeoutMs?: number
       /**
        * `report.lastText` 本 adapter 刻意不报(理由见 transitionState 注释),只报
@@ -271,7 +199,6 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     this.claudeProjectsDir = deps.claudeProjectsDir ?? join(homedir(), '.claude', 'projects')
     this.claudeConfigPath = deps.claudeConfigPath ?? join(homedir(), '.claude.json')
     this.pasteReadyTimeoutMs = deps.pasteReadyTimeoutMs ?? DEFAULT_PASTE_READY_TIMEOUT_MS
-    this.promptDeliveryTimeoutMs = deps.promptDeliveryTimeoutMs ?? PROMPT_DELIVERY_TIMEOUT_MS
   }
 
   async detect(): Promise<DetectResult> {
@@ -434,6 +361,134 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     })
   }
 
+  private async capture(runtime: Runtime): Promise<PaneSnapshot> {
+    const snapshot = await this.tmux.capturePane(runtime.sessionName)
+    return { ...snapshot, text: decodeTerminalOutput(snapshot.text) }
+  }
+
+  private async sendRawInput(runtime: Runtime, h: IncarnationHandle, text: string): Promise<void> {
+    let keysSent = false
+    try {
+      const before = await this.capture(runtime)
+      const keys = text.split(/\s+/).filter((key) => key.length > 0)
+      await this.tmux.sendKeys(runtime.sessionName, keys)
+      keysSent = true
+      const snapshot = await waitForPaneChange(() => this.capture(runtime), before.text)
+      if (hasClaudeInteraction(snapshot.text)) {
+        const report: StateChangeReport = { outputTail: snapshot.text, waitReason: 'interaction_required' }
+        await this.transitionControlState(runtime, h, { kind: 'waiting_action', reason: 'interaction_required' }, report, false)
+        throw new CliInputStallError('not_pasted', 'waiting_action', report)
+      }
+      const primaryProbe = probeClaudeInput(snapshot, 'primary', undefined, false)
+      if (primaryProbe === 'pending') {
+        const next: CliControlState = runtime.controlState.kind === 'running'
+          ? { kind: 'running' }
+          : { kind: 'waiting_action', reason: 'input_pending' }
+        const report: StateChangeReport = { outputTail: snapshot.text, waitReason: 'input_pending' }
+        await this.transitionControlState(runtime, h, next, report, false)
+        throw new CliInputStallError('pending_in_ui', next.kind, report)
+      }
+      if (primaryProbe === 'empty' && (runtime.controlState.kind === 'running' || /esc to interrupt/i.test(snapshot.text))) {
+        await this.transitionControlState(runtime, h, { kind: 'running' })
+        return
+      }
+      if (primaryProbe === 'empty') {
+        await this.transitionControlState(runtime, h, { kind: 'waiting_text' })
+        return
+      }
+      const reason = runtime.controlState.kind === 'waiting_action'
+        ? runtime.controlState.reason
+        : 'input_surface_unavailable'
+      const report: StateChangeReport = { outputTail: snapshot.text, waitReason: reason }
+      await this.transitionControlState(runtime, h, { kind: 'waiting_action', reason }, report, false)
+      throw new CliInputStallError('not_pasted', 'waiting_action', report)
+    } catch (error) {
+      if (!(await this.tmux.isAlive(runtime.sessionName))) {
+        const reason: IncarnationEndReason = keysSent ? 'completed' : 'crashed'
+        await this.transitionExited(runtime, h, reason, false)
+        if (keysSent) {
+          runtime.acceptedExitReport = { endReason: reason }
+          return
+        }
+        throw new WorkerExitedError(h.worker_id, h.seq, reason)
+      }
+      throw error
+    }
+  }
+
+  private async commitGuardedInput(
+    runtime: Runtime,
+    h: IncarnationHandle,
+    text: string,
+    mode: InputMode,
+    notify: boolean,
+    foldStop: boolean,
+  ): Promise<InitialInputResult> {
+    let baseline = ''
+    let pasted = false
+    let result
+    try {
+      baseline = (await this.capture(runtime)).text
+      result = await commitInput(
+        {
+          pasteText: async (value) => {
+            await this.tmux.pasteText(runtime.sessionName, value)
+            pasted = true
+          },
+          sendEnter: () => this.tmux.sendKeys(runtime.sessionName, ['Enter']),
+          capture: () => this.capture(runtime),
+        },
+        (snapshot, phase) => probeClaudeInput(snapshot, mode, phase === 'after_paste' ? text : undefined, phase === 'before_paste'),
+        (snapshot) => acceptedClaudeInput(snapshot, mode, text),
+        text,
+      )
+    } catch (err) {
+      if (!(await this.tmux.isAlive(runtime.sessionName))) {
+        const reason: IncarnationEndReason = pasted ? 'completed' : 'crashed'
+        await this.transitionExited(runtime, h, reason, notify)
+        return {
+          control_state: 'exited',
+          disposition: pasted ? 'accepted' : 'not_pasted',
+          report: { endReason: reason },
+        }
+      }
+      throw err
+    }
+
+    if (result.disposition === 'accepted') {
+      if (!(await this.tmux.isAlive(runtime.sessionName))) {
+        await this.transitionExited(runtime, h, 'completed', notify)
+        return { control_state: 'exited', disposition: 'accepted', report: { endReason: 'completed' } }
+      }
+      if (foldStop) {
+        const events = await runtime.eventChannel.readAll()
+        const stopCount = events.filter((event) => event.kind === 'stop').length
+        if (stopCount > runtime.stopBaseline) {
+          runtime.stopBaseline = stopCount
+          await this.transitionControlState(runtime, h, { kind: 'waiting_text' }, undefined, notify)
+          return { control_state: 'waiting_text', disposition: 'accepted' }
+        }
+      }
+      await this.transitionControlState(runtime, h, { kind: 'running' }, undefined, notify)
+      return { control_state: 'running', disposition: 'accepted' }
+    }
+
+    const next: CliControlState =
+      mode === 'steering' && runtime.controlState.kind === 'running'
+        ? { kind: 'running' }
+        : { kind: 'waiting_action', reason: result.disposition === 'not_pasted' ? 'input_surface_unavailable' : 'input_pending' }
+    let waitReason: string
+    if (next.kind === 'waiting_action') waitReason = next.reason
+    else if (result.disposition === 'pending_in_ui') waitReason = 'input_pending'
+    else waitReason = 'input_surface_unavailable'
+    const report: StateChangeReport = {
+      outputTail: result.snapshot.text || baseline,
+      waitReason,
+    }
+    await this.transitionControlState(runtime, h, next, report, notify)
+    return { control_state: next.kind, disposition: result.disposition, report }
+  }
+
   async spawn(spec: SpawnSpec): Promise<IncarnationHandle> {
     const seq = 1
     const sessionId = randomUUID()
@@ -463,14 +518,13 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       sessionId,
       outputLog: new OutputLog(outputFile),
       eventChannel,
-      state: 'running',
+      controlState: { kind: 'running' },
       stopBaseline: await this.initialStopBaseline(eventChannel),
       killed: false,
     }
 
     await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: sessionId, workspace_root: spec.workspace.root })
     this.runtimes.set(instanceKey(handle), runtime)
-    this.startEventWatch(runtime, handle)
 
     // 启动期就绪握手(见 tmux/paste-ready.ts):等 cc 在 pane 里发出 \e[?2004h 之后再投递,
     // 否则 paste-buffer -p 会静默降级成裸文本注入,prompt 里每个换行都变成一次 Enter——
@@ -484,79 +538,24 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       isAlive: () => this.tmux.isAlive(sessionName),
     })
     if (!pasteReady) {
-      await this.reportStartupStall(runtime, handle, outputFile)
-      return handle
+      const initial_input = await this.initialStartupStall(runtime, handle, outputFile)
+      this.startEventWatch(runtime, handle)
+      return { ...handle, initial_input }
     }
 
-    // 首条任务输入经 sendText 注入,cc 把它当第一条用户消息。注入失败:session 可能已经起来
-    // 但没喂到任务,不能放任 running——按 kill 路径清理 tmux 会话后落 exited(crashed)(不是
-    // killed,这不是用户发起的 kill),spawn 仍然 reject 把失败如实报给调用方。
-    await this.sendTextOrKill(runtime, handle, spec.prompt)
-
-    // 投递验证:就绪握手只证明"paste 会被包裹",不证明"没有启动期模态框"——2026-08-06 生产
-    // 实证 cc 在 \e[?2004h 之后异步弹出 MCP 信任窗,首条 paste 被弹窗消费,worker 静默停在空
-    // composer 直到 30 分钟巡检兜底。这里用结果说话:轮询 cc 的会话记录(session jsonl)直到
-    // 出现这条 user 消息。验证失败 → 判定被模态框吞掉:Esc 取消残留弹窗、重投一次完整任务、
-    // 再验证;仍失败 → 走与 pasteReady 超时同一收场(reportStartupStall 暂扣),绝不静默留下
-    // running。
-    if (this.promptDeliveryTimeoutMs > 0) {
-      // cc 落盘的 session 记录用 workspace 的 **realpath** slug(provision 段实证:逻辑路径
-      // "实测完全无效",~/.claude.json 的 project key 全是 realpath)——软链分量(/tmp、被软链的
-      // DATA_DIR)会导致验证读错路径、对健康会话假阴性。spawn 时 workspace 已存在,realpath 必成功。
-      const realRoot = await fs.realpath(spec.workspace.root)
-      const sessionFile = join(this.claudeProjectsDir, projectSlug(realRoot), `${sessionId}.jsonl`)
-      if (!(await verifyPromptDelivered(sessionFile, this.promptDeliveryTimeoutMs))) {
-        // 取消残留弹窗必须发真正的 Escape 键(sendKeys),不能 sendText——sendText 走
-        // paste-buffer 粘贴,ESC 只会作为文本字符进 composer,真正作用于弹窗的是粘贴结尾的
-        // Enter,可能激活弹窗默认选项(对 MCP 信任窗等于静默授权信任,与 provision 的
-        // enabledMcpjsonServers 授权边界相抵)。
-        await this.sendKeysOrKill(runtime, handle, ['Escape'])
-        await this.sendTextOrKill(runtime, handle, spec.prompt)
-        if (!(await verifyPromptDelivered(sessionFile, this.promptDeliveryTimeoutMs))) {
-          await this.reportStartupStall(runtime, handle, outputFile, {
-            note: describeDeliveryStall({
-              impl: 'claude-code',
-              timeoutMs: this.promptDeliveryTimeoutMs,
-              tail: decodeTerminalOutput(await readOutputTail(outputFile)),
-            }),
-          })
-          return handle
-        }
-      }
-    }
-
-    return handle
-  }
-
-  /**
-   * sendText 失败统一收场:会话可能已死,不能放任 running——按 kill 路径清理 tmux 会话后落
-   * exited(crashed)(不是 killed,这不是用户发起的 kill),异常继续上抛如实报给调用方。
-   */
-  private async sendTextOrKill(runtime: Runtime, h: IncarnationHandle, text: string): Promise<void> {
+    let initial_input: InitialInputResult
     try {
-      await this.tmux.sendText(runtime.sessionName, text)
+      initial_input = await this.commitGuardedInput(runtime, handle, spec.prompt, 'primary', false, true)
     } catch (err) {
-      await this.getMutex(h.worker_id).run(async () => {
-        if (runtime.state === 'exited') return
+      await this.getMutex(handle.worker_id).run(async () => {
+        if (runtime.controlState.kind === 'exited') return
         await this.tmux.killSession(runtime.sessionName)
-        await this.transitionExited(runtime, h, 'crashed')
+        await this.transitionExited(runtime, handle, 'crashed')
       })
       throw err
     }
-  }
-
-  /** sendTextOrKill 的 sendKeys 版本(Esc 清弹窗用,见 spawn 投递验证注释)。 */
-  private async sendKeysOrKill(runtime: Runtime, h: IncarnationHandle, keys: string[]): Promise<void> {
-    try {
-      await this.tmux.sendKeys(runtime.sessionName, keys)
-    } catch (err) {
-      await this.getMutex(h.worker_id).run(async () => {
-        if (runtime.state === 'exited') return
-        await this.tmux.killSession(runtime.sessionName)
-        await this.transitionExited(runtime, h, 'crashed')
-      })
-      throw err
-    }
+    this.startEventWatch(runtime, handle)
+    return { ...handle, initial_input }
   }
 
   async resume(prev: IncarnationRef, wakeInput: string): Promise<IncarnationHandle> {
@@ -602,6 +601,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     //   此之前失败,resumed 仍未被设置,后续重试不会被"已 resume"拒绝(P2 review #2)。
     let handle!: IncarnationHandle
     let runtime!: Runtime
+    let outputFile!: string
     await this.getMutex(prev.worker_id).run(async () => {
       if (prevRuntime.resumed) {
         throw new Error(`ClaudeCodeAdapter.resume: incarnation ${prev.worker_id}#${prev.seq} already resumed (concurrent resume of the same prev incarnation?)`)
@@ -609,7 +609,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       const seq = await this.nextSeq(prev.worker_id)
       handle = { worker_id: prev.worker_id, seq, impl: 'claude-code', session_ref: prev.session_ref }
       const sessionName = `crabot-w-${prev.worker_id}-${seq}`
-      const outputFile = join(dir, `output-${seq}.log`)
+      outputFile = join(dir, `output-${seq}.log`)
       // 不重复传 --permission-mode:provision 阶段已把 bypassPermissions 写进 settings.json,覆盖
       // 命令行没有重复声明的场景(resume 正是这样的场景)。危险确认开关则不接受 project
       // settings,必须与 spawn 对称地每次通过 --settings 注入。session_ref 是 cc 侧的会话 uuid,
@@ -630,7 +630,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         sessionId: prev.session_ref,
         outputLog: new OutputLog(outputFile),
         eventChannel,
-        state: 'running',
+        controlState: { kind: 'running' },
         // 复用上一化身的 workspace ⇒ 事件文件里已有它留下的 stop 事件,基线必须现读现算。
         stopBaseline: await this.initialStopBaseline(eventChannel),
         killed: false,
@@ -638,24 +638,32 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
       await writeMetaAtomic(dir, seq, { seq, state: 'running', session_id: prev.session_ref, workspace_root: prevRuntime.workspaceRoot })
       this.runtimes.set(instanceKey(handle), runtime)
-      this.startEventWatch(runtime, handle)
       prevRuntime.resumed = true
     })
 
-    // 首条 wakeInput 注入失败:按 spawn 同款纪律处理——已注册的化身清理 tmux 会话后落
-    // exited(crashed)(不是 killed,不是用户发起的 kill),resume 仍然 reject。
+    const pasteReady = await waitForPasteReady(outputFile, {
+      timeoutMs: this.pasteReadyTimeoutMs,
+      isAlive: () => this.tmux.isAlive(runtime.sessionName),
+    })
+    if (!pasteReady) {
+      const initial_input = await this.initialStartupStall(runtime, handle, outputFile)
+      this.startEventWatch(runtime, handle)
+      return { ...handle, initial_input }
+    }
+
+    let initial_input: InitialInputResult
     try {
-      await this.tmux.sendText(runtime.sessionName, wakeInput)
+      initial_input = await this.commitGuardedInput(runtime, handle, wakeInput, 'primary', false, true)
     } catch (err) {
       await this.getMutex(handle.worker_id).run(async () => {
-        if (runtime.state === 'exited') return
+        if (runtime.controlState.kind === 'exited') return
         await this.tmux.killSession(runtime.sessionName)
         await this.transitionExited(runtime, handle, 'crashed')
       })
       throw err
     }
-
-    return handle
+    this.startEventWatch(runtime, handle)
+    return { ...handle, initial_input }
   }
 
   async fork(prev: IncarnationRef, forkInput: string): Promise<IncarnationHandle> {
@@ -708,7 +716,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         sessionId,
         outputLog: new OutputLog(outputFile),
         eventChannel: new CliEventChannel(forkEventsFile),
-        state: 'running',
+        controlState: { kind: 'running' },
         stopBaseline: 0,
         killed: false,
       }
@@ -747,7 +755,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     if (stdout) await runtime.outputLog.append(stdout)
 
     await this.getMutex(prev.worker_id).run(async () => {
-      if (runtime.state === 'exited') return // 幂等兜底
+      if (runtime.controlState.kind === 'exited') return // 幂等兜底
       await this.transitionExited(runtime, handle, endedReason)
     })
 
@@ -755,38 +763,39 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   async sendInput(h: IncarnationHandle, text: string, opts?: { raw?: boolean }): Promise<void> {
-    // 四轮 review 修复:重启后新建的 adapter 实例 runtimes 必为空,旧实现在这里直接抛通用
-    // Error("no such incarnation...resident in this process")——harness 只对 WorkerExitedError
-    // 转透明接续,通用 Error 会原样穿透砸给调用方,消息永久卡在队首(protocol-agent-v3 §13
-    // "tmux worker 独立存活 → 重启后 harness 重连接管"在操作层的失效)。改用 ensureRuntime
-    // 从落盘 meta 重建;它拿不到任何记录(真·未知化身)时,对 sendInput 的调用方而言效果
-    // 与"已终态"等价(harness 的透明接续兜底不区分这两种情况),同样抛 WorkerExitedError。
     const runtime = await this.ensureRuntime(h)
     if (!runtime) throw new WorkerExitedError(h.worker_id, h.seq)
 
-    const { state: current, stopCount } = await this.syncState(runtime, h)
-    // 带上 ended_reason:harness 的透明接续要用它给"台账还没追上"的源化身补终态。
-    // 上面 `!runtime` 那条分支给不出原因(重启后连落盘 meta 都读不回来),如实缺省。
+    const { state: current } = await this.syncState(runtime, h)
     if (current === 'exited') throw new WorkerExitedError(h.worker_id, h.seq, runtime.ended_reason)
 
-    // 新一轮开始:把 baseline 推到当前 stop 计数,上一轮遗留的 stop 事件不会被误算进新一轮。
-    runtime.stopBaseline = stopCount
+    return this.getMutex(h.worker_id).run(async () => {
+      if (runtime.controlState.kind === 'exited') throw new WorkerExitedError(h.worker_id, h.seq, runtime.ended_reason)
 
-    if (opts?.raw) {
-      const keys = text.split(/\s+/).filter((k) => k.length > 0)
-      await this.tmux.sendKeys(runtime.sessionName, keys)
-    } else {
-      await this.tmux.sendText(runtime.sessionName, text)
-    }
+      if (opts?.raw) return this.sendRawInput(runtime, h, text)
 
-    await this.getMutex(h.worker_id).run(async () => {
-      if (runtime.state === 'exited') return
-      // 暂扣解除:manager 已经出手(raw 敲键清界面,或重投 prompt),从这一刻起 idle/running
-      // 重新由三源判定说了算。清除与 transitionState 的 meta 写入在同一个临界区里完成,
-      // 落盘的 startup_stalled 随之消失,重启后不会再被当作暂扣态复原。
-      runtime.startupStalled = false
-      await this.transitionState(runtime, h, 'running')
+      if (runtime.controlState.kind === 'waiting_action') {
+        const snapshot = await this.capture(runtime)
+        const report: StateChangeReport = { outputTail: snapshot.text, waitReason: runtime.controlState.reason }
+        throw new CliInputStallError('not_pasted', 'waiting_action', report)
+      }
+
+      const mode: InputMode = runtime.controlState.kind === 'running' ? 'steering' : 'primary'
+      const result = await this.commitGuardedInput(runtime, h, text, mode, false, false)
+      if (result.disposition !== 'accepted') {
+        throw new CliInputStallError(result.disposition, result.control_state, result.report)
+      }
+      if (result.control_state === 'exited') {
+        runtime.acceptedExitReport = result.report ?? { endReason: runtime.ended_reason ?? 'completed' }
+      }
     })
+  }
+
+  takeAcceptedInputExit(h: IncarnationHandle): StateChangeReport | undefined {
+    const runtime = this.runtimes.get(instanceKey(h))
+    const report = runtime?.acceptedExitReport
+    if (runtime) runtime.acceptedExitReport = undefined
+    return report
   }
 
   /**
@@ -886,15 +895,12 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   }
 
   async kill(h: IncarnationHandle): Promise<void> {
-    // 四轮 review 修复:重启后新建的 adapter 实例对已经确已终态(或压根没有落盘记录)的
-    // 化身调 kill,以前直接抛通用 Error,harness.killWorker/handoffIncarnation 对此没有
-    // try/catch,错误会穿透打断整个操作(半成品:HANDOFF.md 已写、旧化身未标 superseded 却
-    // 卡死)。ensureRuntime 拿不到任何落盘记录时直接幂等返回(无事可做);拿到时 runtime.state
-    // 已经是探活得到的真实值,下面既有的 exited 幂等分支自然覆盖"会话已经不在了"的情形。
+    // Meta reconstruction makes kill work after an agent restart; missing meta and already-exited
+    // incarnations are both idempotent no-ops.
     const runtime = await this.ensureRuntime(h)
     if (!runtime) return
     await this.getMutex(h.worker_id).run(async () => {
-      if (runtime.state === 'exited') return // 幂等:不覆盖原 ended_reason
+      if (runtime.controlState.kind === 'exited') return // 幂等:不覆盖原 ended_reason
       runtime.killed = true
       await this.tmux.killSession(runtime.sessionName)
       await this.transitionExited(runtime, h, 'killed')
@@ -908,73 +914,35 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   // --- Internal ---
 
   /**
-   * 三源合成状态判定:tmux isAlive(false → exited,终态优先) > 事件文件(会话还活着时,新
-   * stop → idle) > 默认 running。与内存态不同则在互斥锁内原子迁移(改内存 + 写 meta)。
-   * 返回判定结果与本次读到的 stop 计数(供 sendInput 复用,避免重复读一遍事件文件)。
-   *
-   * `deadReason`:本次判定发现会话已经不在了、且不是本进程发起的 kill 时,落哪个
-   * ended_reason。缺省 `'completed'` 是协议 §6.3 给"干过活之后自然退出"校准的推断,它成立
-   * 的前提是这个化身确实开过工。启动期就绪握手那条路径上前提不成立——开工输入一个字符都
-   * 没投递过,completed 不可能为真,再吃这个缺省推断就会把"启动即死"记成"成功完成"
-   * (harness 的 taskStatusFromIncarnation 据此把 task 记成 completed,manager 与 recovery
-   * 从此不再过问),所以那条路径显式传 `'crashed'`。
-   *
-   * 七轮 review:`deadReason` 只管得住 `reportStartupStall` 里的**那一次**调用,即"握手等待
-   * 期间就死了"这一个时点。而暂扣是个**持续状态**:标志置位、idle 落盘之后进程才死(pane
-   * 被外部收走、TUI 自退、机器重启后残留会话消失),后续任何一次 syncState——事件监视回调、
-   * sendInput 的前置判定、agent 重启后 reconcileOnStartup 调的 state()——判到 exited 仍会吃
-   * 缺省推断,同一个"没干过活却记成成功完成"从另一个时点回来。所以 exited 分支直接看
-   * `runtime.startupStalled`:置位就落 `'crashed'`,覆盖暂扣之后的所有时点;标志跟着
-   * meta.startup_stalled 落盘,重启后由 ensureRuntime 复原,这条判定在新进程里同样成立。
-   *
-   * 三者优先级 `killed > startupStalled > deadReason`:本进程发起的 kill 是确证,永远优先;
-   * `sendInput` 成功投递后会清掉 `startupStalled`(连同落盘的 startup_stalled),所以"投递过
-   * 之后才死"的化身不受这条影响,照旧走缺省推断——这正是"没干过活"与"干过活"的分界。
+   * Reconcile tmux existence and Stop events with the resident control state. A startup/action
+   * wait that dies before proven progress is classified crashed; other external exits retain the
+   * protocol's completed inference. The whole read/transition is serialized per worker.
    */
   private async syncState(
     runtime: Runtime,
     h: IncarnationHandle,
     deadReason: IncarnationEndReason = 'completed',
   ): Promise<{ state: WorkerContractState; stopCount: number }> {
-    if (runtime.state === 'exited') return { state: 'exited', stopCount: runtime.stopBaseline }
+    if (runtime.controlState.kind === 'exited') return { state: 'exited', stopCount: runtime.stopBaseline }
 
     return this.getMutex(h.worker_id).run(async () => {
-      // 锁内重读:进锁前 runtime.state 可能已被并发操作(如 kill,或排在前面的另一次
-      // syncState)抢先落定为 exited——终态不可覆盖。
-      if (runtime.state === 'exited') return { state: 'exited', stopCount: runtime.stopBaseline }
-
+      if (runtime.controlState.kind === 'exited') return { state: 'exited', stopCount: runtime.stopBaseline }
       const events = await runtime.eventChannel.readAll()
-      const stopCount = events.filter((e) => e.kind === 'stop').length
-
-      // isAlive 检查提到最前(终态优先):进程可能在发过 stop 事件之后自退(崩溃/OOM/自敲
-      // exit)——stopCount 恒 > baseline 会一直判成 idle,永远走不到下面的 isAlive 分支,
-      // 化身不落 exited,resume 被永久拒绝(P2 review #2)。会话已经不在了就直接 exited,
-      // 不管有没有新 stop 事件;只有会话还活着,才轮到 stop 事件区分 idle/running。
-      let computed: WorkerContractState
+      const stopCount = events.filter((event) => event.kind === 'stop').length
       if (!(await this.tmux.isAlive(runtime.sessionName))) {
-        computed = 'exited'
+        let reason = deadReason
+        if (runtime.killed) reason = 'killed'
+        // waiting_action 本身就是"所需输入/控制动作尚未安全完成"的证据；在没有新 Stop 的
+        // 情况下 pane 消失不能推断任务已完成。按 spec，reason 只用于诊断、不产生不同终态
+        // 分支，因此 startup_stall / interaction_required / input_pending 统一收敛 crashed。
+        // 同一次 reconcile 若已观察到新 Stop，则轮次完成证据优先，沿缺省 deadReason 推断。
+        else if (runtime.controlState.kind === 'waiting_action' && stopCount <= runtime.stopBaseline) reason = 'crashed'
+        await this.transitionExited(runtime, h, reason)
       } else if (stopCount > runtime.stopBaseline) {
-        computed = 'idle'
-      } else if (runtime.startupStalled) {
-        // 启动期就绪握手超时的暂扣(见 Runtime.startupStalled):开工输入一个字符都没投递过,
-        // stop 计数永远不会涨,落回 running 就是谎报"正在干活"。维持 idle 直到 sendInput 清标志。
-        computed = 'idle'
-      } else {
-        computed = 'running'
+        runtime.stopBaseline = stopCount
+        await this.transitionControlState(runtime, h, { kind: 'waiting_text' })
       }
-
-      if (computed !== runtime.state) {
-        if (computed === 'exited') {
-          // 暂扣态置位 ⇒ 开工输入一个字符都没投递过(sendInput 成功才清标志),缺省的
-          // "非 kill ⇒ completed"推断在这里明确不可能成立。见本方法注释里的优先级说明。
-          const reason: IncarnationEndReason = runtime.killed ? 'killed' : runtime.startupStalled ? 'crashed' : deadReason
-          await this.transitionExited(runtime, h, reason)
-        } else {
-          await this.transitionState(runtime, h, computed)
-        }
-      }
-
-      return { state: runtime.state, stopCount }
+      return { state: contractState(runtime.controlState), stopCount }
     })
   }
 
@@ -987,54 +955,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return mutex
   }
 
-  /**
-   * 四轮 review 修复:重启后新建的 adapter 实例 `runtimes` 必为空,以前 sendInput/kill/
-   * resume/fork/readTrace 在这种情况下清一色直接抛通用 Error("no such incarnation ...
-   * resident in this process")——这个错误不是 WorkerExitedError,harness 只对
-   * WorkerExitedError 转透明接续,通用 Error 会原样穿透砸给调用方,消息永久卡在队首、
-   * kill 抛错用户无法终止、switchWorkerImpl 半成品重复追加 HANDOFF.md(§13"tmux worker
-   * 独立存活 → 重启后 harness 重连接管"在操作层的失效;Task 10 只修了 state() 自己的探活
-   * 分支,这次把同一探活逻辑收拢成所有操作共用的单一重建入口)。
-   *
-   * runtimes 命中直接返回。未命中时读 meta-<seq>.json——**meta 完全不存在**(从未 spawn
-   * 过,或目录已被清理)是唯一返回 undefined 的情形,调用方据此判断"真·未知化身"。
-   *
-   * 关键设计取舍:tmux 会话是否还活着**不**作为"能不能重建"的门槛,只影响重建出的
-   * `runtime.state` 取值('exited'/'running')。原因:resume()/fork() 的合法调用目标本来
-   * 就是一个已终态的化身——它自己的 tmux 会话必然已经不在了;若"会话不存在"直接返回
-   * undefined,重启后 resume 永远无法工作,正好背离本轮修复的目的。改为让重建出的
-   * runtime.state 如实反映一次真实 tmux isAlive 探测的结果(不采信 meta 里可能陈旧的
-   * state 字段),后续操作各自基于这个准确的 state 得到正确行为:
-   *   - sendInput:见该方法注释,`runtime.state==='exited'` 时既有的 syncState 快路径
-   *     自然产出 WorkerExitedError,等价于"ensureRuntime 直接返回 undefined ⇒ 抛
-   *     WorkerExitedError"这一表面语义(仅当 meta 也不存在时才真的走这条兜底分支)。
-   *   - kill:既有的 exited 幂等分支(不重复 kill、不覆盖 ended_reason)天然覆盖"会话
-   *     已经不在了"的情形,不需要在 kill() 里另外判断。
-   *   - resume/fork:重建成功即可拿到 dir/workspaceRoot 继续走下去,不受 tmux 死活影响。
-   *
-   * workspace_root 是本轮修复新增进 meta 的持久化项(spawn/resume/fork/transitionState/
-   * transitionExited 统一写入)。老化身(升级前写的 meta)缺这个字段时按已知限制降级——
-   * workspaceRoot 退化为空串,eventChannel 指向一个不存在的占位路径(CliEventChannel.readAll
-   * 对不存在的文件返回空数组,不抛错,只是探测不到新 stop 事件,不影响 exited 判定,因为
-   * 那条判定只依赖 tmux isAlive,不依赖事件文件)。resume()/fork()/readTrace() 在真正需要
-   * workspaceRoot 时(tmux newSession 的 cwd、execFile 的 cwd、trace 文件路径)显式拒绝并
-   * 给出可诊断错误,不把空串悄悄传下去。
-   *
-   * stopBaseline 重建时刻起算新基线(当前已存在的 stop 事件数):不知道历史 baseline,把
-   * "此刻已经存在的 stop 事件"当作已核销,避免重启前遗留的 stop 事件被误判成本轮新完成
-   * (与 spawn()/sendInput() 推进 baseline 的动机一致)——代价是重建后首次 syncState 之前
-   * 无法准确复原"当时到底是 running 还是 idle"这个精细区分(只影响 idle 报告精度,不影响
-   * exited 判定的正确性,是可接受的已知限制)。
-   *
-   * **重建整体在 per-worker 互斥锁内完成**(锁内再查一次 map):重启后同一化身被并发首次
-   * 触达(如启动对账的 state() 与 recovery 触发的 sendInput() 同时到达)是常态,而
-   * "runtimes.get 未命中"到"runtimes.set"之间隔着 readMetaFile / isAlive / readAll 三个
-   * await。不加锁时两次调用各自重建一个 Runtime、各装一个 watcher,后 set 的胜出;败者却被
-   * 自己 watcher 的闭包持有——transitionExited 只摘胜者的,败者的 fs.watch + 2s 轮询到进程
-   * 退出为止一直活着,每个 stop 事件两边各迁移一次,harness 收到两次 onStateChange、manager
-   * 被重复唤醒,持续整个进程生命周期。锁内重查让后来者直接复用前一次的成果,不产出第二个
-   * runtime,也就没有第二个 watcher 可泄漏。
-   */
+  /** Rebuild a CLI runtime from meta plus the deterministic tmux name. The per-worker lock and
+   * lock-local map recheck prevent duplicate runtimes/watchers during concurrent first access. */
   private async ensureRuntime(ref: { worker_id: string; seq: number; session_ref?: string }): Promise<Runtime | undefined> {
     const key = instanceKey(ref)
     const existing = this.runtimes.get(key)
@@ -1051,11 +973,6 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
       const sessionName = `crabot-w-${ref.worker_id}-${ref.seq}`
       const alive = await this.tmux.isAlive(sessionName)
-      // 启动期就绪握手超时的暂扣态是上面那条"重建后无法复原 running/idle 精细区分"的**唯一
-      // 例外**:它有独立落盘的确证(startup_stalled),且判错的代价不是精度损失而是语义错误
-      // ——一个开工输入一个字符都没投递过的 worker 在台账上显示"正在干活",manager 从此不
-      // 再过问。见 Runtime.startupStalled。
-      const stalled = alive && meta.startup_stalled === true
       const workspaceRoot = meta.workspace_root ?? ''
       const sessionId = meta.session_id ?? ref.session_ref ?? ''
       const outputFile = join(dir, `output-${ref.seq}.log`)
@@ -1077,11 +994,10 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         sessionId,
         outputLog: new OutputLog(outputFile),
         eventChannel,
-        state: alive ? (stalled ? 'idle' : 'running') : 'exited',
+        controlState: controlFromMeta(meta, alive),
         ended_reason: alive ? undefined : meta.ended_reason,
         stopBaseline,
         killed: false,
-        startupStalled: stalled,
       }
       this.runtimes.set(key, runtime)
       // 重启后重连接管(§13):会话还活着的化身在这里重新装上文件监视,它之后每一轮 hook
@@ -1097,7 +1013,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     dir: string,
     seq: number,
   ): Promise<
-    { session_id?: string; workspace_root?: string; ended_reason?: IncarnationEndReason; startup_stalled?: boolean } | undefined
+    { session_id?: string; workspace_root?: string; ended_reason?: IncarnationEndReason; state?: WorkerContractState; wait_mode?: 'text' | 'action'; wait_reason?: string; startup_stalled?: boolean } | undefined
   > {
     try {
       const raw = await fs.readFile(join(dir, `meta-${seq}.json`), 'utf-8')
@@ -1143,76 +1059,57 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
    * 发言"——仍然无解,而那正是 `lastText` 的语义。所以 cc/codex 的唤醒事件只带状态,manager
    * 需要正文时走 `read_worker_output`——那条路本来就通,行为与本次改动之前逐字一致。
    *
-   * 唯一的例外是 `report.outputTail`(见 reportStartupStall):启动期就绪握手超时时,manager
+   * 唯一的例外是 `report.outputTail`(见 initialStartupStall):启动期就绪握手超时时,manager
    * 手上没有任何别的线索能判断"卡在哪",而这是**每个化身至多付一次**的一次性成本,与上面
    * "每轮都付一遍"的量纲完全不同。
    */
-  private async transitionState(
+  private async transitionControlState(
     runtime: Runtime,
     h: IncarnationHandle,
-    state: WorkerContractState,
+    state: CliControlState,
     report?: StateChangeReport,
+    notify = true,
   ): Promise<void> {
+    const external = contractState(state)
+    const changed = runtime.controlState.kind !== state.kind ||
+      (runtime.controlState.kind === 'waiting_action' && state.kind === 'waiting_action' && runtime.controlState.reason !== state.reason)
     await writeMetaAtomic(runtime.dir, runtime.seq, {
       seq: runtime.seq,
-      state,
+      state: external,
       session_id: runtime.sessionId,
       workspace_root: runtime.workspaceRoot,
-      // 暂扣态跟着落盘:重启后 ensureRuntime 靠它把 idle 复原回来(见 Runtime.startupStalled)。
-      // 只在置位时写,不置位就不出现在 meta 里——老 meta 缺这个字段等价于"没暂扣"。
-      ...(runtime.startupStalled ? { startup_stalled: true } : {}),
+      ...(state.kind === 'waiting_text' ? { wait_mode: 'text' as const } : {}),
+      ...(state.kind === 'waiting_action' ? { wait_mode: 'action' as const, wait_reason: state.reason } : {}),
     })
-    runtime.state = state
+    runtime.controlState = state
+    if (!notify || !changed) return
     try {
-      this.deps.onStateChange?.(h, state, report)
+      this.deps.onStateChange?.(h, external, report)
     } catch (err) {
       console.error(`[ClaudeCodeAdapter] onStateChange callback error for ${h.worker_id}#${h.seq}:`, err)
     }
   }
 
-  /**
-   * 就绪握手超时的收场:落 `idle` + 把 output 尾部随唤醒事件交给 manager。**零协议改动**
-   * (protocol-agent-v3 §4.3:"worker 停下且输出尾巴带着问题"本来就是 idle 的一种情况,
-   * 判断语义与决策的责任在 manager 侧;§5.5 又明确授予它 `raw` 敲键的能力)。
-   *
-   * 不走"kill + exited(crashed)":那条路现成(见 kill()),但它把一个还能救的现场直接销毁。
-   * 保留进程交给 manager 决策严格更优,且不额外增加静默风险——化身已经落 idle,manager
-   * 必被唤醒。
-   *
-   * 尾部与 `readOutput` 走同一个解码器:manager 手上只有一个 worker 的一份日志,它没有理由
-   * 在 `read_worker_output` 里拿到可读文本、在唤醒事件里拿到同一份日志的转义序列乱码。解码
-   * 位置也与 `readOutput` 一致地留在 adapter 这一层(builtin 的输出是纯文本,不该被解码)。
-   */
-  private async reportStartupStall(
+  private async initialStartupStall(
     runtime: Runtime,
     h: IncarnationHandle,
     outputFile: string,
-    opts?: { note?: string },
-  ): Promise<void> {
+  ): Promise<InitialInputResult> {
     const tail = decodeTerminalOutput(await readOutputTail(outputFile))
-    // 等待期间进程可能是**自己死了**(启动即失败:二进制缺失、PATH 不对、pane 里的命令立刻
-    // 退出),那不是"停在一个界面上等人",谎报 idle 会让 manager 对着一具尸体发指令。先让既有
-    // 的三源判定跑一遍,它会如实落 exited;只有确实还活着才走下面的暂扣汇报。
-    //
-    // 落 `'crashed'` 而不是 syncState 缺省的 `'completed'`:本函数被调用的前提就是"开工输入
-    // 没落地"——就绪握手超时(一个字符都没投递,completed 不可能)或投递验证失败(prompt 被
-    // 启动期模态框吞掉,任务实际没开始),completed 在这两条路径上都不成立。吃缺省推断会让
-    // 一个从没干过活的 worker 在台账上落成"成功完成"终态(同 #66 修的那类"失败记成成功")。
-    if ((await this.syncState(runtime, h, 'crashed')).state === 'exited') return
-    await this.getMutex(h.worker_id).run(async () => {
-      if (runtime.state === 'exited') return // 判定与提交之间又被并发抢先:终态不可覆盖
-      // 先置标志再迁移:这一次 transitionState 的 meta 写入要带上 startup_stalled,且此后
-      // 任何一次 syncState 都必须维持 idle(见 Runtime.startupStalled)——否则这条 idle
-      // 只是"落了一下",下一次 state() 就把它连同台账一起翻回 running。
-      runtime.startupStalled = true
-      await this.transitionState(runtime, h, 'idle', {
-        outputTail:
-          opts?.note ?? describeStartupStall({ impl: 'claude-code', timeoutMs: this.pasteReadyTimeoutMs, tail }),
-      })
-    })
+    if (!(await this.tmux.isAlive(runtime.sessionName))) {
+      await this.transitionExited(runtime, h, 'crashed', false)
+      return { control_state: 'exited', disposition: 'not_pasted', report: { endReason: 'crashed', outputTail: tail } }
+    }
+    const state: CliControlState = { kind: 'waiting_action', reason: 'startup_stall' }
+    const report: StateChangeReport = {
+      outputTail: describeStartupStall({ impl: 'claude-code', timeoutMs: this.pasteReadyTimeoutMs, tail }),
+      waitReason: 'startup_stall',
+    }
+    await this.transitionControlState(runtime, h, state, report, false)
+    return { control_state: 'waiting_action', disposition: 'not_pasted', report }
   }
 
-  private async transitionExited(runtime: Runtime, h: IncarnationHandle, ended_reason: IncarnationEndReason): Promise<void> {
+  private async transitionExited(runtime: Runtime, h: IncarnationHandle, ended_reason: IncarnationEndReason, notify = true): Promise<void> {
     await writeMetaAtomic(runtime.dir, runtime.seq, {
       seq: runtime.seq,
       state: 'exited',
@@ -1220,11 +1117,12 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       ended_reason,
       workspace_root: runtime.workspaceRoot,
     })
-    runtime.state = 'exited'
+    runtime.controlState = { kind: 'exited', reason: ended_reason }
     runtime.ended_reason = ended_reason
     // 终态唯一入口:文件监视在这里摘掉(kill / 自然结束 / 崩溃都汇到这里),避免已经死掉
     // 的化身继续持有 fs watcher + 轮询定时器,也避免终态之后还往外推状态回调。
     this.stopEventWatch(runtime)
+    if (!notify) return
     try {
       this.deps.onStateChange?.(h, 'exited', { endReason: ended_reason })
     } catch (err) {
@@ -1250,9 +1148,31 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
    */
   private startEventWatch(runtime: Runtime, h: IncarnationHandle): void {
     if (!runtime.sessionName) return // fork 化身,无 tmux 也无 hook
-    if (runtime.state === 'exited') return
-    if (runtime.stopEventWatch) return // 幂等:同一 runtime 只装一个
-    runtime.stopEventWatch = runtime.eventChannel.watch(() => {
+    if (runtime.controlState.kind === 'exited') return
+    if (runtime.stopEventWatch) return
+    runtime.stopEventWatch = runtime.eventChannel.watch((event) => {
+      if (event.kind === 'notification') {
+        const raw = event.raw as { notification_type?: unknown; message?: unknown; title?: unknown } | null
+        const type = typeof raw?.notification_type === 'string' ? raw.notification_type : undefined
+        if (!type || !['permission_prompt', 'elicitation_dialog', 'agent_needs_input'].includes(type)) return
+        void this.getMutex(h.worker_id).run(async () => {
+          if (runtime.controlState.kind === 'exited') return
+          const snapshot = await this.capture(runtime)
+          if (!hasClaudeInteraction(snapshot.text)) return
+          const message = typeof raw?.message === 'string' ? raw.message : undefined
+          const title = typeof raw?.title === 'string' ? raw.title : undefined
+          const report: StateChangeReport = {
+            outputTail: snapshot.text,
+            waitReason: 'interaction_required',
+            notification: { type, ...(message ? { message } : {}), ...(title ? { title } : {}) },
+          }
+          await this.transitionControlState(runtime, h, { kind: 'waiting_action', reason: 'interaction_required' }, report)
+        }).catch((err) => {
+          console.error(`[ClaudeCodeAdapter] notification pane check failed for ${h.worker_id}#${h.seq}:`, err)
+        })
+        return
+      }
+      if (event.kind !== 'stop') return
       this.syncState(runtime, h).catch((err) => {
         console.error(`[ClaudeCodeAdapter] cli event driven syncState failed for ${h.worker_id}#${h.seq}:`, err)
       })
@@ -1289,44 +1209,6 @@ function workerIdLabelFromWorkspace(ws: Workspace): string {
 /** cc 的 project 目录 slug 规则:cwd 路径里的 `/` 与 `.` 都替换成 `-`(已用真实 ~/.claude/projects/ 核实)。 */
 function projectSlug(cwd: string): string {
   return cwd.replace(/[/.]/g, '-')
-}
-
-/**
- * 投递验证的探针:session jsonl 里是否已出现一条 user 消息(cc 收到输入即落盘,见
- * `verifyPromptDelivered` 的注释)。文件还不存在/半行/JSON 未完成都算"还没到",继续下一轮。
- * 非 ENOENT 的读取错误告警后同样按"还没到"处理(保守:宁可多等一轮,不因诊断噪音误判)。
- */
-async function sessionHasUserMessage(filePath: string): Promise<boolean> {
-  let raw: string
-  try {
-    raw = await fs.readFile(filePath, 'utf-8')
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false
-    console.warn(`[claude-code-adapter] prompt delivery check: cannot read ${filePath}:`, err)
-    return false
-  }
-  for (const line of raw.split('\n')) {
-    if (line.trim() === '') continue
-    let obj: unknown
-    try {
-      obj = JSON.parse(line)
-    } catch {
-      continue // 写入中途的半行:跳过,下一轮再看
-    }
-    const m = obj as { type?: string; message?: { role?: string } }
-    if (m.type === 'user' && m.message?.role === 'user') return true
-  }
-  return false
-}
-
-/** 轮询 session jsonl 直到出现 user 消息;超时返回 false。见 PROMPT_DELIVERY_TIMEOUT_MS 注释。 */
-async function verifyPromptDelivered(filePath: string, timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs
-  for (;;) {
-    if (await sessionHasUserMessage(filePath)) return true
-    if (Date.now() >= deadline) return false
-    await new Promise((r) => setTimeout(r, PROMPT_DELIVERY_POLL_INTERVAL_MS))
-  }
 }
 
 function truncate(text: string, max: number): string {

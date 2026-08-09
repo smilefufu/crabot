@@ -5,9 +5,9 @@
  * 投递前把关,不属于本类职责);安全态(running / idle)即投,不安全态(provision 中、
  * 模态弹窗、化身交接间隙、僵尸态)暂扣,恢复后按序补投。
  *
- * hold 选择"布尔"而非计数:harness 侧的暂扣场景(provision / 化身交接)是互斥的单一状态,
- * 不存在"多个理由同时暂扣、需要逐个撤销"的嵌套需求;若未来出现需要嵌套暂扣的场景,再改
- * 计数并补测,不在此提前引入复杂度。
+ * hold 使用理由集合：`waiting_action` / `input_pending` 只允许显式 raw 控制键旁路；
+ * provision / handoff 等其它理由属于 exclusive hold，连 raw 也阻断。理由可独立置位和释放，
+ * 运输层 hold 不作为 CLI control state 的第二维持久化。
  *
  * flush 并发安全:用 AsyncMutex 串行化同一信箱的 flush 调用,避免两轮并发 flush 重复投递
  * 同一条(P1 builtin sendInput 双发竞态同型问题)。deliver 抛错时该条留在队首、停止本轮、
@@ -35,13 +35,26 @@ export interface InboxItem {
   readonly dedupe_key?: string
 }
 
+export interface InboxDeliveryResult {
+  readonly action: 'hold_requeue' | 'hold_consumed'
+  readonly reason: 'waiting_action' | 'input_pending'
+  /** Synchronous ownership/state check evaluated immediately before committing the hold. */
+  readonly isCurrent?: () => boolean
+  /** Keep older consumed receipts ahead of the current requeued item. */
+  readonly requeueAfter?: number
+  /** Handoff may paste a full generated prompt while preserving the original durable receipt. */
+  readonly replacement?: { readonly text: string; readonly raw: boolean }
+}
+
 export class WorkerInbox {
   private queue: InboxItem[] = []
-  private _held = false
+  private readonly holds = new Set<string>()
   /** drain 当刻正在投递的 in-flight 条目;该条目投递失败时仅告警丢弃,post-drain 的条目失败走正常语义。 */
   private drainedInFlight: InboxItem | null = null
   /** flush 正在投递、已从 queue 取出但尚未结算成败的条目;drain 不把它计入结果。 */
   private inFlight: InboxItem | null = null
+  /** Items pasted into a CLI composer: UI owns the text, but durable receipts still need settlement. */
+  private consumedPending: InboxItem[] = []
   private readonly mutex = new AsyncMutex()
 
   constructor(private readonly workerId: string) {}
@@ -57,6 +70,7 @@ export class WorkerInbox {
     if (item.dedupe_key === undefined) throw new Error('enqueueUnique requires dedupe_key')
     if (
       this.inFlight?.dedupe_key === item.dedupe_key ||
+      this.consumedPending.some((consumed) => consumed.dedupe_key === item.dedupe_key) ||
       this.queue.some((queued) => queued.dedupe_key === item.dedupe_key)
     ) {
       return false
@@ -65,21 +79,46 @@ export class WorkerInbox {
     return true
   }
 
-  /** 标记不安全(如 provision/交接中),期间 flush 不投递 */
-  hold(_reason: string): void {
-    this._held = true
+  /** 入队首;仅用于首投not_pasted等已经明确未进入pane的所有权恢复。 */
+  enqueueFront(item: InboxItem): number {
+    this.queue.unshift(item)
+    return this.queue.length
   }
 
-  release(): void {
-    this._held = false
+  /** Mark delivery unsafe. waiting_action/input_pending permit an explicit raw control key. */
+  hold(reason: string): void {
+    this.holds.add(reason)
+  }
+
+  release(reason?: string): void {
+    if (reason) this.holds.delete(reason)
+    else this.holds.clear()
   }
 
   get held(): boolean {
-    return this._held
+    return this.holds.size > 0
+  }
+
+  private get rawBypassOnly(): boolean {
+    return this.holds.size > 0 && [...this.holds].every((reason) => reason === 'waiting_action' || reason === 'input_pending')
   }
 
   get pending(): number {
-    return this.queue.length
+    return this.queue.length + this.consumedPending.length
+  }
+
+  /** Settle durable receipts whose text was pasted and later submitted/abandoned via raw input. */
+  async settleConsumed(settlement: InboxSettlement): Promise<number> {
+    const items = this.consumedPending.splice(0)
+    for (const item of items) await this.settle(item, settlement)
+    return items.length
+  }
+
+  /** A pane incarnation ended; replay consumed durable items in the next incarnation. */
+  requeueConsumed(): number {
+    const items = this.consumedPending.splice(0)
+    if (items.length > 0) this.queue.unshift(...items)
+    return items.length
   }
 
   /**
@@ -96,17 +135,47 @@ export class WorkerInbox {
    * pending:返回队列中的待投条数。注意:在 await deliver() 期间,该条已从 queue
    * 取出(shift),所以 pending 不计入 in-flight 条目。
    */
-  async flush(deliver: (item: InboxItem) => Promise<InboxSettlement | void>): Promise<number> {
+  async flush(
+    deliver: (item: InboxItem) => Promise<InboxSettlement | InboxDeliveryResult | void>,
+  ): Promise<number> {
     return this.mutex.run(async () => {
       let delivered = 0
-      while (this.queue.length > 0 && !this._held) {
-        const item = this.queue.shift()!
+      while (this.queue.length > 0) {
+        if (this.held && !this.rawBypassOnly) break
+        const index = this.held ? this.queue.findIndex((candidate) => candidate.raw) : 0
+        if (index < 0) break
+        const [item] = this.queue.splice(index, 1)
         this.inFlight = item
         try {
-          const settlement = await deliver(item)
+          const result = await deliver(item)
           this.inFlight = null
+          if (typeof result === 'object') {
+            const retainedItem = result.replacement
+              ? { ...item, text: result.replacement.text, raw: result.replacement.raw }
+              : item
+            if (result.isCurrent && !result.isCurrent()) {
+              if (this.drainedInFlight === item || item.raw) {
+                await this.settle(item, 'dead_letter')
+                delivered++
+              } else {
+                this.queue.unshift(retainedItem)
+              }
+              continue
+            }
+            this.hold(result.reason)
+            if (result.action === 'hold_requeue') {
+              if (this.drainedInFlight === item) await this.settle(item, 'dead_letter')
+              else this.queue.splice(Math.min(result.requeueAfter ?? 0, this.queue.length), 0, retainedItem)
+            } else if (this.drainedInFlight === item) {
+              await this.settle(item, 'dead_letter')
+            } else {
+              if (retainedItem.onSettled) this.consumedPending.push(retainedItem)
+              delivered++
+            }
+            break
+          }
           delivered++
-          await this.settle(item, settlement ?? 'delivered')
+          await this.settle(item, typeof result === 'string' ? result : 'delivered')
         } catch (err) {
           this.inFlight = null
           if (this.drainedInFlight === item) {
@@ -146,13 +215,15 @@ export class WorkerInbox {
   /**
    * 取出全部并清空(化身终结时 dead-letter 用)。同步执行、不走 mutex——化身终结时
    * 可能正有一轮 flush 卡在 deliver 上(如 tmux 命令挂起、长时间不返回),drain 不能
-   * 无限等锁卡住终结流程。返回结果不含 in-flight 条目:它的成败由 flush 自己结算
+   * 无限等锁卡住终结流程。返回结果包含已经 paste、仍等待 raw 决议的 durable receipt，
+   * 但不含当前 in-flight 条目:它的成败由 flush 自己结算
    * (成功计入投递、失败见 flush 的 catch 分支),避免同一条目既投递又进 dead-letter。
    */
   drain(): InboxItem[] {
     // 记录 drain 当刻的 in-flight 条目,以便 flush 的 catch 分支判断是否需要吞掉错误
     this.drainedInFlight = this.inFlight
-    const items = this.queue
+    const items = [...this.consumedPending, ...this.queue]
+    this.consumedPending = []
     this.queue = []
     return items
   }
