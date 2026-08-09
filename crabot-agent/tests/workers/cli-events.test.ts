@@ -63,6 +63,22 @@ describe('CliEventChannel', () => {
     expect((await channel.readAll()).map((event) => event.raw)).toEqual([JSON.parse(payload), null])
   })
 
+  it('malformed或截断stdin payload降级为raw:null，不能吞掉整条Stop事件', async () => {
+    const channel = new CliEventChannel(filePath)
+    for (const payload of ['not json', '{"stop_hook_active":true', '{not-json}', '{"stop_hook_active":}']) {
+      const quoted = `'${payload.replace(/'/g, `'\\''`)}'`
+      await execFileAsync('/bin/bash', ['-c', `printf '%s' ${quoted} | (${channel.hookCommand('stop')})`])
+    }
+
+    const events = await channel.readAll()
+    expect(events.map((event) => [event.kind, event.raw])).toEqual([
+      ['stop', null],
+      ['stop', null],
+      ['stop', null],
+      ['stop', null],
+    ])
+  })
+
   it('readAll 对不存在的文件返回空数组', async () => {
     const channel = new CliEventChannel(path.join(tempDir, 'does-not-exist.jsonl'))
     const events = await channel.readAll()
@@ -72,7 +88,12 @@ describe('CliEventChannel', () => {
   it('readAll 跳过坏行, 保留好行', async () => {
     await fs.writeFile(
       filePath,
-      ['not json at all', '{"ts":"2026-01-01T00:00:00Z","kind":"stop","raw":null}', '{broken json'].join('\n') + '\n',
+      [
+        'not json at all',
+        '{"ts":"not-hook","kind":"stop","raw":not-json}',
+        '{"ts":"2026-01-01T00:00:00Z","kind":"stop","raw":null}',
+        '{broken json',
+      ].join('\n') + '\n',
       'utf-8',
     )
     const channel = new CliEventChannel(filePath)

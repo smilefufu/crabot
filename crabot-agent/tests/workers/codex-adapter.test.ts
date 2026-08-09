@@ -1333,6 +1333,7 @@ describe('CodexWorkerAdapter.fork — capabilities.fork=false', () => {
 /** 全程无操作的假 TmuxDriver——readTrace 测试只需要一个"常驻 runtime"的化身,不关心 tmux 行为本身。 */
 class NoopTmux extends TmuxDriver {
   paneText = '› \n? for shortcuts'
+  alive = true
 
   async newSession(spec: TmuxSessionSpec): Promise<void> {
     await fakeReadyNewSession(spec)
@@ -1348,7 +1349,7 @@ class NoopTmux extends TmuxDriver {
     return { text: this.paneText }
   }
   async isAlive(_name: string): Promise<boolean> {
-    return true
+    return this.alive
   }
   async killSession(_name: string): Promise<void> {}
 }
@@ -1707,6 +1708,30 @@ describe('CodexWorkerAdapter — CLI notify 事件文件监视(被动 push)', ()
     expect(seen[seen.length - 1]).toEqual({ seq: h.seq, state: 'idle' })
 
     await adapter.kill(h)
+  })
+
+  it('waiting_action同时观察到新turn-complete与pane死亡时按完成边界推断，不误记crashed', async () => {
+    const tmux = new NoopTmux()
+    const adapter = new CodexWorkerAdapter({
+      dataDir,
+      tmux,
+      codexBin: 'unused',
+      sessionDiscoveryTimeoutMs: 50,
+    })
+    const workerId = `codextest-${randomUUID().slice(0, 8)}`
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '干活', workspace: { root: workspaceRoot } })
+
+    await appendStopEvent()
+    expect(await adapter.state(h)).toBe('idle')
+    tmux.paneText = 'unknown modal surface'
+    await expect(adapter.sendInput(h, '暂扣输入')).rejects.toBeTruthy()
+    expect(await adapter.state(h)).toBe('idle')
+
+    tmux.alive = false
+    await appendStopEvent()
+    expect(await adapter.state(h)).toBe('exited')
+    const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+    expect(meta.ended_reason).toBe('completed')
   })
 
   it('waiting_text期间到达的后续stop仍推进基线，不会让下一轮刚开始就被旧stop判回idle', async () => {

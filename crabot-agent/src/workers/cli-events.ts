@@ -50,9 +50,11 @@ export class CliEventChannel {
    * 生成供 CLI hook 使用的 shell 片段(POSIX sh,不依赖 node/jq 等非必装工具)。
    * 只用 printf + date -u 拼一行 JSON 并追加到事件文件。
    *
-   * hook 的 stdin 是 CLI 提供的 JSON payload。它只作为 JSON 值写进 raw，绝不执行、
+   * hook 的 stdin 是 CLI 提供的 JSON object payload。它只作为 JSON 值写进 raw，绝不执行、
    * 解释或重编码；去掉 CR/LF 仅用于把格式化 JSON 收束为单行（JSON 字符串里的换行必为
-   * `\\n` 转义，因而不会被改变）。空 stdin 保持 legacy raw:null。
+   * `\\n` 转义，因而不会被改变）。空、非 object 或明显截断的 stdin 降级为 legacy
+   * `raw:null`。外形完整但内部无效的 object 无法靠纯 POSIX shell 完整验证；readAll/watch
+   * 会识别本命令生成的可信 envelope，保留 ts/kind 并把这类 raw 同样降级为 null。
    *
    * 追加目标是 `"${CRABOT_CLI_EVENTS_FILE:-<本 channel 的路径>}"`——运行时可被调用方经
    * env 重定向到私有文件,见 EVENTS_FILE_ENV 注释。
@@ -62,9 +64,9 @@ export class CliEventChannel {
     // 再整体当作单个 shell 单引号字面量传给 printf 的 %s——避免 kind 内容
     // 里出现 % 之类字符被 printf 误当格式指令解析。
     const kindJsonEscaped = JSON.stringify(kind).slice(1, -1)
-    const format = '{"ts":"%s","kind":"%s","raw":%s}\\n'
+    const format = '{"ts":"%s","kind":"%s","source":"crabot_cli_hook","raw":%s}\\n'
     const target = `"\${${EVENTS_FILE_ENV}:-${dqEscape(this.filePath)}}"`
-    const raw = "raw=$(tr -d '\\r\\n'); if [ -z \"$raw\" ]; then raw=null; fi"
+    const raw = "raw=$(tr -d '\\r\\n'); case \"$raw\" in \\{*\\}) ;; *) raw=null ;; esac"
     return [
       'ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)',
       raw,
@@ -91,7 +93,8 @@ export class CliEventChannel {
   /**
    * 监视事件文件的新增行:fs.watch(目录)作为快路径 + 2s 轮询兜底。
    * 按已读字节 offset 去重;文件/目录此时可能尚不存在,容忍并等待其出现。
-   * 坏行(完整换行终结但内容损坏)跳过且不中断;半行(尚无换行符,写入未完成)
+   * 坏行(完整换行终结但内容损坏)默认跳过且不中断；由 hookCommand 生成、仅 raw payload
+   * 损坏的可信 envelope 则保留 ts/kind 并降级为 raw:null。半行(尚无换行符,写入未完成)
    * 留到下次补全读——offset 只推进到最后一个完整换行处。
    */
   watch(onEvent: (e: CliEvent) => void): () => void {
@@ -189,6 +192,17 @@ function parseLine(line: string): CliEvent | null {
     }
     return null
   } catch {
-    return null // 坏行:跳过,不中断
+    // hookCommand 的 ts/kind/source 前缀与末尾换行由我们生成，只有 raw 来自 CLI stdin。
+    // POSIX shell 无法在不依赖 jq/node 的前提下完整校验任意 JSON；若 payload 外形像 object
+    // 但内部损坏，带固定 source discriminator 的本通道 envelope 仍保留 turn/notification
+    // 事件，仅把 raw 降级为 null。没有 discriminator 的其它坏行继续跳过。
+    const envelope = /^\{"ts":"([^"\\]*)","kind":"((?:\\.|[^"\\])*)","source":"crabot_cli_hook","raw":.*\}$/.exec(trimmed)
+    if (!envelope) return null
+    try {
+      const kind = JSON.parse(`"${envelope[2]}"`)
+      return typeof kind === 'string' ? { ts: envelope[1], kind, raw: null } : null
+    } catch {
+      return null
+    }
   }
 }

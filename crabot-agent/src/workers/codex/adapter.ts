@@ -1144,7 +1144,11 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       if (!(await this.tmux.isAlive(runtime.sessionName))) {
         let reason = deadReason
         if (runtime.killed) reason = 'killed'
-        else if (runtime.controlState.kind === 'waiting_action') reason = 'crashed'
+        // waiting_action 本身就是"所需输入/控制动作尚未安全完成"的证据；在没有新 turn-complete
+        // 的情况下 pane 消失不能推断任务已完成。按 spec，reason 只用于诊断、不产生不同终态
+        // 分支，因此 startup_stall / interaction_required / input_pending 统一收敛 crashed。
+        // 同一次 reconcile 若已观察到新 turn-complete，则完成证据优先，沿缺省 deadReason 推断。
+        else if (runtime.controlState.kind === 'waiting_action' && stopCount <= runtime.stopBaseline) reason = 'crashed'
         await this.transitionExited(runtime, currentHandle, reason, notify)
       } else if (stopCount > runtime.stopBaseline) {
         runtime.stopBaseline = stopCount
