@@ -52,6 +52,7 @@ htmlcov/
 
 docs/superpowers/
 .superpowers/
+.pi-subagents/
 
 # Git worktrees
 .worktrees/
