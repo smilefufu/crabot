@@ -75,8 +75,52 @@ function shQuote(s: string): string {
  * ~/.claude/settings.json 的前提下消掉弹窗。值是 adapter 内部常量,仍经 shQuote 进入 shell。
  */
 const BYPASS_WARNING_SETTINGS_ARG = `--settings ${shQuote(JSON.stringify({ skipDangerousModePermissionPrompt: true }))}`
+const MCP_CONFIG_FILE = '.mcp.json'
 /** 只允许 provision 生成的 task-scoped MCP，禁止与宿主 user/local scope 求并集。 */
-const STRICT_MCP_CONFIG_ARGS = '--mcp-config .mcp.json --strict-mcp-config'
+const STRICT_MCP_CONFIG_ARGS = `--mcp-config ${MCP_CONFIG_FILE} --strict-mcp-config`
+
+/** 防止含凭据的 project MCP 配置被 worker 的普通 `git add -A` 带进仓库。 */
+async function ensureMcpConfigIgnored(workspaceRoot: string): Promise<void> {
+  const gitEnv = { ...process.env, LC_ALL: 'C' }
+  let isGitWorkspace = false
+  try {
+    const { stdout } = await execFileAsync('git', ['-C', workspaceRoot, 'rev-parse', '--is-inside-work-tree'], { env: gitEnv })
+    isGitWorkspace = stdout.trim() === 'true'
+  } catch (err) {
+    const gitError = err as NodeJS.ErrnoException & { stderr?: string }
+    if (gitError.code !== 'ENOENT' && !gitError.stderr?.includes('not a git repository')) {
+      throw new Error(`ClaudeCodeAdapter.provision: cannot inspect git workspace before writing ${MCP_CONFIG_FILE}: ${gitError.message}`)
+    }
+  }
+
+  if (isGitWorkspace) {
+    try {
+      await execFileAsync('git', ['-C', workspaceRoot, 'ls-files', '--error-unmatch', '--', MCP_CONFIG_FILE], { env: gitEnv })
+      throw new Error(
+        `ClaudeCodeAdapter.provision: refusing to overwrite tracked ${MCP_CONFIG_FILE} with task-scoped MCP credentials; ` +
+        'untrack or relocate that file, then retry',
+      )
+    } catch (err) {
+      const gitError = err as Error & { code?: string | number }
+      if (gitError.message.startsWith('ClaudeCodeAdapter.provision:')) throw err
+      if (gitError.code !== 1) {
+        throw new Error(`ClaudeCodeAdapter.provision: cannot inspect ${MCP_CONFIG_FILE} tracking state: ${gitError.message}`)
+      }
+    }
+  }
+
+  const ignorePath = join(workspaceRoot, '.gitignore')
+  const entry = `/${MCP_CONFIG_FILE}`
+  let current = ''
+  try {
+    current = await fs.readFile(ignorePath, 'utf-8')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+  }
+  if (current.split(/\r?\n/).includes(entry)) return
+  const prefix = current.length > 0 && !current.endsWith('\n') ? '\n' : ''
+  await fs.appendFile(ignorePath, `${prefix}${entry}\n`, 'utf-8')
+}
 
 /** UUID 格式校验:标准 UUID 格式(8-4-4-4-12 十六进制段,由连字符分隔)。*/
 function validateSessionRef(sessionRef: string): void {
@@ -226,6 +270,8 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
   async provision(ws: Workspace, caps: CapabilityBundle): Promise<void> {
     const claudeDir = join(ws.root, '.claude')
+    // 先确保普通 git add 不会收录凭据；已跟踪同名文件或检查失败时在任何 provision 写入前 fail-loud。
+    await ensureMcpConfigIgnored(ws.root)
     // hook 写入目录必须先 mkdir——printf >> 对缺目录静默失败(Task 2 评审裁决)。
     await fs.mkdir(claudeDir, { recursive: true })
 
@@ -248,7 +294,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
     await materializeSkills(ws.root, caps.skills, '.claude/skills')
 
-    await writeSensitiveFileAtomic(join(ws.root, '.mcp.json'), renderMcpJson(mcpServers))
+    await writeSensitiveFileAtomic(join(ws.root, MCP_CONFIG_FILE), renderMcpJson(mcpServers))
 
     await fs.writeFile(
       join(ws.root, 'CLAUDE.md'),
@@ -734,7 +780,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       '--resume', prev.session_ref,
       '--fork-session',
       '--output-format', 'text',
-      '--mcp-config', '.mcp.json',
+      '--mcp-config', MCP_CONFIG_FILE,
       '--strict-mcp-config',
     ]
     const shellCommand = `${this.claudeBin} ${args.map(shQuote).join(' ')}`

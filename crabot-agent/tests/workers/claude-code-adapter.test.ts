@@ -122,14 +122,17 @@ describe('ClaudeCodeAdapter.provision', () => {
   })
 
   it('写出 .claude/settings.json(含 Stop/Notification hook 与 permissions)、.mcp.json、CLAUDE.md', async () => {
+    execFileSync('git', ['init', '-q'], { cwd: ws })
+    await fs.writeFile(path.join(ws, '.gitignore'), 'existing-rule')
     const adapter = new ClaudeCodeAdapter({ dataDir: ws, claudeConfigPath })
-    await adapter.provision({ root: ws }, {
+    const caps = {
       skills: [],
       mcp_servers: [
-        { name: 'x', transport: 'stdio', command: 'node', env: { API_KEY: 'secret' } },
-        { name: 'remote', transport: 'streamable-http', url: 'https://example.com/mcp', headers: { Authorization: 'Bearer token' } },
+        { name: 'x', transport: 'stdio' as const, command: 'node', env: { API_KEY: 'secret' } },
+        { name: 'remote', transport: 'streamable-http' as const, url: 'https://example.com/mcp', headers: { Authorization: 'Bearer token' } },
       ],
-    })
+    }
+    await adapter.provision({ root: ws }, caps)
 
     const settings = JSON.parse(await fs.readFile(path.join(ws, '.claude/settings.json'), 'utf-8'))
     expect(settings.hooks.Stop[0].hooks[0].command).toContain('events-cli.jsonl')
@@ -145,9 +148,32 @@ describe('ClaudeCodeAdapter.provision', () => {
       url: 'https://example.com/mcp',
       headers: { Authorization: 'Bearer token' },
     })
+    expect(await fs.readFile(path.join(ws, '.gitignore'), 'utf-8')).toBe('existing-rule\n/.mcp.json\n')
+
+    // 重复 provision 不重复追加；普通 git add -A 不能把仍含凭据的文件带进索引。
+    await adapter.provision({ root: ws }, caps)
+    expect(await fs.readFile(path.join(ws, '.gitignore'), 'utf-8')).toBe('existing-rule\n/.mcp.json\n')
+    execFileSync('git', ['add', '-A'], { cwd: ws })
+    expect(() => execFileSync('git', ['ls-files', '--error-unmatch', '--', '.mcp.json'], { cwd: ws, stdio: 'ignore' })).toThrow()
 
     const claudeMd = await fs.readFile(path.join(ws, 'CLAUDE.md'), 'utf-8')
     expect(claudeMd).toContain('你是 crabot 的 worker')
+  })
+
+  it('拒绝覆盖 Git 已跟踪的 .mcp.json，避免 ignore 对 tracked file 无效时泄漏凭据', async () => {
+    execFileSync('git', ['init', '-q'], { cwd: ws })
+    const trackedPath = path.join(ws, '.mcp.json')
+    await fs.writeFile(trackedPath, '{"user":"config"}\n', 'utf-8')
+    execFileSync('git', ['add', '.mcp.json'], { cwd: ws })
+
+    const adapter = new ClaudeCodeAdapter({ dataDir: ws, claudeConfigPath })
+    await expect(adapter.provision({ root: ws }, {
+      skills: [],
+      mcp_servers: [{ name: 'x', transport: 'stdio', command: 'node', env: { API_KEY: 'secret' } }],
+    })).rejects.toThrow(/refusing to overwrite tracked \.mcp\.json/)
+
+    expect(await fs.readFile(trackedPath, 'utf-8')).toBe('{"user":"config"}\n')
+    await expect(fs.access(path.join(ws, '.claude/settings.json'))).rejects.toThrow()
   })
 
   // ~/.claude.json 的 projects[<realpath>].hasTrustDialogAccepted —— cc 交互式启动的
