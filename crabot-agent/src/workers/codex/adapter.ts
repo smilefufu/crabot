@@ -35,7 +35,7 @@ import { writeMetaAtomic, maxSeqOnDisk, latestModifiedMs } from '../meta-store.j
 import { WorkerExitedError, CapabilityNotSupportedError, CliInputStallError } from '../errors.js'
 import { probeCodexInput, acceptedCodexInput } from './input-surface.js'
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
-import { materializeSkills, renderCodexMcpToml, renderContextMd, writeSensitiveFileAtomic, type ProvisionSources } from '../provision/materialize.js'
+import { assertWorkspaceFilesUntracked, materializeSkills, renderCodexMcpToml, renderContextMd, writeSensitiveFileAtomic, type ProvisionSources } from '../provision/materialize.js'
 import type {
   AdapterCapabilities,
   CapabilityBundle,
@@ -61,6 +61,7 @@ const execFileAsync = promisify(execFile)
  * "spawn/resume 启动参数"节。取值只含 `[A-Za-z_.=]`,不含 shell 元字符,拼进经 `sh -c`
  * 跑的 tmux 命令行时无需额外引号(与相邻的 `--sandbox workspace-write` 写法一致)。 */
 const CODEX_NETWORK_ACCESS_OPT = '-c sandbox_workspace_write.network_access=true'
+const CODEX_CREDENTIAL_FILES = ['.codex/config.toml', '.codex/auth.json'] as const
 
 /** POSIX shell 单引号转义,与 cc adapter 的私有 shQuote 同款用法(独立复制一份)。 */
 function shQuote(s: string): string {
@@ -504,7 +505,10 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
   async provision(ws: Workspace, caps: CapabilityBundle): Promise<void> {
     const codexDir = join(ws.root, '.codex')
+    // 已跟踪的 credential target 必须在任何 provision 写入前拒绝；ignore 必须先于敏感文件落盘。
+    await assertWorkspaceFilesUntracked(ws.root, CODEX_CREDENTIAL_FILES, 'CodexWorkerAdapter.provision')
     await fs.mkdir(codexDir, { recursive: true })
+    await fs.writeFile(join(codexDir, '.gitignore'), '*\n', 'utf-8')
 
     const channel = new CliEventChannel(eventsFilePath(ws))
     // codex-docs: notify 只支持在"顶层用户配置"这层 config.toml 里声明,项目级
@@ -557,15 +561,10 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     try {
       const authRaw = await fs.readFile(join(this.codexHomeSource, 'auth.json'), 'utf-8')
       const authPath = join(codexDir, 'auth.json')
-      await fs.writeFile(authPath, authRaw, 'utf-8')
-      // auth.json 包含凭据,设置严格权限防止泄露
-      await fs.chmod(authPath, 0o600)
+      await writeSensitiveFileAtomic(authPath, authRaw)
     } catch {
       // 忽略:本机未登录/测试环境本就没有 auth.json
     }
-
-    // .codex/ 整个隔离 HOME 都不应入库(凭据、临时缓存等),写入 .gitignore
-    await fs.writeFile(join(codexDir, '.gitignore'), '*\n', 'utf-8')
 
     // codex-docs: skills 支持 .codex/skills/(项目级)或 ~/.codex/skills/(个人级);本方案下
     // .codex/ 本身就是 CODEX_HOME,两个语义重合到同一目录。

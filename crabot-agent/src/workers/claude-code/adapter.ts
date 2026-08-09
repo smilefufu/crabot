@@ -40,7 +40,7 @@ import { AsyncMutex } from '../async-mutex.js'
 import { writeMetaAtomic, maxSeqOnDisk, latestModifiedMs } from '../meta-store.js'
 import { WorkerExitedError, CliInputStallError } from '../errors.js'
 import { probeClaudeInput, acceptedClaudeInput, hasClaudeInteraction } from './input-surface.js'
-import { materializeSkills, renderMcpJson, renderContextMd, writeSensitiveFileAtomic, type ProvisionSources } from '../provision/materialize.js'
+import { assertWorkspaceFilesUntracked, materializeSkills, renderMcpJson, renderContextMd, writeSensitiveFileAtomic, type ProvisionSources } from '../provision/materialize.js'
 import type {
   AdapterCapabilities,
   CapabilityBundle,
@@ -86,33 +86,11 @@ const STRICT_MCP_CONFIG_ARGS = `--mcp-config ${MCP_CONFIG_FILE} --strict-mcp-con
 
 /** 防止含凭据的 project MCP 配置被 worker 的普通 `git add -A` 带进仓库。 */
 async function ensureMcpConfigIgnored(workspaceRoot: string): Promise<void> {
-  const gitEnv = { ...process.env, LC_ALL: 'C' }
-  let isGitWorkspace = false
-  try {
-    const { stdout } = await execFileAsync('git', ['-C', workspaceRoot, 'rev-parse', '--is-inside-work-tree'], { env: gitEnv })
-    isGitWorkspace = stdout.trim() === 'true'
-  } catch (err) {
-    const gitError = err as NodeJS.ErrnoException & { stderr?: string }
-    if (gitError.code !== 'ENOENT' && !gitError.stderr?.includes('not a git repository')) {
-      throw new Error(`ClaudeCodeAdapter.provision: cannot inspect git workspace before writing ${MCP_CONFIG_FILE}: ${gitError.message}`)
-    }
-  }
-
-  if (isGitWorkspace) {
-    try {
-      await execFileAsync('git', ['-C', workspaceRoot, 'ls-files', '--error-unmatch', '--', MCP_CONFIG_FILE], { env: gitEnv })
-      throw new Error(
-        `ClaudeCodeAdapter.provision: refusing to overwrite tracked ${MCP_CONFIG_FILE} with task-scoped MCP credentials; ` +
-        'untrack or relocate that file, then retry',
-      )
-    } catch (err) {
-      const gitError = err as Error & { code?: string | number }
-      if (gitError.message.startsWith('ClaudeCodeAdapter.provision:')) throw err
-      if (gitError.code !== 1) {
-        throw new Error(`ClaudeCodeAdapter.provision: cannot inspect ${MCP_CONFIG_FILE} tracking state: ${gitError.message}`)
-      }
-    }
-  }
+  await assertWorkspaceFilesUntracked(
+    workspaceRoot,
+    [MCP_CONFIG_FILE],
+    'ClaudeCodeAdapter.provision',
+  )
 
   const ignorePath = join(workspaceRoot, '.gitignore')
   let current = ''

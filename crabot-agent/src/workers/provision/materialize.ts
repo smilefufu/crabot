@@ -1,8 +1,12 @@
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
+import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { promisify } from 'node:util'
 
 import type { MCPServerConfig } from '../../types.js'
+
+const execFileAsync = promisify(execFile)
 
 export interface ProvisionSources {
   skills: ReadonlyArray<{ id: string; name: string; skill_dir: string }>
@@ -114,6 +118,41 @@ export function renderCodexMcpToml(servers: ProvisionSources['mcpServers']): str
     return lines.join('\n')
   })
   return blocks.length === 0 ? '' : blocks.join('\n\n') + '\n'
+}
+
+export async function assertWorkspaceFilesUntracked(
+  workspaceRoot: string,
+  relativePaths: readonly string[],
+  caller: string,
+): Promise<void> {
+  const gitEnv = { ...process.env, LC_ALL: 'C' }
+  let isGitWorkspace = false
+  try {
+    const { stdout } = await execFileAsync('git', ['-C', workspaceRoot, 'rev-parse', '--is-inside-work-tree'], { env: gitEnv })
+    isGitWorkspace = stdout.trim() === 'true'
+  } catch (err) {
+    const gitError = err as NodeJS.ErrnoException & { stderr?: string }
+    if (gitError.code !== 'ENOENT' && !gitError.stderr?.includes('not a git repository')) {
+      throw new Error(`${caller}: cannot inspect git workspace before writing credential files: ${gitError.message}`)
+    }
+  }
+  if (!isGitWorkspace) return
+
+  for (const relativePath of relativePaths) {
+    try {
+      await execFileAsync('git', ['-C', workspaceRoot, 'ls-files', '--error-unmatch', '--', relativePath], { env: gitEnv })
+      throw new Error(
+        `${caller}: refusing to overwrite tracked ${relativePath} with task-scoped credentials; ` +
+        'untrack or relocate that file, then retry',
+      )
+    } catch (err) {
+      const gitError = err as Error & { code?: string | number }
+      if (gitError.message.startsWith(`${caller}:`)) throw err
+      if (gitError.code !== 1) {
+        throw new Error(`${caller}: cannot inspect ${relativePath} tracking state: ${gitError.message}`)
+      }
+    }
+  }
 }
 
 export async function writeSensitiveFileAtomic(filePath: string, content: string): Promise<void> {
