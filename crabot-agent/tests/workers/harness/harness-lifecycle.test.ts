@@ -884,6 +884,47 @@ describe('WorkerHarness.sendToWorker', () => {
     expect(settled.incarnations[0].state).toBe('idle')
   })
 
+  it('pending_in_ui hold保留，但其running状态写不覆盖并发Stop落下的waiting_input', async () => {
+    let markEntered!: () => void
+    const entered = new Promise<void>((resolve) => { markEntered = resolve })
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const { harness, fake } = await makeHarness({
+      implId: 'claude-code',
+      sendInputBehavior: async () => {
+        markEntered()
+        await gate
+        throw new CliInputStallError('pending_in_ui', 'running', {
+          waitReason: 'input_pending',
+          outputTail: 'queued text not visibly acknowledged',
+        })
+      },
+    })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+    const send = harness.sendToWorker(worker.worker_id, 'steering text')
+    await entered
+
+    fake.emitStateChange({
+      worker_id: worker.worker_id,
+      seq: 1,
+      impl: 'claude-code',
+      session_ref: `ref-${worker.worker_id}#1`,
+    }, 'idle')
+    await waitUntil(async () => {
+      const [current] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      return current.task.status === 'waiting_input'
+    })
+
+    release()
+    await send
+
+    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(settled.task.status).toBe('waiting_input')
+    expect(settled.incarnations[0].state).toBe('idle')
+    expect(fake.sendInputCalls).toHaveLength(1)
+    expect((harness as any).getInbox(worker.worker_id).held).toBe(true)
+  })
+
   it('主线CLI投递不因并发fork状态回调而丢失running结算', async () => {
     let fakeRef!: FakeAdapter
     let currentWorkerId = ''

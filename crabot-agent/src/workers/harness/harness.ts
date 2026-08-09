@@ -450,6 +450,7 @@ type InputAttempt =
       readonly handle: IncarnationHandle
       readonly controlState: NonNullable<IncarnationHandle['initial_input']>['control_state']
       readonly report?: StateChangeReport
+      readonly expectedStateChangeRevision: number
       readonly delivery: InboxDeliveryResult
     }
   | {
@@ -806,6 +807,7 @@ export class WorkerHarness {
           handle,
           controlState: error.control_state,
           report: error.report,
+          expectedStateChangeRevision: stateChangeRevision,
           delivery: {
             action: raw || error.disposition === 'pending_in_ui' ? 'hold_consumed' : 'hold_requeue',
             reason: error.disposition === 'pending_in_ui' ? 'input_pending' : 'waiting_action',
@@ -839,7 +841,12 @@ export class WorkerHarness {
   ): Promise<InboxSettlement | InboxDeliveryResult> {
     if (attempt.kind === 'stalled') {
       if (attempt.delivery.isCurrent?.()) {
-        await this.recordCliInputResult(attempt.handle, attempt.controlState, attempt.report)
+        await this.recordCliInputResult(
+          attempt.handle,
+          attempt.controlState,
+          attempt.report,
+          attempt.expectedStateChangeRevision,
+        )
       }
       return attempt.delivery
     }
