@@ -12,12 +12,13 @@ const CLAUDE_COMPOSER_BOUNDARY = /^\s*(?:[─━-]{3,}|esc to interrupt|⏵⏵|(
 export function probeClaudeInput(snapshot: PaneSnapshot, mode: InputMode, text?: string, enforceMode = true): InputProbe {
   const pane = snapshot.text
   if (hasClaudeInteraction(pane)) return 'unavailable'
-  const composer = claudeComposerText(snapshot, text !== undefined)
+  const composer = claudeComposerText(snapshot)
   if (composer === undefined) return 'unavailable'
   const active = /esc to interrupt/i.test(pane)
   if (enforceMode && (mode === 'steering') !== active) return 'unavailable'
   if (text !== undefined) {
-    if (composerMatchesExpected(composer, text)) return 'pending'
+    const expectedComposer = claudeComposerText(snapshot, true)
+    if (expectedComposer !== undefined && composerMatchesExpected(expectedComposer, text)) return 'pending'
     return composer.length === 0 ? 'empty' : 'unavailable'
   }
   return composer.length === 0 ? 'empty' : 'pending'

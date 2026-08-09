@@ -42,6 +42,7 @@ describe('CLI input surfaces', () => {
     const claudePlaceholderPane = pane(`❯\u00a0${claudePlaceholder}\n────────────────\n  ⏵⏵ bypass permissions on (shift+tab to cycle)`)
     expect(probeClaudeInput(claudePlaceholderPane, 'primary')).toBe('empty')
     expect(probeClaudeInput(claudePlaceholderPane, 'primary', claudePlaceholder)).toBe('pending')
+    expect(probeClaudeInput(claudePlaceholderPane, 'primary', 'a different task')).toBe('empty')
     expect(acceptedClaudeInput(historyOnly, 'primary', text)).toBe(true)
     const selector = pane('transcript\n❯ historical choice\n────────────────\n⏵⏵ bypass permissions on')
     expect(probeClaudeInput(selector, 'primary', 'new')).toBe('unavailable')
@@ -76,6 +77,11 @@ describe('CLI input surfaces', () => {
       'primary',
       exactPlaceholder,
     )).toBe('pending')
+    expect(probeCodexInput(
+      pane(`› ${exactPlaceholder}\n  gpt-5.6-sol xhigh · /private/tmp/workspace`),
+      'primary',
+      'a different task',
+    )).toBe('empty')
     const placeholderPrefix = 'Explain this codebase and list the module boundaries'
     expect(probeCodexInput(
       pane(`› ${placeholderPrefix}\n  gpt-5.6-sol xhigh · /private/tmp/workspace`),

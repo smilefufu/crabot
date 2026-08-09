@@ -21,12 +21,13 @@ const CODEX_PLACEHOLDERS = [
 export function probeCodexInput(snapshot: PaneSnapshot, mode: InputMode, text?: string, enforceMode = true): InputProbe {
   const pane = snapshot.text
   if (hasCodexInteraction(pane)) return 'unavailable'
-  const composer = codexComposerText(snapshot, text !== undefined)
+  const composer = codexComposerText(snapshot)
   if (composer === undefined) return 'unavailable'
   const working = codexIsWorking(snapshot)
   if (enforceMode && (mode === 'steering') !== working) return 'unavailable'
   if (text !== undefined) {
-    if (composerMatchesExpected(composer, text)) return 'pending'
+    const expectedComposer = codexComposerText(snapshot, true)
+    if (expectedComposer !== undefined && composerMatchesExpected(expectedComposer, text)) return 'pending'
     return composer.length === 0 ? 'empty' : 'unavailable'
   }
   return composer.length === 0 ? 'empty' : 'pending'
