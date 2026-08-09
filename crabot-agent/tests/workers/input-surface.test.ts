@@ -67,6 +67,12 @@ describe('CLI input surfaces', () => {
     const historyOnly = pane(`user history: ${text}\n› \n? for shortcuts`)
     expect(probeCodexInput(historyOnly, 'primary', text)).toBe('empty')
     expect(probeCodexInput(pane('› Find and fix a bug in @filename\n  gpt-5.6-sol xhigh · /private/tmp/workspace'), 'primary')).toBe('empty')
+    const placeholderPrefix = 'Explain this codebase and list the module boundaries'
+    expect(probeCodexInput(
+      pane(`› ${placeholderPrefix}\n  gpt-5.6-sol xhigh · /private/tmp/workspace`),
+      'primary',
+      placeholderPrefix,
+    )).toBe('pending')
     expect(acceptedCodexInput(historyOnly, 'primary', text, historyOnly.text)).toBe(true)
     const selector = pane('history\n› historical choice\n  gpt-5.6-sol xhigh · /private/tmp/workspace')
     expect(probeCodexInput(selector, 'primary', 'new')).toBe('unavailable')

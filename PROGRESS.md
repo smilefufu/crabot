@@ -1,6 +1,6 @@
 # Crabot 项目进度
 
-> 最后更新：2026-08-09 — PR #80 已合并；PR #82 latest-head review 收口完成并通过回归，待推送
+> 最后更新：2026-08-09 — PR #80 已合并；PR #82 Codex placeholder 前缀碰撞已修复并通过回归，待推送
 
 ## 2026-08-09 — PR #80：legacy loop 最终退役与 builtin bg-shell durable delivery（已合并）
 
@@ -1223,6 +1223,6 @@ Module Manager (port 19000)
 - Claude Code / Codex 已迁移到单层 `running / waiting_text / waiting_action / exited` 控制状态；首投所有权由 `initial_input` 明确结算。
 - 输入提交实现同一 pane 内单次 paste、证据化 Enter（最多补一次）；modal/pending 由 raw 受控清障，普通 WorkerInbox FIFO 与 bg-shell 通知语义保持不变。
 - Codex 0.146 的 rollout 改为首条普通输入接受后发现；startup stall 经 raw 恢复时不再提前固化占位 session。
-- 已补齐六轮 PR review：在此前输入面、session-ref、continuation、durable receipt、raw pane-exit 与 Stop baseline 修复之外，latest-head review 继续收口三项：waiting_action 与新 Stop/turn-complete 同时观察时完成边界优先、CLI hook 的 malformed raw 通过固定 source envelope 降级为 `raw:null` 且不接受无 discriminator 坏行、builtin 恢复严格增量输出契约而 CLI 保留 TUI 重绘豁免。最终独立限定 review `APPROVED`。
-- clean head TypeScript build、组合定向集 **16 files / 397 tests** 通过；Agent 串行全量 **2596 passed / 4 个既有 macOS 基线失败 / 2 skipped**。Claude Code 2.1.226 / Codex 0.146.0 真实 tmux 黑盒最近一次 `EXIT:0`，覆盖 spawn、resume、Claude steering、真实 AskUserQuestion interaction，以及 Codex pending→raw Tab native queue；证据目录 `/var/folders/rf/mby32wyn18788mw75fdvj4ch0000gp/T/crabot-cli-real-AVDfFe`。
-- clean PR #82 基于 `main@331fee7`；本轮 latest-head review 收口待 commit/push，随后回复并 resolve 线程，等待 Claude approval，不自行 merge。
+- 已补齐七轮 PR review：在此前输入面、session-ref、continuation、durable receipt、raw pane-exit、Stop baseline、完成边界、CLI hook envelope 与输出游标契约修复之外，latest-head review 发现 Codex placeholder 使用前缀匹配会把真实 prompt 误判为空 composer；现已改为整串匹配，保留真实 paste receipt，避免 raw 清障后重复投递。最终独立限定 review `APPROVED`。
+- clean head TypeScript build、组合定向集 **16 files / 397 tests** 通过；Agent 串行全量 **2596 passed / 4 个既有 macOS 基线失败 / 2 skipped**。最新 placeholder 定向集 **3 files / 92 tests** 通过。Claude Code 2.1.226 / Codex 0.146.0 真实 tmux 黑盒最近一次 `EXIT:0`，覆盖 spawn、resume、Claude steering、真实 AskUserQuestion interaction，以及 Codex pending→raw Tab native queue；证据目录 `/var/folders/rf/mby32wyn18788mw75fdvj4ch0000gp/T/crabot-cli-real-AVDfFe`。
+- clean PR #82 基于 `main@331fee7`；本轮 Codex placeholder 修复待 commit/push，随后回复并 resolve 线程，等待 Claude approval，不自行 merge。

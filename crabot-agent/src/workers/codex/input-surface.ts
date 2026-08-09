@@ -79,7 +79,7 @@ function findLastComposerIndex(lines: string[]): number {
 }
 
 function isCodexPlaceholder(value: string): boolean {
-  return CODEX_PLACEHOLDERS.some((placeholder) => value.startsWith(placeholder))
+  return CODEX_PLACEHOLDERS.includes(value)
 }
 
 function composerMatchesExpected(composer: string, text: string): boolean {
