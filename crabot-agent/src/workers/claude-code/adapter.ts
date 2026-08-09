@@ -86,12 +86,6 @@ const STRICT_MCP_CONFIG_ARGS = `--mcp-config ${MCP_CONFIG_FILE} --strict-mcp-con
 
 /** 防止含凭据的 project MCP 配置被 worker 的普通 `git add -A` 带进仓库。 */
 async function ensureMcpConfigIgnored(workspaceRoot: string): Promise<void> {
-  await assertWorkspaceFilesUntracked(
-    workspaceRoot,
-    [MCP_CONFIG_FILE],
-    'ClaudeCodeAdapter.provision',
-  )
-
   const ignorePath = join(workspaceRoot, '.gitignore')
   let current = ''
   try {
@@ -252,9 +246,14 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     return { installed: true, activated, detail: versionOutput }
   }
 
+  async preflightProvision(ws: Workspace, _caps: CapabilityBundle): Promise<void> {
+    await assertWorkspaceFilesUntracked(ws.root, [MCP_CONFIG_FILE], 'ClaudeCodeAdapter.provision')
+  }
+
   async provision(ws: Workspace, caps: CapabilityBundle): Promise<void> {
     const claudeDir = join(ws.root, '.claude')
-    // 先确保普通 git add 不会收录凭据；已跟踪同名文件或检查失败时在任何 provision 写入前 fail-loud。
+    // 先做无副作用 tracked-target 检查，再确保普通 git add 不会收录凭据。
+    await this.preflightProvision(ws, caps)
     await ensureMcpConfigIgnored(ws.root)
     // hook 写入目录必须先 mkdir——printf >> 对缺目录静默失败(Task 2 评审裁决)。
     await fs.mkdir(claudeDir, { recursive: true })

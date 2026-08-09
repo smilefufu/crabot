@@ -1229,8 +1229,8 @@ export class WorkerHarness {
 
   /**
    * capabilities().revive===false 分支(交接续办),以及 switchWorkerImpl 复用的公共路径。
-   * 顺序对齐 protocol-agent-v3 §5.3"跨实现切换":旧化身写交接文档收尾 → (若仍存活)
-   * kill 标 superseded → 同 workspace provision+spawn 新实现 → 化身链 +1。
+   * 顺序对齐 protocol-agent-v3 §5.3"跨实现切换":目标实现先完成无副作用 provision pre-flight
+   * → 旧化身写交接文档收尾 → (若仍存活)kill 标 superseded → 同 workspace provision+spawn 新实现 → 化身链 +1。
    */
   private async handoffIncarnation(
     dialogObjectId: DialogObjectId,
@@ -1292,6 +1292,14 @@ export class WorkerHarness {
       }
     }
 
+    const workspace: Workspace = { root: source.workspace }
+    const caps = this.deps.capabilityBundle
+      ? await this.deps.capabilityBundle({ worker_id: worker.worker_id, principal_permissions: principalPermissions })
+      : EMPTY_CAPABILITY_BUNDLE
+    // tracked credential target 等确定性检查必须在 HANDOFF.md / kill 之前完成；preflightProvision
+    // 不得写 workspace。正式 provision 仍在 source teardown 之后执行并重检，避免 TOCTOU 静默越界。
+    await newAdapter.preflightProvision?.(workspace, caps)
+
     // 1. 组装交接材料(task.title/goal + 最近输出尾部,上限 4KB + 上一化身 outcome)并写
     // workspace 下的 HANDOFF.md(已存在则追加带时间戳的新段,不覆盖)。
     let tail = ''
@@ -1337,11 +1345,7 @@ export class WorkerHarness {
     }
 
     // 3. 同 workspace provision + spawn 新实现,开工输入 = 原任务 + 交接引用 + 本次输入。
-    // newAdapter / builtinInjection 已在上面的 pre-flight 里取好,这里不用再判一次。
-    const workspace: Workspace = { root: source.workspace }
-    const caps = this.deps.capabilityBundle
-      ? await this.deps.capabilityBundle({ worker_id: worker.worker_id, principal_permissions: principalPermissions })
-      : EMPTY_CAPABILITY_BUNDLE
+    // newAdapter / builtinInjection / workspace / caps 已在上面的 pre-flight 里取好。
     await newAdapter.provision(workspace, caps)
     const prompt = buildHandoffPrompt(worker.task, input)
     const newHandle = await newAdapter.spawn({

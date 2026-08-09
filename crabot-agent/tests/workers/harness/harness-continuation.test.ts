@@ -49,6 +49,8 @@ interface FakeAdapterOpts {
   readonly sendInputBehavior?: (h: IncarnationHandle, text: string, opts?: { raw?: boolean }) => Promise<void> | void
   readonly resumeBehavior?: (prev: IncarnationRef, wakeInput: string) => Promise<IncarnationHandle> | IncarnationHandle
   readonly spawnBehavior?: (spec: SpawnSpec) => Promise<IncarnationHandle> | IncarnationHandle
+  readonly provisionBehavior?: (ws: Workspace, caps: CapabilityBundle) => Promise<void> | void
+  readonly preflightProvisionBehavior?: (ws: Workspace, caps: CapabilityBundle) => Promise<void> | void
   readonly outputChunk?: string
   readonly acceptedExitReport?: StateChangeReport
   readonly updatedSessionRef?: string
@@ -56,6 +58,7 @@ interface FakeAdapterOpts {
 
 class FakeAdapter implements WorkerAdapter {
   readonly implId: WorkerImplId
+  readonly preflightProvisionCalls: Array<{ ws: Workspace; caps: CapabilityBundle }> = []
   readonly provisionCalls: Array<{ ws: Workspace; caps: CapabilityBundle }> = []
   readonly spawnCalls: SpawnSpec[] = []
   readonly resumeCalls: Array<{ prev: IncarnationRef; wakeInput: string }> = []
@@ -75,8 +78,14 @@ class FakeAdapter implements WorkerAdapter {
     return { installed: true, activated: true }
   }
 
+  async preflightProvision(ws: Workspace, caps: CapabilityBundle): Promise<void> {
+    this.preflightProvisionCalls.push({ ws, caps })
+    await this.opts.preflightProvisionBehavior?.(ws, caps)
+  }
+
   async provision(ws: Workspace, caps: CapabilityBundle): Promise<void> {
     this.provisionCalls.push({ ws, caps })
+    await this.opts.provisionBehavior?.(ws, caps)
   }
 
   async spawn(spec: SpawnSpec): Promise<IncarnationHandle> {
@@ -796,6 +805,34 @@ describe('WorkerHarness.handoffIncarnation — fixed capability snapshot', () =>
     expect(source.killCalls).toEqual([])
     expect(target.provisionCalls).toEqual([])
     await expect(fs.access(join(workspace, 'HANDOFF.md'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('fails before HANDOFF.md or source kill when target provision pre-flight fails', async () => {
+    const { harness, adaptersMap } = await makeHarness()
+    const source = new FakeAdapter({ implId: 'claude-code', caps: { revive: true }, onStateChange: harness.handleStateChange })
+    const target = new FakeAdapter({
+      implId: 'codex',
+      caps: { revive: true },
+      onStateChange: harness.handleStateChange,
+      preflightProvisionBehavior: () => { throw new Error('tracked credential target') },
+    })
+    adaptersMap.set('claude-code', source)
+    adaptersMap.set('codex', target)
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    const workspace = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0].incarnations[0].workspace
+    events.length = 0
+
+    await expect(harness.switchWorkerImpl(worker.worker_id, 'codex', 'must not break source')).rejects.toThrow(/tracked credential target/)
+
+    expect(target.preflightProvisionCalls).toHaveLength(1)
+    expect(target.provisionCalls).toEqual([])
+    expect(target.spawnCalls).toEqual([])
+    expect(source.killCalls).toEqual([])
+    await expect(fs.access(join(workspace, 'HANDOFF.md'))).rejects.toMatchObject({ code: 'ENOENT' })
+    const [current] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(current.incarnations).toHaveLength(1)
+    expect(current.incarnations[0].state).toBe('running')
+    expect(events.filter((event) => event.kind === 'handoff_started' || event.kind === 'superseded')).toEqual([])
   })
 })
 

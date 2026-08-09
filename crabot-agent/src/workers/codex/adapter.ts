@@ -503,10 +503,14 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     }
   }
 
+  async preflightProvision(ws: Workspace, _caps: CapabilityBundle): Promise<void> {
+    await assertWorkspaceFilesUntracked(ws.root, CODEX_CREDENTIAL_FILES, 'CodexWorkerAdapter.provision')
+  }
+
   async provision(ws: Workspace, caps: CapabilityBundle): Promise<void> {
     const codexDir = join(ws.root, '.codex')
     // 已跟踪的 credential target 必须在任何 provision 写入前拒绝；ignore 必须先于敏感文件落盘。
-    await assertWorkspaceFilesUntracked(ws.root, CODEX_CREDENTIAL_FILES, 'CodexWorkerAdapter.provision')
+    await this.preflightProvision(ws, caps)
     await fs.mkdir(codexDir, { recursive: true })
     await fs.writeFile(join(codexDir, '.gitignore'), '*\n', 'utf-8')
 

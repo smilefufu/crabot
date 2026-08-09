@@ -161,6 +161,8 @@ export interface AdapterCapabilities {
 export interface WorkerAdapter {
   readonly implId: WorkerImplId
   detect(): Promise<DetectResult>
+  /** 无副作用的 workspace/capability 前置检查；handoff 在触碰源化身前调用。 */
+  preflightProvision?(ws: Workspace, caps: CapabilityBundle): Promise<void>
   provision(ws: Workspace, caps: CapabilityBundle): Promise<void>
   spawn(spec: SpawnSpec): Promise<IncarnationHandle>
   resume(prev: IncarnationRef, wakeInput: string): Promise<IncarnationHandle>
