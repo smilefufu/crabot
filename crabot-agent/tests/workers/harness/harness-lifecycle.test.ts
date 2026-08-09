@@ -292,6 +292,26 @@ describe('WorkerHarness.spawnWorker', () => {
     })
   })
 
+  it('部分历史权限先按 fail-closed 默认规范化，再交给 capability provider 与 adapter', async () => {
+    const partialPermissions = {
+      tool_access: { mcp_skill: true },
+      cli_access: { mcp: 'read' },
+      storage: null,
+      memory_scopes: ['legacy'],
+    } as unknown as NonNullable<SpawnWorkerParams['principal_permissions']>
+    const capabilityBundle = vi.fn(async () => ({ skills: [], mcp_servers: [] }))
+    const { harness, fake } = await makeHarness({}, { capabilityBundle })
+
+    await harness.spawnWorker(spawnParams({ principal_permissions: partialPermissions }))
+
+    const normalized = capabilityBundle.mock.calls[0][0].principal_permissions
+    expect(normalized).toMatchObject({
+      tool_access: { mcp_skill: true, desktop: false, shell: false },
+      cli_access: { mcp: 'read', undo: 'none', provider: 'none' },
+    })
+    expect(fake.spawnCalls[0].principal_permissions).toEqual(normalized)
+  })
+
   it('无 principal 的新 worker 仍在 provision 前落空 context，而非误作 legacy ENOENT', async () => {
     const { harness, workersDir } = await makeHarness()
     const worker = await harness.spawnWorker(spawnParams())

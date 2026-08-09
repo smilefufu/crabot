@@ -21,7 +21,7 @@ import type {
 import { makeAgentConfig, useTmpDataDir } from '../inbound/harness.js'
 
 const servers: MCPServerConfig[] = [
-  { name: 'git', command: 'git-mcp' },
+  { name: 'git', command: 'git-mcp', env: { GIT_MCP_TOKEN: 'secret' } },
   { name: 'computer-use', command: 'computer-use-mcp' },
 ]
 

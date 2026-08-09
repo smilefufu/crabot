@@ -206,7 +206,7 @@ async function makeHarness(
     ...depsOverrides,
   }
   const harness = new WorkerHarness(deps)
-  return { harness, ledger, adaptersMap, defaultImpl: 'builtin', workersDir }
+  return { harness, ledger, adaptersMap, workersDir }
 }
 
 function spawnParams(overrides: Partial<SpawnWorkerParams> = {}): SpawnWorkerParams {

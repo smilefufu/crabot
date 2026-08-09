@@ -116,14 +116,23 @@ describe('CodexWorkerAdapter.provision', () => {
 
   it('写出 .codex/config.toml(notify 段在 mcp_servers 表头之前)、AGENTS.md', async () => {
     const adapter = new CodexWorkerAdapter({ dataDir: ws, codexHomeSource })
-    await adapter.provision({ root: ws }, { skills: [], mcp_servers: [{ name: 'x', transport: 'stdio', command: 'node' }] })
+    await adapter.provision({ root: ws }, {
+      skills: [],
+      mcp_servers: [
+        { name: 'x', transport: 'stdio', command: 'node', env: { API_KEY: 'secret' } },
+        { name: 'remote', transport: 'streamable-http', url: 'https://example.com/mcp', headers: { Authorization: 'Bearer token' } },
+      ],
+    })
 
     const configToml = await fs.readFile(path.join(ws, '.codex/config.toml'), 'utf-8')
     expect(configToml).toContain('notify = ')
     expect(configToml).toContain('events-cli.jsonl')
     // 序列化交给 smol-toml 之后表头是否给 key 加引号属于格式细节(`[mcp_servers.x]` 与
     // `[mcp_servers."x"]` 语义等价),这里钉语义不钉引号风格。
-    expect((parseToml(configToml) as any).mcp_servers).toEqual({ x: { command: 'node' } })
+    expect((parseToml(configToml) as any).mcp_servers).toEqual({
+      x: { command: 'node', env: { API_KEY: 'secret' } },
+      remote: { url: 'https://example.com/mcp', http_headers: { Authorization: 'Bearer token' } },
+    })
     // TOML 根级 key(notify)必须出现在第一个 table([mcp_servers...])之前。
     expect(configToml.indexOf('notify =')).toBeLessThan(configToml.indexOf('[mcp_servers'))
 

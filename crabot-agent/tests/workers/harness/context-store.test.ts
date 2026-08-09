@@ -32,6 +32,36 @@ describe('WorkerContextStore', () => {
     expect(await store.read('w-1')).toEqual({})
   })
 
+  it('写入历史部分权限时按最严默认补齐，落盘后仍通过严格读取', async () => {
+    const store = new WorkerContextStore(root)
+    const partial = {
+      principal_permissions: {
+        tool_access: { mcp_skill: true },
+        cli_access: { mcp: 'read' },
+        storage: null,
+        memory_scopes: ['legacy'],
+      },
+    } as unknown as Parameters<WorkerContextStore['write']>[1]
+
+    const normalized = await store.write('w-partial', partial)
+    expect(normalized.principal_permissions).toMatchObject({
+      tool_access: { mcp_skill: true, desktop: false, shell: false },
+      cli_access: { mcp: 'read', undo: 'none', provider: 'none' },
+    })
+    expect(await store.read('w-partial')).toEqual(normalized)
+  })
+
+  it('写入时仍拒绝未知权限字段，不把连接信息带入 context', async () => {
+    const store = new WorkerContextStore(root)
+    const invalid = {
+      principal_permissions: {
+        ...permissions,
+        headers: { Authorization: 'secret' },
+      },
+    } as unknown as Parameters<WorkerContextStore['write']>[1]
+    await expect(store.write('w-invalid', invalid)).rejects.toThrow(/invalid principal_permissions/)
+  })
+
   it.each([
     '{',
     '[]',

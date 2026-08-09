@@ -1,9 +1,11 @@
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 
+import type { MCPServerConfig } from '../../types.js'
+
 export interface ProvisionSources {
   skills: ReadonlyArray<{ id: string; name: string; skill_dir: string }>
-  mcpServers: ReadonlyArray<{ name: string; transport: string; command?: string; args?: string[]; url?: string }>
+  mcpServers: ReadonlyArray<MCPServerConfig>
   selfAwareness: { workerId: string; taskTitle: string; disciplines: string }
 }
 
@@ -46,16 +48,21 @@ export async function materializeSkills(
   }
 }
 
-/** cc 标准 .mcp.json:stdio 用 command/args,http/sse 用 url。 */
+/** cc 标准 .mcp.json：stdio 保留 env；远端 server 显式 type，并保留认证 headers。 */
 export function renderMcpJson(servers: ProvisionSources['mcpServers']): string {
   const mcpServers: Record<string, Record<string, unknown>> = {}
-  for (const s of servers) {
-    if (s.url !== undefined) {
-      mcpServers[s.name] = { url: s.url }
+  for (const server of servers) {
+    if (server.url !== undefined) {
+      mcpServers[server.name] = {
+        type: server.transport === 'sse' ? 'sse' : 'http',
+        url: server.url,
+        ...(server.headers !== undefined ? { headers: server.headers } : {}),
+      }
     } else {
-      const entry: Record<string, unknown> = { command: s.command }
-      if (s.args !== undefined) entry.args = s.args
-      mcpServers[s.name] = entry
+      const entry: Record<string, unknown> = { command: server.command }
+      if (server.args !== undefined) entry.args = server.args
+      if (server.env !== undefined) entry.env = server.env
+      mcpServers[server.name] = entry
     }
   }
   return JSON.stringify({ mcpServers }, null, 2) + '\n'
@@ -84,18 +91,24 @@ function tomlString(value: string): string {
   return '"' + escapeTomlBasicString(value) + '"'
 }
 
-/** codex config.toml 的 mcp_servers 段:stdio 用 command/args,http/sse 用 url。 */
+function tomlStringMap(values: Record<string, string>): string {
+  return `{ ${Object.entries(values).map(([key, value]) => `${tomlString(key)} = ${tomlString(value)}`).join(', ')} }`
+}
+
+/** codex config.toml：stdio 保留 env；远端 server 保留认证 http_headers。 */
 export function renderCodexMcpToml(servers: ProvisionSources['mcpServers']): string {
-  const blocks = servers.map((s) => {
-    const escapedName = escapeTomlBasicString(s.name)
+  const blocks = servers.map((server) => {
+    const escapedName = escapeTomlBasicString(server.name)
     const lines = [`[mcp_servers."${escapedName}"]`]
-    if (s.url !== undefined) {
-      lines.push(`url = ${tomlString(s.url)}`)
+    if (server.url !== undefined) {
+      lines.push(`url = ${tomlString(server.url)}`)
+      if (server.headers !== undefined) lines.push(`http_headers = ${tomlStringMap(server.headers)}`)
     } else {
-      lines.push(`command = ${tomlString(s.command ?? '')}`)
-      if (s.args !== undefined) {
-        lines.push(`args = [${s.args.map(tomlString).join(', ')}]`)
+      lines.push(`command = ${tomlString(server.command ?? '')}`)
+      if (server.args !== undefined) {
+        lines.push(`args = [${server.args.map(tomlString).join(', ')}]`)
       }
+      if (server.env !== undefined) lines.push(`env = ${tomlStringMap(server.env)}`)
     }
     return lines.join('\n')
   })

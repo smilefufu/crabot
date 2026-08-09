@@ -639,8 +639,10 @@ export class WorkerHarness {
       let spawnedHandle: IncarnationHandle
       try {
         // 跨实现身份快照必须先于 provision 落盘：CLI-first worker 与 builtin 一样需要它。
-        const context: WorkerContext = p.principal_permissions === undefined ? {} : { principal_permissions: p.principal_permissions }
-        await this.contextStore.write(workerId, context)
+        const requestedContext: WorkerContext = p.principal_permissions === undefined
+          ? {}
+          : { principal_permissions: p.principal_permissions }
+        const context = await this.contextStore.write(workerId, requestedContext)
         const caps = this.deps.capabilityBundle
           ? await this.deps.capabilityBundle({ worker_id: workerId, principal_permissions: context.principal_permissions })
           : EMPTY_CAPABILITY_BUNDLE
@@ -658,7 +660,7 @@ export class WorkerHarness {
                 workspace,
                 origin: p.origin,
                 goal: p.goal,
-                principal_permissions: p.principal_permissions,
+                principal_permissions: context.principal_permissions,
               })
             : undefined)
         const spec: SpawnSpec = {
@@ -667,7 +669,7 @@ export class WorkerHarness {
           workspace,
           goal: p.goal,
           origin: p.origin,
-          principal_permissions: p.principal_permissions,
+          principal_permissions: context.principal_permissions,
           builtin,
         }
         spawnedHandle = await adapter.spawn(spec)

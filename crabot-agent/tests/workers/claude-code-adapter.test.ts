@@ -123,7 +123,13 @@ describe('ClaudeCodeAdapter.provision', () => {
 
   it('写出 .claude/settings.json(含 Stop/Notification hook 与 permissions)、.mcp.json、CLAUDE.md', async () => {
     const adapter = new ClaudeCodeAdapter({ dataDir: ws, claudeConfigPath })
-    await adapter.provision({ root: ws }, { skills: [], mcp_servers: [{ name: 'x', transport: 'stdio', command: 'node' }] })
+    await adapter.provision({ root: ws }, {
+      skills: [],
+      mcp_servers: [
+        { name: 'x', transport: 'stdio', command: 'node', env: { API_KEY: 'secret' } },
+        { name: 'remote', transport: 'streamable-http', url: 'https://example.com/mcp', headers: { Authorization: 'Bearer token' } },
+      ],
+    })
 
     const settings = JSON.parse(await fs.readFile(path.join(ws, '.claude/settings.json'), 'utf-8'))
     expect(settings.hooks.Stop[0].hooks[0].command).toContain('events-cli.jsonl')
@@ -131,7 +137,12 @@ describe('ClaudeCodeAdapter.provision', () => {
     expect(settings.permissions.defaultMode).toBe('bypassPermissions')
 
     const mcpJson = JSON.parse(await fs.readFile(path.join(ws, '.mcp.json'), 'utf-8'))
-    expect(mcpJson.mcpServers.x.command).toBe('node')
+    expect(mcpJson.mcpServers.x).toEqual({ command: 'node', env: { API_KEY: 'secret' } })
+    expect(mcpJson.mcpServers.remote).toEqual({
+      type: 'http',
+      url: 'https://example.com/mcp',
+      headers: { Authorization: 'Bearer token' },
+    })
 
     const claudeMd = await fs.readFile(path.join(ws, 'CLAUDE.md'), 'utf-8')
     expect(claudeMd).toContain('你是 crabot 的 worker')

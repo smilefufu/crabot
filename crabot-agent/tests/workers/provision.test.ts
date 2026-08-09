@@ -91,10 +91,10 @@ describe('materializeSkills', () => {
 })
 
 describe('renderMcpJson', () => {
-  it('渲染 cc 标准 .mcp.json: stdio 用 command/args,http/sse 用 url', () => {
+  it('渲染 cc 标准 .mcp.json：stdio 用 command/args，远端显式 type/url', () => {
     const servers: ProvisionSources['mcpServers'] = [
       { name: 'crabot', transport: 'stdio', command: 'node', args: ['mcp-server.js'] },
-      { name: 'remote', transport: 'http', url: 'https://example.com/mcp' },
+      { name: 'remote', transport: 'streamable-http', url: 'https://example.com/mcp' },
     ]
 
     expect(renderMcpJson(servers)).toBe(`{
@@ -106,11 +106,26 @@ describe('renderMcpJson', () => {
       ]
     },
     "remote": {
+      "type": "http",
       "url": "https://example.com/mcp"
     }
   }
 }
 `)
+  })
+
+  it('保留 stdio env、远端 headers，并区分 http/sse type', () => {
+    const rendered = JSON.parse(renderMcpJson([
+      { name: 'stdio-auth', transport: 'stdio', command: 'node', env: { API_KEY: 'secret' } },
+      { name: 'http-auth', transport: 'streamable-http', url: 'https://example.com/mcp', headers: { Authorization: 'Bearer token' } },
+      { name: 'sse-auth', transport: 'sse', url: 'https://example.com/sse', headers: { 'X-Key': 'value' } },
+    ]))
+
+    expect(rendered.mcpServers).toEqual({
+      'stdio-auth': { command: 'node', env: { API_KEY: 'secret' } },
+      'http-auth': { type: 'http', url: 'https://example.com/mcp', headers: { Authorization: 'Bearer token' } },
+      'sse-auth': { type: 'sse', url: 'https://example.com/sse', headers: { 'X-Key': 'value' } },
+    })
   })
 
   it('stdio server 无 args 时省略 args 字段', () => {
@@ -135,10 +150,10 @@ describe('renderMcpJson', () => {
 })
 
 describe('renderCodexMcpToml', () => {
-  it('渲染 codex config.toml 的 mcp_servers 段: stdio 用 command/args,http/sse 用 url', () => {
+  it('渲染 codex config.toml 的 mcp_servers 段：stdio 用 command/args，远端用 url', () => {
     const servers: ProvisionSources['mcpServers'] = [
       { name: 'crabot', transport: 'stdio', command: 'node', args: ['mcp-server.js', '--flag'] },
-      { name: 'remote', transport: 'http', url: 'https://example.com/mcp' },
+      { name: 'remote', transport: 'streamable-http', url: 'https://example.com/mcp' },
     ]
 
     expect(renderCodexMcpToml(servers)).toBe(`[mcp_servers."crabot"]
@@ -147,6 +162,22 @@ args = ["mcp-server.js", "--flag"]
 
 [mcp_servers."remote"]
 url = "https://example.com/mcp"
+`)
+  })
+
+  it('保留 stdio env 与远端 http_headers，并正确转义键值', () => {
+    const servers: ProvisionSources['mcpServers'] = [
+      { name: 'stdio-auth', transport: 'stdio', command: 'node', env: { API_KEY: 'a"b\\c' } },
+      { name: 'http-auth', transport: 'streamable-http', url: 'https://example.com/mcp', headers: { Authorization: 'Bearer "token"' } },
+    ]
+
+    expect(renderCodexMcpToml(servers)).toBe(`[mcp_servers."stdio-auth"]
+command = "node"
+env = { "API_KEY" = "a\\"b\\\\c" }
+
+[mcp_servers."http-auth"]
+url = "https://example.com/mcp"
+http_headers = { "Authorization" = "Bearer \\"token\\"" }
 `)
   })
 
