@@ -41,6 +41,7 @@ export function buildCoreModules(o: BuildCoreModulesOpts): CoreModule[] {
         // DATA_DIR 全局=顶层；admin 模块级目录走专用 env（与 memory 对称）
         DATA_DIR: o.dataDir,
         CRABOT_ADMIN_DATA_DIR: path.join(o.dataDir, 'admin'),
+        CRABOT_MCP_TOOLS_PATH: path.join(o.crabotRoot, 'crabot-mcp-tools'),
       } as Record<string, string>,
     },
     {
