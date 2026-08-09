@@ -1044,6 +1044,57 @@ describe('WorkerHarness.sendToWorker', () => {
     expect(stateEvents[0].detail).toMatchObject({ to: 'exited', reason: 'completed' })
   })
 
+  it('raw键已送达后同步退出由harness结算为终态，不把raw文本留给后续透明接续', async () => {
+    const report: StateChangeReport = { endReason: 'completed' }
+    const { harness, fake } = await makeHarness({ implId: 'claude-code', acceptedExitReport: report })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+    events.length = 0
+
+    await harness.sendToWorker(worker.worker_id, 'C-d', { raw: true })
+
+    expect(fake.sendInputCalls).toHaveLength(1)
+    expect(fake.sendInputCalls[0]).toMatchObject({ text: 'C-d', opts: { raw: true } })
+    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(settled.task.status).toBe('completed')
+    expect(settled.incarnations).toHaveLength(1)
+    expect(settled.incarnations[0]).toMatchObject({ state: 'exited', ended_reason: 'completed' })
+    const stateEvents = events.filter((event) => event.kind === 'state_changed')
+    expect(stateEvents).toHaveLength(1)
+    expect(stateEvents[0].detail).toMatchObject({ to: 'exited', reason: 'completed' })
+  })
+
+  it('raw提交已在composer持有的文本并同步退出时，先结算原receipt再落终态，不重放旧文本', async () => {
+    let stalled = false
+    const report: StateChangeReport = { endReason: 'completed' }
+    const { harness, fake } = await makeHarness({
+      implId: 'claude-code',
+      caps: { revive: true },
+      acceptedExitReport: report,
+      sendInputBehavior: (_h, _text, opts) => {
+        if (!opts?.raw && !stalled) {
+          stalled = true
+          throw new CliInputStallError('pending_in_ui', 'running', {
+            waitReason: 'input_pending',
+            outputTail: '❯ held prompt',
+          })
+        }
+      },
+    })
+    const worker = await harness.spawnWorker({ ...spawnParams(), impl: 'claude-code' })
+
+    await harness.sendToWorker(worker.worker_id, 'held prompt')
+    await expect(harness.sendToWorker(worker.worker_id, '1 Enter', { raw: true })).resolves.toBeUndefined()
+
+    expect(fake.sendInputCalls.map((call) => [call.text, call.opts?.raw ?? false])).toEqual([
+      ['held prompt', false],
+      ['1 Enter', true],
+    ])
+    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(settled.task.status).toBe('completed')
+    expect(settled.incarnations).toHaveLength(1)
+    expect(settled.incarnations[0]).toMatchObject({ state: 'exited', ended_reason: 'completed' })
+  })
+
   it('同步not_pasted stall由harness单次结算：原item回队首，raw旁路后按FIFO补投且不重复paste', async () => {
     let stalled = false
     const { harness, fake } = await makeHarness({

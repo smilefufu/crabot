@@ -816,7 +816,7 @@ export class WorkerHarness {
       throw error
     }
 
-    if (handle.impl === 'builtin' || raw) return { kind: 'delivered', handle }
+    if (handle.impl === 'builtin') return { kind: 'delivered', handle }
     const cliAdapter = adapter as WorkerAdapter & {
       takeAcceptedInputExit?: (h: IncarnationHandle) => StateChangeReport | undefined
       takeUpdatedSessionRef?: (h: IncarnationHandle) => string | undefined
@@ -826,7 +826,7 @@ export class WorkerHarness {
     return {
       kind: 'delivered',
       handle: settledHandle,
-      expectedStateChangeRevision: stateChangeRevision,
+      expectedStateChangeRevision: raw ? undefined : stateChangeRevision,
       acceptedExit: cliAdapter.takeAcceptedInputExit?.(settledHandle),
     }
   }
@@ -844,6 +844,12 @@ export class WorkerHarness {
       return attempt.delivery
     }
 
+    if (raw) {
+      const inbox = this.getInbox(workerId)
+      await inbox.settleConsumed(rawAbandonsComposer(text) ? 'dead_letter' : 'delivered')
+      inbox.release('waiting_action')
+      inbox.release('input_pending')
+    }
     if (attempt.acceptedExit) {
       await this.recordCliInputResult(attempt.handle, 'exited', attempt.acceptedExit)
     } else if (attempt.expectedStateChangeRevision !== undefined) {
@@ -853,12 +859,6 @@ export class WorkerHarness {
         undefined,
         attempt.expectedStateChangeRevision,
       )
-    }
-    if (raw) {
-      const inbox = this.getInbox(workerId)
-      await inbox.settleConsumed(rawAbandonsComposer(text) ? 'dead_letter' : 'delivered')
-      inbox.release('waiting_action')
-      inbox.release('input_pending')
     }
     await this.appendEvent(workerId, attempt.handle.seq, 'input_sent', { text_len: text.length })
     return 'delivered'

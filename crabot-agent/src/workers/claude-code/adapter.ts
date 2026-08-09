@@ -406,6 +406,10 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       if (!(await this.tmux.isAlive(runtime.sessionName))) {
         const reason: IncarnationEndReason = keysSent ? 'completed' : 'crashed'
         await this.transitionExited(runtime, h, reason, false)
+        if (keysSent) {
+          runtime.acceptedExitReport = { endReason: reason }
+          return
+        }
         throw new WorkerExitedError(h.worker_id, h.seq, reason)
       }
       throw error
@@ -930,7 +934,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
         if (runtime.killed) reason = 'killed'
         else if (runtime.controlState.kind === 'waiting_action') reason = 'crashed'
         await this.transitionExited(runtime, h, reason)
-      } else if (stopCount > runtime.stopBaseline && runtime.controlState.kind !== 'waiting_text') {
+      } else if (stopCount > runtime.stopBaseline) {
         runtime.stopBaseline = stopCount
         await this.transitionControlState(runtime, h, { kind: 'waiting_text' })
       }

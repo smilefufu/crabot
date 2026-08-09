@@ -1868,6 +1868,30 @@ describe('ClaudeCodeAdapter — CLI hook 事件文件监视(被动 push)', () =>
     await adapter.kill(h)
   })
 
+  it('waiting_text期间到达的后续stop仍推进基线，不会让下一轮刚开始就被旧stop判回idle', async () => {
+    const tmux = new NoopTmux()
+    const adapter = new ClaudeCodeAdapter({
+      dataDir,
+      claudeConfigPath: fakeClaudeConfig(dataDir),
+      tmux,
+      claudeBin: 'unused', promptDeliveryTimeoutMs: 0,
+      claudeProjectsDir,
+    })
+    const workerId = `cctest-${randomUUID().slice(0, 8)}`
+    const h = await adapter.spawn({ worker_id: workerId, prompt: '干活', workspace: { root: workspaceRoot } })
+
+    await appendStopEvent()
+    expect(await adapter.state(h)).toBe('idle')
+    await appendStopEvent()
+    expect(await adapter.state(h)).toBe('idle')
+
+    tmux.paneText = '❯ \n? for shortcuts'
+    await adapter.sendInput(h, '下一轮')
+    expect(await adapter.state(h)).toBe('running')
+
+    await adapter.kill(h)
+  })
+
   it('化身落终态后 watcher 停止:kill 之后再追加 stop 事件不再产生任何状态回调', async () => {
     const seen: WorkerContractState[] = []
     const tmux = new NoopTmux()
@@ -2517,7 +2541,29 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
   )
 
   it(
-    'raw键使pane退出时收敛WorkerExitedError而不是裸tmux capture错误',
+    'raw键未送达前pane退出时仍抛WorkerExitedError，保留透明接续信号',
+    async () => {
+      const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
+      const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
+      const sendKeys = vi.spyOn(tmux, 'sendKeys').mockImplementation(async (name) => {
+        await tmux.killSession(name)
+        throw new Error('pane exited before keys were sent')
+      })
+
+      try {
+        await expect(adapter.sendInput(h, 'C-d', { raw: true })).rejects.toMatchObject({
+          name: 'WorkerExitedError',
+          ended_reason: 'crashed',
+        })
+      } finally {
+        sendKeys.mockRestore()
+      }
+    },
+    30000,
+  )
+
+  it(
+    'raw键已送达且导致pane退出时正常结算，不把键名当未投递正文透明接续',
     async () => {
       const { adapter, workerId } = await makeAdapter({ readyDelayMs: 600_000, pasteReadyTimeoutMs: 2000 })
       const h = await adapter.spawn({ worker_id: workerId, prompt: MULTILINE_PROMPT, workspace: { root: workspaceRoot } })
@@ -2528,8 +2574,10 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter — 启动期就绪握手(\\e
       })
 
       try {
-        await expect(adapter.sendInput(h, 'C-d', { raw: true })).rejects.toBeInstanceOf(WorkerExitedError)
+        await expect(adapter.sendInput(h, 'C-d', { raw: true })).resolves.toBeUndefined()
         expect(await adapter.state(h)).toBe('exited')
+        const meta = JSON.parse(await fs.readFile(path.join(dataDir, workerId, 'meta-1.json'), 'utf-8'))
+        expect(meta.ended_reason).toBe('completed')
       } finally {
         sendKeys.mockRestore()
       }
