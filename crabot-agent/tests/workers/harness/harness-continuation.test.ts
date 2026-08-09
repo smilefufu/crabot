@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -172,11 +172,13 @@ function now(): string {
   return new Date(nowValue).toISOString()
 }
 
-async function makeHarness(): Promise<{
+async function makeHarness(
+  depsOverrides: Partial<Pick<HarnessDeps, 'capabilityBundle' | 'builtinSpawnDefaults'>> = {},
+): Promise<{
   harness: WorkerHarness
   ledger: LedgerStore
   adaptersMap: Map<WorkerImplId, WorkerAdapter>
-  defaultImpl: WorkerImplId
+  workersDir: string
 }> {
   const ledgersDir = join(dataDir, 'ledgers')
   const workspacesRoot = join(dataDir, 'workspaces')
@@ -201,9 +203,10 @@ async function makeHarness(): Promise<{
     // 让不专门测这条 pre-flight 的既有用例不受影响。专门测 pre-flight 行为的用例会自建
     // 不含这个字段的 deps（见下面两个 describe 块）。
     builtinSpawnDefaults: () => ({ adapter: {} as LLMAdapter, model: 'test-model', systemPrompt: '', tools: [] }),
+    ...depsOverrides,
   }
   const harness = new WorkerHarness(deps)
-  return { harness, ledger, adaptersMap, defaultImpl: 'builtin' }
+  return { harness, ledger, adaptersMap, defaultImpl: 'builtin', workersDir }
 }
 
 function spawnParams(overrides: Partial<SpawnWorkerParams> = {}): SpawnWorkerParams {
@@ -749,6 +752,50 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
     expect(content).toContain('旧内容不能丢')
     expect(content).toMatch(/## Handoff \d{4}-\d{2}-\d{2}T/) // 新段带时间戳标题
     expect(content).toContain('第二次交接')
+  })
+})
+
+describe('WorkerHarness.handoffIncarnation — fixed capability snapshot', () => {
+  it('reuses the CLI-first worker snapshot for target provision and builtin injection', async () => {
+    const capabilityBundle = vi.fn(async () => ({ skills: [], mcp_servers: [] }))
+    const builtinSpawnDefaults = vi.fn(() => ({ adapter: {} as LLMAdapter, model: 'test-model', systemPrompt: '', tools: [] }))
+    const { harness, adaptersMap } = await makeHarness({ capabilityBundle, builtinSpawnDefaults })
+    const source = new FakeAdapter({ implId: 'claude-code', caps: { revive: true }, onStateChange: harness.handleStateChange })
+    const target = new FakeAdapter({ implId: 'builtin', caps: { revive: true }, onStateChange: harness.handleStateChange })
+    adaptersMap.set('claude-code', source)
+    adaptersMap.set('builtin', target)
+    const principalPermissions = {
+      tool_access: { memory: true, messaging: false, task: false, mcp_skill: false, file_io: true, browser: true, shell: true, remote_exec: false, desktop: false },
+      cli_access: { provider: 'none', agent: 'none', mcp: 'none', skill: 'none', schedule: 'none', channel: 'none', friend: 'none', permission: 'none', config: 'none', undo: 'none' },
+      storage: null,
+      memory_scopes: ['friend-1'],
+    } as const
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code', principal_permissions: principalPermissions }))
+
+    await harness.switchWorkerImpl(worker.worker_id, 'builtin', 'switch with fixed identity')
+
+    expect(capabilityBundle).toHaveBeenLastCalledWith({ worker_id: worker.worker_id, principal_permissions: principalPermissions })
+    expect(builtinSpawnDefaults).toHaveBeenLastCalledWith(expect.objectContaining({
+      worker_id: worker.worker_id,
+      principal_permissions: principalPermissions,
+    }))
+    expect(target.spawnCalls[0].principal_permissions).toEqual(principalPermissions)
+  })
+
+  it('fails before HANDOFF.md or source kill when the persisted context is malformed', async () => {
+    const { harness, adaptersMap, workersDir } = await makeHarness()
+    const source = new FakeAdapter({ implId: 'claude-code', caps: { revive: true }, onStateChange: harness.handleStateChange })
+    const target = new FakeAdapter({ implId: 'codex', caps: { revive: true }, onStateChange: harness.handleStateChange })
+    adaptersMap.set('claude-code', source)
+    adaptersMap.set('codex', target)
+    const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
+    const workspace = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0].incarnations[0].workspace
+    await fs.writeFile(join(workersDir, worker.worker_id, 'context.json'), '{')
+
+    await expect(harness.switchWorkerImpl(worker.worker_id, 'codex', 'must not mutate')).rejects.toThrow(/invalid JSON/)
+    expect(source.killCalls).toEqual([])
+    expect(target.provisionCalls).toEqual([])
+    await expect(fs.access(join(workspace, 'HANDOFF.md'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 })
 

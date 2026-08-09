@@ -39,7 +39,7 @@ import type { DialogObjectId } from '../workers/harness/ledger-types'
 import { BuiltinWorkerAdapter } from '../workers/builtin/adapter.js'
 import { ClaudeCodeAdapter } from '../workers/claude-code/adapter.js'
 import { CodexWorkerAdapter } from '../workers/codex/adapter.js'
-import type { WorkerAdapter, WorkerImplId } from '../workers/types.js'
+import type { WorkerAdapter, WorkerImplId, CapabilityBundle, WorkerCapabilityContext } from '../workers/types.js'
 import type { BuiltinRuntimeFactory } from '../workers/builtin/runtime.js'
 
 import { ManagerRegistry, SYSTEM_TASKS_MANAGER_KEY } from './registry.js'
@@ -151,6 +151,8 @@ export interface BootstrapDeps {
    * "起化身时现取",不能各持一份(spec 决策 2)。
    */
   readonly builtinSpawnDefaults?: BuiltinRuntimeFactory
+  /** 当前 worker capability；调用方必须按 harness 给出的固定权限快照过滤。 */
+  readonly capabilityBundle?: (ctx: WorkerCapabilityContext) => Promise<CapabilityBundle>
   /** Shared bg registry ownership check for builtin end_turn state mapping. */
   readonly hasRunningBg?: (workerId: string) => Promise<boolean>
   /**
@@ -340,6 +342,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       )
     },
     builtinSpawnDefaults: deps.builtinSpawnDefaults,
+    capabilityBundle: deps.capabilityBundle,
     hasRunningBg: deps.hasRunningBg,
   }
 

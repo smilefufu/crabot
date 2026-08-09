@@ -1,6 +1,13 @@
 # Crabot 项目进度
 
-> 最后更新：2026-08-09 — PR #80 已合并；PR #82 placeholder 落地等待回归已修复并通过回归，待推送
+> 最后更新：2026-08-09 — worker-scoped MCP capability 接线已完成本地实现与定向验证，待 PR
+
+## 2026-08-09 — 非 builtin worker 的 task-scoped MCP capability 接线（待 PR）
+
+- 这是 Manager/Worker 双 Agent 架构 P3 的实现遗漏修订，不是新增设计：正式协议已更新到 `protocol-agent-v3.md` v3.0.6，原 split spec §8.2 与实施计划 `2026-08-09-worker-mcp-capability-wiring-plan.md` 已确认并推送文档仓（`ebe076b` / `8c9f917`）。
+- harness 新增跨实现 `workers/<worker_id>/context.json`，只原子持久化 spawn 时固定的 `principal_permissions`；新 worker 无 principal 时写 `{}`，历史 ENOENT 走既有 fallback，损坏/未知字段/读写失败 fail-loud。spawn 在 provision 前落盘；handoff 在写交接材料或 kill 源化身前读取，CLI→builtin 不再丢权限快照。
+- production `capabilityBundle` 在每次 spawn/handoff 现取当前 `agentConfig.mcp_servers`，用 `BUILTIN_WORKER_PERMISSIONS ∩ principal_permissions` 收敛后按 server 过滤：`computer-use→desktop`，其余（含 Git MCP）→`mcp_skill`；skills 仍为空，manager 工具面与宿主 Claude/Codex MCP 合并规则不变。
+- 验证：新增/修改定向 5 文件 **142 passed**；workers/harness + manager + MCP 扩展回归 **31 files / 582 passed**（`TMPDIR=/private/tmp`、串行）；Agent 全量 **2618 passed / 1 failed / 2 skipped**，唯一失败为未改动 `tmux-driver.test.ts` 的已知 foreground-command 环境差异（期待 `sleep`、实际 `bash`，隔离重跑仍复现）。Agent TypeScript build 与 `git diff --check` 通过，未生成 `crabot-agent/package-lock.json`。权限/恢复 fresh review 无 material finding；测试 reviewer 指出的 production callback→真实 Harness spawn/handoff→目标 provision 组合证据及 builtin→CLI 方向已补齐，follow-up review 为 **0 blocker / no material findings**，待 PR 自动 review/merge。
 
 ## 2026-08-09 — PR #80：legacy loop 最终退役与 builtin bg-shell durable delivery（已合并）
 

@@ -11,15 +11,26 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { defineTool } from '../engine/tool-framework.js'
 import type { ToolDefinition, ToolCategory } from '../engine/types.js'
-import type { MCPServerConfig } from '../types.js'
+import type { MCPServerConfig, ResolvedPermissions } from '../types.js'
 
 /**
  * 根据 MCP server 名称决定工具类别。
  * computer-use（键盘/鼠标/截屏）归属 desktop（高权限，仅 master_private 可用）；
  * 其他 MCP server 归属 mcp_skill。
  */
-function mcpCategoryFor(serverName: string): ToolCategory {
+export function mcpCategoryFor(serverName: string): ToolCategory {
   return serverName === 'computer-use' ? 'desktop' : 'mcp_skill'
+}
+
+/**
+ * 在跨 CLI 可移植的 server 粒度按**已经收敛好的 worker 权限**过滤。
+ * 固定 worker 档位与 principal 快照的交集由调用方计算；本层只负责复用 MCP 分类真相。
+ */
+export function filterMcpServersForWorker(
+  servers: ReadonlyArray<MCPServerConfig>,
+  permissions: ResolvedPermissions,
+): MCPServerConfig[] {
+  return servers.filter((server) => permissions.tool_access[mcpCategoryFor(server.name)])
 }
 
 export class McpConnector {

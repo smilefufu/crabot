@@ -1,0 +1,158 @@
+import { describe, it, expect } from 'vitest'
+
+import { filterMcpServersForWorker, mcpCategoryFor } from '../../src/agent/mcp-connector.js'
+import { UnifiedAgent } from '../../src/unified-agent.js'
+import type { AgentLayerConfig, MCPServerConfig, ResolvedPermissions } from '../../src/types.js'
+import { dialogObjectIdForPrivate } from '../../src/workers/harness/ledger-types.js'
+import type { ManagerStack } from '../../src/manager/bootstrap.js'
+import type {
+  AdapterCapabilities,
+  CapabilityBundle,
+  DetectResult,
+  IncarnationHandle,
+  IncarnationRef,
+  OutputCursor,
+  SpawnSpec,
+  WorkerAdapter,
+  WorkerContractState,
+  WorkerImplId,
+  Workspace,
+} from '../../src/workers/types.js'
+import { makeAgentConfig, useTmpDataDir } from '../inbound/harness.js'
+
+const servers: MCPServerConfig[] = [
+  { name: 'git', command: 'git-mcp' },
+  { name: 'computer-use', command: 'computer-use-mcp' },
+]
+
+function permissions(overrides: Partial<ResolvedPermissions['tool_access']>): ResolvedPermissions {
+  return {
+    tool_access: { memory: true, messaging: false, task: false, mcp_skill: true, file_io: true, browser: true, shell: true, remote_exec: false, desktop: false, ...overrides },
+    cli_access: { provider: 'none', agent: 'none', mcp: 'none', skill: 'none', schedule: 'none', channel: 'none', friend: 'none', permission: 'none', config: 'none', undo: 'none' },
+    storage: null,
+    memory_scopes: [],
+  }
+}
+
+/** 只替换 adapter 载体；capability provider、bootstrap、harness 与 workspace/ledger 均走生产真件。 */
+class RecordingAdapter implements WorkerAdapter {
+  readonly provisionCalls: Array<{ ws: Workspace; caps: CapabilityBundle }> = []
+  readonly spawnCalls: SpawnSpec[] = []
+
+  constructor(readonly implId: WorkerImplId) {}
+
+  async detect(): Promise<DetectResult> {
+    return { installed: true, activated: true }
+  }
+
+  async provision(ws: Workspace, caps: CapabilityBundle): Promise<void> {
+    this.provisionCalls.push({ ws, caps })
+  }
+
+  async spawn(spec: SpawnSpec): Promise<IncarnationHandle> {
+    this.spawnCalls.push(spec)
+    return { worker_id: spec.worker_id, seq: 1, impl: this.implId, session_ref: `${this.implId}-${spec.worker_id}` }
+  }
+
+  async resume(_prev: IncarnationRef, _wakeInput: string): Promise<IncarnationHandle> {
+    throw new Error('not used')
+  }
+
+  async fork(_prev: IncarnationRef, _forkInput: string): Promise<IncarnationHandle> {
+    throw new Error('not used')
+  }
+
+  async sendInput(_h: IncarnationHandle, _text: string): Promise<void> {}
+
+  async readOutput(_h: IncarnationHandle, cursor: OutputCursor): Promise<{ chunk: string; nextCursor: OutputCursor }> {
+    return { chunk: '', nextCursor: cursor }
+  }
+
+  async state(_h: IncarnationHandle): Promise<WorkerContractState> {
+    return 'running'
+  }
+
+  async kill(_h: IncarnationHandle): Promise<void> {}
+
+  capabilities(): AdapterCapabilities {
+    return { fork: false, revive: true, goalMode: false, subagent: false, structuredTrace: false }
+  }
+}
+
+describe('worker MCP server permission filter', () => {
+  it('keeps ordinary MCP and excludes computer-use when desktop=false', () => {
+    expect(filterMcpServersForWorker(servers, permissions({ desktop: false }))).toEqual([servers[0]])
+  })
+
+  it('excludes every server when mcp_skill=false and desktop=false', () => {
+    expect(filterMcpServersForWorker(servers, permissions({ mcp_skill: false, desktop: false }))).toEqual([])
+  })
+
+  it('uses the existing category mapping and preserves allowed descriptors in input order', () => {
+    const allowed = filterMcpServersForWorker(servers, permissions({ desktop: true }))
+    expect(mcpCategoryFor('computer-use')).toBe('desktop')
+    expect(mcpCategoryFor('git')).toBe('mcp_skill')
+    expect(allowed).toEqual(servers)
+  })
+})
+
+describe('UnifiedAgent worker capability production wiring', () => {
+  it('真实装配经 spawn/handoff 把当前 MCP 配置按固定 principal 快照送到目标 provision', async () => {
+    const dataDir = await useTmpDataDir('worker-mcp-capability-')
+    const agent = new UnifiedAgent(makeAgentConfig({
+      configured: true,
+      moduleId: 'worker-mcp-capability-test',
+      port: 19992,
+    }))
+    const internals = agent as unknown as {
+      agentConfig?: AgentLayerConfig
+      managerStack: ManagerStack
+      attentionScheduler: { stopAll(): void }
+    }
+
+    try {
+      const builtin = new RecordingAdapter('builtin')
+      const claude = new RecordingAdapter('claude-code')
+      const codex = new RecordingAdapter('codex')
+      internals.managerStack.adapters.set('builtin', builtin)
+      internals.managerStack.adapters.set('claude-code', claude)
+      internals.managerStack.adapters.set('codex', codex)
+      internals.agentConfig = { ...internals.agentConfig!, mcp_servers: servers }
+
+      const common = {
+        title: 'MCP production wiring',
+        prompt: 'work',
+        origin: { spawned_by_session: 'wechat::mcp-test', trigger_type: 'message' as const },
+        report_to: { channel_id: 'wechat', session_id: 'mcp-test' },
+      }
+
+      const lowPrincipal = permissions({ mcp_skill: false, desktop: true })
+      await internals.managerStack.harness.spawnWorker({
+        ...common,
+        dialogObjectId: dialogObjectIdForPrivate('mcp-low'),
+        impl: 'claude-code',
+        principal_permissions: lowPrincipal,
+      })
+      expect(claude.provisionCalls[0].caps).toEqual({ skills: [], mcp_servers: [] })
+
+      const allowedPrincipal = permissions({ mcp_skill: true, desktop: true })
+      const builtinWorker = await internals.managerStack.harness.spawnWorker({
+        ...common,
+        dialogObjectId: dialogObjectIdForPrivate('mcp-allowed'),
+        impl: 'builtin',
+        principal_permissions: allowedPrincipal,
+      })
+      expect(builtin.provisionCalls[0].caps).toEqual({ skills: [], mcp_servers: [servers[0]] })
+
+      const refreshedGit: MCPServerConfig = { name: 'git-v2', command: 'git-mcp-v2' }
+      internals.agentConfig = { ...internals.agentConfig!, mcp_servers: [refreshedGit, servers[1]] }
+      await internals.managerStack.harness.switchWorkerImpl(builtinWorker.worker_id, 'codex', 'switch to codex')
+
+      expect(codex.provisionCalls[0].caps).toEqual({ skills: [], mcp_servers: [refreshedGit] })
+      expect(codex.spawnCalls[0].principal_permissions).toEqual(allowedPrincipal)
+    } finally {
+      internals.attentionScheduler.stopAll()
+      await dataDir.restore()
+    }
+  })
+})
