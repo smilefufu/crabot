@@ -76,6 +76,7 @@ import type {
   SpawnSpec,
   OutputCursor,
   CapabilityBundle,
+  WorkerCapabilityContext,
   Workspace,
 } from '../types'
 import type { BuiltinRuntimeFactory } from '../builtin/runtime'
@@ -92,6 +93,7 @@ import {
   type InboxSettlement,
 } from './inbox'
 import { WorkerEventLog, type HarnessEvent, type HarnessEventDelivery, type HarnessEventKind } from './worker-events'
+import { WorkerContextStore, type WorkerContext } from './context-store'
 import { applyStatusTransition, canTransition, isTerminalStatus, reviveTask, taskStatusFromIncarnation } from './task-status'
 import { join } from 'path'
 
@@ -385,8 +387,8 @@ export interface HarnessDeps {
    * 在锁内等它就是自锁。返回 `void` 的实现(P3 桩、既有测试)行为逐字不变。
    */
   readonly onEvent?: (e: HarnessEvent) => void | HarnessEventDelivery | Promise<HarnessEventDelivery | void>
-  /** provision 素材(P3 可返回空集) */
-  readonly capabilityBundle?: () => Promise<CapabilityBundle>
+  /** provision 素材(P3 可返回空集)，必须按 worker 固定的权限快照生成。 */
+  readonly capabilityBundle?: (ctx: WorkerCapabilityContext) => Promise<CapabilityBundle>
   /**
    * handoff(§5.3 交接续办 / switchWorkerImpl)目标实现是 'builtin' 时所需的 LLM 注入
    * 默认值。`spawnWorker` 的 builtin 注入由调用方随每次调用显式传入(`SpawnWorkerParams.
@@ -513,6 +515,7 @@ function continuationDelivery(
 
 export class WorkerHarness {
   private readonly pendingBgNotifications = new Map<string, number>()
+  private readonly contextStore: WorkerContextStore
 
   /**
    * Marks a shell-exit notification before its async rendering starts.  This
@@ -545,7 +548,9 @@ export class WorkerHarness {
   /** `stopLivenessSweep` 置位后不再接受 `startLivenessSweep`(见该方法注释的停机竞态)。 */
   private sweepStopped = false
 
-  constructor(private readonly deps: HarnessDeps) {}
+  constructor(private readonly deps: HarnessDeps) {
+    this.contextStore = new WorkerContextStore(deps.workersDir)
+  }
 
   private inputOwnershipRevision(workerId: string): number {
     return this.inputOwnershipRevisions.get(workerId) ?? 0
@@ -633,7 +638,14 @@ export class WorkerHarness {
 
       let spawnedHandle: IncarnationHandle
       try {
-        const caps = this.deps.capabilityBundle ? await this.deps.capabilityBundle() : EMPTY_CAPABILITY_BUNDLE
+        // 跨实现身份快照必须先于 provision 落盘：CLI-first worker 与 builtin 一样需要它。
+        const requestedContext: WorkerContext = p.principal_permissions === undefined
+          ? {}
+          : { principal_permissions: p.principal_permissions }
+        const context = await this.contextStore.write(workerId, requestedContext)
+        const caps = this.deps.capabilityBundle
+          ? await this.deps.capabilityBundle({ worker_id: workerId, principal_permissions: context.principal_permissions })
+          : EMPTY_CAPABILITY_BUNDLE
         await adapter.provision(workspace, caps)
         // builtin 注入:调用方显式传了就用它;没传(manager 的 spawn_worker 工具就不可能传——
         // LLMAdapter / tools 是运行时对象,不可能来自 LLM 入参)则回退到装配层注入的工厂,
@@ -648,7 +660,7 @@ export class WorkerHarness {
                 workspace,
                 origin: p.origin,
                 goal: p.goal,
-                principal_permissions: p.principal_permissions,
+                principal_permissions: context.principal_permissions,
               })
             : undefined)
         const spec: SpawnSpec = {
@@ -657,7 +669,7 @@ export class WorkerHarness {
           workspace,
           goal: p.goal,
           origin: p.origin,
-          principal_permissions: p.principal_permissions,
+          principal_permissions: context.principal_permissions,
           builtin,
         }
         spawnedHandle = await adapter.spawn(spec)
@@ -1217,8 +1229,8 @@ export class WorkerHarness {
 
   /**
    * capabilities().revive===false 分支(交接续办),以及 switchWorkerImpl 复用的公共路径。
-   * 顺序对齐 protocol-agent-v3 §5.3"跨实现切换":旧化身写交接文档收尾 → (若仍存活)
-   * kill 标 superseded → 同 workspace provision+spawn 新实现 → 化身链 +1。
+   * 顺序对齐 protocol-agent-v3 §5.3"跨实现切换":目标实现先完成无副作用 provision pre-flight
+   * → 旧化身写交接文档收尾 → (若仍存活)kill 标 superseded → 同 workspace provision+spawn 新实现 → 化身链 +1。
    */
   private async handoffIncarnation(
     dialogObjectId: DialogObjectId,
@@ -1259,25 +1271,18 @@ export class WorkerHarness {
     if (!newAdapter) {
       throw new Error(`WorkerHarness.handoffIncarnation: no adapter registered for impl '${targetImpl}' (handoff target)`)
     }
+    const handoffContext = await this.contextStore.read(worker.worker_id)
+    const principalPermissions = handoffContext?.principal_permissions
     let builtinInjection: SpawnSpec['builtin']
     if (targetImpl === 'builtin') {
-      // 工厂签名带上了 per-worker 上下文(PR F),这里的语义不变:仍在 pre-flight 阶段调一次、
-      // 拿不到就在动源化身之前拒绝。ctx 取交接语境下的既有值——新化身沿用源化身的 workspace
-      // (§5.3 同 workspace 交接),origin/goal 取台账上这条 worker 自己的。
-      //
-      // `principal_permissions` 这里给不出来:它只落在 builtin adapter 自己的 `context.json`
-      // 里(台账 §3 的 `origin` 是协议结构,不放解析后的档位),而 handoff 的目标 impl 按
-      // `implAlreadyUsed` 的 pre-flight 必然是这个 worker **没用过**的实现——目标是 builtin
-      // 就意味着它此前没有 builtin 化身、没有那份 context.json。缺省即"无发起人档位",worker
-      // 退回自己的固定档位(`BUILTIN_WORKER_PERMISSIONS`,已是干活必需的最小面)。
-      // 现网走不到这里:三个 adapter 的 `capabilities().revive` 都是 true(自动交接分支不触发),
-      // `switchWorkerImpl` 也还没有任何生产调用方。接线时必须先给台账/harness 一个跨 impl 的
-      // 档位存放处,再把它接到这里,否则 cc/codex → builtin 的交接会丢掉发起人收敛。
+      // harness-owned 快照在 HANDOFF.md / kill 之前读取：CLI-first worker 切到 builtin
+      // 仍保留原身份；context 损坏则在破坏源化身之前 fail-loud。
       builtinInjection = this.deps.builtinSpawnDefaults?.({
         worker_id: worker.worker_id,
         workspace: { root: source.workspace },
         origin: worker.origin,
         goal: worker.task.goal,
+        principal_permissions: principalPermissions,
       })
       if (!builtinInjection) {
         throw new Error(
@@ -1286,6 +1291,14 @@ export class WorkerHarness {
         )
       }
     }
+
+    const workspace: Workspace = { root: source.workspace }
+    const caps = this.deps.capabilityBundle
+      ? await this.deps.capabilityBundle({ worker_id: worker.worker_id, principal_permissions: principalPermissions })
+      : EMPTY_CAPABILITY_BUNDLE
+    // tracked credential target 等确定性检查必须在 HANDOFF.md / kill 之前完成；preflightProvision
+    // 不得写 workspace。正式 provision 仍在 source teardown 之后执行并重检，避免 TOCTOU 静默越界。
+    await newAdapter.preflightProvision?.(workspace, caps)
 
     // 1. 组装交接材料(task.title/goal + 最近输出尾部,上限 4KB + 上一化身 outcome)并写
     // workspace 下的 HANDOFF.md(已存在则追加带时间戳的新段,不覆盖)。
@@ -1332,9 +1345,7 @@ export class WorkerHarness {
     }
 
     // 3. 同 workspace provision + spawn 新实现,开工输入 = 原任务 + 交接引用 + 本次输入。
-    // newAdapter / builtinInjection 已在上面的 pre-flight 里取好,这里不用再判一次。
-    const workspace: Workspace = { root: source.workspace }
-    const caps = this.deps.capabilityBundle ? await this.deps.capabilityBundle() : EMPTY_CAPABILITY_BUNDLE
+    // newAdapter / builtinInjection / workspace / caps 已在上面的 pre-flight 里取好。
     await newAdapter.provision(workspace, caps)
     const prompt = buildHandoffPrompt(worker.task, input)
     const newHandle = await newAdapter.spawn({
@@ -1343,6 +1354,7 @@ export class WorkerHarness {
       workspace,
       goal: worker.task.goal,
       origin: worker.origin,
+      principal_permissions: principalPermissions,
       builtin: builtinInjection,
     })
 

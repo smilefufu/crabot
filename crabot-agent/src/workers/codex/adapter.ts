@@ -35,7 +35,7 @@ import { writeMetaAtomic, maxSeqOnDisk, latestModifiedMs } from '../meta-store.j
 import { WorkerExitedError, CapabilityNotSupportedError, CliInputStallError } from '../errors.js'
 import { probeCodexInput, acceptedCodexInput } from './input-surface.js'
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
-import { materializeSkills, renderCodexMcpToml, renderContextMd, type ProvisionSources } from '../provision/materialize.js'
+import { assertWorkspaceFilesUntracked, materializeSkills, renderCodexMcpToml, renderContextMd, writeSensitiveFileAtomic, type ProvisionSources } from '../provision/materialize.js'
 import type {
   AdapterCapabilities,
   CapabilityBundle,
@@ -61,6 +61,7 @@ const execFileAsync = promisify(execFile)
  * "spawn/resume 启动参数"节。取值只含 `[A-Za-z_.=]`,不含 shell 元字符,拼进经 `sh -c`
  * 跑的 tmux 命令行时无需额外引号(与相邻的 `--sandbox workspace-write` 写法一致)。 */
 const CODEX_NETWORK_ACCESS_OPT = '-c sandbox_workspace_write.network_access=true'
+const CODEX_CREDENTIAL_FILES = ['.codex/config.toml', '.codex/auth.json'] as const
 
 /** POSIX shell 单引号转义,与 cc adapter 的私有 shQuote 同款用法(独立复制一份)。 */
 function shQuote(s: string): string {
@@ -502,9 +503,16 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     }
   }
 
+  async preflightProvision(ws: Workspace, _caps: CapabilityBundle): Promise<void> {
+    await assertWorkspaceFilesUntracked(ws.root, CODEX_CREDENTIAL_FILES, 'CodexWorkerAdapter.provision')
+  }
+
   async provision(ws: Workspace, caps: CapabilityBundle): Promise<void> {
     const codexDir = join(ws.root, '.codex')
+    // 已跟踪的 credential target 必须在任何 provision 写入前拒绝；ignore 必须先于敏感文件落盘。
+    await this.preflightProvision(ws, caps)
     await fs.mkdir(codexDir, { recursive: true })
+    await fs.writeFile(join(codexDir, '.gitignore'), '*\n', 'utf-8')
 
     const channel = new CliEventChannel(eventsFilePath(ws))
     // codex-docs: notify 只支持在"顶层用户配置"这层 config.toml 里声明,项目级
@@ -548,7 +556,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // TOML 要求根级 key 必须出现在第一个 table 之前,否则会被解析成前一个 table 的子字段。
     // 叠加了宿主配置之后靠字符串拼接已经保证不了这条(宿主自带 table),改由序列化器统一
     // 排布:smol-toml 的 stringify 先出根级标量、再出 table。
-    await fs.writeFile(join(codexDir, 'config.toml'), stringifyToml(config), 'utf-8')
+    await writeSensitiveFileAtomic(join(codexDir, 'config.toml'), stringifyToml(config))
 
     // codex-docs: 既然 .codex/ 在这里被当成独立 CODEX_HOME,真实登录态里的 auth.json 要搬
     // 一份过来,否则隔离出来的 CODEX_HOME 过不了鉴权。找不到就跳过(本机/CI 未 `codex
@@ -557,15 +565,10 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     try {
       const authRaw = await fs.readFile(join(this.codexHomeSource, 'auth.json'), 'utf-8')
       const authPath = join(codexDir, 'auth.json')
-      await fs.writeFile(authPath, authRaw, 'utf-8')
-      // auth.json 包含凭据,设置严格权限防止泄露
-      await fs.chmod(authPath, 0o600)
+      await writeSensitiveFileAtomic(authPath, authRaw)
     } catch {
       // 忽略:本机未登录/测试环境本就没有 auth.json
     }
-
-    // .codex/ 整个隔离 HOME 都不应入库(凭据、临时缓存等),写入 .gitignore
-    await fs.writeFile(join(codexDir, '.gitignore'), '*\n', 'utf-8')
 
     // codex-docs: skills 支持 .codex/skills/(项目级)或 ~/.codex/skills/(个人级);本方案下
     // .codex/ 本身就是 CODEX_HOME,两个语义重合到同一目录。

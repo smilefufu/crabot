@@ -122,19 +122,62 @@ describe('ClaudeCodeAdapter.provision', () => {
   })
 
   it('写出 .claude/settings.json(含 Stop/Notification hook 与 permissions)、.mcp.json、CLAUDE.md', async () => {
+    execFileSync('git', ['init', '-q'], { cwd: ws })
+    await fs.writeFile(path.join(ws, '.gitignore'), 'existing-rule')
     const adapter = new ClaudeCodeAdapter({ dataDir: ws, claudeConfigPath })
-    await adapter.provision({ root: ws }, { skills: [], mcp_servers: [{ name: 'x', transport: 'stdio', command: 'node' }] })
+    const caps = {
+      skills: [],
+      mcp_servers: [
+        { name: 'x', transport: 'stdio' as const, command: 'node', env: { API_KEY: 'secret' } },
+        { name: 'remote', transport: 'streamable-http' as const, url: 'https://example.com/mcp', headers: { Authorization: 'Bearer token' } },
+      ],
+    }
+    await adapter.provision({ root: ws }, caps)
 
     const settings = JSON.parse(await fs.readFile(path.join(ws, '.claude/settings.json'), 'utf-8'))
     expect(settings.hooks.Stop[0].hooks[0].command).toContain('events-cli.jsonl')
     expect(settings.hooks.Notification[0].hooks[0].command).toContain('events-cli.jsonl')
     expect(settings.permissions.defaultMode).toBe('bypassPermissions')
 
-    const mcpJson = JSON.parse(await fs.readFile(path.join(ws, '.mcp.json'), 'utf-8'))
-    expect(mcpJson.mcpServers.x.command).toBe('node')
+    const mcpPath = path.join(ws, '.mcp.json')
+    const mcpJson = JSON.parse(await fs.readFile(mcpPath, 'utf-8'))
+    expect((await fs.stat(mcpPath)).mode & 0o777).toBe(0o600)
+    expect(mcpJson.mcpServers.x).toEqual({ command: 'node', env: { API_KEY: 'secret' } })
+    expect(mcpJson.mcpServers.remote).toEqual({
+      type: 'http',
+      url: 'https://example.com/mcp',
+      headers: { Authorization: 'Bearer token' },
+    })
+    const expectedIgnore = 'existing-rule\n/.mcp.json\n/..mcp.json.tmp-*\n'
+    expect(await fs.readFile(path.join(ws, '.gitignore'), 'utf-8')).toBe(expectedIgnore)
+
+    // 重复 provision 不重复追加；普通 git add -A 不能把仍含凭据的目标或 crash temp 带进索引。
+    await adapter.provision({ root: ws }, caps)
+    expect(await fs.readFile(path.join(ws, '.gitignore'), 'utf-8')).toBe(expectedIgnore)
+    const crashTemp = path.join(ws, '..mcp.json.tmp-crash-fixture')
+    await fs.writeFile(crashTemp, '{"API_KEY":"stale-secret"}\n', { mode: 0o600 })
+    execFileSync('git', ['add', '-A'], { cwd: ws })
+    expect(() => execFileSync('git', ['ls-files', '--error-unmatch', '--', '.mcp.json'], { cwd: ws, stdio: 'ignore' })).toThrow()
+    expect(() => execFileSync('git', ['ls-files', '--error-unmatch', '--', path.basename(crashTemp)], { cwd: ws, stdio: 'ignore' })).toThrow()
 
     const claudeMd = await fs.readFile(path.join(ws, 'CLAUDE.md'), 'utf-8')
     expect(claudeMd).toContain('你是 crabot 的 worker')
+  })
+
+  it('拒绝覆盖 Git 已跟踪的 .mcp.json，避免 ignore 对 tracked file 无效时泄漏凭据', async () => {
+    execFileSync('git', ['init', '-q'], { cwd: ws })
+    const trackedPath = path.join(ws, '.mcp.json')
+    await fs.writeFile(trackedPath, '{"user":"config"}\n', 'utf-8')
+    execFileSync('git', ['add', '.mcp.json'], { cwd: ws })
+
+    const adapter = new ClaudeCodeAdapter({ dataDir: ws, claudeConfigPath })
+    await expect(adapter.provision({ root: ws }, {
+      skills: [],
+      mcp_servers: [{ name: 'x', transport: 'stdio', command: 'node', env: { API_KEY: 'secret' } }],
+    })).rejects.toThrow(/refusing to overwrite tracked \.mcp\.json/)
+
+    expect(await fs.readFile(trackedPath, 'utf-8')).toBe('{"user":"config"}\n')
+    await expect(fs.access(path.join(ws, '.claude/settings.json'))).rejects.toThrow()
   })
 
   // ~/.claude.json 的 projects[<realpath>].hasTrustDialogAccepted —— cc 交互式启动的
@@ -326,6 +369,10 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter (tmux + mock CLI)', () => {
       const settingsIdx = argv.indexOf('--settings')
       expect(settingsIdx).toBeGreaterThan(-1)
       expect(JSON.parse(argv[settingsIdx + 1])).toEqual({ skipDangerousModePermissionPrompt: true })
+      const mcpConfigIdx = argv.indexOf('--mcp-config')
+      expect(mcpConfigIdx).toBeGreaterThan(-1)
+      expect(argv[mcpConfigIdx + 1]).toBe('.mcp.json')
+      expect(argv).toContain('--strict-mcp-config')
 
       await adapter.kill(h)
     },
@@ -1161,6 +1208,10 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.resume', () => {
       const settingsIdx = resumeArgv.indexOf('--settings')
       expect(settingsIdx).toBeGreaterThan(-1)
       expect(JSON.parse(resumeArgv[settingsIdx + 1])).toEqual({ skipDangerousModePermissionPrompt: true })
+      const mcpConfigIdx = resumeArgv.indexOf('--mcp-config')
+      expect(mcpConfigIdx).toBeGreaterThan(-1)
+      expect(resumeArgv[mcpConfigIdx + 1]).toBe('.mcp.json')
+      expect(resumeArgv).toContain('--strict-mcp-config')
 
       await adapter.kill(h2)
     },
@@ -1321,6 +1372,9 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
         '--fork-session',
         '--output-format',
         'text',
+        '--mcp-config',
+        '.mcp.json',
+        '--strict-mcp-config',
       ])
 
       await adapter.kill(h1)

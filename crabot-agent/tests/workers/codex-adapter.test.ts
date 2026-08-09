@@ -115,20 +115,60 @@ describe('CodexWorkerAdapter.provision', () => {
   })
 
   it('写出 .codex/config.toml(notify 段在 mcp_servers 表头之前)、AGENTS.md', async () => {
+    execFileSync('git', ['init', '-q'], { cwd: ws })
+    await fs.writeFile(path.join(codexHomeSource, 'auth.json'), '{"token":"secret-auth"}', 'utf-8')
     const adapter = new CodexWorkerAdapter({ dataDir: ws, codexHomeSource })
-    await adapter.provision({ root: ws }, { skills: [], mcp_servers: [{ name: 'x', transport: 'stdio', command: 'node' }] })
+    await adapter.provision({ root: ws }, {
+      skills: [],
+      mcp_servers: [
+        { name: 'x', transport: 'stdio', command: 'node', env: { API_KEY: 'secret' } },
+        { name: 'remote', transport: 'streamable-http', url: 'https://example.com/mcp', headers: { Authorization: 'Bearer token' } },
+      ],
+    })
 
-    const configToml = await fs.readFile(path.join(ws, '.codex/config.toml'), 'utf-8')
+    const configPath = path.join(ws, '.codex/config.toml')
+    const configToml = await fs.readFile(configPath, 'utf-8')
+    expect((await fs.stat(configPath)).mode & 0o777).toBe(0o600)
     expect(configToml).toContain('notify = ')
     expect(configToml).toContain('events-cli.jsonl')
     // 序列化交给 smol-toml 之后表头是否给 key 加引号属于格式细节(`[mcp_servers.x]` 与
     // `[mcp_servers."x"]` 语义等价),这里钉语义不钉引号风格。
-    expect((parseToml(configToml) as any).mcp_servers).toEqual({ x: { command: 'node' } })
+    expect((parseToml(configToml) as any).mcp_servers).toEqual({
+      x: { command: 'node', env: { API_KEY: 'secret' } },
+      remote: { url: 'https://example.com/mcp', http_headers: { Authorization: 'Bearer token' } },
+    })
     // TOML 根级 key(notify)必须出现在第一个 table([mcp_servers...])之前。
     expect(configToml.indexOf('notify =')).toBeLessThan(configToml.indexOf('[mcp_servers'))
 
+    // ignore 在敏感写入前已存在，普通 git add -A 不收录目标或 crash temp。
+    const crashTemp = path.join(ws, '.codex', '.config.toml.tmp-crash-fixture')
+    await fs.writeFile(crashTemp, 'API_KEY=stale-secret\n', { mode: 0o600 })
+    execFileSync('git', ['add', '-A'], { cwd: ws })
+    for (const relativePath of ['.codex/config.toml', '.codex/auth.json', '.codex/.config.toml.tmp-crash-fixture']) {
+      expect(() => execFileSync('git', ['ls-files', '--error-unmatch', '--', relativePath], { cwd: ws, stdio: 'ignore' })).toThrow()
+    }
+
     const agentsMd = await fs.readFile(path.join(ws, 'AGENTS.md'), 'utf-8')
     expect(agentsMd).toContain('你是 crabot 的 worker')
+  })
+
+  it.each(['config.toml', 'auth.json'])('拒绝覆盖 Git 已跟踪的 .codex/%s，且在其他 provision 写入前失败', async (fileName) => {
+    execFileSync('git', ['init', '-q'], { cwd: ws })
+    const codexDir = path.join(ws, '.codex')
+    await fs.mkdir(codexDir, { recursive: true })
+    const trackedPath = path.join(codexDir, fileName)
+    await fs.writeFile(trackedPath, 'user-owned\n', 'utf-8')
+    execFileSync('git', ['add', `.codex/${fileName}`], { cwd: ws })
+
+    const adapter = new CodexWorkerAdapter({ dataDir: ws, codexHomeSource })
+    await expect(adapter.provision({ root: ws }, {
+      skills: [],
+      mcp_servers: [{ name: 'x', transport: 'stdio', command: 'node', env: { API_KEY: 'secret' } }],
+    })).rejects.toThrow(new RegExp(`refusing to overwrite tracked \\.codex/${fileName.replace('.', '\\.')}`))
+
+    expect(await fs.readFile(trackedPath, 'utf-8')).toBe('user-owned\n')
+    await expect(fs.access(path.join(codexDir, '.gitignore'))).rejects.toThrow()
+    await expect(fs.access(path.join(ws, 'AGENTS.md'))).rejects.toThrow()
   })
 
   it('provision 把 codexHomeSource/auth.json 复制进 workspace 隔离出来的 .codex/auth.json', async () => {

@@ -2,7 +2,7 @@ import type { ToolDefinition, LLMAdapter } from '../engine/index.js'
 import type { Resolvable } from '../engine/types.js'
 // 纯类型引用(两侧都是 `import type`,编译后无运行时依赖,不构成模块环)。
 import type { LedgerWorker } from './harness/ledger-types.js'
-import type { ResolvedPermissions } from '../types.js'
+import type { ResolvedPermissions, MCPServerConfig } from '../types.js'
 
 export type WorkerImplId = 'builtin' | 'claude-code' | 'codex'
 export type WorkerContractState = 'running' | 'idle' | 'exited'
@@ -29,7 +29,13 @@ export interface NormalizedTraceEvent {
 
 export interface CapabilityBundle {
   readonly skills: ReadonlyArray<{ id: string; name: string; skill_dir: string }>
-  readonly mcp_servers: ReadonlyArray<Record<string, unknown>>
+  readonly mcp_servers: ReadonlyArray<MCPServerConfig>
+}
+
+/** Harness 向 capability provider 提供的 worker 身份上下文；权限是 spawn 时固定的快照。 */
+export interface WorkerCapabilityContext {
+  readonly worker_id: string
+  readonly principal_permissions?: ResolvedPermissions
 }
 
 export interface SpawnSpec {
@@ -155,6 +161,8 @@ export interface AdapterCapabilities {
 export interface WorkerAdapter {
   readonly implId: WorkerImplId
   detect(): Promise<DetectResult>
+  /** 无副作用的 workspace/capability 前置检查；handoff 在触碰源化身前调用。 */
+  preflightProvision?(ws: Workspace, caps: CapabilityBundle): Promise<void>
   provision(ws: Workspace, caps: CapabilityBundle): Promise<void>
   spawn(spec: SpawnSpec): Promise<IncarnationHandle>
   resume(prev: IncarnationRef, wakeInput: string): Promise<IncarnationHandle>

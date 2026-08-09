@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -192,7 +192,7 @@ function now(): string {
 
 async function makeHarness(
   fakeOpts: FakeAdapterOpts = {},
-  depsOverrides: Partial<Pick<HarnessDeps, 'hasRunningBg'>> = {},
+  depsOverrides: Partial<Pick<HarnessDeps, 'hasRunningBg' | 'capabilityBundle'>> = {},
 ): Promise<{ harness: WorkerHarness; fake: FakeAdapter; adaptersMap: Map<WorkerImplId, WorkerAdapter>; workersDir: string }> {
   const ledgersDir = join(dataDir, 'ledgers')
   const workspacesRoot = join(dataDir, 'workspaces')
@@ -271,6 +271,70 @@ describe('WorkerHarness.spawnWorker', () => {
     // 台账已落盘且可查
     const listed = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
     expect(listed.map((w) => w.worker_id)).toContain(worker.worker_id)
+  })
+
+  it('首次 provision 前落 harness context，并把同一固定权限快照交给 capability provider', async () => {
+    const principalPermissions = {
+      tool_access: { memory: true, messaging: false, task: false, mcp_skill: false, file_io: true, browser: true, shell: true, remote_exec: false, desktop: false },
+      cli_access: { provider: 'none', agent: 'none', mcp: 'none', skill: 'none', schedule: 'none', channel: 'none', friend: 'none', permission: 'none', config: 'none', undo: 'none' },
+      storage: null,
+      memory_scopes: ['friend-1'],
+    } as const
+    const capabilityBundle = vi.fn(async () => ({ skills: [], mcp_servers: [] }))
+    const { harness, fake, workersDir } = await makeHarness({}, { capabilityBundle })
+
+    const worker = await harness.spawnWorker(spawnParams({ principal_permissions: principalPermissions }))
+
+    expect(capabilityBundle).toHaveBeenCalledWith({ worker_id: worker.worker_id, principal_permissions: principalPermissions })
+    expect(fake.provisionCalls).toHaveLength(1)
+    expect(JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'context.json'), 'utf-8'))).toEqual({
+      principal_permissions: principalPermissions,
+    })
+  })
+
+  it('部分历史权限先按 fail-closed 默认规范化，再交给 capability provider 与 adapter', async () => {
+    const partialPermissions = {
+      tool_access: { mcp_skill: true },
+      cli_access: { mcp: 'read' },
+      storage: null,
+      memory_scopes: ['legacy'],
+    } as unknown as NonNullable<SpawnWorkerParams['principal_permissions']>
+    const capabilityBundle = vi.fn(async () => ({ skills: [], mcp_servers: [] }))
+    const { harness, fake } = await makeHarness({}, { capabilityBundle })
+
+    await harness.spawnWorker(spawnParams({ principal_permissions: partialPermissions }))
+
+    const normalized = capabilityBundle.mock.calls[0][0].principal_permissions
+    expect(normalized).toMatchObject({
+      tool_access: { mcp_skill: true, desktop: false, shell: false },
+      cli_access: { mcp: 'read', undo: 'none', provider: 'none' },
+    })
+    expect(fake.spawnCalls[0].principal_permissions).toEqual(normalized)
+  })
+
+  it('无 principal 的新 worker 仍在 provision 前落空 context，而非误作 legacy ENOENT', async () => {
+    const { harness, workersDir } = await makeHarness()
+    const worker = await harness.spawnWorker(spawnParams())
+    expect(JSON.parse(await fs.readFile(join(workersDir, worker.worker_id, 'context.json'), 'utf-8'))).toEqual({})
+  })
+
+  it('context 原子写失败时不调用 provision，并按既有 spawn_failed 语义落账', async () => {
+    const { harness, fake } = await makeHarness()
+    const contextStore = (harness as unknown as {
+      contextStore: { write(workerId: string, context: unknown): Promise<void> }
+    }).contextStore
+    vi.spyOn(contextStore, 'write').mockRejectedValueOnce(new Error('context disk error'))
+
+    await expect(harness.spawnWorker(spawnParams())).rejects.toThrow('context disk error')
+    expect(fake.provisionCalls).toEqual([])
+    expect(fake.spawnCalls).toEqual([])
+    const [failed] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    expect(failed.task).toMatchObject({ status: 'failed', error: 'context disk error' })
+    expect(failed.incarnations[0]).toMatchObject({ state: 'exited', ended_reason: 'failed' })
+    expect(events.find((event) => event.kind === 'exited')?.detail).toMatchObject({
+      reason: 'spawn_failed',
+      message: 'context disk error',
+    })
   })
 
   it('CLI首投accepted后同步completed：task与化身按endReason落completed而非failed', async () => {

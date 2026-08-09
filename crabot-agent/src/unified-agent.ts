@@ -51,7 +51,7 @@ import type { ToolPermissionConfig, ToolDefinition as EngineToolDefinition } fro
 import { filterToolsByPermission } from './engine/index.js'
 import { getConfiguredBuiltinTools, filterMcpToolsByConfig } from './engine/tools/index.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
-import { McpConnector } from './agent/mcp-connector.js'
+import { McpConnector, filterMcpServersForWorker } from './agent/mcp-connector.js'
 import { mcpServerToToolDefinitions } from './agent/mcp-tool-bridge.js'
 import { createTmpPageTools } from './agent/tmp-page-tools.js'
 import { createCrabMessagingServer, type PathMapping, type TaskContext } from './mcp/crab-messaging.js'
@@ -709,6 +709,17 @@ export class UnifiedAgent extends ModuleBase {
       },
       // 起化身时现取（spec 决策 2）：箭头函数只捕获 `this`，配置一律在调用那一刻读。
       builtinSpawnDefaults: (ctx) => this.buildBuiltinWorkerRuntime(ctx),
+      capabilityBundle: async ({ principal_permissions }) => {
+        const workerPermissions = narrowWorkerPermissions(
+          BUILTIN_WORKER_PERMISSIONS,
+          principal_permissions ?? null,
+        )
+        return {
+          // skill capability 本次仍不激活，只补 MCP provision 接线。
+          skills: [],
+          mcp_servers: filterMcpServersForWorker(this.agentConfig?.mcp_servers ?? [], workerPermissions),
+        }
+      },
       hasRunningBg: (workerId) => this.agentHandler?.hasRunningBgForWorker(workerId) ?? Promise.resolve(false),
       // 对外事件出口（§9.2 `agent.task_status_changed`）：真实 rpcClient 注入。
       // 翻译与去重在 manager/events.ts，这里只负责把口子接上。

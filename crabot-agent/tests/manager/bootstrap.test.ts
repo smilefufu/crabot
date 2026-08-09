@@ -223,6 +223,13 @@ describe('manager bootstrap（P5 Task 1）', () => {
     expect([...stack.adapters.keys()].sort()).toEqual(['builtin', 'claude-code', 'codex'])
   })
 
+  it('capabilityBundle 只在 harness 生命周期中调用，buildManagerStack 保持零 I/O 装配并透传工厂', async () => {
+    const capabilityBundle = vi.fn(async () => ({ skills: [], mcp_servers: [] }))
+    const stack = buildManagerStack(makeDeps({ capabilityBundle }))
+    expect(capabilityBundle).not.toHaveBeenCalled()
+    expect((stack.harness as unknown as { deps: HarnessDeps }).deps.capabilityBundle).toBe(capabilityBundle)
+  })
+
   // --- ② 四步接线契约 ---
 
   it('四步接线契约成立：三个 adapter 都拿到同一个 harness.handleStateChange，回调能落账；harness 看得到构造后才 set 进 Map 的 adapter', async () => {
