@@ -76,6 +76,11 @@ function shQuote(s: string): string {
  */
 const BYPASS_WARNING_SETTINGS_ARG = `--settings ${shQuote(JSON.stringify({ skipDangerousModePermissionPrompt: true }))}`
 const MCP_CONFIG_FILE = '.mcp.json'
+const MCP_CONFIG_IGNORE_ENTRIES = [
+  `/${MCP_CONFIG_FILE}`,
+  // writeSensitiveFileAtomic(`.mcp.json`) 的同目录 crash residue：`..mcp.json.tmp-<uuid>`。
+  `/..mcp.json.tmp-*`,
+] as const
 /** 只允许 provision 生成的 task-scoped MCP，禁止与宿主 user/local scope 求并集。 */
 const STRICT_MCP_CONFIG_ARGS = `--mcp-config ${MCP_CONFIG_FILE} --strict-mcp-config`
 
@@ -110,16 +115,17 @@ async function ensureMcpConfigIgnored(workspaceRoot: string): Promise<void> {
   }
 
   const ignorePath = join(workspaceRoot, '.gitignore')
-  const entry = `/${MCP_CONFIG_FILE}`
   let current = ''
   try {
     current = await fs.readFile(ignorePath, 'utf-8')
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
   }
-  if (current.split(/\r?\n/).includes(entry)) return
+  const existingLines = current.split(/\r?\n/)
+  const missing = MCP_CONFIG_IGNORE_ENTRIES.filter((entry) => !existingLines.includes(entry))
+  if (missing.length === 0) return
   const prefix = current.length > 0 && !current.endsWith('\n') ? '\n' : ''
-  await fs.appendFile(ignorePath, `${prefix}${entry}\n`, 'utf-8')
+  await fs.appendFile(ignorePath, `${prefix}${missing.join('\n')}\n`, 'utf-8')
 }
 
 /** UUID 格式校验:标准 UUID 格式(8-4-4-4-12 十六进制段,由连字符分隔)。*/

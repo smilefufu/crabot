@@ -148,13 +148,17 @@ describe('ClaudeCodeAdapter.provision', () => {
       url: 'https://example.com/mcp',
       headers: { Authorization: 'Bearer token' },
     })
-    expect(await fs.readFile(path.join(ws, '.gitignore'), 'utf-8')).toBe('existing-rule\n/.mcp.json\n')
+    const expectedIgnore = 'existing-rule\n/.mcp.json\n/..mcp.json.tmp-*\n'
+    expect(await fs.readFile(path.join(ws, '.gitignore'), 'utf-8')).toBe(expectedIgnore)
 
-    // 重复 provision 不重复追加；普通 git add -A 不能把仍含凭据的文件带进索引。
+    // 重复 provision 不重复追加；普通 git add -A 不能把仍含凭据的目标或 crash temp 带进索引。
     await adapter.provision({ root: ws }, caps)
-    expect(await fs.readFile(path.join(ws, '.gitignore'), 'utf-8')).toBe('existing-rule\n/.mcp.json\n')
+    expect(await fs.readFile(path.join(ws, '.gitignore'), 'utf-8')).toBe(expectedIgnore)
+    const crashTemp = path.join(ws, '..mcp.json.tmp-crash-fixture')
+    await fs.writeFile(crashTemp, '{"API_KEY":"stale-secret"}\n', { mode: 0o600 })
     execFileSync('git', ['add', '-A'], { cwd: ws })
     expect(() => execFileSync('git', ['ls-files', '--error-unmatch', '--', '.mcp.json'], { cwd: ws, stdio: 'ignore' })).toThrow()
+    expect(() => execFileSync('git', ['ls-files', '--error-unmatch', '--', path.basename(crashTemp)], { cwd: ws, stdio: 'ignore' })).toThrow()
 
     const claudeMd = await fs.readFile(path.join(ws, 'CLAUDE.md'), 'utf-8')
     expect(claudeMd).toContain('你是 crabot 的 worker')
