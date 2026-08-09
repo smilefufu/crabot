@@ -35,7 +35,7 @@ import { writeMetaAtomic, maxSeqOnDisk, latestModifiedMs } from '../meta-store.j
 import { WorkerExitedError, CapabilityNotSupportedError, CliInputStallError } from '../errors.js'
 import { probeCodexInput, acceptedCodexInput } from './input-surface.js'
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
-import { materializeSkills, renderCodexMcpToml, renderContextMd, type ProvisionSources } from '../provision/materialize.js'
+import { materializeSkills, renderCodexMcpToml, renderContextMd, writeSensitiveFileAtomic, type ProvisionSources } from '../provision/materialize.js'
 import type {
   AdapterCapabilities,
   CapabilityBundle,
@@ -548,7 +548,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     // TOML 要求根级 key 必须出现在第一个 table 之前,否则会被解析成前一个 table 的子字段。
     // 叠加了宿主配置之后靠字符串拼接已经保证不了这条(宿主自带 table),改由序列化器统一
     // 排布:smol-toml 的 stringify 先出根级标量、再出 table。
-    await fs.writeFile(join(codexDir, 'config.toml'), stringifyToml(config), 'utf-8')
+    await writeSensitiveFileAtomic(join(codexDir, 'config.toml'), stringifyToml(config))
 
     // codex-docs: 既然 .codex/ 在这里被当成独立 CODEX_HOME,真实登录态里的 auth.json 要搬
     // 一份过来,否则隔离出来的 CODEX_HOME 过不了鉴权。找不到就跳过(本机/CI 未 `codex

@@ -124,7 +124,9 @@ describe('CodexWorkerAdapter.provision', () => {
       ],
     })
 
-    const configToml = await fs.readFile(path.join(ws, '.codex/config.toml'), 'utf-8')
+    const configPath = path.join(ws, '.codex/config.toml')
+    const configToml = await fs.readFile(configPath, 'utf-8')
+    expect((await fs.stat(configPath)).mode & 0o777).toBe(0o600)
     expect(configToml).toContain('notify = ')
     expect(configToml).toContain('events-cli.jsonl')
     // 序列化交给 smol-toml 之后表头是否给 key 加引号属于格式细节(`[mcp_servers.x]` 与

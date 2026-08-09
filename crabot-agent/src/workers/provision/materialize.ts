@@ -1,5 +1,6 @@
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
+import { randomUUID } from 'node:crypto'
 
 import type { MCPServerConfig } from '../../types.js'
 
@@ -113,6 +114,18 @@ export function renderCodexMcpToml(servers: ProvisionSources['mcpServers']): str
     return lines.join('\n')
   })
   return blocks.length === 0 ? '' : blocks.join('\n\n') + '\n'
+}
+
+export async function writeSensitiveFileAtomic(filePath: string, content: string): Promise<void> {
+  const tmpPath = path.join(path.dirname(filePath), `.${path.basename(filePath)}.tmp-${randomUUID()}`)
+  try {
+    await fs.writeFile(tmpPath, content, { encoding: 'utf-8', mode: 0o600 })
+    await fs.chmod(tmpPath, 0o600)
+    await fs.rename(tmpPath, filePath)
+  } catch (err) {
+    await fs.rm(tmpPath, { force: true }).catch(() => undefined)
+    throw err
+  }
 }
 
 /** CLAUDE.md/AGENTS.md 正文:worker 身份声明 + 中间产物落盘纪律 + HANDOFF.md 交接约定。 */

@@ -7,6 +7,7 @@ import {
   renderMcpJson,
   renderCodexMcpToml,
   renderContextMd,
+  writeSensitiveFileAtomic,
   type ProvisionSources,
 } from '../../src/workers/provision/materialize.js'
 
@@ -87,6 +88,23 @@ describe('materializeSkills', () => {
       // 哨兵文件原样还在——validateSkillName 在任何 fs.rm/fs.cp 之前就已经 throw。
       await expect(fs.readFile(sentinelPath, 'utf-8')).resolves.toBe('still here')
     })
+  })
+})
+
+describe('writeSensitiveFileAtomic', () => {
+  it('原子替换已有宽权限文件并把最终权限收紧到 0600', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'provision-sensitive-'))
+    const target = path.join(dir, '.mcp.json')
+    try {
+      await fs.writeFile(target, 'old', { mode: 0o644 })
+      await writeSensitiveFileAtomic(target, 'new-secret')
+
+      expect(await fs.readFile(target, 'utf-8')).toBe('new-secret')
+      expect((await fs.stat(target)).mode & 0o777).toBe(0o600)
+      expect((await fs.readdir(dir)).filter((name) => name.includes('.tmp-'))).toEqual([])
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
   })
 })
 

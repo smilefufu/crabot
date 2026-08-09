@@ -136,7 +136,9 @@ describe('ClaudeCodeAdapter.provision', () => {
     expect(settings.hooks.Notification[0].hooks[0].command).toContain('events-cli.jsonl')
     expect(settings.permissions.defaultMode).toBe('bypassPermissions')
 
-    const mcpJson = JSON.parse(await fs.readFile(path.join(ws, '.mcp.json'), 'utf-8'))
+    const mcpPath = path.join(ws, '.mcp.json')
+    const mcpJson = JSON.parse(await fs.readFile(mcpPath, 'utf-8'))
+    expect((await fs.stat(mcpPath)).mode & 0o777).toBe(0o600)
     expect(mcpJson.mcpServers.x).toEqual({ command: 'node', env: { API_KEY: 'secret' } })
     expect(mcpJson.mcpServers.remote).toEqual({
       type: 'http',
@@ -337,6 +339,10 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter (tmux + mock CLI)', () => {
       const settingsIdx = argv.indexOf('--settings')
       expect(settingsIdx).toBeGreaterThan(-1)
       expect(JSON.parse(argv[settingsIdx + 1])).toEqual({ skipDangerousModePermissionPrompt: true })
+      const mcpConfigIdx = argv.indexOf('--mcp-config')
+      expect(mcpConfigIdx).toBeGreaterThan(-1)
+      expect(argv[mcpConfigIdx + 1]).toBe('.mcp.json')
+      expect(argv).toContain('--strict-mcp-config')
 
       await adapter.kill(h)
     },
@@ -1172,6 +1178,10 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.resume', () => {
       const settingsIdx = resumeArgv.indexOf('--settings')
       expect(settingsIdx).toBeGreaterThan(-1)
       expect(JSON.parse(resumeArgv[settingsIdx + 1])).toEqual({ skipDangerousModePermissionPrompt: true })
+      const mcpConfigIdx = resumeArgv.indexOf('--mcp-config')
+      expect(mcpConfigIdx).toBeGreaterThan(-1)
+      expect(resumeArgv[mcpConfigIdx + 1]).toBe('.mcp.json')
+      expect(resumeArgv).toContain('--strict-mcp-config')
 
       await adapter.kill(h2)
     },
@@ -1332,6 +1342,9 @@ describe.skipIf(!tmuxAvailable)('ClaudeCodeAdapter.fork', () => {
         '--fork-session',
         '--output-format',
         'text',
+        '--mcp-config',
+        '.mcp.json',
+        '--strict-mcp-config',
       ])
 
       await adapter.kill(h1)

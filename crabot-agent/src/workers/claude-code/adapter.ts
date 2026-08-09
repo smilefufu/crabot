@@ -40,7 +40,7 @@ import { AsyncMutex } from '../async-mutex.js'
 import { writeMetaAtomic, maxSeqOnDisk, latestModifiedMs } from '../meta-store.js'
 import { WorkerExitedError, CliInputStallError } from '../errors.js'
 import { probeClaudeInput, acceptedClaudeInput, hasClaudeInteraction } from './input-surface.js'
-import { materializeSkills, renderMcpJson, renderContextMd, type ProvisionSources } from '../provision/materialize.js'
+import { materializeSkills, renderMcpJson, renderContextMd, writeSensitiveFileAtomic, type ProvisionSources } from '../provision/materialize.js'
 import type {
   AdapterCapabilities,
   CapabilityBundle,
@@ -75,6 +75,8 @@ function shQuote(s: string): string {
  * ~/.claude/settings.json 的前提下消掉弹窗。值是 adapter 内部常量,仍经 shQuote 进入 shell。
  */
 const BYPASS_WARNING_SETTINGS_ARG = `--settings ${shQuote(JSON.stringify({ skipDangerousModePermissionPrompt: true }))}`
+/** 只允许 provision 生成的 task-scoped MCP，禁止与宿主 user/local scope 求并集。 */
+const STRICT_MCP_CONFIG_ARGS = '--mcp-config .mcp.json --strict-mcp-config'
 
 /** UUID 格式校验:标准 UUID 格式(8-4-4-4-12 十六进制段,由连字符分隔)。*/
 function validateSessionRef(sessionRef: string): void {
@@ -246,7 +248,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
     await materializeSkills(ws.root, caps.skills, '.claude/skills')
 
-    await fs.writeFile(join(ws.root, '.mcp.json'), renderMcpJson(mcpServers), 'utf-8')
+    await writeSensitiveFileAtomic(join(ws.root, '.mcp.json'), renderMcpJson(mcpServers))
 
     await fs.writeFile(
       join(ws.root, 'CLAUDE.md'),
@@ -502,7 +504,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
 
     const sessionName = `crabot-w-${spec.worker_id}-${seq}`
     const outputFile = join(dir, `output-${seq}.log`)
-    const command = `${this.claudeBin} ${BYPASS_WARNING_SETTINGS_ARG} --session-id ${sessionId} --permission-mode bypassPermissions`
+    const command = `${this.claudeBin} ${BYPASS_WARNING_SETTINGS_ARG} ${STRICT_MCP_CONFIG_ARGS} --session-id ${sessionId} --permission-mode bypassPermissions`
 
     // newSession 成功之后才落 meta(running)+注册 runtime:tmux 失败时不留任何持久痕迹
     // (session_id 可重生成,workspace 内 provision 产物残留可接受),同 worker_id 可安全重试。
@@ -615,7 +617,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
       // settings,必须与 spawn 对称地每次通过 --settings 注入。session_ref 是 cc 侧的会话 uuid,
       // 沿用不变。拼接时用 shQuote 转义 session_ref,防止 shell 注入(双层防御:
       // 入口已校验 UUID 格式,拼接时再加引号转义,提高防御深度)。
-      const command = `${this.claudeBin} ${BYPASS_WARNING_SETTINGS_ARG} --resume ${shQuote(prev.session_ref)}`
+      const command = `${this.claudeBin} ${BYPASS_WARNING_SETTINGS_ARG} ${STRICT_MCP_CONFIG_ARGS} --resume ${shQuote(prev.session_ref)}`
 
       // 锁纪律与 spawn 一致:tmux newSession 成功之后才落 meta(running)+注册 runtime。
       await this.tmux.newSession({ name: sessionName, cwd: prevRuntime.workspaceRoot, command, outputFile })
@@ -727,7 +729,14 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // 无头一击,不进 tmux:子进程在锁外跑(可能耗时较长),不阻塞同 worker_id 上其它操作
     // (主线不受影响)。claudeBin 与 spawn/resume 同款语义——一段 shell 命令片段,经 sh -c
     // 跑;forkInput 与其它参数逐个 shQuote 转义,防止内容里的 shell 元字符注入。
-    const args = ['-p', forkInput, '--resume', prev.session_ref, '--fork-session', '--output-format', 'text']
+    const args = [
+      '-p', forkInput,
+      '--resume', prev.session_ref,
+      '--fork-session',
+      '--output-format', 'text',
+      '--mcp-config', '.mcp.json',
+      '--strict-mcp-config',
+    ]
     const shellCommand = `${this.claudeBin} ${args.map(shQuote).join(' ')}`
 
     // 事件文件重定向:cc 的 hooks 在 print 模式同样执行,而 Stop hook 配在 **workspace 级**
