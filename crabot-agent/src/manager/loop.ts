@@ -35,25 +35,22 @@ import { randomUUID } from 'crypto'
 import {
   runEngine,
   createUserMessage,
-  HumanMessageQueue,
   type EngineMessage,
   type EngineResult,
   type EngineOptions,
   type ToolDefinition,
   type LLMAdapter,
-  type QueueContent,
   type TextBlock,
 } from '../engine/index.js'
+import type { HumanMessageQueueLike } from '../engine/types.js'
 import { AsyncMutex } from '../workers/async-mutex'
 import { formatChannelMessageLine } from '../prompt-manager.js'
 import { resolveSenderIdentity } from '../utils/sender-identity.js'
-import { resolveTimezone } from '../utils/time.js'
 import { decideCompaction, foldIntoSummary, type CompactionPolicy, type CompactionDecision } from './compaction.js'
 import { assembleManagerSystemPrompt } from './prompt.js'
 import type { ManagerSessionStore } from './session-store.js'
 import type { ManagerSessionState, ManagerKey } from './types.js'
 import type { WorkerHarness } from '../workers/harness/harness'
-import type { LedgerWorker } from '../workers/harness/ledger-types'
 import type { HarnessEvent } from '../workers/harness/worker-events'
 import type { ChannelMessage, Friend, ResolvedPermissions } from '../types'
 
@@ -121,6 +118,14 @@ export type WakeEvent =
       readonly principalPermissions?: ResolvedPermissions
     }
 
+export interface TimedWakeEnvelope {
+  readonly wake: WakeEvent
+  readonly received_at: string
+  readonly timezone: string
+  readonly occurred_at?: string
+  readonly human_occurred_at?: ReadonlyArray<{ readonly message_id?: string; readonly occurred_at?: string }>
+}
+
 export interface EpisodeResult {
   readonly episodeId: string
   readonly outcome: 'completed' | 'failed' | 'max_turns' | 'aborted'
@@ -176,8 +181,8 @@ export interface ManagerLoopDeps {
    * `origin.creator_friend_id`)。可选参数,既有调用方 `() => [...]` 无需改动。
    */
   readonly toolFace: (wakeEvent?: WakeEvent) => ReadonlyArray<ToolDefinition>
-  /** system prompt 里除动态台账/时间外的其余输入(档案、待处理通知),每轮重算。 */
-  readonly promptInputs: () => { readonly dialogProfile?: string; readonly pendingNotes?: ReadonlyArray<string> }
+  /** System prompt inputs are stable for the whole dialogProfile revision. */
+  readonly promptInputs: () => { readonly dialogProfile?: string }
   readonly harness: WorkerHarness
   readonly now: () => Date
   /**
@@ -209,17 +214,13 @@ export class ManagerLoop {
    * 在 episode 收口时按 `hasPendingMailbox` 自唤醒(`drainMailbox`)兜底,并由 `evictIdle`
    * 拒绝回收 mailbox 非空的实例保证它不会先被回收掉(P7 阻塞项 #5)。
    */
-  private readonly mailbox = new HumanMessageQueue()
+  private readonly mailbox = new TimedWakeMailbox()
   /**
-   * 非 null 期间表示"当前正有一个 episode 在跑",记录本次 episode 期间所有经
-   * `enqueueDuringEpisode` 推进 mailbox 的原始文本(按到达顺序)。episode 失败时,
-   * 其中已被 engine `drainPending()` 消费进(随失败一起被丢弃的)`finalMessages` 的那部分
-   * 内容不会再留在 mailbox 里——必须靠这份记录才能连同 carriedTexts/eventText 一起重投,
-   * 否则永久丢失(见 runEpisode 失败分支)。episode 成功时整份丢弃,不重投(已被消费进
-   * 保存的 state.recent,重投会变成重复投递)。episode 未在跑时为 null,enqueueDuringEpisode
-   * 不记录——那时 mailbox 只是普通 pending 队列,靠下次 wakeUp 顶部的 drainPending 自然带走。
+   * 本 episode 进行中经 `enqueueDuringEpisode` 推进 mailbox 的原始 envelope（按到达顺序）。
+   * episode 失败时，即使其中一部分已被 engine `drainPending()` 消费进失败的
+   * `finalMessages`，也必须靠这份记录重投。episode 成功时整份丢弃，避免重复投递。
    */
-  private currentEpisodeInjected: string[] | null = null
+  private currentEpisodeInjected: TimedWakeEnvelope[] | null = null
   /**
    * P5 Task 4 additive:本 episode 的唤醒事件,供 `deps.toolFace(wakeEvent)` 按"这次是被
    * 什么唤醒的"装配工具面(见 `ManagerLoopDeps.toolFace`)。与 `currentEpisodeInjected`
@@ -227,15 +228,16 @@ export class ManagerLoop {
    * ——同一 loop 的 episode 由 `wakeUp` 的 mutex 串行,不会有两个 episode 的唤醒事件交叠;
    * 这正是不把它做成 registry 侧 `Map<ManagerKey, …>` 的原因(那样并发唤醒会串身份)。
    */
-  private currentWakeEvent: WakeEvent | null = null
+  private currentWakeEvent: TimedWakeEnvelope | null = null
 
   constructor(deps: ManagerLoopDeps) {
     this.deps = deps
   }
 
   /** 唯一入口:被唤醒 → 跑一个 episode → 回睡。同一 loop 串行,不同 loop 互不影响。 */
-  async wakeUp(event: WakeEvent): Promise<EpisodeResult> {
-    return this.mutex.run(() => this.runEpisode(event))
+  async wakeUp(envelope: TimedWakeEnvelope): Promise<EpisodeResult> {
+    assertTimedWakeEnvelope(envelope)
+    return this.mutex.run(() => this.runEpisode(envelope))
   }
 
   /**
@@ -262,53 +264,46 @@ export class ManagerLoop {
 
   /** episode 进行中到达的新事件:渲染成文本推进内部邮箱,由 engine 的 humanMessageQueue
    *  在 turn 间隙注入;episode 不在跑时同样入队,行为见 `mailbox` 字段注释。 */
-  enqueueDuringEpisode(event: WakeEvent): void {
-    const text = this.renderEvent(event)
-    this.mailbox.push(text)
-    this.currentEpisodeInjected?.push(text)
+  enqueueDuringEpisode(envelope: TimedWakeEnvelope): void {
+    assertTimedWakeEnvelope(envelope)
+    this.mailbox.push(envelope)
+    this.currentEpisodeInjected?.push(envelope)
   }
 
   /**
-   * 唤醒事件 → 投喂给 LLM 的文本。**每个事件只渲染一次**(渲染结果之后作为字符串在
-   * mailbox / state.recent 里流转,失败重投也是同一份字符串),因此渲染依赖当前时钟这件事
-   * 不会让已经进上下文的内容事后改变——前缀缓存不受影响。
+   * 唤醒事件 → 投喂给 LLM 的文本。渲染是 envelope 的纯函数，不读取当前时钟；
+   * mailbox carry、失败重投或 overflow retry 即使重新渲染，也会得到逐字相同的文本。
    */
-  private renderEvent(event: WakeEvent): string {
-    return renderWakeEvent(event, {
-      timezone: this.deps.timezone?.() ?? resolveTimezone(undefined),
-      now: this.deps.now(),
-    })
+  private renderEnvelope(envelope: TimedWakeEnvelope): string {
+    return renderTimedWakeEnvelope(envelope)
   }
 
   /** `event === undefined` ⇒ 自唤醒(见 `drainMailbox`):只处理 mailbox 残留,不渲染唤醒事件。 */
-  private async runEpisode(event: WakeEvent | undefined): Promise<EpisodeResult> {
+  private async runEpisode(envelope: TimedWakeEnvelope | undefined): Promise<EpisodeResult> {
     const episodeId = randomUUID()
-    const carriedTexts = this.mailbox.drainPending().map(toText)
-    if (event === undefined && carriedTexts.length === 0) {
+    const carriedEnvelopes = this.mailbox.drainEnvelopes()
+    const carriedTexts = carriedEnvelopes.map((item) => this.renderEnvelope(item))
+    if (envelope === undefined && carriedEnvelopes.length === 0) {
       // 自唤醒但 mailbox 已空(残留被排在前面的另一个 episode 顺带 drain 走了)——
       // 没有任何新内容,直接空转返回,不开 episode(见 drainMailbox 注释)。
       return { episodeId, outcome: 'completed', turns: 0, consumedEvents: true, repliedToHuman: false }
     }
-    const eventText = event === undefined ? undefined : this.renderEvent(event)
+    const eventText = envelope === undefined ? undefined : this.renderEnvelope(envelope)
     this.currentEpisodeInjected = []
-    this.currentWakeEvent = event ?? null
+    this.currentWakeEvent = envelope ?? null
 
     try {
-      return await this.runEpisodeBody(episodeId, carriedTexts, eventText)
+      return await this.runEpisodeBody(episodeId, carriedTexts, eventText, carriedEnvelopes, envelope)
     } catch (err) {
       // runEpisodeBody 内部按 outcome 判定的失败分支(约 L232-249,LLM 报错被 engine 捕获为
       // outcome='failed'/'aborted' 后正常 return 的路径)已经在返回前自行完成了重投——那条路径
       // 不会走到这里。这里的 catch 专门兜"直接 throw、根本没走到 outcome 判定"的路径:
-      // applyFold → foldIntoSummary(折叠 LLM 持续故障、callNonStreaming 重试耗尽抛出)、
-      // runAttempt 顶部首次 fetchLedgerRender(台账读盘瞬时失败,onTurn 的 refresh 路径才有
-      // .catch,这个首次 await 没有)、store.load/store.save/appendEpisodeLog 的 IO 失败等。
-      // 两条路径互斥(runEpisodeBody 要么正常 return、要么中途 throw,不会同时触发两次重投),
-      // 否则已 drain 的 carriedTexts/eventText/currentEpisodeInjected 会随栈展开永久丢失,
-      // 绕过"至少一次投递"(见文件头)。
-      this.mailbox.drainPending()
-      for (const t of carriedTexts) this.mailbox.push(t)
-      if (eventText !== undefined) this.mailbox.push(eventText)
-      for (const t of this.currentEpisodeInjected ?? []) this.mailbox.push(t)
+      // applyFold/Store I/O can throw before an EngineResult exists. Requeue the same
+      // envelopes in their original order so retry cannot mint a new timestamp.
+      this.mailbox.drainEnvelopes()
+      for (const item of carriedEnvelopes) this.mailbox.push(item)
+      if (envelope !== undefined) this.mailbox.push(envelope)
+      for (const item of this.currentEpisodeInjected ?? []) this.mailbox.push(item)
       throw err
     } finally {
       this.currentEpisodeInjected = null
@@ -320,6 +315,8 @@ export class ManagerLoop {
     episodeId: string,
     carriedTexts: ReadonlyArray<string>,
     eventText: string | undefined,
+    carriedEnvelopes: ReadonlyArray<TimedWakeEnvelope>,
+    envelope: TimedWakeEnvelope | undefined,
   ): Promise<EpisodeResult> {
     // §11 热更语义:整个 episode(含下面的 max_tokens 兜底重试)只在这里解析一次 adapter/
     // model,固定用这份快照——即使两次解析之间 admin config 已经变了,当前 episode 也不换。
@@ -339,10 +336,13 @@ export class ManagerLoop {
       state = await this.applyFold(state, wakeDecision, adapter, model)
     }
 
+    const currentTailMessages: EngineMessage[] = [
+      ...carriedTexts.map((text) => createUserMessage(text)),
+      ...(eventText === undefined ? [] : [createUserMessage(eventText)]),
+    ]
     const tailMessages: EngineMessage[] = [
       ...state.recent,
-      ...carriedTexts.map((t) => createUserMessage(t)),
-      ...(eventText === undefined ? [] : [createUserMessage(eventText)]),
+      ...currentTailMessages,
     ]
 
     let attempt = await this.runAttempt(state, tailMessages, adapter, model)
@@ -354,26 +354,25 @@ export class ManagerLoop {
     // max_tokens 兜底(§4.2):disableCompaction 关掉了 engine 自己的强压重试路径,
     // 这里识别到"上下文超限收场"时强制 force_hot 折叠一次并重试一次,仍失败就放弃。
     //
-    // mid-episode 注入与这条重试路径的交互(想清楚过,记录结论):
-    // 首次尝试期间通过 enqueueDuringEpisode 到达的 mid-episode 注入内容,无论当时是否已被
-    // engine drainPending() 消费(消费掉的已经进了随首次尝试一起丢弃的 finalMessages;未消费
-    // 的——例如恰好在首次尝试最后一次 LLM 调用期间到达,或在两次尝试之间 applyFold 的折叠
-    // LLM 调用期间到达——仍原样躺在 mailbox.pending 里),currentEpisodeInjected 都完整记录了
-    // 原始文本,是唯一权威来源。首次尝试的所有轮次连同其中的消费行为都被丢弃,这些内容等于
-    // 没被处理过,重试时显式把它们追加进 retryTailMessages 才是准确的重投。
-    // 若 mailbox.pending 里还残留"未被消费"那一段不清空,它是 currentEpisodeInjected 的
-    // 后缀——retry 复用同一个 `this.mailbox` 实例作为 humanMessageQueue,engine 会在 retry
-    // 的 turn 边界自然把它再 drain 一次,与下面显式追加的 currentEpisodeInjected 重复投递
-    // (同一条内容在 retry 上下文出现两份)。因此显式追加前必须先 drainPending() 清空残留。
+    // mid-episode 注入与这条重试路径的交互:
+    // 首次尝试期间通过 enqueueDuringEpisode 到达的内容，无论当时是否已被 engine
+    // drainPending() 消费，都由 currentEpisodeInjected 以原始 envelope 顺序记录。
+    // 首次尝试的 finalMessages 在重试时整体丢弃，因此这些 envelope 必须显式追加。
+    // mailbox.pending 里的未消费后缀先清空，避免与显式追加重复。
+    // 初始 wake 与 carried envelopes 同样属于本次 protected current tail；force-hot
+    // 只折叠 state.recent 中此前历史，不能把本次事件折进 rolling summary。
     if (isContextOverflow(attempt.result)) {
-      const forceDecision = forceHotFold({ ...state, recent: tailMessages }, this.deps.policy, this.deps.estimateTokens, nowMs)
+      // Only pre-existing history may be folded. The current initial wake, carried
+      // envelopes and mid-episode supplements are a protected tail (§14.4).
+      const forceDecision = forceHotFold(state, this.deps.policy, this.deps.estimateTokens, nowMs)
       if (forceDecision.kind !== 'none') {
         state = await this.applyFold(state, forceDecision, adapter, model)
         // 清空 mailbox 残留后缀(见上方注释),再按 currentEpisodeInjected 的到达顺序整体追加
-        this.mailbox.drainPending()
+        this.mailbox.drainEnvelopes()
         const retryTailMessages: EngineMessage[] = [
           ...state.recent,
-          ...(this.currentEpisodeInjected?.map((t) => createUserMessage(t)) ?? []),
+          ...currentTailMessages,
+          ...(this.currentEpisodeInjected?.map((item) => createUserMessage(this.renderEnvelope(item))) ?? []),
         ]
         const retryAttempt = await this.runAttempt(state, retryTailMessages, adapter, model)
         totalTurnsUsed += retryAttempt.result.totalTurns
@@ -413,10 +412,10 @@ export class ManagerLoop {
       // currentEpisodeInjected 都完整记录了原始文本,是唯一权威来源;先 drainPending()
       // 清空 mailbox 里可能残留的"尚未被消费"那一段(它是 currentEpisodeInjected 的后缀,
       // 不清空会和下面的整体重投重复),再按到达顺序整体重投,保证至少一次投递、不丢失、不重复。
-      this.mailbox.drainPending()
-      for (const t of carriedTexts) this.mailbox.push(t)
-      if (eventText !== undefined) this.mailbox.push(eventText)
-      for (const t of this.currentEpisodeInjected ?? []) this.mailbox.push(t)
+      this.mailbox.drainEnvelopes()
+      for (const item of carriedEnvelopes) this.mailbox.push(item)
+      if (envelope !== undefined) this.mailbox.push(envelope)
+      for (const item of this.currentEpisodeInjected ?? []) this.mailbox.push(item)
     }
 
     const result: EpisodeResult = {
@@ -476,33 +475,15 @@ export class ManagerLoop {
       ? [createUserMessage(SUMMARY_MESSAGE_PREFIX + state.rollingSummary), ...tailMessages]
       : [...tailMessages]
 
-    // 台账渲染依赖 WorkerHarness.listWorkers(异步读盘),但 EngineOptions.systemPrompt
-    // 的 Resolvable thunk 必须同步(query-loop 每轮同步调用,见 types.ts Resolvable 注释)。
-    // 取舍:episode/attempt 开始前先 await 一次拿起始值;此后每轮 onTurn 完成时
-    // fire-and-forget 重新拉取——工具执行/下一轮 LLM 调用之间总有若干次 await,通常足够
-    //让新值在下一次 thunk 调用前落地。不保证严格的"这一轮绝对最新",但避免了把台账查询
-    // 变成阻塞整条 loop 的等待原语(与 protocol §4.1"loop 内不存在阻塞等待原语"的精神一致)。
-    let ledgerRender = await this.fetchLedgerRender()
-    const refreshLedgerRender = (): void => {
-      void this.fetchLedgerRender()
-        .then((r) => { ledgerRender = r })
-        .catch(() => { /* 台账查询失败不影响当前 episode,下一轮沿用旧值重试 */ })
-    }
-
     const systemPrompt = (): string => {
       const extra = this.deps.promptInputs()
       return assembleManagerSystemPrompt({
         managerKey: this.deps.key,
         isSystemThread: this.deps.isSystemThread,
         dialogProfile: extra.dialogProfile,
-        dynamic: {
-          ledgerRender,
-          nowIso: this.deps.now().toISOString(),
-          pendingNotes: extra.pendingNotes,
-        },
       })
     }
-    const tools = (): ReadonlyArray<ToolDefinition> => this.deps.toolFace(this.currentWakeEvent ?? undefined)
+    const tools = (): ReadonlyArray<ToolDefinition> => this.deps.toolFace(this.currentWakeEvent?.wake)
 
     const options: EngineOptions = {
       systemPrompt,
@@ -512,7 +493,6 @@ export class ManagerLoop {
       contextWindowTokens: this.deps.contextWindowTokens,
       disableCompaction: true,
       humanMessageQueue: this.mailbox,
-      onTurn: () => refreshLedgerRender(),
       // engine 的 forced_summary 兜底(silent end_turn → 注入"你还没向人类发过内容"追问,
       // 最多 3 次)是 v2 worker loop 的机制:那条路径下 caller 用一整套 outbound buffer
       // 跟踪"这轮有没有发过",engine 只是照着它的判定兜底。manager 没有那套跟踪,不传等于
@@ -534,10 +514,6 @@ export class ManagerLoop {
     return { result, hasSummaryMarker }
   }
 
-  private async fetchLedgerRender(): Promise<string> {
-    const workers = await this.deps.harness.listWorkers(this.deps.managerKey())
-    return renderLedger(workers)
-  }
 }
 
 // --- Helpers ---
@@ -575,31 +551,97 @@ function detectRepliedToHuman(finalMessages: ReadonlyArray<EngineMessage>): bool
   return false
 }
 
-function toText(content: QueueContent): string {
-  // mailbox 唯一的写入方是 enqueueDuringEpisode(总是 push 字符串),这里的分支只是
-  // 类型层面的防御——QueueContent 的联合类型允许 ContentBlock[],实际不会走到这条分支。
-  return typeof content === 'string' ? content : '[附件内容,唤醒边界渲染不支持结构化内容,已降级为占位文本]'
+/** Manager-only mailbox: envelopes remain authoritative; the engine receives deterministic text. */
+class TimedWakeMailbox implements HumanMessageQueueLike {
+  private pending: TimedWakeEnvelope[] = []
+  private barrierResolve: (() => void) | null = null
+  private barrierTimer: ReturnType<typeof setTimeout> | null = null
+
+  push(envelope: TimedWakeEnvelope): void {
+    this.pending.push(envelope)
+    this.clearBarrier()
+  }
+
+  drainEnvelopes(): TimedWakeEnvelope[] {
+    const drained = this.pending
+    this.pending = []
+    return drained
+  }
+
+  drainPending(): string[] {
+    return this.drainEnvelopes().map(renderTimedWakeEnvelope)
+  }
+
+  get hasPending(): boolean {
+    return this.pending.length > 0
+  }
+
+  get hasBarrier(): boolean {
+    return this.barrierResolve !== null || this.barrierTimer !== null
+  }
+
+  setBarrier(timeoutMs: number, onTimeout?: () => void): void {
+    this.clearBarrier()
+    this.barrierTimer = setTimeout(() => {
+      this.barrierTimer = null
+      onTimeout?.()
+      this.clearBarrier()
+    }, timeoutMs)
+  }
+
+  clearBarrier(): void {
+    if (this.barrierTimer !== null) {
+      clearTimeout(this.barrierTimer)
+      this.barrierTimer = null
+    }
+    const resolve = this.barrierResolve
+    this.barrierResolve = null
+    resolve?.()
+  }
+
+  async waitBarrier(signal?: AbortSignal): Promise<void> {
+    if (!this.hasBarrier || this.barrierResolve !== null) return
+    await new Promise<void>((resolve) => {
+      const abort = (): void => this.clearBarrier()
+      signal?.addEventListener('abort', abort, { once: true })
+      this.barrierResolve = () => {
+        signal?.removeEventListener('abort', abort)
+        resolve()
+      }
+    })
+  }
 }
 
-function renderLedger(workers: ReadonlyArray<LedgerWorker>): string {
-  if (workers.length === 0) return '(当前无 worker)'
-  return workers
-    .map((w) => `- ${w.worker_id} | ${w.task.title} | ${w.task.status} | 化身数=${w.incarnations.length}`)
-    .join('\n')
+function assertTimedWakeEnvelope(value: TimedWakeEnvelope): void {
+  if (
+    value === null ||
+    typeof value !== 'object' ||
+    !('wake' in value) ||
+    typeof value.received_at !== 'string' ||
+    typeof value.timezone !== 'string'
+  ) {
+    throw new TypeError('ManagerLoop requires a TimedWakeEnvelope captured at ingress')
+  }
 }
 
-/** 消息渲染的两个外部输入(时区 + 时钟),由 `ManagerLoop.renderEvent` 按 deps 解析后传入。 */
-interface MessageRenderOpts {
-  readonly timezone: string
-  readonly now: Date
+/** Pure projection of ingress-fixed time; this function never reads a live clock. */
+export function renderTimedWakeEnvelope(envelope: TimedWakeEnvelope): string {
+  const header = `[event received_at="${envelope.received_at}" timezone="${envelope.timezone}"]`
+  const occurred = envelope.occurred_at ? `\n[event occurred_at="${envelope.occurred_at}"]` : ''
+  return `${header}${occurred}\n${renderWakeEvent(envelope.wake, envelope)}`
 }
 
-function renderWakeEvent(event: WakeEvent, opts: MessageRenderOpts): string {
+function renderWakeEvent(event: WakeEvent, envelope: TimedWakeEnvelope): string {
   switch (event.kind) {
     case 'human_messages':
-      return renderChannelMessages('[人类消息]', event.messages, event.friend, opts)
+      return renderChannelMessages('[人类消息]', event.messages, event.friend, envelope)
     case 'attention_flush':
-      return renderChannelMessages('[补齐:群聊注意力放行期间累积的人类消息]', event.messages, event.friend, opts)
+      return renderChannelMessages(
+        '[补齐:群聊注意力放行期间累积的人类消息]',
+        event.messages,
+        event.friend,
+        envelope,
+      )
     case 'worker_event':
       return renderWorkerEvent(event.event)
     case 'media_notification':
@@ -609,60 +651,30 @@ function renderWakeEvent(event: WakeEvent, opts: MessageRenderOpts): string {
   }
 }
 
-/**
- * 人类消息渲染(P7 J Task 4)。
- *
- * 早先这里只出 `- 名: 文本`,丢掉了 `platform_message_id`、`platform_timestamp`、
- * `is_mention_crab`、`mentions`、`reply_to/quote/thread`、媒体与发送者身份——manager 因此
- * 在群里分不清 @ 的是不是自己、不知道某条在回谁、看不到图片/文件、也拿不到能喂给
- * `get_message` 的 id。J 放弃了引用原文的入站预取(8 件事第 6 条),代价必须由渲染保真度补上:
- * **manager 看到 `reply_to="…"` 才知道自己该不该去拉那条原文**。
- *
- * **复用 `prompt-manager.formatChannelMessageLine`,不另写一版**:它已经把
- * "ChannelMessage 的全部结构化字段按存在性输出成 XML 属性"这件事做完了(含闭合标签转义、
- * 超长截断、媒体/system_event 渲染),worker 与 dispatcher 用的都是它。manager 的上下文虽然是
- * `EngineMessage[]` 而不是 worker 那种整块 XML prompt,但**这里要渲染的是同一种东西**——
- * 一条 ChannelMessage 的完整结构;差别只在"渲染结果放进哪个信封"(这里是一条 user message
- * 的正文)。另写一版必然漂移(本项目已经因为重造既有实现栽过)。
- *
- * `quotedMessages` 刻意不传:入站不预取引用原文,渲染只出 `reply_to` / `quote` 属性,
- * manager 需要时自己调白名单里的 `get_message`(pull 型兜底,与 `get_history` 同款)。
- *
- * `friend` 是本批的发言者,只用于 `resolveSenderIdentity` 判 master/friend/stranger;
- * 群里别人发的消息判不出来就是 `stranger`,与 dispatcher 侧 `buildUserPrompt` 同一套取舍。
- */
 function renderChannelMessages(
   label: string,
   messages: ReadonlyArray<ChannelMessage>,
   friend: Friend | undefined,
-  opts: MessageRenderOpts,
+  envelope: TimedWakeEnvelope,
 ): string {
   if (messages.length === 0) return `${label}(空)`
-  const lines = messages.map((m) =>
-    formatChannelMessageLine(m, {
-      timezone: opts.timezone,
-      now: opts.now,
-      identity: resolveSenderIdentity({ msg: m, ...(friend ? { senderFriend: friend } : {}) }),
-    }),
-  )
+  const lines = messages.map((message, index) => {
+    const occurred = envelope.human_occurred_at?.[index]?.occurred_at
+    const prefix = occurred ? `[human occurred_at="${occurred}"]\n` : ''
+    return prefix + formatChannelMessageLine(message, {
+      timezone: envelope.timezone,
+      now: new Date(envelope.received_at),
+      identity: resolveSenderIdentity({ msg: message, ...(friend ? { senderFriend: friend } : {}) }),
+    })
+  })
   return `${label}\n${lines.join('\n')}`
 }
 
-/**
- * 两段人写给人看的正文单独成段渲染,不塞进 JSON——JSON.stringify 会把换行转义成 `\n`,
- * 几百字的内容挤成一行转义串,manager 读起来费劲。其余 detail 字段仍走 JSON,形状不变。
- *
- * - `detail.text`:worker 在这个轮次边界上最后说的那段话;
- * - `detail.summary`:worker 调 `finish_task` 时自己写的收尾结论。两者都由 harness 按各自
- *   上限截断过(见 WAKE_TEXT_MAX_CHARS / WAKE_SUMMARY_MAX_CHARS)。
- *
- * 一个全程只调工具的 worker 只有后者(前者与 output 一起是空的),所以两段都必须渲染,
- * 不能只挑一段。
- */
-function renderWorkerEvent(e: HarnessEvent): string {
-  const { text, summary, ...rest } = (e.detail ?? {}) as { text?: unknown; summary?: unknown } & Record<string, unknown>
+function renderWorkerEvent(event: HarnessEvent): string {
+  const { text, summary, ...rest } = (event.detail ?? {}) as
+    { text?: unknown; summary?: unknown } & Record<string, unknown>
   const detail = Object.keys(rest).length > 0 ? ` detail=${JSON.stringify(rest)}` : ''
-  const parts = [`[worker 事件] worker_id=${e.worker_id} seq=${e.seq} kind=${e.kind}${detail}`]
+  const parts = [`[worker 事件] worker_id=${event.worker_id} seq=${event.seq} kind=${event.kind}${detail}`]
   if (typeof text === 'string' && text.length > 0) parts.push(`worker 最后说:\n${text}`)
   if (typeof summary === 'string' && summary.length > 0) parts.push(`worker 的收尾结论:\n${summary}`)
   return parts.join('\n')

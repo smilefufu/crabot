@@ -1176,6 +1176,7 @@ export class UnifiedAgent extends ModuleBase {
           channelId: p.channel_id,
           sessionId: p.session_id,
           text: note,
+          ...(typeof event.timestamp === 'string' && Number.isFinite(Date.parse(event.timestamp)) ? { occurredAt: event.timestamp } : {}),
         }).catch((error) => console.error(`[${this.config.moduleId}] media manager wake failed:`, error))
         break
       }

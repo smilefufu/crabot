@@ -394,8 +394,8 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     // 由 registry 挂到本 episode 的唤醒事件上——缓存只服务于同步 thunk(记忆档位 /
     // 对话对象档案),派活用的档位走事件,不走缓存(PR #59 review)。
     onHumanWake: async (key, principal) => (await principals.resolve(key, principal)).permissions,
-    beforeWake: async (key, wake) => {
-      if (wake?.kind !== 'human_messages' && wake?.kind !== 'attention_flush') await principals.refreshForNonHumanWake(key)
+    beforeWake: async (key, envelope) => {
+      if (envelope?.wake.kind !== 'human_messages' && envelope?.wake.kind !== 'attention_flush') await principals.refreshForNonHumanWake(key)
     },
     // scheduled 唤醒边界(§4.4"权限按 `Schedule.creator_friend_id` 解析,`is_builtin` 按 master
     // 等价"):按**调度自己的身份**解析,不碰该会话的发起人缓存(既不读也不写)。

@@ -1,10 +1,9 @@
 /**
  * Manager system prompt 装配 —— protocol-agent-v3.md §4.2/§4.3。
  *
- * 结构按缓存前缀稳定性排序：静态身份段（+ 系统线程专属纪律）→ 对话对象档案 →
- * 动态状态块（台账渲染 / 当前时间 / 待处理通知，置于末尾，不进缓存前缀）。
- * 滚动摘要块与最近 K 条原始消息不在本文件职责内——由 messages 数组承载
- * （见 §4.2「上下文结构」，Task 2 的压缩产物），本文件只负责 system prompt 本身。
+ * 结构按稳定性排序：静态身份段（+ 系统线程专属纪律）→ 对话对象档案。
+ * 每轮变化的 worker 台账、当前时间与通知必须通过 wake event 或工具结果进入消息尾部，
+ * 不得进入 system prompt。
  *
  * @see crabot-docs/protocols/protocol-agent-v3.md §4.2 §4.3
  */
@@ -16,17 +15,10 @@ export interface PromptInputs {
   readonly isSystemThread: boolean
   /** 对话对象档案：friend 资料/权限/关系要点（来自 ContextAssembler 的 scene_profile 或 admin） */
   readonly dialogProfile?: string
-  /** 动态状态块素材 */
-  readonly dynamic: {
-    readonly ledgerRender: string
-    readonly nowIso: string
-    readonly pendingNotes?: ReadonlyArray<string>
-  }
 }
 
 /**
- * 静态段（身份 + crabot 架构自述 + 管家纪律）：进程内常量，同一版本恒定，
- * 不随 managerKey / dialogProfile / dynamic 变化——这是前缀缓存命中的基础。
+ * 静态段（身份 + crabot 架构自述 + 管家纪律）：进程内常量，同一版本恒定。
  */
 export const MANAGER_IDENTITY = `## 你是 Crabot 的 manager
 
@@ -81,36 +73,9 @@ function buildDialogProfileSection(dialogProfile: string): string {
   return `## 对话对象档案\n\n${dialogProfile}`
 }
 
-function buildDynamicBlock(dynamic: PromptInputs['dynamic']): string {
-  const notes =
-    dynamic.pendingNotes && dynamic.pendingNotes.length > 0
-      ? dynamic.pendingNotes.map(n => `- ${n}`).join('\n')
-      : '（无）'
-
-  return `---
-
-## 当前状态（动态，不进缓存前缀）
-
-### 台账
-
-${dynamic.ledgerRender}
-
-### 当前时间
-
-${dynamic.nowIso}
-
-### 待处理通知
-
-${notes}`
-}
-
 /**
- * 按缓存稳定性排序装配：静态（身份 + [系统线程 reach_master 纪律]）→ 档案 →
- * 动态块置尾。滚动摘要与最近消息由 messages 承载，不进 system prompt。
- *
- * 前缀稳定性：只改 `dynamic` 时，输出中动态块之前的部分逐字节不变——实现上
- * 动态块整体在末尾追加，前面各段只依赖 managerKey/isSystemThread/dialogProfile。
- * managerKey 在静态段内用 {{managerKey}} 占位符，装配时替换为实际值，不破坏前缀稳定性。
+ * 按稳定性排序装配：静态（身份 + [系统线程 reach_master 纪律]）→ 档案。
+ * 滚动摘要与带时间的 wake event 由 messages 承载，不进 system prompt。
  */
 export function assembleManagerSystemPrompt(inputs: PromptInputs): string {
   // 先把身份段中的 {{managerKey}} 占位符替换成实际值
@@ -125,8 +90,6 @@ export function assembleManagerSystemPrompt(inputs: PromptInputs): string {
   if (inputs.dialogProfile) {
     parts.push(buildDialogProfileSection(inputs.dialogProfile))
   }
-
-  parts.push(buildDynamicBlock(inputs.dynamic))
 
   return parts.join('\n\n')
 }
