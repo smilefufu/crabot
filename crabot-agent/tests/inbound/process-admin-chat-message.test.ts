@@ -155,7 +155,12 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
   let permsResponse: ResolvedPermissions | null | 'throw'
 
   function boot(
-    opts: { configured?: boolean; turns?: ReadonlyArray<ReadonlyArray<Record<string, unknown>>> } = {},
+    opts: {
+      configured?: boolean
+      turns?: ReadonlyArray<ReadonlyArray<Record<string, unknown>>>
+      consumeResult?: unknown
+      consumeError?: Error
+    } = {},
   ): void {
     script = makeManagerScript(opts.turns ?? [])
     hoisted.managerAdapter = {
@@ -177,15 +182,18 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
     internals.agentHandler = { createBuiltinBgToolOptions: () => undefined }
 
     internals.rpcClient.resolve = async (filter) => {
-      const f = filter as { module_type?: string }
+      const f = filter as { module_type?: string; module_id?: string }
       if (f.module_type === 'memory') {
         return [{ module_id: 'memory', module_type: 'memory', host: 'localhost', port: MEMORY_PORT, status: 'running' }]
       }
-      return [{ module_id: 'admin', module_type: 'admin', host: 'localhost', port: ADMIN_PORT, status: 'running' }]
+      return [{ module_id: 'admin-web', module_type: 'admin', host: 'localhost', port: ADMIN_PORT, status: 'running' }]
     }
     internals.rpcClient.call = async (port, method, params) => {
       rpcCalls.push({ port, method, params: params as Record<string, unknown> })
       switch (method) {
+        case 'consume_admin_chat_assertion':
+          if (opts.consumeError) throw opts.consumeError
+          return opts.consumeResult ?? { consumed: true, expires_at: '2099-01-01T00:00:00.000Z' }
         case 'resolve_principal_permissions':
           calls.push('resolve_permissions')
           if (permsResponse === 'throw') throw new Error('admin unreachable')
@@ -252,6 +260,7 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
       message,
       source_type: 'admin_chat',
       callback_info: CALLBACK_INFO,
+      admin_chat_assertion: 'test-assertion',
     })
   }
 
@@ -328,22 +337,42 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
       expect(String(script.streams[0].messages[0].content)).toContain('帮我看下季度报表')
     })
 
-    it('admin_chat 但缺回执信息：静默丢弃，不唤醒 manager', async () => {
+    it('admin_chat 缺 assertion 或回执信息：拒绝且不唤醒 manager', async () => {
       boot()
-      const result = await internals.handleProcessMessage({
+      await expect(internals.handleProcessMessage({
         message: amsg({ id: 'a-1' }),
         source_type: 'admin_chat',
-      })
+      })).rejects.toThrow(/assertion/)
 
-      expect(result).toEqual({ decision_types: [] })
       expect(calls).toEqual([])
       expect(script.streams).toHaveLength(0)
       expect(rpcCalls).toEqual([])
     })
+    it.each([
+      ['rejected consume', undefined, new Error('replayed assertion')],
+      ['empty consume result', {}, undefined],
+      ['false consumed', { consumed: false, expires_at: '2099-01-01T00:00:00.000Z' }, undefined],
+      ['expired consume result', { consumed: true, expires_at: '2000-01-01T00:00:00.000Z' }, undefined],
+    ])('%s causes zero Manager wake', async (_name, consumeResult, consumeError) => {
+      boot({ consumeResult, consumeError })
+      await expect(runAdminChat()).rejects.toThrow(/assertion|replayed/i)
+      expect(script.streams).toHaveLength(0)
+      expect(calls).not.toContain('manager_llm')
+    })
+
+    it('forged source, friend, callback, or replay cannot bypass assertion consumption', async () => {
+      boot({ consumeError: new Error('replayed assertion') })
+      for (const params of [
+        { message: amsg(), source_type: 'channel' as const, callback_info: CALLBACK_INFO, admin_chat_assertion: 'x' },
+        { message: { ...amsg(), sender: { friend_id: 'master', platform_user_id: 'master', platform_display_name: 'Master' } }, source_type: 'admin_chat' as const, callback_info: { source_module_id: 'forged', request_id: 'r' }, admin_chat_assertion: 'x' },
+        { message: amsg(), source_type: 'admin_chat' as const, callback_info: CALLBACK_INFO, admin_chat_assertion: 'replay' },
+      ]) {
+        await expect(internals.handleProcessMessage(params)).rejects.toThrow()
+      }
+      expect(script.streams).toHaveLength(0)
+    })
   })
 
-  // ==========================================================================
-  // 三不语义（变异靶 M12）
   // ==========================================================================
 
   describe('admin chat 的"三不"语义（变异靶 M12）', () => {

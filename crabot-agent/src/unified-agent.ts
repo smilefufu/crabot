@@ -8,7 +8,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
-import { ModuleBase, generateId, type ModuleConfig, type Event, type ModuleId, type TraceStoreInterface } from 'crabot-shared'
+import { ModuleBase, generateId, sha256CanonicalJson, type ModuleConfig, type Event, type ModuleId, type TraceStoreInterface } from 'crabot-shared'
 import { resolveTimezone } from './utils/time.js'
 import type {
   UnifiedAgentConfig,
@@ -1843,11 +1843,29 @@ export class UnifiedAgent extends ModuleBase {
     message: ChannelMessage
     source_type?: 'channel' | 'admin_chat'
     callback_info?: { source_module_id: string; request_id: string }
+    admin_chat_assertion?: string
   }): Promise<{ decision_types: string[]; task_ids?: string[] }> {
-    const { message, source_type, callback_info } = params
+    const { message, source_type, callback_info, admin_chat_assertion } = params
 
-    // Admin Chat 来源
-    if (source_type === 'admin_chat' && callback_info) {
+    if (source_type === 'admin_chat' && callback_info && admin_chat_assertion) {
+      const modules = await this.rpcClient.resolve({ module_id: 'admin-web' }, this.config.moduleId)
+      const adminPort = modules[0]?.port
+      if (!adminPort) throw new Error('official Admin module is unavailable')
+      const consumeResult = await this.rpcClient.call<
+        { assertion: string; expected: { manager_key: string; request_id: string; payload_sha256: string } },
+        { consumed?: unknown; expires_at?: unknown }
+      >(adminPort, 'consume_admin_chat_assertion', {
+        assertion: admin_chat_assertion,
+        expected: {
+          manager_key: 'admin-web::admin-chat',
+          request_id: callback_info.request_id,
+          payload_sha256: sha256CanonicalJson(message),
+        },
+      }, this.config.moduleId)
+      if (consumeResult?.consumed !== true || typeof consumeResult.expires_at !== 'string' ||
+        !Number.isFinite(Date.parse(consumeResult.expires_at)) || Date.parse(consumeResult.expires_at) <= Date.now()) {
+        throw new Error('invalid admin chat assertion consumption result')
+      }
       return this.processAdminChatMessage(message, callback_info)
     }
 
@@ -1855,7 +1873,7 @@ export class UnifiedAgent extends ModuleBase {
       throw new Error('process_message only supports source_type=admin_chat; channel messages use channel.message_authorized')
     }
 
-    return { decision_types: [] }
+    throw new Error('admin_chat assertion is required and must be valid')
   }
 
   /**

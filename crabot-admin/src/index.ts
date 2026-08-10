@@ -712,6 +712,7 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('delete_session_config', this.handleDeleteSessionConfig.bind(this))
 
     // Chat 管理
+    this.registerMethod('consume_admin_chat_assertion', this.handleConsumeAdminChatAssertion.bind(this))
     this.registerMethod('chat_callback', this.handleChatCallback.bind(this))
     this.registerMethod('get_chat_history', this.handleGetChatHistory.bind(this))
     // admin-web 伪 channel：worker send_message 出站收口（spec 2026-06-10-master-chat-redesign §4）
@@ -9110,6 +9111,14 @@ export class AdminModule extends ModuleBase {
   // Chat RPC 方法
   // ============================================================================
 
+  private async handleConsumeAdminChatAssertion(params: {
+    assertion: string
+    expected: { manager_key: 'admin-web::admin-chat'; request_id: string; payload_sha256: string }
+  }): Promise<{ consumed: true; expires_at: string }> {
+    if (!this.chatManager) throw new Error('chat not ready')
+    return this.chatManager.consumeAdminChatAssertion(params)
+  }
+
   private async handleChatCallback(params: ChatCallbackParams): Promise<ChatCallbackResult> {
     if (!this.chatManager) {
       throw new Error('Chat manager not initialized')
@@ -9286,7 +9295,12 @@ export class AdminModule extends ModuleBase {
         }
         files.push({ buffer, filename: value.name, mime_type: value.type || 'application/octet-stream' })
       }
-      const result = await this.chatManager.handleInboundMessage({ request_id: requestId, text, files })
+      const authorization = req.headers.authorization ?? ''
+      const jwt = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : ''
+      const result = await this.chatManager.handleInboundMessage(
+        { request_id: requestId, text, files },
+        jwt,
+      )
       sendJson(res, 200, result)
     } catch (err) {
       sendJson(res, 400, { error: err instanceof Error ? err.message : 'invalid multipart request' })

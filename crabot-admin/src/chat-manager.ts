@@ -7,7 +7,8 @@ import path from 'node:path'
 import { IncomingMessage } from 'node:http'
 import { Socket } from 'node:net'
 import { WebSocket, WebSocketServer } from 'ws'
-import { generateId, generateTimestamp, type RpcClient, type TaskId } from 'crabot-shared'
+import { generateId, generateTimestamp, sha256CanonicalJson, type RpcClient, type TaskId } from 'crabot-shared'
+import { AdminChatAssertions } from './admin-chat-assertions.js'
 import { MediaStore } from './media-store.js'
 import type {
   ChatMessage,
@@ -42,6 +43,7 @@ export class ChatManager {
   private activeClient: WebSocket | null = null
   private pendingRequests: Map<string, { timestamp: number }> = new Map()
   private readonly messagesFilePath: string
+  private readonly assertions: AdminChatAssertions
 
   constructor(
     private readonly dataDir: string,
@@ -52,6 +54,7 @@ export class ChatManager {
     private readonly mediaStore: MediaStore,
   ) {
     this.messagesFilePath = path.join(dataDir, 'chat_messages.json')
+    this.assertions = new AdminChatAssertions(dataDir, jwtSecret)
   }
 
   // ==========================================================================
@@ -59,6 +62,7 @@ export class ChatManager {
   // ==========================================================================
 
   async loadData(): Promise<void> {
+    await this.assertions.load()
     try {
       const data = await fs.readFile(this.messagesFilePath, 'utf-8')
       // content 字段可能是旧格式（string），需要 hydrate 为 MessageContent
@@ -215,33 +219,29 @@ export class ChatManager {
         throw new Error('Agent module not available')
       }
 
+      const message = {
+        platform_message_id: userMessage.message_id,
+        session: { session_id: 'admin-chat', channel_id: 'admin-web', type: 'private' as const },
+        sender: { friend_id: 'master', platform_user_id: 'master', platform_display_name: 'Master' },
+        content: agentContent,
+        features: { is_mention_crab: false },
+        platform_timestamp: userMessage.timestamp,
+      }
+      const adminChatAssertion = this.assertions.issue({
+        requestId,
+        payloadSha256: sha256CanonicalJson(message),
+      })
       await this.rpcClient.call(
         agentPort,
         'process_message',
         {
-          message: {
-            platform_message_id: userMessage.message_id,
-            session: {
-              session_id: 'admin-chat',
-              channel_id: 'admin-web',
-              type: 'private',
-            },
-            sender: {
-              friend_id: 'master',
-              platform_user_id: 'master',
-              platform_display_name: 'Master',
-            },
-            content: agentContent,
-            features: {
-              is_mention_crab: false,
-            },
-            platform_timestamp: userMessage.timestamp,
-          },
+          message,
           source_type: 'admin_chat',
           callback_info: {
             source_module_id: 'admin-web',
             request_id: requestId,
           },
+          admin_chat_assertion: adminChatAssertion,
         },
         'admin-web'
       )
@@ -274,7 +274,10 @@ export class ChatManager {
     request_id: string
     text: string
     files: Array<{ buffer: Buffer; filename: string; mime_type: string }>
-  }): Promise<{ message: ChatMessage }> {
+  }, jwt: string): Promise<{ message: ChatMessage }> {
+    if (!jwt || !(await this.verifyJwt(jwt, this.jwtSecret, this.dataDir))) {
+      throw new Error('Admin Chat ingress was not JWT authenticated')
+    }
     const text = params.text.trim()
     if (!text && params.files.length === 0) {
       throw new Error('Empty message')
@@ -311,6 +314,13 @@ export class ChatManager {
       ...(mediaForAgent.length > 0 ? { media: mediaForAgent, media_url: mediaForAgent[0].media_url } : {}),
     })
     return { message: userMessage }
+  }
+
+  async consumeAdminChatAssertion(params: {
+    assertion: string
+    expected: { manager_key: 'admin-web::admin-chat'; request_id: string; payload_sha256: string }
+  }): Promise<{ consumed: true; expires_at: string }> {
+    return this.assertions.consume(params.assertion, params.expected)
   }
 
   private pushToClient(message: ChatServerMessage): void {

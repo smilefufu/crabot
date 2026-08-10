@@ -38,6 +38,8 @@ export {
   createEvent,
 } from './base-protocol.js'
 
+export { canonicalizeJson, sha256CanonicalJson } from './canonical-json.js'
+
 export {
   ModuleBase,
   RpcClient,
