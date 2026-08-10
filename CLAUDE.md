@@ -107,11 +107,18 @@ Spec 是设计决策记录，不能取代协议文档。正式协议只记录跨
 
 ### crabot 主仓
 
-走 PR 流程：开分支 → commit → push → 建 PR。**不要自己 merge PR**。
+PR 范围以本文前面的“任务分级与 Spec 前置门禁”为准，不按文件类型或改动行数一刀切：
 
-- PR 有 @claude auto review，需定期跟踪其意见：
-  - 意见合理 → 修改代码、补测试、验证后重提交，并在对应行内评论下回复说明
-  - 意见不接受或存疑 → 在 PR 下回复 @claude 讨论，用证据说话
+- **设计型任务**：必须走 PR 流程：开分支 → commit → push → 建 PR。**不要自己 merge PR**。
+- **小改动**：不走 PR；在本地 `main` 上完成定向验证与 diff review 后直接 commit、push。push 前先确认本地 `main` 已同步；远端前进导致 push 被拒时，先 rebase `origin/main` 再推。
+- 混合任务按最高等级处理；无法确认是否满足“小改动豁免条件”时，不得自行直推，应先让用户确认任务分级。
+- 文案、注释、`README`、`PROGRESS.md` 等纯文档改动通常属于小改动，可直推 `main`；但协议、公共契约、流程治理语义或设计决策的修改仍按设计型任务处理。
+- 不要为了回填“PR 已合并”、merge commit、review actor 等瞬时元信息单独创建后续 PR。此类信息默认在对话中汇报；只有文档存在实质性错误或仍有独立维护价值时才修改，并按上述任务分级处理。
+
+设计型任务的 PR 有 @claude auto review，需定期跟踪其意见：
+
+- 意见合理 → 修改代码、补测试、验证后重提交，并在对应行内评论下回复说明
+- 意见不接受或存疑 → 在 PR 下回复 @claude 讨论，用证据说话
 - @claude approve 后会自动合并
 - main 前进导致冲突（CONFLICTING）时由实施者解决：merge origin/main、解冲突、跑全量测试后 push
 
