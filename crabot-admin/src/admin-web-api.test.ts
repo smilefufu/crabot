@@ -146,10 +146,12 @@ describe('Admin Web API', () => {
           call(port: number, method: string, params: unknown): Promise<unknown>
         }
         processAdminChatMessage: typeof processAdminChatMessage
+        managerStack: { principals: { activateAdminChat(key: string, input: unknown): Promise<void> } }
         handleProcessMessage(params: Record<string, unknown>): Promise<unknown>
       }
       agent.config = { moduleId: 'crabot-agent' }
       agent.processAdminChatMessage = processAdminChatMessage
+      agent.managerStack = { principals: { activateAdminChat: async () => {} } }
       agent.rpcClient = {
         resolve: async (filter) => {
           expect(filter).toEqual({ module_id: 'admin-web' })

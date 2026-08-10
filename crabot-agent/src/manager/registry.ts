@@ -147,6 +147,8 @@ export interface ManagerRegistryDeps {
     key: ManagerKey,
     principal: HumanPrincipal,
   ) => Promise<ResolvedPermissions | null | void>
+  /** Refreshes durable Friend authorization before a non-human/self wake exposes tools. */
+  readonly beforeWake?: (key: ManagerKey, wake: WakeEvent | undefined) => Promise<void>
   /**
    * **scheduled 唤醒边界**的异步解析钩子(PR #59 review):`routeSchedule` 在 `runWake` 之前
    * await 它一次,按 §4.4"权限按 `Schedule.creator_friend_id` 解析(`is_builtin` 按 master
@@ -463,6 +465,7 @@ export class ManagerRegistry {
    * `ManagerLoop.drainMailbox`);`selfWakeChain` 是当前连锁自唤醒的深度,真实唤醒恒为 0。
    */
   private async runWake(key: ManagerKey, event: WakeEvent | undefined, selfWakeChain = 0): Promise<EpisodeResult> {
+    if (this.deps.beforeWake) await this.deps.beforeWake(key, event)
     const loop = this.getOrCreate(key)
     this.activeEpisodes.set(key, (this.activeEpisodes.get(key) ?? 0) + 1)
     let result: EpisodeResult | undefined

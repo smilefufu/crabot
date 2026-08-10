@@ -47,6 +47,7 @@ import { ManagerSessionStore } from './session-store.js'
 import { makeTaskStatusEventBridge, type AgentEventPublisher } from './events.js'
 import { shouldWakeOnHarnessEvent } from './inbound-adapters.js'
 import { buildManagerToolFace } from './tools/tool-face.js'
+import { PrincipalBindingStore } from './principal-binding-store.js'
 import {
   ManagerPrincipalStore,
   applyGroupScopeFallback,
@@ -105,6 +106,8 @@ export interface ManagerStack {
    * (`SpawnWorkerParams.principal_permissions` → `context.json`)。
    */
   readonly principals: ManagerPrincipalStore
+  /** Persistent bindings are initialized during reconciliation, never construction. */
+  readonly principalBindings: PrincipalBindingStore
   /**
    * builtin adapter 的私有 dataDir。`reconcileManagerStack` 需要它跑
    * `BuiltinWorkerAdapter.scanOrphans`——见该函数注释里的顺序契约。放在 stack 上而不是
@@ -244,6 +247,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   const builtinDataDir = adapterDataDir('builtin')
 
   const ledger = new LedgerStore(join(agentDir, 'worker-ledgers'))
+  const principalBindings = new PrincipalBindingStore(join(agentDir, 'manager-principal-bindings.json'))
   const workspaces = new WorkspaceManager(resolveWorkspacesRoot(deps.dataRoot))
 
   // 见文件头"与 registry 的环形依赖"。
@@ -373,7 +377,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   const tokenEstimator = new ContextManager({ maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS })
 
   // 发起人身份:唤醒边界异步解析一次,三个同步 thunk 读缓存(见 principal.ts 文件头)。
-  const principals = new ManagerPrincipalStore(deps.principalResolver)
+  const principals = new ManagerPrincipalStore(deps.principalResolver, principalBindings, () => new Date(deps.now()))
 
   registry = new ManagerRegistry({
     store: new ManagerSessionStore(join(agentDir, 'managers')),
@@ -390,6 +394,9 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     // 由 registry 挂到本 episode 的唤醒事件上——缓存只服务于同步 thunk(记忆档位 /
     // 对话对象档案),派活用的档位走事件,不走缓存(PR #59 review)。
     onHumanWake: async (key, principal) => (await principals.resolve(key, principal)).permissions,
+    beforeWake: async (key, wake) => {
+      if (wake?.kind !== 'human_messages' && wake?.kind !== 'attention_flush') await principals.refreshForNonHumanWake(key)
+    },
     // scheduled 唤醒边界(§4.4"权限按 `Schedule.creator_friend_id` 解析,`is_builtin` 按 master
     // 等价"):按**调度自己的身份**解析,不碰该会话的发起人缓存(既不读也不写)。
     //
@@ -447,9 +454,8 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         memoryServer: deps.memoryServerFor(memoryContextFor(key, principals.get(key))),
         callAdmin: deps.callAdmin,
         isSystemThread,
-        // 这一行是本文件存在的理由之一:registry 按 key 绑定好的 onAsyncError 必须一路传到
-        // `buildWorkerTools`,否则 codex worker 上 `query_worker`(fork 能力恒 false)的失败
-        // 只会 console.error,manager 永远等不到回音(P4 Task 8 留给本 task 的验证点)。
+        authorization: () => principals.currentMasterAuthorization(key),
+        validateMasterAuthorization: (auth) => principals.validateMasterAuthorization(auth),
         onAsyncError,
       }),
     // system prompt 的「对话对象档案」段(§4.2 5b/5d):场景画像 + crab 在该渠道的
@@ -461,7 +467,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     },
   })
 
-  return { ledger, harness, registry, adapters, principals, builtinDataDir }
+  return { ledger, harness, registry, adapters, principals, principalBindings, builtinDataDir }
 }
 
 /**
@@ -475,6 +481,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
  * 误判进 revived 桶。
  */
 export async function reconcileManagerStack(stack: ManagerStack): Promise<ReconcileReport> {
+  await stack.principals.init()
   await BuiltinWorkerAdapter.scanOrphans(stack.builtinDataDir)
   return stack.harness.reconcileOnStartup()
 }

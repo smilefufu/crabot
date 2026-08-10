@@ -185,16 +185,16 @@ afterEach(async () => {
 // ---- 工具面形状 ----
 
 describe('buildWorkerTools — 工具面形状', () => {
-  it('工具名集合恰为六项，isReadOnly 仅 read_worker_output/list_workers 为 true', async () => {
+  it('普通 Manager 有七项 worker 工具；只有 read_worker_output/list_workers/get_worker_detail 为只读', async () => {
     const { harness } = await makeHarness()
     const tools = buildWorkerTools({ harness, context: () => CTX })
 
     expect(tools.map((t) => t.name).sort()).toEqual(
-      ['kill_worker', 'list_workers', 'query_worker', 'read_worker_output', 'send_to_worker', 'spawn_worker'].sort()
+      ['get_worker_detail', 'kill_worker', 'list_workers', 'query_worker', 'read_worker_output', 'send_to_worker', 'spawn_worker'].sort()
     )
 
     const readOnlyNames = tools.filter((t) => t.isReadOnly).map((t) => t.name).sort()
-    expect(readOnlyNames).toEqual(['list_workers', 'read_worker_output'])
+    expect(readOnlyNames).toEqual(['get_worker_detail', 'list_workers', 'read_worker_output'])
   })
 })
 
@@ -283,7 +283,7 @@ describe('send_to_worker', () => {
 
     const result = await sendToWorker.call({ worker_id: 'w-does-not-exist', text: '你好' }, {})
     expect(result.isError).toBe(true)
-    expect(result.output).toMatch(/worker not found/)
+    expect(result.output).toContain('不存在或当前会话无权访问')
   })
 
   it('task 已 cancelled → TaskCancelledError 转成可读 tool_result（isError:true，不抛出）', async () => {
@@ -378,7 +378,7 @@ describe('query_worker', () => {
     expect(w.incarnations[1]).toMatchObject({ seq: 2, forked_from: 1 })
   })
 
-  it('游离 promise reject（worker 不存在）时不产生 unhandledRejection，只记诊断日志；调用本身仍立即返回确认', async () => {
+  it('unknown worker is rejected synchronously without an action or unhandled rejection', async () => {
     const { harness } = await makeHarness({ caps: { fork: true } })
     const tools = buildWorkerTools({ harness, context: () => CTX })
     const queryWorker = tools.find((t) => t.name === 'query_worker')!
@@ -391,17 +391,16 @@ describe('query_worker', () => {
     try {
       const result = await queryWorker.call({ worker_id: 'w-nope', question: '？' }, {})
       // 不再是 isError:true——失败发生在锁外的游离 promise 里，这次调用本身不知道。
-      expect(result.isError).toBe(false)
-      expect(parseOutput(result.output)).toEqual({ status: 'queried', worker_id: 'w-nope' })
+      expect(result.isError).toBe(true)
+      expect(result.output).toContain('不存在或当前会话无权访问')
 
-      // 给游离 promise 一个宏任务窗口 reject 并被 .catch() 兜住。
+      // Authorization happens before fire-and-forget work.
       await new Promise((resolve) => setTimeout(resolve, 20))
 
       expect(unhandled).toHaveLength(0)
       expect(errorSpy).toHaveBeenCalled()
       const loggedArgs = errorSpy.mock.calls.map((args) => args.join(' ')).join('\n')
-      expect(loggedArgs).toMatch(/query_worker/)
-      expect(loggedArgs).toMatch(/worker not found/)
+      expect(loggedArgs).toContain('不存在或当前会话无权访问')
     } finally {
       process.off('unhandledRejection', onUnhandledRejection)
       errorSpy.mockRestore()
@@ -439,7 +438,7 @@ describe('query_worker', () => {
   // 已经拿不到失败原因（见上面两个用例）。onAsyncError 是留给 Task 7/8"把这条错误接成唤醒
   // 本 manager 的信号"的扩展点——本任务只提供出口、验证它确实带着正确的 { tool, worker_id,
   // error } 被调用，不接线到任何真实唤醒机制。
-  it('deps.onAsyncError 存在时，游离 promise reject（worker 不存在）除 console.error 外还携带 {tool, worker_id, error} 调用它', async () => {
+  it('authorization rejection does not invoke onAsyncError', async () => {
     const { harness } = await makeHarness({ caps: { fork: true } })
     const onAsyncError = vi.fn()
     const tools = buildWorkerTools({ harness, context: () => CTX, onAsyncError })
@@ -450,18 +449,14 @@ describe('query_worker', () => {
       await queryWorker.call({ worker_id: 'w-nope', question: '？' }, {})
       await new Promise((resolve) => setTimeout(resolve, 20))
 
-      expect(onAsyncError).toHaveBeenCalledTimes(1)
-      expect(onAsyncError).toHaveBeenCalledWith({
-        tool: 'query_worker',
-        worker_id: 'w-nope',
-        error: expect.stringMatching(/worker not found/),
-      })
+      expect(onAsyncError).not.toHaveBeenCalled()
+
     } finally {
       errorSpy.mockRestore()
     }
   })
 
-  it('未传 deps.onAsyncError 时行为与之前完全一致：游离 promise reject 只 console.error，不因缺省回调而抛错', async () => {
+  it('unknown worker without onAsyncError returns a synchronous denial', async () => {
     const { harness } = await makeHarness({ caps: { fork: true } })
     const tools = buildWorkerTools({ harness, context: () => CTX }) // 不传 onAsyncError
     const queryWorker = tools.find((t) => t.name === 'query_worker')!
@@ -469,7 +464,7 @@ describe('query_worker', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
       const result = await queryWorker.call({ worker_id: 'w-nope', question: '？' }, {})
-      expect(result.isError).toBe(false)
+      expect(result.isError).toBe(true)
       await new Promise((resolve) => setTimeout(resolve, 20))
       expect(errorSpy).toHaveBeenCalled()
     } finally {
@@ -501,7 +496,7 @@ describe('read_worker_output', () => {
 
     const result = await readWorkerOutput.call({ worker_id: 'w-nope' }, {})
     expect(result.isError).toBe(true)
-    expect(result.output).toMatch(/worker not found/)
+    expect(result.output).toContain('不存在或当前会话无权访问')
   })
 
   it('传 seq → 透传给 harness.readWorkerOutput，读到 query_worker 侧问化身的输出（不是主线）', async () => {
@@ -572,6 +567,6 @@ describe('kill_worker', () => {
 
     const result = await killWorker.call({ worker_id: 'w-nope' }, {})
     expect(result.isError).toBe(true)
-    expect(result.output).toMatch(/worker not found/)
+    expect(result.output).toContain('不存在或当前会话无权访问')
   })
 })

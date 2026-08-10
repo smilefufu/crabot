@@ -1477,6 +1477,14 @@ export class WorkerHarness {
     return (await this.deps.ledger.findWorker(workerId)) !== undefined
   }
 
+  async findWorker(workerId: string): Promise<{ managerKey: ManagerKey; worker: LedgerWorker } | undefined> {
+    return this.deps.ledger.findWorker(workerId)
+  }
+
+  async listAllWorkers(): Promise<Array<{ managerKey: ManagerKey; worker: LedgerWorker }>> {
+    return this.deps.ledger.listAllWorkers()
+  }
+
   async listWorkers(managerKey: ManagerKey): Promise<LedgerWorker[]> {
     return this.deps.ledger.listWorkers(managerKey)
   }

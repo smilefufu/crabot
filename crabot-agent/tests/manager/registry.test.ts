@@ -802,6 +802,15 @@ describe('ManagerRegistry', () => {
     const key = 'wechat::sess-e2e-toolface' as ManagerKey
     const fakeHarness = {
       listWorkers: async (): Promise<LedgerWorker[]> => [],
+      findWorker: async (): Promise<{ managerKey: ManagerKey; worker: LedgerWorker }> => ({
+        managerKey: key,
+        worker: {
+          worker_id: 'w-codex-1', manager_key: key,
+          task: { id: 'w-codex-1', title: 'codex', status: 'running', created_at: '2026-01-01T00:00:00.000Z' },
+          origin: { trigger_type: 'message' }, report_to: { channel_id: 'wechat', session_id: 'sess-e2e-toolface' },
+          incarnations: [], updated_at: '2026-01-01T00:00:00.000Z',
+        },
+      }),
       queryWorker: async (): Promise<never> => {
         throw new CapabilityNotSupportedError('codex', 'fork')
       },

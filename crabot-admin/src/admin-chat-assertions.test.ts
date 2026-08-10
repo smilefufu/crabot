@@ -40,7 +40,7 @@ describe('AdminChatAssertions', () => {
     for (const token of [
       `${Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url')}.${body}.${signature}`,
       `${header}.${Buffer.from(JSON.stringify({ assertion_id: 'x' })).toString('base64url')}.${signature}`,
-      `${header}.${body}.${signature!.slice(0, -1)}x`,
+      `${header}.${body}.${signature!.slice(0, -1)}${signature!.endsWith('a') ? 'b' : 'a'}`,
     ]) await expect(assertions.consume(token, expected)).rejects.toThrow(/invalid/)
     const concurrent = await Promise.allSettled([assertions.consume(assertion, expected), assertions.consume(assertion, expected)])
     expect(concurrent.filter(result => result.status === 'fulfilled')).toHaveLength(1)

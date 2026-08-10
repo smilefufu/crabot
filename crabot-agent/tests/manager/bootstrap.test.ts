@@ -278,7 +278,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
 
   // --- ③ onAsyncError 端到端 ---
 
-  it('onAsyncError 端到端：经 bootstrap 装配的真实工具面调用 query_worker（worker 不存在→游离 promise reject）→ registry 按 key 绑定的回调被触发 → episode 内 enqueueDuringEpisode', async () => {
+  it('known-ID authorization happens before query_worker fire-and-forget: an unknown worker returns an error and no async wake is injected', async () => {
     let triggered = false
     const managerLLM: LLMAdapter = {
       async *stream(params: LLMStreamParams) {
@@ -288,10 +288,8 @@ describe('manager bootstrap（P5 Task 1）', () => {
           const queryWorkerTool = params.tools.find((t) => t.name === 'query_worker')
           expect(queryWorkerTool).toBeDefined()
           const result = await queryWorkerTool!.call({ worker_id: 'w-not-in-ledger', question: '进展如何？' }, {} as never)
-          // fire-and-forget：调用本身不因后台失败而报错
-          expect(result.isError).toBe(false)
-          // 给游离 promise 一个宏任务窗口 reject → .catch() → onAsyncError（此刻 episode 仍在跑）
-          await new Promise((resolve) => setTimeout(resolve, 40))
+          // Authorization completes before a fire-and-forget fork can begin.
+          expect(result.isError).toBe(true)
         }
         yield* chunksFromContent([{ type: 'text', text: '收到' }], 'end_turn', { inputTokens: 10, outputTokens: 5 })
       },
@@ -306,8 +304,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
     const result = await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('侧问一下 worker')])
 
     expect(result.outcome).toBe('completed')
-    expect(enqueueSpy).toHaveBeenCalledTimes(1)
-    expect(JSON.stringify(enqueueSpy.mock.calls[0][0])).toContain('query_failed')
+    expect(enqueueSpy).not.toHaveBeenCalled()
   })
 
   // --- ④ 空台账对账 ---

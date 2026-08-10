@@ -23,6 +23,7 @@ import type { CrabMessagingDeps, MessagingTool, MessagingToolSet } from '../../m
 import { buildWorkerTools } from './worker-tools.js'
 import type { WorkerHarness } from '../../workers/harness/harness'
 import { buildCrabotInfoTools } from './crabot-info.js'
+import type { MasterAuthorization } from '../principal.js'
 
 export interface ToolFaceDeps {
   readonly harness: WorkerHarness
@@ -34,6 +35,9 @@ export interface ToolFaceDeps {
   readonly callAdmin: <P, R>(m: string, p: P) => Promise<R>
   /** 该 manager 是否为保留的"系统任务"线程（决定 send_master_private / send_private_message 可见性）。 */
   readonly isSystemThread: boolean
+  /** Opaque control-plane authorization, never represented in any tool schema. */
+  readonly authorization?: () => MasterAuthorization | undefined
+  readonly validateMasterAuthorization?: (auth: MasterAuthorization) => Promise<boolean>
   /**
    * query_worker 异步失败出口（Task 4 留口、Task 8 接线）：原样透传给 `buildWorkerTools` 的
    * `WorkerToolsDeps.onAsyncError`——真正的绑定逻辑（按 key 决定 enqueueDuringEpisode 还是
@@ -200,7 +204,13 @@ export function assertClosedToolFace(tools: readonly ToolDefinition[]): void {
 export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
   const messagingTools = buildMessagingFace(deps)
   const memoryTools = mcpServerToToolDefinitions(deps.memoryServer, 'crab-memory')
-  const workerTools = buildWorkerTools({ harness: deps.harness, context: deps.workerContext, onAsyncError: deps.onAsyncError })
+  const workerTools = buildWorkerTools({
+    harness: deps.harness,
+    context: deps.workerContext,
+    authorization: deps.authorization,
+    validateMasterAuthorization: deps.validateMasterAuthorization,
+    onAsyncError: deps.onAsyncError,
+  })
   const infoTools = buildCrabotInfoTools({ callAdmin: deps.callAdmin })
 
   const tools = [...messagingTools, ...memoryTools, ...workerTools, ...infoTools]

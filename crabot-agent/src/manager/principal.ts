@@ -27,6 +27,11 @@
 
 import type { Friend, MemoryPermissions, ResolvedPermissions, RuntimeSceneProfile } from '../types.js'
 import type { ManagerKey } from './types.js'
+import { PrincipalBindingStore } from './principal-binding-store.js'
+
+export type MasterAuthorization =
+  | { readonly kind: 'friend_master'; readonly manager_key: ManagerKey; readonly friend_id: string; readonly generation: number }
+  | { readonly kind: 'admin_chat_jwt'; readonly manager_key: ManagerKey; readonly assertion_id: string; readonly expires_at: string; readonly generation: number }
 
 /**
  * 一次人类消息唤醒随行的发起人身份。
@@ -144,6 +149,8 @@ export interface PrincipalResolverDeps {
   }) => Promise<RuntimeSceneProfile | null>
   /** crab 在该 channel 的 @handle(入站事件已缓存,同步读)。 */
   readonly crabSelfHandle: (channelId: string) => string | undefined
+  /** Authoritative Admin record used for execution-time Master revalidation. */
+  readonly getFriend?: (friendId: string) => Promise<Friend | null>
 }
 
 /**
@@ -155,8 +162,17 @@ export interface PrincipalResolverDeps {
  */
 export class ManagerPrincipalStore {
   private readonly resolved = new Map<ManagerKey, ResolvedPrincipal>()
+  private readonly activeAuthorizations = new Map<ManagerKey, MasterAuthorization>()
 
-  constructor(private readonly deps: PrincipalResolverDeps) {}
+  constructor(
+    private readonly deps: PrincipalResolverDeps,
+    private readonly bindings?: PrincipalBindingStore,
+    private readonly now: () => Date = () => new Date(),
+  ) {}
+
+  async init(): Promise<void> {
+    await this.bindings?.init()
+  }
 
   /**
    * 唤醒边界解析:把 friend 变成权限 / 记忆档位 / 对话对象档案,写进缓存。
@@ -222,7 +238,89 @@ export class ManagerPrincipalStore {
       ...(dialogProfile ? { dialogProfile } : {}),
     }
     this.resolved.set(key, entry)
+    // Admin Chat's synthetic Friend is never an identity authority. Its opaque assertion
+    // is the only source that may create or replace this binding.
+    if (key !== 'admin-web::admin-chat' && principal.sessionType === 'private' && principal.friend && this.bindings?.isInitialized()) {
+      await this.bindings.set({ manager_key: key, kind: 'friend', friend_id: principal.friend.id })
+      await this.refreshFriendAuthorization(key)
+    }
     return entry
+  }
+
+  /** Only a verified current authorization can enter the tool face; bindings alone never grant Master after restart. */
+  currentMasterAuthorization(key: ManagerKey): MasterAuthorization | undefined {
+    const auth = this.activeAuthorizations.get(key)
+    if (auth?.kind === 'admin_chat_jwt' && Date.parse(auth.expires_at) <= this.now().getTime()) {
+      this.activeAuthorizations.delete(key)
+      return undefined
+    }
+    return auth
+  }
+
+  async activateAdminChat(key: ManagerKey, input: { assertionId: string; expiresAt: string }): Promise<void> {
+    if (!this.bindings) return
+    if (!this.bindings.isInitialized()) await this.bindings.init()
+    if (key !== 'admin-web::admin-chat' || Date.parse(input.expiresAt) <= this.now().getTime()) return
+    const binding = await this.bindings.set({ manager_key: key, kind: 'admin_chat_jwt', assertion_id: input.assertionId, expires_at: input.expiresAt })
+    this.activeAuthorizations.set(key, { kind: 'admin_chat_jwt', manager_key: key, assertion_id: input.assertionId, expires_at: input.expiresAt, generation: binding.generation })
+  }
+
+  async refreshForNonHumanWake(key: ManagerKey): Promise<void> {
+    const binding = this.bindings?.get(key)
+    if (binding?.kind === 'friend') await this.refreshFriendAuthorization(key)
+  }
+
+  async invalidateFriend(friendId: string): Promise<void> {
+    if (!this.bindings?.isInitialized()) return
+    await this.bindings.invalidateWhere(binding => binding.kind === 'friend' && binding.friend_id === friendId)
+    for (const [key, auth] of this.activeAuthorizations) if (auth.kind === 'friend_master' && auth.friend_id === friendId) this.activeAuthorizations.delete(key)
+    for (const [key, resolved] of this.resolved) if (resolved.principal.friend?.id === friendId) this.resolved.delete(key)
+  }
+
+  async validateMasterAuthorization(auth: MasterAuthorization): Promise<boolean> {
+    const current = this.currentMasterAuthorization(auth.manager_key)
+    if (!current || current.generation !== auth.generation || current.kind !== auth.kind) return false
+    if (auth.kind === 'admin_chat_jwt') {
+      return current.kind === 'admin_chat_jwt' && auth.assertion_id === current.assertion_id && Date.parse(auth.expires_at) > this.now().getTime()
+    }
+    const binding = this.bindings?.get(auth.manager_key)
+    if (!binding || binding.kind !== 'friend' || binding.friend_id !== auth.friend_id || binding.generation !== auth.generation) return false
+    try {
+      const friend = await this.deps.getFriend?.(auth.friend_id)
+      if (friend?.permission === 'master') return true
+    } catch {
+      // Lookup errors fail closed just like a missing/downgraded Friend.
+    }
+    await this.invalidateAuthorizationOnce(auth.manager_key, auth.generation)
+    return false
+  }
+
+  private async refreshFriendAuthorization(key: ManagerKey): Promise<void> {
+    const binding = this.bindings?.get(key)
+    if (!binding || binding.kind !== 'friend' || !binding.friend_id) {
+      this.activeAuthorizations.delete(key)
+      return
+    }
+    try {
+      const friend = await this.deps.getFriend?.(binding.friend_id)
+      if (friend?.permission === 'master') {
+        this.activeAuthorizations.set(key, { kind: 'friend_master', manager_key: key, friend_id: binding.friend_id, generation: binding.generation })
+        return
+      }
+    } catch {
+      // fall through to the one-time invalidation below
+    }
+    await this.invalidateAuthorizationOnce(key, binding.generation)
+  }
+
+  private async invalidateAuthorizationOnce(key: ManagerKey, generation: number): Promise<void> {
+    const current = this.bindings?.get(key)
+    const active = this.activeAuthorizations.get(key)
+    this.activeAuthorizations.delete(key)
+    // A prior failed validation already bumped the persisted generation; repeated
+    // non-human wakes remain fail-closed without a write storm.
+    if (!current || current.generation !== generation || !active || active.generation !== generation) return
+    await this.bindings?.bump(key)
   }
 
   /** 该 key 最近一次解析结果;从未收到过人类消息则 undefined。 */

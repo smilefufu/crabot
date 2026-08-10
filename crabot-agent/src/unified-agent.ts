@@ -702,6 +702,12 @@ export class UnifiedAgent extends ModuleBase {
             p.friendId,
           ),
         crabSelfHandle: (channelId) => this.crabSelfHandles.get(channelId),
+        getFriend: async (friendId) => {
+          const result = await this.rpcClient.call<{ friend_id: string }, { friend: Friend | null }>(
+            await this.getAdminPort(), 'get_friend', { friend_id: friendId }, this.config.moduleId,
+          )
+          return result.friend
+        },
       },
       // 起化身时现取（spec 决策 2）：箭头函数只捕获 `this`，配置一律在调用那一刻读。
       builtinSpawnDefaults: (ctx) => this.buildBuiltinWorkerRuntime(ctx),
@@ -1155,6 +1161,7 @@ export class UnifiedAgent extends ModuleBase {
         // 清除 Friend 缓存
         const friendPayload = event.payload as { friend_id: FriendId }
         this.permissionChecker.clearFriendCache(friendPayload.friend_id)
+        await this.managerStack?.principals.invalidateFriend(friendPayload.friend_id)
         break
       }
 
@@ -1866,6 +1873,10 @@ export class UnifiedAgent extends ModuleBase {
         !Number.isFinite(Date.parse(consumeResult.expires_at)) || Date.parse(consumeResult.expires_at) <= Date.now()) {
         throw new Error('invalid admin chat assertion consumption result')
       }
+      await this.requireManagerStack().principals.activateAdminChat('admin-web::admin-chat', {
+        assertionId: sha256CanonicalJson(admin_chat_assertion),
+        expiresAt: consumeResult.expires_at,
+      })
       return this.processAdminChatMessage(message, callback_info)
     }
 

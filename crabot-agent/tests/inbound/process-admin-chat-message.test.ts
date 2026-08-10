@@ -334,6 +334,7 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
       expect(rpcCalls.find((c) => c.method === 'resolve_principal_permissions')!.params).toMatchObject({
         session_id: ADMIN_CHAT_SESSION,
       })
+      expect(script.streams[0].tools.map((tool) => tool.name)).toContain('list_all_workers')
       expect(String(script.streams[0].messages[0].content)).toContain('帮我看下季度报表')
     })
 
