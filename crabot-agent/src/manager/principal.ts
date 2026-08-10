@@ -1,10 +1,10 @@
 /**
  * 人类消息发起人身份 —— 解析、按 key 缓存,以及由它派生的四样东西
- * (protocol-agent-v3.md §3 台账聚合键、§4.2/§4.3 对话对象档案与记忆档位、§8.2 权限身份)。
+ * (protocol-agent-v3.md §4.3 对话对象档案与记忆档位、§8.2 权限身份)。
  *
  * ## 为什么需要单独一层
  *
- * `ManagerRegistryDeps` 的 `dialogObjectIdFor` / `toolFace` / `promptInputs` 全是**同步**
+ * `ManagerRegistryDeps` 的 `toolFace` / `promptInputs` 全是**同步**
  * 签名——它们被 `ManagerLoop` 每轮 turn 同步调用(`EngineOptions.systemPrompt` 的 Resolvable
  * 必须同步)。而这几样东西的原料都是异步 RPC:admin 的 `resolve_principal_permissions`、
  * admin 的 `get_session_config`、memory 的 `get_scene_profile`。
@@ -14,23 +14,18 @@
  * `channel.message_authorized` 的 payload 自带完整 `friend` 对象,而入站点本来就在 async
  * 上下文里。缺的从来不是"能不能拿到 friend",只是"没有把它往下传"。
  *
- * ## 三个消费者
+ * ## 两个消费者
  *
- * 1. **台账聚合键**(`dialogObjectIdFor`):私聊必须收敛成 `friend:<friend_id>`,同一个人
- *    跨 channel 共享一份 worker 台账;群聊是 `group:<channel>:<session>`;系统线程归
- *    master 的对话对象——否则 master 在私聊里问进度时看不到系统线程派出的 worker(§4.4)。
- * 2. **记忆档位**(`ResolvedPrincipal.memory`):决定 manager 与它派出的 worker 写记忆时
+ * 1. **记忆档位**(`ResolvedPrincipal.memory`):决定 manager 与它派出的 worker 写记忆时
  *    的 visibility / scopes。放着不管的现状是 `{visibility:'public', scopes:[]}`
  *    ——群 A 的对话会以 public 落记忆、群 B 读得到,是跨会话信息泄漏。
- * 3. **权限档位**(`ResolvedPrincipal.permissions`):manager 算好、随 spawn 下传给 worker
+ * 2. **权限档位**(`ResolvedPrincipal.permissions`):manager 算好、随 spawn 下传给 worker
  *    (§8.2)。**worker 不需要知道 friend 是谁**,它只拿到一份算好的 `ResolvedPermissions`。
  *
  * @see crabot-docs/protocols/protocol-agent-v3.md §3、§4.3、§4.4、§8.2
  */
 
 import type { Friend, MemoryPermissions, ResolvedPermissions, RuntimeSceneProfile } from '../types.js'
-import { dialogObjectIdForGroup, dialogObjectIdForPrivate } from '../workers/harness/ledger-types.js'
-import type { DialogObjectId } from '../workers/harness/ledger-types'
 import type { ManagerKey } from './types.js'
 
 /**
@@ -149,8 +144,6 @@ export interface PrincipalResolverDeps {
   }) => Promise<RuntimeSceneProfile | null>
   /** crab 在该 channel 的 @handle(入站事件已缓存,同步读)。 */
   readonly crabSelfHandle: (channelId: string) => string | undefined
-  /** master 的 friend id(系统线程台账归档键);未知返回 undefined。 */
-  readonly masterFriendId: () => Promise<string | undefined>
 }
 
 /**
@@ -162,13 +155,8 @@ export interface PrincipalResolverDeps {
  */
 export class ManagerPrincipalStore {
   private readonly resolved = new Map<ManagerKey, ResolvedPrincipal>()
-  /** master friend id 是实例级常量,解析一次即长期有效;未解析出来之前为 undefined。 */
-  private masterFriendId: string | undefined
 
-  constructor(
-    private readonly deps: PrincipalResolverDeps,
-    private readonly systemThreadKey: ManagerKey,
-  ) {}
+  constructor(private readonly deps: PrincipalResolverDeps) {}
 
   /**
    * 唤醒边界解析:把 friend 变成权限 / 记忆档位 / 对话对象档案,写进缓存。
@@ -234,47 +222,11 @@ export class ManagerPrincipalStore {
       ...(dialogProfile ? { dialogProfile } : {}),
     }
     this.resolved.set(key, entry)
-
-    // 顺带把 master friend id 刷出来(系统线程的台账归档键要用)。它是实例级常量,
-    // 解析成功一次就长期有效;失败只是让系统线程暂时退回旧的 group 形状,不影响本次唤醒。
-    if (this.masterFriendId === undefined) {
-      try {
-        this.masterFriendId = await this.deps.masterFriendId()
-      } catch (err) {
-        console.warn('[manager-principal] 解析 master friend id 失败,系统线程台账暂用旧归档键:', err)
-      }
-    }
-
     return entry
   }
 
   /** 该 key 最近一次解析结果;从未收到过人类消息则 undefined。 */
   get(key: ManagerKey): ResolvedPrincipal | undefined {
     return this.resolved.get(key)
-  }
-
-  /**
-   * 台账聚合键(§3)。三条规则:
-   *
-   * 1. **系统线程** → `friend:<master_id>`。§4.4 要求未配目标 session 的 scheduled 任务
-   *    台账归 master 对话对象,否则 master 在私聊里问进度时看不到这些 worker。
-   *    master id 尚未解析出来时**退回旧的 group 形状**——不猜、不阻塞。
-   * 2. **私聊** → `friend:<friend_id>`,同一个人跨 channel 共享一份台账。
-   * 3. **群聊 / 身份未知** → `group:<channel>:<session>`。
-   */
-  dialogObjectIdFor(key: ManagerKey): DialogObjectId {
-    const { channelId, sessionId } = splitManagerKey(key)
-
-    if (key === this.systemThreadKey) {
-      return this.masterFriendId
-        ? dialogObjectIdForPrivate(this.masterFriendId)
-        : dialogObjectIdForGroup(channelId, sessionId)
-    }
-
-    const entry = this.resolved.get(key)
-    if (entry?.principal.sessionType === 'private' && entry.principal.friend) {
-      return dialogObjectIdForPrivate(entry.principal.friend.id)
-    }
-    return dialogObjectIdForGroup(channelId, sessionId)
   }
 }

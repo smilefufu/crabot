@@ -15,7 +15,6 @@ import { join } from 'path'
 import { WorkerHarness, type HarnessDeps, type SpawnWorkerParams } from '../../../src/workers/harness/harness'
 import { LedgerStore } from '../../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../../src/workers/harness/workspace-manager'
-import { dialogObjectIdForPrivate } from '../../../src/workers/harness/ledger-types'
 import type { HarnessEvent, HarnessEventDelivery } from '../../../src/workers/harness/worker-events'
 import type {
   WorkerAdapter,
@@ -135,10 +134,10 @@ async function makeHarness(adapter: WorkerAdapter): Promise<{ harness: WorkerHar
 
 function spawnParams(overrides: Partial<SpawnWorkerParams> = {}): SpawnWorkerParams {
   return {
-    dialogObjectId: dialogObjectIdForPrivate('friend-1'),
+    managerKey: (`test::${'friend-1'}` as ManagerKey),
     title: '测试任务',
     prompt: '把活干完',
-    origin: { spawned_by_session: 'wechat::sess-1', trigger_type: 'message' },
+    origin: { spawned_by_episode: 'wechat::sess-1', trigger_type: 'message' },
     report_to: { channel_id: 'wechat', session_id: 'sess-1' },
     ...overrides,
   }
@@ -355,7 +354,7 @@ describe.each<WorkerImplId>(['claude-code', 'codex'])('WorkerHarness.sweepLivene
     const { harness, ledger, adapter, workerId } = await spawnRunning()
     const found = (await ledger.findWorker(workerId))!
     // fork 化身(无头 `claude -p`,整个执行期可能零输出)追加进同一个 incarnations 数组
-    await ledger.upsertWorker(found.dialogObjectId, workerId, (prev) => ({
+    await ledger.upsertWorker(found.managerKey, workerId, (prev) => ({
       ...prev!,
       incarnations: [
         ...prev!.incarnations,
@@ -397,12 +396,13 @@ describe.each<WorkerImplId>(['claude-code', 'codex'])('WorkerHarness.sweepLivene
     const { harness, ledger } = await makeHarness(adapter)
     // #72 的 maintenance system task:agent 自己跑,不派 worker,台账条目 `incarnations: []`,
     // 但 running 期间照样会被 listAllWorkers 枚举到。
-    const dialogObjectId = dialogObjectIdForPrivate('friend-1')
+    const managerKey = (`test::${'friend-1'}` as ManagerKey)
     const taskId = 'task-maintenance-1'
-    await ledger.upsertWorker(dialogObjectId, taskId, () => ({
+    await ledger.upsertWorker(managerKey, taskId, () => ({
       worker_id: taskId,
+      manager_key: managerKey,
       task: { id: taskId, title: '记忆维护', status: 'running', created_at: now() },
-      origin: { spawned_by_session: 'system::tasks', trigger_type: 'system' },
+      origin: { trigger_type: 'system' },
       report_to: { channel_id: 'system', session_id: 'tasks' },
       incarnations: [],
       updated_at: now(),

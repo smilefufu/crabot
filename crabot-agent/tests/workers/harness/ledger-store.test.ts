@@ -4,13 +4,11 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import {
   LedgerStore,
-  dialogObjectIdToFilename,
-  filenameToDialogObjectId,
+  managerKeyToFilename,
+  filenameToManagerKey,
 } from '../../../src/workers/harness/ledger-store'
 import {
-  dialogObjectIdForPrivate,
-  dialogObjectIdForGroup,
-  type DialogObjectId,
+  type ManagerKey,
   type LedgerWorker,
 } from '../../../src/workers/harness/ledger-types'
 
@@ -25,7 +23,6 @@ function makeWorker(workerId: string, overrides: Partial<LedgerWorker> = {}): Le
       created_at: now,
     },
     origin: {
-      spawned_by_session: 'wechat::sess-1',
       trigger_type: 'message',
     },
     report_to: { channel_id: 'wechat', session_id: 'sess-1' },
@@ -49,19 +46,19 @@ describe('LedgerStore', () => {
   })
 
   it('upsert 新建 worker 后 getLedger 可见且文件落盘', async () => {
-    const id = dialogObjectIdForPrivate('friend-1')
+    const id = `test::friend-1` as ManagerKey
     const result = await store.upsertWorker(id, 'worker-1', (prev) => {
       expect(prev).toBeUndefined()
-      return makeWorker('worker-1')
+      return makeWorker('worker-1', { manager_key: id })
     })
     expect(result?.worker_id).toBe('worker-1')
 
     const ledger = await store.getLedger(id)
-    expect(ledger.dialog_object_id).toBe(id)
+    expect(ledger.manager_key).toBe(id)
     expect(ledger.workers).toHaveLength(1)
     expect(ledger.workers[0].worker_id).toBe('worker-1')
 
-    const filePath = join(dir, dialogObjectIdToFilename(id))
+    const filePath = join(dir, managerKeyToFilename(id))
     const raw = await fs.readFile(filePath, 'utf-8')
     const onDisk = JSON.parse(raw)
     expect(onDisk.workers).toHaveLength(1)
@@ -69,12 +66,12 @@ describe('LedgerStore', () => {
   })
 
   it('同一对话对象并发 10 次 upsert 不丢', async () => {
-    const id = dialogObjectIdForGroup('wechat', 'group-1')
+    const id = `wechat::group-1` as ManagerKey
     await Promise.all(
       Array.from({ length: 10 }, (_, i) =>
         store.upsertWorker(id, `worker-${i}`, (prev) => {
           expect(prev).toBeUndefined()
-          return makeWorker(`worker-${i}`)
+          return makeWorker(`worker-${i}`, { manager_key: id })
         })
       )
     )
@@ -85,17 +82,17 @@ describe('LedgerStore', () => {
   })
 
   it('findWorker 跨文件命中', async () => {
-    const idA = dialogObjectIdForPrivate('friend-a')
-    const idB = dialogObjectIdForPrivate('friend-b')
-    await store.upsertWorker(idA, 'worker-a', () => makeWorker('worker-a'))
-    await store.upsertWorker(idB, 'worker-b', () => makeWorker('worker-b'))
+    const idA = `test::friend-a` as ManagerKey
+    const idB = `test::friend-b` as ManagerKey
+    await store.upsertWorker(idA, 'worker-a', () => makeWorker('worker-a', { manager_key: idA }))
+    await store.upsertWorker(idB, 'worker-b', () => makeWorker('worker-b', { manager_key: idB }))
 
     const foundA = await store.findWorker('worker-a')
-    expect(foundA?.dialogObjectId).toBe(idA)
+    expect(foundA?.managerKey).toBe(idA)
     expect(foundA?.worker.worker_id).toBe('worker-a')
 
     const foundB = await store.findWorker('worker-b')
-    expect(foundB?.dialogObjectId).toBe(idB)
+    expect(foundB?.managerKey).toBe(idB)
     expect(foundB?.worker.worker_id).toBe('worker-b')
   })
 
@@ -103,63 +100,53 @@ describe('LedgerStore', () => {
     await store.init()
 
     // 手工往目录塞一个文件,不经过 store 的写入路径(模拟外部进程写入)
-    const externalId = dialogObjectIdForPrivate('friend-external')
-    const filename = dialogObjectIdToFilename(externalId)
-    const worker = makeWorker('worker-external')
+    const externalId = `test::friend-external` as ManagerKey
+    const filename = managerKeyToFilename(externalId)
+    const worker = makeWorker('worker-external', { manager_key: externalId })
     await fs.writeFile(
       join(dir, filename),
-      JSON.stringify({ dialog_object_id: externalId, workers: [worker] }),
+      JSON.stringify({ manager_key: externalId, workers: [worker] }),
       'utf-8'
     )
 
     const found = await store.findWorker('worker-external')
-    expect(found?.dialogObjectId).toBe(externalId)
+    expect(found?.managerKey).toBe(externalId)
     expect(found?.worker.worker_id).toBe('worker-external')
   })
 
   it('文件名编码对含 : 与 / 的 id 双向可逆', () => {
-    const idWithSlash = dialogObjectIdForPrivate('user/with:colon') as DialogObjectId
-    const idGroup = dialogObjectIdForGroup('chan/nel', 'sess:ion/x')
+    const idWithSlash = `test::user/with:colon` as ManagerKey as ManagerKey
+    const idGroup = `chan/nel::sess:ion/x` as ManagerKey
     for (const id of [idWithSlash, idGroup]) {
-      const filename = dialogObjectIdToFilename(id)
+      const filename = managerKeyToFilename(id)
       expect(filename.endsWith('.json')).toBe(true)
-      const decoded = filenameToDialogObjectId(filename)
+      const decoded = filenameToManagerKey(filename)
       expect(decoded).toBe(id)
     }
   })
 
   it('mutator 返回 undefined 时不写盘', async () => {
-    const id = dialogObjectIdForPrivate('friend-none')
+    const id = `test::friend-none` as ManagerKey
     const result = await store.upsertWorker(id, 'worker-none', () => undefined)
     expect(result).toBeUndefined()
 
-    const filePath = join(dir, dialogObjectIdToFilename(id))
+    const filePath = join(dir, managerKeyToFilename(id))
     await expect(fs.access(filePath)).rejects.toThrow()
 
     const ledger = await store.getLedger(id)
     expect(ledger.workers).toHaveLength(0)
   })
 
-  it('init 扫描遇到坏 JSON 文件时跳过并 warn,不影响其它文件索引', async () => {
-    const goodId = dialogObjectIdForPrivate('friend-good')
-    await fs.writeFile(join(dir, dialogObjectIdToFilename(goodId)), 'not json', 'utf-8')
+  it('init 扫描遇到坏 JSON 文件时 fail loud，不继续建立不完整索引', async () => {
+    const badId = `test::friend-good` as ManagerKey
+    await fs.writeFile(join(dir, managerKeyToFilename(badId)), 'not json', 'utf-8')
 
-    const okId = dialogObjectIdForPrivate('friend-ok')
-    await store.upsertWorker(okId, 'worker-ok', () => makeWorker('worker-ok'))
-
-    const otherStore = new LedgerStore(dir)
-    const warnSpy = (await import('vitest')).vi.spyOn(console, 'warn').mockImplementation(() => {})
-    await otherStore.init()
-    expect(warnSpy).toHaveBeenCalled()
-    warnSpy.mockRestore()
-
-    const found = await otherStore.findWorker('worker-ok')
-    expect(found?.worker.worker_id).toBe('worker-ok')
+    await expect(store.init()).rejects.toThrow(/invalid ledger/)
   })
 
   it('getLedger 读到坏 JSON 文件应抛明确错误,不静默当空', async () => {
-    const id = dialogObjectIdForPrivate('friend-corrupt')
-    await fs.writeFile(join(dir, dialogObjectIdToFilename(id)), 'not json', 'utf-8')
+    const id = `test::friend-corrupt` as ManagerKey
+    await fs.writeFile(join(dir, managerKeyToFilename(id)), 'not json', 'utf-8')
 
     await expect(store.getLedger(id)).rejects.toThrow()
   })

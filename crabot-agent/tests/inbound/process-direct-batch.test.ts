@@ -217,7 +217,7 @@ describe('processDirectBatch —— 私聊 lane handler（cutover 后下游是 m
       .buildBuiltinWorkerRuntime({
         worker_id: 'w-probe',
         workspace: { root: dataDir.root },
-        origin: { spawned_by_session: MANAGER_KEY, trigger_type: 'message' },
+        origin: { spawned_by_episode: MANAGER_KEY, trigger_type: 'message' },
         ...(principalPermissions ? { principal_permissions: principalPermissions } : {}),
       })
       .tools()

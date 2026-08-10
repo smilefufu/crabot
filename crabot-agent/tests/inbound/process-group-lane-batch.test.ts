@@ -295,7 +295,7 @@ describe('processGroupLaneBatch —— 群聊 lane handler（cutover 后下游�
       .buildBuiltinWorkerRuntime({
         worker_id: 'w-probe',
         workspace: { root: dataDir.root },
-        origin: { spawned_by_session: MANAGER_KEY, trigger_type: 'message' },
+        origin: { spawned_by_episode: MANAGER_KEY, trigger_type: 'message' },
         ...(principalPermissions ? { principal_permissions: principalPermissions } : {}),
       })
       .tools()

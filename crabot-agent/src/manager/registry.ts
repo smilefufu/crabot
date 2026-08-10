@@ -56,7 +56,6 @@ import type { ManagerKey } from './types.js'
 import type { EngineMessage, LLMAdapter, ToolDefinition } from '../engine/index.js'
 import type { WorkerHarness } from '../workers/harness/harness'
 import type { LedgerStore } from '../workers/harness/ledger-store'
-import type { DialogObjectId } from '../workers/harness/ledger-types'
 import type { HarnessEvent, HarnessEventKind } from '../workers/harness/worker-events'
 import type { ChannelMessage, Friend, ResolvedPermissions } from '../types'
 import type { HumanPrincipal } from './principal.js'
@@ -124,18 +123,18 @@ export interface ManagerRegistryDeps {
   /** 人类消息渲染的时区(见 `ManagerLoopDeps.timezone`);不注入则退回 `resolveTimezone(undefined)`。 */
   readonly timezone?: () => string
   /**
-   * `ManagerKey` → 台账渲染用的 `DialogObjectId`(`ManagerLoopDeps.dialogObjectId`)。
+   * `ManagerKey` → 台账渲染用的 `ManagerKey`(`ManagerLoopDeps.managerKey`)。
    * 两者粒度不同(manager 按 channel::session,worker 台账按 friend 跨 channel 聚合/单群),
    * 这层映射依赖 friend 解析等本模块无法自行完成的信息,由调用方按 protocol §3 解析好注入。
    *
    * **每次读都要现算**:私聊的归档键要等第一条人类消息带来 friend 之后才能收敛成
    * `friend:<id>`(见 `onHumanWake`),调用方持有的映射会随之变化。
    */
-  readonly dialogObjectIdFor: (key: ManagerKey) => DialogObjectId
+  readonly managerKeyFor: (key: ManagerKey) => ManagerKey
   /**
    * **人类消息唤醒边界**的异步解析钩子:`routeHumanMessages` 在 `runWake` 之前 await 它一次,
    * 调用方据 `principal`(发起人 friend + 私/群)解析权限、记忆档位、对话对象档案并缓存,
-   * 供下面那三个**同步** thunk(`dialogObjectIdFor` / `toolFace` / `promptInputs`)读取。
+   * 供下面那三个**同步** thunk(`managerKeyFor` / `toolFace` / `promptInputs`)读取。
    *
    * 这是"加参数而不是全面异步化"的落点:异步只发生在唤醒边界这一处,每轮 turn 被同步调用的
    * 签名一个都不用改。不注入则行为与之前逐字相同(manager 拿不到发起人身份)。
@@ -223,10 +222,9 @@ export class ManagerRegistry {
     const loopDeps: ManagerLoopDeps = {
       key,
       isSystemThread,
-      // thunk 而非定值:私聊的台账归档键要等第一条人类消息带来 friend 才收敛成
-      // `friend:<id>`,而 loop 实例可能先被 worker 事件建出来。定值会把那一刻的
-      // group 形状永久钉死在实例上,同一个人的台账因此裂成两份。
-      dialogObjectId: () => this.deps.dialogObjectIdFor(key),
+      // ManagerKey 是 worker 的固定台账归属。使用 thunk 只为保持 ManagerLoop 的
+      // 同步依赖注入形状，不从当前 principal 派生或改写会话归属。
+      managerKey: () => this.deps.managerKeyFor(key),
       store: this.deps.store,
       policy: this.deps.policy,
       estimateTokens: this.deps.estimateTokens,
@@ -334,13 +332,13 @@ export class ManagerRegistry {
   }
 
   /**
-   * harness 事件 → 该 worker 的监护 manager(台账 `origin.spawned_by_session`);查不到则落
-   * 系统线程。注意:这里解出的 manager 与该 worker 台账所属的 `DialogObjectId` 可以是两个
+   * harness 事件 → 该 worker 的监护 manager(台账 `origin.manager_key`);查不到则落
+   * 系统线程。注意:这里解出的 manager 与该 worker 台账所属的 `ManagerKey` 可以是两个
    * 不同的对话对象(同一 friend 跨 channel 共享台账)——这是设计意图,不是需要修正的不一致。
    */
   async routeWorkerEvent(event: HarnessEvent): Promise<EpisodeResult | undefined> {
     const found = await this.deps.ledger.findWorker(event.worker_id)
-    const key = found?.worker.origin.spawned_by_session ?? SYSTEM_TASKS_MANAGER_KEY
+    const key = found?.worker.manager_key ?? SYSTEM_TASKS_MANAGER_KEY
     return this.runWake(key, { kind: 'worker_event', event })
   }
 

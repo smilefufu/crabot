@@ -30,7 +30,7 @@
  */
 
 import type { PaginationParams, PaginatedResult } from 'crabot-shared'
-import type { DialogObjectId, LedgerWorker, TaskStatus } from '../workers/harness/ledger-types.js'
+import type { ManagerKey, LedgerWorker, TaskStatus } from '../workers/harness/ledger-types.js'
 import type { NormalizedTraceEvent } from '../workers/types.js'
 
 /**
@@ -51,7 +51,7 @@ export interface TimeRange {
 /** §8.3 list_workers_admin:跨对话对象扁平查询 */
 export interface ListWorkersAdminParams {
   status?: TaskStatus | TaskStatus[]
-  dialog_object_id?: DialogObjectId
+  manager_key?: ManagerKey
   time_range?: TimeRange
   pagination?: PaginationParams
 }
@@ -109,10 +109,10 @@ export interface GetWorkerTraceResult {
 
 /**
  * 台账条目 + 它所属的对话对象 —— `LedgerStore.listAllWorkers()` / `findWorker()` 的返回元素形状。
- * `dialogObjectId` 只用于过滤,不出现在协议返回体里(§8.3 的 items 是 `LedgerWorker`)。
+ * `managerKey` 只用于过滤,不出现在协议返回体里(§8.3 的 items 是 `LedgerWorker`)。
  */
 export interface LedgerWorkerEntry {
-  dialogObjectId: DialogObjectId
+  managerKey: ManagerKey
   worker: LedgerWorker
 }
 
@@ -162,7 +162,7 @@ export function filterAndPageWorkers(
   // filter 总是产出新数组,后面的 sort 不会污染入参
   const matched = all.filter((entry) => {
     if (statuses && !statuses.includes(entry.worker.task.status)) return false
-    if (params.dialog_object_id && entry.dialogObjectId !== params.dialog_object_id) return false
+    if (params.manager_key && entry.managerKey !== params.manager_key) return false
     if (hasRange) {
       // created_at 缺失(脏台账)时无法证明落在窗口内,按不命中处理
       const createdAt = entry.worker.task.created_at
@@ -202,7 +202,7 @@ export function filterAndPageWorkers(
  * 台账条目 → §8.3 的 `GetWorkerDetailResult`。
  *
  * 详情就是台账条目本身(含完整化身链),不做任何计算或裁剪——v3 里 agent 即真相源,台账结构
- * (§3)本身就是对外契约。这里只负责剥掉 `LedgerStore.findWorker` 附带的 `dialogObjectId`
+ * (§3)本身就是对外契约。这里只负责剥掉 `LedgerStore.findWorker` 附带的 `managerKey`
  * 包装:它是查找的副产物,不在协议返回体里(调用方要用的话自己留着)。
  */
 export function buildWorkerDetail(found: LedgerWorkerEntry): GetWorkerDetailResult {

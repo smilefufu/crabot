@@ -8,7 +8,6 @@ import { ManagerSessionStore } from '../../src/manager/session-store.js'
 import type { CompactionPolicy } from '../../src/manager/compaction.js'
 import type { ManagerKey } from '../../src/manager/types.js'
 import type { ChannelMessage, Friend } from '../../src/types.js'
-import { dialogObjectIdForPrivate } from '../../src/workers/harness/ledger-types.js'
 import type { WorkerHarness } from '../../src/workers/harness/harness.js'
 import type { LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import { createUserMessage, defineTool } from '../../src/engine/index.js'
@@ -18,7 +17,7 @@ import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 // --- Fixtures / helpers ---
 
 const KEY: ManagerKey = 'wechat::sess-loop'
-const DIALOG_OBJECT_ID = dialogObjectIdForPrivate('friend-loop')
+const DIALOG_OBJECT_ID = (`test::${'friend-loop'}` as ManagerKey)
 
 /** compaction.ts foldIntoSummary 的 system prompt 常量特征串,用它区分"这是折叠 LLM 调用
  *  还是普通 engine turn 调用",不需要 vi.mock/vi.spyOn 侵入模块内部。 */
@@ -99,7 +98,7 @@ function baseDeps(
   return {
     key: KEY,
     isSystemThread: false,
-    dialogObjectId: () => DIALOG_OBJECT_ID,
+    managerKey: () => DIALOG_OBJECT_ID,
     policy,
     estimateTokens,
     toolFace: () => [],

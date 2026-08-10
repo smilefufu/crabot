@@ -2,9 +2,8 @@
  * 发起人身份的解析规则（P7 / PR J Task 2）—— `src/manager/principal.ts`。
  *
  * 这里钉的是**语义不变量**，不是参数透传：
- *   - 这个 friend 的 `memory_scopes` 真的决定了记忆的读写可见范围；
+ *   - 当前消息的 `memory_scopes` 真的决定了记忆的读写可见范围；
  *   - 群聊空 scopes 真的收敛到本群（否则群 A 的内容会以空 scope 落记忆、群 B 读得到）；
- *   - 私聊的台账真的按 friend 跨 channel 聚合；系统线程真的归 master；
  *   - 每一项解析失败都只降级它自己，不连坐（人类消息比档位重要）。
  */
 import { describe, it, expect, vi } from 'vitest'
@@ -17,7 +16,6 @@ import {
   splitManagerKey,
   type PrincipalResolverDeps,
 } from '../../src/manager/principal.js'
-import { SYSTEM_TASKS_MANAGER_KEY } from '../../src/manager/registry.js'
 import type { ManagerKey } from '../../src/manager/types.js'
 import type { Friend, ResolvedPermissions } from '../../src/types.js'
 import { CLI_DOMAINS, type CliAccessConfig, type CliDomain } from '../../src/types.js'
@@ -57,7 +55,6 @@ function makeResolverDeps(overrides: Partial<PrincipalResolverDeps> = {}): Princ
     sessionMemoryScopes: async (sessionId) => [sessionId],
     sceneProfile: async () => null,
     crabSelfHandle: () => undefined,
-    masterFriendId: async () => undefined,
     ...overrides,
   }
 }
@@ -153,7 +150,7 @@ describe('renderDialogProfile', () => {
 describe('ManagerPrincipalStore.resolve —— 档位真的由 friend 决定', () => {
   it('这个 friend 的 memory_scopes 真的决定了记忆的读写可见范围', async () => {
     const resolvePermissions = vi.fn(async () => makePerms(['team-x']))
-    const store = new ManagerPrincipalStore(makeResolverDeps({ resolvePermissions }), SYSTEM_TASKS_MANAGER_KEY)
+    const store = new ManagerPrincipalStore(makeResolverDeps({ resolvePermissions }))
 
     const entry = await store.resolve(PRIVATE_KEY, { friend: makeFriend('f-1'), sessionType: 'private' })
 
@@ -170,8 +167,7 @@ describe('ManagerPrincipalStore.resolve —— 档位真的由 friend 决定', (
   it('换一个 friend 说话 → 档位整体换掉，不残留上一个人的 scopes', async () => {
     const scopesByFriend: Record<string, string[]> = { 'f-a': ['team-a'], 'f-b': ['team-b'] }
     const store = new ManagerPrincipalStore(
-      makeResolverDeps({ resolvePermissions: async (p) => makePerms(scopesByFriend[p.senderFriendId!]) }),
-      SYSTEM_TASKS_MANAGER_KEY,
+      makeResolverDeps({ resolvePermissions: async (p) => makePerms(scopesByFriend[p.senderFriendId!]) })
     )
 
     await store.resolve(GROUP_KEY, { friend: makeFriend('f-a'), sessionType: 'group' })
@@ -184,8 +180,7 @@ describe('ManagerPrincipalStore.resolve —— 档位真的由 friend 决定', (
   it('群聊 friend 没配 scopes → 收敛到本群，且**不去问 admin 要 session 配置**', async () => {
     const sessionMemoryScopes = vi.fn(async () => ['不该被用到'])
     const store = new ManagerPrincipalStore(
-      makeResolverDeps({ resolvePermissions: async () => makePerms([]), sessionMemoryScopes }),
-      SYSTEM_TASKS_MANAGER_KEY,
+      makeResolverDeps({ resolvePermissions: async () => makePerms([]), sessionMemoryScopes })
     )
 
     const entry = await store.resolve(GROUP_KEY, { friend: makeFriend('f-1'), sessionType: 'group' })
@@ -201,8 +196,7 @@ describe('ManagerPrincipalStore.resolve —— 档位真的由 friend 决定', (
       makeResolverDeps({
         resolvePermissions: async () => null,
         sessionMemoryScopes: async () => ['session-scope'],
-      }),
-      SYSTEM_TASKS_MANAGER_KEY,
+      })
     )
 
     const entry = await store.resolve(PRIVATE_KEY, { friend: makeFriend('f-1'), sessionType: 'private' })
@@ -218,8 +212,7 @@ describe('ManagerPrincipalStore.resolve —— 档位真的由 friend 决定', (
       makeResolverDeps({
         resolvePermissions: async () => { throw new Error('admin down') },
         sessionMemoryScopes: async (sessionId) => [sessionId],
-      }),
-      SYSTEM_TASKS_MANAGER_KEY,
+      })
     )
 
     const entry = await store.resolve(PRIVATE_KEY, { friend: makeFriend('f-1'), sessionType: 'private' })
@@ -233,8 +226,7 @@ describe('ManagerPrincipalStore.resolve —— 档位真的由 friend 决定', (
       makeResolverDeps({
         resolvePermissions: async () => null,
         sessionMemoryScopes: async () => { throw new Error('admin down') },
-      }),
-      SYSTEM_TASKS_MANAGER_KEY,
+      })
     )
     const entry = await store.resolve(PRIVATE_KEY, { friend: makeFriend('f-1'), sessionType: 'private' })
     expect(entry.memory.read_accessible_scopes).toEqual(['sess-1'])
@@ -246,8 +238,7 @@ describe('ManagerPrincipalStore.resolve —— 档位真的由 friend 决定', (
       makeResolverDeps({
         resolvePermissions: async () => makePerms(['team-x']),
         sceneProfile: async () => { throw new Error('memory down') },
-      }),
-      SYSTEM_TASKS_MANAGER_KEY,
+      })
     )
     const entry = await store.resolve(PRIVATE_KEY, { friend: makeFriend('f-1'), sessionType: 'private' })
     expect(entry.dialogProfile).toBeUndefined()
@@ -256,7 +247,7 @@ describe('ManagerPrincipalStore.resolve —— 档位真的由 friend 决定', (
 
   it('场景画像按会话类型去要：私聊带 friend_id，群聊只带 channel+session', async () => {
     const sceneProfile = vi.fn(async () => null)
-    const store = new ManagerPrincipalStore(makeResolverDeps({ sceneProfile }), SYSTEM_TASKS_MANAGER_KEY)
+    const store = new ManagerPrincipalStore(makeResolverDeps({ sceneProfile }))
 
     await store.resolve(PRIVATE_KEY, { friend: makeFriend('f-1'), sessionType: 'private' })
     expect(sceneProfile).toHaveBeenLastCalledWith({
@@ -274,73 +265,11 @@ describe('ManagerPrincipalStore.resolve —— 档位真的由 friend 决定', (
       makeResolverDeps({
         sceneProfile: async () => ({ label: 'friend:f-1', content: '喜欢简短回答', source: { scene: { type: 'friend', friend_id: 'f-1' } } }),
         crabSelfHandle: (channelId) => (channelId === 'wechat' ? '@crabot_wx' : undefined),
-      }),
-      SYSTEM_TASKS_MANAGER_KEY,
+      })
     )
 
     const entry = await store.resolve(PRIVATE_KEY, { friend: makeFriend('f-1'), sessionType: 'private' })
     expect(entry.dialogProfile).toContain('喜欢简短回答')
     expect(entry.dialogProfile).toContain('@crabot_wx')
-  })
-})
-
-describe('ManagerPrincipalStore.dialogObjectIdFor —— 台账归档键（§3 / §4.4）', () => {
-  it('私聊 → friend:<id>：同一个人在 wechat 与 telegram 共享同一份台账', async () => {
-    const store = new ManagerPrincipalStore(makeResolverDeps(), SYSTEM_TASKS_MANAGER_KEY)
-    const friend = makeFriend('f-1')
-
-    await store.resolve('wechat::sess-w' as ManagerKey, { friend, sessionType: 'private' })
-    await store.resolve('telegram::sess-t' as ManagerKey, { friend, sessionType: 'private' })
-
-    expect(store.dialogObjectIdFor('wechat::sess-w' as ManagerKey)).toBe('friend:f-1')
-    expect(store.dialogObjectIdFor('telegram::sess-t' as ManagerKey)).toBe('friend:f-1')
-  })
-
-  it('群聊 → group:<channel>:<session>：两个群各自一份，不合并', async () => {
-    const store = new ManagerPrincipalStore(makeResolverDeps(), SYSTEM_TASKS_MANAGER_KEY)
-    await store.resolve('wechat::g-1' as ManagerKey, { friend: makeFriend('f-1'), sessionType: 'group' })
-    await store.resolve('wechat::g-2' as ManagerKey, { friend: makeFriend('f-1'), sessionType: 'group' })
-
-    expect(store.dialogObjectIdFor('wechat::g-1' as ManagerKey)).toBe('group:wechat:g-1')
-    expect(store.dialogObjectIdFor('wechat::g-2' as ManagerKey)).toBe('group:wechat:g-2')
-  })
-
-  it('身份还没解析出来（loop 先被 worker 事件建出来）→ 群形状，不猜', () => {
-    const store = new ManagerPrincipalStore(makeResolverDeps(), SYSTEM_TASKS_MANAGER_KEY)
-    expect(store.dialogObjectIdFor(PRIVATE_KEY)).toBe('group:wechat:sess-1')
-  })
-
-  it('私聊但没有 friend（陌生人）→ 群形状，不造一个空 friend 键', async () => {
-    const store = new ManagerPrincipalStore(makeResolverDeps(), SYSTEM_TASKS_MANAGER_KEY)
-    await store.resolve(PRIVATE_KEY, { sessionType: 'private' })
-    expect(store.dialogObjectIdFor(PRIVATE_KEY)).toBe('group:wechat:sess-1')
-  })
-
-  it('系统线程 → friend:<master_id>：master 在自己的私聊里查台账能看到系统线程派出的 worker', async () => {
-    const store = new ManagerPrincipalStore(
-      makeResolverDeps({ masterFriendId: async () => 'f-master' }),
-      SYSTEM_TASKS_MANAGER_KEY,
-    )
-    // master friend id 在任意一次人类唤醒时被刷出来（实例级常量）
-    await store.resolve(PRIVATE_KEY, { friend: makeFriend('f-master', 'master'), sessionType: 'private' })
-
-    expect(store.dialogObjectIdFor(SYSTEM_TASKS_MANAGER_KEY)).toBe('friend:f-master')
-    // 与 master 自己私聊那条 manager 的归档键**是同一个** —— §4.4 共享台账接办的前提
-    expect(store.dialogObjectIdFor(PRIVATE_KEY)).toBe('friend:f-master')
-  })
-
-  it('master 尚未解析出来 → 系统线程退回旧的 group 形状（不阻塞、不猜一个 id）', () => {
-    const store = new ManagerPrincipalStore(makeResolverDeps(), SYSTEM_TASKS_MANAGER_KEY)
-    expect(store.dialogObjectIdFor(SYSTEM_TASKS_MANAGER_KEY)).toBe('group:admin-web:system-tasks')
-  })
-
-  it('master friend id 解析失败不抛穿，只是暂时用旧归档键', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const store = new ManagerPrincipalStore(
-      makeResolverDeps({ masterFriendId: async () => { throw new Error('admin down') } }),
-      SYSTEM_TASKS_MANAGER_KEY,
-    )
-    await store.resolve(PRIVATE_KEY, { friend: makeFriend('f-1'), sessionType: 'private' })
-    expect(store.dialogObjectIdFor(SYSTEM_TASKS_MANAGER_KEY)).toBe('group:admin-web:system-tasks')
   })
 })

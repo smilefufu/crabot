@@ -76,7 +76,7 @@ import {
   narrowWorkerPermissions,
   type BuiltinRuntimeContext,
 } from './workers/builtin/runtime.js'
-import type { DialogObjectId, LedgerWorker, ManagerKey, TaskPriority, TaskStatus } from './workers/harness/ledger-types.js'
+import type { ManagerKey, LedgerWorker, TaskPriority, TaskStatus } from './workers/harness/ledger-types.js'
 import {
   filterAndPageWorkers,
   buildWorkerDetail,
@@ -424,9 +424,6 @@ export class UnifiedAgent extends ModuleBase {
    */
   private crabSelfHandles: Map<ModuleId, string> = new Map()
 
-  /** master 的 friend id（系统线程台账归档键，实例级常量）；见 `resolveMasterFriendId`。 */
-  private masterFriendIdCache: string | undefined
-
   /** Per-worker serialization preserves background-shell exit order across async log rendering. */
   private readonly builtinBgDeliveryTails = new Map<string, Promise<void>>()
 
@@ -705,7 +702,6 @@ export class UnifiedAgent extends ModuleBase {
             p.friendId,
           ),
         crabSelfHandle: (channelId) => this.crabSelfHandles.get(channelId),
-        masterFriendId: () => this.resolveMasterFriendId(),
       },
       // 起化身时现取（spec 决策 2）：箭头函数只捕获 `this`，配置一律在调用那一刻读。
       builtinSpawnDefaults: (ctx) => this.buildBuiltinWorkerRuntime(ctx),
@@ -731,33 +727,6 @@ export class UnifiedAgent extends ModuleBase {
         void this.sendBackgroundFailLoud(report.target, report.subject, report.failure)
       },
     })
-  }
-
-  /**
-   * master 的 friend id —— 系统任务线程的台账归档键（§4.4：未配置 `target_session` 的
-   * scheduled 触发，台账归 master 对话对象；否则 master 在私聊里问进度时，其 manager 按
-   * `friend:<master_id>` 查台账看不到这些 worker）。
-   *
-   * 实例级常量：admin 侧 master 唯一（`permission==='master'` 至多一个，见
-   * `crabot-admin/src/index.ts:3525`），解析成功一次即长期缓存。解析不出来时返回
-   * undefined，由 `ManagerPrincipalStore` 退回旧的 group 形状——不猜、不阻塞唤醒。
-   */
-  private async resolveMasterFriendId(): Promise<string | undefined> {
-    if (this.masterFriendIdCache) return this.masterFriendIdCache
-    try {
-      const adminPort = await this.getAdminPort()
-      const result = await this.rpcClient.call<Record<string, never>, { friend: Friend | null }>(
-        adminPort,
-        'find_master_friend',
-        {},
-        this.config.moduleId,
-      )
-      this.masterFriendIdCache = result.friend?.id
-      return this.masterFriendIdCache
-    } catch (err) {
-      console.warn('[Agent] find_master_friend 失败，系统线程台账暂用旧归档键:', err)
-      return undefined
-    }
   }
 
   // ==========================================================================
@@ -2608,7 +2577,7 @@ export class UnifiedAgent extends ModuleBase {
    * 由 manager 在唤醒边界解析身份。
    */
   private async transitionMaintenanceSystemTask(
-    dialogObjectId: DialogObjectId,
+    managerKey: ManagerKey,
     taskId: TaskId,
     to: TaskStatus,
     opts?: { error?: string; outcome?: string },
@@ -2616,7 +2585,7 @@ export class UnifiedAgent extends ModuleBase {
     const { ledger } = this.requireManagerStack()
     const now = new Date().toISOString()
     let oldStatus: TaskStatus | undefined
-    const updated = await ledger.upsertWorker(dialogObjectId, taskId, (previous) => {
+    const updated = await ledger.upsertWorker(managerKey, taskId, (previous) => {
       if (!previous) throw new Error(`Maintenance system task not found: ${taskId}`)
       oldStatus = previous.task.status
       return {
@@ -2631,21 +2600,21 @@ export class UnifiedAgent extends ModuleBase {
       task_id: taskId,
       old_status: oldStatus,
       new_status: to,
-      dialog_object_id: dialogObjectId,
+      manager_key: managerKey,
     })
   }
 
-  private async runMaintenanceSystemTask(dialogObjectId: DialogObjectId, taskId: TaskId): Promise<void> {
-    await this.transitionMaintenanceSystemTask(dialogObjectId, taskId, 'running')
+  private async runMaintenanceSystemTask(managerKey: ManagerKey, taskId: TaskId): Promise<void> {
+    await this.transitionMaintenanceSystemTask(managerKey, taskId, 'running')
     try {
       await this.memoryWriter.runMaintenance('all')
-      await this.transitionMaintenanceSystemTask(dialogObjectId, taskId, 'completed', {
+      await this.transitionMaintenanceSystemTask(managerKey, taskId, 'completed', {
         outcome: '记忆维护完成',
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       console.error(`[${this.config.moduleId}] memory_maintenance system task ${taskId} failed:`, message)
-      await this.transitionMaintenanceSystemTask(dialogObjectId, taskId, 'failed', {
+      await this.transitionMaintenanceSystemTask(managerKey, taskId, 'failed', {
         error: message,
         outcome: `记忆维护失败：${message}`,
       })
@@ -2653,13 +2622,14 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   private async createMaintenanceSystemTask(params: TriggerScheduleParams): Promise<TriggerScheduleResult> {
-    const { ledger, principals } = this.requireManagerStack()
+    const { ledger } = this.requireManagerStack()
     const taskId = generateId() as TaskId
-    const dialogObjectId = principals.dialogObjectIdFor(SYSTEM_TASKS_MANAGER_KEY)
+    const managerKey = SYSTEM_TASKS_MANAGER_KEY
     const { channelId, sessionId } = splitManagerKey(SYSTEM_TASKS_MANAGER_KEY)
     const now = new Date().toISOString()
     const worker: LedgerWorker = {
       worker_id: taskId,
+      manager_key: managerKey,
       task: {
         id: taskId,
         type: params.task_type,
@@ -2671,7 +2641,6 @@ export class UnifiedAgent extends ModuleBase {
         created_at: now,
       },
       origin: {
-        spawned_by_session: SYSTEM_TASKS_MANAGER_KEY,
         trigger_type: 'system',
         ...(params.creator_friend_id ? { creator_friend_id: params.creator_friend_id } : {}),
       },
@@ -2682,13 +2651,13 @@ export class UnifiedAgent extends ModuleBase {
       incarnations: [],
       updated_at: now,
     }
-    const persisted = await ledger.upsertWorker(dialogObjectId, taskId, (previous) => {
+    const persisted = await ledger.upsertWorker(managerKey, taskId, (previous) => {
       if (previous) throw new Error(`Duplicate maintenance system task: ${taskId}`)
       return worker
     })
     if (!persisted) throw new Error(`Failed to persist maintenance system task: ${taskId}`)
 
-    void this.runMaintenanceSystemTask(dialogObjectId, taskId).catch((error) => {
+    void this.runMaintenanceSystemTask(managerKey, taskId).catch((error) => {
       console.error(
         `[${this.config.moduleId}] maintenance system task handler crashed (task=${taskId}):`,
         error instanceof Error ? error.message : String(error),

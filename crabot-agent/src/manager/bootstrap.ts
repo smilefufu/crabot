@@ -35,7 +35,7 @@ import { join, resolve } from 'path'
 import { WorkerHarness, type HarnessDeps, type ReconcileReport } from '../workers/harness/harness'
 import { LedgerStore } from '../workers/harness/ledger-store'
 import { WorkspaceManager } from '../workers/harness/workspace-manager'
-import type { DialogObjectId } from '../workers/harness/ledger-types'
+import type { ManagerKey } from '../workers/harness/ledger-types'
 import { BuiltinWorkerAdapter } from '../workers/builtin/adapter.js'
 import { ClaudeCodeAdapter } from '../workers/claude-code/adapter.js'
 import { CodexWorkerAdapter } from '../workers/codex/adapter.js'
@@ -56,7 +56,7 @@ import {
   type ResolvedPrincipal,
 } from './principal.js'
 import type { CompactionPolicy } from './compaction.js'
-import type { ManagerEpisodeFailure, ManagerKey } from './types.js'
+import type { ManagerEpisodeFailure } from './types.js'
 
 // 与 `unified-agent.ts` 同款引用路径:这两个常量没有从 `engine/index.ts` 转出,直接引子模块
 // (engine 本阶段零改动,不为此新增 barrel 导出)。
@@ -140,7 +140,7 @@ export interface BootstrapDeps {
   /**
    * 发起人身份的解析原料(admin 权限解析 / session memory_scopes / 场景画像 /
    * crab self handle / master friend id)。本模块据它在**唤醒边界**解析一次并缓存,
-   * 让 `dialogObjectIdFor` / `toolFace` / `promptInputs` 这三个同步 thunk 只读缓存
+   * 让 `managerKeyFor` / `toolFace` / `promptInputs` 这三个同步 thunk 只读缓存
    * ——签名一个都不用改成异步(见 `principal.ts` 文件头)。
    */
   readonly principalResolver: PrincipalResolverDeps
@@ -243,7 +243,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   const adapterDataDir = (impl: WorkerImplId): string => join(agentDir, 'worker-adapters', impl)
   const builtinDataDir = adapterDataDir('builtin')
 
-  const ledger = new LedgerStore(join(agentDir, 'ledgers'))
+  const ledger = new LedgerStore(join(agentDir, 'worker-ledgers'))
   const workspaces = new WorkspaceManager(resolveWorkspacesRoot(deps.dataRoot))
 
   // 见文件头"与 registry 的环形依赖"。
@@ -258,7 +258,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   /**
    * worker 事件唤醒的 episode 失败 → `deps.reportEpisodeFailure`(fail-loud)。
    *
-   * 目标会话取**该 worker 的监护 manager**(`origin.spawned_by_session`),台账查不到则落系统
+   * 目标会话取**该 worker 的监护 manager**(`origin.manager_key`),台账查不到则落系统
    * 线程——与 `routeWorkerEvent` 自己的路由判据逐字相同,所以"哪个 manager 挂了"和"告诉谁"
    * 永远是同一个会话。不用 `report_to`:那是 worker **结果**的回报目标,可以与监护 session 不同
    * (同一 friend 跨 channel 共享台账),拿它当告警目标会把话说到另一个对话里去。
@@ -271,7 +271,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     try {
       const found = await ledger.findWorker(workerId)
       const target = channelSessionFromManagerKey(
-        found?.worker.origin.spawned_by_session ?? SYSTEM_TASKS_MANAGER_KEY,
+        found?.worker.manager_key ?? SYSTEM_TASKS_MANAGER_KEY,
       )
       const title = found?.worker.task.title
       deps.reportEpisodeFailure({
@@ -373,7 +373,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   const tokenEstimator = new ContextManager({ maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS })
 
   // 发起人身份:唤醒边界异步解析一次,三个同步 thunk 读缓存(见 principal.ts 文件头)。
-  const principals = new ManagerPrincipalStore(deps.principalResolver, SYSTEM_TASKS_MANAGER_KEY)
+  const principals = new ManagerPrincipalStore(deps.principalResolver)
 
   registry = new ManagerRegistry({
     store: new ManagerSessionStore(join(agentDir, 'managers')),
@@ -385,10 +385,10 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     model: deps.managerModel,
     now: () => new Date(deps.now()),
     timezone: deps.timezone,
-    dialogObjectIdFor: (key) => principals.dialogObjectIdFor(key),
+    managerKeyFor: (key) => key,
     // 人类消息唤醒边界:这是人类消息链路上**唯一**一次异步解析。返回本批发言者算好的档位,
-    // 由 registry 挂到本 episode 的唤醒事件上——缓存只服务于那三个同步 thunk(记忆档位 /
-    // 台账归档键 / 对话对象档案),派活用的档位走事件,不走缓存(PR #59 review)。
+    // 由 registry 挂到本 episode 的唤醒事件上——缓存只服务于同步 thunk(记忆档位 /
+    // 对话对象档案),派活用的档位走事件,不走缓存(PR #59 review)。
     onHumanWake: async (key, principal) => (await principals.resolve(key, principal)).permissions,
     // scheduled 唤醒边界(§4.4"权限按 `Schedule.creator_friend_id` 解析,`is_builtin` 按 master
     // 等价"):按**调度自己的身份**解析,不碰该会话的发起人缓存(既不读也不写)。
@@ -414,7 +414,6 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       buildManagerToolFace({
         harness,
         workerContext: () => ({
-          dialogObjectId: principals.dialogObjectIdFor(key),
           managerKey: key,
           reportTo: channelSessionFromManagerKey(key),
           // 权限身份(§4.4"权限按 Schedule.creator_friend_id 解析(is_builtin 按 master

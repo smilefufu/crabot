@@ -34,8 +34,8 @@
  * 终态**一次都没发出去**(spawned/exited/resumed 三条事件,exited 的读晚于 §5.3 透明接续把
  * task 拉回 running 的那次落账)。把值钉在事件上,读取时刻与落账时刻就此解耦。
  *
- * **台账读没有全部消失**,但读的只剩 `task_id` 与 `dialog_object_id` 两个字段——它们在一个
- * worker 的整个生命周期内不变(`task.id` 建账即等于 `worker_id`,`dialog_object_id` 是台账的
+ * **台账读没有全部消失**,但读的只剩 `task_id` 与 `manager_key` 两个字段——它们在一个
+ * worker 的整个生命周期内不变(`task.id` 建账即等于 `worker_id`,`manager_key` 是台账的
  * 聚合键),读晚了也读不出别的值,不存在"被下一次落账折叠"的问题。会随时间变化的只有
  * `status`,而它已经不再现读。
  *
@@ -75,7 +75,7 @@
 import { generateId, type Event, type ModuleId, type RpcClient } from 'crabot-shared'
 
 import type { LedgerStore } from '../workers/harness/ledger-store.js'
-import type { DialogObjectId, TaskStatus } from '../workers/harness/ledger-types.js'
+import type { ManagerKey, TaskStatus } from '../workers/harness/ledger-types.js'
 import type { HarnessEvent } from '../workers/harness/harness.js'
 import type { TaskId } from '../types.js'
 
@@ -85,7 +85,7 @@ export interface AgentTaskStatusChangedPayload {
   task_id: TaskId
   old_status: TaskStatus
   new_status: TaskStatus
-  dialog_object_id: DialogObjectId
+  manager_key: ManagerKey
 }
 
 /** 对外事件发布口。同步返回(fire-and-forget),失败只记日志。 */
@@ -132,7 +132,7 @@ const INITIAL_TASK_STATUS: TaskStatus = 'queued'
  * (由 bootstrap 接线),同步返回、内部 fire-and-forget。
  *
  * 每个 worker 一条 promise 链——`new_status` 改由事件自带之后这条链**仍然是必需的**,原因有二:
- * 1. 台账读还在(取 `task_id` / `dialog_object_id`,见文件头),`onEvent` 却是同步回调:不串行
+ * 1. 台账读还在(取 `task_id` / `manager_key`,见文件头),`onEvent` 却是同步回调:不串行
  *    的话两条紧邻事件的读会交叉完成,发布顺序被打乱,订阅方最后落到的会是**较早**那个状态
  *    (对 admin 就是"任务永远显示 running");
  * 2. `lastKnownStatus` 的读与写跨了那个 await,不串行就会出现两条事件读到同一个 old_status、
@@ -148,7 +148,7 @@ export function makeTaskStatusEventBridge(deps: {
 
   const translate = async (event: HarnessEvent): Promise<void> => {
     const workerId = event.worker_id
-    // 只为拿两个**不随时间变化**的字段:task_id 与 dialog_object_id(见文件头)。状态不从这里取。
+    // 只为拿两个**不随时间变化**的字段:task_id 与 manager_key(见文件头)。状态不从这里取。
     const found = await deps.ledger.findWorker(workerId)
     // worker 不在台账(如 query_failed 的 worker_not_found 分支):没有 task,无从谈状态迁移。
     if (!found) return
@@ -165,7 +165,7 @@ export function makeTaskStatusEventBridge(deps: {
       task_id: found.worker.task.id,
       old_status: oldStatus,
       new_status: newStatus,
-      dialog_object_id: found.dialogObjectId,
+      manager_key: found.managerKey,
     })
   }
 

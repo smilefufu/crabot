@@ -6,7 +6,7 @@ import { buildWorkerTools, type WorkerToolsContext } from '../../src/manager/too
 import { WorkerHarness, type HarnessDeps, type SpawnWorkerParams } from '../../src/workers/harness/harness'
 import { LedgerStore } from '../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../src/workers/harness/workspace-manager'
-import { dialogObjectIdForPrivate } from '../../src/workers/harness/ledger-types'
+import type { ManagerKey } from '../../src/workers/harness/ledger-types'
 import type { HarnessEvent } from '../../src/workers/harness/worker-events'
 import { WorkerExitedError } from '../../src/workers/errors'
 import type {
@@ -141,8 +141,7 @@ async function makeHarness(
 
 // 本套件下 manager 的固定归属：所有 spawn_worker 透传断言都对照这份 context。
 const CTX: WorkerToolsContext = {
-  dialogObjectId: dialogObjectIdForPrivate('friend-1'),
-  managerKey: 'wechat::sess-1',
+  managerKey: 'wechat::sess-1' as ManagerKey,
   episodeId: 'episode-42',
   creatorFriendId: 'friend-1',
   reportTo: { channel_id: 'wechat', session_id: 'sess-1' },
@@ -150,10 +149,10 @@ const CTX: WorkerToolsContext = {
 
 function directSpawnParams(overrides: Partial<SpawnWorkerParams> = {}): SpawnWorkerParams {
   return {
-    dialogObjectId: CTX.dialogObjectId,
+    managerKey: CTX.managerKey,
     title: '直接调 harness 预置的任务',
     prompt: '把活干完',
-    origin: { spawned_by_session: CTX.managerKey, trigger_type: 'message' },
+    origin: { spawned_by_episode: CTX.managerKey, trigger_type: 'message' },
     report_to: CTX.reportTo,
     ...overrides,
   }
@@ -202,7 +201,7 @@ describe('buildWorkerTools — 工具面形状', () => {
 // ---- spawn_worker ----
 
 describe('spawn_worker', () => {
-  it('透传 dialogObjectId/origin/report_to 到台账，异步返回简短确认（非完整 worker 记录）', async () => {
+  it('透传 managerKey/origin/report_to 到台账，异步返回简短确认（非完整 worker 记录）', async () => {
     const { harness } = await makeHarness()
     const tools = buildWorkerTools({ harness, context: () => CTX })
     const spawnWorker = tools.find((t) => t.name === 'spawn_worker')!
@@ -218,12 +217,11 @@ describe('spawn_worker', () => {
     expect(typeof parsed.worker_id).toBe('string')
     expect(Object.keys(parsed).sort()).toEqual(['impl', 'status', 'worker_id'])
 
-    // 真正落盘的台账记录：origin/report_to/dialogObjectId 与 context() 提供的完全一致。
-    const listed = await harness.listWorkers(CTX.dialogObjectId)
+    // 真正落盘的台账记录：origin/report_to/managerKey 与 context() 提供的完全一致。
+    const listed = await harness.listWorkers(CTX.managerKey)
     const worker = listed.find((w) => w.worker_id === parsed.worker_id)
     expect(worker).toBeDefined()
     expect(worker!.origin).toEqual({
-      spawned_by_session: CTX.managerKey,
       spawned_by_episode: CTX.episodeId,
       creator_friend_id: CTX.creatorFriendId,
       trigger_type: 'message',
@@ -239,7 +237,7 @@ describe('spawn_worker', () => {
 
     const result = await spawnWorker.call({ title: '定时任务', prompt: '按计划执行' }, {})
     const parsed = parseOutput(result.output)
-    const listed = await harness.listWorkers(CTX.dialogObjectId)
+    const listed = await harness.listWorkers(CTX.managerKey)
     const worker = listed.find((w) => w.worker_id === parsed.worker_id)
     expect(worker!.origin.trigger_type).toBe('scheduled')
   })
@@ -373,10 +371,10 @@ describe('query_worker', () => {
     expect(parseOutput(result.output)).toEqual({ status: 'queried', worker_id: worker.worker_id })
 
     await waitUntil(async () => {
-      const [w] = await harness.listWorkers(CTX.dialogObjectId)
+      const [w] = await harness.listWorkers(CTX.managerKey)
       return w.incarnations.length === 2
     })
-    const [w] = await harness.listWorkers(CTX.dialogObjectId)
+    const [w] = await harness.listWorkers(CTX.managerKey)
     expect(w.incarnations[1]).toMatchObject({ seq: 2, forked_from: 1 })
   })
 
@@ -515,7 +513,7 @@ describe('read_worker_output', () => {
 
     await queryWorker.call({ worker_id: worker.worker_id, question: '现在进展如何？' }, {})
     await waitUntil(async () => {
-      const [w] = await harness.listWorkers(CTX.dialogObjectId)
+      const [w] = await harness.listWorkers(CTX.managerKey)
       return w.incarnations.length === 2
     })
 
@@ -530,7 +528,7 @@ describe('read_worker_output', () => {
 // ---- list_workers（同步，本对话对象全量） ----
 
 describe('list_workers', () => {
-  it('同步返回 context().dialogObjectId 名下全部 worker', async () => {
+  it('同步返回 context().managerKey 名下全部 worker', async () => {
     const { harness } = await makeHarness()
     const w1 = await harness.spawnWorker(directSpawnParams({ title: '任务一' }))
     const w2 = await harness.spawnWorker(directSpawnParams({ title: '任务二' }))
@@ -558,7 +556,7 @@ describe('kill_worker', () => {
     expect(parseOutput(first.output)).toEqual({ status: 'killed', worker_id: worker.worker_id })
     expect(fake.killCalls).toHaveLength(1)
 
-    const [afterFirst] = await harness.listWorkers(CTX.dialogObjectId)
+    const [afterFirst] = await harness.listWorkers(CTX.managerKey)
     expect(afterFirst.task.status).toBe('cancelled')
 
     // 幂等：再调一次不重复 adapter.kill、不报错。

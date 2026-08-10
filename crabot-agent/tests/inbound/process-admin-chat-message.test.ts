@@ -268,7 +268,7 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
       .buildBuiltinWorkerRuntime({
         worker_id: 'w-probe',
         workspace: { root: dataDir.root },
-        origin: { spawned_by_session: MANAGER_KEY, trigger_type: 'message' },
+        origin: { spawned_by_episode: MANAGER_KEY, trigger_type: 'message' },
       })
       .tools()
       .map((t) => t.name)

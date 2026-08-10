@@ -19,14 +19,16 @@ const TEST_DATA_DIR = './test-data/agent-task-status-event-test'
 const ADMIN_CHAT_WORKER = {
   worker_id: 'w-admin-1',
   task: { id: 'task-admin-1', title: '把 README 翻译成英文', status: 'running' },
-  origin: { spawned_by_session: 'admin-web::admin-chat', trigger_type: 'message' },
+  manager_key: 'admin-web::admin-chat',
+  origin: { trigger_type: 'message' },
   report_to: { channel_id: 'admin-web', session_id: 'admin-chat' },
 }
 
 const WECHAT_WORKER = {
   worker_id: 'w-wechat-1',
   task: { id: 'task-wechat-1', title: '群里那个活', status: 'running' },
-  origin: { spawned_by_session: 'wechat::sess-1', trigger_type: 'message' },
+  manager_key: 'wechat::sess-1',
+  origin: { trigger_type: 'message' },
   report_to: { channel_id: 'wechat', session_id: 'sess-1' },
 }
 
@@ -128,7 +130,7 @@ describe('agent.task_status_changed 订阅（protocol-agent-v3 §9.2）', () => 
         task_id: p.taskId,
         old_status: p.from,
         new_status: p.to,
-        dialog_object_id: 'friend:master-1',
+        manager_key: 'admin-web::admin-chat',
       },
       timestamp: '2026-08-01T00:00:00.000Z',
     }

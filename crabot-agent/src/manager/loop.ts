@@ -53,7 +53,7 @@ import { assembleManagerSystemPrompt } from './prompt.js'
 import type { ManagerSessionStore } from './session-store.js'
 import type { ManagerSessionState, ManagerKey } from './types.js'
 import type { WorkerHarness } from '../workers/harness/harness'
-import type { DialogObjectId, LedgerWorker } from '../workers/harness/ledger-types'
+import type { LedgerWorker } from '../workers/harness/ledger-types'
 import type { HarnessEvent } from '../workers/harness/worker-events'
 import type { ChannelMessage, Friend, ResolvedPermissions } from '../types'
 
@@ -114,7 +114,7 @@ export type WakeEvent =
       /**
        * P7 J additive:与 `human_messages` 的同名字段逐字同义(见上)。
        * **群聊注意力放行走的是这一条**,漏带 friend 就等于群聊路径拿不到发起人身份
-       * ——权限档位 / 记忆 scopes / 台账归档键全部退回未解析那一档。
+       * ——权限档位 / 记忆 scopes 全部退回未解析那一档。
        */
       readonly friend?: Friend
       /** 与 `human_messages` 的同名字段逐字同义(见上)。 */
@@ -145,12 +145,12 @@ export interface ManagerLoopDeps {
   readonly key: ManagerKey
   readonly isSystemThread: boolean
   /** 台账渲染用(harness.listWorkers 的入参)。manager 会话粒度(ManagerKey)与台账聚合粒度
-   *  (DialogObjectId)不同——由调用方按 protocol §3 解析好传入,本模块不做这层映射。
+   *  (ManagerKey)不同——由调用方按 protocol §3 解析好传入,本模块不做这层映射。
    *
    *  **thunk 而非定值**(P7 J):私聊的归档键要等第一条人类消息带来 friend 之后才能收敛成
    *  `friend:<id>`,而 loop 实例可能先由 worker 事件建出来。定值会把那一刻的 group 形状
    *  永久钉死在实例上,同一个人的台账因此裂成两份。 */
-  readonly dialogObjectId: () => DialogObjectId
+  readonly managerKey: () => ManagerKey
   readonly store: ManagerSessionStore
   readonly policy: CompactionPolicy
   /** decideCompaction 的 token 估算器,调用方注入(与 compaction.ts 的既定依赖注入方式一致)。 */
@@ -535,7 +535,7 @@ export class ManagerLoop {
   }
 
   private async fetchLedgerRender(): Promise<string> {
-    const workers = await this.deps.harness.listWorkers(this.deps.dialogObjectId())
+    const workers = await this.deps.harness.listWorkers(this.deps.managerKey())
     return renderLedger(workers)
   }
 }

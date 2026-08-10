@@ -12,7 +12,7 @@ import {
 } from '../../../src/workers/harness/harness'
 import { LedgerStore } from '../../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../../src/workers/harness/workspace-manager'
-import { dialogObjectIdForPrivate } from '../../../src/workers/harness/ledger-types'
+import type { LedgerWorker, ManagerKey } from '../../../src/workers/harness/ledger-types'
 import type { HarnessEvent } from '../../../src/workers/harness/worker-events'
 import { CliInputStallError, WorkerExitedError } from '../../../src/workers/errors'
 import { BuiltinWorkerAdapter } from '../../../src/workers/builtin/adapter'
@@ -220,11 +220,11 @@ async function makeHarness(
 
 function spawnParams(overrides: Partial<SpawnWorkerParams> = {}): SpawnWorkerParams {
   return {
-    dialogObjectId: dialogObjectIdForPrivate('friend-1'),
+    managerKey: (`test::${'friend-1'}` as ManagerKey),
     title: '测试任务',
     goal: '把活干完',
     prompt: '把活干完',
-    origin: { spawned_by_session: 'wechat::sess-1', trigger_type: 'message' },
+    origin: { spawned_by_episode: 'wechat::sess-1', trigger_type: 'message' },
     report_to: { channel_id: 'wechat', session_id: 'sess-1' },
     ...overrides,
   }
@@ -261,7 +261,7 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     // 化身自然结束（非 kill）→ processStateChange 把台账主线化身落 exited(completed)。
     fake.emitStateChange(mainlineHandle, 'exited')
     await waitUntil(async () => {
-      const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
       return w.incarnations[0].state === 'exited'
     })
     events.length = 0
@@ -276,7 +276,7 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     expect(fake.resumeCalls[0].prev).toEqual({ worker_id: worker.worker_id, seq: 1, session_ref: mainlineHandle.session_ref })
     expect(fake.resumeCalls[0].wakeInput).toBe('还有件事要办')
 
-    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     expect(w.incarnations).toHaveLength(2)
     expect(w.incarnations[1].forked_from).toBeUndefined() // 入主线链，不是侧问分支
     expect(w.incarnations[1].state).toBe('running')
@@ -309,10 +309,10 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     const worker = await harness.spawnWorker(spawnParams())
     const h: IncarnationHandle = { worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }
     fake.emitStateChange(h, 'exited')
-    await waitUntil(async () => (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0].task.status === 'completed')
+    await waitUntil(async () => (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0].task.status === 'completed')
 
     await harness.sendToWorker(worker.worker_id, 'continue')
-    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [settled] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     expect(settled.task.status).toBe('completed')
     expect(settled.incarnations[1]).toMatchObject({ state: 'exited', ended_reason: 'completed' })
   })
@@ -337,7 +337,7 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     adaptersMap.set('builtin', fake)
     const worker = await harness.spawnWorker(spawnParams())
     fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }, 'exited')
-    await waitUntil(async () => (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0].task.status === 'completed')
+    await waitUntil(async () => (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0].task.status === 'completed')
     const settlements: string[] = []
 
     await harness.sendToWorker(worker.worker_id, 'durable bg', {
@@ -383,7 +383,7 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     adaptersMap.set('builtin', fake)
     const worker = await harness.spawnWorker(spawnParams())
     fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }, 'exited')
-    await waitUntil(async () => (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0].task.status === 'completed')
+    await waitUntil(async () => (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0].task.status === 'completed')
     const settlements: string[] = []
 
     await harness.sendToWorker(worker.worker_id, 'durable terminal retry', {
@@ -393,7 +393,7 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
 
     expect(fake.resumeCalls).toHaveLength(2)
     expect(settlements).toEqual(['delivered'])
-    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [settled] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     expect(settled.incarnations[settled.incarnations.length - 1]).toMatchObject({
       seq: 3,
       state: 'running',
@@ -420,7 +420,7 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     adaptersMap.set('builtin', fake)
     const worker = await harness.spawnWorker(spawnParams())
     fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }, 'exited')
-    await waitUntil(async () => (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0].task.status === 'completed')
+    await waitUntil(async () => (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0].task.status === 'completed')
     const settlements: string[] = []
 
     await harness.sendToWorker(worker.worker_id, 'durable bg', {
@@ -470,14 +470,14 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     // 没有触发过任何 fake.emitStateChange —— 台账里 incarnations[0].state 此刻仍是
     // 'running'（spawnWorker 落定后就是 running），模拟"adapter 内部已经退出，但迟到的
     // 状态回调还没追上"的竞态：这正是评审 PoC 复现的场景。
-    const before = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    const before = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0]
     expect(before.incarnations[0].state).toBe('running')
     expect(before.incarnations[0].ended_at).toBeUndefined()
     events.length = 0
 
     await expect(harness.sendToWorker(worker.worker_id, '继续')).resolves.toBeUndefined()
 
-    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     expect(w.incarnations).toHaveLength(2)
     // 修复点：旧化身（seq=1）不再永久卡在 running —— revive 之前已经被回填了终态。
     const oldEntry = w.incarnations[0]
@@ -501,7 +501,7 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     }
     fake.emitStateChange(staleHandle, 'exited')
     await new Promise((resolve) => setTimeout(resolve, 20))
-    const [w2] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w2] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     expect(w2.incarnations[0].ended_reason).toBe('completed')
   })
 
@@ -523,12 +523,12 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     const worker = await harness.spawnWorker(spawnParams())
     // 同上一条：台账主线此刻仍是 running（迟到的状态回调没追上），所以 revive 的回填段
     // 会真正触发——这正是原来把失败记成成功的那一处。
-    const before = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    const before = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0]
     expect(before.incarnations[0].state).toBe('running')
 
     await expect(harness.sendToWorker(worker.worker_id, '继续')).resolves.toBeUndefined()
 
-    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     expect(w.incarnations).toHaveLength(2)
     expect(w.incarnations[0].state).toBe('exited')
     expect(w.incarnations[0].ended_reason).toBe('failed')
@@ -548,13 +548,13 @@ describe('WorkerHarness — 透明接续：revive (capabilities().revive === tru
     const h: IncarnationHandle = { worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }
     fake.emitStateChange(h, 'exited', 'failed')
     await waitUntil(async () => {
-      const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
       return w.task.status === 'failed'
     })
 
     await expect(harness.sendToWorker(worker.worker_id, '再试一次')).resolves.toBeUndefined()
 
-    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     expect(w.incarnations).toHaveLength(2)
     expect(w.incarnations[0].ended_reason).toBe('failed') // 没被洗成 completed
     expect(fake.resumeCalls).toHaveLength(1)
@@ -607,7 +607,7 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
     // exited(superseded)。
     expect(fake.killCalls).toHaveLength(1)
     expect(fake.killCalls[0].seq).toBe(1)
-    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     const oldEntry = w.incarnations.find((i) => i.seq === 1)!
     expect(oldEntry.state).toBe('exited')
     expect(oldEntry.ended_reason).toBe('superseded')
@@ -653,7 +653,7 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
     const worker = await harness.spawnWorker(spawnParams())
 
     await harness.sendToWorker(worker.worker_id, 'continue')
-    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [settled] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     expect(settled.task.status).toBe('completed')
     expect(settled.incarnations[settled.incarnations.length - 1]).toMatchObject({
       impl: 'claude-code',
@@ -723,7 +723,7 @@ describe('WorkerHarness — 透明接续：handoff (capabilities().revive === fa
     const h: IncarnationHandle = { worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }
     fake.emitStateChange(h, 'exited', 'failed')
     await waitUntil(async () => {
-      const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
       return w.task.status === 'failed'
     })
 
@@ -798,7 +798,7 @@ describe('WorkerHarness.handoffIncarnation — fixed capability snapshot', () =>
     adaptersMap.set('claude-code', source)
     adaptersMap.set('codex', target)
     const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
-    const workspace = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0].incarnations[0].workspace
+    const workspace = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0].incarnations[0].workspace
     await fs.writeFile(join(workersDir, worker.worker_id, 'context.json'), '{')
 
     await expect(harness.switchWorkerImpl(worker.worker_id, 'codex', 'must not mutate')).rejects.toThrow(/invalid JSON/)
@@ -819,7 +819,7 @@ describe('WorkerHarness.handoffIncarnation — fixed capability snapshot', () =>
     adaptersMap.set('claude-code', source)
     adaptersMap.set('codex', target)
     const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
-    const workspace = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0].incarnations[0].workspace
+    const workspace = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0].incarnations[0].workspace
     events.length = 0
 
     await expect(harness.switchWorkerImpl(worker.worker_id, 'codex', 'must not break source')).rejects.toThrow(/tracked credential target/)
@@ -829,7 +829,7 @@ describe('WorkerHarness.handoffIncarnation — fixed capability snapshot', () =>
     expect(target.spawnCalls).toEqual([])
     expect(source.killCalls).toEqual([])
     await expect(fs.access(join(workspace, 'HANDOFF.md'))).rejects.toMatchObject({ code: 'ENOENT' })
-    const [current] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [current] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     expect(current.incarnations).toHaveLength(1)
     expect(current.incarnations[0].state).toBe('running')
     expect(events.filter((event) => event.kind === 'handoff_started' || event.kind === 'superseded')).toEqual([])
@@ -858,7 +858,7 @@ describe('WorkerHarness.switchWorkerImpl — 跨实现切换', () => {
     expect(source.spawnCalls).toHaveLength(1)
     expect(target.spawnCalls[0].prompt).toContain('手工切换到 codex')
 
-    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     const oldEntry = w.incarnations.find((i) => i.seq === 1)!
     expect(oldEntry.ended_reason).toBe('superseded')
     const newEntry = w.incarnations[w.incarnations.length - 1]
@@ -964,7 +964,7 @@ describe('WorkerHarness — 接续过程中的并发', () => {
     const mainlineHandle: IncarnationHandle = { worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }
     fake.emitStateChange(mainlineHandle, 'exited')
     await waitUntil(async () => {
-      const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
       return w.incarnations[0].state === 'exited'
     })
 
@@ -989,7 +989,7 @@ describe('WorkerHarness — 接续过程中的并发', () => {
 
     expect(secondResolved).toBe(true)
     // 接续完成后台账只多了一个新主线化身（不是两个并发接续各自产出一个）。
-    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     expect(w.incarnations).toHaveLength(2)
     expect(fake.resumeCalls).toHaveLength(1)
     // 第二条消息通过"mainline.seq !== sourceSeq"分支，作为普通投递补送到了新主线。
@@ -1042,7 +1042,7 @@ describe('WorkerHarness.handoffIncarnation — handoff 目标是 builtin 时的 
     // 新的没建成"的死结里。
     expect(source.killCalls).toHaveLength(0)
     expect(builtinTarget.spawnCalls).toHaveLength(0)
-    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     expect(w.incarnations).toHaveLength(1)
     expect(w.incarnations[0].state).toBe('running') // 源化身原样存活，未被标 superseded
     expect(w.incarnations[0].ended_reason).toBeUndefined()
@@ -1109,7 +1109,7 @@ describe('WorkerHarness.handoffIncarnation — handoff 目标是 builtin 时的 
     expect(factoryCtxs[0].workspace.root).toBe(worker.incarnations[0].workspace)
     expect(factoryCtxs[0].origin).toEqual(worker.origin)
 
-    const [w] = await ledger.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await ledger.listWorkers((`test::${'friend-1'}` as ManagerKey))
     const newEntry = w.incarnations[w.incarnations.length - 1]
     expect(newEntry.impl).toBe('builtin')
     expect(newEntry.state).toBe('running')
@@ -1144,7 +1144,7 @@ describe('WorkerHarness — 化身 seq 跨实例撞号（protocol-agent-v3 §6.1
     // 前会先把旧化身回填终态（Task 8 修复 1），resume 产出的新化身同样是 seq=1（撞号）。
     await harness.sendToWorker(worker.worker_id, '继续')
 
-    const [afterRevive] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [afterRevive] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     expect(afterRevive.incarnations).toHaveLength(2)
     const archived = afterRevive.incarnations[0]
     const active = afterRevive.incarnations[1]
@@ -1167,11 +1167,11 @@ describe('WorkerHarness — 化身 seq 跨实例撞号（protocol-agent-v3 §6.1
     }
     fake.emitStateChange(activeHandle, 'exited')
     await waitUntil(async () => {
-      const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
       return w.incarnations[1].state === 'exited'
     })
 
-    const [afterStateChange] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [afterStateChange] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     const archivedAfter = afterStateChange.incarnations[0]
     const activeAfter = afterStateChange.incarnations[1]
 
@@ -1225,10 +1225,10 @@ describe('BuiltinWorkerAdapter → WorkerHarness — session_ref 时效性修复
     expect(spawnTimeSessionRef).toBeTruthy()
 
     await waitUntil(async () => {
-      const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
       return w.incarnations[0].state === 'idle'
     })
-    const [afterFirstBurst] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [afterFirstBurst] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     // 第一轮 burst 结束后，台账的 session_ref 已经从 spawn 时的根节点前进到新 tip——
     // 不再是创建时刻的快照，而是"最近一次完成的状态转换点"。
     expect(afterFirstBurst.incarnations[0].session_ref).not.toBe(spawnTimeSessionRef)
@@ -1236,11 +1236,11 @@ describe('BuiltinWorkerAdapter → WorkerHarness — session_ref 时效性修复
 
     await harness.sendToWorker(worker.worker_id, '第二轮输入')
     await waitUntil(async () => {
-      const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
       return w.incarnations[0].state === 'idle' && w.incarnations[0].session_ref !== afterFirstBurstRef
     })
 
-    const [afterSecondBurst] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [afterSecondBurst] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     expect(afterSecondBurst.incarnations[0].session_ref).not.toBe(afterFirstBurstRef)
     expect(afterSecondBurst.incarnations[0].session_ref).not.toBe(spawnTimeSessionRef)
   })
@@ -1255,7 +1255,7 @@ describe('WorkerHarness.processStateChange — 化身查找: 同 (impl, seq) 撞
     // 1. spawn 初始化身
     const worker = await harness.spawnWorker(spawnParams())
     const workerId = worker.worker_id
-    const dialogId = dialogObjectIdForPrivate('friend-1')
+    const dialogId = (`test::${'friend-1'}` as ManagerKey)
 
     // 2. 让初始化身进入 exited 状态（旧的已归档化身）
     const handle: IncarnationHandle = { worker_id: workerId, seq: 1, impl: 'builtin', session_ref: worker.incarnations[0].session_ref }
@@ -1333,7 +1333,7 @@ describe('WorkerHarness.processStateChange — 化身查找: 同 (impl, seq) 撞
     // 1. spawn 主线化身 seq=1
     const worker = await harness.spawnWorker(spawnParams())
     const workerId = worker.worker_id
-    const dialogId = dialogObjectIdForPrivate('friend-1')
+    const dialogId = (`test::${'friend-1'}` as ManagerKey)
     const mainlineHandle: IncarnationHandle = {
       worker_id: workerId,
       seq: 1,
@@ -1430,7 +1430,7 @@ describe('WorkerHarness — 终审 PoC 回归：M1 主线守卫按 (impl,seq) �
 
     // handoff 后新主线是 codex#1 —— target 是全新 FakeAdapter 实例，nextSeq 从 1 开始，
     // 与被 kill 的旧化身 claude-code#1 在 seq 上撞号，这正是终审 PoC 复现的前提。
-    const afterHandoff = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    const afterHandoff = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0]
     const newMainline = afterHandoff.incarnations[afterHandoff.incarnations.length - 1]
     expect(newMainline.impl).toBe('codex')
     expect(newMainline.seq).toBe(1)
@@ -1444,7 +1444,7 @@ describe('WorkerHarness — 终审 PoC 回归：M1 主线守卫按 (impl,seq) �
     source.emitStateChange(oldHandle, 'exited')
     await new Promise((resolve) => setTimeout(resolve, 20))
 
-    const after = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    const after = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0]
     // 新主线（codex#1）未被这条属于旧实现的迟到回调误杀。
     expect(after.task.status).toBe('running')
     const stillMainline = after.incarnations[after.incarnations.length - 1]
@@ -1490,7 +1490,7 @@ describe('WorkerHarness — 终审 PoC 回归：M2 kill 与 in-flight flush 竞�
     // kill 走 harness 自己的 per-worker 锁，不被卡住的 sendInput 阻塞，立即完成。
     await harness.killWorker(worker.worker_id, 'M2 PoC')
 
-    const afterKill = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    const afterKill = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0]
     expect(afterKill.task.status).toBe('cancelled')
 
     // 放行第一条，让它的 sendInput 正常返回，flush 的 while 循环继续处理队列里的第二条。
@@ -1498,7 +1498,7 @@ describe('WorkerHarness — 终审 PoC 回归：M2 kill 与 in-flight flush 竞�
     await firstSend
     await secondSend
 
-    const after = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    const after = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0]
     // 核心断言：task 没有被第二条残留消息的透明接续复活成 running。
     expect(after.task.status).toBe('cancelled')
     expect(fake.resumeCalls).toHaveLength(0)
@@ -1531,7 +1531,7 @@ describe('WorkerHarness — 终审 PoC 回归：M2 kill 与 in-flight flush 竞�
     expect(fake.sendInputCalls).toHaveLength(1) // 确认已经卡在 sendInput 里面，是 in-flight 条目
 
     await harness.killWorker(worker.worker_id, 'M2 PoC 2')
-    const afterKill = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    const afterKill = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0]
     expect(afterKill.task.status).toBe('cancelled')
 
     // 放行卡住的 sendInput，让它抛出 WorkerExitedError（模拟 adapter 发现化身已经真的没了）
@@ -1541,7 +1541,7 @@ describe('WorkerHarness — 终审 PoC 回归：M2 kill 与 in-flight flush 竞�
     releaseGate(new WorkerExitedError(worker.worker_id, 1))
     await send
 
-    const after = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    const after = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0]
     expect(after.task.status).toBe('cancelled') // 核心断言：没有被复活成 running
     expect(fake.resumeCalls).toHaveLength(0)
 
@@ -1622,7 +1622,7 @@ describe('WorkerHarness — 终审 PoC 回归：M3 continueTerminalWorker 守卫
     // 从 1 计数，与旧主线（claude-code#1）seq 撞号，这正是本条 PoC 的复现前提（M1 回归
     // 测试已确认这种撞号是跨实现切换的常态）。
     await harness.switchWorkerImpl(worker.worker_id, 'codex', '并发切换')
-    const afterSwitch = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    const afterSwitch = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0]
     const newMainline = afterSwitch.incarnations[afterSwitch.incarnations.length - 1]
     expect(newMainline.impl).toBe('codex')
     expect(newMainline.seq).toBe(1) // 撞号
@@ -1646,7 +1646,7 @@ describe('WorkerHarness — 终审 PoC 回归：M3 continueTerminalWorker 守卫
     expect(target.sendInputCalls[0].opts).toEqual({ raw: true })
 
     // 没有产生第三个化身（没有误触发一次多余的 revive/handoff）。
-    const after = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    const after = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0]
     expect(after.incarnations).toHaveLength(2)
   })
 
@@ -1672,7 +1672,7 @@ describe('WorkerHarness — 终审 PoC 回归：M3 continueTerminalWorker 守卫
     }, '并发补送 accepted exit')
 
     await expect(send).resolves.toBeUndefined()
-    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [settled] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     const mainline = settled.incarnations[settled.incarnations.length - 1]
     expect(mainline).toMatchObject({
       impl: 'codex',
@@ -1724,7 +1724,7 @@ describe('WorkerHarness — 二轮 review PoC 回归：continueTerminalWorker �
 
     // 投递期间发生跨实现切换：codex#1 顶替 claude-code#1。
     await harness.switchWorkerImpl(worker.worker_id, 'codex', '并发切换')
-    const afterSwitch = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    const afterSwitch = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0]
     const newMainline = afterSwitch.incarnations[afterSwitch.incarnations.length - 1]
     expect(newMainline.impl).toBe('codex')
     expect(newMainline.seq).toBe(1)
@@ -1740,7 +1740,7 @@ describe('WorkerHarness — 二轮 review PoC 回归：continueTerminalWorker �
     }
     target.emitStateChange(newMainlineHandle, 'exited')
     await waitUntil(async () => {
-      const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
       const ml = w.incarnations[w.incarnations.length - 1]
       return ml.impl === 'codex' && ml.state === 'exited'
     })
@@ -1766,7 +1766,7 @@ describe('WorkerHarness — 二轮 review PoC 回归：continueTerminalWorker �
     })
     expect(target.resumeCalls[0].wakeInput).toBe('并发终态竞态')
 
-    const after = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    const after = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0]
     expect(after.incarnations).toHaveLength(3)
     const finalMainline = after.incarnations[after.incarnations.length - 1]
     expect(finalMainline.impl).toBe('codex')
@@ -1815,7 +1815,7 @@ describe('WorkerHarness — 二轮 review PoC 回归：continueTerminalWorker �
     expect(source.sendInputCalls).toHaveLength(1)
 
     await harness.switchWorkerImpl(worker.worker_id, 'codex', '并发切换')
-    const afterSwitch = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    const afterSwitch = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0]
     const newMainline = afterSwitch.incarnations[afterSwitch.incarnations.length - 1]
     expect(newMainline.impl).toBe('codex')
     expect(newMainline.seq).toBe(1)
@@ -1837,7 +1837,7 @@ describe('WorkerHarness — 二轮 review PoC 回归：continueTerminalWorker �
     })
     expect(target.resumeCalls[0].wakeInput).toBe('权威抛错场景')
 
-    const after = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    const after = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0]
     expect(after.incarnations).toHaveLength(3)
     // codex#1 被 revive 之前的补写收尾成终态（reviveIncarnation 既有逻辑：台账态未追上
     // adapter 真实状态时先回填）。这里的 'completed' 是**兜底缺省**：上面 releaseGate 抛的
@@ -1866,7 +1866,7 @@ describe('WorkerHarness.switchWorkerImpl — 终审 PoC 回归：M3 cancelled �
     const worker = await harness.spawnWorker(spawnParams({ impl: 'claude-code' }))
     await harness.killWorker(worker.worker_id, '用户明确终止')
 
-    const beforeSwitch = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    const beforeSwitch = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0]
     expect(beforeSwitch.task.status).toBe('cancelled')
     events.length = 0
 
@@ -1881,7 +1881,7 @@ describe('WorkerHarness.switchWorkerImpl — 终审 PoC 回归：M3 cancelled �
     expect(target.spawnCalls).toHaveLength(0)
 
     // 台账原样：task 仍 cancelled，没有多出新化身。
-    const after = (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]
+    const after = (await harness.listWorkers((`test::${'friend-1'}` as ManagerKey)))[0]
     expect(after.task.status).toBe('cancelled')
     expect(after.incarnations).toHaveLength(1)
 
@@ -1960,7 +1960,7 @@ describe('WorkerHarness — 三轮 review PoC 回归：handoff 目标是该 work
     // 源化身（当前主线 codex#1）状态未变：没有被 kill，没有被标 superseded——这正是死结
     // 场景里会被破坏的不变量。
     expect(codex.killCalls).toHaveLength(0)
-    const [after] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [after] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     const mainlineAfter = after.incarnations[after.incarnations.length - 1]
     expect(mainlineAfter.impl).toBe('codex')
     expect(mainlineAfter.seq).toBe(1)
@@ -2000,7 +2000,7 @@ describe('WorkerHarness — 三轮 review PoC 回归：handoff 目标是该 work
     expect(cc.killCalls).toHaveLength(0)
     expect(cc.spawnCalls).toHaveLength(1) // 仍然只有最初 spawnWorker 那一次
 
-    const [after] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [after] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     expect(after.incarnations).toHaveLength(1)
     expect(after.incarnations[0].state).toBe('running')
     expect(after.incarnations[0].ended_reason).toBeUndefined()
@@ -2042,7 +2042,7 @@ describe('WorkerHarness — 三轮 review PoC 回归：handoff 目标是该 work
     expect(builtinTarget.spawnCalls).toHaveLength(1)
     expect(mainlineAdapter.killCalls).toHaveLength(1) // 源化身（claude-code#1）被 kill 标 superseded
 
-    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     const newEntry = w.incarnations[w.incarnations.length - 1]
     expect(newEntry.impl).toBe('builtin')
     expect(newEntry.state).toBe('running')
@@ -2078,7 +2078,7 @@ describe('WorkerHarness — 三轮 review PoC 回归：handoff 目标是该 work
 
     // 源化身没有被 kill、没有被标 superseded——pre-flight 在 kill 之前就已经拒绝。
     expect(mainlineAdapter.killCalls).toHaveLength(0)
-    const [after] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [after] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     expect(after.incarnations).toHaveLength(1)
     expect(after.incarnations[0].state).toBe('running')
     expect(after.incarnations[0].ended_reason).toBeUndefined()
@@ -2104,7 +2104,7 @@ describe('HarnessEvent.task_status —— 透明接续的迁移点', () => {
     const worker = await harness.spawnWorker(spawnParams())
     fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }, 'exited')
     await waitUntil(async () => {
-      const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
       return w.task.status === 'completed'
     })
     // 终态那一跳自己也带了状态(processStateChange 主线分支)
@@ -2117,7 +2117,7 @@ describe('HarnessEvent.task_status —— 透明接续的迁移点', () => {
     const resumed = events.filter((e) => e.kind === 'resumed')
     expect(resumed).toHaveLength(1)
     expect(resumed[0].task_status).toBe('running')
-    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
     expect(w.task.status).toBe('running')
   })
 
@@ -2144,5 +2144,44 @@ describe('HarnessEvent.task_status —— 透明接续的迁移点', () => {
 
     expect(events.filter((e) => e.kind === 'handoff_started')[0].task_status).toBeUndefined()
     expect(events.filter((e) => e.kind === 'superseded')[0].task_status).toBeUndefined()
+  })
+})
+
+describe('legacy incarnation guardrails', () => {
+  const managerKey = 'test::legacy-session' as ManagerKey
+
+  async function addLegacy(ledger: LedgerStore, workerId: string): Promise<void> {
+    const at = now()
+    await ledger.upsertWorker(managerKey, workerId, () => ({
+      worker_id: workerId,
+      manager_key: managerKey,
+      task: { id: workerId, title: 'legacy', status: 'completed', created_at: at },
+      origin: { trigger_type: 'system' },
+      report_to: { channel_id: 'test', session_id: 'legacy-session' },
+      incarnations: [{ seq: 1, impl: 'legacy', state: 'exited', workspace: join(dataDir, 'workspace'), started_at: at, ended_at: at, ended_reason: 'completed' }],
+      legacy_source: { kind: 'v2_admin_task', admin_task_id: 'old-task', trace_ids: [], imported_at: at },
+      updated_at: at,
+    } satisfies LedgerWorker))
+  }
+
+  it('readWorkerOutput returns an unavailable empty chunk without adapter lookup', async () => {
+    const { harness, ledger, adaptersMap } = await makeHarness()
+    await addLegacy(ledger, 'w-legacy-output')
+    expect(await harness.readWorkerOutput('w-legacy-output', 0)).toEqual({ chunk: '', nextCursor: 0, unavailable_reason: 'legacy worker has no raw output' })
+    expect(adaptersMap.size).toBe(0)
+  })
+
+  it('sendToWorker rejects a legacy source before adapter lookup', async () => {
+    const { harness, ledger, adaptersMap } = await makeHarness()
+    await addLegacy(ledger, 'w-legacy-send')
+    await expect(harness.sendToWorker('w-legacy-send', 'continue')).rejects.toThrow(/legacy worker continuation is not available/)
+    expect(adaptersMap.size).toBe(0)
+  })
+
+  it('startup reconciliation leaves terminal legacy workers unchanged without adapter lookup', async () => {
+    const { harness, ledger, adaptersMap } = await makeHarness()
+    await addLegacy(ledger, 'w-legacy-reconcile')
+    await expect(harness.reconcileOnStartup()).resolves.toMatchObject({ unchanged: ['w-legacy-reconcile'] })
+    expect(adaptersMap.size).toBe(0)
   })
 })

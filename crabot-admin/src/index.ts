@@ -9583,7 +9583,7 @@ export class AdminModule extends ModuleBase {
     // §8.3 的 status 是 `TaskStatus | TaskStatus[]`：重复出现 `?status=a&status=b` 即数组，
     // 单个即单值（沿用 parseAccessibleScopes 的 getAll 惯例，不另发明逗号分隔语法）。
     const statuses = url.searchParams.getAll('status').filter(Boolean)
-    const dialogObjectId = url.searchParams.get('dialog_object_id') || undefined
+    const managerKey = url.searchParams.get('manager_key') || undefined
     // base-protocol §5.7 的 TimeRange 两端各自可选（start 闭、end 开），故任一存在即下发；
     // 这点与 search_traces 端点"start+end 必须同时给"的旧写法不同——那是它自己的历史约定。
     const start = url.searchParams.get('start') || undefined
@@ -9592,7 +9592,7 @@ export class AdminModule extends ModuleBase {
     await this.proxyAgentRpc<
       {
         status?: string | string[]
-        dialog_object_id?: string
+        manager_key?: string
         time_range?: { start?: string; end?: string }
         pagination?: { page: number; page_size: number }
       },
@@ -9600,7 +9600,7 @@ export class AdminModule extends ModuleBase {
     >(res, 'list_workers_admin', {
       ...(statuses.length === 1 ? { status: statuses[0] } : {}),
       ...(statuses.length > 1 ? { status: statuses } : {}),
-      ...(dialogObjectId ? { dialog_object_id: dialogObjectId } : {}),
+      ...(managerKey ? { manager_key: managerKey } : {}),
       ...(start || end ? { time_range: { ...(start ? { start } : {}), ...(end ? { end } : {}) } } : {}),
       pagination: {
         page: parseIntParam(url.searchParams.get('page'), 1),

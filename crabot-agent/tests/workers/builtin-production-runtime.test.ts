@@ -23,7 +23,7 @@ import { join } from 'path'
 import { UnifiedAgent } from '../../src/unified-agent.js'
 import * as agentHandlerModule from '../../src/agent/agent-handler.js'
 import * as engineModule from '../../src/engine/query-loop.js'
-import { dialogObjectIdForPrivate, type DialogObjectId } from '../../src/workers/harness/ledger-types.js'
+import type { ManagerKey } from '../../src/workers/harness/ledger-types.js'
 import type { ManagerStack } from '../../src/manager/bootstrap.js'
 import type { LLMAdapter, ToolDefinition } from '../../src/engine/index.js'
 import type {
@@ -219,16 +219,16 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
 
   async function spawnBuiltin(
     internals: AgentInternals,
-    dialogObjectId: DialogObjectId,
+    managerKey: ManagerKey,
     prompt = '把活干完',
   ): Promise<{ workerId: string; workspace: string }> {
     const harness = internals.managerStack!.harness
     // 关键：**不传 `builtin`** —— manager 的 `spawn_worker` 工具就是这么调 harness 的。
     const worker = await harness.spawnWorker({
-      dialogObjectId,
+      managerKey,
       title: '干活',
       prompt,
-      origin: { spawned_by_session: 'wechat::sess-1', trigger_type: 'message', creator_friend_id: 'friend-f1' },
+      origin: { spawned_by_episode: 'wechat::sess-1', trigger_type: 'message', creator_friend_id: 'friend-f1' },
       report_to: { channel_id: 'wechat' as ModuleId, session_id: 'sess-1' },
       impl: 'builtin',
     })
@@ -244,11 +244,11 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       FINISH,
     )
 
-    const dialogObjectId = dialogObjectIdForPrivate('friend-f1')
-    const { workspace } = await spawnBuiltin(internals, dialogObjectId)
+    const managerKey = (`test::${'friend-f1'}` as ManagerKey)
+    const { workspace } = await spawnBuiltin(internals, managerKey)
 
     await waitUntil(async () => {
-      const [w] = await internals.managerStack!.harness.listWorkers(dialogObjectId)
+      const [w] = await internals.managerStack!.harness.listWorkers(managerKey)
       return w.task.status === 'completed'
     })
 
@@ -256,7 +256,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     const pwd = (await fs.readFile(join(workspace, 'pwd.txt'), 'utf-8')).trim()
     expect(pwd).toBe(await fs.realpath(workspace))
 
-    const [done] = await internals.managerStack!.harness.listWorkers(dialogObjectId)
+    const [done] = await internals.managerStack!.harness.listWorkers(managerKey)
     expect(done.incarnations[0].ended_reason).toBe('completed')
   })
 
@@ -327,7 +327,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       const builtin = internals.buildBuiltinWorkerRuntime({
         worker_id: 'w-perm',
         workspace: { root: tmpRoot },
-        origin: { spawned_by_session: MANAGER_KEY, trigger_type: 'message', creator_friend_id: 'f-speaker' },
+        origin: { spawned_by_episode: MANAGER_KEY, trigger_type: 'message', creator_friend_id: 'f-speaker' },
         ...(principalPermissions ? { principal_permissions: principalPermissions } : {}),
       })!
       return resolveTools(builtin).map((t) => t.name)
@@ -361,7 +361,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       const builtin = internals.buildBuiltinWorkerRuntime({
         worker_id: 'w-sys',
         workspace: { root: tmpRoot },
-        origin: { spawned_by_session: 'wechat::never-seen' as ManagerKey, trigger_type: 'scheduled' },
+        origin: { spawned_by_episode: 'wechat::never-seen' as ManagerKey, trigger_type: 'scheduled' },
       })!
       const names = resolveTools(builtin).map((t) => t.name)
       // BUILTIN_WORKER_PERMISSIONS 开着 shell/file_io
@@ -375,9 +375,9 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
      * 等这批 worker 事件唤醒的 manager episode 落完盘再收尾——真实 harness 的 `onEvent` 是
      * 生产接线，worker 一进 idle 就会唤醒 manager 写会话状态，和 afterEach 的 rm 抢目录。
      */
-    async function settle(internals: AgentInternals, dialogObjectId: DialogObjectId): Promise<void> {
+    async function settle(internals: AgentInternals, managerKey: ManagerKey): Promise<void> {
       await waitUntil(async () => {
-        const [w] = await internals.managerStack!.harness.listWorkers(dialogObjectId)
+        const [w] = await internals.managerStack!.harness.listWorkers(managerKey)
         return w.incarnations[0].state !== 'running'
       })
       await waitUntil(async () => {
@@ -429,12 +429,12 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
 
       // 2. manager 以 S 的名义派活：真实 `harness.spawnWorker`，档位随 spawn 下传。
       llm.queue.push({ text: '先歇着', stopReason: 'end_turn' })
-      const dialogObjectId = dialogObjectIdForPrivate('f-lowpriv')
+      const managerKey = MANAGER_KEY
       const worker = await internals.managerStack!.harness.spawnWorker({
-        dialogObjectId,
+        managerKey,
         title: '干活',
         prompt: '把活干完',
-        origin: { spawned_by_session: MANAGER_KEY, trigger_type: 'message', creator_friend_id: 'f-lowpriv' },
+        origin: { spawned_by_episode: MANAGER_KEY, trigger_type: 'message', creator_friend_id: 'f-lowpriv' },
         report_to: { channel_id: 'wechat' as ModuleId, session_id: 'sess-perm' },
         impl: 'builtin',
         principal_permissions: sPerms ?? undefined,
@@ -454,7 +454,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       const onResume = internals.buildBuiltinWorkerRuntime(await readSpawnContext(internals, worker.worker_id))!
       expect(resolveTools(onResume).map((t) => t.name)).not.toContain('Bash')
 
-      await settle(internals, dialogObjectId)
+      await settle(internals, managerKey)
     })
 
     it('反方向同样成立：master 派出的 worker 不会因为低权限成员随后发言而被降权', async () => {
@@ -463,12 +463,12 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
 
       const masterPerms = await speak(internals, friendOf('f-master', 'master'))
       llm.queue.push({ text: '先歇着', stopReason: 'end_turn' })
-      const dialogObjectId = dialogObjectIdForPrivate('f-master')
+      const managerKey = MANAGER_KEY
       const worker = await internals.managerStack!.harness.spawnWorker({
-        dialogObjectId,
+        managerKey,
         title: '干活',
         prompt: '把活干完',
-        origin: { spawned_by_session: MANAGER_KEY, trigger_type: 'message', creator_friend_id: 'f-master' },
+        origin: { spawned_by_episode: MANAGER_KEY, trigger_type: 'message', creator_friend_id: 'f-master' },
         report_to: { channel_id: 'wechat' as ModuleId, session_id: 'sess-perm' },
         impl: 'builtin',
         principal_permissions: masterPerms ?? undefined,
@@ -479,7 +479,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       const onResume = internals.buildBuiltinWorkerRuntime(await readSpawnContext(internals, worker.worker_id))!
       expect(resolveTools(onResume).map((t) => t.name)).toContain('Bash')
 
-      await settle(internals, dialogObjectId)
+      await settle(internals, managerKey)
     })
 
     it('权限固定不等于配置也固定：改了 model slot，同一个 worker 下次起化身用新 model，档位仍是 spawn 那一份', async () => {
@@ -488,12 +488,12 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
 
       const sPerms = await speak(internals, friendOf('f-lowpriv', 'normal'))
       llm.queue.push({ text: '先歇着', stopReason: 'end_turn' })
-      const dialogObjectId = dialogObjectIdForPrivate('f-lowpriv-cfg')
+      const managerKey = MANAGER_KEY
       const worker = await internals.managerStack!.harness.spawnWorker({
-        dialogObjectId,
+        managerKey,
         title: '干活',
         prompt: '把活干完',
-        origin: { spawned_by_session: MANAGER_KEY, trigger_type: 'message', creator_friend_id: 'f-lowpriv' },
+        origin: { spawned_by_episode: MANAGER_KEY, trigger_type: 'message', creator_friend_id: 'f-lowpriv' },
         report_to: { channel_id: 'wechat' as ModuleId, session_id: 'sess-perm' },
         impl: 'builtin',
         principal_permissions: sPerms ?? undefined,
@@ -510,7 +510,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       // 权限固定：仍是 spawn 那一刻 S 的档位。
       expect(resolveTools(next).map((t) => t.name)).not.toContain('Bash')
 
-      await settle(internals, dialogObjectId)
+      await settle(internals, managerKey)
     })
   })
 
@@ -528,10 +528,10 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       FINISH,
     )
 
-    const dialogObjectId = dialogObjectIdForPrivate('friend-hook')
-    const { workerId } = await spawnBuiltin(internals, dialogObjectId)
+    const managerKey = (`test::${'friend-hook'}` as ManagerKey)
+    const { workerId } = await spawnBuiltin(internals, managerKey)
     await waitUntil(async () => {
-      const [w] = await internals.managerStack!.harness.listWorkers(dialogObjectId)
+      const [w] = await internals.managerStack!.harness.listWorkers(managerKey)
       return w.task.status === 'completed'
     })
 
@@ -549,7 +549,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       const builtin = internals.buildBuiltinWorkerRuntime({
         worker_id: 'w-tools',
         workspace: { root: workspaceRoot },
-        origin: { spawned_by_session: 'wechat::s', trigger_type: 'message' },
+        origin: { spawned_by_episode: 'wechat::s', trigger_type: 'message' },
       })!
       return resolveTools(builtin).map((t) => t.name)
     }
@@ -571,7 +571,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       const builtin = internals.buildBuiltinWorkerRuntime({
         worker_id: 'w-bg-owner',
         workspace: { root: tmpRoot },
-        origin: { spawned_by_session: 'wechat::s', trigger_type: 'message' },
+        origin: { spawned_by_episode: 'wechat::s', trigger_type: 'message' },
       })!
       const names = resolveTools(builtin).map((t) => t.name)
       expect(names).toEqual(expect.arrayContaining(['Bash', 'Output', 'Kill', 'ListEntities']))
@@ -587,7 +587,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       internals.agentHandler = undefined
       const runtime = internals.buildBuiltinWorkerRuntime({
         worker_id: 'w-no-handler', workspace: { root: tmpRoot },
-        origin: { spawned_by_session: 'wechat::s', trigger_type: 'message' },
+        origin: { spawned_by_episode: 'wechat::s', trigger_type: 'message' },
       })!
       expect(() => resolveTools(runtime)).toThrow(/AgentHandler is required/)
     })
@@ -643,7 +643,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
 
     // 第一个 worker：跑一轮 end_turn 就停在 idle（化身还活着）。
     llm.queue.push({ text: '先歇着', stopReason: 'end_turn' })
-    const objA = dialogObjectIdForPrivate('friend-a')
+    const objA = (`test::${'friend-a'}` as ManagerKey)
     await spawnBuiltin(internals, objA)
     await waitUntil(async () => {
       const [w] = await internals.managerStack!.harness.listWorkers(objA)
@@ -660,7 +660,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
 
     // 新起的化身现取到 model-B。
     llm.queue.push(FINISH)
-    const objB = dialogObjectIdForPrivate('friend-b')
+    const objB = (`test::${'friend-b'}` as ManagerKey)
     await spawnBuiltin(internals, objB)
     await waitUntil(async () => {
       const [w] = await internals.managerStack!.harness.listWorkers(objB)
@@ -674,10 +674,10 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
   it('验收 2：换一个 UnifiedAgent 实例（内存态全丢）后，send_to_worker 仍能透明接续已终态的 worker', async () => {
     const { internals: first } = boot()
     llm.queue.push(FINISH)
-    const dialogObjectId = dialogObjectIdForPrivate('friend-revive')
-    const { workerId } = await spawnBuiltin(first, dialogObjectId)
+    const managerKey = (`test::${'friend-revive'}` as ManagerKey)
+    const { workerId } = await spawnBuiltin(first, managerKey)
     await waitUntil(async () => {
-      const [w] = await first.managerStack!.harness.listWorkers(dialogObjectId)
+      const [w] = await first.managerStack!.harness.listWorkers(managerKey)
       return w.task.status === 'completed'
     })
 
@@ -686,12 +686,12 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     llm.queue.push(FINISH)
     await restarted.managerStack!.harness.sendToWorker(workerId, '接着干')
 
-    const [revived] = await restarted.managerStack!.harness.listWorkers(dialogObjectId)
+    const [revived] = await restarted.managerStack!.harness.listWorkers(managerKey)
     // 新化身由重启后那套栈的注入工厂现取配置拉起来（seq=2），任务被接续。
     expect(revived.incarnations).toHaveLength(2)
     expect(revived.incarnations[1].seq).toBe(2)
     await waitUntil(async () => {
-      const [w] = await restarted.managerStack!.harness.listWorkers(dialogObjectId)
+      const [w] = await restarted.managerStack!.harness.listWorkers(managerKey)
       return w.incarnations[1].state === 'exited'
     })
   })
@@ -736,11 +736,11 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
 
   it('model_config 缺 powerful slot → 工厂抛错，spawn 如实落成一次失败尝试（不静默降级）', async () => {
     const { internals } = boot(makeConfig({ modelConfig: {} }))
-    const dialogObjectId = dialogObjectIdForPrivate('friend-noconf')
+    const managerKey = (`test::${'friend-noconf'}` as ManagerKey)
 
-    await expect(spawnBuiltin(internals, dialogObjectId)).rejects.toThrow(/powerful/)
+    await expect(spawnBuiltin(internals, managerKey)).rejects.toThrow(/powerful/)
 
-    const [w] = await internals.managerStack!.harness.listWorkers(dialogObjectId)
+    const [w] = await internals.managerStack!.harness.listWorkers(managerKey)
     expect(w.task.status).toBe('failed')
     expect(w.incarnations[0].ended_reason).toBe('failed')
   })

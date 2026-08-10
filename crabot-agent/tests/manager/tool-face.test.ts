@@ -76,8 +76,7 @@ function makeDeps(overrides: Partial<ToolFaceDeps> = {}): ToolFaceDeps {
   return {
     harness: {} as unknown as WorkerHarness,
     workerContext: () => ({
-      dialogObjectId: 'dlg-1',
-      managerKey: 'manager-1',
+      managerKey: 'ch-1::sess-1',
       reportTo: { channel_id: 'ch-1', session_id: 'sess-1' },
     }),
     messagingDeps: makeMessagingDeps(),

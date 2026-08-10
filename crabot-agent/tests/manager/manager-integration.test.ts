@@ -33,7 +33,7 @@ import { randomUUID } from 'node:crypto'
 import { WorkerHarness, type HarnessDeps } from '../../src/workers/harness/harness'
 import { LedgerStore, encodeSegment } from '../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../src/workers/harness/workspace-manager'
-import { dialogObjectIdForPrivate, type DialogObjectId } from '../../src/workers/harness/ledger-types'
+import type { ManagerKey } from '../../src/workers/harness/ledger-types'
 import type { HarnessEvent } from '../../src/workers/harness/worker-events'
 import { BuiltinWorkerAdapter } from '../../src/workers/builtin/adapter.js'
 import type {
@@ -231,7 +231,7 @@ interface Assembly {
   readonly toolCallLog: ToolCallLogEntry[]
   readonly rpcCalls: Array<{ port: number; method: string; params: unknown }>
   readonly builtinConfigQueue: Array<NonNullable<SpawnSpec['builtin']>>
-  readonly dialogObjectIdFor: (key: ManagerKey) => DialogObjectId
+  readonly managerKeyFor: (key: ManagerKey) => ManagerKey
 }
 
 async function setupAssembly(opts: AssemblyOptions): Promise<Assembly> {
@@ -315,7 +315,7 @@ async function setupAssembly(opts: AssemblyOptions): Promise<Assembly> {
     resolveChannelPort: async () => 2,
   }
 
-  const dialogObjectIdFor = (key: ManagerKey): DialogObjectId => dialogObjectIdForPrivate(`friend-of-${key}`)
+  const managerKeyFor = (key: ManagerKey): ManagerKey => key
 
   const toolCallLog: ToolCallLogEntry[] = []
 
@@ -326,14 +326,13 @@ async function setupAssembly(opts: AssemblyOptions): Promise<Assembly> {
     harness,
     ledger,
     now: opts.managerNow,
-    dialogObjectIdFor,
+    managerKeyFor,
     adapter: () => opts.managerAdapter,
     model: () => 'test-manager-model',
     toolFace: (key, isSystemThread, onAsyncError) => {
       const tools = buildManagerToolFace({
         harness,
         workerContext: () => ({
-          dialogObjectId: dialogObjectIdFor(key),
           managerKey: key,
           reportTo: channelSessionFromKey(key),
           triggerType: isSystemThread ? 'system' : 'message',
@@ -361,7 +360,7 @@ async function setupAssembly(opts: AssemblyOptions): Promise<Assembly> {
 
   const registry = new ManagerRegistry(registryDeps)
 
-  return { registry, harness, ledger, store, events, toolCallLog, rpcCalls, builtinConfigQueue, dialogObjectIdFor }
+  return { registry, harness, ledger, store, events, toolCallLog, rpcCalls, builtinConfigQueue, managerKeyFor }
 }
 
 // ============================================================================
@@ -417,10 +416,10 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
 
       // 等真实 worker 后台把 finish_task 跑完——burst 是 fire-and-forget,不是靠猜时序。
       await waitUntil(async () => {
-        const workers = await assembly.harness.listWorkers(assembly.dialogObjectIdFor(key))
+        const workers = await assembly.harness.listWorkers(assembly.managerKeyFor(key))
         return workers.some((w) => w.task.status === 'completed')
       })
-      const [worker] = await assembly.harness.listWorkers(assembly.dialogObjectIdFor(key))
+      const [worker] = await assembly.harness.listWorkers(assembly.managerKeyFor(key))
       // 台账 task 终态正确
       expect(worker.task.status).toBe('completed')
       expect(worker.incarnations).toHaveLength(1)
@@ -502,10 +501,10 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       expect(scheduleResult1.outcome).toBe('completed')
 
       await waitUntil(async () => {
-        const workers = await assembly.harness.listWorkers(assembly.dialogObjectIdFor(SYSTEM_TASKS_MANAGER_KEY))
+        const workers = await assembly.harness.listWorkers(assembly.managerKeyFor(SYSTEM_TASKS_MANAGER_KEY))
         return workers.some((w) => w.task.status === 'completed')
       })
-      const [workerA] = await assembly.harness.listWorkers(assembly.dialogObjectIdFor(SYSTEM_TASKS_MANAGER_KEY))
+      const [workerA] = await assembly.harness.listWorkers(assembly.managerKeyFor(SYSTEM_TASKS_MANAGER_KEY))
       const exitedEventA = findWorkerExitedEvent(assembly.events, workerA.worker_id)!
 
       managerScript.queue.push({
@@ -550,10 +549,10 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       expect(scheduleResult2.outcome).toBe('completed')
 
       await waitUntil(async () => {
-        const workers = await assembly.harness.listWorkers(assembly.dialogObjectIdFor(SYSTEM_TASKS_MANAGER_KEY))
+        const workers = await assembly.harness.listWorkers(assembly.managerKeyFor(SYSTEM_TASKS_MANAGER_KEY))
         return workers.some((w) => w.worker_id !== workerA.worker_id && w.task.status === 'failed')
       })
-      const workersAfterB = await assembly.harness.listWorkers(assembly.dialogObjectIdFor(SYSTEM_TASKS_MANAGER_KEY))
+      const workersAfterB = await assembly.harness.listWorkers(assembly.managerKeyFor(SYSTEM_TASKS_MANAGER_KEY))
       const workerB = workersAfterB.find((w) => w.worker_id !== workerA.worker_id)!
       // 核心验收：worker 自己声明的 outcome:'failed' 一路落到台账，不再被记成成功。
       expect(workerB.task.status).toBe('failed')
@@ -674,12 +673,12 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
         extraAdapters: [['codex', new ForklessStubAdapter()]],
       })
 
-      const dialogObjectId = assembly.dialogObjectIdFor(key)
+      const managerKey = assembly.managerKeyFor(key)
       const worker = await assembly.harness.spawnWorker({
-        dialogObjectId,
+        managerKey,
         title: 'codex worker（fork 不支持）',
         prompt: '随便干点什么',
-        origin: { spawned_by_session: key, trigger_type: 'message' },
+        origin: { spawned_by_episode: key, trigger_type: 'message' },
         report_to: { channel_id: 'wechat', session_id: 'sess-fork' },
         impl: 'codex',
       })
@@ -739,7 +738,7 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       const episode1 = await assembly.registry.routeHumanMessages('wechat', 'sess-say', [makeChannelMessage('帮我做个方案选型')])
       expect(episode1.outcome).toBe('completed')
 
-      const [worker] = await assembly.harness.listWorkers(assembly.dialogObjectIdFor(key))
+      const [worker] = await assembly.harness.listWorkers(assembly.managerKeyFor(key))
       // 等**事件**本身出现，不是等台账转 idle——processStateChange 先 upsert 台账、再 appendEvent，
       // 盯台账会在这两步之间抢跑（实测在全量并发下偶发）。
       const findIdleEvent = () =>
@@ -858,7 +857,7 @@ describe('manager-integration（P4 Task 10：真实 ManagerRegistry + 真实 Wor
       ])
       expect(episode1.outcome).toBe('completed')
 
-      const [worker] = await assembly.harness.listWorkers(assembly.dialogObjectIdFor(key))
+      const [worker] = await assembly.harness.listWorkers(assembly.managerKeyFor(key))
       const findExitedEvent = () => findWorkerExitedEvent(assembly.events, worker.worker_id)
       await waitUntil(() => findExitedEvent() !== undefined)
 

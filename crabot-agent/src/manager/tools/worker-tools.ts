@@ -55,14 +55,12 @@
 import { defineTool } from '../../engine/index.js'
 import type { ToolDefinition, ToolCallResult } from '../../engine/index.js'
 import type { WorkerHarness } from '../../workers/harness/harness'
-import type { DialogObjectId, ManagerKey, LedgerWorker } from '../../workers/harness/ledger-types'
+import type { ManagerKey, LedgerWorker } from '../../workers/harness/ledger-types'
 import type { WorkerImplId } from '../../workers/types'
 import type { ResolvedPermissions } from '../../types'
 
 export interface WorkerToolsContext {
-  /** 本次唤醒所属对话对象:决定 spawn 的台账归属与 `list_workers` 的查询范围。 */
-  readonly dialogObjectId: DialogObjectId
-  /** 当前 manager 实例键:填入 `origin.spawned_by_session`。 */
+  /** Current manager session: worker owner and list_workers scope. */
   readonly managerKey: ManagerKey
   /** 当前 episode 的 trace id(可跳转);填入 `origin.spawned_by_episode`。 */
   readonly episodeId?: string
@@ -88,7 +86,7 @@ export interface WorkerToolsContext {
 
 export interface WorkerToolsDeps {
   readonly harness: WorkerHarness
-  /** 当前 manager 的归属:决定 spawn 的 dialogObjectId / origin / report_to。 */
+  /** 当前 manager 的归属:决定 spawn 的 managerKey / origin / report_to。 */
   readonly context: () => WorkerToolsContext
   /**
    * P4 Task 4 additive 扩展点:`query_worker` 的游离 promise reject 时,除了
@@ -180,11 +178,10 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       const ctx = context()
       try {
         const worker: LedgerWorker = await harness.spawnWorker({
-          dialogObjectId: ctx.dialogObjectId,
+          managerKey: ctx.managerKey,
           title,
           prompt,
           origin: {
-            spawned_by_session: ctx.managerKey,
             spawned_by_episode: ctx.episodeId,
             creator_friend_id: ctx.creatorFriendId,
             // 缺省按最常见场景填 'message';scheduled/system 场景由 context() 提供
@@ -329,7 +326,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     isReadOnly: true,
     call: async (): Promise<ToolCallResult> => {
       try {
-        const workers = await harness.listWorkers(context().dialogObjectId)
+        const workers = await harness.listWorkers(context().managerKey)
         return ok({ workers })
       } catch (error) {
         return mapError('list_workers', error)

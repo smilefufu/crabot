@@ -19,7 +19,6 @@ import { ManagerSessionStore } from '../../src/manager/session-store.js'
 import type { CompactionPolicy } from '../../src/manager/compaction.js'
 import type { ManagerKey } from '../../src/manager/types.js'
 import type { ChannelMessage, Friend } from '../../src/types.js'
-import { dialogObjectIdForPrivate, dialogObjectIdForGroup } from '../../src/workers/harness/ledger-types.js'
 import type { LedgerStore } from '../../src/workers/harness/ledger-store.js'
 import type { LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import type { WorkerHarness } from '../../src/workers/harness/harness.js'
@@ -67,11 +66,12 @@ const estimateTokens = (msgs: ReadonlyArray<EngineMessage>): number => msgs.leng
 
 const FAKE_HARNESS = { listWorkers: async (): Promise<LedgerWorker[]> => [] } as unknown as WorkerHarness
 
-function makeLedgerWorker(workerId: string, spawnedBySession: ManagerKey): LedgerWorker {
+function makeLedgerWorker(workerId: string, managerKey: ManagerKey): LedgerWorker {
   return {
     worker_id: workerId,
+    manager_key: managerKey,
     task: { id: workerId, title: 't', status: 'running', created_at: '2026-01-01T00:00:00.000Z' },
-    origin: { spawned_by_session: spawnedBySession, trigger_type: 'message' },
+    origin: { trigger_type: 'message' },
     report_to: { channel_id: 'wechat', session_id: 'sess' },
     incarnations: [],
     updated_at: '2026-01-01T00:00:00.000Z',
@@ -84,7 +84,7 @@ function fakeLedger(workers: Record<string, LedgerWorker>): LedgerStore {
     findWorker: async (workerId: string) => {
       const worker = workers[workerId]
       if (!worker) return undefined
-      return { dialogObjectId: dialogObjectIdForPrivate('friend-x'), worker }
+      return { managerKey: worker.manager_key, worker }
     },
   } as unknown as LedgerStore
 }
@@ -140,7 +140,7 @@ describe('ManagerRegistry', () => {
       harness: FAKE_HARNESS,
       ledger: fakeLedger({}),
       now: () => new Date(Date.parse('2026-01-01T00:00:00.000Z')),
-      dialogObjectIdFor: () => dialogObjectIdForPrivate('friend-x'),
+      managerKeyFor: (key) => key,
       toolFace: () => [],
       promptInputs: () => ({}),
       adapter: typeof adapter === 'function' ? adapter : () => adapter,
@@ -163,18 +163,18 @@ describe('ManagerRegistry', () => {
     expect(b).not.toBe(a1)
   })
 
-  it('dialogObjectId 是**每次现算**的：先建的 loop 也会跟上后来才解析出的台账归档键，不把旧值钉死', async () => {
+  it('managerKey 是**每次现算**的：先建的 loop 也会跟上后来才解析出的台账归档键，不把旧值钉死', async () => {
     const { adapter, queue } = makeAdapter()
     queue.push({ text: 'ok', stopReason: 'end_turn' })
     // 归档键一开始解析不出 friend（群形状），之后收敛成 friend 形状——模拟"loop 先被
     // worker 事件建出来、人类消息随后才带来 friend"这条真实时序。
     let resolvedFriend: string | undefined
-    const dialogObjectIdFor = vi.fn((key: ManagerKey) =>
-      resolvedFriend ? dialogObjectIdForPrivate(resolvedFriend) : dialogObjectIdForGroup('wechat', key)
+    const managerKeyFor = vi.fn((key: ManagerKey) =>
+      resolvedFriend ? (`test::${resolvedFriend}` as ManagerKey) : (`${'wechat'}::${key}` as ManagerKey)
     )
     const listWorkers = vi.fn(async () => [])
     const registry = new ManagerRegistry(
-      baseRegistryDeps({ adapter, dialogObjectIdFor, harness: { ...FAKE_HARNESS, listWorkers } as never })
+      baseRegistryDeps({ adapter, managerKeyFor, harness: { ...FAKE_HARNESS, listWorkers } as never })
     )
     const key = 'wechat::s1' as ManagerKey
 
@@ -185,8 +185,8 @@ describe('ManagerRegistry', () => {
     await registry.routeHumanMessages('wechat', 's1', [makeChannelMessage('你好')])
 
     // 台账查询用的是**现算**的归档键，不是 loop 建出来那一刻的快照。
-    // 若 dialogObjectId 是定值，这里会是 `group:wechat:wechat::s1` —— 同一个人的台账裂成两份。
-    expect(listWorkers).toHaveBeenCalledWith(dialogObjectIdForPrivate('friend-late'))
+    // 若 managerKey 是定值，这里会是 `group:wechat:wechat::s1` —— 同一个人的台账裂成两份。
+    expect(listWorkers).toHaveBeenCalledWith((`test::${'friend-late'}` as ManagerKey))
   })
 
   it('getOrCreate: adapter/model 是 thunk，原样透传给 ManagerLoop，不在 registry 侧缓存解析结果（§11 热更链路）', async () => {
@@ -344,7 +344,7 @@ describe('ManagerRegistry', () => {
 
   // --- routeWorkerEvent ---
 
-  it('routeWorkerEvent: 经台账 origin.spawned_by_session 找到监护 manager', async () => {
+  it('routeWorkerEvent: 经台账 origin.spawned_by_episode 找到监护 manager', async () => {
     const { adapter, queue } = makeAdapter()
     queue.push({ text: '收到 worker 事件', stopReason: 'end_turn' })
     const owningKey = 'wechat::owner-sess' as ManagerKey
@@ -836,7 +836,6 @@ describe('ManagerRegistry', () => {
           buildManagerToolFace({
             harness: fakeHarness,
             workerContext: () => ({
-              dialogObjectId: dialogObjectIdForPrivate('friend-e2e'),
               managerKey: k,
               reportTo: { channel_id: 'wechat', session_id: 'sess-e2e-toolface' },
             }),

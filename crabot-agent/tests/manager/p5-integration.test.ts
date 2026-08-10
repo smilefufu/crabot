@@ -25,7 +25,7 @@ import { join } from 'path'
 
 import { UnifiedAgent } from '../../src/unified-agent.js'
 import { SYSTEM_TASKS_MANAGER_KEY } from '../../src/manager/registry.js'
-import { dialogObjectIdForPrivate, type DialogObjectId, type LedgerWorker } from '../../src/workers/harness/ledger-types.js'
+import type { ManagerKey, LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import type { ManagerKey } from '../../src/manager/types.js'
 import type { ManagerStack } from '../../src/manager/bootstrap.js'
 import type { LLMAdapter, ToolDefinition } from '../../src/engine/index.js'
@@ -132,20 +132,21 @@ function capturedOnStateChange(
 }
 
 function makeLedgerWorker(p: {
-  workerId: string
+  managerKey: ManagerKey
   status?: LedgerWorker['task']['status']
   updatedAt?: string
   incarnationState?: WorkerContractState
 }): LedgerWorker {
   return {
     worker_id: p.workerId,
+    manager_key: p.managerKey,
     task: {
       id: p.workerId,
       title: `任务 ${p.workerId}`,
       status: p.status ?? 'running',
       created_at: '2026-01-01T00:00:00.000Z',
     },
-    origin: { spawned_by_session: 'wechat::sess-1' as ManagerKey, trigger_type: 'message' },
+    origin: { trigger_type: 'message' },
     report_to: { channel_id: 'wechat' as ModuleId, session_id: 'sess-1' },
     incarnations: [
       {
@@ -334,7 +335,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
         { text: '已派发', stopReason: 'end_turn' },
       ]),
     )
-    const spawnSpy = vi.spyOn(stack.harness, 'spawnWorker').mockResolvedValue(makeLedgerWorker({ workerId: 'w-spawned' }))
+    const spawnSpy = vi.spyOn(stack.harness, 'spawnWorker').mockResolvedValue(makeLedgerWorker({ workerId: 'w-spawned', managerKey: SYSTEM_TASKS_MANAGER_KEY }))
     const routeSpy = vi.spyOn(stack.registry, 'routeSchedule')
 
     const accepted = await rpc('trigger_schedule', {
@@ -350,7 +351,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
 
     await waitUntil(() => spawnSpy.mock.calls.length > 0)
     const params = spawnSpy.mock.calls[0][0]
-    expect(params.origin.spawned_by_session).toBe(SYSTEM_TASKS_MANAGER_KEY)
+    expect(params.managerKey).toBe(SYSTEM_TASKS_MANAGER_KEY)
     expect(params.origin.trigger_type).toBe('scheduled')
     expect(params.origin.creator_friend_id).toBe('friend-42')
 
@@ -362,17 +363,17 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
   it('list_workers_admin / get_worker_detail / read_worker_output_admin 对真实台账与真实输出日志返回正确数据', async () => {
     boot()
     const stack = internals.managerStack!
-    const alice = dialogObjectIdForPrivate('alice')
-    const bob = dialogObjectIdForPrivate('bob')
+    const alice = (`test::${'alice'}` as ManagerKey)
+    const bob = (`test::${'bob'}` as ManagerKey)
 
     await stack.ledger.upsertWorker(alice, 'w-a1', () =>
-      makeLedgerWorker({ workerId: 'w-a1', status: 'running', updatedAt: '2026-02-02T00:00:00.000Z' }),
+      makeLedgerWorker({ workerId: 'w-a1', managerKey: alice, status: 'running', updatedAt: '2026-02-02T00:00:00.000Z' }),
     )
     await stack.ledger.upsertWorker(alice, 'w-a2', () =>
-      makeLedgerWorker({ workerId: 'w-a2', status: 'completed', updatedAt: '2026-02-03T00:00:00.000Z' }),
+      makeLedgerWorker({ workerId: 'w-a2', managerKey: alice, status: 'completed', updatedAt: '2026-02-03T00:00:00.000Z' }),
     )
     await stack.ledger.upsertWorker(bob, 'w-b1', () =>
-      makeLedgerWorker({ workerId: 'w-b1', status: 'running', updatedAt: '2026-02-01T00:00:00.000Z' }),
+      makeLedgerWorker({ workerId: 'w-b1', managerKey: bob, status: 'running', updatedAt: '2026-02-01T00:00:00.000Z' }),
     )
 
     // 全量：updated_at desc
@@ -383,14 +384,14 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     expect(all.items.map((w) => w.worker_id)).toEqual(['w-a2', 'w-a1', 'w-b1'])
     expect(all.pagination.total_items).toBe(3)
 
-    // 按 dialog_object_id + status 过滤
+    // 按 manager_key + status 过滤
     const scoped = await rpc<{ items: Array<{ worker_id: string }> }>('list_workers_admin', {
-      dialog_object_id: alice,
+      manager_key: alice,
       status: 'running',
     })
     expect(scoped.items.map((w) => w.worker_id)).toEqual(['w-a1'])
 
-    // 详情（§8.3 的返回只有 worker 本体，不带 dialog_object_id）
+    // 详情（§8.3 的返回只有 worker 本体，不带 manager_key）
     const detail = await rpc<{ worker: LedgerWorker }>('get_worker_detail', { worker_id: 'w-b1' })
     expect(detail.worker.worker_id).toBe('w-b1')
     expect(detail.worker.task.status).toBe('running')
@@ -439,9 +440,9 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     vi.spyOn(stack.registry, 'routeWorkerEvent').mockResolvedValue(undefined)
     vi.spyOn(internals.rpcClient, 'publishEvent').mockResolvedValue(1)
 
-    const dialogObjectId = dialogObjectIdForPrivate('friend-mainline')
-    const base = makeLedgerWorker({ workerId: 'w-main' })
-    await stack.ledger.upsertWorker(dialogObjectId, 'w-main', () => ({
+    const managerKey = (`test::${'friend-mainline'}` as ManagerKey)
+    const base = makeLedgerWorker({ workerId: 'w-main', managerKey })
+    await stack.ledger.upsertWorker(managerKey, 'w-main', () => ({
       ...base,
       incarnations: [
         {
@@ -542,9 +543,9 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     vi.spyOn(stack.registry, 'routeWorkerEvent').mockResolvedValue(undefined)
     vi.spyOn(internals.rpcClient, 'publishEvent').mockResolvedValue(1)
 
-    const dialogObjectId = dialogObjectIdForPrivate('friend-seq-probe')
-    const base = makeLedgerWorker({ workerId: 'w-seq' })
-    await stack.ledger.upsertWorker(dialogObjectId, 'w-seq', () => ({
+    const managerKey = (`test::${'friend-seq-probe'}` as ManagerKey)
+    const base = makeLedgerWorker({ workerId: 'w-seq', managerKey })
+    await stack.ledger.upsertWorker(managerKey, 'w-seq', () => ({
       ...base,
       incarnations: [
         {
@@ -605,8 +606,8 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     // 顺带断言它确实接着（两条支路互不干扰）。
     const routeSpy = vi.spyOn(stack.registry, 'routeWorkerEvent').mockResolvedValue(undefined)
 
-    const dialogObjectId = dialogObjectIdForPrivate('friend-evt')
-    await stack.ledger.upsertWorker(dialogObjectId, 'w-evt', () => makeLedgerWorker({ workerId: 'w-evt' }))
+    const managerKey = (`test::${'friend-evt'}` as ManagerKey)
+    await stack.ledger.upsertWorker(managerKey, 'w-evt', () => makeLedgerWorker({ workerId: 'w-evt', managerKey }))
 
     // 用 adapter 手里那份回调触发真实迁移：handleStateChange → processStateChange →
     // upsertWorker（落 completed）→ appendEvent（带 task_status）→ onEvent → 事件出口
@@ -630,7 +631,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
       // 台账落账值；P7 阻塞项 #1 未修前，"退出即 completed" 是 harness 的既有行为，
       // 本断言只钉"事件值 == 台账值"，不对语义正确性背书。
       new_status: (await stack.ledger.findWorker('w-evt'))!.worker.task.status,
-      dialog_object_id: dialogObjectId,
+      manager_key: managerKey,
     })
     expect(routeSpy).toHaveBeenCalled()
   })
@@ -684,9 +685,9 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     // 对账判死同样会发 §9.2 事件（下一条用例专门验它）；这里挡住投递，免得没有 MM 的测试环境
     // 刷一屏 ECONNREFUSED——注意 publisher 本身把失败吃掉了，不挡也不会让用例失败。
     vi.spyOn(internals.rpcClient, 'publishEvent').mockResolvedValue(1)
-    const dialogObjectId = dialogObjectIdForPrivate('friend-recon')
-    await stack.ledger.upsertWorker(dialogObjectId, 'w-stale', () =>
-      makeLedgerWorker({ workerId: 'w-stale', status: 'running', incarnationState: 'running' }),
+    const managerKey = (`test::${'friend-recon'}` as ManagerKey)
+    await stack.ledger.upsertWorker(managerKey, 'w-stale', () =>
+      makeLedgerWorker({ workerId: 'w-stale', managerKey, status: 'running', incarnationState: 'running' }),
     )
 
     await internals.onStart()

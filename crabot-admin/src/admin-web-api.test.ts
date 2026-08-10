@@ -1646,7 +1646,7 @@ describe('Admin Web API', () => {
 
       await makeWebRequest(
         TEST_WEB_PORT,
-        '/api/agent/workers?status=executing&status=waiting&dialog_object_id=telegram-001%3Aprivate-42'
+        '/api/agent/workers?status=executing&status=waiting&manager_key=telegram-001%3A%3Aprivate-42'
           + '&start=2026-07-01T00%3A00%3A00.000Z&end=2026-07-31T00%3A00%3A00.000Z&page=2&page_size=5',
         'GET',
         null,
@@ -1655,7 +1655,7 @@ describe('Admin Web API', () => {
 
       expect(spy).toHaveBeenCalledWith('list_workers_admin', {
         status: ['executing', 'waiting'],
-        dialog_object_id: 'telegram-001:private-42',
+        manager_key: 'telegram-001::private-42',
         time_range: { start: '2026-07-01T00:00:00.000Z', end: '2026-07-31T00:00:00.000Z' },
         pagination: { page: 2, page_size: 5 },
       })

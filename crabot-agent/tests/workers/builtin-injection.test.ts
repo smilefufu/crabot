@@ -20,7 +20,6 @@ import { randomUUID } from 'node:crypto'
 import { WorkerHarness, type HarnessDeps } from '../../src/workers/harness/harness'
 import { LedgerStore } from '../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../src/workers/harness/workspace-manager'
-import { dialogObjectIdForPrivate } from '../../src/workers/harness/ledger-types'
 import { CLI_DOMAINS, type CliAccessConfig, type ResolvedPermissions, type ToolAccessConfig } from '../../src/types.js'
 import { BuiltinWorkerAdapter } from '../../src/workers/builtin/adapter.js'
 import {
@@ -187,12 +186,12 @@ describe('builtin worker 注入管道（harness → 工厂回退）', () => {
     }
     const { harness } = await makeStack(factory)
 
-    const dialogObjectId = dialogObjectIdForPrivate('friend-f1')
+    const managerKey = (`test::${'friend-f1'}` as ManagerKey)
     const worker = await harness.spawnWorker({
-      dialogObjectId,
+      managerKey,
       title: '干活',
       prompt: '把活干完',
-      origin: { spawned_by_session: 'wechat::sess-1', trigger_type: 'message', creator_friend_id: 'friend-f1' },
+      origin: { spawned_by_episode: 'wechat::sess-1', trigger_type: 'message', creator_friend_id: 'friend-f1' },
       report_to: { channel_id: 'wechat', session_id: 'sess-1' },
       impl: 'builtin',
       goal: '目标',
@@ -201,13 +200,13 @@ describe('builtin worker 注入管道（harness → 工厂回退）', () => {
 
     expect(worker.task.status).toBe('running')
     await waitUntil(async () => {
-      const [w] = await harness.listWorkers(dialogObjectId)
+      const [w] = await harness.listWorkers(managerKey)
       return w.task.status === 'completed'
     })
 
     // 语义不变量：worker 真的执行了工具调用、真的以 finish_task 收尾。
     expect(probeCalls).toBe(1)
-    const [done] = await harness.listWorkers(dialogObjectId)
+    const [done] = await harness.listWorkers(managerKey)
     expect(done.incarnations[0].state).toBe('exited')
     expect(done.incarnations[0].ended_reason).toBe('completed')
 
@@ -217,7 +216,7 @@ describe('builtin worker 注入管道（harness → 工厂回退）', () => {
     expect(seen[0].workspace.root).toBe(done.incarnations[0].workspace)
     expect(seen[0].goal).toBe('目标')
     expect(seen[0].origin).toEqual({
-      spawned_by_session: 'wechat::sess-1',
+      spawned_by_episode: 'wechat::sess-1',
       trigger_type: 'message',
       creator_friend_id: 'friend-f1',
     })
@@ -249,10 +248,10 @@ describe('builtin worker 注入管道（harness → 工厂回退）', () => {
     adaptersMap.set('claude-code', fakeCli)
 
     await harness.spawnWorker({
-      dialogObjectId: dialogObjectIdForPrivate('friend-f2'),
+      managerKey: (`test::${'friend-f2'}` as ManagerKey),
       title: 'cc 干活',
       prompt: '干',
-      origin: { spawned_by_session: 'wechat::s', trigger_type: 'message' },
+      origin: { spawned_by_episode: 'wechat::s', trigger_type: 'message' },
       report_to: { channel_id: 'wechat', session_id: 's' },
       impl: 'claude-code',
     })
@@ -265,20 +264,20 @@ describe('builtin worker 注入管道（harness → 工厂回退）', () => {
       throw new Error('model slot 未配置')
     }
     const { harness } = await makeStack(factory)
-    const dialogObjectId = dialogObjectIdForPrivate('friend-f3')
+    const managerKey = (`test::${'friend-f3'}` as ManagerKey)
 
     await expect(
       harness.spawnWorker({
-        dialogObjectId,
+        managerKey,
         title: '干活',
         prompt: '干',
-        origin: { spawned_by_session: 'wechat::s', trigger_type: 'message' },
+        origin: { spawned_by_episode: 'wechat::s', trigger_type: 'message' },
         report_to: { channel_id: 'wechat', session_id: 's' },
         impl: 'builtin',
       }),
     ).rejects.toThrow(/model slot 未配置/)
 
-    const [w] = await harness.listWorkers(dialogObjectId)
+    const [w] = await harness.listWorkers(managerKey)
     expect(w.task.status).toBe('failed')
     expect(w.incarnations[0].ended_reason).toBe('failed')
   })
@@ -318,7 +317,7 @@ describe('builtin worker 运行配置在起化身时现取', () => {
       worker_id: workerId,
       prompt: '干活',
       workspace,
-      origin: { spawned_by_session: 'wechat::s1', trigger_type: 'message' },
+      origin: { spawned_by_episode: 'wechat::s1', trigger_type: 'message' },
     })
     await waitState(first, h1, 'exited')
 
@@ -342,7 +341,7 @@ describe('builtin worker 运行配置在起化身时现取', () => {
     const reviveCtx = state.calls[state.calls.length - 1]
     expect(reviveCtx.worker_id).toBe(workerId)
     expect(reviveCtx.workspace.root).toBe(workspace.root)
-    expect(reviveCtx.origin).toEqual({ spawned_by_session: 'wechat::s1', trigger_type: 'message' })
+    expect(reviveCtx.origin).toEqual({ spawned_by_episode: 'wechat::s1', trigger_type: 'message' })
   })
 
   it('改了配置下次起化身生效，正在跑的 burst 用旧的（多轮 burst 内工厂只调一次）', async () => {
