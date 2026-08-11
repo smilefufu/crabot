@@ -45,7 +45,7 @@
 - PR #86 已由 merge gate squash merge 为 `9546baeb50c769f57f0557ac169d2131984522f8`，并于 2026-08-11 完成生产切换。切换前备份在 `~/.crabot/backups/pr86-cutover-20260811T031437Z`；旧 8 份 `data/agent/ledgers/*.json` 保留原地但不再扫描。
 - 生产首次导入完成：2696 个 v2 tasks → 2696 个 legacy workers / snapshots / `legacy_imported` events，分布于 18 个 ManagerKey；marker 为 `completed`。重启命中 completed fast-path，marker、旧 `tasks.json` 与 35 份 legacy trace 源 hash 均保持不变。
 - Admin Chat WS、HTTP multipart、assertion 单次核销/防重放、legacy detail/output/trace、fresh-v3 continuation、Claude Code 与 Codex 真机 worker 均通过。普通群聊 Manager 对已知 Admin Chat worker ID 得到统一的“不存在或当前会话无权访问”；事件保留固定 `received_at / timezone / occurred_at`。
-- Codex fresh spawn 在 MCP 启动期间安全停为 `input_pending`，没有重复粘贴；MCP 完成后以 raw key token `Enter` 提交同一 composer 并完成任务。三个测试 worker 已通过 `kill_worker` 清理，无残留 tmux session。
+- Codex fresh spawn 在 MCP 启动期间安全停为 `input_pending`，没有重复粘贴；MCP 完成后以 raw key token `Enter` 提交同一 composer。补充的同 pane 普通 follow-up 成功回填真实 rollout 和非空 `session_ref`；所有测试 worker 均已通过 `kill_worker` 清理，无残留 tmux session。
 - MM、Admin、Agent、Memory、Telegram、Feishu、WeChat 在切换、Agent fast-path 重启和 E2E 清理后均为 healthy/running。
 - 被旧 owner 管理的 Alpha Breadth v2 长测试按部署授权终止；bg entity `shell_63d5714821b2` 最终为 `failed`，exit notification 为 `delivered`，无残留进程。现场脚本/日志已备份，需要结果时重新运行。
 - PR #83（merge `21dfb1c`）修复 source user mode 下 builtin MCP tools 路径；部署后 Agent 成功连接 `computer-use`、`git`、`lsp`、`tmux-mcp`、`chrome-devtools`。
@@ -60,7 +60,7 @@
 3. **权限 schema 迁移纪律**：新增 `ToolAccessConfig` 或 `CliDomain` 类目前，必须先为历史 worker context 做显式 migration；不得依赖 persisted read 静默补齐。
 4. **incarnation seq 已知限制**：协议 §5.6 已明确 adapter 自管 seq 可能在跨实现/重启后碰撞；legacy `seq:1` 续办后也可能复现。根治需要 harness 全局分配或扩展公开读取身份契约，属于需重新确认的协议变更；当前通用历史 Trace API 仍可读取旧 trace。
 5. **既有测试基线**：单独校准 macOS tmux foreground-command、`/var` realpath 和 Admin v1 cleanup 的跨仓测试扫描；不得与当前功能修复混改。
-6. **Alpha Breadth v2**：部署切换按授权中断了旧 owner 下的长测试；如仍需要结果，从备份或 `.tmp/alpha_breadth_v2_handoff_20260712/run_93_alpha_test_v2.sh` 重新运行，不恢复旧 worker owner。
+6. **Alpha Breadth v2**：部署切换按授权中断了旧 owner 下的长测试；如仍需要结果，从备份 `~/.crabot/backups/pr86-cutover-20260811T031437Z/alpha-test-93/run_93_alpha_test_v2.sh` 或工作目录 `.tmp/alpha_breadth_v2_handoff_20260712/run_93_alpha_test_v2.sh` 重新运行，不恢复旧 worker owner。
 7. **PROGRESS 维护**：只记录稳定事实和可执行 follow-up，不再写“待 review / 待 merge”等瞬时状态，也不为回填 merge 元信息单独改文档。
 
 ### 需重新确认后再立项
