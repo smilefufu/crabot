@@ -69,6 +69,49 @@ describe('TraceStore', () => {
       }
     })
 
+    it('uses a v3 archive prefix while keeping legacy archives readable and outside retention writes', () => {
+      const dir = makeTempDir()
+      try {
+        const legacyPath = path.join(dir, 'traces-2020-01-01.jsonl')
+        const oldV3Path = path.join(dir, 'traces-v3-2020-01-01.jsonl')
+        const legacyTrace = {
+          trace_id: 'legacy-trace',
+          module_id: 'legacy-agent',
+          trigger: { type: 'task', summary: 'legacy' },
+          started_at: '2020-01-01T00:00:00.000Z',
+          status: 'completed',
+          spans: [],
+        }
+        const oldV3Trace = { ...legacyTrace, trace_id: 'old-v3-trace', module_id: 'v3-agent' }
+        fs.writeFileSync(legacyPath, `${JSON.stringify(legacyTrace)}\n`)
+        fs.writeFileSync(oldV3Path, `${JSON.stringify(oldV3Trace)}\n`)
+        const legacyBefore = fs.readFileSync(legacyPath)
+
+        const store = new TraceStore(
+          10,
+          dir,
+          'traces-running-v3.jsonl',
+          'traces-v3-',
+          ['traces-', 'traces-v3-'],
+        )
+        expect(store.searchTraces({}).traces.map((trace) => trace.trace_id)).toEqual(
+          expect.arrayContaining(['legacy-trace', 'old-v3-trace']),
+        )
+
+        const trace = store.startTrace({ module_id: 'v3-agent', trigger: { type: 'task', summary: 'new' } })
+        store.endTrace(trace.trace_id, 'completed')
+        const today = trace.started_at.slice(0, 10)
+        expect(fs.existsSync(path.join(dir, `traces-v3-${today}.jsonl`))).toBe(true)
+        expect(fs.readFileSync(legacyPath)).toEqual(legacyBefore)
+
+        store.cleanupOldTraces(1, false)
+        expect(fs.existsSync(oldV3Path)).toBe(false)
+        expect(fs.readFileSync(legacyPath)).toEqual(legacyBefore)
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
     it('flushed in-flight trace is visible after store recreation (simulates SIGKILL + restart)', () => {
       const dir = makeTempDir()
       try {

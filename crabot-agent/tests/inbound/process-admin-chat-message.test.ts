@@ -60,6 +60,12 @@ const MEMORY_PORT = 18202
 const ADMIN_CHAT_SESSION = 'admin-chat'
 const MANAGER_KEY = 'admin-web::admin-chat'
 const REQUEST_ID = 'req-42'
+const ASSERTION_ID = 'assertion-42'
+const ADMIN_CHAT_ASSERTION = [
+  Buffer.from('{}').toString('base64url'),
+  Buffer.from(JSON.stringify({ assertion_id: ASSERTION_ID })).toString('base64url'),
+  'test-signature',
+].join('.')
 
 /** master 身份解析出来的工具面：file_io 开、remote_exec 关（用来做正反对照）。 */
 const MASTER_TOOL_ACCESS: ToolAccessConfig = {
@@ -115,6 +121,7 @@ interface Internals {
     message: ChannelMessage
     source_type?: 'channel' | 'admin_chat'
     callback_info?: { source_module_id: string; request_id: string }
+    admin_chat_assertion?: string
   }): Promise<{ decision_types: string[]; task_ids?: string[] }>
   processDirectBatch(batch: unknown): Promise<void>
   processGroupLaneBatch(batch: unknown): Promise<void>
@@ -123,7 +130,10 @@ interface Internals {
   groupLaneRegistry: { getOrCreate(key: string): unknown; size(): number }
   contextAssembler: unknown
   managerStack: {
-    principals: { get(key: string): ResolvedPrincipalView | undefined }
+    principals: {
+      get(key: string): ResolvedPrincipalView | undefined
+      currentMasterAuthorization(key: string): { assertion_id?: string } | undefined
+    }
     registry: { routeHumanMessages: (...args: unknown[]) => Promise<unknown> }
   }
   /** fail-loud 的按 key 冷却台账（与私聊 / 群聊两条 lane 共用同一张表）。 */
@@ -260,7 +270,7 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
       message,
       source_type: 'admin_chat',
       callback_info: CALLBACK_INFO,
-      admin_chat_assertion: 'test-assertion',
+      admin_chat_assertion: ADMIN_CHAT_ASSERTION,
     })
   }
 
@@ -326,6 +336,7 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
 
       // 处理端不看消息自带的 session（入参故意给了 wechat / some-other-session）
       expect(principal(), '身份应当解析在 admin-web::admin-chat 这个 manager key 上').toBeDefined()
+      expect(internals.managerStack.principals.currentMasterAuthorization(MANAGER_KEY)?.assertion_id).toBe(ASSERTION_ID)
       expect(sceneCalls[0]).toMatchObject({
         channelId: 'admin-web',
         sessionId: ADMIN_CHAT_SESSION,
@@ -357,6 +368,18 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
     ])('%s causes zero Manager wake', async (_name, consumeResult, consumeError) => {
       boot({ consumeResult, consumeError })
       await expect(runAdminChat()).rejects.toThrow(/assertion|replayed/i)
+      expect(script.streams).toHaveLength(0)
+      expect(calls).not.toContain('manager_llm')
+    })
+
+    it('a consumed response cannot make a malformed assertion payload establish authority', async () => {
+      boot({ consumeResult: { consumed: true, expires_at: '2099-01-01T00:00:00.000Z' } })
+      await expect(internals.handleProcessMessage({
+        message: amsg(),
+        source_type: 'admin_chat',
+        callback_info: CALLBACK_INFO,
+        admin_chat_assertion: 'malformed',
+      })).rejects.toThrow(/assertion payload/i)
       expect(script.streams).toHaveLength(0)
       expect(calls).not.toContain('manager_llm')
     })

@@ -264,6 +264,24 @@ function parseOffsetCursor(cursor: string | undefined): number {
   return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 0
 }
 
+function parseAdminChatAssertionId(assertion: string): string {
+  const payload = assertion.split('.')[1]
+  if (!payload) throw new Error('Admin Chat assertion payload is invalid')
+  try {
+    const claims: unknown = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
+    if (!claims || typeof claims !== 'object' || Array.isArray(claims)) {
+      throw new Error('invalid claims')
+    }
+    const assertionId = (claims as Record<string, unknown>).assertion_id
+    if (typeof assertionId !== 'string' || assertionId.length === 0) {
+      throw new Error('invalid assertion_id')
+    }
+    return assertionId
+  } catch {
+    throw new Error('Admin Chat assertion payload is invalid')
+  }
+}
+
 /** trace summary 的截断长度（§10.2：summary 是"截断摘要"，原始结构留在 detail 里）。 */
 const TRACE_SUMMARY_MAX_CHARS = 200
 
@@ -493,7 +511,13 @@ export class UnifiedAgent extends ModuleBase {
 
     super(moduleConfig)
 
-    this.traceStore = new TraceStore(100, getAgentTraceDir(), 'traces-running-v3.jsonl')
+    this.traceStore = new TraceStore(
+      100,
+      getAgentTraceDir(),
+      'traces-running-v3.jsonl',
+      'traces-v3-',
+      ['traces-', 'traces-v3-'],
+    )
     this.lspManager = createLSPManager()
 
     this.promptManager = new PromptManager()
@@ -1887,7 +1911,7 @@ export class UnifiedAgent extends ModuleBase {
         throw new Error('invalid admin chat assertion consumption result')
       }
       await this.requireManagerStack().principals.activateAdminChat('admin-web::admin-chat', {
-        assertionId: sha256CanonicalJson(admin_chat_assertion),
+        assertionId: parseAdminChatAssertionId(admin_chat_assertion),
         expiresAt: consumeResult.expires_at,
       })
       return this.processAdminChatMessage(message, callback_info)
