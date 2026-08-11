@@ -7,7 +7,7 @@
 
 ### Manager / Worker v3 已完成生产切换
 
-- PR #80（merge `331fee7`）完成 legacy loop 退役：`wait_for_signal`、legacy task/recovery/resume/cancel/abort RPC 与 Admin 恢复控制链已退出生产；memory graph rebuild 保持 manager-native `trigger_schedule` 路径。
+- PR #80（merge `331fee7`）完成 legacy loop **主执行/RPC 控制链**退役：`wait_for_signal`、legacy task/recovery/resume/cancel/abort RPC 已退出生产；memory graph rebuild 保持 manager-native `trigger_schedule` 路径。2026-08-11 审计另发现两段 event/recovery legacy 死码仍保留，列入下方 P7 清理项。
 - builtin worker 已接入 durable bg-shell exit delivery：registry 以 `pending / delivered / dead_letter` 做 at-least-once 结算，owner 使用 `worker_id`，通知统一经 `WorkerInbox` 投递；pending 不被 terminal cleanup 或 7 日 GC 删除。
 - agent-native、无 incarnation 的 system task 在重启后明确标记 `failed`；worker-only API 对此返回稳定 domain error。
 - PR #82（commit `aa7042d`，已部署）完成 Claude Code / Codex 交互输入提交收口：单层控制状态、单次 paste、证据化 Enter、startup stall/raw 清障、session discovery 与 continuation 语义已统一。
@@ -34,7 +34,7 @@
 
 - legacy importer/read-model/authorization/continuation 定向：15 files / 285 passed；PR review-fix 扩展回归：17 files / 325 passed。两轮独立 security/correctness review 最终无 blocker/important。
 - 隔离升级副本使用当前生产快照完成真实 v2 导入：2696 tasks → 2696 legacy workers / 2696 `legacy_imported` events；首次 marker `completed`，有源重跑和隐藏源后的 completed fast-path 均跳过，复制源 hash 不变。索引修复后同一快照全量导入耗时 32.96s。证据目录：`/tmp/crabot-v2-upgrade-e2e-uF3u3v`、`/tmp/crabot-v2-import-perf-7A2Wgz`。
-- 全分支独立 review 覆盖授权/assertion、台账/importer 和 Manager/time；TraceStore 源隔离与精确 assertion ID 意见已修复并复审关闭，seq 碰撞按协议既有范围记录为 residual，当前无未解决 blocker/important。
+- 全分支独立 review 覆盖授权/assertion、台账/importer 和 Manager/time；TraceStore 源隔离与精确 assertion ID 意见已修复并复审关闭，seq 碰撞按协议既有范围记录为 residual；**在 PR #86 diff/review 范围内**无 blocker/important。后续全架构审计发现的跨 PR 遗留见下方收敛清单。
 - Shared 全量：100 passed；Shared build 通过。
 - Agent 全量：2664 passed / 4 failed / 2 skipped。4 个失败均为既有 macOS 环境基线：tmux foreground command 识别差异 1 个，`/var` → `/private/var` realpath 差异 3 个。
 - Admin 全量：1075 passed / 1 failed。唯一失败为既有 `v1-cleanup.test.ts` 扫到 `origin/main` 已存在的测试断言字符串；本分支未引入该引用。Admin focused 81 passed，`build:all` 通过。
@@ -49,34 +49,85 @@
 - MM、Admin、Agent、Memory、Telegram、Feishu、WeChat 在切换、Agent fast-path 重启和 E2E 清理后均为 healthy/running。
 - 被旧 owner 管理的 Alpha Breadth v2 长测试按部署授权终止；bg entity `shell_63d5714821b2` 最终为 `failed`，exit notification 为 `delivered`，无残留进程。现场脚本/日志已备份，需要结果时重新运行。
 - PR #83（merge `21dfb1c`）修复 source user mode 下 builtin MCP tools 路径；部署后 Agent 成功连接 `computer-use`、`git`、`lsp`、`tmux-mcp`、`chrome-devtools`。
-- `market-quotes` 是独立历史自定义 MCP 配置，入口文件缺失；需恢复对应服务或在 Admin 中禁用/删除。
+
+## 双 Agent 架构收敛审计（2026-08-11）
+
+### 结论
+
+- Manager/Worker v3 的**生产核心链路已经收敛**：人类消息只进入 Manager，worker 由不可变 `ManagerKey` 归属；builtin / Claude Code / Codex 三种实现、CLI 输入提交、活性巡检、bg-shell durable notification、Admin Chat assertion、legacy 一次性导入与 fresh-v3 continuation 均已通过真实运行验证。当前没有已知生产 blocker。
+- 但不能表述为“原计划全部完成”。原路线图的 **P6（可观测性与 Admin UI）和 P8（调试工具/内部文档）没有实施**；P7 的主 cutover 已完成，但仍有 legacy Admin task event/recovery 死码未删，并缺少跨 session 代发注记，尚未达到计划中的退役清理/上下文一致状态。
+- `2026-08-03-post-launch-followups.md` 只作为第一版上线现场归档，不再直接当当前 backlog；其中大量问题已被 #65～#82 修复，或被 #80/#86 的 legacy retirement、ManagerKey 与 fresh-v3 continuation 取代。
+
+### 原路线图对账
+
+| 阶段 | 当前结论 |
+|---|---|
+| P1 worker 契约 / builtin adapter / session 树 | 已完成并进入生产。 |
+| P2 tmux / Claude Code / Codex adapter | 核心实现和真机输入闭环已完成；但 `detect()`/实现池/部署偏好没有生产接线，见当前 follow-up。 |
+| P3 ledger / harness / inbox / continuation | 核心实现已完成；台账后来由 PR #86 收敛为每 `ManagerKey` 一份。Admin skill 向 CLI worker 的 capability 接线仍为空。 |
+| P4 Manager loop / 工具面 / 压缩 | 已完成；动态 prompt 状态后来由 PR #86 改为事件尾部输入。 |
+| P5 scheduler / Agent read model / Admin 代理 | `trigger_schedule` 和 worker 四个只读 RPC/REST 已完成；Manager read model 前端消费仍属于未完成的 P6。 |
+| P6 Manager trace / worker 原生 trace / Admin Manager-Worker UI | **未完成。** `/api/agent/managers*` 不存在；Manager episode 未进入 TraceStore；`get_worker_trace` 对 fresh-v3 只返回 harness lifecycle，明确把 adapter `readTrace()` 留给 P6；Admin Web 未消费 `/api/agent/workers*`，旧 conversation-unit/trace UI 仍在。当前实现与 `protocol-agent-v3.md` §10.1/§10.3 存在缺口。 |
+| P7 cutover / legacy import / 旧控制面退役 | 主 cutover、dispatcher 删除、legacy import/continuation 已完成；但 legacy Admin task event/recovery 死码仍保留，跨 session 代发未写目标 Manager 持久注记，见当前 follow-up。 |
+| P8 调试工具 / 内部架构文档 | **未完成。** `debug-agent.mjs` 没有 Manager/Worker 台账命令；`architecture/crabot-agent-internal.md` 与 `guides/agent-debugging.md` 仍描述 Dispatcher/Front/旧 Admin task/旧端口，甚至保留 LiteLLM 时代内容。 |
+
+### 第一版上线问题的收敛情况
+
+- **已修复**：workspace trust、真实 endReason、`finish_task` summary、Codex endpoint/config 继承、TUI 输出解码与保尾、spawn/readiness、Claude/Codex 权限、单次 paste/证据化 Enter、真实活性信号、worker bg-shell exit delivery、Admin Chat assertion 与会话级授权。
+- **被新架构取代**：跨重启旧内存 incarnation、已消失 legacy session 的透明 resume、Admin recovery 误杀 idle worker、旧 Admin task/trace 停摆。这些旧问题不能继续按 8 月 3 日的路径修；现行语义是 v2 只读投影 + 新 v3 化身。
+- **仍真实存在**：下面“必须收口”中的跨 session 代发注记缺失、Manager 失败 mailbox 无通用 retry、P6/P8、Admin Chat 占位误认领、实现选择假配置、skill capability 空接线与 Codex auth 错误吞没；另有 P7 legacy 死码待清理。
 
 ## 当前 follow-up
 
-### 已确认
+### 双 Agent 主线必须收口
 
-1. **PR #84 部署后真实验收**：创建实际 Claude Code / Codex worker，核对 task-scoped MCP、`desktop / mcp_skill` 过滤、handoff 权限快照、disabled server 清理及 credential 文件权限。
-2. **Claude MCP 配置外置**：当前 project-scope 根 `.mcp.json` 与根 `.gitignore` 副作用是 v3.0.8 明确接受的边界。迁移到 Crabot-owned per-worker 外部路径需调整 provision/启动寻址，并重新验证 Claude trust flow。
-3. **权限 schema 迁移纪律**：新增 `ToolAccessConfig` 或 `CliDomain` 类目前，必须先为历史 worker context 做显式 migration；不得依赖 persisted read 静默补齐。
-4. **incarnation seq 已知限制**：协议 §5.6 已明确 adapter 自管 seq 可能在跨实现/重启后碰撞；legacy `seq:1` 续办后也可能复现。根治需要 harness 全局分配或扩展公开读取身份契约，属于需重新确认的协议变更；当前通用历史 Trace API 仍可读取旧 trace。
-5. **既有测试基线**：单独校准 macOS tmux foreground-command、`/var` realpath 和 Admin v1 cleanup 的跨仓测试扫描；不得与当前功能修复混改。
-6. **Alpha Breadth v2**：部署切换按授权中断了旧 owner 下的长测试；如仍需要结果，从备份 `~/.crabot/backups/pr86-cutover-20260811T031437Z/alpha-test-93/run_93_alpha_test_v2.sh` 或工作目录 `.tmp/alpha_breadth_v2_handoff_20260712/run_93_alpha_test_v2.sh` 重新运行，不恢复旧 worker owner。
-7. **PROGRESS 维护**：只记录稳定事实和可执行 follow-up，不再写“待 review / 待 merge”等瞬时状态，也不为回填 merge 元信息单独改文档。
+1. **清理 P7 遗留的 legacy Admin task 死码**
+   - Agent 仍订阅 `admin.task_status_changed`，但正式事件载荷没有旧 handler 要求的 `final_reply`，因此永远在第一道门返回；handler 内调用的 `send_chat_message` 也已无 Admin 注册。
+   - `module_manager.module_stopped` 的旧 handler 首个调用是已退役、未注册的 `query_tasks`，会直接 `METHOD_NOT_FOUND` 并被 catch，后续 `update_task_status` 路径不可达。
+   - 当前不存在绕过 Manager 出口或改写 importer 源的生产行为；follow-up 是删除无效订阅/handler，并补“legacy 控制入口不再存在”的回归测试，完成 P7 退役清理。
 
-### 需重新确认后再立项
+2. **为失败 Manager episode 增加通用、带退避的 mailbox retry**
+   - 当前成功 episode 收口后会自唤醒 drain；失败 episode 只把正文留在内存 mailbox，依赖下一次真实人类/worker/schedule 事件才能重投。
+   - fail-loud 会告诉人类本次失败，但如果故障自行恢复且没有新事件，已收到的正文可以无限等待。需要独立设计低频、去重、带退避的通用 drain，避免故障热循环。
 
-以下来自旧进度表，可能已被后续架构替代；开始实施前必须先核对现有代码、协议和 issue：
+3. **补齐跨 session 代发的目标 Manager 持久注记**
+   - `protocol-agent-v3.md` §4.2 要求任何组件向非所属 session 代发消息时，向目标 Manager 历史追加系统注记；当前系统线程已暴露 `send_master_private`，但没有对应 history append 路径。
+   - 后果是目标会话能看到消息，却没有持久上下文解释消息来自哪个 Manager/系统任务；后续接办容易失去来龙去脉。
 
-- 备份/迁移 Plan 2（导入）旧 worktree 是否仍有未合并价值。
-- Memory 短期压缩、长期去重/合并、混合检索，以及 MemoryBrowser 测试 OOM。
-- Windows 原生进程树终止验证。
-- Admin 配置 push 是否仍缺 `system_prompt / mcp_servers`，以及旧 resume-sweep retry 问题是否已随 legacy retirement 消失。
-- internal-maintenance task 是否需要协议级、可执行的 `external_output: forbidden` 出站边界，避免仅依赖 prompt 约束。
-- required skill 缺失时是否应统一 fail-closed，而不是只返回普通 tool error 后允许流程继续。
-- 是否为 `crabot-agent/tests` 增加独立 TypeScript type-check；当前主 tsconfig 只覆盖 `src/**/*`。
-- Claude Code 在 `bypassPermissions` 下可执行任意 Bash，是否需要容器化或等价沙箱硬化。
-- Agent Trace 自清理的职责归属与重复清理问题；builtin context compaction 已完成，不再列为未实现项。
-- 历史浏览器/live E2E 验收项是否仍未覆盖。
+4. **完成 P6 可观测性与 Admin UI 闭环**
+   - 接通 Manager episode trace 与 `/api/agent/managers*`；把 Claude/Codex 已实现的 `readTrace()` 接入 `get_worker_trace`，补 builtin structured trace 和 native-session 收割策略；让 Admin Web 真正切到 Manager/Worker 视图。
+   - 修正 Admin Chat assistant push 的占位认领：当前任意 `admin-chat` assistant 消息都会 FIFO 消费最早 pending request；worker 事件触发的主动汇报撞上另一条 in-flight 请求时会关联错占位。消息不丢、刷新后可恢复，但实时 UI 语义错误。
+   - 开工前先重新核对 §10 的 cursor、retention、legacy/fresh-v3 命名空间和 UI 范围，不能直接照 7 月侦察稿实现。
+
+5. **实现 worker 类型可用池与选择语义**
+   - 生产从不调用 adapter `detect()`；没有 `worker_impls.default_impl/preferences` 配置入口，实际缺省固定 builtin。
+   - Manager prompt 和 `spawn_worker` 描述仍声称“按部署偏好选择”，属于假承诺。最小收口要么删除该说法并只承诺显式 impl + builtin 默认，要么正式实现检测、激活状态和偏好配置。
+
+6. **补齐 Admin skill → worker capability 接线**
+   - MCP 已在 PR #84 按固定权限快照接入三种 worker；skill 仍在生产 `CapabilityBundle` 中硬编码 `skills: []`，与原 provision 计划不完整。
+   - 需先明确 task-scoped skill 权限/过滤语义，再接入 Claude/Codex 物化和 builtin 对齐。
+
+7. **修复 Codex provision 的鉴权错误吞没**
+   - Codex provision 复制 `auth.json` 时 catch 全部错误；除了 `ENOENT`，权限/IO 错误也被静默吞掉，worker 只会在后续启动时表现成鉴权失败。
+
+8. **完成 P8 调试与文档收尾**
+   - 给 `debug-agent.mjs` 增加 Manager/Worker/ledger/inbox/incarnation 视角；重写内部架构与调试指南，删除 Dispatcher、旧 task、LiteLLM 和错误端口说明。
+
+### 待验证与测试债务
+
+- **PR #84 生产黑盒**：真实 builtin / Claude Code / Codex 用户 MCP 调用已通过；仍需单独覆盖 `desktop / mcp_skill` 过滤、handoff 固定权限快照、禁用 server 清理及带 credential 配置文件权限。
+- **测试基线**：Agent 全量仍有 4 个既有 macOS 环境失败（tmux foreground command 1、`/var` realpath 3），Admin 有 1 个 v1 cleanup 跨仓扫描误报；另有“tests 未进入 TypeScript type-check”债务。应独立校准，不与功能修复混改。
+
+### 已接受边界与待评估增强
+
+- **incarnation seq 碰撞**：协议 §5.6 已接受 adapter 自管 seq 的边界；根治需 harness 全局分配或扩展公开身份契约，属于需重新确认的协议变更。
+- **Claude project-scope MCP 文件**：根 `.mcp.json` / `.gitignore` 副作用是 v3.0.8 已接受边界；迁到 Crabot-owned per-worker 外部路径需重新验证 Claude trust flow。
+- **权限 schema 纪律**：新增 `ToolAccessConfig` / `CliDomain` 前必须先迁移历史 worker context，不能靠 persisted read 静默补齐。
+- **待评估增强**：P7 压缩第 3 步（token 预算 + 文件台账）、turn 内 text 攒批、schedule TTL 等不属于“原架构尚不能正确工作”的 blocker。
+
+### 非双 Agent 主线的历史候选
+
+备份导入 Plan 2、Memory 压缩/去重/混合检索、Windows 进程树、required skill fail-closed、internal-maintenance 出站边界、Claude Code 容器化/沙箱和 Trace 清理职责仍需分别重新确认；它们不是当前已批准的实施计划。Alpha Breadth v2 长测试如仍需要结果，应从备份脚本创建新 owner 重新运行，不恢复旧 worker。
 
 ## 里程碑归档
 
@@ -98,9 +149,9 @@
 
 | 范围 | 里程碑 |
 |---|---|
-| Manager/Worker P1～P7 | 完成 WorkerAdapter、多实现探测、ledger/harness、manager loop、read model、scheduler 路由、Admin 只读代理、入站测试网与 builtin 注入；主要 PR 包括 #47/#48。 |
-| Task 生命周期 | 修复 terminal/revive/new_task 判定、checkpoint 续写、supplement/resume 权限热刷新、goal 生命周期和状态对账；这些 legacy 入口随后在 8 月 cutover 中退役。 |
-| CLI worker | Codex adapter 在 m2 真机校准；Claude/Codex tmux、resume/fork、trace 与交互状态成为 v3 worker 实现。 |
+| Manager/Worker P1～P5 + P7 主链 | 完成 WorkerAdapter、多实现 adapter、ledger/harness、manager loop、read model、scheduler 路由、Admin 只读代理、入站测试网、builtin 注入与 dispatcher cutover；P6 可观测性/UI 和 P8 调试文档未完成，P7 仍有两段 legacy 死码待删。 |
+| Task 生命周期 | 修复 terminal/revive/new_task 判定、checkpoint 续写、supplement/resume 权限热刷新、goal 生命周期和状态对账；这些 legacy 主入口随后在 8 月 cutover 中退役，残留 event/recovery 死码另列当前 follow-up。 |
+| CLI worker | Codex adapter 在 m2 真机校准；Claude/Codex tmux、resume/fork、原生 trace 解析器与交互状态成为 v3 worker 实现；原生 trace 尚未接入 Admin read model/UI。 |
 | Python / 模型配置 | Agent 专用 `agent-venv` 上线；subagent 模型在 delegate 时实时解析，Provider/OAuth 连接信息保持现取。 |
 | Channel / 文件 | 修复飞书图文丢图与外部群 PRD 获取、WeChat 入站文件超时补取、Unicode channel instance id、出站路径白名单限制。 |
 | Trace / tmp-pages | 完成大型 Trace 树与任务状态对账、terminal supplement trace、tmp-pages v2 工具化和页面 GC。 |
