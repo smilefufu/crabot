@@ -1,6 +1,6 @@
 # Crabot 项目进度
 
-> 最后整理：2026-08-10
+> 最后整理：2026-08-11
 > 本文件只保留当前状态、明确 follow-up 和阶段性里程碑；详细实施流水、逐轮 review 与历史测试输出见 Git 历史。压缩前完整版本可用 `git show 49b9cb4:PROGRESS.md` 查看。
 
 ## 当前状态
@@ -42,20 +42,25 @@
 
 ### 最近运行态检查
 
+- PR #86 已由 merge gate squash merge 为 `9546baeb50c769f57f0557ac169d2131984522f8`，并于 2026-08-11 完成生产切换。切换前备份在 `~/.crabot/backups/pr86-cutover-20260811T031437Z`；旧 8 份 `data/agent/ledgers/*.json` 保留原地但不再扫描。
+- 生产首次导入完成：2696 个 v2 tasks → 2696 个 legacy workers / snapshots / `legacy_imported` events，分布于 18 个 ManagerKey；marker 为 `completed`。重启命中 completed fast-path，marker、旧 `tasks.json` 与 35 份 legacy trace 源 hash 均保持不变。
+- Admin Chat WS、HTTP multipart、assertion 单次核销/防重放、legacy detail/output/trace、fresh-v3 continuation、Claude Code 与 Codex 真机 worker 均通过。普通群聊 Manager 对已知 Admin Chat worker ID 得到统一的“不存在或当前会话无权访问”；事件保留固定 `received_at / timezone / occurred_at`。
+- Codex fresh spawn 在 MCP 启动期间安全停为 `input_pending`，没有重复粘贴；MCP 完成后以 raw key token `Enter` 提交同一 composer 并完成任务。三个测试 worker 已通过 `kill_worker` 清理，无残留 tmux session。
+- MM、Admin、Agent、Memory、Telegram、Feishu、WeChat 在切换、Agent fast-path 重启和 E2E 清理后均为 healthy/running。
+- 被旧 owner 管理的 Alpha Breadth v2 长测试按部署授权终止；bg entity `shell_63d5714821b2` 最终为 `failed`，exit notification 为 `delivered`，无残留进程。现场脚本/日志已备份，需要结果时重新运行。
 - PR #83（merge `21dfb1c`）修复 source user mode 下 builtin MCP tools 路径；部署后 Agent 成功连接 `computer-use`、`git`、`lsp`、`tmux-mcp`、`chrome-devtools`。
-- MM、Admin、Agent、Memory、Telegram、Feishu、WeChat 在最近一次只读检查中均为 healthy。
 - `market-quotes` 是独立历史自定义 MCP 配置，入口文件缺失；需恢复对应服务或在 Admin 中禁用/删除。
 
 ## 当前 follow-up
 
 ### 已确认
 
-1. **会话台账切换验收**：部署前人工收口仍在运行的旧 worker/bg owner 并备份旧 `data/agent/ledgers/`；不迁移本机测试期生成的 `friend:*` / `group:*` v3 台账。隔离升级副本必须覆盖 v2 importer 首次运行、重启幂等、legacy read model、授权撤销和 fresh-v3 continuation。
-2. **PR #84 部署后真实验收**：创建实际 Claude Code / Codex worker，核对 task-scoped MCP、`desktop / mcp_skill` 过滤、handoff 权限快照、disabled server 清理及 credential 文件权限。
-3. **Claude MCP 配置外置**：当前 project-scope 根 `.mcp.json` 与根 `.gitignore` 副作用是 v3.0.8 明确接受的边界。迁移到 Crabot-owned per-worker 外部路径需调整 provision/启动寻址，并重新验证 Claude trust flow。
-4. **权限 schema 迁移纪律**：新增 `ToolAccessConfig` 或 `CliDomain` 类目前，必须先为历史 worker context 做显式 migration；不得依赖 persisted read 静默补齐。
-5. **incarnation seq 已知限制**：协议 §5.6 已明确 adapter 自管 seq 可能在跨实现/重启后碰撞；legacy `seq:1` 续办后也可能复现。根治需要 harness 全局分配或扩展公开读取身份契约，属于需重新确认的协议变更；当前通用历史 Trace API 仍可读取旧 trace。
-6. **既有测试基线**：单独校准 macOS tmux foreground-command、`/var` realpath 和 Admin v1 cleanup 的跨仓测试扫描；不得与当前功能修复混改。
+1. **PR #84 部署后真实验收**：创建实际 Claude Code / Codex worker，核对 task-scoped MCP、`desktop / mcp_skill` 过滤、handoff 权限快照、disabled server 清理及 credential 文件权限。
+2. **Claude MCP 配置外置**：当前 project-scope 根 `.mcp.json` 与根 `.gitignore` 副作用是 v3.0.8 明确接受的边界。迁移到 Crabot-owned per-worker 外部路径需调整 provision/启动寻址，并重新验证 Claude trust flow。
+3. **权限 schema 迁移纪律**：新增 `ToolAccessConfig` 或 `CliDomain` 类目前，必须先为历史 worker context 做显式 migration；不得依赖 persisted read 静默补齐。
+4. **incarnation seq 已知限制**：协议 §5.6 已明确 adapter 自管 seq 可能在跨实现/重启后碰撞；legacy `seq:1` 续办后也可能复现。根治需要 harness 全局分配或扩展公开读取身份契约，属于需重新确认的协议变更；当前通用历史 Trace API 仍可读取旧 trace。
+5. **既有测试基线**：单独校准 macOS tmux foreground-command、`/var` realpath 和 Admin v1 cleanup 的跨仓测试扫描；不得与当前功能修复混改。
+6. **Alpha Breadth v2**：部署切换按授权中断了旧 owner 下的长测试；如仍需要结果，从备份或 `.tmp/alpha_breadth_v2_handoff_20260712/run_93_alpha_test_v2.sh` 重新运行，不恢复旧 worker owner。
 7. **PROGRESS 维护**：只记录稳定事实和可执行 follow-up，不再写“待 review / 待 merge”等瞬时状态，也不为回填 merge 元信息单独改文档。
 
 ### 需重新确认后再立项
@@ -79,6 +84,7 @@
 
 | 日期 | 里程碑 |
 |---|---|
+| 08-11 | PR #86（merge `9546bae`）完成生产 cutover：旧 owner/bg 进程收口并备份，2696 条 v2 task 一次性只读导入，重启 fast-path、Admin assertion、会话隔离、legacy continuation 与 Claude/Codex 真机 E2E 通过。 |
 | 08-10 | ManagerKey 会话台账、Master 显式全局视角、Admin Chat assertion、可撤授权 generation、稳定 prompt/事件时间信封和 v2 legacy 只读导入/新 v3 化身续办完成。 |
 | 08-09 | PR #84：task-scoped MCP capability 接入 builtin / Claude Code / Codex；固定 principal 快照、credential 安全写入、handoff preflight 与协议 v3.0.8 落地。 |
 | 08-09 | PR #82：CLI 交互输入提交安全化；Claude Code 2.1.226 / Codex 0.146.0 真机 tmux 路径完成校准。 |
