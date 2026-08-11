@@ -28,6 +28,21 @@
 import type { Friend, MemoryPermissions, ResolvedPermissions, RuntimeSceneProfile } from '../types.js'
 import type { ManagerKey } from './types.js'
 import { PrincipalBindingStore } from './principal-binding-store.js'
+import type { LegacyContinuationAuth } from '../workers/harness/legacy-continuation-auth.js'
+
+export interface LegacyContinuationAuthTemplate {
+  readonly source_manager_key: ManagerKey
+  readonly principal_kind: LegacyContinuationAuth['principal_kind']
+  readonly principal_generation: number
+  readonly principal_permissions: ResolvedPermissions
+}
+
+interface LegacyAuthorizationSource {
+  readonly source_manager_key: ManagerKey
+  readonly target_manager_key: ManagerKey
+  readonly principal_kind: LegacyContinuationAuth['principal_kind']
+  readonly principal_generation: number
+}
 
 export type MasterAuthorization =
   | { readonly kind: 'friend_master'; readonly manager_key: ManagerKey; readonly friend_id: string; readonly generation: number }
@@ -163,6 +178,8 @@ export interface PrincipalResolverDeps {
 export class ManagerPrincipalStore {
   private readonly resolved = new Map<ManagerKey, ResolvedPrincipal>()
   private readonly activeAuthorizations = new Map<ManagerKey, MasterAuthorization>()
+  /** Exact minted credential object → source binding; object identity prevents credential collisions. */
+  private readonly legacyAuthorizationSources = new WeakMap<LegacyContinuationAuth, LegacyAuthorizationSource>()
 
   constructor(
     private readonly deps: PrincipalResolverDeps,
@@ -267,7 +284,19 @@ export class ManagerPrincipalStore {
 
   async refreshForNonHumanWake(key: ManagerKey): Promise<void> {
     const binding = this.bindings?.get(key)
-    if (binding?.kind === 'friend') await this.refreshFriendAuthorization(key)
+    if (binding?.kind !== 'friend' || !binding.friend_id) return
+    try {
+      const friend = await this.deps.getFriend?.(binding.friend_id)
+      if (!friend) {
+        await this.invalidatePrincipalBindingOnce(key, binding.generation)
+        return
+      }
+      // Re-resolve current permissions before exposing a non-human tool face; do not
+      // reuse a stale session cache after downgrade/regrant.
+      await this.resolve(key, { friend, sessionType: 'private' })
+    } catch {
+      await this.invalidatePrincipalBindingOnce(key, binding.generation)
+    }
   }
 
   async invalidateFriend(friendId: string): Promise<void> {
@@ -293,6 +322,96 @@ export class ManagerPrincipalStore {
     }
     await this.invalidateAuthorizationOnce(auth.manager_key, auth.generation)
     return false
+  }
+
+  /** Capture the current turn's credential source synchronously while the tool face is built. */
+  captureLegacyContinuationAuth(key: ManagerKey): LegacyContinuationAuthTemplate | undefined {
+    const resolved = this.resolved.get(key)
+    const binding = this.bindings?.get(key)
+    if (!resolved?.permissions || !binding) return undefined
+    const active = this.currentMasterAuthorization(key)
+    if (active?.kind === 'admin_chat_jwt' && active.generation === binding.generation) {
+      return {
+        source_manager_key: key,
+        principal_kind: 'admin_chat_jwt',
+        principal_generation: binding.generation,
+        principal_permissions: resolved.permissions,
+      }
+    }
+    if (
+      resolved.principal.sessionType !== 'private' ||
+      !resolved.principal.friend ||
+      binding.kind !== 'friend' ||
+      binding.friend_id !== resolved.principal.friend.id
+    ) return undefined
+    return {
+      source_manager_key: key,
+      principal_kind: 'friend',
+      principal_generation: binding.generation,
+      principal_permissions: resolved.permissions,
+    }
+  }
+
+  bindLegacyContinuationAuth(
+    template: LegacyContinuationAuthTemplate | undefined,
+    targetManagerKey: ManagerKey,
+  ): LegacyContinuationAuth | undefined {
+    if (!template) return undefined
+    const auth: LegacyContinuationAuth = {
+      manager_key: targetManagerKey,
+      principal_kind: template.principal_kind,
+      principal_generation: template.principal_generation,
+      principal_permissions: template.principal_permissions,
+    }
+    this.legacyAuthorizationSources.set(auth, {
+      source_manager_key: template.source_manager_key,
+      target_manager_key: targetManagerKey,
+      principal_kind: template.principal_kind,
+      principal_generation: template.principal_generation,
+    })
+    return auth
+  }
+
+  async validateLegacyContinuationAuth(auth: LegacyContinuationAuth): Promise<boolean> {
+    const source = this.legacyAuthorizationSources.get(auth)
+    if (
+      !source ||
+      source.target_manager_key !== auth.manager_key ||
+      source.principal_kind !== auth.principal_kind ||
+      source.principal_generation !== auth.principal_generation
+    ) return false
+
+    const sourceKey = source.source_manager_key
+    const binding = this.bindings?.get(sourceKey)
+    if (!binding || binding.generation !== auth.principal_generation) return false
+    if (auth.principal_kind === 'admin_chat_jwt') {
+      const active = this.currentMasterAuthorization(sourceKey)
+      return binding.kind === 'admin_chat_jwt' &&
+        active?.kind === 'admin_chat_jwt' &&
+        active.generation === auth.principal_generation
+    }
+    if (binding.kind !== 'friend' || !binding.friend_id) return false
+    try {
+      const friend = await this.deps.getFriend?.(binding.friend_id)
+      if (!friend) {
+        await this.invalidatePrincipalBindingOnce(sourceKey, auth.principal_generation)
+        return false
+      }
+      if (sourceKey === auth.manager_key || friend.permission === 'master') return true
+      await this.invalidatePrincipalBindingOnce(sourceKey, auth.principal_generation)
+      return false
+    } catch {
+      await this.invalidatePrincipalBindingOnce(sourceKey, auth.principal_generation)
+      return false
+    }
+  }
+
+  private async invalidatePrincipalBindingOnce(key: ManagerKey, generation: number): Promise<void> {
+    this.activeAuthorizations.delete(key)
+    this.resolved.delete(key)
+    const current = this.bindings?.get(key)
+    if (!current || current.generation !== generation) return
+    await this.bindings?.bump(key)
   }
 
   private async refreshFriendAuthorization(key: ManagerKey): Promise<void> {

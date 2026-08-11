@@ -77,7 +77,7 @@ export class TraceStore {
   // 进程重启后 rebuildIndex 把上次 running 的 trace 重新加载到 this.traces，
   // searchTraces 的现有合并逻辑（line 107-112）能直接展示出来。
   private flushTimer?: ReturnType<typeof setInterval>
-  private static readonly RUNNING_FLUSH_FILE = 'traces-running.jsonl'
+  private readonly runningFlushFile: string
 
   // ── Worker checkpoint resume 集合 ──────────────────────
   // flushWorkerCheckpoint 把 worker trace（含 resume_checkpoint）原子写到
@@ -85,9 +85,10 @@ export class TraceStore {
   // 读进此 Map，等 admin 裁决（HOLD，不立即标 failed）。
   private resumableCheckpoints = new Map<string, { traceId: string; checkpoint: import('../types.js').ResumeCheckpoint }>()
 
-  constructor(maxSize = 100, persistDir?: string) {
+  constructor(maxSize = 100, persistDir?: string, runningFlushFile = 'traces-running.jsonl') {
     this.maxSize = maxSize
     this.persistDir = persistDir
+    this.runningFlushFile = runningFlushFile
     if (persistDir) {
       fs.mkdirSync(persistDir, { recursive: true })
       this.rebuildIndex()
@@ -278,7 +279,7 @@ export class TraceStore {
   private loadResumableCheckpoints(): void {
     if (!this.persistDir) return
     const files = fs.readdirSync(this.persistDir)
-      .filter(f => f.startsWith('traces-running-') && f.endsWith('.jsonl'))
+      .filter(f => f !== this.runningFlushFile && f.startsWith('traces-running-') && f.endsWith('.jsonl'))
     for (const file of files) {
       const taskId = file.slice('traces-running-'.length, -'.jsonl'.length)
       try {
@@ -295,7 +296,7 @@ export class TraceStore {
   }
 
   /**
-   * 全量重写 traces-running.jsonl —— 当前所有 status='running' 的 trace。
+   * 全量重写当前实例的 in-flight 文件（默认兼容旧 traces-running.jsonl）。
    * 用 tmp + rename 实现 atomic 替换：进程在写中间被杀，旧文件保持完好。
    */
   private flushInFlightTraces(): void {
@@ -307,19 +308,19 @@ export class TraceStore {
       }
     }
     const content = lines.length > 0 ? lines.join('\n') + '\n' : ''
-    const finalPath = path.join(this.persistDir, TraceStore.RUNNING_FLUSH_FILE)
+    const finalPath = path.join(this.persistDir, this.runningFlushFile)
     const tmpPath = finalPath + '.tmp'
     fs.writeFileSync(tmpPath, content, 'utf-8')
     fs.renameSync(tmpPath, finalPath)
   }
 
   /**
-   * 启动时加载 traces-running.jsonl —— 上次 agent 死时未结束的 trace。
+   * 启动时加载当前实例的 in-flight 文件（默认为 traces-running.jsonl）。
    * 把这些 trace 标记为 failed（interrupted），写入日期文件，然后清空 running 文件。
    */
   private loadRunningTraces(): void {
     if (!this.persistDir) return
-    const filePath = path.join(this.persistDir, TraceStore.RUNNING_FLUSH_FILE)
+    const filePath = path.join(this.persistDir, this.runningFlushFile)
     if (!fs.existsSync(filePath)) return
     try {
       // 已被 loadResumableCheckpoints 持有的 worker trace（per-task checkpoint 文件）——它在
@@ -362,11 +363,11 @@ export class TraceStore {
   private rebuildIndex(): void {
     if (!this.persistDir) return
     try {
-      // 排除 traces-running.jsonl —— 那是覆盖式写的 in-flight 文件，没有稳定
+      // 排除当前实例的覆盖式 in-flight 文件；它没有稳定
       // 字节 offset，不能进 traceIndex（getFullTrace 走 offset 读会乱）。
       // in-flight 由 loadRunningTraces 单独加载到内存 Map。
       const files = fs.readdirSync(this.persistDir)
-        .filter(f => f.startsWith('traces-') && f.endsWith('.jsonl') && f !== TraceStore.RUNNING_FLUSH_FILE && !f.startsWith('traces-running-'))
+        .filter(f => f.startsWith('traces-') && f.endsWith('.jsonl') && f !== this.runningFlushFile && f !== 'traces-running.jsonl' && !f.startsWith('traces-running-'))
         .sort()
 
       for (const file of files) {
@@ -778,7 +779,7 @@ export class TraceStore {
     let totalBytes = 0
     try {
       const files = fs.readdirSync(this.persistDir)
-        .filter(f => f.startsWith('traces-') && f.endsWith('.jsonl') && !f.startsWith('traces-running-'))
+        .filter(f => f.startsWith('traces-') && f.endsWith('.jsonl') && f !== this.runningFlushFile && f !== 'traces-running.jsonl' && !f.startsWith('traces-running-'))
       for (const file of files) {
         const stat = fs.statSync(path.join(this.persistDir, file))
         totalBytes += stat.size
@@ -883,7 +884,7 @@ export class TraceStore {
 
     try {
       const files = fs.readdirSync(this.persistDir)
-        .filter(f => f.startsWith('traces-') && f.endsWith('.jsonl') && !f.startsWith('traces-running-'))
+        .filter(f => f.startsWith('traces-') && f.endsWith('.jsonl') && f !== this.runningFlushFile && f !== 'traces-running.jsonl' && !f.startsWith('traces-running-'))
       for (const file of files) {
         const dateStr = file.slice('traces-'.length, 'traces-'.length + 10)
         if (dateStr >= cutoffStr) continue

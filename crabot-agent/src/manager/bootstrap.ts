@@ -94,6 +94,7 @@ export const DEFAULT_MANAGER_COMPACTION_POLICY: CompactionPolicy = {
 
 export interface ManagerStack {
   readonly ledger: LedgerStore
+  readonly workspaces: WorkspaceManager
   readonly harness: WorkerHarness
   readonly registry: ManagerRegistry
   readonly adapters: Map<WorkerImplId, WorkerAdapter>
@@ -348,6 +349,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     builtinSpawnDefaults: deps.builtinSpawnDefaults,
     capabilityBundle: deps.capabilityBundle,
     hasRunningBg: deps.hasRunningBg,
+    validateLegacyContinuationAuth: (auth) => principals.validateLegacyContinuationAuth(auth),
   }
 
   // --- step 2:把空壳 Map 交给 harness ---
@@ -417,8 +419,11 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         sessionId,
       )
     },
-    toolFace: (key, isSystemThread, onAsyncError, scheduleIdentity, humanPrincipal, principalPermissions) =>
-      buildManagerToolFace({
+    toolFace: (key, isSystemThread, onAsyncError, scheduleIdentity, humanPrincipal, principalPermissions) => {
+      // Capture at tool-face construction. Calling the resulting factory later must not
+      // pick up a regrant/new generation from a subsequent wake.
+      const legacyAuthTemplate = principals.captureLegacyContinuationAuth(key)
+      return buildManagerToolFace({
         harness,
         workerContext: () => ({
           managerKey: key,
@@ -443,6 +448,10 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
           // public 落进记忆。取数只发生在派活这一刻,取到之后就随 worker 固定下来。
           principalPermissions:
             principalPermissions ?? (scheduleIdentity ? undefined : principals.get(key)?.permissions ?? undefined),
+          legacyContinuationAuth: (targetManagerKey) => principals.bindLegacyContinuationAuth(
+            legacyAuthTemplate,
+            targetManagerKey,
+          ),
           // scheduled 触发(不论有无目标 session)记 'scheduled';系统线程的其余唤醒
           // (查不到监护 session 的 worker 事件)记 'system';人类消息记 'message'。
           triggerType: scheduleIdentity ? 'scheduled' : isSystemThread ? 'system' : 'message',
@@ -457,7 +466,8 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         authorization: () => principals.currentMasterAuthorization(key),
         validateMasterAuthorization: (auth) => principals.validateMasterAuthorization(auth),
         onAsyncError,
-      }),
+      })
+    },
     // system prompt 的「对话对象档案」段(§4.2 5b/5d):场景画像 + crab 在该渠道的
     // @handle,由唤醒边界解析好放在缓存里(见 principal.ts `renderDialogProfile`)。
     // 「待处理通知」仍无解析入口,继续留空——prompt.ts 对缺省有处理。
@@ -467,7 +477,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     },
   })
 
-  return { ledger, harness, registry, adapters, principals, principalBindings, builtinDataDir }
+  return { ledger, workspaces, harness, registry, adapters, principals, principalBindings, builtinDataDir }
 }
 
 /**

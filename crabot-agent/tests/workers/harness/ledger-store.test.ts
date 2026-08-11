@@ -137,6 +137,25 @@ describe('LedgerStore', () => {
     expect(ledger.workers).toHaveLength(0)
   })
 
+  it('legacy source and first incarnation are immutable while ordinary upserts may append v3 incarnations', async () => {
+    const key = 'test::legacy' as ManagerKey
+    const now = new Date().toISOString()
+    const legacy = makeWorker('w-legacy', {
+      manager_key: key,
+      task: { id: 'w-legacy' as never, title: 'old', status: 'completed', created_at: now, completed_at: now },
+      incarnations: [{ impl: 'legacy', seq: 1, state: 'exited', workspace: '/tmp', started_at: now, ended_at: now, ended_reason: 'completed' }],
+      legacy_source: { kind: 'v2_admin_task', admin_task_id: 'old-task' as never, trace_ids: [], imported_at: now },
+    })
+    await store.importLegacyWorker(key, legacy)
+    await store.upsertWorker(key, legacy.worker_id, previous => ({ ...previous!, task: { ...previous!.task, status: 'running' }, incarnations: [...previous!.incarnations, { impl: 'builtin', seq: 2, state: 'running', workspace: '/tmp', started_at: now, session_ref: 'session' }] }))
+    expect((await store.findWorker(legacy.worker_id))?.worker.incarnations).toHaveLength(2)
+    await expect(store.upsertWorker(key, legacy.worker_id, previous => ({ ...previous!, legacy_source: { ...previous!.legacy_source!, admin_task_id: 'other' as never } }))).rejects.toThrow('immutable legacy source')
+    await expect(store.upsertWorker(key, legacy.worker_id, previous => ({ ...previous!, legacy_source: undefined }))).rejects.toThrow('invalid legacy worker')
+    const corrupt = new LedgerStore(dir)
+    await fs.writeFile(join(dir, managerKeyToFilename(key)), JSON.stringify({ manager_key: key, workers: [{ ...legacy, incarnations: [] }] }))
+    await expect(corrupt.getLedger(key)).rejects.toThrow('invalid legacy worker')
+  })
+
   it('init 扫描遇到坏 JSON 文件时 fail loud，不继续建立不完整索引', async () => {
     const badId = `test::friend-good` as ManagerKey
     await fs.writeFile(join(dir, managerKeyToFilename(badId)), 'not json', 'utf-8')

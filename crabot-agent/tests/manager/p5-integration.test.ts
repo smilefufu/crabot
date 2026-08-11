@@ -211,6 +211,8 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     prevAgentDataDir = process.env.CRABOT_AGENT_DATA_DIR
     delete process.env.CRABOT_AGENT_DATA_DIR
     process.env.DATA_DIR = join(tmpRoot, 'data')
+    // UnifiedAgent.onStart now fail-closes legacy import until the Admin archive root is initialized.
+    await fs.mkdir(join(tmpRoot, 'data', 'admin'), { recursive: true })
   })
 
   afterEach(async () => {

@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs'
 import { join, dirname } from 'path'
 import { randomUUID } from 'crypto'
+import { canonicalizeJson } from 'crabot-shared'
 import { AsyncMutex } from '../async-mutex'
 import type { ManagerKey, LedgerWorker, WorkerLedger } from './ledger-types'
 
@@ -81,10 +82,26 @@ export class LedgerStore {
     return { managerKey: key, worker }
   }
 
+  async importLegacyWorker(key: ManagerKey, worker: LedgerWorker): Promise<LedgerWorker> {
+    assertLegacyWorker(worker, true)
+    const saved = await this.mutateWorker(key, worker.worker_id, () => worker, true)
+    if (!saved) throw new Error('[LedgerStore] legacy import unexpectedly removed worker')
+    return saved
+  }
+
   async upsertWorker(
     key: ManagerKey,
     workerId: string,
     mutator: (prev: LedgerWorker | undefined) => LedgerWorker | undefined
+  ): Promise<LedgerWorker | undefined> {
+    return this.mutateWorker(key, workerId, mutator, false)
+  }
+
+  private async mutateWorker(
+    key: ManagerKey,
+    workerId: string,
+    mutator: (prev: LedgerWorker | undefined) => LedgerWorker | undefined,
+    importingLegacy: boolean,
   ): Promise<LedgerWorker | undefined> {
     await this.init()
     return this.getWorkerMutex(workerId).run(async () => this.getMutex(key).run(async () => {
@@ -93,6 +110,21 @@ export class LedgerStore {
       const prev = index >= 0 ? ledger.workers[index] : undefined
       const next = mutator(prev)
       if (!next) return undefined
+      assertWorkerLegacyShape(next)
+      if (prev?.legacy_source) {
+        assertLegacyWorker(prev)
+        assertLegacyWorker(next)
+        const sourceChanged = canonicalizeJson(prev.legacy_source) !== canonicalizeJson(next.legacy_source)
+        const firstIncarnationChanged = canonicalizeJson(prev.incarnations[0]) !== canonicalizeJson(next.incarnations[0])
+        if (sourceChanged || firstIncarnationChanged) {
+          throw new Error(`[LedgerStore] immutable legacy source conflict for ${workerId}`)
+        }
+      } else if (next.legacy_source && !importingLegacy) {
+        throw new Error('[LedgerStore] legacy workers may only be created by importLegacyWorker')
+      }
+      if (prev && importingLegacy && canonicalizeJson(prev) !== canonicalizeJson(next)) {
+        throw new Error(`[LedgerStore] immutable legacy worker conflict for ${workerId}`)
+      }
       if (next.worker_id !== workerId) {
         throw new Error(`[LedgerStore] worker_id mismatch: requested ${workerId}, received ${next.worker_id}`)
       }
@@ -155,7 +187,10 @@ export class LedgerStore {
     if (!ledger || ledger.manager_key !== key || !Array.isArray(ledger.workers)) {
       throw new Error(`[LedgerStore] manager_key mismatch or invalid ledger for ${key}`)
     }
-    for (const worker of ledger.workers) this.assertWorkerOwner(key, worker)
+    for (const worker of ledger.workers) {
+      this.assertWorkerOwner(key, worker)
+      assertWorkerLegacyShape(worker)
+    }
     return ledger
   }
 
@@ -193,5 +228,31 @@ export class LedgerStore {
       }
     }
     this.workerIndex = index
+  }
+}
+
+function assertWorkerLegacyShape(worker: LedgerWorker): void {
+  const hasLegacyIncarnation = worker.incarnations.some((incarnation) => incarnation.impl === 'legacy')
+  if (worker.legacy_source || hasLegacyIncarnation) assertLegacyWorker(worker)
+}
+
+function assertLegacyWorker(worker: LedgerWorker, initialImport = false): void {
+  const source = worker.legacy_source
+  const first = worker.incarnations[0]
+  const traceIds = source?.trace_ids
+  const validSource = source?.kind === 'v2_admin_task' &&
+    typeof source.admin_task_id === 'string' && source.admin_task_id.length > 0 &&
+    typeof source.imported_at === 'string' && source.imported_at.length > 0 &&
+    Array.isArray(traceIds) && traceIds.every((traceId) => typeof traceId === 'string' && traceId.length > 0) &&
+    new Set(traceIds).size === traceIds.length
+  const validFirst = first?.impl === 'legacy' &&
+    first.seq === 1 && first.state === 'exited' &&
+    typeof first.ended_at === 'string' &&
+    first.session_ref === undefined
+  const laterLegacy = worker.incarnations.slice(1).some((incarnation) => incarnation.impl === 'legacy')
+  if (!validSource || !validFirst || laterLegacy || (initialImport && worker.incarnations.length !== 1)) {
+    throw new Error(
+      '[LedgerStore] invalid legacy worker: immutable source and one first legacy incarnation are required',
+    )
   }
 }

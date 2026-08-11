@@ -797,6 +797,25 @@ describe('read_worker_output_admin(§8.3)', () => {
     expect(result).toEqual({ chunk: '', next_cursor: '7', eof: true })
   })
 
+  it('legacy unavailable_reason is preserved for Admin callers', async () => {
+    const agent = buildAgent({
+      harness: {
+        readWorkerOutput: async () => ({
+          chunk: '',
+          nextCursor: { offset: 0 },
+          unavailable_reason: 'legacy worker has no raw output',
+        }),
+      },
+    })
+
+    await expect(agent.handleReadWorkerOutputAdmin({ worker_id: 'w-legacy' })).resolves.toEqual({
+      chunk: '',
+      next_cursor: '0',
+      eof: true,
+      unavailable_reason: 'legacy worker has no raw output',
+    })
+  })
+
   it('harness 抛错(worker/化身不存在)原样冒泡,不吞成空 chunk', async () => {
     const agent = buildAgent({
       harness: {
@@ -850,6 +869,70 @@ describe('get_worker_trace(§8.3 + §10.2)', () => {
     expect(result.events.every((e) => e.kind === 'lifecycle')).toBe(true)
     expect(result.events[0].summary).toContain('spawned')
     expect(result.events[0].detail).toEqual({ impl: 'builtin' })
+  })
+
+  it('legacy RPC preserves started/end/id ordering through final merge and cursor slicing', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'legacy-trace-rpc-'))
+    const previousAgentDir = process.env.CRABOT_AGENT_DATA_DIR
+    try {
+      const agentDir = join(root, 'agent')
+      const traceDir = join(agentDir, 'traces')
+      await fs.mkdir(traceDir, { recursive: true })
+      process.env.CRABOT_AGENT_DATA_DIR = agentDir
+      const started = '2026-01-01T00:00:00.000Z'
+      await fs.writeFile(join(traceDir, 'traces-2026-01-01.jsonl'), [
+        JSON.stringify({ trace_id: 'end-first', related_task_id: 'old', started_at: started, ended_at: '2026-01-01T00:00:01.000Z', outcome: { summary: 'z end first' } }),
+        JSON.stringify({ trace_id: 'a', related_task_id: 'old', started_at: started, ended_at: '2026-01-01T00:00:02.000Z', outcome: { summary: 'z id a' } }),
+        JSON.stringify({ trace_id: 'b', related_task_id: 'old', started_at: started, ended_at: '2026-01-01T00:00:02.000Z', outcome: { summary: 'a id b' } }),
+      ].join('\n'))
+      const worker: LedgerWorker = {
+        ...makeLedgerWorker({ workerId: 'w-legacy' }),
+        manager_key: 'test::f1' as ManagerKey,
+        task: { ...makeLedgerWorker({ workerId: 'w-legacy' }).task, status: 'completed' },
+        incarnations: [{
+          seq: 1,
+          impl: 'legacy',
+          state: 'exited',
+          workspace: root,
+          started_at: started,
+          ended_at: '2026-01-01T00:00:03.000Z',
+          ended_reason: 'completed',
+        }],
+        legacy_source: {
+          kind: 'v2_admin_task',
+          admin_task_id: 'old',
+          trace_ids: ['b', 'end-first', 'a'],
+          imported_at: '2026-01-01T00:10:00.000Z',
+        },
+      }
+      const imported: HarnessEvent = {
+        ts: '2026-01-01T00:10:00.000Z',
+        kind: 'legacy_imported',
+        worker_id: 'w-legacy',
+        seq: 1,
+      }
+      const agent = buildAgent({
+        ledger: { findWorker: async () => ({ managerKey: 'test::f1' as ManagerKey, worker }) },
+        harness: { readWorkerEvents: async () => [imported] },
+      })
+
+      const full = await agent.handleGetWorkerTrace({ worker_id: 'w-legacy', seq: 1 })
+      expect(full.events.map((event) => event.summary)).toEqual([
+        'z end first',
+        'z id a',
+        'a id b',
+        'legacy_imported',
+      ])
+      expect(full.next_cursor).toBe('4')
+
+      const continued = await agent.handleGetWorkerTrace({ worker_id: 'w-legacy', seq: 1, cursor: '1' })
+      expect(continued.events.map((event) => event.summary)).toEqual(['z id a', 'a id b', 'legacy_imported'])
+      expect(continued.next_cursor).toBe('4')
+    } finally {
+      if (previousAgentDir === undefined) delete process.env.CRABOT_AGENT_DATA_DIR
+      else process.env.CRABOT_AGENT_DATA_DIR = previousAgentDir
+      await fs.rm(root, { recursive: true, force: true })
+    }
   })
 
   it('第二层(adapter readTrace 懒解析)本阶段未接线 → unavailable_reason 说明', async () => {

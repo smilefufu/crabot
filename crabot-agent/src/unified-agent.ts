@@ -57,7 +57,13 @@ import { createTmpPageTools } from './agent/tmp-page-tools.js'
 import { createCrabMessagingServer, type PathMapping, type TaskContext } from './mcp/crab-messaging.js'
 import { toImageConnInfo, imageToolsFor, type ImageConnInfo } from './mcp/crab-image.js'
 import { TraceStore } from './core/trace-store.js'
-import { getAgentTraceDir, getAgentLogsDir, getAgentDataDir, getWorkspaceDir, getDataRootDir } from './core/data-paths.js'
+import { getAgentTraceDir, getAgentLogsDir, getAgentDataDir, getWorkspaceDir, getDataRootDir, getAdminDataDir } from './core/data-paths.js'
+import { importV2LegacyTasks } from './workers/legacy-importer.js'
+import {
+  compareLegacyTraceEventEntries,
+  readLegacyTraceEvents,
+  type LegacyTraceEventEntry,
+} from './workers/legacy-source-reader.js'
 import { PromptManager } from './prompt-manager.js'
 import { createLSPManager, type LSPManager } from './lsp/lsp-manager.js'
 import type { BgEntityRecord, BgEntityStatus, BgEntityType } from './engine/bg-entities/types.js'
@@ -76,7 +82,13 @@ import {
   narrowWorkerPermissions,
   type BuiltinRuntimeContext,
 } from './workers/builtin/runtime.js'
-import type { ManagerKey, LedgerWorker, TaskPriority, TaskStatus } from './workers/harness/ledger-types.js'
+import {
+  isLegacyIncarnation,
+  type ManagerKey,
+  type LedgerWorker,
+  type TaskPriority,
+  type TaskStatus,
+} from './workers/harness/ledger-types.js'
 import {
   filterAndPageWorkers,
   buildWorkerDetail,
@@ -481,7 +493,7 @@ export class UnifiedAgent extends ModuleBase {
 
     super(moduleConfig)
 
-    this.traceStore = new TraceStore(100, getAgentTraceDir())
+    this.traceStore = new TraceStore(100, getAgentTraceDir(), 'traces-running-v3.jsonl')
     this.lspManager = createLSPManager()
 
     this.promptManager = new PromptManager()
@@ -2777,12 +2789,17 @@ export class UnifiedAgent extends ModuleBase {
   private async handleReadWorkerOutputAdmin(
     params: ReadWorkerOutputAdminParams
   ): Promise<ReadWorkerOutputAdminResult> {
-    const { chunk, nextCursor } = await this.requireManagerStack().harness.readWorkerOutput(
+    const { chunk, nextCursor, unavailable_reason } = await this.requireManagerStack().harness.readWorkerOutput(
       params.worker_id,
       { offset: parseOffsetCursor(params.cursor) },
-      { seq: params.seq }
+      params.seq === undefined ? undefined : { seq: params.seq },
     )
-    return { chunk, next_cursor: String(nextCursor.offset), eof: chunk.length === 0 }
+    return {
+      chunk,
+      next_cursor: String(nextCursor.offset),
+      eof: chunk.length === 0,
+      ...(unavailable_reason ? { unavailable_reason } : {}),
+    }
   }
 
   /**
@@ -2818,6 +2835,26 @@ export class UnifiedAgent extends ModuleBase {
       params.seq === undefined ? mainlineIncarnation(found.worker) : findIncarnationBySeq(found.worker, params.seq)
     if (!incarnation) {
       throw new Error(`get_worker_trace: no incarnation with seq=${params.seq} found for worker ${params.worker_id}`)
+    }
+    if (isLegacyIncarnation(incarnation)) {
+      const trace = await readLegacyTraceEvents(getAgentTraceDir(), found.worker.legacy_source?.trace_ids ?? [])
+      const harnessEntries: LegacyTraceEventEntry[] = (await stack.harness.readWorkerEvents(params.worker_id))
+        .filter((event) => event.seq === incarnation.seq)
+        .map((event, sourceOrdinal) => ({
+          event: normalizeHarnessEvent(event),
+          ...(Number.isFinite(Date.parse(event.ts)) ? { started_at: event.ts } : {}),
+          trace_id: '',
+          source_ordinal: sourceOrdinal,
+        }))
+      const events = [...trace.entries, ...harnessEntries]
+        .sort(compareLegacyTraceEventEntries)
+        .map((entry) => entry.event)
+      const offset = parseOffsetCursor(params.cursor)
+      return {
+        events: events.slice(offset),
+        next_cursor: String(events.length),
+        ...(trace.unavailable_reason ? { unavailable_reason: trace.unavailable_reason } : {}),
+      }
     }
     const ofIncarnation = (await stack.harness.readWorkerEvents(params.worker_id)).filter(
       (event) => event.seq === incarnation.seq
@@ -2942,9 +2979,26 @@ export class UnifiedAgent extends ModuleBase {
     }
   }
 
+  private async importLegacyV2Tasks(): Promise<void> {
+    const stack = this.managerStack
+    if (!stack) throw new Error('[legacy-import] manager stack unavailable')
+    await importV2LegacyTasks({
+      adminDataDir: getAdminDataDir(),
+      traceDir: getAgentTraceDir(),
+      agentDataDir: getAgentDataDir(),
+      ledger: stack.ledger,
+      workspaces: stack.workspaces,
+      now: () => new Date().toISOString(),
+    })
+  }
+
   protected override async onStart(): Promise<void> {
+    await this.importLegacyV2Tasks()
+    // Business ingress is registered only after onStart resolves; initialize durable
+    // subject bindings before any Manager tool face can mint a continuation credential.
+    await this.managerStack?.principals.init()
     this.startEventLoopWatchdog()
-    // trace 的 in-flight 持久化：每 15s 覆盖写 traces-running.jsonl，让 agent
+    // trace 的 in-flight 持久化：每 15s 覆盖写 traces-running-v3.jsonl，让 agent
     // 被 SIGKILL 时主 task trace 仍能保留到最后一次 flush 的状态。
     this.traceStore.startFlushTimer(15_000)
     // 探測是否有飛書 channel，決定是否注入 read_feishu_document 工具

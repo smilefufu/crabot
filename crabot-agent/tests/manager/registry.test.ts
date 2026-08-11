@@ -1014,9 +1014,10 @@ describe('inbound-adapters', () => {
     expect(event).toEqual({ kind: 'attention_flush', messages: [m1] })
   })
 
-  it('shouldWakeOnHarnessEvent: 过滤 input_sent，其余 kind 一律唤醒', () => {
+  it('shouldWakeOnHarnessEvent: 过滤 input_sent 与 legacy_imported，其余 kind 一律唤醒', () => {
     const base = { ts: '2026-01-01T00:00:00.000Z', worker_id: 'w-1', seq: 1 }
     expect(shouldWakeOnHarnessEvent({ ...base, kind: 'input_sent' })).toBe(false)
+    expect(shouldWakeOnHarnessEvent({ ...base, kind: 'legacy_imported' })).toBe(false)
 
     const otherKinds: HarnessEventKind[] = [
       'spawned',

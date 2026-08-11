@@ -91,6 +91,7 @@ export interface ReadWorkerOutputAdminResult {
   chunk: string
   next_cursor: string
   eof: boolean
+  unavailable_reason?: string
 }
 
 /** §8.3 get_worker_trace:结构化时间线(两层信息源见 §10.2) */

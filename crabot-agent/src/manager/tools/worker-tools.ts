@@ -59,6 +59,7 @@ import type { ManagerKey, LedgerWorker, TaskStatus } from '../../workers/harness
 import type { MasterAuthorization } from '../principal.js'
 import type { WorkerImplId } from '../../workers/types'
 import type { ResolvedPermissions } from '../../types'
+import type { LegacyContinuationAuth } from '../../workers/harness/legacy-continuation-auth.js'
 
 export interface WorkerToolsContext {
   /** Current manager session: worker owner and list_workers scope. */
@@ -78,6 +79,8 @@ export interface WorkerToolsContext {
   readonly principalPermissions?: ResolvedPermissions
   /** 结果回报目标,默认 = 当前 session(protocol-agent-v3 §3)。 */
   readonly reportTo: { channel_id: string; session_id: string }
+  /** Opaque credential factory; only legacy terminal continuation consumes its result. */
+  readonly legacyContinuationAuth?: (managerKey: ManagerKey) => LegacyContinuationAuth | undefined
   /**
    * 本次唤醒的触发来源,填入 `origin.trigger_type`;缺省 'message'。给 scheduled 路由
    * (Task 8)/system 场景预留——本任务只加这个可选出口,不在这里做路由判断。
@@ -162,6 +165,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
   // Capture exactly once: a tool definition belongs to one model turn. A later
   // regrant must not make an already-issued privileged closure usable again.
   const capturedAuthorization = authorization?.()
+  const capturedLegacyContinuationAuth = context().legacyContinuationAuth
 
   const masterAuthorized = async (): Promise<boolean> => {
     return !!capturedAuthorization && !!validateMasterAuthorization && await validateMasterAuthorization(capturedAuthorization)
@@ -270,8 +274,12 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       if (typeof text !== 'string' || text.length === 0) return invalid('send_to_worker: text 必填且为非空字符串')
 
       try {
-        await authorizeWorker(worker_id)
-        await harness.sendToWorker(worker_id, text, raw !== undefined ? { raw } : undefined)
+        const worker = await authorizeWorker(worker_id)
+        const legacyContinuationAuth = capturedLegacyContinuationAuth?.(worker.manager_key)
+        await harness.sendToWorker(worker_id, text, {
+          ...(raw !== undefined ? { raw } : {}),
+          ...(legacyContinuationAuth ? { legacyContinuationAuth } : {}),
+        })
         return ok({ status: 'sent', worker_id })
       } catch (error) {
         return mapError(`send_to_worker(${worker_id})`, error)

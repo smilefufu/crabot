@@ -34,6 +34,8 @@ export type HarnessEventKind =
    * 'worker_disappeared'(见 harness.ts queryWorker 注释,理论上不会发生的防御性分支)。
    */
   | 'query_failed'
+  /** v2 import history record: persisted only, never bridged to a Manager wake. */
+  | 'legacy_imported'
 
 export interface HarnessEvent {
   readonly ts: string

@@ -102,8 +102,10 @@ import {
 } from './inbox'
 import { WorkerEventLog, type HarnessEvent, type HarnessEventDelivery, type HarnessEventKind } from './worker-events'
 import { WorkerContextStore, type WorkerContext } from './context-store'
+import { readLegacyTraces } from '../legacy-source-reader.js'
+import { isLegacyContinuationAuth, type LegacyContinuationAuth } from './legacy-continuation-auth.js'
 import { applyStatusTransition, canTransition, isTerminalStatus, reviveTask, taskStatusFromIncarnation } from './task-status'
-import { join } from 'path'
+import { join, dirname } from 'path'
 
 /** 交接材料里"最近输出尾部"的上限(字符数,近似 4KB,见 protocol-agent-v3 §5.3)。 */
 const HANDOFF_TAIL_MAX_CHARS = 4096
@@ -413,6 +415,8 @@ export interface HarnessDeps {
   readonly builtinSpawnDefaults?: BuiltinRuntimeFactory
   /** True while this worker owns a running background entity. */
   readonly hasRunningBg?: (workerId: string) => Promise<boolean>
+  /** Validates an opaque legacy continuation credential immediately before side effects. */
+  readonly validateLegacyContinuationAuth?: (auth: LegacyContinuationAuth) => Promise<boolean>
 }
 
 export interface SpawnWorkerParams {
@@ -757,6 +761,7 @@ export class WorkerHarness {
       onSettled?: InboxItem['onSettled']
       dedupeKey?: string
       onDeduplicated?: () => void
+      legacyContinuationAuth?: LegacyContinuationAuth
     },
   ): Promise<void> {
     const inbox = this.getInbox(workerId)
@@ -775,6 +780,7 @@ export class WorkerHarness {
         allow_terminal_continuation: true,
         ...(opts?.onSettled ? { onSettled: opts.onSettled } : {}),
         ...(opts?.dedupeKey ? { dedupe_key: opts.dedupeKey } : {}),
+        ...(opts?.legacyContinuationAuth ? { legacy_continuation_auth: opts.legacyContinuationAuth } : {}),
       }
       enqueued = opts?.dedupeKey ? inbox.enqueueUnique(item) : (inbox.enqueue(item), true)
     })
@@ -905,7 +911,19 @@ export class WorkerHarness {
       const incarnation = requireMainlineIncarnation(found.worker)
 
       if (isLegacyIncarnation(incarnation)) {
-        throw new Error('WorkerHarness.sendToWorker: legacy worker continuation is not available')
+        if (item.allow_terminal_continuation === false) return 'delivered'
+        const delivery = await this.continueLegacyWorker(workerId, item)
+        if (isContinuationRetry(delivery)) {
+          return this.continueTerminalWorker(
+            workerId,
+            item.text,
+            delivery.impl,
+            delivery.seq,
+            item.raw,
+            delivery.endedReason,
+          )
+        }
+        return delivery
       }
 
       if (incarnation.state === 'exited') {
@@ -937,6 +955,219 @@ export class WorkerHarness {
       }
       return this.settleInputAttempt(workerId, item.text, item.raw, attempt)
     })
+  }
+
+  private async continueLegacyWorker(
+    workerId: string,
+    item: InboxItem,
+  ): Promise<ContinuationDelivery> {
+    return this.withLock(workerId, async () => {
+      const found = await this.deps.ledger.findWorker(workerId)
+      if (!found) throw new WorkerNotFoundError(workerId)
+      const { managerKey, worker } = found
+      if (worker.task.status === 'cancelled') {
+        await this.appendEvent(workerId, 1, 'state_changed', {
+          kind: 'dead_letter',
+          reason: 'task_cancelled',
+          text_len: item.text.length,
+        })
+        return 'dead_letter'
+      }
+
+      const legacy = requireMainlineIncarnation(worker)
+      if (!isLegacyIncarnation(legacy)) {
+        throw new Error('WorkerHarness.legacyContinuation: mainline changed before continuation')
+      }
+      if (
+        (worker.task.status !== 'completed' && worker.task.status !== 'failed') ||
+        !['completed', 'failed', 'pre_migration'].includes(legacy.ended_reason)
+      ) {
+        throw new Error('WorkerHarness.sendToWorker: legacy worker is not eligible for continuation')
+      }
+      const auth = item.legacy_continuation_auth
+      if (
+        !isLegacyContinuationAuth(auth) ||
+        auth.manager_key !== managerKey ||
+        !this.deps.validateLegacyContinuationAuth ||
+        !await this.deps.validateLegacyContinuationAuth(auth)
+      ) {
+        await this.appendEvent(workerId, legacy.seq, 'state_changed', {
+          kind: 'dead_letter',
+          reason: 'legacy_continuation_authorization_invalid',
+          text_len: item.text.length,
+        })
+        return 'dead_letter'
+      }
+
+      // Source material is read-only. No legacy adapter, resume/checkpoint replay, or
+      // source kill is involved in this path.
+      const material = await this.readLegacyHandoffMaterial(worker, legacy.workspace)
+      const workspace = await this.deps.workspaces.resolve(
+        worker.worker_id,
+        material.workspaceCandidate,
+      )
+      const targetImpl = pickUnusedImpl(worker, this.deps.adapters, this.deps.defaultImpl)
+      const targetAdapter = this.deps.adapters.get(targetImpl)
+      if (!targetAdapter) {
+        throw new Error(`WorkerHarness.legacyContinuation: no adapter registered for impl '${targetImpl}'`)
+      }
+      if (implAlreadyUsed(worker, targetImpl)) {
+        throw new ImplAlreadyUsedError(worker.worker_id, targetImpl)
+      }
+
+      const caps = this.deps.capabilityBundle
+        ? await this.deps.capabilityBundle({
+            worker_id: worker.worker_id,
+            principal_permissions: auth.principal_permissions,
+          })
+        : EMPTY_CAPABILITY_BUNDLE
+      const builtin = targetImpl === 'builtin'
+        ? this.deps.builtinSpawnDefaults?.({
+            worker_id: worker.worker_id,
+            workspace,
+            origin: worker.origin,
+            goal: worker.task.goal,
+            principal_permissions: auth.principal_permissions,
+          })
+        : undefined
+      if (targetImpl === 'builtin' && !builtin) {
+        throw new Error('WorkerHarness.legacyContinuation: builtin target requires builtinSpawnDefaults')
+      }
+      // No context, HANDOFF, ledger, provision or spawn side effect precedes target preflight.
+      await targetAdapter.preflightProvision?.(workspace, caps)
+
+      await this.contextStore.write(worker.worker_id, {
+        principal_permissions: auth.principal_permissions,
+      })
+      const handoffAt = this.deps.now()
+      await appendHandoffFile(workspace.root, {
+        ts: handoffAt,
+        title: worker.task.title,
+        goal: worker.task.goal,
+        outcome: worker.task.outcome ?? legacy.ended_reason,
+        tail: material.tail,
+        input: item.text,
+      })
+      await this.appendEvent(worker.worker_id, legacy.seq, 'handoff_started', {
+        target_impl: targetImpl,
+        legacy: true,
+      })
+
+      await targetAdapter.provision(workspace, caps)
+      const prompt = buildHandoffPrompt(worker.task, item.text)
+      const handle = await targetAdapter.spawn({
+        worker_id: worker.worker_id,
+        prompt,
+        workspace,
+        goal: worker.task.goal,
+        origin: worker.origin,
+        principal_permissions: auth.principal_permissions,
+        builtin,
+      })
+      const initialInput = handle.initial_input
+      const initialState = cliContractState(initialInput?.control_state ?? 'running')
+      const now = this.deps.now()
+      const updated = await this.deps.ledger.upsertWorker(managerKey, worker.worker_id, (previous) => {
+        if (!previous) return undefined
+        const incarnation: Incarnation = {
+          seq: handle.seq,
+          impl: targetImpl,
+          state: initialState,
+          workspace: workspace.root,
+          session_ref: handle.session_ref,
+          started_at: now,
+          ...(initialState === 'exited'
+            ? { ended_at: now, ended_reason: initialInput?.report?.endReason ?? 'crashed' }
+            : {}),
+        }
+        let task = reopenTaskForContinuation(previous.task, now)
+        task = settleCliTask(task, initialState, initialInput?.report, now)
+        return {
+          ...previous,
+          task,
+          incarnations: [...previous.incarnations, incarnation],
+          updated_at: now,
+        }
+      })
+
+      this.bumpInputOwnershipRevision(worker.worker_id)
+      const inbox = this.getInbox(worker.worker_id)
+      inbox.release()
+      const replayedConsumed = inbox.requeueConsumed()
+      await this.appendEvent(
+        worker.worker_id,
+        handle.seq,
+        'spawned',
+        { impl: targetImpl, from_seq: legacy.seq, legacy: true },
+        updated?.task.status,
+      )
+      if (initialInput && (initialInput.disposition !== 'accepted' || initialState === 'exited')) {
+        await this.appendEvent(
+          worker.worker_id,
+          handle.seq,
+          'state_changed',
+          cliReportDetail(initialState, initialInput.report),
+          updated?.task.status,
+        )
+      }
+      return continuationDelivery(
+        initialInput,
+        initialState,
+        handle,
+        replayedConsumed,
+        { text: prompt, raw: item.raw },
+      )
+    })
+  }
+
+  private async readLegacyHandoffMaterial(
+    worker: LedgerWorker,
+    fallbackWorkspace: string,
+  ): Promise<{
+    readonly tail: string
+    readonly workspaceCandidate: string
+  }> {
+    const snapshotPath = join(this.deps.workersDir, worker.worker_id, 'legacy-task.json')
+    let snapshot: Record<string, unknown> | undefined
+    try {
+      const value: unknown = JSON.parse(await fs.readFile(snapshotPath, 'utf8'))
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        snapshot = value as Record<string, unknown>
+      }
+    } catch (error) {
+      console.warn(`[WorkerHarness] legacy snapshot unavailable for ${worker.worker_id}:`, error)
+    }
+
+    let traces: Awaited<ReturnType<typeof readLegacyTraces>> | undefined
+    try {
+      traces = await readLegacyTraces(join(dirname(this.deps.workersDir), 'traces'))
+    } catch (error) {
+      console.warn(`[WorkerHarness] legacy traces unavailable for ${worker.worker_id}:`, error)
+    }
+    const byId = new Map(
+      [...(traces?.values() ?? [])].flat().map((trace) => [trace.trace_id, trace]),
+    )
+    const selected = (worker.legacy_source?.trace_ids ?? [])
+      .map((id) => byId.get(id))
+      .filter((trace): trace is NonNullable<typeof trace> => trace !== undefined)
+    const candidate = [...selected]
+      .reverse()
+      .find((trace) => typeof trace.resume_checkpoint?.worker_state?.cwd === 'string')
+      ?.resume_checkpoint?.worker_state?.cwd
+
+    // Never replay checkpoint messages/permissions into the new engine. Only bounded
+    // task snapshot text and trace lifecycle/outcome metadata become handoff material.
+    const traceSummary = selected.map((trace) => ({
+      trace_id: trace.trace_id,
+      started_at: trace.started_at,
+      ended_at: trace.ended_at,
+      outcome: trace.outcome,
+    }))
+    const raw = JSON.stringify({ task: snapshot, traces: traceSummary })
+    const tail = raw.length > HANDOFF_TAIL_MAX_CHARS
+      ? raw.slice(-HANDOFF_TAIL_MAX_CHARS)
+      : raw
+    return { tail, workspaceCandidate: candidate ?? fallbackWorkspace }
   }
 
   /**
@@ -2517,7 +2748,7 @@ function pickUnusedImpl(
   adapters: ReadonlyMap<WorkerImplId, WorkerAdapter>,
   defaultImpl: WorkerImplId
 ): WorkerImplId {
-  if (!implAlreadyUsed(worker, defaultImpl)) return defaultImpl
+  if (adapters.has(defaultImpl) && !implAlreadyUsed(worker, defaultImpl)) return defaultImpl
   for (const impl of adapters.keys()) {
     if (!implAlreadyUsed(worker, impl)) return impl
   }

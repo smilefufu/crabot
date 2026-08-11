@@ -182,7 +182,7 @@ function now(): string {
 }
 
 async function makeHarness(
-  depsOverrides: Partial<Pick<HarnessDeps, 'capabilityBundle' | 'builtinSpawnDefaults'>> = {},
+  depsOverrides: Partial<Pick<HarnessDeps, 'capabilityBundle' | 'builtinSpawnDefaults' | 'validateLegacyContinuationAuth'>> = {},
 ): Promise<{
   harness: WorkerHarness
   ledger: LedgerStore
@@ -2149,19 +2149,41 @@ describe('HarnessEvent.task_status —— 透明接续的迁移点', () => {
 
 describe('legacy incarnation guardrails', () => {
   const managerKey = 'test::legacy-session' as ManagerKey
+  const permissions = {
+    tool_access: { memory: false, messaging: false, task: false, mcp_skill: false, file_io: false, browser: false, shell: false, remote_exec: false, desktop: false },
+    cli_access: { provider: 'none', agent: 'none', mcp: 'none', skill: 'none', schedule: 'none', channel: 'none', friend: 'none', permission: 'none', config: 'none', undo: 'none' },
+    storage: null,
+    memory_scopes: ['legacy'],
+  } as const
 
-  async function addLegacy(ledger: LedgerStore, workerId: string): Promise<void> {
+  function continuationAuth() {
+    return {
+      manager_key: managerKey,
+      principal_kind: 'friend' as const,
+      principal_generation: 1,
+      principal_permissions: permissions,
+    }
+  }
+
+  async function addLegacy(
+    ledger: LedgerStore,
+    workerId: string,
+    overrides: { status?: LedgerWorker['task']['status']; endedReason?: 'completed' | 'failed' | 'pre_migration' | 'killed' } = {},
+  ): Promise<void> {
     const at = now()
-    await ledger.upsertWorker(managerKey, workerId, () => ({
+    await fs.mkdir(join(dataDir, 'workspace'), { recursive: true })
+    await fs.mkdir(join(dataDir, 'workers', workerId), { recursive: true })
+    await fs.writeFile(join(dataDir, 'workers', workerId, 'legacy-task.json'), JSON.stringify({ id: 'old-task' }))
+    await ledger.importLegacyWorker(managerKey, {
       worker_id: workerId,
       manager_key: managerKey,
-      task: { id: workerId, title: 'legacy', status: 'completed', created_at: at },
+      task: { id: workerId, title: 'legacy', status: overrides.status ?? 'completed', created_at: at },
       origin: { trigger_type: 'system' },
       report_to: { channel_id: 'test', session_id: 'legacy-session' },
-      incarnations: [{ seq: 1, impl: 'legacy', state: 'exited', workspace: join(dataDir, 'workspace'), started_at: at, ended_at: at, ended_reason: 'completed' }],
+      incarnations: [{ seq: 1, impl: 'legacy', state: 'exited', workspace: join(dataDir, 'workspace'), started_at: at, ended_at: at, ended_reason: overrides.endedReason ?? 'completed' }],
       legacy_source: { kind: 'v2_admin_task', admin_task_id: 'old-task', trace_ids: [], imported_at: at },
       updated_at: at,
-    } satisfies LedgerWorker))
+    } satisfies LedgerWorker)
   }
 
   it('readWorkerOutput returns an unavailable empty chunk without adapter lookup', async () => {
@@ -2171,11 +2193,159 @@ describe('legacy incarnation guardrails', () => {
     expect(adaptersMap.size).toBe(0)
   })
 
-  it('sendToWorker rejects a legacy source before adapter lookup', async () => {
+  it('sendToWorker dead-letters a legacy item without auth before adapter lookup', async () => {
+    const settled: string[] = []
     const { harness, ledger, adaptersMap } = await makeHarness()
     await addLegacy(ledger, 'w-legacy-send')
-    await expect(harness.sendToWorker('w-legacy-send', 'continue')).rejects.toThrow(/legacy worker continuation is not available/)
+    await expect(harness.sendToWorker('w-legacy-send', 'continue', {
+      onSettled: (result) => { settled.push(result) },
+    })).resolves.toBeUndefined()
+    expect(settled).toEqual(['dead_letter'])
+    expect(events).toContainEqual(expect.objectContaining({
+      kind: 'state_changed',
+      detail: expect.objectContaining({ reason: 'legacy_continuation_authorization_invalid' }),
+    }))
     expect(adaptersMap.size).toBe(0)
+  })
+
+  it('malformed auth is dead-lettered before target preflight or context writes', async () => {
+    const { harness, ledger, adaptersMap, workersDir } = await makeHarness({
+      validateLegacyContinuationAuth: async () => true,
+    })
+    await addLegacy(ledger, 'w-legacy-malformed-auth')
+    const target = new FakeAdapter({ implId: 'builtin' })
+    adaptersMap.set('builtin', target)
+
+    await harness.sendToWorker('w-legacy-malformed-auth', 'continue', {
+      legacyContinuationAuth: {
+        ...continuationAuth(),
+        principal_permissions: {},
+      } as never,
+    })
+
+    expect(target.preflightProvisionCalls).toHaveLength(0)
+    expect(target.provisionCalls).toHaveLength(0)
+    expect(target.spawnCalls).toHaveLength(0)
+    await expect(fs.stat(join(workersDir, 'w-legacy-malformed-auth', 'context.json')))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('legacy continuation validates auth before side effects, then spawns a fresh v3 incarnation without legacy adapter access', async () => {
+    const { harness, ledger, adaptersMap, workersDir } = await makeHarness({
+      validateLegacyContinuationAuth: async () => true,
+    })
+    await addLegacy(ledger, 'w-legacy-success')
+    await fs.mkdir(join(workersDir, 'w-legacy-success'), { recursive: true })
+    await fs.writeFile(join(workersDir, 'w-legacy-success', 'legacy-task.json'), JSON.stringify({ id: 'old-task' }))
+    const target = new FakeAdapter({ implId: 'builtin', onStateChange: harness.handleStateChange })
+    adaptersMap.set('builtin', target)
+    const adapterGet = vi.spyOn(adaptersMap, 'get')
+
+    await harness.sendToWorker('w-legacy-success', 'continue', {
+      legacyContinuationAuth: continuationAuth(),
+    })
+
+    const worker = (await ledger.findWorker('w-legacy-success'))!.worker
+    expect(worker.task.status).toBe('running')
+    expect(worker.incarnations).toHaveLength(2)
+    expect(worker.incarnations[1]).toMatchObject({ impl: 'builtin', state: 'running' })
+    expect(target.preflightProvisionCalls).toHaveLength(1)
+    expect(target.provisionCalls).toHaveLength(1)
+    expect(target.spawnCalls).toHaveLength(1)
+    expect(target.killCalls).toHaveLength(0)
+    expect(target.resumeCalls).toHaveLength(0)
+    expect(adapterGet.mock.calls.some(([impl]) => String(impl) === 'legacy')).toBe(false)
+    expect(JSON.parse(await fs.readFile(join(workersDir, 'w-legacy-success', 'context.json'), 'utf8'))).toEqual({
+      principal_permissions: permissions,
+    })
+    const handoff = await fs.readFile(join(dataDir, 'workspace', 'HANDOFF.md'), 'utf8')
+    expect(handoff).toContain('old-task')
+    expect(handoff).not.toContain('resume_checkpoint')
+    expect(events.some((event) => event.kind === 'handoff_started')).toBe(true)
+  })
+
+  it('invalid auth settles and does not block a later valid continuation', async () => {
+    let authorized = false
+    const { harness, ledger, adaptersMap } = await makeHarness({
+      validateLegacyContinuationAuth: async () => authorized,
+    })
+    await addLegacy(ledger, 'w-legacy-auth-retry')
+    const target = new FakeAdapter({ implId: 'builtin' })
+    adaptersMap.set('builtin', target)
+
+    await harness.sendToWorker('w-legacy-auth-retry', 'invalid', {
+      legacyContinuationAuth: continuationAuth(),
+    })
+    expect(target.preflightProvisionCalls).toHaveLength(0)
+
+    authorized = true
+    await harness.sendToWorker('w-legacy-auth-retry', 'valid', {
+      legacyContinuationAuth: continuationAuth(),
+    })
+    expect(target.spawnCalls).toHaveLength(1)
+    expect(target.spawnCalls[0].prompt).toContain('valid')
+    expect(target.spawnCalls[0].prompt).not.toContain('invalid')
+  })
+
+  it('failed and pre-migration legacy workers are eligible for the same fresh-v3 path', async () => {
+    const { harness, ledger, adaptersMap } = await makeHarness({
+      validateLegacyContinuationAuth: async () => true,
+    })
+    const target = new FakeAdapter({ implId: 'builtin' })
+    adaptersMap.set('builtin', target)
+    await addLegacy(ledger, 'w-legacy-failed', { status: 'failed', endedReason: 'failed' })
+    await addLegacy(ledger, 'w-legacy-pre-migration', { status: 'failed', endedReason: 'pre_migration' })
+
+    await harness.sendToWorker('w-legacy-failed', 'continue failed', {
+      legacyContinuationAuth: continuationAuth(),
+    })
+    await harness.sendToWorker('w-legacy-pre-migration', 'continue migration', {
+      legacyContinuationAuth: continuationAuth(),
+    })
+
+    expect((await ledger.findWorker('w-legacy-failed'))?.worker.task.status).toBe('running')
+    expect((await ledger.findWorker('w-legacy-pre-migration'))?.worker.task.status).toBe('running')
+    expect(target.spawnCalls).toHaveLength(2)
+  })
+
+  it('cancelled legacy workers are rejected before target preflight', async () => {
+    const { harness, ledger, adaptersMap } = await makeHarness({
+      validateLegacyContinuationAuth: async () => true,
+    })
+    await addLegacy(ledger, 'w-legacy-cancelled', { status: 'cancelled', endedReason: 'killed' })
+    const target = new FakeAdapter({ implId: 'builtin' })
+    adaptersMap.set('builtin', target)
+
+    await expect(harness.sendToWorker('w-legacy-cancelled', 'continue', {
+      legacyContinuationAuth: continuationAuth(),
+    })).rejects.toBeInstanceOf(TaskCancelledError)
+    expect(target.preflightProvisionCalls).toHaveLength(0)
+    expect(target.provisionCalls).toHaveLength(0)
+    expect(target.spawnCalls).toHaveLength(0)
+  })
+
+  it('preflight failure leaves context, HANDOFF and ledger untouched', async () => {
+    const { harness, ledger, adaptersMap, workersDir } = await makeHarness({
+      validateLegacyContinuationAuth: async () => true,
+    })
+    await addLegacy(ledger, 'w-legacy-preflight')
+    const target = new FakeAdapter({
+      implId: 'builtin',
+      preflightProvisionBehavior: () => { throw new Error('preflight denied') },
+    })
+    adaptersMap.set('builtin', target)
+
+    await expect(harness.sendToWorker('w-legacy-preflight', 'continue', {
+      legacyContinuationAuth: continuationAuth(),
+    })).rejects.toThrow('preflight denied')
+
+    expect(target.provisionCalls).toHaveLength(0)
+    expect(target.spawnCalls).toHaveLength(0)
+    await expect(fs.stat(join(workersDir, 'w-legacy-preflight', 'context.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(fs.stat(join(dataDir, 'workspace', 'HANDOFF.md'))).rejects.toMatchObject({ code: 'ENOENT' })
+    const worker = (await ledger.findWorker('w-legacy-preflight'))!.worker
+    expect(worker.task.status).toBe('completed')
+    expect(worker.incarnations).toHaveLength(1)
   })
 
   it('startup reconciliation leaves terminal legacy workers unchanged without adapter lookup', async () => {

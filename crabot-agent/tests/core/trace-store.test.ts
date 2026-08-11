@@ -53,6 +53,22 @@ describe('TraceStore', () => {
       return fs.mkdtempSync(path.join(os.tmpdir(), 'trace-store-flush-'))
     }
 
+    it('uses a configured v3 running file without loading or changing the legacy running file', () => {
+      const dir = makeTempDir()
+      try {
+        const legacyPath = path.join(dir, 'traces-running.jsonl')
+        fs.writeFileSync(legacyPath, '{"legacy":true}\n')
+        const before = fs.readFileSync(legacyPath, 'utf8')
+        const store = new TraceStore(10, dir, 'traces-running-v3.jsonl')
+        const trace = store.startTrace({ module_id: 'agent-1', trigger: { type: 'task', summary: 'new' } })
+        ;(store as unknown as { flushInFlightTraces: () => void }).flushInFlightTraces()
+        expect(fs.readFileSync(legacyPath, 'utf8')).toBe(before)
+        expect(fs.readFileSync(path.join(dir, 'traces-running-v3.jsonl'), 'utf8')).toContain(trace.trace_id)
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
     it('flushed in-flight trace is visible after store recreation (simulates SIGKILL + restart)', () => {
       const dir = makeTempDir()
       try {
