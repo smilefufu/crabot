@@ -42,8 +42,9 @@ export function attentionFlushToWakeEvent(msgs: ReadonlyArray<ChannelMessage>): 
  *  工具调用里同步拿到了投递结果(engine tool_result),不需要再靠事件唤醒一次去获知"已发送"
  *  这件事本身。其余 kind(spawned/input_held/state_changed/exited/killed/superseded/
  *  handoff_started/resumed/query_failed)都代表 worker 生命周期或侧问的进展/终局,manager
- *  需要据此决定要不要转述给人类或采取下一步动作,一律唤醒。 */
-const NO_WAKE_KINDS: ReadonlySet<HarnessEventKind> = new Set(['input_sent'])
+ *  需要据此决定要不要转述给人类或采取下一步动作,一律唤醒。`legacy_imported` 只是一条
+ *  cutover 历史记录，只落盘，不能批量唤醒 Manager。 */
+const NO_WAKE_KINDS: ReadonlySet<HarnessEventKind> = new Set(['input_sent', 'legacy_imported'])
 
 /** harness 事件是否值得唤醒 manager(过滤规则见 `NO_WAKE_KINDS` 注释)。 */
 export function shouldWakeOnHarnessEvent(e: HarnessEvent): boolean {

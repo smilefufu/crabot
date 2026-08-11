@@ -4,8 +4,11 @@
 
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest'
 import http from 'node:http'
+import { WebSocket } from 'ws'
+import { sha256CanonicalJson } from 'crabot-shared'
 import fs from 'node:fs/promises'
 import AdminModule from './index.js'
+import { UnifiedAgent } from '../../crabot-agent/src/unified-agent.js'
 import type { ChannelMessageRef, DialogObjectApplication, Friend, FriendPermissionConfig, ListConversationUnitsResult, LoginResponse, Task } from './types.js'
 import { AdminErrorCode, createCliAccessConfig } from './types.js'
 import { newCredentialsFromPassword, writeCredentials } from './credentials.js'
@@ -114,6 +117,156 @@ describe('Admin Web API', () => {
         'invalid-token'
       )
       expect(response.statusCode).toBe(401)
+    })
+  })
+
+  describe('Admin Chat assertion transport boundaries', () => {
+    afterEach(async () => {
+      vi.restoreAllMocks()
+      await (admin as unknown as { chatManager: { clearMessages(): Promise<void> } }).chatManager.clearMessages()
+    })
+
+    function captureProcessMessage() {
+      ;(admin as unknown as { agentPort: number }).agentPort = 19999
+      return vi.spyOn(
+        (admin as unknown as { rpcClient: { call: (...args: unknown[]) => Promise<unknown> } }).rpcClient,
+        'call',
+      ).mockImplementation(async (_port, method) => {
+        if (method === 'process_message') return { decision_types: [] }
+        throw new Error(`unexpected RPC: ${String(method)}`)
+      })
+    }
+
+    async function consumeThroughAgent(payload: Record<string, any>): Promise<void> {
+      const processAdminChatMessage = vi.fn(async () => ({ decision_types: [] }))
+      const agent = Object.create(UnifiedAgent.prototype) as unknown as {
+        config: { moduleId: string }
+        rpcClient: {
+          resolve(filter: unknown): Promise<Array<{ module_id: string; port: number }>>
+          call(port: number, method: string, params: unknown): Promise<unknown>
+        }
+        processAdminChatMessage: typeof processAdminChatMessage
+        managerStack: { principals: { activateAdminChat(key: string, input: unknown): Promise<void> } }
+        handleProcessMessage(params: Record<string, unknown>): Promise<unknown>
+      }
+      agent.config = { moduleId: 'crabot-agent' }
+      agent.processAdminChatMessage = processAdminChatMessage
+      agent.managerStack = { principals: { activateAdminChat: async () => {} } }
+      agent.rpcClient = {
+        resolve: async (filter) => {
+          expect(filter).toEqual({ module_id: 'admin-web' })
+          return [{ module_id: 'admin-web', port: TEST_PROTOCOL_PORT }]
+        },
+        call: async (port, method, params) => {
+          expect(port).toBe(TEST_PROTOCOL_PORT)
+          expect(method).toBe('consume_admin_chat_assertion')
+          return (admin as unknown as {
+            handleConsumeAdminChatAssertion(input: unknown): Promise<unknown>
+          }).handleConsumeAdminChatAssertion(params)
+        },
+      }
+
+      await expect(agent.handleProcessMessage(payload)).resolves.toEqual({ decision_types: [] })
+      expect(processAdminChatMessage).toHaveBeenCalledTimes(1)
+      await expect(agent.handleProcessMessage(payload)).rejects.toThrow(/consumed/)
+      expect(processAdminChatMessage).toHaveBeenCalledTimes(1)
+    }
+
+    function assertCommonAdminChatPayload(payload: Record<string, any>, requestId: string, text: string): void {
+      expect(Object.keys(payload).sort()).toEqual([
+        'admin_chat_assertion', 'callback_info', 'message', 'source_type',
+      ])
+      expect(payload).toMatchObject({
+        source_type: 'admin_chat',
+        callback_info: { source_module_id: 'admin-web', request_id: requestId },
+        message: {
+          session: { channel_id: 'admin-web', session_id: 'admin-chat', type: 'private' },
+          sender: { friend_id: 'master', platform_user_id: 'master' },
+          content: { type: 'text', text },
+        },
+      })
+      expect(Object.keys(payload.message).sort()).toEqual([
+        'content', 'features', 'platform_message_id', 'platform_timestamp', 'sender', 'session',
+      ])
+      expect(typeof payload.admin_chat_assertion).toBe('string')
+      expect(sha256CanonicalJson(payload.message)).toMatch(/^[a-f0-9]{64}$/)
+    }
+
+    function processPayload(call: unknown[] | undefined): Record<string, any> {
+      expect(call?.[1]).toBe('process_message')
+      return call?.[2] as Record<string, any>
+    }
+
+    async function waitForCall(spy: ReturnType<typeof vi.spyOn>): Promise<unknown[]> {
+      const deadline = Date.now() + 2_000
+      while (Date.now() < deadline) {
+        const call = spy.mock.calls.find(entry => entry[1] === 'process_message')
+        if (call) return call
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      throw new Error('timed out waiting for process_message')
+    }
+
+    async function rejectedWebSocket(url: string): Promise<number | undefined> {
+      return new Promise((resolve, reject) => {
+        const socket = new WebSocket(url)
+        socket.once('unexpected-response', (_request, response) => {
+          response.resume()
+          resolve(response.statusCode)
+        })
+        socket.once('open', () => reject(new Error('websocket unexpectedly opened')))
+        socket.once('error', error => {
+          // `ws` normally emits this after unexpected-response; wait for the HTTP status.
+          if (!socket.readyState || socket.readyState === WebSocket.CLOSED) return
+          reject(error)
+        })
+      })
+    }
+
+    it('multipart Admin Chat requires JWT and creates a one-time assertion bound to the final Agent message', async () => {
+      const body = new FormData()
+      body.set('request_id', 'multipart-assertion-1')
+      body.set('text', '来自 multipart 的消息')
+      const unauthenticated = await fetch(`http://localhost:${TEST_WEB_PORT}/api/chat/messages`, {
+        method: 'POST', body,
+      })
+      expect(unauthenticated.status).toBe(401)
+
+      const token = await loginAndGetToken()
+      const spy = captureProcessMessage()
+      const authenticatedBody = new FormData()
+      authenticatedBody.set('request_id', 'multipart-assertion-2')
+      authenticatedBody.set('text', '来自 multipart 的消息')
+      const response = await fetch(`http://localhost:${TEST_WEB_PORT}/api/chat/messages`, {
+        method: 'POST', body: authenticatedBody, headers: { Authorization: `Bearer ${token}` },
+      })
+      expect(response.status).toBe(200)
+
+      const payload = processPayload(await waitForCall(spy))
+      assertCommonAdminChatPayload(payload, 'multipart-assertion-2', '来自 multipart 的消息')
+      await consumeThroughAgent(payload)
+    })
+
+    it('WebSocket rejects missing/invalid JWT and emits the same Admin Chat assertion payload after valid JWT', async () => {
+      expect(await rejectedWebSocket(`ws://localhost:${TEST_WEB_PORT}/ws/chat`)).toBe(401)
+      expect(await rejectedWebSocket(`ws://localhost:${TEST_WEB_PORT}/ws/chat?token=invalid`)).toBe(401)
+
+      const token = await loginAndGetToken()
+      const spy = captureProcessMessage()
+      const socket = new WebSocket(`ws://localhost:${TEST_WEB_PORT}/ws/chat?token=${encodeURIComponent(token)}`)
+      try {
+        await new Promise<void>((resolve, reject) => {
+          socket.once('open', resolve)
+          socket.once('error', reject)
+        })
+        socket.send(JSON.stringify({ type: 'chat_message', request_id: 'ws-assertion-1', content: '来自 WS 的消息' }))
+        const payload = processPayload(await waitForCall(spy))
+        assertCommonAdminChatPayload(payload, 'ws-assertion-1', '来自 WS 的消息')
+        await consumeThroughAgent(payload)
+      } finally {
+        socket.close()
+        await new Promise(resolve => socket.once('close', resolve))
+      }
     })
   })
 
@@ -1646,7 +1799,7 @@ describe('Admin Web API', () => {
 
       await makeWebRequest(
         TEST_WEB_PORT,
-        '/api/agent/workers?status=executing&status=waiting&dialog_object_id=telegram-001%3Aprivate-42'
+        '/api/agent/workers?status=executing&status=waiting&manager_key=telegram-001%3A%3Aprivate-42'
           + '&start=2026-07-01T00%3A00%3A00.000Z&end=2026-07-31T00%3A00%3A00.000Z&page=2&page_size=5',
         'GET',
         null,
@@ -1655,7 +1808,7 @@ describe('Admin Web API', () => {
 
       expect(spy).toHaveBeenCalledWith('list_workers_admin', {
         status: ['executing', 'waiting'],
-        dialog_object_id: 'telegram-001:private-42',
+        manager_key: 'telegram-001::private-42',
         time_range: { start: '2026-07-01T00:00:00.000Z', end: '2026-07-31T00:00:00.000Z' },
         pagination: { page: 2, page_size: 5 },
       })

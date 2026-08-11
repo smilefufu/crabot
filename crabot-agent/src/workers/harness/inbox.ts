@@ -20,6 +20,7 @@
  */
 
 import { AsyncMutex } from '../async-mutex'
+import type { LegacyContinuationAuth } from './legacy-continuation-auth.js'
 
 export type InboxSettlement = 'delivered' | 'dead_letter'
 
@@ -33,6 +34,8 @@ export interface InboxItem {
   readonly onSettled?: (settlement: InboxSettlement) => void | Promise<void>
   /** Prevent a producer retry from enqueueing the same durable item twice in one process. */
   readonly dedupe_key?: string
+  /** Opaque, in-process-only authorization for one legacy continuation. */
+  readonly legacy_continuation_auth?: LegacyContinuationAuth
 }
 
 export interface InboxDeliveryResult {

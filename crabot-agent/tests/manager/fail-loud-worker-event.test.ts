@@ -24,7 +24,7 @@ import { UnifiedAgent } from '../../src/unified-agent.js'
 import { buildManagerStack, type BootstrapDeps, type ManagerStack } from '../../src/manager/bootstrap.js'
 import type { PrincipalResolverDeps } from '../../src/manager/principal.js'
 import type { ManagerKey } from '../../src/manager/types.js'
-import { dialogObjectIdForPrivate, type LedgerWorker } from '../../src/workers/harness/ledger-types.js'
+import { type LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import type { LLMAdapter } from '../../src/engine/index.js'
 import { createCrabMemoryServer } from '../../src/mcp/crab-memory.js'
 
@@ -76,11 +76,13 @@ function brokenLLM(): LLMAdapter {
   }
 }
 
-function makeLedgerWorker(p: { workerId: string; title: string; spawnedBySession: ManagerKey }): LedgerWorker {
+function makeLedgerWorker(p: { workerId: string; title: string; managerKey: ManagerKey }): LedgerWorker {
   return {
     worker_id: p.workerId,
+    manager_key: p.managerKey,
     task: { id: p.workerId, title: p.title, status: 'running', created_at: '2026-01-01T00:00:00.000Z' },
-    origin: { spawned_by_session: p.spawnedBySession, trigger_type: 'message' },
+    origin: {
+      trigger_type: 'message' },
     report_to: { channel_id: 'wechat', session_id: 'sess-1' },
     incarnations: [
       {
@@ -174,8 +176,8 @@ describe('worker 事件路径的 fail-loud（bootstrap.onEvent → reportEpisode
 
   /** 台账里种一条 worker,再从 adapter 上报口推一个 exited —— 走的是生产的 onEvent 接线。 */
   async function seedAndFireEvent(stack: ManagerStack, p: { workerId: string; title: string }): Promise<void> {
-    await stack.ledger.upsertWorker(dialogObjectIdForPrivate('friend-1'), p.workerId, () =>
-      makeLedgerWorker({ workerId: p.workerId, title: p.title, spawnedBySession: 'wechat::sess-1' as ManagerKey }),
+    await stack.ledger.upsertWorker('wechat::sess-1' as ManagerKey, p.workerId, () =>
+      makeLedgerWorker({ workerId: p.workerId, title: p.title, managerKey: 'wechat::sess-1' as ManagerKey }),
     )
     stack.harness.handleStateChange(
       { worker_id: p.workerId, seq: 1, impl: 'builtin', session_ref: `${p.workerId}-ref` },
@@ -196,7 +198,7 @@ describe('worker 事件路径的 fail-loud（bootstrap.onEvent → reportEpisode
     await waitUntil(() => rpcCalls.some((c) => c.method === 'send_message'))
 
     const sent = rpcCalls.find((c) => c.method === 'send_message')!
-    // 目标 = 该 worker 的监护 manager（origin.spawned_by_session），不是 report_to、不是系统线程
+    // 目标 = 该 worker 的监护 manager（origin.manager_key），不是 report_to、不是系统线程
     expect(sent.port).toBe(WECHAT_PORT)
     expect(sent.params.session_id).toBe('sess-1')
 
@@ -263,8 +265,8 @@ describe('worker 事件路径的 fail-loud（bootstrap.onEvent → reportEpisode
 
     // 台账：主线化身 running、impl=claude-code。
     // builtin 也有自己的 progress 信号；这里选择 CLI 是为了覆盖原生 meta 基线。
-    await stack.ledger.upsertWorker(dialogObjectIdForPrivate('friend-1'), workerId, () => {
-      const worker = makeLedgerWorker({ workerId, title: '卡住的活', spawnedBySession: 'wechat::sess-1' as ManagerKey })
+    await stack.ledger.upsertWorker('wechat::sess-1' as ManagerKey, workerId, () => {
+      const worker = makeLedgerWorker({ workerId, title: '卡住的活', managerKey: 'wechat::sess-1' as ManagerKey })
       return { ...worker, incarnations: [{ ...worker.incarnations[0], impl: 'claude-code' }] }
     })
 

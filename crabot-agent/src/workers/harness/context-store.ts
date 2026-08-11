@@ -37,7 +37,7 @@ function isStoragePermission(value: unknown): value is StoragePermission | null 
     typeof value.workspace_path === 'string' && (value.access === 'read' || value.access === 'readwrite'))
 }
 
-function isCompleteResolvedPermissions(value: unknown): value is ResolvedPermissions {
+export function isResolvedPermissionsSnapshot(value: unknown): value is ResolvedPermissions {
   if (!isRecord(value) || !hasOnlyKeys(value, ['tool_access', 'cli_access', 'storage', 'memory_scopes'])) return false
   const toolAccess = value.tool_access
   if (!isRecord(toolAccess) || !hasOnlyKeys(toolAccess, TOOL_ACCESS_KEYS) ||
@@ -85,7 +85,7 @@ function validatePersistedContext(value: unknown, path: string): WorkerContext {
   if (!isRecord(value) || !hasOnlyKeys(value, ['principal_permissions'])) {
     throw new Error(`WorkerContextStore: invalid context at ${path}`)
   }
-  if (value.principal_permissions !== undefined && !isCompleteResolvedPermissions(value.principal_permissions)) {
+  if (value.principal_permissions !== undefined && !isResolvedPermissionsSnapshot(value.principal_permissions)) {
     throw new Error(`WorkerContextStore: invalid principal_permissions at ${path}`)
   }
   return value.principal_permissions === undefined ? {} : { principal_permissions: value.principal_permissions }

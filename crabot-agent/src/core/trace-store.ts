@@ -67,7 +67,7 @@ export class TraceStore {
   private taskIndex: Map<string, string[]> = new Map()
 
   // ── In-flight 定时持久化 ────────────────────────────────
-  // status='running' 的 trace 只在 endTrace 时才追加到 traces-{date}.jsonl。
+  // status='running' 的 trace 只在 endTrace 时才追加到按日期切片的 archive 文件。
   // 但 agent 被 SIGKILL（health 失败 / OOM / 外部强杀）时根本没机会 endTrace，
   // 整条主 task trace 连带所有 span 永久丢失 —— admin UI 上只能看到已结束的
   // sub-agent / dispatch trace，看不到死前主 loop 在做啥。
@@ -77,7 +77,9 @@ export class TraceStore {
   // 进程重启后 rebuildIndex 把上次 running 的 trace 重新加载到 this.traces，
   // searchTraces 的现有合并逻辑（line 107-112）能直接展示出来。
   private flushTimer?: ReturnType<typeof setInterval>
-  private static readonly RUNNING_FLUSH_FILE = 'traces-running.jsonl'
+  private readonly runningFlushFile: string
+  private readonly archiveFilePrefix: string
+  private readonly readableArchiveFilePrefixes: readonly string[]
 
   // ── Worker checkpoint resume 集合 ──────────────────────
   // flushWorkerCheckpoint 把 worker trace（含 resume_checkpoint）原子写到
@@ -85,9 +87,18 @@ export class TraceStore {
   // 读进此 Map，等 admin 裁决（HOLD，不立即标 failed）。
   private resumableCheckpoints = new Map<string, { traceId: string; checkpoint: import('../types.js').ResumeCheckpoint }>()
 
-  constructor(maxSize = 100, persistDir?: string) {
+  constructor(
+    maxSize = 100,
+    persistDir?: string,
+    runningFlushFile = 'traces-running.jsonl',
+    archiveFilePrefix = 'traces-',
+    readableArchiveFilePrefixes: readonly string[] = [archiveFilePrefix],
+  ) {
     this.maxSize = maxSize
     this.persistDir = persistDir
+    this.runningFlushFile = runningFlushFile
+    this.archiveFilePrefix = archiveFilePrefix
+    this.readableArchiveFilePrefixes = readableArchiveFilePrefixes
     if (persistDir) {
       fs.mkdirSync(persistDir, { recursive: true })
       this.rebuildIndex()
@@ -278,7 +289,7 @@ export class TraceStore {
   private loadResumableCheckpoints(): void {
     if (!this.persistDir) return
     const files = fs.readdirSync(this.persistDir)
-      .filter(f => f.startsWith('traces-running-') && f.endsWith('.jsonl'))
+      .filter(f => f !== this.runningFlushFile && f.startsWith('traces-running-') && f.endsWith('.jsonl'))
     for (const file of files) {
       const taskId = file.slice('traces-running-'.length, -'.jsonl'.length)
       try {
@@ -295,7 +306,7 @@ export class TraceStore {
   }
 
   /**
-   * 全量重写 traces-running.jsonl —— 当前所有 status='running' 的 trace。
+   * 全量重写当前实例的 in-flight 文件（默认兼容旧 traces-running.jsonl）。
    * 用 tmp + rename 实现 atomic 替换：进程在写中间被杀，旧文件保持完好。
    */
   private flushInFlightTraces(): void {
@@ -307,19 +318,19 @@ export class TraceStore {
       }
     }
     const content = lines.length > 0 ? lines.join('\n') + '\n' : ''
-    const finalPath = path.join(this.persistDir, TraceStore.RUNNING_FLUSH_FILE)
+    const finalPath = path.join(this.persistDir, this.runningFlushFile)
     const tmpPath = finalPath + '.tmp'
     fs.writeFileSync(tmpPath, content, 'utf-8')
     fs.renameSync(tmpPath, finalPath)
   }
 
   /**
-   * 启动时加载 traces-running.jsonl —— 上次 agent 死时未结束的 trace。
+   * 启动时加载当前实例的 in-flight 文件（默认为 traces-running.jsonl）。
    * 把这些 trace 标记为 failed（interrupted），写入日期文件，然后清空 running 文件。
    */
   private loadRunningTraces(): void {
     if (!this.persistDir) return
-    const filePath = path.join(this.persistDir, TraceStore.RUNNING_FLUSH_FILE)
+    const filePath = path.join(this.persistDir, this.runningFlushFile)
     if (!fs.existsSync(filePath)) return
     try {
       // 已被 loadResumableCheckpoints 持有的 worker trace（per-task checkpoint 文件）——它在
@@ -362,11 +373,11 @@ export class TraceStore {
   private rebuildIndex(): void {
     if (!this.persistDir) return
     try {
-      // 排除 traces-running.jsonl —— 那是覆盖式写的 in-flight 文件，没有稳定
+      // 排除当前实例的覆盖式 in-flight 文件；它没有稳定
       // 字节 offset，不能进 traceIndex（getFullTrace 走 offset 读会乱）。
       // in-flight 由 loadRunningTraces 单独加载到内存 Map。
       const files = fs.readdirSync(this.persistDir)
-        .filter(f => f.startsWith('traces-') && f.endsWith('.jsonl') && f !== TraceStore.RUNNING_FLUSH_FILE && !f.startsWith('traces-running-'))
+        .filter((file) => this.readableArchiveFilePrefixes.some((prefix) => this.archiveDate(file, prefix) !== undefined))
         .sort()
 
       for (const file of files) {
@@ -778,7 +789,7 @@ export class TraceStore {
     let totalBytes = 0
     try {
       const files = fs.readdirSync(this.persistDir)
-        .filter(f => f.startsWith('traces-') && f.endsWith('.jsonl') && !f.startsWith('traces-running-'))
+        .filter(f => f.startsWith('traces-') && f.endsWith('.jsonl') && f !== this.runningFlushFile && f !== 'traces-running.jsonl' && !f.startsWith('traces-running-'))
       for (const file of files) {
         const stat = fs.statSync(path.join(this.persistDir, file))
         totalBytes += stat.size
@@ -811,7 +822,8 @@ export class TraceStore {
   }
 
   /**
-   * 按日级粒度清理 JSONL 文件：找 traces-<date>.jsonl 中 date < (today - retentionDays) 的整个文件删除。
+   * 按日级粒度清理当前实例的 archive 文件：找 `<archiveFilePrefix><date>.jsonl` 中
+   * date < (today - retentionDays) 的整个文件删除。其他可读前缀只用于兼容查询，不参与清理。
    * dryRun=true 时只返回统计不实删。
    */
   cleanupOldTraces(retentionDays: number, dryRun: boolean): {
@@ -831,7 +843,7 @@ export class TraceStore {
   /**
    * 按条数清理：保留最近 maxCount 条 trace，多余的按文件粒度近似删除。
    *
-   * 由于持久化以 traces-YYYY-MM-DD.jsonl 按天切片，无法精确删除"超出 N 条的尾巴"，
+   * 由于持久化以按天切片的 archive 文件保存，无法精确删除"超出 N 条的尾巴"，
    * 这里按 traceIndex 时间倒序找第 N 条对应的日期，严格更老的整文件删。
    * 同一天文件不切割：实际保留条数 ≥ maxCount。
    */
@@ -843,11 +855,12 @@ export class TraceStore {
     if (!this.persistDir || !Number.isFinite(maxCount) || maxCount < 1 || !fs.existsSync(this.persistDir)) {
       return { affected_count: 0, affected_bytes: 0, deleted_trace_ids: [] }
     }
-    if (this.traceIndex.length <= maxCount) {
+    const ownEntries = this.traceIndex.filter((entry) => this.archiveDate(entry.file) !== undefined)
+    if (ownEntries.length <= maxCount) {
       return { affected_count: 0, affected_bytes: 0, deleted_trace_ids: [] }
     }
     // 时间倒序：第 maxCount 条（1-indexed）是要保留的最后一条；它所在日期及更新的整体保留
-    const sortedDesc = [...this.traceIndex].sort(
+    const sortedDesc = [...ownEntries].sort(
       (a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime()
     )
     const boundary = sortedDesc[maxCount - 1]
@@ -859,14 +872,18 @@ export class TraceStore {
   }
 
   private extractDateFromFile(file: string): string | null {
-    if (!file.startsWith('traces-')) return null
-    const dateStr = file.slice('traces-'.length, 'traces-'.length + 10)
-    return /^\d{4}-\d{2}-\d{2}$/.test(dateStr) ? dateStr : null
+    return this.archiveDate(file) ?? null
+  }
+
+  private archiveDate(file: string, prefix = this.archiveFilePrefix): string | undefined {
+    if (!file.startsWith(prefix) || !file.endsWith('.jsonl')) return undefined
+    const date = file.slice(prefix.length, -'.jsonl'.length)
+    return /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : undefined
   }
 
   /**
-   * 删除 dateStr 严格小于 cutoffStr 的 traces-*.jsonl 文件。
-   * 排除 traces-running-<taskId>.jsonl（per-task checkpoint 文件，由 consumeResumableCheckpoint/finalizeUnresumedCheckpoint 管理）
+   * 删除 dateStr 严格小于 cutoffStr 的当前实例 archive 文件。
+   * 其他 readable archive 前缀（如只读 legacy traces）不会被删除。
    */
   private cleanupTracesBeforeDate(cutoffStr: string, dryRun: boolean): {
     affected_count: number
@@ -883,10 +900,10 @@ export class TraceStore {
 
     try {
       const files = fs.readdirSync(this.persistDir)
-        .filter(f => f.startsWith('traces-') && f.endsWith('.jsonl') && !f.startsWith('traces-running-'))
+        .filter((file) => this.archiveDate(file) !== undefined)
       for (const file of files) {
-        const dateStr = file.slice('traces-'.length, 'traces-'.length + 10)
-        if (dateStr >= cutoffStr) continue
+        const dateStr = this.archiveDate(file)
+        if (!dateStr || dateStr >= cutoffStr) continue
         const filePath = path.join(this.persistDir, file)
         const stat = fs.statSync(filePath)
         affectedBytes += stat.size
@@ -941,8 +958,8 @@ export class TraceStore {
     let fileCount = 0
     try {
       const files = fs.readdirSync(this.persistDir)
-        .filter(f => f.startsWith('traces-') && f.endsWith('.jsonl'))
-      fileCount = files.filter(f => f.slice('traces-'.length, 'traces-'.length + 10) < cutoffStr).length
+        .filter((file) => this.archiveDate(file) !== undefined)
+      fileCount = files.filter((file) => (this.archiveDate(file) ?? '') < cutoffStr).length
     } catch { /* best effort */ }
     this.cleanupOldTraces(retentionDays, false)
     return fileCount
@@ -1001,7 +1018,7 @@ export class TraceStore {
     if (!this.persistDir) return
     try {
       const date = trace.started_at.slice(0, 10)
-      const file = `traces-${date}.jsonl`
+      const file = `${this.archiveFilePrefix}${date}.jsonl`
       const filePath = path.join(this.persistDir, file)
       const line = JSON.stringify(trace) + '\n'
 

@@ -1,14 +1,13 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { promises as fs } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
-import { ManagerLoop, type WakeEvent, type ManagerLoopDeps } from '../../src/manager/loop.js'
+import { ManagerLoop, type WakeEvent, type TimedWakeEnvelope, type ManagerLoopDeps } from '../../src/manager/loop.js'
 import { ManagerSessionStore } from '../../src/manager/session-store.js'
 import type { CompactionPolicy } from '../../src/manager/compaction.js'
 import type { ManagerKey } from '../../src/manager/types.js'
 import type { ChannelMessage, Friend } from '../../src/types.js'
-import { dialogObjectIdForPrivate } from '../../src/workers/harness/ledger-types.js'
 import type { WorkerHarness } from '../../src/workers/harness/harness.js'
 import type { LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import { createUserMessage, defineTool } from '../../src/engine/index.js'
@@ -18,7 +17,9 @@ import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 // --- Fixtures / helpers ---
 
 const KEY: ManagerKey = 'wechat::sess-loop'
-const DIALOG_OBJECT_ID = dialogObjectIdForPrivate('friend-loop')
+const FIXED_RECEIVED_AT = '2026-01-01T08:00:00+08:00'
+function timed(wake: WakeEvent): TimedWakeEnvelope { return { wake, received_at: FIXED_RECEIVED_AT, timezone: 'Asia/Shanghai' } }
+const DIALOG_OBJECT_ID = (`test::${'friend-loop'}` as ManagerKey)
 
 /** compaction.ts foldIntoSummary 的 system prompt 常量特征串,用它区分"这是折叠 LLM 调用
  *  还是普通 engine turn 调用",不需要 vi.mock/vi.spyOn 侵入模块内部。 */
@@ -99,7 +100,7 @@ function baseDeps(
   return {
     key: KEY,
     isSystemThread: false,
-    dialogObjectId: () => DIALOG_OBJECT_ID,
+    managerKey: () => DIALOG_OBJECT_ID,
     policy,
     estimateTokens,
     toolFace: () => [],
@@ -125,6 +126,15 @@ describe('ManagerLoop', () => {
     await fs.rm(dataDir, { recursive: true, force: true })
   })
 
+  it('拒绝绕过 registry 直接提交裸 WakeEvent', async () => {
+    const { adapter } = makeAdapter()
+    const loop = new ManagerLoop(baseDeps({ store, adapter }))
+    const bare = { kind: 'schedule', scheduleId: 'bare', title: 't', description: 'd' } as WakeEvent
+
+    await expect(loop.wakeUp(bare as never)).rejects.toThrow('TimedWakeEnvelope')
+    expect(() => loop.enqueueDuringEpisode(bare as never)).toThrow('TimedWakeEnvelope')
+  })
+
   it('唤醒 → 跑一个 turn → 回睡的完整往返', async () => {
     const { adapter, queue } = makeAdapter()
     queue.push({ text: '收到,已了解情况', stopReason: 'end_turn' })
@@ -132,7 +142,7 @@ describe('ManagerLoop', () => {
     const loop = new ManagerLoop(baseDeps({ store, adapter }))
     const event: WakeEvent = { kind: 'human_messages', messages: [makeChannelMessage('你好')] }
 
-    const result = await loop.wakeUp(event)
+    const result = await loop.wakeUp(timed(event))
 
     expect(result.outcome).toBe('completed')
     expect(result.consumedEvents).toBe(true)
@@ -143,6 +153,45 @@ describe('ManagerLoop', () => {
     expect(state.recent.length).toBe(2) // 渲染的事件 user msg + assistant 回复
     expect(JSON.stringify(state.recent)).toContain('你好')
     expect(state.lastActiveAt).toBeTruthy()
+  })
+
+  it('同一 episode 内时钟、台账与通知变化不改变 system prompt，也不自动读取台账', async () => {
+    const { adapter, queue, calls } = makeAdapter()
+    queue.push(
+      { toolCalls: [{ name: 'mutate_dynamic_state', id: 'mutate-1', input: {} }], stopReason: 'tool_use' },
+      { text: 'done', stopReason: 'end_turn' },
+    )
+    let nowMs = Date.parse('2026-01-01T00:00:00.000Z')
+    let pendingNote = 'before'
+    const listWorkers = vi.fn(async (): Promise<LedgerWorker[]> => [])
+    const loop = new ManagerLoop(baseDeps({
+      store,
+      adapter,
+      now: () => new Date(nowMs),
+      harness: { ...FAKE_HARNESS, listWorkers } as unknown as WorkerHarness,
+      promptInputs: () => (
+        { dialogProfile: 'fixed profile', pendingNotes: [pendingNote] } as { readonly dialogProfile?: string }
+      ),
+      toolFace: () => [{
+        name: 'mutate_dynamic_state',
+        description: 'mutate test-only dynamic state',
+        inputSchema: { type: 'object', properties: {} },
+        isReadOnly: false,
+        call: async () => {
+          nowMs += 60_000
+          pendingNote = 'after'
+          return { output: 'ok', isError: false }
+        },
+      }],
+    }))
+
+    await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('start')] }))
+
+    expect(calls).toHaveLength(2)
+    expect(calls[0].systemPrompt).toBe(calls[1].systemPrompt)
+    expect(calls[0].systemPrompt).not.toContain('before')
+    expect(calls[1].systemPrompt).not.toContain('after')
+    expect(listWorkers).not.toHaveBeenCalled()
   })
 
   it('model 热更于下一个 episode 生效:adapter/model 解析器每个 episode 只调用一次，不在 episode 内重复读取', async () => {
@@ -165,14 +214,14 @@ describe('ManagerLoop', () => {
     })
     const loop = new ManagerLoop(deps)
 
-    await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('第一条')] })
+    await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('第一条')] }))
     expect(adapterResolveCalls).toBe(1)
     expect(modelResolveCalls).toBe(1)
 
     // 模拟"config 热更"发生在两次唤醒之间：deps.adapter/model 这两个 thunk 本身不变
     // （生产环境由调用方在 thunk 内部读取最新 admin config），但 loop 只应在 episode 边界
     // （每次 wakeUp）重新调用一次——同一 episode 内（包括其内部可能的重试）绝不重复调用。
-    await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('第二条')] })
+    await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('第二条')] }))
     expect(adapterResolveCalls).toBe(2)
     expect(modelResolveCalls).toBe(2)
   })
@@ -189,17 +238,17 @@ describe('ManagerLoop', () => {
     const loop = new ManagerLoop(baseDeps({ store, adapter, policy, now: () => new Date(nowMs) }))
 
     // wakeUp #1 @ t=0
-    await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('msg1')] })
+    await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('msg1')] }))
     expect(foldCalls.length).toBe(0)
 
     // wakeUp #2 @ t=100ms(远小于 TTL=1000ms)——burst,不压缩
     nowMs += 100
-    await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('msg2')] })
+    await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('msg2')] }))
     expect(foldCalls.length).toBe(0)
 
     // wakeUp #3 @ t=100+5000ms(远超 TTL),此时累计历史(4 条)已超 foldTokenThreshold
     nowMs += 5000
-    await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('msg3')] })
+    await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('msg3')] }))
     expect(foldCalls.length).toBe(1)
 
     const state = await store.load(KEY)
@@ -225,8 +274,13 @@ describe('ManagerLoop', () => {
 
     const loop = new ManagerLoop(baseDeps({ store, adapter: adapterThatThrowsOnce }))
     const event: WakeEvent = { kind: 'human_messages', messages: [makeChannelMessage('重要的话只能说一次')] }
+    const originalEnvelope: TimedWakeEnvelope = {
+      wake: event,
+      received_at: '2026-01-01T08:12:34+08:00',
+      timezone: 'Asia/Shanghai',
+    }
 
-    const first = await loop.wakeUp(event)
+    const first = await loop.wakeUp(originalEnvelope)
     expect(first.outcome).toBe('failed')
     expect(first.consumedEvents).toBe(false)
 
@@ -235,13 +289,14 @@ describe('ManagerLoop', () => {
     expect(stateAfterFailure.recent.length).toBe(0)
 
     // 下次唤醒(不同的新事件),原始失败事件应随邮箱一起重投,被 LLM 看到
-    const second = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('新的话')] })
+    const second = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('新的话')] }))
     expect(second.outcome).toBe('completed')
     expect(second.consumedEvents).toBe(true)
 
     const finalState = await store.load(KEY)
     const serialized = JSON.stringify(finalState.recent)
     expect(serialized).toContain('重要的话只能说一次') // 重投的原始事件
+    expect(serialized).toContain('received_at=\\"2026-01-01T08:12:34+08:00\\"')
     expect(serialized).toContain('新的话') // 本次新事件
   })
 
@@ -282,7 +337,7 @@ describe('ManagerLoop', () => {
           inputSchema: { type: 'object', properties: {} },
           isReadOnly: false,
           call: async () => {
-            loop.enqueueDuringEpisode({ kind: 'schedule', scheduleId: 'sched-fail', title: '巡检', description: '失败前注入的事件' })
+            loop.enqueueDuringEpisode(timed({ kind: 'schedule', scheduleId: 'sched-fail', title: '巡检', description: '失败前注入的事件' }))
             return { output: 'ok', isError: false }
           },
         },
@@ -290,7 +345,7 @@ describe('ManagerLoop', () => {
     })
     loop = new ManagerLoop(deps)
 
-    const first = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('开始任务')] })
+    const first = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('开始任务')] }))
     expect(first.outcome).toBe('failed')
     expect(first.consumedEvents).toBe(false)
 
@@ -304,7 +359,7 @@ describe('ManagerLoop', () => {
 
     // 下次唤醒(不同的新事件):mid-episode 注入的内容应随邮箱一起重投,被 LLM 看到并落盘
     queue.push({ text: '正常处理', stopReason: 'end_turn' })
-    const second = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('新的话')] })
+    const second = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('新的话')] }))
     expect(second.outcome).toBe('completed')
     expect(second.consumedEvents).toBe(true)
 
@@ -346,7 +401,7 @@ describe('ManagerLoop', () => {
           inputSchema: { type: 'object', properties: {} },
           isReadOnly: false,
           call: async () => {
-            loop.enqueueDuringEpisode({ kind: 'schedule', scheduleId: 'sched-throw', title: '巡检', description: '直接抛错前注入的事件' })
+            loop.enqueueDuringEpisode(timed({ kind: 'schedule', scheduleId: 'sched-throw', title: '巡检', description: '直接抛错前注入的事件' }))
             return { output: 'ok', isError: false }
           },
         },
@@ -365,10 +420,10 @@ describe('ManagerLoop', () => {
 
     // 唤醒前先在邮箱里塞一条"上一次遗留"的内容(episode 未在跑,直接进 mailbox.pending,
     // 是本次唤醒 carriedTexts 的来源)
-    loop.enqueueDuringEpisode({ kind: 'schedule', scheduleId: 'sched-carried', title: '巡检', description: '唤醒前已经在邮箱里的内容' })
+    loop.enqueueDuringEpisode(timed({ kind: 'schedule', scheduleId: 'sched-carried', title: '巡检', description: '唤醒前已经在邮箱里的内容' }))
 
     await expect(
-      loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('触发超限并在折叠时抛错')] })
+      loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('触发超限并在折叠时抛错')] }))
     ).rejects.toThrow('boom: fold llm exhausted retries')
 
     // 落盘不应发生(异常发生在 store.save 之前)
@@ -378,7 +433,7 @@ describe('ManagerLoop', () => {
     // 下次唤醒:carriedTexts(唤醒前邮箱里的内容)、eventText(本次唤醒事件)、
     // currentEpisodeInjected(mid-episode 注入)应该都被重投,一个不丢
     queue.push({ text: '正常处理', stopReason: 'end_turn' })
-    const second = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('新的话')] })
+    const second = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('新的话')] }))
     expect(second.outcome).toBe('completed')
     expect(second.consumedEvents).toBe(true)
 
@@ -408,7 +463,7 @@ describe('ManagerLoop', () => {
           inputSchema: { type: 'object', properties: {} },
           isReadOnly: false,
           call: async () => {
-            loop.enqueueDuringEpisode({ kind: 'schedule', scheduleId: 'sched-ok', title: '巡检', description: '成功路径注入' })
+            loop.enqueueDuringEpisode(timed({ kind: 'schedule', scheduleId: 'sched-ok', title: '巡检', description: '成功路径注入' }))
             return { output: 'ok', isError: false }
           },
         },
@@ -416,11 +471,11 @@ describe('ManagerLoop', () => {
     })
     loop = new ManagerLoop(deps)
 
-    const first = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('开始任务')] })
+    const first = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('开始任务')] }))
     expect(first.outcome).toBe('completed')
     expect(first.consumedEvents).toBe(true)
 
-    const second = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('新的话')] })
+    const second = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('新的话')] }))
     expect(second.outcome).toBe('completed')
 
     // 第二次唤醒发给 LLM 的 messages 里,'sched-ok' 只应该出现一次(第一次 episode 成功时
@@ -449,7 +504,7 @@ describe('ManagerLoop', () => {
           isReadOnly: false,
           call: async () => {
             // 模拟"episode 进行中收到新事件":在工具执行期间(turn1 与 turn2 之间)入队
-            loop.enqueueDuringEpisode({ kind: 'schedule', scheduleId: 'sched-1', title: '巡检', description: '期间到达的新事件' })
+            loop.enqueueDuringEpisode(timed({ kind: 'schedule', scheduleId: 'sched-1', title: '巡检', description: '期间到达的新事件' }))
             return { output: 'ok', isError: false }
           },
         },
@@ -457,7 +512,7 @@ describe('ManagerLoop', () => {
     })
     loop = new ManagerLoop(deps)
 
-    const result = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('开始任务')] })
+    const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('开始任务')] }))
 
     expect(result.outcome).toBe('completed')
     expect(result.turns).toBe(2)
@@ -473,8 +528,7 @@ describe('ManagerLoop', () => {
   })
 
   it('max_tokens(上下文超限)收场时强制折叠一次并重试一次,成功后 outcome=completed', async () => {
-    const { adapter, queue, foldCalls } = makeAdapter()
-    // 第一次尝试:静默 max_tokens(text='' + stopReason='max_tokens')
+    const { adapter, queue, calls, foldCalls } = makeAdapter()
     queue.push({ stopReason: 'max_tokens' })
     // 强制折叠后的重试:正常结束
     queue.push({ text: '折叠后重试成功', stopReason: 'end_turn' })
@@ -491,9 +545,20 @@ describe('ManagerLoop', () => {
     ]
     await store.save({ key: KEY, recent: seedMessages, foldedCount: 0 })
 
-    const result = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('触发超限的一句话')] })
+    const initialEnvelope: TimedWakeEnvelope = {
+      wake: { kind: 'human_messages', messages: [makeChannelMessage('触发超限的一句话')] },
+      received_at: '2026-01-01T08:22:33+08:00',
+      timezone: 'Asia/Shanghai',
+    }
+    const result = await loop.wakeUp(initialEnvelope)
 
     expect(foldCalls.length).toBe(1) // 强制折叠恰好发生一次
+    expect(JSON.stringify(foldCalls[0].messages)).not.toContain('触发超限的一句话')
+    const nonFoldCalls = calls.filter((call) => !call.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER))
+    expect(nonFoldCalls).toHaveLength(2)
+    for (const call of nonFoldCalls) {
+      expect(JSON.stringify(call.messages)).toContain('received_at=\\"2026-01-01T08:22:33+08:00\\"')
+    }
     expect(result.outcome).toBe('completed')
     expect(result.turns).toBe(2) // 首次尝试 1 turn + 重试 1 turn
     expect(result.consumedEvents).toBe(true)
@@ -525,7 +590,7 @@ describe('ManagerLoop', () => {
     ]
     await store.save({ key: KEY, recent: seedMessages, foldedCount: 0 })
 
-    const result = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('会被截断的长问题')] })
+    const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('会被截断的长问题')] }))
 
     expect(foldCalls.length).toBe(0) // 未触发强制折叠
     expect(calls.length).toBe(1) // 只跑了一次 runEngine,没有重试
@@ -553,7 +618,7 @@ describe('ManagerLoop', () => {
     ]
     await store.save({ key: KEY, recent: seedMessages, foldedCount: 0 })
 
-    const result = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('触发超限的一句话(仅推理块)')] })
+    const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('触发超限的一句话(仅推理块)')] }))
 
     expect(foldCalls.length).toBe(1) // 强制折叠恰好发生一次
     expect(result.outcome).toBe('completed')
@@ -586,7 +651,7 @@ describe('ManagerLoop', () => {
           isReadOnly: false,
           call: async () => {
             // turn1 与 turn2 之间注入内容,保证被 turn2 的 drainPending() 消费
-            loop.enqueueDuringEpisode({ kind: 'schedule', scheduleId: 'sched-max-tokens', title: '巡检', description: '首次尝试期间注入' })
+            loop.enqueueDuringEpisode(timed({ kind: 'schedule', scheduleId: 'sched-max-tokens', title: '巡检', description: '首次尝试期间注入' }))
             return { output: 'ok', isError: false }
           },
         },
@@ -603,7 +668,7 @@ describe('ManagerLoop', () => {
     await store.save({ key: KEY, recent: seedMessages, foldedCount: 0 })
 
     // 首次唤醒:首次尝试 turn1 成功 + turn2 max_tokens → 强制折叠 + 重试成功
-    const first = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('触发 max_tokens 的一句话')] })
+    const first = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('触发 max_tokens 的一句话')] }))
     expect(first.outcome).toBe('completed')
     expect(first.turns).toBe(3) // turn1 + turn2(max_tokens) + 重试的 turn1
     expect(first.consumedEvents).toBe(true)
@@ -616,7 +681,7 @@ describe('ManagerLoop', () => {
     expect(retryCallMessages).toContain('首次尝试期间注入')
 
     // 第二次唤醒:验证 mid-episode 内容已被首次 episode 的重试消费进 state.recent,不会重复投递
-    const second = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('新话题')] })
+    const second = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('新话题')] }))
     expect(second.outcome).toBe('completed')
 
     const nonFoldCalls2 = calls.filter((c) => !c.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER))
@@ -639,7 +704,7 @@ describe('ManagerLoop', () => {
     const injectDuringFold: LLMAdapter = {
       async *stream(params) {
         if (params.systemPrompt.includes(FOLD_SYSTEM_PROMPT_MARKER)) {
-          loop.enqueueDuringEpisode({ kind: 'schedule', scheduleId: 'sched-during-fold', title: '巡检', description: '折叠调用期间到达' })
+          loop.enqueueDuringEpisode(timed({ kind: 'schedule', scheduleId: 'sched-during-fold', title: '巡检', description: '折叠调用期间到达' }))
         }
         yield* adapter.stream(params)
       },
@@ -658,7 +723,7 @@ describe('ManagerLoop', () => {
     ]
     await store.save({ key: KEY, recent: seedMessages, foldedCount: 0 })
 
-    const result = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('触发超限')] })
+    const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('触发超限')] }))
 
     expect(result.outcome).toBe('completed')
     expect(result.consumedEvents).toBe(true)
@@ -689,7 +754,7 @@ describe('ManagerLoop', () => {
     ]
     await store.save({ key: KEY, recent: seedMessages, foldedCount: 0 })
 
-    const result = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('触发')] })
+    const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('触发')] }))
 
     expect(foldCalls.length).toBe(0) // 没有可折叠内容(splitAt=0),不该调折叠 LLM
     expect(result.outcome).toBe('completed')
@@ -721,7 +786,7 @@ describe('ManagerLoop', () => {
     queue.push({ text: '下一次唤醒的回复', stopReason: 'end_turn' })
 
     const loop = new ManagerLoop(baseDeps({ store, adapter }))
-    loop.enqueueDuringEpisode({ kind: 'schedule', scheduleId: 'sched-residue', title: '巡检', description: '收口后才到达的残留' })
+    loop.enqueueDuringEpisode(timed({ kind: 'schedule', scheduleId: 'sched-residue', title: '巡检', description: '收口后才到达的残留' }))
     expect(loop.hasPendingMailbox).toBe(true)
 
     const result = await loop.drainMailbox()
@@ -735,7 +800,7 @@ describe('ManagerLoop', () => {
     expect(firstCallMessages).not.toContain('[人类消息]')
 
     // 已消费进持久历史,下次真实唤醒不会重复投递。
-    const afterDrain = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('新的话')] })
+    const afterDrain = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('新的话')] }))
     expect(afterDrain.outcome).toBe('completed')
     const state = await store.load(KEY)
     const occurrences = (JSON.stringify(state.recent).match(/sched-residue/g) ?? []).length
@@ -749,7 +814,7 @@ describe('ManagerLoop', () => {
     const loop = new ManagerLoop(baseDeps({ store, adapter }))
 
     for (let i = 0; i < 5; i++) {
-      const result = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage(`第${i}轮消息`)] })
+      const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage(`第${i}轮消息`)] }))
       expect(result.outcome).toBe('completed')
       expect(result.consumedEvents).toBe(true)
     }
@@ -767,7 +832,7 @@ describe('ManagerLoop', () => {
     queue.push({ stopReason: 'end_turn' })
 
     const loop = new ManagerLoop(baseDeps({ store, adapter }))
-    const result = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('你好')] })
+    const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('你好')] }))
 
     expect(result.outcome).toBe('completed')
     // 语义不变量①:没有任何一轮的上下文里出现过 forced_summary 的文案。
@@ -798,7 +863,7 @@ describe('ManagerLoop', () => {
       queue.push({ text: '(内部判断:这条不需要我回)', stopReason: 'end_turn' })
 
       const loop = new ManagerLoop(baseDeps({ store, adapter, toolFace: replyToolFace }))
-      const result = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('群里有人闲聊')] })
+      const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('群里有人闲聊')] }))
 
       // outcome 答不了这个问题——沉默和回话都是 completed,这正是需要单独一个字段的理由。
       expect(result.outcome).toBe('completed')
@@ -811,7 +876,7 @@ describe('ManagerLoop', () => {
       queue.push({ text: '已回复', stopReason: 'end_turn' })
 
       const loop = new ManagerLoop(baseDeps({ store, adapter, toolFace: replyToolFace }))
-      const result = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('在吗')] })
+      const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('在吗')] }))
 
       expect(result.outcome).toBe('completed')
       expect(result.repliedToHuman).toBe(true)
@@ -825,7 +890,7 @@ describe('ManagerLoop', () => {
 
         const isolatedStore = new ManagerSessionStore(join(dataDir, `store-${toolName}`))
         const loop = new ManagerLoop(baseDeps({ store: isolatedStore, adapter, toolFace: replyToolFace }))
-        const result = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('私下问一句')] })
+        const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('私下问一句')] }))
 
         expect(result.repliedToHuman).toBe(true)
       }
@@ -837,7 +902,7 @@ describe('ManagerLoop', () => {
       queue.push({ text: '已派活', stopReason: 'end_turn' })
 
       const loop = new ManagerLoop(baseDeps({ store, adapter, toolFace: replyToolFace }))
-      const result = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('帮我查个东西')] })
+      const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('帮我查个东西')] }))
 
       expect(result.repliedToHuman).toBe(false)
     })
@@ -848,7 +913,7 @@ describe('ManagerLoop', () => {
       queue.push({ text: '看完了,不回', stopReason: 'end_turn' })
 
       const loop = new ManagerLoop(baseDeps({ store, adapter, toolFace: replyToolFace }))
-      const result = await loop.wakeUp({ kind: 'human_messages', messages: [makeChannelMessage('之前说到哪了')] })
+      const result = await loop.wakeUp(timed({ kind: 'human_messages', messages: [makeChannelMessage('之前说到哪了')] }))
 
       expect(result.repliedToHuman).toBe(false)
     })
@@ -901,7 +966,7 @@ describe('ManagerLoop', () => {
       const { adapter, queue, calls } = makeAdapter()
       queue.push({ text: 'ok', stopReason: 'end_turn' })
       const loop = new ManagerLoop(baseDeps({ store, adapter, timezone: () => 'UTC' }))
-      await loop.wakeUp(event)
+      await loop.wakeUp({ wake: event, received_at: '2026-01-01T00:00:00+00:00', timezone: 'UTC' })
       return JSON.stringify(calls[0].messages)
     }
 

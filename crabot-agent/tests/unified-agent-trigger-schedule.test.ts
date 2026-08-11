@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 
 import { UnifiedAgent, type TriggerScheduleParams, type TriggerScheduleResult } from '../src/unified-agent.js'
 import type { AgentEventPublisher } from '../src/manager/events.js'
-import type { DialogObjectId, LedgerWorker } from '../src/workers/harness/ledger-types.js'
+import type { ManagerKey, LedgerWorker } from '../src/workers/harness/ledger-types.js'
 
 interface AgentUnderTest {
   config: { moduleId: string }
@@ -36,11 +36,11 @@ function buildAgent(runMaintenance: () => Promise<void>) {
   const writes: LedgerWorker[] = []
   const routeSchedule = vi.fn(() => Promise.resolve())
   const publish = vi.fn<AgentEventPublisher>()
-  const dialogObjectId = 'friend:master' as DialogObjectId
+  const managerKey = 'admin-web::system-tasks' as ManagerKey
 
   const ledger = {
     upsertWorker: vi.fn(async (
-      _dialogObjectId: DialogObjectId,
+      _managerKey: ManagerKey,
       workerId: string,
       mutator: (previous: LedgerWorker | undefined) => LedgerWorker | undefined,
     ) => {
@@ -57,13 +57,13 @@ function buildAgent(runMaintenance: () => Promise<void>) {
   agent.config = { moduleId: 'test-agent' }
   agent.managerStack = {
     ledger,
-    principals: { dialogObjectIdFor: () => dialogObjectId },
+    principals: { managerKeyFor: () => managerKey },
     registry: { routeSchedule },
   }
   agent.memoryWriter = { runMaintenance }
   agent.managerEventPublisher = publish
 
-  return { agent, workers, writes, ledger, routeSchedule, publish, dialogObjectId }
+  return { agent, workers, writes, ledger, routeSchedule, publish, managerKey }
 }
 
 describe('trigger_schedule memory_maintenance system task', () => {
@@ -87,6 +87,7 @@ describe('trigger_schedule memory_maintenance system task', () => {
     expect(fixture.routeSchedule).not.toHaveBeenCalled()
     expect(fixture.writes[0]).toMatchObject({
       worker_id: result.task_id,
+      manager_key: 'admin-web::system-tasks',
       task: {
         id: result.task_id,
         type: 'memory_maintenance',
@@ -101,7 +102,7 @@ describe('trigger_schedule memory_maintenance system task', () => {
     })
     expect(fixture.ledger.upsertWorker).toHaveBeenNthCalledWith(
       1,
-      fixture.dialogObjectId,
+      fixture.managerKey,
       result.task_id,
       expect.any(Function),
     )
@@ -120,7 +121,7 @@ describe('trigger_schedule memory_maintenance system task', () => {
         task_id: result.task_id,
         old_status: 'queued',
         new_status: 'running',
-        dialog_object_id: fixture.dialogObjectId,
+        manager_key: fixture.managerKey,
       }),
     )
     expect(fixture.publish).toHaveBeenNthCalledWith(

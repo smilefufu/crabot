@@ -19,7 +19,7 @@ async function makeManager(): Promise<ChatManager> {
     { call: async () => ({}) } as never,
     async () => 0,
     'test-secret',
-    async () => ({ sub: 'admin' }),
+    async (token) => token === 'test-token' ? { sub: 'admin' } : null,
     store,
   )
 }
@@ -35,7 +35,7 @@ async function makeManagerWithRpc(
     { call: rpcCall } as never,
     async () => 42, // 非零端口，让 dispatchToAgent 正常往下走
     'test-secret',
-    async () => ({ sub: 'admin' }),
+    async (token) => token === 'test-token' ? { sub: 'admin' } : null,
     store,
   )
 }
@@ -146,6 +146,14 @@ describe('ChatMessage content 模型升级', () => {
 })
 
 describe('入站带附件消息（handleInboundMessage）', () => {
+  it('requires a verified JWT before it can issue an assertion', async () => {
+    const mgr = await makeManager()
+    await expect(mgr.handleInboundMessage(
+      { request_id: 'unauthenticated', text: 'no', files: [] },
+      'invalid-token',
+    )).rejects.toThrow(/JWT authenticated/)
+  })
+
   beforeEach(async () => {
     await fs.rm(TEST_DATA_DIR, { recursive: true, force: true }).catch(() => {})
     await fs.mkdir(TEST_DATA_DIR, { recursive: true })
@@ -168,7 +176,7 @@ describe('入站带附件消息（handleInboundMessage）', () => {
       request_id: 'req-err',
       text: '会失败的消息',
       files: [],
-    })
+    }, 'test-token')
     // user 消息已落库且正常返回（失败非原子是已登记的设计取舍）
     expect(result.message.content.text).toBe('会失败的消息')
     expect(mgr.getMessages(10)).toHaveLength(1)
@@ -189,7 +197,7 @@ describe('入站带附件消息（handleInboundMessage）', () => {
         { buffer: Buffer.from('img1'), filename: 'a.png', mime_type: 'image/png' },
         { buffer: Buffer.from('img2'), filename: 'b.jpg', mime_type: 'image/jpeg' },
       ],
-    })
+    }, 'test-token')
     // 落库消息：URL 形态 media[]
     expect(result.message.content.type).toBe('image')
     expect(result.message.content.text).toBe('看下这两张图')
@@ -206,7 +214,7 @@ describe('入站带附件消息（handleInboundMessage）', () => {
 
   it('空文本且无附件 → 抛错', async () => {
     const mgr = await makeManager()
-    await expect(mgr.handleInboundMessage({ request_id: 'r', text: ' ', files: [] })).rejects.toThrow()
+    await expect(mgr.handleInboundMessage({ request_id: 'r', text: ' ', files: [] }, 'test-token')).rejects.toThrow()
   })
 })
 
@@ -382,7 +390,7 @@ describe('tagMessageTask / tagUserMessageByRequestId', () => {
       request_id: 'req-cb-1',
       text: '发一条会派 task 的消息',
       files: [],
-    })
+    }, 'test-token')
     pushed.length = 0 // 清空处理中推送
 
     // 模拟 chat_callback 回执带 task_id
@@ -443,7 +451,7 @@ describe('chat_push 收口占位：storeAssistantMessage 认领 in-flight reques
     const rpcDone = new Promise<void>((resolve) => { release = resolve })
     const mgr = await makeManagerWithRpc(async () => { await rpcDone; return {} })
     const pushed = attachClientStub(mgr)
-    const inbound = mgr.handleInboundMessage({ request_id: requestId, text: '帮我看下这个', files: [] })
+    const inbound = mgr.handleInboundMessage({ request_id: requestId, text: '帮我看下这个', files: [] }, 'test-token')
     await vi.waitFor(() => expect(pushed.some((p) => p.type === 'chat_status' && p.request_id === requestId)).toBe(true))
     pushed.length = 0
     return {
@@ -513,9 +521,9 @@ describe('chat_push 收口占位：storeAssistantMessage 认领 in-flight reques
     const rpcDone = new Promise<void>((resolve) => { release = resolve })
     const mgr = await makeManagerWithRpc(async () => { await rpcDone; return {} })
     const pushed = attachClientStub(mgr)
-    const a = mgr.handleInboundMessage({ request_id: 'req-a', text: '第一问', files: [] })
+    const a = mgr.handleInboundMessage({ request_id: 'req-a', text: '第一问', files: [] }, 'test-token')
     await vi.waitFor(() => expect(pushed.filter((p) => p.type === 'chat_status')).toHaveLength(1))
-    const b = mgr.handleInboundMessage({ request_id: 'req-b', text: '第二问', files: [] })
+    const b = mgr.handleInboundMessage({ request_id: 'req-b', text: '第二问', files: [] }, 'test-token')
     await vi.waitFor(() => expect(pushed.filter((p) => p.type === 'chat_status')).toHaveLength(2))
     pushed.length = 0
     await mgr.handleSendMessage({ session_id: 'admin-chat', content: { type: 'text', text: '答第一问' } })
@@ -545,7 +553,7 @@ describe('chat_push 收口占位：storeAssistantMessage 认领 in-flight reques
     // 第一问：agent 侧 F3——`process_message` 正常返回，没有 chat_callback、也没有 send_message。
     const mgr = await makeManagerWithRpc(async () => ({ decision_types: [] }))
     const pushed = attachClientStub(mgr)
-    await mgr.handleInboundMessage({ request_id: 'req-silent', text: '第一问（会被沉默）', files: [] })
+    await mgr.handleInboundMessage({ request_id: 'req-silent', text: '第一问（会被沉默）', files: [] }, 'test-token')
 
     // 第二问：这一轮 manager 在 episode 内（= RPC 返回之前）回了话。
     let release!: () => void
@@ -553,7 +561,7 @@ describe('chat_push 收口占位：storeAssistantMessage 认领 in-flight reques
     ;(mgr as unknown as { rpcClient: { call: unknown } }).rpcClient = {
       call: async () => { await rpcDone; return {} },
     }
-    const second = mgr.handleInboundMessage({ request_id: 'req-2', text: '第二问', files: [] })
+    const second = mgr.handleInboundMessage({ request_id: 'req-2', text: '第二问', files: [] }, 'test-token')
     await vi.waitFor(() => expect(pushed.some((p) => p.type === 'chat_status' && p.request_id === 'req-2')).toBe(true))
     await mgr.handleSendMessage({ session_id: 'admin-chat', content: { type: 'text', text: '答第二问' } })
     release()
@@ -569,7 +577,7 @@ describe('chat_push 收口占位：storeAssistantMessage 认领 in-flight reques
 
   it('沉默 episode（F3）之后 manager 主动推送：没有可认领的 in-flight，纯追加', async () => {
     const mgr = await makeManagerWithRpc(async () => ({ decision_types: [] }))
-    await mgr.handleInboundMessage({ request_id: 'req-silent-2', text: '会被沉默的一问', files: [] })
+    await mgr.handleInboundMessage({ request_id: 'req-silent-2', text: '会被沉默的一问', files: [] }, 'test-token')
     const pushed = attachClientStub(mgr)
 
     await mgr.handleSendMessage({ session_id: 'admin-chat', content: { type: 'text', text: '顺嘴提醒你一句' } })

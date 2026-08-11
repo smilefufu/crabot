@@ -60,6 +60,12 @@ const MEMORY_PORT = 18202
 const ADMIN_CHAT_SESSION = 'admin-chat'
 const MANAGER_KEY = 'admin-web::admin-chat'
 const REQUEST_ID = 'req-42'
+const ASSERTION_ID = 'assertion-42'
+const ADMIN_CHAT_ASSERTION = [
+  Buffer.from('{}').toString('base64url'),
+  Buffer.from(JSON.stringify({ assertion_id: ASSERTION_ID })).toString('base64url'),
+  'test-signature',
+].join('.')
 
 /** master 身份解析出来的工具面：file_io 开、remote_exec 关（用来做正反对照）。 */
 const MASTER_TOOL_ACCESS: ToolAccessConfig = {
@@ -115,6 +121,7 @@ interface Internals {
     message: ChannelMessage
     source_type?: 'channel' | 'admin_chat'
     callback_info?: { source_module_id: string; request_id: string }
+    admin_chat_assertion?: string
   }): Promise<{ decision_types: string[]; task_ids?: string[] }>
   processDirectBatch(batch: unknown): Promise<void>
   processGroupLaneBatch(batch: unknown): Promise<void>
@@ -123,7 +130,10 @@ interface Internals {
   groupLaneRegistry: { getOrCreate(key: string): unknown; size(): number }
   contextAssembler: unknown
   managerStack: {
-    principals: { get(key: string): ResolvedPrincipalView | undefined }
+    principals: {
+      get(key: string): ResolvedPrincipalView | undefined
+      currentMasterAuthorization(key: string): { assertion_id?: string } | undefined
+    }
     registry: { routeHumanMessages: (...args: unknown[]) => Promise<unknown> }
   }
   /** fail-loud 的按 key 冷却台账（与私聊 / 群聊两条 lane 共用同一张表）。 */
@@ -155,7 +165,12 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
   let permsResponse: ResolvedPermissions | null | 'throw'
 
   function boot(
-    opts: { configured?: boolean; turns?: ReadonlyArray<ReadonlyArray<Record<string, unknown>>> } = {},
+    opts: {
+      configured?: boolean
+      turns?: ReadonlyArray<ReadonlyArray<Record<string, unknown>>>
+      consumeResult?: unknown
+      consumeError?: Error
+    } = {},
   ): void {
     script = makeManagerScript(opts.turns ?? [])
     hoisted.managerAdapter = {
@@ -177,15 +192,18 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
     internals.agentHandler = { createBuiltinBgToolOptions: () => undefined }
 
     internals.rpcClient.resolve = async (filter) => {
-      const f = filter as { module_type?: string }
+      const f = filter as { module_type?: string; module_id?: string }
       if (f.module_type === 'memory') {
         return [{ module_id: 'memory', module_type: 'memory', host: 'localhost', port: MEMORY_PORT, status: 'running' }]
       }
-      return [{ module_id: 'admin', module_type: 'admin', host: 'localhost', port: ADMIN_PORT, status: 'running' }]
+      return [{ module_id: 'admin-web', module_type: 'admin', host: 'localhost', port: ADMIN_PORT, status: 'running' }]
     }
     internals.rpcClient.call = async (port, method, params) => {
       rpcCalls.push({ port, method, params: params as Record<string, unknown> })
       switch (method) {
+        case 'consume_admin_chat_assertion':
+          if (opts.consumeError) throw opts.consumeError
+          return opts.consumeResult ?? { consumed: true, expires_at: '2099-01-01T00:00:00.000Z' }
         case 'resolve_principal_permissions':
           calls.push('resolve_permissions')
           if (permsResponse === 'throw') throw new Error('admin unreachable')
@@ -252,6 +270,7 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
       message,
       source_type: 'admin_chat',
       callback_info: CALLBACK_INFO,
+      admin_chat_assertion: ADMIN_CHAT_ASSERTION,
     })
   }
 
@@ -268,7 +287,7 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
       .buildBuiltinWorkerRuntime({
         worker_id: 'w-probe',
         workspace: { root: dataDir.root },
-        origin: { spawned_by_session: MANAGER_KEY, trigger_type: 'message' },
+        origin: { spawned_by_episode: MANAGER_KEY, trigger_type: 'message' },
       })
       .tools()
       .map((t) => t.name)
@@ -317,6 +336,7 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
 
       // 处理端不看消息自带的 session（入参故意给了 wechat / some-other-session）
       expect(principal(), '身份应当解析在 admin-web::admin-chat 这个 manager key 上').toBeDefined()
+      expect(internals.managerStack.principals.currentMasterAuthorization(MANAGER_KEY)?.assertion_id).toBe(ASSERTION_ID)
       expect(sceneCalls[0]).toMatchObject({
         channelId: 'admin-web',
         sessionId: ADMIN_CHAT_SESSION,
@@ -325,25 +345,58 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
       expect(rpcCalls.find((c) => c.method === 'resolve_principal_permissions')!.params).toMatchObject({
         session_id: ADMIN_CHAT_SESSION,
       })
+      expect(script.streams[0].tools.map((tool) => tool.name)).toContain('list_all_workers')
       expect(String(script.streams[0].messages[0].content)).toContain('帮我看下季度报表')
     })
 
-    it('admin_chat 但缺回执信息：静默丢弃，不唤醒 manager', async () => {
+    it('admin_chat 缺 assertion 或回执信息：拒绝且不唤醒 manager', async () => {
       boot()
-      const result = await internals.handleProcessMessage({
+      await expect(internals.handleProcessMessage({
         message: amsg({ id: 'a-1' }),
         source_type: 'admin_chat',
-      })
+      })).rejects.toThrow(/assertion/)
 
-      expect(result).toEqual({ decision_types: [] })
       expect(calls).toEqual([])
       expect(script.streams).toHaveLength(0)
       expect(rpcCalls).toEqual([])
     })
+    it.each([
+      ['rejected consume', undefined, new Error('replayed assertion')],
+      ['empty consume result', {}, undefined],
+      ['false consumed', { consumed: false, expires_at: '2099-01-01T00:00:00.000Z' }, undefined],
+      ['expired consume result', { consumed: true, expires_at: '2000-01-01T00:00:00.000Z' }, undefined],
+    ])('%s causes zero Manager wake', async (_name, consumeResult, consumeError) => {
+      boot({ consumeResult, consumeError })
+      await expect(runAdminChat()).rejects.toThrow(/assertion|replayed/i)
+      expect(script.streams).toHaveLength(0)
+      expect(calls).not.toContain('manager_llm')
+    })
+
+    it('a consumed response cannot make a malformed assertion payload establish authority', async () => {
+      boot({ consumeResult: { consumed: true, expires_at: '2099-01-01T00:00:00.000Z' } })
+      await expect(internals.handleProcessMessage({
+        message: amsg(),
+        source_type: 'admin_chat',
+        callback_info: CALLBACK_INFO,
+        admin_chat_assertion: 'malformed',
+      })).rejects.toThrow(/assertion payload/i)
+      expect(script.streams).toHaveLength(0)
+      expect(calls).not.toContain('manager_llm')
+    })
+
+    it('forged source, friend, callback, or replay cannot bypass assertion consumption', async () => {
+      boot({ consumeError: new Error('replayed assertion') })
+      for (const params of [
+        { message: amsg(), source_type: 'channel' as const, callback_info: CALLBACK_INFO, admin_chat_assertion: 'x' },
+        { message: { ...amsg(), sender: { friend_id: 'master', platform_user_id: 'master', platform_display_name: 'Master' } }, source_type: 'admin_chat' as const, callback_info: { source_module_id: 'forged', request_id: 'r' }, admin_chat_assertion: 'x' },
+        { message: amsg(), source_type: 'admin_chat' as const, callback_info: CALLBACK_INFO, admin_chat_assertion: 'replay' },
+      ]) {
+        await expect(internals.handleProcessMessage(params)).rejects.toThrow()
+      }
+      expect(script.streams).toHaveLength(0)
+    })
   })
 
-  // ==========================================================================
-  // 三不语义（变异靶 M12）
   // ==========================================================================
 
   describe('admin chat 的"三不"语义（变异靶 M12）', () => {

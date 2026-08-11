@@ -22,14 +22,23 @@
 - CLI MCP 物化保留 stdio `env`、远端 `headers/http_headers` 与 transport type。Claude/Codex credential target 均先检查 Git tracked 状态、以 `0600` 原子替换，并用 ignore 规则防止目标及 crash temp 被普通 `git add -A` 收录。
 - `builtin_tool_config.disabled_tools` 的 MCP 逐工具黑名单只作用于 builtin；CLI worker 以整台 server 为最小 provision 单位，跨实现限制使用 `mcp_skill / desktop` 类别权限或禁用整台 server。
 
+### Manager 会话隔离与 v2 历史兼容已实现
+
+- worker 台账改为按不可变 `ManagerKey` 归属，普通 Manager 的发现和 known-ID 操作均限定当前会话；只有当前仍有效的 Master 私聊工具面可显式跨会话查询和操作。
+- Admin Chat 的 WebSocket 与 HTTP 附件入口统一进入 `admin-web::admin-chat`，由 Admin 签发短时、一次性、持久防重放 assertion；Agent 只在官方 `admin-web` RPC 核销成功后建立 Master generation。
+- Friend/Admin Chat 授权使用可撤销 generation；旧 tool call、降权/删除后的调用和无控制层跨会话访问均 fail closed。私聊主体绑定可持久，群聊最近发言人不持久。
+- Manager system prompt 不再嵌入动态台账、当前时间或 pending notes；所有 wake 使用入口时固定的时间信封，mailbox、失败重投、overflow retry 和 mid-episode supplement 保持同一事件时间。
+- v2 Admin task/TraceStore 通过一次性只读 importer 投影为 legacy worker；marker 严格按 `in_progress → completed`，旧 trace 源与 v3 `traces-running-v3.jsonl` / `traces-v3-<date>.jsonl` 写入命名空间隔离。legacy output/trace 可降级读取，受控续办只追加全新 v3 化身，不恢复旧 checkpoint、旧 RPC 或 fake legacy adapter。
+
 ### 最近验证基线
 
-- review-fix 定向：6 files / 168 passed。
-- Claude/Codex/物化安全套件：3 files / 174 passed。
-- handoff continuation：42 passed。
-- workers/harness + manager + provision + MCP 回归：31 files / 605 passed。
-- Agent 全量基线：2623 passed / 1 failed / 2 skipped；唯一失败为既有 macOS/tmux foreground-command 环境差异（期待 `sleep`，实际 `bash`）。
-- Agent TypeScript build 与 `git diff --check` 通过；未生成 `crabot-agent/package-lock.json`。
+- legacy importer/read-model/authorization/continuation 定向：15 files / 285 passed；PR review-fix 扩展回归：17 files / 325 passed。两轮独立 security/correctness review 最终无 blocker/important。
+- 隔离升级副本使用当前生产快照完成真实 v2 导入：2696 tasks → 2696 legacy workers / 2696 `legacy_imported` events；首次 marker `completed`，有源重跑和隐藏源后的 completed fast-path 均跳过，复制源 hash 不变。索引修复后同一快照全量导入耗时 32.96s。证据目录：`/tmp/crabot-v2-upgrade-e2e-uF3u3v`、`/tmp/crabot-v2-import-perf-7A2Wgz`。
+- 全分支独立 review 覆盖授权/assertion、台账/importer 和 Manager/time；TraceStore 源隔离与精确 assertion ID 意见已修复并复审关闭，seq 碰撞按协议既有范围记录为 residual，当前无未解决 blocker/important。
+- Shared 全量：100 passed；Shared build 通过。
+- Agent 全量：2664 passed / 4 failed / 2 skipped。4 个失败均为既有 macOS 环境基线：tmux foreground command 识别差异 1 个，`/var` → `/private/var` realpath 差异 3 个。
+- Admin 全量：1075 passed / 1 failed。唯一失败为既有 `v1-cleanup.test.ts` 扫到 `origin/main` 已存在的测试断言字符串；本分支未引入该引用。Admin focused 81 passed，`build:all` 通过。
+- `CI=true ./dev.sh build`、Agent/Admin/Shared TypeScript build 与全分支 `git diff --check` 通过；禁止回归搜索未发现 worker `dialog_object_id`、`spawned_by_session`、fake legacy adapter 或已退役 resume RPC 注册。
 
 ### 最近运行态检查
 
@@ -41,11 +50,13 @@
 
 ### 已确认
 
-1. **PR #84 部署后真实验收**：创建实际 Claude Code / Codex worker，核对 task-scoped MCP、`desktop / mcp_skill` 过滤、handoff 权限快照、disabled server 清理及 credential 文件权限。
-2. **Claude MCP 配置外置**：当前 project-scope 根 `.mcp.json` 与根 `.gitignore` 副作用是 v3.0.8 明确接受的边界。迁移到 Crabot-owned per-worker 外部路径需调整 provision/启动寻址，并重新验证 Claude trust flow。
-3. **权限 schema 迁移纪律**：新增 `ToolAccessConfig` 或 `CliDomain` 类目前，必须先为历史 worker context 做显式 migration；不得依赖 persisted read 静默补齐。
-4. **既有 tmux 测试基线**：`tmux-driver.test.ts` 在当前 macOS 环境把 foreground command 识别为 `bash` 而非 `sleep`，需单独校准测试或驱动探针。
-5. **PROGRESS 维护**：只记录稳定事实和可执行 follow-up，不再写“待 review / 待 merge”等瞬时状态，也不为回填 merge 元信息单独改文档。
+1. **会话台账切换验收**：部署前人工收口仍在运行的旧 worker/bg owner 并备份旧 `data/agent/ledgers/`；不迁移本机测试期生成的 `friend:*` / `group:*` v3 台账。隔离升级副本必须覆盖 v2 importer 首次运行、重启幂等、legacy read model、授权撤销和 fresh-v3 continuation。
+2. **PR #84 部署后真实验收**：创建实际 Claude Code / Codex worker，核对 task-scoped MCP、`desktop / mcp_skill` 过滤、handoff 权限快照、disabled server 清理及 credential 文件权限。
+3. **Claude MCP 配置外置**：当前 project-scope 根 `.mcp.json` 与根 `.gitignore` 副作用是 v3.0.8 明确接受的边界。迁移到 Crabot-owned per-worker 外部路径需调整 provision/启动寻址，并重新验证 Claude trust flow。
+4. **权限 schema 迁移纪律**：新增 `ToolAccessConfig` 或 `CliDomain` 类目前，必须先为历史 worker context 做显式 migration；不得依赖 persisted read 静默补齐。
+5. **incarnation seq 已知限制**：协议 §5.6 已明确 adapter 自管 seq 可能在跨实现/重启后碰撞；legacy `seq:1` 续办后也可能复现。根治需要 harness 全局分配或扩展公开读取身份契约，属于需重新确认的协议变更；当前通用历史 Trace API 仍可读取旧 trace。
+6. **既有测试基线**：单独校准 macOS tmux foreground-command、`/var` realpath 和 Admin v1 cleanup 的跨仓测试扫描；不得与当前功能修复混改。
+7. **PROGRESS 维护**：只记录稳定事实和可执行 follow-up，不再写“待 review / 待 merge”等瞬时状态，也不为回填 merge 元信息单独改文档。
 
 ### 需重新确认后再立项
 
@@ -68,6 +79,7 @@
 
 | 日期 | 里程碑 |
 |---|---|
+| 08-10 | ManagerKey 会话台账、Master 显式全局视角、Admin Chat assertion、可撤授权 generation、稳定 prompt/事件时间信封和 v2 legacy 只读导入/新 v3 化身续办完成。 |
 | 08-09 | PR #84：task-scoped MCP capability 接入 builtin / Claude Code / Codex；固定 principal 快照、credential 安全写入、handoff preflight 与协议 v3.0.8 落地。 |
 | 08-09 | PR #82：CLI 交互输入提交安全化；Claude Code 2.1.226 / Codex 0.146.0 真机 tmux 路径完成校准。 |
 | 08-09 | PR #80：legacy AgentHandler 生产执行/恢复控制面退役；builtin bg-shell durable exit delivery 上线。 |

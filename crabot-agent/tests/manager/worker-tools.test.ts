@@ -6,7 +6,7 @@ import { buildWorkerTools, type WorkerToolsContext } from '../../src/manager/too
 import { WorkerHarness, type HarnessDeps, type SpawnWorkerParams } from '../../src/workers/harness/harness'
 import { LedgerStore } from '../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../src/workers/harness/workspace-manager'
-import { dialogObjectIdForPrivate } from '../../src/workers/harness/ledger-types'
+import type { ManagerKey } from '../../src/workers/harness/ledger-types'
 import type { HarnessEvent } from '../../src/workers/harness/worker-events'
 import { WorkerExitedError } from '../../src/workers/errors'
 import type {
@@ -141,8 +141,7 @@ async function makeHarness(
 
 // 本套件下 manager 的固定归属：所有 spawn_worker 透传断言都对照这份 context。
 const CTX: WorkerToolsContext = {
-  dialogObjectId: dialogObjectIdForPrivate('friend-1'),
-  managerKey: 'wechat::sess-1',
+  managerKey: 'wechat::sess-1' as ManagerKey,
   episodeId: 'episode-42',
   creatorFriendId: 'friend-1',
   reportTo: { channel_id: 'wechat', session_id: 'sess-1' },
@@ -150,10 +149,10 @@ const CTX: WorkerToolsContext = {
 
 function directSpawnParams(overrides: Partial<SpawnWorkerParams> = {}): SpawnWorkerParams {
   return {
-    dialogObjectId: CTX.dialogObjectId,
+    managerKey: CTX.managerKey,
     title: '直接调 harness 预置的任务',
     prompt: '把活干完',
-    origin: { spawned_by_session: CTX.managerKey, trigger_type: 'message' },
+    origin: { spawned_by_episode: CTX.managerKey, trigger_type: 'message' },
     report_to: CTX.reportTo,
     ...overrides,
   }
@@ -186,23 +185,23 @@ afterEach(async () => {
 // ---- 工具面形状 ----
 
 describe('buildWorkerTools — 工具面形状', () => {
-  it('工具名集合恰为六项，isReadOnly 仅 read_worker_output/list_workers 为 true', async () => {
+  it('普通 Manager 有七项 worker 工具；只有 read_worker_output/list_workers/get_worker_detail 为只读', async () => {
     const { harness } = await makeHarness()
     const tools = buildWorkerTools({ harness, context: () => CTX })
 
     expect(tools.map((t) => t.name).sort()).toEqual(
-      ['kill_worker', 'list_workers', 'query_worker', 'read_worker_output', 'send_to_worker', 'spawn_worker'].sort()
+      ['get_worker_detail', 'kill_worker', 'list_workers', 'query_worker', 'read_worker_output', 'send_to_worker', 'spawn_worker'].sort()
     )
 
     const readOnlyNames = tools.filter((t) => t.isReadOnly).map((t) => t.name).sort()
-    expect(readOnlyNames).toEqual(['list_workers', 'read_worker_output'])
+    expect(readOnlyNames).toEqual(['get_worker_detail', 'list_workers', 'read_worker_output'])
   })
 })
 
 // ---- spawn_worker ----
 
 describe('spawn_worker', () => {
-  it('透传 dialogObjectId/origin/report_to 到台账，异步返回简短确认（非完整 worker 记录）', async () => {
+  it('透传 managerKey/origin/report_to 到台账，异步返回简短确认（非完整 worker 记录）', async () => {
     const { harness } = await makeHarness()
     const tools = buildWorkerTools({ harness, context: () => CTX })
     const spawnWorker = tools.find((t) => t.name === 'spawn_worker')!
@@ -218,12 +217,11 @@ describe('spawn_worker', () => {
     expect(typeof parsed.worker_id).toBe('string')
     expect(Object.keys(parsed).sort()).toEqual(['impl', 'status', 'worker_id'])
 
-    // 真正落盘的台账记录：origin/report_to/dialogObjectId 与 context() 提供的完全一致。
-    const listed = await harness.listWorkers(CTX.dialogObjectId)
+    // 真正落盘的台账记录：origin/report_to/managerKey 与 context() 提供的完全一致。
+    const listed = await harness.listWorkers(CTX.managerKey)
     const worker = listed.find((w) => w.worker_id === parsed.worker_id)
     expect(worker).toBeDefined()
     expect(worker!.origin).toEqual({
-      spawned_by_session: CTX.managerKey,
       spawned_by_episode: CTX.episodeId,
       creator_friend_id: CTX.creatorFriendId,
       trigger_type: 'message',
@@ -239,7 +237,7 @@ describe('spawn_worker', () => {
 
     const result = await spawnWorker.call({ title: '定时任务', prompt: '按计划执行' }, {})
     const parsed = parseOutput(result.output)
-    const listed = await harness.listWorkers(CTX.dialogObjectId)
+    const listed = await harness.listWorkers(CTX.managerKey)
     const worker = listed.find((w) => w.worker_id === parsed.worker_id)
     expect(worker!.origin.trigger_type).toBe('scheduled')
   })
@@ -285,7 +283,7 @@ describe('send_to_worker', () => {
 
     const result = await sendToWorker.call({ worker_id: 'w-does-not-exist', text: '你好' }, {})
     expect(result.isError).toBe(true)
-    expect(result.output).toMatch(/worker not found/)
+    expect(result.output).toContain('不存在或当前会话无权访问')
   })
 
   it('task 已 cancelled → TaskCancelledError 转成可读 tool_result（isError:true，不抛出）', async () => {
@@ -373,14 +371,14 @@ describe('query_worker', () => {
     expect(parseOutput(result.output)).toEqual({ status: 'queried', worker_id: worker.worker_id })
 
     await waitUntil(async () => {
-      const [w] = await harness.listWorkers(CTX.dialogObjectId)
+      const [w] = await harness.listWorkers(CTX.managerKey)
       return w.incarnations.length === 2
     })
-    const [w] = await harness.listWorkers(CTX.dialogObjectId)
+    const [w] = await harness.listWorkers(CTX.managerKey)
     expect(w.incarnations[1]).toMatchObject({ seq: 2, forked_from: 1 })
   })
 
-  it('游离 promise reject（worker 不存在）时不产生 unhandledRejection，只记诊断日志；调用本身仍立即返回确认', async () => {
+  it('unknown worker is rejected synchronously without an action or unhandled rejection', async () => {
     const { harness } = await makeHarness({ caps: { fork: true } })
     const tools = buildWorkerTools({ harness, context: () => CTX })
     const queryWorker = tools.find((t) => t.name === 'query_worker')!
@@ -393,17 +391,16 @@ describe('query_worker', () => {
     try {
       const result = await queryWorker.call({ worker_id: 'w-nope', question: '？' }, {})
       // 不再是 isError:true——失败发生在锁外的游离 promise 里，这次调用本身不知道。
-      expect(result.isError).toBe(false)
-      expect(parseOutput(result.output)).toEqual({ status: 'queried', worker_id: 'w-nope' })
+      expect(result.isError).toBe(true)
+      expect(result.output).toContain('不存在或当前会话无权访问')
 
-      // 给游离 promise 一个宏任务窗口 reject 并被 .catch() 兜住。
+      // Authorization happens before fire-and-forget work.
       await new Promise((resolve) => setTimeout(resolve, 20))
 
       expect(unhandled).toHaveLength(0)
       expect(errorSpy).toHaveBeenCalled()
       const loggedArgs = errorSpy.mock.calls.map((args) => args.join(' ')).join('\n')
-      expect(loggedArgs).toMatch(/query_worker/)
-      expect(loggedArgs).toMatch(/worker not found/)
+      expect(loggedArgs).toContain('不存在或当前会话无权访问')
     } finally {
       process.off('unhandledRejection', onUnhandledRejection)
       errorSpy.mockRestore()
@@ -441,7 +438,7 @@ describe('query_worker', () => {
   // 已经拿不到失败原因（见上面两个用例）。onAsyncError 是留给 Task 7/8"把这条错误接成唤醒
   // 本 manager 的信号"的扩展点——本任务只提供出口、验证它确实带着正确的 { tool, worker_id,
   // error } 被调用，不接线到任何真实唤醒机制。
-  it('deps.onAsyncError 存在时，游离 promise reject（worker 不存在）除 console.error 外还携带 {tool, worker_id, error} 调用它', async () => {
+  it('authorization rejection does not invoke onAsyncError', async () => {
     const { harness } = await makeHarness({ caps: { fork: true } })
     const onAsyncError = vi.fn()
     const tools = buildWorkerTools({ harness, context: () => CTX, onAsyncError })
@@ -452,18 +449,14 @@ describe('query_worker', () => {
       await queryWorker.call({ worker_id: 'w-nope', question: '？' }, {})
       await new Promise((resolve) => setTimeout(resolve, 20))
 
-      expect(onAsyncError).toHaveBeenCalledTimes(1)
-      expect(onAsyncError).toHaveBeenCalledWith({
-        tool: 'query_worker',
-        worker_id: 'w-nope',
-        error: expect.stringMatching(/worker not found/),
-      })
+      expect(onAsyncError).not.toHaveBeenCalled()
+
     } finally {
       errorSpy.mockRestore()
     }
   })
 
-  it('未传 deps.onAsyncError 时行为与之前完全一致：游离 promise reject 只 console.error，不因缺省回调而抛错', async () => {
+  it('unknown worker without onAsyncError returns a synchronous denial', async () => {
     const { harness } = await makeHarness({ caps: { fork: true } })
     const tools = buildWorkerTools({ harness, context: () => CTX }) // 不传 onAsyncError
     const queryWorker = tools.find((t) => t.name === 'query_worker')!
@@ -471,7 +464,7 @@ describe('query_worker', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
       const result = await queryWorker.call({ worker_id: 'w-nope', question: '？' }, {})
-      expect(result.isError).toBe(false)
+      expect(result.isError).toBe(true)
       await new Promise((resolve) => setTimeout(resolve, 20))
       expect(errorSpy).toHaveBeenCalled()
     } finally {
@@ -503,7 +496,7 @@ describe('read_worker_output', () => {
 
     const result = await readWorkerOutput.call({ worker_id: 'w-nope' }, {})
     expect(result.isError).toBe(true)
-    expect(result.output).toMatch(/worker not found/)
+    expect(result.output).toContain('不存在或当前会话无权访问')
   })
 
   it('传 seq → 透传给 harness.readWorkerOutput，读到 query_worker 侧问化身的输出（不是主线）', async () => {
@@ -515,7 +508,7 @@ describe('read_worker_output', () => {
 
     await queryWorker.call({ worker_id: worker.worker_id, question: '现在进展如何？' }, {})
     await waitUntil(async () => {
-      const [w] = await harness.listWorkers(CTX.dialogObjectId)
+      const [w] = await harness.listWorkers(CTX.managerKey)
       return w.incarnations.length === 2
     })
 
@@ -530,7 +523,7 @@ describe('read_worker_output', () => {
 // ---- list_workers（同步，本对话对象全量） ----
 
 describe('list_workers', () => {
-  it('同步返回 context().dialogObjectId 名下全部 worker', async () => {
+  it('同步返回 context().managerKey 名下全部 worker', async () => {
     const { harness } = await makeHarness()
     const w1 = await harness.spawnWorker(directSpawnParams({ title: '任务一' }))
     const w2 = await harness.spawnWorker(directSpawnParams({ title: '任务二' }))
@@ -558,7 +551,7 @@ describe('kill_worker', () => {
     expect(parseOutput(first.output)).toEqual({ status: 'killed', worker_id: worker.worker_id })
     expect(fake.killCalls).toHaveLength(1)
 
-    const [afterFirst] = await harness.listWorkers(CTX.dialogObjectId)
+    const [afterFirst] = await harness.listWorkers(CTX.managerKey)
     expect(afterFirst.task.status).toBe('cancelled')
 
     // 幂等：再调一次不重复 adapter.kill、不报错。
@@ -574,6 +567,6 @@ describe('kill_worker', () => {
 
     const result = await killWorker.call({ worker_id: 'w-nope' }, {})
     expect(result.isError).toBe(true)
-    expect(result.output).toMatch(/worker not found/)
+    expect(result.output).toContain('不存在或当前会话无权访问')
   })
 })

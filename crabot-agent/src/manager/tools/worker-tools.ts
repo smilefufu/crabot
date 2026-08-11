@@ -1,7 +1,7 @@
 /**
  * worker 工具集 —— manager 唯一的 worker 编排入口(protocol-agent-v3 §4.1/§4.3/§5.5)。
  *
- * 六个工具全部是 `WorkerHarness`(P3 已合并,本模块只调用、不修改,唯一的 additive 例外见
+ * 七个工具全部是 `WorkerHarness`(P3 已合并,本模块只调用、不修改,唯一的 additive 例外见
  * `harness.readWorkerOutput` 的 `opts.seq` 参数)既有方法的薄封装:只负责
  * 1) 组装 harness 方法的入参(`spawn_worker` 据 `deps.context()` 填 `origin`/`report_to`);
  * 2) 把 harness 的返回值/异常转成 engine `ToolCallResult`——除 `query_worker`(见下)外,
@@ -46,7 +46,7 @@
  *
  * ## isReadOnly
  *
- * 只有 `read_worker_output`/`list_workers` 标 `isReadOnly: true`(供 engine 并行调度只读工具,
+ * 与 `read_worker_output`/`list_workers`/`get_worker_detail` 标 `isReadOnly: true`(供 engine 并行调度只读工具,
  * `partitionToolCalls`)。`kill_worker` 虽然同步返回,但会改变 worker/task 状态,不是只读。
  *
  * @see crabot-docs/protocols/protocol-agent-v3.md §4.1、§4.3、§5.5
@@ -55,14 +55,14 @@
 import { defineTool } from '../../engine/index.js'
 import type { ToolDefinition, ToolCallResult } from '../../engine/index.js'
 import type { WorkerHarness } from '../../workers/harness/harness'
-import type { DialogObjectId, ManagerKey, LedgerWorker } from '../../workers/harness/ledger-types'
+import type { ManagerKey, LedgerWorker, TaskStatus } from '../../workers/harness/ledger-types'
+import type { MasterAuthorization } from '../principal.js'
 import type { WorkerImplId } from '../../workers/types'
 import type { ResolvedPermissions } from '../../types'
+import type { LegacyContinuationAuth } from '../../workers/harness/legacy-continuation-auth.js'
 
 export interface WorkerToolsContext {
-  /** 本次唤醒所属对话对象:决定 spawn 的台账归属与 `list_workers` 的查询范围。 */
-  readonly dialogObjectId: DialogObjectId
-  /** 当前 manager 实例键:填入 `origin.spawned_by_session`。 */
+  /** Current manager session: worker owner and list_workers scope. */
   readonly managerKey: ManagerKey
   /** 当前 episode 的 trace id(可跳转);填入 `origin.spawned_by_episode`。 */
   readonly episodeId?: string
@@ -79,6 +79,8 @@ export interface WorkerToolsContext {
   readonly principalPermissions?: ResolvedPermissions
   /** 结果回报目标,默认 = 当前 session(protocol-agent-v3 §3)。 */
   readonly reportTo: { channel_id: string; session_id: string }
+  /** Opaque credential factory; only legacy terminal continuation consumes its result. */
+  readonly legacyContinuationAuth?: (managerKey: ManagerKey) => LegacyContinuationAuth | undefined
   /**
    * 本次唤醒的触发来源,填入 `origin.trigger_type`;缺省 'message'。给 scheduled 路由
    * (Task 8)/system 场景预留——本任务只加这个可选出口,不在这里做路由判断。
@@ -88,8 +90,11 @@ export interface WorkerToolsContext {
 
 export interface WorkerToolsDeps {
   readonly harness: WorkerHarness
-  /** 当前 manager 的归属:决定 spawn 的 dialogObjectId / origin / report_to。 */
+  /** 当前 manager 的归属:决定 spawn 的 managerKey / origin / report_to。 */
   readonly context: () => WorkerToolsContext
+  /** Opaque authorization is captured by the control plane, never exposed in a tool schema/history. */
+  readonly authorization?: () => MasterAuthorization | undefined
+  readonly validateMasterAuthorization?: (auth: MasterAuthorization) => Promise<boolean>
   /**
    * P4 Task 4 additive 扩展点:`query_worker` 的游离 promise reject 时,除了
    * `console.error` 诊断日志外还调用这个可选回调。本任务只提供出口、不接线——`harness.
@@ -132,8 +137,47 @@ function isWorkerImplId(value: unknown): value is WorkerImplId {
   return typeof value === 'string' && (WORKER_IMPL_IDS as readonly string[]).includes(value)
 }
 
+function summarizeWorker(worker: LedgerWorker) {
+  const mainline = worker.incarnations.filter(inc => inc.forked_from === undefined).at(-1)
+  return {
+    worker_id: worker.worker_id,
+    manager_key: worker.manager_key,
+    title: worker.task.title,
+    task_status: worker.task.status,
+    ...(mainline ? { incarnation_state: mainline.state, impl: mainline.impl } : {}),
+    updated_at: worker.updated_at,
+  }
+}
+
+function sortSummaries<T extends { updated_at: string; worker_id: string }>(items: T[]): T[] {
+  return items.sort((a, b) => b.updated_at.localeCompare(a.updated_at) || a.worker_id.localeCompare(b.worker_id))
+}
+
+function normalizePagination(page: unknown, pageSize: unknown): { page: number; page_size: number } {
+  const valid = (value: unknown, fallback: number) => typeof value === 'number' && Number.isInteger(value) && value >= 1 ? value : fallback
+  return { page: valid(page, 1), page_size: Math.min(valid(pageSize, 20), 100) }
+}
+
+const ACCESS_DENIED = 'worker 不存在或当前会话无权访问'
+
 export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
-  const { harness, context, onAsyncError } = deps
+  const { harness, context, authorization, validateMasterAuthorization, onAsyncError } = deps
+  // Capture exactly once: a tool definition belongs to one model turn. A later
+  // regrant must not make an already-issued privileged closure usable again.
+  const capturedAuthorization = authorization?.()
+  const capturedLegacyContinuationAuth = context().legacyContinuationAuth
+
+  const masterAuthorized = async (): Promise<boolean> => {
+    return !!capturedAuthorization && !!validateMasterAuthorization && await validateMasterAuthorization(capturedAuthorization)
+  }
+
+  const authorizeWorker = async (workerId: string): Promise<LedgerWorker> => {
+    const found = await harness.findWorker(workerId)
+    if (!found) throw new Error(ACCESS_DENIED)
+    if (found.worker.manager_key === context().managerKey) return found.worker
+    if (!await masterAuthorized()) throw new Error(ACCESS_DENIED)
+    return found.worker
+  }
 
   // --- spawn_worker(异步:发起即返回,任务进展由事件唤醒) ---
   //
@@ -180,11 +224,10 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       const ctx = context()
       try {
         const worker: LedgerWorker = await harness.spawnWorker({
-          dialogObjectId: ctx.dialogObjectId,
+          managerKey: ctx.managerKey,
           title,
           prompt,
           origin: {
-            spawned_by_session: ctx.managerKey,
             spawned_by_episode: ctx.episodeId,
             creator_friend_id: ctx.creatorFriendId,
             // 缺省按最常见场景填 'message';scheduled/system 场景由 context() 提供
@@ -231,7 +274,12 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       if (typeof text !== 'string' || text.length === 0) return invalid('send_to_worker: text 必填且为非空字符串')
 
       try {
-        await harness.sendToWorker(worker_id, text, raw !== undefined ? { raw } : undefined)
+        const worker = await authorizeWorker(worker_id)
+        const legacyContinuationAuth = capturedLegacyContinuationAuth?.(worker.manager_key)
+        await harness.sendToWorker(worker_id, text, {
+          ...(raw !== undefined ? { raw } : {}),
+          ...(legacyContinuationAuth ? { legacyContinuationAuth } : {}),
+        })
         return ok({ status: 'sent', worker_id })
       } catch (error) {
         return mapError(`send_to_worker(${worker_id})`, error)
@@ -274,6 +322,12 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       if (!worker_id || typeof worker_id !== 'string') return invalid('query_worker: worker_id 必填且为字符串')
       if (!question || typeof question !== 'string') return invalid('query_worker: question 必填且为字符串')
 
+      try {
+        // Authorization must settle before this fire-and-forget action is started.
+        await authorizeWorker(worker_id)
+      } catch (error) {
+        return mapError(`query_worker(${worker_id})`, error)
+      }
       harness.queryWorker(worker_id, question).catch((error) => {
         console.error(`[worker-tools] query_worker(${worker_id}) 后台发起失败(fire-and-forget):`, error)
         onAsyncError?.({ tool: 'query_worker', worker_id, error: error instanceof Error ? error.message : String(error) })
@@ -306,36 +360,71 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       if (!worker_id || typeof worker_id !== 'string') return invalid('read_worker_output: worker_id 必填且为字符串')
 
       try {
-        const { chunk, nextCursor } = await harness.readWorkerOutput(
+        await authorizeWorker(worker_id)
+        const { chunk, nextCursor, unavailable_reason } = await harness.readWorkerOutput(
           worker_id,
           { offset: offset ?? 0 },
           seq !== undefined ? { seq } : undefined
         )
-        return ok({ worker_id, chunk, next_offset: nextCursor.offset })
+        return ok({ worker_id, chunk, next_offset: nextCursor.offset, ...(unavailable_reason ? { unavailable_reason } : {}) })
       } catch (error) {
         return mapError(`read_worker_output(${worker_id})`, error)
       }
     },
   })
 
-  // --- list_workers(同步:本对话对象全量台账) ---
   const listWorkers = defineTool({
     name: 'list_workers',
-    description:
-      '同步列出当前对话对象名下的全部 worker(含其它 session 派发到同一对话对象的条目):' +
-      'worker_id、任务状态、化身链等台账信息。新请求进来时先用它找有没有能接着用的 worker' +
-      '(已结束的也算,send_to_worker 会复活它),再决定是复用还是 spawn_worker 开新的。',
+    description: '列出当前会话派出的 worker 精简摘要；需要继续、返工或汇报进度时先查询。',
     inputSchema: { type: 'object', properties: {} },
     isReadOnly: true,
     call: async (): Promise<ToolCallResult> => {
       try {
-        const workers = await harness.listWorkers(context().dialogObjectId)
-        return ok({ workers })
-      } catch (error) {
-        return mapError('list_workers', error)
-      }
+        return ok({ workers: sortSummaries((await harness.listWorkers(context().managerKey)).map(summarizeWorker)) })
+      } catch (error) { return mapError('list_workers', error) }
     },
   })
+
+  const getWorkerDetail = defineTool({
+    name: 'get_worker_detail',
+    description: '读取一个 worker 的完整详情。当前会话只能读取自己的 worker。',
+    inputSchema: { type: 'object', properties: { worker_id: { type: 'string' } }, required: ['worker_id'] },
+    isReadOnly: true,
+    call: async (input): Promise<ToolCallResult> => {
+      const workerId = (input as { worker_id?: string }).worker_id
+      if (!workerId) return invalid('get_worker_detail: worker_id 必填且为字符串')
+      try { return ok({ worker: await authorizeWorker(workerId) }) }
+      catch (error) { return mapError(`get_worker_detail(${workerId})`, error) }
+    },
+  })
+
+  const listAllWorkers = capturedAuthorization ? defineTool({
+    name: 'list_all_workers',
+    description: '仅 Master 可用：跨会话列出 worker 精简摘要，支持 manager_key/status/分页过滤。',
+    inputSchema: {
+      type: 'object', properties: {
+        manager_key: { type: 'string' }, status: { oneOf: [{ type: 'string', enum: ['queued', 'running', 'waiting_input', 'completed', 'failed', 'cancelled'] }, { type: 'array', items: { type: 'string', enum: ['queued', 'running', 'waiting_input', 'completed', 'failed', 'cancelled'] } }] },
+        page: { type: 'number' }, page_size: { type: 'number' },
+      },
+    },
+    isReadOnly: true,
+    call: async (input): Promise<ToolCallResult> => {
+      try {
+        if (!await masterAuthorized()) return invalid(ACCESS_DENIED)
+        const p = input as { manager_key?: string; status?: TaskStatus | TaskStatus[]; page?: number; page_size?: number }
+        const status = p.status === undefined ? undefined : (Array.isArray(p.status) ? p.status : [p.status])
+        const pagination = normalizePagination(p.page, p.page_size)
+        const summaries = sortSummaries((await harness.listAllWorkers())
+          .filter(({ worker }) => (!p.manager_key || worker.manager_key === p.manager_key) && (!status || status.includes(worker.task.status)))
+          .map(({ worker }) => summarizeWorker(worker)))
+        const total_items = summaries.length
+        const start = (pagination.page - 1) * pagination.page_size
+        return ok({ items: summaries.slice(start, start + pagination.page_size), pagination: {
+          ...pagination, total_items, total_pages: Math.ceil(total_items / pagination.page_size),
+        } })
+      } catch (error) { return mapError('list_all_workers', error) }
+    },
+  }) : undefined
 
   // --- kill_worker(同步:终止当前化身,幂等) ---
   const killWorker = defineTool({
@@ -357,6 +446,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
       if (!worker_id || typeof worker_id !== 'string') return invalid('kill_worker: worker_id 必填且为字符串')
 
       try {
+        await authorizeWorker(worker_id)
         await harness.killWorker(worker_id, reason)
         return ok({ status: 'killed', worker_id })
       } catch (error) {
@@ -365,5 +455,5 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
     },
   })
 
-  return [spawnWorker, sendToWorker, queryWorker, readWorkerOutput, listWorkers, killWorker]
+  return [spawnWorker, sendToWorker, queryWorker, readWorkerOutput, listWorkers, getWorkerDetail, ...(listAllWorkers ? [listAllWorkers] : []), killWorker]
 }

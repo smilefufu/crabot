@@ -31,7 +31,7 @@ import * as path from 'node:path'
 import { WorkerHarness, type HarnessDeps } from '../../../src/workers/harness/harness'
 import { LedgerStore } from '../../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../../src/workers/harness/workspace-manager'
-import { dialogObjectIdForPrivate } from '../../../src/workers/harness/ledger-types'
+import { } from '../../../src/workers/harness/ledger-types'
 import type { HarnessEvent } from '../../../src/workers/harness/worker-events'
 import { BuiltinWorkerAdapter } from '../../../src/workers/builtin/adapter.js'
 import { ClaudeCodeAdapter, eventsFilePath as ccEventsFilePath } from '../../../src/workers/claude-code/adapter.js'
@@ -126,12 +126,13 @@ describe('WorkerHarness — 真实 builtin adapter 集成冒烟(mock LLM)', () =
         { toolCalls: [{ name: 'finish_task', id: 'call_1', input: { outcome: 'completed', summary: '搞定了' } }], stopReason: 'tool_use' },
       ])
 
-      const dialogObjectId = dialogObjectIdForPrivate('friend-builtin-integ')
+      const managerKey = `test::friend-builtin-integ` as ManagerKey
       const worker = await harness.spawnWorker({
-        dialogObjectId,
+        managerKey,
         title: '集成冒烟任务',
         prompt: '把活干完',
-        origin: { spawned_by_session: 'wechat::sess-1', trigger_type: 'message' },
+        origin: {
+      trigger_type: 'message' },
         report_to: { channel_id: 'wechat', session_id: 'sess-1' },
         impl: 'builtin',
         builtin: { adapter: llm, model: 'test', systemPrompt: '', tools: [] },
@@ -144,7 +145,7 @@ describe('WorkerHarness — 真实 builtin adapter 集成冒烟(mock LLM)', () =
       // 台账推进到 waiting_input(builtin 的 idle 映射,harness 保守默认 idle→waiting_input),
       // 不是靠猜时序或手动触发回调。
       await waitUntil(async () => {
-        const [w] = await harness.listWorkers(dialogObjectId)
+        const [w] = await harness.listWorkers(managerKey)
         return w.task.status === 'waiting_input'
       })
 
@@ -158,11 +159,11 @@ describe('WorkerHarness — 真实 builtin adapter 集成冒烟(mock LLM)', () =
       await harness.sendToWorker(worker.worker_id, '选 A 吧,继续')
 
       await waitUntil(async () => {
-        const [w] = await harness.listWorkers(dialogObjectId)
+        const [w] = await harness.listWorkers(managerKey)
         return w.task.status === 'completed'
       })
 
-      const [finalWorker] = await harness.listWorkers(dialogObjectId)
+      const [finalWorker] = await harness.listWorkers(managerKey)
       expect(finalWorker.task.status).toBe('completed')
       // 注:被动状态回调路径现在会把 adapter 的 ended_reason 一路透传进
       // incarnation.ended_reason 与 task.status,但**不**回填 task.outcome——
@@ -181,12 +182,12 @@ describe('WorkerHarness — 真实 builtin adapter 集成冒烟(mock LLM)', () =
       // reconcileOnStartup 幂等:worker 已是终态,巡检不该把它错误判成 revived/failed,
       // 也不该再调用 adapter.state()(harness.ts reconcileOnStartup 的设计:已终态 worker
       // 直接归 unchanged,不进 Promise.allSettled 批次)——台账不应被巡检动过。
-      const beforeReconcile = await harness.listWorkers(dialogObjectId)
+      const beforeReconcile = await harness.listWorkers(managerKey)
       const report = await harness.reconcileOnStartup()
       expect(report.unchanged).toContain(worker.worker_id)
       expect(report.revived).not.toContain(worker.worker_id)
       expect(report.failed).not.toContain(worker.worker_id)
-      const afterReconcile = await harness.listWorkers(dialogObjectId)
+      const afterReconcile = await harness.listWorkers(managerKey)
       expect(afterReconcile).toEqual(beforeReconcile)
 
       // 再调用一次,证明幂等不是"只对一次调用生效"的巧合。
@@ -306,12 +307,13 @@ describe.skipIf(!tmuxAvailable)('WorkerHarness — 真实 claude-code adapter �
       const ccAdapter = new ClaudeCodeAdapter({ dataDir: ccDataDir, claudeConfigPath: join(dataDir, 'fake-claude.json'), claudeBin, onStateChange: harness.handleStateChange })
       adaptersMap.set('claude-code', ccAdapter)
 
-      const dialogObjectId = dialogObjectIdForPrivate('friend-cc-integ')
+      const managerKey = `test::friend-cc-integ` as ManagerKey
       const worker = await harness.spawnWorker({
-        dialogObjectId,
+        managerKey,
         title: '真实 cc 冒烟任务',
         prompt: '你好',
-        origin: { spawned_by_session: 'wechat::sess-1', trigger_type: 'message' },
+        origin: {
+      trigger_type: 'message' },
         report_to: { channel_id: 'wechat', session_id: 'sess-1' },
         impl: 'claude-code',
         workspace: workspaceRoot,
@@ -319,10 +321,10 @@ describe.skipIf(!tmuxAvailable)('WorkerHarness — 真实 claude-code adapter �
       sessionsToCleanup.push(`crabot-w-${worker.worker_id}-1`)
 
       await waitUntil(async () => {
-        const [current] = await harness.listWorkers(dialogObjectId)
+        const [current] = await harness.listWorkers(managerKey)
         return current.task.status === 'waiting_input'
       })
-      const [settledWorker] = await harness.listWorkers(dialogObjectId)
+      const [settledWorker] = await harness.listWorkers(managerKey)
       expect(settledWorker.task.status).toBe('waiting_input')
       // cc adapter 的真实 session uuid(spawn 返回前即由 adapter 填入,不是台账初始化时的
       // 占位空串),证明 harness 原子补写了 adapter.spawn 返回的真实 handle.session_ref。
@@ -357,7 +359,7 @@ describe.skipIf(!tmuxAvailable)('WorkerHarness — 真实 claude-code adapter �
 
       await harness.killWorker(worker.worker_id, '冒烟测试收尾')
 
-      const [finalWorker] = await harness.listWorkers(dialogObjectId)
+      const [finalWorker] = await harness.listWorkers(managerKey)
       expect(finalWorker.task.status).toBe('cancelled')
       expect(finalWorker.incarnations).toHaveLength(1)
       expect(finalWorker.incarnations[0].state).toBe('exited')
@@ -415,7 +417,7 @@ describe.skipIf(!tmuxAvailable)(
 
         const ledger = new LedgerStore(ledgersDir)
         const workspaces = new WorkspaceManager(workspacesRoot)
-        const dialogObjectId = dialogObjectIdForPrivate('friend-cc-restart')
+        const managerKey = `test::friend-cc-restart` as ManagerKey
 
         // "重启前":harness1 + adapterA spawn 两个 worker。
         const adaptersMap1 = new Map<WorkerImplId, WorkerAdapter>()
@@ -431,20 +433,22 @@ describe.skipIf(!tmuxAvailable)(
         adaptersMap1.set('claude-code', adapterA)
 
         const aliveWorker = await harness1.spawnWorker({
-          dialogObjectId,
+          managerKey,
           title: '存活 worker',
           prompt: '你好',
-          origin: { spawned_by_session: 'wechat::sess-1', trigger_type: 'message' },
+          origin: {
+      trigger_type: 'message' },
           report_to: { channel_id: 'wechat', session_id: 'sess-1' },
           impl: 'claude-code',
         })
         sessionsToCleanup.push(`crabot-w-${aliveWorker.worker_id}-1`)
 
         const deadWorker = await harness1.spawnWorker({
-          dialogObjectId,
+          managerKey,
           title: '将被外部杀掉的 worker',
           prompt: '你好',
-          origin: { spawned_by_session: 'wechat::sess-1', trigger_type: 'message' },
+          origin: {
+      trigger_type: 'message' },
           report_to: { channel_id: 'wechat', session_id: 'sess-1' },
           impl: 'claude-code',
         })
@@ -455,7 +459,7 @@ describe.skipIf(!tmuxAvailable)(
         execFileSync('tmux', ['kill-session', '-t', `crabot-w-${deadWorker.worker_id}-1`], { stdio: 'ignore' })
 
         // 台账此刻仍然认为两个 worker 都在 running——没人告诉它 deadWorker 已经死了。
-        const beforeRestart = await harness1.listWorkers(dialogObjectId)
+        const beforeRestart = await harness1.listWorkers(managerKey)
         expect(beforeRestart.every((w) => w.task.status === 'running')).toBe(true)
 
         // "重启":全新 harness + adapter 实例,指向同一份台账(同一个 LedgerStore 实例即
@@ -481,7 +485,7 @@ describe.skipIf(!tmuxAvailable)(
         expect(report.revived).toContain(aliveWorker.worker_id)
         expect(report.failed).toContain(deadWorker.worker_id)
 
-        const afterAll = await harness2.listWorkers(dialogObjectId)
+        const afterAll = await harness2.listWorkers(managerKey)
         const afterAlive = afterAll.find((w) => w.worker_id === aliveWorker.worker_id)!
         expect(afterAlive.task.status).toBe('running')
 
@@ -554,7 +558,7 @@ describe.skipIf(!tmuxAvailable)(
 
         const ledger = new LedgerStore(ledgersDir)
         const workspaces = new WorkspaceManager(workspacesRoot)
-        const dialogObjectId = dialogObjectIdForPrivate('friend-cc-poc3')
+        const managerKey = `test::friend-cc-poc3` as ManagerKey
 
         const adaptersMap1 = new Map<WorkerImplId, WorkerAdapter>()
         const harness1 = new WorkerHarness({ adapters: adaptersMap1, defaultImpl: 'claude-code', ledger, workspaces, workersDir, now })
@@ -562,10 +566,11 @@ describe.skipIf(!tmuxAvailable)(
         adaptersMap1.set('claude-code', adapterA)
 
         const worker = await harness1.spawnWorker({
-          dialogObjectId,
+          managerKey,
           title: 'PoC③ worker',
           prompt: '你好',
-          origin: { spawned_by_session: 'wechat::sess-1', trigger_type: 'message' },
+          origin: {
+      trigger_type: 'message' },
           report_to: { channel_id: 'wechat', session_id: 'sess-1' },
           impl: 'claude-code',
         })
@@ -598,7 +603,7 @@ describe.skipIf(!tmuxAvailable)(
         // try/catch,整段失败——task 卡在 running,用户无法终止。
         await harness2.killWorker(worker.worker_id, 'PoC③ 收尾')
 
-        const [finalWorker] = await harness2.listWorkers(dialogObjectId)
+        const [finalWorker] = await harness2.listWorkers(managerKey)
         expect(finalWorker.task.status).toBe('cancelled')
         expect(finalWorker.incarnations[0].state).toBe('exited')
         expect(finalWorker.incarnations[0].ended_reason).toBe('killed')
@@ -621,7 +626,7 @@ describe.skipIf(!tmuxAvailable)(
 
         const ledger = new LedgerStore(ledgersDir)
         const workspaces = new WorkspaceManager(workspacesRoot)
-        const dialogObjectId = dialogObjectIdForPrivate('friend-cc-poc4')
+        const managerKey = `test::friend-cc-poc4` as ManagerKey
 
         const adaptersMap1 = new Map<WorkerImplId, WorkerAdapter>()
         const harness1 = new WorkerHarness({ adapters: adaptersMap1, defaultImpl: 'claude-code', ledger, workspaces, workersDir, now })
@@ -629,10 +634,11 @@ describe.skipIf(!tmuxAvailable)(
         adaptersMap1.set('claude-code', adapterA)
 
         const worker = await harness1.spawnWorker({
-          dialogObjectId,
+          managerKey,
           title: 'PoC④ worker',
           prompt: '你好',
-          origin: { spawned_by_session: 'wechat::sess-1', trigger_type: 'message' },
+          origin: {
+      trigger_type: 'message' },
           report_to: { channel_id: 'wechat', session_id: 'sess-1' },
           impl: 'claude-code',
         })
@@ -646,7 +652,7 @@ describe.skipIf(!tmuxAvailable)(
         // 会话已经先一步真死",台账此刻仍然认为它在 running(没人告诉它已经死了)。
         execFileSync('tmux', ['kill-session', '-t', `crabot-w-${worker.worker_id}-1`], { stdio: 'ignore' })
 
-        const beforeRestart = await harness1.listWorkers(dialogObjectId)
+        const beforeRestart = await harness1.listWorkers(managerKey)
         expect(beforeRestart[0].task.status).toBe('running')
         expect(beforeRestart[0].incarnations[0].state).not.toBe('exited')
 
@@ -660,7 +666,7 @@ describe.skipIf(!tmuxAvailable)(
 
         await expect(harness2.sendToWorker(worker.worker_id, '接着办')).resolves.toBeUndefined()
 
-        const [afterWorker] = await harness2.listWorkers(dialogObjectId)
+        const [afterWorker] = await harness2.listWorkers(managerKey)
         expect(afterWorker.task.status).toBe('running')
         expect(afterWorker.incarnations).toHaveLength(2)
         expect(afterWorker.incarnations[0].state).toBe('exited')

@@ -5,7 +5,7 @@ import { join } from 'path'
 import { WorkerHarness, WorkerNotFoundError, TaskCancelledError, type HarnessDeps, type SpawnWorkerParams } from '../../../src/workers/harness/harness'
 import { LedgerStore } from '../../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../../src/workers/harness/workspace-manager'
-import { dialogObjectIdForPrivate } from '../../../src/workers/harness/ledger-types'
+import { } from '../../../src/workers/harness/ledger-types'
 import { WorkerEventLog, type HarnessEvent } from '../../../src/workers/harness/worker-events'
 import { CapabilityNotSupportedError, CliInputStallError } from '../../../src/workers/errors'
 import { describeStartupStall } from '../../../src/workers/tmux/paste-ready'
@@ -225,10 +225,11 @@ async function makeHarness(
 
 function spawnParams(overrides: Partial<SpawnWorkerParams> = {}): SpawnWorkerParams {
   return {
-    dialogObjectId: dialogObjectIdForPrivate('friend-1'),
+    managerKey: `test::friend-1` as ManagerKey,
     title: '测试任务',
     prompt: '把活干完',
-    origin: { spawned_by_session: 'wechat::sess-1', trigger_type: 'message' },
+    origin: {
+      trigger_type: 'message' },
     report_to: { channel_id: 'wechat', session_id: 'sess-1' },
     ...overrides,
   }
@@ -269,7 +270,7 @@ describe('WorkerHarness.spawnWorker', () => {
     expect(spawnedEvents[0].seq).toBe(1)
 
     // 台账已落盘且可查
-    const listed = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const listed = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(listed.map((w) => w.worker_id)).toContain(worker.worker_id)
   })
 
@@ -328,7 +329,7 @@ describe('WorkerHarness.spawnWorker', () => {
     await expect(harness.spawnWorker(spawnParams())).rejects.toThrow('context disk error')
     expect(fake.provisionCalls).toEqual([])
     expect(fake.spawnCalls).toEqual([])
-    const [failed] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [failed] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(failed.task).toMatchObject({ status: 'failed', error: 'context disk error' })
     expect(failed.incarnations[0]).toMatchObject({ state: 'exited', ended_reason: 'failed' })
     expect(events.find((event) => event.kind === 'exited')?.detail).toMatchObject({
@@ -461,7 +462,7 @@ describe('WorkerHarness.spawnWorker', () => {
 
     await expect(harness.spawnWorker(spawnParams())).rejects.toThrow('spawn 炸了')
 
-    const listed = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const listed = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(listed).toHaveLength(1)
     const worker = listed[0]
     expect(worker.task.status).toBe('failed')
@@ -487,11 +488,11 @@ describe('WorkerHarness.handleStateChange', () => {
     // 的异步台账更新——用轮询等待收敛(与 tests/workers/contract-suite.ts 的 waitForState
     // 同一套路,不是"睡一下猜时序",是"有界轮询直到可观察结果达到预期,超时即失败")。
     await waitUntil(async () => {
-      const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
       return w.task.status === 'waiting_input'
     })
 
-    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(w.task.status).toBe('waiting_input')
     expect(w.incarnations[0].state).toBe('idle')
 
@@ -502,10 +503,10 @@ describe('WorkerHarness.handleStateChange', () => {
     // 化身自然结束(非 kill)→ completed
     fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }, 'exited')
     await waitUntil(async () => {
-      const [w2] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      const [w2] = await harness.listWorkers(`test::friend-1` as ManagerKey)
       return w2.task.status === 'completed'
     })
-    const [w2] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w2] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(w2.task.status).toBe('completed')
     expect(w2.incarnations[0].ended_reason).toBe('completed')
   })
@@ -518,8 +519,8 @@ describe('WorkerHarness.handleStateChange', () => {
       'idle',
     )
 
-    await waitUntil(async () => (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]?.incarnations[0]?.state === 'idle')
-    const [stored] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    await waitUntil(async () => (await harness.listWorkers(`test::friend-1` as ManagerKey))[0]?.incarnations[0]?.state === 'idle')
+    const [stored] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(stored.task.status).toBe('running')
   })
 
@@ -530,12 +531,12 @@ describe('WorkerHarness.handleStateChange', () => {
     const handle = { worker_id: worker.worker_id, seq: 1, impl: 'builtin' as const, session_ref: `ref-${worker.worker_id}#1` }
 
     fake.emitStateChange(handle, 'idle')
-    await waitUntil(async () => (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]?.incarnations[0]?.state === 'idle')
-    expect((await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0].task.status).toBe('running')
+    await waitUntil(async () => (await harness.listWorkers(`test::friend-1` as ManagerKey))[0]?.incarnations[0]?.state === 'idle')
+    expect((await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status).toBe('running')
 
     complete()
     fake.emitStateChange(handle, 'idle')
-    await waitUntil(async () => (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0]?.task.status === 'waiting_input')
+    await waitUntil(async () => (await harness.listWorkers(`test::friend-1` as ManagerKey))[0]?.task.status === 'waiting_input')
   })
 
   it('CLI交互Notification映射为固定manager-facing detail，不泄漏内部notification对象', async () => {
@@ -584,10 +585,10 @@ describe('WorkerHarness.handleStateChange', () => {
     fake.emitStateChange(h, 'exited', undefined, 'failed')
 
     await waitUntil(async () => {
-      const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
       return w.task.status === 'failed'
     })
-    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(w.task.status).toBe('failed')
     expect(w.incarnations[0].ended_reason).toBe('failed')
 
@@ -605,10 +606,10 @@ describe('WorkerHarness.handleStateChange', () => {
     fake.emitStateChange(h, 'exited', undefined, 'crashed')
 
     await waitUntil(async () => {
-      const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
       return w.task.status === 'failed'
     })
-    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(w.incarnations[0].ended_reason).toBe('crashed')
   })
 
@@ -628,10 +629,10 @@ describe('WorkerHarness.handleStateChange', () => {
     )
 
     await waitUntil(async () => {
-      const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
       return w.incarnations[0].state === 'exited'
     })
-    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(w.task.status).toBe('failed')
     expect(w.incarnations[0].ended_reason).toBeUndefined() // 不编造原因
   })
@@ -648,7 +649,7 @@ describe('WorkerHarness.handleStateChange', () => {
     expect(() => harness.handleStateChange(h, 'running', { endReason: 'completed' })).toThrow(/only meaningful for state 'exited'/)
 
     // 台账没有被这次非法回调改动过。
-    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(w.incarnations[0].state).toBe('running')
     expect(w.incarnations[0].ended_reason).toBeUndefined()
   })
@@ -873,7 +874,7 @@ describe('WorkerHarness.handleStateChange', () => {
     // 一定已经跑完。
     await harness.killWorker(worker.worker_id)
 
-    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(w.task.status).toBe('cancelled')
   })
 })
@@ -940,11 +941,11 @@ describe('WorkerHarness.sendToWorker', () => {
 
     await harness.sendToWorker(worker.worker_id, '很快完成的输入')
     await waitUntil(async () => {
-      const [current] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      const [current] = await harness.listWorkers(`test::friend-1` as ManagerKey)
       return current.task.status === 'waiting_input'
     })
 
-    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [settled] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(settled.incarnations[0].state).toBe('idle')
   })
 
@@ -975,14 +976,14 @@ describe('WorkerHarness.sendToWorker', () => {
       session_ref: `ref-${worker.worker_id}#1`,
     }, 'idle')
     await waitUntil(async () => {
-      const [current] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      const [current] = await harness.listWorkers(`test::friend-1` as ManagerKey)
       return current.task.status === 'waiting_input'
     })
 
     release()
     await send
 
-    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [settled] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(settled.task.status).toBe('waiting_input')
     expect(settled.incarnations[0].state).toBe('idle')
     expect(fake.sendInputCalls).toHaveLength(1)
@@ -1014,16 +1015,16 @@ describe('WorkerHarness.sendToWorker', () => {
       impl: 'claude-code',
       session_ref: `ref-${worker.worker_id}#1`,
     }, 'idle')
-    await waitUntil(async () => (await harness.listWorkers(dialogObjectIdForPrivate('friend-1')))[0].task.status === 'waiting_input')
+    await waitUntil(async () => (await harness.listWorkers(`test::friend-1` as ManagerKey))[0].task.status === 'waiting_input')
     await harness.queryWorker(worker.worker_id, '侧问一下')
 
     await harness.sendToWorker(worker.worker_id, '主线继续')
     await waitUntil(async () => {
-      const [current] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      const [current] = await harness.listWorkers(`test::friend-1` as ManagerKey)
       return current.incarnations.find((incarnation) => incarnation.seq === 2)?.state === 'idle'
     })
 
-    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [settled] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(settled.task.status).toBe('running')
     expect(settled.incarnations.find((incarnation) => incarnation.seq === 1)?.state).toBe('running')
   })
@@ -1042,7 +1043,7 @@ describe('WorkerHarness.sendToWorker', () => {
       session_ref: `fork-ref-${worker.worker_id}#2`,
     }, 'exited', undefined, 'completed')
     await waitUntil(async () => {
-      const [current] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      const [current] = await harness.listWorkers(`test::friend-1` as ManagerKey)
       return current.incarnations.find((incarnation) => incarnation.seq === 2)?.state === 'exited'
     })
 
@@ -1055,10 +1056,10 @@ describe('WorkerHarness.sendToWorker', () => {
 
     await harness.sendToWorker(worker.worker_id, 'Escape', { raw: true })
     await waitUntil(async () => {
-      const [current] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      const [current] = await harness.listWorkers(`test::friend-1` as ManagerKey)
       return current.task.status === 'waiting_input'
     })
-    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [settled] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(settled.task.status).toBe('waiting_input')
     expect(settled.incarnations[0].state).toBe('idle')
   })
@@ -1109,7 +1110,7 @@ describe('WorkerHarness.sendToWorker', () => {
 
     await harness.sendToWorker(worker.worker_id, '首条任务')
 
-    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [settled] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(settled.incarnations[0].session_ref).toBe(sessionRef)
   })
 
@@ -1124,11 +1125,11 @@ describe('WorkerHarness.sendToWorker', () => {
 
     await harness.sendToWorker(worker.worker_id, '首条任务')
     await waitUntil(async () => {
-      const [current] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      const [current] = await harness.listWorkers(`test::friend-1` as ManagerKey)
       return current.task.status === 'waiting_input'
     })
 
-    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [settled] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(settled.incarnations[0].session_ref).toBe(sessionRef)
     expect(settled.incarnations[0].state).toBe('idle')
   })
@@ -1141,7 +1142,7 @@ describe('WorkerHarness.sendToWorker', () => {
 
     await harness.sendToWorker(worker.worker_id, '最后一步')
 
-    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [settled] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(settled.task.status).toBe('completed')
     expect(settled.incarnations[0]).toMatchObject({ state: 'exited', ended_reason: 'completed' })
     const stateEvents = events.filter((event) => event.kind === 'state_changed')
@@ -1159,7 +1160,7 @@ describe('WorkerHarness.sendToWorker', () => {
 
     expect(fake.sendInputCalls).toHaveLength(1)
     expect(fake.sendInputCalls[0]).toMatchObject({ text: 'C-d', opts: { raw: true } })
-    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [settled] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(settled.task.status).toBe('completed')
     expect(settled.incarnations).toHaveLength(1)
     expect(settled.incarnations[0]).toMatchObject({ state: 'exited', ended_reason: 'completed' })
@@ -1194,7 +1195,7 @@ describe('WorkerHarness.sendToWorker', () => {
       ['held prompt', false],
       ['1 Enter', true],
     ])
-    const [settled] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [settled] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(settled.task.status).toBe('completed')
     expect(settled.incarnations).toHaveLength(1)
     expect(settled.incarnations[0]).toMatchObject({ state: 'exited', ended_reason: 'completed' })
@@ -1258,7 +1259,7 @@ describe('WorkerHarness.killWorker', () => {
     expect(fake.killCalls).toHaveLength(1)
     expect(fake.killCalls[0]).toEqual({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` })
 
-    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(w.task.status).toBe('cancelled')
     expect(w.incarnations[0].state).toBe('exited')
     expect(w.incarnations[0].ended_reason).toBe('killed')
@@ -1346,7 +1347,7 @@ describe('WorkerHarness.queryWorker', () => {
     expect(failedEvents[0]).toMatchObject({ seq: 1, detail: { reason: 'fork_failed', message: 'fork 侧的 claude -p 炸了' } })
 
     // 主线台账完全不受 fork 失败影响(fork 从未落账,不该有半成品化身)。
-    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(w.incarnations).toHaveLength(1)
     expect(w.task.status).toBe('running')
   })
@@ -1362,7 +1363,7 @@ describe('WorkerHarness.queryWorker', () => {
     expect(fake.forkCalls).toHaveLength(1)
     expect(fake.forkCalls[0].forkInput).toBe('侧问一下')
 
-    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(w.incarnations).toHaveLength(2)
     expect(w.incarnations[1]).toMatchObject({ seq: 2, impl: 'builtin', state: 'running' })
     expect(w.task.status).toBe('running') // fork 不影响主线状态
@@ -1400,7 +1401,7 @@ describe('WorkerHarness.queryWorker', () => {
     const result = await harness.queryWorker(worker.worker_id, '侧问一下')
     expect(result.forkSeq).toBe(2)
 
-    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     const forkEntry = w.incarnations.find((i) => i.seq === 2)!
     // 断言①:fork 化身不是硬编码的 'running'，而是 adapter 的真实状态(exited)。
     expect(forkEntry.state).toBe('exited')
@@ -1517,7 +1518,7 @@ describe('WorkerHarness.queryWorker — adapter.fork 挪出锁(P4 Task 4 review 
     const result = await queryPromise
     expect(result.forkSeq).toBe(2)
 
-    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     // 主线(seq=1)保持 killWorker 落定的记录,完全不被这次迟到的 fork 落账污染。
     expect(w.task.status).toBe('cancelled')
     const mainEntry = w.incarnations.find((i) => i.seq === 1)!
@@ -1559,7 +1560,7 @@ describe('WorkerHarness 锁纪律', () => {
     // 发生的早期写入落盘)。
     let workerId: string | undefined
     await waitUntil(async () => {
-      const list = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      const list = await harness.listWorkers(`test::friend-1` as ManagerKey)
       if (list.length > 0) {
         workerId = list[0].worker_id
         return true
@@ -1611,7 +1612,7 @@ describe('WorkerHarness — fork 不劫持主线(protocol-agent-v3 §5.3 回归)
     expect(fake.killCalls).toHaveLength(1)
     expect(fake.killCalls[0].seq).toBe(1)
 
-    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(w.task.status).toBe('cancelled') // 主线被正确终结,不是台账显示 fork 被 kill 而主线孤儿
     const mainEntry = w.incarnations.find((i) => i.seq === 1)!
     expect(mainEntry.state).toBe('exited')
@@ -1631,11 +1632,11 @@ describe('WorkerHarness — fork 不劫持主线(protocol-agent-v3 §5.3 回归)
     fake.emitStateChange({ worker_id: worker.worker_id, seq: 2, impl: 'builtin', session_ref: 'fork-ref' }, 'exited')
 
     await waitUntil(async () => {
-      const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+      const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
       return w.incarnations.find((i) => i.seq === 2)?.state === 'exited'
     })
 
-    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     // 主线(seq=1)完全不受 fork 结束的影响——修复前 lastIncarnation() 会把这次回调当成
     // "当前化身"的回调,错误地把 task.status 推进到 completed。
     expect(w.task.status).toBe('running')
@@ -1732,7 +1733,7 @@ describe('WorkerHarness.handleStateChange — 同状态重复回调', () => {
     // 的迟到状态回调被忽略"用例一致):等它 resolve,前面排队的状态回调必定已经跑完。
     await harness.sendToWorker(worker.worker_id, '还在干活')
 
-    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(w.task.status).toBe('running') // 没有被非法转换破坏,也没有抛出未捕获错误
 
     const stateEvents = events.filter((e) => e.kind === 'state_changed')
@@ -1852,7 +1853,7 @@ describe('HarnessEvent.task_status —— 事件自带落账后的 task 状态',
     expect(forkEvents.length).toBeGreaterThan(0)
     for (const e of forkEvents) expect(e.task_status).toBeUndefined()
     // 台账确实没动主线 task.status——事件不带这个字段与台账事实一致
-    const [w] = await harness.listWorkers(dialogObjectIdForPrivate('friend-1'))
+    const [w] = await harness.listWorkers(`test::friend-1` as ManagerKey)
     expect(w.task.status).toBe('running')
   })
 })

@@ -16,8 +16,7 @@ import type { PrincipalResolverDeps } from '../../src/manager/principal.js'
 import { buildManagerStack, type BootstrapDeps, type ManagerStack } from '../../src/manager/bootstrap.js'
 import { SYSTEM_TASKS_MANAGER_KEY } from '../../src/manager/registry.js'
 import { WorkerHasNoIncarnationError } from '../../src/workers/harness/harness.js'
-import { dialogObjectIdForPrivate, type DialogObjectId, type LedgerWorker } from '../../src/workers/harness/ledger-types.js'
-import type { ManagerKey } from '../../src/manager/types.js'
+import { type ManagerKey, type LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import type { HarnessEvent } from '../../src/workers/harness/worker-events.js'
 import type { LLMAdapter } from '../../src/engine/index.js'
 import { createCrabMemoryServer } from '../../src/mcp/crab-memory.js'
@@ -80,7 +79,8 @@ function makeLedgerWorker(p: {
       status: p.status ?? 'running',
       created_at: p.createdAt ?? '2026-01-01T00:00:00.000Z',
     },
-    origin: { spawned_by_session: 'wechat::sess-1' as ManagerKey, trigger_type: 'message' },
+    origin: {
+      trigger_type: 'message' },
     report_to: { channel_id: 'wechat', session_id: 'sess-1' },
     incarnations: [],
     updated_at: p.updatedAt ?? '2026-01-01T00:00:00.000Z',
@@ -467,7 +467,7 @@ describe('trigger_schedule 的 fail-loud 兜底', () => {
 
 describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
   let tmpRoot: string
-  const dialogObjectIdFor = (key: ManagerKey): DialogObjectId => dialogObjectIdForPrivate(`friend-of-${key}`)
+  const managerKeyFor = (key: ManagerKey): ManagerKey => `test::friend-of-${key}` as ManagerKey
 
   beforeEach(async () => {
     tmpRoot = await fs.mkdtemp(join(tmpdir(), 'rpc-handlers-'))
@@ -524,7 +524,7 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
 
     await waitUntil(() => spawnSpy.mock.calls.length > 0)
     const params = spawnSpy.mock.calls[0][0]
-    expect(params.origin.spawned_by_session).toBe(SYSTEM_TASKS_MANAGER_KEY)
+    expect(params.managerKey).toBe(SYSTEM_TASKS_MANAGER_KEY)
     expect(params.origin.creator_friend_id).toBe('friend-42')
     expect(params.origin.trigger_type).toBe('scheduled')
 
@@ -549,7 +549,7 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
 
     await waitUntil(() => spawnSpy.mock.calls.length > 0)
     const params = spawnSpy.mock.calls[0][0]
-    expect(params.origin.spawned_by_session).toBe('wechat::sess-1')
+    expect(params.managerKey).toBe('wechat::sess-1')
     expect(params.origin.creator_friend_id).toBe('friend-7')
     expect(params.origin.trigger_type).toBe('scheduled')
 
@@ -722,9 +722,9 @@ describe('trigger_schedule 端到端(真实 manager 栈 + mock LLM)', () => {
 describe('list_workers_admin(§8.3)', () => {
   it('取全量台账 → filterAndPageWorkers(status 过滤 + 分页回显)', async () => {
     const entries = [
-      { dialogObjectId: dialogObjectIdForPrivate('f1'), worker: makeLedgerWorker({ workerId: 'w-1', status: 'running', updatedAt: '2026-01-03T00:00:00.000Z' }) },
-      { dialogObjectId: dialogObjectIdForPrivate('f1'), worker: makeLedgerWorker({ workerId: 'w-2', status: 'completed', updatedAt: '2026-01-02T00:00:00.000Z' }) },
-      { dialogObjectId: dialogObjectIdForPrivate('f2'), worker: makeLedgerWorker({ workerId: 'w-3', status: 'running', updatedAt: '2026-01-01T00:00:00.000Z' }) },
+      { managerKey: `test::f1` as ManagerKey, worker: makeLedgerWorker({ workerId: 'w-1', status: 'running', updatedAt: '2026-01-03T00:00:00.000Z' }) },
+      { managerKey: `test::f1` as ManagerKey, worker: makeLedgerWorker({ workerId: 'w-2', status: 'completed', updatedAt: '2026-01-02T00:00:00.000Z' }) },
+      { managerKey: `test::f2` as ManagerKey, worker: makeLedgerWorker({ workerId: 'w-3', status: 'running', updatedAt: '2026-01-01T00:00:00.000Z' }) },
     ]
     const agent = buildAgent({ ledger: { listAllWorkers: async () => entries } })
 
@@ -735,7 +735,7 @@ describe('list_workers_admin(§8.3)', () => {
     const running = await agent.handleListWorkersAdmin({ status: 'running' })
     expect(running.items.map((w) => w.worker_id)).toEqual(['w-1', 'w-3'])
 
-    const scoped = await agent.handleListWorkersAdmin({ dialog_object_id: dialogObjectIdForPrivate('f2') })
+    const scoped = await agent.handleListWorkersAdmin({ manager_key: `test::f2` as ManagerKey })
     expect(scoped.items.map((w) => w.worker_id)).toEqual(['w-3'])
   })
 
@@ -748,10 +748,10 @@ describe('list_workers_admin(§8.3)', () => {
 })
 
 describe('get_worker_detail(§8.3)', () => {
-  it('存在 → 返回台账条目本身(剥掉 dialogObjectId 包装)', async () => {
+  it('存在 → 返回台账条目本身(剥掉 managerKey 包装)', async () => {
     const worker = makeLedgerWorker({ workerId: 'w-1' })
     const agent = buildAgent({
-      ledger: { findWorker: async () => ({ dialogObjectId: dialogObjectIdForPrivate('f1'), worker }) },
+      ledger: { findWorker: async () => ({ managerKey: `test::f1` as ManagerKey, worker }) },
     })
     await expect(agent.handleGetWorkerDetail({ worker_id: 'w-1' })).resolves.toEqual({ worker })
   })
@@ -797,6 +797,25 @@ describe('read_worker_output_admin(§8.3)', () => {
     expect(result).toEqual({ chunk: '', next_cursor: '7', eof: true })
   })
 
+  it('legacy unavailable_reason is preserved for Admin callers', async () => {
+    const agent = buildAgent({
+      harness: {
+        readWorkerOutput: async () => ({
+          chunk: '',
+          nextCursor: { offset: 0 },
+          unavailable_reason: 'legacy worker has no raw output',
+        }),
+      },
+    })
+
+    await expect(agent.handleReadWorkerOutputAdmin({ worker_id: 'w-legacy' })).resolves.toEqual({
+      chunk: '',
+      next_cursor: '0',
+      eof: true,
+      unavailable_reason: 'legacy worker has no raw output',
+    })
+  })
+
   it('harness 抛错(worker/化身不存在)原样冒泡,不吞成空 chunk', async () => {
     const agent = buildAgent({
       harness: {
@@ -835,7 +854,7 @@ describe('get_worker_trace(§8.3 + §10.2)', () => {
     return buildAgent({
       ledger: {
         findWorker: async () => ({
-          dialogObjectId: dialogObjectIdForPrivate('f1'),
+          managerKey: `test::f1` as ManagerKey,
           worker: { ...makeLedgerWorker({ workerId: 'w-1' }), incarnations: [incarnation(1), incarnation(2)] },
         }),
       },
@@ -850,6 +869,70 @@ describe('get_worker_trace(§8.3 + §10.2)', () => {
     expect(result.events.every((e) => e.kind === 'lifecycle')).toBe(true)
     expect(result.events[0].summary).toContain('spawned')
     expect(result.events[0].detail).toEqual({ impl: 'builtin' })
+  })
+
+  it('legacy RPC preserves started/end/id ordering through final merge and cursor slicing', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'legacy-trace-rpc-'))
+    const previousAgentDir = process.env.CRABOT_AGENT_DATA_DIR
+    try {
+      const agentDir = join(root, 'agent')
+      const traceDir = join(agentDir, 'traces')
+      await fs.mkdir(traceDir, { recursive: true })
+      process.env.CRABOT_AGENT_DATA_DIR = agentDir
+      const started = '2026-01-01T00:00:00.000Z'
+      await fs.writeFile(join(traceDir, 'traces-2026-01-01.jsonl'), [
+        JSON.stringify({ trace_id: 'end-first', related_task_id: 'old', started_at: started, ended_at: '2026-01-01T00:00:01.000Z', outcome: { summary: 'z end first' } }),
+        JSON.stringify({ trace_id: 'a', related_task_id: 'old', started_at: started, ended_at: '2026-01-01T00:00:02.000Z', outcome: { summary: 'z id a' } }),
+        JSON.stringify({ trace_id: 'b', related_task_id: 'old', started_at: started, ended_at: '2026-01-01T00:00:02.000Z', outcome: { summary: 'a id b' } }),
+      ].join('\n'))
+      const worker: LedgerWorker = {
+        ...makeLedgerWorker({ workerId: 'w-legacy' }),
+        manager_key: 'test::f1' as ManagerKey,
+        task: { ...makeLedgerWorker({ workerId: 'w-legacy' }).task, status: 'completed' },
+        incarnations: [{
+          seq: 1,
+          impl: 'legacy',
+          state: 'exited',
+          workspace: root,
+          started_at: started,
+          ended_at: '2026-01-01T00:00:03.000Z',
+          ended_reason: 'completed',
+        }],
+        legacy_source: {
+          kind: 'v2_admin_task',
+          admin_task_id: 'old',
+          trace_ids: ['b', 'end-first', 'a'],
+          imported_at: '2026-01-01T00:10:00.000Z',
+        },
+      }
+      const imported: HarnessEvent = {
+        ts: '2026-01-01T00:10:00.000Z',
+        kind: 'legacy_imported',
+        worker_id: 'w-legacy',
+        seq: 1,
+      }
+      const agent = buildAgent({
+        ledger: { findWorker: async () => ({ managerKey: 'test::f1' as ManagerKey, worker }) },
+        harness: { readWorkerEvents: async () => [imported] },
+      })
+
+      const full = await agent.handleGetWorkerTrace({ worker_id: 'w-legacy', seq: 1 })
+      expect(full.events.map((event) => event.summary)).toEqual([
+        'z end first',
+        'z id a',
+        'a id b',
+        'legacy_imported',
+      ])
+      expect(full.next_cursor).toBe('4')
+
+      const continued = await agent.handleGetWorkerTrace({ worker_id: 'w-legacy', seq: 1, cursor: '1' })
+      expect(continued.events.map((event) => event.summary)).toEqual(['z id a', 'a id b', 'legacy_imported'])
+      expect(continued.next_cursor).toBe('4')
+    } finally {
+      if (previousAgentDir === undefined) delete process.env.CRABOT_AGENT_DATA_DIR
+      else process.env.CRABOT_AGENT_DATA_DIR = previousAgentDir
+      await fs.rm(root, { recursive: true, force: true })
+    }
   })
 
   it('第二层(adapter readTrace 懒解析)本阶段未接线 → unavailable_reason 说明', async () => {
@@ -882,7 +965,7 @@ describe('get_worker_trace(§8.3 + §10.2)', () => {
     const agent = buildAgent({
       ledger: {
         findWorker: async () => ({
-          dialogObjectId: dialogObjectIdForPrivate('f1'),
+          managerKey: `test::f1` as ManagerKey,
           worker: { ...makeLedgerWorker({ workerId: 'w-system' }), incarnations: [] },
         }),
       },

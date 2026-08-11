@@ -21,9 +21,8 @@ import { BuiltinWorkerAdapter } from '../../src/workers/builtin/adapter.js'
 import { ClaudeCodeAdapter } from '../../src/workers/claude-code/adapter.js'
 import { CodexWorkerAdapter } from '../../src/workers/codex/adapter.js'
 import { CapabilityNotSupportedError } from '../../src/workers/errors.js'
-import { dialogObjectIdForPrivate, type DialogObjectId, type LedgerWorker } from '../../src/workers/harness/ledger-types.js'
+import { type ManagerKey, type LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import type { WorkerAdapter, WorkerImplId, IncarnationHandle, StateChangeReport, WorkerContractState } from '../../src/workers/types.js'
-import type { ManagerKey } from '../../src/manager/types.js'
 import type { LLMAdapter, LLMStreamParams } from '../../src/engine/index.js'
 import type { ChannelMessage } from '../../src/types.js'
 import { CLI_DOMAINS } from '../../src/types.js'
@@ -49,7 +48,6 @@ function makePrincipalResolver(): PrincipalResolverDeps {
     sessionMemoryScopes: async (sessionId) => [sessionId],
     sceneProfile: async () => null,
     crabSelfHandle: () => undefined,
-    masterFriendId: async () => undefined,
   }
 }
 
@@ -123,8 +121,9 @@ function makeLedgerWorker(p: {
 }): LedgerWorker {
   return {
     worker_id: p.workerId,
+    manager_key: p.spawnedBySession,
     task: { id: p.workerId, title: 't', status: 'running', created_at: '2026-01-01T00:00:00.000Z' },
-    origin: { spawned_by_session: p.spawnedBySession, trigger_type: 'message' },
+    origin: { trigger_type: 'message' },
     report_to: { channel_id: 'wechat', session_id: 'sess-boot' },
     incarnations: [
       {
@@ -153,7 +152,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
   let tmpRoot: string
   /** 刻意指向一个不存在的子目录:任何"顺手建目录"的 I/O 都会在盘上留下痕迹被用例抓住。 */
   let dataRoot: string
-  const dialogObjectIdFor = (key: ManagerKey): DialogObjectId => dialogObjectIdForPrivate(`friend-of-${key}`)
+  const managerKeyFor = (key: ManagerKey): ManagerKey => key
 
   beforeEach(async () => {
     tmpRoot = await fs.mkdtemp(join(tmpdir(), 'manager-bootstrap-'))
@@ -243,8 +242,8 @@ describe('manager bootstrap（P5 Task 1）', () => {
     }
 
     // step 1/2/4：走 adapter 手里那份回调引用，验证 harness 真的收到了并落账
-    const dialogObjectId = dialogObjectIdForPrivate('friend-wiring')
-    await stack.ledger.upsertWorker(dialogObjectId, 'w-builtin-1', () =>
+    const managerKey = 'wechat::sess-boot' as ManagerKey
+    await stack.ledger.upsertWorker(managerKey, 'w-builtin-1', () =>
       makeLedgerWorker({ workerId: 'w-builtin-1', impl: 'builtin', spawnedBySession: 'wechat::sess-boot' as ManagerKey }),
     )
 
@@ -266,7 +265,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
     // step 4 的另一面：harness 按需从同一个底层 Map 取 adapter——codex 是构造 harness 之后才
     // set 进去的，能命中它自己的 capabilities().fork===false 分支，就证明 Map 引用是共享的
     // （若没共享，抛的会是 "no adapter registered for impl 'codex'"）。
-    await stack.ledger.upsertWorker(dialogObjectId, 'w-codex-1', () =>
+    await stack.ledger.upsertWorker(managerKey, 'w-codex-1', () =>
       makeLedgerWorker({ workerId: 'w-codex-1', impl: 'codex', spawnedBySession: 'wechat::sess-boot' as ManagerKey }),
     )
     await expect(stack.harness.queryWorker('w-codex-1', '进展如何？')).rejects.toBeInstanceOf(CapabilityNotSupportedError)
@@ -279,7 +278,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
 
   // --- ③ onAsyncError 端到端 ---
 
-  it('onAsyncError 端到端：经 bootstrap 装配的真实工具面调用 query_worker（worker 不存在→游离 promise reject）→ registry 按 key 绑定的回调被触发 → episode 内 enqueueDuringEpisode', async () => {
+  it('known-ID authorization happens before query_worker fire-and-forget: an unknown worker returns an error and no async wake is injected', async () => {
     let triggered = false
     const managerLLM: LLMAdapter = {
       async *stream(params: LLMStreamParams) {
@@ -289,10 +288,8 @@ describe('manager bootstrap（P5 Task 1）', () => {
           const queryWorkerTool = params.tools.find((t) => t.name === 'query_worker')
           expect(queryWorkerTool).toBeDefined()
           const result = await queryWorkerTool!.call({ worker_id: 'w-not-in-ledger', question: '进展如何？' }, {} as never)
-          // fire-and-forget：调用本身不因后台失败而报错
-          expect(result.isError).toBe(false)
-          // 给游离 promise 一个宏任务窗口 reject → .catch() → onAsyncError（此刻 episode 仍在跑）
-          await new Promise((resolve) => setTimeout(resolve, 40))
+          // Authorization completes before a fire-and-forget fork can begin.
+          expect(result.isError).toBe(true)
         }
         yield* chunksFromContent([{ type: 'text', text: '收到' }], 'end_turn', { inputTokens: 10, outputTokens: 5 })
       },
@@ -307,8 +304,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
     const result = await stack.registry.routeHumanMessages('wechat', 'sess-boot', [makeChannelMessage('侧问一下 worker')])
 
     expect(result.outcome).toBe('completed')
-    expect(enqueueSpy).toHaveBeenCalledTimes(1)
-    expect(JSON.stringify(enqueueSpy.mock.calls[0][0])).toContain('query_failed')
+    expect(enqueueSpy).not.toHaveBeenCalled()
   })
 
   // --- ④ 空台账对账 ---
@@ -478,9 +474,8 @@ describe('manager bootstrap（P5 Task 1）', () => {
     // J 的硬验收：worker 以谁的名义执行，决定它的权限模板（§8.2）。
     expect(all[0].worker.origin.creator_friend_id).toBe('f-a')
     expect(all[0].worker.origin.trigger_type).toBe('message')
-    expect(all[0].worker.origin.spawned_by_session).toBe('wechat::sess-boot')
-    // 私聊台账按 friend 聚合（跨 channel 共享），不是 group 形状
-    expect(all[0].dialogObjectId).toBe('friend:f-a')
+    expect(all[0].worker.manager_key).toBe('wechat::sess-boot')
+    expect(all[0].managerKey).toBe('wechat::sess-boot')
   })
 
   it('worker 事件唤醒的 episode 里没人在说话 → 不拿缓存里上一次的发言者冒充', async () => {
@@ -493,7 +488,7 @@ describe('manager bootstrap（P5 Task 1）', () => {
     expect(await stack.ledger.listAllWorkers()).toHaveLength(0)
 
     // ② 手工种一条 worker，模拟"更早派出去的活"
-    await stack.ledger.upsertWorker(dialogObjectIdForPrivate('f-a'), 'w-seeded', () =>
+    await stack.ledger.upsertWorker(key, 'w-seeded', () =>
       makeLedgerWorker({ workerId: 'w-seeded', impl: 'builtin', spawnedBySession: key }),
     )
 
@@ -506,8 +501,8 @@ describe('manager bootstrap（P5 Task 1）', () => {
     expect(spawnedByEvent).toHaveLength(1)
     // 缓存里还留着 f-a，但这一轮不是 f-a 在说话——记成 f-a 就是把 worker 挂到错的人名下。
     expect(spawnedByEvent[0].worker.origin.creator_friend_id).toBeUndefined()
-    // 台账归档键仍按**会话身份**（f-a 的私聊）——它是会话属性，与"这轮谁在说话"无关。
-    expect(spawnedByEvent[0].dialogObjectId).toBe('friend:f-a')
+    // worker 事件继续归原会话；没有新的 human wake 时也不继承 f-a 的权限身份。
+    expect(spawnedByEvent[0].managerKey).toBe(key)
   })
 
   it('场景画像与该渠道的 @handle 真的出现在 manager 的 system prompt 里（5b + 5d）', async () => {

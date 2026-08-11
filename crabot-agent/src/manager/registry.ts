@@ -49,17 +49,17 @@
  * @see crabot-docs/protocols/protocol-agent-v3.md §4.4
  */
 
-import { ManagerLoop, type WakeEvent, type EpisodeResult, type ManagerLoopDeps } from './loop.js'
+import { ManagerLoop, type WakeEvent, type TimedWakeEnvelope, type EpisodeResult, type ManagerLoopDeps } from './loop.js'
 import type { ManagerSessionStore } from './session-store.js'
 import type { CompactionPolicy } from './compaction.js'
 import type { ManagerKey } from './types.js'
 import type { EngineMessage, LLMAdapter, ToolDefinition } from '../engine/index.js'
 import type { WorkerHarness } from '../workers/harness/harness'
 import type { LedgerStore } from '../workers/harness/ledger-store'
-import type { DialogObjectId } from '../workers/harness/ledger-types'
 import type { HarnessEvent, HarnessEventKind } from '../workers/harness/worker-events'
 import type { ChannelMessage, Friend, ResolvedPermissions } from '../types'
 import type { HumanPrincipal } from './principal.js'
+import { resolveTimezone } from '../utils/time.js'
 
 /** §4.4 保留线程:未配置目标 session 的 scheduled 触发 / 台账查不到监护 session 的 worker 事件落此。 */
 export const SYSTEM_TASKS_MANAGER_KEY = 'admin-web::system-tasks' as ManagerKey
@@ -124,18 +124,18 @@ export interface ManagerRegistryDeps {
   /** 人类消息渲染的时区(见 `ManagerLoopDeps.timezone`);不注入则退回 `resolveTimezone(undefined)`。 */
   readonly timezone?: () => string
   /**
-   * `ManagerKey` → 台账渲染用的 `DialogObjectId`(`ManagerLoopDeps.dialogObjectId`)。
+   * `ManagerKey` → 台账渲染用的 `ManagerKey`(`ManagerLoopDeps.managerKey`)。
    * 两者粒度不同(manager 按 channel::session,worker 台账按 friend 跨 channel 聚合/单群),
    * 这层映射依赖 friend 解析等本模块无法自行完成的信息,由调用方按 protocol §3 解析好注入。
    *
    * **每次读都要现算**:私聊的归档键要等第一条人类消息带来 friend 之后才能收敛成
    * `friend:<id>`(见 `onHumanWake`),调用方持有的映射会随之变化。
    */
-  readonly dialogObjectIdFor: (key: ManagerKey) => DialogObjectId
+  readonly managerKeyFor: (key: ManagerKey) => ManagerKey
   /**
    * **人类消息唤醒边界**的异步解析钩子:`routeHumanMessages` 在 `runWake` 之前 await 它一次,
    * 调用方据 `principal`(发起人 friend + 私/群)解析权限、记忆档位、对话对象档案并缓存,
-   * 供下面那三个**同步** thunk(`dialogObjectIdFor` / `toolFace` / `promptInputs`)读取。
+   * 供下面那三个**同步** thunk(`managerKeyFor` / `toolFace` / `promptInputs`)读取。
    *
    * 这是"加参数而不是全面异步化"的落点:异步只发生在唤醒边界这一处,每轮 turn 被同步调用的
    * 签名一个都不用改。不注入则行为与之前逐字相同(manager 拿不到发起人身份)。
@@ -148,6 +148,8 @@ export interface ManagerRegistryDeps {
     key: ManagerKey,
     principal: HumanPrincipal,
   ) => Promise<ResolvedPermissions | null | void>
+  /** Refreshes durable Friend authorization before a non-human/self wake exposes tools. */
+  readonly beforeWake?: (key: ManagerKey, envelope: TimedWakeEnvelope | undefined) => Promise<void>
   /**
    * **scheduled 唤醒边界**的异步解析钩子(PR #59 review):`routeSchedule` 在 `runWake` 之前
    * await 它一次,按 §4.4"权限按 `Schedule.creator_friend_id` 解析(`is_builtin` 按 master
@@ -188,8 +190,8 @@ export interface ManagerRegistryDeps {
     humanPrincipal?: HumanPrincipal,
     principalPermissions?: ResolvedPermissions
   ) => ReadonlyArray<ToolDefinition>
-  /** system prompt 动态段素材(档案/待处理通知),每轮重算,由调用方决定要不要按最新状态重建。 */
-  readonly promptInputs: (key: ManagerKey) => { readonly dialogProfile?: string; readonly pendingNotes?: ReadonlyArray<string> }
+  /** Stable system prompt profile material. */
+  readonly promptInputs: (key: ManagerKey) => { readonly dialogProfile?: string }
 }
 
 export class ManagerRegistry {
@@ -223,10 +225,9 @@ export class ManagerRegistry {
     const loopDeps: ManagerLoopDeps = {
       key,
       isSystemThread,
-      // thunk 而非定值:私聊的台账归档键要等第一条人类消息带来 friend 才收敛成
-      // `friend:<id>`,而 loop 实例可能先被 worker 事件建出来。定值会把那一刻的
-      // group 形状永久钉死在实例上,同一个人的台账因此裂成两份。
-      dialogObjectId: () => this.deps.dialogObjectIdFor(key),
+      // ManagerKey 是 worker 的固定台账归属。使用 thunk 只为保持 ManagerLoop 的
+      // 同步依赖注入形状，不从当前 principal 派生或改写会话归属。
+      managerKey: () => this.deps.managerKeyFor(key),
       store: this.deps.store,
       policy: this.deps.policy,
       estimateTokens: this.deps.estimateTokens,
@@ -274,7 +275,8 @@ export class ManagerRegistry {
     messages: ReadonlyArray<ChannelMessage>,
     friend?: Friend
   ): Promise<EpisodeResult> {
-    return this.routeHumanWake('human_messages', channelId, sessionId, messages, friend)
+    const capture = this.captureIngress()
+    return this.routeHumanWake(capture, 'human_messages', channelId, sessionId, messages, friend)
   }
 
   /**
@@ -295,11 +297,13 @@ export class ManagerRegistry {
     messages: ReadonlyArray<ChannelMessage>,
     friend?: Friend
   ): Promise<EpisodeResult> {
-    return this.routeHumanWake('attention_flush', channelId, sessionId, messages, friend)
+    const capture = this.captureIngress()
+    return this.routeHumanWake(capture, 'attention_flush', channelId, sessionId, messages, friend)
   }
 
   /** 两个人类消息入口的公共路径:解析发起人身份(唤醒边界的唯一一次异步)→ 按 kind 造事件唤醒。 */
   private async routeHumanWake(
+    capture: IngressCapture,
     kind: 'human_messages' | 'attention_flush',
     channelId: string,
     sessionId: string,
@@ -311,8 +315,11 @@ export class ManagerRegistry {
     // 与 `handleMessageReceived` 的默认分流一致。
     const sessionType = messages[0]?.session.type === 'group' ? 'group' : 'private'
     const principal: HumanPrincipal = { ...(friend ? { friend } : {}), sessionType }
-
-    // 唤醒边界的唯一一次异步解析。失败不阻断投递——人类消息比档位重要,档位缺失
+    const initialWake: WakeEvent = kind === 'human_messages'
+      ? { kind: 'human_messages', messages, ...(friend ? { friend } : {}) }
+      : { kind: 'attention_flush', messages, ...(friend ? { friend } : {}) }
+    // Capture before principal lookup so queueing cannot rewrite ingress time.
+    const envelope = this.makeEnvelope(capture, initialWake, undefined, messages)
     // 只会退回 fail-soft 兜底,而消息丢了就是丢了。
     let principalPermissions: ResolvedPermissions | undefined
     if (this.deps.onHumanWake) {
@@ -330,29 +337,33 @@ export class ManagerRegistry {
       kind === 'human_messages'
         ? { kind: 'human_messages', messages, ...withFriend, ...withPerms }
         : { kind: 'attention_flush', messages, ...withFriend, ...withPerms }
-    return this.runWake(key, event)
+    return this.runWake(key, { ...envelope, wake: event })
   }
 
   /**
-   * harness 事件 → 该 worker 的监护 manager(台账 `origin.spawned_by_session`);查不到则落
-   * 系统线程。注意:这里解出的 manager 与该 worker 台账所属的 `DialogObjectId` 可以是两个
+   * harness 事件 → 该 worker 的监护 manager(台账 `origin.manager_key`);查不到则落
+   * 系统线程。注意:这里解出的 manager 与该 worker 台账所属的 `ManagerKey` 可以是两个
    * 不同的对话对象(同一 friend 跨 channel 共享台账)——这是设计意图,不是需要修正的不一致。
    */
   async routeWorkerEvent(event: HarnessEvent): Promise<EpisodeResult | undefined> {
+    const capture = this.captureIngress()
+    const envelope = this.makeEnvelope(capture, { kind: 'worker_event', event }, event.ts)
     const found = await this.deps.ledger.findWorker(event.worker_id)
-    const key = found?.worker.origin.spawned_by_session ?? SYSTEM_TASKS_MANAGER_KEY
-    return this.runWake(key, { kind: 'worker_event', event })
+    const key = found?.worker.manager_key ?? SYSTEM_TASKS_MANAGER_KEY
+    return this.runWake(key, envelope)
   }
 
   async routeMediaNotification(p: {
     channelId: string
     sessionId: string
     text: string
+    occurredAt?: string
   }): Promise<EpisodeResult> {
+    const capture = this.captureIngress()
+    const envelope = this.makeEnvelope(capture, { kind: 'media_notification', text: p.text }, p.occurredAt)
     const key = `${p.channelId}::${p.sessionId}` as ManagerKey
-    const event: WakeEvent = { kind: 'media_notification', text: p.text }
     if (this.isEpisodeActive(key)) {
-      this.getOrCreate(key).enqueueDuringEpisode(event)
+      this.getOrCreate(key).enqueueDuringEpisode(envelope)
       return {
         episodeId: '',
         outcome: 'completed',
@@ -361,7 +372,7 @@ export class ManagerRegistry {
         repliedToHuman: false,
       }
     }
-    return this.runWake(key, event)
+    return this.runWake(key, envelope)
   }
 
   /**
@@ -379,9 +390,18 @@ export class ManagerRegistry {
     creatorFriendId?: string
     isBuiltin?: boolean
   }): Promise<EpisodeResult> {
+    const capture = this.captureIngress()
     const key = p.targetSession
       ? (`${p.targetSession.channel_id}::${p.targetSession.session_id}` as ManagerKey)
       : SYSTEM_TASKS_MANAGER_KEY
+    const envelope = this.makeEnvelope(capture, {
+      kind: 'schedule',
+      scheduleId: p.scheduleId,
+      title: p.title,
+      description: p.description,
+      creatorFriendId: p.creatorFriendId,
+      isBuiltin: p.isBuiltin,
+    })
 
     // 调度自己的权限身份在唤醒边界解析一次(§4.4),随事件走。**绝不能退回该 key 的会话级
     // 缓存**:打进人类会话的调度会因此拿到"那个会话最近谁在说话"的档位(PR #59 review)。
@@ -401,13 +421,11 @@ export class ManagerRegistry {
     }
 
     return this.runWake(key, {
-      kind: 'schedule',
-      scheduleId: p.scheduleId,
-      title: p.title,
-      description: p.description,
-      creatorFriendId: p.creatorFriendId,
-      isBuiltin: p.isBuiltin,
-      ...(principalPermissions ? { principalPermissions } : {}),
+      ...envelope,
+      wake: {
+        ...envelope.wake,
+        ...(principalPermissions ? { principalPermissions } : {}),
+      },
     })
   }
 
@@ -444,14 +462,46 @@ export class ManagerRegistry {
 
   /** query_worker 异步失败 → 唤醒信号(见文件头"onAsyncError 出口"一节)。 */
   private handleAsyncToolError(key: ManagerKey, info: AsyncToolErrorInfo): void {
-    const event = buildAsyncErrorWakeEvent(info, this.deps.now())
+    const capture = this.captureIngress()
+    const envelope = this.makeEnvelope(
+      capture,
+      buildAsyncErrorWakeEvent(info, capture.now),
+      capture.now.toISOString(),
+    )
     if (this.isEpisodeActive(key)) {
-      this.getOrCreate(key).enqueueDuringEpisode(event)
+      this.getOrCreate(key).enqueueDuringEpisode(envelope)
       return
     }
-    void this.runWake(key, event).catch((err) => {
+    void this.runWake(key, envelope).catch((err) => {
       console.error(`[ManagerRegistry] onAsyncError 唤醒 manager '${key}' 失败:`, err)
     })
+  }
+
+  private captureIngress(): IngressCapture {
+    const now = this.deps.now()
+    const timezone = this.deps.timezone?.() ?? resolveTimezone(undefined)
+    return { now, timezone, received_at: formatOffsetIso(now, timezone) }
+  }
+
+  private makeEnvelope(
+    capture: IngressCapture,
+    wake: WakeEvent,
+    occurredAt?: string,
+    humanMessages?: ReadonlyArray<ChannelMessage>,
+  ): TimedWakeEnvelope {
+    const occurred_at = parseOccurredAt(occurredAt, 'source')
+    const human_occurred_at = humanMessages?.map((message) => ({
+      ...(message.platform_message_id ? { message_id: message.platform_message_id } : {}),
+      ...toHumanOccurredAt(message.platform_timestamp),
+    }))
+
+    return {
+      wake,
+      received_at: capture.received_at,
+      timezone: capture.timezone,
+      ...(occurred_at ? { occurred_at } : {}),
+      ...(human_occurred_at ? { human_occurred_at } : {}),
+    }
   }
 
   /** 该 key 是否还有至少一个在途 episode(引用计数 > 0)。 */
@@ -464,12 +514,13 @@ export class ManagerRegistry {
    * 自唤醒都走这里。`event === undefined` ⇒ 自唤醒(只处理 mailbox 残留,见
    * `ManagerLoop.drainMailbox`);`selfWakeChain` 是当前连锁自唤醒的深度,真实唤醒恒为 0。
    */
-  private async runWake(key: ManagerKey, event: WakeEvent | undefined, selfWakeChain = 0): Promise<EpisodeResult> {
+  private async runWake(key: ManagerKey, envelope: TimedWakeEnvelope | undefined, selfWakeChain = 0): Promise<EpisodeResult> {
+    if (this.deps.beforeWake) await this.deps.beforeWake(key, envelope)
     const loop = this.getOrCreate(key)
     this.activeEpisodes.set(key, (this.activeEpisodes.get(key) ?? 0) + 1)
     let result: EpisodeResult | undefined
     try {
-      result = await (event === undefined ? loop.drainMailbox() : loop.wakeUp(event))
+      result = await (envelope === undefined ? loop.drainMailbox() : loop.wakeUp(envelope))
       return result
     } finally {
       const remaining = (this.activeEpisodes.get(key) ?? 1) - 1
@@ -570,4 +621,52 @@ function buildAsyncErrorWakeEvent(info: AsyncToolErrorInfo, now: Date): WakeEven
     detail: { tool: info.tool, error: info.error, synthetic: true },
   }
   return { kind: 'worker_event', event }
+}
+
+interface IngressCapture {
+  readonly now: Date
+  readonly timezone: string
+  readonly received_at: string
+}
+
+function parseOccurredAt(value: unknown, source: string): string | undefined {
+  if (value === undefined || validIso(value)) return value
+  console.warn(`[ManagerRegistry] invalid ${source} occurred_at omitted`)
+  return undefined
+}
+
+function toHumanOccurredAt(platformTimestamp: unknown): { readonly occurred_at?: string } {
+  const occurred_at = parseOccurredAt(platformTimestamp, 'human platform_timestamp')
+  return occurred_at ? { occurred_at } : {}
+}
+
+function validIso(value: unknown): value is string {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value))
+}
+
+/** ISO 8601 with seconds and numeric offset, fixed exactly at registry ingress. */
+function formatOffsetIso(date: Date, timezone: string): string {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+    timeZoneName: 'longOffset',
+  })
+  const parts = formatter.formatToParts(date)
+  const part = (type: string): string | undefined =>
+    parts.find((item) => item.type === type)?.value
+  const offset = part('timeZoneName')?.replace('GMT', '') || '+00:00'
+  const normalizedOffset = offset === '+00:00' || offset === '-00:00'
+    ? '+00:00'
+    : offset
+
+  return [
+    `${part('year')}-${part('month')}-${part('day')}`,
+    `${part('hour')}:${part('minute')}:${part('second')}${normalizedOffset}`,
+  ].join('T')
 }

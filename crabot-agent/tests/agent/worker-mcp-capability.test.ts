@@ -3,7 +3,6 @@ import { describe, it, expect } from 'vitest'
 import { filterMcpServersForWorker, mcpCategoryFor } from '../../src/agent/mcp-connector.js'
 import { UnifiedAgent } from '../../src/unified-agent.js'
 import type { AgentLayerConfig, MCPServerConfig, ResolvedPermissions } from '../../src/types.js'
-import { dialogObjectIdForPrivate } from '../../src/workers/harness/ledger-types.js'
 import type { ManagerStack } from '../../src/manager/bootstrap.js'
 import type {
   AdapterCapabilities,
@@ -122,14 +121,14 @@ describe('UnifiedAgent worker capability production wiring', () => {
       const common = {
         title: 'MCP production wiring',
         prompt: 'work',
-        origin: { spawned_by_session: 'wechat::mcp-test', trigger_type: 'message' as const },
+        origin: { spawned_by_episode: 'wechat::mcp-test', trigger_type: 'message' as const },
         report_to: { channel_id: 'wechat', session_id: 'mcp-test' },
       }
 
       const lowPrincipal = permissions({ mcp_skill: false, desktop: true })
       await internals.managerStack.harness.spawnWorker({
         ...common,
-        dialogObjectId: dialogObjectIdForPrivate('mcp-low'),
+        managerKey: (`test::${'mcp-low'}` as ManagerKey),
         impl: 'claude-code',
         principal_permissions: lowPrincipal,
       })
@@ -138,7 +137,7 @@ describe('UnifiedAgent worker capability production wiring', () => {
       const allowedPrincipal = permissions({ mcp_skill: true, desktop: true })
       const builtinWorker = await internals.managerStack.harness.spawnWorker({
         ...common,
-        dialogObjectId: dialogObjectIdForPrivate('mcp-allowed'),
+        managerKey: (`test::${'mcp-allowed'}` as ManagerKey),
         impl: 'builtin',
         principal_permissions: allowedPrincipal,
       })

@@ -2,12 +2,12 @@
  * task 读模型纯逻辑(P5 Task 3)—— `src/manager/read-model.ts`。
  *
  * 钉住的语义不变量:
- * ① 过滤:status 单值/数组、dialog_object_id、time_range 三者可组合,且 total_items
+ * ① 过滤:status 单值/数组、manager_key、time_range 三者可组合,且 total_items
  *    统计的是**过滤后**的总数;
  * ② time_range 边界 = base-protocol §5.7:`start` 闭(含)、`end` 开(不含);
  * ③ 排序:`updated_at desc`,同 updated_at 时按 `worker_id` 升序兜底 —— 与输入顺序无关;
  * ④ 分页越界返回空 items 而不报错;page/page_size 非法值归一,page_size 上限 100;
- * ⑤ 纯函数:不修改入参数组、items 是 `LedgerWorker`(不泄漏 dialogObjectId);
+ * ⑤ 纯函数:不修改入参数组、items 是 `LedgerWorker`(不泄漏 managerKey);
  * ⑥ `buildWorkerDetail` 逐字段透传台账条目(含化身链),返回体只有 `worker`(§8.3)。
  */
 import { describe, it, expect } from 'vitest'
@@ -18,19 +18,18 @@ import {
   type LedgerWorkerEntry,
 } from '../../src/manager/read-model.js'
 import {
-  dialogObjectIdForPrivate,
-  dialogObjectIdForGroup,
-  type DialogObjectId,
+  type ManagerKey,
   type LedgerWorker,
   type TaskStatus,
 } from '../../src/workers/harness/ledger-types.js'
 
-const ALICE = dialogObjectIdForPrivate('alice')
-const BOB = dialogObjectIdForPrivate('bob')
-const GROUP = dialogObjectIdForGroup('telegram', 'g-1')
+const ALICE = `test::alice` as ManagerKey
+const BOB = `test::bob` as ManagerKey
+const GROUP = `telegram::g-1` as ManagerKey
 
 function mkWorker(
   workerId: string,
+  managerKey: ManagerKey,
   opts: {
     status?: TaskStatus
     createdAt?: string
@@ -39,6 +38,7 @@ function mkWorker(
 ): LedgerWorker {
   return {
     worker_id: workerId,
+    manager_key: managerKey,
     task: {
       id: `task-${workerId}`,
       title: `title-${workerId}`,
@@ -46,7 +46,6 @@ function mkWorker(
       created_at: opts.createdAt ?? '2026-07-01T00:00:00.000Z',
     },
     origin: {
-      spawned_by_session: 'telegram::s-1',
       trigger_type: 'message',
     },
     report_to: { channel_id: 'telegram', session_id: 's-1' },
@@ -56,11 +55,11 @@ function mkWorker(
 }
 
 function entry(
-  dialogObjectId: DialogObjectId,
+  managerKey: ManagerKey,
   workerId: string,
-  opts?: Parameters<typeof mkWorker>[1]
+  opts?: Parameters<typeof mkWorker>[2]
 ): LedgerWorkerEntry {
-  return { dialogObjectId, worker: mkWorker(workerId, opts) }
+  return { managerKey, worker: mkWorker(workerId, managerKey, opts) }
 }
 
 describe('filterAndPageWorkers', () => {
@@ -75,12 +74,13 @@ describe('filterAndPageWorkers', () => {
     })
   })
 
-  it('items 是 LedgerWorker 本身,不泄漏 dialogObjectId 包装', () => {
+  it('items 是 LedgerWorker 本身,不泄漏 managerKey 包装', () => {
     const e = entry(ALICE, 'w-1')
     const result = filterAndPageWorkers([e], {})
     expect(result.items).toEqual([e.worker])
-    expect(result.items[0]).not.toHaveProperty('dialogObjectId')
+    expect(result.items[0]).not.toHaveProperty('managerKey')
     expect(result.items[0]).not.toHaveProperty('worker')
+    expect(result.items[0]?.manager_key).toBe(ALICE)
   })
 
   it('不修改入参数组(纯函数)', () => {
@@ -124,7 +124,7 @@ describe('filterAndPageWorkers', () => {
     })
   })
 
-  describe('dialog_object_id 过滤', () => {
+  describe('manager_key 过滤', () => {
     const all = [
       entry(ALICE, 'w-a1'),
       entry(ALICE, 'w-a2'),
@@ -133,18 +133,18 @@ describe('filterAndPageWorkers', () => {
     ]
 
     it('私聊对话对象', () => {
-      const result = filterAndPageWorkers(all, { dialog_object_id: ALICE })
+      const result = filterAndPageWorkers(all, { manager_key: ALICE })
       expect(result.items.map((w) => w.worker_id).sort()).toEqual(['w-a1', 'w-a2'])
     })
 
     it('群聊对话对象', () => {
-      const result = filterAndPageWorkers(all, { dialog_object_id: GROUP })
+      const result = filterAndPageWorkers(all, { manager_key: GROUP })
       expect(result.items.map((w) => w.worker_id)).toEqual(['w-g1'])
     })
 
     it('无匹配返回空而不报错', () => {
       const result = filterAndPageWorkers(all, {
-        dialog_object_id: dialogObjectIdForPrivate('nobody'),
+        manager_key: `test::nobody` as ManagerKey,
       })
       expect(result.items).toEqual([])
       expect(result.pagination.total_items).toBe(0)
@@ -359,7 +359,7 @@ describe('filterAndPageWorkers', () => {
     ]
     const result = filterAndPageWorkers(all, {
       status: ['failed', 'cancelled'],
-      dialog_object_id: ALICE,
+      manager_key: ALICE,
       time_range: { start: '2026-07-01T00:00:00.000Z', end: '2026-07-04T00:00:00.000Z' },
     })
     expect(result.items.map((w) => w.worker_id)).toEqual(['w-hit'])
@@ -367,17 +367,19 @@ describe('filterAndPageWorkers', () => {
 })
 
 describe('buildWorkerDetail', () => {
-  it('返回体只有 worker 一个字段(§8.3),不带 dialog_object_id', () => {
+  it('返回体只有 worker 一个字段(§8.3)，worker 内保留 owner manager_key', () => {
     const found = entry(ALICE, 'w-1')
     const detail = buildWorkerDetail(found)
     expect(Object.keys(detail)).toEqual(['worker'])
-    expect(detail).not.toHaveProperty('dialog_object_id')
-    expect(detail).not.toHaveProperty('dialogObjectId')
+    expect(detail).not.toHaveProperty('manager_key')
+    expect(detail).not.toHaveProperty('managerKey')
+    expect(detail.worker.manager_key).toBe(ALICE)
   })
 
   it('台账条目逐字段透传(含全部可选字段与化身链)', () => {
     const worker: LedgerWorker = {
       worker_id: 'w-full',
+      manager_key: ALICE,
       task: {
         id: 'task-1',
         title: '标题',
@@ -390,7 +392,6 @@ describe('buildWorkerDetail', () => {
         error: 'boom',
       },
       origin: {
-        spawned_by_session: 'telegram::s-1',
         spawned_by_episode: 'trace-1',
         creator_friend_id: 'friend-1',
         trigger_type: 'scheduled',
@@ -421,7 +422,7 @@ describe('buildWorkerDetail', () => {
       updated_at: '2026-07-02T00:00:00.000Z',
     }
 
-    const detail = buildWorkerDetail({ dialogObjectId: ALICE, worker })
+    const detail = buildWorkerDetail({ managerKey: ALICE, worker })
     expect(detail.worker).toEqual(worker)
     expect(detail.worker.incarnations).toHaveLength(2)
     expect(detail.worker.incarnations[1].forked_from).toBe(1)

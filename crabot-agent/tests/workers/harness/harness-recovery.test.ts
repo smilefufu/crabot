@@ -11,9 +11,7 @@ import {
 import { LedgerStore } from '../../../src/workers/harness/ledger-store'
 import { WorkspaceManager } from '../../../src/workers/harness/workspace-manager'
 import {
-  dialogObjectIdForPrivate,
-  dialogObjectIdForGroup,
-  type DialogObjectId,
+  type ManagerKey,
   type LedgerWorker,
 } from '../../../src/workers/harness/ledger-types'
 import type { HarnessEvent } from '../../../src/workers/harness/worker-events'
@@ -141,7 +139,8 @@ function makeWorker(workerId: string, overrides: Partial<LedgerWorker> = {}): Le
       status: 'running',
       created_at: ts,
     },
-    origin: { spawned_by_session: 'wechat::sess-1', trigger_type: 'message' },
+    origin: {
+      trigger_type: 'message' },
     report_to: { channel_id: 'wechat', session_id: 'sess-1' },
     incarnations: [
       { seq: 1, impl: 'builtin', state: 'running', workspace: '/tmp/ws', session_ref: `ref-${workerId}#1`, started_at: ts },
@@ -151,8 +150,8 @@ function makeWorker(workerId: string, overrides: Partial<LedgerWorker> = {}): Le
   }
 }
 
-async function seed(ledger: LedgerStore, dialogObjectId: DialogObjectId, worker: LedgerWorker): Promise<void> {
-  await ledger.upsertWorker(dialogObjectId, worker.worker_id, () => worker)
+async function seed(ledger: LedgerStore, managerKey: ManagerKey, worker: LedgerWorker): Promise<void> {
+  await ledger.upsertWorker(managerKey, worker.worker_id, () => ({ ...worker, manager_key: managerKey }))
 }
 
 async function getWorker(ledger: LedgerStore, workerId: string): Promise<LedgerWorker> {
@@ -161,7 +160,7 @@ async function getWorker(ledger: LedgerStore, workerId: string): Promise<LedgerW
   return found.worker
 }
 
-const DIALOG = dialogObjectIdForPrivate('friend-1')
+const DIALOG = `test::friend-1` as ManagerKey
 
 beforeEach(async () => {
   dataDir = await fs.mkdtemp(join(tmpdir(), 'harness-recovery-test-'))
@@ -228,7 +227,8 @@ describe('WorkerHarness.reconcileOnStartup — 三态判定', () => {
         status: 'running',
         created_at: now(),
       },
-      origin: { spawned_by_session: 'admin-web::system-tasks', trigger_type: 'system' },
+      origin: {
+      trigger_type: 'system' },
       incarnations: [],
     })
     await seed(ledger, DIALOG, worker)
@@ -327,7 +327,8 @@ describe('WorkerHarness empty-incarnation domain errors', () => {
         status: 'running',
         created_at: now(),
       },
-      origin: { spawned_by_session: 'admin-web::system-tasks', trigger_type: 'system' },
+      origin: {
+      trigger_type: 'system' },
       incarnations: [],
     })
     await seed(ledger, DIALOG, worker)
@@ -385,7 +386,7 @@ describe('WorkerHarness.reconcileOnStartup — 报告分类 + 跨对话对象', 
     const fake = new FakeAdapter('builtin')
     adaptersMap.set('builtin', fake)
 
-    const group = dialogObjectIdForGroup('wechat', 'group-1')
+    const group = `wechat::group-1` as ManagerKey
     await seed(ledger, DIALOG, makeWorker('priv-alive'))
     await seed(ledger, DIALOG, makeWorker('priv-dead'))
     await seed(

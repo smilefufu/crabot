@@ -4,8 +4,8 @@
  * in-flight 诊断日志。参照 src/workers/harness/ledger-store.ts 的写法:tmp+rename 保
  * 落盘原子性,一把互斥锁保读-改-写/并发写安全。
  *
- * 目录名编码复用 ledger-store 的 encodeSegment/decodeSegment(通用段编码,不与
- * DialogObjectId 的文件名格式绑定),处理 ManagerKey 里的 `::` 与其它非法字符。
+ * 目录名编码复用 ledger-store 的 encodeSegment/decodeSegment（通用段编码），处理
+ * ManagerKey 里的 `::` 与其它非法字符。
  */
 
 import { promises as fs } from 'fs'

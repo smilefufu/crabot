@@ -712,6 +712,7 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('delete_session_config', this.handleDeleteSessionConfig.bind(this))
 
     // Chat 管理
+    this.registerMethod('consume_admin_chat_assertion', this.handleConsumeAdminChatAssertion.bind(this))
     this.registerMethod('chat_callback', this.handleChatCallback.bind(this))
     this.registerMethod('get_chat_history', this.handleGetChatHistory.bind(this))
     // admin-web 伪 channel：worker send_message 出站收口（spec 2026-06-10-master-chat-redesign §4）
@@ -9110,6 +9111,14 @@ export class AdminModule extends ModuleBase {
   // Chat RPC 方法
   // ============================================================================
 
+  private async handleConsumeAdminChatAssertion(params: {
+    assertion: string
+    expected: { manager_key: 'admin-web::admin-chat'; request_id: string; payload_sha256: string }
+  }): Promise<{ consumed: true; expires_at: string }> {
+    if (!this.chatManager) throw new Error('chat not ready')
+    return this.chatManager.consumeAdminChatAssertion(params)
+  }
+
   private async handleChatCallback(params: ChatCallbackParams): Promise<ChatCallbackResult> {
     if (!this.chatManager) {
       throw new Error('Chat manager not initialized')
@@ -9286,7 +9295,12 @@ export class AdminModule extends ModuleBase {
         }
         files.push({ buffer, filename: value.name, mime_type: value.type || 'application/octet-stream' })
       }
-      const result = await this.chatManager.handleInboundMessage({ request_id: requestId, text, files })
+      const authorization = req.headers.authorization ?? ''
+      const jwt = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : ''
+      const result = await this.chatManager.handleInboundMessage(
+        { request_id: requestId, text, files },
+        jwt,
+      )
       sendJson(res, 200, result)
     } catch (err) {
       sendJson(res, 400, { error: err instanceof Error ? err.message : 'invalid multipart request' })
@@ -9583,7 +9597,7 @@ export class AdminModule extends ModuleBase {
     // §8.3 的 status 是 `TaskStatus | TaskStatus[]`：重复出现 `?status=a&status=b` 即数组，
     // 单个即单值（沿用 parseAccessibleScopes 的 getAll 惯例，不另发明逗号分隔语法）。
     const statuses = url.searchParams.getAll('status').filter(Boolean)
-    const dialogObjectId = url.searchParams.get('dialog_object_id') || undefined
+    const managerKey = url.searchParams.get('manager_key') || undefined
     // base-protocol §5.7 的 TimeRange 两端各自可选（start 闭、end 开），故任一存在即下发；
     // 这点与 search_traces 端点"start+end 必须同时给"的旧写法不同——那是它自己的历史约定。
     const start = url.searchParams.get('start') || undefined
@@ -9592,7 +9606,7 @@ export class AdminModule extends ModuleBase {
     await this.proxyAgentRpc<
       {
         status?: string | string[]
-        dialog_object_id?: string
+        manager_key?: string
         time_range?: { start?: string; end?: string }
         pagination?: { page: number; page_size: number }
       },
@@ -9600,7 +9614,7 @@ export class AdminModule extends ModuleBase {
     >(res, 'list_workers_admin', {
       ...(statuses.length === 1 ? { status: statuses[0] } : {}),
       ...(statuses.length > 1 ? { status: statuses } : {}),
-      ...(dialogObjectId ? { dialog_object_id: dialogObjectId } : {}),
+      ...(managerKey ? { manager_key: managerKey } : {}),
       ...(start || end ? { time_range: { ...(start ? { start } : {}), ...(end ? { end } : {}) } } : {}),
       pagination: {
         page: parseIntParam(url.searchParams.get('page'), 1),

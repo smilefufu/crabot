@@ -20,8 +20,7 @@ import {
 } from '../../src/manager/events.js'
 import { buildManagerStack, type BootstrapDeps } from '../../src/manager/bootstrap.js'
 import {
-  dialogObjectIdForPrivate,
-  type DialogObjectId,
+  type ManagerKey,
   type LedgerWorker,
   type TaskStatus,
 } from '../../src/workers/harness/ledger-types.js'
@@ -38,7 +37,7 @@ import { chunksFromContent } from '../engine/helpers/mock-stream.js'
 // helpers
 // ============================================================================
 
-const DIALOG_OBJECT_ID = dialogObjectIdForPrivate('friend-evt')
+const DIALOG_OBJECT_ID = `test::friend-evt` as ManagerKey
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 function makeLedgerWorker(p: {
@@ -50,7 +49,8 @@ function makeLedgerWorker(p: {
   return {
     worker_id: p.workerId,
     task: { id: p.taskId ?? `task-of-${p.workerId}`, title: 't', status: p.status, created_at: '2026-01-01T00:00:00.000Z' },
-    origin: { spawned_by_session: 'wechat::sess-evt' as ManagerKey, trigger_type: 'message' },
+    origin: {
+      trigger_type: 'message' },
     report_to: { channel_id: 'wechat', session_id: 'sess-evt' },
     incarnations: [
       {
@@ -79,7 +79,7 @@ function makeLedgerStub(
       if (!step) return undefined
       if (step.delayMs) await new Promise((resolve) => setTimeout(resolve, step.delayMs))
       return {
-        dialogObjectId: DIALOG_OBJECT_ID,
+        managerKey: DIALOG_OBJECT_ID,
         worker: makeLedgerWorker({ workerId: opts.workerId ?? workerId, status: step.status, taskId: opts.taskId }),
       }
     },
@@ -185,7 +185,7 @@ describe('agent 对外事件（P5 Task 2）', () => {
         task_id: 'task-1',
         old_status: 'running',
         new_status: 'completed',
-        dialog_object_id: DIALOG_OBJECT_ID,
+        manager_key: DIALOG_OBJECT_ID,
       }
       publish('agent.task_status_changed', payload)
 
@@ -219,7 +219,7 @@ describe('agent 对外事件（P5 Task 2）', () => {
           task_id: 'task-1',
           old_status: 'running',
           new_status: 'failed',
-          dialog_object_id: DIALOG_OBJECT_ID,
+          manager_key: DIALOG_OBJECT_ID,
         }),
       ).not.toThrow()
 
@@ -246,7 +246,7 @@ describe('agent 对外事件（P5 Task 2）', () => {
           task_id: 'task-1',
           old_status: 'queued',
           new_status: 'running',
-          dialog_object_id: DIALOG_OBJECT_ID,
+          manager_key: DIALOG_OBJECT_ID,
         }),
       ).not.toThrow()
       expect(consoleSpy).toHaveBeenCalled()
@@ -256,7 +256,7 @@ describe('agent 对外事件（P5 Task 2）', () => {
   // --- ①④⑤ harness 事件 → task 状态事件的翻译与去重 ---
 
   describe('makeTaskStatusEventBridge', () => {
-    it('①载荷与 §9.2 逐字：worker_id / task_id / old_status / new_status / dialog_object_id，无多余字段', async () => {
+    it('①载荷与 §9.2 逐字：worker_id / task_id / old_status / new_status / manager_key，无多余字段', async () => {
       const publish = vi.fn()
       const { ledger } = makeLedgerStub([{ status: 'running' }], { taskId: 'task-42' })
       const bridge = makeTaskStatusEventBridge({ ledger, publish })
@@ -268,7 +268,7 @@ describe('agent 对外事件（P5 Task 2）', () => {
       const [type, payload] = publish.mock.calls[0] as [string, AgentTaskStatusChangedPayload]
       expect(type).toBe('agent.task_status_changed')
       expect(Object.keys(payload).sort()).toEqual([
-        'dialog_object_id',
+        'manager_key',
         'new_status',
         'old_status',
         'task_id',
@@ -280,7 +280,7 @@ describe('agent 对外事件（P5 Task 2）', () => {
         // 台账里的 task 初始状态是 queued（harness.spawnWorker 先建 queued 再迁 running）
         old_status: 'queued',
         new_status: 'running',
-        dialog_object_id: DIALOG_OBJECT_ID,
+        manager_key: DIALOG_OBJECT_ID,
       })
     })
 
@@ -356,7 +356,7 @@ describe('agent 对外事件（P5 Task 2）', () => {
       let onDisk: TaskStatus = 'running'
       const ledger = {
         findWorker: async (workerId: string) => ({
-          dialogObjectId: DIALOG_OBJECT_ID,
+          managerKey: DIALOG_OBJECT_ID,
           worker: makeLedgerWorker({ workerId, status: onDisk, taskId: 'task-swallow' }),
         }),
       } as unknown as Pick<LedgerStore, 'findWorker'>
@@ -385,7 +385,7 @@ describe('agent 对外事件（P5 Task 2）', () => {
         ['completed', 'running'],
       ])
       // 身份字段仍取自台账（它们在 worker 生命周期内不变，读晚了也读不出别的值）
-      expect(publish.mock.calls[1][1]).toMatchObject({ worker_id: 'w-swallow', task_id: 'task-swallow', dialog_object_id: DIALOG_OBJECT_ID })
+      expect(publish.mock.calls[1][1]).toMatchObject({ worker_id: 'w-swallow', task_id: 'task-swallow', manager_key: DIALOG_OBJECT_ID })
     })
 
     it('⑥事件带 task_status 时，new_status 一律以事件为准，不再受台账现状影响', async () => {
@@ -472,7 +472,7 @@ describe('agent 对外事件（P5 Task 2）', () => {
         messagingDeps: makeMessagingDeps(),
         memoryServer: makeMemoryServer(),
         callAdmin: async () => ({}) as never,
-        dialogObjectIdFor: (): DialogObjectId => DIALOG_OBJECT_ID,
+        managerKeyFor: (): ManagerKey => DIALOG_OBJECT_ID,
         ...overrides,
       }
     }
@@ -487,9 +487,10 @@ describe('agent 对外事件（P5 Task 2）', () => {
         }),
       )
 
-      await stack.ledger.upsertWorker(DIALOG_OBJECT_ID, 'w-wired', () =>
-        makeLedgerWorker({ workerId: 'w-wired', status: 'running', taskId: 'task-wired' }),
-      )
+      await stack.ledger.upsertWorker(DIALOG_OBJECT_ID, 'w-wired', () => ({
+        ...makeLedgerWorker({ workerId: 'w-wired', status: 'running', taskId: 'task-wired' }),
+        manager_key: DIALOG_OBJECT_ID,
+      }))
 
       const onStateChange = capturedOnStateChange(stack.adapters.get('builtin'))
       expect(onStateChange).toBeDefined()
@@ -504,7 +505,7 @@ describe('agent 对外事件（P5 Task 2）', () => {
         task_id: 'task-wired',
         old_status: 'queued',
         new_status: 'completed',
-        dialog_object_id: DIALOG_OBJECT_ID,
+        manager_key: DIALOG_OBJECT_ID,
       })
     })
 
@@ -518,9 +519,10 @@ describe('agent 对外事件（P5 Task 2）', () => {
         }),
       )
 
-      await stack.ledger.upsertWorker(DIALOG_OBJECT_ID, 'w-filtered', () =>
-        makeLedgerWorker({ workerId: 'w-filtered', status: 'running', taskId: 'task-filtered' }),
-      )
+      await stack.ledger.upsertWorker(DIALOG_OBJECT_ID, 'w-filtered', () => ({
+        ...makeLedgerWorker({ workerId: 'w-filtered', status: 'running', taskId: 'task-filtered' }),
+        manager_key: DIALOG_OBJECT_ID,
+      }))
 
       // 直取 harness 拿到的那个 onEvent：这是 bootstrap 开的唯一出口，也是本用例要验证的对象
       // （input_sent 在 NO_WAKE_KINDS 里，真实 harness 只有在活 worker 上投递才会落，
@@ -536,9 +538,10 @@ describe('agent 对外事件（P5 Task 2）', () => {
 
     it('未注入 publishEvent 时装配照常工作（P5 阶段无生产调用方）', async () => {
       const stack = buildManagerStack(makeDeps())
-      await stack.ledger.upsertWorker(DIALOG_OBJECT_ID, 'w-nopub', () =>
-        makeLedgerWorker({ workerId: 'w-nopub', status: 'running' }),
-      )
+      await stack.ledger.upsertWorker(DIALOG_OBJECT_ID, 'w-nopub', () => ({
+        ...makeLedgerWorker({ workerId: 'w-nopub', status: 'running' }),
+        manager_key: DIALOG_OBJECT_ID,
+      }))
       const onStateChange = capturedOnStateChange(stack.adapters.get('builtin'))
       onStateChange!({ worker_id: 'w-nopub', seq: 1, impl: 'builtin', session_ref: 'w-nopub-ref' }, 'exited', { endReason: 'completed' })
       await waitUntil(async () => (await stack.ledger.findWorker('w-nopub'))?.worker.task.status === 'completed')

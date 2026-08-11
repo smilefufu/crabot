@@ -8,7 +8,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
-import { ModuleBase, generateId, type ModuleConfig, type Event, type ModuleId, type TraceStoreInterface } from 'crabot-shared'
+import { ModuleBase, generateId, sha256CanonicalJson, type ModuleConfig, type Event, type ModuleId, type TraceStoreInterface } from 'crabot-shared'
 import { resolveTimezone } from './utils/time.js'
 import type {
   UnifiedAgentConfig,
@@ -57,7 +57,13 @@ import { createTmpPageTools } from './agent/tmp-page-tools.js'
 import { createCrabMessagingServer, type PathMapping, type TaskContext } from './mcp/crab-messaging.js'
 import { toImageConnInfo, imageToolsFor, type ImageConnInfo } from './mcp/crab-image.js'
 import { TraceStore } from './core/trace-store.js'
-import { getAgentTraceDir, getAgentLogsDir, getAgentDataDir, getWorkspaceDir, getDataRootDir } from './core/data-paths.js'
+import { getAgentTraceDir, getAgentLogsDir, getAgentDataDir, getWorkspaceDir, getDataRootDir, getAdminDataDir } from './core/data-paths.js'
+import { importV2LegacyTasks } from './workers/legacy-importer.js'
+import {
+  compareLegacyTraceEventEntries,
+  readLegacyTraceEvents,
+  type LegacyTraceEventEntry,
+} from './workers/legacy-source-reader.js'
 import { PromptManager } from './prompt-manager.js'
 import { createLSPManager, type LSPManager } from './lsp/lsp-manager.js'
 import type { BgEntityRecord, BgEntityStatus, BgEntityType } from './engine/bg-entities/types.js'
@@ -76,7 +82,13 @@ import {
   narrowWorkerPermissions,
   type BuiltinRuntimeContext,
 } from './workers/builtin/runtime.js'
-import type { DialogObjectId, LedgerWorker, ManagerKey, TaskPriority, TaskStatus } from './workers/harness/ledger-types.js'
+import {
+  isLegacyIncarnation,
+  type ManagerKey,
+  type LedgerWorker,
+  type TaskPriority,
+  type TaskStatus,
+} from './workers/harness/ledger-types.js'
 import {
   filterAndPageWorkers,
   buildWorkerDetail,
@@ -252,6 +264,24 @@ function parseOffsetCursor(cursor: string | undefined): number {
   return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 0
 }
 
+function parseAdminChatAssertionId(assertion: string): string {
+  const payload = assertion.split('.')[1]
+  if (!payload) throw new Error('Admin Chat assertion payload is invalid')
+  try {
+    const claims: unknown = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
+    if (!claims || typeof claims !== 'object' || Array.isArray(claims)) {
+      throw new Error('invalid claims')
+    }
+    const assertionId = (claims as Record<string, unknown>).assertion_id
+    if (typeof assertionId !== 'string' || assertionId.length === 0) {
+      throw new Error('invalid assertion_id')
+    }
+    return assertionId
+  } catch {
+    throw new Error('Admin Chat assertion payload is invalid')
+  }
+}
+
 /** trace summary 的截断长度（§10.2：summary 是"截断摘要"，原始结构留在 detail 里）。 */
 const TRACE_SUMMARY_MAX_CHARS = 200
 
@@ -424,9 +454,6 @@ export class UnifiedAgent extends ModuleBase {
    */
   private crabSelfHandles: Map<ModuleId, string> = new Map()
 
-  /** master 的 friend id（系统线程台账归档键，实例级常量）；见 `resolveMasterFriendId`。 */
-  private masterFriendIdCache: string | undefined
-
   /** Per-worker serialization preserves background-shell exit order across async log rendering. */
   private readonly builtinBgDeliveryTails = new Map<string, Promise<void>>()
 
@@ -484,7 +511,13 @@ export class UnifiedAgent extends ModuleBase {
 
     super(moduleConfig)
 
-    this.traceStore = new TraceStore(100, getAgentTraceDir())
+    this.traceStore = new TraceStore(
+      100,
+      getAgentTraceDir(),
+      'traces-running-v3.jsonl',
+      'traces-v3-',
+      ['traces-', 'traces-v3-'],
+    )
     this.lspManager = createLSPManager()
 
     this.promptManager = new PromptManager()
@@ -705,7 +738,12 @@ export class UnifiedAgent extends ModuleBase {
             p.friendId,
           ),
         crabSelfHandle: (channelId) => this.crabSelfHandles.get(channelId),
-        masterFriendId: () => this.resolveMasterFriendId(),
+        getFriend: async (friendId) => {
+          const result = await this.rpcClient.call<{ friend_id: string }, { friend: Friend | null }>(
+            await this.getAdminPort(), 'get_friend', { friend_id: friendId }, this.config.moduleId,
+          )
+          return result.friend
+        },
       },
       // 起化身时现取（spec 决策 2）：箭头函数只捕获 `this`，配置一律在调用那一刻读。
       builtinSpawnDefaults: (ctx) => this.buildBuiltinWorkerRuntime(ctx),
@@ -731,33 +769,6 @@ export class UnifiedAgent extends ModuleBase {
         void this.sendBackgroundFailLoud(report.target, report.subject, report.failure)
       },
     })
-  }
-
-  /**
-   * master 的 friend id —— 系统任务线程的台账归档键（§4.4：未配置 `target_session` 的
-   * scheduled 触发，台账归 master 对话对象；否则 master 在私聊里问进度时，其 manager 按
-   * `friend:<master_id>` 查台账看不到这些 worker）。
-   *
-   * 实例级常量：admin 侧 master 唯一（`permission==='master'` 至多一个，见
-   * `crabot-admin/src/index.ts:3525`），解析成功一次即长期缓存。解析不出来时返回
-   * undefined，由 `ManagerPrincipalStore` 退回旧的 group 形状——不猜、不阻塞唤醒。
-   */
-  private async resolveMasterFriendId(): Promise<string | undefined> {
-    if (this.masterFriendIdCache) return this.masterFriendIdCache
-    try {
-      const adminPort = await this.getAdminPort()
-      const result = await this.rpcClient.call<Record<string, never>, { friend: Friend | null }>(
-        adminPort,
-        'find_master_friend',
-        {},
-        this.config.moduleId,
-      )
-      this.masterFriendIdCache = result.friend?.id
-      return this.masterFriendIdCache
-    } catch (err) {
-      console.warn('[Agent] find_master_friend 失败，系统线程台账暂用旧归档键:', err)
-      return undefined
-    }
   }
 
   // ==========================================================================
@@ -1186,6 +1197,7 @@ export class UnifiedAgent extends ModuleBase {
         // 清除 Friend 缓存
         const friendPayload = event.payload as { friend_id: FriendId }
         this.permissionChecker.clearFriendCache(friendPayload.friend_id)
+        await this.managerStack?.principals.invalidateFriend(friendPayload.friend_id)
         break
       }
 
@@ -1200,6 +1212,7 @@ export class UnifiedAgent extends ModuleBase {
           channelId: p.channel_id,
           sessionId: p.session_id,
           text: note,
+          ...(typeof event.timestamp === 'string' && Number.isFinite(Date.parse(event.timestamp)) ? { occurredAt: event.timestamp } : {}),
         }).catch((error) => console.error(`[${this.config.moduleId}] media manager wake failed:`, error))
         break
       }
@@ -1874,11 +1887,33 @@ export class UnifiedAgent extends ModuleBase {
     message: ChannelMessage
     source_type?: 'channel' | 'admin_chat'
     callback_info?: { source_module_id: string; request_id: string }
+    admin_chat_assertion?: string
   }): Promise<{ decision_types: string[]; task_ids?: string[] }> {
-    const { message, source_type, callback_info } = params
+    const { message, source_type, callback_info, admin_chat_assertion } = params
 
-    // Admin Chat 来源
-    if (source_type === 'admin_chat' && callback_info) {
+    if (source_type === 'admin_chat' && callback_info && admin_chat_assertion) {
+      const modules = await this.rpcClient.resolve({ module_id: 'admin-web' }, this.config.moduleId)
+      const adminPort = modules[0]?.port
+      if (!adminPort) throw new Error('official Admin module is unavailable')
+      const consumeResult = await this.rpcClient.call<
+        { assertion: string; expected: { manager_key: string; request_id: string; payload_sha256: string } },
+        { consumed?: unknown; expires_at?: unknown }
+      >(adminPort, 'consume_admin_chat_assertion', {
+        assertion: admin_chat_assertion,
+        expected: {
+          manager_key: 'admin-web::admin-chat',
+          request_id: callback_info.request_id,
+          payload_sha256: sha256CanonicalJson(message),
+        },
+      }, this.config.moduleId)
+      if (consumeResult?.consumed !== true || typeof consumeResult.expires_at !== 'string' ||
+        !Number.isFinite(Date.parse(consumeResult.expires_at)) || Date.parse(consumeResult.expires_at) <= Date.now()) {
+        throw new Error('invalid admin chat assertion consumption result')
+      }
+      await this.requireManagerStack().principals.activateAdminChat('admin-web::admin-chat', {
+        assertionId: parseAdminChatAssertionId(admin_chat_assertion),
+        expiresAt: consumeResult.expires_at,
+      })
       return this.processAdminChatMessage(message, callback_info)
     }
 
@@ -1886,7 +1921,7 @@ export class UnifiedAgent extends ModuleBase {
       throw new Error('process_message only supports source_type=admin_chat; channel messages use channel.message_authorized')
     }
 
-    return { decision_types: [] }
+    throw new Error('admin_chat assertion is required and must be valid')
   }
 
   /**
@@ -2608,7 +2643,7 @@ export class UnifiedAgent extends ModuleBase {
    * 由 manager 在唤醒边界解析身份。
    */
   private async transitionMaintenanceSystemTask(
-    dialogObjectId: DialogObjectId,
+    managerKey: ManagerKey,
     taskId: TaskId,
     to: TaskStatus,
     opts?: { error?: string; outcome?: string },
@@ -2616,7 +2651,7 @@ export class UnifiedAgent extends ModuleBase {
     const { ledger } = this.requireManagerStack()
     const now = new Date().toISOString()
     let oldStatus: TaskStatus | undefined
-    const updated = await ledger.upsertWorker(dialogObjectId, taskId, (previous) => {
+    const updated = await ledger.upsertWorker(managerKey, taskId, (previous) => {
       if (!previous) throw new Error(`Maintenance system task not found: ${taskId}`)
       oldStatus = previous.task.status
       return {
@@ -2631,21 +2666,21 @@ export class UnifiedAgent extends ModuleBase {
       task_id: taskId,
       old_status: oldStatus,
       new_status: to,
-      dialog_object_id: dialogObjectId,
+      manager_key: managerKey,
     })
   }
 
-  private async runMaintenanceSystemTask(dialogObjectId: DialogObjectId, taskId: TaskId): Promise<void> {
-    await this.transitionMaintenanceSystemTask(dialogObjectId, taskId, 'running')
+  private async runMaintenanceSystemTask(managerKey: ManagerKey, taskId: TaskId): Promise<void> {
+    await this.transitionMaintenanceSystemTask(managerKey, taskId, 'running')
     try {
       await this.memoryWriter.runMaintenance('all')
-      await this.transitionMaintenanceSystemTask(dialogObjectId, taskId, 'completed', {
+      await this.transitionMaintenanceSystemTask(managerKey, taskId, 'completed', {
         outcome: '记忆维护完成',
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       console.error(`[${this.config.moduleId}] memory_maintenance system task ${taskId} failed:`, message)
-      await this.transitionMaintenanceSystemTask(dialogObjectId, taskId, 'failed', {
+      await this.transitionMaintenanceSystemTask(managerKey, taskId, 'failed', {
         error: message,
         outcome: `记忆维护失败：${message}`,
       })
@@ -2653,13 +2688,14 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   private async createMaintenanceSystemTask(params: TriggerScheduleParams): Promise<TriggerScheduleResult> {
-    const { ledger, principals } = this.requireManagerStack()
+    const { ledger } = this.requireManagerStack()
     const taskId = generateId() as TaskId
-    const dialogObjectId = principals.dialogObjectIdFor(SYSTEM_TASKS_MANAGER_KEY)
+    const managerKey = SYSTEM_TASKS_MANAGER_KEY
     const { channelId, sessionId } = splitManagerKey(SYSTEM_TASKS_MANAGER_KEY)
     const now = new Date().toISOString()
     const worker: LedgerWorker = {
       worker_id: taskId,
+      manager_key: managerKey,
       task: {
         id: taskId,
         type: params.task_type,
@@ -2671,7 +2707,6 @@ export class UnifiedAgent extends ModuleBase {
         created_at: now,
       },
       origin: {
-        spawned_by_session: SYSTEM_TASKS_MANAGER_KEY,
         trigger_type: 'system',
         ...(params.creator_friend_id ? { creator_friend_id: params.creator_friend_id } : {}),
       },
@@ -2682,13 +2717,13 @@ export class UnifiedAgent extends ModuleBase {
       incarnations: [],
       updated_at: now,
     }
-    const persisted = await ledger.upsertWorker(dialogObjectId, taskId, (previous) => {
+    const persisted = await ledger.upsertWorker(managerKey, taskId, (previous) => {
       if (previous) throw new Error(`Duplicate maintenance system task: ${taskId}`)
       return worker
     })
     if (!persisted) throw new Error(`Failed to persist maintenance system task: ${taskId}`)
 
-    void this.runMaintenanceSystemTask(dialogObjectId, taskId).catch((error) => {
+    void this.runMaintenanceSystemTask(managerKey, taskId).catch((error) => {
       console.error(
         `[${this.config.moduleId}] maintenance system task handler crashed (task=${taskId}):`,
         error instanceof Error ? error.message : String(error),
@@ -2778,12 +2813,17 @@ export class UnifiedAgent extends ModuleBase {
   private async handleReadWorkerOutputAdmin(
     params: ReadWorkerOutputAdminParams
   ): Promise<ReadWorkerOutputAdminResult> {
-    const { chunk, nextCursor } = await this.requireManagerStack().harness.readWorkerOutput(
+    const { chunk, nextCursor, unavailable_reason } = await this.requireManagerStack().harness.readWorkerOutput(
       params.worker_id,
       { offset: parseOffsetCursor(params.cursor) },
-      { seq: params.seq }
+      params.seq === undefined ? undefined : { seq: params.seq },
     )
-    return { chunk, next_cursor: String(nextCursor.offset), eof: chunk.length === 0 }
+    return {
+      chunk,
+      next_cursor: String(nextCursor.offset),
+      eof: chunk.length === 0,
+      ...(unavailable_reason ? { unavailable_reason } : {}),
+    }
   }
 
   /**
@@ -2819,6 +2859,26 @@ export class UnifiedAgent extends ModuleBase {
       params.seq === undefined ? mainlineIncarnation(found.worker) : findIncarnationBySeq(found.worker, params.seq)
     if (!incarnation) {
       throw new Error(`get_worker_trace: no incarnation with seq=${params.seq} found for worker ${params.worker_id}`)
+    }
+    if (isLegacyIncarnation(incarnation)) {
+      const trace = await readLegacyTraceEvents(getAgentTraceDir(), found.worker.legacy_source?.trace_ids ?? [])
+      const harnessEntries: LegacyTraceEventEntry[] = (await stack.harness.readWorkerEvents(params.worker_id))
+        .filter((event) => event.seq === incarnation.seq)
+        .map((event, sourceOrdinal) => ({
+          event: normalizeHarnessEvent(event),
+          ...(Number.isFinite(Date.parse(event.ts)) ? { started_at: event.ts } : {}),
+          trace_id: '',
+          source_ordinal: sourceOrdinal,
+        }))
+      const events = [...trace.entries, ...harnessEntries]
+        .sort(compareLegacyTraceEventEntries)
+        .map((entry) => entry.event)
+      const offset = parseOffsetCursor(params.cursor)
+      return {
+        events: events.slice(offset),
+        next_cursor: String(events.length),
+        ...(trace.unavailable_reason ? { unavailable_reason: trace.unavailable_reason } : {}),
+      }
     }
     const ofIncarnation = (await stack.harness.readWorkerEvents(params.worker_id)).filter(
       (event) => event.seq === incarnation.seq
@@ -2943,9 +3003,26 @@ export class UnifiedAgent extends ModuleBase {
     }
   }
 
+  private async importLegacyV2Tasks(): Promise<void> {
+    const stack = this.managerStack
+    if (!stack) throw new Error('[legacy-import] manager stack unavailable')
+    await importV2LegacyTasks({
+      adminDataDir: getAdminDataDir(),
+      traceDir: getAgentTraceDir(),
+      agentDataDir: getAgentDataDir(),
+      ledger: stack.ledger,
+      workspaces: stack.workspaces,
+      now: () => new Date().toISOString(),
+    })
+  }
+
   protected override async onStart(): Promise<void> {
+    await this.importLegacyV2Tasks()
+    // Business ingress is registered only after onStart resolves; initialize durable
+    // subject bindings before any Manager tool face can mint a continuation credential.
+    await this.managerStack?.principals.init()
     this.startEventLoopWatchdog()
-    // trace 的 in-flight 持久化：每 15s 覆盖写 traces-running.jsonl，让 agent
+    // trace 的 in-flight 持久化：每 15s 覆盖写 traces-running-v3.jsonl，让 agent
     // 被 SIGKILL 时主 task trace 仍能保留到最后一次 flush 的状态。
     this.traceStore.startFlushTimer(15_000)
     // 探測是否有飛書 channel，決定是否注入 read_feishu_document 工具

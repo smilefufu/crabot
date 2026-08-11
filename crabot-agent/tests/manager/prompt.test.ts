@@ -13,11 +13,6 @@ function baseInputs(overrides: Partial<PromptInputs> = {}): PromptInputs {
     managerKey: MANAGER_KEY,
     isSystemThread: false,
     dialogProfile: '## 对话对象档案\n张三，master，偏好简短回复',
-    dynamic: {
-      ledgerRender: '- worker w1: idle',
-      nowIso: '2026-07-30T08:00:00.000Z',
-      pendingNotes: ['worker w1 已完成'],
-    },
     ...overrides,
   }
 }
@@ -129,142 +124,26 @@ describe('MANAGER_IDENTITY 静态段内容', () => {
   })
 })
 
-describe('assembleManagerSystemPrompt 装配顺序', () => {
-  it('静态段 → 档案 → 动态块，顺序正确', () => {
+describe('assembleManagerSystemPrompt 稳定装配', () => {
+  it('只含身份、固定线程角色和档案，不含动态台账/时钟/通知', () => {
     const output = assembleManagerSystemPrompt(baseInputs())
-
-    const identityIdx = output.indexOf('你是 Crabot 的 manager')
-    const profileIdx = output.indexOf('张三，master，偏好简短回复')
-    const dynamicIdx = output.indexOf('worker w1: idle')
-
-    expect(identityIdx).toBeGreaterThanOrEqual(0)
-    expect(profileIdx).toBeGreaterThan(identityIdx)
-    expect(dynamicIdx).toBeGreaterThan(profileIdx)
+    expect(output).toContain('张三，master，偏好简短回复')
+    expect(output).not.toContain('当前状态（动态')
+    expect(output).not.toContain('worker w1: idle')
+    expect(output).not.toContain('2026-07-30T08:00:00.000Z')
+    expect(output).not.toContain('待处理通知')
   })
 
-  it('动态块包含 ledgerRender / nowIso / pendingNotes', () => {
-    const output = assembleManagerSystemPrompt(baseInputs())
-
-    expect(output).toContain('worker w1: idle')
-    expect(output).toContain('2026-07-30T08:00:00.000Z')
-    expect(output).toContain('worker w1 已完成')
-  })
-
-  it('无 dialogProfile 时不装配档案段，静态段仍在动态块之前', () => {
-    const output = assembleManagerSystemPrompt(baseInputs({ dialogProfile: undefined }))
-
-    const identityIdx = output.indexOf('你是 Crabot 的 manager')
-    const dynamicIdx = output.indexOf('worker w1: idle')
-
-    expect(identityIdx).toBeGreaterThanOrEqual(0)
-    expect(dynamicIdx).toBeGreaterThan(identityIdx)
-  })
-
-  it('系统线程 manager 额外含 reach_master 纪律段（例行留本线程，仅需人类立即注意才 reach_master）', () => {
-    const systemOutput = assembleManagerSystemPrompt(baseInputs({ isSystemThread: true }))
-    const nonSystemOutput = assembleManagerSystemPrompt(baseInputs({ isSystemThread: false }))
-
-    expect(systemOutput).toContain('send_master_private')
-    expect(systemOutput).toContain('例行成功留在本线程')
-    expect(systemOutput).toContain('需要人类立即注意')
-    expect(nonSystemOutput).not.toContain('send_master_private')
-  })
-
-  it('系统线程的 reach_master 纪律段位于静态段区域，仍在档案/动态块之前', () => {
+  it('系统线程追加 reach_master 纪律，且仍在档案之前', () => {
     const output = assembleManagerSystemPrompt(baseInputs({ isSystemThread: true }))
-
-    const reachMasterIdx = output.indexOf('send_master_private')
-    const profileIdx = output.indexOf('张三，master，偏好简短回复')
-    const dynamicIdx = output.indexOf('worker w1: idle')
-
-    expect(reachMasterIdx).toBeGreaterThanOrEqual(0)
-    expect(profileIdx).toBeGreaterThan(reachMasterIdx)
-    expect(dynamicIdx).toBeGreaterThan(profileIdx)
+    expect(output.indexOf('send_master_private')).toBeGreaterThanOrEqual(0)
+    expect(output.indexOf('张三，master，偏好简短回复')).toBeGreaterThan(output.indexOf('send_master_private'))
   })
 
-  describe('前缀稳定性：只改 dynamic 时，输出的动态块之前部分逐字节不变', () => {
-    it('非系统线程', () => {
-      const inputsA = baseInputs()
-      const inputsB = baseInputs({
-        dynamic: {
-          ledgerRender: '- worker w2: running\n- worker w3: exited',
-          nowIso: '2026-07-30T09:30:00.000Z',
-          pendingNotes: ['worker w2 卡住了', 'worker w3 已完成'],
-        },
-      })
-
-      const outputA = assembleManagerSystemPrompt(inputsA)
-      const outputB = assembleManagerSystemPrompt(inputsB)
-
-      const dynamicMarker = '张三，master，偏好简短回复'
-      const cutA = outputA.indexOf(dynamicMarker) + dynamicMarker.length
-      const cutB = outputB.indexOf(dynamicMarker) + dynamicMarker.length
-
-      const prefixA = outputA.slice(0, cutA)
-      const prefixB = outputB.slice(0, cutB)
-
-      // 前缀长度也必须一致——不允许在动态块之前插入任何随 dynamic 变化的内容
-      expect(outputA.length - prefixA.length).not.toBe(0)
-      expect(prefixA).toBe(prefixB)
-    })
-
-    it('系统线程', () => {
-      const inputsA = baseInputs({ isSystemThread: true })
-      const inputsB = baseInputs({
-        isSystemThread: true,
-        dynamic: {
-          ledgerRender: '- worker wA: idle',
-          nowIso: '2026-07-30T23:59:00.000Z',
-        },
-      })
-
-      const outputA = assembleManagerSystemPrompt(inputsA)
-      const outputB = assembleManagerSystemPrompt(inputsB)
-
-      const dynamicMarker = '张三，master，偏好简短回复'
-      const cutA = outputA.indexOf(dynamicMarker) + dynamicMarker.length
-      const cutB = outputB.indexOf(dynamicMarker) + dynamicMarker.length
-
-      const prefixA = outputA.slice(0, cutA)
-      const prefixB = outputB.slice(0, cutB)
-
-      expect(prefixA).toBe(prefixB)
-    })
-
-    it('pendingNotes 缺省 vs 存在，不影响动态块之前的前缀', () => {
-      const withNotes = assembleManagerSystemPrompt(baseInputs())
-      const withoutNotes = assembleManagerSystemPrompt(
-        baseInputs({ dynamic: { ledgerRender: '- worker w1: idle', nowIso: '2026-07-30T08:00:00.000Z' } }),
-      )
-
-      const dynamicMarker = '张三，master，偏好简短回复'
-      const cutWith = withNotes.indexOf(dynamicMarker) + dynamicMarker.length
-      const cutWithout = withoutNotes.indexOf(dynamicMarker) + dynamicMarker.length
-
-      expect(withNotes.slice(0, cutWith)).toBe(withoutNotes.slice(0, cutWithout))
-    })
-
-    it('添加 managerKey 后，仅改 dynamic 时前缀仍逐字节不变', () => {
-      const inputsA = baseInputs()
-      const inputsB = baseInputs({
-        dynamic: {
-          ledgerRender: '- worker w2: running',
-          nowIso: '2026-07-30T09:30:00.000Z',
-        },
-      })
-
-      const outputA = assembleManagerSystemPrompt(inputsA)
-      const outputB = assembleManagerSystemPrompt(inputsB)
-
-      const dynamicMarker = '当前状态（动态，不进缓存前缀）'
-      const cutA = outputA.indexOf(dynamicMarker)
-      const cutB = outputB.indexOf(dynamicMarker)
-
-      const prefixA = outputA.slice(0, cutA)
-      const prefixB = outputB.slice(0, cutB)
-
-      expect(prefixA).toBe(prefixB)
-    })
+  it('改变曾经的动态输入不影响 system prompt 字节', () => {
+    const first = assembleManagerSystemPrompt(baseInputs())
+    const second = assembleManagerSystemPrompt(baseInputs())
+    expect(first).toBe(second)
   })
 
   describe('工具名验证', () => {

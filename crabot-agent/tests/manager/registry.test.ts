@@ -19,7 +19,6 @@ import { ManagerSessionStore } from '../../src/manager/session-store.js'
 import type { CompactionPolicy } from '../../src/manager/compaction.js'
 import type { ManagerKey } from '../../src/manager/types.js'
 import type { ChannelMessage, Friend } from '../../src/types.js'
-import { dialogObjectIdForPrivate, dialogObjectIdForGroup } from '../../src/workers/harness/ledger-types.js'
 import type { LedgerStore } from '../../src/workers/harness/ledger-store.js'
 import type { LedgerWorker } from '../../src/workers/harness/ledger-types.js'
 import type { WorkerHarness } from '../../src/workers/harness/harness.js'
@@ -63,15 +62,22 @@ function makeChannelMessage(text: string): ChannelMessage {
   }
 }
 
+function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
+  let resolve!: () => void
+  const promise = new Promise<void>((done) => { resolve = done })
+  return { promise, resolve }
+}
+
 const estimateTokens = (msgs: ReadonlyArray<EngineMessage>): number => msgs.length * 10
 
 const FAKE_HARNESS = { listWorkers: async (): Promise<LedgerWorker[]> => [] } as unknown as WorkerHarness
 
-function makeLedgerWorker(workerId: string, spawnedBySession: ManagerKey): LedgerWorker {
+function makeLedgerWorker(workerId: string, managerKey: ManagerKey): LedgerWorker {
   return {
     worker_id: workerId,
+    manager_key: managerKey,
     task: { id: workerId, title: 't', status: 'running', created_at: '2026-01-01T00:00:00.000Z' },
-    origin: { spawned_by_session: spawnedBySession, trigger_type: 'message' },
+    origin: { trigger_type: 'message' },
     report_to: { channel_id: 'wechat', session_id: 'sess' },
     incarnations: [],
     updated_at: '2026-01-01T00:00:00.000Z',
@@ -84,7 +90,7 @@ function fakeLedger(workers: Record<string, LedgerWorker>): LedgerStore {
     findWorker: async (workerId: string) => {
       const worker = workers[workerId]
       if (!worker) return undefined
-      return { dialogObjectId: dialogObjectIdForPrivate('friend-x'), worker }
+      return { managerKey: worker.manager_key, worker }
     },
   } as unknown as LedgerStore
 }
@@ -140,7 +146,7 @@ describe('ManagerRegistry', () => {
       harness: FAKE_HARNESS,
       ledger: fakeLedger({}),
       now: () => new Date(Date.parse('2026-01-01T00:00:00.000Z')),
-      dialogObjectIdFor: () => dialogObjectIdForPrivate('friend-x'),
+      managerKeyFor: (key) => key,
       toolFace: () => [],
       promptInputs: () => ({}),
       adapter: typeof adapter === 'function' ? adapter : () => adapter,
@@ -163,18 +169,18 @@ describe('ManagerRegistry', () => {
     expect(b).not.toBe(a1)
   })
 
-  it('dialogObjectId 是**每次现算**的：先建的 loop 也会跟上后来才解析出的台账归档键，不把旧值钉死', async () => {
+  it('managerKey 是**每次现算**的：先建的 loop 也会跟上后来才解析出的台账归档键，不把旧值钉死', async () => {
     const { adapter, queue } = makeAdapter()
     queue.push({ text: 'ok', stopReason: 'end_turn' })
     // 归档键一开始解析不出 friend（群形状），之后收敛成 friend 形状——模拟"loop 先被
     // worker 事件建出来、人类消息随后才带来 friend"这条真实时序。
     let resolvedFriend: string | undefined
-    const dialogObjectIdFor = vi.fn((key: ManagerKey) =>
-      resolvedFriend ? dialogObjectIdForPrivate(resolvedFriend) : dialogObjectIdForGroup('wechat', key)
+    const managerKeyFor = vi.fn((key: ManagerKey) =>
+      resolvedFriend ? (`test::${resolvedFriend}` as ManagerKey) : (`${'wechat'}::${key}` as ManagerKey)
     )
     const listWorkers = vi.fn(async () => [])
     const registry = new ManagerRegistry(
-      baseRegistryDeps({ adapter, dialogObjectIdFor, harness: { ...FAKE_HARNESS, listWorkers } as never })
+      baseRegistryDeps({ adapter, managerKeyFor, harness: { ...FAKE_HARNESS, listWorkers } as never })
     )
     const key = 'wechat::s1' as ManagerKey
 
@@ -184,9 +190,8 @@ describe('ManagerRegistry', () => {
 
     await registry.routeHumanMessages('wechat', 's1', [makeChannelMessage('你好')])
 
-    // 台账查询用的是**现算**的归档键，不是 loop 建出来那一刻的快照。
-    // 若 dialogObjectId 是定值，这里会是 `group:wechat:wechat::s1` —— 同一个人的台账裂成两份。
-    expect(listWorkers).toHaveBeenCalledWith(dialogObjectIdForPrivate('friend-late'))
+    // Stable system prompts no longer perform automatic ledger I/O; worker state is queried explicitly.
+    expect(listWorkers).not.toHaveBeenCalled()
   })
 
   it('getOrCreate: adapter/model 是 thunk，原样透传给 ManagerLoop，不在 registry 侧缓存解析结果（§11 热更链路）', async () => {
@@ -344,7 +349,7 @@ describe('ManagerRegistry', () => {
 
   // --- routeWorkerEvent ---
 
-  it('routeWorkerEvent: 经台账 origin.spawned_by_session 找到监护 manager', async () => {
+  it('routeWorkerEvent: 经台账 origin.spawned_by_episode 找到监护 manager', async () => {
     const { adapter, queue } = makeAdapter()
     queue.push({ text: '收到 worker 事件', stopReason: 'end_turn' })
     const owningKey = 'wechat::owner-sess' as ManagerKey
@@ -400,6 +405,110 @@ describe('ManagerRegistry', () => {
 
     const state = await store.load(SYSTEM_TASKS_MANAGER_KEY)
     expect(state.recent.length).toBeGreaterThan(0)
+  })
+
+  it('异步身份、worker 查找和 schedule 解析等待期间不改写入口时间', async () => {
+    const { adapter, queue, calls } = makeAdapter()
+    queue.push(
+      { text: 'human ok', stopReason: 'end_turn' },
+      { text: 'worker ok', stopReason: 'end_turn' },
+      { text: 'schedule ok', stopReason: 'end_turn' },
+    )
+    let nowMs = Date.parse('2026-08-10T01:00:00.000Z')
+    const humanEntered = deferred()
+    const humanRelease = deferred()
+    const workerEntered = deferred()
+    const workerRelease = deferred()
+    const scheduleEntered = deferred()
+    const scheduleRelease = deferred()
+    const owner = 'wechat::timed-owner' as ManagerKey
+    const worker = makeLedgerWorker('w-timed', owner)
+    const registry = new ManagerRegistry(baseRegistryDeps({
+      adapter,
+      now: () => new Date(nowMs),
+      timezone: () => 'Asia/Shanghai',
+      onHumanWake: async () => {
+        humanEntered.resolve()
+        await humanRelease.promise
+      },
+      ledger: {
+        findWorker: async () => {
+          workerEntered.resolve()
+          await workerRelease.promise
+          return { managerKey: owner, worker }
+        },
+      } as unknown as LedgerStore,
+      onScheduleWake: async () => {
+        scheduleEntered.resolve()
+        await scheduleRelease.promise
+      },
+    }))
+
+    const human = registry.routeHumanMessages('wechat', 'timed-human', [makeChannelMessage('human')])
+    await humanEntered.promise
+    nowMs = Date.parse('2026-08-10T01:01:00.000Z')
+    humanRelease.resolve()
+    await human
+    expect(JSON.stringify(calls[0].messages)).toContain('received_at=\\"2026-08-10T09:00:00+08:00\\"')
+
+    const workerWake = registry.routeWorkerEvent({
+      ts: '2026-08-10T00:59:30.000Z',
+      kind: 'state_changed',
+      worker_id: 'w-timed',
+      seq: 2,
+    })
+    await workerEntered.promise
+    nowMs = Date.parse('2026-08-10T01:02:00.000Z')
+    workerRelease.resolve()
+    await workerWake
+    const workerMessages = JSON.stringify(calls[1].messages)
+    expect(workerMessages).toContain('received_at=\\"2026-08-10T09:01:00+08:00\\"')
+    expect(workerMessages).toContain('occurred_at=\\"2026-08-10T00:59:30.000Z\\"')
+
+    const schedule = registry.routeSchedule({ scheduleId: 'timed', title: 't', description: 'd' })
+    await scheduleEntered.promise
+    nowMs = Date.parse('2026-08-10T01:03:00.000Z')
+    scheduleRelease.resolve()
+    await schedule
+    const scheduleMessages = JSON.stringify(calls[2].messages)
+    expect(scheduleMessages).toContain('received_at=\\"2026-08-10T09:02:00+08:00\\"')
+    expect(scheduleMessages).not.toContain('occurred_at=')
+  })
+
+  it('同一 ManagerKey 并发排队的后到事件保留各自入口时间', async () => {
+    const calls: LLMStreamParams[] = []
+    const firstTurnEntered = deferred()
+    const releaseFirstTurn = deferred()
+    let turn = 0
+    const adapter: LLMAdapter = {
+      async *stream(params) {
+        calls.push({ ...params, messages: [...params.messages] })
+        turn++
+        if (turn === 1) {
+          firstTurnEntered.resolve()
+          await releaseFirstTurn.promise
+        }
+        yield* chunksFromContent([{ type: 'text', text: 'ok' }], 'end_turn', { inputTokens: 10, outputTokens: 5 })
+      },
+      updateConfig: () => {},
+    }
+    let nowMs = Date.parse('2026-08-10T02:00:00.000Z')
+    const registry = new ManagerRegistry(baseRegistryDeps({
+      adapter,
+      now: () => new Date(nowMs),
+      timezone: () => 'Asia/Shanghai',
+    }))
+
+    const first = registry.routeHumanMessages('wechat', 'same-key', [makeChannelMessage('first')])
+    await firstTurnEntered.promise
+    nowMs = Date.parse('2026-08-10T02:00:30.000Z')
+    const second = registry.routeHumanMessages('wechat', 'same-key', [makeChannelMessage('second')])
+    nowMs = Date.parse('2026-08-10T02:05:00.000Z')
+    releaseFirstTurn.resolve()
+    await Promise.all([first, second])
+
+    expect(JSON.stringify(calls[0].messages)).toContain('received_at=\\"2026-08-10T10:00:00+08:00\\"')
+    expect(JSON.stringify(calls[1].messages)).toContain('received_at=\\"2026-08-10T10:00:30+08:00\\"')
   })
 
   // --- evictIdle ---
@@ -681,9 +790,19 @@ describe('ManagerRegistry', () => {
     const loop = registry.getOrCreate(key)
     const wakeUpSpy = vi.spyOn(loop, 'wakeUp')
 
-    await registry.routeMediaNotification({ channelId: 'wechat', sessionId: 'media-idle', text: 'fm-1 ready' })
+    await registry.routeMediaNotification({
+      channelId: 'wechat',
+      sessionId: 'media-idle',
+      text: 'fm-1 ready',
+      occurredAt: '2025-12-31T23:59:30.000Z',
+    })
 
-    expect(wakeUpSpy).toHaveBeenCalledWith({ kind: 'media_notification', text: 'fm-1 ready' })
+    expect(wakeUpSpy).toHaveBeenCalledWith(expect.objectContaining({
+      wake: { kind: 'media_notification', text: 'fm-1 ready' },
+      received_at: expect.any(String),
+      timezone: expect.any(String),
+      occurred_at: '2025-12-31T23:59:30.000Z',
+    }))
     const state = await store.load(key)
     expect(JSON.stringify(state.recent)).toContain('[媒体下载完成]')
     expect(JSON.stringify(state.recent)).not.toContain('<bg-notification>')
@@ -711,7 +830,11 @@ describe('ManagerRegistry', () => {
 
     await registry.routeHumanMessages('wechat', 'media-active', [makeChannelMessage('开始')])
 
-    expect(enqueueSpy).toHaveBeenCalledWith({ kind: 'media_notification', text: 'fm-2 ready' })
+    expect(enqueueSpy).toHaveBeenCalledWith(expect.objectContaining({
+      wake: { kind: 'media_notification', text: 'fm-2 ready' },
+      received_at: expect.any(String),
+      timezone: expect.any(String),
+    }))
     expect(wakeUpSpy).toHaveBeenCalledTimes(1)
   })
 
@@ -753,6 +876,13 @@ describe('ManagerRegistry', () => {
     await registry.routeHumanMessages('wechat', 'sess-async', [makeChannelMessage('你好')])
 
     expect(enqueueSpy).toHaveBeenCalledTimes(1)
+    const syntheticEnvelope = enqueueSpy.mock.calls[0][0]
+    expect(syntheticEnvelope.received_at).toBe('2026-01-01T08:00:00+08:00')
+    expect(syntheticEnvelope.occurred_at).toBe('2026-01-01T00:00:00.000Z')
+    expect(syntheticEnvelope.wake).toMatchObject({
+      kind: 'worker_event',
+      event: { kind: 'query_failed', ts: '2026-01-01T00:00:00.000Z' },
+    })
     // wakeUp 只被 routeHumanMessages 自己调用了一次；onAsyncError 没有额外触发第二次 wakeUp
     expect(wakeUpSpy).toHaveBeenCalledTimes(1)
   })
@@ -802,6 +932,15 @@ describe('ManagerRegistry', () => {
     const key = 'wechat::sess-e2e-toolface' as ManagerKey
     const fakeHarness = {
       listWorkers: async (): Promise<LedgerWorker[]> => [],
+      findWorker: async (): Promise<{ managerKey: ManagerKey; worker: LedgerWorker }> => ({
+        managerKey: key,
+        worker: {
+          worker_id: 'w-codex-1', manager_key: key,
+          task: { id: 'w-codex-1', title: 'codex', status: 'running', created_at: '2026-01-01T00:00:00.000Z' },
+          origin: { trigger_type: 'message' }, report_to: { channel_id: 'wechat', session_id: 'sess-e2e-toolface' },
+          incarnations: [], updated_at: '2026-01-01T00:00:00.000Z',
+        },
+      }),
       queryWorker: async (): Promise<never> => {
         throw new CapabilityNotSupportedError('codex', 'fork')
       },
@@ -836,7 +975,6 @@ describe('ManagerRegistry', () => {
           buildManagerToolFace({
             harness: fakeHarness,
             workerContext: () => ({
-              dialogObjectId: dialogObjectIdForPrivate('friend-e2e'),
               managerKey: k,
               reportTo: { channel_id: 'wechat', session_id: 'sess-e2e-toolface' },
             }),
@@ -876,9 +1014,10 @@ describe('inbound-adapters', () => {
     expect(event).toEqual({ kind: 'attention_flush', messages: [m1] })
   })
 
-  it('shouldWakeOnHarnessEvent: 过滤 input_sent，其余 kind 一律唤醒', () => {
+  it('shouldWakeOnHarnessEvent: 过滤 input_sent 与 legacy_imported，其余 kind 一律唤醒', () => {
     const base = { ts: '2026-01-01T00:00:00.000Z', worker_id: 'w-1', seq: 1 }
     expect(shouldWakeOnHarnessEvent({ ...base, kind: 'input_sent' })).toBe(false)
+    expect(shouldWakeOnHarnessEvent({ ...base, kind: 'legacy_imported' })).toBe(false)
 
     const otherKinds: HarnessEventKind[] = [
       'spawned',
