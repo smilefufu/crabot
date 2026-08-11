@@ -75,7 +75,7 @@
 
 - **已修复**：workspace trust、真实 endReason、`finish_task` summary、Codex endpoint/config 继承、TUI 输出解码、spawn/readiness、Claude/Codex 权限、单次 paste/证据化 Enter、真实活性信号、worker bg-shell exit delivery、Admin Chat assertion 与会话级授权。
 - **被新架构取代**：跨重启旧内存 incarnation、已消失 legacy session 的透明 resume、Admin recovery 误杀 idle worker、旧 Admin task/trace 停摆。这些旧问题不能继续按 8 月 3 日的路径修；现行语义是 v2 只读投影 + 新 v3 化身。
-- **仍真实存在**：下面“必须收口”中的 legacy 旁路、跨 session 代发注记缺失、Manager 失败 mailbox 无通用 retry、P6/P8、Admin Chat 占位误认领、实现选择假配置、skill capability 空接线、handoff 真尾与 Codex auth 错误吞没。
+- **仍真实存在**：下面“必须收口”中的 legacy 旁路、跨 session 代发注记缺失、Manager 失败 mailbox 无通用 retry、P6/P8、Admin Chat 占位误认领、实现选择假配置、skill capability 空接线与 Codex auth 错误吞没。
 
 ## 当前 follow-up
 
@@ -107,9 +107,9 @@
    - MCP 已在 PR #84 按固定权限快照接入三种 worker；skill 仍在生产 `CapabilityBundle` 中硬编码 `skills: []`，与原 provision 计划不完整。
    - 需先明确 task-scoped skill 权限/过滤语义，再接入 Claude/Codex 物化和 builtin 对齐。
 
-7. **修复两处局部 adapter/handoff 正确性问题**
-   - handoff 读取 `readOutput(offset=0)` 的首个 50KB，再取其中末 4096 字符；大输出时并非文件真尾，可能把最新交接现场漏掉。
+7. **修复 Codex provision 的鉴权错误吞没**
    - Codex provision 复制 `auth.json` 时 catch 全部错误；除了 `ENOENT`，权限/IO 错误也被静默吞掉，worker 只会在后续启动时表现成鉴权失败。
+   - handoff 输出尾部不再列为问题：`OutputLog.read` 的窗口贴文件末尾，超 cap 也是丢头保尾，当前已能拿到最近现场。
 
 8. **完成 P8 调试与文档收尾**
    - 给 `debug-agent.mjs` 增加 Manager/Worker/ledger/inbox/incarnation 视角；重写内部架构与调试指南，删除 Dispatcher、旧 task、LiteLLM 和错误端口说明。
