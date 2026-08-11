@@ -1,4 +1,4 @@
-import { describe, expect, it, afterEach } from 'vitest'
+import { describe, expect, it, afterEach, vi } from 'vitest'
 import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -31,6 +31,17 @@ describe('v2 legacy importer', () => {
     expect(await importV2LegacyTasks(deps(absent))).toMatchObject({ imported: 0 })
     const empty = await fixture([])
     expect(await importV2LegacyTasks(deps(empty))).toMatchObject({ imported: 0 })
+  })
+
+  it('builds the ledger index once and does not rescan it for every new imported worker', async () => {
+    const f = await fixture([task('one'), task('two'), task('three')])
+    const d = deps(f)
+    const fullLookup = vi.spyOn(d.ledger, 'findWorker')
+
+    await expect(importV2LegacyTasks(d)).resolves.toMatchObject({ imported: 3 })
+
+    expect(fullLookup).not.toHaveBeenCalled()
+    expect(await d.ledger.listAllWorkers()).toHaveLength(3)
   })
 
   it('imports task authority only, maps source/statuses, writes one local event and never mutates sources', async () => {

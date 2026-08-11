@@ -6,6 +6,7 @@ import { AsyncMutex } from '../async-mutex'
 import type { ManagerKey, LedgerWorker, WorkerLedger } from './ledger-types'
 
 const FILE_SUFFIX = '.json'
+const ATOMIC_TEMP_FILE = /^\.tmp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/i
 
 export function encodeSegment(s: string): string {
   return encodeURIComponent(s).replace(/[.!~*'()]/g, ch => '%' + ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'))
@@ -69,13 +70,20 @@ export class LedgerStore {
   }
 
   async findWorker(workerId: string): Promise<{ managerKey: ManagerKey; worker: LedgerWorker } | undefined> {
+    const indexed = await this.findWorkerFromIndex(workerId)
+    if (indexed) return indexed
+    await this.scanAndBuildIndex()
+    return this.findWorkerFromIndex(workerId)
+  }
+
+  /**
+   * Lookup against the initialized in-memory index without a fallback directory rescan.
+   * Intended for controlled startup imports whose writes all go through this same store.
+   */
+  async findWorkerFromIndex(workerId: string): Promise<{ managerKey: ManagerKey; worker: LedgerWorker } | undefined> {
     await this.init()
-    let key = this.workerIndex.get(workerId)
-    if (!key) {
-      await this.scanAndBuildIndex()
-      key = this.workerIndex.get(workerId)
-      if (!key) return undefined
-    }
+    const key = this.workerIndex.get(workerId)
+    if (!key) return undefined
     const ledger = await this.readLedgerFileStrict(key)
     const worker = ledger.workers.find(w => w.worker_id === workerId)
     if (!worker) throw new Error(`[LedgerStore] worker index inconsistent for ${workerId}`)
@@ -213,6 +221,7 @@ export class LedgerStore {
     const entries = await fs.readdir(this.ledgersDir)
     const index = new Map<string, ManagerKey>()
     for (const entry of entries) {
+      if (ATOMIC_TEMP_FILE.test(entry)) continue
       const key = filenameToManagerKey(entry)
       if (!key) {
         if (entry.endsWith(FILE_SUFFIX)) {

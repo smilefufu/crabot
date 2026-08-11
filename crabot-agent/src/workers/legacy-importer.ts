@@ -78,6 +78,7 @@ export async function importV2LegacyTasks(deps: LegacyImporterDeps): Promise<Leg
   const marker = await readMarkerFile(markerPath)
   if (marker?.state === 'completed') return { skipped: true, imported: 0 }
 
+  await deps.ledger.init()
   await assertDirectory(deps.adminDataDir)
   const source = await readTasks(join(deps.adminDataDir, 'tasks.json'))
   const traces = source.tasks.length === 0
@@ -112,7 +113,7 @@ export async function importV2LegacyTasks(deps: LegacyImporterDeps): Promise<Leg
     const workerDir = join(deps.agentDataDir, 'workers', worker.worker_id)
     await writeSnapshot(join(workerDir, 'legacy-task.json'), task)
 
-    const existing = await deps.ledger.findWorker(worker.worker_id)
+    const existing = await deps.ledger.findWorkerFromIndex(worker.worker_id)
     if (!existing) {
       await deps.ledger.importLegacyWorker(worker.manager_key, worker)
       imported++

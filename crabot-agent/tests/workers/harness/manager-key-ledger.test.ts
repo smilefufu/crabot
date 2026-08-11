@@ -70,6 +70,25 @@ describe('ManagerKey ledger contract', () => {
     }
   })
 
+  it('ignores stale atomic-write temp files without weakening unknown filename fail-loud behavior', async () => {
+    const dir = await fs.mkdtemp(join(tmpdir(), 'manager-ledger-temp-recovery-'))
+    try {
+      const staleTemp = join(dir, '.tmp-123e4567-e89b-12d3-a456-426614174000.json')
+      await fs.writeFile(staleTemp, '{"partial":')
+      const store = new LedgerStore(dir)
+
+      await expect(store.init()).resolves.toBeUndefined()
+      expect(await fs.readFile(staleTemp, 'utf8')).toBe('{"partial":')
+      await store.upsertWorker(KEY_A, 'recovered', () => worker('recovered'))
+      expect((await store.listWorkers(KEY_A)).map((item) => item.worker_id)).toEqual(['recovered'])
+
+      await fs.writeFile(join(dir, '.tmp-not-ours.json'), '{}')
+      await expect(new LedgerStore(dir).init()).rejects.toThrow(/invalid.*ledger filename/)
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
   it('fails loud for malformed manager keys and non-canonical ledger filenames', async () => {
     const dir = await fs.mkdtemp(join(tmpdir(), 'manager-ledger-filenames-'))
     try {

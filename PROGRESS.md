@@ -32,11 +32,11 @@
 
 ### 最近验证基线
 
-- legacy importer/read-model/authorization/continuation 定向：15 files / 285 passed；两轮独立 security/correctness review 最终无 blocker/important。
-- 隔离升级副本使用当前生产快照完成真实 v2 导入：2696 tasks → 2696 legacy workers / 2696 `legacy_imported` events；首次 marker `completed`，有源重跑和隐藏源后的 completed fast-path 均跳过，复制源 hash 不变。证据目录：`/tmp/crabot-v2-upgrade-e2e-uF3u3v`。
+- legacy importer/read-model/authorization/continuation 定向：15 files / 285 passed；PR review-fix 扩展回归：17 files / 325 passed。两轮独立 security/correctness review 最终无 blocker/important。
+- 隔离升级副本使用当前生产快照完成真实 v2 导入：2696 tasks → 2696 legacy workers / 2696 `legacy_imported` events；首次 marker `completed`，有源重跑和隐藏源后的 completed fast-path 均跳过，复制源 hash 不变。索引修复后同一快照全量导入耗时 32.96s。证据目录：`/tmp/crabot-v2-upgrade-e2e-uF3u3v`、`/tmp/crabot-v2-import-perf-7A2Wgz`。
 - 全分支独立 review 覆盖授权/assertion、台账/importer 和 Manager/time；TraceStore 源隔离与精确 assertion ID 意见已修复并复审关闭，seq 碰撞按协议既有范围记录为 residual，当前无未解决 blocker/important。
 - Shared 全量：100 passed；Shared build 通过。
-- Agent 全量：2662 passed / 4 failed / 2 skipped。4 个失败均为既有 macOS 环境基线：tmux foreground command 识别差异 1 个，`/var` → `/private/var` realpath 差异 3 个。
+- Agent 全量：2664 passed / 4 failed / 2 skipped。4 个失败均为既有 macOS 环境基线：tmux foreground command 识别差异 1 个，`/var` → `/private/var` realpath 差异 3 个。
 - Admin 全量：1075 passed / 1 failed。唯一失败为既有 `v1-cleanup.test.ts` 扫到 `origin/main` 已存在的测试断言字符串；本分支未引入该引用。Admin focused 81 passed，`build:all` 通过。
 - `CI=true ./dev.sh build`、Agent/Admin/Shared TypeScript build 与全分支 `git diff --check` 通过；禁止回归搜索未发现 worker `dialog_object_id`、`spawned_by_session`、fake legacy adapter 或已退役 resume RPC 注册。
 
