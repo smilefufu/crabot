@@ -7,7 +7,7 @@
 
 ### Manager / Worker v3 已完成生产切换
 
-- PR #80（merge `331fee7`）完成 legacy loop **主执行/RPC 控制链**退役：`wait_for_signal`、legacy task/recovery/resume/cancel/abort RPC 已退出生产；memory graph rebuild 保持 manager-native `trigger_schedule` 路径。2026-08-11 审计另发现两个 event/recovery 旁路仍可达，列入下方必须收口项。
+- PR #80（merge `331fee7`）完成 legacy loop **主执行/RPC 控制链**退役：`wait_for_signal`、legacy task/recovery/resume/cancel/abort RPC 已退出生产；memory graph rebuild 保持 manager-native `trigger_schedule` 路径。2026-08-11 审计另发现两段 event/recovery legacy 死码仍保留，列入下方 P7 清理项。
 - builtin worker 已接入 durable bg-shell exit delivery：registry 以 `pending / delivered / dead_letter` 做 at-least-once 结算，owner 使用 `worker_id`，通知统一经 `WorkerInbox` 投递；pending 不被 terminal cleanup 或 7 日 GC 删除。
 - agent-native、无 incarnation 的 system task 在重启后明确标记 `failed`；worker-only API 对此返回稳定 domain error。
 - PR #82（commit `aa7042d`，已部署）完成 Claude Code / Codex 交互输入提交收口：单层控制状态、单次 paste、证据化 Enter、startup stall/raw 清障、session discovery 与 continuation 语义已统一。
@@ -55,7 +55,7 @@
 ### 结论
 
 - Manager/Worker v3 的**生产核心链路已经收敛**：人类消息只进入 Manager，worker 由不可变 `ManagerKey` 归属；builtin / Claude Code / Codex 三种实现、CLI 输入提交、活性巡检、bg-shell durable notification、Admin Chat assertion、legacy 一次性导入与 fresh-v3 continuation 均已通过真实运行验证。当前没有已知生产 blocker。
-- 但不能表述为“原计划全部完成”。原路线图的 **P6（可观测性与 Admin UI）和 P8（调试工具/内部文档）没有实施**；P7 的主 cutover 已完成，但仍有 legacy Admin task 控制旁路和跨 session 代发注记缺口，尚未达到协议所写的完全退役/上下文一致状态。
+- 但不能表述为“原计划全部完成”。原路线图的 **P6（可观测性与 Admin UI）和 P8（调试工具/内部文档）没有实施**；P7 的主 cutover 已完成，但仍有 legacy Admin task event/recovery 死码未删，并缺少跨 session 代发注记，尚未达到计划中的退役清理/上下文一致状态。
 - `2026-08-03-post-launch-followups.md` 只作为第一版上线现场归档，不再直接当当前 backlog；其中大量问题已被 #65～#82 修复，或被 #80/#86 的 legacy retirement、ManagerKey 与 fresh-v3 continuation 取代。
 
 ### 原路线图对账
@@ -68,23 +68,23 @@
 | P4 Manager loop / 工具面 / 压缩 | 已完成；动态 prompt 状态后来由 PR #86 改为事件尾部输入。 |
 | P5 scheduler / Agent read model / Admin 代理 | `trigger_schedule` 和 worker 四个只读 RPC/REST 已完成；Manager read model 前端消费仍属于未完成的 P6。 |
 | P6 Manager trace / worker 原生 trace / Admin Manager-Worker UI | **未完成。** `/api/agent/managers*` 不存在；Manager episode 未进入 TraceStore；`get_worker_trace` 对 fresh-v3 只返回 harness lifecycle，明确把 adapter `readTrace()` 留给 P6；Admin Web 未消费 `/api/agent/workers*`，旧 conversation-unit/trace UI 仍在。当前实现与 `protocol-agent-v3.md` §10.1/§10.3 存在缺口。 |
-| P7 cutover / legacy import / 旧控制面退役 | 主 cutover、dispatcher 删除、legacy import/continuation 已完成；但 legacy Admin task event/recovery 旁路仍可达，跨 session 代发未写目标 Manager 持久注记，见当前 follow-up。 |
+| P7 cutover / legacy import / 旧控制面退役 | 主 cutover、dispatcher 删除、legacy import/continuation 已完成；但 legacy Admin task event/recovery 死码仍保留，跨 session 代发未写目标 Manager 持久注记，见当前 follow-up。 |
 | P8 调试工具 / 内部架构文档 | **未完成。** `debug-agent.mjs` 没有 Manager/Worker 台账命令；`architecture/crabot-agent-internal.md` 与 `guides/agent-debugging.md` 仍描述 Dispatcher/Front/旧 Admin task/旧端口，甚至保留 LiteLLM 时代内容。 |
 
 ### 第一版上线问题的收敛情况
 
-- **已修复**：workspace trust、真实 endReason、`finish_task` summary、Codex endpoint/config 继承、TUI 输出解码、spawn/readiness、Claude/Codex 权限、单次 paste/证据化 Enter、真实活性信号、worker bg-shell exit delivery、Admin Chat assertion 与会话级授权。
+- **已修复**：workspace trust、真实 endReason、`finish_task` summary、Codex endpoint/config 继承、TUI 输出解码与保尾、spawn/readiness、Claude/Codex 权限、单次 paste/证据化 Enter、真实活性信号、worker bg-shell exit delivery、Admin Chat assertion 与会话级授权。
 - **被新架构取代**：跨重启旧内存 incarnation、已消失 legacy session 的透明 resume、Admin recovery 误杀 idle worker、旧 Admin task/trace 停摆。这些旧问题不能继续按 8 月 3 日的路径修；现行语义是 v2 只读投影 + 新 v3 化身。
-- **仍真实存在**：下面“必须收口”中的 legacy 旁路、跨 session 代发注记缺失、Manager 失败 mailbox 无通用 retry、P6/P8、Admin Chat 占位误认领、实现选择假配置、skill capability 空接线与 Codex auth 错误吞没。
+- **仍真实存在**：下面“必须收口”中的跨 session 代发注记缺失、Manager 失败 mailbox 无通用 retry、P6/P8、Admin Chat 占位误认领、实现选择假配置、skill capability 空接线与 Codex auth 错误吞没；另有 P7 legacy 死码待清理。
 
 ## 当前 follow-up
 
 ### 双 Agent 主线必须收口
 
-1. **移除仍可达的 legacy Admin task 控制旁路（协议违背）**
-   - Agent 仍订阅 `admin.task_status_changed`，终态事件会查询旧 Admin task 并直接向 Admin Chat/channel 发送最终回复，绕过“Manager 是唯一人类出口”。
-   - `module_manager.module_stopped` 的旧 handler 仍调用 `query_tasks` / `update_task_status` 改写 legacy Admin task，违背 Agent ledger 唯一真相源和 importer 源只读边界。
-   - 应先补“订阅/handler/Admin task write 均不存在”的回归测试，再做最小退役删除。
+1. **清理 P7 遗留的 legacy Admin task 死码**
+   - Agent 仍订阅 `admin.task_status_changed`，但正式事件载荷没有旧 handler 要求的 `final_reply`，因此永远在第一道门返回；handler 内调用的 `send_chat_message` 也已无 Admin 注册。
+   - `module_manager.module_stopped` 的旧 handler 首个调用是已退役、未注册的 `query_tasks`，会直接 `METHOD_NOT_FOUND` 并被 catch，后续 `update_task_status` 路径不可达。
+   - 当前不存在绕过 Manager 出口或改写 importer 源的生产行为；follow-up 是删除无效订阅/handler，并补“legacy 控制入口不再存在”的回归测试，完成 P7 退役清理。
 
 2. **为失败 Manager episode 增加通用、带退避的 mailbox retry**
    - 当前成功 episode 收口后会自唤醒 drain；失败 episode 只把正文留在内存 mailbox，依赖下一次真实人类/worker/schedule 事件才能重投。
@@ -109,7 +109,6 @@
 
 7. **修复 Codex provision 的鉴权错误吞没**
    - Codex provision 复制 `auth.json` 时 catch 全部错误；除了 `ENOENT`，权限/IO 错误也被静默吞掉，worker 只会在后续启动时表现成鉴权失败。
-   - handoff 输出尾部不再列为问题：`OutputLog.read` 的窗口贴文件末尾，超 cap 也是丢头保尾，当前已能拿到最近现场。
 
 8. **完成 P8 调试与文档收尾**
    - 给 `debug-agent.mjs` 增加 Manager/Worker/ledger/inbox/incarnation 视角；重写内部架构与调试指南，删除 Dispatcher、旧 task、LiteLLM 和错误端口说明。
@@ -150,8 +149,8 @@
 
 | 范围 | 里程碑 |
 |---|---|
-| Manager/Worker P1～P5 + P7 主链 | 完成 WorkerAdapter、多实现 adapter、ledger/harness、manager loop、read model、scheduler 路由、Admin 只读代理、入站测试网、builtin 注入与 dispatcher cutover；P6 可观测性/UI 和 P8 调试文档未完成，P7 仍有两个 legacy 旁路待删。 |
-| Task 生命周期 | 修复 terminal/revive/new_task 判定、checkpoint 续写、supplement/resume 权限热刷新、goal 生命周期和状态对账；这些 legacy 主入口随后在 8 月 cutover 中退役，残留 event/recovery 旁路另列当前 follow-up。 |
+| Manager/Worker P1～P5 + P7 主链 | 完成 WorkerAdapter、多实现 adapter、ledger/harness、manager loop、read model、scheduler 路由、Admin 只读代理、入站测试网、builtin 注入与 dispatcher cutover；P6 可观测性/UI 和 P8 调试文档未完成，P7 仍有两段 legacy 死码待删。 |
+| Task 生命周期 | 修复 terminal/revive/new_task 判定、checkpoint 续写、supplement/resume 权限热刷新、goal 生命周期和状态对账；这些 legacy 主入口随后在 8 月 cutover 中退役，残留 event/recovery 死码另列当前 follow-up。 |
 | CLI worker | Codex adapter 在 m2 真机校准；Claude/Codex tmux、resume/fork、原生 trace 解析器与交互状态成为 v3 worker 实现；原生 trace 尚未接入 Admin read model/UI。 |
 | Python / 模型配置 | Agent 专用 `agent-venv` 上线；subagent 模型在 delegate 时实时解析，Provider/OAuth 连接信息保持现取。 |
 | Channel / 文件 | 修复飞书图文丢图与外部群 PRD 获取、WeChat 入站文件超时补取、Unicode channel instance id、出站路径白名单限制。 |
