@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import { CoreAgentConfigMutationCoordinator } from './core-agent-config-revision-store.js'
 import { SkillManager } from './mcp-skill-manager.js'
 
@@ -100,6 +101,33 @@ describe('Skill source mutation journal', () => {
       const fake = { schema_version: 1, domain: 'skills', mutation_id: '11111111-1111-4111-8111-111111111111', target_revision: 2, before_registry_sha256: 'a'.repeat(64), after_registry_sha256: 'a'.repeat(64), staged_registry_rel: '.transactions/missing.json', staged_registry_sha256: 'a'.repeat(64), before_runtime_hashes: {}, after_runtime_hashes: {}, before_target_rel: '.transactions/a', after_target_rel: '.transactions/a', before_target_existed: false, stage_rel: '.transactions/a' }
       await fs.writeFile(path.join(journalDir, 'skill-source-journal.json'), JSON.stringify(fake))
       await expect(manager.recoverSourceJournal(coordinator)).rejects.toThrow()
+    } finally { await fs.rm(dir, { recursive: true, force: true }) }
+  })
+
+  it('rejects a journal that aliases a managed target as operation staging', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-skill-journal-path-'))
+    try {
+      const victimDir = path.join(dir, 'skills', 'victim')
+      await fs.mkdir(victimDir, { recursive: true })
+      await fs.writeFile(path.join(victimDir, 'SKILL.md'), skill('victim'))
+      const registry = Buffer.from(JSON.stringify([{
+        id: 'victim-id', name: 'victim', description: 'victim', version: '1', skill_dir: victimDir,
+        source_type: 'imported', is_builtin: false, is_essential: false, can_disable: true, enabled: true,
+        created_at: 't', updated_at: 't',
+      }], null, 2))
+      await fs.writeFile(path.join(dir, 'skills.json'), registry)
+      const digest = createHash('sha256').update(registry).digest('hex')
+      const journalDir = path.join(dir, 'skills', '.transactions')
+      await fs.mkdir(journalDir, { recursive: true })
+      await fs.writeFile(path.join(journalDir, 'skill-source-journal.json'), JSON.stringify({
+        schema_version: 1, domain: 'skills', mutation_id: '11111111-1111-4111-8111-111111111111', target_revision: 2,
+        before_registry_sha256: digest, after_registry_sha256: digest,
+        staged_registry_rel: '.transactions/registry-111111111111111111111111.json', staged_registry_sha256: digest,
+        before_runtime_hashes: {}, after_runtime_hashes: {}, before_target_rel: 'victim', after_target_rel: 'victim',
+        before_target_existed: true, stage_rel: 'victim',
+      }))
+      await expect(new SkillManager(dir).initializeLoadOnly()).rejects.toThrow('Invalid skill transaction path')
+      await expect(fs.readFile(path.join(victimDir, 'SKILL.md'), 'utf8')).resolves.toContain('victim')
     } finally { await fs.rm(dir, { recursive: true, force: true }) }
   })
 

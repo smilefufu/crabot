@@ -724,13 +724,58 @@ export class SkillManager {
     }
     let journal: SkillSourceJournal
     try { journal = JSON.parse(raw.toString('utf8')) } catch { throw new Error('Invalid skill source journal') }
+    const registryBytes = await this.registryBytes()
+    const registryDigest = sha256(registryBytes)
     const stagedRegistry = this.resolveTransactionPath(journal.staged_registry_rel)
-    const stagedExists = await fs.access(stagedRegistry).then(() => true).catch(() => false)
-    if (stagedExists && journal.staged_registry_sha256 !== sha256(await fs.readFile(stagedRegistry))) throw new Error('Invalid skill source journal')
-    if (!stagedExists && (await this.registryDigest()) !== journal.after_registry_sha256) throw new Error('Invalid skill source journal')
-    if (journal.schema_version !== 1 || journal.domain !== 'skills' || !/^[0-9a-f-]{36}$/i.test(journal.mutation_id) || !Number.isSafeInteger(journal.target_revision) || !/^[a-f0-9]{64}$/.test(journal.before_registry_sha256) || !/^[a-f0-9]{64}$/.test(journal.after_registry_sha256) || !/^[a-f0-9]{64}$/.test(journal.staged_registry_sha256)) throw new Error('Invalid skill source journal')
-    for (const rel of [journal.stage_rel, journal.before_target_rel, journal.after_target_rel, journal.backup_rel, journal.retained_rel]) if (rel !== undefined) this.resolveTransactionPath(rel)
+    const stagedRegistryBytes = await fs.readFile(stagedRegistry).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error))
+    if (stagedRegistryBytes && journal.staged_registry_sha256 !== sha256(stagedRegistryBytes)) throw new Error('Invalid skill source journal')
+    if (!stagedRegistryBytes && registryDigest !== journal.after_registry_sha256) throw new Error('Invalid skill source journal')
+    if (journal.schema_version !== 1 || journal.domain !== 'skills' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(journal.mutation_id) || !Number.isSafeInteger(journal.target_revision) || !/^[a-f0-9]{64}$/.test(journal.before_registry_sha256) || !/^[a-f0-9]{64}$/.test(journal.after_registry_sha256) || !/^[a-f0-9]{64}$/.test(journal.staged_registry_sha256)) throw new Error('Invalid skill source journal')
+    this.assertJournalPath(journal.staged_registry_rel, 'registry')
+    this.assertJournalPath(journal.stage_rel, journal.delete_after_commit ? 'quarantine' : 'stage')
+    this.assertJournalPath(journal.before_target_rel, 'target')
+    this.assertJournalPath(journal.after_target_rel, journal.delete_after_commit ? 'quarantine' : 'target')
+    if (journal.backup_rel !== undefined) this.assertJournalPath(journal.backup_rel, 'snapshot')
+    if (journal.retained_rel !== undefined) this.assertJournalPath(journal.retained_rel, journal.delete_after_commit ? 'quarantine' : 'snapshot')
+    for (const hashes of [journal.before_runtime_hashes, journal.after_runtime_hashes]) {
+      if (!hashes || typeof hashes !== 'object' || Array.isArray(hashes) || Object.values(hashes).some((hash) => !/^[a-f0-9]{64}$/.test(hash))) {
+        throw new Error('Invalid skill source journal')
+      }
+    }
+    const beforeRegistry = registryDigest === journal.before_registry_sha256 ? registryBytes : null
+    const afterRegistry = stagedRegistryBytes ?? (registryDigest === journal.after_registry_sha256 ? registryBytes : null)
+    if (journal.before_target_existed && (!beforeRegistry || !this.registryContainsManagedPath(beforeRegistry, journal.before_target_rel))) {
+      throw new Error('Invalid skill source journal')
+    }
+    if (!journal.delete_after_commit && (!afterRegistry || !this.registryContainsManagedPath(afterRegistry, journal.after_target_rel))) {
+      throw new Error('Invalid skill source journal')
+    }
     return journal
+  }
+
+  private assertJournalPath(relative: string, kind: 'registry' | 'stage' | 'target' | 'snapshot' | 'quarantine'): void {
+    this.resolveTransactionPath(relative)
+    const parts = relative.split('/')
+    const valid = kind === 'registry'
+      ? parts.length === 2 && parts[0] === '.transactions' && /^registry-[a-f0-9]{24}\.json$/.test(parts[1])
+      : kind === 'stage'
+        ? parts.length === 1 && /^\.stage\.\d+\.\d+\.[a-f0-9]{8}$/.test(parts[0])
+        : kind === 'snapshot'
+          ? parts.length === 2 && parts[0] === '.snapshots' && /^[a-z0-9][a-z0-9-]{0,63}-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/.test(parts[1])
+          : kind === 'quarantine'
+            ? parts.length === 2 && parts[0] === '.transactions' && /^delete-[a-f0-9]{24}$/.test(parts[1])
+            : parts.length === 1 && isValidSkillName(parts[0])
+    if (!valid) throw new Error('Invalid skill transaction path')
+  }
+
+  private registryContainsManagedPath(registry: Buffer, relative: string): boolean {
+    let parsed: unknown
+    try { parsed = JSON.parse(registry.toString('utf8')) } catch { throw new Error('Invalid skill source journal') }
+    if (!Array.isArray(parsed)) throw new Error('Invalid skill source journal')
+    return parsed.some((entry) => {
+      if (!entry || typeof entry !== 'object' || typeof (entry as { skill_dir?: unknown }).skill_dir !== 'string') return false
+      try { return this.relativeTransactionPath((entry as { skill_dir: string }).skill_dir) === relative } catch { return false }
+    })
   }
 
   private async registryDigest(): Promise<string> { return sha256(await this.registryBytes()) }
@@ -1050,7 +1095,7 @@ export class SkillManager {
     return this.serial(() => this.createUnlocked(params))
   }
 
-  async createUnlocked(params: {
+  private async createUnlocked(params: {
     name: string
     description: string
     content: string
@@ -1224,10 +1269,12 @@ export class SkillManager {
     const quarantine = path.join(this.transactionRoot, `delete-${randomBytes(12).toString('hex')}`)
     const next = new Map(this.skills)
     next.delete(id)
+    const hashes = new Map(this.contentTreeHashes)
+    hashes.delete(id)
     await this.commit(next, async () => {
       await fs.mkdir(this.transactionRoot, { recursive: true, mode: 0o700 })
       await fs.rename(entry.skill_dir, quarantine)
-    }, new Map(this.contentTreeHashes).set(id, '') as Map<string, string>, {
+    }, hashes, {
       before_target_rel: this.relativeTransactionPath(entry.skill_dir), after_target_rel: this.relativeTransactionPath(quarantine), before_target_existed: true,
       stage_rel: this.relativeTransactionPath(quarantine), retained_rel: this.relativeTransactionPath(quarantine), delete_after_commit: true,
     })
