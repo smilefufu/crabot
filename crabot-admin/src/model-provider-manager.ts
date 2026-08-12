@@ -26,6 +26,13 @@ import type {
 } from './types.js'
 import type { OnConflict } from './backup/import/import-types.js'
 import { findPresetVendor } from './vendor-registry.js'
+import type { ConfigDomain } from './core-agent-config-revision-store.js'
+
+export type ProviderConfigMutationRunner = (
+  domains: ConfigDomain[],
+  prepareAfterSnapshot: () => Promise<unknown>,
+  applySourceMutation: () => Promise<void>,
+) => Promise<void>
 
 /**
  * 错误体截断长度。中转/Provider 的 4xx body 经常 >200 字符，截太短看不到根因。
@@ -302,6 +309,8 @@ export class ModelProviderManager {
   private readonly globalConfigFilePath: string
   private readonly moduleConfigsDir: string
   private refreshInFlight: Map<string, Promise<import('./oauth/openai-codex-oauth.js').OAuthLoginResult>> = new Map()
+  private mutationRunner: ProviderConfigMutationRunner | null = null
+  private semanticSnapshotProvider: (() => unknown) | null = null
 
   constructor(dataDir: string) {
     this.dataDir = dataDir
@@ -316,9 +325,28 @@ export class ModelProviderManager {
     await this.loadData()
   }
 
-  // ============================================================================
-  // Provider CRUD
-  // ============================================================================
+  setMutationRunner(runner: ProviderConfigMutationRunner): void {
+    this.mutationRunner = runner
+  }
+
+  private async mutateRuntimeConfig(
+    domains: ConfigDomain[],
+    preview: () => Promise<unknown>,
+    apply: () => Promise<void>,
+  ): Promise<void> {
+    if (this.mutationRunner) return this.mutationRunner(domains, preview, apply)
+    return apply()
+  }
+
+  setSemanticSnapshotProvider(provider: () => unknown): void {
+    this.semanticSnapshotProvider = provider
+  }
+
+  private async previewSemanticSnapshot(temporarilyApply: () => void, rollback: () => void): Promise<unknown> {
+    temporarilyApply()
+    try { return this.semanticSnapshotProvider?.() } finally { rollback() }
+  }
+
 
   async createProvider(params: CreateModelProviderParams): Promise<ModelProvider> {
     const now = generateTimestamp()
@@ -337,10 +365,13 @@ export class ModelProviderManager {
       updated_at: now,
     }
 
-    this.providers.set(provider.id, provider)
-    await this.saveProviders()
-
-    console.log(`[ModelProviderManager] Created provider ${provider.id} (${provider.name})`)
+    await this.mutateRuntimeConfig(['models'], async () => this.previewSemanticSnapshot(
+      () => this.providers.set(provider.id, provider),
+      () => this.providers.delete(provider.id),
+    ), async () => {
+      this.providers.set(provider.id, provider)
+      await this.saveProviders()
+    })
     return provider
   }
 
@@ -358,20 +389,17 @@ export class ModelProviderManager {
       throw new Error('Provider not found')
     }
 
-    // 更新本地数据
-    if (params.name !== undefined) provider.name = params.name
-    if (params.endpoint !== undefined) provider.endpoint = params.endpoint
-    if (params.api_key !== undefined) provider.api_key = params.api_key
-    if (params.models !== undefined) provider.models = params.models
-    if (params.status !== undefined) provider.status = params.status
-
-    provider.updated_at = generateTimestamp()
-
-    this.providers.set(id, provider)
-    await this.saveProviders()
+    const updated = { ...provider, ...params, updated_at: generateTimestamp() }
+    await this.mutateRuntimeConfig(['models'], async () => this.previewSemanticSnapshot(
+      () => this.providers.set(id, updated),
+      () => this.providers.set(id, provider),
+    ), async () => {
+      this.providers.set(id, updated)
+      await this.saveProviders()
+    })
 
     console.log(`[ModelProviderManager] Updated provider ${id}`)
-    return provider
+    return updated
   }
 
   async deleteProvider(id: string): Promise<void> {
@@ -380,17 +408,26 @@ export class ModelProviderManager {
       throw new Error('Provider not found')
     }
 
-    this.providers.delete(id)
-    await this.saveProviders()
-
-    console.log(`[ModelProviderManager] Deleted provider ${id}`)
+    await this.mutateRuntimeConfig(['models'], async () => this.previewSemanticSnapshot(
+      () => this.providers.delete(id),
+      () => this.providers.set(id, provider),
+    ), async () => {
+      this.providers.delete(id)
+      await this.saveProviders()
+    })
   }
 
   async upsertById(provider: ModelProvider, onConflict: OnConflict): Promise<'imported' | 'overwritten' | 'skipped'> {
     const exists = this.providers.has(provider.id)
     if (exists && onConflict === 'skip') return 'skipped'
-    this.providers.set(provider.id, provider)
-    await this.saveProviders()
+    const previous = this.providers.get(provider.id)
+    await this.mutateRuntimeConfig(['models'], async () => this.previewSemanticSnapshot(
+      () => this.providers.set(provider.id, provider),
+      () => { if (previous) this.providers.set(provider.id, previous); else this.providers.delete(provider.id) },
+    ), async () => {
+      this.providers.set(provider.id, provider)
+      await this.saveProviders()
+    })
     return exists ? 'overwritten' : 'imported'
   }
 
@@ -416,8 +453,13 @@ export class ModelProviderManager {
       oauth_credential: credential,
       updated_at: generateTimestamp(),
     }
-    this.providers.set(providerId, updated)
-    await this.saveProviders()
+    await this.mutateRuntimeConfig(['models'], async () => this.previewSemanticSnapshot(
+      () => this.providers.set(providerId, updated),
+      () => this.providers.set(providerId, provider),
+    ), async () => {
+      this.providers.set(providerId, updated)
+      await this.saveProviders()
+    })
   }
 
   async clearOAuthCredential(providerId: string): Promise<void> {
@@ -430,8 +472,13 @@ export class ModelProviderManager {
       api_key: '',
       updated_at: generateTimestamp(),
     }
-    this.providers.set(providerId, updated)
-    await this.saveProviders()
+    await this.mutateRuntimeConfig(['models'], async () => this.previewSemanticSnapshot(
+      () => this.providers.set(providerId, updated),
+      () => this.providers.set(providerId, provider),
+    ), async () => {
+      this.providers.set(providerId, updated)
+      await this.saveProviders()
+    })
   }
 
   getOAuthCredential(providerId: string): OAuthCredential | undefined {
@@ -511,15 +558,19 @@ export class ModelProviderManager {
    */
   private async measureEndpointLatency(provider: ModelProvider): Promise<{ success: boolean; latency_ms: number; error?: string }> {
     const result = await this.probeEndpointConnectivity(provider)
-    if (result.success) {
-      provider.status = 'active'
-      provider.last_validated_at = generateTimestamp()
-      provider.validation_error = undefined
-    } else {
-      provider.status = 'error'
-      provider.validation_error = result.error
+    const previous = { ...provider }
+    const updated = { ...provider,
+      status: result.success ? 'active' as const : 'error' as const,
+      last_validated_at: result.success ? generateTimestamp() : provider.last_validated_at,
+      validation_error: result.success ? undefined : result.error,
     }
-    await this.saveProviders()
+    await this.mutateRuntimeConfig(['models'], async () => this.previewSemanticSnapshot(
+      () => this.providers.set(provider.id, updated),
+      () => this.providers.set(provider.id, previous),
+    ), async () => {
+      this.providers.set(provider.id, updated)
+      await this.saveProviders()
+    })
     return result
   }
 
@@ -748,10 +799,14 @@ export class ModelProviderManager {
 
     const mergedModels = freshModels
 
-    provider.models = mergedModels
-    provider.updated_at = generateTimestamp()
-    this.providers.set(id, provider)
-    await this.saveProviders()
+    const updated = { ...provider, models: mergedModels, updated_at: generateTimestamp() }
+    await this.mutateRuntimeConfig(['models'], async () => this.previewSemanticSnapshot(
+      () => this.providers.set(id, updated),
+      () => this.providers.set(id, provider),
+    ), async () => {
+      this.providers.set(id, updated)
+      await this.saveProviders()
+    })
 
     await this.autoConfigureImageSlot(id)
 
@@ -1002,9 +1057,25 @@ export class ModelProviderManager {
   }
 
   async updateGlobalConfig(config: Partial<GlobalModelConfig>): Promise<GlobalModelConfig> {
-    this.globalConfig = { ...this.globalConfig, ...config }
-    await this.saveGlobalConfig()
-    return this.globalConfig
+    const updated = { ...this.globalConfig, ...config }
+    const domains: ConfigDomain[] = [
+      ...(config.default_llm_provider_id !== undefined || config.default_llm_model_id !== undefined ? ['models' as const] : []),
+      ...(config.default_image_provider_id !== undefined || config.default_image_model_id !== undefined || config.image_slot_user_set !== undefined ? ['image' as const] : []),
+    ]
+    if (domains.length === 0) {
+      this.globalConfig = updated
+      await this.saveGlobalConfig()
+      return updated
+    }
+    const previous = this.globalConfig
+    await this.mutateRuntimeConfig(domains, async () => this.previewSemanticSnapshot(
+      () => { this.globalConfig = updated },
+      () => { this.globalConfig = previous },
+    ), async () => {
+      this.globalConfig = updated
+      await this.saveGlobalConfig()
+    })
+    return updated
   }
 
   // ============================================================================

@@ -559,8 +559,7 @@ export class AdminModule extends ModuleBase {
     super(moduleConfig)
     this.adminConfig = { ...DEFAULT_ADMIN_CONFIG, ...adminConfig }
     this.configMutationCoordinator = new CoreAgentConfigMutationCoordinator(this.adminConfig.data_dir, {
-      // Domain-manager integration supplies their complete nonsecret semantic projection in a later Slice 0 commit.
-      readSemanticSnapshot: () => ({ schema_version: 1, coordinator_foundation: true }),
+      readSemanticSnapshot: () => this.readCoreAgentSemanticSnapshot(),
       publishInvalidation: async ({ config_revision, domains }) => {
         this.publishAdminEvent('admin.agent_config_invalidated', { config_revision, domains })
       },
@@ -613,10 +612,17 @@ export class AdminModule extends ModuleBase {
       getMemoryPort: (mid) => this.getMemoryPort(mid),
     })
 
-    // 注入回调，实现跨模块解耦通信
-    this.agentManager.setOnConfigChanged(() => {
-      this.triggerPushAfter('agent config change')
+    this.agentManager.setSemanticSnapshotProvider(() => this.readCoreAgentSemanticSnapshot())
+    this.modelProviderManager.setSemanticSnapshotProvider(() => this.readCoreAgentSemanticSnapshot())
+    this.agentManager.setMutationRunner(async (domains, preview, apply) => {
+      await this.configMutationCoordinator.mutateComputed(domains, preview, apply)
     })
+    this.modelProviderManager.setMutationRunner(async (domains, preview, apply) => {
+      await this.configMutationCoordinator.mutateComputed(domains, preview, apply)
+    })
+    // AgentManager still emits its legacy local callback for non-core compatibility; core runtime
+    // invalidation is committed by the coordinator above, never by pushConfig.
+    this.agentManager.setOnConfigChanged(() => undefined)
     this.modelProviderManager.setAgentConfigRefsProvider(
       (providerId) => this.agentManager.getReferencesForProvider(providerId)
     )
@@ -765,8 +771,8 @@ export class AdminModule extends ModuleBase {
 
     // 确保数据目录存在
     await fs.mkdir(this.adminConfig.data_dir, { recursive: true })
-    // Recover durable config revision/outbox before any cutover activation or business ingress.
-    await this.configMutationCoordinator.initialize()
+    // Source managers must load before coordinator recovery so its semantic HMAC observes
+    // persisted data rather than empty in-memory maps.
 
     // 生成 internal-token 供 CLI 和 Agent 使用
     const internalTokenPayload: JwtPayload = {
@@ -805,8 +811,10 @@ export class AdminModule extends ModuleBase {
     proxyManager.updateConfig(proxyConfig)
     console.log(`[Admin] Proxy config loaded: mode=${proxyConfig.mode}`)
 
-    // 初始化 Agent 管理器
-    await this.agentManager.initialize()
+    // Recover durable revision/outbox against fully loaded source state before any mutation.
+    await this.configMutationCoordinator.initialize()
+    // Initial core config/default/legacy-role writes now use the recovered coordinator.
+    await this.agentManager.initializeCoreDefaultsAndMigrations()
 
     // 初始化 Channel 管理器
     await this.channelManager.initialize()
@@ -6594,7 +6602,6 @@ export class AdminModule extends ModuleBase {
     this.syncGlobalConfigToMemoryModules().catch((err: Error) => {
       console.warn('[Admin] syncGlobalConfigToMemoryModules after provider update failed:', err.message)
     })
-    this.triggerPushAfter('provider update')
   }
 
   private async handleDeleteProviderApi(_req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
@@ -6608,7 +6615,6 @@ export class AdminModule extends ModuleBase {
     this.syncGlobalConfigToMemoryModules().catch((err: Error) => {
       console.warn('[Admin] syncGlobalConfigToMemoryModules after provider delete failed:', err.message)
     })
-    this.triggerPushAfter('provider delete')
   }
 
   private async handleImportFromVendorApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -6645,7 +6651,6 @@ export class AdminModule extends ModuleBase {
     this.syncGlobalConfigToMemoryModules().catch((err: Error) => {
       console.warn('[Admin] syncGlobalConfigToMemoryModules after vendor import failed:', err.message)
     })
-    this.triggerPushAfter('vendor import')
   }
 
   private async handleTestProviderApi(req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
@@ -6711,7 +6716,6 @@ export class AdminModule extends ModuleBase {
     this.syncGlobalConfigToMemoryModules().catch((err: Error) => {
       console.warn('[Admin] syncGlobalConfigToMemoryModules failed:', err.message)
     })
-    this.triggerPushAfter('global config update')
   }
 
   private async handleGetSystemVersionApi(_req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -8685,6 +8689,42 @@ export class AdminModule extends ModuleBase {
     await this.syncGlobalConfigToMemoryModules().catch((err: Error) => {
       console.warn('[Admin] 启动对账同步 memory 配置失败:', err.message)
     })
+  }
+
+  private readCoreAgentSemanticSnapshot(): unknown {
+    const core = this.agentManager.getSemanticCoreConfig()
+    const global = this.modelProviderManager.getGlobalConfig()
+    const providers = this.modelProviderManager.listProviders()
+      .map((provider) => ({
+        id: provider.id,
+        type: provider.type,
+        format: provider.format,
+        endpoint: provider.endpoint,
+        status: provider.status,
+        auth_type: provider.auth_type ?? null,
+        api_key: provider.api_key,
+        oauth_credential: provider.oauth_credential ?? null,
+        models: provider.models,
+      }))
+      .sort((left, right) => left.id.localeCompare(right.id))
+    return {
+      core_agent: core ? {
+        model_config: core.model_config,
+        system_prompt: core.system_prompt,
+        max_iterations: core.max_iterations,
+        tools_readonly: core.tools_readonly,
+        timezone: core.timezone ?? null,
+        extra: core.extra ?? {},
+      } : null,
+      global: {
+        default_llm_provider_id: global.default_llm_provider_id ?? null,
+        default_llm_model_id: global.default_llm_model_id ?? null,
+        default_image_provider_id: global.default_image_provider_id ?? null,
+        default_image_model_id: global.default_image_model_id ?? null,
+        image_slot_user_set: global.image_slot_user_set ?? null,
+      },
+      providers,
+    }
   }
 
   private async publishAgentConfigInvalidation(): Promise<boolean> {

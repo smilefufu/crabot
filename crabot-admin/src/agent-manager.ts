@@ -21,9 +21,14 @@ import type {
   ModelRole,
 } from './types.js'
 
-// ============================================================================
-// 默认实现定义
-// ============================================================================
+import type { ConfigDomain } from './core-agent-config-revision-store.js'
+
+export type ConfigMutationRunner = (
+  domains: ConfigDomain[],
+  prepareAfterSnapshot: () => Promise<unknown>,
+  applySourceMutation: () => Promise<void>,
+) => Promise<void>
+
 
 export const DEFAULT_IMPLEMENTATION: AgentImplementation = {
   id: 'default',
@@ -205,6 +210,8 @@ export class AgentManager {
   private readonly instancesFilePath: string
   private readonly configsDir: string
   private onConfigChangedCallback: (() => void) | null = null
+  private mutationRunner: ConfigMutationRunner | null = null
+  private semanticSnapshotProvider: (() => unknown) | null = null
 
   constructor(dataDir: string) {
     this.dataDir = dataDir
@@ -217,6 +224,12 @@ export class AgentManager {
     await fs.mkdir(this.dataDir, { recursive: true })
     await fs.mkdir(this.configsDir, { recursive: true })
     await this.loadData()
+    // Standalone manager consumers/tests retain historical defaults. Admin wires the
+    // coordinator before calling the explicit migration method below.
+    if (!this.mutationRunner) await this.ensureDefaults()
+  }
+
+  async initializeCoreDefaultsAndMigrations(): Promise<void> {
     await this.ensureDefaults()
     await this.migrateAllModelConfigs()
   }
@@ -508,8 +521,18 @@ export class AgentManager {
       ...(params.extra !== undefined && { extra: params.extra }),
     }
 
-    this.configs.set(params.instance_id, updated)
-    await this.saveConfig(params.instance_id)
+    const apply = async () => {
+      this.configs.set(params.instance_id, updated)
+      await this.saveConfig(params.instance_id)
+    }
+    if (params.instance_id === 'crabot-agent' && this.mutationRunner) {
+      await this.mutationRunner(['models', 'behavior'], async () => this.previewSemanticSnapshot(
+        () => this.configs.set(params.instance_id, updated),
+        () => this.configs.set(params.instance_id, existing),
+      ), apply)
+    } else {
+      await apply()
+    }
     this.onConfigChangedCallback?.()
     return updated
   }
@@ -519,7 +542,24 @@ export class AgentManager {
     this.onConfigChangedCallback = fn
   }
 
-  /** 获取所有 AgentInstanceConfig 中引用的 (provider_id, model_id) 对 */
+  setMutationRunner(runner: ConfigMutationRunner): void {
+    this.mutationRunner = runner
+  }
+
+  setSemanticSnapshotProvider(provider: () => unknown): void {
+    this.semanticSnapshotProvider = provider
+  }
+
+  private async previewSemanticSnapshot(temporarilyApply: () => void, rollback: () => void): Promise<unknown> {
+    temporarilyApply()
+    try { return this.semanticSnapshotProvider?.() } finally { rollback() }
+  }
+
+  getSemanticCoreConfig(): AgentInstanceConfig | null {
+    return this.configs.get('crabot-agent') ?? null
+  }
+
+
   getUsedModels(): Array<{ provider_id: string; model_id: string }> {
     const result: Array<{ provider_id: string; model_id: string }> = []
     for (const config of this.configs.values()) {
@@ -658,8 +698,18 @@ export class AgentManager {
     // 确保 crabot-agent 配置存在
     if (!this.configs.has('crabot-agent')) {
       const config = { ...DEFAULT_AGENT_CONFIG }
-      this.configs.set('crabot-agent', config)
-      await this.saveConfig('crabot-agent')
+      const apply = async () => {
+        this.configs.set('crabot-agent', config)
+        await this.saveConfig('crabot-agent')
+      }
+      if (this.mutationRunner) {
+        await this.mutationRunner(['models', 'behavior'], async () => this.previewSemanticSnapshot(
+          () => this.configs.set('crabot-agent', config),
+          () => this.configs.delete('crabot-agent'),
+        ), apply)
+      } else {
+        await apply()
+      }
     }
   }
 
@@ -675,8 +725,18 @@ export class AgentManager {
           `[AgentManager] 实例 ${instanceId} model_config 迁移: [${beforeKeys}] → [${afterKeys}]`
         )
         const updatedConfig = { ...config, model_config: migrated }
-        this.configs.set(instanceId, updatedConfig)
-        await this.saveConfig(instanceId)
+        const apply = async () => {
+          this.configs.set(instanceId, updatedConfig)
+          await this.saveConfig(instanceId)
+        }
+        if (instanceId === 'crabot-agent' && this.mutationRunner) {
+          await this.mutationRunner(['models'], async () => this.previewSemanticSnapshot(
+            () => this.configs.set(instanceId, updatedConfig),
+            () => this.configs.set(instanceId, config),
+          ), apply)
+        } else {
+          await apply()
+        }
       }
     }
   }
@@ -707,6 +767,7 @@ export class AgentManager {
   private async saveConfig(instanceId: string): Promise<void> {
     const config = this.configs.get(instanceId)
     if (!config) return
+    await fs.mkdir(this.configsDir, { recursive: true })
     const filePath = path.join(this.configsDir, `${instanceId}.json`)
     await this.atomicWriteFile(filePath, JSON.stringify(config, null, 2))
   }

@@ -133,12 +133,19 @@ export class CoreAgentConfigMutationCoordinator {
     afterSemanticSnapshot: unknown,
     applySourceMutation: () => Promise<void> | void,
   ): Promise<CoreAgentConfigRevisionRecord> {
+    return this.mutateComputed(domains, () => afterSemanticSnapshot, applySourceMutation)
+  }
+  async mutateComputed(
+    domains: ConfigDomain[],
+    computeAfterSemanticSnapshot: () => Promise<unknown> | unknown,
+    applySourceMutation: () => Promise<void> | void,
+  ): Promise<CoreAgentConfigRevisionRecord> {
     await this.initialize()
     return this.serial(async () => {
       const current = await this.current()
       assertDomains(domains)
       const before = await this.fingerprint()
-      const after = this.fingerprintSnapshot(afterSemanticSnapshot)
+      const after = this.fingerprintSnapshot(await computeAfterSemanticSnapshot())
       if (this.equal(before, after)) throw new Error('Config mutation did not change semantic snapshot')
       if (!this.equal(before, current.semantic_fingerprint_hmac)) throw new Error('Core Agent config semantic fingerprint is stale')
       const outbox: CoreAgentConfigMutationOutboxRecord = {
