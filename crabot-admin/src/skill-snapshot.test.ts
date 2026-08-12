@@ -239,6 +239,15 @@ describe('SkillManager.restore', () => {
     await expect(manager.restore(builtin.id)).rejects.toThrow(/是内置的，不能 restore/)
   })
 
+  it('restore keeps exactly the one referenced snapshot', async () => {
+    const { entry: created } = await manager.importFromLocalPath(skillSrcDir)
+    await manager.update(created.id, { content: 'v2', version: '1.1.0' })
+    await manager.restore(created.id)
+    const after = manager.get(created.id)!
+    const snapshotRoot = path.join(tmpData, 'skills', '.snapshots')
+    expect((await fs.readdir(snapshotRoot)).sort()).toEqual([path.basename(after.previous_snapshot!.snapshot_dir)])
+  })
+
   it('连续两次 restore → 来回 swap', async () => {
     const { entry: created } = await manager.importFromLocalPath(skillSrcDir)
     await manager.update(created.id, { content: 'v2', version: '1.1.0' })

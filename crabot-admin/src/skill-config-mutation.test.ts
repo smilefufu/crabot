@@ -36,6 +36,23 @@ describe('Skill source mutation journal', () => {
     } finally { await fs.rm(dir, { recursive: true, force: true }) }
   })
 
+  it('rejects tampered after-state content before coordinator recovery trusts the journal', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-skill-after-tamper-'))
+    try {
+      const manager = new SkillManager(dir); await manager.initializeLoadOnly()
+      const snapshot = () => ({ skills: manager.runtimeSemanticEntries(), storage: manager.semanticMigrationState() })
+      const coordinator = new CoreAgentConfigMutationCoordinator(dir, { readSemanticSnapshot: snapshot, publishInvalidation: () => {}, hooks: { afterPublish: () => { throw new Error('response lost') } } })
+      manager.setSemanticSnapshotProvider(snapshot)
+      manager.setMutationRunner((domains, preview, apply) => coordinator.mutateComputed(domains, preview, apply).then(() => undefined))
+      await coordinator.initialize()
+      await expect(manager.create({ name: 'after-tamper', description: 'x', content: skill('after-tamper') })).rejects.toThrow('response lost')
+      await fs.appendFile(path.join(dir, 'skills', 'after-tamper', 'SKILL.md'), 'tampered')
+      const restarted = new SkillManager(dir); await restarted.initializeLoadOnly()
+      const recovered = new CoreAgentConfigMutationCoordinator(dir, { readSemanticSnapshot: () => ({ skills: restarted.runtimeSemanticEntries(), storage: restarted.semanticMigrationState() }), publishInvalidation: () => {} })
+      await expect(restarted.verifySourceJournalBinding(recovered)).rejects.toThrow('tree mismatch')
+    } finally { await fs.rm(dir, { recursive: true, force: true }) }
+  })
+
   it('projects journal after-state through publish response loss and finalizes it on restart', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-skill-publish-loss-'))
     try {
@@ -56,6 +73,26 @@ describe('Skill source mutation journal', () => {
       await restarted.recoverSourceJournal(recovered)
       await expect(fs.access(journal)).rejects.toThrow()
       expect((await recovered.current()).revision).toBe(2)
+    } finally { await fs.rm(dir, { recursive: true, force: true }) }
+  })
+
+  it('rejects a plain journal digest rewrite without the coordinator HMAC', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-skill-binding-tamper-'))
+    try {
+      const manager = new SkillManager(dir); await manager.initializeLoadOnly()
+      const snapshot = () => ({ skills: manager.runtimeSemanticEntries(), storage: manager.semanticMigrationState() })
+      const coordinator = new CoreAgentConfigMutationCoordinator(dir, { readSemanticSnapshot: snapshot, publishInvalidation: () => {}, hooks: { afterPublish: () => { throw new Error('response lost') } } })
+      manager.setSemanticSnapshotProvider(snapshot)
+      manager.setMutationRunner((domains, preview, apply) => coordinator.mutateComputed(domains, preview, apply).then(() => undefined))
+      await coordinator.initialize()
+      await expect(manager.create({ name: 'binding', description: 'x', content: skill('binding') })).rejects.toThrow('response lost')
+      const outboxPath = path.join(dir, 'config', 'core-agent-config-mutation-outbox.json')
+      const persisted = JSON.parse(await fs.readFile(outboxPath, 'utf8'))
+      persisted.source_journal_sha256 = 'a'.repeat(64)
+      await fs.writeFile(outboxPath, JSON.stringify(persisted))
+      const restarted = new SkillManager(dir); await restarted.initializeLoadOnly()
+      const recovered = new CoreAgentConfigMutationCoordinator(dir, { readSemanticSnapshot: () => ({ skills: restarted.runtimeSemanticEntries(), storage: restarted.semanticMigrationState() }), publishInvalidation: () => {} })
+      await expect(restarted.verifySourceJournalBinding(recovered)).rejects.toThrow('binding mismatch')
     } finally { await fs.rm(dir, { recursive: true, force: true }) }
   })
 

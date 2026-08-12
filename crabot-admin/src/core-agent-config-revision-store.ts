@@ -21,7 +21,8 @@ export interface CoreAgentConfigMutationContext {
   mutation_id: string
   target_revision: number
   bindSourceJournal: (digest: string) => Promise<void>
-  source_journal_hmac?: string
+  markSourceJournalCleanupCompleted: (digest: string) => Promise<void>
+  clearSourceJournalBinding: (digest: string) => Promise<void>
 }
 
 export interface CoreAgentConfigMutationReceipt {
@@ -29,8 +30,10 @@ export interface CoreAgentConfigMutationReceipt {
   mutation_id: string
   target_revision: number
   domains: ConfigDomain[]
+  outcome?: 'committed' | 'aborted'
   source_journal_sha256?: string
   source_journal_hmac?: string
+  source_cleanup_completed?: boolean
 }
 
 export interface CoreAgentConfigMutationOutboxRecord {
@@ -44,6 +47,7 @@ export interface CoreAgentConfigMutationOutboxRecord {
   invalidation_pending: boolean
   source_journal_sha256?: string
   source_journal_hmac?: string
+  source_cleanup_completed?: boolean
 }
 
 export interface ConfigMutationHooks {
@@ -205,6 +209,12 @@ export class CoreAgentConfigMutationCoordinator {
   ): Promise<CoreAgentConfigRevisionRecord> {
     const persistedBeforeInitialize = await readJson<CoreAgentConfigMutationOutboxRecord>(this.outboxPath)
     if (persistedBeforeInitialize) throw new Error('Core Agent config mutation already active')
+    const receiptBeforeInitialize = await readJson<CoreAgentConfigMutationReceipt>(this.receiptPath)
+    if (receiptBeforeInitialize) {
+      await this.ensureKeyReadOnly()
+      this.assertReceipt(receiptBeforeInitialize)
+      if (receiptBeforeInitialize.source_journal_sha256) throw new Error('Core Agent source journal cleanup is still active')
+    }
     await this.initialize()
     return this.serial(async () => {
       const persistedOutbox = await readJson<CoreAgentConfigMutationOutboxRecord>(this.outboxPath)
@@ -239,7 +249,15 @@ export class CoreAgentConfigMutationCoordinator {
           await atomicWrite(this.outboxPath, persisted)
           bound = true
         }
-        await applySourceMutation({ mutation_id: outbox.mutation_id, target_revision: outbox.target_revision, bindSourceJournal })
+        const markSourceJournalCleanupCompleted = async (digest: string): Promise<void> => {
+          if (!bound || digest !== outbox.source_journal_sha256) throw new Error('Source journal binding does not match')
+          await this.markSourceJournalCleanupCompleted(outbox.mutation_id, outbox.target_revision, digest)
+        }
+        const clearSourceJournalBinding = async (digest: string): Promise<void> => {
+          if (!bound || digest !== outbox.source_journal_sha256) throw new Error('Source journal binding does not match')
+          await this.clearCompletedSourceJournalBinding(outbox.mutation_id, outbox.target_revision, digest)
+        }
+        await applySourceMutation({ mutation_id: outbox.mutation_id, target_revision: outbox.target_revision, bindSourceJournal, markSourceJournalCleanupCompleted, clearSourceJournalBinding })
         const observedAfter = await this.fingerprint()
         if (!this.equal(outbox.after_fingerprint_hmac, observedAfter)) throw new Error('Config mutation source did not produce declared semantic snapshot')
         outbox.state = 'data_persisted'
@@ -264,13 +282,47 @@ export class CoreAgentConfigMutationCoordinator {
     this.key = key
   }
 
-  async persistedMutationBinding(): Promise<CoreAgentConfigMutationOutboxRecord | CoreAgentConfigMutationReceipt | null> {
+  async markSourceJournalCleanupCompleted(mutationId: string, targetRevision: number, digest: string): Promise<void> {
+    await this.updateSourceJournalBinding(mutationId, targetRevision, digest, 'mark')
+  }
+
+  async clearCompletedSourceJournalBinding(mutationId: string, targetRevision: number, digest: string): Promise<void> {
+    await this.updateSourceJournalBinding(mutationId, targetRevision, digest, 'clear')
+  }
+
+  private async updateSourceJournalBinding(mutationId: string, targetRevision: number, digest: string, action: 'mark' | 'clear'): Promise<void> {
     await this.ensureKeyReadOnly()
+    let matched = false
+    const update = async <T extends CoreAgentConfigMutationOutboxRecord | CoreAgentConfigMutationReceipt>(file: string, record: T | null): Promise<void> => {
+      if (!record) return
+      if ('state' in record) this.assertOutbox(record); else this.assertReceipt(record)
+      if (record.mutation_id !== mutationId || record.target_revision !== targetRevision || record.source_journal_sha256 !== digest) return
+      if (action === 'mark') {
+        if ('state' in record && record.state !== 'committed') throw new Error('Source journal cleanup is too early')
+        record.source_cleanup_completed = true
+        record.source_journal_hmac = this.sourceJournalBinding(record.mutation_id, record.target_revision, record.domains, digest, true)
+      } else {
+        if (!record.source_cleanup_completed) throw new Error('Source journal cleanup is not completed')
+        delete record.source_journal_sha256
+        delete record.source_journal_hmac
+        delete record.source_cleanup_completed
+      }
+      await atomicWrite(file, record)
+      matched = true
+    }
+    await update(this.outboxPath, await readJson<CoreAgentConfigMutationOutboxRecord>(this.outboxPath))
+    await update(this.receiptPath, await readJson<CoreAgentConfigMutationReceipt>(this.receiptPath))
+    if (!matched) throw new Error('Completed source journal binding does not match')
+  }
+
+  async persistedMutationBinding(): Promise<CoreAgentConfigMutationOutboxRecord | CoreAgentConfigMutationReceipt | null> {
     const outbox = await readJson<CoreAgentConfigMutationOutboxRecord>(this.outboxPath)
+    const receipt = outbox ? null : await readJson<CoreAgentConfigMutationReceipt>(this.receiptPath)
+    if (!outbox && !receipt) return null
+    await this.ensureKeyReadOnly()
     if (outbox) { this.assertOutbox(outbox); return outbox }
-    const receipt = await readJson<CoreAgentConfigMutationReceipt>(this.receiptPath)
-    if (receipt) { this.assertReceipt(receipt); return receipt }
-    return null
+    this.assertReceipt(receipt!)
+    return receipt
   }
 
   async verifyCommittedFingerprint(): Promise<void> {
@@ -315,7 +367,18 @@ export class CoreAgentConfigMutationCoordinator {
     const isBefore = this.equal(currentFingerprint, outbox.before_fingerprint_hmac)
     const isAfter = this.equal(currentFingerprint, outbox.after_fingerprint_hmac)
     if (outbox.state === 'prepared') {
-      if (isBefore) { await fs.rm(this.outboxPath, { force: true }); return }
+      if (isBefore) {
+        if (outbox.source_journal_sha256) {
+          const receipt: CoreAgentConfigMutationReceipt = {
+            schema_version: 1, mutation_id: outbox.mutation_id, target_revision: outbox.target_revision,
+            domains: [...outbox.domains], outcome: 'aborted', source_journal_sha256: outbox.source_journal_sha256,
+            source_journal_hmac: outbox.source_journal_hmac,
+          }
+          await atomicWrite(this.receiptPath, receipt)
+        }
+        await fs.rm(this.outboxPath, { force: true })
+        return
+      }
       if (!isAfter) throw new Error('Ambiguous prepared config mutation recovery')
       outbox.state = 'data_persisted'
       await atomicWrite(this.outboxPath, outbox)
@@ -348,7 +411,9 @@ export class CoreAgentConfigMutationCoordinator {
 
   private async drainOutbox(outbox: CoreAgentConfigMutationOutboxRecord): Promise<void> {
     const receipt: CoreAgentConfigMutationReceipt = {
-      schema_version: 1, mutation_id: outbox.mutation_id, target_revision: outbox.target_revision, domains: [...outbox.domains], source_journal_sha256: outbox.source_journal_sha256, source_journal_hmac: outbox.source_journal_hmac,
+      schema_version: 1, mutation_id: outbox.mutation_id, target_revision: outbox.target_revision, domains: [...outbox.domains], outcome: 'committed',
+      source_journal_sha256: outbox.source_journal_sha256, source_journal_hmac: outbox.source_journal_hmac,
+      source_cleanup_completed: outbox.source_cleanup_completed,
     }
     await atomicWrite(this.receiptPath, receipt)
     if (!outbox.invalidation_pending) { await fs.rm(this.outboxPath, { force: true }); return }
@@ -363,19 +428,19 @@ export class CoreAgentConfigMutationCoordinator {
     if (record.schema_version !== 1 || !Number.isSafeInteger(record.revision) || record.revision < 1 || !/^[a-f0-9]{64}$/.test(record.semantic_fingerprint_hmac)) throw new Error('Invalid core Agent config revision')
   }
 
-  private sourceJournalBinding(mutationId: string, targetRevision: number, domains: ConfigDomain[], digest: string): string {
+  private sourceJournalBinding(mutationId: string, targetRevision: number, domains: ConfigDomain[], digest: string, cleanupCompleted = false): string {
     if (!this.key) throw new Error('Core Agent config coordinator not initialized')
-    return crypto.createHmac('sha256', this.key).update(canonicalizeJson({ mutation_id: mutationId, target_revision: targetRevision, domains, source_journal_sha256: digest }), 'utf8').digest('hex')
+    return crypto.createHmac('sha256', this.key).update(canonicalizeJson({ mutation_id: mutationId, target_revision: targetRevision, domains, source_journal_sha256: digest, source_cleanup_completed: cleanupCompleted }), 'utf8').digest('hex')
   }
 
-  private assertSourceJournalBinding(record: { mutation_id: string; target_revision: number; domains: ConfigDomain[]; source_journal_sha256?: string; source_journal_hmac?: string }): void {
+  private assertSourceJournalBinding(record: { mutation_id: string; target_revision: number; domains: ConfigDomain[]; source_journal_sha256?: string; source_journal_hmac?: string; source_cleanup_completed?: boolean }): void {
     if (record.source_journal_sha256 === undefined && record.source_journal_hmac === undefined) return
-    if (!record.source_journal_sha256 || !record.source_journal_hmac || !/^[a-f0-9]{64}$/.test(record.source_journal_sha256) || !/^[a-f0-9]{64}$/.test(record.source_journal_hmac) || !this.equal(this.sourceJournalBinding(record.mutation_id, record.target_revision, record.domains, record.source_journal_sha256), record.source_journal_hmac)) throw new Error('Core Agent config source journal binding mismatch')
+    if (!record.source_journal_sha256 || !record.source_journal_hmac || !/^[a-f0-9]{64}$/.test(record.source_journal_sha256) || !/^[a-f0-9]{64}$/.test(record.source_journal_hmac) || (record.source_cleanup_completed !== undefined && typeof record.source_cleanup_completed !== 'boolean') || !this.equal(this.sourceJournalBinding(record.mutation_id, record.target_revision, record.domains, record.source_journal_sha256, record.source_cleanup_completed === true), record.source_journal_hmac)) throw new Error('Core Agent config source journal binding mismatch')
   }
 
   private assertReceipt(receipt: CoreAgentConfigMutationReceipt): void {
     this.assertSourceJournalBinding(receipt)
-    if (receipt.schema_version !== 1 || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(receipt.mutation_id) || !Number.isSafeInteger(receipt.target_revision) || receipt.target_revision < 2 || !Array.isArray(receipt.domains) || receipt.domains.length === 0 || (receipt.source_journal_sha256 !== undefined && !/^[a-f0-9]{64}$/.test(receipt.source_journal_sha256))) throw new Error('Invalid core Agent config mutation receipt')
+    if (receipt.schema_version !== 1 || (receipt.outcome !== undefined && !['committed', 'aborted'].includes(receipt.outcome)) || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(receipt.mutation_id) || !Number.isSafeInteger(receipt.target_revision) || receipt.target_revision < 2 || !Array.isArray(receipt.domains) || receipt.domains.length === 0 || (receipt.source_journal_sha256 !== undefined && !/^[a-f0-9]{64}$/.test(receipt.source_journal_sha256))) throw new Error('Invalid core Agent config mutation receipt')
   }
 
   private assertOutbox(outbox: CoreAgentConfigMutationOutboxRecord): void {

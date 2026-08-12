@@ -160,6 +160,17 @@ describe('CoreAgentConfigMutationCoordinator', () => {
     } finally { await cleanup(f.dir) }
   })
 
+  it('does not overwrite a publish-loss outbox with a later mutation', async () => {
+    const f = await fixture({ afterPublish: () => { throw new Error('response lost') } })
+    try {
+      await expect(f.coordinator.mutate(['models'], { provider: 'after', secret: 'initial-secret' }, async () => { f.state.provider = 'after' })).rejects.toThrow('response lost')
+      const original = await fs.readFile(outbox(f.dir), 'utf8')
+      await expect(f.coordinator.mutate(['skills'], { provider: 'later', secret: 'initial-secret' }, async () => { f.state.provider = 'later' })).rejects.toThrow('already active')
+      expect(await fs.readFile(outbox(f.dir), 'utf8')).toBe(original)
+      expect(f.state.provider).toBe('after')
+    } finally { await cleanup(f.dir) }
+  })
+
   it('recovers committed revision and exact pending invalidation after publish response loss', async () => {
     const f = await fixture({ afterPublish: () => { throw new Error('response lost') } })
     try {

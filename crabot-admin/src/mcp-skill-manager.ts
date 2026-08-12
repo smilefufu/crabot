@@ -537,6 +537,8 @@ interface SkillSourceJournal {
   after_registry_sha256: string
   staged_registry_rel: string
   staged_registry_sha256: string
+  before_registry_rel: string
+  before_registry_artifact_sha256: string
   before_runtime_hashes: Record<string, string>
   after_runtime_hashes: Record<string, string>
   before_referenced_paths: string[]
@@ -602,14 +604,26 @@ export class SkillManager {
 
   async verifySourceJournalBinding(coordinator: import('./core-agent-config-revision-store.js').CoreAgentConfigMutationCoordinator): Promise<void> {
     const journal = await this.readJournal()
-    if (!journal) return
     const binding = await coordinator.persistedMutationBinding()
+    if (!journal) {
+      if (binding?.source_journal_sha256) {
+        if (!binding.source_cleanup_completed) throw new Error('Bound Skill source journal is missing')
+        await this.cleanupCompletedJournalArtifacts()
+        await coordinator.clearCompletedSourceJournalBinding(binding.mutation_id, binding.target_revision, binding.source_journal_sha256)
+      }
+      return
+    }
+    if (!binding) throw new Error('Skill source journal binding mismatch')
     const journalBytes = await fs.readFile(this.journalPath)
-    if (!binding || binding.mutation_id !== journal.mutation_id || binding.target_revision !== journal.target_revision || !binding.domains.includes('skills') || binding.source_journal_sha256 !== sha256(journalBytes)) throw new Error(`Skill source journal binding mismatch: ${JSON.stringify({ binding, journal: { mutation_id: journal.mutation_id, target_revision: journal.target_revision, digest: sha256(journalBytes) } })}`)
+    if (!binding || binding.mutation_id !== journal.mutation_id || binding.target_revision !== journal.target_revision || !binding.domains.includes('skills') || binding.source_journal_sha256 !== sha256(journalBytes)) throw new Error('Skill source journal binding mismatch')
     const registryDigest = await this.registryDigest()
-    if (registryDigest === journal.before_registry_sha256) this.contentTreeHashes = new Map(Object.entries(journal.before_runtime_hashes))
-    else if (registryDigest === journal.after_registry_sha256) this.contentTreeHashes = new Map(Object.entries(journal.after_runtime_hashes))
-    else throw new Error('Skill source journal registry digest mismatch')
+    if (registryDigest === journal.before_registry_sha256) {
+      await this.verifyJournalPhysicalState(journal, 'before')
+      this.contentTreeHashes = new Map(Object.entries(journal.before_runtime_hashes))
+    } else if (registryDigest === journal.after_registry_sha256) {
+      await this.verifyJournalPhysicalState(journal, 'after')
+      this.contentTreeHashes = new Map(Object.entries(journal.after_runtime_hashes))
+    } else throw new Error('Skill source journal registry digest mismatch')
   }
 
   async recoverSourceJournal(coordinator: import('./core-agent-config-revision-store.js').CoreAgentConfigMutationCoordinator): Promise<void> {
@@ -620,11 +634,16 @@ export class SkillManager {
     const receipt = await coordinator.lastCompletedMutation()
     const matches = (record: { mutation_id: string; target_revision: number } | null) => record?.mutation_id === journal.mutation_id && record.target_revision === journal.target_revision
     if (!matches(pending) && !matches(recovered) && !matches(receipt)) throw new Error('Skill source journal mutation identity mismatch')
+    const journalBytes = await fs.readFile(this.journalPath)
+    const journalDigest = sha256(journalBytes)
     const digest = await this.registryDigest()
     if (digest === journal.before_registry_sha256) await this.rollbackJournal(journal)
     else if (digest === journal.after_registry_sha256) await this.rollForwardJournal(journal)
     else throw new Error('Skill source journal registry digest mismatch')
+    await coordinator.markSourceJournalCleanupCompleted(journal.mutation_id, journal.target_revision, journalDigest)
     await fs.rm(this.journalPath, { force: true })
+    await fs.rm(this.resolveTransactionPath(journal.before_registry_rel), { force: true })
+    await coordinator.clearCompletedSourceJournalBinding(journal.mutation_id, journal.target_revision, journalDigest)
     await this.load()
     await this.refreshRuntimeContentHashes()
   }
@@ -670,14 +689,21 @@ export class SkillManager {
       const beforeHashes = Object.fromEntries(previousHashes)
       const afterHashes = Object.fromEntries(previewHashes ?? previousHashes)
       const stageRegistry = path.join(this.transactionRoot, `registry-${randomBytes(12).toString('hex')}.json`)
+      const beforeRegistryStage = path.join(this.transactionRoot, `before-registry-${randomBytes(12).toString('hex')}.json`)
       await fs.mkdir(this.transactionRoot, { recursive: true, mode: 0o700 })
       await this.writePrivate(stageRegistry, afterRegistry)
+      if (transaction) await this.writePrivate(beforeRegistryStage, beforeRegistry)
+      let sourceContext: CoreAgentConfigMutationContext | undefined
+      let journalDigest: string | undefined
       const apply = async (context?: CoreAgentConfigMutationContext) => {
+        sourceContext = context
         if (context && transaction) {
           const journal: SkillSourceJournal = {
             schema_version: 1, domain: 'skills', mutation_id: context.mutation_id, target_revision: context.target_revision,
             before_registry_sha256: sha256(beforeRegistry), after_registry_sha256: sha256(afterRegistry),
-            staged_registry_rel: this.relativeTransactionPath(stageRegistry), staged_registry_sha256: sha256(afterRegistry), before_runtime_hashes: beforeHashes, after_runtime_hashes: afterHashes,
+            staged_registry_rel: this.relativeTransactionPath(stageRegistry), staged_registry_sha256: sha256(afterRegistry),
+            before_registry_rel: this.relativeTransactionPath(beforeRegistryStage), before_registry_artifact_sha256: sha256(beforeRegistry),
+            before_runtime_hashes: beforeHashes, after_runtime_hashes: afterHashes,
             before_target_tree_hash: transaction?.before_target_tree_hash, after_target_tree_hash: transaction?.after_target_tree_hash,
             before_referenced_paths: this.registryReferencedPaths(beforeRegistry),
             ...transaction,
@@ -685,7 +711,8 @@ export class SkillManager {
           const journalBytes = Buffer.from(JSON.stringify(journal))
           await this.writePrivate(this.journalPath, journalBytes)
           if (!context?.bindSourceJournal) throw new Error('Missing source journal binding context')
-          await context.bindSourceJournal(sha256(journalBytes))
+          journalDigest = sha256(journalBytes)
+          await context.bindSourceJournal(journalDigest)
         }
         await applyFiles()
         this.skills = next
@@ -707,9 +734,20 @@ export class SkillManager {
         }, apply)
         if (transaction?.moves) await this.cleanupBatchSources(transaction.moves)
         if (transaction?.obsolete_snapshot_rel) await fs.rm(this.resolveTransactionPath(transaction.obsolete_snapshot_rel), { recursive: true, force: true })
-        if (transaction) await fs.rm(this.journalPath, { force: true })
+        if (transaction && this.mutationRunner) {
+          if (!sourceContext || !journalDigest) throw new Error('Missing completed source journal context')
+          await sourceContext.markSourceJournalCleanupCompleted(journalDigest)
+          await fs.rm(this.journalPath, { force: true })
+          await fs.rm(beforeRegistryStage, { force: true })
+          await sourceContext.clearSourceJournalBinding(journalDigest)
+        } else if (transaction) {
+          await fs.rm(beforeRegistryStage, { force: true })
+        }
       } catch (error) {
-        if (!transaction) await fs.rm(stageRegistry, { force: true }).catch(() => {})
+        if (!transaction) {
+          await fs.rm(stageRegistry, { force: true }).catch(() => {})
+          await fs.rm(beforeRegistryStage, { force: true }).catch(() => {})
+        }
         throw error
       }
     }
@@ -762,11 +800,17 @@ export class SkillManager {
     const registryBytes = await this.registryBytes()
     const registryDigest = sha256(registryBytes)
     const stagedRegistry = this.resolveTransactionPath(journal.staged_registry_rel)
+    this.assertJournalPath(journal.staged_registry_rel, 'registry')
+    const beforeRegistryArtifact = this.resolveTransactionPath(journal.before_registry_rel)
+    this.assertJournalPath(journal.before_registry_rel, 'before-registry')
+    const beforeRegistryBytes = await fs.readFile(beforeRegistryArtifact).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error))
+    if (!beforeRegistryBytes || !/^[a-f0-9]{64}$/.test(journal.before_registry_artifact_sha256) || sha256(beforeRegistryBytes) !== journal.before_registry_artifact_sha256 || sha256(beforeRegistryBytes) !== journal.before_registry_sha256) throw new Error('Invalid skill source journal')
     const stagedRegistryBytes = await fs.readFile(stagedRegistry).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error))
     if (stagedRegistryBytes && journal.staged_registry_sha256 !== sha256(stagedRegistryBytes)) throw new Error('Invalid skill source journal')
     if (!stagedRegistryBytes && registryDigest !== journal.after_registry_sha256) throw new Error('Invalid skill source journal')
     if (journal.schema_version !== 1 || journal.domain !== 'skills' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(journal.mutation_id) || !Number.isSafeInteger(journal.target_revision) || !/^[a-f0-9]{64}$/.test(journal.before_registry_sha256) || !/^[a-f0-9]{64}$/.test(journal.after_registry_sha256) || !/^[a-f0-9]{64}$/.test(journal.staged_registry_sha256)) throw new Error('Invalid skill source journal')
-    const beforeRegistry = registryDigest === journal.before_registry_sha256 ? registryBytes : null
+    const beforeRegistry = beforeRegistryBytes
+    if (registryDigest === journal.before_registry_sha256 && !registryBytes.equals(beforeRegistry)) throw new Error('Invalid skill source journal')
     const afterRegistry = stagedRegistryBytes ?? (registryDigest === journal.after_registry_sha256 ? registryBytes : null)
     if (journal.moves) {
       this.assertJournalPath(journal.staged_registry_rel, 'registry')
@@ -800,7 +844,12 @@ export class SkillManager {
       }
     }
     const afterRegistryForRuntime = afterRegistry
-    if (journal.before_target_existed && beforeRegistry && (!this.registryContainsManagedPath(beforeRegistry, journal.before_target_rel))) {
+    if (!journal.before_target_tree_hash || !/^[a-f0-9]{64}$/.test(journal.before_target_tree_hash)) {
+      if (journal.before_target_existed) throw new Error('Invalid skill source journal')
+    }
+    if (!journal.delete_after_commit && (!journal.after_target_tree_hash || !/^[a-f0-9]{64}$/.test(journal.after_target_tree_hash))) throw new Error('Invalid skill source journal')
+    if (journal.obsolete_snapshot_rel !== undefined) this.assertRestoreSnapshotTransition(beforeRegistry, afterRegistryForRuntime, journal)
+    if (journal.before_target_existed && !this.registryContainsManagedPath(beforeRegistry, journal.before_target_rel)) {
       throw new Error('Invalid skill source journal')
     }
     if (!journal.delete_after_commit && (!afterRegistryForRuntime || !this.registryContainsManagedPath(afterRegistryForRuntime, journal.after_target_rel))) {
@@ -809,11 +858,13 @@ export class SkillManager {
     return journal
   }
 
-  private assertJournalPath(relative: string, kind: 'registry' | 'stage' | 'target' | 'snapshot' | 'quarantine'): void {
+  private assertJournalPath(relative: string, kind: 'registry' | 'before-registry' | 'stage' | 'target' | 'snapshot' | 'quarantine'): void {
     this.resolveTransactionPath(relative)
     const parts = relative.split('/')
     const valid = kind === 'registry'
       ? parts.length === 2 && parts[0] === '.transactions' && /^registry-[a-f0-9]{24}\.json$/.test(parts[1])
+      : kind === 'before-registry'
+        ? parts.length === 2 && parts[0] === '.transactions' && /^before-registry-[a-f0-9]{24}\.json$/.test(parts[1])
       : kind === 'stage'
         ? (parts.length === 1 && /^\.stage\.\d+\.\d+\.[a-f0-9]{8}$/.test(parts[0]) || parts.length === 2 && /^\.stage\.\d+\.\d+\.[a-f0-9]{8}$/.test(parts[0]) && /^(target|snapshot)-\d+$/.test(parts[1]))
         : kind === 'snapshot'
@@ -822,6 +873,89 @@ export class SkillManager {
             ? parts.length === 2 && parts[0] === '.transactions' && /^delete-[a-f0-9]{24}$/.test(parts[1])
             : parts.length === 1 && isValidSkillName(parts[0])
     if (!valid) throw new Error('Invalid skill transaction path')
+  }
+
+  private assertRestoreSnapshotTransition(beforeRegistry: Buffer, afterRegistry: Buffer | null, journal: SkillSourceJournal): void {
+    if (!afterRegistry || !journal.obsolete_snapshot_rel || !journal.retained_rel) throw new Error('Invalid skill source journal')
+    this.assertJournalPath(journal.obsolete_snapshot_rel, 'snapshot')
+    this.assertJournalPath(journal.retained_rel, 'snapshot')
+    const parse = (registry: Buffer): Map<string, { skill?: string; snapshot?: string }> => {
+      let entries: unknown
+      try { entries = JSON.parse(registry.toString('utf8')) } catch { throw new Error('Invalid skill source journal') }
+      if (!Array.isArray(entries)) throw new Error('Invalid skill source journal')
+      const result = new Map<string, { skill?: string; snapshot?: string }>()
+      for (const entry of entries) {
+        if (!entry || typeof entry !== 'object' || typeof (entry as { id?: unknown }).id !== 'string') throw new Error('Invalid skill source journal')
+        const value = entry as { id: string; skill_dir?: unknown; previous_snapshot?: { snapshot_dir?: unknown } }
+        result.set(value.id, {
+          skill: typeof value.skill_dir === 'string' ? this.relativeTransactionPath(value.skill_dir) : undefined,
+          snapshot: typeof value.previous_snapshot?.snapshot_dir === 'string' ? value.previous_snapshot.snapshot_dir : undefined,
+        })
+      }
+      return result
+    }
+    const before = parse(beforeRegistry)
+    const after = parse(afterRegistry)
+    const ids = [...before].filter(([, refs]) => refs.skill === journal.before_target_rel && refs.snapshot === journal.obsolete_snapshot_rel).map(([id]) => id)
+    if (ids.length !== 1 || after.get(ids[0])?.skill !== journal.after_target_rel || after.get(ids[0])?.snapshot !== journal.retained_rel || after.get(ids[0])?.snapshot === journal.obsolete_snapshot_rel) {
+      throw new Error('Invalid skill source journal')
+    }
+  }
+
+  private async verifyJournalPhysicalState(journal: SkillSourceJournal, state: 'before' | 'after'): Promise<void> {
+    if (journal.moves) {
+      for (const move of journal.moves) {
+        const before = move.before_rel ? this.resolveTransactionPath(move.before_rel) : undefined
+        const after = this.resolveTransactionPath(move.after_rel)
+        const beforeExists = before ? await fs.access(before).then(() => true).catch(() => false) : false
+        const afterExists = await fs.access(after).then(() => true).catch(() => false)
+        if (state === 'before') {
+          if (move.before_existed) {
+            if (beforeExists) {
+              if (!move.before_tree_hash || move.before_tree_hash !== await this.hashContentTree(before!)) throw new Error('Skill source journal before tree mismatch')
+            } else if (!afterExists || move.after_tree_hash !== await this.hashContentTree(after)) throw new Error('Skill source journal before state is not recoverable')
+          } else if (afterExists && move.after_tree_hash !== await this.hashContentTree(after)) throw new Error('Skill source journal after tree mismatch')
+        } else if (!afterExists || move.after_tree_hash !== await this.hashContentTree(after)) throw new Error('Skill source journal after tree mismatch')
+      }
+      return
+    }
+    const before = this.resolveTransactionPath(journal.before_target_rel!)
+    const after = this.resolveTransactionPath(journal.after_target_rel!)
+    const backup = journal.backup_rel ? this.resolveTransactionPath(journal.backup_rel) : undefined
+    const retained = journal.retained_rel ? this.resolveTransactionPath(journal.retained_rel) : undefined
+    const beforeExists = await fs.access(before).then(() => true).catch(() => false)
+    const afterExists = await fs.access(after).then(() => true).catch(() => false)
+    const backupExists = backup ? await fs.access(backup).then(() => true).catch(() => false) : false
+    const retainedExists = retained ? await fs.access(retained).then(() => true).catch(() => false) : false
+    if (state === 'before') {
+      if (journal.before_target_existed && beforeExists) {
+        const actual = await this.hashContentTree(before)
+        if (journal.before_target_tree_hash === actual) return
+        const recoverySource = backupExists ? backup! : retainedExists ? retained! : undefined
+        if (!recoverySource || journal.before_target_tree_hash !== await this.hashContentTree(recoverySource) || !journal.after_target_tree_hash || journal.after_target_tree_hash !== actual) {
+          throw new Error('Skill source journal before target tree mismatch')
+        }
+      } else if (journal.before_target_existed && (backupExists || retainedExists)) {
+        const recoverySource = backupExists ? backup! : retained!
+        if (!journal.before_target_tree_hash || journal.before_target_tree_hash !== await this.hashContentTree(recoverySource)) throw new Error('Skill source journal before target tree mismatch')
+      } else if (!journal.before_target_existed && afterExists) {
+        if (!journal.after_target_tree_hash || journal.after_target_tree_hash !== await this.hashContentTree(after)) throw new Error('Skill source journal after target tree mismatch')
+      } else if (journal.before_target_existed) throw new Error('Skill source journal before state is not recoverable')
+      return
+    }
+    if (journal.delete_after_commit) {
+      if (beforeExists) throw new Error('Skill source journal deleted target still exists')
+      if (retainedExists && (!journal.before_target_tree_hash || journal.before_target_tree_hash !== await this.hashContentTree(retained!))) throw new Error('Skill source journal delete quarantine mismatch')
+      return
+    }
+    if (!afterExists || !journal.after_target_tree_hash || journal.after_target_tree_hash !== await this.hashContentTree(after)) throw new Error('Skill source journal after target tree mismatch')
+  }
+
+  private async cleanupCompletedJournalArtifacts(): Promise<void> {
+    const entries = await fs.readdir(this.transactionRoot).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? [] : Promise.reject(error))
+    await Promise.all(entries
+      .filter((name) => /^(?:before-)?registry-[a-f0-9]{24}\.json$/.test(name))
+      .map((name) => fs.rm(path.join(this.transactionRoot, name), { force: true })))
   }
 
   private async readLegacyBeforeRegistry(journal: SkillSourceJournal, currentBefore: Buffer | null): Promise<Buffer> {
@@ -1287,7 +1421,8 @@ export class SkillManager {
       const hashes = new Map(this.contentTreeHashes)
       hashes.set(entry.id, await this.hashContentTree(stagedDir))
       await this.commit(next, async () => { await fs.rename(stagedDir, skillDir) }, hashes, {
-        before_target_rel: this.relativeTransactionPath(skillDir), after_target_rel: this.relativeTransactionPath(skillDir), before_target_existed: false, stage_rel: this.relativeTransactionPath(stagedDir),
+        before_target_rel: this.relativeTransactionPath(skillDir), after_target_rel: this.relativeTransactionPath(skillDir), before_target_existed: false,
+        after_target_tree_hash: hashes.get(entry.id), stage_rel: this.relativeTransactionPath(stagedDir),
       })
     } catch (error) {
       await fs.rm(stagedDir, { recursive: true, force: true }).catch(() => {})
@@ -1351,7 +1486,8 @@ export class SkillManager {
         await fs.rename(entry.skill_dir, snapPath)
         try { await fs.rename(staged, skillDir) } catch (error) { await fs.rename(snapPath, entry.skill_dir).catch(() => {}); throw error }
       }, hashes, createsSnapshot ? {
-        before_target_rel: this.relativeTransactionPath(entry.skill_dir), after_target_rel: this.relativeTransactionPath(skillDir), before_target_existed: true, stage_rel: this.relativeTransactionPath(staged),
+        before_target_rel: this.relativeTransactionPath(entry.skill_dir), after_target_rel: this.relativeTransactionPath(skillDir), before_target_existed: true,
+        before_target_tree_hash: this.contentTreeHashes.get(id), after_target_tree_hash: hashes.get(id), stage_rel: this.relativeTransactionPath(staged),
         backup_rel: this.relativeTransactionPath(snapPath),
       } : undefined)
       if (createsSnapshot && entry.previous_snapshot?.snapshot_dir && entry.previous_snapshot.snapshot_dir !== snapRel) {
@@ -1394,7 +1530,8 @@ export class SkillManager {
         await fs.rename(entry.skill_dir, retained)
         try { await fs.rename(stage, entry.skill_dir) } catch (error) { await fs.rename(retained, entry.skill_dir).catch(() => {}); throw error }
       }, hashes, {
-        before_target_rel: this.relativeTransactionPath(entry.skill_dir), after_target_rel: this.relativeTransactionPath(entry.skill_dir), before_target_existed: true, stage_rel: this.relativeTransactionPath(stage), retained_rel: retainedRel,
+        before_target_rel: this.relativeTransactionPath(entry.skill_dir), after_target_rel: this.relativeTransactionPath(entry.skill_dir), before_target_existed: true,
+        before_target_tree_hash: this.contentTreeHashes.get(id), stage_rel: this.relativeTransactionPath(stage), retained_rel: retainedRel,
         obsolete_snapshot_rel: entry.previous_snapshot.snapshot_dir, after_target_tree_hash: hashes.get(id),
       })
     } catch (error) { await fs.rm(stage, { recursive: true, force: true }).catch(() => {}); throw error }
@@ -1421,6 +1558,7 @@ export class SkillManager {
       await fs.rename(entry.skill_dir, quarantine)
     }, hashes, {
       before_target_rel: this.relativeTransactionPath(entry.skill_dir), after_target_rel: this.relativeTransactionPath(quarantine), before_target_existed: true,
+      before_target_tree_hash: this.contentTreeHashes.get(id),
       stage_rel: this.relativeTransactionPath(quarantine), retained_rel: this.relativeTransactionPath(quarantine), delete_after_commit: true,
     })
     await fs.rm(quarantine, { recursive: true, force: true })
@@ -1796,7 +1934,8 @@ export class SkillManager {
         if (targetExisted) { await fs.mkdir(path.dirname(snapshot), { recursive: true }); await fs.rename(target, snapshot) }
         try { await fs.rename(stage, target) } catch (error) { if (targetExisted) await fs.rename(snapshot, target).catch(() => {}); throw error }
       }, hashes, {
-        before_target_rel: this.relativeTransactionPath(existing?.skill_dir ?? target), after_target_rel: this.relativeTransactionPath(target), before_target_existed: targetExisted, stage_rel: this.relativeTransactionPath(stage),
+        before_target_rel: this.relativeTransactionPath(existing?.skill_dir ?? target), after_target_rel: this.relativeTransactionPath(target), before_target_existed: targetExisted,
+        before_target_tree_hash: existing ? this.contentTreeHashes.get(existing.id) : undefined, after_target_tree_hash: hashes.get(entry.id), stage_rel: this.relativeTransactionPath(stage),
         ...(targetExisted ? { backup_rel: snapshotRel } : {}),
       })
       return { entry, was_overwrite: !!existing }
