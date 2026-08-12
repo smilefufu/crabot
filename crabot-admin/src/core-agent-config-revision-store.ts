@@ -119,6 +119,10 @@ export class CoreAgentConfigMutationCoordinator {
         this.record = storedRecord
       }
       if (outbox) await this.recoverOutbox(outbox, false)
+      const liveFingerprint = await this.fingerprint()
+      if (!this.equal(liveFingerprint, this.record!.semantic_fingerprint_hmac)) {
+        throw new Error('Core Agent config semantic fingerprint does not match committed revision')
+      }
       return this.record!
     })
   }

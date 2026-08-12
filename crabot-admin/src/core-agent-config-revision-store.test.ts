@@ -43,6 +43,18 @@ describe('CoreAgentConfigMutationCoordinator', () => {
     } finally { await cleanup(f.dir) }
   })
 
+  it('fails closed when a committed no-outbox source fingerprint no longer matches', async () => {
+    const f = await fixture()
+    try {
+      f.state.provider = 'tampered-after-commit'
+      const restarted = new CoreAgentConfigMutationCoordinator(f.dir, {
+        readSemanticSnapshot: () => ({ provider: f.state.provider, secret: f.state.secret }),
+        publishInvalidation: () => {},
+      })
+      await expect(restarted.initialize()).rejects.toThrow('semantic fingerprint does not match committed revision')
+    } finally { await cleanup(f.dir) }
+  })
+
   it('clears prepared state when source callback never ran and never invokes it during recovery', async () => {
     let calls = 0
     const f = await fixture({ afterPrepared: () => { throw new Error('simulated crash') } })

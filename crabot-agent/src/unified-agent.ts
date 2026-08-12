@@ -56,8 +56,9 @@ import { mcpServerToToolDefinitions } from './agent/mcp-tool-bridge.js'
 import { createTmpPageTools } from './agent/tmp-page-tools.js'
 import { createCrabMessagingServer, type PathMapping, type TaskContext } from './mcp/crab-messaging.js'
 import { toImageConnInfo, imageToolsFor, type ImageConnInfo } from './mcp/crab-image.js'
-import { TraceStore } from './core/trace-store.js'
 import { getAgentTraceDir, getAgentLogsDir, getAgentDataDir, getWorkspaceDir, getDataRootDir, getAdminDataDir } from './core/data-paths.js'
+import { ConfigLoader } from './core/config-loader.js'
+import { TraceStore } from './core/trace-store.js'
 import { importV2LegacyTasks } from './workers/legacy-importer.js'
 import {
   compareLegacyTraceEventEntries,
@@ -427,6 +428,9 @@ export class UnifiedAgent extends ModuleBase {
   private orchestrationConfig: OrchestrationConfig
   private agentConfig?: AgentLayerConfig
   private extra: Record<string, unknown>
+  private configRevision = ConfigLoader.revision
+  private configStale = false
+  private configPullTimer?: ReturnType<typeof setTimeout>
 
   // 端口缓存
   private adminPort?: number
@@ -506,6 +510,7 @@ export class UnifiedAgent extends ModuleBase {
         'admin.friend_updated',
         'admin.friend_deleted',
         'media.download_completed',
+        'admin.agent_config_invalidated',
       ],
     }
 
@@ -593,6 +598,7 @@ export class UnifiedAgent extends ModuleBase {
    * 检查 Agent 是否已配置（LLM API key 是否存在）
    */
   isConfigured(): boolean {
+    if (this.configStale) return false
     const mc = this.agentConfig?.model_config
     if (!mc) return false
     // 任意一个 slot 有配置即认为已配置
@@ -1180,6 +1186,10 @@ export class UnifiedAgent extends ModuleBase {
    */
   protected override async onEvent(event: Event): Promise<void> {
     switch (event.type) {
+      case 'admin.agent_config_invalidated':
+        this.scheduleRuntimeConfigPull()
+        break
+
       case 'channel.message_authorized':
         await this.handleMessageReceived(event.payload as { message: ChannelMessage; friend: Friend; crab_display_name?: string; crab_self_handle?: string })
         break
@@ -1217,6 +1227,43 @@ export class UnifiedAgent extends ModuleBase {
         break
       }
     }
+  }
+
+  private scheduleRuntimeConfigPull(): void {
+    if (this.configPullTimer) return
+    this.configPullTimer = setTimeout(() => {
+      this.configPullTimer = undefined
+      void this.pullRuntimeConfig().catch((error) => {
+        this.configStale = true
+        console.error(`[${this.config.moduleId}] authenticated runtime config pull failed:`, error instanceof Error ? error.message : String(error))
+      })
+    }, 50)
+    this.configPullTimer.unref?.()
+  }
+
+  private async pullRuntimeConfig(): Promise<void> {
+    const adminPort = await this.getAdminPort()
+    const loaded = await ConfigLoader.pull(this.config.moduleId, this.rpcClient, `http://localhost:${adminPort}`)
+    if (loaded.revision < this.configRevision) throw new Error(`Refusing stale config revision ${loaded.revision}`)
+    if (loaded.revision === this.configRevision) return
+    const next = loaded.config
+    if (!next.agent_config) throw new Error('Pulled runtime config has no agent config')
+    const update: UpdateConfigParams = {
+      model_config: next.agent_config.model_config,
+      system_prompt: next.agent_config.system_prompt,
+      mcp_servers: next.agent_config.mcp_servers,
+      skills: next.agent_config.skills,
+      subagents: next.agent_config.subagents,
+      tmp_page_base_url: next.agent_config.tmp_page_base_url,
+      max_iterations: next.agent_config.max_iterations,
+      extra: next.extra,
+      image_config: (next as UnifiedAgentConfig & { image_config?: LLMConnectionInfo }).image_config,
+      image_capability: (next as UnifiedAgentConfig & { image_capability?: { available: boolean; reason?: string } }).image_capability,
+    }
+    await this.handleUpdateConfig(update)
+    this.configRevision = loaded.revision
+    ConfigLoader.acceptRevision(loaded.revision)
+    this.configStale = false
   }
 
   /**

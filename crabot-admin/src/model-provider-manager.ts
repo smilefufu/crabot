@@ -1147,6 +1147,9 @@ export class ModelProviderManager {
       this.globalConfig = {
         default_llm_provider_id: raw.default_llm_provider_id,
         default_llm_model_id: raw.default_llm_model_id,
+        default_image_provider_id: raw.default_image_provider_id,
+        default_image_model_id: raw.default_image_model_id,
+        image_slot_user_set: raw.image_slot_user_set,
         proxy: raw.proxy,
         public_base_url: raw.public_base_url,
         trace_retention_days: raw.trace_retention_days ?? null,

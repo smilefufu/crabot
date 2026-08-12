@@ -802,8 +802,9 @@ export class AdminModule extends ModuleBase {
     // 加载模块 env 配置缓存
     await this.loadModuleEnvConfigCache()
 
-    // 初始化模型供应商管理器
+    // Load all core config source managers without writes before coordinator recovery.
     await this.modelProviderManager.initialize()
+    await this.agentManager.initialize()
     await initVendorRegistry(this.adminConfig.data_dir)
 
     // 加载并应用存储的代理配置
@@ -7181,7 +7182,7 @@ export class AdminModule extends ModuleBase {
   // Agent Config 协议方法
   // ============================================================================
 
-  private async handleGetAgentConfig(params: { instance_id: string }, context?: RpcHandlerContext): Promise<{
+  private async handleGetAgentConfig(params: { instance_id: string }, context?: RpcHandlerContext, attempt = 0): Promise<{
     config_revision: number
     config: ResolvedAgentConfig
   }> {
@@ -7196,6 +7197,7 @@ export class AdminModule extends ModuleBase {
       this.config.moduleId,
       { authorizationBearer: bearer },
     )
+    const revisionBefore = (await this.configMutationCoordinator.current()).revision
     const config = this.agentManager.getConfig(params.instance_id)
     if (!config) {
       throw new Error(`Config not found for instance: ${params.instance_id}`)
@@ -7286,6 +7288,10 @@ export class AdminModule extends ModuleBase {
     )
 
     const revision = (await this.configMutationCoordinator.current()).revision
+    if (revision !== revisionBefore) {
+      if (attempt >= 2) throw new Error('Core Agent config changed during resolution; retry later')
+      return this.handleGetAgentConfig(params, context, attempt + 1)
+    }
     return {
       config_revision: revision,
       config: {
@@ -7767,7 +7773,6 @@ export class AdminModule extends ModuleBase {
       const tempDir = path.join(os.tmpdir(), `openclaw-import-work-${crypto.randomUUID()}`)
       const summary = await runImport({ archivePath, tempDir, selections: body.selections, deps })
 
-      this.triggerPushAfter('openclaw import')
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(summary))
     } catch (err) {

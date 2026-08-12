@@ -29,7 +29,9 @@ interface GetAgentConfigResult {
     max_iterations?: number
     tools_readonly?: boolean
     extra?: Record<string, unknown>
-    /** 对外可达 base URL（admin handleGetAgentConfig 注入），供 worker 拼临时页面链接 */
+    image_config?: LLMConnectionInfo
+    image_capability?: { available: boolean; reason?: string }
+    subagents?: import('../types.js').SubAgentConfig[]
     tmp_page_base_url?: string
   }
 }
@@ -37,6 +39,11 @@ interface GetAgentConfigResult {
 // ============================================================================
 // ConfigLoader
 // ============================================================================
+
+export interface LoadedAgentConfig {
+  config: UnifiedAgentConfig
+  revision: number
+}
 
 export class ConfigLoader {
   private static currentRevision = 0
@@ -66,9 +73,10 @@ export class ConfigLoader {
       throw new Error('[ConfigLoader] Admin endpoint not configured. Agent cannot start without Admin.')
     }
 
-    const config = await this.loadFromAdmin(moduleId, rpcClient, adminEndpoint)
+    const loaded = await this.pull(moduleId, rpcClient, adminEndpoint)
+    this.acceptRevision(loaded.revision)
     console.log(`[ConfigLoader] Loaded config from Admin for ${moduleId}`)
-    return config
+    return loaded.config
   }
 
   /**
@@ -171,16 +179,9 @@ export class ConfigLoader {
   /**
    * 从 Admin 获取配置
    */
-  private static async loadFromAdmin(
-    moduleId: string,
-    rpcClient: RpcClient,
-    adminEndpoint: string
-  ): Promise<UnifiedAgentConfig> {
+  static async pull(moduleId: string, rpcClient: RpcClient, adminEndpoint: string): Promise<LoadedAgentConfig> {
     const adminPort = this.parsePortFromEndpoint(adminEndpoint)
-    if (!adminPort) {
-      throw new Error(`[ConfigLoader] Invalid admin endpoint: ${adminEndpoint}`)
-    }
-
+    if (!adminPort) throw new Error(`[ConfigLoader] Invalid admin endpoint: ${adminEndpoint}`)
     const result = await rpcClient.callSensitive<{ instance_id: string }, GetAgentConfigResult>(
       adminPort,
       'get_agent_config',
@@ -188,15 +189,17 @@ export class ConfigLoader {
       moduleId,
       { authorizationBearer: ConfigLoader.runtimeBearer },
     )
-    if (!Number.isSafeInteger(result.config_revision) || result.config_revision < ConfigLoader.currentRevision) {
-      throw new Error(`[ConfigLoader] Refusing stale config revision ${result.config_revision}`)
+    if (!Number.isSafeInteger(result.config_revision) || result.config_revision < 1) {
+      throw new Error(`[ConfigLoader] Invalid config revision ${result.config_revision}`)
     }
-    if (result.config_revision === ConfigLoader.currentRevision && ConfigLoader.currentRevision !== 0) {
-      return this.convertAdminConfigToLocal(result.config, moduleId)
-    }
-    ConfigLoader.currentRevision = result.config_revision
-    return this.convertAdminConfigToLocal(result.config, moduleId)
+    return { config: this.convertAdminConfigToLocal(result.config, moduleId), revision: result.config_revision }
+  }
 
+  static acceptRevision(revision: number): void {
+    if (!Number.isSafeInteger(revision) || revision < this.currentRevision) {
+      throw new Error(`[ConfigLoader] Refusing stale config revision ${revision}`)
+    }
+    this.currentRevision = revision
   }
 
   /**
@@ -217,6 +220,7 @@ export class ConfigLoader {
       skills: adminConfig.skills,
       tools_readonly: adminConfig.tools_readonly,
       ...(adminConfig.tmp_page_base_url ? { tmp_page_base_url: adminConfig.tmp_page_base_url } : {}),
+      ...(adminConfig.subagents ? { subagents: adminConfig.subagents } : {}),
       specialization: 'Unified agent with front and worker capabilities',
     }
 
@@ -245,6 +249,8 @@ export class ConfigLoader {
       },
       agent_config: agentConfig,
       extra: adminConfig.extra,
+      ...(adminConfig.image_config ? { image_config: adminConfig.image_config } : {}),
+      ...(adminConfig.image_capability ? { image_capability: adminConfig.image_capability } : {}),
     }
   }
 

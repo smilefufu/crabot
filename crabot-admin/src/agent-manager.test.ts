@@ -28,6 +28,7 @@ describe('AgentManager', () => {
 
     agentManager = new AgentManager(testDataDir)
     await agentManager.initialize()
+    await agentManager.initializeStandaloneDefaults()
 
     // Mock RpcClient
     mockRpcClient = {
@@ -55,6 +56,24 @@ describe('AgentManager', () => {
     } catch {
       // 忽略清理错误
     }
+  })
+
+  it('loads persisted core config without default writes and preserves it across restart', async () => {
+    const dir = path.join(process.cwd(), 'test-data', `agent-manager-load-${Date.now()}`)
+    const configDir = path.join(dir, 'agent-configs')
+    try {
+      await fs.mkdir(configDir, { recursive: true })
+      const persisted = { instance_id: 'crabot-agent', system_prompt: 'persisted', model_config: { powerful: { provider_id: 'p', model_id: 'm' } }, max_iterations: 7, tools_readonly: true }
+      await fs.writeFile(path.join(configDir, 'crabot-agent.json'), JSON.stringify(persisted))
+      const manager = new AgentManager(dir)
+      await manager.initialize()
+      expect(manager.getConfig('crabot-agent')).toMatchObject(persisted)
+      const before = await fs.readFile(path.join(configDir, 'crabot-agent.json'), 'utf8')
+      expect(before).toContain('persisted')
+      const restarted = new AgentManager(dir)
+      await restarted.initialize()
+      expect(restarted.getConfig('crabot-agent')).toMatchObject(persisted)
+    } finally { await fs.rm(dir, { recursive: true, force: true }) }
   })
 
   describe('Implementation CRUD', () => {

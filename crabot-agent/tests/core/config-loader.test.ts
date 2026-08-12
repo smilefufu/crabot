@@ -60,14 +60,14 @@ describe('ConfigLoader.loadWithRetry — 启动期拉配置退避重试', () => 
     )
   }
 
-  function fakeRpcClient(failTimes: number, result: unknown = { config: realAdminConfig }) {
+  function fakeRpcClient(failTimes: number, result: unknown = { config_revision: 1, config: realAdminConfig }) {
     let calls = 0
-    const call = vi.fn(async () => {
+    const callSensitive = vi.fn(async () => {
       calls += 1
       if (calls <= failTimes) throw connRefused()
       return result
     })
-    return { client: { call } as unknown as RpcClient, calls: () => calls }
+    return { client: { callSensitive } as unknown as RpcClient, calls: () => calls }
   }
 
   it('admin 前 N 次不可达、之后可达 → 最终拿到真配置（而不是 unconfigured）', async () => {
@@ -85,31 +85,25 @@ describe('ConfigLoader.loadWithRetry — 启动期拉配置退避重试', () => 
     expect(config.agent_config?.mcp_servers).toHaveLength(1)
   })
 
-  it('admin 始终不可达 → 重试耗尽后落 unconfigured 兜底（agent 仍能起来）', async () => {
+  it('admin 始终不可达 → 重试耗尽后 fail closed', async () => {
     const { client, calls } = fakeRpcClient(Number.POSITIVE_INFINITY)
 
-    const config = await ConfigLoader.loadWithRetry(client, 'http://localhost:19002', {
+    await expect(ConfigLoader.loadWithRetry(client, 'http://localhost:19002', {
       budgetMs: 40,
       initialDelayMs: 5,
       maxDelayMs: 5,
-    })
-
+    })).rejects.toThrow('Admin config pull failed permanently')
     expect(calls()).toBeGreaterThan(1)
-    expect(config.module_type).toBe('agent')
-    expect(config.agent_config?.system_prompt).toBe('')
-    expect(config.agent_config?.model_config).toEqual({})
   })
 
-  it('adminEndpoint 未配置属环境问题、不是竞态 → 立即落 unconfigured，不空转重试', async () => {
+  it('adminEndpoint 未配置属环境问题 → fail closed，不空转重试', async () => {
     const { client, calls } = fakeRpcClient(0)
 
-    const config = await ConfigLoader.loadWithRetry(client, undefined, {
+    await expect(ConfigLoader.loadWithRetry(client, undefined, {
       budgetMs: 60_000,
       initialDelayMs: 1,
       maxDelayMs: 2,
-    })
-
+    })).rejects.toThrow('Admin config pull failed permanently')
     expect(calls()).toBe(0)
-    expect(config.agent_config?.system_prompt).toBe('')
   })
 })

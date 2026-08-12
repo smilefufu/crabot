@@ -204,6 +204,8 @@ export class AgentManager {
   private implementations: Map<string, AgentImplementation> = new Map()
   private instances: Map<string, AgentInstance> = new Map()
   private configs: Map<string, AgentInstanceConfig> = new Map()
+  /** Loaded snapshot configs that must only be persisted after coordinator recovery. */
+  private readonly pendingSnapshotConfigMigrations = new Set<string>()
 
   private readonly dataDir: string
   private readonly implementationsFilePath: string
@@ -224,9 +226,15 @@ export class AgentManager {
     await fs.mkdir(this.dataDir, { recursive: true })
     await fs.mkdir(this.configsDir, { recursive: true })
     await this.loadData()
-    // Standalone manager consumers/tests retain historical defaults. Admin wires the
-    // coordinator before calling the explicit migration method below.
-    if (!this.mutationRunner) await this.ensureDefaults()
+  }
+
+  /**
+   * Startup load is deliberately write-free. Admin must attach its coordinator after
+   * all persisted source managers are loaded, then call this method for any migration.
+   */
+  async initializeStandaloneDefaults(): Promise<void> {
+    if (this.mutationRunner) throw new Error('Standalone defaults are not allowed with a coordinator')
+    await this.ensureDefaults()
   }
 
   async initializeCoreDefaultsAndMigrations(): Promise<void> {
@@ -636,28 +644,19 @@ export class AgentManager {
         const data = await fs.readFile(filePath, 'utf-8')
         const config = JSON.parse(data) as AgentInstanceConfig & { model_config?: Record<string, Record<string, unknown>> }
 
-        // 自动迁移：快照格式 → 引用格式
+        // Snapshot migration is deliberately deferred: coordinator must first validate
+        // the exact persisted semantic state, then own the single durable rewrite.
         if (config.model_config) {
-          let migrated = false
-          const migratedModelConfig: Record<string, ModelSlotRef> = {}
-          for (const [key, val] of Object.entries(config.model_config)) {
+          let hasSnapshot = false
+          for (const val of Object.values(config.model_config)) {
             if (val && typeof val === 'object' && 'endpoint' in val) {
-              // 旧快照格式（有 endpoint 字段）
-              if (val.provider_id && typeof val.provider_id === 'string' && typeof val.model_id === 'string') {
-                // 有 provider_id：可提取引用
-                migratedModelConfig[key] = { provider_id: val.provider_id as string, model_id: val.model_id as string }
-              }
-              // 无 provider_id（旧格式遗留数据）：丢弃，fallback 到全局默认
-              migrated = true
-            } else if (val && typeof val === 'object' && 'provider_id' in val && 'model_id' in val && !('endpoint' in val)) {
-              // 已是引用格式
-              migratedModelConfig[key] = { provider_id: val.provider_id as string, model_id: val.model_id as string }
+              hasSnapshot = true
+              break
             }
           }
-          ;(config as { model_config: Record<string, ModelSlotRef> }).model_config = migratedModelConfig
-          if (migrated) {
-            await this.atomicWriteFile(filePath, JSON.stringify(config, null, 2))
-            console.log(`[AgentManager] Migrated config ${file} from snapshot to ref format`)
+          if (hasSnapshot) {
+            this.pendingSnapshotConfigMigrations.add(config.instance_id)
+            console.log(`[AgentManager] Loaded legacy snapshot config ${file}; migration deferred until coordinator is ready`)
           }
         }
 
@@ -713,14 +712,25 @@ export class AgentManager {
     }
   }
 
-  /** 启动时遍历所有实例 model_config，迁移旧 keys 到新 ModelRole */
+  /** 启动时遍历所有实例 model_config，迁移旧 keys 与load-only snapshot到新 ModelRole */
   private async migrateAllModelConfigs(): Promise<void> {
     for (const [instanceId, config] of this.configs.entries()) {
       const oldMc = config.model_config ?? {}
+      const referenceMc: Record<string, ModelSlotRef> = {}
+      for (const [key, value] of Object.entries(oldMc as Record<string, ModelSlotRef & { endpoint?: unknown }>)) {
+        if (value && typeof value === 'object' && 'endpoint' in value) {
+          if (typeof value.provider_id === 'string' && typeof value.model_id === 'string') {
+            referenceMc[key] = { provider_id: value.provider_id, model_id: value.model_id }
+          }
+        } else if (value && typeof value.provider_id === 'string' && typeof value.model_id === 'string') {
+          referenceMc[key] = { provider_id: value.provider_id, model_id: value.model_id }
+        }
+      }
       const beforeKeys = Object.keys(oldMc).sort().join(',')
-      const migrated = migrateModelConfig(oldMc)
+      const migrated = migrateModelConfig(referenceMc)
       const afterKeys = Object.keys(migrated).sort().join(',')
-      if (beforeKeys !== afterKeys) {
+      const snapshotMigration = this.pendingSnapshotConfigMigrations.has(instanceId)
+      if (beforeKeys !== afterKeys || snapshotMigration) {
         console.log(
           `[AgentManager] 实例 ${instanceId} model_config 迁移: [${beforeKeys}] → [${afterKeys}]`
         )
@@ -737,6 +747,7 @@ export class AgentManager {
         } else {
           await apply()
         }
+        this.pendingSnapshotConfigMigrations.delete(instanceId)
       }
     }
   }

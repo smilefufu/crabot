@@ -334,6 +334,36 @@ describe('ModelProviderManager', () => {
       expect(config.default_llm_provider_id).toBe('provider-1')
       expect(config.default_llm_model_id).toBe('model-1')
     })
+
+    it('preserves manual image selection across restart', async () => {
+      await manager.updateGlobalConfig({
+        default_image_provider_id: 'image-provider',
+        default_image_model_id: 'image-model',
+        image_slot_user_set: true,
+      })
+      const newManager = new ModelProviderManager(testDataDir)
+      await newManager.initialize()
+      expect(newManager.getGlobalConfig()).toMatchObject({
+        default_image_provider_id: 'image-provider',
+        default_image_model_id: 'image-model',
+        image_slot_user_set: true,
+      })
+    })
+
+    it('preserves auto-selected image fields across restart', async () => {
+      await manager.updateGlobalConfig({
+        default_image_provider_id: 'auto-image-provider',
+        default_image_model_id: 'auto-image-model',
+        image_slot_user_set: false,
+      })
+      const newManager = new ModelProviderManager(testDataDir)
+      await newManager.initialize()
+      expect(newManager.getGlobalConfig()).toMatchObject({
+        default_image_provider_id: 'auto-image-provider',
+        default_image_model_id: 'auto-image-model',
+        image_slot_user_set: false,
+      })
+    })
   })
 
   describe('upsertById', () => {
