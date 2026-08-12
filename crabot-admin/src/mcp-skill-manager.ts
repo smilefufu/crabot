@@ -750,18 +750,22 @@ export class SkillManager {
     if (!stagedRegistryBytes && registryDigest !== journal.after_registry_sha256) throw new Error('Invalid skill source journal')
     if (journal.schema_version !== 1 || journal.domain !== 'skills' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(journal.mutation_id) || !Number.isSafeInteger(journal.target_revision) || !/^[a-f0-9]{64}$/.test(journal.before_registry_sha256) || !/^[a-f0-9]{64}$/.test(journal.after_registry_sha256) || !/^[a-f0-9]{64}$/.test(journal.staged_registry_sha256)) throw new Error('Invalid skill source journal')
     const beforeRegistry = registryDigest === journal.before_registry_sha256 ? registryBytes : null
+    const afterRegistry = stagedRegistryBytes ?? (registryDigest === journal.after_registry_sha256 ? registryBytes : null)
     if (journal.moves) {
       this.assertJournalPath(journal.staged_registry_rel, 'registry')
-      if (!Array.isArray(journal.moves) || journal.moves.length === 0) throw new Error('Invalid skill source journal')
+      if (!afterRegistry || !Array.isArray(journal.moves) || journal.moves.length === 0) throw new Error('Invalid skill source journal')
+      const authoritativeBefore = await this.readLegacyBeforeRegistry(journal, beforeRegistry)
+      const expectedReferences = this.registryReferencedPaths(authoritativeBefore)
+      if (canonicalizeJson(expectedReferences) !== canonicalizeJson(journal.before_referenced_paths)) throw new Error('Invalid skill source journal')
       for (const move of journal.moves) {
         if (!move || typeof move !== 'object' || typeof move.after_rel !== 'string' || typeof move.stage_rel !== 'string' || typeof move.before_existed !== 'boolean' || !/^[a-f0-9]{64}$/.test(move.after_tree_hash) || (move.before_tree_hash !== undefined && !/^[a-f0-9]{64}$/.test(move.before_tree_hash))) throw new Error('Invalid skill source journal')
         this.assertJournalPath(move.stage_rel, 'stage')
         this.assertJournalPath(move.after_rel, move.after_rel.startsWith('.snapshots/') ? 'snapshot' : 'target')
+        if (move.before_rel !== undefined) this.assertJournalPath(move.before_rel, move.before_rel.startsWith('.snapshots/') ? 'snapshot' : 'target')
+        this.assertLegacyMoveMapping(authoritativeBefore, afterRegistry, move)
         if (move.cleanup_rel !== undefined) {
           if (!move.before_existed || move.cleanup_rel !== move.before_rel) throw new Error('Invalid skill source journal')
-          if (!Array.isArray(journal.before_referenced_paths) || journal.before_referenced_paths.some((path) => typeof path !== 'string')) throw new Error('Invalid skill source journal')
-          if (!journal.before_referenced_paths.includes(move.cleanup_rel)) throw new Error('Invalid skill source journal')
-          if (beforeRegistry && !this.registryReferencesPath(beforeRegistry, move.cleanup_rel)) throw new Error('Invalid skill source journal')
+          if (!expectedReferences.includes(move.cleanup_rel)) throw new Error('Invalid skill source journal')
         }
       }
       return journal
@@ -778,11 +782,11 @@ export class SkillManager {
         throw new Error('Invalid skill source journal')
       }
     }
-    const afterRegistry = stagedRegistryBytes ?? (registryDigest === journal.after_registry_sha256 ? registryBytes : null)
+    const afterRegistryForRuntime = afterRegistry
     if (journal.before_target_existed && (!beforeRegistry || !this.registryContainsManagedPath(beforeRegistry, journal.before_target_rel))) {
       throw new Error('Invalid skill source journal')
     }
-    if (!journal.delete_after_commit && (!afterRegistry || !this.registryContainsManagedPath(afterRegistry, journal.after_target_rel))) {
+    if (!journal.delete_after_commit && (!afterRegistryForRuntime || !this.registryContainsManagedPath(afterRegistryForRuntime, journal.after_target_rel))) {
       throw new Error('Invalid skill source journal')
     }
     return journal
@@ -801,6 +805,48 @@ export class SkillManager {
             ? parts.length === 2 && parts[0] === '.transactions' && /^delete-[a-f0-9]{24}$/.test(parts[1])
             : parts.length === 1 && isValidSkillName(parts[0])
     if (!valid) throw new Error('Invalid skill transaction path')
+  }
+
+  private async readLegacyBeforeRegistry(journal: SkillSourceJournal, currentBefore: Buffer | null): Promise<Buffer> {
+    if (!journal.legacy_backup_rel || !/^skills\.json\.bak-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/.test(journal.legacy_backup_rel) || !journal.legacy_backup_sha256 || !/^[a-f0-9]{64}$/.test(journal.legacy_backup_sha256)) {
+      throw new Error('Invalid skill source journal')
+    }
+    const backupPath = path.join(path.dirname(this.filePath), journal.legacy_backup_rel)
+    const backup = await fs.readFile(backupPath).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error))
+    if (backup && (sha256(backup) !== journal.legacy_backup_sha256 || sha256(backup) !== journal.before_registry_sha256)) {
+      throw new Error('Invalid skill source journal')
+    }
+    const authoritative = currentBefore ?? backup
+    if (!authoritative || sha256(authoritative) !== journal.before_registry_sha256) throw new Error('Invalid skill source journal')
+    return authoritative
+  }
+
+  private assertLegacyMoveMapping(beforeRegistry: Buffer, afterRegistry: Buffer, move: SkillSourceMove): void {
+    const parse = (registry: Buffer): Map<string, Set<string>> => {
+      let entries: unknown
+      try { entries = JSON.parse(registry.toString('utf8')) } catch { throw new Error('Invalid skill source journal') }
+      if (!Array.isArray(entries)) throw new Error('Invalid skill source journal')
+      const result = new Map<string, Set<string>>()
+      for (const entry of entries) {
+        if (!entry || typeof entry !== 'object' || typeof (entry as { id?: unknown }).id !== 'string' || result.has((entry as { id: string }).id)) {
+          throw new Error('Invalid skill source journal')
+        }
+        const refs = new Set<string>()
+        const value = entry as { id: string; skill_dir?: unknown; previous_snapshot?: { snapshot_dir?: unknown } }
+        for (const candidate of [value.skill_dir, value.previous_snapshot?.snapshot_dir]) {
+          if (typeof candidate !== 'string') continue
+          try { refs.add(candidate.startsWith('.snapshots/') ? candidate : this.relativeTransactionPath(candidate)) } catch { /* external paths are not journal move targets */ }
+        }
+        result.set(value.id, refs)
+      }
+      return result
+    }
+    const before = parse(beforeRegistry)
+    const after = parse(afterRegistry)
+    const matchingIds = [...after].filter(([, refs]) => refs.has(move.after_rel)).map(([id]) => id)
+    if (matchingIds.length !== 1) throw new Error('Invalid skill source journal')
+    const beforeRefs = before.get(matchingIds[0])
+    if (!beforeRefs || (move.before_rel !== undefined && !beforeRefs.has(move.before_rel))) throw new Error('Invalid skill source journal')
   }
 
   private registryContainsManagedPath(registry: Buffer, relative: string): boolean {
