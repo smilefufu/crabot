@@ -7,9 +7,10 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
+import crypto from 'node:crypto'
+import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
-import http from 'node:http'
 import {
   type Request,
   type Response,
@@ -52,8 +53,10 @@ import { terminateProcessTree, waitForProcessTreeExit } from './process-tree.js'
 // 类型定义
 // ============================================================================
 
+interface RpcHandlerContext { authorizationBearer?: string }
+
 interface MethodHandler<P = unknown, R = unknown> {
-  (params: P): Promise<R> | R
+  (params: P, context?: RpcHandlerContext): Promise<R> | R
 }
 
 interface EventSubscription {
@@ -96,6 +99,9 @@ export class ModuleManager {
   private readonly healthRecoveries: Set<ModuleId> = new Set()
   private readonly subscriptions: EventSubscription[] = []
   private readonly methodHandlers: Map<string, MethodHandler> = new Map()
+  private readonly runtimeBearers = new Map<ModuleId, { token: string; child: ChildProcess; revoked: boolean }>()
+  private readonly cutoverBearers = new Map<ModuleId, { token: string; child: ChildProcess; revoked: boolean }>()
+  private managementOnly = true
 
   private server: http.Server | null = null
   private healthCheckTimer: NodeJS.Timeout | null = null
@@ -113,6 +119,9 @@ export class ModuleManager {
 
     // 注册所有方法处理器
     this.registerMethod('register', this.handleRegister.bind(this))
+    this.registerMethod('verify_core_agent_runtime', this.handleVerifyCoreAgentRuntime.bind(this))
+    this.registerMethod('complete_core_agent_cutover', this.handleCompleteCoreAgentCutover.bind(this))
+
     this.registerMethod('unregister', this.handleUnregister.bind(this))
     this.registerMethod('allocate_port', this.handleAllocatePort.bind(this))
     this.registerMethod('start_module', this.handleStartModule.bind(this))
@@ -285,7 +294,12 @@ export class ModuleManager {
 
     try {
       const params = request?.params ?? {}
-      const result = await handler(params)
+      const authorization = req.headers.authorization
+      const authorizationBearer = authorization?.startsWith('Bearer ') ? authorization.slice(7) : undefined
+      if (authorization && (!authorization.startsWith('Bearer ') || !authorizationBearer || /[\r\n]/.test(authorizationBearer))) {
+        throw Object.assign(new Error('Invalid Authorization metadata'), { code: 'UNAUTHORIZED' })
+      }
+      const result = await handler(params, { authorizationBearer })
       const response = createSuccessResponse(request?.id ?? generateId(), result)
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(response))
@@ -324,6 +338,47 @@ export class ModuleManager {
   // ============================================================================
   // API 方法实现
   // ============================================================================
+
+  private handleVerifyCoreAgentRuntime(
+    params: { expected_module_id: 'crabot-agent' },
+    context?: RpcHandlerContext,
+  ): { verified: true } {
+    if (params.expected_module_id !== 'crabot-agent' || !context?.authorizationBearer) {
+      throw Object.assign(new Error('Missing runtime credential'), { code: 'UNAUTHORIZED' })
+    }
+    const record = this.runtimeBearers.get('crabot-agent')
+    if (!record || record.revoked || record.child.exitCode !== null) {
+      throw Object.assign(new Error('Runtime credential revoked'), { code: 'FORBIDDEN' })
+    }
+    const a = Buffer.from(record.token); const b = Buffer.from(context.authorizationBearer)
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      throw Object.assign(new Error('Invalid runtime credential'), { code: 'FORBIDDEN' })
+    }
+    return { verified: true }
+  }
+
+  private async handleCompleteCoreAgentCutover(
+    params: { schema_version: 1; admin_archive_fingerprint: string; admin_archived_record_count: number },
+    context?: RpcHandlerContext,
+  ): Promise<{ schema_version: 1; completed: true; completed_at: string; admin_archive_fingerprint: string; admin_archived_record_count: number; mm_archived_module_ids: ModuleId[]; process_trees_confirmed_stopped: true }> {
+    const record = this.cutoverBearers.get('admin-web')
+    if (!record || record.revoked || !context?.authorizationBearer) throw Object.assign(new Error('Invalid cutover bearer'), { code: 'FORBIDDEN' })
+    const a = Buffer.from(record.token); const b = Buffer.from(context.authorizationBearer)
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) throw Object.assign(new Error('Invalid cutover bearer'), { code: 'FORBIDDEN' })
+    if (params.schema_version !== 1) throw Object.assign(new Error('Invalid cutover schema'), { code: 'INVALID_PARAMS' })
+    const archived: ModuleId[] = []
+    for (const runtime of this.modules.values()) {
+      if (runtime.module_type === 'agent' && runtime.module_id !== 'crabot-agent' && runtime.status !== 'stopped') {
+        await this.stopModuleProcess(runtime.module_id, 'forced')
+        archived.push(runtime.module_id)
+      }
+    }
+    this.managementOnly = false
+    record.revoked = true
+    const result = { schema_version: 1 as const, completed: true as const, completed_at: generateTimestamp(), admin_archive_fingerprint: params.admin_archive_fingerprint, admin_archived_record_count: params.admin_archived_record_count, mm_archived_module_ids: archived, process_trees_confirmed_stopped: true as const }
+    void this.startAutoStartModules()
+    return result
+  }
 
   // --- 模块注册 ---
 
@@ -419,12 +474,23 @@ export class ModuleManager {
     })
   }
 
+  private assertAgentLifecycleAllowed(moduleId: ModuleId): void {
+    const runtime = this.modules.get(moduleId)
+    if (runtime?.module_type === 'agent' && moduleId !== 'crabot-agent') {
+      throw Object.assign(new Error('Only builtin crabot-agent may run'), { code: 'MODULE_MANAGER_AGENT_SINGLETON_ONLY' })
+    }
+  }
+
   private async handleStartModule(params: {
     module_id: ModuleId
     entry_override?: string
     env?: Record<string, string>
   }): Promise<{ status: 'accepted'; tracking_id: string }> {
     this.assertLifecycleRequestsAllowed()
+    if (this.managementOnly && params.module_id !== 'admin-web') {
+      throw Object.assign(new Error('Module Manager is in management-only cutover mode'), { code: 'MODULE_MANAGER_CUTOVER_INCOMPLETE' })
+    }
+    this.assertAgentLifecycleAllowed(params.module_id)
     const trackingId = generateId()
     this.cancelAutoRestart(params.module_id)
 
@@ -592,6 +658,10 @@ export class ModuleManager {
     module_definition: ModuleDefinition
   }): { module_id: ModuleId; registered: true } {
     const def = params.module_definition
+
+    if (def.module_type === 'agent') {
+      throw Object.assign(new Error('Only builtin crabot-agent may be registered'), { code: 'MODULE_MANAGER_AGENT_SINGLETON_ONLY' })
+    }
 
     // 检查是否支持热插拔
     if (!this.config.hotplug_allowed_types.includes(def.module_type)) {
@@ -836,24 +906,46 @@ export class ModuleManager {
         ? { CRABOT_ADMIN_ENDPOINT: `http://localhost:${adminRpcPort}` }
         : {}
 
+    const childEnv: Record<string, string> = {
+      ...process.env,
+      ...runtime.env,
+      ...envOverride,
+      Crabot_MODULE_ID: moduleId,
+      Crabot_PORT: String(runtime.port),
+      CRABOT_MM_PORT: String(this.config.port),
+      CRABOT_MM_ENDPOINT: `http://localhost:${this.config.port}`,
+      ...(adminRpcPort && moduleId !== 'admin-web' ? { CRABOT_ADMIN_ENDPOINT: `http://localhost:${adminRpcPort}` } : {}),
+      ...(moduleId === 'admin-web' ? { CRABOT_ADMIN_CUTOVER_BEARER: (() => { const token = crypto.randomBytes(32).toString('base64url'); (runtime as ModuleRuntime & { _pendingCutover?: { token: string; child: ChildProcess; revoked: boolean } })._pendingCutover = { token, child: undefined as unknown as ChildProcess, revoked: false }; return token })() } : {}),
+    }
+    // Only the exact core Agent receives a per-child runtime credential.
+    if (moduleId === 'crabot-agent') {
+      const token = crypto.randomBytes(32).toString('base64url')
+      const bearer = { token, child: undefined as unknown as ChildProcess, revoked: false }
+      childEnv.CRABOT_CORE_AGENT_RUNTIME_BEARER = token
+      // bound to the exact child immediately after spawn below
+      ;(runtime as ModuleRuntime & { _pendingBearer?: typeof bearer })._pendingBearer = bearer
+    } else {
+      delete childEnv.CRABOT_CORE_AGENT_RUNTIME_BEARER
+    }
+
     const proc = spawn(command, args, {
       cwd: runtime.cwd,
-      env: {
-        ...process.env,
-        ...runtime.env,
-        ...envOverride,
-        Crabot_MODULE_ID: moduleId,
-        Crabot_PORT: String(runtime.port),
-        // MM 是自身端口的权威来源：显式注入回连端口/地址。
-        // 否则动态注册的模块（如 channel）env 里没有 CRABOT_MM_PORT，
-        // RpcClient 会 fallback 到默认 19000，在多实例/端口偏移部署下连到错误的 MM。
-        CRABOT_MM_PORT: String(this.config.port),
-        CRABOT_MM_ENDPOINT: `http://localhost:${this.config.port}`,
-        ...adminEndpointOverride,
-      },
+      env: childEnv,
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: process.platform !== 'win32',
     })
+    const pendingBearer = (runtime as ModuleRuntime & { _pendingBearer?: { token: string; child: ChildProcess; revoked: boolean } })._pendingBearer
+    if (pendingBearer) {
+      pendingBearer.child = proc
+      this.runtimeBearers.set(moduleId, pendingBearer)
+      delete (runtime as ModuleRuntime & { _pendingBearer?: unknown })._pendingBearer
+    }
+    const pendingCutover = (runtime as ModuleRuntime & { _pendingCutover?: { token: string; child: ChildProcess; revoked: boolean } })._pendingCutover
+    if (pendingCutover) {
+      pendingCutover.child = proc
+      this.cutoverBearers.set(moduleId, pendingCutover)
+      delete (runtime as ModuleRuntime & { _pendingCutover?: unknown })._pendingCutover
+    }
 
     this.processes.set(moduleId, proc)
     runtime.pid = proc.pid
@@ -1090,6 +1182,11 @@ export class ModuleManager {
     state.finalizeStarted = true
     state.finalReason = state.intentionalReason ?? 'crashed'
     const runtime = this.modules.get(state.moduleId)
+    const bearer = this.runtimeBearers.get(state.moduleId)
+    if (bearer && bearer.child === state.child) bearer.revoked = true
+    const cutover = this.cutoverBearers.get(state.moduleId)
+    if (cutover && cutover.child === state.child) cutover.revoked = true
+
 
     try {
       await this.ensureChildTreeTerminated(state)
@@ -1397,7 +1494,7 @@ export class ModuleManager {
 
   private async startAutoStartModules(): Promise<void> {
     const autoStartModules = Array.from(this.modules.values())
-      .filter((m) => m.auto_start)
+      .filter((m) => m.auto_start && (!this.managementOnly || m.module_id === 'admin-web'))
       .sort((a, b) => a.start_priority - b.start_priority)
 
     for (const module of autoStartModules) {

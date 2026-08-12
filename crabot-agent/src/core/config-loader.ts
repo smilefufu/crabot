@@ -18,6 +18,7 @@ import type {
 // ============================================================================
 
 interface GetAgentConfigResult {
+  config_revision: number
   config: {
     instance_id: string
     role: 'front' | 'worker'
@@ -38,6 +39,18 @@ interface GetAgentConfigResult {
 // ============================================================================
 
 export class ConfigLoader {
+  private static currentRevision = 0
+
+  static get revision(): number { return ConfigLoader.currentRevision }
+  static captureRuntimeBearer(): void {
+    const bearer = process.env.CRABOT_CORE_AGENT_RUNTIME_BEARER
+    if (bearer) {
+      Object.defineProperty(ConfigLoader, 'runtimeBearer', { value: bearer, writable: false, configurable: true })
+      delete process.env.CRABOT_CORE_AGENT_RUNTIME_BEARER
+    }
+  }
+  private static runtimeBearer?: string
+
   /**
    * 加载配置
    * Admin 是唯一的配置来源，获取失败则报错
@@ -88,13 +101,13 @@ export class ConfigLoader {
     const maxDelayMs = options.maxDelayMs ?? 2_000
 
     // endpoint 没配是环境问题，不是启动竞态，重试只会白等一个预算
+    let lastError = ''
     if (adminEndpoint) {
       const startedAt = Date.now()
       const deadline = startedAt + budgetMs
       let delay = initialDelayMs
       let attempts = 0
       let lastLoggedAt = 0
-      let lastError = ''
 
       for (;;) {
         attempts += 1
@@ -134,8 +147,8 @@ export class ConfigLoader {
       console.warn('[ConfigLoader] Failed to load config from Admin: Admin endpoint not configured')
     }
 
-    console.warn('Starting in unconfigured mode, waiting for config push from Admin...')
-    return this.createUnconfiguredConfig()
+    // 配置拉取失败必须 fail closed；不再启动可操作的 unconfigured Agent。
+    throw new Error(`[ConfigLoader] Admin config pull failed permanently: ${lastError || 'unknown error'}`)
   }
 
   /**
@@ -168,17 +181,22 @@ export class ConfigLoader {
       throw new Error(`[ConfigLoader] Invalid admin endpoint: ${adminEndpoint}`)
     }
 
-    const result = await rpcClient.call<
-      { instance_id: string },
-      GetAgentConfigResult
-    >(
+    const result = await rpcClient.callSensitive<{ instance_id: string }, GetAgentConfigResult>(
       adminPort,
       'get_agent_config',
       { instance_id: moduleId },
-      moduleId
+      moduleId,
+      { authorizationBearer: ConfigLoader.runtimeBearer },
     )
-
+    if (!Number.isSafeInteger(result.config_revision) || result.config_revision < ConfigLoader.currentRevision) {
+      throw new Error(`[ConfigLoader] Refusing stale config revision ${result.config_revision}`)
+    }
+    if (result.config_revision === ConfigLoader.currentRevision && ConfigLoader.currentRevision !== 0) {
+      return this.convertAdminConfigToLocal(result.config, moduleId)
+    }
+    ConfigLoader.currentRevision = result.config_revision
     return this.convertAdminConfigToLocal(result.config, moduleId)
+
   }
 
   /**

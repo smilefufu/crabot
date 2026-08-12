@@ -27,6 +27,8 @@ import { VersionService } from './version/version-service.js'
 import { startUpgrade, canUpgrade, isUpgradeInProgress } from './version/upgrade-runner.js'
 import { readArchiveTextFile, listArchiveEntries } from './openclaw-import/archive-reader.js'
 import { extractArchiveSubtree } from './openclaw-import/extract-subtree.js'
+import { CoreAgentConfigRevisionStore } from './core-agent-config-revision-store.js'
+import { CORE_AGENT_DEFINITION } from './core-agent-definition.js'
 import { BrowserManager } from './browser-manager.js'
 import { PermissionTemplateManager } from './permission-template-manager.js'
 import { decodePathSegment, isPathSafeSegment } from './http-path.js'
@@ -43,6 +45,7 @@ import {
   proxyManager,
   ProxyManager,
   type ProxyConfig,
+  type RpcHandlerContext,
   CLAIM_COMMANDS,
   CLAIM_PAIR_COMMANDS,
   normalizeSlash,
@@ -442,6 +445,7 @@ async function wrapJsonHandler(res: ServerResponse, errorLabel: string, fn: () =
  */
 export class AdminModule extends ModuleBase {
   private readonly adminConfig: AdminConfig
+  private readonly revisionStore: CoreAgentConfigRevisionStore
   private webServer: http.Server | null = null
   private jwtSecret: string = ''
 
@@ -549,6 +553,7 @@ export class AdminModule extends ModuleBase {
   ) {
     super(moduleConfig)
     this.adminConfig = { ...DEFAULT_ADMIN_CONFIG, ...adminConfig }
+    this.revisionStore = new CoreAgentConfigRevisionStore(this.adminConfig.data_dir)
 
     // 数据文件路径：constructor 里就算好，生命周期内不可变
     this.friendsFilePath = path.join(this.adminConfig.data_dir, 'friends.json')
@@ -986,9 +991,9 @@ export class AdminModule extends ModuleBase {
           if (typeof port === 'number' && port > 0) {
             this.agentPort = port
           }
-          console.log(`[Admin] Agent module ${module_id} started (port=${port}), pushing config as safety net...`)
-          this.pushConfigToAgentModules().catch((err: Error) => {
-            console.warn(`[Admin] Failed to push config to ${module_id}: ${err.message}`)
+          console.log(`[Admin] Agent module ${module_id} started (port=${port}), publishing invalidation hint...`)
+          this.publishAgentConfigInvalidation().catch((err: Error) => {
+            console.warn(`[Admin] Failed to publish config invalidation for ${module_id}: ${err.message}`)
           })
         }
         // 新启动的模块推送代理配置
@@ -7035,17 +7040,46 @@ export class AdminModule extends ModuleBase {
     this.publishAdminEvent('admin.agent_instance_deleted', { instance_id: params.instance_id })
     return { deleted: true }
   }
+  async completeCoreAgentCutover(): Promise<void> {
+    const bearer = process.env.CRABOT_ADMIN_CUTOVER_BEARER
+    if (!bearer) throw new Error('Missing CRABOT_ADMIN_CUTOVER_BEARER')
+    delete process.env.CRABOT_ADMIN_CUTOVER_BEARER
+    await this.rpcClient.callModuleManagerSensitive(
+      'complete_core_agent_cutover',
+      { schema_version: 1, admin_archive_fingerprint: 'empty-inventory', admin_archived_record_count: 0 },
+      this.config.moduleId,
+      { authorizationBearer: bearer },
+    )
+  }
 
   // ============================================================================
   // Agent Config 协议方法
   // ============================================================================
 
-  private async handleGetAgentConfig(params: { instance_id: string }): Promise<{
+  private async handleGetAgentConfig(params: { instance_id: string }, context?: RpcHandlerContext): Promise<{
+    config_revision: number
     config: ResolvedAgentConfig
   }> {
+    if (params.instance_id !== 'crabot-agent') {
+      throw new Error('Only exact core Agent may pull runtime config')
+    }
+    const bearer = context?.authorizationBearer
+    if (!bearer) throw new Error('UNAUTHORIZED')
+    await this.rpcClient.callModuleManagerSensitive(
+      'verify_core_agent_runtime',
+      { expected_module_id: 'crabot-agent' },
+      this.config.moduleId,
+      { authorizationBearer: bearer },
+    )
     const config = this.agentManager.getConfig(params.instance_id)
     if (!config) {
       throw new Error(`Config not found for instance: ${params.instance_id}`)
+    }
+
+    // 未知 slot 不属于 v3 静态 core definition，拒绝而不是 fallback 到旧实现。
+    const modelRoles = CORE_AGENT_DEFINITION.model_roles ?? []
+    for (const key of Object.keys(config.model_config)) {
+      if (!modelRoles.some((role) => role.key === key)) throw new Error(`Unknown core Agent model role: ${key}`)
     }
 
     // 全局默认 LLM 配置（作为 fallback，未配置时为 null）
@@ -7059,9 +7093,8 @@ export class AdminModule extends ModuleBase {
       // 首次安装时全局 LLM 未配置，允许返回空 model_config
     }
 
-    // 获取实现定义的 model_roles（含 fallback 元数据）
-    const impl = this.agentManager.getImplementation('default')
-    const modelRoles = impl?.model_roles ?? []
+    // 获取静态 core Agent model_roles（legacy registry不参与运行时）
+    const impl = CORE_AGENT_DEFINITION
 
     // 实时解析每个 slot 引用为连接信息，按 model_roles 遍历
     const resolvedModelConfig: Record<string, LLMConnectionInfo> = {}
@@ -7094,24 +7127,6 @@ export class AdminModule extends ModuleBase {
       // fallback === 'none' 且未配置 → 不加入 resolvedModelConfig
     }
 
-    // 处理用户配置了但不在 model_roles 中的 slot（向前兼容）
-    for (const [key, ref] of Object.entries(config.model_config)) {
-      if (processedKeys.has(key)) continue
-      try {
-        resolvedModelConfig[key] = await this.modelProviderManager.buildConnectionInfo(
-          ref.provider_id, ref.model_id
-        ) as LLMConnectionInfo
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error)
-        if (globalLLM) {
-          console.warn(`[Admin] Unknown slot "${key}" resolve failed: ${msg}, using global default`)
-          resolvedModelConfig[key] = globalLLM
-        } else {
-          console.warn(`[Admin] Unknown slot "${key}" resolve failed: ${msg}, no global default available`)
-        }
-      }
-    }
-
     // 所有 enabled MCP server 都对所有 agent 实例可见——
     // 不再区分 builtin / user-installed，不再读 config.mcp_server_ids（已 @deprecated）
     const enabledMcpServers = this.mcpServerManager.list().filter((s) => s.enabled)
@@ -7128,7 +7143,7 @@ export class AdminModule extends ModuleBase {
       return agentConfig
     })
 
-    // subagents：startup pull 时就带上（与 pushConfigToAgentModules 同源 buildSubAgentConfigsForPush）。
+    // subagents：startup pull 时就带上，避免 Agent 启动期 subagents 空窗。
     // 历史 bug：subagents 只走 push 不走 get_agent_config → agent 启动时 this.subAgents 为空，
     // worker loop 在 push 送达前 snapshot 就拿到空列表 → goal 审计找不到 builtin-goal-auditor →
     // end-turn gate fail open → goal 任务没满足目标就被放完成。startup 就带上从根上消除该 race。
@@ -7145,7 +7160,9 @@ export class AdminModule extends ModuleBase {
       await this.modelProviderManager.resolveImageConfig(),
     )
 
+    const revision = (await this.revisionStore.load()).revision
     return {
+      config_revision: revision,
       config: {
         ...config,
         model_config: resolvedModelConfig,
@@ -8461,8 +8478,8 @@ export class AdminModule extends ModuleBase {
       this.pushDebouncedReasons = []
       this.pushDebounceTimer = undefined
       const reasonLabel = reasons.length === 1 ? reasons[0] : `${reasons.length} triggers: ${reasons.join(', ')}`
-      this.pushConfigToAgentModules().catch((err: Error) => {
-        console.warn(`[Admin] pushConfigToAgentModules after ${reasonLabel} failed:`, err.message)
+      this.publishAgentConfigInvalidation().catch((err: Error) => {
+        console.warn(`[Admin] config invalidation after ${reasonLabel} failed:`, err.message)
       })
     }, 200)
     this.pushDebounceTimer.unref?.()
@@ -8543,51 +8560,19 @@ export class AdminModule extends ModuleBase {
    * 运行」的模块，两者无缝衔接、消除竞态。端口经 MM resolve 自解析，无运行模块时安全 no-op。
    */
   async reconcileRunningModuleConfigs(): Promise<void> {
-    await this.pushConfigToAgentModules()
+    await this.publishAgentConfigInvalidation()
     await this.syncGlobalConfigToMemoryModules().catch((err: Error) => {
       console.warn('[Admin] 启动对账同步 memory 配置失败:', err.message)
     })
   }
 
-  private async pushConfigToAgentModules(): Promise<boolean> {
-    try {
-      const port = await this.ensureAgentPort()
-      if (!port) return false
-
-      // 复用 handleGetAgentConfig 的配置解析逻辑
-      const { config } = await this.handleGetAgentConfig({ instance_id: 'crabot-agent' })
-
-      // 拿原始 instance config（用于解析 model_role + 透传 timeout 字段）
-      const instance = this.agentManager.getConfig('crabot-agent')
-      const subagents = instance
-        ? await this.buildSubAgentConfigsForPush(instance, config.model_config)
-        : []
-
-      // 推送可热更新的字段
-      const updateParams = {
-        model_config: config.model_config,
-        skills: config.skills,
-        extra: config.extra,
-        subagents,
-        tmp_page_base_url: config.tmp_page_base_url,
-        image_config: config.image_config,
-        image_capability: config.image_capability,
-      }
-
-      const result = await this.rpcClient.call<typeof updateParams, { restart_required: boolean; changed_fields: string[] }>(
-        port, 'update_config', updateParams, this.config.moduleId
-      )
-      console.log(
-        `[Admin] Agent config pushed, changed: ${result.changed_fields?.join(', ') || 'none'}` +
-        ` (subagents: ${subagents.length})`
-      )
-      return true
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e)
-      const stack = e instanceof Error && e.stack ? `\n${e.stack}` : ''
-      console.warn(`[Admin] Failed to push config to Agent:`, msg, stack)
-      return false
-    }
+  private async publishAgentConfigInvalidation(): Promise<boolean> {
+    const revision = (await this.revisionStore.load()).revision
+    this.publishAdminEvent('admin.agent_config_invalidated', {
+      config_revision: revision,
+      domains: ['models', 'image', 'mcp', 'skills', 'subagents', 'behavior'],
+    })
+    return true
   }
 
   /**
@@ -10166,7 +10151,7 @@ export class AdminModule extends ModuleBase {
   private async resolveAgentPort(): Promise<void> {
     try {
       const agentModules = await this.rpcClient.resolve(
-        { module_type: 'agent' },
+        { module_id: 'crabot-agent' },
         this.config.moduleId
       )
       if (agentModules.length > 0) {

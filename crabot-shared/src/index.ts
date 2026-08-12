@@ -48,6 +48,10 @@ export {
   type ModuleConfig,
   type ModuleMetadata,
   type RpcTraceContext,
+  type RpcHandlerContext,
+  type SensitiveRpcTransportOptions,
+  type SensitiveRpcMethod,
+  isSensitiveRpcCall,
   type TraceStoreInterface,
 } from './module-base.js'
 

@@ -107,7 +107,27 @@ export interface ModuleMetadata {
 /**
  * 方法处理器
  */
-type MethodHandler<P = unknown, R = unknown> = (params: P) => Promise<R> | R
+type MethodHandler<P = unknown, R = unknown> = (params: P, context?: RpcHandlerContext) => Promise<R> | R
+
+export interface RpcHandlerContext {
+  authorizationBearer?: string
+}
+
+export interface SensitiveRpcTransportOptions {
+  authorizationBearer?: string
+}
+
+export type SensitiveRpcMethod = 'get_agent_config' | 'resolve_worker_connection' | 'verify_core_agent_runtime' | 'complete_core_agent_cutover' | 'consume_admin_chat_assertion' | 'consume_worker_operation_assertion' | 'process_message' | 'install_worker_implementation' | 'start_worker_implementation_setup' | 'verify_worker_implementation' | 'cancel_worker_implementation_operation' | 'attach_worker_implementation_setup_stream'
+
+export function isSensitiveRpcCall(method: string, params: unknown): boolean {
+  if (method === 'process_message') return !!params && typeof params === 'object' && (params as { source_type?: unknown }).source_type === 'admin_chat'
+  return new Set<SensitiveRpcMethod>([
+    'get_agent_config', 'resolve_worker_connection', 'verify_core_agent_runtime', 'complete_core_agent_cutover',
+    'consume_admin_chat_assertion', 'consume_worker_operation_assertion', 'install_worker_implementation',
+    'start_worker_implementation_setup', 'verify_worker_implementation', 'cancel_worker_implementation_operation',
+    'attach_worker_implementation_setup_stream',
+  ]).has(method as SensitiveRpcMethod)
+}
 
 /**
  * 回调处理器
@@ -179,6 +199,28 @@ export class RpcClient {
     source: ModuleId,
     traceCtx?: RpcTraceContext
   ): Promise<R> {
+    if (isSensitiveRpcCall(method, params)) {
+      throw new RpcError('SENSITIVE_RPC_REQUIRES_NO_TRACE_TRANSPORT', `Sensitive RPC "${method}" must use callSensitive()`)
+    }
+    return this.callInternal(targetPort, method, params, source, traceCtx)
+  }
+
+  async callSensitive<P, R>(targetPort: number, method: SensitiveRpcMethod, params: P, source: ModuleId, options: SensitiveRpcTransportOptions = {}): Promise<R> {
+    return this.callInternal(targetPort, method, params, source, undefined, options)
+  }
+
+  async callModuleManagerSensitive<P, R>(method: SensitiveRpcMethod, params: P, source: ModuleId, options: SensitiveRpcTransportOptions = {}): Promise<R> {
+    return this.callSensitive(this.moduleManagerPort, method, params, source, options)
+  }
+
+  private async callInternal<P, R>(
+    targetPort: number,
+    method: string,
+    params: P,
+    source: ModuleId,
+    traceCtx?: RpcTraceContext,
+    options: SensitiveRpcTransportOptions = {}
+  ): Promise<R> {
     const request: Request<P> = {
       id: generateId(),
       source,
@@ -213,6 +255,7 @@ export class RpcClient {
           headers: {
             'Content-Type': 'application/json',
             'Content-Length': Buffer.byteLength(body),
+            ...(options.authorizationBearer ? { Authorization: `Bearer ${options.authorizationBearer}` } : {}),
           },
         },
         (res) => {
@@ -625,11 +668,15 @@ export abstract class ModuleBase {
     }
 
     try {
-      // 提取参数
       const params = request?.params ?? this.parseQueryParams(req.url ?? '')
+      const authorization = req.headers.authorization
+      const authorizationBearer = authorization?.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : undefined
+      if (authorization && (!authorization.startsWith('Bearer ') || !authorizationBearer || /[\r\n]/.test(authorizationBearer))) {
+        throw new RpcError('UNAUTHORIZED', 'Invalid Authorization metadata')
+      }
 
       // 调用处理器
-      const result = await handler(params)
+      const result = await handler(params, { authorizationBearer })
 
       // 如果是 AcceptedResponse，保持格式
       if (

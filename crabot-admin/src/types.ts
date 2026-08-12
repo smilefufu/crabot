@@ -1768,6 +1768,7 @@ export interface AdminEventPayloads {
   'admin.agent_instance_updated': { instance: AgentInstance }
   'admin.agent_instance_deleted': { instance_id: string }
   'admin.agent_instance_config_updated': { instance_id: string; config: AgentInstanceConfig }
+  'admin.agent_config_invalidated': { config_revision: number; domains: Array<'models'|'image'|'mcp'|'skills'|'subagents'|'worker_implementations'|'behavior'> }
   'admin.channel_instance_created': { instance: ChannelInstance }
   'admin.channel_instance_updated': { instance: ChannelInstance }
   'admin.channel_instance_deleted': { instance_id: string }

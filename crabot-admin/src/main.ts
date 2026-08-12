@@ -65,6 +65,7 @@ async function main(): Promise<void> {
   try {
     await admin.start()
     await admin.register()
+    await admin.completeCoreAgentCutover()
     // 启动对账：register() 已让事件订阅生效，这里再对「当下已在运行」的 agent / memory 补推一次
     // 配置，弥补错过 module_started 事件（admin 单独重启 / 启动慢于子模块）的情形。fire-and-forget，
     // 不阻塞启动；无运行模块时安全 no-op。

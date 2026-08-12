@@ -61,6 +61,7 @@ async function main(): Promise<void> {
 
   // admin 比 agent 只早 spawn 约 1s，但要跑完整个 onStart() 才 listen —— 首次 pull 必然扑空。
   // 退避重试等 admin 就绪；耗尽预算仍落 unconfigured 兜底（见 ConfigLoader.loadWithRetry）。
+  ConfigLoader.captureRuntimeBearer()
   const config: UnifiedAgentConfig = await ConfigLoader.loadWithRetry(rpcClient, adminEndpoint)
 
   // Module Manager 会通过环境变量分配端口，覆盖配置文件中的端口

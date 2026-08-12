@@ -25,7 +25,7 @@ import type {
 // 默认实现定义
 // ============================================================================
 
-const DEFAULT_IMPLEMENTATION: AgentImplementation = {
+export const DEFAULT_IMPLEMENTATION: AgentImplementation = {
   id: 'default',
   name: 'Crabot Default Agent',
   type: 'builtin',
