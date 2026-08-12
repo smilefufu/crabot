@@ -499,7 +499,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
         principal_permissions: sPerms ?? undefined,
       })
 
-      // admin 改 model slot（运行配置）＋ master 在同群发言（会话缓存被覆盖）
+      // 兼容 update_config handler 的局部热替换；生产权威路径是 invalidation 后 authenticated pull。
       const updateConfig = internals.methodHandlers.get('update_config')!
       await updateConfig({ model_config: { powerful: connInfo('model-B') } })
       await speak(internals, friendOf('f-master', 'master'))
@@ -651,7 +651,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     })
     expect(workerBurstModels(runEngineSpy)).toEqual(['model-A'])
 
-    // 经真实 update_config RPC 改 model slot。
+    // 直接验证兼容 update_config handler；生产配置变更由 authenticated pull 驱动。
     const updateConfig = internals.methodHandlers.get('update_config')!
     await updateConfig({ model_config: { powerful: connInfo('model-B') } })
 

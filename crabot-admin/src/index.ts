@@ -1025,10 +1025,8 @@ export class AdminModule extends ModuleBase {
   }
 
   protected override async onEvent(event: Event): Promise<void> {
-    // 统一配置分发模式：
-    // 1. 模块启动时先 pull 初始化（模块调用 Admin 的 get_xxx_config RPC）
-    // 2. 运行时配置变更由 Admin push（通过 update_config RPC）
-    // 3. module_started 事件的 push 作为补充保障（覆盖 pull 与 push 之间的时间窗口）
+    // Core Agent config is pull-only: startup uses authenticated get_agent_config and runtime
+    // changes publish a nonsecret revision invalidation. Memory retains its existing push path.
     switch (event.type) {
       case 'module_manager.module_started': {
         const { module_id, module_type, port } = event.payload as { module_id: string; module_type: string; port: number }
@@ -1038,11 +1036,11 @@ export class AdminModule extends ModuleBase {
             console.warn(`[Admin] Failed to push config to ${module_id}:`, err.message)
           })
         }
-        if (module_type === 'agent') {
+        if (module_id === 'crabot-agent') {
           if (typeof port === 'number' && port > 0) {
             this.agentPort = port
           }
-          console.log(`[Admin] Agent module ${module_id} started (port=${port}), publishing invalidation hint...`)
+          console.log(`[Admin] Core Agent started (port=${port}), publishing invalidation hint...`)
           this.publishAgentConfigInvalidation().catch((err: Error) => {
             console.warn(`[Admin] Failed to publish config invalidation for ${module_id}: ${err.message}`)
           })
@@ -8595,16 +8593,7 @@ export class AdminModule extends ModuleBase {
   }
 
   /**
-   * 全局配置保存后或 Agent 启动时，推送可热更新字段到 Agent 模块
-   * 支持热更新：model_config、skills、extra
-   * 仍需重启：system_prompt、mcp_servers
-   */
-  /**
-   * Fire-and-forget push trigger; 调用方传 reason 用于日志区分。
-   *
-   * 200ms debounce：启动期 / 用户连续操作时多个 trigger（onConfigChanged、
-   * skill CRUD、mcp CRUD 等）合并为一次推送，减少与 worker 端 updateSkills
-   * 写盘的并发量。窗口内多次 reason 拼成一条日志便于追踪。
+   * Debounced nonsecret config invalidation trigger; retained only for import/finalize callers.
    */
   private pushDebounceTimer?: NodeJS.Timeout
   private pushDebouncedReasons?: string[]
@@ -9550,7 +9539,7 @@ export class AdminModule extends ModuleBase {
    * agent 模块清 agentPort；memory 模块清 memoryModules 列表的对应项。
    */
   private invalidatePortCache(moduleId: string, moduleType: string): void {
-    if (moduleType === 'agent' || moduleId === 'crabot-agent') {
+    if (moduleId === 'crabot-agent') {
       if (this.agentPort > 0) {
         console.log(`[Admin] Invalidating cached agentPort=${this.agentPort} for ${moduleId}`)
         this.agentPort = 0
