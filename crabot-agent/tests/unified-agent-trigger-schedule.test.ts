@@ -5,6 +5,7 @@ import type { AgentEventPublisher } from '../src/manager/events.js'
 import type { ManagerKey, LedgerWorker } from '../src/workers/harness/ledger-types.js'
 
 interface AgentUnderTest {
+  agentConfig: { model_config: Record<string, { apikey: string; model_id: string }> }
   config: { moduleId: string }
   managerStack: unknown
   memoryWriter: { runMaintenance(scope: 'all'): Promise<void> }
@@ -54,6 +55,7 @@ function buildAgent(runMaintenance: () => Promise<void>) {
   }
 
   const agent = Object.create(UnifiedAgent.prototype) as AgentUnderTest
+  agent.agentConfig = { model_config: { powerful: { apikey: 'test-key', model_id: 'test-model' } } }
   agent.config = { moduleId: 'test-agent' }
   agent.managerStack = {
     ledger,

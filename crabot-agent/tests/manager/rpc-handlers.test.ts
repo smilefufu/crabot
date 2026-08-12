@@ -39,6 +39,7 @@ import type { TriggerScheduleParams, TriggerScheduleResult } from '../../src/uni
 
 /** 被测的五个私有 handler 的公开视图(TS 私有性只在编译期,运行时照常可调)。 */
 interface AgentUnderTest {
+  agentConfig: { model_config: Record<string, { apikey: string; model_id: string }> }
   managerStack?: unknown
   handleTriggerSchedule(p: TriggerScheduleParams): Promise<TriggerScheduleResult>
   handleListWorkersAdmin(p: ListWorkersAdminParams): Promise<ListWorkersAdminResult>
@@ -49,6 +50,7 @@ interface AgentUnderTest {
 
 function buildAgent(managerStack?: unknown): AgentUnderTest {
   const agent = Object.create(UnifiedAgent.prototype) as Record<string, unknown>
+  agent.agentConfig = { model_config: { powerful: { apikey: 'test-key', model_id: 'test-model' } } }
   agent.config = { moduleId: 'test-agent' }
   if (managerStack !== undefined) agent.managerStack = managerStack
   return agent as unknown as AgentUnderTest

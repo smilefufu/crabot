@@ -256,57 +256,32 @@ describe('handleMessageReceived —— 入站分流（P7/PR A 测试网 ①）',
 
   // --- M3：未配置早退 ---
 
-  describe('未配置早退（变异靶 M3）', () => {
-    it('未配置 LLM 时私聊消息不进任何处理路径，只回一条提示', async () => {
+  describe('runtime config admission（变异靶 M3）', () => {
+    it('未配置 LLM 时私聊消息 fail closed，且不产生处理或回复副作用', async () => {
       boot({ configured: false })
       const message = makeMessage({ id: 'pm-3', type: 'private' })
 
-      await internals.onEvent(authorizedEvent({ message, friend: makeFriend('f-1') }))
+      await expect(internals.onEvent(authorizedEvent({ message, friend: makeFriend('f-1') })))
+        .rejects.toThrow('Agent runtime config is not configured')
 
       expect(landings).toEqual([])
-      const sends = rpcCalls.filter((c) => c.method === 'send_message')
-      expect(sends).toHaveLength(1)
-      expect(sends[0].port).toBe(18001)
-      // 入参形状必须是 channel 契约的 `{session_id, content}`（四个 channel 的
-      // `handleSendMessage` 都从 `params.session_id` 取会话、从 `params.content` 取正文）。
-      // 历史上这里是 `{message: <整条 ChannelMessage>}` —— 调用发生、送达从未发生。
-      const params = sends[0].params as { session_id: string; content: { type: string; text: string } }
-      expect(params.session_id).toBe('sess-1')
-      expect(params.content.type).toBe('text')
-      expect(params.content.text).toContain('尚未配置')
+      expect(rpcCalls).toEqual([])
+      expect(delivered).toEqual([])
     })
 
-    it('"未配置"提示真的被 channel 接收端送达到原会话（不是只发出了一次 RPC）', async () => {
-      boot({ configured: false })
-      const message = makeMessage({ id: 'pm-3b', type: 'private' })
-
-      await internals.onEvent(authorizedEvent({ message, friend: makeFriend('f-1') }))
-
-      // 语义断言：人类那侧确确实实收到了一条文本，且落在**原会话**里。
-      // 入参形状一旦退回 `{message: reply}`，`params.session_id` 为 undefined，
-      // 接收端按四个 channel 的真实契约抛 NOT_FOUND —— delivered 为空、rejected 非空。
-      expect(rejected).toEqual([])
-      expect(delivered).toEqual([
-        { sessionId: 'sess-1', text: expect.stringContaining('尚未配置') as unknown as string },
-      ])
-    })
-
-    it('未配置 LLM 时群聊消息既不进群聊路径，也不留在注意力调度里', async () => {
+    it('未配置 LLM 时群聊消息 fail closed，且不进入注意力调度', async () => {
       boot({ configured: false })
       const message = makeMessage({ id: 'gm-4', type: 'group', sessionId: 'group-3', mention: true })
 
-      await internals.onEvent(authorizedEvent({ message, friend: makeFriend('f-1') }))
+      await expect(internals.onEvent(authorizedEvent({ message, friend: makeFriend('f-1') })))
+        .rejects.toThrow('Agent runtime config is not configured')
 
       expect(landings).toEqual([])
       expect(internals.attentionScheduler.getBufferSize('group-3')).toBe(0)
-      expect(rpcCalls.filter((c) => c.method === 'send_message')).toHaveLength(1)
-      // 群聊同样要真的送达，且落在**这个群**的会话里（不能串到私聊或别的群）
-      expect(delivered).toEqual([
-        { sessionId: 'group-3', text: expect.stringContaining('尚未配置') as unknown as string },
-      ])
+      expect(rpcCalls).toEqual([])
     })
 
-    it('配置齐备时不发"未配置"提示（早退不能反过来误伤正常消息）', async () => {
+    it('配置齐备时正常处理消息', async () => {
       boot({ configured: true })
       await internals.onEvent(
         authorizedEvent({ message: makeMessage({ id: 'pm-4', type: 'private' }), friend: makeFriend('f-1') }),
@@ -422,16 +397,16 @@ describe('handleMessageReceived —— 入站分流（P7/PR A 测试网 ①）',
       expect(internals.crabSelfHandles.get('wechat')).toBe('@crabot_wx')
     })
 
-    it('未配置早退发生在缓存之后：提示消息不影响昵称缓存被写入', async () => {
+    it('未配置 admission 发生在缓存之前，不吸收消息元数据', async () => {
       boot({ configured: false })
-      await internals.onEvent(
+      await expect(internals.onEvent(
         authorizedEvent({
           message: makeMessage({ id: 'c5', type: 'private' }),
           friend: makeFriend('f-1'),
           crab_self_handle: '@crabot_wx',
         }),
-      )
-      expect(internals.crabSelfHandles.get('wechat')).toBe('@crabot_wx')
+      )).rejects.toThrow('Agent runtime config is not configured')
+      expect(internals.crabSelfHandles.has('wechat')).toBe(false)
     })
   })
 })

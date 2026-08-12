@@ -2,11 +2,8 @@ import { describe, it, expect, vi } from 'vitest'
 import { AdminModule } from '../src/index.js'
 import type { IncomingMessage, ServerResponse } from 'http'
 
-// 这些测试验证 admin REST 写 handler 都 trigger pushConfigToAgentModules。
-// 用 Object.create 跳过构造，spy on push fn，用最小 req/res mock 调 handler。
-//
-// 本文件覆盖 mcp + skill 9 个 handler。本 task（Simp Task 3）只跑 mcp 4 个，
-// skill 5 个在 Simp Task 4 启用（届时去掉 .skip）。
+// REST handlers delegate source mutation to the owning manager. The manager owns the
+// coordinator/revision transaction; handlers must never resurrect legacy Agent config push.
 
 function makeRes(): ServerResponse & { _written: { code?: number; body?: string } } {
   const written: { code?: number; body?: string } = {}
@@ -33,20 +30,18 @@ function makeReq(body: unknown): IncomingMessage {
   } as unknown as IncomingMessage
 }
 
-/** 调 admin 上的 handler 方法（绕过类型检查）+ 等 200ms debounce 窗口 + fire-and-forget microtask 完成。 */
+/** 调 admin 上的 handler 方法（绕过类型检查）。 */
 async function invoke<A extends unknown[]>(
   admin: unknown,
   method: string,
   ...args: A
 ): Promise<void> {
   await (admin as Record<string, (...a: A) => Promise<void>>)[method](...args)
-  // triggerPushAfter 现在 200ms debounce，等够窗口期 + 微任务清空
-  await new Promise((resolve) => setTimeout(resolve, 250))
 }
 
-/** 断言 push 触发了恰好一次。 */
-function expectPushed(admin: { pushConfigToAgentModules: ReturnType<typeof vi.fn> }): void {
-  expect(admin.pushConfigToAgentModules).toHaveBeenCalledTimes(1)
+/** Owning managers coordinate the mutation; the REST layer emits no legacy Agent push. */
+function expectNoLegacyPush(admin: { pushConfigToAgentModules: ReturnType<typeof vi.fn> }): void {
+  expect(admin.pushConfigToAgentModules).not.toHaveBeenCalled()
 }
 
 function buildAdmin(deps: {
@@ -67,70 +62,71 @@ function buildAdmin(deps: {
     delete: vi.fn().mockResolvedValue(undefined),
     importFromLocalPath: vi.fn().mockResolvedValue({ entry: { id: 'imported-skill-id', name: 'foo' }, was_overwrite: false }),
     importFromZip: vi.fn().mockResolvedValue({ entry: { id: 'zipped-skill-id', name: 'foo' }, was_overwrite: false }),
+    toRestEntry: vi.fn(async (entry) => entry),
     ...deps.skillManagerStubs,
   }
   admin.config = { moduleId: 'test-admin' }
-  // Spy on pushConfigToAgentModules（被 handler 触发；fire-and-forget）
+  // Legacy push spy: every handler must leave it untouched.
   admin.pushConfigToAgentModules = vi.fn().mockResolvedValue(undefined)
   return admin as Record<string, unknown> & {
     pushConfigToAgentModules: ReturnType<typeof vi.fn>
   }
 }
 
-describe('MCP REST handler triggers pushConfigToAgentModules', () => {
-  it('handleCreateMCPServerApi 触发 push', async () => {
+describe('MCP REST handlers delegate without legacy Agent push', () => {
+  it('handleCreateMCPServerApi delegates without push', async () => {
     const admin = buildAdmin()
     await invoke(admin, 'handleCreateMCPServerApi', makeReq({ name: 'X', transport: 'stdio', command: 'echo' }), makeRes())
-    expectPushed(admin)
+    expectNoLegacyPush(admin)
   })
 
-  it('handleUpdateMCPServerApi 触发 push', async () => {
+  it('handleUpdateMCPServerApi delegates without push', async () => {
     const admin = buildAdmin()
     await invoke(admin, 'handleUpdateMCPServerApi', makeReq({ enabled: false }), makeRes(), 'mcp-id')
-    expectPushed(admin)
+    expectNoLegacyPush(admin)
   })
 
-  it('handleDeleteMCPServerApi 触发 push', async () => {
+  it('handleDeleteMCPServerApi delegates without push', async () => {
     const admin = buildAdmin()
     await invoke(admin, 'handleDeleteMCPServerApi', makeReq({}), makeRes(), 'mcp-id')
-    expectPushed(admin)
+    expectNoLegacyPush(admin)
   })
 
-  it('handleImportMCPServersFromJsonApi 触发 push', async () => {
+  it('handleImportMCPServersFromJsonApi delegates without push', async () => {
     const admin = buildAdmin()
     await invoke(admin, 'handleImportMCPServersFromJsonApi', makeReq({ json: '{"mcpServers":{}}' }), makeRes())
-    expectPushed(admin)
+    expectNoLegacyPush(admin)
   })
 })
 
-describe('Skill REST handler triggers pushConfigToAgentModules', () => {
-  it('handleCreateSkillApi 触发 push', async () => {
+describe('Skill REST handlers delegate without legacy Agent push', () => {
+  it('handleCreateSkillApi delegates without push', async () => {
     const admin = buildAdmin()
     await invoke(admin, 'handleCreateSkillApi', makeReq({ name: 'foo', content: 'body' }), makeRes())
-    expectPushed(admin)
+    expectNoLegacyPush(admin)
   })
 
-  it('handleUpdateSkillApi 触发 push', async () => {
+  it('handleUpdateSkillApi delegates without push', async () => {
     const admin = buildAdmin()
     await invoke(admin, 'handleUpdateSkillApi', makeReq({ enabled: false }), makeRes(), 'skill-id')
-    expectPushed(admin)
+    expectNoLegacyPush(admin)
   })
 
-  it('handleDeleteSkillApi 触发 push', async () => {
+  it('handleDeleteSkillApi delegates without push', async () => {
     const admin = buildAdmin()
     await invoke(admin, 'handleDeleteSkillApi', makeReq({}), makeRes(), 'skill-id')
-    expectPushed(admin)
+    expectNoLegacyPush(admin)
   })
 
-  it('handleImportSkillLocalApi 触发 push', async () => {
+  it('handleImportSkillLocalApi delegates without push', async () => {
     const admin = buildAdmin()
     await invoke(admin, 'handleImportSkillLocalApi', makeReq({ dir_path: '/tmp/skill-foo' }), makeRes())
-    expectPushed(admin)
+    expectNoLegacyPush(admin)
   })
 
-  it('handleImportSkillUploadApi 触发 push', async () => {
+  it('handleImportSkillUploadApi delegates without push', async () => {
     const admin = buildAdmin()
     await invoke(admin, 'handleImportSkillUploadApi', makeReq({ base64_content: '', filename: 'foo.zip' }), makeRes())
-    expectPushed(admin)
+    expectNoLegacyPush(admin)
   })
 })

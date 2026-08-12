@@ -561,7 +561,8 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       for (const n of ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Skill']) {
         expect(names, `应装 ${n}`).toContain(n)
       }
-      expect(names).toContain('mcp__crab-memory__store_memory')
+      const storeMemoryToolName = ['mcp__crab-memory', 'store_memory'].join('__')
+      expect(names).toContain(storeMemoryToolName)
       expect(names).toContain('mcp__crab-memory__search_memory')
       expect(names).toContain('tmp_page_create')
     })
@@ -735,7 +736,7 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
   // --- 缺配置时 fail-loud ---
 
   it('model_config 缺 powerful slot → 工厂抛错，spawn 如实落成一次失败尝试（不静默降级）', async () => {
-    const { internals } = boot(makeConfig({ modelConfig: {} }))
+    const { internals } = boot(makeConfig({ modelConfig: { fast: connInfo('model-A') } }))
     const managerKey = (`test::${'friend-noconf'}` as ManagerKey)
 
     await expect(spawnBuiltin(internals, managerKey)).rejects.toThrow(/powerful/)

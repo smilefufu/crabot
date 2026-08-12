@@ -15,13 +15,15 @@ function makeAdmin(): AdminModule {
     subscriptions: [],
   }
 
-  return new AdminModule(config, {
+  const admin = new AdminModule(config, {
     web_port: 13008,
     data_dir: './test-data/admin-message-gating-test',
     password_env: 'TEST_ADMIN_GATING_PASSWORD',
     jwt_secret_env: 'TEST_ADMIN_GATING_JWT_SECRET',
     token_ttl: 3600,
   })
+  ;(admin as unknown as { cutoverActivated: boolean }).cutoverActivated = true
+  return admin
 }
 
 function makeFriend(overrides: Partial<Friend> & { id: string; permission: Friend['permission'] }): Friend {

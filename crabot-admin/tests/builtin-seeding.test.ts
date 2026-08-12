@@ -363,8 +363,10 @@ describe('SubAgentManager v2 override 存储', () => {
 
     const mgr = new SubAgentManager(tmpDir, getBuiltinSubAgents)
     await mgr.initialize()
+    expect(mgr.semanticMigrationState().legacy_rewrite_pending).toBe(true)
+    await mgr.seedBuiltin(getBuiltinSubAgents())
 
-    // 备份文件已落盘
+    // coordinator-owned seed commits the backup and v2 rewrite together.
     const files = readdirSync(tmpDir)
     expect(files.some((f) => f.startsWith('.legacy-subagents-'))).toBe(true)
 
