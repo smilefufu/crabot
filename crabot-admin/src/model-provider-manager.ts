@@ -1058,9 +1058,12 @@ export class ModelProviderManager {
 
   async updateGlobalConfig(config: Partial<GlobalModelConfig>): Promise<GlobalModelConfig> {
     const updated = { ...this.globalConfig, ...config }
+    const publicBaseUrlChanged = Object.prototype.hasOwnProperty.call(config, 'public_base_url') &&
+      config.public_base_url !== this.globalConfig.public_base_url
     const domains: ConfigDomain[] = [
       ...(config.default_llm_provider_id !== undefined || config.default_llm_model_id !== undefined ? ['models' as const] : []),
       ...(config.default_image_provider_id !== undefined || config.default_image_model_id !== undefined || config.image_slot_user_set !== undefined ? ['image' as const] : []),
+      ...(publicBaseUrlChanged ? ['behavior' as const] : []),
     ]
     if (domains.length === 0) {
       this.globalConfig = updated

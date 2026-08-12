@@ -419,6 +419,40 @@ describe('AgentManager', () => {
       expect(updated.tools_readonly).toBe(false) // 保持原值
     })
 
+    it('classifies core semantic config mutations by changed domain', async () => {
+      const calls: string[][] = []
+      agentManager.setMutationRunner(async (domains, _preview, apply) => {
+        calls.push([...domains])
+        await apply({} as any)
+      })
+
+      await agentManager.updateConfig({ instance_id: 'crabot-agent', system_prompt: 'behavior change' })
+      await agentManager.updateConfig({
+        instance_id: 'crabot-agent',
+        model_config: { powerful: { provider_id: 'provider', model_id: 'model' } },
+      })
+      await agentManager.updateConfig({
+        instance_id: 'crabot-agent',
+        system_prompt: 'combined behavior change',
+        model_config: { powerful: { provider_id: 'provider-2', model_id: 'model-2' } },
+      })
+      await agentManager.updateConfig({ instance_id: 'crabot-agent', mcp_server_ids: ['legacy-only'] })
+
+      expect(calls).toEqual([['behavior'], ['models'], ['models', 'behavior']])
+    })
+
+    it('does not run a semantic mutation for an unchanged core config value', async () => {
+      const calls: string[][] = []
+      agentManager.setMutationRunner(async (domains, _preview, apply) => {
+        calls.push([...domains])
+        await apply({} as any)
+      })
+      const current = agentManager.getConfig('crabot-agent')!
+
+      await agentManager.updateConfig({ instance_id: 'crabot-agent', system_prompt: current.system_prompt })
+
+      expect(calls).toEqual([])
+    })
     it('should throw error when updating non-existent config', async () => {
       const params: UpdateAgentConfigParams = {
         instance_id: 'non-existent',

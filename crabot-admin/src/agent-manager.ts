@@ -6,7 +6,7 @@
 
 import fs from 'fs/promises'
 import path from 'path'
-import { generateTimestamp, type RpcClient } from 'crabot-shared'
+import { canonicalizeJson, generateTimestamp, type RpcClient } from 'crabot-shared'
 import type { RuntimeManager } from './runtime-manager.js'
 import type {
   AgentImplementation,
@@ -533,8 +533,20 @@ export class AgentManager {
       this.configs.set(params.instance_id, updated)
       await this.saveConfig(params.instance_id)
     }
-    if (params.instance_id === 'crabot-agent' && this.mutationRunner) {
-      await this.mutationRunner(['models', 'behavior'], async () => this.previewSemanticSnapshot(
+    const domains: ConfigDomain[] = [
+      ...(params.model_config !== undefined && canonicalizeJson(existing.model_config) !== canonicalizeJson(updated.model_config) ? ['models' as const] : []),
+      ...(
+        (params.system_prompt !== undefined && existing.system_prompt !== updated.system_prompt) ||
+        (params.max_iterations !== undefined && existing.max_iterations !== updated.max_iterations) ||
+        (params.tools_readonly !== undefined && existing.tools_readonly !== updated.tools_readonly) ||
+        (params.timezone !== undefined && existing.timezone !== updated.timezone) ||
+        (params.extra !== undefined && canonicalizeJson(existing.extra ?? {}) !== canonicalizeJson(updated.extra ?? {}))
+          ? ['behavior' as const]
+          : []
+      ),
+    ]
+    if (params.instance_id === 'crabot-agent' && this.mutationRunner && domains.length > 0) {
+      await this.mutationRunner(domains, async () => this.previewSemanticSnapshot(
         () => this.configs.set(params.instance_id, updated),
         () => this.configs.set(params.instance_id, existing),
       ), apply)

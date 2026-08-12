@@ -8738,6 +8738,7 @@ export class AdminModule extends ModuleBase {
         default_image_provider_id: global.default_image_provider_id ?? null,
         default_image_model_id: global.default_image_model_id ?? null,
         image_slot_user_set: global.image_slot_user_set ?? null,
+        public_base_url: global.public_base_url ?? null,
       },
       providers,
       mcp_servers: this.mcpServerManager.runtimeSemanticEntries(),

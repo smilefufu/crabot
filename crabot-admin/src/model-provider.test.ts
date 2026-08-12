@@ -131,6 +131,20 @@ describe('ModelProviderManager', () => {
       expect(config).toBeDefined()
     })
 
+    it('coordinates public base URL as behavior and ignores identical updates', async () => {
+      const calls: string[][] = []
+      manager.setSemanticSnapshotProvider(() => ({ global: manager.getGlobalConfig() }))
+      manager.setMutationRunner(async (domains, _preview, apply) => {
+        calls.push([...domains])
+        await apply({} as any)
+      })
+
+      await manager.updateGlobalConfig({ public_base_url: 'https://public.example.test/' })
+      await manager.updateGlobalConfig({ public_base_url: 'https://public.example.test/' })
+
+      expect(calls).toEqual([['behavior']])
+      expect(manager.getGlobalConfig().public_base_url).toBe('https://public.example.test/')
+    })
     it('should update global config', async () => {
       const params: CreateModelProviderParams = {
         name: 'Test Provider',
