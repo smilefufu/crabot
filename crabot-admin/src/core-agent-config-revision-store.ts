@@ -22,6 +22,13 @@ export interface CoreAgentConfigMutationContext {
   target_revision: number
 }
 
+export interface CoreAgentConfigMutationReceipt {
+  schema_version: 1
+  mutation_id: string
+  target_revision: number
+  domains: ConfigDomain[]
+}
+
 export interface CoreAgentConfigMutationOutboxRecord {
   schema_version: 1
   mutation_id: string
@@ -90,6 +97,7 @@ export class CoreAgentConfigMutationCoordinator {
   private readonly keyPath: string
   private readonly recordPath: string
   private readonly outboxPath: string
+  private readonly receiptPath: string
   private readonly options: CoreAgentConfigMutationCoordinatorOptions
   private key: Buffer | null = null
   private record: CoreAgentConfigRevisionRecord | null = null
@@ -102,6 +110,7 @@ export class CoreAgentConfigMutationCoordinator {
     this.keyPath = path.join(this.configDir, 'core-agent-config-hmac-key')
     this.recordPath = path.join(this.configDir, 'core-agent-config-revision.json')
     this.outboxPath = path.join(this.configDir, 'core-agent-config-mutation-outbox.json')
+    this.receiptPath = path.join(this.configDir, 'core-agent-config-last-completed.json')
     this.options = options
   }
 
@@ -233,6 +242,13 @@ export class CoreAgentConfigMutationCoordinator {
     return this.recoveredMutation
   }
 
+  async lastCompletedMutation(): Promise<CoreAgentConfigMutationReceipt | null> {
+    await this.current()
+    const receipt = await readJson<CoreAgentConfigMutationReceipt>(this.receiptPath)
+    if (receipt) this.assertReceipt(receipt)
+    return receipt
+  }
+
   async drainPendingInvalidation(): Promise<void> {
     await this.serial(async () => {
       await this.current()
@@ -282,6 +298,10 @@ export class CoreAgentConfigMutationCoordinator {
   }
 
   private async drainOutbox(outbox: CoreAgentConfigMutationOutboxRecord): Promise<void> {
+    const receipt: CoreAgentConfigMutationReceipt = {
+      schema_version: 1, mutation_id: outbox.mutation_id, target_revision: outbox.target_revision, domains: [...outbox.domains],
+    }
+    await atomicWrite(this.receiptPath, receipt)
     if (!outbox.invalidation_pending) { await fs.rm(this.outboxPath, { force: true }); return }
     await this.options.publishInvalidation({ config_revision: outbox.target_revision, domains: [...outbox.domains] })
     await this.options.hooks?.afterPublish?.()
@@ -292,6 +312,10 @@ export class CoreAgentConfigMutationCoordinator {
 
   private assertRecord(record: CoreAgentConfigRevisionRecord): void {
     if (record.schema_version !== 1 || !Number.isSafeInteger(record.revision) || record.revision < 1 || !/^[a-f0-9]{64}$/.test(record.semantic_fingerprint_hmac)) throw new Error('Invalid core Agent config revision')
+  }
+
+  private assertReceipt(receipt: CoreAgentConfigMutationReceipt): void {
+    if (receipt.schema_version !== 1 || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(receipt.mutation_id) || !Number.isSafeInteger(receipt.target_revision) || receipt.target_revision < 2 || !Array.isArray(receipt.domains) || receipt.domains.length === 0) throw new Error('Invalid core Agent config mutation receipt')
   }
 
   private assertOutbox(outbox: CoreAgentConfigMutationOutboxRecord): void {

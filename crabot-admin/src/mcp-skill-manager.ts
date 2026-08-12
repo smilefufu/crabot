@@ -529,11 +529,13 @@ interface SkillSourceJournal {
   staged_registry_sha256: string
   before_runtime_hashes: Record<string, string>
   after_runtime_hashes: Record<string, string>
-  target_rel: string
-  target_existed: boolean
+  before_target_rel: string
+  after_target_rel: string
+  before_target_existed: boolean
   stage_rel: string
   backup_rel?: string
   retained_rel?: string
+  delete_after_commit?: boolean
 }
 
 function sha256(value: Buffer | string): string { return createHash('sha256').update(value).digest('hex') }
@@ -580,9 +582,9 @@ export class SkillManager {
     if (!journal) return
     const pending = await coordinator.pendingMutation()
     const recovered = await coordinator.recentRecoveredMutation()
-    const current = await coordinator.current()
+    const receipt = await coordinator.lastCompletedMutation()
     const matches = (record: { mutation_id: string; target_revision: number } | null) => record?.mutation_id === journal.mutation_id && record.target_revision === journal.target_revision
-    if (!matches(pending) && !matches(recovered) && current.revision !== journal.target_revision) throw new Error('Skill source journal mutation identity mismatch')
+    if (!matches(pending) && !matches(recovered) && !matches(receipt)) throw new Error('Skill source journal mutation identity mismatch')
     const digest = await this.registryDigest()
     if (digest === journal.before_registry_sha256) await this.rollbackJournal(journal)
     else if (digest === journal.after_registry_sha256) await this.rollForwardJournal(journal)
@@ -727,40 +729,54 @@ export class SkillManager {
     if (stagedExists && journal.staged_registry_sha256 !== sha256(await fs.readFile(stagedRegistry))) throw new Error('Invalid skill source journal')
     if (!stagedExists && (await this.registryDigest()) !== journal.after_registry_sha256) throw new Error('Invalid skill source journal')
     if (journal.schema_version !== 1 || journal.domain !== 'skills' || !/^[0-9a-f-]{36}$/i.test(journal.mutation_id) || !Number.isSafeInteger(journal.target_revision) || !/^[a-f0-9]{64}$/.test(journal.before_registry_sha256) || !/^[a-f0-9]{64}$/.test(journal.after_registry_sha256) || !/^[a-f0-9]{64}$/.test(journal.staged_registry_sha256)) throw new Error('Invalid skill source journal')
-    for (const rel of [journal.stage_rel, journal.target_rel, journal.backup_rel, journal.retained_rel]) if (rel !== undefined) this.resolveTransactionPath(rel)
+    for (const rel of [journal.stage_rel, journal.before_target_rel, journal.after_target_rel, journal.backup_rel, journal.retained_rel]) if (rel !== undefined) this.resolveTransactionPath(rel)
     return journal
   }
 
   private async registryDigest(): Promise<string> { return sha256(await this.registryBytes()) }
 
   private async rollbackJournal(journal: SkillSourceJournal): Promise<void> {
-    const target = this.resolveTransactionPath(journal.target_rel)
+    const beforeTarget = this.resolveTransactionPath(journal.before_target_rel)
+    const afterTarget = this.resolveTransactionPath(journal.after_target_rel)
     const stage = this.resolveTransactionPath(journal.stage_rel)
     const backup = journal.backup_rel ? this.resolveTransactionPath(journal.backup_rel) : undefined
     const retained = journal.retained_rel ? this.resolveTransactionPath(journal.retained_rel) : undefined
     const restore = backup ?? retained
-    if (restore && await fs.access(restore).then(() => true).catch(() => false)) {
-      await fs.rm(target, { recursive: true, force: true })
-      await fs.rename(restore, target)
-    } else if (!journal.target_existed) {
-      await fs.rm(target, { recursive: true, force: true })
+    if (journal.delete_after_commit) {
+      if (!retained || !await fs.access(retained).then(() => true).catch(() => false)) throw new Error('Skill source journal rollback is ambiguous')
+      await fs.rename(retained, beforeTarget)
+    } else if (restore && await fs.access(restore).then(() => true).catch(() => false)) {
+      await fs.rm(afterTarget, { recursive: true, force: true })
+      await fs.rename(restore, beforeTarget)
+    } else if (!journal.before_target_existed) {
+      await fs.rm(afterTarget, { recursive: true, force: true })
+    } else if (!await fs.access(beforeTarget).then(() => true).catch(() => false)) {
+      throw new Error('Skill source journal rollback is ambiguous')
     }
     await fs.rm(stage, { recursive: true, force: true })
   }
 
   private async rollForwardJournal(journal: SkillSourceJournal): Promise<void> {
-    const target = this.resolveTransactionPath(journal.target_rel)
+    const beforeTarget = this.resolveTransactionPath(journal.before_target_rel)
+    const afterTarget = this.resolveTransactionPath(journal.after_target_rel)
     const stage = this.resolveTransactionPath(journal.stage_rel)
     const backup = journal.backup_rel ? this.resolveTransactionPath(journal.backup_rel) : undefined
     const retained = journal.retained_rel ? this.resolveTransactionPath(journal.retained_rel) : undefined
-    if (await fs.access(stage).then(() => true).catch(() => false)) {
-      if (await fs.access(target).then(() => true).catch(() => false)) {
-        if (backup) await fs.rename(target, backup)
-        else if (retained) await fs.rename(target, retained)
-        else if (!journal.target_existed) throw new Error('Skill source journal target collision')
-      }
-      await fs.rename(stage, target)
+    if (journal.delete_after_commit) {
+      await fs.rm(afterTarget, { recursive: true, force: true })
+      await fs.rm(stage, { recursive: true, force: true })
+      return
     }
+    if (await fs.access(stage).then(() => true).catch(() => false)) {
+      if (await fs.access(afterTarget).then(() => true).catch(() => false)) throw new Error('Skill source journal target collision')
+      if (beforeTarget !== afterTarget && await fs.access(beforeTarget).then(() => true).catch(() => false)) {
+        if (backup) await fs.rename(beforeTarget, backup)
+        else if (retained) await fs.rename(beforeTarget, retained)
+        else throw new Error('Skill source journal missing retention path')
+      }
+      await fs.rename(stage, afterTarget)
+    }
+    if (!await fs.access(afterTarget).then(() => true).catch(() => false)) throw new Error('Skill source journal after target missing')
   }
 
   private async serial<T>(operation: () => Promise<T>): Promise<T> {
@@ -784,17 +800,26 @@ export class SkillManager {
   }
 
   private async hashContentTree(root: string): Promise<string> {
+    const rootStat = await fs.lstat(root).catch(() => { throw new Error(`Unreadable imported skill directory: ${root}`) })
+    if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw new Error(`Invalid imported skill directory: ${root}`)
     const hash = createHash('sha256')
+    const frame = (type: string, relative: string, bytes = Buffer.alloc(0)) => {
+      const rel = Buffer.from(relative, 'utf8')
+      hash.update(Buffer.from(type, 'ascii'))
+      hash.update(Buffer.from([0]))
+      const sizes = Buffer.alloc(8)
+      sizes.writeUInt32BE(rel.length, 0); sizes.writeUInt32BE(bytes.length, 4)
+      hash.update(sizes); hash.update(rel); hash.update(bytes)
+    }
     const walk = async (dir: string, relative = ''): Promise<void> => {
       const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => { throw new Error(`Unreadable imported skill directory: ${root}`) })
       for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
         const rel = relative ? `${relative}/${entry.name}` : entry.name
         const target = path.join(dir, entry.name)
-      if (entry.isSymbolicLink()) throw new Error(`Symlink in imported skill directory: ${rel}`)
-        if (entry.isDirectory()) { hash.update(`D\0${rel}\0`); await walk(target, rel); continue }
+        if (entry.isSymbolicLink()) throw new Error(`Symlink in imported skill directory: ${rel}`)
+        if (entry.isDirectory()) { frame('D', rel); await walk(target, rel); continue }
         if (!entry.isFile()) throw new Error(`Unsupported imported skill entry: ${rel}`)
-        hash.update(`F\0${rel}\0`)
-        hash.update(await fs.readFile(target).catch(() => { throw new Error(`Unreadable imported skill file: ${rel}`) }))
+        frame('F', rel, await fs.readFile(target).catch(() => { throw new Error(`Unreadable imported skill file: ${rel}`) }))
       }
     }
     await walk(root)
@@ -1073,7 +1098,7 @@ export class SkillManager {
       const hashes = new Map(this.contentTreeHashes)
       hashes.set(entry.id, await this.hashContentTree(stagedDir))
       await this.commit(next, async () => { await fs.rename(stagedDir, skillDir) }, hashes, {
-        target_rel: this.relativeTransactionPath(skillDir), target_existed: false, stage_rel: this.relativeTransactionPath(stagedDir),
+        before_target_rel: this.relativeTransactionPath(skillDir), after_target_rel: this.relativeTransactionPath(skillDir), before_target_existed: false, stage_rel: this.relativeTransactionPath(stagedDir),
       })
     } catch (error) {
       await fs.rm(stagedDir, { recursive: true, force: true }).catch(() => {})
@@ -1082,7 +1107,17 @@ export class SkillManager {
     return entry
   }
 
-  async update(
+  async update(id: string, params: Partial<Pick<SkillRegistryEntry, 'name' | 'description' | 'version' | 'trigger_phrases' | 'is_essential' | 'enabled'>> & { content?: string }): Promise<SkillRegistryEntry> { return this.serial(() => this.updateUnlocked(id, params)) }
+  async restore(id: string): Promise<SkillRegistryEntry> { return this.serial(() => this.restoreUnlocked(id)) }
+  async delete(id: string): Promise<void> { return this.serial(() => this.deleteUnlocked(id)) }
+  async seedBuiltinSkills(entries: SkillRegistryEntry[]): Promise<void> { return this.serial(() => this.seedBuiltinSkillsUnlocked(entries)) }
+  async registerBuiltins(builtinsDir: string): Promise<number> { return this.serial(() => this.registerBuiltinsUnlocked(builtinsDir)) }
+  async scanWorkspaceSkills(workspaceDir: string): Promise<number> { return this.serial(() => this.scanWorkspaceSkillsUnlocked(workspaceDir)) }
+  async importFromGit(skillMdUrl: string, sourceGitUrl?: string, overwrite?: boolean): Promise<{ entry: SkillRegistryEntry; was_overwrite: boolean }> { return this.serial(() => this.importFromGitUnlocked(skillMdUrl, sourceGitUrl, overwrite)) }
+  async importFromLocalPath(dirPath: string, overwrite?: boolean): Promise<{ entry: SkillRegistryEntry; was_overwrite: boolean }> { return this.serial(() => this.importFromLocalPathUnlocked(dirPath, overwrite)) }
+  async importFromZip(base64Content: string, filename: string, overwrite?: boolean): Promise<{ entry: SkillRegistryEntry; was_overwrite: boolean }> { return this.serial(() => this.importFromZipUnlocked(base64Content, filename, overwrite)) }
+
+  private async updateUnlocked(
     id: string,
     params: Partial<Pick<SkillRegistryEntry, 'name' | 'description' | 'version' | 'trigger_phrases' | 'is_essential' | 'enabled'>> & { content?: string },
   ): Promise<SkillRegistryEntry> {
@@ -1098,38 +1133,41 @@ export class SkillManager {
     const skillDir = managed ? path.join(this.skillsRoot, name) : entry.skill_dir
     const changedContent = params.content !== undefined && managed && await fs.readFile(path.join(entry.skill_dir, 'SKILL.md'), 'utf8').then((text) => text !== params.content).catch(() => true)
     const changedPath = managed && skillDir !== entry.skill_dir
+    const createsSnapshot = managed && (changedContent || changedPath)
+    const snapshotAt = generateTimestamp()
+    const snapRel = path.posix.join('.snapshots', `${name}-${isoCompactTs(snapshotAt)}`)
     const updated: SkillRegistryEntry = {
       ...entry, name, skill_dir: skillDir, description: params.description ?? entry.description,
       version: params.version ?? entry.version, trigger_phrases: params.trigger_phrases ?? entry.trigger_phrases,
       is_essential: params.is_essential ?? entry.is_essential, enabled: params.enabled ?? entry.enabled,
+      ...(createsSnapshot ? { previous_snapshot: { snapshot_dir: snapRel, version: entry.version, updated_at: entry.updated_at, snapshotted_at: snapshotAt } } : {}),
       updated_at: generateTimestamp(),
     }
     const next = new Map(this.skills); next.set(id, updated)
-    if (!changedContent && !changedPath && canonicalizeJson(this.runtimeSemanticEntries()) === canonicalizeJson(await this.runtimeEntriesFor(next))) {
+    if (!createsSnapshot && canonicalizeJson(this.runtimeSemanticEntries()) === canonicalizeJson(await this.runtimeEntriesFor(next))) {
       this.skills = next; await this.save(); return updated
     }
-    let backup: string | undefined
     const staged = path.join(this.skillsRoot, `.stage.${process.pid}.${Date.now()}.${randomBytes(4).toString('hex')}`)
-    const snapRel = path.posix.join('.snapshots', `${name}-${isoCompactTs(generateTimestamp())}`)
     const snapPath = path.join(this.skillsRoot, snapRel)
     try {
-      if (managed) {
+      if (createsSnapshot) {
         await copyDir(entry.skill_dir, staged)
         if (params.content !== undefined) await atomicWriteFileBuf(path.join(staged, 'SKILL.md'), Buffer.from(params.content, 'utf8'))
       }
       const hashes = new Map(this.contentTreeHashes)
-      if (managed) hashes.set(id, await this.hashContentTree(staged))
+      if (createsSnapshot) hashes.set(id, await this.hashContentTree(staged))
       await this.commit(next, async () => {
-        if (!managed) return
-        backup = snapPath
-        await fs.mkdir(path.dirname(backup), { recursive: true })
-        await fs.rename(entry.skill_dir, backup)
-        try { await fs.rename(staged, skillDir) } catch (error) { await fs.rename(backup, entry.skill_dir).catch(() => {}); throw error }
-        updated.previous_snapshot = { snapshot_dir: snapRel, version: entry.version, updated_at: entry.updated_at, snapshotted_at: generateTimestamp() }
-      }, hashes, managed ? {
-        target_rel: this.relativeTransactionPath(skillDir), target_existed: true, stage_rel: this.relativeTransactionPath(staged),
+        if (!createsSnapshot) return
+        await fs.mkdir(path.dirname(snapPath), { recursive: true })
+        await fs.rename(entry.skill_dir, snapPath)
+        try { await fs.rename(staged, skillDir) } catch (error) { await fs.rename(snapPath, entry.skill_dir).catch(() => {}); throw error }
+      }, hashes, createsSnapshot ? {
+        before_target_rel: this.relativeTransactionPath(entry.skill_dir), after_target_rel: this.relativeTransactionPath(skillDir), before_target_existed: true, stage_rel: this.relativeTransactionPath(staged),
         backup_rel: this.relativeTransactionPath(snapPath),
       } : undefined)
+      if (createsSnapshot && entry.previous_snapshot?.snapshot_dir && entry.previous_snapshot.snapshot_dir !== snapRel) {
+        await fs.rm(this.resolveTransactionPath(entry.previous_snapshot.snapshot_dir), { recursive: true, force: true })
+      }
     } catch (error) { await fs.rm(staged, { recursive: true, force: true }).catch(() => {}); throw error }
     return updated
   }
@@ -1141,10 +1179,11 @@ export class SkillManager {
     finally { this.skills = previous; this.contentTreeHashes = previousHashes }
   }
 
-  async restore(id: string): Promise<SkillRegistryEntry> {
+  private async restoreUnlocked(id: string): Promise<SkillRegistryEntry> {
     const entry = this.skills.get(id)
     if (!entry) throw new Error(`Skill not found: ${id}`)
-    if (entry.is_builtin || !this.isAdminOwned(entry)) throw new Error(`Skill "${entry.name}" cannot be restored`)
+    if (entry.is_builtin) throw new Error(`Skill "${entry.name}" 是内置的，不能 restore`)
+    if (!this.isAdminOwned(entry)) throw new Error(`Skill "${entry.name}" cannot be restored`)
     if (!entry.previous_snapshot) throw new Error(`Skill "${entry.name}" 没有上一版可恢复`)
     const source = this.resolveTransactionPath(entry.previous_snapshot.snapshot_dir)
     const now = generateTimestamp()
@@ -1166,26 +1205,41 @@ export class SkillManager {
         await fs.rename(entry.skill_dir, retained)
         try { await fs.rename(stage, entry.skill_dir) } catch (error) { await fs.rename(retained, entry.skill_dir).catch(() => {}); throw error }
       }, hashes, {
-        target_rel: this.relativeTransactionPath(entry.skill_dir), target_existed: true, stage_rel: this.relativeTransactionPath(stage), retained_rel: retainedRel,
+        before_target_rel: this.relativeTransactionPath(entry.skill_dir), after_target_rel: this.relativeTransactionPath(entry.skill_dir), before_target_existed: true, stage_rel: this.relativeTransactionPath(stage), retained_rel: retainedRel,
       })
     } catch (error) { await fs.rm(stage, { recursive: true, force: true }).catch(() => {}); throw error }
     return updated
   }
 
-  async delete(id: string): Promise<void> {
+  private async deleteUnlocked(id: string): Promise<void> {
     const entry = this.skills.get(id)
     if (!entry) throw new Error(`Skill not found: ${id}`)
     if (entry.is_builtin) throw new Error(`Cannot delete built-in Skill "${entry.name}"`)
+    if (!this.isAdminOwned(entry)) {
+      const next = new Map(this.skills)
+      next.delete(id)
+      await this.commit(next, async () => {})
+      return
+    }
+    const quarantine = path.join(this.transactionRoot, `delete-${randomBytes(12).toString('hex')}`)
     const next = new Map(this.skills)
     next.delete(id)
-    await this.commit(next, async () => {})
+    await this.commit(next, async () => {
+      await fs.mkdir(this.transactionRoot, { recursive: true, mode: 0o700 })
+      await fs.rename(entry.skill_dir, quarantine)
+    }, new Map(this.contentTreeHashes).set(id, '') as Map<string, string>, {
+      before_target_rel: this.relativeTransactionPath(entry.skill_dir), after_target_rel: this.relativeTransactionPath(quarantine), before_target_existed: true,
+      stage_rel: this.relativeTransactionPath(quarantine), retained_rel: this.relativeTransactionPath(quarantine), delete_after_commit: true,
+    })
+    await fs.rm(quarantine, { recursive: true, force: true })
+    if (entry.previous_snapshot?.snapshot_dir) await fs.rm(this.resolveTransactionPath(entry.previous_snapshot.snapshot_dir), { recursive: true, force: true })
   }
 
   /**
    * 注入内置 Skill：仅当 id 不存在时插入，已存在则跳过。
    * 与 SubAgentManager.seedBuiltin 相同语义。
    */
-  async seedBuiltinSkills(entries: SkillRegistryEntry[]): Promise<void> {
+  private async seedBuiltinSkillsUnlocked(entries: SkillRegistryEntry[]): Promise<void> {
     let changed = false
     const next = new Map(this.skills)
     for (const e of entries) {
@@ -1211,7 +1265,7 @@ export class SkillManager {
    * 返回本次扫到的可用 builtin skill 数量。扫不到任何一个是异常状态（历史上
    * release 包漏打 SKILL.md 导致 memory-curate 等全部缺失且无声无息），必须报错。
    */
-  async registerBuiltins(builtinsDir: string): Promise<number> {
+  private async registerBuiltinsUnlocked(builtinsDir: string): Promise<number> {
     let dirEntries: import('fs').Dirent[]
     try {
       dirEntries = await fs.readdir(builtinsDir, { withFileTypes: true })
@@ -1306,7 +1360,7 @@ export class SkillManager {
    * Additive-only：已在注册表中（按 name 匹配）的跳过。
    * 返回本次新增数量。
    */
-  async scanWorkspaceSkills(workspaceDir: string): Promise<number> {
+  private async scanWorkspaceSkillsUnlocked(workspaceDir: string): Promise<number> {
     const agentSkillsDir = path.join(workspaceDir, '.agents', 'skills')
     let dirEntries: import('fs').Dirent[]
     try {
@@ -1425,7 +1479,7 @@ export class SkillManager {
    * 从 GitHub 安装指定 skill（通过 skill_md_url 获取内容）
    * 仅允许 raw.githubusercontent.com 的 HTTPS URL，防止 SSRF
    */
-  async importFromGit(
+  private async importFromGitUnlocked(
     skillMdUrl: string,
     sourceGitUrl?: string,
     overwrite?: boolean,
@@ -1492,7 +1546,7 @@ export class SkillManager {
    * 从本地目录路径导入（读取 <dirPath>/SKILL.md）
    * 禁止访问系统敏感目录，防止路径穿越
    */
-  async importFromLocalPath(
+  private async importFromLocalPathUnlocked(
     dirPath: string,
     overwrite?: boolean,
   ): Promise<{ entry: SkillRegistryEntry; was_overwrite: boolean }> {
@@ -1550,7 +1604,7 @@ export class SkillManager {
         if (targetExisted) { await fs.mkdir(path.dirname(snapshot), { recursive: true }); await fs.rename(target, snapshot) }
         try { await fs.rename(stage, target) } catch (error) { if (targetExisted) await fs.rename(snapshot, target).catch(() => {}); throw error }
       }, hashes, {
-        target_rel: this.relativeTransactionPath(target), target_existed: targetExisted, stage_rel: this.relativeTransactionPath(stage),
+        before_target_rel: this.relativeTransactionPath(existing?.skill_dir ?? target), after_target_rel: this.relativeTransactionPath(target), before_target_existed: targetExisted, stage_rel: this.relativeTransactionPath(stage),
         ...(targetExisted ? { backup_rel: snapshotRel } : {}),
       })
       return { entry, was_overwrite: !!existing }
@@ -1560,7 +1614,7 @@ export class SkillManager {
   /**
    * 从 zip/skills 文件的 base64 内容导入
    */
-  async importFromZip(
+  private async importFromZipUnlocked(
     base64Content: string,
     filename: string,
     overwrite?: boolean,

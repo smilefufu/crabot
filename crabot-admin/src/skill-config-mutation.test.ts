@@ -72,6 +72,37 @@ describe('Skill source mutation journal', () => {
     } finally { await fs.rm(dir, { recursive: true, force: true }) }
   })
 
+  it('serializes concurrent update and delete without resurrecting a removed skill', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-skill-serial-update-'))
+    try {
+      const manager = new SkillManager(dir); await manager.initializeLoadOnly()
+      const snapshot = () => ({ skills: manager.runtimeSemanticEntries(), storage: manager.semanticMigrationState() })
+      const coordinator = new CoreAgentConfigMutationCoordinator(dir, { readSemanticSnapshot: snapshot, publishInvalidation: () => {} })
+      manager.setSemanticSnapshotProvider(snapshot)
+      manager.setMutationRunner((domains, preview, apply) => coordinator.mutateComputed(domains, preview, apply).then(() => undefined))
+      await coordinator.initialize()
+      const entry = await manager.create({ name: 'serial', description: 'serial', content: skill('serial') })
+      await Promise.all([manager.update(entry.id, { content: skill('serial', 'updated') }), manager.delete(entry.id)])
+      expect(manager.get(entry.id)).toBeUndefined()
+      await expect(fs.access(path.join(dir, 'skills', 'serial'))).rejects.toThrow()
+      const replacement = await manager.create({ name: 'serial', description: 'serial', content: skill('serial', 'replacement') })
+      expect(replacement.name).toBe('serial')
+    } finally { await fs.rm(dir, { recursive: true, force: true }) }
+  })
+
+  it('rejects a stale same-revision journal receipt with a different mutation id', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-skill-receipt-'))
+    try {
+      const manager = new SkillManager(dir); await manager.initializeLoadOnly()
+      const coordinator = new CoreAgentConfigMutationCoordinator(dir, { readSemanticSnapshot: () => ({ skills: manager.runtimeSemanticEntries(), storage: manager.semanticMigrationState() }), publishInvalidation: () => {} })
+      await coordinator.initialize()
+      const journalDir = path.join(dir, 'skills', '.transactions'); await fs.mkdir(journalDir, { recursive: true })
+      const fake = { schema_version: 1, domain: 'skills', mutation_id: '11111111-1111-4111-8111-111111111111', target_revision: 2, before_registry_sha256: 'a'.repeat(64), after_registry_sha256: 'a'.repeat(64), staged_registry_rel: '.transactions/missing.json', staged_registry_sha256: 'a'.repeat(64), before_runtime_hashes: {}, after_runtime_hashes: {}, before_target_rel: '.transactions/a', after_target_rel: '.transactions/a', before_target_existed: false, stage_rel: '.transactions/a' }
+      await fs.writeFile(path.join(journalDir, 'skill-source-journal.json'), JSON.stringify(fake))
+      await expect(manager.recoverSourceJournal(coordinator)).rejects.toThrow()
+    } finally { await fs.rm(dir, { recursive: true, force: true }) }
+  })
+
   it('serializes concurrent creates without losing either registry entry', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-skill-serial-'))
     try {
