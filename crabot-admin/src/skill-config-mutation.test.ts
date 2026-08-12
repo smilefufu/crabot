@@ -131,6 +131,45 @@ describe('Skill source mutation journal', () => {
     } finally { await fs.rm(dir, { recursive: true, force: true }) }
   })
 
+  it('migrates embedded content and snapshot files through the coordinator without leaking bodies', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-skill-legacy-coordinator-'))
+    try {
+      const marker = 'UNIQUE_LEGACY_BODY_MARKER'
+      await fs.writeFile(path.join(dir, 'skills.json'), JSON.stringify([{
+        id: 'legacy-id', name: 'legacy', description: 'legacy', version: '1', content: skill('legacy', marker),
+        source_type: 'imported', is_builtin: false, is_essential: false, can_disable: true, enabled: true,
+        created_at: 't', updated_at: 't', previous_snapshot: { content: skill('legacy', 'previous'), files: { 'references/a.md': 'ref' }, version: '0', updated_at: 't', snapshotted_at: '2026-01-01T00:00:00.000Z' },
+      }]))
+      const manager = new SkillManager(dir); await manager.initializeLoadOnly()
+      const snapshot = () => ({ skills: manager.runtimeSemanticEntries(), storage: manager.semanticMigrationState() })
+      const coordinator = new CoreAgentConfigMutationCoordinator(dir, { readSemanticSnapshot: snapshot, publishInvalidation: () => {} })
+      manager.setSemanticSnapshotProvider(snapshot)
+      manager.setMutationRunner((domains, preview, apply) => coordinator.mutateComputed(domains, preview, apply).then(() => undefined))
+      await coordinator.initialize(); await manager.initializeMigrations()
+      const entry = manager.get('legacy-id')!
+      expect(await fs.readFile(path.join(entry.skill_dir, 'SKILL.md'), 'utf8')).toContain(marker)
+      expect(await fs.readFile(path.join(dir, 'skills', entry.previous_snapshot!.snapshot_dir, 'references/a.md'), 'utf8')).toBe('ref')
+      expect((await coordinator.current()).revision).toBe(2)
+      const persisted = await fs.readFile(path.join(dir, 'skills.json'), 'utf8')
+      expect(persisted).not.toContain(marker)
+      const transaction = await fs.readdir(path.join(dir, 'skills', '.transactions'))
+      expect(transaction.join(',')).not.toContain(marker)
+      expect((await fs.readdir(dir)).filter((name) => name.startsWith('skills.json.bak-'))).toHaveLength(1)
+    } finally { await fs.rm(dir, { recursive: true, force: true }) }
+  })
+
+  it('rejects traversal in embedded legacy snapshot files before any authoritative write', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-skill-legacy-traversal-'))
+    try {
+      const original = JSON.stringify([{ id: 'legacy-id', name: 'legacy', description: 'legacy', version: '1', content: skill('legacy'), source_type: 'imported', is_builtin: false, is_essential: false, can_disable: true, enabled: true, created_at: 't', updated_at: 't', previous_snapshot: { content: 'old', files: { '../escape': 'bad' }, version: '0', updated_at: 't', snapshotted_at: '2026-01-01T00:00:00.000Z' } }])
+      await fs.writeFile(path.join(dir, 'skills.json'), original)
+      const manager = new SkillManager(dir); await manager.initializeLoadOnly()
+      await expect(manager.initializeMigrations()).rejects.toThrow('Invalid legacy snapshot file path')
+      expect(await fs.readFile(path.join(dir, 'skills.json'), 'utf8')).toBe(original)
+      await expect(fs.access(path.join(dir, 'skills', 'legacy'))).rejects.toThrow()
+    } finally { await fs.rm(dir, { recursive: true, force: true }) }
+  })
+
   it('serializes concurrent creates without losing either registry entry', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-skill-serial-'))
     try {
