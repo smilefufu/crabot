@@ -21,6 +21,7 @@ export interface CoreAgentConfigMutationContext {
   mutation_id: string
   target_revision: number
   bindSourceJournal: (digest: string) => Promise<void>
+  source_journal_hmac?: string
 }
 
 export interface CoreAgentConfigMutationReceipt {
@@ -29,6 +30,7 @@ export interface CoreAgentConfigMutationReceipt {
   target_revision: number
   domains: ConfigDomain[]
   source_journal_sha256?: string
+  source_journal_hmac?: string
 }
 
 export interface CoreAgentConfigMutationOutboxRecord {
@@ -41,6 +43,7 @@ export interface CoreAgentConfigMutationOutboxRecord {
   state: 'prepared' | 'data_persisted' | 'committed'
   invalidation_pending: boolean
   source_journal_sha256?: string
+  source_journal_hmac?: string
 }
 
 export interface ConfigMutationHooks {
@@ -48,7 +51,6 @@ export interface ConfigMutationHooks {
   afterSourceMutation?: () => Promise<void> | void
   afterRevisionCommit?: () => Promise<void> | void
   afterPublish?: () => Promise<void> | void
-  /** Test/crash-race hook after the first epoch outbox read. */
   afterEpochOutboxRead?: () => Promise<void> | void
 }
 
@@ -201,8 +203,12 @@ export class CoreAgentConfigMutationCoordinator {
     computeAfterSemanticSnapshot: () => Promise<unknown> | unknown,
     applySourceMutation: (context: CoreAgentConfigMutationContext) => Promise<void> | void,
   ): Promise<CoreAgentConfigRevisionRecord> {
+    const persistedBeforeInitialize = await readJson<CoreAgentConfigMutationOutboxRecord>(this.outboxPath)
+    if (persistedBeforeInitialize) throw new Error('Core Agent config mutation already active')
     await this.initialize()
     return this.serial(async () => {
+      const persistedOutbox = await readJson<CoreAgentConfigMutationOutboxRecord>(this.outboxPath)
+      if (persistedOutbox) { this.assertOutbox(persistedOutbox); throw new Error('Core Agent config mutation already active') }
       this.mutationGeneration += 1
       try {
         const current = await this.current()
@@ -225,8 +231,11 @@ export class CoreAgentConfigMutationCoordinator {
           if (!persisted) throw new Error('Missing config mutation outbox for source journal binding')
           this.assertOutbox(persisted)
           if (persisted.mutation_id !== outbox.mutation_id || persisted.target_revision !== outbox.target_revision || persisted.state !== 'prepared') throw new Error('Config mutation source journal binding is too late')
+          const binding = this.sourceJournalBinding(outbox.mutation_id, outbox.target_revision, outbox.domains, digest)
           persisted.source_journal_sha256 = digest
+          persisted.source_journal_hmac = binding
           outbox.source_journal_sha256 = digest
+          outbox.source_journal_hmac = binding
           await atomicWrite(this.outboxPath, persisted)
           bound = true
         }
@@ -246,7 +255,17 @@ export class CoreAgentConfigMutationCoordinator {
     })
   }
 
+  private async ensureKeyReadOnly(): Promise<void> {
+    if (this.key) return
+    const raw = await fs.readFile(this.keyPath).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error))
+    if (!raw) throw new Error('Missing core Agent config HMAC key')
+    const text = raw.toString('utf8').trim(); const key = Buffer.from(text, 'base64url')
+    if (key.length !== 32 || key.toString('base64url') !== text) throw new Error('Invalid core Agent config HMAC key')
+    this.key = key
+  }
+
   async persistedMutationBinding(): Promise<CoreAgentConfigMutationOutboxRecord | CoreAgentConfigMutationReceipt | null> {
+    await this.ensureKeyReadOnly()
     const outbox = await readJson<CoreAgentConfigMutationOutboxRecord>(this.outboxPath)
     if (outbox) { this.assertOutbox(outbox); return outbox }
     const receipt = await readJson<CoreAgentConfigMutationReceipt>(this.receiptPath)
@@ -329,7 +348,7 @@ export class CoreAgentConfigMutationCoordinator {
 
   private async drainOutbox(outbox: CoreAgentConfigMutationOutboxRecord): Promise<void> {
     const receipt: CoreAgentConfigMutationReceipt = {
-      schema_version: 1, mutation_id: outbox.mutation_id, target_revision: outbox.target_revision, domains: [...outbox.domains], source_journal_sha256: outbox.source_journal_sha256,
+      schema_version: 1, mutation_id: outbox.mutation_id, target_revision: outbox.target_revision, domains: [...outbox.domains], source_journal_sha256: outbox.source_journal_sha256, source_journal_hmac: outbox.source_journal_hmac,
     }
     await atomicWrite(this.receiptPath, receipt)
     if (!outbox.invalidation_pending) { await fs.rm(this.outboxPath, { force: true }); return }
@@ -344,11 +363,23 @@ export class CoreAgentConfigMutationCoordinator {
     if (record.schema_version !== 1 || !Number.isSafeInteger(record.revision) || record.revision < 1 || !/^[a-f0-9]{64}$/.test(record.semantic_fingerprint_hmac)) throw new Error('Invalid core Agent config revision')
   }
 
+  private sourceJournalBinding(mutationId: string, targetRevision: number, domains: ConfigDomain[], digest: string): string {
+    if (!this.key) throw new Error('Core Agent config coordinator not initialized')
+    return crypto.createHmac('sha256', this.key).update(canonicalizeJson({ mutation_id: mutationId, target_revision: targetRevision, domains, source_journal_sha256: digest }), 'utf8').digest('hex')
+  }
+
+  private assertSourceJournalBinding(record: { mutation_id: string; target_revision: number; domains: ConfigDomain[]; source_journal_sha256?: string; source_journal_hmac?: string }): void {
+    if (record.source_journal_sha256 === undefined && record.source_journal_hmac === undefined) return
+    if (!record.source_journal_sha256 || !record.source_journal_hmac || !/^[a-f0-9]{64}$/.test(record.source_journal_sha256) || !/^[a-f0-9]{64}$/.test(record.source_journal_hmac) || !this.equal(this.sourceJournalBinding(record.mutation_id, record.target_revision, record.domains, record.source_journal_sha256), record.source_journal_hmac)) throw new Error('Core Agent config source journal binding mismatch')
+  }
+
   private assertReceipt(receipt: CoreAgentConfigMutationReceipt): void {
+    this.assertSourceJournalBinding(receipt)
     if (receipt.schema_version !== 1 || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(receipt.mutation_id) || !Number.isSafeInteger(receipt.target_revision) || receipt.target_revision < 2 || !Array.isArray(receipt.domains) || receipt.domains.length === 0 || (receipt.source_journal_sha256 !== undefined && !/^[a-f0-9]{64}$/.test(receipt.source_journal_sha256))) throw new Error('Invalid core Agent config mutation receipt')
   }
 
   private assertOutbox(outbox: CoreAgentConfigMutationOutboxRecord): void {
+    this.assertSourceJournalBinding(outbox)
     if (outbox.schema_version !== 1 || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(outbox.mutation_id) || !Number.isSafeInteger(outbox.target_revision) || outbox.target_revision < 2 || !['prepared', 'data_persisted', 'committed'].includes(outbox.state) || !Array.isArray(outbox.domains) || outbox.domains.length === 0 || !/^[a-f0-9]{64}$/.test(outbox.before_fingerprint_hmac) || !/^[a-f0-9]{64}$/.test(outbox.after_fingerprint_hmac) || typeof outbox.invalidation_pending !== 'boolean' || (outbox.source_journal_sha256 !== undefined && !/^[a-f0-9]{64}$/.test(outbox.source_journal_sha256))) throw new Error('Invalid core Agent config mutation outbox')
   }
 
