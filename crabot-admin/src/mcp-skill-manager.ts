@@ -8,7 +8,7 @@ import fs from 'fs/promises'
 import path from 'path'
 import { randomBytes } from 'node:crypto'
 import AdmZip from 'adm-zip'
-import { generateId, generateTimestamp } from 'crabot-shared'
+import { canonicalizeJson, generateId, generateTimestamp } from 'crabot-shared'
 import type { ConfigDomain } from './core-agent-config-revision-store.js'
 import type { OnConflict } from './backup/import/import-types.js'
 
@@ -308,16 +308,14 @@ export class MCPServerManager {
       ...params,
       updated_at: generateTimestamp(),
     }
-    const currentRuntime = JSON.stringify({ enabled: entry.enabled, ...this.toAgentConfig(entry) })
-    const updatedRuntime = JSON.stringify({ enabled: updated.enabled, ...this.toAgentConfig(updated) })
-    if (currentRuntime === updatedRuntime) {
-      this.servers = new Map(this.servers)
-      this.servers.set(id, updated)
+    const currentRuntime = canonicalizeJson(runtimeMcpEntries(this.servers))
+    const next = new Map(this.servers)
+    next.set(id, updated)
+    if (currentRuntime === canonicalizeJson(runtimeMcpEntries(next))) {
+      this.servers = next
       await this.save()
       return updated
     }
-    const next = new Map(this.servers)
-    next.set(id, updated)
     await this.commit(next)
     return updated
   }
@@ -336,7 +334,7 @@ export class MCPServerManager {
     if (exists && onConflict === 'skip') return 'skipped'
     const next = new Map(this.servers)
     next.set(entry.id, entry)
-    if (exists && JSON.stringify(this.runtimeSemanticEntries()) === JSON.stringify(runtimeMcpEntries(next))) {
+    if (exists && canonicalizeJson(this.runtimeSemanticEntries()) === canonicalizeJson(runtimeMcpEntries(next))) {
       this.servers = next
       await this.save()
       return 'overwritten'

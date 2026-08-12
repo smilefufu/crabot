@@ -21,7 +21,7 @@
 
 import fs from 'fs/promises'
 import path from 'path'
-import { generateId, generateTimestamp } from 'crabot-shared'
+import { canonicalizeJson, generateId, generateTimestamp } from 'crabot-shared'
 import type { SubAgentRegistryEntry, ModelRole } from './types.js'
 import type { RegistryMutationRunner } from './mcp-skill-manager.js'
 import type { OnConflict } from './backup/import/import-types.js'
@@ -88,9 +88,12 @@ function runtimeSubAgentEntries(entries: Map<string, SubAgentRegistryEntry>): un
   return Array.from(entries.values()).filter((entry) => entry.enabled).map((entry) => JSON.parse(JSON.stringify({
     id: entry.id, name: entry.name, description: entry.description, when_to_use: entry.when_to_use,
     role: entry.role, workflow: entry.workflow, deliverables: entry.deliverables,
+    verification: entry.verification,
     provider_id: entry.provider_id, model_id: entry.model_id, model_role: entry.model_role,
-    builtin_capabilities: entry.builtin_capabilities, allowed_mcp_server_ids: entry.allowed_mcp_server_ids,
+    builtin_capabilities: { ...entry.builtin_capabilities, crab_messaging: false },
+    allowed_mcp_server_ids: entry.allowed_mcp_server_ids,
     allowed_skill_ids: entry.allowed_skill_ids, max_turns: entry.max_turns, hook_preset: entry.hook_preset,
+    system_only: entry.system_only,
   }))).sort((a: any, b: any) => a.id.localeCompare(b.id))
 }
 
@@ -156,6 +159,7 @@ export class SubAgentManager {
 
   private async commit(next: Map<string, SubAgentRegistryEntry>): Promise<void> {
     const previous = this.entries
+    const previousRewriteState = this.needsLegacyRewrite
     const apply = async () => {
       this.entries = next
       if (!await this.persistLegacyRewrite()) await this.save()
@@ -163,12 +167,20 @@ export class SubAgentManager {
     if (!this.mutationRunner) return apply()
     await this.mutationRunner(['subagents'], async () => {
       this.entries = next
-      try { return this.semanticSnapshotProvider?.() } finally { this.entries = previous }
+      this.needsLegacyRewrite = false
+      try { return this.semanticSnapshotProvider?.() } finally {
+        this.entries = previous
+        this.needsLegacyRewrite = previousRewriteState
+      }
     }, apply)
   }
 
   runtimeSemanticEntries(): unknown[] {
     return runtimeSubAgentEntries(this.entries)
+  }
+
+  semanticMigrationState(): { storage_version: number; legacy_rewrite_pending: boolean } {
+    return { storage_version: STORAGE_FORMAT_VERSION, legacy_rewrite_pending: this.needsLegacyRewrite }
   }
 
   private buildBuiltinMap(): Map<string, SubAgentRegistryEntry> {
@@ -312,7 +324,7 @@ export class SubAgentManager {
     if (exists && onConflict === 'skip') return 'skipped'
     const next = new Map(this.entries)
     next.set(entry.id, entry)
-    if (exists && JSON.stringify(this.runtimeSemanticEntries()) === JSON.stringify(runtimeSubAgentEntries(next))) {
+    if (exists && canonicalizeJson(this.runtimeSemanticEntries()) === canonicalizeJson(runtimeSubAgentEntries(next))) {
       this.entries = next
       await this.save()
       return 'overwritten'
@@ -362,29 +374,14 @@ export class SubAgentManager {
       updated_at: generateTimestamp(),
     }
     this.validateModelSpec(next)
-    const currentRuntime = JSON.stringify({
-      id: existing.id, name: existing.name, description: existing.description, when_to_use: existing.when_to_use,
-      role: existing.role, workflow: existing.workflow, deliverables: existing.deliverables,
-      provider_id: existing.provider_id, model_id: existing.model_id, model_role: existing.model_role,
-      builtin_capabilities: existing.builtin_capabilities, allowed_mcp_server_ids: existing.allowed_mcp_server_ids,
-      allowed_skill_ids: existing.allowed_skill_ids, max_turns: existing.max_turns, hook_preset: existing.hook_preset,
-      enabled: existing.enabled,
-    })
-    const nextRuntime = JSON.stringify({
-      id: next.id, name: next.name, description: next.description, when_to_use: next.when_to_use,
-      role: next.role, workflow: next.workflow, deliverables: next.deliverables,
-      provider_id: next.provider_id, model_id: next.model_id, model_role: next.model_role,
-      builtin_capabilities: next.builtin_capabilities, allowed_mcp_server_ids: next.allowed_mcp_server_ids,
-      allowed_skill_ids: next.allowed_skill_ids, max_turns: next.max_turns, hook_preset: next.hook_preset,
-      enabled: next.enabled,
-    })
-    if (currentRuntime === nextRuntime) {
-      this.entries.set(id, next)
+    const currentEntries = new Map(this.entries)
+    const nextEntries = new Map(this.entries)
+    nextEntries.set(id, next)
+    if (canonicalizeJson(runtimeSubAgentEntries(currentEntries)) === canonicalizeJson(runtimeSubAgentEntries(nextEntries))) {
+      this.entries = nextEntries
       await this.save()
       return next
     }
-    const nextEntries = new Map(this.entries)
-    nextEntries.set(id, next)
     await this.commit(nextEntries)
     return next
   }
@@ -409,8 +406,11 @@ export class SubAgentManager {
         changed = true
       }
     }
-    if (changed) await this.commit(next)
-    else await this.persistLegacyRewrite()
+    if (changed) {
+      await this.commit(next)
+    } else if (this.needsLegacyRewrite) {
+      await this.commit(next)
+    }
   }
 
   /**

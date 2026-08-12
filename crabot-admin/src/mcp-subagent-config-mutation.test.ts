@@ -9,7 +9,7 @@ import type { SubAgentRegistryEntry } from './types.js'
 
 const cleanup: string[] = []
 const subagent = (id: string): SubAgentRegistryEntry => ({
-  id, name: id, description: 'd', when_to_use: 'w', role: 'r', workflow: 'flow', deliverables: 'out',
+  id, name: id, description: 'd', when_to_use: 'w', role: 'r', workflow: 'flow', deliverables: 'out', verification: 'verify',
   builtin_capabilities: { file_system: false, shell: false, task_intel: false, crab_memory: false, crab_messaging: false },
   allowed_mcp_server_ids: [], allowed_skill_ids: [], max_turns: 1, provider_id: 'provider', model_id: 'model', model_role: null,
   enabled: true, is_builtin: false, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
@@ -60,6 +60,32 @@ describe('MCP and SubAgent coordinator mutations', () => {
     await expect(restarted.initialize()).rejects.toThrow('semantic fingerprint does not match committed revision')
   })
 
+  it('rewrites legacy v1 storage only inside a coordinator mutation', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-subagent-v1-rewrite-')); cleanup.push(dir)
+    const legacy = subagent('legacy')
+    await fs.writeFile(path.join(dir, 'subagents.json'), JSON.stringify([legacy]))
+    const agents = new SubAgentManager(dir)
+    await agents.initializeLoadOnly()
+    const events: Array<{ config_revision: number; domains: string[] }> = []
+    const snapshot = () => ({
+      subagents: agents.runtimeSemanticEntries(),
+      storage: agents.semanticMigrationState(),
+    })
+    const coordinator = new CoreAgentConfigMutationCoordinator(dir, {
+      readSemanticSnapshot: snapshot,
+      publishInvalidation: (event) => { events.push(event) },
+    })
+    agents.setSemanticSnapshotProvider(snapshot)
+    agents.setMutationRunner((domains, preview, apply) => coordinator.mutateComputed(domains, preview, apply).then(() => undefined))
+    await coordinator.initialize()
+    expect(agents.semanticMigrationState().legacy_rewrite_pending).toBe(true)
+    await agents.seedBuiltin([])
+    expect((await coordinator.current()).revision).toBe(2)
+    expect(events).toEqual([{ config_revision: 2, domains: ['subagents'] }])
+    expect(JSON.parse(await fs.readFile(path.join(dir, 'subagents.json'), 'utf8'))).toMatchObject({ version: 2 })
+    expect(agents.semanticMigrationState().legacy_rewrite_pending).toBe(false)
+  })
+
   it('coordinates runtime CRUD/imports with exact domains and never emits MCP secrets', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-mcp-subagent-coordinator-')); cleanup.push(dir)
     const mcp = new MCPServerManager(dir); const agents = new SubAgentManager(dir)
@@ -75,18 +101,22 @@ describe('MCP and SubAgent coordinator mutations', () => {
     mcp.setMutationRunner(runner); agents.setMutationRunner(runner)
     await coordinator.initialize()
 
-    const created = await mcp.create({ name: 'secret-mcp', command: 'node', args: ['server.js'], env: { TOKEN: 'mcp-secret' } })
+    const created = await mcp.create({ name: 'secret-mcp', command: 'node', args: ['server.js'], env: { TOKEN: 'mcp-secret', A: '1', B: '2' } })
+    await mcp.update(created.id, { env: { B: '2', A: '1', TOKEN: 'mcp-secret' } })
+    expect((await coordinator.current()).revision).toBe(2)
     await mcp.importFromJson(JSON.stringify({ mcpServers: { imported: { command: 'python', args: ['tool.py'] } } }))
-    await agents.create(subagent('created'))
-    await agents.upsertById({ ...subagent('created'), description: 'changed' }, 'overwrite')
-    expect((await coordinator.current()).revision).toBe(5)
+    const createdAgent = await agents.create(subagent('created'))
+    await agents.update(createdAgent.id, { verification: 'changed verification' })
+    await agents.upsertById({ ...subagent(createdAgent.id), verification: 'changed verification', description: 'changed' }, 'overwrite')
+    expect((await coordinator.current()).revision).toBe(6)
     expect(events).toEqual([
       { config_revision: 2, domains: ['mcp'] }, { config_revision: 3, domains: ['mcp'] },
       { config_revision: 4, domains: ['subagents'] }, { config_revision: 5, domains: ['subagents'] },
+      { config_revision: 6, domains: ['subagents'] },
     ])
-    expect(await agents.upsertById(subagent('created'), 'skip')).toBe('skipped')
-    expect((await coordinator.current()).revision).toBe(5)
-    expect(mcp.get(created.id)?.env).toEqual({ TOKEN: 'mcp-secret' })
+    expect(await agents.upsertById(subagent(createdAgent.id), 'skip')).toBe('skipped')
+    expect((await coordinator.current()).revision).toBe(6)
+    expect(mcp.get(created.id)?.env).toEqual({ B: '2', A: '1', TOKEN: 'mcp-secret' })
     const outboxPath = path.join(dir, 'config', 'core-agent-config-mutation-outbox.json')
     await expect(fs.readFile(outboxPath, 'utf8')).rejects.toThrow()
     expect(JSON.stringify(events)).not.toContain('mcp-secret')

@@ -8668,11 +8668,12 @@ export class AdminModule extends ModuleBase {
         deliverables: entry.deliverables,
         verification: entry.verification,
         model,
-        builtin_capabilities: entry.builtin_capabilities,
+        builtin_capabilities: { ...entry.builtin_capabilities, crab_messaging: false },
         allowed_mcp_server_ids: entry.allowed_mcp_server_ids,
         allowed_skill_ids: entry.allowed_skill_ids,
         max_turns: entry.max_turns,
         hook_preset: entry.hook_preset,
+        system_only: entry.system_only,
       })
     }
 
@@ -8739,6 +8740,7 @@ export class AdminModule extends ModuleBase {
       providers,
       mcp_servers: this.mcpServerManager.runtimeSemanticEntries(),
       subagents: this.subAgentManager.runtimeSemanticEntries(),
+      subagent_storage: this.subAgentManager.semanticMigrationState(),
     }
   }
 
