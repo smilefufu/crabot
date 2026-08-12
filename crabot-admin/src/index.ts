@@ -977,6 +977,8 @@ export class AdminModule extends ModuleBase {
   protected override async getHealthDetails(): Promise<Record<string, unknown>> {
     const health: Record<string, unknown> = {
       web_server_running: this.webServer !== null,
+      cutover_ready: this.cutoverActivated,
+      ...(this.cutoverActivated ? {} : { recovery_reason: 'waiting for authenticated core Agent startup/configuration' }),
       friends_count: this.friends.size,
       pending_messages_count: this.pendingMessages.size,
       providers_count: this.modelProviderManager.listProviders().length,
@@ -3971,17 +3973,44 @@ export class AdminModule extends ModuleBase {
   /**
    * 处理 channel.message_received 事件：鉴权，决定是否发出 channel.message_authorized
    */
-  private async readLegacyAgentPackageEntries(): Promise<string[]> {
+  private async readLegacyAgentPackageEntries(): Promise<Array<{ source_id: string; raw: unknown }>> {
     const directory = path.join(this.adminConfig.data_dir, 'installed-modules')
     try {
-      return (await fs.readdir(directory, { withFileTypes: true }))
-        .filter((entry) => entry.isDirectory() && /agent/i.test(entry.name) && entry.name !== 'crabot-agent')
-        .map((entry) => entry.name)
-        .sort()
+      const entries = await fs.readdir(directory, { withFileTypes: true })
+      const results: Array<{ source_id: string; raw: unknown }> = []
+      for (const entry of entries) {
+        if (!entry.isDirectory() || entry.name === 'crabot-agent') continue
+        const packagePath = path.join(directory, entry.name)
+        let raw: unknown = { package_id: entry.name, package_path: packagePath }
+        for (const manifestName of ['crabot-module.yaml', 'crabot-module.yml', 'package.json']) {
+          try {
+            const manifest = await fs.readFile(path.join(packagePath, manifestName), 'utf8')
+            raw = { package_id: entry.name, package_path: packagePath, manifest_name: manifestName, manifest }
+            break
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+          }
+        }
+        results.push({ source_id: entry.name, raw })
+      }
+      return results.sort((left, right) => left.source_id.localeCompare(right.source_id))
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
       throw error
     }
+  }
+
+  private async readLegacyFrontWorkerConfigSources(): Promise<Array<{ source_id: string; raw: unknown }>> {
+    const candidates = ['front-agent-config.json', 'worker-agent-config.json', 'front-worker-config.json']
+    const results: Array<{ source_id: string; raw: unknown }> = []
+    for (const name of candidates) {
+      try {
+        results.push({ source_id: name, raw: JSON.parse(await fs.readFile(path.join(this.adminConfig.data_dir, name), 'utf8')) })
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      }
+    }
+    return results
   }
 
   private assertIngressOpen(): void {
@@ -7084,20 +7113,40 @@ export class AdminModule extends ModuleBase {
     this.publishAdminEvent('admin.agent_instance_deleted', { instance_id: params.instance_id })
     return { deleted: true }
   }
+  private async waitForCoreAgentReady(options: { attempts?: number; delayMs?: number } = {}): Promise<void> {
+    const attempts = options.attempts ?? 30
+    const delayMs = options.delayMs ?? 500
+    let lastReason = 'core Agent has not registered'
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        const port = await this.ensureAgentPort()
+        if (!port) throw new Error('core Agent port unavailable')
+        const health = await this.rpcClient.call<{}, { status?: string; details?: { llm_status?: string } }>(port, 'health', {}, this.config.moduleId)
+        if (health.status === 'healthy' && health.details?.llm_status === 'ready') return
+        lastReason = `core Agent health=${health.status ?? 'unknown'} configured=${health.details?.llm_status ?? 'unknown'}`
+      } catch (error) {
+        lastReason = error instanceof Error ? error.message : String(error)
+      }
+      await new Promise((resolve) => setTimeout(resolve, delayMs))
+    }
+    throw new Error(`Core Agent readiness timed out: ${lastReason}`)
+  }
+
   async completeCoreAgentCutover(): Promise<void> {
     if (!this.managementOnly || this.cutoverActivated) return
     if (!this.cutoverBearer) throw new Error('Missing CRABOT_ADMIN_CUTOVER_BEARER')
     const packageEntries = await this.readLegacyAgentPackageEntries()
+    const frontWorkerConfigs = await this.readLegacyFrontWorkerConfigSources()
     const sources = [
       ...this.agentManager.listImplementations().items.filter((item) => item.id !== 'default').map((item) => ({ source_kind: 'agent_implementation' as const, source_id: item.id, raw: item })),
       ...this.agentManager.listInstances().items.filter((item) => item.id !== 'crabot-agent').map((item) => ({ source_kind: 'agent_instance' as const, source_id: item.id, raw: item })),
       ...this.agentManager.listConfigs().filter((item) => item.instance_id !== 'crabot-agent').map((item) => ({ source_kind: 'agent_config' as const, source_id: item.instance_id, raw: item })),
-      ...packageEntries.map((entry) => ({ source_kind: 'installed_package' as const, source_id: entry, raw: { package_id: entry } })),
+      ...packageEntries.map((entry) => ({ source_kind: 'installed_package' as const, source_id: entry.source_id, raw: entry.raw })),
+      ...frontWorkerConfigs.map((entry) => ({ source_kind: 'agent_config' as const, source_id: `legacy-${entry.source_id}`, raw: entry.raw })),
     ]
     const archive = await this.cutoverStore.archive(sources)
     const existing = await this.cutoverStore.loadMarker()
-    let result: unknown
-    result = await this.rpcClient.callModuleManagerSensitive(
+    const result = await this.rpcClient.callModuleManagerSensitive(
       'complete_core_agent_cutover',
       { schema_version: 1, admin_archive_fingerprint: archive.fingerprint, admin_archived_record_count: archive.record_count },
       this.config.moduleId,
@@ -7106,6 +7155,7 @@ export class AdminModule extends ModuleBase {
     if (!existing || existing.archive_fingerprint !== archive.fingerprint || existing.archive_record_count !== archive.record_count) {
       await this.cutoverStore.saveMarker({ schema_version: 1, completed: true, completed_at: new Date().toISOString(), archive_fingerprint: archive.fingerprint, archive_record_count: archive.record_count, mm_result: result })
     }
+    await this.waitForCoreAgentReady()
     await this.channelManager.reRegisterInstances()
     await this.ensureBuiltinSchedules()
     this.scheduleEngine.startAll(Array.from(this.schedules.values()))

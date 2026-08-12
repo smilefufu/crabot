@@ -37,7 +37,7 @@ describe('ModuleManager', () => {
         health_check_timeout: 5000,
         health_check_failure_threshold: 3,
         shutdown_timeout: 5000,
-        hotplug_allowed_types: ['agent', 'channel'],
+        hotplug_allowed_types: ['channel'],
         modules: [],
       } as ModuleManagerConfig,
       TEST_DATA_DIR
@@ -97,7 +97,7 @@ describe('ModuleManager', () => {
       const response = await makeRequest<{ registered: boolean }>(TEST_PORT, 'register_module_definition', {
         module_definition: {
           module_id: 'test-agent-module-def',
-          module_type: 'agent',
+          module_type: 'channel',
           entry: 'node test.js',
           auto_start: false,
           start_priority: 100,
@@ -123,7 +123,7 @@ describe('ModuleManager', () => {
       await makeRequest(TEST_PORT, 'register_module_definition', {
         module_definition: {
           module_id: 'test-duplicate-module',
-          module_type: 'agent',
+          module_type: 'channel',
           entry: 'node test.js',
           auto_start: false,
           start_priority: 100,
@@ -132,7 +132,7 @@ describe('ModuleManager', () => {
       const response = await makeRequest(TEST_PORT, 'register_module_definition', {
         module_definition: {
           module_id: 'test-duplicate-module',
-          module_type: 'agent',
+          module_type: 'channel',
           entry: 'node test.js',
           auto_start: false,
           start_priority: 100,
@@ -146,7 +146,7 @@ describe('ModuleManager', () => {
       await makeRequest(TEST_PORT, 'register_module_definition', {
         module_definition: {
           module_id: 'test-unregister-module-def',
-          module_type: 'agent',
+          module_type: 'channel',
           entry: 'node test.js',
           auto_start: false,
           start_priority: 100,
@@ -171,7 +171,7 @@ describe('ModuleManager', () => {
       await makeRequest(TEST_PORT, 'register_module_definition', {
         module_definition: {
           module_id: 'test-update-module-def',
-          module_type: 'agent',
+          module_type: 'channel',
           entry: 'node test.js',
           auto_start: false,
           start_priority: 100,
@@ -202,7 +202,7 @@ describe('ModuleManager', () => {
       await makeRequest(TEST_PORT, 'register_module_definition', {
         module_definition: {
           module_id: 'test-get-module-def',
-          module_type: 'agent',
+          module_type: 'channel',
           entry: 'node test.js',
           auto_start: false,
           start_priority: 100,

@@ -101,7 +101,7 @@ export class ModuleManager {
   private readonly methodHandlers: Map<string, MethodHandler> = new Map()
   private readonly runtimeBearers = new Map<ModuleId, { token: string; child: ChildProcess; revoked: boolean }>()
   private readonly cutoverBearers = new Map<ModuleId, { token: string; child: ChildProcess; revoked: boolean }>()
-  private managementOnly = true
+  private managementOnly = false
   private cutoverRecord: { schema_version: 1; completed: true; completed_at: string; admin_archive_fingerprint: string; admin_archived_record_count: number; mm_archived_module_ids: ModuleId[]; process_trees_confirmed_stopped: true } | null = null
 
   private server: http.Server | null = null
@@ -166,6 +166,11 @@ export class ModuleManager {
         })
       }
     }
+
+    // The two-phase gate only applies to the real singleton topology. Generic
+    // ModuleManager consumers and focused lifecycle tests without both builtins
+    // retain ordinary module-management semantics.
+    this.managementOnly = !this.cutoverRecord && this.modules.has('admin-web') && this.modules.has('crabot-agent')
 
     // 启动 HTTP 服务器
     this.server = http.createServer((req, res) => {
@@ -376,7 +381,12 @@ export class ModuleManager {
       } catch (error) {
         throw Object.assign(new Error(`Unable to confirm non-core Agent ${runtime.module_id} stopped: ${error instanceof Error ? error.message : String(error)}`), { code: 'MODULE_MANAGER_CUTOVER_STOP_FAILED' })
       }
-      if (this.processes.has(runtime.module_id)) throw Object.assign(new Error(`Non-core Agent process still exists: ${runtime.module_id}`), { code: 'MODULE_MANAGER_CUTOVER_STOP_FAILED' })
+      if (this.processes.has(runtime.module_id)) {
+        throw Object.assign(new Error(`Non-core Agent process still exists: ${runtime.module_id}`), { code: 'MODULE_MANAGER_CUTOVER_STOP_FAILED' })
+      }
+      if (runtime.status === 'running' || runtime.status === 'starting') {
+        throw Object.assign(new Error(`Non-core Agent runtime remains active: ${runtime.module_id}`), { code: 'MODULE_MANAGER_CUTOVER_STOP_FAILED' })
+      }
       runtime.auto_start = false
       ;(runtime as ModuleRuntime & { legacy_archive?: { kind: string } }).legacy_archive = { kind: 'unsupported_non_core_agent' }
       archived.push(runtime.module_id)
