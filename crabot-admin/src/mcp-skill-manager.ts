@@ -758,6 +758,7 @@ export class SkillManager {
         this.assertJournalPath(move.stage_rel, 'stage')
         this.assertJournalPath(move.after_rel, move.after_rel.startsWith('.snapshots/') ? 'snapshot' : 'target')
         if (move.cleanup_rel !== undefined) {
+          if (!move.before_existed || move.cleanup_rel !== move.before_rel) throw new Error('Invalid skill source journal')
           if (!Array.isArray(journal.before_referenced_paths) || journal.before_referenced_paths.some((path) => typeof path !== 'string')) throw new Error('Invalid skill source journal')
           if (!journal.before_referenced_paths.includes(move.cleanup_rel)) throw new Error('Invalid skill source journal')
           if (beforeRegistry && !this.registryReferencesPath(beforeRegistry, move.cleanup_rel)) throw new Error('Invalid skill source journal')
@@ -865,15 +866,15 @@ export class SkillManager {
         const stage = this.resolveTransactionPath(move.stage_rel)
         const after = this.resolveTransactionPath(move.after_rel)
         const before = move.before_rel ? this.resolveTransactionPath(move.before_rel) : undefined
-        if (before && await fs.access(before).then(() => true).catch(() => false)) {
+        if (!move.before_existed) {
+          await fs.rm(after, { recursive: true, force: true })
+        } else if (before && await fs.access(before).then(() => true).catch(() => false)) {
           if (move.before_tree_hash && move.before_tree_hash !== await this.hashContentTree(before)) throw new Error('Skill source journal before tree mismatch')
           await fs.rm(after, { recursive: true, force: true })
         } else if (before && await fs.access(after).then(() => true).catch(() => false)) {
           if (move.after_tree_hash !== await this.hashContentTree(after)) throw new Error('Skill source journal after tree mismatch')
           await fs.rename(after, before)
           if (move.before_tree_hash && move.before_tree_hash !== await this.hashContentTree(before)) throw new Error('Skill source journal before tree mismatch')
-        } else if (!before || !move.before_existed) {
-          await fs.rm(after, { recursive: true, force: true })
         } else throw new Error('Skill source journal rollback is ambiguous')
         await fs.rm(stage, { recursive: true, force: true })
       }
@@ -1027,6 +1028,7 @@ export class SkillManager {
     const next = new Map<string, SkillRegistryEntry>()
     const hashes = new Map<string, string>()
     const moves: SkillSourceMove[] = []
+    const plannedDestinations = new Set<string>()
     const stageRoot = path.join(this.skillsRoot, `.stage.${process.pid}.${Date.now()}.${randomBytes(4).toString('hex')}`)
     const backupPath = `${this.filePath}.bak-${isoCompactTs(generateTimestamp())}`
     if (await fs.access(backupPath).then(() => true).catch(() => false)) throw new Error('Legacy skills backup already exists')
@@ -1047,10 +1049,12 @@ export class SkillManager {
         if (raw.content !== undefined) await atomicWriteFileBuf(path.join(stage, 'SKILL.md'), Buffer.from(raw.content, 'utf8'))
         if (!await fs.access(path.join(stage, 'SKILL.md')).then(() => true).catch(() => false)) throw new Error(`Legacy skill "${raw.name}" has no SKILL.md`)
         const targetExists = await fs.access(target).then(() => true).catch(() => false)
-        if (targetExists) throw new Error(`Legacy skill target collision: ${dirName}`)
+        const targetRel = this.relativeTransactionPath(target)
+        if (targetExists || plannedDestinations.has(targetRel)) throw new Error(`Legacy skill target collision: ${dirName}`)
+        plannedDestinations.add(targetRel)
         moves.push({
           before_rel: source && this.isPathUnderSkillsRoot(source) ? this.relativeTransactionPath(source) : undefined,
-          after_rel: this.relativeTransactionPath(target),
+          after_rel: targetRel,
           stage_rel: this.relativeTransactionPath(stage),
           before_existed: sourceExists,
           ...(sourceExists && this.isPathUnderSkillsRoot(source) ? { before_tree_hash: await this.hashContentTree(source) } : {}),
@@ -1068,7 +1072,8 @@ export class SkillManager {
           if (!oldSnapshotName.startsWith(snapshotPrefix)) throw new Error(`Legacy snapshot does not match source: ${oldSnapshotRel}`)
           const newSnapshotRel = path.posix.join('.snapshots', `${dirName}-${oldSnapshotName.slice(snapshotPrefix.length)}`)
           const newSnapshot = this.resolveTransactionPath(newSnapshotRel)
-          if (await fs.access(newSnapshot).then(() => true).catch(() => false)) throw new Error(`Legacy snapshot collision: ${newSnapshotRel}`)
+          if (await fs.access(newSnapshot).then(() => true).catch(() => false) || plannedDestinations.has(newSnapshotRel)) throw new Error(`Legacy snapshot collision: ${newSnapshotRel}`)
+          plannedDestinations.add(newSnapshotRel)
           if (!await fs.access(oldSnapshot).then(() => true).catch(() => false)) throw new Error(`Legacy snapshot missing: ${oldSnapshotRel}`)
           const snapshotStage = path.join(stageRoot, `snapshot-${moves.length}`)
           await copyDir(oldSnapshot, snapshotStage)
@@ -1081,7 +1086,8 @@ export class SkillManager {
         if (previous?.content !== undefined && !previous.snapshot_dir) {
           const snapshotRel = path.posix.join('.snapshots', `${dirName}-${isoCompactTs(previous.snapshotted_at)}`)
           const snapshot = this.resolveTransactionPath(snapshotRel)
-          if (await fs.access(snapshot).then(() => true).catch(() => false)) throw new Error(`Legacy snapshot collision: ${snapshotRel}`)
+          if (await fs.access(snapshot).then(() => true).catch(() => false) || plannedDestinations.has(snapshotRel)) throw new Error(`Legacy snapshot collision: ${snapshotRel}`)
+          plannedDestinations.add(snapshotRel)
           const snapshotStage = path.join(stageRoot, `snapshot-${moves.length}`)
           await fs.mkdir(snapshotStage, { recursive: true }); await atomicWriteFileBuf(path.join(snapshotStage, 'SKILL.md'), Buffer.from(previous.content, 'utf8'))
           for (const [rel, value] of Object.entries(previous.files ?? {})) {

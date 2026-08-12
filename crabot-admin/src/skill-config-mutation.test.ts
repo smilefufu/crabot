@@ -170,6 +170,32 @@ describe('Skill source mutation journal', () => {
     } finally { await fs.rm(dir, { recursive: true, force: true }) }
   })
 
+  it('rejects duplicate planned legacy destinations before preparing a generic mutation', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-skill-legacy-duplicate-'))
+    try {
+      const entries = ['one', 'two'].map((id) => ({
+        id, name: 'duplicate', description: id, version: '1', content: skill('duplicate', id),
+        source_type: 'imported', is_builtin: false, is_essential: false, can_disable: true, enabled: true,
+        created_at: 't', updated_at: 't',
+      }))
+      await fs.writeFile(path.join(dir, 'skills.json'), JSON.stringify(entries))
+      const manager = new SkillManager(dir); await manager.initializeLoadOnly()
+      let prepared = false
+      const snapshot = () => ({ skills: manager.runtimeSemanticEntries(), storage: manager.semanticMigrationState() })
+      const coordinator = new CoreAgentConfigMutationCoordinator(dir, {
+        readSemanticSnapshot: snapshot,
+        publishInvalidation: () => {},
+        hooks: { afterPrepared: () => { prepared = true } },
+      })
+      manager.setSemanticSnapshotProvider(snapshot)
+      manager.setMutationRunner((domains, preview, apply) => coordinator.mutateComputed(domains, preview, apply).then(() => undefined))
+      await coordinator.initialize()
+      await expect(manager.initializeMigrations()).rejects.toThrow('Legacy skill target collision')
+      expect(prepared).toBe(false)
+      expect((await coordinator.current()).revision).toBe(1)
+    } finally { await fs.rm(dir, { recursive: true, force: true }) }
+  })
+
   it('fails identical legacy target collisions without changing source or registry', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-skill-legacy-collision-'))
     try {
