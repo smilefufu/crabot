@@ -169,6 +169,33 @@ describe('Skill source mutation journal', () => {
     } finally { await fs.rm(dir, { recursive: true, force: true }) }
   })
 
+  it('migrates an external legacy source through a coordinator transaction', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-skill-legacy-external-'))
+    const external = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-skill-external-source-'))
+    try {
+      await fs.writeFile(path.join(external, 'SKILL.md'), skill('external', 'external-body'))
+      await fs.writeFile(path.join(dir, 'skills.json'), JSON.stringify([{
+        id: 'external-id', name: 'external', description: 'external', version: '1', skill_dir: external,
+        source_type: 'imported', is_builtin: false, is_essential: false, can_disable: true, enabled: true,
+        created_at: 't', updated_at: 't',
+      }]))
+      const manager = new SkillManager(dir); await manager.initializeLoadOnly()
+      const snapshot = () => ({ skills: manager.runtimeSemanticEntries(), storage: manager.semanticMigrationState() })
+      const coordinator = new CoreAgentConfigMutationCoordinator(dir, { readSemanticSnapshot: snapshot, publishInvalidation: () => {} })
+      manager.setSemanticSnapshotProvider(snapshot)
+      manager.setMutationRunner((domains, preview, apply) => coordinator.mutateComputed(domains, preview, apply).then(() => undefined))
+      await coordinator.initialize(); await manager.initializeMigrations()
+      const migrated = manager.get('external-id')!
+      expect(migrated.skill_dir).toBe(path.join(dir, 'skills', 'external'))
+      await expect(fs.readFile(path.join(migrated.skill_dir, 'SKILL.md'), 'utf8')).resolves.toContain('external-body')
+      await expect(fs.readFile(path.join(external, 'SKILL.md'), 'utf8')).resolves.toContain('external-body')
+      expect((await coordinator.current()).revision).toBe(2)
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+      await fs.rm(external, { recursive: true, force: true })
+    }
+  })
+
   it('migrates embedded content and snapshot files through the coordinator without leaking bodies', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-skill-legacy-coordinator-'))
     try {
