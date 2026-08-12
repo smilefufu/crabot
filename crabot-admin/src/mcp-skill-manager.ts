@@ -539,6 +539,7 @@ interface SkillSourceJournal {
   staged_registry_sha256: string
   before_runtime_hashes: Record<string, string>
   after_runtime_hashes: Record<string, string>
+  before_referenced_paths: string[]
   before_target_rel?: string
   after_target_rel?: string
   before_target_existed?: boolean
@@ -665,6 +666,7 @@ export class SkillManager {
             schema_version: 1, domain: 'skills', mutation_id: context.mutation_id, target_revision: context.target_revision,
             before_registry_sha256: sha256(beforeRegistry), after_registry_sha256: sha256(afterRegistry),
             staged_registry_rel: this.relativeTransactionPath(stageRegistry), staged_registry_sha256: sha256(afterRegistry), before_runtime_hashes: beforeHashes, after_runtime_hashes: afterHashes,
+            before_referenced_paths: this.registryReferencedPaths(beforeRegistry),
             ...transaction,
           }
           await this.writeJournal(journal)
@@ -687,6 +689,7 @@ export class SkillManager {
             this.legacyMigrationPending = migrationAfter ? true : this.legacyMigrationPending
           }
         }, apply)
+        if (transaction?.moves) await this.cleanupBatchSources(transaction.moves)
         if (transaction) await fs.rm(this.journalPath, { force: true })
       } catch (error) {
         if (!transaction) await fs.rm(stageRegistry, { force: true }).catch(() => {})
@@ -746,13 +749,19 @@ export class SkillManager {
     if (stagedRegistryBytes && journal.staged_registry_sha256 !== sha256(stagedRegistryBytes)) throw new Error('Invalid skill source journal')
     if (!stagedRegistryBytes && registryDigest !== journal.after_registry_sha256) throw new Error('Invalid skill source journal')
     if (journal.schema_version !== 1 || journal.domain !== 'skills' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(journal.mutation_id) || !Number.isSafeInteger(journal.target_revision) || !/^[a-f0-9]{64}$/.test(journal.before_registry_sha256) || !/^[a-f0-9]{64}$/.test(journal.after_registry_sha256) || !/^[a-f0-9]{64}$/.test(journal.staged_registry_sha256)) throw new Error('Invalid skill source journal')
+    const beforeRegistry = registryDigest === journal.before_registry_sha256 ? registryBytes : null
     if (journal.moves) {
+      this.assertJournalPath(journal.staged_registry_rel, 'registry')
       if (!Array.isArray(journal.moves) || journal.moves.length === 0) throw new Error('Invalid skill source journal')
       for (const move of journal.moves) {
-        if (!move || typeof move !== 'object' || typeof move.after_rel !== 'string' || typeof move.stage_rel !== 'string' || typeof move.before_existed !== 'boolean' || !/^[a-f0-9]{64}$/.test(move.after_tree_hash)) throw new Error('Invalid skill source journal')
+        if (!move || typeof move !== 'object' || typeof move.after_rel !== 'string' || typeof move.stage_rel !== 'string' || typeof move.before_existed !== 'boolean' || !/^[a-f0-9]{64}$/.test(move.after_tree_hash) || (move.before_tree_hash !== undefined && !/^[a-f0-9]{64}$/.test(move.before_tree_hash))) throw new Error('Invalid skill source journal')
         this.assertJournalPath(move.stage_rel, 'stage')
         this.assertJournalPath(move.after_rel, move.after_rel.startsWith('.snapshots/') ? 'snapshot' : 'target')
-        if (move.before_rel !== undefined) this.assertJournalPath(move.before_rel, move.before_rel.startsWith('.snapshots/') ? 'snapshot' : 'target')
+        if (move.cleanup_rel !== undefined) {
+          if (!Array.isArray(journal.before_referenced_paths) || journal.before_referenced_paths.some((path) => typeof path !== 'string')) throw new Error('Invalid skill source journal')
+          if (!journal.before_referenced_paths.includes(move.cleanup_rel)) throw new Error('Invalid skill source journal')
+          if (beforeRegistry && !this.registryReferencesPath(beforeRegistry, move.cleanup_rel)) throw new Error('Invalid skill source journal')
+        }
       }
       return journal
     }
@@ -768,7 +777,6 @@ export class SkillManager {
         throw new Error('Invalid skill source journal')
       }
     }
-    const beforeRegistry = registryDigest === journal.before_registry_sha256 ? registryBytes : null
     const afterRegistry = stagedRegistryBytes ?? (registryDigest === journal.after_registry_sha256 ? registryBytes : null)
     if (journal.before_target_existed && (!beforeRegistry || !this.registryContainsManagedPath(beforeRegistry, journal.before_target_rel))) {
       throw new Error('Invalid skill source journal')
@@ -804,6 +812,51 @@ export class SkillManager {
     })
   }
 
+  private registryReferencedPaths(registry: Buffer): string[] {
+    let parsed: unknown
+    try { parsed = JSON.parse(registry.toString('utf8')) } catch { throw new Error('Invalid skill source journal') }
+    if (!Array.isArray(parsed)) throw new Error('Invalid skill source journal')
+    const references = new Set<string>()
+    for (const entry of parsed) {
+      if (!entry || typeof entry !== 'object') continue
+      const value = entry as { skill_dir?: unknown; previous_snapshot?: { snapshot_dir?: unknown } }
+      if (typeof value.skill_dir === 'string') {
+        try { references.add(this.relativeTransactionPath(value.skill_dir)) } catch { /* invalid storage cannot authorize cleanup */ }
+      }
+      if (typeof value.previous_snapshot?.snapshot_dir === 'string') {
+        const snapshot = value.previous_snapshot.snapshot_dir
+        if (snapshot.startsWith('.snapshots/')) references.add(snapshot)
+      }
+    }
+    return [...references].sort()
+  }
+
+  private registryReferencesPath(registry: Buffer, relative: string): boolean {
+    let parsed: unknown
+    try { parsed = JSON.parse(registry.toString('utf8')) } catch { throw new Error('Invalid skill source journal') }
+    if (!Array.isArray(parsed)) throw new Error('Invalid skill source journal')
+    return parsed.some((entry) => {
+      if (!entry || typeof entry !== 'object') return false
+      const value = entry as { skill_dir?: unknown; previous_snapshot?: { snapshot_dir?: unknown } }
+      for (const candidate of [value.skill_dir, value.previous_snapshot?.snapshot_dir]) {
+        if (typeof candidate !== 'string') continue
+        try {
+          const normalized = candidate.startsWith('.snapshots/') ? candidate : this.relativeTransactionPath(candidate)
+          if (normalized === relative) return true
+        } catch { /* invalid references do not authorize cleanup */ }
+      }
+      return false
+    })
+  }
+
+  private async cleanupBatchSources(moves: SkillSourceMove[]): Promise<void> {
+    for (const move of moves) {
+      if (!move.cleanup_rel) continue
+      if (move.cleanup_rel !== move.before_rel) throw new Error('Invalid skill source journal')
+      await fs.rm(this.resolveTransactionPath(move.cleanup_rel), { recursive: true, force: true })
+    }
+  }
+
   private async registryDigest(): Promise<string> { return sha256(await this.registryBytes()) }
 
   private async rollbackJournal(journal: SkillSourceJournal): Promise<void> {
@@ -813,10 +866,13 @@ export class SkillManager {
         const after = this.resolveTransactionPath(move.after_rel)
         const before = move.before_rel ? this.resolveTransactionPath(move.before_rel) : undefined
         if (before && await fs.access(before).then(() => true).catch(() => false)) {
+          if (move.before_tree_hash && move.before_tree_hash !== await this.hashContentTree(before)) throw new Error('Skill source journal before tree mismatch')
           await fs.rm(after, { recursive: true, force: true })
         } else if (before && await fs.access(after).then(() => true).catch(() => false)) {
+          if (move.after_tree_hash !== await this.hashContentTree(after)) throw new Error('Skill source journal after tree mismatch')
           await fs.rename(after, before)
-        } else if (!move.before_existed) {
+          if (move.before_tree_hash && move.before_tree_hash !== await this.hashContentTree(before)) throw new Error('Skill source journal before tree mismatch')
+        } else if (!before || !move.before_existed) {
           await fs.rm(after, { recursive: true, force: true })
         } else throw new Error('Skill source journal rollback is ambiguous')
         await fs.rm(stage, { recursive: true, force: true })
@@ -990,14 +1046,38 @@ export class SkillManager {
         if (sourceExists) await copyDir(source, stage, ['.skill_dir', '.DS_Store']); else await fs.mkdir(stage, { recursive: true })
         if (raw.content !== undefined) await atomicWriteFileBuf(path.join(stage, 'SKILL.md'), Buffer.from(raw.content, 'utf8'))
         if (!await fs.access(path.join(stage, 'SKILL.md')).then(() => true).catch(() => false)) throw new Error(`Legacy skill "${raw.name}" has no SKILL.md`)
-        if (await fs.access(target).then(() => true).catch(() => false)) {
-          if (await this.hashContentTree(target) !== await this.hashContentTree(stage)) throw new Error(`Legacy skill target collision: ${dirName}`)
-          await fs.rm(stage, { recursive: true, force: true })
-        } else {
-          moves.push({ before_rel: source && this.isPathUnderSkillsRoot(source) ? this.relativeTransactionPath(source) : undefined, after_rel: this.relativeTransactionPath(target), stage_rel: this.relativeTransactionPath(stage), before_existed: Boolean(source && this.isPathUnderSkillsRoot(source)), after_tree_hash: await this.hashContentTree(stage), ...(source && this.isPathUnderSkillsRoot(source) && this.relativeTransactionPath(source) !== this.relativeTransactionPath(target) ? { cleanup_rel: this.relativeTransactionPath(source) } : {}) })
-        }
+        const targetExists = await fs.access(target).then(() => true).catch(() => false)
+        if (targetExists) throw new Error(`Legacy skill target collision: ${dirName}`)
+        moves.push({
+          before_rel: source && this.isPathUnderSkillsRoot(source) ? this.relativeTransactionPath(source) : undefined,
+          after_rel: this.relativeTransactionPath(target),
+          stage_rel: this.relativeTransactionPath(stage),
+          before_existed: sourceExists,
+          ...(sourceExists && this.isPathUnderSkillsRoot(source) ? { before_tree_hash: await this.hashContentTree(source) } : {}),
+          after_tree_hash: await this.hashContentTree(stage),
+          ...(sourceExists && this.isPathUnderSkillsRoot(source) && this.relativeTransactionPath(source) !== this.relativeTransactionPath(target) ? { cleanup_rel: this.relativeTransactionPath(source) } : {}),
+        })
         raw.skill_dir = target; delete raw.content
         const previous = raw.previous_snapshot
+        if (previous?.snapshot_dir && source && this.isPathUnderSkillsRoot(source) && path.basename(source) !== dirName) {
+          const oldSnapshotRel = previous.snapshot_dir
+          const oldSnapshot = this.resolveTransactionPath(oldSnapshotRel)
+          const oldSnapshotName = path.basename(oldSnapshotRel)
+          const oldBase = path.basename(source)
+          const snapshotPrefix = `${oldBase}-`
+          if (!oldSnapshotName.startsWith(snapshotPrefix)) throw new Error(`Legacy snapshot does not match source: ${oldSnapshotRel}`)
+          const newSnapshotRel = path.posix.join('.snapshots', `${dirName}-${oldSnapshotName.slice(snapshotPrefix.length)}`)
+          const newSnapshot = this.resolveTransactionPath(newSnapshotRel)
+          if (await fs.access(newSnapshot).then(() => true).catch(() => false)) throw new Error(`Legacy snapshot collision: ${newSnapshotRel}`)
+          if (!await fs.access(oldSnapshot).then(() => true).catch(() => false)) throw new Error(`Legacy snapshot missing: ${oldSnapshotRel}`)
+          const snapshotStage = path.join(stageRoot, `snapshot-${moves.length}`)
+          await copyDir(oldSnapshot, snapshotStage)
+          moves.push({
+            before_rel: oldSnapshotRel, after_rel: newSnapshotRel, stage_rel: this.relativeTransactionPath(snapshotStage),
+            before_existed: true, before_tree_hash: await this.hashContentTree(oldSnapshot), after_tree_hash: await this.hashContentTree(snapshotStage), cleanup_rel: oldSnapshotRel,
+          })
+          raw.previous_snapshot = { ...previous, snapshot_dir: newSnapshotRel }
+        }
         if (previous?.content !== undefined && !previous.snapshot_dir) {
           const snapshotRel = path.posix.join('.snapshots', `${dirName}-${isoCompactTs(previous.snapshotted_at)}`)
           const snapshot = this.resolveTransactionPath(snapshotRel)
@@ -1027,7 +1107,6 @@ export class SkillManager {
         const stage = this.resolveTransactionPath(move.stage_rel); const after = this.resolveTransactionPath(move.after_rel)
         if (await fs.access(after).then(() => true).catch(() => false)) throw new Error('Legacy skill target collision')
         await fs.mkdir(path.dirname(after), { recursive: true }); await fs.rename(stage, after)
-        if (move.cleanup_rel) await fs.rm(this.resolveTransactionPath(move.cleanup_rel), { recursive: true, force: true })
       }
       this.legacyMigrationPending = false
     }, plan.hashes, { moves: plan.moves, legacy_backup_rel: path.basename(plan.backupPath), legacy_backup_sha256: sha256(plan.backupBytes) }, true)

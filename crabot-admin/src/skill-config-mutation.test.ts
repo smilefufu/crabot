@@ -170,6 +170,41 @@ describe('Skill source mutation journal', () => {
     } finally { await fs.rm(dir, { recursive: true, force: true }) }
   })
 
+  it('fails identical legacy target collisions without changing source or registry', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-skill-legacy-collision-'))
+    try {
+      const source = path.join(dir, 'old-source')
+      const target = path.join(dir, 'skills', 'legacy')
+      await fs.mkdir(source, { recursive: true }); await fs.mkdir(target, { recursive: true })
+      await fs.writeFile(path.join(source, 'SKILL.md'), skill('legacy', 'same'))
+      await fs.writeFile(path.join(target, 'SKILL.md'), skill('legacy', 'same'))
+      const original = JSON.stringify([{ id: 'legacy-id', name: 'legacy', description: 'legacy', version: '1', skill_dir: source, source_type: 'imported', is_builtin: false, is_essential: false, can_disable: true, enabled: true, created_at: 't', updated_at: 't' }])
+      await fs.writeFile(path.join(dir, 'skills.json'), original)
+      const manager = new SkillManager(dir); await manager.initializeLoadOnly()
+      await expect(manager.initializeMigrations()).rejects.toThrow('Legacy skill target collision')
+      expect(await fs.readFile(path.join(dir, 'skills.json'), 'utf8')).toBe(original)
+      await expect(fs.readFile(path.join(source, 'SKILL.md'), 'utf8')).resolves.toContain('same')
+    } finally { await fs.rm(dir, { recursive: true, force: true }) }
+  })
+
+  it('renames an internal UUID snapshot with its legacy skill directory', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-skill-legacy-uuid-'))
+    try {
+      const source = path.join(dir, 'skills', 'uuid-old')
+      const oldSnapshot = path.join(dir, 'skills', '.snapshots', 'uuid-old-2026-01-01T00-00-00-000Z')
+      await fs.mkdir(source, { recursive: true }); await fs.mkdir(oldSnapshot, { recursive: true })
+      await fs.writeFile(path.join(source, 'SKILL.md'), skill('renamed', 'current'))
+      await fs.writeFile(path.join(oldSnapshot, 'SKILL.md'), skill('renamed', 'previous'))
+      await fs.writeFile(path.join(dir, 'skills.json'), JSON.stringify([{ id: 'legacy-id', name: 'renamed', description: 'renamed', version: '1', skill_dir: source, source_type: 'imported', is_builtin: false, is_essential: false, can_disable: true, enabled: true, created_at: 't', updated_at: 't', previous_snapshot: { snapshot_dir: '.snapshots/uuid-old-2026-01-01T00-00-00-000Z', version: '0', updated_at: 't', snapshotted_at: '2026-01-01T00:00:00.000Z' } }]))
+      const manager = new SkillManager(dir); await manager.initializeLoadOnly(); await manager.initializeMigrations()
+      const entry = manager.get('legacy-id')!
+      expect(entry.skill_dir).toBe(path.join(dir, 'skills', 'renamed'))
+      expect(entry.previous_snapshot?.snapshot_dir).toBe('.snapshots/renamed-2026-01-01T00-00-00-000Z')
+      await expect(fs.readFile(path.join(dir, 'skills', entry.previous_snapshot!.snapshot_dir, 'SKILL.md'), 'utf8')).resolves.toContain('previous')
+      await expect(fs.access(oldSnapshot)).rejects.toThrow()
+    } finally { await fs.rm(dir, { recursive: true, force: true }) }
+  })
+
   it('serializes concurrent creates without losing either registry entry', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-skill-serial-'))
     try {
