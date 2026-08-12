@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -37,6 +37,101 @@ describe('core Agent cutover gate', () => {
       expect(JSON.parse(await fs.readFile(path.join(dataDir, 'migrations', 'core-agent-singleton-v1.json'), 'utf8')).completed).toBe(true)
     } finally {
       await manager.stop().catch(() => {})
+      await fs.rm(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps persisted auto-start Channel stopped before cutover and starts it after cutover', async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-mm-cutover-channel-'))
+    const manager = new ModuleManager({
+      port: 0, port_range: { range_start: 19830, range_end: 19850 }, health_check_interval: 60, health_check_timeout: 1, health_check_failure_threshold: 3, shutdown_timeout: 1,
+      hotplug_allowed_types: ['channel'],
+      modules: [
+        { module_id: 'admin-web', module_type: 'admin', entry: 'node -e "setTimeout(()=>{}, 10000)"', auto_start: true, start_priority: 1 },
+        { module_id: 'crabot-agent', module_type: 'agent', entry: 'node -e "setTimeout(()=>{}, 10000)"', auto_start: true, start_priority: 2 },
+        { module_id: 'channel-positive', module_type: 'channel', entry: 'node -e "setTimeout(()=>{}, 10000)"', auto_start: true, start_priority: 3 },
+      ],
+    }, dataDir)
+    try {
+      await manager.start()
+      await new Promise(resolve => setTimeout(resolve, 30))
+      const channel = (manager as any).modules.get('channel-positive')
+      const registration = { module_id: 'channel-positive', module_type: 'channel', version: '0.1.0', protocol_version: '0.1.0', port: channel.port, subscriptions: [] }
+      expect((manager as any).processes.has('channel-positive')).toBe(false)
+      await expect((manager as any).handleRegister(registration)).rejects.toMatchObject({ code: 'MODULE_MANAGER_CUTOVER_INCOMPLETE' })
+      const bearer = (manager as any).cutoverBearers.get('admin-web')
+      await (manager as any).handleCompleteCoreAgentCutover({ schema_version: 1, admin_archive_fingerprint: 'channel', admin_archived_record_count: 0 }, { authorizationBearer: bearer.token })
+      await new Promise(resolve => setTimeout(resolve, 2_200))
+      expect((manager as any).processes.has('channel-positive')).toBe(true)
+      await expect((manager as any).handleRegister(registration)).resolves.toEqual({ registered: true })
+    } finally {
+      await manager.stop().catch(() => {})
+      await fs.rm(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  it('fails closed without a marker when a non-core Agent tree cannot stop, then succeeds on retry', async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-mm-cutover-fault-'))
+    const manager = new ModuleManager({
+      port: 0, port_range: { range_start: 19860, range_end: 19880 }, health_check_interval: 60, health_check_timeout: 1, health_check_failure_threshold: 3, shutdown_timeout: 1,
+      hotplug_allowed_types: ['channel'],
+      modules: [
+        { module_id: 'admin-web', module_type: 'admin', entry: 'node -e "setTimeout(()=>{}, 10000)"', auto_start: true, start_priority: 1 },
+        { module_id: 'crabot-agent', module_type: 'agent', entry: 'node -e "setTimeout(()=>{}, 10000)"', auto_start: true, start_priority: 2 },
+        { module_id: 'legacy-agent', module_type: 'agent', entry: 'node -e "setTimeout(()=>{}, 10000)"', auto_start: false, start_priority: 3 },
+      ],
+    }, dataDir)
+    try {
+      await manager.start()
+      const legacy = (manager as any).modules.get('legacy-agent')
+      legacy.status = 'running'
+      ;(manager as any).processes.set('legacy-agent', {})
+      const stop = vi.spyOn(manager as any, 'stopModuleProcess').mockRejectedValueOnce(new Error('tree survives'))
+      const bearer = (manager as any).cutoverBearers.get('admin-web')
+      await expect((manager as any).handleCompleteCoreAgentCutover({ schema_version: 1, admin_archive_fingerprint: 'fault', admin_archived_record_count: 1 }, { authorizationBearer: bearer.token })).rejects.toMatchObject({ code: 'MODULE_MANAGER_CUTOVER_STOP_FAILED' })
+      expect((manager as any).managementOnly).toBe(true)
+      expect((manager as any).processes.has('crabot-agent')).toBe(false)
+      await expect(fs.access(path.join(dataDir, 'migrations', 'core-agent-singleton-v1.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+      stop.mockRestore()
+      ;(manager as any).processes.delete('legacy-agent')
+      legacy.status = 'stopped'
+      const retry = await (manager as any).handleCompleteCoreAgentCutover({ schema_version: 1, admin_archive_fingerprint: 'fault', admin_archived_record_count: 1 }, { authorizationBearer: bearer.token })
+      expect(retry.completed).toBe(true)
+      expect((manager as any).managementOnly).toBe(false)
+    } finally {
+      await manager.stop().catch(() => {})
+      await fs.rm(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  it('replays the same marker response and re-enters management-only for restart rescan', async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-mm-cutover-replay-'))
+    const config = {
+      port: 0, port_range: { range_start: 19890, range_end: 19910 }, health_check_interval: 60, health_check_timeout: 1, health_check_failure_threshold: 3, shutdown_timeout: 1,
+      hotplug_allowed_types: ['channel'], modules: [
+        { module_id: 'admin-web', module_type: 'admin', entry: 'node -e "setTimeout(()=>{}, 10000)"', auto_start: true, start_priority: 1 },
+        { module_id: 'crabot-agent', module_type: 'agent', entry: 'node -e "setTimeout(()=>{}, 10000)"', auto_start: true, start_priority: 2 },
+      ],
+    }
+    const first = new ModuleManager(config, dataDir)
+    try {
+      await first.start()
+      const bearer = (first as any).cutoverBearers.get('admin-web')
+      const result = await (first as any).handleCompleteCoreAgentCutover({ schema_version: 1, admin_archive_fingerprint: 'replay', admin_archived_record_count: 0 }, { authorizationBearer: bearer.token })
+      expect(JSON.parse(await fs.readFile(path.join(dataDir, 'migrations', 'core-agent-singleton-v1.json'), 'utf8'))).toMatchObject(result)
+    } finally {
+      await first.stop().catch(() => {})
+    }
+    const restarted = new ModuleManager(config, dataDir)
+    try {
+      await restarted.start()
+      expect((restarted as any).managementOnly).toBe(true)
+      expect((restarted as any).processes.has('crabot-agent')).toBe(false)
+      const bearer = (restarted as any).cutoverBearers.get('admin-web')
+      const replay = await (restarted as any).handleCompleteCoreAgentCutover({ schema_version: 1, admin_archive_fingerprint: 'replay', admin_archived_record_count: 0 }, { authorizationBearer: bearer.token })
+      expect(replay).toMatchObject({ completed: true, admin_archive_fingerprint: 'replay' })
+    } finally {
+      await restarted.stop().catch(() => {})
       await fs.rm(dataDir, { recursive: true, force: true })
     }
   })

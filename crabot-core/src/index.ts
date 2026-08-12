@@ -167,10 +167,11 @@ export class ModuleManager {
       }
     }
 
-    // The two-phase gate only applies to the real singleton topology. Generic
-    // ModuleManager consumers and focused lifecycle tests without both builtins
-    // retain ordinary module-management semantics.
-    this.managementOnly = !this.cutoverRecord && this.modules.has('admin-web') && this.modules.has('crabot-agent')
+    // Every singleton-topology boot re-enters management-only until Admin re-inventories
+    // legacy records and completes the authenticated cutover handshake. A completed marker
+    // is an idempotency record, not permission to skip the restart rescan: otherwise a
+    // newly introduced runnable non-core Agent could hide behind an old marker.
+    this.managementOnly = this.modules.has('admin-web') && this.modules.has('crabot-agent')
 
     // 启动 HTTP 服务器
     this.server = http.createServer((req, res) => {
