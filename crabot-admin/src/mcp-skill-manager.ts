@@ -9,7 +9,21 @@ import path from 'path'
 import { randomBytes } from 'node:crypto'
 import AdmZip from 'adm-zip'
 import { generateId, generateTimestamp } from 'crabot-shared'
+import type { ConfigDomain } from './core-agent-config-revision-store.js'
 import type { OnConflict } from './backup/import/import-types.js'
+
+export type RegistryMutationRunner = (
+  domains: ConfigDomain[],
+  prepareAfterSnapshot: () => Promise<unknown>,
+  applySourceMutation: () => Promise<void>,
+) => Promise<void>
+
+function runtimeMcpEntries(entries: Map<string, MCPServerRegistryEntry>): unknown[] {
+  return Array.from(entries.values()).filter((entry) => entry.enabled).map((entry) => JSON.parse(JSON.stringify({
+    id: entry.id, name: entry.name, transport: entry.transport, command: entry.command,
+    args: entry.args, env: entry.env, url: entry.url, headers: entry.headers, description: entry.description,
+  }))).sort((a: any, b: any) => a.id.localeCompare(b.id))
+}
 
 const MAX_FILE_SIZE_BYTES = 1 * 1024 * 1024  // 1MB 单文件上限
 const MAX_TOTAL_SIZE_BYTES = 5 * 1024 * 1024 // 5MB 总大小上限
@@ -162,13 +176,36 @@ export interface EssentialToolsConfig {
 export class MCPServerManager {
   private servers: Map<string, MCPServerRegistryEntry> = new Map()
   private readonly filePath: string
+  private mutationRunner: RegistryMutationRunner | null = null
+  private semanticSnapshotProvider: (() => unknown) | null = null
 
   constructor(dataDir: string) {
     this.filePath = path.join(dataDir, 'mcp-servers.json')
   }
 
   async initialize(): Promise<void> {
+    await this.initializeLoadOnly()
+  }
+
+  async initializeLoadOnly(): Promise<void> {
     await this.load()
+  }
+
+  setMutationRunner(runner: RegistryMutationRunner): void { this.mutationRunner = runner }
+  setSemanticSnapshotProvider(provider: () => unknown): void { this.semanticSnapshotProvider = provider }
+
+  private async commit(next: Map<string, MCPServerRegistryEntry>): Promise<void> {
+    const previous = this.servers
+    const apply = async () => { this.servers = next; await this.save() }
+    if (!this.mutationRunner) return apply()
+    await this.mutationRunner(['mcp'], async () => {
+      this.servers = next
+      try { return this.semanticSnapshotProvider?.() } finally { this.servers = previous }
+    }, apply)
+  }
+
+  runtimeSemanticEntries(): unknown[] {
+    return runtimeMcpEntries(this.servers)
   }
 
   private async load(): Promise<void> {
@@ -246,8 +283,9 @@ export class MCPServerManager {
       created_at: now,
       updated_at: now,
     }
-    this.servers.set(entry.id, entry)
-    await this.save()
+    const next = new Map(this.servers)
+    next.set(entry.id, entry)
+    await this.commit(next)
     return entry
   }
 
@@ -270,8 +308,17 @@ export class MCPServerManager {
       ...params,
       updated_at: generateTimestamp(),
     }
-    this.servers.set(id, updated)
-    await this.save()
+    const currentRuntime = JSON.stringify({ enabled: entry.enabled, ...this.toAgentConfig(entry) })
+    const updatedRuntime = JSON.stringify({ enabled: updated.enabled, ...this.toAgentConfig(updated) })
+    if (currentRuntime === updatedRuntime) {
+      this.servers = new Map(this.servers)
+      this.servers.set(id, updated)
+      await this.save()
+      return updated
+    }
+    const next = new Map(this.servers)
+    next.set(id, updated)
+    await this.commit(next)
     return updated
   }
 
@@ -279,15 +326,22 @@ export class MCPServerManager {
     const entry = this.servers.get(id)
     if (!entry) throw new Error(`MCP Server not found: ${id}`)
     if (entry.is_builtin) throw new Error(`Cannot delete built-in MCP Server "${entry.name}"`)
-    this.servers.delete(id)
-    await this.save()
+    const next = new Map(this.servers)
+    next.delete(id)
+    await this.commit(next)
   }
 
   async upsertById(entry: MCPServerRegistryEntry, onConflict: OnConflict): Promise<'imported' | 'overwritten' | 'skipped'> {
     const exists = this.servers.has(entry.id)
     if (exists && onConflict === 'skip') return 'skipped'
-    this.servers.set(entry.id, entry)
-    await this.save()
+    const next = new Map(this.servers)
+    next.set(entry.id, entry)
+    if (exists && JSON.stringify(this.runtimeSemanticEntries()) === JSON.stringify(runtimeMcpEntries(next))) {
+      this.servers = next
+      await this.save()
+      return 'overwritten'
+    }
+    await this.commit(next)
     return exists ? 'overwritten' : 'imported'
   }
 
@@ -345,11 +399,9 @@ export class MCPServerManager {
       throw new Error('无法识别的 JSON 格式，请使用 Claude Desktop mcpServers 格式或单 server 格式')
     }
 
-    // 批量写入，避免 N 次文件 I/O 和竞态
-    for (const entry of newEntries) {
-      this.servers.set(entry.id, entry)
-    }
-    await this.save()
+    const next = new Map(this.servers)
+    for (const entry of newEntries) next.set(entry.id, entry)
+    if (newEntries.length > 0) await this.commit(next)
     return newEntries
   }
 
@@ -359,6 +411,7 @@ export class MCPServerManager {
    */
   async registerBuiltins(mcpToolsPath: string): Promise<void> {
     const existingNames = new Set(this.list().map(s => s.name))
+    const next = new Map(this.servers)
 
     const builtins: Array<{
       name: string
@@ -403,11 +456,11 @@ export class MCPServerManager {
     for (const builtin of builtins) {
       if (existingNames.has(builtin.name)) {
         // 已注册：更新路径（项目目录可能变更）
-        for (const [id, existing] of this.servers) {
+        for (const [id, existing] of next) {
           if (existing.name === builtin.name && existing.is_builtin) {
             const argsChanged = JSON.stringify(existing.args) !== JSON.stringify(builtin.args)
             if (argsChanged) {
-              this.servers.set(id, { ...existing, args: builtin.args, updated_at: generateTimestamp() })
+              next.set(id, { ...existing, args: builtin.args, updated_at: generateTimestamp() })
               changed = true
             }
             break
@@ -426,12 +479,12 @@ export class MCPServerManager {
         created_at: now,
         updated_at: now,
       }
-      this.servers.set(entry.id, entry)
+      next.set(entry.id, entry)
       changed = true
     }
 
     if (changed) {
-      await this.save()
+      await this.commit(next)
     }
   }
 

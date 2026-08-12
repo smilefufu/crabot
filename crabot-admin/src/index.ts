@@ -620,6 +620,14 @@ export class AdminModule extends ModuleBase {
     this.modelProviderManager.setMutationRunner(async (domains, preview, apply) => {
       await this.configMutationCoordinator.mutateComputed(domains, preview, apply)
     })
+    this.mcpServerManager.setSemanticSnapshotProvider(() => this.readCoreAgentSemanticSnapshot())
+    this.subAgentManager.setSemanticSnapshotProvider(() => this.readCoreAgentSemanticSnapshot())
+    this.mcpServerManager.setMutationRunner(async (domains, preview, apply) => {
+      await this.configMutationCoordinator.mutateComputed(domains, preview, apply)
+    })
+    this.subAgentManager.setMutationRunner(async (domains, preview, apply) => {
+      await this.configMutationCoordinator.mutateComputed(domains, preview, apply)
+    })
     // AgentManager still emits its legacy local callback for non-core compatibility; core runtime
     // invalidation is committed by the coordinator above, never by pushConfig.
     this.agentManager.setOnConfigChanged(() => undefined)
@@ -812,6 +820,10 @@ export class AdminModule extends ModuleBase {
     proxyManager.updateConfig(proxyConfig)
     console.log(`[Admin] Proxy config loaded: mode=${proxyConfig.mode}`)
 
+    // Load every source used by the semantic snapshot without writes before coordinator recovery.
+    await this.mcpServerManager.initializeLoadOnly()
+    await this.subAgentManager.initializeLoadOnly()
+
     // Recover durable revision/outbox against fully loaded source state before any mutation.
     await this.configMutationCoordinator.initialize()
     // Initial core config/default/legacy-role writes now use the recovered coordinator.
@@ -830,7 +842,6 @@ export class AdminModule extends ModuleBase {
     await this.moduleInstaller.initialize()
 
     // 初始化 MCP Server 管理器
-    await this.mcpServerManager.initialize()
 
     // 注册内置 MCP Server（幂等，仅首次启动时写入）
     const mcpToolsPath = process.env.CRABOT_MCP_TOOLS_PATH
@@ -859,7 +870,6 @@ export class AdminModule extends ModuleBase {
     await this.essentialToolsManager.initialize()
 
     // 初始化 SubAgent 管理器
-    await this.subAgentManager.initialize()
 
     // Prune 已下线的 builtin subagents，再 seed 当前版本（幂等）
     const builtinSubAgents = getBuiltinSubAgents()
@@ -7357,7 +7367,6 @@ export class AdminModule extends ModuleBase {
     try {
       const params = await this.readJsonBody<Parameters<MCPServerManager['create']>[0]>(req)
       const server = await this.mcpServerManager.create(params)
-      this.triggerPushAfter('mcp create')
       res.writeHead(201, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(server))
     } catch (err) {
@@ -7389,7 +7398,6 @@ export class AdminModule extends ModuleBase {
     try {
       const params = await this.readJsonBody<Parameters<MCPServerManager['update']>[1]>(req)
       const server = await this.mcpServerManager.update(id, params)
-      this.triggerPushAfter('mcp update')
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(server))
     } catch (err) {
@@ -7406,7 +7414,6 @@ export class AdminModule extends ModuleBase {
   ): Promise<void> {
     try {
       await this.mcpServerManager.delete(id)
-      this.triggerPushAfter('mcp delete')
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ deleted: true }))
     } catch (err) {
@@ -7545,7 +7552,6 @@ export class AdminModule extends ModuleBase {
     try {
       const body = await this.readJsonBody<Parameters<typeof this.subAgentManager.create>[0]>(req)
       const entry = await this.subAgentManager.create(body)
-      this.triggerPushAfter('subagent create')
       res.writeHead(201, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(entry))
     } catch (err) {
@@ -7563,7 +7569,6 @@ export class AdminModule extends ModuleBase {
     try {
       const body = await this.readJsonBody<Parameters<typeof this.subAgentManager.update>[1]>(req)
       const entry = await this.subAgentManager.update(id, body)
-      this.triggerPushAfter('subagent update')
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(entry))
     } catch (err) {
@@ -7581,7 +7586,6 @@ export class AdminModule extends ModuleBase {
   ): Promise<void> {
     try {
       await this.subAgentManager.delete(id)
-      this.triggerPushAfter('subagent delete')
       res.writeHead(204)
       res.end()
     } catch (err) {
@@ -7603,8 +7607,6 @@ export class AdminModule extends ModuleBase {
     try {
       const body = await this.readJsonBody<{ json: string }>(req)
       const entries = await this.mcpServerManager.importFromJson(body.json)
-      // 一次性 push，即使导入了多个 MCP 也只 push 一次
-      this.triggerPushAfter('mcp import')
       res.writeHead(201, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ entries, count: entries.length }))
     } catch (err) {
@@ -8735,6 +8737,8 @@ export class AdminModule extends ModuleBase {
         image_slot_user_set: global.image_slot_user_set ?? null,
       },
       providers,
+      mcp_servers: this.mcpServerManager.runtimeSemanticEntries(),
+      subagents: this.subAgentManager.runtimeSemanticEntries(),
     }
   }
 

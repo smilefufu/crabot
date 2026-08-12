@@ -23,6 +23,7 @@ import fs from 'fs/promises'
 import path from 'path'
 import { generateId, generateTimestamp } from 'crabot-shared'
 import type { SubAgentRegistryEntry, ModelRole } from './types.js'
+import type { RegistryMutationRunner } from './mcp-skill-manager.js'
 import type { OnConflict } from './backup/import/import-types.js'
 
 export type CreateSubAgentParams = Omit<
@@ -83,6 +84,16 @@ const BUILTIN_OVERRIDABLE_FIELDS = [
   'system_only',
 ] as const
 
+function runtimeSubAgentEntries(entries: Map<string, SubAgentRegistryEntry>): unknown[] {
+  return Array.from(entries.values()).filter((entry) => entry.enabled).map((entry) => JSON.parse(JSON.stringify({
+    id: entry.id, name: entry.name, description: entry.description, when_to_use: entry.when_to_use,
+    role: entry.role, workflow: entry.workflow, deliverables: entry.deliverables,
+    provider_id: entry.provider_id, model_id: entry.model_id, model_role: entry.model_role,
+    builtin_capabilities: entry.builtin_capabilities, allowed_mcp_server_ids: entry.allowed_mcp_server_ids,
+    allowed_skill_ids: entry.allowed_skill_ids, max_turns: entry.max_turns, hook_preset: entry.hook_preset,
+  }))).sort((a: any, b: any) => a.id.localeCompare(b.id))
+}
+
 function isDeepEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true
   if (a === null || b === null || a === undefined || b === undefined) return a === b
@@ -111,6 +122,10 @@ export class SubAgentManager {
   private entries: Map<string, SubAgentRegistryEntry> = new Map()
   private readonly filePath: string
   private readonly getBuiltinDefaults: () => SubAgentRegistryEntry[]
+  private mutationRunner: RegistryMutationRunner | null = null
+  private semanticSnapshotProvider: (() => unknown) | null = null
+  private needsLegacyRewrite = false
+  private legacyBackupPath: string | null = null
 
   constructor(dataDir: string, getBuiltinDefaults: () => SubAgentRegistryEntry[] = () => []) {
     this.filePath = path.join(dataDir, 'subagents.json')
@@ -118,7 +133,42 @@ export class SubAgentManager {
   }
 
   async initialize(): Promise<void> {
+    await this.initializeLoadOnly()
+  }
+
+  async initializeLoadOnly(): Promise<void> {
     await this.load()
+  }
+
+  setMutationRunner(runner: RegistryMutationRunner): void { this.mutationRunner = runner }
+  setSemanticSnapshotProvider(provider: () => unknown): void { this.semanticSnapshotProvider = provider }
+
+  private async persistLegacyRewrite(): Promise<boolean> {
+    if (!this.needsLegacyRewrite) return false
+    if (this.legacyBackupPath) {
+      await fs.copyFile(this.filePath, this.legacyBackupPath)
+      this.legacyBackupPath = null
+    }
+    await this.save()
+    this.needsLegacyRewrite = false
+    return true
+  }
+
+  private async commit(next: Map<string, SubAgentRegistryEntry>): Promise<void> {
+    const previous = this.entries
+    const apply = async () => {
+      this.entries = next
+      if (!await this.persistLegacyRewrite()) await this.save()
+    }
+    if (!this.mutationRunner) return apply()
+    await this.mutationRunner(['subagents'], async () => {
+      this.entries = next
+      try { return this.semanticSnapshotProvider?.() } finally { this.entries = previous }
+    }, apply)
+  }
+
+  runtimeSemanticEntries(): unknown[] {
+    return runtimeSubAgentEntries(this.entries)
   }
 
   private buildBuiltinMap(): Map<string, SubAgentRegistryEntry> {
@@ -144,10 +194,9 @@ export class SubAgentManager {
       // v1 格式（裸数组）：迁移。备份原文件，builtin entry 仅保留 state 字段（内容字段重置为
       // codeDefault），non-builtin 不变。
       const ts = new Date().toISOString().replace(/[:.]/g, '-')
-      const backup = path.join(path.dirname(this.filePath), `.legacy-subagents-${ts}.json`)
-      await fs.copyFile(this.filePath, backup)
+      this.legacyBackupPath = path.join(path.dirname(this.filePath), `.legacy-subagents-${ts}.json`)
       console.warn(
-        `[SubAgentManager] 检测到 v1 格式 subagents.json，已备份至 ${backup}。\n` +
+        `[SubAgentManager] 检测到 v1 格式 subagents.json，将在 coordinator recovery 后备份至 ${this.legacyBackupPath}。\n` +
           '正在迁移到 v2 override-only 格式：builtin subagent 的所有 prompt / capabilities / max_turns ' +
           '等内容字段将回退到代码默认值。\n如曾通过 Admin UI 改过 builtin，请对照备份文件重新设置。'
       )
@@ -189,7 +238,11 @@ export class SubAgentManager {
       }
     }
 
-    if (needsRewrite) await this.save()
+    if (needsRewrite) {
+      // Startup recovery must observe the persisted source before legacy normalization. The caller
+      // performs the post-recovery write through coordinator-owned seed/reconciliation.
+      this.needsLegacyRewrite = true
+    }
   }
 
   private async atomicWriteFile(filePath: string, content: string): Promise<void> {
@@ -257,8 +310,14 @@ export class SubAgentManager {
   async upsertById(entry: SubAgentRegistryEntry, onConflict: OnConflict): Promise<'imported' | 'overwritten' | 'skipped'> {
     const exists = this.entries.has(entry.id)
     if (exists && onConflict === 'skip') return 'skipped'
-    this.entries.set(entry.id, entry)
-    await this.save()
+    const next = new Map(this.entries)
+    next.set(entry.id, entry)
+    if (exists && JSON.stringify(this.runtimeSemanticEntries()) === JSON.stringify(runtimeSubAgentEntries(next))) {
+      this.entries = next
+      await this.save()
+      return 'overwritten'
+    }
+    await this.commit(next)
     return exists ? 'overwritten' : 'imported'
   }
 
@@ -276,8 +335,9 @@ export class SubAgentManager {
       created_at: now,
       updated_at: now,
     }
-    this.entries.set(entry.id, entry)
-    await this.save()
+    const next = new Map(this.entries)
+    next.set(entry.id, entry)
+    await this.commit(next)
     return entry
   }
 
@@ -302,8 +362,30 @@ export class SubAgentManager {
       updated_at: generateTimestamp(),
     }
     this.validateModelSpec(next)
-    this.entries.set(id, next)
-    await this.save()
+    const currentRuntime = JSON.stringify({
+      id: existing.id, name: existing.name, description: existing.description, when_to_use: existing.when_to_use,
+      role: existing.role, workflow: existing.workflow, deliverables: existing.deliverables,
+      provider_id: existing.provider_id, model_id: existing.model_id, model_role: existing.model_role,
+      builtin_capabilities: existing.builtin_capabilities, allowed_mcp_server_ids: existing.allowed_mcp_server_ids,
+      allowed_skill_ids: existing.allowed_skill_ids, max_turns: existing.max_turns, hook_preset: existing.hook_preset,
+      enabled: existing.enabled,
+    })
+    const nextRuntime = JSON.stringify({
+      id: next.id, name: next.name, description: next.description, when_to_use: next.when_to_use,
+      role: next.role, workflow: next.workflow, deliverables: next.deliverables,
+      provider_id: next.provider_id, model_id: next.model_id, model_role: next.model_role,
+      builtin_capabilities: next.builtin_capabilities, allowed_mcp_server_ids: next.allowed_mcp_server_ids,
+      allowed_skill_ids: next.allowed_skill_ids, max_turns: next.max_turns, hook_preset: next.hook_preset,
+      enabled: next.enabled,
+    })
+    if (currentRuntime === nextRuntime) {
+      this.entries.set(id, next)
+      await this.save()
+      return next
+    }
+    const nextEntries = new Map(this.entries)
+    nextEntries.set(id, next)
+    await this.commit(nextEntries)
     return next
   }
 
@@ -311,21 +393,24 @@ export class SubAgentManager {
     const entry = this.entries.get(id)
     if (!entry) throw new Error(`SubAgent not found: ${id}`)
     if (entry.is_builtin) throw new Error(`内置 SubAgent "${entry.name}" 不可删除`)
-    this.entries.delete(id)
-    await this.save()
+    const next = new Map(this.entries)
+    next.delete(id)
+    await this.commit(next)
   }
 
   /** 内置项 seed：仅插入不存在的 entry。已存在的 builtin 的内容字段在 load 时由 codeDefault 提供，
    *  override 写在 stripBuiltinDefaults 落盘逻辑里，seed 路径不需要再覆盖。 */
   async seedBuiltin(entries: SubAgentRegistryEntry[]): Promise<void> {
     let changed = false
+    const next = new Map(this.entries)
     for (const e of entries) {
-      if (!this.entries.has(e.id)) {
-        this.entries.set(e.id, e)
+      if (!next.has(e.id)) {
+        next.set(e.id, e)
         changed = true
       }
     }
-    if (changed) await this.save()
+    if (changed) await this.commit(next)
+    else await this.persistLegacyRewrite()
   }
 
   /**
@@ -345,14 +430,15 @@ export class SubAgentManager {
       }
     }
     if (obsolete.length === 0) return
+    const next = new Map(this.entries)
     for (const e of obsolete) {
       console.warn(
         `[SubAgentManager] 删除已废弃的 builtin subagent: ${e.name} (id=${e.id}). ` +
           `如曾通过 Admin UI 编辑过 prompt，自定义内容将丢失。`
       )
-      this.entries.delete(e.id)
+      next.delete(e.id)
     }
-    await this.save()
+    await this.commit(next)
   }
 
   private validateModelSpec(entry: Pick<SubAgentRegistryEntry, 'provider_id' | 'model_id' | 'model_role'>): void {
