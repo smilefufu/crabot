@@ -27,7 +27,7 @@ import { VersionService } from './version/version-service.js'
 import { startUpgrade, canUpgrade, isUpgradeInProgress } from './version/upgrade-runner.js'
 import { readArchiveTextFile, listArchiveEntries } from './openclaw-import/archive-reader.js'
 import { extractArchiveSubtree } from './openclaw-import/extract-subtree.js'
-import { CoreAgentConfigRevisionStore } from './core-agent-config-revision-store.js'
+import { CoreAgentConfigMutationCoordinator } from './core-agent-config-revision-store.js'
 import { CoreAgentCutoverStore } from './core-agent-cutover.js'
 import { CORE_AGENT_DEFINITION } from './core-agent-definition.js'
 import { BrowserManager } from './browser-manager.js'
@@ -446,7 +446,7 @@ async function wrapJsonHandler(res: ServerResponse, errorLabel: string, fn: () =
  */
 export class AdminModule extends ModuleBase {
   private readonly adminConfig: AdminConfig
-  private readonly revisionStore: CoreAgentConfigRevisionStore
+  private readonly configMutationCoordinator: CoreAgentConfigMutationCoordinator
   private readonly cutoverStore: CoreAgentCutoverStore
   private readonly managementOnly: boolean
   private readonly cutoverBearer?: string
@@ -558,7 +558,13 @@ export class AdminModule extends ModuleBase {
   ) {
     super(moduleConfig)
     this.adminConfig = { ...DEFAULT_ADMIN_CONFIG, ...adminConfig }
-    this.revisionStore = new CoreAgentConfigRevisionStore(this.adminConfig.data_dir)
+    this.configMutationCoordinator = new CoreAgentConfigMutationCoordinator(this.adminConfig.data_dir, {
+      // Domain-manager integration supplies their complete nonsecret semantic projection in a later Slice 0 commit.
+      readSemanticSnapshot: () => ({ schema_version: 1, coordinator_foundation: true }),
+      publishInvalidation: async ({ config_revision, domains }) => {
+        this.publishAdminEvent('admin.agent_config_invalidated', { config_revision, domains })
+      },
+    })
     this.cutoverStore = new CoreAgentCutoverStore(this.adminConfig.data_dir)
     this.managementOnly = process.env.CRABOT_ADMIN_STARTUP_MODE === 'core-agent-cutover'
     this.cutoverBearer = process.env.CRABOT_ADMIN_CUTOVER_BEARER
@@ -759,6 +765,8 @@ export class AdminModule extends ModuleBase {
 
     // 确保数据目录存在
     await fs.mkdir(this.adminConfig.data_dir, { recursive: true })
+    // Recover durable config revision/outbox before any cutover activation or business ingress.
+    await this.configMutationCoordinator.initialize()
 
     // 生成 internal-token 供 CLI 和 Agent 使用
     const internalTokenPayload: JwtPayload = {
@@ -893,6 +901,7 @@ export class AdminModule extends ModuleBase {
       this.scheduleEngine.startAll(allSchedules)
       console.log(`[Admin] ScheduleEngine started with ${allSchedules.filter(s => s.enabled).length} active schedules`)
       this.cutoverActivated = true
+      await this.configMutationCoordinator.drainPendingInvalidation()
     }
 
     // 启动 Web 服务器
@@ -7156,6 +7165,7 @@ export class AdminModule extends ModuleBase {
       await this.cutoverStore.saveMarker({ schema_version: 1, completed: true, completed_at: new Date().toISOString(), archive_fingerprint: archive.fingerprint, archive_record_count: archive.record_count, mm_result: result })
     }
     await this.waitForCoreAgentReady()
+    await this.configMutationCoordinator.drainPendingInvalidation()
     await this.channelManager.reRegisterInstances()
     await this.ensureBuiltinSchedules()
     this.scheduleEngine.startAll(Array.from(this.schedules.values()))
@@ -7271,7 +7281,7 @@ export class AdminModule extends ModuleBase {
       await this.modelProviderManager.resolveImageConfig(),
     )
 
-    const revision = (await this.revisionStore.load()).revision
+    const revision = (await this.configMutationCoordinator.current()).revision
     return {
       config_revision: revision,
       config: {
@@ -8679,7 +8689,7 @@ export class AdminModule extends ModuleBase {
 
   private async publishAgentConfigInvalidation(): Promise<boolean> {
     if (!this.cutoverActivated) return false
-    const revision = (await this.revisionStore.load()).revision
+    const revision = (await this.configMutationCoordinator.current()).revision
     this.publishAdminEvent('admin.agent_config_invalidated', {
       config_revision: revision,
       domains: ['models', 'image', 'mcp', 'skills', 'subagents', 'behavior'],

@@ -2,17 +2,156 @@ import { describe, expect, it } from 'vitest'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { CoreAgentConfigRevisionStore } from './core-agent-config-revision-store.js'
+import { CoreAgentConfigMutationCoordinator, type ConfigMutationHooks } from './core-agent-config-revision-store.js'
 
-describe('CoreAgentConfigRevisionStore', () => {
-  it('commits monotonically through an outbox', async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-revision-'))
+async function fixture(hooks: ConfigMutationHooks = {}) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-config-coordinator-'))
+  let state = { provider: 'before', secret: 'initial-secret' }
+  const events: Array<{ config_revision: number; domains: string[] }> = []
+  const coordinator = new CoreAgentConfigMutationCoordinator(dir, {
+    readSemanticSnapshot: () => ({ provider: state.provider, secret: state.secret }),
+    publishInvalidation: (payload) => { events.push(payload) },
+    hooks,
+  })
+  await coordinator.initialize()
+  return { dir, state, events, coordinator }
+}
+
+async function cleanup(dir: string) { await fs.rm(dir, { recursive: true, force: true }) }
+const outbox = (dir: string) => path.join(dir, 'config', 'core-agent-config-mutation-outbox.json')
+const record = (dir: string) => path.join(dir, 'config', 'core-agent-config-revision.json')
+const key = (dir: string) => path.join(dir, 'config', 'core-agent-config-hmac-key')
+
+describe('CoreAgentConfigMutationCoordinator', () => {
+  it('serializes mutations, HMACs secret-inclusive snapshots, and publishes exact nonsecret payloads', async () => {
+    const f = await fixture()
     try {
-      const store = new CoreAgentConfigRevisionStore(dir)
-      expect((await store.load()).revision).toBe(1)
-      expect((await store.commit(['models'], 'before', 'after')).revision).toBe(2)
-      expect((await store.current()).semantic_fingerprint_hmac).toBe('after')
-      await expect(fs.access(path.join(dir, 'config', 'core-agent-config-mutation-outbox.json'))).rejects.toThrow()
-    } finally { await fs.rm(dir, { recursive: true, force: true }) }
+      await Promise.all([
+        f.coordinator.mutate(['models'], { provider: 'one', secret: 'initial-secret' }, async () => { f.state.provider = 'one' }),
+        f.coordinator.mutate(['skills'], { provider: 'two', secret: 'rotated' }, async () => { f.state.provider = 'two'; f.state.secret = 'rotated' }),
+      ])
+      expect((await f.coordinator.current()).revision).toBe(3)
+      expect(f.events).toEqual([
+        { config_revision: 2, domains: ['models'] },
+        { config_revision: 3, domains: ['skills'] },
+      ])
+      const persisted = await fs.readFile(record(f.dir), 'utf8')
+      expect(persisted).not.toContain('rotated')
+      expect(await fs.stat(key(f.dir))).toMatchObject({ mode: expect.any(Number) })
+      expect((await fs.stat(key(f.dir))).mode & 0o777).toBe(0o600)
+      await expect(fs.access(outbox(f.dir))).rejects.toThrow()
+    } finally { await cleanup(f.dir) }
+  })
+
+  it('clears prepared state when source callback never ran and never invokes it during recovery', async () => {
+    let calls = 0
+    const f = await fixture({ afterPrepared: () => { throw new Error('simulated crash') } })
+    try {
+      await expect(f.coordinator.mutate(['models'], { provider: 'after', secret: 'initial-secret' }, async () => { calls++; f.state.provider = 'after' })).rejects.toThrow('simulated crash')
+      expect(calls).toBe(0)
+      const restarted = new CoreAgentConfigMutationCoordinator(f.dir, {
+        readSemanticSnapshot: () => ({ provider: f.state.provider, secret: f.state.secret }),
+        publishInvalidation: (payload) => f.events.push(payload),
+      })
+      await restarted.initialize()
+      expect((await restarted.current()).revision).toBe(1)
+      await expect(fs.access(outbox(f.dir))).rejects.toThrow()
+      expect(calls).toBe(0)
+    } finally { await cleanup(f.dir) }
+  })
+
+  it('finishes prepared recovery when the declared after snapshot is already persisted', async () => {
+    let f!: Awaited<ReturnType<typeof fixture>>
+    f = await fixture({ afterPrepared: () => { f.state.provider = 'after'; throw new Error('simulated crash') } })
+    try {
+      await expect(f.coordinator.mutate(['models'], { provider: 'after', secret: 'initial-secret' }, async () => { throw new Error('must not execute') })).rejects.toThrow('simulated crash')
+      const restarted = new CoreAgentConfigMutationCoordinator(f.dir, {
+        readSemanticSnapshot: () => ({ provider: f.state.provider, secret: f.state.secret }),
+        publishInvalidation: (payload) => f.events.push(payload),
+      })
+      await restarted.initialize()
+      expect((await restarted.current()).revision).toBe(2)
+      await restarted.drainPendingInvalidation()
+      expect(f.events).toEqual([{ config_revision: 2, domains: ['models'] }])
+    } finally { await cleanup(f.dir) }
+  })
+
+  it('recovers data_persisted state using after semantic fingerprint', async () => {
+    const f = await fixture({ afterSourceMutation: () => { throw new Error('simulated crash') } })
+    try {
+      await expect(f.coordinator.mutate(['models'], { provider: 'after', secret: 'initial-secret' }, async () => { f.state.provider = 'after' })).rejects.toThrow('simulated crash')
+      const restarted = new CoreAgentConfigMutationCoordinator(f.dir, {
+        readSemanticSnapshot: () => ({ provider: f.state.provider, secret: f.state.secret }),
+        publishInvalidation: (payload) => f.events.push(payload),
+      })
+      await restarted.initialize()
+      expect((await restarted.current()).revision).toBe(2)
+      await restarted.drainPendingInvalidation()
+      expect(f.events).toEqual([{ config_revision: 2, domains: ['models'] }])
+    } finally { await cleanup(f.dir) }
+  })
+
+  it('recovers committed revision and exact pending invalidation after publish response loss', async () => {
+    const f = await fixture({ afterPublish: () => { throw new Error('response lost') } })
+    try {
+      await expect(f.coordinator.mutate(['mcp'], { provider: 'after', secret: 'initial-secret' }, async () => { f.state.provider = 'after' })).rejects.toThrow('response lost')
+      expect((await f.coordinator.current()).revision).toBe(2)
+      expect(await fs.readFile(outbox(f.dir), 'utf8')).not.toContain('initial-secret')
+      const restarted = new CoreAgentConfigMutationCoordinator(f.dir, {
+        readSemanticSnapshot: () => ({ provider: f.state.provider, secret: f.state.secret }),
+        publishInvalidation: (payload) => f.events.push(payload),
+      })
+      await restarted.initialize()
+      await restarted.drainPendingInvalidation()
+      expect(f.events).toEqual([
+        { config_revision: 2, domains: ['mcp'] },
+        { config_revision: 2, domains: ['mcp'] },
+      ])
+      await expect(fs.access(outbox(f.dir))).rejects.toThrow()
+    } finally { await cleanup(f.dir) }
+  })
+
+  it('fails closed for ambiguous, corrupt, missing-key, and regressed persisted state', async () => {
+    const f = await fixture({ afterPrepared: () => { throw new Error('stop') } })
+    try {
+      await expect(f.coordinator.mutate(['models'], { provider: 'after', secret: 'initial-secret' }, async () => { f.state.provider = 'after' })).rejects.toThrow('stop')
+      await fs.writeFile(outbox(f.dir), '{not-json}', { mode: 0o600 })
+      await expect(new CoreAgentConfigMutationCoordinator(f.dir, { readSemanticSnapshot: () => f.state, publishInvalidation: () => {} }).initialize()).rejects.toThrow('Invalid persisted')
+      await fs.rm(outbox(f.dir), { force: true })
+      await fs.writeFile(record(f.dir), JSON.stringify({ schema_version: 1, revision: 0, semantic_fingerprint_hmac: 'a'.repeat(64), updated_at: '' }), { mode: 0o600 })
+      await expect(new CoreAgentConfigMutationCoordinator(f.dir, { readSemanticSnapshot: () => f.state, publishInvalidation: () => {} }).initialize()).rejects.toThrow('Invalid core Agent config revision')
+      await fs.rm(key(f.dir))
+      await expect(new CoreAgentConfigMutationCoordinator(f.dir, { readSemanticSnapshot: () => f.state, publishInvalidation: () => {} }).initialize()).rejects.toThrow('Missing core Agent config HMAC key')
+    } finally { await cleanup(f.dir) }
+  })
+
+  it('rejects mismatch recovery instead of resetting revision or applying a callback twice', async () => {
+    const f = await fixture({ afterSourceMutation: () => { throw new Error('stop') } })
+    try {
+      let calls = 0
+      await expect(f.coordinator.mutate(['models'], { provider: 'after', secret: 'initial-secret' }, async () => { calls++; f.state.provider = 'after' })).rejects.toThrow('stop')
+      f.state.provider = 'third-state'
+      const restarted = new CoreAgentConfigMutationCoordinator(f.dir, { readSemanticSnapshot: () => f.state, publishInvalidation: () => {} })
+      await expect(restarted.initialize()).rejects.toThrow('Config mutation source state does not match outbox')
+      expect(calls).toBe(1)
+    } finally { await cleanup(f.dir) }
+  })
+
+  it('uses 0600 for record and outbox and preserves monotonic revision across restart', async () => {
+    const f = await fixture({ afterRevisionCommit: () => { throw new Error('crash after commit') } })
+    try {
+      await expect(f.coordinator.mutate(['behavior'], { provider: 'after', secret: 'initial-secret' }, async () => { f.state.provider = 'after' })).rejects.toThrow('crash after commit')
+      expect((await fs.stat(record(f.dir))).mode & 0o777).toBe(0o600)
+      expect((await fs.stat(outbox(f.dir))).mode & 0o777).toBe(0o600)
+      const restarted = new CoreAgentConfigMutationCoordinator(f.dir, {
+        readSemanticSnapshot: () => f.state,
+        publishInvalidation: (payload) => f.events.push(payload),
+      })
+      await restarted.initialize()
+      await restarted.drainPendingInvalidation()
+      expect((await restarted.current()).revision).toBe(2)
+      await restarted.mutate(['image'], { provider: 'later', secret: 'initial-secret' }, async () => { f.state.provider = 'later' })
+      expect((await restarted.current()).revision).toBe(3)
+    } finally { await cleanup(f.dir) }
   })
 })
