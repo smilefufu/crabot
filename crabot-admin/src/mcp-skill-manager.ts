@@ -6,7 +6,7 @@
 
 import fs from 'fs/promises'
 import path from 'path'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import AdmZip from 'adm-zip'
 import { canonicalizeJson, generateId, generateTimestamp } from 'crabot-shared'
 import type { ConfigDomain } from './core-agent-config-revision-store.js'
@@ -522,6 +522,10 @@ export class SkillManager {
   private skills: Map<string, SkillRegistryEntry> = new Map()
   private readonly filePath: string
   private readonly skillsRoot: string
+  private mutationRunner: RegistryMutationRunner | null = null
+  private semanticSnapshotProvider: (() => Promise<unknown> | unknown) | null = null
+  private contentTreeHashes = new Map<string, string>()
+  private legacyMigrationPending = false
 
   constructor(dataDir: string) {
     this.filePath = path.join(dataDir, 'skills.json')
@@ -529,8 +533,100 @@ export class SkillManager {
   }
 
   async initialize(): Promise<void> {
+    await this.initializeLoadOnly()
+    await this.initializeMigrations()
+  }
+
+  async initializeLoadOnly(): Promise<void> {
     await this.load()
-    await this.migrateLegacyEntries()
+    await this.refreshRuntimeContentHashes()
+  }
+
+  async initializeMigrations(): Promise<void> {
+    const needsMigration = this.legacyMigrationPending
+    if (!needsMigration) return
+    if (this.mutationRunner) {
+      await this.mutationRunner(['skills'], async () => {
+        this.legacyMigrationPending = false
+        try { return await this.semanticSnapshotProvider?.() } finally { this.legacyMigrationPending = true }
+      }, async () => {
+        await this.migrateLegacyEntries()
+        this.legacyMigrationPending = false
+        await this.refreshRuntimeContentHashes()
+      })
+    } else {
+      await this.migrateLegacyEntries()
+      this.legacyMigrationPending = false
+      await this.refreshRuntimeContentHashes()
+    }
+  }
+
+  setMutationRunner(runner: RegistryMutationRunner): void { this.mutationRunner = runner }
+  setSemanticSnapshotProvider(provider: () => Promise<unknown> | unknown): void { this.semanticSnapshotProvider = provider }
+
+  semanticMigrationState(): { legacy_migration_pending: boolean } {
+    return { legacy_migration_pending: this.legacyMigrationPending }
+  }
+
+  runtimeSemanticEntries(): unknown[] {
+    return Array.from(this.skills.values())
+      .filter((entry) => entry.enabled && typeof entry.skill_dir === 'string' && entry.skill_dir.length > 0)
+      .map((entry) => ({
+        id: entry.id, name: entry.name, description: entry.description, skill_dir: entry.skill_dir,
+        ...(this.isAdminOwned(entry) ? { content_tree_hash: this.contentTreeHashes.get(entry.id) ?? 'unreadable' } : {}),
+      }))
+      .sort((left, right) => left.id.localeCompare(right.id))
+  }
+
+  private async commit(next: Map<string, SkillRegistryEntry>, applyFiles: () => Promise<void>, previewHashes?: Map<string, string>): Promise<void> {
+    const previous = this.skills
+    const previousHashes = this.contentTreeHashes
+    const apply = async () => {
+      await applyFiles()
+      this.skills = next
+      await this.refreshRuntimeContentHashes()
+      await this.save()
+    }
+    if (!this.mutationRunner) return apply()
+    await this.mutationRunner(['skills'], async () => {
+      this.skills = next
+      if (previewHashes) this.contentTreeHashes = previewHashes
+      else await this.refreshRuntimeContentHashes()
+      try { return await this.semanticSnapshotProvider?.() } finally {
+        this.skills = previous
+        this.contentTreeHashes = previousHashes
+      }
+    }, apply)
+  }
+
+  private isAdminOwned(entry: SkillRegistryEntry): boolean {
+    return entry.source_type === 'imported' && typeof entry.skill_dir === 'string' && path.resolve(entry.skill_dir).startsWith(this.skillsRoot + path.sep)
+  }
+
+  private async refreshRuntimeContentHashes(): Promise<void> {
+    const hashes = new Map<string, string>()
+    for (const entry of this.skills.values()) {
+      if (this.isAdminOwned(entry)) hashes.set(entry.id, await this.hashContentTree(entry.skill_dir))
+    }
+    this.contentTreeHashes = hashes
+  }
+
+  private async hashContentTree(root: string): Promise<string> {
+    const hash = createHash('sha256')
+    const walk = async (dir: string, relative = ''): Promise<void> => {
+      const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => { throw new Error(`Unreadable imported skill directory: ${root}`) })
+      for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+        const rel = relative ? `${relative}/${entry.name}` : entry.name
+        const target = path.join(dir, entry.name)
+        if (entry.isSymbolicLink()) throw new Error(`Symlink in imported skill directory: ${rel}`)
+        if (entry.isDirectory()) { hash.update(`D\0${rel}\0`); await walk(target, rel); continue }
+        if (!entry.isFile()) throw new Error(`Unsupported imported skill entry: ${rel}`)
+        hash.update(`F\0${rel}\0`)
+        hash.update(await fs.readFile(target).catch(() => { throw new Error(`Unreadable imported skill file: ${rel}`) }))
+      }
+    }
+    await walk(root)
+    return hash.digest('hex')
   }
 
   private async load(): Promise<void> {
@@ -543,6 +639,12 @@ export class SkillManager {
         }
       }
       this.skills = new Map(entries.map((e) => [e.id, e]))
+      this.legacyMigrationPending = entries.some((entry) => {
+        const rawEntry = entry as SkillRegistryEntry & { content?: string }
+        const previous = rawEntry.previous_snapshot as { content?: string } | undefined
+        return rawEntry.content !== undefined || previous?.content !== undefined ||
+          (!entry.is_builtin && entry.skill_dir?.startsWith(this.skillsRoot + path.sep) && path.basename(entry.skill_dir) !== entry.name)
+      })
     } catch {
       this.skills = new Map()
     }
@@ -754,8 +856,9 @@ export class SkillManager {
     if (orphanCheck) {
       throw new Error(`目录 ${skillDir} 已存在但 registry 中找不到对应 entry，可能是孤儿数据，请手工清理`)
     }
-    await fs.mkdir(skillDir, { recursive: true })
-    await atomicWriteFileBuf(path.join(skillDir, 'SKILL.md'), Buffer.from(params.content, 'utf-8'))
+    const stagedDir = path.join(this.skillsRoot, `.stage.${process.pid}.${Date.now()}.${randomBytes(4).toString('hex')}`)
+    await fs.mkdir(stagedDir, { recursive: true })
+    await atomicWriteFileBuf(path.join(stagedDir, 'SKILL.md'), Buffer.from(params.content, 'utf-8'))
 
     const now = generateTimestamp()
     const entry: SkillRegistryEntry = {
@@ -775,96 +878,73 @@ export class SkillManager {
       created_at: now,
       updated_at: now,
     }
-    this.skills.set(entry.id, entry)
-    await this.save()
+    const next = new Map(this.skills)
+    next.set(entry.id, entry)
+    try {
+      const hashes = new Map(this.contentTreeHashes)
+      hashes.set(entry.id, await this.hashContentTree(stagedDir))
+      await this.commit(next, async () => { await fs.rename(stagedDir, skillDir) }, hashes)
+    } catch (error) {
+      await fs.rm(stagedDir, { recursive: true, force: true }).catch(() => {})
+      throw error
+    }
     return entry
   }
 
   async update(
     id: string,
-    params: Partial<Pick<SkillRegistryEntry, 'name' | 'description' | 'version' | 'trigger_phrases' | 'is_essential' | 'enabled'>>
-      & { content?: string },
+    params: Partial<Pick<SkillRegistryEntry, 'name' | 'description' | 'version' | 'trigger_phrases' | 'is_essential' | 'enabled'>> & { content?: string },
   ): Promise<SkillRegistryEntry> {
     const entry = this.skills.get(id)
     if (!entry) throw new Error(`Skill not found: ${id}`)
-    if (!entry.can_disable && params.enabled === false) {
-      throw new Error(`Skill "${entry.name}" cannot be disabled`)
-    }
-    if (params.content !== undefined && entry.is_builtin) {
-      throw new Error(`Skill "${entry.name}" 是内置的，不能修改 content`)
-    }
-
-    // 处理 name 改名：mv 物理目录（仅在 skillsRoot 下的非 builtin entry）
-    let workingSkillDir = entry.skill_dir
-    if (params.name !== undefined && params.name !== entry.name && !entry.is_builtin) {
-      if (!isValidSkillName(params.name)) {
-        throw new Error(`Skill name "${params.name}" 含非法字符（仅允许小写字母/数字/连字符，最长 64 字符）`)
-      }
-      const newNameConflict = Array.from(this.skills.values()).find(s => s.id !== id && s.name === params.name)
-      if (newNameConflict) {
-        throw new Error(`Skill name "${params.name}" 已被其他 entry 使用`)
-      }
-      const isUnderSkillsRoot = entry.skill_dir.startsWith(this.skillsRoot + path.sep)
-      if (isUnderSkillsRoot) {
-        const newSkillDir = path.join(this.skillsRoot, params.name)
-        const newExists = await fs.access(newSkillDir).then(() => true).catch(() => false)
-        if (newExists) {
-          throw new Error(`目标目录 ${newSkillDir} 已存在`)
-        }
-        await fs.rename(entry.skill_dir, newSkillDir)
-        workingSkillDir = newSkillDir
-      }
-    }
-
-    let previousSnapshot = entry.previous_snapshot
-    if (params.content !== undefined && !entry.is_builtin) {
-      const skillMdPath = path.join(workingSkillDir, 'SKILL.md')
-      const oldContent = await fs.readFile(skillMdPath, 'utf-8').catch(() => '')
-      if (oldContent !== params.content) {
-        const snapTs = isoCompactTs(generateTimestamp())
-        // snapshot 用当前 name（取改名后的，若改了名）
-        const snapBase = params.name ?? entry.name
-        const snapRel = path.posix.join('.snapshots', `${snapBase}-${snapTs}`)
-        const snapDir = path.join(this.skillsRoot, snapRel)
-        await fs.mkdir(path.dirname(snapDir), { recursive: true })
-        // 1. 先 copy 到 tmp，成功后 rename 到正式 snapDir；失败仅 tmp 残留被清，旧 snapshot 完好
-        const tmpSnapDir = `${snapDir}.tmp.${process.pid}.${Date.now()}.${randomBytes(4).toString('hex')}`
-        try {
-          await copyDir(workingSkillDir, tmpSnapDir)
-          await fs.rename(tmpSnapDir, snapDir)
-        } catch (err) {
-          await fs.rm(tmpSnapDir, { recursive: true, force: true }).catch(() => {})
-          throw err
-        }
-        // 2. 新 snapshot 已就位，再删旧（N=1）
-        if (entry.previous_snapshot) {
-          await fs.rm(path.join(this.skillsRoot, entry.previous_snapshot.snapshot_dir), { recursive: true, force: true })
-        }
-        await atomicWriteFileBuf(skillMdPath, Buffer.from(params.content, 'utf-8'))
-        previousSnapshot = {
-          snapshot_dir: snapRel,
-          version: entry.version,
-          updated_at: entry.updated_at,
-          snapshotted_at: generateTimestamp(),
-        }
-      }
-    }
-
+    if (!entry.can_disable && params.enabled === false) throw new Error(`Skill "${entry.name}" cannot be disabled`)
+    if (params.content !== undefined && entry.is_builtin) throw new Error(`Skill "${entry.name}" 是内置的，不能修改 content`)
+    const name = params.name ?? entry.name
+    if (name !== entry.name && !entry.is_builtin && !isValidSkillName(name)) throw new Error(`Skill name "${name}" 含非法字符（仅允许小写字母/数字/连字符，最长 64 字符）`)
+    const existingName = this.findByName(name)
+    if (name !== entry.name && existingName && existingName.id !== id) throw new Error(`Skill name "${name}" 已被其他 entry 使用`)
+    const managed = this.isAdminOwned(entry)
+    const skillDir = managed ? path.join(this.skillsRoot, name) : entry.skill_dir
+    const changedContent = params.content !== undefined && managed && await fs.readFile(path.join(entry.skill_dir, 'SKILL.md'), 'utf8').then((text) => text !== params.content).catch(() => true)
+    const changedPath = managed && skillDir !== entry.skill_dir
     const updated: SkillRegistryEntry = {
-      ...entry,
-      name: params.name ?? entry.name,
-      description: params.description ?? entry.description,
-      version: params.version ?? entry.version,
-      skill_dir: workingSkillDir,
-      trigger_phrases: params.trigger_phrases ?? entry.trigger_phrases,
-      is_essential: params.is_essential ?? entry.is_essential,
-      enabled: params.enabled ?? entry.enabled,
-      previous_snapshot: previousSnapshot,
+      ...entry, name, skill_dir: skillDir, description: params.description ?? entry.description,
+      version: params.version ?? entry.version, trigger_phrases: params.trigger_phrases ?? entry.trigger_phrases,
+      is_essential: params.is_essential ?? entry.is_essential, enabled: params.enabled ?? entry.enabled,
       updated_at: generateTimestamp(),
     }
-    this.skills.set(id, updated)
-    await this.save()
+    const next = new Map(this.skills); next.set(id, updated)
+    if (!changedContent && !changedPath && canonicalizeJson(this.runtimeSemanticEntries()) === canonicalizeJson(await this.runtimeEntriesFor(next))) {
+      this.skills = next; await this.save(); return updated
+    }
+    const staged = path.join(this.skillsRoot, `.stage.${process.pid}.${Date.now()}.${randomBytes(4).toString('hex')}`)
+    let backup: string | undefined
+    try {
+      if (managed) {
+        await copyDir(entry.skill_dir, staged)
+        if (params.content !== undefined) await atomicWriteFileBuf(path.join(staged, 'SKILL.md'), Buffer.from(params.content, 'utf8'))
+      }
+      const hashes = new Map(this.contentTreeHashes)
+      if (managed) hashes.set(id, await this.hashContentTree(staged))
+      await this.commit(next, async () => {
+        if (!managed) return
+        backup = path.join(this.skillsRoot, `.swap.${process.pid}.${Date.now()}.${randomBytes(4).toString('hex')}`)
+        await fs.rename(entry.skill_dir, backup)
+        try { await fs.rename(staged, skillDir) } catch (error) { await fs.rename(backup, entry.skill_dir).catch(() => {}); throw error }
+        const snapRel = path.posix.join('.snapshots', `${name}-${isoCompactTs(generateTimestamp())}`)
+        await fs.mkdir(path.dirname(path.join(this.skillsRoot, snapRel)), { recursive: true })
+        await fs.rename(backup, path.join(this.skillsRoot, snapRel))
+        updated.previous_snapshot = { snapshot_dir: snapRel, version: entry.version, updated_at: entry.updated_at, snapshotted_at: generateTimestamp() }
+      })
+    } catch (error) { await fs.rm(staged, { recursive: true, force: true }).catch(() => {}); throw error }
     return updated
+  }
+
+  private async runtimeEntriesFor(entries: Map<string, SkillRegistryEntry>): Promise<unknown[]> {
+    const previous = this.skills; const previousHashes = this.contentTreeHashes
+    this.skills = entries
+    try { await this.refreshRuntimeContentHashes(); return this.runtimeSemanticEntries() }
+    finally { this.skills = previous; this.contentTreeHashes = previousHashes }
   }
 
   async restore(id: string): Promise<SkillRegistryEntry> {
@@ -919,8 +999,9 @@ export class SkillManager {
       },
       updated_at: now,
     }
-    this.skills.set(id, updated)
-    await this.save()
+    const next = new Map(this.skills)
+    next.set(id, updated)
+    await this.commit(next, async () => {})
     return updated
   }
 
@@ -928,8 +1009,9 @@ export class SkillManager {
     const entry = this.skills.get(id)
     if (!entry) throw new Error(`Skill not found: ${id}`)
     if (entry.is_builtin) throw new Error(`Cannot delete built-in Skill "${entry.name}"`)
-    this.skills.delete(id)
-    await this.save()
+    const next = new Map(this.skills)
+    next.delete(id)
+    await this.commit(next, async () => {})
   }
 
   /**
@@ -938,24 +1020,21 @@ export class SkillManager {
    */
   async seedBuiltinSkills(entries: SkillRegistryEntry[]): Promise<void> {
     let changed = false
+    const next = new Map(this.skills)
     for (const e of entries) {
-      const existing = this.skills.get(e.id)
+      const existing = next.get(e.id)
       if (!existing) {
-        this.skills.set(e.id, e)
+        next.set(e.id, e)
         changed = true
         continue
       }
-      // 修复历史脏数据：旧版本格式的 builtin entry 没有 skill_dir 字段（content 时代遗留），
-      // push 给 agent 时 SkillConfig.skill_dir=undefined → agent computeSkillsHash
-      // h.update(undefined) 抛 TypeError → 整个 update_config 失败（连带 subagents 不更新）。
-      // 这里用 code default 的 skill_dir 补齐；其余字段尊重磁盘上的用户改动。
       if (!existing.skill_dir && e.skill_dir) {
-        this.skills.set(e.id, { ...existing, skill_dir: e.skill_dir, updated_at: new Date().toISOString() })
+        next.set(e.id, { ...existing, skill_dir: e.skill_dir, updated_at: new Date().toISOString() })
         console.warn(`[SkillManager] Repaired builtin skill "${e.name}" (${e.id}): missing skill_dir → ${e.skill_dir}`)
         changed = true
       }
     }
-    if (changed) await this.save()
+    if (changed) await this.commit(next, async () => {})
   }
 
   /**
@@ -974,6 +1053,9 @@ export class SkillManager {
       return 0
     }
 
+    const previous = this.skills
+    const next = new Map(this.skills)
+    this.skills = next
     const existingNames = new Set(this.list().map(s => s.name))
     let changed = false
     let found = 0
@@ -1047,10 +1129,8 @@ export class SkillManager {
       console.error(`[SkillManager] builtin skills 目录下没扫到任何 SKILL.md，内置 skill 全部缺失: ${builtinsDir}`)
     }
 
-    if (changed) {
-      await this.save()
-    }
-
+    this.skills = previous
+    if (changed) await this.commit(next, async () => {})
     return found
   }
 
@@ -1081,6 +1161,9 @@ export class SkillManager {
       })
     )
 
+    const previous = this.skills
+    const next = new Map(this.skills)
+    this.skills = next
     let added = 0
     const now = generateTimestamp()
     for (const result of reads) {
@@ -1107,7 +1190,8 @@ export class SkillManager {
       added++
     }
 
-    if (added > 0) await this.save()
+    this.skills = previous
+    if (added > 0) await this.commit(next, async () => {})
     return added
   }
 
@@ -1365,8 +1449,9 @@ export class SkillManager {
         updated_at: now,
         previous_snapshot: previousSnapshotMeta ?? fallbackSnapshot,
       }
-      this.skills.set(id, entry)
-      await this.save()
+      const next = new Map(this.skills)
+      next.set(id, entry)
+      await this.commit(next, async () => {})
       return { entry, was_overwrite: !!existing }
     } catch (err) {
       // I1: 如果 snapshot rename 已经发生但后续步骤失败 → 把 snapshot 搬回原 targetDir

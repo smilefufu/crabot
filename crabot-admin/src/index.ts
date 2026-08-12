@@ -622,10 +622,14 @@ export class AdminModule extends ModuleBase {
     })
     this.mcpServerManager.setSemanticSnapshotProvider(() => this.readCoreAgentSemanticSnapshot())
     this.subAgentManager.setSemanticSnapshotProvider(() => this.readCoreAgentSemanticSnapshot())
+    this.skillManager.setSemanticSnapshotProvider(() => this.readCoreAgentSemanticSnapshot())
     this.mcpServerManager.setMutationRunner(async (domains, preview, apply) => {
       await this.configMutationCoordinator.mutateComputed(domains, preview, apply)
     })
     this.subAgentManager.setMutationRunner(async (domains, preview, apply) => {
+      await this.configMutationCoordinator.mutateComputed(domains, preview, apply)
+    })
+    this.skillManager.setMutationRunner(async (domains, preview, apply) => {
       await this.configMutationCoordinator.mutateComputed(domains, preview, apply)
     })
     // AgentManager still emits its legacy local callback for non-core compatibility; core runtime
@@ -823,6 +827,7 @@ export class AdminModule extends ModuleBase {
     // Load every source used by the semantic snapshot without writes before coordinator recovery.
     await this.mcpServerManager.initializeLoadOnly()
     await this.subAgentManager.initializeLoadOnly()
+    await this.skillManager.initializeLoadOnly()
 
     // Recover durable revision/outbox against fully loaded source state before any mutation.
     await this.configMutationCoordinator.initialize()
@@ -848,8 +853,8 @@ export class AdminModule extends ModuleBase {
       || path.resolve(this.adminConfig.data_dir, '../../crabot-mcp-tools')
     await this.mcpServerManager.registerBuiltins(mcpToolsPath)
 
-    // 初始化 Skill 管理器
-    await this.skillManager.initialize()
+    // Skill runtime configuration uses the same durable source/revision transaction.
+    await this.skillManager.initializeMigrations()
 
     // 注册内置 Skill（幂等，仅首次启动时写入）
     const builtinSkillsPath = path.join(__dirname, '..', 'builtins', 'skills')
@@ -7443,7 +7448,6 @@ export class AdminModule extends ModuleBase {
     try {
       const params = await this.readJsonBody<Parameters<SkillManager['create']>[0]>(req)
       const skill = await this.skillManager.create(params)
-      this.triggerPushAfter('skill create')
       res.writeHead(201, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(await this.skillManager.toRestEntry(skill)))
     } catch (err) {
@@ -7490,7 +7494,6 @@ export class AdminModule extends ModuleBase {
     try {
       const params = await this.readJsonBody<Parameters<SkillManager['update']>[1]>(req)
       const skill = await this.skillManager.update(id, params)
-      this.triggerPushAfter('skill update')
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(await this.skillManager.toRestEntry(skill)))
     } catch (err) {
@@ -7507,7 +7510,6 @@ export class AdminModule extends ModuleBase {
   ): Promise<void> {
     try {
       await this.skillManager.delete(id)
-      this.triggerPushAfter('skill delete')
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ deleted: true }))
     } catch (err) {
@@ -7680,7 +7682,6 @@ export class AdminModule extends ModuleBase {
     try {
       const body = await this.readJsonBody<{ dir_path: string; overwrite?: boolean }>(req)
       const { entry, was_overwrite } = await this.skillManager.importFromLocalPath(body.dir_path, body.overwrite)
-      this.triggerPushAfter('skill import-local')
       res.writeHead(201, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ ...await this.skillManager.toRestEntry(entry), was_overwrite }))
     } catch (err) {
@@ -7703,7 +7704,6 @@ export class AdminModule extends ModuleBase {
       const { entry, was_overwrite } = await this.skillManager.importFromZip(
         body.base64_content, body.filename, body.overwrite,
       )
-      this.triggerPushAfter('skill import-upload')
       res.writeHead(201, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ ...await this.skillManager.toRestEntry(entry), was_overwrite }))
     } catch (err) {
@@ -7799,7 +7799,6 @@ export class AdminModule extends ModuleBase {
   ): Promise<void> {
     try {
       const entry = await this.skillManager.restore(id)
-      this.triggerPushAfter('skill restore')
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(await this.skillManager.toRestEntry(entry)))
     } catch (err) {
@@ -7819,7 +7818,6 @@ export class AdminModule extends ModuleBase {
     try {
       const workspaceDir = this.workspaceDir
       const added = await this.skillManager.scanWorkspaceSkills(workspaceDir)
-      this.triggerPushAfter('skill scan-workspace')
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ added, workspace_dir: workspaceDir }))
     } catch (err) {
@@ -8741,6 +8739,8 @@ export class AdminModule extends ModuleBase {
       mcp_servers: this.mcpServerManager.runtimeSemanticEntries(),
       subagents: this.subAgentManager.runtimeSemanticEntries(),
       subagent_storage: this.subAgentManager.semanticMigrationState(),
+      skills: this.skillManager.runtimeSemanticEntries(),
+      skill_storage: this.skillManager.semanticMigrationState(),
     }
   }
 
