@@ -312,7 +312,7 @@ export class CoreAgentConfigMutationCoordinator {
     }
     await update(this.outboxPath, await readJson<CoreAgentConfigMutationOutboxRecord>(this.outboxPath))
     await update(this.receiptPath, await readJson<CoreAgentConfigMutationReceipt>(this.receiptPath))
-    if (!matched) throw new Error('Completed source journal binding does not match')
+    if (!matched && action === 'mark') throw new Error('Completed source journal binding does not match')
   }
 
   async persistedMutationBinding(): Promise<CoreAgentConfigMutationOutboxRecord | CoreAgentConfigMutationReceipt | null> {
@@ -434,7 +434,10 @@ export class CoreAgentConfigMutationCoordinator {
   }
 
   private assertSourceJournalBinding(record: { mutation_id: string; target_revision: number; domains: ConfigDomain[]; source_journal_sha256?: string; source_journal_hmac?: string; source_cleanup_completed?: boolean }): void {
-    if (record.source_journal_sha256 === undefined && record.source_journal_hmac === undefined) return
+    if (record.source_journal_sha256 === undefined && record.source_journal_hmac === undefined) {
+      if (record.source_cleanup_completed !== undefined) throw new Error('Core Agent config source journal binding mismatch')
+      return
+    }
     if (!record.source_journal_sha256 || !record.source_journal_hmac || !/^[a-f0-9]{64}$/.test(record.source_journal_sha256) || !/^[a-f0-9]{64}$/.test(record.source_journal_hmac) || (record.source_cleanup_completed !== undefined && typeof record.source_cleanup_completed !== 'boolean') || !this.equal(this.sourceJournalBinding(record.mutation_id, record.target_revision, record.domains, record.source_journal_sha256, record.source_cleanup_completed === true), record.source_journal_hmac)) throw new Error('Core Agent config source journal binding mismatch')
   }
 

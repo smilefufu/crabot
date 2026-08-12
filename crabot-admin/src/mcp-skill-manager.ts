@@ -887,9 +887,15 @@ export class SkillManager {
       for (const entry of entries) {
         if (!entry || typeof entry !== 'object' || typeof (entry as { id?: unknown }).id !== 'string') throw new Error('Invalid skill source journal')
         const value = entry as { id: string; skill_dir?: unknown; previous_snapshot?: { snapshot_dir?: unknown } }
+        let managedSkill: string | undefined
+        if (typeof value.skill_dir === 'string') {
+          try { managedSkill = this.relativeTransactionPath(value.skill_dir) } catch { /* external builtin/scanned paths do not participate */ }
+        }
         result.set(value.id, {
-          skill: typeof value.skill_dir === 'string' ? this.relativeTransactionPath(value.skill_dir) : undefined,
-          snapshot: typeof value.previous_snapshot?.snapshot_dir === 'string' ? value.previous_snapshot.snapshot_dir : undefined,
+          skill: managedSkill,
+          snapshot: typeof value.previous_snapshot?.snapshot_dir === 'string' && value.previous_snapshot.snapshot_dir.startsWith('.snapshots/')
+            ? value.previous_snapshot.snapshot_dir
+            : undefined,
         })
       }
       return result
@@ -1084,8 +1090,14 @@ export class SkillManager {
     const retained = journal.retained_rel ? this.resolveTransactionPath(journal.retained_rel) : undefined
     const restore = backup ?? retained
     if (journal.delete_after_commit) {
-      if (!retained || !await fs.access(retained).then(() => true).catch(() => false)) throw new Error('Skill source journal rollback is ambiguous')
-      await fs.rename(retained, beforeTarget)
+      const beforeExists = await fs.access(beforeTarget).then(() => true).catch(() => false)
+      const retainedExists = retained ? await fs.access(retained).then(() => true).catch(() => false) : false
+      if (beforeExists) {
+        if (!journal.before_target_tree_hash || journal.before_target_tree_hash !== await this.hashContentTree(beforeTarget)) throw new Error('Skill source journal rollback target mismatch')
+      } else if (retained && retainedExists) {
+        if (!journal.before_target_tree_hash || journal.before_target_tree_hash !== await this.hashContentTree(retained)) throw new Error('Skill source journal rollback quarantine mismatch')
+        await fs.rename(retained, beforeTarget)
+      } else throw new Error('Skill source journal rollback is ambiguous')
     } else if (restore && await fs.access(restore).then(() => true).catch(() => false)) {
       await fs.rm(afterTarget, { recursive: true, force: true })
       await fs.rename(restore, beforeTarget)
@@ -1260,7 +1272,7 @@ export class SkillManager {
           before_rel: source && this.isPathUnderSkillsRoot(source) ? this.relativeTransactionPath(source) : undefined,
           after_rel: targetRel,
           stage_rel: this.relativeTransactionPath(stage),
-          before_existed: sourceExists,
+          before_existed: Boolean(sourceExists && source && this.isPathUnderSkillsRoot(source)),
           ...(sourceExists && this.isPathUnderSkillsRoot(source) ? { before_tree_hash: await this.hashContentTree(source) } : {}),
           after_tree_hash: await this.hashContentTree(stage),
           ...(sourceExists && this.isPathUnderSkillsRoot(source) && this.relativeTransactionPath(source) !== this.relativeTransactionPath(target) ? { cleanup_rel: this.relativeTransactionPath(source) } : {}),
