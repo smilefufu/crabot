@@ -7197,7 +7197,12 @@ export class AdminModule extends ModuleBase {
       this.config.moduleId,
       { authorizationBearer: bearer },
     )
-    const revisionBefore = (await this.configMutationCoordinator.current()).revision
+    const revisionBefore = await this.configMutationCoordinator.readCommittedEpoch()
+    if (revisionBefore === null) {
+      if (attempt >= 5) throw new Error('Core Agent config mutation is active; retry later')
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      return this.handleGetAgentConfig(params, context, attempt + 1)
+    }
     const config = this.agentManager.getConfig(params.instance_id)
     if (!config) {
       throw new Error(`Config not found for instance: ${params.instance_id}`)
@@ -7287,9 +7292,10 @@ export class AdminModule extends ModuleBase {
       await this.modelProviderManager.resolveImageConfig(),
     )
 
-    const revision = (await this.configMutationCoordinator.current()).revision
-    if (revision !== revisionBefore) {
-      if (attempt >= 2) throw new Error('Core Agent config changed during resolution; retry later')
+    const revision = await this.configMutationCoordinator.readCommittedEpoch()
+    if (revision === null || revision !== revisionBefore) {
+      if (attempt >= 5) throw new Error('Core Agent config changed during resolution; retry later')
+      await new Promise((resolve) => setTimeout(resolve, 10))
       return this.handleGetAgentConfig(params, context, attempt + 1)
     }
     return {

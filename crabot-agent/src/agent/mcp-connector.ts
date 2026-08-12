@@ -47,7 +47,7 @@ export class McpConnector {
     const unique = configs.filter((config) => !seen.has(config.name) && (seen.add(config.name), true))
     try {
       await Promise.all(unique.map((config) => candidate.connectOne(config)))
-      await candidate.refreshToolCache()
+      await candidate.refreshToolCache(true)
       return candidate
     } catch (error) {
       await candidate.disconnectAll()
@@ -156,7 +156,7 @@ export class McpConnector {
   }
 
   /** Rebuild tool cache from all connected servers */
-  private async refreshToolCache(): Promise<void> {
+  private async refreshToolCache(strict = false): Promise<void> {
     const tools: ToolDefinition[] = []
 
     for (const [serverName, client] of this.clients) {
@@ -204,6 +204,7 @@ export class McpConnector {
         }
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error)
+        if (strict) throw new Error(`Failed to list tools from "${serverName}": ${msg}`)
         console.error(`[McpConnector] Failed to list tools from "${serverName}": ${msg}`)
       }
     }

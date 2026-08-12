@@ -1288,6 +1288,18 @@ describe('WorkerHarness.killWorker', () => {
 })
 
 describe('WorkerHarness.queryWorker', () => {
+  it('stale admission rejects before fork, ledger incarnation, inbox, or event side effects', async () => {
+    const { harness, fake, workersDir } = await makeHarness({ caps: { fork: true } })
+    const worker = await harness.spawnWorker(spawnParams())
+    const before = await new WorkerEventLog(join(workersDir, worker.worker_id)).readAll()
+    ;(harness as any).deps.assertExecutionAdmission = () => { throw new Error('AGENT_RUNTIME_CONFIG_STALE') }
+
+    await expect(harness.queryWorker(worker.worker_id, 'side question')).rejects.toThrow('AGENT_RUNTIME_CONFIG_STALE')
+    expect(fake.forkCalls).toHaveLength(0)
+    expect((await harness.listWorkers(`test::friend-1` as ManagerKey))[0].incarnations).toHaveLength(1)
+    expect(await new WorkerEventLog(join(workersDir, worker.worker_id)).readAll()).toEqual(before)
+  })
+
   it('capabilities().fork 为 false → 抛 CapabilityNotSupportedError,不调用 adapter.fork,失败落 query_failed 事件(读 events.jsonl 核实)', async () => {
     const { harness, fake, workersDir } = await makeHarness({ caps: { fork: false } })
     const worker = await harness.spawnWorker(spawnParams())

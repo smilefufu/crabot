@@ -1064,6 +1064,10 @@ export class AgentHandler {
    *
    * digestSdkEnv 单独可选；不传时保留旧值（与 updateSystemPrompt 同语义）。
    */
+  updateMcpConnector(mcpConnector: McpConnector): void {
+    this.mcpConnector = mcpConnector
+  }
+
   updateSdkEnv(sdkEnv: SdkEnvConfig, digestSdkEnv?: SdkEnvConfig): void {
     this.sdkEnv = sdkEnv
     if (digestSdkEnv !== undefined) {

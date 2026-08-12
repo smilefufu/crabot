@@ -2269,6 +2269,9 @@ export class WorkerHarness {
    * 任何具体化身"。
    */
   async queryWorker(workerId: string, question: string): Promise<{ forkSeq: number }> {
+    // Admission precedes even read/trace bookkeeping: stale config must not cause an adapter fork,
+    // workspace/ledger/inbox/event side effect through this fire-and-forget entry.
+    this.deps.assertExecutionAdmission?.()
     interface QueryPrep {
       readonly adapter: WorkerAdapter
       readonly implId: WorkerImplId

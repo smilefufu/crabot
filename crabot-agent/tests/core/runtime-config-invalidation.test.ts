@@ -42,6 +42,29 @@ describe('UnifiedAgent runtime config invalidation', () => {
     expect(apply).not.toHaveBeenCalled()
   })
 
+  it('cold unconfigured Agent atomically installs a handler before opening execution admission', async () => {
+    const cold = config()
+    cold.agent_config!.roles = ['worker']
+    cold.agent_config!.model_config = {}
+    const agent = new UnifiedAgent(cold) as any
+    agent.adminPort = 19998
+    agent.configRevision = 1
+    agent.configStale = true
+    expect(agent.agentHandler).toBeUndefined()
+    const ready = config()
+    ready.agent_config!.roles = ['worker']
+    vi.spyOn(ConfigLoader, 'pull').mockResolvedValue({ config: ready, revision: 2 })
+
+    await agent.pullRuntimeConfig()
+    expect(agent.agentHandler).toBeDefined()
+    expect(agent.configRevision).toBe(2)
+    expect(agent.configStale).toBe(false)
+    await expect(agent.managerStack.harness.spawnWorker({
+      managerKey: 'admin-web::admin-chat', title: 'ready', prompt: 'ready',
+      origin: { trigger_type: 'human' }, report_to: { channel_id: 'admin-web', session_id: 'admin-chat' },
+    })).resolves.toBeDefined()
+  })
+
   it('rejects candidate preparation failure without changing live revision or config', async () => {
     const agent = new UnifiedAgent(config()) as any
     agent.adminPort = 19998

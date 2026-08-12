@@ -132,6 +132,25 @@ export class CoreAgentConfigMutationCoordinator {
     return this.record!
   }
 
+  /**
+   * Nonblocking seqlock read for secret resolution. A non-null epoch means no mutation outbox
+   * exists at that instant; callers must re-read after all source/resolver work and require the
+   * same revision. This deliberately never waits on the mutation mutex: OAuth resolution may
+   * itself enter mutate().
+   */
+  async readCommittedEpoch(): Promise<number | null> {
+    await this.current()
+    const outbox = await readJson<CoreAgentConfigMutationOutboxRecord>(this.outboxPath)
+    if (outbox) {
+      this.assertOutbox(outbox)
+      return null
+    }
+    const record = await readJson<CoreAgentConfigRevisionRecord>(this.recordPath)
+    if (!record) throw new Error('Missing core Agent config revision')
+    this.assertRecord(record)
+    return record.revision
+  }
+
   async mutate(
     domains: ConfigDomain[],
     afterSemanticSnapshot: unknown,

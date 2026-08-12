@@ -1301,17 +1301,65 @@ export class UnifiedAgent extends ModuleBase {
       subagentIds.add(subagent.id)
     }
 
-    const oldMcp = this.mcpConnector
+    // Construct a missing cold-start handler before the live connector/config mutation. The
+    // constructor captures the connector object's identity, which remains stable through
+    // replaceWith(); any construction failure therefore leaves all live state untouched.
+    let coldHandler: AgentHandler | undefined
+    if (!this.agentHandler && nextWorkerSdk && this.roles.has('worker')) {
+      const prior = {
+        agentConfig: this.agentConfig,
+        extra: this.extra,
+        worker: this.sdkEnvWorker,
+        digest: this.digestSdkEnv,
+        image: this.imageConnInfo,
+        imageCapability: this.imageCapability,
+      }
+      this.agentConfig = candidate
+      this.extra = next.extra ?? {}
+      this.sdkEnvWorker = nextWorkerSdk
+      this.digestSdkEnv = nextDigestSdk
+      this.imageConnInfo = nextImageConn
+      this.imageCapability = nextImageCapability
+      try {
+        const { workerPersonality } = this.buildPromptParts(candidate.system_prompt)
+        const createMcpConfigs = (taskCtx?: TaskContext): Record<string, McpServer> => ({
+          'crab-messaging': createCrabMessagingServer({
+            rpcClient: this.rpcClient,
+            moduleId: this.config.moduleId,
+            getAdminPort: () => this.getAdminPort(),
+            resolveChannelPort: (channelId) => this.getChannelPort(channelId),
+            enableFeishuDocTool: this.feishuChannelAvailable,
+            ...(taskCtx ? { getTaskContext: () => taskCtx } : {}),
+          }, this.sandboxPathMappingsRef),
+        })
+        coldHandler = this.createWorkerHandler(
+          nextWorkerSdk, workerPersonality, createMcpConfigs,
+          candidate.builtin_tool_config, candidate.skills,
+        )
+      } finally {
+        this.agentConfig = prior.agentConfig
+        this.extra = prior.extra
+        this.sdkEnvWorker = prior.worker
+        this.digestSdkEnv = prior.digest
+        this.imageConnInfo = prior.image
+        this.imageCapability = prior.imageCapability
+      }
+    }
+
+    // Install the live connector identity first. AgentHandler captures this object at construction,
+    // so replacing the field would leave existing task/tool paths pointed at retired clients.
+    const liveMcp = this.mcpConnector
+    await liveMcp.replaceWith(nextMcp)
+    this.mcpConnector = liveMcp
     this.agentConfig = candidate
     this.extra = next.extra ?? {}
     this.sdkEnvWorker = nextWorkerSdk
     this.digestSdkEnv = nextDigestSdk
     this.imageConnInfo = nextImageConn
     this.imageCapability = nextImageCapability
-    this.mcpConnector = nextMcp
 
-    // These setters are in-memory assignments; the candidate above made all I/O fallible first.
     if (this.agentHandler && nextWorkerSdk) {
+      this.agentHandler.updateMcpConnector(liveMcp)
       this.agentHandler.updateSdkEnv(nextWorkerSdk, nextDigestSdk)
       this.agentHandler.updateSystemPrompt(candidate.system_prompt)
       this.agentHandler.updateSkills(candidate.skills ?? [])
@@ -1319,8 +1367,15 @@ export class UnifiedAgent extends ModuleBase {
       if (candidate.tmp_page_base_url !== undefined) this.agentHandler.updateTmpPageBaseUrl(candidate.tmp_page_base_url)
       this.agentHandler.updateImageConfig(nextImageConn, nextImageCapability)
       this.scheduledTaskRunner.setWorkerHandler(this.agentHandler)
+      return
     }
-    await oldMcp.disconnectAll()
+
+    if (coldHandler) {
+      this.agentHandler = coldHandler
+      this.agentLoopSubstrate.setWorkerHandler(coldHandler)
+      this.scheduledTaskRunner.setWorkerHandler(coldHandler)
+      this.contextAssembler.setLiveSnapshotProvider((taskId) => this.agentHandler?.getLiveSnapshot(taskId))
+    }
   }
 
   /**

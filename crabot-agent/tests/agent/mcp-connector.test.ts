@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { McpConnector } from '../../src/agent/mcp-connector.js'
+import { AgentHandler } from '../../src/agent/agent-handler.js'
 import type { MCPServerConfig } from '../../src/types.js'
 
 // Stub MCP Client to avoid actual server processes
@@ -29,6 +30,39 @@ describe('McpConnector.reconnect', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     connector = new McpConnector()
+  })
+
+  it('replaceWith preserves AgentHandler connector identity and its tool path uses candidate clients', async () => {
+    const live = new McpConnector()
+    await live.connectAll([cfgA])
+    const handler = new AgentHandler(
+      { modelId: 'test', format: 'openai', env: { LLM_BASE_URL: 'https://example.test', LLM_API_KEY: 'test' } },
+      { systemPrompt: '' },
+      { mcpConnector: live },
+    )
+    const candidate = await McpConnector.prepare([cfgB])
+    await live.replaceWith(candidate)
+    expect((handler as any).mcpConnector).toBe(live)
+    const tool = live.getAllTools().find((item) => item.name === 'mcp__B__echo')!
+    const client = live.getClient('B') as any
+    client.callTool.mockResolvedValueOnce({ content: [{ type: 'text', text: 'from-candidate' }] })
+    await expect(tool.call({ value: 'x' })).resolves.toMatchObject({ output: 'from-candidate' })
+    expect(client.callTool).toHaveBeenCalledWith({ name: 'echo', arguments: { value: 'x' } })
+  })
+
+  it('prepare rejects listTools discovery failure and leaves live connector usable', async () => {
+    await connector.connectAll([cfgA])
+    const oldTool = connector.getAllTools()[0]!
+    const oldClient = connector.getClient('A') as any
+    oldClient.callTool.mockResolvedValueOnce({ content: [{ type: 'text', text: 'old-still-live' }] })
+    const { Client } = await import('@modelcontextprotocol/sdk/client/index.js') as any
+    Client.mockImplementationOnce(() => ({
+      connect: vi.fn().mockResolvedValue(undefined), close: vi.fn().mockResolvedValue(undefined),
+      listTools: vi.fn().mockRejectedValue(new Error('discovery failed')), callTool: vi.fn(),
+    }))
+    await expect(McpConnector.prepare([cfgB])).rejects.toThrow('Failed to list tools')
+    await expect(oldTool.call({})).resolves.toMatchObject({ output: 'old-still-live' })
+    expect(connector.getAllTools().map((tool) => tool.name)).toContain('mcp__A__echo')
   })
 
   it('reconnect 成功路径：cachedTools 含新 server', async () => {
