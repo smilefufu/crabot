@@ -21,12 +21,12 @@ import type {
   ModelRole,
 } from './types.js'
 
-import type { ConfigDomain } from './core-agent-config-revision-store.js'
+import type { ConfigDomain, CoreAgentConfigMutationContext } from './core-agent-config-revision-store.js'
 
 export type ConfigMutationRunner = (
   domains: ConfigDomain[],
   prepareAfterSnapshot: () => Promise<unknown>,
-  applySourceMutation: () => Promise<void>,
+  applySourceMutation: (context: CoreAgentConfigMutationContext) => Promise<void>,
 ) => Promise<void>
 
 

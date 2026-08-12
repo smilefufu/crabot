@@ -17,6 +17,11 @@ export interface CoreAgentConfigReadEpoch {
   generation: number
 }
 
+export interface CoreAgentConfigMutationContext {
+  mutation_id: string
+  target_revision: number
+}
+
 export interface CoreAgentConfigMutationOutboxRecord {
   schema_version: 1
   mutation_id: string
@@ -90,6 +95,7 @@ export class CoreAgentConfigMutationCoordinator {
   private record: CoreAgentConfigRevisionRecord | null = null
   private tail: Promise<void> = Promise.resolve()
   private mutationGeneration = 0
+  private recoveredMutation: CoreAgentConfigMutationOutboxRecord | null = null
 
   constructor(dataDir: string, options: CoreAgentConfigMutationCoordinatorOptions) {
     this.configDir = path.join(dataDir, 'config')
@@ -174,14 +180,14 @@ export class CoreAgentConfigMutationCoordinator {
   async mutate(
     domains: ConfigDomain[],
     afterSemanticSnapshot: unknown,
-    applySourceMutation: () => Promise<void> | void,
+    applySourceMutation: (context: CoreAgentConfigMutationContext) => Promise<void> | void,
   ): Promise<CoreAgentConfigRevisionRecord> {
     return this.mutateComputed(domains, () => afterSemanticSnapshot, applySourceMutation)
   }
   async mutateComputed(
     domains: ConfigDomain[],
     computeAfterSemanticSnapshot: () => Promise<unknown> | unknown,
-    applySourceMutation: () => Promise<void> | void,
+    applySourceMutation: (context: CoreAgentConfigMutationContext) => Promise<void> | void,
   ): Promise<CoreAgentConfigRevisionRecord> {
     await this.initialize()
     return this.serial(async () => {
@@ -199,7 +205,7 @@ export class CoreAgentConfigMutationCoordinator {
         }
         await atomicWrite(this.outboxPath, outbox)
         await this.options.hooks?.afterPrepared?.()
-        await applySourceMutation()
+        await applySourceMutation({ mutation_id: outbox.mutation_id, target_revision: outbox.target_revision })
         const observedAfter = await this.fingerprint()
         if (!this.equal(outbox.after_fingerprint_hmac, observedAfter)) throw new Error('Config mutation source did not produce declared semantic snapshot')
         outbox.state = 'data_persisted'
@@ -215,6 +221,18 @@ export class CoreAgentConfigMutationCoordinator {
     })
   }
 
+  async pendingMutation(): Promise<CoreAgentConfigMutationOutboxRecord | null> {
+    await this.current()
+    const outbox = await readJson<CoreAgentConfigMutationOutboxRecord>(this.outboxPath)
+    if (outbox) this.assertOutbox(outbox)
+    return outbox
+  }
+
+  async recentRecoveredMutation(): Promise<CoreAgentConfigMutationOutboxRecord | null> {
+    await this.current()
+    return this.recoveredMutation
+  }
+
   async drainPendingInvalidation(): Promise<void> {
     await this.serial(async () => {
       await this.current()
@@ -227,6 +245,7 @@ export class CoreAgentConfigMutationCoordinator {
 
   private async recoverOutbox(outbox: CoreAgentConfigMutationOutboxRecord, publish: boolean): Promise<void> {
     this.assertOutbox(outbox)
+    this.recoveredMutation = { ...outbox, domains: [...outbox.domains] }
     const currentFingerprint = await this.fingerprint()
     const isBefore = this.equal(currentFingerprint, outbox.before_fingerprint_hmac)
     const isAfter = this.equal(currentFingerprint, outbox.after_fingerprint_hmac)

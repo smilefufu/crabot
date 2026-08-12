@@ -831,6 +831,7 @@ export class AdminModule extends ModuleBase {
 
     // Recover durable revision/outbox against fully loaded source state before any mutation.
     await this.configMutationCoordinator.initialize()
+    await this.skillManager.recoverSourceJournal(this.configMutationCoordinator)
     // Initial core config/default/legacy-role writes now use the recovered coordinator.
     await this.agentManager.initializeCoreDefaultsAndMigrations()
 

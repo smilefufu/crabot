@@ -26,12 +26,12 @@ import type {
 } from './types.js'
 import type { OnConflict } from './backup/import/import-types.js'
 import { findPresetVendor } from './vendor-registry.js'
-import type { ConfigDomain } from './core-agent-config-revision-store.js'
+import type { ConfigDomain, CoreAgentConfigMutationContext } from './core-agent-config-revision-store.js'
 
 export type ProviderConfigMutationRunner = (
   domains: ConfigDomain[],
   prepareAfterSnapshot: () => Promise<unknown>,
-  applySourceMutation: () => Promise<void>,
+  applySourceMutation: (context: CoreAgentConfigMutationContext) => Promise<void>,
 ) => Promise<void>
 
 /**
