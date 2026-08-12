@@ -155,6 +155,8 @@ export interface BootstrapDeps {
    * "起化身时现取",不能各持一份(spec 决策 2)。
    */
   readonly builtinSpawnDefaults?: BuiltinRuntimeFactory
+  /** Reject new worker incarnations while runtime config is stale. */
+  readonly assertExecutionAdmission?: () => void
   /** 当前 worker capability；调用方必须按 harness 给出的固定权限快照过滤。 */
   readonly capabilityBundle?: (ctx: WorkerCapabilityContext) => Promise<CapabilityBundle>
   /** Shared bg registry ownership check for builtin end_turn state mapping. */
@@ -347,6 +349,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       )
     },
     builtinSpawnDefaults: deps.builtinSpawnDefaults,
+    assertExecutionAdmission: deps.assertExecutionAdmission,
     capabilityBundle: deps.capabilityBundle,
     hasRunningBg: deps.hasRunningBg,
     validateLegacyContinuationAuth: (auth) => principals.validateLegacyContinuationAuth(auth),

@@ -22,12 +22,99 @@ describe('UnifiedAgent runtime config invalidation', () => {
     next.agent_config!.system_prompt = 'new'
     next.agent_config!.model_config.powerful.model_id = 'new'
     vi.spyOn(ConfigLoader, 'pull').mockResolvedValue({ config: next, revision: 2 })
-    const update = vi.spyOn(agent, 'handleUpdateConfig').mockResolvedValue({})
     await agent.onEvent({ type: 'admin.agent_config_invalidated', payload: { config_revision: 2, domains: ['models'] }, timestamp: new Date().toISOString() })
     await new Promise((resolve) => setTimeout(resolve, 70))
-    expect(update).toHaveBeenCalledOnce()
+    expect(agent.agentConfig.system_prompt).toBe('new')
+    expect(agent.agentConfig.model_config.powerful.model_id).toBe('new')
     expect(agent.configRevision).toBe(2)
     expect(agent.configStale).toBe(false)
+  })
+
+  it('clears stale after a successful equal-revision authenticated pull without reapplying config', async () => {
+    const agent = new UnifiedAgent(config()) as any
+    agent.adminPort = 19998
+    agent.configRevision = 2
+    agent.configStale = true
+    const apply = vi.spyOn(agent, 'applyRuntimeConfigCandidate')
+    vi.spyOn(ConfigLoader, 'pull').mockResolvedValue({ config: config(), revision: 2 })
+    await agent.pullRuntimeConfig()
+    expect(agent.configStale).toBe(false)
+    expect(apply).not.toHaveBeenCalled()
+  })
+
+  it('rejects candidate preparation failure without changing live revision or config', async () => {
+    const agent = new UnifiedAgent(config()) as any
+    agent.adminPort = 19998
+    agent.configRevision = 1
+    const old = JSON.stringify(agent.agentConfig)
+    vi.spyOn(ConfigLoader, 'pull').mockResolvedValue({ config: { ...config(), agent_config: { ...config().agent_config!, max_iterations: 2 } }, revision: 2 })
+    await expect(agent.pullRuntimeConfig()).rejects.toThrow('controlled restart')
+    expect(JSON.stringify(agent.agentConfig)).toBe(old)
+    expect(agent.configRevision).toBe(1)
+  })
+
+  it('rejects schedule, background maintenance, task execution, and new worker runtime resolution while stale', async () => {
+    const agent = new UnifiedAgent(config()) as any
+    agent.configStale = true
+    const routeSchedule = vi.spyOn(agent.managerStack.registry, 'routeSchedule')
+    const ledgerWrite = vi.spyOn(agent.managerStack.ledger, 'upsertWorker')
+    const workerSpawn = vi.spyOn(agent.managerStack.harness, 'spawnWorker')
+    const execute = vi.fn()
+    agent.agentHandler = { executeTask: execute }
+    await expect(agent.handleTriggerSchedule({ schedule_id: 's', title: 's' })).rejects.toThrow('AGENT_RUNTIME_CONFIG_STALE')
+    await expect(agent.handleTriggerSchedule({ schedule_id: 'maintenance', title: 'maintenance', task_type: 'memory_maintenance', is_builtin: true })).rejects.toThrow('AGENT_RUNTIME_CONFIG_STALE')
+    await expect(agent.handleExecuteTask({ task: { task_id: 't', task_title: 't' }, context: {} })).rejects.toThrow('AGENT_RUNTIME_CONFIG_STALE')
+    await expect(agent.managerStack.harness.spawnWorker({
+      managerKey: 'admin-web::admin-chat', title: 'new', prompt: 'new',
+      origin: { trigger_type: 'human' }, report_to: { channel_id: 'admin-web', session_id: 'admin-chat' },
+    })).rejects.toThrow('AGENT_RUNTIME_CONFIG_STALE')
+    expect(routeSchedule).not.toHaveBeenCalled()
+    expect(ledgerWrite).not.toHaveBeenCalled()
+    expect(workerSpawn).toHaveBeenCalledOnce()
+    expect(execute).not.toHaveBeenCalled()
+  })
+
+  it('applies cold-start configured and unavailable image capability before first event', () => {
+    const configured = config()
+    configured.image_config = { endpoint: 'https://image.example', apikey: 'image-key', model_id: 'image-model', format: 'openai', provider_id: 'image' }
+    configured.image_capability = { available: true }
+    const ready = new UnifiedAgent(configured) as any
+    expect(ready.imageConnInfo).toMatchObject({ endpoint: 'https://image.example', model_id: 'image-model' })
+    expect(ready.imageCapability).toEqual({ available: true })
+    const unavailable = new UnifiedAgent({ ...config(), image_capability: { available: false, reason: 'not_configured' } }) as any
+    expect(unavailable.imageConnInfo).toBeUndefined()
+    expect(unavailable.imageCapability).toEqual({ available: false, reason: 'not_configured' })
+  })
+
+  it('keeps old config and revision when MCP candidate preparation fails', async () => {
+    const agent = new UnifiedAgent(config()) as any
+    agent.adminPort = 19998
+    agent.configRevision = 1
+    const old = JSON.stringify(agent.agentConfig)
+    const next = config()
+    next.agent_config!.mcp_servers = [{ name: 'bad', transport: 'stdio', command: '' }]
+    vi.spyOn(ConfigLoader, 'pull').mockResolvedValue({ config: next, revision: 2 })
+    await expect(agent.pullRuntimeConfig()).rejects.toThrow()
+    expect(JSON.stringify(agent.agentConfig)).toBe(old)
+    expect(agent.configRevision).toBe(1)
+  })
+
+  it('keeps old config and revision when image or subagent candidate validation fails', async () => {
+    const agent = new UnifiedAgent(config()) as any
+    agent.adminPort = 19998
+    agent.configRevision = 1
+    const old = JSON.stringify(agent.agentConfig)
+    const imageBroken = { ...config(), image_capability: { available: true } }
+    vi.spyOn(ConfigLoader, 'pull').mockResolvedValueOnce({ config: imageBroken, revision: 2 })
+    await expect(agent.pullRuntimeConfig()).rejects.toThrow('Image capability')
+    expect(JSON.stringify(agent.agentConfig)).toBe(old)
+    expect(agent.configRevision).toBe(1)
+    const subagentBroken = config()
+    subagentBroken.agent_config!.subagents = [{ id: 'same', name: 'one' } as any, { id: 'same', name: 'two' } as any]
+    vi.mocked(ConfigLoader.pull).mockResolvedValueOnce({ config: subagentBroken, revision: 2 })
+    await expect(agent.pullRuntimeConfig()).rejects.toThrow('Invalid runtime subagent')
+    expect(JSON.stringify(agent.agentConfig)).toBe(old)
+    expect(agent.configRevision).toBe(1)
   })
 
   it('rejects a lower revision and marks failed pull stale without changing running config', async () => {

@@ -149,6 +149,9 @@ export interface UnifiedAgentConfig {
   port: number
   orchestration: OrchestrationConfig
   agent_config?: AgentLayerConfig
+  /** Cold-start image connection; runtime config pull supplies the same fields. */
+  image_config?: LLMConnectionInfo
+  image_capability?: { available: boolean; reason?: string }
   /**
    * 扩展配置（非协议固定字段，由具体 Agent 实现自定义）
    * @see protocol-agent-v2.md §6 extra

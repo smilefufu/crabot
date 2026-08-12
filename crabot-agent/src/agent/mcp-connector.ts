@@ -40,6 +40,33 @@ export class McpConnector {
   /** Per-server per-tool default params — built from MCPServerConfig.tool_defaults */
   private readonly toolDefaultsMap: Map<string, Record<string, Record<string, unknown>>> = new Map()
 
+  /** Connect a detached candidate without touching the live connector. */
+  static async prepare(configs: ReadonlyArray<MCPServerConfig>): Promise<McpConnector> {
+    const candidate = new McpConnector()
+    const seen = new Set<string>()
+    const unique = configs.filter((config) => !seen.has(config.name) && (seen.add(config.name), true))
+    try {
+      await Promise.all(unique.map((config) => candidate.connectOne(config)))
+      await candidate.refreshToolCache()
+      return candidate
+    } catch (error) {
+      await candidate.disconnectAll()
+      throw error
+    }
+  }
+
+  /** Atomically adopt a fully connected candidate, then retire old clients. */
+  async replaceWith(candidate: McpConnector): Promise<void> {
+    const oldClients = new Map(this.clients)
+    this.clients.clear()
+    for (const [name, client] of candidate.clients) this.clients.set(name, client)
+    this.cachedTools = [...candidate.cachedTools]
+    this.toolDefaultsMap.clear()
+    for (const [name, defaults] of candidate.toolDefaultsMap) this.toolDefaultsMap.set(name, defaults)
+    candidate.clients.clear()
+    await Promise.allSettled(Array.from(oldClients.values()).map((client) => client.close()))
+  }
+
   async connectAll(configs: ReadonlyArray<MCPServerConfig>): Promise<void> {
     // Deduplicate by name
     const seen = new Set<string>()

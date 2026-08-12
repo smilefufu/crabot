@@ -530,6 +530,8 @@ export class UnifiedAgent extends ModuleBase {
     this.orchestrationConfig = config.orchestration
     this.agentConfig = config.agent_config
     this.extra = config.extra ?? {}
+    this.imageConnInfo = toImageConnInfo(config)
+    this.imageCapability = config.image_capability ?? { available: false }
 
     // 初始化编排层组件
     this.sessionManager = new SessionManager(this.orchestrationConfig.session_state_ttl)
@@ -598,14 +600,22 @@ export class UnifiedAgent extends ModuleBase {
    * 检查 Agent 是否已配置（LLM API key 是否存在）
    */
   isConfigured(): boolean {
-    if (this.configStale) return false
+    return !this.configStale && this.hasRuntimeExecutionConfig()
+  }
+
+  /** Central admission for every new runtime-config-dependent execution. */
+  private assertRuntimeExecutionAdmission(): void {
+    if (this.configStale) throw new Error('AGENT_RUNTIME_CONFIG_STALE')
+    if (!this.hasRuntimeExecutionConfig()) throw new Error('Agent runtime config is not configured')
+  }
+
+  private hasRuntimeExecutionConfig(): boolean {
     const mc = this.agentConfig?.model_config
-    if (!mc) return false
-    // 任意一个 slot 有配置即认为已配置
-    return Object.values(mc).some(m => m && m.apikey && m.model_id)
+    return !!mc && Object.values(mc).some((m) => m && m.apikey && m.model_id)
   }
 
   /**
+
    * 初始化智能体层
    */
   private initializeAgentLayer(config: AgentLayerConfig): void {
@@ -752,7 +762,11 @@ export class UnifiedAgent extends ModuleBase {
         },
       },
       // 起化身时现取（spec 决策 2）：箭头函数只捕获 `this`，配置一律在调用那一刻读。
-      builtinSpawnDefaults: (ctx) => this.buildBuiltinWorkerRuntime(ctx),
+      builtinSpawnDefaults: (ctx) => {
+        this.assertRuntimeExecutionAdmission()
+        return this.buildBuiltinWorkerRuntime(ctx)
+      },
+      assertExecutionAdmission: () => this.assertRuntimeExecutionAdmission(),
       capabilityBundle: async ({ principal_permissions }) => {
         const workerPermissions = narrowWorkerPermissions(
           BUILTIN_WORKER_PERMISSIONS,
@@ -1242,28 +1256,71 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   private async pullRuntimeConfig(): Promise<void> {
-    const adminPort = await this.getAdminPort()
-    const loaded = await ConfigLoader.pull(this.config.moduleId, this.rpcClient, `http://localhost:${adminPort}`)
-    if (loaded.revision < this.configRevision) throw new Error(`Refusing stale config revision ${loaded.revision}`)
-    if (loaded.revision === this.configRevision) return
-    const next = loaded.config
-    if (!next.agent_config) throw new Error('Pulled runtime config has no agent config')
-    const update: UpdateConfigParams = {
-      model_config: next.agent_config.model_config,
-      system_prompt: next.agent_config.system_prompt,
-      mcp_servers: next.agent_config.mcp_servers,
-      skills: next.agent_config.skills,
-      subagents: next.agent_config.subagents,
-      tmp_page_base_url: next.agent_config.tmp_page_base_url,
-      max_iterations: next.agent_config.max_iterations,
-      extra: next.extra,
-      image_config: (next as UnifiedAgentConfig & { image_config?: LLMConnectionInfo }).image_config,
-      image_capability: (next as UnifiedAgentConfig & { image_capability?: { available: boolean; reason?: string } }).image_capability,
+    try {
+      const adminPort = await this.getAdminPort()
+      const loaded = await ConfigLoader.pull(this.config.moduleId, this.rpcClient, `http://localhost:${adminPort}`)
+      if (loaded.revision < this.configRevision) throw new Error(`Refusing stale config revision ${loaded.revision}`)
+      if (loaded.revision === this.configRevision) {
+        // A successful authenticated read proves the current revision remains authoritative.
+        // Do not reapply it: a previous transient pull failure must not permanently block ingress.
+        this.configStale = false
+        return
+      }
+      await this.applyRuntimeConfigCandidate(loaded.config)
+      this.configRevision = loaded.revision
+      ConfigLoader.acceptRevision(loaded.revision)
+      this.configStale = false
+    } catch (error) {
+      this.configStale = true
+      throw error
     }
-    await this.handleUpdateConfig(update)
-    this.configRevision = loaded.revision
-    ConfigLoader.acceptRevision(loaded.revision)
-    this.configStale = false
+  }
+
+  private async applyRuntimeConfigCandidate(next: UnifiedAgentConfig): Promise<void> {
+    const candidate = next.agent_config
+    if (!candidate) throw new Error('Pulled runtime config has no agent config')
+    if (candidate.max_iterations !== this.agentConfig?.max_iterations) {
+      throw new Error('Runtime config changes max_iterations and requires controlled restart')
+    }
+
+    // All fallible work happens before the live fields are touched.
+    const worker = candidate.model_config.powerful
+    const digest = candidate.model_config.cost_effective ?? worker
+    const nextWorkerSdk = worker ? this.buildSdkEnv(worker) : undefined
+    const nextDigestSdk = digest ? this.buildSdkEnv(digest) : undefined
+    const nextMcp = await McpConnector.prepare(candidate.mcp_servers ?? [])
+    const nextImageConn = toImageConnInfo(next)
+    const nextImageCapability = next.image_capability ?? { available: false }
+    if (nextImageCapability.available && !nextImageConn) {
+      throw new Error('Image capability is available without a usable image connection')
+    }
+    const subagents = candidate.subagents ?? []
+    const subagentIds = new Set<string>()
+    for (const subagent of subagents) {
+      if (!subagent.id || subagentIds.has(subagent.id)) throw new Error('Invalid runtime subagent configuration')
+      subagentIds.add(subagent.id)
+    }
+
+    const oldMcp = this.mcpConnector
+    this.agentConfig = candidate
+    this.extra = next.extra ?? {}
+    this.sdkEnvWorker = nextWorkerSdk
+    this.digestSdkEnv = nextDigestSdk
+    this.imageConnInfo = nextImageConn
+    this.imageCapability = nextImageCapability
+    this.mcpConnector = nextMcp
+
+    // These setters are in-memory assignments; the candidate above made all I/O fallible first.
+    if (this.agentHandler && nextWorkerSdk) {
+      this.agentHandler.updateSdkEnv(nextWorkerSdk, nextDigestSdk)
+      this.agentHandler.updateSystemPrompt(candidate.system_prompt)
+      this.agentHandler.updateSkills(candidate.skills ?? [])
+      this.agentHandler.updateSubagents(candidate.subagents ?? [])
+      if (candidate.tmp_page_base_url !== undefined) this.agentHandler.updateTmpPageBaseUrl(candidate.tmp_page_base_url)
+      this.agentHandler.updateImageConfig(nextImageConn, nextImageCapability)
+      this.scheduledTaskRunner.setWorkerHandler(this.agentHandler)
+    }
+    await oldMcp.disconnectAll()
   }
 
   /**
@@ -1273,6 +1330,7 @@ export class UnifiedAgent extends ModuleBase {
    * @see protocol-agent-v2.md §5.1 SwitchMap, §5.2 Attention Scheduler
    */
   private async handleMessageReceived(payload: { message: ChannelMessage; friend: Friend; crab_display_name?: string; crab_self_handle?: string }): Promise<void> {
+    this.assertRuntimeExecutionAdmission()
     const { message, friend, crab_display_name, crab_self_handle } = payload
     const { session } = message
 
@@ -2130,6 +2188,7 @@ export class UnifiedAgent extends ModuleBase {
     parent_span_id?: string
     related_task_id?: string
   }): Promise<ExecuteTaskResult & { trace_id?: string }> {
+    this.assertRuntimeExecutionAdmission()
     if (!this.agentHandler) {
       throw new Error('Worker handler not configured')
     }
@@ -2735,6 +2794,7 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   private async createMaintenanceSystemTask(params: TriggerScheduleParams): Promise<TriggerScheduleResult> {
+    this.assertRuntimeExecutionAdmission()
     const { ledger } = this.requireManagerStack()
     const taskId = generateId() as TaskId
     const managerKey = SYSTEM_TASKS_MANAGER_KEY
@@ -2795,6 +2855,7 @@ export class UnifiedAgent extends ModuleBase {
    * 受理仍是"不等 episode"：新增的只是游离 promise 的收尾，一步都没 await。
    */
   private async handleTriggerSchedule(params: TriggerScheduleParams): Promise<TriggerScheduleResult> {
+    this.assertRuntimeExecutionAdmission()
     if (params.task_type === 'memory_maintenance' && params.is_builtin === true) {
       return this.createMaintenanceSystemTask(params)
     }

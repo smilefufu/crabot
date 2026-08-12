@@ -413,6 +413,8 @@ export interface HarnessDeps {
    * 无参签名装不下这些维度(见 `BuiltinRuntimeFactory`)。
    */
   readonly builtinSpawnDefaults?: BuiltinRuntimeFactory
+  /** Rejects new spawn/resume/handoff while runtime config is stale; running incarnations remain untouched. */
+  readonly assertExecutionAdmission?: () => void
   /** True while this worker owns a running background entity. */
   readonly hasRunningBg?: (workerId: string) => Promise<boolean>
   /** Validates an opaque legacy continuation credential immediately before side effects. */
@@ -607,6 +609,7 @@ export class WorkerHarness {
   }
 
   async spawnWorker(p: SpawnWorkerParams): Promise<LedgerWorker> {
+    this.deps.assertExecutionAdmission?.()
     const workerId = `w-${randomUUID()}`
     const impl = p.impl ?? this.deps.defaultImpl
     const adapter = this.deps.adapters.get(impl)
@@ -1185,6 +1188,7 @@ export class WorkerHarness {
    * 级改动,留待后续(protocol-agent-v3 §6.1 已知限制)。
    */
   async switchWorkerImpl(workerId: string, impl: WorkerImplId, note?: string): Promise<void> {
+    this.deps.assertExecutionAdmission?.()
     let restoredDurableReceipt = false
     await this.withLock(workerId, async () => {
       const found = await this.deps.ledger.findWorker(workerId)
@@ -1415,6 +1419,7 @@ export class WorkerHarness {
     /** adapter 经 WorkerExitedError 报上来的源化身终止原因(见下面回填段的注释)。 */
     sourceEndReason?: IncarnationEndReason,
   ): Promise<ContinuationDelivery> {
+    this.deps.assertExecutionAdmission?.()
     const prevRef: IncarnationRef = { worker_id: worker.worker_id, seq: mainline.seq, session_ref: mainline.session_ref }
     // resume 直接把 text 作为 wakeInput 传入——接续就是这次输入的投递方式,不需要在
     // resume 成功之后再补一次 adapter.sendInput。
@@ -1486,6 +1491,7 @@ export class WorkerHarness {
     inputOwnedByInbox = false,
     inboxRaw = false,
   ): Promise<HandoffResult> {
+    this.deps.assertExecutionAdmission?.()
     const sourceAdapter = this.deps.adapters.get(source.impl)
     const sourceHandle: IncarnationHandle = {
       worker_id: worker.worker_id,
