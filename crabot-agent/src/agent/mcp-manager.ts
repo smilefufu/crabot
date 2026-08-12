@@ -10,6 +10,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import type { MCPServerConfig, ToolDeclaration, ToolHandler } from '../types.js'
+import { buildChildEnv } from '../core/runtime-env.js'
 
 /**
  * MCP 工具列表结果
@@ -72,18 +73,7 @@ export class MCPManager {
 
     try {
       // 创建 stdio transport
-      const envVars: Record<string, string> = {}
-      // 合并环境变量
-      for (const [key, value] of Object.entries(process.env)) {
-        if (value !== undefined) {
-          envVars[key] = value
-        }
-      }
-      if (config.env) {
-        for (const [key, value] of Object.entries(config.env)) {
-          envVars[key] = value
-        }
-      }
+      const envVars = buildChildEnv(config.env ?? {})
 
       if (!config.command) {
         throw new Error(`MCP server "${config.name}" requires a command for stdio transport`)

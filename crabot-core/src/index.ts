@@ -547,6 +547,11 @@ export class ModuleManager {
     }
   }
 
+  private revokeRuntimeBearer(moduleId: ModuleId): void {
+    const bearer = this.runtimeBearers.get(moduleId)
+    if (bearer) bearer.revoked = true
+  }
+
   private async handleStartModule(params: {
     module_id: ModuleId
     entry_override?: string
@@ -577,6 +582,7 @@ export class ModuleManager {
   }): Promise<{ status: 'accepted'; tracking_id: string }> {
     this.assertLifecycleRequestsAllowed()
     const trackingId = generateId()
+    this.revokeRuntimeBearer(params.module_id)
     this.cancelAutoRestart(params.module_id)
 
     this.enqueueLifecycle(params.module_id, async () => {
@@ -599,6 +605,7 @@ export class ModuleManager {
     this.assertManagementOnlyAllowed(params.module_id)
     this.assertAgentLifecycleAllowed(params.module_id)
     const trackingId = generateId()
+    this.revokeRuntimeBearer(params.module_id)
     this.cancelAutoRestart(params.module_id)
 
     this.enqueueLifecycle(params.module_id, async () => {
@@ -908,7 +915,6 @@ export class ModuleManager {
     if (!runtime) {
       throw new Error(`Module definition not found: ${moduleId}`)
     }
-
     const existingChild = this.processes.get(moduleId)
     if (existingChild) {
       const existingState = this.childStates.get(existingChild)
@@ -1008,12 +1014,19 @@ export class ModuleManager {
       delete childEnv.CRABOT_CORE_AGENT_RUNTIME_BEARER
     }
 
-    const proc = spawn(command, args, {
-      cwd: runtime.cwd,
-      env: childEnv,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: process.platform !== 'win32',
-    })
+    let proc: ChildProcess
+    try {
+      proc = spawn(command, args, {
+        cwd: runtime.cwd,
+        env: childEnv,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        detached: process.platform !== 'win32',
+      })
+    } catch (error) {
+      delete (runtime as ModuleRuntime & { _pendingBearer?: unknown })._pendingBearer
+      delete (runtime as ModuleRuntime & { _pendingCutover?: unknown })._pendingCutover
+      throw error
+    }
     const pendingBearer = (runtime as ModuleRuntime & { _pendingBearer?: { token: string; child: ChildProcess; revoked: boolean } })._pendingBearer
     if (pendingBearer) {
       pendingBearer.child = proc
@@ -1093,6 +1106,7 @@ export class ModuleManager {
   }
 
   private async stopModuleProcess(moduleId: ModuleId, reason: ModuleStopReason): Promise<void> {
+    this.revokeRuntimeBearer(moduleId)
     const runtime = this.modules.get(moduleId)
     if (!runtime) throw new Error(`Module not found: ${moduleId}`)
 

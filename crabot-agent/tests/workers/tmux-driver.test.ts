@@ -84,6 +84,22 @@ describe.skipIf(!tmuxAvailable)('TmuxDriver', () => {
     expect(await fs.readFile(trickyOutput, 'utf-8')).toContain('marker')
   })
 
+  it('newSession clears a runtime bearer retained by the tmux server', async () => {
+    process.env.CRABOT_CORE_AGENT_RUNTIME_BEARER = 'runtime-secret-marker'
+    try {
+      await driver.newSession({
+        name: sessionName,
+        cwd: tempDir,
+        command: `bash -c 'printf %s "$CRABOT_CORE_AGENT_RUNTIME_BEARER"; sleep 5'`,
+        outputFile,
+      })
+      await waitFor(async () => (await fs.readFile(outputFile, 'utf8')) === '')
+      expect(await fs.readFile(outputFile, 'utf8')).toBe('')
+    } finally {
+      delete process.env.CRABOT_CORE_AGENT_RUNTIME_BEARER
+    }
+  })
+
   it('newSession passes env vars through to the command', async () => {
     await driver.newSession({
       name: sessionName,

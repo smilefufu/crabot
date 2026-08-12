@@ -7,6 +7,7 @@ import path from 'node:path'
 import { createInterface } from 'node:readline'
 import type { ToolCallResult, ToolDefinition } from '../engine/types.js'
 import { byteLength, truncateUtf8 } from '../engine/byte-cap.js'
+import { buildChildEnv } from '../core/runtime-env.js'
 
 export interface TmpPageToolsDeps {
   readonly dataDir: string
@@ -243,11 +244,10 @@ async function startTmpPageServer(deps: TmpPageToolsDeps, serverScriptPath: stri
       child = spawn(process.execPath, [serverScriptPath], {
         detached: true,
         stdio: ['ignore', logHandle.fd, logHandle.fd],
-        env: {
-          ...process.env,
+        env: buildChildEnv({
           DATA_DIR: deps.dataDir,
           CRABOT_TMP_PAGE_PORT: String(port),
-        },
+        }),
       })
     } catch (err) {
       closeParentLog()

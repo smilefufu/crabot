@@ -19,6 +19,7 @@ import {
 } from '../engine/index.js'
 import { createSetCwdTool, createReadTool, filterMcpToolsByConfig } from '../engine/tools/index.js'
 import { BgEntityRegistry } from '../engine/bg-entities/registry.js'
+import { buildChildEnv } from '../core/runtime-env.js'
 import { killShellTree } from '../engine/bg-entities/bg-shell.js'
 import { ReadoptReaper } from '../engine/bg-entities/reaper.js'
 import type { BgEntityOwner, BgEntityRecord, BgEntityStatus, BgEntityType, BgShellRegistryRecord } from '../engine/bg-entities/types.js'
@@ -2427,7 +2428,7 @@ export class AgentHandler {
       cwd: crabotHome,
       detached: true,
       stdio: ['ignore', logFd, logFd],
-      env: { ...process.env, CRABOT_RESTART_REASON: reason ?? '' },
+      env: buildChildEnv({ CRABOT_RESTART_REASON: reason ?? '' }),
     })
     child.on('error', (err) => log(`[request_restart] spawn restart.mjs failed: ${err}`))
     child.unref()

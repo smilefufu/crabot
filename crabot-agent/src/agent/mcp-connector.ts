@@ -12,6 +12,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { defineTool } from '../engine/tool-framework.js'
 import type { ToolDefinition, ToolCategory } from '../engine/types.js'
 import type { MCPServerConfig, ResolvedPermissions } from '../types.js'
+import { buildChildEnv } from '../core/runtime-env.js'
 
 /**
  * 根据 MCP server 名称决定工具类别。
@@ -133,7 +134,7 @@ export class McpConnector {
         return new StdioClientTransport({
           command: config.command,
           args: config.args ?? [],
-          env: config.env ? { ...process.env, ...config.env } as Record<string, string> : undefined,
+          env: buildChildEnv(config.env ?? {}),
         })
       }
       case 'streamable-http': {

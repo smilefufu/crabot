@@ -23,6 +23,7 @@ import { join, dirname } from 'path'
 import { randomUUID } from 'crypto'
 import { homedir } from 'os'
 import { execFile } from 'child_process'
+import { buildChildEnv } from '../../core/runtime-env.js'
 import { promisify } from 'util'
 import { TmuxDriver, type PaneSnapshot } from '../tmux/driver.js'
 import { commitInput, waitForPaneChange, type InputMode } from '../tmux/input-commit.js'
@@ -106,7 +107,7 @@ async function resolveBinDir(bin: string): Promise<string | undefined> {
     if (token.includes('/')) {
       resolved = await fs.realpath(token)
     } else {
-      const { stdout } = await execFileAsync('/bin/sh', ['-c', `command -v ${shQuote(token)}`])
+      const { stdout } = await execFileAsync('/bin/sh', ['-c', `command -v ${shQuote(token)}`], { env: buildChildEnv() })
       resolved = await fs.realpath(stdout.trim())
     }
     return dirname(resolved)
@@ -434,7 +435,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
   async detect(): Promise<DetectResult> {
     const binDir = await this.resolveBinDirCached()
-    const versionEnv = { ...process.env, PATH: binDir ? `${binDir}:${process.env.PATH ?? ''}` : (process.env.PATH ?? '') }
+    const versionEnv = buildChildEnv({ PATH: binDir ? `${binDir}:${process.env.PATH ?? ''}` : (process.env.PATH ?? '') })
     let versionOutput: string
     try {
       const { stdout } = await execFileAsync('/bin/sh', ['-c', `${this.codexBin} --version`], { env: versionEnv })

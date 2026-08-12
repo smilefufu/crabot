@@ -5,6 +5,7 @@ import { createLSPClient, type LSPClient } from './lsp-client'
 import { DiagnosticStore } from './diagnostic-store'
 import { exec as execCb } from 'child_process'
 import { promisify } from 'util'
+import { buildChildEnv } from '../core/runtime-env.js'
 
 const execAsync = promisify(execCb)
 
@@ -27,7 +28,7 @@ export function createLSPManager(): LSPManager {
     const cached = installedCache.get(command)
     if (cached !== undefined) return cached
     try {
-      await execAsync(`which ${command}`)
+      await execAsync(`which ${command}`, { env: buildChildEnv() })
       installedCache.set(command, true)
       return true
     } catch {

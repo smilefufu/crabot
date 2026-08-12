@@ -3,8 +3,65 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import ModuleManager from './index.js'
+import type { ChildProcess } from 'node:child_process'
 
 describe('core Agent cutover gate', () => {
+  it('revokes the exact core bearer before a stop operation is queued', async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-mm-bearer-stop-'))
+    const manager = new ModuleManager({
+      port: 0, port_range: { range_start: 19920, range_end: 19940 }, hotplug_allowed_types: ['channel'], modules: [],
+    }, dataDir) as any
+    const child = { exitCode: null } as ChildProcess
+    manager.runtimeBearers.set('crabot-agent', { token: 'runtime-secret', child, revoked: false })
+    manager.modules.set('crabot-agent', { module_id: 'crabot-agent', module_type: 'agent', entry: 'node -e 1', auto_start: false, start_priority: 1, status: 'stopped', port: 19921 })
+    vi.spyOn(manager, 'stopModuleProcess').mockResolvedValue(undefined)
+    try {
+      await manager.handleStopModule({ module_id: 'crabot-agent', force: true })
+      expect(manager.runtimeBearers.get('crabot-agent').revoked).toBe(true)
+    } finally {
+      await manager.stop().catch(() => {})
+      await fs.rm(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  it('revokes the old bearer before restart and binds a fresh bearer to the replacement child', async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-mm-bearer-restart-'))
+    const manager = new ModuleManager({
+      port: 0, port_range: { range_start: 19950, range_end: 19970 }, shutdown_timeout: 0.1,
+      hotplug_allowed_types: ['channel'], modules: [],
+    }, dataDir) as any
+    manager.modules.set('crabot-agent', {
+      module_id: 'crabot-agent', module_type: 'agent', entry: 'node -e "setInterval(()=>{},1000)"',
+      auto_start: false, auto_restart: false, skip_health_check: true, start_priority: 1,
+      status: 'stopped', port: 19951,
+    })
+    try {
+      await manager.startModuleProcess('crabot-agent')
+      const old = manager.runtimeBearers.get('crabot-agent')
+      expect(manager.handleVerifyCoreAgentRuntime(
+        { expected_module_id: 'crabot-agent' },
+        { authorizationBearer: old.token },
+      )).toEqual({ verified: true })
+
+      await manager.handleRestartModule({ module_id: 'crabot-agent', force: true })
+      expect(() => manager.handleVerifyCoreAgentRuntime(
+        { expected_module_id: 'crabot-agent' },
+        { authorizationBearer: old.token },
+      )).toThrow(/revoked/)
+      await manager.lifecycleQueues.get('crabot-agent')
+
+      const replacement = manager.runtimeBearers.get('crabot-agent')
+      expect(replacement.token).not.toBe(old.token)
+      expect(replacement.child).not.toBe(old.child)
+      expect(manager.handleVerifyCoreAgentRuntime(
+        { expected_module_id: 'crabot-agent' },
+        { authorizationBearer: replacement.token },
+      )).toEqual({ verified: true })
+    } finally {
+      await manager.stop().catch(() => {})
+      await fs.rm(dataDir, { recursive: true, force: true })
+    }
+  })
   it('starts only Admin, rejects pre-cutover ingress, then persists completion before starting core modules', async () => {
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-mm-cutover-'))
     const manager = new ModuleManager({

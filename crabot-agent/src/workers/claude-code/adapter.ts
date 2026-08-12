@@ -38,6 +38,7 @@ import { OutputLog } from '../output-log.js'
 import { decodeTerminalOutput } from '../terminal-output.js'
 import { AsyncMutex } from '../async-mutex.js'
 import { writeMetaAtomic, maxSeqOnDisk, latestModifiedMs } from '../meta-store.js'
+import { buildChildEnv } from '../../core/runtime-env.js'
 import { WorkerExitedError, CliInputStallError } from '../errors.js'
 import { probeClaudeInput, acceptedClaudeInput, hasClaudeInteraction } from './input-surface.js'
 import { assertWorkspaceFilesUntracked, materializeSkills, renderMcpJson, renderContextMd, writeSensitiveFileAtomic, type ProvisionSources } from '../provision/materialize.js'
@@ -228,7 +229,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
   async detect(): Promise<DetectResult> {
     let versionOutput: string
     try {
-      const { stdout } = await execFileAsync('/bin/sh', ['-c', `${this.claudeBin} --version`])
+      const { stdout } = await execFileAsync('/bin/sh', ['-c', `${this.claudeBin} --version`], { env: buildChildEnv() })
       versionOutput = stdout.trim()
     } catch (err) {
       return { installed: false, activated: false, detail: `claude binary not found or failed to run: ${(err as Error).message}` }
@@ -777,7 +778,7 @@ export class ClaudeCodeAdapter implements WorkerAdapter {
     // 这里给子进程 env 塞一个 fork 化身私有的事件文件路径,cc 拉起 hook 子进程时原样继承
     // 下去,hook 写私有文件(见 CliEventChannel.EVENTS_FILE_ENV)。交互态(tmux pane)不设
     // 这个变量,照旧写共享文件,行为不变。
-    const execOpts = { cwd: prevRuntime.workspaceRoot, env: { ...process.env, [EVENTS_FILE_ENV]: forkEventsFile } }
+    const execOpts = { cwd: prevRuntime.workspaceRoot, env: buildChildEnv({ [EVENTS_FILE_ENV]: forkEventsFile }) }
 
     let stdout = ''
     let endedReason: IncarnationEndReason

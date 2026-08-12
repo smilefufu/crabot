@@ -11,6 +11,7 @@ import path from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { promisify } from 'node:util'
 import { getBgEntitiesLogsDir } from '../../core/data-paths.js'
+import { buildChildEnv } from '../../core/runtime-env.js'
 import { resolveBashPath, BASH_NOT_FOUND_MESSAGE } from '../../utils/resolve-bash-path.js'
 import type { BgEntityOwner, BgShellRegistryRecord } from './types.js'
 import type { BgEntityRegistry } from './registry.js'
@@ -35,7 +36,7 @@ function spawnBash(command: string, extraOpts: SpawnOptions = {}): ChildProcess 
   }
   return spawn(bashPath, ['-c', command], {
     detached: process.platform !== 'win32',
-    env: process.env,
+    env: buildChildEnv(),
     ...extraOpts,
   })
 }
@@ -602,7 +603,7 @@ export async function runShellWithGrace(opts: RunShellWithGraceOpts): Promise<Ru
 export async function readProcStartTime(pid: number): Promise<string> {
   try {
     const { stdout } = await execFileAsync('ps', ['-o', 'lstart=', '-p', String(pid)], {
-      env: { ...process.env, LC_ALL: 'C' },
+      env: buildChildEnv({ LC_ALL: 'C' }),
     })
     const trimmed = stdout.trim()
     if (!trimmed) throw new Error('empty ps output')
@@ -625,7 +626,7 @@ export async function readProcStartTime(pid: number): Promise<string> {
  */
 export function killShellTree(pid: number): void {
   if (process.platform === 'win32') {
-    execFile('taskkill', ['/F', '/T', '/PID', String(pid)], () => {
+    execFile('taskkill', ['/F', '/T', '/PID', String(pid)], { env: buildChildEnv() }, () => {
       // Errors (process already exited, access denied for system-level pids)
       // are non-actionable here — the registry update already marks status=killed.
     })

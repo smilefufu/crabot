@@ -19,6 +19,7 @@ import { accessSync, constants } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
+import { buildChildEnv } from '../../core/runtime-env.js'
 
 /** 直达「完全磁盘访问权限」面板的深链（macOS 13+ System Settings 同样支持）。 */
 const FDA_SETTINGS_URL =
@@ -57,7 +58,7 @@ export function shouldScanProtectedDirs(): boolean {
 /** best-effort 打开系统设置的 FDA 面板；后台/无 GUI 会话下失败靠 CLI 提示兜底。 */
 function openFdaSettings(): void {
   try {
-    const proc = spawn('open', [FDA_SETTINGS_URL], { stdio: 'ignore', detached: true })
+    const proc = spawn('open', [FDA_SETTINGS_URL], { stdio: 'ignore', detached: true, env: buildChildEnv() })
     // spawn 失败异步 emit 'error'，必须零 await 立刻 attach，否则漏成 uncaughtException。
     proc.on('error', () => { /* 后台/无 GUI 会话下 open 失败属正常 */ })
     proc.unref()
