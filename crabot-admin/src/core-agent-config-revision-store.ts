@@ -12,6 +12,11 @@ export interface CoreAgentConfigRevisionRecord {
   updated_at: string
 }
 
+export interface CoreAgentConfigReadEpoch {
+  revision: number
+  generation: number
+}
+
 export interface CoreAgentConfigMutationOutboxRecord {
   schema_version: 1
   mutation_id: string
@@ -28,6 +33,8 @@ export interface ConfigMutationHooks {
   afterSourceMutation?: () => Promise<void> | void
   afterRevisionCommit?: () => Promise<void> | void
   afterPublish?: () => Promise<void> | void
+  /** Test/crash-race hook after the first epoch outbox read. */
+  afterEpochOutboxRead?: () => Promise<void> | void
 }
 
 export interface CoreAgentConfigMutationCoordinatorOptions {
@@ -82,6 +89,7 @@ export class CoreAgentConfigMutationCoordinator {
   private key: Buffer | null = null
   private record: CoreAgentConfigRevisionRecord | null = null
   private tail: Promise<void> = Promise.resolve()
+  private mutationGeneration = 0
 
   constructor(dataDir: string, options: CoreAgentConfigMutationCoordinatorOptions) {
     this.configDir = path.join(dataDir, 'config')
@@ -133,22 +141,34 @@ export class CoreAgentConfigMutationCoordinator {
   }
 
   /**
-   * Nonblocking seqlock read for secret resolution. A non-null epoch means no mutation outbox
-   * exists at that instant; callers must re-read after all source/resolver work and require the
-   * same revision. This deliberately never waits on the mutation mutex: OAuth resolution may
-   * itself enter mutate().
+   * Nonblocking seqlock read for secret resolution. The in-process generation catches a mutation
+   * that starts and finishes while callers resolve sources. Reading the outbox on both sides of
+   * the revision catches persisted/recovered writers that are not represented by this process's
+   * generation. Callers must compare the complete epoch before and after source resolution.
    */
-  async readCommittedEpoch(): Promise<number | null> {
+  async readCommittedEpoch(): Promise<CoreAgentConfigReadEpoch | null> {
     await this.current()
-    const outbox = await readJson<CoreAgentConfigMutationOutboxRecord>(this.outboxPath)
-    if (outbox) {
-      this.assertOutbox(outbox)
+    const generationBefore = this.mutationGeneration
+    if (generationBefore % 2 !== 0) return null
+
+    const outboxBefore = await readJson<CoreAgentConfigMutationOutboxRecord>(this.outboxPath)
+    if (outboxBefore) {
+      this.assertOutbox(outboxBefore)
       return null
     }
+    await this.options.hooks?.afterEpochOutboxRead?.()
     const record = await readJson<CoreAgentConfigRevisionRecord>(this.recordPath)
     if (!record) throw new Error('Missing core Agent config revision')
     this.assertRecord(record)
-    return record.revision
+    const outboxAfter = await readJson<CoreAgentConfigMutationOutboxRecord>(this.outboxPath)
+    if (outboxAfter) {
+      this.assertOutbox(outboxAfter)
+      return null
+    }
+
+    const generationAfter = this.mutationGeneration
+    if (generationAfter !== generationBefore || generationAfter % 2 !== 0) return null
+    return { revision: record.revision, generation: generationAfter }
   }
 
   async mutate(
@@ -165,28 +185,33 @@ export class CoreAgentConfigMutationCoordinator {
   ): Promise<CoreAgentConfigRevisionRecord> {
     await this.initialize()
     return this.serial(async () => {
-      const current = await this.current()
-      assertDomains(domains)
-      const before = await this.fingerprint()
-      const after = this.fingerprintSnapshot(await computeAfterSemanticSnapshot())
-      if (this.equal(before, after)) throw new Error('Config mutation did not change semantic snapshot')
-      if (!this.equal(before, current.semantic_fingerprint_hmac)) throw new Error('Core Agent config semantic fingerprint is stale')
-      const outbox: CoreAgentConfigMutationOutboxRecord = {
-        schema_version: 1, mutation_id: crypto.randomUUID(), target_revision: current.revision + 1,
-        domains: [...domains], before_fingerprint_hmac: before, after_fingerprint_hmac: after, state: 'prepared', invalidation_pending: false,
+      this.mutationGeneration += 1
+      try {
+        const current = await this.current()
+        assertDomains(domains)
+        const before = await this.fingerprint()
+        const after = this.fingerprintSnapshot(await computeAfterSemanticSnapshot())
+        if (this.equal(before, after)) throw new Error('Config mutation did not change semantic snapshot')
+        if (!this.equal(before, current.semantic_fingerprint_hmac)) throw new Error('Core Agent config semantic fingerprint is stale')
+        const outbox: CoreAgentConfigMutationOutboxRecord = {
+          schema_version: 1, mutation_id: crypto.randomUUID(), target_revision: current.revision + 1,
+          domains: [...domains], before_fingerprint_hmac: before, after_fingerprint_hmac: after, state: 'prepared', invalidation_pending: false,
+        }
+        await atomicWrite(this.outboxPath, outbox)
+        await this.options.hooks?.afterPrepared?.()
+        await applySourceMutation()
+        const observedAfter = await this.fingerprint()
+        if (!this.equal(outbox.after_fingerprint_hmac, observedAfter)) throw new Error('Config mutation source did not produce declared semantic snapshot')
+        outbox.state = 'data_persisted'
+        await atomicWrite(this.outboxPath, outbox)
+        await this.options.hooks?.afterSourceMutation?.()
+        await this.commitRevision(outbox)
+        await this.options.hooks?.afterRevisionCommit?.()
+        await this.drainOutbox(outbox)
+        return this.record!
+      } finally {
+        this.mutationGeneration += 1
       }
-      await atomicWrite(this.outboxPath, outbox)
-      await this.options.hooks?.afterPrepared?.()
-      await applySourceMutation()
-      const observedAfter = await this.fingerprint()
-      if (!this.equal(outbox.after_fingerprint_hmac, observedAfter)) throw new Error('Config mutation source did not produce declared semantic snapshot')
-      outbox.state = 'data_persisted'
-      await atomicWrite(this.outboxPath, outbox)
-      await this.options.hooks?.afterSourceMutation?.()
-      await this.commitRevision(outbox)
-      await this.options.hooks?.afterRevisionCommit?.()
-      await this.drainOutbox(outbox)
-      return this.record!
     })
   }
 

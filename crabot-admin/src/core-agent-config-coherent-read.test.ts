@@ -37,8 +37,13 @@ describe('core Agent config coherent reads', () => {
     const subject = resource.admin as any
     subject.rpcClient.callModuleManagerSensitive = vi.fn().mockResolvedValue({ verified: true })
     subject.agentManager.configs.set('crabot-agent', { instance_id: 'crabot-agent', model_config: { powerful: { provider_id: 'p', model_id: 'm' } } })
-    let reads = 0
-    subject.configMutationCoordinator.current = vi.fn(async () => ({ revision: reads++ === 0 ? 1 : 2 }))
+    const epochs = [
+      { revision: 1, generation: 0 },
+      { revision: 2, generation: 2 },
+      { revision: 2, generation: 2 },
+      { revision: 2, generation: 2 },
+    ]
+    subject.configMutationCoordinator.readCommittedEpoch = vi.fn(async () => epochs.shift() ?? { revision: 2, generation: 2 })
     subject.modelProviderManager.resolveModelConfig = vi.fn().mockResolvedValue(null)
     subject.modelProviderManager.buildConnectionInfo = vi.fn().mockResolvedValue({ endpoint: 'https://new.example', apikey: 'new', model_id: 'm', format: 'openai', provider_id: 'p' })
     subject.modelProviderManager.resolveImageConfig = vi.fn().mockResolvedValue({ available: false, reason: 'none' })
@@ -93,7 +98,7 @@ describe('core Agent config coherent reads', () => {
     subject.rpcClient.callModuleManagerSensitive = vi.fn().mockResolvedValue({ verified: true })
     subject.agentManager.configs.set('crabot-agent', { instance_id: 'crabot-agent', model_config: {} })
     let revision = 0
-    subject.configMutationCoordinator.readCommittedEpoch = vi.fn(async () => ++revision)
+    subject.configMutationCoordinator.readCommittedEpoch = vi.fn(async () => ({ revision: ++revision, generation: revision * 2 }))
     subject.modelProviderManager.resolveModelConfig = vi.fn().mockResolvedValue(null)
     subject.modelProviderManager.resolveImageConfig = vi.fn().mockResolvedValue({ available: false, reason: 'none' })
     subject.mcpServerManager.list = vi.fn().mockReturnValue([])

@@ -7197,8 +7197,8 @@ export class AdminModule extends ModuleBase {
       this.config.moduleId,
       { authorizationBearer: bearer },
     )
-    const revisionBefore = await this.configMutationCoordinator.readCommittedEpoch()
-    if (revisionBefore === null) {
+    const epochBefore = await this.configMutationCoordinator.readCommittedEpoch()
+    if (epochBefore === null) {
       if (attempt >= 5) throw new Error('Core Agent config mutation is active; retry later')
       await new Promise((resolve) => setTimeout(resolve, 10))
       return this.handleGetAgentConfig(params, context, attempt + 1)
@@ -7292,14 +7292,14 @@ export class AdminModule extends ModuleBase {
       await this.modelProviderManager.resolveImageConfig(),
     )
 
-    const revision = await this.configMutationCoordinator.readCommittedEpoch()
-    if (revision === null || revision !== revisionBefore) {
+    const epoch = await this.configMutationCoordinator.readCommittedEpoch()
+    if (epoch === null || epoch.revision !== epochBefore.revision || epoch.generation !== epochBefore.generation) {
       if (attempt >= 5) throw new Error('Core Agent config changed during resolution; retry later')
       await new Promise((resolve) => setTimeout(resolve, 10))
       return this.handleGetAgentConfig(params, context, attempt + 1)
     }
     return {
-      config_revision: revision,
+      config_revision: epoch.revision,
       config: {
         ...config,
         model_config: resolvedModelConfig,

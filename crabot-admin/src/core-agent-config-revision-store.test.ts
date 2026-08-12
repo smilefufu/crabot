@@ -4,6 +4,12 @@ import os from 'node:os'
 import path from 'node:path'
 import { CoreAgentConfigMutationCoordinator, type ConfigMutationHooks } from './core-agent-config-revision-store.js'
 
+function deferred() {
+  let resolve!: () => void
+  const promise = new Promise<void>((done) => { resolve = done })
+  return { promise, resolve }
+}
+
 async function fixture(hooks: ConfigMutationHooks = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-config-coordinator-'))
   let state = { provider: 'before', secret: 'initial-secret' }
@@ -40,6 +46,57 @@ describe('CoreAgentConfigMutationCoordinator', () => {
       expect(await fs.stat(key(f.dir))).toMatchObject({ mode: expect.any(Number) })
       expect((await fs.stat(key(f.dir))).mode & 0o777).toBe(0o600)
       await expect(fs.access(outbox(f.dir))).rejects.toThrow()
+    } finally { await cleanup(f.dir) }
+  })
+
+  it('rejects an epoch when a mutation creates an outbox between its two persisted-state reads', async () => {
+    const firstRead = deferred()
+    const releaseRead = deferred()
+    const prepared = deferred()
+    const releaseMutation = deferred()
+    let pauseEpoch = true
+    const f = await fixture({
+      afterEpochOutboxRead: async () => {
+        if (!pauseEpoch) return
+        pauseEpoch = false
+        firstRead.resolve()
+        await releaseRead.promise
+      },
+      afterPrepared: async () => {
+        prepared.resolve()
+        await releaseMutation.promise
+      },
+    })
+    try {
+      const epochRead = f.coordinator.readCommittedEpoch()
+      await firstRead.promise
+      const mutation = f.coordinator.mutate(
+        ['models'],
+        { provider: 'after', secret: 'initial-secret' },
+        async () => { f.state.provider = 'after' },
+      )
+      await prepared.promise
+      releaseRead.resolve()
+      await expect(epochRead).resolves.toBeNull()
+      releaseMutation.resolve()
+      await mutation
+      await expect(f.coordinator.readCommittedEpoch()).resolves.toEqual({ revision: 2, generation: 2 })
+    } finally { await cleanup(f.dir) }
+  })
+
+  it('changes the generation token even when an attempted mutation ends without a revision commit', async () => {
+    const f = await fixture()
+    try {
+      const before = await f.coordinator.readCommittedEpoch()
+      await expect(f.coordinator.mutate(
+        ['models'],
+        { provider: 'before', secret: 'initial-secret' },
+        async () => { throw new Error('must not run') },
+      )).rejects.toThrow('did not change semantic snapshot')
+      const after = await f.coordinator.readCommittedEpoch()
+      expect(before).toEqual({ revision: 1, generation: 0 })
+      expect(after).toEqual({ revision: 1, generation: 2 })
+      expect(after).not.toEqual(before)
     } finally { await cleanup(f.dir) }
   })
 
