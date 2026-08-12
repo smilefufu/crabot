@@ -54,6 +54,7 @@ export class ModuleInstaller {
 
       // 解析和验证
       const info = await this.validator.validate(tempPath)
+      this.assertHotplugAllowed(info)
 
       return info
     } finally {
@@ -89,6 +90,7 @@ export class ModuleInstaller {
       // 2. 解析和验证
       console.log('[ModuleInstaller] Step 2: Validating module...')
       const info = await this.validator.validate(tempPath)
+      this.assertHotplugAllowed(info)
       console.log('[ModuleInstaller] Module info:', JSON.stringify(info, null, 2))
 
       // 3. 检查是否已存在
@@ -183,6 +185,16 @@ export class ModuleInstaller {
       throw error
     } finally {
       this.installing = false
+    }
+  }
+
+  /**
+   * Validator rejection is the primary gate; keep an independent installer boundary so a
+   * future validator seam cannot reach runtime/install/build or persistent records.
+   */
+  private assertHotplugAllowed(info: ModulePackageInfo): void {
+    if (info.module_type === 'agent') {
+      throw new Error('ADMIN_HOTPLUG_NOT_ALLOWED: only builtin crabot-agent is supported')
     }
   }
 
