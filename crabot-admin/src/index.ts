@@ -28,6 +28,7 @@ import { startUpgrade, canUpgrade, isUpgradeInProgress } from './version/upgrade
 import { readArchiveTextFile, listArchiveEntries } from './openclaw-import/archive-reader.js'
 import { extractArchiveSubtree } from './openclaw-import/extract-subtree.js'
 import { CoreAgentConfigRevisionStore } from './core-agent-config-revision-store.js'
+import { CoreAgentCutoverStore } from './core-agent-cutover.js'
 import { CORE_AGENT_DEFINITION } from './core-agent-definition.js'
 import { BrowserManager } from './browser-manager.js'
 import { PermissionTemplateManager } from './permission-template-manager.js'
@@ -446,6 +447,10 @@ async function wrapJsonHandler(res: ServerResponse, errorLabel: string, fn: () =
 export class AdminModule extends ModuleBase {
   private readonly adminConfig: AdminConfig
   private readonly revisionStore: CoreAgentConfigRevisionStore
+  private readonly cutoverStore: CoreAgentCutoverStore
+  private readonly managementOnly: boolean
+  private readonly cutoverBearer?: string
+  private cutoverActivated = false
   private webServer: http.Server | null = null
   private jwtSecret: string = ''
 
@@ -554,6 +559,12 @@ export class AdminModule extends ModuleBase {
     super(moduleConfig)
     this.adminConfig = { ...DEFAULT_ADMIN_CONFIG, ...adminConfig }
     this.revisionStore = new CoreAgentConfigRevisionStore(this.adminConfig.data_dir)
+    this.cutoverStore = new CoreAgentCutoverStore(this.adminConfig.data_dir)
+    this.managementOnly = process.env.CRABOT_ADMIN_STARTUP_MODE === 'core-agent-cutover'
+    this.cutoverBearer = process.env.CRABOT_ADMIN_CUTOVER_BEARER
+    delete process.env.CRABOT_ADMIN_STARTUP_MODE
+    delete process.env.CRABOT_ADMIN_CUTOVER_BEARER
+    this.webServer = null
 
     // 数据文件路径：constructor 里就算好，生命周期内不可变
     this.friendsFilePath = path.join(this.adminConfig.data_dir, 'friends.json')
@@ -792,8 +803,8 @@ export class AdminModule extends ModuleBase {
     // 初始化 Channel 管理器
     await this.channelManager.initialize()
 
-    // 重新注册 builtin channel 实例到 MM（MM 重启后动态注册会丢失）
-    await this.channelManager.reRegisterInstances()
+    // management-only must not re-register/start Channel children before cutover opens.
+    if (!this.managementOnly) await this.channelManager.reRegisterInstances()
 
     // 加载 onboarding handler（从 builtin 模块的 yaml 读取 onboarding_methods）
     this.onboardingManager.loadFromImplementations(this.channelManager.listImplementations().items)
@@ -876,12 +887,13 @@ export class AdminModule extends ModuleBase {
     // Agent 端口由 module_started 事件驱动写入（见 onEvent），
     // 若 Admin 单独重启错过事件，由 ensureAgentPort() 惰性兜底。
 
-    await this.ensureBuiltinSchedules()
-
-    // 启动调度引擎
-    const allSchedules = Array.from(this.schedules.values())
-    this.scheduleEngine.startAll(allSchedules)
-    console.log(`[Admin] ScheduleEngine started with ${allSchedules.filter(s => s.enabled).length} active schedules`)
+    if (!this.managementOnly) {
+      await this.ensureBuiltinSchedules()
+      const allSchedules = Array.from(this.schedules.values())
+      this.scheduleEngine.startAll(allSchedules)
+      console.log(`[Admin] ScheduleEngine started with ${allSchedules.filter(s => s.enabled).length} active schedules`)
+      this.cutoverActivated = true
+    }
 
     // 启动 Web 服务器
     await this.startWebServer()
@@ -1091,6 +1103,11 @@ export class AdminModule extends ModuleBase {
     // WebSocket upgrade 处理
     this.webServer.on('upgrade', (req, socket, head) => {
       const handleAsync = async (): Promise<void> => {
+        if (!this.cutoverActivated) {
+          socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n')
+          socket.destroy()
+          return
+        }
         if (this.chatManager) {
           await this.chatManager.handleUpgrade(req, socket as Socket, head)
         } else {
@@ -1126,6 +1143,11 @@ export class AdminModule extends ModuleBase {
 
     const url = new URL(req.url ?? '/', `http://localhost:${this.adminConfig.web_port}`)
     const pathname = url.pathname
+
+    if (!this.cutoverActivated && (pathname === '/api/chat/messages' || pathname === '/api/chat/tasks' || pathname.startsWith('/api/chat/messages/') || pathname.startsWith('/api/chat/tasks/'))) {
+      sendJson(res, 503, { error: 'Core Agent cutover is incomplete' })
+      return
+    }
 
     // 认证检查（排除登录接口、静态文件、媒体文件端点）
     if (pathname.startsWith('/api/') && pathname !== '/api/auth/login' && !pathname.startsWith('/api/media/')) {
@@ -3949,7 +3971,25 @@ export class AdminModule extends ModuleBase {
   /**
    * 处理 channel.message_received 事件：鉴权，决定是否发出 channel.message_authorized
    */
+  private async readLegacyAgentPackageEntries(): Promise<string[]> {
+    const directory = path.join(this.adminConfig.data_dir, 'installed-modules')
+    try {
+      return (await fs.readdir(directory, { withFileTypes: true }))
+        .filter((entry) => entry.isDirectory() && /agent/i.test(entry.name) && entry.name !== 'crabot-agent')
+        .map((entry) => entry.name)
+        .sort()
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+      throw error
+    }
+  }
+
+  private assertIngressOpen(): void {
+    if (!this.cutoverActivated) throw Object.assign(new Error('Core Agent cutover is incomplete'), { code: 'ADMIN_CORE_AGENT_CUTOVER_INCOMPLETE' })
+  }
+
   private async handleChannelMessage(channelId: ModuleId, message: ChannelMessageRef, crabDisplayName?: string, crabSelfHandle?: string): Promise<void> {
+    if (!this.cutoverActivated) return
     const { platform_user_id, platform_display_name } = message.sender
     const friend = this.resolveFriendByChannelIdentity(channelId, platform_user_id)
 
@@ -5626,6 +5666,7 @@ export class AdminModule extends ModuleBase {
   }
 
   private async handleCreateSchedule(params: CreateScheduleParams): Promise<{ schedule: Schedule }> {
+    this.assertIngressOpen()
     // 验证 cron 表达式
     if (params.trigger.type === 'cron') {
       if (!this.isValidCronExpression(params.trigger.expression)) {
@@ -5731,6 +5772,7 @@ export class AdminModule extends ModuleBase {
   }
 
   private async handleUpdateSchedule(params: UpdateScheduleParams): Promise<{ schedule: Schedule }> {
+    this.assertIngressOpen()
     const existing = this.schedules.get(params.schedule_id)
     if (!existing) {
       throw new Error(AdminErrorCode.SCHEDULE_NOT_FOUND)
@@ -5800,6 +5842,7 @@ export class AdminModule extends ModuleBase {
   }
 
   private async handleDeleteSchedule(params: DeleteScheduleParams): Promise<{ deleted: true }> {
+    this.assertIngressOpen()
     const schedule = this.schedules.get(params.schedule_id)
     if (!schedule) {
       throw new Error(AdminErrorCode.SCHEDULE_NOT_FOUND)
@@ -5866,6 +5909,7 @@ export class AdminModule extends ModuleBase {
     accepted: true
     task_id?: string
   } | void> {
+    this.assertIngressOpen()
     const repairedSchedule = await this.repairScheduleTargetSessionReference(schedule)
     if (repairedSchedule !== schedule) {
       this.schedules.set(repairedSchedule.id, repairedSchedule)
@@ -7041,15 +7085,32 @@ export class AdminModule extends ModuleBase {
     return { deleted: true }
   }
   async completeCoreAgentCutover(): Promise<void> {
-    const bearer = process.env.CRABOT_ADMIN_CUTOVER_BEARER
-    if (!bearer) throw new Error('Missing CRABOT_ADMIN_CUTOVER_BEARER')
-    delete process.env.CRABOT_ADMIN_CUTOVER_BEARER
-    await this.rpcClient.callModuleManagerSensitive(
+    if (!this.managementOnly || this.cutoverActivated) return
+    if (!this.cutoverBearer) throw new Error('Missing CRABOT_ADMIN_CUTOVER_BEARER')
+    const packageEntries = await this.readLegacyAgentPackageEntries()
+    const sources = [
+      ...this.agentManager.listImplementations().items.filter((item) => item.id !== 'default').map((item) => ({ source_kind: 'agent_implementation' as const, source_id: item.id, raw: item })),
+      ...this.agentManager.listInstances().items.filter((item) => item.id !== 'crabot-agent').map((item) => ({ source_kind: 'agent_instance' as const, source_id: item.id, raw: item })),
+      ...this.agentManager.listConfigs().filter((item) => item.instance_id !== 'crabot-agent').map((item) => ({ source_kind: 'agent_config' as const, source_id: item.instance_id, raw: item })),
+      ...packageEntries.map((entry) => ({ source_kind: 'installed_package' as const, source_id: entry, raw: { package_id: entry } })),
+    ]
+    const archive = await this.cutoverStore.archive(sources)
+    const existing = await this.cutoverStore.loadMarker()
+    let result: unknown
+    result = await this.rpcClient.callModuleManagerSensitive(
       'complete_core_agent_cutover',
-      { schema_version: 1, admin_archive_fingerprint: 'empty-inventory', admin_archived_record_count: 0 },
+      { schema_version: 1, admin_archive_fingerprint: archive.fingerprint, admin_archived_record_count: archive.record_count },
       this.config.moduleId,
-      { authorizationBearer: bearer },
+      { authorizationBearer: this.cutoverBearer },
     )
+    if (!existing || existing.archive_fingerprint !== archive.fingerprint || existing.archive_record_count !== archive.record_count) {
+      await this.cutoverStore.saveMarker({ schema_version: 1, completed: true, completed_at: new Date().toISOString(), archive_fingerprint: archive.fingerprint, archive_record_count: archive.record_count, mm_result: result })
+    }
+    await this.channelManager.reRegisterInstances()
+    await this.ensureBuiltinSchedules()
+    this.scheduleEngine.startAll(Array.from(this.schedules.values()))
+    this.cutoverActivated = true
+    await this.publishAgentConfigInvalidation()
   }
 
   // ============================================================================
@@ -8567,6 +8628,7 @@ export class AdminModule extends ModuleBase {
   }
 
   private async publishAgentConfigInvalidation(): Promise<boolean> {
+    if (!this.cutoverActivated) return false
     const revision = (await this.revisionStore.load()).revision
     this.publishAdminEvent('admin.agent_config_invalidated', {
       config_revision: revision,

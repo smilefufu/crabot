@@ -102,6 +102,7 @@ export class ModuleManager {
   private readonly runtimeBearers = new Map<ModuleId, { token: string; child: ChildProcess; revoked: boolean }>()
   private readonly cutoverBearers = new Map<ModuleId, { token: string; child: ChildProcess; revoked: boolean }>()
   private managementOnly = true
+  private cutoverRecord: { schema_version: 1; completed: true; completed_at: string; admin_archive_fingerprint: string; admin_archived_record_count: number; mm_archived_module_ids: ModuleId[]; process_trees_confirmed_stopped: true } | null = null
 
   private server: http.Server | null = null
   private healthCheckTimer: NodeJS.Timeout | null = null
@@ -152,6 +153,7 @@ export class ModuleManager {
   async start(): Promise<void> {
     // 初始化端口分配器
     await this.portAllocator.initialize()
+    this.cutoverRecord = this.loadCutoverRecord()
 
     // 加载内置模块定义
     for (const def of this.config.modules) {
@@ -362,33 +364,86 @@ export class ModuleManager {
     context?: RpcHandlerContext,
   ): Promise<{ schema_version: 1; completed: true; completed_at: string; admin_archive_fingerprint: string; admin_archived_record_count: number; mm_archived_module_ids: ModuleId[]; process_trees_confirmed_stopped: true }> {
     const record = this.cutoverBearers.get('admin-web')
-    if (!record || record.revoked || !context?.authorizationBearer) throw Object.assign(new Error('Invalid cutover bearer'), { code: 'FORBIDDEN' })
+    if (!record || !context?.authorizationBearer || record.child.exitCode !== null) throw Object.assign(new Error('Invalid cutover bearer'), { code: 'FORBIDDEN' })
     const a = Buffer.from(record.token); const b = Buffer.from(context.authorizationBearer)
     if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) throw Object.assign(new Error('Invalid cutover bearer'), { code: 'FORBIDDEN' })
     if (params.schema_version !== 1) throw Object.assign(new Error('Invalid cutover schema'), { code: 'INVALID_PARAMS' })
     const archived: ModuleId[] = []
     for (const runtime of this.modules.values()) {
-      if (runtime.module_type === 'agent' && runtime.module_id !== 'crabot-agent' && runtime.status !== 'stopped') {
+      if (runtime.module_type !== 'agent' || runtime.module_id === 'crabot-agent') continue
+      try {
         await this.stopModuleProcess(runtime.module_id, 'forced')
-        archived.push(runtime.module_id)
+      } catch (error) {
+        throw Object.assign(new Error(`Unable to confirm non-core Agent ${runtime.module_id} stopped: ${error instanceof Error ? error.message : String(error)}`), { code: 'MODULE_MANAGER_CUTOVER_STOP_FAILED' })
       }
+      if (this.processes.has(runtime.module_id)) throw Object.assign(new Error(`Non-core Agent process still exists: ${runtime.module_id}`), { code: 'MODULE_MANAGER_CUTOVER_STOP_FAILED' })
+      runtime.auto_start = false
+      ;(runtime as ModuleRuntime & { legacy_archive?: { kind: string } }).legacy_archive = { kind: 'unsupported_non_core_agent' }
+      archived.push(runtime.module_id)
     }
+    if (this.cutoverRecord) {
+      if (this.cutoverRecord.admin_archive_fingerprint !== params.admin_archive_fingerprint || this.cutoverRecord.admin_archived_record_count !== params.admin_archived_record_count || archived.sort().join('\u0000') !== this.cutoverRecord.mm_archived_module_ids.slice().sort().join('\u0000')) {
+        throw Object.assign(new Error('Cutover marker conflicts with current Admin/MM inventory'), { code: 'MODULE_MANAGER_CUTOVER_CONFLICT' })
+      }
+      this.managementOnly = false
+      record.revoked = true
+      void this.startAutoStartModules()
+      return this.cutoverRecord
+    }
+    const completed = { schema_version: 1 as const, completed: true as const, completed_at: generateTimestamp(), admin_archive_fingerprint: params.admin_archive_fingerprint, admin_archived_record_count: params.admin_archived_record_count, mm_archived_module_ids: archived.sort(), process_trees_confirmed_stopped: true as const }
+    this.saveCutoverRecord(completed)
+    this.cutoverRecord = completed
     this.managementOnly = false
     record.revoked = true
-    const result = { schema_version: 1 as const, completed: true as const, completed_at: generateTimestamp(), admin_archive_fingerprint: params.admin_archive_fingerprint, admin_archived_record_count: params.admin_archived_record_count, mm_archived_module_ids: archived, process_trees_confirmed_stopped: true as const }
     void this.startAutoStartModules()
-    return result
+    return completed
+  }
+
+  private loadCutoverRecord(): ModuleManager['cutoverRecord'] {
+    const markerPath = path.join(this.dataDir, 'migrations', 'core-agent-singleton-v1.json')
+    try {
+      const record = JSON.parse(fs.readFileSync(markerPath, 'utf8')) as NonNullable<ModuleManager['cutoverRecord']>
+      if (record.schema_version !== 1 || record.completed !== true || !Array.isArray(record.mm_archived_module_ids) || record.process_trees_confirmed_stopped !== true) throw new Error('invalid cutover marker')
+      return record
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+      throw error
+    }
+  }
+
+  private saveCutoverRecord(record: NonNullable<ModuleManager['cutoverRecord']>): void {
+    const directory = path.join(this.dataDir, 'migrations')
+    fs.mkdirSync(directory, { recursive: true })
+    const target = path.join(directory, 'core-agent-singleton-v1.json')
+    const temporary = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`
+    const fd = fs.openSync(temporary, 'w', 0o600)
+    try { fs.writeFileSync(fd, JSON.stringify(record, null, 2)); fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
+    fs.renameSync(temporary, target)
+  }
+
+  private assertManagementOnlyAllowed(moduleId: ModuleId): void {
+    if (!this.managementOnly || moduleId === 'admin-web') return
+    throw Object.assign(new Error('Module Manager is in management-only cutover mode'), { code: 'MODULE_MANAGER_CUTOVER_INCOMPLETE' })
   }
 
   // --- 模块注册 ---
 
   private async handleRegister(params: RegisterParams): Promise<{ registered: true }> {
+    this.assertManagementOnlyAllowed(params.module_id)
     const runtime = this.modules.get(params.module_id)
+
+    if (runtime?.module_type === 'agent' && params.module_id !== 'crabot-agent') {
+      throw Object.assign(new Error('Only builtin crabot-agent may register'), { code: 'MODULE_MANAGER_AGENT_SINGLETON_ONLY' })
+    }
 
     if (!runtime) {
       throw Object.assign(new Error('Module definition not found'), {
         code: 'MODULE_MANAGER_MODULE_NOT_FOUND',
       })
+    }
+
+    if (runtime.module_type === 'agent' && params.module_id === 'crabot-agent' && !this.processes.has('crabot-agent')) {
+      throw Object.assign(new Error('Core Agent registration requires the exact spawned child'), { code: 'MODULE_MANAGER_AGENT_SINGLETON_ONLY' })
     }
 
     if (runtime.status === 'running') {
@@ -487,9 +542,7 @@ export class ModuleManager {
     env?: Record<string, string>
   }): Promise<{ status: 'accepted'; tracking_id: string }> {
     this.assertLifecycleRequestsAllowed()
-    if (this.managementOnly && params.module_id !== 'admin-web') {
-      throw Object.assign(new Error('Module Manager is in management-only cutover mode'), { code: 'MODULE_MANAGER_CUTOVER_INCOMPLETE' })
-    }
+    this.assertManagementOnlyAllowed(params.module_id)
     this.assertAgentLifecycleAllowed(params.module_id)
     const trackingId = generateId()
     this.cancelAutoRestart(params.module_id)
@@ -532,6 +585,8 @@ export class ModuleManager {
     env?: Record<string, string>
   }): Promise<{ status: 'accepted'; tracking_id: string }> {
     this.assertLifecycleRequestsAllowed()
+    this.assertManagementOnlyAllowed(params.module_id)
+    this.assertAgentLifecycleAllowed(params.module_id)
     const trackingId = generateId()
     this.cancelAutoRestart(params.module_id)
 
@@ -579,6 +634,10 @@ export class ModuleManager {
   }
 
   private handleResolve(params: ResolveParamsInternal): { modules: ResolvedModule[] } {
+    if (this.managementOnly) throw Object.assign(new Error('Resolve is closed during core Agent cutover'), { code: 'MODULE_MANAGER_CUTOVER_INCOMPLETE' })
+    if (params.module_type === 'agent' || (params.module_id && params.module_id !== 'crabot-agent' && this.modules.get(params.module_id)?.module_type === 'agent')) {
+      throw Object.assign(new Error('Only exact core Agent may be resolved'), { code: 'MODULE_MANAGER_AGENT_SINGLETON_ONLY' })
+    }
     if (!params.module_id && !params.module_type) {
       throw Object.assign(new Error('module_id or module_type required'), {
         code: 'INVALID_PARAMS',
@@ -606,6 +665,7 @@ export class ModuleManager {
   // --- 事件 ---
 
   private handleSubscribe(params: SubscribeParams): { subscribed: true; event_types: string[] } {
+    this.assertManagementOnlyAllowed(params.subscriber)
     // 移除该 subscriber 的所有旧订阅记录后再写入（与 register 行为一致）
     this.removeSubscriptionsBySubscriber(params.subscriber)
 
@@ -629,6 +689,9 @@ export class ModuleManager {
   }
 
   private async handlePublishEvent(params: PublishEventParams): Promise<{ subscriber_count: number }> {
+    if (this.managementOnly && !params.event.type.startsWith('module_manager.')) {
+      throw Object.assign(new Error('Event publication is closed during core Agent cutover'), { code: 'MODULE_MANAGER_CUTOVER_INCOMPLETE' })
+    }
     const { event } = params
     const matchingSubscribers = this.findSubscribers(event.type)
 
@@ -657,6 +720,7 @@ export class ModuleManager {
   private handleRegisterModuleDefinition(params: {
     module_definition: ModuleDefinition
   }): { module_id: ModuleId; registered: true } {
+    if (this.managementOnly) throw Object.assign(new Error('Module definition changes are closed during core Agent cutover'), { code: 'MODULE_MANAGER_CUTOVER_INCOMPLETE' })
     const def = params.module_definition
 
     if (def.module_type === 'agent') {
@@ -734,6 +798,8 @@ export class ModuleManager {
     module_id: ModuleId
     updates: Partial<ModuleDefinition>
   }): { module_definition: ModuleDefinition } {
+    this.assertManagementOnlyAllowed(params.module_id)
+    this.assertAgentLifecycleAllowed(params.module_id)
     const runtime = this.modules.get(params.module_id)
     if (!runtime) {
       throw Object.assign(new Error('Module definition not found'), { code: 'NOT_FOUND' })
@@ -789,6 +855,7 @@ export class ModuleManager {
     const errorCount = modules.filter((m) => m.status === 'error').length
 
     let status: 'healthy' | 'degraded' | 'unhealthy' = 'healthy'
+    if (this.managementOnly) status = 'degraded'
     if (errorCount > 0) {
       status = 'degraded'
     }
@@ -824,6 +891,8 @@ export class ModuleManager {
     entryOverride?: string,
     envOverride?: Record<string, string>
   ): Promise<void> {
+    this.assertManagementOnlyAllowed(moduleId)
+    this.assertAgentLifecycleAllowed(moduleId)
     const runtime = this.modules.get(moduleId)
     if (!runtime) {
       throw new Error(`Module definition not found: ${moduleId}`)
@@ -915,7 +984,7 @@ export class ModuleManager {
       CRABOT_MM_PORT: String(this.config.port),
       CRABOT_MM_ENDPOINT: `http://localhost:${this.config.port}`,
       ...(adminRpcPort && moduleId !== 'admin-web' ? { CRABOT_ADMIN_ENDPOINT: `http://localhost:${adminRpcPort}` } : {}),
-      ...(moduleId === 'admin-web' ? { CRABOT_ADMIN_CUTOVER_BEARER: (() => { const token = crypto.randomBytes(32).toString('base64url'); (runtime as ModuleRuntime & { _pendingCutover?: { token: string; child: ChildProcess; revoked: boolean } })._pendingCutover = { token, child: undefined as unknown as ChildProcess, revoked: false }; return token })() } : {}),
+      ...(moduleId === 'admin-web' ? { CRABOT_ADMIN_STARTUP_MODE: 'core-agent-cutover', CRABOT_ADMIN_CUTOVER_BEARER: (() => { const token = crypto.randomBytes(32).toString('base64url'); (runtime as ModuleRuntime & { _pendingCutover?: { token: string; child: ChildProcess; revoked: boolean } })._pendingCutover = { token, child: undefined as unknown as ChildProcess, revoked: false }; return token })() } : {}),
     }
     // Only the exact core Agent receives a per-child runtime credential.
     if (moduleId === 'crabot-agent') {
@@ -1495,7 +1564,7 @@ export class ModuleManager {
   private async startAutoStartModules(): Promise<void> {
     const autoStartModules = Array.from(this.modules.values())
       .filter((m) => m.auto_start && (!this.managementOnly || m.module_id === 'admin-web'))
-      .sort((a, b) => a.start_priority - b.start_priority)
+      .sort((a, b) => (a.module_id === 'crabot-agent' ? -1 : b.module_id === 'crabot-agent' ? 1 : a.start_priority - b.start_priority))
 
     for (const module of autoStartModules) {
       try {

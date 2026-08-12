@@ -486,6 +486,10 @@ export class AgentManager {
     return this.configs.get(instanceId)
   }
 
+  listConfigs(): AgentInstanceConfig[] {
+    return Array.from(this.configs.values())
+  }
+
   async updateConfig(params: UpdateAgentConfigParams): Promise<AgentInstanceConfig> {
     const existing = this.configs.get(params.instance_id)
     if (!existing) {
