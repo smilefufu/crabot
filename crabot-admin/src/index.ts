@@ -830,8 +830,11 @@ export class AdminModule extends ModuleBase {
     await this.skillManager.initializeLoadOnly()
 
     // Recover durable revision/outbox against fully loaded source state before any mutation.
+    // Verify any Skill source journal binding before coordinator initialization/recovery trusts source projection.
+    await this.skillManager.verifySourceJournalBinding(this.configMutationCoordinator)
     await this.configMutationCoordinator.initialize()
     await this.skillManager.recoverSourceJournal(this.configMutationCoordinator)
+    await this.configMutationCoordinator.verifyCommittedFingerprint()
     // Initial core config/default/legacy-role writes now use the recovered coordinator.
     await this.agentManager.initializeCoreDefaultsAndMigrations()
 

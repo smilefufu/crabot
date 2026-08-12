@@ -51,6 +51,7 @@ describe('Skill source mutation journal', () => {
       const restarted = new SkillManager(dir); await restarted.initializeLoadOnly()
       const restartedSnapshot = () => ({ skills: restarted.runtimeSemanticEntries(), storage: restarted.semanticMigrationState() })
       const recovered = new CoreAgentConfigMutationCoordinator(dir, { readSemanticSnapshot: restartedSnapshot, publishInvalidation: () => {} })
+      await restarted.verifySourceJournalBinding(recovered)
       await recovered.initialize()
       await restarted.recoverSourceJournal(recovered)
       await expect(fs.access(journal)).rejects.toThrow()

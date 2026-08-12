@@ -20,6 +20,7 @@ export interface CoreAgentConfigReadEpoch {
 export interface CoreAgentConfigMutationContext {
   mutation_id: string
   target_revision: number
+  bindSourceJournal: (digest: string) => Promise<void>
 }
 
 export interface CoreAgentConfigMutationReceipt {
@@ -27,6 +28,7 @@ export interface CoreAgentConfigMutationReceipt {
   mutation_id: string
   target_revision: number
   domains: ConfigDomain[]
+  source_journal_sha256?: string
 }
 
 export interface CoreAgentConfigMutationOutboxRecord {
@@ -38,6 +40,7 @@ export interface CoreAgentConfigMutationOutboxRecord {
   after_fingerprint_hmac: string
   state: 'prepared' | 'data_persisted' | 'committed'
   invalidation_pending: boolean
+  source_journal_sha256?: string
 }
 
 export interface ConfigMutationHooks {
@@ -214,7 +217,20 @@ export class CoreAgentConfigMutationCoordinator {
         }
         await atomicWrite(this.outboxPath, outbox)
         await this.options.hooks?.afterPrepared?.()
-        await applySourceMutation({ mutation_id: outbox.mutation_id, target_revision: outbox.target_revision })
+        let bound = false
+        const bindSourceJournal = async (digest: string): Promise<void> => {
+          if (bound) throw new Error('Source journal binding already set')
+          if (!/^[a-f0-9]{64}$/.test(digest)) throw new Error('Invalid source journal digest')
+          const persisted = await readJson<CoreAgentConfigMutationOutboxRecord>(this.outboxPath)
+          if (!persisted) throw new Error('Missing config mutation outbox for source journal binding')
+          this.assertOutbox(persisted)
+          if (persisted.mutation_id !== outbox.mutation_id || persisted.target_revision !== outbox.target_revision || persisted.state !== 'prepared') throw new Error('Config mutation source journal binding is too late')
+          persisted.source_journal_sha256 = digest
+          outbox.source_journal_sha256 = digest
+          await atomicWrite(this.outboxPath, persisted)
+          bound = true
+        }
+        await applySourceMutation({ mutation_id: outbox.mutation_id, target_revision: outbox.target_revision, bindSourceJournal })
         const observedAfter = await this.fingerprint()
         if (!this.equal(outbox.after_fingerprint_hmac, observedAfter)) throw new Error('Config mutation source did not produce declared semantic snapshot')
         outbox.state = 'data_persisted'
@@ -228,6 +244,20 @@ export class CoreAgentConfigMutationCoordinator {
         this.mutationGeneration += 1
       }
     })
+  }
+
+  async persistedMutationBinding(): Promise<CoreAgentConfigMutationOutboxRecord | CoreAgentConfigMutationReceipt | null> {
+    const outbox = await readJson<CoreAgentConfigMutationOutboxRecord>(this.outboxPath)
+    if (outbox) { this.assertOutbox(outbox); return outbox }
+    const receipt = await readJson<CoreAgentConfigMutationReceipt>(this.receiptPath)
+    if (receipt) { this.assertReceipt(receipt); return receipt }
+    return null
+  }
+
+  async verifyCommittedFingerprint(): Promise<void> {
+    await this.current()
+    const live = await this.fingerprint()
+    if (!this.equal(live, this.record!.semantic_fingerprint_hmac)) throw new Error('Core Agent config semantic fingerprint does not match committed revision')
   }
 
   async pendingMutation(): Promise<CoreAgentConfigMutationOutboxRecord | null> {
@@ -299,7 +329,7 @@ export class CoreAgentConfigMutationCoordinator {
 
   private async drainOutbox(outbox: CoreAgentConfigMutationOutboxRecord): Promise<void> {
     const receipt: CoreAgentConfigMutationReceipt = {
-      schema_version: 1, mutation_id: outbox.mutation_id, target_revision: outbox.target_revision, domains: [...outbox.domains],
+      schema_version: 1, mutation_id: outbox.mutation_id, target_revision: outbox.target_revision, domains: [...outbox.domains], source_journal_sha256: outbox.source_journal_sha256,
     }
     await atomicWrite(this.receiptPath, receipt)
     if (!outbox.invalidation_pending) { await fs.rm(this.outboxPath, { force: true }); return }
@@ -315,11 +345,11 @@ export class CoreAgentConfigMutationCoordinator {
   }
 
   private assertReceipt(receipt: CoreAgentConfigMutationReceipt): void {
-    if (receipt.schema_version !== 1 || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(receipt.mutation_id) || !Number.isSafeInteger(receipt.target_revision) || receipt.target_revision < 2 || !Array.isArray(receipt.domains) || receipt.domains.length === 0) throw new Error('Invalid core Agent config mutation receipt')
+    if (receipt.schema_version !== 1 || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(receipt.mutation_id) || !Number.isSafeInteger(receipt.target_revision) || receipt.target_revision < 2 || !Array.isArray(receipt.domains) || receipt.domains.length === 0 || (receipt.source_journal_sha256 !== undefined && !/^[a-f0-9]{64}$/.test(receipt.source_journal_sha256))) throw new Error('Invalid core Agent config mutation receipt')
   }
 
   private assertOutbox(outbox: CoreAgentConfigMutationOutboxRecord): void {
-    if (outbox.schema_version !== 1 || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(outbox.mutation_id) || !Number.isSafeInteger(outbox.target_revision) || outbox.target_revision < 2 || !['prepared', 'data_persisted', 'committed'].includes(outbox.state) || !Array.isArray(outbox.domains) || outbox.domains.length === 0 || !/^[a-f0-9]{64}$/.test(outbox.before_fingerprint_hmac) || !/^[a-f0-9]{64}$/.test(outbox.after_fingerprint_hmac) || typeof outbox.invalidation_pending !== 'boolean') throw new Error('Invalid core Agent config mutation outbox')
+    if (outbox.schema_version !== 1 || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(outbox.mutation_id) || !Number.isSafeInteger(outbox.target_revision) || outbox.target_revision < 2 || !['prepared', 'data_persisted', 'committed'].includes(outbox.state) || !Array.isArray(outbox.domains) || outbox.domains.length === 0 || !/^[a-f0-9]{64}$/.test(outbox.before_fingerprint_hmac) || !/^[a-f0-9]{64}$/.test(outbox.after_fingerprint_hmac) || typeof outbox.invalidation_pending !== 'boolean' || (outbox.source_journal_sha256 !== undefined && !/^[a-f0-9]{64}$/.test(outbox.source_journal_sha256))) throw new Error('Invalid core Agent config mutation outbox')
   }
 
   private fingerprintSnapshot(snapshot: unknown): string {
