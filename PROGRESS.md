@@ -5,10 +5,10 @@
 
 ## 当前状态
 
-### P6 进行中：Slice 0（核心 Agent singleton / runtime identity）已开 PR，review 迭代中
+### P6 进行中：Slice 0 已合并（PR #90，merge `377200e`）
 
 - P6 总体设计：`crabot-docs/superpowers/specs/2026-08-11-p6-agent-observability-worker-management-design.md`；五份实施计划在 `crabot-docs/superpowers/plans/2026-08-12-p6-*.md`。顺序固定：**Slice 0 → P6-A → P6-B → P6-C → P6-D**。
-- Slice 0 分支 `feat/p6-slice0-core-agent-runtime` 已实现完成并开 **PR #90**（@claude review 已迭代 12 轮、23 条 finding 全部修复并 resolve：mass assignment 白名单、并发 pull 单飞/退避、全新安装降级自愈、publish 失败 drain 重试、MCP env 白名单、cutover health degraded-only、marker 宽容握手、源写入失败运行期回收、noop-safe 各写入路径、容错 MCP 热更+候选连接清理、journal-bound noop、max_iterations 死循环解除、legacy get_config/update_config 无认证端点退役、mutation 前置检查移入串行队列；R12 起四条主链路逐项核对无异议，等最后一轮 approve；尚未 merge）：
+- Slice 0 **已合并**（PR #90 → merge `377200e`，15 轮 review、28 条 finding 全部修复并 resolve）。核心交付：唯一核心 Agent + 动态/legacy Agent 只读归档、runtime bearer identity（per-child 绑定/撤销、启动即从 env 摘除）、authenticated config pull（单飞+退避自愈、降级启动 fail-closed 存活）、management-only cutover（幂等 marker + 宽容握手 + degraded-only health）、durable config revision（outbox 三态 + HMAC fingerprint + journal binding + seqlock 一致性读）、sensitive RPC 独立 transport、legacy get_config/update_config 无认证端点退役、noop-safe 全部配置写入路径、容错 MCP 热更 + 候选连接清理。协议同步：protocol-agent-v3 3.1.1 §8.5/§8.6/§11、protocol-admin §3.18/§3.19/§7.1、protocol-module-manager §3.18.1：
   - 唯一核心 Agent：动态/legacy Agent 的 create/update/delete/config-write 全部拒绝（`ADMIN_HOTPLUG_NOT_ALLOWED` / HTTP 410），live read surfaces 只暴露 builtin `default` / exact `crabot-agent`；存量记录只读归档（`unsupported_legacy`）。
   - Runtime identity + authenticated config pull：MM 只向 exact `crabot-agent` child 注入一次性 runtime bearer；Agent 启动最早期捕获并从 env 删除；secret-bearing RPC 走 method-closed `callSensitive()`；启动与热更都经 authenticated pull，失败即 fail closed 并断开 stale MCP。pull 有单飞去重 + 旧 revision no-op + 失败退避重试（不会永久 stale）。
   - Wire 契约：authenticated pull 返回正式 `CoreAgentRuntimeConfig`（protocol-agent-v3 §11，`protocol_version: '3.1.1'`）；实例配置为 slot 制（`powerful` 必填），legacy `roles` 不是 wire 字段。
@@ -30,7 +30,7 @@
 
 ### P6 主线（严格串行）
 
-1. **Slice 0 收口**：PR #90 review 迭代至 approve → 自动 merge。当前已处理两轮 @claude 意见（mass assignment、并发 pull、全新安装降级自愈、publish 失败锁死、MCP env 暴露面 + 降级 worker 层建立）。
+1. **Slice 0 收口**：已完成并合并（PR #90 → `377200e`）。
 2. **P6-A 可观测性 / Admin Chat correlation**：Manager episode trace、`/api/agent/managers*`、CLI `readTrace()` 接入 `get_worker_trace`、Admin Chat 占位认领纠偏、Admin Web 切 Manager/Worker 视图。计划：`2026-08-12-p6-a-observability-admin-chat-correlation-plan.md`。
 3. **P6-B Worker 安装/连接/验证/setup**：`native_account`/`admin_provider`/`existing_host` 连接模式、grandfather bootstrap（存量生产首次 rollout 的硬前提）、Admin intent 持久化 + Agent 侧 activation registry。计划：`2026-08-12-p6-b-worker-onboarding-plan.md`。
 4. **P6-C Worker 选择语义**：detect/activation/preference 真实接线，替换 Manager prompt 中的假承诺。计划：`2026-08-12-p6-c-worker-policy-selection-plan.md`。
