@@ -18,6 +18,7 @@ export type RegistryMutationRunner = (
   prepareAfterSnapshot: () => Promise<unknown>,
   applySourceMutation: (context: CoreAgentConfigMutationContext) => Promise<void>,
   allowRuntimeNoop?: boolean,
+  options?: { journalAwareNoop?: boolean },
 ) => Promise<void>
 
 function runtimeMcpEntries(entries: Map<string, MCPServerRegistryEntry>): unknown[] {
@@ -339,7 +340,8 @@ export class MCPServerManager {
       if (entry.is_builtin) throw new Error(`Cannot delete built-in MCP Server "${entry.name}"`)
       const next = new Map(this.servers)
       next.delete(id)
-      await this.commit(next)
+      // 已停用条目不在 runtime 投影里：允许 noop，否则「先停用后删除」永远 400。
+      await this.commit(next, true)
     })
   }
 
@@ -751,7 +753,7 @@ export class SkillManager {
             this.contentTreeHashes = previousHashes
             this.legacyMigrationPending = migrationAfter ? true : this.legacyMigrationPending
           }
-        }, apply)
+        }, apply, true, { journalAwareNoop: transaction !== undefined })
         if (transaction?.moves) await this.cleanupBatchSources(transaction.moves)
         if (transaction?.obsolete_snapshot_rel) await durableRemovePath(this.resolveTransactionPath(transaction.obsolete_snapshot_rel), { recursive: true, force: true })
         if (transaction && this.mutationRunner) {

@@ -169,7 +169,7 @@ export class McpConnector {
   }
 
   /** Rebuild tool cache from all connected servers */
-  private async refreshToolCache(strict = false): Promise<void> {
+  private async refreshToolCache(): Promise<void> {
     const tools: ToolDefinition[] = []
 
     for (const [serverName, client] of this.clients) {
@@ -217,7 +217,6 @@ export class McpConnector {
         }
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error)
-        if (strict) throw new Error(`Failed to list tools from "${serverName}": ${msg}`)
         console.error(`[McpConnector] Failed to list tools from "${serverName}": ${msg}`)
       }
     }

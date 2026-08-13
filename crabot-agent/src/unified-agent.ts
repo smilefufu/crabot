@@ -1360,70 +1360,81 @@ export class UnifiedAgent extends ModuleBase {
     const nextWorkerSdk = worker ? this.buildSdkEnv(worker) : undefined
     const nextDigestSdk = digest ? this.buildSdkEnv(digest) : undefined
     const nextMcp = await McpConnector.prepare(candidate.mcp_servers ?? [])
-    const nextImageConn = toImageConnInfo(next)
-    const nextImageCapability = next.image_capability ?? { available: false }
-    if (nextImageCapability.available && !nextImageConn) {
-      throw new Error('Image capability is available without a usable image connection')
-    }
-    const subagents = candidate.subagents ?? []
-    const subagentIds = new Set<string>()
-    for (const subagent of subagents) {
-      if (!subagent.id || subagentIds.has(subagent.id)) throw new Error('Invalid runtime subagent configuration')
-      subagentIds.add(subagent.id)
-    }
-
-    // 降级启动时构造函数没跑 initializeAgentLayer：首次安装必须补上内部 legacy gate 与
-    // LSP，否则 coldHandler 分支永假、worker 层永远建不起来（入口却会因 isConfigured 放开）。
-    // 放在所有 fallible work 之后、live 字段变更之前，保持本方法的既有约定。
-    if (!this.agentConfig) {
-      const roles: Array<'front' | 'worker'> = candidate.roles && candidate.roles.length > 0 ? candidate.roles : ['front', 'worker']
-      for (const role of roles) this.roles.add(role)
-      void this.lspManager.start(getWorkspaceDir())
-    }
-
-    // Construct a missing cold-start handler before the live connector/config mutation. The
-    // constructor captures the connector object's identity, which remains stable through
-    // replaceWith(); any construction failure therefore leaves all live state untouched.
+    let nextImageConn: ImageConnInfo | undefined
+    let nextImageCapability: { available: boolean; reason?: string } = { available: false }
     let coldHandler: AgentHandler | undefined
-    if (!this.agentHandler && nextWorkerSdk && this.roles.has('worker')) {
-      const prior = {
-        agentConfig: this.agentConfig,
-        extra: this.extra,
-        worker: this.sdkEnvWorker,
-        digest: this.digestSdkEnv,
-        image: this.imageConnInfo,
-        imageCapability: this.imageCapability,
+    try {
+      nextImageConn = toImageConnInfo(next)
+      nextImageCapability = next.image_capability ?? { available: false }
+      if (nextImageCapability.available && !nextImageConn) {
+        throw new Error('Image capability is available without a usable image connection')
       }
-      this.agentConfig = candidate
-      this.extra = next.extra ?? {}
-      this.sdkEnvWorker = nextWorkerSdk
-      this.digestSdkEnv = nextDigestSdk
-      this.imageConnInfo = nextImageConn
-      this.imageCapability = nextImageCapability
-      try {
-        const { workerPersonality } = this.buildPromptParts(candidate.system_prompt)
-        const createMcpConfigs = (taskCtx?: TaskContext): Record<string, McpServer> => ({
-          'crab-messaging': createCrabMessagingServer({
-            rpcClient: this.rpcClient,
-            moduleId: this.config.moduleId,
-            getAdminPort: () => this.getAdminPort(),
-            resolveChannelPort: (channelId) => this.getChannelPort(channelId),
-            enableFeishuDocTool: this.feishuChannelAvailable,
-            ...(taskCtx ? { getTaskContext: () => taskCtx } : {}),
-          }, this.sandboxPathMappingsRef),
-        })
-        coldHandler = this.createWorkerHandler(
-          nextWorkerSdk, workerPersonality, createMcpConfigs,
-          candidate.builtin_tool_config, candidate.skills,
-        )
-      } finally {
-        this.agentConfig = prior.agentConfig
-        this.extra = prior.extra
-        this.sdkEnvWorker = prior.worker
-        this.digestSdkEnv = prior.digest
-        this.imageConnInfo = prior.image
-        this.imageCapability = prior.imageCapability
+      const subagents = candidate.subagents ?? []
+      const subagentIds = new Set<string>()
+      for (const subagent of subagents) {
+        if (!subagent.id || subagentIds.has(subagent.id)) throw new Error('Invalid runtime subagent configuration')
+        subagentIds.add(subagent.id)
       }
+
+      // 降级启动时构造函数没跑 initializeAgentLayer：首次安装必须补上内部 legacy gate 与
+      // LSP，否则 coldHandler 分支永假、worker 层永远建不起来（入口却会因 isConfigured 放开）。
+      // 放在所有 fallible work 之后、live 字段变更之前，保持本方法的既有约定。
+      if (!this.agentConfig) {
+        const roles: Array<'front' | 'worker'> = candidate.roles && candidate.roles.length > 0 ? candidate.roles : ['front', 'worker']
+        for (const role of roles) this.roles.add(role)
+        void this.lspManager.start(getWorkspaceDir())
+      }
+
+      // Construct a missing cold-start handler before the live connector/config mutation. The
+      // constructor captures the connector object's identity, which remains stable through
+      // replaceWith(); any construction failure therefore leaves all live state untouched.
+      if (!this.agentHandler && nextWorkerSdk && this.roles.has('worker')) {
+        const prior = {
+          agentConfig: this.agentConfig,
+          extra: this.extra,
+          worker: this.sdkEnvWorker,
+          digest: this.digestSdkEnv,
+          image: this.imageConnInfo,
+          imageCapability: this.imageCapability,
+        }
+        this.agentConfig = candidate
+        this.extra = next.extra ?? {}
+        this.sdkEnvWorker = nextWorkerSdk
+        this.digestSdkEnv = nextDigestSdk
+        this.imageConnInfo = nextImageConn
+        this.imageCapability = nextImageCapability
+        try {
+          const { workerPersonality } = this.buildPromptParts(candidate.system_prompt)
+          const createMcpConfigs = (taskCtx?: TaskContext): Record<string, McpServer> => ({
+            'crab-messaging': createCrabMessagingServer({
+              rpcClient: this.rpcClient,
+              moduleId: this.config.moduleId,
+              getAdminPort: () => this.getAdminPort(),
+              resolveChannelPort: (channelId) => this.getChannelPort(channelId),
+              enableFeishuDocTool: this.feishuChannelAvailable,
+              ...(taskCtx ? { getTaskContext: () => taskCtx } : {}),
+            }, this.sandboxPathMappingsRef),
+          })
+          coldHandler = this.createWorkerHandler(
+            nextWorkerSdk, workerPersonality, createMcpConfigs,
+            candidate.builtin_tool_config, candidate.skills,
+          )
+        } finally {
+          this.agentConfig = prior.agentConfig
+          this.extra = prior.extra
+          this.sdkEnvWorker = prior.worker
+          this.digestSdkEnv = prior.digest
+          this.imageConnInfo = prior.image
+          this.imageCapability = prior.imageCapability
+        }
+      }
+    } catch (error) {
+      // prepare 已拉起真实 MCP 子进程：后续校验/构造失败必须关掉候选连接，
+      // 否则退避重试每轮泄漏一批子进程（catch 里断的是 live connector，不是候选）。
+      await nextMcp.disconnectAll().catch((closeError) => {
+        console.error(`[${this.config.moduleId}] failed to close candidate MCP connections:`, closeError instanceof Error ? closeError.message : String(closeError))
+      })
+      throw error
     }
 
     // Install the live connector identity first. AgentHandler captures this object at construction,

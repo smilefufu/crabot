@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { UnifiedAgent } from '../../src/unified-agent.js'
 import { ConfigLoader } from '../../src/core/config-loader.js'
+import { McpConnector } from '../../src/agent/mcp-connector.js'
 import type { UnifiedAgentConfig } from '../../src/types.js'
 
 function config(): UnifiedAgentConfig {
@@ -165,6 +166,23 @@ describe('UnifiedAgent runtime config invalidation', () => {
     expect(agent.agentConfig.system_prompt).toBe('new-with-bad-mcp')
     expect(agent.configRevision).toBe(2)
     expect(agent.configStale).toBe(false)
+  })
+
+  it('closes candidate MCP connections when post-prepare validation fails (no child process leak)', async () => {
+    // prepare 已拉起真实 MCP 子进程；其后校验失败必须关掉候选连接，
+    // 否则退避重试每轮泄漏一批子进程。
+    const agent = new UnifiedAgent(config()) as any
+    agent.adminPort = 19998
+    agent.configRevision = 1
+    const candidateDisconnect = vi.fn().mockResolvedValue(undefined)
+    vi.spyOn(McpConnector, 'prepare').mockResolvedValue({
+      disconnectAll: candidateDisconnect, clients: new Map(), cachedTools: [], toolDefaultsMap: new Map(),
+    } as unknown as McpConnector)
+    const broken = { ...config(), image_capability: { available: true } }
+    vi.spyOn(ConfigLoader, 'pull').mockResolvedValue({ config: broken, revision: 2 })
+    await expect(agent.pullRuntimeConfig()).rejects.toThrow('Image capability')
+    expect(candidateDisconnect).toHaveBeenCalled()
+    expect(agent.configRevision).toBe(1)
   })
 
   it('keeps old config and revision when image or subagent candidate validation fails', async () => {

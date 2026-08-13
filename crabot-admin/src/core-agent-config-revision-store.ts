@@ -230,6 +230,7 @@ export class CoreAgentConfigMutationCoordinator {
     computeAfterSemanticSnapshot: () => Promise<unknown> | unknown,
     applySourceMutation: (context: CoreAgentConfigMutationContext) => Promise<void> | void,
     allowRuntimeNoop = false,
+    options: { journalAwareNoop?: boolean } = {},
   ): Promise<CoreAgentConfigRevisionRecord> {
     const persistedBeforeInitialize = await readJson<CoreAgentConfigMutationOutboxRecord>(this.outboxPath)
     if (persistedBeforeInitialize) throw new Error('Core Agent config mutation already active')
@@ -252,16 +253,20 @@ export class CoreAgentConfigMutationCoordinator {
         if (this.equal(before, after)) {
           if (!allowRuntimeNoop) throw new Error('Config mutation did not change semantic snapshot')
           if (!this.equal(before, current.semantic_fingerprint_hmac)) throw new Error('Core Agent config semantic fingerprint is stale')
-          await applySourceMutation({
-            mutation_id: crypto.randomUUID(),
-            target_revision: current.revision,
-            bindSourceJournal: async () => { throw new Error('No source journal is allowed for a runtime-noop mutation') },
-            markSourceJournalCleanupCompleted: async () => { throw new Error('No source journal is allowed for a runtime-noop mutation') },
-            clearSourceJournalBinding: async () => { throw new Error('No source journal is allowed for a runtime-noop mutation') },
-          })
-          const observed = await this.fingerprint()
-          if (!this.equal(before, observed)) throw new Error('Runtime-noop config mutation changed semantic snapshot')
-          return current
+          if (!options.journalAwareNoop) {
+            await applySourceMutation({
+              mutation_id: crypto.randomUUID(),
+              target_revision: current.revision,
+              bindSourceJournal: async () => { throw new Error('No source journal is allowed for a runtime-noop mutation') },
+              markSourceJournalCleanupCompleted: async () => { throw new Error('No source journal is allowed for a runtime-noop mutation') },
+              clearSourceJournalBinding: async () => { throw new Error('No source journal is allowed for a runtime-noop mutation') },
+            })
+            const observed = await this.fingerprint()
+            if (!this.equal(before, observed)) throw new Error('Runtime-noop config mutation changed semantic snapshot')
+            return current
+          }
+          // journal-bound noop（如删除/恢复已停用 skill：源文件变化但 runtime 投影不变）：
+          // journal 需要 durable outbox 身份，落入下方完整生命周期（revision 前进 + invalidation）。
         }
         if (!this.equal(before, current.semantic_fingerprint_hmac)) throw new Error('Core Agent config semantic fingerprint is stale')
         const outbox: CoreAgentConfigMutationOutboxRecord = {

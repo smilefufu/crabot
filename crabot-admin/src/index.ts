@@ -666,8 +666,8 @@ export class AdminModule extends ModuleBase {
     this.subAgentManager.setMutationRunner(async (domains, preview, apply, allowRuntimeNoop) => {
       await this.configMutationCoordinator.mutateComputed(domains, preview, apply, allowRuntimeNoop)
     })
-    this.skillManager.setMutationRunner(async (domains, preview, apply) => {
-      await this.configMutationCoordinator.mutateComputed(domains, preview, apply)
+    this.skillManager.setMutationRunner(async (domains, preview, apply, allowRuntimeNoop, options) => {
+      await this.configMutationCoordinator.mutateComputed(domains, preview, apply, allowRuntimeNoop, options)
     })
     // AgentManager still emits its legacy local callback for non-core compatibility; core runtime
     // invalidation is committed by the coordinator above, never by pushConfig.

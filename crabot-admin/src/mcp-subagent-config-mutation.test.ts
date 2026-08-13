@@ -18,6 +18,29 @@ const subagent = (id: string): SubAgentRegistryEntry => ({
 describe('MCP and SubAgent coordinator mutations', () => {
   afterEach(async () => { while (cleanup.length) await fs.rm(cleanup.pop()!, { recursive: true, force: true }) })
 
+  it('allows deleting disabled entries and creating disabled subagents (runtime-noop writes)', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-disabled-delete-')); cleanup.push(dir)
+    const mcp = new MCPServerManager(dir); const agents = new SubAgentManager(dir)
+    await mcp.initializeLoadOnly(); await agents.initializeLoadOnly()
+    const snapshot = () => ({ mcp: mcp.runtimeSemanticEntries(), subagents: agents.runtimeSemanticEntries() })
+    const coordinator = new CoreAgentConfigMutationCoordinator(dir, { readSemanticSnapshot: snapshot, publishInvalidation: () => {} })
+    mcp.setSemanticSnapshotProvider(snapshot); agents.setSemanticSnapshotProvider(snapshot)
+    const runner = async (domains: any, preview: any, apply: any, allowRuntimeNoop?: boolean, options?: any) => coordinator.mutateComputed(domains, preview, apply, allowRuntimeNoop, options)
+    mcp.setMutationRunner(runner); agents.setMutationRunner(runner)
+    await coordinator.initialize()
+    const server = await mcp.create({ name: 'temp', command: 'node' })
+    const createdAgent = await agents.create(subagent('temp-agent'))
+    // 「先停用后删除」是 Admin Web 常规两步操作：停用条目不在 runtime 投影里，
+    // 删除必须允许 noop，而不是抛 'did not change semantic snapshot'。
+    await mcp.update(server.id, { enabled: false })
+    await agents.update(createdAgent.id, { enabled: false })
+    await expect(mcp.delete(server.id)).resolves.toBeUndefined()
+    await expect(agents.delete(createdAgent.id)).resolves.toBeUndefined()
+    expect(mcp.get(server.id)).toBeUndefined()
+    expect(agents.get(createdAgent.id)).toBeUndefined()
+    await expect(agents.create({ ...subagent('off-agent'), enabled: false })).resolves.toMatchObject({ id: expect.any(String) })
+  })
+
   it('initializes the complete preexisting MCP/SubAgent source state as revision one', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-mcp-subagent-initial-')); cleanup.push(dir)
     const mcp = new MCPServerManager(dir); const agents = new SubAgentManager(dir)

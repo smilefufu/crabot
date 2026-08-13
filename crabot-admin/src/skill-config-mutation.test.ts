@@ -36,6 +36,30 @@ describe('Skill source mutation journal', () => {
     } finally { await fs.rm(dir, { recursive: true, force: true }) }
   })
 
+  it('deletes a disabled skill through the journal-aware noop lifecycle without locking writes', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-skill-disabled-delete-'))
+    try {
+      const manager = new SkillManager(dir); await manager.initializeLoadOnly()
+      const snapshot = () => ({ skills: manager.runtimeSemanticEntries(), storage: manager.semanticMigrationState() })
+      const coordinator = new CoreAgentConfigMutationCoordinator(dir, { readSemanticSnapshot: snapshot, publishInvalidation: () => {} })
+      manager.setSemanticSnapshotProvider(snapshot)
+      manager.setMutationRunner((domains, preview, apply, allowRuntimeNoop, options) => coordinator.mutateComputed(domains, preview, apply, allowRuntimeNoop, options).then(() => undefined))
+      await coordinator.initialize()
+      await manager.create({ name: 'temp', description: 'd', content: skill('temp') })
+      const entry = manager.list().find((item) => item.name === 'temp')!
+      await manager.update(entry.id, { enabled: false })
+      const revisionBefore = (await coordinator.current()).revision
+      // 停用 skill 不在 runtime 投影里，但删除仍有 journal 保护的物理操作：
+      // 走 journal-aware noop 的完整生命周期，不得抛 noop 错误、不得留下 journal。
+      await manager.delete(entry.id)
+      expect(manager.get(entry.id)).toBeUndefined()
+      expect((await coordinator.current()).revision).toBeGreaterThan(revisionBefore)
+      await expect(fs.access(path.join(dir, 'skills', '.transactions', 'skill-source-journal.json'))).rejects.toThrow()
+      // 后续写入不被锁。
+      await manager.create({ name: 'next', description: 'd', content: skill('next') })
+    } finally { await fs.rm(dir, { recursive: true, force: true }) }
+  })
+
   it('rejects tampered after-state content before coordinator recovery trusts the journal', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-skill-after-tamper-'))
     try {

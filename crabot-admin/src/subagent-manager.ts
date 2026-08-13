@@ -358,7 +358,8 @@ export class SubAgentManager {
       }
       const next = new Map(this.entries)
       next.set(entry.id, entry)
-      await this.commit(next)
+      // enabled:false 的新条目不在 runtime 投影里：允许 noop。
+      await this.commit(next, true)
       return entry
     })
   }
@@ -404,7 +405,8 @@ export class SubAgentManager {
       if (entry.is_builtin) throw new Error(`内置 SubAgent "${entry.name}" 不可删除`)
       const next = new Map(this.entries)
       next.delete(id)
-      await this.commit(next)
+      // 已停用条目不在 runtime 投影里：允许 noop，否则「先停用后删除」永远 400。
+      await this.commit(next, true)
     })
   }
 
