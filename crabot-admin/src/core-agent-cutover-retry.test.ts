@@ -42,6 +42,10 @@ function createSubject(options: { completionError?: unknown; existingMarker?: bo
   subject.startAgentDependentMaintenance = vi.fn()
   subject.schedules = new Map()
   subject.publishCurrentAgentConfigInvalidation = vi.fn()
+  subject.webServer = null
+  subject.friends = new Map()
+  subject.pendingMessages = new Map()
+  subject.modelProviderManager = { listProviders: () => [] }
   return subject
 }
 
@@ -56,7 +60,13 @@ describe('core Agent cutover activation retry', () => {
     expect(subject.cutoverActivated).toBe(false)
     expect(subject.configInvalidationPublicationEnabled).toBe(false)
     expect(subject.cutoverRecoveryReason).toBe('legacy Agent process tree could not be stopped; retry after recovery')
-    await expect(subject.getHealthStatus()).resolves.toBe('unhealthy')
+    // 恢复期只报 degraded、绝不报 unhealthy：unhealthy 会让 MM 强杀并限流 auto_restart，
+    // 快失败模式下 admin-web 几分钟内永久下线。恢复原因留在 details.recovery_reason。
+    await expect(subject.getHealthStatus()).resolves.toBe('degraded')
+    await expect(subject.getHealthDetails()).resolves.toMatchObject({
+      cutover_ready: false,
+      recovery_reason: 'legacy Agent process tree could not be stopped; retry after recovery',
+    })
 
     await expect(subject.completeCoreAgentCutover()).resolves.toBeUndefined()
     expect(subject.cutoverActivated).toBe(true)

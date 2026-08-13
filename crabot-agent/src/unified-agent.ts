@@ -1174,9 +1174,9 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('get_config', this.handleGetConfig.bind(this))
     this.registerMethod('update_config', this.handleUpdateConfig.bind(this))
 
-    if (this.roles.has('worker')) {
-      this.registerMethod('deliver_page_feedback', this.handleDeliverPageFeedback.bind(this))
-    }
+    // 无条件注册：roles 是 legacy 内部门控，singleton core Agent 恒承载 worker 层；
+    // 降级未配置时 handler 自身安全兜底（delivered:false），wire 面与正常启动等价。
+    this.registerMethod('deliver_page_feedback', this.handleDeliverPageFeedback.bind(this))
 
     // Trace 接口
     this.registerMethod('get_traces', this.handleGetTraces.bind(this))
@@ -1342,14 +1342,6 @@ export class UnifiedAgent extends ModuleBase {
     if (this.agentConfig && candidate.max_iterations !== this.agentConfig.max_iterations) {
       throw new Error('Runtime config changes max_iterations and requires controlled restart')
     }
-    // 降级启动时构造函数没跑 initializeAgentLayer：首次安装必须补上内部 legacy gate 与
-    // LSP，否则 coldHandler 分支永假、worker 层永远建不起来（入口却会因 isConfigured 放开）。
-    if (!this.agentConfig) {
-      const roles: Array<'front' | 'worker'> = candidate.roles && candidate.roles.length > 0 ? candidate.roles : ['front', 'worker']
-      for (const role of roles) this.roles.add(role)
-      void this.lspManager.start(getWorkspaceDir())
-    }
-
     // All fallible work happens before the live fields are touched.
     const worker = candidate.model_config.powerful
     const digest = candidate.model_config.cost_effective ?? worker
@@ -1366,6 +1358,15 @@ export class UnifiedAgent extends ModuleBase {
     for (const subagent of subagents) {
       if (!subagent.id || subagentIds.has(subagent.id)) throw new Error('Invalid runtime subagent configuration')
       subagentIds.add(subagent.id)
+    }
+
+    // 降级启动时构造函数没跑 initializeAgentLayer：首次安装必须补上内部 legacy gate 与
+    // LSP，否则 coldHandler 分支永假、worker 层永远建不起来（入口却会因 isConfigured 放开）。
+    // 放在所有 fallible work 之后、live 字段变更之前，保持本方法的既有约定。
+    if (!this.agentConfig) {
+      const roles: Array<'front' | 'worker'> = candidate.roles && candidate.roles.length > 0 ? candidate.roles : ['front', 'worker']
+      for (const role of roles) this.roles.add(role)
+      void this.lspManager.start(getWorkspaceDir())
     }
 
     // Construct a missing cold-start handler before the live connector/config mutation. The

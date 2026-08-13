@@ -165,6 +165,9 @@ describe('UnifiedAgent runtime config invalidation', () => {
     agent.configRevision = 1
     expect(agent.configAuthenticated).toBe(false)
     expect(agent.isConfigured()).toBe(false)
+    // wire 面与正常启动等价：role-gated 方法不能因降级启动缺席（否则 tmp-page
+    // 反馈投递 method-not-found，owner task 永远卡在 waiting_human）。
+    expect(agent.methodHandlers.has('deliver_page_feedback')).toBe(true)
     const good = config()
     good.agent_config!.system_prompt = 'healed'
     // 生产 wire 必带 max_iterations（DEFAULT_AGENT_CONFIG）：降级时旧配置缺失，

@@ -1074,7 +1074,12 @@ export class AdminModule extends ModuleBase {
 
   protected override async getHealthStatus(): Promise<'healthy' | 'degraded' | 'unhealthy'> {
     if (this.cutoverActivated) return 'healthy'
-    return this.cutoverRecoveryReason ? 'unhealthy' : 'degraded'
+    // cutover 等待/恢复一律不报 unhealthy：MM 对 unhealthy 会连续探活失败后强杀进程树并
+    // 限流 auto_restart（5 分钟 3 次即永久放弃）。marker 冲突 / stop 失败这类快失败模式下，
+    // admin-web 会在几分钟内永久下线——而这正是最需要人从 Admin Web 介入恢复的场景。
+    // 恢复状态的区分留在 getHealthDetails（cutover_ready / recovery_reason）与
+    // module.health_changed 事件里，不落 MM 的自动重启判据。
+    return 'degraded'
   }
 
   protected override async getHealthDetails(): Promise<Record<string, unknown>> {
