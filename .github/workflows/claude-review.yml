@@ -87,9 +87,6 @@ jobs:
           persist-credentials: false
 
       - name: Claude review (attempt 1)
-        # action 自身可能因上游内部错误崩溃（is_error:true）；不进重试阶梯就白白卡死，
-        # 崩溃也要落到 verify → attempt 2/3 兜底。
-        continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -108,7 +105,6 @@ jobs:
       # 复用 attempt 1 的 session（--continue 接续本目录最近会话）：分析已在上下文里，只催收提交动作
       - name: Claude review (attempt 2, resume session)
         if: steps.verify1.outputs.ok != 'true'
-        continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -130,7 +126,6 @@ jobs:
       # 全新完整重跑，兜底 attempt 1 的 session 本身已跑偏（如只读了一半就下结论）的情况
       - name: Claude review (attempt 3, fresh)
         if: steps.verify1.outputs.ok != 'true' && steps.verify2.outputs.ok != 'true'
-        continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
