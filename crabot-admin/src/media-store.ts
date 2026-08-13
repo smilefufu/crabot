@@ -157,11 +157,6 @@ export class MediaStore {
     return this.toItem(entry)
   }
 
-  /** 丢弃 staged 文件（未进 index，直接删）。 */
-  async rollbackStaged(stagedPath: string): Promise<void> {
-    await fs.rm(stagedPath, { force: true }).catch(() => {})
-  }
-
   /** 复制外部文件进 store（出站收存：worker 的 file_path / 本地路径形态 media_url） */
   async ingestFile(
     srcAbsPath: string,

@@ -1,7 +1,7 @@
 /**
  * Admin Chat delivery journal（P6-A §3.4/§11.8-12）。
  *
- * - delivery index：delivery_id、排序规范化后的 request_ids、canonical payload hash、
+ * - delivery index：delivery_id、exact ordered request_ids、canonical payload hash、
  *   platform_message_id、sent_at；
  * - journal：prepared/committing/committed/rolled_back + 可恢复的目标 mutation
  *   （planned MediaStore UUID/URL、staging 源身份、finalized content）；

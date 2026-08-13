@@ -58,8 +58,6 @@ import { getAgentTraceDir, getAgentLogsDir, getAgentDataDir, getWorkspaceDir, ge
 import { ConfigLoader } from './core/config-loader.js'
 import { TraceStore } from './core/trace-store.js'
 import { importV2LegacyTasks } from './workers/legacy-importer.js'
-import {
-} from './workers/legacy-source-reader.js'
 import { PromptManager } from './prompt-manager.js'
 import { createLSPManager, type LSPManager } from './lsp/lsp-manager.js'
 import type { BgEntityRecord, BgEntityStatus, BgEntityType } from './engine/bg-entities/types.js'
@@ -277,9 +275,6 @@ function parseAdminChatAssertionId(assertion: string): string {
     throw new Error('Admin Chat assertion payload is invalid')
   }
 }
-
-/** trace summary 的截断长度（§10.2：summary 是"截断摘要"，原始结构留在 detail 里）。 */
-const TRACE_SUMMARY_MAX_CHARS = 200
 
 /**
  * fail-loud 兜底回复的按 key 冷却窗口。
@@ -2920,7 +2915,7 @@ export class UnifiedAgent extends ModuleBase {
         adapters: stack.adapters,
         cursorStore: this.traceCursorStore(),
         nativeCopy: this.nativeTraceCopyStore(),
-        redact: (text) => redactSecrets(text, [...this.knownSecrets]),
+        redact: (text) => redactSecrets(text, [...(this.knownSecrets ?? [])]),
         legacyTraceDir: getAgentTraceDir(),
       },
       params,

@@ -129,7 +129,27 @@ export class AdminChatCorrelationStore {
     // （并发入站各自跑 dispatch loop，无锁会互相覆盖 index 条目）。
     return this.withIndexLock(async () => {
       const index = await this.readRequestIndex(record.manager_key)
-      const existing = index.get(record.request_id)
+      let existing = index.get(record.request_id)
+      if (!existing) {
+        // index 缺失时查 wake journal（journal 先于 index 落盘）：崩在两者之间的请求
+        // 必须按 duplicate 处理并自愈 index，否则 Admin 重放会被当成新请求再跑一遍 episode。
+        const wakes = await this.pendingWakes(record.manager_key)
+        const fromJournal = wakes.find((wake) => wake.request_id === record.request_id)
+        if (fromJournal) {
+          if (fromJournal.message_sha256 !== record.message_sha256) {
+            throw new Error(`admin chat request conflict: ${record.request_id}`)
+          }
+          index.set(record.request_id, {
+            request_id: record.request_id,
+            message_sha256: record.message_sha256,
+            manager_key: record.manager_key,
+            status: 'pending',
+            created_at: fromJournal.received_at,
+          })
+          await this.writeRequestIndex(record.manager_key, index)
+          return 'duplicate'
+        }
+      }
       if (existing) {
         if (existing.message_sha256 !== record.message_sha256 || existing.manager_key !== record.manager_key) {
           throw new Error(`admin chat request conflict: ${record.request_id}`)

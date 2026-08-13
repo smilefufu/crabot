@@ -62,10 +62,10 @@ export class ChatRequestIndex {
   }
 
   private async persist(): Promise<void> {
+    // 写盘失败必须抛给调用方（入站事务/结算路径据此回滚或重试）——静默降级成
+    // 「index 无条目」会让后续 delivery 被 pending 校验拒绝、答案彻底丢失且无人重试。
     const snapshot = Array.from(this.entries.values())
-    this.writeTail = this.writeTail.then(() => writeJsonAtomic(this.filePath, snapshot)).catch((error) => {
-      console.error('[ChatRequestIndex] persist failed:', error instanceof Error ? error.message : String(error))
-    })
+    this.writeTail = this.writeTail.then(() => writeJsonAtomic(this.filePath, snapshot))
     await this.writeTail
   }
 

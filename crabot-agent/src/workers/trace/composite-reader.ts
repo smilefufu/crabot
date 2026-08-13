@@ -19,11 +19,10 @@ import {
 import {
   isLegacyIncarnation,
   type Incarnation,
-  type LedgerWorker,
 } from '../harness/ledger-types.js'
 import type { WorkerAdapter, IncarnationHandle, NormalizedTraceEvent, WorkerImplId } from '../types.js'
 import type { HarnessEvent } from '../harness/worker-events.js'
-import { readLegacyTraceEvents, compareLegacyTraceEventEntries, type LegacyTraceEventEntry } from '../legacy-source-reader.js'
+import { readLegacyTraceEvents, type LegacyTraceEventEntry } from '../legacy-source-reader.js'
 import {
   incarnationFingerprint,
   InvalidTraceCursorError,
@@ -219,7 +218,13 @@ export async function readCompositeWorkerTrace(
   const merged = sortSourcedEvents([...harnessEvents, ...nativeEvents]).map((entry) => {
     // source_offset 是内部钳制坐标，不进 REST/RPC response。
     const { source_offset: _dropped, ...event } = entry.event
-    return event
+    // 出参统一脱敏（§8.1「所有 detail 先脱敏」）：live 读与 copy 回退一致，
+    // CLI native trace 原文里的已知 secret 不得经 REST 直出。
+    return {
+      ...event,
+      summary: deps.redact(event.summary),
+      ...(event.detail !== undefined ? { detail: redactDetail(event.detail, deps.redact) } : {}),
+    }
   })
   return {
     events: merged,
@@ -240,6 +245,14 @@ function incarnationStartedAt(incarnation: Incarnation): string | undefined {
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function redactDetail(detail: unknown, redact: (text: string) => string): unknown {
+  try {
+    return JSON.parse(redact(JSON.stringify(detail)))
+  } catch {
+    return '[unserializable detail removed]'
+  }
 }
 
 // 供调用方识别 INVALID_PARAMS 的显式再导出。
