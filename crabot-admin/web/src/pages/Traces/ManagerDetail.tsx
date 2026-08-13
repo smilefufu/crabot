@@ -4,6 +4,7 @@
 import React, { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { Loading } from '../../components/Common/Loading'
+import { MainLayout } from '../../components/Layout/MainLayout'
 import {
   agentObservabilityService,
   type ManagerEpisodeTrace,
@@ -90,7 +91,7 @@ function EpisodeCard({ episode }: { episode: ManagerEpisodeTrace }) {
   )
 }
 
-export const ManagerDetail: React.FC = () => {
+const ManagerDetailContent: React.FC = () => {
   const { managerKey = '' } = useParams()
   const [episodes, setEpisodes] = useState<ManagerEpisodeTrace[]>([])
   const [page, setPage] = useState(1)
@@ -149,3 +150,10 @@ export const ManagerDetail: React.FC = () => {
     </div>
   )
 }
+
+/** 详情页也包 MainLayout（不丢侧边导航）。 */
+export const ManagerDetail: React.FC = () => (
+  <MainLayout>
+    <ManagerDetailContent />
+  </MainLayout>
+)

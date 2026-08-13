@@ -562,7 +562,7 @@ export class BuiltinWorkerAdapter implements WorkerAdapter {
     let consumed = start
     for (let i = start; i < trace.spans.length; i++) {
       const event = normalizeBuiltinSpan(trace.spans[i])
-      if (event) events.push(event)
+      if (event) events.push({ ...event, source_offset: i })
       consumed = i + 1
     }
     return { events, nextCursor: { offset: consumed } }

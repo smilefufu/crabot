@@ -170,9 +170,14 @@ export async function readCompositeWorkerTrace(
     } else {
       try {
         const native = await adapter.readTrace(handle, { offset: positions.native })
-        const nativeLimit = replayBound ? Math.max(0, replayBound.native - positions.native) : native.events.length
-        native.events.slice(0, nativeLimit).forEach((event, ordinal) => {
-          nativeEvents.push({ event: { ...event, source: 'native' }, source: 'native', sourceOrdinal: positions.native + ordinal })
+        // 按行号位置过滤（归一化跳过的行也消费行号，不能用事件条数当行号钳制）。
+        const upper = replayBound ? replayBound.native : Number.POSITIVE_INFINITY
+        const inWindow = native.events.filter((event) => {
+          const offset = event.source_offset
+          return offset === undefined || (offset >= positions.native && offset < upper)
+        })
+        inWindow.forEach((event, ordinal) => {
+          nativeEvents.push({ event: { ...event, source: 'native' }, source: 'native', sourceOrdinal: event.source_offset ?? (positions.native + ordinal) })
         })
         nativeEnd = replayBound ? replayBound.native : native.nextCursor.offset
         // 每次成功 native read 把脱敏、属于本化身的记录增量写 Agent-owned copy（§8.10）。
@@ -181,13 +186,18 @@ export async function readCompositeWorkerTrace(
         // live source 不可用时回退 Agent-owned copy（终态收割/上次增量写入的结果）。
         const copied = await deps.nativeCopy.read(params.worker_id, incarnation.seq, fingerprint)
         if (copied !== null) {
-          const events = copied.events
-          const copyLimit = replayBound ? Math.min(replayBound.native, events.length) : events.length
-          for (let index = positions.native; index < copyLimit; index++) {
-            nativeEvents.push({ event: { ...events[index], source: 'native' }, source: 'native', sourceOrdinal: index })
-            nativeEnd = index + 1
-          }
-          if (replayBound) nativeEnd = replayBound.native
+          // copy 事件带原生行号（source_offset）：按行号区间取，而不是事件下标。
+          const upper = replayBound ? replayBound.native : Number.POSITIVE_INFINITY
+          const events = copied.events.filter((event) => {
+            const offset = event.source_offset
+            return offset !== undefined && offset >= positions.native && offset < upper
+          })
+          events.forEach((event, ordinal) => {
+            nativeEvents.push({ event: { ...event, source: 'native' }, source: 'native', sourceOrdinal: event.source_offset ?? ordinal })
+          })
+          nativeEnd = replayBound
+            ? replayBound.native
+            : (events.length > 0 ? Math.max(...events.map((event) => event.source_offset ?? 0)) + 1 : positions.native)
           unavailableReason = `native degraded (served from agent-owned copy): ${message(error)}`
         } else {
           unavailableReason = `native unavailable: ${message(error)}`

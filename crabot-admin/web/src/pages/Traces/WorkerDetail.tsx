@@ -6,6 +6,7 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { Loading } from '../../components/Common/Loading'
+import { MainLayout } from '../../components/Layout/MainLayout'
 import {
   agentObservabilityService,
   type LedgerWorker,
@@ -43,7 +44,9 @@ function Timeline({ workerId, seq }: { workerId: string; seq?: number }) {
       if (cursor === undefined) setEvents(result.events)
       else setEvents((previous) => [...previous, ...result.events])
       setNextCursor(result.next_cursor)
-      setHasMore(result.events.length > 0 && result.next_cursor !== undefined)
+      // 空页=当前追平（不是"没有更多"）——活跃 worker 之后还可能有新事件，
+      // 按钮切换为刷新语义而不是永久消失。
+      setHasMore(result.next_cursor !== undefined)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       if (message.includes('INVALID_PARAMS') || message.includes('cursor')) {
@@ -85,7 +88,9 @@ function Timeline({ workerId, seq }: { workerId: string; seq?: number }) {
         </div>
       )}
       {!cursorInvalid && hasMore && nextCursor && (
-        <button onClick={() => void load(nextCursor)} style={{ marginTop: 8 }}>加载更多</button>
+        <button onClick={() => void load(nextCursor)} style={{ marginTop: 8 }}>
+          {events.length === 0 ? '刷新/检查新内容' : '加载更多'}
+        </button>
       )}
     </div>
   )
@@ -156,7 +161,7 @@ function IncarnationRow({ incarnation, current, onSelect, selected }: {
   )
 }
 
-export const WorkerDetail: React.FC = () => {
+const WorkerDetailContent: React.FC = () => {
   const { workerId = '' } = useParams()
   const [worker, setWorker] = useState<LedgerWorker | null>(null)
   const [selectedSeq, setSelectedSeq] = useState<number | undefined>(undefined)
@@ -249,3 +254,10 @@ export const WorkerDetail: React.FC = () => {
     </div>
   )
 }
+
+/** 详情页也包 MainLayout（不丢侧边导航）。 */
+export const WorkerDetail: React.FC = () => (
+  <MainLayout>
+    <WorkerDetailContent />
+  </MainLayout>
+)

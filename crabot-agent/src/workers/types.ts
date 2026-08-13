@@ -30,6 +30,11 @@ export interface NormalizedTraceEvent {
    * composite reader 合并时强制填上——对外（RPC/REST）该字段必有值。
    */
   readonly source?: 'harness' | 'native' | 'legacy'
+  /**
+   * 本事件在其原生 source 里的行/记录位置（内部字段，不进 REST/RPC response）。
+   * 归一化跳过的行也消费行号，composite 钳制与 copy 回退必须按它而不是事件条数。
+   */
+  readonly source_offset?: number
 }
 
 export interface CapabilityBundle {

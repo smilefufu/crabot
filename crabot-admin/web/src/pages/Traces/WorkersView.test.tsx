@@ -9,6 +9,9 @@ import { WorkerDetail } from './WorkerDetail'
 import { agentObservabilityService } from '../../services/agent-observability'
 
 vi.mock('../../services/agent-observability')
+vi.mock('../../components/Layout/MainLayout', () => ({
+  MainLayout: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+}))
 
 const mocked = agentObservabilityService as unknown as {
   listWorkers: ReturnType<typeof vi.fn>

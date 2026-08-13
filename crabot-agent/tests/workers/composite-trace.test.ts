@@ -41,6 +41,11 @@ function nativeEvent(text: string, ts: string): NormalizedTraceEvent {
   return { ts, kind: 'message', role: 'assistant', summary: text }
 }
 
+/** 与真实 adapter 对齐：native 事件带行号位置。 */
+function nativeEventAt(text: string, ts: string, offset: number): NormalizedTraceEvent {
+  return { ...nativeEvent(text, ts), source_offset: offset }
+}
+
 describe('readCompositeWorkerTrace', () => {
   let dir: string
   let cursorStore: TraceCursorStore
@@ -48,6 +53,10 @@ describe('readCompositeWorkerTrace', () => {
   let harnessEvents: HarnessEvent[]
   let nativeLines: NormalizedTraceEvent[]
   let nativeShouldThrow: string | null
+
+  function setNative(events: NormalizedTraceEvent[]): void {
+    nativeLines = events.map((event, index) => ({ ...event, source_offset: index }))
+  }
 
   function deps() {
     return {
@@ -74,7 +83,7 @@ describe('readCompositeWorkerTrace', () => {
     cursorStore = new TraceCursorStore(join(dir, 'cursors'))
     nativeCopy = new NativeTraceCopyStore(join(dir, 'copies'))
     harnessEvents = []
-    nativeLines = []
+    setNative([])
     nativeShouldThrow = null
   })
 
@@ -90,7 +99,7 @@ describe('readCompositeWorkerTrace', () => {
 
   it('harness+native 按 ts 合并、带 source、next_cursor 恒在', async () => {
     harnessEvents = [harnessEvent(1, 'spawned', '2026-08-01T00:00:01.000Z'), harnessEvent(1, 'exited', '2026-08-01T00:00:05.000Z')]
-    nativeLines = [nativeEvent('hi', '2026-08-01T00:00:02.000Z'), nativeEvent('working', '2026-08-01T00:00:03.000Z')]
+    setNative([nativeEvent('hi', '2026-08-01T00:00:02.000Z'), nativeEvent('working', '2026-08-01T00:00:03.000Z')])
     const result = await readCompositeWorkerTrace(deps(), { worker_id: WORKER_ID })
     expect(result.events.map((event) => event.source)).toEqual(['harness', 'native', 'native', 'harness'])
     expect(result.next_cursor).toBeTruthy()
@@ -98,13 +107,13 @@ describe('readCompositeWorkerTrace', () => {
 
   it('同一 cursor 重放返回同一逻辑窗口，后续追加不影响', async () => {
     harnessEvents = [harnessEvent(1, 'spawned', '2026-08-01T00:00:01.000Z')]
-    nativeLines = [nativeEvent('a', '2026-08-01T00:00:02.000Z')]
+    setNative([nativeEvent('a', '2026-08-01T00:00:02.000Z')])
     const first = await readCompositeWorkerTrace(deps(), { worker_id: WORKER_ID })
     expect(first.events).toHaveLength(2)
 
     // 文件继续增长
     harnessEvents.push(harnessEvent(1, 'input_sent', '2026-08-01T00:00:03.000Z'))
-    nativeLines.push(nativeEvent('b', '2026-08-01T00:00:04.000Z'))
+    setNative([...nativeLines.map((e) => nativeEvent(e.summary, e.ts)), nativeEvent('b', '2026-08-01T00:00:04.000Z')])
 
     // 用 first 的 cursor 续读：只拿增量
     const second = await readCompositeWorkerTrace(deps(), { worker_id: WORKER_ID, cursor: first.next_cursor })
@@ -112,7 +121,7 @@ describe('readCompositeWorkerTrace', () => {
     expect(second.events.map((event) => event.summary)).toEqual(['input_sent', 'b'])
 
     // 再次追加后重放 first 的窗口 cursor：返回值与第一次完全一致（窗口固定）
-    nativeLines.push(nativeEvent('c', '2026-08-01T00:00:05.000Z'))
+    setNative([...nativeLines.map((e) => nativeEvent(e.summary, e.ts)), nativeEvent('c', '2026-08-01T00:00:05.000Z')])
     // 用 first 之前的隐式 0 起点不可得——验证"重放 first.next_cursor 消费的窗口 token 本身"
     // second.next_cursor 现在指向新窗口；再读应为空（无新增后）+ next_cursor 恒在
     const third = await readCompositeWorkerTrace(deps(), { worker_id: WORKER_ID, cursor: second.next_cursor })
@@ -142,7 +151,7 @@ describe('readCompositeWorkerTrace', () => {
   })
 
   it('native 失败后回退 Agent-owned copy（终态收割/上次增量）', async () => {
-    nativeLines = [nativeEvent('persisted', '2026-08-01T00:00:02.000Z')]
+    setNative([nativeEvent('persisted', '2026-08-01T00:00:02.000Z')])
     // 第一次成功读 → 写 copy
     const first = await readCompositeWorkerTrace(deps(), { worker_id: WORKER_ID })
     expect(first.events.some((event) => event.source === 'native')).toBe(true)
@@ -154,7 +163,7 @@ describe('readCompositeWorkerTrace', () => {
   })
 
   it('copy 指纹不匹配不混读（seq 碰撞防御）', async () => {
-    nativeLines = [nativeEvent('x', '2026-08-01T00:00:02.000Z')]
+    setNative([nativeEvent('x', '2026-08-01T00:00:02.000Z')])
     await readCompositeWorkerTrace(deps(), { worker_id: WORKER_ID })
     // 换一个化身身份（不同 session_ref）→ 指纹不同 → copy 不可见
     const changed = {

@@ -262,7 +262,8 @@ export class AdminChatCorrelationStore {
     await writeJsonAtomic(this.outboundPath(managerKey, deliveryId), record)
   }
 
-  /** startup reconcile：所有 prepared/failed 的 outbound（confirmed 不重放）。 */
+  /** startup reconcile：只有 prepared（响应丢失/未发出）的 outbound 需要重放；
+   *  failed 的已被 wake 重放路径（重跑 episode 生成新 delivery）取代，不再重放。 */
   async pendingOutbounds(managerKey: ManagerKey): Promise<OutboundDeliveryRecord[]> {
     let entries: string[]
     try {
@@ -276,7 +277,7 @@ export class AdminChatCorrelationStore {
       if (!entry.endsWith('.json')) continue
       try {
         const record = JSON.parse(await fs.readFile(join(this.outboundDir(managerKey), entry), 'utf-8')) as OutboundDeliveryRecord
-        if (record.status !== 'confirmed') records.push(record)
+        if (record.status === 'prepared') records.push(record)
       } catch { /* 坏 record 隔离跳过 */ }
     }
     return records

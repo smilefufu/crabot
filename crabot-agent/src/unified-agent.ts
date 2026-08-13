@@ -3347,12 +3347,14 @@ export class UnifiedAgent extends ModuleBase {
     await this.managerStack?.principals.init()
     // P6-A §7.7：开放 Manager read model 前先收口遗留 running episode（failed/interrupted）。
     this.traceStore.reconcileInterruptedManagerEpisodes()
-    // P6-A §3.2：重放未结算的 Admin Chat wake（assertion 已核销但 wake 未送达 Manager 的
-    // 崩溃窗口由这里的重放兜底；同一 request ID 只恢复一次）。
-    await this.replayPendingAdminChatWakes()
-    // P6-A §11.9：重放 prepared/failed 的 outbound delivery（同一 delivery_id/payload，
-    // Admin 幂等返回首次结果后再标 confirmed 并结算）。
+    // P6-A §11.9 先于 §3.2：先重放 prepared 的 outbound delivery（响应丢失场景），
+    // Admin 幂等返回首次结果即 confirm + settle wake——只差 confirm 的崩溃窗口不会
+    // 因重启先重跑一遍重复 episode。只有真正未交付的 wake 才进入重放。
     await this.replayPendingAdminChatOutbounds()
+    // P6-A §3.2：重放未结算的 Admin Chat wake（同一 request ID 只恢复一次）。
+    // 放后台执行：replay 可能触发完整 LLM episode，不能阻塞 onStart（ModuleBase.start
+    // 先 await onStart 再 listen，堵死会让 RPC 端口长时间不可用）。
+    void this.replayPendingAdminChatWakes()
     this.startEventLoopWatchdog()
     // trace 的 in-flight 持久化：每 15s 覆盖写 traces-running-v3.jsonl，让 agent
     // 被 SIGKILL 时主 task trace 仍能保留到最后一次 flush 的状态。

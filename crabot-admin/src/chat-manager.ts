@@ -722,10 +722,13 @@ export class ChatManager {
       if (message) this.pushToClient({ type: 'chat_push', message })
       return result
     } catch (error) {
-      // Browser 可见前 rollback：撤掉已落库消息（尚未 push）；media orphan 留待 GC；
-      // request 未 settle（settle 在 committed 之后）无需回滚。
+      // Browser 可见前 rollback：撤掉已落库消息（尚未 push）；未 promote 的 staging 立即清掉，
+      // 已 promote 的 media orphan 留待 GC；request 未 settle（settle 在 committed 之后）无需回滚。
       this.messages.delete(journal.planned_message_id)
       await this.saveData()
+      for (const planned of journal.planned_media) {
+        await this.mediaStore.rollbackStaged(planned.staged_path)
+      }
       await this.deliveryJournal.transition(journal.delivery_id, 'rolled_back')
       throw error
     }
