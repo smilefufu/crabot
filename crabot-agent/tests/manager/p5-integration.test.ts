@@ -190,6 +190,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
   let prevAgentDataDir: string | undefined
   let agent: UnifiedAgent
   let internals: AgentInternals
+  const bootedAgents: UnifiedAgent[] = []
 
   /** 经真实 RPC 分发表调用——不是直接调私有 handler。 */
   async function rpc<R>(method: string, params: unknown): Promise<R> {
@@ -204,6 +205,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
   }): void {
     agent = new UnifiedAgent(makeConfig(modelConfig))
     internals = agent as unknown as AgentInternals
+    bootedAgents.push(agent)
     // 端口解析预置：避免 onStart 里的 detectFeishuChannel 去 resolve 一个不存在的 MM。
     internals.adminPort = 1
   }
@@ -220,6 +222,14 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
 
   afterEach(async () => {
     vi.restoreAllMocks()
+    // P6-A：composite trace 的 cursor/copy store 是异步写盘——先等它们落地再清目录，
+    // 否则 rmdir 撞上 tmp+rename 进行中会 ENOTEMPTY。
+    for (const booted of bootedAgents) {
+      const internal = booted as unknown as Record<string, { flush?: () => Promise<void> } | undefined>
+      await internal.traceCursorStoreInstance?.flush?.()
+      await internal.nativeTraceCopyStoreInstance?.flush?.()
+    }
+    bootedAgents.length = 0
     if (prevDataDir === undefined) delete process.env.DATA_DIR
     else process.env.DATA_DIR = prevDataDir
     if (prevAgentDataDir === undefined) delete process.env.CRABOT_AGENT_DATA_DIR
@@ -523,7 +533,8 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
     expect(defaultTrace.events).toEqual(mainlineTrace.events)
     expect(defaultTrace.events).toHaveLength(2)
     expect(defaultTrace.events[0].detail).toEqual({ from_seq: 1 })
-    expect(defaultTrace.next_cursor).toBe('2')
+    // P6-A：composite cursor 是 opaque token（非裸 offset），只断言存在与可续读。
+    expect(defaultTrace.next_cursor).toBeTruthy()
     // 不是 #1 的那条、也不是 fork #3 的那条
     expect((await rpc<{ events: unknown[] }>('get_worker_trace', { worker_id: 'w-main', seq: 1 })).events).toHaveLength(1)
     // 修复前 admin 下发的 seq=0：静默返回空 events，与"该化身还没有事件"无法区分；
@@ -588,7 +599,7 @@ describe('P5 集成：manager 栈启动接线（Task 6）', () => {
       seq: 2,
     })
     expect(explicitEmpty.events).toEqual([])
-    expect(explicitEmpty.next_cursor).toBe('0')
+    expect(explicitEmpty.next_cursor).toBeTruthy()
     expect((await rpc<{ events: unknown[] }>('get_worker_trace', { worker_id: 'w-seq' })).events).toEqual([])
 
     // ② 化身不存在：抛错，不再与①的返回值混同

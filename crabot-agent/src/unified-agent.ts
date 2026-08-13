@@ -63,7 +63,6 @@ import { PromptManager } from './prompt-manager.js'
 import { createLSPManager, type LSPManager } from './lsp/lsp-manager.js'
 import type { BgEntityRecord, BgEntityStatus, BgEntityType } from './engine/bg-entities/types.js'
 import { redactSecrets } from './engine/redact-secrets.js'
-import { isResumable, redactCheckpoint } from './core/resume-checkpoint.js'
 import { AGENT_VERSION } from './constants.js'
 import { ContextManager, DEFAULT_COMPACT_THRESHOLD } from './engine/context-manager.js'
 import { DEFAULT_MAX_CONTEXT_TOKENS } from './engine/query-loop.js'
@@ -1161,14 +1160,10 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('deliver_page_feedback', this.handleDeliverPageFeedback.bind(this))
 
     // Trace 接口
-    this.registerMethod('get_traces', this.handleGetTraces.bind(this))
-    this.registerMethod('get_trace', this.handleGetTrace.bind(this))
-    this.registerMethod('clear_traces', this.handleClearTraces.bind(this))
-    this.registerMethod('search_traces', this.handleSearchTraces.bind(this))
-    this.registerMethod('get_trace_tree', this.handleGetTraceTree.bind(this))
+    // P6-A §9.6：raw v2 trace RPC 退役（get_traces/get_trace/clear_traces/search_traces/
+    // get_trace_tree/cleanup_old_traces_by_count）；保留专用维护面 disk_usage/cleanup_old_traces。
     this.registerMethod('get_trace_disk_usage', this.handleGetTraceDiskUsage.bind(this))
     this.registerMethod('cleanup_old_traces', this.handleCleanupOldTraces.bind(this))
-    this.registerMethod('cleanup_old_traces_by_count', this.handleCleanupOldTracesByCount.bind(this))
 
     // Bg-entity admin 接口（Plan 3 Task 1）
     this.registerMethod('list_bg_entities', this.handleListBgEntities.bind(this))
@@ -2581,47 +2576,6 @@ export class UnifiedAgent extends ModuleBase {
   // Trace RPC 方法
   // ============================================================================
 
-  private handleGetTraces(params: { limit?: number; offset?: number; status?: string }): { traces: import('./types.js').AgentTrace[]; total: number } {
-    return this.traceStore.getTraces(params.limit, params.offset, params.status)
-  }
-
-  private async handleGetTrace(params: { trace_id: string }): Promise<{ trace: import('./types.js').AgentTrace }> {
-    const trace = await this.traceStore.getFullTrace(params.trace_id)
-    if (!trace) {
-      throw new Error(`Trace not found: ${params.trace_id}`)
-    }
-    if (trace.resume_checkpoint) {
-      const secrets = [...this.knownSecrets]
-      return {
-        trace: {
-          ...trace,
-          resume_checkpoint: redactCheckpoint(trace.resume_checkpoint, secrets),
-        },
-      }
-    }
-    return { trace }
-  }
-
-  private handleClearTraces(params: { before?: string; trace_ids?: string[] }): { cleared_count: number } {
-    const count = this.traceStore.clearTraces(params.before, params.trace_ids)
-    return { cleared_count: count }
-  }
-
-  private handleSearchTraces(params: {
-    task_id?: string
-    time_range?: { start: string; end: string }
-    keyword?: string
-    status?: string
-    limit?: number
-    offset?: number
-  }): { traces: import('./core/trace-store.js').TraceIndexEntry[]; total: number } {
-    return this.traceStore.searchTraces(params)
-  }
-
-  private handleGetTraceTree(params: { task_id: string }): import('./core/trace-store.js').TraceTree {
-    return this.traceStore.getTraceTree(params.task_id)
-  }
-
   private handleGetTraceDiskUsage(): {
     total_bytes: number
     trace_count: number
@@ -2637,14 +2591,6 @@ export class UnifiedAgent extends ModuleBase {
     deleted_trace_ids: string[]
   } {
     return this.traceStore.cleanupOldTraces(params.days, params.dry_run)
-  }
-
-  private handleCleanupOldTracesByCount(params: { max_count: number; dry_run: boolean }): {
-    affected_count: number
-    affected_bytes: number
-    deleted_trace_ids: string[]
-  } {
-    return this.traceStore.cleanupOldTracesByCount(params.max_count, params.dry_run)
   }
 
   // ============================================================================

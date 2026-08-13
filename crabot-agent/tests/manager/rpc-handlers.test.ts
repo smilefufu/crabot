@@ -55,7 +55,13 @@ function buildAgent(managerStack?: unknown): AgentUnderTest {
   // 直接 test fixture：构造函数默认 runtime_config_authenticated=true；Object.create 绕过构造函数，这里补齐。
   agent.configAuthenticated = true
   agent.configStale = false
-  if (managerStack !== undefined) agent.managerStack = managerStack
+  if (managerStack !== undefined) {
+    // composite reader 需要 adapters Map；mock 栈缺省时补空表（native 走 source-scoped reason）。
+    if (typeof managerStack === 'object' && managerStack !== null && !('adapters' in managerStack)) {
+      ;(managerStack as Record<string, unknown>).adapters = new Map()
+    }
+    agent.managerStack = managerStack
+  }
   return agent as unknown as AgentUnderTest
 }
 
@@ -833,19 +839,13 @@ describe('read_worker_output_admin(§8.3)', () => {
   })
 })
 
-describe('get_worker_trace(§8.3 + §10.2)', () => {
+describe('get_worker_trace(§8.3 + §10.2，P6-A composite)', () => {
   const events: HarnessEvent[] = [
     { ts: '2026-01-01T00:00:00.000Z', kind: 'spawned', worker_id: 'w-1', seq: 1, detail: { impl: 'builtin' } },
     { ts: '2026-01-01T00:00:01.000Z', kind: 'input_sent', worker_id: 'w-1', seq: 1 },
     { ts: '2026-01-01T00:00:02.000Z', kind: 'spawned', worker_id: 'w-1', seq: 2 },
   ]
 
-  /**
-   * 台账里必须真有 seq=1/2 两个化身：handler 现在先按台账校验显式给的 seq 存不存在
-   * （P5 review 修复第二轮），"化身不存在"与"化身没事件"要可区分。makeLedgerWorker 的
-   * `incarnations: []` 缺省对本组用例不成立——有事件却没有对应化身的 worker 在真实台账里
-   * 不存在（每个化身至少由 spawn 落一条）。
-   */
   const incarnation = (seq: number) => ({
     seq,
     impl: 'builtin' as const,
@@ -855,8 +855,9 @@ describe('get_worker_trace(§8.3 + §10.2)', () => {
     started_at: '2026-01-01T00:00:00.000Z',
   })
 
-  function agentWithEvents() {
-    return buildAgent({
+  async function agentWithEvents() {
+    const root = await fs.mkdtemp(join(tmpdir(), 'rpc-trace-'))
+    const agent = buildAgent({
       ledger: {
         findWorker: async () => ({
           managerKey: `test::f1` as ManagerKey,
@@ -864,21 +865,58 @@ describe('get_worker_trace(§8.3 + §10.2)', () => {
         }),
       },
       harness: { readWorkerEvents: async () => events },
-    })
+    }) as unknown as Record<string, unknown>
+    // composite reader 依赖的私有 store：测试用真实临时目录实例
+    const { TraceCursorStore } = await import('../../src/workers/trace/cursor-store.js')
+    const { NativeTraceCopyStore } = await import('../../src/workers/trace/native-copy.js')
+    const cursorStore = new TraceCursorStore(join(root, 'cursors'))
+    const copyStore = new NativeTraceCopyStore(join(root, 'copies'))
+    agent.traceCursorStoreInstance = cursorStore
+    agent.nativeTraceCopyStoreInstance = copyStore
+    const flush = async () => { await cursorStore.flush(); await copyStore.flush() }
+    return { agent: agent as never as { handleGetWorkerTrace(p: unknown): Promise<{ events: Array<{ ts: string; kind: string; summary: string; detail?: unknown; source?: string }>; next_cursor?: string; unavailable_reason?: string }> }, root, flush }
   }
 
-  it('第一层(harness 亲历事件流)按 seq 过滤并归一化为 NormalizedTraceEvent', async () => {
-    const result = await agentWithEvents().handleGetWorkerTrace({ worker_id: 'w-1', seq: 1 })
-
-    expect(result.events.map((e) => e.ts)).toEqual(['2026-01-01T00:00:00.000Z', '2026-01-01T00:00:01.000Z'])
-    expect(result.events.every((e) => e.kind === 'lifecycle')).toBe(true)
-    expect(result.events[0].summary).toContain('spawned')
-    expect(result.events[0].detail).toEqual({ impl: 'builtin' })
+  it('harness 事件按 seq 过滤并归一化；builtin adapter 未注册时 native 给 source-scoped reason', async () => {
+    const { agent, root, flush } = await agentWithEvents()
+    try {
+      const result = await agent.handleGetWorkerTrace({ worker_id: 'w-1', seq: 1 })
+      expect(result.events.map((e) => e.ts)).toEqual(['2026-01-01T00:00:00.000Z', '2026-01-01T00:00:01.000Z'])
+      expect(result.events.every((e) => e.kind === 'lifecycle')).toBe(true)
+      expect(result.events[0].summary).toContain('spawned')
+      expect(result.events[0].detail).toEqual({ impl: 'builtin' })
+      expect(result.events.every((e) => e.source === 'harness')).toBe(true)
+      // 未注册 adapter：不再返回泛化 layer2 unavailable，是 source-scoped reason
+      expect(result.unavailable_reason).toContain('no adapter registered')
+      // 成功解析后 next_cursor 恒在
+      expect(result.next_cursor).toBeTruthy()
+    } finally {
+      await flush()
+      await fs.rm(root, { recursive: true, force: true })
+    }
   })
 
-  it('legacy RPC preserves started/end/id ordering through final merge and cursor slicing', async () => {
+  it('opaque cursor 增量读：token 续读只拿增量、读完为空；非法 token INVALID_PARAMS', async () => {
+    const { agent, root, flush } = await agentWithEvents()
+    try {
+      const first = await agent.handleGetWorkerTrace({ worker_id: 'w-1', seq: 1 })
+      expect(first.events).toHaveLength(2)
+      const second = await agent.handleGetWorkerTrace({ worker_id: 'w-1', seq: 1, cursor: first.next_cursor })
+      expect(second.events).toEqual([])
+      expect(second.next_cursor).toBeTruthy()
+      // 裸 offset token 不再是合法 cursor
+      await expect(agent.handleGetWorkerTrace({ worker_id: 'w-1', seq: 1, cursor: '1' })).rejects.toMatchObject({ code: 'INVALID_PARAMS' })
+    } finally {
+      await flush()
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('legacy 化身：trace_ids 时间线 + harness 事件合并，顺序稳定', async () => {
     const root = await fs.mkdtemp(join(tmpdir(), 'legacy-trace-rpc-'))
     const previousAgentDir = process.env.CRABOT_AGENT_DATA_DIR
+    let cursorStore: { flush(): Promise<void> } | undefined
+    let copyStore: { flush(): Promise<void> } | undefined
     try {
       const agentDir = join(root, 'agent')
       const traceDir = join(agentDir, 'traces')
@@ -919,76 +957,86 @@ describe('get_worker_trace(§8.3 + §10.2)', () => {
       const agent = buildAgent({
         ledger: { findWorker: async () => ({ managerKey: 'test::f1' as ManagerKey, worker }) },
         harness: { readWorkerEvents: async () => [imported] },
-      })
+      }) as unknown as Record<string, unknown>
+      const { TraceCursorStore } = await import('../../src/workers/trace/cursor-store.js')
+      const { NativeTraceCopyStore } = await import('../../src/workers/trace/native-copy.js')
+      cursorStore = new TraceCursorStore(join(root, 'cursors'))
+      copyStore = new NativeTraceCopyStore(join(root, 'copies'))
+      agent.traceCursorStoreInstance = cursorStore
+      agent.nativeTraceCopyStoreInstance = copyStore
+      const handler = agent as never as { handleGetWorkerTrace(p: unknown): Promise<{ events: Array<{ summary: string }>; next_cursor?: string }> }
 
-      const full = await agent.handleGetWorkerTrace({ worker_id: 'w-legacy', seq: 1 })
+      const full = await handler.handleGetWorkerTrace({ worker_id: 'w-legacy', seq: 1 })
       expect(full.events.map((event) => event.summary)).toEqual([
         'z end first',
         'z id a',
         'a id b',
         'legacy_imported',
       ])
-      expect(full.next_cursor).toBe('4')
+      expect(full.next_cursor).toBeTruthy()
 
-      const continued = await agent.handleGetWorkerTrace({ worker_id: 'w-legacy', seq: 1, cursor: '1' })
-      expect(continued.events.map((event) => event.summary)).toEqual(['z id a', 'a id b', 'legacy_imported'])
-      expect(continued.next_cursor).toBe('4')
+      const continued = await handler.handleGetWorkerTrace({ worker_id: 'w-legacy', seq: 1, cursor: full.next_cursor })
+      expect(continued.events).toEqual([])
     } finally {
       if (previousAgentDir === undefined) delete process.env.CRABOT_AGENT_DATA_DIR
       else process.env.CRABOT_AGENT_DATA_DIR = previousAgentDir
+      await cursorStore?.flush()
+      await copyStore?.flush()
       await fs.rm(root, { recursive: true, force: true })
     }
   })
 
-  it('第二层(adapter readTrace 懒解析)本阶段未接线 → unavailable_reason 说明', async () => {
-    const result = await agentWithEvents().handleGetWorkerTrace({ worker_id: 'w-1', seq: 1 })
-    expect(result.unavailable_reason).toBeTruthy()
-    expect(result.unavailable_reason).toContain('readTrace')
-  })
-
-  it('cursor 增量读:next_cursor 回位后再读拿到剩余事件,读完为空', async () => {
-    const agent = agentWithEvents()
-    const first = await agent.handleGetWorkerTrace({ worker_id: 'w-1', seq: 1, cursor: '1' })
-    expect(first.events.map((e) => e.ts)).toEqual(['2026-01-01T00:00:01.000Z'])
-    expect(first.next_cursor).toBe('2')
-
-    const second = await agent.handleGetWorkerTrace({ worker_id: 'w-1', seq: 1, cursor: first.next_cursor })
-    expect(second.events).toEqual([])
-    expect(second.next_cursor).toBe('2')
-  })
-
-  /**
-   * 与 read_worker_output_admin 的 `seq=9 → rejects(/seq=9/)` 对称（见上一个 describe）：
-   * 显式给的化身不存在时报错，而不是与"该化身还没有事件"（seq=2 只有 1 条、cursor 读完
-   * 返回空——上面两条用例）在返回值上混同。
-   */
   it('显式 seq 在化身链里不存在 → 抛错,而不是静默返回空 events', async () => {
-    await expect(agentWithEvents().handleGetWorkerTrace({ worker_id: 'w-1', seq: 9 })).rejects.toThrow(/seq=9/)
+    const { agent, root, flush } = await agentWithEvents()
+    try {
+      await expect(agent.handleGetWorkerTrace({ worker_id: 'w-1', seq: 9 })).rejects.toThrow(/seq=9/)
+    } finally {
+      await flush()
+      await fs.rm(root, { recursive: true, force: true })
+    }
   })
 
   it('zero-incarnation system task returns the stable domain error for default and explicit seq', async () => {
-    const agent = buildAgent({
-      ledger: {
-        findWorker: async () => ({
-          managerKey: `test::f1` as ManagerKey,
-          worker: { ...makeLedgerWorker({ workerId: 'w-system' }), incarnations: [] },
-        }),
-      },
-      harness: { readWorkerEvents: async () => [] },
-    })
-
-    await expect(agent.handleGetWorkerTrace({ worker_id: 'w-system' }))
-      .rejects.toBeInstanceOf(WorkerHasNoIncarnationError)
-    await expect(agent.handleGetWorkerTrace({ worker_id: 'w-system', seq: 1 }))
-      .rejects.toBeInstanceOf(WorkerHasNoIncarnationError)
+    const root = await fs.mkdtemp(join(tmpdir(), 'rpc-trace-zero-'))
+    try {
+      const agent = buildAgent({
+        ledger: {
+          findWorker: async () => ({
+            managerKey: `test::f1` as ManagerKey,
+            worker: { ...makeLedgerWorker({ workerId: 'w-system' }), incarnations: [] },
+          }),
+        },
+        harness: { readWorkerEvents: async () => [] },
+      }) as unknown as Record<string, unknown>
+      const { TraceCursorStore } = await import('../../src/workers/trace/cursor-store.js')
+      const { NativeTraceCopyStore } = await import('../../src/workers/trace/native-copy.js')
+      agent.traceCursorStoreInstance = new TraceCursorStore(join(root, 'cursors'))
+      agent.nativeTraceCopyStoreInstance = new NativeTraceCopyStore(join(root, 'copies'))
+      const handler = agent as never as { handleGetWorkerTrace(p: unknown): Promise<unknown> }
+      await expect(handler.handleGetWorkerTrace({ worker_id: 'w-system' }))
+        .rejects.toBeInstanceOf(WorkerHasNoIncarnationError)
+      await expect(handler.handleGetWorkerTrace({ worker_id: 'w-system', seq: 1 }))
+        .rejects.toBeInstanceOf(WorkerHasNoIncarnationError)
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
   })
 
   it('worker 不存在 → 抛明确错误,而不是返回空时间线', async () => {
-    const agent = buildAgent({
-      ledger: { findWorker: async () => undefined },
-      harness: { readWorkerEvents: async () => [] },
-    })
-    await expect(agent.handleGetWorkerTrace({ worker_id: 'w-missing', seq: 1 })).rejects.toThrow(/w-missing/)
+    const root = await fs.mkdtemp(join(tmpdir(), 'rpc-trace-missing-'))
+    try {
+      const agent = buildAgent({
+        ledger: { findWorker: async () => undefined },
+        harness: { readWorkerEvents: async () => [] },
+      }) as unknown as Record<string, unknown>
+      const { TraceCursorStore } = await import('../../src/workers/trace/cursor-store.js')
+      const { NativeTraceCopyStore } = await import('../../src/workers/trace/native-copy.js')
+      agent.traceCursorStoreInstance = new TraceCursorStore(join(root, 'cursors'))
+      agent.nativeTraceCopyStoreInstance = new NativeTraceCopyStore(join(root, 'copies'))
+      await expect((agent as never as { handleGetWorkerTrace(p: unknown): Promise<unknown> }).handleGetWorkerTrace({ worker_id: 'w-missing', seq: 1 })).rejects.toThrow(/w-missing/)
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
   })
 })
 

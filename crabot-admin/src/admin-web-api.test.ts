@@ -551,140 +551,44 @@ describe('Admin Web API', () => {
     })
   })
 
-  describe('list_conversation_units activity ordering', () => {
-    const taskIds = ['test-activity-old', 'test-activity-new']
-
-    afterEach(() => {
-      for (const id of taskIds) admin['tasks'].delete(id as never)
-    })
-
-    it('orders task rows by last activity instead of original creation time', async () => {
-      vi.spyOn(admin as unknown as { callAgentRpc: (...args: unknown[]) => Promise<unknown> }, 'callAgentRpc')
-        .mockResolvedValue({ traces: [], total: 0 })
-      const revivedOldTask = makeTask({
-        id: 'test-activity-old',
-        title: '开卷考试策略 v2',
-        created_at: '2026-07-01T16:15:15.921Z',
-        updated_at: '2026-07-02T00:17:45.462Z',
-        messages: [
-          { id: 'm-old-1', role: 'human', content: '原始需求', timestamp: '2026-07-01T16:15:15.921Z' },
-          { id: 'm-old-2', role: 'human', content: '那你现在还不赶紧去做？', timestamp: '2026-07-02T00:12:42.281Z' },
-        ],
-      })
-      const newlyCreatedTask = makeTask({
-        id: 'test-activity-new',
-        title: '较新创建但没有后续活动',
-        created_at: '2026-07-02T00:10:00.000Z',
-        updated_at: '2026-07-02T00:10:00.000Z',
-        messages: [
-          { id: 'm-new-1', role: 'human', content: '新任务', timestamp: '2026-07-02T00:10:00.000Z' },
-        ],
-      })
-      admin['tasks'].set(revivedOldTask.id as never, revivedOldTask)
-      admin['tasks'].set(newlyCreatedTask.id as never, newlyCreatedTask)
-
-      const result = await admin['handleListConversationUnits']({
-        page: 1,
-        page_size: 10,
-        filter: { trigger_type: 'task' },
-      }) as ListConversationUnitsResult
-
-      const ids = result.items
-        .filter((u): u is Extract<typeof u, { kind: 'task' }> => u.kind === 'task')
-        .map((u) => u.task.id)
-      expect(ids.indexOf('test-activity-old')).toBeLessThan(ids.indexOf('test-activity-new'))
-    })
-
-    it('uses related dispatcher activity even when listing task-only rows', async () => {
-      const oldTask = makeTask({
-        id: 'test-activity-old',
-        title: '旧标题',
-        created_at: '2026-07-01T16:15:15.921Z',
-        updated_at: '2026-07-01T16:15:15.921Z',
-        messages: [
-          { id: 'm-old-1', role: 'human', content: '原始需求', timestamp: '2026-07-01T16:15:15.921Z' },
-        ],
-      })
-      const newTask = makeTask({
-        id: 'test-activity-new',
-        title: '较新创建但没有后续活动',
-        created_at: '2026-07-02T00:10:00.000Z',
-        updated_at: '2026-07-02T00:10:00.000Z',
-        messages: [
-          { id: 'm-new-1', role: 'human', content: '新任务', timestamp: '2026-07-02T00:10:00.000Z' },
-        ],
-      })
-      admin['tasks'].set(oldTask.id as never, oldTask)
-      admin['tasks'].set(newTask.id as never, newTask)
-      vi.spyOn(admin as unknown as { callAgentRpc: (...args: unknown[]) => Promise<unknown> }, 'callAgentRpc')
-        .mockResolvedValue({
-          traces: [
-            {
-              trace_id: 'trace-related',
-              trigger_type: 'message',
-              trigger_summary: '那你现在还不赶紧去做？',
-              started_at: '2026-07-02T00:12:42.281Z',
-              status: 'completed',
-              span_count: 1,
-              related_task_id: 'test-activity-old',
-            },
-          ],
-          total: 1,
-        })
-
-      const result = await admin['handleListConversationUnits']({
-        page: 1,
-        page_size: 10,
-        filter: { trigger_type: 'task' },
-      }) as ListConversationUnitsResult
-
-      const taskUnits = result.items.filter((u): u is Extract<typeof u, { kind: 'task' }> => u.kind === 'task')
-      const oldUnit = taskUnits.find((u) => u.task.id === 'test-activity-old')
-      expect(oldUnit?.activity_at).toBe('2026-07-02T00:12:42.281Z')
-      expect(oldUnit?.activity_summary).toBe('那你现在还不赶紧去做？')
-      expect(taskUnits.findIndex((u) => u.task.id === 'test-activity-old'))
-        .toBeLessThan(taskUnits.findIndex((u) => u.task.id === 'test-activity-new'))
-    })
-
-    it('filters orphan dispatcher traces by the search keyword', async () => {
-      const callAgentRpc = vi.spyOn(admin as unknown as { callAgentRpc: (...args: unknown[]) => Promise<unknown> }, 'callAgentRpc')
-        .mockResolvedValue({
-          traces: [
-            {
-              trace_id: 'trace-match',
-              trigger_type: 'message',
-              trigger_summary: '[private×1] needle message',
-              started_at: '2026-07-02T00:12:37.518Z',
-              status: 'completed',
-              span_count: 1,
-            },
-            {
-              trace_id: 'trace-unrelated',
-              trigger_type: 'message',
-              trigger_summary: '[group×1] unrelated chatter',
-              started_at: '2026-07-02T00:13:37.518Z',
-              status: 'completed',
-              span_count: 1,
-            },
-          ],
-          total: 2,
-        })
-
-      const result = await admin['handleListConversationUnits']({
-        page: 1,
-        page_size: 10,
-        filter: { trigger_type: 'message', search: 'needle' },
-      }) as ListConversationUnitsResult
-
-      expect(callAgentRpc).toHaveBeenCalledWith(
-        'search_traces',
-        expect.objectContaining({ keyword: 'needle' }),
+  describe('P6-A 退役端点负断言', () => {
+    it('POST /api/admin/conversation-units 已退役 → 404', async () => {
+      const token = await loginAndGetToken()
+      const response = await makeWebRequest(
+        TEST_WEB_PORT,
+        '/api/admin/conversation-units',
+        'POST',
+        { page: 1, page_size: 20 },
+        token,
       )
-      expect(result.items).toHaveLength(1)
-      expect(result.items[0]).toMatchObject({
-        kind: 'orphan_dispatcher',
-        trace: { trace_id: 'trace-match' },
-      })
+      expect(response.statusCode).toBe(404)
+    })
+
+    it('raw v2 trace REST 全部退役 → 404', async () => {
+      const token = await loginAndGetToken()
+      for (const [method, url] of [
+        ['GET', '/api/agent/traces'],
+        ['DELETE', '/api/agent/traces'],
+        ['GET', '/api/agent/traces/search'],
+        ['GET', '/api/agent/trace-tree/task-1'],
+        ['GET', '/api/agent/traces/trace-1'],
+        ['GET', '/api/agents/default/traces'],
+        ['GET', '/api/agents/default/traces/trace-1'],
+      ] as const) {
+        const response = await makeWebRequest(TEST_WEB_PORT, url, method, null, token)
+        expect(response.statusCode, `${method} ${url}`).toBe(404)
+      }
+    })
+
+    it('维护面端点保留：disk-usage / traces/old 透传 agent RPC', async () => {
+      const token = await loginAndGetToken()
+      const spy = vi.spyOn(admin['rpcClient'], 'call')
+      spy.mockResolvedValueOnce({ total_bytes: 0, trace_count: 0 })
+      const usage = await makeWebRequest(TEST_WEB_PORT, '/api/agent/traces/disk-usage', 'GET', null, token)
+      expect(usage.statusCode).toBe(200)
+      spy.mockResolvedValueOnce({ affected_count: 0, affected_bytes: 0, deleted_trace_ids: [] })
+      const cleanup = await makeWebRequest(TEST_WEB_PORT, '/api/agent/traces/old?days=30', 'DELETE', null, token)
+      expect(cleanup.statusCode).toBe(200)
     })
   })
 
@@ -1608,148 +1512,50 @@ describe('Admin Web API', () => {
   // 就写下它们当前的行为（method / params / 状态码 / body），抽完之后必须逐条照旧通过——
   // 这是"纯重构、行为一字不变"的证据，而不是靠肉眼比对。
   // ==========================================================================
-  describe('既有 /api/agent/* 转发端点（重构护栏）', () => {
+  describe('P6-A 新代理端点：managers / episodes', () => {
     const spyAgentRpc = () =>
-      vi.spyOn(
-        admin as unknown as { callAgentRpc: (...args: unknown[]) => Promise<unknown> },
-        'callAgentRpc',
-      )
+      vi.spyOn(admin['rpcClient'], 'call')
 
-    it('GET /api/agent/traces 转发 get_traces（默认 limit/offset，status 缺省为 undefined）', async () => {
+    it('GET /api/agent/managers 转发 list_managers_admin（分页透传）', async () => {
       const token = await loginAndGetToken()
-      const spy = spyAgentRpc().mockResolvedValue({ traces: [], total: 0 })
-
-      const response = await makeWebRequest(TEST_WEB_PORT, '/api/agent/traces', 'GET', null, token)
-
+      const spy = spyAgentRpc().mockResolvedValue({ items: [], pagination: { page: 2, page_size: 5, total_items: 0, total_pages: 0 } })
+      const response = await makeWebRequest(TEST_WEB_PORT, '/api/agent/managers?page=2&page_size=5', 'GET', null, token)
       expect(response.statusCode).toBe(200)
-      expect(spy).toHaveBeenCalledWith('get_traces', { limit: 20, offset: 0, status: undefined })
+      expect(spy).toHaveBeenCalledWith(
+        expect.any(Number),
+        'list_managers_admin',
+        { pagination: { page: 2, page_size: 5 } },
+        expect.any(String),
+      )
     })
 
-    it('GET /api/agent/traces 透传 limit/offset/status', async () => {
+    it('GET /api/agent/managers/:key/episodes 转发 list_manager_episodes_admin（path decode 一次）', async () => {
       const token = await loginAndGetToken()
-      const spy = spyAgentRpc().mockResolvedValue({ traces: [], total: 0 })
-
-      await makeWebRequest(TEST_WEB_PORT, '/api/agent/traces?limit=5&offset=10&status=completed', 'GET', null, token)
-
-      expect(spy).toHaveBeenCalledWith('get_traces', { limit: 5, offset: 10, status: 'completed' })
-    })
-
-    it('GET /api/agent/traces：agent 不可达 → 503 + 固定文案', async () => {
-      const token = await loginAndGetToken()
-      spyAgentRpc().mockRejectedValue(new Error('Agent not available'))
-
-      const response = await makeWebRequest<{ error: string }>(TEST_WEB_PORT, '/api/agent/traces', 'GET', null, token)
-
-      expect(response.statusCode).toBe(503)
-      expect(response.body.error).toBe('Agent not available')
-    })
-
-    it('GET /api/agent/traces：其他错误 → 500 + 原始 message', async () => {
-      const token = await loginAndGetToken()
-      spyAgentRpc().mockRejectedValue(new Error('boom'))
-
-      const response = await makeWebRequest<{ error: string }>(TEST_WEB_PORT, '/api/agent/traces', 'GET', null, token)
-
-      expect(response.statusCode).toBe(500)
-      expect(response.body.error).toBe('boom')
-    })
-
-    it('GET /api/agent/traces/:traceId 转发 get_trace', async () => {
-      const token = await loginAndGetToken()
-      const spy = spyAgentRpc().mockResolvedValue({ trace: { trace_id: 't-1' } })
-
-      const response = await makeWebRequest(TEST_WEB_PORT, '/api/agent/traces/t-1', 'GET', null, token)
-
+      const spy = spyAgentRpc().mockResolvedValue({ items: [], pagination: { page: 1, page_size: 20, total_items: 0, total_pages: 0 } })
+      const key = encodeURIComponent('wechat::sess-1')
+      const response = await makeWebRequest(TEST_WEB_PORT, `/api/agent/managers/${key}/episodes`, 'GET', null, token)
       expect(response.statusCode).toBe(200)
-      expect(spy).toHaveBeenCalledWith('get_trace', { trace_id: 't-1' })
-    })
-
-    it('GET /api/agent/traces/:traceId：not found → 404 + 原始 message（该端点独有分支）', async () => {
-      const token = await loginAndGetToken()
-      spyAgentRpc().mockRejectedValue(new Error('Trace not found: t-404'))
-
-      const response = await makeWebRequest<{ error: string }>(TEST_WEB_PORT, '/api/agent/traces/t-404', 'GET', null, token)
-
-      expect(response.statusCode).toBe(404)
-      expect(response.body.error).toBe('Trace not found: t-404')
-    })
-
-    it('GET /api/agent/traces/:traceId：ECONNREFUSED → 503', async () => {
-      const token = await loginAndGetToken()
-      spyAgentRpc().mockRejectedValue(new Error('connect ECONNREFUSED 127.0.0.1:19000'))
-
-      const response = await makeWebRequest<{ error: string }>(TEST_WEB_PORT, '/api/agent/traces/t-1', 'GET', null, token)
-
-      expect(response.statusCode).toBe(503)
-      expect(response.body.error).toBe('Agent not available')
-    })
-
-    it('DELETE /api/agent/traces 转发 clear_traces（带 body / 空 body）', async () => {
-      const token = await loginAndGetToken()
-      const spy = spyAgentRpc().mockResolvedValue({ cleared_count: 3 })
-
-      const withBody = await makeWebRequest(
-        TEST_WEB_PORT,
-        '/api/agent/traces',
-        'DELETE',
-        { before: '2026-01-01T00:00:00.000Z' },
-        token,
+      expect(spy).toHaveBeenCalledWith(
+        expect.any(Number),
+        'list_manager_episodes_admin',
+        { manager_key: 'wechat::sess-1', pagination: { page: 1, page_size: 20 } },
+        expect.any(String),
       )
-      expect(withBody.statusCode).toBe(200)
-      expect(spy).toHaveBeenCalledWith('clear_traces', { before: '2026-01-01T00:00:00.000Z' })
-
-      await makeWebRequest(TEST_WEB_PORT, '/api/agent/traces', 'DELETE', null, token)
-      expect(spy).toHaveBeenLastCalledWith('clear_traces', {})
     })
 
-    it('DELETE /api/agent/traces：agent 不可达 → 503', async () => {
+    it('manager key 非法 percent-encoding → 400，不发 RPC', async () => {
       const token = await loginAndGetToken()
-      spyAgentRpc().mockRejectedValue(new Error('connect failed'))
+      const spy = spyAgentRpc()
+      const response = await makeWebRequest(TEST_WEB_PORT, '/api/agent/managers/%E0%A4%A/episodes', 'GET', null, token)
+      expect(response.statusCode).toBe(400)
+      expect(spy).not.toHaveBeenCalled()
+    })
 
-      const response = await makeWebRequest<{ error: string }>(TEST_WEB_PORT, '/api/agent/traces', 'DELETE', null, token)
-
+    it('agent 不可达 → 503', async () => {
+      const token = await loginAndGetToken()
+      spyAgentRpc().mockRejectedValue(Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }))
+      const response = await makeWebRequest(TEST_WEB_PORT, '/api/agent/managers', 'GET', null, token)
       expect(response.statusCode).toBe(503)
-      expect(response.body.error).toBe('Agent not available')
-    })
-
-    it('GET /api/agent/traces/search 转发 search_traces（time_range 需 start+end 同时存在）', async () => {
-      const token = await loginAndGetToken()
-      const spy = spyAgentRpc().mockResolvedValue({ traces: [], total: 0 })
-
-      await makeWebRequest(
-        TEST_WEB_PORT,
-        '/api/agent/traces/search?task_id=task-1&keyword=needle&status=completed&start=2026-01-01&end=2026-02-01&limit=3&offset=1',
-        'GET',
-        null,
-        token,
-      )
-      expect(spy).toHaveBeenCalledWith('search_traces', {
-        task_id: 'task-1',
-        keyword: 'needle',
-        status: 'completed',
-        time_range: { start: '2026-01-01', end: '2026-02-01' },
-        limit: 3,
-        offset: 1,
-      })
-
-      await makeWebRequest(TEST_WEB_PORT, '/api/agent/traces/search?start=2026-01-01', 'GET', null, token)
-      expect(spy).toHaveBeenLastCalledWith('search_traces', { limit: 20, offset: 0 })
-    })
-
-    it('GET /api/agent/traces/search：agent 不可达 → 503', async () => {
-      const token = await loginAndGetToken()
-      spyAgentRpc().mockRejectedValue(new Error('Agent not available'))
-
-      const response = await makeWebRequest<{ error: string }>(
-        TEST_WEB_PORT,
-        '/api/agent/traces/search',
-        'GET',
-        null,
-        token,
-      )
-
-      expect(response.statusCode).toBe(503)
-      expect(response.body.error).toBe('Agent not available')
     })
   })
 
