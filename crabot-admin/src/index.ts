@@ -958,6 +958,11 @@ export class AdminModule extends ModuleBase {
       this.mediaStore!,
     )
     await this.chatManager.loadData()
+    // P6-A §11.12：开放 chat ingress（接受新 inbound/outbound delivery）前先 reconcile
+    // 两类 journal——pending_dispatch 的入站 outbox 重放、prepared/committing 的 delivery
+    // journal 按确定性 complete/rollback。
+    await this.chatManager.reconcileInboundDispatches()
+    await this.chatManager.reconcileDeliveries()
 
     // Agent 端口由 module_started 事件驱动写入（见 onEvent），
     // 若 Admin 单独重启错过事件，由 ensureAgentPort() 惰性兜底。
@@ -9543,9 +9548,8 @@ export class AdminModule extends ModuleBase {
    * `/api/agent/*` 转发端点的统一样板：调 agent RPC → 200 回传结果；失败按 agent 可达性
    * 映射 503（agent 不可达，固定文案）/ 500（其余，回传原始 message）。
    *
-   * 抽自 handleGetAgentTracesApi / handleGetAgentTraceApi / handleClearAgentTracesApi /
-   * handleSearchAgentTracesApi 四处**逐字相同**的 catch 块（P5 Task 5，纯重构）。
-   * `notFoundWhen` 只为保留 handleGetAgentTraceApi 独有的 404 分支——不传时行为与抽取前
+   * 抽自（P6-A 已退役的）raw v2 trace 端点**逐字相同**的 catch 块（P5 Task 5，纯重构）。
+   * `notFoundWhen` 保留 detail 类端点的 404 分支——不传时行为与抽取前
    * 完全一致；该分支优先于 503/500 判定，与原实现的判定顺序相同。
    */
   private async proxyAgentRpc<P, R>(

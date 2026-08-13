@@ -287,10 +287,12 @@ export class ManagerRegistry {
     channelId: string,
     sessionId: string,
     messages: ReadonlyArray<ChannelMessage>,
-    friend?: Friend
+    friend?: Friend,
+    /** P6-A §3.2：system-only 关联元数据（不渲染进 LLM 正文）。 */
+    correlation?: import('./loop.js').ManagerWakeCorrelation,
   ): Promise<EpisodeResult> {
     const capture = this.captureIngress()
-    return this.routeHumanWake(capture, 'human_messages', channelId, sessionId, messages, friend)
+    return this.routeHumanWake(capture, 'human_messages', channelId, sessionId, messages, friend, correlation)
   }
 
   /**
@@ -322,7 +324,8 @@ export class ManagerRegistry {
     channelId: string,
     sessionId: string,
     messages: ReadonlyArray<ChannelMessage>,
-    friend?: Friend
+    friend?: Friend,
+    correlation?: import('./loop.js').ManagerWakeCorrelation,
   ): Promise<EpisodeResult> {
     const key = `${channelId}::${sessionId}` as ManagerKey
     // 私/群不新增数据来源:它就在消息自己的 session 上。空批(理论上不该发生)按私聊算,
@@ -333,7 +336,7 @@ export class ManagerRegistry {
       ? { kind: 'human_messages', messages, ...(friend ? { friend } : {}) }
       : { kind: 'attention_flush', messages, ...(friend ? { friend } : {}) }
     // Capture before principal lookup so queueing cannot rewrite ingress time.
-    const envelope = this.makeEnvelope(capture, initialWake, undefined, messages)
+    const envelope = this.makeEnvelope(capture, initialWake, undefined, messages, correlation)
     // 只会退回 fail-soft 兜底,而消息丢了就是丢了。
     let principalPermissions: ResolvedPermissions | undefined
     if (this.deps.onHumanWake) {
@@ -502,6 +505,7 @@ export class ManagerRegistry {
     wake: WakeEvent,
     occurredAt?: string,
     humanMessages?: ReadonlyArray<ChannelMessage>,
+    correlation?: import('./loop.js').ManagerWakeCorrelation,
   ): TimedWakeEnvelope {
     const occurred_at = parseOccurredAt(occurredAt, 'source')
     const human_occurred_at = humanMessages?.map((message) => ({
@@ -515,7 +519,13 @@ export class ManagerRegistry {
       timezone: capture.timezone,
       ...(occurred_at ? { occurred_at } : {}),
       ...(human_occurred_at ? { human_occurred_at } : {}),
+      ...(correlation ? { correlation } : {}),
     }
+  }
+
+  /** P6-A §11.6：给 exact admin-chat manager 当前 episode 原子 claim 未 claim 的 request IDs。 */
+  claimAdminChatRequestIds(key: ManagerKey): string[] {
+    return this.loops.get(key)?.claimAdminChatRequestIds() ?? []
   }
 
   /** 该 key 是否还有至少一个在途 episode(引用计数 > 0)。 */

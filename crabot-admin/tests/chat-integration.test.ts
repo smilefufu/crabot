@@ -170,8 +170,7 @@ describe('Admin Master Chat 集成测试', () => {
     expect(data.messages).toHaveLength(0)
   })
 
-  it('应该能够处理 chat_callback RPC 调用', async () => {
-    // 模拟 Flow 调用 chat_callback
+  it('chat_callback 已退役：只返回 retired 错误，不写消息', async () => {
     const callbackParams = {
       request_id: 'test-callback-' + Date.now(),
       reply_type: 'direct_reply',
@@ -190,22 +189,17 @@ describe('Admin Master Chat 集成测试', () => {
       }),
     })
 
-    expect(response.status).toBe(200)
+    const body = await response.json() as { error?: { message?: string } }
+    expect(JSON.stringify(body)).toContain('retired')
 
-    const result = await response.json() as { success: boolean; data: { received: boolean } }
-    expect(result.success).toBe(true)
-    expect(result.data.received).toBe(true)
-
-    // 验证消息已存储
+    // 退役路径不写任何消息
     const messagesResponse = await fetch(`http://localhost:${webPort}/api/chat/messages?limit=10`, {
       headers: {
         'Authorization': `Bearer ${jwtToken}`,
       },
     })
-
     const messagesData = await messagesResponse.json() as { messages: any[] }
-    const assistantMessage = messagesData.messages.find((m: any) => m.role === 'assistant')
-    expect(assistantMessage).toBeDefined()
-    expect(assistantMessage.content.text).toBe('这是一条测试回复')
+    const assistantMessage = messagesData.messages.find((m: any) => m.role === 'assistant' && m.content?.text === '这是一条测试回复')
+    expect(assistantMessage).toBeUndefined()
   })
 })

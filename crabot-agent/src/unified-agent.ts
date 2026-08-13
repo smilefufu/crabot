@@ -8,6 +8,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import { ModuleBase, generateId, sha256CanonicalJson, type ModuleConfig, type Event, type ModuleId, type TraceStoreInterface } from 'crabot-shared'
 import { resolveTimezone } from './utils/time.js'
 import type {
@@ -69,6 +70,7 @@ import { DEFAULT_MAX_CONTEXT_TOKENS } from './engine/query-loop.js'
 import { buildManagerStack, reconcileManagerStack, type ManagerStack } from './manager/bootstrap.js'
 import { buildManagerAdminSummaries } from './manager/read-model.js'
 import { readCompositeWorkerTrace } from './workers/trace/composite-reader.js'
+import { AdminChatCorrelationStore, dispatchPayloadSha256 } from './manager/chat-correlation-store.js'
 import { TraceCursorStore, incarnationFingerprint } from './workers/trace/cursor-store.js'
 import { NativeTraceCopyStore } from './workers/trace/native-copy.js'
 import { makeAgentEventPublisher, type AgentEventPublisher } from './manager/events.js'
@@ -417,6 +419,7 @@ export class UnifiedAgent extends ModuleBase {
   private adminPort?: number
   private traceCursorStoreInstance?: TraceCursorStore
   private nativeTraceCopyStoreInstance?: NativeTraceCopyStore
+  private adminChatCorrelationStoreInstance?: import('./manager/chat-correlation-store.js').AdminChatCorrelationStore
   private memoryPort?: number
   // Session memory_scopes 缓存（TTL 60s，session config 变更不频繁）
   private sessionScopesCache: Map<string, { scopes: string[]; expiresAt: number }> = new Map()
@@ -716,6 +719,12 @@ export class UnifiedAgent extends ModuleBase {
         // `onStart()` 里；写成定值就永远快照到探测前的 false。worker 侧没这个问题是因为
         // `createMcpConfigs` 本身是每个 task 现调的工厂。
         get enableFeishuDocTool(): boolean { return self.feishuChannelAvailable },
+        // P6-A §11.5-9：Admin Chat 出站 delivery 事务钩子（只作用于 exact admin-web::admin-chat）。
+        adminChatDelivery: {
+          prepare: (entry, content) => self.prepareAdminChatDelivery(entry, content),
+          confirm: (deliveryId, result) => self.confirmAdminChatDelivery(deliveryId, result),
+          fail: (deliveryId, error) => self.failAdminChatDelivery(deliveryId, error),
+        },
       },
       // crab-memory：档位（visibility / scopes）由 manager 装配层按**发起人身份**算好
       // （`manager/principal.ts` + `memoryContextFor`），这里只负责按算好的档位现建 server。
@@ -1649,11 +1658,9 @@ export class UnifiedAgent extends ModuleBase {
    * **按 key 冷却**：F1 会把整批输入推回 mailbox 下次重投，同一批消息可能连续失败若干轮；
    * 没有冷却就是刷屏。冷却命中时只记日志，不再发第二条。
    *
-   * **admin chat 走 `chat_callback` 而不是 `send_message`**（传 `adminChatRequestId` 即切换）：
-   * 判据（`ManagerEpisodeFailure`）、文案（`buildFailLoudText`）、冷却表全部共用，**只有出站
-   * 那一跳不同**。admin-web 伪 channel 的 `send_message` 落到 `chat_push`（**追加**一条新消息），
-   * 前端那个转圈的占位气泡靠 `request_id` 匹配 `chat_reply` 才会被替换掉 —— 只有
-   * `chat_callback` 能收口它。兜底文案是纯文本，`chat_reply` 的 string content 装得下，无损。
+   * **admin chat 的兜底直出走带 delivery 事务的 `send_message`**（P6-A §11.11；chat_callback
+   * 已退役）：判据（`ManagerEpisodeFailure`）、文案（`buildFailLoudText`）、冷却表全部共用，
+   * 占位气泡靠 delivery 的 request_ids CAS 结算。
    *
    * **`subject` 切换成"非人类触发"文案**（定时任务 / worker 事件，见
    * `sendBackgroundFailLoud`）：判据、冷却、出站那一跳全部照旧，只有正文换成第三人称的
@@ -1685,12 +1692,8 @@ export class UnifiedAgent extends ModuleBase {
     try {
       const text = subject === undefined ? buildFailLoudText(failure) : buildBackgroundFailLoudText(subject, failure)
       if (adminChatRequestId !== undefined) {
-        await this.rpcClient.call(
-          await this.getAdminPort(),
-          'chat_callback',
-          { request_id: adminChatRequestId, reply_type: 'direct_reply', content: text },
-          this.config.moduleId,
-        )
+        // P6-A §11.11：fail-loud 直回同样走 admin-web send_message 入口（delivery 事务）。
+        await this.deliverDirectAdminChatReply(adminChatRequestId, text)
       } else {
         const channelPort = await this.getChannelPort(channelId)
         await this.rpcClient.call(
@@ -1721,7 +1724,7 @@ export class UnifiedAgent extends ModuleBase {
    *
    * 1. **文案换第三人称并点名 `subject`**：这两条路上没人刚说话，"暂时回不了你"是错的；
    * 2. **admin-web 一律投 `system-tasks` 线程**：admin 的 `storeAssistantMessage` 只在
-   *    `session_id === 'admin-chat'` 时 `claimPendingRequestId()`——把当时在飞的那条人类
+   *    `session_id === 'admin-chat'` 时按 request 认领（P6-A 后由 delivery CAS 结算）——把当时在飞的那条人类
    *    提问的占位气泡**机会主义地**认领掉（chat-manager.ts:454）。故障期人类消息与定时任务
    *    常常一起失败，正是最容易撞上的时刻：撞上就等于"人类的问题被一句『定时任务没跑成』
    *    顶替，自己的气泡永远转圈"。改投 `system-tasks` 后不认领任何 request_id，而两个
@@ -2100,10 +2103,27 @@ export class UnifiedAgent extends ModuleBase {
         !Number.isFinite(Date.parse(consumeResult.expires_at)) || Date.parse(consumeResult.expires_at) <= Date.now()) {
         throw new Error('invalid admin chat assertion consumption result')
       }
-      await this.requireManagerStack().principals.activateAdminChat('admin-web::admin-chat', {
+      // P6-A §11：assertion 核销后先过 durable inbound index——exact 已有幂等 accepted
+      // 不重复 wake；冲突拒绝；缺失才把完整可重放 wake envelope 原子写入 journal
+      // （commit 后才往下走 Manager 唤醒）。assertion consumed 不能代替 wake commit：
+      // 崩溃在两步之间时 Admin pending outbox 会签新 assertion 重放同一 exact message，
+      // 由这里的 index 判定为 duplicate，保证最终只有一条 wake。
+      const stack = this.requireManagerStack()
+      await stack.principals.activateAdminChat('admin-web::admin-chat', {
         assertionId: parseAdminChatAssertionId(admin_chat_assertion),
         expiresAt: consumeResult.expires_at,
       })
+      const admission = await this.adminChatCorrelationStore().admitInbound({
+        kind: 'admin_chat_wake',
+        request_id: callback_info.request_id,
+        manager_key: 'admin-web::admin-chat' as ManagerKey,
+        message_sha256: sha256CanonicalJson(message),
+        message,
+        received_at: new Date().toISOString(),
+      })
+      if (admission === 'duplicate') {
+        return { decision_types: [] }
+      }
       return this.processAdminChatMessage(message, callback_info)
     }
 
@@ -2134,15 +2154,11 @@ export class UnifiedAgent extends ModuleBase {
     const sessionId = 'admin-chat'
 
     if (!this.isConfigured()) {
-      await this.rpcClient.call(
-        await this.getAdminPort(),
-        'chat_callback',
-        {
-          request_id: callbackInfo.request_id,
-          reply_type: 'direct_reply',
-          content: 'Crabot 尚未配置 LLM 模型。请在全局设置中完成配置后重试。',
-        },
-        this.config.moduleId,
+      // P6-A §11.11：未配置直回也走同一个 admin-web send_message 入口（delivery 事务），
+      // chat_callback 不再写消息。
+      await this.deliverDirectAdminChatReply(
+        callbackInfo.request_id,
+        'Crabot 尚未配置 LLM 模型。请在全局设置中完成配置后重试。',
       )
       return { decision_types: [] }
     }
@@ -2160,6 +2176,7 @@ export class UnifiedAgent extends ModuleBase {
         sessionId,
         [message],
         MASTER_FRIEND,
+        { admin_chat_request_ids: [callbackInfo.request_id] },
       )
     } catch (err) {
       // F2：episode 中途抛错。
@@ -3009,6 +3026,178 @@ export class UnifiedAgent extends ModuleBase {
     }
   }
 
+  /** P6-A §11.9：启动重放未确认 outbound——同 ID/payload 重发，Admin 幂等后标 confirmed。 */
+  private async replayPendingAdminChatOutbounds(): Promise<void> {
+    const key = 'admin-web::admin-chat' as ManagerKey
+    const store = this.adminChatCorrelationStore()
+    try {
+      const pending = await store.pendingOutbounds(key)
+      for (const record of pending) {
+        try {
+          const payload = record.payload as { session_id: string; content: unknown }
+          await this.rpcClient.call(
+            await this.getAdminPort(),
+            'send_message',
+            {
+              session_id: payload.session_id,
+              content: payload.content,
+              delivery_id: record.delivery_id,
+              request_ids: record.request_ids,
+            },
+            this.config.moduleId,
+          )
+          await this.confirmAdminChatDelivery(record.delivery_id, undefined)
+        } catch (error) {
+          console.warn(`[${this.config.moduleId}] admin chat outbound replay pending for ${record.delivery_id}:`,
+            error instanceof Error ? error.message : String(error))
+        }
+      }
+    } catch (error) {
+      console.error(`[${this.config.moduleId}] admin chat outbound replay scan failed:`, error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /** P6-A §3.2：启动重放未结算 Admin Chat wake——完整可重放 envelope 原样回 Manager。 */
+  private async replayPendingAdminChatWakes(): Promise<void> {
+    const stack = this.managerStack
+    if (!stack) return
+    try {
+      const keys = await this.adminChatCorrelationStore().managersWithPendingWakes()
+      for (const key of keys) {
+        const pending = await this.adminChatCorrelationStore().pendingWakes(key)
+        for (const wake of pending) {
+          try {
+            await stack.registry.routeHumanMessages(
+              'admin-web',
+              'admin-chat',
+              [wake.message],
+              MASTER_FRIEND,
+              { admin_chat_request_ids: [wake.request_id] },
+            )
+          } catch (error) {
+            console.error(`[${this.config.moduleId}] admin chat wake replay failed for ${wake.request_id}:`,
+              error instanceof Error ? error.message : String(error))
+          }
+        }
+      }
+    } catch (error) {
+      console.error(`[${this.config.moduleId}] admin chat wake replay scan failed:`, error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /** P6-A §3.2/§3.5：Admin Chat correlation 持久化（inbound wake journal + outbound delivery）。 */
+  private adminChatCorrelationStore(): import('./manager/chat-correlation-store.js').AdminChatCorrelationStore {
+    if (!this.adminChatCorrelationStoreInstance) {
+      this.adminChatCorrelationStoreInstance = new AdminChatCorrelationStore(path.join(getAgentDataDir(), 'managers'))
+    }
+    return this.adminChatCorrelationStoreInstance
+  }
+
+  /** P6-A §11.7：Admin Chat 出站 delivery prepare——claim IDs + staging + prepared 落盘。 */
+  private async prepareAdminChatDelivery(
+    entry: import('./agent/outbound-flush.js').OutboundBufferEntry,
+    content: { type: string; text?: string; media_url?: string; file_path?: string; filename?: string },
+  ): Promise<{ delivery_id: string; request_ids: string[] } | undefined> {
+    const stack = this.managerStack
+    if (!stack) return undefined
+    const key = 'admin-web::admin-chat' as ManagerKey
+    // 原子 claim 本 episode 尚未 claim 的 ID；全部被 claim 过则本条是追加/proactive（空 IDs）。
+    const requestIds = stack.registry.claimAdminChatRequestIds(key)
+    const deliveryId = generateId()
+    const store = this.adminChatCorrelationStore()
+    // local attachment 先复制进 Agent-owned staging 并记 raw-byte digest（§3.5）；
+    // prepared payload 引用稳定 staged 副本，不依赖 restart 后仍存在的源路径。
+    let finalContent = content
+    if (entry.file_path) {
+      finalContent = await this.stageDeliveryAttachment(key, deliveryId, content, entry.file_path)
+    }
+    await store.prepareOutbound({
+      delivery_id: deliveryId,
+      manager_key: key,
+      request_ids: requestIds,
+      target_session: { channel_id: entry.channel_id, session_id: entry.session_id },
+      payload_sha256: dispatchPayloadSha256({
+        session_id: entry.session_id,
+        content: finalContent,
+        request_ids: requestIds,
+        task_id: null,
+      }),
+      payload: { session_id: entry.session_id, content: finalContent },
+    })
+    return { delivery_id: deliveryId, request_ids: requestIds }
+  }
+
+  /** local attachment → Agent-owned per-delivery staging（记 raw-byte digest）。 */
+  private async stageDeliveryAttachment(
+    key: ManagerKey,
+    deliveryId: string,
+    content: { type: string; text?: string; media_url?: string; file_path?: string; filename?: string },
+    filePath: string,
+  ): Promise<{ type: string; text?: string; media_url?: string; file_path?: string; filename?: string }> {
+    const store = this.adminChatCorrelationStore()
+    const stagingDir = store.stagingDir(key, deliveryId)
+    fs.mkdirSync(stagingDir, { recursive: true, mode: 0o700 })
+    const bytes = fs.readFileSync(filePath)
+    const digest = createHash('sha256').update(bytes).digest('hex')
+    const stagedName = `${path.basename(filePath)}.${digest.slice(0, 12)}`
+    const stagedPath = path.join(stagingDir, stagedName)
+    fs.writeFileSync(stagedPath, bytes, { mode: 0o600 })
+    const clone = JSON.parse(JSON.stringify(content)) as Record<string, unknown>
+    if (clone.file_path === filePath) clone.file_path = stagedPath
+    return clone as unknown as { type: string; text?: string; media_url?: string; file_path?: string; filename?: string }
+  }
+
+  /**
+   * P6-A §11.11：不经 LLM 的 Admin Chat 直回（未配置/fail-loud）——与 manager 回话共用
+   * 同一个 admin-web send_message 入口和 delivery 事务。request 仍 pending 时带上 ID
+   * 一次性结算；已结算则 proactive 追加（不携带 IDs，不碰 pending index）。
+   */
+  private async deliverDirectAdminChatReply(requestId: string, text: string): Promise<void> {
+    const key = 'admin-web::admin-chat' as ManagerKey
+    const store = this.adminChatCorrelationStore()
+    const index = await store.readRequestIndex(key)
+    const requestIds = index.get(requestId)?.status === 'pending' ? [requestId] : []
+    const deliveryId = generateId()
+    const content = { type: 'text', text }
+    await store.prepareOutbound({
+      delivery_id: deliveryId,
+      manager_key: key,
+      request_ids: requestIds,
+      target_session: { channel_id: 'admin-web', session_id: 'admin-chat' },
+      payload_sha256: dispatchPayloadSha256({ session_id: 'admin-chat', content, request_ids: requestIds, task_id: null }),
+      payload: { session_id: 'admin-chat', content },
+    })
+    try {
+      await this.rpcClient.call(
+        await this.getAdminPort(),
+        'send_message',
+        { session_id: 'admin-chat', content, delivery_id: deliveryId, request_ids: requestIds },
+        this.config.moduleId,
+      )
+    } catch (error) {
+      await store.markOutbound(key, deliveryId, 'failed')
+      throw error
+    }
+    await this.confirmAdminChatDelivery(deliveryId, undefined)
+  }
+
+  /** Admin 确认 commit：delivery confirmed + request claim settled + wake 结算 + staging 清理。 */
+  private async confirmAdminChatDelivery(deliveryId: string, _result: unknown): Promise<void> {
+    const key = 'admin-web::admin-chat' as ManagerKey
+    const store = this.adminChatCorrelationStore()
+    const record = await store.readOutbound(key, deliveryId)
+    if (!record) return
+    await store.markOutbound(key, deliveryId, 'confirmed')
+    await store.settleInbound(key, record.request_ids)
+    await store.cleanStaging(key, deliveryId)
+  }
+
+  /** 发送失败/结果未知：delivery 保持可重试（Agent restart reconcile 复用同一 ID 重放）。 */
+  private async failAdminChatDelivery(deliveryId: string, _error: unknown): Promise<void> {
+    const key = 'admin-web::admin-chat' as ManagerKey
+    await this.adminChatCorrelationStore().markOutbound(key, deliveryId, 'failed')
+  }
+
   /** P6-A §8.10：Agent-owned native copy store（live source 消失后的降级真相）。 */
   private nativeTraceCopyStore(): NativeTraceCopyStore {
     if (!this.nativeTraceCopyStoreInstance) {
@@ -3149,6 +3338,12 @@ export class UnifiedAgent extends ModuleBase {
     await this.managerStack?.principals.init()
     // P6-A §7.7：开放 Manager read model 前先收口遗留 running episode（failed/interrupted）。
     this.traceStore.reconcileInterruptedManagerEpisodes()
+    // P6-A §3.2：重放未结算的 Admin Chat wake（assertion 已核销但 wake 未送达 Manager 的
+    // 崩溃窗口由这里的重放兜底；同一 request ID 只恢复一次）。
+    await this.replayPendingAdminChatWakes()
+    // P6-A §11.9：重放 prepared/failed 的 outbound delivery（同一 delivery_id/payload，
+    // Admin 幂等返回首次结果后再标 confirmed 并结算）。
+    await this.replayPendingAdminChatOutbounds()
     this.startEventLoopWatchdog()
     // trace 的 in-flight 持久化：每 15s 覆盖写 traces-running-v3.jsonl，让 agent
     // 被 SIGKILL 时主 task trace 仍能保留到最后一次 flush 的状态。

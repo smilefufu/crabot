@@ -265,19 +265,31 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
   }
 
   /** 走真实 RPC 入口（`handleProcessMessage`），不直接调私有方法。 */
+  let requestCounter = 0
   function runAdminChat(
     message: ChannelMessage = amsg({ id: 'a-1' }),
+    requestId?: string,
   ): Promise<{ decision_types: string[]; task_ids?: string[] }> {
+    // P6-A：durable inbound CAS 按 request_id 判重——每次入站必须唯一 ID（与生产一致）。
+    requestCounter += 1
+    const effectiveRequestId = requestId ?? `${REQUEST_ID}-${requestCounter}`
     return internals.handleProcessMessage({
       message,
       source_type: 'admin_chat',
-      callback_info: CALLBACK_INFO,
+      callback_info: { source_module_id: CALLBACK_INFO.source_module_id, request_id: effectiveRequestId },
       admin_chat_assertion: ADMIN_CHAT_ASSERTION,
     })
   }
 
   function callbacksOf(replyType: string): Array<Record<string, unknown>> {
     return rpcCalls.filter((c) => c.method === 'chat_callback' && c.params.reply_type === replyType).map((c) => c.params)
+  }
+
+  /** P6-A §11.11：直回（未配置/fail-loud）走 admin-web send_message + delivery 事务。 */
+  function directDeliveries(): Array<{ delivery_id?: string; request_ids?: string[]; content?: { text?: string } }> {
+    return rpcCalls
+      .filter((c) => c.method === 'send_message' && (c.params as { delivery_id?: string }).delivery_id !== undefined)
+      .map((c) => c.params as { delivery_id?: string; request_ids?: string[]; content?: { text?: string } })
   }
 
   function principal(): ResolvedPrincipalView | undefined {
@@ -562,12 +574,12 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
       const result = await runAdminChat()
 
       expect(result).toEqual({ decision_types: [] })
-      const cb = callbacksOf('direct_reply')
-      expect(cb).toHaveLength(1)
-      expect(cb[0]).toMatchObject({
-        request_id: REQUEST_ID,
-        content: 'Crabot 尚未配置 LLM 模型。请在全局设置中完成配置后重试。',
-      })
+      const deliveries = directDeliveries()
+      expect(deliveries).toHaveLength(1)
+      expect(deliveries[0].content?.text).toBe('Crabot 尚未配置 LLM 模型。请在全局设置中完成配置后重试。')
+      expect(deliveries[0].request_ids).toEqual([expect.stringContaining(REQUEST_ID)])
+      // chat_callback 退役后不再出现
+      expect(callbacksOf('direct_reply')).toHaveLength(0)
       expect(script.streams).toHaveLength(0)
       expectThreeNots()
     })
@@ -604,10 +616,10 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
       })
     }
 
-    /** 兜底文案的唯一观测口：`chat_callback` 的 content（不是 `send_message`）。 */
+    /** 兜底文案的观测口：delivery 事务的 send_message content（chat_callback 已退役）。 */
     function failLoudText(): string | undefined {
-      const cbs = callbacksOf('direct_reply')
-      return cbs.length > 0 ? (cbs[cbs.length - 1].content as string) : undefined
+      const deliveries = directDeliveries()
+      return deliveries.length > 0 ? deliveries[deliveries.length - 1].content?.text : undefined
     }
 
     it('F1：真实 loop 里 LLM 挂掉（不抛错）时 master 仍然收到一条明确回执', async () => {
@@ -623,9 +635,9 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
 
       await expect(runAdminChat()).resolves.toEqual({ decision_types: [] })
 
-      const cb = callbacksOf('direct_reply')
-      expect(cb, 'F1 下 Master Chat 什么都收不到 = 只剩一个转不完的圈').toHaveLength(1)
-      expect(cb[0]).toMatchObject({ request_id: REQUEST_ID })
+      const deliveries = directDeliveries()
+      expect(deliveries, 'F1 下 Master Chat 什么都收不到 = 只剩一个转不完的圈').toHaveLength(1)
+      expect(deliveries[0].request_ids?.[0]).toContain(REQUEST_ID)
       expect(failLoudText()).toContain('管理员')
       expectThreeNots()
     })
@@ -710,17 +722,17 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
      * 出站那一跳的判据：**必须是 `chat_callback`**。走 admin-web 伪 channel 的
      * `send_message` 会落到 `chat_push`（追加），占位气泡不会被收口。
      */
-    it('兜底走 chat_callback 而不是伪 channel 的 send_message（占位气泡才收得了口）', async () => {
+    it('兜底走带 delivery 事务的 send_message（chat_callback 已退役，占位气泡靠 request_ids 结算）', async () => {
       boot()
       stubOutcome('failed')
 
       await runAdminChat()
 
-      const cb = rpcCalls.filter((c) => c.method === 'chat_callback')
-      expect(cb).toHaveLength(1)
-      expect(cb[0].port).toBe(ADMIN_PORT)
-      expect(cb[0].params).toMatchObject({ request_id: REQUEST_ID, reply_type: 'direct_reply' })
-      expect(rpcCalls.find((c) => c.method === 'send_message')).toBeUndefined()
+      const deliveries = directDeliveries()
+      expect(deliveries).toHaveLength(1)
+      expect(deliveries[0].delivery_id).toBeTruthy()
+      expect(deliveries[0].request_ids?.[0]).toContain(REQUEST_ID)
+      expect(rpcCalls.filter((c) => c.method === 'chat_callback')).toHaveLength(0)
     })
 
     it('冷却去重：连续三轮失败只往消息库里落一条兜底文案', async () => {
@@ -731,7 +743,7 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
         await runAdminChat(amsg({ id: `a-${i}` })).catch(() => {/* 冷却命中会抛，见下一条 */})
       }
 
-      expect(rpcCalls.filter((c) => c.method === 'chat_callback')).toHaveLength(1)
+      expect(directDeliveries()).toHaveLength(1)
     })
 
     /**
@@ -754,7 +766,7 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
       internals.failLoudSentAt.set('admin-web::admin-chat', Date.now() - 6 * 60 * 1000)
       await runAdminChat(amsg({ id: 'a-2' }))
 
-      expect(rpcCalls.filter((c) => c.method === 'chat_callback')).toHaveLength(2)
+      expect(directDeliveries()).toHaveLength(2)
     })
 
     it('冷却按 key 隔离：admin chat 的冷却不吃掉 channel 会话那边的兜底', async () => {
@@ -770,12 +782,12 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
      * 兜底路径与 manager 栈零共享：manager 彻底坏掉（registry 直接抛）时这条回执仍然发得出去
      * ——它只依赖 rpcClient + admin 端口。`chat_callback` 也失败才抛回调用方。
      */
-    it('chat_callback 自身也失败时，把异常抛回调用方而不是静默吞掉', async () => {
+    it('兜底 delivery 发送失败时，把异常抛回调用方而不是静默吞掉', async () => {
       boot()
       stubOutcome('failed')
       const realCall = internals.rpcClient.call
       internals.rpcClient.call = async (port, method, params, from) => {
-        if (method === 'chat_callback') throw new Error('admin unreachable')
+        if (method === 'send_message' && (params as { delivery_id?: string }).delivery_id !== undefined) throw new Error('admin unreachable')
         return realCall(port, method, params, from)
       }
 

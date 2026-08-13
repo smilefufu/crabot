@@ -8,7 +8,10 @@ import { IncomingMessage } from 'node:http'
 import { Socket } from 'node:net'
 import { WebSocket, WebSocketServer } from 'ws'
 import { generateId, generateTimestamp, sha256CanonicalJson, type RpcClient, type TaskId } from 'crabot-shared'
+import { createHash } from 'node:crypto'
 import { AdminChatAssertions } from './admin-chat-assertions.js'
+import { ChatRequestIndex } from './chat-request-index.js'
+import { ChatDeliveryJournalStore, type ChatDeliveryJournalRecord } from './chat-delivery-journal.js'
 import { MediaStore } from './media-store.js'
 import type {
   ChatMessage,
@@ -37,13 +40,54 @@ function inferImageMimeType(filenameOrPath: string | undefined): string | undefi
   return IMAGE_MIME_BY_EXT[path.extname(filenameOrPath).toLowerCase()]
 }
 
+/** P6-A §11.1：WS 与 multipart 共用的入站指纹（exact text 不 normalize；附件按请求顺序）。 */
+function computeInboundFingerprintV1(input: {
+  text: string
+  files: Array<{ buffer: Buffer; filename: string; mime_type: string }>
+}): string {
+  return createHash('sha256').update(JSON.stringify({
+    v: 1,
+    text: input.text,
+    attachments: input.files.map((file) => ({
+      sha256: createHash('sha256').update(file.buffer).digest('hex'),
+      size: file.buffer.length,
+      filename: file.filename,
+      mime_type: file.mime_type ? file.mime_type.toLowerCase() : null,
+    })),
+  })).digest('hex')
+}
+
+/** 发给 Agent 的 ChannelMessage（Admin 构造的 exact wire shape，首次生成后固定）。 */
+interface AgentBoundChannelMessage {
+  platform_message_id: string
+  session: { session_id: string; channel_id: string; type: 'private' }
+  sender: { friend_id: string; platform_user_id: string; platform_display_name: string }
+  content: MessageContent
+  features: { is_mention_crab: boolean }
+  platform_timestamp: string
+}
+
+/** 入站 dispatch outbox journal 记录（§3.4）。 */
+interface InboundDispatchJournalRecord {
+  readonly kind: 'admin_chat_inbound_dispatch'
+  readonly request_id: string
+  /** 首次生成后固定的完整 Agent ChannelMessage（每次 attempt 原样重放）。 */
+  readonly message: AgentBoundChannelMessage
+  attempt: number
+  status: 'pending_dispatch' | 'agent_accepted'
+  readonly created_at: string
+}
+
 export class ChatManager {
   private messages: Map<string, ChatMessage> = new Map()
   private wsServer: WebSocketServer | null = null
   private activeClient: WebSocket | null = null
-  private pendingRequests: Map<string, { timestamp: number }> = new Map()
   private readonly messagesFilePath: string
   private readonly assertions: AdminChatAssertions
+  /** P6-A §3.4：request 级 CAS 真相源（fingerprint 幂等/冲突判据）。 */
+  private readonly requestIndex: ChatRequestIndex
+  /** P6-A §3.4/§11.8：delivery 事务 journal（prepared/committing/committed/rolled_back）。 */
+  private readonly deliveryJournal: ChatDeliveryJournalStore
 
   constructor(
     private readonly dataDir: string,
@@ -55,6 +99,8 @@ export class ChatManager {
   ) {
     this.messagesFilePath = path.join(dataDir, 'chat_messages.json')
     this.assertions = new AdminChatAssertions(dataDir, jwtSecret)
+    this.requestIndex = new ChatRequestIndex(dataDir)
+    this.deliveryJournal = new ChatDeliveryJournalStore(dataDir)
   }
 
   // ==========================================================================
@@ -63,6 +109,7 @@ export class ChatManager {
 
   async loadData(): Promise<void> {
     await this.assertions.load()
+    await this.requestIndex.load()
     try {
       const data = await fs.readFile(this.messagesFilePath, 'utf-8')
       // content 字段可能是旧格式（string），需要 hydrate 为 MessageContent
@@ -178,94 +225,180 @@ export class ChatManager {
       return
     }
 
-    // 存储用户消息（WS 纯文本路径：content 字段包装为 MessageContent）
-    const userMessage: ChatMessage = {
-      message_id: generateId(),
-      role: 'user',
-      content: { type: 'text', text: data.content },
+    // P6-A §11.2-4：先 fingerprint CAS 判重，再入站事务（message+index+outbox journal）。
+    const admission = await this.admitInbound({
       request_id: data.request_id,
-      timestamp: generateTimestamp(),
+      text: data.content,
+      files: [],
+      agentContent: { type: 'text', text: data.content },
+      storeContent: { type: 'text', text: data.content },
+    })
+    if (admission.kind === 'duplicate') return
+    if (admission.kind === 'conflict') {
+      this.pushToClient({ type: 'chat_error', request_id: data.request_id, error: 'request_id 已被不同内容占用（409）' })
+      return
     }
-    this.messages.set(userMessage.message_id, userMessage)
-    await this.saveData()
+  }
 
-    // WS 纯文本路径：agent 侧 content 与落库 content 相同
-    await this.dispatchToAgent(userMessage, data.request_id, { type: 'text', text: data.content })
+  // ==========================================================================
+  // P6-A §11：入站 CAS + dispatch outbox
+  // ==========================================================================
+
+  private inboundJournalPath(requestId: string): string {
+    return path.join(this.dataDir, 'chat-inbound-dispatch-journal', `${requestId}.json`)
+  }
+
+  private async readInboundJournal(requestId: string): Promise<InboundDispatchJournalRecord | null> {
+    try {
+      const raw = await fs.readFile(this.inboundJournalPath(requestId), 'utf-8')
+      return JSON.parse(raw) as InboundDispatchJournalRecord
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+      throw error
+    }
+  }
+
+  private async writeInboundJournal(record: InboundDispatchJournalRecord): Promise<void> {
+    const filePath = this.inboundJournalPath(record.request_id)
+    await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 })
+    const tmpPath = `${filePath}.tmp-${generateId()}`
+    await fs.writeFile(tmpPath, JSON.stringify(record), { mode: 0o600 })
+    await fs.rename(tmpPath, filePath)
   }
 
   /**
-   * 向 Agent 发送 process_message（入站双路径共用）。
-   * pendingRequests.set / chat_status / rpcClient.call / catch 推 chat_error 全部在此。
+   * 入站统一判准（WS 纯文本 + HTTP multipart 共用）：
+   * per-request mutex 内、任何 MediaStore promotion/chat 写入之前计算 fingerprint 并查 index。
+   * exact duplicate → duplicate（零 media/chat/index mutation，不触发第二 loop、不停止已有
+   * pending loop）；同 ID 不同 fingerprint/session → conflict（409，零 mutation）；
+   * 新请求 → user message/placeholder、request index、完整 inbound dispatch outbox 作为
+   * crash-recoverable 事务提交，然后起 dispatch loop。
    */
-  private async dispatchToAgent(
-    userMessage: ChatMessage,
-    requestId: string,
-    agentContent: MessageContent,
-  ): Promise<void> {
-    // 记录 pending request
-    this.pendingRequests.set(requestId, { timestamp: Date.now() })
-
-    // 推送处理中状态
-    this.pushToClient({
-      type: 'chat_status',
-      request_id: requestId,
-      status: 'processing',
-    })
-
-    // 调用 Agent process_message
-    try {
-      const agentPort = await this.resolveAgentPort()
-      if (!agentPort) {
-        throw new Error('Agent module not available')
+  private async admitInbound(params: {
+    request_id: string
+    text: string
+    files: Array<{ buffer: Buffer; filename: string; mime_type: string }>
+    storeContent: MessageContent
+    agentContent: MessageContent
+  }): Promise<{ kind: 'admitted'; message: ChatMessage } | { kind: 'duplicate' } | { kind: 'conflict' }> {
+    return this.requestIndex.withMutex(params.request_id, async () => {
+      const fingerprint = computeInboundFingerprintV1({ text: params.text, files: params.files })
+      let admission: Awaited<ReturnType<ChatRequestIndex['admit']>>
+      try {
+        admission = await this.requestIndex.admit({
+          request_id: params.request_id,
+          session_id: 'admin-chat',
+          fingerprint,
+        })
+      } catch {
+        return { kind: 'conflict' }
       }
+      if (admission.kind === 'duplicate') return { kind: 'duplicate' }
 
-      const message = {
+      // 新请求：媒体先落 store（允许不可见可 GC 的 orphan），然后 user message +
+      // inbound dispatch outbox journal 原子提交——不允许可见 message 没有 outbox。
+      const userMessage: ChatMessage = {
+        message_id: generateId(),
+        role: 'user',
+        content: params.storeContent,
+        request_id: params.request_id,
+        timestamp: generateTimestamp(),
+      }
+      const agentMessage: AgentBoundChannelMessage = {
         platform_message_id: userMessage.message_id,
         session: { session_id: 'admin-chat', channel_id: 'admin-web', type: 'private' as const },
         sender: { friend_id: 'master', platform_user_id: 'master', platform_display_name: 'Master' },
-        content: agentContent,
+        content: params.agentContent,
         features: { is_mention_crab: false },
         platform_timestamp: userMessage.timestamp,
       }
-      const adminChatAssertion = this.assertions.issue({
-        requestId,
-        payloadSha256: sha256CanonicalJson(message),
+      const journal: InboundDispatchJournalRecord = {
+        kind: 'admin_chat_inbound_dispatch',
+        request_id: params.request_id,
+        message: agentMessage,
+        attempt: 0,
+        status: 'pending_dispatch',
+        created_at: userMessage.timestamp,
+      }
+      await this.writeInboundJournal(journal)
+      this.messages.set(userMessage.message_id, userMessage)
+      await this.saveData()
+      await this.requestIndex.attachUserMessage(params.request_id, userMessage.message_id)
+
+      this.pushToClient({ type: 'chat_status', request_id: params.request_id, status: 'processing' })
+      // dispatch loop 后台跑；重启由 reconcileInboundDispatches 兜底。
+      void this.runInboundDispatch(journal).catch((error) => {
+        console.error(`[ChatManager] inbound dispatch loop failed for ${params.request_id}:`,
+          error instanceof Error ? error.message : String(error))
       })
-      await this.rpcClient.callSensitive(
-        agentPort,
-        'process_message',
-        {
-          message,
-          source_type: 'admin_chat',
-          callback_info: {
-            source_module_id: 'admin-web',
-            request_id: requestId,
+      return { kind: 'admitted', message: userMessage }
+    })
+  }
+
+  /**
+   * dispatch loop：每次 attempt 签新的短 TTL assertion、重放首次固定的 exact message。
+   * 只有 Agent 在 wake commit 后返回才标 agent_accepted；timeout/EOF/unknown 保持
+   * pending_dispatch，Admin startup 在开放 chat ingress 前恢复重放。
+   */
+  private async runInboundDispatch(record: InboundDispatchJournalRecord): Promise<void> {
+    const MAX_ATTEMPTS = 5
+    while (record.status === 'pending_dispatch') {
+      try {
+        const agentPort = await this.resolveAgentPort()
+        if (!agentPort) throw new Error('Agent module not available')
+        record.attempt += 1
+        await this.writeInboundJournal(record)
+        const assertion = this.assertions.issue({
+          requestId: record.request_id,
+          payloadSha256: sha256CanonicalJson(record.message),
+        })
+        await this.rpcClient.callSensitive(
+          agentPort,
+          'process_message',
+          {
+            message: record.message,
+            source_type: 'admin_chat',
+            callback_info: { source_module_id: 'admin-web', request_id: record.request_id },
+            admin_chat_assertion: assertion,
           },
-          admin_chat_assertion: adminChatAssertion,
-        },
-        'admin-web'
-      )
-      // in-flight 窗口精确等于这次 RPC 的生命周期：`process_message` resolve 意味着 agent 侧
-      // 的 episode 已经结束，不存在合法的迟到认领——manager 回话走的是 episode 内的
-      // `send_message`（`unified-agent.processAdminChatMessage` 整段 await 了 episode），
-      // 失败兜底走的是 episode 内的 `chat_callback`，两条都在这一行之前就把它删掉了，
-      // 重复 delete 幂等。
-      //
-      // 不兜这一下的后果（PR #59 review）：agent 侧还有第四种收口——F3，episode 跑完但
-      // 一句话没说（只记日志）。那条路上没有任何一方删 request_id，它会**永久**留在
-      // pendingRequests 里；`claimPendingRequestId` 又是 FIFO 取最早那条，于是下一条回复
-      // 认领的是那具残骸：回复带着旧 request_id 落库并 chat_push，前端把**旧问题**的占位
-      // 换成**新问题**的答案，新问题的占位永远转圈——且此后每多一次沉默 episode 就整体
-      // 再错一位，不自愈。
-      this.pendingRequests.delete(requestId)
+          'admin-web',
+        )
+        record.status = 'agent_accepted'
+        await this.writeInboundJournal(record)
+        return
+      } catch (error) {
+        console.error(`[ChatManager] dispatch attempt ${record.attempt} failed for ${record.request_id}:`,
+          error instanceof Error ? error.message : String(error))
+        if (record.attempt >= MAX_ATTEMPTS) {
+          this.pushToClient({ type: 'chat_error', request_id: record.request_id, error: '系统暂时不可用，请稍后重试' })
+          return
+        }
+        await new Promise((resolve) => setTimeout(resolve, Math.min(1000 * 2 ** record.attempt, 10_000)))
+      }
+    }
+  }
+
+  /** startup：开放 chat ingress 前恢复 pending_dispatch 的入站 outbox。 */
+  async reconcileInboundDispatches(): Promise<void> {
+    let entries: string[]
+    try {
+      entries = await fs.readdir(path.join(this.dataDir, 'chat-inbound-dispatch-journal'))
     } catch (error) {
-      console.error('[ChatManager] Failed to call Agent:', error)
-      this.pushToClient({
-        type: 'chat_error',
-        request_id: requestId,
-        error: '系统暂时不可用，请稍后重试',
-      })
-      this.pendingRequests.delete(requestId)
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw error
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith('.json')) continue
+      try {
+        const record = JSON.parse(
+          await fs.readFile(path.join(this.dataDir, 'chat-inbound-dispatch-journal', entry), 'utf-8'),
+        ) as InboundDispatchJournalRecord
+        if (record.status !== 'pending_dispatch') continue
+        void this.runInboundDispatch(record).catch((error) => {
+          console.error(`[ChatManager] startup dispatch replay failed for ${record.request_id}:`,
+            error instanceof Error ? error.message : String(error))
+        })
+      } catch { /* 坏 record 隔离跳过 */ }
     }
   }
 
@@ -282,38 +415,87 @@ export class ChatManager {
     if (!text && params.files.length === 0) {
       throw new Error('Empty message')
     }
-    // 附件落 store，保留两个视图：URL 形态（落库/前端）与绝对路径形态（agent VLM 直读磁盘）
-    const saved = await Promise.all(
-      params.files.map((f) => this.mediaStore.saveBuffer(f.buffer, { filename: f.filename, mime_type: f.mime_type }))
-    )
-    const mediaForStore: MediaItem[] = saved.map((s) => s.item)
-    const mediaForAgent: MediaItem[] = saved.map((s) => ({ ...s.item, media_url: s.abs_path }))
-    const type = mediaForStore.length === 0
-      ? ('text' as const)
-      : mediaForStore.some((m) => m.mime_type.startsWith('image/'))
-        ? ('image' as const)
-        : ('file' as const)
 
-    const userMessage: ChatMessage = {
-      message_id: generateId(),
-      role: 'user',
-      content: {
+    // P6-A §11.1-3：fingerprint 在任何 MediaStore promotion/chat 写入之前计算；
+    // exact duplicate 返回既有状态（不二次 promote、不新 journal）。
+    const admission = await this.requestIndex.withMutex(params.request_id, async () => {
+      const fingerprint = computeInboundFingerprintV1({ text, files: params.files })
+      let verdict: Awaited<ReturnType<ChatRequestIndex['admit']>>
+      try {
+        verdict = await this.requestIndex.admit({ request_id: params.request_id, session_id: 'admin-chat', fingerprint })
+      } catch {
+        return { kind: 'conflict' as const }
+      }
+      if (verdict.kind === 'duplicate') return { kind: 'duplicate' as const, entry: verdict.entry }
+
+      // 新请求：附件落 store（允许不可见可 GC orphan），两个视图照旧。
+      const saved = await Promise.all(
+        params.files.map((f) => this.mediaStore.saveBuffer(f.buffer, { filename: f.filename, mime_type: f.mime_type }))
+      )
+      const mediaForStore: MediaItem[] = saved.map((savedItem) => savedItem.item)
+      const mediaForAgent: MediaItem[] = saved.map((savedItem) => ({ ...savedItem.item, media_url: savedItem.abs_path }))
+      const type = mediaForStore.length === 0
+        ? ('text' as const)
+        : mediaForStore.some((m) => m.mime_type.startsWith('image/'))
+          ? ('image' as const)
+          : ('file' as const)
+      const storeContent: MessageContent = {
         type,
         ...(text ? { text } : {}),
         ...(mediaForStore.length > 0 ? { media: mediaForStore, media_url: mediaForStore[0].media_url } : {}),
-      },
-      request_id: params.request_id,
-      timestamp: generateTimestamp(),
-    }
-    this.messages.set(userMessage.message_id, userMessage)
-    await this.saveData()
+      }
+      const agentContent: MessageContent = {
+        type,
+        ...(text ? { text } : {}),
+        ...(mediaForAgent.length > 0 ? { media: mediaForAgent, media_url: mediaForAgent[0].media_url } : {}),
+      }
 
-    await this.dispatchToAgent(userMessage, params.request_id, {
-      type,
-      ...(text ? { text } : {}),
-      ...(mediaForAgent.length > 0 ? { media: mediaForAgent, media_url: mediaForAgent[0].media_url } : {}),
+      const userMessage: ChatMessage = {
+        message_id: generateId(),
+        role: 'user',
+        content: storeContent,
+        request_id: params.request_id,
+        timestamp: generateTimestamp(),
+      }
+      const agentMessage: AgentBoundChannelMessage = {
+        platform_message_id: userMessage.message_id,
+        session: { session_id: 'admin-chat', channel_id: 'admin-web', type: 'private' as const },
+        sender: { friend_id: 'master', platform_user_id: 'master', platform_display_name: 'Master' },
+        content: agentContent,
+        features: { is_mention_crab: false },
+        platform_timestamp: userMessage.timestamp,
+      }
+      const journal: InboundDispatchJournalRecord = {
+        kind: 'admin_chat_inbound_dispatch',
+        request_id: params.request_id,
+        message: agentMessage,
+        attempt: 0,
+        status: 'pending_dispatch',
+        created_at: userMessage.timestamp,
+      }
+      await this.writeInboundJournal(journal)
+      this.messages.set(userMessage.message_id, userMessage)
+      await this.saveData()
+      await this.requestIndex.attachUserMessage(params.request_id, userMessage.message_id)
+      this.pushToClient({ type: 'chat_status', request_id: params.request_id, status: 'processing' })
+      void this.runInboundDispatch(journal).catch((error) => {
+        console.error(`[ChatManager] inbound dispatch loop failed for ${params.request_id}:`,
+          error instanceof Error ? error.message : String(error))
+      })
+      return { kind: 'admitted' as const, message: userMessage }
     })
-    return { message: userMessage }
+
+    if (admission.kind === 'conflict') {
+      const error = new Error(`chat request conflict: ${params.request_id}`)
+      ;(error as { code?: string }).code = 'ADMIN_CHAT_REQUEST_CONFLICT'
+      throw error
+    }
+    if (admission.kind === 'duplicate') {
+      const existing = admission.entry.user_message_id ? this.messages.get(admission.entry.user_message_id) : undefined
+      if (!existing) throw new Error(`duplicate request ${params.request_id} has no stored message`)
+      return { message: existing }
+    }
+    return { message: admission.message }
   }
 
   async consumeAdminChatAssertion(params: {
@@ -339,39 +521,12 @@ export class ChatManager {
   // RPC 回调
   // ==========================================================================
 
-  async handleChatCallback(params: ChatCallbackParams): Promise<ChatCallbackResult> {
-    // 存储 assistant 消息（chat_callback 仍传 string content，包装为 MessageContent）
-    const assistantMessage: ChatMessage = {
-      message_id: generateId(),
-      role: 'assistant',
-      content: { type: 'text', text: params.content },
-      request_id: params.request_id,
-      task_id: params.task_id,
-      timestamp: generateTimestamp(),
-    }
-    this.messages.set(assistantMessage.message_id, assistantMessage)
-    await this.saveData()
-
-    // 推送给客户端
-    this.pushToClient({
-      type: 'chat_reply',
-      request_id: params.request_id,
-      content: params.content,
-      task_id: params.task_id,
-      reply_type: params.reply_type,
-      status: params.reply_type === 'task_failed' ? 'failed' : 'completed',
-    })
-
-    // 清理 pending request
-    this.pendingRequests.delete(params.request_id)
-
-    // 带任务关联的回执（task_created / supplement）：回填触发它的 user 消息，
-    // 历史重载时消息级任务图标才有数据
-    if (params.task_id) {
-      await this.tagUserMessageByRequestId(params.request_id, params.task_id)
-    }
-
-    return { received: true }
+  /**
+   * P6-A §11.11：chat_callback 退役——v3 assistant 新写只有 Manager → crab-messaging →
+   * admin-web send_message 一条路；本 handler 只返回 retired 错误，不写消息、不结算占位。
+   */
+  async handleChatCallback(_params: ChatCallbackParams): Promise<ChatCallbackResult> {
+    throw new Error('chat_callback is retired: assistant replies must go through the admin-web send_message delivery transaction')
   }
 
   // ==========================================================================
@@ -379,42 +534,253 @@ export class ChatManager {
   // ==========================================================================
 
   async handleSendMessage(params: ChatSendMessageParams): Promise<ChatSendMessageResult> {
-    // P4 manager additive（task-8-brief.md）：放开 'system-tasks'（protocol-agent-v3 §4.4
-    // 保留的系统任务线程 key）以外的白名单不变——本分支 cutover 前没有任何调用方会传
-    // session_id='system-tasks'，默认行为（只认 'admin-chat'）不受影响。
+    // P6-A §11.6 严格校验：session 白名单；admin-chat 的 v3 delivery（含 proactive）必须带
+    // delivery_id；request_ids 重复整批拒绝；存在时全部 pending + 同 session 才可 commit。
     if (params.session_id !== 'admin-chat' && params.session_id !== 'system-tasks') {
       throw new Error(`Unknown chat session: ${params.session_id}`)
     }
-    const c = params.content
-    if (c.type === 'system_event') {
-      // system_event：text 是协议规定的人类可读 fallback，按纯文本落库
-      return this.storeAssistantMessage({ type: 'text', text: c.text ?? '' }, params.session_id)
+    const requestIds = params.request_ids ?? []
+    if (params.session_id === 'system-tasks' && requestIds.length > 0) {
+      throw new Error('system-tasks delivery must not carry request_ids')
     }
-    // 归一：media[] 权威；否则单 media_url / file_path 包装成单元素列表
+    if (params.session_id === 'admin-chat' && !params.delivery_id) {
+      throw new Error('delivery_id is required for admin-chat deliveries')
+    }
+    if (new Set(requestIds).size !== requestIds.length) {
+      throw new Error('duplicate request_id in request_ids')
+    }
+    for (const requestId of requestIds) {
+      const entry = this.requestIndex.get(requestId)
+      if (!entry || entry.session_id !== 'admin-chat' || entry.status !== 'pending') {
+        throw new Error(`request ${requestId} is not pending in admin-chat`)
+      }
+    }
+
+    const content = params.content
+    if (content.type === 'system_event') {
+      return this.storeAssistantMessage(
+        { type: 'text', text: content.text ?? '' },
+        params.session_id,
+        { requestIds, deliveryId: params.delivery_id },
+      )
+    }
+
+    // wire 原始 content 的稳定 hash（§11.7：不含 staging path/UUID/推断字段等服务端值）。
+    const payloadHash = createHash('sha256').update(JSON.stringify({
+      session_id: params.session_id,
+      content,
+      request_ids: requestIds,
+      task_id: null,
+    })).digest('hex')
+
+    if (!params.delivery_id) {
+      // system-tasks 等无 delivery_id 的 legacy/proactive 路径：直接写（幂等由调用方保证）。
+      return this.storeAssistantMessageFromContent(content, params.session_id, { requestIds })
+    }
+
+    return this.deliveryJournal.withMutex(params.delivery_id, async () => {
+      const existing = await this.deliveryJournal.read(params.delivery_id!)
+      if (existing) {
+        const sameIds = existing.request_ids.length === requestIds.length
+          && existing.request_ids.every((id, index) => id === requestIds[index])
+        if (existing.payload_sha256 !== payloadHash || !sameIds) {
+          const error = new Error(`delivery ${params.delivery_id} conflicts with a recorded delivery`)
+          ;(error as { code?: string }).code = 'ADMIN_CHAT_DELIVERY_CONFLICT'
+          throw error
+        }
+        if (existing.state === 'committed') {
+          // 幂等返回首次结果，不再读 local file / 重新分配 UUID。
+          return { platform_message_id: existing.platform_message_id!, sent_at: existing.sent_at! }
+        }
+        // prepared/committing：复用首次 journal 的 staging/planned UUID/finalized content 继续。
+        return this.commitDelivery(existing, requestIds)
+      }
+      // 首次 delivery：stage → prepared journal → commit。
+      const prepared = await this.prepareDelivery(params, content, requestIds, payloadHash)
+      return this.commitDelivery(prepared, requestIds)
+    })
+  }
+
+  /** 首次 delivery：媒体 stage + planned UUID/URL + finalized content 写入 prepared journal。 */
+  private async prepareDelivery(
+    params: ChatSendMessageParams,
+    content: MessageContent,
+    requestIds: string[],
+    payloadHash: string,
+  ): Promise<ChatDeliveryJournalRecord> {
+    const deliveryId = params.delivery_id!
+    const stagingDir = this.deliveryJournal.stagingDir(deliveryId)
+    const incoming: Array<Pick<MessageContent, 'media_url' | 'file_path' | 'filename' | 'mime_type'>> =
+      content.media?.length
+        ? content.media.map((m) => ({ media_url: m.media_url, filename: m.filename, mime_type: m.mime_type }))
+        : (content.media_url ?? content.file_path) ? [content] : []
+
+    const plannedMedia: ChatDeliveryJournalRecord['planned_media'] = []
+    const mediaItems: MediaItem[] = []
+    const failures: string[] = []
+    for (const item of incoming) {
+      try {
+        if (item.media_url?.startsWith('http://') || item.media_url?.startsWith('https://')) {
+          mediaItems.push({
+            media_url: item.media_url,
+            mime_type: item.mime_type ?? 'application/octet-stream',
+            ...(item.filename !== undefined ? { filename: item.filename } : {}),
+          })
+        } else {
+          const localPath = item.file_path ?? item.media_url
+          if (!localPath) continue
+          const mimeType = item.mime_type
+            ?? (content.type === 'image' ? inferImageMimeType(item.filename) ?? inferImageMimeType(localPath) : undefined)
+          const buffer = await fs.readFile(localPath)
+          const staged = await this.mediaStore.stageBuffer(buffer, {
+            filename: item.filename ?? path.basename(localPath),
+            mime_type: mimeType ?? 'application/octet-stream',
+          }, stagingDir)
+          plannedMedia.push({
+            staged_path: staged.staged_path,
+            planned_media_id: staged.planned_id,
+            planned_media_url: staged.media_url,
+            entry: staged.entry,
+          })
+          mediaItems.push({
+            media_url: staged.media_url,
+            mime_type: staged.entry.mime_type,
+            filename: staged.entry.filename,
+            size: staged.entry.size,
+          })
+        }
+      } catch {
+        failures.push(item.filename ?? item.file_path ?? item.media_url ?? '未知附件')
+      }
+    }
+
+    // 降级结果在 prepare 时定型（retry/restart 不重新决定）。
+    const failureNote = failures.length > 0 ? `\n[附件收存失败: ${failures.join(', ')}]` : ''
+    const text = `${content.text ?? ''}${failureNote}`.trim()
+    if (!text && mediaItems.length === 0) throw new Error('Empty message content')
+    const type = mediaItems.length === 0
+      ? ('text' as const)
+      : mediaItems.some((m) => m.mime_type.startsWith('image/')) ? ('image' as const) : ('file' as const)
+    const finalizedContent: MessageContent = {
+      type,
+      ...(text ? { text } : {}),
+      ...(mediaItems.length > 0 ? { media: mediaItems, media_url: mediaItems[0].media_url } : {}),
+    }
+    return this.deliveryJournal.prepare({
+      delivery_id: deliveryId,
+      request_ids: requestIds,
+      payload_sha256: payloadHash,
+      session_id: params.session_id,
+      planned_media: plannedMedia,
+      finalized_content: finalizedContent,
+    })
+  }
+
+  /** journal 确定性 commit：media promotion + assistant message + request settlement + index。 */
+  private async commitDelivery(
+    journal: ChatDeliveryJournalRecord,
+    requestIds: string[],
+  ): Promise<ChatSendMessageResult> {
+    await this.deliveryJournal.transition(journal.delivery_id, 'committing')
+    const finalized = journal.finalized_content as MessageContent
+    const promoted: string[] = []
+    try {
+      // media promotion 按 planned UUID（幂等）。
+      for (const planned of journal.planned_media) {
+        await this.mediaStore.promoteStaged(planned.staged_path, planned.entry as never)
+        promoted.push(planned.planned_media_id)
+      }
+      const result = await this.storeAssistantMessage(finalized, journal.session_id, {
+        requestIds,
+        deliveryId: journal.delivery_id,
+        push: false,
+      })
+      // request settlement：placeholder 与 message 同生共死。
+      for (const requestId of requestIds) {
+        await this.requestIndex.settle(requestId, result.platform_message_id)
+      }
+      await this.deliveryJournal.transition(journal.delivery_id, 'committed', {
+        platform_message_id: result.platform_message_id,
+        sent_at: result.sent_at,
+      })
+      await this.deliveryJournal.cleanStaging(journal.delivery_id)
+      // commit 后才 chat_push；无 WS 也算成功（refresh 从 history 可见）。
+      const message = this.messages.get(result.platform_message_id)
+      if (message) this.pushToClient({ type: 'chat_push', message })
+      return result
+    } catch (error) {
+      // Browser 可见前 rollback：撤掉消息（未 push）；media orphan 留待 GC。
+      await this.deliveryJournal.transition(journal.delivery_id, 'rolled_back')
+      throw error
+    }
+  }
+
+  /** startup：reconcile delivery journal——committing 确定性补完，prepared 回滚重来。 */
+  async reconcileDeliveries(): Promise<void> {
+    const pending = await this.deliveryJournal.pendingJournals()
+    for (const journal of pending) {
+      try {
+        if (journal.state === 'committing') {
+          await this.commitDelivery(journal, journal.request_ids)
+        } else {
+          // prepared：journal 里的 staging/planned 都还在，按原样重跑 commit
+          await this.commitDelivery(journal, journal.request_ids)
+        }
+      } catch (error) {
+        console.error(`[ChatManager] delivery reconcile failed for ${journal.delivery_id}:`,
+          error instanceof Error ? error.message : String(error))
+      }
+    }
+  }
+
+  /**
+   * assistant 消息落库 + chat_push（P6-A §11：新写带 request_ids/delivery_id；
+   * placeholder 结算只发生在 delivery commit——本方法不再做任何 FIFO 认领）。
+   */
+  private async storeAssistantMessage(
+    content: MessageContent,
+    sessionId: string,
+    options: { requestIds?: string[]; deliveryId?: string; push?: boolean } = {},
+  ): Promise<ChatSendMessageResult> {
+    const message: ChatMessage = {
+      message_id: generateId(),
+      role: 'assistant',
+      content,
+      ...(options.requestIds && options.requestIds.length > 0 ? { request_ids: options.requestIds } : {}),
+      ...(options.deliveryId !== undefined ? { delivery_id: options.deliveryId } : {}),
+      timestamp: generateTimestamp(),
+    }
+    this.messages.set(message.message_id, message)
+    await this.saveData()
+    if (options.push !== false) this.pushToClient({ type: 'chat_push', message })
+    return { platform_message_id: message.message_id, sent_at: message.timestamp }
+  }
+
+  /** 无 delivery 的 legacy 内容写路径（system_event / system-tasks proactive）。 */
+  private async storeAssistantMessageFromContent(
+    c: MessageContent,
+    sessionId: string,
+    options: { requestIds?: string[] } = {},
+  ): Promise<ChatSendMessageResult> {
     const incoming: Array<Pick<MessageContent, 'media_url' | 'file_path' | 'filename' | 'mime_type'>> =
       c.media?.length
         ? c.media.map((m) => ({ media_url: m.media_url, filename: m.filename, mime_type: m.mime_type }))
         : (c.media_url ?? c.file_path) ? [c] : []
-
     const media: MediaItem[] = []
     const failures: string[] = []
     for (const m of incoming) {
       try {
         if (m.media_url?.startsWith('http://') || m.media_url?.startsWith('https://')) {
-          // http(s) URL：直接存引用，不下载
           media.push({
             media_url: m.media_url,
             mime_type: m.mime_type ?? 'application/octet-stream',
             ...(m.filename !== undefined ? { filename: m.filename } : {}),
           })
         } else {
-          // 本地路径：复制进 MediaStore
           const localPath = m.file_path ?? m.media_url
           if (!localPath) continue
           const mimeType = m.mime_type
-            ?? (c.type === 'image'
-              ? inferImageMimeType(m.filename) ?? inferImageMimeType(localPath)
-              : undefined)
+            ?? (c.type === 'image' ? inferImageMimeType(m.filename) ?? inferImageMimeType(localPath) : undefined)
           media.push(await this.mediaStore.ingestFile(localPath, {
             ...(m.filename !== undefined ? { filename: m.filename } : {}),
             ...(mimeType !== undefined ? { mime_type: mimeType } : {}),
@@ -424,12 +790,9 @@ export class ChatManager {
         failures.push(m.filename ?? m.file_path ?? m.media_url ?? '未知附件')
       }
     }
-
     const failureNote = failures.length > 0 ? `\n[附件收存失败: ${failures.join(', ')}]` : ''
     const text = `${c.text ?? ''}${failureNote}`.trim()
-    if (!text && media.length === 0) {
-      throw new Error('Empty message content')
-    }
+    if (!text && media.length === 0) throw new Error('Empty message content')
     const type = media.length === 0
       ? ('text' as const)
       : media.some((m) => m.mime_type.startsWith('image/')) ? ('image' as const) : ('file' as const)
@@ -437,42 +800,7 @@ export class ChatManager {
       type,
       ...(text ? { text } : {}),
       ...(media.length > 0 ? { media, media_url: media[0].media_url } : {}),
-    }, params.session_id)
-  }
-
-  /**
-   * 认领当前 in-flight 的 request_id 并消费掉（Map 保插入序，取最早那条——它最先被回答）。
-   * manager 正常回话走 send_message → chat_push，前端要靠这个 id 才能把「处理中」占位气泡
-   * 原地收口（失败兜底走 chat_reply，用的是同一把钥匙）。
-   *
-   * 「认领即消费」定死了一轮多条回复的语义：第一条替换占位，后续几条按新消息追加。
-   * 没有 in-flight（manager 主动推送，不是在回应某条请求）时返回 undefined，前端纯追加。
-   */
-  private claimPendingRequestId(): string | undefined {
-    const first = this.pendingRequests.keys().next()
-    if (first.done) return undefined
-    this.pendingRequests.delete(first.value)
-    return first.value
-  }
-
-  private async storeAssistantMessage(
-    content: MessageContent,
-    sessionId: string,
-  ): Promise<ChatSendMessageResult> {
-    // 占位气泡只在 Master Chat（admin-chat）会话里存在；'system-tasks' 是另一条线程，
-    // 不能吃掉 Master Chat 的 in-flight request
-    const requestId = sessionId === 'admin-chat' ? this.claimPendingRequestId() : undefined
-    const message: ChatMessage = {
-      message_id: generateId(),
-      role: 'assistant',
-      content,
-      ...(requestId !== undefined ? { request_id: requestId } : {}),
-      timestamp: generateTimestamp(),
-    }
-    this.messages.set(message.message_id, message)
-    await this.saveData()
-    this.pushToClient({ type: 'chat_push', message })
-    return { platform_message_id: message.message_id, sent_at: message.timestamp }
+    }, sessionId, options)
   }
 
   /** 任务状态/计划变更推送（index.ts 的状态机钩子调用） */

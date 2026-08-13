@@ -23,7 +23,12 @@ export interface ChatMessage {
   message_id: string
   role: 'user' | 'assistant'
   content: ChatMessageContent
+  /** 只读历史兼容（P6-A §11.14）；新写用 request_ids。 */
   request_id?: string
+  /** P6-A §11：本条 assistant 消息结算的入站 request IDs（proactive 缺席）。 */
+  request_ids?: string[]
+  /** P6-A §11：本条 assistant 消息的 delivery 事务 ID。 */
+  delivery_id?: string
   task_id?: string
   timestamp: string
 }

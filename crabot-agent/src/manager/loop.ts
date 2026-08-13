@@ -119,12 +119,22 @@ export type WakeEvent =
       readonly principalPermissions?: ResolvedPermissions
     }
 
+/**
+ * P6-A §3.2：不渲染到 LLM 正文的 system-only 关联元数据。
+ * Admin Chat 入站的 request IDs 只经这个通道进 Manager——不进 ChannelMessage 正文、
+ * 不进工具 schema、不伪造 Friend 字段。
+ */
+export interface ManagerWakeCorrelation {
+  readonly admin_chat_request_ids?: ReadonlyArray<string>
+}
+
 export interface TimedWakeEnvelope {
   readonly wake: WakeEvent
   readonly received_at: string
   readonly timezone: string
   readonly occurred_at?: string
   readonly human_occurred_at?: ReadonlyArray<{ readonly message_id?: string; readonly occurred_at?: string }>
+  readonly correlation?: ManagerWakeCorrelation
 }
 
 export interface EpisodeResult {
@@ -249,6 +259,14 @@ export class ManagerLoop {
     return this.currentTraceId
   }
 
+  /**
+   * P6-A §11.4/6：本 episode 关联的 Admin Chat request IDs 及其 claim 状态。
+   * 初始 wake、carried mailbox、mid-episode injection 的 correlation 合并去重；
+   * 只有目标 exact admin-web::admin-chat 的 eligible send 才原子 claim 未 claim 的 ID，
+   * 每个 ID 最多进入一个 logical delivery。
+   */
+  private adminChatClaims: Map<string, 'unclaimed' | 'claimed'> = new Map()
+
   /** 本 episode 的 token 用量累加器（onTurn 回调写入，finish 时聚合成 total_usage）。 */
   private currentUsage = { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0 }
   /** max_tokens 兜底重试与新 episode 的 span 计数区分（engine turnNumber 在重试时会重数）。 */
@@ -257,6 +275,22 @@ export class ManagerLoop {
   /** spawn_worker 成功回调（registry 桥经 worker-tools 调）：把 worker ID 追加进当前 trace。 */
   recordSpawnedWorker(workerId: string): void {
     if (this.currentTraceId) this.deps.traceWriter?.addSpawnedWorker(this.currentTraceId, workerId)
+  }
+
+  /**
+   * P6-A §11.6：原子 claim 本 episode 尚未 claim 的 Admin Chat request IDs。
+   * 每个 ID 最多进入一个 logical delivery；全部被 claim 过后返回空（后续 send 即
+   * 追加/proactive，不再携带 IDs）。
+   */
+  claimAdminChatRequestIds(): string[] {
+    const claimed: string[] = []
+    for (const [id, state] of this.adminChatClaims) {
+      if (state === 'unclaimed') {
+        this.adminChatClaims.set(id, 'claimed')
+        claimed.push(id)
+      }
+    }
+    return claimed
   }
 
   constructor(deps: ManagerLoopDeps) {
@@ -297,6 +331,9 @@ export class ManagerLoop {
     assertTimedWakeEnvelope(envelope)
     this.mailbox.push(envelope)
     this.currentEpisodeInjected?.push(envelope)
+    for (const id of envelope.correlation?.admin_chat_request_ids ?? []) {
+      if (!this.adminChatClaims.has(id)) this.adminChatClaims.set(id, 'unclaimed')
+    }
   }
 
   /**
@@ -320,6 +357,12 @@ export class ManagerLoop {
     const eventText = envelope === undefined ? undefined : this.renderEnvelope(envelope)
     this.currentEpisodeInjected = []
     this.currentWakeEvent = envelope ?? null
+    this.adminChatClaims = new Map()
+    for (const item of [...carriedEnvelopes, ...(envelope ? [envelope] : [])]) {
+      for (const id of item.correlation?.admin_chat_request_ids ?? []) {
+        if (!this.adminChatClaims.has(id)) this.adminChatClaims.set(id, 'unclaimed')
+      }
+    }
 
     // P6-A §6.2/§6.8：先原子持久最小 session identity，再创建 root trace；
     // 两者失败都不调用 LLM/tool——原 wake 经下方 catch 保持未结算并重投。

@@ -7,6 +7,8 @@ import http from 'node:http'
 import { WebSocket } from 'ws'
 import { sha256CanonicalJson } from 'crabot-shared'
 import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import AdminModule from './index.js'
 import { UnifiedAgent } from '../../crabot-agent/src/unified-agent.js'
 import type { ChannelMessageRef, DialogObjectApplication, Friend, FriendPermissionConfig, ListConversationUnitsResult, LoginResponse, Task } from './types.js'
@@ -152,6 +154,10 @@ describe('Admin Web API', () => {
       agent.config = { moduleId: 'crabot-agent' }
       agent.processAdminChatMessage = processAdminChatMessage
       agent.managerStack = { principals: { activateAdminChat: async () => {} } }
+      // P6-A：入站 admission 落到临时目录，不碰真实 Agent 数据目录
+      const { AdminChatCorrelationStore } = await import('../../crabot-agent/src/manager/chat-correlation-store.js')
+      const correlationDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-correlation-'))
+      ;(agent as unknown as Record<string, unknown>).adminChatCorrelationStoreInstance = new AdminChatCorrelationStore(correlationDir)
       agent.rpcClient = {
         resolve: async (filter) => {
           expect(filter).toEqual({ module_id: 'admin-web' })
