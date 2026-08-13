@@ -18,6 +18,24 @@ const subagent = (id: string): SubAgentRegistryEntry => ({
 describe('MCP and SubAgent coordinator mutations', () => {
   afterEach(async () => { while (cleanup.length) await fs.rm(cleanup.pop()!, { recursive: true, force: true }) })
 
+  it('prunes disabled obsolete builtin subagents at startup without noop errors', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-prune-disabled-')); cleanup.push(dir)
+    const agents = new SubAgentManager(dir)
+    await agents.initializeLoadOnly()
+    const snapshot = () => ({ subagents: agents.runtimeSemanticEntries() })
+    const coordinator = new CoreAgentConfigMutationCoordinator(dir, { readSemanticSnapshot: snapshot, publishInvalidation: () => {} })
+    agents.setSemanticSnapshotProvider(snapshot)
+    const runner = async (domains: any, preview: any, apply: any, allowRuntimeNoop?: boolean, options?: any) => coordinator.mutateComputed(domains, preview, apply, allowRuntimeNoop, options)
+    agents.setMutationRunner(runner)
+    await coordinator.initialize()
+    await agents.seedBuiltin([{ ...subagent('old-builtin'), is_builtin: true }])
+    await agents.update('old-builtin', { enabled: false })
+    // 升级路径：已停用的 builtin 被新版本下线 → prune 删除时不在投影，
+    // 必须允许 noop，否则异常冲出 onStart、admin 确定性砖化。
+    await expect(agents.pruneObsoleteBuiltins(['other-builtin'])).resolves.toBeUndefined()
+    expect(agents.get('old-builtin')).toBeUndefined()
+  })
+
   it('allows deleting disabled entries and creating disabled subagents (runtime-noop writes)', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-disabled-delete-')); cleanup.push(dir)
     const mcp = new MCPServerManager(dir); const agents = new SubAgentManager(dir)

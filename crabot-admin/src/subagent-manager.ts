@@ -455,7 +455,8 @@ export class SubAgentManager {
       )
       next.delete(e.id)
     }
-    await this.commit(next)
+    // 被停用的废弃 builtin 不在 runtime 投影：允许 noop，否则升级期 prune 冲出 onStart。
+    await this.commit(next, true)
   }
 
   private validateModelSpec(entry: Pick<SubAgentRegistryEntry, 'provider_id' | 'model_id' | 'model_role'>): void {

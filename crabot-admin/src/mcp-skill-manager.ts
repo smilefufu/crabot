@@ -502,7 +502,8 @@ export class MCPServerManager {
       }
 
       if (changed) {
-        await this.commit(next)
+        // 变化只落在停用条目（args 更新）或新增默认停用 builtin 时投影不变：允许 noop。
+        await this.commit(next, true)
       }
     })
   }
