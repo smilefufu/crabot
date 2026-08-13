@@ -71,6 +71,7 @@ import { AGENT_VERSION } from './constants.js'
 import { ContextManager, DEFAULT_COMPACT_THRESHOLD } from './engine/context-manager.js'
 import { DEFAULT_MAX_CONTEXT_TOKENS } from './engine/query-loop.js'
 import { buildManagerStack, reconcileManagerStack, type ManagerStack } from './manager/bootstrap.js'
+import { buildManagerAdminSummaries } from './manager/read-model.js'
 import { makeAgentEventPublisher, type AgentEventPublisher } from './manager/events.js'
 import { resolveManagerModelConfig } from './manager/model-slot.js'
 import type { ManagerEpisodeFailure } from './manager/types.js'
@@ -1197,6 +1198,8 @@ export class UnifiedAgent extends ModuleBase {
     // Manager/Worker（v3）接口：§8.2 调度触发 + §8.3 task 读模型四件套。
     this.registerMethod('trigger_schedule', this.handleTriggerSchedule.bind(this))
     this.registerMethod('list_workers_admin', this.handleListWorkersAdmin.bind(this))
+    this.registerMethod('list_managers_admin', this.handleListManagersAdmin.bind(this))
+    this.registerMethod('list_manager_episodes_admin', this.handleListManagerEpisodesAdmin.bind(this))
     this.registerMethod('get_worker_detail', this.handleGetWorkerDetail.bind(this))
     this.registerMethod('read_worker_output_admin', this.handleReadWorkerOutputAdmin.bind(this))
     this.registerMethod('get_worker_trace', this.handleGetWorkerTrace.bind(this))
@@ -2880,6 +2883,37 @@ export class UnifiedAgent extends ModuleBase {
   private async handleListWorkersAdmin(params: ListWorkersAdminParams): Promise<ListWorkersAdminResult> {
     const all = await this.requireManagerStack().ledger.listAllWorkers()
     return filterAndPageWorkers(all, params ?? {})
+  }
+
+  /** §8.4 list_managers_admin：disk session keys ∪ TraceStore keys ∪ 内存 running keys 的去重 union。 */
+  private async handleListManagersAdmin(params: { pagination?: import('crabot-shared').PaginationParams }): Promise<import('crabot-shared').PaginatedResult<import('./manager/read-model.js').ManagerAdminSummary>> {
+    const stack = this.requireManagerStack()
+    const diskKeys = await stack.store.listManagerKeys()
+    const traceKeys = this.traceStore.listTraceManagerKeys()
+    const workers = await stack.ledger.listAllWorkers()
+    const workerCounts = new Map<string, number>()
+    for (const { managerKey } of workers) workerCounts.set(managerKey, (workerCounts.get(managerKey) ?? 0) + 1)
+    const running = new Map(stack.registry.listActiveManagers().map(({ key, lastActiveAtMs }) => [key, lastActiveAtMs] as const))
+    return buildManagerAdminSummaries({
+      diskSessionKeys: diskKeys,
+      traceKeys,
+      episodeStats: (key) => ({
+        count: this.traceStore.countManagerEpisodes(key),
+        latestStartedAt: this.traceStore.listManagerEpisodes(key, { page: 1, page_size: 1 }).items[0]?.started_at,
+      }),
+      workerCount: (key) => workerCounts.get(key) ?? 0,
+      runningLastActiveAtMs: (key) => running.get(key),
+    }, params?.pagination)
+  }
+
+  /** §8.4 list_manager_episodes_admin：按 exact manager key 查 TraceStore episode 列表。 */
+  private async handleListManagerEpisodesAdmin(params: { manager_key: ManagerKey; pagination?: import('crabot-shared').PaginationParams }): Promise<import('crabot-shared').PaginatedResult<import('./manager/trace-types.js').ManagerEpisodeTrace>> {
+    // manager stack/TraceStore 未 ready 时结构化失败，不返回空列表冒充成功。
+    this.requireManagerStack()
+    if (!params || typeof params.manager_key !== 'string' || params.manager_key.length === 0) {
+      throw new Error('manager_key is required')
+    }
+    return this.traceStore.listManagerEpisodes(params.manager_key, params.pagination)
   }
 
   /** §8.3 get_worker_detail：单 worker 全量（台账条目 + 化身链）；不存在抛错，不返回空对象。 */

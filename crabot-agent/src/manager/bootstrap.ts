@@ -94,6 +94,8 @@ export const DEFAULT_MANAGER_COMPACTION_POLICY: CompactionPolicy = {
 
 export interface ManagerStack {
   readonly ledger: LedgerStore
+  /** Manager session 持久化（P6-A 读模型用：disk session keys 枚举）。 */
+  readonly store: ManagerSessionStore
   readonly workspaces: WorkspaceManager
   readonly harness: WorkerHarness
   readonly registry: ManagerRegistry
@@ -387,9 +389,10 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   // 发起人身份:唤醒边界异步解析一次,三个同步 thunk 读缓存(见 principal.ts 文件头)。
   const principals = new ManagerPrincipalStore(deps.principalResolver, principalBindings, () => new Date(deps.now()))
 
+  const sessionStore = new ManagerSessionStore(join(agentDir, 'managers'))
   registry = new ManagerRegistry({
     traceWriter: deps.traceWriter,
-    store: new ManagerSessionStore(join(agentDir, 'managers')),
+    store: sessionStore,
     policy: DEFAULT_MANAGER_COMPACTION_POLICY,
     estimateTokens: (msgs) => tokenEstimator.estimateTotalTokens(msgs),
     harness,
@@ -489,7 +492,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     },
   })
 
-  return { ledger, workspaces, harness, registry, adapters, principals, principalBindings, builtinDataDir }
+  return { ledger, workspaces, harness, registry, adapters, principals, principalBindings, builtinDataDir, store: sessionStore }
 }
 
 /**

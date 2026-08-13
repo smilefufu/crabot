@@ -209,3 +209,75 @@ export function filterAndPageWorkers(
 export function buildWorkerDetail(found: LedgerWorkerEntry): GetWorkerDetailResult {
   return { worker: found.worker }
 }
+
+// ============================================================================
+// P6-A 阶段 3：Manager 读模型（protocol-agent-v3 §8.4）
+// ============================================================================
+
+export interface ManagerAdminSummary {
+  manager_key: ManagerKey
+  last_activity_at?: string
+  episode_count: number
+  worker_count: number
+}
+
+export interface ManagerSummarySources {
+  /** disk session keys（ManagerSessionStore.listManagerKeys 已做 dir/key 校验）。 */
+  readonly diskSessionKeys: ReadonlyArray<ManagerKey>
+  /** TraceStore 已验证 manager keys。 */
+  readonly traceKeys: ReadonlyArray<ManagerKey>
+  /** 每 key 的 episode 数与最近 episode 时间（started_at 倒序后的首个）。 */
+  readonly episodeStats: (key: ManagerKey) => { count: number; latestStartedAt?: string }
+  /** 每 key 的 worker 数（台账 manager_key 聚合）。 */
+  readonly workerCount: (key: ManagerKey) => number
+  /** 内存 registry 当前 running manager 的最近活跃毫秒（补充尚未首次 save 的当前 manager）。 */
+  readonly runningLastActiveAtMs: (key: ManagerKey) => number | undefined
+}
+
+/**
+ * `list_managers_admin` 的纯计算：disk session keys ∪ TraceStore keys ∪ 内存 running keys
+ * 去重 union，排序 `last_activity_at desc, manager_key asc`，base pagination 1/20/max100。
+ */
+export function buildManagerAdminSummaries(
+  sources: ManagerSummarySources,
+  pagination?: PaginationParams,
+): PaginatedResult<ManagerAdminSummary> {
+  const keys = new Set<ManagerKey>()
+  for (const key of sources.diskSessionKeys) keys.add(key)
+  for (const key of sources.traceKeys) keys.add(key)
+
+  const items: ManagerAdminSummary[] = Array.from(keys).map((key) => {
+    const stats = sources.episodeStats(key)
+    const runningMs = sources.runningLastActiveAtMs(key)
+    const lastActivity = [stats.latestStartedAt, runningMs !== undefined ? new Date(runningMs).toISOString() : undefined]
+      .filter((value): value is string => value !== undefined)
+      .sort()
+      .pop()
+    return {
+      manager_key: key,
+      ...(lastActivity ? { last_activity_at: lastActivity } : {}),
+      episode_count: stats.count,
+      worker_count: sources.workerCount(key),
+    }
+  })
+
+  items.sort((left, right) => {
+    const byActivityDesc = (right.last_activity_at ?? '').localeCompare(left.last_activity_at ?? '')
+    if (byActivityDesc !== 0) return byActivityDesc
+    return left.manager_key.localeCompare(right.manager_key)
+  })
+
+  const page = normalizePositive(pagination?.page, 1)
+  const pageSize = Math.min(normalizePositive(pagination?.page_size, DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE)
+  const totalItems = items.length
+  const offset = (page - 1) * pageSize
+  return {
+    items: items.slice(offset, offset + pageSize),
+    pagination: {
+      page,
+      page_size: pageSize,
+      total_items: totalItems,
+      total_pages: Math.ceil(totalItems / pageSize),
+    },
+  }
+}

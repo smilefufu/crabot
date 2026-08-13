@@ -218,6 +218,11 @@ export class ManagerRegistry {
 
   constructor(private readonly deps: ManagerRegistryDeps) {}
 
+  /** 内存 registry 当前 running manager 的只读快照（P6-A §7.3：补充尚未首次 save 的当前 manager）。 */
+  listActiveManagers(): Array<{ key: ManagerKey; lastActiveAtMs?: number }> {
+    return Array.from(this.loops.keys()).map((key) => ({ key, lastActiveAtMs: this.lastActiveAtMs.get(key) }))
+  }
+
   /** 惰性拉起:key 无实例则建;同 key 幂等返回同一实例。实例常驻内存,session 状态在盘上。 */
   getOrCreate(key: ManagerKey): ManagerLoop {
     const existing = this.loops.get(key)

@@ -1003,3 +1003,76 @@ describe('读模型 handler 的 manager 栈前置门', () => {
     await expect(agent.handleGetWorkerTrace({ worker_id: 'w', seq: 1 })).rejects.toThrow(/Manager stack not initialized/)
   })
 })
+
+describe('manager 读模型 RPC（P6-A §7/§8.4）', () => {
+  function buildAgentWithTraceStack(options: {
+    traceStore?: Partial<import('../../src/core/trace-store.js').TraceStore>
+    stackStoreKeys?: string[]
+    running?: Array<{ key: string; lastActiveAtMs?: number }>
+    workers?: Array<{ managerKey: string }>
+    noStack?: boolean
+  }) {
+    const agent = Object.create(UnifiedAgent.prototype) as Record<string, unknown>
+    agent.agentConfig = { model_config: { powerful: { apikey: 'k', model_id: 'm' } } }
+    agent.config = { moduleId: 'test-agent' }
+    agent.configAuthenticated = true
+    agent.configStale = false
+    if (!options.noStack) {
+      agent.managerStack = {
+        store: { listManagerKeys: async () => options.stackStoreKeys ?? [] },
+        ledger: { listAllWorkers: async () => (options.workers ?? []).map((w) => ({ managerKey: w.managerKey, worker: {} })) },
+        registry: { listActiveManagers: () => options.running ?? [] },
+      }
+    }
+    agent.traceStore = options.traceStore ?? {
+      listTraceManagerKeys: () => [],
+      countManagerEpisodes: () => 0,
+      listManagerEpisodes: () => ({ items: [], pagination: { page: 1, page_size: 20, total_items: 0, total_pages: 0 } }),
+    }
+    return agent as unknown as {
+      handleListManagersAdmin(p: unknown): Promise<unknown>
+      handleListManagerEpisodesAdmin(p: unknown): Promise<unknown>
+    }
+  }
+
+  it('list_managers_admin 聚合三源并排序', async () => {
+    const agent = buildAgentWithTraceStack({
+      stackStoreKeys: ['wechat::sess-a'],
+      traceStore: {
+        listTraceManagerKeys: () => ['wechat::sess-b'],
+        countManagerEpisodes: (key: string) => (key === 'wechat::sess-b' ? 2 : 0),
+        listManagerEpisodes: () => ({ items: [{ started_at: '2026-08-01T00:00:00.000Z' }], pagination: { page: 1, page_size: 20, total_items: 1, total_pages: 1 } }),
+      },
+      running: [{ key: 'wechat::sess-a', lastActiveAtMs: Date.parse('2026-08-03T00:00:00.000Z') }],
+      workers: [{ managerKey: 'wechat::sess-a' }],
+    })
+    const result = await agent.handleListManagersAdmin({ pagination: { page: 1, page_size: 20 } }) as { items: Array<{ manager_key: string; episode_count: number; worker_count: number }> }
+    expect(result.items.map((item) => item.manager_key)).toEqual(['wechat::sess-a', 'wechat::sess-b'])
+    expect(result.items[1]).toMatchObject({ episode_count: 2, worker_count: 0 })
+  })
+
+  it('manager stack 未装配时返回结构化失败而非空列表', async () => {
+    const agent = buildAgentWithTraceStack({ noStack: true })
+    await expect(agent.handleListManagersAdmin({})).rejects.toThrow('Manager stack not initialized')
+    await expect(agent.handleListManagerEpisodesAdmin({ manager_key: 'wechat::sess-a' })).rejects.toThrow('Manager stack not initialized')
+  })
+
+  it('list_manager_episodes_admin 按 exact key 透传 TraceStore 分页', async () => {
+    const seen: unknown[] = []
+    const agent = buildAgentWithTraceStack({
+      traceStore: {
+        listTraceManagerKeys: () => [],
+        countManagerEpisodes: () => 0,
+        listManagerEpisodes: (key: string, pagination: unknown) => {
+          seen.push([key, pagination])
+          return { items: [{ trace_id: 'ep-1', manager_key: key }], pagination: { page: 2, page_size: 5, total_items: 6, total_pages: 2 } }
+        },
+      } as never,
+    })
+    const result = await agent.handleListManagerEpisodesAdmin({ manager_key: 'wechat::sess-a', pagination: { page: 2, page_size: 5 } }) as { items: Array<{ trace_id: string }>; pagination: { page: number } }
+    expect(result.items[0].trace_id).toBe('ep-1')
+    expect(result.pagination.page).toBe(2)
+    expect(seen).toEqual([['wechat::sess-a', { page: 2, page_size: 5 }]])
+    await expect(agent.handleListManagerEpisodesAdmin({ manager_key: '' })).rejects.toThrow('manager_key')
+  })
+})
