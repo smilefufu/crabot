@@ -172,6 +172,11 @@ export interface BootstrapDeps {
   readonly publishEvent?: AgentEventPublisher
   /** P6-A：Manager episode trace writer（窄接口）；缺省时整个 trace 面静默关闭。 */
   readonly traceWriter?: import('./trace-types.js').ManagerTraceWriter
+  /** P6-A §8.4：builtin worker 结构化 trace 写钩子/读入口（TraceStore 窄口）。 */
+  readonly builtinTraceHooks?: import('../workers/builtin/adapter.js').BuiltinTraceHooks
+  readonly builtinTraceReader?: import('../workers/builtin/adapter.js').BuiltinTraceReader
+  /** P6-A §8.10：化身终态收割钩子（harness fire-and-forget；装配层做最后一次 native read）。 */
+  readonly onIncarnationTerminal?: (handle: import('../workers/types.js').IncarnationHandle) => void
   /**
    * fail-loud 兜底出口:worker 事件唤醒的 manager episode 失败时,直接告诉人类一声。
    * 接线范式与上面的 `publishEvent` 完全一致(可选;不注入则这条路保持"只记日志"的既有行为)。
@@ -306,6 +311,8 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
     workspaces,
     workersDir: join(agentDir, 'workers'),
     now: deps.now,
+    // P6-A §8.10：化身终态时主动收割一次 native trace（最后一次 read → Agent-owned copy）。
+    onIncarnationTerminal: deps.onIncarnationTerminal,
     // harness 事件 → 该 worker 的监护 manager(§4.4)。过滤复用 P4 的
     // `shouldWakeOnHarnessEvent`(input_sent 不唤醒:manager 发起 send_to_worker 时已在同一次
     // 工具调用里同步拿到结果)。
@@ -370,6 +377,8 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       dataDir: builtinDataDir,
       onStateChange: harness.handleStateChange,
       resolveRuntime: deps.builtinSpawnDefaults,
+      traceHooks: deps.builtinTraceHooks,
+      traceReader: deps.builtinTraceReader,
     }),
   )
   adapters.set(

@@ -25,6 +25,11 @@ export interface NormalizedTraceEvent {
   readonly role?: 'assistant' | 'user' | 'system'
   readonly summary: string
   readonly detail?: unknown
+  /**
+   * 事件来源（P6-A §8.1）。adapter 归一化时缺省（adapter 只解析本实现 source），
+   * composite reader 合并时强制填上——对外（RPC/REST）该字段必有值。
+   */
+  readonly source?: 'harness' | 'native' | 'legacy'
 }
 
 export interface CapabilityBundle {

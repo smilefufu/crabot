@@ -58,9 +58,6 @@ import { ConfigLoader } from './core/config-loader.js'
 import { TraceStore } from './core/trace-store.js'
 import { importV2LegacyTasks } from './workers/legacy-importer.js'
 import {
-  compareLegacyTraceEventEntries,
-  readLegacyTraceEvents,
-  type LegacyTraceEventEntry,
 } from './workers/legacy-source-reader.js'
 import { PromptManager } from './prompt-manager.js'
 import { createLSPManager, type LSPManager } from './lsp/lsp-manager.js'
@@ -72,6 +69,9 @@ import { ContextManager, DEFAULT_COMPACT_THRESHOLD } from './engine/context-mana
 import { DEFAULT_MAX_CONTEXT_TOKENS } from './engine/query-loop.js'
 import { buildManagerStack, reconcileManagerStack, type ManagerStack } from './manager/bootstrap.js'
 import { buildManagerAdminSummaries } from './manager/read-model.js'
+import { readCompositeWorkerTrace } from './workers/trace/composite-reader.js'
+import { TraceCursorStore, incarnationFingerprint } from './workers/trace/cursor-store.js'
+import { NativeTraceCopyStore } from './workers/trace/native-copy.js'
 import { makeAgentEventPublisher, type AgentEventPublisher } from './manager/events.js'
 import { resolveManagerModelConfig } from './manager/model-slot.js'
 import type { ManagerEpisodeFailure } from './manager/types.js'
@@ -82,7 +82,6 @@ import {
   type BuiltinRuntimeContext,
 } from './workers/builtin/runtime.js'
 import {
-  isLegacyIncarnation,
   type ManagerKey,
   type LedgerWorker,
   type TaskPriority,
@@ -101,10 +100,7 @@ import {
   type GetWorkerTraceResult,
 } from './manager/read-model.js'
 import type { NormalizedTraceEvent, SpawnSpec } from './workers/types.js'
-import type { HarnessEvent } from './workers/harness/worker-events.js'
 import {
-  findIncarnationBySeq,
-  mainlineIncarnation,
   TaskCancelledError,
   WorkerHasNoIncarnationError,
   WorkerNotFoundError,
@@ -285,29 +281,6 @@ function parseAdminChatAssertionId(assertion: string): string {
 const TRACE_SUMMARY_MAX_CHARS = 200
 
 /**
- * harness 亲历事件（§10.2 第一层）→ `NormalizedTraceEvent`。
- * 生命周期事件没有会话角色，故一律 `kind: 'lifecycle'` 且不填 `role`；`detail` 原样透传。
- */
-function normalizeHarnessEvent(event: HarnessEvent): NormalizedTraceEvent {
-  const detailText = event.detail === undefined ? '' : ` ${JSON.stringify(event.detail)}`
-  const summary = `${event.kind}${detailText}`
-  return {
-    ts: event.ts,
-    kind: 'lifecycle',
-    summary: summary.length > TRACE_SUMMARY_MAX_CHARS ? `${summary.slice(0, TRACE_SUMMARY_MAX_CHARS)}…` : summary,
-    detail: event.detail,
-  }
-}
-
-/**
- * §8.3 `get_worker_trace` 的第二层（adapter `readTrace()` 懒解析，§10.2）在本阶段未接线，
- * 用协议规定的 `unavailable_reason` 明说，而不是静默只给第一层。
- */
-const WORKER_TRACE_LAYER2_UNAVAILABLE =
-  '实现原生 trace（adapter readTrace 懒解析，protocol-agent-v3 §10.2 第二层）尚未接入本端点，' +
-  '当前仅返回 harness 亲历的生命周期事件（第一层）'
-
-/**
  * fail-loud 兜底回复的按 key 冷却窗口。
  *
  * F1 形态下整批输入被推回 mailbox 等下次唤醒重投，同一批消息因此会**反复**触发失败；
@@ -443,6 +416,8 @@ export class UnifiedAgent extends ModuleBase {
 
   // 端口缓存
   private adminPort?: number
+  private traceCursorStoreInstance?: TraceCursorStore
+  private nativeTraceCopyStoreInstance?: NativeTraceCopyStore
   private memoryPort?: number
   // Session memory_scopes 缓存（TTL 60s，session config 变更不频繁）
   private sessionScopesCache: Map<string, { scopes: string[]; expiresAt: number }> = new Map()
@@ -716,6 +691,11 @@ export class UnifiedAgent extends ModuleBase {
       now: () => new Date().toISOString(),
       // P6-A：Manager episode trace writer（窄接口 + 脱敏收口在 TraceStore.managerTraceWriter）。
       traceWriter: this.traceStore.managerTraceWriter((text) => redactSecrets(text, [...this.knownSecrets])),
+      // P6-A §8.4：builtin worker 结构化 trace（写钩子 + 读入口，同一脱敏纪律）。
+      builtinTraceHooks: this.builtinTraceHooks(),
+      builtinTraceReader: this.builtinTraceReader(),
+      // P6-A §8.10：化身终态主动收割（最后一次 native read → Agent-owned copy）。
+      onIncarnationTerminal: (handle) => { void this.harvestIncarnationNativeTrace(handle) },
       // 人类消息渲染的时区（`formatChannelMessageLine` 的 ts 属性）。与 worker 侧
       // `buildBuiltinWorkerRuntime` 取同一个来源，避免 manager 与 worker 看到的时间对不上。
       timezone: () => resolveTimezone(this.agentConfig?.timezone),
@@ -2968,49 +2948,127 @@ export class UnifiedAgent extends ModuleBase {
    */
   private async handleGetWorkerTrace(params: GetWorkerTraceParams): Promise<GetWorkerTraceResult> {
     const stack = this.requireManagerStack()
-    // 先确认 worker 存在：否则事件流缺席（目录不存在）会被 readAll 归一成空数组，
-    // 让"worker 不存在"与"这个化身还没产生任何事件"在返回值上无法区分。
-    const found = await stack.ledger.findWorker(params.worker_id)
-    if (!found) {
-      throw new WorkerNotFoundError(params.worker_id)
-    }
-    if (found.worker.incarnations.length === 0) {
-      throw new WorkerHasNoIncarnationError(params.worker_id)
-    }
-    const incarnation =
-      params.seq === undefined ? mainlineIncarnation(found.worker) : findIncarnationBySeq(found.worker, params.seq)
-    if (!incarnation) {
-      throw new Error(`get_worker_trace: no incarnation with seq=${params.seq} found for worker ${params.worker_id}`)
-    }
-    if (isLegacyIncarnation(incarnation)) {
-      const trace = await readLegacyTraceEvents(getAgentTraceDir(), found.worker.legacy_source?.trace_ids ?? [])
-      const harnessEntries: LegacyTraceEventEntry[] = (await stack.harness.readWorkerEvents(params.worker_id))
-        .filter((event) => event.seq === incarnation.seq)
-        .map((event, sourceOrdinal) => ({
-          event: normalizeHarnessEvent(event),
-          ...(Number.isFinite(Date.parse(event.ts)) ? { started_at: event.ts } : {}),
-          trace_id: '',
-          source_ordinal: sourceOrdinal,
-        }))
-      const events = [...trace.entries, ...harnessEntries]
-        .sort(compareLegacyTraceEventEntries)
-        .map((entry) => entry.event)
-      const offset = parseOffsetCursor(params.cursor)
-      return {
-        events: events.slice(offset),
-        next_cursor: String(events.length),
-        ...(trace.unavailable_reason ? { unavailable_reason: trace.unavailable_reason } : {}),
-      }
-    }
-    const ofIncarnation = (await stack.harness.readWorkerEvents(params.worker_id)).filter(
-      (event) => event.seq === incarnation.seq
+    return readCompositeWorkerTrace(
+      {
+        ledger: stack.ledger,
+        harness: stack.harness,
+        adapters: stack.adapters,
+        cursorStore: this.traceCursorStore(),
+        nativeCopy: this.nativeTraceCopyStore(),
+        redact: (text) => redactSecrets(text, [...this.knownSecrets]),
+        legacyTraceDir: getAgentTraceDir(),
+      },
+      params,
     )
-    const offset = parseOffsetCursor(params.cursor)
-    return {
-      events: ofIncarnation.slice(offset).map(normalizeHarnessEvent),
-      next_cursor: String(ofIncarnation.length),
-      unavailable_reason: WORKER_TRACE_LAYER2_UNAVAILABLE,
+  }
+
+  /** P6-A §3.3：Agent-owned opaque cursor window store（惰性建目录）。 */
+  private traceCursorStore(): TraceCursorStore {
+    if (!this.traceCursorStoreInstance) {
+      this.traceCursorStoreInstance = new TraceCursorStore(path.join(getAgentDataDir(), 'trace-cursors'))
     }
+    return this.traceCursorStoreInstance
+  }
+
+  /**
+   * builtin 结构化 trace 钩子（P6-A §8.4）：TraceStore legacy record 承载
+   * （spans 即时间线事件；不写 related_task_id，不进 legacy taskIndex）。
+   * 脱敏在这里收口（与 manager trace writer 同一纪律）。
+   */
+  private builtinTraceHooks(): import('./workers/builtin/adapter.js').BuiltinTraceHooks {
+    const redact = (text: string) => redactSecrets(text, [...this.knownSecrets])
+    return {
+      startIncarnationTrace: ({ worker_id, seq, summary }) => {
+        const trace = this.traceStore.startTrace({
+          module_id: this.config.moduleId,
+          trigger: { type: 'task', summary: redact(summary) },
+        })
+        return trace.trace_id
+      },
+      appendTurn: (traceId, event) => {
+        const llmSpan = this.traceStore.startSpan(traceId, {
+          type: 'llm_call',
+          details: {
+            model: '',
+            stop_reason: event.stopReason,
+            ...(event.usage ? { usage: event.usage } : {}),
+          } as import('./types.js').AgentSpanDetails,
+          started_at_ms: event.llmStartedAtMs,
+        })
+        this.traceStore.endSpan(traceId, llmSpan.span_id, 'completed', undefined,
+          event.llmStartedAtMs !== undefined && event.llmCallMs !== undefined ? event.llmStartedAtMs + event.llmCallMs : undefined)
+        for (const toolCall of event.toolCalls) {
+          const span = this.traceStore.startSpan(traceId, {
+            type: 'tool_call',
+            parent_span_id: llmSpan.span_id,
+            details: {
+              name: toolCall.name,
+              input_summary: redact(JSON.stringify(toolCall.input).slice(0, 300)),
+              output_summary: redact(toolCall.output.slice(0, 300)),
+            } as import('./types.js').AgentSpanDetails,
+            started_at_ms: toolCall.startedAtMs,
+          })
+          this.traceStore.endSpan(traceId, span.span_id, toolCall.isError ? 'failed' : 'completed', undefined,
+            toolCall.startedAtMs !== undefined && toolCall.durationMs !== undefined ? toolCall.startedAtMs + toolCall.durationMs : undefined)
+        }
+      },
+      finishIncarnationTrace: (traceId, patch) => {
+        this.traceStore.endTrace(traceId, patch.status, { summary: redact(patch.summary) })
+      },
+    }
+  }
+
+  private builtinTraceReader(): import('./workers/builtin/adapter.js').BuiltinTraceReader {
+    return {
+      readTrace: async (traceId) => this.traceStore.getFullTrace(traceId),
+    }
+  }
+
+  /**
+   * 化身终态收割（P6-A §8.10）：做最后一次 native read，把剩余增量写 Agent-owned copy。
+   * copy 只装本化身、脱敏后的归一化事件（不含 setup terminal / credential / 其它 session）。
+   */
+  private async harvestIncarnationNativeTrace(handle: import('./workers/types.js').IncarnationHandle): Promise<void> {
+    try {
+      const stack = this.managerStack
+      if (!stack) return
+      const found = await stack.ledger.findWorker(handle.worker_id)
+      if (!found) return
+      const incarnation = found.worker.incarnations.find((item) => item.seq === handle.seq && item.impl === handle.impl)
+      if (!incarnation) return
+      const adapter = stack.adapters.get(handle.impl)
+      if (!adapter?.readTrace) return
+      const fingerprint = incarnationFingerprint({
+        impl: handle.impl as import('./workers/types.js').WorkerImplId,
+        seq: handle.seq,
+        session_ref: handle.session_ref,
+        started_at: (incarnation as { started_at?: string }).started_at,
+      })
+      // 从 copy 已有行数续读，保证终态收割是"增量补齐"而不是全量重写。
+      const existing = await this.nativeTraceCopyStore().read(handle.worker_id, handle.seq, fingerprint)
+      const offset = existing?.events.length ?? 0
+      const native = await adapter.readTrace(handle, { offset })
+      if (native.events.length > 0) {
+        await this.nativeTraceCopyStore().append(
+          handle.worker_id,
+          handle.seq,
+          fingerprint,
+          native.events,
+          (text) => redactSecrets(text, [...this.knownSecrets]),
+        )
+      }
+    } catch (error) {
+      console.warn(`[${this.config.moduleId}] native trace terminal harvest failed for ${handle.worker_id}#${handle.seq}:`,
+        error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /** P6-A §8.10：Agent-owned native copy store（live source 消失后的降级真相）。 */
+  private nativeTraceCopyStore(): NativeTraceCopyStore {
+    if (!this.nativeTraceCopyStoreInstance) {
+      this.nativeTraceCopyStoreInstance = new NativeTraceCopyStore(path.join(getAgentDataDir(), 'native-trace-copies'))
+    }
+    return this.nativeTraceCopyStoreInstance
   }
 
   // ============================================================================

@@ -379,6 +379,12 @@ export class ImplAlreadyUsedError extends Error {
 }
 
 export interface HarnessDeps {
+  /**
+   * 化身进入终态（exited）时触发一次（fire-and-forget，P6-A §8.10）：装配层用它做
+   * native trace 终态收割（最后一次 read + 写 Agent-owned copy）。回调异常不得影响
+   * 状态机推进（调用点已 catch）。
+   */
+  readonly onIncarnationTerminal?: (handle: IncarnationHandle) => void
   /** 已 detect 过的可用实现。见文件头"onStateChange 接线契约"——底层 Map 引用可在构造后继续填充。 */
   readonly adapters: ReadonlyMap<WorkerImplId, WorkerAdapter>
   readonly defaultImpl: WorkerImplId
@@ -2462,6 +2468,7 @@ export class WorkerHarness {
       const inbox = this.getInbox(h.worker_id)
       inbox.requeueConsumed()
       inbox.release()
+      this.fireIncarnationTerminal(h)
     }
     if (report) {
       await this.appendEvent(h.worker_id, h.seq, 'state_changed', cliReportDetail(external, report), committedStatus)
@@ -2543,6 +2550,7 @@ export class WorkerHarness {
           return { ...prev, incarnations, updated_at: now }
         })
         await this.appendEvent(h.worker_id, h.seq, 'state_changed', { to: state, ...wakeDetail })
+        if (state === 'exited') this.fireIncarnationTerminal(h)
         return
       }
 
@@ -2599,6 +2607,7 @@ export class WorkerHarness {
         committed?.task.status
       )
     })
+    if (state === 'exited') this.fireIncarnationTerminal(h)
 
     if (!report?.notification && settledCurrentExit) {
       this.bumpInputOwnershipRevision(h.worker_id)
@@ -2686,6 +2695,16 @@ export class WorkerHarness {
     const event = this.buildEvent(workerId, seq, kind, detail)
     await this.getEventLog(workerId).append(event)
     return (await this.deps.onEvent?.(event)) ?? undefined
+  }
+
+  /** 化身终态收割钩子（P6-A §8.10）：fire-and-forget，异常只记不打断。 */
+  private fireIncarnationTerminal(h: IncarnationHandle): void {
+    try {
+      this.deps.onIncarnationTerminal?.(h)
+    } catch (error) {
+      console.error(`[WorkerHarness] onIncarnationTerminal failed for ${h.worker_id}#${h.seq}:`,
+        error instanceof Error ? error.message : String(error))
+    }
   }
 
   /** 事件对象的组装收口(两条 append 路径共用),字段语义见 `HarnessEvent`。 */
