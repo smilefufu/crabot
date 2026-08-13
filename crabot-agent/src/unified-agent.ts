@@ -1338,8 +1338,16 @@ export class UnifiedAgent extends ModuleBase {
   private async applyRuntimeConfigCandidate(next: UnifiedAgentConfig): Promise<void> {
     const candidate = next.agent_config
     if (!candidate) throw new Error('Pulled runtime config has no agent config')
-    if (candidate.max_iterations !== this.agentConfig?.max_iterations) {
+    // 降级启动没有旧配置：这是首次安装而不是变更，max_iterations 差异不构成受控重启条件。
+    if (this.agentConfig && candidate.max_iterations !== this.agentConfig.max_iterations) {
       throw new Error('Runtime config changes max_iterations and requires controlled restart')
+    }
+    // 降级启动时构造函数没跑 initializeAgentLayer：首次安装必须补上内部 legacy gate 与
+    // LSP，否则 coldHandler 分支永假、worker 层永远建不起来（入口却会因 isConfigured 放开）。
+    if (!this.agentConfig) {
+      const roles: Array<'front' | 'worker'> = candidate.roles && candidate.roles.length > 0 ? candidate.roles : ['front', 'worker']
+      for (const role of roles) this.roles.add(role)
+      void this.lspManager.start(getWorkspaceDir())
     }
 
     // All fallible work happens before the live fields are touched.

@@ -1671,7 +1671,9 @@ export class ModuleManager {
 
   private async startAutoStartModules(): Promise<void> {
     const autoStartModules = Array.from(this.modules.values())
-      .filter((m) => m.auto_start && (!this.managementOnly || m.module_id === 'admin-web'))
+      .filter((m) => m.auto_start
+        && m.status !== 'running' && m.status !== 'starting'
+        && (!this.managementOnly || m.module_id === 'admin-web'))
       .sort((a, b) => (a.module_id === 'crabot-agent' ? -1 : b.module_id === 'crabot-agent' ? 1 : a.start_priority - b.start_priority))
 
     for (const module of autoStartModules) {

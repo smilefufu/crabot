@@ -140,13 +140,13 @@ export class ConfigLoader {
     // 降级启动后进程存活并照常注册，runtime_config_authenticated=false 使所有执行入口
     // fail closed，由 UnifiedAgent 的退避 pull 重试等待 admin.agent_config_invalidated 自愈。
     console.warn('[ConfigLoader] Admin config pull failed permanently; starting in degraded fail-closed mode')
-    return this.createDegradatedConfig(process.env.Crabot_MODULE_ID || 'crabot-agent')
+    return this.createDegradedConfig(process.env.Crabot_MODULE_ID || 'crabot-agent')
   }
 
   /**
    * 启动 pull 永久失败时的降级配置：只保留 exact 身份与编排默认值，无 agent_config。
    */
-  static createDegradatedConfig(moduleId: string): UnifiedAgentConfig {
+  static createDegradedConfig(moduleId: string): UnifiedAgentConfig {
     return {
       module_id: moduleId,
       module_type: 'agent',

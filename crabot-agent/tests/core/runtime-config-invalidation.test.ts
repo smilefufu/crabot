@@ -167,6 +167,9 @@ describe('UnifiedAgent runtime config invalidation', () => {
     expect(agent.isConfigured()).toBe(false)
     const good = config()
     good.agent_config!.system_prompt = 'healed'
+    // 生产 wire 必带 max_iterations（DEFAULT_AGENT_CONFIG）：降级时旧配置缺失，
+    // 恢复 pull 不能把它误判成需要受控重启的配置变更。
+    good.agent_config!.max_iterations = 10
     const pull = vi.spyOn(ConfigLoader, 'pull').mockResolvedValue({ config: good, revision: 2 })
     // stub 掉 onStart 的重量级副作用，只验降级自愈接线。
     agent.importLegacyV2Tasks = vi.fn().mockResolvedValue(undefined)
@@ -176,12 +179,16 @@ describe('UnifiedAgent runtime config invalidation', () => {
     agent.detectFeishuChannel = vi.fn().mockResolvedValue(undefined)
     agent.sessionManager.startCleanup = vi.fn()
     // onStart 给降级 Agent 挂退避 pull；无需任何 invalidation 事件即可自愈。
+    agent.lspManager.start = vi.fn().mockResolvedValue(undefined)
     await agent.onStart()
     await new Promise((resolve) => setTimeout(resolve, 1300))
     expect(pull).toHaveBeenCalled()
     expect(agent.configStale).toBe(false)
     expect(agent.configAuthenticated).toBe(true)
     expect(agent.agentConfig.system_prompt).toBe('healed')
+    // worker 层必须真正建起来：roles 补齐、handler 安装，入口放开后不是残废状态。
+    expect(agent.roles.has('worker')).toBe(true)
+    expect(agent.agentHandler).toBeDefined()
   })
 
   it('treats a crossed older-revision response as a no-op without touching live state', async () => {
