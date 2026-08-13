@@ -1285,6 +1285,40 @@ export class TraceStore {
     return this.managerBadRecordCount
   }
 
+  /**
+   * P6-A：窄 trace writer 适配器（ManagerTraceWriter）。所有写盘前的脱敏都在这里收口：
+   * redact 由调用方按 knownSecrets 注入（`redactSecrets(text, [...knownSecrets])`）。
+   */
+  managerTraceWriter(redact: (text: string) => string): import('../manager/trace-types.js').ManagerTraceWriter {
+    const redactDetails = (details: unknown): unknown => {
+      if (details === undefined) return undefined
+      try { return JSON.parse(redact(JSON.stringify(details))) } catch { return '[unserializable details removed]' }
+    }
+    const redactTrigger = (trigger: ManagerEpisodeTrigger): ManagerEpisodeTrigger => ({
+      ...trigger,
+      summary: redact(trigger.summary),
+      ...(trigger.source ? { source: redact(trigger.source) } : {}),
+    })
+    return {
+      startEpisode: (traceId, managerKey, trigger) => this.startManagerEpisode(traceId, managerKey, redactTrigger(trigger)),
+      appendSpan: (traceId, span) => this.appendManagerSpan(traceId, { ...span, details: redactDetails(span.details) }),
+      finishSpan: (traceId, spanId, patch) => this.finishManagerSpan(traceId, spanId, {
+        ...patch,
+        details: patch.details !== undefined ? redactDetails(patch.details) : undefined,
+      }),
+      finishEpisode: (traceId, patch) => this.finishManagerEpisode(traceId, {
+        ...patch,
+        ...(patch.outcome ? {
+          outcome: {
+            summary: redact(patch.outcome.summary),
+            ...(patch.outcome.error ? { error: redact(patch.outcome.error) } : {}),
+          },
+        } : {}),
+      }),
+      addSpawnedWorker: (traceId, workerId) => this.addSpawnedWorkerToManagerEpisode(traceId, workerId),
+    }
+  }
+
   /** cleanupTracesBeforeDate 删除文件后同步剔除 manager 内存条目。 */
   private dropManagerEpisodesForDeletedFile(file: string): void {
     const dateMatch = /(\d{4}-\d{2}-\d{2})\.jsonl$/.exec(file)

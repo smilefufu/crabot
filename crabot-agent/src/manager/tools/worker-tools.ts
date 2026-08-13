@@ -66,6 +66,11 @@ export interface WorkerToolsContext {
   readonly managerKey: ManagerKey
   /** 当前 episode 的 trace id(可跳转);填入 `origin.spawned_by_episode`。 */
   readonly episodeId?: string
+  /**
+   * spawn 成功回调(P6-A §6.6):把 worker ID 追加进当前 episode trace 的 spawned_worker_ids。
+   * 与 `origin.spawned_by_episode` 同一 episode ID,两处必须一致。
+   */
+  readonly onWorkerSpawned?: (workerId: string) => void
   /** 权限身份:以谁的名义派发这个 worker;填入 `origin.creator_friend_id`。 */
   readonly creatorFriendId?: string
   /**
@@ -241,6 +246,7 @@ export function buildWorkerTools(deps: WorkerToolsDeps): ToolDefinition[] {
           impl,
           workspace,
         })
+        ctx.onWorkerSpawned?.(worker.worker_id)
         return ok({ status: 'spawned', worker_id: worker.worker_id, impl: worker.incarnations[0]?.impl })
       } catch (error) {
         return mapError('spawn_worker', error)

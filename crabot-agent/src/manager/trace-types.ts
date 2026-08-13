@@ -94,3 +94,16 @@ export function isValidManagerEpisodeTrace(trace: unknown): trace is ManagerEpis
     && Array.isArray(value.spawned_worker_ids)
   )
 }
+
+/**
+ * 窄 trace writer 接口（P6-A §6.1）：ManagerLoop 只依赖这个面，
+ * 不直接依赖整个 TraceStore API。实现方负责所有写盘前的脱敏。
+ */
+export interface ManagerTraceWriter {
+  /** episode admission：持久化失败必须 throw（调用方不得继续调用 LLM/tool）。 */
+  startEpisode(traceId: string, managerKey: ManagerKey, trigger: ManagerEpisodeTrigger): void
+  appendSpan(traceId: string, span: ManagerEpisodeSpan): void
+  finishSpan(traceId: string, spanId: string, patch: { status: 'completed' | 'failed'; ended_at?: string; details?: unknown }): void
+  finishEpisode(traceId: string, patch: { status: 'completed' | 'failed'; outcome?: { summary: string; error?: string }; total_usage?: ManagerEpisodeUsage }): void
+  addSpawnedWorker(traceId: string, workerId: string): void
+}

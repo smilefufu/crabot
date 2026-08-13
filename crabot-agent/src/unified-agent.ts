@@ -713,6 +713,8 @@ export class UnifiedAgent extends ModuleBase {
     this.managerStack = buildManagerStack({
       dataRoot: getDataRootDir(),
       now: () => new Date().toISOString(),
+      // P6-A：Manager episode trace writer（窄接口 + 脱敏收口在 TraceStore.managerTraceWriter）。
+      traceWriter: this.traceStore.managerTraceWriter((text) => redactSecrets(text, [...this.knownSecrets])),
       // 人类消息渲染的时区（`formatChannelMessageLine` 的 ts 属性）。与 worker 侧
       // `buildBuiltinWorkerRuntime` 取同一个来源，避免 manager 与 worker 看到的时间对不上。
       timezone: () => resolveTimezone(this.agentConfig?.timezone),
@@ -3107,6 +3109,8 @@ export class UnifiedAgent extends ModuleBase {
     // Business ingress is registered only after onStart resolves; initialize durable
     // subject bindings before any Manager tool face can mint a continuation credential.
     await this.managerStack?.principals.init()
+    // P6-A §7.7：开放 Manager read model 前先收口遗留 running episode（failed/interrupted）。
+    this.traceStore.reconcileInterruptedManagerEpisodes()
     this.startEventLoopWatchdog()
     // trace 的 in-flight 持久化：每 15s 覆盖写 traces-running-v3.jsonl，让 agent
     // 被 SIGKILL 时主 task trace 仍能保留到最后一次 flush 的状态。

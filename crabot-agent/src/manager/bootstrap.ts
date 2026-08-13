@@ -168,6 +168,8 @@ export interface BootstrapDeps {
    * 只维护台账、不对外发事件。
    */
   readonly publishEvent?: AgentEventPublisher
+  /** P6-A：Manager episode trace writer（窄接口）；缺省时整个 trace 面静默关闭。 */
+  readonly traceWriter?: import('./trace-types.js').ManagerTraceWriter
   /**
    * fail-loud 兜底出口:worker 事件唤醒的 manager episode 失败时,直接告诉人类一声。
    * 接线范式与上面的 `publishEvent` 完全一致(可选;不注入则这条路保持"只记日志"的既有行为)。
@@ -386,6 +388,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
   const principals = new ManagerPrincipalStore(deps.principalResolver, principalBindings, () => new Date(deps.now()))
 
   registry = new ManagerRegistry({
+    traceWriter: deps.traceWriter,
     store: new ManagerSessionStore(join(agentDir, 'managers')),
     policy: DEFAULT_MANAGER_COMPACTION_POLICY,
     estimateTokens: (msgs) => tokenEstimator.estimateTotalTokens(msgs),
@@ -423,7 +426,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         sessionId,
       )
     },
-    toolFace: (key, isSystemThread, onAsyncError, scheduleIdentity, humanPrincipal, principalPermissions) => {
+    toolFace: (key, isSystemThread, onAsyncError, scheduleIdentity, humanPrincipal, principalPermissions, traceHooks) => {
       // Capture at tool-face construction. Calling the resulting factory later must not
       // pick up a regrant/new generation from a subsequent wake.
       const legacyAuthTemplate = principals.captureLegacyContinuationAuth(key)
@@ -431,6 +434,10 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         harness,
         workerContext: () => ({
           managerKey: key,
+          // P6-A §6.6：当前 episode trace id 由 registry 桥惰性读取（tool call 发生时才取），
+          // spawn 成功后经 onWorkerSpawned 回写同一 trace 的 spawned_worker_ids。
+          episodeId: traceHooks?.currentTraceId(),
+          onWorkerSpawned: traceHooks?.onWorkerSpawned,
           reportTo: channelSessionFromManagerKey(key),
           // 权限身份(§4.4"权限按 Schedule.creator_friend_id 解析(is_builtin 按 master
           // 等价)"):内置 schedule 不以任何 friend 的名义执行,显式留空——空 creator 正是
