@@ -5,23 +5,22 @@
 
 ## 当前状态
 
-### P6 进行中：Slice 0（核心 Agent singleton / runtime identity）实现完成，待 PR
+### P6 进行中：Slice 0（核心 Agent singleton / runtime identity）已开 PR，review 迭代中
 
 - P6 总体设计：`crabot-docs/superpowers/specs/2026-08-11-p6-agent-observability-worker-management-design.md`；五份实施计划在 `crabot-docs/superpowers/plans/2026-08-12-p6-*.md`。顺序固定：**Slice 0 → P6-A → P6-B → P6-C → P6-D**。
-- Slice 0 分支 `feat/p6-slice0-core-agent-runtime` 已实现完成并通过全量验证（尚未 push/开 PR）：
+- Slice 0 分支 `feat/p6-slice0-core-agent-runtime` 已实现完成并开 **PR #90**（@claude review 迭代中，尚未 merge）：
   - 唯一核心 Agent：动态/legacy Agent 的 create/update/delete/config-write 全部拒绝（`ADMIN_HOTPLUG_NOT_ALLOWED` / HTTP 410），live read surfaces 只暴露 builtin `default` / exact `crabot-agent`；存量记录只读归档（`unsupported_legacy`）。
-  - Runtime identity + authenticated config pull：MM 只向 exact `crabot-agent` child 注入一次性 runtime bearer（stop/restart/replacement 撤销，duplicate start 不误撤）；Agent 启动最早期捕获并从 env 删除 bearer；`get_agent_config` 等 secret-bearing RPC 走 method-closed `callSensitive()`，普通 `call()` 在网络 I/O 前拒绝；Agent 启动与热更都经 authenticated pull，失败即 `configStale` fail closed（新执行、schedule、worker spawn、media wake 全挡）并断开 stale MCP。
-  - Wire 契约：authenticated pull 返回正式 `CoreAgentRuntimeConfig`（protocol-agent-v3 §11，`protocol_version: '3.1.1'`）；实例配置为 slot 制（`powerful` 必填），legacy `roles` 不是 wire 字段，Agent 内部固定补齐（见 follow-up）。
-  - Management-only cutover：每次启动用新 cutover bearer 重做 MM inventory/handshake；`complete_core_agent_cutover` 并发先占 bearer、response 丢失经 MM durable record reconcile；activation 前所有 Agent 依赖入口 fail closed（503/稳定错误），Agent-dependent maintenance/schedules 延后到 activation；readiness 失败时 Admin 同进程串行重试。
-  - Durable config revision：coordinator prepared→source→commit→invalidation 全程 file fsync+rename+dir fsync，HMAC semantic fingerprint + Skill source-journal binding；启动期 seeding mutations 不依赖 MM 事件扇出（publication 延后到 activation），runtime mutations publish 失败 fail-loud 且 durable outbox 可重试；`handleGetAgentConfig` 用 seqlock epoch 做一致性读（有界重试后 fail closed）。
+  - Runtime identity + authenticated config pull：MM 只向 exact `crabot-agent` child 注入一次性 runtime bearer；Agent 启动最早期捕获并从 env 删除；secret-bearing RPC 走 method-closed `callSensitive()`；启动与热更都经 authenticated pull，失败即 fail closed 并断开 stale MCP。pull 有单飞去重 + 旧 revision no-op + 失败退避重试（不会永久 stale）。
+  - Wire 契约：authenticated pull 返回正式 `CoreAgentRuntimeConfig`（protocol-agent-v3 §11，`protocol_version: '3.1.1'`）；实例配置为 slot 制（`powerful` 必填），legacy `roles` 不是 wire 字段。
+  - **降级启动自愈**：全新安装未配置 LLM 时 Agent 不再退出，进程存活照常注册，所有执行入口 fail closed，靠退避 pull 自愈；首次安装补建 worker 层（roles/LSP），无需手动重启。
+  - Management-only cutover + durable config revision（seqlock 一致性读、HMAC fingerprint、Skill journal binding、publish 失败退避 drain 自愈）。
 - **部署约束**：pre-P6 存量生产不得部署 Slice 0/A/B 中间态；首次 rollout 至少包含 Slice 0 + P6-B grandfather bootstrap + P6-C 最终选择语义。
 
-### 最近验证基线（2026-08-13，Slice 0 工作树）
+### 最近验证基线（2026-08-13，PR #90 最新 push）
 
-- Shared 107 passed、Core 138 passed、**Admin 全量 1137/1137 passed（131 files，首次真正全绿）**、Web build+269 tests 通过（web 代码此后未再改动）。
-- Agent 全量 2681 passed / 4 failed / 2 skipped。4 个失败均为既有 macOS 环境基线且两文件不在分支 diff 内：`/var`→`/private/var` realpath 3 个、tmux 存活探测 1 个。
-- 顺带修复的两个 main 遗留测试缺陷（与 Slice 0 无关，PR 中会注明）：`admin-chat-assertions.test.ts` 签名篡改用例约 6% 概率 no-op（base64 末尾填充位）；Admin 全量此前长期因 startup seeding 依赖 MM 事件扇出而 suite 级崩溃（17 个文件），现按"seeding 不依赖 MM、runtime publish fail-loud"修复。
-- bearer/secret/trace 泄漏扫描、sensitive-ordinary-call 扫描、配置绝对路径扫描、双仓 `git diff --check` 均通过。
+- Shared 107、Core 138、**Admin 1139/1139**、Web build+269（web 此后未再改动）。
+- Agent 全量 2683 passed / 4 failed / 2 skipped，4 个失败均为既有 macOS 环境基线（`/var` realpath 3、tmux 探测 1），文件不在分支 diff 内。
+- 顺带修复的既有缺陷：`admin-chat-assertions` 签名篡改用例约 6% no-op flake（base64 末尾填充位）；Admin startup seeding 依赖 MM 事件扇出导致的全量 suite 崩溃；MM cutover 后对已运行 admin-web 重复 auto-start 的日志噪音。
 
 ### Manager / Worker v3（已生产运行，背景）
 
@@ -31,7 +30,7 @@
 
 ### P6 主线（严格串行）
 
-1. **Slice 0 收口**：push 分支 → 开 PR → @claude latest-head review/自动 merge。PR 后按 review 意见迭代。
+1. **Slice 0 收口**：PR #90 review 迭代至 approve → 自动 merge。当前已处理两轮 @claude 意见（mass assignment、并发 pull、全新安装降级自愈、publish 失败锁死、MCP env 暴露面 + 降级 worker 层建立）。
 2. **P6-A 可观测性 / Admin Chat correlation**：Manager episode trace、`/api/agent/managers*`、CLI `readTrace()` 接入 `get_worker_trace`、Admin Chat 占位认领纠偏、Admin Web 切 Manager/Worker 视图。计划：`2026-08-12-p6-a-observability-admin-chat-correlation-plan.md`。
 3. **P6-B Worker 安装/连接/验证/setup**：`native_account`/`admin_provider`/`existing_host` 连接模式、grandfather bootstrap（存量生产首次 rollout 的硬前提）、Admin intent 持久化 + Agent 侧 activation registry。计划：`2026-08-12-p6-b-worker-onboarding-plan.md`。
 4. **P6-C Worker 选择语义**：detect/activation/preference 真实接线，替换 Manager prompt 中的假承诺。计划：`2026-08-12-p6-c-worker-policy-selection-plan.md`。
@@ -52,7 +51,7 @@
 
 | 日期 | 里程碑 |
 |---|---|
-| 08-12～13 | P6 Slice 0 实现完成：核心 Agent singleton、runtime bearer identity、authenticated config pull、management-only cutover、durable config revision；三路独立 review 的 blocker 全部修复，全模块测试基线刷新（Admin 首次全绿）。 |
+| 08-13 | P6 Slice 0 开 PR #90：核心 Agent singleton、runtime bearer identity、authenticated config pull、management-only cutover、durable config revision、降级启动自愈；两轮 @claude review 意见全部修复，全模块测试基线刷新（Admin 1139/1139 首次真正全绿）。 |
 | 08-11 | PR #86（merge `9546bae`）生产 cutover：2696 条 v2 task 一次性只读导入，legacy continuation、Admin Chat assertion、会话隔离与 Claude/Codex 真机 E2E 通过。 |
 | 08-09～10 | PR #84 worker-scoped MCP capability；PR #82 CLI 交互输入提交；ManagerKey 会话台账与 v2 legacy 只读导入完成。 |
 | 08-01～09 | PR #80 legacy 执行/恢复控制面退役 + builtin bg-shell durable delivery；PR #77/#78 Claude Code 真机修复；worker 活性信号纠偏。 |
