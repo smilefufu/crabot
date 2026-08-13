@@ -79,7 +79,7 @@ function Ensure-Bash {
     try {
         Invoke-WebRequest -Uri $url -OutFile $exe -UseBasicParsing
     } catch {
-        Write-Err "Failed to download PortableGit from $url: $_"
+        Write-Err "Failed to download PortableGit from ${url}                                                                       : $_"
         Write-Err "Install Git for Windows manually: https://git-scm.com/downloads/win"
         exit 1
     }
