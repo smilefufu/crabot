@@ -43,6 +43,32 @@ describe('UnifiedAgent runtime config invalidation', () => {
     expect(apply).not.toHaveBeenCalled()
   })
 
+  it('rebuilds detached runtime resources when an equal-revision pull recovers after a failure', async () => {
+    const agent = new UnifiedAgent(config()) as any
+    agent.adminPort = 19998
+    agent.configRevision = 2
+    agent.configAuthenticated = true
+    const disconnectAll = vi.spyOn(agent.mcpConnector, 'disconnectAll').mockResolvedValue(undefined)
+    const pull = vi.spyOn(ConfigLoader, 'pull')
+    // 第一次 pull 瞬时失败：stale + 破坏性断连。
+    pull.mockRejectedValueOnce(new Error('transient'))
+    await expect(agent.pullRuntimeConfig()).rejects.toThrow('transient')
+    expect(agent.configStale).toBe(true)
+    expect(agent.configResourcesDetached).toBe(true)
+    expect(disconnectAll).toHaveBeenCalled()
+    // 同 revision 恢复：不能只翻回 stale 标志，必须重建资源，否则外部 MCP 工具永久消失。
+    const apply = vi.spyOn(agent, 'applyRuntimeConfigCandidate').mockResolvedValue(undefined)
+    pull.mockResolvedValue({ config: config(), revision: 2 })
+    await agent.pullRuntimeConfig()
+    expect(apply).toHaveBeenCalledOnce()
+    expect(agent.configStale).toBe(false)
+    expect(agent.configAuthenticated).toBe(true)
+    expect(agent.configResourcesDetached).toBe(false)
+    // 再一次同 revision 成功（无断连）则不重复重建。
+    await agent.pullRuntimeConfig()
+    expect(apply).toHaveBeenCalledOnce()
+  })
+
   it('cold unconfigured Agent atomically installs a handler before opening execution admission', async () => {
     const cold = config()
     cold.agent_config!.roles = ['worker']

@@ -439,6 +439,9 @@ export class UnifiedAgent extends ModuleBase {
   /** Backoff retry after pull failure so a transient error cannot pin the Agent fail-closed. */
   private configPullRetryTimer?: ReturnType<typeof setTimeout>
   private configPullRetryDelayMs = 1_000
+  /** A failed pull destructively detached runtime resources; recovery must rebuild them
+   *  even when the revision does not advance. */
+  private configResourcesDetached = false
 
   // 端口缓存
   private adminPort?: number
@@ -1312,6 +1315,13 @@ export class UnifiedAgent extends ModuleBase {
       if (loaded.revision === this.configRevision) {
         // A successful authenticated read proves the current revision remains authoritative.
         // Do not reapply it: a previous transient pull failure must not permanently block ingress.
+        if (this.configResourcesDetached) {
+          // The failed pull destructively disconnected runtime resources; an equal-revision
+          // recovery must rebuild them before admission reopens, or external MCP tools would
+          // silently stay gone until the next real revision change.
+          await this.applyRuntimeConfigCandidate(loaded.config)
+          this.configResourcesDetached = false
+        }
         this.configStale = false
         this.configAuthenticated = true
         return
@@ -1319,11 +1329,13 @@ export class UnifiedAgent extends ModuleBase {
       await this.applyRuntimeConfigCandidate(loaded.config)
       this.configRevision = loaded.revision
       ConfigLoader.acceptRevision(loaded.revision)
+      this.configResourcesDetached = false
       this.configStale = false
       this.configAuthenticated = true
     } catch (error) {
       this.configStale = true
       this.configAuthenticated = false
+      this.configResourcesDetached = true
       this.disconnectRuntimeConfigResources()
       throw error
     }
