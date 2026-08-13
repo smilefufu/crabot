@@ -12,6 +12,7 @@ import { createReadStream, createWriteStream } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { pipeline } from 'node:stream/promises'
+import yaml from 'js-yaml'
 import { buildBackupOverview } from './openclaw-import/build-overview.js'
 import { runImport, type ImportSelections } from './openclaw-import/run-import.js'
 import { buildImportDeps } from './openclaw-import/build-import-deps.js'
@@ -4090,6 +4091,12 @@ export class AdminModule extends ModuleBase {
       for (const entry of entries) {
         if (!entry.isDirectory() || entry.name === 'crabot-agent') continue
         const packagePath = path.join(directory, entry.name)
+        // 收窄 inventory 范围：cutover 归档只针对 legacy Agent 包。manifest 明确声明
+        // 非 agent module_type 的包（如 cutover 后安装的 channel/memory 模块）不得进入
+        // 归档/fingerprint——否则任何新安装模块都会让 marker 冲突判断 throw，把
+        // admin-web 永久锁在 management-only。无法判定类型的保守保留（维持原退役语义）。
+        const moduleType = await this.readInstalledModuleType(packagePath)
+        if (moduleType !== undefined && moduleType !== 'agent') continue
         let raw: unknown = { package_id: entry.name, package_path: packagePath }
         for (const manifestName of ['crabot-module.yaml', 'crabot-module.yml', 'package.json']) {
           try {
@@ -4107,6 +4114,26 @@ export class AdminModule extends ModuleBase {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
       throw error
     }
+  }
+
+  /**
+   * 读取已安装模块 manifest 声明的 module_type；无法判定（无 manifest / 解析失败 /
+   * 未声明）时返回 undefined，由调用方保守处理。
+   */
+  private async readInstalledModuleType(packagePath: string): Promise<string | undefined> {
+    for (const manifestName of ['crabot-module.yaml', 'crabot-module.yml']) {
+      try {
+        const manifest = await fs.readFile(path.join(packagePath, manifestName), 'utf8')
+        const parsed = yaml.load(manifest)
+        if (parsed && typeof parsed === 'object' && typeof (parsed as Record<string, unknown>).module_type === 'string') {
+          return (parsed as Record<string, unknown>).module_type as string
+        }
+        return undefined
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return undefined
+      }
+    }
+    return undefined
   }
 
   private async readLegacyFrontWorkerConfigSources(): Promise<Array<{ source_id: string; raw: unknown }>> {
@@ -7302,24 +7329,29 @@ export class AdminModule extends ModuleBase {
       ...packageEntries.map((entry) => ({ source_kind: 'installed_package' as const, source_id: entry.source_id, raw: entry.raw })),
       ...frontWorkerConfigs.map((entry) => ({ source_kind: 'agent_config' as const, source_id: `legacy-${entry.source_id}`, raw: entry.raw })),
     ]
+    // archive() 合并时对已归档记录的内容变化抛事实冲突（重新进入 gate）；新增条目只扩展只读归档。
     const archive = await this.cutoverStore.archive(sources)
     const existing = await this.cutoverStore.loadMarker()
-    if (existing && (existing.archive_fingerprint !== archive.fingerprint || existing.archive_record_count !== archive.record_count)) {
-      throw new Error('Core Agent cutover marker conflicts with current archive')
-    }
+    // marker 已提交 cutover 拓扑：提交后的每次重启都必须用已提交的 fingerprint/count 与 MM
+    // 握手（MM record 按该值对账）。cutover 之后新增的 legacy 条目可以容忍——与 MM 侧
+    // 「archived 子集仍在」的检查语义一致；否则 cutover 后任何新安装模块都会把 admin-web
+    // 永久锁在 management-only。
+    const handshake = existing
+      ? { fingerprint: existing.archive_fingerprint, record_count: existing.archive_record_count }
+      : { fingerprint: archive.fingerprint, record_count: archive.record_count }
     if (!this.cutoverBearer) throw new Error('Missing CRABOT_ADMIN_CUTOVER_BEARER')
     let result: unknown
     try {
       result = await this.rpcClient.callModuleManagerSensitive(
         'complete_core_agent_cutover',
-        { schema_version: 1, admin_archive_fingerprint: archive.fingerprint, admin_archived_record_count: archive.record_count },
+        { schema_version: 1, admin_archive_fingerprint: handshake.fingerprint, admin_archived_record_count: handshake.record_count },
         this.config.moduleId,
         { authorizationBearer: this.cutoverBearer },
       )
       const wrapped = result as { record?: unknown }
       if (!wrapped || wrapped.record === undefined) throw new Error('Invalid complete_core_agent_cutover response')
     } catch (error) {
-      result = await this.reconcileCoreAgentCutoverRecord(archive, error)
+      result = await this.reconcileCoreAgentCutoverRecord(handshake, error)
     }
     if (!existing) {
       await this.cutoverStore.saveMarker({ schema_version: 1, completed: true, completed_at: new Date().toISOString(), archive_fingerprint: archive.fingerprint, archive_record_count: archive.record_count, mm_result: result })

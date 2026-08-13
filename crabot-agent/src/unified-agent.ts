@@ -1649,38 +1649,6 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   /**
-   * 配置缺失时发送提示消息给用户。
-   *
-   * 入参形状必须是 channel 的 `SendMessageParams`（`{session_id, content, features?}`）——
-   * 四个 channel 的 `handleSendMessage` 一律先 `sessionManager.findById(params.session_id)`，
-   * 查不到直接抛 `NOT_FOUND`（feishu `:826` / wechat `:468` / dingtalk `:387` /
-   * telegram `:502`）。历史实现传的是 `{message: <整条 ChannelMessage>}`，`session_id`
-   * 恒 undefined ⇒ 这条"未配置"提示**从未送达过任何人**，而外层 catch 把 NOT_FOUND
-   * 吞成一行日志，所以一直没被发现。
-   *
-   * 这也是"不经 LLM 直接告诉人类"这条通路的唯一正确形状（入站兜底回复复用它）。
-   */
-  private async sendConfigMissingReply(message: ChannelMessage): Promise<void> {
-    try {
-      const channelPort = await this.getChannelPort(message.session.channel_id)
-      await this.rpcClient.call(
-        channelPort,
-        'send_message',
-        {
-          session_id: message.session.session_id,
-          content: {
-            type: 'text',
-            text: 'Crabot 尚未配置 LLM 模型。请管理员在 Admin 界面完成配置后重试。',
-          },
-        },
-        this.config.moduleId,
-      )
-    } catch (error) {
-      console.error('Failed to send config missing reply:', error instanceof Error ? error.message : error)
-    }
-  }
-
-  /**
    * fail-loud 兜底：manager episode 没能把话说出来时，**不经 manager、不经 LLM**
    * 直接告诉人类一声。
    *
@@ -1690,7 +1658,7 @@ export class UnifiedAgent extends ModuleBase {
    * harness / 工具面中的任何一个。唯一还能挡住它的是 channel 模块本身也挂了——
    * 那种情况下任何手段都送不出消息，只能落到日志。
    *
-   * 入参形状与 `sendConfigMissingReply` 相同（`{session_id, content}`，见那里的注释）。
+   * 入参形状是 channel 的 `SendMessageParams`（`{session_id, content}`）。
    *
    * **按 key 冷却**：F1 会把整批输入推回 mailbox 下次重投，同一批消息可能连续失败若干轮；
    * 没有冷却就是刷屏。冷却命中时只记日志，不再发第二条。

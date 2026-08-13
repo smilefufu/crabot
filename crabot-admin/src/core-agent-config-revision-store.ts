@@ -291,9 +291,21 @@ export class CoreAgentConfigMutationCoordinator {
           if (!bound || digest !== outbox.source_journal_sha256) throw new Error('Source journal binding does not match')
           await this.clearCompletedSourceJournalBinding(outbox.mutation_id, outbox.target_revision, digest)
         }
-        await applySourceMutation({ mutation_id: outbox.mutation_id, target_revision: outbox.target_revision, bindSourceJournal, markSourceJournalCleanupCompleted, clearSourceJournalBinding })
-        const observedAfter = await this.fingerprint()
-        if (!this.equal(outbox.after_fingerprint_hmac, observedAfter)) throw new Error('Config mutation source did not produce declared semantic snapshot')
+        let sourceMutationError: unknown
+        try {
+          await applySourceMutation({ mutation_id: outbox.mutation_id, target_revision: outbox.target_revision, bindSourceJournal, markSourceJournalCleanupCompleted, clearSourceJournalBinding })
+          const observedAfter = await this.fingerprint()
+          if (!this.equal(outbox.after_fingerprint_hmac, observedAfter)) throw new Error('Config mutation source did not produce declared semantic snapshot')
+        } catch (error) {
+          sourceMutationError = error
+        }
+        if (sourceMutationError !== undefined) {
+          // 源写入失败不得把 outbox 永久钉在 prepared（那会同时锁死后续 mutation 与
+          // 一致性读）。已回滚到 before 就原子中止；状态已推进/歧义时保留 durable
+          // outbox，由重启恢复 fail-loud 处理（disk=before → abort；disk=after → 前进）。
+          await this.abortPreparedMutationIfRolledBack(outbox, before)
+          throw sourceMutationError
+        }
         outbox.state = 'data_persisted'
         await atomicWrite(this.outboxPath, outbox)
         await this.options.hooks?.afterSourceMutation?.()
@@ -463,6 +475,27 @@ export class CoreAgentConfigMutationCoordinator {
     outbox.invalidation_pending = false
     await atomicWrite(this.outboxPath, outbox)
     await durableRemoveFile(this.outboxPath)
+  }
+
+  private async abortPreparedMutationIfRolledBack(outbox: CoreAgentConfigMutationOutboxRecord, beforeFingerprintHmac: string): Promise<void> {
+    try {
+      const observed = await this.fingerprint()
+      if (!this.equal(observed, beforeFingerprintHmac)) {
+        console.error('[CoreAgentConfigMutationCoordinator] source mutation failed with diverged source state; durable outbox retained for restart recovery')
+        return
+      }
+      if (outbox.source_journal_sha256) {
+        const receipt: CoreAgentConfigMutationReceipt = {
+          schema_version: 1, mutation_id: outbox.mutation_id, target_revision: outbox.target_revision,
+          domains: [...outbox.domains], outcome: 'aborted', source_journal_sha256: outbox.source_journal_sha256,
+          source_journal_hmac: outbox.source_journal_hmac,
+        }
+        await atomicWrite(this.receiptPath, receipt)
+      }
+      await durableRemoveFile(this.outboxPath)
+    } catch (recoveryError) {
+      console.error('[CoreAgentConfigMutationCoordinator] prepared-outbox abort recovery failed:', recoveryError)
+    }
   }
 
   private assertRecord(record: CoreAgentConfigRevisionRecord): void {

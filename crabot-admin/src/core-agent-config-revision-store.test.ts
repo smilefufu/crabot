@@ -270,6 +270,35 @@ describe('CoreAgentConfigMutationCoordinator', () => {
     } finally { await cleanup(f.dir) }
   })
 
+  it('aborts the prepared outbox when a failed source mutation rolls back to before', async () => {
+    const f = await fixture()
+    try {
+      await expect(f.coordinator.mutate(['models'], { provider: 'unchanged', secret: 'initial-secret' }, async () => { throw new Error('disk write failed') }))
+        .rejects.toThrow('disk write failed')
+      // 源状态未变：outbox 必须被原子中止，运行期不得锁死（无 journal binding 不写 receipt）。
+      await expect(fs.access(outbox(f.dir))).rejects.toThrow()
+      expect((await f.coordinator.current()).revision).toBe(1)
+      // 后续 mutation 与一致性读立即可用。
+      expect(await f.coordinator.readCommittedEpoch()).toMatchObject({ revision: 1 })
+      await f.coordinator.mutate(['behavior'], { provider: 'next', secret: 'initial-secret' }, async () => { f.state.provider = 'next' })
+      expect((await f.coordinator.current()).revision).toBe(2)
+    } finally { await cleanup(f.dir) }
+  })
+
+  it('retains the prepared outbox when a failed source mutation leaves diverged state', async () => {
+    const f = await fixture()
+    try {
+      await expect(f.coordinator.mutate(['models'], { provider: 'after', secret: 'initial-secret' }, async () => {
+        f.state.provider = 'after'
+        throw new Error('disk write failed after memory advanced')
+      })).rejects.toThrow('disk write failed after memory advanced')
+      // 内存态已推进到 after、与磁盘 before 不一致：保留 durable outbox，由重启恢复 fail-loud。
+      const pending = JSON.parse(await fs.readFile(outbox(f.dir), 'utf8'))
+      expect(pending.state).toBe('prepared')
+      await expect(f.coordinator.mutate(['behavior'], { provider: 'x', secret: 'initial-secret' }, async () => {})).rejects.toThrow('already active')
+    } finally { await cleanup(f.dir) }
+  })
+
   it('rejects mismatch recovery instead of resetting revision or applying a callback twice', async () => {
     const f = await fixture({ afterSourceMutation: () => { throw new Error('stop') } })
     try {
