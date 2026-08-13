@@ -56,8 +56,9 @@ export class NativeTraceCopyStore {
   ): Promise<void> {
     const filePath = this.fileFor(workerId, seq)
     const existing = await this.readHeader(filePath)
-    if (!replace) {
+    if (!replace && existing?.incarnation_fingerprint === fingerprint) {
       // 按 source_offset 去重：同一化身的重复首读/翻页不得把整段 native 再追加一遍。
+      // 去重必须先限定同化身——文件属于旧化身（seq 碰撞）时不能拿它的 offset 砍新内容。
       const maxOffset = await this.readMaxOffset(filePath)
       if (maxOffset !== null) {
         events = events.filter((event) => event.source_offset !== undefined && event.source_offset > maxOffset)

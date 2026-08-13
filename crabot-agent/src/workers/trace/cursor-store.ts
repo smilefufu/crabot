@@ -52,7 +52,9 @@ export class InvalidTraceCursorError extends RpcError {
 
 const MAX_CURSOR_RECORDS = 512
 
-/** incarnation 身份指纹：impl+seq 之外必须绑定可判定身份（started_at/session_ref），seq 碰撞不算唯一。 */
+/** incarnation 身份指纹：只绑不可变身份（impl + seq + started_at）。
+ *  session_ref 对 cc/codex 是运行中延后确定的、对 builtin 每轮 burst 前进——把它绑进
+ *  指纹会让同一化身在正常运行中换指纹，合法翻页 cursor 被误判成别的化身。 */
 export function incarnationFingerprint(input: {
   impl: WorkerImplId
   seq: number
@@ -63,7 +65,6 @@ export function incarnationFingerprint(input: {
     .update(JSON.stringify({
       impl: input.impl,
       seq: input.seq,
-      session_ref: input.session_ref ?? '',
       started_at: input.started_at ?? '',
     }))
     .digest('hex')

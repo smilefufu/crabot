@@ -3006,7 +3006,6 @@ export class UnifiedAgent extends ModuleBase {
       const fingerprint = incarnationFingerprint({
         impl: handle.impl as import('./workers/types.js').WorkerImplId,
         seq: handle.seq,
-        session_ref: handle.session_ref,
         started_at: (incarnation as { started_at?: string }).started_at,
       })
       // 终态收割是全量快照：copy 的「事件条数」≠ native 的「已消费行数」（坏行/未知行
@@ -3209,10 +3208,16 @@ export class UnifiedAgent extends ModuleBase {
     const key = 'admin-web::admin-chat' as ManagerKey
     const store = this.adminChatCorrelationStore()
     const message = error instanceof Error ? error.message : String(error)
-    if (/not pending/i.test(message)) {
-      await store.markOutbound(key, deliveryId, 'confirmed')
-      const record = await store.readOutbound(key, deliveryId)
-      if (record) await store.settleInbound(key, record.request_ids)
+    const notPending = /request (\S+) is not pending/i.exec(message)
+    if (notPending) {
+      // Admin 整批零 mutation 拒绝，报出的是**第一个**非 pending 的 ID——该 ID 在 Admin
+      // 已是终态（settled/expired）：本地结算它（含其 wake），delivery 标 abandoned
+      // （消息未落，不得标 confirmed）。其余 ID 保持 pending，由 wake 重放重跑 episode
+      // 生成只含现存 pending ID 的新 delivery 收敛。一刀切 confirmed+全量 settle 会把
+      // 混批里正常 pending 的回复静默丢掉（round 4 指出）。
+      const badId = notPending[1]
+      await store.markOutbound(key, deliveryId, 'abandoned')
+      await store.settleInbound(key, [badId])
       await store.cleanStaging(key, deliveryId)
       return
     }

@@ -106,7 +106,6 @@ export async function readCompositeWorkerTrace(
   const fingerprint = incarnationFingerprint({
     impl: incarnation.impl as WorkerImplId,
     seq: incarnation.seq,
-    session_ref: incarnationSessionRef(incarnation),
     started_at: incarnationStartedAt(incarnation),
   })
 
@@ -217,7 +216,11 @@ export async function readCompositeWorkerTrace(
     await deps.cursorStore.captureWindow(cursorRecord.token, { end, nextToken })
   }
 
-  const merged = sortSourcedEvents([...harnessEvents, ...nativeEvents]).map((entry) => entry.event)
+  const merged = sortSourcedEvents([...harnessEvents, ...nativeEvents]).map((entry) => {
+    // source_offset 是内部钳制坐标，不进 REST/RPC response。
+    const { source_offset: _dropped, ...event } = entry.event
+    return event
+  })
   return {
     events: merged,
     next_cursor: nextToken,
