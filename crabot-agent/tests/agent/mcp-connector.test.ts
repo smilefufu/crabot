@@ -50,19 +50,25 @@ describe('McpConnector.reconnect', () => {
     expect(client.callTool).toHaveBeenCalledWith({ name: 'echo', arguments: { value: 'x' } })
   })
 
-  it('prepare rejects listTools discovery failure and leaves live connector usable', async () => {
-    await connector.connectAll([cfgA])
-    const oldTool = connector.getAllTools()[0]!
-    const oldClient = connector.getClient('A') as any
-    oldClient.callTool.mockResolvedValueOnce({ content: [{ type: 'text', text: 'old-still-live' }] })
+  it('prepare tolerates a single server failure like startup connectAll (no all-or-nothing)', async () => {
+    // 与启动路径 connectAll 对齐：单台第三方 MCP server 连不上/探不出工具只降级该
+    // server，不得让 prepare reject —— 否则 pullRuntimeConfig 会把「MCP 挂了」升级成
+    // 「配置不可信」，configStale + 断开所有连接 + 全执行入口 fail closed。
     const { Client } = await import('@modelcontextprotocol/sdk/client/index.js') as any
     Client.mockImplementationOnce(() => ({
       connect: vi.fn().mockResolvedValue(undefined), close: vi.fn().mockResolvedValue(undefined),
       listTools: vi.fn().mockRejectedValue(new Error('discovery failed')), callTool: vi.fn(),
     }))
-    await expect(McpConnector.prepare([cfgB])).rejects.toThrow('Failed to list tools')
-    await expect(oldTool.call({})).resolves.toMatchObject({ output: 'old-still-live' })
-    expect(connector.getAllTools().map((tool) => tool.name)).toContain('mcp__A__echo')
+    const candidate = await McpConnector.prepare([cfgA, cfgB])
+    // 并行连接中消耗失败 mock 的那台探不出工具（不进 cache），另一台照常；
+    // 两台都保持连接，prepare 不得 reject。
+    const cached = candidate.getAllTools().map((tool) => tool.name)
+      .filter((name) => name === 'mcp__A__echo' || name === 'mcp__B__echo')
+    expect(cached).toHaveLength(1)
+    expect(candidate.count).toBe(2)
+    await connector.replaceWith(candidate)
+    expect(connector.count).toBe(2)
+    expect(connector.getAllTools().map((tool) => tool.name).filter((name) => name === 'mcp__A__echo' || name === 'mcp__B__echo')).toHaveLength(1)
   })
 
   it('reconnect 成功路径：cachedTools 含新 server', async () => {

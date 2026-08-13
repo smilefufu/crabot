@@ -602,13 +602,15 @@ export class ModelProviderManager {
       last_validated_at: result.success ? generateTimestamp() : provider.last_validated_at,
       validation_error: result.success ? undefined : result.error,
     }
+    // status 不变时语义快照不变（重复测试/对已 error 的 provider 再测）：
+    // 允许 runtime noop，连通性结果与 last_validated_at 照常落盘。
     await this.mutateRuntimeConfig(['models'], async () => this.previewSemanticSnapshot(
       () => this.providers.set(provider.id, updated),
       () => this.providers.set(provider.id, previous),
     ), async () => {
       this.providers.set(provider.id, updated)
       await this.saveProviders()
-    })
+    }, true)
     return result
   }
 
@@ -838,13 +840,15 @@ export class ModelProviderManager {
     const mergedModels = freshModels
 
     const updated = { ...provider, models: mergedModels, updated_at: generateTimestamp() }
+    // 厂商模型列表与本地一致时语义快照不变：允许 runtime noop，否则最常见的
+    // refresh 结果会抛错并跳过 autoConfigureImageSlot。
     await this.mutateRuntimeConfig(['models'], async () => this.previewSemanticSnapshot(
       () => this.providers.set(id, updated),
       () => this.providers.set(id, provider),
     ), async () => {
       this.providers.set(id, updated)
       await this.saveProviders()
-    })
+    }, true)
 
     await this.autoConfigureImageSlot(id)
 

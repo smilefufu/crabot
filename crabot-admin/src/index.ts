@@ -596,6 +596,10 @@ export class AdminModule extends ModuleBase {
       // publish 失败后 outbox 保留 committed/invalidation_pending；运行期必须有重试入口，
       // 否则 readCommittedEpoch/mutate 会被一个卡住的 outbox 永久锁死（只能重启 Admin 解）。
       onInvalidationPublishFailure: () => this.scheduleConfigDrainRetry(),
+      // journal-bound skill mutation 运行期中止时，立即跑与启动期同形的 journal 恢复
+      // （回滚物理文件、删 journal、清 receipt binding），否则所有配置写入会被
+      // 'source journal cleanup is still active' 锁死到重启。
+      abortSourceJournal: () => this.skillManager.recoverSourceJournal(this.configMutationCoordinator),
     })
     this.cutoverStore = new CoreAgentCutoverStore(this.adminConfig.data_dir)
     this.managementOnly = process.env.CRABOT_ADMIN_STARTUP_MODE === 'core-agent-cutover'

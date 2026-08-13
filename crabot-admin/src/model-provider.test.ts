@@ -107,6 +107,32 @@ describe('ModelProviderManager', () => {
       expect(updated.status).toBe('inactive')
     })
 
+    it('repeated connectivity tests succeed even when status does not change (runtime noop)', async () => {
+      const created = await manager.createProvider({
+        name: 'Probe', type: 'manual', format: 'openai', endpoint: 'https://probe.example', api_key: 'k', models: [],
+      })
+      const asAny = manager as unknown as { probeEndpointConnectivity: () => Promise<{ success: boolean; latency_ms: number }> }
+      asAny.probeEndpointConnectivity = async () => ({ success: true, latency_ms: 5 })
+      await expect(manager.testProviderModel(created.id)).resolves.toMatchObject({ success: true })
+      // 第二次测试：status 仍为 active，语义快照不变——必须允许 runtime noop，
+      // 而不是抛 'Config mutation did not change semantic snapshot'。
+      await expect(manager.testProviderModel(created.id)).resolves.toMatchObject({ success: true })
+      expect(manager.getProvider(created.id)?.last_validated_at).toBeTruthy()
+    })
+
+    it('refreshModels with an unchanged vendor model list succeeds as runtime noop', async () => {
+      const models = [{ model_id: 'm1', display_name: 'M1', type: 'llm' as const }]
+      const created = await manager.createProvider({
+        name: 'Preset', type: 'preset', preset_vendor: 'ollama', format: 'openai',
+        endpoint: 'http://localhost:11434/v1', api_key: 'k', models: [...models],
+      })
+      const asAny = manager as unknown as Record<string, unknown>
+      asAny.ensureFreshAuthToken = async () => 'token'
+      asAny.fetchVendorModels = async () => models.map((m) => ({ ...m }))
+      // 厂商返回与本地一致是最常见的 refresh 结果：必须允许 noop 并继续后续流程。
+      await expect(manager.refreshModels(created.id)).resolves.toMatchObject({ added: [], removed: [] })
+    })
+
     it('ignores non-whitelisted provider PATCH fields (mass assignment guard)', async () => {
       const created = await manager.createProvider({
         name: 'Original', type: 'manual', format: 'openai', endpoint: 'https://old.example', api_key: 'key', models: [],

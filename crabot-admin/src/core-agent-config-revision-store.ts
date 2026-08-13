@@ -65,6 +65,9 @@ export interface CoreAgentConfigMutationCoordinatorOptions {
   publishInvalidation: (payload: { config_revision: number; domains: ConfigDomain[] }) => Promise<void> | void
   /** 发布失败（outbox 已保留）时通知宿主挂后台 drain 重试，避免运行期无重试入口。 */
   onInvalidationPublishFailure?: (error: unknown) => void
+  /** journal-bound mutation 被运行期中止时，让源端运行期清理 journal（回滚物理文件、
+   *  删除 journal 并清除 receipt binding）；失败时保留 binding 交重启恢复 fail-loud。 */
+  abortSourceJournal?: () => Promise<void>
   hooks?: ConfigMutationHooks
 }
 
@@ -485,14 +488,27 @@ export class CoreAgentConfigMutationCoordinator {
         return
       }
       if (outbox.source_journal_sha256) {
+        // 先写带 binding 的 aborted receipt：源端运行期清理靠它定位 journal；清理成功后
+        // 由源端清除 binding，配置读写立即解锁。
         const receipt: CoreAgentConfigMutationReceipt = {
           schema_version: 1, mutation_id: outbox.mutation_id, target_revision: outbox.target_revision,
           domains: [...outbox.domains], outcome: 'aborted', source_journal_sha256: outbox.source_journal_sha256,
           source_journal_hmac: outbox.source_journal_hmac,
         }
         await atomicWrite(this.receiptPath, receipt)
+        // 先删 outbox 再跑源端清理：清理走 mark/clear，只应作用于 receipt（'mark'
+        // 拒绝非 committed 的 outbox）。aborted receipt 成为清理与重启恢复的唯一凭据。
+        await durableRemoveFile(this.outboxPath)
+        try {
+          await this.options.abortSourceJournal?.()
+        } catch (error) {
+          // 运行期清理失败：binding 留在 receipt 上，启动期 verify/recover 兜底 fail-loud。
+          console.error('[CoreAgentConfigMutationCoordinator] runtime source journal abort cleanup failed; restart recovery required:', error)
+          return
+        }
+      } else {
+        await durableRemoveFile(this.outboxPath)
       }
-      await durableRemoveFile(this.outboxPath)
     } catch (recoveryError) {
       console.error('[CoreAgentConfigMutationCoordinator] prepared-outbox abort recovery failed:', recoveryError)
     }

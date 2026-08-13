@@ -46,14 +46,24 @@ export class McpConnector {
     const candidate = new McpConnector()
     const seen = new Set<string>()
     const unique = configs.filter((config) => !seen.has(config.name) && (seen.add(config.name), true))
-    try {
-      await Promise.all(unique.map((config) => candidate.connectOne(config)))
-      await candidate.refreshToolCache(true)
-      return candidate
-    } catch (error) {
-      await candidate.disconnectAll()
-      throw error
+    // 与 connectAll 保持一致：先记 tool_defaults，否则 replaceWith 会用空 map 覆盖，
+    // 热更后 tool_defaults 静默丢失。
+    for (const config of unique) {
+      if (config.tool_defaults) candidate.toolDefaultsMap.set(config.name, config.tool_defaults)
     }
+    // 与启动路径 connectAll 同样的容错语义：单台第三方 MCP server 不可用只降级该
+    // server，不得升级成「配置不可信」把整个 Agent 打下线（configStale + 全入口
+    // fail closed + 断开所有连接）。
+    const results = await Promise.allSettled(unique.map((config) => candidate.connectOne(config)))
+    for (let i = 0; i < results.length; i++) {
+      if (results[i].status === 'rejected') {
+        const reason = (results[i] as PromiseRejectedResult).reason
+        const msg = reason instanceof Error ? reason.message : String(reason)
+        console.error(`[McpConnector] Failed to connect MCP server "${unique[i].name}": ${msg}`)
+      }
+    }
+    await candidate.refreshToolCache()
+    return candidate
   }
 
   /** Atomically adopt a fully connected candidate, then retire old clients. */

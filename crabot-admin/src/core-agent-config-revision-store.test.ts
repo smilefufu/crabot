@@ -285,6 +285,55 @@ describe('CoreAgentConfigMutationCoordinator', () => {
     } finally { await cleanup(f.dir) }
   })
 
+  it('unlocks config writes when runtime abort cleanup clears a bound source journal', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-config-coordinator-journal-'))
+    const state = { provider: 'before' }
+    let bound: { mutation_id: string; target_revision: number; digest: string } | undefined
+    const aborts: number[] = []
+    const coordinator = new CoreAgentConfigMutationCoordinator(dir, {
+      readSemanticSnapshot: () => ({ ...state }),
+      publishInvalidation: () => {},
+      abortSourceJournal: async () => {
+        aborts.push(1)
+        // 源端运行期清理：与启动期 recover 同形（mark cleanup → clear binding）。
+        await coordinator.markSourceJournalCleanupCompleted(bound!.mutation_id, bound!.target_revision, bound!.digest)
+        await coordinator.clearCompletedSourceJournalBinding(bound!.mutation_id, bound!.target_revision, bound!.digest)
+      },
+    })
+    try {
+      await coordinator.initialize()
+      await expect(coordinator.mutate(['skills'], { provider: 'after' }, async (ctx) => {
+        await ctx.bindSourceJournal('a'.repeat(64))
+        bound = { mutation_id: ctx.mutation_id, target_revision: ctx.target_revision, digest: 'a'.repeat(64) }
+        throw new Error('applyFiles failed')
+      })).rejects.toThrow('applyFiles failed')
+      expect(aborts).toEqual([1])
+      // 清理成功后配置读写立即解锁，不得等重启。
+      await coordinator.mutate(['behavior'], { provider: 'next' }, async () => { state.provider = 'next' })
+      expect((await coordinator.current()).revision).toBe(2)
+    } finally { await cleanup(dir) }
+  })
+
+  it('keeps the journal binding locked for restart recovery when runtime abort cleanup fails', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'crabot-config-coordinator-journal-fail-'))
+    const state = { provider: 'before' }
+    const coordinator = new CoreAgentConfigMutationCoordinator(dir, {
+      readSemanticSnapshot: () => ({ ...state }),
+      publishInvalidation: () => {},
+      abortSourceJournal: async () => { throw new Error('cleanup unavailable') },
+    })
+    try {
+      await coordinator.initialize()
+      await expect(coordinator.mutate(['skills'], { provider: 'after' }, async (ctx) => {
+        await ctx.bindSourceJournal('b'.repeat(64))
+        throw new Error('applyFiles failed')
+      })).rejects.toThrow('applyFiles failed')
+      // 运行期清理失败：binding 保留在 receipt 上，配置写入继续被挡（启动期 verify/recover 兜底）。
+      await expect(coordinator.mutate(['behavior'], { provider: 'x' }, async () => {}))
+        .rejects.toThrow('Core Agent source journal cleanup is still active')
+    } finally { await cleanup(dir) }
+  })
+
   it('retains the prepared outbox when a failed source mutation leaves diverged state', async () => {
     const f = await fixture()
     try {

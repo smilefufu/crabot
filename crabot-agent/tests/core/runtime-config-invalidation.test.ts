@@ -151,17 +151,20 @@ describe('UnifiedAgent runtime config invalidation', () => {
     expect(unavailable.imageCapability).toEqual({ available: false, reason: 'not_configured' })
   })
 
-  it('keeps old config and revision when MCP candidate preparation fails', async () => {
+  it('applies new config while degrading an unconnectable MCP server (availability never blocks config)', async () => {
+    // 第三方 MCP 不可用 ≠ 配置不可信：与启动 connectAll 一样降级该 server，
+    // 不得把整个 pull 打成失败（configStale + 全入口 fail closed）。
     const agent = new UnifiedAgent(config()) as any
     agent.adminPort = 19998
     agent.configRevision = 1
-    const old = JSON.stringify(agent.agentConfig)
     const next = config()
+    next.agent_config!.system_prompt = 'new-with-bad-mcp'
     next.agent_config!.mcp_servers = [{ name: 'bad', transport: 'stdio', command: '' }]
     vi.spyOn(ConfigLoader, 'pull').mockResolvedValue({ config: next, revision: 2 })
-    await expect(agent.pullRuntimeConfig()).rejects.toThrow()
-    expect(JSON.stringify(agent.agentConfig)).toBe(old)
-    expect(agent.configRevision).toBe(1)
+    await agent.pullRuntimeConfig()
+    expect(agent.agentConfig.system_prompt).toBe('new-with-bad-mcp')
+    expect(agent.configRevision).toBe(2)
+    expect(agent.configStale).toBe(false)
   })
 
   it('keeps old config and revision when image or subagent candidate validation fails', async () => {
