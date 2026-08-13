@@ -1,6 +1,7 @@
 import { spawn } from 'child_process'
 import type { HookDefinition, HookInput, HookResult, InternalHandlerContext } from './types'
 import { getInternalHandler } from './internal-handlers'
+import { buildChildEnv } from '../core/runtime-env.js'
 
 const DEFAULT_TIMEOUT_SECONDS = 30
 
@@ -31,12 +32,11 @@ export async function executeCommandHook(
   return new Promise<HookResult>((resolve) => {
     const child = spawn('sh', ['-c', command], {
       cwd: context.workingDirectory,
-      env: {
-        ...process.env,
+      env: buildChildEnv({
         HOOK_EVENT: input.event,
         TOOL_NAME: input.toolName ?? '',
         WORKING_DIR: context.workingDirectory,
-      },
+      }),
       stdio: ['pipe', 'pipe', 'pipe'],
     })
 

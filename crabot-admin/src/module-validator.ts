@@ -93,29 +93,13 @@ export class ModuleValidator {
       }
     }
 
+    if (data.module_type === 'agent') {
+      throw new Error('ADMIN_HOTPLUG_NOT_ALLOWED: only builtin crabot-agent is supported')
+    }
+
     // runtime 必须有 type
     if (!data.runtime.type) {
       throw new Error('Missing required field: runtime.type')
-    }
-
-    // agent 类型必须有 agent 配置
-    if (data.module_type === 'agent') {
-      if (!data.agent) {
-        throw new Error('Missing required field: agent (for agent module)')
-      }
-
-      const agentRequiredFields = [
-        'engine',
-        'supported_roles',
-        'model_format',
-        'model_roles',
-      ]
-
-      for (const field of agentRequiredFields) {
-        if (!data.agent[field]) {
-          throw new Error(`Missing required field: agent.${field}`)
-        }
-      }
     }
   }
 

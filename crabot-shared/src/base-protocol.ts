@@ -245,6 +245,12 @@ export interface ModuleDefinition {
   skip_health_check?: boolean
   /** 模块数据目录绝对路径，传入则在 spawn 前做 schema 检测 */
   data_dir?: string
+  /** 仅 startup migration 可写；存在时强制 non-runnable。 */
+  legacy_archive?: {
+    kind: 'unsupported_non_core_agent'
+    archived_at: string
+    reason: string
+  }
 }
 
 /**

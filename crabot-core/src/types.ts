@@ -100,7 +100,7 @@ export const DEFAULT_CONFIG: ModuleManagerConfig = {
   health_check_timeout: 5,
   health_check_failure_threshold: 3,
   shutdown_timeout: 30,
-  hotplug_allowed_types: ['agent', 'channel', 'memory'],
+  hotplug_allowed_types: ['channel', 'memory'],
   modules: [],
 }
 

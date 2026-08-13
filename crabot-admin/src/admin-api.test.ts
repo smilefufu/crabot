@@ -199,8 +199,6 @@ describe('AdminModule - Model Provider & Agent', () => {
   // Agent Instance API Tests
   // ==========================================================================
   describe('Agent Instance API', () => {
-    let instanceId: string
-
     it('should list agent instances', async () => {
       const response = await makeWebRequest<{ items: AgentInstance[] }>(
         TEST_WEB_PORT,
@@ -213,8 +211,8 @@ describe('AdminModule - Model Provider & Agent', () => {
       expect(response.items).toBeInstanceOf(Array)
     })
 
-    it('should create an agent instance', async () => {
-      const response = await makeWebRequest<{ instance: AgentInstance }>(
+    it('rejects dynamic Agent instance creation after singleton cutover', async () => {
+      const response = await makeWebRequestRaw(
         TEST_WEB_PORT,
         'POST',
         '/api/agent-instances',
@@ -227,77 +225,8 @@ describe('AdminModule - Model Provider & Agent', () => {
         true
       )
 
-      expect(response.instance.name).toBe('Test Instance')
-      expect(response.instance.specialization).toBe('Worker tasks')
-      instanceId = response.instance.id
-    })
-
-    it('should get instance by id', async () => {
-      const response = await makeWebRequest<{ instance: AgentInstance }>(
-        TEST_WEB_PORT,
-        'GET',
-        `/api/agent-instances/${instanceId}`,
-        null,
-        true
-      )
-
-      expect(response.instance.id).toBe(instanceId)
-    })
-
-    it('should update instance', async () => {
-      const response = await makeWebRequest<{ instance: AgentInstance }>(
-        TEST_WEB_PORT,
-        'PATCH',
-        `/api/agent-instances/${instanceId}`,
-        { name: 'Updated Instance Name' },
-        true
-      )
-
-      expect(response.instance.name).toBe('Updated Instance Name')
-    })
-
-    it('should get instance config', async () => {
-      const response = await makeWebRequest<{
-        config: {
-          system_prompt: string
-          model_config: Record<string, unknown>
-        }
-      }>(TEST_WEB_PORT, 'GET', `/api/agent-instances/${instanceId}/config`, null, true)
-
-      expect(response.config).toHaveProperty('system_prompt')
-      expect(response.config).toHaveProperty('model_config')
-    })
-
-    it('should update instance config', async () => {
-      const response = await makeWebRequest<{
-        config: {
-          system_prompt: string
-          model_config: Record<string, unknown>
-        }
-      }>(
-        TEST_WEB_PORT,
-        'PATCH',
-        `/api/agent-instances/${instanceId}/config`,
-        {
-          system_prompt: 'Updated system prompt for testing',
-        },
-        true
-      )
-
-      expect(response.config.system_prompt).toBe('Updated system prompt for testing')
-    })
-
-    it('should delete instance', async () => {
-      const response = await makeWebRequestRaw(
-        TEST_WEB_PORT,
-        'DELETE',
-        `/api/agent-instances/${instanceId}`,
-        null,
-        true
-      )
-
-      // DELETE returns 204 No Content
-      expect(response.status).toBe(204)
+      expect(response.status).toBe(410)
+      expect(JSON.parse(response.body)).toMatchObject({ code: 'ADMIN_HOTPLUG_NOT_ALLOWED' })
     })
   })
 

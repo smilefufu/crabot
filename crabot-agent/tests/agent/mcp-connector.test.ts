@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { McpConnector } from '../../src/agent/mcp-connector.js'
+import { AgentHandler } from '../../src/agent/agent-handler.js'
 import type { MCPServerConfig } from '../../src/types.js'
 
 // Stub MCP Client to avoid actual server processes
@@ -29,6 +30,45 @@ describe('McpConnector.reconnect', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     connector = new McpConnector()
+  })
+
+  it('replaceWith preserves AgentHandler connector identity and its tool path uses candidate clients', async () => {
+    const live = new McpConnector()
+    await live.connectAll([cfgA])
+    const handler = new AgentHandler(
+      { modelId: 'test', format: 'openai', env: { LLM_BASE_URL: 'https://example.test', LLM_API_KEY: 'test' } },
+      { systemPrompt: '' },
+      { mcpConnector: live },
+    )
+    const candidate = await McpConnector.prepare([cfgB])
+    await live.replaceWith(candidate)
+    expect((handler as any).mcpConnector).toBe(live)
+    const tool = live.getAllTools().find((item) => item.name === 'mcp__B__echo')!
+    const client = live.getClient('B') as any
+    client.callTool.mockResolvedValueOnce({ content: [{ type: 'text', text: 'from-candidate' }] })
+    await expect(tool.call({ value: 'x' })).resolves.toMatchObject({ output: 'from-candidate' })
+    expect(client.callTool).toHaveBeenCalledWith({ name: 'echo', arguments: { value: 'x' } })
+  })
+
+  it('prepare tolerates a single server failure like startup connectAll (no all-or-nothing)', async () => {
+    // 与启动路径 connectAll 对齐：单台第三方 MCP server 连不上/探不出工具只降级该
+    // server，不得让 prepare reject —— 否则 pullRuntimeConfig 会把「MCP 挂了」升级成
+    // 「配置不可信」，configStale + 断开所有连接 + 全执行入口 fail closed。
+    const { Client } = await import('@modelcontextprotocol/sdk/client/index.js') as any
+    Client.mockImplementationOnce(() => ({
+      connect: vi.fn().mockResolvedValue(undefined), close: vi.fn().mockResolvedValue(undefined),
+      listTools: vi.fn().mockRejectedValue(new Error('discovery failed')), callTool: vi.fn(),
+    }))
+    const candidate = await McpConnector.prepare([cfgA, cfgB])
+    // 并行连接中消耗失败 mock 的那台探不出工具（不进 cache），另一台照常；
+    // 两台都保持连接，prepare 不得 reject。
+    const cached = candidate.getAllTools().map((tool) => tool.name)
+      .filter((name) => name === 'mcp__A__echo' || name === 'mcp__B__echo')
+    expect(cached).toHaveLength(1)
+    expect(candidate.count).toBe(2)
+    await connector.replaceWith(candidate)
+    expect(connector.count).toBe(2)
+    expect(connector.getAllTools().map((tool) => tool.name).filter((name) => name === 'mcp__A__echo' || name === 'mcp__B__echo')).toHaveLength(1)
   })
 
   it('reconnect 成功路径：cachedTools 含新 server', async () => {

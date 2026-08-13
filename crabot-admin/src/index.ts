@@ -12,6 +12,7 @@ import { createReadStream, createWriteStream } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { pipeline } from 'node:stream/promises'
+import yaml from 'js-yaml'
 import { buildBackupOverview } from './openclaw-import/build-overview.js'
 import { runImport, type ImportSelections } from './openclaw-import/run-import.js'
 import { buildImportDeps } from './openclaw-import/build-import-deps.js'
@@ -27,6 +28,9 @@ import { VersionService } from './version/version-service.js'
 import { startUpgrade, canUpgrade, isUpgradeInProgress } from './version/upgrade-runner.js'
 import { readArchiveTextFile, listArchiveEntries } from './openclaw-import/archive-reader.js'
 import { extractArchiveSubtree } from './openclaw-import/extract-subtree.js'
+import { CoreAgentConfigMutationCoordinator } from './core-agent-config-revision-store.js'
+import { CoreAgentCutoverStore } from './core-agent-cutover.js'
+import { CORE_AGENT_DEFINITION } from './core-agent-definition.js'
 import { BrowserManager } from './browser-manager.js'
 import { PermissionTemplateManager } from './permission-template-manager.js'
 import { decodePathSegment, isPathSafeSegment } from './http-path.js'
@@ -43,6 +47,8 @@ import {
   proxyManager,
   ProxyManager,
   type ProxyConfig,
+  type RpcHandlerContext,
+  RpcError,
   CLAIM_COMMANDS,
   CLAIM_PAIR_COMMANDS,
   normalizeSlash,
@@ -105,14 +111,13 @@ import {
   type CreateModelProviderParams,
   type UpdateModelProviderParams,
   type ImportFromVendorParams,
-  type ResolveModelConfigParams,
   type GlobalModelConfig,
-  type ModelConnectionInfo,
   type LLMConnectionInfo,
   type AgentImplementation,
   type AgentInstance,
   type AgentInstanceConfig,
   type ResolvedAgentConfig,
+  type CoreAgentRuntimeConfig,
   type SubAgentConfig,
   type SubAgentRegistryEntry,
   type CreateAgentInstanceParams,
@@ -384,6 +389,24 @@ const ADMIN_CHAT_CHANNEL_ID = 'admin-web'
  * 与既有端点惯用的裸 `parseInt(x ?? '20', 10)` 的差别只在于挡住了 NaN——`/api/agent/workers*`
  * 的 page/page_size/seq 会原样进入 agent 侧的 slice/filter，NaN 会静默返回空结果而不报错。
  */
+function coreAgentOrchestrationConfig(): CoreAgentRuntimeConfig['orchestration'] {
+  return {
+    front_context_recent_messages_window_hours: 6,
+    front_context_recent_messages_max_cap: 50,
+    front_context_short_term_memory_window_hours: 12,
+    front_context_short_term_memory_max_cap: 30,
+    worker_recent_messages_window_hours: 4,
+    worker_recent_messages_max_cap: 50,
+    worker_short_term_memory_window_hours: 12,
+    worker_short_term_memory_max_cap: 10,
+    worker_long_term_memory_limit: 5,
+    front_agent_timeout: 30,
+    session_state_ttl: 3600,
+    worker_config_refresh_interval: 60,
+    front_agent_queue_max_length: 100,
+    front_agent_queue_timeout: 300,
+  }
+}
 function parseIntParam(raw: string | null, fallback: number): number {
   const parsed = Number.parseInt(raw ?? '', 10)
   return Number.isFinite(parsed) ? parsed : fallback
@@ -429,7 +452,8 @@ async function wrapJsonHandler(res: ServerResponse, errorLabel: string, fn: () =
   try {
     sendJson(res, 200, await fn())
   } catch (err) {
-    sendJson(res, 500, { error: err instanceof Error ? err.message : errorLabel })
+    const code = (err as { code?: unknown })?.code
+    sendJson(res, code === 'ADMIN_CORE_AGENT_CUTOVER_INCOMPLETE' ? 503 : 500, { error: err instanceof Error ? err.message : errorLabel })
   }
 }
 
@@ -442,6 +466,16 @@ async function wrapJsonHandler(res: ServerResponse, errorLabel: string, fn: () =
  */
 export class AdminModule extends ModuleBase {
   private readonly adminConfig: AdminConfig
+  private readonly configMutationCoordinator: CoreAgentConfigMutationCoordinator
+  private readonly cutoverStore: CoreAgentCutoverStore
+  private readonly managementOnly: boolean
+  private readonly cutoverBearer?: string
+  private cutoverActivated = false
+  private configInvalidationPublicationEnabled = false
+  private configDrainRetryTimer?: ReturnType<typeof setTimeout>
+  private configDrainRetryDelayMs = 1_000
+  private cutoverAttempt: Promise<void> | null = null
+  private cutoverRecoveryReason: string | null = null
   private webServer: http.Server | null = null
   private jwtSecret: string = ''
 
@@ -522,6 +556,7 @@ export class AdminModule extends ModuleBase {
   private static readonly WAITING_HUMAN_SCAN_INTERVAL_MS = 5 * 60 * 1000  // 5min
   private waitingHumanScanTimer?: NodeJS.Timeout
   private stopTraceCleanupCron?: () => void
+  private agentMaintenanceStarted = false
 
   // Task/Trace 状态对账（SSOT 重整 2026-06-09 兜底层）
   private static readonly RECONCILIATION_INTERVAL_MS = 5 * 60 * 1000  // 5min
@@ -549,6 +584,29 @@ export class AdminModule extends ModuleBase {
   ) {
     super(moduleConfig)
     this.adminConfig = { ...DEFAULT_ADMIN_CONFIG, ...adminConfig }
+    this.configMutationCoordinator = new CoreAgentConfigMutationCoordinator(this.adminConfig.data_dir, {
+      readSemanticSnapshot: () => this.readCoreAgentSemanticSnapshot(),
+      // Initial/upgrade seeding may commit multiple serialized source changes before Admin has
+      // registered. Deferring network publication must not block the next local startup mutation;
+      // the latest revision is published explicitly after activation.
+      publishInvalidation: async ({ config_revision, domains }) => {
+        if (!this.configInvalidationPublicationEnabled) return
+        await this.publishAdminEventDurable('admin.agent_config_invalidated', { config_revision, domains })
+      },
+      // publish 失败后 outbox 保留 committed/invalidation_pending；运行期必须有重试入口，
+      // 否则 readCommittedEpoch/mutate 会被一个卡住的 outbox 永久锁死（只能重启 Admin 解）。
+      onInvalidationPublishFailure: () => this.scheduleConfigDrainRetry(),
+      // journal-bound skill mutation 运行期中止时，立即跑与启动期同形的 journal 恢复
+      // （回滚物理文件、删 journal、清 receipt binding），否则所有配置写入会被
+      // 'source journal cleanup is still active' 锁死到重启。
+      abortSourceJournal: () => this.skillManager.recoverSourceJournal(this.configMutationCoordinator),
+    })
+    this.cutoverStore = new CoreAgentCutoverStore(this.adminConfig.data_dir)
+    this.managementOnly = process.env.CRABOT_ADMIN_STARTUP_MODE === 'core-agent-cutover'
+    this.cutoverBearer = process.env.CRABOT_ADMIN_CUTOVER_BEARER
+    delete process.env.CRABOT_ADMIN_STARTUP_MODE
+    delete process.env.CRABOT_ADMIN_CUTOVER_BEARER
+    this.webServer = null
 
     // 数据文件路径：constructor 里就算好，生命周期内不可变
     this.friendsFilePath = path.join(this.adminConfig.data_dir, 'friends.json')
@@ -591,16 +649,35 @@ export class AdminModule extends ModuleBase {
       getMemoryPort: (mid) => this.getMemoryPort(mid),
     })
 
-    // 注入回调，实现跨模块解耦通信
-    this.agentManager.setOnConfigChanged(() => {
-      this.triggerPushAfter('agent config change')
+    this.agentManager.setSemanticSnapshotProvider(() => this.readCoreAgentSemanticSnapshot())
+    this.modelProviderManager.setSemanticSnapshotProvider(() => this.readCoreAgentSemanticSnapshot())
+    this.agentManager.setMutationRunner(async (domains, preview, apply) => {
+      await this.configMutationCoordinator.mutateComputed(domains, preview, apply)
     })
+    this.modelProviderManager.setMutationRunner(async (domains, preview, apply, allowRuntimeNoop) => {
+      await this.configMutationCoordinator.mutateComputed(domains, preview, apply, allowRuntimeNoop)
+    })
+    this.mcpServerManager.setSemanticSnapshotProvider(() => this.readCoreAgentSemanticSnapshot())
+    this.subAgentManager.setSemanticSnapshotProvider(() => this.readCoreAgentSemanticSnapshot())
+    this.skillManager.setSemanticSnapshotProvider(() => this.readCoreAgentSemanticSnapshot())
+    this.mcpServerManager.setMutationRunner(async (domains, preview, apply, allowRuntimeNoop) => {
+      await this.configMutationCoordinator.mutateComputed(domains, preview, apply, allowRuntimeNoop)
+    })
+    this.subAgentManager.setMutationRunner(async (domains, preview, apply, allowRuntimeNoop) => {
+      await this.configMutationCoordinator.mutateComputed(domains, preview, apply, allowRuntimeNoop)
+    })
+    this.skillManager.setMutationRunner(async (domains, preview, apply, allowRuntimeNoop, options) => {
+      await this.configMutationCoordinator.mutateComputed(domains, preview, apply, allowRuntimeNoop, options)
+    })
+    // AgentManager still emits its legacy local callback for non-core compatibility; core runtime
+    // invalidation is committed by the coordinator above, never by pushConfig.
+    this.agentManager.setOnConfigChanged(() => undefined)
     this.modelProviderManager.setAgentConfigRefsProvider(
       (providerId) => this.agentManager.getReferencesForProvider(providerId)
     )
 
     // 注册 Admin 协议方法
-      this.registerMethod('list_friends', this.handleListFriends.bind(this))
+    this.registerMethod('list_friends', this.handleListFriends.bind(this))
     this.registerMethod('get_friend', this.handleGetFriend.bind(this))
     this.registerMethod('find_master_friend', async () => {
       const friend = this.findMasterFriend()
@@ -646,7 +723,6 @@ export class AdminModule extends ModuleBase {
     this.registerMethod('trigger_now', this.handleTriggerNow.bind(this))
 
     // Model Provider 管理
-    this.registerMethod('resolve_model_config', this.handleResolveModelConfig.bind(this))
 
     // Agent 实现管理
     this.registerMethod('list_agent_implementations', this.handleListAgentImplementations.bind(this))
@@ -743,6 +819,8 @@ export class AdminModule extends ModuleBase {
 
     // 确保数据目录存在
     await fs.mkdir(this.adminConfig.data_dir, { recursive: true })
+    // Source managers must load before coordinator recovery so its semantic HMAC observes
+    // persisted data rather than empty in-memory maps.
 
     // 生成 internal-token 供 CLI 和 Agent 使用
     const internalTokenPayload: JwtPayload = {
@@ -772,8 +850,9 @@ export class AdminModule extends ModuleBase {
     // 加载模块 env 配置缓存
     await this.loadModuleEnvConfigCache()
 
-    // 初始化模型供应商管理器
+    // Load all core config source managers without writes before coordinator recovery.
     await this.modelProviderManager.initialize()
+    await this.agentManager.initialize()
     await initVendorRegistry(this.adminConfig.data_dir)
 
     // 加载并应用存储的代理配置
@@ -781,14 +860,38 @@ export class AdminModule extends ModuleBase {
     proxyManager.updateConfig(proxyConfig)
     console.log(`[Admin] Proxy config loaded: mode=${proxyConfig.mode}`)
 
-    // 初始化 Agent 管理器
-    await this.agentManager.initialize()
+    // Load every source used by the semantic snapshot without writes before coordinator recovery.
+    await this.mcpServerManager.initializeLoadOnly()
+    await this.subAgentManager.initializeLoadOnly()
+    await this.skillManager.initializeLoadOnly()
+    await this.essentialToolsManager.initialize()
+
+    // Recover durable revision/outbox against fully loaded source state before any mutation.
+    // Verify any Skill source journal binding before coordinator initialization/recovery trusts source projection.
+    await this.skillManager.verifySourceJournalBinding(this.configMutationCoordinator)
+    await this.configMutationCoordinator.initialize()
+    await this.skillManager.recoverSourceJournal(this.configMutationCoordinator)
+    await this.configMutationCoordinator.verifyCommittedFingerprint()
+    if (!this.managementOnly) {
+      // Normal mode is already eligible to publish; clear a committed startup outbox before
+      // builtin seeding attempts another mutation. Management-only deliberately retains it
+      // until the post-cutover activation phase.
+      this.configInvalidationPublicationEnabled = true
+      await this.configMutationCoordinator.drainPendingInvalidation()
+      // Builtin seeding mutations have no live Agent consumer: the core Agent pulls the
+      // latest revision through its own authenticated startup pull. Keep publication closed
+      // until activation below so startup seeding never depends on MM event fan-out.
+      this.configInvalidationPublicationEnabled = false
+    }
+    // A durable invalidation is replayed only after Admin has registered with MM. Startup source
+    // mutations below remain blocked by an active outbox, so no pending event can be overwritten.
+    await this.agentManager.initializeCoreDefaultsAndMigrations()
 
     // 初始化 Channel 管理器
     await this.channelManager.initialize()
 
-    // 重新注册 builtin channel 实例到 MM（MM 重启后动态注册会丢失）
-    await this.channelManager.reRegisterInstances()
+    // management-only must not re-register/start Channel children before cutover opens.
+    if (!this.managementOnly) await this.channelManager.reRegisterInstances()
 
     // 加载 onboarding handler（从 builtin 模块的 yaml 读取 onboarding_methods）
     this.onboardingManager.loadFromImplementations(this.channelManager.listImplementations().items)
@@ -797,15 +900,14 @@ export class AdminModule extends ModuleBase {
     await this.moduleInstaller.initialize()
 
     // 初始化 MCP Server 管理器
-    await this.mcpServerManager.initialize()
 
     // 注册内置 MCP Server（幂等，仅首次启动时写入）
     const mcpToolsPath = process.env.CRABOT_MCP_TOOLS_PATH
       || path.resolve(this.adminConfig.data_dir, '../../crabot-mcp-tools')
     await this.mcpServerManager.registerBuiltins(mcpToolsPath)
 
-    // 初始化 Skill 管理器
-    await this.skillManager.initialize()
+    // Skill runtime configuration uses the same durable source/revision transaction.
+    await this.skillManager.initializeMigrations()
 
     // 注册内置 Skill（幂等，仅首次启动时写入）
     const builtinSkillsPath = path.join(__dirname, '..', 'builtins', 'skills')
@@ -822,11 +924,7 @@ export class AdminModule extends ModuleBase {
       console.log(`[SkillManager] 扫描发现 ${scannedCount} 个新 skill（来自 ${this.workspaceDir}/.agents/skills/）`)
     }
 
-    // 初始化必要工具配置管理器
-    await this.essentialToolsManager.initialize()
-
     // 初始化 SubAgent 管理器
-    await this.subAgentManager.initialize()
 
     // Prune 已下线的 builtin subagents，再 seed 当前版本（幂等）
     const builtinSubAgents = getBuiltinSubAgents()
@@ -871,12 +969,22 @@ export class AdminModule extends ModuleBase {
     // Agent 端口由 module_started 事件驱动写入（见 onEvent），
     // 若 Admin 单独重启错过事件，由 ensureAgentPort() 惰性兜底。
 
-    await this.ensureBuiltinSchedules()
-
-    // 启动调度引擎
-    const allSchedules = Array.from(this.schedules.values())
-    this.scheduleEngine.startAll(allSchedules)
-    console.log(`[Admin] ScheduleEngine started with ${allSchedules.filter(s => s.enabled).length} active schedules`)
+    if (!this.managementOnly) {
+      await this.ensureBuiltinSchedules()
+      const allSchedules = Array.from(this.schedules.values())
+      this.scheduleEngine.startAll(allSchedules)
+      console.log(`[Admin] ScheduleEngine started with ${allSchedules.filter(s => s.enabled).length} active schedules`)
+      this.cutoverActivated = true
+      this.configInvalidationPublicationEnabled = true
+      try {
+        await this.startAgentDependentMaintenance()
+      } catch (error) {
+        this.cutoverActivated = false
+        this.configInvalidationPublicationEnabled = false
+        this.scheduleEngine.stop()
+        throw error
+      }
+    }
 
     // 启动 Web 服务器
     await this.startWebServer()
@@ -887,41 +995,52 @@ export class AdminModule extends ModuleBase {
       console.warn('[Admin] 首次版本检查失败:', err instanceof Error ? err.message : err)
     })
 
-    // 启动 waiting_human 超时扫描器
+    // waiting_human legacy scan is local-only and may run in management-only mode.
     this.waitingHumanScanTimer = setInterval(
       () => { this.runWaitingHumanTimeoutScan().catch((err) => console.error('[Admin] waiting_human scan error:', err)) },
       AdminModule.WAITING_HUMAN_SCAN_INTERVAL_MS,
     )
+  }
 
-    // 启动 task/trace 状态对账（SSOT 重整兜底层 2026-06-09）
-    // 启动后立即跑一次，把历史 phantom 数据（trace 已终态但 task 仍活跃）即时修复；
-    // 然后周期性兜底——任何上游漏 RPC 都会被这层抓住。
-    void this.runReconciliation().catch((err) => console.error('[Admin] reconciliation initial run error:', err))
-    this.reconciliationTimer = setInterval(
-      () => { this.runReconciliation().catch((err) => console.error('[Admin] reconciliation error:', err)) },
-      AdminModule.RECONCILIATION_INTERVAL_MS,
-    )
+  private async startAgentDependentMaintenance(): Promise<void> {
+    if (this.agentMaintenanceStarted) return
+    this.agentMaintenanceStarted = true
+    try {
+      void this.runReconciliation().catch((err) => console.error('[Admin] reconciliation initial run error:', err))
+      this.reconciliationTimer = setInterval(
+        () => { this.runReconciliation().catch((err) => console.error('[Admin] reconciliation error:', err)) },
+        AdminModule.RECONCILIATION_INTERVAL_MS,
+      )
 
-    // 启动 trace 自动清理 cron（每日）
-    const { startTraceCleanupCron } = await import('./trace-cleanup-cron.js')
-    this.stopTraceCleanupCron = startTraceCleanupCron({
-      getGlobalConfig: () => this.modelProviderManager.getGlobalConfig(),
-      callCleanup: async (days: number) => {
-        return this.callAgentRpc<
-          { days: number; dry_run: boolean },
-          { affected_count: number; affected_bytes: number; deleted_trace_ids: string[] }
-        >('cleanup_old_traces', { days, dry_run: false })
-      },
-      // spec 2026-06-09 §4.4: 按 task 个数清理，调 admin 本地 handleCleanupOldTasksByCount
-      // （不再透传 agent traces_by_count）
-      callCleanupByTaskCount: async (maxCount: number) => {
-        return this.handleCleanupOldTasksByCount({ max_count: maxCount, dry_run: false })
-      },
-    })
-    console.log('[Admin] Trace cleanup cron started')
+      const { startTraceCleanupCron } = await import('./trace-cleanup-cron.js')
+      this.stopTraceCleanupCron = startTraceCleanupCron({
+        getGlobalConfig: () => this.modelProviderManager.getGlobalConfig(),
+        callCleanup: async (days: number) => {
+          return this.callAgentRpc<
+            { days: number; dry_run: boolean },
+            { affected_count: number; affected_bytes: number; deleted_trace_ids: string[] }
+          >('cleanup_old_traces', { days, dry_run: false })
+        },
+        callCleanupByTaskCount: async (maxCount: number) => {
+          return this.handleCleanupOldTasksByCount({ max_count: maxCount, dry_run: false })
+        },
+      })
+      console.log('[Admin] Trace cleanup cron started')
+    } catch (error) {
+      if (this.reconciliationTimer) clearInterval(this.reconciliationTimer)
+      this.reconciliationTimer = undefined
+      this.stopTraceCleanupCron?.()
+      this.stopTraceCleanupCron = undefined
+      this.agentMaintenanceStarted = false
+      throw error
+    }
   }
 
   protected override async onStop(): Promise<void> {
+    if (this.configDrainRetryTimer) {
+      clearTimeout(this.configDrainRetryTimer)
+      this.configDrainRetryTimer = undefined
+    }
     // 停止媒体存储每日清扫定时器
     if (this.mediaSweepTimer) clearInterval(this.mediaSweepTimer)
     if (this.openclawImportSweepTimer) clearInterval(this.openclawImportSweepTimer)
@@ -934,6 +1053,7 @@ export class AdminModule extends ModuleBase {
 
     // 停止 trace 自动清理 cron
     this.stopTraceCleanupCron?.()
+    this.agentMaintenanceStarted = false
 
     // 停止调度引擎
     this.scheduleEngine.stop()
@@ -957,9 +1077,21 @@ export class AdminModule extends ModuleBase {
     }
   }
 
+  protected override async getHealthStatus(): Promise<'healthy' | 'degraded' | 'unhealthy'> {
+    if (this.cutoverActivated) return 'healthy'
+    // cutover 等待/恢复一律不报 unhealthy：MM 对 unhealthy 会连续探活失败后强杀进程树并
+    // 限流 auto_restart（5 分钟 3 次即永久放弃）。marker 冲突 / stop 失败这类快失败模式下，
+    // admin-web 会在几分钟内永久下线——而这正是最需要人从 Admin Web 介入恢复的场景。
+    // 恢复状态的区分留在 getHealthDetails（cutover_ready / recovery_reason）与
+    // module.health_changed 事件里，不落 MM 的自动重启判据。
+    return 'degraded'
+  }
+
   protected override async getHealthDetails(): Promise<Record<string, unknown>> {
     const health: Record<string, unknown> = {
       web_server_running: this.webServer !== null,
+      cutover_ready: this.cutoverActivated,
+      ...(this.cutoverActivated ? {} : { recovery_reason: this.cutoverRecoveryReason ?? 'waiting for authenticated core Agent startup/configuration' }),
       friends_count: this.friends.size,
       pending_messages_count: this.pendingMessages.size,
       providers_count: this.modelProviderManager.listProviders().length,
@@ -969,10 +1101,8 @@ export class AdminModule extends ModuleBase {
   }
 
   protected override async onEvent(event: Event): Promise<void> {
-    // 统一配置分发模式：
-    // 1. 模块启动时先 pull 初始化（模块调用 Admin 的 get_xxx_config RPC）
-    // 2. 运行时配置变更由 Admin push（通过 update_config RPC）
-    // 3. module_started 事件的 push 作为补充保障（覆盖 pull 与 push 之间的时间窗口）
+    // Core Agent config is pull-only: startup uses authenticated get_agent_config and runtime
+    // changes publish a nonsecret revision invalidation. Memory retains its existing push path.
     switch (event.type) {
       case 'module_manager.module_started': {
         const { module_id, module_type, port } = event.payload as { module_id: string; module_type: string; port: number }
@@ -982,13 +1112,13 @@ export class AdminModule extends ModuleBase {
             console.warn(`[Admin] Failed to push config to ${module_id}:`, err.message)
           })
         }
-        if (module_type === 'agent') {
+        if (module_id === 'crabot-agent') {
           if (typeof port === 'number' && port > 0) {
             this.agentPort = port
           }
-          console.log(`[Admin] Agent module ${module_id} started (port=${port}), pushing config as safety net...`)
-          this.pushConfigToAgentModules().catch((err: Error) => {
-            console.warn(`[Admin] Failed to push config to ${module_id}: ${err.message}`)
+          console.log(`[Admin] Core Agent started (port=${port}), publishing invalidation hint...`)
+          this.publishAgentConfigInvalidation().catch((err: Error) => {
+            console.warn(`[Admin] Failed to publish config invalidation for ${module_id}: ${err.message}`)
           })
         }
         // 新启动的模块推送代理配置
@@ -1086,6 +1216,11 @@ export class AdminModule extends ModuleBase {
     // WebSocket upgrade 处理
     this.webServer.on('upgrade', (req, socket, head) => {
       const handleAsync = async (): Promise<void> => {
+        if (!this.cutoverActivated) {
+          socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n')
+          socket.destroy()
+          return
+        }
         if (this.chatManager) {
           await this.chatManager.handleUpgrade(req, socket as Socket, head)
         } else {
@@ -1121,6 +1256,11 @@ export class AdminModule extends ModuleBase {
 
     const url = new URL(req.url ?? '/', `http://localhost:${this.adminConfig.web_port}`)
     const pathname = url.pathname
+
+    if (!this.cutoverActivated && (pathname === '/api/chat/messages' || pathname === '/api/chat/tasks' || pathname.startsWith('/api/chat/messages/') || pathname.startsWith('/api/chat/tasks/'))) {
+      sendJson(res, 503, { error: 'Core Agent cutover is incomplete' })
+      return
+    }
 
     // 认证检查（排除登录接口、静态文件、媒体文件端点）
     if (pathname.startsWith('/api/') && pathname !== '/api/auth/login' && !pathname.startsWith('/api/media/')) {
@@ -2341,7 +2481,10 @@ export class AdminModule extends ModuleBase {
       // 必须在通用 memoryV2Router dispatch 之前——该 router 只持有 memory 模块 RPC，
       // 不能创建 admin 侧 task；重建语义是建一条 pending worker 任务。
       if (req.method === 'POST' && pathname === '/api/memory/v2/graph/rebuild') {
-        await wrapJsonHandler(res, 'memory graph rebuild failed', () => this.handleRebuildMemoryGraph())
+        await wrapJsonHandler(res, 'memory graph rebuild failed', async () => {
+          this.assertIngressOpen()
+          return this.handleRebuildMemoryGraph()
+        })
         return
       }
 
@@ -3944,7 +4087,81 @@ export class AdminModule extends ModuleBase {
   /**
    * 处理 channel.message_received 事件：鉴权，决定是否发出 channel.message_authorized
    */
+  private async readLegacyAgentPackageEntries(): Promise<Array<{ source_id: string; raw: unknown }>> {
+    const directory = path.join(this.adminConfig.data_dir, 'installed-modules')
+    try {
+      const entries = await fs.readdir(directory, { withFileTypes: true })
+      const results: Array<{ source_id: string; raw: unknown }> = []
+      for (const entry of entries) {
+        if (!entry.isDirectory() || entry.name === 'crabot-agent') continue
+        const packagePath = path.join(directory, entry.name)
+        // 收窄 inventory 范围：cutover 归档只针对 legacy Agent 包。manifest 明确声明
+        // 非 agent module_type 的包（如 cutover 后安装的 channel/memory 模块）不得进入
+        // 归档/fingerprint——否则任何新安装模块都会让 marker 冲突判断 throw，把
+        // admin-web 永久锁在 management-only。无法判定类型的保守保留（维持原退役语义）。
+        const moduleType = await this.readInstalledModuleType(packagePath)
+        if (moduleType !== undefined && moduleType !== 'agent') continue
+        let raw: unknown = { package_id: entry.name, package_path: packagePath }
+        for (const manifestName of ['crabot-module.yaml', 'crabot-module.yml', 'package.json']) {
+          try {
+            const manifest = await fs.readFile(path.join(packagePath, manifestName), 'utf8')
+            raw = { package_id: entry.name, package_path: packagePath, manifest_name: manifestName, manifest }
+            break
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+          }
+        }
+        results.push({ source_id: entry.name, raw })
+      }
+      return results.sort((left, right) => left.source_id.localeCompare(right.source_id))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+      throw error
+    }
+  }
+
+  /**
+   * 读取已安装模块 manifest 声明的 module_type；无法判定（无 manifest / 解析失败 /
+   * 未声明）时返回 undefined，由调用方保守处理。
+   */
+  private async readInstalledModuleType(packagePath: string): Promise<string | undefined> {
+    for (const manifestName of ['crabot-module.yaml', 'crabot-module.yml']) {
+      try {
+        const manifest = await fs.readFile(path.join(packagePath, manifestName), 'utf8')
+        const parsed = yaml.load(manifest)
+        if (parsed && typeof parsed === 'object' && typeof (parsed as Record<string, unknown>).module_type === 'string') {
+          return (parsed as Record<string, unknown>).module_type as string
+        }
+        return undefined
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return undefined
+      }
+    }
+    return undefined
+  }
+
+  private async readLegacyFrontWorkerConfigSources(): Promise<Array<{ source_id: string; raw: unknown }>> {
+    const candidates = ['front-agent-config.json', 'worker-agent-config.json', 'front-worker-config.json']
+    const results: Array<{ source_id: string; raw: unknown }> = []
+    for (const name of candidates) {
+      try {
+        results.push({ source_id: name, raw: JSON.parse(await fs.readFile(path.join(this.adminConfig.data_dir, name), 'utf8')) })
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      }
+    }
+    return results
+  }
+
+  private assertIngressOpen(): void {
+    if (!this.cutoverActivated) throw Object.assign(new Error('Core Agent cutover is incomplete'), { code: 'ADMIN_CORE_AGENT_CUTOVER_INCOMPLETE' })
+  }
+
   private async handleChannelMessage(channelId: ModuleId, message: ChannelMessageRef, crabDisplayName?: string, crabSelfHandle?: string): Promise<void> {
+    if (!this.cutoverActivated) {
+      console.warn(`[Admin] dropping channel message during management-only cutover: channel=${channelId}, sender=${message.sender.platform_user_id}`)
+      return
+    }
     const { platform_user_id, platform_display_name } = message.sender
     const friend = this.resolveFriendByChannelIdentity(channelId, platform_user_id)
 
@@ -5279,6 +5496,7 @@ export class AdminModule extends ModuleBase {
    * trace_count + worker_trace_id 列表层暂返 0/null 占位（前端展开 task 时 lazy load get_trace_tree）。
    */
   private async handleListConversationUnits(params: ListConversationUnitsParams): Promise<ListConversationUnitsResult> {
+    this.assertIngressOpen()
     // 1. 拉所有满足 filter 的 task（复用 handleListTasks 的过滤逻辑子集）
     let tasks = Array.from(this.tasks.values())
     if (params.filter) {
@@ -5416,6 +5634,7 @@ export class AdminModule extends ModuleBase {
    * 4. 活跃 task 不计入配额、不删
    */
   private async handleCleanupOldTasksByCount(params: CleanupOldTasksByCountParams): Promise<CleanupOldTasksByCountResult> {
+    this.assertIngressOpen()
     const maxCount = params.max_count
     const dryRun = params.dry_run ?? false
     if (!Number.isFinite(maxCount) || maxCount < 1) {
@@ -5621,6 +5840,7 @@ export class AdminModule extends ModuleBase {
   }
 
   private async handleCreateSchedule(params: CreateScheduleParams): Promise<{ schedule: Schedule }> {
+    this.assertIngressOpen()
     // 验证 cron 表达式
     if (params.trigger.type === 'cron') {
       if (!this.isValidCronExpression(params.trigger.expression)) {
@@ -5726,6 +5946,7 @@ export class AdminModule extends ModuleBase {
   }
 
   private async handleUpdateSchedule(params: UpdateScheduleParams): Promise<{ schedule: Schedule }> {
+    this.assertIngressOpen()
     const existing = this.schedules.get(params.schedule_id)
     if (!existing) {
       throw new Error(AdminErrorCode.SCHEDULE_NOT_FOUND)
@@ -5795,6 +6016,7 @@ export class AdminModule extends ModuleBase {
   }
 
   private async handleDeleteSchedule(params: DeleteScheduleParams): Promise<{ deleted: true }> {
+    this.assertIngressOpen()
     const schedule = this.schedules.get(params.schedule_id)
     if (!schedule) {
       throw new Error(AdminErrorCode.SCHEDULE_NOT_FOUND)
@@ -5861,6 +6083,7 @@ export class AdminModule extends ModuleBase {
     accepted: true
     task_id?: string
   } | void> {
+    this.assertIngressOpen()
     const repairedSchedule = await this.repairScheduleTargetSessionReference(schedule)
     if (repairedSchedule !== schedule) {
       this.schedules.set(repairedSchedule.id, repairedSchedule)
@@ -5977,6 +6200,20 @@ export class AdminModule extends ModuleBase {
   // ============================================================================
   // 事件发布
   // ============================================================================
+
+  private async publishAdminEventDurable<K extends keyof AdminEventPayloads>(
+    type: K,
+    payload: AdminEventPayloads[K]
+  ): Promise<void> {
+    const event = {
+      id: generateId(),
+      type,
+      source: this.config.moduleId,
+      payload,
+      timestamp: generateTimestamp(),
+    }
+    await this.rpcClient.publishEvent(event as Event, this.config.moduleId)
+  }
 
   private publishAdminEvent<K extends keyof AdminEventPayloads>(
     type: K,
@@ -6507,7 +6744,6 @@ export class AdminModule extends ModuleBase {
     this.syncGlobalConfigToMemoryModules().catch((err: Error) => {
       console.warn('[Admin] syncGlobalConfigToMemoryModules after provider update failed:', err.message)
     })
-    this.triggerPushAfter('provider update')
   }
 
   private async handleDeleteProviderApi(_req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
@@ -6521,7 +6757,6 @@ export class AdminModule extends ModuleBase {
     this.syncGlobalConfigToMemoryModules().catch((err: Error) => {
       console.warn('[Admin] syncGlobalConfigToMemoryModules after provider delete failed:', err.message)
     })
-    this.triggerPushAfter('provider delete')
   }
 
   private async handleImportFromVendorApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -6558,7 +6793,6 @@ export class AdminModule extends ModuleBase {
     this.syncGlobalConfigToMemoryModules().catch((err: Error) => {
       console.warn('[Admin] syncGlobalConfigToMemoryModules after vendor import failed:', err.message)
     })
-    this.triggerPushAfter('vendor import')
   }
 
   private async handleTestProviderApi(req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
@@ -6624,7 +6858,6 @@ export class AdminModule extends ModuleBase {
     this.syncGlobalConfigToMemoryModules().catch((err: Error) => {
       console.warn('[Admin] syncGlobalConfigToMemoryModules failed:', err.message)
     })
-    this.triggerPushAfter('global config update')
   }
 
   private async handleGetSystemVersionApi(_req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -6959,14 +7192,6 @@ export class AdminModule extends ModuleBase {
   }
 
   // ============================================================================
-  // Model Provider 协议方法
-  // ============================================================================
-
-  private async handleResolveModelConfig(params: ResolveModelConfigParams): Promise<ModelConnectionInfo> {
-    return this.modelProviderManager.resolveModelConfig(params)
-  }
-
-  // ============================================================================
   // Agent Implementation 协议方法
   // ============================================================================
 
@@ -6974,12 +7199,17 @@ export class AdminModule extends ModuleBase {
     items: AgentImplementation[]
     pagination: { page: number; page_size: number; total_items: number; total_pages: number }
   }> {
-    return this.agentManager.listImplementations(params)
+    const page = params.page ?? 1
+    const pageSize = params.page_size ?? 20
+    const core = this.agentManager.getImplementation('default')
+    const items = core && (!params.type || core.type === params.type) && (!params.engine || core.engine === params.engine) ? [core] : []
+    return { items: items.slice((page - 1) * pageSize, page * pageSize), pagination: { page, page_size: pageSize, total_items: items.length, total_pages: Math.ceil(items.length / pageSize) } }
   }
 
   private async handleGetAgentImplementation(params: { implementation_id: string }): Promise<{
     implementation: AgentImplementation
   }> {
+    if (params.implementation_id !== 'default') throw new Error(`Implementation not found: ${params.implementation_id}`)
     const impl = this.agentManager.getImplementation(params.implementation_id)
     if (!impl) {
       throw new Error(`Implementation not found: ${params.implementation_id}`)
@@ -6995,12 +7225,17 @@ export class AdminModule extends ModuleBase {
     items: AgentInstance[]
     pagination: { page: number; page_size: number; total_items: number; total_pages: number }
   }> {
-    return this.agentManager.listInstances(params)
+    const page = params.page ?? 1
+    const pageSize = params.page_size ?? 20
+    const core = this.agentManager.getInstance('crabot-agent')
+    const items = core && (!params.implementation_id || core.implementation_id === params.implementation_id) && (params.auto_start === undefined || core.auto_start === params.auto_start) ? [core] : []
+    return { items: items.slice((page - 1) * pageSize, page * pageSize), pagination: { page, page_size: pageSize, total_items: items.length, total_pages: Math.ceil(items.length / pageSize) } }
   }
 
   private async handleGetAgentInstance(params: { instance_id: string }): Promise<{
     instance: AgentInstance
   }> {
+    if (params.instance_id !== 'crabot-agent') throw new Error(`Instance not found: ${params.instance_id}`)
     const instance = this.agentManager.getInstance(params.instance_id)
     if (!instance) {
       throw new Error(`Instance not found: ${params.instance_id}`)
@@ -7008,44 +7243,188 @@ export class AdminModule extends ModuleBase {
     return { instance }
   }
 
-  private async handleCreateAgentInstance(params: CreateAgentInstanceParams): Promise<{
+  private async handleCreateAgentInstance(_params: CreateAgentInstanceParams): Promise<{
     instance: AgentInstance
   }> {
-    const instance = await this.agentManager.createInstance(
-      params,
-      this.rpcClient,
-      this.moduleInstaller.getRuntimeManager()
-    )
-    this.publishAdminEvent('admin.agent_instance_created', { instance })
-    return { instance }
+    throw new RpcError('ADMIN_HOTPLUG_NOT_ALLOWED', 'Dynamic Agent instances are retired; only builtin crabot-agent is supported')
   }
 
-  private async handleUpdateAgentInstance(params: UpdateAgentInstanceParams): Promise<{
+  private async handleUpdateAgentInstance(_params: UpdateAgentInstanceParams): Promise<{
     instance: AgentInstance
   }> {
-    const instance = await this.agentManager.updateInstance(params)
-    this.publishAdminEvent('admin.agent_instance_updated', { instance })
-    return { instance }
+    throw new RpcError('ADMIN_HOTPLUG_NOT_ALLOWED', 'Dynamic Agent instances are retired; legacy Agent records are read-only')
   }
 
-  private async handleDeleteAgentInstance(params: { instance_id: string }): Promise<{
+  private async handleDeleteAgentInstance(_params: { instance_id: string }): Promise<{
     deleted: true
   }> {
-    await this.agentManager.deleteInstance(params.instance_id, this.rpcClient)
-    this.publishAdminEvent('admin.agent_instance_deleted', { instance_id: params.instance_id })
-    return { deleted: true }
+    throw new RpcError('ADMIN_HOTPLUG_NOT_ALLOWED', 'Dynamic Agent instances are retired; legacy Agent records are read-only')
+  }
+  private async waitForCoreAgentReady(options: { attempts?: number; delayMs?: number } = {}): Promise<void> {
+    const attempts = options.attempts ?? 30
+    const delayMs = options.delayMs ?? 500
+    let lastReason = 'core Agent has not registered'
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        const port = await this.ensureAgentPort()
+        if (!port) throw new Error('core Agent port unavailable')
+        const health = await this.rpcClient.call<{}, { status?: string; details?: { llm_status?: string } }>(port, 'health', {}, this.config.moduleId)
+        if (health.status === 'healthy' && health.details?.llm_status === 'ready') return
+        lastReason = `core Agent health=${health.status ?? 'unknown'} configured=${health.details?.llm_status ?? 'unknown'}`
+      } catch (error) {
+        lastReason = error instanceof Error ? error.message : String(error)
+      }
+      await new Promise((resolve) => setTimeout(resolve, delayMs))
+    }
+    throw new Error(`Core Agent readiness timed out: ${lastReason}`)
+  }
+
+  async completeCoreAgentCutover(): Promise<void> {
+    if (this.cutoverActivated || !this.managementOnly) return
+    if (this.cutoverAttempt) return this.cutoverAttempt
+    this.cutoverRecoveryReason = null
+    this.cutoverAttempt = this.completeCoreAgentCutoverAttempt()
+      .catch((error) => {
+        this.configInvalidationPublicationEnabled = false
+        this.cutoverRecoveryReason = this.classifyCutoverRecoveryReason(error)
+        throw error
+      })
+      .finally(() => { this.cutoverAttempt = null })
+    return this.cutoverAttempt
+  }
+
+  private classifyCutoverRecoveryReason(error: unknown): string {
+    const code = (error as { code?: unknown })?.code
+    if (code === 'MODULE_MANAGER_CUTOVER_STOP_FAILED') return 'legacy Agent process tree could not be stopped; retry after recovery'
+    if (code === 'MODULE_MANAGER_CUTOVER_CONFLICT') return 'core Agent cutover inventory conflicts with durable marker'
+    const message = error instanceof Error ? error.message : String(error)
+    if (message.startsWith('Core Agent readiness timed out:')) return 'waiting for core Agent health and authenticated configuration'
+    if (message.includes('archive') || message.includes('cutover marker')) return 'legacy Agent archive or cutover marker requires recovery'
+    return 'core Agent cutover requires operator recovery before retry'
+  }
+
+  private async reconcileCoreAgentCutoverRecord(
+    archive: { fingerprint: string; record_count: number },
+    completionError: unknown,
+  ): Promise<unknown> {
+    let response: { record: unknown }
+    try {
+      response = await this.rpcClient.callModuleManager<Record<string, never>, { record: unknown }>(
+        'get_core_agent_cutover_record', {}, this.config.moduleId,
+      )
+    } catch {
+      throw completionError
+    }
+    const result = response.record as {
+      admin_archive_fingerprint?: unknown
+      admin_archived_record_count?: unknown
+    }
+    if (result?.admin_archive_fingerprint !== archive.fingerprint || result?.admin_archived_record_count !== archive.record_count) throw completionError
+    return result
+  }
+
+  private async completeCoreAgentCutoverAttempt(): Promise<void> {
+    const packageEntries = await this.readLegacyAgentPackageEntries()
+    const frontWorkerConfigs = await this.readLegacyFrontWorkerConfigSources()
+    const sources = [
+      ...this.agentManager.listImplementations().items.filter((item) => item.id !== 'default').map((item) => ({ source_kind: 'agent_implementation' as const, source_id: item.id, raw: item })),
+      ...this.agentManager.listInstances().items.filter((item) => item.id !== 'crabot-agent').map((item) => ({ source_kind: 'agent_instance' as const, source_id: item.id, raw: item })),
+      ...this.agentManager.listConfigs().filter((item) => item.instance_id !== 'crabot-agent').map((item) => ({ source_kind: 'agent_config' as const, source_id: item.instance_id, raw: item })),
+      ...packageEntries.map((entry) => ({ source_kind: 'installed_package' as const, source_id: entry.source_id, raw: entry.raw })),
+      ...frontWorkerConfigs.map((entry) => ({ source_kind: 'agent_config' as const, source_id: `legacy-${entry.source_id}`, raw: entry.raw })),
+    ]
+    // archive() 合并时对已归档记录的内容变化抛事实冲突（重新进入 gate）；新增条目只扩展只读归档。
+    const archive = await this.cutoverStore.archive(sources)
+    const existing = await this.cutoverStore.loadMarker()
+    // marker 已提交 cutover 拓扑：提交后的每次重启都必须用已提交的 fingerprint/count 与 MM
+    // 握手（MM record 按该值对账）。cutover 之后新增的 legacy 条目可以容忍——与 MM 侧
+    // 「archived 子集仍在」的检查语义一致；否则 cutover 后任何新安装模块都会把 admin-web
+    // 永久锁在 management-only。
+    const handshake = existing
+      ? { fingerprint: existing.archive_fingerprint, record_count: existing.archive_record_count }
+      : { fingerprint: archive.fingerprint, record_count: archive.record_count }
+    if (!this.cutoverBearer) throw new Error('Missing CRABOT_ADMIN_CUTOVER_BEARER')
+    let result: unknown
+    try {
+      result = await this.rpcClient.callModuleManagerSensitive(
+        'complete_core_agent_cutover',
+        { schema_version: 1, admin_archive_fingerprint: handshake.fingerprint, admin_archived_record_count: handshake.record_count },
+        this.config.moduleId,
+        { authorizationBearer: this.cutoverBearer },
+      )
+      const wrapped = result as { record?: unknown }
+      if (!wrapped || wrapped.record === undefined) throw new Error('Invalid complete_core_agent_cutover response')
+    } catch (error) {
+      result = await this.reconcileCoreAgentCutoverRecord(handshake, error)
+    }
+    if (!existing) {
+      await this.cutoverStore.saveMarker({ schema_version: 1, completed: true, completed_at: new Date().toISOString(), archive_fingerprint: archive.fingerprint, archive_record_count: archive.record_count, mm_result: result })
+    }
+    // The durable marker commits topology cutover. Readiness activation is a separate,
+    // retryable phase: the MM bearer has already been consumed and must never be replayed.
+    await this.waitForCoreAgentReady()
+    this.configInvalidationPublicationEnabled = true
+    await this.configMutationCoordinator.drainPendingInvalidation()
+    await this.channelManager.reRegisterInstances()
+    await this.ensureBuiltinSchedules()
+    await this.publishCurrentAgentConfigInvalidation()
+    try {
+      await this.startAgentDependentMaintenance()
+    } catch (error) {
+      this.configInvalidationPublicationEnabled = false
+      throw error
+    }
+    // Open ingress before arming timers: an already-due one-shot must never fire into
+    // the management-only gate and be lost.
+    this.cutoverActivated = true
+    this.scheduleEngine.startAll(Array.from(this.schedules.values()))
+    this.cutoverRecoveryReason = null
   }
 
   // ============================================================================
   // Agent Config 协议方法
   // ============================================================================
 
-  private async handleGetAgentConfig(params: { instance_id: string }): Promise<{
-    config: ResolvedAgentConfig
+  private async handleGetAgentConfig(params: { instance_id: string }, context?: RpcHandlerContext, attempt = 0): Promise<{
+    config_revision: number
+    config: CoreAgentRuntimeConfig
   }> {
+    if (params.instance_id !== 'crabot-agent') {
+      throw new Error('Only exact core Agent may pull runtime config')
+    }
+    const bearer = context?.authorizationBearer
+    if (!bearer) throw new RpcError('UNAUTHORIZED', 'Missing runtime credential')
+    await this.rpcClient.callModuleManagerSensitive(
+      'verify_core_agent_runtime',
+      { expected_module_id: 'crabot-agent' },
+      this.config.moduleId,
+      { authorizationBearer: bearer },
+    )
+    const coreRuntime = await this.rpcClient.callModuleManager<
+      { module_id: 'crabot-agent' },
+      { module_id: string; module_type: string; port: number }
+    >('get_module', { module_id: 'crabot-agent' }, this.config.moduleId)
+    if (coreRuntime.module_id !== 'crabot-agent' || coreRuntime.module_type !== 'agent' || !Number.isSafeInteger(coreRuntime.port)) {
+      throw new Error('Invalid core Agent runtime definition')
+    }
+    const epochBefore = await this.configMutationCoordinator.readCommittedEpoch()
+    if (epochBefore === null) {
+      // A durable mutation performs several fsync writes and can hold the outbox for tens to
+      // hundreds of milliseconds; give the coherent read a bounded window that outlasts a
+      // normal mutation before failing closed (the Agent outer pull retries regardless).
+      if (attempt >= 25) throw new Error('Core Agent config mutation is active; retry later')
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      return this.handleGetAgentConfig(params, context, attempt + 1)
+    }
     const config = this.agentManager.getConfig(params.instance_id)
     if (!config) {
       throw new Error(`Config not found for instance: ${params.instance_id}`)
+    }
+
+    // 未知 slot 不属于 v3 静态 core definition，拒绝而不是 fallback 到旧实现。
+    const modelRoles = CORE_AGENT_DEFINITION.model_roles ?? []
+    for (const key of Object.keys(config.model_config)) {
+      if (!modelRoles.some((role) => role.key === key)) throw new Error(`Unknown core Agent model role: ${key}`)
     }
 
     // 全局默认 LLM 配置（作为 fallback，未配置时为 null）
@@ -7059,16 +7438,13 @@ export class AdminModule extends ModuleBase {
       // 首次安装时全局 LLM 未配置，允许返回空 model_config
     }
 
-    // 获取实现定义的 model_roles（含 fallback 元数据）
-    const impl = this.agentManager.getImplementation('default')
-    const modelRoles = impl?.model_roles ?? []
+    // 获取静态 core Agent model_roles（legacy registry不参与运行时）
+    const impl = CORE_AGENT_DEFINITION
 
     // 实时解析每个 slot 引用为连接信息，按 model_roles 遍历
     const resolvedModelConfig: Record<string, LLMConnectionInfo> = {}
-    const processedKeys = new Set<string>()
 
     for (const role of modelRoles) {
-      processedKeys.add(role.key)
       const ref = config.model_config[role.key]
       const fallback = role.fallback ?? 'global_default'
 
@@ -7094,22 +7470,8 @@ export class AdminModule extends ModuleBase {
       // fallback === 'none' 且未配置 → 不加入 resolvedModelConfig
     }
 
-    // 处理用户配置了但不在 model_roles 中的 slot（向前兼容）
-    for (const [key, ref] of Object.entries(config.model_config)) {
-      if (processedKeys.has(key)) continue
-      try {
-        resolvedModelConfig[key] = await this.modelProviderManager.buildConnectionInfo(
-          ref.provider_id, ref.model_id
-        ) as LLMConnectionInfo
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error)
-        if (globalLLM) {
-          console.warn(`[Admin] Unknown slot "${key}" resolve failed: ${msg}, using global default`)
-          resolvedModelConfig[key] = globalLLM
-        } else {
-          console.warn(`[Admin] Unknown slot "${key}" resolve failed: ${msg}, no global default available`)
-        }
-      }
+    if (!resolvedModelConfig.powerful) {
+      throw new RpcError('ADMIN_CORE_AGENT_MODEL_NOT_CONFIGURED', 'Core Agent powerful model is not configured')
     }
 
     // 所有 enabled MCP server 都对所有 agent 实例可见——
@@ -7128,7 +7490,7 @@ export class AdminModule extends ModuleBase {
       return agentConfig
     })
 
-    // subagents：startup pull 时就带上（与 pushConfigToAgentModules 同源 buildSubAgentConfigsForPush）。
+    // subagents：startup pull 时就带上，避免 Agent 启动期 subagents 空窗。
     // 历史 bug：subagents 只走 push 不走 get_agent_config → agent 启动时 this.subAgents 为空，
     // worker loop 在 push 送达前 snapshot 就拿到空列表 → goal 审计找不到 builtin-goal-auditor →
     // end-turn gate fail open → goal 任务没满足目标就被放完成。startup 就带上从根上消除该 race。
@@ -7145,36 +7507,54 @@ export class AdminModule extends ModuleBase {
       await this.modelProviderManager.resolveImageConfig(),
     )
 
+    const epoch = await this.configMutationCoordinator.readCommittedEpoch()
+    if (epoch === null || epoch.revision !== epochBefore.revision || epoch.generation !== epochBefore.generation) {
+      if (attempt >= 25) throw new Error('Core Agent config changed during resolution; retry later')
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      return this.handleGetAgentConfig(params, context, attempt + 1)
+    }
+    // 实例配置为 slot 制；legacy front/worker roles 不下发，Agent 内部自行补齐。
+    const resolvedAgentConfig: ResolvedAgentConfig = {
+      ...config,
+      model_config: resolvedModelConfig,
+      tmp_page_base_url: tmpPageBaseUrl,
+      mcp_servers: mcpServerConfigs,
+      skills: this.skillManager.list()
+        .filter((s) => {
+          if (!s.enabled) return false
+          if (!s.skill_dir) {
+            console.warn(`[Admin] skill "${s.name}" (${s.id}) skill_dir missing — skipped from agent push`)
+            return false
+          }
+          return true
+        })
+        .map((s) => this.skillManager.toAgentConfig(s)),
+      subagents,
+    }
+    const runtimeConfig: CoreAgentRuntimeConfig = {
+      module_id: 'crabot-agent',
+      module_type: 'agent',
+      version: '0.2.0',
+      protocol_version: '3.1.1',
+      port: coreRuntime.port,
+      orchestration: coreAgentOrchestrationConfig(),
+      agent_config: resolvedAgentConfig,
+      ...imageFields,
+      ...(config.extra ? { extra: config.extra } : {}),
+    }
+    delete runtimeConfig.agent_config.extra
     return {
-      config: {
-        ...config,
-        model_config: resolvedModelConfig,
-        ...imageFields,
-        tmp_page_base_url: tmpPageBaseUrl,
-        // 所有 enabled MCP server 自动对所有 agent 可见，
-        // 不再读 config.mcp_server_ids（已 @deprecated）
-        mcp_servers: mcpServerConfigs,
-        // 所有 enabled skill 都对所有 agent 可见，不再读 config.skill_ids（已 @deprecated）
-        // skill_dir 缺失的 entry 过滤掉（历史脏数据防御）：agent 拿到 undefined skill_dir 会在
-        // computeSkillsHash h.update(undefined) 抛 TypeError，整个 update_config 推送失败。
-        skills: this.skillManager.list()
-          .filter((s) => {
-            if (!s.enabled) return false
-            if (!s.skill_dir) {
-              console.warn(`[Admin] skill "${s.name}" (${s.id}) skill_dir missing — skipped from agent push`)
-              return false
-            }
-            return true
-          })
-          .map((s) => this.skillManager.toAgentConfig(s)),
-        subagents,
-      },
+      config_revision: epoch.revision,
+      config: runtimeConfig,
     }
   }
 
   private async handleUpdateAgentConfig(params: UpdateAgentConfigParams): Promise<{
     config: AgentInstanceConfig
   }> {
+    if (params.instance_id !== 'crabot-agent') {
+      throw new RpcError('ADMIN_HOTPLUG_NOT_ALLOWED', 'Legacy Agent configuration is read-only')
+    }
     const config = await this.agentManager.updateConfig(params)
     this.publishAdminEvent('admin.agent_instance_config_updated', {
       instance_id: params.instance_id,
@@ -7203,7 +7583,6 @@ export class AdminModule extends ModuleBase {
     try {
       const params = await this.readJsonBody<Parameters<MCPServerManager['create']>[0]>(req)
       const server = await this.mcpServerManager.create(params)
-      this.triggerPushAfter('mcp create')
       res.writeHead(201, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(server))
     } catch (err) {
@@ -7235,7 +7614,6 @@ export class AdminModule extends ModuleBase {
     try {
       const params = await this.readJsonBody<Parameters<MCPServerManager['update']>[1]>(req)
       const server = await this.mcpServerManager.update(id, params)
-      this.triggerPushAfter('mcp update')
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(server))
     } catch (err) {
@@ -7252,7 +7630,6 @@ export class AdminModule extends ModuleBase {
   ): Promise<void> {
     try {
       await this.mcpServerManager.delete(id)
-      this.triggerPushAfter('mcp delete')
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ deleted: true }))
     } catch (err) {
@@ -7282,7 +7659,6 @@ export class AdminModule extends ModuleBase {
     try {
       const params = await this.readJsonBody<Parameters<SkillManager['create']>[0]>(req)
       const skill = await this.skillManager.create(params)
-      this.triggerPushAfter('skill create')
       res.writeHead(201, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(await this.skillManager.toRestEntry(skill)))
     } catch (err) {
@@ -7329,7 +7705,6 @@ export class AdminModule extends ModuleBase {
     try {
       const params = await this.readJsonBody<Parameters<SkillManager['update']>[1]>(req)
       const skill = await this.skillManager.update(id, params)
-      this.triggerPushAfter('skill update')
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(await this.skillManager.toRestEntry(skill)))
     } catch (err) {
@@ -7346,7 +7721,6 @@ export class AdminModule extends ModuleBase {
   ): Promise<void> {
     try {
       await this.skillManager.delete(id)
-      this.triggerPushAfter('skill delete')
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ deleted: true }))
     } catch (err) {
@@ -7391,7 +7765,6 @@ export class AdminModule extends ModuleBase {
     try {
       const body = await this.readJsonBody<Parameters<typeof this.subAgentManager.create>[0]>(req)
       const entry = await this.subAgentManager.create(body)
-      this.triggerPushAfter('subagent create')
       res.writeHead(201, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(entry))
     } catch (err) {
@@ -7409,7 +7782,6 @@ export class AdminModule extends ModuleBase {
     try {
       const body = await this.readJsonBody<Parameters<typeof this.subAgentManager.update>[1]>(req)
       const entry = await this.subAgentManager.update(id, body)
-      this.triggerPushAfter('subagent update')
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(entry))
     } catch (err) {
@@ -7427,7 +7799,6 @@ export class AdminModule extends ModuleBase {
   ): Promise<void> {
     try {
       await this.subAgentManager.delete(id)
-      this.triggerPushAfter('subagent delete')
       res.writeHead(204)
       res.end()
     } catch (err) {
@@ -7449,8 +7820,6 @@ export class AdminModule extends ModuleBase {
     try {
       const body = await this.readJsonBody<{ json: string }>(req)
       const entries = await this.mcpServerManager.importFromJson(body.json)
-      // 一次性 push，即使导入了多个 MCP 也只 push 一次
-      this.triggerPushAfter('mcp import')
       res.writeHead(201, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ entries, count: entries.length }))
     } catch (err) {
@@ -7524,7 +7893,6 @@ export class AdminModule extends ModuleBase {
     try {
       const body = await this.readJsonBody<{ dir_path: string; overwrite?: boolean }>(req)
       const { entry, was_overwrite } = await this.skillManager.importFromLocalPath(body.dir_path, body.overwrite)
-      this.triggerPushAfter('skill import-local')
       res.writeHead(201, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ ...await this.skillManager.toRestEntry(entry), was_overwrite }))
     } catch (err) {
@@ -7547,7 +7915,6 @@ export class AdminModule extends ModuleBase {
       const { entry, was_overwrite } = await this.skillManager.importFromZip(
         body.base64_content, body.filename, body.overwrite,
       )
-      this.triggerPushAfter('skill import-upload')
       res.writeHead(201, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ ...await this.skillManager.toRestEntry(entry), was_overwrite }))
     } catch (err) {
@@ -7625,7 +7992,6 @@ export class AdminModule extends ModuleBase {
       const tempDir = path.join(os.tmpdir(), `openclaw-import-work-${crypto.randomUUID()}`)
       const summary = await runImport({ archivePath, tempDir, selections: body.selections, deps })
 
-      this.triggerPushAfter('openclaw import')
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(summary))
     } catch (err) {
@@ -7644,7 +8010,6 @@ export class AdminModule extends ModuleBase {
   ): Promise<void> {
     try {
       const entry = await this.skillManager.restore(id)
-      this.triggerPushAfter('skill restore')
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(await this.skillManager.toRestEntry(entry)))
     } catch (err) {
@@ -7664,7 +8029,6 @@ export class AdminModule extends ModuleBase {
     try {
       const workspaceDir = this.workspaceDir
       const added = await this.skillManager.scanWorkspaceSkills(workspaceDir)
-      this.triggerPushAfter('skill scan-workspace')
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ added, workspace_dir: workspaceDir }))
     } catch (err) {
@@ -7776,7 +8140,7 @@ export class AdminModule extends ModuleBase {
     const page = parseInt(url.searchParams.get('page') ?? '1', 10)
     const pageSize = parseInt(url.searchParams.get('page_size') ?? '20', 10)
 
-    const result = this.agentManager.listImplementations({
+    const result = await this.handleListAgentImplementations({
       ...(type ? { type } : {}),
       ...(engine ? { engine } : {}),
       page,
@@ -7792,6 +8156,11 @@ export class AdminModule extends ModuleBase {
     res: ServerResponse,
     id: string
   ): Promise<void> {
+    if (id !== 'default') {
+      res.writeHead(404)
+      res.end(JSON.stringify({ error: 'Implementation not found' }))
+      return
+    }
     const impl = this.agentManager.getImplementation(id)
     if (!impl) {
       res.writeHead(404)
@@ -7816,7 +8185,7 @@ export class AdminModule extends ModuleBase {
     const page = parseInt(url.searchParams.get('page') ?? '1', 10)
     const pageSize = parseInt(url.searchParams.get('page_size') ?? '20', 10)
 
-    const result = this.agentManager.listInstances({
+    const result = await this.handleListAgentInstances({
       ...(implementationId ? { implementation_id: implementationId } : {}),
       ...(autoStartParam !== null ? { auto_start: autoStartParam === 'true' } : {}),
       page,
@@ -7827,25 +8196,9 @@ export class AdminModule extends ModuleBase {
     res.end(JSON.stringify(result))
   }
 
-  private async handleCreateInstanceApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    try {
-      const body = await this.readJsonBody<CreateAgentInstanceParams>(req)
-      const instance = await this.agentManager.createInstance(
-        body,
-        this.rpcClient,
-        this.moduleInstaller.getRuntimeManager()
-      )
-      this.publishAdminEvent('admin.agent_instance_created', { instance })
-      res.writeHead(201, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ instance }))
-    } catch (error) {
-      if (error instanceof Error) {
-        res.writeHead(400)
-        res.end(JSON.stringify({ error: error.message }))
-        return
-      }
-      throw error
-    }
+  private async handleCreateInstanceApi(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+    res.writeHead(410, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ code: 'ADMIN_HOTPLUG_NOT_ALLOWED', error: 'Dynamic Agent instances are retired; only builtin crabot-agent is supported' }))
   }
 
   private async handleGetInstanceApi(
@@ -7853,6 +8206,11 @@ export class AdminModule extends ModuleBase {
     res: ServerResponse,
     id: string
   ): Promise<void> {
+    if (id !== 'crabot-agent') {
+      res.writeHead(404)
+      res.end(JSON.stringify({ error: 'Instance not found' }))
+      return
+    }
     const instance = this.agentManager.getInstance(id)
     if (!instance) {
       res.writeHead(404)
@@ -7864,44 +8222,19 @@ export class AdminModule extends ModuleBase {
   }
 
   private async handleUpdateInstanceApi(
-    req: IncomingMessage,
+    _req: IncomingMessage,
     res: ServerResponse,
-    id: string
+    _id: string
   ): Promise<void> {
-    try {
-      const body = await this.readJsonBody<Omit<UpdateAgentInstanceParams, 'instance_id'>>(req)
-      const instance = await this.agentManager.updateInstance({ ...body, instance_id: id })
-      this.publishAdminEvent('admin.agent_instance_updated', { instance })
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ instance }))
-    } catch (error) {
-      if (error instanceof Error) {
-        res.writeHead(error.message.includes('not found') ? 404 : 400)
-        res.end(JSON.stringify({ error: error.message }))
-        return
-      }
-      throw error
-    }
+    sendJson(res, 410, { code: 'ADMIN_HOTPLUG_NOT_ALLOWED', error: 'Dynamic Agent instances are retired; legacy Agent records are read-only' })
   }
 
   private async handleDeleteInstanceApi(
     _req: IncomingMessage,
     res: ServerResponse,
-    id: string
+    _id: string
   ): Promise<void> {
-    try {
-      await this.agentManager.deleteInstance(id, this.rpcClient)
-      this.publishAdminEvent('admin.agent_instance_deleted', { instance_id: id })
-      res.writeHead(204)
-      res.end()
-    } catch (error) {
-      if (error instanceof Error) {
-        res.writeHead(error.message.includes('not found') ? 404 : 400)
-        res.end(JSON.stringify({ error: error.message }))
-        return
-      }
-      throw error
-    }
+    sendJson(res, 410, { code: 'ADMIN_HOTPLUG_NOT_ALLOWED', error: 'Dynamic Agent instances are retired; legacy Agent records are read-only' })
   }
 
   // ============================================================================
@@ -7913,6 +8246,11 @@ export class AdminModule extends ModuleBase {
     res: ServerResponse,
     id: string
   ): Promise<void> {
+    if (id !== 'crabot-agent') {
+      res.writeHead(404)
+      res.end(JSON.stringify({ error: 'Config not found' }))
+      return
+    }
     const config = this.agentManager.getConfig(id)
     if (!config) {
       res.writeHead(404)
@@ -7928,6 +8266,10 @@ export class AdminModule extends ModuleBase {
     res: ServerResponse,
     id: string
   ): Promise<void> {
+    if (id !== 'crabot-agent') {
+      sendJson(res, 410, { code: 'ADMIN_HOTPLUG_NOT_ALLOWED', error: 'Legacy Agent configuration is read-only' })
+      return
+    }
     try {
       const body = await this.readJsonBody<Omit<UpdateAgentConfigParams, 'instance_id'>>(req)
       const config = await this.agentManager.updateConfig({ ...body, instance_id: id })
@@ -8438,16 +8780,7 @@ export class AdminModule extends ModuleBase {
   }
 
   /**
-   * 全局配置保存后或 Agent 启动时，推送可热更新字段到 Agent 模块
-   * 支持热更新：model_config、skills、extra
-   * 仍需重启：system_prompt、mcp_servers
-   */
-  /**
-   * Fire-and-forget push trigger; 调用方传 reason 用于日志区分。
-   *
-   * 200ms debounce：启动期 / 用户连续操作时多个 trigger（onConfigChanged、
-   * skill CRUD、mcp CRUD 等）合并为一次推送，减少与 worker 端 updateSkills
-   * 写盘的并发量。窗口内多次 reason 拼成一条日志便于追踪。
+   * Debounced nonsecret config invalidation trigger; retained only for import/finalize callers.
    */
   private pushDebounceTimer?: NodeJS.Timeout
   private pushDebouncedReasons?: string[]
@@ -8461,8 +8794,8 @@ export class AdminModule extends ModuleBase {
       this.pushDebouncedReasons = []
       this.pushDebounceTimer = undefined
       const reasonLabel = reasons.length === 1 ? reasons[0] : `${reasons.length} triggers: ${reasons.join(', ')}`
-      this.pushConfigToAgentModules().catch((err: Error) => {
-        console.warn(`[Admin] pushConfigToAgentModules after ${reasonLabel} failed:`, err.message)
+      this.publishAgentConfigInvalidation().catch((err: Error) => {
+        console.warn(`[Admin] config invalidation after ${reasonLabel} failed:`, err.message)
       })
     }, 200)
     this.pushDebounceTimer.unref?.()
@@ -8513,11 +8846,12 @@ export class AdminModule extends ModuleBase {
         deliverables: entry.deliverables,
         verification: entry.verification,
         model,
-        builtin_capabilities: entry.builtin_capabilities,
+        builtin_capabilities: { ...entry.builtin_capabilities, crab_messaging: false },
         allowed_mcp_server_ids: entry.allowed_mcp_server_ids,
         allowed_skill_ids: entry.allowed_skill_ids,
         max_turns: entry.max_turns,
         hook_preset: entry.hook_preset,
+        system_only: entry.system_only,
       })
     }
 
@@ -8543,51 +8877,88 @@ export class AdminModule extends ModuleBase {
    * 运行」的模块，两者无缝衔接、消除竞态。端口经 MM resolve 自解析，无运行模块时安全 no-op。
    */
   async reconcileRunningModuleConfigs(): Promise<void> {
-    await this.pushConfigToAgentModules()
+    await this.configMutationCoordinator.drainPendingInvalidation()
+    await this.publishAgentConfigInvalidation()
     await this.syncGlobalConfigToMemoryModules().catch((err: Error) => {
       console.warn('[Admin] 启动对账同步 memory 配置失败:', err.message)
     })
   }
 
-  private async pushConfigToAgentModules(): Promise<boolean> {
-    try {
-      const port = await this.ensureAgentPort()
-      if (!port) return false
-
-      // 复用 handleGetAgentConfig 的配置解析逻辑
-      const { config } = await this.handleGetAgentConfig({ instance_id: 'crabot-agent' })
-
-      // 拿原始 instance config（用于解析 model_role + 透传 timeout 字段）
-      const instance = this.agentManager.getConfig('crabot-agent')
-      const subagents = instance
-        ? await this.buildSubAgentConfigsForPush(instance, config.model_config)
-        : []
-
-      // 推送可热更新的字段
-      const updateParams = {
-        model_config: config.model_config,
-        skills: config.skills,
-        extra: config.extra,
-        subagents,
-        tmp_page_base_url: config.tmp_page_base_url,
-        image_config: config.image_config,
-        image_capability: config.image_capability,
-      }
-
-      const result = await this.rpcClient.call<typeof updateParams, { restart_required: boolean; changed_fields: string[] }>(
-        port, 'update_config', updateParams, this.config.moduleId
-      )
-      console.log(
-        `[Admin] Agent config pushed, changed: ${result.changed_fields?.join(', ') || 'none'}` +
-        ` (subagents: ${subagents.length})`
-      )
-      return true
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e)
-      const stack = e instanceof Error && e.stack ? `\n${e.stack}` : ''
-      console.warn(`[Admin] Failed to push config to Agent:`, msg, stack)
-      return false
+  private readCoreAgentSemanticSnapshot(): unknown {
+    const core = this.agentManager.getSemanticCoreConfig()
+    const global = this.modelProviderManager.getGlobalConfig()
+    const providers = this.modelProviderManager.listProviders()
+      .map((provider) => ({
+        id: provider.id,
+        type: provider.type,
+        format: provider.format,
+        endpoint: provider.endpoint,
+        status: provider.status,
+        auth_type: provider.auth_type ?? null,
+        api_key: provider.api_key,
+        oauth_credential: provider.oauth_credential ?? null,
+        models: provider.models,
+      }))
+      .sort((left, right) => left.id.localeCompare(right.id))
+    return {
+      core_agent: core ? {
+        model_config: core.model_config,
+        system_prompt: core.system_prompt,
+        max_iterations: core.max_iterations,
+        tools_readonly: core.tools_readonly,
+        timezone: core.timezone ?? null,
+        extra: core.extra ?? {},
+      } : null,
+      global: {
+        default_llm_provider_id: global.default_llm_provider_id ?? null,
+        default_llm_model_id: global.default_llm_model_id ?? null,
+        default_image_provider_id: global.default_image_provider_id ?? null,
+        default_image_model_id: global.default_image_model_id ?? null,
+        image_slot_user_set: global.image_slot_user_set ?? null,
+        public_base_url: global.public_base_url ?? null,
+      },
+      providers,
+      mcp_servers: this.mcpServerManager.runtimeSemanticEntries(),
+      subagents: this.subAgentManager.runtimeSemanticEntries(),
+      subagent_storage: this.subAgentManager.semanticMigrationState(),
+      skills: this.skillManager.runtimeSemanticEntries(),
+      skill_storage: this.skillManager.semanticMigrationState(),
     }
+  }
+
+  /**
+   * publish 失败会把 outbox 卡在 committed/invalidation_pending；运行期必须有重试入口，
+   * 否则一致性读与后续 mutation 都会被永久锁死（只能重启 Admin）。退避重试 drain，
+   * 成功后复位退避；MM 短暂不可用（重启窗口/超时）恢复后自愈。
+   */
+  private scheduleConfigDrainRetry(): void {
+    if (this.configDrainRetryTimer) return
+    const delay = this.configDrainRetryDelayMs
+    this.configDrainRetryDelayMs = Math.min(this.configDrainRetryDelayMs * 2, 30_000)
+    this.configDrainRetryTimer = setTimeout(() => {
+      this.configDrainRetryTimer = undefined
+      this.configMutationCoordinator.drainPendingInvalidation()
+        .then(() => { this.configDrainRetryDelayMs = 1_000 })
+        .catch((error) => {
+          console.warn('[Admin] config invalidation drain retry failed:', error instanceof Error ? error.message : String(error))
+          this.scheduleConfigDrainRetry()
+        })
+    }, delay)
+    this.configDrainRetryTimer.unref?.()
+  }
+
+  private async publishCurrentAgentConfigInvalidation(): Promise<void> {
+    const revision = (await this.configMutationCoordinator.current()).revision
+    await this.publishAdminEventDurable('admin.agent_config_invalidated', {
+      config_revision: revision,
+      domains: ['models', 'image', 'mcp', 'skills', 'subagents', 'behavior'],
+    })
+  }
+
+  private async publishAgentConfigInvalidation(): Promise<boolean> {
+    if (!this.cutoverActivated) return false
+    await this.publishCurrentAgentConfigInvalidation()
+    return true
   }
 
   /**
@@ -8681,6 +9052,10 @@ export class AdminModule extends ModuleBase {
   }
 
   private async resolveModuleStartEnv(moduleId: string): Promise<Record<string, string>> {
+    // Core Agent runtime secrets are available only via authenticated get_agent_config pull.
+    // Never copy provider credentials into an MM lifecycle request or process environment.
+    if (moduleId === 'crabot-agent') return {}
+
     // Channel 模块的配置存在 channel-configs/ 目录，其他模块在 module-configs/。
     const channelInstance = this.channelManager.getInstance(moduleId)
     const config = channelInstance
@@ -8694,7 +9069,9 @@ export class AdminModule extends ModuleBase {
   private async handleStartModuleAdmin(params: {
     module_id: string
   }): Promise<{ status: 'accepted'; tracking_id: string }> {
-    const mergedConfig = await this.resolveModuleStartEnv(params.module_id)
+    const mergedConfig = params.module_id === 'crabot-agent'
+      ? undefined
+      : await this.resolveModuleStartEnv(params.module_id)
 
     // 调用 MM 的 start_module，注入配置为 env
     const mmEndpoint = process.env.CRABT_MM_ENDPOINT || process.env.CRABOT_MM_ENDPOINT || 'http://localhost:19000'
@@ -8705,7 +9082,7 @@ export class AdminModule extends ModuleBase {
         id: generateId(),
         params: {
           module_id: params.module_id,
-          env: mergedConfig,
+          ...(mergedConfig ? { env: mergedConfig } : {}),
         },
       }),
     })
@@ -8745,7 +9122,9 @@ export class AdminModule extends ModuleBase {
     module_id: string
     force?: boolean
   }): Promise<{ status: 'accepted'; tracking_id: string }> {
-    const env = await this.resolveModuleStartEnv(params.module_id)
+    const env = params.module_id === 'crabot-agent'
+      ? undefined
+      : await this.resolveModuleStartEnv(params.module_id)
     const mmEndpoint = process.env.CRABT_MM_ENDPOINT || process.env.CRABOT_MM_ENDPOINT || 'http://localhost:19000'
     const response = await fetch(`${mmEndpoint}/restart_module`, {
       method: 'POST',
@@ -8755,7 +9134,7 @@ export class AdminModule extends ModuleBase {
         params: {
           module_id: params.module_id,
           force: params.force,
-          env,
+          ...(env ? { env } : {}),
         },
       }),
     })
@@ -9381,7 +9760,7 @@ export class AdminModule extends ModuleBase {
    * agent 模块清 agentPort；memory 模块清 memoryModules 列表的对应项。
    */
   private invalidatePortCache(moduleId: string, moduleType: string): void {
-    if (moduleType === 'agent' || moduleId === 'crabot-agent') {
+    if (moduleId === 'crabot-agent') {
       if (this.agentPort > 0) {
         console.log(`[Admin] Invalidating cached agentPort=${this.agentPort} for ${moduleId}`)
         this.agentPort = 0
@@ -9412,6 +9791,7 @@ export class AdminModule extends ModuleBase {
    * 调用方应该用这个而不是裸 rpcClient.call(agentPort, ...)。
    */
   private async callAgentRpc<P, R>(method: string, params: P): Promise<R> {
+    this.assertIngressOpen()
     const tryOnce = async (): Promise<R> => {
       const port = await this.ensureAgentPort()
       if (!port) throw new Error('Agent not available')
@@ -9450,6 +9830,10 @@ export class AdminModule extends ModuleBase {
       sendJson(res, 200, result)
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
+      if ((error as { code?: unknown }).code === 'ADMIN_CORE_AGENT_CUTOVER_INCOMPLETE') {
+        sendJson(res, 503, { error: msg })
+        return
+      }
       if (notFoundWhen?.(msg)) {
         sendJson(res, 404, { error: msg })
         return
@@ -9729,8 +10113,8 @@ export class AdminModule extends ModuleBase {
       res.end(JSON.stringify(result))
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      res.writeHead(500, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: msg }))
+      const status = (err as { code?: unknown }).code === 'ADMIN_CORE_AGENT_CUTOVER_INCOMPLETE' ? 503 : 500
+      sendJson(res, status, { error: msg })
     }
   }
 
@@ -9738,15 +10122,7 @@ export class AdminModule extends ModuleBase {
     _req: IncomingMessage,
     res: ServerResponse,
   ): Promise<void> {
-    try {
-      const result = await this.callAgentRpc<
-        Record<string, never>,
-        { total_bytes: number; trace_count: number; oldest_iso?: string; newest_iso?: string }
-      >('get_trace_disk_usage', {})
-      sendJson(res, 200, result)
-    } catch (err) {
-      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) })
-    }
+    await this.proxyAgentRpc(res, 'get_trace_disk_usage', {})
   }
 
   private async handleCleanupOldTracesApi(
@@ -9760,15 +10136,7 @@ export class AdminModule extends ModuleBase {
       return
     }
     const { days, dryRun } = parsed
-    try {
-      const result = await this.callAgentRpc<
-        { days: number; dry_run: boolean },
-        { affected_count: number; affected_bytes: number; deleted_trace_ids: string[] }
-      >('cleanup_old_traces', { days, dry_run: dryRun })
-      sendJson(res, 200, result)
-    } catch (err) {
-      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) })
-    }
+    await this.proxyAgentRpc(res, 'cleanup_old_traces', { days, dry_run: dryRun })
   }
 
   private async handleListModulesApi(_req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -9814,24 +10182,7 @@ export class AdminModule extends ModuleBase {
     res: ServerResponse,
     taskId: string
   ): Promise<void> {
-    try {
-      const port = await this.ensureAgentPort()
-      if (!port) {
-        res.writeHead(503, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'Agent not available' }))
-        return
-      }
-      const result = await this.rpcClient.call<
-        { task_id: string },
-        unknown
-      >(port, 'get_trace_tree', { task_id: taskId }, this.config.moduleId)
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify(result))
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error)
-      res.writeHead(500, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: msg }))
-    }
+    await this.proxyAgentRpc(res, 'get_trace_tree', { task_id: taskId })
   }
 
   // ============================================================================
@@ -9842,24 +10193,7 @@ export class AdminModule extends ModuleBase {
     _req: IncomingMessage,
     res: ServerResponse
   ): Promise<void> {
-    try {
-      const port = await this.ensureAgentPort()
-      if (!port) {
-        res.writeHead(503, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'Agent not available' }))
-        return
-      }
-      const result = await this.rpcClient.call<
-        Record<string, never>,
-        { entities: unknown[] }
-      >(port, 'list_bg_entities', {}, this.config.moduleId)
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify(result))
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error)
-      res.writeHead(500, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: msg }))
-    }
+    await this.proxyAgentRpc(res, 'list_bg_entities', {})
   }
 
   private async handleGetBgEntityLogApi(
@@ -9867,32 +10201,15 @@ export class AdminModule extends ModuleBase {
     res: ServerResponse,
     entityId: string
   ): Promise<void> {
-    try {
-      const port = await this.ensureAgentPort()
-      if (!port) {
-        res.writeHead(503, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'Agent not available' }))
-        return
-      }
-      const url = new URL(req.url ?? '', 'http://localhost')
-      const fromOffset = parseInt(url.searchParams.get('from_offset') ?? '0', 10)
-      const maxBytes = parseInt(url.searchParams.get('max_bytes') ?? '100000', 10)
-      const result = await this.rpcClient.call<
-        { entity_id: string; from_offset: number; max_bytes: number },
-        { content: string; new_offset: number; status: string; type: string }
-      >(port, 'get_bg_entity_log', { entity_id: entityId, from_offset: fromOffset, max_bytes: maxBytes }, this.config.moduleId)
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify(result))
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error)
-      if (msg.includes('not found') || msg.includes('Entity not found')) {
-        res.writeHead(404, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: msg }))
-      } else {
-        res.writeHead(500, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: msg }))
-      }
-    }
+    const url = new URL(req.url ?? '', 'http://localhost')
+    const fromOffset = parseInt(url.searchParams.get('from_offset') ?? '0', 10)
+    const maxBytes = parseInt(url.searchParams.get('max_bytes') ?? '100000', 10)
+    await this.proxyAgentRpc(
+      res,
+      'get_bg_entity_log',
+      { entity_id: entityId, from_offset: fromOffset, max_bytes: maxBytes },
+      (message) => message.includes('not found') || message.includes('Entity not found'),
+    )
   }
 
   private async handleKillBgEntityApi(
@@ -9900,24 +10217,7 @@ export class AdminModule extends ModuleBase {
     res: ServerResponse,
     entityId: string
   ): Promise<void> {
-    try {
-      const port = await this.ensureAgentPort()
-      if (!port) {
-        res.writeHead(503, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'Agent not available' }))
-        return
-      }
-      const result = await this.rpcClient.call<
-        { entity_id: string },
-        { ok: boolean; message?: string }
-      >(port, 'kill_bg_entity', { entity_id: entityId }, this.config.moduleId)
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify(result))
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error)
-      res.writeHead(500, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: msg }))
-    }
+    await this.proxyAgentRpc(res, 'kill_bg_entity', { entity_id: entityId })
   }
 
   private async handleGetActiveAgentConfigApi(
@@ -10166,7 +10466,7 @@ export class AdminModule extends ModuleBase {
   private async resolveAgentPort(): Promise<void> {
     try {
       const agentModules = await this.rpcClient.resolve(
-        { module_type: 'agent' },
+        { module_id: 'crabot-agent' },
         this.config.moduleId
       )
       if (agentModules.length > 0) {

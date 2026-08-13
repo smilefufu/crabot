@@ -7,9 +7,10 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
+import crypto from 'node:crypto'
+import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
-import http from 'node:http'
 import {
   type Request,
   type Response,
@@ -52,8 +53,10 @@ import { terminateProcessTree, waitForProcessTreeExit } from './process-tree.js'
 // 类型定义
 // ============================================================================
 
+interface RpcHandlerContext { authorizationBearer?: string }
+
 interface MethodHandler<P = unknown, R = unknown> {
-  (params: P): Promise<R> | R
+  (params: P, context?: RpcHandlerContext): Promise<R> | R
 }
 
 interface EventSubscription {
@@ -96,6 +99,10 @@ export class ModuleManager {
   private readonly healthRecoveries: Set<ModuleId> = new Set()
   private readonly subscriptions: EventSubscription[] = []
   private readonly methodHandlers: Map<string, MethodHandler> = new Map()
+  private readonly runtimeBearers = new Map<ModuleId, { token: string; child: ChildProcess; revoked: boolean }>()
+  private readonly cutoverBearers = new Map<ModuleId, { token: string; child: ChildProcess; revoked: boolean; completing?: boolean }>()
+  private managementOnly = false
+  private cutoverRecord: { schema_version: 1; completed: true; completed_at: string; admin_archive_fingerprint: string; admin_archived_record_count: number; mm_archived_module_ids: ModuleId[]; process_trees_confirmed_stopped: true } | null = null
 
   private server: http.Server | null = null
   private healthCheckTimer: NodeJS.Timeout | null = null
@@ -106,13 +113,21 @@ export class ModuleManager {
 
   constructor(config: Partial<ModuleManagerConfig> = {}, dataDir: string) {
     this.config = { ...DEFAULT_CONFIG, ...config }
+    if (this.config.hotplug_allowed_types.includes('agent')) {
+      throw new Error('Invalid Module Manager config: hotplug_allowed_types must not contain reserved type "agent"')
+    }
     this.portAllocator = new PortAllocator(this.config.port_range, dataDir)
     this.logsDir = path.join(dataDir, 'logs')
     fs.mkdirSync(this.logsDir, { recursive: true })
     this.dataDir = dataDir
 
     // 注册所有方法处理器
-    this.registerMethod('register', this.handleRegister.bind(this))
+    this.registerMethod('register', this.handleRegisterUnauthenticated.bind(this))
+    this.registerMethod('register_core_agent', this.handleRegisterCoreAgent.bind(this))
+    this.registerMethod('verify_core_agent_runtime', this.handleVerifyCoreAgentRuntime.bind(this))
+    this.registerMethod('complete_core_agent_cutover', this.handleCompleteCoreAgentCutover.bind(this))
+    this.registerMethod('get_core_agent_cutover_record', this.handleGetCoreAgentCutoverRecord.bind(this))
+
     this.registerMethod('unregister', this.handleUnregister.bind(this))
     this.registerMethod('allocate_port', this.handleAllocatePort.bind(this))
     this.registerMethod('start_module', this.handleStartModule.bind(this))
@@ -143,6 +158,7 @@ export class ModuleManager {
   async start(): Promise<void> {
     // 初始化端口分配器
     await this.portAllocator.initialize()
+    this.cutoverRecord = this.loadCutoverRecord()
 
     // 加载内置模块定义
     for (const def of this.config.modules) {
@@ -155,6 +171,12 @@ export class ModuleManager {
         })
       }
     }
+
+    // Every singleton-topology boot re-enters management-only until Admin re-inventories
+    // legacy records and completes the authenticated cutover handshake. A completed marker
+    // is an idempotency record, not permission to skip the restart rescan: otherwise a
+    // newly introduced runnable non-core Agent could hide behind an old marker.
+    this.managementOnly = this.modules.has('admin-web') && this.modules.has('crabot-agent')
 
     // 启动 HTTP 服务器
     this.server = http.createServer((req, res) => {
@@ -285,7 +307,12 @@ export class ModuleManager {
 
     try {
       const params = request?.params ?? {}
-      const result = await handler(params)
+      const authorization = req.headers.authorization
+      const authorizationBearer = authorization?.startsWith('Bearer ') ? authorization.slice(7) : undefined
+      if (authorization && (!authorization.startsWith('Bearer ') || !authorizationBearer || /[\r\n]/.test(authorizationBearer))) {
+        throw Object.assign(new Error('Invalid Authorization metadata'), { code: 'UNAUTHORIZED' })
+      }
+      const result = await handler(params, { authorizationBearer })
       const response = createSuccessResponse(request?.id ?? generateId(), result)
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(response))
@@ -297,7 +324,8 @@ export class ModuleManager {
         errorCode,
         errorMessage
       )
-      res.writeHead(500, { 'Content-Type': 'application/json' })
+      const status = errorCode === 'UNAUTHORIZED' ? 401 : errorCode === 'FORBIDDEN' ? 403 : 500
+      res.writeHead(status, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(errorResponse))
     }
   }
@@ -325,15 +353,158 @@ export class ModuleManager {
   // API 方法实现
   // ============================================================================
 
+  private handleVerifyCoreAgentRuntime(
+    params: { expected_module_id: 'crabot-agent' },
+    context?: RpcHandlerContext,
+  ): { verified: true } {
+    if (params.expected_module_id !== 'crabot-agent' || !context?.authorizationBearer) {
+      throw Object.assign(new Error('Missing runtime credential'), { code: 'UNAUTHORIZED' })
+    }
+    const record = this.runtimeBearers.get('crabot-agent')
+    if (!record || record.revoked || record.child.exitCode !== null) {
+      throw Object.assign(new Error('Runtime credential revoked'), { code: 'FORBIDDEN' })
+    }
+    const a = Buffer.from(record.token); const b = Buffer.from(context.authorizationBearer)
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      throw Object.assign(new Error('Invalid runtime credential'), { code: 'FORBIDDEN' })
+    }
+    return { verified: true }
+  }
+
+  private handleGetCoreAgentCutoverRecord(): { record: NonNullable<ModuleManager['cutoverRecord']> } {
+    if (!this.cutoverRecord) {
+      throw Object.assign(new Error('Core Agent cutover record not found'), { code: 'NOT_FOUND' })
+    }
+    const definition = this.modules.get('crabot-agent')
+    if (!definition || definition.module_type !== 'agent' || definition.legacy_archive) {
+      throw Object.assign(new Error('Core Agent definition is unavailable'), { code: 'FORBIDDEN' })
+    }
+    return { record: { ...this.cutoverRecord, mm_archived_module_ids: [...this.cutoverRecord.mm_archived_module_ids] } }
+  }
+
+  private async handleCompleteCoreAgentCutover(
+    params: { schema_version: 1; admin_archive_fingerprint: string; admin_archived_record_count: number },
+    context?: RpcHandlerContext,
+  ): Promise<{ record: { schema_version: 1; completed: true; completed_at: string; admin_archive_fingerprint: string; admin_archived_record_count: number; mm_archived_module_ids: ModuleId[]; process_trees_confirmed_stopped: true } }> {
+    const record = this.cutoverBearers.get('admin-web')
+    if (!record || record.revoked || record.completing || !context?.authorizationBearer || record.child.exitCode !== null) throw Object.assign(new Error('Invalid cutover bearer'), { code: 'FORBIDDEN' })
+    const a = Buffer.from(record.token); const b = Buffer.from(context.authorizationBearer)
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) throw Object.assign(new Error('Invalid cutover bearer'), { code: 'FORBIDDEN' })
+    record.completing = true
+    try {
+      if (params.schema_version !== 1) throw Object.assign(new Error('Invalid cutover schema'), { code: 'INVALID_PARAMS' })
+      const archived: ModuleId[] = []
+      for (const runtime of this.modules.values()) {
+        if (runtime.module_type !== 'agent' || runtime.module_id === 'crabot-agent') continue
+        try {
+          await this.stopModuleProcess(runtime.module_id, 'forced')
+        } catch (error) {
+          throw Object.assign(new Error(`Unable to confirm non-core Agent ${runtime.module_id} stopped: ${error instanceof Error ? error.message : String(error)}`), { code: 'MODULE_MANAGER_CUTOVER_STOP_FAILED' })
+        }
+        if (this.processes.has(runtime.module_id)) {
+          throw Object.assign(new Error(`Non-core Agent process still exists: ${runtime.module_id}`), { code: 'MODULE_MANAGER_CUTOVER_STOP_FAILED' })
+        }
+        if (runtime.status === 'running' || runtime.status === 'starting') {
+          throw Object.assign(new Error(`Non-core Agent runtime remains active: ${runtime.module_id}`), { code: 'MODULE_MANAGER_CUTOVER_STOP_FAILED' })
+        }
+        runtime.auto_start = false
+        runtime.legacy_archive = {
+          kind: 'unsupported_non_core_agent',
+          archived_at: generateTimestamp(),
+          reason: 'Dynamic Agent runtime retired by core singleton cutover',
+        }
+        archived.push(runtime.module_id)
+      }
+      if (this.cutoverRecord) {
+        const replayed = new Set(this.cutoverRecord.mm_archived_module_ids)
+        if (this.cutoverRecord.admin_archive_fingerprint !== params.admin_archive_fingerprint || this.cutoverRecord.admin_archived_record_count !== params.admin_archived_record_count || archived.some((moduleId) => !replayed.has(moduleId))) {
+          throw Object.assign(new Error('Cutover marker conflicts with current Admin/MM inventory'), { code: 'MODULE_MANAGER_CUTOVER_CONFLICT' })
+        }
+        this.managementOnly = false
+        record.revoked = true
+        void this.startAutoStartModules()
+        return { record: this.cutoverRecord }
+      }
+      const completed = { schema_version: 1 as const, completed: true as const, completed_at: generateTimestamp(), admin_archive_fingerprint: params.admin_archive_fingerprint, admin_archived_record_count: params.admin_archived_record_count, mm_archived_module_ids: archived.sort(), process_trees_confirmed_stopped: true as const }
+      this.saveCutoverRecord(completed)
+      this.cutoverRecord = completed
+      this.managementOnly = false
+      record.revoked = true
+      void this.startAutoStartModules()
+      return { record: completed }
+    } catch (error) {
+      if (!record.revoked) record.completing = false
+      throw error
+    }
+  }
+
+  private loadCutoverRecord(): ModuleManager['cutoverRecord'] {
+    const markerPath = path.join(this.dataDir, 'migrations', 'core-agent-singleton-v1.json')
+    try {
+      const record = JSON.parse(fs.readFileSync(markerPath, 'utf8')) as NonNullable<ModuleManager['cutoverRecord']>
+      if (record.schema_version !== 1 || record.completed !== true || !Array.isArray(record.mm_archived_module_ids) || record.process_trees_confirmed_stopped !== true) throw new Error('invalid cutover marker')
+      return record
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+      throw error
+    }
+  }
+
+  private saveCutoverRecord(record: NonNullable<ModuleManager['cutoverRecord']>): void {
+    const directory = path.join(this.dataDir, 'migrations')
+    fs.mkdirSync(directory, { recursive: true })
+    const target = path.join(directory, 'core-agent-singleton-v1.json')
+    const temporary = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`
+    const fd = fs.openSync(temporary, 'w', 0o600)
+    try { fs.writeFileSync(fd, JSON.stringify(record, null, 2)); fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
+    fs.renameSync(temporary, target)
+    const directoryFd = fs.openSync(directory, 'r')
+    try { fs.fsyncSync(directoryFd) } finally { fs.closeSync(directoryFd) }
+  }
+
+  private assertManagementOnlyAllowed(moduleId: ModuleId): void {
+    if (!this.managementOnly || moduleId === 'admin-web') return
+    throw Object.assign(new Error('Module Manager is in management-only cutover mode'), { code: 'MODULE_MANAGER_CUTOVER_INCOMPLETE' })
+  }
+
   // --- 模块注册 ---
 
-  private async handleRegister(params: RegisterParams): Promise<{ registered: true }> {
+  private async handleRegisterUnauthenticated(params: RegisterParams): Promise<{ registered: true }> {
+    return this.handleRegister(params, false)
+  }
+
+  private async handleRegisterCoreAgent(params: RegisterParams, context?: RpcHandlerContext): Promise<{ registered: true }> {
+    this.handleVerifyCoreAgentRuntime({ expected_module_id: 'crabot-agent' }, context)
+    if (params.module_id !== 'crabot-agent') {
+      throw Object.assign(new Error('Only exact core Agent may use authenticated registration'), { code: 'FORBIDDEN' })
+    }
+    return this.handleRegister(params, true)
+  }
+
+  private async handleRegister(params: RegisterParams, coreAuthenticated = false): Promise<{ registered: true }> {
+    this.assertManagementOnlyAllowed(params.module_id)
     const runtime = this.modules.get(params.module_id)
+
+    if (runtime?.module_type === 'agent' && params.module_id !== 'crabot-agent') {
+      throw Object.assign(new Error('Only builtin crabot-agent may register'), { code: 'MODULE_MANAGER_AGENT_SINGLETON_ONLY' })
+    }
 
     if (!runtime) {
       throw Object.assign(new Error('Module definition not found'), {
         code: 'MODULE_MANAGER_MODULE_NOT_FOUND',
       })
+    }
+
+    if (runtime.module_type === 'agent' && params.module_id === 'crabot-agent') {
+      if (!coreAuthenticated) {
+        throw Object.assign(new Error('Core Agent registration requires runtime authentication'), { code: 'UNAUTHORIZED' })
+      }
+      if (!this.processes.has('crabot-agent')) {
+        throw Object.assign(new Error('Core Agent registration requires the exact spawned child'), { code: 'MODULE_MANAGER_AGENT_SINGLETON_ONLY' })
+      }
+      if (params.protocol_version !== '3.1.1') {
+        throw Object.assign(new Error('Core Agent protocol version must be 3.1.1'), { code: 'MODULE_MANAGER_PROTOCOL_VERSION_MISMATCH' })
+      }
     }
 
     if (runtime.status === 'running') {
@@ -395,6 +566,7 @@ export class ModuleManager {
     if (!runtime) {
       throw Object.assign(new Error('Module not found'), { code: 'NOT_FOUND' })
     }
+    this.assertAgentLifecycleAllowed(params.module_id)
 
     this.removeSubscriptionsBySubscriber(params.module_id)
 
@@ -419,12 +591,34 @@ export class ModuleManager {
     })
   }
 
+  private assertAgentLifecycleAllowed(moduleId: ModuleId): void {
+    const runtime = this.modules.get(moduleId)
+    if (runtime?.legacy_archive || (runtime?.module_type === 'agent' && moduleId !== 'crabot-agent')) {
+      throw Object.assign(new Error('Only builtin crabot-agent may run'), { code: 'MODULE_MANAGER_AGENT_SINGLETON_ONLY' })
+    }
+  }
+
+  private assertCoreLifecycleInput(moduleId: ModuleId, entryOverride?: string, env?: Record<string, string>): void {
+    if (moduleId !== 'crabot-agent') return
+    if (entryOverride !== undefined || (env !== undefined && Object.keys(env).length > 0)) {
+      throw Object.assign(new Error('Core Agent executable and environment are immutable'), { code: 'MODULE_MANAGER_CORE_MODULE_IMMUTABLE' })
+    }
+  }
+
+  private revokeRuntimeBearer(moduleId: ModuleId): void {
+    const bearer = this.runtimeBearers.get(moduleId)
+    if (bearer) bearer.revoked = true
+  }
+
   private async handleStartModule(params: {
     module_id: ModuleId
     entry_override?: string
     env?: Record<string, string>
   }): Promise<{ status: 'accepted'; tracking_id: string }> {
     this.assertLifecycleRequestsAllowed()
+    this.assertManagementOnlyAllowed(params.module_id)
+    this.assertAgentLifecycleAllowed(params.module_id)
+    this.assertCoreLifecycleInput(params.module_id, params.entry_override, params.env)
     const trackingId = generateId()
     this.cancelAutoRestart(params.module_id)
 
@@ -447,6 +641,7 @@ export class ModuleManager {
   }): Promise<{ status: 'accepted'; tracking_id: string }> {
     this.assertLifecycleRequestsAllowed()
     const trackingId = generateId()
+    this.revokeRuntimeBearer(params.module_id)
     this.cancelAutoRestart(params.module_id)
 
     this.enqueueLifecycle(params.module_id, async () => {
@@ -466,15 +661,22 @@ export class ModuleManager {
     env?: Record<string, string>
   }): Promise<{ status: 'accepted'; tracking_id: string }> {
     this.assertLifecycleRequestsAllowed()
+    this.assertManagementOnlyAllowed(params.module_id)
+    this.assertAgentLifecycleAllowed(params.module_id)
+    this.assertCoreLifecycleInput(params.module_id, undefined, params.env)
     const trackingId = generateId()
+    this.revokeRuntimeBearer(params.module_id)
     this.cancelAutoRestart(params.module_id)
 
     this.enqueueLifecycle(params.module_id, async () => {
       this.cancelAutoRestart(params.module_id)
-      const env = params.env === undefined
-        ? { ...(this.envOverrides.get(params.module_id) ?? {}) }
-        : { ...params.env }
-      this.envOverrides.set(params.module_id, env)
+      const env = params.module_id === 'crabot-agent'
+        ? {}
+        : params.env === undefined
+          ? { ...(this.envOverrides.get(params.module_id) ?? {}) }
+          : { ...params.env }
+      if (params.module_id === 'crabot-agent') this.envOverrides.delete(params.module_id)
+      else this.envOverrides.set(params.module_id, env)
       await this.stopModuleProcess(params.module_id, params.force ? 'forced' : 'shutdown')
       this.cancelAutoRestart(params.module_id)
       await this.startModuleProcess(params.module_id, undefined, env)
@@ -513,6 +715,22 @@ export class ModuleManager {
   }
 
   private handleResolve(params: ResolveParamsInternal): { modules: ResolvedModule[] } {
+    if (this.managementOnly) throw Object.assign(new Error('Resolve is closed during core Agent cutover'), { code: 'MODULE_MANAGER_CUTOVER_INCOMPLETE' })
+    if (params.module_id && params.module_id !== 'crabot-agent') {
+      const requested = this.modules.get(params.module_id)
+      if (requested?.module_type === 'agent' || requested?.legacy_archive) {
+        throw Object.assign(new Error('Only exact core Agent may be resolved'), { code: 'MODULE_MANAGER_AGENT_SINGLETON_ONLY' })
+      }
+    }
+    // Preserve protocol-0.2 service-discovery compatibility for module_type callers, but
+    // never expose a legacy Agent: only the exact core singleton can be returned.
+    if (params.module_type === 'agent') {
+      const core = this.modules.get('crabot-agent')
+      if (!core || core.status !== 'running') {
+        throw Object.assign(new Error('Module not found'), { code: 'NOT_FOUND' })
+      }
+      return { modules: [runtimeToResolved(core)] }
+    }
     if (!params.module_id && !params.module_type) {
       throw Object.assign(new Error('module_id or module_type required'), {
         code: 'INVALID_PARAMS',
@@ -540,6 +758,8 @@ export class ModuleManager {
   // --- 事件 ---
 
   private handleSubscribe(params: SubscribeParams): { subscribed: true; event_types: string[] } {
+    this.assertManagementOnlyAllowed(params.subscriber)
+    this.assertAgentLifecycleAllowed(params.subscriber)
     // 移除该 subscriber 的所有旧订阅记录后再写入（与 register 行为一致）
     this.removeSubscriptionsBySubscriber(params.subscriber)
 
@@ -563,6 +783,9 @@ export class ModuleManager {
   }
 
   private async handlePublishEvent(params: PublishEventParams): Promise<{ subscriber_count: number }> {
+    if (this.managementOnly && !params.event.type.startsWith('module_manager.')) {
+      throw Object.assign(new Error('Event publication is closed during core Agent cutover'), { code: 'MODULE_MANAGER_CUTOVER_INCOMPLETE' })
+    }
     const { event } = params
     const matchingSubscribers = this.findSubscribers(event.type)
 
@@ -591,7 +814,12 @@ export class ModuleManager {
   private handleRegisterModuleDefinition(params: {
     module_definition: ModuleDefinition
   }): { module_id: ModuleId; registered: true } {
+    if (this.managementOnly) throw Object.assign(new Error('Module definition changes are closed during core Agent cutover'), { code: 'MODULE_MANAGER_CUTOVER_INCOMPLETE' })
     const def = params.module_definition
+
+    if (def.module_type === 'agent') {
+      throw Object.assign(new Error('Only builtin crabot-agent may be registered'), { code: 'MODULE_MANAGER_HOTPLUG_NOT_ALLOWED' })
+    }
 
     // 检查是否支持热插拔
     if (!this.config.hotplug_allowed_types.includes(def.module_type)) {
@@ -639,6 +867,10 @@ export class ModuleManager {
       throw Object.assign(new Error('Module definition not found'), { code: 'NOT_FOUND' })
     }
 
+    if (runtime.module_id === 'crabot-agent' || !runtime.is_installed) {
+      throw Object.assign(new Error('Builtin module definitions are immutable'), { code: 'MODULE_MANAGER_CORE_MODULE_IMMUTABLE' })
+    }
+
     if (runtime.status === 'running') {
       throw Object.assign(new Error('Module is running, stop it first'), {
         code: 'MODULE_MANAGER_MODULE_RUNNING',
@@ -664,9 +896,15 @@ export class ModuleManager {
     module_id: ModuleId
     updates: Partial<ModuleDefinition>
   }): { module_definition: ModuleDefinition } {
+    this.assertManagementOnlyAllowed(params.module_id)
+    this.assertAgentLifecycleAllowed(params.module_id)
     const runtime = this.modules.get(params.module_id)
     if (!runtime) {
       throw Object.assign(new Error('Module definition not found'), { code: 'NOT_FOUND' })
+    }
+
+    if (runtime.module_id === 'crabot-agent' || !runtime.is_installed) {
+      throw Object.assign(new Error('Builtin module definitions are immutable'), { code: 'MODULE_MANAGER_CORE_MODULE_IMMUTABLE' })
     }
 
     if (runtime.status === 'running') {
@@ -719,6 +957,7 @@ export class ModuleManager {
     const errorCount = modules.filter((m) => m.status === 'error').length
 
     let status: 'healthy' | 'degraded' | 'unhealthy' = 'healthy'
+    if (this.managementOnly) status = 'degraded'
     if (errorCount > 0) {
       status = 'degraded'
     }
@@ -754,11 +993,13 @@ export class ModuleManager {
     entryOverride?: string,
     envOverride?: Record<string, string>
   ): Promise<void> {
+    this.assertManagementOnlyAllowed(moduleId)
+    this.assertAgentLifecycleAllowed(moduleId)
+    this.assertCoreLifecycleInput(moduleId, entryOverride, envOverride)
     const runtime = this.modules.get(moduleId)
     if (!runtime) {
       throw new Error(`Module definition not found: ${moduleId}`)
     }
-
     const existingChild = this.processes.get(moduleId)
     if (existingChild) {
       const existingState = this.childStates.get(existingChild)
@@ -831,29 +1072,54 @@ export class ModuleManager {
     // （无人监听）永远失败，只能靠 module_started 推送兜底；一旦错过推送竞态就永久 unconfigured。
     // 这里用 admin 模块真实分配的端口覆盖静态值，让启动 pull 这条主路径可靠工作。
     const adminRpcPort = this.modules.get('admin-web')?.port
-    const adminEndpointOverride =
-      adminRpcPort && moduleId !== 'admin-web'
-        ? { CRABOT_ADMIN_ENDPOINT: `http://localhost:${adminRpcPort}` }
-        : {}
 
-    const proc = spawn(command, args, {
-      cwd: runtime.cwd,
-      env: {
-        ...process.env,
-        ...runtime.env,
-        ...envOverride,
-        Crabot_MODULE_ID: moduleId,
-        Crabot_PORT: String(runtime.port),
-        // MM 是自身端口的权威来源：显式注入回连端口/地址。
-        // 否则动态注册的模块（如 channel）env 里没有 CRABOT_MM_PORT，
-        // RpcClient 会 fallback 到默认 19000，在多实例/端口偏移部署下连到错误的 MM。
-        CRABOT_MM_PORT: String(this.config.port),
-        CRABOT_MM_ENDPOINT: `http://localhost:${this.config.port}`,
-        ...adminEndpointOverride,
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: process.platform !== 'win32',
-    })
+    const childEnv: Record<string, string> = {
+      ...process.env,
+      ...runtime.env,
+      ...envOverride,
+      Crabot_MODULE_ID: moduleId,
+      Crabot_PORT: String(runtime.port),
+      CRABOT_MM_PORT: String(this.config.port),
+      CRABOT_MM_ENDPOINT: `http://localhost:${this.config.port}`,
+      ...(adminRpcPort && moduleId !== 'admin-web' ? { CRABOT_ADMIN_ENDPOINT: `http://localhost:${adminRpcPort}` } : {}),
+      ...(moduleId === 'admin-web' ? { CRABOT_ADMIN_STARTUP_MODE: 'core-agent-cutover', CRABOT_ADMIN_CUTOVER_BEARER: (() => { const token = crypto.randomBytes(32).toString('base64url'); (runtime as ModuleRuntime & { _pendingCutover?: { token: string; child: ChildProcess; revoked: boolean } })._pendingCutover = { token, child: undefined as unknown as ChildProcess, revoked: false }; return token })() } : {}),
+    }
+    // Only the exact core Agent receives a per-child runtime credential.
+    if (moduleId === 'crabot-agent') {
+      const token = crypto.randomBytes(32).toString('base64url')
+      const bearer = { token, child: undefined as unknown as ChildProcess, revoked: false }
+      childEnv.CRABOT_CORE_AGENT_RUNTIME_BEARER = token
+      // bound to the exact child immediately after spawn below
+      ;(runtime as ModuleRuntime & { _pendingBearer?: typeof bearer })._pendingBearer = bearer
+    } else {
+      delete childEnv.CRABOT_CORE_AGENT_RUNTIME_BEARER
+    }
+
+    let proc: ChildProcess
+    try {
+      proc = spawn(command, args, {
+        cwd: runtime.cwd,
+        env: childEnv,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        detached: process.platform !== 'win32',
+      })
+    } catch (error) {
+      delete (runtime as ModuleRuntime & { _pendingBearer?: unknown })._pendingBearer
+      delete (runtime as ModuleRuntime & { _pendingCutover?: unknown })._pendingCutover
+      throw error
+    }
+    const pendingBearer = (runtime as ModuleRuntime & { _pendingBearer?: { token: string; child: ChildProcess; revoked: boolean } })._pendingBearer
+    if (pendingBearer) {
+      pendingBearer.child = proc
+      this.runtimeBearers.set(moduleId, pendingBearer)
+      delete (runtime as ModuleRuntime & { _pendingBearer?: unknown })._pendingBearer
+    }
+    const pendingCutover = (runtime as ModuleRuntime & { _pendingCutover?: { token: string; child: ChildProcess; revoked: boolean } })._pendingCutover
+    if (pendingCutover) {
+      pendingCutover.child = proc
+      this.cutoverBearers.set(moduleId, pendingCutover)
+      delete (runtime as ModuleRuntime & { _pendingCutover?: unknown })._pendingCutover
+    }
 
     this.processes.set(moduleId, proc)
     runtime.pid = proc.pid
@@ -921,6 +1187,7 @@ export class ModuleManager {
   }
 
   private async stopModuleProcess(moduleId: ModuleId, reason: ModuleStopReason): Promise<void> {
+    this.revokeRuntimeBearer(moduleId)
     const runtime = this.modules.get(moduleId)
     if (!runtime) throw new Error(`Module not found: ${moduleId}`)
 
@@ -1090,6 +1357,11 @@ export class ModuleManager {
     state.finalizeStarted = true
     state.finalReason = state.intentionalReason ?? 'crashed'
     const runtime = this.modules.get(state.moduleId)
+    const bearer = this.runtimeBearers.get(state.moduleId)
+    if (bearer && bearer.child === state.child) bearer.revoked = true
+    const cutover = this.cutoverBearers.get(state.moduleId)
+    if (cutover && cutover.child === state.child) cutover.revoked = true
+
 
     try {
       await this.ensureChildTreeTerminated(state)
@@ -1154,7 +1426,9 @@ export class ModuleManager {
       this.restartTimers.delete(runtime.module_id)
       this.enqueueLifecycle(runtime.module_id, async () => {
         if (this.isShuttingDown || this.processes.has(runtime.module_id)) return
-        const env = { ...(this.envOverrides.get(runtime.module_id) ?? {}) }
+        const env = runtime.module_id === 'crabot-agent'
+          ? {}
+          : { ...(this.envOverrides.get(runtime.module_id) ?? {}) }
         await this.startModuleProcess(runtime.module_id, undefined, env)
       }).catch((error) => {
         console.error(`[ModuleManager] Auto-restart failed for ${runtime.module_id}:`, error)
@@ -1397,13 +1671,16 @@ export class ModuleManager {
 
   private async startAutoStartModules(): Promise<void> {
     const autoStartModules = Array.from(this.modules.values())
-      .filter((m) => m.auto_start)
-      .sort((a, b) => a.start_priority - b.start_priority)
+      .filter((m) => m.auto_start
+        && m.status !== 'running' && m.status !== 'starting'
+        && (!this.managementOnly || m.module_id === 'admin-web'))
+      .sort((a, b) => (a.module_id === 'crabot-agent' ? -1 : b.module_id === 'crabot-agent' ? 1 : a.start_priority - b.start_priority))
 
     for (const module of autoStartModules) {
       try {
         const env: Record<string, string> = {}
-        this.envOverrides.set(module.module_id, env)
+        if (module.module_id === 'crabot-agent') this.envOverrides.delete(module.module_id)
+        else this.envOverrides.set(module.module_id, env)
         await this.enqueueLifecycle(
           module.module_id,
           () => this.startModuleProcess(module.module_id, undefined, env),

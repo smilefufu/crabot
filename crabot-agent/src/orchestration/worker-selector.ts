@@ -50,7 +50,7 @@ export class WorkerSelector {
   private async getAvailableWorkers(): Promise<WorkerRoutingInfo[]> {
     // 通过 Module Manager 解析所有 worker 类型模块
     const modules = await this.rpcClient.resolve(
-      { module_type: 'agent' },
+      { module_id: 'crabot-agent' },
       this.moduleId
     )
 

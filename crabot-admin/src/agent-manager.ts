@@ -6,8 +6,8 @@
 
 import fs from 'fs/promises'
 import path from 'path'
-import { generateTimestamp, type RpcClient } from 'crabot-shared'
-import type { RuntimeManager } from './runtime-manager.js'
+import { canonicalizeJson, generateTimestamp, type RpcClient } from 'crabot-shared'
+import { durableAtomicWriteFile } from './durable-file.js'
 import type {
   AgentImplementation,
   AgentInstance,
@@ -21,11 +21,16 @@ import type {
   ModelRole,
 } from './types.js'
 
-// ============================================================================
-// 默认实现定义
-// ============================================================================
+import type { ConfigDomain, CoreAgentConfigMutationContext } from './core-agent-config-revision-store.js'
 
-const DEFAULT_IMPLEMENTATION: AgentImplementation = {
+export type ConfigMutationRunner = (
+  domains: ConfigDomain[],
+  prepareAfterSnapshot: () => Promise<unknown>,
+  applySourceMutation: (context: CoreAgentConfigMutationContext) => Promise<void>,
+) => Promise<void>
+
+
+export const DEFAULT_IMPLEMENTATION: AgentImplementation = {
   id: 'default',
   name: 'Crabot Default Agent',
   type: 'builtin',
@@ -199,12 +204,17 @@ export class AgentManager {
   private implementations: Map<string, AgentImplementation> = new Map()
   private instances: Map<string, AgentInstance> = new Map()
   private configs: Map<string, AgentInstanceConfig> = new Map()
+  /** Loaded snapshot configs that must only be persisted after coordinator recovery. */
+  private readonly pendingSnapshotConfigMigrations = new Set<string>()
 
   private readonly dataDir: string
   private readonly implementationsFilePath: string
   private readonly instancesFilePath: string
   private readonly configsDir: string
   private onConfigChangedCallback: (() => void) | null = null
+  private mutationRunner: ConfigMutationRunner | null = null
+  private semanticSnapshotProvider: (() => unknown) | null = null
+  private mutationTail: Promise<void> = Promise.resolve()
 
   constructor(dataDir: string) {
     this.dataDir = dataDir
@@ -217,6 +227,18 @@ export class AgentManager {
     await fs.mkdir(this.dataDir, { recursive: true })
     await fs.mkdir(this.configsDir, { recursive: true })
     await this.loadData()
+  }
+
+  /**
+   * Startup load is deliberately write-free. Admin must attach its coordinator after
+   * all persisted source managers are loaded, then call this method for any migration.
+   */
+  async initializeStandaloneDefaults(): Promise<void> {
+    if (this.mutationRunner) throw new Error('Standalone defaults are not allowed with a coordinator')
+    await this.ensureDefaults()
+  }
+
+  async initializeCoreDefaultsAndMigrations(): Promise<void> {
     await this.ensureDefaults()
     await this.migrateAllModelConfigs()
   }
@@ -309,11 +331,19 @@ export class AgentManager {
     return this.instances.get(id)
   }
 
+  /**
+   * Test/import compatibility seam. Production entrypoints never pass true; live dynamic Agent
+   * creation remains rejected before any write. P6-D removes this legacy record constructor.
+   */
   async createInstance(
     params: CreateAgentInstanceParams,
-    rpcClient?: RpcClient,
-    runtimeManager?: RuntimeManager
+    allowLegacyArchiveWrite = false
   ): Promise<AgentInstance> {
+    if (!allowLegacyArchiveWrite) {
+      throw Object.assign(new Error('Dynamic Agent instances are retired; only builtin crabot-agent is supported'), {
+        code: 'ADMIN_HOTPLUG_NOT_ALLOWED',
+      })
+    }
     const impl = this.implementations.get(params.implementation_id)
     if (!impl) {
       throw new Error(`Implementation not found: ${params.implementation_id}`)
@@ -350,68 +380,6 @@ export class AgentManager {
     }
     this.configs.set(instance.id, defaultConfig)
     await this.saveConfig(instance.id)
-
-    // 如果是已安装的实现，注册并启动模块
-    if (impl.type === 'installed' && impl.installed_path && rpcClient && runtimeManager) {
-      try {
-        // 构造启动命令
-        const startCmd = runtimeManager.createStartCommand(
-          {
-            module_id: instance.id,
-            module_type: 'agent',
-            protocol_version: '1.0.0',
-            name: instance.name,
-            version: impl.version ?? '0.1.0',
-            runtime: { type: 'nodejs' }, // 从 impl 获取
-            entry: 'dist/main.js',        // 从 impl 获取
-            env: {},
-          },
-          impl.installed_path
-        )
-
-        // 创建 ModuleDefinition
-        const moduleDefinition = {
-          module_id: instance.id,
-          module_type: 'agent',
-          entry: `${startCmd.command} ${startCmd.args.join(' ')}`,
-          cwd: startCmd.cwd,
-          env: {
-            ...startCmd.env,
-            CRABOT_MM_ENDPOINT: process.env.CRABOT_MM_ENDPOINT || 'http://localhost:19000',
-            CRABOT_AGENT_CONFIG_PATH: path.join(
-              this.dataDir,
-              'agent-configs',
-              `${instance.id}.json`
-            ),
-          },
-          auto_start: instance.auto_start,
-          start_priority: instance.start_priority,
-        }
-
-        // 向 Module Manager 注册
-        await rpcClient.registerModuleDefinition(moduleDefinition, 'admin')
-
-        // 更新实例状态
-        instance.module_registered = true
-        this.instances.set(instance.id, instance)
-        await this.saveInstances()
-
-        // 如果 auto_start，立即启动
-        if (instance.auto_start) {
-          await rpcClient.startModule(instance.id, 'admin')
-        }
-
-        console.log(`[AgentManager] Module registered and started: ${instance.id}`)
-      } catch (error) {
-        console.error(`[AgentManager] Failed to register/start module:`, error)
-        // 回滚：删除实例记录
-        this.instances.delete(instance.id)
-        this.configs.delete(instance.id)
-        await this.saveInstances()
-        await this.deleteConfig(instance.id)
-        throw error
-      }
-    }
 
     return instance
   }
@@ -486,7 +454,23 @@ export class AgentManager {
     return this.configs.get(instanceId)
   }
 
+  listConfigs(): AgentInstanceConfig[] {
+    return Array.from(this.configs.values())
+  }
+
   async updateConfig(params: UpdateAgentConfigParams): Promise<AgentInstanceConfig> {
+    const previous = this.mutationTail
+    let release!: () => void
+    this.mutationTail = new Promise<void>((resolve) => { release = resolve })
+    await previous
+    try {
+      return await this.updateConfigUnlocked(params)
+    } finally {
+      release()
+    }
+  }
+
+  private async updateConfigUnlocked(params: UpdateAgentConfigParams): Promise<AgentInstanceConfig> {
     const existing = this.configs.get(params.instance_id)
     if (!existing) {
       throw new Error(`Config not found for instance: ${params.instance_id}`)
@@ -504,8 +488,30 @@ export class AgentManager {
       ...(params.extra !== undefined && { extra: params.extra }),
     }
 
-    this.configs.set(params.instance_id, updated)
-    await this.saveConfig(params.instance_id)
+    const apply = async () => {
+      this.configs.set(params.instance_id, updated)
+      await this.saveConfig(params.instance_id)
+    }
+    const domains: ConfigDomain[] = [
+      ...(params.model_config !== undefined && canonicalizeJson(existing.model_config) !== canonicalizeJson(updated.model_config) ? ['models' as const] : []),
+      ...(
+        (params.system_prompt !== undefined && existing.system_prompt !== updated.system_prompt) ||
+        (params.max_iterations !== undefined && existing.max_iterations !== updated.max_iterations) ||
+        (params.tools_readonly !== undefined && existing.tools_readonly !== updated.tools_readonly) ||
+        (params.timezone !== undefined && existing.timezone !== updated.timezone) ||
+        (params.extra !== undefined && canonicalizeJson(existing.extra ?? {}) !== canonicalizeJson(updated.extra ?? {}))
+          ? ['behavior' as const]
+          : []
+      ),
+    ]
+    if (params.instance_id === 'crabot-agent' && this.mutationRunner && domains.length > 0) {
+      await this.mutationRunner(domains, async () => this.previewSemanticSnapshot(
+        () => this.configs.set(params.instance_id, updated),
+        () => this.configs.set(params.instance_id, existing),
+      ), apply)
+    } else {
+      await apply()
+    }
     this.onConfigChangedCallback?.()
     return updated
   }
@@ -515,7 +521,24 @@ export class AgentManager {
     this.onConfigChangedCallback = fn
   }
 
-  /** 获取所有 AgentInstanceConfig 中引用的 (provider_id, model_id) 对 */
+  setMutationRunner(runner: ConfigMutationRunner): void {
+    this.mutationRunner = runner
+  }
+
+  setSemanticSnapshotProvider(provider: () => unknown): void {
+    this.semanticSnapshotProvider = provider
+  }
+
+  private async previewSemanticSnapshot(temporarilyApply: () => void, rollback: () => void): Promise<unknown> {
+    temporarilyApply()
+    try { return this.semanticSnapshotProvider?.() } finally { rollback() }
+  }
+
+  getSemanticCoreConfig(): AgentInstanceConfig | null {
+    return this.configs.get('crabot-agent') ?? null
+  }
+
+
   getUsedModels(): Array<{ provider_id: string; model_id: string }> {
     const result: Array<{ provider_id: string; model_id: string }> = []
     for (const config of this.configs.values()) {
@@ -592,28 +615,19 @@ export class AgentManager {
         const data = await fs.readFile(filePath, 'utf-8')
         const config = JSON.parse(data) as AgentInstanceConfig & { model_config?: Record<string, Record<string, unknown>> }
 
-        // 自动迁移：快照格式 → 引用格式
+        // Snapshot migration is deliberately deferred: coordinator must first validate
+        // the exact persisted semantic state, then own the single durable rewrite.
         if (config.model_config) {
-          let migrated = false
-          const migratedModelConfig: Record<string, ModelSlotRef> = {}
-          for (const [key, val] of Object.entries(config.model_config)) {
+          let hasSnapshot = false
+          for (const val of Object.values(config.model_config)) {
             if (val && typeof val === 'object' && 'endpoint' in val) {
-              // 旧快照格式（有 endpoint 字段）
-              if (val.provider_id && typeof val.provider_id === 'string' && typeof val.model_id === 'string') {
-                // 有 provider_id：可提取引用
-                migratedModelConfig[key] = { provider_id: val.provider_id as string, model_id: val.model_id as string }
-              }
-              // 无 provider_id（旧格式遗留数据）：丢弃，fallback 到全局默认
-              migrated = true
-            } else if (val && typeof val === 'object' && 'provider_id' in val && 'model_id' in val && !('endpoint' in val)) {
-              // 已是引用格式
-              migratedModelConfig[key] = { provider_id: val.provider_id as string, model_id: val.model_id as string }
+              hasSnapshot = true
+              break
             }
           }
-          ;(config as { model_config: Record<string, ModelSlotRef> }).model_config = migratedModelConfig
-          if (migrated) {
-            await this.atomicWriteFile(filePath, JSON.stringify(config, null, 2))
-            console.log(`[AgentManager] Migrated config ${file} from snapshot to ref format`)
+          if (hasSnapshot) {
+            this.pendingSnapshotConfigMigrations.add(config.instance_id)
+            console.log(`[AgentManager] Loaded legacy snapshot config ${file}; migration deferred until coordinator is ready`)
           }
         }
 
@@ -654,25 +668,57 @@ export class AgentManager {
     // 确保 crabot-agent 配置存在
     if (!this.configs.has('crabot-agent')) {
       const config = { ...DEFAULT_AGENT_CONFIG }
-      this.configs.set('crabot-agent', config)
-      await this.saveConfig('crabot-agent')
+      const apply = async () => {
+        this.configs.set('crabot-agent', config)
+        await this.saveConfig('crabot-agent')
+      }
+      if (this.mutationRunner) {
+        await this.mutationRunner(['models', 'behavior'], async () => this.previewSemanticSnapshot(
+          () => this.configs.set('crabot-agent', config),
+          () => this.configs.delete('crabot-agent'),
+        ), apply)
+      } else {
+        await apply()
+      }
     }
   }
 
-  /** 启动时遍历所有实例 model_config，迁移旧 keys 到新 ModelRole */
+  /** 启动时遍历所有实例 model_config，迁移旧 keys 与load-only snapshot到新 ModelRole */
   private async migrateAllModelConfigs(): Promise<void> {
     for (const [instanceId, config] of this.configs.entries()) {
       const oldMc = config.model_config ?? {}
+      const referenceMc: Record<string, ModelSlotRef> = {}
+      for (const [key, value] of Object.entries(oldMc as Record<string, ModelSlotRef & { endpoint?: unknown }>)) {
+        if (value && typeof value === 'object' && 'endpoint' in value) {
+          if (typeof value.provider_id === 'string' && typeof value.model_id === 'string') {
+            referenceMc[key] = { provider_id: value.provider_id, model_id: value.model_id }
+          }
+        } else if (value && typeof value.provider_id === 'string' && typeof value.model_id === 'string') {
+          referenceMc[key] = { provider_id: value.provider_id, model_id: value.model_id }
+        }
+      }
       const beforeKeys = Object.keys(oldMc).sort().join(',')
-      const migrated = migrateModelConfig(oldMc)
+      const migrated = migrateModelConfig(referenceMc)
       const afterKeys = Object.keys(migrated).sort().join(',')
-      if (beforeKeys !== afterKeys) {
+      const snapshotMigration = this.pendingSnapshotConfigMigrations.has(instanceId)
+      if (beforeKeys !== afterKeys || snapshotMigration) {
         console.log(
           `[AgentManager] 实例 ${instanceId} model_config 迁移: [${beforeKeys}] → [${afterKeys}]`
         )
         const updatedConfig = { ...config, model_config: migrated }
-        this.configs.set(instanceId, updatedConfig)
-        await this.saveConfig(instanceId)
+        const apply = async () => {
+          this.configs.set(instanceId, updatedConfig)
+          await this.saveConfig(instanceId)
+        }
+        if (instanceId === 'crabot-agent' && this.mutationRunner) {
+          await this.mutationRunner(['models'], async () => this.previewSemanticSnapshot(
+            () => this.configs.set(instanceId, updatedConfig),
+            () => this.configs.set(instanceId, config),
+          ), apply)
+        } else {
+          await apply()
+        }
+        this.pendingSnapshotConfigMigrations.delete(instanceId)
       }
     }
   }
@@ -685,9 +731,7 @@ export class AgentManager {
    * 原子写入文件：先写临时文件，再 rename（避免进程被杀时文件损坏）
    */
   private async atomicWriteFile(filePath: string, content: string): Promise<void> {
-    const tempPath = `${filePath}.tmp`
-    await fs.writeFile(tempPath, content, 'utf-8')
-    await fs.rename(tempPath, filePath)
+    await durableAtomicWriteFile(filePath, content)
   }
 
   private async saveImplementations(): Promise<void> {
@@ -703,6 +747,7 @@ export class AgentManager {
   private async saveConfig(instanceId: string): Promise<void> {
     const config = this.configs.get(instanceId)
     if (!config) return
+    await fs.mkdir(this.configsDir, { recursive: true })
     const filePath = path.join(this.configsDir, `${instanceId}.json`)
     await this.atomicWriteFile(filePath, JSON.stringify(config, null, 2))
   }

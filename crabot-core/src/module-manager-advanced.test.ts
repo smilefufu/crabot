@@ -82,11 +82,11 @@ describe('ModuleManager Advanced', () => {
         health_check_timeout: 5000,
         health_check_failure_threshold: 3,
         shutdown_timeout: 5,
-        hotplug_allowed_types: ['agent', 'channel', 'business'],
+        hotplug_allowed_types: ['channel', 'business'],
         modules: [
           {
             module_id: 'predefined-module',
-            module_type: 'agent',
+            module_type: 'channel',
             entry: 'node -e "console.log(123)"',
             cwd: '.',
             auto_start: false,
@@ -120,7 +120,7 @@ describe('ModuleManager Advanced', () => {
 
       const response = await makeRequest(TEST_PORT, 'register', {
         module_id: 'predefined-module',
-        module_type: 'agent',
+        module_type: 'channel',
         version: '1.0.0',
         protocol_version: '1.0.0',
         port: portResponse.data!.port,
@@ -133,7 +133,7 @@ describe('ModuleManager Advanced', () => {
     it('should reject registration for non-existent module definition', async () => {
       const response = await makeRequest(TEST_PORT, 'register', {
         module_id: 'non-existent-module',
-        module_type: 'agent',
+        module_type: 'channel',
         version: '1.0.0',
         protocol_version: '1.0.0',
         port: 19999,
@@ -148,7 +148,7 @@ describe('ModuleManager Advanced', () => {
       await makeRequest(TEST_PORT, 'register_module_definition', {
         module_definition: {
           module_id: 'port-mismatch-test',
-          module_type: 'agent',
+          module_type: 'channel',
           entry: 'node -e "console.log(123)"',
           cwd: '.',
           auto_start: false,
@@ -158,7 +158,7 @@ describe('ModuleManager Advanced', () => {
 
       const response = await makeRequest(TEST_PORT, 'register', {
         module_id: 'port-mismatch-test',
-        module_type: 'agent',
+        module_type: 'channel',
         version: '1.0.0',
         protocol_version: '1.0.0',
         port: 99999, // Wrong port
@@ -175,7 +175,7 @@ describe('ModuleManager Advanced', () => {
       await makeRequest(TEST_PORT, 'register_module_definition', {
         module_definition: {
           module_id: 'unregister-test-module',
-          module_type: 'agent',
+          module_type: 'channel',
           entry: 'node -e "console.log(123)"',
           cwd: '.',
           auto_start: false,
@@ -189,7 +189,7 @@ describe('ModuleManager Advanced', () => {
 
       await makeRequest(TEST_PORT, 'register', {
         module_id: 'unregister-test-module',
-        module_type: 'agent',
+        module_type: 'channel',
         version: '1.0.0',
         protocol_version: '1.0.0',
         port: portResponse.data!.port,
@@ -218,7 +218,7 @@ describe('ModuleManager Advanced', () => {
       await makeRequest(TEST_PORT, 'register_module_definition', {
         module_definition: {
           module_id: 'subscribe-test-module',
-          module_type: 'agent',
+          module_type: 'channel',
           entry: 'node -e "console.log(123)"',
           cwd: '.',
           auto_start: false,
@@ -232,7 +232,7 @@ describe('ModuleManager Advanced', () => {
 
       await makeRequest(TEST_PORT, 'register', {
         module_id: 'subscribe-test-module',
-        module_type: 'agent',
+        module_type: 'channel',
         version: '1.0.0',
         protocol_version: '1.0.0',
         port: portResponse.data!.port,
@@ -344,7 +344,7 @@ describe('ModuleManager Advanced', () => {
       await makeRequest(TEST_PORT, 'register_module_definition', {
         module_definition: {
           module_id: 'resolve-test-module',
-          module_type: 'agent',
+          module_type: 'channel',
           entry: 'node -e "console.log(123)"',
           cwd: '.',
           auto_start: false,
@@ -358,7 +358,7 @@ describe('ModuleManager Advanced', () => {
 
       await makeRequest(TEST_PORT, 'register', {
         module_id: 'resolve-test-module',
-        module_type: 'agent',
+        module_type: 'channel',
         version: '1.0.0',
         protocol_version: '1.0.0',
         port: portResponse.data!.port,
@@ -374,7 +374,7 @@ describe('ModuleManager Advanced', () => {
 
     it('should resolve by module_type', async () => {
       const response = await makeRequest<{ modules: unknown[] }>(TEST_PORT, 'resolve', {
-        module_type: 'agent',
+        module_type: 'channel',
       })
       expect(response.success).toBe(true)
       expect(response.data?.modules).toBeInstanceOf(Array)
@@ -395,7 +395,7 @@ describe('ModuleManager Advanced', () => {
       await makeRequest(TEST_PORT, 'register_module_definition', {
         module_definition: {
           module_id: 'update-test-module-def',
-          module_type: 'agent',
+          module_type: 'channel',
           entry: 'node -e "console.log(123)"',
           cwd: '.',
           auto_start: false,
@@ -433,7 +433,7 @@ describe('ModuleManager Advanced', () => {
       await makeRequest(TEST_PORT, 'register_module_definition', {
         module_definition: {
           module_id: 'running-module-test',
-          module_type: 'agent',
+          module_type: 'channel',
           entry: 'node -e "console.log(123)"',
           cwd: '.',
           auto_start: false,
@@ -447,7 +447,7 @@ describe('ModuleManager Advanced', () => {
 
       await makeRequest(TEST_PORT, 'register', {
         module_id: 'running-module-test',
-        module_type: 'agent',
+        module_type: 'channel',
         version: '1.0.0',
         protocol_version: '1.0.0',
         port: portResponse.data!.port,
@@ -503,13 +503,13 @@ describe('ModuleManager Advanced', () => {
       const response = await makeRequest<{ modules: Array<{ module_type: string }> }>(
         TEST_PORT,
         'list_modules',
-        { module_type: 'agent' }
+        { module_type: 'channel' }
       )
       expect(response.success).toBe(true)
       expect(response.data?.modules).toBeInstanceOf(Array)
       // 所有返回的模块都应该是 agent 类型
       for (const mod of response.data?.modules ?? []) {
-        expect(mod.module_type).toBe('agent')
+        expect(mod.module_type).toBe('channel')
       }
     })
   })
@@ -526,7 +526,7 @@ describe('ModuleManager Advanced', () => {
     it('should filter by module_type', async () => {
       const response = await makeRequest<{
         definitions: Array<{ module_type: string }>
-      }>(TEST_PORT, 'list_module_definitions', { module_type: 'agent' })
+      }>(TEST_PORT, 'list_module_definitions', { module_type: 'channel' })
       expect(response.success).toBe(true)
       expect(response.data?.definitions).toBeInstanceOf(Array)
     })

@@ -15,6 +15,7 @@ import {
 import type { FormattedDiagnostic } from '../hooks/types'
 import type { Language, LSPServerConfig } from './configs'
 import * as path from 'path'
+import { buildChildEnv } from '../core/runtime-env.js'
 
 const DEFAULT_DIAGNOSTICS_TIMEOUT_MS = 3_000
 
@@ -66,6 +67,7 @@ export function createLSPClient(language: Language, config: LSPServerConfig): LS
 
       process = spawn(config.command, [...config.args], {
         stdio: ['pipe', 'pipe', 'pipe'],
+        env: buildChildEnv(),
       })
 
       if (!process.stdout || !process.stdin) {

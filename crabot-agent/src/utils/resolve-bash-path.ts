@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
+import { buildChildEnv } from '../core/runtime-env.js'
 
 /**
  * Resolve absolute path or PATH-relative name of bash for tool/bg-shell spawn.
@@ -68,6 +69,7 @@ function defaultWhich(name: string): string | null {
     const out = execFileSync(cmd, [name], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
+      env: buildChildEnv(),
     })
     const first = out.split(/\r?\n/).map((s) => s.trim()).find((s) => s.length > 0)
     return first ?? null

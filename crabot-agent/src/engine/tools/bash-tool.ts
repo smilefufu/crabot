@@ -10,6 +10,7 @@ import type { BgEntityTraceContext } from '../bg-entities/trace.js'
 import { runShellWithGrace } from '../bg-entities/bg-shell.js'
 import { resolveBashPath, BASH_NOT_FOUND_MESSAGE } from '../../utils/resolve-bash-path.js'
 import { getAgentDataDir } from '../../core/data-paths.js'
+import { buildChildEnv } from '../../core/runtime-env.js'
 import { byteLength, truncateUtf8Tail } from '../byte-cap.js'
 
 /** 截断阈值（UTF-8 字节）：自截产物恒 < 编排层 100KB 兜底，尾部 hint 不会被再截掉。 */
@@ -180,7 +181,7 @@ function execCommand(
         maxBuffer: 10 * 1024 * 1024,
         // 显式透传父进程 env，确保 CRABOT_TOKEN / DATA_DIR 等环境变量进入子 shell。
         // execFile 默认 inherit 但显式传更稳定。
-        env: process.env,
+        env: buildChildEnv(),
       },
       (error, stdout, stderr) => {
         void (async () => {

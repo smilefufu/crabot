@@ -2,6 +2,7 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { buildChildEnv } from '../../core/runtime-env.js'
 import { promisify } from 'node:util'
 
 import type { MCPServerConfig } from '../../types.js'
@@ -125,7 +126,7 @@ export async function assertWorkspaceFilesUntracked(
   relativePaths: readonly string[],
   caller: string,
 ): Promise<void> {
-  const gitEnv = { ...process.env, LC_ALL: 'C' }
+  const gitEnv = buildChildEnv({ LC_ALL: 'C' })
   let isGitWorkspace = false
   try {
     const { stdout } = await execFileAsync('git', ['-C', workspaceRoot, 'rev-parse', '--is-inside-work-tree'], { env: gitEnv })

@@ -231,7 +231,7 @@ export class ChatManager {
         requestId,
         payloadSha256: sha256CanonicalJson(message),
       })
-      await this.rpcClient.call(
+      await this.rpcClient.callSensitive(
         agentPort,
         'process_message',
         {

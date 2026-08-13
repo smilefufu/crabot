@@ -6,10 +6,27 @@
 
 import fs from 'fs/promises'
 import path from 'path'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import AdmZip from 'adm-zip'
-import { generateId, generateTimestamp } from 'crabot-shared'
+import { canonicalizeJson, generateId, generateTimestamp } from 'crabot-shared'
+import { durableAtomicWriteFile, durableRemovePath, durableRename } from './durable-file.js'
+import type { ConfigDomain, CoreAgentConfigMutationContext } from './core-agent-config-revision-store.js'
 import type { OnConflict } from './backup/import/import-types.js'
+
+export type RegistryMutationRunner = (
+  domains: ConfigDomain[],
+  prepareAfterSnapshot: () => Promise<unknown>,
+  applySourceMutation: (context: CoreAgentConfigMutationContext) => Promise<void>,
+  allowRuntimeNoop?: boolean,
+  options?: { journalAwareNoop?: boolean },
+) => Promise<void>
+
+function runtimeMcpEntries(entries: Map<string, MCPServerRegistryEntry>): unknown[] {
+  return Array.from(entries.values()).filter((entry) => entry.enabled).map((entry) => JSON.parse(JSON.stringify({
+    id: entry.id, name: entry.name, transport: entry.transport, command: entry.command,
+    args: entry.args, env: entry.env, url: entry.url, headers: entry.headers, description: entry.description,
+  }))).sort((a: any, b: any) => a.id.localeCompare(b.id))
+}
 
 const MAX_FILE_SIZE_BYTES = 1 * 1024 * 1024  // 1MB 单文件上限
 const MAX_TOTAL_SIZE_BYTES = 5 * 1024 * 1024 // 5MB 总大小上限
@@ -162,13 +179,45 @@ export interface EssentialToolsConfig {
 export class MCPServerManager {
   private servers: Map<string, MCPServerRegistryEntry> = new Map()
   private readonly filePath: string
+  private mutationRunner: RegistryMutationRunner | null = null
+  private semanticSnapshotProvider: (() => unknown) | null = null
+  private mutationTail: Promise<void> = Promise.resolve()
 
   constructor(dataDir: string) {
     this.filePath = path.join(dataDir, 'mcp-servers.json')
   }
 
   async initialize(): Promise<void> {
+    await this.initializeLoadOnly()
+  }
+
+  async initializeLoadOnly(): Promise<void> {
     await this.load()
+  }
+
+  setMutationRunner(runner: RegistryMutationRunner): void { this.mutationRunner = runner }
+  setSemanticSnapshotProvider(provider: () => unknown): void { this.semanticSnapshotProvider = provider }
+
+  private async serial<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.mutationTail
+    let release!: () => void
+    this.mutationTail = new Promise<void>((resolve) => { release = resolve })
+    await previous
+    try { return await operation() } finally { release() }
+  }
+
+  private async commit(next: Map<string, MCPServerRegistryEntry>, allowRuntimeNoop = false): Promise<void> {
+    const previous = this.servers
+    const apply = async () => { this.servers = next; await this.save() }
+    if (!this.mutationRunner) return apply()
+    await this.mutationRunner(['mcp'], async () => {
+      this.servers = next
+      try { return this.semanticSnapshotProvider?.() } finally { this.servers = previous }
+    }, apply, allowRuntimeNoop)
+  }
+
+  runtimeSemanticEntries(): unknown[] {
+    return runtimeMcpEntries(this.servers)
   }
 
   private async load(): Promise<void> {
@@ -188,12 +237,10 @@ export class MCPServerManager {
   }
 
   /**
-   * 原子写入文件：先写临时文件，再 rename（避免进程被杀时文件损坏）
+   * Durable atomic replace for the MCP source participating in the config transaction.
    */
   private async atomicWriteFile(filePath: string, content: string): Promise<void> {
-    const tempPath = `${filePath}.tmp`
-    await fs.writeFile(tempPath, content, 'utf-8')
-    await fs.rename(tempPath, filePath)
+    await durableAtomicWriteFile(filePath, content)
   }
 
   private async save(): Promise<void> {
@@ -225,30 +272,33 @@ export class MCPServerManager {
     source_market?: string
     source_package?: string
   }): Promise<MCPServerRegistryEntry> {
-    const now = generateTimestamp()
-    const entry: MCPServerRegistryEntry = {
-      id: generateId(),
-      name: params.name,
-      transport: params.transport ?? 'stdio',
-      command: params.command,
-      args: params.args,
-      env: params.env,
-      url: params.url,
-      headers: params.headers,
-      description: params.description,
-      is_builtin: false,
-      is_essential: false,
-      can_disable: true,
-      install_method: params.install_method,
-      source_market: params.source_market,
-      source_package: params.source_package,
-      enabled: true,
-      created_at: now,
-      updated_at: now,
-    }
-    this.servers.set(entry.id, entry)
-    await this.save()
-    return entry
+    return this.serial(async () => {
+      const now = generateTimestamp()
+      const entry: MCPServerRegistryEntry = {
+        id: generateId(),
+        name: params.name,
+        transport: params.transport ?? 'stdio',
+        command: params.command,
+        args: params.args,
+        env: params.env,
+        url: params.url,
+        headers: params.headers,
+        description: params.description,
+        is_builtin: false,
+        is_essential: false,
+        can_disable: true,
+        install_method: params.install_method,
+        source_market: params.source_market,
+        source_package: params.source_package,
+        enabled: true,
+        created_at: now,
+        updated_at: now,
+      }
+      const next = new Map(this.servers)
+      next.set(entry.id, entry)
+      await this.commit(next)
+      return entry
+    })
   }
 
   async update(
@@ -260,35 +310,54 @@ export class MCPServerManager {
       >
     >
   ): Promise<MCPServerRegistryEntry> {
-    const entry = this.servers.get(id)
-    if (!entry) throw new Error(`MCP Server not found: ${id}`)
-    if (!entry.can_disable && params.enabled === false) {
-      throw new Error(`MCP Server "${entry.name}" cannot be disabled`)
-    }
-    const updated: MCPServerRegistryEntry = {
-      ...entry,
-      ...params,
-      updated_at: generateTimestamp(),
-    }
-    this.servers.set(id, updated)
-    await this.save()
-    return updated
+    return this.serial(async () => {
+      const entry = this.servers.get(id)
+      if (!entry) throw new Error(`MCP Server not found: ${id}`)
+      if (!entry.can_disable && params.enabled === false) {
+        throw new Error(`MCP Server "${entry.name}" cannot be disabled`)
+      }
+      const updated: MCPServerRegistryEntry = {
+        ...entry,
+        ...params,
+        updated_at: generateTimestamp(),
+      }
+      const currentRuntime = canonicalizeJson(runtimeMcpEntries(this.servers))
+      const next = new Map(this.servers)
+      next.set(id, updated)
+      if (currentRuntime === canonicalizeJson(runtimeMcpEntries(next))) {
+        await this.commit(next, true)
+        return updated
+      }
+      await this.commit(next)
+      return updated
+    })
   }
 
   async delete(id: string): Promise<void> {
-    const entry = this.servers.get(id)
-    if (!entry) throw new Error(`MCP Server not found: ${id}`)
-    if (entry.is_builtin) throw new Error(`Cannot delete built-in MCP Server "${entry.name}"`)
-    this.servers.delete(id)
-    await this.save()
+    return this.serial(async () => {
+      const entry = this.servers.get(id)
+      if (!entry) throw new Error(`MCP Server not found: ${id}`)
+      if (entry.is_builtin) throw new Error(`Cannot delete built-in MCP Server "${entry.name}"`)
+      const next = new Map(this.servers)
+      next.delete(id)
+      // 已停用条目不在 runtime 投影里：允许 noop，否则「先停用后删除」永远 400。
+      await this.commit(next, true)
+    })
   }
 
   async upsertById(entry: MCPServerRegistryEntry, onConflict: OnConflict): Promise<'imported' | 'overwritten' | 'skipped'> {
-    const exists = this.servers.has(entry.id)
-    if (exists && onConflict === 'skip') return 'skipped'
-    this.servers.set(entry.id, entry)
-    await this.save()
-    return exists ? 'overwritten' : 'imported'
+    return this.serial(async () => {
+      const exists = this.servers.has(entry.id)
+      if (exists && onConflict === 'skip') return 'skipped'
+      const next = new Map(this.servers)
+      next.set(entry.id, entry)
+      if (exists && canonicalizeJson(this.runtimeSemanticEntries()) === canonicalizeJson(runtimeMcpEntries(next))) {
+        await this.commit(next, true)
+        return 'overwritten'
+      }
+      await this.commit(next)
+      return exists ? 'overwritten' : 'imported'
+    })
   }
 
   /**
@@ -298,59 +367,59 @@ export class MCPServerManager {
    * mcpServers 格式: { "mcpServers": { "name": { "command": ..., "args": ..., "env": ... } } }
    */
   async importFromJson(json: string): Promise<MCPServerRegistryEntry[]> {
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(json)
-    } catch {
-      throw new Error('无效的 JSON 格式')
-    }
-
-    if (typeof parsed !== 'object' || parsed === null) {
-      throw new Error('JSON 必须是对象')
-    }
-
-    const obj = parsed as Record<string, unknown>
-    const now = generateTimestamp()
-    const newEntries: MCPServerRegistryEntry[] = []
-
-    const buildEntry = (name: string, c: Record<string, unknown>): MCPServerRegistryEntry => ({
-      id: generateId(),
-      name,
-      transport: 'stdio',
-      command: c.command as string,
-      args: Array.isArray(c.args) ? c.args.map(String) : undefined,
-      env: typeof c.env === 'object' && c.env !== null
-        ? Object.fromEntries(Object.entries(c.env as Record<string, unknown>).map(([k, v]) => [k, String(v)]))
-        : undefined,
-      is_builtin: false,
-      is_essential: false,
-      can_disable: true,
-      enabled: true,
-      created_at: now,
-      updated_at: now,
-    })
-
-    if ('mcpServers' in obj && typeof obj.mcpServers === 'object' && obj.mcpServers !== null) {
-      for (const [name, cfg] of Object.entries(obj.mcpServers as Record<string, unknown>)) {
-        if (typeof cfg !== 'object' || cfg === null) continue
-        const c = cfg as Record<string, unknown>
-        if (typeof c.command !== 'string') continue
-        newEntries.push(buildEntry(name, c))
+    return this.serial(async () => {
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(json)
+      } catch {
+        throw new Error('无效的 JSON 格式')
       }
-    } else if (typeof obj.command === 'string') {
-      const nameParts = obj.command.split(/[\s/\\]/)
-      const name = nameParts[nameParts.length - 1] || 'mcp-server'
-      newEntries.push(buildEntry(name, obj))
-    } else {
-      throw new Error('无法识别的 JSON 格式，请使用 Claude Desktop mcpServers 格式或单 server 格式')
-    }
 
-    // 批量写入，避免 N 次文件 I/O 和竞态
-    for (const entry of newEntries) {
-      this.servers.set(entry.id, entry)
-    }
-    await this.save()
-    return newEntries
+      if (typeof parsed !== 'object' || parsed === null) {
+        throw new Error('JSON 必须是对象')
+      }
+
+      const obj = parsed as Record<string, unknown>
+      const now = generateTimestamp()
+      const newEntries: MCPServerRegistryEntry[] = []
+
+      const buildEntry = (name: string, c: Record<string, unknown>): MCPServerRegistryEntry => ({
+        id: generateId(),
+        name,
+        transport: 'stdio',
+        command: c.command as string,
+        args: Array.isArray(c.args) ? c.args.map(String) : undefined,
+        env: typeof c.env === 'object' && c.env !== null
+          ? Object.fromEntries(Object.entries(c.env as Record<string, unknown>).map(([k, v]) => [k, String(v)]))
+          : undefined,
+        is_builtin: false,
+        is_essential: false,
+        can_disable: true,
+        enabled: true,
+        created_at: now,
+        updated_at: now,
+      })
+
+      if ('mcpServers' in obj && typeof obj.mcpServers === 'object' && obj.mcpServers !== null) {
+        for (const [name, cfg] of Object.entries(obj.mcpServers as Record<string, unknown>)) {
+          if (typeof cfg !== 'object' || cfg === null) continue
+          const c = cfg as Record<string, unknown>
+          if (typeof c.command !== 'string') continue
+          newEntries.push(buildEntry(name, c))
+        }
+      } else if (typeof obj.command === 'string') {
+        const nameParts = obj.command.split(/[\s/\\]/)
+        const name = nameParts[nameParts.length - 1] || 'mcp-server'
+        newEntries.push(buildEntry(name, obj))
+      } else {
+        throw new Error('无法识别的 JSON 格式，请使用 Claude Desktop mcpServers 格式或单 server 格式')
+      }
+
+      const next = new Map(this.servers)
+      for (const entry of newEntries) next.set(entry.id, entry)
+      if (newEntries.length > 0) await this.commit(next)
+      return newEntries
+    })
   }
 
   /**
@@ -358,81 +427,85 @@ export class MCPServerManager {
    * 在 Admin 初始化时调用，确保内置工具在首次启动时自动可用
    */
   async registerBuiltins(mcpToolsPath: string): Promise<void> {
-    const existingNames = new Set(this.list().map(s => s.name))
+    return this.serial(async () => {
+      const existingNames = new Set(this.list().map(s => s.name))
+      const next = new Map(this.servers)
 
-    const builtins: Array<{
-      name: string
-      description: string
-      transport: 'stdio'
-      command: string
-      args: string[]
-      enabled?: boolean
-    }> = [
-      {
-        name: 'computer-use',
-        description: 'Computer interaction: screenshot, mouse, keyboard (macOS)',
-        transport: 'stdio',
-        command: 'node',
-        args: [path.join(mcpToolsPath, 'dist/computer-use/main.js')],
-      },
-      {
-        name: 'lsp',
-        description: 'Code intelligence: diagnostics, hover, definition, references, symbols',
-        transport: 'stdio',
-        command: 'node',
-        args: [path.join(mcpToolsPath, 'dist/lsp/main.js')],
-      },
-      {
-        name: 'git',
-        description: 'Git operations: status, diff, log, commit, branch, stash',
-        transport: 'stdio',
-        command: 'node',
-        args: [path.join(mcpToolsPath, 'dist/git/main.js')],
-      },
-      {
-        name: 'scrapling',
-        description: 'Browser Use: web scraping and browser automation via Scrapling',
-        transport: 'stdio',
-        command: 'scrapling',
-        args: ['mcp'],
-        enabled: false,
-      },
-    ]
+      const builtins: Array<{
+        name: string
+        description: string
+        transport: 'stdio'
+        command: string
+        args: string[]
+        enabled?: boolean
+      }> = [
+        {
+          name: 'computer-use',
+          description: 'Computer interaction: screenshot, mouse, keyboard (macOS)',
+          transport: 'stdio',
+          command: 'node',
+          args: [path.join(mcpToolsPath, 'dist/computer-use/main.js')],
+        },
+        {
+          name: 'lsp',
+          description: 'Code intelligence: diagnostics, hover, definition, references, symbols',
+          transport: 'stdio',
+          command: 'node',
+          args: [path.join(mcpToolsPath, 'dist/lsp/main.js')],
+        },
+        {
+          name: 'git',
+          description: 'Git operations: status, diff, log, commit, branch, stash',
+          transport: 'stdio',
+          command: 'node',
+          args: [path.join(mcpToolsPath, 'dist/git/main.js')],
+        },
+        {
+          name: 'scrapling',
+          description: 'Browser Use: web scraping and browser automation via Scrapling',
+          transport: 'stdio',
+          command: 'scrapling',
+          args: ['mcp'],
+          enabled: false,
+        },
+      ]
 
-    let changed = false
-    for (const builtin of builtins) {
-      if (existingNames.has(builtin.name)) {
-        // 已注册：更新路径（项目目录可能变更）
-        for (const [id, existing] of this.servers) {
-          if (existing.name === builtin.name && existing.is_builtin) {
-            const argsChanged = JSON.stringify(existing.args) !== JSON.stringify(builtin.args)
-            if (argsChanged) {
-              this.servers.set(id, { ...existing, args: builtin.args, updated_at: generateTimestamp() })
-              changed = true
+      let changed = false
+      for (const builtin of builtins) {
+        if (existingNames.has(builtin.name)) {
+          // 已注册：更新路径（项目目录可能变更）
+          for (const [id, existing] of next) {
+            if (existing.name === builtin.name && existing.is_builtin) {
+              const argsChanged = JSON.stringify(existing.args) !== JSON.stringify(builtin.args)
+              if (argsChanged) {
+                next.set(id, { ...existing, args: builtin.args, updated_at: generateTimestamp() })
+                changed = true
+              }
+              break
             }
-            break
           }
+          continue
         }
-        continue
+        const now = generateTimestamp()
+        const entry: MCPServerRegistryEntry = {
+          id: generateId(),
+          ...builtin,
+          is_builtin: true,
+          is_essential: false,
+          can_disable: true,
+          enabled: builtin.enabled ?? true,
+          created_at: now,
+          updated_at: now,
+        }
+        next.set(entry.id, entry)
+        changed = true
       }
-      const now = generateTimestamp()
-      const entry: MCPServerRegistryEntry = {
-        id: generateId(),
-        ...builtin,
-        is_builtin: true,
-        is_essential: false,
-        can_disable: true,
-        enabled: builtin.enabled ?? true,
-        created_at: now,
-        updated_at: now,
-      }
-      this.servers.set(entry.id, entry)
-      changed = true
-    }
 
-    if (changed) {
-      await this.save()
-    }
+      if (changed) {
+        // 变化只落在停用条目（args 更新）或新增默认停用 builtin 时投影不变：允许 noop。
+        await this.commit(next, true)
+      }
+    })
   }
 
   /** 将注册表条目转换为 Agent 所需的 MCPServerConfig 格式 */
@@ -467,19 +540,689 @@ export class MCPServerManager {
 // Skill 管理器
 // ============================================================================
 
+interface SkillSourceMove {
+  before_rel?: string
+  after_rel: string
+  stage_rel: string
+  before_existed: boolean
+  before_tree_hash?: string
+  after_tree_hash: string
+  cleanup_rel?: string
+}
+
+interface SkillSourceJournal {
+  schema_version: 1
+  domain: 'skills'
+  mutation_id: string
+  target_revision: number
+  before_registry_sha256: string
+  after_registry_sha256: string
+  staged_registry_rel: string
+  staged_registry_sha256: string
+  before_registry_rel: string
+  before_registry_artifact_sha256: string
+  before_runtime_hashes: Record<string, string>
+  after_runtime_hashes: Record<string, string>
+  before_referenced_paths: string[]
+  before_target_rel?: string
+  after_target_rel?: string
+  before_target_existed?: boolean
+  before_target_tree_hash?: string
+  after_target_tree_hash?: string
+  stage_rel?: string
+  backup_rel?: string
+  retained_rel?: string
+  delete_after_commit?: boolean
+  /** Legacy migration uses a batch of staged directory moves. */
+  moves?: SkillSourceMove[]
+  legacy_backup_rel?: string
+  legacy_backup_sha256?: string
+  obsolete_snapshot_rel?: string
+}
+
+function sha256(value: Buffer | string): string { return createHash('sha256').update(value).digest('hex') }
+
+interface LegacyMigrationPlan {
+  next: Map<string, SkillRegistryEntry>
+  hashes: Map<string, string>
+  moves: SkillSourceMove[]
+  backupPath: string
+  backupBytes: Buffer
+}
+
 export class SkillManager {
+  private readonly transactionRoot: string
+  private readonly journalPath: string
+  private skillTail: Promise<void> = Promise.resolve()
   private skills: Map<string, SkillRegistryEntry> = new Map()
   private readonly filePath: string
   private readonly skillsRoot: string
+  private mutationRunner: RegistryMutationRunner | null = null
+  private semanticSnapshotProvider: (() => Promise<unknown> | unknown) | null = null
+  private contentTreeHashes = new Map<string, string>()
+  private legacyMigrationPending = false
 
   constructor(dataDir: string) {
     this.filePath = path.join(dataDir, 'skills.json')
     this.skillsRoot = path.join(dataDir, 'skills')
+    this.transactionRoot = path.join(this.skillsRoot, '.transactions')
+    this.journalPath = path.join(this.transactionRoot, 'skill-source-journal.json')
   }
 
   async initialize(): Promise<void> {
+    await this.initializeLoadOnly()
+    await this.initializeMigrations()
+  }
+
+  async initializeLoadOnly(): Promise<void> {
     await this.load()
-    await this.migrateLegacyEntries()
+    const journal = await this.readJournal()
+    if (journal) {
+      this.contentTreeHashes = new Map()
+      return
+    }
+    await this.refreshRuntimeContentHashes()
+  }
+
+  async verifySourceJournalBinding(coordinator: import('./core-agent-config-revision-store.js').CoreAgentConfigMutationCoordinator): Promise<void> {
+    const journal = await this.readJournal()
+    const binding = await coordinator.persistedMutationBinding()
+    if (!journal) {
+      if (binding?.source_journal_sha256) {
+        if (!binding.source_cleanup_completed) throw new Error('Bound Skill source journal is missing')
+        await this.cleanupCompletedJournalArtifacts()
+        await coordinator.clearCompletedSourceJournalBinding(binding.mutation_id, binding.target_revision, binding.source_journal_sha256)
+      }
+      return
+    }
+    if (!binding) throw new Error('Skill source journal binding mismatch')
+    const journalBytes = await fs.readFile(this.journalPath)
+    if (!binding || binding.mutation_id !== journal.mutation_id || binding.target_revision !== journal.target_revision || !binding.domains.includes('skills') || binding.source_journal_sha256 !== sha256(journalBytes)) throw new Error('Skill source journal binding mismatch')
+    const registryDigest = await this.registryDigest()
+    if (registryDigest === journal.before_registry_sha256) {
+      await this.verifyJournalPhysicalState(journal, 'before')
+      this.contentTreeHashes = new Map(Object.entries(journal.before_runtime_hashes))
+    } else if (registryDigest === journal.after_registry_sha256) {
+      await this.verifyJournalPhysicalState(journal, 'after')
+      this.contentTreeHashes = new Map(Object.entries(journal.after_runtime_hashes))
+    } else throw new Error('Skill source journal registry digest mismatch')
+  }
+
+  async recoverSourceJournal(coordinator: import('./core-agent-config-revision-store.js').CoreAgentConfigMutationCoordinator): Promise<void> {
+    const journal = await this.readJournal()
+    if (!journal) return
+    const pending = await coordinator.pendingMutation()
+    const recovered = await coordinator.recentRecoveredMutation()
+    const receipt = await coordinator.lastCompletedMutation()
+    const matches = (record: { mutation_id: string; target_revision: number } | null) => record?.mutation_id === journal.mutation_id && record.target_revision === journal.target_revision
+    if (!matches(pending) && !matches(recovered) && !matches(receipt)) throw new Error('Skill source journal mutation identity mismatch')
+    const journalBytes = await fs.readFile(this.journalPath)
+    const journalDigest = sha256(journalBytes)
+    const digest = await this.registryDigest()
+    if (digest === journal.before_registry_sha256) await this.rollbackJournal(journal)
+    else if (digest === journal.after_registry_sha256) await this.rollForwardJournal(journal)
+    else throw new Error('Skill source journal registry digest mismatch')
+    await coordinator.markSourceJournalCleanupCompleted(journal.mutation_id, journal.target_revision, journalDigest)
+    await durableRemovePath(this.journalPath, { force: true })
+    await durableRemovePath(this.resolveTransactionPath(journal.before_registry_rel), { force: true })
+    await coordinator.clearCompletedSourceJournalBinding(journal.mutation_id, journal.target_revision, journalDigest)
+    await this.load()
+    await this.refreshRuntimeContentHashes()
+  }
+
+  async initializeMigrations(): Promise<void> {
+    return this.serial(async () => {
+      if (!this.legacyMigrationPending) return
+      const plan = await this.planLegacyMigration()
+      if (!plan) return
+      await this.applyLegacyMigrationPlan(plan)
+    })
+  }
+
+  setMutationRunner(runner: RegistryMutationRunner): void { this.mutationRunner = runner }
+  setSemanticSnapshotProvider(provider: () => Promise<unknown> | unknown): void { this.semanticSnapshotProvider = provider }
+
+  semanticMigrationState(): { legacy_migration_pending: boolean } {
+    return { legacy_migration_pending: this.legacyMigrationPending }
+  }
+
+  runtimeSemanticEntries(): unknown[] {
+    return Array.from(this.skills.values())
+      .filter((entry) => entry.enabled && typeof entry.skill_dir === 'string' && entry.skill_dir.length > 0)
+      .map((entry) => ({
+        id: entry.id, name: entry.name, description: entry.description, skill_dir: entry.skill_dir,
+        ...(this.isAdminOwned(entry) ? { content_tree_hash: this.contentTreeHashes.get(entry.id) ?? 'unreadable' } : {}),
+      }))
+      .sort((left, right) => left.id.localeCompare(right.id))
+  }
+
+  private async commit(
+    next: Map<string, SkillRegistryEntry>,
+    applyFiles: () => Promise<void>,
+    previewHashes?: Map<string, string>,
+    transaction?: Partial<Omit<SkillSourceJournal, 'schema_version' | 'domain' | 'mutation_id' | 'target_revision' | 'before_registry_sha256' | 'after_registry_sha256' | 'staged_registry_rel' | 'staged_registry_sha256' | 'before_runtime_hashes' | 'after_runtime_hashes'>>,
+    migrationAfter = false,
+  ): Promise<void> {
+    {
+      const previous = this.skills
+      const previousHashes = this.contentTreeHashes
+      const beforeRegistry = await this.registryBytes()
+      const afterRegistry = this.registryBytesFor(next)
+      const beforeHashes = Object.fromEntries(previousHashes)
+      const afterHashes = Object.fromEntries(previewHashes ?? previousHashes)
+      const stageRegistry = path.join(this.transactionRoot, `registry-${randomBytes(12).toString('hex')}.json`)
+      const beforeRegistryStage = path.join(this.transactionRoot, `before-registry-${randomBytes(12).toString('hex')}.json`)
+      await fs.mkdir(this.transactionRoot, { recursive: true, mode: 0o700 })
+      await this.writePrivate(stageRegistry, afterRegistry)
+      if (transaction) await this.writePrivate(beforeRegistryStage, beforeRegistry)
+      let sourceContext: CoreAgentConfigMutationContext | undefined
+      let journalDigest: string | undefined
+      const apply = async (context?: CoreAgentConfigMutationContext) => {
+        sourceContext = context
+        if (context && transaction) {
+          const journal: SkillSourceJournal = {
+            schema_version: 1, domain: 'skills', mutation_id: context.mutation_id, target_revision: context.target_revision,
+            before_registry_sha256: sha256(beforeRegistry), after_registry_sha256: sha256(afterRegistry),
+            staged_registry_rel: this.relativeTransactionPath(stageRegistry), staged_registry_sha256: sha256(afterRegistry),
+            before_registry_rel: this.relativeTransactionPath(beforeRegistryStage), before_registry_artifact_sha256: sha256(beforeRegistry),
+            before_runtime_hashes: beforeHashes, after_runtime_hashes: afterHashes,
+            before_target_tree_hash: transaction?.before_target_tree_hash, after_target_tree_hash: transaction?.after_target_tree_hash,
+            before_referenced_paths: this.registryReferencedPaths(beforeRegistry),
+            ...transaction,
+          }
+          const journalBytes = Buffer.from(JSON.stringify(journal))
+          await this.writePrivate(this.journalPath, journalBytes)
+          if (!context?.bindSourceJournal) throw new Error('Missing source journal binding context')
+          journalDigest = sha256(journalBytes)
+          await context.bindSourceJournal(journalDigest)
+        }
+        await applyFiles()
+        this.skills = next
+        this.contentTreeHashes = new Map(Object.entries(afterHashes))
+        await this.writePrivate(this.filePath, afterRegistry)
+        await durableRemovePath(stageRegistry, { force: true })
+      }
+      try {
+        if (!this.mutationRunner) await apply()
+        else await this.mutationRunner(['skills'], async () => {
+          this.skills = next
+          this.legacyMigrationPending = migrationAfter ? false : this.legacyMigrationPending
+          // refreshRuntimeContentHashes 对不可读目录/symlink 会 throw：必须在回滚保护内，
+          // 否则 this.skills 停在未落盘的 next，语义 fingerprint 与 committed record 永久错位。
+          try {
+            if (previewHashes) this.contentTreeHashes = previewHashes
+            else await this.refreshRuntimeContentHashes()
+            return await this.semanticSnapshotProvider?.()
+          } finally {
+            this.skills = previous
+            this.contentTreeHashes = previousHashes
+            this.legacyMigrationPending = migrationAfter ? true : this.legacyMigrationPending
+          }
+        }, apply, true, { journalAwareNoop: transaction !== undefined })
+        if (transaction?.moves) await this.cleanupBatchSources(transaction.moves)
+        if (transaction?.obsolete_snapshot_rel) await durableRemovePath(this.resolveTransactionPath(transaction.obsolete_snapshot_rel), { recursive: true, force: true })
+        if (transaction && this.mutationRunner) {
+          if (!sourceContext || !journalDigest) throw new Error('Missing completed source journal context')
+          await sourceContext.markSourceJournalCleanupCompleted(journalDigest)
+          await durableRemovePath(this.journalPath, { force: true })
+          await durableRemovePath(beforeRegistryStage, { force: true })
+          await sourceContext.clearSourceJournalBinding(journalDigest)
+        } else if (transaction) {
+          await durableRemovePath(beforeRegistryStage, { force: true })
+        }
+      } catch (error) {
+        if (!transaction) {
+          await durableRemovePath(stageRegistry, { force: true }).catch(() => {})
+          await durableRemovePath(beforeRegistryStage, { force: true }).catch(() => {})
+        }
+        throw error
+      }
+    }
+  }
+
+  private async registryBytes(): Promise<Buffer> {
+    try { return await fs.readFile(this.filePath) } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return Buffer.from('[]')
+      throw new Error('Invalid skills registry')
+    }
+  }
+
+  private registryBytesFor(entries: Map<string, SkillRegistryEntry>): Buffer {
+    return Buffer.from(JSON.stringify(Array.from(entries.values()), null, 2))
+  }
+
+  private async writePrivate(file: string, content: Buffer): Promise<void> {
+    await durableAtomicWriteFile(file, content)
+  }
+
+  private relativeTransactionPath(file: string): string {
+    const relative = path.relative(this.skillsRoot, file)
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || relative.includes('\0')) throw new Error('Invalid skill transaction path')
+    return relative.split(path.sep).join('/')
+  }
+
+  private resolveTransactionPath(relative: string): string {
+    if (!relative || path.isAbsolute(relative) || relative.includes('\0') || relative.split('/').some((part) => !part || part === '.' || part === '..')) throw new Error('Invalid skill transaction path')
+    const resolved = path.resolve(this.skillsRoot, relative)
+    if (!resolved.startsWith(this.skillsRoot + path.sep)) throw new Error('Invalid skill transaction path')
+    return resolved
+  }
+
+  private async writeJournal(journal: SkillSourceJournal): Promise<void> {
+    await fs.mkdir(this.transactionRoot, { recursive: true, mode: 0o700 })
+    await this.writePrivate(this.journalPath, Buffer.from(JSON.stringify(journal)))
+  }
+
+  private async readJournal(): Promise<SkillSourceJournal | null> {
+    let raw: Buffer
+    try { raw = await fs.readFile(this.journalPath) } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+      throw error
+    }
+    let journal: SkillSourceJournal
+    try { journal = JSON.parse(raw.toString('utf8')) } catch { throw new Error('Invalid skill source journal') }
+    const registryBytes = await this.registryBytes()
+    const registryDigest = sha256(registryBytes)
+    const stagedRegistry = this.resolveTransactionPath(journal.staged_registry_rel)
+    this.assertJournalPath(journal.staged_registry_rel, 'registry')
+    const beforeRegistryArtifact = this.resolveTransactionPath(journal.before_registry_rel)
+    this.assertJournalPath(journal.before_registry_rel, 'before-registry')
+    const beforeRegistryBytes = await fs.readFile(beforeRegistryArtifact).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error))
+    if (!beforeRegistryBytes || !/^[a-f0-9]{64}$/.test(journal.before_registry_artifact_sha256) || sha256(beforeRegistryBytes) !== journal.before_registry_artifact_sha256 || sha256(beforeRegistryBytes) !== journal.before_registry_sha256) throw new Error('Invalid skill source journal')
+    const stagedRegistryBytes = await fs.readFile(stagedRegistry).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error))
+    if (stagedRegistryBytes && journal.staged_registry_sha256 !== sha256(stagedRegistryBytes)) throw new Error('Invalid skill source journal')
+    if (!stagedRegistryBytes && registryDigest !== journal.after_registry_sha256) throw new Error('Invalid skill source journal')
+    if (journal.schema_version !== 1 || journal.domain !== 'skills' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(journal.mutation_id) || !Number.isSafeInteger(journal.target_revision) || !/^[a-f0-9]{64}$/.test(journal.before_registry_sha256) || !/^[a-f0-9]{64}$/.test(journal.after_registry_sha256) || !/^[a-f0-9]{64}$/.test(journal.staged_registry_sha256)) throw new Error('Invalid skill source journal')
+    const beforeRegistry = beforeRegistryBytes
+    if (registryDigest === journal.before_registry_sha256 && !registryBytes.equals(beforeRegistry)) throw new Error('Invalid skill source journal')
+    const afterRegistry = stagedRegistryBytes ?? (registryDigest === journal.after_registry_sha256 ? registryBytes : null)
+    if (journal.moves) {
+      this.assertJournalPath(journal.staged_registry_rel, 'registry')
+      if (!afterRegistry || !Array.isArray(journal.moves) || journal.moves.length === 0) throw new Error('Invalid skill source journal')
+      const authoritativeBefore = await this.readLegacyBeforeRegistry(journal, beforeRegistry)
+      const expectedReferences = this.registryReferencedPaths(authoritativeBefore)
+      if (canonicalizeJson(expectedReferences) !== canonicalizeJson(journal.before_referenced_paths)) throw new Error('Invalid skill source journal')
+      for (const move of journal.moves) {
+        if (!move || typeof move !== 'object' || typeof move.after_rel !== 'string' || typeof move.stage_rel !== 'string' || typeof move.before_existed !== 'boolean' || !/^[a-f0-9]{64}$/.test(move.after_tree_hash) || (move.before_tree_hash !== undefined && !/^[a-f0-9]{64}$/.test(move.before_tree_hash))) throw new Error('Invalid skill source journal')
+        this.assertJournalPath(move.stage_rel, 'stage')
+        this.assertJournalPath(move.after_rel, move.after_rel.startsWith('.snapshots/') ? 'snapshot' : 'target')
+        if (move.before_rel !== undefined) this.assertJournalPath(move.before_rel, move.before_rel.startsWith('.snapshots/') ? 'snapshot' : 'target')
+        this.assertLegacyMoveMapping(authoritativeBefore, afterRegistry, move)
+        if (move.cleanup_rel !== undefined) {
+          if (!move.before_existed || move.cleanup_rel !== move.before_rel) throw new Error('Invalid skill source journal')
+          if (!expectedReferences.includes(move.cleanup_rel)) throw new Error('Invalid skill source journal')
+        }
+      }
+      return journal
+    }
+    if (journal.before_target_rel === undefined || journal.after_target_rel === undefined || journal.before_target_existed === undefined || journal.stage_rel === undefined) throw new Error('Invalid skill source journal')
+    this.assertJournalPath(journal.staged_registry_rel, 'registry')
+    this.assertJournalPath(journal.stage_rel, journal.delete_after_commit ? 'quarantine' : 'stage')
+    this.assertJournalPath(journal.before_target_rel, 'target')
+    this.assertJournalPath(journal.after_target_rel, journal.delete_after_commit ? 'quarantine' : 'target')
+    if (journal.backup_rel !== undefined) this.assertJournalPath(journal.backup_rel, 'snapshot')
+    if (journal.retained_rel !== undefined) this.assertJournalPath(journal.retained_rel, journal.delete_after_commit ? 'quarantine' : 'snapshot')
+    for (const hashes of [journal.before_runtime_hashes, journal.after_runtime_hashes]) {
+      if (!hashes || typeof hashes !== 'object' || Array.isArray(hashes) || Object.values(hashes).some((hash) => !/^[a-f0-9]{64}$/.test(hash))) {
+        throw new Error('Invalid skill source journal')
+      }
+    }
+    const afterRegistryForRuntime = afterRegistry
+    if (!journal.before_target_tree_hash || !/^[a-f0-9]{64}$/.test(journal.before_target_tree_hash)) {
+      if (journal.before_target_existed) throw new Error('Invalid skill source journal')
+    }
+    if (!journal.delete_after_commit && (!journal.after_target_tree_hash || !/^[a-f0-9]{64}$/.test(journal.after_target_tree_hash))) throw new Error('Invalid skill source journal')
+    if (journal.obsolete_snapshot_rel !== undefined) this.assertRestoreSnapshotTransition(beforeRegistry, afterRegistryForRuntime, journal)
+    if (journal.before_target_existed && !this.registryContainsManagedPath(beforeRegistry, journal.before_target_rel)) {
+      throw new Error('Invalid skill source journal')
+    }
+    if (!journal.delete_after_commit && (!afterRegistryForRuntime || !this.registryContainsManagedPath(afterRegistryForRuntime, journal.after_target_rel))) {
+      throw new Error('Invalid skill source journal')
+    }
+    return journal
+  }
+
+  private assertJournalPath(relative: string, kind: 'registry' | 'before-registry' | 'stage' | 'target' | 'snapshot' | 'quarantine'): void {
+    this.resolveTransactionPath(relative)
+    const parts = relative.split('/')
+    const valid = kind === 'registry'
+      ? parts.length === 2 && parts[0] === '.transactions' && /^registry-[a-f0-9]{24}\.json$/.test(parts[1])
+      : kind === 'before-registry'
+        ? parts.length === 2 && parts[0] === '.transactions' && /^before-registry-[a-f0-9]{24}\.json$/.test(parts[1])
+      : kind === 'stage'
+        ? (parts.length === 1 && /^\.stage\.\d+\.\d+\.[a-f0-9]{8}$/.test(parts[0]) || parts.length === 2 && /^\.stage\.\d+\.\d+\.[a-f0-9]{8}$/.test(parts[0]) && /^(target|snapshot)-\d+$/.test(parts[1]))
+        : kind === 'snapshot'
+          ? parts.length === 2 && parts[0] === '.snapshots' && /^[a-z0-9][a-z0-9-]{0,63}-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/.test(parts[1])
+          : kind === 'quarantine'
+            ? parts.length === 2 && parts[0] === '.transactions' && /^delete-[a-f0-9]{24}$/.test(parts[1])
+            : parts.length === 1 && isValidSkillName(parts[0])
+    if (!valid) throw new Error('Invalid skill transaction path')
+  }
+
+  private assertRestoreSnapshotTransition(beforeRegistry: Buffer, afterRegistry: Buffer | null, journal: SkillSourceJournal): void {
+    if (!afterRegistry || !journal.obsolete_snapshot_rel || !journal.retained_rel) throw new Error('Invalid skill source journal')
+    this.assertJournalPath(journal.obsolete_snapshot_rel, 'snapshot')
+    this.assertJournalPath(journal.retained_rel, 'snapshot')
+    const parse = (registry: Buffer): Map<string, { skill?: string; snapshot?: string }> => {
+      let entries: unknown
+      try { entries = JSON.parse(registry.toString('utf8')) } catch { throw new Error('Invalid skill source journal') }
+      if (!Array.isArray(entries)) throw new Error('Invalid skill source journal')
+      const result = new Map<string, { skill?: string; snapshot?: string }>()
+      for (const entry of entries) {
+        if (!entry || typeof entry !== 'object' || typeof (entry as { id?: unknown }).id !== 'string') throw new Error('Invalid skill source journal')
+        const value = entry as { id: string; skill_dir?: unknown; previous_snapshot?: { snapshot_dir?: unknown } }
+        let managedSkill: string | undefined
+        if (typeof value.skill_dir === 'string') {
+          try { managedSkill = this.relativeTransactionPath(value.skill_dir) } catch { /* external builtin/scanned paths do not participate */ }
+        }
+        result.set(value.id, {
+          skill: managedSkill,
+          snapshot: typeof value.previous_snapshot?.snapshot_dir === 'string' && value.previous_snapshot.snapshot_dir.startsWith('.snapshots/')
+            ? value.previous_snapshot.snapshot_dir
+            : undefined,
+        })
+      }
+      return result
+    }
+    const before = parse(beforeRegistry)
+    const after = parse(afterRegistry)
+    const ids = [...before].filter(([, refs]) => refs.skill === journal.before_target_rel && refs.snapshot === journal.obsolete_snapshot_rel).map(([id]) => id)
+    if (ids.length !== 1 || after.get(ids[0])?.skill !== journal.after_target_rel || after.get(ids[0])?.snapshot !== journal.retained_rel || after.get(ids[0])?.snapshot === journal.obsolete_snapshot_rel) {
+      throw new Error('Invalid skill source journal')
+    }
+  }
+
+  private async verifyJournalPhysicalState(journal: SkillSourceJournal, state: 'before' | 'after'): Promise<void> {
+    if (journal.moves) {
+      for (const move of journal.moves) {
+        const before = move.before_rel ? this.resolveTransactionPath(move.before_rel) : undefined
+        const after = this.resolveTransactionPath(move.after_rel)
+        const beforeExists = before ? await fs.access(before).then(() => true).catch(() => false) : false
+        const afterExists = await fs.access(after).then(() => true).catch(() => false)
+        if (state === 'before') {
+          if (move.before_existed) {
+            if (beforeExists) {
+              if (!move.before_tree_hash || move.before_tree_hash !== await this.hashContentTree(before!)) throw new Error('Skill source journal before tree mismatch')
+            } else if (!afterExists || move.after_tree_hash !== await this.hashContentTree(after)) throw new Error('Skill source journal before state is not recoverable')
+          } else if (afterExists && move.after_tree_hash !== await this.hashContentTree(after)) throw new Error('Skill source journal after tree mismatch')
+        } else if (!afterExists || move.after_tree_hash !== await this.hashContentTree(after)) throw new Error('Skill source journal after tree mismatch')
+      }
+      return
+    }
+    const before = this.resolveTransactionPath(journal.before_target_rel!)
+    const after = this.resolveTransactionPath(journal.after_target_rel!)
+    const backup = journal.backup_rel ? this.resolveTransactionPath(journal.backup_rel) : undefined
+    const retained = journal.retained_rel ? this.resolveTransactionPath(journal.retained_rel) : undefined
+    const beforeExists = await fs.access(before).then(() => true).catch(() => false)
+    const afterExists = await fs.access(after).then(() => true).catch(() => false)
+    const backupExists = backup ? await fs.access(backup).then(() => true).catch(() => false) : false
+    const retainedExists = retained ? await fs.access(retained).then(() => true).catch(() => false) : false
+    if (state === 'before') {
+      if (journal.before_target_existed && beforeExists) {
+        const actual = await this.hashContentTree(before)
+        if (journal.before_target_tree_hash === actual) return
+        const recoverySource = backupExists ? backup! : retainedExists ? retained! : undefined
+        if (!recoverySource || journal.before_target_tree_hash !== await this.hashContentTree(recoverySource) || !journal.after_target_tree_hash || journal.after_target_tree_hash !== actual) {
+          throw new Error('Skill source journal before target tree mismatch')
+        }
+      } else if (journal.before_target_existed && (backupExists || retainedExists)) {
+        const recoverySource = backupExists ? backup! : retained!
+        if (!journal.before_target_tree_hash || journal.before_target_tree_hash !== await this.hashContentTree(recoverySource)) throw new Error('Skill source journal before target tree mismatch')
+      } else if (!journal.before_target_existed && afterExists) {
+        if (!journal.after_target_tree_hash || journal.after_target_tree_hash !== await this.hashContentTree(after)) throw new Error('Skill source journal after target tree mismatch')
+      } else if (journal.before_target_existed) throw new Error('Skill source journal before state is not recoverable')
+      return
+    }
+    if (journal.delete_after_commit) {
+      if (beforeExists) throw new Error('Skill source journal deleted target still exists')
+      if (retainedExists && (!journal.before_target_tree_hash || journal.before_target_tree_hash !== await this.hashContentTree(retained!))) throw new Error('Skill source journal delete quarantine mismatch')
+      return
+    }
+    if (!afterExists || !journal.after_target_tree_hash || journal.after_target_tree_hash !== await this.hashContentTree(after)) throw new Error('Skill source journal after target tree mismatch')
+  }
+
+  private async cleanupCompletedJournalArtifacts(): Promise<void> {
+    const entries = await fs.readdir(this.transactionRoot).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? [] : Promise.reject(error))
+    await Promise.all(entries
+      .filter((name) => /^(?:before-)?registry-[a-f0-9]{24}\.json$/.test(name))
+      .map((name) => durableRemovePath(path.join(this.transactionRoot, name), { force: true })))
+  }
+
+  private async readLegacyBeforeRegistry(journal: SkillSourceJournal, currentBefore: Buffer | null): Promise<Buffer> {
+    if (!journal.legacy_backup_rel || !/^skills\.json\.bak-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/.test(journal.legacy_backup_rel) || !journal.legacy_backup_sha256 || !/^[a-f0-9]{64}$/.test(journal.legacy_backup_sha256)) {
+      throw new Error('Invalid skill source journal')
+    }
+    const backupPath = path.join(path.dirname(this.filePath), journal.legacy_backup_rel)
+    const backup = await fs.readFile(backupPath).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? null : Promise.reject(error))
+    if (backup && (sha256(backup) !== journal.legacy_backup_sha256 || sha256(backup) !== journal.before_registry_sha256)) {
+      throw new Error('Invalid skill source journal')
+    }
+    const authoritative = currentBefore ?? backup
+    if (!authoritative || sha256(authoritative) !== journal.before_registry_sha256) throw new Error('Invalid skill source journal')
+    return authoritative
+  }
+
+  private assertLegacyMoveMapping(beforeRegistry: Buffer, afterRegistry: Buffer, move: SkillSourceMove): void {
+    const parse = (registry: Buffer): Map<string, Set<string>> => {
+      let entries: unknown
+      try { entries = JSON.parse(registry.toString('utf8')) } catch { throw new Error('Invalid skill source journal') }
+      if (!Array.isArray(entries)) throw new Error('Invalid skill source journal')
+      const result = new Map<string, Set<string>>()
+      for (const entry of entries) {
+        if (!entry || typeof entry !== 'object' || typeof (entry as { id?: unknown }).id !== 'string' || result.has((entry as { id: string }).id)) {
+          throw new Error('Invalid skill source journal')
+        }
+        const refs = new Set<string>()
+        const value = entry as { id: string; skill_dir?: unknown; previous_snapshot?: { snapshot_dir?: unknown } }
+        for (const candidate of [value.skill_dir, value.previous_snapshot?.snapshot_dir]) {
+          if (typeof candidate !== 'string') continue
+          try { refs.add(candidate.startsWith('.snapshots/') ? candidate : this.relativeTransactionPath(candidate)) } catch { /* external paths are not journal move targets */ }
+        }
+        result.set(value.id, refs)
+      }
+      return result
+    }
+    const before = parse(beforeRegistry)
+    const after = parse(afterRegistry)
+    const matchingIds = [...after].filter(([, refs]) => refs.has(move.after_rel)).map(([id]) => id)
+    if (matchingIds.length !== 1) throw new Error('Invalid skill source journal')
+    const beforeRefs = before.get(matchingIds[0])
+    if (!beforeRefs || (move.before_rel !== undefined && !beforeRefs.has(move.before_rel))) throw new Error('Invalid skill source journal')
+  }
+
+  private registryContainsManagedPath(registry: Buffer, relative: string): boolean {
+    let parsed: unknown
+    try { parsed = JSON.parse(registry.toString('utf8')) } catch { throw new Error('Invalid skill source journal') }
+    if (!Array.isArray(parsed)) throw new Error('Invalid skill source journal')
+    return parsed.some((entry) => {
+      if (!entry || typeof entry !== 'object' || typeof (entry as { skill_dir?: unknown }).skill_dir !== 'string') return false
+      try { return this.relativeTransactionPath((entry as { skill_dir: string }).skill_dir) === relative } catch { return false }
+    })
+  }
+
+  private registryReferencedPaths(registry: Buffer): string[] {
+    let parsed: unknown
+    try { parsed = JSON.parse(registry.toString('utf8')) } catch { throw new Error('Invalid skill source journal') }
+    if (!Array.isArray(parsed)) throw new Error('Invalid skill source journal')
+    const references = new Set<string>()
+    for (const entry of parsed) {
+      if (!entry || typeof entry !== 'object') continue
+      const value = entry as { skill_dir?: unknown; previous_snapshot?: { snapshot_dir?: unknown } }
+      if (typeof value.skill_dir === 'string') {
+        try { references.add(this.relativeTransactionPath(value.skill_dir)) } catch { /* invalid storage cannot authorize cleanup */ }
+      }
+      if (typeof value.previous_snapshot?.snapshot_dir === 'string') {
+        const snapshot = value.previous_snapshot.snapshot_dir
+        if (snapshot.startsWith('.snapshots/')) references.add(snapshot)
+      }
+    }
+    return [...references].sort()
+  }
+
+  private registryReferencesPath(registry: Buffer, relative: string): boolean {
+    let parsed: unknown
+    try { parsed = JSON.parse(registry.toString('utf8')) } catch { throw new Error('Invalid skill source journal') }
+    if (!Array.isArray(parsed)) throw new Error('Invalid skill source journal')
+    return parsed.some((entry) => {
+      if (!entry || typeof entry !== 'object') return false
+      const value = entry as { skill_dir?: unknown; previous_snapshot?: { snapshot_dir?: unknown } }
+      for (const candidate of [value.skill_dir, value.previous_snapshot?.snapshot_dir]) {
+        if (typeof candidate !== 'string') continue
+        try {
+          const normalized = candidate.startsWith('.snapshots/') ? candidate : this.relativeTransactionPath(candidate)
+          if (normalized === relative) return true
+        } catch { /* invalid references do not authorize cleanup */ }
+      }
+      return false
+    })
+  }
+
+  private async cleanupBatchSources(moves: SkillSourceMove[]): Promise<void> {
+    for (const move of moves) {
+      if (!move.cleanup_rel) continue
+      if (move.cleanup_rel !== move.before_rel) throw new Error('Invalid skill source journal')
+      await durableRemovePath(this.resolveTransactionPath(move.cleanup_rel), { recursive: true, force: true })
+    }
+  }
+
+  private async registryDigest(): Promise<string> { return sha256(await this.registryBytes()) }
+
+  private async rollbackJournal(journal: SkillSourceJournal): Promise<void> {
+    if (journal.moves) {
+      for (const move of [...journal.moves].reverse()) {
+        const stage = this.resolveTransactionPath(move.stage_rel)
+        const after = this.resolveTransactionPath(move.after_rel)
+        const before = move.before_rel ? this.resolveTransactionPath(move.before_rel) : undefined
+        if (!move.before_existed) {
+          await durableRemovePath(after, { recursive: true, force: true })
+        } else if (before && await fs.access(before).then(() => true).catch(() => false)) {
+          if (move.before_tree_hash && move.before_tree_hash !== await this.hashContentTree(before)) throw new Error('Skill source journal before tree mismatch')
+          await durableRemovePath(after, { recursive: true, force: true })
+        } else if (before && await fs.access(after).then(() => true).catch(() => false)) {
+          if (move.after_tree_hash !== await this.hashContentTree(after)) throw new Error('Skill source journal after tree mismatch')
+          await durableRename(after, before)
+          if (move.before_tree_hash && move.before_tree_hash !== await this.hashContentTree(before)) throw new Error('Skill source journal before tree mismatch')
+        } else throw new Error('Skill source journal rollback is ambiguous')
+        await durableRemovePath(stage, { recursive: true, force: true })
+      }
+      return
+    }
+    const beforeTarget = this.resolveTransactionPath(journal.before_target_rel!)
+    const afterTarget = this.resolveTransactionPath(journal.after_target_rel!)
+    const stage = this.resolveTransactionPath(journal.stage_rel!)
+    const backup = journal.backup_rel ? this.resolveTransactionPath(journal.backup_rel) : undefined
+    const retained = journal.retained_rel ? this.resolveTransactionPath(journal.retained_rel) : undefined
+    const restore = backup ?? retained
+    if (journal.delete_after_commit) {
+      const beforeExists = await fs.access(beforeTarget).then(() => true).catch(() => false)
+      const retainedExists = retained ? await fs.access(retained).then(() => true).catch(() => false) : false
+      if (beforeExists) {
+        if (!journal.before_target_tree_hash || journal.before_target_tree_hash !== await this.hashContentTree(beforeTarget)) throw new Error('Skill source journal rollback target mismatch')
+      } else if (retained && retainedExists) {
+        if (!journal.before_target_tree_hash || journal.before_target_tree_hash !== await this.hashContentTree(retained)) throw new Error('Skill source journal rollback quarantine mismatch')
+        await durableRename(retained, beforeTarget)
+      } else throw new Error('Skill source journal rollback is ambiguous')
+    } else if (restore && await fs.access(restore).then(() => true).catch(() => false)) {
+      await durableRemovePath(afterTarget, { recursive: true, force: true })
+      await durableRename(restore, beforeTarget)
+    } else if (!journal.before_target_existed) {
+      await durableRemovePath(afterTarget, { recursive: true, force: true })
+    } else if (!await fs.access(beforeTarget).then(() => true).catch(() => false)) {
+      throw new Error('Skill source journal rollback is ambiguous')
+    }
+    await durableRemovePath(stage, { recursive: true, force: true })
+  }
+
+  private async rollForwardJournal(journal: SkillSourceJournal): Promise<void> {
+    if (journal.moves) {
+      for (const move of journal.moves) {
+        const stage = this.resolveTransactionPath(move.stage_rel)
+        const after = this.resolveTransactionPath(move.after_rel)
+        if (await fs.access(stage).then(() => true).catch(() => false)) {
+          if (await fs.access(after).then(() => true).catch(() => false)) throw new Error('Skill source journal target collision')
+          await fs.mkdir(path.dirname(after), { recursive: true })
+          await durableRename(stage, after)
+        }
+        if (!await fs.access(after).then(() => true).catch(() => false)) throw new Error('Skill source journal after target missing')
+        if (move.after_tree_hash !== await this.hashContentTree(after)) throw new Error('Skill source journal after tree mismatch')
+        if (move.cleanup_rel) await durableRemovePath(this.resolveTransactionPath(move.cleanup_rel), { recursive: true, force: true })
+      }
+      return
+    }
+    const beforeTarget = this.resolveTransactionPath(journal.before_target_rel!)
+    const afterTarget = this.resolveTransactionPath(journal.after_target_rel!)
+    const stage = this.resolveTransactionPath(journal.stage_rel!)
+    const backup = journal.backup_rel ? this.resolveTransactionPath(journal.backup_rel) : undefined
+    const retained = journal.retained_rel ? this.resolveTransactionPath(journal.retained_rel) : undefined
+    if (journal.delete_after_commit) {
+      await durableRemovePath(afterTarget, { recursive: true, force: true })
+      await durableRemovePath(stage, { recursive: true, force: true })
+      return
+    }
+    if (await fs.access(stage).then(() => true).catch(() => false)) {
+      if (await fs.access(afterTarget).then(() => true).catch(() => false)) throw new Error('Skill source journal target collision')
+      if (beforeTarget !== afterTarget && await fs.access(beforeTarget).then(() => true).catch(() => false)) {
+        if (backup) await durableRename(beforeTarget, backup)
+        else if (retained) await durableRename(beforeTarget, retained)
+        else throw new Error('Skill source journal missing retention path')
+      }
+      await durableRename(stage, afterTarget)
+    }
+    if (await fs.access(afterTarget).then(() => true).catch(() => false)) {
+      if (journal.after_target_tree_hash && journal.after_target_tree_hash !== await this.hashContentTree(afterTarget)) throw new Error('Skill source journal after target tree mismatch')
+    } else if (journal.delete_after_commit) {
+      return
+    } else throw new Error('Skill source journal after target missing')
+    if (journal.obsolete_snapshot_rel) {
+      await durableRemovePath(this.resolveTransactionPath(journal.obsolete_snapshot_rel), { recursive: true, force: true })
+    }
+  }
+
+  private async serial<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.skillTail
+    let release!: () => void
+    this.skillTail = new Promise<void>((resolve) => { release = resolve })
+    await previous
+    try { return await operation() } finally { release() }
+  }
+
+  private isAdminOwned(entry: SkillRegistryEntry): boolean {
+    return entry.source_type === 'imported' && typeof entry.skill_dir === 'string' && path.resolve(entry.skill_dir).startsWith(this.skillsRoot + path.sep)
+  }
+
+  private async refreshRuntimeContentHashes(): Promise<void> {
+    const hashes = new Map<string, string>()
+    for (const entry of this.skills.values()) {
+      if (this.isAdminOwned(entry)) hashes.set(entry.id, await this.hashContentTree(entry.skill_dir))
+    }
+    this.contentTreeHashes = hashes
+  }
+
+  private async hashContentTree(root: string): Promise<string> {
+    const rootStat = await fs.lstat(root).catch(() => { throw new Error(`Unreadable imported skill directory: ${root}`) })
+    if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw new Error(`Invalid imported skill directory: ${root}`)
+    const hash = createHash('sha256')
+    const frame = (type: string, relative: string, bytes = Buffer.alloc(0)) => {
+      const rel = Buffer.from(relative, 'utf8')
+      hash.update(Buffer.from(type, 'ascii'))
+      hash.update(Buffer.from([0]))
+      const sizes = Buffer.alloc(8)
+      sizes.writeUInt32BE(rel.length, 0); sizes.writeUInt32BE(bytes.length, 4)
+      hash.update(sizes); hash.update(rel); hash.update(bytes)
+    }
+    const walk = async (dir: string, relative = ''): Promise<void> => {
+      const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => { throw new Error(`Unreadable imported skill directory: ${root}`) })
+      for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+        const rel = relative ? `${relative}/${entry.name}` : entry.name
+        const target = path.join(dir, entry.name)
+        if (entry.isSymbolicLink()) throw new Error(`Symlink in imported skill directory: ${rel}`)
+        if (entry.isDirectory()) { frame('D', rel); await walk(target, rel); continue }
+        if (!entry.isFile()) throw new Error(`Unsupported imported skill entry: ${rel}`)
+        frame('F', rel, await fs.readFile(target).catch(() => { throw new Error(`Unreadable imported skill file: ${rel}`) }))
+      }
+    }
+    await walk(root)
+    return hash.digest('hex')
   }
 
   private async load(): Promise<void> {
@@ -492,8 +1235,22 @@ export class SkillManager {
         }
       }
       this.skills = new Map(entries.map((e) => [e.id, e]))
-    } catch {
-      this.skills = new Map()
+      this.legacyMigrationPending = entries.some((entry) => {
+        const rawEntry = entry as SkillRegistryEntry & { content?: string }
+        const previous = rawEntry.previous_snapshot as { content?: string; files?: Record<string, string> } | undefined
+        if (rawEntry.content !== undefined || previous?.content !== undefined || (entry.is_builtin && !entry.skill_dir)) return true
+        if (!entry.is_builtin && entry.source_type !== 'scanned') {
+          const dirName = isValidSkillName(entry.name) ? entry.name : entry.id
+          return !entry.skill_dir || path.resolve(entry.skill_dir) !== path.join(this.skillsRoot, dirName)
+        }
+        return false
+      })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        this.skills = new Map()
+        return
+      }
+      throw new Error('Invalid skills registry')
     }
   }
 
@@ -506,158 +1263,112 @@ export class SkillManager {
    *
    * 首次进入时写一个 skills.json.bak-<ts> 备份；幂等：无 legacy 字段时直接返回。
    */
-  private async migrateLegacyEntries(): Promise<void> {
-    let needsMigrate = false
-    for (const e of this.skills.values()) {
-      const raw = e as SkillRegistryEntry & { content?: string }
-      const prev = raw.previous_snapshot as
-        | undefined
-        | { content?: string; files?: Record<string, string>; snapshot_dir?: string; version: string; updated_at: string; snapshotted_at: string }
-      if (raw.content !== undefined || (prev && prev.content !== undefined)) {
-        needsMigrate = true
-        break
-      }
-      // 已是新格式但 skill_dir basename 不是 name（UUID 命名 → name 命名）
-      if (!e.is_builtin && e.skill_dir && e.skill_dir.startsWith(this.skillsRoot + path.sep)) {
-        if (path.basename(e.skill_dir) !== e.name) {
-          needsMigrate = true
-          break
-        }
-      }
-    }
-    if (!needsMigrate) return
-
-    // 备份 skills.json
+  private async planLegacyMigration(): Promise<LegacyMigrationPlan | null> {
+    if (!this.legacyMigrationPending) return null
+    const next = new Map<string, SkillRegistryEntry>()
+    const hashes = new Map<string, string>()
+    const moves: SkillSourceMove[] = []
+    const plannedDestinations = new Set<string>()
+    const stageRoot = path.join(this.skillsRoot, `.stage.${process.pid}.${Date.now()}.${randomBytes(4).toString('hex')}`)
     const backupPath = `${this.filePath}.bak-${isoCompactTs(generateTimestamp())}`
-    try { await fs.copyFile(this.filePath, backupPath) } catch {}
-
-    let migrated = 0
-    for (const [id, raw] of this.skills) {
-      const entry = raw as SkillRegistryEntry & { content?: string }
-
-      // builtin 不迁移文件（registerBuiltins / seedBuiltinSkills 会用磁盘 builtin 目录同步）
-      if (entry.is_builtin) {
-        if (entry.content !== undefined) {
-          delete (entry as { content?: string }).content
-          migrated++
+    if (await fs.access(backupPath).then(() => true).catch(() => false)) throw new Error('Legacy skills backup already exists')
+    const backupBytes = await this.registryBytes()
+    await fs.mkdir(stageRoot, { recursive: true, mode: 0o700 })
+    try {
+      for (const [id, original] of this.skills) {
+        const raw = JSON.parse(JSON.stringify(original)) as SkillRegistryEntry & { content?: string; previous_snapshot?: SkillRegistryEntry['previous_snapshot'] & { content?: string; files?: Record<string, string> } }
+        if (raw.is_builtin && !raw.skill_dir) continue
+        const dirName = isValidSkillName(raw.name) ? raw.name : (isValidSkillName(id) ? id : (() => { throw new Error(`Invalid legacy skill id: ${id}`) })())
+        if (raw.is_builtin || raw.source_type === 'scanned') { delete raw.content; next.set(id, raw); continue }
+        const target = path.join(this.skillsRoot, dirName)
+        const stage = path.join(stageRoot, `target-${moves.length}`)
+        const source = raw.skill_dir
+        const sourceExists = source ? await fs.access(source).then(() => true).catch(() => false) : false
+        if (raw.content === undefined && !sourceExists) throw new Error(`Legacy skill "${raw.name}" has no recoverable source`)
+        if (sourceExists) await copyDir(source, stage, ['.skill_dir', '.DS_Store']); else await fs.mkdir(stage, { recursive: true })
+        if (raw.content !== undefined) await atomicWriteFileBuf(path.join(stage, 'SKILL.md'), Buffer.from(raw.content, 'utf8'))
+        if (!await fs.access(path.join(stage, 'SKILL.md')).then(() => true).catch(() => false)) throw new Error(`Legacy skill "${raw.name}" has no SKILL.md`)
+        const targetExists = await fs.access(target).then(() => true).catch(() => false)
+        const targetRel = this.relativeTransactionPath(target)
+        if (targetExists || plannedDestinations.has(targetRel)) throw new Error(`Legacy skill target collision: ${dirName}`)
+        plannedDestinations.add(targetRel)
+        moves.push({
+          before_rel: source && this.isPathUnderSkillsRoot(source) ? this.relativeTransactionPath(source) : undefined,
+          after_rel: targetRel,
+          stage_rel: this.relativeTransactionPath(stage),
+          before_existed: Boolean(sourceExists && source && this.isPathUnderSkillsRoot(source)),
+          ...(sourceExists && this.isPathUnderSkillsRoot(source) ? { before_tree_hash: await this.hashContentTree(source) } : {}),
+          after_tree_hash: await this.hashContentTree(stage),
+          ...(sourceExists && this.isPathUnderSkillsRoot(source) && this.relativeTransactionPath(source) !== this.relativeTransactionPath(target) ? { cleanup_rel: this.relativeTransactionPath(source) } : {}),
+        })
+        raw.skill_dir = target; delete raw.content
+        const previous = raw.previous_snapshot
+        if (previous?.snapshot_dir && source && this.isPathUnderSkillsRoot(source) && path.basename(source) !== dirName) {
+          const oldSnapshotRel = previous.snapshot_dir
+          const oldSnapshot = this.resolveTransactionPath(oldSnapshotRel)
+          const oldSnapshotName = path.basename(oldSnapshotRel)
+          const oldBase = path.basename(source)
+          const snapshotPrefix = `${oldBase}-`
+          if (!oldSnapshotName.startsWith(snapshotPrefix)) throw new Error(`Legacy snapshot does not match source: ${oldSnapshotRel}`)
+          const newSnapshotRel = path.posix.join('.snapshots', `${dirName}-${oldSnapshotName.slice(snapshotPrefix.length)}`)
+          const newSnapshot = this.resolveTransactionPath(newSnapshotRel)
+          if (await fs.access(newSnapshot).then(() => true).catch(() => false) || plannedDestinations.has(newSnapshotRel)) throw new Error(`Legacy snapshot collision: ${newSnapshotRel}`)
+          plannedDestinations.add(newSnapshotRel)
+          if (!await fs.access(oldSnapshot).then(() => true).catch(() => false)) throw new Error(`Legacy snapshot missing: ${oldSnapshotRel}`)
+          const snapshotStage = path.join(stageRoot, `snapshot-${moves.length}`)
+          await copyDir(oldSnapshot, snapshotStage)
+          moves.push({
+            before_rel: oldSnapshotRel, after_rel: newSnapshotRel, stage_rel: this.relativeTransactionPath(snapshotStage),
+            before_existed: true, before_tree_hash: await this.hashContentTree(oldSnapshot), after_tree_hash: await this.hashContentTree(snapshotStage), cleanup_rel: oldSnapshotRel,
+          })
+          raw.previous_snapshot = { ...previous, snapshot_dir: newSnapshotRel }
         }
-        // 旧 seed 写入的 entry 可能缺 skill_dir（Task 6 之前的形态）→ 删除让下游 seed 重建
-        if (!entry.skill_dir) {
-          this.skills.delete(id)
-          console.warn(`[SkillManager] builtin "${entry.name}" 缺 skill_dir，已删除待重 seed`)
-          migrated++
-        }
-        continue
-      }
-
-      // scanned：保留 skill_dir 引用，只清 content 字段
-      if (entry.source_type === 'scanned') {
-        if (entry.content !== undefined) {
-          delete (entry as { content?: string }).content
-          migrated++
-        }
-        continue
-      }
-
-      // 用 name 做目录名（对齐 Anthropic 标准）；name 缺失时降级到 id（防御性）
-      const dirName = entry.name && isValidSkillName(entry.name) ? entry.name : id
-      const newSkillDir = path.join(this.skillsRoot, dirName)
-      const newHasSkillMd = await fs.access(path.join(newSkillDir, 'SKILL.md')).then(() => true).catch(() => false)
-
-      if (!newHasSkillMd && entry.content !== undefined) {
-        // 1. 在 <skillsRoot>/<name>/ 写 SKILL.md
-        await fs.mkdir(newSkillDir, { recursive: true })
-        await atomicWriteFileBuf(path.join(newSkillDir, 'SKILL.md'), Buffer.from(entry.content, 'utf-8'))
-
-        // 2. 若旧 skill_dir 指向用户原目录（importFromLocalPath legacy 语义），复制附属文件
-        if (entry.skill_dir && entry.skill_dir !== newSkillDir) {
-          const oldExists = await fs.access(entry.skill_dir).then(() => true).catch(() => false)
-          if (oldExists) {
-            await copyDir(entry.skill_dir, newSkillDir, ['SKILL.md', '.skill_dir', '.DS_Store'])
-          } else {
-            console.warn(`[SkillManager] legacy skill "${entry.name}" 原目录 ${entry.skill_dir} 已不存在，仅迁移 SKILL.md（scripts/references/assets 丢失）`)
+        if (previous?.content !== undefined && !previous.snapshot_dir) {
+          const snapshotRel = path.posix.join('.snapshots', `${dirName}-${isoCompactTs(previous.snapshotted_at)}`)
+          const snapshot = this.resolveTransactionPath(snapshotRel)
+          if (await fs.access(snapshot).then(() => true).catch(() => false) || plannedDestinations.has(snapshotRel)) throw new Error(`Legacy snapshot collision: ${snapshotRel}`)
+          plannedDestinations.add(snapshotRel)
+          const snapshotStage = path.join(stageRoot, `snapshot-${moves.length}`)
+          await fs.mkdir(snapshotStage, { recursive: true }); await atomicWriteFileBuf(path.join(snapshotStage, 'SKILL.md'), Buffer.from(previous.content, 'utf8'))
+          for (const [rel, value] of Object.entries(previous.files ?? {})) {
+            this.assertLegacyRelativePath(rel); const destination = path.resolve(snapshotStage, rel)
+            if (!destination.startsWith(snapshotStage + path.sep)) throw new Error('Invalid legacy snapshot file path')
+            await fs.mkdir(path.dirname(destination), { recursive: true }); await atomicWriteFileBuf(destination, Buffer.from(value.startsWith('base64:') ? value.slice(7) : value, value.startsWith('base64:') ? 'base64' : 'utf8'))
           }
+          moves.push({ after_rel: snapshotRel, stage_rel: this.relativeTransactionPath(snapshotStage), before_existed: false, after_tree_hash: await this.hashContentTree(snapshotStage) })
+          raw.previous_snapshot = { snapshot_dir: snapshotRel, version: previous.version, updated_at: previous.updated_at, snapshotted_at: previous.snapshotted_at }
         }
-        entry.skill_dir = newSkillDir
-      } else if (!entry.skill_dir) {
-        // 无 content 又无 skill_dir 的 zombie entry
-        console.warn(`[SkillManager] legacy entry "${entry.name}" 无 content 无 skill_dir，无法迁移`)
-        entry.skill_dir = newSkillDir
-      } else if (
-        entry.skill_dir.startsWith(this.skillsRoot + path.sep) &&
-        path.basename(entry.skill_dir) !== dirName
-      ) {
-        // 已新格式但目录名是 UUID（或别的旧 basename），rename 到 name 目录
-        const targetExists = await fs.access(newSkillDir).then(() => true).catch(() => false)
-        if (targetExists) {
-          console.warn(`[SkillManager] 无法迁移 "${entry.name}"：目标目录 ${newSkillDir} 已存在`)
-        } else {
-          const srcExists = await fs.access(entry.skill_dir).then(() => true).catch(() => false)
-          if (srcExists) {
-            await fs.rename(entry.skill_dir, newSkillDir)
-            // 同步 previous_snapshot.snapshot_dir 里的旧 basename 前缀
-            const oldBasename = path.basename(entry.skill_dir)
-            if (entry.previous_snapshot?.snapshot_dir?.includes(`/${oldBasename}-`)) {
-              const oldSnapRel = entry.previous_snapshot.snapshot_dir
-              const oldSnapAbs = path.join(this.skillsRoot, oldSnapRel)
-              const newSnapRel = oldSnapRel.replace(`/${oldBasename}-`, `/${dirName}-`)
-              const newSnapAbs = path.join(this.skillsRoot, newSnapRel)
-              const oldSnapExists = await fs.access(oldSnapAbs).then(() => true).catch(() => false)
-              if (oldSnapExists) {
-                await fs.rename(oldSnapAbs, newSnapAbs)
-                entry.previous_snapshot = { ...entry.previous_snapshot, snapshot_dir: newSnapRel }
-              }
-            }
-            entry.skill_dir = newSkillDir
-          }
-        }
+        next.set(id, raw)
+        const stagedTarget = moves.find((move) => move.after_rel === this.relativeTransactionPath(target))
+        hashes.set(id, stagedTarget ? stagedTarget.after_tree_hash : await this.hashContentTree(target))
       }
+      return { next, hashes, moves, backupPath, backupBytes }
+    } catch (error) { await durableRemovePath(stageRoot, { recursive: true, force: true }).catch(() => {}); throw error }
+  }
 
-      // 3. 迁移 previous_snapshot 嵌入式 → 文件夹
-      const prev = entry.previous_snapshot as
-        | undefined
-        | { content?: string; files?: Record<string, string>; snapshot_dir?: string; version: string; updated_at: string; snapshotted_at: string }
-      if (prev && prev.content !== undefined && !prev.snapshot_dir) {
-        const snapTs = isoCompactTs(prev.snapshotted_at)
-        const snapRel = path.posix.join('.snapshots', `${dirName}-${snapTs}`)
-        const snapAbs = path.join(this.skillsRoot, snapRel)
-        await fs.mkdir(snapAbs, { recursive: true })
-        await atomicWriteFileBuf(path.join(snapAbs, 'SKILL.md'), Buffer.from(prev.content, 'utf-8'))
-        if (prev.files) {
-          for (const [rel, val] of Object.entries(prev.files)) {
-            const dst = path.join(snapAbs, rel)
-            await fs.mkdir(path.dirname(dst), { recursive: true })
-            const buf = val.startsWith('base64:') ? Buffer.from(val.slice(7), 'base64') : Buffer.from(val, 'utf-8')
-            await atomicWriteFileBuf(dst, buf)
-          }
-        }
-        entry.previous_snapshot = {
-          snapshot_dir: snapRel,
-          version: prev.version,
-          updated_at: prev.updated_at,
-          snapshotted_at: prev.snapshotted_at,
-        }
+  private async applyLegacyMigrationPlan(plan: LegacyMigrationPlan): Promise<void> {
+    await this.commit(plan.next, async () => {
+      await fs.writeFile(plan.backupPath, plan.backupBytes, { flag: 'wx', mode: 0o600 })
+      for (const move of plan.moves) {
+        const stage = this.resolveTransactionPath(move.stage_rel); const after = this.resolveTransactionPath(move.after_rel)
+        if (await fs.access(after).then(() => true).catch(() => false)) throw new Error('Legacy skill target collision')
+        await fs.mkdir(path.dirname(after), { recursive: true }); await durableRename(stage, after)
       }
+      this.legacyMigrationPending = false
+    }, plan.hashes, { moves: plan.moves, legacy_backup_rel: path.basename(plan.backupPath), legacy_backup_sha256: sha256(plan.backupBytes) }, true)
+    this.legacyMigrationPending = false
+  }
 
-      // 4. 清 content 字段
-      if (entry.content !== undefined) {
-        delete (entry as { content?: string }).content
-      }
-      migrated++
-    }
-    if (migrated > 0) {
-      await this.save()
-      console.log(`[SkillManager] 迁移 ${migrated} 个 legacy skill 到 filesystem-native 布局`)
-    }
+  private isPathUnderSkillsRoot(value: string): boolean { return path.resolve(value).startsWith(this.skillsRoot + path.sep) }
+  private assertLegacyRelativePath(relative: string): void {
+    if (!relative || relative.includes('\0') || path.isAbsolute(relative) || relative.split(/[\\/]/).some((part) => !part || part === '.' || part === '..')) throw new Error('Invalid legacy snapshot file path')
   }
 
   /**
-   * 原子写入文件：先写临时文件，再 rename（避免进程被杀时文件损坏）
+   * Durable atomic replace for the Skill registry participating in the config transaction.
    */
   private async atomicWriteFile(filePath: string, content: string): Promise<void> {
-    const tempPath = `${filePath}.tmp`
-    await fs.writeFile(tempPath, content, 'utf-8')
-    await fs.rename(tempPath, filePath)
+    await durableAtomicWriteFile(filePath, content)
   }
 
   private async save(): Promise<void> {
@@ -693,6 +1404,19 @@ export class SkillManager {
     source_package?: string
     source_type?: 'builtin' | 'imported' | 'scanned'
   }): Promise<SkillRegistryEntry> {
+    return this.serial(() => this.createUnlocked(params))
+  }
+
+  private async createUnlocked(params: {
+    name: string
+    description: string
+    content: string
+    version?: string
+    trigger_phrases?: string[]
+    source_market?: string
+    source_package?: string
+    source_type?: 'builtin' | 'imported' | 'scanned'
+  }): Promise<SkillRegistryEntry> {
     if (!isValidSkillName(params.name)) {
       throw new Error(`Skill name "${params.name}" 含非法字符（仅允许小写字母/数字/连字符，最长 64 字符）`)
     }
@@ -703,8 +1427,9 @@ export class SkillManager {
     if (orphanCheck) {
       throw new Error(`目录 ${skillDir} 已存在但 registry 中找不到对应 entry，可能是孤儿数据，请手工清理`)
     }
-    await fs.mkdir(skillDir, { recursive: true })
-    await atomicWriteFileBuf(path.join(skillDir, 'SKILL.md'), Buffer.from(params.content, 'utf-8'))
+    const stagedDir = path.join(this.skillsRoot, `.stage.${process.pid}.${Date.now()}.${randomBytes(4).toString('hex')}`)
+    await fs.mkdir(stagedDir, { recursive: true })
+    await atomicWriteFileBuf(path.join(stagedDir, 'SKILL.md'), Buffer.from(params.content, 'utf-8'))
 
     const now = generateTimestamp()
     const entry: SkillRegistryEntry = {
@@ -724,187 +1449,177 @@ export class SkillManager {
       created_at: now,
       updated_at: now,
     }
-    this.skills.set(entry.id, entry)
-    await this.save()
+    const next = new Map(this.skills)
+    next.set(entry.id, entry)
+    try {
+      const hashes = new Map(this.contentTreeHashes)
+      hashes.set(entry.id, await this.hashContentTree(stagedDir))
+      await this.commit(next, async () => { await durableRename(stagedDir, skillDir) }, hashes, {
+        before_target_rel: this.relativeTransactionPath(skillDir), after_target_rel: this.relativeTransactionPath(skillDir), before_target_existed: false,
+        after_target_tree_hash: hashes.get(entry.id), stage_rel: this.relativeTransactionPath(stagedDir),
+      })
+    } catch (error) {
+      await durableRemovePath(stagedDir, { recursive: true, force: true }).catch(() => {})
+      throw error
+    }
     return entry
   }
 
-  async update(
+  async update(id: string, params: Partial<Pick<SkillRegistryEntry, 'name' | 'description' | 'version' | 'trigger_phrases' | 'is_essential' | 'enabled'>> & { content?: string }): Promise<SkillRegistryEntry> { return this.serial(() => this.updateUnlocked(id, params)) }
+  async restore(id: string): Promise<SkillRegistryEntry> { return this.serial(() => this.restoreUnlocked(id)) }
+  async delete(id: string): Promise<void> { return this.serial(() => this.deleteUnlocked(id)) }
+  async seedBuiltinSkills(entries: SkillRegistryEntry[]): Promise<void> { return this.serial(() => this.seedBuiltinSkillsUnlocked(entries)) }
+  async registerBuiltins(builtinsDir: string): Promise<number> { return this.serial(() => this.registerBuiltinsUnlocked(builtinsDir)) }
+  async scanWorkspaceSkills(workspaceDir: string): Promise<number> { return this.serial(() => this.scanWorkspaceSkillsUnlocked(workspaceDir)) }
+  async importFromGit(skillMdUrl: string, sourceGitUrl?: string, overwrite?: boolean): Promise<{ entry: SkillRegistryEntry; was_overwrite: boolean }> { return this.serial(() => this.importFromGitUnlocked(skillMdUrl, sourceGitUrl, overwrite)) }
+  async importFromLocalPath(dirPath: string, overwrite?: boolean): Promise<{ entry: SkillRegistryEntry; was_overwrite: boolean }> { return this.serial(() => this.importFromLocalPathUnlocked(dirPath, overwrite)) }
+  async importFromZip(base64Content: string, filename: string, overwrite?: boolean): Promise<{ entry: SkillRegistryEntry; was_overwrite: boolean }> { return this.serial(() => this.importFromZipUnlocked(base64Content, filename, overwrite)) }
+
+  private async updateUnlocked(
     id: string,
-    params: Partial<Pick<SkillRegistryEntry, 'name' | 'description' | 'version' | 'trigger_phrases' | 'is_essential' | 'enabled'>>
-      & { content?: string },
+    params: Partial<Pick<SkillRegistryEntry, 'name' | 'description' | 'version' | 'trigger_phrases' | 'is_essential' | 'enabled'>> & { content?: string },
   ): Promise<SkillRegistryEntry> {
     const entry = this.skills.get(id)
     if (!entry) throw new Error(`Skill not found: ${id}`)
-    if (!entry.can_disable && params.enabled === false) {
-      throw new Error(`Skill "${entry.name}" cannot be disabled`)
-    }
-    if (params.content !== undefined && entry.is_builtin) {
-      throw new Error(`Skill "${entry.name}" 是内置的，不能修改 content`)
-    }
-
-    // 处理 name 改名：mv 物理目录（仅在 skillsRoot 下的非 builtin entry）
-    let workingSkillDir = entry.skill_dir
-    if (params.name !== undefined && params.name !== entry.name && !entry.is_builtin) {
-      if (!isValidSkillName(params.name)) {
-        throw new Error(`Skill name "${params.name}" 含非法字符（仅允许小写字母/数字/连字符，最长 64 字符）`)
-      }
-      const newNameConflict = Array.from(this.skills.values()).find(s => s.id !== id && s.name === params.name)
-      if (newNameConflict) {
-        throw new Error(`Skill name "${params.name}" 已被其他 entry 使用`)
-      }
-      const isUnderSkillsRoot = entry.skill_dir.startsWith(this.skillsRoot + path.sep)
-      if (isUnderSkillsRoot) {
-        const newSkillDir = path.join(this.skillsRoot, params.name)
-        const newExists = await fs.access(newSkillDir).then(() => true).catch(() => false)
-        if (newExists) {
-          throw new Error(`目标目录 ${newSkillDir} 已存在`)
-        }
-        await fs.rename(entry.skill_dir, newSkillDir)
-        workingSkillDir = newSkillDir
-      }
-    }
-
-    let previousSnapshot = entry.previous_snapshot
-    if (params.content !== undefined && !entry.is_builtin) {
-      const skillMdPath = path.join(workingSkillDir, 'SKILL.md')
-      const oldContent = await fs.readFile(skillMdPath, 'utf-8').catch(() => '')
-      if (oldContent !== params.content) {
-        const snapTs = isoCompactTs(generateTimestamp())
-        // snapshot 用当前 name（取改名后的，若改了名）
-        const snapBase = params.name ?? entry.name
-        const snapRel = path.posix.join('.snapshots', `${snapBase}-${snapTs}`)
-        const snapDir = path.join(this.skillsRoot, snapRel)
-        await fs.mkdir(path.dirname(snapDir), { recursive: true })
-        // 1. 先 copy 到 tmp，成功后 rename 到正式 snapDir；失败仅 tmp 残留被清，旧 snapshot 完好
-        const tmpSnapDir = `${snapDir}.tmp.${process.pid}.${Date.now()}.${randomBytes(4).toString('hex')}`
-        try {
-          await copyDir(workingSkillDir, tmpSnapDir)
-          await fs.rename(tmpSnapDir, snapDir)
-        } catch (err) {
-          await fs.rm(tmpSnapDir, { recursive: true, force: true }).catch(() => {})
-          throw err
-        }
-        // 2. 新 snapshot 已就位，再删旧（N=1）
-        if (entry.previous_snapshot) {
-          await fs.rm(path.join(this.skillsRoot, entry.previous_snapshot.snapshot_dir), { recursive: true, force: true })
-        }
-        await atomicWriteFileBuf(skillMdPath, Buffer.from(params.content, 'utf-8'))
-        previousSnapshot = {
-          snapshot_dir: snapRel,
-          version: entry.version,
-          updated_at: entry.updated_at,
-          snapshotted_at: generateTimestamp(),
-        }
-      }
-    }
-
+    if (!entry.can_disable && params.enabled === false) throw new Error(`Skill "${entry.name}" cannot be disabled`)
+    if (params.content !== undefined && entry.is_builtin) throw new Error(`Skill "${entry.name}" 是内置的，不能修改 content`)
+    const name = params.name ?? entry.name
+    if (name !== entry.name && !entry.is_builtin && !isValidSkillName(name)) throw new Error(`Skill name "${name}" 含非法字符（仅允许小写字母/数字/连字符，最长 64 字符）`)
+    const existingName = this.findByName(name)
+    if (name !== entry.name && existingName && existingName.id !== id) throw new Error(`Skill name "${name}" 已被其他 entry 使用`)
+    const managed = this.isAdminOwned(entry)
+    const skillDir = managed ? path.join(this.skillsRoot, name) : entry.skill_dir
+    const changedContent = params.content !== undefined && managed && await fs.readFile(path.join(entry.skill_dir, 'SKILL.md'), 'utf8').then((text) => text !== params.content).catch(() => true)
+    const changedPath = managed && skillDir !== entry.skill_dir
+    const createsSnapshot = managed && (changedContent || changedPath)
+    const snapshotAt = generateTimestamp()
+    const snapRel = path.posix.join('.snapshots', `${name}-${isoCompactTs(snapshotAt)}`)
     const updated: SkillRegistryEntry = {
-      ...entry,
-      name: params.name ?? entry.name,
-      description: params.description ?? entry.description,
-      version: params.version ?? entry.version,
-      skill_dir: workingSkillDir,
-      trigger_phrases: params.trigger_phrases ?? entry.trigger_phrases,
-      is_essential: params.is_essential ?? entry.is_essential,
-      enabled: params.enabled ?? entry.enabled,
-      previous_snapshot: previousSnapshot,
+      ...entry, name, skill_dir: skillDir, description: params.description ?? entry.description,
+      version: params.version ?? entry.version, trigger_phrases: params.trigger_phrases ?? entry.trigger_phrases,
+      is_essential: params.is_essential ?? entry.is_essential, enabled: params.enabled ?? entry.enabled,
+      ...(createsSnapshot ? { previous_snapshot: { snapshot_dir: snapRel, version: entry.version, updated_at: entry.updated_at, snapshotted_at: snapshotAt } } : {}),
       updated_at: generateTimestamp(),
     }
-    this.skills.set(id, updated)
-    await this.save()
+    const next = new Map(this.skills); next.set(id, updated)
+    if (!createsSnapshot && canonicalizeJson(this.runtimeSemanticEntries()) === canonicalizeJson(await this.runtimeEntriesFor(next))) {
+      this.skills = next; await this.save(); return updated
+    }
+    const staged = path.join(this.skillsRoot, `.stage.${process.pid}.${Date.now()}.${randomBytes(4).toString('hex')}`)
+    const snapPath = path.join(this.skillsRoot, snapRel)
+    try {
+      if (createsSnapshot) {
+        await copyDir(entry.skill_dir, staged)
+        if (params.content !== undefined) await atomicWriteFileBuf(path.join(staged, 'SKILL.md'), Buffer.from(params.content, 'utf8'))
+      }
+      const hashes = new Map(this.contentTreeHashes)
+      if (createsSnapshot) hashes.set(id, await this.hashContentTree(staged))
+      await this.commit(next, async () => {
+        if (!createsSnapshot) return
+        await fs.mkdir(path.dirname(snapPath), { recursive: true })
+        await durableRename(entry.skill_dir, snapPath)
+        try { await durableRename(staged, skillDir) } catch (error) { await durableRename(snapPath, entry.skill_dir).catch(() => {}); throw error }
+      }, hashes, createsSnapshot ? {
+        before_target_rel: this.relativeTransactionPath(entry.skill_dir), after_target_rel: this.relativeTransactionPath(skillDir), before_target_existed: true,
+        before_target_tree_hash: this.contentTreeHashes.get(id), after_target_tree_hash: hashes.get(id), stage_rel: this.relativeTransactionPath(staged),
+        backup_rel: this.relativeTransactionPath(snapPath),
+      } : undefined)
+      if (createsSnapshot && entry.previous_snapshot?.snapshot_dir && entry.previous_snapshot.snapshot_dir !== snapRel) {
+        await durableRemovePath(this.resolveTransactionPath(entry.previous_snapshot.snapshot_dir), { recursive: true, force: true })
+      }
+    } catch (error) { await durableRemovePath(staged, { recursive: true, force: true }).catch(() => {}); throw error }
     return updated
   }
 
-  async restore(id: string): Promise<SkillRegistryEntry> {
+  private async runtimeEntriesFor(entries: Map<string, SkillRegistryEntry>): Promise<unknown[]> {
+    const previous = this.skills; const previousHashes = this.contentTreeHashes
+    this.skills = entries
+    try { await this.refreshRuntimeContentHashes(); return this.runtimeSemanticEntries() }
+    finally { this.skills = previous; this.contentTreeHashes = previousHashes }
+  }
+
+  private async restoreUnlocked(id: string): Promise<SkillRegistryEntry> {
     const entry = this.skills.get(id)
     if (!entry) throw new Error(`Skill not found: ${id}`)
     if (entry.is_builtin) throw new Error(`Skill "${entry.name}" 是内置的，不能 restore`)
+    if (!this.isAdminOwned(entry)) throw new Error(`Skill "${entry.name}" cannot be restored`)
     if (!entry.previous_snapshot) throw new Error(`Skill "${entry.name}" 没有上一版可恢复`)
-
-    const oldSnapRel = entry.previous_snapshot.snapshot_dir
-    const oldSnapDir = path.join(this.skillsRoot, oldSnapRel)
+    const source = this.resolveTransactionPath(entry.previous_snapshot.snapshot_dir)
     const now = generateTimestamp()
-    const newSnapTs = isoCompactTs(now)
-    const newSnapRel = path.posix.join('.snapshots', `${entry.name}-${newSnapTs}`)
-    const newSnapDir = path.join(this.skillsRoot, newSnapRel)
-    await fs.mkdir(path.dirname(newSnapDir), { recursive: true })
-
-    // 三段 swap：当前→stash，旧→当前，stash→新
-    const tempStash = path.join(this.skillsRoot, `.swap.${process.pid}.${Date.now()}.${randomBytes(4).toString('hex')}`)
-    await fs.rename(entry.skill_dir, tempStash)
-    let stepASucceeded = false
-    try {
-      await fs.rename(oldSnapDir, entry.skill_dir)
-      stepASucceeded = true
-      await fs.rename(tempStash, newSnapDir)
-    } catch (err) {
-      if (!stepASucceeded) {
-        // A 失败：tempStash 还在，旧 snapshot 完好，把 stash 还回去
-        await fs.rename(tempStash, entry.skill_dir).catch(() => {})
-      } else {
-        // B 失败：磁盘 swap 已半成功（entry.skill_dir 已是旧版内容），但 registry 尚未更新。
-        // tempStash 是被替换下来的"原新版"内容；把它挪到 .orphan-<ts> 便于用户手工捞，
-        // 然后抛 error 让 upstream 知道 registry 没同步。
-        const orphanRel = path.posix.join('.snapshots', `${entry.name}-orphan-${newSnapTs}`)
-        const orphanDir = path.join(this.skillsRoot, orphanRel)
-        await fs.rename(tempStash, orphanDir).catch(() => {})
-      }
-      throw err
-    }
-
-    const newContent = await fs.readFile(path.join(entry.skill_dir, 'SKILL.md'), 'utf-8')
-    const parsed = parseSkillMd(newContent)
-
+    const retainedRel = path.posix.join('.snapshots', `${entry.name}-${isoCompactTs(now)}`)
+    const retained = this.resolveTransactionPath(retainedRel)
+    const stage = path.join(this.skillsRoot, `.stage.${process.pid}.${Date.now()}.${randomBytes(4).toString('hex')}`)
+    await copyDir(source, stage)
+    const parsed = parseSkillMd(await fs.readFile(path.join(stage, 'SKILL.md'), 'utf8'))
     const updated: SkillRegistryEntry = {
-      ...entry,
-      description: parsed.description,
-      version: parsed.version,
-      previous_snapshot: {
-        snapshot_dir: newSnapRel,
-        version: entry.version,
-        updated_at: entry.updated_at,
-        snapshotted_at: now,
-      },
+      ...entry, description: parsed.description, version: parsed.version,
+      previous_snapshot: { snapshot_dir: retainedRel, version: entry.version, updated_at: entry.updated_at, snapshotted_at: now },
       updated_at: now,
     }
-    this.skills.set(id, updated)
-    await this.save()
+    const next = new Map(this.skills); next.set(id, updated)
+    const hashes = new Map(this.contentTreeHashes); hashes.set(id, await this.hashContentTree(stage))
+    try {
+      await this.commit(next, async () => {
+        await fs.mkdir(path.dirname(retained), { recursive: true })
+        await durableRename(entry.skill_dir, retained)
+        try { await durableRename(stage, entry.skill_dir) } catch (error) { await durableRename(retained, entry.skill_dir).catch(() => {}); throw error }
+      }, hashes, {
+        before_target_rel: this.relativeTransactionPath(entry.skill_dir), after_target_rel: this.relativeTransactionPath(entry.skill_dir), before_target_existed: true,
+        before_target_tree_hash: this.contentTreeHashes.get(id), stage_rel: this.relativeTransactionPath(stage), retained_rel: retainedRel,
+        obsolete_snapshot_rel: entry.previous_snapshot.snapshot_dir, after_target_tree_hash: hashes.get(id),
+      })
+    } catch (error) { await durableRemovePath(stage, { recursive: true, force: true }).catch(() => {}); throw error }
     return updated
   }
 
-  async delete(id: string): Promise<void> {
+  private async deleteUnlocked(id: string): Promise<void> {
     const entry = this.skills.get(id)
     if (!entry) throw new Error(`Skill not found: ${id}`)
     if (entry.is_builtin) throw new Error(`Cannot delete built-in Skill "${entry.name}"`)
-    this.skills.delete(id)
-    await this.save()
+    if (!this.isAdminOwned(entry)) {
+      const next = new Map(this.skills)
+      next.delete(id)
+      await this.commit(next, async () => {})
+      return
+    }
+    const quarantine = path.join(this.transactionRoot, `delete-${randomBytes(12).toString('hex')}`)
+    const next = new Map(this.skills)
+    next.delete(id)
+    const hashes = new Map(this.contentTreeHashes)
+    hashes.delete(id)
+    await this.commit(next, async () => {
+      await fs.mkdir(this.transactionRoot, { recursive: true, mode: 0o700 })
+      await durableRename(entry.skill_dir, quarantine)
+    }, hashes, {
+      before_target_rel: this.relativeTransactionPath(entry.skill_dir), after_target_rel: this.relativeTransactionPath(quarantine), before_target_existed: true,
+      before_target_tree_hash: this.contentTreeHashes.get(id),
+      stage_rel: this.relativeTransactionPath(quarantine), retained_rel: this.relativeTransactionPath(quarantine), delete_after_commit: true,
+    })
+    await durableRemovePath(quarantine, { recursive: true, force: true })
+    if (entry.previous_snapshot?.snapshot_dir) await durableRemovePath(this.resolveTransactionPath(entry.previous_snapshot.snapshot_dir), { recursive: true, force: true })
   }
 
   /**
    * 注入内置 Skill：仅当 id 不存在时插入，已存在则跳过。
    * 与 SubAgentManager.seedBuiltin 相同语义。
    */
-  async seedBuiltinSkills(entries: SkillRegistryEntry[]): Promise<void> {
+  private async seedBuiltinSkillsUnlocked(entries: SkillRegistryEntry[]): Promise<void> {
     let changed = false
+    const next = new Map(this.skills)
     for (const e of entries) {
-      const existing = this.skills.get(e.id)
+      const existing = next.get(e.id)
       if (!existing) {
-        this.skills.set(e.id, e)
+        next.set(e.id, e)
         changed = true
         continue
       }
-      // 修复历史脏数据：旧版本格式的 builtin entry 没有 skill_dir 字段（content 时代遗留），
-      // push 给 agent 时 SkillConfig.skill_dir=undefined → agent computeSkillsHash
-      // h.update(undefined) 抛 TypeError → 整个 update_config 失败（连带 subagents 不更新）。
-      // 这里用 code default 的 skill_dir 补齐；其余字段尊重磁盘上的用户改动。
       if (!existing.skill_dir && e.skill_dir) {
-        this.skills.set(e.id, { ...existing, skill_dir: e.skill_dir, updated_at: new Date().toISOString() })
+        next.set(e.id, { ...existing, skill_dir: e.skill_dir, updated_at: new Date().toISOString() })
         console.warn(`[SkillManager] Repaired builtin skill "${e.name}" (${e.id}): missing skill_dir → ${e.skill_dir}`)
         changed = true
       }
     }
-    if (changed) await this.save()
+    if (changed) await this.commit(next, async () => {})
   }
 
   /**
@@ -914,7 +1629,7 @@ export class SkillManager {
    * 返回本次扫到的可用 builtin skill 数量。扫不到任何一个是异常状态（历史上
    * release 包漏打 SKILL.md 导致 memory-curate 等全部缺失且无声无息），必须报错。
    */
-  async registerBuiltins(builtinsDir: string): Promise<number> {
+  private async registerBuiltinsUnlocked(builtinsDir: string): Promise<number> {
     let dirEntries: import('fs').Dirent[]
     try {
       dirEntries = await fs.readdir(builtinsDir, { withFileTypes: true })
@@ -923,6 +1638,9 @@ export class SkillManager {
       return 0
     }
 
+    const previous = this.skills
+    const next = new Map(this.skills)
+    this.skills = next
     const existingNames = new Set(this.list().map(s => s.name))
     let changed = false
     let found = 0
@@ -996,10 +1714,8 @@ export class SkillManager {
       console.error(`[SkillManager] builtin skills 目录下没扫到任何 SKILL.md，内置 skill 全部缺失: ${builtinsDir}`)
     }
 
-    if (changed) {
-      await this.save()
-    }
-
+    this.skills = previous
+    if (changed) await this.commit(next, async () => {})
     return found
   }
 
@@ -1008,7 +1724,7 @@ export class SkillManager {
    * Additive-only：已在注册表中（按 name 匹配）的跳过。
    * 返回本次新增数量。
    */
-  async scanWorkspaceSkills(workspaceDir: string): Promise<number> {
+  private async scanWorkspaceSkillsUnlocked(workspaceDir: string): Promise<number> {
     const agentSkillsDir = path.join(workspaceDir, '.agents', 'skills')
     let dirEntries: import('fs').Dirent[]
     try {
@@ -1030,6 +1746,9 @@ export class SkillManager {
       })
     )
 
+    const previous = this.skills
+    const next = new Map(this.skills)
+    this.skills = next
     let added = 0
     const now = generateTimestamp()
     for (const result of reads) {
@@ -1056,7 +1775,8 @@ export class SkillManager {
       added++
     }
 
-    if (added > 0) await this.save()
+    this.skills = previous
+    if (added > 0) await this.commit(next, async () => {})
     return added
   }
 
@@ -1123,7 +1843,7 @@ export class SkillManager {
    * 从 GitHub 安装指定 skill（通过 skill_md_url 获取内容）
    * 仅允许 raw.githubusercontent.com 的 HTTPS URL，防止 SSRF
    */
-  async importFromGit(
+  private async importFromGitUnlocked(
     skillMdUrl: string,
     sourceGitUrl?: string,
     overwrite?: boolean,
@@ -1190,7 +1910,7 @@ export class SkillManager {
    * 从本地目录路径导入（读取 <dirPath>/SKILL.md）
    * 禁止访问系统敏感目录，防止路径穿越
    */
-  async importFromLocalPath(
+  private async importFromLocalPathUnlocked(
     dirPath: string,
     overwrite?: boolean,
   ): Promise<{ entry: SkillRegistryEntry; was_overwrite: boolean }> {
@@ -1217,121 +1937,49 @@ export class SkillManager {
    */
   private async installSkillFromDirectory(
     srcDir: string,
-    sourceMeta: {
-      source_type?: 'imported' | 'scanned'
-      source_package?: string
-      source_url?: string
-    },
+    sourceMeta: { source_type?: 'imported' | 'scanned'; source_package?: string; source_url?: string },
     overwrite?: boolean,
   ): Promise<{ entry: SkillRegistryEntry; was_overwrite: boolean }> {
-    let content: string
-    try {
-      content = await fs.readFile(path.join(srcDir, 'SKILL.md'), 'utf-8')
-    } catch {
-      throw new Error(`${srcDir} 中未找到 SKILL.md 文件`)
-    }
+    const content = await fs.readFile(path.join(srcDir, 'SKILL.md'), 'utf8').catch(() => { throw new Error(`${srcDir} 中未找到 SKILL.md 文件`) })
     const parsed = parseSkillMd(content)
-    if (!parsed.name) throw new Error('SKILL.md 缺少 name 字段')
-    if (!isValidSkillName(parsed.name)) {
-      throw new Error(`Skill name "${parsed.name}" 含非法字符（仅允许小写字母/数字/连字符，最长 64 字符）`)
-    }
-
+    if (!parsed.name || !isValidSkillName(parsed.name)) throw new Error('SKILL.md name is invalid')
     const existing = this.findByName(parsed.name)
-    if (existing && !overwrite) {
-      if (existing.is_builtin) {
-        throw new Error(`Skill "${existing.name}" 是内置的，不可通过导入覆盖`)
-      }
-      throw new DuplicateSkillError(existing, {
-        name: parsed.name,
-        description: parsed.description,
-        version: parsed.version,
-      })
-    }
-    if (existing?.is_builtin) {
-      throw new Error(`Skill "${existing.name}" 是内置的，不可通过导入覆盖`)
-    }
-
-    const id = existing?.id ?? generateId()
-    const targetDir = path.join(this.skillsRoot, parsed.name)
-
-    await fs.mkdir(this.skillsRoot, { recursive: true })
-    // 防御：targetDir 已存在但 registry 中找不到对应 entry（孤儿目录）
-    if (!existing) {
-      const orphanCheck = await fs.access(targetDir).then(() => true).catch(() => false)
-      if (orphanCheck) {
-        throw new Error(`目录 ${targetDir} 已存在但 registry 中找不到对应 entry，可能是孤儿数据，请手工清理`)
-      }
-    }
-    const tmpDir = path.join(this.skillsRoot, `.tmp.${process.pid}.${Date.now()}.${randomBytes(4).toString('hex')}`)
-    // 放在 try 外面：如果旧 targetDir 已被 rename 到 snapDir，catch 块需要回滚
-    let snapDir: string | undefined
-    let oldDirExists = false
+    if (existing && (!overwrite || existing.is_builtin)) throw new DuplicateSkillError(existing, { name: parsed.name, description: parsed.description, version: parsed.version })
+    const target = path.join(this.skillsRoot, parsed.name)
+    const targetExisted = await fs.access(target).then(() => true).catch(() => false)
+    if (!existing && targetExisted) throw new Error(`目录 ${target} 已存在但 registry 中找不到对应 entry，可能是孤儿数据，请手工清理`)
+    const stage = path.join(this.skillsRoot, `.stage.${process.pid}.${Date.now()}.${randomBytes(4).toString('hex')}`)
     try {
-      await copyDir(srcDir, tmpDir, ['.skill_dir', '.DS_Store'])
-
-      let previousSnapshotMeta: SkillRegistryEntry['previous_snapshot']
-      if (existing) {
-        oldDirExists = await fs.access(targetDir).then(() => true).catch(() => false)
-        if (oldDirExists) {
-          const snapTs = isoCompactTs(generateTimestamp())
-          const snapRel = path.posix.join('.snapshots', `${parsed.name}-${snapTs}`)
-          snapDir = path.join(this.skillsRoot, snapRel)
-          await fs.mkdir(path.dirname(snapDir), { recursive: true })
-          if (existing.previous_snapshot?.snapshot_dir) {
-            await fs.rm(path.join(this.skillsRoot, existing.previous_snapshot.snapshot_dir), { recursive: true, force: true })
-          }
-          await fs.rename(targetDir, snapDir)
-          previousSnapshotMeta = {
-            snapshot_dir: snapRel,
-            version: existing.version,
-            updated_at: existing.updated_at,
-            snapshotted_at: generateTimestamp(),
-          }
-        }
-      }
-      await fs.rename(tmpDir, targetDir)
-
+      await copyDir(srcDir, stage, ['.skill_dir', '.DS_Store'])
       const now = generateTimestamp()
-      // I2: 如果 entry 在 JSON 里但 on-disk 目录早就不在（drift），不要回退到 existing.previous_snapshot
-      // 否则会产生指向 orphan snapshot 的悬挂引用
-      const fallbackSnapshot = existing && !oldDirExists ? undefined : existing?.previous_snapshot
+      const snapshotRel = path.posix.join('.snapshots', `${parsed.name}-${isoCompactTs(now)}`)
+      const snapshot = this.resolveTransactionPath(snapshotRel)
       const entry: SkillRegistryEntry = {
-        id,
-        name: parsed.name,
-        description: parsed.description,
-        version: parsed.version,
-        skill_dir: targetDir,
-        trigger_phrases: existing?.trigger_phrases,
-        source_type: sourceMeta.source_type ?? 'imported',
-        is_builtin: false,
-        is_essential: existing?.is_essential ?? false,
-        can_disable: true,
-        source_market: existing?.source_market,
-        source_package: sourceMeta.source_package ?? existing?.source_package,
-        source_url: sourceMeta.source_url ?? existing?.source_url,
-        enabled: existing?.enabled ?? true,
-        created_at: existing?.created_at ?? now,
-        updated_at: now,
-        previous_snapshot: previousSnapshotMeta ?? fallbackSnapshot,
+        id: existing?.id ?? generateId(), name: parsed.name, description: parsed.description, version: parsed.version, skill_dir: target,
+        trigger_phrases: existing?.trigger_phrases, source_type: sourceMeta.source_type ?? 'imported', is_builtin: false,
+        is_essential: existing?.is_essential ?? false, can_disable: true, source_market: existing?.source_market,
+        source_package: sourceMeta.source_package ?? existing?.source_package, source_url: sourceMeta.source_url ?? existing?.source_url,
+        enabled: existing?.enabled ?? true, created_at: existing?.created_at ?? now, updated_at: now,
+        previous_snapshot: existing && targetExisted ? { snapshot_dir: snapshotRel, version: existing.version, updated_at: existing.updated_at, snapshotted_at: now } : undefined,
       }
-      this.skills.set(id, entry)
-      await this.save()
+      const next = new Map(this.skills); next.set(entry.id, entry)
+      const hashes = new Map(this.contentTreeHashes); hashes.set(entry.id, await this.hashContentTree(stage))
+      await this.commit(next, async () => {
+        if (targetExisted) { await fs.mkdir(path.dirname(snapshot), { recursive: true }); await durableRename(target, snapshot) }
+        try { await durableRename(stage, target) } catch (error) { if (targetExisted) await durableRename(snapshot, target).catch(() => {}); throw error }
+      }, hashes, {
+        before_target_rel: this.relativeTransactionPath(existing?.skill_dir ?? target), after_target_rel: this.relativeTransactionPath(target), before_target_existed: targetExisted,
+        before_target_tree_hash: existing ? this.contentTreeHashes.get(existing.id) : undefined, after_target_tree_hash: hashes.get(entry.id), stage_rel: this.relativeTransactionPath(stage),
+        ...(targetExisted ? { backup_rel: snapshotRel } : {}),
+      })
       return { entry, was_overwrite: !!existing }
-    } catch (err) {
-      // I1: 如果 snapshot rename 已经发生但后续步骤失败 → 把 snapshot 搬回原 targetDir
-      // 避免出现"旧目录在 snapshot 里、新目录没就位、registry 还指向 targetDir"的中间态
-      if (snapDir) {
-        await fs.rename(snapDir, targetDir).catch(() => {})
-      }
-      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
-      throw err
-    }
+    } catch (error) { await durableRemovePath(stage, { recursive: true, force: true }).catch(() => {}); throw error }
   }
 
   /**
    * 从 zip/skills 文件的 base64 内容导入
    */
-  async importFromZip(
+  private async importFromZipUnlocked(
     base64Content: string,
     filename: string,
     overwrite?: boolean,
@@ -1588,7 +2236,7 @@ export class EssentialToolsManager {
   async initialize(): Promise<void> {
     try {
       const raw = await fs.readFile(this.filePath, 'utf-8')
-      this.config = JSON.parse(raw)
+      this.config = JSON.parse(raw) as EssentialToolsConfig
     } catch {
       this.config = { ...DEFAULT_ESSENTIAL_CONFIG }
     }
@@ -1602,9 +2250,7 @@ export class EssentialToolsManager {
    * 原子写入文件：先写临时文件，再 rename（避免进程被杀时文件损坏）
    */
   private async atomicWriteFile(filePath: string, content: string): Promise<void> {
-    const tempPath = `${filePath}.tmp`
-    await fs.writeFile(tempPath, content, 'utf-8')
-    await fs.rename(tempPath, filePath)
+    await durableAtomicWriteFile(filePath, content)
   }
 
   async update(params: Partial<EssentialToolsConfig>): Promise<EssentialToolsConfig> {
@@ -1703,15 +2349,11 @@ export async function writeSkillDirFiles(
 }
 
 async function atomicWrite(filePath: string, buf: Buffer): Promise<void> {
-  const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`
-  await fs.writeFile(tmpPath, buf)
-  await fs.rename(tmpPath, filePath)
+  await durableAtomicWriteFile(filePath, buf)
 }
 
 async function atomicWriteFileBuf(filePath: string, buf: Buffer): Promise<void> {
-  const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}`
-  await fs.writeFile(tmp, buf)
-  await fs.rename(tmp, filePath)
+  await durableAtomicWriteFile(filePath, buf)
 }
 
 async function cleanupExtraFiles(

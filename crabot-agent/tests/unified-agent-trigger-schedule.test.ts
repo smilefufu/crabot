@@ -5,7 +5,10 @@ import type { AgentEventPublisher } from '../src/manager/events.js'
 import type { ManagerKey, LedgerWorker } from '../src/workers/harness/ledger-types.js'
 
 interface AgentUnderTest {
+  agentConfig: { model_config: Record<string, { apikey: string; model_id: string }> }
   config: { moduleId: string }
+  configAuthenticated: boolean
+  configStale: boolean
   managerStack: unknown
   memoryWriter: { runMaintenance(scope: 'all'): Promise<void> }
   managerEventPublisher: AgentEventPublisher
@@ -54,7 +57,11 @@ function buildAgent(runMaintenance: () => Promise<void>) {
   }
 
   const agent = Object.create(UnifiedAgent.prototype) as AgentUnderTest
+  agent.agentConfig = { model_config: { powerful: { apikey: 'test-key', model_id: 'test-model' } } }
   agent.config = { moduleId: 'test-agent' }
+  // 直接 test fixture：构造函数默认 runtime_config_authenticated=true；Object.create 绕过构造函数，这里补齐。
+  agent.configAuthenticated = true
+  agent.configStale = false
   agent.managerStack = {
     ledger,
     principals: { managerKeyFor: () => managerKey },

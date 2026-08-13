@@ -2105,7 +2105,7 @@ describe('HarnessEvent.task_status —— 透明接续的迁移点', () => {
     fake.emitStateChange({ worker_id: worker.worker_id, seq: 1, impl: 'builtin', session_ref: `ref-${worker.worker_id}#1` }, 'exited')
     await waitUntil(async () => {
       const [w] = await harness.listWorkers((`test::${'friend-1'}` as ManagerKey))
-      return w.task.status === 'completed'
+      return w.task.status === 'completed' && events.some((e) => e.kind === 'state_changed' && e.task_status === 'completed')
     })
     // 终态那一跳自己也带了状态(processStateChange 主线分支)
     const exitedStateEvent = events.filter((e) => e.kind === 'state_changed').pop()!

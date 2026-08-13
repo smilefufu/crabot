@@ -1,0 +1,301 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { UnifiedAgent } from '../../src/unified-agent.js'
+import { ConfigLoader } from '../../src/core/config-loader.js'
+import { McpConnector } from '../../src/agent/mcp-connector.js'
+import type { UnifiedAgentConfig } from '../../src/types.js'
+
+function config(): UnifiedAgentConfig {
+  return {
+    module_id: 'crabot-agent', module_type: 'agent', version: '0.2.0', protocol_version: '3.1.1', port: 19999,
+    orchestration: { front_context_recent_messages_window_hours: 1, front_context_recent_messages_max_cap: 1, front_context_short_term_memory_window_hours: 1, front_context_short_term_memory_max_cap: 1, worker_recent_messages_window_hours: 1, worker_recent_messages_max_cap: 1, worker_short_term_memory_window_hours: 1, worker_short_term_memory_max_cap: 1, worker_long_term_memory_limit: 1, front_agent_timeout: 1, session_state_ttl: 1, worker_config_refresh_interval: 1, front_agent_queue_max_length: 1, front_agent_queue_timeout: 1 },
+    agent_config: { instance_id: 'crabot-agent', roles: [], system_prompt: 'old', model_config: { powerful: { endpoint: 'https://old.example', apikey: 'old', model_id: 'old', format: 'openai', provider_id: 'old' } } },
+  }
+}
+
+describe('UnifiedAgent runtime config invalidation', () => {
+  beforeEach(() => vi.restoreAllMocks())
+
+  it('subscribes to nonsecret invalidation and atomically accepts a higher pull revision', async () => {
+    const agent = new UnifiedAgent(config()) as any
+    expect(agent.config.subscriptions).toContain('admin.agent_config_invalidated')
+    agent.adminPort = 19998
+    const next = config()
+    next.agent_config!.system_prompt = 'new'
+    next.agent_config!.model_config.powerful.model_id = 'new'
+    vi.spyOn(ConfigLoader, 'pull').mockResolvedValue({ config: next, revision: 2 })
+    await agent.onEvent({ type: 'admin.agent_config_invalidated', payload: { config_revision: 2, domains: ['models'] }, timestamp: new Date().toISOString() })
+    await new Promise((resolve) => setTimeout(resolve, 70))
+    expect(agent.agentConfig.system_prompt).toBe('new')
+    expect(agent.agentConfig.model_config.powerful.model_id).toBe('new')
+    expect(agent.configRevision).toBe(2)
+    expect(agent.configStale).toBe(false)
+  })
+
+  it('clears stale after a successful equal-revision authenticated pull without reapplying config', async () => {
+    const agent = new UnifiedAgent(config()) as any
+    agent.adminPort = 19998
+    agent.configRevision = 2
+    agent.configAuthenticated = true
+    agent.configStale = true
+    const apply = vi.spyOn(agent, 'applyRuntimeConfigCandidate')
+    vi.spyOn(ConfigLoader, 'pull').mockResolvedValue({ config: config(), revision: 2 })
+    await agent.pullRuntimeConfig()
+    expect(agent.configStale).toBe(false)
+    expect(apply).not.toHaveBeenCalled()
+  })
+
+  it('rebuilds detached runtime resources when an equal-revision pull recovers after a failure', async () => {
+    const agent = new UnifiedAgent(config()) as any
+    agent.adminPort = 19998
+    agent.configRevision = 2
+    agent.configAuthenticated = true
+    const disconnectAll = vi.spyOn(agent.mcpConnector, 'disconnectAll').mockResolvedValue(undefined)
+    const pull = vi.spyOn(ConfigLoader, 'pull')
+    // 第一次 pull 瞬时失败：stale + 破坏性断连。
+    pull.mockRejectedValueOnce(new Error('transient'))
+    await expect(agent.pullRuntimeConfig()).rejects.toThrow('transient')
+    expect(agent.configStale).toBe(true)
+    expect(agent.configResourcesDetached).toBe(true)
+    expect(disconnectAll).toHaveBeenCalled()
+    // 同 revision 恢复：不能只翻回 stale 标志，必须重建资源，否则外部 MCP 工具永久消失。
+    const apply = vi.spyOn(agent, 'applyRuntimeConfigCandidate').mockResolvedValue(undefined)
+    pull.mockResolvedValue({ config: config(), revision: 2 })
+    await agent.pullRuntimeConfig()
+    expect(apply).toHaveBeenCalledOnce()
+    expect(agent.configStale).toBe(false)
+    expect(agent.configAuthenticated).toBe(true)
+    expect(agent.configResourcesDetached).toBe(false)
+    // 再一次同 revision 成功（无断连）则不重复重建。
+    await agent.pullRuntimeConfig()
+    expect(apply).toHaveBeenCalledOnce()
+  })
+
+  it('cold unconfigured Agent atomically installs a handler before opening execution admission', async () => {
+    const cold = config()
+    cold.agent_config!.roles = ['worker']
+    cold.agent_config!.model_config = {}
+    const agent = new UnifiedAgent(cold) as any
+    agent.adminPort = 19998
+    agent.configRevision = 1
+    agent.configAuthenticated = true
+    agent.configStale = true
+    expect(agent.agentHandler).toBeUndefined()
+    const ready = config()
+    ready.agent_config!.roles = ['worker']
+    vi.spyOn(ConfigLoader, 'pull').mockResolvedValue({ config: ready, revision: 2 })
+
+    await agent.pullRuntimeConfig()
+    expect(agent.agentHandler).toBeDefined()
+    expect(agent.configRevision).toBe(2)
+    expect(agent.configStale).toBe(false)
+    await expect(agent.managerStack.harness.spawnWorker({
+      managerKey: 'admin-web::admin-chat', title: 'ready', prompt: 'ready',
+      origin: { trigger_type: 'human' }, report_to: { channel_id: 'admin-web', session_id: 'admin-chat' },
+    })).resolves.toBeDefined()
+  })
+
+  it('applies a revision change that only touches max_iterations without losing admission', async () => {
+    // max_iterations 已无消费方，且协议只要求 revision 变化时原子替换；不得把这类变更
+    // 打成永久 fail-closed（旧实现 throw 'controlled restart' 后退避重试永远撞同一堵墙）。
+    const agent = new UnifiedAgent(config()) as any
+    agent.adminPort = 19998
+    agent.configRevision = 1
+    agent.configAuthenticated = true
+    vi.spyOn(ConfigLoader, 'pull').mockResolvedValue({ config: { ...config(), agent_config: { ...config().agent_config!, max_iterations: 2 } }, revision: 2 })
+    await agent.pullRuntimeConfig()
+    expect(agent.configRevision).toBe(2)
+    expect(agent.configStale).toBe(false)
+    expect(agent.agentConfig.max_iterations).toBe(2)
+  })
+
+  it('rejects schedule, background maintenance, task execution, and new worker runtime resolution while stale', async () => {
+    const agent = new UnifiedAgent(config()) as any
+    agent.configAuthenticated = true
+    agent.configStale = true
+    const routeSchedule = vi.spyOn(agent.managerStack.registry, 'routeSchedule')
+    const ledgerWrite = vi.spyOn(agent.managerStack.ledger, 'upsertWorker')
+    const workerSpawn = vi.spyOn(agent.managerStack.harness, 'spawnWorker')
+    const execute = vi.fn()
+    agent.agentHandler = { executeTask: execute }
+    await expect(agent.handleTriggerSchedule({ schedule_id: 's', title: 's' })).rejects.toThrow('AGENT_RUNTIME_CONFIG_STALE')
+    await expect(agent.handleTriggerSchedule({ schedule_id: 'maintenance', title: 'maintenance', task_type: 'memory_maintenance', is_builtin: true })).rejects.toThrow('AGENT_RUNTIME_CONFIG_STALE')
+    await expect(agent.handleExecuteTask({ task: { task_id: 't', task_title: 't' }, context: {} })).rejects.toThrow('AGENT_RUNTIME_CONFIG_STALE')
+    await expect(agent.managerStack.harness.spawnWorker({
+      managerKey: 'admin-web::admin-chat', title: 'new', prompt: 'new',
+      origin: { trigger_type: 'human' }, report_to: { channel_id: 'admin-web', session_id: 'admin-chat' },
+    })).rejects.toThrow('AGENT_RUNTIME_CONFIG_STALE')
+    expect(routeSchedule).not.toHaveBeenCalled()
+    expect(ledgerWrite).not.toHaveBeenCalled()
+    expect(workerSpawn).toHaveBeenCalledOnce()
+    expect(execute).not.toHaveBeenCalled()
+  })
+
+  it('rejects media completion Manager wakes while runtime config is stale', async () => {
+    const agent = new UnifiedAgent(config()) as any
+    agent.configAuthenticated = true
+    agent.configStale = true
+    const route = vi.spyOn(agent.managerStack.registry, 'routeMediaNotification')
+    await expect(agent.onEvent({
+      type: 'media.download_completed',
+      timestamp: new Date().toISOString(),
+      payload: { channel_id: 'admin-web', session_id: 'admin-chat', handle: 'fm_1', status: 'ready' },
+    })).rejects.toThrow('AGENT_RUNTIME_CONFIG_STALE')
+    expect(route).not.toHaveBeenCalled()
+  })
+
+  it('applies cold-start configured and unavailable image capability before first event', () => {
+    const configured = config()
+    configured.image_config = { endpoint: 'https://image.example', apikey: 'image-key', model_id: 'image-model', format: 'openai', provider_id: 'image' }
+    configured.image_capability = { available: true }
+    const ready = new UnifiedAgent(configured) as any
+    expect(ready.imageConnInfo).toMatchObject({ endpoint: 'https://image.example', model_id: 'image-model' })
+    expect(ready.imageCapability).toEqual({ available: true })
+    const unavailable = new UnifiedAgent({ ...config(), image_capability: { available: false, reason: 'not_configured' } }) as any
+    expect(unavailable.imageConnInfo).toBeUndefined()
+    expect(unavailable.imageCapability).toEqual({ available: false, reason: 'not_configured' })
+  })
+
+  it('applies new config while degrading an unconnectable MCP server (availability never blocks config)', async () => {
+    // 第三方 MCP 不可用 ≠ 配置不可信：与启动 connectAll 一样降级该 server，
+    // 不得把整个 pull 打成失败（configStale + 全入口 fail closed）。
+    const agent = new UnifiedAgent(config()) as any
+    agent.adminPort = 19998
+    agent.configRevision = 1
+    const next = config()
+    next.agent_config!.system_prompt = 'new-with-bad-mcp'
+    next.agent_config!.mcp_servers = [{ name: 'bad', transport: 'stdio', command: '' }]
+    vi.spyOn(ConfigLoader, 'pull').mockResolvedValue({ config: next, revision: 2 })
+    await agent.pullRuntimeConfig()
+    expect(agent.agentConfig.system_prompt).toBe('new-with-bad-mcp')
+    expect(agent.configRevision).toBe(2)
+    expect(agent.configStale).toBe(false)
+  })
+
+  it('propagates extra replacement to the running worker handler on hot apply', async () => {
+    // extra 是原子替换的一部分：运行中 handler 从快照读 goal_mode_enabled 等开关，
+    // 热更必须同步整批 extra，否则配置已换、handler 仍按旧值判定。
+    const agent = new UnifiedAgent(config()) as any
+    agent.adminPort = 19998
+    agent.configRevision = 1
+    agent.configAuthenticated = true
+    const setExtra = vi.fn()
+    agent.agentHandler = {
+      setExtra,
+      updateMcpConnector: vi.fn(), updateSdkEnv: vi.fn(), updateSystemPrompt: vi.fn(),
+      updateSkills: vi.fn(), updateSubagents: vi.fn(), updateTmpPageBaseUrl: vi.fn(),
+      updateImageConfig: vi.fn(),
+    }
+    const next = config()
+    next.extra = { goal_mode_enabled: false }
+    vi.spyOn(ConfigLoader, 'pull').mockResolvedValue({ config: next, revision: 2 })
+    await agent.pullRuntimeConfig()
+    expect(setExtra).toHaveBeenCalledWith({ goal_mode_enabled: false })
+    expect(agent.configRevision).toBe(2)
+  })
+
+  it('closes candidate MCP connections when post-prepare validation fails (no child process leak)', async () => {
+    // prepare 已拉起真实 MCP 子进程；其后校验失败必须关掉候选连接，
+    // 否则退避重试每轮泄漏一批子进程。
+    const agent = new UnifiedAgent(config()) as any
+    agent.adminPort = 19998
+    agent.configRevision = 1
+    const candidateDisconnect = vi.fn().mockResolvedValue(undefined)
+    vi.spyOn(McpConnector, 'prepare').mockResolvedValue({
+      disconnectAll: candidateDisconnect, clients: new Map(), cachedTools: [], toolDefaultsMap: new Map(),
+    } as unknown as McpConnector)
+    const broken = { ...config(), image_capability: { available: true } }
+    vi.spyOn(ConfigLoader, 'pull').mockResolvedValue({ config: broken, revision: 2 })
+    await expect(agent.pullRuntimeConfig()).rejects.toThrow('Image capability')
+    expect(candidateDisconnect).toHaveBeenCalled()
+    expect(agent.configRevision).toBe(1)
+  })
+
+  it('keeps old config and revision when image or subagent candidate validation fails', async () => {
+    const agent = new UnifiedAgent(config()) as any
+    agent.adminPort = 19998
+    agent.configRevision = 1
+    const old = JSON.stringify(agent.agentConfig)
+    const imageBroken = { ...config(), image_capability: { available: true } }
+    vi.spyOn(ConfigLoader, 'pull').mockResolvedValueOnce({ config: imageBroken, revision: 2 })
+    await expect(agent.pullRuntimeConfig()).rejects.toThrow('Image capability')
+    expect(JSON.stringify(agent.agentConfig)).toBe(old)
+    expect(agent.configRevision).toBe(1)
+    const subagentBroken = config()
+    subagentBroken.agent_config!.subagents = [{ id: 'same', name: 'one' } as any, { id: 'same', name: 'two' } as any]
+    vi.mocked(ConfigLoader.pull).mockResolvedValueOnce({ config: subagentBroken, revision: 2 })
+    await expect(agent.pullRuntimeConfig()).rejects.toThrow('Invalid runtime subagent')
+    expect(JSON.stringify(agent.agentConfig)).toBe(old)
+    expect(agent.configRevision).toBe(1)
+  })
+
+  it('degraded startup (unauthenticated config) schedules a backoff pull and self-heals without any event', async () => {
+    const degraded = config()
+    degraded.agent_config = undefined
+    degraded.runtime_config_authenticated = false
+    const agent = new UnifiedAgent(degraded) as any
+    agent.adminPort = 19998
+    agent.configRevision = 1
+    expect(agent.configAuthenticated).toBe(false)
+    expect(agent.isConfigured()).toBe(false)
+    // wire 面与正常启动等价：role-gated 方法不能因降级启动缺席（否则 tmp-page
+    // 反馈投递 method-not-found，owner task 永远卡在 waiting_human）。
+    expect(agent.methodHandlers.has('deliver_page_feedback')).toBe(true)
+    const good = config()
+    good.agent_config!.system_prompt = 'healed'
+    // 生产 wire 必带 max_iterations（DEFAULT_AGENT_CONFIG）：降级时旧配置缺失，
+    // 恢复 pull 不能把它误判成需要受控重启的配置变更。
+    good.agent_config!.max_iterations = 10
+    const pull = vi.spyOn(ConfigLoader, 'pull').mockResolvedValue({ config: good, revision: 2 })
+    // stub 掉 onStart 的重量级副作用，只验降级自愈接线。
+    agent.importLegacyV2Tasks = vi.fn().mockResolvedValue(undefined)
+    agent.managerStack.principals.init = vi.fn().mockResolvedValue(undefined)
+    agent.startEventLoopWatchdog = vi.fn()
+    agent.traceStore.startFlushTimer = vi.fn()
+    agent.detectFeishuChannel = vi.fn().mockResolvedValue(undefined)
+    agent.sessionManager.startCleanup = vi.fn()
+    // onStart 给降级 Agent 挂退避 pull；无需任何 invalidation 事件即可自愈。
+    agent.lspManager.start = vi.fn().mockResolvedValue(undefined)
+    await agent.onStart()
+    await new Promise((resolve) => setTimeout(resolve, 1300))
+    expect(pull).toHaveBeenCalled()
+    expect(agent.configStale).toBe(false)
+    expect(agent.configAuthenticated).toBe(true)
+    expect(agent.agentConfig.system_prompt).toBe('healed')
+    // worker 层必须真正建起来：roles 补齐、handler 安装，入口放开后不是残废状态。
+    expect(agent.roles.has('worker')).toBe(true)
+    expect(agent.agentHandler).toBeDefined()
+  })
+
+  it('treats a crossed older-revision response as a no-op without touching live state', async () => {
+    const agent = new UnifiedAgent(config()) as any
+    agent.adminPort = 19998
+    agent.configRevision = 3
+    const disconnectAll = vi.spyOn(agent.mcpConnector, 'disconnectAll').mockResolvedValue(undefined)
+    vi.spyOn(ConfigLoader, 'pull').mockResolvedValue({ config: config(), revision: 2 })
+    await agent.pullRuntimeConfig()
+    expect(agent.agentConfig.system_prompt).toBe('old')
+    expect(agent.configRevision).toBe(3)
+    expect(agent.configStale).toBe(false)
+    expect(disconnectAll).not.toHaveBeenCalled()
+  })
+
+  it('marks failed pull stale, closes stale MCP connections, and retries with backoff', async () => {
+    const agent = new UnifiedAgent(config()) as any
+    agent.adminPort = 19998
+    agent.configRevision = 1
+    const disconnectAll = vi.spyOn(agent.mcpConnector, 'disconnectAll').mockResolvedValue(undefined)
+    const pull = vi.spyOn(ConfigLoader, 'pull').mockRejectedValue(new Error('admin unavailable'))
+    await agent.onEvent({ type: 'admin.agent_config_invalidated', payload: { config_revision: 2, domains: ['models'] }, timestamp: new Date().toISOString() })
+    await new Promise((resolve) => setTimeout(resolve, 70))
+    expect(agent.configStale).toBe(true)
+    expect(agent.isConfigured()).toBe(false)
+    expect(disconnectAll).toHaveBeenCalled()
+    // 失败后挂退避重试；恢复后的下一次 pull 清除 stale（无需新的 invalidation 事件）。
+    const good = config()
+    good.agent_config!.system_prompt = 'recovered'
+    pull.mockResolvedValue({ config: good, revision: 2 })
+    await new Promise((resolve) => setTimeout(resolve, 1300))
+    expect(agent.configStale).toBe(false)
+    expect(agent.agentConfig.system_prompt).toBe('recovered')
+  })
+})

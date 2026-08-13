@@ -19,6 +19,7 @@ import {
 } from '../engine/index.js'
 import { createSetCwdTool, createReadTool, filterMcpToolsByConfig } from '../engine/tools/index.js'
 import { BgEntityRegistry } from '../engine/bg-entities/registry.js'
+import { buildChildEnv } from '../core/runtime-env.js'
 import { killShellTree } from '../engine/bg-entities/bg-shell.js'
 import { ReadoptReaper } from '../engine/bg-entities/reaper.js'
 import type { BgEntityOwner, BgEntityRecord, BgEntityStatus, BgEntityType, BgShellRegistryRecord } from '../engine/bg-entities/types.js'
@@ -1031,7 +1032,7 @@ export class AgentHandler {
    * 热加载：更新 base system prompt（admin personality）。下次 LLM 调用时生效。
    *
    * `undefined` 表示"不变"，保留当前值；caller 想清空 personality 应明确传 `''`。
-   * 这与 handleUpdateConfig 的 `!== undefined` 守卫语义一致：
+   * 这与配置热更路径的 `!== undefined` 守卫语义一致：
    * undefined 是 "字段未改动"，空字符串是 "明确设为空"。
    */
   updateSystemPrompt(newPrompt: string | undefined): void {
@@ -1064,6 +1065,10 @@ export class AgentHandler {
    *
    * digestSdkEnv 单独可选；不传时保留旧值（与 updateSystemPrompt 同语义）。
    */
+  updateMcpConnector(mcpConnector: McpConnector): void {
+    this.mcpConnector = mcpConnector
+  }
+
   updateSdkEnv(sdkEnv: SdkEnvConfig, digestSdkEnv?: SdkEnvConfig): void {
     this.sdkEnv = sdkEnv
     if (digestSdkEnv !== undefined) {
@@ -1101,6 +1106,11 @@ export class AgentHandler {
    */
   updateExtra(extra: Record<string, unknown>): void {
     this.extra = { ...this.extra, ...extra }
+  }
+
+  /** runtime config 原子替换：整批更新 extra（区别于 updateExtra 的增量合并）。 */
+  setExtra(extra: Record<string, unknown>): void {
+    this.extra = { ...extra }
   }
 
   async executeTask(
@@ -2423,7 +2433,7 @@ export class AgentHandler {
       cwd: crabotHome,
       detached: true,
       stdio: ['ignore', logFd, logFd],
-      env: { ...process.env, CRABOT_RESTART_REASON: reason ?? '' },
+      env: buildChildEnv({ CRABOT_RESTART_REASON: reason ?? '' }),
     })
     child.on('error', (err) => log(`[request_restart] spawn restart.mjs failed: ${err}`))
     child.unref()

@@ -141,6 +141,7 @@ export interface BootstrapDeps {
    */
   readonly memoryServerFor: (ctx: MemoryTaskContext) => McpServer
   readonly callAdmin: <P, R>(m: string, p: P) => Promise<R>
+  readonly getRuntimeConfigSummary?: () => unknown
   /**
    * 发起人身份的解析原料(admin 权限解析 / session memory_scopes / 场景画像 /
    * crab self handle / master friend id)。本模块据它在**唤醒边界**解析一次并缓存,
@@ -155,6 +156,8 @@ export interface BootstrapDeps {
    * "起化身时现取",不能各持一份(spec 决策 2)。
    */
   readonly builtinSpawnDefaults?: BuiltinRuntimeFactory
+  /** Reject new worker incarnations while runtime config is stale. */
+  readonly assertExecutionAdmission?: () => void
   /** 当前 worker capability；调用方必须按 harness 给出的固定权限快照过滤。 */
   readonly capabilityBundle?: (ctx: WorkerCapabilityContext) => Promise<CapabilityBundle>
   /** Shared bg registry ownership check for builtin end_turn state mapping. */
@@ -347,6 +350,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
       )
     },
     builtinSpawnDefaults: deps.builtinSpawnDefaults,
+    assertExecutionAdmission: deps.assertExecutionAdmission,
     capabilityBundle: deps.capabilityBundle,
     hasRunningBg: deps.hasRunningBg,
     validateLegacyContinuationAuth: (auth) => principals.validateLegacyContinuationAuth(auth),
@@ -462,6 +466,7 @@ export function buildManagerStack(deps: BootstrapDeps): ManagerStack {
         // 并不因此改变——它是会话属性,不是本轮属性。
         memoryServer: deps.memoryServerFor(memoryContextFor(key, principals.get(key))),
         callAdmin: deps.callAdmin,
+        getRuntimeConfigSummary: deps.getRuntimeConfigSummary,
         isSystemThread,
         authorization: () => principals.currentMasterAuthorization(key),
         validateMasterAuthorization: (auth) => principals.validateMasterAuthorization(auth),

@@ -10,6 +10,7 @@ import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import * as fs from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
+import { buildChildEnv, CORE_AGENT_RUNTIME_BEARER_ENV, scrubChildEnv } from '../../core/runtime-env.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -34,7 +35,7 @@ export class TmuxDriver {
 
   async available(): Promise<boolean> {
     try {
-      await execFileAsync(this.tmuxBin, ['-V'])
+      await execFileAsync(this.tmuxBin, ['-V'], { env: buildChildEnv() })
       return true
     } catch {
       return false
@@ -45,8 +46,8 @@ export class TmuxDriver {
     // pipe-pane 首次落盘前文件应已存在,方便调用方直接 watch;不截断已存在内容。
     await fs.writeFile(spec.outputFile, '', { flag: 'a' })
 
-    const envArgs: string[] = []
-    for (const [key, value] of Object.entries(spec.env ?? {})) {
+    const envArgs: string[] = ['-e', `${CORE_AGENT_RUNTIME_BEARER_ENV}=`]
+    for (const [key, value] of Object.entries(scrubChildEnv(spec.env ?? {}))) {
       envArgs.push('-e', `${key}=${value}`)
     }
 
@@ -133,13 +134,13 @@ export class TmuxDriver {
   }
 
   private run(args: string[]): Promise<{ stdout: string; stderr: string }> {
-    return execFileAsync(this.tmuxBin, args)
+    return execFileAsync(this.tmuxBin, args, { env: buildChildEnv() })
   }
 
   /** `tmux load-buffer -b <name> -` 从 stdin 灌入内容,不把文本经过 shell 参数或临时文件。 */
   private loadBufferFromStdin(bufferName: string, content: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      const child = spawn(this.tmuxBin, ['load-buffer', '-b', bufferName, '-'])
+      const child = spawn(this.tmuxBin, ['load-buffer', '-b', bufferName, '-'], { env: buildChildEnv() })
       let stderr = ''
       child.stderr.on('data', (chunk: Buffer) => {
         stderr += chunk.toString('utf-8')

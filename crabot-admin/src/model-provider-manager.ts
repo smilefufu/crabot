@@ -8,6 +8,7 @@
 import fs from 'fs/promises'
 import path from 'path'
 import { generateId, generateTimestamp } from 'crabot-shared'
+import { durableAtomicWriteFile } from './durable-file.js'
 import type {
   ModelProvider,
   ModelInfo,
@@ -26,6 +27,14 @@ import type {
 } from './types.js'
 import type { OnConflict } from './backup/import/import-types.js'
 import { findPresetVendor } from './vendor-registry.js'
+import type { ConfigDomain, CoreAgentConfigMutationContext } from './core-agent-config-revision-store.js'
+
+export type ProviderConfigMutationRunner = (
+  domains: ConfigDomain[],
+  prepareAfterSnapshot: () => Promise<unknown>,
+  applySourceMutation: (context: CoreAgentConfigMutationContext) => Promise<void>,
+  allowRuntimeNoop?: boolean,
+) => Promise<void>
 
 /**
  * 错误体截断长度。中转/Provider 的 4xx body 经常 >200 字符，截太短看不到根因。
@@ -302,6 +311,9 @@ export class ModelProviderManager {
   private readonly globalConfigFilePath: string
   private readonly moduleConfigsDir: string
   private refreshInFlight: Map<string, Promise<import('./oauth/openai-codex-oauth.js').OAuthLoginResult>> = new Map()
+  private mutationRunner: ProviderConfigMutationRunner | null = null
+  private semanticSnapshotProvider: (() => unknown) | null = null
+  private mutationTail: Promise<void> = Promise.resolve()
 
   constructor(dataDir: string) {
     this.dataDir = dataDir
@@ -316,11 +328,43 @@ export class ModelProviderManager {
     await this.loadData()
   }
 
-  // ============================================================================
-  // Provider CRUD
-  // ============================================================================
+  setMutationRunner(runner: ProviderConfigMutationRunner): void {
+    this.mutationRunner = runner
+  }
+
+  private async serial<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.mutationTail
+    let release!: () => void
+    this.mutationTail = new Promise<void>((resolve) => { release = resolve })
+    await previous
+    try { return await operation() } finally { release() }
+  }
+
+  private async mutateRuntimeConfig(
+    domains: ConfigDomain[],
+    preview: () => Promise<unknown>,
+    apply: () => Promise<void>,
+    allowRuntimeNoop = false,
+  ): Promise<void> {
+    if (this.mutationRunner) return this.mutationRunner(domains, preview, apply, allowRuntimeNoop)
+    return apply()
+  }
+
+  setSemanticSnapshotProvider(provider: () => unknown): void {
+    this.semanticSnapshotProvider = provider
+  }
+
+  private async previewSemanticSnapshot(temporarilyApply: () => void, rollback: () => void): Promise<unknown> {
+    temporarilyApply()
+    try { return this.semanticSnapshotProvider?.() } finally { rollback() }
+  }
+
 
   async createProvider(params: CreateModelProviderParams): Promise<ModelProvider> {
+    return this.serial(() => this.createProviderUnlocked(params))
+  }
+
+  private async createProviderUnlocked(params: CreateModelProviderParams): Promise<ModelProvider> {
     const now = generateTimestamp()
     const provider: ModelProvider = {
       id: generateId(),
@@ -337,10 +381,13 @@ export class ModelProviderManager {
       updated_at: now,
     }
 
-    this.providers.set(provider.id, provider)
-    await this.saveProviders()
-
-    console.log(`[ModelProviderManager] Created provider ${provider.id} (${provider.name})`)
+    await this.mutateRuntimeConfig(['models'], async () => this.previewSemanticSnapshot(
+      () => this.providers.set(provider.id, provider),
+      () => this.providers.delete(provider.id),
+    ), async () => {
+      this.providers.set(provider.id, provider)
+      await this.saveProviders()
+    })
     return provider
   }
 
@@ -353,44 +400,72 @@ export class ModelProviderManager {
   }
 
   async updateProvider(id: string, params: UpdateModelProviderParams): Promise<ModelProvider> {
+    return this.serial(() => this.updateProviderUnlocked(id, params))
+  }
+
+  private async updateProviderUnlocked(id: string, params: UpdateModelProviderParams): Promise<ModelProvider> {
     const provider = this.providers.get(id)
     if (!provider) {
       throw new Error('Provider not found')
     }
 
-    // 更新本地数据
-    if (params.name !== undefined) provider.name = params.name
-    if (params.endpoint !== undefined) provider.endpoint = params.endpoint
-    if (params.api_key !== undefined) provider.api_key = params.api_key
-    if (params.models !== undefined) provider.models = params.models
-    if (params.status !== undefined) provider.status = params.status
-
-    provider.updated_at = generateTimestamp()
-
-    this.providers.set(id, provider)
-    await this.saveProviders()
+    // 显式字段白名单：REST body 无运行时校验，不得全量 spread（防止改写
+    // format/id/type/oauth_credential 等敏感字段）。
+    const updated: ModelProvider = {
+      ...provider,
+      ...(params.name !== undefined ? { name: params.name } : {}),
+      ...(params.endpoint !== undefined ? { endpoint: params.endpoint } : {}),
+      ...(params.api_key !== undefined ? { api_key: params.api_key } : {}),
+      ...(params.models !== undefined ? { models: params.models } : {}),
+      ...(params.status !== undefined ? { status: params.status } : {}),
+      updated_at: generateTimestamp(),
+    }
+    await this.mutateRuntimeConfig(['models'], async () => this.previewSemanticSnapshot(
+      () => this.providers.set(id, updated),
+      () => this.providers.set(id, provider),
+    ), async () => {
+      this.providers.set(id, updated)
+      await this.saveProviders()
+    }, true)
 
     console.log(`[ModelProviderManager] Updated provider ${id}`)
-    return provider
+    return updated
   }
 
   async deleteProvider(id: string): Promise<void> {
+    return this.serial(() => this.deleteProviderUnlocked(id))
+  }
+
+  private async deleteProviderUnlocked(id: string): Promise<void> {
     const provider = this.providers.get(id)
     if (!provider) {
       throw new Error('Provider not found')
     }
 
-    this.providers.delete(id)
-    await this.saveProviders()
-
-    console.log(`[ModelProviderManager] Deleted provider ${id}`)
+    await this.mutateRuntimeConfig(['models'], async () => this.previewSemanticSnapshot(
+      () => this.providers.delete(id),
+      () => this.providers.set(id, provider),
+    ), async () => {
+      this.providers.delete(id)
+      await this.saveProviders()
+    })
   }
 
   async upsertById(provider: ModelProvider, onConflict: OnConflict): Promise<'imported' | 'overwritten' | 'skipped'> {
+    return this.serial(() => this.upsertByIdUnlocked(provider, onConflict))
+  }
+
+  private async upsertByIdUnlocked(provider: ModelProvider, onConflict: OnConflict): Promise<'imported' | 'overwritten' | 'skipped'> {
     const exists = this.providers.has(provider.id)
     if (exists && onConflict === 'skip') return 'skipped'
-    this.providers.set(provider.id, provider)
-    await this.saveProviders()
+    const previous = this.providers.get(provider.id)
+    await this.mutateRuntimeConfig(['models'], async () => this.previewSemanticSnapshot(
+      () => this.providers.set(provider.id, provider),
+      () => { if (previous) this.providers.set(provider.id, previous); else this.providers.delete(provider.id) },
+    ), async () => {
+      this.providers.set(provider.id, provider)
+      await this.saveProviders()
+    }, exists)
     return exists ? 'overwritten' : 'imported'
   }
 
@@ -416,8 +491,13 @@ export class ModelProviderManager {
       oauth_credential: credential,
       updated_at: generateTimestamp(),
     }
-    this.providers.set(providerId, updated)
-    await this.saveProviders()
+    await this.mutateRuntimeConfig(['models'], async () => this.previewSemanticSnapshot(
+      () => this.providers.set(providerId, updated),
+      () => this.providers.set(providerId, provider),
+    ), async () => {
+      this.providers.set(providerId, updated)
+      await this.saveProviders()
+    })
   }
 
   async clearOAuthCredential(providerId: string): Promise<void> {
@@ -430,8 +510,15 @@ export class ModelProviderManager {
       api_key: '',
       updated_at: generateTimestamp(),
     }
-    this.providers.set(providerId, updated)
-    await this.saveProviders()
+    // credential 不在语义投影里：对已登出/从未登录的 provider 登出是 noop，
+    // 必须容忍（保持幂等），否则抛 'did not change semantic snapshot'。
+    await this.mutateRuntimeConfig(['models'], async () => this.previewSemanticSnapshot(
+      () => this.providers.set(providerId, updated),
+      () => this.providers.set(providerId, provider),
+    ), async () => {
+      this.providers.set(providerId, updated)
+      await this.saveProviders()
+    }, true)
   }
 
   getOAuthCredential(providerId: string): OAuthCredential | undefined {
@@ -511,15 +598,21 @@ export class ModelProviderManager {
    */
   private async measureEndpointLatency(provider: ModelProvider): Promise<{ success: boolean; latency_ms: number; error?: string }> {
     const result = await this.probeEndpointConnectivity(provider)
-    if (result.success) {
-      provider.status = 'active'
-      provider.last_validated_at = generateTimestamp()
-      provider.validation_error = undefined
-    } else {
-      provider.status = 'error'
-      provider.validation_error = result.error
+    const previous = { ...provider }
+    const updated = { ...provider,
+      status: result.success ? 'active' as const : 'error' as const,
+      last_validated_at: result.success ? generateTimestamp() : provider.last_validated_at,
+      validation_error: result.success ? undefined : result.error,
     }
-    await this.saveProviders()
+    // status 不变时语义快照不变（重复测试/对已 error 的 provider 再测）：
+    // 允许 runtime noop，连通性结果与 last_validated_at 照常落盘。
+    await this.mutateRuntimeConfig(['models'], async () => this.previewSemanticSnapshot(
+      () => this.providers.set(provider.id, updated),
+      () => this.providers.set(provider.id, previous),
+    ), async () => {
+      this.providers.set(provider.id, updated)
+      await this.saveProviders()
+    }, true)
     return result
   }
 
@@ -748,10 +841,16 @@ export class ModelProviderManager {
 
     const mergedModels = freshModels
 
-    provider.models = mergedModels
-    provider.updated_at = generateTimestamp()
-    this.providers.set(id, provider)
-    await this.saveProviders()
+    const updated = { ...provider, models: mergedModels, updated_at: generateTimestamp() }
+    // 厂商模型列表与本地一致时语义快照不变：允许 runtime noop，否则最常见的
+    // refresh 结果会抛错并跳过 autoConfigureImageSlot。
+    await this.mutateRuntimeConfig(['models'], async () => this.previewSemanticSnapshot(
+      () => this.providers.set(id, updated),
+      () => this.providers.set(id, provider),
+    ), async () => {
+      this.providers.set(id, updated)
+      await this.saveProviders()
+    }, true)
 
     await this.autoConfigureImageSlot(id)
 
@@ -997,14 +1096,49 @@ export class ModelProviderManager {
    * 更新代理配置
    */
   async updateProxyConfig(proxy: ProxyConfig): Promise<void> {
-    this.globalConfig = { ...this.globalConfig, proxy }
-    await this.saveGlobalConfig()
+    await this.serial(async () => {
+      this.globalConfig = { ...this.globalConfig, proxy }
+      await this.saveGlobalConfig()
+    })
   }
 
   async updateGlobalConfig(config: Partial<GlobalModelConfig>): Promise<GlobalModelConfig> {
-    this.globalConfig = { ...this.globalConfig, ...config }
-    await this.saveGlobalConfig()
-    return this.globalConfig
+    return this.serial(async () => {
+      const updated = { ...this.globalConfig, ...config }
+      const publicBaseUrlChanged = Object.prototype.hasOwnProperty.call(config, 'public_base_url') &&
+      config.public_base_url !== this.globalConfig.public_base_url
+    const llmChanged = (
+      Object.prototype.hasOwnProperty.call(config, 'default_llm_provider_id') && config.default_llm_provider_id !== this.globalConfig.default_llm_provider_id
+    ) || (
+      Object.prototype.hasOwnProperty.call(config, 'default_llm_model_id') && config.default_llm_model_id !== this.globalConfig.default_llm_model_id
+    )
+    const imageChanged = (
+      Object.prototype.hasOwnProperty.call(config, 'default_image_provider_id') && config.default_image_provider_id !== this.globalConfig.default_image_provider_id
+    ) || (
+      Object.prototype.hasOwnProperty.call(config, 'default_image_model_id') && config.default_image_model_id !== this.globalConfig.default_image_model_id
+    ) || (
+      Object.prototype.hasOwnProperty.call(config, 'image_slot_user_set') && config.image_slot_user_set !== this.globalConfig.image_slot_user_set
+    )
+    const domains: ConfigDomain[] = [
+      ...(llmChanged ? ['models' as const] : []),
+      ...(imageChanged ? ['image' as const] : []),
+      ...(publicBaseUrlChanged ? ['behavior' as const] : []),
+    ]
+    if (domains.length === 0) {
+      this.globalConfig = updated
+      await this.saveGlobalConfig()
+      return updated
+    }
+    const previous = this.globalConfig
+    await this.mutateRuntimeConfig(domains, async () => this.previewSemanticSnapshot(
+      () => { this.globalConfig = updated },
+      () => { this.globalConfig = previous },
+    ), async () => {
+      this.globalConfig = updated
+      await this.saveGlobalConfig()
+    })
+      return updated
+    })
   }
 
   // ============================================================================
@@ -1076,6 +1210,9 @@ export class ModelProviderManager {
       this.globalConfig = {
         default_llm_provider_id: raw.default_llm_provider_id,
         default_llm_model_id: raw.default_llm_model_id,
+        default_image_provider_id: raw.default_image_provider_id,
+        default_image_model_id: raw.default_image_model_id,
+        image_slot_user_set: raw.image_slot_user_set,
         proxy: raw.proxy,
         public_base_url: raw.public_base_url,
         trace_retention_days: raw.trace_retention_days ?? null,
@@ -1110,9 +1247,7 @@ export class ModelProviderManager {
    * 原子写入文件：先写临时文件，再 rename（避免进程被杀时文件损坏）
    */
   private async atomicWriteFile(filePath: string, content: string): Promise<void> {
-    const tempPath = `${filePath}.tmp`
-    await fs.writeFile(tempPath, content, 'utf-8')
-    await fs.rename(tempPath, filePath)
+    await durableAtomicWriteFile(filePath, content)
   }
 
   private async saveProviders(): Promise<void> {

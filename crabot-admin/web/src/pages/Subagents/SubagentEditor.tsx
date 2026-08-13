@@ -445,7 +445,7 @@ const CAPABILITY_TOOLS: Record<keyof BuiltinCapabilities, string> = {
   shell: 'Bash + Output, Kill, ListEntities',
   task_intel: 'search_traces, get_task_details, search_short_term',
   crab_memory: 'crab-memory MCP 全部工具',
-  crab_messaging: 'crab-messaging MCP 全部工具',
+  crab_messaging: 'crab-messaging MCP 全部工具。v3 协议固定为 off：Worker/subagent 不允许人类出口（见 protocol-admin §3.19 / protocol-agent-v3 §11），此开关只读。',
 }
 
 const CapabilitiesTab: React.FC<{
@@ -482,15 +482,18 @@ const CapabilitiesTab: React.FC<{
       </div>
       <div>
         <div style={{ color: 'var(--text-muted)', marginBottom: 8, fontSize: 12 }}>敏感（默认 off）</div>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        {/* crab_messaging 由协议强制 false（v3 Worker/subagent 无人类出口，见 protocol-admin §3.19），
+            下发时 Admin 也硬置 false。UI 若允许勾选会造成「开了却不生效」的误导，故置灰只读。 */}
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, opacity: 0.55, cursor: 'not-allowed' }}>
           <input
             type="checkbox"
             aria-label="crab_messaging"
-            checked={form.builtin_capabilities.crab_messaging}
-            onChange={() => toggle('crab_messaging')}
+            checked={false}
+            disabled
+            onChange={() => {}}
           />
           <Tooltip content={CAPABILITY_TOOLS.crab_messaging}>
-            <span style={{ fontFamily: 'var(--font-mono)' }}>crab_messaging</span>
+            <span style={{ fontFamily: 'var(--font-mono)' }}>crab_messaging（协议固定 off）</span>
           </Tooltip>
         </label>
       </div>

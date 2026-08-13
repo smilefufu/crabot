@@ -28,6 +28,7 @@ describe('AgentManager', () => {
 
     agentManager = new AgentManager(testDataDir)
     await agentManager.initialize()
+    await agentManager.initializeStandaloneDefaults()
 
     // Mock RpcClient
     mockRpcClient = {
@@ -55,6 +56,24 @@ describe('AgentManager', () => {
     } catch {
       // 忽略清理错误
     }
+  })
+
+  it('loads persisted core config without default writes and preserves it across restart', async () => {
+    const dir = path.join(process.cwd(), 'test-data', `agent-manager-load-${Date.now()}`)
+    const configDir = path.join(dir, 'agent-configs')
+    try {
+      await fs.mkdir(configDir, { recursive: true })
+      const persisted = { instance_id: 'crabot-agent', system_prompt: 'persisted', model_config: { powerful: { provider_id: 'p', model_id: 'm' } }, max_iterations: 7, tools_readonly: true }
+      await fs.writeFile(path.join(configDir, 'crabot-agent.json'), JSON.stringify(persisted))
+      const manager = new AgentManager(dir)
+      await manager.initialize()
+      expect(manager.getConfig('crabot-agent')).toMatchObject(persisted)
+      const before = await fs.readFile(path.join(configDir, 'crabot-agent.json'), 'utf8')
+      expect(before).toContain('persisted')
+      const restarted = new AgentManager(dir)
+      await restarted.initialize()
+      expect(restarted.getConfig('crabot-agent')).toMatchObject(persisted)
+    } finally { await fs.rm(dir, { recursive: true, force: true }) }
   })
 
   describe('Implementation CRUD', () => {
@@ -144,7 +163,7 @@ describe('AgentManager', () => {
         name: 'Test Instance',
         specialization: 'Test',
       }
-      await agentManager.createInstance(params)
+      await agentManager.createInstance(params, true)
 
       // 尝试删除实现应该失败
       await expect(agentManager.removeImplementation('test-impl-2')).rejects.toThrow(
@@ -187,7 +206,7 @@ describe('AgentManager', () => {
         start_priority: 30,
       }
 
-      const instance = await agentManager.createInstance(params)
+      const instance = await agentManager.createInstance(params, true)
       expect(instance.id).toBe('test-worker')
       expect(instance.name).toBe('Test Worker')
       expect(instance.max_concurrent_tasks).toBe(5)
@@ -203,7 +222,7 @@ describe('AgentManager', () => {
         specialization: 'Testing',
       }
 
-      const instance = await agentManager.createInstance(params)
+      const instance = await agentManager.createInstance(params, true)
       expect(instance.max_concurrent_tasks).toBe(5)
       expect(instance.auto_start).toBe(true)
       expect(instance.start_priority).toBe(20)
@@ -216,7 +235,7 @@ describe('AgentManager', () => {
         specialization: 'Test',
       }
 
-      await expect(agentManager.createInstance(params)).rejects.toThrow(
+      await expect(agentManager.createInstance(params, true)).rejects.toThrow(
         'Implementation not found: non-existent'
       )
     })
@@ -228,7 +247,7 @@ describe('AgentManager', () => {
         specialization: 'Test',
       }
 
-      await expect(agentManager.createInstance(params)).rejects.toThrow(
+      await expect(agentManager.createInstance(params, true)).rejects.toThrow(
         'Instance already exists: crabot-agent'
       )
     })
@@ -265,7 +284,7 @@ describe('AgentManager', () => {
         name: 'To Delete',
         specialization: 'Test',
       }
-      await agentManager.createInstance(createParams)
+      await agentManager.createInstance(createParams, true)
 
       // 删除实例
       await agentManager.deleteInstance('to-delete')
@@ -303,7 +322,7 @@ describe('AgentManager', () => {
       await agentManager.addImplementation(installedImpl)
     })
 
-    it('should register and start module when creating instance', async () => {
+    it('rejects dynamic module registration before runtime, MM, or persistence side effects', async () => {
       const params: CreateAgentInstanceParams = {
         implementation_id: 'installed-test',
         name: 'Test Module Instance',
@@ -311,66 +330,15 @@ describe('AgentManager', () => {
         auto_start: true,
       }
 
-      const instance = await agentManager.createInstance(
-        params,
-        mockRpcClient,
-        mockRuntimeManager
-      )
+      await expect(agentManager.createInstance(params))
+        .rejects.toMatchObject({ code: 'ADMIN_HOTPLUG_NOT_ALLOWED' })
 
-      expect(instance.module_registered).toBe(true)
-      expect(mockRuntimeManager.createStartCommand).toHaveBeenCalled()
-      expect(mockRpcClient.registerModuleDefinition).toHaveBeenCalled()
-      expect(mockRpcClient.startModule).toHaveBeenCalledWith('test-module-instance', 'admin')
-    })
-
-    it('should not start module when auto_start is false', async () => {
-      const params: CreateAgentInstanceParams = {
-        implementation_id: 'installed-test',
-        name: 'Test No Start',
-        specialization: 'Test',
-        auto_start: false,
-      }
-
-      await agentManager.createInstance(params, mockRpcClient, mockRuntimeManager)
-
-      expect(mockRpcClient.registerModuleDefinition).toHaveBeenCalled()
+      expect(mockRuntimeManager.createStartCommand).not.toHaveBeenCalled()
+      expect(mockRpcClient.registerModuleDefinition).not.toHaveBeenCalled()
       expect(mockRpcClient.startModule).not.toHaveBeenCalled()
+      expect(agentManager.getInstance('test-module-instance')).toBeUndefined()
     })
 
-    it('should rollback on registration failure', async () => {
-      // Mock 注册失败
-      mockRpcClient.registerModuleDefinition = vi.fn().mockRejectedValue(new Error('Registration failed'))
-
-      const params: CreateAgentInstanceParams = {
-        implementation_id: 'installed-test',
-        name: 'Test Rollback',
-        specialization: 'Test',
-      }
-
-      await expect(
-        agentManager.createInstance(params, mockRpcClient, mockRuntimeManager)
-      ).rejects.toThrow('Registration failed')
-
-      // 验证实例已回滚
-      const instance = agentManager.getInstance('test-rollback')
-      expect(instance).toBeUndefined()
-    })
-
-    it('should stop and unregister module when deleting instance', async () => {
-      // 先创建一个已注册的实例
-      const params: CreateAgentInstanceParams = {
-        implementation_id: 'installed-test',
-        name: 'Test Delete Module',
-        specialization: 'Test',
-      }
-      await agentManager.createInstance(params, mockRpcClient, mockRuntimeManager)
-
-      // 删除实例
-      await agentManager.deleteInstance('test-delete-module', mockRpcClient)
-
-      expect(mockRpcClient.stopModule).toHaveBeenCalledWith('test-delete-module', 'admin')
-      expect(mockRpcClient.unregisterModuleDefinition).toHaveBeenCalledWith('test-delete-module', 'admin')
-    })
   })
 
   describe('Config CRUD', () => {
@@ -400,6 +368,50 @@ describe('AgentManager', () => {
       expect(updated.tools_readonly).toBe(false) // 保持原值
     })
 
+    it('classifies core semantic config mutations by changed domain', async () => {
+      const calls: string[][] = []
+      agentManager.setMutationRunner(async (domains, _preview, apply) => {
+        calls.push([...domains])
+        await apply({} as any)
+      })
+
+      await agentManager.updateConfig({ instance_id: 'crabot-agent', system_prompt: 'behavior change' })
+      await agentManager.updateConfig({
+        instance_id: 'crabot-agent',
+        model_config: { powerful: { provider_id: 'provider', model_id: 'model' } },
+      })
+      await agentManager.updateConfig({
+        instance_id: 'crabot-agent',
+        system_prompt: 'combined behavior change',
+        model_config: { powerful: { provider_id: 'provider-2', model_id: 'model-2' } },
+      })
+      await agentManager.updateConfig({ instance_id: 'crabot-agent', mcp_server_ids: ['legacy-only'] })
+
+      expect(calls).toEqual([['behavior'], ['models'], ['models', 'behavior']])
+    })
+
+    it('serializes concurrent disjoint core config patches', async () => {
+      await Promise.all([
+        agentManager.updateConfig({ instance_id: 'crabot-agent', system_prompt: 'concurrent prompt' }),
+        agentManager.updateConfig({ instance_id: 'crabot-agent', timezone: 'UTC' }),
+      ])
+      expect(agentManager.getConfig('crabot-agent')).toMatchObject({
+        system_prompt: 'concurrent prompt', timezone: 'UTC',
+      })
+    })
+
+    it('does not run a semantic mutation for an unchanged core config value', async () => {
+      const calls: string[][] = []
+      agentManager.setMutationRunner(async (domains, _preview, apply) => {
+        calls.push([...domains])
+        await apply({} as any)
+      })
+      const current = agentManager.getConfig('crabot-agent')!
+
+      await agentManager.updateConfig({ instance_id: 'crabot-agent', system_prompt: current.system_prompt })
+
+      expect(calls).toEqual([])
+    })
     it('should throw error when updating non-existent config', async () => {
       const params: UpdateAgentConfigParams = {
         instance_id: 'non-existent',
@@ -497,7 +509,7 @@ describe('AgentManager', () => {
         specialization: 'Test',
       }
 
-      await agentManager.createInstance(params)
+      await agentManager.createInstance(params, true)
 
       // 创建新的 AgentManager 实例来验证持久化
       const newManager = new AgentManager(testDataDir)

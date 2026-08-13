@@ -16,16 +16,13 @@ describe('Admin Master Chat 集成测试', () => {
   let adminModule: AdminModule
   let webPort: number
   let jwtToken: string
+  let dataDir: string
 
   beforeAll(async () => {
     // 密码从 .env 迁到 credentials.json
     process.env.CRABOT_JWT_SECRET = 'test-jwt-secret-at-least-32-chars-long'
 
-    const dataDir = '/tmp/crabot-test-admin-chat'
-    await fs.mkdir(dataDir, { recursive: true })
-    // 清理上一轮残留
-    await fs.rm(`${dataDir}/credentials.json`, { force: true })
-    await fs.rm(`${dataDir}/.env`, { force: true })
+    dataDir = await fs.mkdtemp('/tmp/crabot-test-admin-chat-')
 
     const cred = await newCredentialsFromPassword('test123', { is_temp: false, changed_via: 'start' })
     await writeCredentials(dataDir, cred)
@@ -43,7 +40,7 @@ describe('Admin Master Chat 集成测试', () => {
 
     adminModule = new AdminModule(moduleConfig, {
       web_port: webPort,
-      data_dir: '/tmp/crabot-test-admin-chat',
+      data_dir: dataDir,
       password_env: 'CRABOT_ADMIN_PASSWORD',
       jwt_secret_env: 'CRABOT_JWT_SECRET',
       token_ttl: 3600,
@@ -66,6 +63,9 @@ describe('Admin Master Chat 集成测试', () => {
   afterAll(async () => {
     if (adminModule) {
       await adminModule.stop()
+    }
+    if (dataDir) {
+      await fs.rm(dataDir, { recursive: true, force: true })
     }
   })
 

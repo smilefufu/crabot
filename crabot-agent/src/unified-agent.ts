@@ -27,9 +27,6 @@ import type {
   SessionId,
   Friend,
   LLMRoleRequirement,
-  GetConfigResult,
-  UpdateConfigParams,
-  UpdateConfigResult,
   LLMConnectionInfo,
   TraceCallback,
   BuiltinToolConfig,
@@ -56,8 +53,9 @@ import { mcpServerToToolDefinitions } from './agent/mcp-tool-bridge.js'
 import { createTmpPageTools } from './agent/tmp-page-tools.js'
 import { createCrabMessagingServer, type PathMapping, type TaskContext } from './mcp/crab-messaging.js'
 import { toImageConnInfo, imageToolsFor, type ImageConnInfo } from './mcp/crab-image.js'
-import { TraceStore } from './core/trace-store.js'
 import { getAgentTraceDir, getAgentLogsDir, getAgentDataDir, getWorkspaceDir, getDataRootDir, getAdminDataDir } from './core/data-paths.js'
+import { ConfigLoader } from './core/config-loader.js'
+import { TraceStore } from './core/trace-store.js'
 import { importV2LegacyTasks } from './workers/legacy-importer.js'
 import {
   compareLegacyTraceEventEntries,
@@ -427,6 +425,20 @@ export class UnifiedAgent extends ModuleBase {
   private orchestrationConfig: OrchestrationConfig
   private agentConfig?: AgentLayerConfig
   private extra: Record<string, unknown>
+  private configRevision = ConfigLoader.revision
+  private configStale = false
+  private configAuthenticated: boolean
+  private configPullTimer?: ReturnType<typeof setTimeout>
+  /** Single-flight guard: concurrent invalidations must not run overlapping pulls. */
+  private configPullInFlight?: Promise<void>
+  /** A new invalidation arrived while a pull was in flight; run one more after it settles. */
+  private configPullDirty = false
+  /** Backoff retry after pull failure so a transient error cannot pin the Agent fail-closed. */
+  private configPullRetryTimer?: ReturnType<typeof setTimeout>
+  private configPullRetryDelayMs = 1_000
+  /** A failed pull destructively detached runtime resources; recovery must rebuild them
+   *  even when the revision does not advance. */
+  private configResourcesDetached = false
 
   // 端口缓存
   private adminPort?: number
@@ -506,6 +518,7 @@ export class UnifiedAgent extends ModuleBase {
         'admin.friend_updated',
         'admin.friend_deleted',
         'media.download_completed',
+        'admin.agent_config_invalidated',
       ],
     }
 
@@ -524,7 +537,10 @@ export class UnifiedAgent extends ModuleBase {
 
     this.orchestrationConfig = config.orchestration
     this.agentConfig = config.agent_config
+    this.configAuthenticated = config.runtime_config_authenticated ?? true
     this.extra = config.extra ?? {}
+    this.imageConnInfo = toImageConnInfo(config)
+    this.imageCapability = config.image_capability ?? { available: false }
 
     // 初始化编排层组件
     this.sessionManager = new SessionManager(this.orchestrationConfig.session_state_ttl)
@@ -593,18 +609,27 @@ export class UnifiedAgent extends ModuleBase {
    * 检查 Agent 是否已配置（LLM API key 是否存在）
    */
   isConfigured(): boolean {
-    const mc = this.agentConfig?.model_config
-    if (!mc) return false
-    // 任意一个 slot 有配置即认为已配置
-    return Object.values(mc).some(m => m && m.apikey && m.model_id)
+    return !this.configStale && this.hasRuntimeExecutionConfig()
+  }
+
+  /** Central admission for every new runtime-config-dependent execution. */
+  private assertRuntimeExecutionAdmission(): void {
+    if (!this.configAuthenticated || this.configStale) throw new Error('AGENT_RUNTIME_CONFIG_STALE')
+    if (!this.hasRuntimeExecutionConfig()) throw new Error('Agent runtime config is not configured')
+  }
+
+  private hasRuntimeExecutionConfig(): boolean {
+    const powerful = this.agentConfig?.model_config?.powerful
+    return !!powerful?.apikey && !!powerful.model_id
   }
 
   /**
+
    * 初始化智能体层
    */
   private initializeAgentLayer(config: AgentLayerConfig): void {
-    // 设置角色
-    for (const role of config.roles) {
+    // 设置角色（legacy 内部门控；wire 不下发，pull 路径已由 ConfigLoader 补齐）
+    for (const role of config.roles ?? ['front', 'worker']) {
       this.roles.add(role)
     }
 
@@ -725,6 +750,7 @@ export class UnifiedAgent extends ModuleBase {
         ),
       callAdmin: async <P, R>(method: string, params: P): Promise<R> =>
         this.rpcClient.call<P, R>(await this.getAdminPort(), method, params, this.config.moduleId),
+      getRuntimeConfigSummary: () => this.agentConfig,
       // 发起人身份的解析原料：全是**既有**入口，本处只做注入，不新造解析逻辑。
       principalResolver: {
         resolvePermissions: (p) =>
@@ -746,7 +772,11 @@ export class UnifiedAgent extends ModuleBase {
         },
       },
       // 起化身时现取（spec 决策 2）：箭头函数只捕获 `this`，配置一律在调用那一刻读。
-      builtinSpawnDefaults: (ctx) => this.buildBuiltinWorkerRuntime(ctx),
+      builtinSpawnDefaults: (ctx) => {
+        this.assertRuntimeExecutionAdmission()
+        return this.buildBuiltinWorkerRuntime(ctx)
+      },
+      assertExecutionAdmission: () => this.assertRuntimeExecutionAdmission(),
       capabilityBundle: async ({ principal_permissions }) => {
         const workerPermissions = narrowWorkerPermissions(
           BUILTIN_WORKER_PERMISSIONS,
@@ -1140,13 +1170,12 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('get_status', this.handleGetStatus.bind(this))
     this.registerMethod('get_llm_requirements', this.handleGetLLMRequirements.bind(this))
 
-    // 配置管理接口
-    this.registerMethod('get_config', this.handleGetConfig.bind(this))
-    this.registerMethod('update_config', this.handleUpdateConfig.bind(this))
+    // 配置管理接口已退役：runtime config 只经 bearer 认证的 get_agent_config pull 进入，
+    // get_config/update_config 是无认证的 secret 读/写面且已无调用方（见 protocol-agent-v3 §8.6）。
 
-    if (this.roles.has('worker')) {
-      this.registerMethod('deliver_page_feedback', this.handleDeliverPageFeedback.bind(this))
-    }
+    // 无条件注册：roles 是 legacy 内部门控，singleton core Agent 恒承载 worker 层；
+    // 降级未配置时 handler 自身安全兜底（delivered:false），wire 面与正常启动等价。
+    this.registerMethod('deliver_page_feedback', this.handleDeliverPageFeedback.bind(this))
 
     // Trace 接口
     this.registerMethod('get_traces', this.handleGetTraces.bind(this))
@@ -1180,6 +1209,10 @@ export class UnifiedAgent extends ModuleBase {
    */
   protected override async onEvent(event: Event): Promise<void> {
     switch (event.type) {
+      case 'admin.agent_config_invalidated':
+        this.scheduleRuntimeConfigPull()
+        break
+
       case 'channel.message_authorized':
         await this.handleMessageReceived(event.payload as { message: ChannelMessage; friend: Friend; crab_display_name?: string; crab_self_handle?: string })
         break
@@ -1202,6 +1235,7 @@ export class UnifiedAgent extends ModuleBase {
       }
 
       case 'media.download_completed': {
+        this.assertRuntimeExecutionAdmission()
         const p = event.payload as { channel_id: string; session_id?: string; handle: string; status: string; error?: string }
         if (!p.session_id) break
         const note = p.status === 'ready'
@@ -1219,6 +1253,217 @@ export class UnifiedAgent extends ModuleBase {
     }
   }
 
+  private scheduleRuntimeConfigPull(): void {
+    if (this.configPullTimer) return
+    this.configPullTimer = setTimeout(() => {
+      this.configPullTimer = undefined
+      this.runRuntimeConfigPull()
+    }, 50)
+    this.configPullTimer.unref?.()
+  }
+
+  /** Single-flight wrapper around pullRuntimeConfig with dirty-coalesce and backoff retry. */
+  private runRuntimeConfigPull(): void {
+    if (this.configPullInFlight) {
+      this.configPullDirty = true
+      return
+    }
+    if (this.configPullRetryTimer) {
+      clearTimeout(this.configPullRetryTimer)
+      this.configPullRetryTimer = undefined
+    }
+    const run = this.pullRuntimeConfig()
+      .then(() => { this.configPullRetryDelayMs = 1_000 })
+      .catch((error) => {
+        console.error(`[${this.config.moduleId}] authenticated runtime config pull failed:`, error instanceof Error ? error.message : String(error))
+        this.scheduleRuntimeConfigPullRetry()
+      })
+      .finally(() => {
+        this.configPullInFlight = undefined
+        if (this.configPullDirty) {
+          this.configPullDirty = false
+          this.runRuntimeConfigPull()
+        }
+      })
+    this.configPullInFlight = run
+  }
+
+  private scheduleRuntimeConfigPullRetry(): void {
+    if (this.configPullRetryTimer || this.configPullTimer) return
+    const delay = this.configPullRetryDelayMs
+    this.configPullRetryDelayMs = Math.min(this.configPullRetryDelayMs * 2, 30_000)
+    this.configPullRetryTimer = setTimeout(() => {
+      this.configPullRetryTimer = undefined
+      this.runRuntimeConfigPull()
+    }, delay)
+    this.configPullRetryTimer.unref?.()
+  }
+
+  private async pullRuntimeConfig(): Promise<void> {
+    try {
+      const adminPort = await this.getAdminPort()
+      const loaded = await ConfigLoader.pull(this.config.moduleId, this.rpcClient, `http://localhost:${adminPort}`)
+      if (loaded.revision < this.configRevision) {
+        // Response crossed with a newer commit; the newer invalidation owns recovery.
+        // No state change: neither reapplying an older snapshot nor clearing stale is safe.
+        return
+      }
+      if (loaded.revision === this.configRevision) {
+        // A successful authenticated read proves the current revision remains authoritative.
+        // Do not reapply it: a previous transient pull failure must not permanently block ingress.
+        if (this.configResourcesDetached) {
+          // The failed pull destructively disconnected runtime resources; an equal-revision
+          // recovery must rebuild them before admission reopens, or external MCP tools would
+          // silently stay gone until the next real revision change.
+          await this.applyRuntimeConfigCandidate(loaded.config)
+          this.configResourcesDetached = false
+        }
+        this.configStale = false
+        this.configAuthenticated = true
+        return
+      }
+      await this.applyRuntimeConfigCandidate(loaded.config)
+      this.configRevision = loaded.revision
+      ConfigLoader.acceptRevision(loaded.revision)
+      this.configResourcesDetached = false
+      this.configStale = false
+      this.configAuthenticated = true
+    } catch (error) {
+      this.configStale = true
+      this.configAuthenticated = false
+      this.configResourcesDetached = true
+      this.disconnectRuntimeConfigResources()
+      throw error
+    }
+  }
+
+  private disconnectRuntimeConfigResources(): void {
+    void this.mcpConnector.disconnectAll().catch((error) => {
+      console.error(`[${this.config.moduleId}] failed to close stale MCP connections:`, error instanceof Error ? error.message : String(error))
+    })
+  }
+
+  private async applyRuntimeConfigCandidate(next: UnifiedAgentConfig): Promise<void> {
+    const candidate = next.agent_config
+    if (!candidate) throw new Error('Pulled runtime config has no agent config')
+    // All fallible work happens before the live fields are touched.
+    const worker = candidate.model_config.powerful
+    const digest = candidate.model_config.cost_effective ?? worker
+    const nextWorkerSdk = worker ? this.buildSdkEnv(worker) : undefined
+    const nextDigestSdk = digest ? this.buildSdkEnv(digest) : undefined
+    const nextMcp = await McpConnector.prepare(candidate.mcp_servers ?? [])
+    let nextImageConn: ImageConnInfo | undefined
+    let nextImageCapability: { available: boolean; reason?: string } = { available: false }
+    let coldHandler: AgentHandler | undefined
+    try {
+      nextImageConn = toImageConnInfo(next)
+      nextImageCapability = next.image_capability ?? { available: false }
+      if (nextImageCapability.available && !nextImageConn) {
+        throw new Error('Image capability is available without a usable image connection')
+      }
+      const subagents = candidate.subagents ?? []
+      const subagentIds = new Set<string>()
+      for (const subagent of subagents) {
+        if (!subagent.id || subagentIds.has(subagent.id)) throw new Error('Invalid runtime subagent configuration')
+        subagentIds.add(subagent.id)
+      }
+
+      // 降级启动时构造函数没跑 initializeAgentLayer：首次安装必须补上内部 legacy gate 与
+      // LSP，否则 coldHandler 分支永假、worker 层永远建不起来（入口却会因 isConfigured 放开）。
+      // 放在所有 fallible work 之后、live 字段变更之前，保持本方法的既有约定。
+      if (!this.agentConfig) {
+        const roles: Array<'front' | 'worker'> = candidate.roles && candidate.roles.length > 0 ? candidate.roles : ['front', 'worker']
+        for (const role of roles) this.roles.add(role)
+        void this.lspManager.start(getWorkspaceDir())
+      }
+
+      // Construct a missing cold-start handler before the live connector/config mutation. The
+      // constructor captures the connector object's identity, which remains stable through
+      // replaceWith(); any construction failure therefore leaves all live state untouched.
+      if (!this.agentHandler && nextWorkerSdk && this.roles.has('worker')) {
+        const prior = {
+          agentConfig: this.agentConfig,
+          extra: this.extra,
+          worker: this.sdkEnvWorker,
+          digest: this.digestSdkEnv,
+          image: this.imageConnInfo,
+          imageCapability: this.imageCapability,
+        }
+        this.agentConfig = candidate
+        this.extra = next.extra ?? {}
+        this.sdkEnvWorker = nextWorkerSdk
+        this.digestSdkEnv = nextDigestSdk
+        this.imageConnInfo = nextImageConn
+        this.imageCapability = nextImageCapability
+        try {
+          const { workerPersonality } = this.buildPromptParts(candidate.system_prompt)
+          const createMcpConfigs = (taskCtx?: TaskContext): Record<string, McpServer> => ({
+            'crab-messaging': createCrabMessagingServer({
+              rpcClient: this.rpcClient,
+              moduleId: this.config.moduleId,
+              getAdminPort: () => this.getAdminPort(),
+              resolveChannelPort: (channelId) => this.getChannelPort(channelId),
+              enableFeishuDocTool: this.feishuChannelAvailable,
+              ...(taskCtx ? { getTaskContext: () => taskCtx } : {}),
+            }, this.sandboxPathMappingsRef),
+          })
+          coldHandler = this.createWorkerHandler(
+            nextWorkerSdk, workerPersonality, createMcpConfigs,
+            candidate.builtin_tool_config, candidate.skills,
+          )
+        } finally {
+          this.agentConfig = prior.agentConfig
+          this.extra = prior.extra
+          this.sdkEnvWorker = prior.worker
+          this.digestSdkEnv = prior.digest
+          this.imageConnInfo = prior.image
+          this.imageCapability = prior.imageCapability
+        }
+      }
+    } catch (error) {
+      // prepare 已拉起真实 MCP 子进程：后续校验/构造失败必须关掉候选连接，
+      // 否则退避重试每轮泄漏一批子进程（catch 里断的是 live connector，不是候选）。
+      await nextMcp.disconnectAll().catch((closeError) => {
+        console.error(`[${this.config.moduleId}] failed to close candidate MCP connections:`, closeError instanceof Error ? closeError.message : String(closeError))
+      })
+      throw error
+    }
+
+    // Install the live connector identity first. AgentHandler captures this object at construction,
+    // so replacing the field would leave existing task/tool paths pointed at retired clients.
+    const liveMcp = this.mcpConnector
+    await liveMcp.replaceWith(nextMcp)
+    this.mcpConnector = liveMcp
+    this.agentConfig = candidate
+    this.extra = next.extra ?? {}
+    this.sdkEnvWorker = nextWorkerSdk
+    this.digestSdkEnv = nextDigestSdk
+    this.imageConnInfo = nextImageConn
+    this.imageCapability = nextImageCapability
+
+    if (this.agentHandler && nextWorkerSdk) {
+      this.agentHandler.updateMcpConnector(liveMcp)
+      this.agentHandler.updateSdkEnv(nextWorkerSdk, nextDigestSdk)
+      // extra 是原子替换的一部分：必须同步给已运行的 handler（goal_mode_enabled 等开关
+      // 从 handler 快照读取），否则配置已换、在跑 handler 仍按旧值判定。
+      this.agentHandler.setExtra(next.extra ?? {})
+      this.agentHandler.updateSystemPrompt(candidate.system_prompt)
+      this.agentHandler.updateSkills(candidate.skills ?? [])
+      this.agentHandler.updateSubagents(candidate.subagents ?? [])
+      if (candidate.tmp_page_base_url !== undefined) this.agentHandler.updateTmpPageBaseUrl(candidate.tmp_page_base_url)
+      this.agentHandler.updateImageConfig(nextImageConn, nextImageCapability)
+      this.scheduledTaskRunner.setWorkerHandler(this.agentHandler)
+      return
+    }
+
+    if (coldHandler) {
+      this.agentHandler = coldHandler
+      this.agentLoopSubstrate.setWorkerHandler(coldHandler)
+      this.scheduledTaskRunner.setWorkerHandler(coldHandler)
+      this.contextAssembler.setLiveSnapshotProvider((taskId) => this.agentHandler?.getLiveSnapshot(taskId))
+    }
+  }
+
   /**
    * 处理消息接收事件（来自 channel.message_authorized，消息已通过 Admin 鉴权）
    *
@@ -1226,6 +1471,9 @@ export class UnifiedAgent extends ModuleBase {
    * @see protocol-agent-v2.md §5.1 SwitchMap, §5.2 Attention Scheduler
    */
   private async handleMessageReceived(payload: { message: ChannelMessage; friend: Friend; crab_display_name?: string; crab_self_handle?: string }): Promise<void> {
+    // Runtime admission happens before any message metadata is cached or any downstream
+    // routing/reply side effect is attempted.
+    this.assertRuntimeExecutionAdmission()
     const { message, friend, crab_display_name, crab_self_handle } = payload
     const { session } = message
 
@@ -1236,12 +1484,6 @@ export class UnifiedAgent extends ModuleBase {
     // 缓存 Crabot 在该渠道里 @ 自己的稳定标识（多 bot 群必需，用于 prompt 区分）
     if (crab_self_handle && session.channel_id) {
       this.crabSelfHandles.set(session.channel_id, crab_self_handle)
-    }
-
-    // 0. 检查是否已配置
-    if (!this.isConfigured()) {
-      await this.sendConfigMissingReply(message)
-      return
     }
 
     // 群聊消息走注意力调度（@mention 消息立即触发巡检）
@@ -1413,38 +1655,6 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   /**
-   * 配置缺失时发送提示消息给用户。
-   *
-   * 入参形状必须是 channel 的 `SendMessageParams`（`{session_id, content, features?}`）——
-   * 四个 channel 的 `handleSendMessage` 一律先 `sessionManager.findById(params.session_id)`，
-   * 查不到直接抛 `NOT_FOUND`（feishu `:826` / wechat `:468` / dingtalk `:387` /
-   * telegram `:502`）。历史实现传的是 `{message: <整条 ChannelMessage>}`，`session_id`
-   * 恒 undefined ⇒ 这条"未配置"提示**从未送达过任何人**，而外层 catch 把 NOT_FOUND
-   * 吞成一行日志，所以一直没被发现。
-   *
-   * 这也是"不经 LLM 直接告诉人类"这条通路的唯一正确形状（入站兜底回复复用它）。
-   */
-  private async sendConfigMissingReply(message: ChannelMessage): Promise<void> {
-    try {
-      const channelPort = await this.getChannelPort(message.session.channel_id)
-      await this.rpcClient.call(
-        channelPort,
-        'send_message',
-        {
-          session_id: message.session.session_id,
-          content: {
-            type: 'text',
-            text: 'Crabot 尚未配置 LLM 模型。请管理员在 Admin 界面完成配置后重试。',
-          },
-        },
-        this.config.moduleId,
-      )
-    } catch (error) {
-      console.error('Failed to send config missing reply:', error instanceof Error ? error.message : error)
-    }
-  }
-
-  /**
    * fail-loud 兜底：manager episode 没能把话说出来时，**不经 manager、不经 LLM**
    * 直接告诉人类一声。
    *
@@ -1454,7 +1664,7 @@ export class UnifiedAgent extends ModuleBase {
    * harness / 工具面中的任何一个。唯一还能挡住它的是 channel 模块本身也挂了——
    * 那种情况下任何手段都送不出消息，只能落到日志。
    *
-   * 入参形状与 `sendConfigMissingReply` 相同（`{session_id, content}`，见那里的注释）。
+   * 入参形状是 channel 的 `SendMessageParams`（`{session_id, content}`）。
    *
    * **按 key 冷却**：F1 会把整批输入推回 mailbox 下次重投，同一批消息可能连续失败若干轮；
    * 没有冷却就是刷屏。冷却命中时只记日志，不再发第二条。
@@ -1895,7 +2105,7 @@ export class UnifiedAgent extends ModuleBase {
       const modules = await this.rpcClient.resolve({ module_id: 'admin-web' }, this.config.moduleId)
       const adminPort = modules[0]?.port
       if (!adminPort) throw new Error('official Admin module is unavailable')
-      const consumeResult = await this.rpcClient.call<
+      const consumeResult = await this.rpcClient.callSensitive<
         { assertion: string; expected: { manager_key: string; request_id: string; payload_sha256: string } },
         { consumed?: unknown; expires_at?: unknown }
       >(adminPort, 'consume_admin_chat_assertion', {
@@ -2083,6 +2293,7 @@ export class UnifiedAgent extends ModuleBase {
     parent_span_id?: string
     related_task_id?: string
   }): Promise<ExecuteTaskResult & { trace_id?: string }> {
+    this.assertRuntimeExecutionAdmission()
     if (!this.agentHandler) {
       throw new Error('Worker handler not configured')
     }
@@ -2199,133 +2410,6 @@ export class UnifiedAgent extends ModuleBase {
   // ============================================================================
   // 配置管理
   // ============================================================================
-
-  /**
-   * 获取当前配置
-   */
-  private handleGetConfig(): GetConfigResult {
-    if (!this.agentConfig) {
-      throw new Error('Agent config not configured')
-    }
-
-    return {
-      config: this.agentConfig,
-    }
-  }
-
-  /**
-   * 热更新配置
-   */
-  private async handleUpdateConfig(params: UpdateConfigParams): Promise<UpdateConfigResult> {
-    if (!this.agentConfig) {
-      throw new Error('Agent config not configured')
-    }
-
-    const changedFields: string[] = []
-    let restartRequired = false
-
-    // 先收集所有状态变更，最后统一触发 handler 重建，避免多次重建
-    const modelConfigChanged = params.model_config !== undefined
-    const skillsChanged = params.skills !== undefined
-    const systemPromptChanged = params.system_prompt !== undefined
-    const subagentsChanged = params.subagents !== undefined &&
-      JSON.stringify(params.subagents) !== JSON.stringify(this.agentConfig.subagents)
-
-    // 更新模型配置
-    if (params.model_config) {
-      this.agentConfig.model_config = {
-        ...this.agentConfig.model_config,
-        ...params.model_config,
-      }
-      changedFields.push('model_config')
-    }
-
-    // 更新系统提示词（热更新：worker 在下一轮 LLM 调用时通过 callback 看到新 prompt）
-    if (params.system_prompt !== undefined) {
-      this.agentHandler?.updateSystemPrompt(params.system_prompt)
-      this.agentConfig.system_prompt = params.system_prompt
-      changedFields.push('system_prompt')
-    }
-
-    // 更新 MCP Servers（热更新：mcpConnector.reconnect 原子接管；失败抛出由 admin 感知）
-    if (params.mcp_servers !== undefined) {
-      await this.mcpConnector.reconnect(params.mcp_servers)
-      this.agentConfig.mcp_servers = params.mcp_servers
-      changedFields.push('mcp_servers')
-    }
-
-    // 更新 Skills（热更新：worker 在下一轮 LLM 调用时通过 callback 看到新 skill 列表）
-    if (params.skills !== undefined) {
-      this.agentHandler?.updateSkills(params.skills)
-      this.agentConfig.skills = params.skills
-      changedFields.push('skills')
-    }
-
-    // 更新 Subagents（热更新：handler.updateSubagents 改 this.subAgents；
-    // in-flight loop 用启动时 snapshot 不感知；新 loop 下次拿最新 list）
-    if (params.subagents !== undefined) {
-      this.agentHandler?.updateSubagents(params.subagents)
-      this.agentConfig.subagents = params.subagents
-      changedFields.push('subagents')
-    }
-
-    // 必须先写 agentConfig：启动期首次拉配置失败时，updateLlmClients 会在本次
-    // update_config 内创建 handler，createWorkerHandler 需要立即读到这个地址。
-    if (params.tmp_page_base_url !== undefined) {
-      this.agentConfig.tmp_page_base_url = params.tmp_page_base_url
-      this.agentHandler?.updateTmpPageBaseUrl(params.tmp_page_base_url)
-      changedFields.push('tmp_page_base_url')
-    }
-
-    // 根据变更字段，按需更新 LLM client。
-    //
-    // 历史：modelConfig / subagents 变化曾走 createWorkerHandler 重建路径，
-    // 后果是 in-flight task 的 activeTasks 表丢失 + agent_loop trace 永不 endTrace
-    // （详见 2026-05-21 FuFu 与 Claude 的根因诊断）。
-    //
-    // 现在 modelConfig 走 handler.updateSdkEnv 热更，subagents 走 handler.updateSubagents
-    // 热更；两者都是 snapshot 模式：in-flight loop 用启动时快照继续跑，新 loop 取最新值。
-    // skills / system_prompt 历史就已经是 hot-update。
-    if (modelConfigChanged || skillsChanged || systemPromptChanged || subagentsChanged) {
-      const mergedModelConfig = this.agentConfig.model_config ?? {}
-      await this.updateLlmClients(mergedModelConfig)
-    }
-
-    // 更新生图配置（热更新：存实例状态 + 原地更新 handler；下个 worker turn 的 buildToolsDynamic 生效）
-    if (params.image_config !== undefined || params.image_capability !== undefined) {
-      this.imageConnInfo = toImageConnInfo(params)
-      this.imageCapability = params.image_capability ?? { available: false }
-      this.agentHandler?.updateImageConfig(this.imageConnInfo, this.imageCapability)
-      changedFields.push('image_config')
-    }
-
-    // 更新扩展配置（热生效，下次使用对应功能时生效）
-    if (params.extra !== undefined && Object.keys(params.extra).length > 0) {
-      this.extra = { ...this.extra, ...params.extra }
-      this.agentHandler?.updateExtra(params.extra)
-      changedFields.push('extra')
-    }
-
-    // 更新最大迭代次数
-    if (params.max_iterations !== undefined) {
-      this.agentConfig.max_iterations = params.max_iterations
-      changedFields.push('max_iterations')
-      // AgentHandler 的 max_iterations 在构造时设置
-      // 更新后需要重新创建 Handler 或重启
-      restartRequired = true
-    }
-
-    console.log(`[${this.config.moduleId}] Config updated: ${changedFields.join(', ')}`)
-    if (restartRequired) {
-      console.log(`[${this.config.moduleId}] Restart required for changes to take effect`)
-    }
-
-    return {
-      restart_required: restartRequired,
-      config: this.agentConfig,
-      changed_fields: changedFields,
-    }
-  }
 
   /**
    * 热更新 LLM 客户端：永不重建 AgentHandler 实例。
@@ -2688,6 +2772,7 @@ export class UnifiedAgent extends ModuleBase {
   }
 
   private async createMaintenanceSystemTask(params: TriggerScheduleParams): Promise<TriggerScheduleResult> {
+    this.assertRuntimeExecutionAdmission()
     const { ledger } = this.requireManagerStack()
     const taskId = generateId() as TaskId
     const managerKey = SYSTEM_TASKS_MANAGER_KEY
@@ -2748,6 +2833,7 @@ export class UnifiedAgent extends ModuleBase {
    * 受理仍是"不等 episode"：新增的只是游离 promise 的收尾，一步都没 await。
    */
   private async handleTriggerSchedule(params: TriggerScheduleParams): Promise<TriggerScheduleResult> {
+    this.assertRuntimeExecutionAdmission()
     if (params.task_type === 'memory_maintenance' && params.is_builtin === true) {
       return this.createMaintenanceSystemTask(params)
     }
@@ -3029,6 +3115,11 @@ export class UnifiedAgent extends ModuleBase {
     this.detectFeishuChannel().catch(() => {/* 探测失败不影响启动 */})
     this.sessionManager.startCleanup()
 
+    // 降级启动（startup pull 永久失败，如全新安装未配置 LLM）：进程存活并照常注册，
+    // 所有执行入口由 admission fail closed；挂退避 pull 重试自愈。management-only 阶段
+    // invalidation 事件尚未开放，不能只依赖事件，必须靠自己的轮询等到 Admin 可解析配置。
+    if (!this.configAuthenticated) this.scheduleRuntimeConfigPullRetry()
+
     // Connect to external MCP servers (Admin-configured)
     if (this.agentConfig?.mcp_servers && this.agentConfig.mcp_servers.length > 0) {
       console.log(
@@ -3115,6 +3206,15 @@ export class UnifiedAgent extends ModuleBase {
     this.attentionScheduler.stopAll()
     this.traceStore.stopFlushTimer()
     this.managerStack?.harness.stopLivenessSweep()
+
+    if (this.configPullTimer) {
+      clearTimeout(this.configPullTimer)
+      this.configPullTimer = undefined
+    }
+    if (this.configPullRetryTimer) {
+      clearTimeout(this.configPullRetryTimer)
+      this.configPullRetryTimer = undefined
+    }
 
     if (this.watchdogInterval) {
       clearInterval(this.watchdogInterval)

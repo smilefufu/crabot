@@ -111,8 +111,13 @@ export interface SubAgentConfig {
 export interface AgentLayerConfig {
   /** 实例 ID */
   instance_id: string
-  /** 支持的角色 */
-  roles: Array<'front' | 'worker'>
+  /**
+   * Legacy 内部门控字段（多 Agent 时代 front/worker 分离实例的残留），不是协议 wire 字段：
+   * protocol-agent-v2 起实例配置就是 slot 制（model_config），正式协议从未包含 roles。
+   * Admin authenticated pull 不下发该字段；Agent 内部固定填 ['front','worker']，
+   * 测试 fixture 可显式传 []/['worker'] 控制是否起重量级 worker 层。后续可独立重构移除。
+   */
+  roles?: Array<'front' | 'worker'>
   /** 系统提示词 */
   system_prompt: string
   /** 模型配置 */
@@ -149,6 +154,11 @@ export interface UnifiedAgentConfig {
   port: number
   orchestration: OrchestrationConfig
   agent_config?: AgentLayerConfig
+  /** True only for config returned by authenticated Admin pull; direct test/dev fixtures omit it. */
+  runtime_config_authenticated?: boolean
+  /** Cold-start image connection; runtime config pull supplies the same fields. */
+  image_config?: LLMConnectionInfo
+  image_capability?: { available: boolean; reason?: string }
   /**
    * 扩展配置（非协议固定字段，由具体 Agent 实现自定义）
    * @see protocol-agent-v2.md §6 extra
@@ -945,41 +955,6 @@ export interface SupplementTaskDecision {
 // 配置热更新
 // ============================================================================
 
-export interface UpdateConfigParams {
-  /** 更新的模型配置 */
-  model_config?: Record<string, LLMConnectionInfo>
-  /** 更新的系统提示词 */
-  system_prompt?: string
-  /** 更新的 MCP Servers */
-  mcp_servers?: MCPServerConfig[]
-  /** 更新的 Skills */
-  skills?: SkillConfig[]
-  /** 更新的最大迭代次数 */
-  max_iterations?: number
-  /** 更新的扩展配置 */
-  extra?: Record<string, unknown>
-  /** Phase 5: 更新的 Subagent 列表 */
-  subagents?: SubAgentConfig[]
-  /** 对外可达 base URL（tmp-page 链接用）；admin push 时带上，并同步到当前 worker handler */
-  tmp_page_base_url?: string
-  /** 解析后的生图连接信息；有值时 worker 暴露 generate_image */
-  image_config?: LLMConnectionInfo
-  /** 生图能力可用性，驱动 self-aware 提示词 */
-  image_capability?: { available: boolean; reason?: string }
-}
-
-export interface UpdateConfigResult {
-  /** 是否需要重启 */
-  restart_required: boolean
-  /** 更新后的配置 */
-  config: AgentLayerConfig
-  /** 变更的字段列表 */
-  changed_fields: string[]
-}
-
-export interface GetConfigResult {
-  config: AgentLayerConfig
-}
 
 // ============================================================================
 // 类型别名

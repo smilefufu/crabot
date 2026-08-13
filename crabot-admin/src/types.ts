@@ -1617,6 +1617,41 @@ export interface ResolvedAgentConfig extends Omit<AgentInstanceConfig, 'model_co
   image_capability?: { available: boolean; reason?: string }
 }
 
+export interface CoreAgentOrchestrationConfig {
+  front_context_recent_messages_window_hours: number
+  front_context_recent_messages_max_cap: number
+  front_context_short_term_memory_window_hours: number
+  front_context_short_term_memory_max_cap: number
+  worker_recent_messages_window_hours: number
+  worker_recent_messages_max_cap: number
+  worker_short_term_memory_window_hours: number
+  worker_short_term_memory_max_cap: number
+  worker_long_term_memory_limit: number
+  front_agent_timeout: number
+  session_state_ttl: number
+  worker_config_refresh_interval: number
+  front_agent_queue_max_length: number
+  front_agent_queue_timeout: number
+}
+
+/** Exact authenticated runtime wire returned only to the core Agent. */
+export interface CoreAgentRuntimeConfig {
+  module_id: 'crabot-agent'
+  module_type: 'agent'
+  version: '0.2.0'
+  protocol_version: '3.1.1'
+  port: number
+  orchestration: CoreAgentOrchestrationConfig
+  /**
+   * 实例配置为 slot 制（model_config）；legacy front/worker roles 不是 wire 字段，
+   * Agent 内部自行补齐。见 protocol-agent-v3 §11。
+   */
+  agent_config: ResolvedAgentConfig
+  image_config?: LLMConnectionInfo
+  image_capability?: { available: boolean; reason?: string }
+  extra?: Record<string, unknown>
+}
+
 // Agent 实现管理 API 参数类型
 
 export interface ListAgentImplementationsParams extends PaginationParams {
@@ -1768,6 +1803,7 @@ export interface AdminEventPayloads {
   'admin.agent_instance_updated': { instance: AgentInstance }
   'admin.agent_instance_deleted': { instance_id: string }
   'admin.agent_instance_config_updated': { instance_id: string; config: AgentInstanceConfig }
+  'admin.agent_config_invalidated': { config_revision: number; domains: Array<'models'|'image'|'mcp'|'skills'|'subagents'|'worker_implementations'|'behavior'> }
   'admin.channel_instance_created': { instance: ChannelInstance }
   'admin.channel_instance_updated': { instance: ChannelInstance }
   'admin.channel_instance_deleted': { instance_id: string }

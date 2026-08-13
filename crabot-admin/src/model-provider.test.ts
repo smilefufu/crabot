@@ -107,6 +107,68 @@ describe('ModelProviderManager', () => {
       expect(updated.status).toBe('inactive')
     })
 
+    it('repeated connectivity tests succeed even when status does not change (runtime noop)', async () => {
+      const created = await manager.createProvider({
+        name: 'Probe', type: 'manual', format: 'openai', endpoint: 'https://probe.example', api_key: 'k', models: [],
+      })
+      const asAny = manager as unknown as { probeEndpointConnectivity: () => Promise<{ success: boolean; latency_ms: number }> }
+      asAny.probeEndpointConnectivity = async () => ({ success: true, latency_ms: 5 })
+      await expect(manager.testProviderModel(created.id)).resolves.toMatchObject({ success: true })
+      // 第二次测试：status 仍为 active，语义快照不变——必须允许 runtime noop，
+      // 而不是抛 'Config mutation did not change semantic snapshot'。
+      await expect(manager.testProviderModel(created.id)).resolves.toMatchObject({ success: true })
+      expect(manager.getProvider(created.id)?.last_validated_at).toBeTruthy()
+    })
+
+    it('refreshModels with an unchanged vendor model list succeeds as runtime noop', async () => {
+      const models = [{ model_id: 'm1', display_name: 'M1', type: 'llm' as const }]
+      const created = await manager.createProvider({
+        name: 'Preset', type: 'preset', preset_vendor: 'ollama', format: 'openai',
+        endpoint: 'http://localhost:11434/v1', api_key: 'k', models: [...models],
+      })
+      const asAny = manager as unknown as Record<string, unknown>
+      asAny.ensureFreshAuthToken = async () => 'token'
+      asAny.fetchVendorModels = async () => models.map((m) => ({ ...m }))
+      // 厂商返回与本地一致是最常见的 refresh 结果：必须允许 noop 并继续后续流程。
+      await expect(manager.refreshModels(created.id)).resolves.toMatchObject({ added: [], removed: [] })
+    })
+
+    it('clears OAuth credential idempotently (logout of a logged-out provider is a noop)', async () => {
+      const created = await manager.createProvider({
+        name: 'OAuth', type: 'manual', format: 'openai', endpoint: 'https://oauth.example', api_key: 'k', models: [],
+      })
+      // 从未登录的 provider 登出：语义投影不变，必须允许 noop 且幂等。
+      await expect(manager.clearOAuthCredential(created.id)).resolves.toBeUndefined()
+      await expect(manager.clearOAuthCredential(created.id)).resolves.toBeUndefined()
+    })
+
+    it('ignores non-whitelisted provider PATCH fields (mass assignment guard)', async () => {
+      const created = await manager.createProvider({
+        name: 'Original', type: 'manual', format: 'openai', endpoint: 'https://old.example', api_key: 'key', models: [],
+      })
+      const updated = await manager.updateProvider(created.id, {
+        name: 'Renamed',
+        format: 'anthropic', id: 'other', type: 'vendor', oauth_credential: { access_token: 'x' },
+      } as unknown as Parameters<typeof manager.updateProvider>[1])
+      expect(updated).toMatchObject({
+        id: created.id, name: 'Renamed', type: 'manual', format: 'openai',
+      })
+      expect((updated as Record<string, unknown>).oauth_credential).toBeUndefined()
+    })
+
+    it('serializes concurrent disjoint patches to one provider', async () => {
+      const created = await manager.createProvider({
+        name: 'Original', type: 'manual', format: 'openai', endpoint: 'https://old.example', api_key: 'key', models: [],
+      })
+      await Promise.all([
+        manager.updateProvider(created.id, { name: 'Renamed' }),
+        manager.updateProvider(created.id, { endpoint: 'https://new.example' }),
+      ])
+      expect(manager.getProvider(created.id)).toMatchObject({
+        name: 'Renamed', endpoint: 'https://new.example',
+      })
+    })
+
     it('should delete a provider', async () => {
       const params: CreateModelProviderParams = {
         name: 'Test Provider',
@@ -129,6 +191,77 @@ describe('ModelProviderManager', () => {
     it('should get default global config', () => {
       const config = manager.getGlobalConfig()
       expect(config).toBeDefined()
+    })
+
+    it('coordinates public base URL as behavior and ignores identical updates', async () => {
+      const calls: string[][] = []
+      manager.setSemanticSnapshotProvider(() => ({ global: manager.getGlobalConfig() }))
+      manager.setMutationRunner(async (domains, _preview, apply) => {
+        calls.push([...domains])
+        await apply({} as any)
+      })
+
+      await manager.updateGlobalConfig({ public_base_url: 'https://public.example.test/' })
+      await manager.updateGlobalConfig({ public_base_url: 'https://public.example.test/' })
+
+      expect(calls).toEqual([['behavior']])
+      expect(manager.getGlobalConfig().public_base_url).toBe('https://public.example.test/')
+    })
+    it('coordinates model/image changes and treats identical PATCH submissions as no-ops', async () => {
+      const calls: string[][] = []
+      manager.setSemanticSnapshotProvider(() => ({ global: manager.getGlobalConfig() }))
+      manager.setMutationRunner(async (domains, _preview, apply) => {
+        calls.push([...domains])
+        await apply({} as any)
+      })
+
+      const patch = {
+        default_llm_provider_id: 'provider',
+        default_llm_model_id: 'llm',
+        default_image_provider_id: 'provider',
+        default_image_model_id: 'image',
+        image_slot_user_set: true,
+      }
+      await manager.updateGlobalConfig(patch)
+      await manager.updateGlobalConfig(patch)
+
+      expect(calls).toEqual([['models', 'image']])
+    })
+
+    it('serializes concurrent disjoint global config patches', async () => {
+      await Promise.all([
+        manager.updateGlobalConfig({ default_llm_provider_id: 'provider-a' }),
+        manager.updateGlobalConfig({ public_base_url: 'https://public.example.test' }),
+      ])
+      expect(manager.getGlobalConfig()).toMatchObject({
+        default_llm_provider_id: 'provider-a',
+        public_base_url: 'https://public.example.test',
+      })
+    })
+
+    it('serializes concurrent proxy and model patches', async () => {
+      await Promise.all([
+        manager.updateGlobalConfig({ default_llm_provider_id: 'provider-a' }),
+        manager.updateProxyConfig({ mode: 'custom', custom_url: 'http://proxy.example' }),
+      ])
+      expect(manager.getGlobalConfig()).toMatchObject({
+        default_llm_provider_id: 'provider-a',
+        proxy: { mode: 'custom', custom_url: 'http://proxy.example' },
+      })
+    })
+
+    it('treats an identical provider PATCH as a serialized no-op', async () => {
+      const provider = await manager.createProvider({
+        name: 'Provider', type: 'manual', format: 'openai', endpoint: 'https://provider.example', api_key: 'secret', models: [],
+      })
+      const calls: Array<{ domains: string[]; allowRuntimeNoop?: boolean }> = []
+      manager.setSemanticSnapshotProvider(() => ({ providers: manager.listProviders().map(({ updated_at: _, ...item }) => item) }))
+      manager.setMutationRunner(async (domains, _preview, apply, allowRuntimeNoop) => {
+        calls.push({ domains: [...domains], allowRuntimeNoop })
+        await apply({} as any)
+      })
+      await manager.updateProvider(provider.id, {})
+      expect(calls).toEqual([{ domains: ['models'], allowRuntimeNoop: true }])
     })
 
     it('should update global config', async () => {
@@ -333,6 +466,36 @@ describe('ModelProviderManager', () => {
       const config = newManager.getGlobalConfig()
       expect(config.default_llm_provider_id).toBe('provider-1')
       expect(config.default_llm_model_id).toBe('model-1')
+    })
+
+    it('preserves manual image selection across restart', async () => {
+      await manager.updateGlobalConfig({
+        default_image_provider_id: 'image-provider',
+        default_image_model_id: 'image-model',
+        image_slot_user_set: true,
+      })
+      const newManager = new ModelProviderManager(testDataDir)
+      await newManager.initialize()
+      expect(newManager.getGlobalConfig()).toMatchObject({
+        default_image_provider_id: 'image-provider',
+        default_image_model_id: 'image-model',
+        image_slot_user_set: true,
+      })
+    })
+
+    it('preserves auto-selected image fields across restart', async () => {
+      await manager.updateGlobalConfig({
+        default_image_provider_id: 'auto-image-provider',
+        default_image_model_id: 'auto-image-model',
+        image_slot_user_set: false,
+      })
+      const newManager = new ModelProviderManager(testDataDir)
+      await newManager.initialize()
+      expect(newManager.getGlobalConfig()).toMatchObject({
+        default_image_provider_id: 'auto-image-provider',
+        default_image_model_id: 'auto-image-model',
+        image_slot_user_set: false,
+      })
     })
   })
 

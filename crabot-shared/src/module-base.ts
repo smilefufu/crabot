@@ -58,12 +58,18 @@ export class RpcCallError extends Error {
   }
 }
 
+export function rpcErrorHttpStatus(error: unknown): number {
+  if ((error instanceof RpcError || error instanceof RpcCallError) && error.code === 'UNAUTHORIZED') return 401
+  if ((error instanceof RpcError || error instanceof RpcCallError) && error.code === 'FORBIDDEN') return 403
+  return 500
+}
+
 /**
  * 把 handler 抛出的异常格式化为 ErrorResponse。
  * 抽出此函数是为了让单元测试不必起完整 ModuleBase。
  */
 export function formatHandlerError(error: unknown, requestId: string): Response<never> {
-  if (error instanceof RpcError) {
+  if (error instanceof RpcError || error instanceof RpcCallError) {
     return createErrorResponse(requestId, error.code, error.message, error.details)
   }
   const errorMessage = error instanceof Error ? error.message : String(error)
@@ -107,7 +113,29 @@ export interface ModuleMetadata {
 /**
  * 方法处理器
  */
-type MethodHandler<P = unknown, R = unknown> = (params: P) => Promise<R> | R
+type MethodHandler<P = unknown, R = unknown> = (params: P, context?: RpcHandlerContext) => Promise<R> | R
+
+export interface RpcHandlerContext {
+  authorizationBearer?: string
+}
+
+export interface SensitiveRpcTransportOptions {
+  authorizationBearer?: string
+}
+
+export type SensitiveRpcMethod = 'get_agent_config' | 'resolve_worker_connection' | 'verify_core_agent_runtime' | 'complete_core_agent_cutover' | 'register_core_agent' | 'consume_admin_chat_assertion' | 'consume_worker_operation_assertion' | 'process_message' | 'install_worker_implementation' | 'start_worker_implementation_setup' | 'verify_worker_implementation' | 'cancel_worker_implementation_operation' | 'attach_worker_implementation_setup_stream'
+
+const SENSITIVE_RPC_METHODS = new Set<SensitiveRpcMethod>([
+  'get_agent_config', 'resolve_worker_connection', 'verify_core_agent_runtime', 'complete_core_agent_cutover', 'register_core_agent',
+  'consume_admin_chat_assertion', 'consume_worker_operation_assertion', 'install_worker_implementation',
+  'start_worker_implementation_setup', 'verify_worker_implementation', 'cancel_worker_implementation_operation',
+  'attach_worker_implementation_setup_stream',
+])
+
+export function isSensitiveRpcCall(method: string, params: unknown): boolean {
+  if (method === 'process_message') return !!params && typeof params === 'object' && (params as { source_type?: unknown }).source_type === 'admin_chat'
+  return SENSITIVE_RPC_METHODS.has(method as SensitiveRpcMethod)
+}
 
 /**
  * 回调处理器
@@ -179,6 +207,33 @@ export class RpcClient {
     source: ModuleId,
     traceCtx?: RpcTraceContext
   ): Promise<R> {
+    if (isSensitiveRpcCall(method, params)) {
+      throw new RpcError('SENSITIVE_RPC_REQUIRES_NO_TRACE_TRANSPORT', `Sensitive RPC "${method}" must use callSensitive()`)
+    }
+    return this.callInternal(targetPort, method, params, source, traceCtx)
+  }
+
+  get moduleManagerTargetPort(): number { return this.moduleManagerPort }
+
+  async callSensitive<P, R>(targetPort: number, method: SensitiveRpcMethod, params: P, source: ModuleId, options: SensitiveRpcTransportOptions = {}): Promise<R> {
+    if (!isSensitiveRpcCall(method, params)) {
+      throw new RpcError('INVALID_SENSITIVE_RPC_METHOD', `RPC "${method}" is not in the sensitive method closure`)
+    }
+    return this.callInternal(targetPort, method, params, source, undefined, options)
+  }
+
+  async callModuleManagerSensitive<P, R>(method: SensitiveRpcMethod, params: P, source: ModuleId, options: SensitiveRpcTransportOptions = {}): Promise<R> {
+    return this.callSensitive(this.moduleManagerPort, method, params, source, options)
+  }
+
+  private async callInternal<P, R>(
+    targetPort: number,
+    method: string,
+    params: P,
+    source: ModuleId,
+    traceCtx?: RpcTraceContext,
+    options: SensitiveRpcTransportOptions = {}
+  ): Promise<R> {
     const request: Request<P> = {
       id: generateId(),
       source,
@@ -213,6 +268,7 @@ export class RpcClient {
           headers: {
             'Content-Type': 'application/json',
             'Content-Length': Buffer.byteLength(body),
+            ...(options.authorizationBearer ? { Authorization: `Bearer ${options.authorizationBearer}` } : {}),
           },
         },
         (res) => {
@@ -491,7 +547,7 @@ export abstract class ModuleBase {
   /**
    * 向 Module Manager 注册
    */
-  async register(): Promise<void> {
+  async register(authorizationBearer?: string): Promise<void> {
     const params: RegisterParams = {
       module_id: this.config.moduleId,
       module_type: this.config.moduleType,
@@ -501,7 +557,18 @@ export abstract class ModuleBase {
       subscriptions: this.config.subscriptions ?? [],
     }
 
-    await this.rpcClient.callModuleManager('register', params, this.config.moduleId)
+    if (this.config.moduleId === 'crabot-agent') {
+      if (!authorizationBearer) throw new RpcError('UNAUTHORIZED', 'Core Agent registration requires its runtime credential')
+      await this.rpcClient.callSensitive(
+        this.rpcClient.moduleManagerTargetPort,
+        'register_core_agent',
+        params,
+        this.config.moduleId,
+        { authorizationBearer },
+      )
+    } else {
+      await this.rpcClient.callModuleManager('register', params, this.config.moduleId)
+    }
     console.log(`[${this.config.moduleId}] Registered to Module Manager`)
   }
 
@@ -556,6 +623,10 @@ export abstract class ModuleBase {
    */
   protected async getHealthDetails(): Promise<Record<string, unknown>> {
     return {}
+  }
+
+  protected async getHealthStatus(_details: Record<string, unknown>): Promise<HealthResult['status']> {
+    return this.isShuttingDown ? 'degraded' : 'healthy'
   }
 
   /**
@@ -625,11 +696,15 @@ export abstract class ModuleBase {
     }
 
     try {
-      // 提取参数
       const params = request?.params ?? this.parseQueryParams(req.url ?? '')
+      const authorization = req.headers.authorization
+      const authorizationBearer = authorization?.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : undefined
+      if (authorization && (!authorization.startsWith('Bearer ') || !authorizationBearer || /[\r\n]/.test(authorizationBearer))) {
+        throw new RpcError('UNAUTHORIZED', 'Invalid Authorization metadata')
+      }
 
       // 调用处理器
-      const result = await handler(params)
+      const result = await handler(params, { authorizationBearer })
 
       // 如果是 AcceptedResponse，保持格式
       if (
@@ -655,7 +730,7 @@ export abstract class ModuleBase {
       res.end(JSON.stringify(response))
     } catch (error) {
       const errorResponse = formatHandlerError(error, request?.id ?? generateId())
-      res.writeHead(500, { 'Content-Type': 'application/json' })
+      res.writeHead(rpcErrorHttpStatus(error), { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(errorResponse))
     }
   }
@@ -702,7 +777,7 @@ export abstract class ModuleBase {
   private async handleHealth(): Promise<HealthResult> {
     const details = await this.getHealthDetails()
     return {
-      status: this.isShuttingDown ? 'degraded' : 'healthy',
+      status: await this.getHealthStatus(details),
       details,
     }
   }

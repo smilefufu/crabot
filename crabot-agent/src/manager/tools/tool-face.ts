@@ -33,6 +33,7 @@ export interface ToolFaceDeps {
   /** crab-memory，现有 createCrabMemoryServer 产物。 */
   readonly memoryServer: McpServer
   readonly callAdmin: <P, R>(m: string, p: P) => Promise<R>
+  readonly getRuntimeConfigSummary?: () => unknown
   /** 该 manager 是否为保留的"系统任务"线程（决定 send_master_private / send_private_message 可见性）。 */
   readonly isSystemThread: boolean
   /** Opaque control-plane authorization, never represented in any tool schema. */
@@ -211,7 +212,10 @@ export function buildManagerToolFace(deps: ToolFaceDeps): ToolDefinition[] {
     validateMasterAuthorization: deps.validateMasterAuthorization,
     onAsyncError: deps.onAsyncError,
   })
-  const infoTools = buildCrabotInfoTools({ callAdmin: deps.callAdmin })
+  const infoTools = buildCrabotInfoTools({
+    callAdmin: deps.callAdmin,
+    getRuntimeConfigSummary: deps.getRuntimeConfigSummary,
+  })
 
   const tools = [...messagingTools, ...memoryTools, ...workerTools, ...infoTools]
   assertClosedToolFace(tools)

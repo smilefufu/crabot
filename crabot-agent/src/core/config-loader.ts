@@ -5,39 +5,40 @@
  */
 
 import type { RpcClient } from 'crabot-shared'
-import type {
-  UnifiedAgentConfig,
-  AgentLayerConfig,
-  LLMConnectionInfo,
-  MCPServerConfig,
-  SkillConfig,
-} from '../types.js'
+import type { UnifiedAgentConfig } from '../types.js'
 
 // ============================================================================
 // Admin RPC 接口类型
 // ============================================================================
 
 interface GetAgentConfigResult {
-  config: {
-    instance_id: string
-    role: 'front' | 'worker'
-    system_prompt: string
-    model_config: Record<string, LLMConnectionInfo>
-    mcp_servers?: MCPServerConfig[]
-    skills?: SkillConfig[]
-    max_iterations?: number
-    tools_readonly?: boolean
-    extra?: Record<string, unknown>
-    /** 对外可达 base URL（admin handleGetAgentConfig 注入），供 worker 拼临时页面链接 */
-    tmp_page_base_url?: string
-  }
+  config_revision: number
+  config: UnifiedAgentConfig
 }
 
 // ============================================================================
 // ConfigLoader
 // ============================================================================
 
+export interface LoadedAgentConfig {
+  config: UnifiedAgentConfig
+  revision: number
+}
+
 export class ConfigLoader {
+  private static currentRevision = 0
+
+  static get revision(): number { return ConfigLoader.currentRevision }
+  static getRuntimeBearer(): string | undefined { return ConfigLoader.runtimeBearer }
+  static captureRuntimeBearer(): void {
+    const bearer = process.env.CRABOT_CORE_AGENT_RUNTIME_BEARER
+    if (bearer) {
+      Object.defineProperty(ConfigLoader, 'runtimeBearer', { value: bearer, writable: false, configurable: true })
+      delete process.env.CRABOT_CORE_AGENT_RUNTIME_BEARER
+    }
+  }
+  private static runtimeBearer?: string
+
   /**
    * 加载配置
    * Admin 是唯一的配置来源，获取失败则报错
@@ -53,9 +54,10 @@ export class ConfigLoader {
       throw new Error('[ConfigLoader] Admin endpoint not configured. Agent cannot start without Admin.')
     }
 
-    const config = await this.loadFromAdmin(moduleId, rpcClient, adminEndpoint)
+    const loaded = await this.pull(moduleId, rpcClient, adminEndpoint)
+    this.acceptRevision(loaded.revision)
     console.log(`[ConfigLoader] Loaded config from Admin for ${moduleId}`)
-    return config
+    return loaded.config
   }
 
   /**
@@ -88,13 +90,13 @@ export class ConfigLoader {
     const maxDelayMs = options.maxDelayMs ?? 2_000
 
     // endpoint 没配是环境问题，不是启动竞态，重试只会白等一个预算
+    let lastError = ''
     if (adminEndpoint) {
       const startedAt = Date.now()
       const deadline = startedAt + budgetMs
       let delay = initialDelayMs
       let attempts = 0
       let lastLoggedAt = 0
-      let lastError = ''
 
       for (;;) {
         attempts += 1
@@ -134,8 +136,41 @@ export class ConfigLoader {
       console.warn('[ConfigLoader] Failed to load config from Admin: Admin endpoint not configured')
     }
 
-    console.warn('Starting in unconfigured mode, waiting for config push from Admin...')
-    return this.createUnconfiguredConfig()
+    // 永久拉取失败（全新安装未配置 LLM、Admin 暂不可达等）不让进程退出：
+    // 降级启动后进程存活并照常注册，runtime_config_authenticated=false 使所有执行入口
+    // fail closed，由 UnifiedAgent 的退避 pull 重试等待 admin.agent_config_invalidated 自愈。
+    console.warn('[ConfigLoader] Admin config pull failed permanently; starting in degraded fail-closed mode')
+    return this.createDegradedConfig(process.env.Crabot_MODULE_ID || 'crabot-agent')
+  }
+
+  /**
+   * 启动 pull 永久失败时的降级配置：只保留 exact 身份与编排默认值，无 agent_config。
+   */
+  static createDegradedConfig(moduleId: string): UnifiedAgentConfig {
+    return {
+      module_id: moduleId,
+      module_type: 'agent',
+      version: '0.2.0',
+      protocol_version: '3.1.1',
+      port: process.env.Crabot_PORT ? parseInt(process.env.Crabot_PORT, 10) : 19002,
+      orchestration: {
+        front_context_recent_messages_window_hours: 6,
+        front_context_recent_messages_max_cap: 50,
+        front_context_short_term_memory_window_hours: 12,
+        front_context_short_term_memory_max_cap: 30,
+        worker_recent_messages_window_hours: 4,
+        worker_recent_messages_max_cap: 50,
+        worker_short_term_memory_window_hours: 12,
+        worker_short_term_memory_max_cap: 10,
+        worker_long_term_memory_limit: 5,
+        front_agent_timeout: 30,
+        session_state_ttl: 3600,
+        worker_config_refresh_interval: 60,
+        front_agent_queue_max_length: 100,
+        front_agent_queue_timeout: 300,
+      },
+      runtime_config_authenticated: false,
+    }
   }
 
   /**
@@ -158,117 +193,48 @@ export class ConfigLoader {
   /**
    * 从 Admin 获取配置
    */
-  private static async loadFromAdmin(
-    moduleId: string,
-    rpcClient: RpcClient,
-    adminEndpoint: string
-  ): Promise<UnifiedAgentConfig> {
+  static async pull(moduleId: string, rpcClient: RpcClient, adminEndpoint: string): Promise<LoadedAgentConfig> {
     const adminPort = this.parsePortFromEndpoint(adminEndpoint)
-    if (!adminPort) {
-      throw new Error(`[ConfigLoader] Invalid admin endpoint: ${adminEndpoint}`)
-    }
-
-    const result = await rpcClient.call<
-      { instance_id: string },
-      GetAgentConfigResult
-    >(
+    if (!adminPort) throw new Error(`[ConfigLoader] Invalid admin endpoint: ${adminEndpoint}`)
+    const result = await rpcClient.callSensitive<{ instance_id: string }, GetAgentConfigResult>(
       adminPort,
       'get_agent_config',
       { instance_id: moduleId },
-      moduleId
+      moduleId,
+      { authorizationBearer: ConfigLoader.runtimeBearer },
     )
-
-    return this.convertAdminConfigToLocal(result.config, moduleId)
-  }
-
-  /**
-   * 将 Admin 的 AgentInstanceConfig 转换为 UnifiedAgentConfig
-   */
-  private static convertAdminConfigToLocal(
-    adminConfig: GetAgentConfigResult['config'],
-    moduleId: string
-  ): UnifiedAgentConfig {
-    // 构造 AgentLayerConfig
-    const agentConfig: AgentLayerConfig = {
-      instance_id: adminConfig.instance_id,
-      roles: ['front', 'worker'],
-      system_prompt: adminConfig.system_prompt,
-      model_config: adminConfig.model_config,
-      max_iterations: adminConfig.max_iterations,
-      mcp_servers: adminConfig.mcp_servers,
-      skills: adminConfig.skills,
-      tools_readonly: adminConfig.tools_readonly,
-      ...(adminConfig.tmp_page_base_url ? { tmp_page_base_url: adminConfig.tmp_page_base_url } : {}),
-      specialization: 'Unified agent with front and worker capabilities',
+    if (!Number.isSafeInteger(result.config_revision) || result.config_revision < 1) {
+      throw new Error(`[ConfigLoader] Invalid config revision ${result.config_revision}`)
     }
-
-    // 构造 UnifiedAgentConfig
+    this.validateRuntimeConfig(result.config, moduleId)
+    // roles 不是协议 wire 字段（v2 起实例配置为 slot 制）；内部固定补齐 front+worker。
+    const agentConfig = { ...result.config.agent_config!, roles: ['front', 'worker'] as Array<'front' | 'worker'> }
     return {
-      module_id: moduleId,
-      module_type: 'agent',
-      version: '0.2.0',
-      protocol_version: '0.2.0',
-      port: process.env.Crabot_PORT ? parseInt(process.env.Crabot_PORT, 10) : 19002,
-      orchestration: {
-        front_context_recent_messages_window_hours: 6,
-        front_context_recent_messages_max_cap: 50,
-        front_context_short_term_memory_window_hours: 12,
-        front_context_short_term_memory_max_cap: 30,
-        worker_recent_messages_window_hours: 4,
-        worker_recent_messages_max_cap: 50,
-        worker_short_term_memory_window_hours: 12,
-        worker_short_term_memory_max_cap: 10,
-        worker_long_term_memory_limit: 5,
-        front_agent_timeout: 30,
-        session_state_ttl: 3600,
-        worker_config_refresh_interval: 60,
-        front_agent_queue_max_length: 100,
-        front_agent_queue_timeout: 300,
-      },
-      agent_config: agentConfig,
-      extra: adminConfig.extra,
+      config: { ...result.config, agent_config: agentConfig, runtime_config_authenticated: true },
+      revision: result.config_revision,
     }
   }
 
-  /**
-   * 创建未配置状态的默认配置
-   * 协议 §7.4: Agent 在 LLM 未配置时正常启动，等待 Admin 推送配置
-   */
-  static createUnconfiguredConfig(): UnifiedAgentConfig {
-    const moduleId = process.env.Crabot_MODULE_ID || 'crabot-agent'
-    return {
-      module_id: moduleId,
-      module_type: 'agent',
-      version: '0.2.0',
-      protocol_version: '0.2.0',
-      port: process.env.Crabot_PORT ? parseInt(process.env.Crabot_PORT, 10) : 19002,
-      orchestration: {
-        front_context_recent_messages_window_hours: 6,
-        front_context_recent_messages_max_cap: 50,
-        front_context_short_term_memory_window_hours: 12,
-        front_context_short_term_memory_max_cap: 30,
-        worker_recent_messages_window_hours: 4,
-        worker_recent_messages_max_cap: 50,
-        worker_short_term_memory_window_hours: 12,
-        worker_short_term_memory_max_cap: 10,
-        worker_long_term_memory_limit: 5,
-        front_agent_timeout: 30,
-        session_state_ttl: 3600,
-        worker_config_refresh_interval: 60,
-        front_agent_queue_max_length: 100,
-        front_agent_queue_timeout: 300,
-      },
-      agent_config: {
-        instance_id: moduleId,
-        roles: ['front', 'worker'],
-        system_prompt: '',
-        model_config: {},
-        specialization: 'Unified agent with front and worker capabilities',
-      },
+  static acceptRevision(revision: number): void {
+    if (!Number.isSafeInteger(revision) || revision < this.currentRevision) {
+      throw new Error(`[ConfigLoader] Refusing stale config revision ${revision}`)
     }
+    this.currentRevision = revision
   }
 
-  /**
+  private static validateRuntimeConfig(config: UnifiedAgentConfig, moduleId: string): void {
+    if (moduleId !== 'crabot-agent' || config.module_id !== 'crabot-agent' || config.module_type !== 'agent') {
+      throw new Error('[ConfigLoader] Invalid core Agent runtime identity')
+    }
+    if (config.protocol_version !== '3.1.1') throw new Error('[ConfigLoader] Invalid core Agent protocol version')
+    if (!config.agent_config || config.agent_config.instance_id !== 'crabot-agent') {
+      throw new Error('[ConfigLoader] Invalid core Agent layer config')
+    }
+    const powerful = config.agent_config.model_config.powerful
+    if (!powerful?.apikey || !powerful.model_id) throw new Error('[ConfigLoader] Core Agent powerful model is not configured')
+  }
+
+    /**
    * 从 endpoint URL 解析端口
    */
   private static parsePortFromEndpoint(endpoint: string): number | null {

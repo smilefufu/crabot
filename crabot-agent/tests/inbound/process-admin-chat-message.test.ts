@@ -198,7 +198,7 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
       }
       return [{ module_id: 'admin-web', module_type: 'admin', host: 'localhost', port: ADMIN_PORT, status: 'running' }]
     }
-    internals.rpcClient.call = async (port, method, params) => {
+    const rpcCall = async (port: number, method: string, params: unknown) => {
       rpcCalls.push({ port, method, params: params as Record<string, unknown> })
       switch (method) {
         case 'consume_admin_chat_assertion':
@@ -229,6 +229,8 @@ describe('processAdminChatMessage —— admin chat 入站（cutover 后下游�
           return {}
       }
     }
+    internals.rpcClient.call = rpcCall
+    internals.rpcClient.callSensitive = rpcCall
 
     // 「不进 lane」观测点。构造函数存的是 `(batch) => this.processXxxBatch(batch)`
     // （调用时才解引用），所以实例上换成录制器不破坏生产接线。

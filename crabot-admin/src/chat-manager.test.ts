@@ -16,7 +16,7 @@ async function makeManager(): Promise<ChatManager> {
   await store.init()
   return new ChatManager(
     TEST_DATA_DIR,
-    { call: async () => ({}) } as never,
+    { call: async () => ({}), callSensitive: async () => ({}) } as never,
     async () => 0,
     'test-secret',
     async (token) => token === 'test-token' ? { sub: 'admin' } : null,
@@ -32,7 +32,7 @@ async function makeManagerWithRpc(
   await store.init()
   return new ChatManager(
     TEST_DATA_DIR,
-    { call: rpcCall } as never,
+    { call: rpcCall, callSensitive: rpcCall } as never,
     async () => 42, // 非零端口，让 dispatchToAgent 正常往下走
     'test-secret',
     async (token) => token === 'test-token' ? { sub: 'admin' } : null,
@@ -558,8 +558,8 @@ describe('chat_push 收口占位：storeAssistantMessage 认领 in-flight reques
     // 第二问：这一轮 manager 在 episode 内（= RPC 返回之前）回了话。
     let release!: () => void
     const rpcDone = new Promise<void>((resolve) => { release = resolve })
-    ;(mgr as unknown as { rpcClient: { call: unknown } }).rpcClient = {
-      call: async () => { await rpcDone; return {} },
+    ;(mgr as unknown as { rpcClient: { callSensitive: unknown } }).rpcClient = {
+      callSensitive: async () => { await rpcDone; return {} },
     }
     const second = mgr.handleInboundMessage({ request_id: 'req-2', text: '第二问', files: [] }, 'test-token')
     await vi.waitFor(() => expect(pushed.some((p) => p.type === 'chat_status' && p.request_id === 'req-2')).toBe(true))

@@ -21,6 +21,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 
 import { UnifiedAgent } from '../../src/unified-agent.js'
+import { ConfigLoader } from '../../src/core/config-loader.js'
 import * as agentHandlerModule from '../../src/agent/agent-handler.js'
 import * as engineModule from '../../src/engine/query-loop.js'
 import type { ManagerKey } from '../../src/workers/harness/ledger-types.js'
@@ -60,6 +61,18 @@ const ORCHESTRATION: OrchestrationConfig = {
   worker_config_refresh_interval: 300,
   front_agent_queue_max_length: 10,
   front_agent_queue_timeout: 60,
+}
+
+/** 生产权威配置变更路径：invalidation 后的 authenticated pull（update_config 已退役）。 */
+async function applyConfigViaPull(internals: any, modelConfig: Record<string, LLMConnectionInfo>): Promise<void> {
+  const nextUnified = {
+    ...internals.config,
+    agent_config: { ...internals.agentConfig, model_config: { ...internals.agentConfig.model_config, ...modelConfig } },
+    runtime_config_authenticated: true,
+  }
+  internals.adminPort = internals.adminPort ?? 39999
+  vi.spyOn(ConfigLoader, 'pull').mockResolvedValueOnce({ config: nextUnified, revision: (internals.configRevision ?? 1) + 1 })
+  await internals.pullRuntimeConfig()
 }
 
 function connInfo(modelId: string): LLMConnectionInfo {
@@ -499,9 +512,8 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
         principal_permissions: sPerms ?? undefined,
       })
 
-      // admin 改 model slot（运行配置）＋ master 在同群发言（会话缓存被覆盖）
-      const updateConfig = internals.methodHandlers.get('update_config')!
-      await updateConfig({ model_config: { powerful: connInfo('model-B') } })
+      // 生产权威路径：invalidation 后的 authenticated pull。
+      await applyConfigViaPull(internals, { powerful: connInfo('model-B') })
       await speak(internals, friendOf('f-master', 'master'))
 
       const next = internals.buildBuiltinWorkerRuntime(await readSpawnContext(internals, worker.worker_id))!
@@ -561,7 +573,8 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
       for (const n of ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Skill']) {
         expect(names, `应装 ${n}`).toContain(n)
       }
-      expect(names).toContain('mcp__crab-memory__store_memory')
+      const storeMemoryToolName = ['mcp__crab-memory', 'store_memory'].join('__')
+      expect(names).toContain(storeMemoryToolName)
       expect(names).toContain('mcp__crab-memory__search_memory')
       expect(names).toContain('tmp_page_create')
     })
@@ -651,9 +664,8 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
     })
     expect(workerBurstModels(runEngineSpy)).toEqual(['model-A'])
 
-    // 经真实 update_config RPC 改 model slot。
-    const updateConfig = internals.methodHandlers.get('update_config')!
-    await updateConfig({ model_config: { powerful: connInfo('model-B') } })
+    // 生产配置变更由 authenticated pull 驱动（update_config 已退役）。
+    await applyConfigViaPull(internals, { powerful: connInfo('model-B') })
 
     // 已经起好的那个化身不受影响：它那次 burst 仍记 model-A，没有被追溯改写。
     expect(workerBurstModels(runEngineSpy)).toEqual(['model-A'])
@@ -735,10 +747,18 @@ describe('builtin worker 生产装配（PR F 第 2 步）', () => {
   // --- 缺配置时 fail-loud ---
 
   it('model_config 缺 powerful slot → 工厂抛错，spawn 如实落成一次失败尝试（不静默降级）', async () => {
-    const { internals } = boot(makeConfig({ modelConfig: {} }))
+    const { internals } = boot(makeConfig({ modelConfig: { fast: connInfo('model-A') } }))
     const managerKey = (`test::${'friend-noconf'}` as ManagerKey)
 
+    // Keep this test on the intended factory failure seam instead of the earlier runtime
+    // admission guard; Admin now refuses to publish such a config in production.
+    const admission = internals.managerStack!.harness.deps.assertExecutionAdmission
+    const builtinDefaults = internals.managerStack!.harness.deps.builtinSpawnDefaults
+    internals.managerStack!.harness.deps.assertExecutionAdmission = undefined
+    internals.managerStack!.harness.deps.builtinSpawnDefaults = (ctx: unknown) => internals.buildBuiltinWorkerRuntime(ctx)
     await expect(spawnBuiltin(internals, managerKey)).rejects.toThrow(/powerful/)
+    internals.managerStack!.harness.deps.assertExecutionAdmission = admission
+    internals.managerStack!.harness.deps.builtinSpawnDefaults = builtinDefaults
 
     const [w] = await internals.managerStack!.harness.listWorkers(managerKey)
     expect(w.task.status).toBe('failed')

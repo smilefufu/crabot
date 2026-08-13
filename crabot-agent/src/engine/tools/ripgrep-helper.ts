@@ -14,6 +14,7 @@ import { homedir } from 'node:os'
 import { relative, isAbsolute } from 'node:path'
 import { rgPath } from '@vscode/ripgrep'
 import { shouldScanProtectedDirs } from './fda-check'
+import { buildChildEnv } from '../../core/runtime-env.js'
 
 export interface RipgrepResult {
   /** rg 进程的 stdout 全文（已按 maxBytes 截断）。 */
@@ -83,6 +84,7 @@ export function runRipgrep(
     const proc = spawn(rgPath, [...FORCED_LIMITS, ...args], {
       cwd: opts.cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
+      env: buildChildEnv(),
     })
 
     let stdout = ''

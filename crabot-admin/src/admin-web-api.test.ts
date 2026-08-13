@@ -129,8 +129,8 @@ describe('Admin Web API', () => {
     function captureProcessMessage() {
       ;(admin as unknown as { agentPort: number }).agentPort = 19999
       return vi.spyOn(
-        (admin as unknown as { rpcClient: { call: (...args: unknown[]) => Promise<unknown> } }).rpcClient,
-        'call',
+        (admin as unknown as { rpcClient: { callSensitive: (...args: unknown[]) => Promise<unknown> } }).rpcClient,
+        'callSensitive',
       ).mockImplementation(async (_port, method) => {
         if (method === 'process_message') return { decision_types: [] }
         throw new Error(`unexpected RPC: ${String(method)}`)
@@ -143,7 +143,7 @@ describe('Admin Web API', () => {
         config: { moduleId: string }
         rpcClient: {
           resolve(filter: unknown): Promise<Array<{ module_id: string; port: number }>>
-          call(port: number, method: string, params: unknown): Promise<unknown>
+          callSensitive(port: number, method: string, params: unknown): Promise<unknown>
         }
         processAdminChatMessage: typeof processAdminChatMessage
         managerStack: { principals: { activateAdminChat(key: string, input: unknown): Promise<void> } }
@@ -157,7 +157,7 @@ describe('Admin Web API', () => {
           expect(filter).toEqual({ module_id: 'admin-web' })
           return [{ module_id: 'admin-web', port: TEST_PROTOCOL_PORT }]
         },
-        call: async (port, method, params) => {
+        callSensitive: async (port, method, params) => {
           expect(port).toBe(TEST_PROTOCOL_PORT)
           expect(method).toBe('consume_admin_chat_assertion')
           return (admin as unknown as {

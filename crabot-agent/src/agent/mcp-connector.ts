@@ -12,6 +12,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { defineTool } from '../engine/tool-framework.js'
 import type { ToolDefinition, ToolCategory } from '../engine/types.js'
 import type { MCPServerConfig, ResolvedPermissions } from '../types.js'
+import { buildChildEnv } from '../core/runtime-env.js'
 
 /**
  * 根据 MCP server 名称决定工具类别。
@@ -39,6 +40,43 @@ export class McpConnector {
   private cachedTools: ToolDefinition[] = []
   /** Per-server per-tool default params — built from MCPServerConfig.tool_defaults */
   private readonly toolDefaultsMap: Map<string, Record<string, Record<string, unknown>>> = new Map()
+
+  /** Connect a detached candidate without touching the live connector. */
+  static async prepare(configs: ReadonlyArray<MCPServerConfig>): Promise<McpConnector> {
+    const candidate = new McpConnector()
+    const seen = new Set<string>()
+    const unique = configs.filter((config) => !seen.has(config.name) && (seen.add(config.name), true))
+    // 与 connectAll 保持一致：先记 tool_defaults，否则 replaceWith 会用空 map 覆盖，
+    // 热更后 tool_defaults 静默丢失。
+    for (const config of unique) {
+      if (config.tool_defaults) candidate.toolDefaultsMap.set(config.name, config.tool_defaults)
+    }
+    // 与启动路径 connectAll 同样的容错语义：单台第三方 MCP server 不可用只降级该
+    // server，不得升级成「配置不可信」把整个 Agent 打下线（configStale + 全入口
+    // fail closed + 断开所有连接）。
+    const results = await Promise.allSettled(unique.map((config) => candidate.connectOne(config)))
+    for (let i = 0; i < results.length; i++) {
+      if (results[i].status === 'rejected') {
+        const reason = (results[i] as PromiseRejectedResult).reason
+        const msg = reason instanceof Error ? reason.message : String(reason)
+        console.error(`[McpConnector] Failed to connect MCP server "${unique[i].name}": ${msg}`)
+      }
+    }
+    await candidate.refreshToolCache()
+    return candidate
+  }
+
+  /** Atomically adopt a fully connected candidate, then retire old clients. */
+  async replaceWith(candidate: McpConnector): Promise<void> {
+    const oldClients = new Map(this.clients)
+    this.clients.clear()
+    for (const [name, client] of candidate.clients) this.clients.set(name, client)
+    this.cachedTools = [...candidate.cachedTools]
+    this.toolDefaultsMap.clear()
+    for (const [name, defaults] of candidate.toolDefaultsMap) this.toolDefaultsMap.set(name, defaults)
+    candidate.clients.clear()
+    await Promise.allSettled(Array.from(oldClients.values()).map((client) => client.close()))
+  }
 
   async connectAll(configs: ReadonlyArray<MCPServerConfig>): Promise<void> {
     // Deduplicate by name
@@ -106,7 +144,9 @@ export class McpConnector {
         return new StdioClientTransport({
           command: config.command,
           args: config.args ?? [],
-          env: config.env ? { ...process.env, ...config.env } as Record<string, string> : undefined,
+          // 未配置 env 时保持 SDK 默认白名单（getDefaultEnvironment），不向用户可配的
+          // MCP 命令下发整个 Agent 环境；配置了 env 时叠加并剔除 runtime bearer。
+          env: config.env ? buildChildEnv(config.env) : undefined,
         })
       }
       case 'streamable-http': {
@@ -206,7 +246,7 @@ export class McpConnector {
    * 回滚时通过 Map.clear() + 逐项 set 恢复。cachedTools 字段无 readonly，可重赋值。
    *
    * 软原子语义（spec §7）：rollback 仅恢复字段引用；oldClients 中的连接已被
-   * disconnectAll 关闭，**不会重新建立**。失败时上层（handleUpdateConfig）应感知抛错
+   * disconnectAll 关闭，**不会重新建立**。失败时上层（applyRuntimeConfigCandidate）应感知抛错
    * 并向 admin 报错，且当前 task 后续轮的 `getAllTools()` 会拿到旧引用但底层 transport
    * 已断开——调用旧工具会失败。
    */
