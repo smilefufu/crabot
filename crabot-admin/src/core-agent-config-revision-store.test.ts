@@ -270,6 +270,28 @@ describe('CoreAgentConfigMutationCoordinator', () => {
     } finally { await cleanup(f.dir) }
   })
 
+  it('queues a concurrent mutation arriving inside the outbox window instead of false-rejecting it', async () => {
+    const f = await fixture()
+    try {
+      let outboxObserved = false
+      const first = f.coordinator.mutate(['models'], { provider: 'one', secret: 'initial-secret' }, async () => {
+        f.state.provider = 'one'
+        // 按住 outbox 落盘窗口，等第二个并发写到达。
+        while (!outboxObserved) await new Promise((resolve) => setTimeout(resolve, 5))
+      })
+      for (;;) {
+        try { await fs.access(outbox(f.dir)); break } catch { await new Promise((resolve) => setTimeout(resolve, 5)) }
+      }
+      outboxObserved = true
+      // 窗口内到达的第二个写必须排队，而不是被误判为残留 outbox 直接拒绝。
+      const second = f.coordinator.mutate(['behavior'], { provider: 'two', secret: 'initial-secret' }, async () => { f.state.provider = 'two' })
+      await first
+      await second
+      expect((await f.coordinator.current()).revision).toBe(3)
+      expect(f.state.provider).toBe('two')
+    } finally { await cleanup(f.dir) }
+  })
+
   it('aborts the prepared outbox when a failed source mutation rolls back to before', async () => {
     const f = await fixture()
     try {

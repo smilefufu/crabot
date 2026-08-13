@@ -232,16 +232,17 @@ export class CoreAgentConfigMutationCoordinator {
     allowRuntimeNoop = false,
     options: { journalAwareNoop?: boolean } = {},
   ): Promise<CoreAgentConfigRevisionRecord> {
-    const persistedBeforeInitialize = await readJson<CoreAgentConfigMutationOutboxRecord>(this.outboxPath)
-    if (persistedBeforeInitialize) throw new Error('Core Agent config mutation already active')
-    const receiptBeforeInitialize = await readJson<CoreAgentConfigMutationReceipt>(this.receiptPath)
-    if (receiptBeforeInitialize) {
-      await this.ensureKeyReadOnly()
-      this.assertReceipt(receiptBeforeInitialize)
-      if (receiptBeforeInitialize.source_journal_sha256) throw new Error('Core Agent source journal cleanup is still active')
-    }
     await this.initialize()
     return this.serial(async () => {
+      // 两项前置检查必须在串行队列内：队列外的 outbox 检查会把「窗口内进行中的
+      // mutation」误判成残留而直接拒绝并发写（五个 domain manager 各自持锁、
+      // 跨 manager 无共享串行）。重启后真正的残留 outbox 由队列内这份检查覆盖。
+      const receiptBeforeMutation = await readJson<CoreAgentConfigMutationReceipt>(this.receiptPath)
+      if (receiptBeforeMutation) {
+        await this.ensureKeyReadOnly()
+        this.assertReceipt(receiptBeforeMutation)
+        if (receiptBeforeMutation.source_journal_sha256) throw new Error('Core Agent source journal cleanup is still active')
+      }
       const persistedOutbox = await readJson<CoreAgentConfigMutationOutboxRecord>(this.outboxPath)
       if (persistedOutbox) { this.assertOutbox(persistedOutbox); throw new Error('Core Agent config mutation already active') }
       this.mutationGeneration += 1
