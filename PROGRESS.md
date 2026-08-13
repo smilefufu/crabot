@@ -8,7 +8,7 @@
 ### P6 进行中：Slice 0（核心 Agent singleton / runtime identity）已开 PR，review 迭代中
 
 - P6 总体设计：`crabot-docs/superpowers/specs/2026-08-11-p6-agent-observability-worker-management-design.md`；五份实施计划在 `crabot-docs/superpowers/plans/2026-08-12-p6-*.md`。顺序固定：**Slice 0 → P6-A → P6-B → P6-C → P6-D**。
-- Slice 0 分支 `feat/p6-slice0-core-agent-runtime` 已实现完成并开 **PR #90**（@claude review 多轮迭代：mass assignment、并发 pull 单飞/退避、全新安装降级自愈、publish 失败 drain 重试、MCP env 白名单、cutover health degraded-only、marker 宽容握手、源写入失败运行期回收等全部修复；尚未 merge）：
+- Slice 0 分支 `feat/p6-slice0-core-agent-runtime` 已实现完成并开 **PR #90**（@claude review 已迭代 10 轮，累计修复：mass assignment 白名单、并发 pull 单飞/退避、全新安装降级自愈、publish 失败 drain 重试、MCP env 白名单、cutover health degraded-only、marker 宽容握手、源写入失败运行期回收、noop-safe provider 操作、容错 MCP 热更+候选连接清理、journal-bound noop、停用条目删除/启动 prune noop 容忍、max_iterations 死循环解除、legacy get_config/update_config 无认证端点退役；尚未 merge）：
   - 唯一核心 Agent：动态/legacy Agent 的 create/update/delete/config-write 全部拒绝（`ADMIN_HOTPLUG_NOT_ALLOWED` / HTTP 410），live read surfaces 只暴露 builtin `default` / exact `crabot-agent`；存量记录只读归档（`unsupported_legacy`）。
   - Runtime identity + authenticated config pull：MM 只向 exact `crabot-agent` child 注入一次性 runtime bearer；Agent 启动最早期捕获并从 env 删除；secret-bearing RPC 走 method-closed `callSensitive()`；启动与热更都经 authenticated pull，失败即 fail closed 并断开 stale MCP。pull 有单飞去重 + 旧 revision no-op + 失败退避重试（不会永久 stale）。
   - Wire 契约：authenticated pull 返回正式 `CoreAgentRuntimeConfig`（protocol-agent-v3 §11，`protocol_version: '3.1.1'`）；实例配置为 slot 制（`powerful` 必填），legacy `roles` 不是 wire 字段。
@@ -18,7 +18,7 @@
 
 ### 最近验证基线（2026-08-13，PR #90 最新 push）
 
-- Shared 107、Core 138、**Admin 1143/1143**、Web build+269（web 此后未再改动）。
+- Shared 107、Core 138、**Admin 1150/1150**、Web build+269（web 此后未再改动）。
 - Agent 全量 2683 passed / 4 failed / 2 skipped，4 个失败均为既有 macOS 环境基线（`/var` realpath 3、tmux 探测 1），文件不在分支 diff 内。
 - 顺带修复的既有缺陷：`admin-chat-assertions` 签名篡改用例约 6% no-op flake（base64 末尾填充位）；Admin startup seeding 依赖 MM 事件扇出导致的全量 suite 崩溃；MM cutover 后对已运行 admin-web 重复 auto-start 的日志噪音。
 
@@ -42,6 +42,8 @@
 - 失败 Manager episode 的通用带退避 mailbox retry；跨 session 代发目标 Manager 持久注记（§4.2）；Admin skill → worker capability 接线（skill 仍硬编码 `[]`）；Codex provision `auth.json` 错误吞没；P8 调试工具/内部文档重写。
 - incarnation seq 碰撞（已接受边界，根治需协议变更）；Claude project-scope MCP 文件（已接受边界）；权限 schema 纪律（新增 schema 前先迁移历史 worker context）。
 - Admin source manager 的完整两阶段回滚：当前 mutation 源写入失败且内存态已推进时，靠重启恢复 fail-loud 兜底；各 manager 的事务性回滚（磁盘为准）另行设计。
+- claude-review workflow 的 attempt 步骤缺 `continue-on-error`：claude-code-action 自身崩溃（is_error）时重试阶梯被跳过。注意：workflow 文件不能在待审 PR 内修改（action 的反篡改校验会拒绝运行），需单独路径落地（直接推 main 并知会管理员）。
+- reviewer bot 的 OAuth token 有 session 配额（约 10 轮高强度 review 后触发 "session limit"，按 UTC 时间窗口重置）；配额耗尽时 review run 会即死，等重置后重触发即可。
 - `handleGetAgentConfig` 的 epoch 有界重试会整体重放 MM verify/get_module 往返（失败模式下最多 ~26 倍验证调用）；后续可把重试收缩到解析段内部。
 - Admin Web SubagentEditor 的 `crab_messaging` 开关置灰（下发时被协议硬置 false，UI 与行为不一致）。
 - tests 未进入 TypeScript type-check 的债务；Agent 4 个 macOS 基线失败的独立校准。

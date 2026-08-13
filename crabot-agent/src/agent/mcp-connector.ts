@@ -246,7 +246,7 @@ export class McpConnector {
    * 回滚时通过 Map.clear() + 逐项 set 恢复。cachedTools 字段无 readonly，可重赋值。
    *
    * 软原子语义（spec §7）：rollback 仅恢复字段引用；oldClients 中的连接已被
-   * disconnectAll 关闭，**不会重新建立**。失败时上层（handleUpdateConfig）应感知抛错
+   * disconnectAll 关闭，**不会重新建立**。失败时上层（applyRuntimeConfigCandidate）应感知抛错
    * 并向 admin 报错，且当前 task 后续轮的 `getAllTools()` 会拿到旧引用但底层 transport
    * 已断开——调用旧工具会失败。
    */

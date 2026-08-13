@@ -27,9 +27,6 @@ import type {
   SessionId,
   Friend,
   LLMRoleRequirement,
-  GetConfigResult,
-  UpdateConfigParams,
-  UpdateConfigResult,
   LLMConnectionInfo,
   TraceCallback,
   BuiltinToolConfig,
@@ -1173,9 +1170,8 @@ export class UnifiedAgent extends ModuleBase {
     this.registerMethod('get_status', this.handleGetStatus.bind(this))
     this.registerMethod('get_llm_requirements', this.handleGetLLMRequirements.bind(this))
 
-    // 配置管理接口
-    this.registerMethod('get_config', this.handleGetConfig.bind(this))
-    this.registerMethod('update_config', this.handleUpdateConfig.bind(this))
+    // 配置管理接口已退役：runtime config 只经 bearer 认证的 get_agent_config pull 进入，
+    // get_config/update_config 是无认证的 secret 读/写面且已无调用方（见 protocol-agent-v3 §8.6）。
 
     // 无条件注册：roles 是 legacy 内部门控，singleton core Agent 恒承载 worker 层；
     // 降级未配置时 handler 自身安全兜底（delivered:false），wire 面与正常启动等价。
@@ -1350,10 +1346,6 @@ export class UnifiedAgent extends ModuleBase {
   private async applyRuntimeConfigCandidate(next: UnifiedAgentConfig): Promise<void> {
     const candidate = next.agent_config
     if (!candidate) throw new Error('Pulled runtime config has no agent config')
-    // 降级启动没有旧配置：这是首次安装而不是变更，max_iterations 差异不构成受控重启条件。
-    if (this.agentConfig && candidate.max_iterations !== this.agentConfig.max_iterations) {
-      throw new Error('Runtime config changes max_iterations and requires controlled restart')
-    }
     // All fallible work happens before the live fields are touched.
     const worker = candidate.model_config.powerful
     const digest = candidate.model_config.cost_effective ?? worker
@@ -2415,133 +2407,6 @@ export class UnifiedAgent extends ModuleBase {
   // ============================================================================
   // 配置管理
   // ============================================================================
-
-  /**
-   * 获取当前配置
-   */
-  private handleGetConfig(): GetConfigResult {
-    if (!this.agentConfig) {
-      throw new Error('Agent config not configured')
-    }
-
-    return {
-      config: this.agentConfig,
-    }
-  }
-
-  /**
-   * 热更新配置
-   */
-  private async handleUpdateConfig(params: UpdateConfigParams): Promise<UpdateConfigResult> {
-    if (!this.agentConfig) {
-      throw new Error('Agent config not configured')
-    }
-
-    const changedFields: string[] = []
-    let restartRequired = false
-
-    // 先收集所有状态变更，最后统一触发 handler 重建，避免多次重建
-    const modelConfigChanged = params.model_config !== undefined
-    const skillsChanged = params.skills !== undefined
-    const systemPromptChanged = params.system_prompt !== undefined
-    const subagentsChanged = params.subagents !== undefined &&
-      JSON.stringify(params.subagents) !== JSON.stringify(this.agentConfig.subagents)
-
-    // 更新模型配置
-    if (params.model_config) {
-      this.agentConfig.model_config = {
-        ...this.agentConfig.model_config,
-        ...params.model_config,
-      }
-      changedFields.push('model_config')
-    }
-
-    // 更新系统提示词（热更新：worker 在下一轮 LLM 调用时通过 callback 看到新 prompt）
-    if (params.system_prompt !== undefined) {
-      this.agentHandler?.updateSystemPrompt(params.system_prompt)
-      this.agentConfig.system_prompt = params.system_prompt
-      changedFields.push('system_prompt')
-    }
-
-    // 更新 MCP Servers（热更新：mcpConnector.reconnect 原子接管；失败抛出由 admin 感知）
-    if (params.mcp_servers !== undefined) {
-      await this.mcpConnector.reconnect(params.mcp_servers)
-      this.agentConfig.mcp_servers = params.mcp_servers
-      changedFields.push('mcp_servers')
-    }
-
-    // 更新 Skills（热更新：worker 在下一轮 LLM 调用时通过 callback 看到新 skill 列表）
-    if (params.skills !== undefined) {
-      this.agentHandler?.updateSkills(params.skills)
-      this.agentConfig.skills = params.skills
-      changedFields.push('skills')
-    }
-
-    // 更新 Subagents（热更新：handler.updateSubagents 改 this.subAgents；
-    // in-flight loop 用启动时 snapshot 不感知；新 loop 下次拿最新 list）
-    if (params.subagents !== undefined) {
-      this.agentHandler?.updateSubagents(params.subagents)
-      this.agentConfig.subagents = params.subagents
-      changedFields.push('subagents')
-    }
-
-    // 必须先写 agentConfig：启动期首次拉配置失败时，updateLlmClients 会在本次
-    // update_config 内创建 handler，createWorkerHandler 需要立即读到这个地址。
-    if (params.tmp_page_base_url !== undefined) {
-      this.agentConfig.tmp_page_base_url = params.tmp_page_base_url
-      this.agentHandler?.updateTmpPageBaseUrl(params.tmp_page_base_url)
-      changedFields.push('tmp_page_base_url')
-    }
-
-    // 根据变更字段，按需更新 LLM client。
-    //
-    // 历史：modelConfig / subagents 变化曾走 createWorkerHandler 重建路径，
-    // 后果是 in-flight task 的 activeTasks 表丢失 + agent_loop trace 永不 endTrace
-    // （详见 2026-05-21 FuFu 与 Claude 的根因诊断）。
-    //
-    // 现在 modelConfig 走 handler.updateSdkEnv 热更，subagents 走 handler.updateSubagents
-    // 热更；两者都是 snapshot 模式：in-flight loop 用启动时快照继续跑，新 loop 取最新值。
-    // skills / system_prompt 历史就已经是 hot-update。
-    if (modelConfigChanged || skillsChanged || systemPromptChanged || subagentsChanged) {
-      const mergedModelConfig = this.agentConfig.model_config ?? {}
-      await this.updateLlmClients(mergedModelConfig)
-    }
-
-    // 更新生图配置（热更新：存实例状态 + 原地更新 handler；下个 worker turn 的 buildToolsDynamic 生效）
-    if (params.image_config !== undefined || params.image_capability !== undefined) {
-      this.imageConnInfo = toImageConnInfo(params)
-      this.imageCapability = params.image_capability ?? { available: false }
-      this.agentHandler?.updateImageConfig(this.imageConnInfo, this.imageCapability)
-      changedFields.push('image_config')
-    }
-
-    // 更新扩展配置（热生效，下次使用对应功能时生效）
-    if (params.extra !== undefined && Object.keys(params.extra).length > 0) {
-      this.extra = { ...this.extra, ...params.extra }
-      this.agentHandler?.updateExtra(params.extra)
-      changedFields.push('extra')
-    }
-
-    // 更新最大迭代次数
-    if (params.max_iterations !== undefined) {
-      this.agentConfig.max_iterations = params.max_iterations
-      changedFields.push('max_iterations')
-      // AgentHandler 的 max_iterations 在构造时设置
-      // 更新后需要重新创建 Handler 或重启
-      restartRequired = true
-    }
-
-    console.log(`[${this.config.moduleId}] Config updated: ${changedFields.join(', ')}`)
-    if (restartRequired) {
-      console.log(`[${this.config.moduleId}] Restart required for changes to take effect`)
-    }
-
-    return {
-      restart_required: restartRequired,
-      config: this.agentConfig,
-      changed_fields: changedFields,
-    }
-  }
 
   /**
    * 热更新 LLM 客户端：永不重建 AgentHandler 实例。

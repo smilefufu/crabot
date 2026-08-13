@@ -94,15 +94,18 @@ describe('UnifiedAgent runtime config invalidation', () => {
     })).resolves.toBeDefined()
   })
 
-  it('rejects candidate preparation failure without changing live revision or config', async () => {
+  it('applies a revision change that only touches max_iterations without losing admission', async () => {
+    // max_iterations 已无消费方，且协议只要求 revision 变化时原子替换；不得把这类变更
+    // 打成永久 fail-closed（旧实现 throw 'controlled restart' 后退避重试永远撞同一堵墙）。
     const agent = new UnifiedAgent(config()) as any
     agent.adminPort = 19998
     agent.configRevision = 1
-    const old = JSON.stringify(agent.agentConfig)
+    agent.configAuthenticated = true
     vi.spyOn(ConfigLoader, 'pull').mockResolvedValue({ config: { ...config(), agent_config: { ...config().agent_config!, max_iterations: 2 } }, revision: 2 })
-    await expect(agent.pullRuntimeConfig()).rejects.toThrow('controlled restart')
-    expect(JSON.stringify(agent.agentConfig)).toBe(old)
-    expect(agent.configRevision).toBe(1)
+    await agent.pullRuntimeConfig()
+    expect(agent.configRevision).toBe(2)
+    expect(agent.configStale).toBe(false)
+    expect(agent.agentConfig.max_iterations).toBe(2)
   })
 
   it('rejects schedule, background maintenance, task execution, and new worker runtime resolution while stale', async () => {
