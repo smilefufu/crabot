@@ -275,6 +275,8 @@ function prepareDeliveryOnce(
   if (existing) return existing
   const prepared = hooks.prepare(entry, content)
   preparedDeliveries.set(entry, prepared)
+  // prepare 失败（如 staging 写盘）时清缓存：让 withRetry 的后续 attempt 真正重试 prepare。
+  prepared.catch(() => { preparedDeliveries.delete(entry) })
   return prepared
 }
 

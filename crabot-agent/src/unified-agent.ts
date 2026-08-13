@@ -3050,8 +3050,9 @@ export class UnifiedAgent extends ModuleBase {
           )
           await this.confirmAdminChatDelivery(record.delivery_id, undefined)
         } catch (error) {
-          console.warn(`[${this.config.moduleId}] admin chat outbound replay pending for ${record.delivery_id}:`,
-            error instanceof Error ? error.message : String(error))
+          // 重放失败同样走 fail 分流：永久拒绝标 abandoned 退出后续重放，
+          // 「not pending」按终态结算，传输失败留待下次重启。
+          await this.failAdminChatDelivery(record.delivery_id, error)
         }
       }
     } catch (error) {
@@ -3177,7 +3178,9 @@ export class UnifiedAgent extends ModuleBase {
         this.config.moduleId,
       )
     } catch (error) {
-      await store.markOutbound(key, deliveryId, 'failed')
+      // 统一走 fail 分流（not-pending 结算 / 永久拒绝 abandoned / 其余 failed 可重放），
+      // 不让永久失败每次重启重发一遍。
+      await this.failAdminChatDelivery(deliveryId, error)
       throw error
     }
     await this.confirmAdminChatDelivery(deliveryId, undefined)

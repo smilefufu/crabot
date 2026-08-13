@@ -1127,17 +1127,10 @@ export class TraceStore {
 
   private persistManagerEpisode(episode: ManagerEpisodeTrace, strict: boolean, deferred = false): void {
     if (!this.persistDir) return
-    // deferred=true（span/worker 增量）：不追加归档（避免按 span 数平方增长的整份重写），
-    // 改写 running flush 文件（覆盖式、有界）兜底崩溃现场；start/finish 各落一行归档。
-    if (deferred) {
-      try {
-        this.flushInFlightTraces()
-      } catch (err) {
-        console.warn(`[TraceStore] deferred manager episode flush failed for ${episode.trace_id}:`,
-          err instanceof Error ? err.message : String(err))
-      }
-      return
-    }
+    // deferred=true（span/worker 增量）：纯内存更新，不写盘——15s flush 定时器已覆盖
+    // in-flight 快照，归档只在 start/finish 各落一行。每个 span 都同步写盘会把 manager
+    // loop 的热路径压在阻塞 I/O 上，且等于把 O(n²) 搬到另一个文件。
+    if (deferred) return
     try {
       const date = episode.started_at.slice(0, 10)
       const file = `${this.archiveFilePrefix}${date}.jsonl`

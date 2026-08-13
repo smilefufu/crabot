@@ -66,7 +66,8 @@ export class NativeTraceCopyStore {
       }
     }
     const lines: string[] = []
-    if (replace || !existing || existing.incarnation_fingerprint !== fingerprint) {
+    const rewrite = replace || !existing || existing.incarnation_fingerprint !== fingerprint
+    if (rewrite) {
       // 指纹不一致：整文件替换（旧 copy 属于 seq 碰撞的旧化身，不得混入）。
       const header: CopyHeader = { kind: 'native-trace-copy-header', worker_id: workerId, seq, incarnation_fingerprint: fingerprint }
       lines.push(JSON.stringify(header))
@@ -76,7 +77,7 @@ export class NativeTraceCopyStore {
     }
     await fs.mkdir(join(this.rootDir, encodeURIComponent(workerId)), { recursive: true, mode: 0o700 })
     const tmpPath = `${filePath}.tmp-${randomBytes(6).toString('hex')}`
-    if (lines[0]?.includes('native-trace-copy-header')) {
+    if (rewrite) {
       // 新 header：整文件重写（已有内容属于旧化身）。
       await fs.writeFile(tmpPath, lines.join('\n') + '\n', { mode: 0o600 })
       await fs.rename(tmpPath, filePath)

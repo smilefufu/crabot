@@ -726,13 +726,11 @@ export class ChatManager {
       if (message) this.pushToClient({ type: 'chat_push', message })
       return result
     } catch (error) {
-      // Browser 可见前 rollback：撤掉已落库消息（尚未 push）；未 promote 的 staging 立即清掉，
-      // 已 promote 的 media orphan 留待 GC；request 未 settle（settle 在 committed 之后）无需回滚。
+      // Browser 可见前 rollback：撤掉已落库消息（尚未 push）；staging 保留——
+      // rolled_back 的重试契约要求同 delivery_id 复用首次 staged 文件（删掉会让
+      // 重试 rename ENOENT 永久失败）；media orphan 留待 GC。request 未 settle 无需回滚。
       this.messages.delete(journal.planned_message_id)
       await this.saveData()
-      for (const planned of journal.planned_media) {
-        await this.mediaStore.rollbackStaged(planned.staged_path)
-      }
       await this.deliveryJournal.transition(journal.delivery_id, 'rolled_back')
       throw error
     }
@@ -858,16 +856,6 @@ export class ChatManager {
     await this.saveData()
     this.pushToClient({ type: 'chat_message_tagged', message_id: messageId, task_id: taskId })
     return true
-  }
-
-  /** 按 request_id 回填 user 消息的任务归属（chat_callback 带 task_id 时调用） */
-  async tagUserMessageByRequestId(requestId: string, taskId: TaskId): Promise<void> {
-    for (const msg of this.messages.values()) {
-      if (msg.request_id === requestId && msg.role === 'user') {
-        await this.tagMessageTask(msg.message_id, taskId)
-        return
-      }
-    }
   }
 
   // ==========================================================================
