@@ -126,6 +126,19 @@ describe('SubagentEditor', () => {
     expect(screen.getByLabelText('crab_messaging')).not.toBeChecked()
   })
 
+  it('Tab 5 crab_messaging 只读钉死 off：disabled 且 legacy 数据为 on 也显示 off', async () => {
+    renderEditor({
+      mode: 'edit',
+      entry: makeEntry({ builtin_capabilities: { file_system: true, shell: true, task_intel: true, crab_memory: true, crab_messaging: true } }),
+    })
+    fireEvent.click(screen.getByText('内置能力'))
+    const checkbox = screen.getByLabelText('crab_messaging') as HTMLInputElement
+    expect(checkbox).toBeDisabled()
+    expect(checkbox).not.toBeChecked()
+    fireEvent.click(checkbox)
+    expect(checkbox).not.toBeChecked()
+  })
+
   it('create mode 保存调 POST', async () => {
     const onSaved = vi.fn()
     renderEditor({ onSaved })
