@@ -34,11 +34,12 @@ export class NativeTraceCopyStore {
     fingerprint: string,
     events: ReadonlyArray<NormalizedTraceEvent>,
     redact: (text: string) => string,
+    options: { replace?: boolean } = {},
   ): Promise<void> {
     if (events.length === 0) return
     const key = `${workerId}#${seq}`
     const tail = this.writeTails.get(key) ?? Promise.resolve()
-    const next = tail.then(() => this.appendInner(workerId, seq, fingerprint, events, redact)).catch((error) => {
+    const next = tail.then(() => this.appendInner(workerId, seq, fingerprint, events, redact, options.replace === true)).catch((error) => {
       console.warn(`[NativeTraceCopyStore] append failed for ${key}:`, error instanceof Error ? error.message : String(error))
     })
     this.writeTails.set(key, next)
@@ -51,11 +52,12 @@ export class NativeTraceCopyStore {
     fingerprint: string,
     events: ReadonlyArray<NormalizedTraceEvent>,
     redact: (text: string) => string,
+    replace = false,
   ): Promise<void> {
     const filePath = this.fileFor(workerId, seq)
     const existing = await this.readHeader(filePath)
     const lines: string[] = []
-    if (!existing || existing.incarnation_fingerprint !== fingerprint) {
+    if (replace || !existing || existing.incarnation_fingerprint !== fingerprint) {
       // 指纹不一致：整文件替换（旧 copy 属于 seq 碰撞的旧化身，不得混入）。
       const header: CopyHeader = { kind: 'native-trace-copy-header', worker_id: workerId, seq, incarnation_fingerprint: fingerprint }
       lines.push(JSON.stringify(header))

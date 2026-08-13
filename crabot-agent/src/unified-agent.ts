@@ -3009,10 +3009,10 @@ export class UnifiedAgent extends ModuleBase {
         session_ref: handle.session_ref,
         started_at: (incarnation as { started_at?: string }).started_at,
       })
-      // 从 copy 已有行数续读，保证终态收割是"增量补齐"而不是全量重写。
-      const existing = await this.nativeTraceCopyStore().read(handle.worker_id, handle.seq, fingerprint)
-      const offset = existing?.events.length ?? 0
-      const native = await adapter.readTrace(handle, { offset })
+      // 终态收割是全量快照：copy 的「事件条数」≠ native 的「已消费行数」（坏行/未知行
+      // 也消费行号），拿它当 offset 会漏读+重写。终态时 live source 已完整，从头读并整体
+      // 覆盖 copy（append 的指纹替换语义保证不混入旧内容）。
+      const native = await adapter.readTrace(handle, { offset: 0 })
       if (native.events.length > 0) {
         await this.nativeTraceCopyStore().append(
           handle.worker_id,
@@ -3020,6 +3020,7 @@ export class UnifiedAgent extends ModuleBase {
           fingerprint,
           native.events,
           (text) => redactSecrets(text, [...this.knownSecrets]),
+          { replace: true },
         )
       }
     } catch (error) {
