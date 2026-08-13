@@ -1,18 +1,18 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { ManualCleanupDialog, AutoCleanupSettingsDialog } from './CleanupDialogs'
-import { traceService } from '../../services/trace'
+import { agentObservabilityService } from '../../services/agent-observability'
 import { providerService } from '../../services/provider'
 import { ToastProvider } from '../../contexts/ToastContext'
 
-vi.mock('../../services/trace')
+vi.mock('../../services/agent-observability')
 vi.mock('../../services/provider')
 
 describe('ManualCleanupDialog', () => {
   beforeEach(() => { vi.resetAllMocks() })
 
   it('预览 → 显示影响数', async () => {
-    ;(traceService.cleanupOld as ReturnType<typeof vi.fn>).mockResolvedValue({
+    ;(agentObservabilityService.cleanupOldTraces as ReturnType<typeof vi.fn>).mockResolvedValue({
       affected_count: 156, affected_bytes: 4_400_000, deleted_trace_ids: [],
     })
     render(<ToastProvider><ManualCleanupDialog open onClose={vi.fn()} onDeleted={vi.fn()} /></ToastProvider>)
@@ -22,11 +22,11 @@ describe('ManualCleanupDialog', () => {
     await waitFor(() => {
       expect(screen.getByText(/156 条 trace/)).toBeInTheDocument()
     })
-    expect(traceService.cleanupOld).toHaveBeenCalledWith(30, true)
+    expect(agentObservabilityService.cleanupOldTraces).toHaveBeenCalledWith(30, true)
   })
 
   it('确认删除 → 调 dry_run=false', async () => {
-    ;(traceService.cleanupOld as ReturnType<typeof vi.fn>)
+    ;(agentObservabilityService.cleanupOldTraces as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce({ affected_count: 5, affected_bytes: 1024, deleted_trace_ids: [] })
       .mockResolvedValueOnce({ affected_count: 5, affected_bytes: 1024, deleted_trace_ids: ['t1','t2','t3','t4','t5'] })
     const onDeleted = vi.fn()
@@ -36,7 +36,7 @@ describe('ManualCleanupDialog', () => {
     await waitFor(() => screen.getByText(/5 条 trace/))
     fireEvent.click(screen.getByText('确认删除'))
     await waitFor(() => {
-      expect(traceService.cleanupOld).toHaveBeenLastCalledWith(30, false)
+      expect(agentObservabilityService.cleanupOldTraces).toHaveBeenLastCalledWith(30, false)
       expect(onDeleted).toHaveBeenCalled()
     })
   })

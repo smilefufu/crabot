@@ -24,6 +24,8 @@ import { PermissionTemplateList } from './pages/Permissions/PermissionTemplateLi
 import { SkillList } from './pages/Skills/SkillList'
 import { SubagentList } from './pages/Subagents/SubagentList'
 import { Traces } from './pages/Traces'
+import { ManagerDetail } from './pages/Traces/ManagerDetail'
+import { WorkerDetail } from './pages/Traces/WorkerDetail'
 import { ScheduleList } from './pages/Schedules/ScheduleList'
 import { OpenClawImportWizard } from './pages/OpenClawImport/OpenClawImportWizard'
 import { BackupExportPage } from './pages/Backup/BackupExportPage'
@@ -221,6 +223,22 @@ const AppRoutes: React.FC = () => {
         element={
           <PrivateRoute>
             <Traces />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/traces/managers/:managerKey"
+        element={
+          <PrivateRoute>
+            <ManagerDetail />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/traces/workers/:workerId"
+        element={
+          <PrivateRoute>
+            <WorkerDetail />
           </PrivateRoute>
         }
       />
