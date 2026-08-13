@@ -8,7 +8,7 @@
 ### P6 进行中：Slice 0（核心 Agent singleton / runtime identity）已开 PR，review 迭代中
 
 - P6 总体设计：`crabot-docs/superpowers/specs/2026-08-11-p6-agent-observability-worker-management-design.md`；五份实施计划在 `crabot-docs/superpowers/plans/2026-08-12-p6-*.md`。顺序固定：**Slice 0 → P6-A → P6-B → P6-C → P6-D**。
-- Slice 0 分支 `feat/p6-slice0-core-agent-runtime` 已实现完成并开 **PR #90**（@claude review 已迭代 10 轮，累计修复：mass assignment 白名单、并发 pull 单飞/退避、全新安装降级自愈、publish 失败 drain 重试、MCP env 白名单、cutover health degraded-only、marker 宽容握手、源写入失败运行期回收、noop-safe provider 操作、容错 MCP 热更+候选连接清理、journal-bound noop、停用条目删除/启动 prune noop 容忍、max_iterations 死循环解除、legacy get_config/update_config 无认证端点退役；尚未 merge）：
+- Slice 0 分支 `feat/p6-slice0-core-agent-runtime` 已实现完成并开 **PR #90**（@claude review 已迭代 12 轮、23 条 finding 全部修复并 resolve：mass assignment 白名单、并发 pull 单飞/退避、全新安装降级自愈、publish 失败 drain 重试、MCP env 白名单、cutover health degraded-only、marker 宽容握手、源写入失败运行期回收、noop-safe 各写入路径、容错 MCP 热更+候选连接清理、journal-bound noop、max_iterations 死循环解除、legacy get_config/update_config 无认证端点退役、mutation 前置检查移入串行队列；R12 起四条主链路逐项核对无异议，等最后一轮 approve；尚未 merge）：
   - 唯一核心 Agent：动态/legacy Agent 的 create/update/delete/config-write 全部拒绝（`ADMIN_HOTPLUG_NOT_ALLOWED` / HTTP 410），live read surfaces 只暴露 builtin `default` / exact `crabot-agent`；存量记录只读归档（`unsupported_legacy`）。
   - Runtime identity + authenticated config pull：MM 只向 exact `crabot-agent` child 注入一次性 runtime bearer；Agent 启动最早期捕获并从 env 删除；secret-bearing RPC 走 method-closed `callSensitive()`；启动与热更都经 authenticated pull，失败即 fail closed 并断开 stale MCP。pull 有单飞去重 + 旧 revision no-op + 失败退避重试（不会永久 stale）。
   - Wire 契约：authenticated pull 返回正式 `CoreAgentRuntimeConfig`（protocol-agent-v3 §11，`protocol_version: '3.1.1'`）；实例配置为 slot 制（`powerful` 必填），legacy `roles` 不是 wire 字段。
@@ -18,7 +18,7 @@
 
 ### 最近验证基线（2026-08-13，PR #90 最新 push）
 
-- Shared 107、Core 138、**Admin 1150/1150**、Web build+269（web 此后未再改动）。
+- Shared 107、Core 138、**Admin 1152/1152**、Web build+269（web 此后未再改动）。
 - Agent 全量 2683 passed / 4 failed / 2 skipped，4 个失败均为既有 macOS 环境基线（`/var` realpath 3、tmux 探测 1），文件不在分支 diff 内。
 - 顺带修复的既有缺陷：`admin-chat-assertions` 签名篡改用例约 6% no-op flake（base64 末尾填充位）；Admin startup seeding 依赖 MM 事件扇出导致的全量 suite 崩溃；MM cutover 后对已运行 admin-web 重复 auto-start 的日志噪音。
 
